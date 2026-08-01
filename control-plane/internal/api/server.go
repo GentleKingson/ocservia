@@ -31,10 +31,11 @@ type Server struct {
 	bodyLimit      int64
 	requestTimeout time.Duration
 	devAuth        bool
+	expectedSchema int64
 }
 
-func New(address string, pool *pgxpool.Pool, build BuildInfo, logger *slog.Logger, bodyLimit int64, requestTimeout time.Duration, devAuth bool) *Server {
-	s := &Server{pool: pool, build: build, logger: logger, bodyLimit: bodyLimit, requestTimeout: requestTimeout, devAuth: devAuth}
+func New(address string, pool *pgxpool.Pool, build BuildInfo, logger *slog.Logger, bodyLimit int64, requestTimeout time.Duration, devAuth bool, expectedSchema int64) *Server {
+	s := &Server{pool: pool, build: build, logger: logger, bodyLimit: bodyLimit, requestTimeout: requestTimeout, devAuth: devAuth, expectedSchema: expectedSchema}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /livez", s.live)
 	mux.HandleFunc("GET /readyz", s.ready)
@@ -69,7 +70,7 @@ func (s *Server) ready(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	version, err := migrations.CurrentSchemaVersion(ctx, s.pool)
-	if err != nil || version < 1 {
+	if err != nil || version != s.expectedSchema {
 		writeProblem(w, r, http.StatusServiceUnavailable, "https://ocservia.dev/problems/schema-unavailable", "Service is not ready", "database schema is unavailable")
 		return
 	}

@@ -19,7 +19,14 @@ The binary accepts `--role=api`, `--role=worker`, `--role=scheduler`, or
 disabled by default and can only be enabled with `OCSERV_DEV_AUTH=true` when
 the environment is `development` and the HTTP listener is loopback-only.
 
-Database migrations run on startup under a PostgreSQL advisory lock. Applied
-migrations are immutable. Roll back an unshipped development deployment by
-stopping the stack and removing its named volume; shipped schema changes use a
-forward fix or database restore.
+Database migrations run as a separate one-shot process using `--migrate-only`,
+an owner connection in `OCSERV_DATABASE_URL`, and the unprivileged role named
+by `OCSERV_RUNTIME_DATABASE_ROLE`. The long-running control plane receives
+only the runtime role credentials. Migration execution uses a PostgreSQL
+advisory lock, validates the complete applied history, and grants the runtime
+role ordinary data access while limiting `audit_events` to `SELECT` and
+`INSERT`. Readiness requires the database schema to match the binary exactly.
+
+Roll back an unshipped development deployment by stopping the stack and
+removing its named volume; shipped schema changes use a forward fix or database
+restore.

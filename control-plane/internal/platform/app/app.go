@@ -33,10 +33,24 @@ func Run(ctx context.Context, cfg config.Config, build BuildInfo, logger *slog.L
 		return err
 	}
 	defer pool.Close()
-	migrationCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	databaseCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
-	if err := migrations.Migrate(migrationCtx, pool); err != nil {
-		return fmt.Errorf("migrate database: %w", err)
+	if cfg.MigrateOnly {
+		if err := migrations.Migrate(databaseCtx, pool); err != nil {
+			return fmt.Errorf("migrate database: %w", err)
+		}
+		if err := migrations.GrantRuntimePrivileges(databaseCtx, pool, cfg.RuntimeDBRole); err != nil {
+			return fmt.Errorf("grant runtime database privileges: %w", err)
+		}
+		logger.Info("database migrations complete")
+		return nil
+	}
+	if err := migrations.ValidateCurrentSchema(databaseCtx, pool); err != nil {
+		return fmt.Errorf("validate database schema: %w", err)
+	}
+	expectedSchemaVersion, err := migrations.LatestSchemaVersion()
+	if err != nil {
+		return err
 	}
 
 	logger.Info("control plane starting", "role", cfg.Role)
@@ -45,7 +59,7 @@ func Run(ctx context.Context, cfg config.Config, build BuildInfo, logger *slog.L
 		return ctx.Err()
 	}
 
-	server := api.New(cfg.HTTPAddress, pool, api.BuildInfo{Version: build.Version, Commit: build.Commit, Role: string(cfg.Role)}, logger, cfg.BodyLimit, cfg.RequestTimeout, cfg.DevAuth)
+	server := api.New(cfg.HTTPAddress, pool, api.BuildInfo{Version: build.Version, Commit: build.Commit, Role: string(cfg.Role)}, logger, cfg.BodyLimit, cfg.RequestTimeout, cfg.DevAuth, expectedSchemaVersion)
 	serverErr := make(chan error, 1)
 	go func() { serverErr <- server.ListenAndServe() }()
 

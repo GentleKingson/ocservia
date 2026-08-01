@@ -64,3 +64,5 @@ $$;
 CREATE TRIGGER audit_events_append_only
 BEFORE UPDATE OR DELETE OR TRUNCATE ON audit_events
 FOR EACH STATEMENT EXECUTE FUNCTION reject_audit_event_mutation();
+
+REVOKE ALL ON FUNCTION reject_audit_event_mutation() FROM PUBLIC;

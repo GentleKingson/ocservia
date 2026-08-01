@@ -23,6 +23,8 @@ const (
 
 type Config struct {
 	Role            Role
+	MigrateOnly     bool
+	RuntimeDBRole   string
 	Environment     string
 	HTTPAddress     string
 	DatabaseURL     string
@@ -45,6 +47,7 @@ func Load(args []string, lookup LookupEnv) (Config, error) {
 	setString(lookup, "OCSERV_ENVIRONMENT", &cfg.Environment)
 	setString(lookup, "OCSERV_HTTP_ADDRESS", &cfg.HTTPAddress)
 	setString(lookup, "OCSERV_DATABASE_URL", &cfg.DatabaseURL)
+	setString(lookup, "OCSERV_RUNTIME_DATABASE_ROLE", &cfg.RuntimeDBRole)
 	setString(lookup, "OTEL_EXPORTER_OTLP_ENDPOINT", &cfg.OTLPEndpoint)
 	setString(lookup, "OCSERV_LOG_LEVEL", &cfg.LogLevelName)
 	if err := setInt64(lookup, "OCSERV_BODY_LIMIT_BYTES", &cfg.BodyLimit); err != nil {
@@ -66,6 +69,7 @@ func Load(args []string, lookup LookupEnv) (Config, error) {
 
 	fs := flag.NewFlagSet("ocserv-control", flag.ContinueOnError)
 	role := fs.String("role", string(cfg.Role), "process role: api, worker, scheduler, or all")
+	migrateOnly := fs.Bool("migrate-only", false, "apply migrations and grant runtime privileges, then exit")
 	if err := fs.Parse(args); err != nil {
 		return Config{}, err
 	}
@@ -73,6 +77,7 @@ func Load(args []string, lookup LookupEnv) (Config, error) {
 		return Config{}, fmt.Errorf("unexpected arguments: %s", strings.Join(fs.Args(), " "))
 	}
 	cfg.Role = Role(*role)
+	cfg.MigrateOnly = *migrateOnly
 	if err := cfg.Validate(); err != nil {
 		return Config{}, err
 	}
@@ -90,6 +95,9 @@ func (c Config) Validate() error {
 	}
 	if c.DatabaseURL == "" {
 		return errors.New("OCSERV_DATABASE_URL is required")
+	}
+	if c.MigrateOnly && strings.TrimSpace(c.RuntimeDBRole) == "" {
+		return errors.New("OCSERV_RUNTIME_DATABASE_ROLE is required with --migrate-only")
 	}
 	u, err := url.Parse(c.DatabaseURL)
 	if err != nil || (u.Scheme != "postgres" && u.Scheme != "postgresql") || u.Host == "" {

@@ -33,3 +33,32 @@ func TestRoleValidation(t *testing.T) {
 		t.Fatal("Load() accepted invalid role")
 	}
 }
+
+func TestMigrateOnlyRequiresRuntimeRole(t *testing.T) {
+	lookup := func(key string) (string, bool) {
+		values := map[string]string{"OCSERV_DATABASE_URL": "postgres://owner@db/test"}
+		value, ok := values[key]
+		return value, ok
+	}
+	if _, err := Load([]string{"--migrate-only"}, lookup); err == nil {
+		t.Fatal("Load() accepted migration mode without a runtime database role")
+	}
+}
+
+func TestMigrateOnlyAcceptsRuntimeRole(t *testing.T) {
+	lookup := func(key string) (string, bool) {
+		values := map[string]string{
+			"OCSERV_DATABASE_URL":          "postgres://owner@db/test",
+			"OCSERV_RUNTIME_DATABASE_ROLE": "ocservia_app",
+		}
+		value, ok := values[key]
+		return value, ok
+	}
+	config, err := Load([]string{"--migrate-only"}, lookup)
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if !config.MigrateOnly || config.RuntimeDBRole != "ocservia_app" {
+		t.Fatalf("unexpected migration config: %+v", config)
+	}
+}

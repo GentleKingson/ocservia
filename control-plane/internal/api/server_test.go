@@ -11,7 +11,7 @@ import (
 )
 
 func TestLiveAndRequestID(t *testing.T) {
-	server := New("127.0.0.1:0", nil, BuildInfo{Version: "test"}, slog.New(slog.NewTextHandler(io.Discard, nil)), 1024, time.Second, false)
+	server := New("127.0.0.1:0", nil, BuildInfo{Version: "test"}, slog.New(slog.NewTextHandler(io.Discard, nil)), 1024, time.Second, false, 1)
 	request := httptest.NewRequest(http.MethodGet, "/livez", nil)
 	response := httptest.NewRecorder()
 	server.http.Handler.ServeHTTP(response, request)
@@ -27,7 +27,7 @@ func TestLiveAndRequestID(t *testing.T) {
 }
 
 func TestDevAuthMarker(t *testing.T) {
-	server := New("127.0.0.1:0", nil, BuildInfo{}, slog.New(slog.NewTextHandler(io.Discard, nil)), 1024, time.Second, true)
+	server := New("127.0.0.1:0", nil, BuildInfo{}, slog.New(slog.NewTextHandler(io.Discard, nil)), 1024, time.Second, true, 1)
 	response := httptest.NewRecorder()
 	server.http.Handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/livez", nil))
 	if response.Header().Get("X-Ocservia-Dev-Subject") != "developer" {
@@ -36,7 +36,7 @@ func TestDevAuthMarker(t *testing.T) {
 }
 
 func TestVersionUsesContractFieldNames(t *testing.T) {
-	server := New("127.0.0.1:0", nil, BuildInfo{Version: "test", Commit: "abc", Role: "api"}, slog.New(slog.NewTextHandler(io.Discard, nil)), 1024, time.Second, false)
+	server := New("127.0.0.1:0", nil, BuildInfo{Version: "test", Commit: "abc", Role: "api"}, slog.New(slog.NewTextHandler(io.Discard, nil)), 1024, time.Second, false, 1)
 	response := httptest.NewRecorder()
 	server.http.Handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/version", nil))
 	var body map[string]string
@@ -49,7 +49,7 @@ func TestVersionUsesContractFieldNames(t *testing.T) {
 }
 
 func TestRoutingErrorsUseProblemDetails(t *testing.T) {
-	server := New("127.0.0.1:0", nil, BuildInfo{}, slog.New(slog.NewTextHandler(io.Discard, nil)), 1024, time.Second, false)
+	server := New("127.0.0.1:0", nil, BuildInfo{}, slog.New(slog.NewTextHandler(io.Discard, nil)), 1024, time.Second, false, 1)
 	tests := []struct {
 		method string
 		path   string

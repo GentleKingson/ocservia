@@ -95,6 +95,56 @@ func Migrate(ctx context.Context, pool *pgxpool.Pool) error {
 	return nil
 }
 
+func ValidateCurrentSchema(ctx context.Context, pool *pgxpool.Pool) error {
+	conn, err := pool.Acquire(ctx)
+	if err != nil {
+		return fmt.Errorf("acquire schema validation connection: %w", err)
+	}
+	defer conn.Release()
+	known, err := loadMigrations()
+	if err != nil {
+		return err
+	}
+	applied, err := readAppliedMigrations(ctx, conn)
+	if err != nil {
+		return err
+	}
+	if err := validateAppliedMigrations(known, applied); err != nil {
+		return err
+	}
+	if len(applied) != len(known) {
+		return fmt.Errorf("database schema is behind: found %d of %d migrations", len(applied), len(known))
+	}
+	return nil
+}
+
+func LatestSchemaVersion() (int64, error) {
+	migrations, err := loadMigrations()
+	if err != nil {
+		return 0, err
+	}
+	if len(migrations) == 0 {
+		return 0, errors.New("no embedded migrations")
+	}
+	return migrations[len(migrations)-1].Version, nil
+}
+
+func GrantRuntimePrivileges(ctx context.Context, pool *pgxpool.Pool, role string) error {
+	identifier := pgx.Identifier{role}.Sanitize()
+	statements := []string{
+		"GRANT USAGE ON SCHEMA public TO " + identifier,
+		"GRANT SELECT ON schema_migrations TO " + identifier,
+		"GRANT SELECT, INSERT, UPDATE, DELETE ON workspaces, nodes, operations TO " + identifier,
+		"GRANT SELECT, INSERT ON audit_events TO " + identifier,
+	}
+	for _, statement := range statements {
+		if _, err := pool.Exec(ctx, statement); err != nil {
+			return fmt.Errorf("grant privileges to runtime role %q: %w", role, err)
+		}
+	}
+	return nil
+}
+
 func readAppliedMigrations(ctx context.Context, conn *pgxpool.Conn) ([]appliedMigration, error) {
 	rows, err := conn.Query(ctx, "SELECT version, name, checksum FROM schema_migrations ORDER BY version")
 	if err != nil {
