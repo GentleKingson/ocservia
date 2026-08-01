@@ -29,6 +29,7 @@ type Operation struct {
 	ID          uuid.UUID
 	WorkspaceID uuid.UUID
 	NodeID      *uuid.UUID
+	CommandID   *uuid.UUID
 	State       State
 	Version     int64
 	CreatedAt   time.Time
@@ -39,7 +40,8 @@ func (o Operation) Validate() error {
 	if o.ID == uuid.Nil || o.WorkspaceID == uuid.Nil {
 		return errors.New("operation identifiers are required")
 	}
-	if o.ID.Version() != 7 || o.WorkspaceID.Version() != 7 || (o.NodeID != nil && o.NodeID.Version() != 7) {
+	if o.ID.Version() != 7 || o.WorkspaceID.Version() != 7 ||
+		(o.NodeID != nil && o.NodeID.Version() != 7) || (o.CommandID != nil && o.CommandID.Version() != 7) {
 		return errors.New("operation identifiers must be UUIDv7")
 	}
 	if o.Version < 1 {

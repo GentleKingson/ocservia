@@ -24,6 +24,7 @@ CREATE TABLE operations (
     id uuid PRIMARY KEY,
     workspace_id uuid NOT NULL REFERENCES workspaces(id) ON DELETE RESTRICT,
     node_id uuid,
+    command_id uuid,
     state text NOT NULL CHECK (state IN ('draft', 'queued', 'dispatched', 'accepted', 'running', 'succeeded', 'failed', 'unknown', 'expired', 'rolled_back', 'offline_pending', 'drifted', 'superseded')),
     version bigint NOT NULL DEFAULT 1 CHECK (version > 0),
     request_id text NOT NULL,

@@ -32,6 +32,18 @@ func TestValidateRejectsNonV7Identifiers(t *testing.T) {
 	}
 }
 
+func TestValidateRejectsNonV7CommandID(t *testing.T) {
+	now := time.Now()
+	commandID := uuid.New()
+	op := Operation{
+		ID: newV7(t), WorkspaceID: newV7(t), CommandID: &commandID,
+		State: StateDraft, Version: 1, CreatedAt: now, UpdatedAt: now,
+	}
+	if err := op.Validate(); err == nil {
+		t.Fatal("Validate() accepted a non-v7 command ID")
+	}
+}
+
 func TestValidateRejectsInvalidTimestamps(t *testing.T) {
 	now := time.Now()
 	tests := []struct {
