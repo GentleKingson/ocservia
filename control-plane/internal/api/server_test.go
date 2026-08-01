@@ -47,3 +47,32 @@ func TestVersionUsesContractFieldNames(t *testing.T) {
 		t.Fatalf("unexpected response: %v", body)
 	}
 }
+
+func TestRoutingErrorsUseProblemDetails(t *testing.T) {
+	server := New("127.0.0.1:0", nil, BuildInfo{}, slog.New(slog.NewTextHandler(io.Discard, nil)), 1024, time.Second, false)
+	tests := []struct {
+		method string
+		path   string
+		status int
+	}{
+		{method: http.MethodPost, path: "/api/v1/livez", status: http.StatusMethodNotAllowed},
+		{method: http.MethodGet, path: "/missing", status: http.StatusNotFound},
+	}
+	for _, test := range tests {
+		response := httptest.NewRecorder()
+		server.http.Handler.ServeHTTP(response, httptest.NewRequest(test.method, test.path, nil))
+		if response.Code != test.status {
+			t.Fatalf("%s %s status = %d", test.method, test.path, response.Code)
+		}
+		if response.Header().Get("Content-Type") != "application/problem+json" {
+			t.Fatalf("content type = %q", response.Header().Get("Content-Type"))
+		}
+		var problem map[string]any
+		if err := json.Unmarshal(response.Body.Bytes(), &problem); err != nil {
+			t.Fatalf("decode problem: %v", err)
+		}
+		if problem["status"] != float64(test.status) || problem["type"] == "" || problem["title"] == "" {
+			t.Fatalf("invalid problem: %v", problem)
+		}
+	}
+}

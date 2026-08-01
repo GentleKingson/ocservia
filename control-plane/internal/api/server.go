@@ -42,7 +42,7 @@ func New(address string, pool *pgxpool.Pool, build BuildInfo, logger *slog.Logge
 	mux.HandleFunc("GET /api/v1/livez", s.live)
 	mux.HandleFunc("GET /api/v1/readyz", s.ready)
 	mux.HandleFunc("GET /api/v1/version", s.version)
-	handler := s.requestContext(s.limitBody(s.timeout(mux)))
+	handler := s.requestContext(s.limitBody(s.timeout(s.routeErrors(mux))))
 	s.http = &http.Server{Addr: address, Handler: otelhttp.NewHandler(handler, "http.server"), ReadHeaderTimeout: 5 * time.Second, IdleTimeout: 60 * time.Second}
 	return s
 }
@@ -78,6 +78,22 @@ func (s *Server) ready(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) version(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, s.build)
+}
+
+func (s *Server) routeErrors(next http.Handler) http.Handler {
+	paths := map[string]struct{}{"/livez": {}, "/readyz": {}, "/version": {}, "/api/v1/livez": {}, "/api/v1/readyz": {}, "/api/v1/version": {}}
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if _, ok := paths[r.URL.Path]; !ok {
+			writeProblem(w, r, http.StatusNotFound, "https://ocservia.dev/problems/not-found", "Resource not found", "the requested resource does not exist")
+			return
+		}
+		if r.Method != http.MethodGet {
+			w.Header().Set("Allow", http.MethodGet)
+			writeProblem(w, r, http.StatusMethodNotAllowed, "https://ocservia.dev/problems/method-not-allowed", "Method not allowed", "the requested method is not supported")
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
 }
 
 func (s *Server) timeout(next http.Handler) http.Handler {

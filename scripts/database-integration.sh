@@ -74,6 +74,19 @@ for major in 17 18; do
   curl --fail --silent "http://127.0.0.1:${api_port}/version" | grep -q '"role":"all"'
   test "$(docker exec "${container}" psql -U ocservia -d ocservia -Atc "SELECT count(*) FROM schema_migrations WHERE version = 1")" = "1"
   test "$(docker exec "${container}" psql -U ocservia -d ocservia -Atc "SELECT count(*) FROM information_schema.tables WHERE table_schema = 'public' AND table_name IN ('workspaces','nodes','operations','audit_events')")" = "4"
+  docker exec "${container}" psql -v ON_ERROR_STOP=1 -U ocservia -d ocservia -c "
+    INSERT INTO workspaces (id, name, slug, created_at, updated_at) VALUES ('00000000-0000-7000-8000-000000000001', 'One', 'one', now(), now()), ('00000000-0000-7000-8000-000000000002', 'Two', 'two', now(), now());
+    INSERT INTO nodes (id, workspace_id, name, status, created_at, updated_at) VALUES ('00000000-0000-7000-8000-000000000003', '00000000-0000-7000-8000-000000000001', 'node', 'approved', now(), now());
+    INSERT INTO audit_events (id, workspace_id, occurred_at, actor_type, actor_id, action, resource_type, request_id, result, event_hash) VALUES ('00000000-0000-7000-8000-000000000004', '00000000-0000-7000-8000-000000000001', now(), 'system', 'test', 'test', 'workspace', 'request', 'intent', decode('00', 'hex'));
+  " >/dev/null
+  if docker exec "${container}" psql -v ON_ERROR_STOP=1 -U ocservia -d ocservia -c "INSERT INTO operations (id, workspace_id, node_id, state, request_id, created_at, updated_at) VALUES ('00000000-0000-7000-8000-000000000005', '00000000-0000-7000-8000-000000000002', '00000000-0000-7000-8000-000000000003', 'draft', 'request', now(), now())" >/dev/null 2>&1; then
+    echo "cross-workspace operation was accepted" >&2
+    exit 1
+  fi
+  if docker exec "${container}" psql -v ON_ERROR_STOP=1 -U ocservia -d ocservia -c "DELETE FROM audit_events" >/dev/null 2>&1; then
+    echo "audit event deletion was accepted" >&2
+    exit 1
+  fi
   stop_process "${pid}"
 
   OCSERV_ENVIRONMENT=test OCSERV_HTTP_ADDRESS="127.0.0.1:${api_port}" \
