@@ -15,3 +15,10 @@
 coverage/
 dist/
 tmp/
+
+# Project-local tool downloads and caches.
+.tools/
+.cache/
+
+target/
+node_modules/

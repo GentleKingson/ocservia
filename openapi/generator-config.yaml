@@ -1,0 +1,9 @@
+npmName: "@ocservia/api-client"
+npmVersion: 0.1.0
+gitHost: github.com
+gitUserId: GentleKingson
+gitRepoId: ocservia
+supportsES6: true
+typescriptThreePlus: true
+useSingleRequestParameter: true
+withoutRuntimeChecks: false

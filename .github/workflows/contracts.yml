@@ -1,0 +1,69 @@
+name: Contracts and toolchains
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  public-policy:
+    name: Public Repository Policy
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          fetch-depth: 0
+      - run: scripts/check-public-repository.sh
+      - run: scripts/test-public-repository-policy.sh
+
+  contracts:
+    name: Contracts
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          fetch-depth: 0
+      - run: scripts/bootstrap.sh
+      - run: scripts/generate.sh
+      - run: source scripts/env.sh && cd proto && buf format --diff --exit-code && buf lint
+      - run: source scripts/env.sh && cd web && npx --no-install redocly lint --config ../openapi/.redocly.yaml ../openapi/openapi.yaml
+      - run: scripts/check-breaking.sh
+      - run: scripts/generated-clean.sh
+
+  go:
+    name: Go
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+      - run: scripts/bootstrap.sh
+      - run: scripts/go-check.sh
+
+  rust:
+    name: Rust
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+      - run: scripts/bootstrap.sh
+      - run: scripts/rust-check.sh
+
+  web:
+    name: Web
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+      - run: scripts/bootstrap.sh
+      - run: scripts/web-check.sh
+
+  security-licenses:
+    name: Security and Licenses
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          fetch-depth: 0
+      - run: scripts/bootstrap.sh
+      - run: scripts/security-check.sh
+      - run: scripts/license-check.sh
