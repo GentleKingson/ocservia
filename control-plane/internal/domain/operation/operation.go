@@ -39,6 +39,9 @@ func (o Operation) Validate() error {
 	if o.ID == uuid.Nil || o.WorkspaceID == uuid.Nil {
 		return errors.New("operation identifiers are required")
 	}
+	if o.ID.Version() != 7 || o.WorkspaceID.Version() != 7 || (o.NodeID != nil && o.NodeID.Version() != 7) {
+		return errors.New("operation identifiers must be UUIDv7")
+	}
 	if o.Version < 1 {
 		return errors.New("operation version must be positive")
 	}

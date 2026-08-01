@@ -7,6 +7,18 @@ import {
   ScrollText,
   Settings,
 } from "@lucide/vue";
+import { onBeforeUnmount, onMounted } from "vue";
+
+import { useReadinessStore } from "./shared/readiness";
+
+const readiness = useReadinessStore();
+let refreshTimer: ReturnType<typeof setInterval> | undefined;
+
+onMounted(() => {
+  void readiness.refresh();
+  refreshTimer = setInterval(() => void readiness.refresh(), 15_000);
+});
+onBeforeUnmount(() => clearInterval(refreshTimer));
 
 const links = [
   { to: "/", label: "overview", icon: LayoutDashboard },
@@ -50,7 +62,9 @@ const links = [
     <section class="content-shell">
       <header class="topbar">
         <span>{{ $t("platform") }}</span>
-        <div class="status"><i></i>{{ $t("ready") }}</div>
+        <div class="status" :class="{ unavailable: !readiness.isReady }">
+          <i></i>{{ $t(readiness.isReady ? "ready" : "unavailable") }}
+        </div>
       </header>
       <RouterView />
     </section>

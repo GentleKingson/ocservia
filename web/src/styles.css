@@ -129,6 +129,11 @@ a {
   background: #28a96b;
   box-shadow: 0 0 0 3px #dff5ea;
 }
+
+.status.unavailable i,
+.health.unavailable i {
+  background: #c2413b;
+}
 .overview,
 .empty-view {
   max-width: 1180px;

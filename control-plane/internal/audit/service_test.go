@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 )
@@ -55,6 +56,19 @@ func TestWithIntentRejectsChangeWhenAuditFails(t *testing.T) {
 	}
 }
 
+func TestWithIntentRejectsIncompleteMetadata(t *testing.T) {
+	intent := validIntent()
+	intent.ActorID = ""
+	repository := &fakeIntents{}
+	service := NewService(fakeTxManager{tx: &fakeTx{}}, repository)
+	if err := service.WithIntent(context.Background(), intent, func(context.Context, Tx) error { return nil }); err == nil {
+		t.Fatal("WithIntent() accepted incomplete metadata")
+	}
+	if repository.appended {
+		t.Fatal("incomplete intent was appended")
+	}
+}
+
 func validIntent() Intent {
-	return Intent{ID: uuid.MustParse("0193c1b2-7d8a-7f01-8a2d-1e5b4f302901"), WorkspaceID: uuid.MustParse("0193c1b2-7d8a-7f01-8a2d-1e5b4f302902"), Action: "test.write", RequestID: "request-1"}
+	return Intent{ID: uuid.MustParse("0193c1b2-7d8a-7f01-8a2d-1e5b4f302901"), WorkspaceID: uuid.MustParse("0193c1b2-7d8a-7f01-8a2d-1e5b4f302902"), OccurredAt: time.Now(), ActorType: "user", ActorID: "actor-1", Action: "test.write", ResourceType: "workspace", RequestID: "request-1"}
 }

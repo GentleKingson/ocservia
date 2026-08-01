@@ -43,7 +43,9 @@ func NewService(transactions TxManager, intents IntentRepository) *Service {
 }
 
 func (s *Service) WithIntent(ctx context.Context, intent Intent, change func(context.Context, Tx) error) error {
-	if intent.ID == uuid.Nil || intent.WorkspaceID == uuid.Nil || intent.Action == "" || intent.RequestID == "" {
+	if intent.ID == uuid.Nil || intent.WorkspaceID == uuid.Nil || intent.OccurredAt.IsZero() ||
+		intent.ActorType == "" || intent.ActorID == "" || intent.Action == "" ||
+		intent.ResourceType == "" || intent.RequestID == "" {
 		return errors.New("invalid audit intent")
 	}
 	tx, err := s.transactions.Begin(ctx)

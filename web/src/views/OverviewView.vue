@@ -1,5 +1,8 @@
 <script setup lang="ts">
 import { Clock3, Server, Workflow } from "@lucide/vue";
+import { useReadinessStore } from "../shared/readiness";
+
+const readiness = useReadinessStore();
 </script>
 
 <template>
@@ -9,13 +12,18 @@ import { Clock3, Server, Workflow } from "@lucide/vue";
         <p>{{ $t("workspace") }}</p>
         <h1>{{ $t("overview") }}</h1>
       </div>
-      <span class="health"><i></i>{{ $t("allSystems") }}</span>
+      <span class="health" :class="{ unavailable: !readiness.isReady }"
+        ><i></i
+        >{{ $t(readiness.isReady ? "allSystems" : "systemsUnavailable") }}</span
+      >
     </div>
     <section class="metrics" aria-label="Platform status">
       <article>
         <div>
           <span>{{ $t("controlPlane") }}</span
-          ><strong>{{ $t("ready") }}</strong>
+          ><strong>{{
+            $t(readiness.isReady ? "ready" : "unavailable")
+          }}</strong>
         </div>
         <Server :size="20" />
       </article>
