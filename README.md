@@ -13,11 +13,11 @@ generic file management, or arbitrary host command execution.
 
 ## Status
 
-Repository and project governance are currently being established. Source
-code, deployment guidance, and compatibility commitments will be added as
-implementation milestones are completed and verified. Contract contributors
-can use the pinned workflow in
-[docs/development/contracts.md](docs/development/contracts.md).
+The public contracts and the first control-plane foundation are under active
+development. Contract contributors can use the pinned workflow in
+[docs/development/contracts.md](docs/development/contracts.md). The local Go,
+PostgreSQL, OpenTelemetry, and Web stack is documented in
+[docs/development/control-plane.md](docs/development/control-plane.md).
 
 ## Security
 

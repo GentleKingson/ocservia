@@ -1,16 +1,23 @@
 {
   "compilerOptions": {
     "target": "ES2024",
-    "module": "NodeNext",
-    "moduleResolution": "NodeNext",
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
     "strict": true,
     "noUncheckedIndexedAccess": true,
     "exactOptionalPropertyTypes": true,
     "noImplicitOverride": true,
     "useUnknownInCatchVariables": true,
     "noEmit": true,
-    "skipLibCheck": false,
-    "types": ["node", "vitest/globals"]
+    "skipLibCheck": true,
+    "types": ["node", "vite/client", "vitest/globals"]
   },
-  "include": ["test/**/*.ts", "eslint.config.ts"]
+  "include": [
+    "src/**/*.ts",
+    "src/**/*.vue",
+    "test/**/*.ts",
+    "eslint.config.ts",
+    "vite.config.ts"
+  ],
+  "exclude": ["src/api/generated"]
 }

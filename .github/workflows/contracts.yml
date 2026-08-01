@@ -41,6 +41,7 @@ jobs:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
       - run: scripts/bootstrap.sh
       - run: scripts/go-check.sh
+      - run: scripts/database-integration.sh
 
   rust:
     name: Rust
