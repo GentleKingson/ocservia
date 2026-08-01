@@ -14,6 +14,10 @@ export default tseslint.config(
     },
   },
   {
+    files: ["test/**/*.mjs"],
+    ...tseslint.configs.disableTypeChecked,
+  },
+  {
     ignores: ["coverage/**", "src/api/generated/**"],
   },
 );

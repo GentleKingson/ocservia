@@ -7,6 +7,9 @@ import { parse } from "yaml";
 interface OpenApiDocument {
   openapi?: unknown;
   components?: {
+    securitySchemes?: {
+      oidc?: { type?: unknown; scheme?: unknown };
+    };
     schemas?: {
       UuidV7?: { pattern?: unknown };
       Problem?: { required?: unknown };
@@ -29,5 +32,9 @@ describe("OpenAPI invariants", () => {
       "title",
       "status",
     ]);
+    expect(document.components?.securitySchemes?.oidc).toMatchObject({
+      type: "http",
+      scheme: "bearer",
+    });
   });
 });

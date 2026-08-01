@@ -32,6 +32,7 @@ jobs:
       - run: source scripts/env.sh && cd web && npx --no-install redocly lint --config ../openapi/.redocly.yaml ../openapi/openapi.yaml
       - run: scripts/check-breaking.sh
       - run: scripts/generated-clean.sh
+      - run: scripts/test-generated-clean.sh
 
   go:
     name: Go

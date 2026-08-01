@@ -62,8 +62,10 @@ paths:
 components:
   securitySchemes:
     oidc:
-      type: openIdConnect
-      openIdConnectUrl: https://identity.invalid/.well-known/openid-configuration
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: Bearer access token issued by the configured OIDC provider.
   parameters:
     Cursor:
       name: cursor

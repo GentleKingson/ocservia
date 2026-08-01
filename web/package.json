@@ -8,10 +8,11 @@
     "npm": "11.19.0"
   },
   "scripts": {
-    "format": "prettier --write \"{src,test,*.json,*.ts}**/*.{ts,json}\"",
-    "format:check": "prettier --check \"{src,test,*.json,*.ts}**/*.{ts,json}\"",
+    "format": "prettier --write \"{src,test,*.json,*.ts}**/*.{ts,mjs,json}\"",
+    "format:check": "prettier --check \"{src,test,*.json,*.ts}**/*.{ts,mjs,json}\"",
     "lint": "eslint test",
     "test": "vitest run",
+    "test:generated-auth": "node test/generated-client-auth.mjs",
     "typecheck": "tsc --noEmit && tsc -p src/api/generated/tsconfig.json --noEmit"
   },
   "devDependencies": {

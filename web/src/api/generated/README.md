@@ -22,6 +22,8 @@ import type { GetOperationRequest } from '@ocservia/api-client';
 async function example() {
   console.log("🚀 Testing @ocservia/api-client SDK...");
   const config = new Configuration({
+    // Configure HTTP bearer authorization: oidc
+    accessToken: "YOUR BEARER TOKEN",
   });
   const api = new OperationsApi(config);
 
@@ -67,6 +69,8 @@ Authentication schemes defined for the API:
 <a id="oidc"></a>
 
 #### oidc
+
+- **Type**: HTTP Bearer Token authentication (JWT)
 
 ## About
 

@@ -59,6 +59,15 @@ export class OperationsApi extends runtime.BaseAPI {
 
     const headerParameters: runtime.HTTPHeaders = {};
 
+    if (this.configuration && this.configuration.accessToken) {
+      const token = this.configuration.accessToken;
+      const tokenString = await token("oidc", []);
+
+      if (tokenString) {
+        headerParameters["Authorization"] = `Bearer ${tokenString}`;
+      }
+    }
+
     let urlPath = `/operations/{operation_id}`;
     urlPath = urlPath.replace(
       "{operation_id}",
@@ -120,6 +129,15 @@ export class OperationsApi extends runtime.BaseAPI {
     }
 
     const headerParameters: runtime.HTTPHeaders = {};
+
+    if (this.configuration && this.configuration.accessToken) {
+      const token = this.configuration.accessToken;
+      const tokenString = await token("oidc", []);
+
+      if (tokenString) {
+        headerParameters["Authorization"] = `Bearer ${tokenString}`;
+      }
+    }
 
     let urlPath = `/operations`;
 
