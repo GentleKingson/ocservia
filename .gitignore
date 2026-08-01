@@ -1,0 +1,17 @@
+# macOS Finder metadata
+.DS_Store
+
+# Editors
+.idea/
+.vscode/
+*.swp
+
+# Local environment and secrets
+.env
+.env.*
+!.env.example
+
+# Build and test output
+coverage/
+dist/
+tmp/
