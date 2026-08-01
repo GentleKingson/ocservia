@@ -32,7 +32,7 @@ mkdir -p "${TMP_ROOT}"
 wait_for_postgres() {
   local container=$1
   for _ in $(seq 1 60); do
-    if docker exec "${container}" pg_isready -U ocservia -d ocservia >/dev/null 2>&1; then return 0; fi
+    if docker exec "${container}" psql -U ocservia -d ocservia -Atc "SELECT 1" >/dev/null 2>&1; then return 0; fi
     sleep 1
   done
   return 1
