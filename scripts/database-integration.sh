@@ -47,6 +47,19 @@ wait_for_http() {
   return 1
 }
 
+wait_for_tcp() {
+  local host=$1
+  local port=$2
+  for _ in $(seq 1 60); do
+    if (exec 3<>"/dev/tcp/${host}/${port}") 2>/dev/null; then
+      exec 3>&- 3<&-
+      return 0
+    fi
+    sleep 1
+  done
+  return 1
+}
+
 stop_process() {
   local pid=$1
   kill -TERM "${pid}"
@@ -103,6 +116,9 @@ for major in 17 18; do
 
   docker start "${container}" >/dev/null
   wait_for_postgres "${container}"
+  port="$(docker port "${container}" 5432/tcp | sed -n 's/.*://p')"
+  database_url="postgres://ocservia:test-only@127.0.0.1:${port}/ocservia?sslmode=disable"
+  wait_for_tcp 127.0.0.1 "${port}"
   docker exec "${container}" psql -v ON_ERROR_STOP=1 -U ocservia -d ocservia -c \
     "INSERT INTO schema_migrations (version, name, checksum) VALUES (2, '000002_future.up.sql', decode(repeat('00', 32), 'hex'))" >/dev/null
   if OCSERV_ENVIRONMENT=test OCSERV_HTTP_ADDRESS="127.0.0.1:${api_port}" \
@@ -111,7 +127,11 @@ for major in 17 18; do
     echo "binary accepted an unknown schema version" >&2
     exit 1
   fi
-  grep -q 'database schema version 2 is unknown to this binary' "${TMP_ROOT}/pg${major}-unknown-version.log"
+  if ! grep -Fq 'database schema version 2 is unknown to this binary' "${TMP_ROOT}/pg${major}-unknown-version.log"; then
+    cat "${TMP_ROOT}/pg${major}-unknown-version.log" >&2
+    echo "binary failed for an unexpected reason with an unknown schema version" >&2
+    exit 1
+  fi
   docker exec "${container}" psql -v ON_ERROR_STOP=1 -U ocservia -d ocservia -c \
     "DELETE FROM schema_migrations WHERE version = 2" >/dev/null
 done
