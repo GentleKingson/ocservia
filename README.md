@@ -14,8 +14,10 @@ generic file management, or arbitrary host command execution.
 ## Status
 
 Repository and project governance are currently being established. Source
-code, build instructions, deployment guidance, and compatibility commitments
-will be added as implementation milestones are completed and verified.
+code, deployment guidance, and compatibility commitments will be added as
+implementation milestones are completed and verified. Contract contributors
+can use the pinned workflow in
+[docs/development/contracts.md](docs/development/contracts.md).
 
 ## Security
 

@@ -1,0 +1,84 @@
+syntax = "proto3";
+
+package ocserv.platform.agent.v1;
+
+import "google/protobuf/timestamp.proto";
+
+enum HandshakeResult {
+  HANDSHAKE_RESULT_UNSPECIFIED = 0;
+  HANDSHAKE_RESULT_ACCEPTED = 1;
+  HANDSHAKE_RESULT_PENDING_APPROVAL = 2;
+  HANDSHAKE_RESULT_REVOKED = 3;
+  HANDSHAKE_RESULT_INCOMPATIBLE_PROTOCOL = 4;
+  HANDSHAKE_RESULT_UPGRADE_REQUIRED = 5;
+  HANDSHAKE_RESULT_CLOCK_SKEW = 6;
+  HANDSHAKE_RESULT_CAPABILITY_REJECTED = 7;
+}
+
+message SessionHandshake {
+  uint32 protocol_major = 1;
+  uint32 protocol_minor = 2;
+  string agent_version = 3;
+  string controller_version = 4;
+  bytes node_id = 5;
+  bytes endpoint_id = 6;
+  repeated string capabilities = 7;
+  string ocserv_version = 8;
+  string os_release = 9;
+  string boot_id = 10;
+  bytes agent_instance_id = 11;
+  repeated string supported_compressions = 12;
+  uint32 max_message_size = 13;
+  google.protobuf.Timestamp time = 14;
+  bytes nonce = 15;
+}
+
+message CommandEnvelope {
+  string protocol_version = 1;
+  bytes message_id = 2;
+  bytes command_id = 3;
+  bytes idempotency_key = 4;
+  bytes node_id = 5;
+  uint64 sequence = 6;
+  google.protobuf.Timestamp issued_at = 7;
+  google.protobuf.Timestamp expires_at = 8;
+  uint64 expected_revision = 9;
+  string traceparent = 10;
+  string actor_id = 11;
+  string reason = 12;
+
+  reserved 13 to 99;
+  reserved "legacy_payload";
+
+  oneof payload {
+    SessionDisconnect session_disconnect = 100;
+    UserCreate user_create = 101;
+    UserDisable user_disable = 102;
+    ConfigPlan config_plan = 103;
+    ConfigApply config_apply = 104;
+    ServiceReload service_reload = 105;
+  }
+}
+
+message SessionDisconnect {
+  string session_id = 1;
+}
+
+message UserCreate {
+  string username = 1;
+}
+
+message UserDisable {
+  string username = 1;
+}
+
+message ConfigPlan {
+  bytes candidate = 1;
+  bytes candidate_hash = 2;
+}
+
+message ConfigApply {
+  bytes candidate_hash = 1;
+}
+
+message ServiceReload {}

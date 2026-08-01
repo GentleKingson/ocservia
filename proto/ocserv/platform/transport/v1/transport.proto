@@ -1,0 +1,80 @@
+syntax = "proto3";
+
+package ocserv.platform.transport.v1;
+
+import "google/protobuf/timestamp.proto";
+
+// TransportService is the complete typed UDS boundary exposed to Go.
+service TransportService {
+  rpc Health(HealthRequest) returns (HealthResponse);
+  rpc GetNodeConnection(GetNodeConnectionRequest) returns (NodeConnection);
+  rpc SendCommand(SendCommandRequest) returns (SendCommandResponse);
+  rpc CloseNode(CloseNodeRequest) returns (CloseNodeResponse);
+  rpc WatchEvents(WatchEventsRequest) returns (stream TransportEvent);
+}
+
+enum HealthStatus {
+  HEALTH_STATUS_UNSPECIFIED = 0;
+  HEALTH_STATUS_SERVING = 1;
+  HEALTH_STATUS_NOT_SERVING = 2;
+}
+
+enum ConnectionPath {
+  CONNECTION_PATH_UNSPECIFIED = 0;
+  CONNECTION_PATH_DIRECT = 1;
+  CONNECTION_PATH_RELAY = 2;
+}
+
+enum TransportEventType {
+  TRANSPORT_EVENT_TYPE_UNSPECIFIED = 0;
+  TRANSPORT_EVENT_TYPE_CONNECTED = 1;
+  TRANSPORT_EVENT_TYPE_DISCONNECTED = 2;
+  TRANSPORT_EVENT_TYPE_COMMAND_RESULT = 3;
+}
+
+message HealthRequest {}
+
+message HealthResponse {
+  HealthStatus status = 1;
+  string version = 2;
+}
+
+message GetNodeConnectionRequest {
+  bytes node_id = 1;
+}
+
+message NodeConnection {
+  bytes node_id = 1;
+  bytes endpoint_id = 2;
+  ConnectionPath path = 3;
+  uint64 round_trip_time_millis = 4;
+  google.protobuf.Timestamp connected_at = 5;
+}
+
+message SendCommandRequest {
+  bytes node_id = 1;
+  bytes command_envelope = 2;
+}
+
+message SendCommandResponse {
+  bool accepted = 1;
+}
+
+message CloseNodeRequest {
+  bytes node_id = 1;
+  string reason = 2;
+}
+
+message CloseNodeResponse {}
+
+message WatchEventsRequest {
+  bytes after_event_id = 1;
+}
+
+message TransportEvent {
+  bytes event_id = 1;
+  bytes node_id = 2;
+  TransportEventType type = 3;
+  google.protobuf.Timestamp occurred_at = 4;
+  bytes payload = 5;
+}

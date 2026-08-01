@@ -1,0 +1,38 @@
+#!/usr/bin/env bash
+set -euo pipefail
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck source=scripts/env.sh
+source "${ROOT}/scripts/env.sh"
+
+(cd "${ROOT}/control-plane" && \
+  go run github.com/google/go-licenses/v2@v2.0.1 check ./... \
+    --ignore=github.com/GentleKingson/ocservia/control-plane \
+    --allowed_licenses=Apache-2.0,BSD-2-Clause,BSD-3-Clause,ISC,MIT)
+
+(cd "${ROOT}/rust" && cargo metadata --format-version 1 | jq -e '
+  [.packages[]
+   | select(.source != null)
+   | select((.license // "")
+      | test("AGPL|GPL|SSPL|BUSL|Elastic"; "i"))] | length == 0')
+
+(cd "${ROOT}/web" && node <<'EOF'
+import { existsSync, readFileSync } from "node:fs";
+import { join } from "node:path";
+
+const lock = JSON.parse(readFileSync("package-lock.json", "utf8"));
+const rejected = [];
+for (const path of Object.keys(lock.packages ?? {})) {
+  if (!path.startsWith("node_modules/")) continue;
+  const manifestPath = join(path, "package.json");
+  if (!existsSync(manifestPath)) continue;
+  const manifest = JSON.parse(readFileSync(manifestPath, "utf8"));
+  const license = String(manifest.license ?? "");
+  if (/AGPL|GPL|SSPL|BUSL|Elastic/i.test(license)) {
+    rejected.push(`${manifest.name}@${manifest.version}: ${license}`);
+  }
+}
+if (rejected.length > 0) {
+  throw new Error(`disallowed dependency licenses:\n${rejected.join("\n")}`);
+}
+EOF
+)

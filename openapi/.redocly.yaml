@@ -1,0 +1,7 @@
+extends:
+  - recommended-strict
+rules:
+  info-contact: off
+  no-server-example.com: off
+  operation-4xx-response: error
+  security-defined: off

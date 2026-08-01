@@ -1,0 +1,28 @@
+version: v2
+clean: true
+managed:
+  enabled: true
+  override:
+    - file_option: go_package_prefix
+      value: github.com/GentleKingson/ocservia/control-plane/gen/proto
+plugins:
+  - remote: buf.build/protocolbuffers/go:v1.36.11
+    revision: 1
+    out: ../control-plane/gen/proto
+    opt: paths=source_relative
+  - remote: buf.build/grpc/go:v1.6.2
+    revision: 1
+    out: ../control-plane/gen/proto
+    opt:
+      - paths=source_relative
+      - require_unimplemented_servers=true
+  - remote: buf.build/community/neoeinstein-prost:v0.5.0
+    revision: 1
+    out: ../rust/crates/contracts/src/generated
+    opt:
+      - file_descriptor_set
+  - remote: buf.build/community/neoeinstein-tonic:v0.5.0
+    revision: 1
+    out: ../rust/crates/contracts/src/generated
+inputs:
+  - directory: .

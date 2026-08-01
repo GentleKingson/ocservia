@@ -1,0 +1,13 @@
+version: v2
+modules:
+  - path: .
+lint:
+  use:
+    - STANDARD
+  except:
+    # The architecture fixes these response names as NodeConnection and
+    # TransportEvent at the language-neutral IPC boundary.
+    - RPC_RESPONSE_STANDARD_NAME
+breaking:
+  use:
+    - FILE

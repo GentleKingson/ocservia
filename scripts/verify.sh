@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+set -euo pipefail
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+"${ROOT}/scripts/lint.sh"
+"${ROOT}/scripts/check-breaking.sh"
+"${ROOT}/scripts/go-check.sh"
+"${ROOT}/scripts/rust-check.sh"
+"${ROOT}/scripts/web-check.sh"
+"${ROOT}/scripts/test-public-repository-policy.sh"
+"${ROOT}/scripts/security-check.sh"
+"${ROOT}/scripts/license-check.sh"
+"${ROOT}/scripts/generated-clean.sh"
+"${ROOT}/scripts/test-generated-clean.sh"

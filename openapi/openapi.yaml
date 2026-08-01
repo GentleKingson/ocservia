@@ -1,0 +1,196 @@
+openapi: 3.1.2
+info:
+  title: ocservia API
+  version: 1.0.0
+  description: Public control-plane API contract.
+  license:
+    name: MIT OR Apache-2.0
+    identifier: MIT OR Apache-2.0
+servers:
+  - url: /api/v1
+security:
+  - oidc: []
+tags:
+  - name: operations
+    description: Asynchronous control-plane operation state.
+paths:
+  /operations:
+    get:
+      operationId: listOperations
+      summary: List operations
+      tags: [operations]
+      parameters:
+        - $ref: "#/components/parameters/Cursor"
+        - $ref: "#/components/parameters/PageSize"
+      responses:
+        "200":
+          description: Operations ordered from newest to oldest.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OperationPage"
+        "400":
+          $ref: "#/components/responses/Problem"
+        "401":
+          $ref: "#/components/responses/Problem"
+        "403":
+          $ref: "#/components/responses/Problem"
+        default:
+          $ref: "#/components/responses/Problem"
+  /operations/{operation_id}:
+    get:
+      operationId: getOperation
+      summary: Get an asynchronous operation
+      tags: [operations]
+      parameters:
+        - $ref: "#/components/parameters/OperationId"
+      responses:
+        "200":
+          description: Operation state.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Operation"
+        "401":
+          $ref: "#/components/responses/Problem"
+        "403":
+          $ref: "#/components/responses/Problem"
+        "404":
+          $ref: "#/components/responses/Problem"
+        default:
+          $ref: "#/components/responses/Problem"
+components:
+  securitySchemes:
+    oidc:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: Bearer access token issued by the configured OIDC provider.
+  parameters:
+    Cursor:
+      name: cursor
+      in: query
+      description: Opaque cursor returned by the previous page.
+      required: false
+      schema:
+        $ref: "#/components/schemas/Cursor"
+    PageSize:
+      name: page_size
+      in: query
+      required: false
+      schema:
+        type: integer
+        format: int32
+        minimum: 1
+        maximum: 200
+        default: 50
+    OperationId:
+      name: operation_id
+      in: path
+      required: true
+      schema:
+        $ref: "#/components/schemas/UuidV7"
+  responses:
+    Problem:
+      description: Request failed.
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/Problem"
+  schemas:
+    UuidV7:
+      type: string
+      format: uuid
+      pattern: "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+      example: 0193c1b2-7d8a-7f01-8a2d-1e5b4f302901
+    UtcDateTime:
+      type: string
+      format: date-time
+      description: RFC 3339 timestamp normalized to UTC.
+      example: "2026-08-01T16:00:00Z"
+    Cursor:
+      type: string
+      minLength: 1
+      maxLength: 2048
+      description: Opaque pagination position; clients must not parse it.
+    OperationState:
+      type: string
+      enum:
+        - draft
+        - queued
+        - dispatched
+        - accepted
+        - running
+        - succeeded
+        - failed
+        - unknown
+        - expired
+        - rolled_back
+        - offline_pending
+        - drifted
+        - superseded
+    Operation:
+      type: object
+      additionalProperties: false
+      required: [id, state, created_at, updated_at]
+      properties:
+        id:
+          $ref: "#/components/schemas/UuidV7"
+        state:
+          $ref: "#/components/schemas/OperationState"
+        node_id:
+          $ref: "#/components/schemas/UuidV7"
+        command_id:
+          $ref: "#/components/schemas/UuidV7"
+        created_at:
+          $ref: "#/components/schemas/UtcDateTime"
+        updated_at:
+          $ref: "#/components/schemas/UtcDateTime"
+    PageInfo:
+      type: object
+      additionalProperties: false
+      required: [has_more]
+      properties:
+        has_more:
+          type: boolean
+        next_cursor:
+          $ref: "#/components/schemas/Cursor"
+    OperationPage:
+      type: object
+      additionalProperties: false
+      required: [items, page]
+      properties:
+        items:
+          type: array
+          maxItems: 200
+          items:
+            $ref: "#/components/schemas/Operation"
+        page:
+          $ref: "#/components/schemas/PageInfo"
+    Problem:
+      type: object
+      additionalProperties: true
+      description: RFC 9457 Problem Details response.
+      required: [type, title, status]
+      properties:
+        type:
+          type: string
+          format: uri-reference
+          default: about:blank
+        title:
+          type: string
+          minLength: 1
+          maxLength: 256
+        status:
+          type: integer
+          minimum: 400
+          maximum: 599
+        detail:
+          type: string
+          maxLength: 4096
+        instance:
+          type: string
+          format: uri-reference
+        trace_id:
+          type: string
+          pattern: "^[0-9a-f]{32}$"
