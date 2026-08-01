@@ -100,6 +100,20 @@ for major in 17 18; do
   docker stop "${container}" >/dev/null
   test "$(curl --silent --output /dev/null --write-out '%{http_code}' "http://127.0.0.1:${api_port}/readyz")" = "503"
   stop_process "${pid}"
+
+  docker start "${container}" >/dev/null
+  wait_for_postgres "${container}"
+  docker exec "${container}" psql -v ON_ERROR_STOP=1 -U ocservia -d ocservia -c \
+    "INSERT INTO schema_migrations (version, name, checksum) VALUES (2, '000002_future.up.sql', decode(repeat('00', 32), 'hex'))" >/dev/null
+  if OCSERV_ENVIRONMENT=test OCSERV_HTTP_ADDRESS="127.0.0.1:${api_port}" \
+    OCSERV_DATABASE_URL="${database_url}" "${BIN}" --role=all \
+    >"${TMP_ROOT}/pg${major}-unknown-version.log" 2>&1; then
+    echo "binary accepted an unknown schema version" >&2
+    exit 1
+  fi
+  grep -q 'database schema version 2 is unknown to this binary' "${TMP_ROOT}/pg${major}-unknown-version.log"
+  docker exec "${container}" psql -v ON_ERROR_STOP=1 -U ocservia -d ocservia -c \
+    "DELETE FROM schema_migrations WHERE version = 2" >/dev/null
 done
 
 container="${PREFIX}-upgrade"

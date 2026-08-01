@@ -25,9 +25,34 @@ func TestValidateAcceptsContractedStates(t *testing.T) {
 }
 
 func TestValidateRejectsNonV7Identifiers(t *testing.T) {
-	op := Operation{ID: uuid.New(), WorkspaceID: newV7(t), State: StateDraft, Version: 1}
+	now := time.Now()
+	op := Operation{ID: uuid.New(), WorkspaceID: newV7(t), State: StateDraft, Version: 1, CreatedAt: now, UpdatedAt: now}
 	if err := op.Validate(); err == nil {
 		t.Fatal("Validate() accepted a non-v7 operation ID")
+	}
+}
+
+func TestValidateRejectsInvalidTimestamps(t *testing.T) {
+	now := time.Now()
+	tests := []struct {
+		name      string
+		createdAt time.Time
+		updatedAt time.Time
+	}{
+		{name: "missing creation", updatedAt: now},
+		{name: "missing update", createdAt: now},
+		{name: "update before creation", createdAt: now, updatedAt: now.Add(-time.Second)},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			op := Operation{
+				ID: newV7(t), WorkspaceID: newV7(t), State: StateDraft, Version: 1,
+				CreatedAt: tt.createdAt, UpdatedAt: tt.updatedAt,
+			}
+			if err := op.Validate(); err == nil {
+				t.Fatal("Validate() accepted invalid timestamps")
+			}
+		})
 	}
 }
 

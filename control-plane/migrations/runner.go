@@ -29,6 +29,12 @@ type Migration struct {
 	Checksum [sha256.Size]byte
 }
 
+type appliedMigration struct {
+	Version  int64
+	Name     string
+	Checksum []byte
+}
+
 func Open(ctx context.Context, databaseURL string) (*pgxpool.Pool, error) {
 	cfg, err := pgxpool.ParseConfig(databaseURL)
 	if err != nil {
@@ -67,20 +73,64 @@ func Migrate(ctx context.Context, pool *pgxpool.Pool) error {
 	if err != nil {
 		return err
 	}
+	applied, err := readAppliedMigrations(ctx, conn)
+	if err != nil {
+		return err
+	}
+	if err := validateAppliedMigrations(migrations, applied); err != nil {
+		return err
+	}
+	appliedVersions := make(map[int64]struct{}, len(applied))
+	for _, migration := range applied {
+		appliedVersions[migration.Version] = struct{}{}
+	}
 	for _, migration := range migrations {
-		var checksum []byte
-		err := conn.QueryRow(ctx, "SELECT checksum FROM schema_migrations WHERE version = $1", migration.Version).Scan(&checksum)
-		if err != nil && !errors.Is(err, pgx.ErrNoRows) {
-			return fmt.Errorf("read schema version %d: %w", migration.Version, err)
-		}
-		if err == nil {
-			if !equalChecksum(checksum, migration.Checksum[:]) {
-				return fmt.Errorf("migration %d checksum does not match the applied schema", migration.Version)
-			}
+		if _, ok := appliedVersions[migration.Version]; ok {
 			continue
 		}
 		if err := applyMigration(ctx, conn, migration); err != nil {
 			return err
+		}
+	}
+	return nil
+}
+
+func readAppliedMigrations(ctx context.Context, conn *pgxpool.Conn) ([]appliedMigration, error) {
+	rows, err := conn.Query(ctx, "SELECT version, name, checksum FROM schema_migrations ORDER BY version")
+	if err != nil {
+		return nil, fmt.Errorf("read applied migrations: %w", err)
+	}
+	defer rows.Close()
+
+	var applied []appliedMigration
+	for rows.Next() {
+		var migration appliedMigration
+		if err := rows.Scan(&migration.Version, &migration.Name, &migration.Checksum); err != nil {
+			return nil, fmt.Errorf("scan applied migration: %w", err)
+		}
+		applied = append(applied, migration)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate applied migrations: %w", err)
+	}
+	return applied, nil
+}
+
+func validateAppliedMigrations(known []Migration, applied []appliedMigration) error {
+	knownByVersion := make(map[int64]Migration, len(known))
+	for _, migration := range known {
+		knownByVersion[migration.Version] = migration
+	}
+	for _, migration := range applied {
+		expected, ok := knownByVersion[migration.Version]
+		if !ok {
+			return fmt.Errorf("database schema version %d is unknown to this binary", migration.Version)
+		}
+		if migration.Name != expected.Name {
+			return fmt.Errorf("migration %d name does not match the applied schema", migration.Version)
+		}
+		if !equalChecksum(migration.Checksum, expected.Checksum[:]) {
+			return fmt.Errorf("migration %d checksum does not match the applied schema", migration.Version)
 		}
 	}
 	return nil

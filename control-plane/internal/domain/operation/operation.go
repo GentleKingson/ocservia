@@ -45,6 +45,12 @@ func (o Operation) Validate() error {
 	if o.Version < 1 {
 		return errors.New("operation version must be positive")
 	}
+	if o.CreatedAt.IsZero() || o.UpdatedAt.IsZero() {
+		return errors.New("operation timestamps are required")
+	}
+	if o.UpdatedAt.Before(o.CreatedAt) {
+		return errors.New("operation updated timestamp must not precede creation")
+	}
 	switch o.State {
 	case StateDraft, StateQueued, StateDispatched, StateAccepted, StateRunning,
 		StateSucceeded, StateFailed, StateUnknown, StateExpired, StateRolledBack,
