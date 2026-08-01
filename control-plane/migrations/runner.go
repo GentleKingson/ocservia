@@ -121,10 +121,13 @@ func validateAppliedMigrations(known []Migration, applied []appliedMigration) er
 	for _, migration := range known {
 		knownByVersion[migration.Version] = migration
 	}
-	for _, migration := range applied {
+	for index, migration := range applied {
 		expected, ok := knownByVersion[migration.Version]
 		if !ok {
 			return fmt.Errorf("database schema version %d is unknown to this binary", migration.Version)
+		}
+		if migration.Version != known[index].Version {
+			return fmt.Errorf("applied migrations do not form an ordered prefix: expected version %d before version %d", known[index].Version, migration.Version)
 		}
 		if migration.Name != expected.Name {
 			return fmt.Errorf("migration %d name does not match the applied schema", migration.Version)

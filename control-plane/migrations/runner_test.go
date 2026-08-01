@@ -28,6 +28,18 @@ func TestValidateAppliedMigrationsAcceptsKnownVersion(t *testing.T) {
 	}
 }
 
+func TestValidateAppliedMigrationsRejectsGap(t *testing.T) {
+	first := testMigration(1, "000001_foundation.up.sql", "one")
+	second := testMigration(2, "000002_next.up.sql", "two")
+
+	err := validateAppliedMigrations([]Migration{first, second}, []appliedMigration{{
+		Version: second.Version, Name: second.Name, Checksum: second.Checksum[:],
+	}})
+	if err == nil || !strings.Contains(err.Error(), "ordered prefix") {
+		t.Fatalf("validateAppliedMigrations() error = %v, want migration-gap error", err)
+	}
+}
+
 func testMigration(version int64, name, contents string) Migration {
 	return Migration{Version: version, Name: name, Checksum: sha256.Sum256([]byte(contents))}
 }
