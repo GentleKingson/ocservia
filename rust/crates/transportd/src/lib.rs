@@ -297,10 +297,7 @@ impl TransportService for IrohTransportService {
             .lock()
             .await
             .get_mut(&node_id)
-            .map(|entry| {
-                entry.metadata.last_seen = Some(now_timestamp());
-                (entry.connection.clone(), entry.max_message_size)
-            })
+            .map(|entry| (entry.connection.clone(), entry.max_message_size))
             .ok_or_else(|| Status::unavailable("node is not connected"))?;
         if request.command_envelope.len() > max_message_size {
             return Err(Status::resource_exhausted(
@@ -308,6 +305,7 @@ impl TransportService for IrohTransportService {
             ));
         }
         let frame = request.command_envelope;
+        let response_connection = connection.clone();
         let recv = tokio::time::timeout(STREAM_TIMEOUT, async move {
             let (mut send, recv) = connection
                 .open_bi()
@@ -333,6 +331,7 @@ impl TransportService for IrohTransportService {
             node_id,
             command.traceparent,
             max_message_size,
+            response_connection,
         ));
         Ok(Response::new(SendCommandResponse { accepted: true }))
     }
@@ -520,6 +519,9 @@ fn monitor_paths(
             let Some(entry) = registry.get_mut(&node_id) else {
                 break;
             };
+            if entry.connection.stable_id() != connection.stable_id() {
+                break;
+            }
             entry.metadata.path = next.0.into();
             entry.metadata.path_detail.clone_from(&next.1);
             entry.metadata.round_trip_time_millis = next.2;
@@ -542,34 +544,37 @@ async fn read_agent_events(
     node_id: Vec<u8>,
     traceparent: String,
     max_message_size: usize,
+    connection: Connection,
 ) {
     for _ in 0..MAX_RESPONSE_FRAMES {
         let mut length = [0_u8; 4];
         match tokio::time::timeout(STREAM_TIMEOUT, recv.read_exact(&mut length)).await {
             Ok(Ok(())) => {}
-            Ok(Err(_)) => return,
+            Ok(Err(_)) => {
+                publish_agent_error(
+                    &shared,
+                    &node_id,
+                    &traceparent,
+                    "agent response ended before a terminal event",
+                )
+                .await;
+                return;
+            }
             Err(_) => {
-                shared
-                    .publish(event_with_traceparent(
-                        &node_id,
-                        TransportEventType::Error,
-                        b"agent response timed out".to_vec(),
-                        &traceparent,
-                    ))
+                publish_agent_error(&shared, &node_id, &traceparent, "agent response timed out")
                     .await;
                 return;
             }
         }
         let length = u32::from_be_bytes(length) as usize;
         if length == 0 || length > max_message_size || length > MAX_FRAME_BYTES {
-            shared
-                .publish(event_with_traceparent(
-                    &node_id,
-                    TransportEventType::Error,
-                    b"agent response size invalid".to_vec(),
-                    &traceparent,
-                ))
-                .await;
+            publish_agent_error(
+                &shared,
+                &node_id,
+                &traceparent,
+                "agent response size invalid",
+            )
+            .await;
             return;
         }
         let mut bytes = vec![0_u8; length];
@@ -577,25 +582,23 @@ async fn read_agent_events(
             tokio::time::timeout(STREAM_TIMEOUT, recv.read_exact(&mut bytes)).await,
             Ok(Ok(()))
         ) {
-            shared
-                .publish(event_with_traceparent(
-                    &node_id,
-                    TransportEventType::Error,
-                    b"agent response body invalid".to_vec(),
-                    &traceparent,
-                ))
-                .await;
+            publish_agent_error(
+                &shared,
+                &node_id,
+                &traceparent,
+                "agent response body invalid",
+            )
+            .await;
             return;
         }
         let Ok(agent_event) = AgentEvent::decode(bytes.as_slice()) else {
-            shared
-                .publish(event_with_traceparent(
-                    &node_id,
-                    TransportEventType::Error,
-                    b"agent response protobuf invalid".to_vec(),
-                    &traceparent,
-                ))
-                .await;
+            publish_agent_error(
+                &shared,
+                &node_id,
+                &traceparent,
+                "agent response protobuf invalid",
+            )
+            .await;
             return;
         };
         let event_type = match AgentEventType::try_from(agent_event.r#type) {
@@ -603,17 +606,21 @@ async fn read_agent_events(
             Ok(AgentEventType::Heartbeat) => TransportEventType::Heartbeat,
             Ok(AgentEventType::Error) => TransportEventType::Error,
             _ => {
-                shared
-                    .publish(event_with_traceparent(
-                        &node_id,
-                        TransportEventType::Error,
-                        b"agent response type invalid".to_vec(),
-                        &traceparent,
-                    ))
-                    .await;
+                publish_agent_error(
+                    &shared,
+                    &node_id,
+                    &traceparent,
+                    "agent response type invalid",
+                )
+                .await;
                 return;
             }
         };
+        let terminal = matches!(
+            event_type,
+            TransportEventType::CommandResult | TransportEventType::Error
+        );
+        touch_connection(&shared, &node_id, &connection).await;
         shared
             .publish(event_with_traceparent(
                 &node_id,
@@ -622,15 +629,38 @@ async fn read_agent_events(
                 &traceparent,
             ))
             .await;
+        if terminal {
+            return;
+        }
     }
+    publish_agent_error(
+        &shared,
+        &node_id,
+        &traceparent,
+        "agent response frame limit exceeded",
+    )
+    .await;
+}
+
+async fn publish_agent_error(shared: &Shared, node_id: &[u8], traceparent: &str, message: &str) {
     shared
         .publish(event_with_traceparent(
-            &node_id,
+            node_id,
             TransportEventType::Error,
-            b"agent response frame limit exceeded".to_vec(),
-            &traceparent,
+            message.as_bytes().to_vec(),
+            traceparent,
         ))
         .await;
+}
+
+async fn touch_connection(shared: &Shared, node_id: &[u8], connection: &Connection) {
+    let mut registry = shared.inner.connections.lock().await;
+    if let Some(entry) = registry
+        .get_mut(node_id)
+        .filter(|entry| entry.connection.stable_id() == connection.stable_id())
+    {
+        entry.metadata.last_seen = Some(now_timestamp());
+    }
 }
 
 async fn read_handshake(
@@ -999,6 +1029,72 @@ mod tests {
         send.finish().expect("finish response");
     }
 
+    async fn end_command_without_response(connection: Connection) {
+        let (mut send, mut recv) = connection.accept_bi().await.expect("accept command");
+        let mut length = [0_u8; 4];
+        recv.read_exact(&mut length)
+            .await
+            .expect("read command length");
+        let mut command = vec![0_u8; u32::from_be_bytes(length) as usize];
+        recv.read_exact(&mut command).await.expect("read command");
+        CommandEnvelope::decode(command.as_slice()).expect("decode command");
+        send.finish().expect("finish empty response");
+    }
+
+    async fn next_event(
+        events: &mut EventStream,
+        event_type: TransportEventType,
+    ) -> TransportEvent {
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let event = events
+                    .next()
+                    .await
+                    .expect("event stream remains open")
+                    .expect("event is valid");
+                if event.r#type == i32::from(event_type) {
+                    break event;
+                }
+            }
+        })
+        .await
+        .expect("event arrives")
+    }
+
+    async fn wait_until_registered(service: &IrohTransportService, node_id: &[u8]) {
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if service
+                    .shared
+                    .inner
+                    .connections
+                    .lock()
+                    .await
+                    .contains_key(node_id)
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("connection registered");
+    }
+
+    async fn last_seen(
+        service: &IrohTransportService,
+        node_id: &[u8],
+    ) -> Option<prost_types::Timestamp> {
+        service
+            .get_node_connection(Request::new(GetNodeConnectionRequest {
+                node_id: node_id.to_vec(),
+            }))
+            .await
+            .expect("query connection")
+            .into_inner()
+            .last_seen
+    }
+
     #[test]
     fn policy_rejects_unknown_agent_and_revoked_enrollment() {
         let approved = SecretKey::generate().public();
@@ -1213,25 +1309,10 @@ mod tests {
             .expect("connect agent");
         let response = send_handshake(&connection, &handshake).await;
         assert_eq!(response.result, i32::from(HandshakeResult::Accepted));
-        tokio::time::timeout(Duration::from_secs(2), async {
-            loop {
-                if service
-                    .shared
-                    .inner
-                    .connections
-                    .lock()
-                    .await
-                    .contains_key(&handshake.node_id)
-                {
-                    break;
-                }
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .expect("connection registered");
+        wait_until_registered(&service, &handshake.node_id).await;
 
         let traceparent = new_traceparent();
+        let baseline_last_seen = last_seen(&service, &handshake.node_id).await;
         let oversized = command_envelope(&handshake.node_id, &traceparent, "x".repeat(256));
         let error = service
             .send_command(Request::new(SendCommandRequest {
@@ -1241,7 +1322,12 @@ mod tests {
             .await
             .expect_err("negotiated limit enforced");
         assert_eq!(error.code(), tonic::Code::ResourceExhausted);
+        assert_eq!(
+            last_seen(&service, &handshake.node_id).await,
+            baseline_last_seen
+        );
 
+        tokio::time::sleep(Duration::from_millis(2)).await;
         let agent = tokio::spawn(respond_to_command(connection.clone()));
         let mut events = service
             .watch_events(Request::new(WatchEventsRequest {
@@ -1259,20 +1345,35 @@ mod tests {
             .await
             .expect("send command");
         agent.await.expect("agent response task");
-        let event = tokio::time::timeout(Duration::from_secs(2), async {
-            loop {
-                let event = events.next().await.expect("event stream remains open")?;
-                if event.r#type == i32::from(TransportEventType::CommandResult) {
-                    break Ok::<_, Status>(event);
-                }
-            }
-        })
-        .await
-        .expect("command result arrives")
-        .expect("event is valid");
+        let event = next_event(&mut events, TransportEventType::CommandResult).await;
         assert_eq!(event.node_id, handshake.node_id);
         assert_eq!(event.traceparent, traceparent);
         assert_eq!(event.payload, b"completed");
+        assert_ne!(
+            last_seen(&service, &handshake.node_id).await,
+            baseline_last_seen
+        );
+
+        let eof_traceparent = new_traceparent();
+        let agent = tokio::spawn(end_command_without_response(connection.clone()));
+        service
+            .send_command(Request::new(SendCommandRequest {
+                node_id: handshake.node_id.clone(),
+                command_envelope: command_envelope(
+                    &handshake.node_id,
+                    &eof_traceparent,
+                    String::new(),
+                ),
+            }))
+            .await
+            .expect("send command with empty response");
+        agent.await.expect("empty response task");
+        let event = next_event(&mut events, TransportEventType::Error).await;
+        assert_eq!(event.traceparent, eof_traceparent);
+        assert_eq!(
+            event.payload,
+            b"agent response ended before a terminal event"
+        );
 
         shutdown(&service, router).await.expect("shutdown router");
         client.close().await;
