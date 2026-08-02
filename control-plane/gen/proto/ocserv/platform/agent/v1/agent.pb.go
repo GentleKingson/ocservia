@@ -242,6 +242,82 @@ func (x *SessionHandshake) GetNonce() []byte {
 	return nil
 }
 
+type SessionHandshakeResponse struct {
+	state             protoimpl.MessageState `protogen:"open.v1"`
+	Result            HandshakeResult        `protobuf:"varint,1,opt,name=result,proto3,enum=ocserv.platform.agent.v1.HandshakeResult" json:"result,omitempty"`
+	ProtocolMajor     uint32                 `protobuf:"varint,2,opt,name=protocol_major,json=protocolMajor,proto3" json:"protocol_major,omitempty"`
+	ProtocolMinor     uint32                 `protobuf:"varint,3,opt,name=protocol_minor,json=protocolMinor,proto3" json:"protocol_minor,omitempty"`
+	MaxMessageSize    uint32                 `protobuf:"varint,4,opt,name=max_message_size,json=maxMessageSize,proto3" json:"max_message_size,omitempty"`
+	ControllerVersion string                 `protobuf:"bytes,5,opt,name=controller_version,json=controllerVersion,proto3" json:"controller_version,omitempty"`
+	unknownFields     protoimpl.UnknownFields
+	sizeCache         protoimpl.SizeCache
+}
+
+func (x *SessionHandshakeResponse) Reset() {
+	*x = SessionHandshakeResponse{}
+	mi := &file_ocserv_platform_agent_v1_agent_proto_msgTypes[1]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *SessionHandshakeResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*SessionHandshakeResponse) ProtoMessage() {}
+
+func (x *SessionHandshakeResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_ocserv_platform_agent_v1_agent_proto_msgTypes[1]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use SessionHandshakeResponse.ProtoReflect.Descriptor instead.
+func (*SessionHandshakeResponse) Descriptor() ([]byte, []int) {
+	return file_ocserv_platform_agent_v1_agent_proto_rawDescGZIP(), []int{1}
+}
+
+func (x *SessionHandshakeResponse) GetResult() HandshakeResult {
+	if x != nil {
+		return x.Result
+	}
+	return HandshakeResult_HANDSHAKE_RESULT_UNSPECIFIED
+}
+
+func (x *SessionHandshakeResponse) GetProtocolMajor() uint32 {
+	if x != nil {
+		return x.ProtocolMajor
+	}
+	return 0
+}
+
+func (x *SessionHandshakeResponse) GetProtocolMinor() uint32 {
+	if x != nil {
+		return x.ProtocolMinor
+	}
+	return 0
+}
+
+func (x *SessionHandshakeResponse) GetMaxMessageSize() uint32 {
+	if x != nil {
+		return x.MaxMessageSize
+	}
+	return 0
+}
+
+func (x *SessionHandshakeResponse) GetControllerVersion() string {
+	if x != nil {
+		return x.ControllerVersion
+	}
+	return ""
+}
+
 type CommandEnvelope struct {
 	state            protoimpl.MessageState `protogen:"open.v1"`
 	ProtocolVersion  string                 `protobuf:"bytes,1,opt,name=protocol_version,json=protocolVersion,proto3" json:"protocol_version,omitempty"`
@@ -272,7 +348,7 @@ type CommandEnvelope struct {
 
 func (x *CommandEnvelope) Reset() {
 	*x = CommandEnvelope{}
-	mi := &file_ocserv_platform_agent_v1_agent_proto_msgTypes[1]
+	mi := &file_ocserv_platform_agent_v1_agent_proto_msgTypes[2]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -284,7 +360,7 @@ func (x *CommandEnvelope) String() string {
 func (*CommandEnvelope) ProtoMessage() {}
 
 func (x *CommandEnvelope) ProtoReflect() protoreflect.Message {
-	mi := &file_ocserv_platform_agent_v1_agent_proto_msgTypes[1]
+	mi := &file_ocserv_platform_agent_v1_agent_proto_msgTypes[2]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -297,7 +373,7 @@ func (x *CommandEnvelope) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CommandEnvelope.ProtoReflect.Descriptor instead.
 func (*CommandEnvelope) Descriptor() ([]byte, []int) {
-	return file_ocserv_platform_agent_v1_agent_proto_rawDescGZIP(), []int{1}
+	return file_ocserv_platform_agent_v1_agent_proto_rawDescGZIP(), []int{2}
 }
 
 func (x *CommandEnvelope) GetProtocolVersion() string {
@@ -509,7 +585,7 @@ type SessionDisconnect struct {
 
 func (x *SessionDisconnect) Reset() {
 	*x = SessionDisconnect{}
-	mi := &file_ocserv_platform_agent_v1_agent_proto_msgTypes[2]
+	mi := &file_ocserv_platform_agent_v1_agent_proto_msgTypes[3]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -521,7 +597,7 @@ func (x *SessionDisconnect) String() string {
 func (*SessionDisconnect) ProtoMessage() {}
 
 func (x *SessionDisconnect) ProtoReflect() protoreflect.Message {
-	mi := &file_ocserv_platform_agent_v1_agent_proto_msgTypes[2]
+	mi := &file_ocserv_platform_agent_v1_agent_proto_msgTypes[3]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -534,7 +610,7 @@ func (x *SessionDisconnect) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SessionDisconnect.ProtoReflect.Descriptor instead.
 func (*SessionDisconnect) Descriptor() ([]byte, []int) {
-	return file_ocserv_platform_agent_v1_agent_proto_rawDescGZIP(), []int{2}
+	return file_ocserv_platform_agent_v1_agent_proto_rawDescGZIP(), []int{3}
 }
 
 func (x *SessionDisconnect) GetSessionId() string {
@@ -553,7 +629,7 @@ type UserCreate struct {
 
 func (x *UserCreate) Reset() {
 	*x = UserCreate{}
-	mi := &file_ocserv_platform_agent_v1_agent_proto_msgTypes[3]
+	mi := &file_ocserv_platform_agent_v1_agent_proto_msgTypes[4]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -565,7 +641,7 @@ func (x *UserCreate) String() string {
 func (*UserCreate) ProtoMessage() {}
 
 func (x *UserCreate) ProtoReflect() protoreflect.Message {
-	mi := &file_ocserv_platform_agent_v1_agent_proto_msgTypes[3]
+	mi := &file_ocserv_platform_agent_v1_agent_proto_msgTypes[4]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -578,7 +654,7 @@ func (x *UserCreate) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use UserCreate.ProtoReflect.Descriptor instead.
 func (*UserCreate) Descriptor() ([]byte, []int) {
-	return file_ocserv_platform_agent_v1_agent_proto_rawDescGZIP(), []int{3}
+	return file_ocserv_platform_agent_v1_agent_proto_rawDescGZIP(), []int{4}
 }
 
 func (x *UserCreate) GetUsername() string {
@@ -597,7 +673,7 @@ type UserDisable struct {
 
 func (x *UserDisable) Reset() {
 	*x = UserDisable{}
-	mi := &file_ocserv_platform_agent_v1_agent_proto_msgTypes[4]
+	mi := &file_ocserv_platform_agent_v1_agent_proto_msgTypes[5]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -609,7 +685,7 @@ func (x *UserDisable) String() string {
 func (*UserDisable) ProtoMessage() {}
 
 func (x *UserDisable) ProtoReflect() protoreflect.Message {
-	mi := &file_ocserv_platform_agent_v1_agent_proto_msgTypes[4]
+	mi := &file_ocserv_platform_agent_v1_agent_proto_msgTypes[5]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -622,7 +698,7 @@ func (x *UserDisable) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use UserDisable.ProtoReflect.Descriptor instead.
 func (*UserDisable) Descriptor() ([]byte, []int) {
-	return file_ocserv_platform_agent_v1_agent_proto_rawDescGZIP(), []int{4}
+	return file_ocserv_platform_agent_v1_agent_proto_rawDescGZIP(), []int{5}
 }
 
 func (x *UserDisable) GetUsername() string {
@@ -642,7 +718,7 @@ type ConfigPlan struct {
 
 func (x *ConfigPlan) Reset() {
 	*x = ConfigPlan{}
-	mi := &file_ocserv_platform_agent_v1_agent_proto_msgTypes[5]
+	mi := &file_ocserv_platform_agent_v1_agent_proto_msgTypes[6]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -654,7 +730,7 @@ func (x *ConfigPlan) String() string {
 func (*ConfigPlan) ProtoMessage() {}
 
 func (x *ConfigPlan) ProtoReflect() protoreflect.Message {
-	mi := &file_ocserv_platform_agent_v1_agent_proto_msgTypes[5]
+	mi := &file_ocserv_platform_agent_v1_agent_proto_msgTypes[6]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -667,7 +743,7 @@ func (x *ConfigPlan) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ConfigPlan.ProtoReflect.Descriptor instead.
 func (*ConfigPlan) Descriptor() ([]byte, []int) {
-	return file_ocserv_platform_agent_v1_agent_proto_rawDescGZIP(), []int{5}
+	return file_ocserv_platform_agent_v1_agent_proto_rawDescGZIP(), []int{6}
 }
 
 func (x *ConfigPlan) GetCandidate() []byte {
@@ -693,7 +769,7 @@ type ConfigApply struct {
 
 func (x *ConfigApply) Reset() {
 	*x = ConfigApply{}
-	mi := &file_ocserv_platform_agent_v1_agent_proto_msgTypes[6]
+	mi := &file_ocserv_platform_agent_v1_agent_proto_msgTypes[7]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -705,7 +781,7 @@ func (x *ConfigApply) String() string {
 func (*ConfigApply) ProtoMessage() {}
 
 func (x *ConfigApply) ProtoReflect() protoreflect.Message {
-	mi := &file_ocserv_platform_agent_v1_agent_proto_msgTypes[6]
+	mi := &file_ocserv_platform_agent_v1_agent_proto_msgTypes[7]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -718,7 +794,7 @@ func (x *ConfigApply) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ConfigApply.ProtoReflect.Descriptor instead.
 func (*ConfigApply) Descriptor() ([]byte, []int) {
-	return file_ocserv_platform_agent_v1_agent_proto_rawDescGZIP(), []int{6}
+	return file_ocserv_platform_agent_v1_agent_proto_rawDescGZIP(), []int{7}
 }
 
 func (x *ConfigApply) GetCandidateHash() []byte {
@@ -736,7 +812,7 @@ type ServiceReload struct {
 
 func (x *ServiceReload) Reset() {
 	*x = ServiceReload{}
-	mi := &file_ocserv_platform_agent_v1_agent_proto_msgTypes[7]
+	mi := &file_ocserv_platform_agent_v1_agent_proto_msgTypes[8]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -748,7 +824,7 @@ func (x *ServiceReload) String() string {
 func (*ServiceReload) ProtoMessage() {}
 
 func (x *ServiceReload) ProtoReflect() protoreflect.Message {
-	mi := &file_ocserv_platform_agent_v1_agent_proto_msgTypes[7]
+	mi := &file_ocserv_platform_agent_v1_agent_proto_msgTypes[8]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -761,7 +837,7 @@ func (x *ServiceReload) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ServiceReload.ProtoReflect.Descriptor instead.
 func (*ServiceReload) Descriptor() ([]byte, []int) {
-	return file_ocserv_platform_agent_v1_agent_proto_rawDescGZIP(), []int{7}
+	return file_ocserv_platform_agent_v1_agent_proto_rawDescGZIP(), []int{8}
 }
 
 // SimulationProbe exists only to exercise the local, side-effect-free slice.
@@ -778,7 +854,7 @@ type SimulationProbe struct {
 
 func (x *SimulationProbe) Reset() {
 	*x = SimulationProbe{}
-	mi := &file_ocserv_platform_agent_v1_agent_proto_msgTypes[8]
+	mi := &file_ocserv_platform_agent_v1_agent_proto_msgTypes[9]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -790,7 +866,7 @@ func (x *SimulationProbe) String() string {
 func (*SimulationProbe) ProtoMessage() {}
 
 func (x *SimulationProbe) ProtoReflect() protoreflect.Message {
-	mi := &file_ocserv_platform_agent_v1_agent_proto_msgTypes[8]
+	mi := &file_ocserv_platform_agent_v1_agent_proto_msgTypes[9]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -803,7 +879,7 @@ func (x *SimulationProbe) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SimulationProbe.ProtoReflect.Descriptor instead.
 func (*SimulationProbe) Descriptor() ([]byte, []int) {
-	return file_ocserv_platform_agent_v1_agent_proto_rawDescGZIP(), []int{8}
+	return file_ocserv_platform_agent_v1_agent_proto_rawDescGZIP(), []int{9}
 }
 
 func (x *SimulationProbe) GetHeartbeatCount() uint32 {
@@ -864,7 +940,13 @@ const file_ocserv_platform_agent_v1_agent_proto_rawDesc = "" +
 	"\x16supported_compressions\x18\f \x03(\tR\x15supportedCompressions\x12(\n" +
 	"\x10max_message_size\x18\r \x01(\rR\x0emaxMessageSize\x12.\n" +
 	"\x04time\x18\x0e \x01(\v2\x1a.google.protobuf.TimestampR\x04time\x12\x14\n" +
-	"\x05nonce\x18\x0f \x01(\fR\x05nonce\"\xa1\b\n" +
+	"\x05nonce\x18\x0f \x01(\fR\x05nonce\"\x84\x02\n" +
+	"\x18SessionHandshakeResponse\x12A\n" +
+	"\x06result\x18\x01 \x01(\x0e2).ocserv.platform.agent.v1.HandshakeResultR\x06result\x12%\n" +
+	"\x0eprotocol_major\x18\x02 \x01(\rR\rprotocolMajor\x12%\n" +
+	"\x0eprotocol_minor\x18\x03 \x01(\rR\rprotocolMinor\x12(\n" +
+	"\x10max_message_size\x18\x04 \x01(\rR\x0emaxMessageSize\x12-\n" +
+	"\x12controller_version\x18\x05 \x01(\tR\x11controllerVersion\"\xa1\b\n" +
 	"\x0fCommandEnvelope\x12)\n" +
 	"\x10protocol_version\x18\x01 \x01(\tR\x0fprotocolVersion\x12\x1d\n" +
 	"\n" +
@@ -938,36 +1020,38 @@ func file_ocserv_platform_agent_v1_agent_proto_rawDescGZIP() []byte {
 }
 
 var file_ocserv_platform_agent_v1_agent_proto_enumTypes = make([]protoimpl.EnumInfo, 1)
-var file_ocserv_platform_agent_v1_agent_proto_msgTypes = make([]protoimpl.MessageInfo, 9)
+var file_ocserv_platform_agent_v1_agent_proto_msgTypes = make([]protoimpl.MessageInfo, 10)
 var file_ocserv_platform_agent_v1_agent_proto_goTypes = []any{
-	(HandshakeResult)(0),          // 0: ocserv.platform.agent.v1.HandshakeResult
-	(*SessionHandshake)(nil),      // 1: ocserv.platform.agent.v1.SessionHandshake
-	(*CommandEnvelope)(nil),       // 2: ocserv.platform.agent.v1.CommandEnvelope
-	(*SessionDisconnect)(nil),     // 3: ocserv.platform.agent.v1.SessionDisconnect
-	(*UserCreate)(nil),            // 4: ocserv.platform.agent.v1.UserCreate
-	(*UserDisable)(nil),           // 5: ocserv.platform.agent.v1.UserDisable
-	(*ConfigPlan)(nil),            // 6: ocserv.platform.agent.v1.ConfigPlan
-	(*ConfigApply)(nil),           // 7: ocserv.platform.agent.v1.ConfigApply
-	(*ServiceReload)(nil),         // 8: ocserv.platform.agent.v1.ServiceReload
-	(*SimulationProbe)(nil),       // 9: ocserv.platform.agent.v1.SimulationProbe
-	(*timestamppb.Timestamp)(nil), // 10: google.protobuf.Timestamp
+	(HandshakeResult)(0),             // 0: ocserv.platform.agent.v1.HandshakeResult
+	(*SessionHandshake)(nil),         // 1: ocserv.platform.agent.v1.SessionHandshake
+	(*SessionHandshakeResponse)(nil), // 2: ocserv.platform.agent.v1.SessionHandshakeResponse
+	(*CommandEnvelope)(nil),          // 3: ocserv.platform.agent.v1.CommandEnvelope
+	(*SessionDisconnect)(nil),        // 4: ocserv.platform.agent.v1.SessionDisconnect
+	(*UserCreate)(nil),               // 5: ocserv.platform.agent.v1.UserCreate
+	(*UserDisable)(nil),              // 6: ocserv.platform.agent.v1.UserDisable
+	(*ConfigPlan)(nil),               // 7: ocserv.platform.agent.v1.ConfigPlan
+	(*ConfigApply)(nil),              // 8: ocserv.platform.agent.v1.ConfigApply
+	(*ServiceReload)(nil),            // 9: ocserv.platform.agent.v1.ServiceReload
+	(*SimulationProbe)(nil),          // 10: ocserv.platform.agent.v1.SimulationProbe
+	(*timestamppb.Timestamp)(nil),    // 11: google.protobuf.Timestamp
 }
 var file_ocserv_platform_agent_v1_agent_proto_depIdxs = []int32{
-	10, // 0: ocserv.platform.agent.v1.SessionHandshake.time:type_name -> google.protobuf.Timestamp
-	10, // 1: ocserv.platform.agent.v1.CommandEnvelope.issued_at:type_name -> google.protobuf.Timestamp
-	10, // 2: ocserv.platform.agent.v1.CommandEnvelope.expires_at:type_name -> google.protobuf.Timestamp
-	3,  // 3: ocserv.platform.agent.v1.CommandEnvelope.session_disconnect:type_name -> ocserv.platform.agent.v1.SessionDisconnect
-	4,  // 4: ocserv.platform.agent.v1.CommandEnvelope.user_create:type_name -> ocserv.platform.agent.v1.UserCreate
-	5,  // 5: ocserv.platform.agent.v1.CommandEnvelope.user_disable:type_name -> ocserv.platform.agent.v1.UserDisable
-	6,  // 6: ocserv.platform.agent.v1.CommandEnvelope.config_plan:type_name -> ocserv.platform.agent.v1.ConfigPlan
-	7,  // 7: ocserv.platform.agent.v1.CommandEnvelope.config_apply:type_name -> ocserv.platform.agent.v1.ConfigApply
-	8,  // 8: ocserv.platform.agent.v1.CommandEnvelope.service_reload:type_name -> ocserv.platform.agent.v1.ServiceReload
-	9,  // 9: ocserv.platform.agent.v1.CommandEnvelope.simulation_probe:type_name -> ocserv.platform.agent.v1.SimulationProbe
-	10, // [10:10] is the sub-list for method output_type
-	10, // [10:10] is the sub-list for method input_type
-	10, // [10:10] is the sub-list for extension type_name
-	10, // [10:10] is the sub-list for extension extendee
-	0,  // [0:10] is the sub-list for field type_name
+	11, // 0: ocserv.platform.agent.v1.SessionHandshake.time:type_name -> google.protobuf.Timestamp
+	0,  // 1: ocserv.platform.agent.v1.SessionHandshakeResponse.result:type_name -> ocserv.platform.agent.v1.HandshakeResult
+	11, // 2: ocserv.platform.agent.v1.CommandEnvelope.issued_at:type_name -> google.protobuf.Timestamp
+	11, // 3: ocserv.platform.agent.v1.CommandEnvelope.expires_at:type_name -> google.protobuf.Timestamp
+	4,  // 4: ocserv.platform.agent.v1.CommandEnvelope.session_disconnect:type_name -> ocserv.platform.agent.v1.SessionDisconnect
+	5,  // 5: ocserv.platform.agent.v1.CommandEnvelope.user_create:type_name -> ocserv.platform.agent.v1.UserCreate
+	6,  // 6: ocserv.platform.agent.v1.CommandEnvelope.user_disable:type_name -> ocserv.platform.agent.v1.UserDisable
+	7,  // 7: ocserv.platform.agent.v1.CommandEnvelope.config_plan:type_name -> ocserv.platform.agent.v1.ConfigPlan
+	8,  // 8: ocserv.platform.agent.v1.CommandEnvelope.config_apply:type_name -> ocserv.platform.agent.v1.ConfigApply
+	9,  // 9: ocserv.platform.agent.v1.CommandEnvelope.service_reload:type_name -> ocserv.platform.agent.v1.ServiceReload
+	10, // 10: ocserv.platform.agent.v1.CommandEnvelope.simulation_probe:type_name -> ocserv.platform.agent.v1.SimulationProbe
+	11, // [11:11] is the sub-list for method output_type
+	11, // [11:11] is the sub-list for method input_type
+	11, // [11:11] is the sub-list for extension type_name
+	11, // [11:11] is the sub-list for extension extendee
+	0,  // [0:11] is the sub-list for field type_name
 }
 
 func init() { file_ocserv_platform_agent_v1_agent_proto_init() }
@@ -975,7 +1059,7 @@ func file_ocserv_platform_agent_v1_agent_proto_init() {
 	if File_ocserv_platform_agent_v1_agent_proto != nil {
 		return
 	}
-	file_ocserv_platform_agent_v1_agent_proto_msgTypes[1].OneofWrappers = []any{
+	file_ocserv_platform_agent_v1_agent_proto_msgTypes[2].OneofWrappers = []any{
 		(*CommandEnvelope_SessionDisconnect)(nil),
 		(*CommandEnvelope_UserCreate)(nil),
 		(*CommandEnvelope_UserDisable)(nil),
@@ -990,7 +1074,7 @@ func file_ocserv_platform_agent_v1_agent_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_ocserv_platform_agent_v1_agent_proto_rawDesc), len(file_ocserv_platform_agent_v1_agent_proto_rawDesc)),
 			NumEnums:      1,
-			NumMessages:   9,
+			NumMessages:   10,
 			NumExtensions: 0,
 			NumServices:   0,
 		},

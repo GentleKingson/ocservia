@@ -32,6 +32,7 @@ enum TransportEventType {
   TRANSPORT_EVENT_TYPE_COMMAND_RESULT = 3;
   TRANSPORT_EVENT_TYPE_HEARTBEAT = 4;
   TRANSPORT_EVENT_TYPE_ERROR = 5;
+  TRANSPORT_EVENT_TYPE_PATH_CHANGED = 6;
 }
 
 message HealthRequest {}
@@ -51,6 +52,9 @@ message NodeConnection {
   ConnectionPath path = 3;
   uint64 round_trip_time_millis = 4;
   google.protobuf.Timestamp connected_at = 5;
+  bytes agent_instance_id = 6;
+  string path_detail = 7;
+  google.protobuf.Timestamp last_seen = 8;
 }
 
 message SendCommandRequest {

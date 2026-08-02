@@ -33,6 +33,14 @@ message SessionHandshake {
   bytes nonce = 15;
 }
 
+message SessionHandshakeResponse {
+  HandshakeResult result = 1;
+  uint32 protocol_major = 2;
+  uint32 protocol_minor = 3;
+  uint32 max_message_size = 4;
+  string controller_version = 5;
+}
+
 message CommandEnvelope {
   string protocol_version = 1;
   bytes message_id = 2;
