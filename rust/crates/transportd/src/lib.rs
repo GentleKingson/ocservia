@@ -558,7 +558,6 @@ fn monitor_paths(
             entry.metadata.path_detail.clone_from(&next.1);
             entry.metadata.round_trip_time_millis = next.2;
             entry.metadata.last_seen = Some(now_timestamp());
-            drop(registry);
             shared
                 .publish(event(
                     &node_id,
@@ -566,6 +565,7 @@ fn monitor_paths(
                     next.1.into_bytes(),
                 ))
                 .await;
+            drop(registry);
         }
     })
 }
@@ -578,35 +578,32 @@ async fn read_agent_events(
     max_message_size: usize,
     connection: Connection,
 ) {
+    let event_context = (
+        &shared,
+        node_id.as_slice(),
+        traceparent.as_str(),
+        &connection,
+    );
     for _ in 0..MAX_RESPONSE_FRAMES {
         let mut length = [0_u8; 4];
         match tokio::time::timeout(STREAM_TIMEOUT, recv.read_exact(&mut length)).await {
             Ok(Ok(())) => {}
             Ok(Err(_)) => {
                 publish_agent_error(
-                    &shared,
-                    &node_id,
-                    &traceparent,
+                    event_context,
                     "agent response ended before a terminal event",
                 )
                 .await;
                 return;
             }
             Err(_) => {
-                publish_agent_error(&shared, &node_id, &traceparent, "agent response timed out")
-                    .await;
+                publish_agent_error(event_context, "agent response timed out").await;
                 return;
             }
         }
         let length = u32::from_be_bytes(length) as usize;
         if length == 0 || length > max_message_size || length > MAX_FRAME_BYTES {
-            publish_agent_error(
-                &shared,
-                &node_id,
-                &traceparent,
-                "agent response size invalid",
-            )
-            .await;
+            publish_agent_error(event_context, "agent response size invalid").await;
             return;
         }
         let mut bytes = vec![0_u8; length];
@@ -614,23 +611,11 @@ async fn read_agent_events(
             tokio::time::timeout(STREAM_TIMEOUT, recv.read_exact(&mut bytes)).await,
             Ok(Ok(()))
         ) {
-            publish_agent_error(
-                &shared,
-                &node_id,
-                &traceparent,
-                "agent response body invalid",
-            )
-            .await;
+            publish_agent_error(event_context, "agent response body invalid").await;
             return;
         }
         let Ok(agent_event) = AgentEvent::decode(bytes.as_slice()) else {
-            publish_agent_error(
-                &shared,
-                &node_id,
-                &traceparent,
-                "agent response protobuf invalid",
-            )
-            .await;
+            publish_agent_error(event_context, "agent response protobuf invalid").await;
             return;
         };
         let event_type = match AgentEventType::try_from(agent_event.r#type) {
@@ -638,13 +623,7 @@ async fn read_agent_events(
             Ok(AgentEventType::Heartbeat) => TransportEventType::Heartbeat,
             Ok(AgentEventType::Error) => TransportEventType::Error,
             _ => {
-                publish_agent_error(
-                    &shared,
-                    &node_id,
-                    &traceparent,
-                    "agent response type invalid",
-                )
-                .await;
+                publish_agent_error(event_context, "agent response type invalid").await;
                 return;
             }
         };
@@ -652,47 +631,47 @@ async fn read_agent_events(
             event_type,
             TransportEventType::CommandResult | TransportEventType::Error
         );
-        touch_connection(&shared, &node_id, &connection).await;
-        shared
-            .publish(event_with_traceparent(
-                &node_id,
-                event_type,
-                agent_event.payload,
-                &traceparent,
-            ))
-            .await;
+        publish_agent_event(
+            event_context,
+            event_with_traceparent(&node_id, event_type, agent_event.payload, &traceparent),
+        )
+        .await;
         if terminal {
             return;
         }
     }
-    publish_agent_error(
-        &shared,
-        &node_id,
-        &traceparent,
-        "agent response frame limit exceeded",
-    )
-    .await;
+    publish_agent_error(event_context, "agent response frame limit exceeded").await;
 }
 
-async fn publish_agent_error(shared: &Shared, node_id: &[u8], traceparent: &str, message: &str) {
-    shared
-        .publish(event_with_traceparent(
+async fn publish_agent_error(
+    (shared, node_id, traceparent, connection): (&Shared, &[u8], &str, &Connection),
+    message: &str,
+) {
+    publish_agent_event(
+        (shared, node_id, traceparent, connection),
+        event_with_traceparent(
             node_id,
             TransportEventType::Error,
             message.as_bytes().to_vec(),
             traceparent,
-        ))
-        .await;
+        ),
+    )
+    .await;
 }
 
-async fn touch_connection(shared: &Shared, node_id: &[u8], connection: &Connection) {
+async fn publish_agent_event(
+    (shared, node_id, _, connection): (&Shared, &[u8], &str, &Connection),
+    event: TransportEvent,
+) {
     let mut registry = shared.inner.connections.lock().await;
     if let Some(entry) = registry
         .get_mut(node_id)
         .filter(|entry| entry.connection.stable_id() == connection.stable_id())
     {
         entry.metadata.last_seen = Some(now_timestamp());
+        shared.publish(event).await;
     }
+    drop(registry);
 }
 
 async fn read_handshake(
