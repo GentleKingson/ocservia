@@ -116,7 +116,7 @@ func (s *Server) listEvents(w http.ResponseWriter, r *http.Request) {
 	events, hasMore, err := service.ListEvents(r.Context(), after, limit)
 	if err != nil {
 		s.logger.ErrorContext(r.Context(), "list events", "error", err)
-		writeProblem(w, r, http.StatusBadRequest, "https://ocservia.dev/problems/invalid-event-query", "Event query is invalid", "events could not be listed")
+		writeProblem(w, r, http.StatusServiceUnavailable, "https://ocservia.dev/problems/database-unavailable", "Service is unavailable", "events are temporarily unavailable")
 		return
 	}
 	page := map[string]any{"has_more": hasMore}

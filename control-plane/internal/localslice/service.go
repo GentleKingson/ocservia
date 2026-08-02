@@ -23,11 +23,11 @@ import (
 const workspaceSlug = "local-simulator"
 
 type Scenario struct {
-	HeartbeatCount  uint32 `json:"heartbeat_count"`
-	DelayMillis     uint32 `json:"delay_millis"`
-	DuplicateEvent  bool   `json:"duplicate_event"`
-	ReturnError     bool   `json:"return_error"`
-	DisconnectAfter bool   `json:"disconnect_after"`
+	HeartbeatCount  *uint32 `json:"heartbeat_count"`
+	DelayMillis     *uint32 `json:"delay_millis"`
+	DuplicateEvent  bool    `json:"duplicate_event"`
+	ReturnError     bool    `json:"return_error"`
+	DisconnectAfter bool    `json:"disconnect_after"`
 }
 
 type Operation struct {
@@ -66,11 +66,9 @@ func New(pool *pgxpool.Pool) *Service {
 func (s *Service) Create(ctx context.Context, scenario Scenario, requestID, traceparent string) (Operation, error) {
 	ctx, span := otel.Tracer("ocservia.localslice").Start(ctx, "local_slice.queue", trace.WithSpanKind(trace.SpanKindInternal))
 	defer span.End()
-	if scenario.HeartbeatCount == 0 {
-		scenario.HeartbeatCount = 3
-	}
-	if scenario.HeartbeatCount > 32 || scenario.DelayMillis > 10_000 {
-		return Operation{}, errors.New("simulation limits exceeded")
+	heartbeatCount, delayMillis, err := normalizeScenario(scenario)
+	if err != nil {
+		return Operation{}, err
 	}
 	if requestID == "" || !validTraceparent(traceparent) {
 		return Operation{}, errors.New("request correlation is required")
@@ -81,7 +79,7 @@ func (s *Service) Create(ctx context.Context, scenario Scenario, requestID, trac
 	if err != nil {
 		return Operation{}, err
 	}
-	envelope, err := marshalEnvelope(nodeID, operationID, commandID, traceparent, scenario, now)
+	envelope, err := marshalEnvelope(nodeID, operationID, commandID, traceparent, scenario, heartbeatCount, delayMillis, now)
 	if err != nil {
 		return Operation{}, err
 	}
@@ -362,7 +360,22 @@ func newIDs() (uuid.UUID, uuid.UUID, uuid.UUID, uuid.UUID, uuid.UUID, error) {
 	return ids[0], ids[1], ids[2], ids[3], ids[4], nil
 }
 
-func marshalEnvelope(nodeID, operationID, commandID uuid.UUID, traceparent string, scenario Scenario, now time.Time) ([]byte, error) {
+func normalizeScenario(scenario Scenario) (uint32, uint32, error) {
+	heartbeatCount := uint32(3)
+	if scenario.HeartbeatCount != nil {
+		heartbeatCount = *scenario.HeartbeatCount
+	}
+	delayMillis := uint32(100)
+	if scenario.DelayMillis != nil {
+		delayMillis = *scenario.DelayMillis
+	}
+	if heartbeatCount < 1 || heartbeatCount > 32 || delayMillis > 10_000 {
+		return 0, 0, errors.New("simulation limits exceeded")
+	}
+	return heartbeatCount, delayMillis, nil
+}
+
+func marshalEnvelope(nodeID, operationID, commandID uuid.UUID, traceparent string, scenario Scenario, heartbeatCount, delayMillis uint32, now time.Time) ([]byte, error) {
 	messageID, err := uuid.NewV7()
 	if err != nil {
 		return nil, fmt.Errorf("generate message ID: %w", err)
@@ -372,7 +385,7 @@ func marshalEnvelope(nodeID, operationID, commandID uuid.UUID, traceparent strin
 		Sequence: 1, IssuedAt: timestamppb.New(now), ExpiresAt: timestamppb.New(now.Add(time.Minute)), Traceparent: traceparent,
 		ActorId: "developer", Reason: "I03 local side-effect-free slice",
 		Payload: &agentv1.CommandEnvelope_SimulationProbe{SimulationProbe: &agentv1.SimulationProbe{
-			HeartbeatCount: scenario.HeartbeatCount, DelayMillis: scenario.DelayMillis, DuplicateEvent: scenario.DuplicateEvent,
+			HeartbeatCount: heartbeatCount, DelayMillis: delayMillis, DuplicateEvent: scenario.DuplicateEvent,
 			ReturnError: scenario.ReturnError, DisconnectAfter: scenario.DisconnectAfter,
 		}},
 	}

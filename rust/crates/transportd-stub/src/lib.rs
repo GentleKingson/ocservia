@@ -17,7 +17,7 @@ use ocservia_contracts::generated::ocserv::platform::transport::v1::{
     transport_service_server::TransportService,
 };
 use prost::Message;
-use tokio::sync::{Mutex, Semaphore, broadcast};
+use tokio::sync::{Mutex, Semaphore, mpsc};
 use tokio_stream::{Stream, wrappers::ReceiverStream};
 use tonic::{Request, Response, Status};
 use uuid::Uuid;
@@ -34,12 +34,16 @@ pub struct StubService {
 }
 
 struct State {
-    retained: Mutex<VecDeque<TransportEvent>>,
+    delivery: Mutex<EventState>,
     nodes: Mutex<HashMap<Vec<u8>, NodeConnection>>,
     accepted_commands: Mutex<AcceptedCommands>,
-    events: broadcast::Sender<TransportEvent>,
     retention: usize,
     tasks: Arc<Semaphore>,
+}
+
+struct EventState {
+    retained: VecDeque<TransportEvent>,
+    subscribers: Vec<mpsc::Sender<Result<TransportEvent, Status>>>,
 }
 
 struct AcceptedCommands {
@@ -52,16 +56,17 @@ impl StubService {
     #[must_use]
     pub fn new(queue_capacity: usize) -> Self {
         let capacity = queue_capacity.clamp(1, 4096);
-        let (events, _) = broadcast::channel(capacity);
         Self {
             state: Arc::new(State {
-                retained: Mutex::new(VecDeque::with_capacity(capacity)),
+                delivery: Mutex::new(EventState {
+                    retained: VecDeque::with_capacity(capacity),
+                    subscribers: Vec::new(),
+                }),
                 nodes: Mutex::new(HashMap::new()),
                 accepted_commands: Mutex::new(AcceptedCommands {
                     keys: HashSet::with_capacity(capacity),
                     order: VecDeque::with_capacity(capacity),
                 }),
-                events,
                 retention: capacity,
                 tasks: Arc::new(Semaphore::new(capacity)),
             }),
@@ -69,13 +74,23 @@ impl StubService {
     }
 
     async fn publish(&self, event: TransportEvent) {
-        let mut retained = self.state.retained.lock().await;
-        if retained.len() == self.state.retention {
-            retained.pop_front();
+        let mut state = self.state.delivery.lock().await;
+        if state.retained.len() == self.state.retention {
+            state.retained.pop_front();
         }
-        retained.push_back(event.clone());
-        drop(retained);
-        let _subscriber_count = self.state.events.send(event);
+        state.retained.push_back(event.clone());
+        let mut index = 0;
+        while index < state.subscribers.len() {
+            if state.subscribers[index]
+                .send(Ok(event.clone()))
+                .await
+                .is_err()
+            {
+                state.subscribers.swap_remove(index);
+            } else {
+                index += 1;
+            }
+        }
     }
 
     async fn run_probe(self, node_id: Vec<u8>, traceparent: String, probe: SimulationProbe) {
@@ -245,43 +260,30 @@ impl TransportService for StubService {
         if !after.is_empty() {
             validate_id(&after, "after_event_id")?;
         }
-        let retained = self.state.retained.lock().await;
-        if !after.is_empty() && !retained.iter().any(|event| event.event_id == after) {
+        let mut state = self.state.delivery.lock().await;
+        if !after.is_empty() && !state.retained.iter().any(|event| event.event_id == after) {
             return Err(Status::out_of_range("event cursor is outside retention"));
         }
-        let backlog: Vec<_> = retained
+        let backlog: Vec<_> = state
+            .retained
             .iter()
             .skip_while(|event| !after.is_empty() && event.event_id != after)
             .skip(usize::from(!after.is_empty()))
             .cloned()
             .collect();
-        let mut subscription = self.state.events.subscribe();
-        let (sender, receiver) = tokio::sync::mpsc::channel(self.state.retention);
-        tokio::spawn(async move {
-            for event in backlog {
-                if sender.send(Ok(event)).await.is_err() {
-                    return;
-                }
-            }
-            loop {
-                match subscription.recv().await {
-                    Ok(event) => {
-                        if sender.send(Ok(event)).await.is_err() {
-                            return;
-                        }
-                    }
-                    Err(broadcast::error::RecvError::Lagged(_)) => {
-                        let _result = sender
-                            .send(Err(Status::resource_exhausted(
-                                "event consumer fell behind",
-                            )))
-                            .await;
-                        return;
-                    }
-                    Err(broadcast::error::RecvError::Closed) => return,
-                }
-            }
-        });
+        let (sender, receiver) = mpsc::channel(self.state.retention);
+        for event in backlog {
+            sender
+                .try_send(Ok(event))
+                .map_err(|_| Status::internal("retained event queue overflow"))?;
+        }
+        if state.subscribers.len() == self.state.retention {
+            return Err(Status::resource_exhausted(
+                "event subscriber capacity reached",
+            ));
+        }
+        state.subscribers.push(sender);
+        drop(state);
         Ok(Response::new(Box::pin(ReceiverStream::new(receiver))))
     }
 }
@@ -343,6 +345,7 @@ fn new_traceparent() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tokio_stream::StreamExt;
 
     fn probe_request(node_id: Vec<u8>, idempotency_key: Vec<u8>) -> SendCommandRequest {
         let envelope = CommandEnvelope {
@@ -401,7 +404,7 @@ mod tests {
         }
         tokio::time::timeout(Duration::from_secs(1), async {
             loop {
-                if service.state.retained.lock().await.len() == 3 {
+                if service.state.delivery.lock().await.retained.len() == 3 {
                     break;
                 }
                 tokio::task::yield_now().await;
@@ -410,7 +413,7 @@ mod tests {
         .await
         .expect("probe completed");
 
-        assert_eq!(service.state.retained.lock().await.len(), 3);
+        assert_eq!(service.state.delivery.lock().await.retained.len(), 3);
     }
 
     #[tokio::test]
@@ -427,6 +430,46 @@ mod tests {
             result.expect_err("unknown node rejected").code(),
             tonic::Code::NotFound,
         );
-        assert!(service.state.retained.lock().await.is_empty());
+        assert!(service.state.delivery.lock().await.retained.is_empty());
+    }
+
+    #[tokio::test]
+    async fn slow_subscriber_applies_publication_backpressure() {
+        let service = StubService::new(1);
+        let node_id = Uuid::now_v7().as_bytes().to_vec();
+        let mut stream = service
+            .watch_events(Request::new(WatchEventsRequest::default()))
+            .await
+            .expect("watch accepted")
+            .into_inner();
+        service
+            .publish(new_event(
+                &node_id,
+                TransportEventType::Connected,
+                &new_traceparent(),
+                Vec::new(),
+            ))
+            .await;
+        let publisher = tokio::spawn({
+            let service = service.clone();
+            let node_id = node_id.clone();
+            async move {
+                service
+                    .publish(new_event(
+                        &node_id,
+                        TransportEventType::Heartbeat,
+                        &new_traceparent(),
+                        Vec::new(),
+                    ))
+                    .await;
+            }
+        });
+        tokio::task::yield_now().await;
+        assert!(!publisher.is_finished());
+        assert!(stream.next().await.is_some());
+        tokio::time::timeout(Duration::from_secs(1), publisher)
+            .await
+            .expect("publisher unblocked")
+            .expect("publisher task completed");
     }
 }

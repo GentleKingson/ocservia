@@ -28,3 +28,17 @@ func TestEventNamesRejectUnspecified(t *testing.T) {
 		t.Fatal("eventName accepted an unspecified event")
 	}
 }
+
+func TestScenarioDefaultsPreservePresence(t *testing.T) {
+	heartbeats, delay, err := normalizeScenario(Scenario{})
+	if err != nil || heartbeats != 3 || delay != 100 {
+		t.Fatalf("defaults = (%d, %d, %v)", heartbeats, delay, err)
+	}
+	zero := uint32(0)
+	if _, _, err := normalizeScenario(Scenario{HeartbeatCount: &zero}); err == nil {
+		t.Fatal("explicit zero heartbeat_count was accepted")
+	}
+	if heartbeats, delay, err := normalizeScenario(Scenario{DelayMillis: &zero}); err != nil || heartbeats != 3 || delay != 0 {
+		t.Fatalf("explicit zero delay = (%d, %d, %v)", heartbeats, delay, err)
+	}
+}

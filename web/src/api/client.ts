@@ -17,8 +17,10 @@ const platform = new PlatformApi(configuration);
 const development = new DevelopmentApi(configuration);
 const events = new EventsApi(configuration);
 
-export async function listOperations(): Promise<OperationPage> {
-  return operations.listOperations({});
+export async function listOperations(cursor?: string): Promise<OperationPage> {
+  return operations.listOperations(
+    cursor ? { cursor, pageSize: 200 } : { pageSize: 200 },
+  );
 }
 
 export async function getReadiness(): Promise<Readiness> {

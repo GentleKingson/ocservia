@@ -7,7 +7,12 @@ import {
 import { defineStore } from "pinia";
 import { computed, onScopeDispose, ref } from "vue";
 
-import { createLocalSimulation, getOperation, listEvents } from "../api/client";
+import {
+  createLocalSimulation,
+  getOperation,
+  listEvents,
+  listOperations,
+} from "../api/client";
 
 const terminalStates = new Set([
   "succeeded",
@@ -20,6 +25,7 @@ const terminalStates = new Set([
 export const useLocalSliceStore = defineStore("local-slice", () => {
   const events = ref<PlatformEvent[]>([]);
   const connectedNodes = ref(new Set<string>());
+  const pendingOperationIDs = ref(new Set<string>());
   const operation = ref<Operation>();
   const running = ref(false);
   const unavailable = ref(false);
@@ -27,9 +33,7 @@ export const useLocalSliceStore = defineStore("local-slice", () => {
   let pollTimer: ReturnType<typeof setTimeout> | undefined;
 
   const activeNodes = computed(() => connectedNodes.value.size);
-  const pendingOperations = computed(() =>
-    operation.value && !terminalStates.has(operation.value.state) ? 1 : 0,
-  );
+  const pendingOperations = computed(() => pendingOperationIDs.value.size);
 
   async function rebuild(): Promise<void> {
     try {
@@ -44,6 +48,17 @@ export const useLocalSliceStore = defineStore("local-slice", () => {
       for (const event of rebuilt) updateNodeState(rebuiltNodes, event);
       connectedNodes.value = rebuiltNodes;
       events.value = rebuilt.slice(-200);
+
+      const pending = new Set<string>();
+      let operationCursor: string | undefined;
+      do {
+        const page = await listOperations(operationCursor);
+        for (const current of page.items) {
+          if (!terminalStates.has(current.state)) pending.add(current.id);
+        }
+        operationCursor = page.page.hasMore ? page.page.nextCursor : undefined;
+      } while (operationCursor);
+      pendingOperationIDs.value = pending;
       unavailable.value = false;
     } catch {
       unavailable.value = true;
@@ -91,6 +106,7 @@ export const useLocalSliceStore = defineStore("local-slice", () => {
     unavailable.value = false;
     try {
       operation.value = await createLocalSimulation(scenario);
+      pendingOperationIDs.value.add(operation.value.id);
       schedulePoll();
     } catch {
       unavailable.value = true;
@@ -108,6 +124,8 @@ export const useLocalSliceStore = defineStore("local-slice", () => {
     try {
       operation.value = await getOperation(operation.value.id);
       running.value = !terminalStates.has(operation.value.state);
+      if (running.value) pendingOperationIDs.value.add(operation.value.id);
+      else pendingOperationIDs.value.delete(operation.value.id);
       if (running.value) schedulePoll();
     } catch {
       unavailable.value = true;
