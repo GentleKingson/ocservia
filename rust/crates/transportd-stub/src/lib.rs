@@ -98,20 +98,70 @@ impl StubService {
         }
     }
 
+    async fn publish_control(&self, event: TransportEvent) {
+        let mut state = self.state.delivery.lock().await;
+        if state.retained.len() == self.state.retention {
+            state.retained.pop_front();
+        }
+        state.retained.push_back(event.clone());
+        let mut index = 0;
+        while index < state.subscribers.len() {
+            if state.subscribers[index]
+                .try_send(Ok(event.clone()))
+                .is_err()
+            {
+                state.subscribers.swap_remove(index);
+            } else {
+                index += 1;
+            }
+        }
+    }
+
     async fn publish_if_active(
         &self,
         node_id: &[u8],
         generation: Uuid,
         event: TransportEvent,
     ) -> bool {
-        let nodes = self.state.nodes.lock().await;
-        if nodes
-            .get(node_id)
-            .is_none_or(|node| node.generation != generation)
-        {
+        let mut cancelled = {
+            let nodes = self.state.nodes.lock().await;
+            let Some(node) = nodes
+                .get(node_id)
+                .filter(|node| node.generation == generation)
+            else {
+                return false;
+            };
+            node.cancellation.subscribe()
+        };
+        if *cancelled.borrow() {
             return false;
         }
-        self.publish(event).await;
+        let mut state = self.state.delivery.lock().await;
+        if *cancelled.borrow() {
+            return false;
+        }
+        if state.retained.len() == self.state.retention {
+            state.retained.pop_front();
+        }
+        state.retained.push_back(event.clone());
+        let mut index = 0;
+        while index < state.subscribers.len() {
+            tokio::select! {
+                biased;
+                result = cancelled.changed() => {
+                    if result.is_err() || *cancelled.borrow() {
+                        return false;
+                    }
+                }
+                result = state.subscribers[index].send(Ok(event.clone())) => {
+                    if result.is_err() {
+                        state.subscribers.swap_remove(index);
+                    } else {
+                        index += 1;
+                    }
+                }
+            }
+        }
         true
     }
 
@@ -307,6 +357,9 @@ impl TransportService for StubService {
     ) -> Result<Response<CloseNodeResponse>, Status> {
         let request = request.into_inner();
         let node_id = validate_id(&request.node_id, "node_id")?;
+        if request.reason.len() > MAX_COMMAND_BYTES {
+            return Err(Status::resource_exhausted("close reason exceeds 1 MiB"));
+        }
         let node = self
             .state
             .nodes
@@ -315,7 +368,7 @@ impl TransportService for StubService {
             .remove(&node_id)
             .ok_or_else(|| Status::not_found("node is not connected"))?;
         node.cancellation.send_replace(true);
-        self.publish(new_event(
+        self.publish_control(new_event(
             &node_id,
             TransportEventType::Disconnected,
             &node.traceparent,
@@ -378,9 +431,10 @@ fn validate_traceparent(value: &str) -> Result<(), Status> {
         || parts[1].len() != 32
         || parts[2].len() != 16
         || parts[3].len() != 2
-        || !parts
-            .iter()
-            .all(|part| part.bytes().all(|byte| byte.is_ascii_hexdigit()))
+        || !parts.iter().all(|part| {
+            part.bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        })
     {
         return Err(Status::invalid_argument("invalid traceparent"));
     }
@@ -466,6 +520,10 @@ mod tests {
     fn traceparent_validation_is_strict() {
         assert!(validate_traceparent(&new_traceparent()).is_ok());
         assert!(validate_traceparent("not-a-trace").is_err());
+        assert!(
+            validate_traceparent("00-0123456789ABCDEF0123456789abcdef-0123456789abcdef-01")
+                .is_err()
+        );
     }
 
     #[test]
@@ -603,6 +661,93 @@ mod tests {
                 .traceparent,
             traceparent
         );
+    }
+
+    #[tokio::test]
+    async fn slow_subscriber_does_not_block_node_close() {
+        let service = StubService::new(1);
+        let node_id = Uuid::now_v7().as_bytes().to_vec();
+        let _stream = service
+            .watch_events(Request::new(WatchEventsRequest::default()))
+            .await
+            .expect("watch accepted")
+            .into_inner();
+        service
+            .send_command(Request::new(probe_request_with(
+                node_id.clone(),
+                Uuid::now_v7().as_bytes().to_vec(),
+                SimulationProbe {
+                    heartbeat_count: 2,
+                    delay_millis: 0,
+                    duplicate_event: false,
+                    return_error: false,
+                    disconnect_after: false,
+                },
+            )))
+            .await
+            .expect("probe accepted");
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while !service.state.nodes.lock().await.contains_key(&node_id) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("node connected");
+
+        tokio::time::timeout(
+            Duration::from_secs(1),
+            service.close_node(Request::new(CloseNodeRequest {
+                node_id,
+                reason: "operator close".to_owned(),
+            })),
+        )
+        .await
+        .expect("close was not blocked by subscriber")
+        .expect("node closed");
+    }
+
+    #[tokio::test]
+    async fn oversized_close_reason_preserves_connection() {
+        let service = StubService::new(8);
+        let node_id = Uuid::now_v7().as_bytes().to_vec();
+        service
+            .send_command(Request::new(probe_request_with(
+                node_id.clone(),
+                Uuid::now_v7().as_bytes().to_vec(),
+                SimulationProbe {
+                    heartbeat_count: 1,
+                    delay_millis: 250,
+                    duplicate_event: false,
+                    return_error: false,
+                    disconnect_after: false,
+                },
+            )))
+            .await
+            .expect("probe accepted");
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while !service.state.nodes.lock().await.contains_key(&node_id) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("node connected");
+
+        let result = service
+            .close_node(Request::new(CloseNodeRequest {
+                node_id: node_id.clone(),
+                reason: "x".repeat(MAX_COMMAND_BYTES + 1),
+            }))
+            .await
+            .expect_err("oversized close rejected");
+        assert_eq!(result.code(), tonic::Code::ResourceExhausted);
+        assert!(service.state.nodes.lock().await.contains_key(&node_id));
+        service
+            .close_node(Request::new(CloseNodeRequest {
+                node_id,
+                reason: "cleanup".to_owned(),
+            }))
+            .await
+            .expect("valid close accepted");
     }
 
     #[tokio::test]

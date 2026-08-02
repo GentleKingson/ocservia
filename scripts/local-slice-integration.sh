@@ -172,6 +172,8 @@ start_stub
 start_control
 wait_state "${recover_id}" succeeded >/dev/null
 test "$(docker exec "${POSTGRES}" psql -U ocservia_owner -d ocservia -Atc "SELECT status FROM nodes WHERE id = '${normal_node}'")" = "offline"
+test "$(docker exec "${POSTGRES}" psql -U ocservia_owner -d ocservia -Atc "SELECT transport_cursor_valid FROM transport_events WHERE node_id = '${normal_node}' ORDER BY event_id DESC LIMIT 1")" = "f"
+test "$(docker exec "${POSTGRES}" psql -U ocservia_owner -d ocservia -Atc "SELECT count(*) FROM transport_events WHERE transport_cursor_valid")" -gt 0
 curl --fail --silent "http://127.0.0.1:${API_PORT}/api/v1/events?page_size=200" |
   jq -e --arg node "${normal_node}" '[.items[] | select(.node_id == $node)] | last | .type == "disconnected"' >/dev/null
 

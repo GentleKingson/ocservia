@@ -16,6 +16,7 @@ func TestValidTraceparent(t *testing.T) {
 		"00-00000000000000000000000000000000-0123456789abcdef-01",
 		"00-0123456789abcdef0123456789abcdef-0000000000000000-01",
 		"00-0123456789abcdef0123456789abcdef-0123456789abcdef-zz",
+		"00-0123456789ABCDEF0123456789abcdef-0123456789abcdef-01",
 	} {
 		if validTraceparent(value) {
 			t.Fatalf("validTraceparent accepted %q", value)

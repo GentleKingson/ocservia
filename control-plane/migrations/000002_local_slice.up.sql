@@ -19,6 +19,7 @@ CREATE TABLE transport_events (
     occurred_at timestamptz NOT NULL,
     traceparent text NOT NULL CHECK (traceparent ~ '^00-[0-9a-f]{32}-[0-9a-f]{16}-[0-9a-f]{2}$'),
     payload bytea NOT NULL CHECK (octet_length(payload) <= 1048576),
+    transport_cursor_valid boolean NOT NULL DEFAULT true,
     received_at timestamptz NOT NULL DEFAULT now()
 );
 COMMENT ON TABLE local_slice_jobs IS 'Development-only I03 simulator dispatch queue; it has no remote side effects.';

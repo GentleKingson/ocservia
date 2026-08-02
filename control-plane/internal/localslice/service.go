@@ -3,7 +3,6 @@ package localslice
 import (
 	"context"
 	"crypto/sha256"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"time"
@@ -202,7 +201,7 @@ func (s *Service) ListEvents(ctx context.Context, after uuid.UUID, limit int) ([
 
 func (s *Service) LastEventID(ctx context.Context) ([]byte, error) {
 	var id uuid.UUID
-	if err := s.pool.QueryRow(ctx, "SELECT event_id FROM transport_events ORDER BY event_id DESC LIMIT 1").Scan(&id); errors.Is(err, pgx.ErrNoRows) {
+	if err := s.pool.QueryRow(ctx, "SELECT event_id FROM transport_events WHERE transport_cursor_valid ORDER BY event_id DESC LIMIT 1").Scan(&id); errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil
 	} else if err != nil {
 		return nil, fmt.Errorf("read event cursor: %w", err)
@@ -216,6 +215,9 @@ func (s *Service) ReconcileEventGap(ctx context.Context) error {
 		return fmt.Errorf("begin transport event gap reconciliation: %w", err)
 	}
 	defer rollback(tx)
+	if _, err := tx.Exec(ctx, "UPDATE transport_events SET transport_cursor_valid = false WHERE transport_cursor_valid"); err != nil {
+		return fmt.Errorf("invalidate retained transport cursor after event gap: %w", err)
+	}
 	commandTag, err := tx.Exec(ctx, `
 		UPDATE operations AS operation
 		SET state = 'unknown', updated_at = now()
@@ -277,8 +279,8 @@ func (s *Service) ReconcileEventGap(ctx context.Context) error {
 			return fmt.Errorf("generate transport gap event ID: %w", err)
 		}
 		if _, err := tx.Exec(ctx, `
-			INSERT INTO transport_events (event_id, node_id, event_type, occurred_at, traceparent, payload)
-			VALUES ($1, $2, 'disconnected', $3, $4, $5)`,
+			INSERT INTO transport_events (event_id, node_id, event_type, occurred_at, traceparent, payload, transport_cursor_valid)
+			VALUES ($1, $2, 'disconnected', $3, $4, $5, false)`,
 			eventID, node.id, now, node.traceparent, []byte("transport event retention gap")); err != nil {
 			return fmt.Errorf("record simulator disconnect after transport event gap: %w", err)
 		}
@@ -518,7 +520,13 @@ func validTraceparent(value string) bool {
 		return false
 	}
 	for _, part := range parts {
-		if _, err := hex.DecodeString(part); err != nil {
+		for index := range len(part) {
+			character := part[index]
+			if (character < '0' || character > '9') && (character < 'a' || character > 'f') {
+				return false
+			}
+		}
+		if len(part)%2 != 0 {
 			return false
 		}
 	}

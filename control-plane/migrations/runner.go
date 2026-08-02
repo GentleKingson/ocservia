@@ -138,6 +138,7 @@ func GrantRuntimePrivileges(ctx context.Context, pool *pgxpool.Pool, role string
 		"GRANT SELECT, INSERT ON audit_events TO " + identifier,
 		"GRANT SELECT, INSERT, UPDATE, DELETE ON local_slice_jobs TO " + identifier,
 		"GRANT SELECT, INSERT ON transport_events TO " + identifier,
+		"GRANT UPDATE (transport_cursor_valid) ON transport_events TO " + identifier,
 	}
 	for _, statement := range statements {
 		if _, err := pool.Exec(ctx, statement); err != nil {
