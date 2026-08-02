@@ -30,6 +30,7 @@ type Config struct {
 	DatabaseURL      string
 	OTLPEndpoint     string
 	DevAuth          bool
+	DevAuthToken     string
 	BodyLimit        int64
 	RequestTimeout   time.Duration
 	ShutdownTimeout  time.Duration
@@ -56,6 +57,7 @@ func Load(args []string, lookup LookupEnv) (Config, error) {
 	setString(lookup, "OTEL_EXPORTER_OTLP_ENDPOINT", &cfg.OTLPEndpoint)
 	setString(lookup, "OCSERV_LOG_LEVEL", &cfg.LogLevelName)
 	setString(lookup, "OCSERV_TRANSPORT_SOCKET", &cfg.TransportSocket)
+	setString(lookup, "OCSERV_DEV_AUTH_TOKEN", &cfg.DevAuthToken)
 	if err := setInt64(lookup, "OCSERV_BODY_LIMIT_BYTES", &cfg.BodyLimit); err != nil {
 		return Config{}, err
 	}
@@ -131,6 +133,9 @@ func (c Config) Validate() error {
 		if c.Environment != "development" || ip == nil || !ip.IsLoopback() {
 			return errors.New("development auth requires environment=development and a loopback HTTP address")
 		}
+	}
+	if c.DevAuthToken != "" && (c.Environment != "development" || len(c.DevAuthToken) < 32) {
+		return errors.New("development auth token requires environment=development and at least 32 characters")
 	}
 	if c.BodyLimit < 1 || c.RequestTimeout <= 0 || c.ShutdownTimeout <= 0 {
 		return errors.New("limits and timeouts must be positive")

@@ -75,8 +75,12 @@ fn bind_socket(path: &Path) -> Result<UnixListener, io::Error> {
     let parent = path
         .parent()
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "socket path has no parent"))?;
-    std::fs::create_dir_all(parent)?;
-    std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o750))?;
+    if !std::fs::metadata(parent)?.is_dir() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "socket parent is not a directory",
+        ));
+    }
     match std::fs::symlink_metadata(path) {
         Ok(metadata) if metadata.file_type().is_socket() => std::fs::remove_file(path)?,
         Ok(_) => {
@@ -104,4 +108,30 @@ fn remove_socket(path: &Path) -> Result<(), io::Error> {
 
 async fn shutdown() {
     let _signal = tokio::signal::ctrl_c().await;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn bind_socket_preserves_existing_parent_permissions() {
+        let parent = PathBuf::from("/tmp").join(format!("ocservia-stub-{}", uuid::Uuid::now_v7()));
+        std::fs::create_dir(&parent).expect("create test directory");
+        std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o1777))
+            .expect("set test directory permissions");
+        let socket = parent.join("transportd.sock");
+
+        let listener = bind_socket(&socket).expect("bind socket");
+        let mode = std::fs::metadata(&parent)
+            .expect("inspect test directory")
+            .permissions()
+            .mode()
+            & 0o7777;
+
+        assert_eq!(mode, 0o1777);
+        drop(listener);
+        remove_socket(&socket).expect("remove socket");
+        std::fs::remove_dir(parent).expect("remove test directory");
+    }
 }

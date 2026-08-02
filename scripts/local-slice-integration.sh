@@ -11,6 +11,7 @@ TMP_ROOT="${TMPDIR:-/tmp}/ocservia-${RUN_ID}"
 SOCKET="${TMP_ROOT}/run/transportd.sock"
 POSTGRES="${PREFIX}-postgres"
 API_PORT=$((20000 + $(printf '%s' "${RUN_ID}" | cksum | awk '{print $1}') % 20000))
+AUTH_TOKEN="local-slice-integration-token-32-characters"
 PIDS=()
 
 cleanup() {
@@ -67,8 +68,9 @@ start_stub() {
 }
 
 start_control() {
-  OCSERV_ENVIRONMENT=test OCSERV_HTTP_ADDRESS="127.0.0.1:${API_PORT}" \
+  OCSERV_ENVIRONMENT=development OCSERV_HTTP_ADDRESS="127.0.0.1:${API_PORT}" \
     OCSERV_DATABASE_URL="${runtime_url}" OCSERV_LOCAL_SIMULATOR=true \
+    OCSERV_DEV_AUTH_TOKEN="${AUTH_TOKEN}" \
     OCSERV_TRANSPORT_SOCKET="${SOCKET}" OCSERV_TRANSPORT_QUEUE_CAPACITY=8 \
     "${TMP_ROOT}/ocserv-control" --role=all >"${TMP_ROOT}/control.log" 2>&1 &
   CONTROL_PID=$!
@@ -95,7 +97,7 @@ create_probe() {
 wait_state() {
   local operation_id=$1 expected=$2 response
   for _ in $(seq 1 100); do
-    response="$(curl --fail --silent "http://127.0.0.1:${API_PORT}/api/v1/operations/${operation_id}")"
+    response="$(curl --fail --silent -H "Authorization: Bearer ${AUTH_TOKEN}" "http://127.0.0.1:${API_PORT}/api/v1/operations/${operation_id}")"
     if [[ "$(jq -r .state <<<"${response}")" == "${expected}" ]]; then
       printf '%s\n' "${response}"
       return 0
@@ -139,10 +141,10 @@ for _ in $(seq 1 50); do
 done
 [[ "${status}" == "offline" ]]
 
-operations_page="$(curl --fail --silent "http://127.0.0.1:${API_PORT}/api/v1/operations?page_size=2")"
+operations_page="$(curl --fail --silent -H "Authorization: Bearer ${AUTH_TOKEN}" "http://127.0.0.1:${API_PORT}/api/v1/operations?page_size=2")"
 jq -e '.page.has_more == true and (.page.next_cursor | type == "string") and (.items | length == 2)' <<<"${operations_page}" >/dev/null
 operations_cursor="$(jq -r .page.next_cursor <<<"${operations_page}")"
-curl --fail --silent "http://127.0.0.1:${API_PORT}/api/v1/operations?page_size=2&cursor=${operations_cursor}" |
+curl --fail --silent -H "Authorization: Bearer ${AUTH_TOKEN}" "http://127.0.0.1:${API_PORT}/api/v1/operations?page_size=2&cursor=${operations_cursor}" |
   jq -e --arg cursor "${operations_cursor}" '(.items | length) >= 1 and all(.items[]; .id != $cursor)' >/dev/null
 
 first_event="$(jq -r '.items[0].id' <<<"${events}")"

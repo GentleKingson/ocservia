@@ -17,6 +17,7 @@ import {
 const terminalStates = new Set([
   "succeeded",
   "failed",
+  "unknown",
   "expired",
   "rolled_back",
   "superseded",
@@ -31,6 +32,7 @@ export const useLocalSliceStore = defineStore("local-slice", () => {
   const unavailable = ref(false);
   let source: EventSource | undefined;
   let pollTimer: ReturnType<typeof setTimeout> | undefined;
+  let pendingPollTimer: ReturnType<typeof setTimeout> | undefined;
 
   const activeNodes = computed(() => connectedNodes.value.size);
   const pendingOperations = computed(() => pendingOperationIDs.value.size);
@@ -49,16 +51,8 @@ export const useLocalSliceStore = defineStore("local-slice", () => {
       connectedNodes.value = rebuiltNodes;
       events.value = rebuilt.slice(-200);
 
-      const pending = new Set<string>();
-      let operationCursor: string | undefined;
-      do {
-        const page = await listOperations(operationCursor);
-        for (const current of page.items) {
-          if (!terminalStates.has(current.state)) pending.add(current.id);
-        }
-        operationCursor = page.page.hasMore ? page.page.nextCursor : undefined;
-      } while (operationCursor);
-      pendingOperationIDs.value = pending;
+      pendingOperationIDs.value = await loadPendingOperationIDs();
+      schedulePendingRefresh();
       unavailable.value = false;
     } catch {
       unavailable.value = true;
@@ -108,6 +102,7 @@ export const useLocalSliceStore = defineStore("local-slice", () => {
       operation.value = await createLocalSimulation(scenario);
       pendingOperationIDs.value.add(operation.value.id);
       schedulePoll();
+      schedulePendingRefresh();
     } catch {
       unavailable.value = true;
       running.value = false;
@@ -133,9 +128,39 @@ export const useLocalSliceStore = defineStore("local-slice", () => {
     }
   }
 
+  async function loadPendingOperationIDs(): Promise<Set<string>> {
+    const pending = new Set<string>();
+    let cursor: string | undefined;
+    do {
+      const page = await listOperations(cursor);
+      for (const current of page.items) {
+        if (!terminalStates.has(current.state)) pending.add(current.id);
+      }
+      cursor = page.page.hasMore ? page.page.nextCursor : undefined;
+    } while (cursor);
+    return pending;
+  }
+
+  function schedulePendingRefresh(): void {
+    clearTimeout(pendingPollTimer);
+    if (pendingOperationIDs.value.size === 0) return;
+    pendingPollTimer = setTimeout(() => void refreshPendingOperations(), 1000);
+  }
+
+  async function refreshPendingOperations(): Promise<void> {
+    try {
+      pendingOperationIDs.value = await loadPendingOperationIDs();
+      unavailable.value = false;
+    } catch {
+      unavailable.value = true;
+    }
+    schedulePendingRefresh();
+  }
+
   function disconnect(): void {
     source?.close();
     clearTimeout(pollTimer);
+    clearTimeout(pendingPollTimer);
   }
 
   onScopeDispose(disconnect);

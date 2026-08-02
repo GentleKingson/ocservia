@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"crypto/rand"
+	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -33,13 +34,14 @@ type Server struct {
 	bodyLimit      int64
 	requestTimeout time.Duration
 	devAuth        bool
+	devAuthToken   string
 	expectedSchema int64
 	localSlice     *localslice.Service
 	localSliceMu   sync.RWMutex
 }
 
-func New(address string, pool *pgxpool.Pool, build BuildInfo, logger *slog.Logger, bodyLimit int64, requestTimeout time.Duration, devAuth bool, expectedSchema int64) *Server {
-	s := &Server{pool: pool, build: build, logger: logger, bodyLimit: bodyLimit, requestTimeout: requestTimeout, devAuth: devAuth, expectedSchema: expectedSchema}
+func New(address string, pool *pgxpool.Pool, build BuildInfo, logger *slog.Logger, bodyLimit int64, requestTimeout time.Duration, devAuth bool, devAuthToken string, expectedSchema int64) *Server {
+	s := &Server{pool: pool, build: build, logger: logger, bodyLimit: bodyLimit, requestTimeout: requestTimeout, devAuth: devAuth, devAuthToken: devAuthToken, expectedSchema: expectedSchema}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /livez", s.live)
 	mux.HandleFunc("GET /readyz", s.ready)
@@ -158,7 +160,7 @@ func (s *Server) requestContext(next http.Handler) http.Handler {
 			requestID = randomID()
 		}
 		w.Header().Set("X-Request-ID", requestID)
-		if s.devAuth {
+		if s.hasOperationPrincipal(r) {
 			w.Header().Set("X-Ocservia-Dev-Subject", "developer")
 		}
 		r = r.WithContext(context.WithValue(r.Context(), requestIDKey{}, requestID))
@@ -169,13 +171,25 @@ func (s *Server) requestContext(next http.Handler) http.Handler {
 
 func (s *Server) requireOperationAuth(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if !s.devAuth {
+		if !s.hasOperationPrincipal(r) {
 			w.Header().Set("WWW-Authenticate", "Bearer")
 			writeProblem(w, r, http.StatusUnauthorized, "https://ocservia.dev/problems/unauthenticated", "Authentication required", "operation state requires an authenticated principal")
 			return
 		}
 		next(w, r)
 	}
+}
+
+func (s *Server) hasOperationPrincipal(r *http.Request) bool {
+	if s.devAuth {
+		return true
+	}
+	const prefix = "Bearer "
+	authorization := r.Header.Get("Authorization")
+	if s.devAuthToken == "" || !strings.HasPrefix(authorization, prefix) {
+		return false
+	}
+	return subtle.ConstantTimeCompare([]byte(strings.TrimSpace(strings.TrimPrefix(authorization, prefix))), []byte(s.devAuthToken)) == 1
 }
 
 type requestIDKey struct{}

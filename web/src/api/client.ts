@@ -11,7 +11,11 @@ import {
   type SimulationScenario,
 } from "@ocservia/api-client";
 
-const configuration = new Configuration({ basePath: "/api/v1" });
+const devAuthToken = import.meta.env.VITE_DEV_AUTH_TOKEN;
+const configuration = new Configuration({
+  basePath: "/api/v1",
+  ...(devAuthToken ? { accessToken: devAuthToken } : {}),
+});
 const operations = new OperationsApi(configuration);
 const platform = new PlatformApi(configuration);
 const development = new DevelopmentApi(configuration);

@@ -22,6 +22,26 @@ func TestDevAuthGuard(t *testing.T) {
 	}
 }
 
+func TestDevAuthTokenGuard(t *testing.T) {
+	tests := []struct {
+		name string
+		env  map[string]string
+		ok   bool
+	}{
+		{"development", map[string]string{"OCSERV_DATABASE_URL": "postgres://db/test", "OCSERV_HTTP_ADDRESS": "0.0.0.0:8080", "OCSERV_DEV_AUTH_TOKEN": "local-development-token-32-characters"}, true},
+		{"too short", map[string]string{"OCSERV_DATABASE_URL": "postgres://db/test", "OCSERV_DEV_AUTH_TOKEN": "short"}, false},
+		{"production", map[string]string{"OCSERV_DATABASE_URL": "postgres://db/test", "OCSERV_ENVIRONMENT": "production", "OCSERV_DEV_AUTH_TOKEN": "local-development-token-32-characters"}, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := Load(nil, func(key string) (string, bool) { v, ok := tt.env[key]; return v, ok })
+			if (err == nil) != tt.ok {
+				t.Fatalf("Load() error = %v, want success %v", err, tt.ok)
+			}
+		})
+	}
+}
+
 func TestRoleValidation(t *testing.T) {
 	_, err := Load([]string{"--role=invalid"}, func(key string) (string, bool) {
 		if key == "OCSERV_DATABASE_URL" {

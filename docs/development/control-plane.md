@@ -30,7 +30,11 @@ absolute socket path with `OCSERV_TRANSPORT_SOCKET`, the RPC deadline with
 The binary accepts `--role=api`, `--role=worker`, `--role=scheduler`, or
 `--role=all`. `OCSERV_DATABASE_URL` is required. Development authentication is
 disabled by default and can only be enabled with `OCSERV_DEV_AUTH=true` when
-the environment is `development` and the HTTP listener is loopback-only.
+the environment is `development` and the HTTP listener is loopback-only. A
+non-loopback development stack must instead set an explicit bearer credential
+of at least 32 characters in `OCSERV_DEV_AUTH_TOKEN`; the browser development
+server receives the same value as `VITE_DEV_AUTH_TOKEN`. Both modes are
+forbidden in production.
 
 Database migrations run as a separate one-shot process using `--migrate-only`,
 an owner connection in `OCSERV_DATABASE_URL`, and the unprivileged role named
