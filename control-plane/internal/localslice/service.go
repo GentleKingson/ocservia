@@ -423,7 +423,7 @@ func (s *Service) ClaimJobs(ctx context.Context, limit int) ([]Job, error) {
 			WHERE job.available_at <= now()
 			  AND job.expires_at > now()
 			  AND job.dispatched_at IS NULL
-			  AND operation.state NOT IN ('succeeded', 'failed', 'expired', 'rolled_back', 'superseded')
+			  AND operation.state = 'queued'
 			ORDER BY job.available_at, job.operation_id
 			FOR UPDATE OF job SKIP LOCKED
 			LIMIT $1
@@ -473,17 +473,23 @@ func (s *Service) ExpireJobs(ctx context.Context) error {
 	return nil
 }
 
-func (s *Service) MarkDispatched(ctx context.Context, operationID uuid.UUID) error {
-	_, err := s.pool.Exec(ctx, `
-		WITH updated AS (
-			UPDATE local_slice_jobs
-			SET dispatched_at = now(), attempts = attempts + 1, last_error = NULL
-			WHERE operation_id = $1
+func (s *Service) MarkDispatchStarted(ctx context.Context, operationID uuid.UUID) error {
+	result, err := s.pool.Exec(ctx, `
+		WITH started AS (
+			UPDATE operations
+			SET state = 'dispatched', updated_at = now(), version = version + 1
+			WHERE id = $1 AND state = 'queued'
+			RETURNING id
 		)
-		UPDATE operations SET state = 'dispatched', updated_at = now(), version = version + 1
-		WHERE id = $1 AND state IN ('queued', 'dispatched')`, operationID)
+		UPDATE local_slice_jobs AS job
+		SET dispatched_at = now(), attempts = attempts + 1, last_error = NULL
+		FROM started
+		WHERE job.operation_id = started.id AND job.dispatched_at IS NULL`, operationID)
 	if err != nil {
-		return fmt.Errorf("mark simulator job dispatched: %w", err)
+		return fmt.Errorf("mark simulator dispatch started: %w", err)
+	}
+	if result.RowsAffected() != 1 {
+		return errors.New("simulator job is no longer dispatchable")
 	}
 	return nil
 }
@@ -493,9 +499,16 @@ func (s *Service) MarkDispatchError(ctx context.Context, operationID uuid.UUID, 
 		message = message[:512]
 	}
 	_, err := s.pool.Exec(ctx, `
-		UPDATE local_slice_jobs
-		SET attempts = attempts + 1, last_error = $2, available_at = now() + interval '1 second'
-		WHERE operation_id = $1`, operationID, message)
+		WITH retryable AS (
+			UPDATE operations
+			SET state = 'queued', updated_at = now(), version = version + 1
+			WHERE id = $1 AND state = 'dispatched'
+			RETURNING id
+		)
+		UPDATE local_slice_jobs AS job
+		SET dispatched_at = NULL, last_error = $2, available_at = now() + interval '1 second'
+		FROM retryable
+		WHERE job.operation_id = retryable.id`, operationID, message)
 	if err != nil {
 		return fmt.Errorf("record simulator dispatch error: %w", err)
 	}
