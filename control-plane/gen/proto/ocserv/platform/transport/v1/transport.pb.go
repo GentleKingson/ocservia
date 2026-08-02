@@ -129,6 +129,7 @@ const (
 	TransportEventType_TRANSPORT_EVENT_TYPE_COMMAND_RESULT TransportEventType = 3
 	TransportEventType_TRANSPORT_EVENT_TYPE_HEARTBEAT      TransportEventType = 4
 	TransportEventType_TRANSPORT_EVENT_TYPE_ERROR          TransportEventType = 5
+	TransportEventType_TRANSPORT_EVENT_TYPE_PATH_CHANGED   TransportEventType = 6
 )
 
 // Enum value maps for TransportEventType.
@@ -140,6 +141,7 @@ var (
 		3: "TRANSPORT_EVENT_TYPE_COMMAND_RESULT",
 		4: "TRANSPORT_EVENT_TYPE_HEARTBEAT",
 		5: "TRANSPORT_EVENT_TYPE_ERROR",
+		6: "TRANSPORT_EVENT_TYPE_PATH_CHANGED",
 	}
 	TransportEventType_value = map[string]int32{
 		"TRANSPORT_EVENT_TYPE_UNSPECIFIED":    0,
@@ -148,6 +150,7 @@ var (
 		"TRANSPORT_EVENT_TYPE_COMMAND_RESULT": 3,
 		"TRANSPORT_EVENT_TYPE_HEARTBEAT":      4,
 		"TRANSPORT_EVENT_TYPE_ERROR":          5,
+		"TRANSPORT_EVENT_TYPE_PATH_CHANGED":   6,
 	}
 )
 
@@ -317,6 +320,9 @@ type NodeConnection struct {
 	Path                ConnectionPath         `protobuf:"varint,3,opt,name=path,proto3,enum=ocserv.platform.transport.v1.ConnectionPath" json:"path,omitempty"`
 	RoundTripTimeMillis uint64                 `protobuf:"varint,4,opt,name=round_trip_time_millis,json=roundTripTimeMillis,proto3" json:"round_trip_time_millis,omitempty"`
 	ConnectedAt         *timestamppb.Timestamp `protobuf:"bytes,5,opt,name=connected_at,json=connectedAt,proto3" json:"connected_at,omitempty"`
+	AgentInstanceId     []byte                 `protobuf:"bytes,6,opt,name=agent_instance_id,json=agentInstanceId,proto3" json:"agent_instance_id,omitempty"`
+	PathDetail          string                 `protobuf:"bytes,7,opt,name=path_detail,json=pathDetail,proto3" json:"path_detail,omitempty"`
+	LastSeen            *timestamppb.Timestamp `protobuf:"bytes,8,opt,name=last_seen,json=lastSeen,proto3" json:"last_seen,omitempty"`
 	unknownFields       protoimpl.UnknownFields
 	sizeCache           protoimpl.SizeCache
 }
@@ -382,6 +388,27 @@ func (x *NodeConnection) GetRoundTripTimeMillis() uint64 {
 func (x *NodeConnection) GetConnectedAt() *timestamppb.Timestamp {
 	if x != nil {
 		return x.ConnectedAt
+	}
+	return nil
+}
+
+func (x *NodeConnection) GetAgentInstanceId() []byte {
+	if x != nil {
+		return x.AgentInstanceId
+	}
+	return nil
+}
+
+func (x *NodeConnection) GetPathDetail() string {
+	if x != nil {
+		return x.PathDetail
+	}
+	return ""
+}
+
+func (x *NodeConnection) GetLastSeen() *timestamppb.Timestamp {
+	if x != nil {
+		return x.LastSeen
 	}
 	return nil
 }
@@ -708,14 +735,18 @@ const file_ocserv_platform_transport_v1_transport_proto_rawDesc = "" +
 	"\x06status\x18\x01 \x01(\x0e2*.ocserv.platform.transport.v1.HealthStatusR\x06status\x12\x18\n" +
 	"\aversion\x18\x02 \x01(\tR\aversion\"3\n" +
 	"\x18GetNodeConnectionRequest\x12\x17\n" +
-	"\anode_id\x18\x01 \x01(\fR\x06nodeId\"\x80\x02\n" +
+	"\anode_id\x18\x01 \x01(\fR\x06nodeId\"\x86\x03\n" +
 	"\x0eNodeConnection\x12\x17\n" +
 	"\anode_id\x18\x01 \x01(\fR\x06nodeId\x12\x1f\n" +
 	"\vendpoint_id\x18\x02 \x01(\fR\n" +
 	"endpointId\x12@\n" +
 	"\x04path\x18\x03 \x01(\x0e2,.ocserv.platform.transport.v1.ConnectionPathR\x04path\x123\n" +
 	"\x16round_trip_time_millis\x18\x04 \x01(\x04R\x13roundTripTimeMillis\x12=\n" +
-	"\fconnected_at\x18\x05 \x01(\v2\x1a.google.protobuf.TimestampR\vconnectedAt\"X\n" +
+	"\fconnected_at\x18\x05 \x01(\v2\x1a.google.protobuf.TimestampR\vconnectedAt\x12*\n" +
+	"\x11agent_instance_id\x18\x06 \x01(\fR\x0fagentInstanceId\x12\x1f\n" +
+	"\vpath_detail\x18\a \x01(\tR\n" +
+	"pathDetail\x127\n" +
+	"\tlast_seen\x18\b \x01(\v2\x1a.google.protobuf.TimestampR\blastSeen\"X\n" +
 	"\x12SendCommandRequest\x12\x17\n" +
 	"\anode_id\x18\x01 \x01(\fR\x06nodeId\x12)\n" +
 	"\x10command_envelope\x18\x02 \x01(\fR\x0fcommandEnvelope\"1\n" +
@@ -742,14 +773,15 @@ const file_ocserv_platform_transport_v1_transport_proto_rawDesc = "" +
 	"\x0eConnectionPath\x12\x1f\n" +
 	"\x1bCONNECTION_PATH_UNSPECIFIED\x10\x00\x12\x1a\n" +
 	"\x16CONNECTION_PATH_DIRECT\x10\x01\x12\x19\n" +
-	"\x15CONNECTION_PATH_RELAY\x10\x02*\xf2\x01\n" +
+	"\x15CONNECTION_PATH_RELAY\x10\x02*\x99\x02\n" +
 	"\x12TransportEventType\x12$\n" +
 	" TRANSPORT_EVENT_TYPE_UNSPECIFIED\x10\x00\x12\"\n" +
 	"\x1eTRANSPORT_EVENT_TYPE_CONNECTED\x10\x01\x12%\n" +
 	"!TRANSPORT_EVENT_TYPE_DISCONNECTED\x10\x02\x12'\n" +
 	"#TRANSPORT_EVENT_TYPE_COMMAND_RESULT\x10\x03\x12\"\n" +
 	"\x1eTRANSPORT_EVENT_TYPE_HEARTBEAT\x10\x04\x12\x1e\n" +
-	"\x1aTRANSPORT_EVENT_TYPE_ERROR\x10\x052\xc5\x04\n" +
+	"\x1aTRANSPORT_EVENT_TYPE_ERROR\x10\x05\x12%\n" +
+	"!TRANSPORT_EVENT_TYPE_PATH_CHANGED\x10\x062\xc5\x04\n" +
 	"\x10TransportService\x12c\n" +
 	"\x06Health\x12+.ocserv.platform.transport.v1.HealthRequest\x1a,.ocserv.platform.transport.v1.HealthResponse\x12y\n" +
 	"\x11GetNodeConnection\x126.ocserv.platform.transport.v1.GetNodeConnectionRequest\x1a,.ocserv.platform.transport.v1.NodeConnection\x12r\n" +
@@ -792,23 +824,24 @@ var file_ocserv_platform_transport_v1_transport_proto_depIdxs = []int32{
 	0,  // 0: ocserv.platform.transport.v1.HealthResponse.status:type_name -> ocserv.platform.transport.v1.HealthStatus
 	1,  // 1: ocserv.platform.transport.v1.NodeConnection.path:type_name -> ocserv.platform.transport.v1.ConnectionPath
 	13, // 2: ocserv.platform.transport.v1.NodeConnection.connected_at:type_name -> google.protobuf.Timestamp
-	2,  // 3: ocserv.platform.transport.v1.TransportEvent.type:type_name -> ocserv.platform.transport.v1.TransportEventType
-	13, // 4: ocserv.platform.transport.v1.TransportEvent.occurred_at:type_name -> google.protobuf.Timestamp
-	3,  // 5: ocserv.platform.transport.v1.TransportService.Health:input_type -> ocserv.platform.transport.v1.HealthRequest
-	5,  // 6: ocserv.platform.transport.v1.TransportService.GetNodeConnection:input_type -> ocserv.platform.transport.v1.GetNodeConnectionRequest
-	7,  // 7: ocserv.platform.transport.v1.TransportService.SendCommand:input_type -> ocserv.platform.transport.v1.SendCommandRequest
-	9,  // 8: ocserv.platform.transport.v1.TransportService.CloseNode:input_type -> ocserv.platform.transport.v1.CloseNodeRequest
-	11, // 9: ocserv.platform.transport.v1.TransportService.WatchEvents:input_type -> ocserv.platform.transport.v1.WatchEventsRequest
-	4,  // 10: ocserv.platform.transport.v1.TransportService.Health:output_type -> ocserv.platform.transport.v1.HealthResponse
-	6,  // 11: ocserv.platform.transport.v1.TransportService.GetNodeConnection:output_type -> ocserv.platform.transport.v1.NodeConnection
-	8,  // 12: ocserv.platform.transport.v1.TransportService.SendCommand:output_type -> ocserv.platform.transport.v1.SendCommandResponse
-	10, // 13: ocserv.platform.transport.v1.TransportService.CloseNode:output_type -> ocserv.platform.transport.v1.CloseNodeResponse
-	12, // 14: ocserv.platform.transport.v1.TransportService.WatchEvents:output_type -> ocserv.platform.transport.v1.TransportEvent
-	10, // [10:15] is the sub-list for method output_type
-	5,  // [5:10] is the sub-list for method input_type
-	5,  // [5:5] is the sub-list for extension type_name
-	5,  // [5:5] is the sub-list for extension extendee
-	0,  // [0:5] is the sub-list for field type_name
+	13, // 3: ocserv.platform.transport.v1.NodeConnection.last_seen:type_name -> google.protobuf.Timestamp
+	2,  // 4: ocserv.platform.transport.v1.TransportEvent.type:type_name -> ocserv.platform.transport.v1.TransportEventType
+	13, // 5: ocserv.platform.transport.v1.TransportEvent.occurred_at:type_name -> google.protobuf.Timestamp
+	3,  // 6: ocserv.platform.transport.v1.TransportService.Health:input_type -> ocserv.platform.transport.v1.HealthRequest
+	5,  // 7: ocserv.platform.transport.v1.TransportService.GetNodeConnection:input_type -> ocserv.platform.transport.v1.GetNodeConnectionRequest
+	7,  // 8: ocserv.platform.transport.v1.TransportService.SendCommand:input_type -> ocserv.platform.transport.v1.SendCommandRequest
+	9,  // 9: ocserv.platform.transport.v1.TransportService.CloseNode:input_type -> ocserv.platform.transport.v1.CloseNodeRequest
+	11, // 10: ocserv.platform.transport.v1.TransportService.WatchEvents:input_type -> ocserv.platform.transport.v1.WatchEventsRequest
+	4,  // 11: ocserv.platform.transport.v1.TransportService.Health:output_type -> ocserv.platform.transport.v1.HealthResponse
+	6,  // 12: ocserv.platform.transport.v1.TransportService.GetNodeConnection:output_type -> ocserv.platform.transport.v1.NodeConnection
+	8,  // 13: ocserv.platform.transport.v1.TransportService.SendCommand:output_type -> ocserv.platform.transport.v1.SendCommandResponse
+	10, // 14: ocserv.platform.transport.v1.TransportService.CloseNode:output_type -> ocserv.platform.transport.v1.CloseNodeResponse
+	12, // 15: ocserv.platform.transport.v1.TransportService.WatchEvents:output_type -> ocserv.platform.transport.v1.TransportEvent
+	11, // [11:16] is the sub-list for method output_type
+	6,  // [6:11] is the sub-list for method input_type
+	6,  // [6:6] is the sub-list for extension type_name
+	6,  // [6:6] is the sub-list for extension extendee
+	0,  // [0:6] is the sub-list for field type_name
 }
 
 func init() { file_ocserv_platform_transport_v1_transport_proto_init() }

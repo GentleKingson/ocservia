@@ -44,6 +44,13 @@ func TestEventNamesRejectUnspecified(t *testing.T) {
 	}
 }
 
+func TestEventNamesAcceptPathChanged(t *testing.T) {
+	name, err := eventName(transportv1.TransportEventType_TRANSPORT_EVENT_TYPE_PATH_CHANGED)
+	if err != nil || name != "path_changed" {
+		t.Fatalf("eventName(PATH_CHANGED) = %q, %v; want path_changed", name, err)
+	}
+}
+
 func TestScenarioDefaultsPreservePresence(t *testing.T) {
 	heartbeats, delay, err := normalizeScenario(Scenario{})
 	if err != nil || heartbeats != 3 || delay != 100 {

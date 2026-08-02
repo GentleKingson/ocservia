@@ -11,6 +11,9 @@ PostgreSQL. The platform is intended to expose narrowly scoped management
 operations for ocserv. It will not provide a general-purpose remote shell,
 generic file management, or arbitrary host command execution.
 
+The real Iroh 1.0.x transport endpoint and its development and rollback modes
+are documented in [docs/development/transportd.md](docs/development/transportd.md).
+
 ## Status
 
 The public contracts and local side-effect-free control-plane slice are under

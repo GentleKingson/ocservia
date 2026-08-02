@@ -166,6 +166,7 @@ impl StubService {
         true
     }
 
+    #[allow(clippy::too_many_lines)]
     async fn run_probe(self, node_id: Vec<u8>, traceparent: String, probe: SimulationProbe) {
         let delay = Duration::from_millis(u64::from(probe.delay_millis));
         let connected_at = now_timestamp();
@@ -180,6 +181,9 @@ impl StubService {
                     path: ConnectionPath::Direct.into(),
                     round_trip_time_millis: probe.delay_millis.into(),
                     connected_at: Some(connected_at),
+                    agent_instance_id: Uuid::now_v7().as_bytes().to_vec(),
+                    path_detail: "stub/direct".to_owned(),
+                    last_seen: Some(now_timestamp()),
                 },
                 generation,
                 cancellation,
@@ -792,6 +796,9 @@ mod tests {
                     path: ConnectionPath::Direct.into(),
                     round_trip_time_millis: 0,
                     connected_at: Some(now_timestamp()),
+                    agent_instance_id: Uuid::now_v7().as_bytes().to_vec(),
+                    path_detail: "stub/direct".to_owned(),
+                    last_seen: Some(now_timestamp()),
                 },
                 generation,
                 cancellation: cancellation.clone(),

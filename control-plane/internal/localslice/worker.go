@@ -57,6 +57,12 @@ func (w *Worker) dispatch(ctx context.Context) error {
 			for _, job := range jobs {
 				jobCtx := propagation.TraceContext{}.Extract(ctx, propagation.MapCarrier{"traceparent": job.Traceparent})
 				jobCtx, span := otel.Tracer("ocservia.localslice").Start(jobCtx, "local_slice.dispatch", trace.WithSpanKind(trace.SpanKindProducer))
+				if err := w.service.MarkDispatchStarted(ctx, job.OperationID); err != nil {
+					span.RecordError(err)
+					span.End()
+					w.logger.ErrorContext(ctx, "mark simulator dispatch started", "operation_id", job.OperationID, "error", err)
+					continue
+				}
 				if err := w.transport.SendCommand(jobCtx, job.NodeID[:], job.Envelope); err != nil {
 					span.RecordError(err)
 					span.End()
@@ -67,9 +73,6 @@ func (w *Worker) dispatch(ctx context.Context) error {
 					continue
 				}
 				span.End()
-				if err := w.service.MarkDispatched(ctx, job.OperationID); err != nil {
-					w.logger.ErrorContext(ctx, "mark simulator dispatch", "operation_id", job.OperationID, "error", err)
-				}
 			}
 		}
 	}

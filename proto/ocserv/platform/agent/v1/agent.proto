@@ -33,6 +33,27 @@ message SessionHandshake {
   bytes nonce = 15;
 }
 
+message SessionHandshakeResponse {
+  HandshakeResult result = 1;
+  uint32 protocol_major = 2;
+  uint32 protocol_minor = 3;
+  uint32 max_message_size = 4;
+  string controller_version = 5;
+}
+
+enum AgentEventType {
+  AGENT_EVENT_TYPE_UNSPECIFIED = 0;
+  AGENT_EVENT_TYPE_COMMAND_RESULT = 1;
+  AGENT_EVENT_TYPE_HEARTBEAT = 2;
+  AGENT_EVENT_TYPE_ERROR = 3;
+}
+
+// AgentEvent is a bounded, length-delimited response frame on a command stream.
+message AgentEvent {
+  AgentEventType type = 1;
+  bytes payload = 2;
+}
+
 message CommandEnvelope {
   string protocol_version = 1;
   bytes message_id = 2;
