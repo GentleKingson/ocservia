@@ -488,7 +488,8 @@ impl ProtocolHandler for SessionHandler {
         connection.set_max_concurrent_uni_streams(VarInt::from_u32(2));
         let metadata = metadata(&handshake, &connection).await;
         let node_id = metadata.node_id.clone();
-        let replaced = self.shared.inner.connections.lock().await.insert(
+        let mut registry = self.shared.inner.connections.lock().await;
+        let replaced = registry.insert(
             node_id.clone(),
             RegisteredConnection {
                 metadata: metadata.clone(),
@@ -500,6 +501,13 @@ impl ProtocolHandler for SessionHandler {
             previous
                 .connection
                 .close(VarInt::from_u32(0x106), b"superseded connection");
+            self.shared
+                .publish(event(
+                    &node_id,
+                    TransportEventType::Disconnected,
+                    b"connection superseded".to_vec(),
+                ))
+                .await;
         }
         self.shared
             .publish(event(
@@ -508,6 +516,7 @@ impl ProtocolHandler for SessionHandler {
                 metadata.path_detail.as_bytes().to_vec(),
             ))
             .await;
+        drop(registry);
 
         let monitor = monitor_paths(self.shared.clone(), node_id.clone(), connection.clone());
         let _closed = connection.closed().await;
@@ -1370,6 +1379,78 @@ mod tests {
         tokio::time::timeout(Duration::from_secs(2), connection.closed())
             .await
             .expect("connection closed after shutdown");
+        client.close().await;
+    }
+
+    #[tokio::test]
+    async fn replacement_connection_publishes_disconnect_before_connect() {
+        let agent_key = SecretKey::generate();
+        let handshake = handshake(&agent_key);
+        let service = IrohTransportService::new(8);
+        let router = build_router(
+            SecretKey::generate(),
+            RelayMode::Disabled,
+            identity_policy(&agent_key, &handshake),
+            &service,
+        )
+        .await
+        .expect("build router");
+        let client = Endpoint::builder(presets::Minimal)
+            .secret_key(agent_key)
+            .relay_mode(RelayMode::Disabled)
+            .bind()
+            .await
+            .expect("build client");
+        let mut events = service
+            .watch_events(Request::new(WatchEventsRequest {
+                after_event_id: Vec::new(),
+            }))
+            .await
+            .expect("watch events")
+            .into_inner();
+
+        let first = client
+            .connect(router.endpoint().addr(), AGENT_ALPN)
+            .await
+            .expect("connect first agent session");
+        send_handshake(&first, &handshake).await;
+        wait_until_registered(&service, &handshake.node_id).await;
+        let second = client
+            .connect(router.endpoint().addr(), AGENT_ALPN)
+            .await
+            .expect("connect replacement agent session");
+        send_handshake(&second, &handshake).await;
+
+        let mut connectivity = Vec::new();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while connectivity.len() < 3 {
+                let event = events
+                    .next()
+                    .await
+                    .expect("event stream remains open")
+                    .expect("event is valid");
+                if event.r#type == i32::from(TransportEventType::Connected)
+                    || event.r#type == i32::from(TransportEventType::Disconnected)
+                {
+                    connectivity.push(event.r#type);
+                }
+            }
+        })
+        .await
+        .expect("replacement connectivity events arrive");
+        assert_eq!(
+            connectivity,
+            vec![
+                i32::from(TransportEventType::Connected),
+                i32::from(TransportEventType::Disconnected),
+                i32::from(TransportEventType::Connected),
+            ]
+        );
+        tokio::time::timeout(Duration::from_secs(2), first.closed())
+            .await
+            .expect("superseded connection closes");
+
+        shutdown(&service, router).await.expect("shutdown router");
         client.close().await;
     }
 
