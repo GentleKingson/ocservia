@@ -159,32 +159,36 @@ func (s *Service) ListOperations(ctx context.Context, limit int) ([]Operation, e
 	return operations, rows.Err()
 }
 
-func (s *Service) ListEvents(ctx context.Context, after uuid.UUID, limit int) ([]Event, error) {
+func (s *Service) ListEvents(ctx context.Context, after uuid.UUID, limit int) ([]Event, bool, error) {
 	if limit < 1 || limit > 200 {
-		return nil, errors.New("event page size must be between 1 and 200")
+		return nil, false, errors.New("event page size must be between 1 and 200")
 	}
 	rows, err := s.pool.Query(ctx, `
 		SELECT event_id::text, node_id::text, event_type, traceparent, occurred_at
 		FROM transport_events
 		WHERE ($1::uuid IS NULL OR event_id > $1)
 		ORDER BY event_id
-		LIMIT $2`, nullableUUID(after), limit)
+		LIMIT $2`, nullableUUID(after), limit+1)
 	if err != nil {
-		return nil, fmt.Errorf("list transport events: %w", err)
+		return nil, false, fmt.Errorf("list transport events: %w", err)
 	}
 	defer rows.Close()
-	events := make([]Event, 0, limit)
+	events := make([]Event, 0, limit+1)
 	for rows.Next() {
 		var event Event
 		if err := rows.Scan(&event.ID, &event.NodeID, &event.Type, &event.Traceparent, &event.OccurredAt); err != nil {
-			return nil, fmt.Errorf("scan transport event: %w", err)
+			return nil, false, fmt.Errorf("scan transport event: %w", err)
 		}
 		events = append(events, event)
 	}
 	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("iterate transport events: %w", err)
+		return nil, false, fmt.Errorf("iterate transport events: %w", err)
 	}
-	return events, nil
+	hasMore := len(events) > limit
+	if hasMore {
+		events = events[:limit]
+	}
+	return events, hasMore, nil
 }
 
 func (s *Service) LastEventID(ctx context.Context) ([]byte, error) {
@@ -279,6 +283,7 @@ func (s *Service) ClaimJobs(ctx context.Context, limit int) ([]Job, error) {
 			FROM local_slice_jobs AS job
 			JOIN operations AS operation ON operation.id = job.operation_id
 			WHERE job.available_at <= now()
+			  AND job.dispatched_at IS NULL
 			  AND operation.state NOT IN ('succeeded', 'failed', 'expired', 'rolled_back', 'superseded')
 			ORDER BY job.available_at, job.operation_id
 			FOR UPDATE OF job SKIP LOCKED

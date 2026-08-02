@@ -71,17 +71,23 @@ func (c *Client) SendCommand(ctx context.Context, nodeID, envelope []byte) error
 }
 
 func (c *Client) RunWatch(ctx context.Context, cursors CursorStore, handler EventHandler) error {
+	reconcileCursor := false
 	for attempt := uint(0); ; attempt++ {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		err := c.watchOnce(ctx, cursors, handler)
+		err := c.watchOnce(ctx, cursors, handler, reconcileCursor)
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
 		if status.Code(err) == codes.PermissionDenied || status.Code(err) == codes.Unauthenticated {
 			return err
 		}
+		if status.Code(err) == codes.OutOfRange {
+			reconcileCursor = true
+			continue
+		}
+		reconcileCursor = false
 		delay := fullJitter(attempt, 100*time.Millisecond, 5*time.Second)
 		timer := time.NewTimer(delay)
 		select {
@@ -93,7 +99,7 @@ func (c *Client) RunWatch(ctx context.Context, cursors CursorStore, handler Even
 	}
 }
 
-func (c *Client) watchOnce(ctx context.Context, cursors CursorStore, handler EventHandler) error {
+func (c *Client) watchOnce(ctx context.Context, cursors CursorStore, handler EventHandler, reconcileCursor bool) error {
 	connection, err := c.dial()
 	if err != nil {
 		return err
@@ -108,11 +114,14 @@ func (c *Client) watchOnce(ctx context.Context, cursors CursorStore, handler Eve
 	if health.GetStatus() != healthv1.HealthCheckResponse_SERVING {
 		return errors.New("transport health is not serving")
 	}
-	cursorCtx, cancel := context.WithTimeout(ctx, c.deadline)
-	cursor, err := cursors.LastEventID(cursorCtx)
-	cancel()
-	if err != nil {
-		return fmt.Errorf("restore transport cursor: %w", err)
+	var cursor []byte
+	if !reconcileCursor {
+		cursorCtx, cancel := context.WithTimeout(ctx, c.deadline)
+		cursor, err = cursors.LastEventID(cursorCtx)
+		cancel()
+		if err != nil {
+			return fmt.Errorf("restore transport cursor: %w", err)
+		}
 	}
 	streamCtx, streamCancel := context.WithCancel(ctx)
 	defer streamCancel()

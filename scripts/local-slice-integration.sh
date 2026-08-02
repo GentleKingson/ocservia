@@ -116,6 +116,8 @@ wait_state "${normal_id}" succeeded >/dev/null
 events="$(curl --fail --silent "http://127.0.0.1:${API_PORT}/api/v1/events?page_size=200")"
 jq -e --arg node "${normal_node}" '[.items[] | select(.node_id == $node)] | length == 5' <<<"${events}" >/dev/null
 jq -e --arg node "${normal_node}" 'all(.items[] | select(.node_id == $node); .traceparent | test("^00-[0-9a-f]{32}-[0-9a-f]{16}-[0-9a-f]{2}$"))' <<<"${events}" >/dev/null
+page="$(curl --fail --silent "http://127.0.0.1:${API_PORT}/api/v1/events?page_size=2")"
+jq -e '.page.has_more == true and (.page.next_cursor | type == "string") and (.items | length == 2)' <<<"${page}" >/dev/null
 
 duplicate="$(create_probe '{"heartbeat_count":3,"delay_millis":10,"duplicate_event":true}')"
 duplicate_id="$(jq -r .id <<<"${duplicate}")"

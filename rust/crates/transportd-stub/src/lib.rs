@@ -221,10 +221,7 @@ impl TransportService for StubService {
             validate_id(&after, "after_event_id")?;
         }
         let retained = self.state.retained.lock().await;
-        if !after.is_empty()
-            && !retained.is_empty()
-            && !retained.iter().any(|event| event.event_id == after)
-        {
+        if !after.is_empty() && !retained.iter().any(|event| event.event_id == after) {
             return Err(Status::out_of_range("event cursor is outside retention"));
         }
         let backlog: Vec<_> = retained

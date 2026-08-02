@@ -103,13 +103,17 @@ func (s *Server) listEvents(w http.ResponseWriter, r *http.Request) {
 		}
 		limit = parsed
 	}
-	events, err := service.ListEvents(r.Context(), after, limit)
+	events, hasMore, err := service.ListEvents(r.Context(), after, limit)
 	if err != nil {
 		s.logger.ErrorContext(r.Context(), "list events", "error", err)
 		writeProblem(w, r, http.StatusBadRequest, "https://ocservia.dev/problems/invalid-event-query", "Event query is invalid", "events could not be listed")
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"items": events, "page": map[string]bool{"has_more": false}})
+	page := map[string]any{"has_more": hasMore}
+	if hasMore && len(events) > 0 {
+		page["next_cursor"] = events[len(events)-1].ID
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"items": events, "page": page})
 }
 
 func (s *Server) streamEvents(w http.ResponseWriter, r *http.Request) {
@@ -148,7 +152,7 @@ func (s *Server) streamEvents(w http.ResponseWriter, r *http.Request) {
 			}
 			flusher.Flush()
 		case <-ticker.C:
-			events, err := service.ListEvents(r.Context(), after, 100)
+			events, _, err := service.ListEvents(r.Context(), after, 100)
 			if err != nil {
 				s.logger.WarnContext(r.Context(), "poll SSE events", "error", err)
 				continue
