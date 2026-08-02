@@ -15,25 +15,21 @@ Next, try it out.
 ```ts
 import {
   Configuration,
-  OperationsApi,
+  DevelopmentApi,
 } from '@ocservia/api-client';
-import type { GetOperationRequest } from '@ocservia/api-client';
+import type { CreateLocalSimulationRequest } from '@ocservia/api-client';
 
 async function example() {
   console.log("🚀 Testing @ocservia/api-client SDK...");
-  const config = new Configuration({
-    // Configure HTTP bearer authorization: oidc
-    accessToken: "YOUR BEARER TOKEN",
-  });
-  const api = new OperationsApi(config);
+  const api = new DevelopmentApi();
 
   const body = {
-    // string
-    operationId: 38400000-8cf0-11bd-b23e-10b96e4ef00d,
-  } satisfies GetOperationRequest;
+    // SimulationScenario
+    simulationScenario: ...,
+  } satisfies CreateLocalSimulationRequest;
 
   try {
-    const data = await api.getOperation(body);
+    const data = await api.createLocalSimulation(body);
     console.log(data);
   } catch (error) {
     console.error(error);
@@ -50,13 +46,16 @@ example().catch(console.error);
 
 All URIs are relative to _/api/v1_
 
-| Class           | Method                                                     | HTTP request                       | Description                   |
-| --------------- | ---------------------------------------------------------- | ---------------------------------- | ----------------------------- |
-| _OperationsApi_ | [**getOperation**](docs/OperationsApi.md#getoperation)     | **GET** /operations/{operation_id} | Get an asynchronous operation |
-| _OperationsApi_ | [**listOperations**](docs/OperationsApi.md#listoperations) | **GET** /operations                | List operations               |
-| _PlatformApi_   | [**getLiveness**](docs/PlatformApi.md#getliveness)         | **GET** /livez                     | Get process liveness          |
-| _PlatformApi_   | [**getReadiness**](docs/PlatformApi.md#getreadiness)       | **GET** /readyz                    | Get dependency readiness      |
-| _PlatformApi_   | [**getVersion**](docs/PlatformApi.md#getversion)           | **GET** /version                   | Get build metadata            |
+| Class            | Method                                                                    | HTTP request                       | Description                                     |
+| ---------------- | ------------------------------------------------------------------------- | ---------------------------------- | ----------------------------------------------- |
+| _DevelopmentApi_ | [**createLocalSimulation**](docs/DevelopmentApi.md#createlocalsimulation) | **POST** /development/simulations  | Start a side-effect-free local agent simulation |
+| _EventsApi_      | [**listEvents**](docs/EventsApi.md#listevents)                            | **GET** /events                    | Rebuild platform events from durable state      |
+| _EventsApi_      | [**watchEvents**](docs/EventsApi.md#watchevents)                          | **GET** /events/stream             | Watch platform events with SSE resume support   |
+| _OperationsApi_  | [**getOperation**](docs/OperationsApi.md#getoperation)                    | **GET** /operations/{operation_id} | Get an asynchronous operation                   |
+| _OperationsApi_  | [**listOperations**](docs/OperationsApi.md#listoperations)                | **GET** /operations                | List operations                                 |
+| _PlatformApi_    | [**getLiveness**](docs/PlatformApi.md#getliveness)                        | **GET** /livez                     | Get process liveness                            |
+| _PlatformApi_    | [**getReadiness**](docs/PlatformApi.md#getreadiness)                      | **GET** /readyz                    | Get dependency readiness                        |
+| _PlatformApi_    | [**getVersion**](docs/PlatformApi.md#getversion)                          | **GET** /version                   | Get build metadata                              |
 
 ### Models
 
@@ -66,8 +65,12 @@ All URIs are relative to _/api/v1_
 - [OperationPage](docs/OperationPage.md)
 - [OperationState](docs/OperationState.md)
 - [PageInfo](docs/PageInfo.md)
+- [PlatformEvent](docs/PlatformEvent.md)
+- [PlatformEventPage](docs/PlatformEventPage.md)
+- [PlatformEventType](docs/PlatformEventType.md)
 - [Problem](docs/Problem.md)
 - [Readiness](docs/Readiness.md)
+- [SimulationScenario](docs/SimulationScenario.md)
 
 ### Authorization
 

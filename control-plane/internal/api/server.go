@@ -3,14 +3,17 @@ package api
 import (
 	"context"
 	"crypto/rand"
+	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"log/slog"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
+	"github.com/GentleKingson/ocservia/control-plane/internal/localslice"
 	"github.com/GentleKingson/ocservia/control-plane/migrations"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
@@ -31,11 +34,14 @@ type Server struct {
 	bodyLimit      int64
 	requestTimeout time.Duration
 	devAuth        bool
+	devAuthToken   string
 	expectedSchema int64
+	localSlice     *localslice.Service
+	localSliceMu   sync.RWMutex
 }
 
-func New(address string, pool *pgxpool.Pool, build BuildInfo, logger *slog.Logger, bodyLimit int64, requestTimeout time.Duration, devAuth bool, expectedSchema int64) *Server {
-	s := &Server{pool: pool, build: build, logger: logger, bodyLimit: bodyLimit, requestTimeout: requestTimeout, devAuth: devAuth, expectedSchema: expectedSchema}
+func New(address string, pool *pgxpool.Pool, build BuildInfo, logger *slog.Logger, bodyLimit int64, requestTimeout time.Duration, devAuth bool, devAuthToken string, expectedSchema int64) *Server {
+	s := &Server{pool: pool, build: build, logger: logger, bodyLimit: bodyLimit, requestTimeout: requestTimeout, devAuth: devAuth, devAuthToken: devAuthToken, expectedSchema: expectedSchema}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /livez", s.live)
 	mux.HandleFunc("GET /readyz", s.ready)
@@ -43,6 +49,11 @@ func New(address string, pool *pgxpool.Pool, build BuildInfo, logger *slog.Logge
 	mux.HandleFunc("GET /api/v1/livez", s.live)
 	mux.HandleFunc("GET /api/v1/readyz", s.ready)
 	mux.HandleFunc("GET /api/v1/version", s.version)
+	mux.HandleFunc("POST /api/v1/development/simulations", s.createSimulation)
+	mux.HandleFunc("GET /api/v1/operations", s.requireOperationAuth(s.listOperations))
+	mux.HandleFunc("GET /api/v1/operations/{operation_id}", s.requireOperationAuth(s.getOperation))
+	mux.HandleFunc("GET /api/v1/events", s.listEvents)
+	mux.HandleFunc("GET /api/v1/events/stream", s.streamEvents)
 	handler := s.requestContext(s.limitBody(s.timeout(s.routeErrors(mux))))
 	s.http = &http.Server{Addr: address, Handler: otelhttp.NewHandler(handler, "http.server"), ReadHeaderTimeout: 5 * time.Second, IdleTimeout: 60 * time.Second}
 	return s
@@ -57,6 +68,18 @@ func (s *Server) ListenAndServe() error {
 }
 
 func (s *Server) Shutdown(ctx context.Context) error { return s.http.Shutdown(ctx) }
+
+func (s *Server) EnableLocalSlice(service *localslice.Service) {
+	s.localSliceMu.Lock()
+	defer s.localSliceMu.Unlock()
+	s.localSlice = service
+}
+
+func (s *Server) localSliceService() *localslice.Service {
+	s.localSliceMu.RLock()
+	defer s.localSliceMu.RUnlock()
+	return s.localSlice
+}
 
 func (s *Server) live(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
@@ -82,14 +105,14 @@ func (s *Server) version(w http.ResponseWriter, _ *http.Request) {
 }
 
 func (s *Server) routeErrors(next http.Handler) http.Handler {
-	paths := map[string]struct{}{"/livez": {}, "/readyz": {}, "/version": {}, "/api/v1/livez": {}, "/api/v1/readyz": {}, "/api/v1/version": {}}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if _, ok := paths[r.URL.Path]; !ok {
+		expectedMethod, ok := routeMethod(r.URL.Path)
+		if !ok {
 			writeProblem(w, r, http.StatusNotFound, "https://ocservia.dev/problems/not-found", "Resource not found", "the requested resource does not exist")
 			return
 		}
-		if r.Method != http.MethodGet {
-			w.Header().Set("Allow", http.MethodGet)
+		if r.Method != expectedMethod {
+			w.Header().Set("Allow", expectedMethod)
 			writeProblem(w, r, http.StatusMethodNotAllowed, "https://ocservia.dev/problems/method-not-allowed", "Method not allowed", "the requested method is not supported")
 			return
 		}
@@ -97,9 +120,27 @@ func (s *Server) routeErrors(next http.Handler) http.Handler {
 	})
 }
 
+func routeMethod(path string) (string, bool) {
+	switch path {
+	case "/livez", "/readyz", "/version", "/api/v1/livez", "/api/v1/readyz", "/api/v1/version", "/api/v1/operations", "/api/v1/events", "/api/v1/events/stream":
+		return http.MethodGet, true
+	case "/api/v1/development/simulations":
+		return http.MethodPost, true
+	}
+	operationID := strings.TrimPrefix(path, "/api/v1/operations/")
+	if operationID != path && operationID != "" && !strings.Contains(operationID, "/") {
+		return http.MethodGet, true
+	}
+	return "", false
+}
+
 func (s *Server) timeout(next http.Handler) http.Handler {
 	timed := http.TimeoutHandler(next, s.requestTimeout, `{"type":"https://ocservia.dev/problems/timeout","title":"Request timed out","status":503}`)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/v1/events/stream" {
+			next.ServeHTTP(w, r)
+			return
+		}
 		w.Header().Set("Content-Type", "application/problem+json")
 		timed.ServeHTTP(w, r)
 	})
@@ -119,13 +160,39 @@ func (s *Server) requestContext(next http.Handler) http.Handler {
 			requestID = randomID()
 		}
 		w.Header().Set("X-Request-ID", requestID)
-		if s.devAuth {
+		if s.hasOperationPrincipal(r) {
 			w.Header().Set("X-Ocservia-Dev-Subject", "developer")
 		}
+		r = r.WithContext(context.WithValue(r.Context(), requestIDKey{}, requestID))
 		s.logger.InfoContext(r.Context(), "http request", "request_id", requestID, "trace_id", trace.SpanContextFromContext(r.Context()).TraceID().String(), "method", r.Method, "path", r.URL.Path)
 		next.ServeHTTP(w, r)
 	})
 }
+
+func (s *Server) requireOperationAuth(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if !s.hasOperationPrincipal(r) {
+			w.Header().Set("WWW-Authenticate", "Bearer")
+			writeProblem(w, r, http.StatusUnauthorized, "https://ocservia.dev/problems/unauthenticated", "Authentication required", "operation state requires an authenticated principal")
+			return
+		}
+		next(w, r)
+	}
+}
+
+func (s *Server) hasOperationPrincipal(r *http.Request) bool {
+	if s.devAuth {
+		return true
+	}
+	const prefix = "Bearer "
+	authorization := r.Header.Get("Authorization")
+	if s.devAuthToken == "" || !strings.HasPrefix(authorization, prefix) {
+		return false
+	}
+	return subtle.ConstantTimeCompare([]byte(strings.TrimSpace(strings.TrimPrefix(authorization, prefix))), []byte(s.devAuthToken)) == 1
+}
+
+type requestIDKey struct{}
 
 func writeProblem(w http.ResponseWriter, r *http.Request, status int, kind, title, detail string) {
 	w.Header().Set("Content-Type", "application/problem+json")

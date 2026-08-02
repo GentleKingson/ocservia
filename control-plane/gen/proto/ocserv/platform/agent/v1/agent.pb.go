@@ -264,6 +264,7 @@ type CommandEnvelope struct {
 	//	*CommandEnvelope_ConfigPlan
 	//	*CommandEnvelope_ConfigApply
 	//	*CommandEnvelope_ServiceReload
+	//	*CommandEnvelope_SimulationProbe
 	Payload       isCommandEnvelope_Payload `protobuf_oneof:"payload"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -444,6 +445,15 @@ func (x *CommandEnvelope) GetServiceReload() *ServiceReload {
 	return nil
 }
 
+func (x *CommandEnvelope) GetSimulationProbe() *SimulationProbe {
+	if x != nil {
+		if x, ok := x.Payload.(*CommandEnvelope_SimulationProbe); ok {
+			return x.SimulationProbe
+		}
+	}
+	return nil
+}
+
 type isCommandEnvelope_Payload interface {
 	isCommandEnvelope_Payload()
 }
@@ -472,6 +482,10 @@ type CommandEnvelope_ServiceReload struct {
 	ServiceReload *ServiceReload `protobuf:"bytes,105,opt,name=service_reload,json=serviceReload,proto3,oneof"`
 }
 
+type CommandEnvelope_SimulationProbe struct {
+	SimulationProbe *SimulationProbe `protobuf:"bytes,106,opt,name=simulation_probe,json=simulationProbe,proto3,oneof"`
+}
+
 func (*CommandEnvelope_SessionDisconnect) isCommandEnvelope_Payload() {}
 
 func (*CommandEnvelope_UserCreate) isCommandEnvelope_Payload() {}
@@ -483,6 +497,8 @@ func (*CommandEnvelope_ConfigPlan) isCommandEnvelope_Payload() {}
 func (*CommandEnvelope_ConfigApply) isCommandEnvelope_Payload() {}
 
 func (*CommandEnvelope_ServiceReload) isCommandEnvelope_Payload() {}
+
+func (*CommandEnvelope_SimulationProbe) isCommandEnvelope_Payload() {}
 
 type SessionDisconnect struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
@@ -748,6 +764,83 @@ func (*ServiceReload) Descriptor() ([]byte, []int) {
 	return file_ocserv_platform_agent_v1_agent_proto_rawDescGZIP(), []int{7}
 }
 
+// SimulationProbe exists only to exercise the local, side-effect-free slice.
+type SimulationProbe struct {
+	state           protoimpl.MessageState `protogen:"open.v1"`
+	HeartbeatCount  uint32                 `protobuf:"varint,1,opt,name=heartbeat_count,json=heartbeatCount,proto3" json:"heartbeat_count,omitempty"`
+	DelayMillis     uint32                 `protobuf:"varint,2,opt,name=delay_millis,json=delayMillis,proto3" json:"delay_millis,omitempty"`
+	DuplicateEvent  bool                   `protobuf:"varint,3,opt,name=duplicate_event,json=duplicateEvent,proto3" json:"duplicate_event,omitempty"`
+	ReturnError     bool                   `protobuf:"varint,4,opt,name=return_error,json=returnError,proto3" json:"return_error,omitempty"`
+	DisconnectAfter bool                   `protobuf:"varint,5,opt,name=disconnect_after,json=disconnectAfter,proto3" json:"disconnect_after,omitempty"`
+	unknownFields   protoimpl.UnknownFields
+	sizeCache       protoimpl.SizeCache
+}
+
+func (x *SimulationProbe) Reset() {
+	*x = SimulationProbe{}
+	mi := &file_ocserv_platform_agent_v1_agent_proto_msgTypes[8]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *SimulationProbe) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*SimulationProbe) ProtoMessage() {}
+
+func (x *SimulationProbe) ProtoReflect() protoreflect.Message {
+	mi := &file_ocserv_platform_agent_v1_agent_proto_msgTypes[8]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use SimulationProbe.ProtoReflect.Descriptor instead.
+func (*SimulationProbe) Descriptor() ([]byte, []int) {
+	return file_ocserv_platform_agent_v1_agent_proto_rawDescGZIP(), []int{8}
+}
+
+func (x *SimulationProbe) GetHeartbeatCount() uint32 {
+	if x != nil {
+		return x.HeartbeatCount
+	}
+	return 0
+}
+
+func (x *SimulationProbe) GetDelayMillis() uint32 {
+	if x != nil {
+		return x.DelayMillis
+	}
+	return 0
+}
+
+func (x *SimulationProbe) GetDuplicateEvent() bool {
+	if x != nil {
+		return x.DuplicateEvent
+	}
+	return false
+}
+
+func (x *SimulationProbe) GetReturnError() bool {
+	if x != nil {
+		return x.ReturnError
+	}
+	return false
+}
+
+func (x *SimulationProbe) GetDisconnectAfter() bool {
+	if x != nil {
+		return x.DisconnectAfter
+	}
+	return false
+}
+
 var File_ocserv_platform_agent_v1_agent_proto protoreflect.FileDescriptor
 
 const file_ocserv_platform_agent_v1_agent_proto_rawDesc = "" +
@@ -771,7 +864,7 @@ const file_ocserv_platform_agent_v1_agent_proto_rawDesc = "" +
 	"\x16supported_compressions\x18\f \x03(\tR\x15supportedCompressions\x12(\n" +
 	"\x10max_message_size\x18\r \x01(\rR\x0emaxMessageSize\x12.\n" +
 	"\x04time\x18\x0e \x01(\v2\x1a.google.protobuf.TimestampR\x04time\x12\x14\n" +
-	"\x05nonce\x18\x0f \x01(\fR\x05nonce\"\xc9\a\n" +
+	"\x05nonce\x18\x0f \x01(\fR\x05nonce\"\xa1\b\n" +
 	"\x0fCommandEnvelope\x12)\n" +
 	"\x10protocol_version\x18\x01 \x01(\tR\x0fprotocolVersion\x12\x1d\n" +
 	"\n" +
@@ -796,7 +889,8 @@ const file_ocserv_platform_agent_v1_agent_proto_rawDesc = "" +
 	"\vconfig_plan\x18g \x01(\v2$.ocserv.platform.agent.v1.ConfigPlanH\x00R\n" +
 	"configPlan\x12J\n" +
 	"\fconfig_apply\x18h \x01(\v2%.ocserv.platform.agent.v1.ConfigApplyH\x00R\vconfigApply\x12P\n" +
-	"\x0eservice_reload\x18i \x01(\v2'.ocserv.platform.agent.v1.ServiceReloadH\x00R\rserviceReloadB\t\n" +
+	"\x0eservice_reload\x18i \x01(\v2'.ocserv.platform.agent.v1.ServiceReloadH\x00R\rserviceReload\x12V\n" +
+	"\x10simulation_probe\x18j \x01(\v2).ocserv.platform.agent.v1.SimulationProbeH\x00R\x0fsimulationProbeB\t\n" +
 	"\apayloadJ\x04\b\r\x10dR\x0elegacy_payload\"2\n" +
 	"\x11SessionDisconnect\x12\x1d\n" +
 	"\n" +
@@ -812,7 +906,13 @@ const file_ocserv_platform_agent_v1_agent_proto_rawDesc = "" +
 	"\x0ecandidate_hash\x18\x02 \x01(\fR\rcandidateHash\"4\n" +
 	"\vConfigApply\x12%\n" +
 	"\x0ecandidate_hash\x18\x01 \x01(\fR\rcandidateHash\"\x0f\n" +
-	"\rServiceReload*\xb5\x02\n" +
+	"\rServiceReload\"\xd4\x01\n" +
+	"\x0fSimulationProbe\x12'\n" +
+	"\x0fheartbeat_count\x18\x01 \x01(\rR\x0eheartbeatCount\x12!\n" +
+	"\fdelay_millis\x18\x02 \x01(\rR\vdelayMillis\x12'\n" +
+	"\x0fduplicate_event\x18\x03 \x01(\bR\x0eduplicateEvent\x12!\n" +
+	"\freturn_error\x18\x04 \x01(\bR\vreturnError\x12)\n" +
+	"\x10disconnect_after\x18\x05 \x01(\bR\x0fdisconnectAfter*\xb5\x02\n" +
 	"\x0fHandshakeResult\x12 \n" +
 	"\x1cHANDSHAKE_RESULT_UNSPECIFIED\x10\x00\x12\x1d\n" +
 	"\x19HANDSHAKE_RESULT_ACCEPTED\x10\x01\x12%\n" +
@@ -838,7 +938,7 @@ func file_ocserv_platform_agent_v1_agent_proto_rawDescGZIP() []byte {
 }
 
 var file_ocserv_platform_agent_v1_agent_proto_enumTypes = make([]protoimpl.EnumInfo, 1)
-var file_ocserv_platform_agent_v1_agent_proto_msgTypes = make([]protoimpl.MessageInfo, 8)
+var file_ocserv_platform_agent_v1_agent_proto_msgTypes = make([]protoimpl.MessageInfo, 9)
 var file_ocserv_platform_agent_v1_agent_proto_goTypes = []any{
 	(HandshakeResult)(0),          // 0: ocserv.platform.agent.v1.HandshakeResult
 	(*SessionHandshake)(nil),      // 1: ocserv.platform.agent.v1.SessionHandshake
@@ -849,23 +949,25 @@ var file_ocserv_platform_agent_v1_agent_proto_goTypes = []any{
 	(*ConfigPlan)(nil),            // 6: ocserv.platform.agent.v1.ConfigPlan
 	(*ConfigApply)(nil),           // 7: ocserv.platform.agent.v1.ConfigApply
 	(*ServiceReload)(nil),         // 8: ocserv.platform.agent.v1.ServiceReload
-	(*timestamppb.Timestamp)(nil), // 9: google.protobuf.Timestamp
+	(*SimulationProbe)(nil),       // 9: ocserv.platform.agent.v1.SimulationProbe
+	(*timestamppb.Timestamp)(nil), // 10: google.protobuf.Timestamp
 }
 var file_ocserv_platform_agent_v1_agent_proto_depIdxs = []int32{
-	9, // 0: ocserv.platform.agent.v1.SessionHandshake.time:type_name -> google.protobuf.Timestamp
-	9, // 1: ocserv.platform.agent.v1.CommandEnvelope.issued_at:type_name -> google.protobuf.Timestamp
-	9, // 2: ocserv.platform.agent.v1.CommandEnvelope.expires_at:type_name -> google.protobuf.Timestamp
-	3, // 3: ocserv.platform.agent.v1.CommandEnvelope.session_disconnect:type_name -> ocserv.platform.agent.v1.SessionDisconnect
-	4, // 4: ocserv.platform.agent.v1.CommandEnvelope.user_create:type_name -> ocserv.platform.agent.v1.UserCreate
-	5, // 5: ocserv.platform.agent.v1.CommandEnvelope.user_disable:type_name -> ocserv.platform.agent.v1.UserDisable
-	6, // 6: ocserv.platform.agent.v1.CommandEnvelope.config_plan:type_name -> ocserv.platform.agent.v1.ConfigPlan
-	7, // 7: ocserv.platform.agent.v1.CommandEnvelope.config_apply:type_name -> ocserv.platform.agent.v1.ConfigApply
-	8, // 8: ocserv.platform.agent.v1.CommandEnvelope.service_reload:type_name -> ocserv.platform.agent.v1.ServiceReload
-	9, // [9:9] is the sub-list for method output_type
-	9, // [9:9] is the sub-list for method input_type
-	9, // [9:9] is the sub-list for extension type_name
-	9, // [9:9] is the sub-list for extension extendee
-	0, // [0:9] is the sub-list for field type_name
+	10, // 0: ocserv.platform.agent.v1.SessionHandshake.time:type_name -> google.protobuf.Timestamp
+	10, // 1: ocserv.platform.agent.v1.CommandEnvelope.issued_at:type_name -> google.protobuf.Timestamp
+	10, // 2: ocserv.platform.agent.v1.CommandEnvelope.expires_at:type_name -> google.protobuf.Timestamp
+	3,  // 3: ocserv.platform.agent.v1.CommandEnvelope.session_disconnect:type_name -> ocserv.platform.agent.v1.SessionDisconnect
+	4,  // 4: ocserv.platform.agent.v1.CommandEnvelope.user_create:type_name -> ocserv.platform.agent.v1.UserCreate
+	5,  // 5: ocserv.platform.agent.v1.CommandEnvelope.user_disable:type_name -> ocserv.platform.agent.v1.UserDisable
+	6,  // 6: ocserv.platform.agent.v1.CommandEnvelope.config_plan:type_name -> ocserv.platform.agent.v1.ConfigPlan
+	7,  // 7: ocserv.platform.agent.v1.CommandEnvelope.config_apply:type_name -> ocserv.platform.agent.v1.ConfigApply
+	8,  // 8: ocserv.platform.agent.v1.CommandEnvelope.service_reload:type_name -> ocserv.platform.agent.v1.ServiceReload
+	9,  // 9: ocserv.platform.agent.v1.CommandEnvelope.simulation_probe:type_name -> ocserv.platform.agent.v1.SimulationProbe
+	10, // [10:10] is the sub-list for method output_type
+	10, // [10:10] is the sub-list for method input_type
+	10, // [10:10] is the sub-list for extension type_name
+	10, // [10:10] is the sub-list for extension extendee
+	0,  // [0:10] is the sub-list for field type_name
 }
 
 func init() { file_ocserv_platform_agent_v1_agent_proto_init() }
@@ -880,6 +982,7 @@ func file_ocserv_platform_agent_v1_agent_proto_init() {
 		(*CommandEnvelope_ConfigPlan)(nil),
 		(*CommandEnvelope_ConfigApply)(nil),
 		(*CommandEnvelope_ServiceReload)(nil),
+		(*CommandEnvelope_SimulationProbe)(nil),
 	}
 	type x struct{}
 	out := protoimpl.TypeBuilder{
@@ -887,7 +990,7 @@ func file_ocserv_platform_agent_v1_agent_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_ocserv_platform_agent_v1_agent_proto_rawDesc), len(file_ocserv_platform_agent_v1_agent_proto_rawDesc)),
 			NumEnums:      1,
-			NumMessages:   8,
+			NumMessages:   9,
 			NumExtensions: 0,
 			NumServices:   0,
 		},

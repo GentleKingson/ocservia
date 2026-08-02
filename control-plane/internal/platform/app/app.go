@@ -8,8 +8,10 @@ import (
 	"time"
 
 	"github.com/GentleKingson/ocservia/control-plane/internal/api"
+	"github.com/GentleKingson/ocservia/control-plane/internal/localslice"
 	"github.com/GentleKingson/ocservia/control-plane/internal/platform/config"
 	"github.com/GentleKingson/ocservia/control-plane/internal/platform/telemetry"
+	"github.com/GentleKingson/ocservia/control-plane/internal/transportclient"
 	"github.com/GentleKingson/ocservia/control-plane/migrations"
 )
 
@@ -54,18 +56,46 @@ func Run(ctx context.Context, cfg config.Config, build BuildInfo, logger *slog.L
 	}
 
 	logger.Info("control plane starting", "role", cfg.Role)
+	componentCtx, stopComponents := context.WithCancel(ctx)
+	defer stopComponents()
+	var sliceService *localslice.Service
+	workerErr := make(chan error, 1)
+	if cfg.LocalSimulator {
+		sliceService = localslice.New(pool)
+		transport, err := transportclient.New(cfg.TransportSocket, cfg.TransportTimeout, cfg.TransportQueue)
+		if err != nil {
+			return fmt.Errorf("configure transport client: %w", err)
+		}
+		if cfg.RunsWorker() {
+			worker := localslice.NewWorker(sliceService, transport, logger)
+			go func() { workerErr <- worker.Run(componentCtx) }()
+		}
+	}
 	if !cfg.RunsAPI() {
-		<-ctx.Done()
-		return ctx.Err()
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case err := <-workerErr:
+			return fmt.Errorf("run local slice worker: %w", err)
+		}
 	}
 
-	server := api.New(cfg.HTTPAddress, pool, api.BuildInfo{Version: build.Version, Commit: build.Commit, Role: string(cfg.Role)}, logger, cfg.BodyLimit, cfg.RequestTimeout, cfg.DevAuth, expectedSchemaVersion)
+	server := api.New(cfg.HTTPAddress, pool, api.BuildInfo{Version: build.Version, Commit: build.Commit, Role: string(cfg.Role)}, logger, cfg.BodyLimit, cfg.RequestTimeout, operationAuthEnabled(cfg), cfg.DevAuthToken, expectedSchemaVersion)
+	if sliceService != nil {
+		server.EnableLocalSlice(sliceService)
+	}
 	serverErr := make(chan error, 1)
 	go func() { serverErr <- server.ListenAndServe() }()
 
 	select {
 	case err := <-serverErr:
 		return fmt.Errorf("serve HTTP: %w", err)
+	case err := <-workerErr:
+		stopComponents()
+		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), cfg.ShutdownTimeout)
+		defer shutdownCancel()
+		_ = server.Shutdown(shutdownCtx)
+		return fmt.Errorf("run local slice worker: %w", err)
 	case <-ctx.Done():
 		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), cfg.ShutdownTimeout)
 		defer shutdownCancel()
@@ -79,4 +109,8 @@ func Run(ctx context.Context, cfg config.Config, build BuildInfo, logger *slog.L
 		logger.Info("control plane stopped", "role", cfg.Role)
 		return ctx.Err()
 	}
+}
+
+func operationAuthEnabled(cfg config.Config) bool {
+	return cfg.DevAuth
 }

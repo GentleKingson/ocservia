@@ -15,6 +15,10 @@ tags:
     description: Process health and build metadata.
   - name: operations
     description: Asynchronous control-plane operation state.
+  - name: events
+    description: Durable platform event rebuild and live stream.
+  - name: development
+    description: Side-effect-free local development facilities.
 paths:
   /livez:
     get:
@@ -103,6 +107,83 @@ paths:
         "401":
           $ref: "#/components/responses/Problem"
         "403":
+          $ref: "#/components/responses/Problem"
+        "404":
+          $ref: "#/components/responses/Problem"
+        default:
+          $ref: "#/components/responses/Problem"
+  /events:
+    get:
+      operationId: listEvents
+      summary: Rebuild platform events from durable state
+      tags: [events]
+      security: []
+      parameters:
+        - name: after
+          in: query
+          required: false
+          schema:
+            $ref: "#/components/schemas/UuidV7"
+        - $ref: "#/components/parameters/PageSize"
+      responses:
+        "200":
+          description: Events ordered from oldest to newest.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PlatformEventPage"
+        "400":
+          $ref: "#/components/responses/Problem"
+        default:
+          $ref: "#/components/responses/Problem"
+  /events/stream:
+    get:
+      operationId: watchEvents
+      summary: Watch platform events with SSE resume support
+      tags: [events]
+      security: []
+      parameters:
+        - name: Last-Event-ID
+          in: header
+          required: false
+          schema:
+            $ref: "#/components/schemas/UuidV7"
+      responses:
+        "200":
+          description: SSE stream whose id field is a durable platform event ID.
+          content:
+            text/event-stream:
+              schema:
+                type: string
+        "400":
+          $ref: "#/components/responses/Problem"
+        default:
+          $ref: "#/components/responses/Problem"
+  /development/simulations:
+    post:
+      operationId: createLocalSimulation
+      summary: Start a side-effect-free local agent simulation
+      description: Available only when the local simulator is explicitly enabled outside production.
+      tags: [development]
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SimulationScenario"
+      responses:
+        "202":
+          description: The simulation was durably queued.
+          headers:
+            Location:
+              schema:
+                type: string
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Operation"
+        "400":
           $ref: "#/components/responses/Problem"
         "404":
           $ref: "#/components/responses/Problem"
@@ -229,6 +310,64 @@ components:
           $ref: "#/components/schemas/UtcDateTime"
         updated_at:
           $ref: "#/components/schemas/UtcDateTime"
+    SimulationScenario:
+      type: object
+      additionalProperties: false
+      properties:
+        heartbeat_count:
+          type: integer
+          format: int32
+          minimum: 1
+          maximum: 32
+          default: 3
+        delay_millis:
+          type: integer
+          format: int32
+          minimum: 0
+          maximum: 10000
+          default: 100
+        duplicate_event:
+          type: boolean
+          default: false
+        return_error:
+          type: boolean
+          default: false
+        disconnect_after:
+          type: boolean
+          default: false
+    PlatformEventType:
+      type: string
+      enum: [connected, disconnected, command_result, heartbeat, error]
+    Traceparent:
+      type: string
+      pattern: "^00-[0-9a-f]{32}-[0-9a-f]{16}-[0-9a-f]{2}$"
+    PlatformEvent:
+      type: object
+      additionalProperties: false
+      required: [id, node_id, type, traceparent, occurred_at]
+      properties:
+        id:
+          $ref: "#/components/schemas/UuidV7"
+        node_id:
+          $ref: "#/components/schemas/UuidV7"
+        type:
+          $ref: "#/components/schemas/PlatformEventType"
+        traceparent:
+          $ref: "#/components/schemas/Traceparent"
+        occurred_at:
+          $ref: "#/components/schemas/UtcDateTime"
+    PlatformEventPage:
+      type: object
+      additionalProperties: false
+      required: [items, page]
+      properties:
+        items:
+          type: array
+          maxItems: 200
+          items:
+            $ref: "#/components/schemas/PlatformEvent"
+        page:
+          $ref: "#/components/schemas/PageInfo"
     PageInfo:
       type: object
       additionalProperties: false

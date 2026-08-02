@@ -9,11 +9,7 @@ source "${ROOT}/scripts/env.sh"
     --ignore=github.com/GentleKingson/ocservia/control-plane \
     --allowed_licenses=Apache-2.0,BSD-2-Clause,BSD-3-Clause,ISC,MIT)
 
-(cd "${ROOT}/rust" && cargo metadata --format-version 1 | jq -e '
-  [.packages[]
-   | select(.source != null)
-   | select((.license // "")
-      | test("AGPL|GPL|SSPL|BUSL|Elastic"; "i"))] | length == 0')
+(cd "${ROOT}/rust" && cargo deny check licenses)
 
 (cd "${ROOT}/web" && node <<'EOF'
 import { existsSync, readFileSync } from "node:fs";

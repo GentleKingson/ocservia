@@ -5,7 +5,12 @@ export default tseslint.config(
   eslint.configs.recommended,
   ...tseslint.configs.strictTypeChecked,
   {
-    files: ["src/**/*.ts", "test/**/*.ts"],
+    files: [
+      "src/**/*.ts",
+      "test/**/*.ts",
+      "e2e/**/*.ts",
+      "playwright.config.ts",
+    ],
     languageOptions: {
       parserOptions: {
         projectService: true,

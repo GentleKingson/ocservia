@@ -2,7 +2,7 @@ SHELL := /usr/bin/env bash
 
 .DEFAULT_GOAL := verify
 
-.PHONY: bootstrap generate format lint test verify docs-check generated-clean generated-clean-test policy-check contracts-breaking go-check rust-check web-check security-check license-check database-integration
+.PHONY: bootstrap generate format lint test verify docs-check generated-clean generated-clean-test policy-check contracts-breaking go-check rust-check web-check security-check license-check database-integration integration e2e
 
 bootstrap:
 	./scripts/bootstrap.sh
@@ -24,6 +24,12 @@ go-check:
 
 database-integration:
 	./scripts/database-integration.sh
+
+integration:
+	./scripts/local-slice-integration.sh
+
+e2e:
+	./scripts/e2e.sh
 
 rust-check:
 	./scripts/rust-check.sh
