@@ -551,6 +551,8 @@ func eventName(value transportv1.TransportEventType) (string, error) {
 		return "heartbeat", nil
 	case transportv1.TransportEventType_TRANSPORT_EVENT_TYPE_ERROR:
 		return "error", nil
+	case transportv1.TransportEventType_TRANSPORT_EVENT_TYPE_PATH_CHANGED:
+		return "path_changed", nil
 	default:
 		return "", errors.New("unsupported transport event type")
 	}

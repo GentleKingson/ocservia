@@ -6,8 +6,9 @@ the versioned gRPC service on a `0660` Unix socket; Go code does not import Iroh
 types. The process has no database client or database credentials.
 
 The controller key is supplied with `--key-file`. The file must be an absolute,
-non-symlink regular file with no group or other permission bits and must contain
-exactly 32 raw bytes or 64 lowercase hexadecimal characters. Never put this file
+non-symlink regular file owned by the service user, with no group or other
+permission bits, and must contain exactly 32 raw bytes or 64 lowercase
+hexadecimal characters. Never put this file
 in an image, source tree, command-line argument, or log. The endpoint identifier,
 which is public, is logged at startup.
 
@@ -43,3 +44,5 @@ stack and rollback mode. To roll back an unshipped Iroh deployment, stop the rea
 transport process, preserve the controller key, start the stub on the same UDS
 path, and restart the Go worker so its watch reconnects. Active Iroh connections
 will close and agents must reconnect after the real transport is restored.
+Rolling back migration `000003_transport_path_changed` removes derived
+`path_changed` events before restoring the earlier event-type constraint.

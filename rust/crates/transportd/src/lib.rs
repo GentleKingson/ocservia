@@ -7,6 +7,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 
+use futures_util::StreamExt as _;
 use iroh::endpoint::{
     AfterHandshakeOutcome, Connection, EndpointHooks, PathEvent, QuicTransportConfig, RelayMode,
     VarInt, presets,
@@ -23,8 +24,8 @@ use ocservia_contracts::generated::ocserv::platform::transport::v1::{
     transport_service_server::TransportService,
 };
 use prost::Message;
-use tokio::sync::{Mutex, Semaphore, mpsc};
-use tokio_stream::{Stream, StreamExt, wrappers::ReceiverStream};
+use tokio::sync::{Mutex, Semaphore, mpsc, watch};
+use tokio_stream::{Stream, wrappers::ReceiverStream};
 use tonic::{Request, Response, Status};
 use uuid::Uuid;
 
@@ -137,6 +138,7 @@ struct Inner {
     events: Mutex<EventState>,
     event_capacity: usize,
     connection_permits: Arc<Semaphore>,
+    shutdown: watch::Sender<bool>,
 }
 
 struct RegisteredConnection {
@@ -152,6 +154,7 @@ struct EventState {
 impl Shared {
     fn new(event_capacity: usize) -> Self {
         let capacity = event_capacity.clamp(1, MAX_CONNECTIONS);
+        let (shutdown, _) = watch::channel(false);
         Self {
             inner: Arc::new(Inner {
                 connections: Mutex::new(HashMap::new()),
@@ -161,11 +164,15 @@ impl Shared {
                 }),
                 event_capacity: capacity,
                 connection_permits: Arc::new(Semaphore::new(MAX_CONNECTIONS)),
+                shutdown,
             }),
         }
     }
 
     async fn publish(&self, event: TransportEvent) {
+        if *self.inner.shutdown.borrow() {
+            return;
+        }
         let mut state = self.inner.events.lock().await;
         if state.retained.len() == self.inner.event_capacity {
             state.retained.pop_front();
@@ -191,6 +198,8 @@ impl Shared {
     }
 
     async fn shutdown(&self) {
+        let _ = self.inner.shutdown.send(true);
+        self.inner.events.lock().await.subscribers.clear();
         let connections = {
             let mut registry = self.inner.connections.lock().await;
             registry.drain().map(|(_, value)| value).collect::<Vec<_>>()
@@ -216,6 +225,11 @@ impl IrohTransportService {
         Self {
             shared: Shared::new(event_capacity),
         }
+    }
+
+    /// Stops active connections and terminates all long-lived event streams.
+    pub async fn begin_shutdown(&self) {
+        self.shared.shutdown().await;
     }
 }
 
@@ -318,6 +332,10 @@ impl TransportService for IrohTransportService {
         if !after.is_empty() {
             validate_uuid(&after, "after_event_id")?;
         }
+        let mut shutdown = self.shared.inner.shutdown.subscribe();
+        if *shutdown.borrow() {
+            return Err(Status::unavailable("transport is shutting down"));
+        }
         let mut state = self.shared.inner.events.lock().await;
         state.subscribers.retain(|sender| !sender.is_closed());
         if !after.is_empty() && !state.retained.iter().any(|item| item.event_id == after) {
@@ -342,7 +360,12 @@ impl TransportService for IrohTransportService {
                 .map_err(|_| Status::internal("retained event queue overflow"))?;
         }
         state.subscribers.push(sender);
-        Ok(Response::new(Box::pin(ReceiverStream::new(receiver))))
+        drop(state);
+        let shutdown_signal =
+            async move { while !*shutdown.borrow() && shutdown.changed().await.is_ok() {} };
+        Ok(Response::new(Box::pin(
+            ReceiverStream::new(receiver).take_until(shutdown_signal),
+        )))
     }
 }
 
@@ -630,8 +653,18 @@ fn event(node_id: &[u8], kind: TransportEventType, payload: Vec<u8>) -> Transpor
         r#type: kind.into(),
         occurred_at: Some(now_timestamp()),
         payload,
-        traceparent: String::new(),
+        traceparent: new_traceparent(),
     }
+}
+
+fn new_traceparent() -> String {
+    let trace_id = Uuid::now_v7();
+    let span_id = Uuid::now_v7();
+    format!(
+        "00-{}-{}-01",
+        hex::encode(trace_id.as_bytes()),
+        hex::encode(&span_id.as_bytes()[..8])
+    )
 }
 
 fn now_timestamp() -> prost_types::Timestamp {
@@ -703,7 +736,7 @@ pub async fn shutdown(
     service: &IrohTransportService,
     router: Router,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    service.shared.shutdown().await;
+    service.begin_shutdown().await;
     router.shutdown().await.map_err(Into::into)
 }
 
@@ -796,6 +829,45 @@ mod tests {
         assert_eq!(
             service.shared.inner.connection_permits.available_permits(),
             MAX_CONNECTIONS
+        );
+    }
+
+    #[test]
+    fn transport_events_have_a_valid_root_traceparent() {
+        let traceparent = event(
+            Uuid::now_v7().as_bytes(),
+            TransportEventType::Connected,
+            Vec::new(),
+        )
+        .traceparent;
+        let parts = traceparent.split('-').collect::<Vec<_>>();
+        assert_eq!(parts.len(), 4);
+        assert_eq!(parts[0], "00");
+        assert_eq!(parts[1].len(), 32);
+        assert_eq!(parts[2].len(), 16);
+        assert_eq!(parts[3], "01");
+        assert!(parts[1..=2].iter().all(|part| {
+            part.bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        }));
+    }
+
+    #[tokio::test]
+    async fn shutdown_terminates_event_streams() {
+        let service = IrohTransportService::new(8);
+        let mut stream = service
+            .watch_events(Request::new(WatchEventsRequest {
+                after_event_id: Vec::new(),
+            }))
+            .await
+            .expect("open event stream")
+            .into_inner();
+        service.begin_shutdown().await;
+        assert!(
+            tokio::time::timeout(Duration::from_secs(1), stream.next())
+                .await
+                .expect("stream terminates promptly")
+                .is_none()
         );
     }
 

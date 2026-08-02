@@ -53,10 +53,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     health_reporter
         .set_serving::<TransportServiceServer<IrohTransportService>>()
         .await;
+    let shutdown_service = service.clone();
     let result = Server::builder()
         .add_service(health_service)
         .add_service(TransportServiceServer::new(service.clone()))
-        .serve_with_incoming_shutdown(UnixListenerStream::new(listener), shutdown_signal())
+        .serve_with_incoming_shutdown(UnixListenerStream::new(listener), async move {
+            shutdown_signal().await;
+            shutdown_service.begin_shutdown().await;
+        })
         .await;
     health_reporter
         .set_not_serving::<TransportServiceServer<IrohTransportService>>()
@@ -147,26 +151,14 @@ fn parse_endpoint(value: &str) -> Result<EndpointId, io::Error> {
 }
 
 fn load_key(path: &Path) -> Result<SecretKey, io::Error> {
-    let metadata = std::fs::symlink_metadata(path)?;
-    if !metadata.file_type().is_file() || metadata.file_type().is_symlink() {
-        return Err(invalid("key path must be a regular file, not a symlink"));
-    }
-    if metadata.mode() & 0o077 != 0 {
-        return Err(io::Error::new(
-            io::ErrorKind::PermissionDenied,
-            "key file must be owned by the process user with mode 0600 or stricter",
-        ));
-    }
-    let bytes = std::fs::OpenOptions::new()
+    let mut file = std::fs::OpenOptions::new()
         .read(true)
         .custom_flags(libc_o_nofollow())
-        .open(path)
-        .and_then(|mut file| {
-            let mut bytes = Vec::with_capacity(65);
-            std::io::Read::read_to_end(&mut file, &mut bytes)?;
-            Ok(bytes)
-        })?;
-    let bytes = Zeroizing::new(bytes);
+        .open(path)?;
+    validate_key_file(&file, rustix::process::geteuid().as_raw())?;
+    let mut raw = Vec::with_capacity(65);
+    std::io::Read::read_to_end(&mut file, &mut raw)?;
+    let bytes = Zeroizing::new(raw);
     let mut secret = Zeroizing::new([0_u8; 32]);
     if bytes.len() == 32 {
         secret.copy_from_slice(&bytes);
@@ -189,6 +181,20 @@ fn load_key(path: &Path) -> Result<SecretKey, io::Error> {
     }
     let key = SecretKey::from_bytes(&secret);
     Ok(key)
+}
+
+fn validate_key_file(file: &std::fs::File, expected_uid: u32) -> Result<(), io::Error> {
+    let metadata = file.metadata()?;
+    if !metadata.file_type().is_file() {
+        return Err(invalid("key path must be a regular file, not a symlink"));
+    }
+    if metadata.uid() != expected_uid || metadata.mode() & 0o077 != 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "key file must be owned by the process user with mode 0600 or stricter",
+        ));
+    }
+    Ok(())
 }
 
 #[cfg(target_os = "linux")]
@@ -238,8 +244,19 @@ fn invalid(message: &str) -> io::Error {
 }
 
 async fn shutdown_signal() {
-    if tokio::signal::ctrl_c().await.is_err() {
-        tracing::error!("failed to install shutdown signal handler");
+    let terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate());
+    let Ok(mut terminate) = terminate else {
+        tracing::error!("failed to install SIGTERM handler");
+        let _ = tokio::signal::ctrl_c().await;
+        return;
+    };
+    tokio::select! {
+        result = tokio::signal::ctrl_c() => {
+            if result.is_err() {
+                tracing::error!("failed to install Ctrl-C handler");
+            }
+        }
+        _ = terminate.recv() => {}
     }
 }
 
@@ -259,6 +276,24 @@ mod tests {
             .expect("set permissions");
         assert_eq!(
             load_key(&path).expect_err("insecure key rejected").kind(),
+            io::ErrorKind::PermissionDenied
+        );
+        std::fs::remove_dir_all(directory).expect("remove test directory");
+    }
+
+    #[test]
+    fn key_validator_rejects_a_different_owner() {
+        let directory = std::env::temp_dir().join(format!("ocservia-key-{}", uuid::Uuid::now_v7()));
+        std::fs::create_dir(&directory).expect("create test directory");
+        let path = directory.join("controller.key");
+        let file = std::fs::File::create(&path).expect("create key");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
+            .expect("set permissions");
+        let different_uid = file.metadata().expect("key metadata").uid().wrapping_add(1);
+        assert_eq!(
+            validate_key_file(&file, different_uid)
+                .expect_err("foreign-owned key rejected")
+                .kind(),
             io::ErrorKind::PermissionDenied
         );
         std::fs::remove_dir_all(directory).expect("remove test directory");
