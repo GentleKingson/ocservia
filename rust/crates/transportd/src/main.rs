@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::env;
 use std::io;
 use std::os::unix::fs::{FileTypeExt, MetadataExt, OpenOptionsExt, PermissionsExt};
@@ -18,7 +18,7 @@ struct Config {
     socket: PathBuf,
     key_file: PathBuf,
     relay_mode: RelayMode,
-    approved: HashSet<EndpointId>,
+    approved: HashMap<EndpointId, Vec<u8>>,
     revoked: HashSet<EndpointId>,
     event_capacity: usize,
 }
@@ -77,7 +77,7 @@ fn parse_args() -> Result<Config, io::Error> {
     let mut socket = PathBuf::from("/run/ocserv-platform/transportd.sock");
     let mut key_file = None;
     let mut relay_mode = RelayMode::Default;
-    let mut approved = HashSet::new();
+    let mut approved = HashMap::new();
     let mut revoked = HashSet::new();
     let mut event_capacity = 256_usize;
     let mut args = env::args().skip(1);
@@ -94,11 +94,12 @@ fn parse_args() -> Result<Config, io::Error> {
                     _ => return Err(invalid("relay mode must be default or disabled")),
                 };
             }
-            "--approved-endpoint" => {
-                approved.insert(parse_endpoint(&required_value(
-                    &mut args,
-                    "--approved-endpoint",
-                )?)?);
+            "--approved-binding" => {
+                let (endpoint, node_id) =
+                    parse_binding(&required_value(&mut args, "--approved-binding")?)?;
+                if approved.insert(endpoint, node_id).is_some() {
+                    return Err(invalid("approved endpoint is bound more than once"));
+                }
             }
             "--revoked-endpoint" => {
                 revoked.insert(parse_endpoint(&required_value(
@@ -148,6 +149,18 @@ fn parse_endpoint(value: &str) -> Result<EndpointId, io::Error> {
         .try_into()
         .map_err(|_| invalid("endpoint ID must be 32 bytes"))?;
     EndpointId::from_bytes(&bytes).map_err(|_| invalid("endpoint ID is invalid"))
+}
+
+fn parse_binding(value: &str) -> Result<(EndpointId, Vec<u8>), io::Error> {
+    let (node_id, endpoint) = value
+        .split_once('=')
+        .ok_or_else(|| invalid("approved binding must be NODE_UUID=ENDPOINT_ID"))?;
+    let node_id = uuid::Uuid::parse_str(node_id)
+        .map_err(|_| invalid("approved binding node ID must be UUIDv7"))?;
+    if node_id.get_version_num() != 7 {
+        return Err(invalid("approved binding node ID must be UUIDv7"));
+    }
+    Ok((parse_endpoint(endpoint)?, node_id.as_bytes().to_vec()))
 }
 
 fn load_key(path: &Path) -> Result<SecretKey, io::Error> {
@@ -305,5 +318,18 @@ mod tests {
         let encoded = hex::encode(endpoint.as_bytes());
         assert_eq!(parse_endpoint(&encoded).expect("valid endpoint"), endpoint);
         assert!(parse_endpoint(&encoded.to_uppercase()).is_err());
+    }
+
+    #[test]
+    fn binding_parser_requires_a_uuidv7_node() {
+        let node_id = uuid::Uuid::now_v7();
+        let endpoint = SecretKey::generate().public();
+        let value = format!("{node_id}={}", hex::encode(endpoint.as_bytes()));
+        let (parsed_endpoint, parsed_node) = parse_binding(&value).expect("valid binding");
+        assert_eq!(parsed_endpoint, endpoint);
+        assert_eq!(parsed_node, node_id.as_bytes());
+        assert!(
+            parse_binding(&format!("not-a-uuid={}", hex::encode(endpoint.as_bytes()))).is_err()
+        );
     }
 }

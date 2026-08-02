@@ -12,11 +12,14 @@ hexadecimal characters. Never put this file
 in an image, source tree, command-line argument, or log. The endpoint identifier,
 which is public, is logged at startup.
 
-Approved and revoked endpoint identifiers can be supplied with repeated
-`--approved-endpoint` and `--revoked-endpoint` flags. They are 32-byte lowercase
-hexadecimal public identifiers. Enrollment accepts non-revoked identities;
-agent sessions require an approved, non-revoked identity. A later control-plane
-step replaces this startup-only test policy with the typed enrollment lifecycle.
+Approved endpoint-to-node bindings and revoked endpoint identifiers can be
+supplied with repeated `--approved-binding NODE_UUID=ENDPOINT_ID` and
+`--revoked-endpoint ENDPOINT_ID` flags. Endpoint IDs are 32-byte lowercase
+hexadecimal public identifiers and node IDs are UUIDv7 values. Enrollment
+accepts non-revoked identities; agent sessions require an approved,
+non-revoked identity whose handshake claims the bound node. A later
+control-plane step replaces this startup-only test policy with the typed
+enrollment lifecycle.
 
 Run with the public relay set:
 
@@ -25,7 +28,7 @@ ocservia-transportd \
   --socket /run/ocserv-platform/transportd.sock \
   --key-file /run/secrets/controller-iroh.key \
   --relay-mode default \
-  --approved-endpoint <agent-endpoint-id>
+  --approved-binding <node-uuid>=<agent-endpoint-id>
 ```
 
 Use `--relay-mode disabled` for isolated direct-path tests. The endpoint limits

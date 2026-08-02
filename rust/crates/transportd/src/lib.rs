@@ -15,7 +15,8 @@ use iroh::endpoint::{
 use iroh::protocol::{AcceptError, ProtocolHandler, Router};
 use iroh::{Endpoint, EndpointId, SecretKey};
 use ocservia_contracts::generated::ocserv::platform::agent::v1::{
-    HandshakeResult, SessionHandshake, SessionHandshakeResponse,
+    AgentEvent, AgentEventType, CommandEnvelope, HandshakeResult, SessionHandshake,
+    SessionHandshakeResponse,
 };
 use ocservia_contracts::generated::ocserv::platform::transport::v1::{
     CloseNodeRequest, CloseNodeResponse, ConnectionPath, GetNodeConnectionRequest, HealthRequest,
@@ -44,20 +45,21 @@ const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 const STREAM_TIMEOUT: Duration = Duration::from_secs(15);
 const MAX_CONNECTIONS: usize = 4096;
 const MAX_ATTEMPTS_PER_MINUTE: usize = 30;
+const MAX_RESPONSE_FRAMES: usize = 128;
 
 type EventStream = Pin<Box<dyn Stream<Item = Result<TransportEvent, Status>> + Send>>;
 
 /// A bounded, transport-only identity policy supplied at process startup.
 #[derive(Clone, Debug, Default)]
 pub struct IdentityPolicy {
-    approved: Arc<HashSet<EndpointId>>,
+    approved: Arc<HashMap<EndpointId, Vec<u8>>>,
     revoked: Arc<HashSet<EndpointId>>,
 }
 
 impl IdentityPolicy {
-    /// Builds a policy from approved and revoked endpoint identifiers.
+    /// Builds a policy from endpoint-to-node bindings and revoked identifiers.
     #[must_use]
-    pub fn new(approved: HashSet<EndpointId>, revoked: HashSet<EndpointId>) -> Self {
+    pub fn new(approved: HashMap<EndpointId, Vec<u8>>, revoked: HashSet<EndpointId>) -> Self {
         Self {
             approved: Arc::new(approved),
             revoked: Arc::new(revoked),
@@ -68,7 +70,13 @@ impl IdentityPolicy {
         if self.revoked.contains(&endpoint) {
             return false;
         }
-        alpn == ENROLL_ALPN || (alpn == AGENT_ALPN && self.approved.contains(&endpoint))
+        alpn == ENROLL_ALPN || (alpn == AGENT_ALPN && self.approved.contains_key(&endpoint))
+    }
+
+    fn matches_node(&self, endpoint: EndpointId, node_id: &[u8]) -> bool {
+        self.approved
+            .get(&endpoint)
+            .is_some_and(|approved_node| approved_node == node_id)
     }
 }
 
@@ -144,6 +152,7 @@ struct Inner {
 struct RegisteredConnection {
     metadata: NodeConnection,
     connection: Connection,
+    max_message_size: usize,
 }
 
 struct EventState {
@@ -273,7 +282,15 @@ impl TransportService for IrohTransportService {
         if request.command_envelope.len() > MAX_FRAME_BYTES {
             return Err(Status::resource_exhausted("command exceeds 1 MiB"));
         }
-        let connection = self
+        let command = CommandEnvelope::decode(request.command_envelope.as_slice())
+            .map_err(|_| Status::invalid_argument("command envelope protobuf is invalid"))?;
+        if command.node_id != node_id {
+            return Err(Status::invalid_argument(
+                "command node_id does not match request",
+            ));
+        }
+        validate_traceparent(&command.traceparent)?;
+        let (connection, max_message_size) = self
             .shared
             .inner
             .connections
@@ -282,12 +299,17 @@ impl TransportService for IrohTransportService {
             .get_mut(&node_id)
             .map(|entry| {
                 entry.metadata.last_seen = Some(now_timestamp());
-                entry.connection.clone()
+                (entry.connection.clone(), entry.max_message_size)
             })
             .ok_or_else(|| Status::unavailable("node is not connected"))?;
+        if request.command_envelope.len() > max_message_size {
+            return Err(Status::resource_exhausted(
+                "command exceeds the agent's negotiated message size",
+            ));
+        }
         let frame = request.command_envelope;
-        tokio::time::timeout(STREAM_TIMEOUT, async move {
-            let (mut send, _recv) = connection
+        let recv = tokio::time::timeout(STREAM_TIMEOUT, async move {
+            let (mut send, recv) = connection
                 .open_bi()
                 .await
                 .map_err(|_| Status::unavailable("failed to open command stream"))?;
@@ -301,10 +323,17 @@ impl TransportService for IrohTransportService {
                 .map_err(|_| Status::unavailable("failed to write command"))?;
             send.finish()
                 .map_err(|_| Status::unavailable("failed to finish command stream"))?;
-            Ok::<(), Status>(())
+            Ok::<_, Status>(recv)
         })
         .await
         .map_err(|_| Status::deadline_exceeded("command stream timed out"))??;
+        tokio::spawn(read_agent_events(
+            recv,
+            self.shared.clone(),
+            node_id,
+            command.traceparent,
+            max_message_size,
+        ));
         Ok(Response::new(SendCommandResponse { accepted: true }))
     }
 
@@ -378,6 +407,7 @@ enum ProtocolKind {
 #[derive(Clone)]
 struct SessionHandler {
     shared: Shared,
+    policy: IdentityPolicy,
     kind: ProtocolKind,
 }
 
@@ -405,12 +435,19 @@ impl ProtocolHandler for SessionHandler {
             .map_err(|_| protocol_error("handshake stream failed"))?;
         let handshake = read_handshake(&mut recv).await?;
         validate_handshake(&handshake, connection.remote_id())?;
+        if matches!(self.kind, ProtocolKind::Agent)
+            && !self
+                .policy
+                .matches_node(connection.remote_id(), &handshake.node_id)
+        {
+            return Err(protocol_error("endpoint is not bound to the claimed node"));
+        }
 
         let result = match self.kind {
             ProtocolKind::Enroll => HandshakeResult::PendingApproval,
             ProtocolKind::Agent => HandshakeResult::Accepted,
         };
-        write_handshake_response(&mut send, result).await?;
+        write_handshake_response(&mut send, result, handshake.max_message_size).await?;
         if matches!(self.kind, ProtocolKind::Enroll) {
             connection.close(VarInt::from_u32(0), b"enrollment pending");
             return Ok(());
@@ -425,6 +462,7 @@ impl ProtocolHandler for SessionHandler {
             RegisteredConnection {
                 metadata: metadata.clone(),
                 connection: connection.clone(),
+                max_message_size: handshake.max_message_size as usize,
             },
         );
         if let Some(previous) = replaced {
@@ -498,6 +536,103 @@ fn monitor_paths(
     })
 }
 
+async fn read_agent_events(
+    mut recv: iroh::endpoint::RecvStream,
+    shared: Shared,
+    node_id: Vec<u8>,
+    traceparent: String,
+    max_message_size: usize,
+) {
+    for _ in 0..MAX_RESPONSE_FRAMES {
+        let mut length = [0_u8; 4];
+        match tokio::time::timeout(STREAM_TIMEOUT, recv.read_exact(&mut length)).await {
+            Ok(Ok(())) => {}
+            Ok(Err(_)) => return,
+            Err(_) => {
+                shared
+                    .publish(event_with_traceparent(
+                        &node_id,
+                        TransportEventType::Error,
+                        b"agent response timed out".to_vec(),
+                        &traceparent,
+                    ))
+                    .await;
+                return;
+            }
+        }
+        let length = u32::from_be_bytes(length) as usize;
+        if length == 0 || length > max_message_size || length > MAX_FRAME_BYTES {
+            shared
+                .publish(event_with_traceparent(
+                    &node_id,
+                    TransportEventType::Error,
+                    b"agent response size invalid".to_vec(),
+                    &traceparent,
+                ))
+                .await;
+            return;
+        }
+        let mut bytes = vec![0_u8; length];
+        if !matches!(
+            tokio::time::timeout(STREAM_TIMEOUT, recv.read_exact(&mut bytes)).await,
+            Ok(Ok(()))
+        ) {
+            shared
+                .publish(event_with_traceparent(
+                    &node_id,
+                    TransportEventType::Error,
+                    b"agent response body invalid".to_vec(),
+                    &traceparent,
+                ))
+                .await;
+            return;
+        }
+        let Ok(agent_event) = AgentEvent::decode(bytes.as_slice()) else {
+            shared
+                .publish(event_with_traceparent(
+                    &node_id,
+                    TransportEventType::Error,
+                    b"agent response protobuf invalid".to_vec(),
+                    &traceparent,
+                ))
+                .await;
+            return;
+        };
+        let event_type = match AgentEventType::try_from(agent_event.r#type) {
+            Ok(AgentEventType::CommandResult) => TransportEventType::CommandResult,
+            Ok(AgentEventType::Heartbeat) => TransportEventType::Heartbeat,
+            Ok(AgentEventType::Error) => TransportEventType::Error,
+            _ => {
+                shared
+                    .publish(event_with_traceparent(
+                        &node_id,
+                        TransportEventType::Error,
+                        b"agent response type invalid".to_vec(),
+                        &traceparent,
+                    ))
+                    .await;
+                return;
+            }
+        };
+        shared
+            .publish(event_with_traceparent(
+                &node_id,
+                event_type,
+                agent_event.payload,
+                &traceparent,
+            ))
+            .await;
+    }
+    shared
+        .publish(event_with_traceparent(
+            &node_id,
+            TransportEventType::Error,
+            b"agent response frame limit exceeded".to_vec(),
+            &traceparent,
+        ))
+        .await;
+}
+
 async fn read_handshake(
     recv: &mut iroh::endpoint::RecvStream,
 ) -> Result<SessionHandshake, AcceptError> {
@@ -522,12 +657,13 @@ async fn read_handshake(
 async fn write_handshake_response(
     send: &mut iroh::endpoint::SendStream,
     result: HandshakeResult,
+    max_message_size: u32,
 ) -> Result<(), AcceptError> {
     let response = SessionHandshakeResponse {
         result: result.into(),
         protocol_major: PROTOCOL_MAJOR,
         protocol_minor: PROTOCOL_MINOR,
-        max_message_size: MAX_FRAME_BYTES_U32,
+        max_message_size,
         controller_version: env!("CARGO_PKG_VERSION").to_owned(),
     }
     .encode_to_vec();
@@ -647,14 +783,42 @@ fn validate_uuid(value: &[u8], name: &'static str) -> Result<Vec<u8>, Status> {
 }
 
 fn event(node_id: &[u8], kind: TransportEventType, payload: Vec<u8>) -> TransportEvent {
+    event_with_traceparent(node_id, kind, payload, &new_traceparent())
+}
+
+fn event_with_traceparent(
+    node_id: &[u8],
+    kind: TransportEventType,
+    payload: Vec<u8>,
+    traceparent: &str,
+) -> TransportEvent {
     TransportEvent {
         event_id: Uuid::now_v7().as_bytes().to_vec(),
         node_id: node_id.to_vec(),
         r#type: kind.into(),
         occurred_at: Some(now_timestamp()),
         payload,
-        traceparent: new_traceparent(),
+        traceparent: traceparent.to_owned(),
     }
+}
+
+fn validate_traceparent(value: &str) -> Result<(), Status> {
+    let parts = value.split('-').collect::<Vec<_>>();
+    if parts.len() != 4
+        || parts[0] != "00"
+        || parts[1].len() != 32
+        || parts[2].len() != 16
+        || parts[3].len() != 2
+        || !parts.iter().all(|part| {
+            part.bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        })
+        || parts[1] == "00000000000000000000000000000000"
+        || parts[2] == "0000000000000000"
+    {
+        return Err(Status::invalid_argument("invalid traceparent"));
+    }
+    Ok(())
 }
 
 fn new_traceparent() -> String {
@@ -704,7 +868,7 @@ async fn build_router_with_direct(
         .secret_key(secret_key)
         .relay_mode(relay_mode)
         .transport_config(transport)
-        .hooks(SecurityHook::new(policy));
+        .hooks(SecurityHook::new(policy.clone()));
     if !direct_enabled {
         endpoint_builder = endpoint_builder.clear_ip_transports();
     }
@@ -714,6 +878,7 @@ async fn build_router_with_direct(
             ENROLL_ALPN,
             SessionHandler {
                 shared: service.shared.clone(),
+                policy: policy.clone(),
                 kind: ProtocolKind::Enroll,
             },
         )
@@ -721,6 +886,7 @@ async fn build_router_with_direct(
             AGENT_ALPN,
             SessionHandler {
                 shared: service.shared.clone(),
+                policy,
                 kind: ProtocolKind::Agent,
             },
         )
@@ -764,6 +930,32 @@ mod tests {
         }
     }
 
+    fn identity_policy(key: &SecretKey, handshake: &SessionHandshake) -> IdentityPolicy {
+        IdentityPolicy::new(
+            HashMap::from([(key.public(), handshake.node_id.clone())]),
+            HashSet::new(),
+        )
+    }
+
+    fn command_envelope(node_id: &[u8], traceparent: &str, reason: String) -> Vec<u8> {
+        CommandEnvelope {
+            protocol_version: "1.0".to_owned(),
+            message_id: Uuid::now_v7().as_bytes().to_vec(),
+            command_id: Uuid::now_v7().as_bytes().to_vec(),
+            idempotency_key: Uuid::now_v7().as_bytes().to_vec(),
+            node_id: node_id.to_vec(),
+            sequence: 1,
+            issued_at: Some(now_timestamp()),
+            expires_at: Some((SystemTime::now() + Duration::from_secs(30)).into()),
+            expected_revision: 0,
+            traceparent: traceparent.to_owned(),
+            actor_id: "test".to_owned(),
+            reason,
+            payload: None,
+        }
+        .encode_to_vec()
+    }
+
     async fn send_handshake(
         connection: &Connection,
         handshake: &SessionHandshake,
@@ -785,12 +977,40 @@ mod tests {
         SessionHandshakeResponse::decode(response.as_slice()).expect("decode response")
     }
 
+    async fn respond_to_command(connection: Connection) {
+        let (mut send, mut recv) = connection.accept_bi().await.expect("accept command");
+        let mut length = [0_u8; 4];
+        recv.read_exact(&mut length)
+            .await
+            .expect("read command length");
+        let mut command = vec![0_u8; u32::from_be_bytes(length) as usize];
+        recv.read_exact(&mut command).await.expect("read command");
+        CommandEnvelope::decode(command.as_slice()).expect("decode command");
+        let response = AgentEvent {
+            r#type: AgentEventType::CommandResult.into(),
+            payload: b"completed".to_vec(),
+        }
+        .encode_to_vec();
+        let response_len = u32::try_from(response.len()).expect("response length fits u32");
+        send.write_all(&response_len.to_be_bytes())
+            .await
+            .expect("write response length");
+        send.write_all(&response).await.expect("write response");
+        send.finish().expect("finish response");
+    }
+
     #[test]
     fn policy_rejects_unknown_agent_and_revoked_enrollment() {
         let approved = SecretKey::generate().public();
         let revoked = SecretKey::generate().public();
-        let policy = IdentityPolicy::new(HashSet::from([approved]), HashSet::from([revoked]));
+        let approved_node = Uuid::now_v7().as_bytes().to_vec();
+        let policy = IdentityPolicy::new(
+            HashMap::from([(approved, approved_node.clone())]),
+            HashSet::from([revoked]),
+        );
         assert!(policy.permits(approved, AGENT_ALPN));
+        assert!(policy.matches_node(approved, &approved_node));
+        assert!(!policy.matches_node(approved, Uuid::now_v7().as_bytes()));
         assert!(!policy.permits(revoked, ENROLL_ALPN));
         assert!(!policy.permits(SecretKey::generate().public(), AGENT_ALPN));
     }
@@ -910,11 +1130,12 @@ mod tests {
     #[tokio::test]
     async fn direct_connection_is_registered_and_shutdown_is_graceful() {
         let agent_key = SecretKey::generate();
+        let handshake = handshake(&agent_key);
         let service = IrohTransportService::new(8);
         let router = build_router(
             SecretKey::generate(),
             RelayMode::Disabled,
-            IdentityPolicy::new(HashSet::from([agent_key.public()]), HashSet::new()),
+            identity_policy(&agent_key, &handshake),
             &service,
         )
         .await
@@ -929,7 +1150,6 @@ mod tests {
             .connect(router.endpoint().addr(), AGENT_ALPN)
             .await
             .expect("connect agent");
-        let handshake = handshake(&agent_key);
         let response = send_handshake(&connection, &handshake).await;
         assert_eq!(response.result, i32::from(HandshakeResult::Accepted));
 
@@ -968,14 +1188,106 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn command_responses_are_published_with_negotiated_limits() {
+        let agent_key = SecretKey::generate();
+        let mut handshake = handshake(&agent_key);
+        handshake.max_message_size = 256;
+        let service = IrohTransportService::new(16);
+        let router = build_router(
+            SecretKey::generate(),
+            RelayMode::Disabled,
+            identity_policy(&agent_key, &handshake),
+            &service,
+        )
+        .await
+        .expect("build router");
+        let client = Endpoint::builder(presets::Minimal)
+            .secret_key(agent_key.clone())
+            .relay_mode(RelayMode::Disabled)
+            .bind()
+            .await
+            .expect("build client");
+        let connection = client
+            .connect(router.endpoint().addr(), AGENT_ALPN)
+            .await
+            .expect("connect agent");
+        let response = send_handshake(&connection, &handshake).await;
+        assert_eq!(response.result, i32::from(HandshakeResult::Accepted));
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if service
+                    .shared
+                    .inner
+                    .connections
+                    .lock()
+                    .await
+                    .contains_key(&handshake.node_id)
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("connection registered");
+
+        let traceparent = new_traceparent();
+        let oversized = command_envelope(&handshake.node_id, &traceparent, "x".repeat(256));
+        let error = service
+            .send_command(Request::new(SendCommandRequest {
+                node_id: handshake.node_id.clone(),
+                command_envelope: oversized,
+            }))
+            .await
+            .expect_err("negotiated limit enforced");
+        assert_eq!(error.code(), tonic::Code::ResourceExhausted);
+
+        let agent = tokio::spawn(respond_to_command(connection.clone()));
+        let mut events = service
+            .watch_events(Request::new(WatchEventsRequest {
+                after_event_id: Vec::new(),
+            }))
+            .await
+            .expect("watch events")
+            .into_inner();
+        let command = command_envelope(&handshake.node_id, &traceparent, String::new());
+        service
+            .send_command(Request::new(SendCommandRequest {
+                node_id: handshake.node_id.clone(),
+                command_envelope: command,
+            }))
+            .await
+            .expect("send command");
+        agent.await.expect("agent response task");
+        let event = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let event = events.next().await.expect("event stream remains open")?;
+                if event.r#type == i32::from(TransportEventType::CommandResult) {
+                    break Ok::<_, Status>(event);
+                }
+            }
+        })
+        .await
+        .expect("command result arrives")
+        .expect("event is valid");
+        assert_eq!(event.node_id, handshake.node_id);
+        assert_eq!(event.traceparent, traceparent);
+        assert_eq!(event.payload, b"completed");
+
+        shutdown(&service, router).await.expect("shutdown router");
+        client.close().await;
+    }
+
+    #[tokio::test]
     #[ignore = "requires access to the configured public Iroh relay"]
     async fn relay_only_connection_and_disabled_relay_failure() {
         let agent_key = SecretKey::generate();
+        let handshake = handshake(&agent_key);
         let service = IrohTransportService::new(8);
         let router = build_router_with_direct(
             SecretKey::generate(),
             RelayMode::Default,
-            IdentityPolicy::new(HashSet::from([agent_key.public()]), HashSet::new()),
+            identity_policy(&agent_key, &handshake),
             &service,
             false,
         )
@@ -1019,7 +1331,6 @@ mod tests {
         .await
         .expect("relay connection completed")
         .expect("connect over relay");
-        let handshake = handshake(&agent_key);
         let response = send_handshake(&connection, &handshake).await;
         assert_eq!(response.result, i32::from(HandshakeResult::Accepted));
         tokio::time::timeout(Duration::from_secs(2), async {
@@ -1049,11 +1360,12 @@ mod tests {
     #[ignore = "requires access to the configured public Iroh relay"]
     async fn relay_and_direct_paths_converge_to_direct() {
         let agent_key = SecretKey::generate();
+        let handshake = handshake(&agent_key);
         let service = IrohTransportService::new(16);
         let router = build_router(
             SecretKey::generate(),
             RelayMode::Default,
-            IdentityPolicy::new(HashSet::from([agent_key.public()]), HashSet::new()),
+            identity_policy(&agent_key, &handshake),
             &service,
         )
         .await
@@ -1073,7 +1385,6 @@ mod tests {
         .await
         .expect("connection completed")
         .expect("connect agent");
-        let handshake = handshake(&agent_key);
         let response = send_handshake(&connection, &handshake).await;
         assert_eq!(response.result, i32::from(HandshakeResult::Accepted));
 
