@@ -32,7 +32,7 @@ type EventHandler interface {
 }
 
 type GapReconciler interface {
-	ReconcileEventGap(context.Context) error
+	ReconcileEventGap(context.Context, func(context.Context, []byte) (bool, error)) error
 }
 
 type Client struct {
@@ -93,7 +93,7 @@ func (c *Client) RunWatch(ctx context.Context, cursors CursorStore, handler Even
 				return errors.New("transport event gap cannot be reconciled")
 			}
 			reconcileCtx, cancel := context.WithTimeout(ctx, c.deadline)
-			reconcileErr := reconciler.ReconcileEventGap(reconcileCtx)
+			reconcileErr := reconciler.ReconcileEventGap(reconcileCtx, c.NodeConnected)
 			cancel()
 			if reconcileErr != nil {
 				return fmt.Errorf("reconcile transport event gap: %w", reconcileErr)
@@ -111,6 +111,24 @@ func (c *Client) RunWatch(ctx context.Context, cursors CursorStore, handler Even
 		case <-timer.C:
 		}
 	}
+}
+
+func (c *Client) NodeConnected(ctx context.Context, nodeID []byte) (bool, error) {
+	connection, err := c.dial()
+	if err != nil {
+		return false, err
+	}
+	defer connection.Close()
+	rpcCtx, cancel := context.WithTimeout(ctx, c.deadline)
+	defer cancel()
+	_, err = transportv1.NewTransportServiceClient(connection).GetNodeConnection(rpcCtx, &transportv1.GetNodeConnectionRequest{NodeId: nodeID})
+	if status.Code(err) == codes.NotFound {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("get transport node connection: %w", err)
+	}
+	return true, nil
 }
 
 func (c *Client) watchOnce(ctx context.Context, cursors CursorStore, handler EventHandler, reconcileCursor bool) error {

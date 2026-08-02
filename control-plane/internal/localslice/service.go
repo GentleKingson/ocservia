@@ -209,7 +209,51 @@ func (s *Service) LastEventID(ctx context.Context) ([]byte, error) {
 	return id[:], nil
 }
 
-func (s *Service) ReconcileEventGap(ctx context.Context) error {
+func (s *Service) ReconcileEventGap(ctx context.Context, nodeConnected func(context.Context, []byte) (bool, error)) error {
+	rows, err := s.pool.Query(ctx, `
+		SELECT node.id, latest.traceparent
+		FROM nodes AS node
+		JOIN workspaces AS workspace ON workspace.id = node.workspace_id
+		JOIN LATERAL (
+			SELECT event.traceparent
+			FROM transport_events AS event
+			WHERE event.node_id = node.id
+			ORDER BY event.event_id DESC
+			LIMIT 1
+		) AS latest ON true
+		WHERE workspace.slug = $1 AND node.status = 'approved'`, workspaceSlug)
+	if err != nil {
+		return fmt.Errorf("select simulator nodes after transport event gap: %w", err)
+	}
+	type disconnectedNode struct {
+		id          uuid.UUID
+		traceparent string
+	}
+	candidates := make([]disconnectedNode, 0)
+	for rows.Next() {
+		var node disconnectedNode
+		if err := rows.Scan(&node.id, &node.traceparent); err != nil {
+			rows.Close()
+			return fmt.Errorf("scan simulator node after transport event gap: %w", err)
+		}
+		candidates = append(candidates, node)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return fmt.Errorf("iterate simulator nodes after transport event gap: %w", err)
+	}
+	rows.Close()
+	disconnected := make([]disconnectedNode, 0, len(candidates))
+	for _, node := range candidates {
+		connected, err := nodeConnected(ctx, node.id[:])
+		if err != nil {
+			return fmt.Errorf("reconcile simulator node connection %s: %w", node.id, err)
+		}
+		if !connected {
+			disconnected = append(disconnected, node)
+		}
+	}
+
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return fmt.Errorf("begin transport event gap reconciliation: %w", err)
@@ -238,57 +282,27 @@ func (s *Service) ReconcileEventGap(ctx context.Context) error {
 			return fmt.Errorf("record transport event gap: %w", err)
 		}
 	}
-	rows, err := tx.Query(ctx, `
-		SELECT node.id, latest.traceparent
-		FROM nodes AS node
-		JOIN workspaces AS workspace ON workspace.id = node.workspace_id
-		JOIN LATERAL (
-			SELECT event.traceparent
-			FROM transport_events AS event
-			WHERE event.node_id = node.id
-			ORDER BY event.event_id DESC
-			LIMIT 1
-		) AS latest ON true
-		WHERE workspace.slug = $1 AND node.status = 'approved'
-		FOR UPDATE OF node`, workspaceSlug)
-	if err != nil {
-		return fmt.Errorf("select simulator nodes after transport event gap: %w", err)
-	}
-	type disconnectedNode struct {
-		id          uuid.UUID
-		traceparent string
-	}
-	nodes := make([]disconnectedNode, 0)
-	for rows.Next() {
-		var node disconnectedNode
-		if err := rows.Scan(&node.id, &node.traceparent); err != nil {
-			rows.Close()
-			return fmt.Errorf("scan simulator node after transport event gap: %w", err)
-		}
-		nodes = append(nodes, node)
-	}
-	if err := rows.Err(); err != nil {
-		rows.Close()
-		return fmt.Errorf("iterate simulator nodes after transport event gap: %w", err)
-	}
-	rows.Close()
 	now := s.now()
-	for _, node := range nodes {
+	for _, node := range disconnected {
 		eventID, err := uuid.NewV7()
 		if err != nil {
 			return fmt.Errorf("generate transport gap event ID: %w", err)
+		}
+		result, err := tx.Exec(ctx, `
+			UPDATE nodes
+			SET status = 'offline', updated_at = $2, version = version + 1
+			WHERE id = $1 AND status = 'approved'`, node.id, now)
+		if err != nil {
+			return fmt.Errorf("mark simulator node offline after transport event gap: %w", err)
+		}
+		if result.RowsAffected() == 0 {
+			continue
 		}
 		if _, err := tx.Exec(ctx, `
 			INSERT INTO transport_events (event_id, node_id, event_type, occurred_at, traceparent, payload, transport_cursor_valid)
 			VALUES ($1, $2, 'disconnected', $3, $4, $5, false)`,
 			eventID, node.id, now, node.traceparent, []byte("transport event retention gap")); err != nil {
 			return fmt.Errorf("record simulator disconnect after transport event gap: %w", err)
-		}
-		if _, err := tx.Exec(ctx, `
-			UPDATE nodes
-			SET status = 'offline', updated_at = $2, version = version + 1
-			WHERE id = $1`, node.id, now); err != nil {
-			return fmt.Errorf("mark simulator node offline after transport event gap: %w", err)
 		}
 	}
 	if err := tx.Commit(ctx); err != nil {
