@@ -44,6 +44,8 @@ const MAX_STREAMS: u32 = 8;
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 const STREAM_TIMEOUT: Duration = Duration::from_secs(15);
 const MAX_CONNECTIONS: usize = 4096;
+const MAX_ENROLLMENT_CONNECTIONS: usize = 64;
+const MAX_AGENT_CONNECTIONS: usize = MAX_CONNECTIONS - MAX_ENROLLMENT_CONNECTIONS;
 const MAX_ATTEMPTS_PER_MINUTE: usize = 30;
 const MAX_RESPONSE_FRAMES: usize = 128;
 
@@ -145,7 +147,8 @@ struct Inner {
     connections: Mutex<HashMap<Vec<u8>, RegisteredConnection>>,
     events: Mutex<EventState>,
     event_capacity: usize,
-    connection_permits: Arc<Semaphore>,
+    agent_connection_permits: Arc<Semaphore>,
+    enrollment_connection_permits: Arc<Semaphore>,
     shutdown: watch::Sender<bool>,
 }
 
@@ -172,7 +175,8 @@ impl Shared {
                     subscribers: Vec::new(),
                 }),
                 event_capacity: capacity,
-                connection_permits: Arc::new(Semaphore::new(MAX_CONNECTIONS)),
+                agent_connection_permits: Arc::new(Semaphore::new(MAX_AGENT_CONNECTIONS)),
+                enrollment_connection_permits: Arc::new(Semaphore::new(MAX_ENROLLMENT_CONNECTIONS)),
                 shutdown,
             }),
         }
@@ -421,10 +425,11 @@ impl std::fmt::Debug for SessionHandler {
 
 impl ProtocolHandler for SessionHandler {
     async fn accept(&self, connection: Connection) -> Result<(), AcceptError> {
-        let permit = self
-            .shared
-            .inner
-            .connection_permits
+        let permits = match self.kind {
+            ProtocolKind::Enroll => &self.shared.inner.enrollment_connection_permits,
+            ProtocolKind::Agent => &self.shared.inner.agent_connection_permits,
+        };
+        let permit = permits
             .clone()
             .try_acquire_owned()
             .map_err(|_| protocol_error("connection capacity reached"))?;
@@ -1143,9 +1148,53 @@ mod tests {
         let service = IrohTransportService::new(usize::MAX);
         assert_eq!(service.shared.inner.event_capacity, MAX_CONNECTIONS);
         assert_eq!(
-            service.shared.inner.connection_permits.available_permits(),
-            MAX_CONNECTIONS
+            service
+                .shared
+                .inner
+                .agent_connection_permits
+                .available_permits(),
+            MAX_AGENT_CONNECTIONS
         );
+        assert_eq!(
+            service
+                .shared
+                .inner
+                .enrollment_connection_permits
+                .available_permits(),
+            MAX_ENROLLMENT_CONNECTIONS
+        );
+    }
+
+    #[test]
+    fn enrollment_capacity_cannot_exhaust_agent_capacity() {
+        let service = IrohTransportService::new(8);
+        let enrollment_permits = service
+            .shared
+            .inner
+            .enrollment_connection_permits
+            .clone()
+            .try_acquire_many_owned(
+                u32::try_from(MAX_ENROLLMENT_CONNECTIONS).expect("enrollment capacity fits u32"),
+            )
+            .expect("reserve all enrollment permits");
+
+        assert_eq!(
+            service
+                .shared
+                .inner
+                .enrollment_connection_permits
+                .available_permits(),
+            0
+        );
+        assert_eq!(
+            service
+                .shared
+                .inner
+                .agent_connection_permits
+                .available_permits(),
+            MAX_AGENT_CONNECTIONS
+        );
+        drop(enrollment_permits);
     }
 
     #[test]
