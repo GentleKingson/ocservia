@@ -83,7 +83,7 @@ func (s *Server) listOperations(w http.ResponseWriter, r *http.Request) {
 		writeProblem(w, r, http.StatusBadRequest, "https://ocservia.dev/problems/invalid-cursor", "Cursor is invalid", "cursor must be a UUIDv7 operation ID")
 		return
 	}
-	limit, ok := pageSize(r, 100)
+	limit, ok := pageSize(r, 50)
 	if !ok {
 		writeProblem(w, r, http.StatusBadRequest, "https://ocservia.dev/problems/invalid-page-size", "Page size is invalid", "page_size must be an integer between 1 and 200")
 		return
@@ -112,7 +112,7 @@ func (s *Server) listEvents(w http.ResponseWriter, r *http.Request) {
 		writeProblem(w, r, http.StatusBadRequest, "https://ocservia.dev/problems/invalid-cursor", "Cursor is invalid", "after must be a UUIDv7 event ID")
 		return
 	}
-	limit, ok := pageSize(r, 100)
+	limit, ok := pageSize(r, 50)
 	if !ok {
 		writeProblem(w, r, http.StatusBadRequest, "https://ocservia.dev/problems/invalid-page-size", "Page size is invalid", "page_size must be an integer between 1 and 200")
 		return
