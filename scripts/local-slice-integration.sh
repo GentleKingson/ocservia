@@ -179,6 +179,11 @@ fi
 
 stop_pid "${STUB_PID}"
 rm -f "${SOCKET}"
+expired="$(create_probe '{"heartbeat_count":1}')"
+expired_id="$(jq -r .id <<<"${expired}")"
+docker exec "${POSTGRES}" psql -v ON_ERROR_STOP=1 -U ocservia_owner -d ocservia -c \
+  "UPDATE local_slice_jobs SET expires_at = now() - interval '1 second' WHERE operation_id = '${expired_id}'" >/dev/null
+wait_state "${expired_id}" expired >/dev/null
 recover="$(create_probe '{"heartbeat_count":2,"delay_millis":10}')"
 recover_id="$(jq -r .id <<<"${recover}")"
 sleep 1

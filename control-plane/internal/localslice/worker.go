@@ -45,6 +45,10 @@ func (w *Worker) dispatch(ctx context.Context) error {
 		case <-ctx.Done():
 			return ctx.Err()
 		case <-ticker.C:
+			if err := w.service.ExpireJobs(ctx); err != nil {
+				w.logger.ErrorContext(ctx, "expire simulator jobs failed", "error", err)
+				continue
+			}
 			jobs, err := w.service.ClaimJobs(ctx, 16)
 			if err != nil {
 				w.logger.ErrorContext(ctx, "claim simulator jobs failed", "error", err)

@@ -108,8 +108,8 @@ func (s *Service) Create(ctx context.Context, scenario Scenario, requestID, trac
 		return Operation{}, fmt.Errorf("insert simulator operation: %w", err)
 	}
 	if _, err := tx.Exec(ctx, `
-		INSERT INTO local_slice_jobs (operation_id, command_envelope, traceparent, available_at, created_at)
-		VALUES ($1, $2, $3, $4, $4)`, operationID, envelope, traceparent, now); err != nil {
+		INSERT INTO local_slice_jobs (operation_id, command_envelope, traceparent, available_at, expires_at, created_at)
+		VALUES ($1, $2, $3, $4, $5, $4)`, operationID, envelope, traceparent, now, now.Add(time.Minute)); err != nil {
 		return Operation{}, fmt.Errorf("insert simulator job: %w", err)
 	}
 	hash := sha256.Sum256([]byte(operationID.String() + traceparent))
@@ -410,6 +410,7 @@ func (s *Service) ClaimJobs(ctx context.Context, limit int) ([]Job, error) {
 			FROM local_slice_jobs AS job
 			JOIN operations AS operation ON operation.id = job.operation_id
 			WHERE job.available_at <= now()
+			  AND job.expires_at > now()
 			  AND job.dispatched_at IS NULL
 			  AND operation.state NOT IN ('succeeded', 'failed', 'expired', 'rolled_back', 'superseded')
 			ORDER BY job.available_at, job.operation_id
@@ -437,6 +438,28 @@ func (s *Service) ClaimJobs(ctx context.Context, limit int) ([]Job, error) {
 		jobs = append(jobs, job)
 	}
 	return jobs, rows.Err()
+}
+
+func (s *Service) ExpireJobs(ctx context.Context) error {
+	_, err := s.pool.Exec(ctx, `
+		WITH expired AS (
+			UPDATE operations AS operation
+			SET state = 'expired', updated_at = now(), version = version + 1
+			FROM local_slice_jobs AS job
+			WHERE operation.id = job.operation_id
+			  AND job.dispatched_at IS NULL
+			  AND job.expires_at <= now()
+			  AND operation.state NOT IN ('succeeded', 'failed', 'expired', 'rolled_back', 'superseded')
+			RETURNING operation.id
+		)
+		UPDATE local_slice_jobs AS job
+		SET last_error = 'command expired before dispatch'
+		FROM expired
+		WHERE job.operation_id = expired.id`)
+	if err != nil {
+		return fmt.Errorf("expire simulator jobs: %w", err)
+	}
+	return nil
 }
 
 func (s *Service) MarkDispatched(ctx context.Context, operationID uuid.UUID) error {

@@ -4,6 +4,7 @@ CREATE TABLE local_slice_jobs (
     traceparent text NOT NULL CHECK (traceparent ~ '^00-[0-9a-f]{32}-[0-9a-f]{16}-[0-9a-f]{2}$'),
     attempts integer NOT NULL DEFAULT 0 CHECK (attempts >= 0),
     available_at timestamptz NOT NULL,
+    expires_at timestamptz NOT NULL,
     dispatched_at timestamptz,
     last_error text,
     created_at timestamptz NOT NULL

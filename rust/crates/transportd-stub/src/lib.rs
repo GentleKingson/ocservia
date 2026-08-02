@@ -5,7 +5,7 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::pin::Pin;
 use std::sync::Arc;
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use ocservia_contracts::generated::ocserv::platform::agent::v1::{
     CommandEnvelope, SimulationProbe, command_envelope,
@@ -316,6 +316,7 @@ impl TransportService for StubService {
             ));
         }
         validate_traceparent(&envelope.traceparent)?;
+        validate_command_times(envelope.issued_at.as_ref(), envelope.expires_at.as_ref())?;
         let idempotency_key = validate_id(&envelope.idempotency_key, "idempotency_key")?;
         let Some(command_envelope::Payload::SimulationProbe(probe)) = envelope.payload else {
             return Err(Status::unimplemented("stub accepts only simulation probes"));
@@ -445,6 +446,43 @@ fn validate_traceparent(value: &str) -> Result<(), Status> {
     Ok(())
 }
 
+fn validate_command_times(
+    issued_at: Option<&prost_types::Timestamp>,
+    expires_at: Option<&prost_types::Timestamp>,
+) -> Result<(), Status> {
+    let issued_at = timestamp_duration(
+        issued_at.ok_or_else(|| Status::invalid_argument("issued_at is required"))?,
+        "issued_at",
+    )?;
+    let expires_at = timestamp_duration(
+        expires_at.ok_or_else(|| Status::invalid_argument("expires_at is required"))?,
+        "expires_at",
+    )?;
+    if expires_at <= issued_at {
+        return Err(Status::invalid_argument("expires_at must follow issued_at"));
+    }
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|_| Status::internal("system time precedes the Unix epoch"))?;
+    if now >= expires_at {
+        return Err(Status::deadline_exceeded("command envelope expired"));
+    }
+    Ok(())
+}
+
+fn timestamp_duration(
+    timestamp: &prost_types::Timestamp,
+    name: &'static str,
+) -> Result<Duration, Status> {
+    if timestamp.seconds < 0 || !(0..1_000_000_000).contains(&timestamp.nanos) {
+        return Err(Status::invalid_argument(format!("invalid {name}")));
+    }
+    Ok(Duration::new(
+        timestamp.seconds.cast_unsigned(),
+        timestamp.nanos.cast_unsigned(),
+    ))
+}
+
 fn new_event(
     node_id: &[u8],
     event_type: TransportEventType,
@@ -496,6 +534,7 @@ mod tests {
         idempotency_key: Vec<u8>,
         probe: SimulationProbe,
     ) -> SendCommandRequest {
+        let now = SystemTime::now();
         let envelope = CommandEnvelope {
             protocol_version: "1.0".to_owned(),
             message_id: Uuid::now_v7().as_bytes().to_vec(),
@@ -503,8 +542,8 @@ mod tests {
             idempotency_key,
             node_id: node_id.clone(),
             sequence: 1,
-            issued_at: None,
-            expires_at: None,
+            issued_at: Some(now.into()),
+            expires_at: Some((now + Duration::from_mins(1)).into()),
             expected_revision: 0,
             traceparent: new_traceparent(),
             actor_id: "test".to_owned(),
@@ -525,6 +564,26 @@ mod tests {
             validate_traceparent("00-0123456789ABCDEF0123456789abcdef-0123456789abcdef-01")
                 .is_err()
         );
+    }
+
+    #[tokio::test]
+    async fn expired_command_is_rejected_before_acceptance() {
+        let service = StubService::new(8);
+        let node_id = Uuid::now_v7().as_bytes().to_vec();
+        let mut request = probe_request(node_id, Uuid::now_v7().as_bytes().to_vec());
+        let mut envelope = CommandEnvelope::decode(request.command_envelope.as_slice())
+            .expect("valid command envelope");
+        let now = SystemTime::now();
+        envelope.issued_at = Some((now - Duration::from_mins(2)).into());
+        envelope.expires_at = Some((now - Duration::from_mins(1)).into());
+        request.command_envelope = envelope.encode_to_vec();
+
+        let error = service
+            .send_command(Request::new(request))
+            .await
+            .expect_err("expired command rejected");
+        assert_eq!(error.code(), tonic::Code::DeadlineExceeded);
+        assert!(service.state.accepted_commands.lock().await.keys.is_empty());
     }
 
     #[test]
