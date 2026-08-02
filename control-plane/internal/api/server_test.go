@@ -6,8 +6,11 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
+
+	"github.com/GentleKingson/ocservia/control-plane/internal/localslice"
 )
 
 func TestLiveAndRequestID(t *testing.T) {
@@ -65,6 +68,17 @@ func TestOperationsAcceptConfiguredDevelopmentBearer(t *testing.T) {
 	server.http.Handler.ServeHTTP(response, request)
 	if response.Code == http.StatusUnauthorized {
 		t.Fatal("configured development bearer was rejected")
+	}
+}
+
+func TestCreateSimulationRejectsNullBody(t *testing.T) {
+	server := New("127.0.0.1:0", nil, BuildInfo{}, slog.New(slog.NewTextHandler(io.Discard, nil)), 1024, time.Second, false, "", 1)
+	server.EnableLocalSlice(localslice.New(nil))
+	response := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/development/simulations", strings.NewReader("null"))
+	server.http.Handler.ServeHTTP(response, request)
+	if response.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
 	}
 }
 

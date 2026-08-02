@@ -22,11 +22,15 @@ func (s *Server) createSimulation(w http.ResponseWriter, r *http.Request) {
 		writeProblem(w, r, http.StatusNotFound, "https://ocservia.dev/problems/not-found", "Resource not found", "the requested resource does not exist")
 		return
 	}
-	var scenario localslice.Scenario
+	var scenario *localslice.Scenario
 	decoder := json.NewDecoder(r.Body)
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(&scenario); err != nil {
 		writeProblem(w, r, http.StatusBadRequest, "https://ocservia.dev/problems/invalid-request", "Request is invalid", "the simulation request is invalid")
+		return
+	}
+	if scenario == nil {
+		writeProblem(w, r, http.StatusBadRequest, "https://ocservia.dev/problems/invalid-request", "Request is invalid", "the simulation request must be a JSON object")
 		return
 	}
 	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
@@ -34,7 +38,7 @@ func (s *Server) createSimulation(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	requestID, _ := r.Context().Value(requestIDKey{}).(string)
-	operation, err := service.Create(r.Context(), scenario, requestID, requestTraceparent(r))
+	operation, err := service.Create(r.Context(), *scenario, requestID, requestTraceparent(r))
 	if err != nil {
 		s.logger.ErrorContext(r.Context(), "create local simulation", "error", err)
 		if errors.Is(err, localslice.ErrInvalidScenario) {

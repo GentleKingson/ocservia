@@ -121,6 +121,13 @@ jq -e --arg node "${normal_node}" 'all(.items[] | select(.node_id == $node); .tr
 page="$(curl --fail --silent "http://127.0.0.1:${API_PORT}/api/v1/events?page_size=2")"
 jq -e '.page.has_more == true and (.page.next_cursor | type == "string") and (.items | length == 2)' <<<"${page}" >/dev/null
 
+high_event_id="019cf100-0000-7000-8000-ffffffffffff"
+low_event_id="019cf100-0000-7000-8000-000000000001"
+docker exec "${POSTGRES}" psql -v ON_ERROR_STOP=1 -U ocservia_owner -d ocservia -c \
+  "INSERT INTO transport_events (event_id, node_id, event_type, occurred_at, traceparent, payload, transport_cursor_valid) VALUES ('${high_event_id}', '${normal_node}', 'heartbeat', now(), '00-0123456789abcdef0123456789abcdef-0123456789abcdef-01', '', false), ('${low_event_id}', '${normal_node}', 'heartbeat', now(), '00-0123456789abcdef0123456789abcdef-0123456789abcdef-01', '', false)" >/dev/null
+curl --fail --silent "http://127.0.0.1:${API_PORT}/api/v1/events?page_size=200&after=${high_event_id}" |
+  jq -e --arg id "${low_event_id}" 'any(.items[]; .id == $id)' >/dev/null
+
 duplicate="$(create_probe '{"heartbeat_count":3,"delay_millis":10,"duplicate_event":true}')"
 duplicate_id="$(jq -r .id <<<"${duplicate}")"
 duplicate_node="$(jq -r .node_id <<<"${duplicate}")"
@@ -180,7 +187,7 @@ start_stub
 start_control
 wait_state "${recover_id}" succeeded >/dev/null
 test "$(docker exec "${POSTGRES}" psql -U ocservia_owner -d ocservia -Atc "SELECT status FROM nodes WHERE id = '${normal_node}'")" = "offline"
-test "$(docker exec "${POSTGRES}" psql -U ocservia_owner -d ocservia -Atc "SELECT transport_cursor_valid FROM transport_events WHERE node_id = '${normal_node}' ORDER BY event_id DESC LIMIT 1")" = "f"
+test "$(docker exec "${POSTGRES}" psql -U ocservia_owner -d ocservia -Atc "SELECT transport_cursor_valid FROM transport_events WHERE node_id = '${normal_node}' ORDER BY ingest_sequence DESC LIMIT 1")" = "f"
 test "$(docker exec "${POSTGRES}" psql -U ocservia_owner -d ocservia -Atc "SELECT count(*) FROM transport_events WHERE transport_cursor_valid")" -gt 0
 curl --fail --silent "http://127.0.0.1:${API_PORT}/api/v1/events?page_size=200" |
   jq -e --arg node "${normal_node}" '[.items[] | select(.node_id == $node)] | last | .type == "disconnected"' >/dev/null

@@ -189,8 +189,10 @@ func (s *Service) ListEvents(ctx context.Context, after uuid.UUID, limit int) ([
 	rows, err := s.pool.Query(ctx, `
 		SELECT event_id::text, node_id::text, event_type, traceparent, occurred_at
 		FROM transport_events
-		WHERE ($1::uuid IS NULL OR event_id > $1)
-		ORDER BY event_id
+		WHERE ($1::uuid IS NULL OR ingest_sequence > (
+			SELECT ingest_sequence FROM transport_events WHERE event_id = $1
+		))
+		ORDER BY ingest_sequence
 		LIMIT $2`, nullableUUID(after), limit+1)
 	if err != nil {
 		return nil, false, fmt.Errorf("list transport events: %w", err)
@@ -216,7 +218,7 @@ func (s *Service) ListEvents(ctx context.Context, after uuid.UUID, limit int) ([
 
 func (s *Service) LastEventID(ctx context.Context) ([]byte, error) {
 	var id uuid.UUID
-	if err := s.pool.QueryRow(ctx, "SELECT event_id FROM transport_events WHERE transport_cursor_valid ORDER BY event_id DESC LIMIT 1").Scan(&id); errors.Is(err, pgx.ErrNoRows) {
+	if err := s.pool.QueryRow(ctx, "SELECT event_id FROM transport_events WHERE transport_cursor_valid ORDER BY ingest_sequence DESC LIMIT 1").Scan(&id); errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil
 	} else if err != nil {
 		return nil, fmt.Errorf("read event cursor: %w", err)
@@ -233,7 +235,7 @@ func (s *Service) ReconcileEventGap(ctx context.Context, nodeConnected func(cont
 			SELECT event.traceparent
 			FROM transport_events AS event
 			WHERE event.node_id = node.id
-			ORDER BY event.event_id DESC
+			ORDER BY event.ingest_sequence DESC
 			LIMIT 1
 		) AS latest ON true
 		WHERE workspace.slug = $1 AND node.status = 'approved'`, workspaceSlug)

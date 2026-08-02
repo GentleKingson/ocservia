@@ -14,6 +14,7 @@ CREATE INDEX local_slice_jobs_dispatch_idx
 
 CREATE TABLE transport_events (
     event_id uuid PRIMARY KEY,
+    ingest_sequence bigint GENERATED ALWAYS AS IDENTITY UNIQUE,
     node_id uuid NOT NULL REFERENCES nodes(id) ON DELETE RESTRICT,
     event_type text NOT NULL CHECK (event_type IN ('connected', 'disconnected', 'command_result', 'heartbeat', 'error')),
     occurred_at timestamptz NOT NULL,
