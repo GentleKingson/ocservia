@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/contracts"]
+members = ["crates/contracts", "crates/transportd-stub"]
 resolver = "3"
 
 [workspace.package]
@@ -12,6 +12,10 @@ prost = "=0.14.4"
 prost-types = "=0.14.4"
 tonic = "=0.14.6"
 tonic-prost = "=0.14.6"
+tokio = "=1.53.1"
+tokio-stream = "=0.1.19"
+tonic-health = "=0.14.6"
+uuid = "=1.24.0"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

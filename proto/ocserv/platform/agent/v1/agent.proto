@@ -57,6 +57,7 @@ message CommandEnvelope {
     ConfigPlan config_plan = 103;
     ConfigApply config_apply = 104;
     ServiceReload service_reload = 105;
+    SimulationProbe simulation_probe = 106;
   }
 }
 
@@ -82,3 +83,12 @@ message ConfigApply {
 }
 
 message ServiceReload {}
+
+// SimulationProbe exists only to exercise the local, side-effect-free slice.
+message SimulationProbe {
+  uint32 heartbeat_count = 1;
+  uint32 delay_millis = 2;
+  bool duplicate_event = 3;
+  bool return_error = 4;
+  bool disconnect_after = 5;
+}

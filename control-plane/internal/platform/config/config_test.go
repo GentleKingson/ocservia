@@ -62,3 +62,18 @@ func TestMigrateOnlyAcceptsRuntimeRole(t *testing.T) {
 		t.Fatalf("unexpected migration config: %+v", config)
 	}
 }
+
+func TestLocalSimulatorIsRejectedInProduction(t *testing.T) {
+	lookup := func(key string) (string, bool) {
+		values := map[string]string{
+			"OCSERV_DATABASE_URL":    "postgres://db/test",
+			"OCSERV_ENVIRONMENT":     "production",
+			"OCSERV_LOCAL_SIMULATOR": "true",
+		}
+		value, ok := values[key]
+		return value, ok
+	}
+	if _, err := Load(nil, lookup); err == nil {
+		t.Fatal("Load() accepted the local simulator in production")
+	}
+}

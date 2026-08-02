@@ -22,6 +22,18 @@ services:
     volumes:
       - ./otel-collector.yaml:/etc/otelcol/config.yaml:ro
 
+  transportd-stub:
+    build:
+      context: ../..
+      dockerfile: rust/transportd-stub.Dockerfile
+    volumes:
+      - transport-runtime:/run/ocserv-platform
+    healthcheck:
+      test: ["CMD-SHELL", "test -S /run/ocserv-platform/transportd.sock"]
+      interval: 2s
+      timeout: 2s
+      retries: 20
+
   migrate:
     build:
       context: ../..
@@ -51,6 +63,10 @@ services:
       OCSERV_HTTP_ADDRESS: 0.0.0.0:8080
       OCSERV_DATABASE_URL: postgres://ocservia_app:development-runtime-only@postgres:5432/ocservia?sslmode=disable
       OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
+      OCSERV_LOCAL_SIMULATOR: "true"
+      OCSERV_TRANSPORT_SOCKET: /run/ocserv-platform/transportd.sock
+    volumes:
+      - transport-runtime:/run/ocserv-platform
     ports:
       - "127.0.0.1:${OCSERV_HTTP_PORT:-8080}:8080"
     depends_on:
@@ -60,6 +76,8 @@ services:
         condition: service_completed_successfully
       otel-collector:
         condition: service_started
+      transportd-stub:
+        condition: service_healthy
     healthcheck:
       test: ["CMD", "curl", "--fail", "--silent", "http://127.0.0.1:8080/readyz"]
       interval: 5s
@@ -78,5 +96,17 @@ services:
       control-plane:
         condition: service_healthy
 
+  e2e:
+    profiles: ["e2e"]
+    build:
+      context: ../..
+      dockerfile: web/playwright.Dockerfile
+    environment:
+      PLAYWRIGHT_BASE_URL: http://web:4173
+    depends_on:
+      web:
+        condition: service_started
+
 volumes:
   postgres-data:
+  transport-runtime:

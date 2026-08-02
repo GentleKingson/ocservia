@@ -127,6 +127,8 @@ const (
 	TransportEventType_TRANSPORT_EVENT_TYPE_CONNECTED      TransportEventType = 1
 	TransportEventType_TRANSPORT_EVENT_TYPE_DISCONNECTED   TransportEventType = 2
 	TransportEventType_TRANSPORT_EVENT_TYPE_COMMAND_RESULT TransportEventType = 3
+	TransportEventType_TRANSPORT_EVENT_TYPE_HEARTBEAT      TransportEventType = 4
+	TransportEventType_TRANSPORT_EVENT_TYPE_ERROR          TransportEventType = 5
 )
 
 // Enum value maps for TransportEventType.
@@ -136,12 +138,16 @@ var (
 		1: "TRANSPORT_EVENT_TYPE_CONNECTED",
 		2: "TRANSPORT_EVENT_TYPE_DISCONNECTED",
 		3: "TRANSPORT_EVENT_TYPE_COMMAND_RESULT",
+		4: "TRANSPORT_EVENT_TYPE_HEARTBEAT",
+		5: "TRANSPORT_EVENT_TYPE_ERROR",
 	}
 	TransportEventType_value = map[string]int32{
 		"TRANSPORT_EVENT_TYPE_UNSPECIFIED":    0,
 		"TRANSPORT_EVENT_TYPE_CONNECTED":      1,
 		"TRANSPORT_EVENT_TYPE_DISCONNECTED":   2,
 		"TRANSPORT_EVENT_TYPE_COMMAND_RESULT": 3,
+		"TRANSPORT_EVENT_TYPE_HEARTBEAT":      4,
+		"TRANSPORT_EVENT_TYPE_ERROR":          5,
 	}
 )
 
@@ -615,6 +621,7 @@ type TransportEvent struct {
 	Type          TransportEventType     `protobuf:"varint,3,opt,name=type,proto3,enum=ocserv.platform.transport.v1.TransportEventType" json:"type,omitempty"`
 	OccurredAt    *timestamppb.Timestamp `protobuf:"bytes,4,opt,name=occurred_at,json=occurredAt,proto3" json:"occurred_at,omitempty"`
 	Payload       []byte                 `protobuf:"bytes,5,opt,name=payload,proto3" json:"payload,omitempty"`
+	Traceparent   string                 `protobuf:"bytes,6,opt,name=traceparent,proto3" json:"traceparent,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -684,6 +691,13 @@ func (x *TransportEvent) GetPayload() []byte {
 	return nil
 }
 
+func (x *TransportEvent) GetTraceparent() string {
+	if x != nil {
+		return x.Traceparent
+	}
+	return ""
+}
+
 var File_ocserv_platform_transport_v1_transport_proto protoreflect.FileDescriptor
 
 const file_ocserv_platform_transport_v1_transport_proto_rawDesc = "" +
@@ -712,14 +726,15 @@ const file_ocserv_platform_transport_v1_transport_proto_rawDesc = "" +
 	"\x06reason\x18\x02 \x01(\tR\x06reason\"\x13\n" +
 	"\x11CloseNodeResponse\":\n" +
 	"\x12WatchEventsRequest\x12$\n" +
-	"\x0eafter_event_id\x18\x01 \x01(\fR\fafterEventId\"\xe1\x01\n" +
+	"\x0eafter_event_id\x18\x01 \x01(\fR\fafterEventId\"\x83\x02\n" +
 	"\x0eTransportEvent\x12\x19\n" +
 	"\bevent_id\x18\x01 \x01(\fR\aeventId\x12\x17\n" +
 	"\anode_id\x18\x02 \x01(\fR\x06nodeId\x12D\n" +
 	"\x04type\x18\x03 \x01(\x0e20.ocserv.platform.transport.v1.TransportEventTypeR\x04type\x12;\n" +
 	"\voccurred_at\x18\x04 \x01(\v2\x1a.google.protobuf.TimestampR\n" +
 	"occurredAt\x12\x18\n" +
-	"\apayload\x18\x05 \x01(\fR\apayload*g\n" +
+	"\apayload\x18\x05 \x01(\fR\apayload\x12 \n" +
+	"\vtraceparent\x18\x06 \x01(\tR\vtraceparent*g\n" +
 	"\fHealthStatus\x12\x1d\n" +
 	"\x19HEALTH_STATUS_UNSPECIFIED\x10\x00\x12\x19\n" +
 	"\x15HEALTH_STATUS_SERVING\x10\x01\x12\x1d\n" +
@@ -727,12 +742,14 @@ const file_ocserv_platform_transport_v1_transport_proto_rawDesc = "" +
 	"\x0eConnectionPath\x12\x1f\n" +
 	"\x1bCONNECTION_PATH_UNSPECIFIED\x10\x00\x12\x1a\n" +
 	"\x16CONNECTION_PATH_DIRECT\x10\x01\x12\x19\n" +
-	"\x15CONNECTION_PATH_RELAY\x10\x02*\xae\x01\n" +
+	"\x15CONNECTION_PATH_RELAY\x10\x02*\xf2\x01\n" +
 	"\x12TransportEventType\x12$\n" +
 	" TRANSPORT_EVENT_TYPE_UNSPECIFIED\x10\x00\x12\"\n" +
 	"\x1eTRANSPORT_EVENT_TYPE_CONNECTED\x10\x01\x12%\n" +
 	"!TRANSPORT_EVENT_TYPE_DISCONNECTED\x10\x02\x12'\n" +
-	"#TRANSPORT_EVENT_TYPE_COMMAND_RESULT\x10\x032\xc5\x04\n" +
+	"#TRANSPORT_EVENT_TYPE_COMMAND_RESULT\x10\x03\x12\"\n" +
+	"\x1eTRANSPORT_EVENT_TYPE_HEARTBEAT\x10\x04\x12\x1e\n" +
+	"\x1aTRANSPORT_EVENT_TYPE_ERROR\x10\x052\xc5\x04\n" +
 	"\x10TransportService\x12c\n" +
 	"\x06Health\x12+.ocserv.platform.transport.v1.HealthRequest\x1a,.ocserv.platform.transport.v1.HealthResponse\x12y\n" +
 	"\x11GetNodeConnection\x126.ocserv.platform.transport.v1.GetNodeConnectionRequest\x1a,.ocserv.platform.transport.v1.NodeConnection\x12r\n" +

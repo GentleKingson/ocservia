@@ -30,6 +30,8 @@ enum TransportEventType {
   TRANSPORT_EVENT_TYPE_CONNECTED = 1;
   TRANSPORT_EVENT_TYPE_DISCONNECTED = 2;
   TRANSPORT_EVENT_TYPE_COMMAND_RESULT = 3;
+  TRANSPORT_EVENT_TYPE_HEARTBEAT = 4;
+  TRANSPORT_EVENT_TYPE_ERROR = 5;
 }
 
 message HealthRequest {}
@@ -77,4 +79,5 @@ message TransportEvent {
   TransportEventType type = 3;
   google.protobuf.Timestamp occurred_at = 4;
   bytes payload = 5;
+  string traceparent = 6;
 }

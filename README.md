@@ -13,10 +13,10 @@ generic file management, or arbitrary host command execution.
 
 ## Status
 
-The public contracts and the first control-plane foundation are under active
-development. Contract contributors can use the pinned workflow in
+The public contracts and local side-effect-free control-plane slice are under
+active development. Contract contributors can use the pinned workflow in
 [docs/development/contracts.md](docs/development/contracts.md). The local Go,
-PostgreSQL, OpenTelemetry, and Web stack is documented in
+PostgreSQL, UDS transport stub, agent simulator, OpenTelemetry, and Web stack is documented in
 [docs/development/control-plane.md](docs/development/control-plane.md).
 
 ## Security

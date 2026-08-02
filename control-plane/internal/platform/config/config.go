@@ -22,18 +22,22 @@ const (
 )
 
 type Config struct {
-	Role            Role
-	MigrateOnly     bool
-	RuntimeDBRole   string
-	Environment     string
-	HTTPAddress     string
-	DatabaseURL     string
-	OTLPEndpoint    string
-	DevAuth         bool
-	BodyLimit       int64
-	RequestTimeout  time.Duration
-	ShutdownTimeout time.Duration
-	LogLevelName    string
+	Role             Role
+	MigrateOnly      bool
+	RuntimeDBRole    string
+	Environment      string
+	HTTPAddress      string
+	DatabaseURL      string
+	OTLPEndpoint     string
+	DevAuth          bool
+	BodyLimit        int64
+	RequestTimeout   time.Duration
+	ShutdownTimeout  time.Duration
+	LogLevelName     string
+	TransportSocket  string
+	TransportTimeout time.Duration
+	TransportQueue   int
+	LocalSimulator   bool
 }
 
 type LookupEnv func(string) (string, bool)
@@ -42,7 +46,8 @@ func Load(args []string, lookup LookupEnv) (Config, error) {
 	cfg := Config{
 		Role: RoleAll, Environment: "development", HTTPAddress: "127.0.0.1:8080",
 		BodyLimit: 1 << 20, RequestTimeout: 15 * time.Second, ShutdownTimeout: 10 * time.Second,
-		LogLevelName: "info",
+		LogLevelName: "info", TransportSocket: "/run/ocserv-platform/transportd.sock",
+		TransportTimeout: 3 * time.Second, TransportQueue: 256,
 	}
 	setString(lookup, "OCSERV_ENVIRONMENT", &cfg.Environment)
 	setString(lookup, "OCSERV_HTTP_ADDRESS", &cfg.HTTPAddress)
@@ -50,6 +55,7 @@ func Load(args []string, lookup LookupEnv) (Config, error) {
 	setString(lookup, "OCSERV_RUNTIME_DATABASE_ROLE", &cfg.RuntimeDBRole)
 	setString(lookup, "OTEL_EXPORTER_OTLP_ENDPOINT", &cfg.OTLPEndpoint)
 	setString(lookup, "OCSERV_LOG_LEVEL", &cfg.LogLevelName)
+	setString(lookup, "OCSERV_TRANSPORT_SOCKET", &cfg.TransportSocket)
 	if err := setInt64(lookup, "OCSERV_BODY_LIMIT_BYTES", &cfg.BodyLimit); err != nil {
 		return Config{}, err
 	}
@@ -59,12 +65,25 @@ func Load(args []string, lookup LookupEnv) (Config, error) {
 	if err := setDuration(lookup, "OCSERV_SHUTDOWN_TIMEOUT", &cfg.ShutdownTimeout); err != nil {
 		return Config{}, err
 	}
+	if err := setDuration(lookup, "OCSERV_TRANSPORT_TIMEOUT", &cfg.TransportTimeout); err != nil {
+		return Config{}, err
+	}
+	if err := setInt(lookup, "OCSERV_TRANSPORT_QUEUE_CAPACITY", &cfg.TransportQueue); err != nil {
+		return Config{}, err
+	}
 	if value, ok := lookup("OCSERV_DEV_AUTH"); ok {
 		parsed, err := strconv.ParseBool(value)
 		if err != nil {
 			return Config{}, fmt.Errorf("OCSERV_DEV_AUTH: %w", err)
 		}
 		cfg.DevAuth = parsed
+	}
+	if value, ok := lookup("OCSERV_LOCAL_SIMULATOR"); ok {
+		parsed, err := strconv.ParseBool(value)
+		if err != nil {
+			return Config{}, fmt.Errorf("OCSERV_LOCAL_SIMULATOR: %w", err)
+		}
+		cfg.LocalSimulator = parsed
 	}
 
 	fs := flag.NewFlagSet("ocserv-control", flag.ContinueOnError)
@@ -116,6 +135,12 @@ func (c Config) Validate() error {
 	if c.BodyLimit < 1 || c.RequestTimeout <= 0 || c.ShutdownTimeout <= 0 {
 		return errors.New("limits and timeouts must be positive")
 	}
+	if !strings.HasPrefix(c.TransportSocket, "/") || c.TransportTimeout <= 0 || c.TransportQueue < 1 || c.TransportQueue > 4096 {
+		return errors.New("transport UDS path, timeout, or queue capacity is invalid")
+	}
+	if c.LocalSimulator && c.Environment == "production" {
+		return errors.New("local simulator is forbidden in production")
+	}
 	if _, ok := map[string]bool{"debug": true, "info": true, "warn": true, "error": true}[c.LogLevelName]; !ok {
 		return fmt.Errorf("invalid log level %q", c.LogLevelName)
 	}
@@ -127,6 +152,8 @@ func (c Config) LogLevel() slog.Level {
 }
 
 func (c Config) RunsAPI() bool { return c.Role == RoleAPI || c.Role == RoleAll }
+
+func (c Config) RunsWorker() bool { return c.Role == RoleWorker || c.Role == RoleAll }
 
 func setString(lookup LookupEnv, name string, target *string) {
 	if value, ok := lookup(name); ok {
@@ -140,6 +167,19 @@ func setInt64(lookup LookupEnv, name string, target *int64) error {
 		return nil
 	}
 	parsed, err := strconv.ParseInt(value, 10, 64)
+	if err != nil {
+		return fmt.Errorf("%s: %w", name, err)
+	}
+	*target = parsed
+	return nil
+}
+
+func setInt(lookup LookupEnv, name string, target *int) error {
+	value, ok := lookup(name)
+	if !ok {
+		return nil
+	}
+	parsed, err := strconv.Atoi(value)
 	if err != nil {
 		return fmt.Errorf("%s: %w", name, err)
 	}
