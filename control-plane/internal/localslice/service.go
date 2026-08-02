@@ -22,6 +22,8 @@ import (
 
 const workspaceSlug = "local-simulator"
 
+var ErrInvalidScenario = errors.New("invalid simulation")
+
 type Scenario struct {
 	HeartbeatCount  *uint32 `json:"heartbeat_count"`
 	DelayMillis     *uint32 `json:"delay_millis"`
@@ -71,7 +73,7 @@ func (s *Service) Create(ctx context.Context, scenario Scenario, requestID, trac
 		return Operation{}, err
 	}
 	if requestID == "" || !validTraceparent(traceparent) {
-		return Operation{}, errors.New("request correlation is required")
+		return Operation{}, fmt.Errorf("%w: request correlation is required", ErrInvalidScenario)
 	}
 
 	now := s.now()
@@ -206,6 +208,30 @@ func (s *Service) LastEventID(ctx context.Context) ([]byte, error) {
 		return nil, fmt.Errorf("read event cursor: %w", err)
 	}
 	return id[:], nil
+}
+
+func (s *Service) ReconcileEventGap(ctx context.Context) error {
+	commandTag, err := s.pool.Exec(ctx, `
+		UPDATE operations AS operation
+		SET state = 'unknown', updated_at = now()
+		FROM local_slice_jobs AS job
+		WHERE job.operation_id = operation.id
+		  AND job.dispatched_at IS NOT NULL
+		  AND operation.state IN ('queued', 'dispatched', 'accepted', 'running')`)
+	if err != nil {
+		return fmt.Errorf("mark operations unknown after transport event gap: %w", err)
+	}
+	if commandTag.RowsAffected() > 0 {
+		_, err = s.pool.Exec(ctx, `
+			UPDATE local_slice_jobs
+			SET last_error = 'transport event retention gap; outcome requires reconciliation'
+			WHERE dispatched_at IS NOT NULL
+			  AND operation_id IN (SELECT id FROM operations WHERE state = 'unknown')`)
+		if err != nil {
+			return fmt.Errorf("record transport event gap: %w", err)
+		}
+	}
+	return nil
 }
 
 func (s *Service) Ingest(ctx context.Context, event *transportv1.TransportEvent) error {
@@ -370,7 +396,7 @@ func normalizeScenario(scenario Scenario) (uint32, uint32, error) {
 		delayMillis = *scenario.DelayMillis
 	}
 	if heartbeatCount < 1 || heartbeatCount > 32 || delayMillis > 10_000 {
-		return 0, 0, errors.New("simulation limits exceeded")
+		return 0, 0, fmt.Errorf("%w: simulation limits exceeded", ErrInvalidScenario)
 	}
 	return heartbeatCount, delayMillis, nil
 }

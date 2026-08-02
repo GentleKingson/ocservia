@@ -37,7 +37,11 @@ func (s *Server) createSimulation(w http.ResponseWriter, r *http.Request) {
 	operation, err := service.Create(r.Context(), scenario, requestID, requestTraceparent(r))
 	if err != nil {
 		s.logger.ErrorContext(r.Context(), "create local simulation", "error", err)
-		writeProblem(w, r, http.StatusBadRequest, "https://ocservia.dev/problems/invalid-simulation", "Simulation is invalid", "the simulation could not be accepted")
+		if errors.Is(err, localslice.ErrInvalidScenario) {
+			writeProblem(w, r, http.StatusBadRequest, "https://ocservia.dev/problems/invalid-simulation", "Simulation is invalid", "the simulation could not be accepted")
+			return
+		}
+		writeProblem(w, r, http.StatusServiceUnavailable, "https://ocservia.dev/problems/database-unavailable", "Service is unavailable", "the simulation could not be persisted")
 		return
 	}
 	w.Header().Set("Location", "/api/v1/operations/"+operation.ID)

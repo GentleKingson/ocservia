@@ -31,6 +31,10 @@ type EventHandler interface {
 	Ingest(context.Context, *transportv1.TransportEvent) error
 }
 
+type GapReconciler interface {
+	ReconcileEventGap(context.Context) error
+}
+
 type Client struct {
 	path          string
 	deadline      time.Duration
@@ -84,6 +88,16 @@ func (c *Client) RunWatch(ctx context.Context, cursors CursorStore, handler Even
 			return err
 		}
 		if status.Code(err) == codes.OutOfRange {
+			reconciler, ok := handler.(GapReconciler)
+			if !ok {
+				return errors.New("transport event gap cannot be reconciled")
+			}
+			reconcileCtx, cancel := context.WithTimeout(ctx, c.deadline)
+			reconcileErr := reconciler.ReconcileEventGap(reconcileCtx)
+			cancel()
+			if reconcileErr != nil {
+				return fmt.Errorf("reconcile transport event gap: %w", reconcileErr)
+			}
 			reconcileCursor = true
 			continue
 		}
