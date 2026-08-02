@@ -21,7 +21,10 @@ import (
 	"google.golang.org/grpc/status"
 )
 
-const maxMessageBytes = 1 << 20
+const (
+	maxPayloadBytes = 1 << 20
+	maxMessageBytes = maxPayloadBytes + (4 << 10)
+)
 
 type CursorStore interface {
 	LastEventID(context.Context) ([]byte, error)
@@ -54,7 +57,7 @@ func New(path string, deadline time.Duration, queueCapacity int) (*Client, error
 func (c *Client) SendCommand(ctx context.Context, nodeID, envelope []byte) error {
 	ctx, span := otel.Tracer("ocservia.transportclient").Start(ctx, "transport.uds.send", trace.WithSpanKind(trace.SpanKindClient))
 	defer span.End()
-	if len(envelope) == 0 || len(envelope) > maxMessageBytes {
+	if len(envelope) == 0 || len(envelope) > maxPayloadBytes {
 		return errors.New("command envelope size is invalid")
 	}
 	connection, err := c.dial()

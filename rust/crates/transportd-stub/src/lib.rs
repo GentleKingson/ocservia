@@ -532,6 +532,17 @@ mod tests {
         assert_eq!(service.state.retention, 4096);
     }
 
+    #[test]
+    fn maximum_payload_fits_the_transport_envelope_limit() {
+        let event = new_event(
+            Uuid::now_v7().as_bytes(),
+            TransportEventType::Disconnected,
+            &new_traceparent(),
+            vec![0; MAX_COMMAND_BYTES],
+        );
+        assert!(event.encoded_len() <= MAX_COMMAND_BYTES + 4 * 1024);
+    }
+
     #[tokio::test]
     async fn repeated_idempotency_key_runs_probe_once() {
         let service = StubService::new(8);
