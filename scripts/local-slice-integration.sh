@@ -177,6 +177,10 @@ if grep -q "^id: ${first_event}$" "${TMP_ROOT}/resumed.sse"; then
   exit 1
 fi
 
+# Model an in-flight operation whose original command trace differs from the
+# connection-level disconnect event emitted when transportd disappears.
+docker exec "${POSTGRES}" psql -v ON_ERROR_STOP=1 -U ocservia_owner -d ocservia -c \
+  "UPDATE operations SET state = 'running' WHERE id = '${normal_id}'" >/dev/null
 stop_pid "${STUB_PID}"
 rm -f "${SOCKET}"
 expired="$(create_probe '{"heartbeat_count":1}')"
@@ -191,6 +195,7 @@ stop_pid "${CONTROL_PID}"
 start_stub
 start_control
 wait_state "${recover_id}" succeeded >/dev/null
+wait_state "${normal_id}" unknown >/dev/null
 test "$(docker exec "${POSTGRES}" psql -U ocservia_owner -d ocservia -Atc "SELECT status FROM nodes WHERE id = '${normal_node}'")" = "offline"
 test "$(docker exec "${POSTGRES}" psql -U ocservia_owner -d ocservia -Atc "SELECT transport_cursor_valid FROM transport_events WHERE node_id = '${normal_node}' ORDER BY ingest_sequence DESC LIMIT 1")" = "f"
 test "$(docker exec "${POSTGRES}" psql -U ocservia_owner -d ocservia -Atc "SELECT count(*) FROM transport_events WHERE transport_cursor_valid")" -gt 0

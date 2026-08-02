@@ -385,7 +385,16 @@ func (s *Service) Ingest(ctx context.Context, event *transportv1.TransportEvent)
 	case "disconnected":
 		operationState = "unknown"
 	}
-	if eventType != "disconnected" || operationState == "unknown" {
+	if eventType == "disconnected" {
+		if _, err := tx.Exec(ctx, `
+			UPDATE operations
+			SET state = 'unknown', updated_at = $2, version = version + 1
+			WHERE node_id = $1
+			  AND state NOT IN ('succeeded', 'failed', 'expired', 'rolled_back', 'superseded')`,
+			nodeID, occurredAt.AsTime()); err != nil {
+			return fmt.Errorf("mark disconnected operations unknown: %w", err)
+		}
+	} else {
 		if _, err := tx.Exec(ctx, `
 			UPDATE operations AS operation
 			SET state = $2, updated_at = $3, version = version + 1
