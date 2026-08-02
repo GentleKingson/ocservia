@@ -17,7 +17,7 @@ use ocservia_contracts::generated::ocserv::platform::transport::v1::{
     transport_service_server::TransportService,
 };
 use prost::Message;
-use tokio::sync::{Mutex, Semaphore, mpsc};
+use tokio::sync::{Mutex, Semaphore, mpsc, watch};
 use tokio_stream::{Stream, wrappers::ReceiverStream};
 use tonic::{Request, Response, Status};
 use uuid::Uuid;
@@ -35,7 +35,7 @@ pub struct StubService {
 
 struct State {
     delivery: Mutex<EventState>,
-    nodes: Mutex<HashMap<Vec<u8>, NodeConnection>>,
+    nodes: Mutex<HashMap<Vec<u8>, ActiveNode>>,
     accepted_commands: Mutex<AcceptedCommands>,
     retention: usize,
     tasks: Arc<Semaphore>,
@@ -48,7 +48,12 @@ struct EventState {
 
 struct AcceptedCommands {
     keys: HashSet<Vec<u8>>,
-    order: VecDeque<Vec<u8>>,
+}
+
+struct ActiveNode {
+    connection: NodeConnection,
+    generation: Uuid,
+    cancellation: watch::Sender<bool>,
 }
 
 impl StubService {
@@ -65,7 +70,6 @@ impl StubService {
                 nodes: Mutex::new(HashMap::new()),
                 accepted_commands: Mutex::new(AcceptedCommands {
                     keys: HashSet::with_capacity(capacity),
-                    order: VecDeque::with_capacity(capacity),
                 }),
                 retention: capacity,
                 tasks: Arc::new(Semaphore::new(capacity)),
@@ -93,38 +97,81 @@ impl StubService {
         }
     }
 
+    async fn publish_if_active(
+        &self,
+        node_id: &[u8],
+        generation: Uuid,
+        event: TransportEvent,
+    ) -> bool {
+        let nodes = self.state.nodes.lock().await;
+        if nodes
+            .get(node_id)
+            .is_none_or(|node| node.generation != generation)
+        {
+            return false;
+        }
+        self.publish(event).await;
+        true
+    }
+
     async fn run_probe(self, node_id: Vec<u8>, traceparent: String, probe: SimulationProbe) {
         let delay = Duration::from_millis(u64::from(probe.delay_millis));
         let connected_at = now_timestamp();
+        let generation = Uuid::now_v7();
+        let (cancellation, mut cancelled) = watch::channel(false);
         self.state.nodes.lock().await.insert(
             node_id.clone(),
-            NodeConnection {
-                node_id: node_id.clone(),
-                endpoint_id: Uuid::now_v7().as_bytes().to_vec(),
-                path: ConnectionPath::Direct.into(),
-                round_trip_time_millis: probe.delay_millis.into(),
-                connected_at: Some(connected_at),
+            ActiveNode {
+                connection: NodeConnection {
+                    node_id: node_id.clone(),
+                    endpoint_id: Uuid::now_v7().as_bytes().to_vec(),
+                    path: ConnectionPath::Direct.into(),
+                    round_trip_time_millis: probe.delay_millis.into(),
+                    connected_at: Some(connected_at),
+                },
+                generation,
+                cancellation,
             },
         );
-        self.publish(new_event(
-            &node_id,
-            TransportEventType::Connected,
-            &traceparent,
-            b"connected".to_vec(),
-        ))
-        .await;
+        if !self
+            .publish_if_active(
+                &node_id,
+                generation,
+                new_event(
+                    &node_id,
+                    TransportEventType::Connected,
+                    &traceparent,
+                    b"connected".to_vec(),
+                ),
+            )
+            .await
+        {
+            return;
+        }
 
         for sequence in 0..probe.heartbeat_count.max(1) {
-            tokio::time::sleep(delay).await;
+            tokio::select! {
+                result = cancelled.changed() => {
+                    if result.is_err() || *cancelled.borrow() {
+                        return;
+                    }
+                }
+                () = tokio::time::sleep(delay) => {}
+            }
             let event = new_event(
                 &node_id,
                 TransportEventType::Heartbeat,
                 &traceparent,
                 format!("heartbeat:{sequence}").into_bytes(),
             );
-            self.publish(event.clone()).await;
-            if probe.duplicate_event {
-                self.publish(event).await;
+            if !self
+                .publish_if_active(&node_id, generation, event.clone())
+                .await
+            {
+                return;
+            }
+            if probe.duplicate_event && !self.publish_if_active(&node_id, generation, event).await {
+                return;
             }
         }
 
@@ -133,18 +180,38 @@ impl StubService {
         } else {
             (TransportEventType::CommandResult, b"completed".to_vec())
         };
-        self.publish(new_event(&node_id, event_type, &traceparent, payload))
-            .await;
+        if !self
+            .publish_if_active(
+                &node_id,
+                generation,
+                new_event(&node_id, event_type, &traceparent, payload),
+            )
+            .await
+        {
+            return;
+        }
 
         if probe.disconnect_after {
-            self.state.nodes.lock().await.remove(&node_id);
-            self.publish(new_event(
-                &node_id,
-                TransportEventType::Disconnected,
-                &traceparent,
-                b"simulated disconnect".to_vec(),
-            ))
-            .await;
+            let removed = {
+                let mut nodes = self.state.nodes.lock().await;
+                if nodes
+                    .get(&node_id)
+                    .is_some_and(|node| node.generation == generation)
+                {
+                    nodes.remove(&node_id)
+                } else {
+                    None
+                }
+            };
+            if removed.is_some() {
+                self.publish(new_event(
+                    &node_id,
+                    TransportEventType::Disconnected,
+                    &traceparent,
+                    b"simulated disconnect".to_vec(),
+                ))
+                .await;
+            }
         }
     }
 }
@@ -174,7 +241,7 @@ impl TransportService for StubService {
             .lock()
             .await
             .get(&node_id)
-            .cloned()
+            .map(|node| node.connection.clone())
             .ok_or_else(|| Status::not_found("node is not connected"))?;
         Ok(Response::new(connection))
     }
@@ -209,19 +276,18 @@ impl TransportService for StubService {
         if accepted.keys.contains(&idempotency_key) {
             return Ok(Response::new(SendCommandResponse { accepted: true }));
         }
+        if accepted.keys.len() == self.state.retention {
+            return Err(Status::resource_exhausted(
+                "idempotency capacity reached; restart the development stub",
+            ));
+        }
         let permit = self
             .state
             .tasks
             .clone()
             .try_acquire_owned()
             .map_err(|_| Status::resource_exhausted("simulator task capacity reached"))?;
-        if accepted.order.len() == self.state.retention
-            && let Some(expired) = accepted.order.pop_front()
-        {
-            accepted.keys.remove(&expired);
-        }
         accepted.keys.insert(idempotency_key.clone());
-        accepted.order.push_back(idempotency_key);
         drop(accepted);
         let service = self.clone();
         tokio::spawn(async move {
@@ -239,9 +305,14 @@ impl TransportService for StubService {
     ) -> Result<Response<CloseNodeResponse>, Status> {
         let request = request.into_inner();
         let node_id = validate_id(&request.node_id, "node_id")?;
-        if self.state.nodes.lock().await.remove(&node_id).is_none() {
-            return Err(Status::not_found("node is not connected"));
-        }
+        let node = self
+            .state
+            .nodes
+            .lock()
+            .await
+            .remove(&node_id)
+            .ok_or_else(|| Status::not_found("node is not connected"))?;
+        node.cancellation.send_replace(true);
         self.publish(new_event(
             &node_id,
             TransportEventType::Disconnected,
@@ -349,6 +420,24 @@ mod tests {
     use tokio_stream::StreamExt;
 
     fn probe_request(node_id: Vec<u8>, idempotency_key: Vec<u8>) -> SendCommandRequest {
+        probe_request_with(
+            node_id,
+            idempotency_key,
+            SimulationProbe {
+                heartbeat_count: 1,
+                delay_millis: 0,
+                duplicate_event: false,
+                return_error: false,
+                disconnect_after: false,
+            },
+        )
+    }
+
+    fn probe_request_with(
+        node_id: Vec<u8>,
+        idempotency_key: Vec<u8>,
+        probe: SimulationProbe,
+    ) -> SendCommandRequest {
         let envelope = CommandEnvelope {
             protocol_version: "1.0".to_owned(),
             message_id: Uuid::now_v7().as_bytes().to_vec(),
@@ -362,15 +451,7 @@ mod tests {
             traceparent: new_traceparent(),
             actor_id: "test".to_owned(),
             reason: "test".to_owned(),
-            payload: Some(command_envelope::Payload::SimulationProbe(
-                SimulationProbe {
-                    heartbeat_count: 1,
-                    delay_millis: 0,
-                    duplicate_event: false,
-                    return_error: false,
-                    disconnect_after: false,
-                },
-            )),
+            payload: Some(command_envelope::Payload::SimulationProbe(probe)),
         };
         SendCommandRequest {
             node_id,
@@ -415,6 +496,98 @@ mod tests {
         .expect("probe completed");
 
         assert_eq!(service.state.delivery.lock().await.retained.len(), 3);
+    }
+
+    #[tokio::test]
+    async fn idempotency_keys_are_not_evicted_at_capacity() {
+        let service = StubService::new(1);
+        let first_node = Uuid::now_v7().as_bytes().to_vec();
+        let first_key = Uuid::now_v7().as_bytes().to_vec();
+        service
+            .send_command(Request::new(probe_request(
+                first_node.clone(),
+                first_key.clone(),
+            )))
+            .await
+            .expect("first probe accepted");
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while service.state.tasks.available_permits() == 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("first probe completed");
+
+        let second = service
+            .send_command(Request::new(probe_request(
+                Uuid::now_v7().as_bytes().to_vec(),
+                Uuid::now_v7().as_bytes().to_vec(),
+            )))
+            .await
+            .expect_err("new key rejected at capacity");
+        assert_eq!(second.code(), tonic::Code::ResourceExhausted);
+        service
+            .send_command(Request::new(probe_request(first_node, first_key.clone())))
+            .await
+            .expect("original key remains idempotent");
+        assert!(
+            service
+                .state
+                .accepted_commands
+                .lock()
+                .await
+                .keys
+                .contains(&first_key)
+        );
+    }
+
+    #[tokio::test]
+    async fn closing_node_cancels_in_flight_probe_events() {
+        let service = StubService::new(8);
+        let node_id = Uuid::now_v7().as_bytes().to_vec();
+        service
+            .send_command(Request::new(probe_request_with(
+                node_id.clone(),
+                Uuid::now_v7().as_bytes().to_vec(),
+                SimulationProbe {
+                    heartbeat_count: 2,
+                    delay_millis: 250,
+                    duplicate_event: false,
+                    return_error: false,
+                    disconnect_after: false,
+                },
+            )))
+            .await
+            .expect("probe accepted");
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while !service.state.nodes.lock().await.contains_key(&node_id) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("node connected");
+
+        service
+            .close_node(Request::new(CloseNodeRequest {
+                node_id: node_id.clone(),
+                reason: "operator close".to_owned(),
+            }))
+            .await
+            .expect("connected node closed");
+        tokio::time::sleep(Duration::from_millis(300)).await;
+
+        let events = service.state.delivery.lock().await.retained.clone();
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| event.r#type == i32::from(TransportEventType::Disconnected))
+                .count(),
+            1
+        );
+        assert!(events.iter().all(|event| {
+            event.r#type == i32::from(TransportEventType::Connected)
+                || event.r#type == i32::from(TransportEventType::Disconnected)
+        }));
     }
 
     #[tokio::test]

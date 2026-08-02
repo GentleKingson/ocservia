@@ -26,6 +26,10 @@ production, and only accepts the typed `SimulationProbe` payload. Configure its
 absolute socket path with `OCSERV_TRANSPORT_SOCKET`, the RPC deadline with
 `OCSERV_TRANSPORT_TIMEOUT`, and the bounded consumer queue with
 `OCSERV_TRANSPORT_QUEUE_CAPACITY` (1 through 4096).
+The stub retains accepted idempotency keys for its process lifetime. Once that
+bounded set is full, it rejects new keys rather than evicting keys that a
+durable dispatch retry may still need; restart the development stack to clear
+simulator-only state.
 
 The binary accepts `--role=api`, `--role=worker`, `--role=scheduler`, or
 `--role=all`. `OCSERV_DATABASE_URL` is required. Development authentication is

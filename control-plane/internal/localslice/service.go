@@ -236,14 +236,58 @@ func (s *Service) ReconcileEventGap(ctx context.Context) error {
 			return fmt.Errorf("record transport event gap: %w", err)
 		}
 	}
-	if _, err := tx.Exec(ctx, `
-		UPDATE nodes AS node
-		SET status = 'offline', updated_at = now(), version = node.version + 1
-		FROM workspaces AS workspace
-		WHERE node.workspace_id = workspace.id
-		  AND workspace.slug = $1
-		  AND node.status = 'approved'`, workspaceSlug); err != nil {
-		return fmt.Errorf("mark simulator nodes offline after transport event gap: %w", err)
+	rows, err := tx.Query(ctx, `
+		SELECT node.id, latest.traceparent
+		FROM nodes AS node
+		JOIN workspaces AS workspace ON workspace.id = node.workspace_id
+		JOIN LATERAL (
+			SELECT event.traceparent
+			FROM transport_events AS event
+			WHERE event.node_id = node.id
+			ORDER BY event.event_id DESC
+			LIMIT 1
+		) AS latest ON true
+		WHERE workspace.slug = $1 AND node.status = 'approved'
+		FOR UPDATE OF node`, workspaceSlug)
+	if err != nil {
+		return fmt.Errorf("select simulator nodes after transport event gap: %w", err)
+	}
+	type disconnectedNode struct {
+		id          uuid.UUID
+		traceparent string
+	}
+	nodes := make([]disconnectedNode, 0)
+	for rows.Next() {
+		var node disconnectedNode
+		if err := rows.Scan(&node.id, &node.traceparent); err != nil {
+			rows.Close()
+			return fmt.Errorf("scan simulator node after transport event gap: %w", err)
+		}
+		nodes = append(nodes, node)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return fmt.Errorf("iterate simulator nodes after transport event gap: %w", err)
+	}
+	rows.Close()
+	now := s.now()
+	for _, node := range nodes {
+		eventID, err := uuid.NewV7()
+		if err != nil {
+			return fmt.Errorf("generate transport gap event ID: %w", err)
+		}
+		if _, err := tx.Exec(ctx, `
+			INSERT INTO transport_events (event_id, node_id, event_type, occurred_at, traceparent, payload)
+			VALUES ($1, $2, 'disconnected', $3, $4, $5)`,
+			eventID, node.id, now, node.traceparent, []byte("transport event retention gap")); err != nil {
+			return fmt.Errorf("record simulator disconnect after transport event gap: %w", err)
+		}
+		if _, err := tx.Exec(ctx, `
+			UPDATE nodes
+			SET status = 'offline', updated_at = $2, version = version + 1
+			WHERE id = $1`, node.id, now); err != nil {
+			return fmt.Errorf("mark simulator node offline after transport event gap: %w", err)
+		}
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return fmt.Errorf("commit transport event gap reconciliation: %w", err)

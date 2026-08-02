@@ -172,6 +172,8 @@ start_stub
 start_control
 wait_state "${recover_id}" succeeded >/dev/null
 test "$(docker exec "${POSTGRES}" psql -U ocservia_owner -d ocservia -Atc "SELECT status FROM nodes WHERE id = '${normal_node}'")" = "offline"
+curl --fail --silent "http://127.0.0.1:${API_PORT}/api/v1/events?page_size=200" |
+  jq -e --arg node "${normal_node}" '[.items[] | select(.node_id == $node)] | last | .type == "disconnected"' >/dev/null
 
 for _ in $(seq 1 20); do
   curl --fail --silent "http://127.0.0.1:${API_PORT}/readyz" >/dev/null
