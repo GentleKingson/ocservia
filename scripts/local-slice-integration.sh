@@ -141,6 +141,14 @@ for _ in $(seq 1 50); do
 done
 [[ "${status}" == "offline" ]]
 
+nullable_operation_id="019cf000-0000-7000-8000-000000000001"
+docker exec "${POSTGRES}" psql -v ON_ERROR_STOP=1 -U ocservia_owner -d ocservia -c \
+  "INSERT INTO operations (id, workspace_id, state, request_id, created_at, updated_at) SELECT '${nullable_operation_id}', id, 'draft', 'nullable-identifiers', now(), now() FROM workspaces WHERE slug = 'local-simulator'" >/dev/null
+curl --fail --silent -H "Authorization: Bearer ${AUTH_TOKEN}" "http://127.0.0.1:${API_PORT}/api/v1/operations/${nullable_operation_id}" |
+  jq -e '.id == "019cf000-0000-7000-8000-000000000001" and (has("node_id") | not) and (has("command_id") | not)' >/dev/null
+curl --fail --silent -H "Authorization: Bearer ${AUTH_TOKEN}" "http://127.0.0.1:${API_PORT}/api/v1/operations?page_size=200" |
+  jq -e --arg id "${nullable_operation_id}" 'any(.items[]; .id == $id and (has("node_id") | not) and (has("command_id") | not))' >/dev/null
+
 operations_page="$(curl --fail --silent -H "Authorization: Bearer ${AUTH_TOKEN}" "http://127.0.0.1:${API_PORT}/api/v1/operations?page_size=2")"
 jq -e '.page.has_more == true and (.page.next_cursor | type == "string") and (.items | length == 2)' <<<"${operations_page}" >/dev/null
 operations_cursor="$(jq -r .page.next_cursor <<<"${operations_page}")"

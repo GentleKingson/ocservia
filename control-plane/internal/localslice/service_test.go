@@ -1,10 +1,24 @@
 package localslice
 
 import (
+	"encoding/json"
+	"strings"
 	"testing"
 
 	transportv1 "github.com/GentleKingson/ocservia/control-plane/gen/proto/ocserv/platform/transport/v1"
 )
+
+func TestOperationJSONOmitsAbsentIdentifiers(t *testing.T) {
+	payload, err := json.Marshal(Operation{ID: "019cf000-0000-7000-8000-000000000001", State: "draft"})
+	if err != nil {
+		t.Fatalf("marshal operation: %v", err)
+	}
+	for _, field := range []string{"node_id", "command_id"} {
+		if strings.Contains(string(payload), field) {
+			t.Fatalf("absent %s was serialized: %s", field, payload)
+		}
+	}
+}
 
 func TestValidTraceparent(t *testing.T) {
 	valid := "00-0123456789abcdef0123456789abcdef-0123456789abcdef-01"

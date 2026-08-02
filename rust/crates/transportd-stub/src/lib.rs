@@ -150,6 +150,7 @@ impl StubService {
                 biased;
                 result = cancelled.changed() => {
                     if result.is_err() || *cancelled.borrow() {
+                        state.subscribers.truncate(index);
                         return false;
                     }
                 }
@@ -715,6 +716,81 @@ mod tests {
         .await
         .expect("close was not blocked by subscriber")
         .expect("node closed");
+    }
+
+    #[tokio::test]
+    async fn cancellation_disconnects_subscribers_skipped_during_fanout() {
+        let service = StubService::new(2);
+        let node_id = Uuid::now_v7().as_bytes().to_vec();
+        let generation = Uuid::now_v7();
+        let (cancellation, _) = watch::channel(false);
+        service.state.nodes.lock().await.insert(
+            node_id.clone(),
+            ActiveNode {
+                connection: NodeConnection {
+                    node_id: node_id.clone(),
+                    endpoint_id: Uuid::now_v7().as_bytes().to_vec(),
+                    path: ConnectionPath::Direct.into(),
+                    round_trip_time_millis: 0,
+                    connected_at: Some(now_timestamp()),
+                },
+                generation,
+                cancellation: cancellation.clone(),
+                traceparent: new_traceparent(),
+            },
+        );
+        let _slow = service
+            .watch_events(Request::new(WatchEventsRequest::default()))
+            .await
+            .expect("slow watch accepted")
+            .into_inner();
+        let mut healthy = service
+            .watch_events(Request::new(WatchEventsRequest::default()))
+            .await
+            .expect("healthy watch accepted")
+            .into_inner();
+        for event_type in [TransportEventType::Connected, TransportEventType::Heartbeat] {
+            service
+                .publish(new_event(
+                    &node_id,
+                    event_type,
+                    &new_traceparent(),
+                    Vec::new(),
+                ))
+                .await;
+        }
+        assert!(healthy.next().await.is_some());
+        assert!(healthy.next().await.is_some());
+
+        let publisher = tokio::spawn({
+            let service = service.clone();
+            let node_id = node_id.clone();
+            async move {
+                service
+                    .publish_if_active(
+                        &node_id,
+                        generation,
+                        new_event(
+                            &node_id,
+                            TransportEventType::CommandResult,
+                            &new_traceparent(),
+                            Vec::new(),
+                        ),
+                    )
+                    .await
+            }
+        });
+        tokio::task::yield_now().await;
+        assert!(!publisher.is_finished());
+        cancellation.send_replace(true);
+        assert!(
+            !tokio::time::timeout(Duration::from_secs(1), publisher)
+                .await
+                .expect("cancelled publication completed")
+                .expect("publisher task completed")
+        );
+        assert!(service.state.delivery.lock().await.subscribers.is_empty());
+        assert!(healthy.next().await.is_none());
     }
 
     #[tokio::test]

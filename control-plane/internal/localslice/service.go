@@ -11,6 +11,7 @@ import (
 	transportv1 "github.com/GentleKingson/ocservia/control-plane/gen/proto/ocserv/platform/transport/v1"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/propagation"
@@ -34,8 +35,8 @@ type Scenario struct {
 type Operation struct {
 	ID        string    `json:"id"`
 	State     string    `json:"state"`
-	NodeID    string    `json:"node_id"`
-	CommandID string    `json:"command_id"`
+	NodeID    *string   `json:"node_id,omitempty"`
+	CommandID *string   `json:"command_id,omitempty"`
 	CreatedAt time.Time `json:"created_at"`
 	UpdatedAt time.Time `json:"updated_at"`
 }
@@ -122,17 +123,21 @@ func (s *Service) Create(ctx context.Context, scenario Scenario, requestID, trac
 	if err := tx.Commit(ctx); err != nil {
 		return Operation{}, fmt.Errorf("commit local slice transaction: %w", err)
 	}
-	return Operation{ID: operationID.String(), State: "queued", NodeID: nodeID.String(), CommandID: commandID.String(), CreatedAt: now, UpdatedAt: now}, nil
+	nodeIDText, commandIDText := nodeID.String(), commandID.String()
+	return Operation{ID: operationID.String(), State: "queued", NodeID: &nodeIDText, CommandID: &commandIDText, CreatedAt: now, UpdatedAt: now}, nil
 }
 
 func (s *Service) GetOperation(ctx context.Context, id uuid.UUID) (Operation, error) {
 	var operation Operation
+	var nodeID, commandID pgtype.Text
 	err := s.pool.QueryRow(ctx, `
 		SELECT id::text, state, node_id::text, command_id::text, created_at, updated_at
-		FROM operations WHERE id = $1`, id).Scan(&operation.ID, &operation.State, &operation.NodeID, &operation.CommandID, &operation.CreatedAt, &operation.UpdatedAt)
+		FROM operations WHERE id = $1`, id).Scan(&operation.ID, &operation.State, &nodeID, &commandID, &operation.CreatedAt, &operation.UpdatedAt)
 	if err != nil {
 		return Operation{}, fmt.Errorf("get operation: %w", err)
 	}
+	operation.NodeID = optionalText(nodeID)
+	operation.CommandID = optionalText(commandID)
 	return operation, nil
 }
 
@@ -152,9 +157,12 @@ func (s *Service) ListOperations(ctx context.Context, after uuid.UUID, limit int
 	operations := make([]Operation, 0, limit+1)
 	for rows.Next() {
 		var operation Operation
-		if err := rows.Scan(&operation.ID, &operation.State, &operation.NodeID, &operation.CommandID, &operation.CreatedAt, &operation.UpdatedAt); err != nil {
+		var nodeID, commandID pgtype.Text
+		if err := rows.Scan(&operation.ID, &operation.State, &nodeID, &commandID, &operation.CreatedAt, &operation.UpdatedAt); err != nil {
 			return nil, false, fmt.Errorf("scan operation: %w", err)
 		}
+		operation.NodeID = optionalText(nodeID)
+		operation.CommandID = optionalText(commandID)
 		operations = append(operations, operation)
 	}
 	if err := rows.Err(); err != nil {
@@ -165,6 +173,13 @@ func (s *Service) ListOperations(ctx context.Context, after uuid.UUID, limit int
 		operations = operations[:limit]
 	}
 	return operations, hasMore, nil
+}
+
+func optionalText(value pgtype.Text) *string {
+	if !value.Valid {
+		return nil
+	}
+	return &value.String
 }
 
 func (s *Service) ListEvents(ctx context.Context, after uuid.UUID, limit int) ([]Event, bool, error) {
