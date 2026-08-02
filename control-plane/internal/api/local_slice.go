@@ -74,13 +74,27 @@ func (s *Server) listOperations(w http.ResponseWriter, r *http.Request) {
 		writeProblem(w, r, http.StatusNotFound, "https://ocservia.dev/problems/not-found", "Resource not found", "the requested resource does not exist")
 		return
 	}
-	operations, err := service.ListOperations(r.Context(), 200)
+	after, ok := parseEventID(r.URL.Query().Get("cursor"))
+	if !ok {
+		writeProblem(w, r, http.StatusBadRequest, "https://ocservia.dev/problems/invalid-cursor", "Cursor is invalid", "cursor must be a UUIDv7 operation ID")
+		return
+	}
+	limit, ok := pageSize(r, 100)
+	if !ok {
+		writeProblem(w, r, http.StatusBadRequest, "https://ocservia.dev/problems/invalid-page-size", "Page size is invalid", "page_size must be an integer between 1 and 200")
+		return
+	}
+	operations, hasMore, err := service.ListOperations(r.Context(), after, limit)
 	if err != nil {
 		s.logger.ErrorContext(r.Context(), "list operations", "error", err)
 		writeProblem(w, r, http.StatusServiceUnavailable, "https://ocservia.dev/problems/database-unavailable", "Service is unavailable", "operations are temporarily unavailable")
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"items": operations, "page": map[string]bool{"has_more": false}})
+	page := map[string]any{"has_more": hasMore}
+	if hasMore && len(operations) > 0 {
+		page["next_cursor"] = operations[len(operations)-1].ID
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"items": operations, "page": page})
 }
 
 func (s *Server) listEvents(w http.ResponseWriter, r *http.Request) {
@@ -94,14 +108,10 @@ func (s *Server) listEvents(w http.ResponseWriter, r *http.Request) {
 		writeProblem(w, r, http.StatusBadRequest, "https://ocservia.dev/problems/invalid-cursor", "Cursor is invalid", "after must be a UUIDv7 event ID")
 		return
 	}
-	limit := 100
-	if value := r.URL.Query().Get("page_size"); value != "" {
-		parsed, err := strconv.Atoi(value)
-		if err != nil {
-			writeProblem(w, r, http.StatusBadRequest, "https://ocservia.dev/problems/invalid-page-size", "Page size is invalid", "page_size must be an integer")
-			return
-		}
-		limit = parsed
+	limit, ok := pageSize(r, 100)
+	if !ok {
+		writeProblem(w, r, http.StatusBadRequest, "https://ocservia.dev/problems/invalid-page-size", "Page size is invalid", "page_size must be an integer between 1 and 200")
+		return
 	}
 	events, hasMore, err := service.ListEvents(r.Context(), after, limit)
 	if err != nil {
@@ -127,7 +137,11 @@ func (s *Server) streamEvents(w http.ResponseWriter, r *http.Request) {
 		writeProblem(w, r, http.StatusInternalServerError, "https://ocservia.dev/problems/stream-unavailable", "Stream is unavailable", "streaming is not supported")
 		return
 	}
-	after, valid := parseEventID(strings.TrimSpace(r.Header.Get("Last-Event-ID")))
+	cursor := strings.TrimSpace(r.Header.Get("Last-Event-ID"))
+	if cursor == "" {
+		cursor = r.URL.Query().Get("after")
+	}
+	after, valid := parseEventID(cursor)
 	if !valid {
 		writeProblem(w, r, http.StatusBadRequest, "https://ocservia.dev/problems/invalid-cursor", "Cursor is invalid", "Last-Event-ID must be a UUIDv7")
 		return
@@ -171,6 +185,15 @@ func (s *Server) streamEvents(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
+}
+
+func pageSize(r *http.Request, fallback int) (int, bool) {
+	value := r.URL.Query().Get("page_size")
+	if value == "" {
+		return fallback, true
+	}
+	parsed, err := strconv.Atoi(value)
+	return parsed, err == nil && parsed >= 1 && parsed <= 200
 }
 
 func requestTraceparent(r *http.Request) string {

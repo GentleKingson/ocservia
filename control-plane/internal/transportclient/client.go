@@ -138,6 +138,7 @@ func (c *Client) watchOnce(ctx context.Context, cursors CursorStore, handler Eve
 			eventCancel()
 			if err != nil {
 				consumerErr <- err
+				streamCancel()
 				return
 			}
 		}
@@ -147,6 +148,13 @@ func (c *Client) watchOnce(ctx context.Context, cursors CursorStore, handler Eve
 	for {
 		event, err := stream.Recv()
 		if err != nil {
+			select {
+			case ingestErr := <-consumerErr:
+				if ingestErr != nil {
+					return fmt.Errorf("ingest transport event: %w", ingestErr)
+				}
+			default:
+			}
 			return fmt.Errorf("receive transport event: %w", err)
 		}
 		select {

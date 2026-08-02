@@ -2,7 +2,7 @@
 
 #![forbid(unsafe_code)]
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::pin::Pin;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
@@ -36,9 +36,15 @@ pub struct StubService {
 struct State {
     retained: Mutex<VecDeque<TransportEvent>>,
     nodes: Mutex<HashMap<Vec<u8>, NodeConnection>>,
+    accepted_commands: Mutex<AcceptedCommands>,
     events: broadcast::Sender<TransportEvent>,
     retention: usize,
     tasks: Arc<Semaphore>,
+}
+
+struct AcceptedCommands {
+    keys: HashSet<Vec<u8>>,
+    order: VecDeque<Vec<u8>>,
 }
 
 impl StubService {
@@ -51,6 +57,10 @@ impl StubService {
             state: Arc::new(State {
                 retained: Mutex::new(VecDeque::with_capacity(capacity)),
                 nodes: Mutex::new(HashMap::new()),
+                accepted_commands: Mutex::new(AcceptedCommands {
+                    keys: HashSet::with_capacity(capacity),
+                    order: VecDeque::with_capacity(capacity),
+                }),
                 events,
                 retention: capacity,
                 tasks: Arc::new(Semaphore::new(capacity)),
@@ -171,6 +181,7 @@ impl TransportService for StubService {
             ));
         }
         validate_traceparent(&envelope.traceparent)?;
+        let idempotency_key = validate_id(&envelope.idempotency_key, "idempotency_key")?;
         let Some(command_envelope::Payload::SimulationProbe(probe)) = envelope.payload else {
             return Err(Status::unimplemented("stub accepts only simulation probes"));
         };
@@ -179,12 +190,24 @@ impl TransportService for StubService {
         {
             return Err(Status::invalid_argument("simulation limits exceeded"));
         }
+        let mut accepted = self.state.accepted_commands.lock().await;
+        if accepted.keys.contains(&idempotency_key) {
+            return Ok(Response::new(SendCommandResponse { accepted: true }));
+        }
         let permit = self
             .state
             .tasks
             .clone()
             .try_acquire_owned()
             .map_err(|_| Status::resource_exhausted("simulator task capacity reached"))?;
+        if accepted.order.len() == self.state.retention
+            && let Some(expired) = accepted.order.pop_front()
+        {
+            accepted.keys.remove(&expired);
+        }
+        accepted.keys.insert(idempotency_key.clone());
+        accepted.order.push_back(idempotency_key);
+        drop(accepted);
         let service = self.clone();
         tokio::spawn(async move {
             service
@@ -319,6 +342,36 @@ fn new_traceparent() -> String {
 mod tests {
     use super::*;
 
+    fn probe_request(node_id: Vec<u8>, idempotency_key: Vec<u8>) -> SendCommandRequest {
+        let envelope = CommandEnvelope {
+            protocol_version: "1.0".to_owned(),
+            message_id: Uuid::now_v7().as_bytes().to_vec(),
+            command_id: Uuid::now_v7().as_bytes().to_vec(),
+            idempotency_key,
+            node_id: node_id.clone(),
+            sequence: 1,
+            issued_at: None,
+            expires_at: None,
+            expected_revision: 0,
+            traceparent: new_traceparent(),
+            actor_id: "test".to_owned(),
+            reason: "test".to_owned(),
+            payload: Some(command_envelope::Payload::SimulationProbe(
+                SimulationProbe {
+                    heartbeat_count: 1,
+                    delay_millis: 0,
+                    duplicate_event: false,
+                    return_error: false,
+                    disconnect_after: false,
+                },
+            )),
+        };
+        SendCommandRequest {
+            node_id,
+            command_envelope: envelope.encode_to_vec(),
+        }
+    }
+
     #[test]
     fn traceparent_validation_is_strict() {
         assert!(validate_traceparent(&new_traceparent()).is_ok());
@@ -329,5 +382,32 @@ mod tests {
     fn queue_capacity_is_bounded() {
         let service = StubService::new(usize::MAX);
         assert_eq!(service.state.retention, 4096);
+    }
+
+    #[tokio::test]
+    async fn repeated_idempotency_key_runs_probe_once() {
+        let service = StubService::new(8);
+        let node_id = Uuid::now_v7().as_bytes().to_vec();
+        let key = Uuid::now_v7().as_bytes().to_vec();
+
+        for _ in 0..2 {
+            let response = service
+                .send_command(Request::new(probe_request(node_id.clone(), key.clone())))
+                .await
+                .expect("probe accepted");
+            assert!(response.into_inner().accepted);
+        }
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                if service.state.retained.lock().await.len() == 3 {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("probe completed");
+
+        assert_eq!(service.state.retained.lock().await.len(), 3);
     }
 }

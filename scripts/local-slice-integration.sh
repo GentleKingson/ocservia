@@ -139,6 +139,12 @@ for _ in $(seq 1 50); do
 done
 [[ "${status}" == "offline" ]]
 
+operations_page="$(curl --fail --silent "http://127.0.0.1:${API_PORT}/api/v1/operations?page_size=2")"
+jq -e '.page.has_more == true and (.page.next_cursor | type == "string") and (.items | length == 2)' <<<"${operations_page}" >/dev/null
+operations_cursor="$(jq -r .page.next_cursor <<<"${operations_page}")"
+curl --fail --silent "http://127.0.0.1:${API_PORT}/api/v1/operations?page_size=2&cursor=${operations_cursor}" |
+  jq -e --arg cursor "${operations_cursor}" '(.items | length) >= 1 and all(.items[]; .id != $cursor)' >/dev/null
+
 first_event="$(jq -r '.items[0].id' <<<"${events}")"
 timeout 4s curl --no-buffer --silent --limit-rate 32 -H "Last-Event-ID: ${first_event}" \
   "http://127.0.0.1:${API_PORT}/api/v1/events/stream" >"${TMP_ROOT}/resumed.sse" &

@@ -137,26 +137,35 @@ func (s *Service) GetOperation(ctx context.Context, id uuid.UUID) (Operation, er
 	return operation, nil
 }
 
-func (s *Service) ListOperations(ctx context.Context, limit int) ([]Operation, error) {
+func (s *Service) ListOperations(ctx context.Context, after uuid.UUID, limit int) ([]Operation, bool, error) {
 	if limit < 1 || limit > 200 {
-		return nil, errors.New("operation page size must be between 1 and 200")
+		return nil, false, errors.New("operation page size must be between 1 and 200")
 	}
 	rows, err := s.pool.Query(ctx, `
 		SELECT id::text, state, node_id::text, command_id::text, created_at, updated_at
-		FROM operations ORDER BY created_at DESC, id DESC LIMIT $1`, limit)
+		FROM operations
+		WHERE ($1::uuid IS NULL OR id < $1)
+		ORDER BY id DESC LIMIT $2`, nullableUUID(after), limit+1)
 	if err != nil {
-		return nil, fmt.Errorf("list operations: %w", err)
+		return nil, false, fmt.Errorf("list operations: %w", err)
 	}
 	defer rows.Close()
-	operations := make([]Operation, 0, limit)
+	operations := make([]Operation, 0, limit+1)
 	for rows.Next() {
 		var operation Operation
 		if err := rows.Scan(&operation.ID, &operation.State, &operation.NodeID, &operation.CommandID, &operation.CreatedAt, &operation.UpdatedAt); err != nil {
-			return nil, fmt.Errorf("scan operation: %w", err)
+			return nil, false, fmt.Errorf("scan operation: %w", err)
 		}
 		operations = append(operations, operation)
 	}
-	return operations, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, false, err
+	}
+	hasMore := len(operations) > limit
+	if hasMore {
+		operations = operations[:limit]
+	}
+	return operations, hasMore, nil
 }
 
 func (s *Service) ListEvents(ctx context.Context, after uuid.UUID, limit int) ([]Event, bool, error) {

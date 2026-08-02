@@ -38,8 +38,14 @@ export const useLocalSliceStore = defineStore("local-slice", () => {
 
   async function rebuild(): Promise<void> {
     try {
-      const page = await listEvents();
-      events.value = page.items.slice(-200);
+      const rebuilt: PlatformEvent[] = [];
+      let cursor: string | undefined;
+      do {
+        const page = await listEvents(cursor);
+        rebuilt.push(...page.items);
+        cursor = page.page.hasMore ? page.page.nextCursor : undefined;
+      } while (cursor);
+      events.value = rebuilt.slice(-200);
       unavailable.value = false;
     } catch {
       unavailable.value = true;
@@ -48,7 +54,10 @@ export const useLocalSliceStore = defineStore("local-slice", () => {
 
   function connect(): void {
     source?.close();
-    source = new EventSource("/api/v1/events/stream");
+    const cursor = events.value.at(-1)?.id;
+    source = new EventSource(
+      `/api/v1/events/stream${cursor ? `?after=${encodeURIComponent(cursor)}` : ""}`,
+    );
     source.addEventListener("platform", (message) => {
       if (
         !(message instanceof MessageEvent) ||
