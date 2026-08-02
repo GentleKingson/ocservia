@@ -261,6 +261,7 @@ impl TransportService for StubService {
             validate_id(&after, "after_event_id")?;
         }
         let mut state = self.state.delivery.lock().await;
+        state.subscribers.retain(|sender| !sender.is_closed());
         if !after.is_empty() && !state.retained.iter().any(|event| event.event_id == after) {
             return Err(Status::out_of_range("event cursor is outside retention"));
         }
@@ -471,5 +472,20 @@ mod tests {
             .await
             .expect("publisher unblocked")
             .expect("publisher task completed");
+    }
+
+    #[tokio::test]
+    async fn closed_subscribers_do_not_exhaust_capacity() {
+        let service = StubService::new(1);
+        let first = service
+            .watch_events(Request::new(WatchEventsRequest::default()))
+            .await
+            .expect("first watch accepted");
+        drop(first);
+
+        service
+            .watch_events(Request::new(WatchEventsRequest::default()))
+            .await
+            .expect("closed subscriber reaped");
     }
 }

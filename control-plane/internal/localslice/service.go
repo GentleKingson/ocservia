@@ -211,7 +211,12 @@ func (s *Service) LastEventID(ctx context.Context) ([]byte, error) {
 }
 
 func (s *Service) ReconcileEventGap(ctx context.Context) error {
-	commandTag, err := s.pool.Exec(ctx, `
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin transport event gap reconciliation: %w", err)
+	}
+	defer rollback(tx)
+	commandTag, err := tx.Exec(ctx, `
 		UPDATE operations AS operation
 		SET state = 'unknown', updated_at = now()
 		FROM local_slice_jobs AS job
@@ -222,7 +227,7 @@ func (s *Service) ReconcileEventGap(ctx context.Context) error {
 		return fmt.Errorf("mark operations unknown after transport event gap: %w", err)
 	}
 	if commandTag.RowsAffected() > 0 {
-		_, err = s.pool.Exec(ctx, `
+		_, err = tx.Exec(ctx, `
 			UPDATE local_slice_jobs
 			SET last_error = 'transport event retention gap; outcome requires reconciliation'
 			WHERE dispatched_at IS NOT NULL
@@ -230,6 +235,18 @@ func (s *Service) ReconcileEventGap(ctx context.Context) error {
 		if err != nil {
 			return fmt.Errorf("record transport event gap: %w", err)
 		}
+	}
+	if _, err := tx.Exec(ctx, `
+		UPDATE nodes AS node
+		SET status = 'offline', updated_at = now(), version = node.version + 1
+		FROM workspaces AS workspace
+		WHERE node.workspace_id = workspace.id
+		  AND workspace.slug = $1
+		  AND node.status = 'approved'`, workspaceSlug); err != nil {
+		return fmt.Errorf("mark simulator nodes offline after transport event gap: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("commit transport event gap reconciliation: %w", err)
 	}
 	return nil
 }
