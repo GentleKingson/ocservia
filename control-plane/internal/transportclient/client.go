@@ -96,20 +96,30 @@ func (c *Client) RunWatch(ctx context.Context, cursors CursorStore, handler Even
 			reconcileErr := reconciler.ReconcileEventGap(reconcileCtx, c.NodeConnected)
 			cancel()
 			if reconcileErr != nil {
-				return fmt.Errorf("reconcile transport event gap: %w", reconcileErr)
+				if err := waitBackoff(ctx, attempt); err != nil {
+					return err
+				}
+				continue
 			}
 			reconcileCursor = true
 			continue
 		}
 		reconcileCursor = false
-		delay := fullJitter(attempt, 100*time.Millisecond, 5*time.Second)
-		timer := time.NewTimer(delay)
-		select {
-		case <-ctx.Done():
-			timer.Stop()
-			return ctx.Err()
-		case <-timer.C:
+		if err := waitBackoff(ctx, attempt); err != nil {
+			return err
 		}
+	}
+}
+
+func waitBackoff(ctx context.Context, attempt uint) error {
+	delay := fullJitter(attempt, 100*time.Millisecond, 5*time.Second)
+	timer := time.NewTimer(delay)
+	select {
+	case <-ctx.Done():
+		timer.Stop()
+		return ctx.Err()
+	case <-timer.C:
+		return nil
 	}
 }
 

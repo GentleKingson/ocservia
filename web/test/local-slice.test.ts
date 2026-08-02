@@ -73,4 +73,23 @@ describe("local slice operation reconciliation", () => {
     expect(listOperations).toHaveBeenCalledTimes(2);
     store.$dispose();
   });
+
+  it("discovers operations created by another client after an empty rebuild", async () => {
+    vi.mocked(listOperations)
+      .mockResolvedValueOnce(operationPage())
+      .mockResolvedValueOnce(operationPage(operation("running")))
+      .mockResolvedValueOnce(operationPage(operation("succeeded")));
+    const store = useLocalSliceStore();
+
+    await store.rebuild();
+    expect(store.pendingOperations).toBe(0);
+
+    await vi.advanceTimersByTimeAsync(5000);
+    expect(store.pendingOperations).toBe(1);
+
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(store.pendingOperations).toBe(0);
+    expect(listOperations).toHaveBeenCalledTimes(3);
+    store.$dispose();
+  });
 });

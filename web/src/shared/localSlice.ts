@@ -143,8 +143,8 @@ export const useLocalSliceStore = defineStore("local-slice", () => {
 
   function schedulePendingRefresh(): void {
     clearTimeout(pendingPollTimer);
-    if (pendingOperationIDs.value.size === 0) return;
-    pendingPollTimer = setTimeout(() => void refreshPendingOperations(), 1000);
+    const delay = pendingOperationIDs.value.size === 0 ? 5000 : 1000;
+    pendingPollTimer = setTimeout(() => void refreshPendingOperations(), delay);
   }
 
   async function refreshPendingOperations(): Promise<void> {
