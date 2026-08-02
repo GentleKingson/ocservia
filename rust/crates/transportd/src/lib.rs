@@ -101,7 +101,6 @@ impl SecurityHook {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum AttemptRejection {
-    Capacity,
     Rate,
 }
 
@@ -121,7 +120,13 @@ fn record_attempt(
         !endpoint_attempts.is_empty()
     });
     if !attempts.contains_key(&endpoint) && attempts.len() >= identity_capacity {
-        return Err(AttemptRejection::Capacity);
+        let oldest = attempts
+            .iter()
+            .min_by_key(|(_, endpoint_attempts)| endpoint_attempts.front().copied())
+            .map(|(endpoint, _)| *endpoint);
+        if let Some(oldest) = oldest {
+            attempts.remove(&oldest);
+        }
     }
     let endpoint_attempts = attempts.entry(endpoint).or_default();
     if endpoint_attempts.len() >= MAX_ATTEMPTS_PER_MINUTE {
@@ -150,7 +155,6 @@ impl EndpointHooks for SecurityHook {
         let mut attempts = attempts.lock().await;
         match record_attempt(&mut attempts, endpoint, Instant::now(), identity_capacity) {
             Ok(()) => AfterHandshakeOutcome::Accept,
-            Err(AttemptRejection::Capacity) => reject(0x102, b"connection rate capacity reached"),
             Err(AttemptRejection::Rate) => reject(0x103, b"connection rate exceeded"),
         }
     }
@@ -321,6 +325,7 @@ impl TransportService for IrohTransportService {
             ));
         }
         validate_traceparent(&command.traceparent)?;
+        let response_deadline = command_response_deadline(&command)?;
         let (connection, max_message_size) = self
             .shared
             .inner
@@ -363,6 +368,7 @@ impl TransportService for IrohTransportService {
             command.traceparent,
             max_message_size,
             response_connection,
+            response_deadline,
         ));
         Ok(Response::new(SendCommandResponse { accepted: true }))
     }
@@ -586,6 +592,7 @@ async fn read_agent_events(
     traceparent: String,
     max_message_size: usize,
     connection: Connection,
+    response_deadline: tokio::time::Instant,
 ) {
     let event_context = (
         &shared,
@@ -595,7 +602,7 @@ async fn read_agent_events(
     );
     for _ in 0..MAX_RESPONSE_FRAMES {
         let mut length = [0_u8; 4];
-        match tokio::time::timeout(STREAM_TIMEOUT, recv.read_exact(&mut length)).await {
+        match tokio::time::timeout_at(response_deadline, recv.read_exact(&mut length)).await {
             Ok(Ok(())) => {}
             Ok(Err(_)) => {
                 publish_agent_error(
@@ -617,7 +624,7 @@ async fn read_agent_events(
         }
         let mut bytes = vec![0_u8; length];
         if !matches!(
-            tokio::time::timeout(STREAM_TIMEOUT, recv.read_exact(&mut bytes)).await,
+            tokio::time::timeout_at(response_deadline, recv.read_exact(&mut bytes)).await,
             Ok(Ok(()))
         ) {
             publish_agent_error(event_context, "agent response body invalid").await;
@@ -650,6 +657,19 @@ async fn read_agent_events(
         }
     }
     publish_agent_error(event_context, "agent response frame limit exceeded").await;
+}
+
+fn command_response_deadline(command: &CommandEnvelope) -> Result<tokio::time::Instant, Status> {
+    let expires_at = command
+        .expires_at
+        .as_ref()
+        .ok_or_else(|| Status::invalid_argument("command expires_at is required"))?;
+    let expires_at = SystemTime::try_from(*expires_at)
+        .map_err(|_| Status::invalid_argument("command expires_at is invalid"))?;
+    let remaining = expires_at
+        .duration_since(SystemTime::now())
+        .map_err(|_| Status::deadline_exceeded("command has expired"))?;
+    Ok(tokio::time::Instant::now() + remaining)
 }
 
 async fn publish_agent_error(
@@ -1132,27 +1152,37 @@ mod tests {
     }
 
     #[test]
-    fn enrollment_attempts_cannot_exhaust_agent_rate_capacity() {
+    fn enrollment_identity_churn_evicts_oldest_without_affecting_agents() {
         let now = Instant::now();
         let mut enrollment_attempts = HashMap::new();
-        for _ in 0..MAX_ENROLLMENT_CONNECTIONS {
+        let oldest = SecretKey::generate().public();
+        record_attempt(
+            &mut enrollment_attempts,
+            oldest,
+            now,
+            MAX_ENROLLMENT_CONNECTIONS,
+        )
+        .expect("record oldest enrollment identity");
+        for _ in 1..MAX_ENROLLMENT_CONNECTIONS {
             record_attempt(
                 &mut enrollment_attempts,
                 SecretKey::generate().public(),
-                now,
+                now + Duration::from_millis(1),
                 MAX_ENROLLMENT_CONNECTIONS,
             )
             .expect("fill enrollment identity capacity");
         }
-        assert_eq!(
-            record_attempt(
-                &mut enrollment_attempts,
-                SecretKey::generate().public(),
-                now,
-                MAX_ENROLLMENT_CONNECTIONS,
-            ),
-            Err(AttemptRejection::Capacity)
-        );
+        let newcomer = SecretKey::generate().public();
+        record_attempt(
+            &mut enrollment_attempts,
+            newcomer,
+            now + Duration::from_millis(2),
+            MAX_ENROLLMENT_CONNECTIONS,
+        )
+        .expect("new enrollment identity evicts the oldest entry");
+        assert_eq!(enrollment_attempts.len(), MAX_ENROLLMENT_CONNECTIONS);
+        assert!(!enrollment_attempts.contains_key(&oldest));
+        assert!(enrollment_attempts.contains_key(&newcomer));
 
         let mut agent_attempts = HashMap::new();
         assert_eq!(
@@ -1163,6 +1193,27 @@ mod tests {
                 MAX_AGENT_CONNECTIONS,
             ),
             Ok(())
+        );
+    }
+
+    #[test]
+    fn command_response_wait_honors_envelope_expiration() {
+        let command = CommandEnvelope {
+            expires_at: Some((SystemTime::now() + Duration::from_secs(30)).into()),
+            ..CommandEnvelope::default()
+        };
+        let deadline = command_response_deadline(&command).expect("valid command deadline");
+        assert!(deadline > tokio::time::Instant::now() + STREAM_TIMEOUT);
+
+        let expired = CommandEnvelope {
+            expires_at: Some((SystemTime::now() - Duration::from_secs(1)).into()),
+            ..CommandEnvelope::default()
+        };
+        assert_eq!(
+            command_response_deadline(&expired)
+                .expect_err("expired command rejected")
+                .code(),
+            tonic::Code::DeadlineExceeded
         );
     }
 
