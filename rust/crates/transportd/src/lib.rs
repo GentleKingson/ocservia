@@ -85,16 +85,50 @@ impl IdentityPolicy {
 #[derive(Debug)]
 struct SecurityHook {
     policy: IdentityPolicy,
-    attempts: Mutex<HashMap<EndpointId, VecDeque<Instant>>>,
+    agent_attempts: Mutex<HashMap<EndpointId, VecDeque<Instant>>>,
+    enrollment_attempts: Mutex<HashMap<EndpointId, VecDeque<Instant>>>,
 }
 
 impl SecurityHook {
     fn new(policy: IdentityPolicy) -> Self {
         Self {
             policy,
-            attempts: Mutex::new(HashMap::new()),
+            agent_attempts: Mutex::new(HashMap::new()),
+            enrollment_attempts: Mutex::new(HashMap::new()),
         }
     }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum AttemptRejection {
+    Capacity,
+    Rate,
+}
+
+fn record_attempt(
+    attempts: &mut HashMap<EndpointId, VecDeque<Instant>>,
+    endpoint: EndpointId,
+    now: Instant,
+    identity_capacity: usize,
+) -> Result<(), AttemptRejection> {
+    attempts.retain(|_, endpoint_attempts| {
+        while endpoint_attempts
+            .front()
+            .is_some_and(|at| now.duration_since(*at) >= Duration::from_mins(1))
+        {
+            endpoint_attempts.pop_front();
+        }
+        !endpoint_attempts.is_empty()
+    });
+    if !attempts.contains_key(&endpoint) && attempts.len() >= identity_capacity {
+        return Err(AttemptRejection::Capacity);
+    }
+    let endpoint_attempts = attempts.entry(endpoint).or_default();
+    if endpoint_attempts.len() >= MAX_ATTEMPTS_PER_MINUTE {
+        return Err(AttemptRejection::Rate);
+    }
+    endpoint_attempts.push_back(now);
+    Ok(())
 }
 
 impl EndpointHooks for SecurityHook {
@@ -108,26 +142,17 @@ impl EndpointHooks for SecurityHook {
             return reject(0x101, b"endpoint not permitted");
         }
 
-        let now = Instant::now();
-        let mut attempts = self.attempts.lock().await;
-        attempts.retain(|_, endpoint_attempts| {
-            while endpoint_attempts
-                .front()
-                .is_some_and(|at| now.duration_since(*at) >= Duration::from_mins(1))
-            {
-                endpoint_attempts.pop_front();
-            }
-            !endpoint_attempts.is_empty()
-        });
-        if !attempts.contains_key(&endpoint) && attempts.len() >= MAX_CONNECTIONS {
-            return reject(0x102, b"connection rate capacity reached");
+        let (attempts, identity_capacity) = if alpn == ENROLL_ALPN {
+            (&self.enrollment_attempts, MAX_ENROLLMENT_CONNECTIONS)
+        } else {
+            (&self.agent_attempts, MAX_AGENT_CONNECTIONS)
+        };
+        let mut attempts = attempts.lock().await;
+        match record_attempt(&mut attempts, endpoint, Instant::now(), identity_capacity) {
+            Ok(()) => AfterHandshakeOutcome::Accept,
+            Err(AttemptRejection::Capacity) => reject(0x102, b"connection rate capacity reached"),
+            Err(AttemptRejection::Rate) => reject(0x103, b"connection rate exceeded"),
         }
-        let endpoint_attempts = attempts.entry(endpoint).or_default();
-        if endpoint_attempts.len() >= MAX_ATTEMPTS_PER_MINUTE {
-            return reject(0x103, b"connection rate exceeded");
-        }
-        endpoint_attempts.push_back(now);
-        AfterHandshakeOutcome::Accept
     }
 }
 
@@ -197,7 +222,8 @@ impl Shared {
     }
 
     async fn remove(&self, node_id: &[u8], reason: &[u8]) -> Option<RegisteredConnection> {
-        let registered = self.inner.connections.lock().await.remove(node_id);
+        let mut registry = self.inner.connections.lock().await;
+        let registered = registry.remove(node_id);
         if let Some(registered) = &registered {
             registered.connection.close(VarInt::from_u32(0x104), reason);
             self.publish(event(
@@ -207,6 +233,7 @@ impl Shared {
             ))
             .await;
         }
+        drop(registry);
         registered
     }
 
@@ -491,7 +518,6 @@ impl ProtocolHandler for SessionHandler {
             .is_some_and(|entry| entry.connection.stable_id() == connection.stable_id())
         {
             registry.remove(&node_id);
-            drop(registry);
             self.shared
                 .publish(event(
                     &node_id,
@@ -500,6 +526,7 @@ impl ProtocolHandler for SessionHandler {
                 ))
                 .await;
         }
+        drop(registry);
         drop(permit);
         Ok(())
     }
@@ -1114,6 +1141,41 @@ mod tests {
         assert!(!policy.matches_node(approved, Uuid::now_v7().as_bytes()));
         assert!(!policy.permits(revoked, ENROLL_ALPN));
         assert!(!policy.permits(SecretKey::generate().public(), AGENT_ALPN));
+    }
+
+    #[test]
+    fn enrollment_attempts_cannot_exhaust_agent_rate_capacity() {
+        let now = Instant::now();
+        let mut enrollment_attempts = HashMap::new();
+        for _ in 0..MAX_ENROLLMENT_CONNECTIONS {
+            record_attempt(
+                &mut enrollment_attempts,
+                SecretKey::generate().public(),
+                now,
+                MAX_ENROLLMENT_CONNECTIONS,
+            )
+            .expect("fill enrollment identity capacity");
+        }
+        assert_eq!(
+            record_attempt(
+                &mut enrollment_attempts,
+                SecretKey::generate().public(),
+                now,
+                MAX_ENROLLMENT_CONNECTIONS,
+            ),
+            Err(AttemptRejection::Capacity)
+        );
+
+        let mut agent_attempts = HashMap::new();
+        assert_eq!(
+            record_attempt(
+                &mut agent_attempts,
+                SecretKey::generate().public(),
+                now,
+                MAX_AGENT_CONNECTIONS,
+            ),
+            Ok(())
+        );
     }
 
     #[test]
