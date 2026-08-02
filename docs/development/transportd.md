@@ -4,6 +4,9 @@
 `ocserv-platform/enroll/1` and `ocserv-platform/agent/1`. The Go boundary remains
 the versioned gRPC service on a `0660` Unix socket; Go code does not import Iroh
 types. The process has no database client or database credentials.
+The transport and control-plane containers share the numeric `ocservia` group
+(GID 65532), while retaining distinct non-root users, so only that group can
+traverse the runtime directory and connect to the socket.
 
 The controller key is supplied with `--key-file`. The file must be an absolute,
 non-symlink regular file owned by the service user, with no group or other

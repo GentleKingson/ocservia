@@ -2,6 +2,7 @@ use std::collections::{HashMap, HashSet};
 use std::env;
 use std::io;
 use std::os::unix::fs::{FileTypeExt, MetadataExt, OpenOptionsExt, PermissionsExt};
+use std::os::unix::net::UnixStream as StdUnixStream;
 use std::path::{Path, PathBuf};
 
 use iroh::endpoint::RelayMode;
@@ -34,7 +35,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         .init();
     let config = parse_args()?;
     let key = load_key(&config.key_file)?;
-    let listener = bind_socket(&config.socket)?;
+    let (listener, socket_identity) = bind_socket(&config.socket)?;
     let service = IrohTransportService::new(config.event_capacity);
     let router = build_router(
         key,
@@ -66,7 +67,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         .set_not_serving::<TransportServiceServer<IrohTransportService>>()
         .await;
     let router_result = ocservia_transportd::shutdown(&service, router).await;
-    let socket_result = remove_socket(&config.socket);
+    let socket_result = remove_socket(&config.socket, socket_identity);
     result?;
     router_result?;
     socket_result?;
@@ -220,7 +221,13 @@ const fn libc_o_nofollow() -> i32 {
     0x100
 }
 
-fn bind_socket(path: &Path) -> Result<UnixListener, io::Error> {
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct SocketIdentity {
+    device: u64,
+    inode: u64,
+}
+
+fn bind_socket(path: &Path) -> Result<(UnixListener, SocketIdentity), io::Error> {
     let parent = path
         .parent()
         .ok_or_else(|| invalid("socket path has no parent"))?;
@@ -228,7 +235,18 @@ fn bind_socket(path: &Path) -> Result<UnixListener, io::Error> {
         return Err(invalid("socket parent is not a directory"));
     }
     match std::fs::symlink_metadata(path) {
-        Ok(metadata) if metadata.file_type().is_socket() => std::fs::remove_file(path)?,
+        Ok(metadata) if metadata.file_type().is_socket() => match StdUnixStream::connect(path) {
+            Ok(_) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::AlreadyExists,
+                    "socket is already accepting connections",
+                ));
+            }
+            Err(error) if error.kind() == io::ErrorKind::ConnectionRefused => {
+                std::fs::remove_file(path)?;
+            }
+            Err(error) => return Err(error),
+        },
         Ok(_) => {
             return Err(io::Error::new(
                 io::ErrorKind::AlreadyExists,
@@ -240,12 +258,25 @@ fn bind_socket(path: &Path) -> Result<UnixListener, io::Error> {
     }
     let listener = UnixListener::bind(path)?;
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o660))?;
-    Ok(listener)
+    let metadata = std::fs::symlink_metadata(path)?;
+    Ok((
+        listener,
+        SocketIdentity {
+            device: metadata.dev(),
+            inode: metadata.ino(),
+        },
+    ))
 }
 
-fn remove_socket(path: &Path) -> Result<(), io::Error> {
+fn remove_socket(path: &Path, expected: SocketIdentity) -> Result<(), io::Error> {
     match std::fs::symlink_metadata(path) {
-        Ok(metadata) if metadata.file_type().is_socket() => std::fs::remove_file(path),
+        Ok(metadata)
+            if metadata.file_type().is_socket()
+                && metadata.dev() == expected.device
+                && metadata.ino() == expected.inode =>
+        {
+            std::fs::remove_file(path)
+        }
         Ok(_) => Err(io::Error::other("socket path changed during shutdown")),
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
         Err(error) => Err(error),
@@ -331,5 +362,55 @@ mod tests {
         assert!(
             parse_binding(&format!("not-a-uuid={}", hex::encode(endpoint.as_bytes()))).is_err()
         );
+    }
+
+    #[tokio::test]
+    async fn second_instance_cannot_replace_a_live_socket() {
+        let directory =
+            std::env::temp_dir().join(format!("ocservia-socket-{}", uuid::Uuid::now_v7()));
+        std::fs::create_dir(&directory).expect("create test directory");
+        let path = directory.join("transportd.sock");
+        let (listener, identity) = bind_socket(&path).expect("bind first socket");
+
+        assert_eq!(
+            bind_socket(&path)
+                .expect_err("live socket must not be replaced")
+                .kind(),
+            io::ErrorKind::AlreadyExists
+        );
+        let metadata = std::fs::symlink_metadata(&path).expect("socket metadata");
+        assert_eq!(
+            (metadata.dev(), metadata.ino()),
+            (identity.device, identity.inode)
+        );
+
+        drop(listener);
+        remove_socket(&path, identity).expect("remove first socket");
+        std::fs::remove_dir(directory).expect("remove test directory");
+    }
+
+    #[tokio::test]
+    async fn shutdown_does_not_unlink_a_replacement_socket() {
+        let directory =
+            std::env::temp_dir().join(format!("ocservia-socket-{}", uuid::Uuid::now_v7()));
+        std::fs::create_dir(&directory).expect("create test directory");
+        let path = directory.join("transportd.sock");
+        let (first_listener, first_identity) = bind_socket(&path).expect("bind first socket");
+        std::fs::remove_file(&path).expect("remove first socket path");
+        let (replacement_listener, replacement_identity) =
+            bind_socket(&path).expect("bind replacement socket");
+
+        assert_eq!(
+            remove_socket(&path, first_identity)
+                .expect_err("replacement socket must be preserved")
+                .kind(),
+            io::ErrorKind::Other
+        );
+        assert!(path.exists());
+
+        drop(first_listener);
+        drop(replacement_listener);
+        remove_socket(&path, replacement_identity).expect("remove replacement socket");
+        std::fs::remove_dir(directory).expect("remove test directory");
     }
 }
