@@ -1,0 +1,82 @@
+name: ocservia-dev
+
+services:
+  postgres:
+    image: postgres:17.10-bookworm
+    environment:
+      POSTGRES_DB: ocservia
+      POSTGRES_USER: ocservia_owner
+      POSTGRES_PASSWORD: development-owner-only
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ocservia_owner -d ocservia"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./postgres-init:/docker-entrypoint-initdb.d:ro
+
+  otel-collector:
+    image: otel/opentelemetry-collector:0.130.0
+    command: ["--config=/etc/otelcol/config.yaml"]
+    volumes:
+      - ./otel-collector.yaml:/etc/otelcol/config.yaml:ro
+
+  migrate:
+    build:
+      context: ../..
+      dockerfile: control-plane/Dockerfile
+      args:
+        VERSION: ${OCSERV_VERSION:-dev}
+        COMMIT: ${OCSERV_COMMIT:-unknown}
+    command: ["--migrate-only"]
+    environment:
+      OCSERV_ENVIRONMENT: development
+      OCSERV_DATABASE_URL: postgres://ocservia_owner:development-owner-only@postgres:5432/ocservia?sslmode=disable
+      OCSERV_RUNTIME_DATABASE_ROLE: ocservia_app
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  control-plane:
+    build:
+      context: ../..
+      dockerfile: control-plane/Dockerfile
+      args:
+        VERSION: ${OCSERV_VERSION:-dev}
+        COMMIT: ${OCSERV_COMMIT:-unknown}
+    command: ["--role=all"]
+    environment:
+      OCSERV_ENVIRONMENT: development
+      OCSERV_HTTP_ADDRESS: 0.0.0.0:8080
+      OCSERV_DATABASE_URL: postgres://ocservia_app:development-runtime-only@postgres:5432/ocservia?sslmode=disable
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
+    ports:
+      - "127.0.0.1:${OCSERV_HTTP_PORT:-8080}:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+      otel-collector:
+        condition: service_started
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "--silent", "http://127.0.0.1:8080/readyz"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  web:
+    build:
+      context: ../..
+      dockerfile: web/Dockerfile
+    ports:
+      - "127.0.0.1:${OCSERV_WEB_PORT:-4173}:4173"
+    environment:
+      VITE_API_TARGET: http://control-plane:8080
+    depends_on:
+      control-plane:
+        condition: service_healthy
+
+volumes:
+  postgres-data:

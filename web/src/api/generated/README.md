@@ -54,14 +54,20 @@ All URIs are relative to _/api/v1_
 | --------------- | ---------------------------------------------------------- | ---------------------------------- | ----------------------------- |
 | _OperationsApi_ | [**getOperation**](docs/OperationsApi.md#getoperation)     | **GET** /operations/{operation_id} | Get an asynchronous operation |
 | _OperationsApi_ | [**listOperations**](docs/OperationsApi.md#listoperations) | **GET** /operations                | List operations               |
+| _PlatformApi_   | [**getLiveness**](docs/PlatformApi.md#getliveness)         | **GET** /livez                     | Get process liveness          |
+| _PlatformApi_   | [**getReadiness**](docs/PlatformApi.md#getreadiness)       | **GET** /readyz                    | Get dependency readiness      |
+| _PlatformApi_   | [**getVersion**](docs/PlatformApi.md#getversion)           | **GET** /version                   | Get build metadata            |
 
 ### Models
 
+- [BuildInfo](docs/BuildInfo.md)
+- [Health](docs/Health.md)
 - [Operation](docs/Operation.md)
 - [OperationPage](docs/OperationPage.md)
 - [OperationState](docs/OperationState.md)
 - [PageInfo](docs/PageInfo.md)
 - [Problem](docs/Problem.md)
+- [Readiness](docs/Readiness.md)
 
 ### Authorization
 

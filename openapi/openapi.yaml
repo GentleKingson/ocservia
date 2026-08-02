@@ -11,9 +11,58 @@ servers:
 security:
   - oidc: []
 tags:
+  - name: platform
+    description: Process health and build metadata.
   - name: operations
     description: Asynchronous control-plane operation state.
 paths:
+  /livez:
+    get:
+      operationId: getLiveness
+      summary: Get process liveness
+      tags: [platform]
+      security: []
+      responses:
+        "200":
+          description: The process is live.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Health"
+        "4XX":
+          $ref: "#/components/responses/Problem"
+  /readyz:
+    get:
+      operationId: getReadiness
+      summary: Get dependency readiness
+      tags: [platform]
+      security: []
+      responses:
+        "200":
+          description: The process and database schema are ready.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Readiness"
+        "503":
+          $ref: "#/components/responses/Problem"
+        "4XX":
+          $ref: "#/components/responses/Problem"
+  /version:
+    get:
+      operationId: getVersion
+      summary: Get build metadata
+      tags: [platform]
+      security: []
+      responses:
+        "200":
+          description: Build metadata.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BuildInfo"
+        "4XX":
+          $ref: "#/components/responses/Problem"
   /operations:
     get:
       operationId: listOperations
@@ -98,6 +147,40 @@ components:
           schema:
             $ref: "#/components/schemas/Problem"
   schemas:
+    Health:
+      type: object
+      additionalProperties: false
+      required: [status]
+      properties:
+        status:
+          type: string
+          const: ok
+    Readiness:
+      type: object
+      additionalProperties: false
+      required: [status, schema_version]
+      properties:
+        status:
+          type: string
+          const: ok
+        schema_version:
+          type: integer
+          format: int64
+          minimum: 1
+    BuildInfo:
+      type: object
+      additionalProperties: false
+      required: [version, commit, role]
+      properties:
+        version:
+          type: string
+          minLength: 1
+        commit:
+          type: string
+          minLength: 1
+        role:
+          type: string
+          enum: [api, worker, scheduler, all]
     UuidV7:
       type: string
       format: uuid

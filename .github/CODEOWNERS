@@ -4,3 +4,5 @@
 /proto/ @GentleKingson
 /.github/workflows/ @GentleKingson
 /scripts/ @GentleKingson
+/control-plane/migrations/ @GentleKingson
+/deploy/compose/ @GentleKingson

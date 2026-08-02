@@ -1,0 +1,15 @@
+.git
+.github
+.ocservia-control
+AGENTS.md
+.cache
+.tools
+node_modules
+**/node_modules
+target
+**/target
+dist
+**/dist
+tmp
+coverage
+.DS_Store
