@@ -54,6 +54,7 @@ struct ActiveNode {
     connection: NodeConnection,
     generation: Uuid,
     cancellation: watch::Sender<bool>,
+    traceparent: String,
 }
 
 impl StubService {
@@ -131,6 +132,7 @@ impl StubService {
                 },
                 generation,
                 cancellation,
+                traceparent: traceparent.clone(),
             },
         );
         if !self
@@ -316,7 +318,7 @@ impl TransportService for StubService {
         self.publish(new_event(
             &node_id,
             TransportEventType::Disconnected,
-            &new_traceparent(),
+            &node.traceparent,
             request.reason.into_bytes(),
         ))
         .await;
@@ -408,6 +410,7 @@ fn now_timestamp() -> prost_types::Timestamp {
     SystemTime::now().into()
 }
 
+#[cfg(test)]
 fn new_traceparent() -> String {
     let trace_id = Uuid::now_v7().simple().to_string();
     let span_id = &Uuid::now_v7().simple().to_string()[..16];
@@ -545,18 +548,22 @@ mod tests {
     async fn closing_node_cancels_in_flight_probe_events() {
         let service = StubService::new(8);
         let node_id = Uuid::now_v7().as_bytes().to_vec();
+        let request = probe_request_with(
+            node_id.clone(),
+            Uuid::now_v7().as_bytes().to_vec(),
+            SimulationProbe {
+                heartbeat_count: 2,
+                delay_millis: 250,
+                duplicate_event: false,
+                return_error: false,
+                disconnect_after: false,
+            },
+        );
+        let traceparent = CommandEnvelope::decode(request.command_envelope.as_slice())
+            .expect("valid command envelope")
+            .traceparent;
         service
-            .send_command(Request::new(probe_request_with(
-                node_id.clone(),
-                Uuid::now_v7().as_bytes().to_vec(),
-                SimulationProbe {
-                    heartbeat_count: 2,
-                    delay_millis: 250,
-                    duplicate_event: false,
-                    return_error: false,
-                    disconnect_after: false,
-                },
-            )))
+            .send_command(Request::new(request))
             .await
             .expect("probe accepted");
         tokio::time::timeout(Duration::from_secs(1), async {
@@ -588,6 +595,14 @@ mod tests {
             event.r#type == i32::from(TransportEventType::Connected)
                 || event.r#type == i32::from(TransportEventType::Disconnected)
         }));
+        assert_eq!(
+            events
+                .iter()
+                .find(|event| event.r#type == i32::from(TransportEventType::Disconnected))
+                .expect("disconnect published")
+                .traceparent,
+            traceparent
+        );
     }
 
     #[tokio::test]
