@@ -80,7 +80,8 @@ func Run(ctx context.Context, cfg config.Config, build BuildInfo, logger *slog.L
 		}
 	}
 
-	server := api.New(cfg.HTTPAddress, pool, api.BuildInfo{Version: build.Version, Commit: build.Commit, Role: string(cfg.Role)}, logger, cfg.BodyLimit, cfg.RequestTimeout, cfg.DevAuth, expectedSchemaVersion)
+	localPrincipal := cfg.DevAuth || cfg.LocalSimulator
+	server := api.New(cfg.HTTPAddress, pool, api.BuildInfo{Version: build.Version, Commit: build.Commit, Role: string(cfg.Role)}, logger, cfg.BodyLimit, cfg.RequestTimeout, localPrincipal, expectedSchemaVersion)
 	if sliceService != nil {
 		server.EnableLocalSlice(sliceService)
 	}

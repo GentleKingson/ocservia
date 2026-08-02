@@ -224,7 +224,9 @@ impl TransportService for StubService {
     ) -> Result<Response<CloseNodeResponse>, Status> {
         let request = request.into_inner();
         let node_id = validate_id(&request.node_id, "node_id")?;
-        self.state.nodes.lock().await.remove(&node_id);
+        if self.state.nodes.lock().await.remove(&node_id).is_none() {
+            return Err(Status::not_found("node is not connected"));
+        }
         self.publish(new_event(
             &node_id,
             TransportEventType::Disconnected,
@@ -409,5 +411,22 @@ mod tests {
         .expect("probe completed");
 
         assert_eq!(service.state.retained.lock().await.len(), 3);
+    }
+
+    #[tokio::test]
+    async fn closing_unknown_node_does_not_publish() {
+        let service = StubService::new(8);
+        let result = service
+            .close_node(Request::new(CloseNodeRequest {
+                node_id: Uuid::now_v7().as_bytes().to_vec(),
+                reason: "test".to_owned(),
+            }))
+            .await;
+
+        assert_eq!(
+            result.expect_err("unknown node rejected").code(),
+            tonic::Code::NotFound,
+        );
+        assert!(service.state.retained.lock().await.is_empty());
     }
 }

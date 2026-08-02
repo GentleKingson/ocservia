@@ -19,19 +19,14 @@ const terminalStates = new Set([
 
 export const useLocalSliceStore = defineStore("local-slice", () => {
   const events = ref<PlatformEvent[]>([]);
+  const connectedNodes = ref(new Set<string>());
   const operation = ref<Operation>();
   const running = ref(false);
   const unavailable = ref(false);
   let source: EventSource | undefined;
   let pollTimer: ReturnType<typeof setTimeout> | undefined;
 
-  const activeNodes = computed(() => {
-    const states = new Map<string, boolean>();
-    for (const event of events.value) {
-      states.set(event.nodeId, event.type !== "disconnected");
-    }
-    return [...states.values()].filter(Boolean).length;
-  });
+  const activeNodes = computed(() => connectedNodes.value.size);
   const pendingOperations = computed(() =>
     operation.value && !terminalStates.has(operation.value.state) ? 1 : 0,
   );
@@ -45,6 +40,9 @@ export const useLocalSliceStore = defineStore("local-slice", () => {
         rebuilt.push(...page.items);
         cursor = page.page.hasMore ? page.page.nextCursor : undefined;
       } while (cursor);
+      const rebuiltNodes = new Set<string>();
+      for (const event of rebuilt) updateNodeState(rebuiltNodes, event);
+      connectedNodes.value = rebuiltNodes;
       events.value = rebuilt.slice(-200);
       unavailable.value = false;
     } catch {
@@ -70,6 +68,7 @@ export const useLocalSliceStore = defineStore("local-slice", () => {
           JSON.parse(message.data) as unknown,
         );
         if (!events.value.some((current) => current.id === event.id)) {
+          updateNodeState(connectedNodes.value, event);
           events.value = [...events.value.slice(-199), event];
         }
         unavailable.value = false;
@@ -80,6 +79,11 @@ export const useLocalSliceStore = defineStore("local-slice", () => {
     source.onerror = () => {
       unavailable.value = true;
     };
+  }
+
+  function updateNodeState(nodes: Set<string>, event: PlatformEvent): void {
+    if (event.type === "disconnected") nodes.delete(event.nodeId);
+    else nodes.add(event.nodeId);
   }
 
   async function run(scenario: SimulationScenario): Promise<void> {

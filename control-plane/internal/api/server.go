@@ -48,8 +48,8 @@ func New(address string, pool *pgxpool.Pool, build BuildInfo, logger *slog.Logge
 	mux.HandleFunc("GET /api/v1/readyz", s.ready)
 	mux.HandleFunc("GET /api/v1/version", s.version)
 	mux.HandleFunc("POST /api/v1/development/simulations", s.createSimulation)
-	mux.HandleFunc("GET /api/v1/operations", s.listOperations)
-	mux.HandleFunc("GET /api/v1/operations/{operation_id}", s.getOperation)
+	mux.HandleFunc("GET /api/v1/operations", s.requireOperationAuth(s.listOperations))
+	mux.HandleFunc("GET /api/v1/operations/{operation_id}", s.requireOperationAuth(s.getOperation))
 	mux.HandleFunc("GET /api/v1/events", s.listEvents)
 	mux.HandleFunc("GET /api/v1/events/stream", s.streamEvents)
 	handler := s.requestContext(s.limitBody(s.timeout(s.routeErrors(mux))))
@@ -165,6 +165,17 @@ func (s *Server) requestContext(next http.Handler) http.Handler {
 		s.logger.InfoContext(r.Context(), "http request", "request_id", requestID, "trace_id", trace.SpanContextFromContext(r.Context()).TraceID().String(), "method", r.Method, "path", r.URL.Path)
 		next.ServeHTTP(w, r)
 	})
+}
+
+func (s *Server) requireOperationAuth(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if !s.devAuth {
+			w.Header().Set("WWW-Authenticate", "Bearer")
+			writeProblem(w, r, http.StatusUnauthorized, "https://ocservia.dev/problems/unauthenticated", "Authentication required", "operation state requires an authenticated principal")
+			return
+		}
+		next(w, r)
+	}
 }
 
 type requestIDKey struct{}

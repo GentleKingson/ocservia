@@ -35,6 +35,20 @@ func TestDevAuthMarker(t *testing.T) {
 	}
 }
 
+func TestOperationsRequireAuthenticatedPrincipal(t *testing.T) {
+	server := New("127.0.0.1:0", nil, BuildInfo{}, slog.New(slog.NewTextHandler(io.Discard, nil)), 1024, time.Second, false, 1)
+	for _, path := range []string{"/api/v1/operations", "/api/v1/operations/019fc0a4-6d92-765c-a8a1-4af556614cc3"} {
+		response := httptest.NewRecorder()
+		server.http.Handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, path, nil))
+		if response.Code != http.StatusUnauthorized {
+			t.Fatalf("%s status = %d", path, response.Code)
+		}
+		if response.Header().Get("WWW-Authenticate") != "Bearer" {
+			t.Fatalf("%s missing bearer challenge", path)
+		}
+	}
+}
+
 func TestVersionUsesContractFieldNames(t *testing.T) {
 	server := New("127.0.0.1:0", nil, BuildInfo{Version: "test", Commit: "abc", Role: "api"}, slog.New(slog.NewTextHandler(io.Discard, nil)), 1024, time.Second, false, 1)
 	response := httptest.NewRecorder()
