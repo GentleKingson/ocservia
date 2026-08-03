@@ -165,6 +165,50 @@ func TestExpiredAndSubstitutedEnrollmentTokensIntegration(t *testing.T) {
 	}
 }
 
+func TestLegacyPendingNodeCanBeReenrolledIntegration(t *testing.T) {
+	databaseURL := os.Getenv("OCSERV_TEST_DATABASE_URL")
+	if databaseURL == "" {
+		t.Skip("OCSERV_TEST_DATABASE_URL is not set")
+	}
+	ctx := context.Background()
+	pool, err := pgxpool.New(ctx, databaseURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pool.Close()
+	workspaceID := uuid.Must(uuid.NewV7())
+	legacyNodeID := uuid.Must(uuid.NewV7())
+	legacyName := "legacy-node"
+	_, err = pool.Exec(ctx, `INSERT INTO workspaces (id,name,slug,created_at,updated_at) VALUES ($1,'Legacy enrollment',$2,now(),now())`, workspaceID, "legacy-"+workspaceID.String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cleanupWorkspace(ctx, pool, workspaceID)
+	_, err = pool.Exec(ctx, `INSERT INTO nodes (id,workspace_id,name,status,created_at,updated_at) VALUES ($1,$2,$3,'pending',now(),now())`, legacyNodeID, workspaceID, legacyName)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	service := New(pool, "")
+	endpoint := make([]byte, 32)
+	endpoint[0] = 11
+	token, err := service.CreateToken(ctx, TokenSpec{WorkspaceID: workspaceID, Environment: "test", ExpectedNodeName: legacyName, ExpectedEndpointID: endpoint, ActorID: "integration", Reason: "re-enroll legacy node", RequestID: uuid.Must(uuid.NewV7()).String()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	response, err := service.Enroll(ctx, enrollmentRequest(token.Value, endpoint))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(response.GetNodeId()) != string(legacyNodeID[:]) {
+		t.Fatal("legacy enrollment created a replacement node")
+	}
+	var state string
+	if err := pool.QueryRow(ctx, `SELECT state FROM node_endpoint_keys WHERE node_id=$1 AND endpoint_id=$2`, legacyNodeID, endpoint).Scan(&state); err != nil || state != "pending" {
+		t.Fatalf("legacy endpoint binding state=%q err=%v", state, err)
+	}
+}
+
 func createToken(t *testing.T, service *Service, workspaceID uuid.UUID, endpoint []byte) Token {
 	t.Helper()
 	token, err := service.CreateToken(context.Background(), TokenSpec{WorkspaceID: workspaceID, Environment: "test", ExpectedEndpointID: endpoint, ActorID: "integration", Reason: "test enrollment", RequestID: uuid.Must(uuid.NewV7()).String()})

@@ -23,6 +23,18 @@ and `--revoked-endpoint ENDPOINT_ID` flags remain available for isolated tests
 and rollback. Endpoint IDs are 32-byte lowercase hexadecimal public
 identifiers and node IDs are UUIDv7 values.
 
+Before an I04-to-I05 cutover, inventory every startup `--approved-binding` and
+keep the I04 transport running while migration 000004 is applied. The old
+database did not store EndpointIDs, so the migration deliberately changes
+legacy `approved` nodes to fail-closed `pending` rather than falsely activating
+them. For each legacy node, create a one-time token constrained to its exact
+workspace, node name, environment, and inventoried EndpointID. Enrollment with
+that token attaches the EndpointID to the existing node record; explicitly
+approve it before switching transportd to `--trust-socket`. Verify that every
+formerly approved node has one active row in `node_endpoint_keys`, then remove
+the static binding flags. Do not start trust-socket mode while any legacy node
+is still pending or lacks an endpoint binding.
+
 Run with the public relay set:
 
 ```bash

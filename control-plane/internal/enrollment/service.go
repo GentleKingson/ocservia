@@ -186,21 +186,36 @@ func (s *Service) Enroll(ctx context.Context, request *agentv1.EnrollRequest) (*
 		}
 		return &agentv1.EnrollResponse{Result: agentv1.HandshakeResult_HANDSHAKE_RESULT_PENDING_APPROVAL, NodeId: (*consumedNodeID)[:], ControllerEndpointId: s.controllerEndpointID}, nil
 	}
-	var pending int
-	if err := tx.QueryRow(ctx, `SELECT count(*) FROM nodes WHERE workspace_id=$1 AND status='pending'`, workspaceID).Scan(&pending); err != nil {
-		return nil, fmt.Errorf("count pending nodes: %w", err)
-	}
-	if pending >= MaxPendingNodes {
-		return nil, ErrPendingLimit
-	}
 	now := s.now().UTC()
-	nodeID := uuid.Must(uuid.NewV7())
 	name := "node-" + fmt.Sprintf("%x", request.GetEndpointId()[:6])
+	var nodeID uuid.UUID
+	claimedLegacyNode := false
 	if expectedName != nil {
 		name = *expectedName
+		err := tx.QueryRow(ctx, `SELECT n.id FROM nodes n
+			WHERE n.workspace_id=$1 AND n.name=$2 AND n.status='pending'
+			AND NOT EXISTS (SELECT 1 FROM node_endpoint_keys k WHERE k.node_id=n.id)
+			FOR UPDATE OF n`, workspaceID, name).Scan(&nodeID)
+		if err == nil {
+			claimedLegacyNode = true
+		} else if !errors.Is(err, pgx.ErrNoRows) {
+			return nil, fmt.Errorf("lock legacy pending node: %w", err)
+		}
 	}
-	if _, err := tx.Exec(ctx, `INSERT INTO nodes (id,workspace_id,name,status,created_at,updated_at) VALUES ($1,$2,$3,'pending',$4,$4)`, nodeID, workspaceID, name, now); err != nil {
-		return nil, fmt.Errorf("insert pending node: %w", err)
+	if !claimedLegacyNode {
+		var pending int
+		if err := tx.QueryRow(ctx, `SELECT count(*) FROM nodes WHERE workspace_id=$1 AND status='pending'`, workspaceID).Scan(&pending); err != nil {
+			return nil, fmt.Errorf("count pending nodes: %w", err)
+		}
+		if pending >= MaxPendingNodes {
+			return nil, ErrPendingLimit
+		}
+		nodeID = uuid.Must(uuid.NewV7())
+		if _, err := tx.Exec(ctx, `INSERT INTO nodes (id,workspace_id,name,status,created_at,updated_at) VALUES ($1,$2,$3,'pending',$4,$4)`, nodeID, workspaceID, name, now); err != nil {
+			return nil, fmt.Errorf("insert pending node: %w", err)
+		}
+	} else if _, err := tx.Exec(ctx, `UPDATE nodes SET version=version+1,updated_at=$2 WHERE id=$1`, nodeID, now); err != nil {
+		return nil, fmt.Errorf("prepare legacy pending node: %w", err)
 	}
 	if _, err := tx.Exec(ctx, `INSERT INTO node_endpoint_keys (node_id,endpoint_id,state,bound_at) VALUES ($1,$2,'pending',$3)`, nodeID, request.GetEndpointId(), now); err != nil {
 		return nil, fmt.Errorf("bind pending endpoint: %w", err)

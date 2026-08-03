@@ -70,7 +70,7 @@ func (s *Server) createEnrollmentToken(w http.ResponseWriter, r *http.Request) {
 }
 
 func validEnrollmentTTLSeconds(seconds int64) bool {
-	return seconds >= 1 && seconds <= int64(enrollment.DefaultTokenTTL/time.Second)
+	return seconds == 0 || seconds >= 1 && seconds <= int64(enrollment.DefaultTokenTTL/time.Second)
 }
 
 func (s *Server) approveNode(w http.ResponseWriter, r *http.Request) {

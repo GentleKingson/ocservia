@@ -159,12 +159,14 @@ func TestRoutingErrorsUseProblemDetails(t *testing.T) {
 }
 
 func TestEnrollmentTTLSecondsRejectsOverflowInputs(t *testing.T) {
-	for _, seconds := range []int64{0, 901, 36028797018963968} {
+	for _, seconds := range []int64{-1, 901, 36028797018963968} {
 		if validEnrollmentTTLSeconds(seconds) {
 			t.Fatalf("ttl_seconds %d was accepted", seconds)
 		}
 	}
-	if !validEnrollmentTTLSeconds(900) {
-		t.Fatal("maximum enrollment TTL was rejected")
+	for _, seconds := range []int64{0, 1, 900} {
+		if !validEnrollmentTTLSeconds(seconds) {
+			t.Fatalf("ttl_seconds %d was rejected", seconds)
+		}
 	}
 }

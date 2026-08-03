@@ -1,5 +1,7 @@
 ALTER TABLE nodes DROP CONSTRAINT nodes_status_check;
-UPDATE nodes SET status = 'active' WHERE status = 'approved';
+-- Pre-I05 rows have no EndpointID to backfill. Keep them fail-closed until an
+-- exact-name enrollment token binds the existing node and it is re-approved.
+UPDATE nodes SET status = 'pending' WHERE status = 'approved';
 ALTER TABLE nodes
     ADD CONSTRAINT nodes_status_check
     CHECK (status IN ('pending', 'active', 'revoked', 'offline'));
