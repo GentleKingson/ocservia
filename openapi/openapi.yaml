@@ -465,7 +465,7 @@ components:
           type: string
           minLength: 43
           maxLength: 43
-          writeOnly: true
+          readOnly: true
         expires_at:
           $ref: "#/components/schemas/UtcDateTime"
     NodeApproval:

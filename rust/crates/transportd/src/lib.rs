@@ -48,6 +48,8 @@ const MAX_CONNECTIONS: usize = 4096;
 const MAX_ENROLLMENT_CONNECTIONS: usize = 64;
 const MAX_AGENT_CONNECTIONS: usize = MAX_CONNECTIONS - MAX_ENROLLMENT_CONNECTIONS;
 const MAX_ATTEMPTS_PER_MINUTE: usize = 30;
+const MAX_TRUST_ATTEMPTS_PER_MINUTE: usize = 600;
+const MAX_TRUST_CHECKS: usize = 16;
 const MAX_RESPONSE_FRAMES: usize = 128;
 
 type EventStream = Pin<Box<dyn Stream<Item = Result<TransportEvent, Status>> + Send>>;
@@ -235,6 +237,7 @@ struct SecurityHook {
     trust: Option<TrustAuthority>,
     agent_attempts: Mutex<HashMap<EndpointId, VecDeque<Instant>>>,
     enrollment_attempts: Mutex<HashMap<EndpointId, VecDeque<Instant>>>,
+    trust_attempts: Mutex<VecDeque<Instant>>,
     trust_checks: Arc<Semaphore>,
 }
 
@@ -245,7 +248,8 @@ impl SecurityHook {
             trust,
             agent_attempts: Mutex::new(HashMap::new()),
             enrollment_attempts: Mutex::new(HashMap::new()),
-            trust_checks: Arc::new(Semaphore::new(MAX_ENROLLMENT_CONNECTIONS)),
+            trust_attempts: Mutex::new(VecDeque::new()),
+            trust_checks: Arc::new(Semaphore::new(MAX_TRUST_CHECKS)),
         }
     }
 }
@@ -287,6 +291,24 @@ fn record_attempt(
     Ok(())
 }
 
+fn record_global_attempt(
+    attempts: &mut VecDeque<Instant>,
+    now: Instant,
+    limit: usize,
+) -> Result<(), AttemptRejection> {
+    while attempts
+        .front()
+        .is_some_and(|at| now.duration_since(*at) >= Duration::from_mins(1))
+    {
+        attempts.pop_front();
+    }
+    if attempts.len() >= limit {
+        return Err(AttemptRejection::Rate);
+    }
+    attempts.push_back(now);
+    Ok(())
+}
+
 impl EndpointHooks for SecurityHook {
     async fn after_handshake(&self, connection: &Connection) -> AfterHandshakeOutcome {
         let endpoint = connection.remote_id();
@@ -311,6 +333,17 @@ impl EndpointHooks for SecurityHook {
             let Ok(_permit) = self.trust_checks.clone().try_acquire_owned() else {
                 return reject(0x102, b"trust authority capacity reached");
             };
+            let mut trust_attempts = self.trust_attempts.lock().await;
+            if record_global_attempt(
+                &mut trust_attempts,
+                Instant::now(),
+                MAX_TRUST_ATTEMPTS_PER_MINUTE,
+            )
+            .is_err()
+            {
+                return reject(0x103, b"trust authority rate exceeded");
+            }
+            drop(trust_attempts);
             trust.permits(endpoint, alpn).await
         } else {
             self.policy.permits(endpoint, alpn)
@@ -1642,6 +1675,25 @@ mod tests {
                 now,
                 MAX_AGENT_CONNECTIONS,
             ),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn trust_attempt_rate_is_global_and_non_evictable() {
+        let now = Instant::now();
+        let mut attempts = VecDeque::new();
+        assert_eq!(record_global_attempt(&mut attempts, now, 2), Ok(()));
+        assert_eq!(
+            record_global_attempt(&mut attempts, now + Duration::from_millis(1), 2),
+            Ok(())
+        );
+        assert_eq!(
+            record_global_attempt(&mut attempts, now + Duration::from_millis(2), 2),
+            Err(AttemptRejection::Rate)
+        );
+        assert_eq!(
+            record_global_attempt(&mut attempts, now + Duration::from_mins(1), 2),
             Ok(())
         );
     }

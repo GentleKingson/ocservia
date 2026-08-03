@@ -13,6 +13,11 @@ interface OpenApiDocument {
     schemas?: {
       UuidV7?: { pattern?: unknown };
       Problem?: { required?: unknown };
+      EnrollmentToken?: {
+        properties?: {
+          token?: { readOnly?: unknown; writeOnly?: unknown };
+        };
+      };
     };
   };
 }
@@ -32,6 +37,13 @@ describe("OpenAPI invariants", () => {
       "title",
       "status",
     ]);
+    expect(
+      document.components?.schemas?.EnrollmentToken?.properties?.token,
+    ).toMatchObject({ readOnly: true });
+    expect(
+      document.components?.schemas?.EnrollmentToken?.properties?.token
+        ?.writeOnly,
+    ).toBeUndefined();
     expect(document.components?.securitySchemes?.oidc).toMatchObject({
       type: "http",
       scheme: "bearer",

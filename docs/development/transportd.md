@@ -48,7 +48,9 @@ ocservia-transportd \
 Use `--relay-mode disabled` for isolated direct-path tests. The endpoint limits
 handshake size and time, frame and flow-control windows, remotely initiated
 streams, connection count, idle time, connection attempts, event retention, and
-UDS subscribers. Connection queries report the agent instance, selected direct
+UDS subscribers. Database-backed trust checks additionally have a non-evictable
+global 600-attempt-per-minute limit and a 16-request concurrency limit.
+Connection queries report the agent instance, selected direct
 or relay path, path detail, RTT, connection time, and last-seen time.
 
 Iroh is pinned to `1.0.0` in `Cargo.toml`; `Cargo.lock` pins the complete resolved

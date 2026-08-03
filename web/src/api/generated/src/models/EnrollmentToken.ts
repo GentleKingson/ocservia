@@ -30,7 +30,7 @@ export interface EnrollmentToken {
    * @type {string}
    * @memberof EnrollmentToken
    */
-  token: string;
+  readonly token: string;
   /**
    * RFC 3339 timestamp normalized to UTC.
    * @type {Date}
@@ -80,7 +80,7 @@ export function EnrollmentTokenToJSON(json: any): EnrollmentToken {
 }
 
 export function EnrollmentTokenToJSONTyped(
-  value?: EnrollmentToken | null,
+  value?: Omit<EnrollmentToken, "token"> | null,
   ignoreDiscriminator: boolean = false,
 ): any {
   if (value == null) {
@@ -89,7 +89,6 @@ export function EnrollmentTokenToJSONTyped(
 
   return {
     id: value["id"],
-    token: value["token"],
     expires_at: value["expiresAt"].toISOString(),
   };
 }
