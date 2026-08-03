@@ -13,6 +13,7 @@ import (
 	"slices"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	agentv1 "github.com/GentleKingson/ocservia/control-plane/gen/proto/ocserv/platform/agent/v1"
 	transportv1 "github.com/GentleKingson/ocservia/control-plane/gen/proto/ocserv/platform/transport/v1"
@@ -464,7 +465,8 @@ func validCapabilities(values []string) bool {
 
 func validShort(value string, maximum int) bool {
 	trimmed := strings.TrimSpace(value)
-	return value == trimmed && len(value) > 0 && len(value) <= maximum
+	length := utf8.RuneCountInString(value)
+	return value == trimmed && length > 0 && length <= maximum
 }
 func validOptional(value string, maximum int) bool { return value == "" || validShort(value, maximum) }
 func validPolicy(value string) bool                { return validShort(value, 128) }

@@ -4,6 +4,7 @@
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::pin::Pin;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant, SystemTime};
 
@@ -337,6 +338,7 @@ struct Shared {
 
 struct Inner {
     connections: Mutex<HashMap<Vec<u8>, RegisteredConnection>>,
+    registration_generation: AtomicU64,
     events: Mutex<EventState>,
     event_capacity: usize,
     agent_connection_permits: Arc<Semaphore>,
@@ -362,6 +364,7 @@ impl Shared {
         Self {
             inner: Arc::new(Inner {
                 connections: Mutex::new(HashMap::new()),
+                registration_generation: AtomicU64::new(0),
                 events: Mutex::new(EventState {
                     retained: VecDeque::with_capacity(capacity),
                     subscribers: Vec::new(),
@@ -389,6 +392,11 @@ impl Shared {
     }
 
     async fn remove(&self, node_id: &[u8], reason: &[u8]) -> Option<RegisteredConnection> {
+        // Invalidate any live trust decision made before this close attempt,
+        // including when the requested node has not registered yet.
+        self.inner
+            .registration_generation
+            .fetch_add(1, Ordering::AcqRel);
         let mut registry = self.inner.connections.lock().await;
         let registered = registry.remove(node_id);
         if let Some(registered) = &registered {
@@ -550,8 +558,10 @@ impl TransportService for IrohTransportService {
     ) -> Result<Response<CloseNodeResponse>, Status> {
         let request = request.into_inner();
         let node_id = validate_uuid(&request.node_id, "node_id")?;
-        if request.reason.len() > 1024 {
-            return Err(Status::invalid_argument("close reason exceeds 1 KiB"));
+        if request.reason.chars().count() > 1024 {
+            return Err(Status::invalid_argument(
+                "close reason exceeds 1024 characters",
+            ));
         }
         self.shared
             .remove(&node_id, request.reason.as_bytes())
@@ -613,7 +623,7 @@ impl TransportService for IrohTransportService {
         if request.endpoint_id.len() != 32 {
             return Err(Status::invalid_argument("endpoint_id must be 32 bytes"));
         }
-        if request.reason.is_empty() || request.reason.len() > 1024 {
+        if request.reason.is_empty() || request.reason.chars().count() > 1024 {
             return Err(Status::invalid_argument("trust update reason is invalid"));
         }
         if request.revision == 0 {
@@ -762,7 +772,11 @@ impl ProtocolHandler for SessionHandler {
         connection.set_max_concurrent_uni_streams(VarInt::from_u32(2));
         let metadata = metadata(&handshake, &connection).await;
         let node_id = metadata.node_id.clone();
-        let mut registry = self.shared.inner.connections.lock().await;
+        let registration_generation = self
+            .shared
+            .inner
+            .registration_generation
+            .load(Ordering::Acquire);
         if let Some(trust) = &self.trust
             && !trust.permits(connection.remote_id(), AGENT_ALPN).await
         {
@@ -771,10 +785,18 @@ impl ProtocolHandler for SessionHandler {
                 "endpoint trust changed during session registration",
             ));
         }
+        let mut registry = self.shared.inner.connections.lock().await;
         // Trust updates change policy before taking the registry lock. Checking
-        // while holding this lock makes a concurrent revoke either reject this
-        // session here or close it immediately after registration.
-        if self.policy.revoked(connection.remote_id()) {
+        // both local policy and close generation makes a concurrent revoke
+        // either reject this session here or close it after registration.
+        if self.policy.revoked(connection.remote_id())
+            || self
+                .shared
+                .inner
+                .registration_generation
+                .load(Ordering::Acquire)
+                != registration_generation
+        {
             connection.close(VarInt::from_u32(0x101), b"session revoked");
             return Err(protocol_error("endpoint was revoked during handshake"));
         }
@@ -1528,6 +1550,22 @@ mod tests {
             1,
         ));
         assert!(restored.revoked(restored_revocation));
+    }
+
+    #[tokio::test]
+    async fn close_attempt_invalidates_inflight_registration() {
+        let shared = Shared::new(8);
+        let generation = shared.inner.registration_generation.load(Ordering::Acquire);
+        assert!(
+            shared
+                .remove(Uuid::now_v7().as_bytes(), b"revoked")
+                .await
+                .is_none()
+        );
+        assert_ne!(
+            shared.inner.registration_generation.load(Ordering::Acquire),
+            generation
+        );
     }
 
     #[test]

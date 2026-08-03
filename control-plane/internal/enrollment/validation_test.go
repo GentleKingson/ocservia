@@ -48,6 +48,12 @@ func TestValidShortRejectsWhitespaceOutsideContractLimit(t *testing.T) {
 	if !validShort("value", 5) {
 		t.Fatal("expected an exact-length value to be accepted")
 	}
+	if !validShort(strings.Repeat("界", 5), 5) {
+		t.Fatal("expected the contract limit to count Unicode characters")
+	}
+	if validShort(strings.Repeat("界", 6), 5) {
+		t.Fatal("expected an over-limit Unicode value to be rejected")
+	}
 }
 
 func TestValidateLockedTokenPreservesQueryErrors(t *testing.T) {
