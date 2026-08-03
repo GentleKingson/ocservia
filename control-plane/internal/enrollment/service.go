@@ -86,10 +86,11 @@ type Service struct {
 	now                  func() time.Time
 	random               io.Reader
 	controllerEndpointID string
+	controllerVersion    string
 }
 
-func New(pool *pgxpool.Pool, controllerEndpointID string) *Service {
-	return &Service{pool: pool, now: time.Now, random: rand.Reader, controllerEndpointID: controllerEndpointID}
+func New(pool *pgxpool.Pool, controllerEndpointID, controllerVersion string) *Service {
+	return &Service{pool: pool, now: time.Now, random: rand.Reader, controllerEndpointID: controllerEndpointID, controllerVersion: controllerVersion}
 }
 
 func (s *Service) CreateToken(ctx context.Context, spec TokenSpec) (Token, error) {
@@ -377,7 +378,7 @@ func (s *Service) CheckEndpoint(ctx context.Context, request *transportv1.CheckE
 
 func (s *Service) AuthorizeSession(ctx context.Context, request *transportv1.AuthorizeSessionRequest) (*agentv1.SessionHandshakeResponse, error) {
 	handshake := request.GetHandshake()
-	response := &agentv1.SessionHandshakeResponse{ProtocolMajor: ProtocolMajor, ProtocolMinor: ProtocolMinor, MaxMessageSize: MaxMessageSize, ControllerVersion: "1.0.0"}
+	response := &agentv1.SessionHandshakeResponse{ProtocolMajor: ProtocolMajor, ProtocolMinor: ProtocolMinor, MaxMessageSize: MaxMessageSize, ControllerVersion: s.controllerVersion}
 	if handshake == nil || len(request.GetRemoteEndpointId()) != 32 || subtle.ConstantTimeCompare(request.GetRemoteEndpointId(), handshake.GetEndpointId()) != 1 {
 		response.Result = agentv1.HandshakeResult_HANDSHAKE_RESULT_REVOKED
 		return response, nil
@@ -426,6 +427,9 @@ func (s *Service) AuthorizeSession(ctx context.Context, request *transportv1.Aut
 		}
 		approved[capability] = true
 	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
 	for _, capability := range handshake.GetCapabilities() {
 		if !approved[capability] {
 			response.Result = agentv1.HandshakeResult_HANDSHAKE_RESULT_CAPABILITY_REJECTED
@@ -434,7 +438,7 @@ func (s *Service) AuthorizeSession(ctx context.Context, request *transportv1.Aut
 	}
 	response.Result = agentv1.HandshakeResult_HANDSHAKE_RESULT_ACCEPTED
 	response.MaxMessageSize = min(handshake.GetMaxMessageSize(), MaxMessageSize)
-	return response, rows.Err()
+	return response, nil
 }
 
 func validateEnrollment(request *agentv1.EnrollRequest) error {

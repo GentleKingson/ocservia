@@ -795,6 +795,7 @@ impl SessionHandler {
         let result =
             HandshakeResult::try_from(response.result).unwrap_or(HandshakeResult::Unspecified);
         if matches!(self.kind, ProtocolKind::Enroll) || result != HandshakeResult::Accepted {
+            wait_for_delivery(send).await?;
             let reason = if matches!(self.kind, ProtocolKind::Enroll) {
                 b"enrollment pending".as_slice()
             } else {

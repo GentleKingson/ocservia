@@ -29,7 +29,7 @@ func TestCreateTokenUnknownWorkspaceIntegration(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer pool.Close()
-	service := New(pool, "")
+	service := New(pool, "", "test")
 	_, err = service.CreateToken(ctx, TokenSpec{WorkspaceID: uuid.Must(uuid.NewV7()), Environment: "test", ActorID: "integration", Reason: "unknown workspace", RequestID: uuid.Must(uuid.NewV7()).String()})
 	if !errors.Is(err, ErrNotFound) {
 		t.Fatalf("unknown workspace error=%v", err)
@@ -54,7 +54,7 @@ func TestConcurrentAuditChainIntegration(t *testing.T) {
 	}
 	defer cleanupWorkspace(ctx, pool, workspaceID)
 
-	service := New(pool, "")
+	service := New(pool, "", "test")
 	endpoint := bytes.Repeat([]byte{0x2a}, 32)
 	enrollmentToken, err := service.CreateToken(ctx, TokenSpec{WorkspaceID: workspaceID, Environment: "test", ExpectedEndpointID: endpoint, ActorID: "integration", Reason: "concurrent enrollment", RequestID: "audit-enrollment-token"})
 	if err != nil {
@@ -127,7 +127,7 @@ func TestEnrollmentTrustLifecycleIntegration(t *testing.T) {
 	}
 	defer cleanupWorkspace(ctx, pool, workspaceID)
 
-	service := New(pool, string(make([]byte, 64)))
+	service := New(pool, string(make([]byte, 64)), "test")
 	endpoint := make([]byte, 32)
 	endpoint[0] = 7
 	token := createToken(t, service, workspaceID, endpoint)
@@ -213,6 +213,9 @@ func TestEnrollmentTrustLifecycleIntegration(t *testing.T) {
 	if err != nil || response.GetResult() != agentv1.HandshakeResult_HANDSHAKE_RESULT_INCOMPATIBLE_PROTOCOL {
 		t.Fatalf("major protocol mismatch = %v, %v", response, err)
 	}
+	if response.GetControllerVersion() != "test" {
+		t.Fatalf("controller version = %q", response.GetControllerVersion())
+	}
 	handshake.ProtocolMajor = 1
 	handshake.ProtocolMinor = 1
 	response, err = service.AuthorizeSession(ctx, &transportv1.AuthorizeSessionRequest{RemoteEndpointId: endpoint, Handshake: handshake})
@@ -272,7 +275,7 @@ func TestExpiredAndSubstitutedEnrollmentTokensIntegration(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer cleanupWorkspace(ctx, pool, workspaceID)
-	service := New(pool, "")
+	service := New(pool, "", "test")
 	endpoint := make([]byte, 32)
 	endpoint[0] = 9
 	token := createToken(t, service, workspaceID, endpoint)
@@ -313,7 +316,7 @@ func TestLegacyPendingNodeCanBeReenrolledIntegration(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	service := New(pool, "")
+	service := New(pool, "", "test")
 	endpoint := make([]byte, 32)
 	endpoint[0] = 11
 	token, err := service.CreateToken(ctx, TokenSpec{WorkspaceID: workspaceID, Environment: "test", ExpectedNodeName: legacyName, ExpectedEndpointID: endpoint, ActorID: "integration", Reason: "re-enroll legacy node", RequestID: uuid.Must(uuid.NewV7()).String()})
