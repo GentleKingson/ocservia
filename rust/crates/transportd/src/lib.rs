@@ -4,8 +4,7 @@
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::pin::Pin;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, RwLock, Weak};
 use std::time::{Duration, Instant, SystemTime};
 
 use futures_util::StreamExt as _;
@@ -338,7 +337,7 @@ struct Shared {
 
 struct Inner {
     connections: Mutex<HashMap<Vec<u8>, RegisteredConnection>>,
-    registration_generation: AtomicU64,
+    registration_tokens: Mutex<HashMap<Vec<u8>, Weak<()>>>,
     events: Mutex<EventState>,
     event_capacity: usize,
     agent_connection_permits: Arc<Semaphore>,
@@ -364,7 +363,7 @@ impl Shared {
         Self {
             inner: Arc::new(Inner {
                 connections: Mutex::new(HashMap::new()),
-                registration_generation: AtomicU64::new(0),
+                registration_tokens: Mutex::new(HashMap::new()),
                 events: Mutex::new(EventState {
                     retained: VecDeque::with_capacity(capacity),
                     subscribers: Vec::new(),
@@ -394,9 +393,7 @@ impl Shared {
     async fn remove(&self, node_id: &[u8], reason: &[u8]) -> Option<RegisteredConnection> {
         // Invalidate any live trust decision made before this close attempt,
         // including when the requested node has not registered yet.
-        self.inner
-            .registration_generation
-            .fetch_add(1, Ordering::AcqRel);
+        self.inner.registration_tokens.lock().await.remove(node_id);
         let mut registry = self.inner.connections.lock().await;
         let registered = registry.remove(node_id);
         if let Some(registered) = &registered {
@@ -410,6 +407,17 @@ impl Shared {
         }
         drop(registry);
         registered
+    }
+
+    async fn registration_token(&self, node_id: &[u8]) -> Arc<()> {
+        let mut tokens = self.inner.registration_tokens.lock().await;
+        tokens.retain(|_, token| token.strong_count() > 0);
+        if let Some(token) = tokens.get(node_id).and_then(Weak::upgrade) {
+            return token;
+        }
+        let token = Arc::new(());
+        tokens.insert(node_id.to_vec(), Arc::downgrade(&token));
+        token
     }
 
     async fn shutdown(&self) {
@@ -772,11 +780,7 @@ impl ProtocolHandler for SessionHandler {
         connection.set_max_concurrent_uni_streams(VarInt::from_u32(2));
         let metadata = metadata(&handshake, &connection).await;
         let node_id = metadata.node_id.clone();
-        let registration_generation = self
-            .shared
-            .inner
-            .registration_generation
-            .load(Ordering::Acquire);
+        let registration_token = self.shared.registration_token(&node_id).await;
         if let Some(trust) = &self.trust
             && !trust.permits(connection.remote_id(), AGENT_ALPN).await
         {
@@ -787,15 +791,13 @@ impl ProtocolHandler for SessionHandler {
         }
         let mut registry = self.shared.inner.connections.lock().await;
         // Trust updates change policy before taking the registry lock. Checking
-        // both local policy and close generation makes a concurrent revoke
+        // both local policy and this node's close token makes a concurrent revoke
         // either reject this session here or close it after registration.
         if self.policy.revoked(connection.remote_id())
-            || self
-                .shared
-                .inner
-                .registration_generation
-                .load(Ordering::Acquire)
-                != registration_generation
+            || !Arc::ptr_eq(
+                &self.shared.registration_token(&node_id).await,
+                &registration_token,
+            )
         {
             connection.close(VarInt::from_u32(0x101), b"session revoked");
             return Err(protocol_error("endpoint was revoked during handshake"));
@@ -1557,19 +1559,21 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn close_attempt_invalidates_inflight_registration() {
+    async fn close_attempt_invalidates_only_target_registration() {
         let shared = Shared::new(8);
-        let generation = shared.inner.registration_generation.load(Ordering::Acquire);
-        assert!(
-            shared
-                .remove(Uuid::now_v7().as_bytes(), b"revoked")
-                .await
-                .is_none()
-        );
-        assert_ne!(
-            shared.inner.registration_generation.load(Ordering::Acquire),
-            generation
-        );
+        let target = Uuid::now_v7().as_bytes().to_vec();
+        let unrelated = Uuid::now_v7().as_bytes().to_vec();
+        let target_token = shared.registration_token(&target).await;
+        let unrelated_token = shared.registration_token(&unrelated).await;
+        assert!(shared.remove(&target, b"revoked").await.is_none());
+        assert!(!Arc::ptr_eq(
+            &shared.registration_token(&target).await,
+            &target_token
+        ));
+        assert!(Arc::ptr_eq(
+            &shared.registration_token(&unrelated).await,
+            &unrelated_token
+        ));
     }
 
     #[test]
