@@ -19,10 +19,25 @@ import {
   NodeApprovalToJSON,
 } from "../models/NodeApproval";
 import {
+  type NodeObservedState,
+  NodeObservedStateFromJSON,
+  NodeObservedStateToJSON,
+} from "../models/NodeObservedState";
+import {
+  type NodePage,
+  NodePageFromJSON,
+  NodePageToJSON,
+} from "../models/NodePage";
+import {
   type NodeRevocation,
   NodeRevocationFromJSON,
   NodeRevocationToJSON,
 } from "../models/NodeRevocation";
+import {
+  type NodeSessionPage,
+  NodeSessionPageFromJSON,
+  NodeSessionPageToJSON,
+} from "../models/NodeSessionPage";
 import {
   type NodeTrustState,
   NodeTrustStateFromJSON,
@@ -33,10 +48,42 @@ import {
   ProblemFromJSON,
   ProblemToJSON,
 } from "../models/Problem";
+import {
+  type TelemetryMetric,
+  TelemetryMetricFromJSON,
+  TelemetryMetricToJSON,
+} from "../models/TelemetryMetric";
+import {
+  type TelemetryPointPage,
+  TelemetryPointPageFromJSON,
+  TelemetryPointPageToJSON,
+} from "../models/TelemetryPointPage";
 
 export interface ApproveNodeRequest {
   nodeId: string;
   nodeApproval: NodeApproval;
+}
+
+export interface GetNodeRequest {
+  nodeId: string;
+}
+
+export interface ListNodeSessionsRequest {
+  nodeId: string;
+  cursor?: string;
+  pageSize?: number;
+}
+
+export interface ListNodeTelemetryRequest {
+  nodeId: string;
+  metric: TelemetryMetric;
+  resolution?: ListNodeTelemetryResolutionEnum;
+  since?: Date;
+}
+
+export interface ListNodesRequest {
+  cursor?: string;
+  pageSize?: number;
 }
 
 export interface RevokeNodeRequest {
@@ -128,6 +175,304 @@ export class NodesApi extends runtime.BaseAPI {
   }
 
   /**
+   * Creates request options for getNode without sending the request
+   */
+  async getNodeRequestOpts(
+    requestParameters: GetNodeRequest,
+  ): Promise<runtime.RequestOpts> {
+    if (requestParameters["nodeId"] == null) {
+      throw new runtime.RequiredError(
+        "nodeId",
+        'Required parameter "nodeId" was null or undefined when calling getNode().',
+      );
+    }
+
+    const queryParameters: any = {};
+
+    const headerParameters: runtime.HTTPHeaders = {};
+
+    if (this.configuration && this.configuration.accessToken) {
+      const token = this.configuration.accessToken;
+      const tokenString = await token("oidc", []);
+
+      if (tokenString) {
+        headerParameters["Authorization"] = `Bearer ${tokenString}`;
+      }
+    }
+
+    let urlPath = `/nodes/{node_id}`;
+    urlPath = urlPath.replace(
+      "{node_id}",
+      encodeURIComponent(String(requestParameters["nodeId"])),
+    );
+
+    return {
+      path: urlPath,
+      method: "GET",
+      headers: headerParameters,
+      query: queryParameters,
+    };
+  }
+
+  /**
+   * Get current node observed state
+   */
+  async getNodeRaw(
+    requestParameters: GetNodeRequest,
+    initOverrides?: RequestInit | runtime.InitOverrideFunction,
+  ): Promise<runtime.ApiResponse<NodeObservedState>> {
+    const requestOptions = await this.getNodeRequestOpts(requestParameters);
+    const response = await this.request(requestOptions, initOverrides);
+
+    return new runtime.JSONApiResponse(response, (jsonValue) =>
+      NodeObservedStateFromJSON(jsonValue),
+    );
+  }
+
+  /**
+   * Get current node observed state
+   */
+  async getNode(
+    requestParameters: GetNodeRequest,
+    initOverrides?: RequestInit | runtime.InitOverrideFunction,
+  ): Promise<NodeObservedState> {
+    const response = await this.getNodeRaw(requestParameters, initOverrides);
+    return await response.value();
+  }
+
+  /**
+   * Creates request options for listNodeSessions without sending the request
+   */
+  async listNodeSessionsRequestOpts(
+    requestParameters: ListNodeSessionsRequest,
+  ): Promise<runtime.RequestOpts> {
+    if (requestParameters["nodeId"] == null) {
+      throw new runtime.RequiredError(
+        "nodeId",
+        'Required parameter "nodeId" was null or undefined when calling listNodeSessions().',
+      );
+    }
+
+    const queryParameters: any = {};
+
+    if (requestParameters["cursor"] != null) {
+      queryParameters["cursor"] = requestParameters["cursor"];
+    }
+
+    if (requestParameters["pageSize"] != null) {
+      queryParameters["page_size"] = requestParameters["pageSize"];
+    }
+
+    const headerParameters: runtime.HTTPHeaders = {};
+
+    if (this.configuration && this.configuration.accessToken) {
+      const token = this.configuration.accessToken;
+      const tokenString = await token("oidc", []);
+
+      if (tokenString) {
+        headerParameters["Authorization"] = `Bearer ${tokenString}`;
+      }
+    }
+
+    let urlPath = `/nodes/{node_id}/sessions`;
+    urlPath = urlPath.replace(
+      "{node_id}",
+      encodeURIComponent(String(requestParameters["nodeId"])),
+    );
+
+    return {
+      path: urlPath,
+      method: "GET",
+      headers: headerParameters,
+      query: queryParameters,
+    };
+  }
+
+  /**
+   * List current sessions observed on a node
+   */
+  async listNodeSessionsRaw(
+    requestParameters: ListNodeSessionsRequest,
+    initOverrides?: RequestInit | runtime.InitOverrideFunction,
+  ): Promise<runtime.ApiResponse<NodeSessionPage>> {
+    const requestOptions =
+      await this.listNodeSessionsRequestOpts(requestParameters);
+    const response = await this.request(requestOptions, initOverrides);
+
+    return new runtime.JSONApiResponse(response, (jsonValue) =>
+      NodeSessionPageFromJSON(jsonValue),
+    );
+  }
+
+  /**
+   * List current sessions observed on a node
+   */
+  async listNodeSessions(
+    requestParameters: ListNodeSessionsRequest,
+    initOverrides?: RequestInit | runtime.InitOverrideFunction,
+  ): Promise<NodeSessionPage> {
+    const response = await this.listNodeSessionsRaw(
+      requestParameters,
+      initOverrides,
+    );
+    return await response.value();
+  }
+
+  /**
+   * Creates request options for listNodeTelemetry without sending the request
+   */
+  async listNodeTelemetryRequestOpts(
+    requestParameters: ListNodeTelemetryRequest,
+  ): Promise<runtime.RequestOpts> {
+    if (requestParameters["nodeId"] == null) {
+      throw new runtime.RequiredError(
+        "nodeId",
+        'Required parameter "nodeId" was null or undefined when calling listNodeTelemetry().',
+      );
+    }
+
+    if (requestParameters["metric"] == null) {
+      throw new runtime.RequiredError(
+        "metric",
+        'Required parameter "metric" was null or undefined when calling listNodeTelemetry().',
+      );
+    }
+
+    const queryParameters: any = {};
+
+    if (requestParameters["metric"] != null) {
+      queryParameters["metric"] = requestParameters["metric"];
+    }
+
+    if (requestParameters["resolution"] != null) {
+      queryParameters["resolution"] = requestParameters["resolution"];
+    }
+
+    if (requestParameters["since"] != null) {
+      queryParameters["since"] = (
+        requestParameters["since"] as any
+      ).toISOString();
+    }
+
+    const headerParameters: runtime.HTTPHeaders = {};
+
+    if (this.configuration && this.configuration.accessToken) {
+      const token = this.configuration.accessToken;
+      const tokenString = await token("oidc", []);
+
+      if (tokenString) {
+        headerParameters["Authorization"] = `Bearer ${tokenString}`;
+      }
+    }
+
+    let urlPath = `/nodes/{node_id}/telemetry`;
+    urlPath = urlPath.replace(
+      "{node_id}",
+      encodeURIComponent(String(requestParameters["nodeId"])),
+    );
+
+    return {
+      path: urlPath,
+      method: "GET",
+      headers: headerParameters,
+      query: queryParameters,
+    };
+  }
+
+  /**
+   * Query bounded raw or rolled-up node telemetry
+   */
+  async listNodeTelemetryRaw(
+    requestParameters: ListNodeTelemetryRequest,
+    initOverrides?: RequestInit | runtime.InitOverrideFunction,
+  ): Promise<runtime.ApiResponse<TelemetryPointPage>> {
+    const requestOptions =
+      await this.listNodeTelemetryRequestOpts(requestParameters);
+    const response = await this.request(requestOptions, initOverrides);
+
+    return new runtime.JSONApiResponse(response, (jsonValue) =>
+      TelemetryPointPageFromJSON(jsonValue),
+    );
+  }
+
+  /**
+   * Query bounded raw or rolled-up node telemetry
+   */
+  async listNodeTelemetry(
+    requestParameters: ListNodeTelemetryRequest,
+    initOverrides?: RequestInit | runtime.InitOverrideFunction,
+  ): Promise<TelemetryPointPage> {
+    const response = await this.listNodeTelemetryRaw(
+      requestParameters,
+      initOverrides,
+    );
+    return await response.value();
+  }
+
+  /**
+   * Creates request options for listNodes without sending the request
+   */
+  async listNodesRequestOpts(
+    requestParameters: ListNodesRequest,
+  ): Promise<runtime.RequestOpts> {
+    const queryParameters: any = {};
+
+    if (requestParameters["cursor"] != null) {
+      queryParameters["cursor"] = requestParameters["cursor"];
+    }
+
+    if (requestParameters["pageSize"] != null) {
+      queryParameters["page_size"] = requestParameters["pageSize"];
+    }
+
+    const headerParameters: runtime.HTTPHeaders = {};
+
+    if (this.configuration && this.configuration.accessToken) {
+      const token = this.configuration.accessToken;
+      const tokenString = await token("oidc", []);
+
+      if (tokenString) {
+        headerParameters["Authorization"] = `Bearer ${tokenString}`;
+      }
+    }
+
+    let urlPath = `/nodes`;
+
+    return {
+      path: urlPath,
+      method: "GET",
+      headers: headerParameters,
+      query: queryParameters,
+    };
+  }
+
+  /**
+   * List node observed state
+   */
+  async listNodesRaw(
+    requestParameters: ListNodesRequest,
+    initOverrides?: RequestInit | runtime.InitOverrideFunction,
+  ): Promise<runtime.ApiResponse<NodePage>> {
+    const requestOptions = await this.listNodesRequestOpts(requestParameters);
+    const response = await this.request(requestOptions, initOverrides);
+
+    return new runtime.JSONApiResponse(response, (jsonValue) =>
+      NodePageFromJSON(jsonValue),
+    );
+  }
+
+  /**
+   * List node observed state
+   */
+  async listNodes(
+    requestParameters: ListNodesRequest = {},
+    initOverrides?: RequestInit | runtime.InitOverrideFunction,
+  ): Promise<NodePage> {
+    const response = await this.listNodesRaw(requestParameters, initOverrides);
+    return await response.value();
+  }
+
+  /**
    * Creates request options for revokeNode without sending the request
    */
   async revokeNodeRequestOpts(
@@ -203,3 +548,14 @@ export class NodesApi extends runtime.BaseAPI {
     return await response.value();
   }
 }
+
+/**
+ * @export
+ */
+export const ListNodeTelemetryResolutionEnum = {
+  Raw: "raw",
+  _5m: "5m",
+  _1h: "1h",
+} as const;
+export type ListNodeTelemetryResolutionEnum =
+  (typeof ListNodeTelemetryResolutionEnum)[keyof typeof ListNodeTelemetryResolutionEnum];

@@ -175,6 +175,8 @@ func (c Config) RunsAPI() bool { return c.Role == RoleAPI || c.Role == RoleAll }
 
 func (c Config) RunsWorker() bool { return c.Role == RoleWorker || c.Role == RoleAll }
 
+func (c Config) RunsScheduler() bool { return c.Role == RoleScheduler || c.Role == RoleAll }
+
 func setString(lookup LookupEnv, name string, target *string) {
 	if value, ok := lookup(name); ok {
 		*target = value

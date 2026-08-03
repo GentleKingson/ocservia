@@ -16,7 +16,7 @@ use iroh::protocol::{AcceptError, ProtocolHandler, Router};
 use iroh::{Endpoint, EndpointId, SecretKey};
 use ocservia_contracts::generated::ocserv::platform::agent::v1::{
     AgentEvent, AgentEventType, CommandEnvelope, EnrollRequest, EnrollResponse, HandshakeResult,
-    SessionHandshake, SessionHandshakeResponse,
+    SessionHandshake, SessionHandshakeResponse, TelemetryBatch,
 };
 use ocservia_contracts::generated::ocserv::platform::transport::v1::{
     AuthorizeSessionRequest, CheckEndpointRequest, CloseNodeRequest, CloseNodeResponse,
@@ -897,27 +897,93 @@ impl ProtocolHandler for SessionHandler {
             .await;
         drop(registry);
 
-        let monitor = monitor_paths(self.shared.clone(), node_id.clone(), connection.clone());
+        let monitors = (
+            monitor_paths(self.shared.clone(), node_id.clone(), connection.clone()),
+            monitor_telemetry(
+                self.shared.clone(),
+                node_id.clone(),
+                connection.clone(),
+                handshake.max_message_size as usize,
+            ),
+        );
         let _closed = connection.closed().await;
-        monitor.abort();
-        let mut registry = self.shared.inner.connections.lock().await;
-        if registry
-            .get(&node_id)
-            .is_some_and(|entry| entry.connection.stable_id() == connection.stable_id())
-        {
-            registry.remove(&node_id);
-            self.shared
-                .publish(event(
-                    &node_id,
-                    TransportEventType::Disconnected,
-                    b"connection closed".to_vec(),
-                ))
-                .await;
-        }
-        drop(registry);
-        drop(permit);
+        finish_session(&self.shared, &node_id, &connection, monitors, permit).await;
         Ok(())
     }
+}
+
+async fn finish_session(
+    shared: &Shared,
+    node_id: &[u8],
+    connection: &Connection,
+    monitors: (tokio::task::JoinHandle<()>, tokio::task::JoinHandle<()>),
+    _permit: OwnedSemaphorePermit,
+) {
+    monitors.0.abort();
+    monitors.1.abort();
+    let mut registry = shared.inner.connections.lock().await;
+    if registry
+        .get(node_id)
+        .is_some_and(|entry| entry.connection.stable_id() == connection.stable_id())
+    {
+        registry.remove(node_id);
+        shared
+            .publish(event(
+                node_id,
+                TransportEventType::Disconnected,
+                b"connection closed".to_vec(),
+            ))
+            .await;
+    }
+}
+
+fn monitor_telemetry(
+    shared: Shared,
+    node_id: Vec<u8>,
+    connection: Connection,
+    max_message_size: usize,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        loop {
+            let Ok(accepted) = tokio::time::timeout(STREAM_TIMEOUT, connection.accept_uni()).await
+            else {
+                continue;
+            };
+            let Ok(mut recv) = accepted else { break };
+            let mut length = [0_u8; 4];
+            if !matches!(
+                tokio::time::timeout(STREAM_TIMEOUT, recv.read_exact(&mut length)).await,
+                Ok(Ok(()))
+            ) {
+                continue;
+            }
+            let length = u32::from_be_bytes(length) as usize;
+            if length == 0 || length > 512 * 1024 || length > max_message_size {
+                connection.close(VarInt::from_u32(0x107), b"telemetry frame size invalid");
+                break;
+            }
+            let mut payload = vec![0_u8; length];
+            if !matches!(
+                tokio::time::timeout(STREAM_TIMEOUT, recv.read_exact(&mut payload)).await,
+                Ok(Ok(()))
+            ) {
+                continue;
+            }
+            let Ok(batch) = TelemetryBatch::decode(payload.as_slice()) else {
+                connection.close(VarInt::from_u32(0x107), b"telemetry protobuf invalid");
+                break;
+            };
+            if batch.node_id != node_id
+                || validate_uuid(&batch.batch_id, "telemetry batch_id").is_err()
+            {
+                connection.close(VarInt::from_u32(0x107), b"telemetry identity invalid");
+                break;
+            }
+            shared
+                .publish(event(&node_id, TransportEventType::Telemetry, payload))
+                .await;
+        }
+    })
 }
 
 fn monitor_paths(
@@ -1986,6 +2052,66 @@ mod tests {
         tokio::time::timeout(Duration::from_secs(2), connection.closed())
             .await
             .expect("connection closed after revocation");
+
+        shutdown(&service, router).await.expect("shutdown router");
+        client.close().await;
+    }
+
+    #[tokio::test]
+    async fn telemetry_uni_stream_is_identity_checked_and_published() {
+        let agent_key = SecretKey::generate();
+        let handshake = handshake(&agent_key);
+        let service = IrohTransportService::new(8);
+        let router = build_router(
+            SecretKey::generate(),
+            RelayMode::Disabled,
+            identity_policy(&agent_key, &handshake),
+            &service,
+        )
+        .await
+        .expect("build router");
+        let client = Endpoint::builder(presets::Minimal)
+            .secret_key(agent_key)
+            .relay_mode(RelayMode::Disabled)
+            .bind()
+            .await
+            .expect("build client");
+        let connection = client
+            .connect(router.endpoint().addr(), AGENT_ALPN)
+            .await
+            .expect("connect agent");
+        send_handshake(&connection, &handshake).await;
+        wait_until_registered(&service, &handshake.node_id).await;
+        let mut events = service
+            .watch_events(Request::new(WatchEventsRequest {
+                after_event_id: Vec::new(),
+            }))
+            .await
+            .expect("watch events")
+            .into_inner();
+        let batch = TelemetryBatch {
+            batch_id: Uuid::now_v7().as_bytes().to_vec(),
+            node_id: handshake.node_id.clone(),
+            sequence: 1,
+            priority: 2,
+            snapshot: None,
+            sessions: Vec::new(),
+            samples: Vec::new(),
+            security_events: Vec::new(),
+        };
+        let payload = batch.encode_to_vec();
+        let mut send = connection.open_uni().await.expect("open telemetry stream");
+        send.write_all(&u32::try_from(payload.len()).unwrap().to_be_bytes())
+            .await
+            .expect("write telemetry length");
+        send.write_all(&payload)
+            .await
+            .expect("write telemetry batch");
+        send.finish().expect("finish telemetry stream");
+
+        let event = next_event(&mut events, TransportEventType::Telemetry).await;
+        assert_eq!(event.node_id, handshake.node_id);
+        assert_eq!(event.payload, payload);
 
         shutdown(&service, router).await.expect("shutdown router");
         client.close().await;

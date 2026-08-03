@@ -131,6 +131,7 @@ const (
 	TransportEventType_TRANSPORT_EVENT_TYPE_HEARTBEAT      TransportEventType = 4
 	TransportEventType_TRANSPORT_EVENT_TYPE_ERROR          TransportEventType = 5
 	TransportEventType_TRANSPORT_EVENT_TYPE_PATH_CHANGED   TransportEventType = 6
+	TransportEventType_TRANSPORT_EVENT_TYPE_TELEMETRY      TransportEventType = 7
 )
 
 // Enum value maps for TransportEventType.
@@ -143,6 +144,7 @@ var (
 		4: "TRANSPORT_EVENT_TYPE_HEARTBEAT",
 		5: "TRANSPORT_EVENT_TYPE_ERROR",
 		6: "TRANSPORT_EVENT_TYPE_PATH_CHANGED",
+		7: "TRANSPORT_EVENT_TYPE_TELEMETRY",
 	}
 	TransportEventType_value = map[string]int32{
 		"TRANSPORT_EVENT_TYPE_UNSPECIFIED":    0,
@@ -152,6 +154,7 @@ var (
 		"TRANSPORT_EVENT_TYPE_HEARTBEAT":      4,
 		"TRANSPORT_EVENT_TYPE_ERROR":          5,
 		"TRANSPORT_EVENT_TYPE_PATH_CHANGED":   6,
+		"TRANSPORT_EVENT_TYPE_TELEMETRY":      7,
 	}
 )
 
@@ -1100,7 +1103,7 @@ const file_ocserv_platform_transport_v1_transport_proto_rawDesc = "" +
 	"\x0eConnectionPath\x12\x1f\n" +
 	"\x1bCONNECTION_PATH_UNSPECIFIED\x10\x00\x12\x1a\n" +
 	"\x16CONNECTION_PATH_DIRECT\x10\x01\x12\x19\n" +
-	"\x15CONNECTION_PATH_RELAY\x10\x02*\x99\x02\n" +
+	"\x15CONNECTION_PATH_RELAY\x10\x02*\xbd\x02\n" +
 	"\x12TransportEventType\x12$\n" +
 	" TRANSPORT_EVENT_TYPE_UNSPECIFIED\x10\x00\x12\"\n" +
 	"\x1eTRANSPORT_EVENT_TYPE_CONNECTED\x10\x01\x12%\n" +
@@ -1108,7 +1111,8 @@ const file_ocserv_platform_transport_v1_transport_proto_rawDesc = "" +
 	"#TRANSPORT_EVENT_TYPE_COMMAND_RESULT\x10\x03\x12\"\n" +
 	"\x1eTRANSPORT_EVENT_TYPE_HEARTBEAT\x10\x04\x12\x1e\n" +
 	"\x1aTRANSPORT_EVENT_TYPE_ERROR\x10\x05\x12%\n" +
-	"!TRANSPORT_EVENT_TYPE_PATH_CHANGED\x10\x06*m\n" +
+	"!TRANSPORT_EVENT_TYPE_PATH_CHANGED\x10\x06\x12\"\n" +
+	"\x1eTRANSPORT_EVENT_TYPE_TELEMETRY\x10\a*m\n" +
 	"\x0eNodeTrustState\x12 \n" +
 	"\x1cNODE_TRUST_STATE_UNSPECIFIED\x10\x00\x12\x1b\n" +
 	"\x17NODE_TRUST_STATE_ACTIVE\x10\x01\x12\x1c\n" +

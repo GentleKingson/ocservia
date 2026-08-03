@@ -180,6 +180,23 @@ if grep -q "^id: ${first_event}$" "${TMP_ROOT}/resumed.sse"; then
   exit 1
 fi
 
+latest_event="$(curl --fail --silent "http://127.0.0.1:${API_PORT}/api/v1/events?page_size=200" | jq -r '.items[-1].id')"
+for subscriber in one two; do
+  timeout 4s curl --no-buffer --silent -H "Last-Event-ID: ${latest_event}" \
+    "http://127.0.0.1:${API_PORT}/api/v1/events/stream" >"${TMP_ROOT}/subscriber-${subscriber}.sse" &
+  PIDS+=("$!")
+done
+sleep 0.3
+fanout="$(create_probe '{"heartbeat_count":1,"delay_millis":10}')"
+wait_state "$(jq -r .id <<<"${fanout}")" succeeded >/dev/null
+for subscriber in one two; do
+  for _ in $(seq 1 40); do
+    grep -q '^id: ' "${TMP_ROOT}/subscriber-${subscriber}.sse" && break
+    sleep 0.1
+  done
+  grep -q '^id: ' "${TMP_ROOT}/subscriber-${subscriber}.sse"
+done
+
 # Model an in-flight operation whose original command trace differs from the
 # connection-level disconnect event emitted when transportd disappears.
 docker exec "${POSTGRES}" psql -v ON_ERROR_STOP=1 -U ocservia_owner -d ocservia -c \

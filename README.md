@@ -27,6 +27,8 @@ active development. Contract contributors can use the pinned workflow in
 [docs/development/contracts.md](docs/development/contracts.md). The local Go,
 PostgreSQL, UDS transport stub, agent simulator, OpenTelemetry, and Web stack is documented in
 [docs/development/control-plane.md](docs/development/control-plane.md).
+Telemetry freshness, retention, read-only node APIs, and fleet views are
+documented in [docs/development/telemetry.md](docs/development/telemetry.md).
 
 ## Security
 

@@ -53,6 +53,10 @@ All URIs are relative to _/api/v1_
 | _EventsApi_      | [**listEvents**](docs/EventsApi.md#listevents)                            | **GET** /events                      | Rebuild platform events from durable state              |
 | _EventsApi_      | [**watchEvents**](docs/EventsApi.md#watchevents)                          | **GET** /events/stream               | Watch platform events with SSE resume support           |
 | _NodesApi_       | [**approveNode**](docs/NodesApi.md#approvenode)                           | **POST** /nodes/{node_id}/approval   | Approve a pending node and bind its endpoint identity   |
+| _NodesApi_       | [**getNode**](docs/NodesApi.md#getnode)                                   | **GET** /nodes/{node_id}             | Get current node observed state                         |
+| _NodesApi_       | [**listNodeSessions**](docs/NodesApi.md#listnodesessions)                 | **GET** /nodes/{node_id}/sessions    | List current sessions observed on a node                |
+| _NodesApi_       | [**listNodeTelemetry**](docs/NodesApi.md#listnodetelemetry)               | **GET** /nodes/{node_id}/telemetry   | Query bounded raw or rolled-up node telemetry           |
+| _NodesApi_       | [**listNodes**](docs/NodesApi.md#listnodes)                               | **GET** /nodes                       | List node observed state                                |
 | _NodesApi_       | [**revokeNode**](docs/NodesApi.md#revokenode)                             | **POST** /nodes/{node_id}/revocation | Revoke a node endpoint and close its current connection |
 | _OperationsApi_  | [**getOperation**](docs/OperationsApi.md#getoperation)                    | **GET** /operations/{operation_id}   | Get an asynchronous operation                           |
 | _OperationsApi_  | [**listOperations**](docs/OperationsApi.md#listoperations)                | **GET** /operations                  | List operations                                         |
@@ -63,11 +67,17 @@ All URIs are relative to _/api/v1_
 ### Models
 
 - [BuildInfo](docs/BuildInfo.md)
+- [ConnectionPathState](docs/ConnectionPathState.md)
+- [DropCounters](docs/DropCounters.md)
 - [EnrollmentToken](docs/EnrollmentToken.md)
 - [EnrollmentTokenRequest](docs/EnrollmentTokenRequest.md)
 - [Health](docs/Health.md)
 - [NodeApproval](docs/NodeApproval.md)
+- [NodeObservedState](docs/NodeObservedState.md)
+- [NodePage](docs/NodePage.md)
 - [NodeRevocation](docs/NodeRevocation.md)
+- [NodeSession](docs/NodeSession.md)
+- [NodeSessionPage](docs/NodeSessionPage.md)
 - [NodeTrustState](docs/NodeTrustState.md)
 - [Operation](docs/Operation.md)
 - [OperationPage](docs/OperationPage.md)
@@ -79,6 +89,9 @@ All URIs are relative to _/api/v1_
 - [Problem](docs/Problem.md)
 - [Readiness](docs/Readiness.md)
 - [SimulationScenario](docs/SimulationScenario.md)
+- [TelemetryMetric](docs/TelemetryMetric.md)
+- [TelemetryPoint](docs/TelemetryPoint.md)
+- [TelemetryPointPage](docs/TelemetryPointPage.md)
 
 ### Authorization
 

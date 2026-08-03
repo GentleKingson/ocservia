@@ -138,6 +138,61 @@ func (AgentEventType) EnumDescriptor() ([]byte, []int) {
 	return file_ocserv_platform_agent_v1_agent_proto_rawDescGZIP(), []int{1}
 }
 
+type TelemetryPriority int32
+
+const (
+	TelemetryPriority_TELEMETRY_PRIORITY_UNSPECIFIED    TelemetryPriority = 0
+	TelemetryPriority_TELEMETRY_PRIORITY_SECURITY       TelemetryPriority = 1
+	TelemetryPriority_TELEMETRY_PRIORITY_CURRENT_HEALTH TelemetryPriority = 2
+	TelemetryPriority_TELEMETRY_PRIORITY_AGGREGATE      TelemetryPriority = 3
+	TelemetryPriority_TELEMETRY_PRIORITY_RAW_HISTORY    TelemetryPriority = 4
+)
+
+// Enum value maps for TelemetryPriority.
+var (
+	TelemetryPriority_name = map[int32]string{
+		0: "TELEMETRY_PRIORITY_UNSPECIFIED",
+		1: "TELEMETRY_PRIORITY_SECURITY",
+		2: "TELEMETRY_PRIORITY_CURRENT_HEALTH",
+		3: "TELEMETRY_PRIORITY_AGGREGATE",
+		4: "TELEMETRY_PRIORITY_RAW_HISTORY",
+	}
+	TelemetryPriority_value = map[string]int32{
+		"TELEMETRY_PRIORITY_UNSPECIFIED":    0,
+		"TELEMETRY_PRIORITY_SECURITY":       1,
+		"TELEMETRY_PRIORITY_CURRENT_HEALTH": 2,
+		"TELEMETRY_PRIORITY_AGGREGATE":      3,
+		"TELEMETRY_PRIORITY_RAW_HISTORY":    4,
+	}
+)
+
+func (x TelemetryPriority) Enum() *TelemetryPriority {
+	p := new(TelemetryPriority)
+	*p = x
+	return p
+}
+
+func (x TelemetryPriority) String() string {
+	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
+}
+
+func (TelemetryPriority) Descriptor() protoreflect.EnumDescriptor {
+	return file_ocserv_platform_agent_v1_agent_proto_enumTypes[2].Descriptor()
+}
+
+func (TelemetryPriority) Type() protoreflect.EnumType {
+	return &file_ocserv_platform_agent_v1_agent_proto_enumTypes[2]
+}
+
+func (x TelemetryPriority) Number() protoreflect.EnumNumber {
+	return protoreflect.EnumNumber(x)
+}
+
+// Deprecated: Use TelemetryPriority.Descriptor instead.
+func (TelemetryPriority) EnumDescriptor() ([]byte, []int) {
+	return file_ocserv_platform_agent_v1_agent_proto_rawDescGZIP(), []int{2}
+}
+
 type EnrollRequest struct {
 	state           protoimpl.MessageState `protogen:"open.v1"`
 	Token           string                 `protobuf:"bytes,1,opt,name=token,proto3" json:"token,omitempty"`
@@ -607,6 +662,510 @@ func (x *AgentEvent) GetPayload() []byte {
 	return nil
 }
 
+type TelemetryDropCounters struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Security      uint64                 `protobuf:"varint,1,opt,name=security,proto3" json:"security,omitempty"`
+	Health        uint64                 `protobuf:"varint,2,opt,name=health,proto3" json:"health,omitempty"`
+	Aggregate     uint64                 `protobuf:"varint,3,opt,name=aggregate,proto3" json:"aggregate,omitempty"`
+	Raw           uint64                 `protobuf:"varint,4,opt,name=raw,proto3" json:"raw,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *TelemetryDropCounters) Reset() {
+	*x = TelemetryDropCounters{}
+	mi := &file_ocserv_platform_agent_v1_agent_proto_msgTypes[5]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *TelemetryDropCounters) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*TelemetryDropCounters) ProtoMessage() {}
+
+func (x *TelemetryDropCounters) ProtoReflect() protoreflect.Message {
+	mi := &file_ocserv_platform_agent_v1_agent_proto_msgTypes[5]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use TelemetryDropCounters.ProtoReflect.Descriptor instead.
+func (*TelemetryDropCounters) Descriptor() ([]byte, []int) {
+	return file_ocserv_platform_agent_v1_agent_proto_rawDescGZIP(), []int{5}
+}
+
+func (x *TelemetryDropCounters) GetSecurity() uint64 {
+	if x != nil {
+		return x.Security
+	}
+	return 0
+}
+
+func (x *TelemetryDropCounters) GetHealth() uint64 {
+	if x != nil {
+		return x.Health
+	}
+	return 0
+}
+
+func (x *TelemetryDropCounters) GetAggregate() uint64 {
+	if x != nil {
+		return x.Aggregate
+	}
+	return 0
+}
+
+func (x *TelemetryDropCounters) GetRaw() uint64 {
+	if x != nil {
+		return x.Raw
+	}
+	return 0
+}
+
+type ObservedSnapshot struct {
+	state           protoimpl.MessageState `protogen:"open.v1"`
+	ObservedAt      *timestamppb.Timestamp `protobuf:"bytes,1,opt,name=observed_at,json=observedAt,proto3" json:"observed_at,omitempty"`
+	BootId          string                 `protobuf:"bytes,2,opt,name=boot_id,json=bootId,proto3" json:"boot_id,omitempty"`
+	AgentInstanceId []byte                 `protobuf:"bytes,3,opt,name=agent_instance_id,json=agentInstanceId,proto3" json:"agent_instance_id,omitempty"`
+	AgentVersion    string                 `protobuf:"bytes,4,opt,name=agent_version,json=agentVersion,proto3" json:"agent_version,omitempty"`
+	OcservVersion   string                 `protobuf:"bytes,5,opt,name=ocserv_version,json=ocservVersion,proto3" json:"ocserv_version,omitempty"`
+	OsRelease       string                 `protobuf:"bytes,6,opt,name=os_release,json=osRelease,proto3" json:"os_release,omitempty"`
+	OcservJson      []byte                 `protobuf:"bytes,7,opt,name=ocserv_json,json=ocservJson,proto3" json:"ocserv_json,omitempty"`
+	SystemJson      []byte                 `protobuf:"bytes,8,opt,name=system_json,json=systemJson,proto3" json:"system_json,omitempty"`
+	PathJson        []byte                 `protobuf:"bytes,9,opt,name=path_json,json=pathJson,proto3" json:"path_json,omitempty"`
+	Dropped         *TelemetryDropCounters `protobuf:"bytes,10,opt,name=dropped,proto3" json:"dropped,omitempty"`
+	unknownFields   protoimpl.UnknownFields
+	sizeCache       protoimpl.SizeCache
+}
+
+func (x *ObservedSnapshot) Reset() {
+	*x = ObservedSnapshot{}
+	mi := &file_ocserv_platform_agent_v1_agent_proto_msgTypes[6]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ObservedSnapshot) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ObservedSnapshot) ProtoMessage() {}
+
+func (x *ObservedSnapshot) ProtoReflect() protoreflect.Message {
+	mi := &file_ocserv_platform_agent_v1_agent_proto_msgTypes[6]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ObservedSnapshot.ProtoReflect.Descriptor instead.
+func (*ObservedSnapshot) Descriptor() ([]byte, []int) {
+	return file_ocserv_platform_agent_v1_agent_proto_rawDescGZIP(), []int{6}
+}
+
+func (x *ObservedSnapshot) GetObservedAt() *timestamppb.Timestamp {
+	if x != nil {
+		return x.ObservedAt
+	}
+	return nil
+}
+
+func (x *ObservedSnapshot) GetBootId() string {
+	if x != nil {
+		return x.BootId
+	}
+	return ""
+}
+
+func (x *ObservedSnapshot) GetAgentInstanceId() []byte {
+	if x != nil {
+		return x.AgentInstanceId
+	}
+	return nil
+}
+
+func (x *ObservedSnapshot) GetAgentVersion() string {
+	if x != nil {
+		return x.AgentVersion
+	}
+	return ""
+}
+
+func (x *ObservedSnapshot) GetOcservVersion() string {
+	if x != nil {
+		return x.OcservVersion
+	}
+	return ""
+}
+
+func (x *ObservedSnapshot) GetOsRelease() string {
+	if x != nil {
+		return x.OsRelease
+	}
+	return ""
+}
+
+func (x *ObservedSnapshot) GetOcservJson() []byte {
+	if x != nil {
+		return x.OcservJson
+	}
+	return nil
+}
+
+func (x *ObservedSnapshot) GetSystemJson() []byte {
+	if x != nil {
+		return x.SystemJson
+	}
+	return nil
+}
+
+func (x *ObservedSnapshot) GetPathJson() []byte {
+	if x != nil {
+		return x.PathJson
+	}
+	return nil
+}
+
+func (x *ObservedSnapshot) GetDropped() *TelemetryDropCounters {
+	if x != nil {
+		return x.Dropped
+	}
+	return nil
+}
+
+type SessionObservation struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	SessionId     string                 `protobuf:"bytes,1,opt,name=session_id,json=sessionId,proto3" json:"session_id,omitempty"`
+	Username      string                 `protobuf:"bytes,2,opt,name=username,proto3" json:"username,omitempty"`
+	ClientIp      string                 `protobuf:"bytes,3,opt,name=client_ip,json=clientIp,proto3" json:"client_ip,omitempty"`
+	ConnectedAt   *timestamppb.Timestamp `protobuf:"bytes,4,opt,name=connected_at,json=connectedAt,proto3" json:"connected_at,omitempty"`
+	BytesIn       uint64                 `protobuf:"varint,5,opt,name=bytes_in,json=bytesIn,proto3" json:"bytes_in,omitempty"`
+	BytesOut      uint64                 `protobuf:"varint,6,opt,name=bytes_out,json=bytesOut,proto3" json:"bytes_out,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *SessionObservation) Reset() {
+	*x = SessionObservation{}
+	mi := &file_ocserv_platform_agent_v1_agent_proto_msgTypes[7]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *SessionObservation) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*SessionObservation) ProtoMessage() {}
+
+func (x *SessionObservation) ProtoReflect() protoreflect.Message {
+	mi := &file_ocserv_platform_agent_v1_agent_proto_msgTypes[7]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use SessionObservation.ProtoReflect.Descriptor instead.
+func (*SessionObservation) Descriptor() ([]byte, []int) {
+	return file_ocserv_platform_agent_v1_agent_proto_rawDescGZIP(), []int{7}
+}
+
+func (x *SessionObservation) GetSessionId() string {
+	if x != nil {
+		return x.SessionId
+	}
+	return ""
+}
+
+func (x *SessionObservation) GetUsername() string {
+	if x != nil {
+		return x.Username
+	}
+	return ""
+}
+
+func (x *SessionObservation) GetClientIp() string {
+	if x != nil {
+		return x.ClientIp
+	}
+	return ""
+}
+
+func (x *SessionObservation) GetConnectedAt() *timestamppb.Timestamp {
+	if x != nil {
+		return x.ConnectedAt
+	}
+	return nil
+}
+
+func (x *SessionObservation) GetBytesIn() uint64 {
+	if x != nil {
+		return x.BytesIn
+	}
+	return 0
+}
+
+func (x *SessionObservation) GetBytesOut() uint64 {
+	if x != nil {
+		return x.BytesOut
+	}
+	return 0
+}
+
+type MetricSample struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	SampledAt     *timestamppb.Timestamp `protobuf:"bytes,1,opt,name=sampled_at,json=sampledAt,proto3" json:"sampled_at,omitempty"`
+	Metric        string                 `protobuf:"bytes,2,opt,name=metric,proto3" json:"metric,omitempty"`
+	Value         float64                `protobuf:"fixed64,3,opt,name=value,proto3" json:"value,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *MetricSample) Reset() {
+	*x = MetricSample{}
+	mi := &file_ocserv_platform_agent_v1_agent_proto_msgTypes[8]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *MetricSample) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*MetricSample) ProtoMessage() {}
+
+func (x *MetricSample) ProtoReflect() protoreflect.Message {
+	mi := &file_ocserv_platform_agent_v1_agent_proto_msgTypes[8]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use MetricSample.ProtoReflect.Descriptor instead.
+func (*MetricSample) Descriptor() ([]byte, []int) {
+	return file_ocserv_platform_agent_v1_agent_proto_rawDescGZIP(), []int{8}
+}
+
+func (x *MetricSample) GetSampledAt() *timestamppb.Timestamp {
+	if x != nil {
+		return x.SampledAt
+	}
+	return nil
+}
+
+func (x *MetricSample) GetMetric() string {
+	if x != nil {
+		return x.Metric
+	}
+	return ""
+}
+
+func (x *MetricSample) GetValue() float64 {
+	if x != nil {
+		return x.Value
+	}
+	return 0
+}
+
+type SecurityObservation struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	EventId       []byte                 `protobuf:"bytes,1,opt,name=event_id,json=eventId,proto3" json:"event_id,omitempty"`
+	ObservedAt    *timestamppb.Timestamp `protobuf:"bytes,2,opt,name=observed_at,json=observedAt,proto3" json:"observed_at,omitempty"`
+	Severity      string                 `protobuf:"bytes,3,opt,name=severity,proto3" json:"severity,omitempty"`
+	EventType     string                 `protobuf:"bytes,4,opt,name=event_type,json=eventType,proto3" json:"event_type,omitempty"`
+	DetailJson    []byte                 `protobuf:"bytes,5,opt,name=detail_json,json=detailJson,proto3" json:"detail_json,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *SecurityObservation) Reset() {
+	*x = SecurityObservation{}
+	mi := &file_ocserv_platform_agent_v1_agent_proto_msgTypes[9]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *SecurityObservation) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*SecurityObservation) ProtoMessage() {}
+
+func (x *SecurityObservation) ProtoReflect() protoreflect.Message {
+	mi := &file_ocserv_platform_agent_v1_agent_proto_msgTypes[9]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use SecurityObservation.ProtoReflect.Descriptor instead.
+func (*SecurityObservation) Descriptor() ([]byte, []int) {
+	return file_ocserv_platform_agent_v1_agent_proto_rawDescGZIP(), []int{9}
+}
+
+func (x *SecurityObservation) GetEventId() []byte {
+	if x != nil {
+		return x.EventId
+	}
+	return nil
+}
+
+func (x *SecurityObservation) GetObservedAt() *timestamppb.Timestamp {
+	if x != nil {
+		return x.ObservedAt
+	}
+	return nil
+}
+
+func (x *SecurityObservation) GetSeverity() string {
+	if x != nil {
+		return x.Severity
+	}
+	return ""
+}
+
+func (x *SecurityObservation) GetEventType() string {
+	if x != nil {
+		return x.EventType
+	}
+	return ""
+}
+
+func (x *SecurityObservation) GetDetailJson() []byte {
+	if x != nil {
+		return x.DetailJson
+	}
+	return nil
+}
+
+type TelemetryBatch struct {
+	state          protoimpl.MessageState `protogen:"open.v1"`
+	BatchId        []byte                 `protobuf:"bytes,1,opt,name=batch_id,json=batchId,proto3" json:"batch_id,omitempty"`
+	NodeId         []byte                 `protobuf:"bytes,2,opt,name=node_id,json=nodeId,proto3" json:"node_id,omitempty"`
+	Sequence       uint64                 `protobuf:"varint,3,opt,name=sequence,proto3" json:"sequence,omitempty"`
+	Priority       TelemetryPriority      `protobuf:"varint,4,opt,name=priority,proto3,enum=ocserv.platform.agent.v1.TelemetryPriority" json:"priority,omitempty"`
+	Snapshot       *ObservedSnapshot      `protobuf:"bytes,5,opt,name=snapshot,proto3" json:"snapshot,omitempty"`
+	Sessions       []*SessionObservation  `protobuf:"bytes,6,rep,name=sessions,proto3" json:"sessions,omitempty"`
+	Samples        []*MetricSample        `protobuf:"bytes,7,rep,name=samples,proto3" json:"samples,omitempty"`
+	SecurityEvents []*SecurityObservation `protobuf:"bytes,8,rep,name=security_events,json=securityEvents,proto3" json:"security_events,omitempty"`
+	unknownFields  protoimpl.UnknownFields
+	sizeCache      protoimpl.SizeCache
+}
+
+func (x *TelemetryBatch) Reset() {
+	*x = TelemetryBatch{}
+	mi := &file_ocserv_platform_agent_v1_agent_proto_msgTypes[10]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *TelemetryBatch) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*TelemetryBatch) ProtoMessage() {}
+
+func (x *TelemetryBatch) ProtoReflect() protoreflect.Message {
+	mi := &file_ocserv_platform_agent_v1_agent_proto_msgTypes[10]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use TelemetryBatch.ProtoReflect.Descriptor instead.
+func (*TelemetryBatch) Descriptor() ([]byte, []int) {
+	return file_ocserv_platform_agent_v1_agent_proto_rawDescGZIP(), []int{10}
+}
+
+func (x *TelemetryBatch) GetBatchId() []byte {
+	if x != nil {
+		return x.BatchId
+	}
+	return nil
+}
+
+func (x *TelemetryBatch) GetNodeId() []byte {
+	if x != nil {
+		return x.NodeId
+	}
+	return nil
+}
+
+func (x *TelemetryBatch) GetSequence() uint64 {
+	if x != nil {
+		return x.Sequence
+	}
+	return 0
+}
+
+func (x *TelemetryBatch) GetPriority() TelemetryPriority {
+	if x != nil {
+		return x.Priority
+	}
+	return TelemetryPriority_TELEMETRY_PRIORITY_UNSPECIFIED
+}
+
+func (x *TelemetryBatch) GetSnapshot() *ObservedSnapshot {
+	if x != nil {
+		return x.Snapshot
+	}
+	return nil
+}
+
+func (x *TelemetryBatch) GetSessions() []*SessionObservation {
+	if x != nil {
+		return x.Sessions
+	}
+	return nil
+}
+
+func (x *TelemetryBatch) GetSamples() []*MetricSample {
+	if x != nil {
+		return x.Samples
+	}
+	return nil
+}
+
+func (x *TelemetryBatch) GetSecurityEvents() []*SecurityObservation {
+	if x != nil {
+		return x.SecurityEvents
+	}
+	return nil
+}
+
 type CommandEnvelope struct {
 	state            protoimpl.MessageState `protogen:"open.v1"`
 	ProtocolVersion  string                 `protobuf:"bytes,1,opt,name=protocol_version,json=protocolVersion,proto3" json:"protocol_version,omitempty"`
@@ -637,7 +1196,7 @@ type CommandEnvelope struct {
 
 func (x *CommandEnvelope) Reset() {
 	*x = CommandEnvelope{}
-	mi := &file_ocserv_platform_agent_v1_agent_proto_msgTypes[5]
+	mi := &file_ocserv_platform_agent_v1_agent_proto_msgTypes[11]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -649,7 +1208,7 @@ func (x *CommandEnvelope) String() string {
 func (*CommandEnvelope) ProtoMessage() {}
 
 func (x *CommandEnvelope) ProtoReflect() protoreflect.Message {
-	mi := &file_ocserv_platform_agent_v1_agent_proto_msgTypes[5]
+	mi := &file_ocserv_platform_agent_v1_agent_proto_msgTypes[11]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -662,7 +1221,7 @@ func (x *CommandEnvelope) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CommandEnvelope.ProtoReflect.Descriptor instead.
 func (*CommandEnvelope) Descriptor() ([]byte, []int) {
-	return file_ocserv_platform_agent_v1_agent_proto_rawDescGZIP(), []int{5}
+	return file_ocserv_platform_agent_v1_agent_proto_rawDescGZIP(), []int{11}
 }
 
 func (x *CommandEnvelope) GetProtocolVersion() string {
@@ -874,7 +1433,7 @@ type SessionDisconnect struct {
 
 func (x *SessionDisconnect) Reset() {
 	*x = SessionDisconnect{}
-	mi := &file_ocserv_platform_agent_v1_agent_proto_msgTypes[6]
+	mi := &file_ocserv_platform_agent_v1_agent_proto_msgTypes[12]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -886,7 +1445,7 @@ func (x *SessionDisconnect) String() string {
 func (*SessionDisconnect) ProtoMessage() {}
 
 func (x *SessionDisconnect) ProtoReflect() protoreflect.Message {
-	mi := &file_ocserv_platform_agent_v1_agent_proto_msgTypes[6]
+	mi := &file_ocserv_platform_agent_v1_agent_proto_msgTypes[12]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -899,7 +1458,7 @@ func (x *SessionDisconnect) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SessionDisconnect.ProtoReflect.Descriptor instead.
 func (*SessionDisconnect) Descriptor() ([]byte, []int) {
-	return file_ocserv_platform_agent_v1_agent_proto_rawDescGZIP(), []int{6}
+	return file_ocserv_platform_agent_v1_agent_proto_rawDescGZIP(), []int{12}
 }
 
 func (x *SessionDisconnect) GetSessionId() string {
@@ -918,7 +1477,7 @@ type UserCreate struct {
 
 func (x *UserCreate) Reset() {
 	*x = UserCreate{}
-	mi := &file_ocserv_platform_agent_v1_agent_proto_msgTypes[7]
+	mi := &file_ocserv_platform_agent_v1_agent_proto_msgTypes[13]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -930,7 +1489,7 @@ func (x *UserCreate) String() string {
 func (*UserCreate) ProtoMessage() {}
 
 func (x *UserCreate) ProtoReflect() protoreflect.Message {
-	mi := &file_ocserv_platform_agent_v1_agent_proto_msgTypes[7]
+	mi := &file_ocserv_platform_agent_v1_agent_proto_msgTypes[13]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -943,7 +1502,7 @@ func (x *UserCreate) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use UserCreate.ProtoReflect.Descriptor instead.
 func (*UserCreate) Descriptor() ([]byte, []int) {
-	return file_ocserv_platform_agent_v1_agent_proto_rawDescGZIP(), []int{7}
+	return file_ocserv_platform_agent_v1_agent_proto_rawDescGZIP(), []int{13}
 }
 
 func (x *UserCreate) GetUsername() string {
@@ -962,7 +1521,7 @@ type UserDisable struct {
 
 func (x *UserDisable) Reset() {
 	*x = UserDisable{}
-	mi := &file_ocserv_platform_agent_v1_agent_proto_msgTypes[8]
+	mi := &file_ocserv_platform_agent_v1_agent_proto_msgTypes[14]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -974,7 +1533,7 @@ func (x *UserDisable) String() string {
 func (*UserDisable) ProtoMessage() {}
 
 func (x *UserDisable) ProtoReflect() protoreflect.Message {
-	mi := &file_ocserv_platform_agent_v1_agent_proto_msgTypes[8]
+	mi := &file_ocserv_platform_agent_v1_agent_proto_msgTypes[14]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -987,7 +1546,7 @@ func (x *UserDisable) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use UserDisable.ProtoReflect.Descriptor instead.
 func (*UserDisable) Descriptor() ([]byte, []int) {
-	return file_ocserv_platform_agent_v1_agent_proto_rawDescGZIP(), []int{8}
+	return file_ocserv_platform_agent_v1_agent_proto_rawDescGZIP(), []int{14}
 }
 
 func (x *UserDisable) GetUsername() string {
@@ -1007,7 +1566,7 @@ type ConfigPlan struct {
 
 func (x *ConfigPlan) Reset() {
 	*x = ConfigPlan{}
-	mi := &file_ocserv_platform_agent_v1_agent_proto_msgTypes[9]
+	mi := &file_ocserv_platform_agent_v1_agent_proto_msgTypes[15]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1019,7 +1578,7 @@ func (x *ConfigPlan) String() string {
 func (*ConfigPlan) ProtoMessage() {}
 
 func (x *ConfigPlan) ProtoReflect() protoreflect.Message {
-	mi := &file_ocserv_platform_agent_v1_agent_proto_msgTypes[9]
+	mi := &file_ocserv_platform_agent_v1_agent_proto_msgTypes[15]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1032,7 +1591,7 @@ func (x *ConfigPlan) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ConfigPlan.ProtoReflect.Descriptor instead.
 func (*ConfigPlan) Descriptor() ([]byte, []int) {
-	return file_ocserv_platform_agent_v1_agent_proto_rawDescGZIP(), []int{9}
+	return file_ocserv_platform_agent_v1_agent_proto_rawDescGZIP(), []int{15}
 }
 
 func (x *ConfigPlan) GetCandidate() []byte {
@@ -1058,7 +1617,7 @@ type ConfigApply struct {
 
 func (x *ConfigApply) Reset() {
 	*x = ConfigApply{}
-	mi := &file_ocserv_platform_agent_v1_agent_proto_msgTypes[10]
+	mi := &file_ocserv_platform_agent_v1_agent_proto_msgTypes[16]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1070,7 +1629,7 @@ func (x *ConfigApply) String() string {
 func (*ConfigApply) ProtoMessage() {}
 
 func (x *ConfigApply) ProtoReflect() protoreflect.Message {
-	mi := &file_ocserv_platform_agent_v1_agent_proto_msgTypes[10]
+	mi := &file_ocserv_platform_agent_v1_agent_proto_msgTypes[16]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1083,7 +1642,7 @@ func (x *ConfigApply) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ConfigApply.ProtoReflect.Descriptor instead.
 func (*ConfigApply) Descriptor() ([]byte, []int) {
-	return file_ocserv_platform_agent_v1_agent_proto_rawDescGZIP(), []int{10}
+	return file_ocserv_platform_agent_v1_agent_proto_rawDescGZIP(), []int{16}
 }
 
 func (x *ConfigApply) GetCandidateHash() []byte {
@@ -1101,7 +1660,7 @@ type ServiceReload struct {
 
 func (x *ServiceReload) Reset() {
 	*x = ServiceReload{}
-	mi := &file_ocserv_platform_agent_v1_agent_proto_msgTypes[11]
+	mi := &file_ocserv_platform_agent_v1_agent_proto_msgTypes[17]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1113,7 +1672,7 @@ func (x *ServiceReload) String() string {
 func (*ServiceReload) ProtoMessage() {}
 
 func (x *ServiceReload) ProtoReflect() protoreflect.Message {
-	mi := &file_ocserv_platform_agent_v1_agent_proto_msgTypes[11]
+	mi := &file_ocserv_platform_agent_v1_agent_proto_msgTypes[17]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1126,7 +1685,7 @@ func (x *ServiceReload) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ServiceReload.ProtoReflect.Descriptor instead.
 func (*ServiceReload) Descriptor() ([]byte, []int) {
-	return file_ocserv_platform_agent_v1_agent_proto_rawDescGZIP(), []int{11}
+	return file_ocserv_platform_agent_v1_agent_proto_rawDescGZIP(), []int{17}
 }
 
 // SimulationProbe exists only to exercise the local, side-effect-free slice.
@@ -1143,7 +1702,7 @@ type SimulationProbe struct {
 
 func (x *SimulationProbe) Reset() {
 	*x = SimulationProbe{}
-	mi := &file_ocserv_platform_agent_v1_agent_proto_msgTypes[12]
+	mi := &file_ocserv_platform_agent_v1_agent_proto_msgTypes[18]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1155,7 +1714,7 @@ func (x *SimulationProbe) String() string {
 func (*SimulationProbe) ProtoMessage() {}
 
 func (x *SimulationProbe) ProtoReflect() protoreflect.Message {
-	mi := &file_ocserv_platform_agent_v1_agent_proto_msgTypes[12]
+	mi := &file_ocserv_platform_agent_v1_agent_proto_msgTypes[18]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1168,7 +1727,7 @@ func (x *SimulationProbe) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SimulationProbe.ProtoReflect.Descriptor instead.
 func (*SimulationProbe) Descriptor() ([]byte, []int) {
-	return file_ocserv_platform_agent_v1_agent_proto_rawDescGZIP(), []int{12}
+	return file_ocserv_platform_agent_v1_agent_proto_rawDescGZIP(), []int{18}
 }
 
 func (x *SimulationProbe) GetHeartbeatCount() uint32 {
@@ -1258,7 +1817,59 @@ const file_ocserv_platform_agent_v1_agent_proto_rawDesc = "" +
 	"\n" +
 	"AgentEvent\x12<\n" +
 	"\x04type\x18\x01 \x01(\x0e2(.ocserv.platform.agent.v1.AgentEventTypeR\x04type\x12\x18\n" +
-	"\apayload\x18\x02 \x01(\fR\apayload\"\xa1\b\n" +
+	"\apayload\x18\x02 \x01(\fR\apayload\"{\n" +
+	"\x15TelemetryDropCounters\x12\x1a\n" +
+	"\bsecurity\x18\x01 \x01(\x04R\bsecurity\x12\x16\n" +
+	"\x06health\x18\x02 \x01(\x04R\x06health\x12\x1c\n" +
+	"\taggregate\x18\x03 \x01(\x04R\taggregate\x12\x10\n" +
+	"\x03raw\x18\x04 \x01(\x04R\x03raw\"\xa9\x03\n" +
+	"\x10ObservedSnapshot\x12;\n" +
+	"\vobserved_at\x18\x01 \x01(\v2\x1a.google.protobuf.TimestampR\n" +
+	"observedAt\x12\x17\n" +
+	"\aboot_id\x18\x02 \x01(\tR\x06bootId\x12*\n" +
+	"\x11agent_instance_id\x18\x03 \x01(\fR\x0fagentInstanceId\x12#\n" +
+	"\ragent_version\x18\x04 \x01(\tR\fagentVersion\x12%\n" +
+	"\x0eocserv_version\x18\x05 \x01(\tR\rocservVersion\x12\x1d\n" +
+	"\n" +
+	"os_release\x18\x06 \x01(\tR\tosRelease\x12\x1f\n" +
+	"\vocserv_json\x18\a \x01(\fR\n" +
+	"ocservJson\x12\x1f\n" +
+	"\vsystem_json\x18\b \x01(\fR\n" +
+	"systemJson\x12\x1b\n" +
+	"\tpath_json\x18\t \x01(\fR\bpathJson\x12I\n" +
+	"\adropped\x18\n" +
+	" \x01(\v2/.ocserv.platform.agent.v1.TelemetryDropCountersR\adropped\"\xe3\x01\n" +
+	"\x12SessionObservation\x12\x1d\n" +
+	"\n" +
+	"session_id\x18\x01 \x01(\tR\tsessionId\x12\x1a\n" +
+	"\busername\x18\x02 \x01(\tR\busername\x12\x1b\n" +
+	"\tclient_ip\x18\x03 \x01(\tR\bclientIp\x12=\n" +
+	"\fconnected_at\x18\x04 \x01(\v2\x1a.google.protobuf.TimestampR\vconnectedAt\x12\x19\n" +
+	"\bbytes_in\x18\x05 \x01(\x04R\abytesIn\x12\x1b\n" +
+	"\tbytes_out\x18\x06 \x01(\x04R\bbytesOut\"w\n" +
+	"\fMetricSample\x129\n" +
+	"\n" +
+	"sampled_at\x18\x01 \x01(\v2\x1a.google.protobuf.TimestampR\tsampledAt\x12\x16\n" +
+	"\x06metric\x18\x02 \x01(\tR\x06metric\x12\x14\n" +
+	"\x05value\x18\x03 \x01(\x01R\x05value\"\xc9\x01\n" +
+	"\x13SecurityObservation\x12\x19\n" +
+	"\bevent_id\x18\x01 \x01(\fR\aeventId\x12;\n" +
+	"\vobserved_at\x18\x02 \x01(\v2\x1a.google.protobuf.TimestampR\n" +
+	"observedAt\x12\x1a\n" +
+	"\bseverity\x18\x03 \x01(\tR\bseverity\x12\x1d\n" +
+	"\n" +
+	"event_type\x18\x04 \x01(\tR\teventType\x12\x1f\n" +
+	"\vdetail_json\x18\x05 \x01(\fR\n" +
+	"detailJson\"\xd5\x03\n" +
+	"\x0eTelemetryBatch\x12\x19\n" +
+	"\bbatch_id\x18\x01 \x01(\fR\abatchId\x12\x17\n" +
+	"\anode_id\x18\x02 \x01(\fR\x06nodeId\x12\x1a\n" +
+	"\bsequence\x18\x03 \x01(\x04R\bsequence\x12G\n" +
+	"\bpriority\x18\x04 \x01(\x0e2+.ocserv.platform.agent.v1.TelemetryPriorityR\bpriority\x12F\n" +
+	"\bsnapshot\x18\x05 \x01(\v2*.ocserv.platform.agent.v1.ObservedSnapshotR\bsnapshot\x12H\n" +
+	"\bsessions\x18\x06 \x03(\v2,.ocserv.platform.agent.v1.SessionObservationR\bsessions\x12@\n" +
+	"\asamples\x18\a \x03(\v2&.ocserv.platform.agent.v1.MetricSampleR\asamples\x12V\n" +
+	"\x0fsecurity_events\x18\b \x03(\v2-.ocserv.platform.agent.v1.SecurityObservationR\x0esecurityEvents\"\xa1\b\n" +
 	"\x0fCommandEnvelope\x12)\n" +
 	"\x10protocol_version\x18\x01 \x01(\tR\x0fprotocolVersion\x12\x1d\n" +
 	"\n" +
@@ -1320,7 +1931,13 @@ const file_ocserv_platform_agent_v1_agent_proto_rawDesc = "" +
 	"\x1cAGENT_EVENT_TYPE_UNSPECIFIED\x10\x00\x12#\n" +
 	"\x1fAGENT_EVENT_TYPE_COMMAND_RESULT\x10\x01\x12\x1e\n" +
 	"\x1aAGENT_EVENT_TYPE_HEARTBEAT\x10\x02\x12\x1a\n" +
-	"\x16AGENT_EVENT_TYPE_ERROR\x10\x03B\x89\x02\n" +
+	"\x16AGENT_EVENT_TYPE_ERROR\x10\x03*\xc5\x01\n" +
+	"\x11TelemetryPriority\x12\"\n" +
+	"\x1eTELEMETRY_PRIORITY_UNSPECIFIED\x10\x00\x12\x1f\n" +
+	"\x1bTELEMETRY_PRIORITY_SECURITY\x10\x01\x12%\n" +
+	"!TELEMETRY_PRIORITY_CURRENT_HEALTH\x10\x02\x12 \n" +
+	"\x1cTELEMETRY_PRIORITY_AGGREGATE\x10\x03\x12\"\n" +
+	"\x1eTELEMETRY_PRIORITY_RAW_HISTORY\x10\x04B\x89\x02\n" +
 	"\x1ccom.ocserv.platform.agent.v1B\n" +
 	"AgentProtoP\x01ZZgithub.com/GentleKingson/ocservia/control-plane/gen/proto/ocserv/platform/agent/v1;agentv1\xa2\x02\x03OPA\xaa\x02\x18Ocserv.Platform.Agent.V1\xca\x02\x18Ocserv\\Platform\\Agent\\V1\xe2\x02$Ocserv\\Platform\\Agent\\V1\\GPBMetadata\xea\x02\x1bOcserv::Platform::Agent::V1b\x06proto3"
 
@@ -1336,46 +1953,63 @@ func file_ocserv_platform_agent_v1_agent_proto_rawDescGZIP() []byte {
 	return file_ocserv_platform_agent_v1_agent_proto_rawDescData
 }
 
-var file_ocserv_platform_agent_v1_agent_proto_enumTypes = make([]protoimpl.EnumInfo, 2)
-var file_ocserv_platform_agent_v1_agent_proto_msgTypes = make([]protoimpl.MessageInfo, 13)
+var file_ocserv_platform_agent_v1_agent_proto_enumTypes = make([]protoimpl.EnumInfo, 3)
+var file_ocserv_platform_agent_v1_agent_proto_msgTypes = make([]protoimpl.MessageInfo, 19)
 var file_ocserv_platform_agent_v1_agent_proto_goTypes = []any{
 	(HandshakeResult)(0),             // 0: ocserv.platform.agent.v1.HandshakeResult
 	(AgentEventType)(0),              // 1: ocserv.platform.agent.v1.AgentEventType
-	(*EnrollRequest)(nil),            // 2: ocserv.platform.agent.v1.EnrollRequest
-	(*EnrollResponse)(nil),           // 3: ocserv.platform.agent.v1.EnrollResponse
-	(*SessionHandshake)(nil),         // 4: ocserv.platform.agent.v1.SessionHandshake
-	(*SessionHandshakeResponse)(nil), // 5: ocserv.platform.agent.v1.SessionHandshakeResponse
-	(*AgentEvent)(nil),               // 6: ocserv.platform.agent.v1.AgentEvent
-	(*CommandEnvelope)(nil),          // 7: ocserv.platform.agent.v1.CommandEnvelope
-	(*SessionDisconnect)(nil),        // 8: ocserv.platform.agent.v1.SessionDisconnect
-	(*UserCreate)(nil),               // 9: ocserv.platform.agent.v1.UserCreate
-	(*UserDisable)(nil),              // 10: ocserv.platform.agent.v1.UserDisable
-	(*ConfigPlan)(nil),               // 11: ocserv.platform.agent.v1.ConfigPlan
-	(*ConfigApply)(nil),              // 12: ocserv.platform.agent.v1.ConfigApply
-	(*ServiceReload)(nil),            // 13: ocserv.platform.agent.v1.ServiceReload
-	(*SimulationProbe)(nil),          // 14: ocserv.platform.agent.v1.SimulationProbe
-	(*timestamppb.Timestamp)(nil),    // 15: google.protobuf.Timestamp
+	(TelemetryPriority)(0),           // 2: ocserv.platform.agent.v1.TelemetryPriority
+	(*EnrollRequest)(nil),            // 3: ocserv.platform.agent.v1.EnrollRequest
+	(*EnrollResponse)(nil),           // 4: ocserv.platform.agent.v1.EnrollResponse
+	(*SessionHandshake)(nil),         // 5: ocserv.platform.agent.v1.SessionHandshake
+	(*SessionHandshakeResponse)(nil), // 6: ocserv.platform.agent.v1.SessionHandshakeResponse
+	(*AgentEvent)(nil),               // 7: ocserv.platform.agent.v1.AgentEvent
+	(*TelemetryDropCounters)(nil),    // 8: ocserv.platform.agent.v1.TelemetryDropCounters
+	(*ObservedSnapshot)(nil),         // 9: ocserv.platform.agent.v1.ObservedSnapshot
+	(*SessionObservation)(nil),       // 10: ocserv.platform.agent.v1.SessionObservation
+	(*MetricSample)(nil),             // 11: ocserv.platform.agent.v1.MetricSample
+	(*SecurityObservation)(nil),      // 12: ocserv.platform.agent.v1.SecurityObservation
+	(*TelemetryBatch)(nil),           // 13: ocserv.platform.agent.v1.TelemetryBatch
+	(*CommandEnvelope)(nil),          // 14: ocserv.platform.agent.v1.CommandEnvelope
+	(*SessionDisconnect)(nil),        // 15: ocserv.platform.agent.v1.SessionDisconnect
+	(*UserCreate)(nil),               // 16: ocserv.platform.agent.v1.UserCreate
+	(*UserDisable)(nil),              // 17: ocserv.platform.agent.v1.UserDisable
+	(*ConfigPlan)(nil),               // 18: ocserv.platform.agent.v1.ConfigPlan
+	(*ConfigApply)(nil),              // 19: ocserv.platform.agent.v1.ConfigApply
+	(*ServiceReload)(nil),            // 20: ocserv.platform.agent.v1.ServiceReload
+	(*SimulationProbe)(nil),          // 21: ocserv.platform.agent.v1.SimulationProbe
+	(*timestamppb.Timestamp)(nil),    // 22: google.protobuf.Timestamp
 }
 var file_ocserv_platform_agent_v1_agent_proto_depIdxs = []int32{
-	15, // 0: ocserv.platform.agent.v1.EnrollRequest.time:type_name -> google.protobuf.Timestamp
+	22, // 0: ocserv.platform.agent.v1.EnrollRequest.time:type_name -> google.protobuf.Timestamp
 	0,  // 1: ocserv.platform.agent.v1.EnrollResponse.result:type_name -> ocserv.platform.agent.v1.HandshakeResult
-	15, // 2: ocserv.platform.agent.v1.SessionHandshake.time:type_name -> google.protobuf.Timestamp
+	22, // 2: ocserv.platform.agent.v1.SessionHandshake.time:type_name -> google.protobuf.Timestamp
 	0,  // 3: ocserv.platform.agent.v1.SessionHandshakeResponse.result:type_name -> ocserv.platform.agent.v1.HandshakeResult
 	1,  // 4: ocserv.platform.agent.v1.AgentEvent.type:type_name -> ocserv.platform.agent.v1.AgentEventType
-	15, // 5: ocserv.platform.agent.v1.CommandEnvelope.issued_at:type_name -> google.protobuf.Timestamp
-	15, // 6: ocserv.platform.agent.v1.CommandEnvelope.expires_at:type_name -> google.protobuf.Timestamp
-	8,  // 7: ocserv.platform.agent.v1.CommandEnvelope.session_disconnect:type_name -> ocserv.platform.agent.v1.SessionDisconnect
-	9,  // 8: ocserv.platform.agent.v1.CommandEnvelope.user_create:type_name -> ocserv.platform.agent.v1.UserCreate
-	10, // 9: ocserv.platform.agent.v1.CommandEnvelope.user_disable:type_name -> ocserv.platform.agent.v1.UserDisable
-	11, // 10: ocserv.platform.agent.v1.CommandEnvelope.config_plan:type_name -> ocserv.platform.agent.v1.ConfigPlan
-	12, // 11: ocserv.platform.agent.v1.CommandEnvelope.config_apply:type_name -> ocserv.platform.agent.v1.ConfigApply
-	13, // 12: ocserv.platform.agent.v1.CommandEnvelope.service_reload:type_name -> ocserv.platform.agent.v1.ServiceReload
-	14, // 13: ocserv.platform.agent.v1.CommandEnvelope.simulation_probe:type_name -> ocserv.platform.agent.v1.SimulationProbe
-	14, // [14:14] is the sub-list for method output_type
-	14, // [14:14] is the sub-list for method input_type
-	14, // [14:14] is the sub-list for extension type_name
-	14, // [14:14] is the sub-list for extension extendee
-	0,  // [0:14] is the sub-list for field type_name
+	22, // 5: ocserv.platform.agent.v1.ObservedSnapshot.observed_at:type_name -> google.protobuf.Timestamp
+	8,  // 6: ocserv.platform.agent.v1.ObservedSnapshot.dropped:type_name -> ocserv.platform.agent.v1.TelemetryDropCounters
+	22, // 7: ocserv.platform.agent.v1.SessionObservation.connected_at:type_name -> google.protobuf.Timestamp
+	22, // 8: ocserv.platform.agent.v1.MetricSample.sampled_at:type_name -> google.protobuf.Timestamp
+	22, // 9: ocserv.platform.agent.v1.SecurityObservation.observed_at:type_name -> google.protobuf.Timestamp
+	2,  // 10: ocserv.platform.agent.v1.TelemetryBatch.priority:type_name -> ocserv.platform.agent.v1.TelemetryPriority
+	9,  // 11: ocserv.platform.agent.v1.TelemetryBatch.snapshot:type_name -> ocserv.platform.agent.v1.ObservedSnapshot
+	10, // 12: ocserv.platform.agent.v1.TelemetryBatch.sessions:type_name -> ocserv.platform.agent.v1.SessionObservation
+	11, // 13: ocserv.platform.agent.v1.TelemetryBatch.samples:type_name -> ocserv.platform.agent.v1.MetricSample
+	12, // 14: ocserv.platform.agent.v1.TelemetryBatch.security_events:type_name -> ocserv.platform.agent.v1.SecurityObservation
+	22, // 15: ocserv.platform.agent.v1.CommandEnvelope.issued_at:type_name -> google.protobuf.Timestamp
+	22, // 16: ocserv.platform.agent.v1.CommandEnvelope.expires_at:type_name -> google.protobuf.Timestamp
+	15, // 17: ocserv.platform.agent.v1.CommandEnvelope.session_disconnect:type_name -> ocserv.platform.agent.v1.SessionDisconnect
+	16, // 18: ocserv.platform.agent.v1.CommandEnvelope.user_create:type_name -> ocserv.platform.agent.v1.UserCreate
+	17, // 19: ocserv.platform.agent.v1.CommandEnvelope.user_disable:type_name -> ocserv.platform.agent.v1.UserDisable
+	18, // 20: ocserv.platform.agent.v1.CommandEnvelope.config_plan:type_name -> ocserv.platform.agent.v1.ConfigPlan
+	19, // 21: ocserv.platform.agent.v1.CommandEnvelope.config_apply:type_name -> ocserv.platform.agent.v1.ConfigApply
+	20, // 22: ocserv.platform.agent.v1.CommandEnvelope.service_reload:type_name -> ocserv.platform.agent.v1.ServiceReload
+	21, // 23: ocserv.platform.agent.v1.CommandEnvelope.simulation_probe:type_name -> ocserv.platform.agent.v1.SimulationProbe
+	24, // [24:24] is the sub-list for method output_type
+	24, // [24:24] is the sub-list for method input_type
+	24, // [24:24] is the sub-list for extension type_name
+	24, // [24:24] is the sub-list for extension extendee
+	0,  // [0:24] is the sub-list for field type_name
 }
 
 func init() { file_ocserv_platform_agent_v1_agent_proto_init() }
@@ -1383,7 +2017,7 @@ func file_ocserv_platform_agent_v1_agent_proto_init() {
 	if File_ocserv_platform_agent_v1_agent_proto != nil {
 		return
 	}
-	file_ocserv_platform_agent_v1_agent_proto_msgTypes[5].OneofWrappers = []any{
+	file_ocserv_platform_agent_v1_agent_proto_msgTypes[11].OneofWrappers = []any{
 		(*CommandEnvelope_SessionDisconnect)(nil),
 		(*CommandEnvelope_UserCreate)(nil),
 		(*CommandEnvelope_UserDisable)(nil),
@@ -1397,8 +2031,8 @@ func file_ocserv_platform_agent_v1_agent_proto_init() {
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_ocserv_platform_agent_v1_agent_proto_rawDesc), len(file_ocserv_platform_agent_v1_agent_proto_rawDesc)),
-			NumEnums:      2,
-			NumMessages:   13,
+			NumEnums:      3,
+			NumMessages:   19,
 			NumExtensions: 0,
 			NumServices:   0,
 		},

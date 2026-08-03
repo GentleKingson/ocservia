@@ -12,6 +12,7 @@ import (
 	"github.com/GentleKingson/ocservia/control-plane/internal/localslice"
 	"github.com/GentleKingson/ocservia/control-plane/internal/platform/config"
 	"github.com/GentleKingson/ocservia/control-plane/internal/platform/telemetry"
+	telemetrystore "github.com/GentleKingson/ocservia/control-plane/internal/telemetry"
 	"github.com/GentleKingson/ocservia/control-plane/internal/transportclient"
 	"github.com/GentleKingson/ocservia/control-plane/internal/trustserver"
 	"github.com/GentleKingson/ocservia/control-plane/migrations"
@@ -60,8 +61,9 @@ func Run(ctx context.Context, cfg config.Config, build BuildInfo, logger *slog.L
 	logger.Info("control plane starting", "role", cfg.Role)
 	componentCtx, stopComponents := context.WithCancel(ctx)
 	defer stopComponents()
-	var sliceService *localslice.Service
+	sliceService := localslice.New(pool)
 	workerErr := make(chan error, 1)
+	maintenanceErr := make(chan error, 1)
 	var trust *trustserver.Server
 	trustErr := make(chan error, 1)
 	if cfg.RunsWorker() && cfg.ControllerEndpointID != "" {
@@ -79,16 +81,32 @@ func Run(ctx context.Context, cfg config.Config, build BuildInfo, logger *slog.L
 		defer shutdownCancel()
 		return trust.Shutdown(shutdownCtx)
 	}
-	if cfg.LocalSimulator {
-		sliceService = localslice.New(pool)
+	if cfg.RunsWorker() && (cfg.LocalSimulator || cfg.ControllerEndpointID != "") {
 		transport, err := transportclient.New(cfg.TransportSocket, cfg.TransportTimeout, cfg.TransportQueue)
 		if err != nil {
 			return fmt.Errorf("configure transport client: %w", err)
 		}
-		if cfg.RunsWorker() {
-			worker := localslice.NewWorker(sliceService, transport, logger)
-			go func() { workerErr <- worker.Run(componentCtx) }()
-		}
+		worker := localslice.NewWorker(sliceService, transport, logger)
+		go func() { workerErr <- worker.Run(componentCtx) }()
+	}
+	telemetryService := telemetrystore.New(pool)
+	if cfg.RunsScheduler() {
+		go func() {
+			ticker := time.NewTicker(30 * time.Second)
+			defer ticker.Stop()
+			for {
+				if err := telemetryService.Maintain(componentCtx); err != nil {
+					maintenanceErr <- err
+					return
+				}
+				select {
+				case <-componentCtx.Done():
+					maintenanceErr <- componentCtx.Err()
+					return
+				case <-ticker.C:
+				}
+			}
+		}()
 	}
 	if !cfg.RunsAPI() {
 		select {
@@ -103,10 +121,14 @@ func Run(ctx context.Context, cfg config.Config, build BuildInfo, logger *slog.L
 		case err := <-trustErr:
 			_ = stopTrust()
 			return fmt.Errorf("serve trust UDS: %w", err)
+		case err := <-maintenanceErr:
+			_ = stopTrust()
+			return fmt.Errorf("run telemetry maintenance: %w", err)
 		}
 	}
 
 	server := api.New(cfg.HTTPAddress, pool, api.BuildInfo{Version: build.Version, Commit: build.Commit, Role: string(cfg.Role)}, logger, cfg.BodyLimit, cfg.RequestTimeout, operationAuthEnabled(cfg), cfg.DevAuthToken, expectedSchemaVersion)
+	server.EnableTelemetry(telemetryService)
 	if cfg.ControllerEndpointID != "" {
 		transport, transportErr := transportclient.New(cfg.TransportSocket, cfg.TransportTimeout, cfg.TransportQueue)
 		if transportErr != nil {
@@ -114,9 +136,8 @@ func Run(ctx context.Context, cfg config.Config, build BuildInfo, logger *slog.L
 		}
 		server.EnableEnrollment(enrollment.New(pool, cfg.ControllerEndpointID, build.Version), transport)
 	}
-	if sliceService != nil {
-		server.EnableLocalSlice(sliceService)
-	}
+	server.EnableLocalSlice(sliceService)
+	server.SetLocalSimulatorEnabled(cfg.LocalSimulator)
 	serverErr := make(chan error, 1)
 	go func() { serverErr <- server.ListenAndServe() }()
 
@@ -137,6 +158,13 @@ func Run(ctx context.Context, cfg config.Config, build BuildInfo, logger *slog.L
 		_ = server.Shutdown(shutdownCtx)
 		_ = stopTrust()
 		return fmt.Errorf("serve trust UDS: %w", err)
+	case err := <-maintenanceErr:
+		stopComponents()
+		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), cfg.ShutdownTimeout)
+		defer shutdownCancel()
+		_ = server.Shutdown(shutdownCtx)
+		_ = stopTrust()
+		return fmt.Errorf("run telemetry maintenance: %w", err)
 	case <-ctx.Done():
 		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), cfg.ShutdownTimeout)
 		defer shutdownCancel()
