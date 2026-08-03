@@ -3,7 +3,7 @@ set -euo pipefail
 
 ROOT="${1:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 
-forbidden_path='(^|/)(AGENTS\.md|\.ocservia-control)(/|$)|(^|/)(implementation-tracker\.csv|EVIDENCE\.md)$|(^|/)(prompts?|threat-models?|internal-adrs?|buildserver-logs?)(/|$)'
+forbidden_path='(^|/)(AGENTS\.md|\.ocservia-control)(/|$)|(^|/)(implementation-tracker\.csv|EVIDENCE\.md)$|(^|/)(prompts?|threat-models?|internal-adrs?|localserver-logs?)(/|$)'
 tracked="$(git -C "${ROOT}" ls-files)"
 
 if printf '%s\n' "${tracked}" | grep -E "${forbidden_path}"; then
