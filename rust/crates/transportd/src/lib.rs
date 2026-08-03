@@ -69,11 +69,16 @@ impl IdentityPolicy {
     /// Builds a policy from endpoint-to-node bindings and revoked identifiers.
     #[must_use]
     pub fn new(approved: HashMap<EndpointId, Vec<u8>>, revoked: HashSet<EndpointId>) -> Self {
+        let revisions = revoked
+            .iter()
+            .copied()
+            .map(|endpoint| (endpoint, u64::MAX))
+            .collect();
         Self {
             state: Arc::new(RwLock::new(IdentityState {
                 approved,
                 revoked,
-                revisions: HashMap::new(),
+                revisions,
             })),
         }
     }
@@ -758,6 +763,14 @@ impl ProtocolHandler for SessionHandler {
         let metadata = metadata(&handshake, &connection).await;
         let node_id = metadata.node_id.clone();
         let mut registry = self.shared.inner.connections.lock().await;
+        if let Some(trust) = &self.trust
+            && !trust.permits(connection.remote_id(), AGENT_ALPN).await
+        {
+            connection.close(VarInt::from_u32(0x101), b"session trust changed");
+            return Err(protocol_error(
+                "endpoint trust changed during session registration",
+            ));
+        }
         // Trust updates change policy before taking the registry lock. Checking
         // while holding this lock makes a concurrent revoke either reject this
         // session here or close it immediately after registration.
@@ -1505,6 +1518,16 @@ mod tests {
         assert!(policy.update(dynamic, dynamic_node, NodeTrustState::Active, 1));
         assert!(!policy.permits(dynamic, AGENT_ALPN));
         assert!(policy.revoked(dynamic));
+
+        let restored_revocation = SecretKey::generate().public();
+        let restored = IdentityPolicy::new(HashMap::new(), HashSet::from([restored_revocation]));
+        assert!(restored.update(
+            restored_revocation,
+            Uuid::now_v7().as_bytes().to_vec(),
+            NodeTrustState::Active,
+            1,
+        ));
+        assert!(restored.revoked(restored_revocation));
     }
 
     #[test]
