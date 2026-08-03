@@ -2,6 +2,7 @@ package api
 
 import (
 	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
 	"net/http"
@@ -10,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/GentleKingson/ocservia/control-plane/internal/enrollment"
 	"github.com/GentleKingson/ocservia/control-plane/internal/localslice"
 )
 
@@ -64,6 +66,23 @@ func TestEnrollmentWritesRequireAuthenticatedPrincipal(t *testing.T) {
 		if response.Code != http.StatusUnauthorized {
 			t.Fatalf("%s status = %d", path, response.Code)
 		}
+	}
+}
+
+func TestEnrollmentErrorsDistinguishInvalidRequestsFromBackendFailures(t *testing.T) {
+	server := New("127.0.0.1:0", nil, BuildInfo{}, slog.New(slog.NewTextHandler(io.Discard, nil)), 1024, time.Second, false, "", 1)
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/enrollment-tokens", nil)
+
+	response := httptest.NewRecorder()
+	server.writeEnrollmentError(response, request, enrollment.ErrInvalidRequest)
+	if response.Code != http.StatusBadRequest {
+		t.Fatalf("invalid request status = %d", response.Code)
+	}
+
+	response = httptest.NewRecorder()
+	server.writeEnrollmentError(response, request, errors.New("database unavailable"))
+	if response.Code != http.StatusServiceUnavailable || response.Header().Get("Retry-After") != "1" {
+		t.Fatalf("backend failure status = %d retry-after = %q", response.Code, response.Header().Get("Retry-After"))
 	}
 }
 

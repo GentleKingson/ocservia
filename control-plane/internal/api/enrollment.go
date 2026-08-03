@@ -58,7 +58,7 @@ func (s *Server) createEnrollmentToken(w http.ResponseWriter, r *http.Request) {
 	}
 	token, err := s.enrollment.CreateToken(r.Context(), enrollment.TokenSpec{WorkspaceID: workspaceID, Environment: body.Environment, ExpectedNodeName: body.ExpectedNodeName, ExpectedEndpointID: endpoint, TTL: time.Duration(body.TTLSeconds) * time.Second, ActorID: "developer", Reason: body.Reason, RequestID: requestID(r)})
 	if err != nil {
-		writeEnrollmentError(w, r, err)
+		s.writeEnrollmentError(w, r, err)
 		return
 	}
 	w.Header().Set("Cache-Control", "no-store")
@@ -81,7 +81,7 @@ func (s *Server) approveNode(w http.ResponseWriter, r *http.Request) {
 	}
 	trust, err := s.enrollment.Approve(r.Context(), enrollment.Approval{NodeID: nodeID, Labels: body.Labels, Policy: body.Policy, Capabilities: body.Capabilities, ActorID: "developer", Reason: body.Reason, RequestID: requestID(r)})
 	if err != nil {
-		writeEnrollmentError(w, r, err)
+		s.writeEnrollmentError(w, r, err)
 		return
 	}
 	if err := s.transport.UpdateNodeTrust(r.Context(), trust.NodeID[:], trust.EndpointID, transportv1.NodeTrustState_NODE_TRUST_STATE_ACTIVE, body.Reason); err != nil {
@@ -107,7 +107,7 @@ func (s *Server) revokeNode(w http.ResponseWriter, r *http.Request) {
 	}
 	trust, err := s.enrollment.Revoke(r.Context(), enrollment.Revocation{NodeID: nodeID, ActorID: "developer", Reason: body.Reason, RequestID: requestID(r)})
 	if err != nil {
-		writeEnrollmentError(w, r, err)
+		s.writeEnrollmentError(w, r, err)
 		return
 	}
 	syncErr := s.transport.UpdateNodeTrust(r.Context(), trust.NodeID[:], trust.EndpointID, transportv1.NodeTrustState_NODE_TRUST_STATE_REVOKED, body.Reason)
@@ -133,14 +133,18 @@ func decodeStrict(w http.ResponseWriter, r *http.Request, target any) bool {
 	return true
 }
 
-func writeEnrollmentError(w http.ResponseWriter, r *http.Request, err error) {
+func (s *Server) writeEnrollmentError(w http.ResponseWriter, r *http.Request, err error) {
 	switch {
 	case errors.Is(err, enrollment.ErrInvalidTransition):
 		writeProblem(w, r, http.StatusConflict, "https://ocservia.dev/problems/invalid-node-state", "Invalid node state", "the requested node transition is not allowed")
 	case errors.Is(err, enrollment.ErrNotFound):
 		writeProblem(w, r, http.StatusNotFound, "https://ocservia.dev/problems/not-found", "Resource not found", "the requested resource does not exist")
-	default:
+	case errors.Is(err, enrollment.ErrInvalidRequest):
 		writeProblem(w, r, http.StatusBadRequest, "https://ocservia.dev/problems/invalid-request", "Invalid request", "request could not be completed")
+	default:
+		s.logger.ErrorContext(r.Context(), "enrollment persistence failed", "error", err)
+		w.Header().Set("Retry-After", "1")
+		writeProblem(w, r, http.StatusServiceUnavailable, "https://ocservia.dev/problems/database-unavailable", "Enrollment service unavailable", "the enrollment database is temporarily unavailable")
 	}
 }
 

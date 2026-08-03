@@ -36,6 +36,7 @@ var (
 	ErrPendingLimit      = errors.New("pending node limit reached")
 	ErrInvalidTransition = errors.New("node state transition is invalid")
 	ErrNotFound          = errors.New("node not found")
+	ErrInvalidRequest    = errors.New("enrollment request is invalid")
 )
 
 type TokenSpec struct {
@@ -91,14 +92,14 @@ func New(pool *pgxpool.Pool, controllerEndpointID string) *Service {
 func (s *Service) CreateToken(ctx context.Context, spec TokenSpec) (Token, error) {
 	if spec.WorkspaceID == uuid.Nil || !validShort(spec.Environment, 64) || !validOptional(spec.ExpectedNodeName, 128) ||
 		(len(spec.ExpectedEndpointID) != 0 && len(spec.ExpectedEndpointID) != 32) || !validActor(spec.ActorID, spec.RequestID, spec.Reason) {
-		return Token{}, errors.New("invalid enrollment token request")
+		return Token{}, ErrInvalidRequest
 	}
 	ttl := spec.TTL
 	if ttl == 0 {
 		ttl = DefaultTokenTTL
 	}
 	if ttl <= 0 || ttl > DefaultTokenTTL {
-		return Token{}, errors.New("enrollment token ttl must be between zero and 15 minutes")
+		return Token{}, ErrInvalidRequest
 	}
 	raw := make([]byte, 32)
 	if _, err := io.ReadFull(s.random, raw); err != nil {
@@ -211,14 +212,14 @@ func (s *Service) Enroll(ctx context.Context, request *agentv1.EnrollRequest) (*
 
 func (s *Service) Approve(ctx context.Context, approval Approval) (NodeTrust, error) {
 	if approval.NodeID == uuid.Nil || !validActor(approval.ActorID, approval.RequestID, approval.Reason) || !validPolicy(approval.Policy) || len(approval.Labels) > 32 {
-		return NodeTrust{}, errors.New("invalid node approval")
+		return NodeTrust{}, ErrInvalidRequest
 	}
 	if !validCapabilities(approval.Capabilities) {
-		return NodeTrust{}, errors.New("invalid capability approval")
+		return NodeTrust{}, ErrInvalidRequest
 	}
 	capabilities := normalizedCapabilities(approval.Capabilities)
 	if len(capabilities) == 0 {
-		return NodeTrust{}, errors.New("at least one capability must be approved")
+		return NodeTrust{}, ErrInvalidRequest
 	}
 	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{})
 	if err != nil {
@@ -240,7 +241,7 @@ func (s *Service) Approve(ctx context.Context, approval Approval) (NodeTrust, er
 	}
 	for key, value := range approval.Labels {
 		if !validShort(key, 64) || !validShort(value, 128) {
-			return NodeTrust{}, errors.New("invalid node label")
+			return NodeTrust{}, ErrInvalidRequest
 		}
 	}
 	labels := mapToJSON(approval.Labels)
@@ -270,7 +271,7 @@ func (s *Service) Approve(ctx context.Context, approval Approval) (NodeTrust, er
 
 func (s *Service) Revoke(ctx context.Context, revocation Revocation) (NodeTrust, error) {
 	if revocation.NodeID == uuid.Nil || !validActor(revocation.ActorID, revocation.RequestID, revocation.Reason) {
-		return NodeTrust{}, errors.New("invalid revocation")
+		return NodeTrust{}, ErrInvalidRequest
 	}
 	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{})
 	if err != nil {
@@ -319,7 +320,7 @@ func (s *Service) CheckEndpoint(ctx context.Context, request *transportv1.CheckE
 		return false, nil
 	}
 	var permitted bool
-	err := s.pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM nodes n JOIN node_endpoint_keys k ON k.node_id=n.id WHERE k.endpoint_id=$1 AND n.status='active' AND k.state='active')`, request.GetEndpointId()).Scan(&permitted)
+	err := s.pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM nodes n JOIN node_endpoint_keys k ON k.node_id=n.id WHERE k.endpoint_id=$1 AND n.status IN ('active','offline') AND k.state='active')`, request.GetEndpointId()).Scan(&permitted)
 	return permitted, err
 }
 
@@ -345,7 +346,7 @@ func (s *Service) AuthorizeSession(ctx context.Context, request *transportv1.Aut
 		response.Result = agentv1.HandshakeResult_HANDSHAKE_RESULT_PENDING_APPROVAL
 		return response, nil
 	}
-	if status != "active" || endpointState != "active" || !slices.Equal(nodeID[:], handshake.GetNodeId()) {
+	if (status != "active" && status != "offline") || endpointState != "active" || !slices.Equal(nodeID[:], handshake.GetNodeId()) {
 		response.Result = agentv1.HandshakeResult_HANDSHAKE_RESULT_REVOKED
 		return response, nil
 	}

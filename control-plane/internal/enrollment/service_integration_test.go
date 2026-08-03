@@ -77,6 +77,17 @@ func TestEnrollmentTrustLifecycleIntegration(t *testing.T) {
 	if err != nil || response.GetResult() != agentv1.HandshakeResult_HANDSHAKE_RESULT_ACCEPTED {
 		t.Fatalf("active authorization = %v, %v", response, err)
 	}
+	if _, err := pool.Exec(ctx, `UPDATE nodes SET status='offline' WHERE id=$1`, nodeID); err != nil {
+		t.Fatal(err)
+	}
+	permitted, err = service.CheckEndpoint(ctx, &transportv1.CheckEndpointRequest{EndpointId: endpoint, Alpn: "ocserv-platform/agent/1"})
+	if err != nil || !permitted {
+		t.Fatalf("offline endpoint permitted=%v err=%v", permitted, err)
+	}
+	response, err = service.AuthorizeSession(ctx, &transportv1.AuthorizeSessionRequest{RemoteEndpointId: endpoint, Handshake: handshake})
+	if err != nil || response.GetResult() != agentv1.HandshakeResult_HANDSHAKE_RESULT_ACCEPTED {
+		t.Fatalf("offline authorization = %v, %v", response, err)
+	}
 	handshake.Time = timestamppb.New(time.Now().Add(-MaxClockSkew - time.Second))
 	response, err = service.AuthorizeSession(ctx, &transportv1.AuthorizeSessionRequest{RemoteEndpointId: endpoint, Handshake: handshake})
 	if err != nil || response.GetResult() != agentv1.HandshakeResult_HANDSHAKE_RESULT_CLOCK_SKEW {
