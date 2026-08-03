@@ -16,6 +16,9 @@ are documented in [docs/development/transportd.md](docs/development/transportd.m
 The one-time enrollment, approval, EndpointID pinning, revocation, and rollback
 workflow is documented in
 [docs/development/enrollment.md](docs/development/enrollment.md).
+The unprivileged Agent, fixed read-only privd boundary, and systemd lifecycle
+are documented in
+[docs/development/agent-privd.md](docs/development/agent-privd.md).
 
 ## Status
 

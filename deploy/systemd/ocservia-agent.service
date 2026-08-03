@@ -1,0 +1,38 @@
+[Unit]
+Description=Ocservia unprivileged node agent
+After=network-online.target ocservia-privd.service
+Wants=network-online.target
+Requires=ocservia-privd.service
+
+[Service]
+Type=simple
+User=ocserv-agent
+Group=ocserv-agent
+EnvironmentFile=/etc/ocservia-agent/agent.env
+ExecStart=/usr/libexec/ocservia/ocservia-agent --controller $CONTROLLER_ENDPOINT_ID --node-id $NODE_ID
+Restart=on-failure
+RestartSec=5s
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RestrictSUIDSGID=yes
+RestrictNamespaces=yes
+SystemCallArchitectures=native
+CapabilityBoundingSet=
+ReadWritePaths=/var/lib/ocservia-agent
+UMask=0077
+TasksMax=64
+LimitNOFILE=1024
+
+[Install]
+WantedBy=multi-user.target

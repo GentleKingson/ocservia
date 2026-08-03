@@ -1,0 +1,39 @@
+[Unit]
+Description=Ocservia fixed read-only privileged helper
+Before=ocservia-agent.service
+
+[Service]
+Type=simple
+User=root
+Group=ocserv-agent
+EnvironmentFile=/etc/ocservia-agent/privd.env
+ExecStart=/usr/libexec/ocservia/ocservia-privd --agent-uid $AGENT_UID
+Restart=on-failure
+RestartSec=5s
+RuntimeDirectory=ocserv-platform
+RuntimeDirectoryMode=0750
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_UNIX AF_NETLINK
+IPAddressDeny=any
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RestrictSUIDSGID=yes
+RestrictNamespaces=yes
+SystemCallArchitectures=native
+CapabilityBoundingSet=CAP_DAC_OVERRIDE
+ReadOnlyPaths=-/etc/ocserv
+UMask=0007
+TasksMax=32
+LimitNOFILE=128
+
+[Install]
+WantedBy=multi-user.target

@@ -25,3 +25,23 @@ if "${temporary}/scripts/check-public-repository.sh" "${temporary}" >/dev/null 2
   echo "policy check accepted forbidden control directory" >&2
   exit 1
 fi
+
+rm -rf "${temporary}/.ocservia-control"
+mkdir -p "${temporary}/localserver-log"
+printf '%s\n' 'private' >"${temporary}/localserver-log/run.log"
+git -C "${temporary}" add -Af
+
+if "${temporary}/scripts/check-public-repository.sh" "${temporary}" >/dev/null 2>&1; then
+  echo "policy check accepted forbidden localserver-log directory" >&2
+  exit 1
+fi
+
+rm -rf "${temporary}/localserver-log"
+mkdir -p "${temporary}/localserver-logs"
+printf '%s\n' 'private' >"${temporary}/localserver-logs/run.log"
+git -C "${temporary}" add -Af
+
+if "${temporary}/scripts/check-public-repository.sh" "${temporary}" >/dev/null 2>&1; then
+  echo "policy check accepted forbidden localserver-logs directory" >&2
+  exit 1
+fi
