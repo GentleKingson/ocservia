@@ -185,15 +185,21 @@ func (s *Service) Enroll(ctx context.Context, request *agentv1.EnrollRequest) (*
 		if consumedNodeID == nil {
 			return nil, ErrInvalidToken
 		}
-		var retryable bool
-		err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM nodes n JOIN node_endpoint_keys k ON k.node_id=n.id WHERE n.id=$1 AND n.status='pending' AND k.endpoint_id=$2 AND k.state='pending')`, *consumedNodeID, request.GetEndpointId()).Scan(&retryable)
+		var nodeStatus, endpointState string
+		err := tx.QueryRow(ctx, `SELECT n.status,k.state FROM nodes n JOIN node_endpoint_keys k ON k.node_id=n.id WHERE n.id=$1 AND k.endpoint_id=$2`, *consumedNodeID, request.GetEndpointId()).Scan(&nodeStatus, &endpointState)
 		if err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				return nil, ErrInvalidToken
+			}
 			return nil, fmt.Errorf("check enrollment retry: %w", err)
 		}
-		if !retryable {
+		result := agentv1.HandshakeResult_HANDSHAKE_RESULT_PENDING_APPROVAL
+		if (nodeStatus == "active" || nodeStatus == "offline") && endpointState == "active" {
+			result = agentv1.HandshakeResult_HANDSHAKE_RESULT_ACCEPTED
+		} else if nodeStatus != "pending" || endpointState != "pending" {
 			return nil, ErrInvalidToken
 		}
-		return &agentv1.EnrollResponse{Result: agentv1.HandshakeResult_HANDSHAKE_RESULT_PENDING_APPROVAL, NodeId: (*consumedNodeID)[:], ControllerEndpointId: s.controllerEndpointID}, nil
+		return &agentv1.EnrollResponse{Result: result, NodeId: (*consumedNodeID)[:], ControllerEndpointId: s.controllerEndpointID}, nil
 	}
 	if err := audit.LockChain(ctx, tx, workspaceID); err != nil {
 		return nil, err
@@ -358,7 +364,7 @@ func (s *Service) CheckEndpoint(ctx context.Context, request *transportv1.CheckE
 	}
 	if request.GetAlpn() == "ocserv-platform/enroll/1" {
 		var permitted bool
-		err := s.pool.QueryRow(ctx, `SELECT NOT EXISTS(SELECT 1 FROM node_endpoint_keys WHERE endpoint_id=$1 AND state <> 'pending')`, request.GetEndpointId()).Scan(&permitted)
+		err := s.pool.QueryRow(ctx, `SELECT NOT EXISTS(SELECT 1 FROM node_endpoint_keys WHERE endpoint_id=$1 AND state='revoked')`, request.GetEndpointId()).Scan(&permitted)
 		return permitted, err
 	}
 	if request.GetAlpn() != "ocserv-platform/agent/1" {

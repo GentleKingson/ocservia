@@ -195,14 +195,31 @@ func TestEnrollmentTrustLifecycleIntegration(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := service.Enroll(ctx, request); !errors.Is(err, ErrInvalidToken) {
-		t.Fatalf("approved token replay error = %v", err)
+	approvedRetry, err := service.Enroll(ctx, request)
+	if err != nil || approvedRetry.GetResult() != agentv1.HandshakeResult_HANDSHAKE_RESULT_ACCEPTED || string(approvedRetry.GetNodeId()) != string(nodeID[:]) {
+		t.Fatalf("approved enrollment recovery = %v, %v", approvedRetry, err)
+	}
+	permitted, err = service.CheckEndpoint(ctx, &transportv1.CheckEndpointRequest{EndpointId: endpoint, Alpn: "ocserv-platform/enroll/1"})
+	if err != nil || !permitted {
+		t.Fatalf("active enrollment recovery permitted=%v err=%v", permitted, err)
 	}
 	handshake := &agentv1.SessionHandshake{ProtocolMajor: 1, ProtocolMinor: 0, AgentVersion: "test", NodeId: nodeID[:], EndpointId: endpoint, Capabilities: []string{"ocserv.status.read"}, OsRelease: "test", BootId: "boot", AgentInstanceId: uuidBytes(), MaxMessageSize: 1024, Time: timestamppb.Now(), Nonce: make([]byte, 16)}
 	response, err := service.AuthorizeSession(ctx, &transportv1.AuthorizeSessionRequest{RemoteEndpointId: endpoint, Handshake: handshake})
 	if err != nil || response.GetResult() != agentv1.HandshakeResult_HANDSHAKE_RESULT_ACCEPTED {
 		t.Fatalf("active authorization = %v, %v", response, err)
 	}
+	handshake.ProtocolMajor = 2
+	response, err = service.AuthorizeSession(ctx, &transportv1.AuthorizeSessionRequest{RemoteEndpointId: endpoint, Handshake: handshake})
+	if err != nil || response.GetResult() != agentv1.HandshakeResult_HANDSHAKE_RESULT_INCOMPATIBLE_PROTOCOL {
+		t.Fatalf("major protocol mismatch = %v, %v", response, err)
+	}
+	handshake.ProtocolMajor = 1
+	handshake.ProtocolMinor = 1
+	response, err = service.AuthorizeSession(ctx, &transportv1.AuthorizeSessionRequest{RemoteEndpointId: endpoint, Handshake: handshake})
+	if err != nil || response.GetResult() != agentv1.HandshakeResult_HANDSHAKE_RESULT_UPGRADE_REQUIRED {
+		t.Fatalf("minor protocol mismatch = %v, %v", response, err)
+	}
+	handshake.ProtocolMinor = 0
 	if _, err := pool.Exec(ctx, `UPDATE nodes SET status='offline' WHERE id=$1`, nodeID); err != nil {
 		t.Fatal(err)
 	}
@@ -228,6 +245,13 @@ func TestEnrollmentTrustLifecycleIntegration(t *testing.T) {
 	permitted, err = service.CheckEndpoint(ctx, &transportv1.CheckEndpointRequest{EndpointId: endpoint, Alpn: "ocserv-platform/agent/1"})
 	if err != nil || permitted {
 		t.Fatalf("revoked endpoint permitted=%v err=%v", permitted, err)
+	}
+	permitted, err = service.CheckEndpoint(ctx, &transportv1.CheckEndpointRequest{EndpointId: endpoint, Alpn: "ocserv-platform/enroll/1"})
+	if err != nil || permitted {
+		t.Fatalf("revoked enrollment endpoint permitted=%v err=%v", permitted, err)
+	}
+	if _, err := service.Enroll(ctx, request); !errors.Is(err, ErrInvalidToken) {
+		t.Fatalf("revoked token replay error = %v", err)
 	}
 }
 

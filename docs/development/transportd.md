@@ -48,8 +48,9 @@ ocservia-transportd \
 Use `--relay-mode disabled` for isolated direct-path tests. The endpoint limits
 handshake size and time, frame and flow-control windows, remotely initiated
 streams, connection count, idle time, connection attempts, event retention, and
-UDS subscribers. Database-backed trust checks additionally have a non-evictable
-global 600-attempt-per-minute limit and a 16-request concurrency limit.
+UDS subscribers. Every database-backed trust-authority call shares a
+non-evictable global 600-attempt-per-minute limit and a 16-request concurrency
+limit, including authorization and the registration trust recheck.
 Connection queries report the agent instance, selected direct
 or relay path, path detail, RTT, connection time, and last-seen time.
 

@@ -26,7 +26,7 @@ use ocservia_contracts::generated::ocserv::platform::transport::v1::{
     transport_service_server::TransportService, trust_service_client::TrustServiceClient,
 };
 use prost::Message;
-use tokio::sync::{Mutex, Semaphore, mpsc, watch};
+use tokio::sync::{Mutex, OwnedSemaphorePermit, Semaphore, mpsc, watch};
 use tokio_stream::{Stream, wrappers::ReceiverStream};
 use tonic::{Request, Response, Status};
 use uuid::Uuid;
@@ -174,6 +174,8 @@ impl IdentityPolicy {
 #[derive(Clone, Debug)]
 pub struct TrustAuthority {
     client: TrustServiceClient<tonic::transport::Channel>,
+    attempts: Arc<Mutex<VecDeque<Instant>>>,
+    checks: Arc<Semaphore>,
 }
 
 impl TrustAuthority {
@@ -181,15 +183,30 @@ impl TrustAuthority {
     pub fn new(channel: tonic::transport::Channel) -> Self {
         Self {
             client: TrustServiceClient::new(channel),
+            attempts: Arc::new(Mutex::new(VecDeque::new())),
+            checks: Arc::new(Semaphore::new(MAX_TRUST_CHECKS)),
         }
     }
 
-    async fn permits(&self, endpoint: EndpointId, alpn: &[u8]) -> bool {
+    async fn acquire_check(&self) -> Result<OwnedSemaphorePermit, AttemptRejection> {
+        let permit = self
+            .checks
+            .clone()
+            .try_acquire_owned()
+            .map_err(|_| AttemptRejection::Capacity)?;
+        let mut attempts = self.attempts.lock().await;
+        record_global_attempt(&mut attempts, Instant::now(), MAX_TRUST_ATTEMPTS_PER_MINUTE)?;
+        drop(attempts);
+        Ok(permit)
+    }
+
+    async fn permits(&self, endpoint: EndpointId, alpn: &[u8]) -> Result<bool, AttemptRejection> {
+        let _permit = self.acquire_check().await?;
         let Ok(alpn) = std::str::from_utf8(alpn) else {
-            return false;
+            return Ok(false);
         };
         let mut client = self.client.clone();
-        tokio::time::timeout(
+        Ok(tokio::time::timeout(
             HANDSHAKE_TIMEOUT,
             client.check_endpoint(CheckEndpointRequest {
                 endpoint_id: endpoint.as_bytes().to_vec(),
@@ -199,10 +216,11 @@ impl TrustAuthority {
         .await
         .ok()
         .and_then(Result::ok)
-        .is_some_and(|response| response.into_inner().permitted)
+        .is_some_and(|response| response.into_inner().permitted))
     }
 
     async fn enroll(&self, request: EnrollRequest) -> Result<EnrollResponse, AcceptError> {
+        let _permit = self.acquire_check().await.map_err(trust_rejection_error)?;
         let mut client = self.client.clone();
         tokio::time::timeout(HANDSHAKE_TIMEOUT, client.enroll(request))
             .await
@@ -216,6 +234,7 @@ impl TrustAuthority {
         endpoint: EndpointId,
         handshake: SessionHandshake,
     ) -> Result<SessionHandshakeResponse, AcceptError> {
+        let _permit = self.acquire_check().await.map_err(trust_rejection_error)?;
         let mut client = self.client.clone();
         tokio::time::timeout(
             HANDSHAKE_TIMEOUT,
@@ -237,8 +256,6 @@ struct SecurityHook {
     trust: Option<TrustAuthority>,
     agent_attempts: Mutex<HashMap<EndpointId, VecDeque<Instant>>>,
     enrollment_attempts: Mutex<HashMap<EndpointId, VecDeque<Instant>>>,
-    trust_attempts: Mutex<VecDeque<Instant>>,
-    trust_checks: Arc<Semaphore>,
 }
 
 impl SecurityHook {
@@ -248,8 +265,6 @@ impl SecurityHook {
             trust,
             agent_attempts: Mutex::new(HashMap::new()),
             enrollment_attempts: Mutex::new(HashMap::new()),
-            trust_attempts: Mutex::new(VecDeque::new()),
-            trust_checks: Arc::new(Semaphore::new(MAX_TRUST_CHECKS)),
         }
     }
 }
@@ -257,6 +272,14 @@ impl SecurityHook {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum AttemptRejection {
     Rate,
+    Capacity,
+}
+
+fn trust_rejection_error(rejection: AttemptRejection) -> AcceptError {
+    match rejection {
+        AttemptRejection::Rate => protocol_error("trust authority rate exceeded"),
+        AttemptRejection::Capacity => protocol_error("trust authority capacity reached"),
+    }
 }
 
 fn record_attempt(
@@ -330,21 +353,15 @@ impl EndpointHooks for SecurityHook {
             return reject(0x101, b"endpoint not permitted");
         }
         let permitted = if let Some(trust) = &self.trust {
-            let Ok(_permit) = self.trust_checks.clone().try_acquire_owned() else {
-                return reject(0x102, b"trust authority capacity reached");
-            };
-            let mut trust_attempts = self.trust_attempts.lock().await;
-            if record_global_attempt(
-                &mut trust_attempts,
-                Instant::now(),
-                MAX_TRUST_ATTEMPTS_PER_MINUTE,
-            )
-            .is_err()
-            {
-                return reject(0x103, b"trust authority rate exceeded");
+            match trust.permits(endpoint, alpn).await {
+                Ok(permitted) => permitted,
+                Err(AttemptRejection::Capacity) => {
+                    return reject(0x102, b"trust authority capacity reached");
+                }
+                Err(AttemptRejection::Rate) => {
+                    return reject(0x103, b"trust authority rate exceeded");
+                }
             }
-            drop(trust_attempts);
-            trust.permits(endpoint, alpn).await
         } else {
             self.policy.permits(endpoint, alpn)
         };
@@ -738,11 +755,19 @@ impl SessionHandler {
             let response = trust.enroll(request).await?;
             write_message(send, &response).await?;
             wait_for_delivery(send).await?;
-            connection.close(VarInt::from_u32(0), b"enrollment pending");
+            let reason = if response.result == i32::from(HandshakeResult::Accepted) {
+                b"enrollment recovered".as_slice()
+            } else {
+                b"enrollment pending".as_slice()
+            };
+            connection.close(VarInt::from_u32(0), reason);
             return Ok(None);
         }
         let handshake = read_handshake(recv).await?;
         validate_handshake(&handshake, connection.remote_id())?;
+        if self.trust.is_none() {
+            validate_protocol_version(&handshake)?;
+        }
         let response = match self.kind {
             ProtocolKind::Enroll => local_handshake_response(
                 HandshakeResult::PendingApproval,
@@ -814,13 +839,20 @@ impl ProtocolHandler for SessionHandler {
         let metadata = metadata(&handshake, &connection).await;
         let node_id = metadata.node_id.clone();
         let registration_token = self.shared.registration_token(&node_id).await;
-        if let Some(trust) = &self.trust
-            && !trust.permits(connection.remote_id(), AGENT_ALPN).await
-        {
-            connection.close(VarInt::from_u32(0x101), b"session trust changed");
-            return Err(protocol_error(
-                "endpoint trust changed during session registration",
-            ));
+        if let Some(trust) = &self.trust {
+            match trust.permits(connection.remote_id(), AGENT_ALPN).await {
+                Ok(true) => {}
+                Ok(false) => {
+                    connection.close(VarInt::from_u32(0x101), b"session trust changed");
+                    return Err(protocol_error(
+                        "endpoint trust changed during session registration",
+                    ));
+                }
+                Err(rejection) => {
+                    connection.close(VarInt::from_u32(0x102), b"trust authority unavailable");
+                    return Err(trust_rejection_error(rejection));
+                }
+            }
         }
         let mut registry = self.shared.inner.connections.lock().await;
         // Trust updates change policy before taking the registry lock. Checking
@@ -1157,9 +1189,6 @@ fn validate_handshake(handshake: &SessionHandshake, remote: EndpointId) -> Resul
     if handshake.endpoint_id != remote.as_bytes() {
         return Err(protocol_error("endpoint identity mismatch"));
     }
-    if handshake.protocol_major != PROTOCOL_MAJOR || handshake.protocol_minor > PROTOCOL_MINOR {
-        return Err(protocol_error("protocol version incompatible"));
-    }
     if handshake.max_message_size == 0 || handshake.max_message_size as usize > MAX_FRAME_BYTES {
         return Err(protocol_error("message size incompatible"));
     }
@@ -1183,6 +1212,13 @@ fn validate_handshake(handshake: &SessionHandshake, remote: EndpointId) -> Resul
         .any(|value| value.chars().count() > 256)
     {
         return Err(protocol_error("handshake field limit exceeded"));
+    }
+    Ok(())
+}
+
+fn validate_protocol_version(handshake: &SessionHandshake) -> Result<(), AcceptError> {
+    if handshake.protocol_major != PROTOCOL_MAJOR || handshake.protocol_minor > PROTOCOL_MINOR {
+        return Err(protocol_error("protocol version incompatible"));
     }
     Ok(())
 }
@@ -1698,6 +1734,16 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn trust_authority_clones_share_the_global_limits() {
+        let channel = tonic::transport::Endpoint::from_static("http://[::1]:50051").connect_lazy();
+        let trust = TrustAuthority::new(channel);
+        let clone = trust.clone();
+        assert!(Arc::ptr_eq(&trust.attempts, &clone.attempts));
+        assert!(Arc::ptr_eq(&trust.checks, &clone.checks));
+        assert_eq!(trust.checks.available_permits(), MAX_TRUST_CHECKS);
+    }
+
     #[test]
     fn command_response_wait_honors_envelope_expiration() {
         let command = CommandEnvelope {
@@ -1740,8 +1786,10 @@ mod tests {
             nonce: vec![7; 32],
         };
         assert!(validate_handshake(&handshake, remote_key.public()).is_ok());
+        assert!(validate_protocol_version(&handshake).is_ok());
         handshake.protocol_major = 2;
-        assert!(validate_handshake(&handshake, remote_key.public()).is_err());
+        assert!(validate_handshake(&handshake, remote_key.public()).is_ok());
+        assert!(validate_protocol_version(&handshake).is_err());
         handshake.protocol_major = PROTOCOL_MAJOR;
         assert!(validate_handshake(&handshake, SecretKey::generate().public()).is_err());
     }

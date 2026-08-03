@@ -9,7 +9,9 @@ The Agent keeps its endpoint key in an owner-only local directory and pins the
 controller EndpointID. Reusing the directory preserves the Agent EndpointID;
 attempting to provision it with a different controller pin is rejected. The
 enrollment ALPN submits the token and public Agent metadata and returns a
-pending node ID. Pending nodes cannot use the agent ALPN.
+pending node ID. If that response is lost, the same authenticated EndpointID
+can reuse the consumed token to recover its node ID before or after approval;
+revocation permanently ends recovery. Pending nodes cannot use the agent ALPN.
 
 Approve the node with `POST /api/v1/nodes/{node_id}/approval`, including a
 non-empty reason, policy, labels, and the allowed capability set. Revoke it with
