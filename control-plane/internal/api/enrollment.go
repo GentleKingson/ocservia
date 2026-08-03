@@ -56,6 +56,10 @@ func (s *Server) createEnrollmentToken(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	if !validEnrollmentTTLSeconds(body.TTLSeconds) {
+		writeProblem(w, r, http.StatusBadRequest, "https://ocservia.dev/problems/invalid-request", "Invalid request", "ttl_seconds must be between 1 and 900")
+		return
+	}
 	token, err := s.enrollment.CreateToken(r.Context(), enrollment.TokenSpec{WorkspaceID: workspaceID, Environment: body.Environment, ExpectedNodeName: body.ExpectedNodeName, ExpectedEndpointID: endpoint, TTL: time.Duration(body.TTLSeconds) * time.Second, ActorID: "developer", Reason: body.Reason, RequestID: requestID(r)})
 	if err != nil {
 		s.writeEnrollmentError(w, r, err)
@@ -63,6 +67,10 @@ func (s *Server) createEnrollmentToken(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Cache-Control", "no-store")
 	writeJSON(w, http.StatusCreated, map[string]any{"id": token.ID, "token": token.Value, "expires_at": token.ExpiresAt})
+}
+
+func validEnrollmentTTLSeconds(seconds int64) bool {
+	return seconds >= 1 && seconds <= int64(enrollment.DefaultTokenTTL/time.Second)
 }
 
 func (s *Server) approveNode(w http.ResponseWriter, r *http.Request) {
@@ -84,7 +92,7 @@ func (s *Server) approveNode(w http.ResponseWriter, r *http.Request) {
 		s.writeEnrollmentError(w, r, err)
 		return
 	}
-	if err := s.transport.UpdateNodeTrust(r.Context(), trust.NodeID[:], trust.EndpointID, transportv1.NodeTrustState_NODE_TRUST_STATE_ACTIVE, body.Reason); err != nil {
+	if err := s.transport.UpdateNodeTrust(r.Context(), trust.NodeID[:], trust.EndpointID, transportv1.NodeTrustState_NODE_TRUST_STATE_ACTIVE, body.Reason, trust.Revision); err != nil {
 		writeProblem(w, r, http.StatusServiceUnavailable, "https://ocservia.dev/problems/transport-unavailable", "Trust update pending", "the database is authoritative but transport synchronization is pending")
 		return
 	}
@@ -110,7 +118,7 @@ func (s *Server) revokeNode(w http.ResponseWriter, r *http.Request) {
 		s.writeEnrollmentError(w, r, err)
 		return
 	}
-	syncErr := s.transport.UpdateNodeTrust(r.Context(), trust.NodeID[:], trust.EndpointID, transportv1.NodeTrustState_NODE_TRUST_STATE_REVOKED, body.Reason)
+	syncErr := s.transport.UpdateNodeTrust(r.Context(), trust.NodeID[:], trust.EndpointID, transportv1.NodeTrustState_NODE_TRUST_STATE_REVOKED, body.Reason, trust.Revision)
 	closeErr := s.transport.CloseNode(r.Context(), trust.NodeID[:], "node revoked")
 	if syncErr != nil || closeErr != nil {
 		writeProblem(w, r, http.StatusServiceUnavailable, "https://ocservia.dev/problems/transport-unavailable", "Revocation committed", "the node is revoked but transport disconnect synchronization is pending")

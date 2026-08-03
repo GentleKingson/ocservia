@@ -76,6 +76,7 @@ type Revocation struct {
 type NodeTrust struct {
 	NodeID     uuid.UUID
 	EndpointID []byte
+	Revision   uint64
 }
 
 type Service struct {
@@ -249,7 +250,8 @@ func (s *Service) Approve(ctx context.Context, approval Approval) (NodeTrust, er
 	var workspaceID uuid.UUID
 	var endpointID []byte
 	var currentStatus string
-	err = tx.QueryRow(ctx, `SELECT n.workspace_id,k.endpoint_id,n.status FROM nodes n JOIN node_endpoint_keys k ON k.node_id=n.id WHERE n.id=$1 AND n.status IN ('pending','active','offline') FOR UPDATE OF n,k`, approval.NodeID).Scan(&workspaceID, &endpointID, &currentStatus)
+	var revision uint64
+	err = tx.QueryRow(ctx, `SELECT n.workspace_id,k.endpoint_id,n.status,n.version FROM nodes n JOIN node_endpoint_keys k ON k.node_id=n.id WHERE n.id=$1 AND n.status IN ('pending','active','offline') FOR UPDATE OF n,k`, approval.NodeID).Scan(&workspaceID, &endpointID, &currentStatus, &revision)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return NodeTrust{}, ErrInvalidTransition
 	}
@@ -257,11 +259,11 @@ func (s *Service) Approve(ctx context.Context, approval Approval) (NodeTrust, er
 		return NodeTrust{}, fmt.Errorf("lock pending node: %w", err)
 	}
 	if currentStatus == "active" || currentStatus == "offline" {
-		return NodeTrust{NodeID: approval.NodeID, EndpointID: endpointID}, nil
+		return NodeTrust{NodeID: approval.NodeID, EndpointID: endpointID, Revision: revision}, nil
 	}
 	labels := mapToJSON(approval.Labels)
 	now := s.now().UTC()
-	if _, err := tx.Exec(ctx, `UPDATE nodes SET status='active',labels=$2::jsonb,policy=$3,version=version+1,updated_at=$4 WHERE id=$1`, approval.NodeID, labels, approval.Policy, now); err != nil {
+	if err := tx.QueryRow(ctx, `UPDATE nodes SET status='active',labels=$2::jsonb,policy=$3,version=version+1,updated_at=$4 WHERE id=$1 RETURNING version`, approval.NodeID, labels, approval.Policy, now).Scan(&revision); err != nil {
 		return NodeTrust{}, fmt.Errorf("activate node: %w", err)
 	}
 	if _, err := tx.Exec(ctx, `UPDATE node_endpoint_keys SET state='active' WHERE node_id=$1`, approval.NodeID); err != nil {
@@ -281,7 +283,7 @@ func (s *Service) Approve(ctx context.Context, approval Approval) (NodeTrust, er
 	if err := tx.Commit(ctx); err != nil {
 		return NodeTrust{}, fmt.Errorf("commit approval: %w", err)
 	}
-	return NodeTrust{NodeID: approval.NodeID, EndpointID: endpointID}, nil
+	return NodeTrust{NodeID: approval.NodeID, EndpointID: endpointID, Revision: revision}, nil
 }
 
 func (s *Service) Revoke(ctx context.Context, revocation Revocation) (NodeTrust, error) {
@@ -296,7 +298,8 @@ func (s *Service) Revoke(ctx context.Context, revocation Revocation) (NodeTrust,
 	var workspaceID uuid.UUID
 	var endpointID []byte
 	var currentStatus string
-	err = tx.QueryRow(ctx, `SELECT n.workspace_id,k.endpoint_id,n.status FROM nodes n JOIN node_endpoint_keys k ON k.node_id=n.id WHERE n.id=$1 FOR UPDATE OF n,k`, revocation.NodeID).Scan(&workspaceID, &endpointID, &currentStatus)
+	var revision uint64
+	err = tx.QueryRow(ctx, `SELECT n.workspace_id,k.endpoint_id,n.status,n.version FROM nodes n JOIN node_endpoint_keys k ON k.node_id=n.id WHERE n.id=$1 FOR UPDATE OF n,k`, revocation.NodeID).Scan(&workspaceID, &endpointID, &currentStatus, &revision)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return NodeTrust{}, ErrInvalidTransition
 	}
@@ -304,10 +307,10 @@ func (s *Service) Revoke(ctx context.Context, revocation Revocation) (NodeTrust,
 		return NodeTrust{}, fmt.Errorf("lock node for revocation: %w", err)
 	}
 	if currentStatus == "revoked" {
-		return NodeTrust{NodeID: revocation.NodeID, EndpointID: endpointID}, nil
+		return NodeTrust{NodeID: revocation.NodeID, EndpointID: endpointID, Revision: revision}, nil
 	}
 	now := s.now().UTC()
-	if _, err := tx.Exec(ctx, `UPDATE nodes SET status='revoked',version=version+1,updated_at=$2 WHERE id=$1`, revocation.NodeID, now); err != nil {
+	if err := tx.QueryRow(ctx, `UPDATE nodes SET status='revoked',version=version+1,updated_at=$2 WHERE id=$1 RETURNING version`, revocation.NodeID, now).Scan(&revision); err != nil {
 		return NodeTrust{}, err
 	}
 	if _, err := tx.Exec(ctx, `UPDATE node_endpoint_keys SET state='revoked',revoked_at=$2 WHERE node_id=$1`, revocation.NodeID, now); err != nil {
@@ -319,7 +322,7 @@ func (s *Service) Revoke(ctx context.Context, revocation Revocation) (NodeTrust,
 	if err := tx.Commit(ctx); err != nil {
 		return NodeTrust{}, fmt.Errorf("commit revocation: %w", err)
 	}
-	return NodeTrust{NodeID: revocation.NodeID, EndpointID: endpointID}, nil
+	return NodeTrust{NodeID: revocation.NodeID, EndpointID: endpointID, Revision: revision}, nil
 }
 
 func (s *Service) CheckEndpoint(ctx context.Context, request *transportv1.CheckEndpointRequest) (bool, error) {

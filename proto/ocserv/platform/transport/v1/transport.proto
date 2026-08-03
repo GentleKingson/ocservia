@@ -93,6 +93,7 @@ message UpdateNodeTrustRequest {
   bytes endpoint_id = 2;
   NodeTrustState state = 3;
   string reason = 4;
+  uint64 revision = 5;
 }
 
 message UpdateNodeTrustResponse {}

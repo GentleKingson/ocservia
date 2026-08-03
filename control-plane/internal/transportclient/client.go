@@ -144,7 +144,7 @@ func (c *Client) NodeConnected(ctx context.Context, nodeID []byte) (bool, error)
 	return true, nil
 }
 
-func (c *Client) UpdateNodeTrust(ctx context.Context, nodeID, endpointID []byte, state transportv1.NodeTrustState, reason string) error {
+func (c *Client) UpdateNodeTrust(ctx context.Context, nodeID, endpointID []byte, state transportv1.NodeTrustState, reason string, revision uint64) error {
 	connection, err := c.dial()
 	if err != nil {
 		return err
@@ -152,7 +152,7 @@ func (c *Client) UpdateNodeTrust(ctx context.Context, nodeID, endpointID []byte,
 	defer connection.Close()
 	rpcCtx, cancel := context.WithTimeout(ctx, c.deadline)
 	defer cancel()
-	_, err = transportv1.NewTransportServiceClient(connection).UpdateNodeTrust(rpcCtx, &transportv1.UpdateNodeTrustRequest{NodeId: nodeID, EndpointId: endpointID, State: state, Reason: reason})
+	_, err = transportv1.NewTransportServiceClient(connection).UpdateNodeTrust(rpcCtx, &transportv1.UpdateNodeTrustRequest{NodeId: nodeID, EndpointId: endpointID, State: state, Reason: reason, Revision: revision})
 	if err != nil {
 		return fmt.Errorf("update transport node trust: %w", err)
 	}

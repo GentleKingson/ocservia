@@ -653,6 +653,7 @@ type UpdateNodeTrustRequest struct {
 	EndpointId    []byte                 `protobuf:"bytes,2,opt,name=endpoint_id,json=endpointId,proto3" json:"endpoint_id,omitempty"`
 	State         NodeTrustState         `protobuf:"varint,3,opt,name=state,proto3,enum=ocserv.platform.transport.v1.NodeTrustState" json:"state,omitempty"`
 	Reason        string                 `protobuf:"bytes,4,opt,name=reason,proto3" json:"reason,omitempty"`
+	Revision      uint64                 `protobuf:"varint,5,opt,name=revision,proto3" json:"revision,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -713,6 +714,13 @@ func (x *UpdateNodeTrustRequest) GetReason() string {
 		return x.Reason
 	}
 	return ""
+}
+
+func (x *UpdateNodeTrustRequest) GetRevision() uint64 {
+	if x != nil {
+		return x.Revision
+	}
+	return 0
 }
 
 type UpdateNodeTrustResponse struct {
@@ -1057,13 +1065,14 @@ const file_ocserv_platform_transport_v1_transport_proto_rawDesc = "" +
 	"\x10CloseNodeRequest\x12\x17\n" +
 	"\anode_id\x18\x01 \x01(\fR\x06nodeId\x12\x16\n" +
 	"\x06reason\x18\x02 \x01(\tR\x06reason\"\x13\n" +
-	"\x11CloseNodeResponse\"\xae\x01\n" +
+	"\x11CloseNodeResponse\"\xca\x01\n" +
 	"\x16UpdateNodeTrustRequest\x12\x17\n" +
 	"\anode_id\x18\x01 \x01(\fR\x06nodeId\x12\x1f\n" +
 	"\vendpoint_id\x18\x02 \x01(\fR\n" +
 	"endpointId\x12B\n" +
 	"\x05state\x18\x03 \x01(\x0e2,.ocserv.platform.transport.v1.NodeTrustStateR\x05state\x12\x16\n" +
-	"\x06reason\x18\x04 \x01(\tR\x06reason\"\x19\n" +
+	"\x06reason\x18\x04 \x01(\tR\x06reason\x12\x1a\n" +
+	"\brevision\x18\x05 \x01(\x04R\brevision\"\x19\n" +
 	"\x17UpdateNodeTrustResponse\"K\n" +
 	"\x14CheckEndpointRequest\x12\x1f\n" +
 	"\vendpoint_id\x18\x01 \x01(\fR\n" +

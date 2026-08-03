@@ -390,7 +390,11 @@ impl TransportService for StubService {
     ) -> Result<Response<UpdateNodeTrustResponse>, Status> {
         let request = request.into_inner();
         validate_id(&request.node_id, "node_id")?;
-        if request.endpoint_id.len() != 32 || request.state == 0 || request.reason.is_empty() {
+        if request.endpoint_id.len() != 32
+            || request.state == 0
+            || request.reason.is_empty()
+            || request.revision == 0
+        {
             return Err(Status::invalid_argument("trust update is invalid"));
         }
         Ok(Response::new(UpdateNodeTrustResponse {}))

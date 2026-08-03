@@ -62,6 +62,7 @@ pub struct IdentityPolicy {
 struct IdentityState {
     approved: HashMap<EndpointId, Vec<u8>>,
     revoked: HashSet<EndpointId>,
+    revisions: HashMap<EndpointId, u64>,
 }
 
 impl IdentityPolicy {
@@ -69,7 +70,11 @@ impl IdentityPolicy {
     #[must_use]
     pub fn new(approved: HashMap<EndpointId, Vec<u8>>, revoked: HashSet<EndpointId>) -> Self {
         Self {
-            state: Arc::new(RwLock::new(IdentityState { approved, revoked })),
+            state: Arc::new(RwLock::new(IdentityState {
+                approved,
+                revoked,
+                revisions: HashMap::new(),
+            })),
         }
     }
 
@@ -101,11 +106,31 @@ impl IdentityPolicy {
             .contains(&endpoint)
     }
 
-    fn update(&self, endpoint: EndpointId, node_id: Vec<u8>, state: NodeTrustState) -> bool {
+    fn update(
+        &self,
+        endpoint: EndpointId,
+        node_id: Vec<u8>,
+        state: NodeTrustState,
+        revision: u64,
+    ) -> bool {
         let mut identities = self
             .state
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let current_revision = identities.revisions.get(&endpoint).copied().unwrap_or(0);
+        if revision < current_revision {
+            return true;
+        }
+        if revision == current_revision && current_revision != 0 {
+            return match state {
+                NodeTrustState::Active => identities
+                    .approved
+                    .get(&endpoint)
+                    .is_some_and(|bound_node| bound_node == &node_id),
+                NodeTrustState::Revoked => identities.revoked.contains(&endpoint),
+                NodeTrustState::Unspecified => false,
+            };
+        }
         match state {
             NodeTrustState::Active => {
                 if identities
@@ -134,6 +159,7 @@ impl IdentityPolicy {
             }
             NodeTrustState::Unspecified => {}
         }
+        identities.revisions.insert(endpoint, revision);
         true
     }
 }
@@ -585,6 +611,9 @@ impl TransportService for IrohTransportService {
         if request.reason.is_empty() || request.reason.len() > 1024 {
             return Err(Status::invalid_argument("trust update reason is invalid"));
         }
+        if request.revision == 0 {
+            return Err(Status::invalid_argument("trust update revision is invalid"));
+        }
         let endpoint = EndpointId::from_bytes(
             &request
                 .endpoint_id
@@ -598,7 +627,10 @@ impl TransportService for IrohTransportService {
         if state == NodeTrustState::Unspecified {
             return Err(Status::invalid_argument("trust state is unspecified"));
         }
-        if !self.policy.update(endpoint, node_id.clone(), state) {
+        if !self
+            .policy
+            .update(endpoint, node_id.clone(), state, request.revision)
+        {
             return Err(Status::failed_precondition(
                 "endpoint-to-node substitution refused",
             ));
@@ -1455,9 +1487,10 @@ mod tests {
         assert!(!policy.permits(SecretKey::generate().public(), AGENT_ALPN));
         let dynamic = SecretKey::generate().public();
         let dynamic_node = Uuid::now_v7().as_bytes().to_vec();
-        assert!(policy.update(dynamic, dynamic_node.clone(), NodeTrustState::Active));
+        assert!(policy.update(dynamic, dynamic_node.clone(), NodeTrustState::Active, 1));
         assert!(policy.matches_node(dynamic, &dynamic_node));
-        assert!(policy.update(dynamic, dynamic_node, NodeTrustState::Revoked));
+        assert!(policy.update(dynamic, dynamic_node.clone(), NodeTrustState::Revoked, 2));
+        assert!(policy.update(dynamic, dynamic_node, NodeTrustState::Active, 1));
         assert!(!policy.permits(dynamic, AGENT_ALPN));
         assert!(policy.revoked(dynamic));
     }
@@ -1759,6 +1792,7 @@ mod tests {
                 endpoint_id: agent_key.public().as_bytes().to_vec(),
                 state: NodeTrustState::Revoked.into(),
                 reason: "integration revocation".to_owned(),
+                revision: 2,
             }))
             .await
             .expect("revoke connected node");
