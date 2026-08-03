@@ -158,10 +158,11 @@ func (s *Service) Enroll(ctx context.Context, request *agentv1.EnrollRequest) (*
 	var expectedEndpoint []byte
 	var expiresAt time.Time
 	var consumedAt *time.Time
+	var consumedNodeID *uuid.UUID
 	err = tx.QueryRow(ctx, `SELECT id, workspace_id, expected_environment, expected_node_name,
-        expected_endpoint_id, expires_at, consumed_at FROM enrollment_tokens WHERE token_hash=$1 FOR UPDATE`, digest[:]).
-		Scan(&tokenID, &workspaceID, &environment, &expectedName, &expectedEndpoint, &expiresAt, &consumedAt)
-	if errors.Is(err, pgx.ErrNoRows) || consumedAt != nil || !s.now().Before(expiresAt) {
+	        expected_endpoint_id, expires_at, consumed_at, consumed_node_id FROM enrollment_tokens WHERE token_hash=$1 FOR UPDATE`, digest[:]).
+		Scan(&tokenID, &workspaceID, &environment, &expectedName, &expectedEndpoint, &expiresAt, &consumedAt, &consumedNodeID)
+	if errors.Is(err, pgx.ErrNoRows) || !s.now().Before(expiresAt) {
 		return nil, ErrInvalidToken
 	}
 	if err != nil {
@@ -172,6 +173,20 @@ func (s *Service) Enroll(ctx context.Context, request *agentv1.EnrollRequest) (*
 	}
 	if len(expectedEndpoint) != 0 && subtle.ConstantTimeCompare(expectedEndpoint, request.GetEndpointId()) != 1 {
 		return nil, ErrEndpointMismatch
+	}
+	if consumedAt != nil {
+		if consumedNodeID == nil {
+			return nil, ErrInvalidToken
+		}
+		var retryable bool
+		err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM nodes n JOIN node_endpoint_keys k ON k.node_id=n.id WHERE n.id=$1 AND n.status='pending' AND k.endpoint_id=$2 AND k.state='pending')`, *consumedNodeID, request.GetEndpointId()).Scan(&retryable)
+		if err != nil {
+			return nil, fmt.Errorf("check enrollment retry: %w", err)
+		}
+		if !retryable {
+			return nil, ErrInvalidToken
+		}
+		return &agentv1.EnrollResponse{Result: agentv1.HandshakeResult_HANDSHAKE_RESULT_PENDING_APPROVAL, NodeId: (*consumedNodeID)[:], ControllerEndpointId: s.controllerEndpointID}, nil
 	}
 	var pending int
 	if err := tx.QueryRow(ctx, `SELECT count(*) FROM nodes WHERE workspace_id=$1 AND status='pending'`, workspaceID).Scan(&pending); err != nil {
@@ -316,7 +331,7 @@ func (s *Service) CheckEndpoint(ctx context.Context, request *transportv1.CheckE
 	}
 	if request.GetAlpn() == "ocserv-platform/enroll/1" {
 		var permitted bool
-		err := s.pool.QueryRow(ctx, `SELECT NOT EXISTS(SELECT 1 FROM node_endpoint_keys WHERE endpoint_id=$1)`, request.GetEndpointId()).Scan(&permitted)
+		err := s.pool.QueryRow(ctx, `SELECT NOT EXISTS(SELECT 1 FROM node_endpoint_keys WHERE endpoint_id=$1 AND state <> 'pending')`, request.GetEndpointId()).Scan(&permitted)
 		return permitted, err
 	}
 	if request.GetAlpn() != "ocserv-platform/agent/1" {

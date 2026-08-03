@@ -41,6 +41,7 @@ func TestEnrollmentTrustLifecycleIntegration(t *testing.T) {
 	request := enrollmentRequest(token.Value, endpoint)
 
 	var successes atomic.Int32
+	nodeIDs := make(chan string, 12)
 	var wait sync.WaitGroup
 	for range 12 {
 		wait.Add(1)
@@ -49,17 +50,33 @@ func TestEnrollmentTrustLifecycleIntegration(t *testing.T) {
 			response, enrollErr := service.Enroll(ctx, request)
 			if enrollErr == nil && response.GetResult() == agentv1.HandshakeResult_HANDSHAKE_RESULT_PENDING_APPROVAL {
 				successes.Add(1)
+				nodeIDs <- string(response.GetNodeId())
 			}
 		}()
 	}
 	wait.Wait()
-	if successes.Load() != 1 {
+	close(nodeIDs)
+	if successes.Load() < 1 {
 		t.Fatalf("concurrent token successes = %d", successes.Load())
 	}
-	if _, err := service.Enroll(ctx, request); !errors.Is(err, ErrInvalidToken) {
-		t.Fatalf("replay error = %v", err)
+	var concurrentNodeID string
+	for candidate := range nodeIDs {
+		if concurrentNodeID == "" {
+			concurrentNodeID = candidate
+		}
+		if candidate != concurrentNodeID {
+			t.Fatal("concurrent enrollment retries returned different nodes")
+		}
 	}
-	permitted, err := service.CheckEndpoint(ctx, &transportv1.CheckEndpointRequest{EndpointId: endpoint, Alpn: "ocserv-platform/agent/1"})
+	retry, err := service.Enroll(ctx, request)
+	if err != nil {
+		t.Fatalf("pending retry response = %v, %v", retry, err)
+	}
+	permitted, err := service.CheckEndpoint(ctx, &transportv1.CheckEndpointRequest{EndpointId: endpoint, Alpn: "ocserv-platform/enroll/1"})
+	if err != nil || !permitted {
+		t.Fatalf("pending enrollment endpoint permitted=%v err=%v", permitted, err)
+	}
+	permitted, err = service.CheckEndpoint(ctx, &transportv1.CheckEndpointRequest{EndpointId: endpoint, Alpn: "ocserv-platform/agent/1"})
 	if err != nil || permitted {
 		t.Fatalf("pending endpoint permitted=%v err=%v", permitted, err)
 	}
@@ -68,9 +85,18 @@ func TestEnrollmentTrustLifecycleIntegration(t *testing.T) {
 	if err := pool.QueryRow(ctx, `SELECT consumed_node_id FROM enrollment_tokens WHERE id=$1`, token.ID).Scan(&nodeID); err != nil {
 		t.Fatal(err)
 	}
+	if string(retry.GetNodeId()) != string(nodeID[:]) {
+		t.Fatal("pending enrollment retry returned a different node")
+	}
+	if concurrentNodeID != string(nodeID[:]) {
+		t.Fatal("concurrent enrollment retry returned a different node")
+	}
 	trust, err := service.Approve(ctx, Approval{NodeID: nodeID, Labels: map[string]string{"region": "test"}, Policy: "readonly", Capabilities: []string{"ocserv.status.read"}, ActorID: "integration", Reason: "approve fixture", RequestID: uuid.Must(uuid.NewV7()).String()})
 	if err != nil {
 		t.Fatal(err)
+	}
+	if _, err := service.Enroll(ctx, request); !errors.Is(err, ErrInvalidToken) {
+		t.Fatalf("approved token replay error = %v", err)
 	}
 	handshake := &agentv1.SessionHandshake{ProtocolMajor: 1, ProtocolMinor: 0, AgentVersion: "test", NodeId: nodeID[:], EndpointId: endpoint, Capabilities: []string{"ocserv.status.read"}, OsRelease: "test", BootId: "boot", AgentInstanceId: uuidBytes(), MaxMessageSize: 1024, Time: timestamppb.Now(), Nonce: make([]byte, 16)}
 	response, err := service.AuthorizeSession(ctx, &transportv1.AuthorizeSessionRequest{RemoteEndpointId: endpoint, Handshake: handshake})
