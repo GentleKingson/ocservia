@@ -144,6 +144,39 @@ func (c *Client) NodeConnected(ctx context.Context, nodeID []byte) (bool, error)
 	return true, nil
 }
 
+func (c *Client) UpdateNodeTrust(ctx context.Context, nodeID, endpointID []byte, state transportv1.NodeTrustState, reason string) error {
+	connection, err := c.dial()
+	if err != nil {
+		return err
+	}
+	defer connection.Close()
+	rpcCtx, cancel := context.WithTimeout(ctx, c.deadline)
+	defer cancel()
+	_, err = transportv1.NewTransportServiceClient(connection).UpdateNodeTrust(rpcCtx, &transportv1.UpdateNodeTrustRequest{NodeId: nodeID, EndpointId: endpointID, State: state, Reason: reason})
+	if err != nil {
+		return fmt.Errorf("update transport node trust: %w", err)
+	}
+	return nil
+}
+
+func (c *Client) CloseNode(ctx context.Context, nodeID []byte, reason string) error {
+	connection, err := c.dial()
+	if err != nil {
+		return err
+	}
+	defer connection.Close()
+	rpcCtx, cancel := context.WithTimeout(ctx, c.deadline)
+	defer cancel()
+	_, err = transportv1.NewTransportServiceClient(connection).CloseNode(rpcCtx, &transportv1.CloseNodeRequest{NodeId: nodeID, Reason: reason})
+	if status.Code(err) == codes.NotFound {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("close transport node: %w", err)
+	}
+	return nil
+}
+
 func (c *Client) watchOnce(ctx context.Context, cursors CursorStore, handler EventHandler, reconcileCursor bool) error {
 	connection, err := c.dial()
 	if err != nil {

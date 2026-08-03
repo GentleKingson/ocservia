@@ -1,6 +1,7 @@
 package config
 
 import (
+	"encoding/hex"
 	"errors"
 	"flag"
 	"fmt"
@@ -22,23 +23,25 @@ const (
 )
 
 type Config struct {
-	Role             Role
-	MigrateOnly      bool
-	RuntimeDBRole    string
-	Environment      string
-	HTTPAddress      string
-	DatabaseURL      string
-	OTLPEndpoint     string
-	DevAuth          bool
-	DevAuthToken     string
-	BodyLimit        int64
-	RequestTimeout   time.Duration
-	ShutdownTimeout  time.Duration
-	LogLevelName     string
-	TransportSocket  string
-	TransportTimeout time.Duration
-	TransportQueue   int
-	LocalSimulator   bool
+	Role                 Role
+	MigrateOnly          bool
+	RuntimeDBRole        string
+	Environment          string
+	HTTPAddress          string
+	DatabaseURL          string
+	OTLPEndpoint         string
+	DevAuth              bool
+	DevAuthToken         string
+	BodyLimit            int64
+	RequestTimeout       time.Duration
+	ShutdownTimeout      time.Duration
+	LogLevelName         string
+	TransportSocket      string
+	TrustSocket          string
+	ControllerEndpointID string
+	TransportTimeout     time.Duration
+	TransportQueue       int
+	LocalSimulator       bool
 }
 
 type LookupEnv func(string) (string, bool)
@@ -48,6 +51,7 @@ func Load(args []string, lookup LookupEnv) (Config, error) {
 		Role: RoleAll, Environment: "development", HTTPAddress: "127.0.0.1:8080",
 		BodyLimit: 1 << 20, RequestTimeout: 15 * time.Second, ShutdownTimeout: 10 * time.Second,
 		LogLevelName: "info", TransportSocket: "/run/ocserv-platform/transportd.sock",
+		TrustSocket:      "/run/ocserv-platform/control-plane-trust.sock",
 		TransportTimeout: 3 * time.Second, TransportQueue: 256,
 	}
 	setString(lookup, "OCSERV_ENVIRONMENT", &cfg.Environment)
@@ -57,6 +61,8 @@ func Load(args []string, lookup LookupEnv) (Config, error) {
 	setString(lookup, "OTEL_EXPORTER_OTLP_ENDPOINT", &cfg.OTLPEndpoint)
 	setString(lookup, "OCSERV_LOG_LEVEL", &cfg.LogLevelName)
 	setString(lookup, "OCSERV_TRANSPORT_SOCKET", &cfg.TransportSocket)
+	setString(lookup, "OCSERV_TRUST_SOCKET", &cfg.TrustSocket)
+	setString(lookup, "OCSERV_CONTROLLER_ENDPOINT_ID", &cfg.ControllerEndpointID)
 	setString(lookup, "OCSERV_DEV_AUTH_TOKEN", &cfg.DevAuthToken)
 	if err := setInt64(lookup, "OCSERV_BODY_LIMIT_BYTES", &cfg.BodyLimit); err != nil {
 		return Config{}, err
@@ -142,6 +148,15 @@ func (c Config) Validate() error {
 	}
 	if !strings.HasPrefix(c.TransportSocket, "/") || c.TransportTimeout <= 0 || c.TransportQueue < 1 || c.TransportQueue > 4096 {
 		return errors.New("transport UDS path, timeout, or queue capacity is invalid")
+	}
+	if !strings.HasPrefix(c.TrustSocket, "/") {
+		return errors.New("trust UDS path is invalid")
+	}
+	if c.ControllerEndpointID != "" {
+		decoded, err := hex.DecodeString(c.ControllerEndpointID)
+		if err != nil || len(decoded) != 32 || strings.ToLower(c.ControllerEndpointID) != c.ControllerEndpointID {
+			return errors.New("controller endpoint ID must be 32-byte lowercase hex")
+		}
 	}
 	if c.LocalSimulator && c.Environment == "production" {
 		return errors.New("local simulator is forbidden in production")

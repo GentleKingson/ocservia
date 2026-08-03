@@ -19,6 +19,10 @@ tags:
     description: Durable platform event rebuild and live stream.
   - name: development
     description: Side-effect-free local development facilities.
+  - name: enrollment
+    description: One-time node enrollment credentials.
+  - name: nodes
+    description: Explicit node trust lifecycle.
 paths:
   /livez:
     get:
@@ -189,6 +193,87 @@ paths:
           $ref: "#/components/responses/Problem"
         default:
           $ref: "#/components/responses/Problem"
+  /enrollment-tokens:
+    post:
+      operationId: createEnrollmentToken
+      summary: Create a one-time enrollment token
+      tags: [enrollment]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/EnrollmentTokenRequest"
+      responses:
+        "201":
+          description: The plaintext token is returned once and is not persisted.
+          headers:
+            Cache-Control:
+              schema:
+                type: string
+                const: no-store
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EnrollmentToken"
+        "400":
+          $ref: "#/components/responses/Problem"
+        "401":
+          $ref: "#/components/responses/Problem"
+        default:
+          $ref: "#/components/responses/Problem"
+  /nodes/{node_id}/approval:
+    post:
+      operationId: approveNode
+      summary: Approve a pending node and bind its endpoint identity
+      tags: [nodes]
+      parameters:
+        - $ref: "#/components/parameters/NodeId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/NodeApproval"
+      responses:
+        "200":
+          description: The node is active.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/NodeTrustState"
+        "409":
+          $ref: "#/components/responses/Problem"
+        "503":
+          $ref: "#/components/responses/Problem"
+        default:
+          $ref: "#/components/responses/Problem"
+  /nodes/{node_id}/revocation:
+    post:
+      operationId: revokeNode
+      summary: Revoke a node endpoint and close its current connection
+      tags: [nodes]
+      parameters:
+        - $ref: "#/components/parameters/NodeId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/NodeRevocation"
+      responses:
+        "200":
+          description: The node is revoked.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/NodeTrustState"
+        "409":
+          $ref: "#/components/responses/Problem"
+        "503":
+          $ref: "#/components/responses/Problem"
+        default:
+          $ref: "#/components/responses/Problem"
 components:
   securitySchemes:
     oidc:
@@ -216,6 +301,12 @@ components:
         default: 50
     OperationId:
       name: operation_id
+      in: path
+      required: true
+      schema:
+        $ref: "#/components/schemas/UuidV7"
+    NodeId:
+      name: node_id
       in: path
       required: true
       schema:
@@ -335,6 +426,96 @@ components:
         disconnect_after:
           type: boolean
           default: false
+    EnrollmentTokenRequest:
+      type: object
+      additionalProperties: false
+      required: [workspace_id, environment, reason]
+      properties:
+        workspace_id:
+          $ref: "#/components/schemas/UuidV7"
+        environment:
+          type: string
+          minLength: 1
+          maxLength: 64
+        expected_node_name:
+          type: string
+          minLength: 1
+          maxLength: 128
+        expected_endpoint_id:
+          type: string
+          pattern: "^[0-9a-f]{64}$"
+        ttl_seconds:
+          type: integer
+          format: int64
+          minimum: 1
+          maximum: 900
+          default: 900
+        reason:
+          type: string
+          minLength: 1
+          maxLength: 1024
+    EnrollmentToken:
+      type: object
+      additionalProperties: false
+      required: [id, token, expires_at]
+      properties:
+        id:
+          $ref: "#/components/schemas/UuidV7"
+        token:
+          type: string
+          minLength: 43
+          maxLength: 43
+          writeOnly: true
+        expires_at:
+          $ref: "#/components/schemas/UtcDateTime"
+    NodeApproval:
+      type: object
+      additionalProperties: false
+      required: [policy, capabilities, reason]
+      properties:
+        labels:
+          type: object
+          maxProperties: 32
+          additionalProperties:
+            type: string
+            minLength: 1
+            maxLength: 128
+        policy:
+          type: string
+          minLength: 1
+          maxLength: 128
+        capabilities:
+          type: array
+          minItems: 1
+          maxItems: 128
+          uniqueItems: true
+          items:
+            type: string
+            minLength: 1
+            maxLength: 128
+        reason:
+          type: string
+          minLength: 1
+          maxLength: 1024
+    NodeRevocation:
+      type: object
+      additionalProperties: false
+      required: [reason]
+      properties:
+        reason:
+          type: string
+          minLength: 1
+          maxLength: 1024
+    NodeTrustState:
+      type: object
+      additionalProperties: false
+      required: [id, status]
+      properties:
+        id:
+          $ref: "#/components/schemas/UuidV7"
+        status:
+          type: string
+          enum: [active, revoked]
     PlatformEventType:
       type: string
       enum: [connected, disconnected, command_result, heartbeat, error]

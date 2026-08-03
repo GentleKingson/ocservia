@@ -52,6 +52,21 @@ func TestOperationsRequireAuthenticatedPrincipal(t *testing.T) {
 	}
 }
 
+func TestEnrollmentWritesRequireAuthenticatedPrincipal(t *testing.T) {
+	server := New("127.0.0.1:0", nil, BuildInfo{}, slog.New(slog.NewTextHandler(io.Discard, nil)), 1024, time.Second, false, "", 1)
+	for _, path := range []string{
+		"/api/v1/enrollment-tokens",
+		"/api/v1/nodes/019fc0a4-6d92-765c-a8a1-4af556614cc3/approval",
+		"/api/v1/nodes/019fc0a4-6d92-765c-a8a1-4af556614cc3/revocation",
+	} {
+		response := httptest.NewRecorder()
+		server.http.Handler.ServeHTTP(response, httptest.NewRequest(http.MethodPost, path, strings.NewReader("{}")))
+		if response.Code != http.StatusUnauthorized {
+			t.Fatalf("%s status = %d", path, response.Code)
+		}
+	}
+}
+
 func TestOperationsAcceptConfiguredDevelopmentBearer(t *testing.T) {
 	server := New("127.0.0.1:0", nil, BuildInfo{}, slog.New(slog.NewTextHandler(io.Discard, nil)), 1024, time.Second, false, "local-development-token-32-characters", 1)
 	response := httptest.NewRecorder()

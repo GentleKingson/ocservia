@@ -15,14 +15,13 @@ hexadecimal characters. Never put this file
 in an image, source tree, command-line argument, or log. The endpoint identifier,
 which is public, is logged at startup.
 
-Approved endpoint-to-node bindings and revoked endpoint identifiers can be
-supplied with repeated `--approved-binding NODE_UUID=ENDPOINT_ID` and
-`--revoked-endpoint ENDPOINT_ID` flags. Endpoint IDs are 32-byte lowercase
-hexadecimal public identifiers and node IDs are UUIDv7 values. Enrollment
-accepts non-revoked identities; agent sessions require an approved,
-non-revoked identity whose handshake claims the bound node. A later
-control-plane step replaces this startup-only test policy with the typed
-enrollment lifecycle.
+For the database-backed lifecycle, pass
+`--trust-socket /run/ocserv-platform/control-plane-trust.sock`. The Iroh hook
+then checks remote EndpointIDs with the Go trust service before reading
+application data. The startup-only `--approved-binding NODE_UUID=ENDPOINT_ID`
+and `--revoked-endpoint ENDPOINT_ID` flags remain available for isolated tests
+and rollback. Endpoint IDs are 32-byte lowercase hexadecimal public
+identifiers and node IDs are UUIDv7 values.
 
 Run with the public relay set:
 
@@ -31,7 +30,7 @@ ocservia-transportd \
   --socket /run/ocserv-platform/transportd.sock \
   --key-file /run/secrets/controller-iroh.key \
   --relay-mode default \
-  --approved-binding <node-uuid>=<agent-endpoint-id>
+  --trust-socket /run/ocserv-platform/control-plane-trust.sock
 ```
 
 Use `--relay-mode disabled` for isolated direct-path tests. The endpoint limits
@@ -50,5 +49,8 @@ stack and rollback mode. To roll back an unshipped Iroh deployment, stop the rea
 transport process, preserve the controller key, start the stub on the same UDS
 path, and restart the Go worker so its watch reconnects. Active Iroh connections
 will close and agents must reconnect after the real transport is restored.
-Rolling back migration `000003_transport_path_changed` removes derived
-`path_changed` events before restoring the earlier event-type constraint.
+Do not roll back migration `000004_enrollment_trust` while enrolled nodes must
+remain manageable. The database rollback removes enrollment tokens, endpoint
+bindings, and capability approvals. Restore the startup binding flags before
+stopping the trust service, then roll back the migration only after preserving
+the required public endpoint-to-node mapping.

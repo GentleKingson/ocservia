@@ -238,7 +238,7 @@ func (s *Service) ReconcileEventGap(ctx context.Context, nodeConnected func(cont
 			ORDER BY event.ingest_sequence DESC
 			LIMIT 1
 		) AS latest ON true
-		WHERE workspace.slug = $1 AND node.status = 'approved'`, workspaceSlug)
+		WHERE workspace.slug = $1 AND node.status = 'active'`, workspaceSlug)
 	if err != nil {
 		return fmt.Errorf("select simulator nodes after transport event gap: %w", err)
 	}
@@ -308,7 +308,7 @@ func (s *Service) ReconcileEventGap(ctx context.Context, nodeConnected func(cont
 		result, err := tx.Exec(ctx, `
 			UPDATE nodes
 			SET status = 'offline', updated_at = $2, version = version + 1
-			WHERE id = $1 AND status = 'approved'`, node.id, now)
+			WHERE id = $1 AND status = 'active'`, node.id, now)
 		if err != nil {
 			return fmt.Errorf("mark simulator node offline after transport event gap: %w", err)
 		}
@@ -369,7 +369,7 @@ func (s *Service) Ingest(ctx context.Context, event *transportv1.TransportEvent)
 	if result.RowsAffected() == 0 {
 		return tx.Commit(ctx)
 	}
-	status := "approved"
+	status := "active"
 	if eventType == "disconnected" {
 		status = "offline"
 	}

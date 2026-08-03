@@ -8,6 +8,7 @@ package transportv1
 
 import (
 	context "context"
+	v1 "github.com/GentleKingson/ocservia/control-plane/gen/proto/ocserv/platform/agent/v1"
 	grpc "google.golang.org/grpc"
 	codes "google.golang.org/grpc/codes"
 	status "google.golang.org/grpc/status"
@@ -24,6 +25,7 @@ const (
 	TransportService_SendCommand_FullMethodName       = "/ocserv.platform.transport.v1.TransportService/SendCommand"
 	TransportService_CloseNode_FullMethodName         = "/ocserv.platform.transport.v1.TransportService/CloseNode"
 	TransportService_WatchEvents_FullMethodName       = "/ocserv.platform.transport.v1.TransportService/WatchEvents"
+	TransportService_UpdateNodeTrust_FullMethodName   = "/ocserv.platform.transport.v1.TransportService/UpdateNodeTrust"
 )
 
 // TransportServiceClient is the client API for TransportService service.
@@ -37,6 +39,7 @@ type TransportServiceClient interface {
 	SendCommand(ctx context.Context, in *SendCommandRequest, opts ...grpc.CallOption) (*SendCommandResponse, error)
 	CloseNode(ctx context.Context, in *CloseNodeRequest, opts ...grpc.CallOption) (*CloseNodeResponse, error)
 	WatchEvents(ctx context.Context, in *WatchEventsRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[TransportEvent], error)
+	UpdateNodeTrust(ctx context.Context, in *UpdateNodeTrustRequest, opts ...grpc.CallOption) (*UpdateNodeTrustResponse, error)
 }
 
 type transportServiceClient struct {
@@ -106,6 +109,16 @@ func (c *transportServiceClient) WatchEvents(ctx context.Context, in *WatchEvent
 // This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
 type TransportService_WatchEventsClient = grpc.ServerStreamingClient[TransportEvent]
 
+func (c *transportServiceClient) UpdateNodeTrust(ctx context.Context, in *UpdateNodeTrustRequest, opts ...grpc.CallOption) (*UpdateNodeTrustResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(UpdateNodeTrustResponse)
+	err := c.cc.Invoke(ctx, TransportService_UpdateNodeTrust_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // TransportServiceServer is the server API for TransportService service.
 // All implementations must embed UnimplementedTransportServiceServer
 // for forward compatibility.
@@ -117,6 +130,7 @@ type TransportServiceServer interface {
 	SendCommand(context.Context, *SendCommandRequest) (*SendCommandResponse, error)
 	CloseNode(context.Context, *CloseNodeRequest) (*CloseNodeResponse, error)
 	WatchEvents(*WatchEventsRequest, grpc.ServerStreamingServer[TransportEvent]) error
+	UpdateNodeTrust(context.Context, *UpdateNodeTrustRequest) (*UpdateNodeTrustResponse, error)
 	mustEmbedUnimplementedTransportServiceServer()
 }
 
@@ -141,6 +155,9 @@ func (UnimplementedTransportServiceServer) CloseNode(context.Context, *CloseNode
 }
 func (UnimplementedTransportServiceServer) WatchEvents(*WatchEventsRequest, grpc.ServerStreamingServer[TransportEvent]) error {
 	return status.Error(codes.Unimplemented, "method WatchEvents not implemented")
+}
+func (UnimplementedTransportServiceServer) UpdateNodeTrust(context.Context, *UpdateNodeTrustRequest) (*UpdateNodeTrustResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method UpdateNodeTrust not implemented")
 }
 func (UnimplementedTransportServiceServer) mustEmbedUnimplementedTransportServiceServer() {}
 func (UnimplementedTransportServiceServer) testEmbeddedByValue()                          {}
@@ -246,6 +263,24 @@ func _TransportService_WatchEvents_Handler(srv interface{}, stream grpc.ServerSt
 // This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
 type TransportService_WatchEventsServer = grpc.ServerStreamingServer[TransportEvent]
 
+func _TransportService_UpdateNodeTrust_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(UpdateNodeTrustRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(TransportServiceServer).UpdateNodeTrust(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: TransportService_UpdateNodeTrust_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(TransportServiceServer).UpdateNodeTrust(ctx, req.(*UpdateNodeTrustRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // TransportService_ServiceDesc is the grpc.ServiceDesc for TransportService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -269,6 +304,10 @@ var TransportService_ServiceDesc = grpc.ServiceDesc{
 			MethodName: "CloseNode",
 			Handler:    _TransportService_CloseNode_Handler,
 		},
+		{
+			MethodName: "UpdateNodeTrust",
+			Handler:    _TransportService_UpdateNodeTrust_Handler,
+		},
 	},
 	Streams: []grpc.StreamDesc{
 		{
@@ -277,5 +316,187 @@ var TransportService_ServiceDesc = grpc.ServiceDesc{
 			ServerStreams: true,
 		},
 	},
+	Metadata: "ocserv/platform/transport/v1/transport.proto",
+}
+
+const (
+	TrustService_CheckEndpoint_FullMethodName    = "/ocserv.platform.transport.v1.TrustService/CheckEndpoint"
+	TrustService_Enroll_FullMethodName           = "/ocserv.platform.transport.v1.TrustService/Enroll"
+	TrustService_AuthorizeSession_FullMethodName = "/ocserv.platform.transport.v1.TrustService/AuthorizeSession"
+)
+
+// TrustServiceClient is the client API for TrustService service.
+//
+// For semantics around ctx use and closing/ending streaming RPCs, please refer to https://pkg.go.dev/google.golang.org/grpc/?tab=doc#ClientConn.NewStream.
+//
+// TrustService is implemented by the Go control plane on a private UDS.
+type TrustServiceClient interface {
+	CheckEndpoint(ctx context.Context, in *CheckEndpointRequest, opts ...grpc.CallOption) (*CheckEndpointResponse, error)
+	Enroll(ctx context.Context, in *v1.EnrollRequest, opts ...grpc.CallOption) (*v1.EnrollResponse, error)
+	AuthorizeSession(ctx context.Context, in *AuthorizeSessionRequest, opts ...grpc.CallOption) (*v1.SessionHandshakeResponse, error)
+}
+
+type trustServiceClient struct {
+	cc grpc.ClientConnInterface
+}
+
+func NewTrustServiceClient(cc grpc.ClientConnInterface) TrustServiceClient {
+	return &trustServiceClient{cc}
+}
+
+func (c *trustServiceClient) CheckEndpoint(ctx context.Context, in *CheckEndpointRequest, opts ...grpc.CallOption) (*CheckEndpointResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(CheckEndpointResponse)
+	err := c.cc.Invoke(ctx, TrustService_CheckEndpoint_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *trustServiceClient) Enroll(ctx context.Context, in *v1.EnrollRequest, opts ...grpc.CallOption) (*v1.EnrollResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(v1.EnrollResponse)
+	err := c.cc.Invoke(ctx, TrustService_Enroll_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *trustServiceClient) AuthorizeSession(ctx context.Context, in *AuthorizeSessionRequest, opts ...grpc.CallOption) (*v1.SessionHandshakeResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(v1.SessionHandshakeResponse)
+	err := c.cc.Invoke(ctx, TrustService_AuthorizeSession_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// TrustServiceServer is the server API for TrustService service.
+// All implementations must embed UnimplementedTrustServiceServer
+// for forward compatibility.
+//
+// TrustService is implemented by the Go control plane on a private UDS.
+type TrustServiceServer interface {
+	CheckEndpoint(context.Context, *CheckEndpointRequest) (*CheckEndpointResponse, error)
+	Enroll(context.Context, *v1.EnrollRequest) (*v1.EnrollResponse, error)
+	AuthorizeSession(context.Context, *AuthorizeSessionRequest) (*v1.SessionHandshakeResponse, error)
+	mustEmbedUnimplementedTrustServiceServer()
+}
+
+// UnimplementedTrustServiceServer must be embedded to have
+// forward compatible implementations.
+//
+// NOTE: this should be embedded by value instead of pointer to avoid a nil
+// pointer dereference when methods are called.
+type UnimplementedTrustServiceServer struct{}
+
+func (UnimplementedTrustServiceServer) CheckEndpoint(context.Context, *CheckEndpointRequest) (*CheckEndpointResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method CheckEndpoint not implemented")
+}
+func (UnimplementedTrustServiceServer) Enroll(context.Context, *v1.EnrollRequest) (*v1.EnrollResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method Enroll not implemented")
+}
+func (UnimplementedTrustServiceServer) AuthorizeSession(context.Context, *AuthorizeSessionRequest) (*v1.SessionHandshakeResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method AuthorizeSession not implemented")
+}
+func (UnimplementedTrustServiceServer) mustEmbedUnimplementedTrustServiceServer() {}
+func (UnimplementedTrustServiceServer) testEmbeddedByValue()                      {}
+
+// UnsafeTrustServiceServer may be embedded to opt out of forward compatibility for this service.
+// Use of this interface is not recommended, as added methods to TrustServiceServer will
+// result in compilation errors.
+type UnsafeTrustServiceServer interface {
+	mustEmbedUnimplementedTrustServiceServer()
+}
+
+func RegisterTrustServiceServer(s grpc.ServiceRegistrar, srv TrustServiceServer) {
+	// If the following call panics, it indicates UnimplementedTrustServiceServer was
+	// embedded by pointer and is nil.  This will cause panics if an
+	// unimplemented method is ever invoked, so we test this at initialization
+	// time to prevent it from happening at runtime later due to I/O.
+	if t, ok := srv.(interface{ testEmbeddedByValue() }); ok {
+		t.testEmbeddedByValue()
+	}
+	s.RegisterService(&TrustService_ServiceDesc, srv)
+}
+
+func _TrustService_CheckEndpoint_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(CheckEndpointRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(TrustServiceServer).CheckEndpoint(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: TrustService_CheckEndpoint_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(TrustServiceServer).CheckEndpoint(ctx, req.(*CheckEndpointRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _TrustService_Enroll_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(v1.EnrollRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(TrustServiceServer).Enroll(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: TrustService_Enroll_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(TrustServiceServer).Enroll(ctx, req.(*v1.EnrollRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _TrustService_AuthorizeSession_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(AuthorizeSessionRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(TrustServiceServer).AuthorizeSession(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: TrustService_AuthorizeSession_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(TrustServiceServer).AuthorizeSession(ctx, req.(*AuthorizeSessionRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+// TrustService_ServiceDesc is the grpc.ServiceDesc for TrustService service.
+// It's only intended for direct use with grpc.RegisterService,
+// and not to be introspected or modified (even as a copy)
+var TrustService_ServiceDesc = grpc.ServiceDesc{
+	ServiceName: "ocserv.platform.transport.v1.TrustService",
+	HandlerType: (*TrustServiceServer)(nil),
+	Methods: []grpc.MethodDesc{
+		{
+			MethodName: "CheckEndpoint",
+			Handler:    _TrustService_CheckEndpoint_Handler,
+		},
+		{
+			MethodName: "Enroll",
+			Handler:    _TrustService_Enroll_Handler,
+		},
+		{
+			MethodName: "AuthorizeSession",
+			Handler:    _TrustService_AuthorizeSession_Handler,
+		},
+	},
+	Streams:  []grpc.StreamDesc{},
 	Metadata: "ocserv/platform/transport/v1/transport.proto",
 }

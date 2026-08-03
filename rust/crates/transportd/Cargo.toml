@@ -22,6 +22,8 @@ uuid = { workspace = true, features = ["v7"] }
 zeroize.workspace = true
 rustix.workspace = true
 futures-util.workspace = true
+tower.workspace = true
+hyper-util.workspace = true
 
 [lints]
 workspace = true

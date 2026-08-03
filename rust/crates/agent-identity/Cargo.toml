@@ -1,0 +1,16 @@
+[package]
+name = "ocservia-agent-identity"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+hex.workspace = true
+iroh.workspace = true
+rustix.workspace = true
+zeroize.workspace = true
+
+[lints]
+workspace = true

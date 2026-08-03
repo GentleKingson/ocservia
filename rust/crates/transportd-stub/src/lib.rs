@@ -13,8 +13,8 @@ use ocservia_contracts::generated::ocserv::platform::agent::v1::{
 use ocservia_contracts::generated::ocserv::platform::transport::v1::{
     CloseNodeRequest, CloseNodeResponse, ConnectionPath, GetNodeConnectionRequest, HealthRequest,
     HealthResponse, HealthStatus, NodeConnection, SendCommandRequest, SendCommandResponse,
-    TransportEvent, TransportEventType, WatchEventsRequest,
-    transport_service_server::TransportService,
+    TransportEvent, TransportEventType, UpdateNodeTrustRequest, UpdateNodeTrustResponse,
+    WatchEventsRequest, transport_service_server::TransportService,
 };
 use prost::Message;
 use tokio::sync::{Mutex, Semaphore, mpsc, watch};
@@ -382,6 +382,18 @@ impl TransportService for StubService {
         ))
         .await;
         Ok(Response::new(CloseNodeResponse {}))
+    }
+
+    async fn update_node_trust(
+        &self,
+        request: Request<UpdateNodeTrustRequest>,
+    ) -> Result<Response<UpdateNodeTrustResponse>, Status> {
+        let request = request.into_inner();
+        validate_id(&request.node_id, "node_id")?;
+        if request.endpoint_id.len() != 32 || request.state == 0 || request.reason.is_empty() {
+            return Err(Status::invalid_argument("trust update is invalid"));
+        }
+        Ok(Response::new(UpdateNodeTrustResponse {}))
     }
 
     async fn watch_events(

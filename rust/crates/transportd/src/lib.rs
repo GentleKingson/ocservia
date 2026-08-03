@@ -4,7 +4,7 @@
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::pin::Pin;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant, SystemTime};
 
 use futures_util::StreamExt as _;
@@ -15,14 +15,15 @@ use iroh::endpoint::{
 use iroh::protocol::{AcceptError, ProtocolHandler, Router};
 use iroh::{Endpoint, EndpointId, SecretKey};
 use ocservia_contracts::generated::ocserv::platform::agent::v1::{
-    AgentEvent, AgentEventType, CommandEnvelope, HandshakeResult, SessionHandshake,
-    SessionHandshakeResponse,
+    AgentEvent, AgentEventType, CommandEnvelope, EnrollRequest, EnrollResponse, HandshakeResult,
+    SessionHandshake, SessionHandshakeResponse,
 };
 use ocservia_contracts::generated::ocserv::platform::transport::v1::{
-    CloseNodeRequest, CloseNodeResponse, ConnectionPath, GetNodeConnectionRequest, HealthRequest,
-    HealthResponse, HealthStatus, NodeConnection, SendCommandRequest, SendCommandResponse,
-    TransportEvent, TransportEventType, WatchEventsRequest,
-    transport_service_server::TransportService,
+    AuthorizeSessionRequest, CheckEndpointRequest, CloseNodeRequest, CloseNodeResponse,
+    ConnectionPath, GetNodeConnectionRequest, HealthRequest, HealthResponse, HealthStatus,
+    NodeConnection, NodeTrustState, SendCommandRequest, SendCommandResponse, TransportEvent,
+    TransportEventType, UpdateNodeTrustRequest, UpdateNodeTrustResponse, WatchEventsRequest,
+    transport_service_server::TransportService, trust_service_client::TrustServiceClient,
 };
 use prost::Message;
 use tokio::sync::{Mutex, Semaphore, mpsc, watch};
@@ -54,8 +55,13 @@ type EventStream = Pin<Box<dyn Stream<Item = Result<TransportEvent, Status>> + S
 /// A bounded, transport-only identity policy supplied at process startup.
 #[derive(Clone, Debug, Default)]
 pub struct IdentityPolicy {
-    approved: Arc<HashMap<EndpointId, Vec<u8>>>,
-    revoked: Arc<HashSet<EndpointId>>,
+    state: Arc<RwLock<IdentityState>>,
+}
+
+#[derive(Debug, Default)]
+struct IdentityState {
+    approved: HashMap<EndpointId, Vec<u8>>,
+    revoked: HashSet<EndpointId>,
 }
 
 impl IdentityPolicy {
@@ -63,38 +69,152 @@ impl IdentityPolicy {
     #[must_use]
     pub fn new(approved: HashMap<EndpointId, Vec<u8>>, revoked: HashSet<EndpointId>) -> Self {
         Self {
-            approved: Arc::new(approved),
-            revoked: Arc::new(revoked),
+            state: Arc::new(RwLock::new(IdentityState { approved, revoked })),
         }
     }
 
     fn permits(&self, endpoint: EndpointId, alpn: &[u8]) -> bool {
-        if self.revoked.contains(&endpoint) {
+        let state = self
+            .state
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if state.revoked.contains(&endpoint) {
             return false;
         }
-        alpn == ENROLL_ALPN || (alpn == AGENT_ALPN && self.approved.contains_key(&endpoint))
+        alpn == ENROLL_ALPN || (alpn == AGENT_ALPN && state.approved.contains_key(&endpoint))
     }
 
     fn matches_node(&self, endpoint: EndpointId, node_id: &[u8]) -> bool {
-        self.approved
+        self.state
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .approved
             .get(&endpoint)
             .is_some_and(|approved_node| approved_node == node_id)
+    }
+
+    fn revoked(&self, endpoint: EndpointId) -> bool {
+        self.state
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .revoked
+            .contains(&endpoint)
+    }
+
+    fn update(&self, endpoint: EndpointId, node_id: Vec<u8>, state: NodeTrustState) -> bool {
+        let mut identities = self
+            .state
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        match state {
+            NodeTrustState::Active => {
+                if identities
+                    .approved
+                    .iter()
+                    .any(|(bound_endpoint, bound_node)| {
+                        (*bound_endpoint == endpoint && bound_node != &node_id)
+                            || (*bound_endpoint != endpoint && bound_node == &node_id)
+                    })
+                {
+                    return false;
+                }
+                identities.revoked.remove(&endpoint);
+                identities.approved.insert(endpoint, node_id);
+            }
+            NodeTrustState::Revoked => {
+                if identities
+                    .approved
+                    .get(&endpoint)
+                    .is_some_and(|bound_node| bound_node != &node_id)
+                {
+                    return false;
+                }
+                identities.approved.remove(&endpoint);
+                identities.revoked.insert(endpoint);
+            }
+            NodeTrustState::Unspecified => {}
+        }
+        true
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct TrustAuthority {
+    client: TrustServiceClient<tonic::transport::Channel>,
+}
+
+impl TrustAuthority {
+    #[must_use]
+    pub fn new(channel: tonic::transport::Channel) -> Self {
+        Self {
+            client: TrustServiceClient::new(channel),
+        }
+    }
+
+    async fn permits(&self, endpoint: EndpointId, alpn: &[u8]) -> bool {
+        let Ok(alpn) = std::str::from_utf8(alpn) else {
+            return false;
+        };
+        let mut client = self.client.clone();
+        tokio::time::timeout(
+            HANDSHAKE_TIMEOUT,
+            client.check_endpoint(CheckEndpointRequest {
+                endpoint_id: endpoint.as_bytes().to_vec(),
+                alpn: alpn.to_owned(),
+            }),
+        )
+        .await
+        .ok()
+        .and_then(Result::ok)
+        .is_some_and(|response| response.into_inner().permitted)
+    }
+
+    async fn enroll(&self, request: EnrollRequest) -> Result<EnrollResponse, AcceptError> {
+        let mut client = self.client.clone();
+        tokio::time::timeout(HANDSHAKE_TIMEOUT, client.enroll(request))
+            .await
+            .map_err(|_| protocol_error("enrollment authority timed out"))?
+            .map(Response::into_inner)
+            .map_err(|_| protocol_error("enrollment rejected"))
+    }
+
+    async fn authorize(
+        &self,
+        endpoint: EndpointId,
+        handshake: SessionHandshake,
+    ) -> Result<SessionHandshakeResponse, AcceptError> {
+        let mut client = self.client.clone();
+        tokio::time::timeout(
+            HANDSHAKE_TIMEOUT,
+            client.authorize_session(AuthorizeSessionRequest {
+                remote_endpoint_id: endpoint.as_bytes().to_vec(),
+                handshake: Some(handshake),
+            }),
+        )
+        .await
+        .map_err(|_| protocol_error("trust authority timed out"))?
+        .map(Response::into_inner)
+        .map_err(|_| protocol_error("session authorization failed"))
     }
 }
 
 #[derive(Debug)]
 struct SecurityHook {
     policy: IdentityPolicy,
+    trust: Option<TrustAuthority>,
     agent_attempts: Mutex<HashMap<EndpointId, VecDeque<Instant>>>,
     enrollment_attempts: Mutex<HashMap<EndpointId, VecDeque<Instant>>>,
+    trust_checks: Arc<Semaphore>,
 }
 
 impl SecurityHook {
-    fn new(policy: IdentityPolicy) -> Self {
+    fn new(policy: IdentityPolicy, trust: Option<TrustAuthority>) -> Self {
         Self {
             policy,
+            trust,
             agent_attempts: Mutex::new(HashMap::new()),
             enrollment_attempts: Mutex::new(HashMap::new()),
+            trust_checks: Arc::new(Semaphore::new(MAX_ENROLLMENT_CONNECTIONS)),
         }
     }
 }
@@ -143,19 +263,31 @@ impl EndpointHooks for SecurityHook {
         if alpn != ENROLL_ALPN && alpn != AGENT_ALPN {
             return reject(0x100, b"unsupported protocol");
         }
-        if !self.policy.permits(endpoint, alpn) {
-            return reject(0x101, b"endpoint not permitted");
-        }
-
         let (attempts, identity_capacity) = if alpn == ENROLL_ALPN {
             (&self.enrollment_attempts, MAX_ENROLLMENT_CONNECTIONS)
         } else {
             (&self.agent_attempts, MAX_AGENT_CONNECTIONS)
         };
         let mut attempts = attempts.lock().await;
-        match record_attempt(&mut attempts, endpoint, Instant::now(), identity_capacity) {
-            Ok(()) => AfterHandshakeOutcome::Accept,
-            Err(AttemptRejection::Rate) => reject(0x103, b"connection rate exceeded"),
+        if record_attempt(&mut attempts, endpoint, Instant::now(), identity_capacity).is_err() {
+            return reject(0x103, b"connection rate exceeded");
+        }
+        drop(attempts);
+        if self.policy.revoked(endpoint) {
+            return reject(0x101, b"endpoint not permitted");
+        }
+        let permitted = if let Some(trust) = &self.trust {
+            let Ok(_permit) = self.trust_checks.clone().try_acquire_owned() else {
+                return reject(0x102, b"trust authority capacity reached");
+            };
+            trust.permits(endpoint, alpn).await
+        } else {
+            self.policy.permits(endpoint, alpn)
+        };
+        if permitted {
+            AfterHandshakeOutcome::Accept
+        } else {
+            reject(0x101, b"endpoint not permitted")
         }
     }
 }
@@ -260,14 +392,22 @@ impl Shared {
 #[derive(Clone)]
 pub struct IrohTransportService {
     shared: Shared,
+    policy: IdentityPolicy,
 }
 
 impl IrohTransportService {
     /// Creates the service and its bounded connection registry.
     #[must_use]
     pub fn new(event_capacity: usize) -> Self {
+        Self::new_with_policy(event_capacity, IdentityPolicy::default())
+    }
+
+    /// Creates the service with a shared mutable endpoint policy.
+    #[must_use]
+    pub fn new_with_policy(event_capacity: usize, policy: IdentityPolicy) -> Self {
         Self {
             shared: Shared::new(event_capacity),
+            policy,
         }
     }
 
@@ -432,6 +572,42 @@ impl TransportService for IrohTransportService {
             ReceiverStream::new(receiver).take_until(shutdown_signal),
         )))
     }
+
+    async fn update_node_trust(
+        &self,
+        request: Request<UpdateNodeTrustRequest>,
+    ) -> Result<Response<UpdateNodeTrustResponse>, Status> {
+        let request = request.into_inner();
+        let node_id = validate_uuid(&request.node_id, "node_id")?;
+        if request.endpoint_id.len() != 32 {
+            return Err(Status::invalid_argument("endpoint_id must be 32 bytes"));
+        }
+        if request.reason.is_empty() || request.reason.len() > 1024 {
+            return Err(Status::invalid_argument("trust update reason is invalid"));
+        }
+        let endpoint = EndpointId::from_bytes(
+            &request
+                .endpoint_id
+                .clone()
+                .try_into()
+                .map_err(|_| Status::invalid_argument("endpoint_id is invalid"))?,
+        )
+        .map_err(|_| Status::invalid_argument("endpoint_id is invalid"))?;
+        let state = NodeTrustState::try_from(request.state)
+            .map_err(|_| Status::invalid_argument("trust state is invalid"))?;
+        if state == NodeTrustState::Unspecified {
+            return Err(Status::invalid_argument("trust state is unspecified"));
+        }
+        if !self.policy.update(endpoint, node_id.clone(), state) {
+            return Err(Status::failed_precondition(
+                "endpoint-to-node substitution refused",
+            ));
+        }
+        if state == NodeTrustState::Revoked {
+            let _ = self.shared.remove(&node_id, b"node revoked").await;
+        }
+        Ok(Response::new(UpdateNodeTrustResponse {}))
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -445,6 +621,7 @@ struct SessionHandler {
     shared: Shared,
     policy: IdentityPolicy,
     kind: ProtocolKind,
+    trust: Option<TrustAuthority>,
 }
 
 impl std::fmt::Debug for SessionHandler {
@@ -453,6 +630,74 @@ impl std::fmt::Debug for SessionHandler {
             .debug_struct("SessionHandler")
             .field("kind", &self.kind)
             .finish_non_exhaustive()
+    }
+}
+
+impl SessionHandler {
+    async fn negotiate(
+        &self,
+        connection: &Connection,
+        send: &mut iroh::endpoint::SendStream,
+        recv: &mut iroh::endpoint::RecvStream,
+    ) -> Result<Option<SessionHandshake>, AcceptError> {
+        if matches!(self.kind, ProtocolKind::Enroll) && self.trust.is_some() {
+            let request = read_enrollment(recv).await?;
+            validate_enrollment(&request, connection.remote_id())?;
+            let trust = self
+                .trust
+                .as_ref()
+                .ok_or_else(|| protocol_error("trust authority unavailable"))?;
+            let response = trust.enroll(request).await?;
+            write_message(send, &response).await?;
+            connection.close(VarInt::from_u32(0), b"enrollment pending");
+            return Ok(None);
+        }
+        let handshake = read_handshake(recv).await?;
+        validate_handshake(&handshake, connection.remote_id())?;
+        let response = match self.kind {
+            ProtocolKind::Enroll => local_handshake_response(
+                HandshakeResult::PendingApproval,
+                handshake.max_message_size,
+            ),
+            ProtocolKind::Agent if self.trust.is_some() => {
+                self.trust
+                    .as_ref()
+                    .ok_or_else(|| protocol_error("trust authority unavailable"))?
+                    .authorize(connection.remote_id(), handshake.clone())
+                    .await?
+            }
+            ProtocolKind::Agent
+                if self
+                    .policy
+                    .matches_node(connection.remote_id(), &handshake.node_id) =>
+            {
+                local_handshake_response(HandshakeResult::Accepted, handshake.max_message_size)
+            }
+            ProtocolKind::Agent => {
+                return Err(protocol_error("endpoint is not bound to the claimed node"));
+            }
+        };
+        write_message(send, &response).await?;
+        let result =
+            HandshakeResult::try_from(response.result).unwrap_or(HandshakeResult::Unspecified);
+        if matches!(self.kind, ProtocolKind::Enroll) || result != HandshakeResult::Accepted {
+            let reason = if matches!(self.kind, ProtocolKind::Enroll) {
+                b"enrollment pending".as_slice()
+            } else {
+                b"session rejected".as_slice()
+            };
+            connection.close(VarInt::from_u32(0x101), reason);
+            return Ok(None);
+        }
+        if response.max_message_size == 0
+            || response.max_message_size > handshake.max_message_size
+            || response.max_message_size as usize > MAX_FRAME_BYTES
+        {
+            return Err(protocol_error("negotiated message size is invalid"));
+        }
+        let mut handshake = handshake;
+        handshake.max_message_size = response.max_message_size;
+        Ok(Some(handshake))
     }
 }
 
@@ -470,31 +715,23 @@ impl ProtocolHandler for SessionHandler {
             .await
             .map_err(|_| protocol_error("handshake stream timed out"))?
             .map_err(|_| protocol_error("handshake stream failed"))?;
-        let handshake = read_handshake(&mut recv).await?;
-        validate_handshake(&handshake, connection.remote_id())?;
-        if matches!(self.kind, ProtocolKind::Agent)
-            && !self
-                .policy
-                .matches_node(connection.remote_id(), &handshake.node_id)
-        {
-            return Err(protocol_error("endpoint is not bound to the claimed node"));
-        }
-
-        let result = match self.kind {
-            ProtocolKind::Enroll => HandshakeResult::PendingApproval,
-            ProtocolKind::Agent => HandshakeResult::Accepted,
-        };
-        write_handshake_response(&mut send, result, handshake.max_message_size).await?;
-        if matches!(self.kind, ProtocolKind::Enroll) {
-            connection.close(VarInt::from_u32(0), b"enrollment pending");
+        let Some(handshake) = self.negotiate(&connection, &mut send, &mut recv).await? else {
+            drop(permit);
             return Ok(());
-        }
+        };
 
         connection.set_max_concurrent_bi_streams(VarInt::from_u32(MAX_STREAMS));
         connection.set_max_concurrent_uni_streams(VarInt::from_u32(2));
         let metadata = metadata(&handshake, &connection).await;
         let node_id = metadata.node_id.clone();
         let mut registry = self.shared.inner.connections.lock().await;
+        // Trust updates change policy before taking the registry lock. Checking
+        // while holding this lock makes a concurrent revoke either reject this
+        // session here or close it immediately after registration.
+        if self.policy.revoked(connection.remote_id()) {
+            connection.close(VarInt::from_u32(0x101), b"session revoked");
+            return Err(protocol_error("endpoint was revoked during handshake"));
+        }
         let replaced = registry.insert(
             node_id.clone(),
             RegisteredConnection {
@@ -706,37 +943,41 @@ async fn publish_agent_event(
 async fn read_handshake(
     recv: &mut iroh::endpoint::RecvStream,
 ) -> Result<SessionHandshake, AcceptError> {
+    read_message(recv, "handshake").await
+}
+
+async fn read_enrollment(
+    recv: &mut iroh::endpoint::RecvStream,
+) -> Result<EnrollRequest, AcceptError> {
+    read_message(recv, "enrollment").await
+}
+
+async fn read_message<M: Message + Default>(
+    recv: &mut iroh::endpoint::RecvStream,
+    kind: &str,
+) -> Result<M, AcceptError> {
     let mut length = [0_u8; 4];
     tokio::time::timeout(HANDSHAKE_TIMEOUT, recv.read_exact(&mut length))
         .await
-        .map_err(|_| protocol_error("handshake length timed out"))?
-        .map_err(|_| protocol_error("handshake length invalid"))?;
+        .map_err(|_| protocol_error(&format!("{kind} length timed out")))?
+        .map_err(|_| protocol_error(&format!("{kind} length invalid")))?;
     let length = u32::from_be_bytes(length) as usize;
     if length == 0 || length > MAX_HANDSHAKE_BYTES {
-        return Err(protocol_error("handshake size invalid"));
+        return Err(protocol_error(&format!("{kind} size invalid")));
     }
     let mut bytes = vec![0_u8; length];
     tokio::time::timeout(HANDSHAKE_TIMEOUT, recv.read_exact(&mut bytes))
         .await
-        .map_err(|_| protocol_error("handshake body timed out"))?
-        .map_err(|_| protocol_error("handshake body invalid"))?;
-    SessionHandshake::decode(bytes.as_slice())
-        .map_err(|_| protocol_error("handshake protobuf invalid"))
+        .map_err(|_| protocol_error(&format!("{kind} body timed out")))?
+        .map_err(|_| protocol_error(&format!("{kind} body invalid")))?;
+    M::decode(bytes.as_slice()).map_err(|_| protocol_error(&format!("{kind} protobuf invalid")))
 }
 
-async fn write_handshake_response(
+async fn write_message(
     send: &mut iroh::endpoint::SendStream,
-    result: HandshakeResult,
-    max_message_size: u32,
+    response: &impl Message,
 ) -> Result<(), AcceptError> {
-    let response = SessionHandshakeResponse {
-        result: result.into(),
-        protocol_major: PROTOCOL_MAJOR,
-        protocol_minor: PROTOCOL_MINOR,
-        max_message_size,
-        controller_version: env!("CARGO_PKG_VERSION").to_owned(),
-    }
-    .encode_to_vec();
+    let response = response.encode_to_vec();
     let response_len = u32::try_from(response.len())
         .map_err(|_| protocol_error("handshake response length exceeds u32"))?;
     send.write_all(&response_len.to_be_bytes())
@@ -747,6 +988,51 @@ async fn write_handshake_response(
         .map_err(|_| protocol_error("handshake response failed"))?;
     send.finish()
         .map_err(|_| protocol_error("handshake response finish failed"))?;
+    Ok(())
+}
+
+fn local_handshake_response(
+    result: HandshakeResult,
+    max_message_size: u32,
+) -> SessionHandshakeResponse {
+    SessionHandshakeResponse {
+        result: result.into(),
+        protocol_major: PROTOCOL_MAJOR,
+        protocol_minor: PROTOCOL_MINOR,
+        max_message_size,
+        controller_version: env!("CARGO_PKG_VERSION").to_owned(),
+    }
+}
+
+fn validate_enrollment(request: &EnrollRequest, remote: EndpointId) -> Result<(), AcceptError> {
+    validate_uuid(&request.agent_instance_id, "agent_instance_id")
+        .map_err(|status| status_to_accept(&status))?;
+    if request.endpoint_id != remote.as_bytes() {
+        return Err(protocol_error("endpoint identity mismatch"));
+    }
+    if request.token.len() != 43 || request.nonce.len() < 16 || request.nonce.len() > 64 {
+        return Err(protocol_error("enrollment credential or nonce is invalid"));
+    }
+    if request.capabilities.is_empty()
+        || request.capabilities.len() > 128
+        || request
+            .capabilities
+            .iter()
+            .any(|value| value.is_empty() || value.len() > 128)
+        || request.capabilities.iter().collect::<HashSet<_>>().len() != request.capabilities.len()
+        || request.time.is_none()
+        || [
+            &request.agent_version,
+            &request.os_release,
+            &request.ocserv_version,
+            &request.boot_id,
+            &request.environment,
+        ]
+        .iter()
+        .any(|value| value.is_empty() || value.len() > 256)
+    {
+        return Err(protocol_error("enrollment field limit exceeded"));
+    }
     Ok(())
 }
 
@@ -916,13 +1202,29 @@ pub async fn build_router(
     policy: IdentityPolicy,
     service: &IrohTransportService,
 ) -> Result<Router, iroh::endpoint::BindError> {
-    build_router_with_direct(secret_key, relay_mode, policy, service, true).await
+    build_router_with_direct(secret_key, relay_mode, policy, None, service, true).await
+}
+
+/// Builds the controller endpoint with a live Go trust authority.
+///
+/// # Errors
+///
+/// Returns an Iroh bind error when endpoint or transport initialization fails.
+pub async fn build_router_with_trust(
+    secret_key: SecretKey,
+    relay_mode: RelayMode,
+    policy: IdentityPolicy,
+    trust: TrustAuthority,
+    service: &IrohTransportService,
+) -> Result<Router, iroh::endpoint::BindError> {
+    build_router_with_direct(secret_key, relay_mode, policy, Some(trust), service, true).await
 }
 
 async fn build_router_with_direct(
     secret_key: SecretKey,
     relay_mode: RelayMode,
     policy: IdentityPolicy,
+    trust: Option<TrustAuthority>,
     service: &IrohTransportService,
     direct_enabled: bool,
 ) -> Result<Router, iroh::endpoint::BindError> {
@@ -938,7 +1240,7 @@ async fn build_router_with_direct(
         .secret_key(secret_key)
         .relay_mode(relay_mode)
         .transport_config(transport)
-        .hooks(SecurityHook::new(policy.clone()));
+        .hooks(SecurityHook::new(policy.clone(), trust.clone()));
     if !direct_enabled {
         endpoint_builder = endpoint_builder.clear_ip_transports();
     }
@@ -950,6 +1252,7 @@ async fn build_router_with_direct(
                 shared: service.shared.clone(),
                 policy: policy.clone(),
                 kind: ProtocolKind::Enroll,
+                trust: trust.clone(),
             },
         )
         .accept(
@@ -958,6 +1261,7 @@ async fn build_router_with_direct(
                 shared: service.shared.clone(),
                 policy,
                 kind: ProtocolKind::Agent,
+                trust,
             },
         )
         .spawn())
@@ -1149,6 +1453,33 @@ mod tests {
         assert!(!policy.matches_node(approved, Uuid::now_v7().as_bytes()));
         assert!(!policy.permits(revoked, ENROLL_ALPN));
         assert!(!policy.permits(SecretKey::generate().public(), AGENT_ALPN));
+        let dynamic = SecretKey::generate().public();
+        let dynamic_node = Uuid::now_v7().as_bytes().to_vec();
+        assert!(policy.update(dynamic, dynamic_node.clone(), NodeTrustState::Active));
+        assert!(policy.matches_node(dynamic, &dynamic_node));
+        assert!(policy.update(dynamic, dynamic_node, NodeTrustState::Revoked));
+        assert!(!policy.permits(dynamic, AGENT_ALPN));
+        assert!(policy.revoked(dynamic));
+    }
+
+    #[test]
+    fn enrollment_request_binds_the_authenticated_endpoint() {
+        let key = SecretKey::generate();
+        let request = EnrollRequest {
+            token: "a".repeat(43),
+            endpoint_id: key.public().as_bytes().to_vec(),
+            agent_version: "test".to_owned(),
+            os_release: "test".to_owned(),
+            ocserv_version: "test".to_owned(),
+            boot_id: "boot".to_owned(),
+            agent_instance_id: Uuid::now_v7().as_bytes().to_vec(),
+            capabilities: vec!["ocserv.status.read".to_owned()],
+            environment: "test".to_owned(),
+            nonce: vec![0; 16],
+            time: Some(now_timestamp()),
+        };
+        assert!(validate_enrollment(&request, key.public()).is_ok());
+        assert!(validate_enrollment(&request, SecretKey::generate().public()).is_err());
     }
 
     #[test]
@@ -1377,15 +1708,11 @@ mod tests {
     async fn direct_connection_is_registered_and_shutdown_is_graceful() {
         let agent_key = SecretKey::generate();
         let handshake = handshake(&agent_key);
-        let service = IrohTransportService::new(8);
-        let router = build_router(
-            SecretKey::generate(),
-            RelayMode::Disabled,
-            identity_policy(&agent_key, &handshake),
-            &service,
-        )
-        .await
-        .expect("build router");
+        let policy = identity_policy(&agent_key, &handshake);
+        let service = IrohTransportService::new_with_policy(8, policy.clone());
+        let router = build_router(SecretKey::generate(), RelayMode::Disabled, policy, &service)
+            .await
+            .expect("build router");
         let client = Endpoint::builder(presets::Minimal)
             .secret_key(agent_key.clone())
             .relay_mode(RelayMode::Disabled)
@@ -1426,10 +1753,20 @@ mod tests {
         assert_eq!(metadata.endpoint_id, agent_key.public().as_bytes());
         assert_eq!(metadata.path, i32::from(ConnectionPath::Direct));
 
-        shutdown(&service, router).await.expect("shutdown router");
+        service
+            .update_node_trust(Request::new(UpdateNodeTrustRequest {
+                node_id: metadata.node_id,
+                endpoint_id: agent_key.public().as_bytes().to_vec(),
+                state: NodeTrustState::Revoked.into(),
+                reason: "integration revocation".to_owned(),
+            }))
+            .await
+            .expect("revoke connected node");
         tokio::time::timeout(Duration::from_secs(2), connection.closed())
             .await
-            .expect("connection closed after shutdown");
+            .expect("connection closed after revocation");
+
+        shutdown(&service, router).await.expect("shutdown router");
         client.close().await;
     }
 
@@ -1611,6 +1948,7 @@ mod tests {
             SecretKey::generate(),
             RelayMode::Default,
             identity_policy(&agent_key, &handshake),
+            None,
             &service,
             false,
         )
