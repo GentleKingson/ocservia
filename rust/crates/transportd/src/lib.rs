@@ -681,6 +681,7 @@ impl SessionHandler {
                 .ok_or_else(|| protocol_error("trust authority unavailable"))?;
             let response = trust.enroll(request).await?;
             write_message(send, &response).await?;
+            wait_for_delivery(send).await?;
             connection.close(VarInt::from_u32(0), b"enrollment pending");
             return Ok(None);
         }
@@ -1020,6 +1021,17 @@ async fn write_message(
         .map_err(|_| protocol_error("handshake response failed"))?;
     send.finish()
         .map_err(|_| protocol_error("handshake response finish failed"))?;
+    Ok(())
+}
+
+async fn wait_for_delivery(send: &iroh::endpoint::SendStream) -> Result<(), AcceptError> {
+    let stopped = tokio::time::timeout(HANDSHAKE_TIMEOUT, send.stopped())
+        .await
+        .map_err(|_| protocol_error("handshake response acknowledgement timed out"))?
+        .map_err(|_| protocol_error("handshake response acknowledgement failed"))?;
+    if stopped.is_some() {
+        return Err(protocol_error("peer rejected handshake response"));
+    }
     Ok(())
 }
 

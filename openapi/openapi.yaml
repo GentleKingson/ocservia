@@ -476,6 +476,9 @@ components:
         labels:
           type: object
           maxProperties: 32
+          propertyNames:
+            minLength: 1
+            maxLength: 64
           additionalProperties:
             type: string
             minLength: 1

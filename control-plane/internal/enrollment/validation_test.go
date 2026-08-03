@@ -17,16 +17,24 @@ func TestAuditPayloadIsUnambiguous(t *testing.T) {
 	first.RequestID, first.Reason = "a|b", "c"
 	second := base
 	second.RequestID, second.Reason = "a", "b|c"
-	firstPayload, err := encodeAuditPayload([]byte("previous"), first)
+	eventID := uuid.Must(uuid.NewV7())
+	firstPayload, err := encodeAuditPayload([]byte("previous"), eventID, first)
 	if err != nil {
 		t.Fatal(err)
 	}
-	secondPayload, err := encodeAuditPayload([]byte("previous"), second)
+	secondPayload, err := encodeAuditPayload([]byte("previous"), eventID, second)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if bytes.Equal(firstPayload, secondPayload) {
 		t.Fatal("distinct audit fields produced the same payload")
+	}
+	otherIDPayload, err := encodeAuditPayload([]byte("previous"), uuid.Must(uuid.NewV7()), first)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Equal(firstPayload, otherIDPayload) {
+		t.Fatal("distinct audit event IDs produced the same payload")
 	}
 }
 

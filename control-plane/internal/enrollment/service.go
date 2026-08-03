@@ -516,21 +516,23 @@ func appendAudit(ctx context.Context, tx pgx.Tx, record auditRecord) error {
 	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
 		return fmt.Errorf("read audit chain: %w", err)
 	}
-	payload, err := encodeAuditPayload(previous, record)
+	eventID := uuid.Must(uuid.NewV7())
+	payload, err := encodeAuditPayload(previous, eventID, record)
 	if err != nil {
 		return fmt.Errorf("encode audit payload: %w", err)
 	}
 	digest := sha256.Sum256(payload)
-	_, err = tx.Exec(ctx, `INSERT INTO audit_events (id,workspace_id,occurred_at,actor_type,actor_id,action,resource_type,resource_id,request_id,result,reason,previous_event_hash,event_hash) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,'intent',$10,$11,$12)`, uuid.Must(uuid.NewV7()), record.WorkspaceID, record.At, record.ActorType, record.ActorID, record.Action, record.ResourceType, record.ResourceID, record.RequestID, record.Reason, previous, digest[:])
+	_, err = tx.Exec(ctx, `INSERT INTO audit_events (id,workspace_id,occurred_at,actor_type,actor_id,action,resource_type,resource_id,request_id,result,reason,previous_event_hash,event_hash) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,'intent',$10,$11,$12)`, eventID, record.WorkspaceID, record.At, record.ActorType, record.ActorID, record.Action, record.ResourceType, record.ResourceID, record.RequestID, record.Reason, previous, digest[:])
 	if err != nil {
 		return fmt.Errorf("append audit intent: %w", err)
 	}
 	return nil
 }
 
-func encodeAuditPayload(previous []byte, record auditRecord) ([]byte, error) {
+func encodeAuditPayload(previous []byte, eventID uuid.UUID, record auditRecord) ([]byte, error) {
 	return json.Marshal(struct {
 		Previous     []byte    `json:"previous"`
+		EventID      uuid.UUID `json:"event_id"`
 		WorkspaceID  uuid.UUID `json:"workspace_id"`
 		OccurredAt   time.Time `json:"occurred_at"`
 		ActorType    string    `json:"actor_type"`
@@ -541,7 +543,7 @@ func encodeAuditPayload(previous []byte, record auditRecord) ([]byte, error) {
 		RequestID    string    `json:"request_id"`
 		Reason       string    `json:"reason"`
 	}{
-		Previous: previous, WorkspaceID: record.WorkspaceID, OccurredAt: record.At,
+		Previous: previous, EventID: eventID, WorkspaceID: record.WorkspaceID, OccurredAt: record.At,
 		ActorType: record.ActorType, ActorID: record.ActorID, Action: record.Action,
 		ResourceType: record.ResourceType, ResourceID: record.ResourceID,
 		RequestID: record.RequestID, Reason: record.Reason,
