@@ -22,6 +22,8 @@ export const PlatformEventType = {
   CommandResult: "command_result",
   Heartbeat: "heartbeat",
   Error: "error",
+  PathChanged: "path_changed",
+  Telemetry: "telemetry",
 } as const;
 export type PlatformEventType =
   (typeof PlatformEventType)[keyof typeof PlatformEventType];

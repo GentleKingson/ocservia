@@ -2192,6 +2192,7 @@ dependencies = [
  "prost-types",
  "rand 0.9.5",
  "rustix",
+ "serde_json",
  "tokio",
  "tracing",
  "uuid",

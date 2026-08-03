@@ -274,6 +274,98 @@ paths:
           $ref: "#/components/responses/Problem"
         default:
           $ref: "#/components/responses/Problem"
+  /nodes:
+    get:
+      operationId: listNodes
+      summary: List node observed state
+      tags: [nodes]
+      parameters:
+        - $ref: "#/components/parameters/Cursor"
+        - $ref: "#/components/parameters/PageSize"
+      responses:
+        "200":
+          description: Nodes ordered by stable ID.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/NodePage"
+        "400":
+          $ref: "#/components/responses/Problem"
+        default:
+          $ref: "#/components/responses/Problem"
+  /nodes/{node_id}:
+    get:
+      operationId: getNode
+      summary: Get current node observed state
+      tags: [nodes]
+      parameters:
+        - $ref: "#/components/parameters/NodeId"
+      responses:
+        "200":
+          description: Node state with freshness and path information.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/NodeObservedState"
+        "404":
+          $ref: "#/components/responses/Problem"
+        default:
+          $ref: "#/components/responses/Problem"
+  /nodes/{node_id}/sessions:
+    get:
+      operationId: listNodeSessions
+      summary: List current sessions observed on a node
+      tags: [nodes]
+      parameters:
+        - $ref: "#/components/parameters/NodeId"
+        - $ref: "#/components/parameters/Cursor"
+        - $ref: "#/components/parameters/PageSize"
+      responses:
+        "200":
+          description: Current observed sessions ordered by stable session ID.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/NodeSessionPage"
+        "400":
+          $ref: "#/components/responses/Problem"
+        default:
+          $ref: "#/components/responses/Problem"
+  /nodes/{node_id}/telemetry:
+    get:
+      operationId: listNodeTelemetry
+      summary: Query bounded raw or rolled-up node telemetry
+      tags: [nodes]
+      parameters:
+        - $ref: "#/components/parameters/NodeId"
+        - name: metric
+          in: query
+          required: true
+          schema:
+            $ref: "#/components/schemas/TelemetryMetric"
+        - name: resolution
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [raw, 5m, 1h]
+            default: 5m
+        - name: since
+          in: query
+          required: false
+          schema:
+            $ref: "#/components/schemas/UtcDateTime"
+      responses:
+        "200":
+          description: At most 2000 chronological telemetry points.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TelemetryPointPage"
+        "400":
+          $ref: "#/components/responses/Problem"
+        default:
+          $ref: "#/components/responses/Problem"
 components:
   securitySchemes:
     oidc:
@@ -519,9 +611,103 @@ components:
         status:
           type: string
           enum: [active, revoked]
+    DropCounters:
+      type: object
+      additionalProperties: false
+      required: [security, health, aggregate, raw]
+      properties:
+        security: { type: integer, format: int64, minimum: 0 }
+        health: { type: integer, format: int64, minimum: 0 }
+        aggregate: { type: integer, format: int64, minimum: 0 }
+        raw: { type: integer, format: int64, minimum: 0 }
+    NodeObservedState:
+      type: object
+      additionalProperties: false
+      required: [id, name, trust_status, connection_state, freshness, dropped, session_count]
+      properties:
+        id: { $ref: "#/components/schemas/UuidV7" }
+        name: { type: string, minLength: 1, maxLength: 128 }
+        trust_status: { type: string, enum: [pending, active, revoked, offline] }
+        connection_state: { type: string, enum: [online, offline] }
+        freshness: { type: string, enum: [fresh, stale, never] }
+        observed_at: { $ref: "#/components/schemas/UtcDateTime" }
+        last_heartbeat_at: { $ref: "#/components/schemas/UtcDateTime" }
+        boot_id: { type: string, minLength: 1, maxLength: 128 }
+        agent_instance_id: { $ref: "#/components/schemas/UuidV7" }
+        agent_version: { type: string, minLength: 1, maxLength: 128 }
+        ocserv_version: { type: string, minLength: 1, maxLength: 128 }
+        os_release: { type: string, minLength: 1, maxLength: 128 }
+        ocserv: { type: object, additionalProperties: true }
+        system: { type: object, additionalProperties: true }
+        path: { $ref: "#/components/schemas/ConnectionPathState" }
+        dropped: { $ref: "#/components/schemas/DropCounters" }
+        session_count: { type: integer, minimum: 0 }
+    ConnectionPathState:
+      type: object
+      additionalProperties: true
+      required: [mode, rtt_ms]
+      properties:
+        mode: { type: string, enum: [direct, relay, unknown] }
+        rtt_ms: { type: number, minimum: 0 }
+        relay_url: { type: string, format: uri }
+    NodePage:
+      type: object
+      additionalProperties: false
+      required: [items, page]
+      properties:
+        items:
+          type: array
+          maxItems: 200
+          items: { $ref: "#/components/schemas/NodeObservedState" }
+        page: { $ref: "#/components/schemas/PageInfo" }
+    NodeSession:
+      type: object
+      additionalProperties: false
+      required: [id, username, client_ip, connected_at, bytes_in, bytes_out]
+      properties:
+        id: { type: string, minLength: 1, maxLength: 256 }
+        username: { type: string, minLength: 1, maxLength: 256 }
+        client_ip: { type: string, format: ip }
+        connected_at: { $ref: "#/components/schemas/UtcDateTime" }
+        bytes_in: { type: integer, format: int64, minimum: 0 }
+        bytes_out: { type: integer, format: int64, minimum: 0 }
+    NodeSessionPage:
+      type: object
+      additionalProperties: false
+      required: [items, page]
+      properties:
+        items:
+          type: array
+          maxItems: 200
+          items: { $ref: "#/components/schemas/NodeSession" }
+        page: { $ref: "#/components/schemas/PageInfo" }
+    TelemetryMetric:
+      type: string
+      enum: [cpu_usage_ratio, memory_used_bytes, network_rx_bytes, network_tx_bytes, session_count, connection_rtt_ms]
+    TelemetryPoint:
+      type: object
+      additionalProperties: false
+      required: [at, metric, count, minimum, maximum, average]
+      properties:
+        at: { $ref: "#/components/schemas/UtcDateTime" }
+        metric: { $ref: "#/components/schemas/TelemetryMetric" }
+        count: { type: integer, format: int64, minimum: 1 }
+        minimum: { type: number }
+        maximum: { type: number }
+        average: { type: number }
+    TelemetryPointPage:
+      type: object
+      additionalProperties: false
+      required: [items, resolution]
+      properties:
+        items:
+          type: array
+          maxItems: 2000
+          items: { $ref: "#/components/schemas/TelemetryPoint" }
+        resolution: { type: string, enum: [raw, 5m, 1h] }
     PlatformEventType:
       type: string
-      enum: [connected, disconnected, command_result, heartbeat, error]
+      enum: [connected, disconnected, command_result, heartbeat, error, path_changed, telemetry]
     Traceparent:
       type: string
       pattern: "^00-[0-9a-f]{32}-[0-9a-f]{16}-[0-9a-f]{2}$"

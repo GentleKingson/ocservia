@@ -18,7 +18,7 @@ import (
 
 func (s *Server) createSimulation(w http.ResponseWriter, r *http.Request) {
 	service := s.localSliceService()
-	if service == nil {
+	if service == nil || !s.localSimulator {
 		writeProblem(w, r, http.StatusNotFound, "https://ocservia.dev/problems/not-found", "Resource not found", "the requested resource does not exist")
 		return
 	}

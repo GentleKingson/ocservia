@@ -141,6 +141,13 @@ func GrantRuntimePrivileges(ctx context.Context, pool *pgxpool.Pool, role string
 		"GRANT SELECT, INSERT ON transport_events TO " + identifier,
 		"GRANT UPDATE (transport_cursor_valid) ON transport_events TO " + identifier,
 		"GRANT USAGE ON SEQUENCE transport_events_ingest_sequence_seq TO " + identifier,
+		"GRANT SELECT, INSERT ON telemetry_ingest_batches TO " + identifier,
+		"GRANT SELECT, INSERT, UPDATE ON node_observed_snapshots, node_sessions TO " + identifier,
+		"GRANT DELETE ON node_sessions TO " + identifier,
+		"GRANT SELECT, INSERT ON telemetry_security_events, telemetry_samples TO " + identifier,
+		"GRANT SELECT, INSERT, UPDATE, DELETE ON telemetry_rollups_5m, telemetry_rollups_1h TO " + identifier,
+		"GRANT EXECUTE ON FUNCTION telemetry_ensure_month_partition(timestamptz) TO " + identifier,
+		"GRANT EXECUTE ON FUNCTION telemetry_drop_expired_partitions(timestamptz) TO " + identifier,
 	}
 	for _, statement := range statements {
 		if _, err := pool.Exec(ctx, statement); err != nil {

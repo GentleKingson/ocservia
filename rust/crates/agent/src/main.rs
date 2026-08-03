@@ -6,10 +6,11 @@ use std::time::{Duration, SystemTime};
 use iroh::endpoint::{RelayMode, presets};
 use iroh::{Endpoint, EndpointAddr, EndpointId};
 use ocservia_agent::PrivdClient;
-use ocservia_agent_protocol::privd_response;
-use ocservia_command_journal::Journal;
+use ocservia_agent_protocol::{PrivdResponse, privd_response};
+use ocservia_command_journal::{Journal, TelemetryInsert};
 use ocservia_contracts::generated::ocserv::platform::agent::v1::{
-    HandshakeResult, SessionHandshake, SessionHandshakeResponse,
+    HandshakeResult, MetricSample, ObservedSnapshot, SessionHandshake, SessionHandshakeResponse,
+    SessionObservation, TelemetryBatch, TelemetryDropCounters, TelemetryPriority,
 };
 use prost::Message;
 use uuid::Uuid;
@@ -22,7 +23,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     ocservia_observability::init("ocservia-agent")?;
     ocservia_agent::ensure_unprivileged(rustix::process::geteuid().as_raw())?;
     let config = parse_args()?;
-    let _journal = Journal::open(&config.journal)?;
+    let mut journal = Journal::open(&config.journal)?;
     let privd = PrivdClient::new(config.privd_socket, Duration::from_secs(5))?;
     let observations = privd.snapshot().await?;
     let failures = observations
@@ -60,11 +61,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         .relay_mode(RelayMode::Default)
         .bind()
         .await?;
+    let boot_id = ocservia_agent::read_boot_id().await?;
+    let os_release = ocservia_agent::read_os_release().await?;
+    let agent_instance_id = Uuid::now_v7();
     let run = async {
         let mut attempt = 0_u32;
         let backoff = ocservia_agent::Backoff::default();
         loop {
-            match connect_once(&endpoint, controller, node_id, identity.endpoint_id()).await {
+            let mut session = SessionContext {
+                node_id,
+                endpoint_id: identity.endpoint_id(),
+                privd: &privd,
+                journal: &mut journal,
+                boot_id: &boot_id,
+                os_release: &os_release,
+                agent_instance_id,
+            };
+            match connect_once(&endpoint, controller, &mut session).await {
                 Ok(()) => attempt = 0,
                 Err(error) => {
                     tracing::warn!(error = %error, attempt, "controller connection ended");
@@ -83,11 +96,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     Ok(())
 }
 
+struct SessionContext<'a> {
+    node_id: Uuid,
+    endpoint_id: EndpointId,
+    privd: &'a PrivdClient,
+    journal: &'a mut Journal,
+    boot_id: &'a str,
+    os_release: &'a str,
+    agent_instance_id: Uuid,
+}
+
 async fn connect_once(
     endpoint: &Endpoint,
     controller: EndpointId,
-    node_id: Uuid,
-    endpoint_id: EndpointId,
+    session: &mut SessionContext<'_>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let connection = endpoint
         .connect(EndpointAddr::new(controller), AGENT_ALPN)
@@ -97,8 +119,8 @@ async fn connect_once(
         protocol_minor: 0,
         agent_version: env!("CARGO_PKG_VERSION").to_owned(),
         controller_version: String::new(),
-        node_id: node_id.as_bytes().to_vec(),
-        endpoint_id: endpoint_id.as_bytes().to_vec(),
+        node_id: session.node_id.as_bytes().to_vec(),
+        endpoint_id: session.endpoint_id.as_bytes().to_vec(),
         capabilities: vec![
             "ocserv.status.read".to_owned(),
             "ocserv.version.read".to_owned(),
@@ -107,9 +129,9 @@ async fn connect_once(
             "ocserv.config_fingerprint.read".to_owned(),
         ],
         ocserv_version: "unknown".to_owned(),
-        os_release: ocservia_agent::read_os_release().await?,
-        boot_id: ocservia_agent::read_boot_id().await?,
-        agent_instance_id: Uuid::now_v7().as_bytes().to_vec(),
+        os_release: session.os_release.to_owned(),
+        boot_id: session.boot_id.to_owned(),
+        agent_instance_id: session.agent_instance_id.as_bytes().to_vec(),
         supported_compressions: Vec::new(),
         max_message_size: 1024 * 1024,
         time: Some(SystemTime::now().into()),
@@ -141,11 +163,130 @@ async fn connect_once(
     }
     tracing::info!(controller = %controller, "agent session accepted");
     let mut heartbeat = tokio::time::interval(Duration::from_secs(30));
+    let mut sequence = 0_u64;
     loop {
         tokio::select! {
             _ = connection.closed() => return Ok(()),
-            _ = heartbeat.tick() => tracing::info!(node_id = %node_id, "agent heartbeat"),
+            _ = heartbeat.tick() => {
+                let observations=session.privd.snapshot().await?;
+                sequence=sequence.saturating_add(1);
+                let drops=session.journal.telemetry_drop_counters()?;
+                let batch=build_telemetry(session,sequence,&observations,&connection,drops);
+                let payload=batch.encode_to_vec();
+                let batch_id: [u8;16]=batch.batch_id.as_slice().try_into().map_err(|_| invalid("telemetry batch ID invalid"))?;
+                let now=SystemTime::now().duration_since(SystemTime::UNIX_EPOCH)?.as_secs();
+                session.journal.enqueue_telemetry(&TelemetryInsert { batch_id: &batch_id, priority: 2, observed_at: i64::try_from(now)?, expires_at: i64::try_from(now+24*60*60)?, payload: &payload, now: i64::try_from(now)?, max_bytes: 64*1024*1024 })?;
+                for (pending_id,pending) in session.journal.telemetry_pending(32)? {
+                    send_telemetry(&connection,&pending).await?;
+                    session.journal.acknowledge_telemetry(&pending_id)?;
+                }
+                tracing::info!(node_id = %session.node_id, sequence, "agent telemetry delivered");
+            },
         }
+    }
+}
+
+async fn send_telemetry(
+    connection: &iroh::endpoint::Connection,
+    payload: &[u8],
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    if payload.is_empty() || payload.len() > 512 * 1024 {
+        return Err(invalid("telemetry payload size invalid").into());
+    }
+    let mut send = tokio::time::timeout(HANDSHAKE_TIMEOUT, connection.open_uni()).await??;
+    send.write_all(&u32::try_from(payload.len())?.to_be_bytes())
+        .await?;
+    send.write_all(payload).await?;
+    send.finish()?;
+    Ok(())
+}
+
+fn build_telemetry(
+    session: &SessionContext<'_>,
+    sequence: u64,
+    observations: &[PrivdResponse],
+    connection: &iroh::endpoint::Connection,
+    drops: [u64; 4],
+) -> TelemetryBatch {
+    let now = SystemTime::now();
+    let mut service = serde_json::json!({"active_state":"unknown","sub_state":"unknown"});
+    let mut version = "unknown".to_owned();
+    let mut sessions = Vec::new();
+    let mut fingerprint = serde_json::json!({});
+    for observation in observations {
+        match &observation.result {
+            Some(privd_response::Result::ServiceStatus(value)) => {
+                service = serde_json::json!({"load_state":value.load_state,"active_state":value.active_state,"sub_state":value.sub_state});
+            }
+            Some(privd_response::Result::OcservVersion(value)) => {
+                version.clone_from(&value.version);
+            }
+            Some(privd_response::Result::ConfigFingerprint(value)) => {
+                fingerprint = serde_json::json!({"config_sha256":value.sha256,"config_size_bytes":value.size_bytes});
+            }
+            Some(privd_response::Result::SessionList(value)) => {
+                sessions = value
+                    .sessions
+                    .iter()
+                    .map(|session| SessionObservation {
+                        session_id: session.id.clone(),
+                        username: session.username.clone(),
+                        client_ip: session.remote_ip.clone(),
+                        connected_at: Some(now.into()),
+                        bytes_in: 0,
+                        bytes_out: 0,
+                    })
+                    .collect();
+            }
+            _ => {}
+        }
+    }
+    let paths = connection.paths();
+    let selected = paths.iter().find(iroh::endpoint::Path::is_selected);
+    let (mode, rtt) = selected.map_or(("unknown", 0), |path| {
+        (
+            if path.is_ip() {
+                "direct"
+            } else if path.is_relay() {
+                "relay"
+            } else {
+                "unknown"
+            },
+            u64::try_from(path.rtt().as_millis()).unwrap_or(u64::MAX),
+        )
+    });
+    let ocserv = serde_json::json!({"service":service,"configuration":fingerprint});
+    let path = serde_json::json!({"mode":mode,"rtt_ms":rtt});
+    let session_count = f64::from(u32::try_from(sessions.len()).unwrap_or(u32::MAX));
+    TelemetryBatch {
+        batch_id: Uuid::now_v7().as_bytes().to_vec(),
+        node_id: session.node_id.as_bytes().to_vec(),
+        sequence,
+        priority: i32::from(TelemetryPriority::CurrentHealth),
+        snapshot: Some(ObservedSnapshot {
+            observed_at: Some(now.into()),
+            boot_id: session.boot_id.to_owned(),
+            agent_instance_id: session.agent_instance_id.as_bytes().to_vec(),
+            agent_version: env!("CARGO_PKG_VERSION").to_owned(),
+            ocserv_version: version,
+            os_release: session.os_release.to_owned(),
+            ocserv_json: serde_json::to_vec(&ocserv).unwrap_or_else(|_| b"{}".to_vec()),
+            system_json: b"{}".to_vec(),
+            path_json: serde_json::to_vec(&path).unwrap_or_else(|_| b"{}".to_vec()),
+            dropped: Some(TelemetryDropCounters {
+                security: drops[0],
+                health: drops[1],
+                aggregate: drops[2],
+                raw: drops[3],
+            }),
+        }),
+        sessions,
+        samples: vec![MetricSample {
+            sampled_at: Some(now.into()),
+            metric: "session_count".to_owned(),
+            value: session_count,
+        }],
+        security_events: Vec::new(),
     }
 }
 

@@ -9,6 +9,7 @@ import (
 	agentv1 "github.com/GentleKingson/ocservia/control-plane/gen/proto/ocserv/platform/agent/v1"
 	transportv1 "github.com/GentleKingson/ocservia/control-plane/gen/proto/ocserv/platform/transport/v1"
 	"github.com/GentleKingson/ocservia/control-plane/internal/audit"
+	telemetrystore "github.com/GentleKingson/ocservia/control-plane/internal/telemetry"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
@@ -345,6 +346,11 @@ func (s *Service) Ingest(ctx context.Context, event *transportv1.TransportEvent)
 	if err != nil {
 		return err
 	}
+	if eventType == "telemetry" {
+		if _, err := telemetrystore.New(s.pool).IngestWire(ctx, event.GetPayload()); err != nil {
+			return fmt.Errorf("ingest telemetry payload: %w", err)
+		}
+	}
 	occurredAt := event.GetOccurredAt()
 	if occurredAt == nil || occurredAt.CheckValid() != nil {
 		return errors.New("event occurred_at is invalid")
@@ -368,8 +374,10 @@ func (s *Service) Ingest(ctx context.Context, event *transportv1.TransportEvent)
 	if eventType == "disconnected" {
 		status = "offline"
 	}
-	if _, err := tx.Exec(ctx, "UPDATE nodes SET status = $2, updated_at = $3, version = version + 1 WHERE id = $1 AND status IN ('active','offline')", nodeID, status, occurredAt.AsTime()); err != nil {
-		return fmt.Errorf("update node from transport event: %w", err)
+	if eventType != "telemetry" {
+		if _, err := tx.Exec(ctx, "UPDATE nodes SET status = $2, updated_at = $3, version = version + 1 WHERE id = $1 AND status IN ('active','offline')", nodeID, status, occurredAt.AsTime()); err != nil {
+			return fmt.Errorf("update node from transport event: %w", err)
+		}
 	}
 	operationState := "running"
 	switch eventType {
@@ -391,7 +399,7 @@ func (s *Service) Ingest(ctx context.Context, event *transportv1.TransportEvent)
 			nodeID, occurredAt.AsTime()); err != nil {
 			return fmt.Errorf("mark disconnected operations unknown: %w", err)
 		}
-	} else {
+	} else if eventType != "telemetry" && eventType != "path_changed" {
 		if _, err := tx.Exec(ctx, `
 			UPDATE operations AS operation
 			SET state = $2, updated_at = $3, version = version + 1
@@ -572,6 +580,8 @@ func eventName(value transportv1.TransportEventType) (string, error) {
 		return "error", nil
 	case transportv1.TransportEventType_TRANSPORT_EVENT_TYPE_PATH_CHANGED:
 		return "path_changed", nil
+	case transportv1.TransportEventType_TRANSPORT_EVENT_TYPE_TELEMETRY:
+		return "telemetry", nil
 	default:
 		return "", errors.New("unsupported transport event type")
 	}
