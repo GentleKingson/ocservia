@@ -88,6 +88,9 @@ func TestEnrollmentTrustLifecycleIntegration(t *testing.T) {
 	if err != nil || response.GetResult() != agentv1.HandshakeResult_HANDSHAKE_RESULT_ACCEPTED {
 		t.Fatalf("offline authorization = %v, %v", response, err)
 	}
+	if retryTrust, err := service.Approve(ctx, Approval{NodeID: nodeID, Labels: map[string]string{"region": "test"}, Policy: "readonly", Capabilities: []string{"ocserv.status.read"}, ActorID: "integration", Reason: "retry approval", RequestID: uuid.Must(uuid.NewV7()).String()}); err != nil || retryTrust.NodeID != nodeID {
+		t.Fatalf("offline approval retry = %v, %v", retryTrust, err)
+	}
 	handshake.Time = timestamppb.New(time.Now().Add(-MaxClockSkew - time.Second))
 	response, err = service.AuthorizeSession(ctx, &transportv1.AuthorizeSessionRequest{RemoteEndpointId: endpoint, Handshake: handshake})
 	if err != nil || response.GetResult() != agentv1.HandshakeResult_HANDSHAKE_RESULT_CLOCK_SKEW {

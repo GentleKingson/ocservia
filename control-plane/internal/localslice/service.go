@@ -373,7 +373,7 @@ func (s *Service) Ingest(ctx context.Context, event *transportv1.TransportEvent)
 	if eventType == "disconnected" {
 		status = "offline"
 	}
-	if _, err := tx.Exec(ctx, "UPDATE nodes SET status = $2, updated_at = $3, version = version + 1 WHERE id = $1", nodeID, status, occurredAt.AsTime()); err != nil {
+	if _, err := tx.Exec(ctx, "UPDATE nodes SET status = $2, updated_at = $3, version = version + 1 WHERE id = $1 AND status <> 'revoked'", nodeID, status, occurredAt.AsTime()); err != nil {
 		return fmt.Errorf("update node from transport event: %w", err)
 	}
 	operationState := "running"

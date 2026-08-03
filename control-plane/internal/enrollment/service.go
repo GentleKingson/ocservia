@@ -140,7 +140,7 @@ func (s *Service) CreateToken(ctx context.Context, spec TokenSpec) (Token, error
 
 func (s *Service) Enroll(ctx context.Context, request *agentv1.EnrollRequest) (*agentv1.EnrollResponse, error) {
 	if err := validateEnrollment(request); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("%w: %v", ErrInvalidRequest, err)
 	}
 	raw, err := base64.RawURLEncoding.DecodeString(request.GetToken())
 	if err != nil || len(raw) != 32 {
@@ -198,7 +198,10 @@ func (s *Service) Enroll(ctx context.Context, request *agentv1.EnrollRequest) (*
 		}
 	}
 	command, err := tx.Exec(ctx, `UPDATE enrollment_tokens SET consumed_at=$1,consumed_node_id=$2 WHERE id=$3 AND consumed_at IS NULL`, now, nodeID, tokenID)
-	if err != nil || command.RowsAffected() != 1 {
+	if err != nil {
+		return nil, fmt.Errorf("consume enrollment token: %w", err)
+	}
+	if command.RowsAffected() != 1 {
 		return nil, ErrInvalidToken
 	}
 	if err := appendAudit(ctx, tx, auditRecord{WorkspaceID: workspaceID, ActorType: "agent", ActorID: fmt.Sprintf("endpoint:%x", request.GetEndpointId()), Action: "node.enroll", ResourceType: "node", ResourceID: nodeID, RequestID: uuid.Must(uuid.NewV7()).String(), At: now}); err != nil {
@@ -229,14 +232,14 @@ func (s *Service) Approve(ctx context.Context, approval Approval) (NodeTrust, er
 	var workspaceID uuid.UUID
 	var endpointID []byte
 	var currentStatus string
-	err = tx.QueryRow(ctx, `SELECT n.workspace_id,k.endpoint_id,n.status FROM nodes n JOIN node_endpoint_keys k ON k.node_id=n.id WHERE n.id=$1 AND n.status IN ('pending','active') FOR UPDATE OF n,k`, approval.NodeID).Scan(&workspaceID, &endpointID, &currentStatus)
+	err = tx.QueryRow(ctx, `SELECT n.workspace_id,k.endpoint_id,n.status FROM nodes n JOIN node_endpoint_keys k ON k.node_id=n.id WHERE n.id=$1 AND n.status IN ('pending','active','offline') FOR UPDATE OF n,k`, approval.NodeID).Scan(&workspaceID, &endpointID, &currentStatus)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return NodeTrust{}, ErrInvalidTransition
 	}
 	if err != nil {
 		return NodeTrust{}, fmt.Errorf("lock pending node: %w", err)
 	}
-	if currentStatus == "active" {
+	if currentStatus == "active" || currentStatus == "offline" {
 		return NodeTrust{NodeID: approval.NodeID, EndpointID: endpointID}, nil
 	}
 	for key, value := range approval.Labels {

@@ -40,8 +40,10 @@ func (h *Handler) Enroll(ctx context.Context, request *agentv1.EnrollRequest) (*
 		return nil, status.Error(codes.PermissionDenied, "enrollment rejected")
 	case errors.Is(err, enrollment.ErrPendingLimit):
 		return nil, status.Error(codes.ResourceExhausted, "pending enrollment capacity reached")
-	case err != nil:
+	case errors.Is(err, enrollment.ErrInvalidRequest):
 		return nil, status.Error(codes.InvalidArgument, "enrollment request rejected")
+	case err != nil:
+		return nil, status.Error(codes.Unavailable, "trust authority unavailable")
 	default:
 		return response, nil
 	}
@@ -102,9 +104,13 @@ func listen(path string) (net.Listener, socketIdentity, error) {
 	if !filepath.IsAbs(path) {
 		return nil, socketIdentity{}, errors.New("trust socket path must be absolute")
 	}
-	parent, err := os.Stat(filepath.Dir(path))
+	parent, err := os.Lstat(filepath.Dir(path))
 	if err != nil || !parent.IsDir() {
 		return nil, socketIdentity{}, errors.New("trust socket parent must exist")
+	}
+	parentStat, ok := parent.Sys().(*syscall.Stat_t)
+	if !ok || int(parentStat.Uid) != os.Geteuid() || parent.Mode().Perm()&0o022 != 0 {
+		return nil, socketIdentity{}, errors.New("trust socket parent must be owned by this process and not group or world writable")
 	}
 	if info, err := os.Lstat(path); err == nil {
 		if info.Mode()&os.ModeSocket == 0 {

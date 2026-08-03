@@ -51,7 +51,7 @@ func Load(args []string, lookup LookupEnv) (Config, error) {
 		Role: RoleAll, Environment: "development", HTTPAddress: "127.0.0.1:8080",
 		BodyLimit: 1 << 20, RequestTimeout: 15 * time.Second, ShutdownTimeout: 10 * time.Second,
 		LogLevelName: "info", TransportSocket: "/run/ocserv-platform/transportd.sock",
-		TrustSocket:      "/run/ocserv-platform/control-plane-trust.sock",
+		TrustSocket:      "/run/ocserv-trust/control-plane.sock",
 		TransportTimeout: 3 * time.Second, TransportQueue: 256,
 	}
 	setString(lookup, "OCSERV_ENVIRONMENT", &cfg.Environment)

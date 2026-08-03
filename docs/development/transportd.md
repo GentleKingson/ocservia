@@ -16,7 +16,7 @@ in an image, source tree, command-line argument, or log. The endpoint identifier
 which is public, is logged at startup.
 
 For the database-backed lifecycle, pass
-`--trust-socket /run/ocserv-platform/control-plane-trust.sock`. The Iroh hook
+`--trust-socket /run/ocserv-trust/control-plane.sock`. The Iroh hook
 then checks remote EndpointIDs with the Go trust service before reading
 application data. The startup-only `--approved-binding NODE_UUID=ENDPOINT_ID`
 and `--revoked-endpoint ENDPOINT_ID` flags remain available for isolated tests
@@ -30,7 +30,7 @@ ocservia-transportd \
   --socket /run/ocserv-platform/transportd.sock \
   --key-file /run/secrets/controller-iroh.key \
   --relay-mode default \
-  --trust-socket /run/ocserv-platform/control-plane-trust.sock
+  --trust-socket /run/ocserv-trust/control-plane.sock
 ```
 
 Use `--relay-mode disabled` for isolated direct-path tests. The endpoint limits

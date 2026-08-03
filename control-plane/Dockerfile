@@ -12,7 +12,8 @@ FROM debian:bookworm-slim
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl \
     && rm -rf /var/lib/apt/lists/* \
     && groupadd --system --gid 65532 ocservia \
-    && usermod --gid ocservia nobody
+    && usermod --gid ocservia nobody \
+    && install -d -o nobody -g ocservia -m 0750 /run/ocserv-trust
 COPY --from=build /out/ocserv-control /usr/local/bin/ocserv-control
 USER nobody:ocservia
 ENTRYPOINT ["/usr/local/bin/ocserv-control"]

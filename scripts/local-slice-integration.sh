@@ -9,6 +9,7 @@ RUN_ID="${RUN_ID:-I03-local-slice-$(date -u +%Y%m%dT%H%M%SZ)}"
 PREFIX="$(printf '%s' "${RUN_ID}" | tr '[:upper:]_' '[:lower:]-' | tr -cd 'a-z0-9-')"
 TMP_ROOT="${TMPDIR:-/tmp}/ocservia-${RUN_ID}"
 SOCKET="${TMP_ROOT}/run/transportd.sock"
+TRUST_SOCKET="${TMP_ROOT}/trust/control-plane.sock"
 POSTGRES="${PREFIX}-postgres"
 API_PORT=$((20000 + $(printf '%s' "${RUN_ID}" | cksum | awk '{print $1}') % 20000))
 AUTH_TOKEN="local-slice-integration-token-32-characters"
@@ -35,7 +36,8 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
-mkdir -p "${TMP_ROOT}/run"
+mkdir -p "${TMP_ROOT}/run" "${TMP_ROOT}/trust"
+chmod 0700 "${TMP_ROOT}/trust"
 (cd "${ROOT}/control-plane" && go build -trimpath -o "${TMP_ROOT}/ocserv-control" ./cmd/ocserv-control)
 (cd "${ROOT}/rust" && cargo build --locked --package ocservia-transportd-stub)
 
@@ -72,6 +74,7 @@ start_control() {
     OCSERV_DATABASE_URL="${runtime_url}" OCSERV_LOCAL_SIMULATOR=true \
     OCSERV_DEV_AUTH_TOKEN="${AUTH_TOKEN}" \
     OCSERV_TRANSPORT_SOCKET="${SOCKET}" OCSERV_TRANSPORT_QUEUE_CAPACITY=8 \
+    OCSERV_TRUST_SOCKET="${TRUST_SOCKET}" \
     "${TMP_ROOT}/ocserv-control" --role=all >"${TMP_ROOT}/control.log" 2>&1 &
   CONTROL_PID=$!
   PIDS+=("${CONTROL_PID}")

@@ -22,8 +22,12 @@ Enable the trust service on worker or all roles by setting both:
 
 ```text
 OCSERV_CONTROLLER_ENDPOINT_ID=<64 lowercase hex characters>
-OCSERV_TRUST_SOCKET=/run/ocserv-platform/control-plane-trust.sock
+OCSERV_TRUST_SOCKET=/run/ocserv-trust/control-plane.sock
 ```
+
+The trust-socket directory must be owned by the control-plane process and must
+not be group- or world-writable. Keep it separate from the transport socket
+directory so a compromised transport process cannot replace the trust service.
 
 The endpoint value must match the public identity derived from the controller
 key used by `ocservia-transportd`. The trust socket's parent directory must
