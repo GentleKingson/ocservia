@@ -40,6 +40,14 @@ impl Identity {
         ensure_directory(directory)?;
         let key_path = directory.join(KEY_FILE);
         let pin_path = directory.join(CONTROLLER_FILE);
+        let key_exists = path_exists(&key_path)?;
+        let pin_exists = path_exists(&pin_path)?;
+        if key_exists != pin_exists {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "identity directory is partially initialized",
+            ));
+        }
         let key = match secure_open(&key_path) {
             Ok(mut file) => read_key(&mut file)?,
             Err(error) if error.kind() == io::ErrorKind::NotFound => create_key(&key_path)?,
@@ -80,6 +88,14 @@ impl Identity {
     #[must_use]
     pub const fn secret_key(&self) -> &SecretKey {
         &self.key
+    }
+}
+
+fn path_exists(path: &Path) -> Result<bool, io::Error> {
+    match std::fs::symlink_metadata(path) {
+        Ok(_) => Ok(true),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error),
     }
 }
 
@@ -213,6 +229,21 @@ mod tests {
         let error = Identity::provision(&directory, SecretKey::generate().public())
             .expect_err("substitution rejected");
         assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+        std::fs::remove_dir_all(directory).expect("remove identity fixture");
+    }
+
+    #[test]
+    fn partial_identity_is_rejected_instead_of_rotated() {
+        let directory = test_dir().with_extension("partial");
+        let _ = std::fs::remove_dir_all(&directory);
+        let controller = SecretKey::generate().public();
+        Identity::provision(&directory, controller).expect("provision identity");
+        std::fs::remove_file(directory.join(KEY_FILE)).expect("remove endpoint key");
+
+        let error = Identity::provision(&directory, controller).expect_err("partial identity");
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert!(!directory.join(KEY_FILE).exists());
+        assert!(directory.join(CONTROLLER_FILE).exists());
         std::fs::remove_dir_all(directory).expect("remove identity fixture");
     }
 }

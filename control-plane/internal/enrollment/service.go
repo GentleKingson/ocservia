@@ -508,16 +508,42 @@ func appendAudit(ctx context.Context, tx pgx.Tx, record auditRecord) error {
 	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1,0))`, record.WorkspaceID.String()); err != nil {
 		return fmt.Errorf("lock audit chain: %w", err)
 	}
+	if err := tx.QueryRow(ctx, `SELECT clock_timestamp()`).Scan(&record.At); err != nil {
+		return fmt.Errorf("assign audit order: %w", err)
+	}
 	var previous []byte
 	err := tx.QueryRow(ctx, `SELECT event_hash FROM audit_events WHERE workspace_id=$1 ORDER BY occurred_at DESC,id DESC LIMIT 1`, record.WorkspaceID).Scan(&previous)
 	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
 		return fmt.Errorf("read audit chain: %w", err)
 	}
-	payload := fmt.Sprintf("%x|%s|%s|%s|%s|%s|%s|%s|%s|%s", previous, record.WorkspaceID, record.At.Format(time.RFC3339Nano), record.ActorType, record.ActorID, record.Action, record.ResourceType, record.ResourceID, record.RequestID, record.Reason)
-	digest := sha256.Sum256([]byte(payload))
+	payload, err := encodeAuditPayload(previous, record)
+	if err != nil {
+		return fmt.Errorf("encode audit payload: %w", err)
+	}
+	digest := sha256.Sum256(payload)
 	_, err = tx.Exec(ctx, `INSERT INTO audit_events (id,workspace_id,occurred_at,actor_type,actor_id,action,resource_type,resource_id,request_id,result,reason,previous_event_hash,event_hash) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,'intent',$10,$11,$12)`, uuid.Must(uuid.NewV7()), record.WorkspaceID, record.At, record.ActorType, record.ActorID, record.Action, record.ResourceType, record.ResourceID, record.RequestID, record.Reason, previous, digest[:])
 	if err != nil {
 		return fmt.Errorf("append audit intent: %w", err)
 	}
 	return nil
+}
+
+func encodeAuditPayload(previous []byte, record auditRecord) ([]byte, error) {
+	return json.Marshal(struct {
+		Previous     []byte    `json:"previous"`
+		WorkspaceID  uuid.UUID `json:"workspace_id"`
+		OccurredAt   time.Time `json:"occurred_at"`
+		ActorType    string    `json:"actor_type"`
+		ActorID      string    `json:"actor_id"`
+		Action       string    `json:"action"`
+		ResourceType string    `json:"resource_type"`
+		ResourceID   uuid.UUID `json:"resource_id"`
+		RequestID    string    `json:"request_id"`
+		Reason       string    `json:"reason"`
+	}{
+		Previous: previous, WorkspaceID: record.WorkspaceID, OccurredAt: record.At,
+		ActorType: record.ActorType, ActorID: record.ActorID, Action: record.Action,
+		ResourceType: record.ResourceType, ResourceID: record.ResourceID,
+		RequestID: record.RequestID, Reason: record.Reason,
+	})
 }

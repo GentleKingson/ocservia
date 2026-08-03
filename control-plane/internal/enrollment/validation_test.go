@@ -1,6 +1,7 @@
 package enrollment
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"strings"
@@ -9,6 +10,25 @@ import (
 
 	"github.com/google/uuid"
 )
+
+func TestAuditPayloadIsUnambiguous(t *testing.T) {
+	base := auditRecord{WorkspaceID: uuid.Must(uuid.NewV7()), At: time.Now().UTC(), ActorType: "user", ActorID: "operator", Action: "node.approve", ResourceType: "node", ResourceID: uuid.Must(uuid.NewV7())}
+	first := base
+	first.RequestID, first.Reason = "a|b", "c"
+	second := base
+	second.RequestID, second.Reason = "a", "b|c"
+	firstPayload, err := encodeAuditPayload([]byte("previous"), first)
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondPayload, err := encodeAuditPayload([]byte("previous"), second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Equal(firstPayload, secondPayload) {
+		t.Fatal("distinct audit fields produced the same payload")
+	}
+}
 
 func TestValidShortRejectsWhitespaceOutsideContractLimit(t *testing.T) {
 	if validShort("value ", 5) {

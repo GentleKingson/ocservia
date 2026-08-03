@@ -1,8 +1,10 @@
 package enrollment
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"sync"
 	"sync/atomic"
@@ -15,6 +17,69 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
+
+func TestConcurrentAuditChainIntegration(t *testing.T) {
+	databaseURL := os.Getenv("OCSERV_TEST_DATABASE_URL")
+	if databaseURL == "" {
+		t.Skip("OCSERV_TEST_DATABASE_URL is not set")
+	}
+	ctx := context.Background()
+	pool, err := pgxpool.New(ctx, databaseURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pool.Close()
+	workspaceID := uuid.Must(uuid.NewV7())
+	_, err = pool.Exec(ctx, `INSERT INTO workspaces (id,name,slug,created_at,updated_at) VALUES ($1,'Audit concurrency',$2,now(),now())`, workspaceID, "audit-"+workspaceID.String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cleanupWorkspace(ctx, pool, workspaceID)
+
+	service := New(pool, "")
+	errors := make(chan error, 8)
+	var wait sync.WaitGroup
+	for index := range 8 {
+		wait.Add(1)
+		go func() {
+			defer wait.Done()
+			_, createErr := service.CreateToken(ctx, TokenSpec{WorkspaceID: workspaceID, Environment: "test", ActorID: "integration", Reason: "concurrent audit", RequestID: fmt.Sprintf("audit-%d", index)})
+			errors <- createErr
+		}()
+	}
+	wait.Wait()
+	close(errors)
+	for err := range errors {
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	rows, err := pool.Query(ctx, `SELECT previous_event_hash,event_hash FROM audit_events WHERE workspace_id=$1 ORDER BY occurred_at,id`, workspaceID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	var previous []byte
+	count := 0
+	for rows.Next() {
+		var linked, current []byte
+		if err := rows.Scan(&linked, &current); err != nil {
+			t.Fatal(err)
+		}
+		if !bytes.Equal(linked, previous) {
+			t.Fatalf("audit row %d does not link to its serialized predecessor", count)
+		}
+		previous = current
+		count++
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	if count != 8 {
+		t.Fatalf("audit row count=%d", count)
+	}
+}
 
 func TestEnrollmentTrustLifecycleIntegration(t *testing.T) {
 	databaseURL := os.Getenv("OCSERV_TEST_DATABASE_URL")
