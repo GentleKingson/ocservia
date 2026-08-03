@@ -1097,7 +1097,7 @@ fn validate_enrollment(request: &EnrollRequest, remote: EndpointId) -> Result<()
         || request
             .capabilities
             .iter()
-            .any(|value| value.is_empty() || value.len() > 128)
+            .any(|value| value.is_empty() || value.chars().count() > 128)
         || request.capabilities.iter().collect::<HashSet<_>>().len() != request.capabilities.len()
         || request.time.is_none()
         || [
@@ -1108,7 +1108,7 @@ fn validate_enrollment(request: &EnrollRequest, remote: EndpointId) -> Result<()
             &request.environment,
         ]
         .iter()
-        .any(|value| value.is_empty() || value.len() > 256)
+        .any(|value| value.is_empty() || value.chars().count() > 256)
     {
         return Err(protocol_error("enrollment field limit exceeded"));
     }
@@ -1132,6 +1132,10 @@ fn validate_handshake(handshake: &SessionHandshake, remote: EndpointId) -> Resul
         return Err(protocol_error("nonce size invalid"));
     }
     if handshake.capabilities.len() > 128
+        || handshake
+            .capabilities
+            .iter()
+            .any(|value| value.chars().count() > 128)
         || handshake.supported_compressions.len() > 16
         || [
             &handshake.agent_version,
@@ -1141,7 +1145,7 @@ fn validate_handshake(handshake: &SessionHandshake, remote: EndpointId) -> Resul
             &handshake.boot_id,
         ]
         .iter()
-        .any(|value| value.len() > 256)
+        .any(|value| value.chars().count() > 256)
     {
         return Err(protocol_error("handshake field limit exceeded"));
     }
@@ -1586,6 +1590,11 @@ mod tests {
         };
         assert!(validate_enrollment(&request, key.public()).is_ok());
         assert!(validate_enrollment(&request, SecretKey::generate().public()).is_err());
+        let mut unicode = request;
+        unicode.capabilities = vec!["界".repeat(128)];
+        assert!(validate_enrollment(&unicode, key.public()).is_ok());
+        unicode.capabilities = vec!["界".repeat(129)];
+        assert!(validate_enrollment(&unicode, key.public()).is_err());
     }
 
     #[test]

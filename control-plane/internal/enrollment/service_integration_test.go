@@ -18,6 +18,24 @@ import (
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
+func TestCreateTokenUnknownWorkspaceIntegration(t *testing.T) {
+	databaseURL := os.Getenv("OCSERV_TEST_DATABASE_URL")
+	if databaseURL == "" {
+		t.Skip("OCSERV_TEST_DATABASE_URL is not set")
+	}
+	ctx := context.Background()
+	pool, err := pgxpool.New(ctx, databaseURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pool.Close()
+	service := New(pool, "")
+	_, err = service.CreateToken(ctx, TokenSpec{WorkspaceID: uuid.Must(uuid.NewV7()), Environment: "test", ActorID: "integration", Reason: "unknown workspace", RequestID: uuid.Must(uuid.NewV7()).String()})
+	if !errors.Is(err, ErrNotFound) {
+		t.Fatalf("unknown workspace error=%v", err)
+	}
+}
+
 func TestConcurrentAuditChainIntegration(t *testing.T) {
 	databaseURL := os.Getenv("OCSERV_TEST_DATABASE_URL")
 	if databaseURL == "" {

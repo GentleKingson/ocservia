@@ -36,7 +36,7 @@ var (
 	ErrEndpointMismatch  = errors.New("endpoint does not match enrollment token")
 	ErrPendingLimit      = errors.New("pending node limit reached")
 	ErrInvalidTransition = errors.New("node state transition is invalid")
-	ErrNotFound          = errors.New("node not found")
+	ErrNotFound          = errors.New("resource not found")
 	ErrInvalidRequest    = errors.New("enrollment request is invalid")
 )
 
@@ -124,6 +124,13 @@ func (s *Service) CreateToken(ctx context.Context, spec TokenSpec) (Token, error
 		return Token{}, fmt.Errorf("begin token transaction: %w", err)
 	}
 	defer rollback(tx)
+	var workspaceExists bool
+	if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM workspaces WHERE id=$1)`, spec.WorkspaceID).Scan(&workspaceExists); err != nil {
+		return Token{}, fmt.Errorf("check token workspace: %w", err)
+	}
+	if !workspaceExists {
+		return Token{}, ErrNotFound
+	}
 	_, err = tx.Exec(ctx, `INSERT INTO enrollment_tokens
         (id, workspace_id, token_hash, expected_environment, expected_node_name, expected_endpoint_id, expires_at, created_by, created_at)
 		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
