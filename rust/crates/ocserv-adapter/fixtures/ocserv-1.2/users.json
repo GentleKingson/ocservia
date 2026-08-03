@@ -1,0 +1,4 @@
+[
+  {"ID": 1, "Username": "alice", "Remote IP": "192.0.2.10", "IPv4": "10.10.0.2"},
+  {"ID": 2, "Username": "bob", "Remote IP": "2001:db8::1", "IPv6": "2001:db8:10::2"}
+]

@@ -1,0 +1,25 @@
+[package]
+name = "ocservia-agent"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+iroh.workspace = true
+ocservia-agent-identity = { version = "=0.1.0", path = "../agent-identity" }
+ocservia-agent-protocol = { version = "=0.1.0", path = "../agent-protocol" }
+ocservia-command-journal = { version = "=0.1.0", path = "../command-journal" }
+ocservia-contracts = { version = "=0.1.0", path = "../contracts" }
+ocservia-observability = { version = "=0.1.0", path = "../observability" }
+prost.workspace = true
+prost-types.workspace = true
+rand.workspace = true
+rustix.workspace = true
+tokio = { workspace = true, features = ["fs", "io-util", "macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
+tracing.workspace = true
+uuid = { workspace = true, features = ["v7"] }
+
+[lints]
+workspace = true
