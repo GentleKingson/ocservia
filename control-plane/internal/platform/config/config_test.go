@@ -1,6 +1,9 @@
 package config
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestDevAuthGuard(t *testing.T) {
 	tests := []struct {
@@ -95,5 +98,18 @@ func TestLocalSimulatorIsRejectedInProduction(t *testing.T) {
 	}
 	if _, err := Load(nil, lookup); err == nil {
 		t.Fatal("Load() accepted the local simulator in production")
+	}
+}
+
+func TestControllerEndpointIDValidation(t *testing.T) {
+	for _, value := range []string{"ABC", strings.Repeat("z", 64), strings.Repeat("A", 64)} {
+		_, err := Load(nil, func(key string) (string, bool) {
+			values := map[string]string{"OCSERV_DATABASE_URL": "postgres://db/test", "OCSERV_CONTROLLER_ENDPOINT_ID": value}
+			result, ok := values[key]
+			return result, ok
+		})
+		if err == nil {
+			t.Fatalf("accepted controller endpoint %q", value)
+		}
 	}
 }

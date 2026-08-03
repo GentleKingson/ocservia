@@ -8,7 +8,9 @@ use std::path::{Path, PathBuf};
 use iroh::endpoint::RelayMode;
 use iroh::{EndpointId, SecretKey};
 use ocservia_contracts::generated::ocserv::platform::transport::v1::transport_service_server::TransportServiceServer;
-use ocservia_transportd::{IdentityPolicy, IrohTransportService, build_router};
+use ocservia_transportd::{
+    IdentityPolicy, IrohTransportService, TrustAuthority, build_router, build_router_with_trust,
+};
 use tokio::net::UnixListener;
 use tokio_stream::wrappers::UnixListenerStream;
 use tonic::transport::Server;
@@ -22,6 +24,7 @@ struct Config {
     approved: HashMap<EndpointId, Vec<u8>>,
     revoked: HashSet<EndpointId>,
     event_capacity: usize,
+    trust_socket: Option<PathBuf>,
 }
 
 #[tokio::main]
@@ -36,14 +39,30 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let config = parse_args()?;
     let key = load_key(&config.key_file)?;
     let (listener, socket_identity) = bind_socket(&config.socket)?;
-    let service = IrohTransportService::new(config.event_capacity);
-    let router = build_router(
-        key,
-        config.relay_mode,
-        IdentityPolicy::new(config.approved, config.revoked),
-        &service,
-    )
-    .await?;
+    let policy = IdentityPolicy::new(config.approved, config.revoked);
+    let service = IrohTransportService::new_with_policy(config.event_capacity, policy.clone());
+    let router = if let Some(trust_socket) = config.trust_socket {
+        let channel = tonic::transport::Endpoint::try_from("http://[::]:50051")?
+            .connect_with_connector(tower::service_fn(move |_| {
+                let path = trust_socket.clone();
+                async move {
+                    tokio::net::UnixStream::connect(path)
+                        .await
+                        .map(hyper_util::rt::TokioIo::new)
+                }
+            }))
+            .await?;
+        build_router_with_trust(
+            key,
+            config.relay_mode,
+            policy,
+            TrustAuthority::new(channel),
+            &service,
+        )
+        .await?
+    } else {
+        build_router(key, config.relay_mode, policy, &service).await?
+    };
     tracing::info!(
         endpoint_id = %router.endpoint().id(),
         socket = %config.socket.display(),
@@ -81,6 +100,7 @@ fn parse_args() -> Result<Config, io::Error> {
     let mut approved = HashMap::new();
     let mut revoked = HashSet::new();
     let mut event_capacity = 256_usize;
+    let mut trust_socket = None;
     let mut args = env::args().skip(1);
     while let Some(argument) = args.next() {
         match argument.as_str() {
@@ -113,11 +133,19 @@ fn parse_args() -> Result<Config, io::Error> {
                     .parse()
                     .map_err(|_| invalid("event capacity must be an integer"))?;
             }
+            "--trust-socket" => {
+                trust_socket = Some(PathBuf::from(required_value(&mut args, "--trust-socket")?));
+            }
             _ => return Err(invalid(&format!("unknown argument: {argument}"))),
         }
     }
     let key_file = key_file.ok_or_else(|| invalid("--key-file is required"))?;
-    if !socket.is_absolute() || !key_file.is_absolute() {
+    if !socket.is_absolute()
+        || !key_file.is_absolute()
+        || trust_socket
+            .as_ref()
+            .is_some_and(|path| !path.is_absolute())
+    {
         return Err(invalid("socket and key file paths must be absolute"));
     }
     if event_capacity == 0 || event_capacity > 4096 {
@@ -130,6 +158,7 @@ fn parse_args() -> Result<Config, io::Error> {
         approved,
         revoked,
         event_capacity,
+        trust_socket,
     })
 }
 

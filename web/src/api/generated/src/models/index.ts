@@ -1,7 +1,12 @@
 /* tslint:disable */
 /* eslint-disable */
 export * from "./BuildInfo";
+export * from "./EnrollmentToken";
+export * from "./EnrollmentTokenRequest";
 export * from "./Health";
+export * from "./NodeApproval";
+export * from "./NodeRevocation";
+export * from "./NodeTrustState";
 export * from "./Operation";
 export * from "./OperationPage";
 export * from "./OperationState";

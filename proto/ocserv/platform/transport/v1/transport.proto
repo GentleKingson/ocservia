@@ -3,6 +3,7 @@ syntax = "proto3";
 package ocserv.platform.transport.v1;
 
 import "google/protobuf/timestamp.proto";
+import "ocserv/platform/agent/v1/agent.proto";
 
 // TransportService is the complete typed UDS boundary exposed to Go.
 service TransportService {
@@ -11,6 +12,14 @@ service TransportService {
   rpc SendCommand(SendCommandRequest) returns (SendCommandResponse);
   rpc CloseNode(CloseNodeRequest) returns (CloseNodeResponse);
   rpc WatchEvents(WatchEventsRequest) returns (stream TransportEvent);
+  rpc UpdateNodeTrust(UpdateNodeTrustRequest) returns (UpdateNodeTrustResponse);
+}
+
+// TrustService is implemented by the Go control plane on a private UDS.
+service TrustService {
+  rpc CheckEndpoint(CheckEndpointRequest) returns (CheckEndpointResponse);
+  rpc Enroll(ocserv.platform.agent.v1.EnrollRequest) returns (ocserv.platform.agent.v1.EnrollResponse);
+  rpc AuthorizeSession(AuthorizeSessionRequest) returns (ocserv.platform.agent.v1.SessionHandshakeResponse);
 }
 
 enum HealthStatus {
@@ -72,6 +81,36 @@ message CloseNodeRequest {
 }
 
 message CloseNodeResponse {}
+
+enum NodeTrustState {
+  NODE_TRUST_STATE_UNSPECIFIED = 0;
+  NODE_TRUST_STATE_ACTIVE = 1;
+  NODE_TRUST_STATE_REVOKED = 2;
+}
+
+message UpdateNodeTrustRequest {
+  bytes node_id = 1;
+  bytes endpoint_id = 2;
+  NodeTrustState state = 3;
+  string reason = 4;
+  uint64 revision = 5;
+}
+
+message UpdateNodeTrustResponse {}
+
+message CheckEndpointRequest {
+  bytes endpoint_id = 1;
+  string alpn = 2;
+}
+
+message CheckEndpointResponse {
+  bool permitted = 1;
+}
+
+message AuthorizeSessionRequest {
+  bytes remote_endpoint_id = 1;
+  ocserv.platform.agent.v1.SessionHandshake handshake = 2;
+}
 
 message WatchEventsRequest {
   bytes after_event_id = 1;

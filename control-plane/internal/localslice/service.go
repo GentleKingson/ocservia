@@ -2,13 +2,13 @@ package localslice
 
 import (
 	"context"
-	"crypto/sha256"
 	"errors"
 	"fmt"
 	"time"
 
 	agentv1 "github.com/GentleKingson/ocservia/control-plane/gen/proto/ocserv/platform/agent/v1"
 	transportv1 "github.com/GentleKingson/ocservia/control-plane/gen/proto/ocserv/platform/transport/v1"
+	"github.com/GentleKingson/ocservia/control-plane/internal/audit"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
@@ -99,7 +99,7 @@ func (s *Service) Create(ctx context.Context, scenario Scenario, requestID, trac
 	}
 	if _, err := tx.Exec(ctx, `
 		INSERT INTO nodes (id, workspace_id, name, status, created_at, updated_at)
-		VALUES ($1, $2, $3, 'pending', $4, $4)`, nodeID, workspaceID, "sim-"+nodeID.String(), now); err != nil {
+		VALUES ($1, $2, $3, 'active', $4, $4)`, nodeID, workspaceID, "sim-"+nodeID.String(), now); err != nil {
 		return Operation{}, fmt.Errorf("insert simulator node: %w", err)
 	}
 	if _, err := tx.Exec(ctx, `
@@ -112,13 +112,8 @@ func (s *Service) Create(ctx context.Context, scenario Scenario, requestID, trac
 		VALUES ($1, $2, $3, $4, $5, $4)`, operationID, envelope, traceparent, now, now.Add(time.Minute)); err != nil {
 		return Operation{}, fmt.Errorf("insert simulator job: %w", err)
 	}
-	hash := sha256.Sum256([]byte(operationID.String() + traceparent))
-	if _, err := tx.Exec(ctx, `
-		INSERT INTO audit_events
-		(id, workspace_id, occurred_at, actor_type, actor_id, action, resource_type, resource_id, request_id, trace_id, result, reason, event_hash)
-		VALUES ($1, $2, $3, 'development_stub', 'developer', 'simulation.probe', 'operation', $4, $5, $6, 'intent', 'I03 local side-effect-free slice', $7)`,
-		auditID, workspaceID, now, operationID, requestID, traceID(traceparent), hash[:]); err != nil {
-		return Operation{}, fmt.Errorf("insert simulator audit intent: %w", err)
+	if err := audit.AppendChain(ctx, tx, audit.ChainRecord{EventID: auditID, WorkspaceID: workspaceID, ActorType: "development_stub", ActorID: "developer", Action: "simulation.probe", ResourceType: "operation", ResourceID: operationID, RequestID: requestID, TraceID: traceID(traceparent), Reason: "I03 local side-effect-free slice", At: now}); err != nil {
+		return Operation{}, fmt.Errorf("append simulator audit intent: %w", err)
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return Operation{}, fmt.Errorf("commit local slice transaction: %w", err)
@@ -238,7 +233,7 @@ func (s *Service) ReconcileEventGap(ctx context.Context, nodeConnected func(cont
 			ORDER BY event.ingest_sequence DESC
 			LIMIT 1
 		) AS latest ON true
-		WHERE workspace.slug = $1 AND node.status = 'approved'`, workspaceSlug)
+		WHERE workspace.slug = $1 AND node.status = 'active'`, workspaceSlug)
 	if err != nil {
 		return fmt.Errorf("select simulator nodes after transport event gap: %w", err)
 	}
@@ -308,7 +303,7 @@ func (s *Service) ReconcileEventGap(ctx context.Context, nodeConnected func(cont
 		result, err := tx.Exec(ctx, `
 			UPDATE nodes
 			SET status = 'offline', updated_at = $2, version = version + 1
-			WHERE id = $1 AND status = 'approved'`, node.id, now)
+			WHERE id = $1 AND status = 'active'`, node.id, now)
 		if err != nil {
 			return fmt.Errorf("mark simulator node offline after transport event gap: %w", err)
 		}
@@ -369,11 +364,11 @@ func (s *Service) Ingest(ctx context.Context, event *transportv1.TransportEvent)
 	if result.RowsAffected() == 0 {
 		return tx.Commit(ctx)
 	}
-	status := "approved"
+	status := "active"
 	if eventType == "disconnected" {
 		status = "offline"
 	}
-	if _, err := tx.Exec(ctx, "UPDATE nodes SET status = $2, updated_at = $3, version = version + 1 WHERE id = $1", nodeID, status, occurredAt.AsTime()); err != nil {
+	if _, err := tx.Exec(ctx, "UPDATE nodes SET status = $2, updated_at = $3, version = version + 1 WHERE id = $1 AND status IN ('active','offline')", nodeID, status, occurredAt.AsTime()); err != nil {
 		return fmt.Errorf("update node from transport event: %w", err)
 	}
 	operationState := "running"

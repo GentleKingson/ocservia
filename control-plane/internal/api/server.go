@@ -13,7 +13,9 @@ import (
 	"sync"
 	"time"
 
+	"github.com/GentleKingson/ocservia/control-plane/internal/enrollment"
 	"github.com/GentleKingson/ocservia/control-plane/internal/localslice"
+	"github.com/GentleKingson/ocservia/control-plane/internal/transportclient"
 	"github.com/GentleKingson/ocservia/control-plane/migrations"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
@@ -38,6 +40,8 @@ type Server struct {
 	expectedSchema int64
 	localSlice     *localslice.Service
 	localSliceMu   sync.RWMutex
+	enrollment     *enrollment.Service
+	transport      *transportclient.Client
 }
 
 func New(address string, pool *pgxpool.Pool, build BuildInfo, logger *slog.Logger, bodyLimit int64, requestTimeout time.Duration, devAuth bool, devAuthToken string, expectedSchema int64) *Server {
@@ -54,9 +58,17 @@ func New(address string, pool *pgxpool.Pool, build BuildInfo, logger *slog.Logge
 	mux.HandleFunc("GET /api/v1/operations/{operation_id}", s.requireOperationAuth(s.getOperation))
 	mux.HandleFunc("GET /api/v1/events", s.listEvents)
 	mux.HandleFunc("GET /api/v1/events/stream", s.streamEvents)
+	mux.HandleFunc("POST /api/v1/enrollment-tokens", s.requireOperationAuth(s.createEnrollmentToken))
+	mux.HandleFunc("POST /api/v1/nodes/{node_id}/approval", s.requireOperationAuth(s.approveNode))
+	mux.HandleFunc("POST /api/v1/nodes/{node_id}/revocation", s.requireOperationAuth(s.revokeNode))
 	handler := s.requestContext(s.limitBody(s.timeout(s.routeErrors(mux))))
 	s.http = &http.Server{Addr: address, Handler: otelhttp.NewHandler(handler, "http.server"), ReadHeaderTimeout: 5 * time.Second, IdleTimeout: 60 * time.Second}
 	return s
+}
+
+func (s *Server) EnableEnrollment(service *enrollment.Service, transport *transportclient.Client) {
+	s.enrollment = service
+	s.transport = transport
 }
 
 func (s *Server) ListenAndServe() error {
@@ -125,6 +137,12 @@ func routeMethod(path string) (string, bool) {
 	case "/livez", "/readyz", "/version", "/api/v1/livez", "/api/v1/readyz", "/api/v1/version", "/api/v1/operations", "/api/v1/events", "/api/v1/events/stream":
 		return http.MethodGet, true
 	case "/api/v1/development/simulations":
+		return http.MethodPost, true
+	case "/api/v1/enrollment-tokens":
+		return http.MethodPost, true
+	}
+	parts := strings.Split(strings.Trim(path, "/"), "/")
+	if len(parts) == 5 && parts[0] == "api" && parts[1] == "v1" && parts[2] == "nodes" && parts[3] != "" && (parts[4] == "approval" || parts[4] == "revocation") {
 		return http.MethodPost, true
 	}
 	operationID := strings.TrimPrefix(path, "/api/v1/operations/")

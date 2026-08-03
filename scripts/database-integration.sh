@@ -93,16 +93,18 @@ for major in 17 18; do
   curl --fail --silent "http://127.0.0.1:${api_port}/livez" >/dev/null
   curl --fail --silent "http://127.0.0.1:${api_port}/version" | grep -q '"role":"all"'
   test "$(docker exec "${container}" psql -U ocservia_owner -d ocservia -Atc "SELECT count(*) FROM schema_migrations WHERE version = 1")" = "1"
-  test "$(docker exec "${container}" psql -U ocservia_owner -d ocservia -Atc "SELECT count(*) FROM information_schema.tables WHERE table_schema = 'public' AND table_name IN ('workspaces','nodes','operations','audit_events','local_slice_jobs','transport_events')")" = "6"
+  test "$(docker exec "${container}" psql -U ocservia_owner -d ocservia -Atc "SELECT count(*) FROM information_schema.tables WHERE table_schema = 'public' AND table_name IN ('workspaces','nodes','operations','audit_events','local_slice_jobs','transport_events','enrollment_tokens','node_endpoint_keys','node_capabilities')")" = "9"
   test "$(docker exec "${container}" psql -U ocservia_owner -d ocservia -Atc "SELECT count(*) FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'operations' AND column_name = 'command_id' AND data_type = 'uuid'")" = "1"
   test "$(docker exec "${container}" psql -U ocservia_owner -d ocservia -Atc "SELECT has_column_privilege('ocservia_app', 'transport_events', 'transport_cursor_valid', 'UPDATE')")" = "t"
   test "$(docker exec "${container}" psql -U ocservia_owner -d ocservia -Atc "SELECT has_column_privilege('ocservia_app', 'transport_events', 'event_type', 'UPDATE')")" = "f"
   test "$(docker exec "${container}" psql -U ocservia_owner -d ocservia -Atc "SELECT has_sequence_privilege('ocservia_app', 'transport_events_ingest_sequence_seq', 'USAGE')")" = "t"
   docker exec "${container}" psql -v ON_ERROR_STOP=1 -U ocservia_app -d ocservia -c "
     INSERT INTO workspaces (id, name, slug, created_at, updated_at) VALUES ('00000000-0000-7000-8000-000000000001', 'One', 'one', now(), now()), ('00000000-0000-7000-8000-000000000002', 'Two', 'two', now(), now());
-    INSERT INTO nodes (id, workspace_id, name, status, created_at, updated_at) VALUES ('00000000-0000-7000-8000-000000000003', '00000000-0000-7000-8000-000000000001', 'node', 'approved', now(), now());
+    INSERT INTO nodes (id, workspace_id, name, status, created_at, updated_at) VALUES ('00000000-0000-7000-8000-000000000003', '00000000-0000-7000-8000-000000000001', 'node', 'active', now(), now());
     INSERT INTO audit_events (id, workspace_id, occurred_at, actor_type, actor_id, action, resource_type, request_id, result, event_hash) VALUES ('00000000-0000-7000-8000-000000000004', '00000000-0000-7000-8000-000000000001', now(), 'system', 'test', 'test', 'workspace', 'request', 'intent', decode('00', 'hex'));
   " >/dev/null
+  (cd "${ROOT}/control-plane" && OCSERV_TEST_DATABASE_URL="${runtime_url}" \
+    go test ./internal/enrollment ./internal/localslice -run Integration -count=1)
   if docker exec "${container}" psql -v ON_ERROR_STOP=1 -U ocservia_app -d ocservia -c "INSERT INTO operations (id, workspace_id, node_id, state, request_id, created_at, updated_at) VALUES ('00000000-0000-7000-8000-000000000005', '00000000-0000-7000-8000-000000000002', '00000000-0000-7000-8000-000000000003', 'draft', 'request', now(), now())" >/dev/null 2>&1; then
     echo "cross-workspace operation was accepted" >&2
     exit 1
@@ -127,12 +129,12 @@ for major in 17 18; do
   pid=$!
   PIDS+=("${pid}")
   wait_for_http "http://127.0.0.1:${api_port}/readyz"
-  test "$(docker exec "${container}" psql -U ocservia_owner -d ocservia -Atc "SELECT count(*) FROM schema_migrations")" = "3"
+  test "$(docker exec "${container}" psql -U ocservia_owner -d ocservia -Atc "SELECT count(*) FROM schema_migrations")" = "4"
   docker exec "${container}" psql -v ON_ERROR_STOP=1 -U ocservia_owner -d ocservia -c \
-    "INSERT INTO schema_migrations (version, name, checksum) VALUES (4, '000004_future.up.sql', decode(repeat('00', 32), 'hex'))" >/dev/null
+    "INSERT INTO schema_migrations (version, name, checksum) VALUES (5, '000005_future.up.sql', decode(repeat('00', 32), 'hex'))" >/dev/null
   test "$(curl --silent --output /dev/null --write-out '%{http_code}' "http://127.0.0.1:${api_port}/readyz")" = "503"
   docker exec "${container}" psql -v ON_ERROR_STOP=1 -U ocservia_owner -d ocservia -c \
-    "DELETE FROM schema_migrations WHERE version = 4" >/dev/null
+    "DELETE FROM schema_migrations WHERE version = 5" >/dev/null
   wait_for_http "http://127.0.0.1:${api_port}/readyz"
 
   docker stop "${container}" >/dev/null
@@ -146,20 +148,20 @@ for major in 17 18; do
   runtime_url="postgres://ocservia_app:test-runtime-only@127.0.0.1:${port}/ocservia?sslmode=disable"
   wait_for_tcp 127.0.0.1 "${port}"
   docker exec "${container}" psql -v ON_ERROR_STOP=1 -U ocservia_owner -d ocservia -c \
-    "INSERT INTO schema_migrations (version, name, checksum) VALUES (4, '000004_future.up.sql', decode(repeat('00', 32), 'hex'))" >/dev/null
+    "INSERT INTO schema_migrations (version, name, checksum) VALUES (5, '000005_future.up.sql', decode(repeat('00', 32), 'hex'))" >/dev/null
   if OCSERV_ENVIRONMENT=test OCSERV_HTTP_ADDRESS="127.0.0.1:${api_port}" \
     OCSERV_DATABASE_URL="${runtime_url}" "${BIN}" --role=all \
     >"${TMP_ROOT}/pg${major}-unknown-version.log" 2>&1; then
     echo "binary accepted an unknown schema version" >&2
     exit 1
   fi
-  if ! grep -Fq 'database schema version 4 is unknown to this binary' "${TMP_ROOT}/pg${major}-unknown-version.log"; then
+  if ! grep -Fq 'database schema version 5 is unknown to this binary' "${TMP_ROOT}/pg${major}-unknown-version.log"; then
     cat "${TMP_ROOT}/pg${major}-unknown-version.log" >&2
     echo "binary failed for an unexpected reason with an unknown schema version" >&2
     exit 1
   fi
   docker exec "${container}" psql -v ON_ERROR_STOP=1 -U ocservia_owner -d ocservia -c \
-    "DELETE FROM schema_migrations WHERE version = 4" >/dev/null
+    "DELETE FROM schema_migrations WHERE version = 5" >/dev/null
 done
 
 container="${PREFIX}-upgrade"
@@ -184,6 +186,10 @@ docker exec "${container}" psql -v ON_ERROR_STOP=1 -U ocservia_owner -d ocservia
   "INSERT INTO schema_migrations (version, name, checksum) VALUES (1, '000001_foundation.up.sql', decode('${foundation_checksum}', 'hex'))" >/dev/null
 docker exec "${container}" psql -v ON_ERROR_STOP=1 -U ocservia_owner -d ocservia -c \
   "CREATE ROLE ocservia_app LOGIN PASSWORD 'test-runtime-only'" >/dev/null
+docker exec "${container}" psql -v ON_ERROR_STOP=1 -U ocservia_owner -d ocservia -c "
+  INSERT INTO workspaces (id,name,slug,created_at,updated_at) VALUES ('00000000-0000-7000-8000-000000000010','Legacy','legacy',now(),now());
+  INSERT INTO nodes (id,workspace_id,name,status,created_at,updated_at) VALUES ('00000000-0000-7000-8000-000000000011','00000000-0000-7000-8000-000000000010','legacy-node','approved',now(),now());
+" >/dev/null
 owner_url="postgres://ocservia_owner:test-owner-only@127.0.0.1:${port}/ocservia?sslmode=disable"
 runtime_url="postgres://ocservia_app:test-runtime-only@127.0.0.1:${port}/ocservia?sslmode=disable"
 OCSERV_ENVIRONMENT=test OCSERV_DATABASE_URL="${owner_url}" \
@@ -192,7 +198,10 @@ OCSERV_ENVIRONMENT=test OCSERV_DATABASE_URL="${owner_url}" \
 test "$(docker exec "${container}" psql -U ocservia_owner -d ocservia -Atc "SELECT count(*) FROM schema_migrations WHERE version = 1")" = "1"
 test "$(docker exec "${container}" psql -U ocservia_owner -d ocservia -Atc "SELECT count(*) FROM schema_migrations WHERE version = 2")" = "1"
 test "$(docker exec "${container}" psql -U ocservia_owner -d ocservia -Atc "SELECT count(*) FROM schema_migrations WHERE version = 3")" = "1"
+test "$(docker exec "${container}" psql -U ocservia_owner -d ocservia -Atc "SELECT count(*) FROM schema_migrations WHERE version = 4")" = "1"
 test "$(docker exec "${container}" psql -U ocservia_owner -d ocservia -Atc "SELECT count(*) FROM pre_i03_marker WHERE id = 1")" = "1"
+test "$(docker exec "${container}" psql -U ocservia_owner -d ocservia -Atc "SELECT status FROM nodes WHERE id = '00000000-0000-7000-8000-000000000011'")" = "pending"
+test "$(docker exec "${container}" psql -U ocservia_owner -d ocservia -Atc "SELECT count(*) FROM node_endpoint_keys WHERE node_id = '00000000-0000-7000-8000-000000000011'")" = "0"
 OCSERV_ENVIRONMENT=test OCSERV_DATABASE_URL="${runtime_url}" "${BIN}" --role=worker \
   >"${TMP_ROOT}/worker.log" 2>&1 &
 pid=$!
@@ -213,6 +222,10 @@ for role in scheduler api; do
 done
 
 docker exec -i "${container}" psql -v ON_ERROR_STOP=1 -U ocservia_owner -d ocservia \
+  <"${ROOT}/control-plane/migrations/000004_enrollment_trust.down.sql" >/dev/null
+docker exec "${container}" psql -v ON_ERROR_STOP=1 -U ocservia_owner -d ocservia -c \
+  "DELETE FROM schema_migrations WHERE version = 4" >/dev/null
+docker exec -i "${container}" psql -v ON_ERROR_STOP=1 -U ocservia_owner -d ocservia \
   <"${ROOT}/control-plane/migrations/000003_transport_path_changed.down.sql" >/dev/null
 docker exec "${container}" psql -v ON_ERROR_STOP=1 -U ocservia_owner -d ocservia -c \
   "DELETE FROM schema_migrations WHERE version = 3" >/dev/null
@@ -220,9 +233,10 @@ docker exec -i "${container}" psql -v ON_ERROR_STOP=1 -U ocservia_owner -d ocser
   <"${ROOT}/control-plane/migrations/000002_local_slice.down.sql" >/dev/null
 docker exec "${container}" psql -v ON_ERROR_STOP=1 -U ocservia_owner -d ocservia -c \
   "DELETE FROM schema_migrations WHERE version = 2" >/dev/null
-test "$(docker exec "${container}" psql -U ocservia_owner -d ocservia -Atc "SELECT count(*) FROM information_schema.tables WHERE table_schema = 'public' AND table_name IN ('local_slice_jobs','transport_events')")" = "0"
+test "$(docker exec "${container}" psql -U ocservia_owner -d ocservia -Atc "SELECT count(*) FROM information_schema.tables WHERE table_schema = 'public' AND table_name IN ('local_slice_jobs','transport_events','enrollment_tokens','node_endpoint_keys','node_capabilities')")" = "0"
 OCSERV_ENVIRONMENT=test OCSERV_DATABASE_URL="${owner_url}" \
   OCSERV_RUNTIME_DATABASE_ROLE=ocservia_app "${BIN}" --migrate-only \
   >"${TMP_ROOT}/rollback-forward.log" 2>&1
 test "$(docker exec "${container}" psql -U ocservia_owner -d ocservia -Atc "SELECT count(*) FROM schema_migrations WHERE version = 2")" = "1"
 test "$(docker exec "${container}" psql -U ocservia_owner -d ocservia -Atc "SELECT count(*) FROM schema_migrations WHERE version = 3")" = "1"
+test "$(docker exec "${container}" psql -U ocservia_owner -d ocservia -Atc "SELECT count(*) FROM schema_migrations WHERE version = 4")" = "1"

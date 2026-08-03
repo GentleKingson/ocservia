@@ -15,14 +15,25 @@ hexadecimal characters. Never put this file
 in an image, source tree, command-line argument, or log. The endpoint identifier,
 which is public, is logged at startup.
 
-Approved endpoint-to-node bindings and revoked endpoint identifiers can be
-supplied with repeated `--approved-binding NODE_UUID=ENDPOINT_ID` and
-`--revoked-endpoint ENDPOINT_ID` flags. Endpoint IDs are 32-byte lowercase
-hexadecimal public identifiers and node IDs are UUIDv7 values. Enrollment
-accepts non-revoked identities; agent sessions require an approved,
-non-revoked identity whose handshake claims the bound node. A later
-control-plane step replaces this startup-only test policy with the typed
-enrollment lifecycle.
+For the database-backed lifecycle, pass
+`--trust-socket /run/ocserv-trust/control-plane.sock`. The Iroh hook
+then checks remote EndpointIDs with the Go trust service before reading
+application data. The startup-only `--approved-binding NODE_UUID=ENDPOINT_ID`
+and `--revoked-endpoint ENDPOINT_ID` flags remain available for isolated tests
+and rollback. Endpoint IDs are 32-byte lowercase hexadecimal public
+identifiers and node IDs are UUIDv7 values.
+
+Before an I04-to-I05 cutover, inventory every startup `--approved-binding` and
+keep the I04 transport running while migration 000004 is applied. The old
+database did not store EndpointIDs, so the migration deliberately changes
+legacy `approved` nodes to fail-closed `pending` rather than falsely activating
+them. For each legacy node, create a one-time token constrained to its exact
+workspace, node name, environment, and inventoried EndpointID. Enrollment with
+that token attaches the EndpointID to the existing node record; explicitly
+approve it before switching transportd to `--trust-socket`. Verify that every
+formerly approved node has one active row in `node_endpoint_keys`, then remove
+the static binding flags. Do not start trust-socket mode while any legacy node
+is still pending or lacks an endpoint binding.
 
 Run with the public relay set:
 
@@ -31,13 +42,16 @@ ocservia-transportd \
   --socket /run/ocserv-platform/transportd.sock \
   --key-file /run/secrets/controller-iroh.key \
   --relay-mode default \
-  --approved-binding <node-uuid>=<agent-endpoint-id>
+  --trust-socket /run/ocserv-trust/control-plane.sock
 ```
 
 Use `--relay-mode disabled` for isolated direct-path tests. The endpoint limits
 handshake size and time, frame and flow-control windows, remotely initiated
 streams, connection count, idle time, connection attempts, event retention, and
-UDS subscribers. Connection queries report the agent instance, selected direct
+UDS subscribers. Every database-backed trust-authority call shares a
+non-evictable global 600-attempt-per-minute limit and a 16-request concurrency
+limit, including authorization and the registration trust recheck.
+Connection queries report the agent instance, selected direct
 or relay path, path detail, RTT, connection time, and last-seen time.
 
 Iroh is pinned to `1.0.0` in `Cargo.toml`; `Cargo.lock` pins the complete resolved
@@ -50,5 +64,8 @@ stack and rollback mode. To roll back an unshipped Iroh deployment, stop the rea
 transport process, preserve the controller key, start the stub on the same UDS
 path, and restart the Go worker so its watch reconnects. Active Iroh connections
 will close and agents must reconnect after the real transport is restored.
-Rolling back migration `000003_transport_path_changed` removes derived
-`path_changed` events before restoring the earlier event-type constraint.
+Do not roll back migration `000004_enrollment_trust` while enrolled nodes must
+remain manageable. The database rollback removes enrollment tokens, endpoint
+bindings, and capability approvals. Restore the startup binding flags before
+stopping the trust service, then roll back the migration only after preserving
+the required public endpoint-to-node mapping.

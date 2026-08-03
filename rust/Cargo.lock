@@ -2101,6 +2101,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "ocservia-agent-identity"
+version = "0.1.0"
+dependencies = [
+ "hex",
+ "iroh",
+ "rustix",
+ "zeroize",
+]
+
+[[package]]
 name = "ocservia-contracts"
 version = "0.1.0"
 dependencies = [
@@ -2116,6 +2126,7 @@ version = "0.1.0"
 dependencies = [
  "futures-util",
  "hex",
+ "hyper-util",
  "iroh",
  "ocservia-contracts",
  "prost",
@@ -2125,6 +2136,7 @@ dependencies = [
  "tokio-stream",
  "tonic",
  "tonic-health",
+ "tower",
  "tracing",
  "tracing-subscriber",
  "uuid",
@@ -3300,9 +3312,9 @@ dependencies = [
 
 [[package]]
 name = "tower"
-version = "0.5.3"
+version = "0.5.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ebe5ef63511595f1344e2d5cfa636d973292adc0eec1f0ad45fae9f0851ab1d4"
+checksum = "d039ad9159c98b70ecfd540b2573b97f7f52c3e8d9f8ad57a24b916a536975f9"
 dependencies = [
  "futures-core",
  "futures-util",
