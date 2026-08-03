@@ -162,11 +162,8 @@ func (s *Service) Enroll(ctx context.Context, request *agentv1.EnrollRequest) (*
 	err = tx.QueryRow(ctx, `SELECT id, workspace_id, expected_environment, expected_node_name,
 	        expected_endpoint_id, expires_at, consumed_at, consumed_node_id FROM enrollment_tokens WHERE token_hash=$1 FOR UPDATE`, digest[:]).
 		Scan(&tokenID, &workspaceID, &environment, &expectedName, &expectedEndpoint, &expiresAt, &consumedAt, &consumedNodeID)
-	if errors.Is(err, pgx.ErrNoRows) || !s.now().Before(expiresAt) {
-		return nil, ErrInvalidToken
-	}
-	if err != nil {
-		return nil, fmt.Errorf("lock enrollment token: %w", err)
+	if err := validateLockedToken(err, expiresAt, s.now()); err != nil {
+		return nil, err
 	}
 	if environment != request.GetEnvironment() {
 		return nil, ErrInvalidToken
@@ -235,6 +232,11 @@ func (s *Service) Approve(ctx context.Context, approval Approval) (NodeTrust, er
 	if !validCapabilities(approval.Capabilities) {
 		return NodeTrust{}, ErrInvalidRequest
 	}
+	for key, value := range approval.Labels {
+		if !validShort(key, 64) || !validShort(value, 128) {
+			return NodeTrust{}, ErrInvalidRequest
+		}
+	}
 	capabilities := normalizedCapabilities(approval.Capabilities)
 	if len(capabilities) == 0 {
 		return NodeTrust{}, ErrInvalidRequest
@@ -256,11 +258,6 @@ func (s *Service) Approve(ctx context.Context, approval Approval) (NodeTrust, er
 	}
 	if currentStatus == "active" || currentStatus == "offline" {
 		return NodeTrust{NodeID: approval.NodeID, EndpointID: endpointID}, nil
-	}
-	for key, value := range approval.Labels {
-		if !validShort(key, 64) || !validShort(value, 128) {
-			return NodeTrust{}, ErrInvalidRequest
-		}
 	}
 	labels := mapToJSON(approval.Labels)
 	now := s.now().UTC()
@@ -448,13 +445,25 @@ func validCapabilities(values []string) bool {
 }
 
 func validShort(value string, maximum int) bool {
-	value = strings.TrimSpace(value)
-	return len(value) > 0 && len(value) <= maximum
+	trimmed := strings.TrimSpace(value)
+	return value == trimmed && len(value) > 0 && len(value) <= maximum
 }
 func validOptional(value string, maximum int) bool { return value == "" || validShort(value, maximum) }
 func validPolicy(value string) bool                { return validShort(value, 128) }
 func validActor(actor, request, reason string) bool {
 	return validShort(actor, 256) && validShort(request, 128) && validShort(reason, 1024)
+}
+func validateLockedToken(queryErr error, expiresAt, now time.Time) error {
+	if errors.Is(queryErr, pgx.ErrNoRows) {
+		return ErrInvalidToken
+	}
+	if queryErr != nil {
+		return fmt.Errorf("lock enrollment token: %w", queryErr)
+	}
+	if !now.Before(expiresAt) {
+		return ErrInvalidToken
+	}
+	return nil
 }
 func mapToJSON(values map[string]string) string {
 	data, err := json.Marshal(values)

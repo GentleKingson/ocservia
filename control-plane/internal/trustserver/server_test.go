@@ -50,3 +50,18 @@ func TestListenRejectsSymlinkParentDirectory(t *testing.T) {
 		t.Fatal("expected symlink trust socket parent to be rejected")
 	}
 }
+
+func TestListenRejectsWritableAncestorDirectory(t *testing.T) {
+	ancestor := t.TempDir()
+	if err := os.Chmod(ancestor, 0o777); err != nil {
+		t.Fatal(err)
+	}
+	parent := filepath.Join(ancestor, "private")
+	if err := os.Mkdir(parent, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if listener, _, err := listen(filepath.Join(parent, "trust.sock")); err == nil {
+		_ = listener.Close()
+		t.Fatal("expected writable trust socket ancestor to be rejected")
+	}
+}

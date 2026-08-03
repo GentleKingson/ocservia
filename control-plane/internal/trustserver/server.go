@@ -71,7 +71,7 @@ func New(path string, handler *Handler) (*Server, error) {
 	}
 	server := grpc.NewServer(grpc.MaxRecvMsgSize(64<<10), grpc.MaxSendMsgSize(64<<10))
 	transportv1.RegisterTrustServiceServer(server, handler)
-	return &Server{grpc: server, listener: listener, path: path, identity: identity}, nil
+	return &Server{grpc: server, listener: listener, path: listener.Addr().String(), identity: identity}, nil
 }
 
 func (s *Server) Serve() error {
@@ -104,7 +104,8 @@ func listen(path string) (net.Listener, socketIdentity, error) {
 	if !filepath.IsAbs(path) {
 		return nil, socketIdentity{}, errors.New("trust socket path must be absolute")
 	}
-	parent, err := os.Lstat(filepath.Dir(path))
+	requestedParent := filepath.Dir(path)
+	parent, err := os.Lstat(requestedParent)
 	if err != nil || !parent.IsDir() {
 		return nil, socketIdentity{}, errors.New("trust socket parent must exist")
 	}
@@ -112,6 +113,23 @@ func listen(path string) (net.Listener, socketIdentity, error) {
 	if !ok || int(parentStat.Uid) != os.Geteuid() || parent.Mode().Perm()&0o022 != 0 {
 		return nil, socketIdentity{}, errors.New("trust socket parent must be owned by this process and not group or world writable")
 	}
+	parentPath, err := filepath.EvalSymlinks(requestedParent)
+	if err != nil {
+		return nil, socketIdentity{}, fmt.Errorf("resolve trust socket parent: %w", err)
+	}
+	for ancestor := parentPath; ; ancestor = filepath.Dir(ancestor) {
+		info, err := os.Lstat(ancestor)
+		if err != nil || !info.IsDir() {
+			return nil, socketIdentity{}, errors.New("trust socket ancestor must be a directory")
+		}
+		if info.Mode().Perm()&0o022 != 0 && info.Mode()&os.ModeSticky == 0 {
+			return nil, socketIdentity{}, errors.New("trust socket ancestor must not be attacker writable")
+		}
+		if next := filepath.Dir(ancestor); next == ancestor {
+			break
+		}
+	}
+	path = filepath.Join(parentPath, filepath.Base(path))
 	if info, err := os.Lstat(path); err == nil {
 		if info.Mode()&os.ModeSocket == 0 {
 			return nil, socketIdentity{}, errors.New("refusing to replace non-socket trust path")
