@@ -55,12 +55,22 @@ func TestConcurrentAuditChainIntegration(t *testing.T) {
 	defer cleanupWorkspace(ctx, pool, workspaceID)
 
 	service := New(pool, "")
+	endpoint := bytes.Repeat([]byte{0x2a}, 32)
+	enrollmentToken, err := service.CreateToken(ctx, TokenSpec{WorkspaceID: workspaceID, Environment: "test", ExpectedEndpointID: endpoint, ActorID: "integration", Reason: "concurrent enrollment", RequestID: "audit-enrollment-token"})
+	if err != nil {
+		t.Fatal(err)
+	}
 	errors := make(chan error, 8)
 	var wait sync.WaitGroup
 	for index := range 8 {
 		wait.Add(1)
 		go func() {
 			defer wait.Done()
+			if index == 0 {
+				_, enrollErr := service.Enroll(ctx, enrollmentRequest(enrollmentToken.Value, endpoint))
+				errors <- enrollErr
+				return
+			}
 			_, createErr := service.CreateToken(ctx, TokenSpec{WorkspaceID: workspaceID, Environment: "test", ActorID: "integration", Reason: "concurrent audit", RequestID: fmt.Sprintf("audit-%d", index)})
 			errors <- createErr
 		}()
@@ -94,7 +104,7 @@ func TestConcurrentAuditChainIntegration(t *testing.T) {
 	if err := rows.Err(); err != nil {
 		t.Fatal(err)
 	}
-	if count != 8 {
+	if count != 9 {
 		t.Fatalf("audit row count=%d", count)
 	}
 }

@@ -156,7 +156,7 @@ func (s *Service) Enroll(ctx context.Context, request *agentv1.EnrollRequest) (*
 		return nil, ErrInvalidToken
 	}
 	digest := sha256.Sum256(raw)
-	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.Serializable})
+	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{})
 	if err != nil {
 		return nil, fmt.Errorf("begin enrollment transaction: %w", err)
 	}
@@ -193,6 +193,9 @@ func (s *Service) Enroll(ctx context.Context, request *agentv1.EnrollRequest) (*
 			return nil, ErrInvalidToken
 		}
 		return &agentv1.EnrollResponse{Result: agentv1.HandshakeResult_HANDSHAKE_RESULT_PENDING_APPROVAL, NodeId: (*consumedNodeID)[:], ControllerEndpointId: s.controllerEndpointID}, nil
+	}
+	if err := lockAuditChain(ctx, tx, workspaceID); err != nil {
+		return nil, err
 	}
 	now := s.now().UTC()
 	name := "node-" + fmt.Sprintf("%x", request.GetEndpointId()[:6])
@@ -516,8 +519,8 @@ type auditRecord struct {
 const auditResultIntent = "intent"
 
 func appendAudit(ctx context.Context, tx pgx.Tx, record auditRecord) error {
-	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1,0))`, record.WorkspaceID.String()); err != nil {
-		return fmt.Errorf("lock audit chain: %w", err)
+	if err := lockAuditChain(ctx, tx, record.WorkspaceID); err != nil {
+		return err
 	}
 	if err := tx.QueryRow(ctx, `SELECT clock_timestamp()`).Scan(&record.At); err != nil {
 		return fmt.Errorf("assign audit order: %w", err)
@@ -536,6 +539,13 @@ func appendAudit(ctx context.Context, tx pgx.Tx, record auditRecord) error {
 	_, err = tx.Exec(ctx, `INSERT INTO audit_events (id,workspace_id,occurred_at,actor_type,actor_id,action,resource_type,resource_id,request_id,result,reason,previous_event_hash,event_hash) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)`, eventID, record.WorkspaceID, record.At, record.ActorType, record.ActorID, record.Action, record.ResourceType, record.ResourceID, record.RequestID, auditResultIntent, record.Reason, previous, digest[:])
 	if err != nil {
 		return fmt.Errorf("append audit intent: %w", err)
+	}
+	return nil
+}
+
+func lockAuditChain(ctx context.Context, tx pgx.Tx, workspaceID uuid.UUID) error {
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1,0))`, workspaceID.String()); err != nil {
+		return fmt.Errorf("lock audit chain: %w", err)
 	}
 	return nil
 }
