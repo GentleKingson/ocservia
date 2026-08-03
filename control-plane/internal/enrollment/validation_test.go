@@ -52,9 +52,18 @@ func TestValidShortRejectsWhitespaceOutsideContractLimit(t *testing.T) {
 
 func TestValidateLockedTokenPreservesQueryErrors(t *testing.T) {
 	queryErr := errors.New("database unavailable")
-	err := validateLockedToken(queryErr, time.Time{}, time.Now())
+	err := validateLockedToken(queryErr, false, time.Time{}, time.Now())
 	if !errors.Is(err, queryErr) || errors.Is(err, ErrInvalidToken) {
 		t.Fatalf("expected query error, got %v", err)
+	}
+}
+
+func TestConsumedTokenValidationIgnoresExpiry(t *testing.T) {
+	if err := validateLockedToken(nil, true, time.Now().Add(-time.Minute), time.Now()); err != nil {
+		t.Fatalf("consumed token expiry should be checked by the idempotency path: %v", err)
+	}
+	if err := validateLockedToken(nil, false, time.Now().Add(-time.Minute), time.Now()); !errors.Is(err, ErrInvalidToken) {
+		t.Fatalf("unconsumed expired token error = %v", err)
 	}
 }
 

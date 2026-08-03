@@ -163,7 +163,7 @@ func (s *Service) Enroll(ctx context.Context, request *agentv1.EnrollRequest) (*
 	err = tx.QueryRow(ctx, `SELECT id, workspace_id, expected_environment, expected_node_name,
 	        expected_endpoint_id, expires_at, consumed_at, consumed_node_id FROM enrollment_tokens WHERE token_hash=$1 FOR UPDATE`, digest[:]).
 		Scan(&tokenID, &workspaceID, &environment, &expectedName, &expectedEndpoint, &expiresAt, &consumedAt, &consumedNodeID)
-	if err := validateLockedToken(err, expiresAt, s.now()); err != nil {
+	if err := validateLockedToken(err, consumedAt != nil, expiresAt, s.now()); err != nil {
 		return nil, err
 	}
 	if environment != request.GetEnvironment() {
@@ -471,14 +471,14 @@ func validPolicy(value string) bool                { return validShort(value, 12
 func validActor(actor, request, reason string) bool {
 	return validShort(actor, 256) && validShort(request, 128) && validShort(reason, 1024)
 }
-func validateLockedToken(queryErr error, expiresAt, now time.Time) error {
+func validateLockedToken(queryErr error, consumed bool, expiresAt, now time.Time) error {
 	if errors.Is(queryErr, pgx.ErrNoRows) {
 		return ErrInvalidToken
 	}
 	if queryErr != nil {
 		return fmt.Errorf("lock enrollment token: %w", queryErr)
 	}
-	if !now.Before(expiresAt) {
+	if !consumed && !now.Before(expiresAt) {
 		return ErrInvalidToken
 	}
 	return nil
@@ -504,6 +504,8 @@ type auditRecord struct {
 	At                                       time.Time
 }
 
+const auditResultIntent = "intent"
+
 func appendAudit(ctx context.Context, tx pgx.Tx, record auditRecord) error {
 	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1,0))`, record.WorkspaceID.String()); err != nil {
 		return fmt.Errorf("lock audit chain: %w", err)
@@ -522,7 +524,7 @@ func appendAudit(ctx context.Context, tx pgx.Tx, record auditRecord) error {
 		return fmt.Errorf("encode audit payload: %w", err)
 	}
 	digest := sha256.Sum256(payload)
-	_, err = tx.Exec(ctx, `INSERT INTO audit_events (id,workspace_id,occurred_at,actor_type,actor_id,action,resource_type,resource_id,request_id,result,reason,previous_event_hash,event_hash) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,'intent',$10,$11,$12)`, eventID, record.WorkspaceID, record.At, record.ActorType, record.ActorID, record.Action, record.ResourceType, record.ResourceID, record.RequestID, record.Reason, previous, digest[:])
+	_, err = tx.Exec(ctx, `INSERT INTO audit_events (id,workspace_id,occurred_at,actor_type,actor_id,action,resource_type,resource_id,request_id,result,reason,previous_event_hash,event_hash) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)`, eventID, record.WorkspaceID, record.At, record.ActorType, record.ActorID, record.Action, record.ResourceType, record.ResourceID, record.RequestID, auditResultIntent, record.Reason, previous, digest[:])
 	if err != nil {
 		return fmt.Errorf("append audit intent: %w", err)
 	}
@@ -541,11 +543,12 @@ func encodeAuditPayload(previous []byte, eventID uuid.UUID, record auditRecord) 
 		ResourceType string    `json:"resource_type"`
 		ResourceID   uuid.UUID `json:"resource_id"`
 		RequestID    string    `json:"request_id"`
+		Result       string    `json:"result"`
 		Reason       string    `json:"reason"`
 	}{
 		Previous: previous, EventID: eventID, WorkspaceID: record.WorkspaceID, OccurredAt: record.At,
 		ActorType: record.ActorType, ActorID: record.ActorID, Action: record.Action,
 		ResourceType: record.ResourceType, ResourceID: record.ResourceID,
-		RequestID: record.RequestID, Reason: record.Reason,
+		RequestID: record.RequestID, Result: auditResultIntent, Reason: record.Reason,
 	})
 }

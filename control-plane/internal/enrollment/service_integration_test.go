@@ -156,6 +156,13 @@ func TestEnrollmentTrustLifecycleIntegration(t *testing.T) {
 	if concurrentNodeID != string(nodeID[:]) {
 		t.Fatal("concurrent enrollment retry returned a different node")
 	}
+	if _, err := pool.Exec(ctx, `UPDATE enrollment_tokens SET created_at=now()-interval '2 seconds', expires_at=now()-interval '1 second' WHERE id=$1`, token.ID); err != nil {
+		t.Fatal(err)
+	}
+	expiredRetry, err := service.Enroll(ctx, request)
+	if err != nil || string(expiredRetry.GetNodeId()) != string(nodeID[:]) {
+		t.Fatalf("expired consumed-token retry = %v, %v", expiredRetry, err)
+	}
 	trust, err := service.Approve(ctx, Approval{NodeID: nodeID, Labels: map[string]string{"region": "test"}, Policy: "readonly", Capabilities: []string{"ocserv.status.read"}, ActorID: "integration", Reason: "approve fixture", RequestID: uuid.Must(uuid.NewV7()).String()})
 	if err != nil {
 		t.Fatal(err)
