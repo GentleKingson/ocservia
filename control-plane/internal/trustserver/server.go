@@ -139,7 +139,10 @@ func listen(path string) (net.Listener, socketIdentity, error) {
 			_ = probe.Close()
 			return nil, socketIdentity{}, errors.New("trust socket is already active")
 		}
-		if err := os.Remove(path); err != nil {
+		if !staleSocketError(dialErr) {
+			return nil, socketIdentity{}, fmt.Errorf("probe existing trust socket: %w", dialErr)
+		}
+		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
 			return nil, socketIdentity{}, fmt.Errorf("remove stale trust socket: %w", err)
 		}
 	} else if !errors.Is(err, os.ErrNotExist) {
@@ -161,6 +164,10 @@ func listen(path string) (net.Listener, socketIdentity, error) {
 		return nil, socketIdentity{}, err
 	}
 	return listener, identity, nil
+}
+
+func staleSocketError(err error) bool {
+	return errors.Is(err, syscall.ECONNREFUSED) || errors.Is(err, os.ErrNotExist)
 }
 
 func socketID(path string) (socketIdentity, error) {

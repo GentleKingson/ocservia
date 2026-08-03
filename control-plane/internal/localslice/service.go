@@ -99,7 +99,7 @@ func (s *Service) Create(ctx context.Context, scenario Scenario, requestID, trac
 	}
 	if _, err := tx.Exec(ctx, `
 		INSERT INTO nodes (id, workspace_id, name, status, created_at, updated_at)
-		VALUES ($1, $2, $3, 'pending', $4, $4)`, nodeID, workspaceID, "sim-"+nodeID.String(), now); err != nil {
+		VALUES ($1, $2, $3, 'active', $4, $4)`, nodeID, workspaceID, "sim-"+nodeID.String(), now); err != nil {
 		return Operation{}, fmt.Errorf("insert simulator node: %w", err)
 	}
 	if _, err := tx.Exec(ctx, `
@@ -373,7 +373,7 @@ func (s *Service) Ingest(ctx context.Context, event *transportv1.TransportEvent)
 	if eventType == "disconnected" {
 		status = "offline"
 	}
-	if _, err := tx.Exec(ctx, "UPDATE nodes SET status = $2, updated_at = $3, version = version + 1 WHERE id = $1 AND status <> 'revoked'", nodeID, status, occurredAt.AsTime()); err != nil {
+	if _, err := tx.Exec(ctx, "UPDATE nodes SET status = $2, updated_at = $3, version = version + 1 WHERE id = $1 AND status IN ('active','offline')", nodeID, status, occurredAt.AsTime()); err != nil {
 		return fmt.Errorf("update node from transport event: %w", err)
 	}
 	operationState := "running"

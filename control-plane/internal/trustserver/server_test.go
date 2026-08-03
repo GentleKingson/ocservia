@@ -1,10 +1,22 @@
 package trustserver
 
 import (
+	"context"
+	"errors"
 	"os"
 	"path/filepath"
+	"syscall"
 	"testing"
 )
+
+func TestStaleSocketErrorRequiresDefinitiveFailure(t *testing.T) {
+	if !staleSocketError(syscall.ECONNREFUSED) || !staleSocketError(os.ErrNotExist) {
+		t.Fatal("expected refused and missing sockets to be stale")
+	}
+	if staleSocketError(context.DeadlineExceeded) || staleSocketError(errors.New("ambiguous probe failure")) {
+		t.Fatal("expected ambiguous probe failures to preserve the socket")
+	}
+}
 
 func TestListenRejectsWritableParentDirectory(t *testing.T) {
 	parent := t.TempDir()
