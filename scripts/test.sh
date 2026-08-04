@@ -8,3 +8,4 @@ source "${ROOT}/scripts/env.sh"
 (cd "${ROOT}/web" && npm test)
 "${ROOT}/scripts/test-public-repository-policy.sh"
 "${ROOT}/scripts/test-generated-clean.sh"
+"${ROOT}/scripts/test-p1-resilience-capacity.sh"
