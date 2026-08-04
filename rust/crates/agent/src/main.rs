@@ -64,7 +64,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let transport = QuicTransportConfig::builder()
         .max_concurrent_bidi_streams(VarInt::from_u32(u32::try_from(MAX_WRITE_QUEUE)?))
         .build();
-    let endpoint = Endpoint::builder(presets::Minimal)
+    // The CLI receives the controller's stable endpoint ID, so the production
+    // endpoint must retain N0 address discovery instead of requiring an
+    // out-of-band direct or relay address.
+    let endpoint = Endpoint::builder(presets::N0)
         .secret_key(identity.secret_key().clone())
         .relay_mode(RelayMode::Default)
         .transport_config(transport)
