@@ -9,6 +9,7 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -57,6 +58,7 @@ func New(address string, pool *pgxpool.Pool, build BuildInfo, logger *slog.Logge
 	mux.HandleFunc("GET /api/v1/readyz", s.ready)
 	mux.HandleFunc("GET /api/v1/version", s.version)
 	mux.HandleFunc("POST /api/v1/development/simulations", s.createSimulation)
+	mux.HandleFunc("GET /api/v1/development/runtime", s.developmentRuntime)
 	mux.HandleFunc("GET /api/v1/operations", s.requireOperationAuth(s.listOperations))
 	mux.HandleFunc("GET /api/v1/operations/{operation_id}", s.requireOperationAuth(s.getOperation))
 	mux.HandleFunc("GET /api/v1/events", s.listEvents)
@@ -128,6 +130,20 @@ func (s *Server) version(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, s.build)
 }
 
+func (s *Server) developmentRuntime(w http.ResponseWriter, r *http.Request) {
+	if !s.localSimulator {
+		writeProblem(w, r, http.StatusNotFound, "https://ocservia.dev/problems/not-found", "Resource not found", "the requested resource does not exist")
+		return
+	}
+	pool := s.pool.Stat()
+	writeJSON(w, http.StatusOK, map[string]any{
+		"goroutines":  runtime.NumGoroutine(),
+		"db_acquired": pool.AcquiredConns(),
+		"db_idle":     pool.IdleConns(),
+		"db_total":    pool.TotalConns(),
+	})
+}
+
 func (s *Server) routeErrors(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		expectedMethod, ok := routeMethod(r.URL.Path)
@@ -146,7 +162,7 @@ func (s *Server) routeErrors(next http.Handler) http.Handler {
 
 func routeMethod(path string) (string, bool) {
 	switch path {
-	case "/livez", "/readyz", "/version", "/api/v1/livez", "/api/v1/readyz", "/api/v1/version", "/api/v1/operations", "/api/v1/events", "/api/v1/events/stream":
+	case "/livez", "/readyz", "/version", "/api/v1/livez", "/api/v1/readyz", "/api/v1/version", "/api/v1/operations", "/api/v1/events", "/api/v1/events/stream", "/api/v1/development/runtime":
 		return http.MethodGet, true
 	case "/api/v1/nodes":
 		return http.MethodGet, true

@@ -63,4 +63,12 @@ func TestScenarioDefaultsPreservePresence(t *testing.T) {
 	if heartbeats, delay, err := normalizeScenario(Scenario{DelayMillis: &zero}); err != nil || heartbeats != 3 || delay != 0 {
 		t.Fatalf("explicit zero delay = (%d, %d, %v)", heartbeats, delay, err)
 	}
+	thirtySeconds := uint32(30_000)
+	if _, delay, err := normalizeScenario(Scenario{DelayMillis: &thirtySeconds}); err != nil || delay != thirtySeconds {
+		t.Fatalf("30-second heartbeat delay = (%d, %v)", delay, err)
+	}
+	overLimit := uint32(30_001)
+	if _, _, err := normalizeScenario(Scenario{DelayMillis: &overLimit}); err == nil {
+		t.Fatal("delay above 30 seconds was accepted")
+	}
 }

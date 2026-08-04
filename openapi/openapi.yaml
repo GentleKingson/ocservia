@@ -193,6 +193,24 @@ paths:
           $ref: "#/components/responses/Problem"
         default:
           $ref: "#/components/responses/Problem"
+  /development/runtime:
+    get:
+      operationId: getDevelopmentRuntime
+      summary: Read bounded runtime counters for local resilience tests
+      description: Available only when the local simulator is explicitly enabled outside production.
+      tags: [development]
+      security: []
+      responses:
+        "200":
+          description: Current process and database pool counters.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DevelopmentRuntime"
+        "404":
+          $ref: "#/components/responses/Problem"
+        default:
+          $ref: "#/components/responses/Problem"
   /enrollment-tokens:
     post:
       operationId: createEnrollmentToken
@@ -507,7 +525,7 @@ components:
           type: integer
           format: int32
           minimum: 0
-          maximum: 10000
+          maximum: 30000
           default: 100
         duplicate_event:
           type: boolean
@@ -518,6 +536,27 @@ components:
         disconnect_after:
           type: boolean
           default: false
+    DevelopmentRuntime:
+      type: object
+      additionalProperties: false
+      required: [goroutines, db_acquired, db_idle, db_total]
+      properties:
+        goroutines:
+          type: integer
+          format: int32
+          minimum: 1
+        db_acquired:
+          type: integer
+          format: int32
+          minimum: 0
+        db_idle:
+          type: integer
+          format: int32
+          minimum: 0
+        db_total:
+          type: integer
+          format: int32
+          minimum: 0
     EnrollmentTokenRequest:
       type: object
       additionalProperties: false

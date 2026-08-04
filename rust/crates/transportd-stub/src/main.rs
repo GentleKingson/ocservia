@@ -2,18 +2,26 @@ use std::env;
 use std::io;
 use std::os::unix::fs::{FileTypeExt, PermissionsExt};
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use ocservia_contracts::generated::ocserv::platform::transport::v1::transport_service_server::TransportServiceServer;
-use ocservia_transportd_stub::StubService;
+use ocservia_transportd_stub::{StubService, StubStats};
 use tokio::net::UnixListener;
 use tokio_stream::wrappers::UnixListenerStream;
 use tonic::transport::Server;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let (socket, queue_capacity) = parse_args()?;
-    let listener = bind_socket(&socket)?;
-    let service = StubService::new(queue_capacity);
+    let config = parse_args()?;
+    let listener = bind_socket(&config.socket)?;
+    let service = if config.capacity_telemetry {
+        StubService::new_capacity(config.queue_capacity)
+    } else {
+        StubService::new(config.queue_capacity)
+    };
+    if let Some(path) = config.stats_file.clone() {
+        tokio::spawn(write_stats(service.clone(), path));
+    }
     let (health_reporter, health_service) = tonic_health::server::health_reporter();
     health_reporter
         .set_serving::<TransportServiceServer<StubService>>()
@@ -24,24 +32,35 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .add_service(TransportServiceServer::new(service))
         .serve_with_incoming_shutdown(UnixListenerStream::new(listener), shutdown())
         .await;
-    remove_socket(&socket)?;
+    remove_socket(&config.socket)?;
     result?;
     Ok(())
 }
 
-fn parse_args() -> Result<(PathBuf, usize), io::Error> {
-    let mut socket = PathBuf::from("/run/ocserv-platform/transportd.sock");
-    let mut queue_capacity = 256_usize;
+struct Config {
+    socket: PathBuf,
+    queue_capacity: usize,
+    capacity_telemetry: bool,
+    stats_file: Option<PathBuf>,
+}
+
+fn parse_args() -> Result<Config, io::Error> {
+    let mut config = Config {
+        socket: PathBuf::from("/run/ocserv-platform/transportd.sock"),
+        queue_capacity: 256,
+        capacity_telemetry: false,
+        stats_file: None,
+    };
     let mut args = env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--socket" => {
-                socket = PathBuf::from(args.next().ok_or_else(|| {
+                config.socket = PathBuf::from(args.next().ok_or_else(|| {
                     io::Error::new(io::ErrorKind::InvalidInput, "--socket requires a path")
                 })?);
             }
             "--queue-capacity" => {
-                queue_capacity = args
+                config.queue_capacity = args
                     .next()
                     .ok_or_else(|| {
                         io::Error::new(
@@ -54,6 +73,12 @@ fn parse_args() -> Result<(PathBuf, usize), io::Error> {
                         io::Error::new(io::ErrorKind::InvalidInput, "invalid --queue-capacity")
                     })?;
             }
+            "--capacity-telemetry" => config.capacity_telemetry = true,
+            "--stats-file" => {
+                config.stats_file = Some(PathBuf::from(args.next().ok_or_else(|| {
+                    io::Error::new(io::ErrorKind::InvalidInput, "--stats-file requires a path")
+                })?));
+            }
             _ => {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidInput,
@@ -62,13 +87,45 @@ fn parse_args() -> Result<(PathBuf, usize), io::Error> {
             }
         }
     }
-    if !socket.is_absolute() || queue_capacity == 0 || queue_capacity > 4096 {
+    if !config.socket.is_absolute()
+        || config.queue_capacity == 0
+        || config.queue_capacity > 4096
+        || config
+            .stats_file
+            .as_ref()
+            .is_some_and(|path| !path.is_absolute())
+    {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
-            "socket must be absolute and queue capacity must be 1..4096",
+            "socket and stats paths must be absolute and queue capacity must be 1..4096",
         ));
     }
-    Ok((socket, queue_capacity))
+    Ok(config)
+}
+
+async fn write_stats(service: StubService, path: PathBuf) {
+    let mut ticker = tokio::time::interval(Duration::from_secs(1));
+    loop {
+        ticker.tick().await;
+        let stats = service.stats().await;
+        let document = stats_json(stats);
+        if let Err(error) = tokio::fs::write(&path, document).await {
+            eprintln!("failed to write simulator stats: {error}");
+            return;
+        }
+    }
+}
+
+fn stats_json(stats: StubStats) -> Vec<u8> {
+    serde_json::to_vec(&serde_json::json!({
+        "connected_nodes": stats.connected_nodes,
+        "retained_events": stats.retained_events,
+        "subscribers": stats.subscribers,
+        "accepted_commands": stats.accepted_commands,
+        "active_tasks": stats.active_tasks,
+        "task_capacity": stats.task_capacity,
+    }))
+    .expect("simulator stats contain only integers")
 }
 
 fn bind_socket(path: &Path) -> Result<UnixListener, io::Error> {

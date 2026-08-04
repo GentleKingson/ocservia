@@ -46,28 +46,30 @@ example().catch(console.error);
 
 All URIs are relative to _/api/v1_
 
-| Class            | Method                                                                    | HTTP request                         | Description                                             |
-| ---------------- | ------------------------------------------------------------------------- | ------------------------------------ | ------------------------------------------------------- |
-| _DevelopmentApi_ | [**createLocalSimulation**](docs/DevelopmentApi.md#createlocalsimulation) | **POST** /development/simulations    | Start a side-effect-free local agent simulation         |
-| _EnrollmentApi_  | [**createEnrollmentToken**](docs/EnrollmentApi.md#createenrollmenttoken)  | **POST** /enrollment-tokens          | Create a one-time enrollment token                      |
-| _EventsApi_      | [**listEvents**](docs/EventsApi.md#listevents)                            | **GET** /events                      | Rebuild platform events from durable state              |
-| _EventsApi_      | [**watchEvents**](docs/EventsApi.md#watchevents)                          | **GET** /events/stream               | Watch platform events with SSE resume support           |
-| _NodesApi_       | [**approveNode**](docs/NodesApi.md#approvenode)                           | **POST** /nodes/{node_id}/approval   | Approve a pending node and bind its endpoint identity   |
-| _NodesApi_       | [**getNode**](docs/NodesApi.md#getnode)                                   | **GET** /nodes/{node_id}             | Get current node observed state                         |
-| _NodesApi_       | [**listNodeSessions**](docs/NodesApi.md#listnodesessions)                 | **GET** /nodes/{node_id}/sessions    | List current sessions observed on a node                |
-| _NodesApi_       | [**listNodeTelemetry**](docs/NodesApi.md#listnodetelemetry)               | **GET** /nodes/{node_id}/telemetry   | Query bounded raw or rolled-up node telemetry           |
-| _NodesApi_       | [**listNodes**](docs/NodesApi.md#listnodes)                               | **GET** /nodes                       | List node observed state                                |
-| _NodesApi_       | [**revokeNode**](docs/NodesApi.md#revokenode)                             | **POST** /nodes/{node_id}/revocation | Revoke a node endpoint and close its current connection |
-| _OperationsApi_  | [**getOperation**](docs/OperationsApi.md#getoperation)                    | **GET** /operations/{operation_id}   | Get an asynchronous operation                           |
-| _OperationsApi_  | [**listOperations**](docs/OperationsApi.md#listoperations)                | **GET** /operations                  | List operations                                         |
-| _PlatformApi_    | [**getLiveness**](docs/PlatformApi.md#getliveness)                        | **GET** /livez                       | Get process liveness                                    |
-| _PlatformApi_    | [**getReadiness**](docs/PlatformApi.md#getreadiness)                      | **GET** /readyz                      | Get dependency readiness                                |
-| _PlatformApi_    | [**getVersion**](docs/PlatformApi.md#getversion)                          | **GET** /version                     | Get build metadata                                      |
+| Class            | Method                                                                    | HTTP request                         | Description                                              |
+| ---------------- | ------------------------------------------------------------------------- | ------------------------------------ | -------------------------------------------------------- |
+| _DevelopmentApi_ | [**createLocalSimulation**](docs/DevelopmentApi.md#createlocalsimulation) | **POST** /development/simulations    | Start a side-effect-free local agent simulation          |
+| _DevelopmentApi_ | [**getDevelopmentRuntime**](docs/DevelopmentApi.md#getdevelopmentruntime) | **GET** /development/runtime         | Read bounded runtime counters for local resilience tests |
+| _EnrollmentApi_  | [**createEnrollmentToken**](docs/EnrollmentApi.md#createenrollmenttoken)  | **POST** /enrollment-tokens          | Create a one-time enrollment token                       |
+| _EventsApi_      | [**listEvents**](docs/EventsApi.md#listevents)                            | **GET** /events                      | Rebuild platform events from durable state               |
+| _EventsApi_      | [**watchEvents**](docs/EventsApi.md#watchevents)                          | **GET** /events/stream               | Watch platform events with SSE resume support            |
+| _NodesApi_       | [**approveNode**](docs/NodesApi.md#approvenode)                           | **POST** /nodes/{node_id}/approval   | Approve a pending node and bind its endpoint identity    |
+| _NodesApi_       | [**getNode**](docs/NodesApi.md#getnode)                                   | **GET** /nodes/{node_id}             | Get current node observed state                          |
+| _NodesApi_       | [**listNodeSessions**](docs/NodesApi.md#listnodesessions)                 | **GET** /nodes/{node_id}/sessions    | List current sessions observed on a node                 |
+| _NodesApi_       | [**listNodeTelemetry**](docs/NodesApi.md#listnodetelemetry)               | **GET** /nodes/{node_id}/telemetry   | Query bounded raw or rolled-up node telemetry            |
+| _NodesApi_       | [**listNodes**](docs/NodesApi.md#listnodes)                               | **GET** /nodes                       | List node observed state                                 |
+| _NodesApi_       | [**revokeNode**](docs/NodesApi.md#revokenode)                             | **POST** /nodes/{node_id}/revocation | Revoke a node endpoint and close its current connection  |
+| _OperationsApi_  | [**getOperation**](docs/OperationsApi.md#getoperation)                    | **GET** /operations/{operation_id}   | Get an asynchronous operation                            |
+| _OperationsApi_  | [**listOperations**](docs/OperationsApi.md#listoperations)                | **GET** /operations                  | List operations                                          |
+| _PlatformApi_    | [**getLiveness**](docs/PlatformApi.md#getliveness)                        | **GET** /livez                       | Get process liveness                                     |
+| _PlatformApi_    | [**getReadiness**](docs/PlatformApi.md#getreadiness)                      | **GET** /readyz                      | Get dependency readiness                                 |
+| _PlatformApi_    | [**getVersion**](docs/PlatformApi.md#getversion)                          | **GET** /version                     | Get build metadata                                       |
 
 ### Models
 
 - [BuildInfo](docs/BuildInfo.md)
 - [ConnectionPathState](docs/ConnectionPathState.md)
+- [DevelopmentRuntime](docs/DevelopmentRuntime.md)
 - [DropCounters](docs/DropCounters.md)
 - [EnrollmentToken](docs/EnrollmentToken.md)
 - [EnrollmentTokenRequest](docs/EnrollmentTokenRequest.md)
