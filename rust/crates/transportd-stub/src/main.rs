@@ -282,7 +282,7 @@ mod tests {
         std::fs::create_dir(&parent).expect("create stats test directory");
         let path = parent.join("missing").join("stats.json");
 
-        assert!(publish_stats(&path, br#"{}"#).is_err());
+        assert!(publish_stats(&path, br"{}").is_err());
         assert!(!parent.join("missing").join("stats.json.tmp").exists());
         std::fs::remove_dir_all(parent).expect("remove stats test directory");
     }
