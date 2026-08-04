@@ -161,6 +161,8 @@ message CommandEnvelope {
     ConfigApply config_apply = 104;
     ServiceReload service_reload = 105;
     SimulationProbe simulation_probe = 106;
+    SyntheticNoop synthetic_noop = 107;
+    SyntheticEcho synthetic_echo = 108;
   }
 }
 
@@ -186,6 +188,13 @@ message ConfigApply {
 }
 
 message ServiceReload {}
+
+// Synthetic commands exercise delivery without changing remote state.
+message SyntheticNoop {}
+
+message SyntheticEcho {
+  string message = 1;
+}
 
 // SimulationProbe exists only to exercise the local, side-effect-free slice.
 message SimulationProbe {

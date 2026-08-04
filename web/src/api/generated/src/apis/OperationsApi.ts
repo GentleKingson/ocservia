@@ -28,6 +28,23 @@ import {
   ProblemFromJSON,
   ProblemToJSON,
 } from "../models/Problem";
+import {
+  type QueueMetrics,
+  QueueMetricsFromJSON,
+  QueueMetricsToJSON,
+} from "../models/QueueMetrics";
+import {
+  type SyntheticCommandRequest,
+  SyntheticCommandRequestFromJSON,
+  SyntheticCommandRequestToJSON,
+} from "../models/SyntheticCommandRequest";
+
+export interface CreateSyntheticCommandRequest {
+  nodeId: string;
+  idempotencyKey: string;
+  syntheticCommandRequest: SyntheticCommandRequest;
+  ifMatch?: string;
+}
 
 export interface GetOperationRequest {
   operationId: string;
@@ -38,10 +55,114 @@ export interface ListOperationsRequest {
   pageSize?: number;
 }
 
+export interface WatchOperationEventsRequest {
+  operationId: string;
+  lastEventID?: string;
+}
+
 /**
  *
  */
 export class OperationsApi extends runtime.BaseAPI {
+  /**
+   * Creates request options for createSyntheticCommand without sending the request
+   */
+  async createSyntheticCommandRequestOpts(
+    requestParameters: CreateSyntheticCommandRequest,
+  ): Promise<runtime.RequestOpts> {
+    if (requestParameters["nodeId"] == null) {
+      throw new runtime.RequiredError(
+        "nodeId",
+        'Required parameter "nodeId" was null or undefined when calling createSyntheticCommand().',
+      );
+    }
+
+    if (requestParameters["idempotencyKey"] == null) {
+      throw new runtime.RequiredError(
+        "idempotencyKey",
+        'Required parameter "idempotencyKey" was null or undefined when calling createSyntheticCommand().',
+      );
+    }
+
+    if (requestParameters["syntheticCommandRequest"] == null) {
+      throw new runtime.RequiredError(
+        "syntheticCommandRequest",
+        'Required parameter "syntheticCommandRequest" was null or undefined when calling createSyntheticCommand().',
+      );
+    }
+
+    const queryParameters: any = {};
+
+    const headerParameters: runtime.HTTPHeaders = {};
+
+    headerParameters["Content-Type"] = "application/json";
+
+    if (requestParameters["idempotencyKey"] != null) {
+      headerParameters["Idempotency-Key"] = String(
+        requestParameters["idempotencyKey"],
+      );
+    }
+
+    if (requestParameters["ifMatch"] != null) {
+      headerParameters["If-Match"] = String(requestParameters["ifMatch"]);
+    }
+
+    if (this.configuration && this.configuration.accessToken) {
+      const token = this.configuration.accessToken;
+      const tokenString = await token("oidc", []);
+
+      if (tokenString) {
+        headerParameters["Authorization"] = `Bearer ${tokenString}`;
+      }
+    }
+
+    let urlPath = `/nodes/{node_id}/synthetic-commands`;
+    urlPath = urlPath.replace(
+      "{node_id}",
+      encodeURIComponent(String(requestParameters["nodeId"])),
+    );
+
+    return {
+      path: urlPath,
+      method: "POST",
+      headers: headerParameters,
+      query: queryParameters,
+      body: SyntheticCommandRequestToJSON(
+        requestParameters["syntheticCommandRequest"],
+      ),
+    };
+  }
+
+  /**
+   * Queue a side-effect-free typed synthetic command
+   */
+  async createSyntheticCommandRaw(
+    requestParameters: CreateSyntheticCommandRequest,
+    initOverrides?: RequestInit | runtime.InitOverrideFunction,
+  ): Promise<runtime.ApiResponse<Operation>> {
+    const requestOptions =
+      await this.createSyntheticCommandRequestOpts(requestParameters);
+    const response = await this.request(requestOptions, initOverrides);
+
+    return new runtime.JSONApiResponse(response, (jsonValue) =>
+      OperationFromJSON(jsonValue),
+    );
+  }
+
+  /**
+   * Queue a side-effect-free typed synthetic command
+   */
+  async createSyntheticCommand(
+    requestParameters: CreateSyntheticCommandRequest,
+    initOverrides?: RequestInit | runtime.InitOverrideFunction,
+  ): Promise<Operation> {
+    const response = await this.createSyntheticCommandRaw(
+      requestParameters,
+      initOverrides,
+    );
+    return await response.value();
+  }
+
   /**
    * Creates request options for getOperation without sending the request
    */
@@ -113,6 +234,57 @@ export class OperationsApi extends runtime.BaseAPI {
   }
 
   /**
+   * Creates request options for getOperationQueueMetrics without sending the request
+   */
+  async getOperationQueueMetricsRequestOpts(): Promise<runtime.RequestOpts> {
+    const queryParameters: any = {};
+
+    const headerParameters: runtime.HTTPHeaders = {};
+
+    if (this.configuration && this.configuration.accessToken) {
+      const token = this.configuration.accessToken;
+      const tokenString = await token("oidc", []);
+
+      if (tokenString) {
+        headerParameters["Authorization"] = `Bearer ${tokenString}`;
+      }
+    }
+
+    let urlPath = `/operations/queue-metrics`;
+
+    return {
+      path: urlPath,
+      method: "GET",
+      headers: headerParameters,
+      query: queryParameters,
+    };
+  }
+
+  /**
+   * Get transactional outbox and command queue metrics
+   */
+  async getOperationQueueMetricsRaw(
+    initOverrides?: RequestInit | runtime.InitOverrideFunction,
+  ): Promise<runtime.ApiResponse<QueueMetrics>> {
+    const requestOptions = await this.getOperationQueueMetricsRequestOpts();
+    const response = await this.request(requestOptions, initOverrides);
+
+    return new runtime.JSONApiResponse(response, (jsonValue) =>
+      QueueMetricsFromJSON(jsonValue),
+    );
+  }
+
+  /**
+   * Get transactional outbox and command queue metrics
+   */
+  async getOperationQueueMetrics(
+    initOverrides?: RequestInit | runtime.InitOverrideFunction,
+  ): Promise<QueueMetrics> {
+    const response = await this.getOperationQueueMetricsRaw(initOverrides);
+    return await response.value();
+  }
+
+  /**
    * Creates request options for listOperations without sending the request
    */
   async listOperationsRequestOpts(
@@ -173,6 +345,84 @@ export class OperationsApi extends runtime.BaseAPI {
     initOverrides?: RequestInit | runtime.InitOverrideFunction,
   ): Promise<OperationPage> {
     const response = await this.listOperationsRaw(
+      requestParameters,
+      initOverrides,
+    );
+    return await response.value();
+  }
+
+  /**
+   * Creates request options for watchOperationEvents without sending the request
+   */
+  async watchOperationEventsRequestOpts(
+    requestParameters: WatchOperationEventsRequest,
+  ): Promise<runtime.RequestOpts> {
+    if (requestParameters["operationId"] == null) {
+      throw new runtime.RequiredError(
+        "operationId",
+        'Required parameter "operationId" was null or undefined when calling watchOperationEvents().',
+      );
+    }
+
+    const queryParameters: any = {};
+
+    const headerParameters: runtime.HTTPHeaders = {};
+
+    if (requestParameters["lastEventID"] != null) {
+      headerParameters["Last-Event-ID"] = String(
+        requestParameters["lastEventID"],
+      );
+    }
+
+    if (this.configuration && this.configuration.accessToken) {
+      const token = this.configuration.accessToken;
+      const tokenString = await token("oidc", []);
+
+      if (tokenString) {
+        headerParameters["Authorization"] = `Bearer ${tokenString}`;
+      }
+    }
+
+    let urlPath = `/operations/{operation_id}/events`;
+    urlPath = urlPath.replace(
+      "{operation_id}",
+      encodeURIComponent(String(requestParameters["operationId"])),
+    );
+
+    return {
+      path: urlPath,
+      method: "GET",
+      headers: headerParameters,
+      query: queryParameters,
+    };
+  }
+
+  /**
+   * Watch durable operation state changes
+   */
+  async watchOperationEventsRaw(
+    requestParameters: WatchOperationEventsRequest,
+    initOverrides?: RequestInit | runtime.InitOverrideFunction,
+  ): Promise<runtime.ApiResponse<string>> {
+    const requestOptions =
+      await this.watchOperationEventsRequestOpts(requestParameters);
+    const response = await this.request(requestOptions, initOverrides);
+
+    if (this.isJsonMime(response.headers.get("content-type"))) {
+      return new runtime.JSONApiResponse<string>(response);
+    } else {
+      return new runtime.TextApiResponse(response) as any;
+    }
+  }
+
+  /**
+   * Watch durable operation state changes
+   */
+  async watchOperationEvents(
+    requestParameters: WatchOperationEventsRequest,
+    initOverrides?: RequestInit | runtime.InitOverrideFunction,
+  ): Promise<string> {
+    const response = await this.watchOperationEventsRaw(
       requestParameters,
       initOverrides,
     );

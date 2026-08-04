@@ -52,6 +52,12 @@ export interface Operation {
    */
   commandId?: string;
   /**
+   *
+   * @type {number}
+   * @memberof Operation
+   */
+  version: number;
+  /**
    * RFC 3339 timestamp normalized to UTC.
    * @type {Date}
    * @memberof Operation
@@ -63,6 +69,12 @@ export interface Operation {
    * @memberof Operation
    */
   updatedAt: Date;
+  /**
+   * RFC 3339 timestamp normalized to UTC.
+   * @type {Date}
+   * @memberof Operation
+   */
+  expiresAt?: Date;
 }
 
 /**
@@ -71,6 +83,7 @@ export interface Operation {
 export function instanceOfOperation(value: object): value is Operation {
   if (!("id" in value) || value["id"] === undefined) return false;
   if (!("state" in value) || value["state"] === undefined) return false;
+  if (!("version" in value) || value["version"] === undefined) return false;
   if (
     (!("createdAt" in (value as Record<string, any>)) &&
       !("created_at" in (value as Record<string, any>))) ||
@@ -104,8 +117,11 @@ export function OperationFromJSONTyped(
     state: OperationStateFromJSON(json["state"]),
     nodeId: json["node_id"] == null ? undefined : json["node_id"],
     commandId: json["command_id"] == null ? undefined : json["command_id"],
+    version: json["version"],
     createdAt: new Date(json["created_at"]),
     updatedAt: new Date(json["updated_at"]),
+    expiresAt:
+      json["expires_at"] == null ? undefined : new Date(json["expires_at"]),
   };
 }
 
@@ -126,7 +142,12 @@ export function OperationToJSONTyped(
     state: OperationStateToJSON(value["state"]),
     node_id: value["nodeId"],
     command_id: value["commandId"],
+    version: value["version"],
     created_at: value["createdAt"].toISOString(),
     updated_at: value["updatedAt"].toISOString(),
+    expires_at:
+      value["expiresAt"] == null
+        ? value["expiresAt"]
+        : value["expiresAt"].toISOString(),
   };
 }

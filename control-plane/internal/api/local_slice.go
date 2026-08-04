@@ -53,6 +53,23 @@ func (s *Server) createSimulation(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) getOperation(w http.ResponseWriter, r *http.Request) {
+	if s.operations != nil {
+		id, err := uuid.Parse(r.PathValue("operation_id"))
+		if err != nil || id.Version() != 7 {
+			writeProblem(w, r, http.StatusBadRequest, "https://ocservia.dev/problems/invalid-id", "Identifier is invalid", "operation_id must be a UUIDv7")
+			return
+		}
+		operation, err := s.operations.Get(r.Context(), id)
+		if err == nil {
+			w.Header().Set("ETag", fmt.Sprintf("\"revision-%d\"", operation.Version))
+			writeJSON(w, http.StatusOK, operation)
+			return
+		}
+		if !errors.Is(err, pgx.ErrNoRows) {
+			s.writeOperationError(w, r, err)
+			return
+		}
+	}
 	service := s.localSliceService()
 	if service == nil {
 		writeProblem(w, r, http.StatusNotFound, "https://ocservia.dev/problems/not-found", "Resource not found", "the requested resource does not exist")
