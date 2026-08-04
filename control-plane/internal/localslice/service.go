@@ -38,6 +38,7 @@ type Operation struct {
 	State     string    `json:"state"`
 	NodeID    *string   `json:"node_id,omitempty"`
 	CommandID *string   `json:"command_id,omitempty"`
+	Version   int64     `json:"version"`
 	CreatedAt time.Time `json:"created_at"`
 	UpdatedAt time.Time `json:"updated_at"`
 }
@@ -120,15 +121,15 @@ func (s *Service) Create(ctx context.Context, scenario Scenario, requestID, trac
 		return Operation{}, fmt.Errorf("commit local slice transaction: %w", err)
 	}
 	nodeIDText, commandIDText := nodeID.String(), commandID.String()
-	return Operation{ID: operationID.String(), State: "queued", NodeID: &nodeIDText, CommandID: &commandIDText, CreatedAt: now, UpdatedAt: now}, nil
+	return Operation{ID: operationID.String(), State: "queued", NodeID: &nodeIDText, CommandID: &commandIDText, Version: 1, CreatedAt: now, UpdatedAt: now}, nil
 }
 
 func (s *Service) GetOperation(ctx context.Context, id uuid.UUID) (Operation, error) {
 	var operation Operation
 	var nodeID, commandID pgtype.Text
 	err := s.pool.QueryRow(ctx, `
-		SELECT id::text, state, node_id::text, command_id::text, created_at, updated_at
-		FROM operations WHERE id = $1`, id).Scan(&operation.ID, &operation.State, &nodeID, &commandID, &operation.CreatedAt, &operation.UpdatedAt)
+		SELECT id::text, state, node_id::text, command_id::text, version, created_at, updated_at
+		FROM operations WHERE id = $1`, id).Scan(&operation.ID, &operation.State, &nodeID, &commandID, &operation.Version, &operation.CreatedAt, &operation.UpdatedAt)
 	if err != nil {
 		return Operation{}, fmt.Errorf("get operation: %w", err)
 	}
@@ -142,7 +143,7 @@ func (s *Service) ListOperations(ctx context.Context, after uuid.UUID, limit int
 		return nil, false, errors.New("operation page size must be between 1 and 200")
 	}
 	rows, err := s.pool.Query(ctx, `
-		SELECT id::text, state, node_id::text, command_id::text, created_at, updated_at
+		SELECT id::text, state, node_id::text, command_id::text, version, created_at, updated_at
 		FROM operations
 		WHERE ($1::uuid IS NULL OR id < $1)
 		ORDER BY id DESC LIMIT $2`, nullableUUID(after), limit+1)
@@ -154,7 +155,7 @@ func (s *Service) ListOperations(ctx context.Context, after uuid.UUID, limit int
 	for rows.Next() {
 		var operation Operation
 		var nodeID, commandID pgtype.Text
-		if err := rows.Scan(&operation.ID, &operation.State, &nodeID, &commandID, &operation.CreatedAt, &operation.UpdatedAt); err != nil {
+		if err := rows.Scan(&operation.ID, &operation.State, &nodeID, &commandID, &operation.Version, &operation.CreatedAt, &operation.UpdatedAt); err != nil {
 			return nil, false, fmt.Errorf("scan operation: %w", err)
 		}
 		operation.NodeID = optionalText(nodeID)

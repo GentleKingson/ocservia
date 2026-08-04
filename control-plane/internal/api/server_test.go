@@ -182,3 +182,35 @@ func TestEnrollmentTTLSecondsRejectsOverflowInputs(t *testing.T) {
 		}
 	}
 }
+
+func TestExpectedRevisionRequiresMatchingHeaderOrBody(t *testing.T) {
+	version := int64(7)
+	for _, test := range []struct {
+		header string
+		body   *int64
+		want   int64
+		ok     bool
+	}{
+		{header: "\"revision-7\"", want: 7, ok: true},
+		{body: &version, want: 7, ok: true},
+		{header: "\"revision-7\"", body: &version, want: 7, ok: true},
+		{header: "revision-6", body: &version, ok: false},
+		{header: "*", ok: false},
+		{},
+	} {
+		got, ok := expectedRevision(test.header, test.body)
+		if got != test.want || ok != test.ok {
+			t.Fatalf("expectedRevision(%q) = %d,%v; want %d,%v", test.header, got, ok, test.want, test.ok)
+		}
+	}
+}
+
+func TestSyntheticCommandRequiresAuthentication(t *testing.T) {
+	server := New("127.0.0.1:0", nil, BuildInfo{}, slog.New(slog.NewTextHandler(io.Discard, nil)), 1024, time.Second, false, "", 1)
+	response := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/nodes/019fc0a4-6d92-765c-a8a1-4af556614cc3/synthetic-commands", strings.NewReader(`{"kind":"noop","expected_version":1}`))
+	server.http.Handler.ServeHTTP(response, request)
+	if response.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d", response.Code)
+	}
+}

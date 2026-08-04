@@ -10,6 +10,7 @@ import (
 	"github.com/GentleKingson/ocservia/control-plane/internal/api"
 	"github.com/GentleKingson/ocservia/control-plane/internal/enrollment"
 	"github.com/GentleKingson/ocservia/control-plane/internal/localslice"
+	operationstore "github.com/GentleKingson/ocservia/control-plane/internal/operations"
 	"github.com/GentleKingson/ocservia/control-plane/internal/platform/config"
 	"github.com/GentleKingson/ocservia/control-plane/internal/platform/telemetry"
 	telemetrystore "github.com/GentleKingson/ocservia/control-plane/internal/telemetry"
@@ -62,7 +63,8 @@ func Run(ctx context.Context, cfg config.Config, build BuildInfo, logger *slog.L
 	componentCtx, stopComponents := context.WithCancel(ctx)
 	defer stopComponents()
 	sliceService := localslice.New(pool)
-	workerErr := make(chan error, 1)
+	operationService := operationstore.New(pool)
+	workerErr := make(chan error, 2)
 	maintenanceErr := make(chan error, 1)
 	var trust *trustserver.Server
 	trustErr := make(chan error, 1)
@@ -88,6 +90,11 @@ func Run(ctx context.Context, cfg config.Config, build BuildInfo, logger *slog.L
 		}
 		worker := localslice.NewWorker(sliceService, transport, logger)
 		go func() { workerErr <- worker.Run(componentCtx) }()
+		operationWorker, workerConfigErr := operationstore.NewWorker(operationService, transport, logger)
+		if workerConfigErr != nil {
+			return fmt.Errorf("configure outbox worker: %w", workerConfigErr)
+		}
+		go func() { workerErr <- operationWorker.Run(componentCtx) }()
 	}
 	telemetryService := telemetrystore.New(pool)
 	if cfg.RunsScheduler() {
@@ -128,6 +135,7 @@ func Run(ctx context.Context, cfg config.Config, build BuildInfo, logger *slog.L
 	}
 
 	server := api.New(cfg.HTTPAddress, pool, api.BuildInfo{Version: build.Version, Commit: build.Commit, Role: string(cfg.Role)}, logger, cfg.BodyLimit, cfg.RequestTimeout, operationAuthEnabled(cfg), cfg.DevAuthToken, expectedSchemaVersion)
+	server.EnableOperations(operationService)
 	server.EnableTelemetry(telemetryService)
 	if cfg.ControllerEndpointID != "" {
 		transport, transportErr := transportclient.New(cfg.TransportSocket, cfg.TransportTimeout, cfg.TransportQueue)

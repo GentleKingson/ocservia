@@ -116,6 +116,45 @@ paths:
           $ref: "#/components/responses/Problem"
         default:
           $ref: "#/components/responses/Problem"
+  /operations/{operation_id}/events:
+    get:
+      operationId: watchOperationEvents
+      summary: Watch durable operation state changes
+      tags: [operations]
+      parameters:
+        - $ref: "#/components/parameters/OperationId"
+        - name: Last-Event-ID
+          in: header
+          required: false
+          schema:
+            $ref: "#/components/schemas/UuidV7"
+      responses:
+        "200":
+          description: SSE stream whose id field is a durable operation event ID.
+          content:
+            text/event-stream:
+              schema:
+                type: string
+        "400":
+          $ref: "#/components/responses/Problem"
+        default:
+          $ref: "#/components/responses/Problem"
+  /operations/queue-metrics:
+    get:
+      operationId: getOperationQueueMetrics
+      summary: Get transactional outbox and command queue metrics
+      tags: [operations]
+      responses:
+        "200":
+          description: Current bounded queue metrics.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/QueueMetrics"
+        "401":
+          $ref: "#/components/responses/Problem"
+        default:
+          $ref: "#/components/responses/Problem"
   /events:
     get:
       operationId: listEvents
@@ -384,6 +423,55 @@ paths:
           $ref: "#/components/responses/Problem"
         default:
           $ref: "#/components/responses/Problem"
+  /nodes/{node_id}/synthetic-commands:
+    post:
+      operationId: createSyntheticCommand
+      summary: Queue a side-effect-free typed synthetic command
+      tags: [operations]
+      parameters:
+        - $ref: "#/components/parameters/NodeId"
+        - $ref: "#/components/parameters/IdempotencyKey"
+        - name: If-Match
+          in: header
+          required: false
+          schema:
+            type: string
+            pattern: '^"revision-[1-9][0-9]*"$'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SyntheticCommandRequest"
+      responses:
+        "202":
+          description: The operation intent, command, outbox event, and audit intent were committed atomically.
+          headers:
+            Location:
+              required: true
+              schema:
+                type: string
+            ETag:
+              required: true
+              schema:
+                type: string
+            Idempotency-Replayed:
+              required: false
+              schema:
+                type: string
+                enum: ["true"]
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Operation"
+        "400":
+          $ref: "#/components/responses/Problem"
+        "404":
+          $ref: "#/components/responses/Problem"
+        "409":
+          $ref: "#/components/responses/Problem"
+        default:
+          $ref: "#/components/responses/Problem"
 components:
   securitySchemes:
     oidc:
@@ -421,6 +509,14 @@ components:
       required: true
       schema:
         $ref: "#/components/schemas/UuidV7"
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: true
+      schema:
+        type: string
+        minLength: 1
+        maxLength: 128
   responses:
     Problem:
       description: Request failed.
@@ -497,7 +593,7 @@ components:
     Operation:
       type: object
       additionalProperties: false
-      required: [id, state, created_at, updated_at]
+      required: [id, state, version, created_at, updated_at]
       properties:
         id:
           $ref: "#/components/schemas/UuidV7"
@@ -507,10 +603,62 @@ components:
           $ref: "#/components/schemas/UuidV7"
         command_id:
           $ref: "#/components/schemas/UuidV7"
+        version:
+          type: integer
+          format: int64
+          minimum: 1
         created_at:
           $ref: "#/components/schemas/UtcDateTime"
         updated_at:
           $ref: "#/components/schemas/UtcDateTime"
+        expires_at:
+          $ref: "#/components/schemas/UtcDateTime"
+    SyntheticCommandRequest:
+      type: object
+      additionalProperties: false
+      required: [kind]
+      properties:
+        kind:
+          type: string
+          enum: [noop, echo]
+        message:
+          type: string
+          maxLength: 4096
+        expected_version:
+          type: integer
+          format: int64
+          minimum: 1
+        ttl_seconds:
+          type: integer
+          format: int64
+          minimum: 1
+          maximum: 86400
+          default: 60
+        supersede_pending:
+          type: boolean
+          default: false
+      description: expected_version is required unless If-Match supplies the same revision.
+    QueueMetrics:
+      type: object
+      additionalProperties: false
+      required: [outbox_unpublished_total, outbox_oldest_age_seconds, command_queue_depth, command_unknown_total]
+      properties:
+        outbox_unpublished_total:
+          type: integer
+          format: int64
+          minimum: 0
+        outbox_oldest_age_seconds:
+          type: number
+          format: double
+          minimum: 0
+        command_queue_depth:
+          type: integer
+          format: int64
+          minimum: 0
+        command_unknown_total:
+          type: integer
+          format: int64
+          minimum: 0
     SimulationScenario:
       type: object
       additionalProperties: false

@@ -409,6 +409,25 @@ fn new_telemetry_event(
     )
 }
 
+impl StubService {
+    async fn accept_synthetic(
+        &self,
+        idempotency_key: Vec<u8>,
+    ) -> Result<Response<SendCommandResponse>, Status> {
+        let mut accepted = self.state.accepted_commands.lock().await;
+        if accepted.keys.contains(&idempotency_key) {
+            return Ok(Response::new(SendCommandResponse { accepted: true }));
+        }
+        if accepted.keys.len() == self.state.retention {
+            return Err(Status::resource_exhausted(
+                "idempotency capacity reached; restart the development stub",
+            ));
+        }
+        accepted.keys.insert(idempotency_key);
+        Ok(Response::new(SendCommandResponse { accepted: true }))
+    }
+}
+
 #[tonic::async_trait]
 impl TransportService for StubService {
     type WatchEventsStream = EventStream;
@@ -458,8 +477,23 @@ impl TransportService for StubService {
         validate_traceparent(&envelope.traceparent)?;
         validate_command_times(envelope.issued_at.as_ref(), envelope.expires_at.as_ref())?;
         let idempotency_key = validate_id(&envelope.idempotency_key, "idempotency_key")?;
-        let Some(command_envelope::Payload::SimulationProbe(probe)) = envelope.payload else {
-            return Err(Status::unimplemented("stub accepts only simulation probes"));
+        let payload = envelope
+            .payload
+            .ok_or_else(|| Status::invalid_argument("command payload is required"))?;
+        let probe = match payload {
+            command_envelope::Payload::SimulationProbe(probe) => probe,
+            command_envelope::Payload::SyntheticNoop(_) => {
+                return self.accept_synthetic(idempotency_key).await;
+            }
+            command_envelope::Payload::SyntheticEcho(echo) => {
+                if echo.message.len() > 4096 {
+                    return Err(Status::invalid_argument(
+                        "synthetic echo exceeds 4096 bytes",
+                    ));
+                }
+                return self.accept_synthetic(idempotency_key).await;
+            }
+            _ => return Err(Status::unimplemented("stub rejects non-synthetic commands")),
         };
         if probe.heartbeat_count > MAX_HEARTBEATS
             || Duration::from_millis(u64::from(probe.delay_millis)) > MAX_DELAY

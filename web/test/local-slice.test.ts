@@ -19,6 +19,7 @@ vi.mock("../src/api/client", () => ({
 const operation = (state: Operation["state"]): Operation => ({
   id: "019fc0a4-6d92-765c-a8a1-4af556614cc3",
   state,
+  version: 1,
   createdAt: new Date(0),
   updatedAt: new Date(0),
 });

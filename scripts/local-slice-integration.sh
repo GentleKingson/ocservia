@@ -121,6 +121,33 @@ wait_state "${normal_id}" succeeded >/dev/null
 events="$(curl --fail --silent "http://127.0.0.1:${API_PORT}/api/v1/events?page_size=200")"
 jq -e --arg node "${normal_node}" '[.items[] | select(.node_id == $node)] | length == 5' <<<"${events}" >/dev/null
 jq -e --arg node "${normal_node}" 'all(.items[] | select(.node_id == $node); .traceparent | test("^00-[0-9a-f]{32}-[0-9a-f]{16}-[0-9a-f]{2}$"))' <<<"${events}" >/dev/null
+
+node_version="$(docker exec "${POSTGRES}" psql -U ocservia_owner -d ocservia -Atc "SELECT version FROM nodes WHERE id='${normal_node}'")"
+synthetic="$(curl --fail --silent -H "Authorization: Bearer ${AUTH_TOKEN}" \
+  -H 'Content-Type: application/json' -H 'Idempotency-Key: synthetic-echo-1' \
+  -H "If-Match: \"revision-${node_version}\"" \
+  -d '{"kind":"echo","message":"i09"}' \
+  "http://127.0.0.1:${API_PORT}/api/v1/nodes/${normal_node}/synthetic-commands")"
+synthetic_id="$(jq -r .id <<<"${synthetic}")"
+wait_state "${synthetic_id}" dispatched >/dev/null
+replayed="$(curl --fail --silent -D "${TMP_ROOT}/replay.headers" -H "Authorization: Bearer ${AUTH_TOKEN}" \
+  -H 'Content-Type: application/json' -H 'Idempotency-Key: synthetic-echo-1' \
+  -d "{\"kind\":\"echo\",\"message\":\"i09\",\"expected_version\":${node_version}}" \
+  "http://127.0.0.1:${API_PORT}/api/v1/nodes/${normal_node}/synthetic-commands")"
+test "$(jq -r .id <<<"${replayed}")" = "${synthetic_id}"
+grep -qi '^Idempotency-Replayed: true' "${TMP_ROOT}/replay.headers"
+test "$(curl --silent --output /dev/null --write-out '%{http_code}' -H "Authorization: Bearer ${AUTH_TOKEN}" \
+  -H 'Content-Type: application/json' -H 'Idempotency-Key: synthetic-echo-1' \
+  -d "{\"kind\":\"echo\",\"message\":\"different\",\"expected_version\":${node_version}}" \
+  "http://127.0.0.1:${API_PORT}/api/v1/nodes/${normal_node}/synthetic-commands")" = "409"
+curl --fail --silent -H "Authorization: Bearer ${AUTH_TOKEN}" \
+  "http://127.0.0.1:${API_PORT}/api/v1/operations/queue-metrics" |
+  jq -e '.outbox_unpublished_total == 0 and .command_queue_depth == 0 and .command_unknown_total == 0' >/dev/null
+timeout 2s curl --no-buffer --silent -H "Authorization: Bearer ${AUTH_TOKEN}" \
+  "http://127.0.0.1:${API_PORT}/api/v1/operations/${synthetic_id}/events" >"${TMP_ROOT}/operation.sse" || true
+grep -q '^event: operation' "${TMP_ROOT}/operation.sse"
+grep -q '"state":"dispatched"' "${TMP_ROOT}/operation.sse"
+
 page="$(curl --fail --silent "http://127.0.0.1:${API_PORT}/api/v1/events?page_size=2")"
 jq -e '.page.has_more == true and (.page.next_cursor | type == "string") and (.items | length == 2)' <<<"${page}" >/dev/null
 

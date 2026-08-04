@@ -16,6 +16,7 @@ import (
 
 	"github.com/GentleKingson/ocservia/control-plane/internal/enrollment"
 	"github.com/GentleKingson/ocservia/control-plane/internal/localslice"
+	operationstore "github.com/GentleKingson/ocservia/control-plane/internal/operations"
 	telemetrystore "github.com/GentleKingson/ocservia/control-plane/internal/telemetry"
 	"github.com/GentleKingson/ocservia/control-plane/internal/transportclient"
 	"github.com/GentleKingson/ocservia/control-plane/migrations"
@@ -43,6 +44,7 @@ type Server struct {
 	localSlice     *localslice.Service
 	localSliceMu   sync.RWMutex
 	localSimulator bool
+	operations     *operationstore.Service
 	enrollment     *enrollment.Service
 	transport      *transportclient.Client
 	telemetry      *telemetrystore.Service
@@ -61,6 +63,9 @@ func New(address string, pool *pgxpool.Pool, build BuildInfo, logger *slog.Logge
 	mux.HandleFunc("GET /api/v1/development/runtime", s.developmentRuntime)
 	mux.HandleFunc("GET /api/v1/operations", s.requireOperationAuth(s.listOperations))
 	mux.HandleFunc("GET /api/v1/operations/{operation_id}", s.requireOperationAuth(s.getOperation))
+	mux.HandleFunc("GET /api/v1/operations/{operation_id}/events", s.requireOperationAuth(s.streamOperationEvents))
+	mux.HandleFunc("GET /api/v1/operations/queue-metrics", s.requireOperationAuth(s.queueMetrics))
+	mux.HandleFunc("POST /api/v1/nodes/{node_id}/synthetic-commands", s.requireOperationAuth(s.createSyntheticCommand))
 	mux.HandleFunc("GET /api/v1/events", s.listEvents)
 	mux.HandleFunc("GET /api/v1/events/stream", s.streamEvents)
 	mux.HandleFunc("POST /api/v1/enrollment-tokens", s.requireOperationAuth(s.createEnrollmentToken))
@@ -76,6 +81,8 @@ func New(address string, pool *pgxpool.Pool, build BuildInfo, logger *slog.Logge
 }
 
 func (s *Server) EnableTelemetry(service *telemetrystore.Service) { s.telemetry = service }
+
+func (s *Server) EnableOperations(service *operationstore.Service) { s.operations = service }
 
 func (s *Server) EnableEnrollment(service *enrollment.Service, transport *transportclient.Client) {
 	s.enrollment = service
@@ -162,7 +169,7 @@ func (s *Server) routeErrors(next http.Handler) http.Handler {
 
 func routeMethod(path string) (string, bool) {
 	switch path {
-	case "/livez", "/readyz", "/version", "/api/v1/livez", "/api/v1/readyz", "/api/v1/version", "/api/v1/operations", "/api/v1/events", "/api/v1/events/stream", "/api/v1/development/runtime":
+	case "/livez", "/readyz", "/version", "/api/v1/livez", "/api/v1/readyz", "/api/v1/version", "/api/v1/operations", "/api/v1/operations/queue-metrics", "/api/v1/events", "/api/v1/events/stream", "/api/v1/development/runtime":
 		return http.MethodGet, true
 	case "/api/v1/nodes":
 		return http.MethodGet, true
@@ -181,6 +188,12 @@ func routeMethod(path string) (string, bool) {
 	if len(parts) == 5 && parts[0] == "api" && parts[1] == "v1" && parts[2] == "nodes" && parts[3] != "" && (parts[4] == "sessions" || parts[4] == "telemetry") {
 		return http.MethodGet, true
 	}
+	if len(parts) == 5 && parts[0] == "api" && parts[1] == "v1" && parts[2] == "nodes" && parts[3] != "" && parts[4] == "synthetic-commands" {
+		return http.MethodPost, true
+	}
+	if len(parts) == 5 && parts[0] == "api" && parts[1] == "v1" && parts[2] == "operations" && parts[3] != "" && parts[4] == "events" {
+		return http.MethodGet, true
+	}
 	operationID := strings.TrimPrefix(path, "/api/v1/operations/")
 	if operationID != path && operationID != "" && !strings.Contains(operationID, "/") {
 		return http.MethodGet, true
@@ -191,7 +204,7 @@ func routeMethod(path string) (string, bool) {
 func (s *Server) timeout(next http.Handler) http.Handler {
 	timed := http.TimeoutHandler(next, s.requestTimeout, `{"type":"https://ocservia.dev/problems/timeout","title":"Request timed out","status":503}`)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/api/v1/events/stream" {
+		if r.URL.Path == "/api/v1/events/stream" || strings.HasSuffix(r.URL.Path, "/events") && strings.HasPrefix(r.URL.Path, "/api/v1/operations/") {
 			next.ServeHTTP(w, r)
 			return
 		}

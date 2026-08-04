@@ -31,6 +31,9 @@ Telemetry freshness, retention, read-only node APIs, and fleet views are
 documented in [docs/development/telemetry.md](docs/development/telemetry.md).
 The repeatable single-host P1 recovery and initial capacity harness is documented
 in [docs/development/p1-resilience-capacity.md](docs/development/p1-resilience-capacity.md).
+The typed synthetic command, asynchronous operation, node lease, and
+transactional outbox development workflow is documented in
+[docs/development/operations-outbox.md](docs/development/operations-outbox.md).
 
 ## Security
 

@@ -1,0 +1,233 @@
+package operations
+
+import (
+	"context"
+	"errors"
+	"os"
+	"sync"
+	"testing"
+	"time"
+
+	agentv1 "github.com/GentleKingson/ocservia/control-plane/gen/proto/ocserv/platform/agent/v1"
+	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgxpool"
+	"google.golang.org/protobuf/proto"
+)
+
+const testTraceparent = "00-0123456789abcdef0123456789abcdef-0123456789abcdef-01"
+
+func TestTransactionalCreateIdempotencyAndTypedPayloadIntegration(t *testing.T) {
+	service, pool, workspaceID, nodeID := integrationService(t)
+	request := testRequest(nodeID, "same-key", SyntheticEcho, "hello")
+	first, replayed, err := service.CreateSynthetic(context.Background(), request)
+	if err != nil || replayed {
+		t.Fatalf("first create = %+v, %v, %v", first, replayed, err)
+	}
+	second, replayed, err := service.CreateSynthetic(context.Background(), request)
+	if err != nil || !replayed || second.ID != first.ID {
+		t.Fatalf("replay = %+v, %v, %v", second, replayed, err)
+	}
+
+	var operationCount, commandCount, outboxCount, auditCount int
+	var envelope []byte
+	err = pool.QueryRow(context.Background(), `SELECT (SELECT count(*) FROM operations WHERE workspace_id=$1),(SELECT count(*) FROM commands WHERE workspace_id=$1),(SELECT count(*) FROM outbox_events o JOIN commands c ON c.id=o.command_id WHERE c.workspace_id=$1),(SELECT count(*) FROM audit_events WHERE workspace_id=$1),(SELECT envelope FROM commands WHERE workspace_id=$1)`, workspaceID).Scan(&operationCount, &commandCount, &outboxCount, &auditCount, &envelope)
+	if err != nil || operationCount != 1 || commandCount != 1 || outboxCount != 1 || auditCount != 1 {
+		t.Fatalf("atomic rows = %d/%d/%d/%d, %v", operationCount, commandCount, outboxCount, auditCount, err)
+	}
+	var command agentv1.CommandEnvelope
+	if err := proto.Unmarshal(envelope, &command); err != nil {
+		t.Fatal(err)
+	}
+	if command.GetSyntheticEcho().GetMessage() != "hello" || command.GetExpectedRevision() != 1 {
+		t.Fatalf("unexpected typed envelope: %v", &command)
+	}
+
+	conflict := request
+	conflict.Message = "different"
+	if _, _, err := service.CreateSynthetic(context.Background(), conflict); !errors.Is(err, ErrIdempotencyConflict) {
+		t.Fatalf("conflicting replay error = %v", err)
+	}
+	stale := testRequest(nodeID, "stale", SyntheticNoop, "")
+	stale.ExpectedVersion = 2
+	if _, _, err := service.CreateSynthetic(context.Background(), stale); !errors.Is(err, ErrStaleRevision) {
+		t.Fatalf("stale revision error = %v", err)
+	}
+}
+
+func TestConcurrentWorkersNodeLeaseAndCrashWindowsIntegration(t *testing.T) {
+	service, pool, workspaceID, nodeID := integrationService(t)
+	for _, key := range []string{"one", "two"} {
+		if _, _, err := service.CreateSynthetic(context.Background(), testRequest(nodeID, key, SyntheticNoop, "")); err != nil {
+			t.Fatal(err)
+		}
+	}
+	workers := []uuid.UUID{uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7())}
+	results := make(chan []Dispatch, 2)
+	var group sync.WaitGroup
+	for _, worker := range workers {
+		group.Add(1)
+		go func(workerID uuid.UUID) {
+			defer group.Done()
+			jobs, err := service.Claim(context.Background(), workerID, 8, 80*time.Millisecond)
+			if err != nil {
+				t.Error(err)
+			}
+			results <- jobs
+		}(worker)
+	}
+	group.Wait()
+	close(results)
+	claimed := 0
+	var first Dispatch
+	for jobs := range results {
+		claimed += len(jobs)
+		if len(jobs) > 0 {
+			first = jobs[0]
+		}
+	}
+	if claimed != 1 {
+		t.Fatalf("concurrent claims = %d, want one per node", claimed)
+	}
+
+	// Crash after network send but before DB acknowledgement: lease expiry makes
+	// the side-effect-free command eligible for at-least-once redelivery.
+	time.Sleep(100 * time.Millisecond)
+	if err := service.Reap(context.Background(), 3); err != nil {
+		t.Fatal(err)
+	}
+	var retried Dispatch
+	for range 2 {
+		retry, err := service.Claim(context.Background(), uuid.Must(uuid.NewV7()), 8, time.Second)
+		if err != nil || len(retry) != 1 {
+			t.Fatalf("crash-window retry = %+v, %v", retry, err)
+		}
+		if retry[0].CommandID == first.CommandID {
+			retried = retry[0]
+			break
+		}
+		if err := service.MarkSent(context.Background(), retry[0]); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if retried.CommandID == uuid.Nil {
+		t.Fatal("lease-expired command was not redelivered")
+	}
+	if err := service.MarkSent(context.Background(), retried); err != nil {
+		t.Fatal(err)
+	}
+
+	var attempts int
+	var state string
+	if err := pool.QueryRow(context.Background(), `SELECT count(*),min(command.state) FROM command_attempts AS attempt JOIN commands AS command ON command.id=attempt.command_id WHERE command.workspace_id=$1 AND command.id=$2 GROUP BY command.id`, workspaceID, first.CommandID).Scan(&attempts, &state); err != nil {
+		t.Fatal(err)
+	}
+	if attempts != 2 || state != "dispatched" {
+		t.Fatalf("attempts/state = %d/%s", attempts, state)
+	}
+	metrics, err := service.Metrics(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if metrics.Unpublished != metrics.Queued || metrics.Queued > 1 || metrics.Unknown != 0 {
+		t.Fatalf("metrics after dispatch = %+v", metrics)
+	}
+}
+
+func TestBacklogRecoverySupersededExpiryAndUnknownIntegration(t *testing.T) {
+	service, pool, workspaceID, nodeID := integrationService(t)
+	old, _, err := service.CreateSynthetic(context.Background(), testRequest(nodeID, "old", SyntheticEcho, "old"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	replacement := testRequest(nodeID, "replacement", SyntheticEcho, "new")
+	replacement.SupersedePending = true
+	if _, _, err := service.CreateSynthetic(context.Background(), replacement); err != nil {
+		t.Fatal(err)
+	}
+	var oldState string
+	if err := pool.QueryRow(context.Background(), `SELECT state FROM operations WHERE id=$1`, old.ID).Scan(&oldState); err != nil || oldState != "superseded" {
+		t.Fatalf("old state=%s err=%v", oldState, err)
+	}
+
+	jobs, err := service.Claim(context.Background(), uuid.Must(uuid.NewV7()), 10, 30*time.Millisecond)
+	if err != nil || len(jobs) != 1 {
+		t.Fatalf("claim=%d err=%v", len(jobs), err)
+	}
+	for attempt := 1; attempt <= 3; attempt++ {
+		time.Sleep(40 * time.Millisecond)
+		if err := service.Reap(context.Background(), 3); err != nil {
+			t.Fatal(err)
+		}
+		if attempt < 3 {
+			jobs, err = service.Claim(context.Background(), uuid.Must(uuid.NewV7()), 10, 30*time.Millisecond)
+			if err != nil || len(jobs) != 1 {
+				t.Fatalf("retry %d=%d err=%v", attempt, len(jobs), err)
+			}
+		}
+	}
+	var unknown, published bool
+	if err := pool.QueryRow(context.Background(), `SELECT command.state='unknown',outbox.published_at IS NOT NULL FROM commands command JOIN outbox_events outbox ON outbox.command_id=command.id WHERE command.workspace_id=$1 AND command.id=$2`, workspaceID, jobs[0].CommandID).Scan(&unknown, &published); err != nil {
+		t.Fatal(err)
+	}
+	if !unknown || !published {
+		t.Fatalf("unknown stop = %v/%v", unknown, published)
+	}
+
+	expiring := testRequest(nodeID, "expires", SyntheticNoop, "")
+	expiring.TTL = time.Second
+	if _, _, err := service.CreateSynthetic(context.Background(), expiring); err != nil {
+		t.Fatal(err)
+	}
+	_, err = pool.Exec(context.Background(), `UPDATE commands SET created_at=now()-interval '2 seconds',expires_at=now()-interval '1 second' WHERE workspace_id=$1 AND idempotency_key='expires'`, workspaceID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := service.Expire(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	var expired string
+	if err := pool.QueryRow(context.Background(), `SELECT state FROM commands WHERE workspace_id=$1 AND idempotency_key='expires'`, workspaceID).Scan(&expired); err != nil || expired != "expired" {
+		t.Fatalf("expired=%s err=%v", expired, err)
+	}
+}
+
+func integrationService(t *testing.T) (*Service, *pgxpool.Pool, uuid.UUID, uuid.UUID) {
+	t.Helper()
+	databaseURL := os.Getenv("OCSERV_TEST_DATABASE_URL")
+	if databaseURL == "" {
+		t.Skip("OCSERV_TEST_DATABASE_URL is not set")
+	}
+	ctx := context.Background()
+	pool, err := pgxpool.New(ctx, databaseURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	workspaceID, nodeID := uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7())
+	if _, err := pool.Exec(ctx, `INSERT INTO workspaces(id,name,slug,created_at,updated_at)VALUES($1,'I09 test',$2,now(),now())`, workspaceID, "i09-"+workspaceID.String()); err != nil {
+		pool.Close()
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `INSERT INTO nodes(id,workspace_id,name,status,version,created_at,updated_at)VALUES($1,$2,$3,'active',1,now(),now())`, nodeID, workspaceID, "node-"+nodeID.String()); err != nil {
+		pool.Close()
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		cleanupCtx := context.Background()
+		for _, statement := range []string{
+			`DELETE FROM node_command_leases WHERE command_id IN(SELECT id FROM commands WHERE workspace_id=$1)`,
+			`DELETE FROM command_attempts WHERE command_id IN(SELECT id FROM commands WHERE workspace_id=$1)`,
+			`DELETE FROM outbox_events WHERE command_id IN(SELECT id FROM commands WHERE workspace_id=$1)`,
+			`DELETE FROM commands WHERE workspace_id=$1`, `DELETE FROM operations WHERE workspace_id=$1`,
+			`DELETE FROM audit_events WHERE workspace_id=$1`, `DELETE FROM nodes WHERE workspace_id=$1`,
+			`DELETE FROM workspaces WHERE id=$1`,
+		} {
+			_, _ = pool.Exec(cleanupCtx, statement, workspaceID)
+		}
+		pool.Close()
+	})
+	return New(pool), pool, workspaceID, nodeID
+}
+
+func testRequest(nodeID uuid.UUID, key string, kind SyntheticKind, message string) CreateRequest {
+	return CreateRequest{NodeID: nodeID, IdempotencyKey: key, ExpectedVersion: 1, Kind: kind, Message: message, TTL: time.Minute, RequestID: "request-" + key, Traceparent: testTraceparent}
+}
