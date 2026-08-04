@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
+ulimit -c 0
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # shellcheck source=scripts/env.sh
@@ -11,6 +12,8 @@ cargo test -p ocservia-agent --all-features \
   duplicate_delivery_ack_loss_and_restart_execute_once
 cargo test -p ocservia-agent --all-features \
   every_crash_boundary_reconciles_before_safe_retry
+cargo test -p ocservia-agent --all-features \
+  process_abort_crash_matrix_recovers_exactly_once
 cargo test -p ocservia-agent --all-features \
   command_validation_fails_before_side_effect
 cargo test -p ocservia-agent --all-features \

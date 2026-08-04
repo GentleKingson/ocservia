@@ -458,6 +458,22 @@ impl Journal {
             .pragma_query_value(None, "busy_timeout", |row| row.get(0))
     }
 
+    /// Runs SQLite's complete consistency check on the active journal connection.
+    ///
+    /// # Errors
+    ///
+    /// Returns a query error or `InvalidQuery` when SQLite reports corruption.
+    pub fn integrity_check(&self) -> Result<(), rusqlite::Error> {
+        let result: String =
+            self.connection
+                .pragma_query_value(None, "integrity_check", |row| row.get(0))?;
+        if result == "ok" {
+            Ok(())
+        } else {
+            Err(rusqlite::Error::InvalidQuery)
+        }
+    }
+
     /// Enqueues one bounded telemetry batch, evicting oldest low-priority data first.
     ///
     /// Returns `false` when this batch was itself evicted. Expired records count as drops.

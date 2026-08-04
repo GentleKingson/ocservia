@@ -27,7 +27,7 @@ Run the focused fault matrix with:
 ```
 
 The matrix covers 100 duplicate deliveries, acknowledgement loss, restart,
-every persistence and effect crash boundary, key and command identity
+process aborts at every persistence and effect crash boundary, key and command identity
 conflicts, cross-language semantic hash vectors, explicit safe retry, expiry,
 clock skew, revision, capability, cancellation, size limits, and SQLite
 read-only, full, and corrupt failures.

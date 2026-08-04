@@ -459,6 +459,12 @@ fn validate_command(
     }
     let key = fixed::<16>(&envelope.idempotency_key, "idempotency_key_invalid")?;
     let command_id = fixed::<16>(&envelope.command_id, "command_id_invalid")?;
+    if Uuid::from_bytes(key).get_version_num() != 7 {
+        return Err(CommandError::Rejected("idempotency_key_invalid"));
+    }
+    if Uuid::from_bytes(command_id).get_version_num() != 7 {
+        return Err(CommandError::Rejected("command_id_invalid"));
+    }
     let payload_hash = semantic_payload_hash(envelope)?;
     Ok(ValidatedCommand {
         key,
@@ -713,6 +719,8 @@ mod tests {
     };
     use prost_types::Timestamp;
     use rand::{SeedableRng, rngs::StdRng};
+    use std::os::unix::process::ExitStatusExt as _;
+    use std::process::Command;
 
     use super::*;
 
@@ -844,6 +852,97 @@ mod tests {
         }
     }
 
+    fn abort_matrix_command() -> (CommandEnvelope, CommandContext) {
+        let node_id = [0x11; 16];
+        let mut key = [0x22; 16];
+        key[6] = 0x72;
+        key[8] = 0x82;
+        let mut command_id = [0x33; 16];
+        command_id[6] = 0x73;
+        command_id[8] = 0x83;
+        let mut envelope = command(node_id, key, "once", 100);
+        envelope.command_id = command_id.to_vec();
+        (envelope, context(node_id, 100))
+    }
+
+    #[test]
+    fn abort_crash_child() {
+        let Ok(point) = std::env::var("OCSERVIA_ABORT_CRASH_POINT") else {
+            return;
+        };
+        let path = std::env::var_os("OCSERVIA_ABORT_JOURNAL")
+            .map(std::path::PathBuf::from)
+            .expect("child journal path");
+        let crash = match point.as_str() {
+            "after-accepted" => CrashPoint::AfterAccepted,
+            "before-side-effect" => CrashPoint::BeforeSideEffect,
+            "after-side-effect" => CrashPoint::AfterSideEffect,
+            "after-result" => CrashPoint::AfterResult,
+            _ => panic!("unknown crash point"),
+        };
+        let (envelope, command_context) = abort_matrix_command();
+        let mut executor = CommandExecutor::new(Journal::open(&path).expect("child journal"));
+        assert!(matches!(
+            executor.execute(&envelope, &command_context, Some(crash)),
+            Err(CommandError::InjectedCrash(point)) if point == crash
+        ));
+        std::process::abort();
+    }
+
+    #[test]
+    fn process_abort_crash_matrix_recovers_exactly_once() {
+        for point in [
+            "after-accepted",
+            "before-side-effect",
+            "after-side-effect",
+            "after-result",
+        ] {
+            let path = temporary_journal(point);
+            let status = Command::new(std::env::current_exe().expect("test executable"))
+                .args(["--exact", "tests::abort_crash_child", "--nocapture"])
+                .env("OCSERVIA_ABORT_CRASH_POINT", point)
+                .env("OCSERVIA_ABORT_JOURNAL", &path)
+                .status()
+                .expect("spawn crash child");
+            assert_eq!(status.signal(), Some(6), "{point}: {status}");
+
+            let (envelope, command_context) = abort_matrix_command();
+            let mut executor = CommandExecutor::new(Journal::open(&path).expect("reopen"));
+            let replayed = executor
+                .execute(&envelope, &command_context, None)
+                .expect("ordinary replay");
+            let reconciled = if replayed.record.state == CommandState::Unknown {
+                executor
+                    .reconcile(&envelope, &command_context)
+                    .expect("explicit reconcile")
+            } else {
+                replayed
+            };
+            let completed = if reconciled.record.state == CommandState::Unknown {
+                executor
+                    .retry_unknown(&envelope, &command_context)
+                    .expect("safe retry")
+            } else {
+                reconciled
+            };
+            assert_eq!(completed.record.state, CommandState::Succeeded, "{point}");
+            assert_eq!(
+                executor
+                    .journal()
+                    .synthetic_execution_count()
+                    .expect("effect count"),
+                1,
+                "{point}"
+            );
+            executor
+                .journal()
+                .integrity_check()
+                .expect("integrity check");
+            drop(executor);
+            cleanup_journal(&path);
+        }
+    }
+
     #[test]
     fn duplicate_delivery_ack_loss_and_restart_execute_once() {
         let path = temporary_journal("duplicates");
@@ -967,6 +1066,16 @@ mod tests {
             ("revision", {
                 let mut value = base.clone();
                 value.expected_revision = 2;
+                value
+            }),
+            ("idempotency-key-version", {
+                let mut value = base.clone();
+                value.idempotency_key = [0_u8; 16].to_vec();
+                value
+            }),
+            ("command-id-version", {
+                let mut value = base.clone();
+                value.command_id = [0_u8; 16].to_vec();
                 value
             }),
         ];
