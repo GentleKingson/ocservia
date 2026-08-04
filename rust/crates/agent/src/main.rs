@@ -13,8 +13,9 @@ use ocservia_agent_protocol::{PrivdResponse, privd_response};
 use ocservia_command_journal::{CommandRecord, CommandState, Journal, TelemetryInsert};
 use ocservia_contracts::generated::ocserv::platform::agent::v1::{
     AgentEvent, AgentEventType, CommandEnvelope, CommandResult, CommandResultState,
-    HandshakeResult, MetricSample, ObservedSnapshot, SessionHandshake, SessionHandshakeResponse,
-    SessionObservation, TelemetryBatch, TelemetryDropCounters, TelemetryPriority,
+    HandshakeResult, MetricSample, ObservedSnapshot, SemanticPayloadHashVersion, SessionHandshake,
+    SessionHandshakeResponse, SessionObservation, TelemetryBatch, TelemetryDropCounters,
+    TelemetryPriority,
 };
 use prost::Message;
 use uuid::Uuid;
@@ -143,6 +144,8 @@ async fn connect_once(
             "ocserv.config_fingerprint.read".to_owned(),
             "synthetic.noop".to_owned(),
             "synthetic.echo".to_owned(),
+            "command.semantic-hash.v1".to_owned(),
+            "command.strict-wire.v1".to_owned(),
         ],
         ocserv_version: "unknown".to_owned(),
         os_release: session.os_release.to_owned(),
@@ -301,6 +304,7 @@ fn command_result(record: &CommandRecord, replayed: bool) -> CommandResult {
             nanos: 0,
         }),
         replayed,
+        semantic_payload_hash_version: SemanticPayloadHashVersion::Unspecified as i32,
     }
 }
 
@@ -318,6 +322,7 @@ fn rejected_result(envelope: &CommandEnvelope, code: &str, now: i64) -> CommandR
             nanos: 0,
         }),
         replayed: false,
+        semantic_payload_hash_version: SemanticPayloadHashVersion::Unspecified as i32,
     }
 }
 

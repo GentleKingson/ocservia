@@ -89,6 +89,13 @@ enum CommandDeliveryMode {
   COMMAND_DELIVERY_MODE_RETRY_IF_EFFECT_ABSENT = 3;
 }
 
+// SemanticPayloadHashVersion identifies the canonical command identity
+// algorithm. See docs/development/command-semantic-hash-v1.md.
+enum SemanticPayloadHashVersion {
+  SEMANTIC_PAYLOAD_HASH_VERSION_UNSPECIFIED = 0;
+  SEMANTIC_PAYLOAD_HASH_VERSION_V1 = 1;
+}
+
 // CommandResult is persisted before it is placed on the response stream.
 message CommandResult {
   bytes command_id = 1;
@@ -100,6 +107,7 @@ message CommandResult {
   google.protobuf.Timestamp accepted_at = 7;
   google.protobuf.Timestamp completed_at = 8;
   bool replayed = 9;
+  SemanticPayloadHashVersion semantic_payload_hash_version = 10;
 }
 
 enum TelemetryPriority {
@@ -192,6 +200,8 @@ message CommandEnvelope {
     SyntheticEcho synthetic_echo = 108;
   }
   CommandDeliveryMode delivery_mode = 109;
+  SemanticPayloadHashVersion semantic_payload_hash_version = 110;
+  bytes semantic_payload_sha256 = 111;
 }
 
 message SessionDisconnect {

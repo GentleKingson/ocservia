@@ -715,7 +715,7 @@ pub async fn read_boot_id() -> Result<String, io::Error> {
 #[cfg(test)]
 mod tests {
     use ocservia_contracts::generated::ocserv::platform::agent::v1::{
-        SyntheticEcho, SyntheticNoop, command_envelope,
+        SemanticPayloadHashVersion, SyntheticEcho, SyntheticNoop, command_envelope,
     };
     use prost_types::Timestamp;
     use rand::{SeedableRng, rngs::StdRng};
@@ -826,6 +826,8 @@ mod tests {
             payload: Some(command_envelope::Payload::SyntheticEcho(SyntheticEcho {
                 message: message.to_owned(),
             })),
+            semantic_payload_hash_version: SemanticPayloadHashVersion::Unspecified as i32,
+            semantic_payload_sha256: Vec::new(),
         }
     }
 

@@ -1503,7 +1503,9 @@ pub async fn shutdown(
 
 #[cfg(test)]
 mod tests {
-    use ocservia_contracts::generated::ocserv::platform::agent::v1::CommandDeliveryMode;
+    use ocservia_contracts::generated::ocserv::platform::agent::v1::{
+        CommandDeliveryMode, SemanticPayloadHashVersion,
+    };
 
     use super::*;
 
@@ -1550,6 +1552,8 @@ mod tests {
             reason,
             delivery_mode: CommandDeliveryMode::ExecuteOrReplay.into(),
             payload: None,
+            semantic_payload_hash_version: SemanticPayloadHashVersion::Unspecified as i32,
+            semantic_payload_sha256: Vec::new(),
         }
         .encode_to_vec()
     }

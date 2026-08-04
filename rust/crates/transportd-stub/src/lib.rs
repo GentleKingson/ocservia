@@ -711,6 +711,7 @@ fn new_traceparent() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ocservia_contracts::generated::ocserv::platform::agent::v1::SemanticPayloadHashVersion;
     use tokio_stream::StreamExt;
 
     fn probe_request(node_id: Vec<u8>, idempotency_key: Vec<u8>) -> SendCommandRequest {
@@ -748,6 +749,8 @@ mod tests {
             reason: "test".to_owned(),
             delivery_mode: CommandDeliveryMode::ExecuteOrReplay.into(),
             payload: Some(command_envelope::Payload::SimulationProbe(probe)),
+            semantic_payload_hash_version: SemanticPayloadHashVersion::Unspecified as i32,
+            semantic_payload_sha256: Vec::new(),
         };
         SendCommandRequest {
             node_id,

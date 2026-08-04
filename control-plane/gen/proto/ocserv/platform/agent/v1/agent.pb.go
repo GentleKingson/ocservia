@@ -245,6 +245,54 @@ func (CommandDeliveryMode) EnumDescriptor() ([]byte, []int) {
 	return file_ocserv_platform_agent_v1_agent_proto_rawDescGZIP(), []int{3}
 }
 
+// SemanticPayloadHashVersion identifies the canonical command identity
+// algorithm. See docs/development/command-semantic-hash-v1.md.
+type SemanticPayloadHashVersion int32
+
+const (
+	SemanticPayloadHashVersion_SEMANTIC_PAYLOAD_HASH_VERSION_UNSPECIFIED SemanticPayloadHashVersion = 0
+	SemanticPayloadHashVersion_SEMANTIC_PAYLOAD_HASH_VERSION_V1          SemanticPayloadHashVersion = 1
+)
+
+// Enum value maps for SemanticPayloadHashVersion.
+var (
+	SemanticPayloadHashVersion_name = map[int32]string{
+		0: "SEMANTIC_PAYLOAD_HASH_VERSION_UNSPECIFIED",
+		1: "SEMANTIC_PAYLOAD_HASH_VERSION_V1",
+	}
+	SemanticPayloadHashVersion_value = map[string]int32{
+		"SEMANTIC_PAYLOAD_HASH_VERSION_UNSPECIFIED": 0,
+		"SEMANTIC_PAYLOAD_HASH_VERSION_V1":          1,
+	}
+)
+
+func (x SemanticPayloadHashVersion) Enum() *SemanticPayloadHashVersion {
+	p := new(SemanticPayloadHashVersion)
+	*p = x
+	return p
+}
+
+func (x SemanticPayloadHashVersion) String() string {
+	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
+}
+
+func (SemanticPayloadHashVersion) Descriptor() protoreflect.EnumDescriptor {
+	return file_ocserv_platform_agent_v1_agent_proto_enumTypes[4].Descriptor()
+}
+
+func (SemanticPayloadHashVersion) Type() protoreflect.EnumType {
+	return &file_ocserv_platform_agent_v1_agent_proto_enumTypes[4]
+}
+
+func (x SemanticPayloadHashVersion) Number() protoreflect.EnumNumber {
+	return protoreflect.EnumNumber(x)
+}
+
+// Deprecated: Use SemanticPayloadHashVersion.Descriptor instead.
+func (SemanticPayloadHashVersion) EnumDescriptor() ([]byte, []int) {
+	return file_ocserv_platform_agent_v1_agent_proto_rawDescGZIP(), []int{4}
+}
+
 type TelemetryPriority int32
 
 const (
@@ -284,11 +332,11 @@ func (x TelemetryPriority) String() string {
 }
 
 func (TelemetryPriority) Descriptor() protoreflect.EnumDescriptor {
-	return file_ocserv_platform_agent_v1_agent_proto_enumTypes[4].Descriptor()
+	return file_ocserv_platform_agent_v1_agent_proto_enumTypes[5].Descriptor()
 }
 
 func (TelemetryPriority) Type() protoreflect.EnumType {
-	return &file_ocserv_platform_agent_v1_agent_proto_enumTypes[4]
+	return &file_ocserv_platform_agent_v1_agent_proto_enumTypes[5]
 }
 
 func (x TelemetryPriority) Number() protoreflect.EnumNumber {
@@ -297,7 +345,7 @@ func (x TelemetryPriority) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use TelemetryPriority.Descriptor instead.
 func (TelemetryPriority) EnumDescriptor() ([]byte, []int) {
-	return file_ocserv_platform_agent_v1_agent_proto_rawDescGZIP(), []int{4}
+	return file_ocserv_platform_agent_v1_agent_proto_rawDescGZIP(), []int{5}
 }
 
 type EnrollRequest struct {
@@ -771,18 +819,19 @@ func (x *AgentEvent) GetPayload() []byte {
 
 // CommandResult is persisted before it is placed on the response stream.
 type CommandResult struct {
-	state          protoimpl.MessageState `protogen:"open.v1"`
-	CommandId      []byte                 `protobuf:"bytes,1,opt,name=command_id,json=commandId,proto3" json:"command_id,omitempty"`
-	IdempotencyKey []byte                 `protobuf:"bytes,2,opt,name=idempotency_key,json=idempotencyKey,proto3" json:"idempotency_key,omitempty"`
-	PayloadSha256  []byte                 `protobuf:"bytes,3,opt,name=payload_sha256,json=payloadSha256,proto3" json:"payload_sha256,omitempty"`
-	State          CommandResultState     `protobuf:"varint,4,opt,name=state,proto3,enum=ocserv.platform.agent.v1.CommandResultState" json:"state,omitempty"`
-	Result         []byte                 `protobuf:"bytes,5,opt,name=result,proto3" json:"result,omitempty"`
-	ErrorCode      string                 `protobuf:"bytes,6,opt,name=error_code,json=errorCode,proto3" json:"error_code,omitempty"`
-	AcceptedAt     *timestamppb.Timestamp `protobuf:"bytes,7,opt,name=accepted_at,json=acceptedAt,proto3" json:"accepted_at,omitempty"`
-	CompletedAt    *timestamppb.Timestamp `protobuf:"bytes,8,opt,name=completed_at,json=completedAt,proto3" json:"completed_at,omitempty"`
-	Replayed       bool                   `protobuf:"varint,9,opt,name=replayed,proto3" json:"replayed,omitempty"`
-	unknownFields  protoimpl.UnknownFields
-	sizeCache      protoimpl.SizeCache
+	state                      protoimpl.MessageState     `protogen:"open.v1"`
+	CommandId                  []byte                     `protobuf:"bytes,1,opt,name=command_id,json=commandId,proto3" json:"command_id,omitempty"`
+	IdempotencyKey             []byte                     `protobuf:"bytes,2,opt,name=idempotency_key,json=idempotencyKey,proto3" json:"idempotency_key,omitempty"`
+	PayloadSha256              []byte                     `protobuf:"bytes,3,opt,name=payload_sha256,json=payloadSha256,proto3" json:"payload_sha256,omitempty"`
+	State                      CommandResultState         `protobuf:"varint,4,opt,name=state,proto3,enum=ocserv.platform.agent.v1.CommandResultState" json:"state,omitempty"`
+	Result                     []byte                     `protobuf:"bytes,5,opt,name=result,proto3" json:"result,omitempty"`
+	ErrorCode                  string                     `protobuf:"bytes,6,opt,name=error_code,json=errorCode,proto3" json:"error_code,omitempty"`
+	AcceptedAt                 *timestamppb.Timestamp     `protobuf:"bytes,7,opt,name=accepted_at,json=acceptedAt,proto3" json:"accepted_at,omitempty"`
+	CompletedAt                *timestamppb.Timestamp     `protobuf:"bytes,8,opt,name=completed_at,json=completedAt,proto3" json:"completed_at,omitempty"`
+	Replayed                   bool                       `protobuf:"varint,9,opt,name=replayed,proto3" json:"replayed,omitempty"`
+	SemanticPayloadHashVersion SemanticPayloadHashVersion `protobuf:"varint,10,opt,name=semantic_payload_hash_version,json=semanticPayloadHashVersion,proto3,enum=ocserv.platform.agent.v1.SemanticPayloadHashVersion" json:"semantic_payload_hash_version,omitempty"`
+	unknownFields              protoimpl.UnknownFields
+	sizeCache                  protoimpl.SizeCache
 }
 
 func (x *CommandResult) Reset() {
@@ -876,6 +925,13 @@ func (x *CommandResult) GetReplayed() bool {
 		return x.Replayed
 	}
 	return false
+}
+
+func (x *CommandResult) GetSemanticPayloadHashVersion() SemanticPayloadHashVersion {
+	if x != nil {
+		return x.SemanticPayloadHashVersion
+	}
+	return SemanticPayloadHashVersion_SEMANTIC_PAYLOAD_HASH_VERSION_UNSPECIFIED
 }
 
 type TelemetryDropCounters struct {
@@ -1407,10 +1463,12 @@ type CommandEnvelope struct {
 	//	*CommandEnvelope_SimulationProbe
 	//	*CommandEnvelope_SyntheticNoop
 	//	*CommandEnvelope_SyntheticEcho
-	Payload       isCommandEnvelope_Payload `protobuf_oneof:"payload"`
-	DeliveryMode  CommandDeliveryMode       `protobuf:"varint,109,opt,name=delivery_mode,json=deliveryMode,proto3,enum=ocserv.platform.agent.v1.CommandDeliveryMode" json:"delivery_mode,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	Payload                    isCommandEnvelope_Payload  `protobuf_oneof:"payload"`
+	DeliveryMode               CommandDeliveryMode        `protobuf:"varint,109,opt,name=delivery_mode,json=deliveryMode,proto3,enum=ocserv.platform.agent.v1.CommandDeliveryMode" json:"delivery_mode,omitempty"`
+	SemanticPayloadHashVersion SemanticPayloadHashVersion `protobuf:"varint,110,opt,name=semantic_payload_hash_version,json=semanticPayloadHashVersion,proto3,enum=ocserv.platform.agent.v1.SemanticPayloadHashVersion" json:"semantic_payload_hash_version,omitempty"`
+	SemanticPayloadSha256      []byte                     `protobuf:"bytes,111,opt,name=semantic_payload_sha256,json=semanticPayloadSha256,proto3" json:"semantic_payload_sha256,omitempty"`
+	unknownFields              protoimpl.UnknownFields
+	sizeCache                  protoimpl.SizeCache
 }
 
 func (x *CommandEnvelope) Reset() {
@@ -1620,6 +1678,20 @@ func (x *CommandEnvelope) GetDeliveryMode() CommandDeliveryMode {
 		return x.DeliveryMode
 	}
 	return CommandDeliveryMode_COMMAND_DELIVERY_MODE_UNSPECIFIED
+}
+
+func (x *CommandEnvelope) GetSemanticPayloadHashVersion() SemanticPayloadHashVersion {
+	if x != nil {
+		return x.SemanticPayloadHashVersion
+	}
+	return SemanticPayloadHashVersion_SEMANTIC_PAYLOAD_HASH_VERSION_UNSPECIFIED
+}
+
+func (x *CommandEnvelope) GetSemanticPayloadSha256() []byte {
+	if x != nil {
+		return x.SemanticPayloadSha256
+	}
+	return nil
 }
 
 type isCommandEnvelope_Payload interface {
@@ -2154,7 +2226,7 @@ const file_ocserv_platform_agent_v1_agent_proto_rawDesc = "" +
 	"\n" +
 	"AgentEvent\x12<\n" +
 	"\x04type\x18\x01 \x01(\x0e2(.ocserv.platform.agent.v1.AgentEventTypeR\x04type\x12\x18\n" +
-	"\apayload\x18\x02 \x01(\fR\apayload\"\x91\x03\n" +
+	"\apayload\x18\x02 \x01(\fR\apayload\"\x8a\x04\n" +
 	"\rCommandResult\x12\x1d\n" +
 	"\n" +
 	"command_id\x18\x01 \x01(\fR\tcommandId\x12'\n" +
@@ -2167,7 +2239,9 @@ const file_ocserv_platform_agent_v1_agent_proto_rawDesc = "" +
 	"\vaccepted_at\x18\a \x01(\v2\x1a.google.protobuf.TimestampR\n" +
 	"acceptedAt\x12=\n" +
 	"\fcompleted_at\x18\b \x01(\v2\x1a.google.protobuf.TimestampR\vcompletedAt\x12\x1a\n" +
-	"\breplayed\x18\t \x01(\bR\breplayed\"{\n" +
+	"\breplayed\x18\t \x01(\bR\breplayed\x12w\n" +
+	"\x1dsemantic_payload_hash_version\x18\n" +
+	" \x01(\x0e24.ocserv.platform.agent.v1.SemanticPayloadHashVersionR\x1asemanticPayloadHashVersion\"{\n" +
 	"\x15TelemetryDropCounters\x12\x1a\n" +
 	"\bsecurity\x18\x01 \x01(\x04R\bsecurity\x12\x16\n" +
 	"\x06health\x18\x02 \x01(\x04R\x06health\x12\x1c\n" +
@@ -2219,8 +2293,7 @@ const file_ocserv_platform_agent_v1_agent_proto_rawDesc = "" +
 	"\bsnapshot\x18\x05 \x01(\v2*.ocserv.platform.agent.v1.ObservedSnapshotR\bsnapshot\x12H\n" +
 	"\bsessions\x18\x06 \x03(\v2,.ocserv.platform.agent.v1.SessionObservationR\bsessions\x12@\n" +
 	"\asamples\x18\a \x03(\v2&.ocserv.platform.agent.v1.MetricSampleR\asamples\x12V\n" +
-	"\x0fsecurity_events\x18\b \x03(\v2-.ocserv.platform.agent.v1.SecurityObservationR\x0esecurityEvents\"\x99\n" +
-	"\n" +
+	"\x0fsecurity_events\x18\b \x03(\v2-.ocserv.platform.agent.v1.SecurityObservationR\x0esecurityEvents\"\xca\v\n" +
 	"\x0fCommandEnvelope\x12)\n" +
 	"\x10protocol_version\x18\x01 \x01(\tR\x0fprotocolVersion\x12\x1d\n" +
 	"\n" +
@@ -2249,7 +2322,9 @@ const file_ocserv_platform_agent_v1_agent_proto_rawDesc = "" +
 	"\x10simulation_probe\x18j \x01(\v2).ocserv.platform.agent.v1.SimulationProbeH\x00R\x0fsimulationProbe\x12P\n" +
 	"\x0esynthetic_noop\x18k \x01(\v2'.ocserv.platform.agent.v1.SyntheticNoopH\x00R\rsyntheticNoop\x12P\n" +
 	"\x0esynthetic_echo\x18l \x01(\v2'.ocserv.platform.agent.v1.SyntheticEchoH\x00R\rsyntheticEcho\x12R\n" +
-	"\rdelivery_mode\x18m \x01(\x0e2-.ocserv.platform.agent.v1.CommandDeliveryModeR\fdeliveryModeB\t\n" +
+	"\rdelivery_mode\x18m \x01(\x0e2-.ocserv.platform.agent.v1.CommandDeliveryModeR\fdeliveryMode\x12w\n" +
+	"\x1dsemantic_payload_hash_version\x18n \x01(\x0e24.ocserv.platform.agent.v1.SemanticPayloadHashVersionR\x1asemanticPayloadHashVersion\x126\n" +
+	"\x17semantic_payload_sha256\x18o \x01(\fR\x15semanticPayloadSha256B\t\n" +
 	"\apayloadJ\x04\b\r\x10dR\x0elegacy_payload\"2\n" +
 	"\x11SessionDisconnect\x12\x1d\n" +
 	"\n" +
@@ -2299,7 +2374,10 @@ const file_ocserv_platform_agent_v1_agent_proto_rawDesc = "" +
 	"!COMMAND_DELIVERY_MODE_UNSPECIFIED\x10\x00\x12+\n" +
 	"'COMMAND_DELIVERY_MODE_EXECUTE_OR_REPLAY\x10\x01\x12(\n" +
 	"$COMMAND_DELIVERY_MODE_RECONCILE_ONLY\x10\x02\x120\n" +
-	",COMMAND_DELIVERY_MODE_RETRY_IF_EFFECT_ABSENT\x10\x03*\xc5\x01\n" +
+	",COMMAND_DELIVERY_MODE_RETRY_IF_EFFECT_ABSENT\x10\x03*q\n" +
+	"\x1aSemanticPayloadHashVersion\x12-\n" +
+	")SEMANTIC_PAYLOAD_HASH_VERSION_UNSPECIFIED\x10\x00\x12$\n" +
+	" SEMANTIC_PAYLOAD_HASH_VERSION_V1\x10\x01*\xc5\x01\n" +
 	"\x11TelemetryPriority\x12\"\n" +
 	"\x1eTELEMETRY_PRIORITY_UNSPECIFIED\x10\x00\x12\x1f\n" +
 	"\x1bTELEMETRY_PRIORITY_SECURITY\x10\x01\x12%\n" +
@@ -2321,74 +2399,77 @@ func file_ocserv_platform_agent_v1_agent_proto_rawDescGZIP() []byte {
 	return file_ocserv_platform_agent_v1_agent_proto_rawDescData
 }
 
-var file_ocserv_platform_agent_v1_agent_proto_enumTypes = make([]protoimpl.EnumInfo, 5)
+var file_ocserv_platform_agent_v1_agent_proto_enumTypes = make([]protoimpl.EnumInfo, 6)
 var file_ocserv_platform_agent_v1_agent_proto_msgTypes = make([]protoimpl.MessageInfo, 22)
 var file_ocserv_platform_agent_v1_agent_proto_goTypes = []any{
 	(HandshakeResult)(0),             // 0: ocserv.platform.agent.v1.HandshakeResult
 	(AgentEventType)(0),              // 1: ocserv.platform.agent.v1.AgentEventType
 	(CommandResultState)(0),          // 2: ocserv.platform.agent.v1.CommandResultState
 	(CommandDeliveryMode)(0),         // 3: ocserv.platform.agent.v1.CommandDeliveryMode
-	(TelemetryPriority)(0),           // 4: ocserv.platform.agent.v1.TelemetryPriority
-	(*EnrollRequest)(nil),            // 5: ocserv.platform.agent.v1.EnrollRequest
-	(*EnrollResponse)(nil),           // 6: ocserv.platform.agent.v1.EnrollResponse
-	(*SessionHandshake)(nil),         // 7: ocserv.platform.agent.v1.SessionHandshake
-	(*SessionHandshakeResponse)(nil), // 8: ocserv.platform.agent.v1.SessionHandshakeResponse
-	(*AgentEvent)(nil),               // 9: ocserv.platform.agent.v1.AgentEvent
-	(*CommandResult)(nil),            // 10: ocserv.platform.agent.v1.CommandResult
-	(*TelemetryDropCounters)(nil),    // 11: ocserv.platform.agent.v1.TelemetryDropCounters
-	(*ObservedSnapshot)(nil),         // 12: ocserv.platform.agent.v1.ObservedSnapshot
-	(*SessionObservation)(nil),       // 13: ocserv.platform.agent.v1.SessionObservation
-	(*MetricSample)(nil),             // 14: ocserv.platform.agent.v1.MetricSample
-	(*SecurityObservation)(nil),      // 15: ocserv.platform.agent.v1.SecurityObservation
-	(*TelemetryBatch)(nil),           // 16: ocserv.platform.agent.v1.TelemetryBatch
-	(*CommandEnvelope)(nil),          // 17: ocserv.platform.agent.v1.CommandEnvelope
-	(*SessionDisconnect)(nil),        // 18: ocserv.platform.agent.v1.SessionDisconnect
-	(*UserCreate)(nil),               // 19: ocserv.platform.agent.v1.UserCreate
-	(*UserDisable)(nil),              // 20: ocserv.platform.agent.v1.UserDisable
-	(*ConfigPlan)(nil),               // 21: ocserv.platform.agent.v1.ConfigPlan
-	(*ConfigApply)(nil),              // 22: ocserv.platform.agent.v1.ConfigApply
-	(*ServiceReload)(nil),            // 23: ocserv.platform.agent.v1.ServiceReload
-	(*SyntheticNoop)(nil),            // 24: ocserv.platform.agent.v1.SyntheticNoop
-	(*SyntheticEcho)(nil),            // 25: ocserv.platform.agent.v1.SyntheticEcho
-	(*SimulationProbe)(nil),          // 26: ocserv.platform.agent.v1.SimulationProbe
-	(*timestamppb.Timestamp)(nil),    // 27: google.protobuf.Timestamp
+	(SemanticPayloadHashVersion)(0),  // 4: ocserv.platform.agent.v1.SemanticPayloadHashVersion
+	(TelemetryPriority)(0),           // 5: ocserv.platform.agent.v1.TelemetryPriority
+	(*EnrollRequest)(nil),            // 6: ocserv.platform.agent.v1.EnrollRequest
+	(*EnrollResponse)(nil),           // 7: ocserv.platform.agent.v1.EnrollResponse
+	(*SessionHandshake)(nil),         // 8: ocserv.platform.agent.v1.SessionHandshake
+	(*SessionHandshakeResponse)(nil), // 9: ocserv.platform.agent.v1.SessionHandshakeResponse
+	(*AgentEvent)(nil),               // 10: ocserv.platform.agent.v1.AgentEvent
+	(*CommandResult)(nil),            // 11: ocserv.platform.agent.v1.CommandResult
+	(*TelemetryDropCounters)(nil),    // 12: ocserv.platform.agent.v1.TelemetryDropCounters
+	(*ObservedSnapshot)(nil),         // 13: ocserv.platform.agent.v1.ObservedSnapshot
+	(*SessionObservation)(nil),       // 14: ocserv.platform.agent.v1.SessionObservation
+	(*MetricSample)(nil),             // 15: ocserv.platform.agent.v1.MetricSample
+	(*SecurityObservation)(nil),      // 16: ocserv.platform.agent.v1.SecurityObservation
+	(*TelemetryBatch)(nil),           // 17: ocserv.platform.agent.v1.TelemetryBatch
+	(*CommandEnvelope)(nil),          // 18: ocserv.platform.agent.v1.CommandEnvelope
+	(*SessionDisconnect)(nil),        // 19: ocserv.platform.agent.v1.SessionDisconnect
+	(*UserCreate)(nil),               // 20: ocserv.platform.agent.v1.UserCreate
+	(*UserDisable)(nil),              // 21: ocserv.platform.agent.v1.UserDisable
+	(*ConfigPlan)(nil),               // 22: ocserv.platform.agent.v1.ConfigPlan
+	(*ConfigApply)(nil),              // 23: ocserv.platform.agent.v1.ConfigApply
+	(*ServiceReload)(nil),            // 24: ocserv.platform.agent.v1.ServiceReload
+	(*SyntheticNoop)(nil),            // 25: ocserv.platform.agent.v1.SyntheticNoop
+	(*SyntheticEcho)(nil),            // 26: ocserv.platform.agent.v1.SyntheticEcho
+	(*SimulationProbe)(nil),          // 27: ocserv.platform.agent.v1.SimulationProbe
+	(*timestamppb.Timestamp)(nil),    // 28: google.protobuf.Timestamp
 }
 var file_ocserv_platform_agent_v1_agent_proto_depIdxs = []int32{
-	27, // 0: ocserv.platform.agent.v1.EnrollRequest.time:type_name -> google.protobuf.Timestamp
+	28, // 0: ocserv.platform.agent.v1.EnrollRequest.time:type_name -> google.protobuf.Timestamp
 	0,  // 1: ocserv.platform.agent.v1.EnrollResponse.result:type_name -> ocserv.platform.agent.v1.HandshakeResult
-	27, // 2: ocserv.platform.agent.v1.SessionHandshake.time:type_name -> google.protobuf.Timestamp
+	28, // 2: ocserv.platform.agent.v1.SessionHandshake.time:type_name -> google.protobuf.Timestamp
 	0,  // 3: ocserv.platform.agent.v1.SessionHandshakeResponse.result:type_name -> ocserv.platform.agent.v1.HandshakeResult
 	1,  // 4: ocserv.platform.agent.v1.AgentEvent.type:type_name -> ocserv.platform.agent.v1.AgentEventType
 	2,  // 5: ocserv.platform.agent.v1.CommandResult.state:type_name -> ocserv.platform.agent.v1.CommandResultState
-	27, // 6: ocserv.platform.agent.v1.CommandResult.accepted_at:type_name -> google.protobuf.Timestamp
-	27, // 7: ocserv.platform.agent.v1.CommandResult.completed_at:type_name -> google.protobuf.Timestamp
-	27, // 8: ocserv.platform.agent.v1.ObservedSnapshot.observed_at:type_name -> google.protobuf.Timestamp
-	11, // 9: ocserv.platform.agent.v1.ObservedSnapshot.dropped:type_name -> ocserv.platform.agent.v1.TelemetryDropCounters
-	27, // 10: ocserv.platform.agent.v1.SessionObservation.connected_at:type_name -> google.protobuf.Timestamp
-	27, // 11: ocserv.platform.agent.v1.MetricSample.sampled_at:type_name -> google.protobuf.Timestamp
-	27, // 12: ocserv.platform.agent.v1.SecurityObservation.observed_at:type_name -> google.protobuf.Timestamp
-	4,  // 13: ocserv.platform.agent.v1.TelemetryBatch.priority:type_name -> ocserv.platform.agent.v1.TelemetryPriority
-	12, // 14: ocserv.platform.agent.v1.TelemetryBatch.snapshot:type_name -> ocserv.platform.agent.v1.ObservedSnapshot
-	13, // 15: ocserv.platform.agent.v1.TelemetryBatch.sessions:type_name -> ocserv.platform.agent.v1.SessionObservation
-	14, // 16: ocserv.platform.agent.v1.TelemetryBatch.samples:type_name -> ocserv.platform.agent.v1.MetricSample
-	15, // 17: ocserv.platform.agent.v1.TelemetryBatch.security_events:type_name -> ocserv.platform.agent.v1.SecurityObservation
-	27, // 18: ocserv.platform.agent.v1.CommandEnvelope.issued_at:type_name -> google.protobuf.Timestamp
-	27, // 19: ocserv.platform.agent.v1.CommandEnvelope.expires_at:type_name -> google.protobuf.Timestamp
-	18, // 20: ocserv.platform.agent.v1.CommandEnvelope.session_disconnect:type_name -> ocserv.platform.agent.v1.SessionDisconnect
-	19, // 21: ocserv.platform.agent.v1.CommandEnvelope.user_create:type_name -> ocserv.platform.agent.v1.UserCreate
-	20, // 22: ocserv.platform.agent.v1.CommandEnvelope.user_disable:type_name -> ocserv.platform.agent.v1.UserDisable
-	21, // 23: ocserv.platform.agent.v1.CommandEnvelope.config_plan:type_name -> ocserv.platform.agent.v1.ConfigPlan
-	22, // 24: ocserv.platform.agent.v1.CommandEnvelope.config_apply:type_name -> ocserv.platform.agent.v1.ConfigApply
-	23, // 25: ocserv.platform.agent.v1.CommandEnvelope.service_reload:type_name -> ocserv.platform.agent.v1.ServiceReload
-	26, // 26: ocserv.platform.agent.v1.CommandEnvelope.simulation_probe:type_name -> ocserv.platform.agent.v1.SimulationProbe
-	24, // 27: ocserv.platform.agent.v1.CommandEnvelope.synthetic_noop:type_name -> ocserv.platform.agent.v1.SyntheticNoop
-	25, // 28: ocserv.platform.agent.v1.CommandEnvelope.synthetic_echo:type_name -> ocserv.platform.agent.v1.SyntheticEcho
-	3,  // 29: ocserv.platform.agent.v1.CommandEnvelope.delivery_mode:type_name -> ocserv.platform.agent.v1.CommandDeliveryMode
-	30, // [30:30] is the sub-list for method output_type
-	30, // [30:30] is the sub-list for method input_type
-	30, // [30:30] is the sub-list for extension type_name
-	30, // [30:30] is the sub-list for extension extendee
-	0,  // [0:30] is the sub-list for field type_name
+	28, // 6: ocserv.platform.agent.v1.CommandResult.accepted_at:type_name -> google.protobuf.Timestamp
+	28, // 7: ocserv.platform.agent.v1.CommandResult.completed_at:type_name -> google.protobuf.Timestamp
+	4,  // 8: ocserv.platform.agent.v1.CommandResult.semantic_payload_hash_version:type_name -> ocserv.platform.agent.v1.SemanticPayloadHashVersion
+	28, // 9: ocserv.platform.agent.v1.ObservedSnapshot.observed_at:type_name -> google.protobuf.Timestamp
+	12, // 10: ocserv.platform.agent.v1.ObservedSnapshot.dropped:type_name -> ocserv.platform.agent.v1.TelemetryDropCounters
+	28, // 11: ocserv.platform.agent.v1.SessionObservation.connected_at:type_name -> google.protobuf.Timestamp
+	28, // 12: ocserv.platform.agent.v1.MetricSample.sampled_at:type_name -> google.protobuf.Timestamp
+	28, // 13: ocserv.platform.agent.v1.SecurityObservation.observed_at:type_name -> google.protobuf.Timestamp
+	5,  // 14: ocserv.platform.agent.v1.TelemetryBatch.priority:type_name -> ocserv.platform.agent.v1.TelemetryPriority
+	13, // 15: ocserv.platform.agent.v1.TelemetryBatch.snapshot:type_name -> ocserv.platform.agent.v1.ObservedSnapshot
+	14, // 16: ocserv.platform.agent.v1.TelemetryBatch.sessions:type_name -> ocserv.platform.agent.v1.SessionObservation
+	15, // 17: ocserv.platform.agent.v1.TelemetryBatch.samples:type_name -> ocserv.platform.agent.v1.MetricSample
+	16, // 18: ocserv.platform.agent.v1.TelemetryBatch.security_events:type_name -> ocserv.platform.agent.v1.SecurityObservation
+	28, // 19: ocserv.platform.agent.v1.CommandEnvelope.issued_at:type_name -> google.protobuf.Timestamp
+	28, // 20: ocserv.platform.agent.v1.CommandEnvelope.expires_at:type_name -> google.protobuf.Timestamp
+	19, // 21: ocserv.platform.agent.v1.CommandEnvelope.session_disconnect:type_name -> ocserv.platform.agent.v1.SessionDisconnect
+	20, // 22: ocserv.platform.agent.v1.CommandEnvelope.user_create:type_name -> ocserv.platform.agent.v1.UserCreate
+	21, // 23: ocserv.platform.agent.v1.CommandEnvelope.user_disable:type_name -> ocserv.platform.agent.v1.UserDisable
+	22, // 24: ocserv.platform.agent.v1.CommandEnvelope.config_plan:type_name -> ocserv.platform.agent.v1.ConfigPlan
+	23, // 25: ocserv.platform.agent.v1.CommandEnvelope.config_apply:type_name -> ocserv.platform.agent.v1.ConfigApply
+	24, // 26: ocserv.platform.agent.v1.CommandEnvelope.service_reload:type_name -> ocserv.platform.agent.v1.ServiceReload
+	27, // 27: ocserv.platform.agent.v1.CommandEnvelope.simulation_probe:type_name -> ocserv.platform.agent.v1.SimulationProbe
+	25, // 28: ocserv.platform.agent.v1.CommandEnvelope.synthetic_noop:type_name -> ocserv.platform.agent.v1.SyntheticNoop
+	26, // 29: ocserv.platform.agent.v1.CommandEnvelope.synthetic_echo:type_name -> ocserv.platform.agent.v1.SyntheticEcho
+	3,  // 30: ocserv.platform.agent.v1.CommandEnvelope.delivery_mode:type_name -> ocserv.platform.agent.v1.CommandDeliveryMode
+	4,  // 31: ocserv.platform.agent.v1.CommandEnvelope.semantic_payload_hash_version:type_name -> ocserv.platform.agent.v1.SemanticPayloadHashVersion
+	32, // [32:32] is the sub-list for method output_type
+	32, // [32:32] is the sub-list for method input_type
+	32, // [32:32] is the sub-list for extension type_name
+	32, // [32:32] is the sub-list for extension extendee
+	0,  // [0:32] is the sub-list for field type_name
 }
 
 func init() { file_ocserv_platform_agent_v1_agent_proto_init() }
@@ -2412,7 +2493,7 @@ func file_ocserv_platform_agent_v1_agent_proto_init() {
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_ocserv_platform_agent_v1_agent_proto_rawDesc), len(file_ocserv_platform_agent_v1_agent_proto_rawDesc)),
-			NumEnums:      5,
+			NumEnums:      6,
 			NumMessages:   22,
 			NumExtensions: 0,
 			NumServices:   0,
