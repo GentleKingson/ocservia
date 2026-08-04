@@ -349,7 +349,10 @@ func TestInvalidCommandResultStatesAndTimesFailClosedIntegration(t *testing.T) {
 func TestAgentResultCannotRegressAuthorityTimestampsIntegration(t *testing.T) {
 	fixture := newCommandResultFixture(t)
 	authorityTime := time.Now().UTC().Add(2 * time.Minute).Truncate(time.Microsecond)
-	if _, err := fixture.pool.Exec(context.Background(), `UPDATE commands SET updated_at=$2 WHERE id=$1; UPDATE operations SET updated_at=$2 WHERE id=$3`, fixture.commandID, authorityTime, fixture.operationID); err != nil {
+	if _, err := fixture.pool.Exec(context.Background(), `UPDATE commands SET updated_at=$2 WHERE id=$1`, fixture.commandID, authorityTime); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fixture.pool.Exec(context.Background(), `UPDATE operations SET updated_at=$2 WHERE id=$1`, fixture.operationID, authorityTime); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := fixture.ingestResult(t, fixture.validResult()); err != nil {

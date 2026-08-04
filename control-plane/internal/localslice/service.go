@@ -542,7 +542,11 @@ func ingestAgentCommandResult(ctx context.Context, tx pgx.Tx, eventID, nodeID uu
 	if result.GetErrorCode() != "" {
 		errorCode = result.GetErrorCode()
 	}
-	if _, err := tx.Exec(ctx, `INSERT INTO agent_command_results(event_id,command_id,idempotency_key,payload_sha256,state,result,error_code,accepted_at,completed_at,replayed,created_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`, eventID, commandID, idempotencyKey, payloadHash, state, result.GetResult(), errorCode, acceptedAtValue, completedTime, result.GetReplayed(), observedAt); err != nil {
+	resultBytes := result.GetResult()
+	if resultBytes == nil {
+		resultBytes = []byte{}
+	}
+	if _, err := tx.Exec(ctx, `INSERT INTO agent_command_results(event_id,command_id,idempotency_key,payload_sha256,state,result,error_code,accepted_at,completed_at,replayed,created_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`, eventID, commandID, idempotencyKey, payloadHash, state, resultBytes, errorCode, acceptedAtValue, completedTime, result.GetReplayed(), observedAt); err != nil {
 		return fmt.Errorf("persist Agent command result: %w", err)
 	}
 	operationEventID, err := uuid.NewV7()
