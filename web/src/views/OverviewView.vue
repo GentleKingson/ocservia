@@ -31,6 +31,7 @@ function eventLabel(type: string): string {
     connected: "eventConnected",
     disconnected: "eventDisconnected",
     command_result: "eventCommandResult",
+    simulation_result: "eventCommandResult",
     heartbeat: "eventHeartbeat",
     error: "eventError",
   };
