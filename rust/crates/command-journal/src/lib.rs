@@ -458,11 +458,11 @@ impl Journal {
             .pragma_query_value(None, "busy_timeout", |row| row.get(0))
     }
 
-    /// Runs SQLite's complete consistency check on the active journal connection.
+    /// Runs `SQLite`'s complete consistency check on the active journal connection.
     ///
     /// # Errors
     ///
-    /// Returns a query error or `InvalidQuery` when SQLite reports corruption.
+    /// Returns a query error or `InvalidQuery` when `SQLite` reports corruption.
     pub fn integrity_check(&self) -> Result<(), rusqlite::Error> {
         let result: String =
             self.connection
