@@ -541,6 +541,7 @@ func ingestAgentCommandResult(ctx context.Context, tx pgx.Tx, eventID, nodeID uu
 	if len(result.GetPayloadSha256()) == 32 {
 		payloadHash = result.GetPayloadSha256()
 	}
+	hashVersion := int16(result.GetSemanticPayloadHashVersion())
 	var acceptedAtValue any
 	if acceptedAt != nil {
 		acceptedAtValue = acceptedAt.AsTime()
@@ -553,7 +554,7 @@ func ingestAgentCommandResult(ctx context.Context, tx pgx.Tx, eventID, nodeID uu
 	if resultBytes == nil {
 		resultBytes = []byte{}
 	}
-	if _, err := tx.Exec(ctx, `INSERT INTO agent_command_results(event_id,command_id,idempotency_key,payload_sha256,state,result,error_code,accepted_at,completed_at,replayed,created_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`, eventID, commandID, idempotencyKey, payloadHash, state, resultBytes, errorCode, acceptedAtValue, completedTime, result.GetReplayed(), observedAt); err != nil {
+	if _, err := tx.Exec(ctx, `INSERT INTO agent_command_results(event_id,command_id,idempotency_key,payload_sha256,semantic_payload_hash_version,state,result,error_code,accepted_at,completed_at,replayed,created_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`, eventID, commandID, idempotencyKey, payloadHash, hashVersion, state, resultBytes, errorCode, acceptedAtValue, completedTime, result.GetReplayed(), observedAt); err != nil {
 		return fmt.Errorf("persist Agent command result: %w", err)
 	}
 	operationEventID, err := uuid.NewV7()
