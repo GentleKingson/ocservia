@@ -15,3 +15,9 @@ cargo test -p ocservia-agent --all-features \
   command_validation_fails_before_side_effect
 cargo test -p ocservia-agent --all-features \
   same_key_different_payload_is_rejected_without_second_effect
+cargo test -p ocservia-agent --all-features \
+  identity_conflicts_never_execute_a_second_effect
+cargo test -p ocservia-agent --all-features \
+  safe_retry_requires_explicit_effect_absence_reconciliation
+cargo test -p ocservia-agent --all-features \
+  semantic_payload_hash_matches_cross_language_golden_vectors

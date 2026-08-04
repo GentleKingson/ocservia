@@ -13,7 +13,7 @@ use ocservia_agent_protocol::{
 };
 use ocservia_command_journal::{AcceptOutcome, CommandRecord, CommandState, Journal};
 use ocservia_contracts::generated::ocserv::platform::agent::v1::{
-    CommandEnvelope, command_envelope,
+    CommandDeliveryMode, CommandEnvelope, command_envelope,
 };
 use prost::Message;
 use rand::Rng;
@@ -59,7 +59,14 @@ pub struct CommandOutcome {
 #[derive(Debug)]
 pub enum CommandError {
     Rejected(&'static str),
-    Journal(rusqlite::Error),
+    IdentityConflict,
+    PayloadConflict,
+    PreEffectJournalFailure(Box<rusqlite::Error>),
+    OutcomeUnknown {
+        code: &'static str,
+        record: Box<CommandRecord>,
+        source: Box<rusqlite::Error>,
+    },
     InjectedCrash(CrashPoint),
 }
 
@@ -67,7 +74,14 @@ impl fmt::Display for CommandError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Rejected(code) => write!(formatter, "command rejected: {code}"),
-            Self::Journal(_) => formatter.write_str("command journal unavailable"),
+            Self::IdentityConflict => formatter.write_str("command identity conflict"),
+            Self::PayloadConflict => formatter.write_str("command payload conflict"),
+            Self::PreEffectJournalFailure(_) => {
+                formatter.write_str("command journal unavailable before effect")
+            }
+            Self::OutcomeUnknown { code, .. } => {
+                write!(formatter, "command outcome unknown: {code}")
+            }
             Self::InjectedCrash(point) => write!(formatter, "injected crash at {point:?}"),
         }
     }
@@ -76,15 +90,10 @@ impl fmt::Display for CommandError {
 impl std::error::Error for CommandError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
-            Self::Journal(error) => Some(error),
+            Self::PreEffectJournalFailure(error) => Some(error.as_ref()),
+            Self::OutcomeUnknown { source, .. } => Some(source.as_ref()),
             _ => None,
         }
-    }
-}
-
-impl From<rusqlite::Error> for CommandError {
-    fn from(value: rusqlite::Error) -> Self {
-        Self::Journal(value)
     }
 }
 
@@ -113,51 +122,77 @@ impl CommandExecutor {
         crash: Option<CrashPoint>,
     ) -> Result<CommandOutcome, CommandError> {
         let validated = validate_command(envelope, context)?;
-        let acceptance = self.journal.accept_command(
-            &validated.key,
-            &validated.command_id,
-            &validated.payload_hash,
-            context.now_unix_seconds,
-        )?;
+        let acceptance = self
+            .journal
+            .accept_command(
+                &validated.key,
+                &validated.command_id,
+                &validated.payload_hash,
+                context.now_unix_seconds,
+            )
+            .map_err(pre_effect_failure)?;
         match acceptance {
             AcceptOutcome::PayloadConflict(_) => {
-                return Err(CommandError::Rejected("idempotency_payload_conflict"));
+                return Err(CommandError::PayloadConflict);
+            }
+            AcceptOutcome::IdentityConflict(_) => {
+                return Err(CommandError::IdentityConflict);
             }
             AcceptOutcome::Replay(record) => {
-                return self.reconcile_replay(record, &validated, context);
+                return self.reconcile_replay(record, &validated, context, false);
             }
             AcceptOutcome::Accepted(_) => {}
         }
         inject(crash, CrashPoint::AfterAccepted)?;
-        self.journal.transition_command(
-            &validated.key,
-            &[CommandState::Accepted],
-            CommandState::Running,
-            None,
-            None,
-            context.now_unix_seconds,
-        )?;
+        self.journal
+            .transition_command(
+                &validated.key,
+                &[CommandState::Accepted],
+                CommandState::Running,
+                None,
+                None,
+                context.now_unix_seconds,
+            )
+            .map_err(pre_effect_failure)?;
         inject(crash, CrashPoint::BeforeSideEffect)?;
-        self.journal.execute_synthetic_effect(
-            &validated.key,
-            &validated.payload_hash,
-            &validated.result,
-            context.now_unix_seconds,
-        )?;
+        let record = self
+            .journal
+            .execute_and_complete_synthetic(
+                &validated.key,
+                &validated.command_id,
+                &validated.payload_hash,
+                &validated.result,
+                context.now_unix_seconds,
+            )
+            .map_err(pre_effect_failure)?;
         inject(crash, CrashPoint::AfterSideEffect)?;
-        let record = self.journal.transition_command(
-            &validated.key,
-            &[CommandState::Running],
-            CommandState::Succeeded,
-            Some(&validated.result),
-            None,
-            context.now_unix_seconds,
-        )?;
         inject(crash, CrashPoint::AfterResult)?;
         Ok(CommandOutcome {
             record,
             replayed: false,
         })
+    }
+
+    /// Executes the delivery intent carried by a production command frame.
+    ///
+    /// # Errors
+    ///
+    /// Rejects an unspecified mode and propagates execution or reconciliation failures.
+    pub fn deliver(
+        &mut self,
+        envelope: &CommandEnvelope,
+        context: &CommandContext,
+    ) -> Result<CommandOutcome, CommandError> {
+        match CommandDeliveryMode::try_from(envelope.delivery_mode)
+            .unwrap_or(CommandDeliveryMode::Unspecified)
+        {
+            CommandDeliveryMode::ExecuteOrReplay => self.execute(envelope, context, None),
+            CommandDeliveryMode::ReconcileOnly => self.reconcile(envelope, context),
+            CommandDeliveryMode::RetryIfEffectAbsent => self.retry_unknown(envelope, context),
+            CommandDeliveryMode::Unspecified => {
+                Err(CommandError::Rejected("delivery_mode_invalid"))
+            }
+        }
     }
 
     /// Explicitly retries an Unknown synthetic command only after reconciliation proved absence.
@@ -171,41 +206,41 @@ impl CommandExecutor {
         context: &CommandContext,
     ) -> Result<CommandOutcome, CommandError> {
         let validated = validate_command(envelope, context)?;
-        let record = self
-            .journal
-            .command(&validated.key)?
-            .ok_or(CommandError::Rejected("command_not_accepted"))?;
-        if record.payload_sha256 != validated.payload_hash {
-            return Err(CommandError::Rejected("idempotency_payload_conflict"));
-        }
+        let record = self.matching_record(&validated)?;
         if record.state != CommandState::Unknown {
             return Err(CommandError::Rejected("command_not_unknown"));
         }
-        if self.journal.synthetic_effect(&validated.key)?.is_some() {
-            return self.reconcile_replay(record, &validated, context);
+        if record.error_code.as_deref() != Some("effect_absent") {
+            return Err(CommandError::Rejected("reconciliation_required"));
         }
-        self.journal.transition_command(
-            &validated.key,
-            &[CommandState::Unknown],
-            CommandState::Running,
-            None,
-            None,
-            context.now_unix_seconds,
-        )?;
-        self.journal.execute_synthetic_effect(
-            &validated.key,
-            &validated.payload_hash,
-            &validated.result,
-            context.now_unix_seconds,
-        )?;
-        let record = self.journal.transition_command(
-            &validated.key,
-            &[CommandState::Running],
-            CommandState::Succeeded,
-            Some(&validated.result),
-            None,
-            context.now_unix_seconds,
-        )?;
+        if self
+            .journal
+            .synthetic_effect(&validated.key)
+            .map_err(pre_effect_failure)?
+            .is_some()
+        {
+            return self.reconcile_replay(record, &validated, context, false);
+        }
+        self.journal
+            .transition_command(
+                &validated.key,
+                &[CommandState::Unknown],
+                CommandState::Running,
+                None,
+                None,
+                context.now_unix_seconds,
+            )
+            .map_err(pre_effect_failure)?;
+        let record = self
+            .journal
+            .execute_and_complete_synthetic(
+                &validated.key,
+                &validated.command_id,
+                &validated.payload_hash,
+                &validated.result,
+                context.now_unix_seconds,
+            )
+            .map_err(pre_effect_failure)?;
         Ok(CommandOutcome {
             record,
             replayed: true,
@@ -217,11 +252,52 @@ impl CommandExecutor {
         &self.journal
     }
 
+    /// Observes and persists reconciliation state without executing an effect.
+    ///
+    /// # Errors
+    ///
+    /// Rejects an identity mismatch and reports journal failures without executing an effect.
+    pub fn reconcile(
+        &self,
+        envelope: &CommandEnvelope,
+        context: &CommandContext,
+    ) -> Result<CommandOutcome, CommandError> {
+        let validated = validate_command(envelope, context)?;
+        let record = self.matching_record(&validated)?;
+        self.reconcile_replay(record, &validated, context, true)
+    }
+
+    fn matching_record(&self, validated: &ValidatedCommand) -> Result<CommandRecord, CommandError> {
+        let by_key = self
+            .journal
+            .command(&validated.key)
+            .map_err(pre_effect_failure)?;
+        let by_command = self
+            .journal
+            .command_by_id(&validated.command_id)
+            .map_err(pre_effect_failure)?;
+        match (by_key, by_command) {
+            (Some(by_key), Some(by_command))
+                if by_key.idempotency_key == by_command.idempotency_key
+                    && by_key.command_id == validated.command_id =>
+            {
+                if by_key.payload_sha256 == validated.payload_hash {
+                    Ok(by_key)
+                } else {
+                    Err(CommandError::PayloadConflict)
+                }
+            }
+            (None, None) => Err(CommandError::Rejected("command_not_accepted")),
+            _ => Err(CommandError::IdentityConflict),
+        }
+    }
+
     fn reconcile_replay(
         &self,
         record: CommandRecord,
         validated: &ValidatedCommand,
         context: &CommandContext,
+        explicit: bool,
     ) -> Result<CommandOutcome, CommandError> {
         if matches!(record.state, CommandState::Succeeded | CommandState::Failed) {
             return Ok(CommandOutcome {
@@ -229,39 +305,62 @@ impl CommandExecutor {
                 replayed: true,
             });
         }
-        let effect = self.journal.synthetic_effect(&validated.key)?;
+        let effect = self
+            .journal
+            .synthetic_effect(&validated.key)
+            .map_err(pre_effect_failure)?;
         if let Some(effect) = effect {
             if effect.payload_sha256 != validated.payload_hash {
                 return Err(CommandError::Rejected("idempotency_payload_conflict"));
             }
-            let record = self.journal.transition_command(
-                &validated.key,
-                &[
-                    CommandState::Accepted,
-                    CommandState::Running,
-                    CommandState::Unknown,
-                ],
-                CommandState::Succeeded,
-                Some(&effect.result),
-                None,
-                context.now_unix_seconds,
-            )?;
+            let record = self
+                .journal
+                .transition_command(
+                    &validated.key,
+                    &[
+                        CommandState::Accepted,
+                        CommandState::Running,
+                        CommandState::Unknown,
+                    ],
+                    CommandState::Succeeded,
+                    Some(&effect.result),
+                    None,
+                    context.now_unix_seconds,
+                )
+                .map_err(|source| CommandError::OutcomeUnknown {
+                    code: "result_persistence_failed",
+                    record: Box::new(record.clone()),
+                    source: Box::new(source),
+                })?;
             return Ok(CommandOutcome {
                 record,
                 replayed: true,
             });
         }
-        let record = if record.state == CommandState::Unknown {
+        let error_code = if explicit {
+            "effect_absent"
+        } else {
+            "outcome_requires_reconciliation"
+        };
+        let record = if record.state == CommandState::Unknown
+            && record.error_code.as_deref() == Some(error_code)
+        {
             record
         } else {
-            self.journal.transition_command(
-                &validated.key,
-                &[CommandState::Accepted, CommandState::Running],
-                CommandState::Unknown,
-                None,
-                Some("outcome_requires_reconciliation"),
-                context.now_unix_seconds,
-            )?
+            self.journal
+                .transition_command(
+                    &validated.key,
+                    &[
+                        CommandState::Accepted,
+                        CommandState::Running,
+                        CommandState::Unknown,
+                    ],
+                    CommandState::Unknown,
+                    None,
+                    Some(error_code),
+                    context.now_unix_seconds,
+                )
+                .map_err(pre_effect_failure)?
         };
         Ok(CommandOutcome {
             record,
@@ -275,6 +374,32 @@ struct ValidatedCommand {
     command_id: [u8; 16],
     payload_hash: [u8; 32],
     result: Vec<u8>,
+}
+
+/// Computes the cross-language semantic payload identity for a supported command.
+///
+/// Delivery metadata is intentionally excluded because reconciliation intent does not change the
+/// side effect. The capability, node, revision, and canonical typed payload are all bound.
+///
+/// # Errors
+///
+/// Rejects unsupported payload types.
+pub fn semantic_payload_hash(envelope: &CommandEnvelope) -> Result<[u8; 32], CommandError> {
+    let (capability, payload_bytes) = match envelope.payload.as_ref() {
+        Some(command_envelope::Payload::SyntheticNoop(payload)) => {
+            ("synthetic.noop", payload.encode_to_vec())
+        }
+        Some(command_envelope::Payload::SyntheticEcho(payload)) => {
+            ("synthetic.echo", payload.encode_to_vec())
+        }
+        _ => return Err(CommandError::Rejected("capability_rejected")),
+    };
+    let mut hash = Sha256::new();
+    hash.update(capability.as_bytes());
+    hash.update(&envelope.node_id);
+    hash.update(envelope.expected_revision.to_be_bytes());
+    hash.update(payload_bytes);
+    Ok(hash.finalize().into())
 }
 
 fn validate_command(
@@ -317,21 +442,15 @@ fn validate_command(
     if envelope.expected_revision != context.observed_revision {
         return Err(CommandError::Rejected("revision_mismatch"));
     }
-    let (capability, result, payload_bytes) = match envelope.payload.as_ref() {
-        Some(command_envelope::Payload::SyntheticNoop(payload)) => (
-            "synthetic.noop",
-            b"noop:completed".to_vec(),
-            payload.encode_to_vec(),
-        ),
+    let (capability, result) = match envelope.payload.as_ref() {
+        Some(command_envelope::Payload::SyntheticNoop(_)) => {
+            ("synthetic.noop", b"noop:completed".to_vec())
+        }
         Some(command_envelope::Payload::SyntheticEcho(payload)) => {
             if payload.message.len() > 4096 {
                 return Err(CommandError::Rejected("payload_size_invalid"));
             }
-            (
-                "synthetic.echo",
-                payload.message.as_bytes().to_vec(),
-                payload.encode_to_vec(),
-            )
+            ("synthetic.echo", payload.message.as_bytes().to_vec())
         }
         _ => return Err(CommandError::Rejected("capability_rejected")),
     };
@@ -340,12 +459,7 @@ fn validate_command(
     }
     let key = fixed::<16>(&envelope.idempotency_key, "idempotency_key_invalid")?;
     let command_id = fixed::<16>(&envelope.command_id, "command_id_invalid")?;
-    let mut hash = Sha256::new();
-    hash.update(capability.as_bytes());
-    hash.update(context.node_id);
-    hash.update(envelope.expected_revision.to_be_bytes());
-    hash.update(payload_bytes);
-    let payload_hash: [u8; 32] = hash.finalize().into();
+    let payload_hash = semantic_payload_hash(envelope)?;
     Ok(ValidatedCommand {
         key,
         command_id,
@@ -356,6 +470,10 @@ fn validate_command(
 
 fn fixed<const N: usize>(value: &[u8], code: &'static str) -> Result<[u8; N], CommandError> {
     value.try_into().map_err(|_| CommandError::Rejected(code))
+}
+
+fn pre_effect_failure(source: rusqlite::Error) -> CommandError {
+    CommandError::PreEffectJournalFailure(Box::new(source))
 }
 
 fn inject(selected: Option<CrashPoint>, point: CrashPoint) -> Result<(), CommandError> {
@@ -591,7 +709,7 @@ pub async fn read_boot_id() -> Result<String, io::Error> {
 #[cfg(test)]
 mod tests {
     use ocservia_contracts::generated::ocserv::platform::agent::v1::{
-        SyntheticEcho, command_envelope,
+        SyntheticEcho, SyntheticNoop, command_envelope,
     };
     use prost_types::Timestamp;
     use rand::{SeedableRng, rngs::StdRng};
@@ -618,6 +736,64 @@ mod tests {
         assert!(values.windows(2).any(|pair| pair[0] != pair[1]));
     }
 
+    #[test]
+    fn semantic_payload_hash_matches_cross_language_golden_vectors() {
+        let node = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15];
+        let key = *Uuid::now_v7().as_bytes();
+        let mut envelope = command(node, key, "", 100);
+        let cases = [
+            (
+                "",
+                "2d6daaae892285c786fba378aff37d4d0436dae76699061500b548e939782433",
+            ),
+            (
+                "hello",
+                "a7299856cb7fa4e266b1234614361677e1d1b2466608d014e71b4a547c804397",
+            ),
+            (
+                "你好",
+                "10f1ae9994bde9ea69de8fb965bf5029e97ad8b1bf1f00834d47831f60adf38d",
+            ),
+        ];
+        for (message, expected) in cases {
+            envelope.payload = Some(command_envelope::Payload::SyntheticEcho(SyntheticEcho {
+                message: message.to_owned(),
+            }));
+            assert_eq!(
+                hex::encode(semantic_payload_hash(&envelope).unwrap()),
+                expected
+            );
+        }
+        envelope.payload = Some(command_envelope::Payload::SyntheticEcho(SyntheticEcho {
+            message: "x".repeat(4096),
+        }));
+        assert_eq!(
+            hex::encode(semantic_payload_hash(&envelope).unwrap()),
+            "d6f3a8f8d0fc7ccbbfe6fec9f93bcad544d98fec0f3501aeef8be2a5d2b78daa"
+        );
+        envelope.payload = Some(command_envelope::Payload::SyntheticNoop(
+            SyntheticNoop::default(),
+        ));
+        assert_eq!(
+            hex::encode(semantic_payload_hash(&envelope).unwrap()),
+            "2e5b198f3c3a2718113a4dbf2a552c730ddede13567ee448c6118459ccfa0d98"
+        );
+        envelope.payload = Some(command_envelope::Payload::SyntheticEcho(SyntheticEcho {
+            message: "hello".to_owned(),
+        }));
+        envelope.expected_revision = 2;
+        assert_eq!(
+            hex::encode(semantic_payload_hash(&envelope).unwrap()),
+            "79659b4e1819080191867174096d8aa5d01a43cb634cab9c51b113391643c343"
+        );
+        envelope.expected_revision = 1;
+        envelope.node_id = (1_u8..=16).collect();
+        assert_eq!(
+            hex::encode(semantic_payload_hash(&envelope).unwrap()),
+            "a45222e4babe147a02b9274937f09c337ac56764a56c61a9ebfd901d4fec7afe"
+        );
+    }
+
     fn command(node_id: [u8; 16], key: [u8; 16], message: &str, now: i64) -> CommandEnvelope {
         CommandEnvelope {
             protocol_version: "1.0".to_owned(),
@@ -638,6 +814,7 @@ mod tests {
             traceparent: "00-0123456789abcdef0123456789abcdef-0123456789abcdef-01".to_owned(),
             actor_id: "test".to_owned(),
             reason: "fault matrix".to_owned(),
+            delivery_mode: CommandDeliveryMode::ExecuteOrReplay.into(),
             payload: Some(command_envelope::Payload::SyntheticEcho(SyntheticEcho {
                 message: message.to_owned(),
             })),
@@ -720,10 +897,25 @@ mod tests {
             drop(executor);
 
             let mut executor = CommandExecutor::new(Journal::open(&path).expect("restart"));
-            let reconciled = executor
+            let replayed = executor
                 .execute(&envelope, &command_context, None)
-                .expect("reconcile");
+                .expect("ordinary replay");
+            let reconciled = if replayed.record.state == CommandState::Unknown {
+                assert_eq!(
+                    replayed.record.error_code.as_deref(),
+                    Some("outcome_requires_reconciliation")
+                );
+                executor
+                    .reconcile(&envelope, &command_context)
+                    .expect("explicit reconcile")
+            } else {
+                replayed
+            };
             let completed = if reconciled.record.state == CommandState::Unknown {
+                assert_eq!(
+                    reconciled.record.error_code.as_deref(),
+                    Some("effect_absent")
+                );
                 executor
                     .retry_unknown(&envelope, &command_context)
                     .expect("explicit safe retry")
@@ -832,16 +1024,17 @@ mod tests {
         let key = *Uuid::now_v7().as_bytes();
         let command_context = context(node_id, 100);
         let mut executor = CommandExecutor::new(Journal::open(&path).expect("open"));
+        let first = command(node_id, key, "first", 100);
         executor
-            .execute(&command(node_id, key, "first", 100), &command_context, None)
+            .execute(&first, &command_context, None)
             .expect("first");
+        let mut conflicting = first.clone();
+        conflicting.payload = Some(command_envelope::Payload::SyntheticEcho(SyntheticEcho {
+            message: "second".to_owned(),
+        }));
         assert!(matches!(
-            executor.execute(
-                &command(node_id, key, "second", 100),
-                &command_context,
-                None
-            ),
-            Err(CommandError::Rejected("idempotency_payload_conflict"))
+            executor.execute(&conflicting, &command_context, None),
+            Err(CommandError::PayloadConflict)
         ));
         assert_eq!(
             executor
@@ -850,6 +1043,79 @@ mod tests {
                 .expect("count"),
             1
         );
+        drop(executor);
+        cleanup_journal(&path);
+    }
+
+    #[test]
+    fn identity_conflicts_never_execute_a_second_effect() {
+        let path = temporary_journal("identity-conflict");
+        let node_id = *Uuid::now_v7().as_bytes();
+        let key = *Uuid::now_v7().as_bytes();
+        let command_context = context(node_id, 100);
+        let first = command(node_id, key, "first", 100);
+        let mut executor = CommandExecutor::new(Journal::open(&path).expect("open"));
+        executor
+            .execute(&first, &command_context, None)
+            .expect("first");
+
+        let mut different_command = first.clone();
+        different_command.command_id = Uuid::now_v7().as_bytes().to_vec();
+        assert!(matches!(
+            executor.execute(&different_command, &command_context, None),
+            Err(CommandError::IdentityConflict)
+        ));
+
+        let mut different_key = first.clone();
+        different_key.idempotency_key = Uuid::now_v7().as_bytes().to_vec();
+        assert!(matches!(
+            executor.execute(&different_key, &command_context, None),
+            Err(CommandError::IdentityConflict)
+        ));
+        assert_eq!(
+            executor
+                .journal()
+                .synthetic_execution_count()
+                .expect("count"),
+            1
+        );
+        drop(executor);
+        cleanup_journal(&path);
+    }
+
+    #[test]
+    fn safe_retry_requires_explicit_effect_absence_reconciliation() {
+        let path = temporary_journal("reconcile-required");
+        let node_id = *Uuid::now_v7().as_bytes();
+        let envelope = command(node_id, *Uuid::now_v7().as_bytes(), "once", 100);
+        let command_context = context(node_id, 100);
+        let mut executor = CommandExecutor::new(Journal::open(&path).expect("open"));
+        assert!(matches!(
+            executor.execute(&envelope, &command_context, Some(CrashPoint::AfterAccepted)),
+            Err(CommandError::InjectedCrash(CrashPoint::AfterAccepted))
+        ));
+        assert!(matches!(
+            executor.retry_unknown(&envelope, &command_context),
+            Err(CommandError::Rejected("command_not_unknown"))
+        ));
+        executor
+            .deliver(&envelope, &command_context)
+            .expect("ordinary replay records uncertainty");
+        let mut retry = envelope.clone();
+        retry.delivery_mode = CommandDeliveryMode::RetryIfEffectAbsent.into();
+        assert!(matches!(
+            executor.deliver(&retry, &command_context),
+            Err(CommandError::Rejected("reconciliation_required"))
+        ));
+        let mut reconcile = envelope.clone();
+        reconcile.delivery_mode = CommandDeliveryMode::ReconcileOnly.into();
+        executor
+            .deliver(&reconcile, &command_context)
+            .expect("observe effect absence");
+        executor
+            .deliver(&retry, &command_context)
+            .expect("safe retry");
+        assert_eq!(executor.journal().synthetic_execution_count().unwrap(), 1);
         drop(executor);
         cleanup_journal(&path);
     }

@@ -82,6 +82,13 @@ enum CommandResultState {
   COMMAND_RESULT_STATE_REJECTED = 4;
 }
 
+enum CommandDeliveryMode {
+  COMMAND_DELIVERY_MODE_UNSPECIFIED = 0;
+  COMMAND_DELIVERY_MODE_EXECUTE_OR_REPLAY = 1;
+  COMMAND_DELIVERY_MODE_RECONCILE_ONLY = 2;
+  COMMAND_DELIVERY_MODE_RETRY_IF_EFFECT_ABSENT = 3;
+}
+
 // CommandResult is persisted before it is placed on the response stream.
 message CommandResult {
   bytes command_id = 1;
@@ -170,7 +177,6 @@ message CommandEnvelope {
   string traceparent = 10;
   string actor_id = 11;
   string reason = 12;
-
   reserved 13 to 99;
   reserved "legacy_payload";
 
@@ -185,6 +191,7 @@ message CommandEnvelope {
     SyntheticNoop synthetic_noop = 107;
     SyntheticEcho synthetic_echo = 108;
   }
+  CommandDeliveryMode delivery_mode = 109;
 }
 
 message SessionDisconnect {

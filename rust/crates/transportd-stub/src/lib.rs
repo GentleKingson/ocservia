@@ -8,8 +8,8 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use ocservia_contracts::generated::ocserv::platform::agent::v1::{
-    CommandEnvelope, MetricSample, ObservedSnapshot, SimulationProbe, TelemetryBatch,
-    TelemetryDropCounters, TelemetryPriority, command_envelope,
+    CommandDeliveryMode, CommandEnvelope, MetricSample, ObservedSnapshot, SimulationProbe,
+    TelemetryBatch, TelemetryDropCounters, TelemetryPriority, command_envelope,
 };
 use ocservia_contracts::generated::ocserv::platform::transport::v1::{
     CloseNodeRequest, CloseNodeResponse, ConnectionPath, GetNodeConnectionRequest, HealthRequest,
@@ -290,7 +290,7 @@ impl StubService {
         let (event_type, payload) = if probe.return_error {
             (TransportEventType::Error, b"simulated error".to_vec())
         } else {
-            (TransportEventType::CommandResult, b"completed".to_vec())
+            (TransportEventType::SimulationResult, b"completed".to_vec())
         };
         if !self
             .publish_if_active(
@@ -476,6 +476,14 @@ impl TransportService for StubService {
         }
         validate_traceparent(&envelope.traceparent)?;
         validate_command_times(envelope.issued_at.as_ref(), envelope.expires_at.as_ref())?;
+        if CommandDeliveryMode::try_from(envelope.delivery_mode)
+            .unwrap_or(CommandDeliveryMode::Unspecified)
+            == CommandDeliveryMode::Unspecified
+        {
+            return Err(Status::invalid_argument(
+                "command delivery mode is required",
+            ));
+        }
         let idempotency_key = validate_id(&envelope.idempotency_key, "idempotency_key")?;
         let payload = envelope
             .payload
@@ -738,6 +746,7 @@ mod tests {
             traceparent: new_traceparent(),
             actor_id: "test".to_owned(),
             reason: "test".to_owned(),
+            delivery_mode: CommandDeliveryMode::ExecuteOrReplay.into(),
             payload: Some(command_envelope::Payload::SimulationProbe(probe)),
         };
         SendCommandRequest {

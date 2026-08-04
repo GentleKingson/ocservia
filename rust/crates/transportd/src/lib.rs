@@ -1503,6 +1503,8 @@ pub async fn shutdown(
 
 #[cfg(test)]
 mod tests {
+    use ocservia_contracts::generated::ocserv::platform::agent::v1::CommandDeliveryMode;
+
     use super::*;
 
     fn handshake(key: &SecretKey) -> SessionHandshake {
@@ -1546,6 +1548,7 @@ mod tests {
             traceparent: traceparent.to_owned(),
             actor_id: "test".to_owned(),
             reason,
+            delivery_mode: CommandDeliveryMode::ExecuteOrReplay.into(),
             payload: None,
         }
         .encode_to_vec()

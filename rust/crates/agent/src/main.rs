@@ -230,12 +230,27 @@ async fn handle_command_stream(
         now_unix_seconds,
         cancelled: false,
     };
-    let result = match session.command_executor.execute(&envelope, &context, None) {
+    let execution = session.command_executor.deliver(&envelope, &context);
+    let result = match execution {
         Ok(outcome) => command_result(&outcome.record, outcome.replayed),
         Err(CommandError::Rejected(code)) => rejected_result(&envelope, code, now_unix_seconds),
-        Err(CommandError::Journal(error)) => {
+        Err(CommandError::IdentityConflict) => {
+            rejected_result(&envelope, "command_identity_conflict", now_unix_seconds)
+        }
+        Err(CommandError::PayloadConflict) => {
+            rejected_result(&envelope, "idempotency_payload_conflict", now_unix_seconds)
+        }
+        Err(CommandError::PreEffectJournalFailure(error)) => {
             tracing::error!(command_id = %hex::encode(&envelope.command_id), error = %error, "command journal failure");
             rejected_result(&envelope, "journal_unavailable", now_unix_seconds)
+        }
+        Err(CommandError::OutcomeUnknown {
+            code,
+            record,
+            source,
+        }) => {
+            tracing::error!(command_id = %hex::encode(&envelope.command_id), error = %source, "command outcome requires reconciliation");
+            unknown_result(record.as_ref(), code)
         }
         Err(CommandError::InjectedCrash(_)) => unreachable!("crash injection is test-only"),
     };
@@ -249,6 +264,14 @@ async fn handle_command_stream(
     send.write_all(&encoded).await?;
     send.finish()?;
     Ok(())
+}
+
+fn unknown_result(record: &CommandRecord, code: &str) -> CommandResult {
+    let mut result = command_result(record, false);
+    result.state = CommandResultState::Unknown.into();
+    result.result.clear();
+    code.clone_into(&mut result.error_code);
+    result
 }
 
 fn command_result(record: &CommandRecord, replayed: bool) -> CommandResult {

@@ -214,7 +214,7 @@ func (s *Service) Claim(ctx context.Context, workerID uuid.UUID, limit int, leas
 		JOIN commands AS command ON command.id=outbox.command_id
 		WHERE outbox.published_at IS NULL AND outbox.available_at<=now()
 		  AND (outbox.locked_until IS NULL OR outbox.locked_until<=now())
-		  AND command.state='queued' AND command.expires_at>now()
+		  AND command.state IN ('queued','unknown') AND command.expires_at>now()
 		ORDER BY outbox.available_at,outbox.id FOR UPDATE OF outbox SKIP LOCKED LIMIT $1`, limit)
 	if err != nil {
 		return nil, fmt.Errorf("select outbox candidates: %w", err)
@@ -301,7 +301,7 @@ func (s *Service) finishDispatch(ctx context.Context, d Dispatch, sent bool, mes
 		if _, err = tx.Exec(ctx, `UPDATE outbox_events SET published_at=now(),locked_by=NULL,locked_until=NULL,last_error=NULL WHERE id=$1 AND locked_by IS NOT NULL`, d.OutboxID); err != nil {
 			return err
 		}
-		if _, err = tx.Exec(ctx, `UPDATE commands SET state='dispatched',updated_at=now() WHERE id=$1 AND state='queued'`, d.CommandID); err != nil {
+		if _, err = tx.Exec(ctx, `UPDATE commands SET state='dispatched',updated_at=now() WHERE id=$1 AND state IN ('queued','unknown')`, d.CommandID); err != nil {
 			return err
 		}
 		if _, err = tx.Exec(ctx, `UPDATE operations SET state='dispatched',version=version+1,updated_at=now() WHERE id=$1 AND state='queued'`, d.OperationID); err != nil {
@@ -444,7 +444,7 @@ func marshalEnvelope(r CreateRequest, operationID, commandID uuid.UUID, now, exp
 	if err != nil {
 		return nil, "", err
 	}
-	envelope := &agentv1.CommandEnvelope{ProtocolVersion: "1.0", MessageId: messageID[:], CommandId: commandID[:], IdempotencyKey: operationID[:], NodeId: r.NodeID[:], Sequence: 1, IssuedAt: timestamppb.New(now), ExpiresAt: timestamppb.New(expires), ExpectedRevision: uint64(r.ExpectedVersion), Traceparent: r.Traceparent, ActorId: "developer", Reason: "side-effect-free delivery validation"}
+	envelope := &agentv1.CommandEnvelope{ProtocolVersion: "1.0", MessageId: messageID[:], CommandId: commandID[:], IdempotencyKey: operationID[:], NodeId: r.NodeID[:], Sequence: 1, IssuedAt: timestamppb.New(now), ExpiresAt: timestamppb.New(expires), ExpectedRevision: uint64(r.ExpectedVersion), Traceparent: r.Traceparent, ActorId: "developer", Reason: "side-effect-free delivery validation", DeliveryMode: agentv1.CommandDeliveryMode_COMMAND_DELIVERY_MODE_EXECUTE_OR_REPLAY}
 	payloadType := "synthetic_noop"
 	if r.Kind == SyntheticEcho {
 		payloadType = "synthetic_echo"

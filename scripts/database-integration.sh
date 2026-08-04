@@ -132,6 +132,18 @@ for major in 17 18; do
   fi
   stop_process "${pid}"
 
+  test "$(docker exec "${container}" psql -U ocservia_owner -d ocservia -Atc "SELECT count(*) FROM pg_indexes WHERE schemaname='public' AND tablename='agent_command_results' AND indexname IN ('agent_command_results_pkey','agent_command_results_command_created_idx')")" = "2"
+  docker exec -i "${container}" psql -v ON_ERROR_STOP=1 -U ocservia_owner -d ocservia \
+    <"${ROOT}/control-plane/migrations/000007_agent_command_results.down.sql" >/dev/null
+  docker exec "${container}" psql -v ON_ERROR_STOP=1 -U ocservia_owner -d ocservia -c \
+    "DELETE FROM schema_migrations WHERE version = 7" >/dev/null
+  test "$(docker exec "${container}" psql -U ocservia_owner -d ocservia -Atc "SELECT count(*) FROM information_schema.tables WHERE table_schema='public' AND table_name='agent_command_results'")" = "0"
+  OCSERV_ENVIRONMENT=test OCSERV_DATABASE_URL="${owner_url}" \
+    OCSERV_RUNTIME_DATABASE_ROLE=ocservia_app "${BIN}" --migrate-only \
+    >"${TMP_ROOT}/pg${major}-up-after-down.log" 2>&1
+  test "$(docker exec "${container}" psql -U ocservia_owner -d ocservia -Atc "SELECT count(*) FROM schema_migrations WHERE version = 7")" = "1"
+  test "$(docker exec "${container}" psql -U ocservia_owner -d ocservia -Atc "SELECT count(*) FROM pg_indexes WHERE schemaname='public' AND tablename='agent_command_results' AND indexname IN ('agent_command_results_pkey','agent_command_results_command_created_idx')")" = "2"
+
   OCSERV_ENVIRONMENT=test OCSERV_DATABASE_URL="${owner_url}" \
     OCSERV_RUNTIME_DATABASE_ROLE=ocservia_app "${BIN}" --migrate-only \
     >"${TMP_ROOT}/pg${major}-repeat-migrate.log" 2>&1

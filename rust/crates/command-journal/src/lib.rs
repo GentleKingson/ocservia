@@ -4,8 +4,9 @@
 
 use std::path::Path;
 use std::time::Duration;
+use std::{fs, os::unix::fs::PermissionsExt as _};
 
-use rusqlite::{Connection, OpenFlags};
+use rusqlite::{Connection, OpenFlags, TransactionBehavior};
 
 const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -67,6 +68,7 @@ pub enum AcceptOutcome {
     Accepted(CommandRecord),
     Replay(CommandRecord),
     PayloadConflict(CommandRecord),
+    IdentityConflict(CommandRecord),
 }
 
 /// Durable synthetic effect used to prove crash-safe reconciliation before real writes exist.
@@ -99,6 +101,7 @@ impl Journal {
     ///
     /// Returns an error when the database cannot be opened, configured, or migrated.
     pub fn open(path: &Path) -> Result<Self, rusqlite::Error> {
+        let existed = path.exists();
         let connection = Connection::open_with_flags(
             path,
             OpenFlags::SQLITE_OPEN_READ_WRITE
@@ -106,8 +109,19 @@ impl Journal {
                 | OpenFlags::SQLITE_OPEN_NO_MUTEX
                 | OpenFlags::SQLITE_OPEN_NOFOLLOW,
         )?;
+        if existed {
+            let metadata = fs::symlink_metadata(path)
+                .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
+            if metadata.file_type().is_symlink() || metadata.permissions().mode() & 0o022 != 0 {
+                return Err(rusqlite::Error::InvalidPath(path.to_path_buf()));
+            }
+        } else {
+            fs::set_permissions(path, fs::Permissions::from_mode(0o600))
+                .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
+        }
         connection.busy_timeout(BUSY_TIMEOUT)?;
         connection.pragma_update(None, "journal_mode", "WAL")?;
+        connection.pragma_update(None, "synchronous", "FULL")?;
         connection.pragma_update(None, "foreign_keys", true)?;
         connection.execute_batch(
             "CREATE TABLE IF NOT EXISTS agent_metadata (
@@ -132,6 +146,8 @@ impl Journal {
              ) STRICT;
              CREATE INDEX IF NOT EXISTS command_journal_updated_at
                 ON command_journal(updated_at);
+             CREATE UNIQUE INDEX IF NOT EXISTS command_journal_command_id_unique
+                ON command_journal(command_id);
              CREATE TABLE IF NOT EXISTS synthetic_effects (
                 idempotency_key BLOB PRIMARY KEY NOT NULL,
                 payload_sha256 BLOB NOT NULL,
@@ -196,21 +212,36 @@ impl Journal {
         payload_sha256: &[u8; 32],
         now: i64,
     ) -> Result<AcceptOutcome, rusqlite::Error> {
-        let transaction = self.connection.transaction()?;
-        let inserted = transaction.execute(
-            "INSERT INTO command_journal(idempotency_key,command_id,payload_sha256,state,result,error_code,accepted_at,updated_at) VALUES (?1,?2,?3,'accepted',NULL,NULL,?4,?4) ON CONFLICT(idempotency_key) DO NOTHING",
-            rusqlite::params![idempotency_key.as_slice(), command_id.as_slice(), payload_sha256.as_slice(), now],
-        )?;
-        let record = query_command(&transaction, idempotency_key)?
-            .ok_or(rusqlite::Error::QueryReturnedNoRows)?;
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let by_key = query_command(&transaction, idempotency_key)?;
+        let by_command = query_command_by_id(&transaction, command_id)?;
+        let outcome = match (by_key, by_command) {
+            (None, None) => {
+                transaction.execute(
+                    "INSERT INTO command_journal(idempotency_key,command_id,payload_sha256,state,result,error_code,accepted_at,updated_at) VALUES (?1,?2,?3,'accepted',NULL,NULL,?4,?4)",
+                    rusqlite::params![idempotency_key.as_slice(), command_id.as_slice(), payload_sha256.as_slice(), now],
+                )?;
+                AcceptOutcome::Accepted(
+                    query_command(&transaction, idempotency_key)?
+                        .ok_or(rusqlite::Error::QueryReturnedNoRows)?,
+                )
+            }
+            (Some(by_key), Some(by_command))
+                if by_key.idempotency_key == by_command.idempotency_key
+                    && by_key.command_id == *command_id =>
+            {
+                if by_key.payload_sha256 == *payload_sha256 {
+                    AcceptOutcome::Replay(by_key)
+                } else {
+                    AcceptOutcome::PayloadConflict(by_key)
+                }
+            }
+            (Some(existing), _) | (_, Some(existing)) => AcceptOutcome::IdentityConflict(existing),
+        };
         transaction.commit()?;
-        if inserted == 1 {
-            Ok(AcceptOutcome::Accepted(record))
-        } else if record.payload_sha256 == *payload_sha256 {
-            Ok(AcceptOutcome::Replay(record))
-        } else {
-            Ok(AcceptOutcome::PayloadConflict(record))
-        }
+        Ok(outcome)
     }
 
     /// Loads a command record by idempotency key.
@@ -223,6 +254,18 @@ impl Journal {
         idempotency_key: &[u8; 16],
     ) -> Result<Option<CommandRecord>, rusqlite::Error> {
         query_command(&self.connection, idempotency_key)
+    }
+
+    /// Loads a command record by command identity.
+    ///
+    /// # Errors
+    ///
+    /// Returns a query error.
+    pub fn command_by_id(
+        &self,
+        command_id: &[u8; 16],
+    ) -> Result<Option<CommandRecord>, rusqlite::Error> {
+        query_command_by_id(&self.connection, command_id)
     }
 
     /// Moves a command to a new state and durably stores its bounded result.
@@ -296,6 +339,60 @@ impl Journal {
         Ok(true)
     }
 
+    /// Commits the synthetic effect and terminal journal result atomically.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error without committing either the effect or terminal result.
+    pub fn execute_and_complete_synthetic(
+        &mut self,
+        idempotency_key: &[u8; 16],
+        command_id: &[u8; 16],
+        payload_sha256: &[u8; 32],
+        result: &[u8],
+        now: i64,
+    ) -> Result<CommandRecord, rusqlite::Error> {
+        if result.len() > 1024 * 1024 {
+            return Err(rusqlite::Error::InvalidQuery);
+        }
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let record = query_command(&transaction, idempotency_key)?
+            .ok_or(rusqlite::Error::QueryReturnedNoRows)?;
+        if record.command_id != *command_id
+            || record.payload_sha256 != *payload_sha256
+            || record.state != CommandState::Running
+        {
+            return Err(rusqlite::Error::InvalidQuery);
+        }
+        if let Some(existing) = query_effect(&transaction, idempotency_key)? {
+            if existing.payload_sha256 != *payload_sha256 || existing.result != result {
+                return Err(rusqlite::Error::InvalidQuery);
+            }
+        } else {
+            transaction.execute(
+                "INSERT INTO synthetic_effects(idempotency_key,payload_sha256,result,executed_at) VALUES (?1,?2,?3,?4)",
+                rusqlite::params![idempotency_key.as_slice(), payload_sha256.as_slice(), result, now],
+            )?;
+            transaction.execute(
+                "UPDATE synthetic_effect_counter SET executions=executions+1 WHERE singleton=1",
+                [],
+            )?;
+        }
+        let updated = transaction.execute(
+            "UPDATE command_journal SET state='succeeded',result=?4,error_code=NULL,updated_at=?5 WHERE idempotency_key=?1 AND command_id=?2 AND payload_sha256=?3 AND state='running'",
+            rusqlite::params![idempotency_key.as_slice(), command_id.as_slice(), payload_sha256.as_slice(), result, now],
+        )?;
+        if updated != 1 {
+            return Err(rusqlite::Error::InvalidQuery);
+        }
+        let completed = query_command(&transaction, idempotency_key)?
+            .ok_or(rusqlite::Error::QueryReturnedNoRows)?;
+        transaction.commit()?;
+        Ok(completed)
+    }
+
     /// Observes a durable synthetic effect during Unknown reconciliation.
     ///
     /// # Errors
@@ -329,6 +426,16 @@ impl Journal {
     pub fn journal_mode(&self) -> Result<String, rusqlite::Error> {
         self.connection
             .pragma_query_value(None, "journal_mode", |row| row.get(0))
+    }
+
+    /// Returns the active `SQLite` synchronous durability level.
+    ///
+    /// # Errors
+    ///
+    /// Returns a query error.
+    pub fn synchronous_level(&self) -> Result<u8, rusqlite::Error> {
+        self.connection
+            .pragma_query_value(None, "synchronous", |row| row.get(0))
     }
 
     /// Returns whether foreign keys are enabled.
@@ -506,6 +613,29 @@ fn query_command(
     }))
 }
 
+fn query_command_by_id(
+    connection: &Connection,
+    command_id: &[u8; 16],
+) -> Result<Option<CommandRecord>, rusqlite::Error> {
+    let mut statement = connection.prepare(
+        "SELECT idempotency_key,command_id,payload_sha256,state,result,error_code,accepted_at,updated_at FROM command_journal WHERE command_id=?1",
+    )?;
+    let mut rows = statement.query([command_id.as_slice()])?;
+    let Some(row) = rows.next()? else {
+        return Ok(None);
+    };
+    Ok(Some(CommandRecord {
+        idempotency_key: fixed_blob::<16>(row.get(0)?)?,
+        command_id: fixed_blob::<16>(row.get(1)?)?,
+        payload_sha256: fixed_blob::<32>(row.get(2)?)?,
+        state: CommandState::parse(&row.get::<_, String>(3)?)?,
+        result: row.get(4)?,
+        error_code: row.get(5)?,
+        accepted_at: row.get(6)?,
+        updated_at: row.get(7)?,
+    }))
+}
+
 fn query_effect(
     connection: &Connection,
     idempotency_key: &[u8; 16],
@@ -572,6 +702,15 @@ mod tests {
         );
         assert!(journal.foreign_keys_enabled().expect("foreign keys"));
         assert_eq!(journal.busy_timeout_ms().expect("busy timeout"), 5000);
+        assert_eq!(journal.synchronous_level().expect("synchronous"), 2);
+        assert_eq!(
+            std::fs::metadata(&path)
+                .expect("journal metadata")
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600
+        );
         drop(journal);
         for suffix in ["", "-wal", "-shm"] {
             let _ = std::fs::remove_file(format!("{}{}", path.display(), suffix));
@@ -667,6 +806,97 @@ mod tests {
                 .expect("conflict"),
             AcceptOutcome::PayloadConflict(_)
         ));
+        drop(journal);
+        cleanup(&path);
+    }
+
+    #[test]
+    fn command_key_and_command_id_are_one_to_one() {
+        let path = temporary_path("identity");
+        let mut journal = Journal::open(&path).expect("open");
+        let key = *uuid::Uuid::now_v7().as_bytes();
+        let command = *uuid::Uuid::now_v7().as_bytes();
+        let payload = [7_u8; 32];
+        assert!(matches!(
+            journal
+                .accept_command(&key, &command, &payload, 10)
+                .expect("accept"),
+            AcceptOutcome::Accepted(_)
+        ));
+        assert!(matches!(
+            journal
+                .accept_command(&key, &command, &payload, 11)
+                .expect("exact replay"),
+            AcceptOutcome::Replay(_)
+        ));
+        assert!(matches!(
+            journal
+                .accept_command(&key, uuid::Uuid::now_v7().as_bytes(), &payload, 12)
+                .expect("same key conflict"),
+            AcceptOutcome::IdentityConflict(_)
+        ));
+        assert!(matches!(
+            journal
+                .accept_command(uuid::Uuid::now_v7().as_bytes(), &command, &payload, 13)
+                .expect("same command conflict"),
+            AcceptOutcome::IdentityConflict(_)
+        ));
+        assert!(matches!(
+            journal
+                .accept_command(&key, &command, &[8_u8; 32], 14)
+                .expect("payload conflict"),
+            AcceptOutcome::PayloadConflict(_)
+        ));
+        assert_eq!(journal.synthetic_execution_count().expect("count"), 0);
+        drop(journal);
+        cleanup(&path);
+    }
+
+    #[test]
+    fn synthetic_effect_and_terminal_result_roll_back_together() {
+        let path = temporary_path("atomic-completion");
+        let key = *uuid::Uuid::now_v7().as_bytes();
+        let command = *uuid::Uuid::now_v7().as_bytes();
+        let payload = [9_u8; 32];
+        let mut journal = Journal::open(&path).expect("open");
+        journal
+            .accept_command(&key, &command, &payload, 10)
+            .expect("accept");
+        journal
+            .transition_command(
+                &key,
+                &[CommandState::Accepted],
+                CommandState::Running,
+                None,
+                None,
+                11,
+            )
+            .expect("running");
+        journal
+            .connection
+            .execute_batch(
+                "CREATE TEMP TRIGGER fail_terminal_result
+                 BEFORE UPDATE OF state ON command_journal
+                 WHEN NEW.state = 'succeeded'
+                 BEGIN SELECT RAISE(FAIL, 'injected terminal write failure'); END;",
+            )
+            .expect("failure trigger");
+        assert!(
+            journal
+                .execute_and_complete_synthetic(&key, &command, &payload, b"result", 12)
+                .is_err()
+        );
+        assert!(
+            journal
+                .synthetic_effect(&key)
+                .expect("effect query")
+                .is_none()
+        );
+        assert_eq!(journal.synthetic_execution_count().expect("count"), 0);
+        assert_eq!(
+            journal.command(&key).expect("command query").unwrap().state,
+            CommandState::Running
+        );
         drop(journal);
         cleanup(&path);
     }
