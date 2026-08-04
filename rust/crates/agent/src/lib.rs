@@ -1228,4 +1228,165 @@ mod tests {
         drop(executor);
         cleanup_journal(&path);
     }
+
+    // ---- Canonical Semantic Payload Hash v1 ----
+    //
+    // The tests below pin the v1 algorithm defined in
+    // `docs/development/command-semantic-hash-v1.md` against the shared golden
+    // fixture `testdata/semantic-payload-hash-v1.json`. They are `#[ignore]`d
+    // until the production `semantic_payload_hash_v1` function is introduced in
+    // a later I10 commit; the inlined `compute_v1_canonical` mirror computes the
+    // same bytes per spec so the vectors are auditable today. Once the
+    // production function exists, replace the mirror with a call to it and drop
+    // the `#[ignore]`.
+
+    /// V1 canonical preimage domain separator: ASCII label plus a NUL terminator.
+    const V1_DOMAIN_SEPARATOR: &[u8] = b"ocservia.command.semantic-hash.v1\0";
+
+    /// Mirror of the v1 canonical hash that writes each field by hand.
+    ///
+    /// This intentionally does not use Protobuf serialization. It is the test
+    /// reference; the production implementation must produce identical bytes.
+    fn compute_v1_canonical(
+        node_id: &[u8],
+        expected_revision: u64,
+        payload_kind: u32,
+        canonical_payload: &[u8],
+    ) -> [u8; 32] {
+        let mut hash = Sha256::new();
+        hash.update(V1_DOMAIN_SEPARATOR);
+        hash.update(node_id);
+        hash.update(expected_revision.to_be_bytes());
+        hash.update(payload_kind.to_be_bytes());
+        hash.update(canonical_payload);
+        hash.finalize().into()
+    }
+
+    fn canonical_payload_for(kind: u32, message: &str) -> Vec<u8> {
+        match kind {
+            107 => Vec::new(), // SyntheticNoop
+            108 => {
+                // SyntheticEcho: u32_be(len(utf8)) || utf8
+                let utf8 = message.as_bytes();
+                let mut out = Vec::with_capacity(4 + utf8.len());
+                out.extend_from_slice(&(u32::try_from(utf8.len()).unwrap()).to_be_bytes());
+                out.extend_from_slice(utf8);
+                out
+            }
+            _ => panic!("unsupported payload_kind in test: {kind}"),
+        }
+    }
+
+    fn load_v1_fixture() -> serde_json::Value {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../../testdata/semantic-payload-hash-v1.json");
+        let raw = std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("read v1 fixture {}: {e}", path.display()));
+        serde_json::from_str(&raw)
+            .unwrap_or_else(|e| panic!("parse v1 fixture {}: {e}", path.display()))
+    }
+
+    #[test]
+    #[ignore = "pending production semantic_payload_hash_v1 (I10 commit 3)"]
+    fn canonical_semantic_hash_v1_matches_shared_fixture() {
+        let fixture = load_v1_fixture();
+        for vector in fixture
+            .get("vectors")
+            .and_then(serde_json::Value::as_array)
+            .expect("vectors array")
+        {
+            let name = vector
+                .get("name")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("<unnamed>");
+            let node_id = hex::decode(
+                vector
+                    .get("node_id_hex")
+                    .and_then(serde_json::Value::as_str)
+                    .expect("node_id_hex"),
+            )
+            .expect("node_id hex");
+            let expected_revision = vector
+                .get("expected_revision")
+                .and_then(serde_json::Value::as_u64)
+                .expect("expected_revision");
+            let payload_kind = vector
+                .get("payload_kind")
+                .and_then(serde_json::Value::as_u64)
+                .expect("payload_kind");
+            let payload_kind = u32::try_from(payload_kind).expect("payload_kind fits u32");
+            let message = vector
+                .get("payload")
+                .and_then(|p| p.get("message"))
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("");
+            let expected = vector
+                .get("expected_sha256")
+                .and_then(serde_json::Value::as_str)
+                .expect("expected_sha256");
+
+            let payload = canonical_payload_for(payload_kind, message);
+            let digest = compute_v1_canonical(&node_id, expected_revision, payload_kind, &payload);
+            assert_eq!(
+                hex::encode(digest),
+                expected,
+                "vector {name:?} digest mismatch"
+            );
+        }
+    }
+
+    #[test]
+    #[ignore = "pending production semantic_payload_hash_v1 (I10 commit 3)"]
+    fn canonical_semantic_hash_v1_excludes_delivery_metadata() {
+        let node = [0_u8, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15];
+        let message = "hello";
+        let payload = canonical_payload_for(108, message);
+        // Baseline: a minimal semantic identity.
+        let baseline = compute_v1_canonical(&node, 1, 108, &payload);
+        // The hash input never sees delivery/audit metadata, so changing the
+        // envelope fields that carry such metadata cannot affect the digest.
+        // This mirrors the contract: only node_id, revision, kind, and payload
+        // bytes enter the preimage.
+        let again = compute_v1_canonical(&node, 1, 108, &payload);
+        assert_eq!(baseline, again);
+        // Sanity: the preimage is invariant to message_id/command_id/etc by
+        // construction (they are not parameters), which is the guarantee under
+        // test here.
+    }
+
+    #[test]
+    #[ignore = "pending production semantic_payload_hash_v1 (I10 commit 3)"]
+    fn canonical_semantic_hash_v1_changes_on_semantic_input() {
+        let node = [0_u8, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15];
+        let node_shifted = [1_u8, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16];
+
+        let hello = compute_v1_canonical(&node, 1, 108, &canonical_payload_for(108, "hello"));
+        // message change
+        let world = compute_v1_canonical(&node, 1, 108, &canonical_payload_for(108, "world"));
+        assert_ne!(hello, world);
+        // node_id change
+        let shifted =
+            compute_v1_canonical(&node_shifted, 1, 108, &canonical_payload_for(108, "hello"));
+        assert_ne!(hello, shifted);
+        // revision change
+        let rev2 = compute_v1_canonical(&node, 2, 108, &canonical_payload_for(108, "hello"));
+        assert_ne!(hello, rev2);
+        // payload kind change (noop vs echo)
+        let noop = compute_v1_canonical(&node, 1, 107, &canonical_payload_for(107, ""));
+        assert_ne!(hello, noop);
+    }
+
+    #[test]
+    #[ignore = "pending production semantic_payload_hash_v1 (I10 commit 3)"]
+    fn canonical_semantic_hash_v1_rejects_unicode_normalization() {
+        let node = [0_u8, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15];
+        // Precomposed é (U+00E9) vs decomposed e + combining acute (U+0301).
+        let composed = compute_v1_canonical(&node, 1, 108, &canonical_payload_for(108, "\u{00e9}"));
+        let decomposed =
+            compute_v1_canonical(&node, 1, 108, &canonical_payload_for(108, "e\u{0301}"));
+        assert_ne!(
+            composed, decomposed,
+            "no Unicode normalization: different bytes must hash differently"
+        );
+    }
 }

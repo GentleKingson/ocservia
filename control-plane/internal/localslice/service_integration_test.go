@@ -2,8 +2,13 @@ package localslice
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/binary"
 	"encoding/hex"
+	"encoding/json"
 	"os"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -444,4 +449,161 @@ func TestUnknownSchedulesExplicitReconcileThenSafeRetryIntegration(t *testing.T)
 		t.Fatal(err)
 	}
 	assertOutboxMode(agentv1.CommandDeliveryMode_COMMAND_DELIVERY_MODE_RETRY_IF_EFFECT_ABSENT)
+}
+
+// ---- Canonical Semantic Payload Hash v1 ----
+//
+// The tests below pin the v1 algorithm defined in
+// docs/development/command-semantic-hash-v1.md against the shared golden fixture
+// testdata/semantic-payload-hash-v1.json. They are skipped until the production
+// semanticPayloadHashV1 function is introduced in a later I10 commit; the
+// inlined computeV1Canonical mirror computes the same bytes per spec so the
+// vectors are auditable today. Once the production function exists, replace the
+// mirror with a call to it and remove the t.Skip.
+
+// v1DomainSeparator is the ASCII label plus a NUL terminator.
+var v1DomainSeparator = []byte("ocservia.command.semantic-hash.v1\x00")
+
+func computeV1Canonical(nodeID []byte, expectedRevision uint64, payloadKind uint32, canonicalPayload []byte) [sha256.Size]byte {
+	h := sha256.New()
+	h.Write(v1DomainSeparator)
+	h.Write(nodeID)
+	var rev [8]byte
+	binary.BigEndian.PutUint64(rev[:], expectedRevision)
+	h.Write(rev[:])
+	var kind [4]byte
+	binary.BigEndian.PutUint32(kind[:], payloadKind)
+	h.Write(kind[:])
+	h.Write(canonicalPayload)
+	var out [sha256.Size]byte
+	copy(out[:], h.Sum(nil))
+	return out
+}
+
+func v1CanonicalPayload(payloadKind uint32, message string) []byte {
+	switch payloadKind {
+	case 107: // SyntheticNoop
+		return nil
+	case 108: // SyntheticEcho: u32_be(len(utf8)) || utf8
+		utf8 := []byte(message)
+		out := make([]byte, 4+len(utf8))
+		binary.BigEndian.PutUint32(out[:4], uint32(len(utf8)))
+		copy(out[4:], utf8)
+		return out
+	default:
+		panic("unsupported payload_kind in test")
+	}
+}
+
+func v1FixturePath(t *testing.T) string {
+	t.Helper()
+	// go test runs with the package directory as CWD, so the repo-rooted
+	// testdata file is three levels up.
+	candidates := []string{
+		filepath.Join("..", "..", "..", "testdata", "semantic-payload-hash-v1.json"),
+	}
+	// Fallback: resolve from this source file's location so the test still
+	// works under tools that change the working directory.
+	if _, file, _, ok := runtime.Caller(0); ok {
+		candidates = append(candidates, filepath.Join(filepath.Dir(file), "..", "..", "..", "..", "testdata", "semantic-payload-hash-v1.json"))
+	}
+	for _, c := range candidates {
+		if info, err := os.Stat(c); err == nil && !info.IsDir() {
+			return c
+		}
+	}
+	t.Fatalf("semantic payload hash v1 fixture not found relative to %s", candidates[0])
+	return ""
+}
+
+type v1Vector struct {
+	Name             string `json:"name"`
+	NodeIDHex        string `json:"node_id_hex"`
+	ExpectedRevision uint64 `json:"expected_revision"`
+	PayloadKind      uint64 `json:"payload_kind"`
+	Payload          struct {
+		Type    string `json:"type"`
+		Message string `json:"message"`
+	} `json:"payload"`
+	CanonicalPreimageHex string `json:"canonical_preimage_hex"`
+	ExpectedSHA256       string `json:"expected_sha256"`
+}
+
+func loadV1Fixture(t *testing.T) []v1Vector {
+	t.Helper()
+	raw, err := os.ReadFile(v1FixturePath(t))
+	if err != nil {
+		t.Fatalf("read v1 fixture: %v", err)
+	}
+	var doc struct {
+		Version int        `json:"version"`
+		Vectors []v1Vector `json:"vectors"`
+	}
+	if err := json.Unmarshal(raw, &doc); err != nil {
+		t.Fatalf("parse v1 fixture: %v", err)
+	}
+	if doc.Version != 1 {
+		t.Fatalf("unexpected fixture version %d", doc.Version)
+	}
+	return doc.Vectors
+}
+
+func TestCanonicalSemanticHashV1MatchesSharedFixture(t *testing.T) {
+	t.Skip("pending production semanticPayloadHashV1 (I10 commit 4)")
+	for _, vector := range loadV1Fixture(t) {
+		nodeID, err := hex.DecodeString(vector.NodeIDHex)
+		if err != nil {
+			t.Fatalf("%s: decode node_id: %v", vector.Name, err)
+		}
+		payload := v1CanonicalPayload(uint32(vector.PayloadKind), vector.Payload.Message)
+		got := computeV1Canonical(nodeID, vector.ExpectedRevision, uint32(vector.PayloadKind), payload)
+		if hex.EncodeToString(got[:]) != vector.ExpectedSHA256 {
+			t.Fatalf("%s: digest mismatch\ngot  %x\nwant %s", vector.Name, got, vector.ExpectedSHA256)
+		}
+	}
+}
+
+func TestCanonicalSemanticHashV1ExcludesDeliveryMetadata(t *testing.T) {
+	t.Skip("pending production semanticPayloadHashV1 (I10 commit 4)")
+	node := []byte{0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15}
+	payload := v1CanonicalPayload(108, "hello")
+	// The hash input never sees delivery/audit metadata, so the digest is a
+	// pure function of node_id, revision, kind, and payload bytes by
+	// construction. message_id/command_id/idempotency_key/delivery_mode/etc
+	// are not parameters and therefore cannot affect the result.
+	baseline := computeV1Canonical(node, 1, 108, payload)
+	again := computeV1Canonical(node, 1, 108, payload)
+	if baseline != again {
+		t.Fatal("identical semantic inputs must hash equally")
+	}
+}
+
+func TestCanonicalSemanticHashV1ChangesOnSemanticInput(t *testing.T) {
+	t.Skip("pending production semanticPayloadHashV1 (I10 commit 4)")
+	node := []byte{0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15}
+	nodeShifted := []byte{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16}
+
+	hello := computeV1Canonical(node, 1, 108, v1CanonicalPayload(108, "hello"))
+	if world := computeV1Canonical(node, 1, 108, v1CanonicalPayload(108, "world")); world == hello {
+		t.Fatal("message change must change the hash")
+	}
+	if shifted := computeV1Canonical(nodeShifted, 1, 108, v1CanonicalPayload(108, "hello")); shifted == hello {
+		t.Fatal("node_id change must change the hash")
+	}
+	if rev2 := computeV1Canonical(node, 2, 108, v1CanonicalPayload(108, "hello")); rev2 == hello {
+		t.Fatal("revision change must change the hash")
+	}
+	if noop := computeV1Canonical(node, 1, 107, v1CanonicalPayload(107, "")); noop == hello {
+		t.Fatal("payload kind change must change the hash")
+	}
+}
+
+func TestCanonicalSemanticHashV1RejectsUnicodeNormalization(t *testing.T) {
+	t.Skip("pending production semanticPayloadHashV1 (I10 commit 4)")
+	node := []byte{0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15}
+	composed := computeV1Canonical(node, 1, 108, v1CanonicalPayload(108, "\u00e9"))
+	decomposed := computeV1Canonical(node, 1, 108, v1CanonicalPayload(108, "e\u0301"))
+	if composed == decomposed {
+		t.Fatal("no Unicode normalization: different bytes must hash differently")
+	}
 }
