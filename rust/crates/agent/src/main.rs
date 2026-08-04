@@ -1,14 +1,18 @@
+use std::collections::HashSet;
 use std::env;
 use std::io;
 use std::path::PathBuf;
 use std::time::{Duration, SystemTime};
 
-use iroh::endpoint::{RelayMode, presets};
+use iroh::endpoint::{QuicTransportConfig, RelayMode, VarInt, presets};
 use iroh::{Endpoint, EndpointAddr, EndpointId};
-use ocservia_agent::PrivdClient;
+use ocservia_agent::{
+    CommandContext, CommandError, CommandExecutor, MAX_COMMAND_BYTES, MAX_WRITE_QUEUE, PrivdClient,
+};
 use ocservia_agent_protocol::{PrivdResponse, privd_response};
-use ocservia_command_journal::{Journal, TelemetryInsert};
+use ocservia_command_journal::{CommandRecord, CommandState, Journal, TelemetryInsert};
 use ocservia_contracts::generated::ocserv::platform::agent::v1::{
+    AgentEvent, AgentEventType, CommandEnvelope, CommandResult, CommandResultState,
     HandshakeResult, MetricSample, ObservedSnapshot, SessionHandshake, SessionHandshakeResponse,
     SessionObservation, TelemetryBatch, TelemetryDropCounters, TelemetryPriority,
 };
@@ -24,6 +28,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     ocservia_agent::ensure_unprivileged(rustix::process::geteuid().as_raw())?;
     let config = parse_args()?;
     let mut journal = Journal::open(&config.journal)?;
+    let mut command_executor = CommandExecutor::new(Journal::open(&config.journal)?);
     let privd = PrivdClient::new(config.privd_socket, Duration::from_secs(5))?;
     let observations = privd.snapshot().await?;
     let failures = observations
@@ -56,9 +61,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         .node_id
         .ok_or_else(|| invalid("--node-id is required"))?;
     let identity = ocservia_agent_identity::Identity::provision(&config.identity_dir, controller)?;
+    let transport = QuicTransportConfig::builder()
+        .max_concurrent_bidi_streams(VarInt::from_u32(u32::try_from(MAX_WRITE_QUEUE)?))
+        .build();
     let endpoint = Endpoint::builder(presets::Minimal)
         .secret_key(identity.secret_key().clone())
         .relay_mode(RelayMode::Default)
+        .transport_config(transport)
         .bind()
         .await?;
     let boot_id = ocservia_agent::read_boot_id().await?;
@@ -73,6 +82,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                 endpoint_id: identity.endpoint_id(),
                 privd: &privd,
                 journal: &mut journal,
+                command_executor: &mut command_executor,
                 boot_id: &boot_id,
                 os_release: &os_release,
                 agent_instance_id,
@@ -101,6 +111,7 @@ struct SessionContext<'a> {
     endpoint_id: EndpointId,
     privd: &'a PrivdClient,
     journal: &'a mut Journal,
+    command_executor: &'a mut CommandExecutor,
     boot_id: &'a str,
     os_release: &'a str,
     agent_instance_id: Uuid,
@@ -127,6 +138,8 @@ async fn connect_once(
             "ocserv.sessions.read".to_owned(),
             "ocserv.ip_bans.read".to_owned(),
             "ocserv.config_fingerprint.read".to_owned(),
+            "synthetic.noop".to_owned(),
+            "synthetic.echo".to_owned(),
         ],
         ocserv_version: "unknown".to_owned(),
         os_release: session.os_release.to_owned(),
@@ -167,6 +180,10 @@ async fn connect_once(
     loop {
         tokio::select! {
             _ = connection.closed() => return Ok(()),
+            stream = connection.accept_bi() => {
+                let (send,recv)=stream?;
+                handle_command_stream(send,recv,session).await?;
+            },
             _ = heartbeat.tick() => {
                 let observations=session.privd.snapshot().await?;
                 sequence=sequence.saturating_add(1);
@@ -183,6 +200,98 @@ async fn connect_once(
                 tracing::info!(node_id = %session.node_id, sequence, "agent telemetry delivered");
             },
         }
+    }
+}
+
+async fn handle_command_stream(
+    mut send: iroh::endpoint::SendStream,
+    mut recv: iroh::endpoint::RecvStream,
+    session: &mut SessionContext<'_>,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let mut length = [0_u8; 4];
+    tokio::time::timeout(HANDSHAKE_TIMEOUT, recv.read_exact(&mut length))
+        .await
+        .map_err(|_| invalid("command length timed out"))??;
+    let length = u32::from_be_bytes(length) as usize;
+    if length == 0 || length > MAX_COMMAND_BYTES {
+        return Err(invalid("command size invalid").into());
+    }
+    let mut bytes = vec![0_u8; length];
+    tokio::time::timeout(HANDSHAKE_TIMEOUT, recv.read_exact(&mut bytes))
+        .await
+        .map_err(|_| invalid("command body timed out"))??;
+    let envelope = CommandEnvelope::decode(bytes.as_slice())?;
+    let now = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH)?;
+    let now_unix_seconds = i64::try_from(now.as_secs())?;
+    let context = CommandContext {
+        node_id: *session.node_id.as_bytes(),
+        observed_revision: 1,
+        capabilities: HashSet::from(["synthetic.noop", "synthetic.echo"]),
+        now_unix_seconds,
+        cancelled: false,
+    };
+    let result = match session.command_executor.execute(&envelope, &context, None) {
+        Ok(outcome) => command_result(&outcome.record, outcome.replayed),
+        Err(CommandError::Rejected(code)) => rejected_result(&envelope, code, now_unix_seconds),
+        Err(CommandError::Journal(error)) => {
+            tracing::error!(command_id = %hex::encode(&envelope.command_id), error = %error, "command journal failure");
+            rejected_result(&envelope, "journal_unavailable", now_unix_seconds)
+        }
+        Err(CommandError::InjectedCrash(_)) => unreachable!("crash injection is test-only"),
+    };
+    let event = AgentEvent {
+        r#type: AgentEventType::CommandResult.into(),
+        payload: result.encode_to_vec(),
+    };
+    let encoded = event.encode_to_vec();
+    send.write_all(&u32::try_from(encoded.len())?.to_be_bytes())
+        .await?;
+    send.write_all(&encoded).await?;
+    send.finish()?;
+    Ok(())
+}
+
+fn command_result(record: &CommandRecord, replayed: bool) -> CommandResult {
+    let state = match record.state {
+        CommandState::Succeeded => CommandResultState::Succeeded,
+        CommandState::Failed => CommandResultState::Failed,
+        CommandState::Unknown | CommandState::Accepted | CommandState::Running => {
+            CommandResultState::Unknown
+        }
+    };
+    CommandResult {
+        command_id: record.command_id.to_vec(),
+        idempotency_key: record.idempotency_key.to_vec(),
+        payload_sha256: record.payload_sha256.to_vec(),
+        state: state.into(),
+        result: record.result.clone().unwrap_or_default(),
+        error_code: record.error_code.clone().unwrap_or_default(),
+        accepted_at: Some(prost_types::Timestamp {
+            seconds: record.accepted_at,
+            nanos: 0,
+        }),
+        completed_at: Some(prost_types::Timestamp {
+            seconds: record.updated_at,
+            nanos: 0,
+        }),
+        replayed,
+    }
+}
+
+fn rejected_result(envelope: &CommandEnvelope, code: &str, now: i64) -> CommandResult {
+    CommandResult {
+        command_id: envelope.command_id.clone(),
+        idempotency_key: envelope.idempotency_key.clone(),
+        payload_sha256: Vec::new(),
+        state: CommandResultState::Rejected.into(),
+        result: Vec::new(),
+        error_code: code.to_owned(),
+        accepted_at: None,
+        completed_at: Some(prost_types::Timestamp {
+            seconds: now,
+            nanos: 0,
+        }),
+        replayed: false,
     }
 }
 

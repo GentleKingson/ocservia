@@ -214,6 +214,7 @@ func integrationService(t *testing.T) (*Service, *pgxpool.Pool, uuid.UUID, uuid.
 	t.Cleanup(func() {
 		cleanupCtx := context.Background()
 		for _, statement := range []string{
+			`DELETE FROM agent_command_results WHERE command_id IN(SELECT id FROM commands WHERE workspace_id=$1)`,
 			`DELETE FROM node_command_leases WHERE command_id IN(SELECT id FROM commands WHERE workspace_id=$1)`,
 			`DELETE FROM command_attempts WHERE command_id IN(SELECT id FROM commands WHERE workspace_id=$1)`,
 			`DELETE FROM outbox_events WHERE command_id IN(SELECT id FROM commands WHERE workspace_id=$1)`,

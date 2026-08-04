@@ -1,0 +1,17 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck source=scripts/env.sh
+source "${ROOT}/scripts/env.sh"
+
+cd "${ROOT}/rust"
+cargo test -p ocservia-command-journal --all-features
+cargo test -p ocservia-agent --all-features \
+  duplicate_delivery_ack_loss_and_restart_execute_once
+cargo test -p ocservia-agent --all-features \
+  every_crash_boundary_reconciles_before_safe_retry
+cargo test -p ocservia-agent --all-features \
+  command_validation_fails_before_side_effect
+cargo test -p ocservia-agent --all-features \
+  same_key_different_payload_is_rejected_without_second_effect
