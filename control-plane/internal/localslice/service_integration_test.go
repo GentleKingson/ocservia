@@ -15,6 +15,7 @@ import (
 
 	agentv1 "github.com/GentleKingson/ocservia/control-plane/gen/proto/ocserv/platform/agent/v1"
 	transportv1 "github.com/GentleKingson/ocservia/control-plane/gen/proto/ocserv/platform/transport/v1"
+	"github.com/GentleKingson/ocservia/control-plane/internal/semanticpayload"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"google.golang.org/protobuf/proto"
@@ -455,11 +456,9 @@ func TestUnknownSchedulesExplicitReconcileThenSafeRetryIntegration(t *testing.T)
 //
 // The tests below pin the v1 algorithm defined in
 // docs/development/command-semantic-hash-v1.md against the shared golden fixture
-// testdata/semantic-payload-hash-v1.json. They are skipped until the production
-// semanticPayloadHashV1 function is introduced in a later I10 commit; the
-// inlined computeV1Canonical mirror computes the same bytes per spec so the
-// vectors are auditable today. Once the production function exists, replace the
-// mirror with a call to it and remove the t.Skip.
+// testdata/semantic-payload-hash-v1.json. The inlined computeV1Canonical mirror
+// is an independent reference; the production semanticpayload.HashV1 function
+// must produce identical bytes.
 
 // v1DomainSeparator is the ASCII label plus a NUL terminator.
 var v1DomainSeparator = []byte("ocservia.command.semantic-hash.v1\x00")
@@ -548,61 +547,113 @@ func loadV1Fixture(t *testing.T) []v1Vector {
 	return doc.Vectors
 }
 
+// v1EnvelopeFromVector builds a CommandEnvelope from a fixture vector so the
+// production hash function can be exercised against the golden vectors.
+func v1EnvelopeFromVector(nodeID []byte, expectedRevision uint64, payloadKind uint32, message string) *agentv1.CommandEnvelope {
+	envelope := &agentv1.CommandEnvelope{NodeId: nodeID, ExpectedRevision: expectedRevision}
+	switch payloadKind {
+	case 107:
+		envelope.Payload = &agentv1.CommandEnvelope_SyntheticNoop{SyntheticNoop: &agentv1.SyntheticNoop{}}
+	case 108:
+		envelope.Payload = &agentv1.CommandEnvelope_SyntheticEcho{SyntheticEcho: &agentv1.SyntheticEcho{Message: message}}
+	default:
+		panic("unsupported payload_kind in test")
+	}
+	return envelope
+}
+
 func TestCanonicalSemanticHashV1MatchesSharedFixture(t *testing.T) {
-	t.Skip("pending production semanticPayloadHashV1 (I10 commit 4)")
 	for _, vector := range loadV1Fixture(t) {
 		nodeID, err := hex.DecodeString(vector.NodeIDHex)
 		if err != nil {
 			t.Fatalf("%s: decode node_id: %v", vector.Name, err)
 		}
+		// Cross-check: the test-only mirror must agree with the fixture.
 		payload := v1CanonicalPayload(uint32(vector.PayloadKind), vector.Payload.Message)
-		got := computeV1Canonical(nodeID, vector.ExpectedRevision, uint32(vector.PayloadKind), payload)
+		mirror := computeV1Canonical(nodeID, vector.ExpectedRevision, uint32(vector.PayloadKind), payload)
+		if hex.EncodeToString(mirror[:]) != vector.ExpectedSHA256 {
+			t.Fatalf("%s: mirror digest mismatch\ngot  %x\nwant %s", vector.Name, mirror, vector.ExpectedSHA256)
+		}
+		// Production function must agree with the mirror.
+		envelope := v1EnvelopeFromVector(nodeID, vector.ExpectedRevision, uint32(vector.PayloadKind), vector.Payload.Message)
+		got, gErr := semanticpayload.HashV1(envelope)
+		if gErr != nil {
+			t.Fatalf("%s: production hash error: %v", vector.Name, gErr)
+		}
 		if hex.EncodeToString(got[:]) != vector.ExpectedSHA256 {
-			t.Fatalf("%s: digest mismatch\ngot  %x\nwant %s", vector.Name, got, vector.ExpectedSHA256)
+			t.Fatalf("%s: production digest mismatch\ngot  %x\nwant %s", vector.Name, got, vector.ExpectedSHA256)
 		}
 	}
 }
 
 func TestCanonicalSemanticHashV1ExcludesDeliveryMetadata(t *testing.T) {
-	t.Skip("pending production semanticPayloadHashV1 (I10 commit 4)")
 	node := []byte{0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15}
-	payload := v1CanonicalPayload(108, "hello")
-	// The hash input never sees delivery/audit metadata, so the digest is a
-	// pure function of node_id, revision, kind, and payload bytes by
-	// construction. message_id/command_id/idempotency_key/delivery_mode/etc
-	// are not parameters and therefore cannot affect the result.
-	baseline := computeV1Canonical(node, 1, 108, payload)
-	again := computeV1Canonical(node, 1, 108, payload)
-	if baseline != again {
+	// Build two envelopes that differ only in delivery/audit metadata.
+	a := v1EnvelopeFromVector(node, 1, 108, "hello")
+	a.MessageId = []byte{1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1}
+	a.CommandId = []byte{2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2}
+	a.IdempotencyKey = []byte{3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3}
+	a.Sequence = 42
+	a.Traceparent = "00-aaa"
+	a.ActorId = "alice"
+	a.Reason = "ticket-1"
+	a.DeliveryMode = agentv1.CommandDeliveryMode_COMMAND_DELIVERY_MODE_EXECUTE_OR_REPLAY
+	b := v1EnvelopeFromVector(node, 1, 108, "hello")
+	b.MessageId = []byte{9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9}
+	b.CommandId = []byte{8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8}
+	b.IdempotencyKey = []byte{7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7}
+	b.Sequence = 99
+	b.Traceparent = "00-bbb"
+	b.ActorId = "bob"
+	b.Reason = "ticket-2"
+	b.DeliveryMode = agentv1.CommandDeliveryMode_COMMAND_DELIVERY_MODE_RECONCILE_ONLY
+	// Only node_id, revision, kind, and payload bytes enter the preimage,
+	// so changing delivery/audit fields cannot affect the digest.
+	hashA, errA := semanticpayload.HashV1(a)
+	if errA != nil {
+		t.Fatalf("hash a: %v", errA)
+	}
+	hashB, errB := semanticpayload.HashV1(b)
+	if errB != nil {
+		t.Fatalf("hash b: %v", errB)
+	}
+	if hashA != hashB {
 		t.Fatal("identical semantic inputs must hash equally")
 	}
 }
 
 func TestCanonicalSemanticHashV1ChangesOnSemanticInput(t *testing.T) {
-	t.Skip("pending production semanticPayloadHashV1 (I10 commit 4)")
 	node := []byte{0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15}
 	nodeShifted := []byte{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16}
 
-	hello := computeV1Canonical(node, 1, 108, v1CanonicalPayload(108, "hello"))
-	if world := computeV1Canonical(node, 1, 108, v1CanonicalPayload(108, "world")); world == hello {
+	hello, err := semanticpayload.HashV1(v1EnvelopeFromVector(node, 1, 108, "hello"))
+	if err != nil {
+		t.Fatalf("hash hello: %v", err)
+	}
+	if world, err := semanticpayload.HashV1(v1EnvelopeFromVector(node, 1, 108, "world")); err != nil || world == hello {
 		t.Fatal("message change must change the hash")
 	}
-	if shifted := computeV1Canonical(nodeShifted, 1, 108, v1CanonicalPayload(108, "hello")); shifted == hello {
+	if shifted, err := semanticpayload.HashV1(v1EnvelopeFromVector(nodeShifted, 1, 108, "hello")); err != nil || shifted == hello {
 		t.Fatal("node_id change must change the hash")
 	}
-	if rev2 := computeV1Canonical(node, 2, 108, v1CanonicalPayload(108, "hello")); rev2 == hello {
+	if rev2, err := semanticpayload.HashV1(v1EnvelopeFromVector(node, 2, 108, "hello")); err != nil || rev2 == hello {
 		t.Fatal("revision change must change the hash")
 	}
-	if noop := computeV1Canonical(node, 1, 107, v1CanonicalPayload(107, "")); noop == hello {
+	if noop, err := semanticpayload.HashV1(v1EnvelopeFromVector(node, 1, 107, "")); err != nil || noop == hello {
 		t.Fatal("payload kind change must change the hash")
 	}
 }
 
 func TestCanonicalSemanticHashV1RejectsUnicodeNormalization(t *testing.T) {
-	t.Skip("pending production semanticPayloadHashV1 (I10 commit 4)")
 	node := []byte{0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15}
-	composed := computeV1Canonical(node, 1, 108, v1CanonicalPayload(108, "\u00e9"))
-	decomposed := computeV1Canonical(node, 1, 108, v1CanonicalPayload(108, "e\u0301"))
+	composed, err := semanticpayload.HashV1(v1EnvelopeFromVector(node, 1, 108, "\u00e9"))
+	if err != nil {
+		t.Fatalf("hash composed: %v", err)
+	}
+	decomposed, err := semanticpayload.HashV1(v1EnvelopeFromVector(node, 1, 108, "e\u0301"))
+	if err != nil {
+		t.Fatalf("hash decomposed: %v", err)
+	}
 	if composed == decomposed {
 		t.Fatal("no Unicode normalization: different bytes must hash differently")
 	}

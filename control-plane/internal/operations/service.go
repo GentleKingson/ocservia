@@ -10,6 +10,7 @@ import (
 
 	agentv1 "github.com/GentleKingson/ocservia/control-plane/gen/proto/ocserv/platform/agent/v1"
 	"github.com/GentleKingson/ocservia/control-plane/internal/audit"
+	"github.com/GentleKingson/ocservia/control-plane/internal/semanticpayload"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -451,6 +452,9 @@ func marshalEnvelope(r CreateRequest, operationID, commandID uuid.UUID, now, exp
 		envelope.Payload = &agentv1.CommandEnvelope_SyntheticEcho{SyntheticEcho: &agentv1.SyntheticEcho{Message: r.Message}}
 	} else {
 		envelope.Payload = &agentv1.CommandEnvelope_SyntheticNoop{SyntheticNoop: &agentv1.SyntheticNoop{}}
+	}
+	if err := semanticpayload.PopulateV1(envelope); err != nil {
+		return nil, "", fmt.Errorf("compute semantic payload hash: %w", err)
 	}
 	data, err := proto.Marshal(envelope)
 	if err != nil {

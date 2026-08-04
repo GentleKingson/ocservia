@@ -12,6 +12,7 @@ import (
 	agentv1 "github.com/GentleKingson/ocservia/control-plane/gen/proto/ocserv/platform/agent/v1"
 	transportv1 "github.com/GentleKingson/ocservia/control-plane/gen/proto/ocserv/platform/transport/v1"
 	"github.com/GentleKingson/ocservia/control-plane/internal/audit"
+	"github.com/GentleKingson/ocservia/control-plane/internal/semanticpayload"
 	telemetrystore "github.com/GentleKingson/ocservia/control-plane/internal/telemetry"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -515,8 +516,14 @@ func ingestAgentCommandResult(ctx context.Context, tx pgx.Tx, eventID, nodeID uu
 			return errors.New("unknown command result must not contain result bytes")
 		}
 	}
-	if len(result.GetPayloadSha256()) == 32 {
-		expectedHash, err := agentPayloadHash(&envelope)
+	if len(result.GetPayloadSha256()) == sha256.Size {
+		var expectedHash [sha256.Size]byte
+		var err error
+		if result.GetSemanticPayloadHashVersion() == agentv1.SemanticPayloadHashVersion_SEMANTIC_PAYLOAD_HASH_VERSION_V1 {
+			expectedHash, err = semanticpayload.HashV1(&envelope)
+		} else {
+			expectedHash, err = agentPayloadHash(&envelope)
+		}
 		if err != nil {
 			return err
 		}
