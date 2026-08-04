@@ -8,7 +8,8 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use ocservia_contracts::generated::ocserv::platform::agent::v1::{
-    CommandEnvelope, SimulationProbe, command_envelope,
+    CommandEnvelope, MetricSample, ObservedSnapshot, SimulationProbe, TelemetryBatch,
+    TelemetryDropCounters, TelemetryPriority, command_envelope,
 };
 use ocservia_contracts::generated::ocserv::platform::transport::v1::{
     CloseNodeRequest, CloseNodeResponse, ConnectionPath, GetNodeConnectionRequest, HealthRequest,
@@ -24,7 +25,7 @@ use uuid::Uuid;
 
 const MAX_COMMAND_BYTES: usize = 1024 * 1024;
 const MAX_HEARTBEATS: u32 = 32;
-const MAX_DELAY: Duration = Duration::from_secs(10);
+const MAX_DELAY: Duration = Duration::from_secs(30);
 
 type EventStream = Pin<Box<dyn Stream<Item = Result<TransportEvent, Status>> + Send>>;
 
@@ -39,6 +40,7 @@ struct State {
     accepted_commands: Mutex<AcceptedCommands>,
     retention: usize,
     tasks: Arc<Semaphore>,
+    capacity_telemetry: bool,
 }
 
 struct EventState {
@@ -61,6 +63,16 @@ impl StubService {
     /// Creates a service with bounded replay and subscriber queues.
     #[must_use]
     pub fn new(queue_capacity: usize) -> Self {
+        Self::new_with_capacity_telemetry(queue_capacity, false)
+    }
+
+    /// Creates a stub that emits representative telemetry for capacity tests.
+    #[must_use]
+    pub fn new_capacity(queue_capacity: usize) -> Self {
+        Self::new_with_capacity_telemetry(queue_capacity, true)
+    }
+
+    fn new_with_capacity_telemetry(queue_capacity: usize, capacity_telemetry: bool) -> Self {
         let capacity = queue_capacity.clamp(1, 4096);
         Self {
             state: Arc::new(State {
@@ -74,7 +86,26 @@ impl StubService {
                 }),
                 retention: capacity,
                 tasks: Arc::new(Semaphore::new(capacity)),
+                capacity_telemetry,
             }),
+        }
+    }
+
+    /// Returns bounded runtime counters for the repeatable capacity harness.
+    pub async fn stats(&self) -> StubStats {
+        let delivery = self.state.delivery.lock().await;
+        let retained_events = delivery.retained.len();
+        let subscribers = delivery.subscribers.len();
+        drop(delivery);
+        let connected_nodes = self.state.nodes.lock().await.len();
+        let accepted_commands = self.state.accepted_commands.lock().await.keys.len();
+        StubStats {
+            connected_nodes,
+            retained_events,
+            subscribers,
+            accepted_commands,
+            active_tasks: self.state.retention - self.state.tasks.available_permits(),
+            task_capacity: self.state.retention,
         }
     }
 
@@ -171,6 +202,12 @@ impl StubService {
         let delay = Duration::from_millis(u64::from(probe.delay_millis));
         let connected_at = now_timestamp();
         let generation = Uuid::now_v7();
+        let agent_instance_id = Uuid::now_v7();
+        let path = if self.state.capacity_telemetry {
+            capacity_path(&node_id)
+        } else {
+            ConnectionPath::Direct
+        };
         let (cancellation, mut cancelled) = watch::channel(false);
         self.state.nodes.lock().await.insert(
             node_id.clone(),
@@ -178,11 +215,11 @@ impl StubService {
                 connection: NodeConnection {
                     node_id: node_id.clone(),
                     endpoint_id: Uuid::now_v7().as_bytes().to_vec(),
-                    path: ConnectionPath::Direct.into(),
+                    path: path.into(),
                     round_trip_time_millis: probe.delay_millis.into(),
                     connected_at: Some(connected_at),
-                    agent_instance_id: Uuid::now_v7().as_bytes().to_vec(),
-                    path_detail: "stub/direct".to_owned(),
+                    agent_instance_id: agent_instance_id.as_bytes().to_vec(),
+                    path_detail: capacity_path_detail(path).to_owned(),
                     last_seen: Some(now_timestamp()),
                 },
                 generation,
@@ -230,6 +267,24 @@ impl StubService {
             if probe.duplicate_event && !self.publish_if_active(&node_id, generation, event).await {
                 return;
             }
+            if self.state.capacity_telemetry
+                && !self
+                    .publish_if_active(
+                        &node_id,
+                        generation,
+                        new_telemetry_event(
+                            &node_id,
+                            agent_instance_id,
+                            path,
+                            sequence,
+                            probe.delay_millis,
+                            &traceparent,
+                        ),
+                    )
+                    .await
+            {
+                return;
+            }
         }
 
         let (event_type, payload) = if probe.return_error {
@@ -271,6 +326,87 @@ impl StubService {
             }
         }
     }
+}
+
+/// Snapshot of the simulator's bounded in-memory state.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct StubStats {
+    pub connected_nodes: usize,
+    pub retained_events: usize,
+    pub subscribers: usize,
+    pub accepted_commands: usize,
+    pub active_tasks: usize,
+    pub task_capacity: usize,
+}
+
+fn capacity_path(node_id: &[u8]) -> ConnectionPath {
+    if node_id.last().is_some_and(|value| value % 4 == 0) {
+        ConnectionPath::Relay
+    } else {
+        ConnectionPath::Direct
+    }
+}
+
+fn capacity_path_detail(path: ConnectionPath) -> &'static str {
+    match path {
+        ConnectionPath::Relay => "stub/relay-a",
+        _ => "stub/direct",
+    }
+}
+
+fn new_telemetry_event(
+    node_id: &[u8],
+    agent_instance_id: Uuid,
+    path: ConnectionPath,
+    sequence: u32,
+    round_trip_time_millis: u32,
+    traceparent: &str,
+) -> TransportEvent {
+    let observed_at = now_timestamp();
+    let path_name = if path == ConnectionPath::Relay {
+        "relay"
+    } else {
+        "direct"
+    };
+    let batch = TelemetryBatch {
+        batch_id: Uuid::now_v7().as_bytes().to_vec(),
+        node_id: node_id.to_vec(),
+        sequence: u64::from(sequence) + 1,
+        priority: TelemetryPriority::CurrentHealth.into(),
+        snapshot: Some(ObservedSnapshot {
+            observed_at: Some(observed_at),
+            boot_id: "capacity-boot".to_owned(),
+            agent_instance_id: agent_instance_id.as_bytes().to_vec(),
+            agent_version: env!("CARGO_PKG_VERSION").to_owned(),
+            ocserv_version: "1.3.0".to_owned(),
+            os_release: "capacity-simulator".to_owned(),
+            ocserv_json: br#"{"status":"running","sessions":1}"#.to_vec(),
+            system_json: br#"{"cpu_usage_ratio":0.25,"memory_used_bytes":67108864}"#.to_vec(),
+            path_json: format!("{{\"mode\":\"{path_name}\",\"rtt_ms\":{round_trip_time_millis}}}")
+                .into_bytes(),
+            dropped: Some(TelemetryDropCounters::default()),
+        }),
+        sessions: Vec::new(),
+        samples: vec![
+            MetricSample {
+                sampled_at: Some(observed_at),
+                metric: "cpu_usage_ratio".to_owned(),
+                value: 0.25,
+            },
+            MetricSample {
+                sampled_at: Some(observed_at),
+                metric: "connection_rtt_ms".to_owned(),
+                value: f64::from(round_trip_time_millis),
+            },
+        ],
+        security_events: Vec::new(),
+    };
+    new_event(
+        node_id,
+        TransportEventType::Telemetry,
+        traceparent,
+        batch.encode_to_vec(),
+    )
 }
 
 #[tonic::async_trait]
@@ -587,6 +723,25 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn accepts_thirty_second_heartbeat_interval() {
+        let service = StubService::new(8);
+        service
+            .send_command(Request::new(probe_request_with(
+                Uuid::now_v7().as_bytes().to_vec(),
+                Uuid::now_v7().as_bytes().to_vec(),
+                SimulationProbe {
+                    heartbeat_count: 1,
+                    delay_millis: 30_000,
+                    duplicate_event: false,
+                    return_error: false,
+                    disconnect_after: false,
+                },
+            )))
+            .await
+            .expect("30-second heartbeat accepted");
+    }
+
+    #[tokio::test]
     async fn expired_command_is_rejected_before_acceptance() {
         let service = StubService::new(8);
         let node_id = Uuid::now_v7().as_bytes().to_vec();
@@ -610,6 +765,37 @@ mod tests {
     fn queue_capacity_is_bounded() {
         let service = StubService::new(usize::MAX);
         assert_eq!(service.state.retention, 4096);
+    }
+
+    #[tokio::test]
+    async fn capacity_mode_reports_bounds_and_emits_telemetry() {
+        let service = StubService::new_capacity(8);
+        let node_id = Uuid::now_v7().as_bytes().to_vec();
+        service
+            .send_command(Request::new(probe_request(
+                node_id,
+                Uuid::now_v7().as_bytes().to_vec(),
+            )))
+            .await
+            .expect("capacity probe accepted");
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                let stats = service.stats().await;
+                if stats.active_tasks == 0 && stats.accepted_commands == 1 {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("capacity probe completed");
+
+        let events = service.state.delivery.lock().await.retained.clone();
+        assert!(events.iter().any(|event| {
+            event.r#type == i32::from(TransportEventType::Telemetry)
+                && TelemetryBatch::decode(event.payload.as_slice()).is_ok()
+        }));
+        assert_eq!(service.stats().await.task_capacity, 8);
     }
 
     #[test]

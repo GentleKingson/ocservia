@@ -2,6 +2,7 @@
 /* eslint-disable */
 export * from "./BuildInfo";
 export * from "./ConnectionPathState";
+export * from "./DevelopmentRuntime";
 export * from "./DropCounters";
 export * from "./EnrollmentToken";
 export * from "./EnrollmentTokenRequest";

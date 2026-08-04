@@ -1,47 +1,85 @@
 use std::env;
 use std::io;
+use std::io::Write;
 use std::os::unix::fs::{FileTypeExt, PermissionsExt};
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use ocservia_contracts::generated::ocserv::platform::transport::v1::transport_service_server::TransportServiceServer;
-use ocservia_transportd_stub::StubService;
+use ocservia_transportd_stub::{StubService, StubStats};
 use tokio::net::UnixListener;
 use tokio_stream::wrappers::UnixListenerStream;
 use tonic::transport::Server;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let (socket, queue_capacity) = parse_args()?;
-    let listener = bind_socket(&socket)?;
-    let service = StubService::new(queue_capacity);
+    let config = parse_args()?;
+    let listener = bind_socket(&config.socket)?;
+    let service = if config.capacity_telemetry {
+        StubService::new_capacity(config.queue_capacity)
+    } else {
+        StubService::new(config.queue_capacity)
+    };
     let (health_reporter, health_service) = tonic_health::server::health_reporter();
     health_reporter
         .set_serving::<TransportServiceServer<StubService>>()
         .await;
 
-    let result = Server::builder()
+    let stats_service = service.clone();
+    let server = Server::builder()
         .add_service(health_service)
         .add_service(TransportServiceServer::new(service))
-        .serve_with_incoming_shutdown(UnixListenerStream::new(listener), shutdown())
-        .await;
-    remove_socket(&socket)?;
+        .serve_with_incoming_shutdown(UnixListenerStream::new(listener), shutdown());
+    tokio::pin!(server);
+    let result: Result<(), Box<dyn std::error::Error>> = if let Some(path) = config.stats_file {
+        let mut writer = tokio::spawn(write_stats(stats_service, path));
+        tokio::select! {
+            result = &mut server => {
+                writer.abort();
+                result.map_err(Into::into)
+            }
+            result = &mut writer => {
+                let error = match result {
+                    Ok(Err(error)) => error,
+                    Ok(Ok(())) => io::Error::other("simulator stats writer stopped unexpectedly"),
+                    Err(error) => io::Error::other(format!("simulator stats writer task failed: {error}")),
+                };
+                Err(error.into())
+            }
+        }
+    } else {
+        server.await.map_err(Into::into)
+    };
+    let socket_result = remove_socket(&config.socket);
     result?;
+    socket_result?;
     Ok(())
 }
 
-fn parse_args() -> Result<(PathBuf, usize), io::Error> {
-    let mut socket = PathBuf::from("/run/ocserv-platform/transportd.sock");
-    let mut queue_capacity = 256_usize;
+struct Config {
+    socket: PathBuf,
+    queue_capacity: usize,
+    capacity_telemetry: bool,
+    stats_file: Option<PathBuf>,
+}
+
+fn parse_args() -> Result<Config, io::Error> {
+    let mut config = Config {
+        socket: PathBuf::from("/run/ocserv-platform/transportd.sock"),
+        queue_capacity: 256,
+        capacity_telemetry: false,
+        stats_file: None,
+    };
     let mut args = env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--socket" => {
-                socket = PathBuf::from(args.next().ok_or_else(|| {
+                config.socket = PathBuf::from(args.next().ok_or_else(|| {
                     io::Error::new(io::ErrorKind::InvalidInput, "--socket requires a path")
                 })?);
             }
             "--queue-capacity" => {
-                queue_capacity = args
+                config.queue_capacity = args
                     .next()
                     .ok_or_else(|| {
                         io::Error::new(
@@ -54,6 +92,12 @@ fn parse_args() -> Result<(PathBuf, usize), io::Error> {
                         io::Error::new(io::ErrorKind::InvalidInput, "invalid --queue-capacity")
                     })?;
             }
+            "--capacity-telemetry" => config.capacity_telemetry = true,
+            "--stats-file" => {
+                config.stats_file = Some(PathBuf::from(args.next().ok_or_else(|| {
+                    io::Error::new(io::ErrorKind::InvalidInput, "--stats-file requires a path")
+                })?));
+            }
             _ => {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidInput,
@@ -62,13 +106,70 @@ fn parse_args() -> Result<(PathBuf, usize), io::Error> {
             }
         }
     }
-    if !socket.is_absolute() || queue_capacity == 0 || queue_capacity > 4096 {
+    if !config.socket.is_absolute()
+        || config.queue_capacity == 0
+        || config.queue_capacity > 4096
+        || config
+            .stats_file
+            .as_ref()
+            .is_some_and(|path| !path.is_absolute())
+    {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
-            "socket must be absolute and queue capacity must be 1..4096",
+            "socket and stats paths must be absolute and queue capacity must be 1..4096",
         ));
     }
-    Ok((socket, queue_capacity))
+    Ok(config)
+}
+
+async fn write_stats(service: StubService, path: PathBuf) -> io::Result<()> {
+    let mut ticker = tokio::time::interval(Duration::from_secs(1));
+    loop {
+        ticker.tick().await;
+        let stats = service.stats().await;
+        let document = stats_json(stats);
+        publish_stats(&path, &document)?;
+    }
+}
+
+fn publish_stats(path: &Path, document: &[u8]) -> io::Result<()> {
+    let file_name = path.file_name().ok_or_else(|| {
+        io::Error::new(io::ErrorKind::InvalidInput, "stats path has no file name")
+    })?;
+    let mut temporary_name = file_name.to_os_string();
+    temporary_name.push(".tmp");
+    let temporary = path.with_file_name(temporary_name);
+    match std::fs::remove_file(&temporary) {
+        Ok(()) => {}
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error),
+    }
+    let result = (|| {
+        let mut file = std::fs::OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&temporary)?;
+        file.write_all(document)?;
+        file.flush()?;
+        drop(file);
+        std::fs::rename(&temporary, path)
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&temporary);
+    }
+    result
+}
+
+fn stats_json(stats: StubStats) -> Vec<u8> {
+    serde_json::to_vec(&serde_json::json!({
+        "connected_nodes": stats.connected_nodes,
+        "retained_events": stats.retained_events,
+        "subscribers": stats.subscribers,
+        "accepted_commands": stats.accepted_commands,
+        "active_tasks": stats.active_tasks,
+        "task_capacity": stats.task_capacity,
+    }))
+    .expect("simulator stats contain only integers")
 }
 
 fn bind_socket(path: &Path) -> Result<UnixListener, io::Error> {
@@ -114,6 +215,17 @@ async fn shutdown() {
 mod tests {
     use super::*;
 
+    fn empty_stats() -> StubStats {
+        StubStats {
+            connected_nodes: 0,
+            retained_events: 0,
+            subscribers: 0,
+            accepted_commands: 0,
+            active_tasks: 0,
+            task_capacity: 0,
+        }
+    }
+
     #[tokio::test]
     async fn bind_socket_preserves_existing_parent_permissions() {
         let parent = PathBuf::from("/tmp").join(format!("ocservia-stub-{}", uuid::Uuid::now_v7()));
@@ -133,5 +245,75 @@ mod tests {
         drop(listener);
         remove_socket(&socket).expect("remove socket");
         std::fs::remove_dir(parent).expect("remove test directory");
+    }
+
+    #[test]
+    fn stats_are_published_atomically_and_replace_existing_snapshot() {
+        let parent = PathBuf::from("/tmp").join(format!("ocservia-stats-{}", uuid::Uuid::now_v7()));
+        std::fs::create_dir(&parent).expect("create stats test directory");
+        let path = parent.join("stats.json");
+        std::fs::write(&path, br#"{"old":true}"#).expect("write old snapshot");
+        let document = stats_json(StubStats {
+            connected_nodes: 1,
+            retained_events: 2,
+            subscribers: 3,
+            accepted_commands: 4,
+            active_tasks: 5,
+            task_capacity: 8,
+        });
+
+        publish_stats(&path, &document).expect("publish stats");
+
+        let published = std::fs::read(&path).expect("read published stats");
+        let value: serde_json::Value = serde_json::from_slice(&published).expect("valid JSON");
+        assert_eq!(value["connected_nodes"], 1);
+        assert_eq!(value["retained_events"], 2);
+        assert_eq!(value["subscribers"], 3);
+        assert_eq!(value["accepted_commands"], 4);
+        assert_eq!(value["active_tasks"], 5);
+        assert_eq!(value["task_capacity"], 8);
+        assert!(!parent.join("stats.json.tmp").exists());
+        std::fs::remove_dir_all(parent).expect("remove stats test directory");
+    }
+
+    #[test]
+    fn stats_publish_errors_do_not_leave_temporary_file() {
+        let parent = PathBuf::from("/tmp").join(format!("ocservia-stats-{}", uuid::Uuid::now_v7()));
+        std::fs::create_dir(&parent).expect("create stats test directory");
+        let path = parent.join("missing").join("stats.json");
+
+        assert!(publish_stats(&path, br"{}").is_err());
+        assert!(!parent.join("missing").join("stats.json.tmp").exists());
+        std::fs::remove_dir_all(parent).expect("remove stats test directory");
+    }
+
+    #[test]
+    fn concurrent_stats_reads_never_observe_partial_json() {
+        let parent = PathBuf::from("/tmp").join(format!("ocservia-stats-{}", uuid::Uuid::now_v7()));
+        std::fs::create_dir(&parent).expect("create stats test directory");
+        let path = parent.join("stats.json");
+        publish_stats(&path, &stats_json(empty_stats())).expect("publish initial stats");
+        let writer_path = path.clone();
+        let writer = std::thread::spawn(move || {
+            for value in 1..=100 {
+                publish_stats(
+                    &writer_path,
+                    &stats_json(StubStats {
+                        connected_nodes: value,
+                        ..empty_stats()
+                    }),
+                )
+                .expect("publish replacement stats");
+            }
+        });
+
+        while !writer.is_finished() {
+            let document = std::fs::read(&path).expect("read stats during publication");
+            let _: serde_json::Value =
+                serde_json::from_slice(&document).expect("complete JSON during publication");
+        }
+        writer.join().expect("stats writer thread");
+        assert!(!parent.join("stats.json.tmp").exists());
+        std::fs::remove_dir_all(parent).expect("remove stats test directory");
     }
 }

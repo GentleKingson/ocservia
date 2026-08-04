@@ -539,7 +539,7 @@ func normalizeScenario(scenario Scenario) (uint32, uint32, error) {
 	if scenario.DelayMillis != nil {
 		delayMillis = *scenario.DelayMillis
 	}
-	if heartbeatCount < 1 || heartbeatCount > 32 || delayMillis > 10_000 {
+	if heartbeatCount < 1 || heartbeatCount > 32 || delayMillis > 30_000 {
 		return 0, 0, fmt.Errorf("%w: simulation limits exceeded", ErrInvalidScenario)
 	}
 	return heartbeatCount, delayMillis, nil

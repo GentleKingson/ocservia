@@ -116,6 +116,18 @@ func TestCreateSimulationRejectsNullBody(t *testing.T) {
 	}
 }
 
+func TestDevelopmentRuntimeIsHiddenWhenSimulatorIsDisabled(t *testing.T) {
+	server := New("127.0.0.1:0", nil, BuildInfo{}, slog.New(slog.NewTextHandler(io.Discard, nil)), 1024, time.Second, false, "", 1)
+	request := httptest.NewRequest(http.MethodGet, "/api/v1/development/runtime", nil)
+	response := httptest.NewRecorder()
+
+	server.http.Handler.ServeHTTP(response, request)
+
+	if response.Code != http.StatusNotFound {
+		t.Fatalf("development runtime status = %d, want 404", response.Code)
+	}
+}
+
 func TestVersionUsesContractFieldNames(t *testing.T) {
 	server := New("127.0.0.1:0", nil, BuildInfo{Version: "test", Commit: "abc", Role: "api"}, slog.New(slog.NewTextHandler(io.Discard, nil)), 1024, time.Second, false, "", 1)
 	response := httptest.NewRecorder()

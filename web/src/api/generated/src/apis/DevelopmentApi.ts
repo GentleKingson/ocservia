@@ -14,6 +14,11 @@
 
 import * as runtime from "../runtime";
 import {
+  type DevelopmentRuntime,
+  DevelopmentRuntimeFromJSON,
+  DevelopmentRuntimeToJSON,
+} from "../models/DevelopmentRuntime";
+import {
   type Operation,
   OperationFromJSON,
   OperationToJSON,
@@ -96,6 +101,50 @@ export class DevelopmentApi extends runtime.BaseAPI {
       requestParameters,
       initOverrides,
     );
+    return await response.value();
+  }
+
+  /**
+   * Creates request options for getDevelopmentRuntime without sending the request
+   */
+  async getDevelopmentRuntimeRequestOpts(): Promise<runtime.RequestOpts> {
+    const queryParameters: any = {};
+
+    const headerParameters: runtime.HTTPHeaders = {};
+
+    let urlPath = `/development/runtime`;
+
+    return {
+      path: urlPath,
+      method: "GET",
+      headers: headerParameters,
+      query: queryParameters,
+    };
+  }
+
+  /**
+   * Available only when the local simulator is explicitly enabled outside production.
+   * Read bounded runtime counters for local resilience tests
+   */
+  async getDevelopmentRuntimeRaw(
+    initOverrides?: RequestInit | runtime.InitOverrideFunction,
+  ): Promise<runtime.ApiResponse<DevelopmentRuntime>> {
+    const requestOptions = await this.getDevelopmentRuntimeRequestOpts();
+    const response = await this.request(requestOptions, initOverrides);
+
+    return new runtime.JSONApiResponse(response, (jsonValue) =>
+      DevelopmentRuntimeFromJSON(jsonValue),
+    );
+  }
+
+  /**
+   * Available only when the local simulator is explicitly enabled outside production.
+   * Read bounded runtime counters for local resilience tests
+   */
+  async getDevelopmentRuntime(
+    initOverrides?: RequestInit | runtime.InitOverrideFunction,
+  ): Promise<DevelopmentRuntime> {
+    const response = await this.getDevelopmentRuntimeRaw(initOverrides);
     return await response.value();
   }
 }

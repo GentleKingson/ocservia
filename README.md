@@ -29,6 +29,8 @@ PostgreSQL, UDS transport stub, agent simulator, OpenTelemetry, and Web stack is
 [docs/development/control-plane.md](docs/development/control-plane.md).
 Telemetry freshness, retention, read-only node APIs, and fleet views are
 documented in [docs/development/telemetry.md](docs/development/telemetry.md).
+The repeatable single-host P1 recovery and initial capacity harness is documented
+in [docs/development/p1-resilience-capacity.md](docs/development/p1-resilience-capacity.md).
 
 ## Security
 
