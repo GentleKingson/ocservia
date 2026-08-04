@@ -13,7 +13,7 @@ use ocservia_agent_protocol::{
 };
 use ocservia_command_journal::{AcceptOutcome, CommandRecord, CommandState, Journal};
 use ocservia_contracts::generated::ocserv::platform::agent::v1::{
-    CommandDeliveryMode, CommandEnvelope, command_envelope,
+    CommandDeliveryMode, CommandEnvelope, SemanticPayloadHashVersion, command_envelope,
 };
 use prost::Message;
 use rand::Rng;
@@ -128,6 +128,7 @@ impl CommandExecutor {
                 &validated.key,
                 &validated.command_id,
                 &validated.payload_hash,
+                validated.hash_version as i32,
                 context.now_unix_seconds,
             )
             .map_err(pre_effect_failure)?;
@@ -373,6 +374,7 @@ struct ValidatedCommand {
     key: [u8; 16],
     command_id: [u8; 16],
     payload_hash: [u8; 32],
+    hash_version: SemanticPayloadHashVersion,
     result: Vec<u8>,
 }
 
@@ -399,6 +401,46 @@ pub fn semantic_payload_hash(envelope: &CommandEnvelope) -> Result<[u8; 32], Com
     hash.update(&envelope.node_id);
     hash.update(envelope.expected_revision.to_be_bytes());
     hash.update(payload_bytes);
+    Ok(hash.finalize().into())
+}
+
+/// Domain separator for v1 canonical semantic hashes.
+///
+/// Includes the trailing `0x00` terminator required by
+/// `docs/development/command-semantic-hash-v1.md`.
+const SEMANTIC_HASH_V1_DOMAIN_SEPARATOR: &[u8] = b"ocservia.command.semantic-hash.v1\0";
+
+/// Computes the versioned canonical semantic hash (v1) for a command envelope.
+///
+/// Follows `docs/development/command-semantic-hash-v1.md`. The preimage is
+/// hand-specified canonical bytes, never Protobuf wire encoding, so it is stable
+/// across language runtimes regardless of unknown-field retention.
+///
+/// # Errors
+///
+/// Rejects unsupported payload types.
+pub fn semantic_payload_hash_v1(envelope: &CommandEnvelope) -> Result<[u8; 32], CommandError> {
+    let (payload_kind, canonical_payload) = match envelope.payload.as_ref() {
+        Some(command_envelope::Payload::SyntheticNoop(_)) => (107_u32, Vec::new()),
+        Some(command_envelope::Payload::SyntheticEcho(payload)) => {
+            let utf8 = payload.message.as_bytes();
+            let mut out = Vec::with_capacity(4 + utf8.len());
+            out.extend_from_slice(
+                &u32::try_from(utf8.len())
+                    .map_err(|_| CommandError::Rejected("payload_size_invalid"))?
+                    .to_be_bytes(),
+            );
+            out.extend_from_slice(utf8);
+            (108_u32, out)
+        }
+        _ => return Err(CommandError::Rejected("capability_rejected")),
+    };
+    let mut hash = Sha256::new();
+    hash.update(SEMANTIC_HASH_V1_DOMAIN_SEPARATOR);
+    hash.update(&envelope.node_id);
+    hash.update(envelope.expected_revision.to_be_bytes());
+    hash.update(payload_kind.to_be_bytes());
+    hash.update(&canonical_payload);
     Ok(hash.finalize().into())
 }
 
@@ -465,11 +507,38 @@ fn validate_command(
     if Uuid::from_bytes(command_id).get_version_num() != 7 {
         return Err(CommandError::Rejected("command_id_invalid"));
     }
-    let payload_hash = semantic_payload_hash(envelope)?;
+    let version = SemanticPayloadHashVersion::try_from(envelope.semantic_payload_hash_version)
+        .map_err(|_| CommandError::Rejected("semantic_hash_version_unsupported"))?;
+    let (payload_hash, hash_version) = match version {
+        SemanticPayloadHashVersion::Unspecified => {
+            // Compatibility path: the Controller has not upgraded to v1 (pre-Commit 4).
+            // Use the legacy hash and do not verify envelope.semantic_payload_sha256.
+            (
+                semantic_payload_hash(envelope)?,
+                SemanticPayloadHashVersion::Unspecified,
+            )
+        }
+        SemanticPayloadHashVersion::V1 => {
+            let recomputed = semantic_payload_hash_v1(envelope)?;
+            if envelope.semantic_payload_sha256.len() != 32 {
+                return Err(CommandError::Rejected("semantic_payload_hash_missing"));
+            }
+            let expected: [u8; 32] = envelope
+                .semantic_payload_sha256
+                .as_slice()
+                .try_into()
+                .map_err(|_| CommandError::Rejected("semantic_payload_hash_malformed"))?;
+            if recomputed != expected {
+                return Err(CommandError::Rejected("semantic_payload_hash_mismatch"));
+            }
+            (recomputed, SemanticPayloadHashVersion::V1)
+        }
+    };
     Ok(ValidatedCommand {
         key,
         command_id,
         payload_hash,
+        hash_version,
         result,
     })
 }
@@ -715,7 +784,7 @@ pub async fn read_boot_id() -> Result<String, io::Error> {
 #[cfg(test)]
 mod tests {
     use ocservia_contracts::generated::ocserv::platform::agent::v1::{
-        SemanticPayloadHashVersion, SyntheticEcho, SyntheticNoop, command_envelope,
+        SyntheticEcho, SyntheticNoop, command_envelope,
     };
     use prost_types::Timestamp;
     use rand::{SeedableRng, rngs::StdRng};
@@ -829,6 +898,19 @@ mod tests {
             semantic_payload_hash_version: SemanticPayloadHashVersion::Unspecified as i32,
             semantic_payload_sha256: Vec::new(),
         }
+    }
+
+    /// Builds a v1 command envelope with a correctly computed semantic hash.
+    ///
+    /// The `semantic_payload_sha256` is filled from `semantic_payload_hash_v1`
+    /// so that `validate_command` passes the strict wire-schema check.
+    fn command_v1(node_id: [u8; 16], key: [u8; 16], message: &str, now: i64) -> CommandEnvelope {
+        let mut envelope = command(node_id, key, message, now);
+        envelope.semantic_payload_hash_version = SemanticPayloadHashVersion::V1 as i32;
+        envelope.semantic_payload_sha256 = semantic_payload_hash_v1(&envelope)
+            .expect("v1 hash")
+            .to_vec();
+        envelope
     }
 
     fn context(node_id: [u8; 16], now: i64) -> CommandContext {
@@ -1129,6 +1211,105 @@ mod tests {
     }
 
     #[test]
+    fn v1_command_with_missing_semantic_payload_hash_is_rejected() {
+        let path = temporary_journal("v1-missing-hash");
+        let node_id = *Uuid::now_v7().as_bytes();
+        let key = *Uuid::now_v7().as_bytes();
+        let command_context = context(node_id, 100);
+        let mut executor = CommandExecutor::new(Journal::open(&path).expect("open"));
+        // Declare v1 but omit the expected hash bytes.
+        let mut envelope = command(node_id, key, "hello", 100);
+        envelope.semantic_payload_hash_version = SemanticPayloadHashVersion::V1 as i32;
+        assert!(matches!(
+            executor.execute(&envelope, &command_context, None),
+            Err(CommandError::Rejected("semantic_payload_hash_missing"))
+        ));
+        assert_eq!(
+            executor
+                .journal()
+                .synthetic_execution_count()
+                .expect("count"),
+            0
+        );
+        drop(executor);
+        cleanup_journal(&path);
+    }
+
+    #[test]
+    fn v1_command_with_mismatched_semantic_payload_hash_is_rejected() {
+        let path = temporary_journal("v1-hash-mismatch");
+        let node_id = *Uuid::now_v7().as_bytes();
+        let key = *Uuid::now_v7().as_bytes();
+        let command_context = context(node_id, 100);
+        let mut executor = CommandExecutor::new(Journal::open(&path).expect("open"));
+        // Declare v1 with a wrong hash (32 bytes of zeros).
+        let mut envelope = command(node_id, key, "hello", 100);
+        envelope.semantic_payload_hash_version = SemanticPayloadHashVersion::V1 as i32;
+        envelope.semantic_payload_sha256 = vec![0_u8; 32];
+        assert!(matches!(
+            executor.execute(&envelope, &command_context, None),
+            Err(CommandError::Rejected("semantic_payload_hash_mismatch"))
+        ));
+        assert_eq!(
+            executor
+                .journal()
+                .synthetic_execution_count()
+                .expect("count"),
+            0
+        );
+        drop(executor);
+        cleanup_journal(&path);
+    }
+
+    #[test]
+    fn v1_command_with_unknown_hash_version_is_rejected() {
+        let path = temporary_journal("v1-unknown-version");
+        let node_id = *Uuid::now_v7().as_bytes();
+        let key = *Uuid::now_v7().as_bytes();
+        let command_context = context(node_id, 100);
+        let mut executor = CommandExecutor::new(Journal::open(&path).expect("open"));
+        // Use an unsupported version number.
+        let mut envelope = command(node_id, key, "hello", 100);
+        envelope.semantic_payload_hash_version = 99;
+        assert!(matches!(
+            executor.execute(&envelope, &command_context, None),
+            Err(CommandError::Rejected("semantic_hash_version_unsupported"))
+        ));
+        assert_eq!(
+            executor
+                .journal()
+                .synthetic_execution_count()
+                .expect("count"),
+            0
+        );
+        drop(executor);
+        cleanup_journal(&path);
+    }
+
+    #[test]
+    fn v1_command_with_correct_hash_is_accepted() {
+        let path = temporary_journal("v1-correct");
+        let node_id = *Uuid::now_v7().as_bytes();
+        let key = *Uuid::now_v7().as_bytes();
+        let command_context = context(node_id, 100);
+        let mut executor = CommandExecutor::new(Journal::open(&path).expect("open"));
+        let envelope = command_v1(node_id, key, "hello", 100);
+        let outcome = executor
+            .execute(&envelope, &command_context, None)
+            .expect("accept");
+        assert!(!outcome.replayed);
+        assert_eq!(
+            executor
+                .journal()
+                .synthetic_execution_count()
+                .expect("count"),
+            1
+        );
+        drop(executor);
+        cleanup_journal(&path);
+    }
+
+    #[test]
     fn same_key_different_payload_is_rejected_without_second_effect() {
         let path = temporary_journal("conflict");
         let node_id = *Uuid::now_v7().as_bytes();
@@ -1235,20 +1416,18 @@ mod tests {
     //
     // The tests below pin the v1 algorithm defined in
     // `docs/development/command-semantic-hash-v1.md` against the shared golden
-    // fixture `testdata/semantic-payload-hash-v1.json`. They are `#[ignore]`d
-    // until the production `semantic_payload_hash_v1` function is introduced in
-    // a later I10 commit; the inlined `compute_v1_canonical` mirror computes the
-    // same bytes per spec so the vectors are auditable today. Once the
-    // production function exists, replace the mirror with a call to it and drop
-    // the `#[ignore]`.
+    // fixture `testdata/semantic-payload-hash-v1.json`. The inlined
+    // `compute_v1_canonical` mirror is an independent reference that writes each
+    // field by hand (no Protobuf). The production `semantic_payload_hash_v1`
+    // function must produce identical bytes.
 
     /// V1 canonical preimage domain separator: ASCII label plus a NUL terminator.
     const V1_DOMAIN_SEPARATOR: &[u8] = b"ocservia.command.semantic-hash.v1\0";
 
-    /// Mirror of the v1 canonical hash that writes each field by hand.
+    /// Independent reference mirror of the v1 canonical hash.
     ///
     /// This intentionally does not use Protobuf serialization. It is the test
-    /// reference; the production implementation must produce identical bytes.
+    /// reference; the production `semantic_payload_hash_v1` must match it.
     fn compute_v1_canonical(
         node_id: &[u8],
         expected_revision: u64,
@@ -1288,8 +1467,41 @@ mod tests {
             .unwrap_or_else(|e| panic!("parse v1 fixture {}: {e}", path.display()))
     }
 
+    /// Builds a v1 envelope from fixture vector fields for hash verification.
+    fn envelope_from_fixture_vector(
+        node_id: &[u8],
+        expected_revision: u64,
+        payload_kind: u32,
+        message: &str,
+    ) -> CommandEnvelope {
+        let payload = match payload_kind {
+            107 => Some(command_envelope::Payload::SyntheticNoop(SyntheticNoop {})),
+            108 => Some(command_envelope::Payload::SyntheticEcho(SyntheticEcho {
+                message: message.to_owned(),
+            })),
+            _ => panic!("unsupported payload_kind in test: {payload_kind}"),
+        };
+        CommandEnvelope {
+            protocol_version: "1.0".to_owned(),
+            message_id: Vec::new(),
+            command_id: Vec::new(),
+            idempotency_key: Vec::new(),
+            node_id: node_id.to_vec(),
+            sequence: 0,
+            issued_at: None,
+            expires_at: None,
+            expected_revision,
+            traceparent: String::new(),
+            actor_id: String::new(),
+            reason: String::new(),
+            delivery_mode: CommandDeliveryMode::Unspecified.into(),
+            payload,
+            semantic_payload_hash_version: SemanticPayloadHashVersion::Unspecified as i32,
+            semantic_payload_sha256: Vec::new(),
+        }
+    }
+
     #[test]
-    #[ignore = "pending production semantic_payload_hash_v1 (I10 commit 3)"]
     fn canonical_semantic_hash_v1_matches_shared_fixture() {
         let fixture = load_v1_fixture();
         for vector in fixture
@@ -1327,65 +1539,98 @@ mod tests {
                 .and_then(serde_json::Value::as_str)
                 .expect("expected_sha256");
 
+            // Cross-check: the test-only mirror must agree with the fixture.
             let payload = canonical_payload_for(payload_kind, message);
-            let digest = compute_v1_canonical(&node_id, expected_revision, payload_kind, &payload);
+            let mirror = compute_v1_canonical(&node_id, expected_revision, payload_kind, &payload);
             assert_eq!(
-                hex::encode(digest),
+                hex::encode(mirror),
                 expected,
-                "vector {name:?} digest mismatch"
+                "vector {name:?} mirror digest mismatch"
+            );
+
+            // Production function must agree with the mirror.
+            let envelope =
+                envelope_from_fixture_vector(&node_id, expected_revision, payload_kind, message);
+            let production = semantic_payload_hash_v1(&envelope).expect("v1 hash");
+            assert_eq!(
+                hex::encode(production),
+                expected,
+                "vector {name:?} production digest mismatch"
             );
         }
     }
 
     #[test]
-    #[ignore = "pending production semantic_payload_hash_v1 (I10 commit 3)"]
     fn canonical_semantic_hash_v1_excludes_delivery_metadata() {
         let node = [0_u8, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15];
         let message = "hello";
-        let payload = canonical_payload_for(108, message);
-        // Baseline: a minimal semantic identity.
-        let baseline = compute_v1_canonical(&node, 1, 108, &payload);
-        // The hash input never sees delivery/audit metadata, so changing the
-        // envelope fields that carry such metadata cannot affect the digest.
-        // This mirrors the contract: only node_id, revision, kind, and payload
-        // bytes enter the preimage.
-        let again = compute_v1_canonical(&node, 1, 108, &payload);
-        assert_eq!(baseline, again);
-        // Sanity: the preimage is invariant to message_id/command_id/etc by
-        // construction (they are not parameters), which is the guarantee under
-        // test here.
+        // Build two envelopes that differ only in delivery/audit metadata.
+        let mut a = envelope_from_fixture_vector(&node, 1, 108, message);
+        let mut b = envelope_from_fixture_vector(&node, 1, 108, message);
+        a.message_id = vec![1_u8; 16];
+        a.command_id = vec![2_u8; 16];
+        a.idempotency_key = vec![3_u8; 16];
+        a.sequence = 42;
+        a.traceparent = "00-aaa".to_owned();
+        a.actor_id = "alice".to_owned();
+        a.reason = "ticket-1".to_owned();
+        a.delivery_mode = CommandDeliveryMode::ExecuteOrReplay.into();
+        b.message_id = vec![9_u8; 16];
+        b.command_id = vec![8_u8; 16];
+        b.idempotency_key = vec![7_u8; 16];
+        b.sequence = 99;
+        b.traceparent = "00-bbb".to_owned();
+        b.actor_id = "bob".to_owned();
+        b.reason = "ticket-2".to_owned();
+        b.delivery_mode = CommandDeliveryMode::ReconcileOnly.into();
+        // Only node_id, revision, kind, and payload bytes enter the preimage,
+        // so changing delivery/audit fields cannot affect the digest.
+        assert_eq!(
+            semantic_payload_hash_v1(&a).expect("v1 hash a"),
+            semantic_payload_hash_v1(&b).expect("v1 hash b"),
+        );
     }
 
     #[test]
-    #[ignore = "pending production semantic_payload_hash_v1 (I10 commit 3)"]
     fn canonical_semantic_hash_v1_changes_on_semantic_input() {
         let node = [0_u8, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15];
         let node_shifted = [1_u8, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16];
 
-        let hello = compute_v1_canonical(&node, 1, 108, &canonical_payload_for(108, "hello"));
+        let hello = semantic_payload_hash_v1(&envelope_from_fixture_vector(&node, 1, 108, "hello"))
+            .expect("v1 hash");
         // message change
-        let world = compute_v1_canonical(&node, 1, 108, &canonical_payload_for(108, "world"));
+        let world = semantic_payload_hash_v1(&envelope_from_fixture_vector(&node, 1, 108, "world"))
+            .expect("v1 hash");
         assert_ne!(hello, world);
         // node_id change
-        let shifted =
-            compute_v1_canonical(&node_shifted, 1, 108, &canonical_payload_for(108, "hello"));
+        let shifted = semantic_payload_hash_v1(&envelope_from_fixture_vector(
+            &node_shifted,
+            1,
+            108,
+            "hello",
+        ))
+        .expect("v1 hash");
         assert_ne!(hello, shifted);
         // revision change
-        let rev2 = compute_v1_canonical(&node, 2, 108, &canonical_payload_for(108, "hello"));
+        let rev2 = semantic_payload_hash_v1(&envelope_from_fixture_vector(&node, 2, 108, "hello"))
+            .expect("v1 hash");
         assert_ne!(hello, rev2);
         // payload kind change (noop vs echo)
-        let noop = compute_v1_canonical(&node, 1, 107, &canonical_payload_for(107, ""));
+        let noop = semantic_payload_hash_v1(&envelope_from_fixture_vector(&node, 1, 107, ""))
+            .expect("v1 hash");
         assert_ne!(hello, noop);
     }
 
     #[test]
-    #[ignore = "pending production semantic_payload_hash_v1 (I10 commit 3)"]
     fn canonical_semantic_hash_v1_rejects_unicode_normalization() {
         let node = [0_u8, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15];
         // Precomposed é (U+00E9) vs decomposed e + combining acute (U+0301).
-        let composed = compute_v1_canonical(&node, 1, 108, &canonical_payload_for(108, "\u{00e9}"));
+        let composed =
+            semantic_payload_hash_v1(&envelope_from_fixture_vector(&node, 1, 108, "\u{00e9}"))
+                .expect("v1 hash");
         let decomposed =
-            compute_v1_canonical(&node, 1, 108, &canonical_payload_for(108, "e\u{0301}"));
+            semantic_payload_hash_v1(&envelope_from_fixture_vector(&node, 1, 108, "e\u{0301}"))
+                .expect("v1 hash");
         assert_ne!(
             composed, decomposed,
             "no Unicode normalization: different bytes must hash differently"

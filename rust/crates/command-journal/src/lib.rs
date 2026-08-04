@@ -55,6 +55,8 @@ pub struct CommandRecord {
     pub idempotency_key: [u8; 16],
     pub command_id: [u8; 16],
     pub payload_sha256: [u8; 32],
+    /// Algorithm version that produced `payload_sha256` (0 = legacy, 1 = v1 canonical).
+    pub payload_hash_version: i32,
     pub state: CommandState,
     pub result: Option<Vec<u8>>,
     pub error_code: Option<String>,
@@ -134,6 +136,7 @@ impl Journal {
                 idempotency_key BLOB PRIMARY KEY NOT NULL,
                 command_id BLOB NOT NULL,
                 payload_sha256 BLOB NOT NULL,
+                payload_hash_version INTEGER NOT NULL DEFAULT 0 CHECK (payload_hash_version >= 0),
                 state TEXT NOT NULL CHECK (state IN ('accepted','running','succeeded','failed','unknown')),
                 result BLOB,
                 error_code TEXT CHECK (error_code IS NULL OR length(error_code) BETWEEN 1 AND 128),
@@ -179,19 +182,7 @@ impl Journal {
                 dropped INTEGER NOT NULL DEFAULT 0 CHECK (dropped >= 0)
              ) STRICT;",
         )?;
-        let has_error_code = {
-            let mut columns = connection.prepare("PRAGMA table_info(command_journal)")?;
-            let names = columns
-                .query_map([], |row| row.get::<_, String>(1))?
-                .collect::<Result<Vec<_>, _>>()?;
-            names.iter().any(|name| name == "error_code")
-        };
-        if !has_error_code {
-            connection.execute(
-                "ALTER TABLE command_journal ADD COLUMN error_code TEXT CHECK (error_code IS NULL OR length(error_code) BETWEEN 1 AND 128)",
-                [],
-            )?;
-        }
+        migrate_command_journal(&connection)?;
         let integrity: String =
             connection.pragma_query_value(None, "quick_check", |row| row.get(0))?;
         if integrity != "ok" {
@@ -210,6 +201,7 @@ impl Journal {
         idempotency_key: &[u8; 16],
         command_id: &[u8; 16],
         payload_sha256: &[u8; 32],
+        payload_hash_version: i32,
         now: i64,
     ) -> Result<AcceptOutcome, rusqlite::Error> {
         let transaction = self
@@ -220,8 +212,8 @@ impl Journal {
         let outcome = match (by_key, by_command) {
             (None, None) => {
                 transaction.execute(
-                    "INSERT INTO command_journal(idempotency_key,command_id,payload_sha256,state,result,error_code,accepted_at,updated_at) VALUES (?1,?2,?3,'accepted',NULL,NULL,?4,?4)",
-                    rusqlite::params![idempotency_key.as_slice(), command_id.as_slice(), payload_sha256.as_slice(), now],
+                    "INSERT INTO command_journal(idempotency_key,command_id,payload_sha256,payload_hash_version,state,result,error_code,accepted_at,updated_at) VALUES (?1,?2,?3,?4,'accepted',NULL,NULL,?5,?5)",
+                    rusqlite::params![idempotency_key.as_slice(), command_id.as_slice(), payload_sha256.as_slice(), payload_hash_version, now],
                 )?;
                 AcceptOutcome::Accepted(
                     query_command(&transaction, idempotency_key)?
@@ -232,7 +224,9 @@ impl Journal {
                 if by_key.idempotency_key == by_command.idempotency_key
                     && by_key.command_id == *command_id =>
             {
-                if by_key.payload_sha256 == *payload_sha256 {
+                if by_key.payload_sha256 == *payload_sha256
+                    && by_key.payload_hash_version == payload_hash_version
+                {
                     AcceptOutcome::Replay(by_key)
                 } else {
                     AcceptOutcome::PayloadConflict(by_key)
@@ -603,12 +597,42 @@ impl Journal {
     }
 }
 
+/// Applies idempotent column migrations to `command_journal`.
+///
+/// New databases already include every column via the `CREATE TABLE` statement.
+/// Pre-existing databases are upgraded with `ALTER TABLE … ADD COLUMN` guarded
+/// by a `PRAGMA table_info` presence check.
+fn migrate_command_journal(connection: &Connection) -> Result<(), rusqlite::Error> {
+    if !has_column(connection, "error_code")? {
+        connection.execute(
+            "ALTER TABLE command_journal ADD COLUMN error_code TEXT CHECK (error_code IS NULL OR length(error_code) BETWEEN 1 AND 128)",
+            [],
+        )?;
+    }
+    if !has_column(connection, "payload_hash_version")? {
+        connection.execute(
+            "ALTER TABLE command_journal ADD COLUMN payload_hash_version INTEGER NOT NULL DEFAULT 0 CHECK (payload_hash_version >= 0)",
+            [],
+        )?;
+    }
+    Ok(())
+}
+
+/// Returns `true` when `command_journal` has a column named `column`.
+fn has_column(connection: &Connection, column: &str) -> Result<bool, rusqlite::Error> {
+    let mut statement = connection.prepare("PRAGMA table_info(command_journal)")?;
+    let names = statement
+        .query_map([], |row| row.get::<_, String>(1))?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(names.iter().any(|name| name == column))
+}
+
 fn query_command(
     connection: &Connection,
     idempotency_key: &[u8; 16],
 ) -> Result<Option<CommandRecord>, rusqlite::Error> {
     let mut statement = connection.prepare(
-        "SELECT idempotency_key,command_id,payload_sha256,state,result,error_code,accepted_at,updated_at FROM command_journal WHERE idempotency_key=?1",
+        "SELECT idempotency_key,command_id,payload_sha256,payload_hash_version,state,result,error_code,accepted_at,updated_at FROM command_journal WHERE idempotency_key=?1",
     )?;
     let mut rows = statement.query([idempotency_key.as_slice()])?;
     let Some(row) = rows.next()? else {
@@ -621,11 +645,12 @@ fn query_command(
         idempotency_key: key,
         command_id,
         payload_sha256,
-        state: CommandState::parse(&row.get::<_, String>(3)?)?,
-        result: row.get(4)?,
-        error_code: row.get(5)?,
-        accepted_at: row.get(6)?,
-        updated_at: row.get(7)?,
+        payload_hash_version: row.get(3)?,
+        state: CommandState::parse(&row.get::<_, String>(4)?)?,
+        result: row.get(5)?,
+        error_code: row.get(6)?,
+        accepted_at: row.get(7)?,
+        updated_at: row.get(8)?,
     }))
 }
 
@@ -634,7 +659,7 @@ fn query_command_by_id(
     command_id: &[u8; 16],
 ) -> Result<Option<CommandRecord>, rusqlite::Error> {
     let mut statement = connection.prepare(
-        "SELECT idempotency_key,command_id,payload_sha256,state,result,error_code,accepted_at,updated_at FROM command_journal WHERE command_id=?1",
+        "SELECT idempotency_key,command_id,payload_sha256,payload_hash_version,state,result,error_code,accepted_at,updated_at FROM command_journal WHERE command_id=?1",
     )?;
     let mut rows = statement.query([command_id.as_slice()])?;
     let Some(row) = rows.next()? else {
@@ -644,11 +669,12 @@ fn query_command_by_id(
         idempotency_key: fixed_blob::<16>(row.get(0)?)?,
         command_id: fixed_blob::<16>(row.get(1)?)?,
         payload_sha256: fixed_blob::<32>(row.get(2)?)?,
-        state: CommandState::parse(&row.get::<_, String>(3)?)?,
-        result: row.get(4)?,
-        error_code: row.get(5)?,
-        accepted_at: row.get(6)?,
-        updated_at: row.get(7)?,
+        payload_hash_version: row.get(3)?,
+        state: CommandState::parse(&row.get::<_, String>(4)?)?,
+        result: row.get(5)?,
+        error_code: row.get(6)?,
+        accepted_at: row.get(7)?,
+        updated_at: row.get(8)?,
     }))
 }
 
@@ -792,7 +818,7 @@ mod tests {
         let payload = [7_u8; 32];
         assert!(matches!(
             journal
-                .accept_command(&key, &command, &payload, 10)
+                .accept_command(&key, &command, &payload, 0, 10)
                 .expect("accept"),
             AcceptOutcome::Accepted(_)
         ));
@@ -809,7 +835,7 @@ mod tests {
         assert_eq!(completed.result.as_deref(), Some(b"result".as_slice()));
         assert!(matches!(
             journal
-                .accept_command(&key, &command, &payload, 12)
+                .accept_command(&key, &command, &payload, 0, 12)
                 .expect("replay"),
             AcceptOutcome::Replay(CommandRecord {
                 state: CommandState::Succeeded,
@@ -818,7 +844,7 @@ mod tests {
         ));
         assert!(matches!(
             journal
-                .accept_command(&key, &command, &[8; 32], 13)
+                .accept_command(&key, &command, &[8; 32], 0, 13)
                 .expect("conflict"),
             AcceptOutcome::PayloadConflict(_)
         ));
@@ -835,31 +861,31 @@ mod tests {
         let payload = [7_u8; 32];
         assert!(matches!(
             journal
-                .accept_command(&key, &command, &payload, 10)
+                .accept_command(&key, &command, &payload, 0, 10)
                 .expect("accept"),
             AcceptOutcome::Accepted(_)
         ));
         assert!(matches!(
             journal
-                .accept_command(&key, &command, &payload, 11)
+                .accept_command(&key, &command, &payload, 0, 11)
                 .expect("exact replay"),
             AcceptOutcome::Replay(_)
         ));
         assert!(matches!(
             journal
-                .accept_command(&key, uuid::Uuid::now_v7().as_bytes(), &payload, 12)
+                .accept_command(&key, uuid::Uuid::now_v7().as_bytes(), &payload, 0, 12)
                 .expect("same key conflict"),
             AcceptOutcome::IdentityConflict(_)
         ));
         assert!(matches!(
             journal
-                .accept_command(uuid::Uuid::now_v7().as_bytes(), &command, &payload, 13)
+                .accept_command(uuid::Uuid::now_v7().as_bytes(), &command, &payload, 0, 13)
                 .expect("same command conflict"),
             AcceptOutcome::IdentityConflict(_)
         ));
         assert!(matches!(
             journal
-                .accept_command(&key, &command, &[8_u8; 32], 14)
+                .accept_command(&key, &command, &[8_u8; 32], 0, 14)
                 .expect("payload conflict"),
             AcceptOutcome::PayloadConflict(_)
         ));
@@ -876,7 +902,7 @@ mod tests {
         let payload = [9_u8; 32];
         let mut journal = Journal::open(&path).expect("open");
         journal
-            .accept_command(&key, &command, &payload, 10)
+            .accept_command(&key, &command, &payload, 0, 10)
             .expect("accept");
         journal
             .transition_command(
@@ -964,7 +990,7 @@ mod tests {
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o444))
             .expect("make read-only");
         let result = Journal::open(&path)
-            .and_then(|mut journal| journal.accept_command(&[1; 16], &[2; 16], &[3; 32], 10));
+            .and_then(|mut journal| journal.accept_command(&[1; 16], &[2; 16], &[3; 32], 0, 10));
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
             .expect("restore permissions");
         assert!(result.is_err());
@@ -978,7 +1004,7 @@ mod tests {
         let payload = [2_u8; 32];
         let mut journal = Journal::open(&path).expect("open");
         journal
-            .accept_command(&key, &[3; 16], &payload, 10)
+            .accept_command(&key, &[3; 16], &payload, 0, 10)
             .expect("accept");
         journal
             .connection

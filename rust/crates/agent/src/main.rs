@@ -304,7 +304,7 @@ fn command_result(record: &CommandRecord, replayed: bool) -> CommandResult {
             nanos: 0,
         }),
         replayed,
-        semantic_payload_hash_version: SemanticPayloadHashVersion::Unspecified as i32,
+        semantic_payload_hash_version: record.payload_hash_version,
     }
 }
 
