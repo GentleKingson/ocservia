@@ -116,6 +116,7 @@ for major in 17 18; do
   docker exec "${container}" psql -v ON_ERROR_STOP=1 -U ocservia_app -d ocservia -c \
     "SELECT telemetry_drop_expired_partitions(now() - interval '14 days')" >/dev/null
   test "$(docker exec "${container}" psql -U ocservia_owner -d ocservia -Atc "SELECT count(*) FROM pg_class WHERE relname = 'telemetry_samples_' || to_char(date_trunc('month', now()) - interval '2 months', 'YYYYMM')")" = "0"
+  stop_process "${pid}"
   (cd "${ROOT}/control-plane" && OCSERV_TEST_DATABASE_URL="${runtime_url}" \
     go test -p 1 ./internal/enrollment ./internal/localslice ./internal/operations ./internal/telemetry -run Integration -count=1)
   if docker exec "${container}" psql -v ON_ERROR_STOP=1 -U ocservia_app -d ocservia -c "INSERT INTO operations (id, workspace_id, node_id, state, request_id, created_at, updated_at) VALUES ('00000000-0000-7000-8000-000000000005', '00000000-0000-7000-8000-000000000002', '00000000-0000-7000-8000-000000000003', 'draft', 'request', now(), now())" >/dev/null 2>&1; then
@@ -130,8 +131,6 @@ for major in 17 18; do
     echo "runtime role disabled the audit append-only trigger" >&2
     exit 1
   fi
-  stop_process "${pid}"
-
   test "$(docker exec "${container}" psql -U ocservia_owner -d ocservia -Atc "SELECT count(*) FROM pg_indexes WHERE schemaname='public' AND tablename='agent_command_results' AND indexname IN ('agent_command_results_pkey','agent_command_results_command_created_idx')")" = "2"
   docker exec -i "${container}" psql -v ON_ERROR_STOP=1 -U ocservia_owner -d ocservia \
     <"${ROOT}/control-plane/migrations/000007_agent_command_results.down.sql" >/dev/null
