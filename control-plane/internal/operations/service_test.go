@@ -89,3 +89,27 @@ func TestControlledOperationsRequireTypedTargetsAndReason(t *testing.T) {
 		t.Fatal("non-canonical IP was accepted")
 	}
 }
+
+func TestRequestHashBindsTargetActorAndActionButNotAttemptMetadata(t *testing.T) {
+	base := CreateRequest{NodeID: uuid.Must(uuid.NewV7()), IdempotencyKey: "stable-key", ExpectedVersion: 4, Kind: ServiceReload, ActorID: "operator", Action: "service.reload", Reason: "support case", TTL: time.Minute, RequestID: "request-one", Traceparent: "00-0123456789abcdef0123456789abcdef-0123456789abcdef-01"}
+	baseHash := requestHash(base)
+	for name, mutate := range map[string]func(*CreateRequest){
+		"node":   func(r *CreateRequest) { r.NodeID = uuid.Must(uuid.NewV7()) },
+		"actor":  func(r *CreateRequest) { r.ActorID = "other-operator" },
+		"action": func(r *CreateRequest) { r.Action = "other.action" },
+	} {
+		t.Run(name, func(t *testing.T) {
+			request := base
+			mutate(&request)
+			if requestHash(request) == baseHash {
+				t.Fatalf("%s was not bound into the idempotency digest", name)
+			}
+		})
+	}
+	attempt := base
+	attempt.RequestID = "request-two"
+	attempt.Traceparent = "00-1123456789abcdef0123456789abcdef-1123456789abcdef-01"
+	if requestHash(attempt) != baseHash {
+		t.Fatal("attempt-only metadata changed the idempotency digest")
+	}
+}

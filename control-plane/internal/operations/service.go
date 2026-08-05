@@ -3,6 +3,7 @@ package operations
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
@@ -204,16 +205,7 @@ func (s *Service) CreateSynthetic(ctx context.Context, request CreateRequest) (O
 	if _, err := tx.Exec(ctx, `INSERT INTO operation_events (id, operation_id, state, occurred_at) VALUES ($1,$2,'queued',$3)`, eventID, operationID, now); err != nil {
 		return Operation{}, false, fmt.Errorf("insert operation event: %w", err)
 	}
-	actorID, action, reason := request.ActorID, request.Action, request.Reason
-	if actorID == "" {
-		actorID = "developer"
-	}
-	if action == "" {
-		action = "synthetic.command"
-	}
-	if reason == "" {
-		reason = "side-effect-free delivery validation"
-	}
+	actorID, action, reason := normalizedAuditIntent(request)
 	if err := audit.AppendChain(ctx, tx, audit.ChainRecord{EventID: auditID, WorkspaceID: workspaceID, ActorType: "user", ActorID: actorID, Action: action, ResourceType: "operation", ResourceID: operationID, RequestID: request.RequestID, TraceID: traceID(request.Traceparent), Reason: reason, At: now}); err != nil {
 		return Operation{}, false, fmt.Errorf("append operation audit intent: %w", err)
 	}
@@ -507,7 +499,43 @@ func validateCreate(r CreateRequest) error {
 }
 
 func requestHash(r CreateRequest) [32]byte {
-	return sha256.Sum256([]byte(fmt.Sprintf("%s\x00%s\x00%s\x00%s\x00%s\x00%d\x00%t\x00%d\x00%s", r.Kind, r.Message, r.SessionID, r.BootID, r.IP, r.ExpectedVersion, r.SupersedePending, r.TTL/time.Second, r.Reason)))
+	actorID, action, reason := normalizedAuditIntent(r)
+	// Request and trace IDs identify an attempt, not the mutation intent. Every
+	// field that selects the target, effect, authorization action, actor, audit
+	// reason, revision, or delivery behavior is deliberately bound here.
+	intent := struct {
+		NodeID           uuid.UUID     `json:"node_id"`
+		Kind             SyntheticKind `json:"kind"`
+		Message          string        `json:"message"`
+		SessionID        string        `json:"session_id"`
+		BootID           string        `json:"boot_id"`
+		IP               string        `json:"ip"`
+		ExpectedVersion  int64         `json:"expected_version"`
+		SupersedePending bool          `json:"supersede_pending"`
+		TTLSeconds       int64         `json:"ttl_seconds"`
+		ActorID          string        `json:"actor_id"`
+		Action           string        `json:"action"`
+		Reason           string        `json:"reason"`
+	}{r.NodeID, r.Kind, r.Message, r.SessionID, r.BootID, r.IP, r.ExpectedVersion, r.SupersedePending, int64(r.TTL / time.Second), actorID, action, reason}
+	encoded, err := json.Marshal(intent)
+	if err != nil {
+		panic("marshal fixed idempotency intent: " + err.Error())
+	}
+	return sha256.Sum256(encoded)
+}
+
+func normalizedAuditIntent(r CreateRequest) (actorID, action, reason string) {
+	actorID, action, reason = r.ActorID, r.Action, r.Reason
+	if actorID == "" {
+		actorID = "developer"
+	}
+	if action == "" {
+		action = "synthetic.command"
+	}
+	if reason == "" {
+		reason = "side-effect-free delivery validation"
+	}
+	return actorID, action, reason
 }
 
 func marshalEnvelope(r CreateRequest, operationID, commandID uuid.UUID, now, expires time.Time) ([]byte, string, error) {
@@ -515,13 +543,7 @@ func marshalEnvelope(r CreateRequest, operationID, commandID uuid.UUID, now, exp
 	if err != nil {
 		return nil, "", err
 	}
-	actorID, reason := r.ActorID, r.Reason
-	if actorID == "" {
-		actorID = "developer"
-	}
-	if reason == "" {
-		reason = "side-effect-free delivery validation"
-	}
+	actorID, _, reason := normalizedAuditIntent(r)
 	envelope := &agentv1.CommandEnvelope{ProtocolVersion: "1.0", MessageId: messageID[:], CommandId: commandID[:], IdempotencyKey: operationID[:], NodeId: r.NodeID[:], Sequence: 1, IssuedAt: timestamppb.New(now), ExpiresAt: timestamppb.New(expires), ExpectedRevision: uint64(r.ExpectedVersion), Traceparent: r.Traceparent, ActorId: actorID, Reason: reason, DeliveryMode: agentv1.CommandDeliveryMode_COMMAND_DELIVERY_MODE_EXECUTE_OR_REPLAY}
 	payloadType := "synthetic_noop"
 	switch r.Kind {

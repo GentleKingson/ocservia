@@ -13,6 +13,12 @@ returned by the node API. The API returns `202 Accepted` with an asynchronous
 Operation. Callers must display its persisted state and must not treat queueing
 or dispatch as success.
 
+Idempotency keys are scoped to a workspace and bind the target node, typed
+payload, expected revision, delivery behavior, actor, authorization action,
+reason, and TTL. Reusing a key for another node or intent returns a conflict.
+Request and trace identifiers describe an individual attempt and may differ on
+an otherwise identical replay.
+
 Each command requires its matching approved node capability. Session and IP-ban
 targets must exist in current observed state before the Controller commits the
 Operation, Command, outbox event, and audit intent. The Agent revalidates the

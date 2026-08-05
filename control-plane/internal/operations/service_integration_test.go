@@ -54,6 +54,27 @@ func TestTransactionalCreateIdempotencyAndTypedPayloadIntegration(t *testing.T) 
 	}
 }
 
+func TestIdempotencyKeyCannotReplayAcrossNodesIntegration(t *testing.T) {
+	service, pool, workspaceID, nodeID := integrationService(t)
+	otherNodeID := uuid.Must(uuid.NewV7())
+	ctx := context.Background()
+	if _, err := pool.Exec(ctx, `INSERT INTO nodes(id,workspace_id,name,status,version,created_at,updated_at)VALUES($1,$2,$3,'active',1,now(),now())`, otherNodeID, workspaceID, "node-"+otherNodeID.String()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `INSERT INTO node_capabilities(node_id,capability,approved) VALUES($1,'ocserv.service.reload',true),($2,'ocserv.service.reload',true)`, nodeID, otherNodeID); err != nil {
+		t.Fatal(err)
+	}
+	request := controlledTestRequest(nodeID, "cross-node-key", ServiceReload, "service.reload", "", "", "")
+	first, replayed, err := service.CreateSynthetic(ctx, request)
+	if err != nil || replayed || first.NodeID == nil || *first.NodeID != nodeID.String() {
+		t.Fatalf("first node operation = %+v, %v, %v", first, replayed, err)
+	}
+	request.NodeID = otherNodeID
+	if _, _, err := service.CreateSynthetic(ctx, request); !errors.Is(err, ErrIdempotencyConflict) {
+		t.Fatalf("cross-node replay error = %v", err)
+	}
+}
+
 func TestControlledOperationsRequireApprovedCapabilityAndObservedTargetIntegration(t *testing.T) {
 	service, pool, _, nodeID := integrationService(t)
 	bootID := uuid.NewString()
@@ -91,6 +112,10 @@ func TestControlledOperationsRequireApprovedCapabilityAndObservedTargetIntegrati
 			operation, replayed, err := service.CreateSynthetic(ctx, request)
 			if err != nil || replayed || operation.State != "queued" {
 				t.Fatalf("create controlled operation = %+v, %v, %v", operation, replayed, err)
+			}
+			replayedOperation, replayed, err := service.CreateSynthetic(ctx, request)
+			if err != nil || !replayed || replayedOperation.ID != operation.ID {
+				t.Fatalf("replay controlled operation = %+v, %v, %v", replayedOperation, replayed, err)
 			}
 		})
 	}
