@@ -133,6 +133,8 @@ export const useLocalSliceStore = defineStore("local-slice", () => {
     const controller = trackRequest();
     rebuildController = controller;
     const sequence = ++rebuildSequence;
+    let pendingRequest:
+      { controller: AbortController; sequence: number } | undefined;
     let context: WorkspaceContext | undefined;
     try {
       context = await currentContext();
@@ -158,9 +160,10 @@ export const useLocalSliceStore = defineStore("local-slice", () => {
       connectedNodes.value = rebuiltNodes;
       events.value = rebuilt.slice(-200);
 
-      const pendingRequest = beginPendingRequest();
+      const currentPendingRequest = beginPendingRequest();
+      pendingRequest = currentPendingRequest;
       const abortPendingWithRebuild = () => {
-        pendingRequest.controller.abort();
+        currentPendingRequest.controller.abort();
       };
       controller.signal.addEventListener("abort", abortPendingWithRebuild, {
         once: true,
@@ -170,17 +173,17 @@ export const useLocalSliceStore = defineStore("local-slice", () => {
       try {
         pending = await loadPendingOperationIDs(
           context,
-          pendingRequest.controller.signal,
+          currentPendingRequest.controller.signal,
         );
         pendingIsLatest = isLatestPending(
           context,
-          pendingRequest.controller,
-          pendingRequest.sequence,
+          currentPendingRequest.controller,
+          currentPendingRequest.sequence,
         );
       } finally {
         controller.signal.removeEventListener("abort", abortPendingWithRebuild);
-        releaseRequest(pendingRequest.controller);
-        if (pendingController === pendingRequest.controller)
+        releaseRequest(currentPendingRequest.controller);
+        if (pendingController === currentPendingRequest.controller)
           pendingController = undefined;
       }
       if (!isLatestRebuild() || !pendingIsLatest) return;
@@ -189,6 +192,13 @@ export const useLocalSliceStore = defineStore("local-slice", () => {
       unavailable.value = false;
     } catch {
       if (!context) return;
+      if (
+        pendingRequest &&
+        (pendingRequest.controller.signal.aborted ||
+          pendingController !== pendingRequest.controller ||
+          pendingSequence !== pendingRequest.sequence)
+      )
+        return;
       const isLatestRebuild =
         rebuildController === controller &&
         sequence === rebuildSequence &&
