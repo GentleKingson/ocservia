@@ -22,5 +22,7 @@ const api = new OperationsApi(
   }),
 );
 
-await api.listOperations();
+await api.listOperations({
+  xWorkspaceID: "0198f20e-0882-7000-8000-000000000001",
+});
 assert.equal(authorization, "Bearer test-token");

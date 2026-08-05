@@ -9,6 +9,7 @@ import { computed, onScopeDispose, ref } from "vue";
 
 import {
   createLocalSimulation,
+  eventStreamPath,
   getOperation,
   listEvents,
   listOperations,
@@ -59,12 +60,10 @@ export const useLocalSliceStore = defineStore("local-slice", () => {
     }
   }
 
-  function connect(): void {
+  async function connect(): Promise<void> {
     source?.close();
     const cursor = events.value.at(-1)?.id;
-    source = new EventSource(
-      `/api/v1/events/stream${cursor ? `?after=${encodeURIComponent(cursor)}` : ""}`,
-    );
+    source = new EventSource(await eventStreamPath(cursor));
     source.addEventListener("platform", (message) => {
       if (
         !(message instanceof MessageEvent) ||

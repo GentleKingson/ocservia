@@ -14,6 +14,7 @@ import {
   type NodePage,
   type NodeSessionPage,
   type SimulationScenario,
+  type Workspace,
 } from "@ocservia/api-client";
 
 const devAuthToken = import.meta.env.VITE_DEV_AUTH_TOKEN;
@@ -26,10 +27,40 @@ const platform = new PlatformApi(configuration);
 const development = new DevelopmentApi(configuration);
 const events = new EventsApi(configuration);
 const nodes = new NodesApi(configuration);
+let selectedWorkspace: Workspace | undefined;
+
+export async function getWorkspace(): Promise<Workspace> {
+  if (selectedWorkspace) return selectedWorkspace;
+  const page = await platform.listAuthorizedWorkspaces();
+  const workspace = page.items[0];
+  if (!workspace) throw new Error("No authorized workspace is available");
+  selectedWorkspace = workspace;
+  return workspace;
+}
+
+export async function eventStreamPath(after?: string): Promise<string> {
+  const query = new URLSearchParams();
+  if (after) query.set("after", after);
+  try {
+    const workspace = await getWorkspace();
+    query.set("workspace_id", workspace.id);
+  } catch (error) {
+    if (!devAuthToken) throw error;
+  }
+  const encoded = query.toString();
+  return `/api/v1/events/stream${encoded ? `?${encoded}` : ""}`;
+}
+
+async function workspaceID(): Promise<string> {
+  return (await getWorkspace()).id;
+}
 
 export async function listOperations(cursor?: string): Promise<OperationPage> {
+  const xWorkspaceID = await workspaceID();
   return operations.listOperations(
-    cursor ? { cursor, pageSize: 200 } : { pageSize: 200 },
+    cursor
+      ? { xWorkspaceID, cursor, pageSize: 200 }
+      : { xWorkspaceID, pageSize: 200 },
   );
 }
 
@@ -48,14 +79,20 @@ export async function getOperation(operationId: string): Promise<Operation> {
 }
 
 export async function listEvents(after?: string): Promise<PlatformEventPage> {
+  const xWorkspaceID = await workspaceID();
   return events.listEvents(
-    after ? { after, pageSize: 200 } : { pageSize: 200 },
+    after
+      ? { xWorkspaceID, after, pageSize: 200 }
+      : { xWorkspaceID, pageSize: 200 },
   );
 }
 
 export async function listNodes(cursor?: string): Promise<NodePage> {
+  const xWorkspaceID = await workspaceID();
   return nodes.listNodes(
-    cursor ? { cursor, pageSize: 200 } : { pageSize: 200 },
+    cursor
+      ? { xWorkspaceID, cursor, pageSize: 200 }
+      : { xWorkspaceID, pageSize: 200 },
   );
 }
 
@@ -139,9 +176,11 @@ export async function removeIpBan(
 export async function reloadService(
   node: NodeObservedState,
   reason: string,
+  approvalId: string,
 ): Promise<Operation> {
   return operations.reloadNodeService({
     nodeId: node.id,
+    xApprovalID: approvalId,
     ...controlledRequest(node, reason),
   });
 }

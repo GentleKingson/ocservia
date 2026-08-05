@@ -67,6 +67,7 @@ import {
 export interface ApproveNodeRequest {
   nodeId: string;
   nodeApproval: NodeApproval;
+  xApprovalID?: string;
 }
 
 export interface GetNodeRequest {
@@ -91,6 +92,7 @@ export interface ListNodeTelemetryRequest {
 }
 
 export interface ListNodesRequest {
+  xWorkspaceID?: string;
   cursor?: string;
   pageSize?: number;
 }
@@ -98,6 +100,7 @@ export interface ListNodesRequest {
 export interface RevokeNodeRequest {
   nodeId: string;
   nodeRevocation: NodeRevocation;
+  xApprovalID?: string;
 }
 
 /**
@@ -130,9 +133,15 @@ export class NodesApi extends runtime.BaseAPI {
 
     headerParameters["Content-Type"] = "application/json";
 
+    if (requestParameters["xApprovalID"] != null) {
+      headerParameters["X-Approval-ID"] = String(
+        requestParameters["xApprovalID"],
+      );
+    }
+
     if (this.configuration && this.configuration.accessToken) {
       const token = this.configuration.accessToken;
-      const tokenString = await token("oidc", []);
+      const tokenString = await token("bearerAuth", []);
 
       if (tokenString) {
         headerParameters["Authorization"] = `Bearer ${tokenString}`;
@@ -202,7 +211,7 @@ export class NodesApi extends runtime.BaseAPI {
 
     if (this.configuration && this.configuration.accessToken) {
       const token = this.configuration.accessToken;
-      const tokenString = await token("oidc", []);
+      const tokenString = await token("bearerAuth", []);
 
       if (tokenString) {
         headerParameters["Authorization"] = `Bearer ${tokenString}`;
@@ -268,7 +277,7 @@ export class NodesApi extends runtime.BaseAPI {
 
     if (this.configuration && this.configuration.accessToken) {
       const token = this.configuration.accessToken;
-      const tokenString = await token("oidc", []);
+      const tokenString = await token("bearerAuth", []);
 
       if (tokenString) {
         headerParameters["Authorization"] = `Bearer ${tokenString}`;
@@ -346,7 +355,7 @@ export class NodesApi extends runtime.BaseAPI {
 
     if (this.configuration && this.configuration.accessToken) {
       const token = this.configuration.accessToken;
-      const tokenString = await token("oidc", []);
+      const tokenString = await token("bearerAuth", []);
 
       if (tokenString) {
         headerParameters["Authorization"] = `Bearer ${tokenString}`;
@@ -437,7 +446,7 @@ export class NodesApi extends runtime.BaseAPI {
 
     if (this.configuration && this.configuration.accessToken) {
       const token = this.configuration.accessToken;
-      const tokenString = await token("oidc", []);
+      const tokenString = await token("bearerAuth", []);
 
       if (tokenString) {
         headerParameters["Authorization"] = `Bearer ${tokenString}`;
@@ -506,9 +515,15 @@ export class NodesApi extends runtime.BaseAPI {
 
     const headerParameters: runtime.HTTPHeaders = {};
 
+    if (requestParameters["xWorkspaceID"] != null) {
+      headerParameters["X-Workspace-ID"] = String(
+        requestParameters["xWorkspaceID"],
+      );
+    }
+
     if (this.configuration && this.configuration.accessToken) {
       const token = this.configuration.accessToken;
-      const tokenString = await token("oidc", []);
+      const tokenString = await token("bearerAuth", []);
 
       if (tokenString) {
         headerParameters["Authorization"] = `Bearer ${tokenString}`;
@@ -577,9 +592,15 @@ export class NodesApi extends runtime.BaseAPI {
 
     headerParameters["Content-Type"] = "application/json";
 
+    if (requestParameters["xApprovalID"] != null) {
+      headerParameters["X-Approval-ID"] = String(
+        requestParameters["xApprovalID"],
+      );
+    }
+
     if (this.configuration && this.configuration.accessToken) {
       const token = this.configuration.accessToken;
-      const tokenString = await token("oidc", []);
+      const tokenString = await token("bearerAuth", []);
 
       if (tokenString) {
         headerParameters["Authorization"] = `Bearer ${tokenString}`;

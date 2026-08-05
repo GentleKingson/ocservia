@@ -1,5 +1,11 @@
 /* tslint:disable */
 /* eslint-disable */
+export * from "./Approval";
+export * from "./ApprovalDecision";
+export * from "./ApprovalRequest";
+export * from "./AuditEventPage";
+export * from "./AuditVerification";
+export * from "./BreakGlassRequest";
 export * from "./BuildInfo";
 export * from "./ConnectionPathState";
 export * from "./ControlledOperationRequest";
@@ -27,8 +33,11 @@ export * from "./PlatformEventType";
 export * from "./Problem";
 export * from "./QueueMetrics";
 export * from "./Readiness";
+export * from "./RoleBindingRequest";
 export * from "./SimulationScenario";
 export * from "./SyntheticCommandRequest";
 export * from "./TelemetryMetric";
 export * from "./TelemetryPoint";
 export * from "./TelemetryPointPage";
+export * from "./Workspace";
+export * from "./WorkspacePage";

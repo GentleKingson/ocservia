@@ -48,8 +48,8 @@ func TestOperationsRequireAuthenticatedPrincipal(t *testing.T) {
 		if response.Code != http.StatusUnauthorized {
 			t.Fatalf("%s status = %d", path, response.Code)
 		}
-		if response.Header().Get("WWW-Authenticate") != "Bearer" {
-			t.Fatalf("%s missing bearer challenge", path)
+		if response.Header().Get("WWW-Authenticate") != "OIDC" {
+			t.Fatalf("%s missing OIDC challenge", path)
 		}
 	}
 }

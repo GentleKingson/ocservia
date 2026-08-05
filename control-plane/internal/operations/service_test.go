@@ -59,7 +59,15 @@ func TestControlledOperationsRequireTypedTargetsAndReason(t *testing.T) {
 			r.Action = "ip_ban.remove"
 			return r
 		}(),
-		"reload": func() CreateRequest { r := base; r.Kind = ServiceReload; r.Action = "service.reload"; return r }(),
+		"reload": func() CreateRequest {
+			r := base
+			r.Kind = ServiceReload
+			r.Action = "service.reload"
+			r.ActorIdentityID = uuid.Must(uuid.NewV7())
+			r.ActorSessionID = uuid.Must(uuid.NewV7())
+			r.ApprovalID = uuid.Must(uuid.NewV7())
+			return r
+		}(),
 	} {
 		t.Run(name, func(t *testing.T) {
 			if err := validateCreate(request); err != nil {
@@ -87,6 +95,17 @@ func TestControlledOperationsRequireTypedTargetsAndReason(t *testing.T) {
 	invalid.IP = "192.0.2.009"
 	if err := validateCreate(invalid); err == nil {
 		t.Fatal("non-canonical IP was accepted")
+	}
+}
+
+func TestServiceReloadRequiresIndependentApprovalMetadata(t *testing.T) {
+	request := CreateRequest{NodeID: uuid.Must(uuid.NewV7()), IdempotencyKey: "stable-key", ExpectedVersion: 1, Kind: ServiceReload, ActorID: "operator", Action: "service.reload", Reason: "change", TTL: time.Minute, RequestID: "request", Traceparent: "00-0123456789abcdef0123456789abcdef-0123456789abcdef-01"}
+	if err := validateCreate(request); err == nil {
+		t.Fatal("high-risk reload accepted without approval metadata")
+	}
+	request.ActorIdentityID, request.ActorSessionID, request.ApprovalID = uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7())
+	if err := validateCreate(request); err != nil {
+		t.Fatalf("approved reload rejected: %v", err)
 	}
 }
 

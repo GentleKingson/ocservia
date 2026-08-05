@@ -24,7 +24,7 @@ func (s *Server) listNodes(w http.ResponseWriter, r *http.Request) {
 		writeProblem(w, r, http.StatusBadRequest, "https://ocservia.dev/problems/invalid-page-size", "Invalid page size", "page_size must be between 1 and 200")
 		return
 	}
-	nodes, hasMore, err := s.telemetry.ListNodes(r.Context(), after, limit)
+	nodes, hasMore, err := s.telemetry.ListNodesInWorkspace(r.Context(), workspace(r), after, limit)
 	if err != nil {
 		s.logger.Error("list nodes failed", "error", err)
 		writeProblem(w, r, http.StatusServiceUnavailable, "https://ocservia.dev/problems/database-unavailable", "Nodes unavailable", "node state could not be read")

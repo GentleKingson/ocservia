@@ -143,14 +143,18 @@ func (s *Service) GetOperation(ctx context.Context, id uuid.UUID) (Operation, er
 }
 
 func (s *Service) ListOperations(ctx context.Context, after uuid.UUID, limit int) ([]Operation, bool, error) {
+	return s.ListOperationsInWorkspace(ctx, uuid.Nil, after, limit)
+}
+
+func (s *Service) ListOperationsInWorkspace(ctx context.Context, workspaceID, after uuid.UUID, limit int) ([]Operation, bool, error) {
 	if limit < 1 || limit > 200 {
 		return nil, false, errors.New("operation page size must be between 1 and 200")
 	}
 	rows, err := s.pool.Query(ctx, `
 		SELECT id::text, state, node_id::text, command_id::text, version, created_at, updated_at
 		FROM operations
-		WHERE ($1::uuid IS NULL OR id < $1)
-		ORDER BY id DESC LIMIT $2`, nullableUUID(after), limit+1)
+		WHERE ($1::uuid IS NULL OR id < $1) AND ($3::uuid IS NULL OR workspace_id=$3)
+		ORDER BY id DESC LIMIT $2`, nullableUUID(after), limit+1, nullableUUID(workspaceID))
 	if err != nil {
 		return nil, false, fmt.Errorf("list operations: %w", err)
 	}
@@ -184,17 +188,21 @@ func optionalText(value pgtype.Text) *string {
 }
 
 func (s *Service) ListEvents(ctx context.Context, after uuid.UUID, limit int) ([]Event, bool, error) {
+	return s.ListEventsInWorkspace(ctx, uuid.Nil, after, limit)
+}
+
+func (s *Service) ListEventsInWorkspace(ctx context.Context, workspaceID, after uuid.UUID, limit int) ([]Event, bool, error) {
 	if limit < 1 || limit > 200 {
 		return nil, false, errors.New("event page size must be between 1 and 200")
 	}
 	rows, err := s.pool.Query(ctx, `
-		SELECT event_id::text, node_id::text, event_type, traceparent, occurred_at
-		FROM transport_events
-		WHERE ($1::uuid IS NULL OR ingest_sequence > (
+		SELECT event.event_id::text, event.node_id::text, event.event_type, event.traceparent, event.occurred_at
+		FROM transport_events event JOIN nodes node ON node.id=event.node_id
+		WHERE ($1::uuid IS NULL OR event.ingest_sequence > (
 			SELECT ingest_sequence FROM transport_events WHERE event_id = $1
-		))
-		ORDER BY ingest_sequence
-		LIMIT $2`, nullableUUID(after), limit+1)
+		)) AND ($3::uuid IS NULL OR node.workspace_id=$3)
+		ORDER BY event.ingest_sequence
+		LIMIT $2`, nullableUUID(after), limit+1, nullableUUID(workspaceID))
 	if err != nil {
 		return nil, false, fmt.Errorf("list transport events: %w", err)
 	}
@@ -589,15 +597,27 @@ func ingestAgentCommandResult(ctx context.Context, tx pgx.Tx, eventID, nodeID uu
 	if state == "rejected" {
 		operationState = "failed"
 	}
-	operationTag, err := tx.Exec(ctx, `UPDATE operations SET state=$2,version=version+1,updated_at=GREATEST(updated_at,$3),completed_at=CASE WHEN $4::boolean THEN GREATEST(COALESCE(completed_at,$3),$3) ELSE NULL END WHERE command_id=$1 AND state IN ('dispatched','accepted','running','unknown')`, commandID, operationState, observedAt, terminal)
-	if err != nil {
+	var operationID, workspaceID uuid.UUID
+	var operationRequestID, operationTraceID string
+	err = tx.QueryRow(ctx, `UPDATE operations SET state=$2,version=version+1,updated_at=GREATEST(updated_at,$3),completed_at=CASE WHEN $4::boolean THEN GREATEST(COALESCE(completed_at,$3),$3) ELSE NULL END WHERE command_id=$1 AND state IN ('dispatched','accepted','running','unknown') RETURNING id,workspace_id,request_id,COALESCE(trace_id,'')`, commandID, operationState, observedAt, terminal).Scan(&operationID, &workspaceID, &operationRequestID, &operationTraceID)
+	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
 		return fmt.Errorf("apply Agent operation result: %w", err)
 	}
-	if operationTag.RowsAffected() != 1 {
+	if errors.Is(err, pgx.ErrNoRows) {
 		return errors.New("command result does not match a mutable operation")
 	}
-	if _, err := tx.Exec(ctx, `INSERT INTO operation_events(id,operation_id,state,occurred_at) SELECT $2,id,$3,$4 FROM operations WHERE command_id=$1`, commandID, operationEventID, operationState, observedAt); err != nil {
+	if _, err := tx.Exec(ctx, `INSERT INTO operation_events(id,operation_id,state,occurred_at) VALUES($1,$2,$3,$4)`, operationEventID, operationID, operationState, observedAt); err != nil {
 		return fmt.Errorf("append Agent operation result event: %w", err)
+	}
+	if terminal {
+		auditResult := "failed"
+		if operationState == "succeeded" {
+			auditResult = "succeeded"
+		}
+		action := commandAuditAction(&envelope)
+		if err := audit.AppendChain(ctx, tx, audit.ChainRecord{WorkspaceID: workspaceID, ActorType: "agent", ActorID: envelope.GetActorId(), Action: action, ResourceType: "operation", ResourceID: operationID, NodeID: &nodeID, CommandID: &commandID, RequestID: operationRequestID, TraceID: operationTraceID, Result: auditResult, Reason: envelope.GetReason(), ErrorType: result.GetErrorCode(), At: observedAt}); err != nil {
+			return fmt.Errorf("append Agent audit result: %w", err)
+		}
 	}
 	if state == "unknown" {
 		if err := scheduleCommandRecovery(ctx, tx, commandID, &envelope, result.GetErrorCode(), observedAt); err != nil {
@@ -605,6 +625,21 @@ func ingestAgentCommandResult(ctx context.Context, tx pgx.Tx, eventID, nodeID uu
 		}
 	}
 	return nil
+}
+
+func commandAuditAction(envelope *agentv1.CommandEnvelope) string {
+	switch envelope.GetPayload().(type) {
+	case *agentv1.CommandEnvelope_SessionDisconnect:
+		return "session.disconnect"
+	case *agentv1.CommandEnvelope_SessionTerminate:
+		return "session.terminate"
+	case *agentv1.CommandEnvelope_IpBanRemove:
+		return "ip_ban.remove"
+	case *agentv1.CommandEnvelope_ServiceReload:
+		return "service.reload"
+	default:
+		return "synthetic.command"
+	}
 }
 
 func scheduleCommandRecovery(ctx context.Context, tx pgx.Tx, commandID uuid.UUID, envelope *agentv1.CommandEnvelope, reason string, observedAt time.Time) error {

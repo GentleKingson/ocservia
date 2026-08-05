@@ -344,6 +344,10 @@ func validObject(value json.RawMessage) bool {
 }
 
 func (s *Service) ListNodes(ctx context.Context, after uuid.UUID, limit int) ([]Node, bool, error) {
+	return s.ListNodesInWorkspace(ctx, uuid.Nil, after, limit)
+}
+
+func (s *Service) ListNodesInWorkspace(ctx context.Context, workspaceID, after uuid.UUID, limit int) ([]Node, bool, error) {
 	if limit < 1 || limit > 200 {
 		return nil, false, errors.New("node page size must be between 1 and 200")
 	}
@@ -351,7 +355,7 @@ func (s *Service) ListNodes(ctx context.Context, after uuid.UUID, limit int) ([]
 	if after != uuid.Nil {
 		cursor = after
 	}
-	rows, err := s.pool.Query(ctx, `SELECT n.id::text,n.name,n.version,n.status,o.observed_at,o.last_heartbeat_at,o.boot_id,o.agent_instance_id::text,o.agent_version,o.ocserv_version,o.os_release,o.ocserv,o.system,o.path,o.dropped_security,o.dropped_health,o.dropped_aggregate,o.dropped_raw,(SELECT count(*) FROM node_sessions ss WHERE ss.node_id=n.id) FROM nodes n LEFT JOIN node_observed_snapshots o ON o.node_id=n.id WHERE ($1::uuid IS NULL OR n.id>$1) ORDER BY n.id LIMIT $2`, cursor, limit+1)
+	rows, err := s.pool.Query(ctx, `SELECT n.id::text,n.name,n.version,n.status,o.observed_at,o.last_heartbeat_at,o.boot_id,o.agent_instance_id::text,o.agent_version,o.ocserv_version,o.os_release,o.ocserv,o.system,o.path,o.dropped_security,o.dropped_health,o.dropped_aggregate,o.dropped_raw,(SELECT count(*) FROM node_sessions ss WHERE ss.node_id=n.id) FROM nodes n LEFT JOIN node_observed_snapshots o ON o.node_id=n.id WHERE ($1::uuid IS NULL OR n.id>$1) AND ($3::uuid IS NULL OR n.workspace_id=$3) ORDER BY n.id LIMIT $2`, cursor, limit+1, nullableWorkspace(workspaceID))
 	if err != nil {
 		return nil, false, fmt.Errorf("list nodes: %w", err)
 	}
@@ -372,6 +376,13 @@ func (s *Service) ListNodes(ctx context.Context, after uuid.UUID, limit int) ([]
 		result = result[:limit]
 	}
 	return result, hasMore, nil
+}
+
+func nullableWorkspace(id uuid.UUID) any {
+	if id == uuid.Nil {
+		return nil
+	}
+	return id
 }
 
 func (s *Service) GetNode(ctx context.Context, id uuid.UUID) (Node, error) {

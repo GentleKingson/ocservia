@@ -14,9 +14,13 @@ import (
 	"sync"
 	"time"
 
+	"github.com/GentleKingson/ocservia/control-plane/internal/approvals"
+	"github.com/GentleKingson/ocservia/control-plane/internal/audit"
+	"github.com/GentleKingson/ocservia/control-plane/internal/auth"
 	"github.com/GentleKingson/ocservia/control-plane/internal/enrollment"
 	"github.com/GentleKingson/ocservia/control-plane/internal/localslice"
 	operationstore "github.com/GentleKingson/ocservia/control-plane/internal/operations"
+	"github.com/GentleKingson/ocservia/control-plane/internal/rbac"
 	telemetrystore "github.com/GentleKingson/ocservia/control-plane/internal/telemetry"
 	"github.com/GentleKingson/ocservia/control-plane/internal/transportclient"
 	"github.com/GentleKingson/ocservia/control-plane/migrations"
@@ -48,6 +52,10 @@ type Server struct {
 	enrollment     *enrollment.Service
 	transport      *transportclient.Client
 	telemetry      *telemetrystore.Service
+	auth           *auth.Service
+	rbac           *rbac.Service
+	approvals      *approvals.Service
+	audit          *audit.Manager
 }
 
 func New(address string, pool *pgxpool.Pool, build BuildInfo, logger *slog.Logger, bodyLimit int64, requestTimeout time.Duration, devAuth bool, devAuthToken string, expectedSchema int64) *Server {
@@ -59,6 +67,10 @@ func New(address string, pool *pgxpool.Pool, build BuildInfo, logger *slog.Logge
 	mux.HandleFunc("GET /api/v1/livez", s.live)
 	mux.HandleFunc("GET /api/v1/readyz", s.ready)
 	mux.HandleFunc("GET /api/v1/version", s.version)
+	mux.HandleFunc("GET /api/v1/auth/login", s.login)
+	mux.HandleFunc("GET /api/v1/auth/callback", s.callback)
+	mux.HandleFunc("POST /api/v1/auth/logout", s.requireOperationAuth(s.logout))
+	mux.HandleFunc("POST /api/v1/auth/break-glass", s.breakGlass)
 	mux.HandleFunc("POST /api/v1/development/simulations", s.createSimulation)
 	mux.HandleFunc("GET /api/v1/development/runtime", s.developmentRuntime)
 	mux.HandleFunc("GET /api/v1/operations", s.requireOperationAuth(s.listOperations))
@@ -69,8 +81,8 @@ func New(address string, pool *pgxpool.Pool, build BuildInfo, logger *slog.Logge
 	mux.HandleFunc("POST /api/v1/nodes/{node_id}/sessions/{session_action}", s.requireOperationAuth(s.sessionAction))
 	mux.HandleFunc("POST /api/v1/nodes/{node_id}/ip-bans/{ip_action}", s.requireOperationAuth(s.ipBanAction))
 	mux.HandleFunc("POST /api/v1/nodes/{node_id}/service:reload", s.requireOperationAuth(s.reloadService))
-	mux.HandleFunc("GET /api/v1/events", s.listEvents)
-	mux.HandleFunc("GET /api/v1/events/stream", s.streamEvents)
+	mux.HandleFunc("GET /api/v1/events", s.requireOperationAuth(s.listEvents))
+	mux.HandleFunc("GET /api/v1/events/stream", s.requireOperationAuth(s.streamEvents))
 	mux.HandleFunc("POST /api/v1/enrollment-tokens", s.requireOperationAuth(s.createEnrollmentToken))
 	mux.HandleFunc("POST /api/v1/nodes/{node_id}/approval", s.requireOperationAuth(s.approveNode))
 	mux.HandleFunc("POST /api/v1/nodes/{node_id}/revocation", s.requireOperationAuth(s.revokeNode))
@@ -79,6 +91,12 @@ func New(address string, pool *pgxpool.Pool, build BuildInfo, logger *slog.Logge
 	mux.HandleFunc("GET /api/v1/nodes/{node_id}/sessions", s.requireOperationAuth(s.listNodeSessions))
 	mux.HandleFunc("GET /api/v1/nodes/{node_id}/ip-bans", s.requireOperationAuth(s.listNodeIPBans))
 	mux.HandleFunc("GET /api/v1/nodes/{node_id}/telemetry", s.requireOperationAuth(s.listNodeTelemetry))
+	mux.HandleFunc("POST /api/v1/approval-requests", s.requireOperationAuth(s.createApproval))
+	mux.HandleFunc("POST /api/v1/approval-requests/{approval_id}", s.requireOperationAuth(s.approveRequest))
+	mux.HandleFunc("GET /api/v1/audit/events", s.requireOperationAuth(s.listAuditEvents))
+	mux.HandleFunc("POST /api/v1/audit:verify", s.requireOperationAuth(s.verifyAudit))
+	mux.HandleFunc("GET /api/v1/workspaces", s.requireOperationAuth(s.listWorkspaces))
+	mux.HandleFunc("POST /api/v1/role-bindings", s.requireOperationAuth(s.createRoleBinding))
 	handler := s.requestContext(s.limitBody(s.timeout(s.routeErrors(mux))))
 	s.http = &http.Server{Addr: address, Handler: otelhttp.NewHandler(handler, "http.server"), ReadHeaderTimeout: 5 * time.Second, IdleTimeout: 60 * time.Second}
 	return s
@@ -87,6 +105,10 @@ func New(address string, pool *pgxpool.Pool, build BuildInfo, logger *slog.Logge
 func (s *Server) EnableTelemetry(service *telemetrystore.Service) { s.telemetry = service }
 
 func (s *Server) EnableOperations(service *operationstore.Service) { s.operations = service }
+
+func (s *Server) EnableAuthorization(authn *auth.Service, authz *rbac.Service, approvalService *approvals.Service, auditManager *audit.Manager) {
+	s.auth, s.rbac, s.approvals, s.audit = authn, authz, approvalService, auditManager
+}
 
 func (s *Server) EnableEnrollment(service *enrollment.Service, transport *transportclient.Client) {
 	s.enrollment = service
@@ -173,13 +195,13 @@ func (s *Server) routeErrors(next http.Handler) http.Handler {
 
 func routeMethod(path string) (string, bool) {
 	switch path {
-	case "/livez", "/readyz", "/version", "/api/v1/livez", "/api/v1/readyz", "/api/v1/version", "/api/v1/operations", "/api/v1/operations/queue-metrics", "/api/v1/events", "/api/v1/events/stream", "/api/v1/development/runtime":
+	case "/livez", "/readyz", "/version", "/api/v1/livez", "/api/v1/readyz", "/api/v1/version", "/api/v1/operations", "/api/v1/operations/queue-metrics", "/api/v1/events", "/api/v1/events/stream", "/api/v1/development/runtime", "/api/v1/auth/login", "/api/v1/auth/callback", "/api/v1/audit/events", "/api/v1/workspaces":
 		return http.MethodGet, true
 	case "/api/v1/nodes":
 		return http.MethodGet, true
 	case "/api/v1/development/simulations":
 		return http.MethodPost, true
-	case "/api/v1/enrollment-tokens":
+	case "/api/v1/enrollment-tokens", "/api/v1/auth/logout", "/api/v1/auth/break-glass", "/api/v1/approval-requests", "/api/v1/audit:verify", "/api/v1/role-bindings":
 		return http.MethodPost, true
 	}
 	parts := strings.Split(strings.Trim(path, "/"), "/")
@@ -206,6 +228,9 @@ func routeMethod(path string) (string, bool) {
 	}
 	if len(parts) == 5 && parts[0] == "api" && parts[1] == "v1" && parts[2] == "operations" && parts[3] != "" && parts[4] == "events" {
 		return http.MethodGet, true
+	}
+	if len(parts) == 4 && parts[0] == "api" && parts[1] == "v1" && parts[2] == "approval-requests" && strings.HasSuffix(parts[3], ":approve") {
+		return http.MethodPost, true
 	}
 	operationID := strings.TrimPrefix(path, "/api/v1/operations/")
 	if operationID != path && operationID != "" && !strings.Contains(operationID, "/") {
@@ -251,12 +276,18 @@ func (s *Server) requestContext(next http.Handler) http.Handler {
 
 func (s *Server) requireOperationAuth(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if !s.hasOperationPrincipal(r) {
-			w.Header().Set("WWW-Authenticate", "Bearer")
+		principal, err := s.authenticate(r)
+		if err != nil {
+			w.Header().Set("WWW-Authenticate", "OIDC")
 			writeProblem(w, r, http.StatusUnauthorized, "https://ocservia.dev/problems/unauthenticated", "Authentication required", "operation state requires an authenticated principal")
 			return
 		}
-		next(w, r)
+		ctx, err := s.authorizeRoute(r, principal)
+		if err != nil {
+			s.writeAuthorizationError(w, r, err)
+			return
+		}
+		next(w, r.WithContext(ctx))
 	}
 }
 

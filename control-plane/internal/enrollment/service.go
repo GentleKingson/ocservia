@@ -17,6 +17,7 @@ import (
 
 	agentv1 "github.com/GentleKingson/ocservia/control-plane/gen/proto/ocserv/platform/agent/v1"
 	transportv1 "github.com/GentleKingson/ocservia/control-plane/gen/proto/ocserv/platform/transport/v1"
+	approvalstore "github.com/GentleKingson/ocservia/control-plane/internal/approvals"
 	"github.com/GentleKingson/ocservia/control-plane/internal/audit"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -59,20 +60,22 @@ type Token struct {
 }
 
 type Approval struct {
-	NodeID       uuid.UUID
-	Labels       map[string]string
-	Policy       string
-	Capabilities []string
-	ActorID      string
-	Reason       string
-	RequestID    string
+	NodeID                            uuid.UUID
+	Labels                            map[string]string
+	Policy                            string
+	Capabilities                      []string
+	ActorID                           string
+	Reason                            string
+	RequestID                         string
+	ApprovalID, IdentityID, SessionID uuid.UUID
 }
 
 type Revocation struct {
-	NodeID    uuid.UUID
-	ActorID   string
-	Reason    string
-	RequestID string
+	NodeID                            uuid.UUID
+	ActorID                           string
+	Reason                            string
+	RequestID                         string
+	ApprovalID, IdentityID, SessionID uuid.UUID
 }
 
 type NodeTrust struct {
@@ -261,7 +264,7 @@ func (s *Service) Enroll(ctx context.Context, request *agentv1.EnrollRequest) (*
 }
 
 func (s *Service) Approve(ctx context.Context, approval Approval) (NodeTrust, error) {
-	if approval.NodeID == uuid.Nil || !validActor(approval.ActorID, approval.RequestID, approval.Reason) || !validPolicy(approval.Policy) || len(approval.Labels) > 32 {
+	if approval.NodeID == uuid.Nil || approval.ApprovalID == uuid.Nil || approval.IdentityID == uuid.Nil || approval.SessionID == uuid.Nil || !validActor(approval.ActorID, approval.RequestID, approval.Reason) || !validPolicy(approval.Policy) || len(approval.Labels) > 32 {
 		return NodeTrust{}, ErrInvalidRequest
 	}
 	if !validCapabilities(approval.Capabilities) {
@@ -295,6 +298,9 @@ func (s *Service) Approve(ctx context.Context, approval Approval) (NodeTrust, er
 	if currentStatus == "active" || currentStatus == "offline" {
 		return NodeTrust{NodeID: approval.NodeID, EndpointID: endpointID, Revision: revision}, nil
 	}
+	if err := approvalstore.Consume(ctx, tx, approval.ApprovalID, workspaceID, approval.IdentityID, "node.approve", "node", approval.NodeID); err != nil {
+		return NodeTrust{}, err
+	}
 	labels := mapToJSON(approval.Labels)
 	now := s.now().UTC()
 	if err := tx.QueryRow(ctx, `UPDATE nodes SET status='active',labels=$2::jsonb,policy=$3,version=version+1,updated_at=$4 WHERE id=$1 RETURNING version`, approval.NodeID, labels, approval.Policy, now).Scan(&revision); err != nil {
@@ -311,7 +317,7 @@ func (s *Service) Approve(ctx context.Context, approval Approval) (NodeTrust, er
 			return NodeTrust{}, fmt.Errorf("approve capability: %w", err)
 		}
 	}
-	if err := audit.AppendChain(ctx, tx, audit.ChainRecord{WorkspaceID: workspaceID, ActorType: "user", ActorID: approval.ActorID, Action: "node.approve", ResourceType: "node", ResourceID: approval.NodeID, RequestID: approval.RequestID, Reason: approval.Reason, At: now}); err != nil {
+	if err := audit.AppendChain(ctx, tx, audit.ChainRecord{WorkspaceID: workspaceID, ActorType: "user", ActorID: approval.ActorID, SessionID: &approval.SessionID, ApprovalID: &approval.ApprovalID, NodeID: &approval.NodeID, Action: "node.approve", ResourceType: "node", ResourceID: approval.NodeID, RequestID: approval.RequestID, Reason: approval.Reason, At: now}); err != nil {
 		return NodeTrust{}, err
 	}
 	if err := tx.Commit(ctx); err != nil {
@@ -321,7 +327,7 @@ func (s *Service) Approve(ctx context.Context, approval Approval) (NodeTrust, er
 }
 
 func (s *Service) Revoke(ctx context.Context, revocation Revocation) (NodeTrust, error) {
-	if revocation.NodeID == uuid.Nil || !validActor(revocation.ActorID, revocation.RequestID, revocation.Reason) {
+	if revocation.NodeID == uuid.Nil || revocation.ApprovalID == uuid.Nil || revocation.IdentityID == uuid.Nil || revocation.SessionID == uuid.Nil || !validActor(revocation.ActorID, revocation.RequestID, revocation.Reason) {
 		return NodeTrust{}, ErrInvalidRequest
 	}
 	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{})
@@ -343,6 +349,9 @@ func (s *Service) Revoke(ctx context.Context, revocation Revocation) (NodeTrust,
 	if currentStatus == "revoked" {
 		return NodeTrust{NodeID: revocation.NodeID, EndpointID: endpointID, Revision: revision}, nil
 	}
+	if err := approvalstore.Consume(ctx, tx, revocation.ApprovalID, workspaceID, revocation.IdentityID, "node.revoke", "node", revocation.NodeID); err != nil {
+		return NodeTrust{}, err
+	}
 	now := s.now().UTC()
 	if err := tx.QueryRow(ctx, `UPDATE nodes SET status='revoked',version=version+1,updated_at=$2 WHERE id=$1 RETURNING version`, revocation.NodeID, now).Scan(&revision); err != nil {
 		return NodeTrust{}, err
@@ -350,7 +359,7 @@ func (s *Service) Revoke(ctx context.Context, revocation Revocation) (NodeTrust,
 	if _, err := tx.Exec(ctx, `UPDATE node_endpoint_keys SET state='revoked',revoked_at=$2 WHERE node_id=$1`, revocation.NodeID, now); err != nil {
 		return NodeTrust{}, err
 	}
-	if err := audit.AppendChain(ctx, tx, audit.ChainRecord{WorkspaceID: workspaceID, ActorType: "user", ActorID: revocation.ActorID, Action: "node.revoke", ResourceType: "node", ResourceID: revocation.NodeID, RequestID: revocation.RequestID, Reason: revocation.Reason, At: now}); err != nil {
+	if err := audit.AppendChain(ctx, tx, audit.ChainRecord{WorkspaceID: workspaceID, ActorType: "user", ActorID: revocation.ActorID, SessionID: &revocation.SessionID, ApprovalID: &revocation.ApprovalID, NodeID: &revocation.NodeID, Action: "node.revoke", ResourceType: "node", ResourceID: revocation.NodeID, RequestID: revocation.RequestID, Reason: revocation.Reason, At: now}); err != nil {
 		return NodeTrust{}, err
 	}
 	if err := tx.Commit(ctx); err != nil {

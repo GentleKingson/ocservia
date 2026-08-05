@@ -8,11 +8,15 @@ import (
 	"time"
 
 	"github.com/GentleKingson/ocservia/control-plane/internal/api"
+	"github.com/GentleKingson/ocservia/control-plane/internal/approvals"
+	"github.com/GentleKingson/ocservia/control-plane/internal/audit"
+	"github.com/GentleKingson/ocservia/control-plane/internal/auth"
 	"github.com/GentleKingson/ocservia/control-plane/internal/enrollment"
 	"github.com/GentleKingson/ocservia/control-plane/internal/localslice"
 	operationstore "github.com/GentleKingson/ocservia/control-plane/internal/operations"
 	"github.com/GentleKingson/ocservia/control-plane/internal/platform/config"
 	"github.com/GentleKingson/ocservia/control-plane/internal/platform/telemetry"
+	"github.com/GentleKingson/ocservia/control-plane/internal/rbac"
 	telemetrystore "github.com/GentleKingson/ocservia/control-plane/internal/telemetry"
 	"github.com/GentleKingson/ocservia/control-plane/internal/transportclient"
 	"github.com/GentleKingson/ocservia/control-plane/internal/trustserver"
@@ -97,12 +101,17 @@ func Run(ctx context.Context, cfg config.Config, build BuildInfo, logger *slog.L
 		go func() { workerErr <- operationWorker.Run(componentCtx) }()
 	}
 	telemetryService := telemetrystore.New(pool)
+	auditManager := audit.NewManager(pool, cfg.AuditCheckpointKey)
 	if cfg.RunsScheduler() {
 		go func() {
 			ticker := time.NewTicker(30 * time.Second)
 			defer ticker.Stop()
 			for {
 				if err := telemetryService.Maintain(componentCtx); err != nil {
+					maintenanceErr <- err
+					return
+				}
+				if err := auditManager.CheckpointAll(componentCtx); err != nil {
 					maintenanceErr <- err
 					return
 				}
@@ -135,6 +144,14 @@ func Run(ctx context.Context, cfg config.Config, build BuildInfo, logger *slog.L
 	}
 
 	server := api.New(cfg.HTTPAddress, pool, api.BuildInfo{Version: build.Version, Commit: build.Commit, Role: string(cfg.Role)}, logger, cfg.BodyLimit, cfg.RequestTimeout, operationAuthEnabled(cfg), cfg.DevAuthToken, expectedSchemaVersion)
+	var authService *auth.Service
+	if cfg.OIDCEnabled() {
+		authService, err = auth.New(ctx, pool, auth.Config{Issuer: cfg.OIDCIssuer, ClientID: cfg.OIDCClientID, ClientSecret: cfg.OIDCClientSecret, RedirectURL: cfg.OIDCRedirectURL, SessionKey: cfg.SessionKey, SessionTTL: cfg.SessionTTL, BreakGlassEnabled: cfg.BreakGlassEnabled, BreakGlassTokenHash: cfg.BreakGlassTokenHash})
+		if err != nil {
+			return fmt.Errorf("configure OIDC: %w", err)
+		}
+	}
+	server.EnableAuthorization(authService, rbac.New(pool), approvals.New(pool), auditManager)
 	server.EnableOperations(operationService)
 	server.EnableTelemetry(telemetryService)
 	if cfg.ControllerEndpointID != "" {

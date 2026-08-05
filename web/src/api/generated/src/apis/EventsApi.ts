@@ -14,6 +14,16 @@
 
 import * as runtime from "../runtime";
 import {
+  type AuditEventPage,
+  AuditEventPageFromJSON,
+  AuditEventPageToJSON,
+} from "../models/AuditEventPage";
+import {
+  type AuditVerification,
+  AuditVerificationFromJSON,
+  AuditVerificationToJSON,
+} from "../models/AuditVerification";
+import {
   type PlatformEventPage,
   PlatformEventPageFromJSON,
   PlatformEventPageToJSON,
@@ -24,12 +34,23 @@ import {
   ProblemToJSON,
 } from "../models/Problem";
 
+export interface ListAuditEventsRequest {
+  xWorkspaceID?: string;
+  pageSize?: number;
+}
+
 export interface ListEventsRequest {
+  xWorkspaceID?: string;
   after?: string;
   pageSize?: number;
 }
 
+export interface VerifyAuditChainRequest {
+  xWorkspaceID?: string;
+}
+
 export interface WatchEventsRequest {
+  xWorkspaceID?: string;
   lastEventID?: string;
 }
 
@@ -37,6 +58,75 @@ export interface WatchEventsRequest {
  *
  */
 export class EventsApi extends runtime.BaseAPI {
+  /**
+   * Creates request options for listAuditEvents without sending the request
+   */
+  async listAuditEventsRequestOpts(
+    requestParameters: ListAuditEventsRequest,
+  ): Promise<runtime.RequestOpts> {
+    const queryParameters: any = {};
+
+    if (requestParameters["pageSize"] != null) {
+      queryParameters["page_size"] = requestParameters["pageSize"];
+    }
+
+    const headerParameters: runtime.HTTPHeaders = {};
+
+    if (requestParameters["xWorkspaceID"] != null) {
+      headerParameters["X-Workspace-ID"] = String(
+        requestParameters["xWorkspaceID"],
+      );
+    }
+
+    if (this.configuration && this.configuration.accessToken) {
+      const token = this.configuration.accessToken;
+      const tokenString = await token("bearerAuth", []);
+
+      if (tokenString) {
+        headerParameters["Authorization"] = `Bearer ${tokenString}`;
+      }
+    }
+
+    let urlPath = `/audit/events`;
+
+    return {
+      path: urlPath,
+      method: "GET",
+      headers: headerParameters,
+      query: queryParameters,
+    };
+  }
+
+  /**
+   * List append-only audit events
+   */
+  async listAuditEventsRaw(
+    requestParameters: ListAuditEventsRequest,
+    initOverrides?: RequestInit | runtime.InitOverrideFunction,
+  ): Promise<runtime.ApiResponse<AuditEventPage>> {
+    const requestOptions =
+      await this.listAuditEventsRequestOpts(requestParameters);
+    const response = await this.request(requestOptions, initOverrides);
+
+    return new runtime.JSONApiResponse(response, (jsonValue) =>
+      AuditEventPageFromJSON(jsonValue),
+    );
+  }
+
+  /**
+   * List append-only audit events
+   */
+  async listAuditEvents(
+    requestParameters: ListAuditEventsRequest = {},
+    initOverrides?: RequestInit | runtime.InitOverrideFunction,
+  ): Promise<AuditEventPage> {
+    const response = await this.listAuditEventsRaw(
+      requestParameters,
+      initOverrides,
+    );
+    return await response.value();
+  }
+
   /**
    * Creates request options for listEvents without sending the request
    */
@@ -54,6 +144,12 @@ export class EventsApi extends runtime.BaseAPI {
     }
 
     const headerParameters: runtime.HTTPHeaders = {};
+
+    if (requestParameters["xWorkspaceID"] != null) {
+      headerParameters["X-Workspace-ID"] = String(
+        requestParameters["xWorkspaceID"],
+      );
+    }
 
     let urlPath = `/events`;
 
@@ -92,6 +188,71 @@ export class EventsApi extends runtime.BaseAPI {
   }
 
   /**
+   * Creates request options for verifyAuditChain without sending the request
+   */
+  async verifyAuditChainRequestOpts(
+    requestParameters: VerifyAuditChainRequest,
+  ): Promise<runtime.RequestOpts> {
+    const queryParameters: any = {};
+
+    const headerParameters: runtime.HTTPHeaders = {};
+
+    if (requestParameters["xWorkspaceID"] != null) {
+      headerParameters["X-Workspace-ID"] = String(
+        requestParameters["xWorkspaceID"],
+      );
+    }
+
+    if (this.configuration && this.configuration.accessToken) {
+      const token = this.configuration.accessToken;
+      const tokenString = await token("bearerAuth", []);
+
+      if (tokenString) {
+        headerParameters["Authorization"] = `Bearer ${tokenString}`;
+      }
+    }
+
+    let urlPath = `/audit:verify`;
+
+    return {
+      path: urlPath,
+      method: "POST",
+      headers: headerParameters,
+      query: queryParameters,
+    };
+  }
+
+  /**
+   * Verify the workspace audit hash chain and latest checkpoint
+   */
+  async verifyAuditChainRaw(
+    requestParameters: VerifyAuditChainRequest,
+    initOverrides?: RequestInit | runtime.InitOverrideFunction,
+  ): Promise<runtime.ApiResponse<AuditVerification>> {
+    const requestOptions =
+      await this.verifyAuditChainRequestOpts(requestParameters);
+    const response = await this.request(requestOptions, initOverrides);
+
+    return new runtime.JSONApiResponse(response, (jsonValue) =>
+      AuditVerificationFromJSON(jsonValue),
+    );
+  }
+
+  /**
+   * Verify the workspace audit hash chain and latest checkpoint
+   */
+  async verifyAuditChain(
+    requestParameters: VerifyAuditChainRequest = {},
+    initOverrides?: RequestInit | runtime.InitOverrideFunction,
+  ): Promise<AuditVerification> {
+    const response = await this.verifyAuditChainRaw(
+      requestParameters,
+      initOverrides,
+    );
+    return await response.value();
+  }
+
+  /**
    * Creates request options for watchEvents without sending the request
    */
   async watchEventsRequestOpts(
@@ -100,6 +261,12 @@ export class EventsApi extends runtime.BaseAPI {
     const queryParameters: any = {};
 
     const headerParameters: runtime.HTTPHeaders = {};
+
+    if (requestParameters["xWorkspaceID"] != null) {
+      headerParameters["X-Workspace-ID"] = String(
+        requestParameters["xWorkspaceID"],
+      );
+    }
 
     if (requestParameters["lastEventID"] != null) {
       headerParameters["Last-Event-ID"] = String(

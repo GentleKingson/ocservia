@@ -9,7 +9,8 @@ interface OpenApiDocument {
   paths?: Record<string, Record<string, unknown>>;
   components?: {
     securitySchemes?: {
-      oidc?: { type?: unknown; scheme?: unknown };
+      oidc?: { type?: unknown; in?: unknown; name?: unknown };
+      bearerAuth?: { type?: unknown; scheme?: unknown };
     };
     schemas?: {
       UuidV7?: { pattern?: unknown };
@@ -46,6 +47,11 @@ describe("OpenAPI invariants", () => {
         ?.writeOnly,
     ).toBeUndefined();
     expect(document.components?.securitySchemes?.oidc).toMatchObject({
+      type: "apiKey",
+      in: "cookie",
+      name: "__Host-ocservia_session",
+    });
+    expect(document.components?.securitySchemes?.bearerAuth).toMatchObject({
       type: "http",
       scheme: "bearer",
     });

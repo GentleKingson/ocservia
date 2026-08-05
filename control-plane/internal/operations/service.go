@@ -12,6 +12,7 @@ import (
 	"time"
 
 	agentv1 "github.com/GentleKingson/ocservia/control-plane/gen/proto/ocserv/platform/agent/v1"
+	"github.com/GentleKingson/ocservia/control-plane/internal/approvals"
 	"github.com/GentleKingson/ocservia/control-plane/internal/audit"
 	"github.com/GentleKingson/ocservia/control-plane/internal/semanticpayload"
 	"github.com/google/uuid"
@@ -51,6 +52,9 @@ type CreateRequest struct {
 	BootID           string
 	IP               string
 	ActorID          string
+	ActorIdentityID  uuid.UUID
+	ActorSessionID   uuid.UUID
+	ApprovalID       uuid.UUID
 	Action           string
 	Reason           string
 	SupersedePending bool
@@ -170,6 +174,11 @@ func (s *Service) CreateSynthetic(ctx context.Context, request CreateRequest) (O
 			return Operation{}, false, ErrTargetNotObserved
 		}
 	}
+	if request.Kind == ServiceReload {
+		if err := approvals.Consume(ctx, tx, request.ApprovalID, workspaceID, request.ActorIdentityID, request.Action, "node", request.NodeID); err != nil {
+			return Operation{}, false, err
+		}
+	}
 
 	operationID, commandID, outboxID, auditID, eventID, err := newIDs(5)
 	if err != nil {
@@ -206,7 +215,7 @@ func (s *Service) CreateSynthetic(ctx context.Context, request CreateRequest) (O
 		return Operation{}, false, fmt.Errorf("insert operation event: %w", err)
 	}
 	actorID, action, reason := normalizedAuditIntent(request)
-	if err := audit.AppendChain(ctx, tx, audit.ChainRecord{EventID: auditID, WorkspaceID: workspaceID, ActorType: "user", ActorID: actorID, Action: action, ResourceType: "operation", ResourceID: operationID, RequestID: request.RequestID, TraceID: traceID(request.Traceparent), Reason: reason, At: now}); err != nil {
+	if err := audit.AppendChain(ctx, tx, audit.ChainRecord{EventID: auditID, WorkspaceID: workspaceID, ActorType: "user", ActorID: actorID, SessionID: optionalUUID(request.ActorSessionID), Action: action, ResourceType: "operation", ResourceID: operationID, NodeID: &request.NodeID, CommandID: &commandID, ApprovalID: optionalUUID(request.ApprovalID), RequestID: request.RequestID, TraceID: traceID(request.Traceparent), Reason: reason, At: now}); err != nil {
 		return Operation{}, false, fmt.Errorf("append operation audit intent: %w", err)
 	}
 	if _, err := tx.Exec(ctx, `SELECT pg_notify('ocservia_outbox', $1)`, outboxID.String()); err != nil {
@@ -495,6 +504,9 @@ func validateCreate(r CreateRequest) error {
 	if (r.Kind == SessionDisconnect || r.Kind == SessionTerminate || r.Kind == IPBanRemove || r.Kind == ServiceReload) && (r.Action == "" || r.Reason == "" || len(r.Reason) > 512) {
 		return ErrInvalidRequest
 	}
+	if r.Kind == ServiceReload && (r.ActorID == "" || r.ActorIdentityID == uuid.Nil || r.ActorSessionID == uuid.Nil || r.ApprovalID == uuid.Nil) {
+		return ErrInvalidRequest
+	}
 	return nil
 }
 
@@ -516,7 +528,10 @@ func requestHash(r CreateRequest) [32]byte {
 		ActorID          string        `json:"actor_id"`
 		Action           string        `json:"action"`
 		Reason           string        `json:"reason"`
-	}{r.NodeID, r.Kind, r.Message, r.SessionID, r.BootID, r.IP, r.ExpectedVersion, r.SupersedePending, int64(r.TTL / time.Second), actorID, action, reason}
+		ActorSessionID   uuid.UUID     `json:"actor_session_id"`
+		ActorIdentityID  uuid.UUID     `json:"actor_identity_id"`
+		ApprovalID       uuid.UUID     `json:"approval_id"`
+	}{r.NodeID, r.Kind, r.Message, r.SessionID, r.BootID, r.IP, r.ExpectedVersion, r.SupersedePending, int64(r.TTL / time.Second), actorID, action, reason, r.ActorSessionID, r.ActorIdentityID, r.ApprovalID}
 	encoded, err := json.Marshal(intent)
 	if err != nil {
 		panic("marshal fixed idempotency intent: " + err.Error())
@@ -678,6 +693,13 @@ func nullableUUID(id uuid.UUID) any {
 		return nil
 	}
 	return id
+}
+
+func optionalUUID(id uuid.UUID) *uuid.UUID {
+	if id == uuid.Nil {
+		return nil
+	}
+	return &id
 }
 func validTraceparent(value string) bool {
 	parts := strings.Split(value, "-")

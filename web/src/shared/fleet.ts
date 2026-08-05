@@ -11,6 +11,7 @@ import {
   disconnectSession,
   getNode,
   getOperation,
+  eventStreamPath,
   listNodeIpBans,
   listNodes,
   listNodeSessions,
@@ -131,13 +132,13 @@ export const useFleetStore = defineStore("fleet", () => {
     await runOperation((node) => removeIpBan(node, ip, reason));
   }
 
-  async function reload(reason: string): Promise<void> {
-    await runOperation((node) => reloadService(node, reason));
+  async function reload(reason: string, approvalId: string): Promise<void> {
+    await runOperation((node) => reloadService(node, reason, approvalId));
   }
 
-  function connect(): void {
+  async function connect(): Promise<void> {
     source?.close();
-    source = new EventSource("/api/v1/events/stream");
+    source = new EventSource(await eventStreamPath());
     source.addEventListener("platform", () => {
       clearTimeout(refreshTimer);
       refreshTimer = setTimeout(() => void rebuild(), 150);

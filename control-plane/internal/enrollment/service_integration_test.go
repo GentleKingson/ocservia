@@ -191,7 +191,8 @@ func TestEnrollmentTrustLifecycleIntegration(t *testing.T) {
 	if err != nil || string(expiredRetry.GetNodeId()) != string(nodeID[:]) {
 		t.Fatalf("expired consumed-token retry = %v, %v", expiredRetry, err)
 	}
-	trust, err := service.Approve(ctx, Approval{NodeID: nodeID, Labels: map[string]string{"region": "test"}, Policy: "readonly", Capabilities: []string{"ocserv.status.read"}, ActorID: "integration", Reason: "approve fixture", RequestID: uuid.Must(uuid.NewV7()).String()})
+	approvalID, identityID, sessionID := approvedMetadata(t, pool, workspaceID, nodeID, "node.approve")
+	trust, err := service.Approve(ctx, Approval{NodeID: nodeID, Labels: map[string]string{"region": "test"}, Policy: "readonly", Capabilities: []string{"ocserv.status.read"}, ActorID: identityID.String(), ApprovalID: approvalID, IdentityID: identityID, SessionID: sessionID, Reason: "approve fixture", RequestID: uuid.Must(uuid.NewV7()).String()})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -234,7 +235,7 @@ func TestEnrollmentTrustLifecycleIntegration(t *testing.T) {
 	if err != nil || response.GetResult() != agentv1.HandshakeResult_HANDSHAKE_RESULT_ACCEPTED {
 		t.Fatalf("offline authorization = %v, %v", response, err)
 	}
-	if retryTrust, err := service.Approve(ctx, Approval{NodeID: nodeID, Labels: map[string]string{"region": "test"}, Policy: "readonly", Capabilities: []string{"ocserv.status.read"}, ActorID: "integration", Reason: "retry approval", RequestID: uuid.Must(uuid.NewV7()).String()}); err != nil || retryTrust.NodeID != nodeID {
+	if retryTrust, err := service.Approve(ctx, Approval{NodeID: nodeID, Labels: map[string]string{"region": "test"}, Policy: "readonly", Capabilities: []string{"ocserv.status.read"}, ActorID: identityID.String(), ApprovalID: approvalID, IdentityID: identityID, SessionID: sessionID, Reason: "retry approval", RequestID: uuid.Must(uuid.NewV7()).String()}); err != nil || retryTrust.NodeID != nodeID {
 		t.Fatalf("offline approval retry = %v, %v", retryTrust, err)
 	}
 	handshake.Time = timestamppb.New(time.Now().Add(-MaxClockSkew - time.Second))
@@ -242,7 +243,8 @@ func TestEnrollmentTrustLifecycleIntegration(t *testing.T) {
 	if err != nil || response.GetResult() != agentv1.HandshakeResult_HANDSHAKE_RESULT_CLOCK_SKEW {
 		t.Fatalf("clock skew authorization = %v, %v", response, err)
 	}
-	if _, err := service.Revoke(ctx, Revocation{NodeID: trust.NodeID, ActorID: "integration", Reason: "revoke fixture", RequestID: uuid.Must(uuid.NewV7()).String()}); err != nil {
+	revokeApprovalID, revokeIdentityID, revokeSessionID := approvedMetadata(t, pool, workspaceID, nodeID, "node.revoke")
+	if _, err := service.Revoke(ctx, Revocation{NodeID: trust.NodeID, ActorID: revokeIdentityID.String(), ApprovalID: revokeApprovalID, IdentityID: revokeIdentityID, SessionID: revokeSessionID, Reason: "revoke fixture", RequestID: uuid.Must(uuid.NewV7()).String()}); err != nil {
 		t.Fatal(err)
 	}
 	permitted, err = service.CheckEndpoint(ctx, &transportv1.CheckEndpointRequest{EndpointId: endpoint, Alpn: "ocserv-platform/agent/1"})
@@ -360,4 +362,19 @@ func cleanupWorkspace(ctx context.Context, pool *pgxpool.Pool, workspaceID uuid.
 	_, _ = pool.Exec(ctx, `DELETE FROM node_endpoint_keys WHERE node_id IN (SELECT id FROM nodes WHERE workspace_id=$1)`, workspaceID)
 	_, _ = pool.Exec(ctx, `DELETE FROM nodes WHERE workspace_id=$1`, workspaceID)
 	_, _ = pool.Exec(ctx, `DELETE FROM workspaces WHERE id=$1`, workspaceID)
+}
+
+func approvedMetadata(t *testing.T, pool *pgxpool.Pool, workspaceID, resourceID uuid.UUID, action string) (uuid.UUID, uuid.UUID, uuid.UUID) {
+	t.Helper()
+	requesterID, approverID, sessionID, approvalID := uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7())
+	if _, err := pool.Exec(context.Background(), `INSERT INTO identities(id,issuer,subject,created_at,updated_at) VALUES($1,'test',$2,now(),now()),($3,'test',$4,now(),now())`, requesterID, "requester-"+requesterID.String(), approverID, "approver-"+approverID.String()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(context.Background(), `INSERT INTO auth_sessions(id,identity_id,expires_at,created_at) VALUES($1,$2,now()+interval '1 hour',now())`, sessionID, requesterID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(context.Background(), `INSERT INTO approval_requests(id,workspace_id,requester_id,action,resource_type,resource_id,reason,status,approver_id,approval_reason,expires_at,approved_at,created_at) VALUES($1,$2,$3,$4,'node',$5,'integration','approved',$6,'independent',now()+interval '1 hour',now(),now())`, approvalID, workspaceID, requesterID, action, resourceID, approverID); err != nil {
+		t.Fatal(err)
+	}
+	return approvalID, requesterID, sessionID
 }

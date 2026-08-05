@@ -109,7 +109,7 @@ func (s *Server) listOperations(w http.ResponseWriter, r *http.Request) {
 		writeProblem(w, r, http.StatusBadRequest, "https://ocservia.dev/problems/invalid-page-size", "Page size is invalid", "page_size must be an integer between 1 and 200")
 		return
 	}
-	operations, hasMore, err := service.ListOperations(r.Context(), after, limit)
+	operations, hasMore, err := service.ListOperationsInWorkspace(r.Context(), workspace(r), after, limit)
 	if err != nil {
 		s.logger.ErrorContext(r.Context(), "list operations", "error", err)
 		writeProblem(w, r, http.StatusServiceUnavailable, "https://ocservia.dev/problems/database-unavailable", "Service is unavailable", "operations are temporarily unavailable")
@@ -138,7 +138,7 @@ func (s *Server) listEvents(w http.ResponseWriter, r *http.Request) {
 		writeProblem(w, r, http.StatusBadRequest, "https://ocservia.dev/problems/invalid-page-size", "Page size is invalid", "page_size must be an integer between 1 and 200")
 		return
 	}
-	events, hasMore, err := service.ListEvents(r.Context(), after, limit)
+	events, hasMore, err := service.ListEventsInWorkspace(r.Context(), workspace(r), after, limit)
 	if err != nil {
 		s.logger.ErrorContext(r.Context(), "list events", "error", err)
 		writeProblem(w, r, http.StatusServiceUnavailable, "https://ocservia.dev/problems/database-unavailable", "Service is unavailable", "events are temporarily unavailable")
@@ -191,7 +191,7 @@ func (s *Server) streamEvents(w http.ResponseWriter, r *http.Request) {
 			}
 			flusher.Flush()
 		case <-ticker.C:
-			events, _, err := service.ListEvents(r.Context(), after, 100)
+			events, _, err := service.ListEventsInWorkspace(r.Context(), workspace(r), after, 100)
 			if err != nil {
 				s.logger.WarnContext(r.Context(), "poll SSE events", "error", err)
 				continue
