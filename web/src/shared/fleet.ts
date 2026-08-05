@@ -231,6 +231,7 @@ export const useFleetStore = defineStore("fleet", () => {
     const controller = trackRequest();
     operationController = controller;
     const sequence = ++operationSequence;
+    const selectSequenceAtStart = selectSequence;
     const isLatestOperation = () =>
       operationController === controller &&
       sequence === operationSequence &&
@@ -254,6 +255,7 @@ export const useFleetStore = defineStore("fleet", () => {
       if (
         isLatestOperation() &&
         currentOperation.state === "succeeded" &&
+        selectSequence === selectSequenceAtStart &&
         selected.value.id === node.id
       ) {
         await select(node.id);

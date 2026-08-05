@@ -167,4 +167,31 @@ describe("controlled fleet operations", () => {
     expect(store.selected?.name).toBe(nodeB.name);
     store.$dispose();
   });
+
+  it("does not refresh the operated node over a selection that is still loading", async () => {
+    const nodeBDetails = deferred<NodeObservedState>();
+    const operationResult = deferred<Operation>();
+    vi.mocked(getNode).mockImplementation((nodeId) =>
+      nodeId === nodeB.id ? nodeBDetails.promise : Promise.resolve(node),
+    );
+    vi.mocked(disconnectSession).mockResolvedValue(operation("queued"));
+    vi.mocked(getOperation).mockReturnValue(operationResult.promise);
+    const store = useFleetStore();
+    await store.select(node.id);
+
+    const completion = store.disconnectSession(session.id, "support case");
+    await vi.advanceTimersByTimeAsync(750);
+    const selection = store.select(nodeB.id);
+    await Promise.resolve();
+    await Promise.resolve();
+
+    operationResult.resolve(operation("succeeded"));
+    await completion;
+    nodeBDetails.resolve(nodeB);
+    await selection;
+
+    expect(store.selected?.id).toBe(nodeB.id);
+    expect(store.selected?.name).toBe(nodeB.name);
+    store.$dispose();
+  });
 });
