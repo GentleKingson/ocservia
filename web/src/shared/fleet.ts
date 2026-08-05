@@ -46,7 +46,14 @@ export const useFleetStore = defineStore("fleet", () => {
   const unavailable = ref(false);
   let source: EventSource | undefined;
   let refreshTimer: ReturnType<typeof setTimeout> | undefined;
+  let connectSequence = 0;
   const controllers = new Set<AbortController>();
+  let rebuildController: AbortController | undefined;
+  let rebuildSequence = 0;
+  let selectController: AbortController | undefined;
+  let selectSequence = 0;
+  let operationController: AbortController | undefined;
+  let operationSequence = 0;
 
   function trackRequest(): AbortController {
     const controller = new AbortController();
@@ -58,9 +65,21 @@ export const useFleetStore = defineStore("fleet", () => {
     controllers.delete(controller);
   }
 
+  function cancelRequest(controller: AbortController | undefined): void {
+    if (!controller) return;
+    controller.abort();
+    controllers.delete(controller);
+  }
+
   function abortRequests(): void {
     for (const controller of controllers) controller.abort();
     controllers.clear();
+    rebuildController = undefined;
+    selectController = undefined;
+    operationController = undefined;
+    rebuildSequence += 1;
+    selectSequence += 1;
+    operationSequence += 1;
   }
 
   function isCurrent(
@@ -99,61 +118,99 @@ export const useFleetStore = defineStore("fleet", () => {
   );
 
   async function rebuild(): Promise<void> {
+    cancelRequest(rebuildController);
     const controller = trackRequest();
+    rebuildController = controller;
+    const sequence = ++rebuildSequence;
+    const selectSequenceAtStart = selectSequence;
     let context: WorkspaceContext | undefined;
     loading.value = true;
     try {
       context = await currentContext();
+      const isLatestRebuild = () =>
+        Boolean(
+          context &&
+          rebuildController === controller &&
+          sequence === rebuildSequence &&
+          isCurrent(context, controller),
+        );
+      if (!isLatestRebuild()) return;
       const rebuilt: NodeObservedState[] = [];
       let cursor: string | undefined;
       do {
         const page = await listNodes(cursor, controller.signal);
-        if (!isCurrent(context, controller)) return;
+        if (!isLatestRebuild()) return;
         rebuilt.push(...page.items);
         cursor = page.page.hasMore ? page.page.nextCursor : undefined;
       } while (cursor);
-      if (!isCurrent(context, controller)) return;
+      if (!isLatestRebuild()) return;
       nodes.value = rebuilt;
-      if (selected.value) await select(selected.value.id);
-      if (!isCurrent(context, controller)) return;
+      if (selected.value && selectSequence === selectSequenceAtStart)
+        await select(selected.value.id);
+      if (!isLatestRebuild()) return;
       unavailable.value = false;
     } catch {
-      if (!context || !isCurrent(context, controller)) return;
+      if (!context) return;
+      const isLatestRebuild =
+        rebuildController === controller &&
+        sequence === rebuildSequence &&
+        isCurrent(context, controller);
+      if (!isLatestRebuild) return;
       unavailable.value = true;
     } finally {
       releaseRequest(controller);
-      if (context && isCurrent(context)) loading.value = false;
+      if (rebuildController === controller) {
+        rebuildController = undefined;
+        loading.value = false;
+      }
     }
   }
 
   async function select(nodeId: string): Promise<void> {
+    cancelRequest(selectController);
     const controller = trackRequest();
+    selectController = controller;
+    const sequence = ++selectSequence;
     let context: WorkspaceContext | undefined;
     try {
       context = await currentContext();
+      const isLatestSelect = () =>
+        Boolean(
+          context &&
+          selectController === controller &&
+          sequence === selectSequence &&
+          isCurrent(context, controller),
+        );
+      if (!isLatestSelect()) return;
       const node = await getNode(nodeId, controller.signal);
-      if (!isCurrent(context, controller)) return;
+      if (!isLatestSelect()) return;
       const rebuiltSessions: NodeSession[] = [];
       let cursor: string | undefined;
       do {
         const page = await listNodeSessions(nodeId, cursor, controller.signal);
-        if (!isCurrent(context, controller)) return;
+        if (!isLatestSelect()) return;
         rebuiltSessions.push(...page.items);
         cursor = page.page.hasMore ? page.page.nextCursor : undefined;
       } while (cursor);
-      if (!isCurrent(context, controller)) return;
+      if (!isLatestSelect()) return;
       const rebuiltIpBans = (await listNodeIpBans(nodeId, controller.signal))
         .items;
-      if (!isCurrent(context, controller)) return;
+      if (!isLatestSelect()) return;
       selected.value = node;
       sessions.value = rebuiltSessions;
       ipBans.value = rebuiltIpBans;
       unavailable.value = false;
     } catch {
-      if (!context || !isCurrent(context, controller)) return;
+      if (!context) return;
+      const isLatestSelect =
+        selectController === controller &&
+        sequence === selectSequence &&
+        isCurrent(context, controller);
+      if (!isLatestSelect) return;
       unavailable.value = true;
     } finally {
       releaseRequest(controller);
+      if (selectController === controller) selectController = undefined;
     }
   }
 
@@ -169,37 +226,45 @@ export const useFleetStore = defineStore("fleet", () => {
         !terminalStates.has(latestOperation.value.state))
     )
       return;
+    cancelRequest(operationController);
     const context = workspaceContext();
     const controller = trackRequest();
+    operationController = controller;
+    const sequence = ++operationSequence;
+    const isLatestOperation = () =>
+      operationController === controller &&
+      sequence === operationSequence &&
+      isCurrent(context, controller);
     const node = selected.value;
     operationError.value = "";
     try {
       let currentOperation = await create(node, controller.signal);
-      if (!isCurrent(context, controller)) return;
+      if (!isLatestOperation()) return;
       latestOperation.value = currentOperation;
       while (!terminalStates.has(currentOperation.state)) {
         await new Promise((resolve) => setTimeout(resolve, 750));
-        if (!isCurrent(context, controller)) return;
+        if (!isLatestOperation()) return;
         currentOperation = await getOperation(
           currentOperation.id,
           controller.signal,
         );
-        if (!isCurrent(context, controller)) return;
+        if (!isLatestOperation()) return;
         latestOperation.value = currentOperation;
       }
       if (
-        isCurrent(context, controller) &&
+        isLatestOperation() &&
         currentOperation.state === "succeeded" &&
         selected.value.id === node.id
       ) {
         await select(node.id);
       }
     } catch (error) {
-      if (!isCurrent(context, controller) || controller.signal.aborted) return;
+      if (!isLatestOperation() || controller.signal.aborted) return;
       operationError.value =
         error instanceof Error ? error.message : "Operation failed";
     } finally {
       releaseRequest(controller);
+      if (operationController === controller) operationController = undefined;
     }
   }
 
@@ -229,18 +294,24 @@ export const useFleetStore = defineStore("fleet", () => {
   }
 
   async function connect(): Promise<void> {
+    const sequence = ++connectSequence;
     source?.close();
+    source = undefined;
     let context: WorkspaceContext;
     try {
       context = await currentContext();
       const stream = new EventSource(await eventStreamPath());
-      if (!isCurrent(context)) {
+      if (sequence !== connectSequence || !isCurrent(context)) {
         stream.close();
         return;
       }
       source = stream;
       stream.addEventListener("platform", () => {
-        if (!isCurrent(context) || source !== stream) {
+        if (
+          sequence !== connectSequence ||
+          !isCurrent(context) ||
+          source !== stream
+        ) {
           stream.close();
           return;
         }
@@ -248,7 +319,11 @@ export const useFleetStore = defineStore("fleet", () => {
         refreshTimer = setTimeout(() => void rebuild(), 150);
       });
       stream.onerror = () => {
-        if (!isCurrent(context) || source !== stream) {
+        if (
+          sequence !== connectSequence ||
+          !isCurrent(context) ||
+          source !== stream
+        ) {
           stream.close();
           return;
         }
@@ -256,11 +331,12 @@ export const useFleetStore = defineStore("fleet", () => {
         void probeAuthentication().catch(() => undefined);
       };
     } catch {
-      unavailable.value = true;
+      if (sequence === connectSequence) unavailable.value = true;
     }
   }
 
   function disconnect(): void {
+    connectSequence += 1;
     source?.close();
     source = undefined;
     clearTimeout(refreshTimer);

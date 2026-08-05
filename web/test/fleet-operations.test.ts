@@ -11,6 +11,7 @@ import {
   getNode,
   getOperation,
   listNodeIpBans,
+  listNodes,
   listNodeSessions,
 } from "../src/api/client";
 import { useFleetStore } from "../src/shared/fleet";
@@ -56,15 +57,44 @@ const operation = (state: Operation["state"]): Operation => ({
   updatedAt: new Date(0),
 });
 
+function deferred<T>(): {
+  promise: Promise<T>;
+  resolve: (value: T) => void;
+} {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((next) => {
+    resolve = next;
+  });
+  return { promise, resolve };
+}
+
+const nodeB: NodeObservedState = {
+  ...node,
+  id: "019fc0a4-6d92-765c-a8a1-4af556614cc6",
+  name: "node-b",
+};
+
+const nodePage = (item: NodeObservedState) => ({
+  items: [item],
+  page: { hasMore: false },
+});
+
 describe("controlled fleet operations", () => {
   beforeEach(() => {
     vi.useFakeTimers();
     setActivePinia(createPinia());
+    vi.mocked(getNode).mockReset();
+    vi.mocked(getOperation).mockReset();
+    vi.mocked(listNodeIpBans).mockReset();
+    vi.mocked(listNodes).mockReset();
+    vi.mocked(listNodeSessions).mockReset();
+    vi.mocked(disconnectSession).mockReset();
     vi.mocked(getNode).mockResolvedValue(node);
     vi.mocked(listNodeIpBans).mockResolvedValue({ items: [] });
-    vi.mocked(listNodeSessions)
-      .mockResolvedValueOnce({ items: [session], page: { hasMore: false } })
-      .mockResolvedValueOnce({ items: [], page: { hasMore: false } });
+    vi.mocked(listNodeSessions).mockResolvedValue({
+      items: [],
+      page: { hasMore: false },
+    });
   });
 
   afterEach(() => vi.useRealTimers());
@@ -72,6 +102,9 @@ describe("controlled fleet operations", () => {
   it("keeps observed state until the asynchronous operation succeeds", async () => {
     vi.mocked(disconnectSession).mockResolvedValue(operation("queued"));
     vi.mocked(getOperation).mockResolvedValue(operation("succeeded"));
+    vi.mocked(listNodeSessions)
+      .mockResolvedValueOnce({ items: [session], page: { hasMore: false } })
+      .mockResolvedValueOnce({ items: [], page: { hasMore: false } });
     const store = useFleetStore();
     await store.select(node.id);
 
@@ -84,5 +117,54 @@ describe("controlled fleet operations", () => {
     await completion;
     expect(store.latestOperation?.state).toBe("succeeded");
     expect(store.sessions).toEqual([]);
+  });
+
+  it("does not let an older rebuild overwrite a newer same-workspace snapshot", async () => {
+    const first = deferred<ReturnType<typeof nodePage>>();
+    const second = deferred<ReturnType<typeof nodePage>>();
+    vi.mocked(listNodes)
+      .mockImplementationOnce(() => first.promise)
+      .mockImplementationOnce(() => second.promise);
+    const store = useFleetStore();
+
+    const staleRebuild = store.rebuild();
+    await Promise.resolve();
+    await Promise.resolve();
+    const currentRebuild = store.rebuild();
+    await Promise.resolve();
+    await Promise.resolve();
+
+    second.resolve(nodePage(nodeB));
+    await currentRebuild;
+    first.resolve(nodePage(node));
+    await staleRebuild;
+
+    expect(store.nodes).toEqual([nodeB]);
+    store.$dispose();
+  });
+
+  it("keeps the latest node selection when an earlier detail request returns last", async () => {
+    const first = deferred<NodeObservedState>();
+    const second = deferred<NodeObservedState>();
+    vi.mocked(getNode).mockImplementation((nodeId) =>
+      nodeId === "node-a" ? first.promise : second.promise,
+    );
+    const store = useFleetStore();
+
+    const staleSelection = store.select("node-a");
+    await Promise.resolve();
+    await Promise.resolve();
+    const currentSelection = store.select("node-b");
+    await Promise.resolve();
+    await Promise.resolve();
+
+    second.resolve(nodeB);
+    await currentSelection;
+    first.resolve(node);
+    await staleSelection;
+
+    expect(store.selected?.id).toBe(nodeB.id);
+    expect(store.selected?.name).toBe(nodeB.name);
+    store.$dispose();
   });
 });

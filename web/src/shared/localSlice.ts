@@ -39,7 +39,16 @@ export const useLocalSliceStore = defineStore("local-slice", () => {
   let source: EventSource | undefined;
   let pollTimer: ReturnType<typeof setTimeout> | undefined;
   let pendingPollTimer: ReturnType<typeof setTimeout> | undefined;
+  let connectSequence = 0;
   const controllers = new Set<AbortController>();
+  let rebuildController: AbortController | undefined;
+  let rebuildSequence = 0;
+  let pendingController: AbortController | undefined;
+  let pendingSequence = 0;
+  let pollController: AbortController | undefined;
+  let pollSequence = 0;
+  let runController: AbortController | undefined;
+  let runSequence = 0;
 
   function trackRequest(): AbortController {
     const controller = new AbortController();
@@ -51,9 +60,45 @@ export const useLocalSliceStore = defineStore("local-slice", () => {
     controllers.delete(controller);
   }
 
+  function cancelRequest(controller: AbortController | undefined): void {
+    if (!controller) return;
+    controller.abort();
+    controllers.delete(controller);
+  }
+
   function abortRequests(): void {
     for (const controller of controllers) controller.abort();
     controllers.clear();
+    rebuildController = undefined;
+    pendingController = undefined;
+    pollController = undefined;
+    runController = undefined;
+    rebuildSequence += 1;
+    pendingSequence += 1;
+    pollSequence += 1;
+    runSequence += 1;
+  }
+
+  function beginPendingRequest(): {
+    controller: AbortController;
+    sequence: number;
+  } {
+    cancelRequest(pendingController);
+    const controller = trackRequest();
+    pendingController = controller;
+    return { controller, sequence: ++pendingSequence };
+  }
+
+  function isLatestPending(
+    context: WorkspaceContext,
+    controller: AbortController,
+    sequence: number,
+  ): boolean {
+    return (
+      pendingController === controller &&
+      sequence === pendingSequence &&
+      isCurrent(context, controller)
+    );
   }
 
   function isCurrent(
@@ -84,51 +129,98 @@ export const useLocalSliceStore = defineStore("local-slice", () => {
   const pendingOperations = computed(() => pendingOperationIDs.value.size);
 
   async function rebuild(): Promise<void> {
+    cancelRequest(rebuildController);
     const controller = trackRequest();
+    rebuildController = controller;
+    const sequence = ++rebuildSequence;
     let context: WorkspaceContext | undefined;
     try {
       context = await currentContext();
+      const isLatestRebuild = () =>
+        Boolean(
+          context &&
+          rebuildController === controller &&
+          sequence === rebuildSequence &&
+          isCurrent(context, controller),
+        );
+      if (!isLatestRebuild()) return;
       const rebuilt: PlatformEvent[] = [];
       let cursor: string | undefined;
       do {
         const page = await listEvents(cursor, controller.signal);
-        if (!isCurrent(context, controller)) return;
+        if (!isLatestRebuild()) return;
         rebuilt.push(...page.items);
         cursor = page.page.hasMore ? page.page.nextCursor : undefined;
       } while (cursor);
-      if (!isCurrent(context, controller)) return;
+      if (!isLatestRebuild()) return;
       const rebuiltNodes = new Set<string>();
       for (const event of rebuilt) updateNodeState(rebuiltNodes, event);
       connectedNodes.value = rebuiltNodes;
       events.value = rebuilt.slice(-200);
 
-      const pending = await loadPendingOperationIDs(context, controller.signal);
-      if (!isCurrent(context, controller)) return;
+      const pendingRequest = beginPendingRequest();
+      const abortPendingWithRebuild = () => {
+        pendingRequest.controller.abort();
+      };
+      controller.signal.addEventListener("abort", abortPendingWithRebuild, {
+        once: true,
+      });
+      let pending = new Set<string>();
+      let pendingIsLatest = false;
+      try {
+        pending = await loadPendingOperationIDs(
+          context,
+          pendingRequest.controller.signal,
+        );
+        pendingIsLatest = isLatestPending(
+          context,
+          pendingRequest.controller,
+          pendingRequest.sequence,
+        );
+      } finally {
+        controller.signal.removeEventListener("abort", abortPendingWithRebuild);
+        releaseRequest(pendingRequest.controller);
+        if (pendingController === pendingRequest.controller)
+          pendingController = undefined;
+      }
+      if (!isLatestRebuild() || !pendingIsLatest) return;
       pendingOperationIDs.value = pending;
       schedulePendingRefresh();
       unavailable.value = false;
     } catch {
-      if (!context || !isCurrent(context, controller)) return;
+      if (!context) return;
+      const isLatestRebuild =
+        rebuildController === controller &&
+        sequence === rebuildSequence &&
+        isCurrent(context, controller);
+      if (!isLatestRebuild) return;
       unavailable.value = true;
     } finally {
       releaseRequest(controller);
+      if (rebuildController === controller) rebuildController = undefined;
     }
   }
 
   async function connect(): Promise<void> {
+    const sequence = ++connectSequence;
     source?.close();
+    source = undefined;
     let context: WorkspaceContext;
     try {
       context = await currentContext();
       const cursor = events.value.at(-1)?.id;
       const stream = new EventSource(await eventStreamPath(cursor));
-      if (!isCurrent(context)) {
+      if (sequence !== connectSequence || !isCurrent(context)) {
         stream.close();
         return;
       }
       source = stream;
       stream.addEventListener("platform", (message) => {
-        if (!isCurrent(context) || source !== stream) {
+        if (
+          sequence !== connectSequence ||
+          !isCurrent(context) ||
+          source !== stream
+        ) {
           stream.close();
           return;
         }
@@ -153,7 +245,11 @@ export const useLocalSliceStore = defineStore("local-slice", () => {
         }
       });
       stream.onerror = () => {
-        if (!isCurrent(context) || source !== stream) {
+        if (
+          sequence !== connectSequence ||
+          !isCurrent(context) ||
+          source !== stream
+        ) {
           stream.close();
           return;
         }
@@ -161,7 +257,7 @@ export const useLocalSliceStore = defineStore("local-slice", () => {
         void probeAuthentication().catch(() => undefined);
       };
     } catch {
-      unavailable.value = true;
+      if (sequence === connectSequence) unavailable.value = true;
     }
   }
 
@@ -171,24 +267,48 @@ export const useLocalSliceStore = defineStore("local-slice", () => {
   }
 
   async function run(scenario: SimulationScenario): Promise<void> {
+    cancelRequest(runController);
+    cancelRequest(pollController);
+    pollController = undefined;
+    ++pollSequence;
+    clearTimeout(pollTimer);
     const controller = trackRequest();
+    runController = controller;
+    const sequence = ++runSequence;
     let context: WorkspaceContext | undefined;
     running.value = true;
     unavailable.value = false;
     try {
       context = await currentContext();
+      const isLatestRun = () =>
+        Boolean(
+          context &&
+          runController === controller &&
+          sequence === runSequence &&
+          isCurrent(context, controller),
+        );
+      if (!isLatestRun()) return;
       const created = await createLocalSimulation(scenario, controller.signal);
-      if (!isCurrent(context, controller)) return;
+      if (!isLatestRun()) return;
+      cancelRequest(pendingController);
+      pendingController = undefined;
+      ++pendingSequence;
       operation.value = created;
       pendingOperationIDs.value.add(operation.value.id);
       schedulePoll();
       schedulePendingRefresh();
     } catch {
-      if (!context || !isCurrent(context, controller)) return;
+      if (!context) return;
+      const isLatestRun =
+        runController === controller &&
+        sequence === runSequence &&
+        isCurrent(context, controller);
+      if (!isLatestRun) return;
       unavailable.value = true;
       running.value = false;
     } finally {
       releaseRequest(controller);
+      if (runController === controller) runController = undefined;
     }
   }
 
@@ -199,23 +319,36 @@ export const useLocalSliceStore = defineStore("local-slice", () => {
 
   async function pollOperation(): Promise<void> {
     if (!operation.value) return;
+    cancelRequest(pollController);
     const context = workspaceContext();
     const controller = trackRequest();
+    pollController = controller;
+    const sequence = ++pollSequence;
+    const operationID = operation.value.id;
+    const isLatestPoll = () =>
+      pollController === controller &&
+      sequence === pollSequence &&
+      operation.value?.id === operationID &&
+      isCurrent(context, controller);
     try {
-      const operationID = operation.value.id;
       const refreshed = await getOperation(operationID, controller.signal);
-      if (!isCurrent(context, controller)) return;
+      if (!isLatestPoll()) return;
+      cancelRequest(pendingController);
+      pendingController = undefined;
+      ++pendingSequence;
       operation.value = refreshed;
       running.value = !terminalStates.has(refreshed.state);
       if (running.value) pendingOperationIDs.value.add(refreshed.id);
       else pendingOperationIDs.value.delete(refreshed.id);
       if (running.value) schedulePoll();
+      else schedulePendingRefresh();
     } catch {
-      if (!isCurrent(context, controller)) return;
+      if (!isLatestPoll()) return;
       unavailable.value = true;
       running.value = false;
     } finally {
       releaseRequest(controller);
+      if (pollController === controller) pollController = undefined;
     }
   }
 
@@ -227,7 +360,7 @@ export const useLocalSliceStore = defineStore("local-slice", () => {
     let cursor: string | undefined;
     do {
       const page = await listOperations(cursor, signal);
-      if (!isCurrent(context)) return pending;
+      if (signal?.aborted || !isCurrent(context)) return pending;
       for (const current of page.items) {
         if (!terminalStates.has(current.state)) pending.add(current.id);
       }
@@ -243,24 +376,30 @@ export const useLocalSliceStore = defineStore("local-slice", () => {
   }
 
   async function refreshPendingOperations(): Promise<void> {
-    const controller = trackRequest();
+    const { controller, sequence } = beginPendingRequest();
     let context: WorkspaceContext | undefined;
+    let schedule: boolean | undefined;
     try {
       context = await currentContext();
+      if (!isLatestPending(context, controller, sequence)) return;
       const pending = await loadPendingOperationIDs(context, controller.signal);
-      if (!isCurrent(context, controller)) return;
+      if (!isLatestPending(context, controller, sequence)) return;
       pendingOperationIDs.value = pending;
       unavailable.value = false;
     } catch {
-      if (!context || !isCurrent(context, controller)) return;
+      if (!context || !isLatestPending(context, controller, sequence)) return;
       unavailable.value = true;
     } finally {
+      schedule =
+        context !== undefined && isLatestPending(context, controller, sequence);
       releaseRequest(controller);
+      if (pendingController === controller) pendingController = undefined;
     }
-    if (isCurrent(context)) schedulePendingRefresh();
+    if (schedule) schedulePendingRefresh();
   }
 
   function disconnect(): void {
+    connectSequence += 1;
     source?.close();
     source = undefined;
     clearTimeout(pollTimer);
