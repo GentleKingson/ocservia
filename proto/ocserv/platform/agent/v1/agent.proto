@@ -74,6 +74,42 @@ message AgentEvent {
   bytes payload = 2;
 }
 
+enum CommandResultState {
+  COMMAND_RESULT_STATE_UNSPECIFIED = 0;
+  COMMAND_RESULT_STATE_SUCCEEDED = 1;
+  COMMAND_RESULT_STATE_FAILED = 2;
+  COMMAND_RESULT_STATE_UNKNOWN = 3;
+  COMMAND_RESULT_STATE_REJECTED = 4;
+}
+
+enum CommandDeliveryMode {
+  COMMAND_DELIVERY_MODE_UNSPECIFIED = 0;
+  COMMAND_DELIVERY_MODE_EXECUTE_OR_REPLAY = 1;
+  COMMAND_DELIVERY_MODE_RECONCILE_ONLY = 2;
+  COMMAND_DELIVERY_MODE_RETRY_IF_EFFECT_ABSENT = 3;
+}
+
+// SemanticPayloadHashVersion identifies the canonical command identity
+// algorithm. See docs/development/command-semantic-hash-v1.md.
+enum SemanticPayloadHashVersion {
+  SEMANTIC_PAYLOAD_HASH_VERSION_UNSPECIFIED = 0;
+  SEMANTIC_PAYLOAD_HASH_VERSION_V1 = 1;
+}
+
+// CommandResult is persisted before it is placed on the response stream.
+message CommandResult {
+  bytes command_id = 1;
+  bytes idempotency_key = 2;
+  bytes payload_sha256 = 3;
+  CommandResultState state = 4;
+  bytes result = 5;
+  string error_code = 6;
+  google.protobuf.Timestamp accepted_at = 7;
+  google.protobuf.Timestamp completed_at = 8;
+  bool replayed = 9;
+  SemanticPayloadHashVersion semantic_payload_hash_version = 10;
+}
+
 enum TelemetryPriority {
   TELEMETRY_PRIORITY_UNSPECIFIED = 0;
   TELEMETRY_PRIORITY_SECURITY = 1;
@@ -149,7 +185,6 @@ message CommandEnvelope {
   string traceparent = 10;
   string actor_id = 11;
   string reason = 12;
-
   reserved 13 to 99;
   reserved "legacy_payload";
 
@@ -164,6 +199,9 @@ message CommandEnvelope {
     SyntheticNoop synthetic_noop = 107;
     SyntheticEcho synthetic_echo = 108;
   }
+  CommandDeliveryMode delivery_mode = 109;
+  SemanticPayloadHashVersion semantic_payload_hash_version = 110;
+  bytes semantic_payload_sha256 = 111;
 }
 
 message SessionDisconnect {

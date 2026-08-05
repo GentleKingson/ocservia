@@ -894,7 +894,7 @@ components:
         resolution: { type: string, enum: [raw, 5m, 1h] }
     PlatformEventType:
       type: string
-      enum: [connected, disconnected, command_result, heartbeat, error, path_changed, telemetry]
+      enum: [connected, disconnected, command_result, simulation_result, heartbeat, error, path_changed, telemetry]
     Traceparent:
       type: string
       pattern: "^00-[0-9a-f]{32}-[0-9a-f]{16}-[0-9a-f]{2}$"

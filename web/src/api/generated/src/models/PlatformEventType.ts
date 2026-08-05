@@ -20,6 +20,7 @@ export const PlatformEventType = {
   Connected: "connected",
   Disconnected: "disconnected",
   CommandResult: "command_result",
+  SimulationResult: "simulation_result",
   Heartbeat: "heartbeat",
   Error: "error",
   PathChanged: "path_changed",

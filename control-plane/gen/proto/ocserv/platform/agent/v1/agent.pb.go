@@ -138,6 +138,161 @@ func (AgentEventType) EnumDescriptor() ([]byte, []int) {
 	return file_ocserv_platform_agent_v1_agent_proto_rawDescGZIP(), []int{1}
 }
 
+type CommandResultState int32
+
+const (
+	CommandResultState_COMMAND_RESULT_STATE_UNSPECIFIED CommandResultState = 0
+	CommandResultState_COMMAND_RESULT_STATE_SUCCEEDED   CommandResultState = 1
+	CommandResultState_COMMAND_RESULT_STATE_FAILED      CommandResultState = 2
+	CommandResultState_COMMAND_RESULT_STATE_UNKNOWN     CommandResultState = 3
+	CommandResultState_COMMAND_RESULT_STATE_REJECTED    CommandResultState = 4
+)
+
+// Enum value maps for CommandResultState.
+var (
+	CommandResultState_name = map[int32]string{
+		0: "COMMAND_RESULT_STATE_UNSPECIFIED",
+		1: "COMMAND_RESULT_STATE_SUCCEEDED",
+		2: "COMMAND_RESULT_STATE_FAILED",
+		3: "COMMAND_RESULT_STATE_UNKNOWN",
+		4: "COMMAND_RESULT_STATE_REJECTED",
+	}
+	CommandResultState_value = map[string]int32{
+		"COMMAND_RESULT_STATE_UNSPECIFIED": 0,
+		"COMMAND_RESULT_STATE_SUCCEEDED":   1,
+		"COMMAND_RESULT_STATE_FAILED":      2,
+		"COMMAND_RESULT_STATE_UNKNOWN":     3,
+		"COMMAND_RESULT_STATE_REJECTED":    4,
+	}
+)
+
+func (x CommandResultState) Enum() *CommandResultState {
+	p := new(CommandResultState)
+	*p = x
+	return p
+}
+
+func (x CommandResultState) String() string {
+	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
+}
+
+func (CommandResultState) Descriptor() protoreflect.EnumDescriptor {
+	return file_ocserv_platform_agent_v1_agent_proto_enumTypes[2].Descriptor()
+}
+
+func (CommandResultState) Type() protoreflect.EnumType {
+	return &file_ocserv_platform_agent_v1_agent_proto_enumTypes[2]
+}
+
+func (x CommandResultState) Number() protoreflect.EnumNumber {
+	return protoreflect.EnumNumber(x)
+}
+
+// Deprecated: Use CommandResultState.Descriptor instead.
+func (CommandResultState) EnumDescriptor() ([]byte, []int) {
+	return file_ocserv_platform_agent_v1_agent_proto_rawDescGZIP(), []int{2}
+}
+
+type CommandDeliveryMode int32
+
+const (
+	CommandDeliveryMode_COMMAND_DELIVERY_MODE_UNSPECIFIED            CommandDeliveryMode = 0
+	CommandDeliveryMode_COMMAND_DELIVERY_MODE_EXECUTE_OR_REPLAY      CommandDeliveryMode = 1
+	CommandDeliveryMode_COMMAND_DELIVERY_MODE_RECONCILE_ONLY         CommandDeliveryMode = 2
+	CommandDeliveryMode_COMMAND_DELIVERY_MODE_RETRY_IF_EFFECT_ABSENT CommandDeliveryMode = 3
+)
+
+// Enum value maps for CommandDeliveryMode.
+var (
+	CommandDeliveryMode_name = map[int32]string{
+		0: "COMMAND_DELIVERY_MODE_UNSPECIFIED",
+		1: "COMMAND_DELIVERY_MODE_EXECUTE_OR_REPLAY",
+		2: "COMMAND_DELIVERY_MODE_RECONCILE_ONLY",
+		3: "COMMAND_DELIVERY_MODE_RETRY_IF_EFFECT_ABSENT",
+	}
+	CommandDeliveryMode_value = map[string]int32{
+		"COMMAND_DELIVERY_MODE_UNSPECIFIED":            0,
+		"COMMAND_DELIVERY_MODE_EXECUTE_OR_REPLAY":      1,
+		"COMMAND_DELIVERY_MODE_RECONCILE_ONLY":         2,
+		"COMMAND_DELIVERY_MODE_RETRY_IF_EFFECT_ABSENT": 3,
+	}
+)
+
+func (x CommandDeliveryMode) Enum() *CommandDeliveryMode {
+	p := new(CommandDeliveryMode)
+	*p = x
+	return p
+}
+
+func (x CommandDeliveryMode) String() string {
+	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
+}
+
+func (CommandDeliveryMode) Descriptor() protoreflect.EnumDescriptor {
+	return file_ocserv_platform_agent_v1_agent_proto_enumTypes[3].Descriptor()
+}
+
+func (CommandDeliveryMode) Type() protoreflect.EnumType {
+	return &file_ocserv_platform_agent_v1_agent_proto_enumTypes[3]
+}
+
+func (x CommandDeliveryMode) Number() protoreflect.EnumNumber {
+	return protoreflect.EnumNumber(x)
+}
+
+// Deprecated: Use CommandDeliveryMode.Descriptor instead.
+func (CommandDeliveryMode) EnumDescriptor() ([]byte, []int) {
+	return file_ocserv_platform_agent_v1_agent_proto_rawDescGZIP(), []int{3}
+}
+
+// SemanticPayloadHashVersion identifies the canonical command identity
+// algorithm. See docs/development/command-semantic-hash-v1.md.
+type SemanticPayloadHashVersion int32
+
+const (
+	SemanticPayloadHashVersion_SEMANTIC_PAYLOAD_HASH_VERSION_UNSPECIFIED SemanticPayloadHashVersion = 0
+	SemanticPayloadHashVersion_SEMANTIC_PAYLOAD_HASH_VERSION_V1          SemanticPayloadHashVersion = 1
+)
+
+// Enum value maps for SemanticPayloadHashVersion.
+var (
+	SemanticPayloadHashVersion_name = map[int32]string{
+		0: "SEMANTIC_PAYLOAD_HASH_VERSION_UNSPECIFIED",
+		1: "SEMANTIC_PAYLOAD_HASH_VERSION_V1",
+	}
+	SemanticPayloadHashVersion_value = map[string]int32{
+		"SEMANTIC_PAYLOAD_HASH_VERSION_UNSPECIFIED": 0,
+		"SEMANTIC_PAYLOAD_HASH_VERSION_V1":          1,
+	}
+)
+
+func (x SemanticPayloadHashVersion) Enum() *SemanticPayloadHashVersion {
+	p := new(SemanticPayloadHashVersion)
+	*p = x
+	return p
+}
+
+func (x SemanticPayloadHashVersion) String() string {
+	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
+}
+
+func (SemanticPayloadHashVersion) Descriptor() protoreflect.EnumDescriptor {
+	return file_ocserv_platform_agent_v1_agent_proto_enumTypes[4].Descriptor()
+}
+
+func (SemanticPayloadHashVersion) Type() protoreflect.EnumType {
+	return &file_ocserv_platform_agent_v1_agent_proto_enumTypes[4]
+}
+
+func (x SemanticPayloadHashVersion) Number() protoreflect.EnumNumber {
+	return protoreflect.EnumNumber(x)
+}
+
+// Deprecated: Use SemanticPayloadHashVersion.Descriptor instead.
+func (SemanticPayloadHashVersion) EnumDescriptor() ([]byte, []int) {
+	return file_ocserv_platform_agent_v1_agent_proto_rawDescGZIP(), []int{4}
+}
+
 type TelemetryPriority int32
 
 const (
@@ -177,11 +332,11 @@ func (x TelemetryPriority) String() string {
 }
 
 func (TelemetryPriority) Descriptor() protoreflect.EnumDescriptor {
-	return file_ocserv_platform_agent_v1_agent_proto_enumTypes[2].Descriptor()
+	return file_ocserv_platform_agent_v1_agent_proto_enumTypes[5].Descriptor()
 }
 
 func (TelemetryPriority) Type() protoreflect.EnumType {
-	return &file_ocserv_platform_agent_v1_agent_proto_enumTypes[2]
+	return &file_ocserv_platform_agent_v1_agent_proto_enumTypes[5]
 }
 
 func (x TelemetryPriority) Number() protoreflect.EnumNumber {
@@ -190,7 +345,7 @@ func (x TelemetryPriority) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use TelemetryPriority.Descriptor instead.
 func (TelemetryPriority) EnumDescriptor() ([]byte, []int) {
-	return file_ocserv_platform_agent_v1_agent_proto_rawDescGZIP(), []int{2}
+	return file_ocserv_platform_agent_v1_agent_proto_rawDescGZIP(), []int{5}
 }
 
 type EnrollRequest struct {
@@ -662,6 +817,123 @@ func (x *AgentEvent) GetPayload() []byte {
 	return nil
 }
 
+// CommandResult is persisted before it is placed on the response stream.
+type CommandResult struct {
+	state                      protoimpl.MessageState     `protogen:"open.v1"`
+	CommandId                  []byte                     `protobuf:"bytes,1,opt,name=command_id,json=commandId,proto3" json:"command_id,omitempty"`
+	IdempotencyKey             []byte                     `protobuf:"bytes,2,opt,name=idempotency_key,json=idempotencyKey,proto3" json:"idempotency_key,omitempty"`
+	PayloadSha256              []byte                     `protobuf:"bytes,3,opt,name=payload_sha256,json=payloadSha256,proto3" json:"payload_sha256,omitempty"`
+	State                      CommandResultState         `protobuf:"varint,4,opt,name=state,proto3,enum=ocserv.platform.agent.v1.CommandResultState" json:"state,omitempty"`
+	Result                     []byte                     `protobuf:"bytes,5,opt,name=result,proto3" json:"result,omitempty"`
+	ErrorCode                  string                     `protobuf:"bytes,6,opt,name=error_code,json=errorCode,proto3" json:"error_code,omitempty"`
+	AcceptedAt                 *timestamppb.Timestamp     `protobuf:"bytes,7,opt,name=accepted_at,json=acceptedAt,proto3" json:"accepted_at,omitempty"`
+	CompletedAt                *timestamppb.Timestamp     `protobuf:"bytes,8,opt,name=completed_at,json=completedAt,proto3" json:"completed_at,omitempty"`
+	Replayed                   bool                       `protobuf:"varint,9,opt,name=replayed,proto3" json:"replayed,omitempty"`
+	SemanticPayloadHashVersion SemanticPayloadHashVersion `protobuf:"varint,10,opt,name=semantic_payload_hash_version,json=semanticPayloadHashVersion,proto3,enum=ocserv.platform.agent.v1.SemanticPayloadHashVersion" json:"semantic_payload_hash_version,omitempty"`
+	unknownFields              protoimpl.UnknownFields
+	sizeCache                  protoimpl.SizeCache
+}
+
+func (x *CommandResult) Reset() {
+	*x = CommandResult{}
+	mi := &file_ocserv_platform_agent_v1_agent_proto_msgTypes[5]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *CommandResult) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*CommandResult) ProtoMessage() {}
+
+func (x *CommandResult) ProtoReflect() protoreflect.Message {
+	mi := &file_ocserv_platform_agent_v1_agent_proto_msgTypes[5]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use CommandResult.ProtoReflect.Descriptor instead.
+func (*CommandResult) Descriptor() ([]byte, []int) {
+	return file_ocserv_platform_agent_v1_agent_proto_rawDescGZIP(), []int{5}
+}
+
+func (x *CommandResult) GetCommandId() []byte {
+	if x != nil {
+		return x.CommandId
+	}
+	return nil
+}
+
+func (x *CommandResult) GetIdempotencyKey() []byte {
+	if x != nil {
+		return x.IdempotencyKey
+	}
+	return nil
+}
+
+func (x *CommandResult) GetPayloadSha256() []byte {
+	if x != nil {
+		return x.PayloadSha256
+	}
+	return nil
+}
+
+func (x *CommandResult) GetState() CommandResultState {
+	if x != nil {
+		return x.State
+	}
+	return CommandResultState_COMMAND_RESULT_STATE_UNSPECIFIED
+}
+
+func (x *CommandResult) GetResult() []byte {
+	if x != nil {
+		return x.Result
+	}
+	return nil
+}
+
+func (x *CommandResult) GetErrorCode() string {
+	if x != nil {
+		return x.ErrorCode
+	}
+	return ""
+}
+
+func (x *CommandResult) GetAcceptedAt() *timestamppb.Timestamp {
+	if x != nil {
+		return x.AcceptedAt
+	}
+	return nil
+}
+
+func (x *CommandResult) GetCompletedAt() *timestamppb.Timestamp {
+	if x != nil {
+		return x.CompletedAt
+	}
+	return nil
+}
+
+func (x *CommandResult) GetReplayed() bool {
+	if x != nil {
+		return x.Replayed
+	}
+	return false
+}
+
+func (x *CommandResult) GetSemanticPayloadHashVersion() SemanticPayloadHashVersion {
+	if x != nil {
+		return x.SemanticPayloadHashVersion
+	}
+	return SemanticPayloadHashVersion_SEMANTIC_PAYLOAD_HASH_VERSION_UNSPECIFIED
+}
+
 type TelemetryDropCounters struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Security      uint64                 `protobuf:"varint,1,opt,name=security,proto3" json:"security,omitempty"`
@@ -674,7 +946,7 @@ type TelemetryDropCounters struct {
 
 func (x *TelemetryDropCounters) Reset() {
 	*x = TelemetryDropCounters{}
-	mi := &file_ocserv_platform_agent_v1_agent_proto_msgTypes[5]
+	mi := &file_ocserv_platform_agent_v1_agent_proto_msgTypes[6]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -686,7 +958,7 @@ func (x *TelemetryDropCounters) String() string {
 func (*TelemetryDropCounters) ProtoMessage() {}
 
 func (x *TelemetryDropCounters) ProtoReflect() protoreflect.Message {
-	mi := &file_ocserv_platform_agent_v1_agent_proto_msgTypes[5]
+	mi := &file_ocserv_platform_agent_v1_agent_proto_msgTypes[6]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -699,7 +971,7 @@ func (x *TelemetryDropCounters) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use TelemetryDropCounters.ProtoReflect.Descriptor instead.
 func (*TelemetryDropCounters) Descriptor() ([]byte, []int) {
-	return file_ocserv_platform_agent_v1_agent_proto_rawDescGZIP(), []int{5}
+	return file_ocserv_platform_agent_v1_agent_proto_rawDescGZIP(), []int{6}
 }
 
 func (x *TelemetryDropCounters) GetSecurity() uint64 {
@@ -748,7 +1020,7 @@ type ObservedSnapshot struct {
 
 func (x *ObservedSnapshot) Reset() {
 	*x = ObservedSnapshot{}
-	mi := &file_ocserv_platform_agent_v1_agent_proto_msgTypes[6]
+	mi := &file_ocserv_platform_agent_v1_agent_proto_msgTypes[7]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -760,7 +1032,7 @@ func (x *ObservedSnapshot) String() string {
 func (*ObservedSnapshot) ProtoMessage() {}
 
 func (x *ObservedSnapshot) ProtoReflect() protoreflect.Message {
-	mi := &file_ocserv_platform_agent_v1_agent_proto_msgTypes[6]
+	mi := &file_ocserv_platform_agent_v1_agent_proto_msgTypes[7]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -773,7 +1045,7 @@ func (x *ObservedSnapshot) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ObservedSnapshot.ProtoReflect.Descriptor instead.
 func (*ObservedSnapshot) Descriptor() ([]byte, []int) {
-	return file_ocserv_platform_agent_v1_agent_proto_rawDescGZIP(), []int{6}
+	return file_ocserv_platform_agent_v1_agent_proto_rawDescGZIP(), []int{7}
 }
 
 func (x *ObservedSnapshot) GetObservedAt() *timestamppb.Timestamp {
@@ -860,7 +1132,7 @@ type SessionObservation struct {
 
 func (x *SessionObservation) Reset() {
 	*x = SessionObservation{}
-	mi := &file_ocserv_platform_agent_v1_agent_proto_msgTypes[7]
+	mi := &file_ocserv_platform_agent_v1_agent_proto_msgTypes[8]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -872,7 +1144,7 @@ func (x *SessionObservation) String() string {
 func (*SessionObservation) ProtoMessage() {}
 
 func (x *SessionObservation) ProtoReflect() protoreflect.Message {
-	mi := &file_ocserv_platform_agent_v1_agent_proto_msgTypes[7]
+	mi := &file_ocserv_platform_agent_v1_agent_proto_msgTypes[8]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -885,7 +1157,7 @@ func (x *SessionObservation) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SessionObservation.ProtoReflect.Descriptor instead.
 func (*SessionObservation) Descriptor() ([]byte, []int) {
-	return file_ocserv_platform_agent_v1_agent_proto_rawDescGZIP(), []int{7}
+	return file_ocserv_platform_agent_v1_agent_proto_rawDescGZIP(), []int{8}
 }
 
 func (x *SessionObservation) GetSessionId() string {
@@ -941,7 +1213,7 @@ type MetricSample struct {
 
 func (x *MetricSample) Reset() {
 	*x = MetricSample{}
-	mi := &file_ocserv_platform_agent_v1_agent_proto_msgTypes[8]
+	mi := &file_ocserv_platform_agent_v1_agent_proto_msgTypes[9]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -953,7 +1225,7 @@ func (x *MetricSample) String() string {
 func (*MetricSample) ProtoMessage() {}
 
 func (x *MetricSample) ProtoReflect() protoreflect.Message {
-	mi := &file_ocserv_platform_agent_v1_agent_proto_msgTypes[8]
+	mi := &file_ocserv_platform_agent_v1_agent_proto_msgTypes[9]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -966,7 +1238,7 @@ func (x *MetricSample) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use MetricSample.ProtoReflect.Descriptor instead.
 func (*MetricSample) Descriptor() ([]byte, []int) {
-	return file_ocserv_platform_agent_v1_agent_proto_rawDescGZIP(), []int{8}
+	return file_ocserv_platform_agent_v1_agent_proto_rawDescGZIP(), []int{9}
 }
 
 func (x *MetricSample) GetSampledAt() *timestamppb.Timestamp {
@@ -1003,7 +1275,7 @@ type SecurityObservation struct {
 
 func (x *SecurityObservation) Reset() {
 	*x = SecurityObservation{}
-	mi := &file_ocserv_platform_agent_v1_agent_proto_msgTypes[9]
+	mi := &file_ocserv_platform_agent_v1_agent_proto_msgTypes[10]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1015,7 +1287,7 @@ func (x *SecurityObservation) String() string {
 func (*SecurityObservation) ProtoMessage() {}
 
 func (x *SecurityObservation) ProtoReflect() protoreflect.Message {
-	mi := &file_ocserv_platform_agent_v1_agent_proto_msgTypes[9]
+	mi := &file_ocserv_platform_agent_v1_agent_proto_msgTypes[10]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1028,7 +1300,7 @@ func (x *SecurityObservation) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SecurityObservation.ProtoReflect.Descriptor instead.
 func (*SecurityObservation) Descriptor() ([]byte, []int) {
-	return file_ocserv_platform_agent_v1_agent_proto_rawDescGZIP(), []int{9}
+	return file_ocserv_platform_agent_v1_agent_proto_rawDescGZIP(), []int{10}
 }
 
 func (x *SecurityObservation) GetEventId() []byte {
@@ -1082,7 +1354,7 @@ type TelemetryBatch struct {
 
 func (x *TelemetryBatch) Reset() {
 	*x = TelemetryBatch{}
-	mi := &file_ocserv_platform_agent_v1_agent_proto_msgTypes[10]
+	mi := &file_ocserv_platform_agent_v1_agent_proto_msgTypes[11]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1094,7 +1366,7 @@ func (x *TelemetryBatch) String() string {
 func (*TelemetryBatch) ProtoMessage() {}
 
 func (x *TelemetryBatch) ProtoReflect() protoreflect.Message {
-	mi := &file_ocserv_platform_agent_v1_agent_proto_msgTypes[10]
+	mi := &file_ocserv_platform_agent_v1_agent_proto_msgTypes[11]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1107,7 +1379,7 @@ func (x *TelemetryBatch) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use TelemetryBatch.ProtoReflect.Descriptor instead.
 func (*TelemetryBatch) Descriptor() ([]byte, []int) {
-	return file_ocserv_platform_agent_v1_agent_proto_rawDescGZIP(), []int{10}
+	return file_ocserv_platform_agent_v1_agent_proto_rawDescGZIP(), []int{11}
 }
 
 func (x *TelemetryBatch) GetBatchId() []byte {
@@ -1191,14 +1463,17 @@ type CommandEnvelope struct {
 	//	*CommandEnvelope_SimulationProbe
 	//	*CommandEnvelope_SyntheticNoop
 	//	*CommandEnvelope_SyntheticEcho
-	Payload       isCommandEnvelope_Payload `protobuf_oneof:"payload"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	Payload                    isCommandEnvelope_Payload  `protobuf_oneof:"payload"`
+	DeliveryMode               CommandDeliveryMode        `protobuf:"varint,109,opt,name=delivery_mode,json=deliveryMode,proto3,enum=ocserv.platform.agent.v1.CommandDeliveryMode" json:"delivery_mode,omitempty"`
+	SemanticPayloadHashVersion SemanticPayloadHashVersion `protobuf:"varint,110,opt,name=semantic_payload_hash_version,json=semanticPayloadHashVersion,proto3,enum=ocserv.platform.agent.v1.SemanticPayloadHashVersion" json:"semantic_payload_hash_version,omitempty"`
+	SemanticPayloadSha256      []byte                     `protobuf:"bytes,111,opt,name=semantic_payload_sha256,json=semanticPayloadSha256,proto3" json:"semantic_payload_sha256,omitempty"`
+	unknownFields              protoimpl.UnknownFields
+	sizeCache                  protoimpl.SizeCache
 }
 
 func (x *CommandEnvelope) Reset() {
 	*x = CommandEnvelope{}
-	mi := &file_ocserv_platform_agent_v1_agent_proto_msgTypes[11]
+	mi := &file_ocserv_platform_agent_v1_agent_proto_msgTypes[12]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1210,7 +1485,7 @@ func (x *CommandEnvelope) String() string {
 func (*CommandEnvelope) ProtoMessage() {}
 
 func (x *CommandEnvelope) ProtoReflect() protoreflect.Message {
-	mi := &file_ocserv_platform_agent_v1_agent_proto_msgTypes[11]
+	mi := &file_ocserv_platform_agent_v1_agent_proto_msgTypes[12]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1223,7 +1498,7 @@ func (x *CommandEnvelope) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CommandEnvelope.ProtoReflect.Descriptor instead.
 func (*CommandEnvelope) Descriptor() ([]byte, []int) {
-	return file_ocserv_platform_agent_v1_agent_proto_rawDescGZIP(), []int{11}
+	return file_ocserv_platform_agent_v1_agent_proto_rawDescGZIP(), []int{12}
 }
 
 func (x *CommandEnvelope) GetProtocolVersion() string {
@@ -1398,6 +1673,27 @@ func (x *CommandEnvelope) GetSyntheticEcho() *SyntheticEcho {
 	return nil
 }
 
+func (x *CommandEnvelope) GetDeliveryMode() CommandDeliveryMode {
+	if x != nil {
+		return x.DeliveryMode
+	}
+	return CommandDeliveryMode_COMMAND_DELIVERY_MODE_UNSPECIFIED
+}
+
+func (x *CommandEnvelope) GetSemanticPayloadHashVersion() SemanticPayloadHashVersion {
+	if x != nil {
+		return x.SemanticPayloadHashVersion
+	}
+	return SemanticPayloadHashVersion_SEMANTIC_PAYLOAD_HASH_VERSION_UNSPECIFIED
+}
+
+func (x *CommandEnvelope) GetSemanticPayloadSha256() []byte {
+	if x != nil {
+		return x.SemanticPayloadSha256
+	}
+	return nil
+}
+
 type isCommandEnvelope_Payload interface {
 	isCommandEnvelope_Payload()
 }
@@ -1465,7 +1761,7 @@ type SessionDisconnect struct {
 
 func (x *SessionDisconnect) Reset() {
 	*x = SessionDisconnect{}
-	mi := &file_ocserv_platform_agent_v1_agent_proto_msgTypes[12]
+	mi := &file_ocserv_platform_agent_v1_agent_proto_msgTypes[13]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1477,7 +1773,7 @@ func (x *SessionDisconnect) String() string {
 func (*SessionDisconnect) ProtoMessage() {}
 
 func (x *SessionDisconnect) ProtoReflect() protoreflect.Message {
-	mi := &file_ocserv_platform_agent_v1_agent_proto_msgTypes[12]
+	mi := &file_ocserv_platform_agent_v1_agent_proto_msgTypes[13]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1490,7 +1786,7 @@ func (x *SessionDisconnect) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SessionDisconnect.ProtoReflect.Descriptor instead.
 func (*SessionDisconnect) Descriptor() ([]byte, []int) {
-	return file_ocserv_platform_agent_v1_agent_proto_rawDescGZIP(), []int{12}
+	return file_ocserv_platform_agent_v1_agent_proto_rawDescGZIP(), []int{13}
 }
 
 func (x *SessionDisconnect) GetSessionId() string {
@@ -1509,7 +1805,7 @@ type UserCreate struct {
 
 func (x *UserCreate) Reset() {
 	*x = UserCreate{}
-	mi := &file_ocserv_platform_agent_v1_agent_proto_msgTypes[13]
+	mi := &file_ocserv_platform_agent_v1_agent_proto_msgTypes[14]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1521,7 +1817,7 @@ func (x *UserCreate) String() string {
 func (*UserCreate) ProtoMessage() {}
 
 func (x *UserCreate) ProtoReflect() protoreflect.Message {
-	mi := &file_ocserv_platform_agent_v1_agent_proto_msgTypes[13]
+	mi := &file_ocserv_platform_agent_v1_agent_proto_msgTypes[14]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1534,7 +1830,7 @@ func (x *UserCreate) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use UserCreate.ProtoReflect.Descriptor instead.
 func (*UserCreate) Descriptor() ([]byte, []int) {
-	return file_ocserv_platform_agent_v1_agent_proto_rawDescGZIP(), []int{13}
+	return file_ocserv_platform_agent_v1_agent_proto_rawDescGZIP(), []int{14}
 }
 
 func (x *UserCreate) GetUsername() string {
@@ -1553,7 +1849,7 @@ type UserDisable struct {
 
 func (x *UserDisable) Reset() {
 	*x = UserDisable{}
-	mi := &file_ocserv_platform_agent_v1_agent_proto_msgTypes[14]
+	mi := &file_ocserv_platform_agent_v1_agent_proto_msgTypes[15]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1565,7 +1861,7 @@ func (x *UserDisable) String() string {
 func (*UserDisable) ProtoMessage() {}
 
 func (x *UserDisable) ProtoReflect() protoreflect.Message {
-	mi := &file_ocserv_platform_agent_v1_agent_proto_msgTypes[14]
+	mi := &file_ocserv_platform_agent_v1_agent_proto_msgTypes[15]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1578,7 +1874,7 @@ func (x *UserDisable) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use UserDisable.ProtoReflect.Descriptor instead.
 func (*UserDisable) Descriptor() ([]byte, []int) {
-	return file_ocserv_platform_agent_v1_agent_proto_rawDescGZIP(), []int{14}
+	return file_ocserv_platform_agent_v1_agent_proto_rawDescGZIP(), []int{15}
 }
 
 func (x *UserDisable) GetUsername() string {
@@ -1598,7 +1894,7 @@ type ConfigPlan struct {
 
 func (x *ConfigPlan) Reset() {
 	*x = ConfigPlan{}
-	mi := &file_ocserv_platform_agent_v1_agent_proto_msgTypes[15]
+	mi := &file_ocserv_platform_agent_v1_agent_proto_msgTypes[16]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1610,7 +1906,7 @@ func (x *ConfigPlan) String() string {
 func (*ConfigPlan) ProtoMessage() {}
 
 func (x *ConfigPlan) ProtoReflect() protoreflect.Message {
-	mi := &file_ocserv_platform_agent_v1_agent_proto_msgTypes[15]
+	mi := &file_ocserv_platform_agent_v1_agent_proto_msgTypes[16]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1623,7 +1919,7 @@ func (x *ConfigPlan) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ConfigPlan.ProtoReflect.Descriptor instead.
 func (*ConfigPlan) Descriptor() ([]byte, []int) {
-	return file_ocserv_platform_agent_v1_agent_proto_rawDescGZIP(), []int{15}
+	return file_ocserv_platform_agent_v1_agent_proto_rawDescGZIP(), []int{16}
 }
 
 func (x *ConfigPlan) GetCandidate() []byte {
@@ -1649,7 +1945,7 @@ type ConfigApply struct {
 
 func (x *ConfigApply) Reset() {
 	*x = ConfigApply{}
-	mi := &file_ocserv_platform_agent_v1_agent_proto_msgTypes[16]
+	mi := &file_ocserv_platform_agent_v1_agent_proto_msgTypes[17]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1661,7 +1957,7 @@ func (x *ConfigApply) String() string {
 func (*ConfigApply) ProtoMessage() {}
 
 func (x *ConfigApply) ProtoReflect() protoreflect.Message {
-	mi := &file_ocserv_platform_agent_v1_agent_proto_msgTypes[16]
+	mi := &file_ocserv_platform_agent_v1_agent_proto_msgTypes[17]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1674,7 +1970,7 @@ func (x *ConfigApply) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ConfigApply.ProtoReflect.Descriptor instead.
 func (*ConfigApply) Descriptor() ([]byte, []int) {
-	return file_ocserv_platform_agent_v1_agent_proto_rawDescGZIP(), []int{16}
+	return file_ocserv_platform_agent_v1_agent_proto_rawDescGZIP(), []int{17}
 }
 
 func (x *ConfigApply) GetCandidateHash() []byte {
@@ -1692,7 +1988,7 @@ type ServiceReload struct {
 
 func (x *ServiceReload) Reset() {
 	*x = ServiceReload{}
-	mi := &file_ocserv_platform_agent_v1_agent_proto_msgTypes[17]
+	mi := &file_ocserv_platform_agent_v1_agent_proto_msgTypes[18]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1704,7 +2000,7 @@ func (x *ServiceReload) String() string {
 func (*ServiceReload) ProtoMessage() {}
 
 func (x *ServiceReload) ProtoReflect() protoreflect.Message {
-	mi := &file_ocserv_platform_agent_v1_agent_proto_msgTypes[17]
+	mi := &file_ocserv_platform_agent_v1_agent_proto_msgTypes[18]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1717,7 +2013,7 @@ func (x *ServiceReload) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ServiceReload.ProtoReflect.Descriptor instead.
 func (*ServiceReload) Descriptor() ([]byte, []int) {
-	return file_ocserv_platform_agent_v1_agent_proto_rawDescGZIP(), []int{17}
+	return file_ocserv_platform_agent_v1_agent_proto_rawDescGZIP(), []int{18}
 }
 
 // Synthetic commands exercise delivery without changing remote state.
@@ -1729,7 +2025,7 @@ type SyntheticNoop struct {
 
 func (x *SyntheticNoop) Reset() {
 	*x = SyntheticNoop{}
-	mi := &file_ocserv_platform_agent_v1_agent_proto_msgTypes[18]
+	mi := &file_ocserv_platform_agent_v1_agent_proto_msgTypes[19]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1741,7 +2037,7 @@ func (x *SyntheticNoop) String() string {
 func (*SyntheticNoop) ProtoMessage() {}
 
 func (x *SyntheticNoop) ProtoReflect() protoreflect.Message {
-	mi := &file_ocserv_platform_agent_v1_agent_proto_msgTypes[18]
+	mi := &file_ocserv_platform_agent_v1_agent_proto_msgTypes[19]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1754,7 +2050,7 @@ func (x *SyntheticNoop) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SyntheticNoop.ProtoReflect.Descriptor instead.
 func (*SyntheticNoop) Descriptor() ([]byte, []int) {
-	return file_ocserv_platform_agent_v1_agent_proto_rawDescGZIP(), []int{18}
+	return file_ocserv_platform_agent_v1_agent_proto_rawDescGZIP(), []int{19}
 }
 
 type SyntheticEcho struct {
@@ -1766,7 +2062,7 @@ type SyntheticEcho struct {
 
 func (x *SyntheticEcho) Reset() {
 	*x = SyntheticEcho{}
-	mi := &file_ocserv_platform_agent_v1_agent_proto_msgTypes[19]
+	mi := &file_ocserv_platform_agent_v1_agent_proto_msgTypes[20]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1778,7 +2074,7 @@ func (x *SyntheticEcho) String() string {
 func (*SyntheticEcho) ProtoMessage() {}
 
 func (x *SyntheticEcho) ProtoReflect() protoreflect.Message {
-	mi := &file_ocserv_platform_agent_v1_agent_proto_msgTypes[19]
+	mi := &file_ocserv_platform_agent_v1_agent_proto_msgTypes[20]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1791,7 +2087,7 @@ func (x *SyntheticEcho) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SyntheticEcho.ProtoReflect.Descriptor instead.
 func (*SyntheticEcho) Descriptor() ([]byte, []int) {
-	return file_ocserv_platform_agent_v1_agent_proto_rawDescGZIP(), []int{19}
+	return file_ocserv_platform_agent_v1_agent_proto_rawDescGZIP(), []int{20}
 }
 
 func (x *SyntheticEcho) GetMessage() string {
@@ -1815,7 +2111,7 @@ type SimulationProbe struct {
 
 func (x *SimulationProbe) Reset() {
 	*x = SimulationProbe{}
-	mi := &file_ocserv_platform_agent_v1_agent_proto_msgTypes[20]
+	mi := &file_ocserv_platform_agent_v1_agent_proto_msgTypes[21]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1827,7 +2123,7 @@ func (x *SimulationProbe) String() string {
 func (*SimulationProbe) ProtoMessage() {}
 
 func (x *SimulationProbe) ProtoReflect() protoreflect.Message {
-	mi := &file_ocserv_platform_agent_v1_agent_proto_msgTypes[20]
+	mi := &file_ocserv_platform_agent_v1_agent_proto_msgTypes[21]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1840,7 +2136,7 @@ func (x *SimulationProbe) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SimulationProbe.ProtoReflect.Descriptor instead.
 func (*SimulationProbe) Descriptor() ([]byte, []int) {
-	return file_ocserv_platform_agent_v1_agent_proto_rawDescGZIP(), []int{20}
+	return file_ocserv_platform_agent_v1_agent_proto_rawDescGZIP(), []int{21}
 }
 
 func (x *SimulationProbe) GetHeartbeatCount() uint32 {
@@ -1930,7 +2226,22 @@ const file_ocserv_platform_agent_v1_agent_proto_rawDesc = "" +
 	"\n" +
 	"AgentEvent\x12<\n" +
 	"\x04type\x18\x01 \x01(\x0e2(.ocserv.platform.agent.v1.AgentEventTypeR\x04type\x12\x18\n" +
-	"\apayload\x18\x02 \x01(\fR\apayload\"{\n" +
+	"\apayload\x18\x02 \x01(\fR\apayload\"\x8a\x04\n" +
+	"\rCommandResult\x12\x1d\n" +
+	"\n" +
+	"command_id\x18\x01 \x01(\fR\tcommandId\x12'\n" +
+	"\x0fidempotency_key\x18\x02 \x01(\fR\x0eidempotencyKey\x12%\n" +
+	"\x0epayload_sha256\x18\x03 \x01(\fR\rpayloadSha256\x12B\n" +
+	"\x05state\x18\x04 \x01(\x0e2,.ocserv.platform.agent.v1.CommandResultStateR\x05state\x12\x16\n" +
+	"\x06result\x18\x05 \x01(\fR\x06result\x12\x1d\n" +
+	"\n" +
+	"error_code\x18\x06 \x01(\tR\terrorCode\x12;\n" +
+	"\vaccepted_at\x18\a \x01(\v2\x1a.google.protobuf.TimestampR\n" +
+	"acceptedAt\x12=\n" +
+	"\fcompleted_at\x18\b \x01(\v2\x1a.google.protobuf.TimestampR\vcompletedAt\x12\x1a\n" +
+	"\breplayed\x18\t \x01(\bR\breplayed\x12w\n" +
+	"\x1dsemantic_payload_hash_version\x18\n" +
+	" \x01(\x0e24.ocserv.platform.agent.v1.SemanticPayloadHashVersionR\x1asemanticPayloadHashVersion\"{\n" +
 	"\x15TelemetryDropCounters\x12\x1a\n" +
 	"\bsecurity\x18\x01 \x01(\x04R\bsecurity\x12\x16\n" +
 	"\x06health\x18\x02 \x01(\x04R\x06health\x12\x1c\n" +
@@ -1982,7 +2293,7 @@ const file_ocserv_platform_agent_v1_agent_proto_rawDesc = "" +
 	"\bsnapshot\x18\x05 \x01(\v2*.ocserv.platform.agent.v1.ObservedSnapshotR\bsnapshot\x12H\n" +
 	"\bsessions\x18\x06 \x03(\v2,.ocserv.platform.agent.v1.SessionObservationR\bsessions\x12@\n" +
 	"\asamples\x18\a \x03(\v2&.ocserv.platform.agent.v1.MetricSampleR\asamples\x12V\n" +
-	"\x0fsecurity_events\x18\b \x03(\v2-.ocserv.platform.agent.v1.SecurityObservationR\x0esecurityEvents\"\xc5\t\n" +
+	"\x0fsecurity_events\x18\b \x03(\v2-.ocserv.platform.agent.v1.SecurityObservationR\x0esecurityEvents\"\xca\v\n" +
 	"\x0fCommandEnvelope\x12)\n" +
 	"\x10protocol_version\x18\x01 \x01(\tR\x0fprotocolVersion\x12\x1d\n" +
 	"\n" +
@@ -2010,7 +2321,10 @@ const file_ocserv_platform_agent_v1_agent_proto_rawDesc = "" +
 	"\x0eservice_reload\x18i \x01(\v2'.ocserv.platform.agent.v1.ServiceReloadH\x00R\rserviceReload\x12V\n" +
 	"\x10simulation_probe\x18j \x01(\v2).ocserv.platform.agent.v1.SimulationProbeH\x00R\x0fsimulationProbe\x12P\n" +
 	"\x0esynthetic_noop\x18k \x01(\v2'.ocserv.platform.agent.v1.SyntheticNoopH\x00R\rsyntheticNoop\x12P\n" +
-	"\x0esynthetic_echo\x18l \x01(\v2'.ocserv.platform.agent.v1.SyntheticEchoH\x00R\rsyntheticEchoB\t\n" +
+	"\x0esynthetic_echo\x18l \x01(\v2'.ocserv.platform.agent.v1.SyntheticEchoH\x00R\rsyntheticEcho\x12R\n" +
+	"\rdelivery_mode\x18m \x01(\x0e2-.ocserv.platform.agent.v1.CommandDeliveryModeR\fdeliveryMode\x12w\n" +
+	"\x1dsemantic_payload_hash_version\x18n \x01(\x0e24.ocserv.platform.agent.v1.SemanticPayloadHashVersionR\x1asemanticPayloadHashVersion\x126\n" +
+	"\x17semantic_payload_sha256\x18o \x01(\fR\x15semanticPayloadSha256B\t\n" +
 	"\apayloadJ\x04\b\r\x10dR\x0elegacy_payload\"2\n" +
 	"\x11SessionDisconnect\x12\x1d\n" +
 	"\n" +
@@ -2049,7 +2363,21 @@ const file_ocserv_platform_agent_v1_agent_proto_rawDesc = "" +
 	"\x1cAGENT_EVENT_TYPE_UNSPECIFIED\x10\x00\x12#\n" +
 	"\x1fAGENT_EVENT_TYPE_COMMAND_RESULT\x10\x01\x12\x1e\n" +
 	"\x1aAGENT_EVENT_TYPE_HEARTBEAT\x10\x02\x12\x1a\n" +
-	"\x16AGENT_EVENT_TYPE_ERROR\x10\x03*\xc5\x01\n" +
+	"\x16AGENT_EVENT_TYPE_ERROR\x10\x03*\xc4\x01\n" +
+	"\x12CommandResultState\x12$\n" +
+	" COMMAND_RESULT_STATE_UNSPECIFIED\x10\x00\x12\"\n" +
+	"\x1eCOMMAND_RESULT_STATE_SUCCEEDED\x10\x01\x12\x1f\n" +
+	"\x1bCOMMAND_RESULT_STATE_FAILED\x10\x02\x12 \n" +
+	"\x1cCOMMAND_RESULT_STATE_UNKNOWN\x10\x03\x12!\n" +
+	"\x1dCOMMAND_RESULT_STATE_REJECTED\x10\x04*\xc5\x01\n" +
+	"\x13CommandDeliveryMode\x12%\n" +
+	"!COMMAND_DELIVERY_MODE_UNSPECIFIED\x10\x00\x12+\n" +
+	"'COMMAND_DELIVERY_MODE_EXECUTE_OR_REPLAY\x10\x01\x12(\n" +
+	"$COMMAND_DELIVERY_MODE_RECONCILE_ONLY\x10\x02\x120\n" +
+	",COMMAND_DELIVERY_MODE_RETRY_IF_EFFECT_ABSENT\x10\x03*q\n" +
+	"\x1aSemanticPayloadHashVersion\x12-\n" +
+	")SEMANTIC_PAYLOAD_HASH_VERSION_UNSPECIFIED\x10\x00\x12$\n" +
+	" SEMANTIC_PAYLOAD_HASH_VERSION_V1\x10\x01*\xc5\x01\n" +
 	"\x11TelemetryPriority\x12\"\n" +
 	"\x1eTELEMETRY_PRIORITY_UNSPECIFIED\x10\x00\x12\x1f\n" +
 	"\x1bTELEMETRY_PRIORITY_SECURITY\x10\x01\x12%\n" +
@@ -2071,67 +2399,77 @@ func file_ocserv_platform_agent_v1_agent_proto_rawDescGZIP() []byte {
 	return file_ocserv_platform_agent_v1_agent_proto_rawDescData
 }
 
-var file_ocserv_platform_agent_v1_agent_proto_enumTypes = make([]protoimpl.EnumInfo, 3)
-var file_ocserv_platform_agent_v1_agent_proto_msgTypes = make([]protoimpl.MessageInfo, 21)
+var file_ocserv_platform_agent_v1_agent_proto_enumTypes = make([]protoimpl.EnumInfo, 6)
+var file_ocserv_platform_agent_v1_agent_proto_msgTypes = make([]protoimpl.MessageInfo, 22)
 var file_ocserv_platform_agent_v1_agent_proto_goTypes = []any{
 	(HandshakeResult)(0),             // 0: ocserv.platform.agent.v1.HandshakeResult
 	(AgentEventType)(0),              // 1: ocserv.platform.agent.v1.AgentEventType
-	(TelemetryPriority)(0),           // 2: ocserv.platform.agent.v1.TelemetryPriority
-	(*EnrollRequest)(nil),            // 3: ocserv.platform.agent.v1.EnrollRequest
-	(*EnrollResponse)(nil),           // 4: ocserv.platform.agent.v1.EnrollResponse
-	(*SessionHandshake)(nil),         // 5: ocserv.platform.agent.v1.SessionHandshake
-	(*SessionHandshakeResponse)(nil), // 6: ocserv.platform.agent.v1.SessionHandshakeResponse
-	(*AgentEvent)(nil),               // 7: ocserv.platform.agent.v1.AgentEvent
-	(*TelemetryDropCounters)(nil),    // 8: ocserv.platform.agent.v1.TelemetryDropCounters
-	(*ObservedSnapshot)(nil),         // 9: ocserv.platform.agent.v1.ObservedSnapshot
-	(*SessionObservation)(nil),       // 10: ocserv.platform.agent.v1.SessionObservation
-	(*MetricSample)(nil),             // 11: ocserv.platform.agent.v1.MetricSample
-	(*SecurityObservation)(nil),      // 12: ocserv.platform.agent.v1.SecurityObservation
-	(*TelemetryBatch)(nil),           // 13: ocserv.platform.agent.v1.TelemetryBatch
-	(*CommandEnvelope)(nil),          // 14: ocserv.platform.agent.v1.CommandEnvelope
-	(*SessionDisconnect)(nil),        // 15: ocserv.platform.agent.v1.SessionDisconnect
-	(*UserCreate)(nil),               // 16: ocserv.platform.agent.v1.UserCreate
-	(*UserDisable)(nil),              // 17: ocserv.platform.agent.v1.UserDisable
-	(*ConfigPlan)(nil),               // 18: ocserv.platform.agent.v1.ConfigPlan
-	(*ConfigApply)(nil),              // 19: ocserv.platform.agent.v1.ConfigApply
-	(*ServiceReload)(nil),            // 20: ocserv.platform.agent.v1.ServiceReload
-	(*SyntheticNoop)(nil),            // 21: ocserv.platform.agent.v1.SyntheticNoop
-	(*SyntheticEcho)(nil),            // 22: ocserv.platform.agent.v1.SyntheticEcho
-	(*SimulationProbe)(nil),          // 23: ocserv.platform.agent.v1.SimulationProbe
-	(*timestamppb.Timestamp)(nil),    // 24: google.protobuf.Timestamp
+	(CommandResultState)(0),          // 2: ocserv.platform.agent.v1.CommandResultState
+	(CommandDeliveryMode)(0),         // 3: ocserv.platform.agent.v1.CommandDeliveryMode
+	(SemanticPayloadHashVersion)(0),  // 4: ocserv.platform.agent.v1.SemanticPayloadHashVersion
+	(TelemetryPriority)(0),           // 5: ocserv.platform.agent.v1.TelemetryPriority
+	(*EnrollRequest)(nil),            // 6: ocserv.platform.agent.v1.EnrollRequest
+	(*EnrollResponse)(nil),           // 7: ocserv.platform.agent.v1.EnrollResponse
+	(*SessionHandshake)(nil),         // 8: ocserv.platform.agent.v1.SessionHandshake
+	(*SessionHandshakeResponse)(nil), // 9: ocserv.platform.agent.v1.SessionHandshakeResponse
+	(*AgentEvent)(nil),               // 10: ocserv.platform.agent.v1.AgentEvent
+	(*CommandResult)(nil),            // 11: ocserv.platform.agent.v1.CommandResult
+	(*TelemetryDropCounters)(nil),    // 12: ocserv.platform.agent.v1.TelemetryDropCounters
+	(*ObservedSnapshot)(nil),         // 13: ocserv.platform.agent.v1.ObservedSnapshot
+	(*SessionObservation)(nil),       // 14: ocserv.platform.agent.v1.SessionObservation
+	(*MetricSample)(nil),             // 15: ocserv.platform.agent.v1.MetricSample
+	(*SecurityObservation)(nil),      // 16: ocserv.platform.agent.v1.SecurityObservation
+	(*TelemetryBatch)(nil),           // 17: ocserv.platform.agent.v1.TelemetryBatch
+	(*CommandEnvelope)(nil),          // 18: ocserv.platform.agent.v1.CommandEnvelope
+	(*SessionDisconnect)(nil),        // 19: ocserv.platform.agent.v1.SessionDisconnect
+	(*UserCreate)(nil),               // 20: ocserv.platform.agent.v1.UserCreate
+	(*UserDisable)(nil),              // 21: ocserv.platform.agent.v1.UserDisable
+	(*ConfigPlan)(nil),               // 22: ocserv.platform.agent.v1.ConfigPlan
+	(*ConfigApply)(nil),              // 23: ocserv.platform.agent.v1.ConfigApply
+	(*ServiceReload)(nil),            // 24: ocserv.platform.agent.v1.ServiceReload
+	(*SyntheticNoop)(nil),            // 25: ocserv.platform.agent.v1.SyntheticNoop
+	(*SyntheticEcho)(nil),            // 26: ocserv.platform.agent.v1.SyntheticEcho
+	(*SimulationProbe)(nil),          // 27: ocserv.platform.agent.v1.SimulationProbe
+	(*timestamppb.Timestamp)(nil),    // 28: google.protobuf.Timestamp
 }
 var file_ocserv_platform_agent_v1_agent_proto_depIdxs = []int32{
-	24, // 0: ocserv.platform.agent.v1.EnrollRequest.time:type_name -> google.protobuf.Timestamp
+	28, // 0: ocserv.platform.agent.v1.EnrollRequest.time:type_name -> google.protobuf.Timestamp
 	0,  // 1: ocserv.platform.agent.v1.EnrollResponse.result:type_name -> ocserv.platform.agent.v1.HandshakeResult
-	24, // 2: ocserv.platform.agent.v1.SessionHandshake.time:type_name -> google.protobuf.Timestamp
+	28, // 2: ocserv.platform.agent.v1.SessionHandshake.time:type_name -> google.protobuf.Timestamp
 	0,  // 3: ocserv.platform.agent.v1.SessionHandshakeResponse.result:type_name -> ocserv.platform.agent.v1.HandshakeResult
 	1,  // 4: ocserv.platform.agent.v1.AgentEvent.type:type_name -> ocserv.platform.agent.v1.AgentEventType
-	24, // 5: ocserv.platform.agent.v1.ObservedSnapshot.observed_at:type_name -> google.protobuf.Timestamp
-	8,  // 6: ocserv.platform.agent.v1.ObservedSnapshot.dropped:type_name -> ocserv.platform.agent.v1.TelemetryDropCounters
-	24, // 7: ocserv.platform.agent.v1.SessionObservation.connected_at:type_name -> google.protobuf.Timestamp
-	24, // 8: ocserv.platform.agent.v1.MetricSample.sampled_at:type_name -> google.protobuf.Timestamp
-	24, // 9: ocserv.platform.agent.v1.SecurityObservation.observed_at:type_name -> google.protobuf.Timestamp
-	2,  // 10: ocserv.platform.agent.v1.TelemetryBatch.priority:type_name -> ocserv.platform.agent.v1.TelemetryPriority
-	9,  // 11: ocserv.platform.agent.v1.TelemetryBatch.snapshot:type_name -> ocserv.platform.agent.v1.ObservedSnapshot
-	10, // 12: ocserv.platform.agent.v1.TelemetryBatch.sessions:type_name -> ocserv.platform.agent.v1.SessionObservation
-	11, // 13: ocserv.platform.agent.v1.TelemetryBatch.samples:type_name -> ocserv.platform.agent.v1.MetricSample
-	12, // 14: ocserv.platform.agent.v1.TelemetryBatch.security_events:type_name -> ocserv.platform.agent.v1.SecurityObservation
-	24, // 15: ocserv.platform.agent.v1.CommandEnvelope.issued_at:type_name -> google.protobuf.Timestamp
-	24, // 16: ocserv.platform.agent.v1.CommandEnvelope.expires_at:type_name -> google.protobuf.Timestamp
-	15, // 17: ocserv.platform.agent.v1.CommandEnvelope.session_disconnect:type_name -> ocserv.platform.agent.v1.SessionDisconnect
-	16, // 18: ocserv.platform.agent.v1.CommandEnvelope.user_create:type_name -> ocserv.platform.agent.v1.UserCreate
-	17, // 19: ocserv.platform.agent.v1.CommandEnvelope.user_disable:type_name -> ocserv.platform.agent.v1.UserDisable
-	18, // 20: ocserv.platform.agent.v1.CommandEnvelope.config_plan:type_name -> ocserv.platform.agent.v1.ConfigPlan
-	19, // 21: ocserv.platform.agent.v1.CommandEnvelope.config_apply:type_name -> ocserv.platform.agent.v1.ConfigApply
-	20, // 22: ocserv.platform.agent.v1.CommandEnvelope.service_reload:type_name -> ocserv.platform.agent.v1.ServiceReload
-	23, // 23: ocserv.platform.agent.v1.CommandEnvelope.simulation_probe:type_name -> ocserv.platform.agent.v1.SimulationProbe
-	21, // 24: ocserv.platform.agent.v1.CommandEnvelope.synthetic_noop:type_name -> ocserv.platform.agent.v1.SyntheticNoop
-	22, // 25: ocserv.platform.agent.v1.CommandEnvelope.synthetic_echo:type_name -> ocserv.platform.agent.v1.SyntheticEcho
-	26, // [26:26] is the sub-list for method output_type
-	26, // [26:26] is the sub-list for method input_type
-	26, // [26:26] is the sub-list for extension type_name
-	26, // [26:26] is the sub-list for extension extendee
-	0,  // [0:26] is the sub-list for field type_name
+	2,  // 5: ocserv.platform.agent.v1.CommandResult.state:type_name -> ocserv.platform.agent.v1.CommandResultState
+	28, // 6: ocserv.platform.agent.v1.CommandResult.accepted_at:type_name -> google.protobuf.Timestamp
+	28, // 7: ocserv.platform.agent.v1.CommandResult.completed_at:type_name -> google.protobuf.Timestamp
+	4,  // 8: ocserv.platform.agent.v1.CommandResult.semantic_payload_hash_version:type_name -> ocserv.platform.agent.v1.SemanticPayloadHashVersion
+	28, // 9: ocserv.platform.agent.v1.ObservedSnapshot.observed_at:type_name -> google.protobuf.Timestamp
+	12, // 10: ocserv.platform.agent.v1.ObservedSnapshot.dropped:type_name -> ocserv.platform.agent.v1.TelemetryDropCounters
+	28, // 11: ocserv.platform.agent.v1.SessionObservation.connected_at:type_name -> google.protobuf.Timestamp
+	28, // 12: ocserv.platform.agent.v1.MetricSample.sampled_at:type_name -> google.protobuf.Timestamp
+	28, // 13: ocserv.platform.agent.v1.SecurityObservation.observed_at:type_name -> google.protobuf.Timestamp
+	5,  // 14: ocserv.platform.agent.v1.TelemetryBatch.priority:type_name -> ocserv.platform.agent.v1.TelemetryPriority
+	13, // 15: ocserv.platform.agent.v1.TelemetryBatch.snapshot:type_name -> ocserv.platform.agent.v1.ObservedSnapshot
+	14, // 16: ocserv.platform.agent.v1.TelemetryBatch.sessions:type_name -> ocserv.platform.agent.v1.SessionObservation
+	15, // 17: ocserv.platform.agent.v1.TelemetryBatch.samples:type_name -> ocserv.platform.agent.v1.MetricSample
+	16, // 18: ocserv.platform.agent.v1.TelemetryBatch.security_events:type_name -> ocserv.platform.agent.v1.SecurityObservation
+	28, // 19: ocserv.platform.agent.v1.CommandEnvelope.issued_at:type_name -> google.protobuf.Timestamp
+	28, // 20: ocserv.platform.agent.v1.CommandEnvelope.expires_at:type_name -> google.protobuf.Timestamp
+	19, // 21: ocserv.platform.agent.v1.CommandEnvelope.session_disconnect:type_name -> ocserv.platform.agent.v1.SessionDisconnect
+	20, // 22: ocserv.platform.agent.v1.CommandEnvelope.user_create:type_name -> ocserv.platform.agent.v1.UserCreate
+	21, // 23: ocserv.platform.agent.v1.CommandEnvelope.user_disable:type_name -> ocserv.platform.agent.v1.UserDisable
+	22, // 24: ocserv.platform.agent.v1.CommandEnvelope.config_plan:type_name -> ocserv.platform.agent.v1.ConfigPlan
+	23, // 25: ocserv.platform.agent.v1.CommandEnvelope.config_apply:type_name -> ocserv.platform.agent.v1.ConfigApply
+	24, // 26: ocserv.platform.agent.v1.CommandEnvelope.service_reload:type_name -> ocserv.platform.agent.v1.ServiceReload
+	27, // 27: ocserv.platform.agent.v1.CommandEnvelope.simulation_probe:type_name -> ocserv.platform.agent.v1.SimulationProbe
+	25, // 28: ocserv.platform.agent.v1.CommandEnvelope.synthetic_noop:type_name -> ocserv.platform.agent.v1.SyntheticNoop
+	26, // 29: ocserv.platform.agent.v1.CommandEnvelope.synthetic_echo:type_name -> ocserv.platform.agent.v1.SyntheticEcho
+	3,  // 30: ocserv.platform.agent.v1.CommandEnvelope.delivery_mode:type_name -> ocserv.platform.agent.v1.CommandDeliveryMode
+	4,  // 31: ocserv.platform.agent.v1.CommandEnvelope.semantic_payload_hash_version:type_name -> ocserv.platform.agent.v1.SemanticPayloadHashVersion
+	32, // [32:32] is the sub-list for method output_type
+	32, // [32:32] is the sub-list for method input_type
+	32, // [32:32] is the sub-list for extension type_name
+	32, // [32:32] is the sub-list for extension extendee
+	0,  // [0:32] is the sub-list for field type_name
 }
 
 func init() { file_ocserv_platform_agent_v1_agent_proto_init() }
@@ -2139,7 +2477,7 @@ func file_ocserv_platform_agent_v1_agent_proto_init() {
 	if File_ocserv_platform_agent_v1_agent_proto != nil {
 		return
 	}
-	file_ocserv_platform_agent_v1_agent_proto_msgTypes[11].OneofWrappers = []any{
+	file_ocserv_platform_agent_v1_agent_proto_msgTypes[12].OneofWrappers = []any{
 		(*CommandEnvelope_SessionDisconnect)(nil),
 		(*CommandEnvelope_UserCreate)(nil),
 		(*CommandEnvelope_UserDisable)(nil),
@@ -2155,8 +2493,8 @@ func file_ocserv_platform_agent_v1_agent_proto_init() {
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_ocserv_platform_agent_v1_agent_proto_rawDesc), len(file_ocserv_platform_agent_v1_agent_proto_rawDesc)),
-			NumEnums:      3,
-			NumMessages:   21,
+			NumEnums:      6,
+			NumMessages:   22,
 			NumExtensions: 0,
 			NumServices:   0,
 		},

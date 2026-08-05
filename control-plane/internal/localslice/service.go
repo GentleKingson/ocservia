@@ -1,7 +1,10 @@
 package localslice
 
 import (
+	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"time"
@@ -9,6 +12,7 @@ import (
 	agentv1 "github.com/GentleKingson/ocservia/control-plane/gen/proto/ocserv/platform/agent/v1"
 	transportv1 "github.com/GentleKingson/ocservia/control-plane/gen/proto/ocserv/platform/transport/v1"
 	"github.com/GentleKingson/ocservia/control-plane/internal/audit"
+	"github.com/GentleKingson/ocservia/control-plane/internal/semanticpayload"
 	telemetrystore "github.com/GentleKingson/ocservia/control-plane/internal/telemetry"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -329,6 +333,7 @@ func (s *Service) Ingest(ctx context.Context, event *transportv1.TransportEvent)
 	ctx = propagation.TraceContext{}.Extract(ctx, propagation.MapCarrier{"traceparent": event.GetTraceparent()})
 	ctx, span := otel.Tracer("ocservia.localslice").Start(ctx, "local_slice.event.ingest", trace.WithSpanKind(trace.SpanKindConsumer))
 	defer span.End()
+	observedAt := s.now()
 	eventID, err := uuid.FromBytes(event.GetEventId())
 	if err != nil || eventID.Version() != 7 {
 		return errors.New("event_id must be UUIDv7")
@@ -371,6 +376,12 @@ func (s *Service) Ingest(ctx context.Context, event *transportv1.TransportEvent)
 	if result.RowsAffected() == 0 {
 		return tx.Commit(ctx)
 	}
+	structuredCommandResult := eventType == "command_result"
+	if eventType == "command_result" {
+		if err := ingestAgentCommandResult(ctx, tx, eventID, nodeID, event.GetPayload(), occurredAt.AsTime(), observedAt); err != nil {
+			return err
+		}
+	}
 	status := "active"
 	if eventType == "disconnected" {
 		status = "offline"
@@ -382,7 +393,7 @@ func (s *Service) Ingest(ctx context.Context, event *transportv1.TransportEvent)
 	}
 	operationState := "running"
 	switch eventType {
-	case "command_result":
+	case "simulation_result":
 		operationState = "succeeded"
 	case "error":
 		operationState = "failed"
@@ -400,7 +411,7 @@ func (s *Service) Ingest(ctx context.Context, event *transportv1.TransportEvent)
 			nodeID, occurredAt.AsTime()); err != nil {
 			return fmt.Errorf("mark disconnected operations unknown: %w", err)
 		}
-	} else if eventType != "telemetry" && eventType != "path_changed" {
+	} else if eventType != "telemetry" && eventType != "path_changed" && !structuredCommandResult {
 		if _, err := tx.Exec(ctx, `
 			UPDATE operations AS operation
 			SET state = $2, updated_at = $3, version = version + 1
@@ -416,6 +427,248 @@ func (s *Service) Ingest(ctx context.Context, event *transportv1.TransportEvent)
 		return fmt.Errorf("commit event transaction: %w", err)
 	}
 	return nil
+}
+
+func ingestAgentCommandResult(ctx context.Context, tx pgx.Tx, eventID, nodeID uuid.UUID, payload []byte, occurredAt, observedAt time.Time) error {
+	var result agentv1.CommandResult
+	if err := proto.Unmarshal(payload, &result); err != nil {
+		return fmt.Errorf("decode structured Agent command result: %w", err)
+	}
+	commandID, err := uuid.FromBytes(result.GetCommandId())
+	if err != nil || commandID.Version() != 7 {
+		return errors.New("command result command_id must be UUIDv7")
+	}
+	idempotencyKey, err := uuid.FromBytes(result.GetIdempotencyKey())
+	if err != nil || idempotencyKey.Version() != 7 {
+		return errors.New("command result idempotency_key must be UUIDv7")
+	}
+	completedAt := result.GetCompletedAt()
+	if completedAt == nil || completedAt.CheckValid() != nil {
+		return errors.New("command result completed_at is invalid")
+	}
+	completedTime := completedAt.AsTime()
+	if completedTime.After(observedAt.Add(5*time.Minute)) || completedTime.After(occurredAt.Add(5*time.Minute)) {
+		return errors.New("command result completed_at exceeds clock skew bound")
+	}
+	if len(result.GetResult()) > 1<<20 || len(result.GetErrorCode()) > 128 {
+		return errors.New("command result field exceeds its bound")
+	}
+	state := ""
+	switch result.GetState() {
+	case agentv1.CommandResultState_COMMAND_RESULT_STATE_SUCCEEDED:
+		state = "succeeded"
+	case agentv1.CommandResultState_COMMAND_RESULT_STATE_FAILED:
+		state = "failed"
+	case agentv1.CommandResultState_COMMAND_RESULT_STATE_UNKNOWN:
+		state = "unknown"
+	case agentv1.CommandResultState_COMMAND_RESULT_STATE_REJECTED:
+		state = "rejected"
+	default:
+		return errors.New("command result state is invalid")
+	}
+	var envelopeBytes []byte
+	var currentState string
+	var commandCreatedAt time.Time
+	if err := tx.QueryRow(ctx, `SELECT command.envelope,command.state,command.created_at FROM commands command JOIN operations operation ON operation.command_id=command.id WHERE command.id=$1 AND command.node_id=$2`, commandID, nodeID).Scan(&envelopeBytes, &currentState, &commandCreatedAt); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return errors.New("command result does not match a dispatched command")
+		}
+		return fmt.Errorf("load command envelope for result: %w", err)
+	}
+	var envelope agentv1.CommandEnvelope
+	if err := proto.Unmarshal(envelopeBytes, &envelope); err != nil {
+		return fmt.Errorf("decode stored command envelope: %w", err)
+	}
+	if !bytes.Equal(envelope.GetIdempotencyKey(), result.GetIdempotencyKey()) {
+		return errors.New("command result idempotency key mismatch")
+	}
+	storedHashVersion := envelope.GetSemanticPayloadHashVersion()
+	if err := semanticpayload.ValidateVersion(storedHashVersion); err != nil {
+		return fmt.Errorf("stored command semantic payload hash version: %w", err)
+	}
+	resultHashVersion := result.GetSemanticPayloadHashVersion()
+	if err := semanticpayload.ValidateVersion(resultHashVersion); err != nil {
+		return fmt.Errorf("command result semantic payload hash version: %w", err)
+	}
+	issuedAt := envelope.GetIssuedAt()
+	if issuedAt == nil || issuedAt.CheckValid() != nil {
+		return errors.New("stored command issued_at is invalid")
+	}
+	issuedTime := issuedAt.AsTime()
+	lowerBound := issuedTime
+	if commandCreatedAt.After(lowerBound) {
+		lowerBound = commandCreatedAt
+	}
+	if completedTime.Before(lowerBound.Add(-5 * time.Minute)) {
+		return errors.New("command result completed_at precedes issued_at")
+	}
+	acceptedAt := result.GetAcceptedAt()
+	if state == "rejected" {
+		if acceptedAt != nil || result.GetErrorCode() == "" || len(result.GetResult()) != 0 || (len(result.GetPayloadSha256()) != 0 && len(result.GetPayloadSha256()) != sha256.Size) {
+			return errors.New("rejected command result fields are invalid")
+		}
+	} else {
+		if acceptedAt == nil || acceptedAt.CheckValid() != nil || len(result.GetPayloadSha256()) != sha256.Size {
+			return errors.New("accepted command result fields are invalid")
+		}
+		if acceptedAt.AsTime().Before(lowerBound.Add(-5*time.Minute)) || acceptedAt.AsTime().After(completedTime) {
+			return errors.New("command result accepted_at is invalid")
+		}
+		if state == "succeeded" && result.GetErrorCode() != "" {
+			return errors.New("succeeded command result must not contain an error code")
+		}
+		if (state == "failed" || state == "unknown") && result.GetErrorCode() == "" {
+			return errors.New("non-success command result requires an error code")
+		}
+		if state == "unknown" && len(result.GetResult()) != 0 {
+			return errors.New("unknown command result must not contain result bytes")
+		}
+	}
+	if state == "rejected" && len(result.GetPayloadSha256()) == 0 {
+		if resultHashVersion != agentv1.SemanticPayloadHashVersion_SEMANTIC_PAYLOAD_HASH_VERSION_UNSPECIFIED {
+			return errors.New("rejected command result must not declare a payload hash version")
+		}
+	} else if resultHashVersion != storedHashVersion {
+		return errors.New("command result semantic payload hash version mismatch")
+	}
+	if len(result.GetPayloadSha256()) == sha256.Size {
+		var expectedHash [sha256.Size]byte
+		var err error
+		switch resultHashVersion {
+		case agentv1.SemanticPayloadHashVersion_SEMANTIC_PAYLOAD_HASH_VERSION_V1:
+			expectedHash, err = semanticpayload.HashV1(&envelope)
+		case agentv1.SemanticPayloadHashVersion_SEMANTIC_PAYLOAD_HASH_VERSION_UNSPECIFIED:
+			expectedHash, err = agentPayloadHash(&envelope)
+		}
+		if err != nil {
+			return err
+		}
+		if !bytes.Equal(result.GetPayloadSha256(), expectedHash[:]) {
+			return errors.New("command result payload hash mismatch")
+		}
+	}
+	if (currentState == "succeeded" || currentState == "failed" || currentState == "rejected") && currentState != state {
+		return errors.New("command result contradicts a terminal state")
+	}
+	if currentState == "expired" || currentState == "rolled_back" || currentState == "superseded" {
+		return errors.New("command result contradicts a terminal state")
+	}
+	var payloadHash any
+	if len(result.GetPayloadSha256()) == 32 {
+		payloadHash = result.GetPayloadSha256()
+	}
+	hashVersion := int16(result.GetSemanticPayloadHashVersion())
+	var acceptedAtValue any
+	if acceptedAt != nil {
+		acceptedAtValue = acceptedAt.AsTime()
+	}
+	errorCode := any(nil)
+	if result.GetErrorCode() != "" {
+		errorCode = result.GetErrorCode()
+	}
+	resultBytes := result.GetResult()
+	if resultBytes == nil {
+		resultBytes = []byte{}
+	}
+	if _, err := tx.Exec(ctx, `INSERT INTO agent_command_results(event_id,command_id,idempotency_key,payload_sha256,semantic_payload_hash_version,state,result,error_code,accepted_at,completed_at,replayed,created_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`, eventID, commandID, idempotencyKey, payloadHash, hashVersion, state, resultBytes, errorCode, acceptedAtValue, completedTime, result.GetReplayed(), observedAt); err != nil {
+		return fmt.Errorf("persist Agent command result: %w", err)
+	}
+	operationEventID, err := uuid.NewV7()
+	if err != nil {
+		return fmt.Errorf("generate operation result event ID: %w", err)
+	}
+	terminal := state == "succeeded" || state == "failed" || state == "rejected"
+	commandTag, err := tx.Exec(ctx, `UPDATE commands SET state=$2,updated_at=GREATEST(updated_at,$3) WHERE id=$1 AND state IN ('dispatched','accepted','running','unknown')`, commandID, state, observedAt)
+	if err != nil {
+		return fmt.Errorf("apply Agent command result: %w", err)
+	}
+	if commandTag.RowsAffected() == 0 {
+		return nil
+	}
+	operationState := state
+	if state == "rejected" {
+		operationState = "failed"
+	}
+	operationTag, err := tx.Exec(ctx, `UPDATE operations SET state=$2,version=version+1,updated_at=GREATEST(updated_at,$3),completed_at=CASE WHEN $4::boolean THEN GREATEST(COALESCE(completed_at,$3),$3) ELSE NULL END WHERE command_id=$1 AND state IN ('dispatched','accepted','running','unknown')`, commandID, operationState, observedAt, terminal)
+	if err != nil {
+		return fmt.Errorf("apply Agent operation result: %w", err)
+	}
+	if operationTag.RowsAffected() != 1 {
+		return errors.New("command result does not match a mutable operation")
+	}
+	if _, err := tx.Exec(ctx, `INSERT INTO operation_events(id,operation_id,state,occurred_at) SELECT $2,id,$3,$4 FROM operations WHERE command_id=$1`, commandID, operationEventID, operationState, observedAt); err != nil {
+		return fmt.Errorf("append Agent operation result event: %w", err)
+	}
+	if state == "unknown" {
+		if err := scheduleCommandRecovery(ctx, tx, commandID, &envelope, result.GetErrorCode(), observedAt); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func scheduleCommandRecovery(ctx context.Context, tx pgx.Tx, commandID uuid.UUID, envelope *agentv1.CommandEnvelope, reason string, observedAt time.Time) error {
+	var mode agentv1.CommandDeliveryMode
+	switch reason {
+	case "effect_absent":
+		if envelope.GetDeliveryMode() != agentv1.CommandDeliveryMode_COMMAND_DELIVERY_MODE_RECONCILE_ONLY {
+			return errors.New("effect absence was not observed during reconciliation")
+		}
+		mode = agentv1.CommandDeliveryMode_COMMAND_DELIVERY_MODE_RETRY_IF_EFFECT_ABSENT
+	case "outcome_requires_reconciliation", "result_persistence_failed":
+		mode = agentv1.CommandDeliveryMode_COMMAND_DELIVERY_MODE_RECONCILE_ONLY
+	default:
+		return nil
+	}
+	if expires := envelope.GetExpiresAt(); expires == nil || !expires.AsTime().After(observedAt) {
+		return nil
+	}
+	messageID, err := uuid.NewV7()
+	if err != nil {
+		return fmt.Errorf("generate reconciliation message ID: %w", err)
+	}
+	envelope.MessageId = messageID[:]
+	envelope.DeliveryMode = mode
+	payload, err := proto.Marshal(envelope)
+	if err != nil {
+		return fmt.Errorf("encode reconciliation command: %w", err)
+	}
+	if _, err := tx.Exec(ctx, `UPDATE commands SET envelope=$2 WHERE id=$1 AND state='unknown'`, commandID, payload); err != nil {
+		return fmt.Errorf("persist reconciliation command: %w", err)
+	}
+	if _, err := tx.Exec(ctx, `UPDATE outbox_events SET payload=$2,published_at=NULL,locked_by=NULL,locked_until=NULL,available_at=$3,last_error=NULL WHERE command_id=$1`, commandID, payload, observedAt); err != nil {
+		return fmt.Errorf("schedule reconciliation command: %w", err)
+	}
+	return nil
+}
+
+func agentPayloadHash(envelope *agentv1.CommandEnvelope) ([sha256.Size]byte, error) {
+	var capability string
+	var payload []byte
+	var err error
+	switch {
+	case envelope.GetSyntheticNoop() != nil:
+		capability = "synthetic.noop"
+		payload, err = proto.Marshal(envelope.GetSyntheticNoop())
+	case envelope.GetSyntheticEcho() != nil:
+		capability = "synthetic.echo"
+		payload, err = proto.Marshal(envelope.GetSyntheticEcho())
+	default:
+		return [sha256.Size]byte{}, errors.New("command result payload type is not reconcilable")
+	}
+	if err != nil {
+		return [sha256.Size]byte{}, fmt.Errorf("encode command payload for result verification: %w", err)
+	}
+	hash := sha256.New()
+	_, _ = hash.Write([]byte(capability))
+	_, _ = hash.Write(envelope.GetNodeId())
+	var revision [8]byte
+	binary.BigEndian.PutUint64(revision[:], envelope.GetExpectedRevision())
+	_, _ = hash.Write(revision[:])
+	_, _ = hash.Write(payload)
+	var result [sha256.Size]byte
+	copy(result[:], hash.Sum(nil))
+	return result, nil
 }
 
 func (s *Service) ClaimJobs(ctx context.Context, limit int) ([]Job, error) {
@@ -554,7 +807,7 @@ func marshalEnvelope(nodeID, operationID, commandID uuid.UUID, traceparent strin
 	envelope := &agentv1.CommandEnvelope{
 		ProtocolVersion: "1.0", MessageId: messageID[:], CommandId: commandID[:], IdempotencyKey: operationID[:], NodeId: nodeID[:],
 		Sequence: 1, IssuedAt: timestamppb.New(now), ExpiresAt: timestamppb.New(now.Add(time.Minute)), Traceparent: traceparent,
-		ActorId: "developer", Reason: "I03 local side-effect-free slice",
+		ActorId: "developer", Reason: "I03 local side-effect-free slice", DeliveryMode: agentv1.CommandDeliveryMode_COMMAND_DELIVERY_MODE_EXECUTE_OR_REPLAY,
 		Payload: &agentv1.CommandEnvelope_SimulationProbe{SimulationProbe: &agentv1.SimulationProbe{
 			HeartbeatCount: heartbeatCount, DelayMillis: delayMillis, DuplicateEvent: scenario.DuplicateEvent,
 			ReturnError: scenario.ReturnError, DisconnectAfter: scenario.DisconnectAfter,
@@ -575,6 +828,8 @@ func eventName(value transportv1.TransportEventType) (string, error) {
 		return "disconnected", nil
 	case transportv1.TransportEventType_TRANSPORT_EVENT_TYPE_COMMAND_RESULT:
 		return "command_result", nil
+	case transportv1.TransportEventType_TRANSPORT_EVENT_TYPE_SIMULATION_RESULT:
+		return "simulation_result", nil
 	case transportv1.TransportEventType_TRANSPORT_EVENT_TYPE_HEARTBEAT:
 		return "heartbeat", nil
 	case transportv1.TransportEventType_TRANSPORT_EVENT_TYPE_ERROR:
