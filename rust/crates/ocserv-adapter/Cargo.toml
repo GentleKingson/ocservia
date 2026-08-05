@@ -13,6 +13,7 @@ rustix.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 tokio = { workspace = true, features = ["fs", "io-util", "macros", "process", "rt", "sync", "time"] }
+uuid.workspace = true
 
 [dev-dependencies]
 uuid = { workspace = true, features = ["v7"] }

@@ -77,6 +77,19 @@ func (s *Server) listNodeSessions(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"items": items, "page": page})
 }
 
+func (s *Server) listNodeIPBans(w http.ResponseWriter, r *http.Request) {
+	id, ok := s.nodePathID(w, r)
+	if !ok {
+		return
+	}
+	items, err := s.telemetry.ListIPBans(r.Context(), id, 200)
+	if err != nil {
+		writeProblem(w, r, http.StatusServiceUnavailable, "https://ocservia.dev/problems/database-unavailable", "IP bans unavailable", "IP ban state could not be read")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"items": items})
+}
+
 func (s *Server) listNodeTelemetry(w http.ResponseWriter, r *http.Request) {
 	id, ok := s.nodePathID(w, r)
 	if !ok {

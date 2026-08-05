@@ -147,6 +147,7 @@ func GrantRuntimePrivileges(ctx context.Context, pool *pgxpool.Pool, role string
 		"GRANT SELECT, INSERT ON telemetry_ingest_batches TO " + identifier,
 		"GRANT SELECT, INSERT, UPDATE ON node_observed_snapshots, node_sessions TO " + identifier,
 		"GRANT DELETE ON node_sessions TO " + identifier,
+		"GRANT SELECT, INSERT, DELETE ON node_ip_bans TO " + identifier,
 		"GRANT SELECT, INSERT ON telemetry_security_events, telemetry_samples TO " + identifier,
 		"GRANT SELECT, INSERT, UPDATE, DELETE ON telemetry_rollups_5m, telemetry_rollups_1h TO " + identifier,
 		"GRANT EXECUTE ON FUNCTION telemetry_ensure_month_partition(timestamptz) TO " + identifier,

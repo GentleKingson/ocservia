@@ -10,6 +10,7 @@ import {
   type PlatformEventPage,
   type Readiness,
   type NodeObservedState,
+  type NodeIpBanPage,
   type NodePage,
   type NodeSessionPage,
   type SimulationScenario,
@@ -69,4 +70,78 @@ export async function listNodeSessions(
   return nodes.listNodeSessions(
     cursor ? { nodeId, cursor, pageSize: 200 } : { nodeId, pageSize: 200 },
   );
+}
+
+export async function listNodeIpBans(nodeId: string): Promise<NodeIpBanPage> {
+  return nodes.listNodeIpBans({ nodeId });
+}
+
+function controlledRequest(node: NodeObservedState, reason: string) {
+  return {
+    idempotencyKey: crypto.randomUUID(),
+    ifMatch: `"revision-${String(node.version)}"`,
+    controlledOperationRequest: {
+      reason,
+      expectedVersion: node.version,
+      ttlSeconds: 60,
+    },
+  };
+}
+
+export async function disconnectSession(
+  node: NodeObservedState,
+  sessionId: string,
+  reason: string,
+): Promise<Operation> {
+  if (!node.bootId) throw new Error("Node boot identity is unavailable");
+  const request = controlledRequest(node, reason);
+  return operations.disconnectNodeSession({
+    nodeId: node.id,
+    sessionId,
+    ...request,
+    controlledOperationRequest: {
+      ...request.controlledOperationRequest,
+      bootId: node.bootId,
+    },
+  });
+}
+
+export async function terminateSession(
+  node: NodeObservedState,
+  sessionId: string,
+  reason: string,
+): Promise<Operation> {
+  if (!node.bootId) throw new Error("Node boot identity is unavailable");
+  const request = controlledRequest(node, reason);
+  return operations.terminateNodeSession({
+    nodeId: node.id,
+    sessionId,
+    ...request,
+    controlledOperationRequest: {
+      ...request.controlledOperationRequest,
+      bootId: node.bootId,
+    },
+  });
+}
+
+export async function removeIpBan(
+  node: NodeObservedState,
+  ip: string,
+  reason: string,
+): Promise<Operation> {
+  return operations.removeNodeIpBan({
+    nodeId: node.id,
+    ip,
+    ...controlledRequest(node, reason),
+  });
+}
+
+export async function reloadService(
+  node: NodeObservedState,
+  reason: string,
+): Promise<Operation> {
+  return operations.reloadNodeService({
+    nodeId: node.id,
+    ...controlledRequest(node, reason),
+  });
 }

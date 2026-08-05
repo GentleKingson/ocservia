@@ -66,6 +66,9 @@ func New(address string, pool *pgxpool.Pool, build BuildInfo, logger *slog.Logge
 	mux.HandleFunc("GET /api/v1/operations/{operation_id}/events", s.requireOperationAuth(s.streamOperationEvents))
 	mux.HandleFunc("GET /api/v1/operations/queue-metrics", s.requireOperationAuth(s.queueMetrics))
 	mux.HandleFunc("POST /api/v1/nodes/{node_id}/synthetic-commands", s.requireOperationAuth(s.createSyntheticCommand))
+	mux.HandleFunc("POST /api/v1/nodes/{node_id}/sessions/{session_action}", s.requireOperationAuth(s.sessionAction))
+	mux.HandleFunc("POST /api/v1/nodes/{node_id}/ip-bans/{ip_action}", s.requireOperationAuth(s.ipBanAction))
+	mux.HandleFunc("POST /api/v1/nodes/{node_id}/service:reload", s.requireOperationAuth(s.reloadService))
 	mux.HandleFunc("GET /api/v1/events", s.listEvents)
 	mux.HandleFunc("GET /api/v1/events/stream", s.streamEvents)
 	mux.HandleFunc("POST /api/v1/enrollment-tokens", s.requireOperationAuth(s.createEnrollmentToken))
@@ -74,6 +77,7 @@ func New(address string, pool *pgxpool.Pool, build BuildInfo, logger *slog.Logge
 	mux.HandleFunc("GET /api/v1/nodes", s.requireOperationAuth(s.listNodes))
 	mux.HandleFunc("GET /api/v1/nodes/{node_id}", s.requireOperationAuth(s.getNode))
 	mux.HandleFunc("GET /api/v1/nodes/{node_id}/sessions", s.requireOperationAuth(s.listNodeSessions))
+	mux.HandleFunc("GET /api/v1/nodes/{node_id}/ip-bans", s.requireOperationAuth(s.listNodeIPBans))
 	mux.HandleFunc("GET /api/v1/nodes/{node_id}/telemetry", s.requireOperationAuth(s.listNodeTelemetry))
 	handler := s.requestContext(s.limitBody(s.timeout(s.routeErrors(mux))))
 	s.http = &http.Server{Addr: address, Handler: otelhttp.NewHandler(handler, "http.server"), ReadHeaderTimeout: 5 * time.Second, IdleTimeout: 60 * time.Second}
@@ -185,10 +189,19 @@ func routeMethod(path string) (string, bool) {
 	if len(parts) == 4 && parts[0] == "api" && parts[1] == "v1" && parts[2] == "nodes" && parts[3] != "" {
 		return http.MethodGet, true
 	}
-	if len(parts) == 5 && parts[0] == "api" && parts[1] == "v1" && parts[2] == "nodes" && parts[3] != "" && (parts[4] == "sessions" || parts[4] == "telemetry") {
+	if len(parts) == 5 && parts[0] == "api" && parts[1] == "v1" && parts[2] == "nodes" && parts[3] != "" && (parts[4] == "sessions" || parts[4] == "telemetry" || parts[4] == "ip-bans") {
 		return http.MethodGet, true
 	}
 	if len(parts) == 5 && parts[0] == "api" && parts[1] == "v1" && parts[2] == "nodes" && parts[3] != "" && parts[4] == "synthetic-commands" {
+		return http.MethodPost, true
+	}
+	if len(parts) == 6 && parts[0] == "api" && parts[1] == "v1" && parts[2] == "nodes" && parts[3] != "" && parts[4] == "sessions" && (strings.HasSuffix(parts[5], ":disconnect") || strings.HasSuffix(parts[5], ":terminate")) {
+		return http.MethodPost, true
+	}
+	if len(parts) == 6 && parts[0] == "api" && parts[1] == "v1" && parts[2] == "nodes" && parts[3] != "" && parts[4] == "ip-bans" && strings.HasSuffix(parts[5], ":remove") {
+		return http.MethodPost, true
+	}
+	if len(parts) == 5 && parts[0] == "api" && parts[1] == "v1" && parts[2] == "nodes" && parts[3] != "" && parts[4] == "service:reload" {
 		return http.MethodPost, true
 	}
 	if len(parts) == 5 && parts[0] == "api" && parts[1] == "v1" && parts[2] == "operations" && parts[3] != "" && parts[4] == "events" {

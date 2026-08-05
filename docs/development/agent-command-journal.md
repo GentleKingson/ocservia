@@ -6,11 +6,12 @@ ID, and one semantic payload hash. The key and command ID are independently
 unique. Only an exact match replays a stored result; either identity being
 reused for another command is rejected before execution.
 
-A command is validated and durably accepted before the typed synthetic effect
-runs. Synthetic effects, their execution counter, and the terminal result are
-committed in one SQLite transaction. The result is therefore durable before a
-response frame is sent, and a failed commit cannot leave an effect recorded
-without its terminal result.
+A command is validated and durably accepted before its typed effect runs.
+Synthetic effects, their execution counter, and the terminal result are
+committed in one SQLite transaction. External Ocserv effects transition to
+`running` before the privd call and persist the bounded terminal result before
+acknowledgement. A failure to persist that result produces `unknown`, never a
+guessed result.
 
 Command ingress performs strict raw-wire validation before Protobuf decoding.
 Unknown fields and known fields with incompatible wire types are rejected in
@@ -22,9 +23,11 @@ Incomplete records become `unknown` on ordinary replay. Delivery mode is
 explicit: `RECONCILE_ONLY` observes durable state without execution, while
 `RETRY_IF_EFFECT_ABSENT` is accepted only after reconciliation persisted proof
 that the effect is absent. A matching effect completes reconciliation without
-executing again. Mutating execution is serial, and inbound command streams are
-bounded to eight per Agent connection. Delivery mode is not part of the
-semantic hash because it controls recovery rather than the side effect.
+executing again. A service reload with an uncertain result requires manual
+reconciliation because service status cannot prove that a reload occurred.
+Mutating execution is serial, and inbound command streams are bounded to eight
+per Agent connection. Delivery mode is not part of the semantic hash because it
+controls recovery rather than the side effect.
 
 Run the focused fault matrix with:
 

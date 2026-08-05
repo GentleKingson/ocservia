@@ -54,6 +54,85 @@ func TestTransactionalCreateIdempotencyAndTypedPayloadIntegration(t *testing.T) 
 	}
 }
 
+func TestIdempotencyKeyCannotReplayAcrossNodesIntegration(t *testing.T) {
+	service, pool, workspaceID, nodeID := integrationService(t)
+	otherNodeID := uuid.Must(uuid.NewV7())
+	ctx := context.Background()
+	if _, err := pool.Exec(ctx, `INSERT INTO nodes(id,workspace_id,name,status,version,created_at,updated_at)VALUES($1,$2,$3,'active',1,now(),now())`, otherNodeID, workspaceID, "node-"+otherNodeID.String()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `INSERT INTO node_capabilities(node_id,capability,approved) VALUES($1,'ocserv.service.reload',true),($2,'ocserv.service.reload',true)`, nodeID, otherNodeID); err != nil {
+		t.Fatal(err)
+	}
+	request := controlledTestRequest(nodeID, "cross-node-key", ServiceReload, "service.reload", "", "", "")
+	first, replayed, err := service.CreateSynthetic(ctx, request)
+	if err != nil || replayed || first.NodeID == nil || *first.NodeID != nodeID.String() {
+		t.Fatalf("first node operation = %+v, %v, %v", first, replayed, err)
+	}
+	request.NodeID = otherNodeID
+	if _, _, err := service.CreateSynthetic(ctx, request); !errors.Is(err, ErrIdempotencyConflict) {
+		t.Fatalf("cross-node replay error = %v", err)
+	}
+}
+
+func TestControlledOperationsRequireApprovedCapabilityAndObservedTargetIntegration(t *testing.T) {
+	service, pool, _, nodeID := integrationService(t)
+	bootID := uuid.NewString()
+	ctx := context.Background()
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO node_observed_snapshots(node_id,observed_at,boot_id,agent_instance_id,agent_version,ocserv_version,os_release,ocserv,system,path,last_heartbeat_at)
+		VALUES($1,now(),$2,$3,'test','1.4.2','test','{}','{}','{}',now())`,
+		nodeID, bootID, uuid.Must(uuid.NewV7())); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO node_sessions(node_id,session_id,username,client_ip,connected_at,bytes_in,bytes_out,observed_at)
+		VALUES($1,'42','alice','192.0.2.10',now(),0,0,now())`, nodeID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO node_ip_bans(node_id,ip,seconds_remaining,observed_at)
+		VALUES($1,'192.0.2.9',60,now())`, nodeID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO node_capabilities(node_id,capability,approved) VALUES
+		($1,'ocserv.session.disconnect',true),($1,'ocserv.session.terminate',true),
+		($1,'ocserv.ip_ban.remove',true),($1,'ocserv.service.reload',true)`, nodeID); err != nil {
+		t.Fatal(err)
+	}
+
+	for name, request := range map[string]CreateRequest{
+		"disconnect": controlledTestRequest(nodeID, "disconnect", SessionDisconnect, "session.disconnect", bootID, "42", ""),
+		"terminate":  controlledTestRequest(nodeID, "terminate", SessionTerminate, "session.terminate", bootID, "42", ""),
+		"unban":      controlledTestRequest(nodeID, "unban", IPBanRemove, "ip_ban.remove", "", "", "192.0.2.9"),
+		"reload":     controlledTestRequest(nodeID, "reload", ServiceReload, "service.reload", "", "", ""),
+	} {
+		t.Run(name, func(t *testing.T) {
+			operation, replayed, err := service.CreateSynthetic(ctx, request)
+			if err != nil || replayed || operation.State != "queued" {
+				t.Fatalf("create controlled operation = %+v, %v, %v", operation, replayed, err)
+			}
+			replayedOperation, replayed, err := service.CreateSynthetic(ctx, request)
+			if err != nil || !replayed || replayedOperation.ID != operation.ID {
+				t.Fatalf("replay controlled operation = %+v, %v, %v", replayedOperation, replayed, err)
+			}
+		})
+	}
+
+	missing := controlledTestRequest(nodeID, "missing", SessionDisconnect, "session.disconnect", bootID, "43", "")
+	if _, _, err := service.CreateSynthetic(ctx, missing); !errors.Is(err, ErrTargetNotObserved) {
+		t.Fatalf("missing observed target error = %v", err)
+	}
+	if _, err := pool.Exec(ctx, `UPDATE node_capabilities SET approved=false WHERE node_id=$1 AND capability='ocserv.service.reload'`, nodeID); err != nil {
+		t.Fatal(err)
+	}
+	denied := controlledTestRequest(nodeID, "denied", ServiceReload, "service.reload", "", "", "")
+	if _, _, err := service.CreateSynthetic(ctx, denied); !errors.Is(err, ErrCapabilityMissing) {
+		t.Fatalf("missing capability error = %v", err)
+	}
+}
+
 func TestConcurrentWorkersNodeLeaseAndCrashWindowsIntegration(t *testing.T) {
 	service, pool, workspaceID, nodeID := integrationService(t)
 	for _, key := range []string{"one", "two"} {
@@ -219,7 +298,11 @@ func integrationService(t *testing.T) (*Service, *pgxpool.Pool, uuid.UUID, uuid.
 			`DELETE FROM command_attempts WHERE command_id IN(SELECT id FROM commands WHERE workspace_id=$1)`,
 			`DELETE FROM outbox_events WHERE command_id IN(SELECT id FROM commands WHERE workspace_id=$1)`,
 			`DELETE FROM commands WHERE workspace_id=$1`, `DELETE FROM operations WHERE workspace_id=$1`,
-			`DELETE FROM audit_events WHERE workspace_id=$1`, `DELETE FROM nodes WHERE workspace_id=$1`,
+			`DELETE FROM audit_events WHERE workspace_id=$1`, `DELETE FROM node_ip_bans WHERE node_id IN(SELECT id FROM nodes WHERE workspace_id=$1)`,
+			`DELETE FROM node_sessions WHERE node_id IN(SELECT id FROM nodes WHERE workspace_id=$1)`,
+			`DELETE FROM node_observed_snapshots WHERE node_id IN(SELECT id FROM nodes WHERE workspace_id=$1)`,
+			`DELETE FROM node_capabilities WHERE node_id IN(SELECT id FROM nodes WHERE workspace_id=$1)`,
+			`DELETE FROM nodes WHERE workspace_id=$1`,
 			`DELETE FROM workspaces WHERE id=$1`,
 		} {
 			_, _ = pool.Exec(cleanupCtx, statement, workspaceID)
@@ -227,6 +310,10 @@ func integrationService(t *testing.T) (*Service, *pgxpool.Pool, uuid.UUID, uuid.
 		pool.Close()
 	})
 	return New(pool), pool, workspaceID, nodeID
+}
+
+func controlledTestRequest(nodeID uuid.UUID, key string, kind SyntheticKind, action, bootID, sessionID, ip string) CreateRequest {
+	return CreateRequest{NodeID: nodeID, IdempotencyKey: key, ExpectedVersion: 1, Kind: kind, BootID: bootID, SessionID: sessionID, IP: ip, ActorID: "operator", Action: action, Reason: "integration test", TTL: time.Minute, RequestID: "request-" + key, Traceparent: testTraceparent}
 }
 
 func testRequest(nodeID uuid.UUID, key string, kind SyntheticKind, message string) CreateRequest {

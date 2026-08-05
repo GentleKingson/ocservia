@@ -23,8 +23,11 @@ pub struct PrivdRequest {
     /// Absolute Unix epoch deadline in milliseconds.
     #[prost(uint64, tag = "2")]
     pub deadline_unix_ms: u64,
-    /// One of the permanently fixed read-only operations.
-    #[prost(oneof = "privd_request::Operation", tags = "10, 11, 12, 13, 14")]
+    /// One of the permanently fixed operations.
+    #[prost(
+        oneof = "privd_request::Operation",
+        tags = "10, 11, 12, 13, 14, 30, 31, 32, 33"
+    )]
     pub operation: Option<privd_request::Operation>,
 }
 
@@ -32,7 +35,7 @@ pub struct PrivdRequest {
 pub mod privd_request {
     use prost::Oneof;
 
-    use super::ReadRequest;
+    use super::{IpBanRemoveRequest, ReadRequest, ServiceReloadRequest, SessionMutationRequest};
 
     /// Read-only operation allowlist.
     #[derive(Clone, PartialEq, Eq, Oneof)]
@@ -52,7 +55,46 @@ pub mod privd_request {
         /// Fingerprint the fixed ocserv configuration file.
         #[prost(message, tag = "14")]
         ConfigFingerprint(ReadRequest),
+        /// Disconnect one numeric session without invalidating its cookie.
+        #[prost(message, tag = "30")]
+        SessionDisconnect(SessionMutationRequest),
+        /// Terminate one numeric session and invalidate its cookie.
+        #[prost(message, tag = "31")]
+        SessionTerminate(SessionMutationRequest),
+        /// Remove one canonical address from the ban list.
+        #[prost(message, tag = "32")]
+        IpBanRemove(IpBanRemoveRequest),
+        /// Reload only the fixed `ocserv.service` unit.
+        #[prost(message, tag = "33")]
+        ServiceReload(ServiceReloadRequest),
     }
+}
+
+/// One stable numeric session scoped to the current boot.
+#[derive(Clone, PartialEq, Eq, Message)]
+pub struct SessionMutationRequest {
+    #[prost(string, tag = "1")]
+    pub session_id: String,
+    #[prost(string, tag = "2")]
+    pub boot_id: String,
+}
+
+/// One canonical IP address to remove from the fixed Ocserv ban list.
+#[derive(Clone, PartialEq, Eq, Message)]
+pub struct IpBanRemoveRequest {
+    #[prost(string, tag = "1")]
+    pub ip: String,
+}
+
+/// Empty marker for reloading the fixed Ocserv systemd unit.
+#[derive(Clone, Copy, PartialEq, Eq, Message)]
+pub struct ServiceReloadRequest {}
+
+/// Bounded acknowledgement for a fixed mutation.
+#[derive(Clone, PartialEq, Eq, Message)]
+pub struct MutationResult {
+    #[prost(bool, tag = "1")]
+    pub applied: bool,
 }
 
 /// Stable service state DTO.
@@ -172,7 +214,7 @@ pub struct PrivdResponse {
     #[prost(bytes = "vec", tag = "1")]
     pub request_id: Vec<u8>,
     /// Exactly one stable result or error.
-    #[prost(oneof = "privd_response::Result", tags = "10, 11, 12, 13, 14, 20")]
+    #[prost(oneof = "privd_response::Result", tags = "10, 11, 12, 13, 14, 15, 20")]
     pub result: Option<privd_response::Result>,
 }
 
@@ -181,7 +223,8 @@ pub mod privd_response {
     use prost::Oneof;
 
     use super::{
-        ConfigFingerprint, IpBanList, OcservVersion, PrivdError, ServiceStatus, SessionList,
+        ConfigFingerprint, IpBanList, MutationResult, OcservVersion, PrivdError, ServiceStatus,
+        SessionList,
     };
 
     /// Result allowlist.
@@ -202,6 +245,9 @@ pub mod privd_response {
         /// Configuration fingerprint.
         #[prost(message, tag = "14")]
         ConfigFingerprint(ConfigFingerprint),
+        /// Fixed mutation acknowledgement.
+        #[prost(message, tag = "15")]
+        Mutation(MutationResult),
         /// Stable failure.
         #[prost(message, tag = "20")]
         Error(PrivdError),

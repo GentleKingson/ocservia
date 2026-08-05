@@ -81,8 +81,12 @@ payload. The current schema uses:
 
 | Payload | Field number |
 |---|---:|
+| `SessionDisconnect` | 100 |
+| `ServiceReload` | 105 |
 | `SyntheticNoop` | 107 |
 | `SyntheticEcho` | 108 |
+| `SessionTerminate` | 112 |
+| `IpBanRemove` | 113 |
 
 These field numbers are reserved forever. When a payload type is removed, its
 field number stays reserved so old wire data is never reinterpreted as a new
@@ -108,6 +112,31 @@ canonical_payload =
 ```
 
 The length is the UTF-8 **byte** count, not the Unicode scalar count.
+
+### SessionDisconnect and SessionTerminate
+
+```
+payload_kind = uint32_be(100) or uint32_be(112)
+canonical_payload =
+    uint32_be(len(session_id_utf8)) || session_id_utf8
+    || uint32_be(len(boot_id_utf8)) || boot_id_utf8
+```
+
+### ServiceReload
+
+```
+payload_kind = uint32_be(105)
+canonical_payload = empty
+```
+
+### IpBanRemove
+
+```
+payload_kind = uint32_be(113)
+canonical_payload = uint32_be(len(ip_utf8)) || ip_utf8
+```
+
+The IP string must already be in canonical form before hashing.
 
 **No Unicode normalization is performed.** A precomposed character and its
 decomposed equivalent are different byte sequences and therefore produce

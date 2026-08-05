@@ -15,6 +15,50 @@
       "expected_sha256": "0ef12c2bb51a9ea29df3cd9d1e041608b9ee81eade84dbd75469bc16f08b9d10"
     },
     {
+      "name": "session-disconnect",
+      "node_id_hex": "000102030405060708090a0b0c0d0e0f",
+      "expected_revision": 1,
+      "payload_kind": 100,
+      "payload": {
+        "type": "session_disconnect",
+        "session_id": "42",
+        "boot_id": "019fc0a4-6d92-765c-a8a1-4af556614cc4"
+      },
+      "canonical_preimage_hex": "6f637365727669612e636f6d6d616e642e73656d616e7469632d686173682e763100000102030405060708090a0b0c0d0e0f0000000000000001000000640000000234320000002430313966633061342d366439322d373635632d613861312d346166353536363134636334",
+      "expected_sha256": "0f017d58699e615eaabdce0a1e81328895cbd9fa7a16fc2a5dc4fdd9da2c6023"
+    },
+    {
+      "name": "service-reload",
+      "node_id_hex": "000102030405060708090a0b0c0d0e0f",
+      "expected_revision": 1,
+      "payload_kind": 105,
+      "payload": { "type": "service_reload" },
+      "canonical_preimage_hex": "6f637365727669612e636f6d6d616e642e73656d616e7469632d686173682e763100000102030405060708090a0b0c0d0e0f000000000000000100000069",
+      "expected_sha256": "7a5261042a412d32444ada71b7962adc98029ee2061828306957cf7d7e45a465"
+    },
+    {
+      "name": "session-terminate",
+      "node_id_hex": "000102030405060708090a0b0c0d0e0f",
+      "expected_revision": 1,
+      "payload_kind": 112,
+      "payload": {
+        "type": "session_terminate",
+        "session_id": "42",
+        "boot_id": "019fc0a4-6d92-765c-a8a1-4af556614cc4"
+      },
+      "canonical_preimage_hex": "6f637365727669612e636f6d6d616e642e73656d616e7469632d686173682e763100000102030405060708090a0b0c0d0e0f0000000000000001000000700000000234320000002430313966633061342d366439322d373635632d613861312d346166353536363134636334",
+      "expected_sha256": "71dd0f73b278b541f4fbc6dcdbb9113aa73f8de3e778b0af49d0bab516805109"
+    },
+    {
+      "name": "ip-ban-remove",
+      "node_id_hex": "000102030405060708090a0b0c0d0e0f",
+      "expected_revision": 1,
+      "payload_kind": 113,
+      "payload": { "type": "ip_ban_remove", "ip": "192.0.2.9" },
+      "canonical_preimage_hex": "6f637365727669612e636f6d6d616e642e73656d616e7469632d686173682e763100000102030405060708090a0b0c0d0e0f000000000000000100000071000000093139322e302e322e39",
+      "expected_sha256": "8f064b12cdef069874d34cc9de280dd90b414d6a4725bad97b7847fae0d08354"
+    },
+    {
       "name": "echo-empty",
       "node_id_hex": "000102030405060708090a0b0c0d0e0f",
       "expected_revision": 1,

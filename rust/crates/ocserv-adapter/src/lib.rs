@@ -10,12 +10,13 @@ use std::process::Stdio;
 use std::time::Duration;
 
 use ocservia_agent_protocol::{
-    ConfigFingerprint, ErrorKind, IpBan, IpBanList, OcservVersion, PrivdError, ServiceStatus,
-    Session, SessionList,
+    ConfigFingerprint, ErrorKind, IpBan, IpBanList, MutationResult, OcservVersion, PrivdError,
+    ServiceStatus, Session, SessionList,
 };
 use sha2::{Digest, Sha256};
 use tokio::io::{AsyncRead, AsyncReadExt};
 use tokio::process::Command;
+use uuid::Uuid;
 
 const MAX_CONFIG_BYTES: usize = 1024 * 1024;
 const DEFAULT_OUTPUT_BYTES: usize = 256 * 1024;
@@ -27,6 +28,7 @@ pub struct FixedResources {
     ocserv: PathBuf,
     occtl: PathBuf,
     config: PathBuf,
+    boot_id: PathBuf,
 }
 
 impl Default for FixedResources {
@@ -36,6 +38,7 @@ impl Default for FixedResources {
             ocserv: PathBuf::from("/usr/sbin/ocserv"),
             occtl: PathBuf::from("/usr/bin/occtl"),
             config: PathBuf::from("/etc/ocserv/ocserv.conf"),
+            boot_id: PathBuf::from("/proc/sys/kernel/random/boot_id"),
         }
     }
 }
@@ -53,8 +56,9 @@ impl FixedResources {
         ocserv: PathBuf,
         occtl: PathBuf,
         config: PathBuf,
+        boot_id: PathBuf,
     ) -> Result<Self, AdapterError> {
-        for path in [&systemctl, &ocserv, &occtl, &config] {
+        for path in [&systemctl, &ocserv, &occtl, &config, &boot_id] {
             if !path.is_absolute() {
                 return Err(AdapterError::InvalidResource);
             }
@@ -64,6 +68,7 @@ impl FixedResources {
             ocserv,
             occtl,
             config,
+            boot_id,
         })
     }
 }
@@ -185,6 +190,82 @@ impl Adapter {
         })
     }
 
+    /// Disconnects exactly one numeric session from the current host boot.
+    ///
+    /// # Errors
+    ///
+    /// Rejects a malformed or stale target and propagates bounded child failures.
+    pub async fn session_disconnect(
+        &self,
+        session_id: &str,
+        boot_id: &str,
+    ) -> Result<MutationResult, AdapterError> {
+        self.ensure_boot_id(boot_id).await?;
+        let session_id = numeric_session_id(session_id)?;
+        self.execute(&self.resources.occtl, &["disconnect", "id", session_id])
+            .await?;
+        Ok(MutationResult { applied: true })
+    }
+
+    /// Terminates exactly one numeric session and invalidates its reconnect cookie.
+    ///
+    /// # Errors
+    ///
+    /// Rejects a malformed or stale target and propagates bounded child failures.
+    pub async fn session_terminate(
+        &self,
+        session_id: &str,
+        boot_id: &str,
+    ) -> Result<MutationResult, AdapterError> {
+        self.ensure_boot_id(boot_id).await?;
+        let session_id = numeric_session_id(session_id)?;
+        self.execute(&self.resources.occtl, &["terminate", "id", session_id])
+            .await?;
+        Ok(MutationResult { applied: true })
+    }
+
+    /// Removes exactly one canonical address from the Ocserv ban list.
+    ///
+    /// # Errors
+    ///
+    /// Rejects a noncanonical address and propagates bounded child failures.
+    pub async fn ip_ban_remove(&self, ip: &str) -> Result<MutationResult, AdapterError> {
+        let canonical = canonical_ip(ip)?;
+        if canonical != ip {
+            return Err(AdapterError::InvalidRequest);
+        }
+        self.execute(&self.resources.occtl, &["unban", "ip", &canonical])
+            .await?;
+        Ok(MutationResult { applied: true })
+    }
+
+    /// Reloads only the fixed `ocserv.service` systemd unit.
+    ///
+    /// # Errors
+    ///
+    /// Propagates bounded failures from the fixed systemctl invocation.
+    pub async fn service_reload(&self) -> Result<MutationResult, AdapterError> {
+        self.execute(
+            &self.resources.systemctl,
+            &["reload", "ocserv.service", "--no-ask-password"],
+        )
+        .await?;
+        Ok(MutationResult { applied: true })
+    }
+
+    async fn ensure_boot_id(&self, expected: &str) -> Result<(), AdapterError> {
+        if Uuid::parse_str(expected).is_err() {
+            return Err(AdapterError::InvalidRequest);
+        }
+        let actual = tokio::fs::read_to_string(&self.resources.boot_id)
+            .await
+            .map_err(AdapterError::Io)?;
+        if actual.trim() != expected {
+            return Err(AdapterError::StaleBoot);
+        }
+        Ok(())
+    }
+
     async fn execute(&self, program: &Path, args: &[&str]) -> Result<ChildOutput, AdapterError> {
         let mut command = Command::new(program);
         command
@@ -274,6 +355,10 @@ async fn read_bounded(
 pub enum AdapterError {
     /// Trusted resources must be absolute paths.
     InvalidResource,
+    /// An operation argument was not in its canonical typed form.
+    InvalidRequest,
+    /// A session identifier belongs to a prior host boot.
+    StaleBoot,
     /// Fixed local resource was unavailable.
     Unavailable,
     /// Child exceeded its deadline.
@@ -292,6 +377,8 @@ impl std::fmt::Display for AdapterError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::InvalidResource => write!(formatter, "fixed resource path invalid"),
+            Self::InvalidRequest => write!(formatter, "fixed operation argument invalid"),
+            Self::StaleBoot => write!(formatter, "session boot identity is stale"),
             Self::Unavailable => write!(formatter, "fixed local resource unavailable"),
             Self::DeadlineExceeded => write!(formatter, "fixed read operation timed out"),
             Self::OutputLimit => write!(formatter, "fixed read operation output limit exceeded"),
@@ -319,6 +406,7 @@ impl From<AdapterError> for PrivdError {
             AdapterError::InvalidResource | AdapterError::MalformedOutput => {
                 ErrorKind::MalformedOutput
             }
+            AdapterError::InvalidRequest | AdapterError::StaleBoot => ErrorKind::InvalidRequest,
             AdapterError::Unavailable | AdapterError::Io(_) => ErrorKind::Unavailable,
             AdapterError::DeadlineExceeded => ErrorKind::DeadlineExceeded,
             AdapterError::OutputLimit => ErrorKind::OutputLimit,
@@ -481,6 +569,16 @@ fn canonical_ip(value: &str) -> Result<String, AdapterError> {
         .map_err(|_| AdapterError::MalformedOutput)
 }
 
+fn numeric_session_id(value: &str) -> Result<&str, AdapterError> {
+    let parsed = value
+        .parse::<u64>()
+        .map_err(|_| AdapterError::InvalidRequest)?;
+    if parsed == 0 || parsed.to_string() != value {
+        return Err(AdapterError::InvalidRequest);
+    }
+    Ok(value)
+}
+
 #[cfg(test)]
 mod tests {
     use std::os::unix::fs::PermissionsExt;
@@ -536,6 +634,7 @@ mod tests {
             version_program,
             PathBuf::from("/bin/false"),
             PathBuf::from("/etc/hosts"),
+            PathBuf::from("/proc/sys/kernel/random/boot_id"),
         )
         .expect("fixed resources");
         let version = Adapter::new(resources, Limits::default())
@@ -590,6 +689,7 @@ mod tests {
             timeout_program,
             PathBuf::from("/bin/false"),
             PathBuf::from("/etc/hosts"),
+            PathBuf::from("/proc/sys/kernel/random/boot_id"),
         )
         .expect("fixed resources");
         let adapter = Adapter::new(
@@ -612,6 +712,7 @@ mod tests {
             noisy_program,
             PathBuf::from("/bin/false"),
             PathBuf::from("/etc/hosts"),
+            PathBuf::from("/proc/sys/kernel/random/boot_id"),
         )
         .expect("fixed resources");
         let adapter = Adapter::new(
@@ -626,5 +727,91 @@ mod tests {
             Err(AdapterError::OutputLimit)
         ));
         std::fs::remove_dir_all(noisy_directory).expect("remove noisy fixture");
+    }
+
+    #[tokio::test]
+    async fn mutations_use_only_fixed_programs_and_arguments() {
+        let occtl = executable(
+            "occtl",
+            "case \"$*\" in 'disconnect id 42'|'terminate id 42'|'unban ip 192.0.2.9') exit 0;; *) exit 9;; esac",
+        );
+        let directory = occtl.parent().expect("fixture parent").to_owned();
+        let systemctl = directory.join("systemctl");
+        std::fs::write(
+            &systemctl,
+            "#!/bin/sh\n[ \"$*\" = 'reload ocserv.service --no-ask-password' ]\n",
+        )
+        .expect("write systemctl fixture");
+        std::fs::set_permissions(&systemctl, std::fs::Permissions::from_mode(0o700))
+            .expect("make systemctl executable");
+        let boot = directory.join("boot_id");
+        let boot_id = Uuid::now_v7().to_string();
+        std::fs::write(&boot, &boot_id).expect("write boot fixture");
+        let resources = FixedResources::new(
+            systemctl,
+            PathBuf::from("/bin/false"),
+            occtl,
+            PathBuf::from("/etc/hosts"),
+            boot,
+        )
+        .expect("fixed resources");
+        let adapter = Adapter::new(resources, Limits::default());
+        assert!(adapter.session_disconnect("42", &boot_id).await.is_ok());
+        assert!(adapter.session_terminate("42", &boot_id).await.is_ok());
+        assert!(adapter.ip_ban_remove("192.0.2.9").await.is_ok());
+        assert!(adapter.service_reload().await.is_ok());
+        assert!(matches!(
+            adapter.session_disconnect("042", &boot_id).await,
+            Err(AdapterError::InvalidRequest)
+        ));
+        assert!(matches!(
+            adapter
+                .session_disconnect("42", &Uuid::now_v7().to_string())
+                .await,
+            Err(AdapterError::StaleBoot)
+        ));
+        std::fs::remove_dir_all(directory).expect("remove mutation fixture");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    #[ignore = "requires an explicitly prepared native Ocserv test service"]
+    async fn native_controlled_operations() {
+        let disconnect_id = std::env::var("OCSERVIA_DISCONNECT_SESSION_ID")
+            .expect("disconnect session ID is required");
+        let terminate_id = std::env::var("OCSERVIA_TERMINATE_SESSION_ID")
+            .expect("terminate session ID is required");
+        let banned_ip = std::env::var("OCSERVIA_BANNED_IP").expect("banned IP is required");
+        let boot_id =
+            std::fs::read_to_string("/proc/sys/kernel/random/boot_id").expect("read boot ID");
+        let adapter = Adapter::new(FixedResources::default(), Limits::default());
+
+        adapter
+            .session_disconnect(&disconnect_id, boot_id.trim())
+            .await
+            .expect("disconnect observed session");
+        adapter
+            .session_terminate(&terminate_id, boot_id.trim())
+            .await
+            .expect("terminate observed session");
+        adapter
+            .ip_ban_remove(&banned_ip)
+            .await
+            .expect("remove observed IP ban");
+        adapter
+            .service_reload()
+            .await
+            .expect("reload ocserv.service");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    #[ignore = "requires an explicitly stopped native Ocserv test service"]
+    async fn native_reload_failure_is_bounded() {
+        let adapter = Adapter::new(FixedResources::default(), Limits::default());
+        assert!(matches!(
+            adapter.service_reload().await,
+            Err(AdapterError::CommandFailed { .. })
+        ));
     }
 }

@@ -388,6 +388,152 @@ paths:
           $ref: "#/components/responses/Problem"
         default:
           $ref: "#/components/responses/Problem"
+  /nodes/{node_id}/sessions/{session_id}:disconnect:
+    post:
+      operationId: disconnectNodeSession
+      summary: Disconnect one observed session
+      tags: [operations]
+      parameters:
+        - $ref: "#/components/parameters/NodeId"
+        - $ref: "#/components/parameters/SessionId"
+        - $ref: "#/components/parameters/IdempotencyKey"
+        - $ref: "#/components/parameters/IfMatch"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ControlledOperationRequest"
+      responses:
+        "202":
+          $ref: "#/components/responses/OperationAccepted"
+        "400":
+          $ref: "#/components/responses/Problem"
+        "401":
+          $ref: "#/components/responses/Problem"
+        "403":
+          $ref: "#/components/responses/Problem"
+        "404":
+          $ref: "#/components/responses/Problem"
+        "409":
+          $ref: "#/components/responses/Problem"
+        default:
+          $ref: "#/components/responses/Problem"
+  /nodes/{node_id}/sessions/{session_id}:terminate:
+    post:
+      operationId: terminateNodeSession
+      summary: Terminate one observed session and invalidate its reconnect cookie
+      tags: [operations]
+      parameters:
+        - $ref: "#/components/parameters/NodeId"
+        - $ref: "#/components/parameters/SessionId"
+        - $ref: "#/components/parameters/IdempotencyKey"
+        - $ref: "#/components/parameters/IfMatch"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ControlledOperationRequest"
+      responses:
+        "202":
+          $ref: "#/components/responses/OperationAccepted"
+        "400":
+          $ref: "#/components/responses/Problem"
+        "401":
+          $ref: "#/components/responses/Problem"
+        "403":
+          $ref: "#/components/responses/Problem"
+        "404":
+          $ref: "#/components/responses/Problem"
+        "409":
+          $ref: "#/components/responses/Problem"
+        default:
+          $ref: "#/components/responses/Problem"
+  /nodes/{node_id}/ip-bans/{ip}:remove:
+    post:
+      operationId: removeNodeIpBan
+      summary: Remove one canonical IP address from the Ocserv ban list
+      tags: [operations]
+      parameters:
+        - $ref: "#/components/parameters/NodeId"
+        - name: ip
+          in: path
+          required: true
+          schema: { type: string, format: ip }
+        - $ref: "#/components/parameters/IdempotencyKey"
+        - $ref: "#/components/parameters/IfMatch"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ControlledOperationRequest"
+      responses:
+        "202":
+          $ref: "#/components/responses/OperationAccepted"
+        "400":
+          $ref: "#/components/responses/Problem"
+        "401":
+          $ref: "#/components/responses/Problem"
+        "403":
+          $ref: "#/components/responses/Problem"
+        "404":
+          $ref: "#/components/responses/Problem"
+        "409":
+          $ref: "#/components/responses/Problem"
+        default:
+          $ref: "#/components/responses/Problem"
+  /nodes/{node_id}/ip-bans:
+    get:
+      operationId: listNodeIpBans
+      summary: List current IP bans observed on a node
+      tags: [nodes]
+      parameters:
+        - $ref: "#/components/parameters/NodeId"
+      responses:
+        "200":
+          description: At most 200 current typed ban observations.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/NodeIpBanPage"
+        "401":
+          $ref: "#/components/responses/Problem"
+        "404":
+          $ref: "#/components/responses/Problem"
+        default:
+          $ref: "#/components/responses/Problem"
+  /nodes/{node_id}/service:reload:
+    post:
+      operationId: reloadNodeService
+      summary: Reload the fixed Ocserv service unit
+      tags: [operations]
+      parameters:
+        - $ref: "#/components/parameters/NodeId"
+        - $ref: "#/components/parameters/IdempotencyKey"
+        - $ref: "#/components/parameters/IfMatch"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ControlledOperationRequest"
+      responses:
+        "202":
+          $ref: "#/components/responses/OperationAccepted"
+        "400":
+          $ref: "#/components/responses/Problem"
+        "401":
+          $ref: "#/components/responses/Problem"
+        "403":
+          $ref: "#/components/responses/Problem"
+        "404":
+          $ref: "#/components/responses/Problem"
+        "409":
+          $ref: "#/components/responses/Problem"
+        default:
+          $ref: "#/components/responses/Problem"
   /nodes/{node_id}/telemetry:
     get:
       operationId: listNodeTelemetry
@@ -517,6 +663,21 @@ components:
         type: string
         minLength: 1
         maxLength: 128
+    SessionId:
+      name: session_id
+      in: path
+      required: true
+      schema:
+        type: string
+        pattern: "^[1-9][0-9]*$"
+        maxLength: 20
+    IfMatch:
+      name: If-Match
+      in: header
+      required: false
+      schema:
+        type: string
+        pattern: '^"revision-[1-9][0-9]*"$'
   responses:
     Problem:
       description: Request failed.
@@ -524,6 +685,22 @@ components:
         application/problem+json:
           schema:
             $ref: "#/components/schemas/Problem"
+    OperationAccepted:
+      description: The typed operation intent, command, outbox event, and audit intent were committed atomically.
+      headers:
+        Location:
+          required: true
+          schema: { type: string }
+        ETag:
+          required: true
+          schema: { type: string }
+        Idempotency-Replayed:
+          required: false
+          schema: { type: string, enum: ["true"] }
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Operation"
   schemas:
     Health:
       type: object
@@ -637,6 +814,30 @@ components:
         supersede_pending:
           type: boolean
           default: false
+      description: expected_version is required unless If-Match supplies the same revision.
+    ControlledOperationRequest:
+      type: object
+      additionalProperties: false
+      required: [reason]
+      properties:
+        boot_id:
+          type: string
+          format: uuid
+          description: Required for session operations; must match the observed node boot.
+        reason:
+          type: string
+          minLength: 1
+          maxLength: 512
+        expected_version:
+          type: integer
+          format: int64
+          minimum: 1
+        ttl_seconds:
+          type: integer
+          format: int64
+          minimum: 1
+          maximum: 300
+          default: 60
       description: expected_version is required unless If-Match supplies the same revision.
     QueueMetrics:
       type: object
@@ -810,10 +1011,11 @@ components:
     NodeObservedState:
       type: object
       additionalProperties: false
-      required: [id, name, trust_status, connection_state, freshness, dropped, session_count]
+      required: [id, name, version, trust_status, connection_state, freshness, dropped, session_count]
       properties:
         id: { $ref: "#/components/schemas/UuidV7" }
         name: { type: string, minLength: 1, maxLength: 128 }
+        version: { type: integer, format: int64, minimum: 1 }
         trust_status: { type: string, enum: [pending, active, revoked, offline] }
         connection_state: { type: string, enum: [online, offline] }
         freshness: { type: string, enum: [fresh, stale, never] }
@@ -868,6 +1070,22 @@ components:
           maxItems: 200
           items: { $ref: "#/components/schemas/NodeSession" }
         page: { $ref: "#/components/schemas/PageInfo" }
+    NodeIpBan:
+      type: object
+      additionalProperties: false
+      required: [ip]
+      properties:
+        ip: { type: string, format: ip }
+        seconds_remaining: { type: integer, format: int64, minimum: 0 }
+    NodeIpBanPage:
+      type: object
+      additionalProperties: false
+      required: [items]
+      properties:
+        items:
+          type: array
+          maxItems: 200
+          items: { $ref: "#/components/schemas/NodeIpBan" }
     TelemetryMetric:
       type: string
       enum: [cpu_usage_ratio, memory_used_bytes, network_rx_bytes, network_tx_bytes, session_count, connection_rtt_ms]

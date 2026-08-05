@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/binary"
 	"errors"
+	"net"
 
 	agentv1 "github.com/GentleKingson/ocservia/control-plane/gen/proto/ocserv/platform/agent/v1"
 )
@@ -33,8 +34,8 @@ var domainSeparatorV1 = []byte("ocservia.command.semantic-hash.v1\x00")
 //
 // The preimage is hand-specified canonical bytes, never Protobuf wire encoding,
 // so it is stable across Go and Rust regardless of unknown-field retention.
-// Only SyntheticNoop and SyntheticEcho payloads are reconcilable; other payload
-// types (including SimulationProbe) return an error.
+// Only explicitly mapped typed payloads are reconcilable; other payload types
+// (including SimulationProbe) return an error.
 func HashV1(envelope *agentv1.CommandEnvelope) ([sha256.Size]byte, error) {
 	var payloadKind uint32
 	var canonicalPayload []byte
@@ -47,6 +48,22 @@ func HashV1(envelope *agentv1.CommandEnvelope) ([sha256.Size]byte, error) {
 		canonicalPayload = make([]byte, 4+len(utf8))
 		binary.BigEndian.PutUint32(canonicalPayload[:4], uint32(len(utf8)))
 		copy(canonicalPayload[4:], utf8)
+	case *agentv1.CommandEnvelope_SessionDisconnect:
+		payloadKind = 100
+		canonicalPayload = canonicalStrings(envelope.GetSessionDisconnect().GetSessionId(), envelope.GetSessionDisconnect().GetBootId())
+	case *agentv1.CommandEnvelope_ServiceReload:
+		payloadKind = 105
+	case *agentv1.CommandEnvelope_SessionTerminate:
+		payloadKind = 112
+		canonicalPayload = canonicalStrings(envelope.GetSessionTerminate().GetSessionId(), envelope.GetSessionTerminate().GetBootId())
+	case *agentv1.CommandEnvelope_IpBanRemove:
+		payloadKind = 113
+		ip := envelope.GetIpBanRemove().GetIp()
+		parsed := net.ParseIP(ip)
+		if parsed == nil || parsed.String() != ip {
+			return [sha256.Size]byte{}, errors.New("IP address is not canonical")
+		}
+		canonicalPayload = canonicalStrings(ip)
 	default:
 		return [sha256.Size]byte{}, errors.New("command payload type is not reconcilable")
 	}
@@ -63,6 +80,21 @@ func HashV1(envelope *agentv1.CommandEnvelope) ([sha256.Size]byte, error) {
 	var out [sha256.Size]byte
 	copy(out[:], h.Sum(nil))
 	return out, nil
+}
+
+func canonicalStrings(values ...string) []byte {
+	size := 4 * len(values)
+	for _, value := range values {
+		size += len(value)
+	}
+	out := make([]byte, 0, size)
+	for _, value := range values {
+		var length [4]byte
+		binary.BigEndian.PutUint32(length[:], uint32(len(value)))
+		out = append(out, length[:]...)
+		out = append(out, value...)
+	}
+	return out
 }
 
 // PopulateV1 fills the versioned hash fields on a reconcilable command envelope.
