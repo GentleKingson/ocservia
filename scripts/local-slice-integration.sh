@@ -118,7 +118,7 @@ normal="$(create_probe '{"heartbeat_count":3,"delay_millis":25}')"
 normal_id="$(jq -r .id <<<"${normal}")"
 normal_node="$(jq -r .node_id <<<"${normal}")"
 wait_state "${normal_id}" succeeded >/dev/null
-events="$(curl --fail --silent "http://127.0.0.1:${API_PORT}/api/v1/events?page_size=200")"
+events="$(curl --fail --silent -H "Authorization: Bearer ${AUTH_TOKEN}" "http://127.0.0.1:${API_PORT}/api/v1/events?page_size=200")"
 jq -e --arg node "${normal_node}" '[.items[] | select(.node_id == $node)] | length == 5' <<<"${events}" >/dev/null
 jq -e --arg node "${normal_node}" 'all(.items[] | select(.node_id == $node); .traceparent | test("^00-[0-9a-f]{32}-[0-9a-f]{16}-[0-9a-f]{2}$"))' <<<"${events}" >/dev/null
 
@@ -148,14 +148,14 @@ timeout 2s curl --no-buffer --silent -H "Authorization: Bearer ${AUTH_TOKEN}" \
 grep -q '^event: operation' "${TMP_ROOT}/operation.sse"
 grep -q '"state":"dispatched"' "${TMP_ROOT}/operation.sse"
 
-page="$(curl --fail --silent "http://127.0.0.1:${API_PORT}/api/v1/events?page_size=2")"
+page="$(curl --fail --silent -H "Authorization: Bearer ${AUTH_TOKEN}" "http://127.0.0.1:${API_PORT}/api/v1/events?page_size=2")"
 jq -e '.page.has_more == true and (.page.next_cursor | type == "string") and (.items | length == 2)' <<<"${page}" >/dev/null
 
 high_event_id="019cf100-0000-7000-8000-ffffffffffff"
 low_event_id="019cf100-0000-7000-8000-000000000001"
 docker exec "${POSTGRES}" psql -v ON_ERROR_STOP=1 -U ocservia_owner -d ocservia -c \
   "INSERT INTO transport_events (event_id, node_id, event_type, occurred_at, traceparent, payload, transport_cursor_valid) VALUES ('${high_event_id}', '${normal_node}', 'heartbeat', now(), '00-0123456789abcdef0123456789abcdef-0123456789abcdef-01', '', false), ('${low_event_id}', '${normal_node}', 'heartbeat', now(), '00-0123456789abcdef0123456789abcdef-0123456789abcdef-01', '', false)" >/dev/null
-curl --fail --silent "http://127.0.0.1:${API_PORT}/api/v1/events?page_size=200&after=${high_event_id}" |
+curl --fail --silent -H "Authorization: Bearer ${AUTH_TOKEN}" "http://127.0.0.1:${API_PORT}/api/v1/events?page_size=200&after=${high_event_id}" |
   jq -e --arg id "${low_event_id}" 'any(.items[]; .id == $id)' >/dev/null
 
 duplicate="$(create_probe '{"heartbeat_count":3,"delay_millis":10,"duplicate_event":true}')"
@@ -193,7 +193,7 @@ curl --fail --silent -H "Authorization: Bearer ${AUTH_TOKEN}" "http://127.0.0.1:
   jq -e --arg cursor "${operations_cursor}" '(.items | length) >= 1 and all(.items[]; .id != $cursor)' >/dev/null
 
 first_event="$(jq -r '.items[0].id' <<<"${events}")"
-timeout 4s curl --no-buffer --silent --limit-rate 32 -H "Last-Event-ID: ${first_event}" \
+timeout 4s curl --no-buffer --silent --limit-rate 32 -H "Authorization: Bearer ${AUTH_TOKEN}" -H "Last-Event-ID: ${first_event}" \
   "http://127.0.0.1:${API_PORT}/api/v1/events/stream" >"${TMP_ROOT}/resumed.sse" &
 sse_pid=$!
 PIDS+=("${sse_pid}")
@@ -207,9 +207,9 @@ if grep -q "^id: ${first_event}$" "${TMP_ROOT}/resumed.sse"; then
   exit 1
 fi
 
-latest_event="$(curl --fail --silent "http://127.0.0.1:${API_PORT}/api/v1/events?page_size=200" | jq -r '.items[-1].id')"
+latest_event="$(curl --fail --silent -H "Authorization: Bearer ${AUTH_TOKEN}" "http://127.0.0.1:${API_PORT}/api/v1/events?page_size=200" | jq -r '.items[-1].id')"
 for subscriber in one two; do
-  timeout 4s curl --no-buffer --silent -H "Last-Event-ID: ${latest_event}" \
+  timeout 4s curl --no-buffer --silent -H "Authorization: Bearer ${AUTH_TOKEN}" -H "Last-Event-ID: ${latest_event}" \
     "http://127.0.0.1:${API_PORT}/api/v1/events/stream" >"${TMP_ROOT}/subscriber-${subscriber}.sse" &
   PIDS+=("$!")
 done
@@ -250,7 +250,7 @@ wait_state "${queued_operation_id}" queued >/dev/null
 test "$(docker exec "${POSTGRES}" psql -U ocservia_owner -d ocservia -Atc "SELECT status FROM nodes WHERE id = '${normal_node}'")" = "offline"
 test "$(docker exec "${POSTGRES}" psql -U ocservia_owner -d ocservia -Atc "SELECT transport_cursor_valid FROM transport_events WHERE node_id = '${normal_node}' ORDER BY ingest_sequence DESC LIMIT 1")" = "f"
 test "$(docker exec "${POSTGRES}" psql -U ocservia_owner -d ocservia -Atc "SELECT count(*) FROM transport_events WHERE transport_cursor_valid")" -gt 0
-curl --fail --silent "http://127.0.0.1:${API_PORT}/api/v1/events?page_size=200" |
+curl --fail --silent -H "Authorization: Bearer ${AUTH_TOKEN}" "http://127.0.0.1:${API_PORT}/api/v1/events?page_size=200" |
   jq -e --arg node "${normal_node}" '[.items[] | select(.node_id == $node)] | last | .type == "disconnected"' >/dev/null
 
 for _ in $(seq 1 20); do
