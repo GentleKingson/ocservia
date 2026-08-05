@@ -17,6 +17,7 @@ import { useFleetStore } from "../src/shared/fleet";
 
 vi.mock("../src/api/client", () => ({
   disconnectSession: vi.fn(),
+  getWorkspace: vi.fn().mockResolvedValue({ id: "workspace" }),
   getNode: vi.fn(),
   getOperation: vi.fn(),
   listNodeIpBans: vi.fn(),
@@ -25,6 +26,7 @@ vi.mock("../src/api/client", () => ({
   reloadService: vi.fn(),
   removeIpBan: vi.fn(),
   terminateSession: vi.fn(),
+  workspaceContext: vi.fn().mockReturnValue({ id: "workspace", generation: 1 }),
 }));
 
 const node: NodeObservedState = {

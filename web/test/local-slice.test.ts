@@ -11,9 +11,11 @@ import { useLocalSliceStore } from "../src/shared/localSlice";
 
 vi.mock("../src/api/client", () => ({
   createLocalSimulation: vi.fn(),
+  getWorkspace: vi.fn().mockResolvedValue({ id: "workspace" }),
   getOperation: vi.fn(),
   listEvents: vi.fn(),
   listOperations: vi.fn(),
+  workspaceContext: vi.fn().mockReturnValue({ id: "workspace", generation: 1 }),
 }));
 
 const operation = (state: Operation["state"]): Operation => ({
