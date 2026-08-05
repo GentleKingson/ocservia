@@ -35,6 +35,11 @@ import {
   ReadinessToJSON,
 } from "../models/Readiness";
 import {
+  type RoleBinding,
+  RoleBindingFromJSON,
+  RoleBindingToJSON,
+} from "../models/RoleBinding";
+import {
   type RoleBindingRequest,
   RoleBindingRequestFromJSON,
   RoleBindingRequestToJSON,
@@ -228,12 +233,14 @@ export class PlatformApi extends runtime.BaseAPI {
   async createRoleBindingRaw(
     requestParameters: CreateRoleBindingRequest,
     initOverrides?: RequestInit | runtime.InitOverrideFunction,
-  ): Promise<runtime.ApiResponse<void>> {
+  ): Promise<runtime.ApiResponse<RoleBinding>> {
     const requestOptions =
       await this.createRoleBindingRequestOpts(requestParameters);
     const response = await this.request(requestOptions, initOverrides);
 
-    return new runtime.VoidApiResponse(response);
+    return new runtime.JSONApiResponse(response, (jsonValue) =>
+      RoleBindingFromJSON(jsonValue),
+    );
   }
 
   /**
@@ -242,8 +249,12 @@ export class PlatformApi extends runtime.BaseAPI {
   async createRoleBinding(
     requestParameters: CreateRoleBindingRequest,
     initOverrides?: RequestInit | runtime.InitOverrideFunction,
-  ): Promise<void> {
-    await this.createRoleBindingRaw(requestParameters, initOverrides);
+  ): Promise<RoleBinding> {
+    const response = await this.createRoleBindingRaw(
+      requestParameters,
+      initOverrides,
+    );
+    return await response.value();
   }
 
   /**

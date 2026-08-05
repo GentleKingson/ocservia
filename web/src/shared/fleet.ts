@@ -18,6 +18,7 @@ import {
   reloadService,
   removeIpBan,
   terminateSession,
+  workspaceChangedEvent,
 } from "../api/client";
 
 const terminalStates = new Set([
@@ -150,7 +151,24 @@ export const useFleetStore = defineStore("fleet", () => {
 
   function disconnect(): void {
     source?.close();
+    source = undefined;
     clearTimeout(refreshTimer);
+  }
+  function resetWorkspace(): void {
+    disconnect();
+    nodes.value = [];
+    selected.value = undefined;
+    sessions.value = [];
+    ipBans.value = [];
+    latestOperation.value = undefined;
+    operationError.value = "";
+    void rebuild().then(() => connect());
+  }
+  if (typeof window !== "undefined") {
+    window.addEventListener(workspaceChangedEvent, resetWorkspace);
+    onScopeDispose(() => {
+      window.removeEventListener(workspaceChangedEvent, resetWorkspace);
+    });
   }
   onScopeDispose(disconnect);
   return {

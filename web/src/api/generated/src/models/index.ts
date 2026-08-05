@@ -33,6 +33,7 @@ export * from "./PlatformEventType";
 export * from "./Problem";
 export * from "./QueueMetrics";
 export * from "./Readiness";
+export * from "./RoleBinding";
 export * from "./RoleBindingRequest";
 export * from "./SimulationScenario";
 export * from "./SyntheticCommandRequest";

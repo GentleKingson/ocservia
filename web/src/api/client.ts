@@ -18,8 +18,34 @@ import {
 } from "@ocservia/api-client";
 
 const devAuthToken = import.meta.env.VITE_DEV_AUTH_TOKEN;
+const loginReturnKey = "ocservia.login.return-to";
+const loginStartedKey = "ocservia.login.started-at";
+const workspaceKey = "ocservia.workspace-id";
+export const workspaceChangedEvent = "ocservia:workspace-changed";
+
+async function authenticatedFetch(
+  input: RequestInfo | URL,
+  init?: RequestInit,
+): Promise<Response> {
+  const response = await fetch(input, init);
+  if (response.status === 401 && typeof window !== "undefined") {
+    const started = Number(sessionStorage.getItem(loginStartedKey) ?? "0");
+    if (!started || Date.now() - started > 60_000) {
+      const returnTo = `${window.location.pathname}${window.location.search}${window.location.hash}`;
+      if (returnTo.startsWith("/") && !returnTo.startsWith("//")) {
+        sessionStorage.setItem(loginReturnKey, returnTo);
+      }
+      sessionStorage.setItem(loginStartedKey, String(Date.now()));
+      window.location.assign("/api/v1/auth/login");
+    }
+  }
+  return response;
+}
+
 const configuration = new Configuration({
   basePath: "/api/v1",
+  fetchApi: authenticatedFetch,
+  credentials: "same-origin",
   ...(devAuthToken ? { accessToken: devAuthToken } : {}),
 });
 const operations = new OperationsApi(configuration);
@@ -28,14 +54,63 @@ const development = new DevelopmentApi(configuration);
 const events = new EventsApi(configuration);
 const nodes = new NodesApi(configuration);
 let selectedWorkspace: Workspace | undefined;
+let authorizedWorkspaces: Workspace[] | undefined;
+let workspaceRequest: Promise<Workspace[]> | undefined;
+
+export async function listAuthorizedWorkspaces(
+  refresh = false,
+): Promise<Workspace[]> {
+  if (authorizedWorkspaces && !refresh) return authorizedWorkspaces;
+  workspaceRequest ??= platform
+    .listAuthorizedWorkspaces()
+    .then((page) => {
+      authorizedWorkspaces = page.items;
+      const remembered = sessionStorage.getItem(workspaceKey);
+      selectedWorkspace =
+        page.items.find((workspace) => workspace.id === remembered) ??
+        page.items[0];
+      if (selectedWorkspace)
+        sessionStorage.setItem(workspaceKey, selectedWorkspace.id);
+      else sessionStorage.removeItem(workspaceKey);
+      return page.items;
+    })
+    .finally(() => {
+      workspaceRequest = undefined;
+    });
+  return workspaceRequest;
+}
 
 export async function getWorkspace(): Promise<Workspace> {
   if (selectedWorkspace) return selectedWorkspace;
-  const page = await platform.listAuthorizedWorkspaces();
-  const workspace = page.items[0];
+  const page = await listAuthorizedWorkspaces();
+  const remembered = sessionStorage.getItem(workspaceKey);
+  const workspace =
+    page.find((candidate) => candidate.id === remembered) ?? page[0];
   if (!workspace) throw new Error("No authorized workspace is available");
   selectedWorkspace = workspace;
   return workspace;
+}
+
+export async function selectWorkspace(workspaceId: string): Promise<Workspace> {
+  const workspaces = await listAuthorizedWorkspaces();
+  const workspace = workspaces.find(
+    (candidate) => candidate.id === workspaceId,
+  );
+  if (!workspace) throw new Error("Workspace is not authorized");
+  if (selectedWorkspace?.id === workspace.id) return workspace;
+  selectedWorkspace = workspace;
+  sessionStorage.setItem(workspaceKey, workspace.id);
+  window.dispatchEvent(
+    new CustomEvent(workspaceChangedEvent, { detail: workspace.id }),
+  );
+  return workspace;
+}
+
+export function consumeLoginReturnPath(): string | undefined {
+  const value = sessionStorage.getItem(loginReturnKey) ?? undefined;
+  sessionStorage.removeItem(loginReturnKey);
+  sessionStorage.removeItem(loginStartedKey);
+  return value?.startsWith("/") && !value.startsWith("//") ? value : undefined;
 }
 
 export async function eventStreamPath(after?: string): Promise<string> {

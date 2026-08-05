@@ -13,6 +13,7 @@ import (
 
 	agentv1 "github.com/GentleKingson/ocservia/control-plane/gen/proto/ocserv/platform/agent/v1"
 	transportv1 "github.com/GentleKingson/ocservia/control-plane/gen/proto/ocserv/platform/transport/v1"
+	approvalstore "github.com/GentleKingson/ocservia/control-plane/internal/approvals"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"google.golang.org/protobuf/types/known/timestamppb"
@@ -238,6 +239,9 @@ func TestEnrollmentTrustLifecycleIntegration(t *testing.T) {
 	if retryTrust, err := service.Approve(ctx, Approval{NodeID: nodeID, Labels: map[string]string{"region": "test"}, Policy: "readonly", Capabilities: []string{"ocserv.status.read"}, ActorID: identityID.String(), ApprovalID: approvalID, IdentityID: identityID, SessionID: sessionID, Reason: "retry approval", RequestID: uuid.Must(uuid.NewV7()).String()}); err != nil || retryTrust.NodeID != nodeID {
 		t.Fatalf("offline approval retry = %v, %v", retryTrust, err)
 	}
+	if _, err := service.Approve(ctx, Approval{NodeID: nodeID, Labels: map[string]string{"region": "test"}, Policy: "readonly", Capabilities: []string{"ocserv.status.read"}, ActorID: identityID.String(), ApprovalID: uuid.Must(uuid.NewV7()), IdentityID: identityID, SessionID: sessionID, Reason: "invalid retry approval", RequestID: uuid.Must(uuid.NewV7()).String()}); !errors.Is(err, approvalstore.ErrNotReady) {
+		t.Fatalf("offline approval with unrelated credential error = %v", err)
+	}
 	handshake.Time = timestamppb.New(time.Now().Add(-MaxClockSkew - time.Second))
 	response, err = service.AuthorizeSession(ctx, &transportv1.AuthorizeSessionRequest{RemoteEndpointId: endpoint, Handshake: handshake})
 	if err != nil || response.GetResult() != agentv1.HandshakeResult_HANDSHAKE_RESULT_CLOCK_SKEW {
@@ -246,6 +250,12 @@ func TestEnrollmentTrustLifecycleIntegration(t *testing.T) {
 	revokeApprovalID, revokeIdentityID, revokeSessionID := approvedMetadata(t, pool, workspaceID, nodeID, "node.revoke")
 	if _, err := service.Revoke(ctx, Revocation{NodeID: trust.NodeID, ActorID: revokeIdentityID.String(), ApprovalID: revokeApprovalID, IdentityID: revokeIdentityID, SessionID: revokeSessionID, Reason: "revoke fixture", RequestID: uuid.Must(uuid.NewV7()).String()}); err != nil {
 		t.Fatal(err)
+	}
+	if _, err := service.Revoke(ctx, Revocation{NodeID: trust.NodeID, ActorID: revokeIdentityID.String(), ApprovalID: uuid.Must(uuid.NewV7()), IdentityID: revokeIdentityID, SessionID: revokeSessionID, Reason: "invalid retry revocation", RequestID: uuid.Must(uuid.NewV7()).String()}); !errors.Is(err, approvalstore.ErrNotReady) {
+		t.Fatalf("revoked node with unrelated credential error = %v", err)
+	}
+	if _, err := service.Revoke(ctx, Revocation{NodeID: trust.NodeID, ActorID: revokeIdentityID.String(), ApprovalID: revokeApprovalID, IdentityID: revokeIdentityID, SessionID: revokeSessionID, Reason: "retry revocation", RequestID: uuid.Must(uuid.NewV7()).String()}); err != nil {
+		t.Fatalf("revoked node retry error = %v", err)
 	}
 	permitted, err = service.CheckEndpoint(ctx, &transportv1.CheckEndpointRequest{EndpointId: endpoint, Alpn: "ocserv-platform/agent/1"})
 	if err != nil || permitted {

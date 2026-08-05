@@ -76,4 +76,22 @@ describe("OpenAPI invariants", () => {
       /shell|docker\.sock|systemctl_command|occtl_command/,
     );
   });
+
+  it("publishes the role binding identifier returned by the server", async () => {
+    const source = await readFile(
+      resolve(import.meta.dirname, "../../openapi/openapi.yaml"),
+      "utf8",
+    );
+    const document = parse(source) as OpenApiDocument;
+    const response = document.paths?.["/role-bindings"]?.post as
+      { responses?: Record<string, unknown> } | undefined;
+
+    expect(response?.responses?.["201"]).toMatchObject({
+      content: {
+        "application/json": {
+          schema: { $ref: "#/components/schemas/RoleBinding" },
+        },
+      },
+    });
+  });
 });

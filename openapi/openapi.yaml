@@ -697,7 +697,9 @@ paths:
         required: true
         content: { application/json: { schema: { $ref: "#/components/schemas/RoleBindingRequest" } } }
       responses:
-        "201": { description: Role binding created. }
+        "201":
+          description: Role binding created.
+          content: { application/json: { schema: { $ref: "#/components/schemas/RoleBinding" } } }
         "403": { $ref: "#/components/responses/Problem" }
         default: { $ref: "#/components/responses/Problem" }
   /approval-requests:
@@ -1351,6 +1353,12 @@ components:
         resource_type: { type: string, enum: [workspace, node, resource] }
         resource_id: { $ref: "#/components/schemas/UuidV7" }
         reason: { type: string, minLength: 1, maxLength: 512 }
+    RoleBinding:
+      type: object
+      additionalProperties: false
+      required: [id]
+      properties:
+        id: { $ref: "#/components/schemas/UuidV7" }
     ApprovalRequest:
       type: object
       additionalProperties: false

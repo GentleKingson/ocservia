@@ -118,6 +118,7 @@ All URIs are relative to _/api/v1_
 - [Problem](docs/Problem.md)
 - [QueueMetrics](docs/QueueMetrics.md)
 - [Readiness](docs/Readiness.md)
+- [RoleBinding](docs/RoleBinding.md)
 - [RoleBindingRequest](docs/RoleBindingRequest.md)
 - [SimulationScenario](docs/SimulationScenario.md)
 - [SyntheticCommandRequest](docs/SyntheticCommandRequest.md)

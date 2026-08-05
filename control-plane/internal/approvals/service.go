@@ -133,6 +133,29 @@ func Consume(ctx context.Context, tx pgx.Tx, approvalID, workspaceID, requesterI
 	return nil
 }
 
+// ValidateConsumed accepts only the approval that authorized an already
+// completed action. It makes idempotent retries prove the original approval
+// without attempting to consume a second approval.
+func ValidateConsumed(ctx context.Context, tx pgx.Tx, approvalID, workspaceID, requesterID uuid.UUID, action, resourceType string, resourceID uuid.UUID) error {
+	if approvalID == uuid.Nil {
+		return ErrNotReady
+	}
+	var valid bool
+	err := tx.QueryRow(ctx, `SELECT EXISTS(
+		SELECT 1 FROM approval_requests
+		WHERE id=$1 AND workspace_id=$2 AND requester_id=$3 AND action=$4
+		  AND resource_type=$5 AND resource_id=$6 AND status='consumed'
+		  AND approver_id IS DISTINCT FROM requester_id
+	)`, approvalID, workspaceID, requesterID, action, resourceType, resourceID).Scan(&valid)
+	if err != nil {
+		return fmt.Errorf("validate consumed approval: %w", err)
+	}
+	if !valid {
+		return ErrNotReady
+	}
+	return nil
+}
+
 func (s *Service) Get(ctx context.Context, id uuid.UUID) (Approval, error) {
 	return scan(s.pool.QueryRow(ctx, `SELECT id,workspace_id,requester_id,approver_id,action,resource_type,resource_id,reason,status,expires_at,created_at FROM approval_requests WHERE id=$1`, id))
 }

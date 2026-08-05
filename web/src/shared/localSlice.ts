@@ -13,6 +13,7 @@ import {
   getOperation,
   listEvents,
   listOperations,
+  workspaceChangedEvent,
 } from "../api/client";
 
 const terminalStates = new Set([
@@ -158,10 +159,28 @@ export const useLocalSliceStore = defineStore("local-slice", () => {
 
   function disconnect(): void {
     source?.close();
+    source = undefined;
     clearTimeout(pollTimer);
     clearTimeout(pendingPollTimer);
   }
 
+  function resetWorkspace(): void {
+    disconnect();
+    events.value = [];
+    connectedNodes.value = new Set();
+    pendingOperationIDs.value = new Set();
+    operation.value = undefined;
+    running.value = false;
+    unavailable.value = false;
+    void rebuild().then(() => connect());
+  }
+
+  if (typeof window !== "undefined") {
+    window.addEventListener(workspaceChangedEvent, resetWorkspace);
+    onScopeDispose(() => {
+      window.removeEventListener(workspaceChangedEvent, resetWorkspace);
+    });
+  }
   onScopeDispose(disconnect);
   return {
     activeNodes,

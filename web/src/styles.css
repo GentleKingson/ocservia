@@ -63,14 +63,23 @@ a {
   border-radius: 6px;
   background: #202a27;
 }
-.workspace-switcher span {
+.workspace-switcher label {
   color: #92a39d;
   font-size: 11px;
   text-transform: uppercase;
 }
-.workspace-switcher strong {
+.workspace-switcher select {
+  width: 100%;
+  min-width: 0;
+  padding: 0;
+  border: 0;
+  color: #f4f7f6;
+  background: transparent;
   font-size: 13px;
   font-weight: 600;
+}
+.workspace-switcher select:disabled {
+  opacity: 1;
 }
 .sidebar nav {
   display: grid;
@@ -608,9 +617,32 @@ h1 {
     padding-inline: 0;
   }
   .brand span,
-  .workspace-switcher,
   .sidebar a span {
     display: none;
+  }
+  .workspace-switcher {
+    position: fixed;
+    z-index: 2;
+    top: 11px;
+    left: 80px;
+    width: min(42vw, 160px);
+    min-height: 36px;
+    margin: 0;
+    padding: 8px 10px;
+    border-color: #d5ddda;
+    background: #fff;
+  }
+  .workspace-switcher label {
+    display: none;
+  }
+  .workspace-switcher select {
+    color: #26332e;
+  }
+  .topbar > span {
+    display: none;
+  }
+  .topbar {
+    justify-content: flex-end;
   }
   .sidebar nav a,
   .settings-link {

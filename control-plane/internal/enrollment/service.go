@@ -296,6 +296,9 @@ func (s *Service) Approve(ctx context.Context, approval Approval) (NodeTrust, er
 		return NodeTrust{}, fmt.Errorf("lock pending node: %w", err)
 	}
 	if currentStatus == "active" || currentStatus == "offline" {
+		if err := approvalstore.ValidateConsumed(ctx, tx, approval.ApprovalID, workspaceID, approval.IdentityID, "node.approve", "node", approval.NodeID); err != nil {
+			return NodeTrust{}, err
+		}
 		return NodeTrust{NodeID: approval.NodeID, EndpointID: endpointID, Revision: revision}, nil
 	}
 	if err := approvalstore.Consume(ctx, tx, approval.ApprovalID, workspaceID, approval.IdentityID, "node.approve", "node", approval.NodeID); err != nil {
@@ -347,6 +350,9 @@ func (s *Service) Revoke(ctx context.Context, revocation Revocation) (NodeTrust,
 		return NodeTrust{}, fmt.Errorf("lock node for revocation: %w", err)
 	}
 	if currentStatus == "revoked" {
+		if err := approvalstore.ValidateConsumed(ctx, tx, revocation.ApprovalID, workspaceID, revocation.IdentityID, "node.revoke", "node", revocation.NodeID); err != nil {
+			return NodeTrust{}, err
+		}
 		return NodeTrust{NodeID: revocation.NodeID, EndpointID: endpointID, Revision: revision}, nil
 	}
 	if err := approvalstore.Consume(ctx, tx, revocation.ApprovalID, workspaceID, revocation.IdentityID, "node.revoke", "node", revocation.NodeID); err != nil {
