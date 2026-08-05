@@ -151,6 +151,15 @@ export class EventsApi extends runtime.BaseAPI {
       );
     }
 
+    if (this.configuration && this.configuration.accessToken) {
+      const token = this.configuration.accessToken;
+      const tokenString = await token("bearerAuth", []);
+
+      if (tokenString) {
+        headerParameters["Authorization"] = `Bearer ${tokenString}`;
+      }
+    }
+
     let urlPath = `/events`;
 
     return {
@@ -272,6 +281,15 @@ export class EventsApi extends runtime.BaseAPI {
       headerParameters["Last-Event-ID"] = String(
         requestParameters["lastEventID"],
       );
+    }
+
+    if (this.configuration && this.configuration.accessToken) {
+      const token = this.configuration.accessToken;
+      const tokenString = await token("bearerAuth", []);
+
+      if (tokenString) {
+        headerParameters["Authorization"] = `Bearer ${tokenString}`;
+      }
     }
 
     let urlPath = `/events/stream`;

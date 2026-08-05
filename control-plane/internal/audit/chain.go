@@ -138,13 +138,30 @@ func canonicalJSON(value json.RawMessage) (json.RawMessage, error) {
 }
 
 func (m *Manager) Verify(ctx context.Context, workspaceID uuid.UUID) (Verification, error) {
-	rows, err := m.pool.Query(ctx, `SELECT id,occurred_at,actor_type,actor_id,action,resource_type,resource_id,request_id,COALESCE(trace_id,''),result,COALESCE(reason,''),source_session_id,node_id,command_id,approval_id,before_summary,after_summary,COALESCE(error_type,''),previous_event_hash,event_hash FROM audit_events WHERE workspace_id=$1 ORDER BY occurred_at,id`, workspaceID)
+	tx, err := m.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly})
+	if err != nil {
+		return Verification{}, err
+	}
+	defer func() { _ = tx.Rollback(context.Background()) }()
+
+	var checkpointEventID uuid.UUID
+	var checkpointHash, signature []byte
+	checkpointExists := true
+	err = tx.QueryRow(ctx, `SELECT through_event_id,through_event_hash,signature FROM audit_checkpoints WHERE workspace_id=$1 ORDER BY created_at DESC,id DESC LIMIT 1`, workspaceID).Scan(&checkpointEventID, &checkpointHash, &signature)
+	if errors.Is(err, pgx.ErrNoRows) {
+		checkpointExists = false
+	} else if err != nil {
+		return Verification{}, err
+	}
+
+	rows, err := tx.Query(ctx, `SELECT id,occurred_at,actor_type,actor_id,action,resource_type,resource_id,request_id,COALESCE(trace_id,''),result,COALESCE(reason,''),source_session_id,node_id,command_id,approval_id,before_summary,after_summary,COALESCE(error_type,''),previous_event_hash,event_hash FROM audit_events WHERE workspace_id=$1 ORDER BY occurred_at,id`, workspaceID)
 	if err != nil {
 		return Verification{}, err
 	}
 	defer rows.Close()
 	verification := Verification{WorkspaceID: workspaceID, Valid: true, Checkpoint: true}
 	var previous []byte
+	checkpointEncountered := false
 	for rows.Next() {
 		record := ChainRecord{WorkspaceID: workspaceID}
 		var resourceID *uuid.UUID
@@ -163,6 +180,12 @@ func (m *Manager) Verify(ctx context.Context, workspaceID uuid.UUID) (Verificati
 		if subtle.ConstantTimeCompare(storedPrevious, previous) != 1 || subtle.ConstantTimeCompare(storedHash, digest[:]) != 1 {
 			verification.Valid = false
 		}
+		if checkpointExists && record.EventID == checkpointEventID {
+			checkpointEncountered = true
+			if subtle.ConstantTimeCompare(storedHash, checkpointHash) != 1 {
+				verification.Checkpoint = false
+			}
+		}
 		previous = append(previous[:0], storedHash...)
 		verification.Events++
 	}
@@ -173,16 +196,11 @@ func (m *Manager) Verify(ctx context.Context, workspaceID uuid.UUID) (Verificati
 		verification.Checkpoint = false
 		return verification, nil
 	}
-	var checkpointHash, signature []byte
-	err = m.pool.QueryRow(ctx, `SELECT through_event_hash,signature FROM audit_checkpoints WHERE workspace_id=$1 ORDER BY created_at DESC,id DESC LIMIT 1`, workspaceID).Scan(&checkpointHash, &signature)
-	if errors.Is(err, pgx.ErrNoRows) {
+	if !checkpointExists {
 		verification.Checkpoint = verification.Events == 0
 		return verification, nil
 	}
-	if err != nil {
-		return Verification{}, err
-	}
-	verification.Checkpoint = hmac.Equal(signature, signCheckpoint(m.key, workspaceID, checkpointHash))
+	verification.Checkpoint = verification.Checkpoint && checkpointEncountered && hmac.Equal(signature, signCheckpoint(m.key, workspaceID, checkpointEventID, checkpointHash))
 	return verification, nil
 }
 
@@ -203,7 +221,7 @@ func (m *Manager) Checkpoint(ctx context.Context, workspaceID uuid.UUID) error {
 	if err := tx.QueryRow(ctx, `SELECT id,event_hash FROM audit_events WHERE workspace_id=$1 ORDER BY occurred_at DESC,id DESC LIMIT 1`, workspaceID).Scan(&eventID, &eventHash); err != nil {
 		return err
 	}
-	_, err = tx.Exec(ctx, `INSERT INTO audit_checkpoints(id,workspace_id,through_event_id,through_event_hash,signature,created_at) VALUES($1,$2,$3,$4,$5,now()) ON CONFLICT(workspace_id,through_event_id) DO NOTHING`, uuid.Must(uuid.NewV7()), workspaceID, eventID, eventHash, signCheckpoint(m.key, workspaceID, eventHash))
+	_, err = tx.Exec(ctx, `INSERT INTO audit_checkpoints(id,workspace_id,through_event_id,through_event_hash,signature,created_at) VALUES($1,$2,$3,$4,$5,now()) ON CONFLICT(workspace_id,through_event_id) DO NOTHING`, uuid.Must(uuid.NewV7()), workspaceID, eventID, eventHash, signCheckpoint(m.key, workspaceID, eventID, eventHash))
 	if err != nil {
 		return err
 	}
@@ -239,9 +257,10 @@ func (m *Manager) CheckpointAll(ctx context.Context) error {
 	return nil
 }
 
-func signCheckpoint(key []byte, workspaceID uuid.UUID, hash []byte) []byte {
+func signCheckpoint(key []byte, workspaceID, eventID uuid.UUID, hash []byte) []byte {
 	mac := hmac.New(sha256.New, key)
 	_, _ = mac.Write(workspaceID[:])
+	_, _ = mac.Write(eventID[:])
 	_, _ = mac.Write(hash)
 	return mac.Sum(nil)
 }

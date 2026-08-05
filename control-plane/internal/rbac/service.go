@@ -13,7 +13,10 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-var ErrForbidden = errors.New("authorization denied")
+var (
+	ErrForbidden      = errors.New("authorization denied")
+	ErrGrantForbidden = errors.New("role grant exceeds actor permissions")
+)
 
 type Resource struct {
 	WorkspaceID uuid.UUID
@@ -148,6 +151,13 @@ func (s *Service) CreateBinding(ctx context.Context, request BindingRequest) (uu
 		return uuid.Nil, err
 	}
 	defer func() { _ = tx.Rollback(context.Background()) }()
+	allowed, err := canGrantRole(ctx, tx, request.ActorID, request.WorkspaceID, request.Role)
+	if err != nil {
+		return uuid.Nil, err
+	}
+	if !allowed {
+		return uuid.Nil, ErrGrantForbidden
+	}
 	id := uuid.Must(uuid.NewV7())
 	now := time.Now().UTC()
 	if _, err := tx.Exec(ctx, `INSERT INTO role_bindings(id,identity_id,workspace_id,role_name,resource_type,resource_id,created_by,created_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8)`, id, request.IdentityID, request.WorkspaceID, request.Role, request.ResourceType, nullable(request.ResourceID), request.ActorID, now); err != nil {
@@ -160,6 +170,36 @@ func (s *Service) CreateBinding(ctx context.Context, request BindingRequest) (uu
 		return uuid.Nil, err
 	}
 	return id, nil
+}
+
+func canGrantRole(ctx context.Context, tx pgx.Tx, actorID, workspaceID uuid.UUID, role string) (bool, error) {
+	rows, err := tx.Query(ctx, `SELECT role_name FROM role_bindings WHERE identity_id=$1 AND workspace_id=$2 AND resource_type='workspace'`, actorID, workspaceID)
+	if err != nil {
+		return false, err
+	}
+	defer rows.Close()
+	actorActions := map[string]bool{}
+	for rows.Next() {
+		var actorRole string
+		if err := rows.Scan(&actorRole); err != nil {
+			return false, err
+		}
+		for _, action := range roleActions[actorRole] {
+			actorActions[action] = true
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return false, err
+	}
+	if actorActions["*"] {
+		return true, nil
+	}
+	for _, action := range roleActions[role] {
+		if action == "*" || !actorActions[action] {
+			return false, nil
+		}
+	}
+	return true, nil
 }
 
 func nullable(id uuid.UUID) any {

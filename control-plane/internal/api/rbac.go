@@ -1,6 +1,7 @@
 package api
 
 import (
+	"errors"
 	"net/http"
 
 	"github.com/GentleKingson/ocservia/control-plane/internal/rbac"
@@ -69,6 +70,10 @@ func (s *Server) createRoleBinding(w http.ResponseWriter, r *http.Request) {
 	actor := principal(r)
 	id, err := s.rbac.CreateBinding(r.Context(), rbac.BindingRequest{IdentityID: identityID, WorkspaceID: workspaceID, ResourceID: resourceID, ActorID: actor.IdentityID, SessionID: actor.SessionID, Role: body.Role, ResourceType: body.ResourceType, RequestID: requestID(r), Reason: body.Reason})
 	if err != nil {
+		if errors.Is(err, rbac.ErrGrantForbidden) {
+			writeProblem(w, r, http.StatusForbidden, "https://ocservia.dev/problems/forbidden", "Access denied", "the requested role exceeds the actor's effective permissions")
+			return
+		}
 		writeProblem(w, r, http.StatusBadRequest, "https://ocservia.dev/problems/invalid-request", "Invalid request", "the role binding could not be created")
 		return
 	}

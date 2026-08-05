@@ -40,6 +40,12 @@ of at least 32 characters in `OCSERV_DEV_AUTH_TOKEN`; the browser development
 server receives the same value as `VITE_DEV_AUTH_TOKEN`. Both modes are
 forbidden in production.
 
+Development bearer authentication has no persisted user identity or session.
+It can exercise ordinary development reads and simulations, but it cannot
+create or approve independent approval requests or perform approval-backed node
+approval, revocation, or service reload operations. Use the test OIDC provider
+when developing those identity-bound high-risk workflows.
+
 Database migrations run as a separate one-shot process using `--migrate-only`,
 an owner connection in `OCSERV_DATABASE_URL`, and the unprivileged role named
 by `OCSERV_RUNTIME_DATABASE_ROLE`. The long-running control plane receives

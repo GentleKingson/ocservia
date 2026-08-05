@@ -162,7 +162,6 @@ paths:
       operationId: listEvents
       summary: Rebuild platform events from durable state
       tags: [events]
-      security: []
       parameters:
         - $ref: "#/components/parameters/WorkspaceId"
         - name: after
@@ -180,6 +179,8 @@ paths:
                 $ref: "#/components/schemas/PlatformEventPage"
         "400":
           $ref: "#/components/responses/Problem"
+        "401":
+          $ref: "#/components/responses/Problem"
         default:
           $ref: "#/components/responses/Problem"
   /events/stream:
@@ -187,7 +188,6 @@ paths:
       operationId: watchEvents
       summary: Watch platform events with SSE resume support
       tags: [events]
-      security: []
       parameters:
         - $ref: "#/components/parameters/WorkspaceId"
         - name: Last-Event-ID
@@ -203,6 +203,8 @@ paths:
               schema:
                 type: string
         "400":
+          $ref: "#/components/responses/Problem"
+        "401":
           $ref: "#/components/responses/Problem"
         default:
           $ref: "#/components/responses/Problem"
