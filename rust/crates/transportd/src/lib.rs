@@ -14,6 +14,7 @@ use iroh::endpoint::{
 };
 use iroh::protocol::{AcceptError, ProtocolHandler, Router};
 use iroh::{Endpoint, EndpointId, SecretKey};
+use ocservia_contracts::decode_strict_command_envelope;
 use ocservia_contracts::generated::ocserv::platform::agent::v1::{
     AgentEvent, AgentEventType, CommandEnvelope, EnrollRequest, EnrollResponse, HandshakeResult,
     SessionHandshake, SessionHandshakeResponse, TelemetryBatch,
@@ -554,8 +555,12 @@ impl TransportService for IrohTransportService {
         if request.command_envelope.len() > MAX_FRAME_BYTES {
             return Err(Status::resource_exhausted("command exceeds 1 MiB"));
         }
-        let command = CommandEnvelope::decode(request.command_envelope.as_slice())
-            .map_err(|_| Status::invalid_argument("command envelope protobuf is invalid"))?;
+        let command =
+            decode_strict_command_envelope(request.command_envelope.as_slice()).map_err(|_| {
+                Status::invalid_argument(
+                    "command envelope protobuf is invalid or contains unknown fields",
+                )
+            })?;
         if command.node_id != node_id {
             return Err(Status::invalid_argument(
                 "command node_id does not match request",

@@ -8,3 +8,9 @@
 /// Generated Protocol Buffer types.
 #[allow(clippy::all, clippy::pedantic)]
 pub mod generated;
+
+pub mod strict_wire;
+
+pub use strict_wire::{
+    StrictWireError, decode_strict_command_envelope, validate_strict_command_envelope,
+};

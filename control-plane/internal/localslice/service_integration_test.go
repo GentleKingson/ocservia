@@ -303,6 +303,56 @@ func TestMalformedCommandResultRollsBackTransactionIntegration(t *testing.T) {
 	}
 }
 
+func TestStoredCommandHashVersionMustMatchResultIntegration(t *testing.T) {
+	tests := []struct {
+		name    string
+		version agentv1.SemanticPayloadHashVersion
+	}{
+		{name: "legacy_zero", version: agentv1.SemanticPayloadHashVersion_SEMANTIC_PAYLOAD_HASH_VERSION_UNSPECIFIED},
+		{name: "unknown_99", version: agentv1.SemanticPayloadHashVersion(99)},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			fixture := newCommandResultFixture(t)
+			fixture.envelope.SemanticPayloadHashVersion = agentv1.SemanticPayloadHashVersion_SEMANTIC_PAYLOAD_HASH_VERSION_V1
+			v1Hash, err := semanticpayload.HashV1(fixture.envelope)
+			if err != nil {
+				t.Fatal(err)
+			}
+			fixture.envelope.SemanticPayloadSha256 = v1Hash[:]
+			storedEnvelope, err := proto.Marshal(fixture.envelope)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := fixture.pool.Exec(context.Background(), `UPDATE commands SET envelope=$2 WHERE id=$1`, fixture.commandID, storedEnvelope); err != nil {
+				t.Fatal(err)
+			}
+			legacyHash, err := agentPayloadHash(fixture.envelope)
+			if err != nil {
+				t.Fatal(err)
+			}
+			result := &agentv1.CommandResult{
+				CommandId: fixture.commandID[:], IdempotencyKey: fixture.envelope.GetIdempotencyKey(),
+				PayloadSha256: legacyHash[:], State: agentv1.CommandResultState_COMMAND_RESULT_STATE_SUCCEEDED,
+				Result: []byte("legacy-digest"), AcceptedAt: timestamppb.New(fixture.issuedAt), CompletedAt: timestamppb.New(fixture.issuedAt),
+				SemanticPayloadHashVersion: test.version,
+			}
+			eventID, err := fixture.ingestResult(t, result)
+			if err == nil {
+				t.Fatalf("stored V1 envelope accepted result hash version %v", test.version)
+			}
+			var transportCount, resultCount int
+			var operationState, commandState string
+			if queryErr := fixture.pool.QueryRow(context.Background(), `SELECT (SELECT count(*) FROM transport_events WHERE event_id=$1),(SELECT count(*) FROM agent_command_results WHERE command_id=$2),(SELECT state FROM operations WHERE id=$3),(SELECT state FROM commands WHERE id=$2)`, eventID, fixture.commandID, fixture.operationID).Scan(&transportCount, &resultCount, &operationState, &commandState); queryErr != nil {
+				t.Fatal(queryErr)
+			}
+			if transportCount != 0 || resultCount != 0 || operationState != "dispatched" || commandState != "dispatched" {
+				t.Fatalf("version mismatch left partial state: transport=%d results=%d operation=%s command=%s", transportCount, resultCount, operationState, commandState)
+			}
+		})
+	}
+}
+
 func TestInvalidCommandResultStatesAndTimesFailClosedIntegration(t *testing.T) {
 	tests := []struct {
 		name   string

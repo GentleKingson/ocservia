@@ -282,6 +282,9 @@ impl CommandExecutor {
                 if by_key.idempotency_key == by_command.idempotency_key
                     && by_key.command_id == validated.command_id =>
             {
+                if by_key.payload_hash_version != validated.hash_version as i32 {
+                    return Err(CommandError::Rejected("semantic_hash_version_conflict"));
+                }
                 if by_key.payload_sha256 == validated.payload_hash {
                     Ok(by_key)
                 } else {
@@ -1370,6 +1373,54 @@ mod tests {
                 .synthetic_execution_count()
                 .expect("count"),
             1
+        );
+        drop(executor);
+        cleanup_journal(&path);
+    }
+
+    #[test]
+    fn reconcile_and_retry_reject_stored_hash_version_conflict() {
+        let path = temporary_journal("stored-version-conflict");
+        let node_id = *Uuid::now_v7().as_bytes();
+        let key = *Uuid::now_v7().as_bytes();
+        let command_context = context(node_id, 100);
+        let envelope = command_v1(node_id, key, "once", 100);
+        {
+            let mut executor = CommandExecutor::new(Journal::open(&path).expect("open"));
+            assert!(matches!(
+                executor.execute(&envelope, &command_context, Some(CrashPoint::AfterAccepted)),
+                Err(CommandError::InjectedCrash(CrashPoint::AfterAccepted))
+            ));
+            executor
+                .deliver(&envelope, &command_context)
+                .expect("ordinary replay records uncertainty");
+        }
+        let connection = rusqlite::Connection::open(&path).expect("open journal for mutation");
+        connection
+            .execute(
+                "UPDATE command_journal SET payload_hash_version=99 WHERE idempotency_key=?1",
+                [key.as_slice()],
+            )
+            .expect("install incompatible stored hash version");
+        drop(connection);
+
+        let mut executor = CommandExecutor::new(Journal::open(&path).expect("reopen"));
+        assert!(matches!(
+            executor.reconcile(&envelope, &command_context),
+            Err(CommandError::Rejected("semantic_hash_version_conflict"))
+        ));
+        let mut retry = envelope;
+        retry.delivery_mode = CommandDeliveryMode::RetryIfEffectAbsent.into();
+        assert!(matches!(
+            executor.retry_unknown(&retry, &command_context),
+            Err(CommandError::Rejected("semantic_hash_version_conflict"))
+        ));
+        assert_eq!(
+            executor
+                .journal()
+                .synthetic_execution_count()
+                .expect("effect count"),
+            0
         );
         drop(executor);
         cleanup_journal(&path);

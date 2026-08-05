@@ -11,6 +11,7 @@ use ocservia_agent::{
 };
 use ocservia_agent_protocol::{PrivdResponse, privd_response};
 use ocservia_command_journal::{CommandRecord, CommandState, Journal, TelemetryInsert};
+use ocservia_contracts::decode_strict_command_envelope;
 use ocservia_contracts::generated::ocserv::platform::agent::v1::{
     AgentEvent, AgentEventType, CommandEnvelope, CommandResult, CommandResultState,
     HandshakeResult, MetricSample, ObservedSnapshot, SemanticPayloadHashVersion, SessionHandshake,
@@ -226,7 +227,7 @@ async fn handle_command_stream(
     tokio::time::timeout(HANDSHAKE_TIMEOUT, recv.read_exact(&mut bytes))
         .await
         .map_err(|_| invalid("command body timed out"))??;
-    let envelope = CommandEnvelope::decode(bytes.as_slice())?;
+    let envelope = decode_strict_command_envelope(bytes.as_slice())?;
     let now = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH)?;
     let now_unix_seconds = i64::try_from(now.as_secs())?;
     let context = CommandContext {

@@ -10,6 +10,20 @@ import (
 	agentv1 "github.com/GentleKingson/ocservia/control-plane/gen/proto/ocserv/platform/agent/v1"
 )
 
+// ValidateVersion rejects hash algorithms that this binary cannot verify.
+//
+// The version is part of the durable command identity and must never silently
+// fall back to the legacy algorithm when a newer value is received.
+func ValidateVersion(version agentv1.SemanticPayloadHashVersion) error {
+	switch version {
+	case agentv1.SemanticPayloadHashVersion_SEMANTIC_PAYLOAD_HASH_VERSION_UNSPECIFIED,
+		agentv1.SemanticPayloadHashVersion_SEMANTIC_PAYLOAD_HASH_VERSION_V1:
+		return nil
+	default:
+		return errors.New("semantic payload hash version is unsupported")
+	}
+}
+
 // domainSeparatorV1 is the ASCII label plus NUL terminator defined by
 // docs/development/command-semantic-hash-v1.md.
 var domainSeparatorV1 = []byte("ocservia.command.semantic-hash.v1\x00")

@@ -7,9 +7,10 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use ocservia_contracts::decode_strict_command_envelope;
 use ocservia_contracts::generated::ocserv::platform::agent::v1::{
-    CommandDeliveryMode, CommandEnvelope, MetricSample, ObservedSnapshot, SimulationProbe,
-    TelemetryBatch, TelemetryDropCounters, TelemetryPriority, command_envelope,
+    CommandDeliveryMode, MetricSample, ObservedSnapshot, SimulationProbe, TelemetryBatch,
+    TelemetryDropCounters, TelemetryPriority, command_envelope,
 };
 use ocservia_contracts::generated::ocserv::platform::transport::v1::{
     CloseNodeRequest, CloseNodeResponse, ConnectionPath, GetNodeConnectionRequest, HealthRequest,
@@ -467,8 +468,8 @@ impl TransportService for StubService {
         if request.command_envelope.len() > MAX_COMMAND_BYTES {
             return Err(Status::resource_exhausted("command exceeds 1 MiB"));
         }
-        let envelope = CommandEnvelope::decode(request.command_envelope.as_slice())
-            .map_err(|_| Status::invalid_argument("invalid command envelope"))?;
+        let envelope = decode_strict_command_envelope(request.command_envelope.as_slice())
+            .map_err(|_| Status::invalid_argument("invalid or unknown command envelope fields"))?;
         if envelope.node_id != node_id {
             return Err(Status::invalid_argument(
                 "command node_id does not match request",
@@ -711,7 +712,9 @@ fn new_traceparent() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ocservia_contracts::generated::ocserv::platform::agent::v1::SemanticPayloadHashVersion;
+    use ocservia_contracts::generated::ocserv::platform::agent::v1::{
+        CommandEnvelope, SemanticPayloadHashVersion,
+    };
     use tokio_stream::StreamExt;
 
     fn probe_request(node_id: Vec<u8>, idempotency_key: Vec<u8>) -> SendCommandRequest {

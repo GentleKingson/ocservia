@@ -12,6 +12,12 @@ committed in one SQLite transaction. The result is therefore durable before a
 response frame is sent, and a failed commit cannot leave an effect recorded
 without its terminal result.
 
+Command ingress performs strict raw-wire validation before Protobuf decoding.
+Unknown fields and known fields with incompatible wire types are rejected in
+the Controller transport path and the Agent command stream, including nested
+payload messages. This keeps a schema extension from changing the meaning of a
+side-effecting command without an explicit protocol update.
+
 Incomplete records become `unknown` on ordinary replay. Delivery mode is
 explicit: `RECONCILE_ONLY` observes durable state without execution, while
 `RETRY_IF_EFFECT_ABSENT` is accepted only after reconciliation persisted proof
@@ -32,15 +38,19 @@ conflicts, cross-language semantic hash vectors, explicit safe retry, expiry,
 clock skew, revision, capability, cancellation, size limits, and SQLite
 read-only, full, and corrupt failures.
 
-Database schema version 7 stores structured Agent command result history in
-PostgreSQL. Every `command_result` event must decode and satisfy its state,
-identity, hash, size, and time constraints; invalid results roll back the whole
-ingestion transaction. Development simulation completion uses the distinct
-`simulation_result` event type. Agent timestamps remain history data and never
-replace Controller-observed authority timestamps.
+Database schema version 9 stores structured Agent command result history in
+PostgreSQL. Migration 8 persists the semantic hash algorithm version, and
+migration 9 restricts it to the supported legacy (`0`) and canonical v1 (`1`)
+values. Every `command_result` event must decode and satisfy its state,
+identity, hash-version, hash, size, and time constraints; invalid results roll
+back the whole ingestion transaction. Development simulation completion uses
+the distinct `simulation_result` event type. Agent timestamps remain history
+data and never replace Controller-observed authority timestamps.
 
 Binary rollback must stop new command dispatch and preserve the Agent SQLite
-journal. Applying the version 7 down migration deletes result history and
-simulation-result events, so use it only after that destructive loss is
-accepted. The Agent journal schema is forward compatible and should not be
-deleted during rollback.
+journal. Applying the version 9 down migration removes the supported-version
+constraint; applying version 8 down removes the persisted hash-version column;
+applying version 7 down deletes result history and simulation-result events.
+Use the version 7 rollback only after that destructive loss is accepted. The
+Agent journal schema is forward compatible and should not be deleted during
+rollback.

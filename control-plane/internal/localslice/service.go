@@ -482,6 +482,14 @@ func ingestAgentCommandResult(ctx context.Context, tx pgx.Tx, eventID, nodeID uu
 	if !bytes.Equal(envelope.GetIdempotencyKey(), result.GetIdempotencyKey()) {
 		return errors.New("command result idempotency key mismatch")
 	}
+	storedHashVersion := envelope.GetSemanticPayloadHashVersion()
+	if err := semanticpayload.ValidateVersion(storedHashVersion); err != nil {
+		return fmt.Errorf("stored command semantic payload hash version: %w", err)
+	}
+	resultHashVersion := result.GetSemanticPayloadHashVersion()
+	if err := semanticpayload.ValidateVersion(resultHashVersion); err != nil {
+		return fmt.Errorf("command result semantic payload hash version: %w", err)
+	}
 	issuedAt := envelope.GetIssuedAt()
 	if issuedAt == nil || issuedAt.CheckValid() != nil {
 		return errors.New("stored command issued_at is invalid")
@@ -516,12 +524,20 @@ func ingestAgentCommandResult(ctx context.Context, tx pgx.Tx, eventID, nodeID uu
 			return errors.New("unknown command result must not contain result bytes")
 		}
 	}
+	if state == "rejected" && len(result.GetPayloadSha256()) == 0 {
+		if resultHashVersion != agentv1.SemanticPayloadHashVersion_SEMANTIC_PAYLOAD_HASH_VERSION_UNSPECIFIED {
+			return errors.New("rejected command result must not declare a payload hash version")
+		}
+	} else if resultHashVersion != storedHashVersion {
+		return errors.New("command result semantic payload hash version mismatch")
+	}
 	if len(result.GetPayloadSha256()) == sha256.Size {
 		var expectedHash [sha256.Size]byte
 		var err error
-		if result.GetSemanticPayloadHashVersion() == agentv1.SemanticPayloadHashVersion_SEMANTIC_PAYLOAD_HASH_VERSION_V1 {
+		switch resultHashVersion {
+		case agentv1.SemanticPayloadHashVersion_SEMANTIC_PAYLOAD_HASH_VERSION_V1:
 			expectedHash, err = semanticpayload.HashV1(&envelope)
-		} else {
+		case agentv1.SemanticPayloadHashVersion_SEMANTIC_PAYLOAD_HASH_VERSION_UNSPECIFIED:
 			expectedHash, err = agentPayloadHash(&envelope)
 		}
 		if err != nil {
