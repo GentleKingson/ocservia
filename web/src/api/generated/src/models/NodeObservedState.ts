@@ -48,6 +48,12 @@ export interface NodeObservedState {
   name: string;
   /**
    *
+   * @type {number}
+   * @memberof NodeObservedState
+   */
+  version: number;
+  /**
+   *
    * @type {NodeObservedStateTrustStatusEnum}
    * @memberof NodeObservedState
    */
@@ -179,6 +185,7 @@ export function instanceOfNodeObservedState(
 ): value is NodeObservedState {
   if (!("id" in value) || value["id"] === undefined) return false;
   if (!("name" in value) || value["name"] === undefined) return false;
+  if (!("version" in value) || value["version"] === undefined) return false;
   if (
     (!("trustStatus" in (value as Record<string, any>)) &&
       !("trust_status" in (value as Record<string, any>))) ||
@@ -219,6 +226,7 @@ export function NodeObservedStateFromJSONTyped(
   return {
     id: json["id"],
     name: json["name"],
+    version: json["version"],
     trustStatus: json["trust_status"],
     connectionState: json["connection_state"],
     freshness: json["freshness"],
@@ -262,6 +270,7 @@ export function NodeObservedStateToJSONTyped(
   return {
     id: value["id"],
     name: value["name"],
+    version: value["version"],
     trust_status: value["trustStatus"],
     connection_state: value["connectionState"],
     freshness: value["freshness"],

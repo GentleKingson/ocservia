@@ -19,6 +19,11 @@ import {
   NodeApprovalToJSON,
 } from "../models/NodeApproval";
 import {
+  type NodeIpBanPage,
+  NodeIpBanPageFromJSON,
+  NodeIpBanPageToJSON,
+} from "../models/NodeIpBanPage";
+import {
   type NodeObservedState,
   NodeObservedStateFromJSON,
   NodeObservedStateToJSON,
@@ -65,6 +70,10 @@ export interface ApproveNodeRequest {
 }
 
 export interface GetNodeRequest {
+  nodeId: string;
+}
+
+export interface ListNodeIpBansRequest {
   nodeId: string;
 }
 
@@ -237,6 +246,76 @@ export class NodesApi extends runtime.BaseAPI {
     initOverrides?: RequestInit | runtime.InitOverrideFunction,
   ): Promise<NodeObservedState> {
     const response = await this.getNodeRaw(requestParameters, initOverrides);
+    return await response.value();
+  }
+
+  /**
+   * Creates request options for listNodeIpBans without sending the request
+   */
+  async listNodeIpBansRequestOpts(
+    requestParameters: ListNodeIpBansRequest,
+  ): Promise<runtime.RequestOpts> {
+    if (requestParameters["nodeId"] == null) {
+      throw new runtime.RequiredError(
+        "nodeId",
+        'Required parameter "nodeId" was null or undefined when calling listNodeIpBans().',
+      );
+    }
+
+    const queryParameters: any = {};
+
+    const headerParameters: runtime.HTTPHeaders = {};
+
+    if (this.configuration && this.configuration.accessToken) {
+      const token = this.configuration.accessToken;
+      const tokenString = await token("oidc", []);
+
+      if (tokenString) {
+        headerParameters["Authorization"] = `Bearer ${tokenString}`;
+      }
+    }
+
+    let urlPath = `/nodes/{node_id}/ip-bans`;
+    urlPath = urlPath.replace(
+      "{node_id}",
+      encodeURIComponent(String(requestParameters["nodeId"])),
+    );
+
+    return {
+      path: urlPath,
+      method: "GET",
+      headers: headerParameters,
+      query: queryParameters,
+    };
+  }
+
+  /**
+   * List current IP bans observed on a node
+   */
+  async listNodeIpBansRaw(
+    requestParameters: ListNodeIpBansRequest,
+    initOverrides?: RequestInit | runtime.InitOverrideFunction,
+  ): Promise<runtime.ApiResponse<NodeIpBanPage>> {
+    const requestOptions =
+      await this.listNodeIpBansRequestOpts(requestParameters);
+    const response = await this.request(requestOptions, initOverrides);
+
+    return new runtime.JSONApiResponse(response, (jsonValue) =>
+      NodeIpBanPageFromJSON(jsonValue),
+    );
+  }
+
+  /**
+   * List current IP bans observed on a node
+   */
+  async listNodeIpBans(
+    requestParameters: ListNodeIpBansRequest,
+    initOverrides?: RequestInit | runtime.InitOverrideFunction,
+  ): Promise<NodeIpBanPage> {
+    const response = await this.listNodeIpBansRaw(
+      requestParameters,
+      initOverrides,
+    );
     return await response.value();
   }
 

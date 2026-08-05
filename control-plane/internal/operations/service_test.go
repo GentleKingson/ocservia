@@ -32,3 +32,60 @@ func TestMarshalEnvelopeUsesTypedOneof(t *testing.T) {
 		t.Fatalf("marshalEnvelope() = %q, %d bytes, %v", payloadType, len(data), err)
 	}
 }
+
+func TestControlledOperationsRequireTypedTargetsAndReason(t *testing.T) {
+	base := CreateRequest{NodeID: uuid.Must(uuid.NewV7()), IdempotencyKey: "stable-key", ExpectedVersion: 4, TTL: time.Minute, RequestID: "request", Traceparent: "00-0123456789abcdef0123456789abcdef-0123456789abcdef-01", ActorID: "operator", Reason: "support case", Action: "session.disconnect"}
+	bootID := uuid.NewString()
+	for name, request := range map[string]CreateRequest{
+		"disconnect": func() CreateRequest {
+			r := base
+			r.Kind = SessionDisconnect
+			r.SessionID = "42"
+			r.BootID = bootID
+			return r
+		}(),
+		"terminate": func() CreateRequest {
+			r := base
+			r.Kind = SessionTerminate
+			r.SessionID = "42"
+			r.BootID = bootID
+			r.Action = "session.terminate"
+			return r
+		}(),
+		"unban": func() CreateRequest {
+			r := base
+			r.Kind = IPBanRemove
+			r.IP = "192.0.2.9"
+			r.Action = "ip_ban.remove"
+			return r
+		}(),
+		"reload": func() CreateRequest { r := base; r.Kind = ServiceReload; r.Action = "service.reload"; return r }(),
+	} {
+		t.Run(name, func(t *testing.T) {
+			if err := validateCreate(request); err != nil {
+				t.Fatalf("validateCreate() = %v", err)
+			}
+			data, payloadType, err := marshalEnvelope(request, uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7()), time.Now(), time.Now().Add(time.Minute))
+			if err != nil || len(data) == 0 || payloadType == "" {
+				t.Fatalf("marshalEnvelope() = %q, %d, %v", payloadType, len(data), err)
+			}
+		})
+	}
+	invalid := base
+	invalid.Kind = SessionDisconnect
+	invalid.SessionID = "alice"
+	invalid.BootID = bootID
+	if err := validateCreate(invalid); err == nil {
+		t.Fatal("username-like session target was accepted")
+	}
+	invalid.SessionID = "042"
+	if err := validateCreate(invalid); err == nil {
+		t.Fatal("non-canonical session target was accepted")
+	}
+	invalid = base
+	invalid.Kind = IPBanRemove
+	invalid.IP = "192.0.2.009"
+	if err := validateCreate(invalid); err == nil {
+		t.Fatal("non-canonical IP was accepted")
+	}
+}

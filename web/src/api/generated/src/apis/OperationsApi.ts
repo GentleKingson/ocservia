@@ -14,6 +14,11 @@
 
 import * as runtime from "../runtime";
 import {
+  type ControlledOperationRequest,
+  ControlledOperationRequestFromJSON,
+  ControlledOperationRequestToJSON,
+} from "../models/ControlledOperationRequest";
+import {
   type Operation,
   OperationFromJSON,
   OperationToJSON,
@@ -46,6 +51,14 @@ export interface CreateSyntheticCommandRequest {
   ifMatch?: string;
 }
 
+export interface DisconnectNodeSessionRequest {
+  nodeId: string;
+  sessionId: string;
+  idempotencyKey: string;
+  controlledOperationRequest: ControlledOperationRequest;
+  ifMatch?: string;
+}
+
 export interface GetOperationRequest {
   operationId: string;
 }
@@ -53,6 +66,29 @@ export interface GetOperationRequest {
 export interface ListOperationsRequest {
   cursor?: string;
   pageSize?: number;
+}
+
+export interface ReloadNodeServiceRequest {
+  nodeId: string;
+  idempotencyKey: string;
+  controlledOperationRequest: ControlledOperationRequest;
+  ifMatch?: string;
+}
+
+export interface RemoveNodeIpBanRequest {
+  nodeId: string;
+  ip: string;
+  idempotencyKey: string;
+  controlledOperationRequest: ControlledOperationRequest;
+  ifMatch?: string;
+}
+
+export interface TerminateNodeSessionRequest {
+  nodeId: string;
+  sessionId: string;
+  idempotencyKey: string;
+  controlledOperationRequest: ControlledOperationRequest;
+  ifMatch?: string;
 }
 
 export interface WatchOperationEventsRequest {
@@ -157,6 +193,116 @@ export class OperationsApi extends runtime.BaseAPI {
     initOverrides?: RequestInit | runtime.InitOverrideFunction,
   ): Promise<Operation> {
     const response = await this.createSyntheticCommandRaw(
+      requestParameters,
+      initOverrides,
+    );
+    return await response.value();
+  }
+
+  /**
+   * Creates request options for disconnectNodeSession without sending the request
+   */
+  async disconnectNodeSessionRequestOpts(
+    requestParameters: DisconnectNodeSessionRequest,
+  ): Promise<runtime.RequestOpts> {
+    if (requestParameters["nodeId"] == null) {
+      throw new runtime.RequiredError(
+        "nodeId",
+        'Required parameter "nodeId" was null or undefined when calling disconnectNodeSession().',
+      );
+    }
+
+    if (requestParameters["sessionId"] == null) {
+      throw new runtime.RequiredError(
+        "sessionId",
+        'Required parameter "sessionId" was null or undefined when calling disconnectNodeSession().',
+      );
+    }
+
+    if (requestParameters["idempotencyKey"] == null) {
+      throw new runtime.RequiredError(
+        "idempotencyKey",
+        'Required parameter "idempotencyKey" was null or undefined when calling disconnectNodeSession().',
+      );
+    }
+
+    if (requestParameters["controlledOperationRequest"] == null) {
+      throw new runtime.RequiredError(
+        "controlledOperationRequest",
+        'Required parameter "controlledOperationRequest" was null or undefined when calling disconnectNodeSession().',
+      );
+    }
+
+    const queryParameters: any = {};
+
+    const headerParameters: runtime.HTTPHeaders = {};
+
+    headerParameters["Content-Type"] = "application/json";
+
+    if (requestParameters["idempotencyKey"] != null) {
+      headerParameters["Idempotency-Key"] = String(
+        requestParameters["idempotencyKey"],
+      );
+    }
+
+    if (requestParameters["ifMatch"] != null) {
+      headerParameters["If-Match"] = String(requestParameters["ifMatch"]);
+    }
+
+    if (this.configuration && this.configuration.accessToken) {
+      const token = this.configuration.accessToken;
+      const tokenString = await token("oidc", []);
+
+      if (tokenString) {
+        headerParameters["Authorization"] = `Bearer ${tokenString}`;
+      }
+    }
+
+    let urlPath = `/nodes/{node_id}/sessions/{session_id}:disconnect`;
+    urlPath = urlPath.replace(
+      "{node_id}",
+      encodeURIComponent(String(requestParameters["nodeId"])),
+    );
+    urlPath = urlPath.replace(
+      "{session_id}",
+      encodeURIComponent(String(requestParameters["sessionId"])),
+    );
+
+    return {
+      path: urlPath,
+      method: "POST",
+      headers: headerParameters,
+      query: queryParameters,
+      body: ControlledOperationRequestToJSON(
+        requestParameters["controlledOperationRequest"],
+      ),
+    };
+  }
+
+  /**
+   * Disconnect one observed session
+   */
+  async disconnectNodeSessionRaw(
+    requestParameters: DisconnectNodeSessionRequest,
+    initOverrides?: RequestInit | runtime.InitOverrideFunction,
+  ): Promise<runtime.ApiResponse<Operation>> {
+    const requestOptions =
+      await this.disconnectNodeSessionRequestOpts(requestParameters);
+    const response = await this.request(requestOptions, initOverrides);
+
+    return new runtime.JSONApiResponse(response, (jsonValue) =>
+      OperationFromJSON(jsonValue),
+    );
+  }
+
+  /**
+   * Disconnect one observed session
+   */
+  async disconnectNodeSession(
+    requestParameters: DisconnectNodeSessionRequest,
+    initOverrides?: RequestInit | runtime.InitOverrideFunction,
+  ): Promise<Operation> {
+    const response = await this.disconnectNodeSessionRaw(
       requestParameters,
       initOverrides,
     );
@@ -345,6 +491,325 @@ export class OperationsApi extends runtime.BaseAPI {
     initOverrides?: RequestInit | runtime.InitOverrideFunction,
   ): Promise<OperationPage> {
     const response = await this.listOperationsRaw(
+      requestParameters,
+      initOverrides,
+    );
+    return await response.value();
+  }
+
+  /**
+   * Creates request options for reloadNodeService without sending the request
+   */
+  async reloadNodeServiceRequestOpts(
+    requestParameters: ReloadNodeServiceRequest,
+  ): Promise<runtime.RequestOpts> {
+    if (requestParameters["nodeId"] == null) {
+      throw new runtime.RequiredError(
+        "nodeId",
+        'Required parameter "nodeId" was null or undefined when calling reloadNodeService().',
+      );
+    }
+
+    if (requestParameters["idempotencyKey"] == null) {
+      throw new runtime.RequiredError(
+        "idempotencyKey",
+        'Required parameter "idempotencyKey" was null or undefined when calling reloadNodeService().',
+      );
+    }
+
+    if (requestParameters["controlledOperationRequest"] == null) {
+      throw new runtime.RequiredError(
+        "controlledOperationRequest",
+        'Required parameter "controlledOperationRequest" was null or undefined when calling reloadNodeService().',
+      );
+    }
+
+    const queryParameters: any = {};
+
+    const headerParameters: runtime.HTTPHeaders = {};
+
+    headerParameters["Content-Type"] = "application/json";
+
+    if (requestParameters["idempotencyKey"] != null) {
+      headerParameters["Idempotency-Key"] = String(
+        requestParameters["idempotencyKey"],
+      );
+    }
+
+    if (requestParameters["ifMatch"] != null) {
+      headerParameters["If-Match"] = String(requestParameters["ifMatch"]);
+    }
+
+    if (this.configuration && this.configuration.accessToken) {
+      const token = this.configuration.accessToken;
+      const tokenString = await token("oidc", []);
+
+      if (tokenString) {
+        headerParameters["Authorization"] = `Bearer ${tokenString}`;
+      }
+    }
+
+    let urlPath = `/nodes/{node_id}/service:reload`;
+    urlPath = urlPath.replace(
+      "{node_id}",
+      encodeURIComponent(String(requestParameters["nodeId"])),
+    );
+
+    return {
+      path: urlPath,
+      method: "POST",
+      headers: headerParameters,
+      query: queryParameters,
+      body: ControlledOperationRequestToJSON(
+        requestParameters["controlledOperationRequest"],
+      ),
+    };
+  }
+
+  /**
+   * Reload the fixed Ocserv service unit
+   */
+  async reloadNodeServiceRaw(
+    requestParameters: ReloadNodeServiceRequest,
+    initOverrides?: RequestInit | runtime.InitOverrideFunction,
+  ): Promise<runtime.ApiResponse<Operation>> {
+    const requestOptions =
+      await this.reloadNodeServiceRequestOpts(requestParameters);
+    const response = await this.request(requestOptions, initOverrides);
+
+    return new runtime.JSONApiResponse(response, (jsonValue) =>
+      OperationFromJSON(jsonValue),
+    );
+  }
+
+  /**
+   * Reload the fixed Ocserv service unit
+   */
+  async reloadNodeService(
+    requestParameters: ReloadNodeServiceRequest,
+    initOverrides?: RequestInit | runtime.InitOverrideFunction,
+  ): Promise<Operation> {
+    const response = await this.reloadNodeServiceRaw(
+      requestParameters,
+      initOverrides,
+    );
+    return await response.value();
+  }
+
+  /**
+   * Creates request options for removeNodeIpBan without sending the request
+   */
+  async removeNodeIpBanRequestOpts(
+    requestParameters: RemoveNodeIpBanRequest,
+  ): Promise<runtime.RequestOpts> {
+    if (requestParameters["nodeId"] == null) {
+      throw new runtime.RequiredError(
+        "nodeId",
+        'Required parameter "nodeId" was null or undefined when calling removeNodeIpBan().',
+      );
+    }
+
+    if (requestParameters["ip"] == null) {
+      throw new runtime.RequiredError(
+        "ip",
+        'Required parameter "ip" was null or undefined when calling removeNodeIpBan().',
+      );
+    }
+
+    if (requestParameters["idempotencyKey"] == null) {
+      throw new runtime.RequiredError(
+        "idempotencyKey",
+        'Required parameter "idempotencyKey" was null or undefined when calling removeNodeIpBan().',
+      );
+    }
+
+    if (requestParameters["controlledOperationRequest"] == null) {
+      throw new runtime.RequiredError(
+        "controlledOperationRequest",
+        'Required parameter "controlledOperationRequest" was null or undefined when calling removeNodeIpBan().',
+      );
+    }
+
+    const queryParameters: any = {};
+
+    const headerParameters: runtime.HTTPHeaders = {};
+
+    headerParameters["Content-Type"] = "application/json";
+
+    if (requestParameters["idempotencyKey"] != null) {
+      headerParameters["Idempotency-Key"] = String(
+        requestParameters["idempotencyKey"],
+      );
+    }
+
+    if (requestParameters["ifMatch"] != null) {
+      headerParameters["If-Match"] = String(requestParameters["ifMatch"]);
+    }
+
+    if (this.configuration && this.configuration.accessToken) {
+      const token = this.configuration.accessToken;
+      const tokenString = await token("oidc", []);
+
+      if (tokenString) {
+        headerParameters["Authorization"] = `Bearer ${tokenString}`;
+      }
+    }
+
+    let urlPath = `/nodes/{node_id}/ip-bans/{ip}:remove`;
+    urlPath = urlPath.replace(
+      "{node_id}",
+      encodeURIComponent(String(requestParameters["nodeId"])),
+    );
+    urlPath = urlPath.replace(
+      "{ip}",
+      encodeURIComponent(String(requestParameters["ip"])),
+    );
+
+    return {
+      path: urlPath,
+      method: "POST",
+      headers: headerParameters,
+      query: queryParameters,
+      body: ControlledOperationRequestToJSON(
+        requestParameters["controlledOperationRequest"],
+      ),
+    };
+  }
+
+  /**
+   * Remove one canonical IP address from the Ocserv ban list
+   */
+  async removeNodeIpBanRaw(
+    requestParameters: RemoveNodeIpBanRequest,
+    initOverrides?: RequestInit | runtime.InitOverrideFunction,
+  ): Promise<runtime.ApiResponse<Operation>> {
+    const requestOptions =
+      await this.removeNodeIpBanRequestOpts(requestParameters);
+    const response = await this.request(requestOptions, initOverrides);
+
+    return new runtime.JSONApiResponse(response, (jsonValue) =>
+      OperationFromJSON(jsonValue),
+    );
+  }
+
+  /**
+   * Remove one canonical IP address from the Ocserv ban list
+   */
+  async removeNodeIpBan(
+    requestParameters: RemoveNodeIpBanRequest,
+    initOverrides?: RequestInit | runtime.InitOverrideFunction,
+  ): Promise<Operation> {
+    const response = await this.removeNodeIpBanRaw(
+      requestParameters,
+      initOverrides,
+    );
+    return await response.value();
+  }
+
+  /**
+   * Creates request options for terminateNodeSession without sending the request
+   */
+  async terminateNodeSessionRequestOpts(
+    requestParameters: TerminateNodeSessionRequest,
+  ): Promise<runtime.RequestOpts> {
+    if (requestParameters["nodeId"] == null) {
+      throw new runtime.RequiredError(
+        "nodeId",
+        'Required parameter "nodeId" was null or undefined when calling terminateNodeSession().',
+      );
+    }
+
+    if (requestParameters["sessionId"] == null) {
+      throw new runtime.RequiredError(
+        "sessionId",
+        'Required parameter "sessionId" was null or undefined when calling terminateNodeSession().',
+      );
+    }
+
+    if (requestParameters["idempotencyKey"] == null) {
+      throw new runtime.RequiredError(
+        "idempotencyKey",
+        'Required parameter "idempotencyKey" was null or undefined when calling terminateNodeSession().',
+      );
+    }
+
+    if (requestParameters["controlledOperationRequest"] == null) {
+      throw new runtime.RequiredError(
+        "controlledOperationRequest",
+        'Required parameter "controlledOperationRequest" was null or undefined when calling terminateNodeSession().',
+      );
+    }
+
+    const queryParameters: any = {};
+
+    const headerParameters: runtime.HTTPHeaders = {};
+
+    headerParameters["Content-Type"] = "application/json";
+
+    if (requestParameters["idempotencyKey"] != null) {
+      headerParameters["Idempotency-Key"] = String(
+        requestParameters["idempotencyKey"],
+      );
+    }
+
+    if (requestParameters["ifMatch"] != null) {
+      headerParameters["If-Match"] = String(requestParameters["ifMatch"]);
+    }
+
+    if (this.configuration && this.configuration.accessToken) {
+      const token = this.configuration.accessToken;
+      const tokenString = await token("oidc", []);
+
+      if (tokenString) {
+        headerParameters["Authorization"] = `Bearer ${tokenString}`;
+      }
+    }
+
+    let urlPath = `/nodes/{node_id}/sessions/{session_id}:terminate`;
+    urlPath = urlPath.replace(
+      "{node_id}",
+      encodeURIComponent(String(requestParameters["nodeId"])),
+    );
+    urlPath = urlPath.replace(
+      "{session_id}",
+      encodeURIComponent(String(requestParameters["sessionId"])),
+    );
+
+    return {
+      path: urlPath,
+      method: "POST",
+      headers: headerParameters,
+      query: queryParameters,
+      body: ControlledOperationRequestToJSON(
+        requestParameters["controlledOperationRequest"],
+      ),
+    };
+  }
+
+  /**
+   * Terminate one observed session and invalidate its reconnect cookie
+   */
+  async terminateNodeSessionRaw(
+    requestParameters: TerminateNodeSessionRequest,
+    initOverrides?: RequestInit | runtime.InitOverrideFunction,
+  ): Promise<runtime.ApiResponse<Operation>> {
+    const requestOptions =
+      await this.terminateNodeSessionRequestOpts(requestParameters);
+    const response = await this.request(requestOptions, initOverrides);
+
+    return new runtime.JSONApiResponse(response, (jsonValue) =>
+      OperationFromJSON(jsonValue),
+    );
+  }
+
+  /**
+   * Terminate one observed session and invalidate its reconnect cookie
+   */
+  async terminateNodeSession(
+    requestParameters: TerminateNodeSessionRequest,
+    initOverrides?: RequestInit | runtime.InitOverrideFunction,
+  ): Promise<Operation> {
+    const response = await this.terminateNodeSessionRaw(
       requestParameters,
       initOverrides,
     );

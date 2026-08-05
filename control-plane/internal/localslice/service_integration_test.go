@@ -529,19 +529,36 @@ func computeV1Canonical(nodeID []byte, expectedRevision uint64, payloadKind uint
 	return out
 }
 
-func v1CanonicalPayload(payloadKind uint32, message string) []byte {
+func v1CanonicalPayload(payloadKind uint32, payload v1Payload) []byte {
 	switch payloadKind {
+	case 100, 112:
+		return canonicalFixtureStrings(payload.SessionID, payload.BootID)
+	case 105:
+		return nil
 	case 107: // SyntheticNoop
 		return nil
 	case 108: // SyntheticEcho: u32_be(len(utf8)) || utf8
-		utf8 := []byte(message)
+		utf8 := []byte(payload.Message)
 		out := make([]byte, 4+len(utf8))
 		binary.BigEndian.PutUint32(out[:4], uint32(len(utf8)))
 		copy(out[4:], utf8)
 		return out
+	case 113:
+		return canonicalFixtureStrings(payload.IP)
 	default:
 		panic("unsupported payload_kind in test")
 	}
+}
+
+func canonicalFixtureStrings(values ...string) []byte {
+	var out []byte
+	for _, value := range values {
+		var length [4]byte
+		binary.BigEndian.PutUint32(length[:], uint32(len(value)))
+		out = append(out, length[:]...)
+		out = append(out, value...)
+	}
+	return out
 }
 
 func v1FixturePath(t *testing.T) string {
@@ -565,17 +582,22 @@ func v1FixturePath(t *testing.T) string {
 	return ""
 }
 
+type v1Payload struct {
+	Type      string `json:"type"`
+	Message   string `json:"message"`
+	SessionID string `json:"session_id"`
+	BootID    string `json:"boot_id"`
+	IP        string `json:"ip"`
+}
+
 type v1Vector struct {
-	Name             string `json:"name"`
-	NodeIDHex        string `json:"node_id_hex"`
-	ExpectedRevision uint64 `json:"expected_revision"`
-	PayloadKind      uint64 `json:"payload_kind"`
-	Payload          struct {
-		Type    string `json:"type"`
-		Message string `json:"message"`
-	} `json:"payload"`
-	CanonicalPreimageHex string `json:"canonical_preimage_hex"`
-	ExpectedSHA256       string `json:"expected_sha256"`
+	Name                 string    `json:"name"`
+	NodeIDHex            string    `json:"node_id_hex"`
+	ExpectedRevision     uint64    `json:"expected_revision"`
+	PayloadKind          uint64    `json:"payload_kind"`
+	Payload              v1Payload `json:"payload"`
+	CanonicalPreimageHex string    `json:"canonical_preimage_hex"`
+	ExpectedSHA256       string    `json:"expected_sha256"`
 }
 
 func loadV1Fixture(t *testing.T) []v1Vector {
@@ -599,17 +621,29 @@ func loadV1Fixture(t *testing.T) []v1Vector {
 
 // v1EnvelopeFromVector builds a CommandEnvelope from a fixture vector so the
 // production hash function can be exercised against the golden vectors.
-func v1EnvelopeFromVector(nodeID []byte, expectedRevision uint64, payloadKind uint32, message string) *agentv1.CommandEnvelope {
+func v1EnvelopeFromPayload(nodeID []byte, expectedRevision uint64, payloadKind uint32, payload v1Payload) *agentv1.CommandEnvelope {
 	envelope := &agentv1.CommandEnvelope{NodeId: nodeID, ExpectedRevision: expectedRevision}
 	switch payloadKind {
+	case 100:
+		envelope.Payload = &agentv1.CommandEnvelope_SessionDisconnect{SessionDisconnect: &agentv1.SessionDisconnect{SessionId: payload.SessionID, BootId: payload.BootID}}
+	case 105:
+		envelope.Payload = &agentv1.CommandEnvelope_ServiceReload{ServiceReload: &agentv1.ServiceReload{}}
 	case 107:
 		envelope.Payload = &agentv1.CommandEnvelope_SyntheticNoop{SyntheticNoop: &agentv1.SyntheticNoop{}}
 	case 108:
-		envelope.Payload = &agentv1.CommandEnvelope_SyntheticEcho{SyntheticEcho: &agentv1.SyntheticEcho{Message: message}}
+		envelope.Payload = &agentv1.CommandEnvelope_SyntheticEcho{SyntheticEcho: &agentv1.SyntheticEcho{Message: payload.Message}}
+	case 112:
+		envelope.Payload = &agentv1.CommandEnvelope_SessionTerminate{SessionTerminate: &agentv1.SessionTerminate{SessionId: payload.SessionID, BootId: payload.BootID}}
+	case 113:
+		envelope.Payload = &agentv1.CommandEnvelope_IpBanRemove{IpBanRemove: &agentv1.IpBanRemove{Ip: payload.IP}}
 	default:
 		panic("unsupported payload_kind in test")
 	}
 	return envelope
+}
+
+func v1EnvelopeFromVector(nodeID []byte, expectedRevision uint64, payloadKind uint32, message string) *agentv1.CommandEnvelope {
+	return v1EnvelopeFromPayload(nodeID, expectedRevision, payloadKind, v1Payload{Message: message})
 }
 
 func TestCanonicalSemanticHashV1MatchesSharedFixture(t *testing.T) {
@@ -619,13 +653,13 @@ func TestCanonicalSemanticHashV1MatchesSharedFixture(t *testing.T) {
 			t.Fatalf("%s: decode node_id: %v", vector.Name, err)
 		}
 		// Cross-check: the test-only mirror must agree with the fixture.
-		payload := v1CanonicalPayload(uint32(vector.PayloadKind), vector.Payload.Message)
+		payload := v1CanonicalPayload(uint32(vector.PayloadKind), vector.Payload)
 		mirror := computeV1Canonical(nodeID, vector.ExpectedRevision, uint32(vector.PayloadKind), payload)
 		if hex.EncodeToString(mirror[:]) != vector.ExpectedSHA256 {
 			t.Fatalf("%s: mirror digest mismatch\ngot  %x\nwant %s", vector.Name, mirror, vector.ExpectedSHA256)
 		}
 		// Production function must agree with the mirror.
-		envelope := v1EnvelopeFromVector(nodeID, vector.ExpectedRevision, uint32(vector.PayloadKind), vector.Payload.Message)
+		envelope := v1EnvelopeFromPayload(nodeID, vector.ExpectedRevision, uint32(vector.PayloadKind), vector.Payload)
 		got, gErr := semanticpayload.HashV1(envelope)
 		if gErr != nil {
 			t.Fatalf("%s: production hash error: %v", vector.Name, gErr)

@@ -57,6 +57,11 @@ type Session struct {
 	BytesOut    int64     `json:"bytes_out"`
 }
 
+type IPBan struct {
+	IP               string  `json:"ip"`
+	SecondsRemaining *uint64 `json:"seconds_remaining,omitempty"`
+}
+
 type Sample struct {
 	SampledAt time.Time `json:"sampled_at"`
 	Metric    string    `json:"metric"`
@@ -78,6 +83,7 @@ type Batch struct {
 	Kind     string          `json:"kind"`
 	Snapshot Snapshot        `json:"snapshot"`
 	Sessions []Session       `json:"sessions"`
+	IPBans   []IPBan         `json:"ip_bans"`
 	Samples  []Sample        `json:"samples"`
 	Security []SecurityEvent `json:"security_events"`
 }
@@ -85,6 +91,7 @@ type Batch struct {
 type Node struct {
 	ID              string          `json:"id"`
 	Name            string          `json:"name"`
+	Version         int64           `json:"version"`
 	TrustStatus     string          `json:"trust_status"`
 	ConnectionState string          `json:"connection_state"`
 	Freshness       string          `json:"freshness"`
@@ -109,6 +116,26 @@ type HistoryPoint struct {
 	Minimum float64   `json:"minimum"`
 	Maximum float64   `json:"maximum"`
 	Average float64   `json:"average"`
+}
+
+func (s *Service) ListIPBans(ctx context.Context, nodeID uuid.UUID, limit int) ([]IPBan, error) {
+	if nodeID == uuid.Nil || limit < 1 || limit > 200 {
+		return nil, errors.New("IP ban query is invalid")
+	}
+	rows, err := s.pool.Query(ctx, `SELECT host(ip),seconds_remaining FROM node_ip_bans WHERE node_id=$1 ORDER BY ip LIMIT $2`, nodeID, limit)
+	if err != nil {
+		return nil, fmt.Errorf("list node IP bans: %w", err)
+	}
+	defer rows.Close()
+	result := []IPBan{}
+	for rows.Next() {
+		var ban IPBan
+		if err := rows.Scan(&ban.IP, &ban.SecondsRemaining); err != nil {
+			return nil, err
+		}
+		result = append(result, ban)
+	}
+	return result, rows.Err()
 }
 
 type Service struct {
@@ -157,6 +184,9 @@ func (s *Service) IngestWire(ctx context.Context, payload []byte) (bool, error) 
 			return false, errors.New("session byte count invalid")
 		}
 		batch.Sessions = append(batch.Sessions, Session{ID: item.GetSessionId(), Username: item.GetUsername(), ClientIP: item.GetClientIp(), ConnectedAt: item.GetConnectedAt().AsTime(), BytesIn: int64(item.GetBytesIn()), BytesOut: int64(item.GetBytesOut())})
+	}
+	for _, item := range wire.GetIpBans() {
+		batch.IPBans = append(batch.IPBans, IPBan{IP: item.GetIp(), SecondsRemaining: item.SecondsRemaining})
 	}
 	for _, item := range wire.GetSamples() {
 		if item.GetSampledAt() == nil || item.GetSampledAt().CheckValid() != nil {
@@ -228,6 +258,14 @@ func (s *Service) Ingest(ctx context.Context, batch Batch) (bool, error) {
 				return false, fmt.Errorf("insert observed session: %w", err)
 			}
 		}
+		if _, err := tx.Exec(ctx, `DELETE FROM node_ip_bans WHERE node_id=$1`, batch.NodeID); err != nil {
+			return false, err
+		}
+		for _, ban := range batch.IPBans {
+			if _, err := tx.Exec(ctx, `INSERT INTO node_ip_bans (node_id,ip,seconds_remaining,observed_at) VALUES ($1,$2,$3,$4)`, batch.NodeID, ban.IP, ban.SecondsRemaining, batch.Snapshot.ObservedAt); err != nil {
+				return false, fmt.Errorf("insert observed IP ban: %w", err)
+			}
+		}
 		if batch.Snapshot.ObservedAt.After(s.now().Add(-OfflineAfter)) {
 			if _, err := tx.Exec(ctx, `UPDATE nodes SET status='active',updated_at=GREATEST(updated_at,$2),version=version+1 WHERE id=$1 AND status='offline'`, batch.NodeID, batch.Snapshot.ObservedAt); err != nil {
 				return false, err
@@ -273,8 +311,14 @@ func validateBatch(batch Batch, now time.Time) error {
 			return errors.New("observed documents must be JSON objects")
 		}
 	}
-	if len(batch.Sessions) > 10000 || len(batch.Samples) > 8192 || len(batch.Security) > 1024 {
+	if len(batch.Sessions) > 10000 || len(batch.IPBans) > 4096 || len(batch.Samples) > 8192 || len(batch.Security) > 1024 {
 		return errors.New("telemetry collection count exceeds limit")
+	}
+	for _, ban := range batch.IPBans {
+		parsed := net.ParseIP(ban.IP)
+		if parsed == nil || parsed.String() != ban.IP {
+			return errors.New("IP ban observation is invalid")
+		}
 	}
 	for _, session := range batch.Sessions {
 		if session.ID == "" || len(session.ID) > 256 || session.Username == "" || len(session.Username) > 256 || net.ParseIP(session.ClientIP) == nil || session.BytesIn < 0 || session.BytesOut < 0 || session.ConnectedAt.IsZero() {
@@ -307,7 +351,7 @@ func (s *Service) ListNodes(ctx context.Context, after uuid.UUID, limit int) ([]
 	if after != uuid.Nil {
 		cursor = after
 	}
-	rows, err := s.pool.Query(ctx, `SELECT n.id::text,n.name,n.status,o.observed_at,o.last_heartbeat_at,o.boot_id,o.agent_instance_id::text,o.agent_version,o.ocserv_version,o.os_release,o.ocserv,o.system,o.path,o.dropped_security,o.dropped_health,o.dropped_aggregate,o.dropped_raw,(SELECT count(*) FROM node_sessions ss WHERE ss.node_id=n.id) FROM nodes n LEFT JOIN node_observed_snapshots o ON o.node_id=n.id WHERE ($1::uuid IS NULL OR n.id>$1) ORDER BY n.id LIMIT $2`, cursor, limit+1)
+	rows, err := s.pool.Query(ctx, `SELECT n.id::text,n.name,n.version,n.status,o.observed_at,o.last_heartbeat_at,o.boot_id,o.agent_instance_id::text,o.agent_version,o.ocserv_version,o.os_release,o.ocserv,o.system,o.path,o.dropped_security,o.dropped_health,o.dropped_aggregate,o.dropped_raw,(SELECT count(*) FROM node_sessions ss WHERE ss.node_id=n.id) FROM nodes n LEFT JOIN node_observed_snapshots o ON o.node_id=n.id WHERE ($1::uuid IS NULL OR n.id>$1) ORDER BY n.id LIMIT $2`, cursor, limit+1)
 	if err != nil {
 		return nil, false, fmt.Errorf("list nodes: %w", err)
 	}
@@ -331,7 +375,7 @@ func (s *Service) ListNodes(ctx context.Context, after uuid.UUID, limit int) ([]
 }
 
 func (s *Service) GetNode(ctx context.Context, id uuid.UUID) (Node, error) {
-	row := s.pool.QueryRow(ctx, `SELECT n.id::text,n.name,n.status,o.observed_at,o.last_heartbeat_at,o.boot_id,o.agent_instance_id::text,o.agent_version,o.ocserv_version,o.os_release,o.ocserv,o.system,o.path,o.dropped_security,o.dropped_health,o.dropped_aggregate,o.dropped_raw,(SELECT count(*) FROM node_sessions ss WHERE ss.node_id=n.id) FROM nodes n LEFT JOIN node_observed_snapshots o ON o.node_id=n.id WHERE n.id=$1`, id)
+	row := s.pool.QueryRow(ctx, `SELECT n.id::text,n.name,n.version,n.status,o.observed_at,o.last_heartbeat_at,o.boot_id,o.agent_instance_id::text,o.agent_version,o.ocserv_version,o.os_release,o.ocserv,o.system,o.path,o.dropped_security,o.dropped_health,o.dropped_aggregate,o.dropped_raw,(SELECT count(*) FROM node_sessions ss WHERE ss.node_id=n.id) FROM nodes n LEFT JOIN node_observed_snapshots o ON o.node_id=n.id WHERE n.id=$1`, id)
 	return scanNode(row, s.now())
 }
 
@@ -343,7 +387,7 @@ func scanNode(row scanner, now time.Time) (Node, error) {
 	var boot, instance, agent, ocserv, os *string
 	var ocservJSON, systemJSON, pathJSON []byte
 	var ds, dh, da, dr *int64
-	if err := row.Scan(&n.ID, &n.Name, &n.TrustStatus, &observed, &heartbeat, &boot, &instance, &agent, &ocserv, &os, &ocservJSON, &systemJSON, &pathJSON, &ds, &dh, &da, &dr, &n.SessionCount); err != nil {
+	if err := row.Scan(&n.ID, &n.Name, &n.Version, &n.TrustStatus, &observed, &heartbeat, &boot, &instance, &agent, &ocserv, &os, &ocservJSON, &systemJSON, &pathJSON, &ds, &dh, &da, &dr, &n.SessionCount); err != nil {
 		return Node{}, err
 	}
 	n.ObservedAt = observed

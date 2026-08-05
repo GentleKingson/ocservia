@@ -214,3 +214,19 @@ func TestSyntheticCommandRequiresAuthentication(t *testing.T) {
 		t.Fatalf("status = %d", response.Code)
 	}
 }
+
+func TestControlledOperationRoutesRequireAuthentication(t *testing.T) {
+	server := New("127.0.0.1:0", nil, BuildInfo{}, slog.New(slog.NewTextHandler(io.Discard, nil)), 1024, time.Second, false, "", 1)
+	for _, path := range []string{
+		"/api/v1/nodes/019fc0a4-6d92-765c-a8a1-4af556614cc3/sessions/42:disconnect",
+		"/api/v1/nodes/019fc0a4-6d92-765c-a8a1-4af556614cc3/sessions/42:terminate",
+		"/api/v1/nodes/019fc0a4-6d92-765c-a8a1-4af556614cc3/ip-bans/192.0.2.9:remove",
+		"/api/v1/nodes/019fc0a4-6d92-765c-a8a1-4af556614cc3/service:reload",
+	} {
+		response := httptest.NewRecorder()
+		server.http.Handler.ServeHTTP(response, httptest.NewRequest(http.MethodPost, path, nil))
+		if response.Code != http.StatusUnauthorized {
+			t.Fatalf("POST %s status = %d", path, response.Code)
+		}
+	}
+}

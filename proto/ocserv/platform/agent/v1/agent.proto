@@ -147,6 +147,11 @@ message SessionObservation {
   uint64 bytes_out = 6;
 }
 
+message IpBanObservation {
+  string ip = 1;
+  optional uint64 seconds_remaining = 2;
+}
+
 message MetricSample {
   google.protobuf.Timestamp sampled_at = 1;
   string metric = 2;
@@ -170,6 +175,7 @@ message TelemetryBatch {
   repeated SessionObservation sessions = 6;
   repeated MetricSample samples = 7;
   repeated SecurityObservation security_events = 8;
+  repeated IpBanObservation ip_bans = 9;
 }
 
 message CommandEnvelope {
@@ -198,6 +204,8 @@ message CommandEnvelope {
     SimulationProbe simulation_probe = 106;
     SyntheticNoop synthetic_noop = 107;
     SyntheticEcho synthetic_echo = 108;
+    SessionTerminate session_terminate = 112;
+    IpBanRemove ip_ban_remove = 113;
   }
   CommandDeliveryMode delivery_mode = 109;
   SemanticPayloadHashVersion semantic_payload_hash_version = 110;
@@ -206,6 +214,16 @@ message CommandEnvelope {
 
 message SessionDisconnect {
   string session_id = 1;
+  string boot_id = 2;
+}
+
+message SessionTerminate {
+  string session_id = 1;
+  string boot_id = 2;
+}
+
+message IpBanRemove {
+  string ip = 1;
 }
 
 message UserCreate {

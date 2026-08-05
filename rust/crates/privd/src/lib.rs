@@ -1,4 +1,4 @@
-//! AF_UNIX-only privileged helper exposing fixed read-only Ocserv operations.
+//! AF_UNIX-only privileged helper exposing fixed, typed Ocserv operations.
 
 #![forbid(unsafe_code)]
 
@@ -230,6 +230,34 @@ async fn execute(
                 .config_fingerprint()
                 .await
                 .map(privd_response::Result::ConfigFingerprint),
+        ),
+        privd_request::Operation::SessionDisconnect(request) => (
+            "session_disconnect",
+            adapter
+                .session_disconnect(&request.session_id, &request.boot_id)
+                .await
+                .map(privd_response::Result::Mutation),
+        ),
+        privd_request::Operation::SessionTerminate(request) => (
+            "session_terminate",
+            adapter
+                .session_terminate(&request.session_id, &request.boot_id)
+                .await
+                .map(privd_response::Result::Mutation),
+        ),
+        privd_request::Operation::IpBanRemove(request) => (
+            "ip_ban_remove",
+            adapter
+                .ip_ban_remove(&request.ip)
+                .await
+                .map(privd_response::Result::Mutation),
+        ),
+        privd_request::Operation::ServiceReload(_) => (
+            "service_reload",
+            adapter
+                .service_reload()
+                .await
+                .map(privd_response::Result::Mutation),
         ),
     };
     let result =

@@ -5,6 +5,8 @@ import (
 	"crypto/sha256"
 	"errors"
 	"fmt"
+	"net"
+	"strconv"
 	"strings"
 	"time"
 
@@ -23,13 +25,19 @@ var (
 	ErrIdempotencyConflict = errors.New("idempotency key was reused with different input")
 	ErrStaleRevision       = errors.New("resource revision is stale")
 	ErrNodeUnavailable     = errors.New("node is unavailable")
+	ErrCapabilityMissing   = errors.New("node capability is unavailable")
+	ErrTargetNotObserved   = errors.New("target is not present in observed state")
 )
 
 type SyntheticKind string
 
 const (
-	SyntheticNoop SyntheticKind = "noop"
-	SyntheticEcho SyntheticKind = "echo"
+	SyntheticNoop     SyntheticKind = "noop"
+	SyntheticEcho     SyntheticKind = "echo"
+	SessionDisconnect SyntheticKind = "session_disconnect"
+	SessionTerminate  SyntheticKind = "session_terminate"
+	IPBanRemove       SyntheticKind = "ip_ban_remove"
+	ServiceReload     SyntheticKind = "service_reload"
 )
 
 type CreateRequest struct {
@@ -38,6 +46,12 @@ type CreateRequest struct {
 	ExpectedVersion  int64
 	Kind             SyntheticKind
 	Message          string
+	SessionID        string
+	BootID           string
+	IP               string
+	ActorID          string
+	Action           string
+	Reason           string
 	SupersedePending bool
 	TTL              time.Duration
 	RequestID        string
@@ -128,6 +142,33 @@ func (s *Service) CreateSynthetic(ctx context.Context, request CreateRequest) (O
 	if nodeVersion != request.ExpectedVersion {
 		return Operation{}, false, ErrStaleRevision
 	}
+	if capability := capabilityFor(request.Kind); capability != "" {
+		var approved bool
+		if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM node_capabilities WHERE node_id=$1 AND capability=$2 AND approved=true)`, request.NodeID, capability).Scan(&approved); err != nil {
+			return Operation{}, false, fmt.Errorf("check operation capability: %w", err)
+		}
+		if !approved {
+			return Operation{}, false, ErrCapabilityMissing
+		}
+	}
+	if request.Kind == SessionDisconnect || request.Kind == SessionTerminate {
+		var present bool
+		if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM node_sessions s JOIN node_observed_snapshots o ON o.node_id=s.node_id WHERE s.node_id=$1 AND s.session_id=$2 AND o.boot_id=$3)`, request.NodeID, request.SessionID, request.BootID).Scan(&present); err != nil {
+			return Operation{}, false, fmt.Errorf("check observed session: %w", err)
+		}
+		if !present {
+			return Operation{}, false, ErrTargetNotObserved
+		}
+	}
+	if request.Kind == IPBanRemove {
+		var present bool
+		if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM node_ip_bans WHERE node_id=$1 AND ip=$2::inet)`, request.NodeID, request.IP).Scan(&present); err != nil {
+			return Operation{}, false, fmt.Errorf("check observed IP ban: %w", err)
+		}
+		if !present {
+			return Operation{}, false, ErrTargetNotObserved
+		}
+	}
 
 	operationID, commandID, outboxID, auditID, eventID, err := newIDs(5)
 	if err != nil {
@@ -163,7 +204,17 @@ func (s *Service) CreateSynthetic(ctx context.Context, request CreateRequest) (O
 	if _, err := tx.Exec(ctx, `INSERT INTO operation_events (id, operation_id, state, occurred_at) VALUES ($1,$2,'queued',$3)`, eventID, operationID, now); err != nil {
 		return Operation{}, false, fmt.Errorf("insert operation event: %w", err)
 	}
-	if err := audit.AppendChain(ctx, tx, audit.ChainRecord{EventID: auditID, WorkspaceID: workspaceID, ActorType: "development_stub", ActorID: "developer", Action: "synthetic.command", ResourceType: "operation", ResourceID: operationID, RequestID: request.RequestID, TraceID: traceID(request.Traceparent), Reason: "side-effect-free delivery validation", At: now}); err != nil {
+	actorID, action, reason := request.ActorID, request.Action, request.Reason
+	if actorID == "" {
+		actorID = "developer"
+	}
+	if action == "" {
+		action = "synthetic.command"
+	}
+	if reason == "" {
+		reason = "side-effect-free delivery validation"
+	}
+	if err := audit.AppendChain(ctx, tx, audit.ChainRecord{EventID: auditID, WorkspaceID: workspaceID, ActorType: "user", ActorID: actorID, Action: action, ResourceType: "operation", ResourceID: operationID, RequestID: request.RequestID, TraceID: traceID(request.Traceparent), Reason: reason, At: now}); err != nil {
 		return Operation{}, false, fmt.Errorf("append operation audit intent: %w", err)
 	}
 	if _, err := tx.Exec(ctx, `SELECT pg_notify('ocservia_outbox', $1)`, outboxID.String()); err != nil {
@@ -427,17 +478,36 @@ func validateCreate(r CreateRequest) error {
 	if len(r.IdempotencyKey) < 1 || len(r.IdempotencyKey) > 128 || strings.TrimSpace(r.IdempotencyKey) != r.IdempotencyKey {
 		return ErrInvalidRequest
 	}
-	if r.Kind != SyntheticNoop && r.Kind != SyntheticEcho {
+	if r.Kind != SyntheticNoop && r.Kind != SyntheticEcho && r.Kind != SessionDisconnect && r.Kind != SessionTerminate && r.Kind != IPBanRemove && r.Kind != ServiceReload {
 		return ErrInvalidRequest
 	}
 	if r.Kind == SyntheticNoop && r.Message != "" || len(r.Message) > 4096 {
+		return ErrInvalidRequest
+	}
+	if r.Kind == SessionDisconnect || r.Kind == SessionTerminate {
+		sessionID, err := strconv.ParseUint(r.SessionID, 10, 64)
+		if err != nil || sessionID == 0 || strconv.FormatUint(sessionID, 10) != r.SessionID {
+			return ErrInvalidRequest
+		}
+		bootID, err := uuid.Parse(r.BootID)
+		if err != nil || bootID == uuid.Nil {
+			return ErrInvalidRequest
+		}
+	}
+	if r.Kind == IPBanRemove {
+		parsed := net.ParseIP(r.IP)
+		if parsed == nil || parsed.String() != r.IP {
+			return ErrInvalidRequest
+		}
+	}
+	if (r.Kind == SessionDisconnect || r.Kind == SessionTerminate || r.Kind == IPBanRemove || r.Kind == ServiceReload) && (r.Action == "" || r.Reason == "" || len(r.Reason) > 512) {
 		return ErrInvalidRequest
 	}
 	return nil
 }
 
 func requestHash(r CreateRequest) [32]byte {
-	return sha256.Sum256([]byte(fmt.Sprintf("%s\x00%s\x00%d\x00%t\x00%d", r.Kind, r.Message, r.ExpectedVersion, r.SupersedePending, r.TTL/time.Second)))
+	return sha256.Sum256([]byte(fmt.Sprintf("%s\x00%s\x00%s\x00%s\x00%s\x00%d\x00%t\x00%d\x00%s", r.Kind, r.Message, r.SessionID, r.BootID, r.IP, r.ExpectedVersion, r.SupersedePending, r.TTL/time.Second, r.Reason)))
 }
 
 func marshalEnvelope(r CreateRequest, operationID, commandID uuid.UUID, now, expires time.Time) ([]byte, string, error) {
@@ -445,13 +515,33 @@ func marshalEnvelope(r CreateRequest, operationID, commandID uuid.UUID, now, exp
 	if err != nil {
 		return nil, "", err
 	}
-	envelope := &agentv1.CommandEnvelope{ProtocolVersion: "1.0", MessageId: messageID[:], CommandId: commandID[:], IdempotencyKey: operationID[:], NodeId: r.NodeID[:], Sequence: 1, IssuedAt: timestamppb.New(now), ExpiresAt: timestamppb.New(expires), ExpectedRevision: uint64(r.ExpectedVersion), Traceparent: r.Traceparent, ActorId: "developer", Reason: "side-effect-free delivery validation", DeliveryMode: agentv1.CommandDeliveryMode_COMMAND_DELIVERY_MODE_EXECUTE_OR_REPLAY}
+	actorID, reason := r.ActorID, r.Reason
+	if actorID == "" {
+		actorID = "developer"
+	}
+	if reason == "" {
+		reason = "side-effect-free delivery validation"
+	}
+	envelope := &agentv1.CommandEnvelope{ProtocolVersion: "1.0", MessageId: messageID[:], CommandId: commandID[:], IdempotencyKey: operationID[:], NodeId: r.NodeID[:], Sequence: 1, IssuedAt: timestamppb.New(now), ExpiresAt: timestamppb.New(expires), ExpectedRevision: uint64(r.ExpectedVersion), Traceparent: r.Traceparent, ActorId: actorID, Reason: reason, DeliveryMode: agentv1.CommandDeliveryMode_COMMAND_DELIVERY_MODE_EXECUTE_OR_REPLAY}
 	payloadType := "synthetic_noop"
-	if r.Kind == SyntheticEcho {
+	switch r.Kind {
+	case SyntheticEcho:
 		payloadType = "synthetic_echo"
 		envelope.Payload = &agentv1.CommandEnvelope_SyntheticEcho{SyntheticEcho: &agentv1.SyntheticEcho{Message: r.Message}}
-	} else {
+	case SyntheticNoop:
 		envelope.Payload = &agentv1.CommandEnvelope_SyntheticNoop{SyntheticNoop: &agentv1.SyntheticNoop{}}
+	case SessionDisconnect:
+		payloadType = "session_disconnect"
+		envelope.Payload = &agentv1.CommandEnvelope_SessionDisconnect{SessionDisconnect: &agentv1.SessionDisconnect{SessionId: r.SessionID, BootId: r.BootID}}
+	case SessionTerminate:
+		payloadType = "session_terminate"
+		envelope.Payload = &agentv1.CommandEnvelope_SessionTerminate{SessionTerminate: &agentv1.SessionTerminate{SessionId: r.SessionID, BootId: r.BootID}}
+	case IPBanRemove:
+		payloadType = "ip_ban_remove"
+		envelope.Payload = &agentv1.CommandEnvelope_IpBanRemove{IpBanRemove: &agentv1.IpBanRemove{Ip: r.IP}}
+	case ServiceReload:
+		payloadType = "service_reload"
+		envelope.Payload = &agentv1.CommandEnvelope_ServiceReload{ServiceReload: &agentv1.ServiceReload{}}
 	}
 	if err := semanticpayload.PopulateV1(envelope); err != nil {
 		return nil, "", fmt.Errorf("compute semantic payload hash: %w", err)
@@ -461,6 +551,21 @@ func marshalEnvelope(r CreateRequest, operationID, commandID uuid.UUID, now, exp
 		return nil, "", fmt.Errorf("marshal typed command: %w", err)
 	}
 	return data, payloadType, nil
+}
+
+func capabilityFor(kind SyntheticKind) string {
+	switch kind {
+	case SessionDisconnect:
+		return "ocserv.session.disconnect"
+	case SessionTerminate:
+		return "ocserv.session.terminate"
+	case IPBanRemove:
+		return "ocserv.ip_ban.remove"
+	case ServiceReload:
+		return "ocserv.service.reload"
+	default:
+		return ""
+	}
 }
 
 func findIdempotent(ctx context.Context, tx pgx.Tx, workspaceID uuid.UUID, key string, hash []byte) (Operation, bool, error) {

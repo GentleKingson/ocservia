@@ -448,9 +448,144 @@ h1 {
 .session-list > div {
   display: grid;
   grid-template-columns: 1fr auto;
+  align-items: center;
   gap: 8px;
   padding: 8px 0;
   font-size: 11px;
+}
+.session-identity {
+  min-width: 0;
+  display: grid;
+  gap: 2px;
+}
+.session-actions {
+  display: flex;
+  gap: 5px;
+}
+.session-actions button,
+.node-actions button {
+  min-width: 30px;
+  height: 30px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 0 8px;
+  color: #35443f;
+  background: #fff;
+  border: 1px solid #ced8d4;
+  border-radius: 5px;
+  cursor: pointer;
+}
+.session-actions button.danger {
+  color: #9f302d;
+}
+.session-actions button:disabled,
+.node-actions button:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+.node-actions {
+  padding: 12px 18px 0;
+}
+.operation-status {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  margin: 12px 18px 0;
+  padding: 9px 10px;
+  color: #66746f;
+  background: #f4f7f5;
+  border: 1px solid #dce3e0;
+  border-radius: 5px;
+  font-size: 12px;
+}
+.operation-status strong.succeeded {
+  color: #176d47;
+}
+.operation-status strong.failed,
+.operation-status strong.unknown,
+.operation-status strong.expired,
+.operation-status strong.drifted {
+  color: #a33d37;
+}
+.operation-error {
+  margin: 10px 18px 0;
+  color: #a33d37;
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+.ban-list {
+  padding-top: 0;
+}
+.dialog-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 20;
+  display: grid;
+  place-items: center;
+  padding: 20px;
+  background: rgb(20 28 25 / 48%);
+}
+.operation-dialog {
+  width: min(420px, 100%);
+  display: grid;
+  gap: 12px;
+  padding: 20px;
+  background: #fff;
+  border: 1px solid #cbd5d1;
+  border-radius: 7px;
+  box-shadow: 0 18px 45px rgb(16 24 21 / 24%);
+}
+.operation-dialog header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+}
+.operation-dialog h2 {
+  margin: 0;
+  font-size: 18px;
+}
+.operation-dialog code {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.operation-dialog label {
+  color: #5d6b66;
+  font-size: 12px;
+  font-weight: 650;
+}
+.operation-dialog textarea {
+  width: 100%;
+  min-height: 88px;
+  resize: vertical;
+  padding: 9px;
+  border: 1px solid #bac7c2;
+  border-radius: 5px;
+  font: inherit;
+}
+.operation-dialog footer {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+.operation-dialog footer button {
+  min-height: 34px;
+  padding: 0 13px;
+  border: 1px solid #bdc9c4;
+  border-radius: 5px;
+  background: #fff;
+  cursor: pointer;
+}
+.operation-dialog footer button.primary {
+  color: #fff;
+  background: #176d47;
+  border-color: #176d47;
+}
+.operation-dialog footer button:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
 }
 .session-list > div span,
 .session-list p {

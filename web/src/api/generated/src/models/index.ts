@@ -2,12 +2,15 @@
 /* eslint-disable */
 export * from "./BuildInfo";
 export * from "./ConnectionPathState";
+export * from "./ControlledOperationRequest";
 export * from "./DevelopmentRuntime";
 export * from "./DropCounters";
 export * from "./EnrollmentToken";
 export * from "./EnrollmentTokenRequest";
 export * from "./Health";
 export * from "./NodeApproval";
+export * from "./NodeIpBan";
+export * from "./NodeIpBanPage";
 export * from "./NodeObservedState";
 export * from "./NodePage";
 export * from "./NodeRevocation";

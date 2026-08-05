@@ -1,13 +1,41 @@
-import type { NodeObservedState, NodeSession } from "@ocservia/api-client";
+import type {
+  NodeIpBan,
+  NodeObservedState,
+  NodeSession,
+  Operation,
+} from "@ocservia/api-client";
 import { defineStore } from "pinia";
 import { computed, onScopeDispose, ref } from "vue";
 
-import { getNode, listNodes, listNodeSessions } from "../api/client";
+import {
+  disconnectSession,
+  getNode,
+  getOperation,
+  listNodeIpBans,
+  listNodes,
+  listNodeSessions,
+  reloadService,
+  removeIpBan,
+  terminateSession,
+} from "../api/client";
+
+const terminalStates = new Set([
+  "succeeded",
+  "failed",
+  "unknown",
+  "expired",
+  "rolled_back",
+  "drifted",
+  "superseded",
+]);
 
 export const useFleetStore = defineStore("fleet", () => {
   const nodes = ref<NodeObservedState[]>([]);
   const selected = ref<NodeObservedState>();
   const sessions = ref<NodeSession[]>([]);
+  const ipBans = ref<NodeIpBan[]>([]);
+  const latestOperation = ref<Operation>();
+  const operationError = ref("");
   const loading = ref(false);
   const unavailable = ref(false);
   let source: EventSource | undefined;
@@ -56,10 +84,55 @@ export const useFleetStore = defineStore("fleet", () => {
       } while (cursor);
       selected.value = node;
       sessions.value = rebuiltSessions;
+      ipBans.value = (await listNodeIpBans(nodeId)).items;
       unavailable.value = false;
     } catch {
       unavailable.value = true;
     }
+  }
+
+  async function runOperation(
+    create: (node: NodeObservedState) => Promise<Operation>,
+  ): Promise<void> {
+    if (
+      !selected.value ||
+      (latestOperation.value &&
+        !terminalStates.has(latestOperation.value.state))
+    )
+      return;
+    operationError.value = "";
+    try {
+      latestOperation.value = await create(selected.value);
+      while (!terminalStates.has(latestOperation.value.state)) {
+        await new Promise((resolve) => setTimeout(resolve, 750));
+        latestOperation.value = await getOperation(latestOperation.value.id);
+      }
+      if (latestOperation.value.state === "succeeded") {
+        await select(selected.value.id);
+      }
+    } catch (error) {
+      operationError.value =
+        error instanceof Error ? error.message : "Operation failed";
+    }
+  }
+
+  async function disconnectSessionAction(
+    sessionId: string,
+    reason: string,
+  ): Promise<void> {
+    await runOperation((node) => disconnectSession(node, sessionId, reason));
+  }
+
+  async function terminate(sessionId: string, reason: string): Promise<void> {
+    await runOperation((node) => terminateSession(node, sessionId, reason));
+  }
+
+  async function unban(ip: string, reason: string): Promise<void> {
+    await runOperation((node) => removeIpBan(node, ip, reason));
+  }
+
+  async function reload(reason: string): Promise<void> {
+    await runOperation((node) => reloadService(node, reason));
   }
 
   function connect(): void {
@@ -83,6 +156,9 @@ export const useFleetStore = defineStore("fleet", () => {
     nodes,
     selected,
     sessions,
+    ipBans,
+    latestOperation,
+    operationError,
     loading,
     unavailable,
     online,
@@ -92,5 +168,9 @@ export const useFleetStore = defineStore("fleet", () => {
     select,
     connect,
     disconnect,
+    disconnectSession: disconnectSessionAction,
+    terminateSession: terminate,
+    removeIpBan: unban,
+    reloadService: reload,
   };
 });

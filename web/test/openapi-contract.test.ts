@@ -6,6 +6,7 @@ import { parse } from "yaml";
 
 interface OpenApiDocument {
   openapi?: unknown;
+  paths?: Record<string, Record<string, unknown>>;
   components?: {
     securitySchemes?: {
       oidc?: { type?: unknown; scheme?: unknown };
@@ -48,5 +49,25 @@ describe("OpenAPI invariants", () => {
       type: "http",
       scheme: "bearer",
     });
+  });
+
+  it("publishes only the four typed controlled operation routes", async () => {
+    const source = await readFile(
+      resolve(import.meta.dirname, "../../openapi/openapi.yaml"),
+      "utf8",
+    );
+    const document = parse(source) as OpenApiDocument;
+
+    for (const path of [
+      "/nodes/{node_id}/sessions/{session_id}:disconnect",
+      "/nodes/{node_id}/sessions/{session_id}:terminate",
+      "/nodes/{node_id}/ip-bans/{ip}:remove",
+      "/nodes/{node_id}/service:reload",
+    ]) {
+      expect(document.paths?.[path]?.post).toBeDefined();
+    }
+    expect(source).not.toMatch(
+      /shell|docker\.sock|systemctl_command|occtl_command/,
+    );
   });
 });

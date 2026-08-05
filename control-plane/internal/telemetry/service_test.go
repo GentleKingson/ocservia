@@ -16,7 +16,17 @@ func testBatch(nodeID uuid.UUID, sequence uint64, observed time.Time) Batch {
 		ID: uuid.Must(uuid.NewV7()), NodeID: nodeID, Sequence: sequence, Kind: "current_health",
 		Snapshot: Snapshot{ObservedAt: observed, BootID: "boot-a", AgentInstance: uuid.Must(uuid.NewV7()), AgentVersion: "0.1.0", OcservVersion: "1.3.0", OSRelease: "debian", Ocserv: json.RawMessage(`{"active_state":"active"}`), System: json.RawMessage(`{"memory_used_bytes":42}`), Path: json.RawMessage(`{"mode":"direct","rtt_ms":12}`)},
 		Sessions: []Session{{ID: "session-a", Username: "alice", ClientIP: "192.0.2.1", ConnectedAt: observed.Add(-time.Minute), BytesIn: 10, BytesOut: 20}},
+		IPBans:   []IPBan{{IP: "192.0.2.9"}},
 		Samples:  []Sample{{SampledAt: observed, Metric: "connection_rtt_ms", Value: 12}},
+	}
+}
+
+func TestValidateBatchRejectsNonCanonicalIPBan(t *testing.T) {
+	now := time.Now().UTC()
+	batch := testBatch(uuid.Must(uuid.NewV7()), 1, now)
+	batch.IPBans[0].IP = "2001:0db8::1"
+	if err := validateBatch(batch, now); err == nil {
+		t.Fatal("non-canonical IP ban accepted")
 	}
 }
 
@@ -83,6 +93,10 @@ func TestIngestOrderingRollupOfflineAndRecoveryIntegration(t *testing.T) {
 	}
 	if node.OcservVersion != "1.3.0" || node.SessionCount != 1 || node.Freshness != "fresh" {
 		t.Fatalf("unexpected current node: %#v", node)
+	}
+	bans, err := service.ListIPBans(ctx, nodeID, 200)
+	if err != nil || len(bans) != 1 || bans[0].IP != "192.0.2.9" {
+		t.Fatalf("unexpected current IP bans: %#v %v", bans, err)
 	}
 	if err := service.Maintain(ctx); err != nil {
 		t.Fatal(err)

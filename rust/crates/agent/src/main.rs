@@ -7,16 +7,20 @@ use std::time::{Duration, SystemTime};
 use iroh::endpoint::{QuicTransportConfig, RelayMode, VarInt, presets};
 use iroh::{Endpoint, EndpointAddr, EndpointId};
 use ocservia_agent::{
-    CommandContext, CommandError, CommandExecutor, MAX_COMMAND_BYTES, MAX_WRITE_QUEUE, PrivdClient,
+    CommandContext, CommandError, CommandExecutor, ExternalPreparation, MAX_COMMAND_BYTES,
+    MAX_WRITE_QUEUE, PrivdClient,
 };
-use ocservia_agent_protocol::{PrivdResponse, privd_response};
+use ocservia_agent_protocol::{
+    ErrorKind, IpBanRemoveRequest, PrivdResponse, ServiceReloadRequest, SessionMutationRequest,
+    privd_request, privd_response,
+};
 use ocservia_command_journal::{CommandRecord, CommandState, Journal, TelemetryInsert};
 use ocservia_contracts::decode_strict_command_envelope;
 use ocservia_contracts::generated::ocserv::platform::agent::v1::{
-    AgentEvent, AgentEventType, CommandEnvelope, CommandResult, CommandResultState,
-    HandshakeResult, MetricSample, ObservedSnapshot, SemanticPayloadHashVersion, SessionHandshake,
-    SessionHandshakeResponse, SessionObservation, TelemetryBatch, TelemetryDropCounters,
-    TelemetryPriority,
+    AgentEvent, AgentEventType, CommandDeliveryMode, CommandEnvelope, CommandResult,
+    CommandResultState, HandshakeResult, IpBanObservation, MetricSample, ObservedSnapshot,
+    SemanticPayloadHashVersion, SessionHandshake, SessionHandshakeResponse, SessionObservation,
+    TelemetryBatch, TelemetryDropCounters, TelemetryPriority, command_envelope,
 };
 use prost::Message;
 use uuid::Uuid;
@@ -147,6 +151,10 @@ async fn connect_once(
             "synthetic.echo".to_owned(),
             "command.semantic-hash.v1".to_owned(),
             "command.strict-wire.v1".to_owned(),
+            "ocserv.session.disconnect".to_owned(),
+            "ocserv.session.terminate".to_owned(),
+            "ocserv.ip_ban.remove".to_owned(),
+            "ocserv.service.reload".to_owned(),
         ],
         ocserv_version: "unknown".to_owned(),
         os_release: session.os_release.to_owned(),
@@ -232,12 +240,32 @@ async fn handle_command_stream(
     let now_unix_seconds = i64::try_from(now.as_secs())?;
     let context = CommandContext {
         node_id: *session.node_id.as_bytes(),
-        observed_revision: 1,
-        capabilities: HashSet::from(["synthetic.noop", "synthetic.echo"]),
+        observed_revision: None,
+        capabilities: HashSet::from([
+            "synthetic.noop",
+            "synthetic.echo",
+            "ocserv.session.disconnect",
+            "ocserv.session.terminate",
+            "ocserv.ip_ban.remove",
+            "ocserv.service.reload",
+        ]),
         now_unix_seconds,
         cancelled: false,
     };
-    let execution = session.command_executor.deliver(&envelope, &context);
+    let external = matches!(
+        envelope.payload,
+        Some(
+            command_envelope::Payload::SessionDisconnect(_)
+                | command_envelope::Payload::SessionTerminate(_)
+                | command_envelope::Payload::IpBanRemove(_)
+                | command_envelope::Payload::ServiceReload(_)
+        )
+    );
+    let execution = if external {
+        execute_external_command(session, &envelope, &context, now_unix_seconds).await
+    } else {
+        session.command_executor.deliver(&envelope, &context)
+    };
     let result = match execution {
         Ok(outcome) => command_result(&outcome.record, outcome.replayed),
         Err(CommandError::Rejected(code)) => rejected_result(&envelope, code, now_unix_seconds),
@@ -271,6 +299,143 @@ async fn handle_command_stream(
     send.write_all(&encoded).await?;
     send.finish()?;
     Ok(())
+}
+
+async fn execute_external_command(
+    session: &mut SessionContext<'_>,
+    envelope: &CommandEnvelope,
+    context: &CommandContext,
+    now: i64,
+) -> Result<ocservia_agent::CommandOutcome, CommandError> {
+    let mode = CommandDeliveryMode::try_from(envelope.delivery_mode)
+        .unwrap_or(CommandDeliveryMode::Unspecified);
+    let command = match mode {
+        CommandDeliveryMode::ExecuteOrReplay => {
+            match session
+                .command_executor
+                .prepare_external(envelope, context)?
+            {
+                ExternalPreparation::Execute(command) => command,
+                ExternalPreparation::Replay(outcome) => return Ok(outcome),
+            }
+        }
+        CommandDeliveryMode::ReconcileOnly => {
+            let observed = observe_external_effect(session.privd, envelope).await;
+            return session
+                .command_executor
+                .reconcile_external(envelope, context, observed);
+        }
+        CommandDeliveryMode::RetryIfEffectAbsent => {
+            session.command_executor.retry_external(envelope, context)?
+        }
+        CommandDeliveryMode::Unspecified => {
+            return Err(CommandError::Rejected("delivery_mode_invalid"));
+        }
+    };
+    let operation = match envelope.payload.as_ref() {
+        Some(command_envelope::Payload::SessionDisconnect(payload)) => {
+            privd_request::Operation::SessionDisconnect(SessionMutationRequest {
+                session_id: payload.session_id.clone(),
+                boot_id: payload.boot_id.clone(),
+            })
+        }
+        Some(command_envelope::Payload::SessionTerminate(payload)) => {
+            privd_request::Operation::SessionTerminate(SessionMutationRequest {
+                session_id: payload.session_id.clone(),
+                boot_id: payload.boot_id.clone(),
+            })
+        }
+        Some(command_envelope::Payload::IpBanRemove(payload)) => {
+            privd_request::Operation::IpBanRemove(IpBanRemoveRequest {
+                ip: payload.ip.clone(),
+            })
+        }
+        Some(command_envelope::Payload::ServiceReload(_)) => {
+            privd_request::Operation::ServiceReload(ServiceReloadRequest {})
+        }
+        _ => return Err(CommandError::Rejected("capability_rejected")),
+    };
+    match session.privd.call(operation).await {
+        Ok(response) => match response.result {
+            Some(privd_response::Result::Mutation(result)) if result.applied => session
+                .command_executor
+                .complete_external(&command, Ok(b"applied"), now),
+            Some(privd_response::Result::Error(error))
+                if matches!(
+                    ErrorKind::try_from(error.kind).unwrap_or(ErrorKind::Unspecified),
+                    ErrorKind::InvalidRequest
+                        | ErrorKind::PermissionDenied
+                        | ErrorKind::MalformedOutput
+                ) =>
+            {
+                session
+                    .command_executor
+                    .complete_external(&command, Err("privd_rejected"), now)
+            }
+            _ => session.command_executor.mark_external_unknown(
+                &command,
+                "privd_outcome_unknown",
+                now,
+            ),
+        },
+        Err(_) => {
+            session
+                .command_executor
+                .mark_external_unknown(&command, "privd_transport_unknown", now)
+        }
+    }
+}
+
+async fn observe_external_effect(privd: &PrivdClient, envelope: &CommandEnvelope) -> Option<bool> {
+    let target_boot = match envelope.payload.as_ref() {
+        Some(command_envelope::Payload::SessionDisconnect(target)) => Some(&target.boot_id),
+        Some(command_envelope::Payload::SessionTerminate(target)) => Some(&target.boot_id),
+        _ => None,
+    };
+    if let Some(target_boot) = target_boot {
+        let current_boot = tokio::fs::read_to_string("/proc/sys/kernel/random/boot_id")
+            .await
+            .ok()?;
+        if current_boot.trim() != target_boot {
+            return None;
+        }
+    }
+    let operation = match envelope.payload.as_ref()? {
+        command_envelope::Payload::SessionDisconnect(_)
+        | command_envelope::Payload::SessionTerminate(_) => {
+            privd_request::Operation::SessionList(ocservia_agent_protocol::ReadRequest {})
+        }
+        command_envelope::Payload::IpBanRemove(_) => {
+            privd_request::Operation::IpBanList(ocservia_agent_protocol::ReadRequest {})
+        }
+        _ => return None,
+    };
+    let response = privd.call(operation).await.ok()?;
+    match (envelope.payload.as_ref()?, response.result?) {
+        (
+            command_envelope::Payload::SessionDisconnect(target),
+            privd_response::Result::SessionList(current),
+        ) => Some(
+            !current
+                .sessions
+                .iter()
+                .any(|session| session.id == target.session_id),
+        ),
+        (
+            command_envelope::Payload::SessionTerminate(target),
+            privd_response::Result::SessionList(current),
+        ) => Some(
+            !current
+                .sessions
+                .iter()
+                .any(|session| session.id == target.session_id),
+        ),
+        (
+            command_envelope::Payload::IpBanRemove(target),
+            privd_response::Result::IpBanList(current),
+        ) => Some(!current.bans.iter().any(|ban| ban.ip == target.ip)),
+        _ => None,
+    }
 }
 
 fn unknown_result(record: &CommandRecord, code: &str) -> CommandResult {
@@ -353,6 +518,7 @@ fn build_telemetry(
     let mut service = serde_json::json!({"active_state":"unknown","sub_state":"unknown"});
     let mut version = "unknown".to_owned();
     let mut sessions = Vec::new();
+    let mut ip_bans = Vec::new();
     let mut fingerprint = serde_json::json!({});
     for observation in observations {
         match &observation.result {
@@ -376,6 +542,16 @@ fn build_telemetry(
                         connected_at: Some(now.into()),
                         bytes_in: 0,
                         bytes_out: 0,
+                    })
+                    .collect();
+            }
+            Some(privd_response::Result::IpBanList(value)) => {
+                ip_bans = value
+                    .bans
+                    .iter()
+                    .map(|ban| IpBanObservation {
+                        ip: ban.ip.clone(),
+                        seconds_remaining: ban.seconds_remaining,
                     })
                     .collect();
             }
@@ -428,6 +604,7 @@ fn build_telemetry(
             value: session_count,
         }],
         security_events: Vec::new(),
+        ip_bans,
     }
 }
 

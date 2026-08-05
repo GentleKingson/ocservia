@@ -33,7 +33,10 @@ const MAX_FUTURE_SKEW_SECONDS: i64 = 300;
 #[derive(Clone, Debug)]
 pub struct CommandContext {
     pub node_id: [u8; 16],
-    pub observed_revision: u64,
+    /// Locally authoritative revision when one exists. Production node commands
+    /// rely on the Controller's transactional revision check and bind that
+    /// revision into the semantic hash instead of inventing a local value.
+    pub observed_revision: Option<u64>,
     pub capabilities: HashSet<&'static str>,
     pub now_unix_seconds: i64,
     pub cancelled: bool,
@@ -53,6 +56,20 @@ pub enum CrashPoint {
 pub struct CommandOutcome {
     pub record: CommandRecord,
     pub replayed: bool,
+}
+
+/// Durable authorization to execute one external typed effect.
+#[derive(Clone, Debug)]
+pub struct ExternalCommand {
+    key: [u8; 16],
+    command_id: [u8; 16],
+}
+
+/// Result of preparing an external effect.
+#[derive(Clone, Debug)]
+pub enum ExternalPreparation {
+    Execute(ExternalCommand),
+    Replay(CommandOutcome),
 }
 
 /// Refusal, storage failure, or an intentional fault boundary.
@@ -194,6 +211,247 @@ impl CommandExecutor {
                 Err(CommandError::Rejected("delivery_mode_invalid"))
             }
         }
+    }
+
+    /// Validates and durably records an external command before its privd call.
+    ///
+    /// # Errors
+    ///
+    /// Rejects invalid or conflicting commands and fails closed on journal errors.
+    pub fn prepare_external(
+        &mut self,
+        envelope: &CommandEnvelope,
+        context: &CommandContext,
+    ) -> Result<ExternalPreparation, CommandError> {
+        let validated = validate_command(envelope, context)?;
+        if !validated.external {
+            return Err(CommandError::Rejected("external_command_required"));
+        }
+        let acceptance = self
+            .journal
+            .accept_command(
+                &validated.key,
+                &validated.command_id,
+                &validated.payload_hash,
+                validated.hash_version as i32,
+                context.now_unix_seconds,
+            )
+            .map_err(pre_effect_failure)?;
+        match acceptance {
+            AcceptOutcome::PayloadConflict(_) => Err(CommandError::PayloadConflict),
+            AcceptOutcome::IdentityConflict(_) => Err(CommandError::IdentityConflict),
+            AcceptOutcome::Replay(record) => {
+                let terminal_or_reconciling =
+                    matches!(record.state, CommandState::Succeeded | CommandState::Failed)
+                        || (record.state == CommandState::Unknown
+                            && record.error_code.as_deref()
+                                == Some("outcome_requires_reconciliation"));
+                let record = if terminal_or_reconciling {
+                    record
+                } else {
+                    self.journal
+                        .transition_command(
+                            &validated.key,
+                            &[
+                                CommandState::Accepted,
+                                CommandState::Running,
+                                CommandState::Unknown,
+                            ],
+                            CommandState::Unknown,
+                            None,
+                            Some("outcome_requires_reconciliation"),
+                            context.now_unix_seconds,
+                        )
+                        .map_err(pre_effect_failure)?
+                };
+                Ok(ExternalPreparation::Replay(CommandOutcome {
+                    record,
+                    replayed: true,
+                }))
+            }
+            AcceptOutcome::Accepted(_) => {
+                self.journal
+                    .transition_command(
+                        &validated.key,
+                        &[CommandState::Accepted],
+                        CommandState::Running,
+                        None,
+                        None,
+                        context.now_unix_seconds,
+                    )
+                    .map_err(pre_effect_failure)?;
+                Ok(ExternalPreparation::Execute(ExternalCommand {
+                    key: validated.key,
+                    command_id: validated.command_id,
+                }))
+            }
+        }
+    }
+
+    /// Persists the bounded result of an external privd call.
+    ///
+    /// # Errors
+    ///
+    /// Fails closed on missing identity, identity conflict, or journal failure.
+    pub fn complete_external(
+        &self,
+        command: &ExternalCommand,
+        result: Result<&[u8], &'static str>,
+        now: i64,
+    ) -> Result<CommandOutcome, CommandError> {
+        let (state, bytes, code) = match result {
+            Ok(bytes) if bytes.len() <= MAX_COMMAND_BYTES => {
+                (CommandState::Succeeded, Some(bytes), None)
+            }
+            Ok(_) => (CommandState::Failed, None, Some("result_too_large")),
+            Err(code) => (CommandState::Failed, None, Some(code)),
+        };
+        let before = self
+            .journal
+            .command(&command.key)
+            .map_err(pre_effect_failure)?
+            .ok_or(CommandError::Rejected("command_not_accepted"))?;
+        let record = self
+            .journal
+            .transition_command(
+                &command.key,
+                &[CommandState::Running],
+                state,
+                bytes,
+                code,
+                now,
+            )
+            .map_err(|source| CommandError::OutcomeUnknown {
+                code: "result_persistence_failed",
+                record: Box::new(before),
+                source: Box::new(source),
+            })?;
+        if record.command_id != command.command_id {
+            return Err(CommandError::IdentityConflict);
+        }
+        Ok(CommandOutcome {
+            record,
+            replayed: false,
+        })
+    }
+
+    /// Persists an uncertain external outcome without permitting an automatic retry.
+    ///
+    /// # Errors
+    ///
+    /// Fails closed on identity conflict or journal failure.
+    pub fn mark_external_unknown(
+        &self,
+        command: &ExternalCommand,
+        code: &'static str,
+        now: i64,
+    ) -> Result<CommandOutcome, CommandError> {
+        let record = self
+            .journal
+            .transition_command(
+                &command.key,
+                &[CommandState::Running],
+                CommandState::Unknown,
+                None,
+                Some(code),
+                now,
+            )
+            .map_err(pre_effect_failure)?;
+        if record.command_id != command.command_id {
+            return Err(CommandError::IdentityConflict);
+        }
+        Ok(CommandOutcome {
+            record,
+            replayed: false,
+        })
+    }
+
+    /// Resolves an external Unknown from an independent typed observation.
+    ///
+    /// # Errors
+    ///
+    /// Rejects invalid or mismatched commands and propagates journal failures.
+    pub fn reconcile_external(
+        &self,
+        envelope: &CommandEnvelope,
+        context: &CommandContext,
+        applied: Option<bool>,
+    ) -> Result<CommandOutcome, CommandError> {
+        let validated = validate_command(envelope, context)?;
+        if !validated.external {
+            return Err(CommandError::Rejected("external_command_required"));
+        }
+        let record = self.matching_record(&validated)?;
+        if matches!(record.state, CommandState::Succeeded | CommandState::Failed) {
+            return Ok(CommandOutcome {
+                record,
+                replayed: true,
+            });
+        }
+        let (state, result, code) = match applied {
+            Some(true) => (CommandState::Succeeded, Some(b"observed".as_slice()), None),
+            Some(false) => (CommandState::Unknown, None, Some("effect_absent")),
+            None => (
+                CommandState::Unknown,
+                None,
+                Some("manual_reconciliation_required"),
+            ),
+        };
+        let record = self
+            .journal
+            .transition_command(
+                &validated.key,
+                &[
+                    CommandState::Accepted,
+                    CommandState::Running,
+                    CommandState::Unknown,
+                ],
+                state,
+                result,
+                code,
+                context.now_unix_seconds,
+            )
+            .map_err(pre_effect_failure)?;
+        Ok(CommandOutcome {
+            record,
+            replayed: true,
+        })
+    }
+
+    /// Authorizes one retry only after an explicit effect-absent observation.
+    ///
+    /// # Errors
+    ///
+    /// Rejects commands without persisted absence proof and propagates journal failures.
+    pub fn retry_external(
+        &self,
+        envelope: &CommandEnvelope,
+        context: &CommandContext,
+    ) -> Result<ExternalCommand, CommandError> {
+        let validated = validate_command(envelope, context)?;
+        if !validated.external {
+            return Err(CommandError::Rejected("external_command_required"));
+        }
+        let record = self.matching_record(&validated)?;
+        if record.state != CommandState::Unknown
+            || record.error_code.as_deref() != Some("effect_absent")
+        {
+            return Err(CommandError::Rejected("reconciliation_required"));
+        }
+        self.journal
+            .transition_command(
+                &validated.key,
+                &[CommandState::Unknown],
+                CommandState::Running,
+                None,
+                None,
+                context.now_unix_seconds,
+            )
+            .map_err(pre_effect_failure)?;
+        Ok(ExternalCommand {
+            key: validated.key,
+            command_id: validated.command_id,
+        })
     }
 
     /// Explicitly retries an Unknown synthetic command only after reconciliation proved absence.
@@ -379,6 +637,7 @@ struct ValidatedCommand {
     payload_hash: [u8; 32],
     hash_version: SemanticPayloadHashVersion,
     result: Vec<u8>,
+    external: bool,
 }
 
 /// Computes the cross-language semantic payload identity for a supported command.
@@ -396,6 +655,18 @@ pub fn semantic_payload_hash(envelope: &CommandEnvelope) -> Result<[u8; 32], Com
         }
         Some(command_envelope::Payload::SyntheticEcho(payload)) => {
             ("synthetic.echo", payload.encode_to_vec())
+        }
+        Some(command_envelope::Payload::SessionDisconnect(payload)) => {
+            ("ocserv.session.disconnect", payload.encode_to_vec())
+        }
+        Some(command_envelope::Payload::SessionTerminate(payload)) => {
+            ("ocserv.session.terminate", payload.encode_to_vec())
+        }
+        Some(command_envelope::Payload::IpBanRemove(payload)) => {
+            ("ocserv.ip_ban.remove", payload.encode_to_vec())
+        }
+        Some(command_envelope::Payload::ServiceReload(payload)) => {
+            ("ocserv.service.reload", payload.encode_to_vec())
         }
         _ => return Err(CommandError::Rejected("capability_rejected")),
     };
@@ -435,6 +706,26 @@ pub fn semantic_payload_hash_v1(envelope: &CommandEnvelope) -> Result<[u8; 32], 
             );
             out.extend_from_slice(utf8);
             (108_u32, out)
+        }
+        Some(command_envelope::Payload::SessionDisconnect(payload)) => (
+            100_u32,
+            canonical_session_payload(&payload.session_id, &payload.boot_id)?,
+        ),
+        Some(command_envelope::Payload::ServiceReload(_)) => (105_u32, Vec::new()),
+        Some(command_envelope::Payload::SessionTerminate(payload)) => (
+            112_u32,
+            canonical_session_payload(&payload.session_id, &payload.boot_id)?,
+        ),
+        Some(command_envelope::Payload::IpBanRemove(payload)) => {
+            let utf8 = payload.ip.as_bytes();
+            let mut out = Vec::with_capacity(4 + utf8.len());
+            out.extend_from_slice(
+                &u32::try_from(utf8.len())
+                    .map_err(|_| CommandError::Rejected("payload_size_invalid"))?
+                    .to_be_bytes(),
+            );
+            out.extend_from_slice(utf8);
+            (113_u32, out)
         }
         _ => return Err(CommandError::Rejected("capability_rejected")),
     };
@@ -484,21 +775,13 @@ fn validate_command(
     {
         return Err(CommandError::Rejected("clock_skew"));
     }
-    if envelope.expected_revision != context.observed_revision {
+    if context
+        .observed_revision
+        .is_some_and(|revision| envelope.expected_revision != revision)
+    {
         return Err(CommandError::Rejected("revision_mismatch"));
     }
-    let (capability, result) = match envelope.payload.as_ref() {
-        Some(command_envelope::Payload::SyntheticNoop(_)) => {
-            ("synthetic.noop", b"noop:completed".to_vec())
-        }
-        Some(command_envelope::Payload::SyntheticEcho(payload)) => {
-            if payload.message.len() > 4096 {
-                return Err(CommandError::Rejected("payload_size_invalid"));
-            }
-            ("synthetic.echo", payload.message.as_bytes().to_vec())
-        }
-        _ => return Err(CommandError::Rejected("capability_rejected")),
-    };
+    let (capability, result, external) = validate_payload(envelope)?;
     if !context.capabilities.contains(capability) {
         return Err(CommandError::Rejected("capability_rejected"));
     }
@@ -543,7 +826,74 @@ fn validate_command(
         payload_hash,
         hash_version,
         result,
+        external,
     })
+}
+
+fn validate_payload(
+    envelope: &CommandEnvelope,
+) -> Result<(&'static str, Vec<u8>, bool), CommandError> {
+    Ok(match envelope.payload.as_ref() {
+        Some(command_envelope::Payload::SyntheticNoop(_)) => {
+            ("synthetic.noop", b"noop:completed".to_vec(), false)
+        }
+        Some(command_envelope::Payload::SyntheticEcho(payload)) => {
+            if payload.message.len() > 4096 {
+                return Err(CommandError::Rejected("payload_size_invalid"));
+            }
+            ("synthetic.echo", payload.message.as_bytes().to_vec(), false)
+        }
+        Some(command_envelope::Payload::SessionDisconnect(payload)) => {
+            validate_session_payload(&payload.session_id, &payload.boot_id)?;
+            ("ocserv.session.disconnect", Vec::new(), true)
+        }
+        Some(command_envelope::Payload::SessionTerminate(payload)) => {
+            validate_session_payload(&payload.session_id, &payload.boot_id)?;
+            ("ocserv.session.terminate", Vec::new(), true)
+        }
+        Some(command_envelope::Payload::IpBanRemove(payload)) => {
+            let canonical = payload
+                .ip
+                .parse::<std::net::IpAddr>()
+                .map_err(|_| CommandError::Rejected("ip_invalid"))?
+                .to_string();
+            if canonical != payload.ip {
+                return Err(CommandError::Rejected("ip_not_canonical"));
+            }
+            ("ocserv.ip_ban.remove", Vec::new(), true)
+        }
+        Some(command_envelope::Payload::ServiceReload(_)) => {
+            ("ocserv.service.reload", Vec::new(), true)
+        }
+        _ => return Err(CommandError::Rejected("capability_rejected")),
+    })
+}
+
+fn validate_session_payload(session_id: &str, boot_id: &str) -> Result<(), CommandError> {
+    let parsed = session_id
+        .parse::<u64>()
+        .map_err(|_| CommandError::Rejected("session_id_invalid"))?;
+    if parsed == 0 || parsed.to_string() != session_id {
+        return Err(CommandError::Rejected("session_id_invalid"));
+    }
+    if Uuid::parse_str(boot_id).is_err() {
+        return Err(CommandError::Rejected("boot_id_invalid"));
+    }
+    Ok(())
+}
+
+fn canonical_session_payload(session_id: &str, boot_id: &str) -> Result<Vec<u8>, CommandError> {
+    validate_session_payload(session_id, boot_id)?;
+    let mut out = Vec::with_capacity(8 + session_id.len() + boot_id.len());
+    for value in [session_id.as_bytes(), boot_id.as_bytes()] {
+        out.extend_from_slice(
+            &u32::try_from(value.len())
+                .map_err(|_| CommandError::Rejected("payload_size_invalid"))?
+                .to_be_bytes(),
+        );
+        out.extend_from_slice(value);
+    }
+    Ok(out)
 }
 
 fn fixed<const N: usize>(value: &[u8], code: &'static str) -> Result<[u8; N], CommandError> {
@@ -787,7 +1137,8 @@ pub async fn read_boot_id() -> Result<String, io::Error> {
 #[cfg(test)]
 mod tests {
     use ocservia_contracts::generated::ocserv::platform::agent::v1::{
-        SyntheticEcho, SyntheticNoop, command_envelope,
+        IpBanRemove, ServiceReload, SessionDisconnect, SessionTerminate, SyntheticEcho,
+        SyntheticNoop, command_envelope,
     };
     use prost_types::Timestamp;
     use rand::{SeedableRng, rngs::StdRng};
@@ -919,7 +1270,7 @@ mod tests {
     fn context(node_id: [u8; 16], now: i64) -> CommandContext {
         CommandContext {
             node_id,
-            observed_revision: 1,
+            observed_revision: Some(1),
             capabilities: HashSet::from(["synthetic.noop", "synthetic.echo"]),
             now_unix_seconds: now,
             cancelled: false,
@@ -931,6 +1282,46 @@ mod tests {
             .canonicalize()
             .expect("tmp")
             .join(format!("ocservia-agent-{label}-{}.db", Uuid::now_v7()))
+    }
+
+    #[test]
+    fn external_command_is_durable_and_duplicate_delivery_replays() {
+        let path = temporary_journal("external");
+        let node = [0x41; 16];
+        let key = *Uuid::now_v7().as_bytes();
+        let mut envelope = command(node, key, "", 100);
+        envelope.payload = Some(command_envelope::Payload::SessionDisconnect(
+            SessionDisconnect {
+                session_id: "42".to_owned(),
+                boot_id: Uuid::now_v7().to_string(),
+            },
+        ));
+        envelope.semantic_payload_hash_version = SemanticPayloadHashVersion::V1 as i32;
+        envelope.semantic_payload_sha256 = semantic_payload_hash_v1(&envelope)
+            .expect("session hash")
+            .to_vec();
+        let mut command_context = context(node, 100);
+        command_context.capabilities = HashSet::from(["ocserv.session.disconnect"]);
+        let mut executor = CommandExecutor::new(Journal::open(&path).expect("journal"));
+        let ExternalPreparation::Execute(command) = executor
+            .prepare_external(&envelope, &command_context)
+            .expect("prepare")
+        else {
+            panic!("first delivery must execute");
+        };
+        let completed = executor
+            .complete_external(&command, Ok(b"applied"), 101)
+            .expect("complete");
+        assert_eq!(completed.record.state, CommandState::Succeeded);
+        let ExternalPreparation::Replay(replayed) = executor
+            .prepare_external(&envelope, &command_context)
+            .expect("replay")
+        else {
+            panic!("duplicate delivery must not execute");
+        };
+        assert!(replayed.replayed);
+        assert_eq!(replayed.record.state, CommandState::Succeeded);
+        cleanup_journal(&path);
     }
 
     fn cleanup_journal(path: &Path) {
@@ -1509,6 +1900,31 @@ mod tests {
         }
     }
 
+    fn fixture_string_payload(values: &[&str]) -> Vec<u8> {
+        let mut out = Vec::new();
+        for value in values {
+            out.extend_from_slice(&u32::try_from(value.len()).unwrap().to_be_bytes());
+            out.extend_from_slice(value.as_bytes());
+        }
+        out
+    }
+
+    fn canonical_payload_from_fixture(kind: u32, payload: &serde_json::Value) -> Vec<u8> {
+        let field = |name| {
+            payload
+                .get(name)
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("")
+        };
+        match kind {
+            100 | 112 => fixture_string_payload(&[field("session_id"), field("boot_id")]),
+            105 => Vec::new(),
+            107 | 108 => canonical_payload_for(kind, field("message")),
+            113 => fixture_string_payload(&[field("ip")]),
+            _ => panic!("unsupported payload_kind in fixture: {kind}"),
+        }
+    }
+
     fn load_v1_fixture() -> serde_json::Value {
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../../testdata/semantic-payload-hash-v1.json");
@@ -1552,6 +1968,47 @@ mod tests {
         }
     }
 
+    fn envelope_from_fixture_payload(
+        node_id: &[u8],
+        expected_revision: u64,
+        payload_kind: u32,
+        payload: &serde_json::Value,
+    ) -> CommandEnvelope {
+        let field = |name| {
+            payload
+                .get(name)
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("")
+                .to_owned()
+        };
+        let message = field("message");
+        let mut envelope = envelope_from_fixture_vector(
+            node_id,
+            expected_revision,
+            if matches!(payload_kind, 107 | 108) {
+                payload_kind
+            } else {
+                107
+            },
+            &message,
+        );
+        envelope.payload = Some(match payload_kind {
+            100 => command_envelope::Payload::SessionDisconnect(SessionDisconnect {
+                session_id: field("session_id"),
+                boot_id: field("boot_id"),
+            }),
+            105 => command_envelope::Payload::ServiceReload(ServiceReload {}),
+            107 | 108 => return envelope,
+            112 => command_envelope::Payload::SessionTerminate(SessionTerminate {
+                session_id: field("session_id"),
+                boot_id: field("boot_id"),
+            }),
+            113 => command_envelope::Payload::IpBanRemove(IpBanRemove { ip: field("ip") }),
+            _ => panic!("unsupported payload_kind in fixture: {payload_kind}"),
+        });
+        envelope
+    }
+
     #[test]
     fn canonical_semantic_hash_v1_matches_shared_fixture() {
         let fixture = load_v1_fixture();
@@ -1580,18 +2037,14 @@ mod tests {
                 .and_then(serde_json::Value::as_u64)
                 .expect("payload_kind");
             let payload_kind = u32::try_from(payload_kind).expect("payload_kind fits u32");
-            let message = vector
-                .get("payload")
-                .and_then(|p| p.get("message"))
-                .and_then(serde_json::Value::as_str)
-                .unwrap_or("");
+            let payload_fields = vector.get("payload").expect("payload");
             let expected = vector
                 .get("expected_sha256")
                 .and_then(serde_json::Value::as_str)
                 .expect("expected_sha256");
 
             // Cross-check: the test-only mirror must agree with the fixture.
-            let payload = canonical_payload_for(payload_kind, message);
+            let payload = canonical_payload_from_fixture(payload_kind, payload_fields);
             let mirror = compute_v1_canonical(&node_id, expected_revision, payload_kind, &payload);
             assert_eq!(
                 hex::encode(mirror),
@@ -1600,8 +2053,12 @@ mod tests {
             );
 
             // Production function must agree with the mirror.
-            let envelope =
-                envelope_from_fixture_vector(&node_id, expected_revision, payload_kind, message);
+            let envelope = envelope_from_fixture_payload(
+                &node_id,
+                expected_revision,
+                payload_kind,
+                payload_fields,
+            );
             let production = semantic_payload_hash_v1(&envelope).expect("v1 hash");
             assert_eq!(
                 hex::encode(production),
