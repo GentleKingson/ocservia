@@ -54,6 +54,33 @@ func TestTransactionalCreateIdempotencyAndTypedPayloadIntegration(t *testing.T) 
 	}
 }
 
+func TestAuditFailureRejectsBusinessWriteIntegration(t *testing.T) {
+	ownerURL := os.Getenv("OCSERV_TEST_OWNER_DATABASE_URL")
+	if ownerURL == "" {
+		t.Skip("OCSERV_TEST_OWNER_DATABASE_URL is not set")
+	}
+	service, pool, workspaceID, nodeID := integrationService(t)
+	ctx := context.Background()
+	owner, err := pgxpool.New(ctx, ownerURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer owner.Close()
+	if _, err := owner.Exec(ctx, `CREATE OR REPLACE FUNCTION i12_reject_audit() RETURNS trigger LANGUAGE plpgsql AS $$BEGIN RAISE EXCEPTION 'injected audit failure'; END;$$; CREATE TRIGGER i12_reject_audit BEFORE INSERT ON audit_events FOR EACH ROW EXECUTE FUNCTION i12_reject_audit()`); err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		_, _ = owner.Exec(context.Background(), `DROP TRIGGER IF EXISTS i12_reject_audit ON audit_events; DROP FUNCTION IF EXISTS i12_reject_audit()`)
+	}()
+	if _, _, err := service.CreateSynthetic(ctx, testRequest(nodeID, "audit-failure", SyntheticNoop, "")); err == nil {
+		t.Fatal("business write succeeded while audit failed")
+	}
+	var count int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM operations WHERE workspace_id=$1`, workspaceID).Scan(&count); err != nil || count != 0 {
+		t.Fatalf("operations after audit failure = %d, %v", count, err)
+	}
+}
+
 func TestIdempotencyKeyCannotReplayAcrossNodesIntegration(t *testing.T) {
 	service, pool, workspaceID, nodeID := integrationService(t)
 	otherNodeID := uuid.Must(uuid.NewV7())
@@ -65,6 +92,7 @@ func TestIdempotencyKeyCannotReplayAcrossNodesIntegration(t *testing.T) {
 		t.Fatal(err)
 	}
 	request := controlledTestRequest(nodeID, "cross-node-key", ServiceReload, "service.reload", "", "", "")
+	approveOperation(t, pool, workspaceID, &request)
 	first, replayed, err := service.CreateSynthetic(ctx, request)
 	if err != nil || replayed || first.NodeID == nil || *first.NodeID != nodeID.String() {
 		t.Fatalf("first node operation = %+v, %v, %v", first, replayed, err)
@@ -76,7 +104,7 @@ func TestIdempotencyKeyCannotReplayAcrossNodesIntegration(t *testing.T) {
 }
 
 func TestControlledOperationsRequireApprovedCapabilityAndObservedTargetIntegration(t *testing.T) {
-	service, pool, _, nodeID := integrationService(t)
+	service, pool, workspaceID, nodeID := integrationService(t)
 	bootID := uuid.NewString()
 	ctx := context.Background()
 	if _, err := pool.Exec(ctx, `
@@ -102,12 +130,16 @@ func TestControlledOperationsRequireApprovedCapabilityAndObservedTargetIntegrati
 		t.Fatal(err)
 	}
 
-	for name, request := range map[string]CreateRequest{
+	requests := map[string]CreateRequest{
 		"disconnect": controlledTestRequest(nodeID, "disconnect", SessionDisconnect, "session.disconnect", bootID, "42", ""),
 		"terminate":  controlledTestRequest(nodeID, "terminate", SessionTerminate, "session.terminate", bootID, "42", ""),
 		"unban":      controlledTestRequest(nodeID, "unban", IPBanRemove, "ip_ban.remove", "", "", "192.0.2.9"),
 		"reload":     controlledTestRequest(nodeID, "reload", ServiceReload, "service.reload", "", "", ""),
-	} {
+	}
+	reload := requests["reload"]
+	approveOperation(t, pool, workspaceID, &reload)
+	requests["reload"] = reload
+	for name, request := range requests {
 		t.Run(name, func(t *testing.T) {
 			operation, replayed, err := service.CreateSynthetic(ctx, request)
 			if err != nil || replayed || operation.State != "queued" {
@@ -128,6 +160,7 @@ func TestControlledOperationsRequireApprovedCapabilityAndObservedTargetIntegrati
 		t.Fatal(err)
 	}
 	denied := controlledTestRequest(nodeID, "denied", ServiceReload, "service.reload", "", "", "")
+	denied.ActorIdentityID, denied.ActorSessionID, denied.ApprovalID = uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7())
 	if _, _, err := service.CreateSynthetic(ctx, denied); !errors.Is(err, ErrCapabilityMissing) {
 		t.Fatalf("missing capability error = %v", err)
 	}
@@ -314,6 +347,22 @@ func integrationService(t *testing.T) (*Service, *pgxpool.Pool, uuid.UUID, uuid.
 
 func controlledTestRequest(nodeID uuid.UUID, key string, kind SyntheticKind, action, bootID, sessionID, ip string) CreateRequest {
 	return CreateRequest{NodeID: nodeID, IdempotencyKey: key, ExpectedVersion: 1, Kind: kind, BootID: bootID, SessionID: sessionID, IP: ip, ActorID: "operator", Action: action, Reason: "integration test", TTL: time.Minute, RequestID: "request-" + key, Traceparent: testTraceparent}
+}
+
+func approveOperation(t *testing.T, pool *pgxpool.Pool, workspaceID uuid.UUID, request *CreateRequest) {
+	t.Helper()
+	request.ActorIdentityID, request.ActorSessionID, request.ApprovalID = uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7())
+	approverID := uuid.Must(uuid.NewV7())
+	_, err := pool.Exec(context.Background(), `INSERT INTO identities(id,issuer,subject,created_at,updated_at) VALUES($1,'test',$2,now(),now()),($3,'test',$4,now(),now())`, request.ActorIdentityID, "requester-"+request.ActorIdentityID.String(), approverID, "approver-"+approverID.String())
+	if err == nil {
+		_, err = pool.Exec(context.Background(), `INSERT INTO auth_sessions(id,identity_id,expires_at,created_at) VALUES($1,$2,now()+interval '1 hour',now())`, request.ActorSessionID, request.ActorIdentityID)
+	}
+	if err == nil {
+		_, err = pool.Exec(context.Background(), `INSERT INTO approval_requests(id,workspace_id,requester_id,action,resource_type,resource_id,reason,status,approver_id,approval_reason,expires_at,approved_at,created_at) VALUES($1,$2,$3,$4,'node',$5,'integration test','approved',$6,'independent approval',now()+interval '1 hour',now(),now())`, request.ApprovalID, workspaceID, request.ActorIdentityID, request.Action, request.NodeID, approverID)
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
 }
 
 func testRequest(nodeID uuid.UUID, key string, kind SyntheticKind, message string) CreateRequest {

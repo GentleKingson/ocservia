@@ -51,7 +51,9 @@ All URIs are relative to _/api/v1_
 | _DevelopmentApi_ | [**createLocalSimulation**](docs/DevelopmentApi.md#createlocalsimulation)      | **POST** /development/simulations                          | Start a side-effect-free local agent simulation                    |
 | _DevelopmentApi_ | [**getDevelopmentRuntime**](docs/DevelopmentApi.md#getdevelopmentruntime)      | **GET** /development/runtime                               | Read bounded runtime counters for local resilience tests           |
 | _EnrollmentApi_  | [**createEnrollmentToken**](docs/EnrollmentApi.md#createenrollmenttoken)       | **POST** /enrollment-tokens                                | Create a one-time enrollment token                                 |
+| _EventsApi_      | [**listAuditEvents**](docs/EventsApi.md#listauditevents)                       | **GET** /audit/events                                      | List append-only audit events                                      |
 | _EventsApi_      | [**listEvents**](docs/EventsApi.md#listevents)                                 | **GET** /events                                            | Rebuild platform events from durable state                         |
+| _EventsApi_      | [**verifyAuditChain**](docs/EventsApi.md#verifyauditchain)                     | **POST** /audit:verify                                     | Verify the workspace audit hash chain and latest checkpoint        |
 | _EventsApi_      | [**watchEvents**](docs/EventsApi.md#watchevents)                               | **GET** /events/stream                                     | Watch platform events with SSE resume support                      |
 | _NodesApi_       | [**approveNode**](docs/NodesApi.md#approvenode)                                | **POST** /nodes/{node_id}/approval                         | Approve a pending node and bind its endpoint identity              |
 | _NodesApi_       | [**getNode**](docs/NodesApi.md#getnode)                                        | **GET** /nodes/{node_id}                                   | Get current node observed state                                    |
@@ -60,6 +62,8 @@ All URIs are relative to _/api/v1_
 | _NodesApi_       | [**listNodeTelemetry**](docs/NodesApi.md#listnodetelemetry)                    | **GET** /nodes/{node_id}/telemetry                         | Query bounded raw or rolled-up node telemetry                      |
 | _NodesApi_       | [**listNodes**](docs/NodesApi.md#listnodes)                                    | **GET** /nodes                                             | List node observed state                                           |
 | _NodesApi_       | [**revokeNode**](docs/NodesApi.md#revokenode)                                  | **POST** /nodes/{node_id}/revocation                       | Revoke a node endpoint and close its current connection            |
+| _OperationsApi_  | [**approveRequest**](docs/OperationsApi.md#approverequest)                     | **POST** /approval-requests/{approval_id}:approve          | Approve another principal\&#39;s high-risk request                 |
+| _OperationsApi_  | [**createApprovalRequest**](docs/OperationsApi.md#createapprovalrequest)       | **POST** /approval-requests                                | Request independent approval for a high-risk action                |
 | _OperationsApi_  | [**createSyntheticCommand**](docs/OperationsApi.md#createsyntheticcommand)     | **POST** /nodes/{node_id}/synthetic-commands               | Queue a side-effect-free typed synthetic command                   |
 | _OperationsApi_  | [**disconnectNodeSession**](docs/OperationsApi.md#disconnectnodesession)       | **POST** /nodes/{node_id}/sessions/{session_id}:disconnect | Disconnect one observed session                                    |
 | _OperationsApi_  | [**getOperation**](docs/OperationsApi.md#getoperation)                         | **GET** /operations/{operation_id}                         | Get an asynchronous operation                                      |
@@ -69,12 +73,24 @@ All URIs are relative to _/api/v1_
 | _OperationsApi_  | [**removeNodeIpBan**](docs/OperationsApi.md#removenodeipban)                   | **POST** /nodes/{node_id}/ip-bans/{ip}:remove              | Remove one canonical IP address from the Ocserv ban list           |
 | _OperationsApi_  | [**terminateNodeSession**](docs/OperationsApi.md#terminatenodesession)         | **POST** /nodes/{node_id}/sessions/{session_id}:terminate  | Terminate one observed session and invalidate its reconnect cookie |
 | _OperationsApi_  | [**watchOperationEvents**](docs/OperationsApi.md#watchoperationevents)         | **GET** /operations/{operation_id}/events                  | Watch durable operation state changes                              |
+| _PlatformApi_    | [**beginOIDCLogin**](docs/PlatformApi.md#beginoidclogin)                       | **GET** /auth/login                                        | Begin OIDC Authorization Code login with PKCE S256                 |
+| _PlatformApi_    | [**completeOIDCLogin**](docs/PlatformApi.md#completeoidclogin)                 | **GET** /auth/callback                                     | Validate OIDC state, nonce, code, and ID token                     |
+| _PlatformApi_    | [**createRoleBinding**](docs/PlatformApi.md#createrolebinding)                 | **POST** /role-bindings                                    | Bind one baseline role to a workspace or resource scope            |
 | _PlatformApi_    | [**getLiveness**](docs/PlatformApi.md#getliveness)                             | **GET** /livez                                             | Get process liveness                                               |
 | _PlatformApi_    | [**getReadiness**](docs/PlatformApi.md#getreadiness)                           | **GET** /readyz                                            | Get dependency readiness                                           |
 | _PlatformApi_    | [**getVersion**](docs/PlatformApi.md#getversion)                               | **GET** /version                                           | Get build metadata                                                 |
+| _PlatformApi_    | [**listAuthorizedWorkspaces**](docs/PlatformApi.md#listauthorizedworkspaces)   | **GET** /workspaces                                        | List only workspaces visible to the current principal              |
+| _PlatformApi_    | [**logout**](docs/PlatformApi.md#logout)                                       | **POST** /auth/logout                                      | Revoke the current server-side session                             |
+| _PlatformApi_    | [**useBreakGlass**](docs/PlatformApi.md#usebreakglass)                         | **POST** /auth/break-glass                                 | Use explicitly enabled offline emergency access                    |
 
 ### Models
 
+- [Approval](docs/Approval.md)
+- [ApprovalDecision](docs/ApprovalDecision.md)
+- [ApprovalRequest](docs/ApprovalRequest.md)
+- [AuditEventPage](docs/AuditEventPage.md)
+- [AuditVerification](docs/AuditVerification.md)
+- [BreakGlassRequest](docs/BreakGlassRequest.md)
 - [BuildInfo](docs/BuildInfo.md)
 - [ConnectionPathState](docs/ConnectionPathState.md)
 - [ControlledOperationRequest](docs/ControlledOperationRequest.md)
@@ -102,11 +118,15 @@ All URIs are relative to _/api/v1_
 - [Problem](docs/Problem.md)
 - [QueueMetrics](docs/QueueMetrics.md)
 - [Readiness](docs/Readiness.md)
+- [RoleBinding](docs/RoleBinding.md)
+- [RoleBindingRequest](docs/RoleBindingRequest.md)
 - [SimulationScenario](docs/SimulationScenario.md)
 - [SyntheticCommandRequest](docs/SyntheticCommandRequest.md)
 - [TelemetryMetric](docs/TelemetryMetric.md)
 - [TelemetryPoint](docs/TelemetryPoint.md)
 - [TelemetryPointPage](docs/TelemetryPointPage.md)
+- [Workspace](docs/Workspace.md)
+- [WorkspacePage](docs/WorkspacePage.md)
 
 ### Authorization
 
@@ -115,7 +135,14 @@ Authentication schemes defined for the API:
 
 #### oidc
 
-- **Type**: HTTP Bearer Token authentication (JWT)
+- **Type**: API key
+- **API key parameter name**: `__Host-ocservia_session`
+- **Location**:
+  <a id="bearerAuth"></a>
+
+#### bearerAuth
+
+- **Type**: HTTP Bearer Token authentication
 
 ## About
 

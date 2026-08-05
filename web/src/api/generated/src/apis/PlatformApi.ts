@@ -14,6 +14,11 @@
 
 import * as runtime from "../runtime";
 import {
+  type BreakGlassRequest,
+  BreakGlassRequestFromJSON,
+  BreakGlassRequestToJSON,
+} from "../models/BreakGlassRequest";
+import {
   type BuildInfo,
   BuildInfoFromJSON,
   BuildInfoToJSON,
@@ -29,11 +34,229 @@ import {
   ReadinessFromJSON,
   ReadinessToJSON,
 } from "../models/Readiness";
+import {
+  type RoleBinding,
+  RoleBindingFromJSON,
+  RoleBindingToJSON,
+} from "../models/RoleBinding";
+import {
+  type RoleBindingRequest,
+  RoleBindingRequestFromJSON,
+  RoleBindingRequestToJSON,
+} from "../models/RoleBindingRequest";
+import {
+  type WorkspacePage,
+  WorkspacePageFromJSON,
+  WorkspacePageToJSON,
+} from "../models/WorkspacePage";
+
+export interface CompleteOIDCLoginRequest {
+  state: string;
+  code: string;
+}
+
+export interface CreateRoleBindingRequest {
+  roleBindingRequest: RoleBindingRequest;
+  xWorkspaceID?: string;
+}
+
+export interface UseBreakGlassRequest {
+  breakGlassRequest: BreakGlassRequest;
+}
 
 /**
  *
  */
 export class PlatformApi extends runtime.BaseAPI {
+  /**
+   * Creates request options for beginOIDCLogin without sending the request
+   */
+  async beginOIDCLoginRequestOpts(): Promise<runtime.RequestOpts> {
+    const queryParameters: any = {};
+
+    const headerParameters: runtime.HTTPHeaders = {};
+
+    let urlPath = `/auth/login`;
+
+    return {
+      path: urlPath,
+      method: "GET",
+      headers: headerParameters,
+      query: queryParameters,
+    };
+  }
+
+  /**
+   * Begin OIDC Authorization Code login with PKCE S256
+   */
+  async beginOIDCLoginRaw(
+    initOverrides?: RequestInit | runtime.InitOverrideFunction,
+  ): Promise<runtime.ApiResponse<Problem>> {
+    const requestOptions = await this.beginOIDCLoginRequestOpts();
+    const response = await this.request(requestOptions, initOverrides);
+
+    return new runtime.JSONApiResponse(response, (jsonValue) =>
+      ProblemFromJSON(jsonValue),
+    );
+  }
+
+  /**
+   * Begin OIDC Authorization Code login with PKCE S256
+   */
+  async beginOIDCLogin(
+    initOverrides?: RequestInit | runtime.InitOverrideFunction,
+  ): Promise<Problem> {
+    const response = await this.beginOIDCLoginRaw(initOverrides);
+    return await response.value();
+  }
+
+  /**
+   * Creates request options for completeOIDCLogin without sending the request
+   */
+  async completeOIDCLoginRequestOpts(
+    requestParameters: CompleteOIDCLoginRequest,
+  ): Promise<runtime.RequestOpts> {
+    if (requestParameters["state"] == null) {
+      throw new runtime.RequiredError(
+        "state",
+        'Required parameter "state" was null or undefined when calling completeOIDCLogin().',
+      );
+    }
+
+    if (requestParameters["code"] == null) {
+      throw new runtime.RequiredError(
+        "code",
+        'Required parameter "code" was null or undefined when calling completeOIDCLogin().',
+      );
+    }
+
+    const queryParameters: any = {};
+
+    if (requestParameters["state"] != null) {
+      queryParameters["state"] = requestParameters["state"];
+    }
+
+    if (requestParameters["code"] != null) {
+      queryParameters["code"] = requestParameters["code"];
+    }
+
+    const headerParameters: runtime.HTTPHeaders = {};
+
+    let urlPath = `/auth/callback`;
+
+    return {
+      path: urlPath,
+      method: "GET",
+      headers: headerParameters,
+      query: queryParameters,
+    };
+  }
+
+  /**
+   * Validate OIDC state, nonce, code, and ID token
+   */
+  async completeOIDCLoginRaw(
+    requestParameters: CompleteOIDCLoginRequest,
+    initOverrides?: RequestInit | runtime.InitOverrideFunction,
+  ): Promise<runtime.ApiResponse<Problem>> {
+    const requestOptions =
+      await this.completeOIDCLoginRequestOpts(requestParameters);
+    const response = await this.request(requestOptions, initOverrides);
+
+    return new runtime.JSONApiResponse(response, (jsonValue) =>
+      ProblemFromJSON(jsonValue),
+    );
+  }
+
+  /**
+   * Validate OIDC state, nonce, code, and ID token
+   */
+  async completeOIDCLogin(
+    requestParameters: CompleteOIDCLoginRequest,
+    initOverrides?: RequestInit | runtime.InitOverrideFunction,
+  ): Promise<Problem> {
+    const response = await this.completeOIDCLoginRaw(
+      requestParameters,
+      initOverrides,
+    );
+    return await response.value();
+  }
+
+  /**
+   * Creates request options for createRoleBinding without sending the request
+   */
+  async createRoleBindingRequestOpts(
+    requestParameters: CreateRoleBindingRequest,
+  ): Promise<runtime.RequestOpts> {
+    if (requestParameters["roleBindingRequest"] == null) {
+      throw new runtime.RequiredError(
+        "roleBindingRequest",
+        'Required parameter "roleBindingRequest" was null or undefined when calling createRoleBinding().',
+      );
+    }
+
+    const queryParameters: any = {};
+
+    const headerParameters: runtime.HTTPHeaders = {};
+
+    headerParameters["Content-Type"] = "application/json";
+
+    if (requestParameters["xWorkspaceID"] != null) {
+      headerParameters["X-Workspace-ID"] = String(
+        requestParameters["xWorkspaceID"],
+      );
+    }
+
+    if (this.configuration && this.configuration.accessToken) {
+      const token = this.configuration.accessToken;
+      const tokenString = await token("bearerAuth", []);
+
+      if (tokenString) {
+        headerParameters["Authorization"] = `Bearer ${tokenString}`;
+      }
+    }
+
+    let urlPath = `/role-bindings`;
+
+    return {
+      path: urlPath,
+      method: "POST",
+      headers: headerParameters,
+      query: queryParameters,
+      body: RoleBindingRequestToJSON(requestParameters["roleBindingRequest"]),
+    };
+  }
+
+  /**
+   * Bind one baseline role to a workspace or resource scope
+   */
+  async createRoleBindingRaw(
+    requestParameters: CreateRoleBindingRequest,
+    initOverrides?: RequestInit | runtime.InitOverrideFunction,
+  ): Promise<runtime.ApiResponse<RoleBinding>> {
+    const requestOptions =
+      await this.createRoleBindingRequestOpts(requestParameters);
+    const response = await this.request(requestOptions, initOverrides);
+
+    return new runtime.JSONApiResponse(response, (jsonValue) =>
+      RoleBindingFromJSON(jsonValue),
+    );
+  }
+
+  /**
+   * Bind one baseline role to a workspace or resource scope
+   */
+  async createRoleBinding(
+    requestParameters: CreateRoleBindingRequest,
+    initOverrides?: RequestInit | runtime.InitOverrideFunction,
+  ): Promise<RoleBinding> {
+    const response = await this.createRoleBindingRaw(
+      requestParameters,
+      initOverrides,
+    );
+    return await response.value();
+  }
+
   /**
    * Creates request options for getLiveness without sending the request
    */
@@ -158,5 +381,158 @@ export class PlatformApi extends runtime.BaseAPI {
   ): Promise<BuildInfo> {
     const response = await this.getVersionRaw(initOverrides);
     return await response.value();
+  }
+
+  /**
+   * Creates request options for listAuthorizedWorkspaces without sending the request
+   */
+  async listAuthorizedWorkspacesRequestOpts(): Promise<runtime.RequestOpts> {
+    const queryParameters: any = {};
+
+    const headerParameters: runtime.HTTPHeaders = {};
+
+    if (this.configuration && this.configuration.accessToken) {
+      const token = this.configuration.accessToken;
+      const tokenString = await token("bearerAuth", []);
+
+      if (tokenString) {
+        headerParameters["Authorization"] = `Bearer ${tokenString}`;
+      }
+    }
+
+    let urlPath = `/workspaces`;
+
+    return {
+      path: urlPath,
+      method: "GET",
+      headers: headerParameters,
+      query: queryParameters,
+    };
+  }
+
+  /**
+   * List only workspaces visible to the current principal
+   */
+  async listAuthorizedWorkspacesRaw(
+    initOverrides?: RequestInit | runtime.InitOverrideFunction,
+  ): Promise<runtime.ApiResponse<WorkspacePage>> {
+    const requestOptions = await this.listAuthorizedWorkspacesRequestOpts();
+    const response = await this.request(requestOptions, initOverrides);
+
+    return new runtime.JSONApiResponse(response, (jsonValue) =>
+      WorkspacePageFromJSON(jsonValue),
+    );
+  }
+
+  /**
+   * List only workspaces visible to the current principal
+   */
+  async listAuthorizedWorkspaces(
+    initOverrides?: RequestInit | runtime.InitOverrideFunction,
+  ): Promise<WorkspacePage> {
+    const response = await this.listAuthorizedWorkspacesRaw(initOverrides);
+    return await response.value();
+  }
+
+  /**
+   * Creates request options for logout without sending the request
+   */
+  async logoutRequestOpts(): Promise<runtime.RequestOpts> {
+    const queryParameters: any = {};
+
+    const headerParameters: runtime.HTTPHeaders = {};
+
+    if (this.configuration && this.configuration.accessToken) {
+      const token = this.configuration.accessToken;
+      const tokenString = await token("bearerAuth", []);
+
+      if (tokenString) {
+        headerParameters["Authorization"] = `Bearer ${tokenString}`;
+      }
+    }
+
+    let urlPath = `/auth/logout`;
+
+    return {
+      path: urlPath,
+      method: "POST",
+      headers: headerParameters,
+      query: queryParameters,
+    };
+  }
+
+  /**
+   * Revoke the current server-side session
+   */
+  async logoutRaw(
+    initOverrides?: RequestInit | runtime.InitOverrideFunction,
+  ): Promise<runtime.ApiResponse<void>> {
+    const requestOptions = await this.logoutRequestOpts();
+    const response = await this.request(requestOptions, initOverrides);
+
+    return new runtime.VoidApiResponse(response);
+  }
+
+  /**
+   * Revoke the current server-side session
+   */
+  async logout(
+    initOverrides?: RequestInit | runtime.InitOverrideFunction,
+  ): Promise<void> {
+    await this.logoutRaw(initOverrides);
+  }
+
+  /**
+   * Creates request options for useBreakGlass without sending the request
+   */
+  async useBreakGlassRequestOpts(
+    requestParameters: UseBreakGlassRequest,
+  ): Promise<runtime.RequestOpts> {
+    if (requestParameters["breakGlassRequest"] == null) {
+      throw new runtime.RequiredError(
+        "breakGlassRequest",
+        'Required parameter "breakGlassRequest" was null or undefined when calling useBreakGlass().',
+      );
+    }
+
+    const queryParameters: any = {};
+
+    const headerParameters: runtime.HTTPHeaders = {};
+
+    headerParameters["Content-Type"] = "application/json";
+
+    let urlPath = `/auth/break-glass`;
+
+    return {
+      path: urlPath,
+      method: "POST",
+      headers: headerParameters,
+      query: queryParameters,
+      body: BreakGlassRequestToJSON(requestParameters["breakGlassRequest"]),
+    };
+  }
+
+  /**
+   * Use explicitly enabled offline emergency access
+   */
+  async useBreakGlassRaw(
+    requestParameters: UseBreakGlassRequest,
+    initOverrides?: RequestInit | runtime.InitOverrideFunction,
+  ): Promise<runtime.ApiResponse<void>> {
+    const requestOptions =
+      await this.useBreakGlassRequestOpts(requestParameters);
+    const response = await this.request(requestOptions, initOverrides);
+
+    return new runtime.VoidApiResponse(response);
+  }
+
+  /**
+   * Use explicitly enabled offline emergency access
+   */
+  async useBreakGlass(
+    requestParameters: UseBreakGlassRequest,
+    initOverrides?: RequestInit | runtime.InitOverrideFunction,
+  ): Promise<void> {
+    await this.useBreakGlassRaw(requestParameters, initOverrides);
   }
 }

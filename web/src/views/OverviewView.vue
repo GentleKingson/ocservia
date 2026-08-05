@@ -23,7 +23,7 @@ const scenarios: Record<typeof mode.value, SimulationScenario> = {
 
 onMounted(async () => {
   await slice.rebuild();
-  slice.connect();
+  void slice.connect();
 });
 
 function eventLabel(type: string): string {

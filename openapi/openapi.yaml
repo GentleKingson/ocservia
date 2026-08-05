@@ -10,6 +10,7 @@ servers:
   - url: /api/v1
 security:
   - oidc: []
+  - bearerAuth: []
 tags:
   - name: platform
     description: Process health and build metadata.
@@ -77,6 +78,7 @@ paths:
       summary: List operations
       tags: [operations]
       parameters:
+        - $ref: "#/components/parameters/WorkspaceId"
         - $ref: "#/components/parameters/Cursor"
         - $ref: "#/components/parameters/PageSize"
       responses:
@@ -160,8 +162,8 @@ paths:
       operationId: listEvents
       summary: Rebuild platform events from durable state
       tags: [events]
-      security: []
       parameters:
+        - $ref: "#/components/parameters/WorkspaceId"
         - name: after
           in: query
           required: false
@@ -177,6 +179,8 @@ paths:
                 $ref: "#/components/schemas/PlatformEventPage"
         "400":
           $ref: "#/components/responses/Problem"
+        "401":
+          $ref: "#/components/responses/Problem"
         default:
           $ref: "#/components/responses/Problem"
   /events/stream:
@@ -184,8 +188,8 @@ paths:
       operationId: watchEvents
       summary: Watch platform events with SSE resume support
       tags: [events]
-      security: []
       parameters:
+        - $ref: "#/components/parameters/WorkspaceId"
         - name: Last-Event-ID
           in: header
           required: false
@@ -199,6 +203,8 @@ paths:
               schema:
                 type: string
         "400":
+          $ref: "#/components/responses/Problem"
+        "401":
           $ref: "#/components/responses/Problem"
         default:
           $ref: "#/components/responses/Problem"
@@ -286,6 +292,7 @@ paths:
       tags: [nodes]
       parameters:
         - $ref: "#/components/parameters/NodeId"
+        - $ref: "#/components/parameters/ApprovalId"
       requestBody:
         required: true
         content:
@@ -312,6 +319,7 @@ paths:
       tags: [nodes]
       parameters:
         - $ref: "#/components/parameters/NodeId"
+        - $ref: "#/components/parameters/ApprovalId"
       requestBody:
         required: true
         content:
@@ -337,6 +345,7 @@ paths:
       summary: List node observed state
       tags: [nodes]
       parameters:
+        - $ref: "#/components/parameters/WorkspaceId"
         - $ref: "#/components/parameters/Cursor"
         - $ref: "#/components/parameters/PageSize"
       responses:
@@ -511,6 +520,7 @@ paths:
       tags: [operations]
       parameters:
         - $ref: "#/components/parameters/NodeId"
+        - $ref: "#/components/parameters/ApprovalId"
         - $ref: "#/components/parameters/IdempotencyKey"
         - $ref: "#/components/parameters/IfMatch"
       requestBody:
@@ -618,13 +628,148 @@ paths:
           $ref: "#/components/responses/Problem"
         default:
           $ref: "#/components/responses/Problem"
+  /auth/login:
+    get:
+      operationId: beginOIDCLogin
+      summary: Begin OIDC Authorization Code login with PKCE S256
+      tags: [platform]
+      security: []
+      responses:
+        "302": { description: Redirect to the configured OIDC provider. }
+        "404": { $ref: "#/components/responses/Problem" }
+        default: { $ref: "#/components/responses/Problem" }
+  /auth/callback:
+    get:
+      operationId: completeOIDCLogin
+      summary: Validate OIDC state, nonce, code, and ID token
+      tags: [platform]
+      security: []
+      parameters:
+        - { name: state, in: query, required: true, schema: { type: string, minLength: 32, maxLength: 128 } }
+        - { name: code, in: query, required: true, schema: { type: string, minLength: 1, maxLength: 4096 } }
+      responses:
+        "302": { description: Secure session established. }
+        "401": { $ref: "#/components/responses/Problem" }
+        default: { $ref: "#/components/responses/Problem" }
+  /auth/logout:
+    post:
+      operationId: logout
+      summary: Revoke the current server-side session
+      tags: [platform]
+      responses:
+        "204": { description: Session revoked and cookie cleared. }
+        "401": { $ref: "#/components/responses/Problem" }
+        default: { $ref: "#/components/responses/Problem" }
+  /auth/break-glass:
+    post:
+      operationId: useBreakGlass
+      summary: Use explicitly enabled offline emergency access
+      tags: [platform]
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/BreakGlassRequest" }
+      responses:
+        "204": { description: Short-lived emergency session established; alert and rotation requirement recorded. }
+        "401": { $ref: "#/components/responses/Problem" }
+        "423": { $ref: "#/components/responses/Problem" }
+        default: { $ref: "#/components/responses/Problem" }
+  /workspaces:
+    get:
+      operationId: listAuthorizedWorkspaces
+      summary: List only workspaces visible to the current principal
+      tags: [platform]
+      responses:
+        "200":
+          description: Authorized workspaces.
+          content: { application/json: { schema: { $ref: "#/components/schemas/WorkspacePage" } } }
+        "401": { $ref: "#/components/responses/Problem" }
+        default: { $ref: "#/components/responses/Problem" }
+  /role-bindings:
+    post:
+      operationId: createRoleBinding
+      summary: Bind one baseline role to a workspace or resource scope
+      tags: [platform]
+      parameters: [{ $ref: "#/components/parameters/WorkspaceId" }]
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: "#/components/schemas/RoleBindingRequest" } } }
+      responses:
+        "201":
+          description: Role binding created.
+          content: { application/json: { schema: { $ref: "#/components/schemas/RoleBinding" } } }
+        "403": { $ref: "#/components/responses/Problem" }
+        default: { $ref: "#/components/responses/Problem" }
+  /approval-requests:
+    post:
+      operationId: createApprovalRequest
+      summary: Request independent approval for a high-risk action
+      tags: [operations]
+      parameters: [{ $ref: "#/components/parameters/WorkspaceId" }]
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: "#/components/schemas/ApprovalRequest" } } }
+      responses:
+        "201":
+          description: Pending approval created.
+          content: { application/json: { schema: { $ref: "#/components/schemas/Approval" } } }
+        "403": { $ref: "#/components/responses/Problem" }
+        default: { $ref: "#/components/responses/Problem" }
+  /approval-requests/{approval_id}:approve:
+    post:
+      operationId: approveRequest
+      summary: Approve another principal's high-risk request
+      tags: [operations]
+      parameters:
+        - { name: approval_id, in: path, required: true, schema: { $ref: "#/components/schemas/UuidV7" } }
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: "#/components/schemas/ApprovalDecision" } } }
+      responses:
+        "200":
+          description: Approval granted.
+          content: { application/json: { schema: { $ref: "#/components/schemas/Approval" } } }
+        "403": { $ref: "#/components/responses/Problem" }
+        "409": { $ref: "#/components/responses/Problem" }
+        default: { $ref: "#/components/responses/Problem" }
+  /audit/events:
+    get:
+      operationId: listAuditEvents
+      summary: List append-only audit events
+      tags: [events]
+      parameters:
+        - { $ref: "#/components/parameters/WorkspaceId" }
+        - { $ref: "#/components/parameters/PageSize" }
+      responses:
+        "200":
+          description: Audit events with chain hashes.
+          content: { application/json: { schema: { $ref: "#/components/schemas/AuditEventPage" } } }
+        "403": { $ref: "#/components/responses/Problem" }
+        default: { $ref: "#/components/responses/Problem" }
+  /audit:verify:
+    post:
+      operationId: verifyAuditChain
+      summary: Verify the workspace audit hash chain and latest checkpoint
+      tags: [events]
+      parameters: [{ $ref: "#/components/parameters/WorkspaceId" }]
+      responses:
+        "200":
+          description: Chain and checkpoint are valid.
+          content: { application/json: { schema: { $ref: "#/components/schemas/AuditVerification" } } }
+        "409": { $ref: "#/components/responses/Problem" }
+        default: { $ref: "#/components/responses/Problem" }
 components:
   securitySchemes:
     oidc:
+      type: apiKey
+      in: cookie
+      name: __Host-ocservia_session
+    bearerAuth:
       type: http
       scheme: bearer
-      bearerFormat: JWT
-      description: Bearer access token issued by the configured OIDC provider.
+      description: Secure, HttpOnly, SameSite server-side session established by OIDC Authorization Code plus PKCE S256.
   parameters:
     Cursor:
       name: cursor
@@ -678,6 +823,18 @@ components:
       schema:
         type: string
         pattern: '^"revision-[1-9][0-9]*"$'
+    WorkspaceId:
+      name: X-Workspace-ID
+      in: header
+      description: Required when the principal can access more than one workspace; otherwise the sole authorized workspace is inferred.
+      required: false
+      schema: { $ref: "#/components/schemas/UuidV7" }
+    ApprovalId:
+      name: X-Approval-ID
+      in: header
+      description: Required by high-risk actions; optional in the base contract so pre-approval clients receive a typed authorization error.
+      required: false
+      schema: { $ref: "#/components/schemas/UuidV7" }
   responses:
     Problem:
       description: Request failed.
@@ -1164,6 +1321,94 @@ components:
             $ref: "#/components/schemas/Operation"
         page:
           $ref: "#/components/schemas/PageInfo"
+    BreakGlassRequest:
+      type: object
+      additionalProperties: false
+      required: [token]
+      properties:
+        token: { type: string, minLength: 32, maxLength: 1024, writeOnly: true }
+    Workspace:
+      type: object
+      additionalProperties: false
+      required: [id, name, slug, version]
+      properties:
+        id: { $ref: "#/components/schemas/UuidV7" }
+        name: { type: string, minLength: 1, maxLength: 256 }
+        slug: { type: string, minLength: 1, maxLength: 256 }
+        version: { type: integer, format: int64, minimum: 1 }
+    WorkspacePage:
+      type: object
+      additionalProperties: false
+      required: [items]
+      properties:
+        items: { type: array, maxItems: 1000, items: { $ref: "#/components/schemas/Workspace" } }
+    RoleBindingRequest:
+      type: object
+      additionalProperties: false
+      required: [identity_id, workspace_id, role, resource_type, reason]
+      properties:
+        identity_id: { $ref: "#/components/schemas/UuidV7" }
+        workspace_id: { $ref: "#/components/schemas/UuidV7" }
+        role: { type: string, enum: [Viewer, Operator, UserManager, ConfigManager, Auditor, SecurityAdmin, PlatformAdmin] }
+        resource_type: { type: string, enum: [workspace, node, resource] }
+        resource_id: { $ref: "#/components/schemas/UuidV7" }
+        reason: { type: string, minLength: 1, maxLength: 512 }
+    RoleBinding:
+      type: object
+      additionalProperties: false
+      required: [id]
+      properties:
+        id: { $ref: "#/components/schemas/UuidV7" }
+    ApprovalRequest:
+      type: object
+      additionalProperties: false
+      required: [action, resource_type, resource_id, reason, ttl_seconds]
+      properties:
+        action: { type: string, minLength: 1, maxLength: 128 }
+        resource_type: { type: string, minLength: 1, maxLength: 64 }
+        resource_id: { $ref: "#/components/schemas/UuidV7" }
+        reason: { type: string, minLength: 1, maxLength: 512 }
+        ttl_seconds: { type: integer, format: int64, minimum: 60, maximum: 86400 }
+    ApprovalDecision:
+      type: object
+      additionalProperties: false
+      required: [reason]
+      properties:
+        reason: { type: string, minLength: 1, maxLength: 512 }
+    Approval:
+      type: object
+      additionalProperties: false
+      required: [id, workspace_id, requester_id, action, resource_type, resource_id, reason, status, expires_at, created_at]
+      properties:
+        id: { $ref: "#/components/schemas/UuidV7" }
+        workspace_id: { $ref: "#/components/schemas/UuidV7" }
+        requester_id: { $ref: "#/components/schemas/UuidV7" }
+        approver_id: { $ref: "#/components/schemas/UuidV7" }
+        action: { type: string }
+        resource_type: { type: string }
+        resource_id: { $ref: "#/components/schemas/UuidV7" }
+        reason: { type: string }
+        status: { type: string, enum: [pending, approved, rejected, expired, consumed] }
+        expires_at: { $ref: "#/components/schemas/UtcDateTime" }
+        created_at: { $ref: "#/components/schemas/UtcDateTime" }
+    AuditEventPage:
+      type: object
+      additionalProperties: false
+      required: [items]
+      properties:
+        items:
+          type: array
+          maxItems: 200
+          items: { type: object, additionalProperties: true }
+    AuditVerification:
+      type: object
+      additionalProperties: false
+      required: [workspace_id, events, valid, checkpoint_valid]
+      properties:
+        workspace_id: { $ref: "#/components/schemas/UuidV7" }
+        events: { type: integer, format: int64, minimum: 0 }
+        valid: { type: boolean }
+        checkpoint_valid: { type: boolean }
     Problem:
       type: object
       additionalProperties: true

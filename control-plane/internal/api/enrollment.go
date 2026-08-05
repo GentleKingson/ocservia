@@ -10,6 +10,7 @@ import (
 	"time"
 
 	transportv1 "github.com/GentleKingson/ocservia/control-plane/gen/proto/ocserv/platform/transport/v1"
+	approvalstore "github.com/GentleKingson/ocservia/control-plane/internal/approvals"
 	"github.com/GentleKingson/ocservia/control-plane/internal/enrollment"
 	"github.com/google/uuid"
 )
@@ -48,6 +49,10 @@ func (s *Server) createEnrollmentToken(w http.ResponseWriter, r *http.Request) {
 		writeProblem(w, r, http.StatusBadRequest, "https://ocservia.dev/problems/invalid-request", "Invalid request", "workspace_id must be UUIDv7")
 		return
 	}
+	if !s.devAuth && workspaceID != workspace(r) {
+		writeProblem(w, r, http.StatusForbidden, "https://ocservia.dev/problems/forbidden", "Access denied", "workspace_id is outside the authorized scope")
+		return
+	}
 	var endpoint []byte
 	if body.ExpectedEndpointID != "" {
 		endpoint, err = hex.DecodeString(body.ExpectedEndpointID)
@@ -60,7 +65,7 @@ func (s *Server) createEnrollmentToken(w http.ResponseWriter, r *http.Request) {
 		writeProblem(w, r, http.StatusBadRequest, "https://ocservia.dev/problems/invalid-request", "Invalid request", "ttl_seconds must be between 1 and 900")
 		return
 	}
-	token, err := s.enrollment.CreateToken(r.Context(), enrollment.TokenSpec{WorkspaceID: workspaceID, Environment: body.Environment, ExpectedNodeName: body.ExpectedNodeName, ExpectedEndpointID: endpoint, TTL: time.Duration(body.TTLSeconds) * time.Second, ActorID: "developer", Reason: body.Reason, RequestID: requestID(r)})
+	token, err := s.enrollment.CreateToken(r.Context(), enrollment.TokenSpec{WorkspaceID: workspaceID, Environment: body.Environment, ExpectedNodeName: body.ExpectedNodeName, ExpectedEndpointID: endpoint, TTL: time.Duration(body.TTLSeconds) * time.Second, ActorID: actorID(r), Reason: body.Reason, RequestID: requestID(r)})
 	if err != nil {
 		s.writeEnrollmentError(w, r, err)
 		return
@@ -87,7 +92,8 @@ func (s *Server) approveNode(w http.ResponseWriter, r *http.Request) {
 	if !decodeStrict(w, r, &body) {
 		return
 	}
-	trust, err := s.enrollment.Approve(r.Context(), enrollment.Approval{NodeID: nodeID, Labels: body.Labels, Policy: body.Policy, Capabilities: body.Capabilities, ActorID: "developer", Reason: body.Reason, RequestID: requestID(r)})
+	actor := principal(r)
+	trust, err := s.enrollment.Approve(r.Context(), enrollment.Approval{NodeID: nodeID, Labels: body.Labels, Policy: body.Policy, Capabilities: body.Capabilities, ActorID: actorID(r), ApprovalID: approvalID(r), IdentityID: actor.IdentityID, SessionID: actor.SessionID, Reason: body.Reason, RequestID: requestID(r)})
 	if err != nil {
 		s.writeEnrollmentError(w, r, err)
 		return
@@ -113,7 +119,8 @@ func (s *Server) revokeNode(w http.ResponseWriter, r *http.Request) {
 	if !decodeStrict(w, r, &body) {
 		return
 	}
-	trust, err := s.enrollment.Revoke(r.Context(), enrollment.Revocation{NodeID: nodeID, ActorID: "developer", Reason: body.Reason, RequestID: requestID(r)})
+	actor := principal(r)
+	trust, err := s.enrollment.Revoke(r.Context(), enrollment.Revocation{NodeID: nodeID, ActorID: actorID(r), ApprovalID: approvalID(r), IdentityID: actor.IdentityID, SessionID: actor.SessionID, Reason: body.Reason, RequestID: requestID(r)})
 	if err != nil {
 		s.writeEnrollmentError(w, r, err)
 		return
@@ -143,6 +150,8 @@ func decodeStrict(w http.ResponseWriter, r *http.Request, target any) bool {
 
 func (s *Server) writeEnrollmentError(w http.ResponseWriter, r *http.Request, err error) {
 	switch {
+	case errors.Is(err, approvalstore.ErrNotReady):
+		writeProblem(w, r, http.StatusConflict, "https://ocservia.dev/problems/approval-required", "Approval required", "a matching unexpired approval from a different principal is required")
 	case errors.Is(err, enrollment.ErrInvalidTransition):
 		writeProblem(w, r, http.StatusConflict, "https://ocservia.dev/problems/invalid-node-state", "Invalid node state", "the requested node transition is not allowed")
 	case errors.Is(err, enrollment.ErrNotFound):

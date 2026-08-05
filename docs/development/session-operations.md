@@ -7,6 +7,10 @@ The first production command set consists of four typed operations:
 - `ip_ban.remove` targets one canonical IPv4 or IPv6 address;
 - `service.reload` targets only `ocserv.service`.
 
+Service reload is a high-risk action. It also requires a matching, unexpired
+approval created by the requester and granted by a different authorized
+principal; the mutation supplies that record in `X-Approval-ID`.
+
 Clients submit a reason, a unique `Idempotency-Key`, and the node revision in
 `If-Match` or `expected_version`. Session requests must also carry the boot ID
 returned by the node API. The API returns `202 Accepted` with an asynchronous

@@ -21,6 +21,7 @@ const pendingAction = ref<{
   label: string;
 }>();
 const reason = ref("");
+const approvalId = ref("");
 const operationBusy = computed(() =>
   fleet.latestOperation
     ? ![
@@ -36,7 +37,7 @@ const operationBusy = computed(() =>
 );
 onMounted(async () => {
   await fleet.rebuild();
-  fleet.connect();
+  void fleet.connect();
 });
 
 function pathLabel(node: { path?: { mode: string; rttMs: number } }): string {
@@ -50,6 +51,7 @@ function openAction(
   label: string,
 ): void {
   reason.value = "";
+  approvalId.value = "";
   pendingAction.value = { kind, target, label };
 }
 
@@ -64,7 +66,7 @@ async function submitAction(): Promise<void> {
     await fleet.terminateSession(action.target, explanation);
   else if (action.kind === "unban")
     await fleet.removeIpBan(action.target, explanation);
-  else await fleet.reloadService(explanation);
+  else await fleet.reloadService(explanation, approvalId.value.trim());
 }
 </script>
 
@@ -263,11 +265,27 @@ async function submitAction(): Promise<void> {
           maxlength="512"
           required
         ></textarea>
+        <template v-if="pendingAction.kind === 'reload'">
+          <label for="approval-id">{{ $t("approvalId") }}</label>
+          <input
+            id="approval-id"
+            v-model="approvalId"
+            autocomplete="off"
+            required
+          />
+        </template>
         <footer>
           <button type="button" @click="pendingAction = undefined">
             {{ $t("cancel") }}
           </button>
-          <button type="submit" class="primary" :disabled="!reason.trim()">
+          <button
+            type="submit"
+            class="primary"
+            :disabled="
+              !reason.trim() ||
+              (pendingAction.kind === 'reload' && !approvalId.trim())
+            "
+          >
             {{ $t("confirm") }}
           </button>
         </footer>

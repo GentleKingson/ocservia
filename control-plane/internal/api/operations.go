@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/GentleKingson/ocservia/control-plane/internal/approvals"
 	operationstore "github.com/GentleKingson/ocservia/control-plane/internal/operations"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -98,7 +99,7 @@ func (s *Server) createControlledCommand(w http.ResponseWriter, r *http.Request,
 		NodeID: nodeID, IdempotencyKey: idempotencyKey, ExpectedVersion: expectedVersion,
 		Kind: kind, SessionID: sessionID, BootID: body.BootID, IP: ip,
 		TTL: time.Duration(ttl) * time.Second, RequestID: requestID(r), Traceparent: requestTraceparent(r),
-		ActorID: "developer", Action: action, Reason: strings.TrimSpace(body.Reason),
+		ActorID: actorID(r), ActorIdentityID: principal(r).IdentityID, ActorSessionID: principal(r).SessionID, ApprovalID: approvalID(r), Action: action, Reason: strings.TrimSpace(body.Reason),
 	})
 	if err != nil {
 		s.writeOperationError(w, r, err)
@@ -110,6 +111,22 @@ func (s *Server) createControlledCommand(w http.ResponseWriter, r *http.Request,
 	w.Header().Set("Location", "/api/v1/operations/"+operation.ID)
 	w.Header().Set("ETag", fmt.Sprintf("\"revision-%d\"", operation.Version))
 	writeJSON(w, http.StatusAccepted, operation)
+}
+
+func actorID(r *http.Request) string {
+	actor := principal(r)
+	if actor.IdentityID != uuid.Nil {
+		return actor.IdentityID.String()
+	}
+	return "developer"
+}
+
+func approvalID(r *http.Request) uuid.UUID {
+	value, err := uuid.Parse(strings.TrimSpace(r.Header.Get("X-Approval-ID")))
+	if err != nil || value.Version() != 7 {
+		return uuid.Nil
+	}
+	return value
 }
 
 func (s *Server) createSyntheticCommand(w http.ResponseWriter, r *http.Request) {
@@ -258,6 +275,8 @@ func (s *Server) writeOperationError(w http.ResponseWriter, r *http.Request, err
 		writeProblem(w, r, http.StatusConflict, "https://ocservia.dev/problems/capability-unavailable", "Capability is unavailable", "the node has not advertised and received approval for this operation")
 	case errors.Is(err, operationstore.ErrTargetNotObserved):
 		writeProblem(w, r, http.StatusConflict, "https://ocservia.dev/problems/target-not-observed", "Target is not observed", "the typed target is not present in the node's current observed state")
+	case errors.Is(err, approvals.ErrNotReady):
+		writeProblem(w, r, http.StatusConflict, "https://ocservia.dev/problems/approval-required", "Approval required", "a matching unexpired approval from a different principal is required")
 	case errors.Is(err, operationstore.ErrNodeUnavailable), errors.Is(err, pgx.ErrNoRows):
 		writeProblem(w, r, http.StatusNotFound, "https://ocservia.dev/problems/not-found", "Resource not found", "the requested node or operation does not exist")
 	default:

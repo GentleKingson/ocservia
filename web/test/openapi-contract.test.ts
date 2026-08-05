@@ -9,7 +9,8 @@ interface OpenApiDocument {
   paths?: Record<string, Record<string, unknown>>;
   components?: {
     securitySchemes?: {
-      oidc?: { type?: unknown; scheme?: unknown };
+      oidc?: { type?: unknown; in?: unknown; name?: unknown };
+      bearerAuth?: { type?: unknown; scheme?: unknown };
     };
     schemas?: {
       UuidV7?: { pattern?: unknown };
@@ -46,6 +47,11 @@ describe("OpenAPI invariants", () => {
         ?.writeOnly,
     ).toBeUndefined();
     expect(document.components?.securitySchemes?.oidc).toMatchObject({
+      type: "apiKey",
+      in: "cookie",
+      name: "__Host-ocservia_session",
+    });
+    expect(document.components?.securitySchemes?.bearerAuth).toMatchObject({
       type: "http",
       scheme: "bearer",
     });
@@ -69,5 +75,23 @@ describe("OpenAPI invariants", () => {
     expect(source).not.toMatch(
       /shell|docker\.sock|systemctl_command|occtl_command/,
     );
+  });
+
+  it("publishes the role binding identifier returned by the server", async () => {
+    const source = await readFile(
+      resolve(import.meta.dirname, "../../openapi/openapi.yaml"),
+      "utf8",
+    );
+    const document = parse(source) as OpenApiDocument;
+    const response = document.paths?.["/role-bindings"]?.post as
+      { responses?: Record<string, unknown> } | undefined;
+
+    expect(response?.responses?.["201"]).toMatchObject({
+      content: {
+        "application/json": {
+          schema: { $ref: "#/components/schemas/RoleBinding" },
+        },
+      },
+    });
   });
 });

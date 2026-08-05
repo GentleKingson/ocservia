@@ -7,18 +7,44 @@ import {
   ScrollText,
   Settings,
 } from "@lucide/vue";
-import { onBeforeUnmount, onMounted } from "vue";
+import type { Workspace } from "@ocservia/api-client";
+import { onBeforeUnmount, onMounted, ref } from "vue";
+import { useRouter } from "vue-router";
 
+import {
+  consumeLoginReturnPath,
+  getWorkspace,
+  listAuthorizedWorkspaces,
+  selectWorkspace,
+} from "./api/client";
 import { useReadinessStore } from "./shared/readiness";
 
 const readiness = useReadinessStore();
+const router = useRouter();
+const workspaces = ref<Workspace[]>([]);
+const selectedWorkspaceId = ref("");
 let refreshTimer: ReturnType<typeof setInterval> | undefined;
 
-onMounted(() => {
+onMounted(async () => {
   void readiness.refresh();
   refreshTimer = setInterval(() => void readiness.refresh(), 15_000);
+  try {
+    workspaces.value = await listAuthorizedWorkspaces();
+    selectedWorkspaceId.value = (await getWorkspace()).id;
+    const returnTo = consumeLoginReturnPath();
+    if (returnTo && returnTo !== router.currentRoute.value.fullPath) {
+      await router.replace(returnTo);
+    }
+  } catch {
+    // The centralized API handler starts OIDC login for unauthenticated users.
+  }
 });
 onBeforeUnmount(() => clearInterval(refreshTimer));
+
+async function changeWorkspace(event: Event): Promise<void> {
+  const workspaceId = (event.target as HTMLSelectElement).value;
+  selectedWorkspaceId.value = (await selectWorkspace(workspaceId)).id;
+}
 
 const links = [
   { to: "/", label: "overview", icon: LayoutDashboard },
@@ -35,8 +61,22 @@ const links = [
         <Activity :size="22" stroke-width="2.4" /><span>{{ $t("brand") }}</span>
       </div>
       <div class="workspace-switcher">
-        <span>{{ $t("workspace") }}</span
-        ><strong>Default</strong>
+        <label for="workspace-select">{{ $t("workspace") }}</label>
+        <select
+          id="workspace-select"
+          v-model="selectedWorkspaceId"
+          :aria-label="$t('workspace')"
+          :disabled="workspaces.length < 2"
+          @change="changeWorkspace"
+        >
+          <option
+            v-for="workspace in workspaces"
+            :key="workspace.id"
+            :value="workspace.id"
+          >
+            {{ workspace.name }}
+          </option>
+        </select>
       </div>
       <nav :aria-label="$t('navigation')">
         <RouterLink

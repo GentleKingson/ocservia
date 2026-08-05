@@ -60,6 +60,7 @@ export const i18n = createI18n({
       removeBan: "Remove ban",
       noIpBans: "No active IP bans",
       reason: "Reason",
+      approvalId: "Approval ID",
       cancel: "Cancel",
       confirm: "Confirm",
       operation_draft: "Draft",

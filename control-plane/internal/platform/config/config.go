@@ -32,6 +32,15 @@ type Config struct {
 	OTLPEndpoint         string
 	DevAuth              bool
 	DevAuthToken         string
+	OIDCIssuer           string
+	OIDCClientID         string
+	OIDCClientSecret     string
+	OIDCRedirectURL      string
+	SessionKey           []byte
+	SessionTTL           time.Duration
+	AuditCheckpointKey   []byte
+	BreakGlassEnabled    bool
+	BreakGlassTokenHash  []byte
 	BodyLimit            int64
 	RequestTimeout       time.Duration
 	ShutdownTimeout      time.Duration
@@ -52,7 +61,7 @@ func Load(args []string, lookup LookupEnv) (Config, error) {
 		BodyLimit: 1 << 20, RequestTimeout: 15 * time.Second, ShutdownTimeout: 10 * time.Second,
 		LogLevelName: "info", TransportSocket: "/run/ocserv-platform/transportd.sock",
 		TrustSocket:      "/run/ocserv-trust/control-plane.sock",
-		TransportTimeout: 3 * time.Second, TransportQueue: 256,
+		TransportTimeout: 3 * time.Second, TransportQueue: 256, SessionTTL: 8 * time.Hour,
 	}
 	setString(lookup, "OCSERV_ENVIRONMENT", &cfg.Environment)
 	setString(lookup, "OCSERV_HTTP_ADDRESS", &cfg.HTTPAddress)
@@ -64,6 +73,22 @@ func Load(args []string, lookup LookupEnv) (Config, error) {
 	setString(lookup, "OCSERV_TRUST_SOCKET", &cfg.TrustSocket)
 	setString(lookup, "OCSERV_CONTROLLER_ENDPOINT_ID", &cfg.ControllerEndpointID)
 	setString(lookup, "OCSERV_DEV_AUTH_TOKEN", &cfg.DevAuthToken)
+	setString(lookup, "OCSERV_OIDC_ISSUER", &cfg.OIDCIssuer)
+	setString(lookup, "OCSERV_OIDC_CLIENT_ID", &cfg.OIDCClientID)
+	setString(lookup, "OCSERV_OIDC_CLIENT_SECRET", &cfg.OIDCClientSecret)
+	setString(lookup, "OCSERV_OIDC_REDIRECT_URL", &cfg.OIDCRedirectURL)
+	if err := setHex(lookup, "OCSERV_SESSION_KEY", &cfg.SessionKey); err != nil {
+		return Config{}, err
+	}
+	if err := setHex(lookup, "OCSERV_AUDIT_CHECKPOINT_KEY", &cfg.AuditCheckpointKey); err != nil {
+		return Config{}, err
+	}
+	if err := setHex(lookup, "OCSERV_BREAK_GLASS_TOKEN_SHA256", &cfg.BreakGlassTokenHash); err != nil {
+		return Config{}, err
+	}
+	if err := setDuration(lookup, "OCSERV_SESSION_TTL", &cfg.SessionTTL); err != nil {
+		return Config{}, err
+	}
 	if err := setInt64(lookup, "OCSERV_BODY_LIMIT_BYTES", &cfg.BodyLimit); err != nil {
 		return Config{}, err
 	}
@@ -92,6 +117,13 @@ func Load(args []string, lookup LookupEnv) (Config, error) {
 			return Config{}, fmt.Errorf("OCSERV_LOCAL_SIMULATOR: %w", err)
 		}
 		cfg.LocalSimulator = parsed
+	}
+	if value, ok := lookup("OCSERV_BREAK_GLASS_ENABLED"); ok {
+		parsed, err := strconv.ParseBool(value)
+		if err != nil {
+			return Config{}, fmt.Errorf("OCSERV_BREAK_GLASS_ENABLED: %w", err)
+		}
+		cfg.BreakGlassEnabled = parsed
 	}
 
 	fs := flag.NewFlagSet("ocserv-control", flag.ContinueOnError)
@@ -142,6 +174,31 @@ func (c Config) Validate() error {
 	}
 	if c.DevAuthToken != "" && (c.Environment != "development" || len(c.DevAuthToken) < 32) {
 		return errors.New("development auth token requires environment=development and at least 32 characters")
+	}
+	oidcConfigured := c.OIDCIssuer != "" || c.OIDCClientID != "" || c.OIDCClientSecret != "" || c.OIDCRedirectURL != "" || len(c.SessionKey) != 0
+	if oidcConfigured {
+		issuer, issuerErr := url.Parse(c.OIDCIssuer)
+		redirect, redirectErr := url.Parse(c.OIDCRedirectURL)
+		if issuerErr != nil || issuer.Scheme != "https" || issuer.Host == "" || issuer.User != nil || issuer.RawQuery != "" || issuer.Fragment != "" ||
+			redirectErr != nil || redirect.Scheme != "https" || redirect.Host == "" || redirect.User != nil || redirect.RawQuery != "" || redirect.Fragment != "" ||
+			c.OIDCClientID == "" || c.OIDCClientSecret == "" || len(c.SessionKey) != 32 || c.SessionTTL < time.Minute || c.SessionTTL > 24*time.Hour {
+			return errors.New("OIDC requires HTTPS issuer/redirect, client credentials, a 32-byte session key, and a session TTL from 1m to 24h")
+		}
+	}
+	if c.Environment == "production" && !oidcConfigured {
+		return errors.New("OIDC is required in production")
+	}
+	if len(c.AuditCheckpointKey) != 0 && len(c.AuditCheckpointKey) != 32 {
+		return errors.New("audit checkpoint key must be 32 bytes")
+	}
+	if c.Environment == "production" && len(c.AuditCheckpointKey) != 32 {
+		return errors.New("audit checkpoint key is required in production")
+	}
+	if c.BreakGlassEnabled && len(c.BreakGlassTokenHash) != 32 {
+		return errors.New("enabled break-glass requires a 32-byte token SHA-256 hash")
+	}
+	if !c.BreakGlassEnabled && len(c.BreakGlassTokenHash) != 0 {
+		return errors.New("break-glass token hash requires explicit enablement")
 	}
 	if c.BodyLimit < 1 || c.RequestTimeout <= 0 || c.ShutdownTimeout <= 0 {
 		return errors.New("limits and timeouts must be positive")
@@ -221,3 +278,21 @@ func setDuration(lookup LookupEnv, name string, target *time.Duration) error {
 	*target = parsed
 	return nil
 }
+
+func setHex(lookup LookupEnv, name string, target *[]byte) error {
+	value, ok := lookup(name)
+	if !ok || value == "" {
+		return nil
+	}
+	decoded, err := hex.DecodeString(value)
+	if err != nil {
+		return fmt.Errorf("%s must be lowercase hex: %w", name, err)
+	}
+	if strings.ToLower(value) != value {
+		return fmt.Errorf("%s must be lowercase hex", name)
+	}
+	*target = decoded
+	return nil
+}
+
+func (c Config) OIDCEnabled() bool { return c.OIDCIssuer != "" }

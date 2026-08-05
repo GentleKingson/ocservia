@@ -14,6 +14,21 @@
 
 import * as runtime from "../runtime";
 import {
+  type Approval,
+  ApprovalFromJSON,
+  ApprovalToJSON,
+} from "../models/Approval";
+import {
+  type ApprovalDecision,
+  ApprovalDecisionFromJSON,
+  ApprovalDecisionToJSON,
+} from "../models/ApprovalDecision";
+import {
+  type ApprovalRequest,
+  ApprovalRequestFromJSON,
+  ApprovalRequestToJSON,
+} from "../models/ApprovalRequest";
+import {
   type ControlledOperationRequest,
   ControlledOperationRequestFromJSON,
   ControlledOperationRequestToJSON,
@@ -44,6 +59,16 @@ import {
   SyntheticCommandRequestToJSON,
 } from "../models/SyntheticCommandRequest";
 
+export interface ApproveRequestRequest {
+  approvalId: string;
+  approvalDecision: ApprovalDecision;
+}
+
+export interface CreateApprovalRequestRequest {
+  approvalRequest: ApprovalRequest;
+  xWorkspaceID?: string;
+}
+
 export interface CreateSyntheticCommandRequest {
   nodeId: string;
   idempotencyKey: string;
@@ -64,6 +89,7 @@ export interface GetOperationRequest {
 }
 
 export interface ListOperationsRequest {
+  xWorkspaceID?: string;
   cursor?: string;
   pageSize?: number;
 }
@@ -72,6 +98,7 @@ export interface ReloadNodeServiceRequest {
   nodeId: string;
   idempotencyKey: string;
   controlledOperationRequest: ControlledOperationRequest;
+  xApprovalID?: string;
   ifMatch?: string;
 }
 
@@ -100,6 +127,161 @@ export interface WatchOperationEventsRequest {
  *
  */
 export class OperationsApi extends runtime.BaseAPI {
+  /**
+   * Creates request options for approveRequest without sending the request
+   */
+  async approveRequestRequestOpts(
+    requestParameters: ApproveRequestRequest,
+  ): Promise<runtime.RequestOpts> {
+    if (requestParameters["approvalId"] == null) {
+      throw new runtime.RequiredError(
+        "approvalId",
+        'Required parameter "approvalId" was null or undefined when calling approveRequest().',
+      );
+    }
+
+    if (requestParameters["approvalDecision"] == null) {
+      throw new runtime.RequiredError(
+        "approvalDecision",
+        'Required parameter "approvalDecision" was null or undefined when calling approveRequest().',
+      );
+    }
+
+    const queryParameters: any = {};
+
+    const headerParameters: runtime.HTTPHeaders = {};
+
+    headerParameters["Content-Type"] = "application/json";
+
+    if (this.configuration && this.configuration.accessToken) {
+      const token = this.configuration.accessToken;
+      const tokenString = await token("bearerAuth", []);
+
+      if (tokenString) {
+        headerParameters["Authorization"] = `Bearer ${tokenString}`;
+      }
+    }
+
+    let urlPath = `/approval-requests/{approval_id}:approve`;
+    urlPath = urlPath.replace(
+      "{approval_id}",
+      encodeURIComponent(String(requestParameters["approvalId"])),
+    );
+
+    return {
+      path: urlPath,
+      method: "POST",
+      headers: headerParameters,
+      query: queryParameters,
+      body: ApprovalDecisionToJSON(requestParameters["approvalDecision"]),
+    };
+  }
+
+  /**
+   * Approve another principal\'s high-risk request
+   */
+  async approveRequestRaw(
+    requestParameters: ApproveRequestRequest,
+    initOverrides?: RequestInit | runtime.InitOverrideFunction,
+  ): Promise<runtime.ApiResponse<Approval>> {
+    const requestOptions =
+      await this.approveRequestRequestOpts(requestParameters);
+    const response = await this.request(requestOptions, initOverrides);
+
+    return new runtime.JSONApiResponse(response, (jsonValue) =>
+      ApprovalFromJSON(jsonValue),
+    );
+  }
+
+  /**
+   * Approve another principal\'s high-risk request
+   */
+  async approveRequest(
+    requestParameters: ApproveRequestRequest,
+    initOverrides?: RequestInit | runtime.InitOverrideFunction,
+  ): Promise<Approval> {
+    const response = await this.approveRequestRaw(
+      requestParameters,
+      initOverrides,
+    );
+    return await response.value();
+  }
+
+  /**
+   * Creates request options for createApprovalRequest without sending the request
+   */
+  async createApprovalRequestRequestOpts(
+    requestParameters: CreateApprovalRequestRequest,
+  ): Promise<runtime.RequestOpts> {
+    if (requestParameters["approvalRequest"] == null) {
+      throw new runtime.RequiredError(
+        "approvalRequest",
+        'Required parameter "approvalRequest" was null or undefined when calling createApprovalRequest().',
+      );
+    }
+
+    const queryParameters: any = {};
+
+    const headerParameters: runtime.HTTPHeaders = {};
+
+    headerParameters["Content-Type"] = "application/json";
+
+    if (requestParameters["xWorkspaceID"] != null) {
+      headerParameters["X-Workspace-ID"] = String(
+        requestParameters["xWorkspaceID"],
+      );
+    }
+
+    if (this.configuration && this.configuration.accessToken) {
+      const token = this.configuration.accessToken;
+      const tokenString = await token("bearerAuth", []);
+
+      if (tokenString) {
+        headerParameters["Authorization"] = `Bearer ${tokenString}`;
+      }
+    }
+
+    let urlPath = `/approval-requests`;
+
+    return {
+      path: urlPath,
+      method: "POST",
+      headers: headerParameters,
+      query: queryParameters,
+      body: ApprovalRequestToJSON(requestParameters["approvalRequest"]),
+    };
+  }
+
+  /**
+   * Request independent approval for a high-risk action
+   */
+  async createApprovalRequestRaw(
+    requestParameters: CreateApprovalRequestRequest,
+    initOverrides?: RequestInit | runtime.InitOverrideFunction,
+  ): Promise<runtime.ApiResponse<Approval>> {
+    const requestOptions =
+      await this.createApprovalRequestRequestOpts(requestParameters);
+    const response = await this.request(requestOptions, initOverrides);
+
+    return new runtime.JSONApiResponse(response, (jsonValue) =>
+      ApprovalFromJSON(jsonValue),
+    );
+  }
+
+  /**
+   * Request independent approval for a high-risk action
+   */
+  async createApprovalRequest(
+    requestParameters: CreateApprovalRequestRequest,
+    initOverrides?: RequestInit | runtime.InitOverrideFunction,
+  ): Promise<Approval> {
+    const response = await this.createApprovalRequestRaw(
+      requestParameters,
+      initOverrides,
+    );
+    return await response.value();
+  }
+
   /**
    * Creates request options for createSyntheticCommand without sending the request
    */
@@ -145,7 +327,7 @@ export class OperationsApi extends runtime.BaseAPI {
 
     if (this.configuration && this.configuration.accessToken) {
       const token = this.configuration.accessToken;
-      const tokenString = await token("oidc", []);
+      const tokenString = await token("bearerAuth", []);
 
       if (tokenString) {
         headerParameters["Authorization"] = `Bearer ${tokenString}`;
@@ -251,7 +433,7 @@ export class OperationsApi extends runtime.BaseAPI {
 
     if (this.configuration && this.configuration.accessToken) {
       const token = this.configuration.accessToken;
-      const tokenString = await token("oidc", []);
+      const tokenString = await token("bearerAuth", []);
 
       if (tokenString) {
         headerParameters["Authorization"] = `Bearer ${tokenString}`;
@@ -328,7 +510,7 @@ export class OperationsApi extends runtime.BaseAPI {
 
     if (this.configuration && this.configuration.accessToken) {
       const token = this.configuration.accessToken;
-      const tokenString = await token("oidc", []);
+      const tokenString = await token("bearerAuth", []);
 
       if (tokenString) {
         headerParameters["Authorization"] = `Bearer ${tokenString}`;
@@ -389,7 +571,7 @@ export class OperationsApi extends runtime.BaseAPI {
 
     if (this.configuration && this.configuration.accessToken) {
       const token = this.configuration.accessToken;
-      const tokenString = await token("oidc", []);
+      const tokenString = await token("bearerAuth", []);
 
       if (tokenString) {
         headerParameters["Authorization"] = `Bearer ${tokenString}`;
@@ -448,9 +630,15 @@ export class OperationsApi extends runtime.BaseAPI {
 
     const headerParameters: runtime.HTTPHeaders = {};
 
+    if (requestParameters["xWorkspaceID"] != null) {
+      headerParameters["X-Workspace-ID"] = String(
+        requestParameters["xWorkspaceID"],
+      );
+    }
+
     if (this.configuration && this.configuration.accessToken) {
       const token = this.configuration.accessToken;
-      const tokenString = await token("oidc", []);
+      const tokenString = await token("bearerAuth", []);
 
       if (tokenString) {
         headerParameters["Authorization"] = `Bearer ${tokenString}`;
@@ -530,6 +718,12 @@ export class OperationsApi extends runtime.BaseAPI {
 
     headerParameters["Content-Type"] = "application/json";
 
+    if (requestParameters["xApprovalID"] != null) {
+      headerParameters["X-Approval-ID"] = String(
+        requestParameters["xApprovalID"],
+      );
+    }
+
     if (requestParameters["idempotencyKey"] != null) {
       headerParameters["Idempotency-Key"] = String(
         requestParameters["idempotencyKey"],
@@ -542,7 +736,7 @@ export class OperationsApi extends runtime.BaseAPI {
 
     if (this.configuration && this.configuration.accessToken) {
       const token = this.configuration.accessToken;
-      const tokenString = await token("oidc", []);
+      const tokenString = await token("bearerAuth", []);
 
       if (tokenString) {
         headerParameters["Authorization"] = `Bearer ${tokenString}`;
@@ -648,7 +842,7 @@ export class OperationsApi extends runtime.BaseAPI {
 
     if (this.configuration && this.configuration.accessToken) {
       const token = this.configuration.accessToken;
-      const tokenString = await token("oidc", []);
+      const tokenString = await token("bearerAuth", []);
 
       if (tokenString) {
         headerParameters["Authorization"] = `Bearer ${tokenString}`;
@@ -758,7 +952,7 @@ export class OperationsApi extends runtime.BaseAPI {
 
     if (this.configuration && this.configuration.accessToken) {
       const token = this.configuration.accessToken;
-      const tokenString = await token("oidc", []);
+      const tokenString = await token("bearerAuth", []);
 
       if (tokenString) {
         headerParameters["Authorization"] = `Bearer ${tokenString}`;
@@ -841,7 +1035,7 @@ export class OperationsApi extends runtime.BaseAPI {
 
     if (this.configuration && this.configuration.accessToken) {
       const token = this.configuration.accessToken;
-      const tokenString = await token("oidc", []);
+      const tokenString = await token("bearerAuth", []);
 
       if (tokenString) {
         headerParameters["Authorization"] = `Bearer ${tokenString}`;
