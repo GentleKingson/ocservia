@@ -52,6 +52,8 @@ func (s *Server) userAction(w http.ResponseWriter, r *http.Request) {
 	switch {
 	case strings.HasSuffix(action, ":disable"):
 		s.mutateUserGroup(w, r, userstate.UserDisable, strings.TrimSuffix(action, ":disable"))
+	case strings.HasSuffix(action, ":enable"):
+		s.mutateUserGroup(w, r, userstate.UserEnable, strings.TrimSuffix(action, ":enable"))
 	case strings.HasSuffix(action, ":rotate-password"):
 		s.mutateUserGroup(w, r, userstate.UserPasswordRotate, strings.TrimSuffix(action, ":rotate-password"))
 	default:

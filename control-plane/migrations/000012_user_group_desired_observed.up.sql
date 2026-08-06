@@ -4,7 +4,7 @@ ALTER TABLE commands
         payload_type IN (
             'synthetic_noop', 'synthetic_echo', 'session_disconnect',
             'session_terminate', 'ip_ban_remove', 'service_reload',
-            'user_create', 'user_disable', 'user_password_rotate', 'group_apply'
+            'user_create', 'user_disable', 'user_enable', 'user_password_rotate', 'group_apply'
         )
     ),
     DROP CONSTRAINT commands_expected_version_check,

@@ -224,6 +224,7 @@ message CommandEnvelope {
     IpBanRemove ip_ban_remove = 113;
     UserPasswordRotate user_password_rotate = 114;
     GroupApply group_apply = 115;
+    UserEnable user_enable = 116;
   }
   CommandDeliveryMode delivery_mode = 109;
   SemanticPayloadHashVersion semantic_payload_hash_version = 110;
@@ -252,6 +253,11 @@ message UserCreate {
 }
 
 message UserDisable {
+  string username = 1;
+  uint64 desired_revision = 2;
+}
+
+message UserEnable {
   string username = 1;
   uint64 desired_revision = 2;
 }

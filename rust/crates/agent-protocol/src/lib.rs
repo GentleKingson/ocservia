@@ -26,7 +26,7 @@ pub struct PrivdRequest {
     /// One of the permanently fixed operations.
     #[prost(
         oneof = "privd_request::Operation",
-        tags = "10, 11, 12, 13, 14, 15, 16, 30, 31, 32, 33, 34, 35, 36, 37"
+        tags = "10, 11, 12, 13, 14, 15, 16, 30, 31, 32, 33, 34, 35, 36, 37, 38"
     )]
     pub operation: Option<privd_request::Operation>,
 }
@@ -37,7 +37,7 @@ pub mod privd_request {
 
     use super::{
         GroupApplyRequest, IpBanRemoveRequest, ReadRequest, ServiceReloadRequest,
-        SessionMutationRequest, UserDisableRequest, UserSecretRequest,
+        SessionMutationRequest, UserDisableRequest, UserEnableRequest, UserSecretRequest,
     };
 
     /// Read-only operation allowlist.
@@ -61,7 +61,7 @@ pub mod privd_request {
         /// List users from the fixed ocpasswd file without hashes.
         #[prost(message, tag = "15")]
         UserList(ReadRequest),
-        /// List groups from the fixed group file.
+        /// List groups derived from authoritative ocpasswd records.
         #[prost(message, tag = "16")]
         GroupList(ReadRequest),
         /// Disconnect one numeric session without invalidating its cookie.
@@ -88,6 +88,9 @@ pub mod privd_request {
         /// Atomically replace one group membership record.
         #[prost(message, tag = "37")]
         GroupApply(GroupApplyRequest),
+        /// Enable a user without changing its password or groups.
+        #[prost(message, tag = "38")]
+        UserEnable(UserEnableRequest),
     }
 }
 
@@ -127,6 +130,15 @@ pub struct UserSecretRequest {
 /// User disable request with no password material.
 #[derive(Clone, PartialEq, Eq, Message)]
 pub struct UserDisableRequest {
+    #[prost(string, tag = "1")]
+    pub username: String,
+    #[prost(uint64, tag = "2")]
+    pub desired_revision: u64,
+}
+
+/// User enable request with no password material.
+#[derive(Clone, PartialEq, Eq, Message)]
+pub struct UserEnableRequest {
     #[prost(string, tag = "1")]
     pub username: String,
     #[prost(uint64, tag = "2")]

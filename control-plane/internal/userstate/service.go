@@ -39,6 +39,7 @@ type MutationKind string
 const (
 	UserCreate         MutationKind = "user_create"
 	UserDisable        MutationKind = "user_disable"
+	UserEnable         MutationKind = "user_enable"
 	UserPasswordRotate MutationKind = "user_password_rotate"
 	GroupApply         MutationKind = "group_apply"
 )
@@ -277,6 +278,12 @@ func writeDesired(ctx context.Context, tx pgx.Tx, request MutationRequest, versi
 			return ErrNotFound
 		}
 		return err
+	case UserEnable:
+		result, err := tx.Exec(ctx, `UPDATE desired_users SET enabled=true,version=$3,revision=$4,fingerprint=$5,updated_at=$6 WHERE node_id=$1 AND username=$2`, request.NodeID, request.Name, version, revision, fingerprint, now)
+		if err == nil && result.RowsAffected() != 1 {
+			return ErrNotFound
+		}
+		return err
 	case UserPasswordRotate:
 		result, err := tx.Exec(ctx, `UPDATE desired_users SET version=$3,revision=$4,updated_at=$5 WHERE node_id=$1 AND username=$2`, request.NodeID, request.Name, version, revision, now)
 		if err == nil && result.RowsAffected() != 1 {
@@ -302,6 +309,8 @@ func marshalEnvelope(request MutationRequest, operationID, commandID uuid.UUID, 
 		envelope.Payload = &agentv1.CommandEnvelope_UserCreate{UserCreate: &agentv1.UserCreate{Username: request.Name, SealedPassword: request.SealedPassword, SecretKeyId: request.SecretKeyID, DesiredRevision: desiredRevision}}
 	case UserDisable:
 		envelope.Payload = &agentv1.CommandEnvelope_UserDisable{UserDisable: &agentv1.UserDisable{Username: request.Name, DesiredRevision: desiredRevision}}
+	case UserEnable:
+		envelope.Payload = &agentv1.CommandEnvelope_UserEnable{UserEnable: &agentv1.UserEnable{Username: request.Name, DesiredRevision: desiredRevision}}
 	case UserPasswordRotate:
 		envelope.Payload = &agentv1.CommandEnvelope_UserPasswordRotate{UserPasswordRotate: &agentv1.UserPasswordRotate{Username: request.Name, SealedPassword: request.SealedPassword, SecretKeyId: request.SecretKeyID, DesiredRevision: desiredRevision}}
 	case GroupApply:
@@ -317,17 +326,18 @@ func marshalEnvelope(request MutationRequest, operationID, commandID uuid.UUID, 
 
 func desiredFingerprint(kind MutationKind, name string, members []string) [32]byte {
 	enabled := kind != UserDisable
-	value := struct {
-		Name    string   `json:"name"`
-		Enabled *bool    `json:"enabled,omitempty"`
-		Members []string `json:"members,omitempty"`
-	}{Name: name}
+	var encoded []byte
 	if kind == GroupApply {
-		value.Members = members
+		encoded, _ = json.Marshal(struct {
+			Name    string   `json:"name"`
+			Members []string `json:"members"`
+		}{Name: name, Members: members})
 	} else {
-		value.Enabled = &enabled
+		encoded, _ = json.Marshal(struct {
+			Name    string `json:"name"`
+			Enabled bool   `json:"enabled"`
+		}{Name: name, Enabled: enabled})
 	}
-	encoded, _ := json.Marshal(value)
 	return sha256.Sum256(encoded)
 }
 
@@ -347,6 +357,9 @@ func requestHash(request MutationRequest) [32]byte {
 }
 
 func normalizeMembers(members []string) []string {
+	if len(members) == 0 {
+		return []string{}
+	}
 	result := slices.Clone(members)
 	slices.Sort(result)
 	return slices.Compact(result)
@@ -363,6 +376,8 @@ func actionFor(kind MutationKind) string {
 		return "user.create"
 	case UserDisable:
 		return "user.disable"
+	case UserEnable:
+		return "user.enable"
 	case UserPasswordRotate:
 		return "user.password.rotate"
 	default:
@@ -374,14 +389,14 @@ func convergence(item ResourceState, nodeStatus string) string {
 	if item.DesiredVersion == nil {
 		return "drifted"
 	}
-	if item.ObservedRevision != nil && item.DesiredFingerprint == item.ObservedFingerprint {
-		return "converged"
-	}
-	if nodeStatus == "offline" {
-		return "offline_pending"
-	}
 	if item.OperationState != nil && (*item.OperationState == "queued" || *item.OperationState == "dispatched" || *item.OperationState == "accepted" || *item.OperationState == "running") {
+		if nodeStatus == "offline" {
+			return "offline_pending"
+		}
 		return "pending"
+	}
+	if item.DesiredRevision != nil && item.ObservedRevision != nil && *item.DesiredRevision == *item.ObservedRevision && item.DesiredFingerprint == item.ObservedFingerprint {
+		return "converged"
 	}
 	return "drifted"
 }

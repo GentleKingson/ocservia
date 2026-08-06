@@ -225,7 +225,7 @@ func routeMethod(path string) (string, bool) {
 	if len(parts) == 5 && parts[0] == "api" && parts[1] == "v1" && parts[2] == "nodes" && parts[3] != "" && parts[4] == "users" {
 		return http.MethodPost, true
 	}
-	if len(parts) == 6 && parts[0] == "api" && parts[1] == "v1" && parts[2] == "nodes" && parts[3] != "" && parts[4] == "users" && (strings.HasSuffix(parts[5], ":disable") || strings.HasSuffix(parts[5], ":rotate-password")) {
+	if len(parts) == 6 && parts[0] == "api" && parts[1] == "v1" && parts[2] == "nodes" && parts[3] != "" && parts[4] == "users" && (strings.HasSuffix(parts[5], ":disable") || strings.HasSuffix(parts[5], ":enable") || strings.HasSuffix(parts[5], ":rotate-password")) {
 		return http.MethodPost, true
 	}
 	if len(parts) == 6 && parts[0] == "api" && parts[1] == "v1" && parts[2] == "nodes" && parts[3] != "" && parts[4] == "groups" && parts[5] != "" {

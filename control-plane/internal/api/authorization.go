@@ -110,7 +110,7 @@ func routeAction(r *http.Request) string {
 		return "ip_ban.remove"
 	case strings.HasSuffix(path, "/service:reload"):
 		return "service.reload"
-	case strings.HasSuffix(path, ":disable"), strings.HasSuffix(path, ":rotate-password"), strings.HasSuffix(path, "/users"):
+	case strings.HasSuffix(path, ":disable"), strings.HasSuffix(path, ":enable"), strings.HasSuffix(path, ":rotate-password"), strings.HasSuffix(path, "/users"):
 		return "user.manage"
 	case strings.Contains(path, "/groups/"):
 		return "group.manage"

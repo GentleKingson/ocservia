@@ -11,7 +11,9 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use ocservia_agent_protocol::{
     PrivdRequest, PrivdResponse, ReadRequest, privd_request, read_frame, write_frame,
 };
-use ocservia_command_journal::{AcceptOutcome, CommandRecord, CommandState, Journal};
+use ocservia_command_journal::{
+    AcceptOutcome, AppliedResourceRevision, CommandRecord, CommandState, Journal,
+};
 use ocservia_contracts::generated::ocserv::platform::agent::v1::{
     CommandDeliveryMode, CommandEnvelope, SemanticPayloadHashVersion, command_envelope,
 };
@@ -329,6 +331,48 @@ impl CommandExecutor {
         if record.command_id != command.command_id {
             return Err(CommandError::IdentityConflict);
         }
+        Ok(CommandOutcome {
+            record,
+            replayed: false,
+        })
+    }
+
+    /// Atomically persists a successful desired-state result and applied revision.
+    ///
+    /// # Errors
+    ///
+    /// Reports an unknown outcome if the post-effect `SQLite` transaction cannot commit.
+    pub fn complete_external_applied(
+        &mut self,
+        command: &ExternalCommand,
+        resource_type: &str,
+        resource_key: &str,
+        revision: u64,
+        now: i64,
+    ) -> Result<CommandOutcome, CommandError> {
+        let before = self
+            .journal
+            .command(&command.key)
+            .map_err(pre_effect_failure)?
+            .ok_or(CommandError::Rejected("command_not_accepted"))?;
+        let record = self
+            .journal
+            .complete_external_with_revision(
+                &command.key,
+                &command.command_id,
+                AppliedResourceRevision {
+                    resource_type,
+                    resource_key,
+                    revision,
+                },
+                b"applied",
+                now,
+            )
+            .map_err(|source| CommandError::OutcomeUnknown {
+                code: "result_persistence_failed",
+                record: Box::new(before),
+                source: Box::new(source),
+            })?;
         Ok(CommandOutcome {
             record,
             replayed: false,
@@ -674,6 +718,9 @@ pub fn semantic_payload_hash(envelope: &CommandEnvelope) -> Result<[u8; 32], Com
         Some(command_envelope::Payload::UserDisable(payload)) => {
             ("ocserv.users.write", payload.encode_to_vec())
         }
+        Some(command_envelope::Payload::UserEnable(payload)) => {
+            ("ocserv.users.write", payload.encode_to_vec())
+        }
         Some(command_envelope::Payload::UserPasswordRotate(payload)) => {
             ("ocserv.users.write", payload.encode_to_vec())
         }
@@ -768,6 +815,10 @@ pub fn semantic_payload_hash_v1(envelope: &CommandEnvelope) -> Result<[u8; 32], 
                 &payload.members,
                 payload.desired_revision,
             )?,
+        ),
+        Some(command_envelope::Payload::UserEnable(payload)) => (
+            116_u32,
+            canonical_named_payload(&payload.username, &[], payload.desired_revision)?,
         ),
         _ => return Err(CommandError::Rejected("capability_rejected")),
     };
@@ -922,6 +973,11 @@ fn validate_payload(
             validate_revision(payload.desired_revision)?;
             ("ocserv.users.write", Vec::new(), true)
         }
+        Some(command_envelope::Payload::UserEnable(payload)) => {
+            validate_name(&payload.username)?;
+            validate_revision(payload.desired_revision)?;
+            ("ocserv.users.write", Vec::new(), true)
+        }
         Some(command_envelope::Payload::UserPasswordRotate(payload)) => {
             validate_name(&payload.username)?;
             validate_sealed_secret(
@@ -955,6 +1011,7 @@ fn validate_desired_transition(envelope: &CommandEnvelope) -> Result<(), Command
     let desired = match envelope.payload.as_ref() {
         Some(command_envelope::Payload::UserCreate(value)) => Some(value.desired_revision),
         Some(command_envelope::Payload::UserDisable(value)) => Some(value.desired_revision),
+        Some(command_envelope::Payload::UserEnable(value)) => Some(value.desired_revision),
         Some(command_envelope::Payload::UserPasswordRotate(value)) => Some(value.desired_revision),
         Some(command_envelope::Payload::GroupApply(value)) => Some(value.desired_revision),
         _ => None,

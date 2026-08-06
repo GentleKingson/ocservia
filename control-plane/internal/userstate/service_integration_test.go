@@ -90,6 +90,34 @@ func TestDesiredStateAtomicOfflineDriftVersionAndNodeScopeIntegration(t *testing
 	}
 }
 
+func TestEnableQueuesAuditableDesiredRevisionIntegration(t *testing.T) {
+	service, pool, workspaceID, nodeID := integrationService(t, "active")
+	disabled := desiredFingerprint(UserDisable, "alice", nil)
+	if _, err := pool.Exec(context.Background(), `INSERT INTO desired_users(node_id,username,enabled,version,revision,fingerprint,created_at,updated_at)VALUES($1,'alice',false,3,3,$2,now(),now())`, nodeID, disabled[:]); err != nil {
+		t.Fatal(err)
+	}
+	request := mutation(nodeID, "enable-alice", UserEnable, "alice", 3)
+	operation, replayed, err := service.Mutate(context.Background(), request)
+	if err != nil || replayed || operation.State != "queued" {
+		t.Fatalf("enable=%+v replayed=%v err=%v", operation, replayed, err)
+	}
+	var enabled bool
+	var version, revision int64
+	var envelope []byte
+	var auditAction string
+	err = pool.QueryRow(context.Background(), `SELECT d.enabled,d.version,d.revision,c.envelope,(SELECT action FROM audit_events WHERE workspace_id=$1 AND command_id=c.id) FROM desired_users d JOIN commands c ON c.node_id=d.node_id AND c.resource_type='user' AND c.resource_key=d.username WHERE d.node_id=$2 AND d.username='alice'`, workspaceID, nodeID).Scan(&enabled, &version, &revision, &envelope, &auditAction)
+	if err != nil || !enabled || version != 4 || revision != 4 || auditAction != "user.enable" {
+		t.Fatalf("enabled=%v version=%d revision=%d audit=%q err=%v", enabled, version, revision, auditAction, err)
+	}
+	var command agentv1.CommandEnvelope
+	if err := proto.Unmarshal(envelope, &command); err != nil {
+		t.Fatal(err)
+	}
+	if command.GetUserEnable().GetUsername() != "alice" || command.GetUserEnable().GetDesiredRevision() != 4 {
+		t.Fatalf("typed enable=%v", &command)
+	}
+}
+
 func mutation(nodeID uuid.UUID, key string, kind MutationKind, name string, version int64) MutationRequest {
 	request := MutationRequest{NodeID: nodeID, Kind: kind, Name: name, IdempotencyKey: key, ExpectedVersion: version, TTL: time.Hour, ActorID: "operator", Reason: "ticket", RequestID: "request-" + key, Traceparent: testTraceparent}
 	if kind == UserCreate || kind == UserPasswordRotate {

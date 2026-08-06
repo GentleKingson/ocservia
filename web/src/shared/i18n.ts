@@ -69,6 +69,7 @@ export const i18n = createI18n({
       group: "Group",
       createUser: "Create user",
       disableUser: "Disable user",
+      enableUser: "Enable user",
       rotatePassword: "Rotate password",
       applyGroup: "Apply group",
       secretKeyId: "Secret key ID",

@@ -12,7 +12,8 @@ use ocservia_agent::{
 };
 use ocservia_agent_protocol::{
     ErrorKind, GroupApplyRequest, IpBanRemoveRequest, PrivdResponse, ServiceReloadRequest,
-    SessionMutationRequest, UserDisableRequest, UserSecretRequest, privd_request, privd_response,
+    SessionMutationRequest, UserDisableRequest, UserEnableRequest, UserSecretRequest,
+    privd_request, privd_response,
 };
 use ocservia_command_journal::{CommandRecord, CommandState, Journal, TelemetryInsert};
 use ocservia_contracts::decode_strict_command_envelope;
@@ -157,6 +158,8 @@ async fn connect_once(
             "ocserv.session.terminate".to_owned(),
             "ocserv.ip_ban.remove".to_owned(),
             "ocserv.service.reload".to_owned(),
+            "ocserv.users.write".to_owned(),
+            "ocserv.groups.write".to_owned(),
         ],
         ocserv_version: "unknown".to_owned(),
         os_release: session.os_release.to_owned(),
@@ -250,6 +253,8 @@ async fn handle_command_stream(
             "ocserv.session.terminate",
             "ocserv.ip_ban.remove",
             "ocserv.service.reload",
+            "ocserv.users.write",
+            "ocserv.groups.write",
         ]),
         now_unix_seconds,
         cancelled: false,
@@ -261,6 +266,11 @@ async fn handle_command_stream(
                 | command_envelope::Payload::SessionTerminate(_)
                 | command_envelope::Payload::IpBanRemove(_)
                 | command_envelope::Payload::ServiceReload(_)
+                | command_envelope::Payload::UserCreate(_)
+                | command_envelope::Payload::UserDisable(_)
+                | command_envelope::Payload::UserEnable(_)
+                | command_envelope::Payload::UserPasswordRotate(_)
+                | command_envelope::Payload::GroupApply(_)
         )
     );
     let execution = if external {
@@ -370,6 +380,12 @@ async fn execute_external_command(
                 desired_revision: payload.desired_revision,
             })
         }
+        Some(command_envelope::Payload::UserEnable(payload)) => {
+            privd_request::Operation::UserEnable(UserEnableRequest {
+                username: payload.username.clone(),
+                desired_revision: payload.desired_revision,
+            })
+        }
         Some(command_envelope::Payload::UserPasswordRotate(payload)) => {
             privd_request::Operation::UserPasswordRotate(UserSecretRequest {
                 username: payload.username.clone(),
@@ -389,9 +405,21 @@ async fn execute_external_command(
     };
     match session.privd.call(operation).await {
         Ok(response) => match response.result {
-            Some(privd_response::Result::Mutation(result)) if result.applied => session
-                .command_executor
-                .complete_external(&command, Ok(b"applied"), now),
+            Some(privd_response::Result::Mutation(result)) if result.applied => {
+                if let Some((resource_type, resource_key, revision)) = desired_resource(envelope) {
+                    session.command_executor.complete_external_applied(
+                        &command,
+                        resource_type,
+                        resource_key,
+                        revision,
+                        now,
+                    )
+                } else {
+                    session
+                        .command_executor
+                        .complete_external(&command, Ok(b"applied"), now)
+                }
+            }
             Some(privd_response::Result::Error(error))
                 if matches!(
                     ErrorKind::try_from(error.kind).unwrap_or(ErrorKind::Unspecified),
@@ -415,6 +443,27 @@ async fn execute_external_command(
                 .command_executor
                 .mark_external_unknown(&command, "privd_transport_unknown", now)
         }
+    }
+}
+
+fn desired_resource(envelope: &CommandEnvelope) -> Option<(&'static str, &str, u64)> {
+    match envelope.payload.as_ref()? {
+        command_envelope::Payload::UserCreate(value) => {
+            Some(("user", &value.username, value.desired_revision))
+        }
+        command_envelope::Payload::UserDisable(value) => {
+            Some(("user", &value.username, value.desired_revision))
+        }
+        command_envelope::Payload::UserEnable(value) => {
+            Some(("user", &value.username, value.desired_revision))
+        }
+        command_envelope::Payload::UserPasswordRotate(value) => {
+            Some(("user", &value.username, value.desired_revision))
+        }
+        command_envelope::Payload::GroupApply(value) => {
+            Some(("group", &value.group_name, value.desired_revision))
+        }
+        _ => None,
     }
 }
 
@@ -602,7 +651,12 @@ fn build_telemetry(
                         UserObservation {
                             username: user.username.clone(),
                             enabled: user.enabled,
-                            revision: 0,
+                            revision: session
+                                .journal
+                                .applied_revision("user", &user.username)
+                                .ok()
+                                .flatten()
+                                .unwrap_or(0),
                             fingerprint_sha256: sha2::Sha256::digest(canonical.as_bytes()).to_vec(),
                         }
                     })
@@ -626,7 +680,12 @@ fn build_telemetry(
                         GroupObservation {
                             group_name: group.group_name.clone(),
                             members: group.members.clone(),
-                            revision: 0,
+                            revision: session
+                                .journal
+                                .applied_revision("group", &group.group_name)
+                                .ok()
+                                .flatten()
+                                .unwrap_or(0),
                             fingerprint_sha256: sha2::Sha256::digest(canonical.as_bytes()).to_vec(),
                         }
                     })
@@ -634,6 +693,21 @@ fn build_telemetry(
             }
             _ => {}
         }
+    }
+    if let Ok(applied_groups) = session.journal.applied_revisions("group") {
+        for (group_name, revision) in applied_groups {
+            if groups.iter().any(|group| group.group_name == group_name) {
+                continue;
+            }
+            let canonical = format!("{{\"name\":\"{group_name}\",\"members\":[]}}");
+            groups.push(GroupObservation {
+                group_name,
+                members: Vec::new(),
+                revision,
+                fingerprint_sha256: sha2::Sha256::digest(canonical.as_bytes()).to_vec(),
+            });
+        }
+        groups.sort_by(|left, right| left.group_name.cmp(&right.group_name));
     }
     let paths = connection.paths();
     let selected = paths.iter().find(iroh::endpoint::Path::is_selected);

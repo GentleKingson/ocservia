@@ -292,6 +292,13 @@ async fn execute(
                 .await
                 .map(privd_response::Result::Mutation),
         ),
+        privd_request::Operation::UserEnable(request) => (
+            "user_enable",
+            adapter
+                .user_enable(&request.username)
+                .await
+                .map(privd_response::Result::Mutation),
+        ),
         privd_request::Operation::UserPasswordRotate(request) => (
             "user_password_rotate",
             adapter

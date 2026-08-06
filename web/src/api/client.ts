@@ -313,6 +313,29 @@ export async function disableUser(
     requestInit(signal),
   );
 }
+export async function enableUser(
+  nodeId: string,
+  username: string,
+  version: number,
+  reason: string,
+  signal?: AbortSignal,
+): Promise<Operation> {
+  const request = desiredRequest(version, reason);
+  return operations.enableNodeUser(
+    {
+      nodeId,
+      username,
+      idempotencyKey: request.idempotencyKey,
+      ifMatch: request.ifMatch,
+      desiredMutationRequest: {
+        reason: request.reason,
+        expectedVersion: version,
+        ttlSeconds: request.ttlSeconds,
+      },
+    },
+    requestInit(signal),
+  );
+}
 export async function rotateUserPassword(
   nodeId: string,
   username: string,

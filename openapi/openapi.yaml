@@ -635,6 +635,27 @@ paths:
         "404": { $ref: "#/components/responses/Problem" }
         "409": { $ref: "#/components/responses/Problem" }
         default: { $ref: "#/components/responses/Problem" }
+  /nodes/{node_id}/users/{username}:enable:
+    post:
+      operationId: enableNodeUser
+      summary: Queue enabling one node-scoped user without changing its password or groups
+      tags: [operations]
+      parameters:
+        - $ref: "#/components/parameters/NodeId"
+        - $ref: "#/components/parameters/Username"
+        - $ref: "#/components/parameters/IdempotencyKey"
+        - $ref: "#/components/parameters/DesiredIfMatch"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/DesiredMutationRequest" }
+      responses:
+        "202": { $ref: "#/components/responses/OperationAccepted" }
+        "400": { $ref: "#/components/responses/Problem" }
+        "404": { $ref: "#/components/responses/Problem" }
+        "409": { $ref: "#/components/responses/Problem" }
+        default: { $ref: "#/components/responses/Problem" }
   /nodes/{node_id}/users/{username}:rotate-password:
     post:
       operationId: rotateNodeUserPassword

@@ -51,3 +51,27 @@ func TestMembersAreCanonicalAndRequestHashBindsCiphertext(t *testing.T) {
 		t.Fatal("idempotency hash did not bind sealed ciphertext")
 	}
 }
+
+func TestConvergenceRequiresAppliedRevisionAndPendingWins(t *testing.T) {
+	desired, observed := int64(2), int64(1)
+	state := ResourceState{
+		DesiredVersion:      &desired,
+		DesiredRevision:     &desired,
+		ObservedRevision:    &observed,
+		DesiredFingerprint:  "same",
+		ObservedFingerprint: "same",
+	}
+	if got := convergence(state, "active"); got != "drifted" {
+		t.Fatalf("stale applied revision reported %q", got)
+	}
+	pending := "queued"
+	state.OperationState = &pending
+	if got := convergence(state, "offline"); got != "offline_pending" {
+		t.Fatalf("offline queued revision reported %q", got)
+	}
+	state.OperationState = nil
+	state.ObservedRevision = &desired
+	if got := convergence(state, "active"); got != "converged" {
+		t.Fatalf("matching revision and fingerprint reported %q", got)
+	}
+}

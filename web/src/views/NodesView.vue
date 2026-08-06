@@ -11,6 +11,7 @@ import {
   Users,
   UserPlus,
   UserX,
+  UserCheck,
   KeyRound,
   ListPlus,
 } from "@lucide/vue";
@@ -28,7 +29,7 @@ const reason = ref("");
 const approvalId = ref("");
 const stateTab = ref<"users" | "groups">("users");
 const desiredDialog = ref<{
-  kind: "create" | "disable" | "rotate" | "group";
+  kind: "create" | "disable" | "enable" | "rotate" | "group";
   name: string;
   version: number;
 }>();
@@ -91,7 +92,7 @@ async function submitAction(): Promise<void> {
 }
 
 function openDesired(
-  kind: "create" | "disable" | "rotate" | "group",
+  kind: "create" | "disable" | "enable" | "rotate" | "group",
   name = "",
   version = 0,
 ): void {
@@ -122,6 +123,8 @@ async function submitDesired(): Promise<void> {
     );
   else if (dialog.kind === "disable")
     await fleet.disableUser(dialog.name, dialog.version, explanation);
+  else if (dialog.kind === "enable")
+    await fleet.enableUser(dialog.name, dialog.version, explanation);
   else if (dialog.kind === "rotate")
     await fleet.rotateUserPassword(
       dialog.name,
@@ -328,13 +331,21 @@ async function submitDesired(): Promise<void> {
                 <KeyRound :size="14" />
               </button>
               <button
+                v-if="item.desiredEnabled === false"
+                type="button"
+                :disabled="operationBusy || !item.desiredVersion"
+                :title="$t('enableUser')"
+                @click="
+                  openDesired('enable', item.name, item.desiredVersion ?? 0)
+                "
+              >
+                <UserCheck :size="14" />
+              </button>
+              <button
+                v-else
                 type="button"
                 class="danger"
-                :disabled="
-                  operationBusy ||
-                  !item.desiredVersion ||
-                  item.desiredEnabled === false
-                "
+                :disabled="operationBusy || !item.desiredVersion"
                 :title="$t('disableUser')"
                 @click="
                   openDesired('disable', item.name, item.desiredVersion ?? 0)
@@ -473,9 +484,11 @@ async function submitDesired(): Promise<void> {
                   ? "createUser"
                   : desiredDialog.kind === "disable"
                     ? "disableUser"
-                    : desiredDialog.kind === "rotate"
-                      ? "rotatePassword"
-                      : "applyGroup",
+                    : desiredDialog.kind === "enable"
+                      ? "enableUser"
+                      : desiredDialog.kind === "rotate"
+                        ? "rotatePassword"
+                        : "applyGroup",
               )
             }}
           </h2>

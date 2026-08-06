@@ -26,6 +26,7 @@ import {
   listNodeUserGroupState,
   createUser,
   disableUser,
+  enableUser,
   rotateUserPassword,
   applyGroup,
   type WorkspaceContext,
@@ -325,6 +326,15 @@ export const useFleetStore = defineStore("fleet", () => {
       disableUser(node.id, username, version, reason, signal),
     );
   }
+  async function enableUserAction(
+    username: string,
+    version: number,
+    reason: string,
+  ): Promise<void> {
+    await runOperation((node, signal) =>
+      enableUser(node.id, username, version, reason, signal),
+    );
+  }
   async function rotatePasswordAction(
     username: string,
     version: number,
@@ -446,6 +456,7 @@ export const useFleetStore = defineStore("fleet", () => {
     reloadService: reload,
     createUser: createUserAction,
     disableUser: disableUserAction,
+    enableUser: enableUserAction,
     rotateUserPassword: rotatePasswordAction,
     applyGroup: applyGroupAction,
   };

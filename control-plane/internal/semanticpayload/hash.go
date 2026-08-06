@@ -72,6 +72,10 @@ func HashV1(envelope *agentv1.CommandEnvelope) ([sha256.Size]byte, error) {
 		payloadKind = 102
 		payload := envelope.GetUserDisable()
 		canonicalPayload = canonicalStringsAndBytes([]string{payload.GetUsername()}, nil, payload.GetDesiredRevision())
+	case *agentv1.CommandEnvelope_UserEnable:
+		payloadKind = 116
+		payload := envelope.GetUserEnable()
+		canonicalPayload = canonicalStringsAndBytes([]string{payload.GetUsername()}, nil, payload.GetDesiredRevision())
 	case *agentv1.CommandEnvelope_UserPasswordRotate:
 		payloadKind = 114
 		payload := envelope.GetUserPasswordRotate()
