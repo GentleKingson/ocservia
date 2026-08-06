@@ -448,6 +448,9 @@ impl Adapter {
                 )
                 .await?;
             }
+            // ocpasswd may replace its target inode, so restore markers from the
+            // still-authoritative file before committing the staged result.
+            copy_effect_markers(&self.resources.user_file, &staging)?;
             set_effect_marker(&staging, mode.mutation_kind(), username, desired_revision)?;
             commit_staging(&staging, &self.resources.user_file).await
         }
@@ -515,6 +518,7 @@ impl Adapter {
             } else {
                 "user_enable"
             };
+            copy_effect_markers(&self.resources.user_file, &staging)?;
             set_effect_marker(&staging, mutation_kind, username, desired_revision)?;
             commit_staging(&staging, &self.resources.user_file).await
         }
