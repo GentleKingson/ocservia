@@ -20,7 +20,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           fetch-depth: 0
           persist-credentials: false
@@ -37,13 +37,13 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
       - name: Runner preflight
         run: scripts/ci-preflight.sh
       - name: Restore verified toolchain downloads
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: |
             .cache/downloads
@@ -59,14 +59,14 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           fetch-depth: 0
           persist-credentials: false
       - name: Runner preflight
         run: scripts/ci-preflight.sh
       - name: Restore verified toolchain downloads
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: |
             .cache/downloads
@@ -98,7 +98,7 @@ jobs:
           git diff --binary >"${ARTIFACT_DIR}/generated-output.diff"
       - name: Upload contract diagnostics
         if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: contracts-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/artifacts/contracts
@@ -111,13 +111,13 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
       - name: Runner preflight
         run: scripts/ci-preflight.sh
       - name: Restore verified tools
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: |
             .cache/downloads
@@ -125,7 +125,7 @@ jobs:
             .tools
           key: tooling-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'scripts/checksums.txt', 'web/package-lock.json') }}
       - name: Restore Go build cache
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: |
             .cache/go-build
@@ -145,7 +145,7 @@ jobs:
           scripts/go-check.sh 2>&1 | tee "${ARTIFACT_DIR}/go-check.log"
       - name: Upload Go diagnostics
         if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: go-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/artifacts/go
@@ -160,13 +160,13 @@ jobs:
     env:
       RUN_ID: database-${{ github.run_id }}-${{ github.run_attempt }}-database-integration
     steps:
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
       - name: Runner preflight
         run: scripts/ci-preflight.sh
       - name: Restore verified tools
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: |
             .cache/downloads
@@ -174,7 +174,7 @@ jobs:
             .tools
           key: tooling-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'scripts/checksums.txt', 'web/package-lock.json') }}
       - name: Restore database Go build cache
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: |
             .cache/go-build
@@ -189,7 +189,7 @@ jobs:
         run: scripts/database-integration.sh
       - name: Upload database diagnostics
         if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: database-${{ github.run_id }}-${{ github.run_attempt }}-pg17-pg18
           path: ${{ runner.temp }}/artifacts/database
@@ -204,13 +204,13 @@ jobs:
     env:
       RUN_ID: local-slice-${{ github.run_id }}-${{ github.run_attempt }}-local-slice-integration
     steps:
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
       - name: Runner preflight
         run: scripts/ci-preflight.sh
       - name: Restore verified tools
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: |
             .cache/downloads
@@ -218,7 +218,7 @@ jobs:
             .tools
           key: tooling-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'scripts/checksums.txt', 'web/package-lock.json') }}
       - name: Restore local-slice build caches
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: |
             .cache/go-build
@@ -234,7 +234,7 @@ jobs:
         run: scripts/local-slice-integration.sh
       - name: Upload local-slice diagnostics
         if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: local-slice-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/artifacts/local-slice
@@ -247,13 +247,13 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
       - name: Runner preflight
         run: scripts/ci-preflight.sh
       - name: Restore verified tools
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: |
             .cache/downloads
@@ -261,7 +261,7 @@ jobs:
             .tools
           key: tooling-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'scripts/checksums.txt', 'web/package-lock.json') }}
       - name: Restore Rust target cache
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: |
             rust/target
@@ -279,7 +279,7 @@ jobs:
           scripts/rust-check.sh 2>&1 | tee "${ARTIFACT_DIR}/rust-check.log"
       - name: Upload Rust diagnostics
         if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: rust-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/artifacts/rust
@@ -292,13 +292,13 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
       - name: Runner preflight
         run: scripts/ci-preflight.sh
       - name: Restore verified tools
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: |
             .cache/downloads
@@ -322,7 +322,7 @@ jobs:
             scripts/i13-native-ocserv-integration.sh
       - name: Upload native Ocserv diagnostics
         if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: native-ocserv-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/artifacts/native-ocserv
@@ -335,13 +335,13 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
       - name: Runner preflight
         run: scripts/ci-preflight.sh
       - name: Restore verified tools and npm cache
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: |
             .cache/downloads
@@ -359,7 +359,7 @@ jobs:
           scripts/web-check.sh 2>&1 | tee "${ARTIFACT_DIR}/web-check.log"
       - name: Upload Web diagnostics
         if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: web-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/artifacts/web
@@ -373,7 +373,7 @@ jobs:
     env:
       COMPOSE_PROJECT: ocservia-e2e-${{ github.run_id }}-${{ github.run_attempt }}-browser-e2e
     steps:
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
       - name: Runner preflight
@@ -384,7 +384,7 @@ jobs:
         run: scripts/e2e.sh
       - name: Upload Playwright and Compose diagnostics
         if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: browser-e2e-${{ github.run_id }}-${{ github.run_attempt }}-desktop-mobile
           path: ${{ runner.temp }}/artifacts/browser-e2e
@@ -406,7 +406,7 @@ jobs:
       REQUEST_CONCURRENCY: 8
       RUN_ID: p1-smoke-${{ github.run_id }}-${{ github.run_attempt }}-p1-smoke
     steps:
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
       - name: Runner preflight
@@ -419,7 +419,7 @@ jobs:
         run: scripts/p1-resilience-capacity.sh
       - name: Upload P1 smoke evidence
         if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: p1-smoke-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/artifacts/p1-smoke
@@ -432,14 +432,14 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           fetch-depth: 0
           persist-credentials: false
       - name: Runner preflight
         run: scripts/ci-preflight.sh
       - name: Restore verified tools
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: |
             .cache/downloads
