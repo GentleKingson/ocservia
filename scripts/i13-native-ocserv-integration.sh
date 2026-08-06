@@ -91,8 +91,9 @@ cat >"${NATIVE_ROOT}/ocserv.conf" <<EOF
 auth = "plain[passwd=${NATIVE_ROOT}/ocpasswd]"
 tcp-port = ${PORT}
 udp-port = 0
-run-as-user = nobody
-run-as-group = daemon
+run-as-user = ocserv
+run-as-group = ocserv
+listen-host = 127.0.0.1
 socket-file = ${NATIVE_ROOT}/ocserv.sock
 pid-file = ${NATIVE_ROOT}/ocserv.pid
 server-cert = /etc/ssl/certs/ssl-cert-snakeoil.pem
@@ -121,7 +122,7 @@ config-per-group = ${NATIVE_ROOT}/groups/
 EOF
 
 ocserv --test-config -c "${NATIVE_ROOT}/ocserv.conf"
-ocserv -c "${NATIVE_ROOT}/ocserv.conf" -f >"${NATIVE_ROOT}/server.log" 2>&1 &
+ocserv -c "${NATIVE_ROOT}/ocserv.conf" -f -d 9 >"${NATIVE_ROOT}/server.log" 2>&1 &
 printf '%s' "$!" >"${NATIVE_ROOT}/launcher.pid"
 for _ in $(seq 1 50); do
   if ss -H -ltn "sport = :${PORT}" | grep -q .; then
@@ -130,6 +131,16 @@ for _ in $(seq 1 50); do
   sleep 0.1
 done
 ss -H -ltn "sport = :${PORT}" | grep -q .
+tls_ready=0
+for _ in $(seq 1 50); do
+  if timeout 2 openssl s_client -connect "127.0.0.1:${PORT}" -servername localhost \
+    </dev/null >/dev/null 2>&1; then
+    tls_ready=1
+    break
+  fi
+  sleep 0.1
+done
+test "${tls_ready}" = 1
 
 PIN="$(openssl x509 -in /etc/ssl/certs/ssl-cert-snakeoil.pem -pubkey -noout | openssl pkey -pubin -outform DER 2>/dev/null | openssl dgst -sha256 -binary | openssl base64 -A)"
 set +e

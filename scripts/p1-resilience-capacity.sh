@@ -21,6 +21,7 @@ RESOURCE_SAMPLES="${TMP_ROOT}/resource-samples.jsonl"
 SAMPLE_PHASE_FILE="${TMP_ROOT}/sample-phase"
 SAMPLE_PAUSE_FILE="${TMP_ROOT}/sample-paused"
 ARTIFACT_DIR="${ARTIFACT_DIR:-}"
+AUTH_TOKEN="${OCSERV_DEV_AUTH_TOKEN:-local-development-token-32-characters}"
 API_PORT=$((22000 + $(printf '%s' "${RUN_ID}" | cksum | awk '{print $1}') % 20000))
 SAMPLE_PID=""
 SAMPLER_EXIT=0
@@ -208,7 +209,8 @@ record_sample() {
 }
 
 set_sample_phase() {
-  printf '%s\n' "$1" >"${SAMPLE_PHASE_FILE}"
+  printf '%s\n' "$1" >"${SAMPLE_PHASE_FILE}.next"
+  mv "${SAMPLE_PHASE_FILE}.next" "${SAMPLE_PHASE_FILE}"
 }
 
 sample_resources() {
@@ -292,8 +294,10 @@ printf '%s\n' "request latency seconds: ${latency_percentiles}" \
 
 # A throttled SSE reader must not prevent fresh probes from completing.
 sample_phase_now slow-sse
-last_event="$(curl --fail --silent "http://127.0.0.1:${API_PORT}/api/v1/events?page_size=200" | jq -r '.items[-1].id')"
-timeout 40s curl --silent --no-buffer --limit-rate 16 -H "Last-Event-ID: ${last_event}" \
+last_event="$(curl --fail --silent -H "Authorization: Bearer ${AUTH_TOKEN}" \
+  "http://127.0.0.1:${API_PORT}/api/v1/events?page_size=200" | jq -r '.items[-1].id')"
+timeout 40s curl --silent --no-buffer --limit-rate 16 \
+  -H "Authorization: Bearer ${AUTH_TOKEN}" -H "Last-Event-ID: ${last_event}" \
   "http://127.0.0.1:${API_PORT}/api/v1/events/stream" >"${TMP_ROOT}/slow.sse" &
 slow_pid=$!
 before="$(psql_value "SELECT count(*) FROM operations WHERE state = 'succeeded'")"

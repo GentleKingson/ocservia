@@ -8,7 +8,9 @@ source "${ROOT}/scripts/env.sh"
 RUN_ID="${RUN_ID:-local-slice-${GITHUB_RUN_ID:-local}-${GITHUB_RUN_ATTEMPT:-1}-${GITHUB_JOB:-job}-$(date -u +%Y%m%dT%H%M%SZ)-$$}"
 PREFIX="$(printf '%s' "${RUN_ID}" | tr '[:upper:]_' '[:lower:]-' | tr -cd 'a-z0-9-')"
 TMP_BASE="${RUNNER_TEMP:-${TMPDIR:-/tmp}}"
-TMP_ROOT="$(mktemp -d "${TMP_BASE%/}/ocservia-${PREFIX}-XXXXXX")"
+# Keep Unix socket paths below Linux sockaddr_un.sun_path while mktemp supplies
+# per-run uniqueness inside the runner-owned temporary directory.
+TMP_ROOT="$(mktemp -d "${TMP_BASE%/}/ocsv-ls-XXXXXX")"
 SOCKET="${TMP_ROOT}/run/transportd.sock"
 TRUST_SOCKET="${TMP_ROOT}/trust/control-plane.sock"
 POSTGRES="${PREFIX}-postgres"
