@@ -10,6 +10,12 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 /// Maximum encoded local RPC frame size.
 pub const MAX_FRAME_BYTES: usize = 64 * 1024;
 
+/// Maximum users, groups, members in one group, and aggregate memberships per node.
+///
+/// This bound keeps every complete supported snapshot and mutation below the
+/// fixed local RPC and telemetry frame limits without partial-state semantics.
+pub const MAX_MANAGED_RESOURCES: usize = 384;
+
 /// Empty marker used by every fixed read-only request.
 #[derive(Clone, Copy, PartialEq, Eq, Message)]
 pub struct ReadRequest {}
@@ -501,5 +507,78 @@ mod tests {
                 .kind(),
             io::ErrorKind::InvalidData
         );
+    }
+
+    fn maximum_name(prefix: &str, index: usize) -> String {
+        format!("{prefix}{index:06}{}", "x".repeat(64 - prefix.len() - 6))
+    }
+
+    #[tokio::test]
+    async fn maximum_supported_user_group_frames_round_trip() {
+        let members = (0..MAX_MANAGED_RESOURCES)
+            .map(|index| maximum_name("m", index))
+            .collect::<Vec<_>>();
+        let request = PrivdRequest {
+            request_id: vec![7; 16],
+            deadline_unix_ms: u64::MAX,
+            command_id: vec![8; 16],
+            idempotency_key: vec![9; 16],
+            semantic_payload_sha256: vec![10; 32],
+            command_expires_at_unix_seconds: i64::MAX,
+            operation: Some(privd_request::Operation::GroupApply(GroupApplyRequest {
+                group_name: maximum_name("g", 0),
+                members,
+                desired_revision: u64::MAX,
+            })),
+        };
+        let (mut request_writer, mut request_reader) =
+            tokio::net::UnixStream::pair().expect("pair");
+        let (write_result, read_result) = tokio::join!(
+            write_frame(&mut request_writer, &request),
+            read_frame::<PrivdRequest, _>(&mut request_reader)
+        );
+        write_result.expect("maximum group apply frame");
+        let decoded = read_result.expect("decode maximum group apply");
+        assert_eq!(decoded, request);
+
+        let users = PrivdResponse {
+            request_id: vec![7; 16],
+            result: Some(privd_response::Result::UserList(UserList {
+                users: (0..MAX_MANAGED_RESOURCES)
+                    .map(|index| ObservedUser {
+                        username: maximum_name("u", index),
+                        enabled: true,
+                    })
+                    .collect(),
+            })),
+        };
+        let (mut user_writer, mut user_reader) = tokio::net::UnixStream::pair().expect("pair");
+        let (write_result, read_result) = tokio::join!(
+            write_frame(&mut user_writer, &users),
+            read_frame::<PrivdResponse, _>(&mut user_reader)
+        );
+        write_result.expect("maximum user list frame");
+        let decoded = read_result.expect("decode maximum user list");
+        assert_eq!(decoded, users);
+
+        let groups = PrivdResponse {
+            request_id: vec![7; 16],
+            result: Some(privd_response::Result::GroupList(GroupList {
+                groups: (0..MAX_MANAGED_RESOURCES)
+                    .map(|index| ObservedGroup {
+                        group_name: maximum_name("g", index),
+                        members: vec![maximum_name("u", index)],
+                    })
+                    .collect(),
+            })),
+        };
+        let (mut group_writer, mut group_reader) = tokio::net::UnixStream::pair().expect("pair");
+        let (write_result, read_result) = tokio::join!(
+            write_frame(&mut group_writer, &groups),
+            read_frame::<PrivdResponse, _>(&mut group_reader)
+        );
+        write_result.expect("maximum group list frame");
+        let decoded = read_result.expect("decode maximum group list");
+        assert_eq!(decoded, groups);
     }
 }

@@ -14,8 +14,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use ocservia_agent_protocol::{
     ConfigFingerprint, DesiredEffectObservation, DesiredEffectState, ErrorKind, GroupList, IpBan,
-    IpBanList, MutationResult, ObservedGroup, ObservedUser, OcservVersion, PrivdError,
-    ServiceStatus, Session, SessionList, UserList,
+    IpBanList, MAX_MANAGED_RESOURCES, MutationResult, ObservedGroup, ObservedUser, OcservVersion,
+    PrivdError, ServiceStatus, Session, SessionList, UserList,
 };
 use rand::RngCore;
 use rusqlite::{Connection, OpenFlags, OptionalExtension, TransactionBehavior, params};
@@ -671,7 +671,7 @@ impl Adapter {
         effect: EffectIdentity<'_>,
     ) -> Result<MutationResult, AdapterError> {
         validate_name(group_name)?;
-        if members.len() > 4096 || desired_revision == 0 {
+        if members.len() > MAX_MANAGED_RESOURCES || desired_revision == 0 {
             return Err(AdapterError::InvalidRequest);
         }
         let mut previous = "";
@@ -720,6 +720,7 @@ impl Adapter {
             output.extend_from_slice(record.hash.as_bytes());
             output.push(b'\n');
         }
+        parse_secret_user_records(&output)?;
         let mut staging = self.stage_user_file(&output).await?;
         self.commit_desired_staging(
             &mut staging,
@@ -1002,7 +1003,11 @@ fn parse_secret_user_records(bytes: &[u8]) -> Result<Vec<SecretUserRecord>, Adap
         return Err(AdapterError::OutputLimit);
     }
     let mut records = Vec::new();
+    let mut memberships = 0_usize;
     for line in utf8(bytes)?.lines().filter(|line| !line.is_empty()) {
+        if records.len() == MAX_MANAGED_RESOURCES {
+            return Err(AdapterError::OutputLimit);
+        }
         let mut parts = line.split(':');
         let username = parts.next().ok_or(AdapterError::MalformedOutput)?;
         let groups = parts.next().ok_or(AdapterError::MalformedOutput)?;
@@ -1016,6 +1021,10 @@ fn parse_secret_user_records(bytes: &[u8]) -> Result<Vec<SecretUserRecord>, Adap
                 continue;
             }
             validate_name(group).map_err(|_| AdapterError::MalformedOutput)?;
+            memberships = memberships.saturating_add(1);
+            if memberships > MAX_MANAGED_RESOURCES {
+                return Err(AdapterError::OutputLimit);
+            }
         }
         records.push(SecretUserRecord {
             username: username.to_owned(),
@@ -2202,6 +2211,58 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn maximum_group_apply_succeeds_and_overflow_is_side_effect_free() {
+        let directory = std::env::temp_dir().join(format!("ocservia-group-max-{}", Uuid::now_v7()));
+        std::fs::create_dir(&directory).expect("directory");
+        let users = directory.join("ocpasswd");
+        let members = (0..MAX_MANAGED_RESOURCES)
+            .map(|index| format!("user{index:03}"))
+            .collect::<Vec<_>>();
+        let mut original = String::new();
+        for member in &members {
+            original.push_str(member);
+            original.push_str(":*:$6$test-hash\n");
+        }
+        std::fs::write(&users, original).expect("initial users");
+        let resources = FixedResources::default()
+            .with_user_resources(
+                PathBuf::from("/bin/false"),
+                users.clone(),
+                PathBuf::from("/bin/false"),
+                directory.join("key.pem"),
+                String::from("test-key"),
+            )
+            .expect("resources")
+            .with_effect_store(
+                directory.join("effects.sqlite3"),
+                directory.join("effects.key"),
+            )
+            .expect("effect resources");
+        let adapter = Adapter::new(resources, Limits::default());
+        adapter
+            .group_apply("staff", &members, 1, test_effect())
+            .await
+            .expect("maximum group apply");
+        assert_eq!(
+            adapter.group_list().await.expect("groups").groups[0]
+                .members
+                .len(),
+            384
+        );
+        let applied = std::fs::read(&users).expect("applied users");
+        let mut overflow = members;
+        overflow.push("overflow".to_owned());
+        assert!(matches!(
+            adapter
+                .group_apply("staff", &overflow, 2, test_effect())
+                .await,
+            Err(AdapterError::InvalidRequest)
+        ));
+        assert_eq!(std::fs::read(&users).expect("unchanged users"), applied);
+        std::fs::remove_dir_all(directory).expect("cleanup");
+    }
+
+    #[tokio::test]
     async fn failed_password_rotation_preserves_original_record() {
         let directory = std::env::temp_dir().join(format!("ocservia-secret-{}", Uuid::now_v7()));
         std::fs::create_dir(&directory).expect("directory");
@@ -2474,7 +2535,7 @@ mod tests {
     }
 
     #[test]
-    fn effect_store_supports_ten_thousand_resources() {
+    fn effect_store_supports_ten_thousand_historical_records() {
         let directory = std::env::temp_dir().join(format!("ocservia-effects-{}", Uuid::now_v7()));
         std::fs::create_dir(&directory).expect("directory");
         let resources = FixedResources::default()
@@ -2522,17 +2583,33 @@ mod tests {
                 .expect("scale count"),
             10_000
         );
-        let mut users = Vec::with_capacity(2 * 1024 * 1024);
-        for index in 0..10_000_u64 {
+        std::fs::remove_dir_all(directory).expect("cleanup");
+    }
+
+    #[test]
+    fn user_and_group_snapshot_capacity_is_bounded() {
+        let mut users = Vec::new();
+        for index in 0..MAX_MANAGED_RESOURCES {
             users.extend_from_slice(
-                format!("user{index:05}:staff:$6$test-hash-{index}\n").as_bytes(),
+                format!("user{index:03}:group{index:03}:$6$test-hash-{index}\n").as_bytes(),
             );
         }
         assert_eq!(
-            parse_user_file(&users).expect("10k users").users.len(),
-            10_000
+            parse_user_file(&users).expect("maximum users").users.len(),
+            384
         );
-        std::fs::remove_dir_all(directory).expect("cleanup");
+        assert_eq!(
+            parse_groups_from_user_file(&users)
+                .expect("maximum groups")
+                .groups
+                .len(),
+            384
+        );
+        users.extend_from_slice(b"overflow:overflow:$6$test-hash\n");
+        assert!(matches!(
+            parse_user_file(&users),
+            Err(AdapterError::OutputLimit)
+        ));
     }
 
     #[test]

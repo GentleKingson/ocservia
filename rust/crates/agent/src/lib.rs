@@ -1062,7 +1062,7 @@ fn validate_payload(
         Some(command_envelope::Payload::GroupApply(payload)) => {
             validate_name(&payload.group_name)?;
             validate_revision(payload.desired_revision)?;
-            if payload.members.len() > 4096 {
+            if payload.members.len() > ocservia_agent_protocol::MAX_MANAGED_RESOURCES {
                 return Err(CommandError::Rejected("group_members_invalid"));
             }
             let mut previous = None;
@@ -1506,7 +1506,7 @@ pub async fn read_boot_id() -> Result<String, io::Error> {
 #[cfg(test)]
 mod tests {
     use ocservia_contracts::generated::ocserv::platform::agent::v1::{
-        IpBanRemove, ServiceReload, SessionDisconnect, SessionTerminate, SyntheticEcho,
+        GroupApply, IpBanRemove, ServiceReload, SessionDisconnect, SessionTerminate, SyntheticEcho,
         SyntheticNoop, UserPasswordRotate, command_envelope,
     };
     use prost_types::Timestamp;
@@ -1526,6 +1526,24 @@ mod tests {
         assert_eq!(client.timeout, Duration::from_secs(5));
         assert_eq!(client.desired_timeout, Duration::from_secs(20));
         assert!(client.desired_timeout > client.timeout);
+    }
+
+    #[test]
+    fn oversized_group_apply_is_terminally_rejected_before_privd() {
+        let envelope = CommandEnvelope {
+            payload: Some(command_envelope::Payload::GroupApply(GroupApply {
+                group_name: "staff".to_owned(),
+                members: (0..=ocservia_agent_protocol::MAX_MANAGED_RESOURCES)
+                    .map(|index| format!("member{index:03}"))
+                    .collect(),
+                desired_revision: 1,
+            })),
+            ..CommandEnvelope::default()
+        };
+        assert!(matches!(
+            validate_payload(&envelope),
+            Err(CommandError::Rejected("group_members_invalid"))
+        ));
     }
 
     #[test]

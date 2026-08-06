@@ -37,11 +37,12 @@ var namePattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$`)
 type MutationKind string
 
 const (
-	UserCreate         MutationKind = "user_create"
-	UserDisable        MutationKind = "user_disable"
-	UserEnable         MutationKind = "user_enable"
-	UserPasswordRotate MutationKind = "user_password_rotate"
-	GroupApply         MutationKind = "group_apply"
+	UserCreate          MutationKind = "user_create"
+	UserDisable         MutationKind = "user_disable"
+	UserEnable          MutationKind = "user_enable"
+	UserPasswordRotate  MutationKind = "user_password_rotate"
+	GroupApply          MutationKind = "group_apply"
+	MaxManagedResources              = 384
 )
 
 type MutationRequest struct {
@@ -131,6 +132,9 @@ func (s *Service) Mutate(ctx context.Context, request MutationRequest) (operatio
 	}
 	if currentVersion != request.ExpectedVersion {
 		return operationstore.Operation{}, false, ErrVersionConflict
+	}
+	if err := ensureMutationCapacity(ctx, tx, request, currentVersion == 0); err != nil {
+		return operationstore.Operation{}, false, err
 	}
 	nextVersion, nextRevision := currentVersion+1, currentRevision+1
 	now := s.now()
@@ -231,7 +235,7 @@ func validateMutation(request MutationRequest) error {
 		return ErrInvalidRequest
 	}
 	if request.Kind == GroupApply {
-		if len(request.Members) > 4096 {
+		if len(request.Members) > MaxManagedResources {
 			return ErrInvalidRequest
 		}
 		for _, member := range request.Members {
@@ -265,6 +269,32 @@ func lockDesired(ctx context.Context, tx pgx.Tx, request MutationRequest) (int64
 		return 0, 0, ErrVersionConflict
 	}
 	return version, revision, nil
+}
+
+func ensureMutationCapacity(ctx context.Context, tx pgx.Tx, request MutationRequest, creating bool) error {
+	if creating {
+		table := "desired_users"
+		if request.Kind == GroupApply {
+			table = "desired_groups"
+		}
+		var count int
+		if err := tx.QueryRow(ctx, `SELECT count(*) FROM `+table+` WHERE node_id=$1`, request.NodeID).Scan(&count); err != nil {
+			return err
+		}
+		if count >= MaxManagedResources {
+			return ErrInvalidRequest
+		}
+	}
+	if request.Kind == GroupApply {
+		var otherMemberships int
+		if err := tx.QueryRow(ctx, `SELECT COALESCE(sum(cardinality(members)),0) FROM desired_groups WHERE node_id=$1 AND group_name<>$2`, request.NodeID, request.Name).Scan(&otherMemberships); err != nil {
+			return err
+		}
+		if otherMemberships+len(request.Members) > MaxManagedResources {
+			return ErrInvalidRequest
+		}
+	}
+	return nil
 }
 
 func writeDesired(ctx context.Context, tx pgx.Tx, request MutationRequest, version, revision int64, fingerprint []byte, now time.Time) error {

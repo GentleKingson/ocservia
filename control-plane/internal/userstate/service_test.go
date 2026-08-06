@@ -2,6 +2,8 @@ package userstate
 
 import (
 	"bytes"
+	"errors"
+	"fmt"
 	"testing"
 	"time"
 
@@ -49,6 +51,21 @@ func TestMembersAreCanonicalAndRequestHashBindsCiphertext(t *testing.T) {
 	changed.SealedPassword = bytes.Repeat([]byte{2}, 32)
 	if requestHash(secret) == requestHash(changed) {
 		t.Fatal("idempotency hash did not bind sealed ciphertext")
+	}
+}
+
+func TestMutationValidationEnforcesTransportSafeGroupCapacity(t *testing.T) {
+	members := make([]string, MaxManagedResources)
+	for index := range members {
+		members[index] = fmt.Sprintf("member%03d", index)
+	}
+	request := MutationRequest{NodeID: uuid.Must(uuid.NewV7()), Kind: GroupApply, Name: "staff", Members: members, IdempotencyKey: "key", ExpectedVersion: 0, TTL: time.Hour, ActorID: "operator", Reason: "ticket", RequestID: "request", Traceparent: testTraceparent}
+	if err := validateMutation(request); err != nil {
+		t.Fatalf("maximum supported group rejected: %v", err)
+	}
+	request.Members = append(request.Members, "overflow")
+	if err := validateMutation(request); !errors.Is(err, ErrInvalidRequest) {
+		t.Fatalf("oversized group was not rejected deterministically: %v", err)
 	}
 }
 

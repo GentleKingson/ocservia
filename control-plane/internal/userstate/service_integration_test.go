@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"maps"
 	"os"
 	"slices"
@@ -119,6 +120,30 @@ func TestEnableQueuesAuditableDesiredRevisionIntegration(t *testing.T) {
 	}
 	if command.GetUserEnable().GetUsername() != "alice" || command.GetUserEnable().GetDesiredRevision() != 4 {
 		t.Fatalf("typed enable=%v", &command)
+	}
+}
+
+func TestManagedResourceAndMembershipCapacityIntegration(t *testing.T) {
+	service, pool, _, nodeID := integrationService(t, "active")
+	if _, err := pool.Exec(context.Background(), `INSERT INTO desired_groups(node_id,group_name,members,version,revision,fingerprint,created_at,updated_at) SELECT $1,'group'||lpad(value::text,3,'0'),ARRAY[]::text[],1,1,decode(repeat('00',32),'hex'),now(),now() FROM generate_series(0,$2-1) value`, nodeID, MaxManagedResources); err != nil {
+		t.Fatal(err)
+	}
+	request := mutation(nodeID, "capacity-group", GroupApply, "overflow", 0)
+	if _, _, err := service.Mutate(context.Background(), request); !errors.Is(err, ErrInvalidRequest) {
+		t.Fatalf("managed group overflow was not rejected: %v", err)
+	}
+	first := mutation(nodeID, "membership-one", GroupApply, "group000", 1)
+	first.Members = make([]string, MaxManagedResources)
+	for index := range first.Members {
+		first.Members[index] = fmt.Sprintf("user%03d", index)
+	}
+	if _, _, err := service.Mutate(context.Background(), first); err != nil {
+		t.Fatalf("maximum aggregate membership: %v", err)
+	}
+	second := mutation(nodeID, "membership-overflow", GroupApply, "group001", 1)
+	second.Members = []string{"alice"}
+	if _, _, err := service.Mutate(context.Background(), second); !errors.Is(err, ErrInvalidRequest) {
+		t.Fatalf("aggregate membership overflow was not rejected: %v", err)
 	}
 }
 

@@ -12,8 +12,9 @@ use ocservia_agent::{
 };
 use ocservia_agent_protocol::{
     DesiredEffectObserveRequest, DesiredEffectState, ErrorKind, GroupApplyRequest,
-    IpBanRemoveRequest, PrivdResponse, ServiceReloadRequest, SessionMutationRequest,
-    UserDisableRequest, UserEnableRequest, UserSecretRequest, privd_request, privd_response,
+    IpBanRemoveRequest, MAX_MANAGED_RESOURCES, PrivdResponse, ServiceReloadRequest,
+    SessionMutationRequest, UserDisableRequest, UserEnableRequest, UserSecretRequest,
+    privd_request, privd_response,
 };
 use ocservia_command_journal::{CommandRecord, CommandState, Journal, TelemetryInsert};
 use ocservia_contracts::decode_strict_command_envelope;
@@ -208,7 +209,7 @@ async fn connect_once(
                 let observations=session.privd.snapshot().await?;
                 sequence=sequence.saturating_add(1);
                 let drops=session.journal.telemetry_drop_counters()?;
-                let batch=build_telemetry(session,sequence,&observations,&connection,drops);
+                let batch=build_telemetry(session,sequence,&observations,&connection,drops)?;
                 let payload=batch.encode_to_vec();
                 let batch_id: [u8;16]=batch.batch_id.as_slice().try_into().map_err(|_| invalid("telemetry batch ID invalid"))?;
                 let now=SystemTime::now().duration_since(SystemTime::UNIX_EPOCH)?.as_secs();
@@ -718,7 +719,7 @@ fn build_telemetry(
     observations: &[PrivdResponse],
     connection: &iroh::endpoint::Connection,
     drops: [u64; 4],
-) -> TelemetryBatch {
+) -> Result<TelemetryBatch, io::Error> {
     let now = SystemTime::now();
     let mut service = serde_json::json!({"active_state":"unknown","sub_state":"unknown"});
     let mut version = "unknown".to_owned();
@@ -726,6 +727,8 @@ fn build_telemetry(
     let mut ip_bans = Vec::new();
     let mut users = Vec::new();
     let mut groups = Vec::new();
+    let mut user_snapshot_complete = false;
+    let mut group_snapshot_complete = false;
     let mut fingerprint = serde_json::json!({});
     for observation in observations {
         match &observation.result {
@@ -763,6 +766,7 @@ fn build_telemetry(
                     .collect();
             }
             Some(privd_response::Result::UserList(value)) => {
+                user_snapshot_complete = true;
                 users = value
                     .users
                     .iter()
@@ -786,6 +790,7 @@ fn build_telemetry(
                     .collect();
             }
             Some(privd_response::Result::GroupList(value)) => {
+                group_snapshot_complete = true;
                 groups = value
                     .groups
                     .iter()
@@ -817,6 +822,9 @@ fn build_telemetry(
             _ => {}
         }
     }
+    if !user_snapshot_complete || !group_snapshot_complete {
+        return Err(invalid("privd user/group snapshot incomplete"));
+    }
     if let Ok(applied_groups) = session.journal.applied_revisions("group") {
         for (group_name, revision) in applied_groups {
             if groups.iter().any(|group| group.group_name == group_name) {
@@ -831,6 +839,10 @@ fn build_telemetry(
             });
         }
         groups.sort_by(|left, right| left.group_name.cmp(&right.group_name));
+    }
+    if users.len() > MAX_MANAGED_RESOURCES || groups.len() > MAX_MANAGED_RESOURCES.saturating_mul(2)
+    {
+        return Err(invalid("user/group telemetry capacity exceeded"));
     }
     let paths = connection.paths();
     let selected = paths.iter().find(iroh::endpoint::Path::is_selected);
@@ -849,7 +861,7 @@ fn build_telemetry(
     let ocserv = serde_json::json!({"service":service,"configuration":fingerprint});
     let path = serde_json::json!({"mode":mode,"rtt_ms":rtt});
     let session_count = f64::from(u32::try_from(sessions.len()).unwrap_or(u32::MAX));
-    TelemetryBatch {
+    let batch = TelemetryBatch {
         batch_id: Uuid::now_v7().as_bytes().to_vec(),
         node_id: session.node_id.as_bytes().to_vec(),
         sequence,
@@ -881,7 +893,11 @@ fn build_telemetry(
         ip_bans,
         users,
         groups,
+    };
+    if batch.encoded_len() > 512 * 1024 {
+        return Err(invalid("telemetry payload size invalid"));
     }
+    Ok(batch)
 }
 
 async fn shutdown_signal() {

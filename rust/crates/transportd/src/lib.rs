@@ -1509,7 +1509,7 @@ pub async fn shutdown(
 #[cfg(test)]
 mod tests {
     use ocservia_contracts::generated::ocserv::platform::agent::v1::{
-        CommandDeliveryMode, SemanticPayloadHashVersion,
+        CommandDeliveryMode, GroupObservation, SemanticPayloadHashVersion, UserObservation,
     };
 
     use super::*;
@@ -2101,6 +2101,29 @@ mod tests {
             .await
             .expect("watch events")
             .into_inner();
+        let maximum_name = |prefix: &str, index: usize| {
+            format!("{prefix}{index:06}{}", "x".repeat(64 - prefix.len() - 6))
+        };
+        let users = (0..384)
+            .map(|index| UserObservation {
+                username: maximum_name("u", index),
+                enabled: true,
+                revision: 1,
+                fingerprint_sha256: vec![1; 32],
+            })
+            .collect::<Vec<_>>();
+        let groups = (0..768)
+            .map(|index| GroupObservation {
+                group_name: maximum_name("g", index),
+                members: if index < 384 {
+                    vec![maximum_name("u", index)]
+                } else {
+                    Vec::new()
+                },
+                revision: 1,
+                fingerprint_sha256: vec![2; 32],
+            })
+            .collect::<Vec<_>>();
         let batch = TelemetryBatch {
             batch_id: Uuid::now_v7().as_bytes().to_vec(),
             node_id: handshake.node_id.clone(),
@@ -2111,10 +2134,11 @@ mod tests {
             samples: Vec::new(),
             security_events: Vec::new(),
             ip_bans: Vec::new(),
-            users: Vec::new(),
-            groups: Vec::new(),
+            users,
+            groups,
         };
         let payload = batch.encode_to_vec();
+        assert!(payload.len() <= 512 * 1024);
         let mut send = connection.open_uni().await.expect("open telemetry stream");
         send.write_all(&u32::try_from(payload.len()).unwrap().to_be_bytes())
             .await

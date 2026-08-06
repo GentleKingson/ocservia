@@ -1185,7 +1185,7 @@ components:
       properties:
         members:
           type: array
-          maxItems: 4096
+          maxItems: 384
           uniqueItems: true
           items: { $ref: "#/components/schemas/OcservName" }
         reason: { type: string, minLength: 1, maxLength: 512 }
@@ -1200,8 +1200,8 @@ components:
         name: { $ref: "#/components/schemas/OcservName" }
         desired_enabled: { type: boolean }
         observed_enabled: { type: boolean }
-        desired_members: { type: array, items: { $ref: "#/components/schemas/OcservName" }, maxItems: 4096 }
-        observed_members: { type: array, items: { $ref: "#/components/schemas/OcservName" }, maxItems: 4096 }
+        desired_members: { type: array, items: { $ref: "#/components/schemas/OcservName" }, maxItems: 384 }
+        observed_members: { type: array, items: { $ref: "#/components/schemas/OcservName" }, maxItems: 384 }
         desired_version: { type: integer, format: int64, minimum: 1 }
         desired_revision: { type: integer, format: int64, minimum: 1 }
         observed_revision: { type: integer, format: int64, minimum: 0 }
@@ -1218,7 +1218,7 @@ components:
       properties:
         items:
           type: array
-          maxItems: 14096
+          maxItems: 1536
           items: { $ref: "#/components/schemas/UserGroupResourceState" }
     QueueMetrics:
       type: object

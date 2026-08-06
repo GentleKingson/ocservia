@@ -4,12 +4,17 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/json"
+	"fmt"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
+	agentv1 "github.com/GentleKingson/ocservia/control-plane/gen/proto/ocserv/platform/agent/v1"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
 func testBatch(nodeID uuid.UUID, sequence uint64, observed time.Time) Batch {
@@ -37,6 +42,52 @@ func TestValidateBatchRejectsHighCardinalityMetricNames(t *testing.T) {
 	batch.Samples[0].Metric = "session_019fc0a4"
 	if err := validateBatch(batch, now); err == nil {
 		t.Fatal("high-cardinality metric name accepted")
+	}
+}
+
+func TestMaximumUserGroupSnapshotFitsWireAndValidation(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Second)
+	maximumName := func(prefix string, index int) string {
+		base := fmt.Sprintf("%s%06d", prefix, index)
+		return base + strings.Repeat("x", 64-len(base))
+	}
+	batchID := uuid.Must(uuid.NewV7())
+	nodeID := uuid.Must(uuid.NewV7())
+	agentInstanceID := uuid.Must(uuid.NewV7())
+	wire := &agentv1.TelemetryBatch{
+		BatchId: batchID[:], NodeId: nodeID[:], Sequence: 1,
+		Priority: agentv1.TelemetryPriority_TELEMETRY_PRIORITY_CURRENT_HEALTH,
+		Snapshot: &agentv1.ObservedSnapshot{ObservedAt: timestamppb.New(now), BootId: "boot", AgentInstanceId: agentInstanceID[:], AgentVersion: "0.1.0", OcservVersion: "1.3.0", OsRelease: "debian", OcservJson: []byte(`{}`), SystemJson: []byte(`{}`), PathJson: []byte(`{}`)},
+	}
+	for index := 0; index < MaxManagedResources; index++ {
+		username := maximumName("u", index)
+		wire.Users = append(wire.Users, &agentv1.UserObservation{Username: username, Enabled: true, Revision: 1, FingerprintSha256: make([]byte, sha256.Size)})
+		wire.Groups = append(wire.Groups, &agentv1.GroupObservation{GroupName: maximumName("g", index), Members: []string{username}, Revision: 1, FingerprintSha256: make([]byte, sha256.Size)})
+	}
+	for index := MaxManagedResources; index < MaxReportedGroups; index++ {
+		wire.Groups = append(wire.Groups, &agentv1.GroupObservation{GroupName: maximumName("g", index), Revision: 1, FingerprintSha256: make([]byte, sha256.Size)})
+	}
+	payload, err := proto.Marshal(wire)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(payload) > MaxBatchBytes {
+		t.Fatalf("maximum supported telemetry is %d bytes", len(payload))
+	}
+	batch, err := decodeWire(payload)
+	if err != nil {
+		t.Fatalf("decode maximum telemetry: %v", err)
+	}
+	if err := validateBatch(batch, now); err != nil {
+		t.Fatalf("validate maximum telemetry: %v", err)
+	}
+	encoded, err := json.Marshal(batch)
+	if err != nil || len(encoded) > MaxBatchBytes {
+		t.Fatalf("maximum internal telemetry is %d bytes: %v", len(encoded), err)
+	}
+	batch.Users = append(batch.Users, batch.Users[0])
+	if err := validateBatch(batch, now); err == nil {
+		t.Fatal("oversized user snapshot accepted")
 	}
 }
 
