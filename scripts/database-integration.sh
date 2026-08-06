@@ -89,8 +89,11 @@ stop_process() {
   wait "${pid}"
   local index
   for index in "${!PIDS[@]}"; do
-    [[ "${PIDS[index]}" == "${pid}" ]] && PIDS[index]=""
+    if [[ "${PIDS[index]}" == "${pid}" ]]; then
+      PIDS[index]=""
+    fi
   done
+  return 0
 }
 
 for major in 17 18; do

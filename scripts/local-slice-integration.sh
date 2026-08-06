@@ -113,8 +113,11 @@ stop_pid() {
   wait "${pid}" 2>/dev/null || true
   local index
   for index in "${!PIDS[@]}"; do
-    [[ "${PIDS[index]}" == "${pid}" ]] && PIDS[index]=""
+    if [[ "${PIDS[index]}" == "${pid}" ]]; then
+      PIDS[index]=""
+    fi
   done
+  return 0
 }
 
 create_probe() {

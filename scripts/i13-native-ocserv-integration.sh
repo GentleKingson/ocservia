@@ -95,6 +95,7 @@ run-as-user = ocserv
 run-as-group = ocserv
 listen-host = 127.0.0.1
 socket-file = ${NATIVE_ROOT}/ocserv.sock
+occtl-socket-file = ${NATIVE_ROOT}/occtl.sock
 pid-file = ${NATIVE_ROOT}/ocserv.pid
 server-cert = /etc/ssl/certs/ssl-cert-snakeoil.pem
 server-key = /etc/ssl/private/ssl-cert-snakeoil.key
@@ -131,16 +132,13 @@ for _ in $(seq 1 50); do
   sleep 0.1
 done
 ss -H -ltn "sport = :${PORT}" | grep -q .
-tls_ready=0
 for _ in $(seq 1 50); do
-  if timeout 2 openssl s_client -connect "127.0.0.1:${PORT}" -servername localhost \
-    </dev/null >/dev/null 2>&1; then
-    tls_ready=1
+  if compgen -G "${NATIVE_ROOT}/ocserv.sock.*.0" >/dev/null; then
     break
   fi
   sleep 0.1
 done
-test "${tls_ready}" = 1
+compgen -G "${NATIVE_ROOT}/ocserv.sock.*.0" >/dev/null
 
 PIN="$(openssl x509 -in /etc/ssl/certs/ssl-cert-snakeoil.pem -pubkey -noout | openssl pkey -pubin -outform DER 2>/dev/null | openssl dgst -sha256 -binary | openssl base64 -A)"
 set +e
