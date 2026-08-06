@@ -15,10 +15,16 @@ PORT="${OCSERVIA_I13_OCSERV_PORT:-44443}"
 PASSWORD="native-password-sentinel"
 
 cleanup() {
-  if [[ -f "${NATIVE_ROOT}/ocserv.pid" ]]; then
-    kill "$(<"${NATIVE_ROOT}/ocserv.pid")" 2>/dev/null || true
+  status=$?
+  if [[ "${status}" -ne 0 ]]; then
+    [[ -f "${NATIVE_ROOT}/server.log" ]] && sed -n '1,160p' "${NATIVE_ROOT}/server.log" >&2
+    [[ -f "${NATIVE_ROOT}/client.log" ]] && sed -n '1,160p' "${NATIVE_ROOT}/client.log" >&2
+  fi
+  if [[ -f "${NATIVE_ROOT}/launcher.pid" ]]; then
+    kill "$(<"${NATIVE_ROOT}/launcher.pid")" 2>/dev/null || true
   fi
   rm -rf "${NATIVE_ROOT}"
+  return "${status}"
 }
 trap cleanup EXIT INT TERM
 
@@ -92,7 +98,7 @@ EOF
 
 ocserv --test-config -c "${NATIVE_ROOT}/ocserv.conf"
 ocserv -c "${NATIVE_ROOT}/ocserv.conf" -f >"${NATIVE_ROOT}/server.log" 2>&1 &
-printf '%s' "$!" >"${NATIVE_ROOT}/ocserv.pid"
+printf '%s' "$!" >"${NATIVE_ROOT}/launcher.pid"
 for _ in $(seq 1 50); do
   [[ -S "${NATIVE_ROOT}/ocserv.sock" ]] && break
   sleep 0.1
