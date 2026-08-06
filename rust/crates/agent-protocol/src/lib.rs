@@ -23,6 +23,18 @@ pub struct PrivdRequest {
     /// Absolute Unix epoch deadline in milliseconds.
     #[prost(uint64, tag = "2")]
     pub deadline_unix_ms: u64,
+    /// Controller command identity for desired-state mutations and reconciliation.
+    #[prost(bytes = "vec", tag = "3")]
+    pub command_id: Vec<u8>,
+    /// Stable idempotency identity for desired-state mutations and reconciliation.
+    #[prost(bytes = "vec", tag = "4")]
+    pub idempotency_key: Vec<u8>,
+    /// Canonical semantic payload hash, never password material or a password hash.
+    #[prost(bytes = "vec", tag = "5")]
+    pub semantic_payload_sha256: Vec<u8>,
+    /// Command expiry after which local effect evidence may be safely collected.
+    #[prost(int64, tag = "6")]
+    pub command_expires_at_unix_seconds: i64,
     /// One of the permanently fixed operations.
     #[prost(
         oneof = "privd_request::Operation",
@@ -65,7 +77,7 @@ pub mod privd_request {
         /// List groups derived from authoritative ocpasswd records.
         #[prost(message, tag = "16")]
         GroupList(ReadRequest),
-        /// Check the non-secret marker committed with one desired-state file replacement.
+        /// Check bounded non-secret evidence for one desired-state replacement.
         #[prost(message, tag = "17")]
         DesiredEffectObserve(DesiredEffectObserveRequest),
         /// Disconnect one numeric session without invalidating its cookie.
@@ -171,11 +183,30 @@ pub struct DesiredEffectObserveRequest {
     pub desired_revision: u64,
 }
 
-/// Result of checking a marker stored on the authoritative password-file inode.
+/// Stable result of independently checking one desired-state effect.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, prost::Enumeration)]
+#[repr(i32)]
+pub enum DesiredEffectState {
+    /// No trustworthy conclusion was possible.
+    Unspecified = 0,
+    /// This exact command and revision was durably applied.
+    AppliedExact = 1,
+    /// A newer revision of the same mutation kind is authoritative.
+    SupersededByNewerRevision = 2,
+    /// The store proves that the effect was not applied.
+    Absent = 3,
+    /// Evidence exists but does not match the current authoritative state.
+    Unknown = 4,
+}
+
+/// Result of checking the bounded root-owned desired-effect store.
 #[derive(Clone, Copy, PartialEq, Eq, Message)]
 pub struct DesiredEffectObservation {
-    #[prost(bool, tag = "1")]
-    pub applied: bool,
+    #[prost(enumeration = "DesiredEffectState", tag = "1")]
+    pub state: i32,
+    /// Latest stored revision for this mutation kind and resource, if any.
+    #[prost(uint64, tag = "2")]
+    pub observed_revision: u64,
 }
 
 /// Observed user without password material.
@@ -377,7 +408,7 @@ pub mod privd_response {
         /// Observed groups.
         #[prost(message, tag = "17")]
         GroupList(GroupList),
-        /// Non-secret authoritative desired-effect marker observation.
+        /// Non-secret authoritative desired-effect observation.
         #[prost(message, tag = "18")]
         DesiredEffectObservation(DesiredEffectObservation),
         /// Stable failure.
@@ -444,6 +475,10 @@ mod tests {
         let request = PrivdRequest {
             request_id: vec![7; 16],
             deadline_unix_ms: 42,
+            command_id: Vec::new(),
+            idempotency_key: Vec::new(),
+            semantic_payload_sha256: Vec::new(),
+            command_expires_at_unix_seconds: 0,
             operation: Some(privd_request::Operation::ServiceStatus(ReadRequest {})),
         };
         let mut bytes = Vec::new();

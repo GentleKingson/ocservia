@@ -502,6 +502,41 @@ func TestUnknownSchedulesExplicitReconcileThenSafeRetryIntegration(t *testing.T)
 	assertOutboxMode(agentv1.CommandDeliveryMode_COMMAND_DELIVERY_MODE_RETRY_IF_EFFECT_ABSENT)
 }
 
+func TestPrivdUnknownResultsScheduleReconcileOnlyIntegration(t *testing.T) {
+	for _, reason := range []string{"privd_transport_unknown", "privd_outcome_unknown"} {
+		t.Run(reason, func(t *testing.T) {
+			fixture := newCommandResultFixture(t)
+			outboxID := uuid.Must(uuid.NewV7())
+			envelopeBytes, err := proto.Marshal(fixture.envelope)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := fixture.pool.Exec(context.Background(), `INSERT INTO outbox_events(id,command_id,event_type,payload,available_at,published_at,created_at) VALUES($1,$2,'command.dispatch',$3,$4,$4,$4)`, outboxID, fixture.commandID, envelopeBytes, fixture.issuedAt); err != nil {
+				t.Fatal(err)
+			}
+			unknown := fixture.validResult()
+			unknown.State = agentv1.CommandResultState_COMMAND_RESULT_STATE_UNKNOWN
+			unknown.Result = nil
+			unknown.ErrorCode = reason
+			if _, err := fixture.ingestResult(t, unknown); err != nil {
+				t.Fatal(err)
+			}
+			var payload []byte
+			var unpublished bool
+			if err := fixture.pool.QueryRow(context.Background(), `SELECT payload,published_at IS NULL FROM outbox_events WHERE id=$1`, outboxID).Scan(&payload, &unpublished); err != nil {
+				t.Fatal(err)
+			}
+			var recovered agentv1.CommandEnvelope
+			if err := proto.Unmarshal(payload, &recovered); err != nil {
+				t.Fatal(err)
+			}
+			if recovered.GetDeliveryMode() != agentv1.CommandDeliveryMode_COMMAND_DELIVERY_MODE_RECONCILE_ONLY || !unpublished {
+				t.Fatalf("recovery mode=%s unpublished=%v", recovered.GetDeliveryMode(), unpublished)
+			}
+		})
+	}
+}
+
 // ---- Canonical Semantic Payload Hash v1 ----
 //
 // The tests below pin the v1 algorithm defined in

@@ -3,20 +3,22 @@
 #![forbid(unsafe_code)]
 
 use std::collections::{HashMap, HashSet};
+use std::fs::OpenOptions as StdOpenOptions;
 use std::io;
 use std::net::IpAddr;
-use std::os::unix::fs::PermissionsExt;
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use ocservia_agent_protocol::{
-    ConfigFingerprint, DesiredEffectObservation, ErrorKind, GroupList, IpBan, IpBanList,
-    MutationResult, ObservedGroup, ObservedUser, OcservVersion, PrivdError, ServiceStatus, Session,
-    SessionList, UserList,
+    ConfigFingerprint, DesiredEffectObservation, DesiredEffectState, ErrorKind, GroupList, IpBan,
+    IpBanList, MutationResult, ObservedGroup, ObservedUser, OcservVersion, PrivdError,
+    ServiceStatus, Session, SessionList, UserList,
 };
-use rustix::fs::XattrFlags;
+use rand::RngCore;
+use rusqlite::{Connection, OpenFlags, OptionalExtension, TransactionBehavior, params};
 use sha2::{Digest, Sha256};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 use tokio::process::Command;
@@ -25,9 +27,10 @@ use uuid::Uuid;
 use zeroize::Zeroizing;
 
 const MAX_CONFIG_BYTES: usize = 1024 * 1024;
+const MAX_USER_FILE_BYTES: usize = 16 * 1024 * 1024;
 const DEFAULT_OUTPUT_BYTES: usize = 256 * 1024;
-const EFFECT_XATTR_PREFIX: &str = "user.ocservia.effect.";
-const MAX_MANAGED_XATTR_BYTES: usize = 64 * 1024;
+const EFFECT_STORE_KEY_BYTES: usize = 32;
+const MAX_EFFECT_RECORDS: i64 = 65_536;
 
 /// Root-controlled fixed local resources used by the adapter.
 #[derive(Clone, Debug)]
@@ -42,6 +45,8 @@ pub struct FixedResources {
     openssl: PathBuf,
     secret_key: PathBuf,
     secret_key_id: String,
+    effect_store: PathBuf,
+    effect_store_key: PathBuf,
 }
 
 impl Default for FixedResources {
@@ -57,6 +62,8 @@ impl Default for FixedResources {
             openssl: PathBuf::from("/usr/bin/openssl"),
             secret_key: PathBuf::from("/etc/ocservia/password-seal-private.pem"),
             secret_key_id: String::from("default"),
+            effect_store: PathBuf::from("/var/lib/ocservia-privd/desired-effects.sqlite3"),
+            effect_store_key: PathBuf::from("/var/lib/ocservia-privd/desired-effects.key"),
         }
     }
 }
@@ -119,6 +126,40 @@ impl FixedResources {
         self.secret_key_id = secret_key_id;
         Ok(self)
     }
+
+    /// Overrides the fixed root-owned reconciliation store for isolated deployments or tests.
+    ///
+    /// # Errors
+    ///
+    /// Rejects non-absolute paths or colocated database and key files.
+    pub fn with_effect_store(
+        mut self,
+        effect_store: PathBuf,
+        effect_store_key: PathBuf,
+    ) -> Result<Self, AdapterError> {
+        if !effect_store.is_absolute()
+            || !effect_store_key.is_absolute()
+            || effect_store == effect_store_key
+        {
+            return Err(AdapterError::InvalidResource);
+        }
+        self.effect_store = effect_store;
+        self.effect_store_key = effect_store_key;
+        Ok(self)
+    }
+}
+
+/// Non-secret controller command identity bound into desired-effect evidence.
+#[derive(Clone, Copy, Debug)]
+pub struct EffectIdentity<'a> {
+    /// Stable controller command UUID bytes.
+    pub command_id: &'a [u8],
+    /// Stable idempotency UUID bytes.
+    pub idempotency_key: &'a [u8],
+    /// Canonical semantic payload SHA-256.
+    pub semantic_payload_sha256: &'a [u8],
+    /// Command expiry after which evidence may be safely garbage-collected.
+    pub expires_at_unix_seconds: i64,
 }
 
 /// Adapter execution limits.
@@ -337,12 +378,14 @@ impl Adapter {
         key_id: &str,
         sealed_password: &[u8],
         desired_revision: u64,
+        effect: EffectIdentity<'_>,
     ) -> Result<MutationResult, AdapterError> {
         self.user_secret_apply(
             username,
             key_id,
             sealed_password,
             desired_revision,
+            effect,
             SecretApplyMode::MustBeAbsent,
         )
         .await
@@ -359,12 +402,14 @@ impl Adapter {
         key_id: &str,
         sealed_password: &[u8],
         desired_revision: u64,
+        effect: EffectIdentity<'_>,
     ) -> Result<MutationResult, AdapterError> {
         self.user_secret_apply(
             username,
             key_id,
             sealed_password,
             desired_revision,
+            effect,
             SecretApplyMode::MustExist,
         )
         .await
@@ -376,6 +421,7 @@ impl Adapter {
         key_id: &str,
         sealed_password: &[u8],
         desired_revision: u64,
+        effect: EffectIdentity<'_>,
         mode: SecretApplyMode,
     ) -> Result<MutationResult, AdapterError> {
         validate_name(username)?;
@@ -448,11 +494,15 @@ impl Adapter {
                 )
                 .await?;
             }
-            // ocpasswd may replace its target inode, so restore markers from the
-            // still-authoritative file before committing the staged result.
-            copy_effect_markers(&self.resources.user_file, &staging)?;
-            set_effect_marker(&staging, mode.mutation_kind(), username, desired_revision)?;
-            commit_staging(&staging, &self.resources.user_file).await
+            self.commit_desired_staging(
+                &staging,
+                &current,
+                mode.mutation_kind(),
+                username,
+                desired_revision,
+                effect,
+            )
+            .await
         }
         .await;
         if result.is_err() {
@@ -471,8 +521,10 @@ impl Adapter {
         &self,
         username: &str,
         desired_revision: u64,
+        effect: EffectIdentity<'_>,
     ) -> Result<MutationResult, AdapterError> {
-        self.user_lock_state(username, desired_revision, true).await
+        self.user_lock_state(username, desired_revision, effect, true)
+            .await
     }
 
     /// Enables exactly one validated user without changing its password or groups.
@@ -484,8 +536,9 @@ impl Adapter {
         &self,
         username: &str,
         desired_revision: u64,
+        effect: EffectIdentity<'_>,
     ) -> Result<MutationResult, AdapterError> {
-        self.user_lock_state(username, desired_revision, false)
+        self.user_lock_state(username, desired_revision, effect, false)
             .await
     }
 
@@ -493,6 +546,7 @@ impl Adapter {
         &self,
         username: &str,
         desired_revision: u64,
+        effect: EffectIdentity<'_>,
         locked: bool,
     ) -> Result<MutationResult, AdapterError> {
         validate_name(username)?;
@@ -518,9 +572,15 @@ impl Adapter {
             } else {
                 "user_enable"
             };
-            copy_effect_markers(&self.resources.user_file, &staging)?;
-            set_effect_marker(&staging, mutation_kind, username, desired_revision)?;
-            commit_staging(&staging, &self.resources.user_file).await
+            self.commit_desired_staging(
+                &staging,
+                &current,
+                mutation_kind,
+                username,
+                desired_revision,
+                effect,
+            )
+            .await
         }
         .await;
         if result.is_err() {
@@ -540,6 +600,7 @@ impl Adapter {
         group_name: &str,
         members: &[String],
         desired_revision: u64,
+        effect: EffectIdentity<'_>,
     ) -> Result<MutationResult, AdapterError> {
         validate_name(group_name)?;
         if members.len() > 4096 || desired_revision == 0 {
@@ -591,16 +652,25 @@ impl Adapter {
             output.extend_from_slice(record.hash.as_bytes());
             output.push(b'\n');
         }
-        atomic_replace(
-            &self.resources.user_file,
-            &output,
-            Some(("group_apply", group_name, desired_revision)),
-        )
-        .await?;
+        let staging = self.stage_user_file(&output).await?;
+        let result = self
+            .commit_desired_staging(
+                &staging,
+                &bytes,
+                "group_apply",
+                group_name,
+                desired_revision,
+                effect,
+            )
+            .await;
+        if result.is_err() {
+            let _ = tokio::fs::remove_file(&staging).await;
+        }
+        result?;
         Ok(MutationResult { applied: true })
     }
 
-    /// Checks the non-secret effect marker committed with an authoritative file replacement.
+    /// Checks the bounded authenticated evidence for one authoritative replacement.
     ///
     /// # Errors
     ///
@@ -610,16 +680,49 @@ impl Adapter {
         mutation_kind: &str,
         resource_key: &str,
         desired_revision: u64,
+        effect: EffectIdentity<'_>,
     ) -> Result<DesiredEffectObservation, AdapterError> {
         validate_effect_identity(mutation_kind, resource_key, desired_revision)?;
         let _guard = self.user_file_lock.lock().await;
-        let applied = effect_marker_matches(
-            &self.resources.user_file,
+        let current = read_optional_secret_file(&self.resources.user_file).await?;
+        EffectStore::open(&self.resources)?.observe(
             mutation_kind,
             resource_key,
             desired_revision,
-        )?;
-        Ok(DesiredEffectObservation { applied })
+            effect,
+            &current,
+        )
+    }
+
+    async fn commit_desired_staging(
+        &self,
+        staging: &Path,
+        before: &[u8],
+        mutation_kind: &str,
+        resource_key: &str,
+        desired_revision: u64,
+        effect: EffectIdentity<'_>,
+    ) -> Result<(), AdapterError> {
+        let after = read_optional_secret_file(staging).await?;
+        let mut store = EffectStore::open(&self.resources)?;
+        match store.prepare(
+            mutation_kind,
+            resource_key,
+            desired_revision,
+            effect,
+            before,
+            &after,
+        )? {
+            PrepareEffect::AlreadyApplied => {
+                tokio::fs::remove_file(staging)
+                    .await
+                    .map_err(AdapterError::Io)?;
+                return Ok(());
+            }
+            PrepareEffect::Proceed => {}
+        }
+        atomic_replace(staging, &self.resources.user_file).await?;
+        store.mark_applied(mutation_kind, resource_key, desired_revision, effect)
     }
 
     async fn stage_user_file(&self, bytes: &[u8]) -> Result<PathBuf, AdapterError> {
@@ -636,8 +739,7 @@ impl Adapter {
         let mut file = options.open(&staging).await.map_err(AdapterError::Io)?;
         if let Err(error) = async {
             file.write_all(bytes).await.map_err(AdapterError::Io)?;
-            file.sync_all().await.map_err(AdapterError::Io)?;
-            copy_effect_markers(path, &staging)
+            file.sync_all().await.map_err(AdapterError::Io)
         }
         .await
         {
@@ -791,7 +893,7 @@ struct SecretUserRecord {
 }
 
 fn parse_secret_user_records(bytes: &[u8]) -> Result<Vec<SecretUserRecord>, AdapterError> {
-    if bytes.len() > MAX_CONFIG_BYTES {
+    if bytes.len() > MAX_USER_FILE_BYTES {
         return Err(AdapterError::OutputLimit);
     }
     let mut records = Vec::new();
@@ -866,92 +968,502 @@ fn validate_effect_identity(
     validate_name(resource_key)
 }
 
-fn effect_marker_name(mutation_kind: &str, resource_key: &str) -> String {
-    let mut hash = Sha256::new();
-    hash.update(b"ocservia.desired-effect-resource.v1\0");
-    hash.update(mutation_kind.as_bytes());
-    hash.update([0]);
-    hash.update(resource_key.as_bytes());
-    format!("{EFFECT_XATTR_PREFIX}{}", hex::encode(hash.finalize()))
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PrepareEffect {
+    Proceed,
+    AlreadyApplied,
 }
 
-fn effect_marker_value(mutation_kind: &str, resource_key: &str, desired_revision: u64) -> [u8; 32] {
-    let mut hash = Sha256::new();
-    hash.update(b"ocservia.desired-effect-marker.v1\0");
-    hash.update(mutation_kind.as_bytes());
-    hash.update([0]);
-    hash.update(resource_key.as_bytes());
-    hash.update([0]);
-    hash.update(desired_revision.to_be_bytes());
-    hash.finalize().into()
+#[derive(Debug)]
+struct EffectRecord {
+    mutation_kind: String,
+    resource_key: String,
+    revision: u64,
+    command_id: [u8; 16],
+    idempotency_key: [u8; 16],
+    payload_sha256: [u8; 32],
+    expires_at: i64,
+    state: &'static str,
+    before_hmac: [u8; 32],
+    after_hmac: [u8; 32],
+    record_hmac: [u8; 32],
 }
 
-fn set_effect_marker(
-    path: &Path,
-    mutation_kind: &str,
-    resource_key: &str,
-    desired_revision: u64,
-) -> Result<(), AdapterError> {
-    validate_effect_identity(mutation_kind, resource_key, desired_revision)?;
-    rustix::fs::setxattr(
-        path,
-        effect_marker_name(mutation_kind, resource_key),
-        &effect_marker_value(mutation_kind, resource_key, desired_revision),
-        XattrFlags::empty(),
-    )
-    .map_err(rustix_io)
+#[derive(Debug)]
+struct EffectStore {
+    connection: Connection,
+    hmac_key: Zeroizing<[u8; EFFECT_STORE_KEY_BYTES]>,
 }
 
-fn effect_marker_matches(
-    path: &Path,
-    mutation_kind: &str,
-    resource_key: &str,
-    desired_revision: u64,
-) -> Result<bool, AdapterError> {
-    let name = effect_marker_name(mutation_kind, resource_key);
-    let mut value = vec![0_u8; 64];
-    match rustix::fs::getxattr(path, name, &mut value) {
-        Ok(length) => {
-            Ok(value[..length]
-                == effect_marker_value(mutation_kind, resource_key, desired_revision))
-        }
-        Err(rustix::io::Errno::NOENT | rustix::io::Errno::NODATA) => Ok(false),
-        Err(error) => Err(rustix_io(error)),
-    }
-}
-
-fn copy_effect_markers(source: &Path, destination: &Path) -> Result<(), AdapterError> {
-    if !source.exists() {
-        return Ok(());
-    }
-    let mut names = vec![0_u8; MAX_MANAGED_XATTR_BYTES];
-    let names_length = rustix::fs::listxattr(source, &mut names).map_err(rustix_io)?;
-    for raw_name in names[..names_length]
-        .split(|byte| *byte == 0)
-        .filter(|name| !name.is_empty())
-    {
-        let name = std::str::from_utf8(raw_name).map_err(|_| AdapterError::InvalidResource)?;
-        if !name.starts_with(EFFECT_XATTR_PREFIX) {
-            continue;
-        }
-        let mut value = vec![0_u8; 64];
-        let value_length = rustix::fs::getxattr(source, name, &mut value).map_err(rustix_io)?;
-        if value_length != 32 {
-            return Err(AdapterError::InvalidResource);
-        }
-        rustix::fs::setxattr(
-            destination,
-            name,
-            &value[..value_length],
-            XattrFlags::empty(),
+impl EffectStore {
+    fn open(resources: &FixedResources) -> Result<Self, AdapterError> {
+        let parent = resources
+            .effect_store
+            .parent()
+            .ok_or(AdapterError::InvalidResource)?;
+        std::fs::create_dir_all(parent).map_err(AdapterError::Io)?;
+        std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700))
+            .map_err(AdapterError::Io)?;
+        let hmac_key = load_or_create_effect_key(&resources.effect_store_key)?;
+        reject_symlink(&resources.effect_store)?;
+        let connection = Connection::open_with_flags(
+            &resources.effect_store,
+            OpenFlags::SQLITE_OPEN_READ_WRITE
+                | OpenFlags::SQLITE_OPEN_CREATE
+                | OpenFlags::SQLITE_OPEN_NO_MUTEX,
         )
-        .map_err(rustix_io)?;
+        .map_err(sqlite_io)?;
+        std::fs::set_permissions(
+            &resources.effect_store,
+            std::fs::Permissions::from_mode(0o600),
+        )
+        .map_err(AdapterError::Io)?;
+        connection
+            .execute_batch(
+                "PRAGMA journal_mode=DELETE;
+                 PRAGMA synchronous=FULL;
+                 PRAGMA foreign_keys=ON;
+                 PRAGMA trusted_schema=OFF;
+                 CREATE TABLE IF NOT EXISTS desired_effects (
+                   mutation_kind TEXT NOT NULL,
+                   resource_key TEXT NOT NULL,
+                   revision INTEGER NOT NULL CHECK(revision > 0),
+                   command_id BLOB NOT NULL CHECK(length(command_id)=16),
+                   idempotency_key BLOB NOT NULL CHECK(length(idempotency_key)=16),
+                   payload_sha256 BLOB NOT NULL CHECK(length(payload_sha256)=32),
+                   expires_at INTEGER NOT NULL,
+                   state TEXT NOT NULL CHECK(state IN ('prepared','applied')),
+                   before_hmac BLOB NOT NULL CHECK(length(before_hmac)=32),
+                   after_hmac BLOB NOT NULL CHECK(length(after_hmac)=32),
+                   record_hmac BLOB NOT NULL CHECK(length(record_hmac)=32),
+                   updated_at INTEGER NOT NULL,
+                   PRIMARY KEY(mutation_kind, resource_key)
+                 ) STRICT;",
+            )
+            .map_err(sqlite_io)?;
+        Ok(Self {
+            connection,
+            hmac_key,
+        })
+    }
+
+    fn prepare(
+        &mut self,
+        mutation_kind: &str,
+        resource_key: &str,
+        revision: u64,
+        identity: EffectIdentity<'_>,
+        before: &[u8],
+        after: &[u8],
+    ) -> Result<PrepareEffect, AdapterError> {
+        let now = effect_now()?;
+        let identity =
+            validate_effect_context(mutation_kind, resource_key, revision, identity, now)?;
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(sqlite_io)?;
+        transaction
+            .execute("DELETE FROM desired_effects WHERE expires_at <= ?1", [now])
+            .map_err(sqlite_io)?;
+        if let Some(existing) = query_effect(&transaction, mutation_kind, resource_key)? {
+            validate_effect_record(&self.hmac_key, &existing)?;
+            if existing.revision > revision {
+                return Err(AdapterError::InvalidRequest);
+            }
+            if existing.revision == revision {
+                validate_same_effect(&existing, identity)?;
+                if existing.state == "applied" {
+                    transaction.commit().map_err(sqlite_io)?;
+                    return Ok(PrepareEffect::AlreadyApplied);
+                }
+                let current_hmac = authenticate_file(&self.hmac_key, before);
+                if current_hmac == existing.after_hmac {
+                    update_effect_state(&transaction, &self.hmac_key, existing, "applied", now)?;
+                    transaction.commit().map_err(sqlite_io)?;
+                    return Ok(PrepareEffect::AlreadyApplied);
+                }
+                if current_hmac != existing.before_hmac {
+                    return Err(AdapterError::Unavailable);
+                }
+            }
+        } else {
+            let count: i64 = transaction
+                .query_row("SELECT count(*) FROM desired_effects", [], |row| row.get(0))
+                .map_err(sqlite_io)?;
+            if count >= MAX_EFFECT_RECORDS {
+                return Err(AdapterError::Unavailable);
+            }
+        }
+        let before_hmac = authenticate_file(&self.hmac_key, before);
+        let after_hmac = authenticate_file(&self.hmac_key, after);
+        let record_hmac = authenticate_record(
+            &self.hmac_key,
+            mutation_kind,
+            resource_key,
+            revision,
+            identity,
+            "prepared",
+            &before_hmac,
+            &after_hmac,
+        );
+        transaction
+            .execute(
+                "INSERT INTO desired_effects(mutation_kind,resource_key,revision,command_id,idempotency_key,payload_sha256,expires_at,state,before_hmac,after_hmac,record_hmac,updated_at)
+                 VALUES(?1,?2,?3,?4,?5,?6,?7,'prepared',?8,?9,?10,?11)
+                 ON CONFLICT(mutation_kind,resource_key) DO UPDATE SET revision=excluded.revision,command_id=excluded.command_id,idempotency_key=excluded.idempotency_key,payload_sha256=excluded.payload_sha256,expires_at=excluded.expires_at,state=excluded.state,before_hmac=excluded.before_hmac,after_hmac=excluded.after_hmac,record_hmac=excluded.record_hmac,updated_at=excluded.updated_at",
+                params![mutation_kind, resource_key, i64::try_from(revision).map_err(|_| AdapterError::InvalidRequest)?, identity.command_id.as_slice(), identity.idempotency_key.as_slice(), identity.payload_sha256.as_slice(), identity.expires_at, before_hmac.as_slice(), after_hmac.as_slice(), record_hmac.as_slice(), now],
+            )
+            .map_err(sqlite_io)?;
+        transaction.commit().map_err(sqlite_io)?;
+        Ok(PrepareEffect::Proceed)
+    }
+
+    fn mark_applied(
+        &mut self,
+        mutation_kind: &str,
+        resource_key: &str,
+        revision: u64,
+        identity: EffectIdentity<'_>,
+    ) -> Result<(), AdapterError> {
+        let now = effect_now()?;
+        // Expiry is checked before execution. Do not turn a successfully
+        // committed effect into a terminal rejection if it expires mid-call.
+        let identity = validate_effect_context(mutation_kind, resource_key, revision, identity, 0)?;
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(sqlite_io)?;
+        let record = query_effect(&transaction, mutation_kind, resource_key)?
+            .ok_or(AdapterError::Unavailable)?;
+        validate_effect_record(&self.hmac_key, &record)?;
+        validate_same_effect(&record, identity)?;
+        update_effect_state(&transaction, &self.hmac_key, record, "applied", now)?;
+        transaction.commit().map_err(sqlite_io)
+    }
+
+    fn observe(
+        &mut self,
+        mutation_kind: &str,
+        resource_key: &str,
+        revision: u64,
+        identity: EffectIdentity<'_>,
+        current: &[u8],
+    ) -> Result<DesiredEffectObservation, AdapterError> {
+        let now = effect_now()?;
+        let identity =
+            validate_effect_context(mutation_kind, resource_key, revision, identity, now)?;
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(sqlite_io)?;
+        transaction
+            .execute("DELETE FROM desired_effects WHERE expires_at <= ?1", [now])
+            .map_err(sqlite_io)?;
+        let Some(record) = query_effect(&transaction, mutation_kind, resource_key)? else {
+            transaction.commit().map_err(sqlite_io)?;
+            return Ok(effect_observation(DesiredEffectState::Absent, 0));
+        };
+        validate_effect_record(&self.hmac_key, &record)?;
+        if record.revision > revision {
+            let observed = record.revision;
+            transaction.commit().map_err(sqlite_io)?;
+            return Ok(effect_observation(
+                DesiredEffectState::SupersededByNewerRevision,
+                observed,
+            ));
+        }
+        if record.revision < revision {
+            let observed = record.revision;
+            transaction.commit().map_err(sqlite_io)?;
+            return Ok(effect_observation(DesiredEffectState::Absent, observed));
+        }
+        if validate_same_effect(&record, identity).is_err() {
+            let observed = record.revision;
+            transaction.commit().map_err(sqlite_io)?;
+            return Ok(effect_observation(DesiredEffectState::Unknown, observed));
+        }
+        if record.state == "applied" {
+            transaction.commit().map_err(sqlite_io)?;
+            return Ok(effect_observation(
+                DesiredEffectState::AppliedExact,
+                revision,
+            ));
+        }
+        let current_hmac = authenticate_file(&self.hmac_key, current);
+        let state = if current_hmac == record.after_hmac {
+            update_effect_state(&transaction, &self.hmac_key, record, "applied", now)?;
+            DesiredEffectState::AppliedExact
+        } else if current_hmac == record.before_hmac {
+            DesiredEffectState::Absent
+        } else {
+            DesiredEffectState::Unknown
+        };
+        transaction.commit().map_err(sqlite_io)?;
+        Ok(effect_observation(state, revision))
+    }
+}
+
+fn effect_observation(state: DesiredEffectState, revision: u64) -> DesiredEffectObservation {
+    DesiredEffectObservation {
+        state: state.into(),
+        observed_revision: revision,
+    }
+}
+
+fn validate_effect_context<'a>(
+    mutation_kind: &str,
+    resource_key: &str,
+    revision: u64,
+    identity: EffectIdentity<'a>,
+    now: i64,
+) -> Result<ValidatedEffectIdentity<'a>, AdapterError> {
+    validate_effect_identity(mutation_kind, resource_key, revision)?;
+    let command_id: &'a [u8; 16] = identity
+        .command_id
+        .try_into()
+        .map_err(|_| AdapterError::InvalidRequest)?;
+    let idempotency_key: &'a [u8; 16] = identity
+        .idempotency_key
+        .try_into()
+        .map_err(|_| AdapterError::InvalidRequest)?;
+    let payload_sha256: &'a [u8; 32] = identity
+        .semantic_payload_sha256
+        .try_into()
+        .map_err(|_| AdapterError::InvalidRequest)?;
+    if Uuid::from_bytes(*command_id).get_version_num() != 7
+        || Uuid::from_bytes(*idempotency_key).get_version_num() != 7
+        || identity.expires_at_unix_seconds <= now
+    {
+        return Err(AdapterError::InvalidRequest);
+    }
+    Ok(ValidatedEffectIdentity {
+        command_id,
+        idempotency_key,
+        payload_sha256,
+        expires_at: identity.expires_at_unix_seconds,
+    })
+}
+
+#[derive(Clone, Copy)]
+struct ValidatedEffectIdentity<'a> {
+    command_id: &'a [u8; 16],
+    idempotency_key: &'a [u8; 16],
+    payload_sha256: &'a [u8; 32],
+    expires_at: i64,
+}
+
+fn effect_now() -> Result<i64, AdapterError> {
+    i64::try_from(
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(|_| AdapterError::Unavailable)?
+            .as_secs(),
+    )
+    .map_err(|_| AdapterError::Unavailable)
+}
+
+fn load_or_create_effect_key(path: &Path) -> Result<Zeroizing<[u8; 32]>, AdapterError> {
+    reject_symlink(path)?;
+    if !path.exists() {
+        let parent = path.parent().ok_or(AdapterError::InvalidResource)?;
+        std::fs::create_dir_all(parent).map_err(AdapterError::Io)?;
+        let mut key = Zeroizing::new([0_u8; EFFECT_STORE_KEY_BYTES]);
+        rand::rng().fill_bytes(key.as_mut());
+        let mut options = StdOpenOptions::new();
+        options.write(true).create_new(true).mode(0o600);
+        let mut file = options.open(path).map_err(AdapterError::Io)?;
+        std::io::Write::write_all(&mut file, key.as_ref()).map_err(AdapterError::Io)?;
+        file.sync_all().map_err(AdapterError::Io)?;
+    }
+    let metadata = std::fs::symlink_metadata(path).map_err(AdapterError::Io)?;
+    if !metadata.file_type().is_file() || metadata.permissions().mode() & 0o077 != 0 {
+        return Err(AdapterError::InvalidResource);
+    }
+    let bytes = Zeroizing::new(std::fs::read(path).map_err(AdapterError::Io)?);
+    let key: [u8; EFFECT_STORE_KEY_BYTES] = bytes
+        .as_slice()
+        .try_into()
+        .map_err(|_| AdapterError::InvalidResource)?;
+    Ok(Zeroizing::new(key))
+}
+
+fn reject_symlink(path: &Path) -> Result<(), AdapterError> {
+    match std::fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_symlink() => Err(AdapterError::InvalidResource),
+        Ok(_) => Ok(()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(AdapterError::Io(error)),
+    }
+}
+
+fn query_effect(
+    connection: &Connection,
+    mutation_kind: &str,
+    resource_key: &str,
+) -> Result<Option<EffectRecord>, AdapterError> {
+    connection
+        .query_row(
+            "SELECT mutation_kind,resource_key,revision,command_id,idempotency_key,payload_sha256,expires_at,state,before_hmac,after_hmac,record_hmac FROM desired_effects WHERE mutation_kind=?1 AND resource_key=?2",
+            params![mutation_kind, resource_key],
+            |row| {
+                let revision: i64 = row.get(2)?;
+                Ok(EffectRecord {
+                    mutation_kind: row.get(0)?,
+                    resource_key: row.get(1)?,
+                    revision: u64::try_from(revision).map_err(|_| rusqlite::Error::InvalidQuery)?,
+                    command_id: fixed_blob(row.get(3)?)?,
+                    idempotency_key: fixed_blob(row.get(4)?)?,
+                    payload_sha256: fixed_blob(row.get(5)?)?,
+                    expires_at: row.get(6)?,
+                    state: match row.get::<_, String>(7)?.as_str() {
+                        "prepared" => "prepared",
+                        "applied" => "applied",
+                        _ => return Err(rusqlite::Error::InvalidQuery),
+                    },
+                    before_hmac: fixed_blob(row.get(8)?)?,
+                    after_hmac: fixed_blob(row.get(9)?)?,
+                    record_hmac: fixed_blob(row.get(10)?)?,
+                })
+            },
+        )
+        .optional()
+        .map_err(sqlite_io)
+}
+
+fn fixed_blob<const N: usize>(value: Vec<u8>) -> Result<[u8; N], rusqlite::Error> {
+    value.try_into().map_err(|_| rusqlite::Error::InvalidQuery)
+}
+
+fn validate_same_effect(
+    record: &EffectRecord,
+    identity: ValidatedEffectIdentity<'_>,
+) -> Result<(), AdapterError> {
+    if record.command_id != *identity.command_id
+        || record.idempotency_key != *identity.idempotency_key
+        || record.payload_sha256 != *identity.payload_sha256
+        || record.expires_at != identity.expires_at
+    {
+        return Err(AdapterError::InvalidRequest);
     }
     Ok(())
 }
 
-fn rustix_io(error: rustix::io::Errno) -> AdapterError {
-    AdapterError::Io(io::Error::from_raw_os_error(error.raw_os_error()))
+fn validate_effect_record(key: &[u8; 32], record: &EffectRecord) -> Result<(), AdapterError> {
+    let identity = ValidatedEffectIdentity {
+        command_id: &record.command_id,
+        idempotency_key: &record.idempotency_key,
+        payload_sha256: &record.payload_sha256,
+        expires_at: record.expires_at,
+    };
+    let expected = authenticate_record(
+        key,
+        &record.mutation_kind,
+        &record.resource_key,
+        record.revision,
+        identity,
+        record.state,
+        &record.before_hmac,
+        &record.after_hmac,
+    );
+    if expected != record.record_hmac {
+        return Err(AdapterError::InvalidResource);
+    }
+    Ok(())
+}
+
+fn update_effect_state(
+    connection: &Connection,
+    key: &[u8; 32],
+    mut record: EffectRecord,
+    state: &'static str,
+    now: i64,
+) -> Result<(), AdapterError> {
+    record.state = state;
+    let identity = ValidatedEffectIdentity {
+        command_id: &record.command_id,
+        idempotency_key: &record.idempotency_key,
+        payload_sha256: &record.payload_sha256,
+        expires_at: record.expires_at,
+    };
+    let record_hmac = authenticate_record(
+        key,
+        &record.mutation_kind,
+        &record.resource_key,
+        record.revision,
+        identity,
+        state,
+        &record.before_hmac,
+        &record.after_hmac,
+    );
+    let changed = connection
+        .execute(
+            "UPDATE desired_effects SET state=?4,record_hmac=?5,updated_at=?6 WHERE mutation_kind=?1 AND resource_key=?2 AND revision=?3",
+            params![record.mutation_kind, record.resource_key, i64::try_from(record.revision).map_err(|_| AdapterError::InvalidResource)?, state, record_hmac.as_slice(), now],
+        )
+        .map_err(sqlite_io)?;
+    if changed != 1 {
+        return Err(AdapterError::Unavailable);
+    }
+    Ok(())
+}
+
+fn authenticate_file(key: &[u8; 32], bytes: &[u8]) -> [u8; 32] {
+    hmac_sha256(key, &[b"ocservia.authoritative-file.v1\0", bytes])
+}
+
+#[allow(clippy::too_many_arguments)]
+fn authenticate_record(
+    key: &[u8; 32],
+    mutation_kind: &str,
+    resource_key: &str,
+    revision: u64,
+    identity: ValidatedEffectIdentity<'_>,
+    state: &str,
+    before_hmac: &[u8; 32],
+    after_hmac: &[u8; 32],
+) -> [u8; 32] {
+    hmac_sha256(
+        key,
+        &[
+            b"ocservia.desired-effect-record.v1\0",
+            mutation_kind.as_bytes(),
+            &[0],
+            resource_key.as_bytes(),
+            &[0],
+            &revision.to_be_bytes(),
+            identity.command_id,
+            identity.idempotency_key,
+            identity.payload_sha256,
+            &identity.expires_at.to_be_bytes(),
+            state.as_bytes(),
+            before_hmac,
+            after_hmac,
+        ],
+    )
+}
+
+fn hmac_sha256(key: &[u8; 32], chunks: &[&[u8]]) -> [u8; 32] {
+    let mut inner_key = [0x36_u8; 64];
+    let mut outer_key = [0x5c_u8; 64];
+    for (index, byte) in key.iter().enumerate() {
+        inner_key[index] ^= byte;
+        outer_key[index] ^= byte;
+    }
+    let mut inner = Sha256::new();
+    inner.update(inner_key);
+    for chunk in chunks {
+        inner.update(chunk);
+    }
+    let inner_digest = inner.finalize();
+    let mut outer = Sha256::new();
+    outer.update(outer_key);
+    outer.update(inner_digest);
+    outer.finalize().into()
+}
+
+fn sqlite_io(error: rusqlite::Error) -> AdapterError {
+    AdapterError::Io(io::Error::other(error))
 }
 
 async fn read_optional_secret_file(path: &Path) -> Result<Zeroizing<Vec<u8>>, AdapterError> {
@@ -962,37 +1474,6 @@ async fn read_optional_secret_file(path: &Path) -> Result<Zeroizing<Vec<u8>>, Ad
     }
 }
 
-async fn atomic_replace(
-    path: &Path,
-    bytes: &[u8],
-    effect: Option<(&str, &str, u64)>,
-) -> Result<(), AdapterError> {
-    let parent = path.parent().ok_or(AdapterError::InvalidResource)?;
-    let name = path
-        .file_name()
-        .and_then(|value| value.to_str())
-        .ok_or(AdapterError::InvalidResource)?;
-    let staging = parent.join(format!(".{name}.ocservia-{}", Uuid::now_v7()));
-    let mode = file_mode(path).await?;
-    let mut options = tokio::fs::OpenOptions::new();
-    options.write(true).create_new(true).mode(mode);
-    let mut file = options.open(&staging).await.map_err(AdapterError::Io)?;
-    let result = async {
-        file.write_all(bytes).await.map_err(AdapterError::Io)?;
-        file.sync_all().await.map_err(AdapterError::Io)?;
-        copy_effect_markers(path, &staging)?;
-        if let Some((mutation_kind, resource_key, desired_revision)) = effect {
-            set_effect_marker(&staging, mutation_kind, resource_key, desired_revision)?;
-        }
-        commit_staging(&staging, path).await
-    }
-    .await;
-    if result.is_err() {
-        let _ = tokio::fs::remove_file(&staging).await;
-    }
-    result
-}
-
 async fn file_mode(path: &Path) -> Result<u32, AdapterError> {
     match tokio::fs::metadata(path).await {
         Ok(metadata) => Ok(metadata.permissions().mode() & 0o777),
@@ -1001,7 +1482,7 @@ async fn file_mode(path: &Path) -> Result<u32, AdapterError> {
     }
 }
 
-async fn commit_staging(staging: &Path, path: &Path) -> Result<(), AdapterError> {
+async fn atomic_replace(staging: &Path, path: &Path) -> Result<(), AdapterError> {
     let file = tokio::fs::OpenOptions::new()
         .read(true)
         .open(staging)
@@ -1298,6 +1779,20 @@ mod tests {
 
     use super::*;
 
+    const TEST_COMMAND_ID: [u8; 16] = [1, 2, 3, 4, 5, 6, 0x70, 8, 0x80, 10, 11, 12, 13, 14, 15, 16];
+    const TEST_IDEMPOTENCY_KEY: [u8; 16] =
+        [16, 15, 14, 13, 12, 11, 0x70, 9, 0x80, 7, 6, 5, 4, 3, 2, 1];
+    const TEST_PAYLOAD_HASH: [u8; 32] = [9; 32];
+
+    fn test_effect() -> EffectIdentity<'static> {
+        EffectIdentity {
+            command_id: &TEST_COMMAND_ID,
+            idempotency_key: &TEST_IDEMPOTENCY_KEY,
+            semantic_payload_sha256: &TEST_PAYLOAD_HASH,
+            expires_at_unix_seconds: i64::MAX,
+        }
+    }
+
     fn executable(name: &str, body: &str) -> PathBuf {
         let directory =
             std::env::temp_dir().join(format!("ocservia-adapter-{}", uuid::Uuid::now_v7()));
@@ -1420,11 +1915,21 @@ mod tests {
                 directory.join("key.pem"),
                 String::from("test-key"),
             )
-            .expect("resources");
+            .expect("resources")
+            .with_effect_store(
+                directory.join("effects.sqlite3"),
+                directory.join("effects.key"),
+            )
+            .expect("effect resources");
         let adapter = Adapter::new(resources, Limits::default());
         assert!(
             adapter
-                .group_apply("staff", &["alice".to_owned(), "bob".to_owned()], 1)
+                .group_apply(
+                    "staff",
+                    &["alice".to_owned(), "bob".to_owned()],
+                    1,
+                    test_effect(),
+                )
                 .await
                 .is_ok()
         );
@@ -1432,23 +1937,30 @@ mod tests {
             adapter.group_list().await.expect("groups").groups[0].members,
             ["alice", "bob"]
         );
-        assert!(
+        assert_eq!(
             adapter
-                .desired_effect_observe("group_apply", "staff", 1)
+                .desired_effect_observe("group_apply", "staff", 1, test_effect())
                 .await
-                .expect("group marker")
-                .applied
+                .expect("group effect")
+                .state,
+            DesiredEffectState::AppliedExact as i32
         );
-        assert!(
-            !adapter
-                .desired_effect_observe("group_apply", "staff", 2)
+        assert_eq!(
+            adapter
+                .desired_effect_observe("group_apply", "staff", 2, test_effect())
                 .await
-                .expect("stale group marker")
-                .applied
+                .expect("stale group effect")
+                .state,
+            DesiredEffectState::Absent as i32
         );
         let updated = std::fs::read(&users).expect("updated");
         assert!(updated.starts_with(b"alice:staff:$6$alice-hash\nbob:staff:!$6$bob-hash\n"));
-        assert!(adapter.group_apply("../staff", &[], 2).await.is_err());
+        assert!(
+            adapter
+                .group_apply("../staff", &[], 2, test_effect())
+                .await
+                .is_err()
+        );
         assert_eq!(std::fs::read(&users).expect("unchanged"), updated);
         std::fs::remove_dir_all(directory).expect("cleanup");
     }
@@ -1472,11 +1984,16 @@ mod tests {
                 directory.join("key.pem"),
                 String::from("test-key"),
             )
-            .expect("resources");
+            .expect("resources")
+            .with_effect_store(
+                directory.join("effects.sqlite3"),
+                directory.join("effects.key"),
+            )
+            .expect("effect resources");
         let adapter = Adapter::new(resources, Limits::default());
         assert!(
             adapter
-                .user_password_rotate("alice", "test-key", &[7_u8; 64], 2)
+                .user_password_rotate("alice", "test-key", &[7_u8; 64], 2, test_effect())
                 .await
                 .is_err()
         );
@@ -1501,18 +2018,23 @@ mod tests {
                 directory.join("key.pem"),
                 String::from("test-key"),
             )
-            .expect("resources");
+            .expect("resources")
+            .with_effect_store(
+                directory.join("effects.sqlite3"),
+                directory.join("effects.key"),
+            )
+            .expect("effect resources");
         let adapter = Adapter::new(resources, Limits::default());
         assert!(matches!(
             adapter
-                .user_create("alice", "test-key", &[7_u8; 64], 1)
+                .user_create("alice", "test-key", &[7_u8; 64], 1, test_effect())
                 .await,
             Err(AdapterError::InvalidRequest)
         ));
         assert_eq!(std::fs::read(&users).expect("create conflict"), original);
         assert!(matches!(
             adapter
-                .user_password_rotate("bob", "test-key", &[7_u8; 64], 2)
+                .user_password_rotate("bob", "test-key", &[7_u8; 64], 2, test_effect())
                 .await,
             Err(AdapterError::InvalidRequest)
         ));
@@ -1520,8 +2042,199 @@ mod tests {
         std::fs::remove_dir_all(directory).expect("cleanup");
     }
 
+    #[test]
+    fn effect_store_supports_ten_thousand_resources() {
+        let directory = std::env::temp_dir().join(format!("ocservia-effects-{}", Uuid::now_v7()));
+        std::fs::create_dir(&directory).expect("directory");
+        let resources = FixedResources::default()
+            .with_effect_store(
+                directory.join("effects.sqlite3"),
+                directory.join("effects.key"),
+            )
+            .expect("effect resources");
+        let mut store = EffectStore::open(&resources).expect("open effect store");
+        let now = effect_now().expect("clock");
+        let transaction = store
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .expect("scale transaction");
+        for index in 0..10_000_u64 {
+            let resource_key = format!("user{index:05}");
+            let before_hmac = authenticate_file(&store.hmac_key, b"before");
+            let after_hmac = authenticate_file(&store.hmac_key, b"after");
+            let identity =
+                validate_effect_context("user_create", &resource_key, 1, test_effect(), now)
+                    .expect("scale identity");
+            let record_hmac = authenticate_record(
+                &store.hmac_key,
+                "user_create",
+                &resource_key,
+                1,
+                identity,
+                "applied",
+                &before_hmac,
+                &after_hmac,
+            );
+            transaction
+                .execute(
+                    "INSERT INTO desired_effects(mutation_kind,resource_key,revision,command_id,idempotency_key,payload_sha256,expires_at,state,before_hmac,after_hmac,record_hmac,updated_at) VALUES('user_create',?1,1,?2,?3,?4,?5,'applied',?6,?7,?8,?9)",
+                    params![resource_key, identity.command_id.as_slice(), identity.idempotency_key.as_slice(), identity.payload_sha256.as_slice(), identity.expires_at, before_hmac.as_slice(), after_hmac.as_slice(), record_hmac.as_slice(), now],
+                )
+                .expect("scale effect");
+        }
+        transaction.commit().expect("scale commit");
+        assert_eq!(
+            store
+                .connection
+                .query_row("SELECT count(*) FROM desired_effects", [], |row| row
+                    .get::<_, i64>(0))
+                .expect("scale count"),
+            10_000
+        );
+        let mut users = Vec::with_capacity(2 * 1024 * 1024);
+        for index in 0..10_000_u64 {
+            users.extend_from_slice(
+                format!("user{index:05}:staff:$6$test-hash-{index}\n").as_bytes(),
+            );
+        }
+        assert_eq!(
+            parse_user_file(&users).expect("10k users").users.len(),
+            10_000
+        );
+        std::fs::remove_dir_all(directory).expect("cleanup");
+    }
+
+    #[test]
+    fn effect_store_rejects_revision_rollback() {
+        let directory =
+            std::env::temp_dir().join(format!("ocservia-effect-order-{}", Uuid::now_v7()));
+        std::fs::create_dir(&directory).expect("directory");
+        let resources = FixedResources::default()
+            .with_effect_store(
+                directory.join("effects.sqlite3"),
+                directory.join("effects.key"),
+            )
+            .expect("effect resources");
+        let mut store = EffectStore::open(&resources).expect("open effect store");
+        store
+            .prepare(
+                "user_password_rotate",
+                "alice",
+                2,
+                test_effect(),
+                b"password-one",
+                b"password-two",
+            )
+            .expect("prepare rotate two");
+        store
+            .mark_applied("user_password_rotate", "alice", 2, test_effect())
+            .expect("apply rotate two");
+        store
+            .prepare(
+                "user_password_rotate",
+                "alice",
+                3,
+                test_effect(),
+                b"password-two",
+                b"password-three",
+            )
+            .expect("prepare rotate three");
+        store
+            .mark_applied("user_password_rotate", "alice", 3, test_effect())
+            .expect("apply rotate three");
+        let observation = store
+            .observe(
+                "user_password_rotate",
+                "alice",
+                2,
+                test_effect(),
+                b"password-three",
+            )
+            .expect("observe stale rotate");
+        assert_eq!(
+            observation.state,
+            DesiredEffectState::SupersededByNewerRevision as i32
+        );
+        assert_eq!(observation.observed_revision, 3);
+        assert!(matches!(
+            store.prepare(
+                "user_password_rotate",
+                "alice",
+                2,
+                test_effect(),
+                b"password-three",
+                b"password-two",
+            ),
+            Err(AdapterError::InvalidRequest)
+        ));
+        std::fs::remove_dir_all(directory).expect("cleanup");
+    }
+
+    #[test]
+    fn effect_store_recovers_post_commit_crash_and_rejects_tampering() {
+        let directory =
+            std::env::temp_dir().join(format!("ocservia-effect-crash-{}", Uuid::now_v7()));
+        std::fs::create_dir(&directory).expect("directory");
+        let resources = FixedResources::default()
+            .with_effect_store(
+                directory.join("effects.sqlite3"),
+                directory.join("effects.key"),
+            )
+            .expect("effect resources");
+        let mut store = EffectStore::open(&resources).expect("open effect store");
+        store
+            .prepare(
+                "user_password_rotate",
+                "alice",
+                2,
+                test_effect(),
+                b"password-one",
+                b"password-two",
+            )
+            .expect("durable prepared record");
+        let recovered = store
+            .observe(
+                "user_password_rotate",
+                "alice",
+                2,
+                test_effect(),
+                b"password-two",
+            )
+            .expect("recover post-commit crash");
+        assert_eq!(recovered.state, DesiredEffectState::AppliedExact as i32);
+        assert_eq!(
+            store
+                .connection
+                .query_row(
+                    "SELECT state FROM desired_effects WHERE mutation_kind='user_password_rotate' AND resource_key='alice'",
+                    [],
+                    |row| row.get::<_, String>(0),
+                )
+                .expect("recovered state"),
+            "applied"
+        );
+        store
+            .connection
+            .execute(
+                "UPDATE desired_effects SET record_hmac=zeroblob(32) WHERE mutation_kind='user_password_rotate' AND resource_key='alice'",
+                [],
+            )
+            .expect("inject tamper");
+        assert!(matches!(
+            store.observe(
+                "user_password_rotate",
+                "alice",
+                2,
+                test_effect(),
+                b"password-two",
+            ),
+            Err(AdapterError::InvalidResource)
+        ));
+        std::fs::remove_dir_all(directory).expect("cleanup");
+    }
+
     #[cfg(target_os = "linux")]
-    async fn assert_effect_marker(
+    async fn assert_effect_state(
         adapter: &Adapter,
         mutation_kind: &str,
         resource_key: &str,
@@ -1530,10 +2243,11 @@ mod tests {
     ) {
         assert_eq!(
             adapter
-                .desired_effect_observe(mutation_kind, resource_key, revision)
+                .desired_effect_observe(mutation_kind, resource_key, revision, test_effect())
                 .await
-                .expect("observe effect marker")
-                .applied,
+                .expect("observe effect state")
+                .state
+                == DesiredEffectState::AppliedExact as i32,
             expected
         );
     }
@@ -1553,17 +2267,22 @@ mod tests {
                 root.join("private.pem"),
                 String::from("i13-native"),
             )
-            .expect("fixed native resources");
+            .expect("fixed native resources")
+            .with_effect_store(
+                root.join("privd-state/effects.sqlite3"),
+                root.join("privd-state/effects.key"),
+            )
+            .expect("native effect resources");
         let adapter = Adapter::new(resources, Limits::default());
         adapter
-            .user_create("alice", "i13-native", &sealed, 1)
+            .user_create("alice", "i13-native", &sealed, 1, test_effect())
             .await
             .expect("create native user");
-        assert_effect_marker(&adapter, "user_create", "alice", 1, true).await;
+        assert_effect_state(&adapter, "user_create", "alice", 1, true).await;
         let after_create = std::fs::read(&users).expect("created record");
         assert!(
             adapter
-                .user_password_rotate("bob", "i13-native", &sealed, 2)
+                .user_password_rotate("bob", "i13-native", &sealed, 2, test_effect())
                 .await
                 .is_err(),
             "rotate must not create a missing user"
@@ -1578,20 +2297,20 @@ mod tests {
         assert!(listed.users[0].enabled);
         assert!(!format!("{listed:?}").contains("native-password-sentinel"));
         adapter
-            .group_apply("staff", &["alice".to_owned()], 2)
+            .group_apply("staff", &["alice".to_owned()], 2, test_effect())
             .await
             .expect("apply native group");
         let before_rotate = std::fs::read_to_string(&users).expect("before rotate");
         assert!(before_rotate.starts_with("alice:staff:"));
         adapter
-            .user_disable("alice", 3)
+            .user_disable("alice", 3, test_effect())
             .await
             .expect("disable native user");
         assert!(!adapter.user_list().await.expect("list disabled").users[0].enabled);
         let locked_record = std::fs::read(&users).expect("locked record");
         assert!(
             adapter
-                .user_create("alice", "i13-native", &sealed, 4)
+                .user_create("alice", "i13-native", &sealed, 4, test_effect())
                 .await
                 .is_err(),
             "create must not overwrite an existing user"
@@ -1602,10 +2321,10 @@ mod tests {
             "create conflict changed password, group, or lock state"
         );
         adapter
-            .user_password_rotate("alice", "i13-native", &sealed, 4)
+            .user_password_rotate("alice", "i13-native", &sealed, 4, test_effect())
             .await
             .expect("rotate disabled native user");
-        assert_effect_marker(&adapter, "user_password_rotate", "alice", 4, true).await;
+        assert_effect_state(&adapter, "user_password_rotate", "alice", 4, true).await;
         assert!(
             !adapter
                 .user_list()
@@ -1620,7 +2339,7 @@ mod tests {
                 .starts_with("alice:staff:!")
         );
         adapter
-            .user_enable("alice", 5)
+            .user_enable("alice", 5, test_effect())
             .await
             .expect("enable native user");
         assert!(adapter.user_list().await.expect("enabled user").users[0].enabled);
@@ -1629,8 +2348,8 @@ mod tests {
                 .expect("enabled record")
                 .starts_with("alice:staff:")
         );
-        assert_effect_marker(&adapter, "user_create", "alice", 1, true).await;
-        assert_effect_marker(&adapter, "user_password_rotate", "alice", 3, false).await;
+        assert_effect_state(&adapter, "user_create", "alice", 1, true).await;
+        assert_effect_state(&adapter, "user_password_rotate", "alice", 3, false).await;
     }
 
     #[test]

@@ -1,5 +1,5 @@
 [Unit]
-Description=Ocservia fixed read-only privileged helper
+Description=Ocservia fixed typed privileged helper
 Before=ocservia-agent.service
 
 [Service]
@@ -12,6 +12,8 @@ Restart=on-failure
 RestartSec=5s
 RuntimeDirectory=ocserv-platform
 RuntimeDirectoryMode=0750
+StateDirectory=ocservia-privd
+StateDirectoryMode=0700
 NoNewPrivileges=yes
 PrivateTmp=yes
 PrivateDevices=yes
@@ -30,7 +32,7 @@ RestrictSUIDSGID=yes
 RestrictNamespaces=yes
 SystemCallArchitectures=native
 CapabilityBoundingSet=CAP_DAC_OVERRIDE
-ReadOnlyPaths=-/etc/ocserv
+ReadWritePaths=-/etc/ocserv /var/lib/ocservia-privd
 UMask=0007
 TasksMax=32
 LimitNOFILE=128

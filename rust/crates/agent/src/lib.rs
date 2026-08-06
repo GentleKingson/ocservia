@@ -74,6 +74,15 @@ pub enum ExternalPreparation {
     Replay(CommandOutcome),
 }
 
+/// Independent effect evidence used to resolve an external Unknown safely.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ExternalEffectObservation {
+    AppliedExact,
+    SupersededByNewerRevision,
+    Absent,
+    Unknown,
+}
+
 /// Refusal, storage failure, or an intentional fault boundary.
 #[derive(Debug)]
 pub enum CommandError {
@@ -419,7 +428,7 @@ impl CommandExecutor {
         &mut self,
         envelope: &CommandEnvelope,
         context: &CommandContext,
-        applied: Option<bool>,
+        observation: ExternalEffectObservation,
     ) -> Result<CommandOutcome, CommandError> {
         let validated = validate_command(envelope, context)?;
         if !validated.external {
@@ -432,7 +441,7 @@ impl CommandExecutor {
                 replayed: true,
             });
         }
-        if applied == Some(true)
+        if observation == ExternalEffectObservation::AppliedExact
             && let Some((resource_type, resource_key, revision)) = desired_resource(envelope)
         {
             let record = self
@@ -454,10 +463,19 @@ impl CommandExecutor {
                 replayed: true,
             });
         }
-        let (state, result, code) = match applied {
-            Some(true) => (CommandState::Succeeded, Some(b"observed".as_slice()), None),
-            Some(false) => (CommandState::Unknown, None, Some("effect_absent")),
-            None => (
+        let (state, result, code) = match observation {
+            ExternalEffectObservation::AppliedExact => {
+                (CommandState::Succeeded, Some(b"observed".as_slice()), None)
+            }
+            ExternalEffectObservation::SupersededByNewerRevision => (
+                CommandState::Failed,
+                None,
+                Some("effect_superseded_by_newer_revision"),
+            ),
+            ExternalEffectObservation::Absent => {
+                (CommandState::Unknown, None, Some("effect_absent"))
+            }
+            ExternalEffectObservation::Unknown => (
                 CommandState::Unknown,
                 None,
                 Some("manual_reconciliation_required"),
@@ -503,6 +521,17 @@ impl CommandExecutor {
             || record.error_code.as_deref() != Some("effect_absent")
         {
             return Err(CommandError::Rejected("reconciliation_required"));
+        }
+        if let Some((resource_type, resource_key, revision)) = desired_resource(envelope)
+            && self
+                .journal
+                .applied_revision(resource_type, resource_key)
+                .map_err(pre_effect_failure)?
+                .is_some_and(|applied| applied > revision)
+        {
+            return Err(CommandError::Rejected(
+                "effect_superseded_by_newer_revision",
+            ));
         }
         self.journal
             .transition_command(
@@ -1261,6 +1290,50 @@ impl PrivdClient {
         &self,
         operation: privd_request::Operation,
     ) -> Result<PrivdResponse, io::Error> {
+        self.call_inner(operation, &[], &[], &[], 0).await
+    }
+
+    /// Calls one desired-state operation with its stable non-secret command identity.
+    ///
+    /// # Errors
+    ///
+    /// Returns an I/O or deadline error and rejects malformed identity lengths.
+    pub async fn call_desired(
+        &self,
+        operation: privd_request::Operation,
+        command_id: &[u8],
+        idempotency_key: &[u8],
+        semantic_payload_sha256: &[u8],
+        expires_at_unix_seconds: i64,
+    ) -> Result<PrivdResponse, io::Error> {
+        if command_id.len() != 16
+            || idempotency_key.len() != 16
+            || semantic_payload_sha256.len() != 32
+            || expires_at_unix_seconds <= 0
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "desired effect identity invalid",
+            ));
+        }
+        self.call_inner(
+            operation,
+            command_id,
+            idempotency_key,
+            semantic_payload_sha256,
+            expires_at_unix_seconds,
+        )
+        .await
+    }
+
+    async fn call_inner(
+        &self,
+        operation: privd_request::Operation,
+        command_id: &[u8],
+        idempotency_key: &[u8],
+        semantic_payload_sha256: &[u8],
+        expires_at_unix_seconds: i64,
+    ) -> Result<PrivdResponse, io::Error> {
         let deadline = SystemTime::now()
             .checked_add(self.timeout)
             .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "privd deadline overflow"))?
@@ -1271,6 +1344,10 @@ impl PrivdClient {
         let request = PrivdRequest {
             request_id: Uuid::now_v7().as_bytes().to_vec(),
             deadline_unix_ms,
+            command_id: command_id.to_vec(),
+            idempotency_key: idempotency_key.to_vec(),
+            semantic_payload_sha256: semantic_payload_sha256.to_vec(),
+            command_expires_at_unix_seconds: expires_at_unix_seconds,
             operation: Some(operation),
         };
         let mut stream = tokio::time::timeout(self.timeout, UnixStream::connect(&self.socket))
@@ -1619,6 +1696,7 @@ mod tests {
             .expect("password hash")
             .to_vec();
         let mut command_context = context(node, 100);
+        command_context.observed_revision = None;
         command_context.capabilities = HashSet::from(["ocserv.users.write"]);
         {
             let mut executor = CommandExecutor::new(Journal::open(&path).expect("journal"));
@@ -1636,8 +1714,12 @@ mod tests {
         command_context.now_unix_seconds = 102;
         let mut executor = CommandExecutor::new(Journal::open(&path).expect("restart"));
         let recovered = executor
-            .reconcile_external(&envelope, &command_context, Some(true))
-            .expect("marker proves effect");
+            .reconcile_external(
+                &envelope,
+                &command_context,
+                ExternalEffectObservation::AppliedExact,
+            )
+            .expect("effect store proves effect");
         assert_eq!(recovered.record.state, CommandState::Succeeded);
         assert_eq!(
             executor
@@ -1651,7 +1733,7 @@ mod tests {
     }
 
     #[test]
-    fn password_unknown_remains_nonterminal_until_marker_observation() {
+    fn password_unknown_remains_nonterminal_until_effect_observation() {
         let path = temporary_journal("password-absence");
         let node = *Uuid::now_v7().as_bytes();
         let mut envelope = command(node, *Uuid::now_v7().as_bytes(), "", 100);
@@ -1666,6 +1748,7 @@ mod tests {
         envelope.semantic_payload_hash_version = SemanticPayloadHashVersion::V1 as i32;
         envelope.semantic_payload_sha256 = semantic_payload_hash_v1(&envelope).unwrap().to_vec();
         let mut command_context = context(node, 100);
+        command_context.observed_revision = None;
         command_context.capabilities = HashSet::from(["ocserv.users.write"]);
         let mut executor = CommandExecutor::new(Journal::open(&path).expect("journal"));
         let ExternalPreparation::Execute(command) = executor
@@ -1679,8 +1762,12 @@ mod tests {
             .expect("unknown");
         command_context.now_unix_seconds = 102;
         let reconciled = executor
-            .reconcile_external(&envelope, &command_context, Some(false))
-            .expect("marker absence");
+            .reconcile_external(
+                &envelope,
+                &command_context,
+                ExternalEffectObservation::Absent,
+            )
+            .expect("effect absence");
         assert_eq!(reconciled.record.state, CommandState::Unknown);
         assert_eq!(
             reconciled.record.error_code.as_deref(),
@@ -1694,6 +1781,141 @@ mod tests {
             None
         );
         drop(executor);
+        cleanup_journal(&path);
+    }
+
+    #[test]
+    fn older_unknown_password_revision_is_obsolete_after_newer_success() {
+        let path = temporary_journal("password-superseded");
+        let node = *Uuid::now_v7().as_bytes();
+        let mut command_context = context(node, 100);
+        command_context.observed_revision = None;
+        command_context.capabilities = HashSet::from(["ocserv.users.write"]);
+        let mut old = command(node, *Uuid::now_v7().as_bytes(), "", 100);
+        old.payload = Some(command_envelope::Payload::UserPasswordRotate(
+            UserPasswordRotate {
+                username: "alice".to_owned(),
+                sealed_password: vec![0xa2; 64],
+                secret_key_id: "node-key-1".to_owned(),
+                desired_revision: 2,
+            },
+        ));
+        old.semantic_payload_hash_version = SemanticPayloadHashVersion::V1 as i32;
+        old.semantic_payload_sha256 = semantic_payload_hash_v1(&old).unwrap().to_vec();
+        let mut newer = command(node, *Uuid::now_v7().as_bytes(), "", 100);
+        newer.expected_revision = 2;
+        newer.payload = Some(command_envelope::Payload::UserPasswordRotate(
+            UserPasswordRotate {
+                username: "alice".to_owned(),
+                sealed_password: vec![0xa3; 64],
+                secret_key_id: "node-key-1".to_owned(),
+                desired_revision: 3,
+            },
+        ));
+        newer.semantic_payload_hash_version = SemanticPayloadHashVersion::V1 as i32;
+        newer.semantic_payload_sha256 = semantic_payload_hash_v1(&newer).unwrap().to_vec();
+
+        let mut executor = CommandExecutor::new(Journal::open(&path).expect("journal"));
+        let ExternalPreparation::Execute(old_command) = executor
+            .prepare_external(&old, &command_context)
+            .expect("prepare old")
+        else {
+            panic!("old execute preparation")
+        };
+        executor
+            .mark_external_unknown(&old_command, "privd_transport_unknown", 101)
+            .expect("old unknown");
+        let ExternalPreparation::Execute(new_command) = executor
+            .prepare_external(&newer, &command_context)
+            .expect("prepare newer")
+        else {
+            panic!("new execute preparation")
+        };
+        executor
+            .complete_external_applied(&new_command, "user", "alice", 3, 102)
+            .expect("newer applied");
+        command_context.now_unix_seconds = 103;
+        let obsolete = executor
+            .reconcile_external(
+                &old,
+                &command_context,
+                ExternalEffectObservation::SupersededByNewerRevision,
+            )
+            .expect("old reconcile");
+        assert_eq!(obsolete.record.state, CommandState::Failed);
+        assert_eq!(
+            obsolete.record.error_code.as_deref(),
+            Some("effect_superseded_by_newer_revision")
+        );
+        assert_eq!(
+            executor
+                .journal()
+                .applied_revision("user", "alice")
+                .expect("applied revision"),
+            Some(3)
+        );
+        cleanup_journal(&path);
+    }
+
+    #[test]
+    fn stale_effect_absent_retry_is_blocked_by_applied_revision() {
+        let path = temporary_journal("password-stale-retry");
+        let node = *Uuid::now_v7().as_bytes();
+        let mut command_context = context(node, 100);
+        command_context.observed_revision = None;
+        command_context.capabilities = HashSet::from(["ocserv.users.write"]);
+        let mut old = command(node, *Uuid::now_v7().as_bytes(), "", 100);
+        old.payload = Some(command_envelope::Payload::UserPasswordRotate(
+            UserPasswordRotate {
+                username: "alice".to_owned(),
+                sealed_password: vec![0xa2; 64],
+                secret_key_id: "node-key-1".to_owned(),
+                desired_revision: 2,
+            },
+        ));
+        old.semantic_payload_hash_version = SemanticPayloadHashVersion::V1 as i32;
+        old.semantic_payload_sha256 = semantic_payload_hash_v1(&old).unwrap().to_vec();
+        let mut newer = old.clone();
+        newer.command_id = Uuid::now_v7().as_bytes().to_vec();
+        newer.idempotency_key = Uuid::now_v7().as_bytes().to_vec();
+        let Some(command_envelope::Payload::UserPasswordRotate(payload)) = newer.payload.as_mut()
+        else {
+            unreachable!()
+        };
+        payload.desired_revision = 3;
+        payload.sealed_password.fill(0xa3);
+        newer.expected_revision = 2;
+        newer.semantic_payload_sha256 = semantic_payload_hash_v1(&newer).unwrap().to_vec();
+        let mut executor = CommandExecutor::new(Journal::open(&path).expect("journal"));
+        let ExternalPreparation::Execute(old_command) = executor
+            .prepare_external(&old, &command_context)
+            .expect("prepare old")
+        else {
+            panic!("old execute preparation")
+        };
+        executor
+            .mark_external_unknown(&old_command, "privd_transport_unknown", 101)
+            .expect("old unknown");
+        command_context.now_unix_seconds = 102;
+        executor
+            .reconcile_external(&old, &command_context, ExternalEffectObservation::Absent)
+            .expect("old absent");
+        let ExternalPreparation::Execute(new_command) = executor
+            .prepare_external(&newer, &command_context)
+            .expect("prepare newer")
+        else {
+            panic!("new execute preparation")
+        };
+        executor
+            .complete_external_applied(&new_command, "user", "alice", 3, 103)
+            .expect("newer applied");
+        command_context.now_unix_seconds = 104;
+        assert!(matches!(
+            executor.retry_external(&old, &command_context),
+            Err(CommandError::Rejected(
+                "effect_superseded_by_newer_revision"
+            ))
+        ));
         cleanup_journal(&path);
     }
 

@@ -12,10 +12,13 @@ import (
 	"time"
 
 	agentv1 "github.com/GentleKingson/ocservia/control-plane/gen/proto/ocserv/platform/agent/v1"
+	transportv1 "github.com/GentleKingson/ocservia/control-plane/gen/proto/ocserv/platform/transport/v1"
+	"github.com/GentleKingson/ocservia/control-plane/internal/localslice"
 	operationstore "github.com/GentleKingson/ocservia/control-plane/internal/operations"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
 func TestDesiredStateAtomicOfflineDriftVersionAndNodeScopeIntegration(t *testing.T) {
@@ -116,6 +119,77 @@ func TestEnableQueuesAuditableDesiredRevisionIntegration(t *testing.T) {
 	}
 	if command.GetUserEnable().GetUsername() != "alice" || command.GetUserEnable().GetDesiredRevision() != 4 {
 		t.Fatalf("typed enable=%v", &command)
+	}
+}
+
+func TestI13IntentAndTerminalAuditActionsMatchIntegration(t *testing.T) {
+	service, pool, _, nodeID := integrationService(t, "active")
+	ingest := localslice.New(pool)
+	tests := []struct {
+		kind    MutationKind
+		name    string
+		version int64
+		action  string
+		members []string
+	}{
+		{UserCreate, "alice", 0, "user.create", nil},
+		{UserPasswordRotate, "alice", 1, "user.password.rotate", nil},
+		{UserDisable, "alice", 2, "user.disable", nil},
+		{UserEnable, "alice", 3, "user.enable", nil},
+		{GroupApply, "staff", 0, "group.apply", []string{"alice"}},
+	}
+	for index, test := range tests {
+		request := mutation(nodeID, "terminal-audit-"+test.action, test.kind, test.name, test.version)
+		request.Members = test.members
+		operation, replayed, err := service.Mutate(context.Background(), request)
+		if err != nil || replayed || operation.CommandID == nil {
+			t.Fatalf("%s mutation=%+v replayed=%v err=%v", test.action, operation, replayed, err)
+		}
+		commandID := uuid.MustParse(*operation.CommandID)
+		var encoded []byte
+		if err := pool.QueryRow(context.Background(), `UPDATE commands SET state='dispatched' WHERE id=$1 RETURNING envelope`, commandID).Scan(&encoded); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := pool.Exec(context.Background(), `UPDATE operations SET state='dispatched' WHERE id=$1`, uuid.MustParse(operation.ID)); err != nil {
+			t.Fatal(err)
+		}
+		var envelope agentv1.CommandEnvelope
+		if err := proto.Unmarshal(encoded, &envelope); err != nil {
+			t.Fatal(err)
+		}
+		completed := time.Now().UTC().Add(time.Duration(index+1) * time.Millisecond)
+		result := agentv1.CommandResult{
+			CommandId: envelope.GetCommandId(), IdempotencyKey: envelope.GetIdempotencyKey(),
+			PayloadSha256: envelope.GetSemanticPayloadSha256(), SemanticPayloadHashVersion: agentv1.SemanticPayloadHashVersion_SEMANTIC_PAYLOAD_HASH_VERSION_V1,
+			State: agentv1.CommandResultState_COMMAND_RESULT_STATE_SUCCEEDED, Result: []byte("applied"),
+			AcceptedAt: timestamppb.New(completed), CompletedAt: timestamppb.New(completed),
+		}
+		payload, err := proto.Marshal(&result)
+		if err != nil {
+			t.Fatal(err)
+		}
+		eventID := uuid.Must(uuid.NewV7())
+		if err := ingest.Ingest(context.Background(), &transportv1.TransportEvent{
+			EventId: eventID[:], NodeId: nodeID[:],
+			Type:       transportv1.TransportEventType_TRANSPORT_EVENT_TYPE_COMMAND_RESULT,
+			OccurredAt: timestamppb.New(completed), Traceparent: request.Traceparent, Payload: payload,
+		}); err != nil {
+			t.Fatalf("%s terminal result: %v", test.action, err)
+		}
+		var count, distinct int
+		var action string
+		if err := pool.QueryRow(context.Background(), `SELECT count(*),count(DISTINCT action),min(action) FROM audit_events WHERE command_id=$1`, commandID).Scan(&count, &distinct, &action); err != nil {
+			t.Fatal(err)
+		}
+		if count != 2 || distinct != 1 || action != test.action {
+			t.Fatalf("%s audit count=%d distinct=%d action=%q", test.action, count, distinct, action)
+		}
+		// The runtime test role intentionally cannot delete immutable results. Keep
+		// retained fixtures compatible with the migration rollback exercised after
+		// this package finishes.
+		if _, err := pool.Exec(context.Background(), `UPDATE commands SET payload_type='synthetic_echo',expected_version=1 WHERE id=$1`, commandID); err != nil {
+			t.Fatal(err)
+		}
 	}
 }
 
@@ -229,7 +303,7 @@ func integrationService(t *testing.T, status string) (*Service, *pgxpool.Pool, u
 		t.Fatal(err)
 	}
 	t.Cleanup(func() {
-		for _, statement := range []string{`DELETE FROM agent_command_results WHERE command_id IN(SELECT id FROM commands WHERE workspace_id=$1)`, `DELETE FROM node_command_leases WHERE command_id IN(SELECT id FROM commands WHERE workspace_id=$1)`, `DELETE FROM command_attempts WHERE command_id IN(SELECT id FROM commands WHERE workspace_id=$1)`, `DELETE FROM outbox_events WHERE command_id IN(SELECT id FROM commands WHERE workspace_id=$1)`, `DELETE FROM commands WHERE workspace_id=$1`, `DELETE FROM operations WHERE workspace_id=$1`, `DELETE FROM audit_events WHERE workspace_id=$1`, `DELETE FROM observed_groups WHERE node_id IN(SELECT id FROM nodes WHERE workspace_id=$1)`, `DELETE FROM observed_users WHERE node_id IN(SELECT id FROM nodes WHERE workspace_id=$1)`, `DELETE FROM desired_groups WHERE node_id IN(SELECT id FROM nodes WHERE workspace_id=$1)`, `DELETE FROM desired_users WHERE node_id IN(SELECT id FROM nodes WHERE workspace_id=$1)`, `DELETE FROM node_capabilities WHERE node_id IN(SELECT id FROM nodes WHERE workspace_id=$1)`, `DELETE FROM nodes WHERE workspace_id=$1`, `DELETE FROM workspaces WHERE id=$1`} {
+		for _, statement := range []string{`DELETE FROM agent_command_results WHERE command_id IN(SELECT id FROM commands WHERE workspace_id=$1)`, `DELETE FROM transport_events WHERE node_id IN(SELECT id FROM nodes WHERE workspace_id=$1)`, `DELETE FROM node_command_leases WHERE command_id IN(SELECT id FROM commands WHERE workspace_id=$1)`, `DELETE FROM command_attempts WHERE command_id IN(SELECT id FROM commands WHERE workspace_id=$1)`, `DELETE FROM outbox_events WHERE command_id IN(SELECT id FROM commands WHERE workspace_id=$1)`, `DELETE FROM operation_events WHERE operation_id IN(SELECT id FROM operations WHERE workspace_id=$1)`, `DELETE FROM commands WHERE workspace_id=$1`, `DELETE FROM operations WHERE workspace_id=$1`, `DELETE FROM audit_events WHERE workspace_id=$1`, `DELETE FROM observed_groups WHERE node_id IN(SELECT id FROM nodes WHERE workspace_id=$1)`, `DELETE FROM observed_users WHERE node_id IN(SELECT id FROM nodes WHERE workspace_id=$1)`, `DELETE FROM desired_groups WHERE node_id IN(SELECT id FROM nodes WHERE workspace_id=$1)`, `DELETE FROM desired_users WHERE node_id IN(SELECT id FROM nodes WHERE workspace_id=$1)`, `DELETE FROM node_capabilities WHERE node_id IN(SELECT id FROM nodes WHERE workspace_id=$1)`, `DELETE FROM nodes WHERE workspace_id=$1`, `DELETE FROM workspaces WHERE id=$1`} {
 			_, _ = pool.Exec(context.Background(), statement, workspaceID)
 		}
 		pool.Close()

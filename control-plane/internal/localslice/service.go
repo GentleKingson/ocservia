@@ -637,6 +637,16 @@ func commandAuditAction(envelope *agentv1.CommandEnvelope) string {
 		return "ip_ban.remove"
 	case *agentv1.CommandEnvelope_ServiceReload:
 		return "service.reload"
+	case *agentv1.CommandEnvelope_UserCreate:
+		return "user.create"
+	case *agentv1.CommandEnvelope_UserDisable:
+		return "user.disable"
+	case *agentv1.CommandEnvelope_UserEnable:
+		return "user.enable"
+	case *agentv1.CommandEnvelope_UserPasswordRotate:
+		return "user.password.rotate"
+	case *agentv1.CommandEnvelope_GroupApply:
+		return "group.apply"
 	default:
 		return "synthetic.command"
 	}
@@ -650,7 +660,7 @@ func scheduleCommandRecovery(ctx context.Context, tx pgx.Tx, commandID uuid.UUID
 			return errors.New("effect absence was not observed during reconciliation")
 		}
 		mode = agentv1.CommandDeliveryMode_COMMAND_DELIVERY_MODE_RETRY_IF_EFFECT_ABSENT
-	case "outcome_requires_reconciliation", "result_persistence_failed":
+	case "outcome_requires_reconciliation", "result_persistence_failed", "privd_transport_unknown", "privd_outcome_unknown":
 		mode = agentv1.CommandDeliveryMode_COMMAND_DELIVERY_MODE_RECONCILE_ONLY
 	default:
 		return nil

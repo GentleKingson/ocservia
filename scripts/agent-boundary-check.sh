@@ -5,8 +5,8 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 source "${ROOT}/scripts/env.sh"
 
 privd_tree="$(cd "${ROOT}/rust" && cargo tree --locked --package ocservia-privd --prefix none)"
-if grep -Eiq '^(iroh|reqwest|hyper|tonic|postgres|postgres-types|tokio-postgres|sqlx|diesel|sea-orm|rusqlite) ' <<<"${privd_tree}"; then
-  echo "privd must not depend on remote networking, Iroh, gRPC, or databases" >&2
+if grep -Eiq '^(iroh|reqwest|hyper|tonic|postgres|postgres-types|tokio-postgres|sqlx|diesel|sea-orm) ' <<<"${privd_tree}"; then
+  echo "privd must not depend on remote networking, Iroh, gRPC, or remote databases" >&2
   exit 1
 fi
 
@@ -22,3 +22,5 @@ grep -Fxq 'CapabilityBoundingSet=' "${ROOT}/deploy/systemd/ocservia-agent.servic
 grep -Fxq 'CapabilityBoundingSet=CAP_DAC_OVERRIDE' "${ROOT}/deploy/systemd/ocservia-privd.service"
 grep -Fxq 'RestrictAddressFamilies=AF_UNIX AF_NETLINK' "${ROOT}/deploy/systemd/ocservia-privd.service"
 grep -Fxq 'IPAddressDeny=any' "${ROOT}/deploy/systemd/ocservia-privd.service"
+grep -Fxq 'StateDirectory=ocservia-privd' "${ROOT}/deploy/systemd/ocservia-privd.service"
+grep -Fxq 'ReadWritePaths=-/etc/ocserv /var/lib/ocservia-privd' "${ROOT}/deploy/systemd/ocservia-privd.service"
