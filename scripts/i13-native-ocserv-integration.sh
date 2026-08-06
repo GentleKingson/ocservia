@@ -100,10 +100,12 @@ ocserv --test-config -c "${NATIVE_ROOT}/ocserv.conf"
 ocserv -c "${NATIVE_ROOT}/ocserv.conf" -f >"${NATIVE_ROOT}/server.log" 2>&1 &
 printf '%s' "$!" >"${NATIVE_ROOT}/launcher.pid"
 for _ in $(seq 1 50); do
-  [[ -S "${NATIVE_ROOT}/ocserv.sock" ]] && break
+  if ss -H -ltn "sport = :${PORT}" | grep -q .; then
+    break
+  fi
   sleep 0.1
 done
-[[ -S "${NATIVE_ROOT}/ocserv.sock" ]]
+ss -H -ltn "sport = :${PORT}" | grep -q .
 
 PIN="$(openssl x509 -in /etc/ssl/certs/ssl-cert-snakeoil.pem -pubkey -noout | openssl pkey -pubin -outform DER 2>/dev/null | openssl dgst -sha256 -binary | openssl base64 -A)"
 set +e
