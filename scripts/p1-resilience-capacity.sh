@@ -20,6 +20,7 @@ RESULTS="${TMP_ROOT}/operations.tsv"
 RESOURCE_SAMPLES="${TMP_ROOT}/resource-samples.jsonl"
 SAMPLE_PHASE_FILE="${TMP_ROOT}/sample-phase"
 SAMPLE_PAUSE_FILE="${TMP_ROOT}/sample-paused"
+SAMPLE_ACTIVE_FILE="${TMP_ROOT}/sample-active"
 ARTIFACT_DIR="${ARTIFACT_DIR:-}"
 AUTH_TOKEN="${OCSERV_DEV_AUTH_TOKEN:-local-development-token-32-characters}"
 API_PORT=$((22000 + $(printf '%s' "${RUN_ID}" | cksum | awk '{print $1}') % 20000))
@@ -214,13 +215,23 @@ set_sample_phase() {
 }
 
 sample_resources() {
-  trap 'exit 0' TERM
+  trap 'rm -f "${SAMPLE_ACTIVE_FILE}"; exit 0' TERM
   while true; do
     if [[ -e "${SAMPLE_PAUSE_FILE}" ]]; then
       sleep 0.1
       continue
     fi
-    record_sample "$(<"${SAMPLE_PHASE_FILE}")"
+    : >"${SAMPLE_ACTIVE_FILE}"
+    if [[ -e "${SAMPLE_PAUSE_FILE}" ]]; then
+      rm -f "${SAMPLE_ACTIVE_FILE}"
+      sleep 0.1
+      continue
+    fi
+    if ! record_sample "$(<"${SAMPLE_PHASE_FILE}")"; then
+      rm -f "${SAMPLE_ACTIVE_FILE}"
+      return 1
+    fi
+    rm -f "${SAMPLE_ACTIVE_FILE}"
     sleep 5
   done
 }
@@ -228,6 +239,15 @@ sample_resources() {
 pause_periodic_sampler() {
   set_sample_phase "$1"
   : >"${SAMPLE_PAUSE_FILE}"
+  for _ in $(seq 1 100); do
+    [[ ! -e "${SAMPLE_ACTIVE_FILE}" ]] && break
+    check_sampler
+    sleep 0.1
+  done
+  if [[ -e "${SAMPLE_ACTIVE_FILE}" ]]; then
+    echo "resource sampler did not pause within 10 seconds" >&2
+    return 1
+  fi
   check_sampler
 }
 
