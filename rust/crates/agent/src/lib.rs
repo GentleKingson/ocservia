@@ -416,7 +416,7 @@ impl CommandExecutor {
     ///
     /// Rejects invalid or mismatched commands and propagates journal failures.
     pub fn reconcile_external(
-        &self,
+        &mut self,
         envelope: &CommandEnvelope,
         context: &CommandContext,
         applied: Option<bool>,
@@ -427,6 +427,28 @@ impl CommandExecutor {
         }
         let record = self.matching_record(&validated)?;
         if matches!(record.state, CommandState::Succeeded | CommandState::Failed) {
+            return Ok(CommandOutcome {
+                record,
+                replayed: true,
+            });
+        }
+        if applied == Some(true)
+            && let Some((resource_type, resource_key, revision)) = desired_resource(envelope)
+        {
+            let record = self
+                .journal
+                .reconcile_external_with_revision(
+                    &validated.key,
+                    &validated.command_id,
+                    AppliedResourceRevision {
+                        resource_type,
+                        resource_key,
+                        revision,
+                    },
+                    b"observed",
+                    context.now_unix_seconds,
+                )
+                .map_err(pre_effect_failure)?;
             return Ok(CommandOutcome {
                 record,
                 replayed: true,
@@ -672,6 +694,27 @@ impl CommandExecutor {
             record,
             replayed: true,
         })
+    }
+}
+
+fn desired_resource(envelope: &CommandEnvelope) -> Option<(&'static str, &str, u64)> {
+    match envelope.payload.as_ref()? {
+        command_envelope::Payload::UserCreate(value) => {
+            Some(("user", &value.username, value.desired_revision))
+        }
+        command_envelope::Payload::UserDisable(value) => {
+            Some(("user", &value.username, value.desired_revision))
+        }
+        command_envelope::Payload::UserEnable(value) => {
+            Some(("user", &value.username, value.desired_revision))
+        }
+        command_envelope::Payload::UserPasswordRotate(value) => {
+            Some(("user", &value.username, value.desired_revision))
+        }
+        command_envelope::Payload::GroupApply(value) => {
+            Some(("group", &value.group_name, value.desired_revision))
+        }
+        _ => None,
     }
 }
 
@@ -1248,7 +1291,7 @@ impl PrivdClient {
         Ok(response)
     }
 
-    /// Reads all five I06 observations with at most four active tasks.
+    /// Reads all seven routine observations with at most four active tasks.
     ///
     /// # Errors
     ///
@@ -1371,7 +1414,7 @@ pub async fn read_boot_id() -> Result<String, io::Error> {
 mod tests {
     use ocservia_contracts::generated::ocserv::platform::agent::v1::{
         IpBanRemove, ServiceReload, SessionDisconnect, SessionTerminate, SyntheticEcho,
-        SyntheticNoop, command_envelope,
+        SyntheticNoop, UserPasswordRotate, command_envelope,
     };
     use prost_types::Timestamp;
     use rand::{SeedableRng, rngs::StdRng};
@@ -1554,6 +1597,103 @@ mod tests {
         };
         assert!(replayed.replayed);
         assert_eq!(replayed.record.state, CommandState::Succeeded);
+        cleanup_journal(&path);
+    }
+
+    #[test]
+    fn desired_unknown_reconcile_recovers_result_and_applied_revision_after_restart() {
+        let path = temporary_journal("desired-reconcile");
+        let node = *Uuid::now_v7().as_bytes();
+        let key = *Uuid::now_v7().as_bytes();
+        let mut envelope = command(node, key, "", 100);
+        envelope.payload = Some(command_envelope::Payload::UserPasswordRotate(
+            UserPasswordRotate {
+                username: "alice".to_owned(),
+                sealed_password: vec![0xa5; 64],
+                secret_key_id: "node-key-1".to_owned(),
+                desired_revision: 2,
+            },
+        ));
+        envelope.semantic_payload_hash_version = SemanticPayloadHashVersion::V1 as i32;
+        envelope.semantic_payload_sha256 = semantic_payload_hash_v1(&envelope)
+            .expect("password hash")
+            .to_vec();
+        let mut command_context = context(node, 100);
+        command_context.capabilities = HashSet::from(["ocserv.users.write"]);
+        {
+            let mut executor = CommandExecutor::new(Journal::open(&path).expect("journal"));
+            let ExternalPreparation::Execute(command) = executor
+                .prepare_external(&envelope, &command_context)
+                .expect("prepare")
+            else {
+                panic!("execute preparation")
+            };
+            let unknown = executor
+                .mark_external_unknown(&command, "privd_transport_unknown", 101)
+                .expect("unknown after lost response");
+            assert_eq!(unknown.record.state, CommandState::Unknown);
+        }
+        command_context.now_unix_seconds = 102;
+        let mut executor = CommandExecutor::new(Journal::open(&path).expect("restart"));
+        let recovered = executor
+            .reconcile_external(&envelope, &command_context, Some(true))
+            .expect("marker proves effect");
+        assert_eq!(recovered.record.state, CommandState::Succeeded);
+        assert_eq!(
+            executor
+                .journal()
+                .applied_revision("user", "alice")
+                .expect("applied revision"),
+            Some(2)
+        );
+        drop(executor);
+        cleanup_journal(&path);
+    }
+
+    #[test]
+    fn password_unknown_remains_nonterminal_until_marker_observation() {
+        let path = temporary_journal("password-absence");
+        let node = *Uuid::now_v7().as_bytes();
+        let mut envelope = command(node, *Uuid::now_v7().as_bytes(), "", 100);
+        envelope.payload = Some(command_envelope::Payload::UserPasswordRotate(
+            UserPasswordRotate {
+                username: "alice".to_owned(),
+                sealed_password: vec![0xa5; 64],
+                secret_key_id: "node-key-1".to_owned(),
+                desired_revision: 2,
+            },
+        ));
+        envelope.semantic_payload_hash_version = SemanticPayloadHashVersion::V1 as i32;
+        envelope.semantic_payload_sha256 = semantic_payload_hash_v1(&envelope).unwrap().to_vec();
+        let mut command_context = context(node, 100);
+        command_context.capabilities = HashSet::from(["ocserv.users.write"]);
+        let mut executor = CommandExecutor::new(Journal::open(&path).expect("journal"));
+        let ExternalPreparation::Execute(command) = executor
+            .prepare_external(&envelope, &command_context)
+            .expect("prepare")
+        else {
+            panic!("execute preparation")
+        };
+        executor
+            .mark_external_unknown(&command, "privd_transport_unknown", 101)
+            .expect("unknown");
+        command_context.now_unix_seconds = 102;
+        let reconciled = executor
+            .reconcile_external(&envelope, &command_context, Some(false))
+            .expect("marker absence");
+        assert_eq!(reconciled.record.state, CommandState::Unknown);
+        assert_eq!(
+            reconciled.record.error_code.as_deref(),
+            Some("effect_absent")
+        );
+        assert_eq!(
+            executor
+                .journal()
+                .applied_revision("user", "alice")
+                .unwrap(),
+            None
+        );
+        drop(executor);
         cleanup_journal(&path);
     }
 

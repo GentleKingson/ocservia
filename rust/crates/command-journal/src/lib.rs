@@ -368,6 +368,68 @@ impl Journal {
         Ok(completed)
     }
 
+    /// Atomically recovers an observed desired-state effect and its applied revision.
+    ///
+    /// # Errors
+    ///
+    /// Rejects terminal failures, identity mismatches, revision regressions, or `SQLite` failure.
+    pub fn reconcile_external_with_revision(
+        &mut self,
+        idempotency_key: &[u8; 16],
+        command_id: &[u8; 16],
+        resource: AppliedResourceRevision<'_>,
+        result: &[u8],
+        now: i64,
+    ) -> Result<CommandRecord, rusqlite::Error> {
+        if !matches!(resource.resource_type, "user" | "group")
+            || resource.resource_key.is_empty()
+            || resource.resource_key.len() > 64
+            || resource.revision == 0
+            || resource.revision > i64::MAX as u64
+            || result.len() > 1024 * 1024
+        {
+            return Err(rusqlite::Error::InvalidQuery);
+        }
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let record = query_command(&transaction, idempotency_key)?
+            .ok_or(rusqlite::Error::QueryReturnedNoRows)?;
+        if record.command_id != *command_id
+            || !matches!(
+                record.state,
+                CommandState::Accepted | CommandState::Running | CommandState::Unknown
+            )
+        {
+            return Err(rusqlite::Error::InvalidQuery);
+        }
+        let revision =
+            i64::try_from(resource.revision).map_err(|_| rusqlite::Error::InvalidQuery)?;
+        transaction.execute(
+            "INSERT INTO applied_resource_revisions(resource_type,resource_key,revision,updated_at) VALUES(?1,?2,?3,?4) ON CONFLICT(resource_type,resource_key) DO UPDATE SET revision=excluded.revision,updated_at=excluded.updated_at WHERE excluded.revision >= applied_resource_revisions.revision",
+            rusqlite::params![resource.resource_type, resource.resource_key, revision, now],
+        )?;
+        let stored: i64 = transaction.query_row(
+            "SELECT revision FROM applied_resource_revisions WHERE resource_type=?1 AND resource_key=?2",
+            rusqlite::params![resource.resource_type, resource.resource_key],
+            |row| row.get(0),
+        )?;
+        if stored != revision {
+            return Err(rusqlite::Error::InvalidQuery);
+        }
+        let updated = transaction.execute(
+            "UPDATE command_journal SET state='succeeded',result=?3,error_code=NULL,updated_at=?4 WHERE idempotency_key=?1 AND command_id=?2 AND state IN ('accepted','running','unknown')",
+            rusqlite::params![idempotency_key.as_slice(), command_id.as_slice(), result, now],
+        )?;
+        if updated != 1 {
+            return Err(rusqlite::Error::InvalidQuery);
+        }
+        let completed = query_command(&transaction, idempotency_key)?
+            .ok_or(rusqlite::Error::QueryReturnedNoRows)?;
+        transaction.commit()?;
+        Ok(completed)
+    }
+
     /// Returns the last durably applied revision for one local resource.
     ///
     /// # Errors
@@ -1029,6 +1091,78 @@ mod tests {
                 .state,
             CommandState::Succeeded
         );
+        drop(journal);
+        cleanup(&path);
+    }
+
+    #[test]
+    fn reconciled_external_result_and_revision_recover_atomically_after_commit_failure() {
+        let path = temporary_path("reconciled-applied-revision");
+        let mut journal = Journal::open(&path).expect("open");
+        let key = *uuid::Uuid::now_v7().as_bytes();
+        let command = *uuid::Uuid::now_v7().as_bytes();
+        let payload = [8_u8; 32];
+        journal
+            .accept_command(&key, &command, &payload, 1, 10)
+            .expect("accept");
+        journal
+            .transition_command(
+                &key,
+                &[CommandState::Accepted],
+                CommandState::Unknown,
+                None,
+                Some("result_persistence_failed"),
+                11,
+            )
+            .expect("unknown");
+        journal
+            .connection
+            .execute_batch(
+                "CREATE TEMP TRIGGER fail_reconciled_terminal_result
+                 BEFORE UPDATE OF state ON command_journal
+                 WHEN NEW.state = 'succeeded'
+                 BEGIN SELECT RAISE(FAIL, 'injected reconciled write failure'); END;",
+            )
+            .expect("failure trigger");
+        assert!(
+            journal
+                .reconcile_external_with_revision(
+                    &key,
+                    &command,
+                    AppliedResourceRevision {
+                        resource_type: "user",
+                        resource_key: "alice",
+                        revision: 7,
+                    },
+                    b"observed",
+                    12,
+                )
+                .is_err()
+        );
+        assert_eq!(journal.applied_revision("user", "alice").unwrap(), None);
+        assert_eq!(
+            journal.command(&key).unwrap().unwrap().state,
+            CommandState::Unknown
+        );
+        journal
+            .connection
+            .execute_batch("DROP TRIGGER fail_reconciled_terminal_result")
+            .expect("drop trigger");
+        let recovered = journal
+            .reconcile_external_with_revision(
+                &key,
+                &command,
+                AppliedResourceRevision {
+                    resource_type: "user",
+                    resource_key: "alice",
+                    revision: 7,
+                },
+                b"observed",
+                13,
+            )
+            .expect("recover");
+        assert_eq!(recovered.state, CommandState::Succeeded);
+        assert_eq!(journal.applied_revision("user", "alice").unwrap(), Some(7));
         drop(journal);
         cleanup(&path);
     }

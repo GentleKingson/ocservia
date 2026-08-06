@@ -8,20 +8,26 @@ use std::net::IpAddr;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
+use std::sync::Arc;
 use std::time::Duration;
 
 use ocservia_agent_protocol::{
-    ConfigFingerprint, ErrorKind, GroupList, IpBan, IpBanList, MutationResult, ObservedGroup,
-    ObservedUser, OcservVersion, PrivdError, ServiceStatus, Session, SessionList, UserList,
+    ConfigFingerprint, DesiredEffectObservation, ErrorKind, GroupList, IpBan, IpBanList,
+    MutationResult, ObservedGroup, ObservedUser, OcservVersion, PrivdError, ServiceStatus, Session,
+    SessionList, UserList,
 };
+use rustix::fs::XattrFlags;
 use sha2::{Digest, Sha256};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 use tokio::process::Command;
+use tokio::sync::Mutex;
 use uuid::Uuid;
 use zeroize::Zeroizing;
 
 const MAX_CONFIG_BYTES: usize = 1024 * 1024;
 const DEFAULT_OUTPUT_BYTES: usize = 256 * 1024;
+const EFFECT_XATTR_PREFIX: &str = "user.ocservia.effect.";
+const MAX_MANAGED_XATTR_BYTES: usize = 64 * 1024;
 
 /// Root-controlled fixed local resources used by the adapter.
 #[derive(Clone, Debug)]
@@ -138,13 +144,18 @@ impl Default for Limits {
 pub struct Adapter {
     resources: FixedResources,
     limits: Limits,
+    user_file_lock: Arc<Mutex<()>>,
 }
 
 impl Adapter {
     /// Creates an adapter with fixed trusted resources.
     #[must_use]
-    pub const fn new(resources: FixedResources, limits: Limits) -> Self {
-        Self { resources, limits }
+    pub fn new(resources: FixedResources, limits: Limits) -> Self {
+        Self {
+            resources,
+            limits,
+            user_file_lock: Arc::new(Mutex::new(())),
+        }
     }
 
     /// Returns the fixed `ocserv.service` state.
@@ -315,22 +326,72 @@ impl Adapter {
         Ok(MutationResult { applied: true })
     }
 
-    /// Creates or rotates a user password after root-local unsealing.
+    /// Creates a user only when the authoritative password file has no matching record.
     ///
     /// # Errors
     ///
     /// Rejects invalid inputs and propagates bounded fixed-command failures.
-    pub async fn user_secret_apply(
+    pub async fn user_create(
         &self,
         username: &str,
         key_id: &str,
         sealed_password: &[u8],
+        desired_revision: u64,
+    ) -> Result<MutationResult, AdapterError> {
+        self.user_secret_apply(
+            username,
+            key_id,
+            sealed_password,
+            desired_revision,
+            SecretApplyMode::MustBeAbsent,
+        )
+        .await
+    }
+
+    /// Rotates a password only when the authoritative password file contains the user.
+    ///
+    /// # Errors
+    ///
+    /// Rejects missing users and propagates bounded fixed-command failures.
+    pub async fn user_password_rotate(
+        &self,
+        username: &str,
+        key_id: &str,
+        sealed_password: &[u8],
+        desired_revision: u64,
+    ) -> Result<MutationResult, AdapterError> {
+        self.user_secret_apply(
+            username,
+            key_id,
+            sealed_password,
+            desired_revision,
+            SecretApplyMode::MustExist,
+        )
+        .await
+    }
+
+    async fn user_secret_apply(
+        &self,
+        username: &str,
+        key_id: &str,
+        sealed_password: &[u8],
+        desired_revision: u64,
+        mode: SecretApplyMode,
     ) -> Result<MutationResult, AdapterError> {
         validate_name(username)?;
         if !valid_key_id(key_id)
             || key_id != self.resources.secret_key_id
             || sealed_password.len() < 32
             || sealed_password.len() > 4096
+            || desired_revision == 0
+        {
+            return Err(AdapterError::InvalidRequest);
+        }
+        let _guard = self.user_file_lock.lock().await;
+        let current = read_optional_secret_file(&self.resources.user_file).await?;
+        let metadata = find_user_metadata(&current, username)?;
+        if (mode == SecretApplyMode::MustBeAbsent && metadata.is_some())
+            || (mode == SecretApplyMode::MustExist && metadata.is_none())
         {
             return Err(AdapterError::InvalidRequest);
         }
@@ -370,8 +431,6 @@ impl Adapter {
         input.extend_from_slice(&password);
         input.push(b'\n');
         password.fill(0);
-        let current = read_optional_secret_file(&self.resources.user_file).await?;
-        let metadata = find_user_metadata(&current, username)?;
         let staging = self.stage_user_file(&current).await?;
         let staging_text = staging.to_str().ok_or(AdapterError::InvalidResource)?;
         let result = async {
@@ -389,6 +448,7 @@ impl Adapter {
                 )
                 .await?;
             }
+            set_effect_marker(&staging, mode.mutation_kind(), username, desired_revision)?;
             commit_staging(&staging, &self.resources.user_file).await
         }
         .await;
@@ -404,8 +464,12 @@ impl Adapter {
     /// # Errors
     ///
     /// Rejects invalid names and propagates bounded fixed-command failures.
-    pub async fn user_disable(&self, username: &str) -> Result<MutationResult, AdapterError> {
-        self.user_lock_state(username, true).await
+    pub async fn user_disable(
+        &self,
+        username: &str,
+        desired_revision: u64,
+    ) -> Result<MutationResult, AdapterError> {
+        self.user_lock_state(username, desired_revision, true).await
     }
 
     /// Enables exactly one validated user without changing its password or groups.
@@ -413,16 +477,26 @@ impl Adapter {
     /// # Errors
     ///
     /// Rejects invalid names and propagates bounded fixed-command failures.
-    pub async fn user_enable(&self, username: &str) -> Result<MutationResult, AdapterError> {
-        self.user_lock_state(username, false).await
+    pub async fn user_enable(
+        &self,
+        username: &str,
+        desired_revision: u64,
+    ) -> Result<MutationResult, AdapterError> {
+        self.user_lock_state(username, desired_revision, false)
+            .await
     }
 
     async fn user_lock_state(
         &self,
         username: &str,
+        desired_revision: u64,
         locked: bool,
     ) -> Result<MutationResult, AdapterError> {
         validate_name(username)?;
+        if desired_revision == 0 {
+            return Err(AdapterError::InvalidRequest);
+        }
+        let _guard = self.user_file_lock.lock().await;
         let current = read_optional_secret_file(&self.resources.user_file).await?;
         if find_user_metadata(&current, username)?.is_none() {
             return Err(AdapterError::InvalidRequest);
@@ -436,6 +510,12 @@ impl Adapter {
                 &["-c", staging_text, action, username],
             )
             .await?;
+            let mutation_kind = if locked {
+                "user_disable"
+            } else {
+                "user_enable"
+            };
+            set_effect_marker(&staging, mutation_kind, username, desired_revision)?;
             commit_staging(&staging, &self.resources.user_file).await
         }
         .await;
@@ -455,9 +535,10 @@ impl Adapter {
         &self,
         group_name: &str,
         members: &[String],
+        desired_revision: u64,
     ) -> Result<MutationResult, AdapterError> {
         validate_name(group_name)?;
-        if members.len() > 4096 {
+        if members.len() > 4096 || desired_revision == 0 {
             return Err(AdapterError::InvalidRequest);
         }
         let mut previous = "";
@@ -468,6 +549,7 @@ impl Adapter {
             }
             previous = member;
         }
+        let _guard = self.user_file_lock.lock().await;
         let bytes = read_optional_secret_file(&self.resources.user_file).await?;
         let records = parse_secret_user_records(&bytes)?;
         let requested: HashSet<&str> = members.iter().map(String::as_str).collect();
@@ -505,8 +587,35 @@ impl Adapter {
             output.extend_from_slice(record.hash.as_bytes());
             output.push(b'\n');
         }
-        atomic_replace(&self.resources.user_file, &output).await?;
+        atomic_replace(
+            &self.resources.user_file,
+            &output,
+            Some(("group_apply", group_name, desired_revision)),
+        )
+        .await?;
         Ok(MutationResult { applied: true })
+    }
+
+    /// Checks the non-secret effect marker committed with an authoritative file replacement.
+    ///
+    /// # Errors
+    ///
+    /// Rejects unknown mutation kinds or invalid resource identities.
+    pub async fn desired_effect_observe(
+        &self,
+        mutation_kind: &str,
+        resource_key: &str,
+        desired_revision: u64,
+    ) -> Result<DesiredEffectObservation, AdapterError> {
+        validate_effect_identity(mutation_kind, resource_key, desired_revision)?;
+        let _guard = self.user_file_lock.lock().await;
+        let applied = effect_marker_matches(
+            &self.resources.user_file,
+            mutation_kind,
+            resource_key,
+            desired_revision,
+        )?;
+        Ok(DesiredEffectObservation { applied })
     }
 
     async fn stage_user_file(&self, bytes: &[u8]) -> Result<PathBuf, AdapterError> {
@@ -523,7 +632,8 @@ impl Adapter {
         let mut file = options.open(&staging).await.map_err(AdapterError::Io)?;
         if let Err(error) = async {
             file.write_all(bytes).await.map_err(AdapterError::Io)?;
-            file.sync_all().await.map_err(AdapterError::Io)
+            file.sync_all().await.map_err(AdapterError::Io)?;
+            copy_effect_markers(path, &staging)
         }
         .await
         {
@@ -722,6 +832,124 @@ fn find_user_metadata(
         .map(|record| (record.groups, record.hash.starts_with('!'))))
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SecretApplyMode {
+    MustBeAbsent,
+    MustExist,
+}
+
+impl SecretApplyMode {
+    const fn mutation_kind(self) -> &'static str {
+        match self {
+            Self::MustBeAbsent => "user_create",
+            Self::MustExist => "user_password_rotate",
+        }
+    }
+}
+
+fn validate_effect_identity(
+    mutation_kind: &str,
+    resource_key: &str,
+    desired_revision: u64,
+) -> Result<(), AdapterError> {
+    if !matches!(
+        mutation_kind,
+        "user_create" | "user_disable" | "user_enable" | "user_password_rotate" | "group_apply"
+    ) || desired_revision == 0
+    {
+        return Err(AdapterError::InvalidRequest);
+    }
+    validate_name(resource_key)
+}
+
+fn effect_marker_name(mutation_kind: &str, resource_key: &str) -> String {
+    let mut hash = Sha256::new();
+    hash.update(b"ocservia.desired-effect-resource.v1\0");
+    hash.update(mutation_kind.as_bytes());
+    hash.update([0]);
+    hash.update(resource_key.as_bytes());
+    format!("{EFFECT_XATTR_PREFIX}{}", hex::encode(hash.finalize()))
+}
+
+fn effect_marker_value(mutation_kind: &str, resource_key: &str, desired_revision: u64) -> [u8; 32] {
+    let mut hash = Sha256::new();
+    hash.update(b"ocservia.desired-effect-marker.v1\0");
+    hash.update(mutation_kind.as_bytes());
+    hash.update([0]);
+    hash.update(resource_key.as_bytes());
+    hash.update([0]);
+    hash.update(desired_revision.to_be_bytes());
+    hash.finalize().into()
+}
+
+fn set_effect_marker(
+    path: &Path,
+    mutation_kind: &str,
+    resource_key: &str,
+    desired_revision: u64,
+) -> Result<(), AdapterError> {
+    validate_effect_identity(mutation_kind, resource_key, desired_revision)?;
+    rustix::fs::setxattr(
+        path,
+        effect_marker_name(mutation_kind, resource_key),
+        &effect_marker_value(mutation_kind, resource_key, desired_revision),
+        XattrFlags::empty(),
+    )
+    .map_err(rustix_io)
+}
+
+fn effect_marker_matches(
+    path: &Path,
+    mutation_kind: &str,
+    resource_key: &str,
+    desired_revision: u64,
+) -> Result<bool, AdapterError> {
+    let name = effect_marker_name(mutation_kind, resource_key);
+    let mut value = vec![0_u8; 64];
+    match rustix::fs::getxattr(path, name, &mut value) {
+        Ok(length) => {
+            Ok(value[..length]
+                == effect_marker_value(mutation_kind, resource_key, desired_revision))
+        }
+        Err(rustix::io::Errno::NOENT | rustix::io::Errno::NODATA) => Ok(false),
+        Err(error) => Err(rustix_io(error)),
+    }
+}
+
+fn copy_effect_markers(source: &Path, destination: &Path) -> Result<(), AdapterError> {
+    if !source.exists() {
+        return Ok(());
+    }
+    let mut names = vec![0_u8; MAX_MANAGED_XATTR_BYTES];
+    let names_length = rustix::fs::listxattr(source, &mut names).map_err(rustix_io)?;
+    for raw_name in names[..names_length]
+        .split(|byte| *byte == 0)
+        .filter(|name| !name.is_empty())
+    {
+        let name = std::str::from_utf8(raw_name).map_err(|_| AdapterError::InvalidResource)?;
+        if !name.starts_with(EFFECT_XATTR_PREFIX) {
+            continue;
+        }
+        let mut value = vec![0_u8; 64];
+        let value_length = rustix::fs::getxattr(source, name, &mut value).map_err(rustix_io)?;
+        if value_length != 32 {
+            return Err(AdapterError::InvalidResource);
+        }
+        rustix::fs::setxattr(
+            destination,
+            name,
+            &value[..value_length],
+            XattrFlags::empty(),
+        )
+        .map_err(rustix_io)?;
+    }
+    Ok(())
+}
+
+fn rustix_io(error: rustix::io::Errno) -> AdapterError {
+    AdapterError::Io(io::Error::from_raw_os_error(error.raw_os_error()))
+}
+
 async fn read_optional_secret_file(path: &Path) -> Result<Zeroizing<Vec<u8>>, AdapterError> {
     match tokio::fs::read(path).await {
         Ok(value) => Ok(Zeroizing::new(value)),
@@ -730,7 +958,11 @@ async fn read_optional_secret_file(path: &Path) -> Result<Zeroizing<Vec<u8>>, Ad
     }
 }
 
-async fn atomic_replace(path: &Path, bytes: &[u8]) -> Result<(), AdapterError> {
+async fn atomic_replace(
+    path: &Path,
+    bytes: &[u8],
+    effect: Option<(&str, &str, u64)>,
+) -> Result<(), AdapterError> {
     let parent = path.parent().ok_or(AdapterError::InvalidResource)?;
     let name = path
         .file_name()
@@ -744,6 +976,10 @@ async fn atomic_replace(path: &Path, bytes: &[u8]) -> Result<(), AdapterError> {
     let result = async {
         file.write_all(bytes).await.map_err(AdapterError::Io)?;
         file.sync_all().await.map_err(AdapterError::Io)?;
+        copy_effect_markers(path, &staging)?;
+        if let Some((mutation_kind, resource_key, desired_revision)) = effect {
+            set_effect_marker(&staging, mutation_kind, resource_key, desired_revision)?;
+        }
         commit_staging(&staging, path).await
     }
     .await;
@@ -1184,7 +1420,7 @@ mod tests {
         let adapter = Adapter::new(resources, Limits::default());
         assert!(
             adapter
-                .group_apply("staff", &["alice".to_owned(), "bob".to_owned()])
+                .group_apply("staff", &["alice".to_owned(), "bob".to_owned()], 1)
                 .await
                 .is_ok()
         );
@@ -1192,9 +1428,23 @@ mod tests {
             adapter.group_list().await.expect("groups").groups[0].members,
             ["alice", "bob"]
         );
+        assert!(
+            adapter
+                .desired_effect_observe("group_apply", "staff", 1)
+                .await
+                .expect("group marker")
+                .applied
+        );
+        assert!(
+            !adapter
+                .desired_effect_observe("group_apply", "staff", 2)
+                .await
+                .expect("stale group marker")
+                .applied
+        );
         let updated = std::fs::read(&users).expect("updated");
         assert!(updated.starts_with(b"alice:staff:$6$alice-hash\nbob:staff:!$6$bob-hash\n"));
-        assert!(adapter.group_apply("../staff", &[]).await.is_err());
+        assert!(adapter.group_apply("../staff", &[], 2).await.is_err());
         assert_eq!(std::fs::read(&users).expect("unchanged"), updated);
         std::fs::remove_dir_all(directory).expect("cleanup");
     }
@@ -1222,7 +1472,7 @@ mod tests {
         let adapter = Adapter::new(resources, Limits::default());
         assert!(
             adapter
-                .user_secret_apply("alice", "test-key", &[7_u8; 64])
+                .user_password_rotate("alice", "test-key", &[7_u8; 64], 2)
                 .await
                 .is_err()
         );
@@ -1230,6 +1480,40 @@ mod tests {
         std::fs::remove_dir_all(directory).expect("cleanup directory");
         std::fs::remove_dir_all(openssl_directory).expect("cleanup openssl");
         std::fs::remove_dir_all(ocpasswd_directory).expect("cleanup ocpasswd");
+    }
+
+    #[tokio::test]
+    async fn create_and_rotate_enforce_authoritative_existence_preconditions() {
+        let directory = std::env::temp_dir().join(format!("ocservia-existence-{}", Uuid::now_v7()));
+        std::fs::create_dir(&directory).expect("directory");
+        let users = directory.join("ocpasswd");
+        let original = b"alice:admins,staff:!$6$original-hash\n";
+        std::fs::write(&users, original).expect("original");
+        let resources = FixedResources::default()
+            .with_user_resources(
+                PathBuf::from("/bin/false"),
+                users.clone(),
+                PathBuf::from("/bin/false"),
+                directory.join("key.pem"),
+                String::from("test-key"),
+            )
+            .expect("resources");
+        let adapter = Adapter::new(resources, Limits::default());
+        assert!(matches!(
+            adapter
+                .user_create("alice", "test-key", &[7_u8; 64], 1)
+                .await,
+            Err(AdapterError::InvalidRequest)
+        ));
+        assert_eq!(std::fs::read(&users).expect("create conflict"), original);
+        assert!(matches!(
+            adapter
+                .user_password_rotate("bob", "test-key", &[7_u8; 64], 2)
+                .await,
+            Err(AdapterError::InvalidRequest)
+        ));
+        assert_eq!(std::fs::read(&users).expect("rotate missing"), original);
+        std::fs::remove_dir_all(directory).expect("cleanup");
     }
 
     #[cfg(target_os = "linux")]
@@ -1250,29 +1534,68 @@ mod tests {
             .expect("fixed native resources");
         let adapter = Adapter::new(resources, Limits::default());
         adapter
-            .user_secret_apply("alice", "i13-native", &sealed)
+            .user_create("alice", "i13-native", &sealed, 1)
             .await
             .expect("create native user");
+        assert!(
+            adapter
+                .desired_effect_observe("user_create", "alice", 1)
+                .await
+                .expect("observe create marker")
+                .applied
+        );
+        let after_create = std::fs::read(&users).expect("created record");
+        assert!(
+            adapter
+                .user_password_rotate("bob", "i13-native", &sealed, 2)
+                .await
+                .is_err(),
+            "rotate must not create a missing user"
+        );
+        assert_eq!(
+            std::fs::read(&users).expect("unchanged create"),
+            after_create
+        );
         let listed = adapter.user_list().await.expect("list native users");
         assert_eq!(listed.users.len(), 1);
         assert_eq!(listed.users[0].username, "alice");
         assert!(listed.users[0].enabled);
         assert!(!format!("{listed:?}").contains("native-password-sentinel"));
         adapter
-            .group_apply("staff", &["alice".to_owned()])
+            .group_apply("staff", &["alice".to_owned()], 2)
             .await
             .expect("apply native group");
         let before_rotate = std::fs::read_to_string(&users).expect("before rotate");
         assert!(before_rotate.starts_with("alice:staff:"));
         adapter
-            .user_disable("alice")
+            .user_disable("alice", 3)
             .await
             .expect("disable native user");
         assert!(!adapter.user_list().await.expect("list disabled").users[0].enabled);
+        let locked_record = std::fs::read(&users).expect("locked record");
+        assert!(
+            adapter
+                .user_create("alice", "i13-native", &sealed, 4)
+                .await
+                .is_err(),
+            "create must not overwrite an existing user"
+        );
+        assert_eq!(
+            std::fs::read(&users).expect("unchanged conflict"),
+            locked_record,
+            "create conflict changed password, group, or lock state"
+        );
         adapter
-            .user_secret_apply("alice", "i13-native", &sealed)
+            .user_password_rotate("alice", "i13-native", &sealed, 4)
             .await
             .expect("rotate disabled native user");
+        assert!(
+            adapter
+                .desired_effect_observe("user_password_rotate", "alice", 4)
+                .await
+                .expect("observe rotate marker")
+                .applied
+        );
         assert!(
             !adapter
                 .user_list()
@@ -1287,7 +1610,7 @@ mod tests {
                 .starts_with("alice:staff:!")
         );
         adapter
-            .user_enable("alice")
+            .user_enable("alice", 5)
             .await
             .expect("enable native user");
         assert!(adapter.user_list().await.expect("enabled user").users[0].enabled);
@@ -1295,6 +1618,20 @@ mod tests {
             std::fs::read_to_string(&users)
                 .expect("enabled record")
                 .starts_with("alice:staff:")
+        );
+        assert!(
+            adapter
+                .desired_effect_observe("user_create", "alice", 1)
+                .await
+                .expect("create marker survived later replacements")
+                .applied
+        );
+        assert!(
+            !adapter
+                .desired_effect_observe("user_password_rotate", "alice", 3)
+                .await
+                .expect("stale rotate marker")
+                .applied
         );
     }
 

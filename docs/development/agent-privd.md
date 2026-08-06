@@ -2,10 +2,11 @@
 
 The node runtime is split into an unprivileged `ocservia-agent` and a small
 root `ocservia-privd`. The Agent owns network connectivity and local SQLite
-state. Privd has no TCP listener. It accepts seven typed reads on
+state. Privd has no TCP listener. It accepts eight typed reads on
 `/run/ocserv-platform/privd.sock`: service status, Ocserv version, sessions, IP
 bans, the fingerprint of `/etc/ocserv/ocserv.conf`, and hash-free users and
-groups derived from the fixed Ocserv password file. Its nine typed mutations
+groups derived from the fixed Ocserv password file, plus a non-secret
+desired-effect marker check used only for Unknown reconciliation. Its nine typed mutations
 cover session disconnect/terminate, IP unban, service reload, user
 create/disable/enable/password rotation, and authoritative group application.
 

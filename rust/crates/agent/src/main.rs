@@ -11,9 +11,9 @@ use ocservia_agent::{
     MAX_WRITE_QUEUE, PrivdClient,
 };
 use ocservia_agent_protocol::{
-    ErrorKind, GroupApplyRequest, IpBanRemoveRequest, PrivdResponse, ServiceReloadRequest,
-    SessionMutationRequest, UserDisableRequest, UserEnableRequest, UserSecretRequest,
-    privd_request, privd_response,
+    DesiredEffectObserveRequest, ErrorKind, GroupApplyRequest, IpBanRemoveRequest, PrivdResponse,
+    ServiceReloadRequest, SessionMutationRequest, UserDisableRequest, UserEnableRequest,
+    UserSecretRequest, privd_request, privd_response,
 };
 use ocservia_command_journal::{CommandRecord, CommandState, Journal, TelemetryInsert};
 use ocservia_contracts::decode_strict_command_envelope;
@@ -420,14 +420,7 @@ async fn execute_external_command(
                         .complete_external(&command, Ok(b"applied"), now)
                 }
             }
-            Some(privd_response::Result::Error(error))
-                if matches!(
-                    ErrorKind::try_from(error.kind).unwrap_or(ErrorKind::Unspecified),
-                    ErrorKind::InvalidRequest
-                        | ErrorKind::PermissionDenied
-                        | ErrorKind::MalformedOutput
-                ) =>
-            {
+            Some(privd_response::Result::Error(error)) if terminal_privd_error(error.kind) => {
                 session
                     .command_executor
                     .complete_external(&command, Err("privd_rejected"), now)
@@ -444,6 +437,13 @@ async fn execute_external_command(
                 .mark_external_unknown(&command, "privd_transport_unknown", now)
         }
     }
+}
+
+fn terminal_privd_error(kind: i32) -> bool {
+    matches!(
+        ErrorKind::try_from(kind).unwrap_or(ErrorKind::Unspecified),
+        ErrorKind::InvalidRequest | ErrorKind::PermissionDenied | ErrorKind::MalformedOutput
+    )
 }
 
 fn desired_resource(envelope: &CommandEnvelope) -> Option<(&'static str, &str, u64)> {
@@ -489,6 +489,14 @@ async fn observe_external_effect(privd: &PrivdClient, envelope: &CommandEnvelope
         command_envelope::Payload::IpBanRemove(_) => {
             privd_request::Operation::IpBanList(ocservia_agent_protocol::ReadRequest {})
         }
+        payload if desired_effect_identity(payload).is_some() => {
+            let (mutation_kind, resource_key, desired_revision) = desired_effect_identity(payload)?;
+            privd_request::Operation::DesiredEffectObserve(DesiredEffectObserveRequest {
+                mutation_kind: mutation_kind.to_owned(),
+                resource_key: resource_key.to_owned(),
+                desired_revision,
+            })
+        }
         _ => return None,
     };
     let response = privd.call(operation).await.ok()?;
@@ -515,6 +523,36 @@ async fn observe_external_effect(privd: &PrivdClient, envelope: &CommandEnvelope
             command_envelope::Payload::IpBanRemove(target),
             privd_response::Result::IpBanList(current),
         ) => Some(!current.bans.iter().any(|ban| ban.ip == target.ip)),
+        (payload, privd_response::Result::DesiredEffectObservation(observation))
+            if desired_effect_identity(payload).is_some() =>
+        {
+            Some(observation.applied)
+        }
+        _ => None,
+    }
+}
+
+fn desired_effect_identity(
+    payload: &command_envelope::Payload,
+) -> Option<(&'static str, &str, u64)> {
+    match payload {
+        command_envelope::Payload::UserCreate(value) => {
+            Some(("user_create", &value.username, value.desired_revision))
+        }
+        command_envelope::Payload::UserDisable(value) => {
+            Some(("user_disable", &value.username, value.desired_revision))
+        }
+        command_envelope::Payload::UserEnable(value) => {
+            Some(("user_enable", &value.username, value.desired_revision))
+        }
+        command_envelope::Payload::UserPasswordRotate(value) => Some((
+            "user_password_rotate",
+            &value.username,
+            value.desired_revision,
+        )),
+        command_envelope::Payload::GroupApply(value) => {
+            Some(("group_apply", &value.group_name, value.desired_revision))
+        }
         _ => None,
     }
 }
@@ -831,4 +869,66 @@ fn required(args: &mut impl Iterator<Item = String>, name: &str) -> Result<Strin
 
 fn invalid(detail: &str) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidInput, detail)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ocservia_agent_protocol::{
+        DesiredEffectObservation, PrivdRequest, read_frame, write_frame,
+    };
+    use ocservia_contracts::generated::ocserv::platform::agent::v1::UserPasswordRotate;
+
+    #[test]
+    fn authoritative_precondition_rejection_is_terminal() {
+        assert!(terminal_privd_error(ErrorKind::InvalidRequest.into()));
+        assert!(!terminal_privd_error(ErrorKind::Unavailable.into()));
+        assert!(!terminal_privd_error(ErrorKind::CommandFailed.into()));
+    }
+
+    #[tokio::test]
+    async fn password_reconcile_uses_non_secret_authoritative_marker() {
+        let socket = PathBuf::from(format!("/tmp/ocsm-{}.sock", Uuid::now_v7().simple()));
+        let listener = tokio::net::UnixListener::bind(&socket).expect("bind marker fixture");
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("accept");
+            let request: PrivdRequest = read_frame(&mut stream).await.expect("request");
+            let Some(privd_request::Operation::DesiredEffectObserve(observe)) = request.operation
+            else {
+                panic!("desired effect observation required")
+            };
+            assert_eq!(observe.mutation_kind, "user_password_rotate");
+            assert_eq!(observe.resource_key, "alice");
+            assert_eq!(observe.desired_revision, 7);
+            write_frame(
+                &mut stream,
+                &PrivdResponse {
+                    request_id: request.request_id,
+                    result: Some(privd_response::Result::DesiredEffectObservation(
+                        DesiredEffectObservation { applied: true },
+                    )),
+                },
+            )
+            .await
+            .expect("response");
+        });
+        let client = PrivdClient::new(socket.clone(), Duration::from_secs(2)).expect("client");
+        let envelope = CommandEnvelope {
+            payload: Some(command_envelope::Payload::UserPasswordRotate(
+                UserPasswordRotate {
+                    username: "alice".to_owned(),
+                    sealed_password: vec![0xa5; 64],
+                    secret_key_id: "node-key-1".to_owned(),
+                    desired_revision: 7,
+                },
+            )),
+            ..CommandEnvelope::default()
+        };
+        assert_eq!(
+            observe_external_effect(&client, &envelope).await,
+            Some(true)
+        );
+        server.await.expect("server");
+        std::fs::remove_file(socket).expect("remove socket");
+    }
 }

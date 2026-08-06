@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"maps"
 	"os"
 	"slices"
 	"strings"
@@ -116,6 +117,84 @@ func TestEnableQueuesAuditableDesiredRevisionIntegration(t *testing.T) {
 	if command.GetUserEnable().GetUsername() != "alice" || command.GetUserEnable().GetDesiredRevision() != 4 {
 		t.Fatalf("typed enable=%v", &command)
 	}
+}
+
+func TestOfflineSupersedePreservesNonSubstitutableUserCommandsIntegration(t *testing.T) {
+	service, pool, _, nodeID := integrationService(t, "offline")
+	apply := func(key string, kind MutationKind, name string, version int64) {
+		t.Helper()
+		if _, _, err := service.Mutate(context.Background(), mutation(nodeID, key, kind, name, version)); err != nil {
+			t.Fatalf("%s %s: %v", name, kind, err)
+		}
+	}
+	apply("alice-create", UserCreate, "alice", 0)
+	apply("alice-rotate", UserPasswordRotate, "alice", 1)
+	apply("alice-disable", UserDisable, "alice", 2)
+	apply("bob-create", UserCreate, "bob", 0)
+	apply("bob-disable", UserDisable, "bob", 1)
+	apply("bob-rotate", UserPasswordRotate, "bob", 2)
+	apply("carol-create", UserCreate, "carol", 0)
+	apply("carol-disable", UserDisable, "carol", 1)
+	apply("carol-enable", UserEnable, "carol", 2)
+	apply("dave-create", UserCreate, "dave", 0)
+	apply("dave-rotate-1", UserPasswordRotate, "dave", 1)
+	apply("dave-rotate-2", UserPasswordRotate, "dave", 2)
+	groupOne := mutation(nodeID, "staff-1", GroupApply, "staff", 0)
+	groupOne.Members = []string{"alice"}
+	if _, _, err := service.Mutate(context.Background(), groupOne); err != nil {
+		t.Fatal(err)
+	}
+	groupTwo := mutation(nodeID, "staff-2", GroupApply, "staff", 1)
+	groupTwo.Members = []string{"alice", "bob"}
+	if _, _, err := service.Mutate(context.Background(), groupTwo); err != nil {
+		t.Fatal(err)
+	}
+
+	assertStates := func(name string, want map[MutationKind]map[string]int) {
+		t.Helper()
+		rows, err := pool.Query(context.Background(), `SELECT payload_type,state,count(*) FROM commands WHERE node_id=$1 AND resource_type='user' AND resource_key=$2 GROUP BY payload_type,state`, nodeID, name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer rows.Close()
+		got := map[MutationKind]map[string]int{}
+		for rows.Next() {
+			var kind MutationKind
+			var state string
+			var count int
+			if err := rows.Scan(&kind, &state, &count); err != nil {
+				t.Fatal(err)
+			}
+			if got[kind] == nil {
+				got[kind] = map[string]int{}
+			}
+			got[kind][state] = count
+		}
+		if err := rows.Err(); err != nil {
+			t.Fatal(err)
+		}
+		if !mapsEqual(got, want) {
+			t.Fatalf("%s command states=%v want=%v", name, got, want)
+		}
+	}
+	queued := map[string]int{"queued": 1}
+	assertStates("alice", map[MutationKind]map[string]int{UserCreate: queued, UserPasswordRotate: queued, UserDisable: queued})
+	assertStates("bob", map[MutationKind]map[string]int{UserCreate: queued, UserDisable: queued, UserPasswordRotate: queued})
+	assertStates("carol", map[MutationKind]map[string]int{UserCreate: queued, UserDisable: {"superseded": 1}, UserEnable: queued})
+	assertStates("dave", map[MutationKind]map[string]int{UserCreate: queued, UserPasswordRotate: {"queued": 1, "superseded": 1}})
+	var queuedGroups, supersededGroups int
+	if err := pool.QueryRow(context.Background(), `SELECT count(*) FILTER(WHERE state='queued'),count(*) FILTER(WHERE state='superseded') FROM commands WHERE node_id=$1 AND resource_type='group' AND resource_key='staff'`, nodeID).Scan(&queuedGroups, &supersededGroups); err != nil {
+		t.Fatal(err)
+	}
+	if queuedGroups != 1 || supersededGroups != 1 {
+		t.Fatalf("group supersede queued=%d superseded=%d", queuedGroups, supersededGroups)
+	}
+}
+
+func mapsEqual(left, right map[MutationKind]map[string]int) bool {
+	return maps.EqualFunc(left, right, func(leftStates, rightStates map[string]int) bool {
+		return maps.Equal(leftStates, rightStates)
+	})
 }
 
 func mutation(nodeID uuid.UUID, key string, kind MutationKind, name string, version int64) MutationRequest {

@@ -26,7 +26,7 @@ pub struct PrivdRequest {
     /// One of the permanently fixed operations.
     #[prost(
         oneof = "privd_request::Operation",
-        tags = "10, 11, 12, 13, 14, 15, 16, 30, 31, 32, 33, 34, 35, 36, 37, 38"
+        tags = "10, 11, 12, 13, 14, 15, 16, 17, 30, 31, 32, 33, 34, 35, 36, 37, 38"
     )]
     pub operation: Option<privd_request::Operation>,
 }
@@ -36,8 +36,9 @@ pub mod privd_request {
     use prost::Oneof;
 
     use super::{
-        GroupApplyRequest, IpBanRemoveRequest, ReadRequest, ServiceReloadRequest,
-        SessionMutationRequest, UserDisableRequest, UserEnableRequest, UserSecretRequest,
+        DesiredEffectObserveRequest, GroupApplyRequest, IpBanRemoveRequest, ReadRequest,
+        ServiceReloadRequest, SessionMutationRequest, UserDisableRequest, UserEnableRequest,
+        UserSecretRequest,
     };
 
     /// Read-only operation allowlist.
@@ -64,6 +65,9 @@ pub mod privd_request {
         /// List groups derived from authoritative ocpasswd records.
         #[prost(message, tag = "16")]
         GroupList(ReadRequest),
+        /// Check the non-secret marker committed with one desired-state file replacement.
+        #[prost(message, tag = "17")]
+        DesiredEffectObserve(DesiredEffectObserveRequest),
         /// Disconnect one numeric session without invalidating its cookie.
         #[prost(message, tag = "30")]
         SessionDisconnect(SessionMutationRequest),
@@ -154,6 +158,24 @@ pub struct GroupApplyRequest {
     pub members: Vec<String>,
     #[prost(uint64, tag = "3")]
     pub desired_revision: u64,
+}
+
+/// Identifies one desired-state effect without carrying password material or hashes.
+#[derive(Clone, PartialEq, Eq, Message)]
+pub struct DesiredEffectObserveRequest {
+    #[prost(string, tag = "1")]
+    pub mutation_kind: String,
+    #[prost(string, tag = "2")]
+    pub resource_key: String,
+    #[prost(uint64, tag = "3")]
+    pub desired_revision: u64,
+}
+
+/// Result of checking a marker stored on the authoritative password-file inode.
+#[derive(Clone, Copy, PartialEq, Eq, Message)]
+pub struct DesiredEffectObservation {
+    #[prost(bool, tag = "1")]
+    pub applied: bool,
 }
 
 /// Observed user without password material.
@@ -314,7 +336,7 @@ pub struct PrivdResponse {
     /// Exactly one stable result or error.
     #[prost(
         oneof = "privd_response::Result",
-        tags = "10, 11, 12, 13, 14, 15, 16, 17, 20"
+        tags = "10, 11, 12, 13, 14, 15, 16, 17, 18, 20"
     )]
     pub result: Option<privd_response::Result>,
 }
@@ -324,8 +346,8 @@ pub mod privd_response {
     use prost::Oneof;
 
     use super::{
-        ConfigFingerprint, GroupList, IpBanList, MutationResult, OcservVersion, PrivdError,
-        ServiceStatus, SessionList, UserList,
+        ConfigFingerprint, DesiredEffectObservation, GroupList, IpBanList, MutationResult,
+        OcservVersion, PrivdError, ServiceStatus, SessionList, UserList,
     };
 
     /// Result allowlist.
@@ -355,6 +377,9 @@ pub mod privd_response {
         /// Observed groups.
         #[prost(message, tag = "17")]
         GroupList(GroupList),
+        /// Non-secret authoritative desired-effect marker observation.
+        #[prost(message, tag = "18")]
+        DesiredEffectObservation(DesiredEffectObservation),
         /// Stable failure.
         #[prost(message, tag = "20")]
         Error(PrivdError),

@@ -152,7 +152,7 @@ func (s *Service) Mutate(ctx context.Context, request MutationRequest) (operatio
 	if request.Kind == GroupApply {
 		resourceType = "group"
 	}
-	if err := supersedePending(ctx, tx, request.NodeID, resourceType, request.Name, now); err != nil {
+	if err := supersedePending(ctx, tx, request.NodeID, resourceType, request.Name, request.Kind, now); err != nil {
 		return operationstore.Operation{}, false, err
 	}
 	if _, err := tx.Exec(ctx, `INSERT INTO operations(id,workspace_id,node_id,command_id,state,version,request_id,trace_id,idempotency_key,request_hash,expires_at,created_at,updated_at) VALUES($1,$2,$3,$4,'queued',1,$5,$6,$7,$8,$9,$10,$10)`, operationID, workspaceID, request.NodeID, commandID, request.RequestID, traceID(request.Traceparent), request.IdempotencyKey, hash[:], expiresAt, now); err != nil {
@@ -417,8 +417,21 @@ func findIdempotent(ctx context.Context, tx pgx.Tx, workspaceID uuid.UUID, key s
 	return op, same, nil
 }
 
-func supersedePending(ctx context.Context, tx pgx.Tx, nodeID uuid.UUID, resourceType, resourceKey string, now time.Time) error {
-	rows, err := tx.Query(ctx, `UPDATE commands c SET state='superseded',updated_at=$4 FROM outbox_events o WHERE c.node_id=$1 AND c.resource_type=$2 AND c.resource_key=$3 AND c.state='queued' AND o.command_id=c.id AND o.locked_by IS NULL AND NOT EXISTS(SELECT 1 FROM node_command_leases l WHERE l.command_id=c.id) RETURNING c.id,c.operation_id`, nodeID, resourceType, resourceKey, now)
+func supersedePending(ctx context.Context, tx pgx.Tx, nodeID uuid.UUID, resourceType, resourceKey string, kind MutationKind, now time.Time) error {
+	var replaceable []string
+	switch kind {
+	case GroupApply:
+		replaceable = []string{string(GroupApply)}
+	case UserPasswordRotate:
+		replaceable = []string{string(UserPasswordRotate)}
+	case UserDisable, UserEnable:
+		replaceable = []string{string(UserDisable), string(UserEnable)}
+	case UserCreate:
+		return nil
+	default:
+		return ErrInvalidRequest
+	}
+	rows, err := tx.Query(ctx, `UPDATE commands c SET state='superseded',updated_at=$5 FROM outbox_events o WHERE c.node_id=$1 AND c.resource_type=$2 AND c.resource_key=$3 AND c.payload_type=ANY($4) AND c.state='queued' AND o.command_id=c.id AND o.locked_by IS NULL AND NOT EXISTS(SELECT 1 FROM node_command_leases l WHERE l.command_id=c.id) RETURNING c.id,c.operation_id`, nodeID, resourceType, resourceKey, replaceable, now)
 	if err != nil {
 		return err
 	}

@@ -246,6 +246,17 @@ async fn execute(
                 .await
                 .map(privd_response::Result::GroupList),
         ),
+        privd_request::Operation::DesiredEffectObserve(request) => (
+            "desired_effect_observe",
+            adapter
+                .desired_effect_observe(
+                    &request.mutation_kind,
+                    &request.resource_key,
+                    request.desired_revision,
+                )
+                .await
+                .map(privd_response::Result::DesiredEffectObservation),
+        ),
         privd_request::Operation::SessionDisconnect(request) => (
             "session_disconnect",
             adapter
@@ -277,10 +288,11 @@ async fn execute(
         privd_request::Operation::UserCreate(request) => (
             "user_create",
             adapter
-                .user_secret_apply(
+                .user_create(
                     &request.username,
                     &request.secret_key_id,
                     &request.sealed_password,
+                    request.desired_revision,
                 )
                 .await
                 .map(privd_response::Result::Mutation),
@@ -288,24 +300,25 @@ async fn execute(
         privd_request::Operation::UserDisable(request) => (
             "user_disable",
             adapter
-                .user_disable(&request.username)
+                .user_disable(&request.username, request.desired_revision)
                 .await
                 .map(privd_response::Result::Mutation),
         ),
         privd_request::Operation::UserEnable(request) => (
             "user_enable",
             adapter
-                .user_enable(&request.username)
+                .user_enable(&request.username, request.desired_revision)
                 .await
                 .map(privd_response::Result::Mutation),
         ),
         privd_request::Operation::UserPasswordRotate(request) => (
             "user_password_rotate",
             adapter
-                .user_secret_apply(
+                .user_password_rotate(
                     &request.username,
                     &request.secret_key_id,
                     &request.sealed_password,
+                    request.desired_revision,
                 )
                 .await
                 .map(privd_response::Result::Mutation),
@@ -313,7 +326,11 @@ async fn execute(
         privd_request::Operation::GroupApply(request) => (
             "group_apply",
             adapter
-                .group_apply(&request.group_name, &request.members)
+                .group_apply(
+                    &request.group_name,
+                    &request.members,
+                    request.desired_revision,
+                )
                 .await
                 .map(privd_response::Result::Mutation),
         ),
