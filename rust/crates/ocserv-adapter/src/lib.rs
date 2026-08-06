@@ -1517,6 +1517,24 @@ mod tests {
     }
 
     #[cfg(target_os = "linux")]
+    async fn assert_effect_marker(
+        adapter: &Adapter,
+        mutation_kind: &str,
+        resource_key: &str,
+        revision: u64,
+        expected: bool,
+    ) {
+        assert_eq!(
+            adapter
+                .desired_effect_observe(mutation_kind, resource_key, revision)
+                .await
+                .expect("observe effect marker")
+                .applied,
+            expected
+        );
+    }
+
+    #[cfg(target_os = "linux")]
     #[tokio::test]
     #[ignore = "requires native ocpasswd, OpenSSL, and an isolated test directory"]
     async fn native_user_and_group_operations() {
@@ -1537,13 +1555,7 @@ mod tests {
             .user_create("alice", "i13-native", &sealed, 1)
             .await
             .expect("create native user");
-        assert!(
-            adapter
-                .desired_effect_observe("user_create", "alice", 1)
-                .await
-                .expect("observe create marker")
-                .applied
-        );
+        assert_effect_marker(&adapter, "user_create", "alice", 1, true).await;
         let after_create = std::fs::read(&users).expect("created record");
         assert!(
             adapter
@@ -1589,13 +1601,7 @@ mod tests {
             .user_password_rotate("alice", "i13-native", &sealed, 4)
             .await
             .expect("rotate disabled native user");
-        assert!(
-            adapter
-                .desired_effect_observe("user_password_rotate", "alice", 4)
-                .await
-                .expect("observe rotate marker")
-                .applied
-        );
+        assert_effect_marker(&adapter, "user_password_rotate", "alice", 4, true).await;
         assert!(
             !adapter
                 .user_list()
@@ -1619,20 +1625,8 @@ mod tests {
                 .expect("enabled record")
                 .starts_with("alice:staff:")
         );
-        assert!(
-            adapter
-                .desired_effect_observe("user_create", "alice", 1)
-                .await
-                .expect("create marker survived later replacements")
-                .applied
-        );
-        assert!(
-            !adapter
-                .desired_effect_observe("user_password_rotate", "alice", 3)
-                .await
-                .expect("stale rotate marker")
-                .applied
-        );
+        assert_effect_marker(&adapter, "user_create", "alice", 1, true).await;
+        assert_effect_marker(&adapter, "user_password_rotate", "alice", 3, false).await;
     }
 
     #[test]
