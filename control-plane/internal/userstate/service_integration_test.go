@@ -147,6 +147,31 @@ func TestManagedResourceAndMembershipCapacityIntegration(t *testing.T) {
 	}
 }
 
+func TestFreshObservedUsersBoundCreateCapacityIntegration(t *testing.T) {
+	service, pool, _, nodeID := integrationService(t, "active")
+	now := time.Now().UTC().Truncate(time.Microsecond)
+	service.now = func() time.Time { return now }
+	agentInstanceID := uuid.Must(uuid.NewV7())
+	if _, err := pool.Exec(context.Background(), `INSERT INTO node_observed_snapshots(node_id,observed_at,received_at,boot_id,agent_instance_id,agent_version,ocserv_version,os_release,ocserv,system,path,last_heartbeat_at) VALUES($1,$2,$2,'capacity-boot',$3,'test-agent','test-ocserv','test-os','{}','{}','{}',$2)`, nodeID, now, agentInstanceID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(context.Background(), `INSERT INTO observed_users(node_id,username,enabled,revision,fingerprint,observed_at) SELECT $1,'user'||lpad(value::text,3,'0'),true,0,decode(repeat('00',32),'hex'),$2 FROM generate_series(0,$3-1) value`, nodeID, now, MaxManagedResources); err != nil {
+		t.Fatal(err)
+	}
+
+	request := mutation(nodeID, "observed-capacity-user", UserCreate, "overflow", 0)
+	if _, _, err := service.Mutate(context.Background(), request); !errors.Is(err, ErrInvalidRequest) {
+		t.Fatalf("fresh observed user capacity was not rejected: %v", err)
+	}
+	var desired, operations, commands int
+	if err := pool.QueryRow(context.Background(), `SELECT (SELECT count(*) FROM desired_users WHERE node_id=$1),(SELECT count(*) FROM operations WHERE node_id=$1),(SELECT count(*) FROM commands WHERE node_id=$1)`, nodeID).Scan(&desired, &operations, &commands); err != nil {
+		t.Fatal(err)
+	}
+	if desired != 0 || operations != 0 || commands != 0 {
+		t.Fatalf("capacity rejection persisted desired=%d operations=%d commands=%d", desired, operations, commands)
+	}
+}
+
 func TestI13IntentAndTerminalAuditActionsMatchIntegration(t *testing.T) {
 	service, pool, _, nodeID := integrationService(t, "active")
 	ingest := localslice.New(pool)

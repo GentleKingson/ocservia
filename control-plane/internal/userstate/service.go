@@ -133,11 +133,11 @@ func (s *Service) Mutate(ctx context.Context, request MutationRequest) (operatio
 	if currentVersion != request.ExpectedVersion {
 		return operationstore.Operation{}, false, ErrVersionConflict
 	}
-	if err := ensureMutationCapacity(ctx, tx, request, currentVersion == 0); err != nil {
+	now := s.now()
+	if err := ensureMutationCapacity(ctx, tx, request, currentVersion == 0, now); err != nil {
 		return operationstore.Operation{}, false, err
 	}
 	nextVersion, nextRevision := currentVersion+1, currentRevision+1
-	now := s.now()
 	fingerprint := desiredFingerprint(request.Kind, request.Name, request.Members)
 	if err := writeDesired(ctx, tx, request, nextVersion, nextRevision, fingerprint[:], now); err != nil {
 		return operationstore.Operation{}, false, err
@@ -271,15 +271,17 @@ func lockDesired(ctx context.Context, tx pgx.Tx, request MutationRequest) (int64
 	return version, revision, nil
 }
 
-func ensureMutationCapacity(ctx context.Context, tx pgx.Tx, request MutationRequest, creating bool) error {
+func ensureMutationCapacity(ctx context.Context, tx pgx.Tx, request MutationRequest, creating bool, now time.Time) error {
 	if creating {
-		table := "desired_users"
-		if request.Kind == GroupApply {
-			table = "desired_groups"
-		}
 		var count int
-		if err := tx.QueryRow(ctx, `SELECT count(*) FROM `+table+` WHERE node_id=$1`, request.NodeID).Scan(&count); err != nil {
-			return err
+		if request.Kind == UserCreate {
+			if err := tx.QueryRow(ctx, `SELECT count(*) FROM (SELECT username FROM desired_users WHERE node_id=$1 UNION SELECT o.username FROM observed_users o JOIN node_observed_snapshots s ON s.node_id=o.node_id WHERE o.node_id=$1 AND s.last_heartbeat_at >= $2::timestamptz - interval '90 seconds') resources`, request.NodeID, now).Scan(&count); err != nil {
+				return err
+			}
+		} else {
+			if err := tx.QueryRow(ctx, `SELECT count(*) FROM desired_groups WHERE node_id=$1`, request.NodeID).Scan(&count); err != nil {
+				return err
+			}
 		}
 		if count >= MaxManagedResources {
 			return ErrInvalidRequest

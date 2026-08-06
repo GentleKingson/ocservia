@@ -503,12 +503,20 @@ impl Adapter {
         }
         let _guard = self.user_file_lock.lock().await;
         let current = read_optional_secret_file(&self.resources.user_file).await?;
-        let metadata = find_user_metadata(&current, username)?;
+        let records = parse_secret_user_records(&current)?;
+        let metadata = records
+            .iter()
+            .find(|record| record.username == username)
+            .map(|record| (record.groups.clone(), record.hash.starts_with('!')));
         if (mode == SecretApplyMode::MustBeAbsent && metadata.is_some())
             || (mode == SecretApplyMode::MustExist && metadata.is_none())
         {
             return Err(AdapterError::InvalidRequest);
         }
+        if mode == SecretApplyMode::MustBeAbsent && records.len() >= MAX_MANAGED_RESOURCES {
+            return Err(AdapterError::InvalidRequest);
+        }
+        drop(records);
         let key = self
             .resources
             .secret_key
@@ -768,6 +776,7 @@ impl Adapter {
         effect: EffectIdentity<'_>,
     ) -> Result<(), AdapterError> {
         let after = read_optional_secret_file(staging.path()).await?;
+        parse_secret_user_records(&after)?;
         let mut store = EffectStore::open_for_mutation(&self.resources)?;
         match store.prepare(
             mutation_kind,
@@ -2532,6 +2541,128 @@ mod tests {
         ));
         assert_eq!(std::fs::read(&users).expect("rotate missing"), original);
         std::fs::remove_dir_all(directory).expect("cleanup");
+    }
+
+    #[tokio::test]
+    async fn user_create_rejects_authoritative_capacity_before_side_effects() {
+        let directory =
+            std::env::temp_dir().join(format!("ocservia-user-capacity-{}", Uuid::now_v7()));
+        std::fs::create_dir(&directory).expect("directory");
+        let users = directory.join("ocpasswd");
+        let mut original = Vec::new();
+        for index in 0..MAX_MANAGED_RESOURCES {
+            original.extend_from_slice(format!("user{index:03}:*:$6$test-hash\n").as_bytes());
+        }
+        std::fs::write(&users, &original).expect("maximum users");
+
+        let openssl_marker = directory.join("openssl-called");
+        let ocpasswd_marker = directory.join("ocpasswd-called");
+        let openssl = executable(
+            "openssl-fixture",
+            &format!("touch '{}'; printf password", openssl_marker.display()),
+        );
+        let openssl_directory = openssl.parent().expect("openssl parent").to_owned();
+        let ocpasswd = executable(
+            "ocpasswd-fixture",
+            &format!("touch '{}'; exit 1", ocpasswd_marker.display()),
+        );
+        let ocpasswd_directory = ocpasswd.parent().expect("ocpasswd parent").to_owned();
+        let effect_database = directory.join("effects.sqlite3");
+        let effect_key = directory.join("effects.key");
+        let resources = FixedResources::default()
+            .with_user_resources(
+                openssl,
+                users.clone(),
+                ocpasswd,
+                directory.join("key.pem"),
+                String::from("test-key"),
+            )
+            .expect("resources")
+            .with_effect_store(effect_database.clone(), effect_key.clone())
+            .expect("effect resources");
+        let adapter = Adapter::new(resources, Limits::default());
+
+        assert!(matches!(
+            adapter
+                .user_create("overflow", "test-key", &[7_u8; 64], 1, test_effect())
+                .await,
+            Err(AdapterError::InvalidRequest)
+        ));
+        assert!(!openssl_marker.exists());
+        assert!(!ocpasswd_marker.exists());
+        assert!(!effect_database.exists());
+        assert!(!effect_key.exists());
+        assert_eq!(std::fs::read(&users).expect("unchanged users"), original);
+        assert_eq!(
+            adapter.user_list().await.expect("user list").users.len(),
+            384
+        );
+
+        std::fs::remove_dir_all(directory).expect("cleanup directory");
+        std::fs::remove_dir_all(openssl_directory).expect("cleanup openssl");
+        std::fs::remove_dir_all(ocpasswd_directory).expect("cleanup ocpasswd");
+    }
+
+    #[tokio::test]
+    async fn oversized_password_staging_is_rejected_before_effect_prepare() {
+        let directory =
+            std::env::temp_dir().join(format!("ocservia-staging-capacity-{}", Uuid::now_v7()));
+        std::fs::create_dir(&directory).expect("directory");
+        let users = directory.join("ocpasswd");
+        let mut original = Vec::new();
+        for index in 0..(MAX_MANAGED_RESOURCES - 1) {
+            original.extend_from_slice(format!("user{index:03}:*:$6$test-hash\n").as_bytes());
+        }
+        std::fs::write(&users, &original).expect("users below capacity");
+        let effect_database = directory.join("effects.sqlite3");
+        let effect_key = directory.join("effects.key");
+        let resources = FixedResources::default()
+            .with_user_resources(
+                PathBuf::from("/bin/false"),
+                users.clone(),
+                PathBuf::from("/bin/false"),
+                directory.join("key.pem"),
+                String::from("test-key"),
+            )
+            .expect("resources")
+            .with_effect_store(effect_database.clone(), effect_key.clone())
+            .expect("effect resources");
+        let adapter = Adapter::new(resources, Limits::default());
+        let mut staging = adapter
+            .stage_user_file(&original)
+            .await
+            .expect("staging file");
+        let mut oversized = Vec::new();
+        for index in 0..=MAX_MANAGED_RESOURCES {
+            oversized.extend_from_slice(format!("staged{index:03}:*:$6$test-hash\n").as_bytes());
+        }
+        tokio::fs::write(staging.path(), oversized)
+            .await
+            .expect("oversized staging");
+
+        let result = adapter
+            .commit_desired_staging(
+                &mut staging,
+                &original,
+                "user_create",
+                "overflow",
+                1,
+                test_effect(),
+            )
+            .await;
+        assert!(
+            matches!(result, Err(AdapterError::OutputLimit)),
+            "unexpected result: {result:?}"
+        );
+        assert!(!effect_database.exists());
+        assert!(!effect_key.exists());
+        assert_eq!(std::fs::read(&users).expect("unchanged users"), original);
+        assert_eq!(
+            adapter.user_list().await.expect("user list").users.len(),
+            383
+        );
+
+        std::fs::remove_dir_all(directory).expect("cleanup directory");
     }
 
     #[test]
