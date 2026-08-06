@@ -16,6 +16,8 @@ NATIVE_ROOT="${TMP_BASE%/}/ocservia-${PREFIX}-native"
 PORT="${OCSERVIA_I13_OCSERV_PORT:-44443}"
 PASSWORD="native-password-sentinel"
 ARTIFACT_DIR="${ARTIFACT_DIR:-}"
+RUN_AS_USER="${SUDO_USER:-nobody}"
+RUN_AS_GROUP="$(id -gn "${RUN_AS_USER}")"
 
 cleanup() {
   local status=$? cleanup_status=0
@@ -91,15 +93,15 @@ cat >"${NATIVE_ROOT}/ocserv.conf" <<EOF
 auth = "plain[passwd=${NATIVE_ROOT}/ocpasswd]"
 tcp-port = ${PORT}
 udp-port = 0
-run-as-user = ocserv
-run-as-group = ocserv
+run-as-user = ${RUN_AS_USER}
+run-as-group = ${RUN_AS_GROUP}
 listen-host = 127.0.0.1
 socket-file = ${NATIVE_ROOT}/ocserv.sock
 occtl-socket-file = ${NATIVE_ROOT}/occtl.sock
 pid-file = ${NATIVE_ROOT}/ocserv.pid
 server-cert = /etc/ssl/certs/ssl-cert-snakeoil.pem
 server-key = /etc/ssl/private/ssl-cert-snakeoil.key
-tls-priorities = "NORMAL:%SERVER_PRECEDENCE:%COMPAT:-VERS-SSL3.0:-VERS-TLS1.0:-VERS-TLS1.1:-VERS-TLS1.3"
+tls-priorities = "NORMAL:%SERVER_PRECEDENCE:%COMPAT:-VERS-SSL3.0:-VERS-TLS1.0:-VERS-TLS1.1"
 isolate-workers = false
 max-clients = 4
 max-same-clients = 2
