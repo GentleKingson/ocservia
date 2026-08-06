@@ -1263,6 +1263,7 @@ impl Backoff {
 pub struct PrivdClient {
     socket: std::path::PathBuf,
     timeout: Duration,
+    desired_timeout: Duration,
 }
 
 impl PrivdClient {
@@ -1278,7 +1279,12 @@ impl PrivdClient {
                 "privd timeout invalid",
             ));
         }
-        Ok(Self { socket, timeout })
+        let desired_timeout = timeout.saturating_mul(4).min(Duration::from_secs(30));
+        Ok(Self {
+            socket,
+            timeout,
+            desired_timeout,
+        })
     }
 
     /// Calls exactly one fixed read-only operation.
@@ -1290,7 +1296,8 @@ impl PrivdClient {
         &self,
         operation: privd_request::Operation,
     ) -> Result<PrivdResponse, io::Error> {
-        self.call_inner(operation, &[], &[], &[], 0).await
+        self.call_inner(operation, &[], &[], &[], 0, self.timeout)
+            .await
     }
 
     /// Calls one desired-state operation with its stable non-secret command identity.
@@ -1322,6 +1329,7 @@ impl PrivdClient {
             idempotency_key,
             semantic_payload_sha256,
             expires_at_unix_seconds,
+            self.desired_timeout,
         )
         .await
     }
@@ -1333,9 +1341,10 @@ impl PrivdClient {
         idempotency_key: &[u8],
         semantic_payload_sha256: &[u8],
         expires_at_unix_seconds: i64,
+        timeout: Duration,
     ) -> Result<PrivdResponse, io::Error> {
         let deadline = SystemTime::now()
-            .checked_add(self.timeout)
+            .checked_add(timeout)
             .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "privd deadline overflow"))?
             .duration_since(UNIX_EPOCH)
             .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "system clock unavailable"))?;
@@ -1350,15 +1359,22 @@ impl PrivdClient {
             command_expires_at_unix_seconds: expires_at_unix_seconds,
             operation: Some(operation),
         };
-        let mut stream = tokio::time::timeout(self.timeout, UnixStream::connect(&self.socket))
-            .await
-            .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "privd connect timed out"))??;
-        tokio::time::timeout(self.timeout, write_frame(&mut stream, &request))
+        let transport_deadline = tokio::time::Instant::now() + timeout;
+        let mut stream =
+            tokio::time::timeout_at(transport_deadline, UnixStream::connect(&self.socket))
+                .await
+                .map_err(|_| {
+                    io::Error::new(io::ErrorKind::TimedOut, "privd connect timed out")
+                })??;
+        tokio::time::timeout_at(transport_deadline, write_frame(&mut stream, &request))
             .await
             .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "privd request timed out"))??;
-        let response: PrivdResponse = tokio::time::timeout(self.timeout, read_frame(&mut stream))
-            .await
-            .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "privd response timed out"))??;
+        let response: PrivdResponse =
+            tokio::time::timeout_at(transport_deadline, read_frame(&mut stream))
+                .await
+                .map_err(|_| {
+                    io::Error::new(io::ErrorKind::TimedOut, "privd response timed out")
+                })??;
         if response.request_id != request.request_id {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
@@ -1499,6 +1515,18 @@ mod tests {
     use std::process::Command;
 
     use super::*;
+
+    #[test]
+    fn desired_privd_deadline_exceeds_each_child_budget() {
+        let client = PrivdClient::new(
+            std::path::PathBuf::from("/tmp/ocservia-test-privd.sock"),
+            Duration::from_secs(5),
+        )
+        .expect("client");
+        assert_eq!(client.timeout, Duration::from_secs(5));
+        assert_eq!(client.desired_timeout, Duration::from_secs(20));
+        assert!(client.desired_timeout > client.timeout);
+    }
 
     #[test]
     fn root_is_refused() {

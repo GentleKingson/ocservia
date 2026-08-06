@@ -23,6 +23,10 @@ Desired user/group mutations use a root-only bounded SQLite store under
 `/var/lib/ocservia-privd`. The store is local only and is not a business
 database or network service. Authenticated records bind the command identity,
 semantic payload hash, revision, expiry, and authoritative file transition.
+The authenticated store identity makes missing or mismatched database/key state
+fail closed. Privd resolves every prepared whole-file transition before another
+user/group mutation, so later changes cannot erase earlier recovery proof. Only
+an exact prepared record with a matching before-state proves an absent effect.
 The unit grants write access only to this state directory and the fixed Ocserv
 directory. Keep the generated HMAC key and database together during backup,
 restore, and binary rollback.

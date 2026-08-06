@@ -9,15 +9,11 @@ use ocservia_privd::{ServerConfig, bind_socket, remove_socket, serve};
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     ocservia_observability::init("ocservia-privd")?;
     let (config, resources, limits) = parse_args()?;
+    let adapter = Adapter::new(resources, limits);
+    adapter.cleanup_stale_user_staging().await?;
     let listener = bind_socket(&config)?;
     tracing::info!(socket = %config.socket.display(), agent_uid = config.agent_uid, "privd serving on AF_UNIX");
-    let result = serve(
-        listener,
-        config.clone(),
-        Adapter::new(resources, limits),
-        shutdown(),
-    )
-    .await;
+    let result = serve(listener, config.clone(), adapter, shutdown()).await;
     let cleanup = remove_socket(&config.socket);
     result?;
     cleanup?;
