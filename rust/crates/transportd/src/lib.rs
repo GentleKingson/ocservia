@@ -2111,6 +2111,8 @@ mod tests {
             samples: Vec::new(),
             security_events: Vec::new(),
             ip_bans: Vec::new(),
+            users: Vec::new(),
+            groups: Vec::new(),
         };
         let payload = batch.encode_to_vec();
         let mut send = connection.open_uni().await.expect("open telemetry stream");

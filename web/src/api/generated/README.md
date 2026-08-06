@@ -60,17 +60,22 @@ All URIs are relative to _/api/v1_
 | _NodesApi_       | [**listNodeIpBans**](docs/NodesApi.md#listnodeipbans)                          | **GET** /nodes/{node_id}/ip-bans                           | List current IP bans observed on a node                            |
 | _NodesApi_       | [**listNodeSessions**](docs/NodesApi.md#listnodesessions)                      | **GET** /nodes/{node_id}/sessions                          | List current sessions observed on a node                           |
 | _NodesApi_       | [**listNodeTelemetry**](docs/NodesApi.md#listnodetelemetry)                    | **GET** /nodes/{node_id}/telemetry                         | Query bounded raw or rolled-up node telemetry                      |
+| _NodesApi_       | [**listNodeUserGroupState**](docs/NodesApi.md#listnodeusergroupstate)          | **GET** /nodes/{node_id}/user-group-state                  | List node-scoped desired and observed users and groups             |
 | _NodesApi_       | [**listNodes**](docs/NodesApi.md#listnodes)                                    | **GET** /nodes                                             | List node observed state                                           |
 | _NodesApi_       | [**revokeNode**](docs/NodesApi.md#revokenode)                                  | **POST** /nodes/{node_id}/revocation                       | Revoke a node endpoint and close its current connection            |
+| _OperationsApi_  | [**applyNodeGroup**](docs/OperationsApi.md#applynodegroup)                     | **PUT** /nodes/{node_id}/groups/{group_name}               | Queue atomic application of one node-scoped group                  |
 | _OperationsApi_  | [**approveRequest**](docs/OperationsApi.md#approverequest)                     | **POST** /approval-requests/{approval_id}:approve          | Approve another principal\&#39;s high-risk request                 |
 | _OperationsApi_  | [**createApprovalRequest**](docs/OperationsApi.md#createapprovalrequest)       | **POST** /approval-requests                                | Request independent approval for a high-risk action                |
+| _OperationsApi_  | [**createNodeUser**](docs/OperationsApi.md#createnodeuser)                     | **POST** /nodes/{node_id}/users                            | Queue creation of one node-scoped user                             |
 | _OperationsApi_  | [**createSyntheticCommand**](docs/OperationsApi.md#createsyntheticcommand)     | **POST** /nodes/{node_id}/synthetic-commands               | Queue a side-effect-free typed synthetic command                   |
+| _OperationsApi_  | [**disableNodeUser**](docs/OperationsApi.md#disablenodeuser)                   | **POST** /nodes/{node_id}/users/{username}:disable         | Queue disabling one node-scoped user                               |
 | _OperationsApi_  | [**disconnectNodeSession**](docs/OperationsApi.md#disconnectnodesession)       | **POST** /nodes/{node_id}/sessions/{session_id}:disconnect | Disconnect one observed session                                    |
 | _OperationsApi_  | [**getOperation**](docs/OperationsApi.md#getoperation)                         | **GET** /operations/{operation_id}                         | Get an asynchronous operation                                      |
 | _OperationsApi_  | [**getOperationQueueMetrics**](docs/OperationsApi.md#getoperationqueuemetrics) | **GET** /operations/queue-metrics                          | Get transactional outbox and command queue metrics                 |
 | _OperationsApi_  | [**listOperations**](docs/OperationsApi.md#listoperations)                     | **GET** /operations                                        | List operations                                                    |
 | _OperationsApi_  | [**reloadNodeService**](docs/OperationsApi.md#reloadnodeservice)               | **POST** /nodes/{node_id}/service:reload                   | Reload the fixed Ocserv service unit                               |
 | _OperationsApi_  | [**removeNodeIpBan**](docs/OperationsApi.md#removenodeipban)                   | **POST** /nodes/{node_id}/ip-bans/{ip}:remove              | Remove one canonical IP address from the Ocserv ban list           |
+| _OperationsApi_  | [**rotateNodeUserPassword**](docs/OperationsApi.md#rotatenodeuserpassword)     | **POST** /nodes/{node_id}/users/{username}:rotate-password | Queue write-only password rotation using node-sealed ciphertext    |
 | _OperationsApi_  | [**terminateNodeSession**](docs/OperationsApi.md#terminatenodesession)         | **POST** /nodes/{node_id}/sessions/{session_id}:terminate  | Terminate one observed session and invalidate its reconnect cookie |
 | _OperationsApi_  | [**watchOperationEvents**](docs/OperationsApi.md#watchoperationevents)         | **GET** /operations/{operation_id}/events                  | Watch durable operation state changes                              |
 | _PlatformApi_    | [**beginOIDCLogin**](docs/PlatformApi.md#beginoidclogin)                       | **GET** /auth/login                                        | Begin OIDC Authorization Code login with PKCE S256                 |
@@ -94,10 +99,12 @@ All URIs are relative to _/api/v1_
 - [BuildInfo](docs/BuildInfo.md)
 - [ConnectionPathState](docs/ConnectionPathState.md)
 - [ControlledOperationRequest](docs/ControlledOperationRequest.md)
+- [DesiredMutationRequest](docs/DesiredMutationRequest.md)
 - [DevelopmentRuntime](docs/DevelopmentRuntime.md)
 - [DropCounters](docs/DropCounters.md)
 - [EnrollmentToken](docs/EnrollmentToken.md)
 - [EnrollmentTokenRequest](docs/EnrollmentTokenRequest.md)
+- [GroupApplyRequest](docs/GroupApplyRequest.md)
 - [Health](docs/Health.md)
 - [NodeApproval](docs/NodeApproval.md)
 - [NodeIpBan](docs/NodeIpBan.md)
@@ -112,6 +119,7 @@ All URIs are relative to _/api/v1_
 - [OperationPage](docs/OperationPage.md)
 - [OperationState](docs/OperationState.md)
 - [PageInfo](docs/PageInfo.md)
+- [PasswordRotateRequest](docs/PasswordRotateRequest.md)
 - [PlatformEvent](docs/PlatformEvent.md)
 - [PlatformEventPage](docs/PlatformEventPage.md)
 - [PlatformEventType](docs/PlatformEventType.md)
@@ -125,6 +133,9 @@ All URIs are relative to _/api/v1_
 - [TelemetryMetric](docs/TelemetryMetric.md)
 - [TelemetryPoint](docs/TelemetryPoint.md)
 - [TelemetryPointPage](docs/TelemetryPointPage.md)
+- [UserCreateRequest](docs/UserCreateRequest.md)
+- [UserGroupResourceState](docs/UserGroupResourceState.md)
+- [UserGroupStatePage](docs/UserGroupStatePage.md)
 - [Workspace](docs/Workspace.md)
 - [WorkspacePage](docs/WorkspacePage.md)
 

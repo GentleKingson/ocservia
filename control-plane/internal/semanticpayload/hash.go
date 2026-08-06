@@ -64,6 +64,23 @@ func HashV1(envelope *agentv1.CommandEnvelope) ([sha256.Size]byte, error) {
 			return [sha256.Size]byte{}, errors.New("IP address is not canonical")
 		}
 		canonicalPayload = canonicalStrings(ip)
+	case *agentv1.CommandEnvelope_UserCreate:
+		payloadKind = 101
+		payload := envelope.GetUserCreate()
+		canonicalPayload = canonicalStringsAndBytes([]string{payload.GetUsername(), payload.GetSecretKeyId()}, payload.GetSealedPassword(), payload.GetDesiredRevision())
+	case *agentv1.CommandEnvelope_UserDisable:
+		payloadKind = 102
+		payload := envelope.GetUserDisable()
+		canonicalPayload = canonicalStringsAndBytes([]string{payload.GetUsername()}, nil, payload.GetDesiredRevision())
+	case *agentv1.CommandEnvelope_UserPasswordRotate:
+		payloadKind = 114
+		payload := envelope.GetUserPasswordRotate()
+		canonicalPayload = canonicalStringsAndBytes([]string{payload.GetUsername(), payload.GetSecretKeyId()}, payload.GetSealedPassword(), payload.GetDesiredRevision())
+	case *agentv1.CommandEnvelope_GroupApply:
+		payloadKind = 115
+		payload := envelope.GetGroupApply()
+		values := append([]string{payload.GetGroupName()}, payload.GetMembers()...)
+		canonicalPayload = canonicalStringsAndBytes(values, nil, payload.GetDesiredRevision())
 	default:
 		return [sha256.Size]byte{}, errors.New("command payload type is not reconcilable")
 	}
@@ -80,6 +97,17 @@ func HashV1(envelope *agentv1.CommandEnvelope) ([sha256.Size]byte, error) {
 	var out [sha256.Size]byte
 	copy(out[:], h.Sum(nil))
 	return out, nil
+}
+
+func canonicalStringsAndBytes(values []string, value []byte, revision uint64) []byte {
+	out := canonicalStrings(values...)
+	var length [4]byte
+	binary.BigEndian.PutUint32(length[:], uint32(len(value)))
+	out = append(out, length[:]...)
+	out = append(out, value...)
+	var encodedRevision [8]byte
+	binary.BigEndian.PutUint64(encodedRevision[:], revision)
+	return append(out, encodedRevision[:]...)
 }
 
 func canonicalStrings(values ...string) []byte {

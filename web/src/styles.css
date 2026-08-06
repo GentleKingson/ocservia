@@ -472,7 +472,8 @@ h1 {
   gap: 5px;
 }
 .session-actions button,
-.node-actions button {
+.node-actions button,
+.icon-command {
   min-width: 30px;
   height: 30px;
   display: inline-flex;
@@ -485,6 +486,70 @@ h1 {
   border: 1px solid #ced8d4;
   border-radius: 5px;
   cursor: pointer;
+}
+.state-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 12px 18px 6px;
+  border-top: 1px solid #e6ebe8;
+}
+.state-toolbar .segmented {
+  flex: 0 1 170px;
+}
+.desired-state-list {
+  padding: 4px 18px 14px;
+}
+.desired-state-list > div {
+  min-height: 44px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  border-bottom: 1px solid #edf0ef;
+}
+.desired-state-list > div > span:first-child {
+  min-width: 0;
+  display: grid;
+  gap: 3px;
+}
+.desired-state-list strong {
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+.desired-state-list small {
+  font-size: 10px;
+  color: #6b7873;
+}
+.desired-state-list small.converged {
+  color: #176d47;
+}
+.desired-state-list small.drifted {
+  color: #a33d37;
+}
+.desired-state-list small.offline_pending {
+  color: #8c5418;
+}
+.desired-state-list p {
+  margin: 12px 0;
+  color: #75817d;
+  font-size: 12px;
+}
+.icon-command {
+  width: 30px;
+  min-width: 30px;
+  height: 30px;
+  padding: 0;
+  color: #35443f;
+  background: #fff;
+  border: 1px solid #ced8d4;
+  border-radius: 5px;
+  cursor: pointer;
+}
+.icon-command:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
 }
 .session-actions button.danger {
   color: #9f302d;
@@ -565,7 +630,8 @@ h1 {
   font-size: 12px;
   font-weight: 650;
 }
-.operation-dialog textarea {
+.operation-dialog textarea,
+.operation-dialog input {
   width: 100%;
   min-height: 88px;
   resize: vertical;
@@ -573,6 +639,9 @@ h1 {
   border: 1px solid #bac7c2;
   border-radius: 5px;
   font: inherit;
+}
+.operation-dialog input {
+  min-height: 38px;
 }
 .operation-dialog footer {
   display: flex;

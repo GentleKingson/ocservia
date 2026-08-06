@@ -26,7 +26,7 @@ pub struct PrivdRequest {
     /// One of the permanently fixed operations.
     #[prost(
         oneof = "privd_request::Operation",
-        tags = "10, 11, 12, 13, 14, 30, 31, 32, 33"
+        tags = "10, 11, 12, 13, 14, 15, 16, 30, 31, 32, 33, 34, 35, 36, 37"
     )]
     pub operation: Option<privd_request::Operation>,
 }
@@ -35,7 +35,10 @@ pub struct PrivdRequest {
 pub mod privd_request {
     use prost::Oneof;
 
-    use super::{IpBanRemoveRequest, ReadRequest, ServiceReloadRequest, SessionMutationRequest};
+    use super::{
+        GroupApplyRequest, IpBanRemoveRequest, ReadRequest, ServiceReloadRequest,
+        SessionMutationRequest, UserDisableRequest, UserSecretRequest,
+    };
 
     /// Read-only operation allowlist.
     #[derive(Clone, PartialEq, Eq, Oneof)]
@@ -55,6 +58,12 @@ pub mod privd_request {
         /// Fingerprint the fixed ocserv configuration file.
         #[prost(message, tag = "14")]
         ConfigFingerprint(ReadRequest),
+        /// List users from the fixed ocpasswd file without hashes.
+        #[prost(message, tag = "15")]
+        UserList(ReadRequest),
+        /// List groups from the fixed group file.
+        #[prost(message, tag = "16")]
+        GroupList(ReadRequest),
         /// Disconnect one numeric session without invalidating its cookie.
         #[prost(message, tag = "30")]
         SessionDisconnect(SessionMutationRequest),
@@ -67,6 +76,18 @@ pub mod privd_request {
         /// Reload only the fixed `ocserv.service` unit.
         #[prost(message, tag = "33")]
         ServiceReload(ServiceReloadRequest),
+        /// Create a user through the fixed ocpasswd resource.
+        #[prost(message, tag = "34")]
+        UserCreate(UserSecretRequest),
+        /// Disable a user through the fixed ocpasswd resource.
+        #[prost(message, tag = "35")]
+        UserDisable(UserDisableRequest),
+        /// Rotate a user's write-only password.
+        #[prost(message, tag = "36")]
+        UserPasswordRotate(UserSecretRequest),
+        /// Atomically replace one group membership record.
+        #[prost(message, tag = "37")]
+        GroupApply(GroupApplyRequest),
     }
 }
 
@@ -89,6 +110,71 @@ pub struct IpBanRemoveRequest {
 /// Empty marker for reloading the fixed Ocserv systemd unit.
 #[derive(Clone, Copy, PartialEq, Eq, Message)]
 pub struct ServiceReloadRequest {}
+
+/// User request carrying only ciphertext sealed for the node's root helper.
+#[derive(Clone, PartialEq, Eq, Message)]
+pub struct UserSecretRequest {
+    #[prost(string, tag = "1")]
+    pub username: String,
+    #[prost(bytes = "vec", tag = "2")]
+    pub sealed_password: Vec<u8>,
+    #[prost(string, tag = "3")]
+    pub secret_key_id: String,
+    #[prost(uint64, tag = "4")]
+    pub desired_revision: u64,
+}
+
+/// User disable request with no password material.
+#[derive(Clone, PartialEq, Eq, Message)]
+pub struct UserDisableRequest {
+    #[prost(string, tag = "1")]
+    pub username: String,
+    #[prost(uint64, tag = "2")]
+    pub desired_revision: u64,
+}
+
+/// Canonical group membership replacement.
+#[derive(Clone, PartialEq, Eq, Message)]
+pub struct GroupApplyRequest {
+    #[prost(string, tag = "1")]
+    pub group_name: String,
+    #[prost(string, repeated, tag = "2")]
+    pub members: Vec<String>,
+    #[prost(uint64, tag = "3")]
+    pub desired_revision: u64,
+}
+
+/// Observed user without password material.
+#[derive(Clone, PartialEq, Eq, Message)]
+pub struct ObservedUser {
+    #[prost(string, tag = "1")]
+    pub username: String,
+    #[prost(bool, tag = "2")]
+    pub enabled: bool,
+}
+
+/// Bounded observed user collection.
+#[derive(Clone, PartialEq, Eq, Message)]
+pub struct UserList {
+    #[prost(message, repeated, tag = "1")]
+    pub users: Vec<ObservedUser>,
+}
+
+/// Observed group membership.
+#[derive(Clone, PartialEq, Eq, Message)]
+pub struct ObservedGroup {
+    #[prost(string, tag = "1")]
+    pub group_name: String,
+    #[prost(string, repeated, tag = "2")]
+    pub members: Vec<String>,
+}
+
+/// Bounded observed group collection.
+#[derive(Clone, PartialEq, Eq, Message)]
+pub struct GroupList {
+    #[prost(message, repeated, tag = "1")]
+    pub groups: Vec<ObservedGroup>,
+}
 
 /// Bounded acknowledgement for a fixed mutation.
 #[derive(Clone, PartialEq, Eq, Message)]
@@ -214,7 +300,10 @@ pub struct PrivdResponse {
     #[prost(bytes = "vec", tag = "1")]
     pub request_id: Vec<u8>,
     /// Exactly one stable result or error.
-    #[prost(oneof = "privd_response::Result", tags = "10, 11, 12, 13, 14, 15, 20")]
+    #[prost(
+        oneof = "privd_response::Result",
+        tags = "10, 11, 12, 13, 14, 15, 16, 17, 20"
+    )]
     pub result: Option<privd_response::Result>,
 }
 
@@ -223,8 +312,8 @@ pub mod privd_response {
     use prost::Oneof;
 
     use super::{
-        ConfigFingerprint, IpBanList, MutationResult, OcservVersion, PrivdError, ServiceStatus,
-        SessionList,
+        ConfigFingerprint, GroupList, IpBanList, MutationResult, OcservVersion, PrivdError,
+        ServiceStatus, SessionList, UserList,
     };
 
     /// Result allowlist.
@@ -248,6 +337,12 @@ pub mod privd_response {
         /// Fixed mutation acknowledgement.
         #[prost(message, tag = "15")]
         Mutation(MutationResult),
+        /// Observed users without password material.
+        #[prost(message, tag = "16")]
+        UserList(UserList),
+        /// Observed groups.
+        #[prost(message, tag = "17")]
+        GroupList(GroupList),
         /// Stable failure.
         #[prost(message, tag = "20")]
         Error(PrivdError),

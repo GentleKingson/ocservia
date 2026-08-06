@@ -3,6 +3,7 @@ import type {
   NodeObservedState,
   NodeSession,
   Operation,
+  UserGroupResourceState,
 } from "@ocservia/api-client";
 import { defineStore } from "pinia";
 import { computed, onScopeDispose, ref } from "vue";
@@ -22,6 +23,11 @@ import {
   probeAuthentication,
   workspaceContext,
   workspaceChangedEvent,
+  listNodeUserGroupState,
+  createUser,
+  disableUser,
+  rotateUserPassword,
+  applyGroup,
   type WorkspaceContext,
 } from "../api/client";
 
@@ -40,6 +46,7 @@ export const useFleetStore = defineStore("fleet", () => {
   const selected = ref<NodeObservedState>();
   const sessions = ref<NodeSession[]>([]);
   const ipBans = ref<NodeIpBan[]>([]);
+  const userGroupState = ref<UserGroupResourceState[]>([]);
   const latestOperation = ref<Operation>();
   const operationError = ref("");
   const loading = ref(false);
@@ -195,10 +202,14 @@ export const useFleetStore = defineStore("fleet", () => {
       if (!isLatestSelect()) return;
       const rebuiltIpBans = (await listNodeIpBans(nodeId, controller.signal))
         .items;
+      const rebuiltUserGroupState = (
+        await listNodeUserGroupState(nodeId, controller.signal)
+      ).items;
       if (!isLatestSelect()) return;
       selected.value = node;
       sessions.value = rebuiltSessions;
       ipBans.value = rebuiltIpBans;
+      userGroupState.value = rebuiltUserGroupState;
       unavailable.value = false;
     } catch {
       if (!context) return;
@@ -295,6 +306,55 @@ export const useFleetStore = defineStore("fleet", () => {
     );
   }
 
+  async function createUserAction(
+    name: string,
+    sealedPassword: string,
+    secretKeyId: string,
+    reason: string,
+  ): Promise<void> {
+    await runOperation((node, signal) =>
+      createUser(node.id, name, sealedPassword, secretKeyId, reason, signal),
+    );
+  }
+  async function disableUserAction(
+    username: string,
+    version: number,
+    reason: string,
+  ): Promise<void> {
+    await runOperation((node, signal) =>
+      disableUser(node.id, username, version, reason, signal),
+    );
+  }
+  async function rotatePasswordAction(
+    username: string,
+    version: number,
+    sealedPassword: string,
+    secretKeyId: string,
+    reason: string,
+  ): Promise<void> {
+    await runOperation((node, signal) =>
+      rotateUserPassword(
+        node.id,
+        username,
+        version,
+        sealedPassword,
+        secretKeyId,
+        reason,
+        signal,
+      ),
+    );
+  }
+  async function applyGroupAction(
+    groupName: string,
+    version: number,
+    members: string[],
+    reason: string,
+  ): Promise<void> {
+    await runOperation((node, signal) =>
+      applyGroup(node.id, groupName, version, members, reason, signal),
+    );
+  }
+
   async function connect(): Promise<void> {
     const sequence = ++connectSequence;
     source?.close();
@@ -350,6 +410,7 @@ export const useFleetStore = defineStore("fleet", () => {
     selected.value = undefined;
     sessions.value = [];
     ipBans.value = [];
+    userGroupState.value = [];
     latestOperation.value = undefined;
     operationError.value = "";
     loading.value = false;
@@ -367,6 +428,7 @@ export const useFleetStore = defineStore("fleet", () => {
     selected,
     sessions,
     ipBans,
+    userGroupState,
     latestOperation,
     operationError,
     loading,
@@ -382,5 +444,9 @@ export const useFleetStore = defineStore("fleet", () => {
     terminateSession: terminate,
     removeIpBan: unban,
     reloadService: reload,
+    createUser: createUserAction,
+    disableUser: disableUserAction,
+    rotateUserPassword: rotatePasswordAction,
+    applyGroup: applyGroupAction,
   };
 });

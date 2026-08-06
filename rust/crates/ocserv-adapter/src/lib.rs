@@ -5,18 +5,20 @@
 use std::collections::HashMap;
 use std::io;
 use std::net::IpAddr;
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::Duration;
 
 use ocservia_agent_protocol::{
-    ConfigFingerprint, ErrorKind, IpBan, IpBanList, MutationResult, OcservVersion, PrivdError,
-    ServiceStatus, Session, SessionList,
+    ConfigFingerprint, ErrorKind, GroupList, IpBan, IpBanList, MutationResult, ObservedGroup,
+    ObservedUser, OcservVersion, PrivdError, ServiceStatus, Session, SessionList, UserList,
 };
 use sha2::{Digest, Sha256};
-use tokio::io::{AsyncRead, AsyncReadExt};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 use tokio::process::Command;
 use uuid::Uuid;
+use zeroize::Zeroizing;
 
 const MAX_CONFIG_BYTES: usize = 1024 * 1024;
 const DEFAULT_OUTPUT_BYTES: usize = 256 * 1024;
@@ -29,6 +31,12 @@ pub struct FixedResources {
     occtl: PathBuf,
     config: PathBuf,
     boot_id: PathBuf,
+    ocpasswd: PathBuf,
+    user_file: PathBuf,
+    group_file: PathBuf,
+    openssl: PathBuf,
+    secret_key: PathBuf,
+    secret_key_id: String,
 }
 
 impl Default for FixedResources {
@@ -39,6 +47,12 @@ impl Default for FixedResources {
             occtl: PathBuf::from("/usr/bin/occtl"),
             config: PathBuf::from("/etc/ocserv/ocserv.conf"),
             boot_id: PathBuf::from("/proc/sys/kernel/random/boot_id"),
+            ocpasswd: PathBuf::from("/usr/bin/ocpasswd"),
+            user_file: PathBuf::from("/etc/ocserv/ocpasswd"),
+            group_file: PathBuf::from("/etc/ocserv/groups"),
+            openssl: PathBuf::from("/usr/bin/openssl"),
+            secret_key: PathBuf::from("/etc/ocservia/password-seal-private.pem"),
+            secret_key_id: String::from("default"),
         }
     }
 }
@@ -69,7 +83,39 @@ impl FixedResources {
             occtl,
             config,
             boot_id,
+            ..Self::default()
         })
+    }
+
+    /// Overrides only fixed root-owned user resources at process startup.
+    ///
+    /// # Errors
+    ///
+    /// Rejects non-absolute paths and invalid configured key identifiers.
+    pub fn with_user_resources(
+        mut self,
+        ocpasswd: PathBuf,
+        user_file: PathBuf,
+        group_file: PathBuf,
+        openssl: PathBuf,
+        secret_key: PathBuf,
+        secret_key_id: String,
+    ) -> Result<Self, AdapterError> {
+        for path in [&ocpasswd, &user_file, &group_file, &openssl, &secret_key] {
+            if !path.is_absolute() {
+                return Err(AdapterError::InvalidResource);
+            }
+        }
+        if !valid_key_id(&secret_key_id) {
+            return Err(AdapterError::InvalidResource);
+        }
+        self.ocpasswd = ocpasswd;
+        self.user_file = user_file;
+        self.group_file = group_file;
+        self.openssl = openssl;
+        self.secret_key = secret_key;
+        self.secret_key_id = secret_key_id;
+        Ok(self)
     }
 }
 
@@ -190,6 +236,30 @@ impl Adapter {
         })
     }
 
+    /// Lists fixed ocpasswd identities without returning password hashes.
+    ///
+    /// # Errors
+    ///
+    /// Returns a stable adapter error for unreadable or malformed data.
+    pub async fn user_list(&self) -> Result<UserList, AdapterError> {
+        let bytes = tokio::fs::read(&self.resources.user_file)
+            .await
+            .map_err(AdapterError::Io)?;
+        parse_user_file(&bytes)
+    }
+
+    /// Lists the fixed group file with canonical sorted members.
+    ///
+    /// # Errors
+    ///
+    /// Returns a stable adapter error for unreadable or malformed data.
+    pub async fn group_list(&self) -> Result<GroupList, AdapterError> {
+        let bytes = tokio::fs::read(&self.resources.group_file)
+            .await
+            .map_err(AdapterError::Io)?;
+        parse_group_file(&bytes)
+    }
+
     /// Disconnects exactly one numeric session from the current host boot.
     ///
     /// # Errors
@@ -253,6 +323,135 @@ impl Adapter {
         Ok(MutationResult { applied: true })
     }
 
+    /// Creates or rotates a user password after root-local unsealing.
+    ///
+    /// # Errors
+    ///
+    /// Rejects invalid inputs and propagates bounded fixed-command failures.
+    pub async fn user_secret_apply(
+        &self,
+        username: &str,
+        key_id: &str,
+        sealed_password: &[u8],
+    ) -> Result<MutationResult, AdapterError> {
+        validate_name(username)?;
+        if !valid_key_id(key_id)
+            || key_id != self.resources.secret_key_id
+            || sealed_password.len() < 32
+            || sealed_password.len() > 4096
+        {
+            return Err(AdapterError::InvalidRequest);
+        }
+        let key = self
+            .resources
+            .secret_key
+            .to_str()
+            .ok_or(AdapterError::InvalidResource)?;
+        let output = self
+            .execute_with_input(
+                &self.resources.openssl,
+                &[
+                    "pkeyutl",
+                    "-decrypt",
+                    "-inkey",
+                    key,
+                    "-pkeyopt",
+                    "rsa_padding_mode:oaep",
+                    "-pkeyopt",
+                    "rsa_oaep_md:sha256",
+                ],
+                sealed_password,
+            )
+            .await?;
+        let mut password = Zeroizing::new(output.stdout);
+        if password.is_empty()
+            || password.len() > 1024
+            || password
+                .iter()
+                .any(|byte| matches!(byte, b'\0' | b'\r' | b'\n'))
+        {
+            return Err(AdapterError::MalformedOutput);
+        }
+        let mut input = Zeroizing::new(Vec::with_capacity(password.len() * 2 + 2));
+        input.extend_from_slice(&password);
+        input.push(b'\n');
+        input.extend_from_slice(&password);
+        input.push(b'\n');
+        password.fill(0);
+        let file = self
+            .resources
+            .user_file
+            .to_str()
+            .ok_or(AdapterError::InvalidResource)?;
+        self.execute_with_input(&self.resources.ocpasswd, &["-c", file, username], &input)
+            .await?;
+        Ok(MutationResult { applied: true })
+    }
+
+    /// Disables exactly one validated user in the fixed password file.
+    ///
+    /// # Errors
+    ///
+    /// Rejects invalid names and propagates bounded fixed-command failures.
+    pub async fn user_disable(&self, username: &str) -> Result<MutationResult, AdapterError> {
+        validate_name(username)?;
+        let file = self
+            .resources
+            .user_file
+            .to_str()
+            .ok_or(AdapterError::InvalidResource)?;
+        self.execute(&self.resources.ocpasswd, &["-c", file, "-l", username])
+            .await?;
+        Ok(MutationResult { applied: true })
+    }
+
+    /// Atomically replaces one validated group entry in the fixed group file.
+    ///
+    /// # Errors
+    ///
+    /// Rejects noncanonical inputs and propagates bounded file failures.
+    pub async fn group_apply(
+        &self,
+        group_name: &str,
+        members: &[String],
+    ) -> Result<MutationResult, AdapterError> {
+        validate_name(group_name)?;
+        if members.len() > 4096 {
+            return Err(AdapterError::InvalidRequest);
+        }
+        let mut previous = "";
+        for member in members {
+            validate_name(member)?;
+            if member.as_str() <= previous {
+                return Err(AdapterError::InvalidRequest);
+            }
+            previous = member;
+        }
+        let bytes = match tokio::fs::read(&self.resources.group_file).await {
+            Ok(value) => value,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Vec::new(),
+            Err(error) => return Err(AdapterError::Io(error)),
+        };
+        let current = parse_group_file(&bytes)?;
+        let mut groups: HashMap<String, Vec<String>> = current
+            .groups
+            .into_iter()
+            .map(|group| (group.group_name, group.members))
+            .collect();
+        groups.insert(group_name.to_owned(), members.to_vec());
+        let mut names: Vec<_> = groups.keys().cloned().collect();
+        names.sort();
+        let mut output = Vec::new();
+        for name in names {
+            output.extend_from_slice(name.as_bytes());
+            output.push(b':');
+            output.extend_from_slice(groups[&name].join(",").as_bytes());
+            output.push(b'\n');
+        }
+        atomic_replace(&self.resources.group_file, &output).await?;
+        Ok(MutationResult { applied: true })
+    }
+
     async fn ensure_boot_id(&self, expected: &str) -> Result<(), AdapterError> {
         if Uuid::parse_str(expected).is_err() {
             return Err(AdapterError::InvalidRequest);
@@ -267,15 +466,33 @@ impl Adapter {
     }
 
     async fn execute(&self, program: &Path, args: &[&str]) -> Result<ChildOutput, AdapterError> {
+        self.execute_with_input(program, args, &[]).await
+    }
+
+    async fn execute_with_input(
+        &self,
+        program: &Path,
+        args: &[&str],
+        input: &[u8],
+    ) -> Result<ChildOutput, AdapterError> {
         let mut command = Command::new(program);
         command
             .args(args)
             .process_group(0)
-            .stdin(Stdio::null())
+            .stdin(if input.is_empty() {
+                Stdio::null()
+            } else {
+                Stdio::piped()
+            })
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .kill_on_drop(true);
         let mut child = command.spawn().map_err(AdapterError::Io)?;
+        if !input.is_empty() {
+            let mut stdin = child.stdin.take().ok_or(AdapterError::Unavailable)?;
+            stdin.write_all(input).await.map_err(AdapterError::Io)?;
+            stdin.shutdown().await.map_err(AdapterError::Io)?;
+        }
         let stdout = child.stdout.take().ok_or(AdapterError::Unavailable)?;
         let stderr = child.stderr.take().ok_or(AdapterError::Unavailable)?;
         let stdout_task = tokio::spawn(read_bounded(stdout, self.limits.output_bytes));
@@ -303,6 +520,137 @@ impl Adapter {
             stderr: stderr.bytes,
         })
     }
+}
+
+fn validate_name(value: &str) -> Result<(), AdapterError> {
+    if value.is_empty()
+        || value.len() > 64
+        || !value.bytes().enumerate().all(|(index, byte)| {
+            byte.is_ascii_alphanumeric() || (index > 0 && matches!(byte, b'_' | b'.' | b'-'))
+        })
+    {
+        return Err(AdapterError::InvalidRequest);
+    }
+    Ok(())
+}
+
+fn valid_key_id(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 128
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'.' | b'-'))
+}
+
+/// Parses a bounded ocpasswd file while discarding every hash.
+///
+/// # Errors
+///
+/// Rejects malformed lines, unsafe names, and oversized input.
+pub fn parse_user_file(bytes: &[u8]) -> Result<UserList, AdapterError> {
+    if bytes.len() > MAX_CONFIG_BYTES {
+        return Err(AdapterError::OutputLimit);
+    }
+    let mut users = Vec::new();
+    for line in utf8(bytes)?.lines().filter(|line| !line.is_empty()) {
+        let mut parts = line.split(':');
+        let username = parts.next().ok_or(AdapterError::MalformedOutput)?;
+        let groups = parts.next().ok_or(AdapterError::MalformedOutput)?;
+        let hash = parts.next().ok_or(AdapterError::MalformedOutput)?;
+        if parts.next().is_some() || hash.is_empty() {
+            return Err(AdapterError::MalformedOutput);
+        }
+        validate_name(username).map_err(|_| AdapterError::MalformedOutput)?;
+        for group in groups.split(',').filter(|group| !group.is_empty()) {
+            if matches!(group, "*" | "x") {
+                continue;
+            }
+            validate_name(group).map_err(|_| AdapterError::MalformedOutput)?;
+        }
+        users.push(ObservedUser {
+            username: username.to_owned(),
+            enabled: !hash.starts_with('!'),
+        });
+    }
+    users.sort_by(|left, right| left.username.cmp(&right.username));
+    if users
+        .windows(2)
+        .any(|pair| pair[0].username == pair[1].username)
+    {
+        return Err(AdapterError::MalformedOutput);
+    }
+    Ok(UserList { users })
+}
+
+/// Parses a bounded `group:member,member` file.
+///
+/// # Errors
+///
+/// Rejects malformed lines, unsafe names, duplicates, and oversized input.
+pub fn parse_group_file(bytes: &[u8]) -> Result<GroupList, AdapterError> {
+    if bytes.len() > MAX_CONFIG_BYTES {
+        return Err(AdapterError::OutputLimit);
+    }
+    let mut groups = Vec::new();
+    for line in utf8(bytes)?.lines().filter(|line| !line.is_empty()) {
+        let (name, list) = line.split_once(':').ok_or(AdapterError::MalformedOutput)?;
+        validate_name(name).map_err(|_| AdapterError::MalformedOutput)?;
+        let mut members = if list.is_empty() {
+            Vec::new()
+        } else {
+            list.split(',').map(str::to_owned).collect()
+        };
+        members.sort();
+        members.dedup();
+        for member in &members {
+            validate_name(member).map_err(|_| AdapterError::MalformedOutput)?;
+        }
+        groups.push(ObservedGroup {
+            group_name: name.to_owned(),
+            members,
+        });
+    }
+    groups.sort_by(|left, right| left.group_name.cmp(&right.group_name));
+    if groups
+        .windows(2)
+        .any(|pair| pair[0].group_name == pair[1].group_name)
+    {
+        return Err(AdapterError::MalformedOutput);
+    }
+    Ok(GroupList { groups })
+}
+
+async fn atomic_replace(path: &Path, bytes: &[u8]) -> Result<(), AdapterError> {
+    let parent = path.parent().ok_or(AdapterError::InvalidResource)?;
+    let name = path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .ok_or(AdapterError::InvalidResource)?;
+    let staging = parent.join(format!(".{name}.ocservia-{}", Uuid::now_v7()));
+    let mode = match tokio::fs::metadata(path).await {
+        Ok(metadata) => metadata.permissions().mode() & 0o777,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => 0o660,
+        Err(error) => return Err(AdapterError::Io(error)),
+    };
+    let mut options = tokio::fs::OpenOptions::new();
+    options.write(true).create_new(true).mode(mode);
+    let mut file = options.open(&staging).await.map_err(AdapterError::Io)?;
+    let result = async {
+        file.write_all(bytes).await.map_err(AdapterError::Io)?;
+        file.sync_all().await.map_err(AdapterError::Io)?;
+        tokio::fs::rename(&staging, path)
+            .await
+            .map_err(AdapterError::Io)?;
+        let directory = tokio::fs::File::open(parent)
+            .await
+            .map_err(AdapterError::Io)?;
+        directory.sync_all().await.map_err(AdapterError::Io)
+    }
+    .await;
+    if result.is_err() {
+        let _ = tokio::fs::remove_file(&staging).await;
+    }
+    result
 }
 
 fn kill_process_group(child: &tokio::process::Child) {
@@ -669,6 +1017,99 @@ mod tests {
             assert_eq!(bans.bans[1].seconds_remaining, None);
         }
         assert!(parse_ip_bans(b"[{\"IP\":\"192.0.2.1\"},]").is_err());
+    }
+
+    #[test]
+    fn user_and_group_parsers_drop_hashes_and_reject_unsafe_names() {
+        let users =
+            parse_user_file(b"alice:*:$6$secret-hash\nbob:x:!$6$disabled\n").expect("users");
+        assert_eq!(users.users.len(), 2);
+        assert!(users.users[0].enabled);
+        assert!(!users.users[1].enabled);
+        assert!(!format!("{users:?}").contains("secret-hash"));
+        let groups = parse_group_file(b"staff:bob,alice\n").expect("groups");
+        assert_eq!(groups.groups[0].members, ["alice", "bob"]);
+        assert!(parse_user_file(b"../root:hash\n").is_err());
+        assert!(parse_group_file(b"staff:alice;id\n").is_err());
+    }
+
+    #[tokio::test]
+    async fn group_apply_is_atomic_when_replacement_fails() {
+        let directory = std::env::temp_dir().join(format!("ocservia-group-{}", Uuid::now_v7()));
+        std::fs::create_dir(&directory).expect("directory");
+        let groups = directory.join("groups");
+        std::fs::write(&groups, b"staff:alice\n").expect("initial groups");
+        let resources = FixedResources::default()
+            .with_user_resources(
+                PathBuf::from("/bin/false"),
+                directory.join("users"),
+                groups.clone(),
+                PathBuf::from("/bin/false"),
+                directory.join("key.pem"),
+                String::from("test-key"),
+            )
+            .expect("resources");
+        let adapter = Adapter::new(resources, Limits::default());
+        assert!(
+            adapter
+                .group_apply("staff", &["alice".to_owned(), "bob".to_owned()])
+                .await
+                .is_ok()
+        );
+        assert_eq!(
+            std::fs::read(&groups).expect("updated"),
+            b"staff:alice,bob\n"
+        );
+        assert!(adapter.group_apply("../staff", &[]).await.is_err());
+        assert_eq!(
+            std::fs::read(&groups).expect("unchanged"),
+            b"staff:alice,bob\n"
+        );
+        std::fs::remove_dir_all(directory).expect("cleanup");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    #[ignore = "requires native ocpasswd, OpenSSL, and an isolated test directory"]
+    async fn native_user_and_group_operations() {
+        let root = PathBuf::from(std::env::var("OCSERVIA_I13_NATIVE_ROOT").expect("native root"));
+        let sealed = std::fs::read(root.join("sealed-password.bin")).expect("sealed password");
+        let users = root.join("ocpasswd");
+        let groups = root.join("groups");
+        std::fs::write(&groups, b"staff:alice\n").expect("initial group file");
+        let resources = FixedResources::default()
+            .with_user_resources(
+                PathBuf::from("/usr/bin/ocpasswd"),
+                users,
+                groups.clone(),
+                PathBuf::from("/usr/bin/openssl"),
+                root.join("private.pem"),
+                String::from("i13-native"),
+            )
+            .expect("fixed native resources");
+        let adapter = Adapter::new(resources, Limits::default());
+        adapter
+            .user_secret_apply("alice", "i13-native", &sealed)
+            .await
+            .expect("create native user");
+        let listed = adapter.user_list().await.expect("list native users");
+        assert_eq!(listed.users.len(), 1);
+        assert_eq!(listed.users[0].username, "alice");
+        assert!(listed.users[0].enabled);
+        assert!(!format!("{listed:?}").contains("native-password-sentinel"));
+        adapter
+            .user_disable("alice")
+            .await
+            .expect("disable native user");
+        assert!(!adapter.user_list().await.expect("list disabled").users[0].enabled);
+        adapter
+            .group_apply("staff", &["alice".to_owned(), "bob".to_owned()])
+            .await
+            .expect("apply native group");
+        assert_eq!(
+            std::fs::read(groups).expect("read native groups"),
+            b"staff:alice,bob\n"
+        );
     }
 
     #[test]

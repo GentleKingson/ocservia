@@ -11,18 +11,20 @@ use ocservia_agent::{
     MAX_WRITE_QUEUE, PrivdClient,
 };
 use ocservia_agent_protocol::{
-    ErrorKind, IpBanRemoveRequest, PrivdResponse, ServiceReloadRequest, SessionMutationRequest,
-    privd_request, privd_response,
+    ErrorKind, GroupApplyRequest, IpBanRemoveRequest, PrivdResponse, ServiceReloadRequest,
+    SessionMutationRequest, UserDisableRequest, UserSecretRequest, privd_request, privd_response,
 };
 use ocservia_command_journal::{CommandRecord, CommandState, Journal, TelemetryInsert};
 use ocservia_contracts::decode_strict_command_envelope;
 use ocservia_contracts::generated::ocserv::platform::agent::v1::{
     AgentEvent, AgentEventType, CommandDeliveryMode, CommandEnvelope, CommandResult,
-    CommandResultState, HandshakeResult, IpBanObservation, MetricSample, ObservedSnapshot,
-    SemanticPayloadHashVersion, SessionHandshake, SessionHandshakeResponse, SessionObservation,
-    TelemetryBatch, TelemetryDropCounters, TelemetryPriority, command_envelope,
+    CommandResultState, GroupObservation, HandshakeResult, IpBanObservation, MetricSample,
+    ObservedSnapshot, SemanticPayloadHashVersion, SessionHandshake, SessionHandshakeResponse,
+    SessionObservation, TelemetryBatch, TelemetryDropCounters, TelemetryPriority, UserObservation,
+    command_envelope,
 };
 use prost::Message;
+use sha2::Digest;
 use uuid::Uuid;
 
 const AGENT_ALPN: &[u8] = b"ocserv-platform/agent/1";
@@ -301,6 +303,7 @@ async fn handle_command_stream(
     Ok(())
 }
 
+#[allow(clippy::too_many_lines)]
 async fn execute_external_command(
     session: &mut SessionContext<'_>,
     envelope: &CommandEnvelope,
@@ -352,6 +355,35 @@ async fn execute_external_command(
         }
         Some(command_envelope::Payload::ServiceReload(_)) => {
             privd_request::Operation::ServiceReload(ServiceReloadRequest {})
+        }
+        Some(command_envelope::Payload::UserCreate(payload)) => {
+            privd_request::Operation::UserCreate(UserSecretRequest {
+                username: payload.username.clone(),
+                sealed_password: payload.sealed_password.clone(),
+                secret_key_id: payload.secret_key_id.clone(),
+                desired_revision: payload.desired_revision,
+            })
+        }
+        Some(command_envelope::Payload::UserDisable(payload)) => {
+            privd_request::Operation::UserDisable(UserDisableRequest {
+                username: payload.username.clone(),
+                desired_revision: payload.desired_revision,
+            })
+        }
+        Some(command_envelope::Payload::UserPasswordRotate(payload)) => {
+            privd_request::Operation::UserPasswordRotate(UserSecretRequest {
+                username: payload.username.clone(),
+                sealed_password: payload.sealed_password.clone(),
+                secret_key_id: payload.secret_key_id.clone(),
+                desired_revision: payload.desired_revision,
+            })
+        }
+        Some(command_envelope::Payload::GroupApply(payload)) => {
+            privd_request::Operation::GroupApply(GroupApplyRequest {
+                group_name: payload.group_name.clone(),
+                members: payload.members.clone(),
+                desired_revision: payload.desired_revision,
+            })
         }
         _ => return Err(CommandError::Rejected("capability_rejected")),
     };
@@ -507,6 +539,7 @@ async fn send_telemetry(
     Ok(())
 }
 
+#[allow(clippy::too_many_lines)]
 fn build_telemetry(
     session: &SessionContext<'_>,
     sequence: u64,
@@ -519,6 +552,8 @@ fn build_telemetry(
     let mut version = "unknown".to_owned();
     let mut sessions = Vec::new();
     let mut ip_bans = Vec::new();
+    let mut users = Vec::new();
+    let mut groups = Vec::new();
     let mut fingerprint = serde_json::json!({});
     for observation in observations {
         match &observation.result {
@@ -552,6 +587,48 @@ fn build_telemetry(
                     .map(|ban| IpBanObservation {
                         ip: ban.ip.clone(),
                         seconds_remaining: ban.seconds_remaining,
+                    })
+                    .collect();
+            }
+            Some(privd_response::Result::UserList(value)) => {
+                users = value
+                    .users
+                    .iter()
+                    .map(|user| {
+                        let canonical = format!(
+                            "{{\"name\":\"{}\",\"enabled\":{}}}",
+                            user.username, user.enabled
+                        );
+                        UserObservation {
+                            username: user.username.clone(),
+                            enabled: user.enabled,
+                            revision: 0,
+                            fingerprint_sha256: sha2::Sha256::digest(canonical.as_bytes()).to_vec(),
+                        }
+                    })
+                    .collect();
+            }
+            Some(privd_response::Result::GroupList(value)) => {
+                groups = value
+                    .groups
+                    .iter()
+                    .map(|group| {
+                        let encoded_members = group
+                            .members
+                            .iter()
+                            .map(|member| format!("\"{member}\""))
+                            .collect::<Vec<_>>()
+                            .join(",");
+                        let canonical = format!(
+                            "{{\"name\":\"{}\",\"members\":[{}]}}",
+                            group.group_name, encoded_members
+                        );
+                        GroupObservation {
+                            group_name: group.group_name.clone(),
+                            members: group.members.clone(),
+                            revision: 0,
+                            fingerprint_sha256: sha2::Sha256::digest(canonical.as_bytes()).to_vec(),
+                        }
                     })
                     .collect();
             }
@@ -605,6 +682,8 @@ fn build_telemetry(
         }],
         security_events: Vec::new(),
         ip_bans,
+        users,
+        groups,
     }
 }
 

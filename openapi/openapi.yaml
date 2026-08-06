@@ -579,6 +579,104 @@ paths:
           $ref: "#/components/responses/Problem"
         default:
           $ref: "#/components/responses/Problem"
+  /nodes/{node_id}/user-group-state:
+    get:
+      operationId: listNodeUserGroupState
+      summary: List node-scoped desired and observed users and groups
+      tags: [nodes]
+      parameters:
+        - $ref: "#/components/parameters/NodeId"
+      responses:
+        "200":
+          description: Desired, observed, drift, pending, and latest operation state.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/UserGroupStatePage" }
+        "404": { $ref: "#/components/responses/Problem" }
+        default: { $ref: "#/components/responses/Problem" }
+  /nodes/{node_id}/users:
+    post:
+      operationId: createNodeUser
+      summary: Queue creation of one node-scoped user
+      tags: [operations]
+      parameters:
+        - $ref: "#/components/parameters/NodeId"
+        - $ref: "#/components/parameters/IdempotencyKey"
+        - $ref: "#/components/parameters/DesiredIfMatch"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/UserCreateRequest" }
+      responses:
+        "202": { $ref: "#/components/responses/OperationAccepted" }
+        "400": { $ref: "#/components/responses/Problem" }
+        "404": { $ref: "#/components/responses/Problem" }
+        "409": { $ref: "#/components/responses/Problem" }
+        default: { $ref: "#/components/responses/Problem" }
+  /nodes/{node_id}/users/{username}:disable:
+    post:
+      operationId: disableNodeUser
+      summary: Queue disabling one node-scoped user
+      tags: [operations]
+      parameters:
+        - $ref: "#/components/parameters/NodeId"
+        - $ref: "#/components/parameters/Username"
+        - $ref: "#/components/parameters/IdempotencyKey"
+        - $ref: "#/components/parameters/DesiredIfMatch"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/DesiredMutationRequest" }
+      responses:
+        "202": { $ref: "#/components/responses/OperationAccepted" }
+        "400": { $ref: "#/components/responses/Problem" }
+        "404": { $ref: "#/components/responses/Problem" }
+        "409": { $ref: "#/components/responses/Problem" }
+        default: { $ref: "#/components/responses/Problem" }
+  /nodes/{node_id}/users/{username}:rotate-password:
+    post:
+      operationId: rotateNodeUserPassword
+      summary: Queue write-only password rotation using node-sealed ciphertext
+      tags: [operations]
+      parameters:
+        - $ref: "#/components/parameters/NodeId"
+        - $ref: "#/components/parameters/Username"
+        - $ref: "#/components/parameters/IdempotencyKey"
+        - $ref: "#/components/parameters/DesiredIfMatch"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/PasswordRotateRequest" }
+      responses:
+        "202": { $ref: "#/components/responses/OperationAccepted" }
+        "400": { $ref: "#/components/responses/Problem" }
+        "404": { $ref: "#/components/responses/Problem" }
+        "409": { $ref: "#/components/responses/Problem" }
+        default: { $ref: "#/components/responses/Problem" }
+  /nodes/{node_id}/groups/{group_name}:
+    put:
+      operationId: applyNodeGroup
+      summary: Queue atomic application of one node-scoped group
+      tags: [operations]
+      parameters:
+        - $ref: "#/components/parameters/NodeId"
+        - $ref: "#/components/parameters/GroupName"
+        - $ref: "#/components/parameters/IdempotencyKey"
+        - $ref: "#/components/parameters/DesiredIfMatch"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/GroupApplyRequest" }
+      responses:
+        "202": { $ref: "#/components/responses/OperationAccepted" }
+        "400": { $ref: "#/components/responses/Problem" }
+        "404": { $ref: "#/components/responses/Problem" }
+        "409": { $ref: "#/components/responses/Problem" }
+        default: { $ref: "#/components/responses/Problem" }
   /nodes/{node_id}/synthetic-commands:
     post:
       operationId: createSyntheticCommand
@@ -823,6 +921,23 @@ components:
       schema:
         type: string
         pattern: '^"revision-[1-9][0-9]*"$'
+    DesiredIfMatch:
+      name: If-Match
+      in: header
+      required: false
+      schema:
+        type: string
+        pattern: '^"revision-(0|[1-9][0-9]*)"$'
+    Username:
+      name: username
+      in: path
+      required: true
+      schema: { $ref: "#/components/schemas/OcservName" }
+    GroupName:
+      name: group_name
+      in: path
+      required: true
+      schema: { $ref: "#/components/schemas/OcservName" }
     WorkspaceId:
       name: X-Workspace-ID
       in: header
@@ -903,6 +1018,11 @@ components:
       format: date-time
       description: RFC 3339 timestamp normalized to UTC.
       example: "2026-08-01T16:00:00Z"
+    OcservName:
+      type: string
+      pattern: "^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$"
+      minLength: 1
+      maxLength: 64
     Cursor:
       type: string
       minLength: 1
@@ -996,6 +1116,89 @@ components:
           maximum: 300
           default: 60
       description: expected_version is required unless If-Match supplies the same revision.
+    DesiredMutationRequest:
+      type: object
+      additionalProperties: false
+      required: [reason]
+      properties:
+        reason: { type: string, minLength: 1, maxLength: 512 }
+        expected_version: { type: integer, format: int64, minimum: 0 }
+        ttl_seconds: { type: integer, format: int64, minimum: 1, maximum: 86400, default: 86400 }
+      description: expected_version is required unless If-Match supplies the same desired version.
+    UserCreateRequest:
+      type: object
+      additionalProperties: false
+      required: [name, sealed_password, secret_key_id, reason]
+      properties:
+        name: { $ref: "#/components/schemas/OcservName" }
+        sealed_password:
+          type: string
+          format: byte
+          minLength: 44
+          maxLength: 5464
+          writeOnly: true
+          description: RSA-OAEP-SHA256 ciphertext sealed to the selected node key; plaintext is never accepted.
+        secret_key_id: { type: string, minLength: 1, maxLength: 128, pattern: "^[A-Za-z0-9_.-]+$" }
+        reason: { type: string, minLength: 1, maxLength: 512 }
+        expected_version: { type: integer, format: int64, minimum: 0 }
+        ttl_seconds: { type: integer, format: int64, minimum: 1, maximum: 86400, default: 86400 }
+    PasswordRotateRequest:
+      type: object
+      additionalProperties: false
+      required: [sealed_password, secret_key_id, reason]
+      properties:
+        sealed_password:
+          type: string
+          format: byte
+          minLength: 44
+          maxLength: 5464
+          writeOnly: true
+        secret_key_id: { type: string, minLength: 1, maxLength: 128, pattern: "^[A-Za-z0-9_.-]+$" }
+        reason: { type: string, minLength: 1, maxLength: 512 }
+        expected_version: { type: integer, format: int64, minimum: 1 }
+        ttl_seconds: { type: integer, format: int64, minimum: 1, maximum: 86400, default: 86400 }
+    GroupApplyRequest:
+      type: object
+      additionalProperties: false
+      required: [members, reason]
+      properties:
+        members:
+          type: array
+          maxItems: 4096
+          uniqueItems: true
+          items: { $ref: "#/components/schemas/OcservName" }
+        reason: { type: string, minLength: 1, maxLength: 512 }
+        expected_version: { type: integer, format: int64, minimum: 0 }
+        ttl_seconds: { type: integer, format: int64, minimum: 1, maximum: 86400, default: 86400 }
+    UserGroupResourceState:
+      type: object
+      additionalProperties: false
+      required: [kind, name, convergence]
+      properties:
+        kind: { type: string, enum: [user, group] }
+        name: { $ref: "#/components/schemas/OcservName" }
+        desired_enabled: { type: boolean }
+        observed_enabled: { type: boolean }
+        desired_members: { type: array, items: { $ref: "#/components/schemas/OcservName" }, maxItems: 4096 }
+        observed_members: { type: array, items: { $ref: "#/components/schemas/OcservName" }, maxItems: 4096 }
+        desired_version: { type: integer, format: int64, minimum: 1 }
+        desired_revision: { type: integer, format: int64, minimum: 1 }
+        observed_revision: { type: integer, format: int64, minimum: 0 }
+        desired_fingerprint: { type: string, pattern: "^[0-9a-f]{64}$" }
+        observed_fingerprint: { type: string, pattern: "^[0-9a-f]{64}$" }
+        convergence: { type: string, enum: [converged, pending, offline_pending, drifted] }
+        operation_id: { $ref: "#/components/schemas/UuidV7" }
+        operation_state: { $ref: "#/components/schemas/OperationState" }
+        observed_at: { $ref: "#/components/schemas/UtcDateTime" }
+    UserGroupStatePage:
+      type: object
+      additionalProperties: false
+      required: [items]
+      properties:
+        items:
+          type: array
+          maxItems: 14096
+          items: { $ref: "#/components/schemas/UserGroupResourceState" }
     QueueMetrics:
       type: object
       additionalProperties: false

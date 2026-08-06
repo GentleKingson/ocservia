@@ -185,6 +185,7 @@ fn validate_request(request: &PrivdRequest) -> Result<Duration, PrivdError> {
     Ok(remaining)
 }
 
+#[allow(clippy::too_many_lines)]
 async fn execute(
     operation: Option<privd_request::Operation>,
     adapter: &Adapter,
@@ -231,6 +232,20 @@ async fn execute(
                 .await
                 .map(privd_response::Result::ConfigFingerprint),
         ),
+        privd_request::Operation::UserList(_) => (
+            "user_list",
+            adapter
+                .user_list()
+                .await
+                .map(privd_response::Result::UserList),
+        ),
+        privd_request::Operation::GroupList(_) => (
+            "group_list",
+            adapter
+                .group_list()
+                .await
+                .map(privd_response::Result::GroupList),
+        ),
         privd_request::Operation::SessionDisconnect(request) => (
             "session_disconnect",
             adapter
@@ -256,6 +271,42 @@ async fn execute(
             "service_reload",
             adapter
                 .service_reload()
+                .await
+                .map(privd_response::Result::Mutation),
+        ),
+        privd_request::Operation::UserCreate(request) => (
+            "user_create",
+            adapter
+                .user_secret_apply(
+                    &request.username,
+                    &request.secret_key_id,
+                    &request.sealed_password,
+                )
+                .await
+                .map(privd_response::Result::Mutation),
+        ),
+        privd_request::Operation::UserDisable(request) => (
+            "user_disable",
+            adapter
+                .user_disable(&request.username)
+                .await
+                .map(privd_response::Result::Mutation),
+        ),
+        privd_request::Operation::UserPasswordRotate(request) => (
+            "user_password_rotate",
+            adapter
+                .user_secret_apply(
+                    &request.username,
+                    &request.secret_key_id,
+                    &request.sealed_password,
+                )
+                .await
+                .map(privd_response::Result::Mutation),
+        ),
+        privd_request::Operation::GroupApply(request) => (
+            "group_apply",
+            adapter
+                .group_apply(&request.group_name, &request.members)
                 .await
                 .map(privd_response::Result::Mutation),
         ),

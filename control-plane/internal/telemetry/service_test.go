@@ -2,6 +2,7 @@ package telemetry
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"os"
 	"testing"
@@ -122,8 +123,17 @@ func TestIngestOrderingRollupOfflineAndRecoveryIntegration(t *testing.T) {
 		t.Fatalf("stale telemetry revived node: %#v %v", node, err)
 	}
 	recovered := testBatch(nodeID, 3, now.Add(OfflineAfter+3*time.Second))
+	recovered.IPBans = nil
+	userFingerprint := sha256.Sum256([]byte(`{"name":"alice","enabled":true}`))
+	groupFingerprint := sha256.Sum256([]byte(`{"name":"staff","members":["alice"]}`))
+	recovered.Users = []User{{Username: "alice", Enabled: true, Fingerprint: userFingerprint[:]}}
+	recovered.Groups = []Group{{Name: "staff", Members: []string{"alice"}, Fingerprint: groupFingerprint[:]}}
 	if inserted, err = service.Ingest(ctx, recovered); err != nil || !inserted {
 		t.Fatalf("recovery: %v %v", inserted, err)
+	}
+	var observedUsers, observedGroups int
+	if err := pool.QueryRow(ctx, `SELECT (SELECT count(*) FROM observed_users WHERE node_id=$1),(SELECT count(*) FROM observed_groups WHERE node_id=$1)`, nodeID).Scan(&observedUsers, &observedGroups); err != nil || observedUsers != 1 || observedGroups != 1 {
+		t.Fatalf("user/group observations without IP bans: users=%d groups=%d err=%v", observedUsers, observedGroups, err)
 	}
 	node, err = service.GetNode(ctx, nodeID)
 	if err != nil || node.ConnectionState != "online" {

@@ -265,6 +265,7 @@ func (s *Service) Claim(ctx context.Context, workerID uuid.UUID, limit int, leas
 		SELECT outbox.id, command.id, command.operation_id, command.node_id, outbox.payload, command.traceparent
 		FROM outbox_events AS outbox
 		JOIN commands AS command ON command.id=outbox.command_id
+		JOIN nodes AS node ON node.id=command.node_id AND node.status='active'
 		WHERE outbox.published_at IS NULL AND outbox.available_at<=now()
 		  AND (outbox.locked_until IS NULL OR outbox.locked_until<=now())
 		  AND command.state IN ('queued','unknown') AND command.expires_at>now()

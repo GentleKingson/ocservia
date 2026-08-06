@@ -20,6 +20,7 @@ import (
 	telemetrystore "github.com/GentleKingson/ocservia/control-plane/internal/telemetry"
 	"github.com/GentleKingson/ocservia/control-plane/internal/transportclient"
 	"github.com/GentleKingson/ocservia/control-plane/internal/trustserver"
+	"github.com/GentleKingson/ocservia/control-plane/internal/userstate"
 	"github.com/GentleKingson/ocservia/control-plane/migrations"
 )
 
@@ -153,6 +154,7 @@ func Run(ctx context.Context, cfg config.Config, build BuildInfo, logger *slog.L
 	}
 	server.EnableAuthorization(authService, rbac.New(pool), approvals.New(pool), auditManager)
 	server.EnableOperations(operationService)
+	server.EnableUserState(userstate.New(pool))
 	server.EnableTelemetry(telemetryService)
 	if cfg.ControllerEndpointID != "" {
 		transport, transportErr := transportclient.New(cfg.TransportSocket, cfg.TransportTimeout, cfg.TransportQueue)

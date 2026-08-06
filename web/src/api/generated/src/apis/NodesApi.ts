@@ -63,6 +63,11 @@ import {
   TelemetryPointPageFromJSON,
   TelemetryPointPageToJSON,
 } from "../models/TelemetryPointPage";
+import {
+  type UserGroupStatePage,
+  UserGroupStatePageFromJSON,
+  UserGroupStatePageToJSON,
+} from "../models/UserGroupStatePage";
 
 export interface ApproveNodeRequest {
   nodeId: string;
@@ -89,6 +94,10 @@ export interface ListNodeTelemetryRequest {
   metric: TelemetryMetric;
   resolution?: ListNodeTelemetryResolutionEnum;
   since?: Date;
+}
+
+export interface ListNodeUserGroupStateRequest {
+  nodeId: string;
 }
 
 export interface ListNodesRequest {
@@ -491,6 +500,76 @@ export class NodesApi extends runtime.BaseAPI {
     initOverrides?: RequestInit | runtime.InitOverrideFunction,
   ): Promise<TelemetryPointPage> {
     const response = await this.listNodeTelemetryRaw(
+      requestParameters,
+      initOverrides,
+    );
+    return await response.value();
+  }
+
+  /**
+   * Creates request options for listNodeUserGroupState without sending the request
+   */
+  async listNodeUserGroupStateRequestOpts(
+    requestParameters: ListNodeUserGroupStateRequest,
+  ): Promise<runtime.RequestOpts> {
+    if (requestParameters["nodeId"] == null) {
+      throw new runtime.RequiredError(
+        "nodeId",
+        'Required parameter "nodeId" was null or undefined when calling listNodeUserGroupState().',
+      );
+    }
+
+    const queryParameters: any = {};
+
+    const headerParameters: runtime.HTTPHeaders = {};
+
+    if (this.configuration && this.configuration.accessToken) {
+      const token = this.configuration.accessToken;
+      const tokenString = await token("bearerAuth", []);
+
+      if (tokenString) {
+        headerParameters["Authorization"] = `Bearer ${tokenString}`;
+      }
+    }
+
+    let urlPath = `/nodes/{node_id}/user-group-state`;
+    urlPath = urlPath.replace(
+      "{node_id}",
+      encodeURIComponent(String(requestParameters["nodeId"])),
+    );
+
+    return {
+      path: urlPath,
+      method: "GET",
+      headers: headerParameters,
+      query: queryParameters,
+    };
+  }
+
+  /**
+   * List node-scoped desired and observed users and groups
+   */
+  async listNodeUserGroupStateRaw(
+    requestParameters: ListNodeUserGroupStateRequest,
+    initOverrides?: RequestInit | runtime.InitOverrideFunction,
+  ): Promise<runtime.ApiResponse<UserGroupStatePage>> {
+    const requestOptions =
+      await this.listNodeUserGroupStateRequestOpts(requestParameters);
+    const response = await this.request(requestOptions, initOverrides);
+
+    return new runtime.JSONApiResponse(response, (jsonValue) =>
+      UserGroupStatePageFromJSON(jsonValue),
+    );
+  }
+
+  /**
+   * List node-scoped desired and observed users and groups
+   */
+  async listNodeUserGroupState(
+    requestParameters: ListNodeUserGroupStateRequest,
+    initOverrides?: RequestInit | runtime.InitOverrideFunction,
+  ): Promise<UserGroupStatePage> {
+    const response = await this.listNodeUserGroupStateRaw(
       requestParameters,
       initOverrides,
     );

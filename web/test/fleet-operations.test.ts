@@ -11,6 +11,7 @@ import {
   getNode,
   getOperation,
   listNodeIpBans,
+  listNodeUserGroupState,
   listNodes,
   listNodeSessions,
 } from "../src/api/client";
@@ -22,6 +23,7 @@ vi.mock("../src/api/client", () => ({
   getNode: vi.fn(),
   getOperation: vi.fn(),
   listNodeIpBans: vi.fn(),
+  listNodeUserGroupState: vi.fn(),
   listNodeSessions: vi.fn(),
   listNodes: vi.fn(),
   reloadService: vi.fn(),
@@ -86,11 +88,13 @@ describe("controlled fleet operations", () => {
     vi.mocked(getNode).mockReset();
     vi.mocked(getOperation).mockReset();
     vi.mocked(listNodeIpBans).mockReset();
+    vi.mocked(listNodeUserGroupState).mockReset();
     vi.mocked(listNodes).mockReset();
     vi.mocked(listNodeSessions).mockReset();
     vi.mocked(disconnectSession).mockReset();
     vi.mocked(getNode).mockResolvedValue(node);
     vi.mocked(listNodeIpBans).mockResolvedValue({ items: [] });
+    vi.mocked(listNodeUserGroupState).mockResolvedValue({ items: [] });
     vi.mocked(listNodeSessions).mockResolvedValue({
       items: [],
       page: { hasMore: false },

@@ -668,6 +668,18 @@ pub fn semantic_payload_hash(envelope: &CommandEnvelope) -> Result<[u8; 32], Com
         Some(command_envelope::Payload::ServiceReload(payload)) => {
             ("ocserv.service.reload", payload.encode_to_vec())
         }
+        Some(command_envelope::Payload::UserCreate(payload)) => {
+            ("ocserv.users.write", payload.encode_to_vec())
+        }
+        Some(command_envelope::Payload::UserDisable(payload)) => {
+            ("ocserv.users.write", payload.encode_to_vec())
+        }
+        Some(command_envelope::Payload::UserPasswordRotate(payload)) => {
+            ("ocserv.users.write", payload.encode_to_vec())
+        }
+        Some(command_envelope::Payload::GroupApply(payload)) => {
+            ("ocserv.groups.write", payload.encode_to_vec())
+        }
         _ => return Err(CommandError::Rejected("capability_rejected")),
     };
     let mut hash = Sha256::new();
@@ -727,6 +739,36 @@ pub fn semantic_payload_hash_v1(envelope: &CommandEnvelope) -> Result<[u8; 32], 
             out.extend_from_slice(utf8);
             (113_u32, out)
         }
+        Some(command_envelope::Payload::UserCreate(payload)) => (
+            101_u32,
+            canonical_secret_payload(
+                &payload.username,
+                &payload.secret_key_id,
+                &payload.sealed_password,
+                payload.desired_revision,
+            )?,
+        ),
+        Some(command_envelope::Payload::UserDisable(payload)) => (
+            102_u32,
+            canonical_named_payload(&payload.username, &[], payload.desired_revision)?,
+        ),
+        Some(command_envelope::Payload::UserPasswordRotate(payload)) => (
+            114_u32,
+            canonical_secret_payload(
+                &payload.username,
+                &payload.secret_key_id,
+                &payload.sealed_password,
+                payload.desired_revision,
+            )?,
+        ),
+        Some(command_envelope::Payload::GroupApply(payload)) => (
+            115_u32,
+            canonical_named_payload(
+                &payload.group_name,
+                &payload.members,
+                payload.desired_revision,
+            )?,
+        ),
         _ => return Err(CommandError::Rejected("capability_rejected")),
     };
     let mut hash = Sha256::new();
@@ -782,6 +824,7 @@ fn validate_command(
         return Err(CommandError::Rejected("revision_mismatch"));
     }
     let (capability, result, external) = validate_payload(envelope)?;
+    validate_desired_transition(envelope)?;
     if !context.capabilities.contains(capability) {
         return Err(CommandError::Rejected("capability_rejected"));
     }
@@ -865,8 +908,61 @@ fn validate_payload(
         Some(command_envelope::Payload::ServiceReload(_)) => {
             ("ocserv.service.reload", Vec::new(), true)
         }
+        Some(command_envelope::Payload::UserCreate(payload)) => {
+            validate_name(&payload.username)?;
+            validate_sealed_secret(
+                &payload.secret_key_id,
+                &payload.sealed_password,
+                payload.desired_revision,
+            )?;
+            ("ocserv.users.write", Vec::new(), true)
+        }
+        Some(command_envelope::Payload::UserDisable(payload)) => {
+            validate_name(&payload.username)?;
+            validate_revision(payload.desired_revision)?;
+            ("ocserv.users.write", Vec::new(), true)
+        }
+        Some(command_envelope::Payload::UserPasswordRotate(payload)) => {
+            validate_name(&payload.username)?;
+            validate_sealed_secret(
+                &payload.secret_key_id,
+                &payload.sealed_password,
+                payload.desired_revision,
+            )?;
+            ("ocserv.users.write", Vec::new(), true)
+        }
+        Some(command_envelope::Payload::GroupApply(payload)) => {
+            validate_name(&payload.group_name)?;
+            validate_revision(payload.desired_revision)?;
+            if payload.members.len() > 4096 {
+                return Err(CommandError::Rejected("group_members_invalid"));
+            }
+            let mut previous = None;
+            for member in &payload.members {
+                validate_name(member)?;
+                if previous.is_some_and(|value: &String| value >= member) {
+                    return Err(CommandError::Rejected("group_members_invalid"));
+                }
+                previous = Some(member);
+            }
+            ("ocserv.groups.write", Vec::new(), true)
+        }
         _ => return Err(CommandError::Rejected("capability_rejected")),
     })
+}
+
+fn validate_desired_transition(envelope: &CommandEnvelope) -> Result<(), CommandError> {
+    let desired = match envelope.payload.as_ref() {
+        Some(command_envelope::Payload::UserCreate(value)) => Some(value.desired_revision),
+        Some(command_envelope::Payload::UserDisable(value)) => Some(value.desired_revision),
+        Some(command_envelope::Payload::UserPasswordRotate(value)) => Some(value.desired_revision),
+        Some(command_envelope::Payload::GroupApply(value)) => Some(value.desired_revision),
+        _ => None,
+    };
+    if desired.is_some_and(|revision| revision != envelope.expected_revision.saturating_add(1)) {
+        return Err(CommandError::Rejected("revision_mismatch"));
+    }
+    Ok(())
 }
 
 fn validate_session_payload(session_id: &str, boot_id: &str) -> Result<(), CommandError> {
@@ -880,6 +976,84 @@ fn validate_session_payload(session_id: &str, boot_id: &str) -> Result<(), Comma
         return Err(CommandError::Rejected("boot_id_invalid"));
     }
     Ok(())
+}
+
+fn validate_name(value: &str) -> Result<(), CommandError> {
+    if value.is_empty()
+        || value.len() > 64
+        || !value.as_bytes().iter().enumerate().all(|(index, byte)| {
+            byte.is_ascii_alphanumeric() || (index > 0 && matches!(byte, b'_' | b'.' | b'-'))
+        })
+    {
+        return Err(CommandError::Rejected("name_invalid"));
+    }
+    Ok(())
+}
+
+fn validate_revision(value: u64) -> Result<(), CommandError> {
+    if value == 0 {
+        return Err(CommandError::Rejected("revision_invalid"));
+    }
+    Ok(())
+}
+fn validate_sealed_secret(key_id: &str, secret: &[u8], revision: u64) -> Result<(), CommandError> {
+    validate_revision(revision)?;
+    if key_id.is_empty() || key_id.len() > 128 || secret.len() < 32 || secret.len() > 4096 {
+        return Err(CommandError::Rejected("sealed_secret_invalid"));
+    }
+    Ok(())
+}
+
+fn canonical_named_payload(
+    name: &str,
+    values: &[String],
+    revision: u64,
+) -> Result<Vec<u8>, CommandError> {
+    validate_name(name)?;
+    validate_revision(revision)?;
+    let mut all = Vec::with_capacity(values.len() + 1);
+    all.push(name);
+    for value in values {
+        all.push(value);
+    }
+    let mut out = Vec::new();
+    for value in all {
+        out.extend_from_slice(
+            &u32::try_from(value.len())
+                .map_err(|_| CommandError::Rejected("payload_size_invalid"))?
+                .to_be_bytes(),
+        );
+        out.extend_from_slice(value.as_bytes());
+    }
+    out.extend_from_slice(&0_u32.to_be_bytes());
+    out.extend_from_slice(&revision.to_be_bytes());
+    Ok(out)
+}
+fn canonical_secret_payload(
+    name: &str,
+    key_id: &str,
+    secret: &[u8],
+    revision: u64,
+) -> Result<Vec<u8>, CommandError> {
+    validate_name(name)?;
+    validate_sealed_secret(key_id, secret, revision)?;
+    let mut out = Vec::new();
+    for value in [name, key_id] {
+        out.extend_from_slice(
+            &u32::try_from(value.len())
+                .map_err(|_| CommandError::Rejected("payload_size_invalid"))?
+                .to_be_bytes(),
+        );
+        out.extend_from_slice(value.as_bytes());
+    }
+    out.extend_from_slice(
+        &u32::try_from(secret.len())
+            .map_err(|_| CommandError::Rejected("payload_size_invalid"))?
+            .to_be_bytes(),
+    );
+    out.extend_from_slice(secret);
+    out.extend_from_slice(&revision.to_be_bytes());
+    Ok(out)
 }
 
 fn canonical_session_payload(session_id: &str, boot_id: &str) -> Result<Vec<u8>, CommandError> {
@@ -1029,6 +1203,8 @@ impl PrivdClient {
             privd_request::Operation::SessionList(ReadRequest {}),
             privd_request::Operation::IpBanList(ReadRequest {}),
             privd_request::Operation::ConfigFingerprint(ReadRequest {}),
+            privd_request::Operation::UserList(ReadRequest {}),
+            privd_request::Operation::GroupList(ReadRequest {}),
         ];
         let permits = std::sync::Arc::new(tokio::sync::Semaphore::new(MAX_READ_CONCURRENCY));
         let mut tasks = tokio::task::JoinSet::new();
@@ -1043,7 +1219,7 @@ impl PrivdClient {
                 client.call(operation).await
             });
         }
-        let mut responses = Vec::with_capacity(5);
+        let mut responses = Vec::with_capacity(7);
         while let Some(result) = tasks.join_next().await {
             responses.push(result.map_err(|_| io::Error::other("read task failed"))??);
         }
