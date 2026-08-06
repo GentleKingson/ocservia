@@ -99,6 +99,7 @@ occtl-socket-file = ${NATIVE_ROOT}/occtl.sock
 pid-file = ${NATIVE_ROOT}/ocserv.pid
 server-cert = /etc/ssl/certs/ssl-cert-snakeoil.pem
 server-key = /etc/ssl/private/ssl-cert-snakeoil.key
+tls-priorities = "NORMAL:%SERVER_PRECEDENCE:%COMPAT:-VERS-SSL3.0:-VERS-TLS1.0:-VERS-TLS1.1:-VERS-TLS1.3"
 isolate-workers = false
 max-clients = 4
 max-same-clients = 2
@@ -123,7 +124,7 @@ config-per-group = ${NATIVE_ROOT}/groups/
 EOF
 
 ocserv --test-config -c "${NATIVE_ROOT}/ocserv.conf"
-ocserv -c "${NATIVE_ROOT}/ocserv.conf" -f -d 9 >"${NATIVE_ROOT}/server.log" 2>&1 &
+ocserv -c "${NATIVE_ROOT}/ocserv.conf" -f -d 2 >"${NATIVE_ROOT}/server.log" 2>&1 &
 printf '%s' "$!" >"${NATIVE_ROOT}/launcher.pid"
 for _ in $(seq 1 50); do
   if ss -H -ltn "sport = :${PORT}" | grep -q .; then
