@@ -5,24 +5,47 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # shellcheck source=scripts/env.sh
 source "${ROOT}/scripts/env.sh"
 
-RUN_ID="${RUN_ID:-I03-local-$(date -u +%Y%m%dT%H%M%SZ)}"
+RUN_ID="${RUN_ID:-database-${GITHUB_RUN_ID:-local}-${GITHUB_RUN_ATTEMPT:-1}-${GITHUB_JOB:-job}-$(date -u +%Y%m%dT%H%M%SZ)-$$}"
 PREFIX="$(printf '%s' "${RUN_ID}" | tr '[:upper:]_' '[:lower:]-' | tr -cd 'a-z0-9-')"
-TMP_ROOT="${TMPDIR:-/tmp}/ocservia-${RUN_ID}"
+TMP_BASE="${RUNNER_TEMP:-${TMPDIR:-/tmp}}"
+TMP_ROOT="$(mktemp -d "${TMP_BASE%/}/ocservia-${PREFIX}-XXXXXX")"
 BIN="${TMP_ROOT}/ocserv-control"
+ARTIFACT_DIR="${ARTIFACT_DIR:-}"
+API_PORT_BASE=$((18000 + $(printf '%s' "${RUN_ID}" | cksum | awk '{print $1}') % 10000))
 PIDS=()
 CONTAINERS=()
 
 cleanup() {
-  local exit_code=$?
+  local exit_code=$? cleanup_exit=0 container
+  trap - EXIT INT TERM
+  set +e
+  if [[ -n "${ARTIFACT_DIR}" ]]; then
+    mkdir -p "${ARTIFACT_DIR}" || cleanup_exit=1
+    docker ps -a --filter "name=${PREFIX}" >"${ARTIFACT_DIR}/docker-ps.txt" 2>&1 || true
+    for container in "${CONTAINERS[@]:-}"; do
+      [[ -n "${container}" ]] || continue
+      docker logs "${container}" >"${ARTIFACT_DIR}/postgres-${container}.log" 2>&1 || true
+    done
+    cp -f "${TMP_ROOT}"/*.log "${ARTIFACT_DIR}/" 2>/dev/null || true
+  fi
   for pid in "${PIDS[@]:-}"; do
+    [[ -n "${pid}" ]] || continue
     kill -TERM "${pid}" 2>/dev/null || true
     wait "${pid}" 2>/dev/null || true
   done
   for container in "${CONTAINERS[@]:-}"; do
-    docker rm -f "${container}" >/dev/null 2>&1 || true
+    [[ -n "${container}" ]] || continue
+    docker rm -f "${container}" >/dev/null 2>&1 || cleanup_exit=1
+    if docker inspect "${container}" >/dev/null 2>&1; then
+      echo "database integration left container ${container}" >&2
+      cleanup_exit=1
+    fi
   done
   rm -rf "${TMP_ROOT}"
-  exit "${exit_code}"
+  if ((exit_code != 0)); then
+    exit "${exit_code}"
+  fi
+  exit "${cleanup_exit}"
 }
 trap cleanup EXIT INT TERM
 
@@ -64,6 +87,10 @@ stop_process() {
   local pid=$1
   kill -TERM "${pid}"
   wait "${pid}"
+  local index
+  for index in "${!PIDS[@]}"; do
+    [[ "${PIDS[index]}" == "${pid}" ]] && PIDS[index]=""
+  done
 }
 
 for major in 17 18; do
@@ -76,7 +103,7 @@ for major in 17 18; do
   port="$(docker port "${container}" 5432/tcp | sed -n 's/.*://p')"
   owner_url="postgres://ocservia_owner:test-owner-only@127.0.0.1:${port}/ocservia?sslmode=disable"
   runtime_url="postgres://ocservia_app:test-runtime-only@127.0.0.1:${port}/ocservia?sslmode=disable"
-  api_port=$((18100 + major))
+  api_port=$((API_PORT_BASE + major - 17))
 
   docker exec "${container}" psql -v ON_ERROR_STOP=1 -U ocservia_owner -d ocservia -c \
     "CREATE ROLE ocservia_app LOGIN PASSWORD 'test-runtime-only'" >/dev/null

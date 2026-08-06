@@ -17,6 +17,13 @@ if grep -R -n -E --include='*.rs' \
   exit 1
 fi
 
+if grep -R -n -E --include='*.go' --include='*.rs' \
+  'Command::new\([^)]*(sh|bash)|exec\.Command\([^)]*(sh|bash)|docker\.sock' \
+  "${ROOT}/control-plane" "${ROOT}/rust"; then
+  echo "forbidden generic shell or Docker socket surface found" >&2
+  exit 1
+fi
+
 grep -Fxq 'User=ocserv-agent' "${ROOT}/deploy/systemd/ocservia-agent.service"
 grep -Fxq 'CapabilityBoundingSet=' "${ROOT}/deploy/systemd/ocservia-agent.service"
 grep -Fxq 'CapabilityBoundingSet=CAP_DAC_OVERRIDE' "${ROOT}/deploy/systemd/ocservia-privd.service"

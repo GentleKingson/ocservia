@@ -7,11 +7,17 @@ Direct and Relay path metadata. The harness also injects slow SSE consumption,
 Controller and transport restarts, a temporary PostgreSQL outage, and an
 interrupted operation whose outcome must remain explicit.
 
-Run it on an isolated Linux host with Docker, Compose, `curl`, and `jq`:
+The authoritative profiles run on a standard GitHub-hosted `ubuntu-24.04`
+runner. `P1 Smoke` runs for pull requests and `main` with 24 Agents, two
+500-millisecond heartbeats, eight request submitters, and a 256-item queue. It
+keeps every fault phase and resource-sample assertion while reducing load and
+duration. `P1 Full Validation` is a manual workflow using the defaults below.
+
+For optional local Linux reproduction with Docker, Compose, `curl`, and `jq`:
 
 ```bash
-RUN_ID="I08-$(date -u +%Y%m%dT%H%M%SZ)-$(git rev-parse --short HEAD)"
-RUN_ID="$RUN_ID" ./scripts/p1-resilience-capacity.sh
+make p1-smoke
+make p1-full
 ```
 
 The defaults are 500 Agents, two heartbeats at 30-second intervals, 32 request
@@ -38,3 +44,10 @@ Production-scale, 24-hour, and dedicated Relay A/B validation remain release
 gates. The script labels every Docker resource with its Compose project and
 removes only that project's containers, network, volumes, and locally built
 images on success, failure, or interruption.
+
+Both hosted profiles write under `RUNNER_TEMP` and upload run parameters,
+request and completion metrics, the JSON summary, resource samples, slow-SSE
+output, interrupted-operation state, disk snapshots, Compose logs, container
+status, and the final exit status. A standard runner's disk, CPU, and memory
+bound the result. The full job must fail rather than silently reduce its load if
+that VM cannot complete the configured profile.

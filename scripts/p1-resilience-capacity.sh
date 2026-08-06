@@ -4,7 +4,8 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # shellcheck source=scripts/p1-resilience-capacity-lib.sh
 source "${ROOT}/scripts/p1-resilience-capacity-lib.sh"
-RUN_ID="${RUN_ID:-I08-$(date -u +%Y%m%dT%H%M%SZ)-worktree}"
+RUN_ID="${RUN_ID:-p1-${GITHUB_RUN_ID:-local}-${GITHUB_RUN_ATTEMPT:-1}-${GITHUB_JOB:-job}-$(date -u +%Y%m%dT%H%M%SZ)-$$}"
+P1_PROFILE="${P1_PROFILE:-full}"
 AGENT_COUNT="${AGENT_COUNT:-500}"
 HEARTBEAT_COUNT="${HEARTBEAT_COUNT:-2}"
 HEARTBEAT_INTERVAL_MS="${HEARTBEAT_INTERVAL_MS:-30000}"
@@ -12,7 +13,8 @@ REQUEST_CONCURRENCY="${REQUEST_CONCURRENCY:-32}"
 QUEUE_CAPACITY="${QUEUE_CAPACITY:-2048}"
 PREFIX="$(printf '%s' "${RUN_ID}" | tr '[:upper:]_' '[:lower:]-' | tr -cd 'a-z0-9-')"
 COMPOSE_PROJECT="${COMPOSE_PROJECT:-ocservia-i08-${PREFIX}}"
-TMP_ROOT="${TMPDIR:-/tmp}/ocservia-${RUN_ID}"
+TMP_BASE="${RUNNER_TEMP:-${TMPDIR:-/tmp}}"
+TMP_ROOT="${TMP_BASE%/}/ocservia-${PREFIX}"
 OVERRIDE="${TMP_ROOT}/compose.override.yaml"
 RESULTS="${TMP_ROOT}/operations.tsv"
 RESOURCE_SAMPLES="${TMP_ROOT}/resource-samples.jsonl"
@@ -22,7 +24,10 @@ ARTIFACT_DIR="${ARTIFACT_DIR:-}"
 API_PORT=$((22000 + $(printf '%s' "${RUN_ID}" | cksum | awk '{print $1}') % 20000))
 SAMPLE_PID=""
 SAMPLER_EXIT=0
+# These state variables are read and updated by the sourced sampler helpers.
+# shellcheck disable=SC2034
 SAMPLER_REAPED=0
+# shellcheck disable=SC2034
 SAMPLER_STOP_REQUESTED=0
 TEST_EXIT=1
 TRAP_EXIT=0
@@ -30,6 +35,14 @@ CLEANUP_EXIT=0
 MINIMUM_RESOURCE_SAMPLES="${MINIMUM_RESOURCE_SAMPLES:-10}"
 MINIMUM_SAMPLE_SPAN_SECONDS=0
 
+if [[ ! "${P1_PROFILE}" =~ ^(smoke|full)$ ]]; then
+  echo "P1_PROFILE must be smoke or full" >&2
+  exit 2
+fi
+if [[ -z "${PREFIX}" ]]; then
+  echo "RUN_ID must contain at least one ASCII letter or digit" >&2
+  exit 2
+fi
 if [[ "$(cd "$(dirname "${TMP_ROOT}")" && pwd)/$(basename "${TMP_ROOT}")" == "${ROOT}" ]]; then
   echo "temporary run directory must not equal the source checkout" >&2
   exit 2
@@ -60,7 +73,9 @@ cleanup() {
     CLEANUP_EXIT=1
   fi
   if [[ -n "${ARTIFACT_DIR}" && "${ARTIFACT_DIR}" != "${TMP_ROOT}"* ]]; then
-    "${COMPOSE[@]}" logs --no-color >"${ARTIFACT_DIR}/compose.log" 2>&1 || CLEANUP_EXIT=1
+    df -h >"${ARTIFACT_DIR}/disk-after.txt" 2>&1 || true
+    "${COMPOSE[@]}" ps --all >"${ARTIFACT_DIR}/docker-ps.txt" 2>&1 || true
+    "${COMPOSE[@]}" logs --no-color >"${ARTIFACT_DIR}/docker-compose.log" 2>&1 || true
   fi
   "${COMPOSE[@]}" down --volumes --remove-orphans --rmi local >/dev/null 2>&1 || CLEANUP_EXIT=1
   local leftovers
@@ -76,11 +91,16 @@ cleanup() {
   printf 'test_exit=%s sampler_exit=%s trap_exit=%s cleanup_exit=%s\n' \
     "${TEST_EXIT}" "${SAMPLER_EXIT}" "${TRAP_EXIT}" "${CLEANUP_EXIT}" >"${TMP_ROOT}/exit-status.log"
   if [[ -n "${ARTIFACT_DIR}" && "${ARTIFACT_DIR}" != "${TMP_ROOT}"* ]]; then
-    cp -f "${RESULTS}" "${RESOURCE_SAMPLES}" "${TMP_ROOT}/metrics.txt" "${TMP_ROOT}/summary.json" \
-      "${TMP_ROOT}/slow.sse" "${TMP_ROOT}/interrupted-operation.json" "${TMP_ROOT}/exit-status.log" \
-      "${ARTIFACT_DIR}/" 2>/dev/null || CLEANUP_EXIT=1
+    [[ -f "${RESULTS}" ]] && cp -f "${RESULTS}" "${ARTIFACT_DIR}/operations.tsv"
+    [[ -f "${RESOURCE_SAMPLES}" ]] && cp -f "${RESOURCE_SAMPLES}" "${ARTIFACT_DIR}/p1-resource-samples.jsonl"
+    [[ -f "${TMP_ROOT}/metrics.txt" ]] && cp -f "${TMP_ROOT}/metrics.txt" "${ARTIFACT_DIR}/p1-metrics.txt"
+    [[ -f "${TMP_ROOT}/summary.json" ]] && cp -f "${TMP_ROOT}/summary.json" "${ARTIFACT_DIR}/p1-summary.json"
+    [[ -f "${TMP_ROOT}/slow.sse" ]] && cp -f "${TMP_ROOT}/slow.sse" "${ARTIFACT_DIR}/slow.sse"
+    [[ -f "${TMP_ROOT}/interrupted-operation.json" ]] && cp -f "${TMP_ROOT}/interrupted-operation.json" "${ARTIFACT_DIR}/interrupted-operation.json"
+    [[ -f "${TMP_ROOT}/run-parameters.txt" ]] && cp -f "${TMP_ROOT}/run-parameters.txt" "${ARTIFACT_DIR}/run-parameters.txt"
+    cp -f "${TMP_ROOT}/exit-status.log" "${ARTIFACT_DIR}/p1-exit-status.log" 2>/dev/null || CLEANUP_EXIT=1
     printf 'test_exit=%s sampler_exit=%s trap_exit=%s cleanup_exit=%s\n' \
-      "${TEST_EXIT}" "${SAMPLER_EXIT}" "${TRAP_EXIT}" "${CLEANUP_EXIT}" >"${ARTIFACT_DIR}/exit-status.log" 2>/dev/null || CLEANUP_EXIT=1
+      "${TEST_EXIT}" "${SAMPLER_EXIT}" "${TRAP_EXIT}" "${CLEANUP_EXIT}" >"${ARTIFACT_DIR}/p1-exit-status.log" 2>/dev/null || CLEANUP_EXIT=1
   fi
   rm -rf "${TMP_ROOT}"
   exit "$((TEST_EXIT != 0 || SAMPLER_EXIT != 0 || CLEANUP_EXIT != 0))"
@@ -88,6 +108,15 @@ cleanup() {
 trap cleanup EXIT INT TERM
 
 mkdir -p "${TMP_ROOT}"
+df -h >"${TMP_ROOT}/disk-before.txt"
+printf 'profile=%s\nagent_count=%s\nheartbeat_count=%s\nheartbeat_interval_ms=%s\nrequest_concurrency=%s\nqueue_capacity=%s\nminimum_resource_samples=%s\n' \
+  "${P1_PROFILE}" "${AGENT_COUNT}" "${HEARTBEAT_COUNT}" "${HEARTBEAT_INTERVAL_MS}" \
+  "${REQUEST_CONCURRENCY}" "${QUEUE_CAPACITY}" "${MINIMUM_RESOURCE_SAMPLES}" \
+  >"${TMP_ROOT}/run-parameters.txt"
+if [[ -n "${ARTIFACT_DIR}" && "${ARTIFACT_DIR}" != "${TMP_ROOT}"* ]]; then
+  mkdir -p "${ARTIFACT_DIR}"
+  cp -f "${TMP_ROOT}/disk-before.txt" "${ARTIFACT_DIR}/disk-before.txt"
+fi
 printf '%s\n' \
   'services:' \
   '  transportd-stub:' \
@@ -213,7 +242,7 @@ sample_phase_now() {
   check_sampler
 }
 
-echo "starting ${AGENT_COUNT}-agent I08 load with ${HEARTBEAT_INTERVAL_MS} ms heartbeat cadence"
+echo "starting ${P1_PROFILE} profile: ${AGENT_COUNT} agents, ${HEARTBEAT_COUNT} heartbeats, ${HEARTBEAT_INTERVAL_MS} ms cadence, concurrency ${REQUEST_CONCURRENCY}, queue ${QUEUE_CAPACITY}"
 RUN_STARTED_EPOCH="$(date -u +%s)"
 "${COMPOSE[@]}" up --build -d postgres otel-collector transportd-stub migrate control-plane
 wait_ready
@@ -346,6 +375,9 @@ stop_sampler
 TOTAL_RUN_SECONDS=$(($(date -u +%s) - RUN_STARTED_EPOCH))
 validate_resource_samples "${RESOURCE_SAMPLES}" "${TMP_ROOT}/summary.json" "${MINIMUM_RESOURCE_SAMPLES}" \
   "${MINIMUM_SAMPLE_SPAN_SECONDS}" "${SAMPLER_EXIT}" "${I08_REQUIRED_SAMPLE_PHASES}" "${TOTAL_RUN_SECONDS}"
+jq --arg profile "${P1_PROFILE}" '. + {profile:$profile}' "${TMP_ROOT}/summary.json" \
+  >"${TMP_ROOT}/summary.json.next"
+mv "${TMP_ROOT}/summary.json.next" "${TMP_ROOT}/summary.json"
 printf 'total run seconds: %s\n' "${TOTAL_RUN_SECONDS}" >>"${TMP_ROOT}/metrics.txt"
 cat "${TMP_ROOT}/summary.json"
 TEST_EXIT=0

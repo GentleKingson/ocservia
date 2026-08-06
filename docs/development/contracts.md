@@ -12,6 +12,13 @@ The canonical sources are `openapi/openapi.yaml` and the schemas below
 `proto/`. Generate clients and message types with `make generate`; generated
 directories are replaced on every run and must not be edited manually.
 
-Use `make verify` before opening a pull request. It runs format and lint checks,
-contract compatibility, language tests, generated-output cleanliness, and the
-public repository policy check.
+GitHub Actions on the pinned `ubuntu-24.04` hosted runner is the authoritative
+pull-request validation environment. The workflow bootstraps from
+`toolchains.lock`, verifies downloaded tools against `scripts/checksums.txt`,
+and runs contract compatibility and generated-clean checks from a fresh
+checkout.
+
+Use `make bootstrap` followed by `make verify` to reproduce failures locally
+before opening or updating a pull request. Local success is useful for
+debugging but does not replace the required Actions checks. See
+[github-actions.md](github-actions.md) for the complete job and artifact map.

@@ -1,0 +1,66 @@
+name: P1 full validation
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  p1-full:
+    name: P1 Full Validation
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      COMPOSE_PROJECT: ocservia-p1-full-${{ github.run_id }}-${{ github.run_attempt }}-p1-full
+      P1_PROFILE: full
+      RUN_ID: p1-full-${{ github.run_id }}-${{ github.run_attempt }}-p1-full
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - name: Runner preflight
+        run: scripts/ci-preflight.sh
+      - name: Record runner capacity
+        env:
+          ARTIFACT_DIR: ${{ runner.temp }}/artifacts/p1-full
+        run: |
+          mkdir -p "${ARTIFACT_DIR}"
+          df -h >"${ARTIFACT_DIR}/disk-runner-before.txt"
+          free -h >"${ARTIFACT_DIR}/memory-before.txt"
+          docker system df >"${ARTIFACT_DIR}/docker-storage-before.txt"
+      - name: Harness boundary tests
+        run: scripts/test-p1-resilience-capacity.sh
+      - name: Full single-runner validation
+        env:
+          ARTIFACT_DIR: ${{ runner.temp }}/artifacts/p1-full
+        run: scripts/p1-resilience-capacity.sh
+      - name: Explain evidence scope
+        if: always()
+        env:
+          ARTIFACT_DIR: ${{ runner.temp }}/artifacts/p1-full
+        run: |
+          {
+            echo '## P1 full validation'
+            echo
+            echo 'This run is evidence from one standard GitHub-hosted ubuntu-24.04 VM.'
+            echo 'It is not a production capacity commitment or multi-host failure-domain proof.'
+            if [[ -f "${ARTIFACT_DIR}/run-parameters.txt" ]]; then
+              echo
+              echo '```text'
+              cat "${ARTIFACT_DIR}/run-parameters.txt"
+              echo '```'
+            fi
+          } >>"${GITHUB_STEP_SUMMARY}"
+      - name: Upload full P1 evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: p1-full-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/artifacts/p1-full
+          if-no-files-found: warn
+          retention-days: 30

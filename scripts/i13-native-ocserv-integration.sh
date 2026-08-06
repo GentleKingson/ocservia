@@ -10,21 +10,45 @@ if [[ ! "${RUN_ID}" =~ ^I13-[A-Za-z0-9._-]+$ ]]; then
   echo "RUN_ID is invalid" >&2
   exit 1
 fi
-NATIVE_ROOT="/tmp/ocservia-${RUN_ID}-native"
+PREFIX="$(printf '%s' "${RUN_ID}" | tr '[:upper:]_' '[:lower:]-' | tr -cd 'a-z0-9-')"
+TMP_BASE="${RUNNER_TEMP:-${TMPDIR:-/tmp}}"
+NATIVE_ROOT="${TMP_BASE%/}/ocservia-${PREFIX}-native"
 PORT="${OCSERVIA_I13_OCSERV_PORT:-44443}"
 PASSWORD="native-password-sentinel"
+ARTIFACT_DIR="${ARTIFACT_DIR:-}"
 
 cleanup() {
-  status=$?
+  local status=$? cleanup_status=0
+  trap - EXIT INT TERM
+  set +e
   if [[ "${status}" -ne 0 ]]; then
     [[ -f "${NATIVE_ROOT}/server.log" ]] && sed -n '1,160p' "${NATIVE_ROOT}/server.log" >&2
     [[ -f "${NATIVE_ROOT}/client.log" ]] && sed -n '1,160p' "${NATIVE_ROOT}/client.log" >&2
   fi
+  if [[ -n "${ARTIFACT_DIR}" ]]; then
+    mkdir -p "${ARTIFACT_DIR}" || cleanup_status=1
+    [[ -f "${NATIVE_ROOT}/server.log" ]] && cp -f "${NATIVE_ROOT}/server.log" "${ARTIFACT_DIR}/ocserv.log"
+    [[ -f "${NATIVE_ROOT}/client.log" ]] && cp -f "${NATIVE_ROOT}/client.log" "${ARTIFACT_DIR}/openconnect.log"
+  fi
   if [[ -f "${NATIVE_ROOT}/launcher.pid" ]]; then
     kill "$(<"${NATIVE_ROOT}/launcher.pid")" 2>/dev/null || true
+    wait "$(<"${NATIVE_ROOT}/launcher.pid")" 2>/dev/null || true
+  fi
+  for _ in $(seq 1 50); do
+    if ! ss -H -ltn "sport = :${PORT}" | grep -q .; then
+      break
+    fi
+    sleep 0.1
+  done
+  if ss -H -ltn "sport = :${PORT}" | grep -q .; then
+    echo "native Ocserv integration left port ${PORT} listening" >&2
+    cleanup_status=1
   fi
   rm -rf "${NATIVE_ROOT}"
-  return "${status}"
+  if ((status != 0)); then
+    exit "${status}"
+  fi
+  exit "${cleanup_status}"
 }
 trap cleanup EXIT INT TERM
 

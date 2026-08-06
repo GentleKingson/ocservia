@@ -3,71 +3,454 @@ name: Contracts and toolchains
 on:
   pull_request:
   push:
-    branches: [main]
+    branches:
+      - main
+  workflow_dispatch:
 
 permissions:
   contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
 
 jobs:
   public-policy:
     name: Public Repository Policy
     runs-on: ubuntu-24.04
+    timeout-minutes: 5
     steps:
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           fetch-depth: 0
-      - run: scripts/check-public-repository.sh
-      - run: scripts/test-public-repository-policy.sh
+          persist-credentials: false
+      - name: Runner preflight
+        run: scripts/ci-preflight.sh
+      - name: Repository policy and docs
+        run: |
+          scripts/check-public-repository.sh
+          scripts/test-public-repository-policy.sh
+          scripts/docs-check.sh
+
+  toolchain:
+    name: Toolchain Bootstrap
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - name: Runner preflight
+        run: scripts/ci-preflight.sh
+      - name: Restore verified toolchain downloads
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: |
+            .cache/downloads
+            .cache/npm
+            .tools
+          key: tooling-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'scripts/checksums.txt', 'web/package-lock.json') }}
+      - name: Bootstrap and verify pinned tools
+        run: scripts/bootstrap.sh
 
   contracts:
     name: Contracts
+    needs: toolchain
     runs-on: ubuntu-24.04
+    timeout-minutes: 10
     steps:
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           fetch-depth: 0
-      - run: scripts/bootstrap.sh
-      - run: scripts/generate.sh
-      - run: source scripts/env.sh && cd proto && buf format --diff --exit-code && buf lint
-      - run: source scripts/env.sh && cd web && npx --no-install redocly lint --config ../openapi/.redocly.yaml ../openapi/openapi.yaml
-      - run: scripts/check-breaking.sh
-      - run: scripts/generated-clean.sh
-      - run: scripts/test-generated-clean.sh
+          persist-credentials: false
+      - name: Runner preflight
+        run: scripts/ci-preflight.sh
+      - name: Restore verified toolchain downloads
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: |
+            .cache/downloads
+            .cache/npm
+            .tools
+          key: tooling-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'scripts/checksums.txt', 'web/package-lock.json') }}
+      - name: Bootstrap and verify pinned tools
+        run: scripts/bootstrap.sh
+      - name: Generate contracts
+        run: scripts/generate.sh
+      - name: Lint contract sources
+        run: |
+          source scripts/env.sh
+          (cd proto && buf format --diff --exit-code && buf lint)
+          (cd web && npx --no-install redocly lint --config ../openapi/.redocly.yaml ../openapi/openapi.yaml)
+      - name: Check breaking changes
+        run: scripts/check-breaking.sh
+      - name: Check generated output
+        run: |
+          scripts/generated-clean.sh
+          scripts/test-generated-clean.sh
+      - name: Capture generated-output diagnostics
+        if: always()
+        env:
+          ARTIFACT_DIR: ${{ runner.temp }}/artifacts/contracts
+        run: |
+          mkdir -p "${ARTIFACT_DIR}"
+          git status --short >"${ARTIFACT_DIR}/git-status.txt"
+          git diff --binary >"${ARTIFACT_DIR}/generated-output.diff"
+      - name: Upload contract diagnostics
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: contracts-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/artifacts/contracts
+          if-no-files-found: error
+          retention-days: 14
 
   go:
     name: Go
+    needs: toolchain
     runs-on: ubuntu-24.04
+    timeout-minutes: 15
     steps:
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
-      - run: scripts/bootstrap.sh
-      - run: scripts/go-check.sh
-      - run: scripts/database-integration.sh
-      - run: scripts/local-slice-integration.sh
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - name: Runner preflight
+        run: scripts/ci-preflight.sh
+      - name: Restore verified tools
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: |
+            .cache/downloads
+            .cache/npm
+            .tools
+          key: tooling-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'scripts/checksums.txt', 'web/package-lock.json') }}
+      - name: Restore Go build cache
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: |
+            .cache/go-build
+            .cache/go-mod
+            .cache/gopath
+          key: go-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'control-plane/go.sum') }}
+          restore-keys: |
+            go-${{ runner.os }}-${{ runner.arch }}-
+      - name: Bootstrap and verify pinned tools
+        run: scripts/bootstrap.sh
+      - name: Go checks
+        env:
+          ARTIFACT_DIR: ${{ runner.temp }}/artifacts/go
+        run: |
+          mkdir -p "${ARTIFACT_DIR}"
+          set -o pipefail
+          scripts/go-check.sh 2>&1 | tee "${ARTIFACT_DIR}/go-check.log"
+      - name: Upload Go diagnostics
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: go-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/artifacts/go
+          if-no-files-found: error
+          retention-days: 14
+
+  database-integration:
+    name: Database Integration
+    needs: toolchain
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      RUN_ID: database-${{ github.run_id }}-${{ github.run_attempt }}-database-integration
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - name: Runner preflight
+        run: scripts/ci-preflight.sh
+      - name: Restore verified tools
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: |
+            .cache/downloads
+            .cache/npm
+            .tools
+          key: tooling-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'scripts/checksums.txt', 'web/package-lock.json') }}
+      - name: Restore database Go build cache
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: |
+            .cache/go-build
+            .cache/go-mod
+            .cache/gopath
+          key: database-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'control-plane/go.sum') }}
+      - name: Bootstrap and verify pinned tools
+        run: scripts/bootstrap.sh
+      - name: PostgreSQL 17 and 18 integration
+        env:
+          ARTIFACT_DIR: ${{ runner.temp }}/artifacts/database
+        run: scripts/database-integration.sh
+      - name: Upload database diagnostics
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: database-${{ github.run_id }}-${{ github.run_attempt }}-pg17-pg18
+          path: ${{ runner.temp }}/artifacts/database
+          if-no-files-found: warn
+          retention-days: 14
+
+  local-slice-integration:
+    name: Local Slice Integration
+    needs: toolchain
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      RUN_ID: local-slice-${{ github.run_id }}-${{ github.run_attempt }}-local-slice-integration
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - name: Runner preflight
+        run: scripts/ci-preflight.sh
+      - name: Restore verified tools
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: |
+            .cache/downloads
+            .cache/npm
+            .tools
+          key: tooling-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'scripts/checksums.txt', 'web/package-lock.json') }}
+      - name: Restore local-slice build caches
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: |
+            .cache/go-build
+            .cache/go-mod
+            .cache/gopath
+            rust/target
+          key: local-slice-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'scripts/checksums.txt', 'control-plane/go.sum', 'rust/Cargo.lock', 'web/package-lock.json') }}
+      - name: Bootstrap and verify pinned tools
+        run: scripts/bootstrap.sh
+      - name: Go, PostgreSQL, UDS, and Rust stub integration
+        env:
+          ARTIFACT_DIR: ${{ runner.temp }}/artifacts/local-slice
+        run: scripts/local-slice-integration.sh
+      - name: Upload local-slice diagnostics
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: local-slice-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/artifacts/local-slice
+          if-no-files-found: warn
+          retention-days: 14
 
   rust:
     name: Rust
+    needs: toolchain
     runs-on: ubuntu-24.04
+    timeout-minutes: 20
     steps:
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
-      - run: scripts/bootstrap.sh
-      - run: scripts/rust-check.sh
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - name: Runner preflight
+        run: scripts/ci-preflight.sh
+      - name: Restore verified tools
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: |
+            .cache/downloads
+            .cache/npm
+            .tools
+          key: tooling-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'scripts/checksums.txt', 'web/package-lock.json') }}
+      - name: Restore Rust target cache
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: |
+            rust/target
+          key: rust-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'rust/Cargo.lock') }}
+          restore-keys: |
+            rust-${{ runner.os }}-${{ runner.arch }}-
+      - name: Bootstrap and verify pinned tools
+        run: scripts/bootstrap.sh
+      - name: Rust checks
+        env:
+          ARTIFACT_DIR: ${{ runner.temp }}/artifacts/rust
+        run: |
+          mkdir -p "${ARTIFACT_DIR}"
+          set -o pipefail
+          scripts/rust-check.sh 2>&1 | tee "${ARTIFACT_DIR}/rust-check.log"
+      - name: Upload Rust diagnostics
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: rust-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/artifacts/rust
+          if-no-files-found: error
+          retention-days: 14
+
+  native-ocserv:
+    name: Native Ocserv
+    needs: toolchain
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - name: Runner preflight
+        run: scripts/ci-preflight.sh
+      - name: Restore verified tools
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: |
+            .cache/downloads
+            .cache/npm
+            .tools
+          key: tooling-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'scripts/checksums.txt', 'web/package-lock.json') }}
+      - name: Bootstrap and verify pinned tools
+        run: scripts/bootstrap.sh
+      - name: Install ephemeral native fixtures
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes ocserv openconnect ssl-cert
+      - name: Native ocpasswd, OpenSSL, and Ocserv login
+        env:
+          ARTIFACT_DIR: ${{ runner.temp }}/artifacts/native-ocserv
+        run: |
+          port=$((40000 + GITHUB_RUN_ID % 10000))
+          sudo --preserve-env=RUNNER_TEMP,ARTIFACT_DIR env \
+            RUN_ID="I13-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-native-ocserv" \
+            OCSERVIA_I13_OCSERV_PORT="${port}" \
+            scripts/i13-native-ocserv-integration.sh
+      - name: Upload native Ocserv diagnostics
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: native-ocserv-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/artifacts/native-ocserv
+          if-no-files-found: warn
+          retention-days: 14
 
   web:
     name: Web
+    needs: toolchain
     runs-on: ubuntu-24.04
+    timeout-minutes: 15
     steps:
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
-      - run: scripts/bootstrap.sh
-      - run: scripts/web-check.sh
-      - run: scripts/e2e.sh
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - name: Runner preflight
+        run: scripts/ci-preflight.sh
+      - name: Restore verified tools and npm cache
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: |
+            .cache/downloads
+            .cache/npm
+            .tools
+          key: tooling-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'scripts/checksums.txt', 'web/package-lock.json') }}
+      - name: Bootstrap and verify pinned tools
+        run: scripts/bootstrap.sh
+      - name: Web checks
+        env:
+          ARTIFACT_DIR: ${{ runner.temp }}/artifacts/web
+        run: |
+          mkdir -p "${ARTIFACT_DIR}"
+          set -o pipefail
+          scripts/web-check.sh 2>&1 | tee "${ARTIFACT_DIR}/web-check.log"
+      - name: Upload Web diagnostics
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: web-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/artifacts/web
+          if-no-files-found: error
+          retention-days: 14
+
+  browser-e2e:
+    name: Browser E2E
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      COMPOSE_PROJECT: ocservia-e2e-${{ github.run_id }}-${{ github.run_attempt }}-browser-e2e
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - name: Runner preflight
+        run: scripts/ci-preflight.sh
+      - name: Docker Compose Playwright E2E
+        env:
+          ARTIFACT_DIR: ${{ runner.temp }}/artifacts/browser-e2e
+        run: scripts/e2e.sh
+      - name: Upload Playwright and Compose diagnostics
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: browser-e2e-${{ github.run_id }}-${{ github.run_attempt }}-desktop-mobile
+          path: ${{ runner.temp }}/artifacts/browser-e2e
+          if-no-files-found: warn
+          retention-days: 14
+
+  p1-smoke:
+    name: P1 Smoke
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    env:
+      AGENT_COUNT: 24
+      COMPOSE_PROJECT: ocservia-p1-smoke-${{ github.run_id }}-${{ github.run_attempt }}-p1-smoke
+      HEARTBEAT_COUNT: 2
+      HEARTBEAT_INTERVAL_MS: 500
+      MINIMUM_RESOURCE_SAMPLES: 8
+      P1_PROFILE: smoke
+      QUEUE_CAPACITY: 256
+      REQUEST_CONCURRENCY: 8
+      RUN_ID: p1-smoke-${{ github.run_id }}-${{ github.run_attempt }}-p1-smoke
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - name: Runner preflight
+        run: scripts/ci-preflight.sh
+      - name: Harness boundary tests
+        run: scripts/test-p1-resilience-capacity.sh
+      - name: Hosted-runner smoke profile
+        env:
+          ARTIFACT_DIR: ${{ runner.temp }}/artifacts/p1-smoke
+        run: scripts/p1-resilience-capacity.sh
+      - name: Upload P1 smoke evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: p1-smoke-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/artifacts/p1-smoke
+          if-no-files-found: warn
+          retention-days: 14
 
   security-licenses:
     name: Security and Licenses
+    needs: toolchain
     runs-on: ubuntu-24.04
+    timeout-minutes: 10
     steps:
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           fetch-depth: 0
-      - run: scripts/bootstrap.sh
-      - run: scripts/security-check.sh
-      - run: scripts/license-check.sh
+          persist-credentials: false
+      - name: Runner preflight
+        run: scripts/ci-preflight.sh
+      - name: Restore verified tools
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: |
+            .cache/downloads
+            .cache/npm
+            .tools
+          key: tooling-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'scripts/checksums.txt', 'web/package-lock.json') }}
+      - name: Bootstrap and verify pinned tools
+        run: scripts/bootstrap.sh
+      - name: Security and license checks
+        run: |
+          scripts/agent-boundary-check.sh
+          scripts/transport-boundary-check.sh
+          scripts/security-check.sh
+          scripts/license-check.sh

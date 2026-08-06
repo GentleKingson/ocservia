@@ -46,3 +46,8 @@ Operations. The migration down script intentionally refuses to restore the old
 payload constraint while rows of a new command type remain. Preserve the Agent
 SQLite journal across rollback so duplicate and uncertain outcomes remain
 reconcilable.
+
+The authoritative Actions language jobs cover the focused Go and Rust tests in
+`scripts/i11-session-operations.sh`; the `Security and Licenses` job runs the
+Agent and transport boundary checks. CI does not duplicate the full focused
+script. It remains the local reproduction entry point.

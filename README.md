@@ -34,6 +34,9 @@ in [docs/development/p1-resilience-capacity.md](docs/development/p1-resilience-c
 The typed synthetic command, asynchronous operation, node lease, and
 transactional outbox development workflow is documented in
 [docs/development/operations-outbox.md](docs/development/operations-outbox.md).
+GitHub-hosted validation, job coverage, diagnostic artifacts, and local
+reproduction commands are summarized in
+[docs/development/github-actions.md](docs/development/github-actions.md).
 
 ## Security
 

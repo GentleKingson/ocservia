@@ -5,18 +5,22 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # shellcheck source=scripts/env.sh
 source "${ROOT}/scripts/env.sh"
 
-RUN_ID="${RUN_ID:-I03-local-slice-$(date -u +%Y%m%dT%H%M%SZ)}"
+RUN_ID="${RUN_ID:-local-slice-${GITHUB_RUN_ID:-local}-${GITHUB_RUN_ATTEMPT:-1}-${GITHUB_JOB:-job}-$(date -u +%Y%m%dT%H%M%SZ)-$$}"
 PREFIX="$(printf '%s' "${RUN_ID}" | tr '[:upper:]_' '[:lower:]-' | tr -cd 'a-z0-9-')"
-TMP_ROOT="${TMPDIR:-/tmp}/ocservia-${RUN_ID}"
+TMP_BASE="${RUNNER_TEMP:-${TMPDIR:-/tmp}}"
+TMP_ROOT="$(mktemp -d "${TMP_BASE%/}/ocservia-${PREFIX}-XXXXXX")"
 SOCKET="${TMP_ROOT}/run/transportd.sock"
 TRUST_SOCKET="${TMP_ROOT}/trust/control-plane.sock"
 POSTGRES="${PREFIX}-postgres"
 API_PORT=$((20000 + $(printf '%s' "${RUN_ID}" | cksum | awk '{print $1}') % 20000))
 AUTH_TOKEN="local-slice-integration-token-32-characters"
+ARTIFACT_DIR="${ARTIFACT_DIR:-}"
 PIDS=()
 
 cleanup() {
-  local exit_code=$?
+  local exit_code=$? cleanup_exit=0
+  trap - EXIT INT TERM
+  set +e
   if [[ ${exit_code} -ne 0 ]]; then
     for log in transportd.log control.log; do
       if [[ -f "${TMP_ROOT}/${log}" ]]; then
@@ -26,13 +30,29 @@ cleanup() {
     done
     docker logs "${POSTGRES}" >&2 || true
   fi
+  if [[ -n "${ARTIFACT_DIR}" ]]; then
+    mkdir -p "${ARTIFACT_DIR}" || cleanup_exit=1
+    docker ps -a --filter "name=^/${POSTGRES}$" >"${ARTIFACT_DIR}/docker-ps.txt" 2>&1 || true
+    docker logs "${POSTGRES}" >"${ARTIFACT_DIR}/postgres.log" 2>&1 || true
+    [[ -f "${TMP_ROOT}/control.log" ]] && cp -f "${TMP_ROOT}/control.log" "${ARTIFACT_DIR}/control-plane.log"
+    [[ -f "${TMP_ROOT}/transportd.log" ]] && cp -f "${TMP_ROOT}/transportd.log" "${ARTIFACT_DIR}/transportd.log"
+    cp -f "${TMP_ROOT}"/*.sse "${TMP_ROOT}"/*.headers "${ARTIFACT_DIR}/" 2>/dev/null || true
+  fi
   for pid in "${PIDS[@]:-}"; do
+    [[ -n "${pid}" ]] || continue
     kill -TERM "${pid}" 2>/dev/null || true
     wait "${pid}" 2>/dev/null || true
   done
-  docker rm -f "${POSTGRES}" >/dev/null 2>&1 || true
+  docker rm -f "${POSTGRES}" >/dev/null 2>&1 || cleanup_exit=1
+  if docker inspect "${POSTGRES}" >/dev/null 2>&1; then
+    echo "local-slice integration left container ${POSTGRES}" >&2
+    cleanup_exit=1
+  fi
   rm -rf "${TMP_ROOT}"
-  exit "${exit_code}"
+  if ((exit_code != 0)); then
+    exit "${exit_code}"
+  fi
+  exit "${cleanup_exit}"
 }
 trap cleanup EXIT INT TERM
 
@@ -89,6 +109,10 @@ stop_pid() {
   local pid=$1
   kill -TERM "${pid}" 2>/dev/null || true
   wait "${pid}" 2>/dev/null || true
+  local index
+  for index in "${!PIDS[@]}"; do
+    [[ "${PIDS[index]}" == "${pid}" ]] && PIDS[index]=""
+  done
 }
 
 create_probe() {
