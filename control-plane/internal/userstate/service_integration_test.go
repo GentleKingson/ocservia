@@ -698,6 +698,11 @@ func TestRejectedRevisionSlotRequiresProofThatNoEffectWasAcceptedIntegration(t *
 		if envelope.GetExpectedRevision() != 1 || envelope.GetUserPasswordRotate().GetDesiredRevision() != 2 {
 			t.Fatalf("replacement revisions expected=%d desired=%d", envelope.GetExpectedRevision(), envelope.GetUserPasswordRotate().GetDesiredRevision())
 		}
+		// The runtime test role cannot delete immutable Agent results. Keep the
+		// retained rejected command compatible with migration rollback.
+		if _, err := pool.Exec(context.Background(), `UPDATE commands SET payload_type='synthetic_echo',expected_version=1 WHERE id=$1`, uuid.MustParse(*rotate.CommandID)); err != nil {
+			t.Fatal(err)
+		}
 	})
 
 	t.Run("accepted unknown cannot be retired by a later rejection", func(t *testing.T) {
@@ -715,6 +720,9 @@ func TestRejectedRevisionSlotRequiresProofThatNoEffectWasAcceptedIntegration(t *
 		}
 		if _, _, err := service.Mutate(context.Background(), mutation(nodeID, "unsafe-replacement", UserPasswordRotate, "alice", 2)); !errors.Is(err, ErrRevisionRecovery) {
 			t.Fatalf("ambiguous rejected replacement=%v", err)
+		}
+		if _, err := pool.Exec(context.Background(), `UPDATE commands SET payload_type='synthetic_echo',expected_version=1 WHERE id=$1`, uuid.MustParse(*rotate.CommandID)); err != nil {
+			t.Fatal(err)
 		}
 	})
 }
