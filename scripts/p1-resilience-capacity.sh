@@ -98,7 +98,9 @@ cleanup() {
     [[ -f "${TMP_ROOT}/metrics.txt" ]] && cp -f "${TMP_ROOT}/metrics.txt" "${ARTIFACT_DIR}/p1-metrics.txt"
     [[ -f "${TMP_ROOT}/summary.json" ]] && cp -f "${TMP_ROOT}/summary.json" "${ARTIFACT_DIR}/p1-summary.json"
     [[ -f "${TMP_ROOT}/slow.sse" ]] && cp -f "${TMP_ROOT}/slow.sse" "${ARTIFACT_DIR}/slow.sse"
-    [[ -f "${TMP_ROOT}/interrupted-operation.json" ]] && cp -f "${TMP_ROOT}/interrupted-operation.json" "${ARTIFACT_DIR}/interrupted-operation.json"
+    [[ -f "${TMP_ROOT}/interrupted-operation-initial.json" ]] && cp -f "${TMP_ROOT}/interrupted-operation-initial.json" "${ARTIFACT_DIR}/interrupted-operation-initial.json"
+    [[ -f "${TMP_ROOT}/interrupted-operation-final.json" ]] && cp -f "${TMP_ROOT}/interrupted-operation-final.json" "${ARTIFACT_DIR}/interrupted-operation-final.json"
+    [[ -f "${TMP_ROOT}/interrupted-operation-summary.json" ]] && cp -f "${TMP_ROOT}/interrupted-operation-summary.json" "${ARTIFACT_DIR}/interrupted-operation-summary.json"
     [[ -f "${TMP_ROOT}/run-parameters.txt" ]] && cp -f "${TMP_ROOT}/run-parameters.txt" "${ARTIFACT_DIR}/run-parameters.txt"
     cp -f "${TMP_ROOT}/exit-status.log" "${ARTIFACT_DIR}/p1-exit-status.log" 2>/dev/null || CLEANUP_EXIT=1
     printf 'test_exit=%s sampler_exit=%s trap_exit=%s cleanup_exit=%s\n' \
@@ -340,8 +342,8 @@ wait_succeeded "$((before + 1))"
 echo "controller restart recovery passed"
 
 # A transport restart invalidates the old cursor, then new work must converge.
-create_probe 2 5000 >"${TMP_ROOT}/interrupted-operation.json"
-interrupted_id="$(jq -r .id "${TMP_ROOT}/interrupted-operation.json")"
+create_probe 2 5000 >"${TMP_ROOT}/interrupted-operation-initial.json"
+interrupted_id="$(jq -r .id "${TMP_ROOT}/interrupted-operation-initial.json")"
 for _ in $(seq 1 40); do
   interrupted_state="$(psql_value "SELECT state FROM operations WHERE id='${interrupted_id}'")"
   [[ "${interrupted_state}" == "running" ]] && break
@@ -371,6 +373,12 @@ if ! wait_for_interrupted_operation "${interrupted_id}" 60 0.5 read_interrupted_
 fi
 interrupted_state="$(read_interrupted_state "${interrupted_id}")"
 interrupted_operation_is_final "${interrupted_state}"
+psql_value "SELECT json_build_object('id',operation.id,'state',operation.state,'updated_at',operation.updated_at,'dispatched_at',job.dispatched_at,'attempts',job.attempts,'last_error',job.last_error) FROM operations AS operation JOIN local_slice_jobs AS job ON job.operation_id=operation.id WHERE operation.id='${interrupted_id}'" \
+  >"${TMP_ROOT}/interrupted-operation-final.json"
+write_interrupted_operation_evidence \
+  "${TMP_ROOT}/interrupted-operation-initial.json" \
+  "${TMP_ROOT}/interrupted-operation-final.json" \
+  "${TMP_ROOT}/interrupted-operation-summary.json"
 check_sampler
 echo "transport restart recovery passed; interrupted outcome=${interrupted_state}"
 

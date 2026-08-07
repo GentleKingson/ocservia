@@ -63,6 +63,23 @@ if wait_for_interrupted_operation operation-id 2 0 always_running >/dev/null 2>&
   exit 1
 fi
 
+initial_operation="${temporary}/interrupted-operation-initial.json"
+final_operation="${temporary}/interrupted-operation-final.json"
+operation_summary="${temporary}/interrupted-operation-summary.json"
+jq -n '{id:"operation-id",state:"queued"}' >"${initial_operation}"
+jq -n '{id:"operation-id",state:"unknown",attempts:1}' >"${final_operation}"
+write_interrupted_operation_evidence "${initial_operation}" "${final_operation}" "${operation_summary}"
+jq -e '.state == "queued"' "${initial_operation}" >/dev/null
+jq -e '.state == "unknown"' "${final_operation}" >/dev/null
+jq -e '.operation_id == "operation-id" and .initial_state == "queued" and .final_state == "unknown"' \
+  "${operation_summary}" >/dev/null
+jq -n '{id:"operation-id",state:"running"}' >"${final_operation}"
+if write_interrupted_operation_evidence "${initial_operation}" "${final_operation}" "${operation_summary}" \
+  >/dev/null 2>&1; then
+  echo "non-final interrupted operation evidence was accepted" >&2
+  exit 1
+fi
+
 make_sample() {
   local phase=$1 epoch=$2
   jq -cn --arg phase "${phase}" --arg at "2026-08-04T00:00:${epoch}Z" --argjson epoch "${epoch}" \
