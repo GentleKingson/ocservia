@@ -1975,6 +1975,58 @@ mod tests {
     }
 
     #[test]
+    fn failed_revision_can_be_replaced_without_claiming_it_was_applied() {
+        let path = temporary_journal("failed-revision-replacement");
+        let node = *Uuid::now_v7().as_bytes();
+        let command_context = desired_context(node, 100);
+        let mut executor = CommandExecutor::new(Journal::open(&path).expect("journal"));
+        let mut privd_calls = 0;
+        apply_desired(
+            &mut executor,
+            &desired_command(node, DesiredMutation::Create, "alice", 0, 1, 100),
+            &command_context,
+            101,
+            &mut privd_calls,
+        );
+
+        let failed = desired_command(node, DesiredMutation::Rotate, "alice", 1, 2, 100);
+        let ExternalPreparation::Execute(failed_command) = executor
+            .prepare_external(&failed, &command_context)
+            .expect("prepare failed revision")
+        else {
+            panic!("fresh revision must execute")
+        };
+        executor
+            .complete_external(&failed_command, Err("privd_rejected"), 102)
+            .expect("record deterministic failure");
+        assert_eq!(
+            executor
+                .journal()
+                .applied_revision("user", "alice")
+                .expect("applied revision"),
+            Some(1)
+        );
+
+        let replacement = desired_command(node, DesiredMutation::Rotate, "alice", 1, 2, 100);
+        apply_desired(
+            &mut executor,
+            &replacement,
+            &command_context,
+            103,
+            &mut privd_calls,
+        );
+        assert_eq!(
+            executor
+                .journal()
+                .applied_revision("user", "alice")
+                .expect("replacement revision"),
+            Some(2)
+        );
+        assert_eq!(privd_calls, 2);
+        cleanup_journal(&path);
+    }
+
+    #[test]
     fn sequential_cross_kind_user_mutations_advance_one_resource_revision() {
         let path = temporary_journal("sequential-cross-kind");
         let node = *Uuid::now_v7().as_bytes();

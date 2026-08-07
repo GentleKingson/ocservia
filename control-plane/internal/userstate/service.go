@@ -27,6 +27,8 @@ var (
 	ErrInvalidRequest      = errors.New("user or group request is invalid")
 	ErrCapacityExceeded    = errors.New("managed user or group capacity exceeded")
 	ErrVersionConflict     = errors.New("desired state version is stale")
+	ErrRevisionPending     = errors.New("the current desired revision is still pending")
+	ErrRevisionRecovery    = errors.New("the current desired revision requires same-kind recovery")
 	ErrNotFound            = errors.New("desired resource was not found")
 	ErrNodeUnavailable     = errors.New("node is unavailable")
 	ErrCapabilityMissing   = errors.New("node capability is unavailable")
@@ -134,13 +136,17 @@ func (s *Service) Mutate(ctx context.Context, request MutationRequest) (operatio
 	if currentVersion != request.ExpectedVersion {
 		return operationstore.Operation{}, false, ErrVersionConflict
 	}
+	resourceType := resourceTypeFor(request.Kind)
+	replaceRevision, err := revisionReplacement(ctx, tx, request.NodeID, resourceType, request.Name, request.Kind, currentRevision)
+	if err != nil {
+		return operationstore.Operation{}, false, err
+	}
+	if request.Kind == UserCreate && currentVersion > 0 && !replaceRevision {
+		return operationstore.Operation{}, false, ErrVersionConflict
+	}
 	now := s.now()
 	if err := ensureMutationCapacity(ctx, tx, request, currentVersion == 0, now); err != nil {
 		return operationstore.Operation{}, false, err
-	}
-	resourceType := "user"
-	if request.Kind == GroupApply {
-		resourceType = "group"
 	}
 	coalesced, err := supersedePending(ctx, tx, request.NodeID, resourceType, request.Name, request.Kind, currentRevision, now)
 	if err != nil {
@@ -148,9 +154,9 @@ func (s *Service) Mutate(ctx context.Context, request MutationRequest) (operatio
 	}
 	nextVersion, nextRevision := currentVersion+1, currentRevision+1
 	commandExpectedRevision := currentRevision
-	if coalesced {
-		// Replacing a command that never left the queue must not create a hole in
-		// the Agent's durable resource revision sequence.
+	if coalesced || replaceRevision {
+		// Replacing a command that never applied must not create a hole in the
+		// Agent's durable applied-revision sequence.
 		nextRevision = currentRevision
 		commandExpectedRevision = currentRevision - 1
 	}
@@ -274,10 +280,47 @@ func lockDesired(ctx context.Context, tx pgx.Tx, request MutationRequest) (int64
 	if err != nil {
 		return 0, 0, err
 	}
-	if request.Kind == UserCreate {
-		return 0, 0, ErrVersionConflict
-	}
 	return version, revision, nil
+}
+
+func resourceTypeFor(kind MutationKind) string {
+	if kind == GroupApply {
+		return "group"
+	}
+	return "user"
+}
+
+func revisionReplacement(ctx context.Context, tx pgx.Tx, nodeID uuid.UUID, resourceType, resourceKey string, kind MutationKind, currentRevision int64) (bool, error) {
+	if currentRevision == 0 {
+		return false, nil
+	}
+	var state string
+	var priorKind MutationKind
+	err := tx.QueryRow(ctx, `SELECT state,payload_type FROM commands WHERE node_id=$1 AND resource_type=$2 AND resource_key=$3 AND expected_version=$4 ORDER BY created_at DESC,id DESC LIMIT 1`, nodeID, resourceType, resourceKey, currentRevision-1).Scan(&state, &priorKind)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	switch state {
+	case "succeeded":
+		return false, nil
+	case "failed", "expired", "rolled_back":
+		if priorKind != kind {
+			return false, ErrRevisionRecovery
+		}
+		return true, nil
+	case "queued":
+		if priorKind == kind {
+			return false, nil
+		}
+		return false, ErrRevisionPending
+	case "dispatched", "accepted", "running", "unknown", "superseded":
+		return false, ErrRevisionPending
+	default:
+		return false, ErrRevisionRecovery
+	}
 }
 
 func ensureMutationCapacity(ctx context.Context, tx pgx.Tx, request MutationRequest, creating bool, now time.Time) error {
@@ -311,7 +354,7 @@ func ensureMutationCapacity(ctx context.Context, tx pgx.Tx, request MutationRequ
 func writeDesired(ctx context.Context, tx pgx.Tx, request MutationRequest, version, revision int64, fingerprint []byte, now time.Time) error {
 	switch request.Kind {
 	case UserCreate:
-		_, err := tx.Exec(ctx, `INSERT INTO desired_users(node_id,username,enabled,version,revision,fingerprint,created_at,updated_at) VALUES($1,$2,true,$3,$4,$5,$6,$6)`, request.NodeID, request.Name, version, revision, fingerprint, now)
+		_, err := tx.Exec(ctx, `INSERT INTO desired_users(node_id,username,enabled,version,revision,fingerprint,created_at,updated_at) VALUES($1,$2,true,$3,$4,$5,$6,$6) ON CONFLICT(node_id,username) DO UPDATE SET enabled=true,version=EXCLUDED.version,revision=EXCLUDED.revision,fingerprint=EXCLUDED.fingerprint,updated_at=EXCLUDED.updated_at`, request.NodeID, request.Name, version, revision, fingerprint, now)
 		return err
 	case UserDisable:
 		result, err := tx.Exec(ctx, `UPDATE desired_users SET enabled=false,version=$3,revision=$4,fingerprint=$5,updated_at=$6 WHERE node_id=$1 AND username=$2`, request.NodeID, request.Name, version, revision, fingerprint, now)

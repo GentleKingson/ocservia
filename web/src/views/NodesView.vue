@@ -14,6 +14,7 @@ import {
   UserCheck,
   KeyRound,
   ListPlus,
+  CircleStop,
 } from "@lucide/vue";
 import { computed, onMounted, ref } from "vue";
 
@@ -44,19 +45,7 @@ const usersState = computed(() =>
 const groupsState = computed(() =>
   fleet.userGroupState.filter((item) => item.kind === "group"),
 );
-const operationBusy = computed(() =>
-  fleet.latestOperation
-    ? ![
-        "succeeded",
-        "failed",
-        "unknown",
-        "expired",
-        "rolled_back",
-        "drifted",
-        "superseded",
-      ].includes(fleet.latestOperation.state)
-    : false,
-);
+const operationBusy = computed(() => fleet.operationTracking);
 onMounted(async () => {
   await fleet.rebuild();
   void fleet.connect();
@@ -253,6 +242,19 @@ async function submitDesired(): Promise<void> {
           <strong :class="fleet.latestOperation.state">{{
             $t(`operation_${fleet.latestOperation.state}`)
           }}</strong>
+          <button
+            v-if="
+              fleet.operationTracking &&
+              fleet.latestOperation.state === 'unknown'
+            "
+            type="button"
+            class="icon-command"
+            :title="$t('stopTrackingOperation')"
+            :aria-label="$t('stopTrackingOperation')"
+            @click="fleet.detachOperation"
+          >
+            <CircleStop :size="15" />
+          </button>
         </div>
         <p v-if="fleet.operationError" class="operation-error" role="alert">
           {{ fleet.operationError }}

@@ -169,6 +169,10 @@ func (s *Server) writeUserStateError(w http.ResponseWriter, r *http.Request, err
 		writeProblem(w, r, http.StatusConflict, "https://ocservia.dev/problems/capacity-exceeded", "Capacity is exceeded", "the node cannot accept another managed user, group, or membership")
 	case errors.Is(err, userstate.ErrVersionConflict):
 		writeProblem(w, r, http.StatusConflict, "https://ocservia.dev/problems/stale-revision", "Resource revision is stale", "the desired resource changed after this request was prepared")
+	case errors.Is(err, userstate.ErrRevisionPending):
+		writeProblem(w, r, http.StatusConflict, "https://ocservia.dev/problems/desired-revision-pending", "Desired revision is pending", "wait for the current desired revision to finish before changing this resource")
+	case errors.Is(err, userstate.ErrRevisionRecovery):
+		writeProblem(w, r, http.StatusConflict, "https://ocservia.dev/problems/desired-revision-recovery-required", "Desired revision requires recovery", "replace the failed desired mutation with the same mutation kind before changing another property")
 	case errors.Is(err, userstate.ErrIdempotencyConflict):
 		writeProblem(w, r, http.StatusConflict, "https://ocservia.dev/problems/idempotency-conflict", "Idempotency conflict", "the Idempotency-Key was already used with different input")
 	case errors.Is(err, userstate.ErrCapabilityMissing):

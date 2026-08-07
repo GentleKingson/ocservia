@@ -315,80 +315,32 @@ func TestI13IntentAndTerminalAuditIdentityMatchIntegration(t *testing.T) {
 	}
 }
 
-func TestOfflineSupersedePreservesNonSubstitutableUserCommandsIntegration(t *testing.T) {
+func TestOfflineRevisionSlotBlocksChangesBehindCreateIntegration(t *testing.T) {
 	service, pool, _, nodeID := integrationService(t, "offline")
-	apply := func(key string, kind MutationKind, name string, version int64) {
-		t.Helper()
-		if _, _, err := service.Mutate(context.Background(), mutation(nodeID, key, kind, name, version)); err != nil {
-			t.Fatalf("%s %s: %v", name, kind, err)
-		}
+	created, _, err := service.Mutate(context.Background(), mutation(nodeID, "alice-create", UserCreate, "alice", 0))
+	if err != nil || created.CommandID == nil {
+		t.Fatalf("create=%+v err=%v", created, err)
 	}
-	apply("alice-create", UserCreate, "alice", 0)
-	apply("alice-rotate", UserPasswordRotate, "alice", 1)
-	apply("alice-disable", UserDisable, "alice", 2)
-	apply("alice-rotate-later", UserPasswordRotate, "alice", 3)
-	apply("bob-create", UserCreate, "bob", 0)
-	apply("bob-disable", UserDisable, "bob", 1)
-	apply("bob-rotate", UserPasswordRotate, "bob", 2)
-	apply("carol-create", UserCreate, "carol", 0)
-	apply("carol-disable", UserDisable, "carol", 1)
-	apply("carol-enable", UserEnable, "carol", 2)
-	apply("dave-create", UserCreate, "dave", 0)
-	apply("dave-rotate-1", UserPasswordRotate, "dave", 1)
-	apply("dave-rotate-2", UserPasswordRotate, "dave", 2)
-	groupOne := mutation(nodeID, "staff-1", GroupApply, "staff", 0)
-	groupOne.Members = []string{"alice"}
-	if _, _, err := service.Mutate(context.Background(), groupOne); err != nil {
+	if _, _, err := service.Mutate(context.Background(), mutation(nodeID, "alice-disable", UserDisable, "alice", 1)); !errors.Is(err, ErrRevisionPending) {
+		t.Fatalf("cross-kind mutation behind queued create=%v", err)
+	}
+	if _, _, err := service.Mutate(context.Background(), mutation(nodeID, "alice-create-replacement", UserCreate, "alice", 1)); !errors.Is(err, ErrVersionConflict) {
+		t.Fatalf("queued create replacement=%v", err)
+	}
+	var originalState string
+	var version, revision int64
+	if err := pool.QueryRow(context.Background(), `SELECT state FROM commands WHERE id=$1`, uuid.MustParse(*created.CommandID)).Scan(&originalState); err != nil {
 		t.Fatal(err)
 	}
-	groupTwo := mutation(nodeID, "staff-2", GroupApply, "staff", 1)
-	groupTwo.Members = []string{"alice", "bob"}
-	if _, _, err := service.Mutate(context.Background(), groupTwo); err != nil {
+	if err := pool.QueryRow(context.Background(), `SELECT version,revision FROM desired_users WHERE node_id=$1 AND username='alice'`, nodeID).Scan(&version, &revision); err != nil {
 		t.Fatal(err)
 	}
-
-	assertStates := func(name string, want map[MutationKind]map[string]int) {
-		t.Helper()
-		rows, err := pool.Query(context.Background(), `SELECT payload_type,state,count(*) FROM commands WHERE node_id=$1 AND resource_type='user' AND resource_key=$2 GROUP BY payload_type,state`, nodeID, name)
-		if err != nil {
-			t.Fatal(err)
-		}
-		defer rows.Close()
-		got := map[MutationKind]map[string]int{}
-		for rows.Next() {
-			var kind MutationKind
-			var state string
-			var count int
-			if err := rows.Scan(&kind, &state, &count); err != nil {
-				t.Fatal(err)
-			}
-			if got[kind] == nil {
-				got[kind] = map[string]int{}
-			}
-			got[kind][state] = count
-		}
-		if err := rows.Err(); err != nil {
-			t.Fatal(err)
-		}
-		if !mapsEqual(got, want) {
-			t.Fatalf("%s command states=%v want=%v", name, got, want)
-		}
-	}
-	queued := map[string]int{"queued": 1}
-	assertStates("alice", map[MutationKind]map[string]int{UserCreate: queued, UserPasswordRotate: {"queued": 2}, UserDisable: queued})
-	assertStates("bob", map[MutationKind]map[string]int{UserCreate: queued, UserDisable: queued, UserPasswordRotate: queued})
-	assertStates("carol", map[MutationKind]map[string]int{UserCreate: queued, UserDisable: queued, UserEnable: queued})
-	assertStates("dave", map[MutationKind]map[string]int{UserCreate: queued, UserPasswordRotate: {"queued": 1, "superseded": 1}})
-	var queuedGroups, supersededGroups int
-	if err := pool.QueryRow(context.Background(), `SELECT count(*) FILTER(WHERE state='queued'),count(*) FILTER(WHERE state='superseded') FROM commands WHERE node_id=$1 AND resource_type='group' AND resource_key='staff'`, nodeID).Scan(&queuedGroups, &supersededGroups); err != nil {
-		t.Fatal(err)
-	}
-	if queuedGroups != 1 || supersededGroups != 1 {
-		t.Fatalf("group supersede queued=%d superseded=%d", queuedGroups, supersededGroups)
+	if originalState != "queued" || version != 1 || revision != 1 {
+		t.Fatalf("blocked state=%s desired=%d/%d", originalState, version, revision)
 	}
 }
 
-func TestResourceDispatchWaitsForPriorCrossKindRevisionIntegration(t *testing.T) {
+func TestResourceMutationWaitsForPriorCrossKindRevisionIntegration(t *testing.T) {
 	service, pool, _, nodeID := integrationService(t, "active")
 	created, _, err := service.Mutate(context.Background(), mutation(nodeID, "ordered-create", UserCreate, "alice", 0))
 	if err != nil || created.CommandID == nil {
@@ -404,75 +356,117 @@ func TestResourceDispatchWaitsForPriorCrossKindRevisionIntegration(t *testing.T)
 		t.Fatal(err)
 	}
 
-	for _, request := range []MutationRequest{
-		mutation(nodeID, "ordered-rotate", UserPasswordRotate, "alice", 1),
-		mutation(nodeID, "ordered-disable", UserDisable, "alice", 2),
-		mutation(nodeID, "ordered-enable", UserEnable, "alice", 3),
-	} {
-		if _, _, err := service.Mutate(context.Background(), request); err != nil {
-			t.Fatalf("queue %s: %v", request.Kind, err)
+	rotate, _, err := service.Mutate(context.Background(), mutation(nodeID, "ordered-rotate", UserPasswordRotate, "alice", 1))
+	if err != nil || rotate.CommandID == nil {
+		t.Fatalf("rotate=%+v err=%v", rotate, err)
+	}
+	if _, _, err := service.Mutate(context.Background(), mutation(nodeID, "ordered-disable", UserDisable, "alice", 2)); !errors.Is(err, ErrRevisionPending) {
+		t.Fatalf("disable did not wait for rotate: %v", err)
+	}
+	if _, err := pool.Exec(context.Background(), `UPDATE commands SET state='succeeded' WHERE id=$1`, uuid.MustParse(*rotate.CommandID)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(context.Background(), `UPDATE operations SET state='succeeded',completed_at=now() WHERE id=$1`, uuid.MustParse(rotate.ID)); err != nil {
+		t.Fatal(err)
+	}
+	disable, _, err := service.Mutate(context.Background(), mutation(nodeID, "ordered-disable-after-success", UserDisable, "alice", 2))
+	if err != nil || disable.CommandID == nil {
+		t.Fatalf("disable after rotate=%+v err=%v", disable, err)
+	}
+}
+
+func TestTerminalDesiredRevisionRequiresSameKindReplacementIntegration(t *testing.T) {
+	markTerminal := func(t *testing.T, pool *pgxpool.Pool, operation operationstore.Operation, state string) {
+		t.Helper()
+		if operation.CommandID == nil {
+			t.Fatal("operation has no command")
+		}
+		commandID := uuid.MustParse(*operation.CommandID)
+		if _, err := pool.Exec(context.Background(), `UPDATE commands SET state=$2 WHERE id=$1`, commandID, state); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := pool.Exec(context.Background(), `UPDATE operations SET state=$2,completed_at=now() WHERE id=$1`, uuid.MustParse(operation.ID), state); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := pool.Exec(context.Background(), `UPDATE outbox_events SET published_at=now(),locked_by=NULL,locked_until=NULL WHERE command_id=$1`, commandID); err != nil {
+			t.Fatal(err)
+		}
+	}
+	assertEnvelope := func(t *testing.T, pool *pgxpool.Pool, operation operationstore.Operation, expected, desired uint64) {
+		t.Helper()
+		var encoded []byte
+		if err := pool.QueryRow(context.Background(), `SELECT envelope FROM commands WHERE id=$1`, uuid.MustParse(*operation.CommandID)).Scan(&encoded); err != nil {
+			t.Fatal(err)
+		}
+		var envelope agentv1.CommandEnvelope
+		if err := proto.Unmarshal(encoded, &envelope); err != nil {
+			t.Fatal(err)
+		}
+		if envelope.GetExpectedRevision() != expected {
+			t.Fatalf("expected revision=%d want=%d", envelope.GetExpectedRevision(), expected)
+		}
+		actualDesired := uint64(0)
+		switch payload := envelope.GetPayload().(type) {
+		case *agentv1.CommandEnvelope_UserCreate:
+			actualDesired = payload.UserCreate.GetDesiredRevision()
+		case *agentv1.CommandEnvelope_UserPasswordRotate:
+			actualDesired = payload.UserPasswordRotate.GetDesiredRevision()
+		case *agentv1.CommandEnvelope_GroupApply:
+			actualDesired = payload.GroupApply.GetDesiredRevision()
+		}
+		if actualDesired != desired {
+			t.Fatalf("desired revision=%d want=%d", actualDesired, desired)
 		}
 	}
 
-	dispatcher := operationstore.New(pool)
-	claimKind := func(want MutationKind) operationstore.Dispatch {
-		t.Helper()
-		dispatches, err := dispatcher.Claim(context.Background(), uuid.Must(uuid.NewV7()), 8, time.Second)
+	t.Run("failed create", func(t *testing.T) {
+		service, pool, _, nodeID := integrationService(t, "active")
+		first, _, err := service.Mutate(context.Background(), mutation(nodeID, "failed-create", UserCreate, "alice", 0))
 		if err != nil {
 			t.Fatal(err)
 		}
-		for _, dispatch := range dispatches {
-			if dispatch.NodeID != nodeID {
-				continue
-			}
-			var kind MutationKind
-			if err := pool.QueryRow(context.Background(), `SELECT payload_type FROM commands WHERE id=$1`, dispatch.CommandID).Scan(&kind); err != nil {
-				t.Fatal(err)
-			}
-			if kind != want {
-				t.Fatalf("claimed %s before %s", kind, want)
-			}
-			return dispatch
-		}
-		t.Fatalf("no dispatch for %s", want)
-		return operationstore.Dispatch{}
-	}
-	assertBlocked := func() {
-		t.Helper()
-		dispatches, err := dispatcher.Claim(context.Background(), uuid.Must(uuid.NewV7()), 8, time.Second)
+		markTerminal(t, pool, first, "failed")
+		recovery, _, err := service.Mutate(context.Background(), mutation(nodeID, "create-recovery", UserCreate, "alice", 1))
 		if err != nil {
-			t.Fatal(err)
+			t.Fatalf("create recovery: %v", err)
 		}
-		if slices.ContainsFunc(dispatches, func(dispatch operationstore.Dispatch) bool { return dispatch.NodeID == nodeID }) {
-			t.Fatalf("later resource revision dispatched early: %+v", dispatches)
-		}
-	}
-	complete := func(dispatch operationstore.Dispatch) {
-		t.Helper()
-		if _, err := pool.Exec(context.Background(), `UPDATE commands SET state='succeeded' WHERE id=$1`, dispatch.CommandID); err != nil {
-			t.Fatal(err)
-		}
-		if _, err := pool.Exec(context.Background(), `UPDATE operations SET state='succeeded',completed_at=now() WHERE id=$1`, dispatch.OperationID); err != nil {
-			t.Fatal(err)
-		}
-	}
+		assertEnvelope(t, pool, recovery, 0, 1)
+	})
 
-	rotate := claimKind(UserPasswordRotate)
-	if err := dispatcher.MarkSent(context.Background(), rotate); err != nil {
-		t.Fatal(err)
-	}
-	assertBlocked()
-	complete(rotate)
-	disable := claimKind(UserDisable)
-	if err := dispatcher.MarkSent(context.Background(), disable); err != nil {
-		t.Fatal(err)
-	}
-	assertBlocked()
-	complete(disable)
-	enable := claimKind(UserEnable)
-	if err := dispatcher.MarkSent(context.Background(), enable); err != nil {
-		t.Fatal(err)
-	}
+	t.Run("failed password", func(t *testing.T) {
+		service, pool, _, nodeID := integrationService(t, "active")
+		fingerprint := desiredFingerprint(UserCreate, "alice", nil)
+		if _, err := pool.Exec(context.Background(), `INSERT INTO desired_users(node_id,username,enabled,version,revision,fingerprint,created_at,updated_at)VALUES($1,'alice',true,1,1,$2,now(),now())`, nodeID, fingerprint[:]); err != nil {
+			t.Fatal(err)
+		}
+		rotate, _, err := service.Mutate(context.Background(), mutation(nodeID, "failed-rotate", UserPasswordRotate, "alice", 1))
+		if err != nil {
+			t.Fatal(err)
+		}
+		markTerminal(t, pool, rotate, "failed")
+		if _, _, err := service.Mutate(context.Background(), mutation(nodeID, "disable-after-failed-password", UserDisable, "alice", 2)); !errors.Is(err, ErrRevisionRecovery) {
+			t.Fatalf("cross-kind recovery error=%v", err)
+		}
+		recovery, _, err := service.Mutate(context.Background(), mutation(nodeID, "rotate-recovery", UserPasswordRotate, "alice", 2))
+		if err != nil {
+			t.Fatalf("password recovery: %v", err)
+		}
+		assertEnvelope(t, pool, recovery, 1, 2)
+	})
+
+	t.Run("expired group", func(t *testing.T) {
+		service, pool, _, nodeID := integrationService(t, "offline")
+		first, _, err := service.Mutate(context.Background(), mutation(nodeID, "expired-group", GroupApply, "staff", 0))
+		if err != nil {
+			t.Fatal(err)
+		}
+		markTerminal(t, pool, first, "expired")
+		recovery, _, err := service.Mutate(context.Background(), mutation(nodeID, "group-recovery", GroupApply, "staff", 1))
+		if err != nil {
+			t.Fatalf("group recovery: %v", err)
+		}
+		assertEnvelope(t, pool, recovery, 0, 1)
+	})
 }
 
 func TestSameKindSupersedeCoalescesAgentRevisionIntegration(t *testing.T) {

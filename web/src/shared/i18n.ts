@@ -56,6 +56,7 @@ export const i18n = createI18n({
       reload: "Reload",
       reloadOcserv: "Reload Ocserv",
       latestOperation: "Latest operation",
+      stopTrackingOperation: "Stop tracking this operation",
       ipBans: "IP bans",
       removeBan: "Remove ban",
       noIpBans: "No active IP bans",

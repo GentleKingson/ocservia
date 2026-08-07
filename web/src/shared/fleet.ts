@@ -75,6 +75,8 @@ export const useFleetStore = defineStore("fleet", () => {
   const ipBans = ref<NodeIpBan[]>([]);
   const userGroupState = ref<UserGroupResourceState[]>([]);
   const latestOperation = ref<Operation>();
+  const activeOperation = ref<Operation>();
+  const operationTracking = ref(false);
   const operationError = ref("");
   const loading = ref(false);
   const unavailable = ref(false);
@@ -111,6 +113,8 @@ export const useFleetStore = defineStore("fleet", () => {
     rebuildController = undefined;
     selectController = undefined;
     operationController = undefined;
+    activeOperation.value = undefined;
+    operationTracking.value = false;
     rebuildSequence += 1;
     selectSequence += 1;
     operationSequence += 1;
@@ -204,6 +208,8 @@ export const useFleetStore = defineStore("fleet", () => {
     if (selected.value && selected.value.id !== nodeId) {
       cancelRequest(operationController);
       operationController = undefined;
+      activeOperation.value = undefined;
+      operationTracking.value = false;
       operationSequence += 1;
     }
     cancelRequest(selectController);
@@ -263,16 +269,12 @@ export const useFleetStore = defineStore("fleet", () => {
       signal: AbortSignal,
     ) => Promise<Operation>,
   ): Promise<void> {
-    if (
-      !selected.value ||
-      (latestOperation.value &&
-        !terminalStates.has(latestOperation.value.state))
-    )
-      return;
+    if (!selected.value || operationTracking.value) return;
     cancelRequest(operationController);
     const context = workspaceContext();
     const controller = trackRequest();
     operationController = controller;
+    operationTracking.value = true;
     const sequence = ++operationSequence;
     const selectSequenceAtStart = selectSequence;
     const isLatestOperation = () =>
@@ -285,6 +287,7 @@ export const useFleetStore = defineStore("fleet", () => {
       let currentOperation = await create(node, controller.signal);
       if (!isLatestOperation()) return;
       latestOperation.value = currentOperation;
+      activeOperation.value = currentOperation;
       let recoveryAttempt = 0;
       while (!terminalStates.has(currentOperation.state)) {
         const recovering = currentOperation.state === "unknown";
@@ -299,6 +302,7 @@ export const useFleetStore = defineStore("fleet", () => {
         );
         if (!isLatestOperation()) return;
         latestOperation.value = currentOperation;
+        activeOperation.value = currentOperation;
         recoveryAttempt = recovering ? recoveryAttempt + 1 : 0;
       }
       if (
@@ -315,8 +319,21 @@ export const useFleetStore = defineStore("fleet", () => {
         error instanceof Error ? error.message : "Operation failed";
     } finally {
       releaseRequest(controller);
-      if (operationController === controller) operationController = undefined;
+      if (operationController === controller) {
+        operationController = undefined;
+        activeOperation.value = undefined;
+        operationTracking.value = false;
+      }
     }
+  }
+
+  function detachOperation(): void {
+    if (!operationController) return;
+    cancelRequest(operationController);
+    operationController = undefined;
+    activeOperation.value = undefined;
+    operationTracking.value = false;
+    operationSequence += 1;
   }
 
   async function disconnectSessionAction(
@@ -459,6 +476,8 @@ export const useFleetStore = defineStore("fleet", () => {
     ipBans.value = [];
     userGroupState.value = [];
     latestOperation.value = undefined;
+    activeOperation.value = undefined;
+    operationTracking.value = false;
     operationError.value = "";
     loading.value = false;
     void rebuild().then(() => connect());
@@ -477,6 +496,8 @@ export const useFleetStore = defineStore("fleet", () => {
     ipBans,
     userGroupState,
     latestOperation,
+    activeOperation,
+    operationTracking,
     operationError,
     loading,
     unavailable,
@@ -496,5 +517,6 @@ export const useFleetStore = defineStore("fleet", () => {
     enableUser: enableUserAction,
     rotateUserPassword: rotatePasswordAction,
     applyGroup: applyGroupAction,
+    detachOperation,
   };
 });

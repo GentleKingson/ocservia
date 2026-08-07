@@ -199,18 +199,12 @@ describe("controlled fleet operations", () => {
 
   it("cancels unknown polling when the selected node changes", async () => {
     let pollingSignal: AbortSignal | undefined;
-    vi.mocked(disconnectSession).mockResolvedValue(operation("queued"));
+    vi.mocked(disconnectSession)
+      .mockResolvedValueOnce(operation("queued"))
+      .mockResolvedValueOnce(operation("succeeded"));
     vi.mocked(getOperation).mockImplementation((_operationId, signal) => {
       pollingSignal = signal;
-      return new Promise((_resolve, reject) => {
-        signal?.addEventListener(
-          "abort",
-          () => {
-            reject(new DOMException("aborted", "AbortError"));
-          },
-          { once: true },
-        );
-      });
+      return Promise.resolve(operation("unknown"));
     });
     vi.mocked(getNode).mockImplementation((nodeId) =>
       Promise.resolve(nodeId === nodeB.id ? nodeB : node),
@@ -220,12 +214,42 @@ describe("controlled fleet operations", () => {
 
     const completion = store.disconnectSession(session.id, "support case");
     await vi.advanceTimersByTimeAsync(750);
+    expect(store.latestOperation?.state).toBe("unknown");
     await store.select(nodeB.id);
     await completion;
+    await store.disconnectSession(session.id, "node b support case");
 
     expect(pollingSignal?.aborted).toBe(true);
     expect(store.selected?.id).toBe(nodeB.id);
-    expect(store.latestOperation?.state).toBe("queued");
+    expect(store.latestOperation?.state).toBe("succeeded");
+    expect(disconnectSession).toHaveBeenCalledTimes(2);
+    store.$dispose();
+  });
+
+  it("lets the operator detach a manual unknown and start another operation", async () => {
+    vi.mocked(disconnectSession)
+      .mockResolvedValueOnce(operation("queued"))
+      .mockResolvedValueOnce(operation("succeeded"));
+    vi.mocked(getOperation).mockResolvedValue(operation("unknown"));
+    const store = useFleetStore();
+    await store.select(node.id);
+
+    const unknownCompletion = store.disconnectSession(
+      session.id,
+      "manual reconciliation",
+    );
+    await vi.advanceTimersByTimeAsync(750);
+    expect(store.latestOperation?.state).toBe("unknown");
+    expect(store.operationTracking).toBe(true);
+
+    store.detachOperation();
+    await unknownCompletion;
+    expect(store.operationTracking).toBe(false);
+    expect(store.latestOperation?.state).toBe("unknown");
+
+    await store.disconnectSession(session.id, "unrelated follow-up");
+    expect(disconnectSession).toHaveBeenCalledTimes(2);
+    expect(store.latestOperation?.state).toBe("succeeded");
     store.$dispose();
   });
 

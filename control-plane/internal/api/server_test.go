@@ -74,6 +74,33 @@ func TestUserStateCapacityErrorUsesConflictProblem(t *testing.T) {
 	}
 }
 
+func TestUserStateRevisionSlotErrorsUseConflictProblems(t *testing.T) {
+	tests := []struct {
+		err         error
+		problemType string
+	}{
+		{userstate.ErrRevisionPending, "https://ocservia.dev/problems/desired-revision-pending"},
+		{userstate.ErrRevisionRecovery, "https://ocservia.dev/problems/desired-revision-recovery-required"},
+	}
+	server := &Server{logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
+	for _, test := range tests {
+		response := httptest.NewRecorder()
+		server.writeUserStateError(response, httptest.NewRequest(http.MethodPost, "/api/v1/nodes/node/users", nil), test.err)
+		if response.Code != http.StatusConflict {
+			t.Fatalf("%s status = %d", test.problemType, response.Code)
+		}
+		var problem struct {
+			Type string `json:"type"`
+		}
+		if err := json.Unmarshal(response.Body.Bytes(), &problem); err != nil {
+			t.Fatal(err)
+		}
+		if problem.Type != test.problemType {
+			t.Fatalf("problem type = %q want %q", problem.Type, test.problemType)
+		}
+	}
+}
+
 func TestEnrollmentWritesRequireAuthenticatedPrincipal(t *testing.T) {
 	server := New("127.0.0.1:0", nil, BuildInfo{}, slog.New(slog.NewTextHandler(io.Discard, nil)), 1024, time.Second, false, "", 1)
 	for _, path := range []string{
