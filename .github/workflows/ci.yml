@@ -50,9 +50,9 @@ jobs:
             .cache/downloads
             .cache/npm
             .tools
-          key: tooling-static-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'scripts/checksums.txt', 'web/package-lock.json') }}
+          key: tooling-contracts-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'scripts/checksums.txt', 'web/package-lock.json') }}
       - name: Bootstrap and verify pinned tools
-        run: scripts/bootstrap.sh static
+        run: scripts/bootstrap.sh contracts
       - name: Generate contracts
         run: scripts/generate.sh
       - name: Lint contract sources
@@ -157,7 +157,7 @@ jobs:
             .cache/downloads
             .cache/npm
             .tools
-          key: tooling-rust-native-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'scripts/checksums.txt', 'web/package-lock.json') }}
+          key: tooling-rust-validation-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'scripts/checksums.txt', 'web/package-lock.json') }}
       - name: Restore Rust target cache
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
@@ -166,7 +166,7 @@ jobs:
           restore-keys: |
             rust-${{ runner.os }}-${{ runner.arch }}-
       - name: Bootstrap and verify pinned tools
-        run: scripts/bootstrap.sh rust-native
+        run: scripts/bootstrap.sh rust-validation
       - name: Rust checks
         env:
           ARTIFACT_DIR: ${{ runner.temp }}/artifacts/rust
@@ -241,9 +241,9 @@ jobs:
             .cache/downloads
             .cache/npm
             .tools
-          key: tooling-rust-native-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'scripts/checksums.txt', 'web/package-lock.json') }}
+          key: tooling-native-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'scripts/checksums.txt', 'web/package-lock.json') }}
       - name: Bootstrap and verify pinned tools
-        run: scripts/bootstrap.sh rust-native
+        run: scripts/bootstrap.sh native
       - name: Install ephemeral native fixtures
         run: |
           sudo apt-get update
@@ -319,9 +319,9 @@ jobs:
             .cache/downloads
             .cache/npm
             .tools
-          key: tooling-all-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'scripts/checksums.txt', 'web/package-lock.json') }}
+          key: tooling-security-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'scripts/checksums.txt', 'web/package-lock.json') }}
       - name: Bootstrap and verify pinned tools
-        run: scripts/bootstrap.sh all
+        run: scripts/bootstrap.sh security
       - name: Security and license checks
         run: |
           scripts/agent-boundary-check.sh

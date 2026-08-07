@@ -8,12 +8,12 @@ CHECKSUMS="${ROOT}/scripts/checksums.txt"
 PROFILE="${1:-all}"
 
 if (($# > 1)); then
-  echo "usage: $0 [all|static|go-integration|rust-native|web]" >&2
+  echo "usage: $0 [all|contracts|go-integration|rust-validation|native|web|security]" >&2
   exit 2
 fi
 
 case "${PROFILE}" in
-  all | static | go-integration | rust-native | web) ;;
+  all | contracts | go-integration | rust-validation | native | web | security) ;;
   *)
     echo "unsupported bootstrap profile: ${PROFILE}" >&2
     exit 2
@@ -271,9 +271,7 @@ install_cargo_deny() {
 
 install_contract_tools() {
   install_buf
-  install_protoc
   install_openapi_generator
-  install_gitleaks
   install_oasdiff
 }
 
@@ -317,6 +315,8 @@ case "${PROFILE}" in
     install_npm
     install_rust
     install_contract_tools
+    install_protoc
+    install_gitleaks
     install_go_quality_tools
     install_rust_quality_tools
     verify_java
@@ -324,12 +324,9 @@ case "${PROFILE}" in
     verify_host_command shellcheck
     install_web_dependencies
     ;;
-  static)
-    install_go
+  contracts)
     install_node
     install_npm
-    # Boundary checks inspect Rust dependency trees but do not compile them.
-    install_rust
     install_contract_tools
     verify_java
     install_web_dependencies
@@ -340,13 +337,25 @@ case "${PROFILE}" in
     install_go_quality_tools
     verify_host_command jq
     ;;
-  rust-native)
+  rust-validation)
     install_rust
     install_rust_quality_tools
+    ;;
+  native)
+    install_rust
     ;;
   web)
     install_node
     install_npm
+    install_web_dependencies
+    ;;
+  security)
+    install_go
+    install_node
+    install_npm
+    install_rust
+    install_gitleaks
+    install_cargo_deny
     install_web_dependencies
     ;;
 esac
