@@ -1,5 +1,6 @@
 import {
   Configuration,
+  ConfigurationApi,
   DevelopmentApi,
   EventsApi,
   NodesApi,
@@ -18,6 +19,8 @@ import {
   type UserPolicyRequest,
   type SimulationScenario,
   type Workspace,
+  type ConfigPlan,
+  type ConfigPlanRequest,
 } from "@ocservia/api-client";
 
 const devAuthToken = import.meta.env.VITE_DEV_AUTH_TOKEN;
@@ -66,6 +69,7 @@ const platform = new PlatformApi(configuration);
 const development = new DevelopmentApi(configuration);
 const events = new EventsApi(configuration);
 const nodes = new NodesApi(configuration);
+const configPlans = new ConfigurationApi(configuration);
 let selectedWorkspace: Workspace | undefined;
 let authorizedWorkspaces: Workspace[] | undefined;
 let workspaceRequest: Promise<Workspace[]> | undefined;
@@ -79,6 +83,24 @@ export interface WorkspaceContext {
 
 export function workspaceContext(): WorkspaceContext {
   return { id: selectedWorkspace?.id, generation: workspaceGeneration };
+}
+
+export async function createConfigPlan(
+  nodeId: string,
+  request: ConfigPlanRequest,
+  signal?: AbortSignal,
+): Promise<ConfigPlan> {
+  return configPlans.createConfigPlan(
+    { nodeId, idempotencyKey: newIdempotencyKey(), configPlanRequest: request },
+    requestInit(signal),
+  );
+}
+
+export async function getConfigPlan(
+  planId: string,
+  signal?: AbortSignal,
+): Promise<ConfigPlan> {
+  return configPlans.getConfigPlan({ planId }, requestInit(signal));
 }
 
 function setSelectedWorkspace(workspace: Workspace | undefined): void {

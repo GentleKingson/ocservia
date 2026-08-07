@@ -37,9 +37,9 @@ var roleActions = map[string][]string{
 	"Viewer":        {"node.read", "operation.read"},
 	"Operator":      {"node.read", "operation.read", "operation.create", "session.disconnect", "session.terminate", "ip_ban.remove", "service.reload", "approval.request"},
 	"UserManager":   {"node.read", "operation.read", "user.manage", "user.batch.disable", "group.manage", "approval.request"},
-	"ConfigManager": {"node.read", "operation.read", "config.plan", "config.apply", "approval.request"},
+	"ConfigManager": {"node.read", "operation.read", "config.plan", "config.review", "config.apply", "approval.request"},
 	"Auditor":       {"node.read", "operation.read", "audit.read", "audit.verify"},
-	"SecurityAdmin": {"node.read", "operation.read", "enrollment_token.create", "node.approve", "node.revoke", "approval.request", "approval.approve", "role_binding.manage", "security_alert.read"},
+	"SecurityAdmin": {"node.read", "operation.read", "config.review", "enrollment_token.create", "node.approve", "node.revoke", "approval.request", "approval.approve", "role_binding.manage", "security_alert.read"},
 	"PlatformAdmin": {"*"},
 }
 

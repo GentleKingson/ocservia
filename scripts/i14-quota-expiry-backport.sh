@@ -46,22 +46,32 @@ printf '%s  %s\n' \
 test -f "${ROOT}/web/src/upstream/UserPolicyFields.vue"
 test -f "${ROOT}/web/src/adapters/user-policy.ts"
 
-rejected_boundary_pattern='occtl|systemctl|docker[.]sock|/etc/ocserv|/proc|/sys|privileged'
+rejected_execution_pattern='occtl|systemctl|docker[.]sock|privileged'
+rejected_local_path_pattern='/etc/ocserv|/proc|/sys'
 if command -v rg >/dev/null 2>&1; then
   boundary_scanner='rg'
   boundary_matches() {
-    rg -n --glob '!**/*_test.go' --glob '!api/generated/**' "${rejected_boundary_pattern}" "$@"
+    local pattern="$1"
+    shift
+    rg -n --glob '!**/*_test.go' --glob '!api/generated/**' "${pattern}" "$@"
   }
 else
   boundary_scanner='grep'
   boundary_matches() {
-    grep -REnE --exclude='*_test.go' --exclude-dir=generated "${rejected_boundary_pattern}" "$@"
+    local pattern="$1"
+    shift
+    grep -REnE --exclude='*_test.go' --exclude-dir=generated "${pattern}" "$@"
   }
 fi
 
-if boundary_matches \
+# Browser strings may describe typed remote configuration; local path access is
+# forbidden specifically in the controller, while execution surfaces are
+# forbidden across both controller and Web code.
+if boundary_matches "${rejected_execution_pattern}" \
   "${ROOT}/control-plane/internal" \
-  "${ROOT}/web/src"; then
+  "${ROOT}/web/src" || \
+  boundary_matches "${rejected_local_path_pattern}" \
+  "${ROOT}/control-plane/internal"; then
   echo "I14 imported a rejected local-execution boundary" >&2
   exit 1
 fi

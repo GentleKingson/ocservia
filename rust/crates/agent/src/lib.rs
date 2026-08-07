@@ -827,6 +827,9 @@ pub fn semantic_payload_hash(envelope: &CommandEnvelope) -> Result<[u8; 32], Com
         Some(command_envelope::Payload::ServiceReload(payload)) => {
             ("ocserv.service.reload", payload.encode_to_vec())
         }
+        Some(command_envelope::Payload::ConfigPlan(payload)) => {
+            ("ocserv.config.plan", payload.encode_to_vec())
+        }
         Some(command_envelope::Payload::UserCreate(payload)) => {
             ("ocserv.users.write", payload.encode_to_vec())
         }
@@ -886,6 +889,12 @@ pub fn semantic_payload_hash_v1(envelope: &CommandEnvelope) -> Result<[u8; 32], 
             canonical_session_payload(&payload.session_id, &payload.boot_id)?,
         ),
         Some(command_envelope::Payload::ServiceReload(_)) => (105_u32, Vec::new()),
+        Some(command_envelope::Payload::ConfigPlan(payload)) => {
+            if payload.candidate_hash.len() != 32 {
+                return Err(CommandError::Rejected("candidate_hash_invalid"));
+            }
+            (103_u32, payload.candidate_hash.clone())
+        }
         Some(command_envelope::Payload::SessionTerminate(payload)) => (
             112_u32,
             canonical_session_payload(&payload.session_id, &payload.boot_id)?,
@@ -1073,6 +1082,16 @@ fn validate_payload(
         }
         Some(command_envelope::Payload::ServiceReload(_)) => {
             ("ocserv.service.reload", Vec::new(), true)
+        }
+        Some(command_envelope::Payload::ConfigPlan(payload)) => {
+            if payload.candidate.is_empty()
+                || payload.candidate.len() > 256 * 1024
+                || payload.candidate_hash.len() != 32
+                || Sha256::digest(&payload.candidate).as_slice() != payload.candidate_hash
+            {
+                return Err(CommandError::Rejected("config_candidate_invalid"));
+            }
+            ("ocserv.config.plan", Vec::new(), true)
         }
         Some(command_envelope::Payload::UserCreate(payload)) => {
             validate_name(&payload.username)?;

@@ -298,6 +298,13 @@ async fn execute(
                 .await
                 .map(privd_response::Result::DesiredEffectObservation),
         ),
+        privd_request::Operation::ConfigPlan(request) => (
+            "config_plan",
+            adapter
+                .config_plan(&request.candidate, &request.candidate_hash)
+                .await
+                .map(privd_response::Result::ConfigPlan),
+        ),
         privd_request::Operation::SessionDisconnect(request) => (
             "session_disconnect",
             adapter

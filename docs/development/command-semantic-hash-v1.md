@@ -82,6 +82,7 @@ payload. The current schema uses:
 | Payload | Field number |
 |---|---:|
 | `SessionDisconnect` | 100 |
+| `ConfigPlan` | 103 |
 | `ServiceReload` | 105 |
 | `SyntheticNoop` | 107 |
 | `SyntheticEcho` | 108 |
@@ -128,6 +129,17 @@ canonical_payload =
 payload_kind = uint32_be(105)
 canonical_payload = empty
 ```
+
+### ConfigPlan
+
+```
+payload_kind = uint32_be(103)
+canonical_payload = candidate_hash
+```
+
+`candidate_hash` is exactly 32 bytes and is independently verified against the
+bounded candidate before validation. The candidate is immutable for that hash;
+delivery metadata and the temporary fixed staging filename are excluded.
 
 ### IpBanRemove
 

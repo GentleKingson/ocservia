@@ -13,6 +13,13 @@
  */
 
 import { mapValues } from "../runtime";
+import type { ConfigPlanApprovalSummary } from "./ConfigPlanApprovalSummary";
+import {
+  ConfigPlanApprovalSummaryFromJSON,
+  ConfigPlanApprovalSummaryFromJSONTyped,
+  ConfigPlanApprovalSummaryToJSON,
+  ConfigPlanApprovalSummaryToJSONTyped,
+} from "./ConfigPlanApprovalSummary";
 import type { UserBatchItemRequest } from "./UserBatchItemRequest";
 import {
   UserBatchItemRequestFromJSON,
@@ -82,7 +89,7 @@ export interface Approval {
    */
   status: ApprovalStatusEnum;
   /**
-   * Canonical SHA-256 of the ordered batch items when the approval is content-bound.
+   * Canonical SHA-256 of the immutable reviewed content when the approval is content-bound.
    * @type {string}
    * @memberof Approval
    */
@@ -93,6 +100,12 @@ export interface Approval {
    * @memberof Approval
    */
   requestSummary?: Array<UserBatchItemRequest>;
+  /**
+   *
+   * @type {ConfigPlanApprovalSummary}
+   * @memberof Approval
+   */
+  configPlanSummary?: ConfigPlanApprovalSummary;
   /**
    * RFC 3339 timestamp normalized to UTC.
    * @type {Date}
@@ -202,6 +215,10 @@ export function ApprovalFromJSONTyped(
         : (json["request_summary"] as Array<any>).map(
             UserBatchItemRequestFromJSON,
           ),
+    configPlanSummary:
+      json["config_plan_summary"] == null
+        ? undefined
+        : ConfigPlanApprovalSummaryFromJSON(json["config_plan_summary"]),
     expiresAt: new Date(json["expires_at"]),
     createdAt: new Date(json["created_at"]),
   };
@@ -236,6 +253,9 @@ export function ApprovalToJSONTyped(
         : (value["requestSummary"] as Array<any>).map(
             UserBatchItemRequestToJSON,
           ),
+    config_plan_summary: ConfigPlanApprovalSummaryToJSON(
+      value["configPlanSummary"],
+    ),
     expires_at: value["expiresAt"].toISOString(),
     created_at: value["createdAt"].toISOString(),
   };

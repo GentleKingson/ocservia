@@ -38,19 +38,20 @@ type Decision struct {
 }
 
 type Approval struct {
-	ID             uuid.UUID       `json:"id"`
-	WorkspaceID    uuid.UUID       `json:"workspace_id"`
-	RequesterID    uuid.UUID       `json:"requester_id"`
-	ApproverID     *uuid.UUID      `json:"approver_id,omitempty"`
-	Action         string          `json:"action"`
-	ResourceType   string          `json:"resource_type"`
-	ResourceID     uuid.UUID       `json:"resource_id"`
-	Reason         string          `json:"reason"`
-	Status         string          `json:"status"`
-	ExpiresAt      time.Time       `json:"expires_at"`
-	CreatedAt      time.Time       `json:"created_at"`
-	RequestHash    string          `json:"request_hash,omitempty"`
-	RequestSummary json.RawMessage `json:"request_summary,omitempty"`
+	ID                uuid.UUID       `json:"id"`
+	WorkspaceID       uuid.UUID       `json:"workspace_id"`
+	RequesterID       uuid.UUID       `json:"requester_id"`
+	ApproverID        *uuid.UUID      `json:"approver_id,omitempty"`
+	Action            string          `json:"action"`
+	ResourceType      string          `json:"resource_type"`
+	ResourceID        uuid.UUID       `json:"resource_id"`
+	Reason            string          `json:"reason"`
+	Status            string          `json:"status"`
+	ExpiresAt         time.Time       `json:"expires_at"`
+	CreatedAt         time.Time       `json:"created_at"`
+	RequestHash       string          `json:"request_hash,omitempty"`
+	RequestSummary    json.RawMessage `json:"request_summary,omitempty"`
+	ConfigPlanSummary json.RawMessage `json:"config_plan_summary,omitempty"`
 }
 
 type Service struct {
@@ -80,7 +81,11 @@ func (s *Service) Create(ctx context.Context, request Request) (Approval, error)
 	defer func() { _ = tx.Rollback(context.Background()) }()
 	if len(request.RequestHash) != 0 {
 		approval.RequestHash = fmt.Sprintf("%x", request.RequestHash)
-		approval.RequestSummary = request.RequestSummary
+		if request.ResourceType == "config_plan" {
+			approval.ConfigPlanSummary = request.RequestSummary
+		} else {
+			approval.RequestSummary = request.RequestSummary
+		}
 	}
 	if _, err := tx.Exec(ctx, `INSERT INTO approval_requests(id,workspace_id,requester_id,action,resource_type,resource_id,reason,status,expires_at,created_at,request_hash,request_summary) VALUES($1,$2,$3,$4,$5,$6,$7,'pending',$8,$9,$10,$11)`, approval.ID, approval.WorkspaceID, approval.RequesterID, approval.Action, approval.ResourceType, approval.ResourceID, approval.Reason, approval.ExpiresAt, approval.CreatedAt, nullableBytes(request.RequestHash), nullableJSON(request.RequestSummary)); err != nil {
 		return Approval{}, fmt.Errorf("insert approval request: %w", err)
@@ -206,6 +211,10 @@ func (s *Service) Get(ctx context.Context, id uuid.UUID) (Approval, error) {
 func scan(row pgx.Row) (Approval, error) {
 	var value Approval
 	err := row.Scan(&value.ID, &value.WorkspaceID, &value.RequesterID, &value.ApproverID, &value.Action, &value.ResourceType, &value.ResourceID, &value.Reason, &value.Status, &value.ExpiresAt, &value.CreatedAt, &value.RequestHash, &value.RequestSummary)
+	if err == nil && value.ResourceType == "config_plan" {
+		value.ConfigPlanSummary = value.RequestSummary
+		value.RequestSummary = nil
+	}
 	return value, err
 }
 
@@ -213,7 +222,11 @@ func approvalSummary(value Approval) json.RawMessage {
 	if value.RequestHash == "" {
 		return nil
 	}
-	result, _ := json.Marshal(map[string]any{"request_hash": value.RequestHash, "request_summary": value.RequestSummary})
+	summary := value.RequestSummary
+	if len(summary) == 0 {
+		summary = value.ConfigPlanSummary
+	}
+	result, _ := json.Marshal(map[string]any{"request_hash": value.RequestHash, "request_summary": summary})
 	return result
 }
 

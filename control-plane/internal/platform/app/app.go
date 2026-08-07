@@ -11,6 +11,7 @@ import (
 	"github.com/GentleKingson/ocservia/control-plane/internal/approvals"
 	"github.com/GentleKingson/ocservia/control-plane/internal/audit"
 	"github.com/GentleKingson/ocservia/control-plane/internal/auth"
+	"github.com/GentleKingson/ocservia/control-plane/internal/configplan"
 	"github.com/GentleKingson/ocservia/control-plane/internal/enrollment"
 	"github.com/GentleKingson/ocservia/control-plane/internal/localslice"
 	operationstore "github.com/GentleKingson/ocservia/control-plane/internal/operations"
@@ -173,6 +174,7 @@ func Run(ctx context.Context, cfg config.Config, build BuildInfo, logger *slog.L
 	server.EnableOperations(operationService)
 	server.EnableUserState(userStateService)
 	server.EnableUserOperations(userOperationsService)
+	server.EnableConfigPlans(configplan.New(pool, operationService))
 	server.EnableTelemetry(telemetryService)
 	if cfg.ControllerEndpointID != "" {
 		transport, transportErr := transportclient.New(cfg.TransportSocket, cfg.TransportTimeout, cfg.TransportQueue)

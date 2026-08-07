@@ -1,5 +1,6 @@
 /* tslint:disable */
 /* eslint-disable */
+export * from "./ConfigurationApi";
 export * from "./DevelopmentApi";
 export * from "./EnrollmentApi";
 export * from "./EventsApi";
