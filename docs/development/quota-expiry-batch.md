@@ -24,12 +24,12 @@ users disabled for another reason are not re-enabled.
 
 User batches contain a parent and bounded item list. Each item is independently
 authorized and, when allowed, receives a distinct child operation and command.
-The default global active remote-command limit is 50. Admission is serialized
-in the command-creation transaction across typed operations, direct user
-mutations, policy enforcement, and batch children. Parent results retain
-forbidden, failed, unknown, and offline-pending child states instead of reducing
-the batch to a misleading boolean. Set `OCSERV_USER_OPERATION_CONCURRENCY` from
-1 through 500 to change the limit.
+The default global active remote-command limit is 50. Dispatch reservations are
+serialized across workers and count in-flight or unknown commands, while queued
+work for an offline node does not consume execution capacity. Parent results
+retain forbidden, failed, unknown, and offline-pending child states instead of
+reducing the batch to a misleading boolean. Set
+`OCSERV_USER_OPERATION_CONCURRENCY` from 1 through 500 to change the limit.
 
 Any batch containing a disable action requires independent approval. The client
 generates the UUIDv7 batch identifier first, obtains approval for action

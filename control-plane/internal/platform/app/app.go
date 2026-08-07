@@ -105,7 +105,7 @@ func Run(ctx context.Context, cfg config.Config, build BuildInfo, logger *slog.L
 		go func() { workerErr <- operationWorker.Run(componentCtx) }()
 	}
 	telemetryService := telemetrystore.New(pool)
-	userStateService := userstate.NewWithConcurrency(pool, cfg.UserOperationConcurrency)
+	userStateService := userstate.New(pool)
 	userOperationsService := useroperations.NewWithConcurrency(pool, userStateService, cfg.UserOperationConcurrency)
 	auditManager := audit.NewManager(pool, cfg.AuditCheckpointKey)
 	if cfg.RunsScheduler() {

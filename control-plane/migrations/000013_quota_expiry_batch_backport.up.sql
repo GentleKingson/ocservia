@@ -118,6 +118,10 @@ CREATE INDEX batch_operations_active_idx
     ON batch_operations (updated_at, id)
     WHERE state IN ('queued', 'running', 'partial_failed');
 
+CREATE INDEX operations_active_command_limit_idx
+    ON operations (state, id)
+    WHERE state IN ('dispatched', 'accepted', 'running', 'unknown');
+
 CREATE TABLE upstream_sync_records (
     id uuid PRIMARY KEY,
     repository text NOT NULL,

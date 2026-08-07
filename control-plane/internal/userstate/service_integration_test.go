@@ -737,41 +737,86 @@ func mutation(nodeID uuid.UUID, key string, kind MutationKind, name string, vers
 }
 
 func TestGlobalCommandLimitAcrossProducersIntegration(t *testing.T) {
-	_, pool, _, nodeID := integrationService(t, "active")
-	users := NewWithConcurrency(pool, 1)
-	operations := operationstore.NewWithConcurrency(pool, 1)
+	_, pool, workspaceID, nodeID := integrationService(t, "active")
+	secondNodeID := uuid.Must(uuid.NewV7())
+	if _, err := pool.Exec(context.Background(), `INSERT INTO nodes(id,workspace_id,name,status,version,created_at,updated_at) VALUES($1,$2,$3,'active',1,now(),now())`, secondNodeID, workspaceID, "second-"+secondNodeID.String()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(context.Background(), `INSERT INTO node_capabilities(node_id,capability,approved) VALUES($1,'ocserv.users.write',true)`, secondNodeID); err != nil {
+		t.Fatal(err)
+	}
+	users := New(pool)
+	operations := operationstore.New(pool)
+	if _, _, err := users.Mutate(context.Background(), mutation(nodeID, "limited-user", UserCreate, "limited", 0)); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := operations.CreateSynthetic(context.Background(), operationstore.CreateRequest{NodeID: secondNodeID, IdempotencyKey: "limited-noop", ExpectedVersion: 1, Kind: operationstore.SyntheticNoop, TTL: time.Minute, RequestID: "request-limited-noop", Traceparent: testTraceparent}); err != nil {
+		t.Fatal(err)
+	}
+	var baseline int
+	if err := pool.QueryRow(context.Background(), `SELECT count(*) FROM operations operation JOIN commands command ON command.operation_id=operation.id LEFT JOIN node_command_leases lease ON lease.command_id=command.id AND lease.leased_until>now() WHERE operation.state IN('dispatched','accepted','running','unknown') OR lease.command_id IS NOT NULL`).Scan(&baseline); err != nil {
+		t.Fatal(err)
+	}
 	start := make(chan struct{})
-	results := make(chan error, 2)
+	results := make(chan int, 2)
 	go func() {
 		<-start
-		_, _, err := users.Mutate(context.Background(), mutation(nodeID, "limited-user", UserCreate, "limited", 0))
-		results <- err
+		dispatches, err := operationstore.NewWithConcurrency(pool, baseline+1).Claim(context.Background(), uuid.Must(uuid.NewV7()), 1, time.Minute)
+		if err != nil {
+			results <- -1
+			return
+		}
+		results <- len(dispatches)
 	}()
 	go func() {
 		<-start
-		_, _, err := operations.CreateSynthetic(context.Background(), operationstore.CreateRequest{NodeID: nodeID, IdempotencyKey: "limited-noop", ExpectedVersion: 1, Kind: operationstore.SyntheticNoop, TTL: time.Minute, RequestID: "request-limited-noop", Traceparent: testTraceparent})
-		results <- err
+		dispatches, err := operationstore.NewWithConcurrency(pool, baseline+1).Claim(context.Background(), uuid.Must(uuid.NewV7()), 1, time.Minute)
+		if err != nil {
+			results <- -1
+			return
+		}
+		results <- len(dispatches)
 	}()
 	close(start)
 
-	var succeeded, limited int
+	claimed := 0
 	for range 2 {
-		err := <-results
-		switch {
-		case err == nil:
-			succeeded++
-		case errors.Is(err, ErrConcurrencyExceeded), errors.Is(err, operationstore.ErrConcurrencyExceeded):
-			limited++
-		default:
-			t.Fatalf("unexpected command admission error: %v", err)
+		result := <-results
+		if result < 0 {
+			t.Fatal("concurrent dispatch claim failed")
 		}
+		claimed += result
 	}
-	var active int
-	if err := pool.QueryRow(context.Background(), `SELECT count(*) FROM operations operation JOIN commands command ON command.operation_id=operation.id WHERE operation.state IN('queued','dispatched','accepted','running','offline_pending','unknown')`).Scan(&active); err != nil {
+	if claimed != 1 {
+		t.Fatalf("global dispatch limit claimed=%d, want 1", claimed)
+	}
+}
+
+func TestOfflineQueueDoesNotConsumeGlobalDispatchCapacityIntegration(t *testing.T) {
+	_, pool, workspaceID, activeNodeID := integrationService(t, "active")
+	offlineNodeID := uuid.Must(uuid.NewV7())
+	if _, err := pool.Exec(context.Background(), `INSERT INTO nodes(id,workspace_id,name,status,version,created_at,updated_at) VALUES($1,$2,$3,'offline',1,now(),now())`, offlineNodeID, workspaceID, "offline-"+offlineNodeID.String()); err != nil {
 		t.Fatal(err)
 	}
-	if succeeded != 1 || limited != 1 || active != 1 {
-		t.Fatalf("global limit result succeeded=%d limited=%d active=%d", succeeded, limited, active)
+	operations := operationstore.New(pool)
+	for _, item := range []struct {
+		node uuid.UUID
+		key  string
+	}{{offlineNodeID, "offline-backlog"}, {activeNodeID, "online-work"}} {
+		if _, _, err := operations.CreateSynthetic(context.Background(), operationstore.CreateRequest{NodeID: item.node, IdempotencyKey: item.key, ExpectedVersion: 1, Kind: operationstore.SyntheticNoop, TTL: time.Minute, RequestID: "request-" + item.key, Traceparent: testTraceparent}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var baseline int
+	if err := pool.QueryRow(context.Background(), `SELECT count(*) FROM operations operation JOIN commands command ON command.operation_id=operation.id LEFT JOIN node_command_leases lease ON lease.command_id=command.id AND lease.leased_until>now() WHERE operation.state IN('dispatched','accepted','running','unknown') OR lease.command_id IS NOT NULL`).Scan(&baseline); err != nil {
+		t.Fatal(err)
+	}
+	dispatches, err := operationstore.NewWithConcurrency(pool, baseline+1).Claim(context.Background(), uuid.Must(uuid.NewV7()), 1, time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(dispatches) != 1 || dispatches[0].NodeID != activeNodeID {
+		t.Fatalf("offline backlog consumed dispatch capacity: %+v", dispatches)
 	}
 }
 

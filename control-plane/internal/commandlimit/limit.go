@@ -4,29 +4,27 @@ package commandlimit
 
 import (
 	"context"
-	"errors"
 
 	"github.com/jackc/pgx/v5"
 )
 
-var ErrExceeded = errors.New("global active command limit reached")
-
 const advisoryLockID int64 = 0x4f435356434d444c // "OCSVCMDL"
 
-// Reserve must run in the transaction that creates the command.
-func Reserve(ctx context.Context, tx pgx.Tx, limit int) error {
+// Available serializes dispatch reservations and returns the number of slots
+// that may be leased without exceeding the environment-wide limit.
+func Available(ctx context.Context, tx pgx.Tx, limit int) (int, error) {
 	if limit < 1 {
-		return ErrExceeded
+		return 0, nil
 	}
 	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock($1)`, advisoryLockID); err != nil {
-		return err
+		return 0, err
 	}
 	var active int
-	if err := tx.QueryRow(ctx, `SELECT count(*) FROM operations operation JOIN commands command ON command.operation_id=operation.id WHERE operation.state IN('queued','dispatched','accepted','running','offline_pending','unknown')`).Scan(&active); err != nil {
-		return err
+	if err := tx.QueryRow(ctx, `SELECT count(*) FROM (SELECT operation.id FROM operations operation JOIN commands command ON command.operation_id=operation.id WHERE operation.state IN('dispatched','accepted','running','unknown') UNION SELECT command.operation_id FROM node_command_leases lease JOIN commands command ON command.id=lease.command_id WHERE lease.leased_until>now() LIMIT $1) active`, limit).Scan(&active); err != nil {
+		return 0, err
 	}
 	if active >= limit {
-		return ErrExceeded
+		return 0, nil
 	}
-	return nil
+	return limit - active, nil
 }

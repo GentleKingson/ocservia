@@ -30,7 +30,6 @@ var (
 	ErrNodeUnavailable     = errors.New("node is unavailable")
 	ErrCapabilityMissing   = errors.New("node capability is unavailable")
 	ErrTargetNotObserved   = errors.New("target is not present in observed state")
-	ErrConcurrencyExceeded = commandlimit.ErrExceeded
 )
 
 type SyntheticKind string
@@ -201,9 +200,6 @@ func (s *Service) CreateSynthetic(ctx context.Context, request CreateRequest) (O
 			return Operation{}, false, err
 		}
 	}
-	if err := commandlimit.Reserve(ctx, tx, s.commandLimit); err != nil {
-		return Operation{}, false, err
-	}
 	if _, err := tx.Exec(ctx, `
 		INSERT INTO operations (id, workspace_id, node_id, command_id, state, version, request_id, trace_id, idempotency_key, request_hash, expires_at, created_at, updated_at)
 		VALUES ($1,$2,$3,$4,'queued',1,$5,$6,$7,$8,$9,$10,$10)`,
@@ -271,6 +267,17 @@ func (s *Service) Claim(ctx context.Context, workerID uuid.UUID, limit int, leas
 		return nil, fmt.Errorf("begin outbox claim: %w", err)
 	}
 	defer rollback(tx)
+	available, err := commandlimit.Available(ctx, tx, s.commandLimit)
+	if err != nil {
+		return nil, fmt.Errorf("reserve global dispatch capacity: %w", err)
+	}
+	limit = min(limit, available)
+	if limit == 0 {
+		if err := tx.Commit(ctx); err != nil {
+			return nil, fmt.Errorf("commit empty outbox claim: %w", err)
+		}
+		return nil, nil
+	}
 	rows, err := tx.Query(ctx, `
 		SELECT outbox.id, command.id, command.operation_id, command.node_id, outbox.payload, command.traceparent
 		FROM outbox_events AS outbox

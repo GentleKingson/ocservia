@@ -275,8 +275,6 @@ func (s *Server) writeOperationError(w http.ResponseWriter, r *http.Request, err
 		writeProblem(w, r, http.StatusConflict, "https://ocservia.dev/problems/capability-unavailable", "Capability is unavailable", "the node has not advertised and received approval for this operation")
 	case errors.Is(err, operationstore.ErrTargetNotObserved):
 		writeProblem(w, r, http.StatusConflict, "https://ocservia.dev/problems/target-not-observed", "Target is not observed", "the typed target is not present in the node's current observed state")
-	case errors.Is(err, operationstore.ErrConcurrencyExceeded):
-		writeProblem(w, r, http.StatusServiceUnavailable, "https://ocservia.dev/problems/command-capacity-exceeded", "Command capacity is exceeded", "the global active command limit has been reached")
 	case errors.Is(err, approvals.ErrNotReady):
 		writeProblem(w, r, http.StatusConflict, "https://ocservia.dev/problems/approval-required", "Approval required", "a matching unexpired approval from a different principal is required")
 	case errors.Is(err, operationstore.ErrNodeUnavailable), errors.Is(err, pgx.ErrNoRows):
