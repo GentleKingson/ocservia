@@ -75,7 +75,21 @@ func (s *Server) authorizeRoute(r *http.Request, principal auth.Principal) (cont
 		if getErr != nil {
 			return nil, getErr
 		}
-		resource = rbac.Resource{WorkspaceID: approval.WorkspaceID, Type: approval.ResourceType, ID: approval.ResourceID}
+		if approval.ResourceType == "config_plan" {
+			if s.configplans == nil {
+				return nil, pgx.ErrNoRows
+			}
+			workspaceID, nodeID, resourceErr := s.configplans.Resource(r.Context(), approval.ResourceID)
+			if resourceErr != nil {
+				return nil, resourceErr
+			}
+			if workspaceID != approval.WorkspaceID {
+				return nil, rbac.ErrForbidden
+			}
+			resource = rbac.Resource{WorkspaceID: workspaceID, Type: "node", ID: nodeID}
+		} else {
+			resource = rbac.Resource{WorkspaceID: approval.WorkspaceID, Type: approval.ResourceType, ID: approval.ResourceID}
+		}
 	} else if planText := r.PathValue("plan_id"); planText != "" {
 		planID, parseErr := uuid.Parse(planText)
 		if parseErr != nil || planID.Version() != 7 || s.configplans == nil {

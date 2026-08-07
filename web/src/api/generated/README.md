@@ -112,7 +112,6 @@ All URIs are relative to _/api/v1_
 - [Approval](docs/Approval.md)
 - [ApprovalDecision](docs/ApprovalDecision.md)
 - [ApprovalRequest](docs/ApprovalRequest.md)
-- [ApprovalRequestSummary](docs/ApprovalRequestSummary.md)
 - [AuditEventPage](docs/AuditEventPage.md)
 - [AuditVerification](docs/AuditVerification.md)
 - [BreakGlassRequest](docs/BreakGlassRequest.md)

@@ -33,6 +33,10 @@ func TestRenderRejectsInjectionAndUnsupportedDirective(t *testing.T) {
 	if _, err := Render(base); err == nil {
 		t.Fatal("arbitrary path directive accepted")
 	}
+	base.Template.Directives[0] = Directive{Name: "tcp-port", SecretRef: &SecretRef{Provider: "node", Key: "not-a-secret-port"}}
+	if _, err := Render(base); err == nil {
+		t.Fatal("non-secret directive accepted SecretRef")
+	}
 }
 
 func TestRenderEnforcesVersionAndCapabilityMatrix(t *testing.T) {

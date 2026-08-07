@@ -55,6 +55,9 @@ type CreateRequest struct {
 	Candidate        []byte
 	CandidateHash    []byte
 	PlanRevision     uint64
+	PlanMetadata     *ConfigPlanMetadata
+	OcservVersion    string
+	PlanCapabilities []string
 	SessionID        string
 	BootID           string
 	IP               string
@@ -68,6 +71,14 @@ type CreateRequest struct {
 	TTL              time.Duration
 	RequestID        string
 	Traceparent      string
+}
+
+// ConfigPlanMetadata is written atomically with the remote validation intent.
+type ConfigPlanMetadata struct {
+	TemplateName      string
+	CandidateRedacted string
+	Warnings          []string
+	CreatedBy         uuid.UUID
 }
 
 type Operation struct {
@@ -167,6 +178,22 @@ func (s *Service) CreateSynthetic(ctx context.Context, request CreateRequest) (O
 		if configRevision < 0 || uint64(configRevision) != request.PlanRevision {
 			return Operation{}, false, ErrStaleRevision
 		}
+		var observedVersion string
+		if err := tx.QueryRow(ctx, `SELECT COALESCE((SELECT o.ocserv_version FROM node_observed_snapshots o WHERE o.node_id=$1 ORDER BY o.observed_at DESC LIMIT 1),'')`, request.NodeID).Scan(&observedVersion); err != nil {
+			return Operation{}, false, fmt.Errorf("read observed Ocserv version: %w", err)
+		}
+		if observedVersion != request.OcservVersion {
+			return Operation{}, false, ErrStaleRevision
+		}
+		for _, required := range request.PlanCapabilities {
+			var approved bool
+			if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM node_capabilities WHERE node_id=$1 AND capability=$2 AND approved=true)`, request.NodeID, required).Scan(&approved); err != nil {
+				return Operation{}, false, fmt.Errorf("recheck configuration capability: %w", err)
+			}
+			if !approved {
+				return Operation{}, false, ErrCapabilityMissing
+			}
+		}
 	}
 	if capability := capabilityFor(request.Kind); capability != "" {
 		var approved bool
@@ -223,6 +250,20 @@ func (s *Service) CreateSynthetic(ctx context.Context, request CreateRequest) (O
 		VALUES ($1,$2,$3,$4,'queued',1,$5,$6,$7,$8,$9,$10,$10)`,
 		operationID, workspaceID, request.NodeID, commandID, request.RequestID, traceID(request.Traceparent), request.IdempotencyKey, hash[:], expiresAt, now); err != nil {
 		return Operation{}, false, fmt.Errorf("insert operation intent: %w", err)
+	}
+	if request.Kind == ConfigPlan {
+		warnings, err := json.Marshal(request.PlanMetadata.Warnings)
+		if err != nil {
+			return Operation{}, false, fmt.Errorf("marshal configuration plan warnings: %w", err)
+		}
+		createdBy := any(request.PlanMetadata.CreatedBy)
+		if request.PlanMetadata.CreatedBy == uuid.Nil {
+			createdBy = nil
+		}
+		if _, err := tx.Exec(ctx, `INSERT INTO config_plans(id,workspace_id,node_id,operation_id,template_name,expected_revision,candidate_hash,candidate_redacted,warnings,expires_at,created_by,created_at)
+			VALUES($1,$2,$3,$1,$4,$5,$6,$7,$8,$9,$10,$11)`, operationID, workspaceID, request.NodeID, request.PlanMetadata.TemplateName, request.PlanRevision, request.CandidateHash, request.PlanMetadata.CandidateRedacted, warnings, expiresAt, createdBy, now); err != nil {
+			return Operation{}, false, fmt.Errorf("insert configuration plan: %w", err)
+		}
 	}
 	if _, err := tx.Exec(ctx, `
 		INSERT INTO commands (id, operation_id, workspace_id, node_id, state, payload_type, envelope, idempotency_key, expected_version, traceparent, expires_at, created_at, updated_at)
@@ -546,7 +587,7 @@ func validateCreate(r CreateRequest) error {
 	if r.Kind == SyntheticNoop && r.Message != "" || len(r.Message) > 4096 {
 		return ErrInvalidRequest
 	}
-	if r.Kind == ConfigPlan && (len(r.Candidate) == 0 || len(r.Candidate) > 256*1024 || len(r.CandidateHash) != sha256.Size || r.PlanRevision > uint64(^uint64(0)>>1)) {
+	if r.Kind == ConfigPlan && (len(r.Candidate) == 0 || len(r.Candidate) > 256*1024 || len(r.CandidateHash) != sha256.Size || r.PlanRevision > uint64(^uint64(0)>>1) || r.PlanMetadata == nil || strings.TrimSpace(r.PlanMetadata.TemplateName) == "" || len(r.PlanMetadata.TemplateName) > 128 || len(r.PlanMetadata.CandidateRedacted) == 0 || len(r.PlanMetadata.CandidateRedacted) > 256*1024 || len(r.PlanCapabilities) == 0) {
 		return ErrInvalidRequest
 	}
 	if r.Kind == ConfigPlan {
@@ -555,7 +596,7 @@ func validateCreate(r CreateRequest) error {
 			return ErrInvalidRequest
 		}
 	}
-	if r.Kind != ConfigPlan && (len(r.Candidate) != 0 || len(r.CandidateHash) != 0 || r.PlanRevision != 0) {
+	if r.Kind != ConfigPlan && (len(r.Candidate) != 0 || len(r.CandidateHash) != 0 || r.PlanRevision != 0 || r.PlanMetadata != nil || r.OcservVersion != "" || len(r.PlanCapabilities) != 0) {
 		return ErrInvalidRequest
 	}
 	if r.Kind == SessionDisconnect || r.Kind == SessionTerminate {
@@ -609,12 +650,22 @@ func requestHash(r CreateRequest) [32]byte {
 		ApprovalID       uuid.UUID     `json:"approval_id"`
 		CandidateHash    string        `json:"candidate_hash"`
 		PlanRevision     uint64        `json:"plan_revision"`
-	}{r.NodeID, r.Kind, r.Message, r.SessionID, r.BootID, r.IP, r.ExpectedVersion, r.SupersedePending, int64(r.TTL / time.Second), actorID, action, reason, r.ActorSessionID, r.ActorIdentityID, r.ApprovalID, fmt.Sprintf("%x", r.CandidateHash), r.PlanRevision}
+		PlanTemplate     string        `json:"plan_template"`
+		OcservVersion    string        `json:"ocserv_version"`
+		PlanCapabilities []string      `json:"plan_capabilities"`
+	}{r.NodeID, r.Kind, r.Message, r.SessionID, r.BootID, r.IP, r.ExpectedVersion, r.SupersedePending, int64(r.TTL / time.Second), actorID, action, reason, r.ActorSessionID, r.ActorIdentityID, r.ApprovalID, fmt.Sprintf("%x", r.CandidateHash), r.PlanRevision, planTemplate(r.PlanMetadata), r.OcservVersion, r.PlanCapabilities}
 	encoded, err := json.Marshal(intent)
 	if err != nil {
 		panic("marshal fixed idempotency intent: " + err.Error())
 	}
 	return sha256.Sum256(encoded)
+}
+
+func planTemplate(metadata *ConfigPlanMetadata) string {
+	if metadata == nil {
+		return ""
+	}
+	return metadata.TemplateName
 }
 
 func normalizedAuditIntent(r CreateRequest) (actorID, action, reason string) {

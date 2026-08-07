@@ -57,6 +57,16 @@ func TestConfigPlanCreateReplayStaleAndTypedEnvelopeIntegration(t *testing.T) {
 		{Name: "auth", Value: "plain[passwd=/etc/ocserv/ocpasswd]"}, {Name: "max-clients", Value: "128"},
 		{Name: "socket-file", Value: "/run/ocserv.socket"}, {Name: "tcp-port", Value: "443"},
 	}}, TTL: 15 * time.Minute, IdempotencyKey: "i15-plan", ActorID: "developer", RequestID: "request-i15", Traceparent: "00-0123456789abcdef0123456789abcdef-0123456789abcdef-01", Reason: "integration plan"}
+	failing := request
+	failing.IdempotencyKey = "i15-plan-atomic-failure"
+	failing.ActorIdentityID = uuid.Must(uuid.NewV7())
+	if _, _, err := service.Create(ctx, failing); err == nil {
+		t.Fatal("missing created_by identity did not fail plan persistence")
+	}
+	var orphaned int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM operations WHERE workspace_id=$1 AND idempotency_key=$2`, workspaceID, failing.IdempotencyKey).Scan(&orphaned); err != nil || orphaned != 0 {
+		t.Fatalf("atomic failure left %d operation rows: %v", orphaned, err)
+	}
 	plan, replayed, err := service.Create(ctx, request)
 	if err != nil || replayed || plan.ExpectedRevision != 0 || plan.Validation != "pending" {
 		t.Fatalf("create plan=%+v replayed=%v err=%v", plan, replayed, err)

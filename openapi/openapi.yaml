@@ -1964,11 +1964,11 @@ components:
           pattern: "^[0-9a-f]{64}$"
           description: Canonical SHA-256 of the immutable reviewed content when the approval is content-bound.
         request_summary:
-          oneOf:
-            - type: array
-              maxItems: 500
-              items: { $ref: "#/components/schemas/UserBatchItemRequest" }
-            - $ref: "#/components/schemas/ConfigPlanApprovalSummary"
+          type: array
+          maxItems: 500
+          items: { $ref: "#/components/schemas/UserBatchItemRequest" }
+        config_plan_summary:
+          $ref: "#/components/schemas/ConfigPlanApprovalSummary"
         expires_at: { $ref: "#/components/schemas/UtcDateTime" }
         created_at: { $ref: "#/components/schemas/UtcDateTime" }
     AuditEventPage:

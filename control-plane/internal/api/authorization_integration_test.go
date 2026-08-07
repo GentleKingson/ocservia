@@ -8,7 +8,9 @@ import (
 	"strings"
 	"testing"
 
+	approvalstore "github.com/GentleKingson/ocservia/control-plane/internal/approvals"
 	"github.com/GentleKingson/ocservia/control-plane/internal/auth"
+	configplanstore "github.com/GentleKingson/ocservia/control-plane/internal/configplan"
 	operationstore "github.com/GentleKingson/ocservia/control-plane/internal/operations"
 	"github.com/GentleKingson/ocservia/control-plane/internal/rbac"
 	"github.com/google/uuid"
@@ -72,6 +74,40 @@ func TestSyntheticCommandAuditUsesAuthenticatedOperator(t *testing.T) {
 	}
 	if actorID != identityID.String() || sourceSessionID != sessionID || action != "operation.create" || reason != "operator synthetic command" {
 		t.Fatalf("synthetic audit actor=%q session=%s action=%q reason=%q", actorID, sourceSessionID, action, reason)
+	}
+}
+
+func TestConfigPlanApprovalResolvesNodeScopedApprover(t *testing.T) {
+	databaseURL := os.Getenv("OCSERV_TEST_DATABASE_URL")
+	if databaseURL == "" {
+		t.Skip("OCSERV_TEST_DATABASE_URL is not set")
+	}
+	ctx := context.Background()
+	pool, err := pgxpool.New(ctx, databaseURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pool.Close()
+	workspaceID, nodeID, operationID := uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7())
+	requesterID, approverID, approvalID, bindingID := uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7())
+	if _, err := pool.Exec(ctx, `INSERT INTO workspaces(id,name,slug,created_at,updated_at) VALUES($1,'config approval',$2,now(),now());
+		INSERT INTO identities(id,issuer,subject,created_at,updated_at) VALUES($3,'integration',$4,now(),now()),($5,'integration',$6,now(),now());
+		INSERT INTO nodes(id,workspace_id,name,status,version,created_at,updated_at) VALUES($7,$1,'config-node','active',1,now(),now());
+		INSERT INTO operations(id,workspace_id,node_id,state,version,request_id,idempotency_key,request_hash,created_at,updated_at) VALUES($8,$1,$7,'succeeded',1,'config-approval','config-approval',decode(repeat('00',32),'hex'),now(),now());
+		INSERT INTO config_plans(id,workspace_id,node_id,operation_id,template_name,expected_revision,candidate_hash,candidate_redacted,warnings,expires_at,created_by,created_at) VALUES($8,$1,$7,$8,'approval',0,decode(repeat('01',32),'hex'),'tcp-port = 443','[]',now()+interval '1 hour',$3,now());
+		INSERT INTO approval_requests(id,workspace_id,requester_id,action,resource_type,resource_id,reason,status,expires_at,created_at,request_hash,request_summary) VALUES($9,$1,$3,'config.apply','config_plan',$8,'review','pending',now()+interval '1 hour',now(),decode(repeat('01',32),'hex'),'{}');
+		INSERT INTO role_bindings(id,identity_id,workspace_id,role_name,resource_type,resource_id,created_by,created_at) VALUES($10,$5,$1,'SecurityAdmin','node',$7,$5,now())`, workspaceID, "config-approval-"+workspaceID.String(), requesterID, requesterID.String(), approverID, approverID.String(), nodeID, operationID, approvalID, bindingID); err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		_, _ = pool.Exec(context.Background(), `DELETE FROM role_bindings WHERE id=$1; DELETE FROM approval_requests WHERE id=$2; DELETE FROM config_plans WHERE id=$3; DELETE FROM operations WHERE id=$3; DELETE FROM nodes WHERE id=$4; DELETE FROM identities WHERE id IN($5,$6); DELETE FROM workspaces WHERE id=$7`, bindingID, approvalID, operationID, nodeID, requesterID, approverID, workspaceID)
+	}()
+	operationService := operationstore.New(pool)
+	server := &Server{rbac: rbac.New(pool), approvals: approvalstore.New(pool), configplans: configplanstore.New(pool, operationService)}
+	request := httptest.NewRequest(http.MethodGet, "/api/v1/approval-requests/"+approvalID.String(), nil)
+	request.SetPathValue("approval_id", approvalID.String())
+	if _, err := server.authorizeRoute(request, auth.Principal{IdentityID: approverID, Issuer: "integration"}); err != nil {
+		t.Fatalf("node-scoped config approver: %v", err)
 	}
 }
 

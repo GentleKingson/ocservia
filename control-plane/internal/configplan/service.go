@@ -6,7 +6,6 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"strings"
 	"time"
 
@@ -118,6 +117,8 @@ func (s *Service) Create(ctx context.Context, request CreateRequest) (Plan, bool
 		TTL: request.TTL, RequestID: request.RequestID, Traceparent: request.Traceparent,
 		ActorID: request.ActorID, ActorIdentityID: request.ActorIdentityID, ActorSessionID: request.ActorSessionID,
 		Action: "config.plan", Reason: request.Reason,
+		OcservVersion: ocservVersion, PlanCapabilities: rendered.RequiredCapabilities,
+		PlanMetadata: &operations.ConfigPlanMetadata{TemplateName: request.Template.Name, CandidateRedacted: rendered.Redacted, Warnings: rendered.Warnings, CreatedBy: request.ActorIdentityID},
 	})
 	if err != nil {
 		return Plan{}, false, err
@@ -125,17 +126,6 @@ func (s *Service) Create(ctx context.Context, request CreateRequest) (Plan, bool
 	planID, err := uuid.Parse(op.ID)
 	if err != nil {
 		return Plan{}, false, err
-	}
-	warnings, _ := json.Marshal(rendered.Warnings)
-	createdBy := any(request.ActorIdentityID)
-	if request.ActorIdentityID == uuid.Nil {
-		createdBy = nil
-	}
-	_, err = s.pool.Exec(ctx, `INSERT INTO config_plans(id,workspace_id,node_id,operation_id,template_name,expected_revision,candidate_hash,candidate_redacted,warnings,expires_at,created_by,created_at)
-		VALUES($1,$2,$3,$1,$4,$5,$6,$7,$8,$9,$10,$11) ON CONFLICT(id) DO NOTHING`,
-		planID, workspaceID, request.NodeID, request.Template.Name, request.ExpectedRevision, rendered.Hash[:], rendered.Redacted, warnings, op.ExpiresAt, createdBy, op.CreatedAt)
-	if err != nil {
-		return Plan{}, false, fmt.Errorf("record configuration plan: %w", err)
 	}
 	plan, err := s.Get(ctx, planID)
 	return plan, replayed, err

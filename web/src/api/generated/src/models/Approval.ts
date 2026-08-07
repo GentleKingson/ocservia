@@ -13,13 +13,20 @@
  */
 
 import { mapValues } from "../runtime";
-import type { ApprovalRequestSummary } from "./ApprovalRequestSummary";
+import type { ConfigPlanApprovalSummary } from "./ConfigPlanApprovalSummary";
 import {
-  ApprovalRequestSummaryFromJSON,
-  ApprovalRequestSummaryFromJSONTyped,
-  ApprovalRequestSummaryToJSON,
-  ApprovalRequestSummaryToJSONTyped,
-} from "./ApprovalRequestSummary";
+  ConfigPlanApprovalSummaryFromJSON,
+  ConfigPlanApprovalSummaryFromJSONTyped,
+  ConfigPlanApprovalSummaryToJSON,
+  ConfigPlanApprovalSummaryToJSONTyped,
+} from "./ConfigPlanApprovalSummary";
+import type { UserBatchItemRequest } from "./UserBatchItemRequest";
+import {
+  UserBatchItemRequestFromJSON,
+  UserBatchItemRequestFromJSONTyped,
+  UserBatchItemRequestToJSON,
+  UserBatchItemRequestToJSONTyped,
+} from "./UserBatchItemRequest";
 
 /**
  *
@@ -89,10 +96,16 @@ export interface Approval {
   requestHash?: string;
   /**
    *
-   * @type {ApprovalRequestSummary}
+   * @type {Array<UserBatchItemRequest>}
    * @memberof Approval
    */
-  requestSummary?: ApprovalRequestSummary;
+  requestSummary?: Array<UserBatchItemRequest>;
+  /**
+   *
+   * @type {ConfigPlanApprovalSummary}
+   * @memberof Approval
+   */
+  configPlanSummary?: ConfigPlanApprovalSummary;
   /**
    * RFC 3339 timestamp normalized to UTC.
    * @type {Date}
@@ -199,7 +212,13 @@ export function ApprovalFromJSONTyped(
     requestSummary:
       json["request_summary"] == null
         ? undefined
-        : ApprovalRequestSummaryFromJSON(json["request_summary"]),
+        : (json["request_summary"] as Array<any>).map(
+            UserBatchItemRequestFromJSON,
+          ),
+    configPlanSummary:
+      json["config_plan_summary"] == null
+        ? undefined
+        : ConfigPlanApprovalSummaryFromJSON(json["config_plan_summary"]),
     expiresAt: new Date(json["expires_at"]),
     createdAt: new Date(json["created_at"]),
   };
@@ -228,7 +247,15 @@ export function ApprovalToJSONTyped(
     reason: value["reason"],
     status: value["status"],
     request_hash: value["requestHash"],
-    request_summary: ApprovalRequestSummaryToJSON(value["requestSummary"]),
+    request_summary:
+      value["requestSummary"] == null
+        ? undefined
+        : (value["requestSummary"] as Array<any>).map(
+            UserBatchItemRequestToJSON,
+          ),
+    config_plan_summary: ConfigPlanApprovalSummaryToJSON(
+      value["configPlanSummary"],
+    ),
     expires_at: value["expiresAt"].toISOString(),
     created_at: value["createdAt"].toISOString(),
   };

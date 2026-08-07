@@ -3,7 +3,6 @@
 export * from "./Approval";
 export * from "./ApprovalDecision";
 export * from "./ApprovalRequest";
-export * from "./ApprovalRequestSummary";
 export * from "./AuditEventPage";
 export * from "./AuditVerification";
 export * from "./BreakGlassRequest";

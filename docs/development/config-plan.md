@@ -11,9 +11,12 @@ objects; the API does not accept secret values or caller-selected target paths.
 Equivalent inputs produce identical canonical output and a SHA-256 candidate
 hash.
 
-Privd writes the candidate only to a generated file beside the fixed Ocserv
-configuration, validates it with bounded parsing and the fixed Ocserv binary
-when no unresolved SecretRef remains, then removes the staging file. It
+Privd writes a validation candidate only to a generated file beside the fixed
+Ocserv configuration, validates every directive with a bounded structural parser, and
+validates the non-secret directive set with the fixed Ocserv binary. Unresolved
+SecretRef lines are omitted only from the native-parser staging input and are
+reported as a typed warning; no secret key is materialized. Privd then removes
+the staging file. It
 fingerprints the current configuration before and after validation and rejects
 the result if current state changed. Planning never replaces the current file
 and never reloads Ocserv.
