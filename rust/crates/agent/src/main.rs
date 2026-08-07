@@ -441,9 +441,10 @@ async fn execute_external_command(
                 }
             }
             Some(privd_response::Result::Error(error)) if terminal_privd_error(error.kind) => {
+                let code = terminal_privd_error_code(error.kind).unwrap_or("privd_rejected");
                 session
                     .command_executor
-                    .complete_external(&command, Err("privd_rejected"), now)
+                    .complete_external(&command, Err(code), now)
             }
             _ => session.command_executor.mark_external_unknown(
                 &command,
@@ -460,10 +461,17 @@ async fn execute_external_command(
 }
 
 fn terminal_privd_error(kind: i32) -> bool {
-    matches!(
-        ErrorKind::try_from(kind).unwrap_or(ErrorKind::Unspecified),
-        ErrorKind::InvalidRequest | ErrorKind::PermissionDenied | ErrorKind::MalformedOutput
-    )
+    terminal_privd_error_code(kind).is_some()
+}
+
+fn terminal_privd_error_code(kind: i32) -> Option<&'static str> {
+    match ErrorKind::try_from(kind).unwrap_or(ErrorKind::Unspecified) {
+        ErrorKind::CapacityExceeded => Some("capacity_exceeded"),
+        ErrorKind::InvalidRequest | ErrorKind::PermissionDenied | ErrorKind::MalformedOutput => {
+            Some("privd_rejected")
+        }
+        _ => None,
+    }
 }
 
 fn desired_resource(envelope: &CommandEnvelope) -> Option<(&'static str, &str, u64)> {
@@ -983,6 +991,12 @@ mod tests {
     #[test]
     fn authoritative_precondition_rejection_is_terminal() {
         assert!(terminal_privd_error(ErrorKind::InvalidRequest.into()));
+        assert!(terminal_privd_error(ErrorKind::CapacityExceeded.into()));
+        assert_eq!(
+            terminal_privd_error_code(ErrorKind::CapacityExceeded.into()),
+            Some("capacity_exceeded")
+        );
+        assert!(!terminal_privd_error(ErrorKind::OutputLimit.into()));
         assert!(!terminal_privd_error(ErrorKind::Unavailable.into()));
         assert!(!terminal_privd_error(ErrorKind::CommandFailed.into()));
     }

@@ -728,7 +728,10 @@ impl Adapter {
             output.extend_from_slice(record.hash.as_bytes());
             output.push(b'\n');
         }
-        parse_secret_user_records(&output)?;
+        parse_secret_user_records(&output).map_err(|error| match error {
+            AdapterError::OutputLimit => AdapterError::CapacityExceeded,
+            other => other,
+        })?;
         let mut staging = self.stage_user_file(&output).await?;
         self.commit_desired_staging(
             &mut staging,
@@ -1813,6 +1816,8 @@ pub enum AdapterError {
     DeadlineExceeded,
     /// stdout or stderr exceeded the configured bound.
     OutputLimit,
+    /// A desired mutation would exceed a bounded authoritative-state capacity.
+    CapacityExceeded,
     /// Fixed child returned nonzero.
     CommandFailed { code: Option<i32> },
     /// Output did not match a supported version fixture.
@@ -1830,6 +1835,7 @@ impl std::fmt::Display for AdapterError {
             Self::Unavailable => write!(formatter, "fixed local resource unavailable"),
             Self::DeadlineExceeded => write!(formatter, "fixed read operation timed out"),
             Self::OutputLimit => write!(formatter, "fixed read operation output limit exceeded"),
+            Self::CapacityExceeded => write!(formatter, "authoritative state capacity exceeded"),
             Self::CommandFailed { code } => {
                 write!(formatter, "fixed read operation failed (status {code:?})")
             }
@@ -1858,6 +1864,7 @@ impl From<AdapterError> for PrivdError {
             AdapterError::Unavailable | AdapterError::Io(_) => ErrorKind::Unavailable,
             AdapterError::DeadlineExceeded => ErrorKind::DeadlineExceeded,
             AdapterError::OutputLimit => ErrorKind::OutputLimit,
+            AdapterError::CapacityExceeded => ErrorKind::CapacityExceeded,
             AdapterError::CommandFailed { .. } => ErrorKind::CommandFailed,
         };
         Self {
@@ -2269,6 +2276,53 @@ mod tests {
         ));
         assert_eq!(std::fs::read(&users).expect("unchanged users"), applied);
         std::fs::remove_dir_all(directory).expect("cleanup");
+    }
+
+    #[tokio::test]
+    async fn aggregate_group_capacity_rejection_is_terminal_and_pre_effect() {
+        let directory =
+            std::env::temp_dir().join(format!("ocservia-group-aggregate-{}", Uuid::now_v7()));
+        std::fs::create_dir(&directory).expect("directory");
+        let users = directory.join("ocpasswd");
+        let mut original = Vec::new();
+        for index in 0..MAX_MANAGED_RESOURCES {
+            original.extend_from_slice(format!("user{index:03}:legacy:$6$test-hash\n").as_bytes());
+        }
+        std::fs::write(&users, &original).expect("initial users");
+        let effect_database = directory.join("effects.sqlite3");
+        let effect_key = directory.join("effects.key");
+        let resources = FixedResources::default()
+            .with_user_resources(
+                PathBuf::from("/bin/false"),
+                users.clone(),
+                PathBuf::from("/bin/false"),
+                directory.join("key.pem"),
+                String::from("test-key"),
+            )
+            .expect("resources")
+            .with_effect_store(effect_database.clone(), effect_key.clone())
+            .expect("effect resources");
+        let adapter = Adapter::new(resources, Limits::default());
+
+        let result = adapter
+            .group_apply("new-group", &["user000".to_owned()], 1, test_effect())
+            .await;
+
+        assert!(
+            matches!(result, Err(AdapterError::CapacityExceeded)),
+            "unexpected result: {result:?}"
+        );
+        assert_eq!(std::fs::read(&users).expect("unchanged users"), original);
+        assert!(!effect_database.exists());
+        assert!(!effect_key.exists());
+        std::fs::remove_dir_all(directory).expect("cleanup");
+    }
+
+    #[test]
+    fn capacity_error_has_a_distinct_privilege_boundary_kind() {
+        let error = PrivdError::from(AdapterError::CapacityExceeded);
+        assert_eq!(error.kind, i32::from(ErrorKind::CapacityExceeded));
+        assert_eq!(error.detail, "authoritative state capacity exceeded");
     }
 
     #[tokio::test]

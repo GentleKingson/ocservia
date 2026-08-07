@@ -25,6 +25,7 @@ import (
 
 var (
 	ErrInvalidRequest      = errors.New("user or group request is invalid")
+	ErrCapacityExceeded    = errors.New("managed user or group capacity exceeded")
 	ErrVersionConflict     = errors.New("desired state version is stale")
 	ErrNotFound            = errors.New("desired resource was not found")
 	ErrNodeUnavailable     = errors.New("node is unavailable")
@@ -279,21 +280,21 @@ func ensureMutationCapacity(ctx context.Context, tx pgx.Tx, request MutationRequ
 				return err
 			}
 		} else {
-			if err := tx.QueryRow(ctx, `SELECT count(*) FROM desired_groups WHERE node_id=$1`, request.NodeID).Scan(&count); err != nil {
+			if err := tx.QueryRow(ctx, `SELECT count(*) FROM (SELECT group_name FROM desired_groups WHERE node_id=$1 AND group_name<>$2 UNION SELECT o.group_name FROM observed_groups o JOIN node_observed_snapshots s ON s.node_id=o.node_id WHERE o.node_id=$1 AND o.group_name<>$2 AND s.last_heartbeat_at >= $3::timestamptz - interval '90 seconds') resources`, request.NodeID, request.Name, now).Scan(&count); err != nil {
 				return err
 			}
 		}
 		if count >= MaxManagedResources {
-			return ErrInvalidRequest
+			return ErrCapacityExceeded
 		}
 	}
 	if request.Kind == GroupApply {
 		var otherMemberships int
-		if err := tx.QueryRow(ctx, `SELECT COALESCE(sum(cardinality(members)),0) FROM desired_groups WHERE node_id=$1 AND group_name<>$2`, request.NodeID, request.Name).Scan(&otherMemberships); err != nil {
+		if err := tx.QueryRow(ctx, `SELECT count(*) FROM (SELECT d.group_name,unnest(d.members) member FROM desired_groups d WHERE d.node_id=$1 AND d.group_name<>$2 UNION SELECT o.group_name,unnest(o.members) member FROM observed_groups o JOIN node_observed_snapshots s ON s.node_id=o.node_id WHERE o.node_id=$1 AND o.group_name<>$2 AND s.last_heartbeat_at >= $3::timestamptz - interval '90 seconds') memberships`, request.NodeID, request.Name, now).Scan(&otherMemberships); err != nil {
 			return err
 		}
 		if otherMemberships+len(request.Members) > MaxManagedResources {
-			return ErrInvalidRequest
+			return ErrCapacityExceeded
 		}
 	}
 	return nil

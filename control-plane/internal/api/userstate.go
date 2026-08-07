@@ -165,6 +165,8 @@ func (s *Server) writeUserStateError(w http.ResponseWriter, r *http.Request, err
 	switch {
 	case errors.Is(err, userstate.ErrInvalidRequest):
 		writeProblem(w, r, http.StatusBadRequest, "https://ocservia.dev/problems/invalid-request", "Request is invalid", "the desired state request failed validation")
+	case errors.Is(err, userstate.ErrCapacityExceeded):
+		writeProblem(w, r, http.StatusConflict, "https://ocservia.dev/problems/capacity-exceeded", "Capacity is exceeded", "the node cannot accept another managed user, group, or membership")
 	case errors.Is(err, userstate.ErrVersionConflict):
 		writeProblem(w, r, http.StatusConflict, "https://ocservia.dev/problems/stale-revision", "Resource revision is stale", "the desired resource changed after this request was prepared")
 	case errors.Is(err, userstate.ErrIdempotencyConflict):

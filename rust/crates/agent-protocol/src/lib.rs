@@ -362,6 +362,8 @@ pub enum ErrorKind {
     MalformedOutput = 6,
     /// Fixed local resource was unavailable.
     Unavailable = 7,
+    /// A mutation would exceed a bounded authoritative-state capacity.
+    CapacityExceeded = 8,
 }
 
 /// A response from privd.

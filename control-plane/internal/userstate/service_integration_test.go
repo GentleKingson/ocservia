@@ -129,7 +129,7 @@ func TestManagedResourceAndMembershipCapacityIntegration(t *testing.T) {
 		t.Fatal(err)
 	}
 	request := mutation(nodeID, "capacity-group", GroupApply, "overflow", 0)
-	if _, _, err := service.Mutate(context.Background(), request); !errors.Is(err, ErrInvalidRequest) {
+	if _, _, err := service.Mutate(context.Background(), request); !errors.Is(err, ErrCapacityExceeded) {
 		t.Fatalf("managed group overflow was not rejected: %v", err)
 	}
 	first := mutation(nodeID, "membership-one", GroupApply, "group000", 1)
@@ -142,8 +142,38 @@ func TestManagedResourceAndMembershipCapacityIntegration(t *testing.T) {
 	}
 	second := mutation(nodeID, "membership-overflow", GroupApply, "group001", 1)
 	second.Members = []string{"alice"}
-	if _, _, err := service.Mutate(context.Background(), second); !errors.Is(err, ErrInvalidRequest) {
+	if _, _, err := service.Mutate(context.Background(), second); !errors.Is(err, ErrCapacityExceeded) {
 		t.Fatalf("aggregate membership overflow was not rejected: %v", err)
+	}
+}
+
+func TestFreshObservedGroupMembershipsBoundApplyCapacityIntegration(t *testing.T) {
+	service, pool, _, nodeID := integrationService(t, "active")
+	now := time.Now().UTC().Truncate(time.Microsecond)
+	service.now = func() time.Time { return now }
+	agentInstanceID := uuid.Must(uuid.NewV7())
+	if _, err := pool.Exec(context.Background(), `INSERT INTO node_observed_snapshots(node_id,observed_at,received_at,boot_id,agent_instance_id,agent_version,ocserv_version,os_release,ocserv,system,path,last_heartbeat_at) VALUES($1,$2,$2,'group-capacity-boot',$3,'test-agent','test-ocserv','test-os','{}','{}','{}',$2)`, nodeID, now, agentInstanceID); err != nil {
+		t.Fatal(err)
+	}
+	members := make([]string, MaxManagedResources)
+	for index := range members {
+		members[index] = fmt.Sprintf("user%03d", index)
+	}
+	if _, err := pool.Exec(context.Background(), `INSERT INTO observed_groups(node_id,group_name,members,revision,fingerprint,observed_at) VALUES($1,'legacy',$2,0,decode(repeat('00',32),'hex'),$3)`, nodeID, members, now); err != nil {
+		t.Fatal(err)
+	}
+
+	request := mutation(nodeID, "observed-membership-capacity", GroupApply, "new-group", 0)
+	request.Members = []string{"alice"}
+	if _, _, err := service.Mutate(context.Background(), request); !errors.Is(err, ErrCapacityExceeded) {
+		t.Fatalf("fresh observed membership capacity was not rejected: %v", err)
+	}
+	var desired, operations, commands int
+	if err := pool.QueryRow(context.Background(), `SELECT (SELECT count(*) FROM desired_groups WHERE node_id=$1),(SELECT count(*) FROM operations WHERE node_id=$1),(SELECT count(*) FROM commands WHERE node_id=$1)`, nodeID).Scan(&desired, &operations, &commands); err != nil {
+		t.Fatal(err)
+	}
+	if desired != 0 || operations != 0 || commands != 0 {
+		t.Fatalf("capacity rejection persisted desired=%d operations=%d commands=%d", desired, operations, commands)
 	}
 }
 
@@ -160,7 +190,7 @@ func TestFreshObservedUsersBoundCreateCapacityIntegration(t *testing.T) {
 	}
 
 	request := mutation(nodeID, "observed-capacity-user", UserCreate, "overflow", 0)
-	if _, _, err := service.Mutate(context.Background(), request); !errors.Is(err, ErrInvalidRequest) {
+	if _, _, err := service.Mutate(context.Background(), request); !errors.Is(err, ErrCapacityExceeded) {
 		t.Fatalf("fresh observed user capacity was not rejected: %v", err)
 	}
 	var desired, operations, commands int

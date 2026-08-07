@@ -502,6 +502,26 @@ func TestUnknownSchedulesExplicitReconcileThenSafeRetryIntegration(t *testing.T)
 	assertOutboxMode(agentv1.CommandDeliveryMode_COMMAND_DELIVERY_MODE_RETRY_IF_EFFECT_ABSENT)
 }
 
+func TestCapacityExceededResultFailsWithoutReconciliationIntegration(t *testing.T) {
+	fixture := newCommandResultFixture(t)
+	failed := fixture.validResult()
+	failed.State = agentv1.CommandResultState_COMMAND_RESULT_STATE_FAILED
+	failed.Result = nil
+	failed.ErrorCode = "capacity_exceeded"
+	if _, err := fixture.ingestResult(t, failed); err != nil {
+		t.Fatal(err)
+	}
+
+	var operationState, commandState, errorCode string
+	var recoveryEvents int
+	if err := fixture.pool.QueryRow(context.Background(), `SELECT (SELECT state FROM operations WHERE id=$1),(SELECT state FROM commands WHERE id=$2),(SELECT error_code FROM agent_command_results WHERE command_id=$2),(SELECT count(*) FROM outbox_events WHERE command_id=$2 AND published_at IS NULL)`, fixture.operationID, fixture.commandID).Scan(&operationState, &commandState, &errorCode, &recoveryEvents); err != nil {
+		t.Fatal(err)
+	}
+	if operationState != "failed" || commandState != "failed" || errorCode != "capacity_exceeded" || recoveryEvents != 0 {
+		t.Fatalf("capacity result operation=%s command=%s error=%s recovery=%d", operationState, commandState, errorCode, recoveryEvents)
+	}
+}
+
 func TestPrivdUnknownResultsScheduleReconcileOnlyIntegration(t *testing.T) {
 	for _, reason := range []string{"privd_transport_unknown", "privd_outcome_unknown"} {
 		t.Run(reason, func(t *testing.T) {
