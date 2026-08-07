@@ -34,6 +34,7 @@ type Decision struct {
 	ApprovalID, ApproverID, SessionID uuid.UUID
 	Reason                            string
 	RequestID                         string
+	ExpectedRequestHash               string
 }
 
 type Approval struct {
@@ -109,6 +110,9 @@ func (s *Service) Approve(ctx context.Context, decision Decision) (Approval, err
 	}
 	if approval.RequesterID == decision.ApproverID {
 		return Approval{}, ErrSelf
+	}
+	if approval.RequestHash != "" && decision.ExpectedRequestHash != approval.RequestHash {
+		return Approval{}, ErrNotReady
 	}
 	if approval.Status != "pending" || !approval.ExpiresAt.After(s.now()) {
 		return Approval{}, ErrNotReady

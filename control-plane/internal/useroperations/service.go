@@ -242,7 +242,7 @@ func readPolicy(ctx context.Context, q queryer, nodeID uuid.UUID, username strin
 		policy.Convergence = "converged"
 	case nodeStatus == "offline":
 		policy.Convergence = "offline_pending"
-	case operationState != nil && slices.Contains([]string{"queued", "running", "offline_pending"}, *operationState):
+	case operationState != nil && slices.Contains([]string{"queued", "dispatched", "accepted", "running", "offline_pending"}, *operationState):
 		policy.Convergence = "pending"
 	case triggerPending:
 		policy.Convergence = "pending"
@@ -344,7 +344,7 @@ func (s *Service) GetBatch(ctx context.Context, id uuid.UUID) (Batch, error) {
 func (s *Service) Metrics(ctx context.Context, workspaceID uuid.UUID) (Metrics, error) {
 	var value Metrics
 	err := s.pool.QueryRow(ctx, `SELECT
-		(SELECT count(*) FROM desired_user_policies policy JOIN nodes node ON node.id=policy.node_id JOIN desired_users desired USING(node_id,username) LEFT JOIN observed_user_usage usage ON usage.node_id=policy.node_id AND usage.username=policy.username AND usage.period=CASE WHEN policy.quota_period='monthly' THEN 'monthly' ELSE 'lifetime' END AND usage.period_start=CASE WHEN policy.quota_period='monthly' THEN date_trunc('month',now() AT TIME ZONE 'UTC') AT TIME ZONE 'UTC' ELSE '1970-01-01T00:00:00Z'::timestamptz END WHERE node.workspace_id=$1 AND desired.enabled=true AND ((policy.expires_at IS NOT NULL AND policy.expires_at<=now()) OR (policy.quota_period<>'none' AND CASE policy.quota_direction WHEN 'rx' THEN COALESCE(usage.rx_bytes,0)::numeric WHEN 'tx' THEN COALESCE(usage.tx_bytes,0)::numeric ELSE COALESCE(usage.rx_bytes,0)::numeric+COALESCE(usage.tx_bytes,0)::numeric END>=policy.quota_bytes::numeric))),
+		(SELECT count(*) FROM desired_user_policies policy JOIN nodes node ON node.id=policy.node_id JOIN desired_users desired USING(node_id,username) LEFT JOIN observed_users observed USING(node_id,username) LEFT JOIN observed_user_usage usage ON usage.node_id=policy.node_id AND usage.username=policy.username AND usage.period=CASE WHEN policy.quota_period='monthly' THEN 'monthly' ELSE 'lifetime' END AND usage.period_start=CASE WHEN policy.quota_period='monthly' THEN date_trunc('month',now() AT TIME ZONE 'UTC') AT TIME ZONE 'UTC' ELSE '1970-01-01T00:00:00Z'::timestamptz END WHERE node.workspace_id=$1 AND ((desired.enabled=true AND ((policy.expires_at IS NOT NULL AND policy.expires_at<=now()) OR (policy.quota_period<>'none' AND CASE policy.quota_direction WHEN 'rx' THEN COALESCE(usage.rx_bytes,0)::numeric WHEN 'tx' THEN COALESCE(usage.tx_bytes,0)::numeric ELSE COALESCE(usage.rx_bytes,0)::numeric+COALESCE(usage.tx_bytes,0)::numeric END>=policy.quota_bytes::numeric))) OR (EXISTS(SELECT 1 FROM user_policy_enforcements enforcement WHERE enforcement.node_id=policy.node_id AND enforcement.username=policy.username AND enforcement.policy_version=policy.version AND enforcement.operation_id IS NOT NULL) AND (observed.username IS NULL OR observed.enabled<>desired.enabled OR observed.revision<>desired.revision)))),
 		(SELECT count(*) FROM batch_operation_items item JOIN batch_operations batch ON batch.id=item.batch_id WHERE batch.workspace_id=$1 AND item.state IN('queued','submitting','submitted','offline_pending','unknown')),
 		(SELECT count(*) FROM batch_operation_items item JOIN batch_operations batch ON batch.id=item.batch_id WHERE batch.workspace_id=$1 AND item.state='submitting' AND item.lease_until<=now()),
 		(SELECT count(*) FROM batch_operation_items item JOIN batch_operations batch ON batch.id=item.batch_id WHERE batch.workspace_id=$1 AND item.state='unknown')`, workspaceID).Scan(&value.PolicyPendingTotal, &value.ActiveBatchItemTotal, &value.StaleBatchClaimTotal, &value.UnknownBatchItemTotal)
@@ -362,7 +362,11 @@ func (s *Service) RunOnce(ctx context.Context) error {
 	if err := s.refreshBatches(ctx); err != nil {
 		return err
 	}
-	remaining := s.batchSize
+	active, err := s.activeUserOperationCount(ctx)
+	if err != nil {
+		return err
+	}
+	remaining := max(0, s.batchSize-active)
 	used, err := s.resetMonthlyPolicies(ctx, remaining)
 	if err != nil {
 		return err
@@ -383,6 +387,12 @@ func (s *Service) RunOnce(ctx context.Context) error {
 	return s.refreshBatches(ctx)
 }
 
+func (s *Service) activeUserOperationCount(ctx context.Context) (int, error) {
+	var count int
+	err := s.pool.QueryRow(ctx, `SELECT count(*) FROM operations operation JOIN commands command ON command.operation_id=operation.id WHERE command.payload_type IN('user_disable','user_enable') AND operation.state IN('queued','dispatched','accepted','running','offline_pending','unknown')`).Scan(&count)
+	return count, err
+}
+
 func (s *Service) resetMonthlyPolicies(ctx context.Context, limit int) (int, error) {
 	if limit <= 0 {
 		return 0, nil
@@ -391,11 +401,11 @@ func (s *Service) resetMonthlyPolicies(ctx context.Context, limit int) (int, err
 	rows, err := s.pool.Query(ctx, `SELECT p.node_id,p.username,p.version,u.version,u.enabled,prior.resulting_user_version
 		FROM desired_user_policies p JOIN desired_users u USING(node_id,username)
 		LEFT JOIN observed_user_usage usage ON usage.node_id=p.node_id AND usage.username=p.username AND usage.period='monthly' AND usage.period_start=$1
-		JOIN LATERAL (SELECT resulting_user_version FROM user_policy_enforcements prior WHERE prior.node_id=p.node_id AND prior.username=p.username AND prior.policy_version=p.version AND prior.cause='quota' AND prior.period_start<$1 ORDER BY prior.period_start DESC LIMIT 1) prior ON true
+		JOIN LATERAL (SELECT resulting_user_version FROM user_policy_enforcements prior WHERE prior.node_id=p.node_id AND prior.username=p.username AND prior.policy_version=p.version AND prior.cause='quota' AND prior.period_start<$1 AND prior.operation_id IS NOT NULL ORDER BY prior.period_start DESC LIMIT 1) prior ON true
 		WHERE p.quota_period='monthly' AND (p.expires_at IS NULL OR p.expires_at>$2)
 		AND CASE p.quota_direction WHEN 'rx' THEN COALESCE(usage.rx_bytes,0)::numeric WHEN 'tx' THEN COALESCE(usage.tx_bytes,0)::numeric ELSE COALESCE(usage.rx_bytes,0)::numeric+COALESCE(usage.tx_bytes,0)::numeric END<p.quota_bytes::numeric
-		AND (u.enabled=true OR prior.resulting_user_version=u.version)
-		AND NOT EXISTS(SELECT 1 FROM user_policy_enforcements reset WHERE reset.node_id=p.node_id AND reset.username=p.username AND reset.policy_version=p.version AND reset.cause='quota_reset' AND reset.period_start=$1)
+		AND ((u.enabled=false AND prior.resulting_user_version=u.version) OR EXISTS(SELECT 1 FROM user_policy_enforcements pending WHERE pending.node_id=p.node_id AND pending.username=p.username AND pending.policy_version=p.version AND pending.cause='quota_reset' AND pending.period_start=$1 AND pending.operation_id IS NULL))
+		AND NOT EXISTS(SELECT 1 FROM user_policy_enforcements reset WHERE reset.node_id=p.node_id AND reset.username=p.username AND reset.policy_version=p.version AND reset.cause='quota_reset' AND reset.period_start=$1 AND reset.operation_id IS NOT NULL)
 		ORDER BY p.node_id,p.username LIMIT $3`, month, now, limit)
 	if err != nil {
 		return 0, err
@@ -419,15 +429,19 @@ func (s *Service) resetMonthlyPolicies(ctx context.Context, limit int) (int, err
 	processed := 0
 	for _, item := range candidates {
 		key := stableKey("policy-reset", item.nodeID.String(), item.username, fmt.Sprint(item.policyVersion), month.Format(time.RFC3339))
+		if _, err := s.pool.Exec(ctx, `INSERT INTO user_policy_enforcements(node_id,username,policy_version,cause,period_start,created_at) VALUES($1,$2,$3,'quota_reset',$4,$5) ON CONFLICT DO NOTHING`, item.nodeID, item.username, item.policyVersion, month, now); err != nil {
+			return 0, err
+		}
 		if item.enabled {
 			operationID, found, findErr := s.findUserOperation(ctx, item.nodeID, item.username, key, userstate.UserEnable)
 			if findErr != nil {
 				return 0, findErr
 			}
 			if !found {
+				_, _ = s.pool.Exec(ctx, `DELETE FROM user_policy_enforcements WHERE node_id=$1 AND username=$2 AND policy_version=$3 AND cause='quota_reset' AND period_start=$4 AND operation_id IS NULL`, item.nodeID, item.username, item.policyVersion, month)
 				continue
 			}
-			if _, err := s.pool.Exec(ctx, `INSERT INTO user_policy_enforcements(node_id,username,policy_version,cause,period_start,operation_id,resulting_user_version,created_at) VALUES($1,$2,$3,'quota_reset',$4,$5,$6,$7) ON CONFLICT DO NOTHING`, item.nodeID, item.username, item.policyVersion, month, operationID, item.userVersion, now); err != nil {
+			if _, err := s.pool.Exec(ctx, `UPDATE user_policy_enforcements SET operation_id=$5,resulting_user_version=$6 WHERE node_id=$1 AND username=$2 AND policy_version=$3 AND cause='quota_reset' AND period_start=$4 AND operation_id IS NULL`, item.nodeID, item.username, item.policyVersion, month, operationID, item.userVersion); err != nil {
 				return 0, err
 			}
 			processed++
@@ -444,7 +458,7 @@ func (s *Service) resetMonthlyPolicies(ctx context.Context, limit int) (int, err
 		if parseErr != nil {
 			return 0, parseErr
 		}
-		if _, err := s.pool.Exec(ctx, `INSERT INTO user_policy_enforcements(node_id,username,policy_version,cause,period_start,operation_id,resulting_user_version,created_at) VALUES($1,$2,$3,'quota_reset',$4,$5,$6,$7) ON CONFLICT DO NOTHING`, item.nodeID, item.username, item.policyVersion, month, operationID, item.userVersion+1, now); err != nil {
+		if _, err := s.pool.Exec(ctx, `UPDATE user_policy_enforcements SET operation_id=$5,resulting_user_version=$6 WHERE node_id=$1 AND username=$2 AND policy_version=$3 AND cause='quota_reset' AND period_start=$4 AND operation_id IS NULL`, item.nodeID, item.username, item.policyVersion, month, operationID, item.userVersion+1); err != nil {
 			return 0, err
 		}
 		processed++
@@ -478,7 +492,8 @@ func (s *Service) enforcePolicies(ctx context.Context, limit int) (int, error) {
 		FROM desired_user_policies p JOIN desired_users u USING(node_id,username)
 		LEFT JOIN observed_user_usage usage ON usage.node_id=p.node_id AND usage.username=p.username AND usage.period=CASE WHEN p.quota_period='monthly' THEN 'monthly' ELSE 'lifetime' END AND usage.period_start=CASE WHEN p.quota_period='monthly' THEN $2::timestamptz ELSE '1970-01-01T00:00:00Z'::timestamptz END
 		WHERE ((p.expires_at IS NOT NULL AND p.expires_at<=$1) OR (p.quota_period<>'none' AND CASE p.quota_direction WHEN 'rx' THEN COALESCE(usage.rx_bytes,0)::numeric WHEN 'tx' THEN COALESCE(usage.tx_bytes,0)::numeric ELSE COALESCE(usage.rx_bytes,0)::numeric+COALESCE(usage.tx_bytes,0)::numeric END>=p.quota_bytes::numeric))
-		AND NOT EXISTS(SELECT 1 FROM user_policy_enforcements e WHERE e.node_id=p.node_id AND e.username=p.username AND e.policy_version=p.version AND e.cause=CASE WHEN p.expires_at IS NOT NULL AND p.expires_at<=$1 THEN 'expiry' ELSE 'quota' END AND e.period_start=CASE WHEN p.quota_period='monthly' THEN $2::timestamptz ELSE '1970-01-01T00:00:00Z'::timestamptz END)
+		AND (u.enabled=true OR EXISTS(SELECT 1 FROM user_policy_enforcements pending WHERE pending.node_id=p.node_id AND pending.username=p.username AND pending.policy_version=p.version AND pending.cause=CASE WHEN p.expires_at IS NOT NULL AND p.expires_at<=$1 THEN 'expiry' ELSE 'quota' END AND pending.period_start=CASE WHEN p.quota_period='monthly' THEN $2::timestamptz ELSE '1970-01-01T00:00:00Z'::timestamptz END AND pending.operation_id IS NULL))
+		AND NOT EXISTS(SELECT 1 FROM user_policy_enforcements e WHERE e.node_id=p.node_id AND e.username=p.username AND e.policy_version=p.version AND e.cause=CASE WHEN p.expires_at IS NOT NULL AND p.expires_at<=$1 THEN 'expiry' ELSE 'quota' END AND e.period_start=CASE WHEN p.quota_period='monthly' THEN $2::timestamptz ELSE '1970-01-01T00:00:00Z'::timestamptz END AND e.operation_id IS NOT NULL)
 		ORDER BY p.node_id,p.username LIMIT $3`, now, month, limit)
 	if err != nil {
 		return 0, err
@@ -497,15 +512,19 @@ func (s *Service) enforcePolicies(ctx context.Context, limit int) (int, error) {
 	for _, item := range candidates {
 		key := stableKey("policy", item.nodeID.String(), item.username, fmt.Sprint(item.version), item.cause, item.periodStart.Format(time.RFC3339))
 		trace := stableTraceparent(key)
+		if _, err := s.pool.Exec(ctx, `INSERT INTO user_policy_enforcements(node_id,username,policy_version,cause,period_start,created_at) VALUES($1,$2,$3,$4,$5,$6) ON CONFLICT DO NOTHING`, item.nodeID, item.username, item.version, item.cause, item.periodStart, now); err != nil {
+			return 0, err
+		}
 		if !item.enabled {
 			operationID, found, findErr := s.findUserOperation(ctx, item.nodeID, item.username, key, userstate.UserDisable)
 			if findErr != nil {
 				return 0, findErr
 			}
 			if !found {
+				_, _ = s.pool.Exec(ctx, `DELETE FROM user_policy_enforcements WHERE node_id=$1 AND username=$2 AND policy_version=$3 AND cause=$4 AND period_start=$5 AND operation_id IS NULL`, item.nodeID, item.username, item.version, item.cause, item.periodStart)
 				continue
 			}
-			if _, err := s.pool.Exec(ctx, `INSERT INTO user_policy_enforcements(node_id,username,policy_version,cause,period_start,operation_id,resulting_user_version,created_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8) ON CONFLICT DO NOTHING`, item.nodeID, item.username, item.version, item.cause, item.periodStart, operationID, item.userVersion, now); err != nil {
+			if _, err := s.pool.Exec(ctx, `UPDATE user_policy_enforcements SET operation_id=$6,resulting_user_version=$7 WHERE node_id=$1 AND username=$2 AND policy_version=$3 AND cause=$4 AND period_start=$5 AND operation_id IS NULL`, item.nodeID, item.username, item.version, item.cause, item.periodStart, operationID, item.userVersion); err != nil {
 				return 0, err
 			}
 			processed++
@@ -522,7 +541,7 @@ func (s *Service) enforcePolicies(ctx context.Context, limit int) (int, error) {
 		if parseErr != nil {
 			return 0, parseErr
 		}
-		if _, err := s.pool.Exec(ctx, `INSERT INTO user_policy_enforcements(node_id,username,policy_version,cause,period_start,operation_id,resulting_user_version,created_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8) ON CONFLICT DO NOTHING`, item.nodeID, item.username, item.version, item.cause, item.periodStart, operationID, item.userVersion+1, now); err != nil {
+		if _, err := s.pool.Exec(ctx, `UPDATE user_policy_enforcements SET operation_id=$6,resulting_user_version=$7 WHERE node_id=$1 AND username=$2 AND policy_version=$3 AND cause=$4 AND period_start=$5 AND operation_id IS NULL`, item.nodeID, item.username, item.version, item.cause, item.periodStart, operationID, item.userVersion+1); err != nil {
 			return 0, err
 		}
 		processed++
@@ -596,7 +615,7 @@ func (s *Service) refreshBatches(ctx context.Context) error {
 	if _, err := s.pool.Exec(ctx, `WITH active AS (SELECT id FROM batch_operations WHERE state IN('queued','running','partial_failed') ORDER BY updated_at,id LIMIT $1) UPDATE batch_operation_items item SET state=CASE WHEN op.state='queued' AND node.status='offline' THEN 'offline_pending' WHEN op.state='succeeded' THEN 'succeeded' WHEN op.state IN('failed','expired','rolled_back') THEN 'failed' WHEN op.state='unknown' THEN 'unknown' WHEN op.state='offline_pending' THEN 'offline_pending' ELSE item.state END,error_type=CASE WHEN op.state IN('failed','expired','rolled_back') THEN op.state ELSE item.error_type END,updated_at=now() FROM operations op JOIN nodes node ON node.id=op.node_id,active WHERE item.batch_id=active.id AND item.child_operation_id=op.id AND item.state IN('submitted','unknown','offline_pending')`, MaxBatchRefresh); err != nil {
 		return err
 	}
-	_, err := s.pool.Exec(ctx, `WITH active AS (SELECT id FROM batch_operations WHERE state IN('queued','running','partial_failed') ORDER BY updated_at,id LIMIT $1),summary AS (SELECT item.batch_id,CASE WHEN bool_or(item.state IN('queued','submitting','submitted','unknown','offline_pending')) THEN CASE WHEN bool_or(item.state IN('failed','forbidden')) THEN 'partial_failed' ELSE 'running' END WHEN bool_and(item.state='succeeded') THEN 'succeeded' WHEN bool_or(item.state='succeeded') THEN 'partial_failed' ELSE 'failed' END state FROM batch_operation_items item JOIN active ON active.id=item.batch_id GROUP BY item.batch_id) UPDATE batch_operations batch SET state=summary.state,updated_at=now() FROM summary WHERE batch.id=summary.batch_id AND batch.state<>summary.state`, MaxBatchRefresh)
+	_, err := s.pool.Exec(ctx, `WITH active AS (SELECT id FROM batch_operations WHERE state IN('queued','running','partial_failed') ORDER BY updated_at,id LIMIT $1),summary AS (SELECT item.batch_id,CASE WHEN bool_or(item.state IN('queued','submitting','submitted','unknown','offline_pending')) THEN CASE WHEN bool_or(item.state IN('failed','forbidden')) THEN 'partial_failed' ELSE 'running' END WHEN bool_and(item.state='succeeded') THEN 'succeeded' WHEN bool_or(item.state='succeeded') THEN 'partial_failed' ELSE 'failed' END state FROM batch_operation_items item JOIN active ON active.id=item.batch_id GROUP BY item.batch_id) UPDATE batch_operations batch SET state=summary.state,updated_at=now() FROM summary WHERE batch.id=summary.batch_id`, MaxBatchRefresh)
 	return err
 }
 

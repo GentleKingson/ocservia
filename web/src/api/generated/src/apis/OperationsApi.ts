@@ -167,6 +167,10 @@ export interface EnableNodeUserRequest {
   ifMatch?: string;
 }
 
+export interface GetApprovalRequestRequest {
+  approvalId: string;
+}
+
 export interface GetOperationRequest {
   operationId: string;
 }
@@ -1111,6 +1115,76 @@ export class OperationsApi extends runtime.BaseAPI {
     initOverrides?: RequestInit | runtime.InitOverrideFunction,
   ): Promise<Operation> {
     const response = await this.enableNodeUserRaw(
+      requestParameters,
+      initOverrides,
+    );
+    return await response.value();
+  }
+
+  /**
+   * Creates request options for getApprovalRequest without sending the request
+   */
+  async getApprovalRequestRequestOpts(
+    requestParameters: GetApprovalRequestRequest,
+  ): Promise<runtime.RequestOpts> {
+    if (requestParameters["approvalId"] == null) {
+      throw new runtime.RequiredError(
+        "approvalId",
+        'Required parameter "approvalId" was null or undefined when calling getApprovalRequest().',
+      );
+    }
+
+    const queryParameters: any = {};
+
+    const headerParameters: runtime.HTTPHeaders = {};
+
+    if (this.configuration && this.configuration.accessToken) {
+      const token = this.configuration.accessToken;
+      const tokenString = await token("bearerAuth", []);
+
+      if (tokenString) {
+        headerParameters["Authorization"] = `Bearer ${tokenString}`;
+      }
+    }
+
+    let urlPath = `/approval-requests/{approval_id}`;
+    urlPath = urlPath.replace(
+      "{approval_id}",
+      encodeURIComponent(String(requestParameters["approvalId"])),
+    );
+
+    return {
+      path: urlPath,
+      method: "GET",
+      headers: headerParameters,
+      query: queryParameters,
+    };
+  }
+
+  /**
+   * Inspect immutable approval details before deciding
+   */
+  async getApprovalRequestRaw(
+    requestParameters: GetApprovalRequestRequest,
+    initOverrides?: RequestInit | runtime.InitOverrideFunction,
+  ): Promise<runtime.ApiResponse<Approval>> {
+    const requestOptions =
+      await this.getApprovalRequestRequestOpts(requestParameters);
+    const response = await this.request(requestOptions, initOverrides);
+
+    return new runtime.JSONApiResponse(response, (jsonValue) =>
+      ApprovalFromJSON(jsonValue),
+    );
+  }
+
+  /**
+   * Inspect immutable approval details before deciding
+   */
+  async getApprovalRequest(
+    requestParameters: GetApprovalRequestRequest,
+    initOverrides?: RequestInit | runtime.InitOverrideFunction,
+  ): Promise<Approval> {
+    const response = await this.getApprovalRequestRaw(
       requestParameters,
       initOverrides,
     );

@@ -162,6 +162,8 @@ func routeAction(r *http.Request) string {
 		return "node.revoke"
 	case strings.HasSuffix(path, ":approve") && strings.Contains(path, "/approval-requests/"):
 		return "approval.approve"
+	case r.Method == http.MethodGet && strings.HasPrefix(path, "/api/v1/approval-requests/"):
+		return "approval.approve"
 	case path == "/api/v1/approval-requests":
 		return "approval.request"
 	case strings.HasPrefix(path, "/api/v1/audit"):

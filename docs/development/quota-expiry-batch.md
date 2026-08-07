@@ -35,8 +35,9 @@ generates the UUIDv7 batch identifier first, obtains approval for action
 `batch_items` list in the approval request. The approval response exposes the
 canonical SHA-256 and reviewed items. The later batch must match both the batch
 identifier and content hash before the approval can be consumed. The client then
-submits the approval in `X-Approval-ID`. Enable-only batches do not require
-approval.
+has the independent approver read `GET /approval-requests/{approval_id}` and
+submit that digest as `expected_request_hash` with the decision. The client then
+submits the approval in `X-Approval-ID`. Enable-only batches do not require approval.
 
 `GET /api/v1/user-operations/metrics` returns workspace-scoped pending-policy,
 active-item, expired-claim, and unknown-item counters. Alert when

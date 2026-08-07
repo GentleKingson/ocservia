@@ -63,10 +63,11 @@ CREATE TABLE user_policy_enforcements (
     policy_version bigint NOT NULL CHECK (policy_version > 0),
     cause text NOT NULL CHECK (cause IN ('quota', 'expiry', 'quota_reset')),
     period_start timestamptz NOT NULL,
-    operation_id uuid NOT NULL REFERENCES operations(id) ON DELETE RESTRICT,
-    resulting_user_version bigint NOT NULL CHECK (resulting_user_version > 0),
+    operation_id uuid REFERENCES operations(id) ON DELETE RESTRICT,
+    resulting_user_version bigint CHECK (resulting_user_version > 0),
     created_at timestamptz NOT NULL,
-    PRIMARY KEY (node_id, username, policy_version, cause, period_start)
+    PRIMARY KEY (node_id, username, policy_version, cause, period_start),
+    CHECK ((operation_id IS NULL) = (resulting_user_version IS NULL))
 );
 
 ALTER TABLE approval_requests

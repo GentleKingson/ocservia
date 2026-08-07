@@ -24,7 +24,8 @@ type createApprovalRequest struct {
 }
 
 type approvalDecision struct {
-	Reason string `json:"reason"`
+	Reason              string `json:"reason"`
+	ExpectedRequestHash string `json:"expected_request_hash,omitempty"`
 }
 
 func (s *Server) createApproval(w http.ResponseWriter, r *http.Request) {
@@ -97,7 +98,21 @@ func (s *Server) approveRequest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	actor := principal(r)
-	value, err := s.approvals.Approve(r.Context(), approvals.Decision{ApprovalID: id, ApproverID: actor.IdentityID, SessionID: actor.SessionID, Reason: body.Reason, RequestID: requestID(r)})
+	value, err := s.approvals.Approve(r.Context(), approvals.Decision{ApprovalID: id, ApproverID: actor.IdentityID, SessionID: actor.SessionID, Reason: body.Reason, RequestID: requestID(r), ExpectedRequestHash: strings.TrimSpace(body.ExpectedRequestHash)})
+	if err != nil {
+		writeApprovalError(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, value)
+}
+
+func (s *Server) getApproval(w http.ResponseWriter, r *http.Request) {
+	id, err := uuid.Parse(r.PathValue("approval_id"))
+	if err != nil || id.Version() != 7 {
+		writeProblem(w, r, http.StatusBadRequest, "https://ocservia.dev/problems/invalid-id", "Invalid identifier", "approval_id must be UUIDv7")
+		return
+	}
+	value, err := s.approvals.Get(r.Context(), id)
 	if err != nil {
 		writeApprovalError(w, r, err)
 		return

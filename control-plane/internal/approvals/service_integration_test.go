@@ -65,6 +65,22 @@ func TestTwoPersonApprovalAndSingleConsumptionIntegration(t *testing.T) {
 	if err := Consume(ctx, tx, approval.ID, workspaceID, requesterID, "service.reload", "node", nodeID); !errors.Is(err, ErrNotReady) {
 		t.Fatalf("reused approval error = %v", err)
 	}
+	boundHash := make([]byte, 32)
+	boundHash[0] = 0x42
+	bound, err := service.Create(ctx, Request{WorkspaceID: workspaceID, RequesterID: requesterID, ResourceID: uuid.Must(uuid.NewV7()), Action: "user.batch.disable", ResourceType: "batch_operation", Reason: "bulk review", TTL: time.Hour, SessionID: requesterSession, RequestID: "request-bound", RequestHash: boundHash, RequestSummary: []byte(`[{"node_id":"019fc0a4-6d92-765c-a8a1-4af556614cc3","username":"alice","action":"disable","expected_version":1}]`)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	details, err := service.Get(ctx, bound.ID)
+	if err != nil || details.RequestHash == "" || len(details.RequestSummary) == 0 {
+		t.Fatalf("bound approval details=%+v err=%v", details, err)
+	}
+	if _, err := service.Approve(ctx, Decision{ApprovalID: bound.ID, ApproverID: approverID, SessionID: approverSession, Reason: "wrong digest", RequestID: "request-bound-wrong", ExpectedRequestHash: "wrong"}); !errors.Is(err, ErrNotReady) {
+		t.Fatalf("wrong bound hash approval err=%v", err)
+	}
+	if _, err := service.Approve(ctx, Decision{ApprovalID: bound.ID, ApproverID: approverID, SessionID: approverSession, Reason: "reviewed details", RequestID: "request-bound-approve", ExpectedRequestHash: details.RequestHash}); err != nil {
+		t.Fatalf("approve reviewed bound content: %v", err)
+	}
 	var auditCount int
 	if err := pool.QueryRow(ctx, `SELECT count(*) FROM audit_events WHERE workspace_id=$1 AND approval_id=$2`, workspaceID, approval.ID).Scan(&auditCount); err != nil || auditCount != 2 {
 		t.Fatalf("approval audit count = %d, %v", auditCount, err)

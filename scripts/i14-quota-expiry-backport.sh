@@ -18,8 +18,12 @@ jq -e '
   .schema_version == 1 and
   .repository == "https://github.com/mmtaee/ocserv-dashboard" and
   .license == "MIT" and
+  .license_blob == "ce7caf5a71c20fd589b9e5c251554afc6efa3681" and
   .old.commit == "b8f59026c4d879f40c1da43dc00d97e34f9790bc" and
   .new.commit == "4d25478580d899b77460bdf0cf0a590cfdd26030" and
+  .diff.ahead_by == 2 and .diff.total_commits == 2 and
+  .diff.patch_file == "docs/upstream/v4.9-post1.patch" and
+  .diff.patch_sha256 == "be9b113b2c2d5f32acf146f361bd2edfd32464708343db910fc1174eba7cc25a" and
   .diff.files == ["web/src/components/auth/SetupForm.vue"] and
   .diff.dependencies == [] and .diff.migrations == [] and
   .diff.security_sensitive_files == [] and
@@ -28,6 +32,9 @@ jq -e '
   (.classification.D | length) == 4 and
   .adaptation.verbatim_upstream_files == []
 ' "${manifest}" >/dev/null
+printf '%s  %s\n' \
+  "$(jq -r '.diff.patch_sha256' "${manifest}")" \
+  "${ROOT}/$(jq -r '.diff.patch_file' "${manifest}")" | shasum -a 256 -c -
 test -f "${ROOT}/web/src/upstream/UserPolicyFields.vue"
 test -f "${ROOT}/web/src/adapters/user-policy.ts"
 
@@ -35,19 +42,18 @@ rejected_boundary_pattern='occtl|systemctl|docker[.]sock|/etc/ocserv|/proc|/sys|
 if command -v rg >/dev/null 2>&1; then
   boundary_scanner='rg'
   boundary_matches() {
-    rg -n "${rejected_boundary_pattern}" "$@"
+    rg -n --glob '!**/*_test.go' --glob '!api/generated/**' "${rejected_boundary_pattern}" "$@"
   }
 else
   boundary_scanner='grep'
   boundary_matches() {
-    grep -REnE "${rejected_boundary_pattern}" "$@"
+    grep -REnE --exclude='*_test.go' --exclude-dir=generated "${rejected_boundary_pattern}" "$@"
   }
 fi
 
 if boundary_matches \
-  "${ROOT}/control-plane/internal/useroperations" \
-  "${ROOT}/web/src/upstream" \
-  "${ROOT}/web/src/adapters"; then
+  "${ROOT}/control-plane/internal" \
+  "${ROOT}/web/src"; then
   echo "I14 imported a rejected local-execution boundary" >&2
   exit 1
 fi

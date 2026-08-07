@@ -775,6 +775,7 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/UserOperationMetrics" }
+        "403": { $ref: "#/components/responses/Problem" }
         default: { $ref: "#/components/responses/Problem" }
   /nodes/{node_id}/groups/{group_name}:
     put:
@@ -934,6 +935,25 @@ paths:
           description: Pending approval created.
           content: { application/json: { schema: { $ref: "#/components/schemas/Approval" } } }
         "403": { $ref: "#/components/responses/Problem" }
+        default: { $ref: "#/components/responses/Problem" }
+  /approval-requests/{approval_id}:
+    get:
+      operationId: getApprovalRequest
+      summary: Inspect immutable approval details before deciding
+      tags: [operations]
+      parameters:
+        - name: approval_id
+          in: path
+          required: true
+          schema: { $ref: "#/components/schemas/UuidV7" }
+      responses:
+        "200":
+          description: Approval details including any content-bound hash and item summary.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Approval" }
+        "403": { $ref: "#/components/responses/Problem" }
+        "404": { $ref: "#/components/responses/Problem" }
         default: { $ref: "#/components/responses/Problem" }
   /approval-requests/{approval_id}:approve:
     post:
@@ -1804,6 +1824,10 @@ components:
       required: [reason]
       properties:
         reason: { type: string, minLength: 1, maxLength: 512 }
+        expected_request_hash:
+          type: string
+          pattern: "^[0-9a-f]{64}$"
+          description: Required when approving a content-bound request; must match the details read before deciding.
     Approval:
       type: object
       additionalProperties: false

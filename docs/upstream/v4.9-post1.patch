@@ -1,0 +1,12 @@
+diff --git a/web/src/components/auth/SetupForm.vue b/web/src/components/auth/SetupForm.vue
+--- a/web/src/components/auth/SetupForm.vue
++++ b/web/src/components/auth/SetupForm.vue
+@@ -112,7 +112,7 @@ const data = reactive<SystemSetupSystem>({
+                         </v-label>
+                         <v-text-field
+                             :disabled="!data.auto_delete_inactive_users"
+-                            v-model="data.keep_inactive_user_days"
++                            v-model.number="data.keep_inactive_user_days"
+                             color="primary"
+                             hide-details
+                             type="text"
