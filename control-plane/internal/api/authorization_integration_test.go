@@ -107,8 +107,8 @@ func TestCertificateRoutesUseNodeScopedAuthorizationIntegration(t *testing.T) {
 	response := &failingArtifactWriter{header: make(http.Header)}
 	server.downloadArtifact(response, request)
 	var artifactState string
-	if err := pool.QueryRow(ctx, `SELECT state FROM artifact_operations WHERE id=$1`, artifactID).Scan(&artifactState); err != nil || artifactState != "ready" {
-		t.Fatalf("interrupted download state=%q err=%v", artifactState, err)
+	if err := pool.QueryRow(ctx, `SELECT state FROM artifact_operations WHERE id=$1`, artifactID).Scan(&artifactState); err != nil || artifactState != "consumed" {
+		t.Fatalf("one-time download state=%q err=%v", artifactState, err)
 	}
 }
 

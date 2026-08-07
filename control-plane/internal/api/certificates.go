@@ -188,13 +188,12 @@ func (s *Server) downloadArtifact(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Disposition", `attachment; filename="certificate.p12"`)
 	w.Header().Set("Content-Length", fmt.Sprintf("%d", download.Size))
 	w.Header().Set("Cache-Control", "no-store")
-	written, writeErr := w.Write(data)
-	if writeErr != nil || written != len(data) {
-		_ = s.certificates.AbortArtifact(context.WithoutCancel(r.Context()), id)
+	actor := principal(r)
+	if err := s.certificates.CompleteArtifact(context.WithoutCancel(r.Context()), id, digest[:], int64(len(data)), actor.IdentityID, actor.SessionID, requestID(r)); err != nil {
+		writeCertificateError(w, r, err)
 		return
 	}
-	actor := principal(r)
-	_ = s.certificates.CompleteArtifact(context.WithoutCancel(r.Context()), id, digest[:], int64(len(data)), actor.IdentityID, actor.SessionID, requestID(r))
+	_, _ = w.Write(data)
 }
 
 func (s *Server) getCertificate(w http.ResponseWriter, r *http.Request) {
