@@ -13,6 +13,7 @@ import (
 
 	"github.com/GentleKingson/ocservia/control-plane/internal/enrollment"
 	"github.com/GentleKingson/ocservia/control-plane/internal/localslice"
+	operationstore "github.com/GentleKingson/ocservia/control-plane/internal/operations"
 	"github.com/GentleKingson/ocservia/control-plane/internal/userstate"
 )
 
@@ -70,6 +71,25 @@ func TestUserStateCapacityErrorUsesConflictProblem(t *testing.T) {
 		t.Fatal(err)
 	}
 	if problem.Type != "https://ocservia.dev/problems/capacity-exceeded" {
+		t.Fatalf("problem type = %q", problem.Type)
+	}
+}
+
+func TestOperationBacklogErrorUsesServiceUnavailableProblem(t *testing.T) {
+	server := &Server{logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/nodes/node/synthetic-commands", nil)
+	response := httptest.NewRecorder()
+	server.writeOperationError(response, request, operationstore.ErrBacklogExceeded)
+	if response.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d", response.Code)
+	}
+	var problem struct {
+		Type string `json:"type"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &problem); err != nil {
+		t.Fatal(err)
+	}
+	if problem.Type != "https://ocservia.dev/problems/command-backlog-exceeded" {
 		t.Fatalf("problem type = %q", problem.Type)
 	}
 }

@@ -14,9 +14,11 @@ import (
 	agentv1 "github.com/GentleKingson/ocservia/control-plane/gen/proto/ocserv/platform/agent/v1"
 	transportv1 "github.com/GentleKingson/ocservia/control-plane/gen/proto/ocserv/platform/transport/v1"
 	"github.com/GentleKingson/ocservia/control-plane/internal/audit"
+	"github.com/GentleKingson/ocservia/control-plane/internal/commandlimit"
 	"github.com/GentleKingson/ocservia/control-plane/internal/localslice"
 	operationstore "github.com/GentleKingson/ocservia/control-plane/internal/operations"
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/timestamppb"
@@ -826,7 +828,11 @@ func TestExpiredLeaseStaysChargedUntilReapedIntegration(t *testing.T) {
 	if _, err := pool.Exec(context.Background(), `INSERT INTO nodes(id,workspace_id,name,status,version,created_at,updated_at) VALUES($1,$2,$3,'active',1,now(),now())`, secondNodeID, workspaceID, "lease-"+secondNodeID.String()); err != nil {
 		t.Fatal(err)
 	}
-	service := operationstore.NewWithConcurrency(pool, 1)
+	var baseline int
+	if err := pool.QueryRow(context.Background(), `SELECT count(*) FROM (SELECT operation.id FROM operations operation JOIN commands command ON command.operation_id=operation.id WHERE operation.state IN('dispatched','accepted','running','unknown') UNION SELECT command.operation_id FROM node_command_leases lease JOIN commands command ON command.id=lease.command_id) active`).Scan(&baseline); err != nil {
+		t.Fatal(err)
+	}
+	service := operationstore.NewWithConcurrency(pool, baseline+1)
 	for index, nodeID := range []uuid.UUID{firstNodeID, secondNodeID} {
 		key := fmt.Sprintf("lease-cap-%d", index)
 		if _, _, err := service.CreateSynthetic(context.Background(), operationstore.CreateRequest{NodeID: nodeID, IdempotencyKey: key, ExpectedVersion: 1, Kind: operationstore.SyntheticNoop, TTL: time.Minute, RequestID: "request-" + key, Traceparent: testTraceparent}); err != nil {
@@ -897,6 +903,102 @@ func TestDispatchCandidateFairnessAcrossNodesIntegration(t *testing.T) {
 	}
 	if len(dispatches) != 2 || !seen[busyNodeID] || !seen[otherNodeID] {
 		t.Fatalf("cross-node candidate fairness=%+v", dispatches)
+	}
+}
+
+func TestNodeBacklogBoundaryConcurrencyAndReplayIntegration(t *testing.T) {
+	_, pool, workspaceID, nodeID := integrationService(t, "active")
+	seedQueuedOperations(t, pool, workspaceID, []uuid.UUID{nodeID}, commandlimit.MaxNodeBacklog-1)
+	service := operationstore.New(pool)
+	requests := []operationstore.CreateRequest{
+		{NodeID: nodeID, IdempotencyKey: "node-boundary-a", ExpectedVersion: 1, Kind: operationstore.SyntheticNoop, TTL: time.Minute, RequestID: "request-node-boundary-a", Traceparent: testTraceparent},
+		{NodeID: nodeID, IdempotencyKey: "node-boundary-b", ExpectedVersion: 1, Kind: operationstore.SyntheticNoop, TTL: time.Minute, RequestID: "request-node-boundary-b", Traceparent: testTraceparent},
+	}
+	start := make(chan struct{})
+	type result struct {
+		index int
+		err   error
+	}
+	results := make(chan result, 2)
+	for index, request := range requests {
+		go func(index int, request operationstore.CreateRequest) {
+			<-start
+			_, _, err := service.CreateSynthetic(context.Background(), request)
+			results <- result{index: index, err: err}
+		}(index, request)
+	}
+	close(start)
+	winner, successes, rejected := -1, 0, 0
+	for range 2 {
+		result := <-results
+		if result.err == nil {
+			winner, successes = result.index, successes+1
+		} else if errors.Is(result.err, operationstore.ErrBacklogExceeded) {
+			rejected++
+		} else {
+			t.Fatalf("unexpected node backlog result: %v", result.err)
+		}
+	}
+	if successes != 1 || rejected != 1 {
+		t.Fatalf("node backlog boundary successes=%d rejected=%d", successes, rejected)
+	}
+	if _, replayed, err := service.CreateSynthetic(context.Background(), requests[winner]); err != nil || !replayed {
+		t.Fatalf("idempotent replay at backlog capacity replayed=%v err=%v", replayed, err)
+	}
+}
+
+func TestWorkspaceBacklogBoundaryAcrossNodesIntegration(t *testing.T) {
+	_, pool, workspaceID, firstNodeID := integrationService(t, "active")
+	nodeIDs := []uuid.UUID{firstNodeID}
+	for index := 0; index < 10; index++ {
+		nodeID := uuid.Must(uuid.NewV7())
+		if _, err := pool.Exec(context.Background(), `INSERT INTO nodes(id,workspace_id,name,status,version,created_at,updated_at) VALUES($1,$2,$3,'active',1,now(),now())`, nodeID, workspaceID, fmt.Sprintf("workspace-bound-%02d", index)); err != nil {
+			t.Fatal(err)
+		}
+		nodeIDs = append(nodeIDs, nodeID)
+	}
+	seedQueuedOperations(t, pool, workspaceID, nodeIDs, commandlimit.MaxWorkspaceBacklog-1)
+	service := operationstore.New(pool)
+	requests := []operationstore.CreateRequest{
+		{NodeID: nodeIDs[9], IdempotencyKey: "workspace-boundary-a", ExpectedVersion: 1, Kind: operationstore.SyntheticNoop, TTL: time.Minute, RequestID: "request-workspace-boundary-a", Traceparent: testTraceparent},
+		{NodeID: nodeIDs[10], IdempotencyKey: "workspace-boundary-b", ExpectedVersion: 1, Kind: operationstore.SyntheticNoop, TTL: time.Minute, RequestID: "request-workspace-boundary-b", Traceparent: testTraceparent},
+	}
+	start := make(chan struct{})
+	results := make(chan error, 2)
+	for _, request := range requests {
+		go func(request operationstore.CreateRequest) {
+			<-start
+			_, _, err := service.CreateSynthetic(context.Background(), request)
+			results <- err
+		}(request)
+	}
+	close(start)
+	successes, rejected := 0, 0
+	for range 2 {
+		err := <-results
+		if err == nil {
+			successes++
+		} else if errors.Is(err, operationstore.ErrBacklogExceeded) {
+			rejected++
+		} else {
+			t.Fatalf("unexpected workspace backlog result: %v", err)
+		}
+	}
+	if successes != 1 || rejected != 1 {
+		t.Fatalf("workspace backlog boundary successes=%d rejected=%d", successes, rejected)
+	}
+}
+
+func seedQueuedOperations(t *testing.T, pool *pgxpool.Pool, workspaceID uuid.UUID, nodeIDs []uuid.UUID, count int) {
+	t.Helper()
+	now := time.Now().UTC()
+	rows := make([][]any, 0, count)
+	for index := 0; index < count; index++ {
+		rows = append(rows, []any{uuid.Must(uuid.NewV7()), workspaceID, nodeIDs[index%len(nodeIDs)], "queued", int64(1), fmt.Sprintf("backlog-seed-%d", index), now, now})
+	}
+	inserted, err := pool.CopyFrom(context.Background(), pgx.Identifier{"operations"}, []string{"id", "workspace_id", "node_id", "state", "version", "request_id", "created_at", "updated_at"}, pgx.CopyFromRows(rows))
+	if err != nil || inserted != int64(count) {
+		t.Fatalf("seed queued operations inserted=%d err=%v", inserted, err)
 	}
 }
 

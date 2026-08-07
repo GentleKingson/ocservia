@@ -169,10 +169,13 @@ func (s *Server) createSyntheticCommand(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	requestID, _ := r.Context().Value(requestIDKey{}).(string)
+	actor := principal(r)
 	operation, replayed, err := s.operations.CreateSynthetic(r.Context(), operationstore.CreateRequest{
 		NodeID: nodeID, IdempotencyKey: idempotencyKey, ExpectedVersion: expectedVersion,
 		Kind: body.Kind, Message: body.Message, SupersedePending: body.SupersedePending,
 		TTL: time.Duration(ttl) * time.Second, RequestID: requestID, Traceparent: requestTraceparent(r),
+		ActorID: actorID(r), ActorIdentityID: actor.IdentityID, ActorSessionID: actor.SessionID,
+		Action: "operation.create", Reason: "operator synthetic command",
 	})
 	if err != nil {
 		s.writeOperationError(w, r, err)
