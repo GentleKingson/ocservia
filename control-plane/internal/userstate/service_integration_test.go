@@ -5,7 +5,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"maps"
 	"os"
 	"slices"
 	"strings"
@@ -566,12 +565,6 @@ func TestSameKindSupersedeCoalescesAgentRevisionIntegration(t *testing.T) {
 	if !claimed[uuid.MustParse(*secondRotate.CommandID)] || !claimed[uuid.MustParse(*secondGroup.CommandID)] {
 		t.Fatalf("coalesced commands did not become dispatchable: %+v", claimed)
 	}
-}
-
-func mapsEqual(left, right map[MutationKind]map[string]int) bool {
-	return maps.EqualFunc(left, right, func(leftStates, rightStates map[string]int) bool {
-		return maps.Equal(leftStates, rightStates)
-	})
 }
 
 func mutation(nodeID uuid.UUID, key string, kind MutationKind, name string, version int64) MutationRequest {
