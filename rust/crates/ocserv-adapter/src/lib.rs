@@ -3599,9 +3599,9 @@ mod tests {
         let users = directory.join("ocpasswd");
         let original = b"alice:staff:!$6$original-hash\n";
         std::fs::write(&users, original).expect("original");
-        let openssl = executable("openssl-fast", "printf rotated-password");
+        let openssl = executable("openssl-fast", "cat >/dev/null; printf rotated-password");
         let openssl_directory = openssl.parent().expect("openssl parent").to_owned();
-        let slow_ocpasswd = executable("ocpasswd-slow", "sleep 5");
+        let slow_ocpasswd = executable("ocpasswd-slow", "cat >/dev/null; sleep 5");
         let slow_directory = slow_ocpasswd
             .parent()
             .expect("slow ocpasswd parent")
