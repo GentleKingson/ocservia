@@ -14,6 +14,7 @@ import (
 	"time"
 
 	agentv1 "github.com/GentleKingson/ocservia/control-plane/gen/proto/ocserv/platform/agent/v1"
+	"github.com/GentleKingson/ocservia/control-plane/internal/userusage"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -285,6 +286,13 @@ func (s *Service) Ingest(ctx context.Context, batch Batch) (bool, error) {
 		return false, fmt.Errorf("upsert observed snapshot: %w", err)
 	}
 	if updated.RowsAffected() > 0 {
+		usage := make([]userusage.Sample, 0, len(batch.Sessions))
+		for _, session := range batch.Sessions {
+			usage = append(usage, userusage.Sample{SessionID: session.ID, Username: session.Username, Connected: session.ConnectedAt, RXBytes: session.BytesIn, TXBytes: session.BytesOut, ObservedAt: batch.Snapshot.ObservedAt})
+		}
+		if err := userusage.RecordTx(ctx, tx, batch.NodeID, usage); err != nil {
+			return false, fmt.Errorf("record observed user usage: %w", err)
+		}
 		if _, err := tx.Exec(ctx, `DELETE FROM node_sessions WHERE node_id=$1`, batch.NodeID); err != nil {
 			return false, err
 		}

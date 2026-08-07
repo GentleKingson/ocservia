@@ -25,6 +25,12 @@ export interface ApprovalDecision {
    * @memberof ApprovalDecision
    */
   reason: string;
+  /**
+   * Required when approving a content-bound request; must match the details read before deciding.
+   * @type {string}
+   * @memberof ApprovalDecision
+   */
+  expectedRequestHash?: string;
 }
 
 /**
@@ -50,6 +56,10 @@ export function ApprovalDecisionFromJSONTyped(
   }
   return {
     reason: json["reason"],
+    expectedRequestHash:
+      json["expected_request_hash"] == null
+        ? undefined
+        : json["expected_request_hash"],
   };
 }
 
@@ -67,5 +77,6 @@ export function ApprovalDecisionToJSONTyped(
 
   return {
     reason: value["reason"],
+    expected_request_hash: value["expectedRequestHash"],
   };
 }

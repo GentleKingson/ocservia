@@ -23,34 +23,35 @@ const (
 )
 
 type Config struct {
-	Role                 Role
-	MigrateOnly          bool
-	RuntimeDBRole        string
-	Environment          string
-	HTTPAddress          string
-	DatabaseURL          string
-	OTLPEndpoint         string
-	DevAuth              bool
-	DevAuthToken         string
-	OIDCIssuer           string
-	OIDCClientID         string
-	OIDCClientSecret     string
-	OIDCRedirectURL      string
-	SessionKey           []byte
-	SessionTTL           time.Duration
-	AuditCheckpointKey   []byte
-	BreakGlassEnabled    bool
-	BreakGlassTokenHash  []byte
-	BodyLimit            int64
-	RequestTimeout       time.Duration
-	ShutdownTimeout      time.Duration
-	LogLevelName         string
-	TransportSocket      string
-	TrustSocket          string
-	ControllerEndpointID string
-	TransportTimeout     time.Duration
-	TransportQueue       int
-	LocalSimulator       bool
+	Role                     Role
+	MigrateOnly              bool
+	RuntimeDBRole            string
+	Environment              string
+	HTTPAddress              string
+	DatabaseURL              string
+	OTLPEndpoint             string
+	DevAuth                  bool
+	DevAuthToken             string
+	OIDCIssuer               string
+	OIDCClientID             string
+	OIDCClientSecret         string
+	OIDCRedirectURL          string
+	SessionKey               []byte
+	SessionTTL               time.Duration
+	AuditCheckpointKey       []byte
+	BreakGlassEnabled        bool
+	BreakGlassTokenHash      []byte
+	BodyLimit                int64
+	RequestTimeout           time.Duration
+	ShutdownTimeout          time.Duration
+	LogLevelName             string
+	TransportSocket          string
+	TrustSocket              string
+	ControllerEndpointID     string
+	TransportTimeout         time.Duration
+	TransportQueue           int
+	UserOperationConcurrency int
+	LocalSimulator           bool
 }
 
 type LookupEnv func(string) (string, bool)
@@ -61,7 +62,7 @@ func Load(args []string, lookup LookupEnv) (Config, error) {
 		BodyLimit: 1 << 20, RequestTimeout: 15 * time.Second, ShutdownTimeout: 10 * time.Second,
 		LogLevelName: "info", TransportSocket: "/run/ocserv-platform/transportd.sock",
 		TrustSocket:      "/run/ocserv-trust/control-plane.sock",
-		TransportTimeout: 3 * time.Second, TransportQueue: 256, SessionTTL: 8 * time.Hour,
+		TransportTimeout: 3 * time.Second, TransportQueue: 256, UserOperationConcurrency: 50, SessionTTL: 8 * time.Hour,
 	}
 	setString(lookup, "OCSERV_ENVIRONMENT", &cfg.Environment)
 	setString(lookup, "OCSERV_HTTP_ADDRESS", &cfg.HTTPAddress)
@@ -102,6 +103,9 @@ func Load(args []string, lookup LookupEnv) (Config, error) {
 		return Config{}, err
 	}
 	if err := setInt(lookup, "OCSERV_TRANSPORT_QUEUE_CAPACITY", &cfg.TransportQueue); err != nil {
+		return Config{}, err
+	}
+	if err := setInt(lookup, "OCSERV_USER_OPERATION_CONCURRENCY", &cfg.UserOperationConcurrency); err != nil {
 		return Config{}, err
 	}
 	if value, ok := lookup("OCSERV_DEV_AUTH"); ok {
@@ -205,6 +209,9 @@ func (c Config) Validate() error {
 	}
 	if !strings.HasPrefix(c.TransportSocket, "/") || c.TransportTimeout <= 0 || c.TransportQueue < 1 || c.TransportQueue > 4096 {
 		return errors.New("transport UDS path, timeout, or queue capacity is invalid")
+	}
+	if c.UserOperationConcurrency < 1 || c.UserOperationConcurrency > 500 {
+		return errors.New("user operation concurrency must be between 1 and 500")
 	}
 	if !strings.HasPrefix(c.TrustSocket, "/") {
 		return errors.New("trust UDS path is invalid")

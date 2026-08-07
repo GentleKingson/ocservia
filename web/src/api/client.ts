@@ -14,6 +14,8 @@ import {
   type NodePage,
   type NodeSessionPage,
   type UserGroupStatePage,
+  type UserPolicy,
+  type UserPolicyRequest,
   type SimulationScenario,
   type Workspace,
 } from "@ocservia/api-client";
@@ -23,6 +25,16 @@ const loginReturnKey = "ocservia.login.return-to";
 const loginStartedKey = "ocservia.login.started-at";
 const workspaceKey = "ocservia.workspace-id";
 export const workspaceChangedEvent = "ocservia:workspace-changed";
+
+function newIdempotencyKey(): string {
+  if (typeof globalThis.crypto.randomUUID === "function")
+    return globalThis.crypto.randomUUID();
+  const bytes = globalThis.crypto.getRandomValues(new Uint8Array(16));
+  bytes[6] = ((bytes[6] ?? 0) & 0x0f) | 0x40;
+  bytes[8] = ((bytes[8] ?? 0) & 0x3f) | 0x80;
+  const hex = Array.from(bytes, (value) => value.toString(16).padStart(2, "0"));
+  return `${hex.slice(0, 4).join("")}-${hex.slice(4, 6).join("")}-${hex.slice(6, 8).join("")}-${hex.slice(8, 10).join("")}-${hex.slice(10).join("")}`;
+}
 
 async function authenticatedFetch(
   input: RequestInfo | URL,
@@ -256,7 +268,7 @@ export async function listNodeUserGroupState(
 
 function desiredRequest(version: number, reason: string) {
   return {
-    idempotencyKey: crypto.randomUUID(),
+    idempotencyKey: newIdempotencyKey(),
     ifMatch: `"revision-${String(version)}"`,
     reason,
     expectedVersion: version,
@@ -390,9 +402,34 @@ export async function applyGroup(
   );
 }
 
+export async function getUserPolicy(
+  nodeId: string,
+  username: string,
+  signal?: AbortSignal,
+): Promise<UserPolicy> {
+  return nodes.getNodeUserPolicy({ nodeId, username }, requestInit(signal));
+}
+
+export async function setUserPolicy(
+  nodeId: string,
+  username: string,
+  policy: UserPolicyRequest,
+  signal?: AbortSignal,
+): Promise<UserPolicy> {
+  return operations.setNodeUserPolicy(
+    {
+      nodeId,
+      username,
+      idempotencyKey: newIdempotencyKey(),
+      userPolicyRequest: policy,
+    },
+    requestInit(signal),
+  );
+}
+
 function controlledRequest(node: NodeObservedState, reason: string) {
   return {
-    idempotencyKey: crypto.randomUUID(),
+    idempotencyKey: newIdempotencyKey(),
     ifMatch: `"revision-${String(node.version)}"`,
     controlledOperationRequest: {
       reason,

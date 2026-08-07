@@ -13,6 +13,7 @@ import (
 
 	"github.com/GentleKingson/ocservia/control-plane/internal/enrollment"
 	"github.com/GentleKingson/ocservia/control-plane/internal/localslice"
+	operationstore "github.com/GentleKingson/ocservia/control-plane/internal/operations"
 	"github.com/GentleKingson/ocservia/control-plane/internal/userstate"
 )
 
@@ -70,6 +71,25 @@ func TestUserStateCapacityErrorUsesConflictProblem(t *testing.T) {
 		t.Fatal(err)
 	}
 	if problem.Type != "https://ocservia.dev/problems/capacity-exceeded" {
+		t.Fatalf("problem type = %q", problem.Type)
+	}
+}
+
+func TestOperationBacklogErrorUsesServiceUnavailableProblem(t *testing.T) {
+	server := &Server{logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/nodes/node/synthetic-commands", nil)
+	response := httptest.NewRecorder()
+	server.writeOperationError(response, request, operationstore.ErrBacklogExceeded)
+	if response.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d", response.Code)
+	}
+	var problem struct {
+		Type string `json:"type"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &problem); err != nil {
+		t.Fatal(err)
+	}
+	if problem.Type != "https://ocservia.dev/problems/command-backlog-exceeded" {
 		t.Fatalf("problem type = %q", problem.Type)
 	}
 }
@@ -274,6 +294,26 @@ func TestControlledOperationRoutesRequireAuthentication(t *testing.T) {
 		server.http.Handler.ServeHTTP(response, httptest.NewRequest(http.MethodPost, path, nil))
 		if response.Code != http.StatusUnauthorized {
 			t.Fatalf("POST %s status = %d", path, response.Code)
+		}
+	}
+}
+
+func TestI14RoutesRequireAuthentication(t *testing.T) {
+	server := New("127.0.0.1:0", nil, BuildInfo{}, slog.New(slog.NewTextHandler(io.Discard, nil)), 1024, time.Second, false, "", 1)
+	tests := []struct {
+		method string
+		path   string
+	}{
+		{http.MethodGet, "/api/v1/nodes/019fc0a4-6d92-765c-a8a1-4af556614cc3/users/alice/policy"},
+		{http.MethodPut, "/api/v1/nodes/019fc0a4-6d92-765c-a8a1-4af556614cc3/users/alice/policy"},
+		{http.MethodPost, "/api/v1/user-batches"},
+		{http.MethodGet, "/api/v1/user-batches/019fc0a4-6d92-765c-a8a1-4af556614cc3"},
+	}
+	for _, test := range tests {
+		response := httptest.NewRecorder()
+		server.http.Handler.ServeHTTP(response, httptest.NewRequest(test.method, test.path, nil))
+		if response.Code != http.StatusUnauthorized {
+			t.Fatalf("%s %s status = %d", test.method, test.path, response.Code)
 		}
 	}
 }

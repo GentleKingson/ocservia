@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"slices"
 	"strings"
 
 	"github.com/GentleKingson/ocservia/control-plane/internal/auth"
@@ -42,6 +43,14 @@ func (s *Server) authorizeRoute(r *http.Request, principal auth.Principal) (cont
 	action := routeAction(r)
 	if action == "" {
 		return nil, rbac.ErrForbidden
+	}
+	if (r.Method == http.MethodPost && (r.URL.Path == "/api/v1/user-batches" || r.URL.Path == "/api/v1/approval-requests")) || (r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/api/v1/user-batches/")) {
+		workspaceID, err := s.selectWorkspace(r, principal, action)
+		if err != nil {
+			return nil, err
+		}
+		ctx := context.WithValue(r.Context(), principalKey{}, principal)
+		return context.WithValue(ctx, workspaceKey{}, workspaceID), nil
 	}
 	var resource rbac.Resource
 	var err error
@@ -99,6 +108,28 @@ func (s *Server) authorizeRoute(r *http.Request, principal auth.Principal) (cont
 	return ctx, nil
 }
 
+func (s *Server) selectWorkspace(r *http.Request, principal auth.Principal, action string) (uuid.UUID, error) {
+	workspaceText := strings.TrimSpace(r.Header.Get("X-Workspace-ID"))
+	workspaceIDs, err := s.rbac.AuthorizedWorkspaces(r.Context(), principal.IdentityID, action, principal.BreakGlass)
+	if err != nil {
+		return uuid.Nil, err
+	}
+	if workspaceText == "" {
+		if len(workspaceIDs) != 1 {
+			return uuid.Nil, rbac.ErrForbidden
+		}
+		workspaceText = workspaceIDs[0].String()
+	}
+	workspaceID, parseErr := uuid.Parse(workspaceText)
+	if parseErr != nil || workspaceID.Version() != 7 || !slices.Contains(workspaceIDs, workspaceID) {
+		return uuid.Nil, rbac.ErrForbidden
+	}
+	if _, err := s.rbac.Workspace(r.Context(), workspaceID); err != nil {
+		return uuid.Nil, err
+	}
+	return workspaceID, nil
+}
+
 func routeAction(r *http.Request) string {
 	path := r.URL.Path
 	switch {
@@ -112,6 +143,17 @@ func routeAction(r *http.Request) string {
 		return "service.reload"
 	case strings.HasSuffix(path, ":disable"), strings.HasSuffix(path, ":enable"), strings.HasSuffix(path, ":rotate-password"), strings.HasSuffix(path, "/users"):
 		return "user.manage"
+	case strings.Contains(path, "/users/") && strings.HasSuffix(path, "/policy"):
+		if r.Method == http.MethodPut {
+			return "user.manage"
+		}
+		return "node.read"
+	case path == "/api/v1/user-batches":
+		return "user.manage"
+	case strings.HasPrefix(path, "/api/v1/user-batches/"):
+		return "operation.read"
+	case path == "/api/v1/user-operations/metrics":
+		return "operation.read"
 	case strings.Contains(path, "/groups/"):
 		return "group.manage"
 	case strings.HasSuffix(path, "/approval"):
@@ -119,6 +161,8 @@ func routeAction(r *http.Request) string {
 	case strings.HasSuffix(path, "/revocation"):
 		return "node.revoke"
 	case strings.HasSuffix(path, ":approve") && strings.Contains(path, "/approval-requests/"):
+		return "approval.approve"
+	case r.Method == http.MethodGet && strings.HasPrefix(path, "/api/v1/approval-requests/"):
 		return "approval.approve"
 	case path == "/api/v1/approval-requests":
 		return "approval.request"
@@ -135,6 +179,8 @@ func routeAction(r *http.Request) string {
 		return "operation.read"
 	case strings.HasPrefix(path, "/api/v1/events"):
 		return "operation.read"
+	case r.Method == http.MethodPost && strings.HasSuffix(path, "/synthetic-commands"):
+		return "operation.create"
 	case strings.HasPrefix(path, "/api/v1/nodes"):
 		return "node.read"
 	default:

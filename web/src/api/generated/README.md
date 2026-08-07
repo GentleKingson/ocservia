@@ -57,6 +57,7 @@ All URIs are relative to _/api/v1_
 | _EventsApi_      | [**watchEvents**](docs/EventsApi.md#watchevents)                               | **GET** /events/stream                                     | Watch platform events with SSE resume support                               |
 | _NodesApi_       | [**approveNode**](docs/NodesApi.md#approvenode)                                | **POST** /nodes/{node_id}/approval                         | Approve a pending node and bind its endpoint identity                       |
 | _NodesApi_       | [**getNode**](docs/NodesApi.md#getnode)                                        | **GET** /nodes/{node_id}                                   | Get current node observed state                                             |
+| _NodesApi_       | [**getNodeUserPolicy**](docs/NodesApi.md#getnodeuserpolicy)                    | **GET** /nodes/{node_id}/users/{username}/policy           | Get desired quota and UTC expiry with observed usage                        |
 | _NodesApi_       | [**listNodeIpBans**](docs/NodesApi.md#listnodeipbans)                          | **GET** /nodes/{node_id}/ip-bans                           | List current IP bans observed on a node                                     |
 | _NodesApi_       | [**listNodeSessions**](docs/NodesApi.md#listnodesessions)                      | **GET** /nodes/{node_id}/sessions                          | List current sessions observed on a node                                    |
 | _NodesApi_       | [**listNodeTelemetry**](docs/NodesApi.md#listnodetelemetry)                    | **GET** /nodes/{node_id}/telemetry                         | Query bounded raw or rolled-up node telemetry                               |
@@ -68,15 +69,20 @@ All URIs are relative to _/api/v1_
 | _OperationsApi_  | [**createApprovalRequest**](docs/OperationsApi.md#createapprovalrequest)       | **POST** /approval-requests                                | Request independent approval for a high-risk action                         |
 | _OperationsApi_  | [**createNodeUser**](docs/OperationsApi.md#createnodeuser)                     | **POST** /nodes/{node_id}/users                            | Queue creation of one node-scoped user                                      |
 | _OperationsApi_  | [**createSyntheticCommand**](docs/OperationsApi.md#createsyntheticcommand)     | **POST** /nodes/{node_id}/synthetic-commands               | Queue a side-effect-free typed synthetic command                            |
+| _OperationsApi_  | [**createUserBatch**](docs/OperationsApi.md#createuserbatch)                   | **POST** /user-batches                                     | Create a parent batch whose items are authorized and executed independently |
 | _OperationsApi_  | [**disableNodeUser**](docs/OperationsApi.md#disablenodeuser)                   | **POST** /nodes/{node_id}/users/{username}:disable         | Queue disabling one node-scoped user                                        |
 | _OperationsApi_  | [**disconnectNodeSession**](docs/OperationsApi.md#disconnectnodesession)       | **POST** /nodes/{node_id}/sessions/{session_id}:disconnect | Disconnect one observed session                                             |
 | _OperationsApi_  | [**enableNodeUser**](docs/OperationsApi.md#enablenodeuser)                     | **POST** /nodes/{node_id}/users/{username}:enable          | Queue enabling one node-scoped user without changing its password or groups |
+| _OperationsApi_  | [**getApprovalRequest**](docs/OperationsApi.md#getapprovalrequest)             | **GET** /approval-requests/{approval_id}                   | Inspect immutable approval details before deciding                          |
 | _OperationsApi_  | [**getOperation**](docs/OperationsApi.md#getoperation)                         | **GET** /operations/{operation_id}                         | Get an asynchronous operation                                               |
 | _OperationsApi_  | [**getOperationQueueMetrics**](docs/OperationsApi.md#getoperationqueuemetrics) | **GET** /operations/queue-metrics                          | Get transactional outbox and command queue metrics                          |
+| _OperationsApi_  | [**getUserBatch**](docs/OperationsApi.md#getuserbatch)                         | **GET** /user-batches/{batch_id}                           | Get parent and per-item authorization, command, and result state            |
+| _OperationsApi_  | [**getUserOperationMetrics**](docs/OperationsApi.md#getuseroperationmetrics)   | **GET** /user-operations/metrics                           | Get workspace quota, expiry, and batch scheduler health counters            |
 | _OperationsApi_  | [**listOperations**](docs/OperationsApi.md#listoperations)                     | **GET** /operations                                        | List operations                                                             |
 | _OperationsApi_  | [**reloadNodeService**](docs/OperationsApi.md#reloadnodeservice)               | **POST** /nodes/{node_id}/service:reload                   | Reload the fixed Ocserv service unit                                        |
 | _OperationsApi_  | [**removeNodeIpBan**](docs/OperationsApi.md#removenodeipban)                   | **POST** /nodes/{node_id}/ip-bans/{ip}:remove              | Remove one canonical IP address from the Ocserv ban list                    |
 | _OperationsApi_  | [**rotateNodeUserPassword**](docs/OperationsApi.md#rotatenodeuserpassword)     | **POST** /nodes/{node_id}/users/{username}:rotate-password | Queue write-only password rotation using node-sealed ciphertext             |
+| _OperationsApi_  | [**setNodeUserPolicy**](docs/OperationsApi.md#setnodeuserpolicy)               | **PUT** /nodes/{node_id}/users/{username}/policy           | Set byte quota and exact UTC expiry for one node-scoped user                |
 | _OperationsApi_  | [**terminateNodeSession**](docs/OperationsApi.md#terminatenodesession)         | **POST** /nodes/{node_id}/sessions/{session_id}:terminate  | Terminate one observed session and invalidate its reconnect cookie          |
 | _OperationsApi_  | [**watchOperationEvents**](docs/OperationsApi.md#watchoperationevents)         | **GET** /operations/{operation_id}/events                  | Watch durable operation state changes                                       |
 | _PlatformApi_    | [**beginOIDCLogin**](docs/PlatformApi.md#beginoidclogin)                       | **GET** /auth/login                                        | Begin OIDC Authorization Code login with PKCE S256                          |
@@ -134,9 +140,16 @@ All URIs are relative to _/api/v1_
 - [TelemetryMetric](docs/TelemetryMetric.md)
 - [TelemetryPoint](docs/TelemetryPoint.md)
 - [TelemetryPointPage](docs/TelemetryPointPage.md)
+- [UserBatch](docs/UserBatch.md)
+- [UserBatchItem](docs/UserBatchItem.md)
+- [UserBatchItemRequest](docs/UserBatchItemRequest.md)
+- [UserBatchRequest](docs/UserBatchRequest.md)
 - [UserCreateRequest](docs/UserCreateRequest.md)
 - [UserGroupResourceState](docs/UserGroupResourceState.md)
 - [UserGroupStatePage](docs/UserGroupStatePage.md)
+- [UserOperationMetrics](docs/UserOperationMetrics.md)
+- [UserPolicy](docs/UserPolicy.md)
+- [UserPolicyRequest](docs/UserPolicyRequest.md)
 - [Workspace](docs/Workspace.md)
 - [WorkspacePage](docs/WorkspacePage.md)
 

@@ -47,8 +47,8 @@
     ]
   },
   "adaptation": {
-    "planned_upstream_view": "web/src/upstream/UserPolicyFields.vue",
-    "planned_node_adapter": "web/src/adapters/user-policy.ts",
+    "upstream_view": "web/src/upstream/UserPolicyFields.vue",
+    "node_adapter": "web/src/adapters/user-policy.ts",
     "verbatim_upstream_files": []
   },
   "publication": {

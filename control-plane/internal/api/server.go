@@ -23,6 +23,7 @@ import (
 	"github.com/GentleKingson/ocservia/control-plane/internal/rbac"
 	telemetrystore "github.com/GentleKingson/ocservia/control-plane/internal/telemetry"
 	"github.com/GentleKingson/ocservia/control-plane/internal/transportclient"
+	"github.com/GentleKingson/ocservia/control-plane/internal/useroperations"
 	"github.com/GentleKingson/ocservia/control-plane/internal/userstate"
 	"github.com/GentleKingson/ocservia/control-plane/migrations"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -58,6 +59,7 @@ type Server struct {
 	approvals      *approvals.Service
 	audit          *audit.Manager
 	userstate      *userstate.Service
+	useroperations *useroperations.Service
 }
 
 func New(address string, pool *pgxpool.Pool, build BuildInfo, logger *slog.Logger, bodyLimit int64, requestTimeout time.Duration, devAuth bool, devAuthToken string, expectedSchema int64) *Server {
@@ -97,7 +99,13 @@ func New(address string, pool *pgxpool.Pool, build BuildInfo, logger *slog.Logge
 	mux.HandleFunc("POST /api/v1/nodes/{node_id}/users", s.requireOperationAuth(s.createUser))
 	mux.HandleFunc("POST /api/v1/nodes/{node_id}/users/{user_action}", s.requireOperationAuth(s.userAction))
 	mux.HandleFunc("PUT /api/v1/nodes/{node_id}/groups/{group_name}", s.requireOperationAuth(s.applyGroup))
+	mux.HandleFunc("GET /api/v1/nodes/{node_id}/users/{username}/policy", s.requireOperationAuth(s.getUserPolicy))
+	mux.HandleFunc("PUT /api/v1/nodes/{node_id}/users/{username}/policy", s.requireOperationAuth(s.setUserPolicy))
+	mux.HandleFunc("POST /api/v1/user-batches", s.requireOperationAuth(s.createUserBatch))
+	mux.HandleFunc("GET /api/v1/user-batches/{batch_id}", s.requireOperationAuth(s.getUserBatch))
+	mux.HandleFunc("GET /api/v1/user-operations/metrics", s.requireOperationAuth(s.userOperationMetrics))
 	mux.HandleFunc("POST /api/v1/approval-requests", s.requireOperationAuth(s.createApproval))
+	mux.HandleFunc("GET /api/v1/approval-requests/{approval_id}", s.requireOperationAuth(s.getApproval))
 	mux.HandleFunc("POST /api/v1/approval-requests/{approval_id}", s.requireOperationAuth(s.approveRequest))
 	mux.HandleFunc("GET /api/v1/audit/events", s.requireOperationAuth(s.listAuditEvents))
 	mux.HandleFunc("POST /api/v1/audit:verify", s.requireOperationAuth(s.verifyAudit))
@@ -113,6 +121,8 @@ func (s *Server) EnableTelemetry(service *telemetrystore.Service) { s.telemetry 
 func (s *Server) EnableOperations(service *operationstore.Service) { s.operations = service }
 
 func (s *Server) EnableUserState(service *userstate.Service) { s.userstate = service }
+
+func (s *Server) EnableUserOperations(service *useroperations.Service) { s.useroperations = service }
 
 func (s *Server) EnableAuthorization(authn *auth.Service, authz *rbac.Service, approvalService *approvals.Service, auditManager *audit.Manager) {
 	s.auth, s.rbac, s.approvals, s.audit = authn, authz, approvalService, auditManager
@@ -192,8 +202,13 @@ func (s *Server) routeErrors(next http.Handler) http.Handler {
 			writeProblem(w, r, http.StatusNotFound, "https://ocservia.dev/problems/not-found", "Resource not found", "the requested resource does not exist")
 			return
 		}
-		if r.Method != expectedMethod {
-			w.Header().Set("Allow", expectedMethod)
+		methodAllowed := r.Method == expectedMethod || expectedMethod == "GET_OR_PUT" && (r.Method == http.MethodGet || r.Method == http.MethodPut)
+		if !methodAllowed {
+			allow := expectedMethod
+			if expectedMethod == "GET_OR_PUT" {
+				allow = "GET, PUT"
+			}
+			w.Header().Set("Allow", allow)
 			writeProblem(w, r, http.StatusMethodNotAllowed, "https://ocservia.dev/problems/method-not-allowed", "Method not allowed", "the requested method is not supported")
 			return
 		}
@@ -203,13 +218,13 @@ func (s *Server) routeErrors(next http.Handler) http.Handler {
 
 func routeMethod(path string) (string, bool) {
 	switch path {
-	case "/livez", "/readyz", "/version", "/api/v1/livez", "/api/v1/readyz", "/api/v1/version", "/api/v1/operations", "/api/v1/operations/queue-metrics", "/api/v1/events", "/api/v1/events/stream", "/api/v1/development/runtime", "/api/v1/auth/login", "/api/v1/auth/callback", "/api/v1/audit/events", "/api/v1/workspaces":
+	case "/livez", "/readyz", "/version", "/api/v1/livez", "/api/v1/readyz", "/api/v1/version", "/api/v1/operations", "/api/v1/operations/queue-metrics", "/api/v1/user-operations/metrics", "/api/v1/events", "/api/v1/events/stream", "/api/v1/development/runtime", "/api/v1/auth/login", "/api/v1/auth/callback", "/api/v1/audit/events", "/api/v1/workspaces":
 		return http.MethodGet, true
 	case "/api/v1/nodes":
 		return http.MethodGet, true
 	case "/api/v1/development/simulations":
 		return http.MethodPost, true
-	case "/api/v1/enrollment-tokens", "/api/v1/auth/logout", "/api/v1/auth/break-glass", "/api/v1/approval-requests", "/api/v1/audit:verify", "/api/v1/role-bindings":
+	case "/api/v1/enrollment-tokens", "/api/v1/auth/logout", "/api/v1/auth/break-glass", "/api/v1/approval-requests", "/api/v1/audit:verify", "/api/v1/role-bindings", "/api/v1/user-batches":
 		return http.MethodPost, true
 	}
 	parts := strings.Split(strings.Trim(path, "/"), "/")
@@ -231,6 +246,12 @@ func routeMethod(path string) (string, bool) {
 	if len(parts) == 6 && parts[0] == "api" && parts[1] == "v1" && parts[2] == "nodes" && parts[3] != "" && parts[4] == "groups" && parts[5] != "" {
 		return http.MethodPut, true
 	}
+	if len(parts) == 7 && parts[0] == "api" && parts[1] == "v1" && parts[2] == "nodes" && parts[3] != "" && parts[4] == "users" && parts[5] != "" && parts[6] == "policy" {
+		return "GET_OR_PUT", true
+	}
+	if len(parts) == 4 && parts[0] == "api" && parts[1] == "v1" && parts[2] == "user-batches" && parts[3] != "" {
+		return http.MethodGet, true
+	}
 	if len(parts) == 5 && parts[0] == "api" && parts[1] == "v1" && parts[2] == "nodes" && parts[3] != "" && parts[4] == "synthetic-commands" {
 		return http.MethodPost, true
 	}
@@ -248,6 +269,9 @@ func routeMethod(path string) (string, bool) {
 	}
 	if len(parts) == 4 && parts[0] == "api" && parts[1] == "v1" && parts[2] == "approval-requests" && strings.HasSuffix(parts[3], ":approve") {
 		return http.MethodPost, true
+	}
+	if len(parts) == 4 && parts[0] == "api" && parts[1] == "v1" && parts[2] == "approval-requests" && parts[3] != "" {
+		return http.MethodGet, true
 	}
 	operationID := strings.TrimPrefix(path, "/api/v1/operations/")
 	if operationID != path && operationID != "" && !strings.Contains(operationID, "/") {

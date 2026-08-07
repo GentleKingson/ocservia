@@ -14,9 +14,11 @@ import (
 	agentv1 "github.com/GentleKingson/ocservia/control-plane/gen/proto/ocserv/platform/agent/v1"
 	transportv1 "github.com/GentleKingson/ocservia/control-plane/gen/proto/ocserv/platform/transport/v1"
 	"github.com/GentleKingson/ocservia/control-plane/internal/audit"
+	"github.com/GentleKingson/ocservia/control-plane/internal/commandlimit"
 	"github.com/GentleKingson/ocservia/control-plane/internal/localslice"
 	operationstore "github.com/GentleKingson/ocservia/control-plane/internal/operations"
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/timestamppb"
@@ -734,6 +736,288 @@ func mutation(nodeID uuid.UUID, key string, kind MutationKind, name string, vers
 		request.SecretKeyID = "node-key-1"
 	}
 	return request
+}
+
+func TestGlobalCommandLimitAcrossProducersIntegration(t *testing.T) {
+	_, pool, workspaceID, nodeID := integrationService(t, "active")
+	secondNodeID := uuid.Must(uuid.NewV7())
+	if _, err := pool.Exec(context.Background(), `INSERT INTO nodes(id,workspace_id,name,status,version,created_at,updated_at) VALUES($1,$2,$3,'active',1,now(),now())`, secondNodeID, workspaceID, "second-"+secondNodeID.String()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(context.Background(), `INSERT INTO node_capabilities(node_id,capability,approved) VALUES($1,'ocserv.users.write',true)`, secondNodeID); err != nil {
+		t.Fatal(err)
+	}
+	users := New(pool)
+	operations := operationstore.New(pool)
+	if _, _, err := users.Mutate(context.Background(), mutation(nodeID, "limited-user", UserCreate, "limited", 0)); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := operations.CreateSynthetic(context.Background(), operationstore.CreateRequest{NodeID: secondNodeID, IdempotencyKey: "limited-noop", ExpectedVersion: 1, Kind: operationstore.SyntheticNoop, TTL: time.Minute, RequestID: "request-limited-noop", Traceparent: testTraceparent}); err != nil {
+		t.Fatal(err)
+	}
+	var baseline int
+	if err := pool.QueryRow(context.Background(), `SELECT count(*) FROM operations operation JOIN commands command ON command.operation_id=operation.id LEFT JOIN node_command_leases lease ON lease.command_id=command.id AND lease.leased_until>now() WHERE operation.state IN('dispatched','accepted','running','unknown') OR lease.command_id IS NOT NULL`).Scan(&baseline); err != nil {
+		t.Fatal(err)
+	}
+	start := make(chan struct{})
+	results := make(chan int, 2)
+	go func() {
+		<-start
+		dispatches, err := operationstore.NewWithConcurrency(pool, baseline+1).Claim(context.Background(), uuid.Must(uuid.NewV7()), 1, time.Minute)
+		if err != nil {
+			results <- -1
+			return
+		}
+		results <- len(dispatches)
+	}()
+	go func() {
+		<-start
+		dispatches, err := operationstore.NewWithConcurrency(pool, baseline+1).Claim(context.Background(), uuid.Must(uuid.NewV7()), 1, time.Minute)
+		if err != nil {
+			results <- -1
+			return
+		}
+		results <- len(dispatches)
+	}()
+	close(start)
+
+	claimed := 0
+	for range 2 {
+		result := <-results
+		if result < 0 {
+			t.Fatal("concurrent dispatch claim failed")
+		}
+		claimed += result
+	}
+	if claimed != 1 {
+		t.Fatalf("global dispatch limit claimed=%d, want 1", claimed)
+	}
+}
+
+func TestOfflineQueueDoesNotConsumeGlobalDispatchCapacityIntegration(t *testing.T) {
+	_, pool, workspaceID, activeNodeID := integrationService(t, "active")
+	offlineNodeID := uuid.Must(uuid.NewV7())
+	if _, err := pool.Exec(context.Background(), `INSERT INTO nodes(id,workspace_id,name,status,version,created_at,updated_at) VALUES($1,$2,$3,'offline',1,now(),now())`, offlineNodeID, workspaceID, "offline-"+offlineNodeID.String()); err != nil {
+		t.Fatal(err)
+	}
+	operations := operationstore.New(pool)
+	for _, item := range []struct {
+		node uuid.UUID
+		key  string
+	}{{offlineNodeID, "offline-backlog"}, {activeNodeID, "online-work"}} {
+		if _, _, err := operations.CreateSynthetic(context.Background(), operationstore.CreateRequest{NodeID: item.node, IdempotencyKey: item.key, ExpectedVersion: 1, Kind: operationstore.SyntheticNoop, TTL: time.Minute, RequestID: "request-" + item.key, Traceparent: testTraceparent}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var baseline int
+	if err := pool.QueryRow(context.Background(), `SELECT count(*) FROM operations operation JOIN commands command ON command.operation_id=operation.id LEFT JOIN node_command_leases lease ON lease.command_id=command.id AND lease.leased_until>now() WHERE operation.state IN('dispatched','accepted','running','unknown') OR lease.command_id IS NOT NULL`).Scan(&baseline); err != nil {
+		t.Fatal(err)
+	}
+	dispatches, err := operationstore.NewWithConcurrency(pool, baseline+1).Claim(context.Background(), uuid.Must(uuid.NewV7()), 1, time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(dispatches) != 1 || dispatches[0].NodeID != activeNodeID {
+		t.Fatalf("offline backlog consumed dispatch capacity: %+v", dispatches)
+	}
+}
+
+func TestExpiredLeaseStaysChargedUntilReapedIntegration(t *testing.T) {
+	_, pool, workspaceID, firstNodeID := integrationService(t, "active")
+	secondNodeID := uuid.Must(uuid.NewV7())
+	if _, err := pool.Exec(context.Background(), `INSERT INTO nodes(id,workspace_id,name,status,version,created_at,updated_at) VALUES($1,$2,$3,'active',1,now(),now())`, secondNodeID, workspaceID, "lease-"+secondNodeID.String()); err != nil {
+		t.Fatal(err)
+	}
+	var baseline int
+	if err := pool.QueryRow(context.Background(), `SELECT count(*) FROM (SELECT operation.id FROM operations operation JOIN commands command ON command.operation_id=operation.id WHERE operation.state IN('dispatched','accepted','running','unknown') UNION SELECT command.operation_id FROM node_command_leases lease JOIN commands command ON command.id=lease.command_id) active`).Scan(&baseline); err != nil {
+		t.Fatal(err)
+	}
+	service := operationstore.NewWithConcurrency(pool, baseline+1)
+	for index, nodeID := range []uuid.UUID{firstNodeID, secondNodeID} {
+		key := fmt.Sprintf("lease-cap-%d", index)
+		if _, _, err := service.CreateSynthetic(context.Background(), operationstore.CreateRequest{NodeID: nodeID, IdempotencyKey: key, ExpectedVersion: 1, Kind: operationstore.SyntheticNoop, TTL: time.Minute, RequestID: "request-" + key, Traceparent: testTraceparent}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	first, err := service.Claim(context.Background(), uuid.Must(uuid.NewV7()), 1, 20*time.Millisecond)
+	if err != nil || len(first) != 1 {
+		t.Fatalf("first dispatch claim=%+v err=%v", first, err)
+	}
+	time.Sleep(30 * time.Millisecond)
+	blocked, err := service.Claim(context.Background(), uuid.Must(uuid.NewV7()), 1, time.Minute)
+	if err != nil || len(blocked) != 0 {
+		t.Fatalf("expired unreaped lease released capacity=%+v err=%v", blocked, err)
+	}
+	if err := service.Reap(context.Background(), 3); err != nil {
+		t.Fatal(err)
+	}
+	afterReap, err := service.Claim(context.Background(), uuid.Must(uuid.NewV7()), 1, time.Minute)
+	if err != nil || len(afterReap) != 1 {
+		t.Fatalf("reaped lease did not release exactly one slot=%+v err=%v", afterReap, err)
+	}
+}
+
+func TestUnknownReconciliationBypassesConsumedDispatchSlotIntegration(t *testing.T) {
+	_, pool, _, nodeID := integrationService(t, "active")
+	service := operationstore.NewWithConcurrency(pool, 1)
+	op, _, err := service.CreateSynthetic(context.Background(), operationstore.CreateRequest{NodeID: nodeID, IdempotencyKey: "unknown-reconcile", ExpectedVersion: 1, Kind: operationstore.SyntheticNoop, TTL: time.Minute, RequestID: "request-unknown-reconcile", Traceparent: testTraceparent})
+	if err != nil {
+		t.Fatal(err)
+	}
+	operationID := uuid.MustParse(op.ID)
+	if _, err := pool.Exec(context.Background(), `UPDATE operations SET state='unknown' WHERE id=$1`, operationID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(context.Background(), `UPDATE commands SET state='unknown' WHERE operation_id=$1`, operationID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(context.Background(), `UPDATE outbox_events SET available_at='2000-01-01T00:00:00Z' WHERE command_id=(SELECT command_id FROM operations WHERE id=$1)`, operationID); err != nil {
+		t.Fatal(err)
+	}
+	dispatches, err := service.Claim(context.Background(), uuid.Must(uuid.NewV7()), 1, time.Minute)
+	if err != nil || len(dispatches) != 1 || dispatches[0].OperationID != operationID {
+		t.Fatalf("unknown reconciliation claim=%+v err=%v", dispatches, err)
+	}
+}
+
+func TestDispatchCandidateFairnessAcrossNodesIntegration(t *testing.T) {
+	_, pool, workspaceID, busyNodeID := integrationService(t, "active")
+	otherNodeID := uuid.Must(uuid.NewV7())
+	if _, err := pool.Exec(context.Background(), `INSERT INTO nodes(id,workspace_id,name,status,version,created_at,updated_at) VALUES($1,$2,$3,'active',1,now(),now())`, otherNodeID, workspaceID, "fair-"+otherNodeID.String()); err != nil {
+		t.Fatal(err)
+	}
+	service := operationstore.NewWithConcurrency(pool, 50)
+	operationIDs := make([]uuid.UUID, 0, 21)
+	for index := range 20 {
+		key := fmt.Sprintf("busy-%02d", index)
+		operation, _, err := service.CreateSynthetic(context.Background(), operationstore.CreateRequest{NodeID: busyNodeID, IdempotencyKey: key, ExpectedVersion: 1, Kind: operationstore.SyntheticNoop, TTL: time.Minute, RequestID: "request-" + key, Traceparent: testTraceparent})
+		if err != nil {
+			t.Fatal(err)
+		}
+		operationIDs = append(operationIDs, uuid.MustParse(operation.ID))
+	}
+	otherOperation, _, err := service.CreateSynthetic(context.Background(), operationstore.CreateRequest{NodeID: otherNodeID, IdempotencyKey: "other-node", ExpectedVersion: 1, Kind: operationstore.SyntheticNoop, TTL: time.Minute, RequestID: "request-other-node", Traceparent: testTraceparent})
+	if err != nil {
+		t.Fatal(err)
+	}
+	operationIDs = append(operationIDs, uuid.MustParse(otherOperation.ID))
+	for index, operationID := range operationIDs {
+		if _, err := pool.Exec(context.Background(), `WITH updated_operation AS (
+			UPDATE operations SET state='unknown' WHERE id=$1
+		), updated_command AS (
+			UPDATE commands SET state='unknown' WHERE operation_id=$1 RETURNING id
+		)
+		UPDATE outbox_events SET available_at='2000-01-01T00:00:00Z'::timestamptz+$2::interval WHERE command_id=(SELECT id FROM updated_command)`, operationID, (time.Duration(index) * time.Second).String()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	dispatches, err := service.Claim(context.Background(), uuid.Must(uuid.NewV7()), 2, time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	seen := map[uuid.UUID]bool{}
+	for _, dispatch := range dispatches {
+		seen[dispatch.NodeID] = true
+	}
+	if len(dispatches) != 2 || !seen[busyNodeID] || !seen[otherNodeID] {
+		t.Fatalf("cross-node candidate fairness=%+v", dispatches)
+	}
+}
+
+func TestNodeBacklogBoundaryConcurrencyAndReplayIntegration(t *testing.T) {
+	_, pool, workspaceID, nodeID := integrationService(t, "active")
+	seedQueuedOperations(t, pool, workspaceID, []uuid.UUID{nodeID}, commandlimit.MaxNodeBacklog-1)
+	service := operationstore.New(pool)
+	requests := []operationstore.CreateRequest{
+		{NodeID: nodeID, IdempotencyKey: "node-boundary-a", ExpectedVersion: 1, Kind: operationstore.SyntheticNoop, TTL: time.Minute, RequestID: "request-node-boundary-a", Traceparent: testTraceparent},
+		{NodeID: nodeID, IdempotencyKey: "node-boundary-b", ExpectedVersion: 1, Kind: operationstore.SyntheticNoop, TTL: time.Minute, RequestID: "request-node-boundary-b", Traceparent: testTraceparent},
+	}
+	start := make(chan struct{})
+	type result struct {
+		index int
+		err   error
+	}
+	results := make(chan result, 2)
+	for index, request := range requests {
+		go func(index int, request operationstore.CreateRequest) {
+			<-start
+			_, _, err := service.CreateSynthetic(context.Background(), request)
+			results <- result{index: index, err: err}
+		}(index, request)
+	}
+	close(start)
+	winner, successes, rejected := -1, 0, 0
+	for range 2 {
+		result := <-results
+		if result.err == nil {
+			winner, successes = result.index, successes+1
+		} else if errors.Is(result.err, operationstore.ErrBacklogExceeded) {
+			rejected++
+		} else {
+			t.Fatalf("unexpected node backlog result: %v", result.err)
+		}
+	}
+	if successes != 1 || rejected != 1 {
+		t.Fatalf("node backlog boundary successes=%d rejected=%d", successes, rejected)
+	}
+	if _, replayed, err := service.CreateSynthetic(context.Background(), requests[winner]); err != nil || !replayed {
+		t.Fatalf("idempotent replay at backlog capacity replayed=%v err=%v", replayed, err)
+	}
+}
+
+func TestWorkspaceBacklogBoundaryAcrossNodesIntegration(t *testing.T) {
+	_, pool, workspaceID, firstNodeID := integrationService(t, "active")
+	nodeIDs := []uuid.UUID{firstNodeID}
+	for index := 0; index < 10; index++ {
+		nodeID := uuid.Must(uuid.NewV7())
+		if _, err := pool.Exec(context.Background(), `INSERT INTO nodes(id,workspace_id,name,status,version,created_at,updated_at) VALUES($1,$2,$3,'active',1,now(),now())`, nodeID, workspaceID, fmt.Sprintf("workspace-bound-%02d", index)); err != nil {
+			t.Fatal(err)
+		}
+		nodeIDs = append(nodeIDs, nodeID)
+	}
+	seedQueuedOperations(t, pool, workspaceID, nodeIDs, commandlimit.MaxWorkspaceBacklog-1)
+	service := operationstore.New(pool)
+	requests := []operationstore.CreateRequest{
+		{NodeID: nodeIDs[9], IdempotencyKey: "workspace-boundary-a", ExpectedVersion: 1, Kind: operationstore.SyntheticNoop, TTL: time.Minute, RequestID: "request-workspace-boundary-a", Traceparent: testTraceparent},
+		{NodeID: nodeIDs[10], IdempotencyKey: "workspace-boundary-b", ExpectedVersion: 1, Kind: operationstore.SyntheticNoop, TTL: time.Minute, RequestID: "request-workspace-boundary-b", Traceparent: testTraceparent},
+	}
+	start := make(chan struct{})
+	results := make(chan error, 2)
+	for _, request := range requests {
+		go func(request operationstore.CreateRequest) {
+			<-start
+			_, _, err := service.CreateSynthetic(context.Background(), request)
+			results <- err
+		}(request)
+	}
+	close(start)
+	successes, rejected := 0, 0
+	for range 2 {
+		err := <-results
+		if err == nil {
+			successes++
+		} else if errors.Is(err, operationstore.ErrBacklogExceeded) {
+			rejected++
+		} else {
+			t.Fatalf("unexpected workspace backlog result: %v", err)
+		}
+	}
+	if successes != 1 || rejected != 1 {
+		t.Fatalf("workspace backlog boundary successes=%d rejected=%d", successes, rejected)
+	}
+}
+
+func seedQueuedOperations(t *testing.T, pool *pgxpool.Pool, workspaceID uuid.UUID, nodeIDs []uuid.UUID, count int) {
+	t.Helper()
+	now := time.Now().UTC()
+	rows := make([][]any, 0, count)
+	for index := 0; index < count; index++ {
+		rows = append(rows, []any{uuid.Must(uuid.NewV7()), workspaceID, nodeIDs[index%len(nodeIDs)], "queued", int64(1), fmt.Sprintf("backlog-seed-%d", index), now, now})
+	}
+	inserted, err := pool.CopyFrom(context.Background(), pgx.Identifier{"operations"}, []string{"id", "workspace_id", "node_id", "state", "version", "request_id", "created_at", "updated_at"}, pgx.CopyFromRows(rows))
+	if err != nil || inserted != int64(count) {
+		t.Fatalf("seed queued operations inserted=%d err=%v", inserted, err)
+	}
 }
 
 func integrationService(t *testing.T, status string) (*Service, *pgxpool.Pool, uuid.UUID, uuid.UUID) {

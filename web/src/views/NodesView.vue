@@ -15,11 +15,19 @@ import {
   KeyRound,
   ListPlus,
   CircleStop,
+  SlidersHorizontal,
 } from "@lucide/vue";
 import { computed, onMounted, ref } from "vue";
 
 import { useFleetStore } from "../shared/fleet";
 import { recoveryDialogKind } from "../shared/desired-recovery";
+import {
+  loadUserPolicy,
+  policyToForm,
+  saveUserPolicy,
+  type UserPolicyForm,
+} from "../adapters/user-policy";
+import UserPolicyFields from "../upstream/UserPolicyFields.vue";
 
 const fleet = useFleetStore();
 const pendingAction = ref<{
@@ -40,6 +48,11 @@ const sealedPassword = ref("");
 const secretKeyId = ref("");
 const groupMembers = ref("");
 const desiredReason = ref("");
+const policyDialog = ref<{ username: string }>();
+const policyForm = ref<UserPolicyForm>(policyToForm());
+const policyReason = ref("");
+const policyLoading = ref(false);
+const policyError = ref("");
 const usersState = computed(() =>
   fleet.userGroupState.filter((item) => item.kind === "user"),
 );
@@ -135,6 +148,52 @@ async function submitDesired(): Promise<void> {
         .sort(),
       explanation,
     );
+}
+
+async function openPolicy(username: string): Promise<void> {
+  if (!fleet.selected) return;
+  const nodeId = fleet.selected.id;
+  policyDialog.value = { username };
+  policyForm.value = policyToForm();
+  policyReason.value = "";
+  policyError.value = "";
+  policyLoading.value = true;
+  try {
+    const loaded = await loadUserPolicy(nodeId, username);
+    if (
+      fleet.selected?.id === nodeId &&
+      policyDialog.value?.username === username
+    )
+      policyForm.value = loaded;
+  } catch (error) {
+    policyError.value =
+      error instanceof Error ? error.message : "Policy load failed";
+  } finally {
+    policyLoading.value = false;
+  }
+}
+
+async function submitPolicy(): Promise<void> {
+  if (!fleet.selected || !policyDialog.value || !policyReason.value.trim())
+    return;
+  const nodeId = fleet.selected.id;
+  const username = policyDialog.value.username;
+  policyLoading.value = true;
+  policyError.value = "";
+  try {
+    policyForm.value = await saveUserPolicy(
+      nodeId,
+      username,
+      policyForm.value,
+      policyReason.value.trim(),
+    );
+    policyDialog.value = undefined;
+  } catch (error) {
+    policyError.value =
+      error instanceof Error ? error.message : "Policy update failed";
+  } finally {
+    policyLoading.value = false;
+  }
 }
 </script>
 
@@ -329,6 +388,15 @@ async function submitDesired(): Promise<void> {
               ></span
             >
             <span class="session-actions">
+              <button
+                v-if="item.desiredVersion"
+                type="button"
+                :disabled="operationBusy"
+                :title="$t('quotaAndExpiry')"
+                @click="openPolicy(item.name)"
+              >
+                <SlidersHorizontal :size="14" />
+              </button>
               <button
                 v-if="recoveryDialogKind(item) === 'create'"
                 type="button"
@@ -623,6 +691,41 @@ async function submitDesired(): Promise<void> {
             type="submit"
             class="primary"
             :disabled="!desiredReason.trim()"
+          >
+            {{ $t("confirm") }}
+          </button>
+        </footer>
+      </form>
+    </div>
+    <div
+      v-if="policyDialog"
+      class="dialog-backdrop"
+      @click.self="policyDialog = undefined"
+    >
+      <form class="operation-dialog" @submit.prevent="submitPolicy">
+        <header>
+          <h2>{{ $t("quotaAndExpiry") }}</h2>
+          <code>{{ policyDialog.username }}</code>
+        </header>
+        <UserPolicyFields v-model="policyForm" />
+        <label for="policy-reason">{{ $t("reason") }}</label>
+        <textarea
+          id="policy-reason"
+          v-model="policyReason"
+          maxlength="512"
+          required
+        ></textarea>
+        <p v-if="policyError" class="operation-error" role="alert">
+          {{ policyError }}
+        </p>
+        <footer>
+          <button type="button" @click="policyDialog = undefined">
+            {{ $t("cancel") }}
+          </button>
+          <button
+            type="submit"
+            class="primary"
+            :disabled="policyLoading || !policyReason.trim()"
           >
             {{ $t("confirm") }}
           </button>

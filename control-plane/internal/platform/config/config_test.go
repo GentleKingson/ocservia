@@ -113,3 +113,25 @@ func TestControllerEndpointIDValidation(t *testing.T) {
 		}
 	}
 }
+
+func TestUserOperationConcurrency(t *testing.T) {
+	lookup := func(key string) (string, bool) {
+		values := map[string]string{
+			"OCSERV_DATABASE_URL":               "postgres://db/test",
+			"OCSERV_USER_OPERATION_CONCURRENCY": "17",
+		}
+		value, ok := values[key]
+		return value, ok
+	}
+	config, err := Load(nil, lookup)
+	if err != nil || config.UserOperationConcurrency != 17 {
+		t.Fatalf("configured concurrency=%d err=%v", config.UserOperationConcurrency, err)
+	}
+	if _, err := Load(nil, func(key string) (string, bool) {
+		values := map[string]string{"OCSERV_DATABASE_URL": "postgres://db/test", "OCSERV_USER_OPERATION_CONCURRENCY": "501"}
+		value, ok := values[key]
+		return value, ok
+	}); err == nil {
+		t.Fatal("accepted user operation concurrency above the batch bound")
+	}
+}

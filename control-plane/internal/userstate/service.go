@@ -14,6 +14,7 @@ import (
 
 	agentv1 "github.com/GentleKingson/ocservia/control-plane/gen/proto/ocserv/platform/agent/v1"
 	"github.com/GentleKingson/ocservia/control-plane/internal/audit"
+	"github.com/GentleKingson/ocservia/control-plane/internal/commandlimit"
 	operationstore "github.com/GentleKingson/ocservia/control-plane/internal/operations"
 	"github.com/GentleKingson/ocservia/control-plane/internal/semanticpayload"
 	"github.com/google/uuid"
@@ -33,6 +34,7 @@ var (
 	ErrNodeUnavailable     = errors.New("node is unavailable")
 	ErrCapabilityMissing   = errors.New("node capability is unavailable")
 	ErrIdempotencyConflict = errors.New("idempotency key was reused with different input")
+	ErrBacklogExceeded     = commandlimit.ErrBacklogExceeded
 )
 
 var namePattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$`)
@@ -152,6 +154,9 @@ func (s *Service) Mutate(ctx context.Context, request MutationRequest) (operatio
 	}
 	coalesced, err := supersedePending(ctx, tx, request.NodeID, resourceType, request.Name, request.Kind, currentRevision, now)
 	if err != nil {
+		return operationstore.Operation{}, false, err
+	}
+	if err := commandlimit.ReserveBacklog(ctx, tx, workspaceID, request.NodeID); err != nil {
 		return operationstore.Operation{}, false, err
 	}
 	nextVersion, nextRevision := currentVersion+1, currentRevision+1

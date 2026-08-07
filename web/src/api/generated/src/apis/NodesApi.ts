@@ -68,6 +68,11 @@ import {
   UserGroupStatePageFromJSON,
   UserGroupStatePageToJSON,
 } from "../models/UserGroupStatePage";
+import {
+  type UserPolicy,
+  UserPolicyFromJSON,
+  UserPolicyToJSON,
+} from "../models/UserPolicy";
 
 export interface ApproveNodeRequest {
   nodeId: string;
@@ -77,6 +82,11 @@ export interface ApproveNodeRequest {
 
 export interface GetNodeRequest {
   nodeId: string;
+}
+
+export interface GetNodeUserPolicyRequest {
+  nodeId: string;
+  username: string;
 }
 
 export interface ListNodeIpBansRequest {
@@ -264,6 +274,87 @@ export class NodesApi extends runtime.BaseAPI {
     initOverrides?: RequestInit | runtime.InitOverrideFunction,
   ): Promise<NodeObservedState> {
     const response = await this.getNodeRaw(requestParameters, initOverrides);
+    return await response.value();
+  }
+
+  /**
+   * Creates request options for getNodeUserPolicy without sending the request
+   */
+  async getNodeUserPolicyRequestOpts(
+    requestParameters: GetNodeUserPolicyRequest,
+  ): Promise<runtime.RequestOpts> {
+    if (requestParameters["nodeId"] == null) {
+      throw new runtime.RequiredError(
+        "nodeId",
+        'Required parameter "nodeId" was null or undefined when calling getNodeUserPolicy().',
+      );
+    }
+
+    if (requestParameters["username"] == null) {
+      throw new runtime.RequiredError(
+        "username",
+        'Required parameter "username" was null or undefined when calling getNodeUserPolicy().',
+      );
+    }
+
+    const queryParameters: any = {};
+
+    const headerParameters: runtime.HTTPHeaders = {};
+
+    if (this.configuration && this.configuration.accessToken) {
+      const token = this.configuration.accessToken;
+      const tokenString = await token("bearerAuth", []);
+
+      if (tokenString) {
+        headerParameters["Authorization"] = `Bearer ${tokenString}`;
+      }
+    }
+
+    let urlPath = `/nodes/{node_id}/users/{username}/policy`;
+    urlPath = urlPath.replace(
+      "{node_id}",
+      encodeURIComponent(String(requestParameters["nodeId"])),
+    );
+    urlPath = urlPath.replace(
+      "{username}",
+      encodeURIComponent(String(requestParameters["username"])),
+    );
+
+    return {
+      path: urlPath,
+      method: "GET",
+      headers: headerParameters,
+      query: queryParameters,
+    };
+  }
+
+  /**
+   * Get desired quota and UTC expiry with observed usage
+   */
+  async getNodeUserPolicyRaw(
+    requestParameters: GetNodeUserPolicyRequest,
+    initOverrides?: RequestInit | runtime.InitOverrideFunction,
+  ): Promise<runtime.ApiResponse<UserPolicy>> {
+    const requestOptions =
+      await this.getNodeUserPolicyRequestOpts(requestParameters);
+    const response = await this.request(requestOptions, initOverrides);
+
+    return new runtime.JSONApiResponse(response, (jsonValue) =>
+      UserPolicyFromJSON(jsonValue),
+    );
+  }
+
+  /**
+   * Get desired quota and UTC expiry with observed usage
+   */
+  async getNodeUserPolicy(
+    requestParameters: GetNodeUserPolicyRequest,
+    initOverrides?: RequestInit | runtime.InitOverrideFunction,
+  ): Promise<UserPolicy> {
+    const response = await this.getNodeUserPolicyRaw(
+      requestParameters,
+      initOverrides,
+    );
     return await response.value();
   }
 
