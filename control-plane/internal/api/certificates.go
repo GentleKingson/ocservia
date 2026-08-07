@@ -184,15 +184,15 @@ func (s *Server) downloadArtifact(w http.ResponseWriter, r *http.Request) {
 		writeProblem(w, r, http.StatusServiceUnavailable, "https://ocservia.dev/problems/artifact-unavailable", "Artifact unavailable", "the bounded artifact stream failed integrity verification")
 		return
 	}
-	w.Header().Set("Content-Type", "application/x-pkcs12")
-	w.Header().Set("Content-Disposition", `attachment; filename="certificate.p12"`)
-	w.Header().Set("Content-Length", fmt.Sprintf("%d", download.Size))
-	w.Header().Set("Cache-Control", "no-store")
 	actor := principal(r)
 	if err := s.certificates.CompleteArtifact(context.WithoutCancel(r.Context()), id, digest[:], int64(len(data)), actor.IdentityID, actor.SessionID, requestID(r)); err != nil {
 		writeCertificateError(w, r, err)
 		return
 	}
+	w.Header().Set("Content-Type", "application/x-pkcs12")
+	w.Header().Set("Content-Disposition", `attachment; filename="certificate.p12"`)
+	w.Header().Set("Content-Length", fmt.Sprintf("%d", download.Size))
+	w.Header().Set("Cache-Control", "no-store")
 	_, _ = w.Write(data)
 }
 

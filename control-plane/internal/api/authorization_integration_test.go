@@ -28,6 +28,19 @@ func (f certificateArtifactFixture) FetchArtifact(context.Context, uuid.UUID, uu
 	return io.NopCloser(bytes.NewReader(f.data)), nil
 }
 
+type invalidatingArtifactFixture struct {
+	pool       *pgxpool.Pool
+	artifactID uuid.UUID
+	data       []byte
+}
+
+func (f invalidatingArtifactFixture) FetchArtifact(ctx context.Context, _ uuid.UUID, _ uuid.UUID, _ int64) (io.ReadCloser, error) {
+	if _, err := f.pool.Exec(ctx, `UPDATE artifact_operations SET state='failed',lease_until=NULL WHERE id=$1`, f.artifactID); err != nil {
+		return nil, err
+	}
+	return io.NopCloser(bytes.NewReader(f.data)), nil
+}
+
 type failingArtifactWriter struct {
 	header http.Header
 }
@@ -109,6 +122,19 @@ func TestCertificateRoutesUseNodeScopedAuthorizationIntegration(t *testing.T) {
 	var artifactState string
 	if err := pool.QueryRow(ctx, `SELECT state FROM artifact_operations WHERE id=$1`, artifactID).Scan(&artifactState); err != nil || artifactState != "consumed" {
 		t.Fatalf("one-time download state=%q err=%v", artifactState, err)
+	}
+	if _, err := pool.Exec(ctx, `UPDATE artifact_operations SET state='ready',consumed_at=NULL,content_sha256=$2,content_size=$3 WHERE id=$1`, artifactID, artifactHash[:], len(artifactData)); err != nil {
+		t.Fatal(err)
+	}
+	failureServer := &Server{certificates: certificatestore.NewWithDependencies(pool, operationstore.New(pool), nil, nil, invalidatingArtifactFixture{pool: pool, artifactID: artifactID, data: artifactData})}
+	failureRequest := httptest.NewRequest(http.MethodGet, "/api/v1/artifacts/"+artifactID.String(), nil)
+	failureRequest.SetPathValue("artifact_id", artifactID.String())
+	failureRequest.Header.Set("X-Artifact-Token", token)
+	failureRequest = failureRequest.WithContext(context.WithValue(context.WithValue(failureRequest.Context(), principalKey{}, manager), requestIDKey{}, "artifact-completion-failure"))
+	failureResponse := httptest.NewRecorder()
+	failureServer.downloadArtifact(failureResponse, failureRequest)
+	if failureResponse.Code != http.StatusForbidden || failureResponse.Header().Get("Content-Disposition") != "" || failureResponse.Header().Get("Content-Length") != "" || !strings.Contains(failureResponse.Header().Get("Content-Type"), "application/problem+json") {
+		t.Fatalf("completion failure status=%d headers=%v body=%s", failureResponse.Code, failureResponse.Header(), failureResponse.Body.String())
 	}
 }
 
