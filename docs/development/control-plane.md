@@ -58,7 +58,7 @@ Run the browser-to-simulator E2E with `make e2e`. The script scopes every
 container, network, and volume to `COMPOSE_PROJECT` and removes them on success,
 failure, or interruption.
 
-The same Compose stack is used by the `Browser E2E` GitHub Actions job. CI gives
+The same Compose stack is used by the browser E2E phase of the `Web` GitHub Actions job. CI gives
 each run and attempt a unique Compose project, retains the Playwright HTML
 report, traces, screenshots, videos, test results, Compose logs, and container
 status as a workflow artifact, then verifies scoped cleanup. `make e2e` is the

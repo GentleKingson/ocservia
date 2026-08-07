@@ -1,4 +1,4 @@
-name: Contracts and toolchains
+name: CI
 
 on:
   pull_request:
@@ -32,30 +32,8 @@ jobs:
           scripts/test-public-repository-policy.sh
           scripts/docs-check.sh
 
-  toolchain:
-    name: Toolchain Bootstrap
-    runs-on: ubuntu-24.04
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-        with:
-          persist-credentials: false
-      - name: Runner preflight
-        run: scripts/ci-preflight.sh
-      - name: Restore verified toolchain downloads
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
-        with:
-          path: |
-            .cache/downloads
-            .cache/npm
-            .tools
-          key: tooling-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'scripts/checksums.txt', 'web/package-lock.json') }}
-      - name: Bootstrap and verify pinned tools
-        run: scripts/bootstrap.sh
-
   contracts:
     name: Contracts
-    needs: toolchain
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
@@ -107,9 +85,8 @@ jobs:
 
   go:
     name: Go
-    needs: toolchain
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
+    timeout-minutes: 35
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
@@ -124,100 +101,7 @@ jobs:
             .cache/npm
             .tools
           key: tooling-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'scripts/checksums.txt', 'web/package-lock.json') }}
-      - name: Restore Go build cache
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
-        with:
-          path: |
-            .cache/go-build
-            .cache/go-mod
-            .cache/gopath
-          key: go-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'control-plane/go.sum') }}
-          restore-keys: |
-            go-${{ runner.os }}-${{ runner.arch }}-
-      - name: Bootstrap and verify pinned tools
-        run: scripts/bootstrap.sh
-      - name: Go checks
-        env:
-          ARTIFACT_DIR: ${{ runner.temp }}/artifacts/go
-        run: |
-          mkdir -p "${ARTIFACT_DIR}"
-          set -o pipefail
-          scripts/go-check.sh 2>&1 | tee "${ARTIFACT_DIR}/go-check.log"
-      - name: Upload Go diagnostics
-        if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
-        with:
-          name: go-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/artifacts/go
-          if-no-files-found: error
-          retention-days: 14
-
-  database-integration:
-    name: Database Integration
-    needs: toolchain
-    runs-on: ubuntu-24.04
-    timeout-minutes: 15
-    env:
-      RUN_ID: database-${{ github.run_id }}-${{ github.run_attempt }}-database-integration
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-        with:
-          persist-credentials: false
-      - name: Runner preflight
-        run: scripts/ci-preflight.sh
-      - name: Restore verified tools
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
-        with:
-          path: |
-            .cache/downloads
-            .cache/npm
-            .tools
-          key: tooling-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'scripts/checksums.txt', 'web/package-lock.json') }}
-      - name: Restore database Go build cache
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
-        with:
-          path: |
-            .cache/go-build
-            .cache/go-mod
-            .cache/gopath
-          key: database-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'control-plane/go.sum') }}
-      - name: Bootstrap and verify pinned tools
-        run: scripts/bootstrap.sh
-      - name: PostgreSQL 17 and 18 integration
-        env:
-          ARTIFACT_DIR: ${{ runner.temp }}/artifacts/database
-        run: scripts/database-integration.sh
-      - name: Upload database diagnostics
-        if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
-        with:
-          name: database-${{ github.run_id }}-${{ github.run_attempt }}-pg17-pg18
-          path: ${{ runner.temp }}/artifacts/database
-          if-no-files-found: warn
-          retention-days: 14
-
-  local-slice-integration:
-    name: Local Slice Integration
-    needs: toolchain
-    runs-on: ubuntu-24.04
-    timeout-minutes: 15
-    env:
-      RUN_ID: local-slice-${{ github.run_id }}-${{ github.run_attempt }}-local-slice-integration
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-        with:
-          persist-credentials: false
-      - name: Runner preflight
-        run: scripts/ci-preflight.sh
-      - name: Restore verified tools
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
-        with:
-          path: |
-            .cache/downloads
-            .cache/npm
-            .tools
-          key: tooling-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'scripts/checksums.txt', 'web/package-lock.json') }}
-      - name: Restore local-slice build caches
+      - name: Restore Go and integration build caches
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: |
@@ -225,25 +109,39 @@ jobs:
             .cache/go-mod
             .cache/gopath
             rust/target
-          key: local-slice-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'scripts/checksums.txt', 'control-plane/go.sum', 'rust/Cargo.lock', 'web/package-lock.json') }}
+          key: go-integration-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'scripts/checksums.txt', 'control-plane/go.sum', 'rust/Cargo.lock') }}
+          restore-keys: |
+            go-integration-${{ runner.os }}-${{ runner.arch }}-
       - name: Bootstrap and verify pinned tools
         run: scripts/bootstrap.sh
+      - name: Go checks
+        env:
+          ARTIFACT_DIR: ${{ runner.temp }}/artifacts/go/go-check
+        run: |
+          mkdir -p "${ARTIFACT_DIR}"
+          set -o pipefail
+          scripts/go-check.sh 2>&1 | tee "${ARTIFACT_DIR}/go-check.log"
+      - name: PostgreSQL 17 and 18 integration
+        env:
+          ARTIFACT_DIR: ${{ runner.temp }}/artifacts/go/database-integration
+          RUN_ID: database-${{ github.run_id }}-${{ github.run_attempt }}-go
+        run: scripts/database-integration.sh
       - name: Go, PostgreSQL, UDS, and Rust stub integration
         env:
-          ARTIFACT_DIR: ${{ runner.temp }}/artifacts/local-slice
+          ARTIFACT_DIR: ${{ runner.temp }}/artifacts/go/local-slice
+          RUN_ID: local-slice-${{ github.run_id }}-${{ github.run_attempt }}-go
         run: scripts/local-slice-integration.sh
-      - name: Upload local-slice diagnostics
+      - name: Upload Go and integration diagnostics
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
-          name: local-slice-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/artifacts/local-slice
+          name: go-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/artifacts/go
           if-no-files-found: warn
           retention-days: 14
 
   rust:
     name: Rust
-    needs: toolchain
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
@@ -263,8 +161,7 @@ jobs:
       - name: Restore Rust target cache
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
-          path: |
-            rust/target
+          path: rust/target
           key: rust-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'rust/Cargo.lock') }}
           restore-keys: |
             rust-${{ runner.os }}-${{ runner.arch }}-
@@ -286,9 +183,49 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
+  web:
+    name: Web
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - name: Runner preflight
+        run: scripts/ci-preflight.sh
+      - name: Restore verified tools and npm cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: |
+            .cache/downloads
+            .cache/npm
+            .tools
+          key: tooling-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'scripts/checksums.txt', 'web/package-lock.json') }}
+      - name: Bootstrap and verify pinned tools
+        run: scripts/bootstrap.sh
+      - name: Web checks
+        env:
+          ARTIFACT_DIR: ${{ runner.temp }}/artifacts/web/web-check
+        run: |
+          mkdir -p "${ARTIFACT_DIR}"
+          set -o pipefail
+          scripts/web-check.sh 2>&1 | tee "${ARTIFACT_DIR}/web-check.log"
+      - name: Docker Compose Playwright E2E
+        env:
+          ARTIFACT_DIR: ${{ runner.temp }}/artifacts/web/browser-e2e
+          COMPOSE_PROJECT: ocservia-e2e-${{ github.run_id }}-${{ github.run_attempt }}-web
+        run: scripts/e2e.sh
+      - name: Upload Web and browser diagnostics
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: web-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/artifacts/web
+          if-no-files-found: warn
+          retention-days: 14
+
   native-ocserv:
     name: Native Ocserv
-    needs: toolchain
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
@@ -329,68 +266,6 @@ jobs:
           if-no-files-found: warn
           retention-days: 14
 
-  web:
-    name: Web
-    needs: toolchain
-    runs-on: ubuntu-24.04
-    timeout-minutes: 15
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-        with:
-          persist-credentials: false
-      - name: Runner preflight
-        run: scripts/ci-preflight.sh
-      - name: Restore verified tools and npm cache
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
-        with:
-          path: |
-            .cache/downloads
-            .cache/npm
-            .tools
-          key: tooling-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'scripts/checksums.txt', 'web/package-lock.json') }}
-      - name: Bootstrap and verify pinned tools
-        run: scripts/bootstrap.sh
-      - name: Web checks
-        env:
-          ARTIFACT_DIR: ${{ runner.temp }}/artifacts/web
-        run: |
-          mkdir -p "${ARTIFACT_DIR}"
-          set -o pipefail
-          scripts/web-check.sh 2>&1 | tee "${ARTIFACT_DIR}/web-check.log"
-      - name: Upload Web diagnostics
-        if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
-        with:
-          name: web-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/artifacts/web
-          if-no-files-found: error
-          retention-days: 14
-
-  browser-e2e:
-    name: Browser E2E
-    runs-on: ubuntu-24.04
-    timeout-minutes: 20
-    env:
-      COMPOSE_PROJECT: ocservia-e2e-${{ github.run_id }}-${{ github.run_attempt }}-browser-e2e
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-        with:
-          persist-credentials: false
-      - name: Runner preflight
-        run: scripts/ci-preflight.sh
-      - name: Docker Compose Playwright E2E
-        env:
-          ARTIFACT_DIR: ${{ runner.temp }}/artifacts/browser-e2e
-        run: scripts/e2e.sh
-      - name: Upload Playwright and Compose diagnostics
-        if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
-        with:
-          name: browser-e2e-${{ github.run_id }}-${{ github.run_attempt }}-desktop-mobile
-          path: ${{ runner.temp }}/artifacts/browser-e2e
-          if-no-files-found: warn
-          retention-days: 14
-
   p1-smoke:
     name: P1 Smoke
     runs-on: ubuntu-24.04
@@ -428,7 +303,6 @@ jobs:
 
   security-licenses:
     name: Security and Licenses
-    needs: toolchain
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
@@ -454,3 +328,59 @@ jobs:
           scripts/transport-boundary-check.sh
           scripts/security-check.sh
           scripts/license-check.sh
+
+  ci-gate:
+    name: CI Gate
+    if: always()
+    needs:
+      - public-policy
+      - contracts
+      - go
+      - rust
+      - web
+      - native-ocserv
+      - p1-smoke
+      - security-licenses
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    env:
+      PUBLIC_POLICY_RESULT: ${{ needs.public-policy.result }}
+      CONTRACTS_RESULT: ${{ needs.contracts.result }}
+      GO_RESULT: ${{ needs.go.result }}
+      RUST_RESULT: ${{ needs.rust.result }}
+      WEB_RESULT: ${{ needs.web.result }}
+      NATIVE_OCSERV_RESULT: ${{ needs.native-ocserv.result }}
+      P1_SMOKE_RESULT: ${{ needs.p1-smoke.result }}
+      SECURITY_LICENSES_RESULT: ${{ needs.security-licenses.result }}
+    steps:
+      - name: Verify required execution jobs
+        run: |
+          {
+            echo '## CI Gate'
+            echo
+            echo '| Job | Result |'
+            echo '| --- | --- |'
+            echo "| Public Repository Policy | ${PUBLIC_POLICY_RESULT} |"
+            echo "| Contracts | ${CONTRACTS_RESULT} |"
+            echo "| Go | ${GO_RESULT} |"
+            echo "| Rust | ${RUST_RESULT} |"
+            echo "| Web | ${WEB_RESULT} |"
+            echo "| Native Ocserv | ${NATIVE_OCSERV_RESULT} |"
+            echo "| P1 Smoke | ${P1_SMOKE_RESULT} |"
+            echo "| Security and Licenses | ${SECURITY_LICENSES_RESULT} |"
+          } >>"${GITHUB_STEP_SUMMARY}"
+
+          for result in \
+            "${PUBLIC_POLICY_RESULT}" \
+            "${CONTRACTS_RESULT}" \
+            "${GO_RESULT}" \
+            "${RUST_RESULT}" \
+            "${WEB_RESULT}" \
+            "${NATIVE_OCSERV_RESULT}" \
+            "${P1_SMOKE_RESULT}" \
+            "${SECURITY_LICENSES_RESULT}"; do
+            if [[ "${result}" != success ]]; then
+              echo "CI Gate rejected upstream result: ${result}" >&2
+              exit 1
+            fi
+          done
