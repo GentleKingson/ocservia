@@ -3601,7 +3601,7 @@ mod tests {
         std::fs::write(&users, original).expect("original");
         let openssl = executable("openssl-fast", "printf rotated-password");
         let openssl_directory = openssl.parent().expect("openssl parent").to_owned();
-        let slow_ocpasswd = executable("ocpasswd-slow", "sleep 2");
+        let slow_ocpasswd = executable("ocpasswd-slow", "sleep 5");
         let slow_directory = slow_ocpasswd
             .parent()
             .expect("slow ocpasswd parent")
@@ -3623,23 +3623,24 @@ mod tests {
         let adapter = Adapter::new(
             resources,
             Limits {
-                timeout: Duration::from_millis(50),
+                timeout: Duration::from_millis(500),
                 output_bytes: DEFAULT_OUTPUT_BYTES,
             },
         );
-        assert!(matches!(
-            adapter
-                .user_password_rotate("alice", "test-key", &[7_u8; 64], 2, test_effect())
-                .await,
-            Err(AdapterError::DeadlineExceeded)
-        ));
+        let timeout_result = adapter
+            .user_password_rotate("alice", "test-key", &[7_u8; 64], 2, test_effect())
+            .await;
+        assert!(
+            matches!(timeout_result, Err(AdapterError::DeadlineExceeded)),
+            "unexpected password staging timeout result: {timeout_result:?}"
+        );
         assert!(staging_files(&directory).is_empty());
         assert_eq!(
             std::fs::read(&users).expect("preserved after timeout"),
             original
         );
 
-        let slow_openssl = executable("openssl-slow", "sleep 2");
+        let slow_openssl = executable("openssl-slow", "sleep 5");
         let slow_openssl_directory = slow_openssl
             .parent()
             .expect("slow openssl parent")
@@ -3657,16 +3658,17 @@ mod tests {
                 )
                 .expect("slow decrypt resources"),
             Limits {
-                timeout: Duration::from_millis(50),
+                timeout: Duration::from_millis(500),
                 output_bytes: DEFAULT_OUTPUT_BYTES,
             },
         );
-        assert!(matches!(
-            decrypt_adapter
-                .user_password_rotate("alice", "test-key", &[7_u8; 64], 2, test_effect())
-                .await,
-            Err(AdapterError::DeadlineExceeded)
-        ));
+        let decrypt_timeout_result = decrypt_adapter
+            .user_password_rotate("alice", "test-key", &[7_u8; 64], 2, test_effect())
+            .await;
+        assert!(
+            matches!(decrypt_timeout_result, Err(AdapterError::DeadlineExceeded)),
+            "unexpected password decrypt timeout result: {decrypt_timeout_result:?}"
+        );
         assert!(staging_files(&directory).is_empty());
         assert_eq!(
             std::fs::read(&users).expect("preserved after decrypt timeout"),
@@ -3718,7 +3720,7 @@ mod tests {
 
         let lock_ocpasswd = executable(
             "ocpasswd-lock-slow",
-            "if [ \"$3\" = \"-l\" ]; then sleep 2; exit 0; fi\nprintf '%s\\n' 'alice:staff:$6$new-hash' > \"$2\"",
+            "if [ \"$3\" = \"-l\" ]; then sleep 5; exit 0; fi\nprintf '%s\\n' 'alice:staff:$6$new-hash' > \"$2\"",
         );
         let lock_directory = lock_ocpasswd
             .parent()
@@ -3738,16 +3740,17 @@ mod tests {
         let lock_adapter = Adapter::new(
             lock_resources,
             Limits {
-                timeout: Duration::from_millis(50),
+                timeout: Duration::from_millis(500),
                 output_bytes: DEFAULT_OUTPUT_BYTES,
             },
         );
-        assert!(matches!(
-            lock_adapter
-                .user_password_rotate("alice", "test-key", &[7_u8; 64], 2, test_effect())
-                .await,
-            Err(AdapterError::DeadlineExceeded)
-        ));
+        let lock_timeout_result = lock_adapter
+            .user_password_rotate("alice", "test-key", &[7_u8; 64], 2, test_effect())
+            .await;
+        assert!(
+            matches!(lock_timeout_result, Err(AdapterError::DeadlineExceeded)),
+            "unexpected password lock timeout result: {lock_timeout_result:?}"
+        );
         assert!(staging_files(&directory).is_empty());
         assert_eq!(
             std::fs::read(&users).expect("preserved after lock timeout"),
