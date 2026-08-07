@@ -263,6 +263,9 @@ func TestCertificateIssueArtifactAndRevokeIntegration(t *testing.T) {
 	if expired, err := service.Get(ctx, certificate.ID); err != nil || expired.State != "expired" {
 		t.Fatalf("expired certificate=%+v err=%v", expired, err)
 	}
+	if _, err := service.OpenArtifact(ctx, hashGrant.ArtifactID, hashGrant.DownloadToken); !errors.Is(err, ErrArtifactDenied) {
+		t.Fatalf("certificate expiry left artifact downloadable: %v", err)
+	}
 	if _, _, err := service.CreateP12(ctx, P12Request{CertificateID: certificate.ID, ActorIdentityID: requesterID, ActorSessionID: requesterSession, ExpectedVersion: 1, IdempotencyKey: "i17-p12-after-certificate-expiry", Reason: "reject expired certificate", RequestID: "p12-after-certificate-expiry"}); !errors.Is(err, ErrNotReady) {
 		t.Fatalf("expired certificate P12 err=%v", err)
 	}

@@ -458,7 +458,7 @@ func (s *Service) OpenArtifact(ctx context.Context, id uuid.UUID, token string) 
 	var nodeID uuid.UUID
 	var expected []byte
 	var size int64
-	err = tx.QueryRow(ctx, `SELECT node_id,content_sha256,content_size FROM artifact_operations WHERE id=$1 AND token_sha256=$2 AND expires_at>now() AND (state='ready' OR (state='leased' AND lease_until<now())) FOR UPDATE`, id, tokenHash[:]).Scan(&nodeID, &expected, &size)
+	err = tx.QueryRow(ctx, `SELECT a.node_id,a.content_sha256,a.content_size FROM artifact_operations a JOIN certificates c ON c.id=a.certificate_id WHERE a.id=$1 AND a.token_sha256=$2 AND a.expires_at>now() AND c.not_after>now() AND c.state IN ('issued','expiring') AND (a.state='ready' OR (a.state='leased' AND a.lease_until<now())) FOR UPDATE OF a`, id, tokenHash[:]).Scan(&nodeID, &expected, &size)
 	if err != nil {
 		return ArtifactDownload{}, ErrArtifactDenied
 	}
@@ -537,6 +537,9 @@ func (s *Service) Maintain(ctx context.Context) error {
 		return err
 	}
 	rows.Close()
+	if _, err := tx.Exec(ctx, `UPDATE artifact_operations a SET state='expired',lease_until=NULL,updated_at=now() FROM certificates c WHERE c.id=a.certificate_id AND c.state='expired' AND a.state IN ('pending','ready','leased')`); err != nil {
+		return err
+	}
 	rows, err = tx.Query(ctx, `WITH due AS (
 		SELECT id FROM certificates WHERE state='issued' AND not_after>now() AND not_after<=now()+interval '30 days'
 		ORDER BY not_after,id LIMIT 100 FOR UPDATE SKIP LOCKED
