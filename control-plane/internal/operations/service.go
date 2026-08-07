@@ -596,6 +596,62 @@ func (s *Service) Reap(ctx context.Context, maxAttempts int) error {
 			return err
 		}
 	}
+	expiredRows, err := tx.Query(ctx, `SELECT command.id,command.operation_id,command.envelope FROM commands AS command JOIN config_apply_operations AS apply ON apply.operation_id=command.operation_id WHERE command.state IN('dispatched','accepted','running') AND apply.state IN('dispatched','accepted','running') AND command.expires_at<=now() FOR UPDATE OF command`)
+	if err != nil {
+		return fmt.Errorf("select config applies with missing outcomes: %w", err)
+	}
+	type expiredApply struct {
+		commandID, operationID uuid.UUID
+		envelope               []byte
+	}
+	var expiredApplies []expiredApply
+	for expiredRows.Next() {
+		var row expiredApply
+		if err := expiredRows.Scan(&row.commandID, &row.operationID, &row.envelope); err != nil {
+			expiredRows.Close()
+			return err
+		}
+		expiredApplies = append(expiredApplies, row)
+	}
+	expiredRows.Close()
+	for _, row := range expiredApplies {
+		var envelope agentv1.CommandEnvelope
+		if err := proto.Unmarshal(row.envelope, &envelope); err != nil {
+			return fmt.Errorf("decode expired configuration apply: %w", err)
+		}
+		now := s.now()
+		deadline := now.Add(5 * time.Minute)
+		messageID, err := uuid.NewV7()
+		if err != nil {
+			return err
+		}
+		eventID, err := uuid.NewV7()
+		if err != nil {
+			return err
+		}
+		envelope.MessageId = messageID[:]
+		envelope.DeliveryMode = agentv1.CommandDeliveryMode_COMMAND_DELIVERY_MODE_RECONCILE_ONLY
+		envelope.ExpiresAt = timestamppb.New(deadline)
+		payload, err := proto.Marshal(&envelope)
+		if err != nil {
+			return fmt.Errorf("encode expired configuration apply reconciliation: %w", err)
+		}
+		if _, err = tx.Exec(ctx, `UPDATE commands SET state='unknown',envelope=$2,expires_at=$3,updated_at=$4 WHERE id=$1 AND state IN('dispatched','accepted','running')`, row.commandID, payload, deadline, now); err != nil {
+			return err
+		}
+		if _, err = tx.Exec(ctx, `UPDATE operations SET state='unknown',version=version+1,expires_at=$2,updated_at=$3 WHERE id=$1 AND state IN('dispatched','accepted','running')`, row.operationID, deadline, now); err != nil {
+			return err
+		}
+		if _, err = tx.Exec(ctx, `UPDATE config_apply_operations SET state='unknown',updated_at=$2 WHERE operation_id=$1 AND state IN('dispatched','accepted','running')`, row.operationID, now); err != nil {
+			return err
+		}
+		if _, err = tx.Exec(ctx, `UPDATE outbox_events SET payload=$2,published_at=NULL,locked_by=NULL,locked_until=NULL,available_at=$3,last_error='apply outcome missing; reconciliation required' WHERE command_id=$1`, row.commandID, payload, now); err != nil {
+			return err
+		}
+		if _, err = tx.Exec(ctx, `INSERT INTO operation_events(id,operation_id,state,occurred_at) VALUES($1,$2,'unknown',$3)`, eventID, row.operationID, now); err != nil {
+			return err
+		}
+	}
 	if _, err = tx.Exec(ctx, `DELETE FROM node_command_leases WHERE leased_until<=now()`); err != nil {
 		return err
 	}

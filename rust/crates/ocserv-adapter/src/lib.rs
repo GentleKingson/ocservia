@@ -2896,6 +2896,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::too_many_lines)]
     async fn config_apply_fault_points_and_health_commands_fail_closed() {
         fn fixture(
             name: &str,

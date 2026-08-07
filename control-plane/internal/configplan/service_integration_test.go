@@ -152,6 +152,28 @@ func TestConfigPlanCreateReplayStaleAndTypedEnvelopeIntegration(t *testing.T) {
 	if _, err := pool.Exec(ctx, `UPDATE commands SET state='dispatched' WHERE id=$1`, applyCommandID); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := pool.Exec(ctx, `UPDATE config_apply_operations SET state='dispatched' WHERE operation_id=$1`, applyOperationID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `UPDATE commands SET expires_at=now()-interval '1 second' WHERE id=$1`, applyCommandID); err != nil {
+		t.Fatal(err)
+	}
+	if err := operations.New(pool).Reap(ctx, 3); err != nil {
+		t.Fatal(err)
+	}
+	var missingOutcomeState string
+	if err := pool.QueryRow(ctx, `SELECT state FROM config_apply_operations WHERE operation_id=$1`, applyOperationID).Scan(&missingOutcomeState); err != nil || missingOutcomeState != "unknown" {
+		t.Fatalf("missing apply outcome state=%s err=%v", missingOutcomeState, err)
+	}
+	if _, err := pool.Exec(ctx, `UPDATE commands SET state='dispatched',expires_at=now()+interval '10 minutes' WHERE id=$1`, applyCommandID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `UPDATE operations SET state='dispatched' WHERE id=$1`, applyOperationID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `UPDATE config_apply_operations SET state='dispatched' WHERE operation_id=$1`, applyOperationID); err != nil {
+		t.Fatal(err)
+	}
 	resultBytes, err = proto.Marshal(&agentv1.ConfigApplyResult{CandidateHash: hash, PreviousHash: currentHash, Healthy: false, FailedCritical: true, FailureCode: "rollback_failed"})
 	if err != nil {
 		t.Fatal(err)
@@ -170,8 +192,26 @@ func TestConfigPlanCreateReplayStaleAndTypedEnvelopeIntegration(t *testing.T) {
 	}
 	var preEvidenceState string
 	var preEvidenceRevision int64
-	if err := pool.QueryRow(ctx, `SELECT x.state,s.revision FROM config_apply_operations x JOIN node_config_state s ON s.node_id=x.node_id WHERE x.operation_id=$1`, applyOperationID).Scan(&preEvidenceState, &preEvidenceRevision); err != nil || preEvidenceState != "dispatched" || preEvidenceRevision != 0 {
+	if err := pool.QueryRow(ctx, `SELECT x.state,COALESCE(s.revision,0) FROM config_apply_operations x LEFT JOIN node_config_state s ON s.node_id=x.node_id WHERE x.operation_id=$1`, applyOperationID).Scan(&preEvidenceState, &preEvidenceRevision); err != nil || preEvidenceState != "unknown" || preEvidenceRevision != 0 {
 		t.Fatalf("invalid evidence changed state=%s revision=%d err=%v", preEvidenceState, preEvidenceRevision, err)
+	}
+	var recoveryEnvelopeBytes []byte
+	var recoveryUnpublished bool
+	if err := pool.QueryRow(ctx, `SELECT c.envelope,o.published_at IS NULL FROM commands c JOIN outbox_events o ON o.command_id=c.id WHERE c.id=$1`, applyCommandID).Scan(&recoveryEnvelopeBytes, &recoveryUnpublished); err != nil {
+		t.Fatal(err)
+	}
+	var recoveryEnvelope agentv1.CommandEnvelope
+	if proto.Unmarshal(recoveryEnvelopeBytes, &recoveryEnvelope) != nil || recoveryEnvelope.GetDeliveryMode() != agentv1.CommandDeliveryMode_COMMAND_DELIVERY_MODE_RECONCILE_ONLY || !recoveryUnpublished {
+		t.Fatalf("invalid evidence did not schedule reconciliation: %v unpublished=%v", &recoveryEnvelope, recoveryUnpublished)
+	}
+	if _, err := pool.Exec(ctx, `UPDATE commands SET state='dispatched' WHERE id=$1`, applyCommandID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `UPDATE operations SET state='dispatched' WHERE id=$1`, applyOperationID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `UPDATE config_apply_operations SET state='dispatched' WHERE operation_id=$1`, applyOperationID); err != nil {
+		t.Fatal(err)
 	}
 	commandResultBytes, err := proto.Marshal(&agentv1.CommandResult{CommandId: applyEnvelope.GetCommandId(), IdempotencyKey: applyEnvelope.GetIdempotencyKey(), PayloadSha256: payloadHash[:], SemanticPayloadHashVersion: agentv1.SemanticPayloadHashVersion_SEMANTIC_PAYLOAD_HASH_VERSION_V1, State: agentv1.CommandResultState_COMMAND_RESULT_STATE_SUCCEEDED, Result: resultBytes, AcceptedAt: timestamppb.Now(), CompletedAt: timestamppb.Now()})
 	if err != nil {

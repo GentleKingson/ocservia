@@ -16,8 +16,8 @@ use iroh::protocol::{AcceptError, ProtocolHandler, Router};
 use iroh::{Endpoint, EndpointId, SecretKey};
 use ocservia_contracts::decode_strict_command_envelope;
 use ocservia_contracts::generated::ocserv::platform::agent::v1::{
-    AgentEvent, AgentEventType, CommandEnvelope, EnrollRequest, EnrollResponse, HandshakeResult,
-    SessionHandshake, SessionHandshakeResponse, TelemetryBatch,
+    AgentEvent, AgentEventType, CommandEnvelope, CommandResult, CommandResultState, EnrollRequest,
+    EnrollResponse, HandshakeResult, SessionHandshake, SessionHandshakeResponse, TelemetryBatch,
 };
 use ocservia_contracts::generated::ocserv::platform::transport::v1::{
     AuthorizeSessionRequest, CheckEndpointRequest, CloseNodeRequest, CloseNodeResponse,
@@ -607,10 +607,10 @@ impl TransportService for IrohTransportService {
             recv,
             self.shared.clone(),
             node_id,
-            command.traceparent,
             max_message_size,
             response_connection,
             response_deadline,
+            command,
         ));
         Ok(Response::new(SendCommandResponse { accepted: true }))
     }
@@ -1033,11 +1033,12 @@ async fn read_agent_events(
     mut recv: iroh::endpoint::RecvStream,
     shared: Shared,
     node_id: Vec<u8>,
-    traceparent: String,
     max_message_size: usize,
     connection: Connection,
     response_deadline: tokio::time::Instant,
+    command: CommandEnvelope,
 ) {
+    let traceparent = command.traceparent.clone();
     let event_context = (
         &shared,
         node_id.as_slice(),
@@ -1049,21 +1050,22 @@ async fn read_agent_events(
         match tokio::time::timeout_at(response_deadline, recv.read_exact(&mut length)).await {
             Ok(Ok(())) => {}
             Ok(Err(_)) => {
-                publish_agent_error(
+                publish_command_unknown(
                     event_context,
+                    &command,
                     "agent response ended before a terminal event",
                 )
                 .await;
                 return;
             }
             Err(_) => {
-                publish_agent_error(event_context, "agent response timed out").await;
+                publish_command_unknown(event_context, &command, "agent response timed out").await;
                 return;
             }
         }
         let length = u32::from_be_bytes(length) as usize;
         if length == 0 || length > max_message_size || length > MAX_FRAME_BYTES {
-            publish_agent_error(event_context, "agent response size invalid").await;
+            publish_command_unknown(event_context, &command, "agent response size invalid").await;
             return;
         }
         let mut bytes = vec![0_u8; length];
@@ -1071,11 +1073,12 @@ async fn read_agent_events(
             tokio::time::timeout_at(response_deadline, recv.read_exact(&mut bytes)).await,
             Ok(Ok(()))
         ) {
-            publish_agent_error(event_context, "agent response body invalid").await;
+            publish_command_unknown(event_context, &command, "agent response body invalid").await;
             return;
         }
         let Ok(agent_event) = AgentEvent::decode(bytes.as_slice()) else {
-            publish_agent_error(event_context, "agent response protobuf invalid").await;
+            publish_command_unknown(event_context, &command, "agent response protobuf invalid")
+                .await;
             return;
         };
         let event_type = match AgentEventType::try_from(agent_event.r#type) {
@@ -1083,7 +1086,8 @@ async fn read_agent_events(
             Ok(AgentEventType::Heartbeat) => TransportEventType::Heartbeat,
             Ok(AgentEventType::Error) => TransportEventType::Error,
             _ => {
-                publish_agent_error(event_context, "agent response type invalid").await;
+                publish_command_unknown(event_context, &command, "agent response type invalid")
+                    .await;
                 return;
             }
         };
@@ -1100,7 +1104,42 @@ async fn read_agent_events(
             return;
         }
     }
-    publish_agent_error(event_context, "agent response frame limit exceeded").await;
+    publish_command_unknown(
+        event_context,
+        &command,
+        "agent response frame limit exceeded",
+    )
+    .await;
+}
+
+async fn publish_command_unknown(
+    (shared, node_id, traceparent, connection): (&Shared, &[u8], &str, &Connection),
+    command: &CommandEnvelope,
+    _message: &str,
+) {
+    let now = now_timestamp();
+    let result = CommandResult {
+        command_id: command.command_id.clone(),
+        idempotency_key: command.idempotency_key.clone(),
+        payload_sha256: command.semantic_payload_sha256.clone(),
+        state: CommandResultState::Unknown.into(),
+        result: Vec::new(),
+        error_code: "outcome_requires_reconciliation".to_owned(),
+        accepted_at: Some(now),
+        completed_at: Some(now),
+        replayed: false,
+        semantic_payload_hash_version: command.semantic_payload_hash_version,
+    };
+    publish_agent_event(
+        (shared, node_id, traceparent, connection),
+        event_with_traceparent(
+            node_id,
+            TransportEventType::CommandResult,
+            result.encode_to_vec(),
+            traceparent,
+        ),
+    )
+    .await;
 }
 
 fn command_response_deadline(command: &CommandEnvelope) -> Result<tokio::time::Instant, Status> {
@@ -1114,22 +1153,6 @@ fn command_response_deadline(command: &CommandEnvelope) -> Result<tokio::time::I
         .duration_since(SystemTime::now())
         .map_err(|_| Status::deadline_exceeded("command has expired"))?;
     Ok(tokio::time::Instant::now() + remaining)
-}
-
-async fn publish_agent_error(
-    (shared, node_id, traceparent, connection): (&Shared, &[u8], &str, &Connection),
-    message: &str,
-) {
-    publish_agent_event(
-        (shared, node_id, traceparent, connection),
-        event_with_traceparent(
-            node_id,
-            TransportEventType::Error,
-            message.as_bytes().to_vec(),
-            traceparent,
-        ),
-    )
-    .await;
 }
 
 async fn publish_agent_event(
@@ -2313,12 +2336,15 @@ mod tests {
             .await
             .expect("send command with empty response");
         agent.await.expect("empty response task");
-        let event = next_event(&mut events, TransportEventType::Error).await;
+        let event = next_event(&mut events, TransportEventType::CommandResult).await;
         assert_eq!(event.traceparent, eof_traceparent);
+        let result = CommandResult::decode(event.payload.as_slice()).expect("unknown result");
         assert_eq!(
-            event.payload,
-            b"agent response ended before a terminal event"
+            CommandResultState::try_from(result.state).expect("result state"),
+            CommandResultState::Unknown
         );
+        assert_eq!(result.error_code, "outcome_requires_reconciliation");
+        assert_eq!(result.command_id.len(), 16);
 
         shutdown(&service, router).await.expect("shutdown router");
         client.close().await;

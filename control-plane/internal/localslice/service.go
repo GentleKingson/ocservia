@@ -572,11 +572,17 @@ func ingestAgentCommandResult(ctx context.Context, tx pgx.Tx, eventID, nodeID uu
 	if resultBytes == nil {
 		resultBytes = []byte{}
 	}
-	effectiveState, applyResult, err := normalizeConfigApplyResult(&envelope, state, resultBytes)
-	if err != nil {
-		return err
+	effectiveState, applyResult, normalizationErr := normalizeConfigApplyResult(&envelope, state, resultBytes)
+	recoveryReason := result.GetErrorCode()
+	if normalizationErr != nil {
+		effectiveState = "unknown"
+		applyResult = nil
+		recoveryReason = "outcome_requires_reconciliation"
 	}
 	if (currentState == "succeeded" || currentState == "failed" || currentState == "rejected" || currentState == "rolled_back") && currentState != effectiveState {
+		if normalizationErr != nil {
+			return nil
+		}
 		return errors.New("command result contradicts a terminal state")
 	}
 	if currentState == "expired" || currentState == "superseded" {
@@ -609,6 +615,11 @@ func ingestAgentCommandResult(ctx context.Context, tx pgx.Tx, eventID, nodeID uu
 	}
 	if errors.Is(err, pgx.ErrNoRows) {
 		return errors.New("command result does not match a mutable operation")
+	}
+	if terminal {
+		if _, err := tx.Exec(ctx, `UPDATE outbox_events SET published_at=COALESCE(published_at,$2),locked_by=NULL,locked_until=NULL,last_error=NULL WHERE command_id=$1`, commandID, observedAt); err != nil {
+			return fmt.Errorf("complete command reconciliation outbox: %w", err)
+		}
 	}
 	if apply := envelope.GetConfigApply(); apply != nil {
 		applyState := operationState
@@ -661,8 +672,8 @@ func ingestAgentCommandResult(ctx context.Context, tx pgx.Tx, eventID, nodeID uu
 			return fmt.Errorf("append Agent audit result: %w", err)
 		}
 	}
-	if state == "unknown" {
-		if err := scheduleCommandRecovery(ctx, tx, commandID, &envelope, result.GetErrorCode(), observedAt); err != nil {
+	if effectiveState == "unknown" {
+		if err := scheduleCommandRecovery(ctx, tx, commandID, &envelope, recoveryReason, observedAt); err != nil {
 			return err
 		}
 	}
@@ -739,8 +750,16 @@ func scheduleCommandRecovery(ctx context.Context, tx pgx.Tx, commandID uuid.UUID
 	default:
 		return nil
 	}
-	if expires := envelope.GetExpiresAt(); expires == nil || !expires.AsTime().After(observedAt) {
+	expiresAt := envelope.GetExpiresAt()
+	if expiresAt == nil {
 		return nil
+	}
+	if !expiresAt.AsTime().After(observedAt) {
+		if mode != agentv1.CommandDeliveryMode_COMMAND_DELIVERY_MODE_RECONCILE_ONLY {
+			return nil
+		}
+		expiresAt = timestamppb.New(observedAt.Add(5 * time.Minute))
+		envelope.ExpiresAt = expiresAt
 	}
 	messageID, err := uuid.NewV7()
 	if err != nil {
@@ -752,8 +771,11 @@ func scheduleCommandRecovery(ctx context.Context, tx pgx.Tx, commandID uuid.UUID
 	if err != nil {
 		return fmt.Errorf("encode reconciliation command: %w", err)
 	}
-	if _, err := tx.Exec(ctx, `UPDATE commands SET envelope=$2 WHERE id=$1 AND state='unknown'`, commandID, payload); err != nil {
+	if _, err := tx.Exec(ctx, `UPDATE commands SET envelope=$2,expires_at=$3 WHERE id=$1 AND state='unknown'`, commandID, payload, expiresAt.AsTime()); err != nil {
 		return fmt.Errorf("persist reconciliation command: %w", err)
+	}
+	if _, err := tx.Exec(ctx, `UPDATE operations SET expires_at=$2 WHERE command_id=$1 AND state='unknown'`, commandID, expiresAt.AsTime()); err != nil {
+		return fmt.Errorf("extend reconciliation operation: %w", err)
 	}
 	if _, err := tx.Exec(ctx, `UPDATE outbox_events SET payload=$2,published_at=NULL,locked_by=NULL,locked_until=NULL,available_at=$3,last_error=NULL WHERE command_id=$1`, commandID, payload, observedAt); err != nil {
 		return fmt.Errorf("schedule reconciliation command: %w", err)
