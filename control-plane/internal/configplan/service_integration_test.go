@@ -155,15 +155,22 @@ func TestConfigPlanCreateReplayStaleAndTypedEnvelopeIntegration(t *testing.T) {
 	if _, err := pool.Exec(ctx, `UPDATE config_apply_operations SET state='dispatched' WHERE operation_id=$1`, applyOperationID); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := pool.Exec(ctx, `UPDATE commands SET expires_at=now()-interval '1 second' WHERE id=$1`, applyCommandID); err != nil {
+	if _, err := pool.Exec(ctx, `UPDATE commands SET expires_at=created_at+interval '1 microsecond' WHERE id=$1`, applyCommandID); err != nil {
 		t.Fatal(err)
 	}
 	if err := operations.New(pool).Reap(ctx, 3); err != nil {
 		t.Fatal(err)
 	}
-	var missingOutcomeState string
-	if err := pool.QueryRow(ctx, `SELECT state FROM config_apply_operations WHERE operation_id=$1`, applyOperationID).Scan(&missingOutcomeState); err != nil || missingOutcomeState != "unknown" {
-		t.Fatalf("missing apply outcome state=%s err=%v", missingOutcomeState, err)
+	var commandState, operationState, missingOutcomeState string
+	var commandExpiry, operationExpiry time.Time
+	var missingOutcomeEnvelopeBytes []byte
+	var missingOutcomeUnpublished bool
+	if err := pool.QueryRow(ctx, `SELECT c.state,o.state,x.state,c.expires_at,o.expires_at,c.envelope,b.published_at IS NULL FROM commands c JOIN operations o ON o.id=c.operation_id JOIN config_apply_operations x ON x.operation_id=o.id JOIN outbox_events b ON b.command_id=c.id WHERE c.id=$1`, applyCommandID).Scan(&commandState, &operationState, &missingOutcomeState, &commandExpiry, &operationExpiry, &missingOutcomeEnvelopeBytes, &missingOutcomeUnpublished); err != nil {
+		t.Fatal(err)
+	}
+	var missingOutcomeEnvelope agentv1.CommandEnvelope
+	if proto.Unmarshal(missingOutcomeEnvelopeBytes, &missingOutcomeEnvelope) != nil || commandState != "unknown" || operationState != "unknown" || missingOutcomeState != "unknown" || !commandExpiry.After(time.Now()) || !operationExpiry.Equal(commandExpiry) || missingOutcomeEnvelope.GetDeliveryMode() != agentv1.CommandDeliveryMode_COMMAND_DELIVERY_MODE_RECONCILE_ONLY || bytes.Equal(missingOutcomeEnvelope.GetMessageId(), applyEnvelope.GetMessageId()) || !missingOutcomeUnpublished {
+		t.Fatalf("missing outcome command=%s operation=%s apply=%s command_expiry=%s operation_expiry=%s envelope=%v unpublished=%v", commandState, operationState, missingOutcomeState, commandExpiry, operationExpiry, &missingOutcomeEnvelope, missingOutcomeUnpublished)
 	}
 	if _, err := pool.Exec(ctx, `UPDATE commands SET state='dispatched',expires_at=now()+interval '10 minutes' WHERE id=$1`, applyCommandID); err != nil {
 		t.Fatal(err)
@@ -187,8 +194,8 @@ func TestConfigPlanCreateReplayStaleAndTypedEnvelopeIntegration(t *testing.T) {
 		t.Fatal(err)
 	}
 	invalidEventID := uuid.Must(uuid.NewV7())
-	if err := localslice.New(pool).Ingest(ctx, &transportv1.TransportEvent{EventId: invalidEventID[:], NodeId: nodeID[:], Type: transportv1.TransportEventType_TRANSPORT_EVENT_TYPE_COMMAND_RESULT, OccurredAt: timestamppb.Now(), Traceparent: request.Traceparent, Payload: invalidResultBytes}); err == nil {
-		t.Fatal("empty configuration apply result was accepted")
+	if err := localslice.New(pool).Ingest(ctx, &transportv1.TransportEvent{EventId: invalidEventID[:], NodeId: nodeID[:], Type: transportv1.TransportEventType_TRANSPORT_EVENT_TYPE_COMMAND_RESULT, OccurredAt: timestamppb.Now(), Traceparent: request.Traceparent, Payload: invalidResultBytes}); err != nil {
+		t.Fatalf("ingest invalid configuration evidence for reconciliation: %v", err)
 	}
 	var preEvidenceState string
 	var preEvidenceRevision int64

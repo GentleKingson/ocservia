@@ -2324,14 +2324,14 @@ mod tests {
 
         let eof_traceparent = new_traceparent();
         let agent = tokio::spawn(end_command_without_response(connection.clone()));
+        let eof_command_bytes =
+            command_envelope(&handshake.node_id, &eof_traceparent, String::new());
+        let eof_command =
+            CommandEnvelope::decode(eof_command_bytes.as_slice()).expect("decode sent EOF command");
         service
             .send_command(Request::new(SendCommandRequest {
                 node_id: handshake.node_id.clone(),
-                command_envelope: command_envelope(
-                    &handshake.node_id,
-                    &eof_traceparent,
-                    String::new(),
-                ),
+                command_envelope: eof_command_bytes,
             }))
             .await
             .expect("send command with empty response");
@@ -2344,7 +2344,13 @@ mod tests {
             CommandResultState::Unknown
         );
         assert_eq!(result.error_code, "outcome_requires_reconciliation");
-        assert_eq!(result.command_id.len(), 16);
+        assert_eq!(result.command_id, eof_command.command_id);
+        assert_eq!(result.idempotency_key, eof_command.idempotency_key);
+        assert_eq!(result.payload_sha256, eof_command.semantic_payload_sha256);
+        assert_eq!(
+            result.semantic_payload_hash_version,
+            eof_command.semantic_payload_hash_version
+        );
 
         shutdown(&service, router).await.expect("shutdown router");
         client.close().await;
