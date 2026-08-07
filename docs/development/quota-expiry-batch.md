@@ -26,12 +26,26 @@ User batches contain a parent and bounded item list. Each item is independently
 authorized and, when allowed, receives a distinct child operation and command.
 The default global submission bound is 50 per scan. Parent results retain
 forbidden, failed, unknown, and offline-pending child states instead of reducing
-the batch to a misleading boolean.
+the batch to a misleading boolean. Set `OCSERV_USER_OPERATION_CONCURRENCY` from
+1 through 500 to change the global per-scan bound.
 
 Any batch containing a disable action requires independent approval. The client
 generates the UUIDv7 batch identifier first, obtains approval for action
-`user.batch.disable` on that `batch_operation`, then submits the identifier and
-approval in `X-Approval-ID`. Enable-only batches do not require approval.
+`user.batch.disable` on that `batch_operation`, and includes the complete ordered
+`batch_items` list in the approval request. The approval response exposes the
+canonical SHA-256 and reviewed items. The later batch must match both the batch
+identifier and content hash before the approval can be consumed. The client then
+submits the approval in `X-Approval-ID`. Enable-only batches do not require
+approval.
+
+`GET /api/v1/user-operations/metrics` returns workspace-scoped pending-policy,
+active-item, expired-claim, and unknown-item counters. Alert when
+`stale_batch_claim_total` stays nonzero across two scheduler intervals, when
+`unknown_batch_item_total` increases, or when `policy_pending_total` grows for
+more than two intervals. Each scheduler run emits the
+`user_operations.scheduler.run` trace span and a structured completion log. A
+failed run emits `alert_kind=user_operations.scheduler_failed` before the
+scheduler process exits for supervised restart.
 
 Rollback disables the scheduler/API version first, waits for active command
 leases to settle, and reverts the standalone I14 change. Migration `000013`

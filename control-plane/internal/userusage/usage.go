@@ -34,7 +34,7 @@ func RecordTx(ctx context.Context, tx pgx.Tx, nodeID uuid.UUID, samples []Sample
 		if err != nil && !errors.Is(err, pgx.ErrNoRows) {
 			return err
 		}
-		if err == nil && sample.ObservedAt.Before(priorObservedAt) {
+		if err == nil && !sample.ObservedAt.After(priorObservedAt) {
 			continue
 		}
 		if err == nil && sample.Username != priorUsername {
@@ -47,7 +47,7 @@ func RecordTx(ctx context.Context, tx pgx.Tx, nodeID uuid.UUID, samples []Sample
 		if deltaTX < 0 {
 			deltaTX = sample.TXBytes
 		}
-		if _, err := tx.Exec(ctx, `INSERT INTO user_usage_cursors(node_id,session_id,connected_at,username,rx_bytes,tx_bytes,observed_at) VALUES($1,$2,$3,$4,$5,$6,$7) ON CONFLICT(node_id,session_id,connected_at) DO UPDATE SET username=EXCLUDED.username,rx_bytes=EXCLUDED.rx_bytes,tx_bytes=EXCLUDED.tx_bytes,observed_at=GREATEST(user_usage_cursors.observed_at,EXCLUDED.observed_at) WHERE EXCLUDED.observed_at>=user_usage_cursors.observed_at`, nodeID, sample.SessionID, sample.Connected, sample.Username, sample.RXBytes, sample.TXBytes, sample.ObservedAt); err != nil {
+		if _, err := tx.Exec(ctx, `INSERT INTO user_usage_cursors(node_id,session_id,connected_at,username,rx_bytes,tx_bytes,observed_at) VALUES($1,$2,$3,$4,$5,$6,$7) ON CONFLICT(node_id,session_id,connected_at) DO UPDATE SET username=EXCLUDED.username,rx_bytes=EXCLUDED.rx_bytes,tx_bytes=EXCLUDED.tx_bytes,observed_at=EXCLUDED.observed_at WHERE EXCLUDED.observed_at>user_usage_cursors.observed_at`, nodeID, sample.SessionID, sample.Connected, sample.Username, sample.RXBytes, sample.TXBytes, sample.ObservedAt); err != nil {
 			return err
 		}
 		for _, period := range []struct {

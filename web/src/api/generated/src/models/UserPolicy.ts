@@ -132,6 +132,7 @@ export type UserPolicyQuotaDirectionEnum =
  */
 export const UserPolicyConvergenceEnum = {
   Converged: "converged",
+  Pending: "pending",
   OfflinePending: "offline_pending",
   Drifted: "drifted",
 } as const;

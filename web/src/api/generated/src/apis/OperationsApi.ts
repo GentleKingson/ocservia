@@ -89,6 +89,11 @@ import {
   UserCreateRequestToJSON,
 } from "../models/UserCreateRequest";
 import {
+  type UserOperationMetrics,
+  UserOperationMetricsFromJSON,
+  UserOperationMetricsToJSON,
+} from "../models/UserOperationMetrics";
+import {
   type UserPolicy,
   UserPolicyFromJSON,
   UserPolicyToJSON,
@@ -168,6 +173,10 @@ export interface GetOperationRequest {
 
 export interface GetUserBatchRequest {
   batchId: string;
+  xWorkspaceID?: string;
+}
+
+export interface GetUserOperationMetricsRequest {
   xWorkspaceID?: string;
 }
 
@@ -1299,6 +1308,71 @@ export class OperationsApi extends runtime.BaseAPI {
     initOverrides?: RequestInit | runtime.InitOverrideFunction,
   ): Promise<UserBatch> {
     const response = await this.getUserBatchRaw(
+      requestParameters,
+      initOverrides,
+    );
+    return await response.value();
+  }
+
+  /**
+   * Creates request options for getUserOperationMetrics without sending the request
+   */
+  async getUserOperationMetricsRequestOpts(
+    requestParameters: GetUserOperationMetricsRequest,
+  ): Promise<runtime.RequestOpts> {
+    const queryParameters: any = {};
+
+    const headerParameters: runtime.HTTPHeaders = {};
+
+    if (requestParameters["xWorkspaceID"] != null) {
+      headerParameters["X-Workspace-ID"] = String(
+        requestParameters["xWorkspaceID"],
+      );
+    }
+
+    if (this.configuration && this.configuration.accessToken) {
+      const token = this.configuration.accessToken;
+      const tokenString = await token("bearerAuth", []);
+
+      if (tokenString) {
+        headerParameters["Authorization"] = `Bearer ${tokenString}`;
+      }
+    }
+
+    let urlPath = `/user-operations/metrics`;
+
+    return {
+      path: urlPath,
+      method: "GET",
+      headers: headerParameters,
+      query: queryParameters,
+    };
+  }
+
+  /**
+   * Get workspace quota, expiry, and batch scheduler health counters
+   */
+  async getUserOperationMetricsRaw(
+    requestParameters: GetUserOperationMetricsRequest,
+    initOverrides?: RequestInit | runtime.InitOverrideFunction,
+  ): Promise<runtime.ApiResponse<UserOperationMetrics>> {
+    const requestOptions =
+      await this.getUserOperationMetricsRequestOpts(requestParameters);
+    const response = await this.request(requestOptions, initOverrides);
+
+    return new runtime.JSONApiResponse(response, (jsonValue) =>
+      UserOperationMetricsFromJSON(jsonValue),
+    );
+  }
+
+  /**
+   * Get workspace quota, expiry, and batch scheduler health counters
+   */
+  async getUserOperationMetrics(
+    requestParameters: GetUserOperationMetricsRequest = {},
+    initOverrides?: RequestInit | runtime.InitOverrideFunction,
+  ): Promise<UserOperationMetrics> {
+    const response = await this.getUserOperationMetricsRaw(
       requestParameters,
       initOverrides,
     );

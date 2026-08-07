@@ -99,6 +99,25 @@ func TestBulkDisableRequiresApproval(t *testing.T) {
 	}
 }
 
+func TestBatchApprovalHashBindsOrderedContent(t *testing.T) {
+	nodeA, nodeB := uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7())
+	items := []BatchItemRequest{{NodeID: nodeA, Username: "alice", Action: "disable", ExpectedVersion: 1, Authorized: true}, {NodeID: nodeB, Username: "bob", Action: "enable", ExpectedVersion: 2}}
+	original := BatchRequestHash(items)
+	reordered := BatchRequestHash([]BatchItemRequest{items[1], items[0]})
+	if original == reordered {
+		t.Fatal("reordering batch items did not change the approval hash")
+	}
+	items[0].ExpectedVersion++
+	if original == BatchRequestHash(items) {
+		t.Fatal("substituting batch content did not change the approval hash")
+	}
+	items[0].ExpectedVersion--
+	items[0].Authorized = false
+	if original != BatchRequestHash(items) {
+		t.Fatal("server authorization result leaked into the client content hash")
+	}
+}
+
 func TestBatchValidationRejectsInvalidNamesAndWhitespaceActors(t *testing.T) {
 	request := BatchRequest{
 		ID: uuid.Must(uuid.NewV7()), WorkspaceID: uuid.Must(uuid.NewV7()),

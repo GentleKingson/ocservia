@@ -23,6 +23,8 @@ import (
 	"github.com/GentleKingson/ocservia/control-plane/internal/useroperations"
 	"github.com/GentleKingson/ocservia/control-plane/internal/userstate"
 	"github.com/GentleKingson/ocservia/control-plane/migrations"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/codes"
 )
 
 type BuildInfo struct{ Version, Commit string }
@@ -104,17 +106,25 @@ func Run(ctx context.Context, cfg config.Config, build BuildInfo, logger *slog.L
 	}
 	telemetryService := telemetrystore.New(pool)
 	userStateService := userstate.New(pool)
-	userOperationsService := useroperations.New(pool, userStateService)
+	userOperationsService := useroperations.NewWithConcurrency(pool, userStateService, cfg.UserOperationConcurrency)
 	auditManager := audit.NewManager(pool, cfg.AuditCheckpointKey)
 	if cfg.RunsScheduler() {
 		go func() {
 			ticker := time.NewTicker(30 * time.Second)
 			defer ticker.Stop()
 			for {
-				if err := userOperationsService.RunOnce(componentCtx); err != nil {
+				started := time.Now()
+				runCtx, span := otel.Tracer("ocservia.useroperations").Start(componentCtx, "user_operations.scheduler.run")
+				if err := userOperationsService.RunOnce(runCtx); err != nil {
+					span.RecordError(err)
+					span.SetStatus(codes.Error, "scheduler run failed")
+					span.End()
+					logger.ErrorContext(componentCtx, "user operations scheduler failed", "alert_kind", "user_operations.scheduler_failed", "error", err, "duration_ms", time.Since(started).Milliseconds())
 					maintenanceErr <- err
 					return
 				}
+				span.End()
+				logger.InfoContext(componentCtx, "user operations scheduler completed", "duration_ms", time.Since(started).Milliseconds(), "submission_limit", cfg.UserOperationConcurrency)
 				if err := telemetryService.Maintain(componentCtx); err != nil {
 					maintenanceErr <- err
 					return

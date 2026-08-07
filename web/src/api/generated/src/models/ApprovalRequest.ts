@@ -13,6 +13,14 @@
  */
 
 import { mapValues } from "../runtime";
+import type { UserBatchItemRequest } from "./UserBatchItemRequest";
+import {
+  UserBatchItemRequestFromJSON,
+  UserBatchItemRequestFromJSONTyped,
+  UserBatchItemRequestToJSON,
+  UserBatchItemRequestToJSONTyped,
+} from "./UserBatchItemRequest";
+
 /**
  *
  * @export
@@ -49,6 +57,12 @@ export interface ApprovalRequest {
    * @memberof ApprovalRequest
    */
   ttlSeconds: number;
+  /**
+   * Required for user.batch.disable so the approver reviews the immutable batch contents.
+   * @type {Array<UserBatchItemRequest>}
+   * @memberof ApprovalRequest
+   */
+  batchItems?: Array<UserBatchItemRequest>;
 }
 
 /**
@@ -100,6 +114,10 @@ export function ApprovalRequestFromJSONTyped(
     resourceId: json["resource_id"],
     reason: json["reason"],
     ttlSeconds: json["ttl_seconds"],
+    batchItems:
+      json["batch_items"] == null
+        ? undefined
+        : (json["batch_items"] as Array<any>).map(UserBatchItemRequestFromJSON),
   };
 }
 
@@ -121,5 +139,9 @@ export function ApprovalRequestToJSONTyped(
     resource_id: value["resourceId"],
     reason: value["reason"],
     ttl_seconds: value["ttlSeconds"],
+    batch_items:
+      value["batchItems"] == null
+        ? undefined
+        : (value["batchItems"] as Array<any>).map(UserBatchItemRequestToJSON),
   };
 }

@@ -76,6 +76,7 @@ All URIs are relative to _/api/v1_
 | _OperationsApi_  | [**getOperation**](docs/OperationsApi.md#getoperation)                         | **GET** /operations/{operation_id}                         | Get an asynchronous operation                                               |
 | _OperationsApi_  | [**getOperationQueueMetrics**](docs/OperationsApi.md#getoperationqueuemetrics) | **GET** /operations/queue-metrics                          | Get transactional outbox and command queue metrics                          |
 | _OperationsApi_  | [**getUserBatch**](docs/OperationsApi.md#getuserbatch)                         | **GET** /user-batches/{batch_id}                           | Get parent and per-item authorization, command, and result state            |
+| _OperationsApi_  | [**getUserOperationMetrics**](docs/OperationsApi.md#getuseroperationmetrics)   | **GET** /user-operations/metrics                           | Get workspace quota, expiry, and batch scheduler health counters            |
 | _OperationsApi_  | [**listOperations**](docs/OperationsApi.md#listoperations)                     | **GET** /operations                                        | List operations                                                             |
 | _OperationsApi_  | [**reloadNodeService**](docs/OperationsApi.md#reloadnodeservice)               | **POST** /nodes/{node_id}/service:reload                   | Reload the fixed Ocserv service unit                                        |
 | _OperationsApi_  | [**removeNodeIpBan**](docs/OperationsApi.md#removenodeipban)                   | **POST** /nodes/{node_id}/ip-bans/{ip}:remove              | Remove one canonical IP address from the Ocserv ban list                    |
@@ -145,6 +146,7 @@ All URIs are relative to _/api/v1_
 - [UserCreateRequest](docs/UserCreateRequest.md)
 - [UserGroupResourceState](docs/UserGroupResourceState.md)
 - [UserGroupStatePage](docs/UserGroupStatePage.md)
+- [UserOperationMetrics](docs/UserOperationMetrics.md)
 - [UserPolicy](docs/UserPolicy.md)
 - [UserPolicyRequest](docs/UserPolicyRequest.md)
 - [Workspace](docs/Workspace.md)

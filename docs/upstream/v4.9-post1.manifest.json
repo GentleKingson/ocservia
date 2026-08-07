@@ -1,0 +1,41 @@
+{
+  "schema_version": 1,
+  "repository": "https://github.com/mmtaee/ocserv-dashboard",
+  "license": "MIT",
+  "old": {
+    "ref": "v4.9",
+    "commit": "b8f59026c4d879f40c1da43dc00d97e34f9790bc"
+  },
+  "new": {
+    "ref": "master-after-v4.9",
+    "commit": "4d25478580d899b77460bdf0cf0a590cfdd26030"
+  },
+  "diff": {
+    "files": [
+      "web/src/components/auth/SetupForm.vue"
+    ],
+    "dependencies": [],
+    "migrations": [],
+    "security_sensitive_files": []
+  },
+  "classification": {
+    "A": [],
+    "B": [
+      "web/src/components/auth/SetupForm.vue"
+    ],
+    "C": [
+      "quota and expiry semantics mapped to node-scoped desired policy and scheduler"
+    ],
+    "D": [
+      "Docker/native occtl execution",
+      "local cron journal",
+      "direct password/config files",
+      "permanent deletion"
+    ]
+  },
+  "adaptation": {
+    "upstream_view": "web/src/upstream/UserPolicyFields.vue",
+    "node_adapter": "web/src/adapters/user-policy.ts",
+    "verbatim_upstream_files": []
+  }
+}

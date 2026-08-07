@@ -13,6 +13,14 @@
  */
 
 import { mapValues } from "../runtime";
+import type { UserBatchItemRequest } from "./UserBatchItemRequest";
+import {
+  UserBatchItemRequestFromJSON,
+  UserBatchItemRequestFromJSONTyped,
+  UserBatchItemRequestToJSON,
+  UserBatchItemRequestToJSONTyped,
+} from "./UserBatchItemRequest";
+
 /**
  *
  * @export
@@ -73,6 +81,18 @@ export interface Approval {
    * @memberof Approval
    */
   status: ApprovalStatusEnum;
+  /**
+   * Canonical SHA-256 of the ordered batch items when the approval is content-bound.
+   * @type {string}
+   * @memberof Approval
+   */
+  requestHash?: string;
+  /**
+   *
+   * @type {Array<UserBatchItemRequest>}
+   * @memberof Approval
+   */
+  requestSummary?: Array<UserBatchItemRequest>;
   /**
    * RFC 3339 timestamp normalized to UTC.
    * @type {Date}
@@ -174,6 +194,14 @@ export function ApprovalFromJSONTyped(
     resourceId: json["resource_id"],
     reason: json["reason"],
     status: json["status"],
+    requestHash:
+      json["request_hash"] == null ? undefined : json["request_hash"],
+    requestSummary:
+      json["request_summary"] == null
+        ? undefined
+        : (json["request_summary"] as Array<any>).map(
+            UserBatchItemRequestFromJSON,
+          ),
     expiresAt: new Date(json["expires_at"]),
     createdAt: new Date(json["created_at"]),
   };
@@ -201,6 +229,13 @@ export function ApprovalToJSONTyped(
     resource_id: value["resourceId"],
     reason: value["reason"],
     status: value["status"],
+    request_hash: value["requestHash"],
+    request_summary:
+      value["requestSummary"] == null
+        ? undefined
+        : (value["requestSummary"] as Array<any>).map(
+            UserBatchItemRequestToJSON,
+          ),
     expires_at: value["expiresAt"].toISOString(),
     created_at: value["createdAt"].toISOString(),
   };

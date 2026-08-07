@@ -25,6 +25,7 @@ import (
 const (
 	DefaultGlobalConcurrency = 50
 	MaxBatchItems            = 500
+	MaxBatchRefresh          = 100
 	MaxSafeQuotaBytes        = 1<<53 - 1
 	leaseName                = "user-operations"
 )
@@ -91,15 +92,23 @@ type BatchItem struct {
 }
 
 type Batch struct {
-	ID          uuid.UUID   `json:"id"`
-	WorkspaceID uuid.UUID   `json:"workspace_id"`
-	State       string      `json:"state"`
-	Items       []BatchItem `json:"items"`
-	CreatedAt   time.Time   `json:"created_at"`
-	UpdatedAt   time.Time   `json:"updated_at"`
+	ID              uuid.UUID   `json:"id"`
+	WorkspaceID     uuid.UUID   `json:"workspace_id"`
+	ActorIdentityID *uuid.UUID  `json:"-"`
+	State           string      `json:"state"`
+	Items           []BatchItem `json:"items"`
+	CreatedAt       time.Time   `json:"created_at"`
+	UpdatedAt       time.Time   `json:"updated_at"`
 }
 
 type UsageSample = userusage.Sample
+
+type Metrics struct {
+	PolicyPendingTotal    int64 `json:"policy_pending_total"`
+	ActiveBatchItemTotal  int64 `json:"active_batch_item_total"`
+	StaleBatchClaimTotal  int64 `json:"stale_batch_claim_total"`
+	UnknownBatchItemTotal int64 `json:"unknown_batch_item_total"`
+}
 
 type Service struct {
 	pool      *pgxpool.Pool
@@ -111,6 +120,14 @@ type Service struct {
 
 func New(pool *pgxpool.Pool, users *userstate.Service) *Service {
 	return &Service{pool: pool, users: users, now: func() time.Time { return time.Now().UTC() }, newID: func() uuid.UUID { return uuid.Must(uuid.NewV7()) }, batchSize: DefaultGlobalConcurrency}
+}
+
+func NewWithConcurrency(pool *pgxpool.Pool, users *userstate.Service, concurrency int) *Service {
+	service := New(pool, users)
+	if concurrency > 0 {
+		service.batchSize = concurrency
+	}
+	return service
 }
 
 func (s *Service) SetPolicy(ctx context.Context, request PolicyRequest) (Policy, bool, error) {
@@ -195,14 +212,21 @@ type queryer interface {
 func readPolicy(ctx context.Context, q queryer, nodeID uuid.UUID, username string, now time.Time) (Policy, error) {
 	policy := Policy{NodeID: nodeID, Username: username}
 	month := monthStart(now)
+	var nodeStatus string
+	var desiredEnabled bool
+	var desiredRevision int64
+	var observedEnabled *bool
+	var observedRevision *int64
+	var operationState *string
 	err := q.QueryRow(ctx, `SELECT p.quota_period,p.quota_direction,p.quota_bytes,p.expires_at,p.version,
 		CASE WHEN p.quota_period='monthly' THEN $3::timestamptz ELSE '1970-01-01T00:00:00Z'::timestamptz END,
 		COALESCE(u.rx_bytes,0),COALESCE(u.tx_bytes,0),u.observed_at,
-		CASE WHEN n.status='offline' THEN 'offline_pending' WHEN o.username IS NULL THEN 'drifted' ELSE 'converged' END
-		FROM desired_user_policies p JOIN nodes n ON n.id=p.node_id
+		n.status,d.enabled,d.revision,o.enabled,o.revision,latest.state
+		FROM desired_user_policies p JOIN nodes n ON n.id=p.node_id JOIN desired_users d ON d.node_id=p.node_id AND d.username=p.username
 		LEFT JOIN observed_users o ON o.node_id=p.node_id AND o.username=p.username
 		LEFT JOIN observed_user_usage u ON u.node_id=p.node_id AND u.username=p.username AND u.period=CASE WHEN p.quota_period='monthly' THEN 'monthly' ELSE 'lifetime' END AND u.period_start=CASE WHEN p.quota_period='monthly' THEN $3::timestamptz ELSE '1970-01-01T00:00:00Z'::timestamptz END
-		WHERE p.node_id=$1 AND p.username=$2`, nodeID, username, month).Scan(&policy.QuotaPeriod, &policy.QuotaDirection, &policy.QuotaBytes, &policy.ExpiresAt, &policy.Version, &policy.PeriodStart, &policy.ObservedRXBytes, &policy.ObservedTXBytes, &policy.ObservedAt, &policy.Convergence)
+		LEFT JOIN LATERAL (SELECT op.state FROM commands command JOIN operations op ON op.id=command.operation_id WHERE command.node_id=p.node_id AND command.resource_type='user' AND command.resource_key=p.username ORDER BY command.created_at DESC,command.id DESC LIMIT 1) latest ON true
+		WHERE p.node_id=$1 AND p.username=$2`, nodeID, username, month).Scan(&policy.QuotaPeriod, &policy.QuotaDirection, &policy.QuotaBytes, &policy.ExpiresAt, &policy.Version, &policy.PeriodStart, &policy.ObservedRXBytes, &policy.ObservedTXBytes, &policy.ObservedAt, &nodeStatus, &desiredEnabled, &desiredRevision, &observedEnabled, &observedRevision, &operationState)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Policy{}, ErrNotFound
 	}
@@ -211,7 +235,18 @@ func readPolicy(ctx context.Context, q queryer, nodeID uuid.UUID, username strin
 	}
 	policy.Exceeded = quotaValue(policy.QuotaDirection, policy.ObservedRXBytes, policy.ObservedTXBytes) >= policy.QuotaBytes && policy.QuotaPeriod != "none"
 	policy.Expired = policy.ExpiresAt != nil && !policy.ExpiresAt.After(now)
-	if policy.Exceeded || policy.Expired {
+	triggerPending := (policy.Exceeded || policy.Expired) && desiredEnabled
+	observedMatches := observedEnabled != nil && observedRevision != nil && *observedEnabled == desiredEnabled && *observedRevision == desiredRevision
+	switch {
+	case observedMatches && !triggerPending:
+		policy.Convergence = "converged"
+	case nodeStatus == "offline":
+		policy.Convergence = "offline_pending"
+	case operationState != nil && slices.Contains([]string{"queued", "running", "offline_pending"}, *operationState):
+		policy.Convergence = "pending"
+	case triggerPending:
+		policy.Convergence = "pending"
+	default:
 		policy.Convergence = "drifted"
 	}
 	return policy, nil
@@ -221,7 +256,7 @@ func (s *Service) CreateBatch(ctx context.Context, request BatchRequest) (Batch,
 	if err := validateBatchRequest(request); err != nil {
 		return Batch{}, false, err
 	}
-	hash := batchHash(request.Items)
+	hash := BatchRequestHash(request.Items)
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return Batch{}, false, err
@@ -235,7 +270,7 @@ func (s *Service) CreateBatch(ctx context.Context, request BatchRequest) (Batch,
 			return Batch{}, false, ErrIdempotencyConflict
 		}
 		if hasDisable(request.Items) {
-			if err := approvals.ValidateConsumed(ctx, tx, request.ApprovalID, request.WorkspaceID, request.ActorIdentityID, "user.batch.disable", "batch_operation", existing); err != nil {
+			if err := approvals.ValidateConsumedBound(ctx, tx, request.ApprovalID, request.WorkspaceID, request.ActorIdentityID, "user.batch.disable", "batch_operation", existing, hash[:]); err != nil {
 				return Batch{}, false, err
 			}
 		}
@@ -250,7 +285,7 @@ func (s *Service) CreateBatch(ctx context.Context, request BatchRequest) (Batch,
 	}
 	id, now := request.ID, s.now()
 	if hasDisable(request.Items) {
-		if err := approvals.Consume(ctx, tx, request.ApprovalID, request.WorkspaceID, request.ActorIdentityID, "user.batch.disable", "batch_operation", id); err != nil {
+		if err := approvals.ConsumeBound(ctx, tx, request.ApprovalID, request.WorkspaceID, request.ActorIdentityID, "user.batch.disable", "batch_operation", id, hash[:]); err != nil {
 			return Batch{}, false, err
 		}
 	}
@@ -274,7 +309,8 @@ func (s *Service) CreateBatch(ctx context.Context, request BatchRequest) (Batch,
 			return Batch{}, false, err
 		}
 	}
-	if err := audit.AppendChain(ctx, tx, audit.ChainRecord{WorkspaceID: request.WorkspaceID, ActorType: "user", ActorID: request.ActorID, SessionID: optionalUUID(request.ActorSessionID), Action: "user.batch.create", ResourceType: "batch_operation", ResourceID: id, ApprovalID: optionalUUID(request.ApprovalID), RequestID: request.RequestID, TraceID: traceID(request.Traceparent), Reason: request.Reason, At: now}); err != nil {
+	auditSummary, _ := json.Marshal(map[string]any{"request_hash": hex.EncodeToString(hash[:]), "items": request.Items})
+	if err := audit.AppendChain(ctx, tx, audit.ChainRecord{WorkspaceID: request.WorkspaceID, ActorType: "user", ActorID: request.ActorID, SessionID: optionalUUID(request.ActorSessionID), Action: "user.batch.create", ResourceType: "batch_operation", ResourceID: id, ApprovalID: optionalUUID(request.ApprovalID), RequestID: request.RequestID, TraceID: traceID(request.Traceparent), Reason: request.Reason, AfterSummary: auditSummary, At: now}); err != nil {
 		return Batch{}, false, err
 	}
 	if err := tx.Commit(ctx); err != nil {
@@ -287,7 +323,7 @@ func (s *Service) CreateBatch(ctx context.Context, request BatchRequest) (Batch,
 func (s *Service) GetBatch(ctx context.Context, id uuid.UUID) (Batch, error) {
 	var batch Batch
 	batch.ID = id
-	if err := s.pool.QueryRow(ctx, `SELECT workspace_id,state,created_at,updated_at FROM batch_operations WHERE id=$1`, id).Scan(&batch.WorkspaceID, &batch.State, &batch.CreatedAt, &batch.UpdatedAt); err != nil {
+	if err := s.pool.QueryRow(ctx, `SELECT workspace_id,actor_identity_id,state,created_at,updated_at FROM batch_operations WHERE id=$1`, id).Scan(&batch.WorkspaceID, &batch.ActorIdentityID, &batch.State, &batch.CreatedAt, &batch.UpdatedAt); err != nil {
 		return Batch{}, err
 	}
 	rows, err := s.pool.Query(ctx, `SELECT item_index,node_id,username,action,expected_version,state,child_operation_id,COALESCE(error_type,'') FROM batch_operation_items WHERE batch_id=$1 ORDER BY item_index`, id)
@@ -303,6 +339,16 @@ func (s *Service) GetBatch(ctx context.Context, id uuid.UUID) (Batch, error) {
 		batch.Items = append(batch.Items, item)
 	}
 	return batch, rows.Err()
+}
+
+func (s *Service) Metrics(ctx context.Context, workspaceID uuid.UUID) (Metrics, error) {
+	var value Metrics
+	err := s.pool.QueryRow(ctx, `SELECT
+		(SELECT count(*) FROM desired_user_policies policy JOIN nodes node ON node.id=policy.node_id JOIN desired_users desired USING(node_id,username) LEFT JOIN observed_user_usage usage ON usage.node_id=policy.node_id AND usage.username=policy.username AND usage.period=CASE WHEN policy.quota_period='monthly' THEN 'monthly' ELSE 'lifetime' END AND usage.period_start=CASE WHEN policy.quota_period='monthly' THEN date_trunc('month',now() AT TIME ZONE 'UTC') AT TIME ZONE 'UTC' ELSE '1970-01-01T00:00:00Z'::timestamptz END WHERE node.workspace_id=$1 AND desired.enabled=true AND ((policy.expires_at IS NOT NULL AND policy.expires_at<=now()) OR (policy.quota_period<>'none' AND CASE policy.quota_direction WHEN 'rx' THEN COALESCE(usage.rx_bytes,0)::numeric WHEN 'tx' THEN COALESCE(usage.tx_bytes,0)::numeric ELSE COALESCE(usage.rx_bytes,0)::numeric+COALESCE(usage.tx_bytes,0)::numeric END>=policy.quota_bytes::numeric))),
+		(SELECT count(*) FROM batch_operation_items item JOIN batch_operations batch ON batch.id=item.batch_id WHERE batch.workspace_id=$1 AND item.state IN('queued','submitting','submitted','offline_pending','unknown')),
+		(SELECT count(*) FROM batch_operation_items item JOIN batch_operations batch ON batch.id=item.batch_id WHERE batch.workspace_id=$1 AND item.state='submitting' AND item.lease_until<=now()),
+		(SELECT count(*) FROM batch_operation_items item JOIN batch_operations batch ON batch.id=item.batch_id WHERE batch.workspace_id=$1 AND item.state='unknown')`, workspaceID).Scan(&value.PolicyPendingTotal, &value.ActiveBatchItemTotal, &value.StaleBatchClaimTotal, &value.UnknownBatchItemTotal)
+	return value, err
 }
 
 // RunOnce obtains the database lease, compensates missed expiry/quota scans,
@@ -342,34 +388,51 @@ func (s *Service) resetMonthlyPolicies(ctx context.Context, limit int) (int, err
 		return 0, nil
 	}
 	now, month := s.now(), monthStart(s.now())
-	rows, err := s.pool.Query(ctx, `SELECT p.node_id,p.username,p.version,u.version
+	rows, err := s.pool.Query(ctx, `SELECT p.node_id,p.username,p.version,u.version,u.enabled,prior.resulting_user_version
 		FROM desired_user_policies p JOIN desired_users u USING(node_id,username)
 		LEFT JOIN observed_user_usage usage ON usage.node_id=p.node_id AND usage.username=p.username AND usage.period='monthly' AND usage.period_start=$1
-		WHERE p.quota_period='monthly' AND u.enabled=false AND (p.expires_at IS NULL OR p.expires_at>$2)
+		JOIN LATERAL (SELECT resulting_user_version FROM user_policy_enforcements prior WHERE prior.node_id=p.node_id AND prior.username=p.username AND prior.policy_version=p.version AND prior.cause='quota' AND prior.period_start<$1 ORDER BY prior.period_start DESC LIMIT 1) prior ON true
+		WHERE p.quota_period='monthly' AND (p.expires_at IS NULL OR p.expires_at>$2)
 		AND CASE p.quota_direction WHEN 'rx' THEN COALESCE(usage.rx_bytes,0)::numeric WHEN 'tx' THEN COALESCE(usage.tx_bytes,0)::numeric ELSE COALESCE(usage.rx_bytes,0)::numeric+COALESCE(usage.tx_bytes,0)::numeric END<p.quota_bytes::numeric
-		AND EXISTS(SELECT 1 FROM user_policy_enforcements prior WHERE prior.node_id=p.node_id AND prior.username=p.username AND prior.policy_version=p.version AND prior.cause='quota' AND prior.period_start<$1 AND prior.resulting_user_version=u.version)
+		AND (u.enabled=true OR prior.resulting_user_version=u.version)
 		AND NOT EXISTS(SELECT 1 FROM user_policy_enforcements reset WHERE reset.node_id=p.node_id AND reset.username=p.username AND reset.policy_version=p.version AND reset.cause='quota_reset' AND reset.period_start=$1)
 		ORDER BY p.node_id,p.username LIMIT $3`, month, now, limit)
 	if err != nil {
 		return 0, err
 	}
 	type resetCandidate struct {
-		nodeID                     uuid.UUID
-		username                   string
-		policyVersion, userVersion int64
+		nodeID                                      uuid.UUID
+		username                                    string
+		policyVersion, userVersion, enforcedVersion int64
+		enabled                                     bool
 	}
 	var candidates []resetCandidate
 	for rows.Next() {
 		var item resetCandidate
-		if err := rows.Scan(&item.nodeID, &item.username, &item.policyVersion, &item.userVersion); err != nil {
+		if err := rows.Scan(&item.nodeID, &item.username, &item.policyVersion, &item.userVersion, &item.enabled, &item.enforcedVersion); err != nil {
 			rows.Close()
 			return 0, err
 		}
 		candidates = append(candidates, item)
 	}
 	rows.Close()
+	processed := 0
 	for _, item := range candidates {
 		key := stableKey("policy-reset", item.nodeID.String(), item.username, fmt.Sprint(item.policyVersion), month.Format(time.RFC3339))
+		if item.enabled {
+			operationID, found, findErr := s.findUserOperation(ctx, item.nodeID, item.username, key, userstate.UserEnable)
+			if findErr != nil {
+				return 0, findErr
+			}
+			if !found {
+				continue
+			}
+			if _, err := s.pool.Exec(ctx, `INSERT INTO user_policy_enforcements(node_id,username,policy_version,cause,period_start,operation_id,resulting_user_version,created_at) VALUES($1,$2,$3,'quota_reset',$4,$5,$6,$7) ON CONFLICT DO NOTHING`, item.nodeID, item.username, item.policyVersion, month, operationID, item.userVersion, now); err != nil {
+				return 0, err
+			}
+			processed++
+			continue
+		}
 		op, _, mutateErr := s.users.Mutate(ctx, userstate.MutationRequest{NodeID: item.nodeID, Kind: userstate.UserEnable, Name: item.username, ExpectedVersion: item.userVersion, IdempotencyKey: key, TTL: 24 * time.Hour, ActorID: "scheduler", Reason: "monthly quota reset", RequestID: key, Traceparent: stableTraceparent(key)})
 		if mutateErr != nil {
 			if errors.Is(mutateErr, userstate.ErrVersionConflict) || errors.Is(mutateErr, userstate.ErrRevisionPending) || errors.Is(mutateErr, userstate.ErrRevisionRecovery) {
@@ -384,8 +447,9 @@ func (s *Service) resetMonthlyPolicies(ctx context.Context, limit int) (int, err
 		if _, err := s.pool.Exec(ctx, `INSERT INTO user_policy_enforcements(node_id,username,policy_version,cause,period_start,operation_id,resulting_user_version,created_at) VALUES($1,$2,$3,'quota_reset',$4,$5,$6,$7) ON CONFLICT DO NOTHING`, item.nodeID, item.username, item.policyVersion, month, operationID, item.userVersion+1, now); err != nil {
 			return 0, err
 		}
+		processed++
 	}
-	return len(candidates), rows.Err()
+	return processed, rows.Err()
 }
 
 func (s *Service) acquireLease(ctx context.Context, owner uuid.UUID, duration time.Duration) (bool, error) {
@@ -413,7 +477,7 @@ func (s *Service) enforcePolicies(ctx context.Context, limit int) (int, error) {
 		CASE WHEN p.quota_period='monthly' THEN $2::timestamptz ELSE '1970-01-01T00:00:00Z'::timestamptz END,u.enabled
 		FROM desired_user_policies p JOIN desired_users u USING(node_id,username)
 		LEFT JOIN observed_user_usage usage ON usage.node_id=p.node_id AND usage.username=p.username AND usage.period=CASE WHEN p.quota_period='monthly' THEN 'monthly' ELSE 'lifetime' END AND usage.period_start=CASE WHEN p.quota_period='monthly' THEN $2::timestamptz ELSE '1970-01-01T00:00:00Z'::timestamptz END
-		WHERE u.enabled=true AND ((p.expires_at IS NOT NULL AND p.expires_at<=$1) OR (p.quota_period<>'none' AND CASE p.quota_direction WHEN 'rx' THEN COALESCE(usage.rx_bytes,0)::numeric WHEN 'tx' THEN COALESCE(usage.tx_bytes,0)::numeric ELSE COALESCE(usage.rx_bytes,0)::numeric+COALESCE(usage.tx_bytes,0)::numeric END>=p.quota_bytes::numeric))
+		WHERE ((p.expires_at IS NOT NULL AND p.expires_at<=$1) OR (p.quota_period<>'none' AND CASE p.quota_direction WHEN 'rx' THEN COALESCE(usage.rx_bytes,0)::numeric WHEN 'tx' THEN COALESCE(usage.tx_bytes,0)::numeric ELSE COALESCE(usage.rx_bytes,0)::numeric+COALESCE(usage.tx_bytes,0)::numeric END>=p.quota_bytes::numeric))
 		AND NOT EXISTS(SELECT 1 FROM user_policy_enforcements e WHERE e.node_id=p.node_id AND e.username=p.username AND e.policy_version=p.version AND e.cause=CASE WHEN p.expires_at IS NOT NULL AND p.expires_at<=$1 THEN 'expiry' ELSE 'quota' END AND e.period_start=CASE WHEN p.quota_period='monthly' THEN $2::timestamptz ELSE '1970-01-01T00:00:00Z'::timestamptz END)
 		ORDER BY p.node_id,p.username LIMIT $3`, now, month, limit)
 	if err != nil {
@@ -429,9 +493,24 @@ func (s *Service) enforcePolicies(ctx context.Context, limit int) (int, error) {
 		candidates = append(candidates, item)
 	}
 	rows.Close()
+	processed := 0
 	for _, item := range candidates {
 		key := stableKey("policy", item.nodeID.String(), item.username, fmt.Sprint(item.version), item.cause, item.periodStart.Format(time.RFC3339))
 		trace := stableTraceparent(key)
+		if !item.enabled {
+			operationID, found, findErr := s.findUserOperation(ctx, item.nodeID, item.username, key, userstate.UserDisable)
+			if findErr != nil {
+				return 0, findErr
+			}
+			if !found {
+				continue
+			}
+			if _, err := s.pool.Exec(ctx, `INSERT INTO user_policy_enforcements(node_id,username,policy_version,cause,period_start,operation_id,resulting_user_version,created_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8) ON CONFLICT DO NOTHING`, item.nodeID, item.username, item.version, item.cause, item.periodStart, operationID, item.userVersion, now); err != nil {
+				return 0, err
+			}
+			processed++
+			continue
+		}
 		op, _, mutateErr := s.users.Mutate(ctx, userstate.MutationRequest{NodeID: item.nodeID, Kind: userstate.UserDisable, Name: item.username, ExpectedVersion: item.userVersion, IdempotencyKey: key, TTL: 24 * time.Hour, ActorID: "scheduler", Reason: "quota or expiry policy enforcement", RequestID: key, Traceparent: trace})
 		if mutateErr != nil {
 			if errors.Is(mutateErr, userstate.ErrVersionConflict) || errors.Is(mutateErr, userstate.ErrRevisionPending) || errors.Is(mutateErr, userstate.ErrRevisionRecovery) {
@@ -446,12 +525,22 @@ func (s *Service) enforcePolicies(ctx context.Context, limit int) (int, error) {
 		if _, err := s.pool.Exec(ctx, `INSERT INTO user_policy_enforcements(node_id,username,policy_version,cause,period_start,operation_id,resulting_user_version,created_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8) ON CONFLICT DO NOTHING`, item.nodeID, item.username, item.version, item.cause, item.periodStart, operationID, item.userVersion+1, now); err != nil {
 			return 0, err
 		}
+		processed++
 	}
-	return len(candidates), nil
+	return processed, nil
+}
+
+func (s *Service) findUserOperation(ctx context.Context, nodeID uuid.UUID, username, key string, kind userstate.MutationKind) (uuid.UUID, bool, error) {
+	var operationID uuid.UUID
+	err := s.pool.QueryRow(ctx, `SELECT op.id FROM operations op JOIN commands command ON command.operation_id=op.id WHERE op.node_id=$1 AND op.idempotency_key=$2 AND command.resource_type='user' AND command.resource_key=$3 AND command.payload_type=$4`, nodeID, key, username, kind).Scan(&operationID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return uuid.Nil, false, nil
+	}
+	return operationID, err == nil, err
 }
 
 func (s *Service) submitBatchItems(ctx context.Context, owner uuid.UUID, limit int) error {
-	rows, err := s.pool.Query(ctx, `WITH claim AS (SELECT batch_id,item_index FROM batch_operation_items WHERE state='queued' AND (lease_until IS NULL OR lease_until<=now()) ORDER BY updated_at,batch_id,item_index FOR UPDATE SKIP LOCKED LIMIT $1) UPDATE batch_operation_items item SET state='submitting',lease_owner=$2,lease_until=now()+interval '20 seconds',updated_at=now() FROM claim WHERE item.batch_id=claim.batch_id AND item.item_index=claim.item_index RETURNING item.batch_id,item.item_index,item.node_id,item.username,item.action,item.expected_version`, limit, owner)
+	rows, err := s.pool.Query(ctx, `WITH claim AS (SELECT batch_id,item_index FROM batch_operation_items WHERE (state='queued' AND lease_until IS NULL) OR (state='submitting' AND lease_until<=now()) ORDER BY updated_at,batch_id,item_index FOR UPDATE SKIP LOCKED LIMIT $1) UPDATE batch_operation_items item SET state='submitting',lease_owner=$2,lease_until=now()+interval '20 seconds',updated_at=now() FROM claim WHERE item.batch_id=claim.batch_id AND item.item_index=claim.item_index RETURNING item.batch_id,item.item_index,item.node_id,item.username,item.action,item.expected_version`, limit, owner)
 	if err != nil {
 		return err
 	}
@@ -504,10 +593,10 @@ func (s *Service) submitBatchItems(ctx context.Context, owner uuid.UUID, limit i
 }
 
 func (s *Service) refreshBatches(ctx context.Context) error {
-	if _, err := s.pool.Exec(ctx, `UPDATE batch_operation_items item SET state=CASE WHEN op.state='queued' AND node.status='offline' THEN 'offline_pending' WHEN op.state='succeeded' THEN 'succeeded' WHEN op.state IN('failed','expired','rolled_back') THEN 'failed' WHEN op.state='unknown' THEN 'unknown' WHEN op.state='offline_pending' THEN 'offline_pending' ELSE item.state END,error_type=CASE WHEN op.state IN('failed','expired','rolled_back') THEN op.state ELSE item.error_type END,updated_at=now() FROM operations op JOIN nodes node ON node.id=op.node_id WHERE item.child_operation_id=op.id AND item.state IN('submitted','unknown','offline_pending')`); err != nil {
+	if _, err := s.pool.Exec(ctx, `WITH active AS (SELECT id FROM batch_operations WHERE state IN('queued','running','partial_failed') ORDER BY updated_at,id LIMIT $1) UPDATE batch_operation_items item SET state=CASE WHEN op.state='queued' AND node.status='offline' THEN 'offline_pending' WHEN op.state='succeeded' THEN 'succeeded' WHEN op.state IN('failed','expired','rolled_back') THEN 'failed' WHEN op.state='unknown' THEN 'unknown' WHEN op.state='offline_pending' THEN 'offline_pending' ELSE item.state END,error_type=CASE WHEN op.state IN('failed','expired','rolled_back') THEN op.state ELSE item.error_type END,updated_at=now() FROM operations op JOIN nodes node ON node.id=op.node_id,active WHERE item.batch_id=active.id AND item.child_operation_id=op.id AND item.state IN('submitted','unknown','offline_pending')`, MaxBatchRefresh); err != nil {
 		return err
 	}
-	_, err := s.pool.Exec(ctx, `UPDATE batch_operations batch SET state=summary.state,updated_at=now() FROM (SELECT batch_id,CASE WHEN bool_or(state IN('queued','submitting','submitted','unknown','offline_pending')) THEN CASE WHEN bool_or(state IN('failed','forbidden')) THEN 'partial_failed' ELSE 'running' END WHEN bool_and(state='succeeded') THEN 'succeeded' WHEN bool_or(state='succeeded') THEN 'partial_failed' ELSE 'failed' END state FROM batch_operation_items GROUP BY batch_id) summary WHERE batch.id=summary.batch_id AND batch.state<>summary.state`)
+	_, err := s.pool.Exec(ctx, `WITH active AS (SELECT id FROM batch_operations WHERE state IN('queued','running','partial_failed') ORDER BY updated_at,id LIMIT $1),summary AS (SELECT item.batch_id,CASE WHEN bool_or(item.state IN('queued','submitting','submitted','unknown','offline_pending')) THEN CASE WHEN bool_or(item.state IN('failed','forbidden')) THEN 'partial_failed' ELSE 'running' END WHEN bool_and(item.state='succeeded') THEN 'succeeded' WHEN bool_or(item.state='succeeded') THEN 'partial_failed' ELSE 'failed' END state FROM batch_operation_items item JOIN active ON active.id=item.batch_id GROUP BY item.batch_id) UPDATE batch_operations batch SET state=summary.state,updated_at=now() FROM summary WHERE batch.id=summary.batch_id AND batch.state<>summary.state`, MaxBatchRefresh)
 	return err
 }
 
@@ -538,16 +627,23 @@ func validatePolicyRequest(request PolicyRequest) error {
 }
 
 func validateBatchRequest(request BatchRequest) error {
-	if request.ID == uuid.Nil || request.ID.Version() != 7 || request.WorkspaceID == uuid.Nil || strings.TrimSpace(request.ActorID) == "" || strings.TrimSpace(request.Reason) == "" || len(request.Reason) > 512 || request.RequestID == "" || request.IdempotencyKey == "" || len(request.IdempotencyKey) > 128 || !validTraceparent(request.Traceparent) || len(request.Items) == 0 || len(request.Items) > MaxBatchItems {
+	if request.ID == uuid.Nil || request.ID.Version() != 7 || request.WorkspaceID == uuid.Nil || strings.TrimSpace(request.ActorID) == "" || strings.TrimSpace(request.Reason) == "" || len(request.Reason) > 512 || request.RequestID == "" || request.IdempotencyKey == "" || len(request.IdempotencyKey) > 128 || !validTraceparent(request.Traceparent) || ValidateBatchItems(request.Items) != nil {
 		return ErrInvalidRequest
-	}
-	for _, item := range request.Items {
-		if item.NodeID == uuid.Nil || !namePattern.MatchString(item.Username) || item.ExpectedVersion < 1 || !slices.Contains([]string{"disable", "enable"}, item.Action) {
-			return ErrInvalidRequest
-		}
 	}
 	if hasDisable(request.Items) && (request.ActorIdentityID == uuid.Nil || request.ApprovalID == uuid.Nil) {
 		return approvals.ErrNotReady
+	}
+	return nil
+}
+
+func ValidateBatchItems(items []BatchItemRequest) error {
+	if len(items) == 0 || len(items) > MaxBatchItems {
+		return ErrInvalidRequest
+	}
+	for _, item := range items {
+		if item.NodeID == uuid.Nil || !namePattern.MatchString(item.Username) || item.ExpectedVersion < 1 || !slices.Contains([]string{"disable", "enable"}, item.Action) {
+			return ErrInvalidRequest
+		}
 	}
 	return nil
 }
@@ -566,7 +662,7 @@ func policyHash(request PolicyRequest) [32]byte {
 	return sha256.Sum256(encoded)
 }
 
-func batchHash(items []BatchItemRequest) [32]byte {
+func BatchRequestHash(items []BatchItemRequest) [32]byte {
 	encoded, _ := json.Marshal(items)
 	return sha256.Sum256(encoded)
 }

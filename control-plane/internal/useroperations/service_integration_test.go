@@ -2,10 +2,12 @@ package useroperations
 
 import (
 	"context"
+	"errors"
 	"os"
 	"testing"
 	"time"
 
+	"github.com/GentleKingson/ocservia/control-plane/internal/approvals"
 	"github.com/GentleKingson/ocservia/control-plane/internal/userstate"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -80,6 +82,13 @@ func TestQuotaExpirySchedulerBatchAndUsageIntegration(t *testing.T) {
 		t.Fatal(err)
 	}
 	tx, _ = pool.Begin(ctx)
+	if err := RecordUsageTx(ctx, tx, nodeID, []UsageSample{{SessionID: "session-a", Username: "alice", Connected: connected, RXBytes: 1, TXBytes: 2, ObservedAt: now}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+	tx, _ = pool.Begin(ctx)
 	if err := RecordUsageTx(ctx, tx, nodeID, []UsageSample{{SessionID: "session-a", Username: "alice", Connected: connected, RXBytes: 130, TXBytes: 260, ObservedAt: now.Add(time.Minute)}}); err != nil {
 		t.Fatal(err)
 	}
@@ -94,7 +103,7 @@ func TestQuotaExpirySchedulerBatchAndUsageIntegration(t *testing.T) {
 		t.Fatal(err)
 	}
 	policy, err = service.GetPolicy(ctx, nodeID, "alice")
-	if err != nil || policy.ObservedRXBytes != 130 || policy.ObservedTXBytes != 260 || !policy.Exceeded {
+	if err != nil || policy.ObservedRXBytes != 130 || policy.ObservedTXBytes != 260 || !policy.Exceeded || policy.Convergence != "pending" {
 		t.Fatalf("observed policy=%+v err=%v", policy, err)
 	}
 	tx, _ = pool.Begin(ctx)
@@ -121,6 +130,10 @@ func TestQuotaExpirySchedulerBatchAndUsageIntegration(t *testing.T) {
 		t.Fatalf("usage did not saturate rx=%d tx=%d", saturatedRX, saturatedTX)
 	}
 
+	policyKey := stableKey("policy", nodeID.String(), "alice", "1", "quota", monthStart(now).Format(time.RFC3339))
+	if _, _, err := service.users.Mutate(ctx, userstate.MutationRequest{NodeID: nodeID, Kind: userstate.UserDisable, Name: "alice", ExpectedVersion: 1, IdempotencyKey: policyKey, TTL: 24 * time.Hour, ActorID: "scheduler", Reason: "quota or expiry policy enforcement", RequestID: policyKey, Traceparent: stableTraceparent(policyKey)}); err != nil {
+		t.Fatalf("inject enforcement crash window: %v", err)
+	}
 	if err := service.RunOnce(ctx); err != nil {
 		t.Fatal(err)
 	}
@@ -139,6 +152,13 @@ func TestQuotaExpirySchedulerBatchAndUsageIntegration(t *testing.T) {
 	}
 	if enforcementCount != 1 || operationCount != 1 {
 		t.Fatalf("repeat scan created duplicates enforcements=%d commands=%d", enforcementCount, operationCount)
+	}
+	if _, err := pool.Exec(ctx, `INSERT INTO observed_users(node_id,username,enabled,revision,fingerprint,observed_at) VALUES($1,'alice',false,2,$2,now())`, nodeID, fingerprint); err != nil {
+		t.Fatal(err)
+	}
+	policy, err = service.GetPolicy(ctx, nodeID, "alice")
+	if err != nil || policy.Convergence != "converged" {
+		t.Fatalf("enforced policy convergence=%q err=%v", policy.Convergence, err)
 	}
 	if _, _, err := service.users.Mutate(ctx, userstate.MutationRequest{NodeID: nodeID, Kind: userstate.UserDisable, Name: "alice", ExpectedVersion: 2, IdempotencyKey: "manual-disable-after-quota", TTL: 24 * time.Hour, ActorID: "operator", Reason: "manual security hold", RequestID: "request-manual-disable", Traceparent: testTraceparent}); err != nil {
 		t.Fatalf("manual disable after quota enforcement: %v", err)
@@ -163,10 +183,18 @@ func TestQuotaExpirySchedulerBatchAndUsageIntegration(t *testing.T) {
 		t.Fatal(err)
 	}
 	batchID, approvalID := uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7())
-	if _, err := pool.Exec(ctx, `INSERT INTO approval_requests(id,workspace_id,requester_id,action,resource_type,resource_id,reason,status,approver_id,approval_reason,expires_at,approved_at,created_at)VALUES($1,$2,$3,'user.batch.disable','batch_operation',$4,'integration','approved',$5,'independent',now()+interval '1 hour',now(),now())`, approvalID, workspaceID, requesterID, batchID, approverID); err != nil {
+	batchItems := []BatchItemRequest{{NodeID: nodeID, Username: "bob", Action: "disable", ExpectedVersion: 1, Authorized: true}, {NodeID: nodeID, Username: "charlie", Action: "disable", ExpectedVersion: 1, Authorized: false}}
+	batchHash := BatchRequestHash(batchItems)
+	if _, err := pool.Exec(ctx, `INSERT INTO approval_requests(id,workspace_id,requester_id,action,resource_type,resource_id,reason,status,approver_id,approval_reason,expires_at,approved_at,created_at,request_hash,request_summary)VALUES($1,$2,$3,'user.batch.disable','batch_operation',$4,'integration','approved',$5,'independent',now()+interval '1 hour',now(),now(),$6,$7)`, approvalID, workspaceID, requesterID, batchID, approverID, batchHash[:], `[{"node_id":"`+nodeID.String()+`","username":"bob","action":"disable","expected_version":1},{"node_id":"`+nodeID.String()+`","username":"charlie","action":"disable","expected_version":1}]`); err != nil {
 		t.Fatal(err)
 	}
-	batchRequest := BatchRequest{ID: batchID, WorkspaceID: workspaceID, ActorIdentityID: requesterID, ApprovalID: approvalID, ActorID: "operator", Reason: "ticket", RequestID: "request-batch", Traceparent: testTraceparent, IdempotencyKey: "batch-one", Items: []BatchItemRequest{{NodeID: nodeID, Username: "bob", Action: "disable", ExpectedVersion: 1, Authorized: true}, {NodeID: nodeID, Username: "charlie", Action: "disable", ExpectedVersion: 1, Authorized: false}}}
+	batchRequest := BatchRequest{ID: batchID, WorkspaceID: workspaceID, ActorIdentityID: requesterID, ApprovalID: approvalID, ActorID: "operator", Reason: "ticket", RequestID: "request-batch", Traceparent: testTraceparent, IdempotencyKey: "batch-one", Items: batchItems}
+	substituted := batchRequest
+	substituted.Items = append([]BatchItemRequest(nil), batchRequest.Items...)
+	substituted.Items[0].ExpectedVersion = 2
+	if _, _, err := service.CreateBatch(ctx, substituted); !errors.Is(err, approvals.ErrNotReady) {
+		t.Fatalf("content-substituted approval err=%v", err)
+	}
 	batch, replayed, err := service.CreateBatch(ctx, batchRequest)
 	if err != nil || replayed || len(batch.Items) != 2 || batch.Items[1].State != "forbidden" {
 		t.Fatalf("create batch=%+v replayed=%v err=%v", batch, replayed, err)
@@ -178,6 +206,14 @@ func TestQuotaExpirySchedulerBatchAndUsageIntegration(t *testing.T) {
 	if _, replayed, err := service.CreateBatch(ctx, batchRequest); err != nil || !replayed {
 		t.Fatalf("batch replay=%v err=%v", replayed, err)
 	}
+	batchKey := stableKey("batch", batchID.String(), "0")
+	if _, _, err := service.users.Mutate(ctx, userstate.MutationRequest{NodeID: nodeID, Kind: userstate.UserDisable, Name: "bob", ExpectedVersion: 1, IdempotencyKey: batchKey, TTL: 24 * time.Hour, ActorID: "operator", ActorIdentityID: requesterID, Reason: "ticket", RequestID: "request-batch:0", Traceparent: testTraceparent}); err != nil {
+		t.Fatalf("inject batch post-mutation crash window: %v", err)
+	}
+	crashedOwner := uuid.Must(uuid.NewV7())
+	if _, err := pool.Exec(ctx, `UPDATE batch_operation_items SET state='submitting',lease_owner=$3,lease_until=now()-interval '1 second' WHERE batch_id=$1 AND item_index=$2`, batchID, 0, crashedOwner); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := pool.Exec(ctx, `UPDATE scheduler_leases SET lease_until=now()-interval '1 second' WHERE lease_name=$1`, leaseName); err != nil {
 		t.Fatal(err)
 	}
@@ -187,6 +223,14 @@ func TestQuotaExpirySchedulerBatchAndUsageIntegration(t *testing.T) {
 	batch, err = service.GetBatch(ctx, batch.ID)
 	if err != nil || batch.Items[0].ChildOperationID == nil || batch.Items[0].State != "offline_pending" || batch.Items[1].State != "forbidden" || batch.State != "partial_failed" {
 		t.Fatalf("batch result=%+v err=%v", batch, err)
+	}
+	var batchCommandCount int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM commands WHERE node_id=$1 AND resource_key='bob' AND idempotency_key=$2`, nodeID, batchKey).Scan(&batchCommandCount); err != nil || batchCommandCount != 1 {
+		t.Fatalf("batch crash recovery command count=%d err=%v", batchCommandCount, err)
+	}
+	metrics, err := service.Metrics(ctx, workspaceID)
+	if err != nil || metrics.ActiveBatchItemTotal != 1 || metrics.StaleBatchClaimTotal != 0 || metrics.UnknownBatchItemTotal != 0 {
+		t.Fatalf("user operation metrics=%+v err=%v", metrics, err)
 	}
 }
 

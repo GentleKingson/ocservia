@@ -69,6 +69,11 @@ CREATE TABLE user_policy_enforcements (
     PRIMARY KEY (node_id, username, policy_version, cause, period_start)
 );
 
+ALTER TABLE approval_requests
+    ADD COLUMN request_hash bytea CHECK (request_hash IS NULL OR octet_length(request_hash) = 32),
+    ADD COLUMN request_summary jsonb CHECK (request_summary IS NULL OR jsonb_typeof(request_summary) = 'array'),
+    ADD CONSTRAINT approval_request_content_pair CHECK ((request_hash IS NULL) = (request_summary IS NULL));
+
 CREATE TABLE batch_operations (
     id uuid PRIMARY KEY,
     workspace_id uuid NOT NULL REFERENCES workspaces(id) ON DELETE RESTRICT,
@@ -106,7 +111,10 @@ CREATE TABLE batch_operation_items (
 );
 CREATE INDEX batch_operation_items_claim_idx
     ON batch_operation_items (updated_at, batch_id, item_index)
-    WHERE state = 'queued';
+    WHERE state IN ('queued', 'submitting');
+CREATE INDEX batch_operations_active_idx
+    ON batch_operations (updated_at, id)
+    WHERE state IN ('queued', 'running', 'partial_failed');
 
 CREATE TABLE upstream_sync_records (
     id uuid PRIMARY KEY,

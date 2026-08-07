@@ -50,6 +50,7 @@ export * from "./UserBatchRequest";
 export * from "./UserCreateRequest";
 export * from "./UserGroupResourceState";
 export * from "./UserGroupStatePage";
+export * from "./UserOperationMetrics";
 export * from "./UserPolicy";
 export * from "./UserPolicyRequest";
 export * from "./Workspace";

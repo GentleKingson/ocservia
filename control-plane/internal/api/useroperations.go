@@ -142,7 +142,29 @@ func (s *Server) getUserBatch(w http.ResponseWriter, r *http.Request) {
 		writeProblem(w, r, http.StatusNotFound, "https://ocservia.dev/problems/not-found", "Resource not found", "the requested batch does not exist")
 		return
 	}
+	actor := principal(r)
+	creator := batch.ActorIdentityID != nil && *batch.ActorIdentityID == actor.IdentityID
+	if actor.Issuer != "development" && !creator {
+		resource := rbac.Resource{WorkspaceID: batch.WorkspaceID, Type: "workspace"}
+		if err := s.rbac.Authorize(r.Context(), actor.IdentityID, "operation.read", resource, actor.BreakGlass); err != nil {
+			s.writeAuthorizationError(w, r, err)
+			return
+		}
+	}
 	writeJSON(w, http.StatusOK, batch)
+}
+
+func (s *Server) userOperationMetrics(w http.ResponseWriter, r *http.Request) {
+	if s.useroperations == nil {
+		writeProblem(w, r, http.StatusServiceUnavailable, "https://ocservia.dev/problems/service-unavailable", "Service is unavailable", "user operations service is unavailable")
+		return
+	}
+	metrics, err := s.useroperations.Metrics(r.Context(), workspace(r))
+	if err != nil {
+		s.writeUserOperationsError(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, metrics)
 }
 
 func decodeSingleJSON(w http.ResponseWriter, r *http.Request, target any) bool {

@@ -2,6 +2,10 @@ DROP TABLE upstream_sync_records;
 DROP TABLE batch_operation_items;
 DROP TABLE batch_operations;
 DROP TABLE user_policy_enforcements;
+ALTER TABLE approval_requests
+    DROP CONSTRAINT approval_request_content_pair,
+    DROP COLUMN request_summary,
+    DROP COLUMN request_hash;
 DROP TABLE scheduler_leases;
 DROP TABLE user_usage_cursors;
 DROP TABLE observed_user_usage;
