@@ -128,10 +128,13 @@ export type CertificateKeyBitsEnum =
 export const CertificateStateEnum = {
   CsrPending: "csr_pending",
   CsrReady: "csr_ready",
+  Signing: "signing",
   SignerUnavailable: "signer_unavailable",
   Issued: "issued",
   Expiring: "expiring",
+  Expired: "expired",
   Revoking: "revoking",
+  RevocationUnknown: "revocation_unknown",
   Revoked: "revoked",
   Failed: "failed",
   Unknown: "unknown",

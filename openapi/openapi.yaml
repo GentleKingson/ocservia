@@ -1825,7 +1825,7 @@ components:
         common_name: { type: string, minLength: 1, maxLength: 253 }
         dns_names: { type: array, maxItems: 32, items: { type: string, maxLength: 253 } }
         key_bits: { type: integer, format: int32, enum: [2048, 3072, 4096] }
-        state: { type: string, enum: [csr_pending, csr_ready, signer_unavailable, issued, expiring, revoking, revoked, failed, unknown] }
+        state: { type: string, enum: [csr_pending, csr_ready, signing, signer_unavailable, issued, expiring, expired, revoking, revocation_unknown, revoked, failed, unknown] }
         public_key_sha256: { type: string, format: byte, description: SHA-256 of the node-local public key. }
         serial_number: { type: string, maxLength: 128 }
         not_before: { $ref: "#/components/schemas/UtcDateTime" }

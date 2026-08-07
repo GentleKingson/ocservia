@@ -412,6 +412,7 @@ pub struct Adapter {
     limits: Limits,
     user_file_lock: Arc<Mutex<()>>,
     config_plan_lock: Arc<Mutex<()>>,
+    certificate_artifact_lock: Arc<Mutex<()>>,
     #[cfg(test)]
     config_apply_fault: Arc<AtomicU8>,
 }
@@ -425,6 +426,7 @@ impl Adapter {
             limits,
             user_file_lock: Arc::new(Mutex::new(())),
             config_plan_lock: Arc::new(Mutex::new(())),
+            certificate_artifact_lock: Arc::new(Mutex::new(())),
             #[cfg(test)]
             config_apply_fault: Arc::new(AtomicU8::new(0)),
         }
@@ -1469,6 +1471,7 @@ impl Adapter {
     ///
     /// Returns an I/O error when the fixed artifact directory cannot be inspected or cleaned.
     pub async fn cleanup_stale_certificate_artifacts(&self) -> Result<(), AdapterError> {
+        let _guard = self.certificate_artifact_lock.lock().await;
         let directory = self.resources.certificate_key_dir.join("artifacts");
         let mut entries = match tokio::fs::read_dir(&directory).await {
             Ok(entries) => entries,
@@ -1476,11 +1479,12 @@ impl Adapter {
             Err(error) => return Err(AdapterError::Io(error)),
         };
         let cutoff = SystemTime::now()
-            .checked_sub(Duration::from_hours(1))
+            .checked_sub(Duration::from_mins(15))
             .ok_or(AdapterError::InvalidResource)?;
         while let Some(entry) = entries.next_entry().await.map_err(AdapterError::Io)? {
             let name = entry.file_name();
             let name = name.to_string_lossy();
+            let is_staging = name.starts_with('.');
             let id_text = name.strip_suffix(".p12").or_else(|| {
                 name.strip_prefix('.')
                     .and_then(|value| value.strip_suffix(".chain.pem"))
@@ -1492,8 +1496,13 @@ impl Adapter {
             if id.get_version_num() != 7 {
                 continue;
             }
-            let metadata = entry.metadata().await.map_err(AdapterError::Io)?;
-            if metadata.is_file() && metadata.modified().map_err(AdapterError::Io)? < cutoff {
+            let metadata = tokio::fs::symlink_metadata(entry.path())
+                .await
+                .map_err(AdapterError::Io)?;
+            if metadata.is_file()
+                && !metadata.file_type().is_symlink()
+                && (is_staging || metadata.modified().map_err(AdapterError::Io)? < cutoff)
+            {
                 tokio::fs::remove_file(entry.path())
                     .await
                     .map_err(AdapterError::Io)?;
@@ -4887,6 +4896,13 @@ mod tests {
         assert!(sealed.status.success());
         let chain = std::fs::read(&certificate_path).expect("read certificate chain");
         let artifact_id = Uuid::now_v7();
+        let artifact_directory = directory.join("artifacts");
+        std::fs::create_dir(&artifact_directory).expect("artifact directory");
+        std::fs::set_permissions(&artifact_directory, std::fs::Permissions::from_mode(0o700))
+            .expect("artifact directory mode");
+        let interrupted_staging = artifact_directory.join(format!(".{artifact_id}.chain.pem"));
+        std::fs::write(&interrupted_staging, b"interrupted staging fixture")
+            .expect("interrupted staging file");
         let result = adapter
             .certificate_p12(
                 certificate_id.as_bytes(),
@@ -4900,7 +4916,16 @@ mod tests {
         let artifact = directory
             .join("artifacts")
             .join(format!("{artifact_id}.p12"));
+        assert!(!interrupted_staging.exists());
         let bytes = std::fs::read(&artifact).expect("read encrypted P12");
+        assert_eq!(
+            std::fs::metadata(&artifact)
+                .expect("artifact metadata")
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600
+        );
         assert_eq!(result.artifact_size, bytes.len() as u64);
         assert_eq!(result.artifact_sha256, Sha256::digest(&bytes).to_vec());
         assert!(
@@ -5164,6 +5189,7 @@ impl Adapter {
         {
             return Err(AdapterError::InvalidRequest);
         }
+        let _guard = self.certificate_artifact_lock.lock().await;
         let key_path = self
             .resources
             .certificate_key_dir
@@ -5205,6 +5231,16 @@ impl Adapter {
                 artifact_sha256: Sha256::digest(&data).to_vec(),
                 artifact_size: u64::try_from(data.len()).map_err(|_| AdapterError::OutputLimit)?,
             });
+        }
+        match tokio::fs::symlink_metadata(&chain_path).await {
+            Ok(metadata) if metadata.is_file() && !metadata.file_type().is_symlink() => {
+                tokio::fs::remove_file(&chain_path)
+                    .await
+                    .map_err(AdapterError::Io)?;
+            }
+            Ok(_) => return Err(AdapterError::InvalidResource),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(AdapterError::Io(error)),
         }
         let mut chain_file = StdOpenOptions::new()
             .write(true)
@@ -5291,7 +5327,7 @@ impl Adapter {
             let _ = tokio::fs::remove_file(&output_path).await;
             return Err(AdapterError::OutputLimit);
         }
-        tokio::fs::set_permissions(&output_path, std::fs::Permissions::from_mode(0o644))
+        tokio::fs::set_permissions(&output_path, std::fs::Permissions::from_mode(0o600))
             .await
             .map_err(AdapterError::Io)?;
         Ok(CertificateArtifactResult {

@@ -24,10 +24,11 @@ import (
 )
 
 type fixturePKI struct {
-	key         *rsa.PrivateKey
-	certificate *x509.Certificate
-	revoked     bool
-	unavailable bool
+	key               *rsa.PrivateKey
+	certificate       *x509.Certificate
+	revoked           bool
+	revokeUnavailable bool
+	unavailable       bool
 }
 
 func newFixturePKI(t *testing.T) *fixturePKI {
@@ -60,9 +61,14 @@ func (f *fixturePKI) Sign(_ context.Context, request SignRequest) (SignResult, e
 	if err != nil {
 		return SignResult{}, err
 	}
-	return SignResult{CertificateChainPEM: pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})}, nil
+	chain := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
+	chain = append(chain, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: f.certificate.Raw})...)
+	return SignResult{CertificateChainPEM: chain}, nil
 }
 func (f *fixturePKI) Revoke(_ context.Context, _ RevokeSignerRequest) error {
+	if f.revokeUnavailable {
+		return errors.New("fixture revocation unavailable")
+	}
 	f.revoked = true
 	return nil
 }
@@ -159,6 +165,10 @@ func TestCertificateIssueArtifactAndRevokeIntegration(t *testing.T) {
 	if _, err := service.Issue(ctx, IssueRequest{CertificateID: certificate.ID, ApprovalID: approval.ID, ActorIdentityID: requesterID, ActorSessionID: requesterSession, Reason: "issue node certificate", RequestID: "issue-unavailable"}); !errors.Is(err, ErrSignerUnavailable) {
 		t.Fatalf("signer unavailable err=%v", err)
 	}
+	var issueState, approvalState string
+	if err := pool.QueryRow(ctx, `SELECT c.state,a.status FROM certificates c JOIN approval_requests a ON a.id=c.issue_approval_id WHERE c.id=$1`, certificate.ID).Scan(&issueState, &approvalState); err != nil || issueState != "signer_unavailable" || approvalState != "consumed" {
+		t.Fatalf("durable issue intent state=%q approval=%q err=%v", issueState, approvalState, err)
+	}
 	pki.unavailable = false
 	issued, err := service.Issue(ctx, IssueRequest{CertificateID: certificate.ID, ApprovalID: approval.ID, ActorIdentityID: requesterID, ActorSessionID: requesterSession, Reason: "issue node certificate", RequestID: "issue-request"})
 	if err != nil || issued.State != "issued" || issued.SerialNumber == "" {
@@ -244,9 +254,35 @@ func TestCertificateIssueArtifactAndRevokeIntegration(t *testing.T) {
 	if err != nil || rotated.Version != "version-2" || rotated.RotatedAt == nil {
 		t.Fatalf("rotated ref=%+v err=%v", rotated, err)
 	}
+	if _, err := pool.Exec(ctx, `UPDATE certificates SET not_after=now()-interval '1 second' WHERE id=$1`, certificate.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.Maintain(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if expired, err := service.Get(ctx, certificate.ID); err != nil || expired.State != "expired" {
+		t.Fatalf("expired certificate=%+v err=%v", expired, err)
+	}
+	if _, _, err := service.CreateP12(ctx, P12Request{CertificateID: certificate.ID, ActorIdentityID: requesterID, ActorSessionID: requesterSession, ExpectedVersion: 1, IdempotencyKey: "i17-p12-after-certificate-expiry", Reason: "reject expired certificate", RequestID: "p12-after-certificate-expiry"}); !errors.Is(err, ErrNotReady) {
+		t.Fatalf("expired certificate P12 err=%v", err)
+	}
+	pki.revokeUnavailable = true
 	op, replayed, err := service.Revoke(ctx, RevokeRequest{CertificateID: certificate.ID, ActorIdentityID: approverID, ActorSessionID: approverSession, ExpectedVersion: 1, IdempotencyKey: "i17-revoke", Reason: "retire certificate", RequestID: "revoke-request", Traceparent: "00-2123456789abcdef0123456789abcdef-0123456789abcdef-01"})
-	if err != nil || replayed || op.ID == "" || !pki.revoked {
+	if !errors.Is(err, ErrSignerUnavailable) || replayed || op.ID == "" {
+		t.Fatalf("durable revoke=%+v replay=%v err=%v", op, replayed, err)
+	}
+	var revokeState string
+	var held bool
+	if err := pool.QueryRow(ctx, `SELECT c.state,o.available_at>now() FROM certificates c JOIN operations p ON p.workspace_id=c.workspace_id AND p.idempotency_key='i17-revoke' JOIN outbox_events o ON o.command_id=p.command_id WHERE c.id=$1`, certificate.ID).Scan(&revokeState, &held); err != nil || revokeState != "revocation_unknown" || !held {
+		t.Fatalf("durable revoke intent state=%q held=%v err=%v", revokeState, held, err)
+	}
+	pki.revokeUnavailable = false
+	op, replayed, err = service.Revoke(ctx, RevokeRequest{CertificateID: certificate.ID, ActorIdentityID: approverID, ActorSessionID: approverSession, ExpectedVersion: 1, IdempotencyKey: "i17-revoke", Reason: "retire certificate", RequestID: "revoke-request", Traceparent: "00-2123456789abcdef0123456789abcdef-0123456789abcdef-01"})
+	if err != nil || !replayed || op.ID == "" || !pki.revoked {
 		t.Fatalf("revoke=%+v replay=%v external=%v err=%v", op, replayed, pki.revoked, err)
+	}
+	if err := pool.QueryRow(ctx, `SELECT available_at<=now() FROM outbox_events WHERE command_id=(SELECT command_id FROM operations WHERE id=$1::uuid)`, op.ID).Scan(&held); err != nil || !held {
+		t.Fatalf("released revoke outbox=%v err=%v", held, err)
 	}
 }
 

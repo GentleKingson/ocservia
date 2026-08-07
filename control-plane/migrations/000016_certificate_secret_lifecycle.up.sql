@@ -13,7 +13,7 @@ CREATE TABLE certificates (
     common_name text NOT NULL CHECK (length(common_name) BETWEEN 1 AND 253),
     dns_names jsonb NOT NULL DEFAULT '[]'::jsonb CHECK (jsonb_typeof(dns_names)='array'),
     key_bits integer NOT NULL CHECK (key_bits IN (2048,3072,4096)),
-    state text NOT NULL CHECK (state IN ('csr_pending','csr_ready','signer_unavailable','issued','expiring','revoking','revoked','failed','unknown')),
+    state text NOT NULL CHECK (state IN ('csr_pending','csr_ready','signing','signer_unavailable','issued','expiring','expired','revoking','revocation_unknown','revoked','failed','unknown')),
     csr_der bytea CHECK (csr_der IS NULL OR octet_length(csr_der) BETWEEN 64 AND 65536),
     public_key_sha256 bytea CHECK (public_key_sha256 IS NULL OR octet_length(public_key_sha256)=32),
     certificate_chain_pem bytea CHECK (certificate_chain_pem IS NULL OR octet_length(certificate_chain_pem) BETWEEN 64 AND 262144),
@@ -22,6 +22,9 @@ CREATE TABLE certificates (
     not_after timestamptz,
     revoked_at timestamptz,
     revocation_reason text CHECK (revocation_reason IS NULL OR length(revocation_reason) BETWEEN 1 AND 128),
+    issue_approval_id uuid REFERENCES approval_requests(id) ON DELETE RESTRICT,
+    issue_request_hash bytea CHECK (issue_request_hash IS NULL OR octet_length(issue_request_hash)=32),
+    issue_actor_identity_id uuid REFERENCES identities(id) ON DELETE RESTRICT,
     created_at timestamptz NOT NULL,
     updated_at timestamptz NOT NULL,
     FOREIGN KEY (workspace_id,node_id) REFERENCES nodes(workspace_id,id) ON DELETE RESTRICT

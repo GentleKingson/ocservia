@@ -3,11 +3,14 @@ package localslice
 import (
 	"bytes"
 	"context"
+	"crypto/rsa"
 	"crypto/sha256"
 	"crypto/x509"
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"slices"
+	"sort"
 	"time"
 
 	agentv1 "github.com/GentleKingson/ocservia/control-plane/gen/proto/ocserv/platform/agent/v1"
@@ -759,6 +762,18 @@ func normalizeCertificateCSRResult(envelope *agentv1.CommandEnvelope, state stri
 	csr, err := x509.ParseCertificateRequest(result.GetCsrDer())
 	if err != nil || csr.CheckSignature() != nil {
 		return nil, errors.New("certificate CSR signature is invalid")
+	}
+	key, ok := csr.PublicKey.(*rsa.PublicKey)
+	requestedNames, actualNames := slices.Clone(request.GetDnsNames()), slices.Clone(csr.DNSNames)
+	sort.Strings(requestedNames)
+	sort.Strings(actualNames)
+	if !ok || uint32(key.N.BitLen()) != request.GetKeyBits() || csr.Subject.CommonName != request.GetCommonName() || len(csr.Subject.Names) != 1 || !csr.Subject.Names[0].Type.Equal([]int{2, 5, 4, 3}) || !slices.Equal(requestedNames, actualNames) || len(csr.EmailAddresses) != 0 || len(csr.IPAddresses) != 0 || len(csr.URIs) != 0 {
+		return nil, errors.New("certificate CSR identity does not match the requested subject")
+	}
+	for _, extension := range csr.Extensions {
+		if !extension.Id.Equal([]int{2, 5, 29, 17}) {
+			return nil, errors.New("certificate CSR contains an unsupported extension")
+		}
 	}
 	publicKey, err := x509.MarshalPKIXPublicKey(csr.PublicKey)
 	if err != nil {

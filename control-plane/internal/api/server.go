@@ -234,11 +234,13 @@ func (s *Server) routeErrors(next http.Handler) http.Handler {
 			writeProblem(w, r, http.StatusNotFound, "https://ocservia.dev/problems/not-found", "Resource not found", "the requested resource does not exist")
 			return
 		}
-		methodAllowed := r.Method == expectedMethod || expectedMethod == "GET_OR_PUT" && (r.Method == http.MethodGet || r.Method == http.MethodPut)
+		methodAllowed := r.Method == expectedMethod || expectedMethod == "GET_OR_PUT" && (r.Method == http.MethodGet || r.Method == http.MethodPut) || expectedMethod == "GET_OR_POST" && (r.Method == http.MethodGet || r.Method == http.MethodPost)
 		if !methodAllowed {
 			allow := expectedMethod
 			if expectedMethod == "GET_OR_PUT" {
 				allow = "GET, PUT"
+			} else if expectedMethod == "GET_OR_POST" {
+				allow = "GET, POST"
 			}
 			w.Header().Set("Allow", allow)
 			writeProblem(w, r, http.StatusMethodNotAllowed, "https://ocservia.dev/problems/method-not-allowed", "Method not allowed", "the requested method is not supported")
@@ -309,7 +311,7 @@ func routeMethod(path string) (string, bool) {
 		return http.MethodPost, true
 	}
 	if len(parts) == 5 && parts[0] == "api" && parts[1] == "v1" && parts[2] == "nodes" && parts[3] != "" && parts[4] == "certificates" {
-		return http.MethodPost, true
+		return "GET_OR_POST", true
 	}
 	if len(parts) == 4 && parts[0] == "api" && parts[1] == "v1" && parts[2] == "config-plans" && parts[3] != "" {
 		return http.MethodGet, true

@@ -87,6 +87,7 @@ type CreateRequest struct {
 	Action              string
 	Reason              string
 	SupersedePending    bool
+	HoldDispatch        bool
 	TTL                 time.Duration
 	RequestID           string
 	Traceparent         string
@@ -361,9 +362,13 @@ func (s *Service) CreateSynthetic(ctx context.Context, request CreateRequest) (O
 		commandID, operationID, workspaceID, request.NodeID, payloadType, envelope, request.IdempotencyKey, request.ExpectedVersion, request.Traceparent, expiresAt, now); err != nil {
 		return Operation{}, false, fmt.Errorf("insert command: %w", err)
 	}
+	availableAt := now
+	if request.HoldDispatch {
+		availableAt = expiresAt
+	}
 	if _, err := tx.Exec(ctx, `
 		INSERT INTO outbox_events (id, command_id, event_type, payload, available_at, created_at)
-		VALUES ($1,$2,'command.dispatch',$3,$4,$4)`, outboxID, commandID, envelope, now); err != nil {
+		VALUES ($1,$2,'command.dispatch',$3,$4,$5)`, outboxID, commandID, envelope, availableAt, now); err != nil {
 		return Operation{}, false, fmt.Errorf("insert outbox event: %w", err)
 	}
 	if _, err := tx.Exec(ctx, `INSERT INTO operation_events (id, operation_id, state, occurred_at) VALUES ($1,$2,'queued',$3)`, eventID, operationID, now); err != nil {
@@ -783,6 +788,9 @@ func validateCreate(r CreateRequest) error {
 	if r.Kind == CertificateRevoke && (r.CertificateID == uuid.Nil || r.CertificateID.Version() != 7 || strings.TrimSpace(r.RevocationReason) == "" || len(r.RevocationReason) > 128) {
 		return ErrInvalidRequest
 	}
+	if r.HoldDispatch && r.Kind != CertificateRevoke {
+		return ErrInvalidRequest
+	}
 	if r.Kind != ConfigPlan && r.Kind != ConfigApply && (len(r.Candidate) != 0 || len(r.CandidateHash) != 0 || len(r.ExpectedCurrentHash) != 0 || r.DesiredRevision != 0 || r.PlanRevision != 0 || r.PlanMetadata != nil || r.ApplyMetadata != nil || r.OcservVersion != "" || len(r.PlanCapabilities) != 0) {
 		return ErrInvalidRequest
 	}
@@ -828,6 +836,7 @@ func requestHash(r CreateRequest) [32]byte {
 		IP                   string        `json:"ip"`
 		ExpectedVersion      int64         `json:"expected_version"`
 		SupersedePending     bool          `json:"supersede_pending"`
+		HoldDispatch         bool          `json:"hold_dispatch,omitempty"`
 		TTLSeconds           int64         `json:"ttl_seconds"`
 		ActorID              string        `json:"actor_id"`
 		Action               string        `json:"action"`
@@ -856,7 +865,7 @@ func requestHash(r CreateRequest) [32]byte {
 		ArtifactExpiresAt    string        `json:"artifact_expires_at"`
 		RevocationReason     string        `json:"revocation_reason"`
 	}{NodeID: r.NodeID, Kind: r.Kind, Message: r.Message, SessionID: r.SessionID, BootID: r.BootID, IP: r.IP,
-		ExpectedVersion: r.ExpectedVersion, SupersedePending: r.SupersedePending, TTLSeconds: int64(r.TTL / time.Second),
+		ExpectedVersion: r.ExpectedVersion, SupersedePending: r.SupersedePending, HoldDispatch: r.HoldDispatch, TTLSeconds: int64(r.TTL / time.Second),
 		ActorID: actorID, Action: action, Reason: reason, ActorSessionID: r.ActorSessionID, ActorIdentityID: r.ActorIdentityID,
 		ApprovalID: r.ApprovalID, CandidateHash: fmt.Sprintf("%x", r.CandidateHash), ExpectedCurrentHash: fmt.Sprintf("%x", r.ExpectedCurrentHash),
 		DesiredRevision: r.DesiredRevision, PlanID: applyPlanID(r.ApplyMetadata), PlanRevision: r.PlanRevision,
