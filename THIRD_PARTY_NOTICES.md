@@ -11,3 +11,9 @@ CDLA-Permissive-2.0. These are permissive terms; their exact versions and
 license texts are recorded by `Cargo.lock` and the generated dependency SBOM.
 
 The project itself is available under `MIT OR Apache-2.0`.
+
+Quota, expiry, and related user-form behavior were reviewed against
+`mmtaee/ocserv-dashboard` v4.9 and commit
+`4d25478580d899b77460bdf0cf0a590cfdd26030`, licensed under the MIT License.
+No upstream source file is copied verbatim; provenance and the A/B/C/D decision
+record are documented in `docs/upstream/v4.9-post1.md`.
