@@ -736,6 +736,45 @@ func mutation(nodeID uuid.UUID, key string, kind MutationKind, name string, vers
 	return request
 }
 
+func TestGlobalCommandLimitAcrossProducersIntegration(t *testing.T) {
+	_, pool, _, nodeID := integrationService(t, "active")
+	users := NewWithConcurrency(pool, 1)
+	operations := operationstore.NewWithConcurrency(pool, 1)
+	start := make(chan struct{})
+	results := make(chan error, 2)
+	go func() {
+		<-start
+		_, _, err := users.Mutate(context.Background(), mutation(nodeID, "limited-user", UserCreate, "limited", 0))
+		results <- err
+	}()
+	go func() {
+		<-start
+		_, _, err := operations.CreateSynthetic(context.Background(), operationstore.CreateRequest{NodeID: nodeID, IdempotencyKey: "limited-noop", ExpectedVersion: 1, Kind: operationstore.SyntheticNoop, TTL: time.Minute, RequestID: "request-limited-noop", Traceparent: testTraceparent})
+		results <- err
+	}()
+	close(start)
+
+	var succeeded, limited int
+	for range 2 {
+		err := <-results
+		switch {
+		case err == nil:
+			succeeded++
+		case errors.Is(err, ErrConcurrencyExceeded), errors.Is(err, operationstore.ErrConcurrencyExceeded):
+			limited++
+		default:
+			t.Fatalf("unexpected command admission error: %v", err)
+		}
+	}
+	var active int
+	if err := pool.QueryRow(context.Background(), `SELECT count(*) FROM operations operation JOIN commands command ON command.operation_id=operation.id WHERE operation.state IN('queued','dispatched','accepted','running','offline_pending','unknown')`).Scan(&active); err != nil {
+		t.Fatal(err)
+	}
+	if succeeded != 1 || limited != 1 || active != 1 {
+		t.Fatalf("global limit result succeeded=%d limited=%d active=%d", succeeded, limited, active)
+	}
+}
+
 func integrationService(t *testing.T, status string) (*Service, *pgxpool.Pool, uuid.UUID, uuid.UUID) {
 	t.Helper()
 	url := os.Getenv("OCSERV_TEST_DATABASE_URL")

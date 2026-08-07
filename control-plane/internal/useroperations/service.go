@@ -389,7 +389,7 @@ func (s *Service) RunOnce(ctx context.Context) error {
 
 func (s *Service) activeUserOperationCount(ctx context.Context) (int, error) {
 	var count int
-	err := s.pool.QueryRow(ctx, `SELECT count(*) FROM operations operation JOIN commands command ON command.operation_id=operation.id WHERE command.payload_type IN('user_disable','user_enable') AND operation.state IN('queued','dispatched','accepted','running','offline_pending','unknown')`).Scan(&count)
+	err := s.pool.QueryRow(ctx, `SELECT count(*) FROM operations operation JOIN commands command ON command.operation_id=operation.id WHERE operation.state IN('queued','dispatched','accepted','running','offline_pending','unknown')`).Scan(&count)
 	return count, err
 }
 
@@ -404,7 +404,7 @@ func (s *Service) resetMonthlyPolicies(ctx context.Context, limit int) (int, err
 		JOIN LATERAL (SELECT resulting_user_version FROM user_policy_enforcements prior WHERE prior.node_id=p.node_id AND prior.username=p.username AND prior.policy_version=p.version AND prior.cause='quota' AND prior.period_start<$1 AND prior.operation_id IS NOT NULL ORDER BY prior.period_start DESC LIMIT 1) prior ON true
 		WHERE p.quota_period='monthly' AND (p.expires_at IS NULL OR p.expires_at>$2)
 		AND CASE p.quota_direction WHEN 'rx' THEN COALESCE(usage.rx_bytes,0)::numeric WHEN 'tx' THEN COALESCE(usage.tx_bytes,0)::numeric ELSE COALESCE(usage.rx_bytes,0)::numeric+COALESCE(usage.tx_bytes,0)::numeric END<p.quota_bytes::numeric
-		AND ((u.enabled=false AND prior.resulting_user_version=u.version) OR EXISTS(SELECT 1 FROM user_policy_enforcements pending WHERE pending.node_id=p.node_id AND pending.username=p.username AND pending.policy_version=p.version AND pending.cause='quota_reset' AND pending.period_start=$1 AND pending.operation_id IS NULL))
+		AND ((u.enabled=false AND prior.resulting_user_version=u.version) OR EXISTS(SELECT 1 FROM user_policy_enforcements pending WHERE pending.node_id=p.node_id AND pending.username=p.username AND pending.policy_version=p.version AND pending.cause='quota_reset' AND pending.period_start=$1 AND pending.source_user_version=u.version AND pending.operation_id IS NULL))
 		AND NOT EXISTS(SELECT 1 FROM user_policy_enforcements reset WHERE reset.node_id=p.node_id AND reset.username=p.username AND reset.policy_version=p.version AND reset.cause='quota_reset' AND reset.period_start=$1 AND reset.operation_id IS NOT NULL)
 		ORDER BY p.node_id,p.username LIMIT $3`, month, now, limit)
 	if err != nil {
@@ -429,7 +429,7 @@ func (s *Service) resetMonthlyPolicies(ctx context.Context, limit int) (int, err
 	processed := 0
 	for _, item := range candidates {
 		key := stableKey("policy-reset", item.nodeID.String(), item.username, fmt.Sprint(item.policyVersion), month.Format(time.RFC3339))
-		if _, err := s.pool.Exec(ctx, `INSERT INTO user_policy_enforcements(node_id,username,policy_version,cause,period_start,created_at) VALUES($1,$2,$3,'quota_reset',$4,$5) ON CONFLICT DO NOTHING`, item.nodeID, item.username, item.policyVersion, month, now); err != nil {
+		if _, err := s.pool.Exec(ctx, `INSERT INTO user_policy_enforcements(node_id,username,policy_version,cause,period_start,source_user_version,created_at) VALUES($1,$2,$3,'quota_reset',$4,$5,$6) ON CONFLICT DO NOTHING`, item.nodeID, item.username, item.policyVersion, month, item.userVersion, now); err != nil {
 			return 0, err
 		}
 		if item.enabled {
@@ -449,7 +449,11 @@ func (s *Service) resetMonthlyPolicies(ctx context.Context, limit int) (int, err
 		}
 		op, _, mutateErr := s.users.Mutate(ctx, userstate.MutationRequest{NodeID: item.nodeID, Kind: userstate.UserEnable, Name: item.username, ExpectedVersion: item.userVersion, IdempotencyKey: key, TTL: 24 * time.Hour, ActorID: "scheduler", Reason: "monthly quota reset", RequestID: key, Traceparent: stableTraceparent(key)})
 		if mutateErr != nil {
+			if errors.Is(mutateErr, userstate.ErrConcurrencyExceeded) {
+				return processed, nil
+			}
 			if errors.Is(mutateErr, userstate.ErrVersionConflict) || errors.Is(mutateErr, userstate.ErrRevisionPending) || errors.Is(mutateErr, userstate.ErrRevisionRecovery) {
+				_, _ = s.pool.Exec(ctx, `DELETE FROM user_policy_enforcements WHERE node_id=$1 AND username=$2 AND policy_version=$3 AND cause='quota_reset' AND period_start=$4 AND source_user_version=$5 AND operation_id IS NULL`, item.nodeID, item.username, item.policyVersion, month, item.userVersion)
 				continue
 			}
 			return 0, mutateErr
@@ -492,7 +496,7 @@ func (s *Service) enforcePolicies(ctx context.Context, limit int) (int, error) {
 		FROM desired_user_policies p JOIN desired_users u USING(node_id,username)
 		LEFT JOIN observed_user_usage usage ON usage.node_id=p.node_id AND usage.username=p.username AND usage.period=CASE WHEN p.quota_period='monthly' THEN 'monthly' ELSE 'lifetime' END AND usage.period_start=CASE WHEN p.quota_period='monthly' THEN $2::timestamptz ELSE '1970-01-01T00:00:00Z'::timestamptz END
 		WHERE ((p.expires_at IS NOT NULL AND p.expires_at<=$1) OR (p.quota_period<>'none' AND CASE p.quota_direction WHEN 'rx' THEN COALESCE(usage.rx_bytes,0)::numeric WHEN 'tx' THEN COALESCE(usage.tx_bytes,0)::numeric ELSE COALESCE(usage.rx_bytes,0)::numeric+COALESCE(usage.tx_bytes,0)::numeric END>=p.quota_bytes::numeric))
-		AND (u.enabled=true OR EXISTS(SELECT 1 FROM user_policy_enforcements pending WHERE pending.node_id=p.node_id AND pending.username=p.username AND pending.policy_version=p.version AND pending.cause=CASE WHEN p.expires_at IS NOT NULL AND p.expires_at<=$1 THEN 'expiry' ELSE 'quota' END AND pending.period_start=CASE WHEN p.quota_period='monthly' THEN $2::timestamptz ELSE '1970-01-01T00:00:00Z'::timestamptz END AND pending.operation_id IS NULL))
+		AND (u.enabled=true OR EXISTS(SELECT 1 FROM user_policy_enforcements pending WHERE pending.node_id=p.node_id AND pending.username=p.username AND pending.policy_version=p.version AND pending.cause=CASE WHEN p.expires_at IS NOT NULL AND p.expires_at<=$1 THEN 'expiry' ELSE 'quota' END AND pending.period_start=CASE WHEN p.quota_period='monthly' THEN $2::timestamptz ELSE '1970-01-01T00:00:00Z'::timestamptz END AND pending.source_user_version=u.version AND pending.operation_id IS NULL))
 		AND NOT EXISTS(SELECT 1 FROM user_policy_enforcements e WHERE e.node_id=p.node_id AND e.username=p.username AND e.policy_version=p.version AND e.cause=CASE WHEN p.expires_at IS NOT NULL AND p.expires_at<=$1 THEN 'expiry' ELSE 'quota' END AND e.period_start=CASE WHEN p.quota_period='monthly' THEN $2::timestamptz ELSE '1970-01-01T00:00:00Z'::timestamptz END AND e.operation_id IS NOT NULL)
 		ORDER BY p.node_id,p.username LIMIT $3`, now, month, limit)
 	if err != nil {
@@ -512,7 +516,7 @@ func (s *Service) enforcePolicies(ctx context.Context, limit int) (int, error) {
 	for _, item := range candidates {
 		key := stableKey("policy", item.nodeID.String(), item.username, fmt.Sprint(item.version), item.cause, item.periodStart.Format(time.RFC3339))
 		trace := stableTraceparent(key)
-		if _, err := s.pool.Exec(ctx, `INSERT INTO user_policy_enforcements(node_id,username,policy_version,cause,period_start,created_at) VALUES($1,$2,$3,$4,$5,$6) ON CONFLICT DO NOTHING`, item.nodeID, item.username, item.version, item.cause, item.periodStart, now); err != nil {
+		if _, err := s.pool.Exec(ctx, `INSERT INTO user_policy_enforcements(node_id,username,policy_version,cause,period_start,source_user_version,created_at) VALUES($1,$2,$3,$4,$5,$6,$7) ON CONFLICT DO NOTHING`, item.nodeID, item.username, item.version, item.cause, item.periodStart, item.userVersion, now); err != nil {
 			return 0, err
 		}
 		if !item.enabled {
@@ -532,7 +536,11 @@ func (s *Service) enforcePolicies(ctx context.Context, limit int) (int, error) {
 		}
 		op, _, mutateErr := s.users.Mutate(ctx, userstate.MutationRequest{NodeID: item.nodeID, Kind: userstate.UserDisable, Name: item.username, ExpectedVersion: item.userVersion, IdempotencyKey: key, TTL: 24 * time.Hour, ActorID: "scheduler", Reason: "quota or expiry policy enforcement", RequestID: key, Traceparent: trace})
 		if mutateErr != nil {
+			if errors.Is(mutateErr, userstate.ErrConcurrencyExceeded) {
+				return processed, nil
+			}
 			if errors.Is(mutateErr, userstate.ErrVersionConflict) || errors.Is(mutateErr, userstate.ErrRevisionPending) || errors.Is(mutateErr, userstate.ErrRevisionRecovery) {
+				_, _ = s.pool.Exec(ctx, `DELETE FROM user_policy_enforcements WHERE node_id=$1 AND username=$2 AND policy_version=$3 AND cause=$4 AND period_start=$5 AND source_user_version=$6 AND operation_id IS NULL`, item.nodeID, item.username, item.version, item.cause, item.periodStart, item.userVersion)
 				continue
 			}
 			return 0, mutateErr
@@ -594,6 +602,10 @@ func (s *Service) submitBatchItems(ctx context.Context, owner uuid.UUID, limit i
 		key := stableKey("batch", item.batchID.String(), fmt.Sprint(item.index))
 		op, _, mutateErr := s.users.Mutate(ctx, userstate.MutationRequest{NodeID: item.nodeID, Kind: kind, Name: item.username, ExpectedVersion: item.expectedVersion, IdempotencyKey: key, TTL: 24 * time.Hour, ActorID: actorID, ActorIdentityID: derefUUID(actorIdentity), ActorSessionID: derefUUID(actorSession), Reason: reason, RequestID: requestID + ":" + fmt.Sprint(item.index), Traceparent: traceparent})
 		if mutateErr != nil {
+			if errors.Is(mutateErr, userstate.ErrConcurrencyExceeded) {
+				_, err = s.pool.Exec(ctx, `UPDATE batch_operation_items SET state='queued',lease_owner=NULL,lease_until=NULL,updated_at=now() WHERE lease_owner=$1 AND state='submitting'`, owner)
+				return err
+			}
 			_, err = s.pool.Exec(ctx, `UPDATE batch_operation_items SET state='failed',error_type=$4,lease_owner=NULL,lease_until=NULL,updated_at=now() WHERE batch_id=$1 AND item_index=$2 AND lease_owner=$3`, item.batchID, item.index, owner, userstateErrorType(mutateErr))
 			if err != nil {
 				return err

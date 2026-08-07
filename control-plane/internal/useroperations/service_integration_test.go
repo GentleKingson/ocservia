@@ -131,7 +131,7 @@ func TestQuotaExpirySchedulerBatchAndUsageIntegration(t *testing.T) {
 	}
 
 	policyKey := stableKey("policy", nodeID.String(), "alice", "1", "quota", monthStart(now).Format(time.RFC3339))
-	if _, err := pool.Exec(ctx, `INSERT INTO user_policy_enforcements(node_id,username,policy_version,cause,period_start,created_at) VALUES($1,'alice',1,'quota',$2,now())`, nodeID, monthStart(now)); err != nil {
+	if _, err := pool.Exec(ctx, `INSERT INTO user_policy_enforcements(node_id,username,policy_version,cause,period_start,source_user_version,created_at) VALUES($1,'alice',1,'quota',$2,1,now())`, nodeID, monthStart(now)); err != nil {
 		t.Fatalf("inject enforcement intent: %v", err)
 	}
 	if _, _, err := service.users.Mutate(ctx, userstate.MutationRequest{NodeID: nodeID, Kind: userstate.UserDisable, Name: "alice", ExpectedVersion: 1, IdempotencyKey: policyKey, TTL: 24 * time.Hour, ActorID: "scheduler", Reason: "quota or expiry policy enforcement", RequestID: policyKey, Traceparent: stableTraceparent(policyKey)}); err != nil {
@@ -162,6 +162,10 @@ func TestQuotaExpirySchedulerBatchAndUsageIntegration(t *testing.T) {
 	policy, err = service.GetPolicy(ctx, nodeID, "alice")
 	if err != nil || policy.Convergence != "converged" {
 		t.Fatalf("enforced policy convergence=%q err=%v", policy.Convergence, err)
+	}
+	nextMonth := time.Date(2026, 9, 1, 0, 0, 0, 0, time.UTC)
+	if _, err := pool.Exec(ctx, `INSERT INTO user_policy_enforcements(node_id,username,policy_version,cause,period_start,source_user_version,created_at) VALUES($1,'alice',1,'quota_reset',$2,2,now())`, nodeID, nextMonth); err != nil {
+		t.Fatalf("inject reset intent before manual hold: %v", err)
 	}
 	if _, _, err := service.users.Mutate(ctx, userstate.MutationRequest{NodeID: nodeID, Kind: userstate.UserDisable, Name: "alice", ExpectedVersion: 2, IdempotencyKey: "manual-disable-after-quota", TTL: 24 * time.Hour, ActorID: "operator", Reason: "manual security hold", RequestID: "request-manual-disable", Traceparent: testTraceparent}); err != nil {
 		t.Fatalf("manual disable after quota enforcement: %v", err)
@@ -246,8 +250,11 @@ func TestQuotaExpirySchedulerBatchAndUsageIntegration(t *testing.T) {
 		createdAt := time.Date(2000, 1, 1, 0, index, 0, 0, time.UTC)
 		requestHash := make([]byte, 32)
 		requestHash[0] = byte(index)
-		if _, err := pool.Exec(ctx, `INSERT INTO batch_operations(id,workspace_id,state,actor_identity_id,actor_id,reason,request_id,traceparent,idempotency_key,request_hash,created_at,updated_at) VALUES($1,$2,'queued',$3,'operator','fairness','fairness',$4,$5,$6,$7,$7); INSERT INTO batch_operation_items(batch_id,item_index,node_id,username,action,expected_version,state,updated_at) VALUES($1,0,$8,'charlie','enable',1,$9,$7)`, batchID, workspaceID, requesterID, testTraceparent, "fairness-"+batchID.String(), requestHash, createdAt, nodeID, state); err != nil {
+		if _, err := pool.Exec(ctx, `INSERT INTO batch_operations(id,workspace_id,state,actor_identity_id,actor_id,reason,request_id,traceparent,idempotency_key,request_hash,created_at,updated_at) VALUES($1,$2,'queued',$3,'operator','fairness','fairness',$4,$5,$6,$7,$7)`, batchID, workspaceID, requesterID, testTraceparent, "fairness-"+batchID.String(), requestHash, createdAt); err != nil {
 			t.Fatalf("insert refresh fairness batch %d: %v", index, err)
+		}
+		if _, err := pool.Exec(ctx, `INSERT INTO batch_operation_items(batch_id,item_index,node_id,username,action,expected_version,state,updated_at) VALUES($1,0,$2,'charlie','enable',1,$3,$4)`, batchID, nodeID, state, createdAt); err != nil {
+			t.Fatalf("insert refresh fairness item %d: %v", index, err)
 		}
 	}
 	if err := service.refreshBatches(ctx); err != nil {

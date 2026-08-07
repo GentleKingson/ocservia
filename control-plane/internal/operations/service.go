@@ -14,6 +14,7 @@ import (
 	agentv1 "github.com/GentleKingson/ocservia/control-plane/gen/proto/ocserv/platform/agent/v1"
 	"github.com/GentleKingson/ocservia/control-plane/internal/approvals"
 	"github.com/GentleKingson/ocservia/control-plane/internal/audit"
+	"github.com/GentleKingson/ocservia/control-plane/internal/commandlimit"
 	"github.com/GentleKingson/ocservia/control-plane/internal/semanticpayload"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -29,6 +30,7 @@ var (
 	ErrNodeUnavailable     = errors.New("node is unavailable")
 	ErrCapabilityMissing   = errors.New("node capability is unavailable")
 	ErrTargetNotObserved   = errors.New("target is not present in observed state")
+	ErrConcurrencyExceeded = commandlimit.ErrExceeded
 )
 
 type SyntheticKind string
@@ -101,12 +103,17 @@ type QueueMetrics struct {
 }
 
 type Service struct {
-	pool *pgxpool.Pool
-	now  func() time.Time
+	pool         *pgxpool.Pool
+	now          func() time.Time
+	commandLimit int
 }
 
 func New(pool *pgxpool.Pool) *Service {
-	return &Service{pool: pool, now: func() time.Time { return time.Now().UTC() }}
+	return NewWithConcurrency(pool, 50)
+}
+
+func NewWithConcurrency(pool *pgxpool.Pool, commandLimit int) *Service {
+	return &Service{pool: pool, now: func() time.Time { return time.Now().UTC() }, commandLimit: commandLimit}
 }
 
 func (s *Service) CreateSynthetic(ctx context.Context, request CreateRequest) (Operation, bool, error) {
@@ -193,6 +200,9 @@ func (s *Service) CreateSynthetic(ctx context.Context, request CreateRequest) (O
 		if err := supersedePending(ctx, tx, request.NodeID, payloadType, now); err != nil {
 			return Operation{}, false, err
 		}
+	}
+	if err := commandlimit.Reserve(ctx, tx, s.commandLimit); err != nil {
+		return Operation{}, false, err
 	}
 	if _, err := tx.Exec(ctx, `
 		INSERT INTO operations (id, workspace_id, node_id, command_id, state, version, request_id, trace_id, idempotency_key, request_hash, expires_at, created_at, updated_at)

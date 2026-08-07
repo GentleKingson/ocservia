@@ -71,7 +71,7 @@ func Run(ctx context.Context, cfg config.Config, build BuildInfo, logger *slog.L
 	componentCtx, stopComponents := context.WithCancel(ctx)
 	defer stopComponents()
 	sliceService := localslice.New(pool)
-	operationService := operationstore.New(pool)
+	operationService := operationstore.NewWithConcurrency(pool, cfg.UserOperationConcurrency)
 	workerErr := make(chan error, 2)
 	maintenanceErr := make(chan error, 1)
 	var trust *trustserver.Server
@@ -105,7 +105,7 @@ func Run(ctx context.Context, cfg config.Config, build BuildInfo, logger *slog.L
 		go func() { workerErr <- operationWorker.Run(componentCtx) }()
 	}
 	telemetryService := telemetrystore.New(pool)
-	userStateService := userstate.New(pool)
+	userStateService := userstate.NewWithConcurrency(pool, cfg.UserOperationConcurrency)
 	userOperationsService := useroperations.NewWithConcurrency(pool, userStateService, cfg.UserOperationConcurrency)
 	auditManager := audit.NewManager(pool, cfg.AuditCheckpointKey)
 	if cfg.RunsScheduler() {

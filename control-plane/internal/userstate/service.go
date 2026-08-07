@@ -14,6 +14,7 @@ import (
 
 	agentv1 "github.com/GentleKingson/ocservia/control-plane/gen/proto/ocserv/platform/agent/v1"
 	"github.com/GentleKingson/ocservia/control-plane/internal/audit"
+	"github.com/GentleKingson/ocservia/control-plane/internal/commandlimit"
 	operationstore "github.com/GentleKingson/ocservia/control-plane/internal/operations"
 	"github.com/GentleKingson/ocservia/control-plane/internal/semanticpayload"
 	"github.com/google/uuid"
@@ -33,6 +34,7 @@ var (
 	ErrNodeUnavailable     = errors.New("node is unavailable")
 	ErrCapabilityMissing   = errors.New("node capability is unavailable")
 	ErrIdempotencyConflict = errors.New("idempotency key was reused with different input")
+	ErrConcurrencyExceeded = commandlimit.ErrExceeded
 )
 
 var namePattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$`)
@@ -80,12 +82,17 @@ type ResourceState struct {
 }
 
 type Service struct {
-	pool *pgxpool.Pool
-	now  func() time.Time
+	pool         *pgxpool.Pool
+	now          func() time.Time
+	commandLimit int
 }
 
 func New(pool *pgxpool.Pool) *Service {
-	return &Service{pool: pool, now: func() time.Time { return time.Now().UTC() }}
+	return NewWithConcurrency(pool, 50)
+}
+
+func NewWithConcurrency(pool *pgxpool.Pool, commandLimit int) *Service {
+	return &Service{pool: pool, now: func() time.Time { return time.Now().UTC() }, commandLimit: commandLimit}
 }
 
 func (s *Service) Mutate(ctx context.Context, request MutationRequest) (operationstore.Operation, bool, error) {
@@ -152,6 +159,9 @@ func (s *Service) Mutate(ctx context.Context, request MutationRequest) (operatio
 	}
 	coalesced, err := supersedePending(ctx, tx, request.NodeID, resourceType, request.Name, request.Kind, currentRevision, now)
 	if err != nil {
+		return operationstore.Operation{}, false, err
+	}
+	if err := commandlimit.Reserve(ctx, tx, s.commandLimit); err != nil {
 		return operationstore.Operation{}, false, err
 	}
 	nextVersion, nextRevision := currentVersion+1, currentRevision+1
