@@ -1,6 +1,8 @@
 {
   "schema_version": 1,
   "repository": "https://github.com/mmtaee/ocserv-dashboard",
+  "branch": "master",
+  "imported_at": "2026-08-07T16:41:52Z",
   "license": "MIT",
   "license_blob": "ce7caf5a71c20fd589b9e5c251554afc6efa3681",
   "old": {
@@ -8,12 +10,16 @@
     "commit": "b8f59026c4d879f40c1da43dc00d97e34f9790bc"
   },
   "new": {
-    "ref": "master-after-v4.9",
+    "ref": "master",
     "commit": "4d25478580d899b77460bdf0cf0a590cfdd26030"
   },
   "diff": {
     "ahead_by": 2,
     "total_commits": 2,
+    "commits": [
+      "b84969abac926c0ddc0a560ca06ebf85cbe5c787",
+      "4d25478580d899b77460bdf0cf0a590cfdd26030"
+    ],
     "patch_file": "docs/upstream/v4.9-post1.patch",
     "patch_sha256": "be9b113b2c2d5f32acf146f361bd2edfd32464708343db910fc1174eba7cc25a",
     "files": [
@@ -21,7 +27,9 @@
     ],
     "dependencies": [],
     "migrations": [],
-    "security_sensitive_files": []
+    "security_sensitive_files": [
+      "web/src/components/auth/SetupForm.vue"
+    ]
   },
   "classification": {
     "A": [],
@@ -42,5 +50,9 @@
     "upstream_view": "web/src/upstream/UserPolicyFields.vue",
     "node_adapter": "web/src/adapters/user-policy.ts",
     "verbatim_upstream_files": []
+  },
+  "publication": {
+    "review_pr": "https://github.com/GentleKingson/ocservia/pull/15",
+    "implementation_pr": "https://github.com/GentleKingson/ocservia/pull/14"
   }
 }

@@ -17,19 +17,27 @@ manifest="${ROOT}/docs/upstream/v4.9-post1.manifest.json"
 jq -e '
   .schema_version == 1 and
   .repository == "https://github.com/mmtaee/ocserv-dashboard" and
+  .branch == "master" and
+  .imported_at == "2026-08-07T16:41:52Z" and
   .license == "MIT" and
   .license_blob == "ce7caf5a71c20fd589b9e5c251554afc6efa3681" and
   .old.commit == "b8f59026c4d879f40c1da43dc00d97e34f9790bc" and
+  .new.ref == "master" and
   .new.commit == "4d25478580d899b77460bdf0cf0a590cfdd26030" and
   .diff.ahead_by == 2 and .diff.total_commits == 2 and
+  .diff.commits == ["b84969abac926c0ddc0a560ca06ebf85cbe5c787", "4d25478580d899b77460bdf0cf0a590cfdd26030"] and
   .diff.patch_file == "docs/upstream/v4.9-post1.patch" and
   .diff.patch_sha256 == "be9b113b2c2d5f32acf146f361bd2edfd32464708343db910fc1174eba7cc25a" and
   .diff.files == ["web/src/components/auth/SetupForm.vue"] and
   .diff.dependencies == [] and .diff.migrations == [] and
-  .diff.security_sensitive_files == [] and
+  .diff.security_sensitive_files == ["web/src/components/auth/SetupForm.vue"] and
   .classification.A == [] and
   .classification.B == ["web/src/components/auth/SetupForm.vue"] and
   (.classification.D | length) == 4 and
+  .adaptation.upstream_view == "web/src/upstream/UserPolicyFields.vue" and
+  .adaptation.node_adapter == "web/src/adapters/user-policy.ts" and
+  .publication.review_pr == "https://github.com/GentleKingson/ocservia/pull/15" and
+  .publication.implementation_pr == "https://github.com/GentleKingson/ocservia/pull/14" and
   .adaptation.verbatim_upstream_files == []
 ' "${manifest}" >/dev/null
 printf '%s  %s\n' \
