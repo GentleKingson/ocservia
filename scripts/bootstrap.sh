@@ -5,6 +5,20 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TOOLS="${ROOT}/.tools"
 CACHE="${ROOT}/.cache/downloads"
 CHECKSUMS="${ROOT}/scripts/checksums.txt"
+PROFILE="${1:-all}"
+
+if (($# > 1)); then
+  echo "usage: $0 [all|static|go-integration|rust-native|web]" >&2
+  exit 2
+fi
+
+case "${PROFILE}" in
+  all | static | go-integration | rust-native | web) ;;
+  *)
+    echo "unsupported bootstrap profile: ${PROFILE}" >&2
+    exit 2
+    ;;
+esac
 
 mkdir -p "${TOOLS}/bin" "${CACHE}"
 
@@ -23,7 +37,7 @@ verify_sha256() {
   else
     actual="$(shasum -a 256 "${file}" | awk '{print $1}')"
   fi
-  [[ "${actual}" == "${expected}" ]] || {
+  [[ -n "${expected}" && "${actual}" == "${expected}" ]] || {
     echo "checksum mismatch for ${file}" >&2
     return 1
   }
@@ -43,6 +57,7 @@ version_output_contains() {
   local expected="$1"
   shift
   local executable="$1" output
+  shift
   [[ -x "${executable}" ]] || return 1
   output="$("$@" 2>&1)" || return 1
   [[ "${output}" == *"${expected}"* ]]
@@ -52,6 +67,7 @@ version_output_equals() {
   local expected="$1"
   shift
   local executable="$1" output
+  shift
   [[ -x "${executable}" ]] || return 1
   output="$("$@" 2>&1)" || return 1
   [[ "${output}" == "${expected}" ]]
@@ -88,131 +104,249 @@ case "$(uname -s)-$(uname -m)" in
     ;;
 esac
 
-go_version="$(version go)"
-go_artifact="go${go_version}.${go_platform}.tar.gz"
-if ! version_output_contains "go version go${go_version} " "${TOOLS}/go/bin/go" "${TOOLS}/go/bin/go" version; then
-  archive="$(download "https://go.dev/dl/${go_artifact}" "${go_artifact}")"
-  rm -rf "${TOOLS}/go"
-  tar -xzf "${archive}" -C "${TOOLS}"
-fi
+install_go() {
+  local go_version go_artifact archive
+  go_version="$(version go)"
+  go_artifact="go${go_version}.${go_platform}.tar.gz"
+  if ! version_output_contains "go version go${go_version} " "${TOOLS}/go/bin/go" \
+    "${TOOLS}/go/bin/go" version; then
+    archive="$(download "https://go.dev/dl/${go_artifact}" "${go_artifact}")"
+    rm -rf "${TOOLS}/go"
+    tar -xzf "${archive}" -C "${TOOLS}"
+  fi
+  [[ "$("${TOOLS}/go/bin/go" env GOVERSION)" == "go${go_version}" ]]
+}
 
-node_version="$(version node)"
-node_artifact="node-v${node_version}-${node_platform}.tar.xz"
-if ! version_output_equals "v${node_version}" "${TOOLS}/node/bin/node" "${TOOLS}/node/bin/node" --version; then
-  archive="$(download "https://nodejs.org/dist/v${node_version}/${node_artifact}" "${node_artifact}")"
-  rm -rf "${TOOLS}/node"
-  mkdir -p "${TOOLS}/node"
-  tar -xJf "${archive}" --strip-components=1 -C "${TOOLS}/node"
-fi
+install_node() {
+  local node_version node_artifact archive
+  node_version="$(version node)"
+  node_artifact="node-v${node_version}-${node_platform}.tar.xz"
+  if ! version_output_equals "v${node_version}" "${TOOLS}/node/bin/node" \
+    "${TOOLS}/node/bin/node" --version; then
+    archive="$(download "https://nodejs.org/dist/v${node_version}/${node_artifact}" "${node_artifact}")"
+    rm -rf "${TOOLS}/node"
+    mkdir -p "${TOOLS}/node"
+    tar -xJf "${archive}" --strip-components=1 -C "${TOOLS}/node"
+  fi
+  [[ "$("${TOOLS}/node/bin/node" --version)" == "v${node_version}" ]]
+}
 
-rustup_artifact="rustup-init-${rust_platform}"
-if ! RUSTUP_HOME="${TOOLS}/rustup" CARGO_HOME="${TOOLS}/cargo" \
-  version_output_contains "rustc $(version rust) " "${TOOLS}/cargo/bin/rustc" \
-  "${TOOLS}/cargo/bin/rustc" --version; then
-  rustup_init="$(download "https://static.rust-lang.org/rustup/archive/1.29.0/${rust_platform}/rustup-init" "${rustup_artifact}")"
-  chmod +x "${rustup_init}"
-  rm -rf "${TOOLS}/rustup" "${TOOLS}/cargo"
-  RUSTUP_HOME="${TOOLS}/rustup" CARGO_HOME="${TOOLS}/cargo" \
-    "${rustup_init}" -y --no-modify-path --profile minimal \
-    --default-toolchain "$(version rust)" --component clippy,rustfmt
-fi
+install_npm() {
+  if [[ "$(npm --version)" != "$(version npm)" ]]; then
+    npm install --global --ignore-scripts "npm@$(version npm)"
+  fi
+  [[ "$(npm --version)" == "$(version npm)" ]]
+}
 
-buf_artifact="buf-${buf_platform}"
-if ! version_output_equals "$(version buf)" "${TOOLS}/bin/buf" "${TOOLS}/bin/buf" --version; then
-  buf_binary="$(download "https://github.com/bufbuild/buf/releases/download/v$(version buf)/${buf_artifact}" "${buf_artifact}")"
-  install -m 0755 "${buf_binary}" "${TOOLS}/bin/buf"
-fi
+install_rust() {
+  local rustup_artifact rustup_init
+  rustup_artifact="rustup-init-${rust_platform}"
+  if ! RUSTUP_HOME="${TOOLS}/rustup" CARGO_HOME="${TOOLS}/cargo" \
+    version_output_contains "rustc $(version rust) " "${TOOLS}/cargo/bin/rustc" \
+    "${TOOLS}/cargo/bin/rustc" --version || \
+    [[ ! -x "${TOOLS}/cargo/bin/cargo" || ! -x "${TOOLS}/cargo/bin/rustup" ]]; then
+    rustup_init="$(download "https://static.rust-lang.org/rustup/archive/1.29.0/${rust_platform}/rustup-init" "${rustup_artifact}")"
+    chmod +x "${rustup_init}"
+    rm -rf "${TOOLS}/rustup" "${TOOLS}/cargo"
+    RUSTUP_HOME="${TOOLS}/rustup" CARGO_HOME="${TOOLS}/cargo" \
+      "${rustup_init}" -y --no-modify-path --profile minimal \
+      --default-toolchain "$(version rust)"
+  fi
+  [[ "$(rustc --version | awk '{print $2}')" == "$(version rust)" ]]
+  cargo --version >/dev/null
+}
 
-protoc_artifact="protoc-$(version protobuf)-${protoc_platform}.zip"
-if ! version_output_equals "libprotoc $(version protobuf)" "${TOOLS}/protoc/bin/protoc" \
-  "${TOOLS}/protoc/bin/protoc" --version; then
-  archive="$(download "https://github.com/protocolbuffers/protobuf/releases/download/v$(version protobuf)/${protoc_artifact}" "${protoc_artifact}")"
-  rm -rf "${TOOLS}/protoc"
-  mkdir -p "${TOOLS}/protoc"
-  unzip -q "${archive}" -d "${TOOLS}/protoc"
-fi
+install_rust_validation_components() {
+  if ! cargo clippy --version >/dev/null 2>&1 || ! rustfmt --version >/dev/null 2>&1; then
+    rustup component add --toolchain "$(version rust)" clippy rustfmt
+  fi
+  cargo clippy --version >/dev/null
+  rustfmt --version >/dev/null
+}
 
-openapi_artifact="openapi-generator-cli-$(version openapi_generator).jar"
-if [[ ! -f "${TOOLS}/${openapi_artifact}" ]]; then
-  jar="$(download "https://github.com/OpenAPITools/openapi-generator/releases/download/v$(version openapi_generator)/${openapi_artifact}" "${openapi_artifact}")"
-  install -m 0644 "${jar}" "${TOOLS}/${openapi_artifact}"
-fi
+install_buf() {
+  local artifact binary
+  artifact="buf-${buf_platform}"
+  if ! version_output_equals "$(version buf)" "${TOOLS}/bin/buf" \
+    "${TOOLS}/bin/buf" --version; then
+    binary="$(download "https://github.com/bufbuild/buf/releases/download/v$(version buf)/${artifact}" "${artifact}")"
+    install -m 0755 "${binary}" "${TOOLS}/bin/buf"
+  fi
+  [[ "$(buf --version)" == "$(version buf)" ]]
+}
 
-gitleaks_artifact="gitleaks_$(version gitleaks)_${gitleaks_platform}.tar.gz"
-if ! version_output_equals "$(version gitleaks)" "${TOOLS}/bin/gitleaks" \
-  "${TOOLS}/bin/gitleaks" version; then
-  archive="$(download "https://github.com/gitleaks/gitleaks/releases/download/v$(version gitleaks)/${gitleaks_artifact}" "${gitleaks_artifact}")"
-  tar -xzf "${archive}" -C "${TOOLS}/bin" gitleaks
-  chmod 0755 "${TOOLS}/bin/gitleaks"
-fi
+install_protoc() {
+  local artifact archive
+  artifact="protoc-$(version protobuf)-${protoc_platform}.zip"
+  if ! version_output_equals "libprotoc $(version protobuf)" "${TOOLS}/protoc/bin/protoc" \
+    "${TOOLS}/protoc/bin/protoc" --version; then
+    archive="$(download "https://github.com/protocolbuffers/protobuf/releases/download/v$(version protobuf)/${artifact}" "${artifact}")"
+    rm -rf "${TOOLS}/protoc"
+    mkdir -p "${TOOLS}/protoc"
+    unzip -q "${archive}" -d "${TOOLS}/protoc"
+  fi
+  [[ "$(protoc --version)" == "libprotoc $(version protobuf)" ]]
+}
 
-oasdiff_artifact="oasdiff_$(version oasdiff)_${oasdiff_platform}.tar.gz"
-if ! version_output_contains "$(version oasdiff)" "${TOOLS}/bin/oasdiff" \
-  "${TOOLS}/bin/oasdiff" --version; then
-  archive="$(download "https://github.com/Tufin/oasdiff/releases/download/v$(version oasdiff)/${oasdiff_artifact}" "${oasdiff_artifact}")"
-  tar -xzf "${archive}" -C "${TOOLS}/bin" oasdiff
-  chmod 0755 "${TOOLS}/bin/oasdiff"
-fi
+install_openapi_generator() {
+  local artifact jar
+  artifact="openapi-generator-cli-$(version openapi_generator).jar"
+  if [[ ! -f "${TOOLS}/${artifact}" ]]; then
+    jar="$(download "https://github.com/OpenAPITools/openapi-generator/releases/download/v$(version openapi_generator)/${artifact}" "${artifact}")"
+    install -m 0644 "${jar}" "${TOOLS}/${artifact}"
+  fi
+  verify_sha256 "${TOOLS}/${artifact}" "$(checksum "${artifact}")"
+}
 
-staticcheck_artifact="staticcheck_${staticcheck_platform}.tar.gz"
-if ! version_output_contains "$(version staticcheck)" "${TOOLS}/bin/staticcheck" \
-  "${TOOLS}/bin/staticcheck" -version; then
-  archive="$(download "https://github.com/dominikh/go-tools/releases/download/$(version staticcheck)/${staticcheck_artifact}" "${staticcheck_artifact}")"
-  tar -xzf "${archive}" --strip-components=1 -C "${TOOLS}/bin" staticcheck/staticcheck
-  chmod 0755 "${TOOLS}/bin/staticcheck"
-fi
+install_gitleaks() {
+  local artifact archive
+  artifact="gitleaks_$(version gitleaks)_${gitleaks_platform}.tar.gz"
+  if ! version_output_equals "$(version gitleaks)" "${TOOLS}/bin/gitleaks" \
+    "${TOOLS}/bin/gitleaks" version; then
+    archive="$(download "https://github.com/gitleaks/gitleaks/releases/download/v$(version gitleaks)/${artifact}" "${artifact}")"
+    tar -xzf "${archive}" -C "${TOOLS}/bin" gitleaks
+    chmod 0755 "${TOOLS}/bin/gitleaks"
+  fi
+  [[ "$(gitleaks version)" == "$(version gitleaks)" ]]
+}
 
-cargo_audit_artifact="cargo-audit-${cargo_audit_platform}-v$(version cargo_audit).tgz"
-if ! version_output_contains "$(version cargo_audit)" "${TOOLS}/cargo/bin/cargo-audit" \
-  "${TOOLS}/cargo/bin/cargo-audit" --version; then
-  archive="$(download "https://github.com/rustsec/rustsec/releases/download/cargo-audit%2Fv$(version cargo_audit)/${cargo_audit_artifact}" "${cargo_audit_artifact}")"
-  tar -xzf "${archive}" --strip-components=1 -C "${TOOLS}/cargo/bin" \
-    "cargo-audit-${cargo_audit_platform}-v$(version cargo_audit)/cargo-audit"
-  chmod 0755 "${TOOLS}/cargo/bin/cargo-audit"
-fi
+install_oasdiff() {
+  local artifact archive
+  artifact="oasdiff_$(version oasdiff)_${oasdiff_platform}.tar.gz"
+  if ! version_output_contains "$(version oasdiff)" "${TOOLS}/bin/oasdiff" \
+    "${TOOLS}/bin/oasdiff" --version; then
+    archive="$(download "https://github.com/Tufin/oasdiff/releases/download/v$(version oasdiff)/${artifact}" "${artifact}")"
+    tar -xzf "${archive}" -C "${TOOLS}/bin" oasdiff
+    chmod 0755 "${TOOLS}/bin/oasdiff"
+  fi
+  [[ "$(oasdiff --version)" == *"$(version oasdiff)"* ]]
+}
 
-cargo_deny_artifact="cargo-deny-$(version cargo_deny)-${cargo_deny_platform}.tar.gz"
-if ! version_output_contains "$(version cargo_deny)" "${TOOLS}/cargo/bin/cargo-deny" \
-  "${TOOLS}/cargo/bin/cargo-deny" --version; then
-  archive="$(download "https://github.com/EmbarkStudios/cargo-deny/releases/download/$(version cargo_deny)/${cargo_deny_artifact}" "${cargo_deny_artifact}")"
-  tar -xzf "${archive}" --strip-components=1 -C "${TOOLS}/cargo/bin" \
-    "cargo-deny-$(version cargo_deny)-${cargo_deny_platform}/cargo-deny"
-  chmod 0755 "${TOOLS}/cargo/bin/cargo-deny"
-fi
+install_staticcheck() {
+  local artifact archive
+  artifact="staticcheck_${staticcheck_platform}.tar.gz"
+  if ! version_output_contains "$(version staticcheck)" "${TOOLS}/bin/staticcheck" \
+    "${TOOLS}/bin/staticcheck" -version; then
+    archive="$(download "https://github.com/dominikh/go-tools/releases/download/$(version staticcheck)/${artifact}" "${artifact}")"
+    tar -xzf "${archive}" --strip-components=1 -C "${TOOLS}/bin" staticcheck/staticcheck
+    chmod 0755 "${TOOLS}/bin/staticcheck"
+  fi
+  [[ "$(staticcheck -version)" == *"$(version staticcheck)"* ]]
+}
+
+install_govulncheck() {
+  if ! version_output_contains "v$(version govulncheck)" "${TOOLS}/bin/govulncheck" \
+    "${TOOLS}/bin/govulncheck" -version; then
+    GOBIN="${TOOLS}/bin" go install \
+      "golang.org/x/vuln/cmd/govulncheck@v$(version govulncheck)"
+  fi
+  [[ "$(govulncheck -version 2>&1)" == *"v$(version govulncheck)"* ]]
+}
+
+install_cargo_audit() {
+  local artifact archive
+  artifact="cargo-audit-${cargo_audit_platform}-v$(version cargo_audit).tgz"
+  if ! version_output_contains "$(version cargo_audit)" "${TOOLS}/cargo/bin/cargo-audit" \
+    "${TOOLS}/cargo/bin/cargo-audit" --version; then
+    archive="$(download "https://github.com/rustsec/rustsec/releases/download/cargo-audit%2Fv$(version cargo_audit)/${artifact}" "${artifact}")"
+    tar -xzf "${archive}" --strip-components=1 -C "${TOOLS}/cargo/bin" \
+      "cargo-audit-${cargo_audit_platform}-v$(version cargo_audit)/cargo-audit"
+    chmod 0755 "${TOOLS}/cargo/bin/cargo-audit"
+  fi
+  [[ "$(cargo audit --version)" == *"$(version cargo_audit)"* ]]
+}
+
+install_cargo_deny() {
+  local artifact archive
+  artifact="cargo-deny-$(version cargo_deny)-${cargo_deny_platform}.tar.gz"
+  if ! version_output_contains "$(version cargo_deny)" "${TOOLS}/cargo/bin/cargo-deny" \
+    "${TOOLS}/cargo/bin/cargo-deny" --version; then
+    archive="$(download "https://github.com/EmbarkStudios/cargo-deny/releases/download/$(version cargo_deny)/${artifact}" "${artifact}")"
+    tar -xzf "${archive}" --strip-components=1 -C "${TOOLS}/cargo/bin" \
+      "cargo-deny-$(version cargo_deny)-${cargo_deny_platform}/cargo-deny"
+    chmod 0755 "${TOOLS}/cargo/bin/cargo-deny"
+  fi
+  [[ "$(cargo deny --version)" == *"$(version cargo_deny)"* ]]
+}
+
+install_contract_tools() {
+  install_buf
+  install_protoc
+  install_openapi_generator
+  install_gitleaks
+  install_oasdiff
+}
+
+install_go_quality_tools() {
+  install_staticcheck
+  install_govulncheck
+}
+
+install_rust_quality_tools() {
+  install_rust_validation_components
+  install_cargo_audit
+  install_cargo_deny
+}
+
+install_web_dependencies() {
+  (cd "${ROOT}/web" && npm ci)
+}
+
+verify_host_command() {
+  command -v "$1" >/dev/null 2>&1 || {
+    echo "required host command is missing: $1" >&2
+    exit 1
+  }
+}
+
+verify_java() {
+  verify_host_command java
+  java -version >/dev/null 2>&1 || {
+    echo "Java 17 or newer is required to run OpenAPI Generator" >&2
+    exit 1
+  }
+}
 
 # shellcheck source=scripts/env.sh
 source "${ROOT}/scripts/env.sh"
-if [[ "$(npm --version)" != "$(version npm)" ]]; then
-  npm install --global --ignore-scripts "npm@$(version npm)"
-fi
-[[ "$(go env GOVERSION)" == "go${go_version}" ]]
-[[ "$(node --version)" == "v${node_version}" ]]
-[[ "$(npm --version)" == "$(version npm)" ]]
-[[ "$(rustc --version | awk '{print $2}')" == "$(version rust)" ]]
-[[ "$(buf --version)" == "$(version buf)" ]]
-[[ "$(protoc --version)" == "libprotoc $(version protobuf)" ]]
-[[ "$(gitleaks version)" == "$(version gitleaks)" ]]
-[[ "$(oasdiff --version)" == *"$(version oasdiff)"* ]]
-[[ "$(staticcheck -version)" == *"$(version staticcheck)"* ]]
-[[ "$(cargo audit --version)" == *"$(version cargo_audit)"* ]]
-[[ "$(cargo deny --version)" == *"$(version cargo_deny)"* ]]
 
-if ! version_output_contains "v$(version govulncheck)" "${TOOLS}/bin/govulncheck" \
-  "${TOOLS}/bin/govulncheck" -version; then
-  GOBIN="${TOOLS}/bin" go install \
-    "golang.org/x/vuln/cmd/govulncheck@v$(version govulncheck)"
-fi
-[[ "$(govulncheck -version 2>&1)" == *"v$(version govulncheck)"* ]]
-
-for command_name in java jq shellcheck; do
-  command -v "${command_name}" >/dev/null 2>&1 || {
-    echo "required host command is missing: ${command_name}" >&2
-    exit 1
-  }
-done
-java -version >/dev/null 2>&1 || {
-  echo "Java 17 or newer is required to run OpenAPI Generator" >&2
-  exit 1
-}
-
-(cd "${ROOT}/web" && npm ci)
+case "${PROFILE}" in
+  all)
+    install_go
+    install_node
+    install_npm
+    install_rust
+    install_contract_tools
+    install_go_quality_tools
+    install_rust_quality_tools
+    verify_java
+    verify_host_command jq
+    verify_host_command shellcheck
+    install_web_dependencies
+    ;;
+  static)
+    install_go
+    install_node
+    install_npm
+    # Boundary checks inspect Rust dependency trees but do not compile them.
+    install_rust
+    install_contract_tools
+    verify_java
+    install_web_dependencies
+    ;;
+  go-integration)
+    install_go
+    install_rust
+    install_go_quality_tools
+    verify_host_command jq
+    ;;
+  rust-native)
+    install_rust
+    install_rust_quality_tools
+    ;;
+  web)
+    install_node
+    install_npm
+    install_web_dependencies
+    ;;
+esac
