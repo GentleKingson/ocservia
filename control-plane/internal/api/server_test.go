@@ -13,6 +13,7 @@ import (
 
 	"github.com/GentleKingson/ocservia/control-plane/internal/enrollment"
 	"github.com/GentleKingson/ocservia/control-plane/internal/localslice"
+	"github.com/GentleKingson/ocservia/control-plane/internal/userstate"
 )
 
 func TestLiveAndRequestID(t *testing.T) {
@@ -51,6 +52,25 @@ func TestOperationsRequireAuthenticatedPrincipal(t *testing.T) {
 		if response.Header().Get("WWW-Authenticate") != "OIDC" {
 			t.Fatalf("%s missing OIDC challenge", path)
 		}
+	}
+}
+
+func TestUserStateCapacityErrorUsesConflictProblem(t *testing.T) {
+	server := &Server{logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/nodes/node/users", nil)
+	response := httptest.NewRecorder()
+	server.writeUserStateError(response, request, userstate.ErrCapacityExceeded)
+	if response.Code != http.StatusConflict {
+		t.Fatalf("status = %d", response.Code)
+	}
+	var problem struct {
+		Type string `json:"type"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &problem); err != nil {
+		t.Fatal(err)
+	}
+	if problem.Type != "https://ocservia.dev/problems/capacity-exceeded" {
+		t.Fatalf("problem type = %q", problem.Type)
 	}
 }
 

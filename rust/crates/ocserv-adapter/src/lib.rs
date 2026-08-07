@@ -514,7 +514,7 @@ impl Adapter {
             return Err(AdapterError::InvalidRequest);
         }
         if mode == SecretApplyMode::MustBeAbsent && records.len() >= MAX_MANAGED_RESOURCES {
-            return Err(AdapterError::InvalidRequest);
+            return Err(AdapterError::CapacityExceeded);
         }
         drop(records);
         let key = self
@@ -2640,7 +2640,7 @@ mod tests {
             adapter
                 .user_create("overflow", "test-key", &[7_u8; 64], 1, test_effect())
                 .await,
-            Err(AdapterError::InvalidRequest)
+            Err(AdapterError::CapacityExceeded)
         ));
         assert!(!openssl_marker.exists());
         assert!(!ocpasswd_marker.exists());
@@ -3153,7 +3153,7 @@ mod tests {
     #[ignore = "requires native ocpasswd, OpenSSL, and an isolated test directory"]
     async fn native_user_and_group_operations() {
         let root = PathBuf::from(std::env::var("OCSERVIA_I13_NATIVE_ROOT").expect("native root"));
-        let sealed = std::fs::read(root.join("sealed-password.bin")).expect("sealed password");
+        let phase = std::env::var("OCSERVIA_I13_NATIVE_PHASE").expect("native phase");
         let users = root.join("ocpasswd");
         let resources = FixedResources::default()
             .with_user_resources(
@@ -3170,82 +3170,124 @@ mod tests {
             )
             .expect("native effect resources");
         let adapter = Adapter::new(resources, Limits::default());
-        adapter
-            .user_create("alice", "i13-native", &sealed, 1, test_effect())
-            .await
-            .expect("create native user");
-        assert_effect_state(&adapter, "user_create", "alice", 1, true).await;
-        let after_create = std::fs::read(&users).expect("created record");
-        assert!(
-            adapter
-                .user_password_rotate("bob", "i13-native", &sealed, 2, test_effect())
-                .await
-                .is_err(),
-            "rotate must not create a missing user"
-        );
-        assert_eq!(
-            std::fs::read(&users).expect("unchanged create"),
-            after_create
-        );
-        let listed = adapter.user_list().await.expect("list native users");
-        assert_eq!(listed.users.len(), 1);
-        assert_eq!(listed.users[0].username, "alice");
-        assert!(listed.users[0].enabled);
-        assert!(!format!("{listed:?}").contains("native-password-sentinel"));
-        adapter
-            .group_apply("staff", &["alice".to_owned()], 2, test_effect())
-            .await
-            .expect("apply native group");
-        let before_rotate = std::fs::read_to_string(&users).expect("before rotate");
-        assert!(before_rotate.starts_with("alice:staff:"));
-        adapter
-            .user_disable("alice", 3, test_effect())
-            .await
-            .expect("disable native user");
-        assert!(!adapter.user_list().await.expect("list disabled").users[0].enabled);
-        let locked_record = std::fs::read(&users).expect("locked record");
-        assert!(
-            adapter
-                .user_create("alice", "i13-native", &sealed, 4, test_effect())
-                .await
-                .is_err(),
-            "create must not overwrite an existing user"
-        );
-        assert_eq!(
-            std::fs::read(&users).expect("unchanged conflict"),
-            locked_record,
-            "create conflict changed password, group, or lock state"
-        );
-        adapter
-            .user_password_rotate("alice", "i13-native", &sealed, 4, test_effect())
-            .await
-            .expect("rotate disabled native user");
-        assert_effect_state(&adapter, "user_password_rotate", "alice", 4, true).await;
-        assert!(
-            !adapter
-                .user_list()
-                .await
-                .expect("disabled after rotate")
-                .users[0]
-                .enabled
-        );
-        assert!(
-            std::fs::read_to_string(&users)
-                .expect("after rotate")
-                .starts_with("alice:staff:!")
-        );
-        adapter
-            .user_enable("alice", 5, test_effect())
-            .await
-            .expect("enable native user");
-        assert!(adapter.user_list().await.expect("enabled user").users[0].enabled);
-        assert!(
-            std::fs::read_to_string(&users)
-                .expect("enabled record")
-                .starts_with("alice:staff:")
-        );
-        assert_effect_state(&adapter, "user_create", "alice", 1, true).await;
-        assert_effect_state(&adapter, "user_password_rotate", "alice", 3, false).await;
+        let record = || {
+            let records = parse_secret_user_records(&std::fs::read(&users).expect("native users"))
+                .expect("parse native users");
+            assert_eq!(records.len(), 1);
+            assert_eq!(records[0].username, "alice");
+            (records[0].groups.clone(), records[0].hash.to_string())
+        };
+        match phase.as_str() {
+            "create-p1" => {
+                let sealed = std::fs::read(root.join("sealed-p1.bin")).expect("sealed P1");
+                adapter
+                    .user_create("alice", "i13-native", &sealed, 1, test_effect())
+                    .await
+                    .expect("create native user");
+                assert_effect_state(&adapter, "user_create", "alice", 1, true).await;
+                let after_create = std::fs::read(&users).expect("created record");
+                assert!(
+                    adapter
+                        .user_password_rotate("bob", "i13-native", &sealed, 2, test_effect())
+                        .await
+                        .is_err(),
+                    "rotate must not create a missing user"
+                );
+                assert_eq!(
+                    std::fs::read(&users).expect("unchanged create"),
+                    after_create
+                );
+                let listed = adapter.user_list().await.expect("list native users");
+                assert_eq!(listed.users.len(), 1);
+                assert_eq!(listed.users[0].username, "alice");
+                assert!(listed.users[0].enabled);
+                let (groups, hash) = record();
+                assert!(groups.is_empty());
+                assert!(!hash.starts_with('!'));
+            }
+            "rotate-p2" => {
+                let sealed = std::fs::read(root.join("sealed-p2.bin")).expect("sealed P2");
+                let (before_groups, before_hash) = record();
+                adapter
+                    .user_password_rotate("alice", "i13-native", &sealed, 2, test_effect())
+                    .await
+                    .expect("rotate native user to P2");
+                let (after_groups, after_hash) = record();
+                assert_eq!(after_groups, before_groups);
+                assert_ne!(after_hash, before_hash);
+                assert!(!after_hash.starts_with('!'));
+                assert_effect_state(&adapter, "user_password_rotate", "alice", 2, true).await;
+            }
+            "disable" => {
+                let before = std::fs::read(&users).expect("before disable");
+                let (before_groups, before_hash) = record();
+                adapter
+                    .user_disable("alice", 3, test_effect())
+                    .await
+                    .expect("disable native user");
+                let (after_groups, after_hash) = record();
+                assert_eq!(after_groups, before_groups);
+                assert_eq!(after_hash.strip_prefix('!'), Some(before_hash.as_str()));
+                assert!(!adapter.user_list().await.expect("list disabled").users[0].enabled);
+                let sealed = std::fs::read(root.join("sealed-p2.bin")).expect("sealed P2");
+                assert!(
+                    adapter
+                        .user_create("alice", "i13-native", &sealed, 3, test_effect())
+                        .await
+                        .is_err(),
+                    "create must not overwrite an existing user"
+                );
+                assert_ne!(std::fs::read(&users).expect("locked record"), before);
+                assert_eq!(record(), (after_groups, after_hash));
+                assert_effect_state(&adapter, "user_disable", "alice", 3, true).await;
+            }
+            "rotate-disabled-p3" => {
+                let sealed = std::fs::read(root.join("sealed-p3.bin")).expect("sealed P3");
+                let (before_groups, before_hash) = record();
+                assert!(before_hash.starts_with('!'));
+                adapter
+                    .user_password_rotate("alice", "i13-native", &sealed, 4, test_effect())
+                    .await
+                    .expect("rotate disabled native user to P3");
+                let (after_groups, after_hash) = record();
+                assert_eq!(after_groups, before_groups);
+                assert!(after_hash.starts_with('!'));
+                assert_ne!(after_hash, before_hash);
+                assert!(
+                    !adapter
+                        .user_list()
+                        .await
+                        .expect("disabled after rotate")
+                        .users[0]
+                        .enabled
+                );
+                assert_effect_state(&adapter, "user_password_rotate", "alice", 4, true).await;
+            }
+            "enable" => {
+                let (before_groups, before_hash) = record();
+                adapter
+                    .user_enable("alice", 5, test_effect())
+                    .await
+                    .expect("enable native user");
+                let (after_groups, after_hash) = record();
+                assert_eq!(after_groups, before_groups);
+                assert_eq!(before_hash.strip_prefix('!'), Some(after_hash.as_str()));
+                assert!(adapter.user_list().await.expect("enabled user").users[0].enabled);
+                assert_effect_state(&adapter, "user_enable", "alice", 5, true).await;
+            }
+            "group-apply" => {
+                let (_, before_hash) = record();
+                adapter
+                    .group_apply("staff", &["alice".to_owned()], 1, test_effect())
+                    .await
+                    .expect("apply native group");
+                let (after_groups, after_hash) = record();
+                assert_eq!(after_groups, "staff");
+                assert_eq!(after_hash, before_hash);
+                assert_effect_state(&adapter, "group_apply", "staff", 1, true).await;
+            }
+            _ => panic!("unsupported native phase"),
+        }
     }
 
     #[test]
