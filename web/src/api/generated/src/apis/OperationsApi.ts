@@ -34,6 +34,16 @@ import {
   ControlledOperationRequestToJSON,
 } from "../models/ControlledOperationRequest";
 import {
+  type DesiredMutationRequest,
+  DesiredMutationRequestFromJSON,
+  DesiredMutationRequestToJSON,
+} from "../models/DesiredMutationRequest";
+import {
+  type GroupApplyRequest,
+  GroupApplyRequestFromJSON,
+  GroupApplyRequestToJSON,
+} from "../models/GroupApplyRequest";
+import {
   type Operation,
   OperationFromJSON,
   OperationToJSON,
@@ -43,6 +53,11 @@ import {
   OperationPageFromJSON,
   OperationPageToJSON,
 } from "../models/OperationPage";
+import {
+  type PasswordRotateRequest,
+  PasswordRotateRequestFromJSON,
+  PasswordRotateRequestToJSON,
+} from "../models/PasswordRotateRequest";
 import {
   type Problem,
   ProblemFromJSON,
@@ -58,6 +73,19 @@ import {
   SyntheticCommandRequestFromJSON,
   SyntheticCommandRequestToJSON,
 } from "../models/SyntheticCommandRequest";
+import {
+  type UserCreateRequest,
+  UserCreateRequestFromJSON,
+  UserCreateRequestToJSON,
+} from "../models/UserCreateRequest";
+
+export interface ApplyNodeGroupRequest {
+  nodeId: string;
+  groupName: string;
+  idempotencyKey: string;
+  groupApplyRequest: GroupApplyRequest;
+  ifMatch?: string;
+}
 
 export interface ApproveRequestRequest {
   approvalId: string;
@@ -69,10 +97,25 @@ export interface CreateApprovalRequestRequest {
   xWorkspaceID?: string;
 }
 
+export interface CreateNodeUserRequest {
+  nodeId: string;
+  idempotencyKey: string;
+  userCreateRequest: UserCreateRequest;
+  ifMatch?: string;
+}
+
 export interface CreateSyntheticCommandRequest {
   nodeId: string;
   idempotencyKey: string;
   syntheticCommandRequest: SyntheticCommandRequest;
+  ifMatch?: string;
+}
+
+export interface DisableNodeUserRequest {
+  nodeId: string;
+  username: string;
+  idempotencyKey: string;
+  desiredMutationRequest: DesiredMutationRequest;
   ifMatch?: string;
 }
 
@@ -81,6 +124,14 @@ export interface DisconnectNodeSessionRequest {
   sessionId: string;
   idempotencyKey: string;
   controlledOperationRequest: ControlledOperationRequest;
+  ifMatch?: string;
+}
+
+export interface EnableNodeUserRequest {
+  nodeId: string;
+  username: string;
+  idempotencyKey: string;
+  desiredMutationRequest: DesiredMutationRequest;
   ifMatch?: string;
 }
 
@@ -110,6 +161,14 @@ export interface RemoveNodeIpBanRequest {
   ifMatch?: string;
 }
 
+export interface RotateNodeUserPasswordRequest {
+  nodeId: string;
+  username: string;
+  idempotencyKey: string;
+  passwordRotateRequest: PasswordRotateRequest;
+  ifMatch?: string;
+}
+
 export interface TerminateNodeSessionRequest {
   nodeId: string;
   sessionId: string;
@@ -127,6 +186,114 @@ export interface WatchOperationEventsRequest {
  *
  */
 export class OperationsApi extends runtime.BaseAPI {
+  /**
+   * Creates request options for applyNodeGroup without sending the request
+   */
+  async applyNodeGroupRequestOpts(
+    requestParameters: ApplyNodeGroupRequest,
+  ): Promise<runtime.RequestOpts> {
+    if (requestParameters["nodeId"] == null) {
+      throw new runtime.RequiredError(
+        "nodeId",
+        'Required parameter "nodeId" was null or undefined when calling applyNodeGroup().',
+      );
+    }
+
+    if (requestParameters["groupName"] == null) {
+      throw new runtime.RequiredError(
+        "groupName",
+        'Required parameter "groupName" was null or undefined when calling applyNodeGroup().',
+      );
+    }
+
+    if (requestParameters["idempotencyKey"] == null) {
+      throw new runtime.RequiredError(
+        "idempotencyKey",
+        'Required parameter "idempotencyKey" was null or undefined when calling applyNodeGroup().',
+      );
+    }
+
+    if (requestParameters["groupApplyRequest"] == null) {
+      throw new runtime.RequiredError(
+        "groupApplyRequest",
+        'Required parameter "groupApplyRequest" was null or undefined when calling applyNodeGroup().',
+      );
+    }
+
+    const queryParameters: any = {};
+
+    const headerParameters: runtime.HTTPHeaders = {};
+
+    headerParameters["Content-Type"] = "application/json";
+
+    if (requestParameters["idempotencyKey"] != null) {
+      headerParameters["Idempotency-Key"] = String(
+        requestParameters["idempotencyKey"],
+      );
+    }
+
+    if (requestParameters["ifMatch"] != null) {
+      headerParameters["If-Match"] = String(requestParameters["ifMatch"]);
+    }
+
+    if (this.configuration && this.configuration.accessToken) {
+      const token = this.configuration.accessToken;
+      const tokenString = await token("bearerAuth", []);
+
+      if (tokenString) {
+        headerParameters["Authorization"] = `Bearer ${tokenString}`;
+      }
+    }
+
+    let urlPath = `/nodes/{node_id}/groups/{group_name}`;
+    urlPath = urlPath.replace(
+      "{node_id}",
+      encodeURIComponent(String(requestParameters["nodeId"])),
+    );
+    urlPath = urlPath.replace(
+      "{group_name}",
+      encodeURIComponent(String(requestParameters["groupName"])),
+    );
+
+    return {
+      path: urlPath,
+      method: "PUT",
+      headers: headerParameters,
+      query: queryParameters,
+      body: GroupApplyRequestToJSON(requestParameters["groupApplyRequest"]),
+    };
+  }
+
+  /**
+   * Queue atomic application of one node-scoped group
+   */
+  async applyNodeGroupRaw(
+    requestParameters: ApplyNodeGroupRequest,
+    initOverrides?: RequestInit | runtime.InitOverrideFunction,
+  ): Promise<runtime.ApiResponse<Operation>> {
+    const requestOptions =
+      await this.applyNodeGroupRequestOpts(requestParameters);
+    const response = await this.request(requestOptions, initOverrides);
+
+    return new runtime.JSONApiResponse(response, (jsonValue) =>
+      OperationFromJSON(jsonValue),
+    );
+  }
+
+  /**
+   * Queue atomic application of one node-scoped group
+   */
+  async applyNodeGroup(
+    requestParameters: ApplyNodeGroupRequest,
+    initOverrides?: RequestInit | runtime.InitOverrideFunction,
+  ): Promise<Operation> {
+    const response = await this.applyNodeGroupRaw(
+      requestParameters,
+      initOverrides,
+    );
+    return await response.value();
+  }
+
   /**
    * Creates request options for approveRequest without sending the request
    */
@@ -283,6 +450,103 @@ export class OperationsApi extends runtime.BaseAPI {
   }
 
   /**
+   * Creates request options for createNodeUser without sending the request
+   */
+  async createNodeUserRequestOpts(
+    requestParameters: CreateNodeUserRequest,
+  ): Promise<runtime.RequestOpts> {
+    if (requestParameters["nodeId"] == null) {
+      throw new runtime.RequiredError(
+        "nodeId",
+        'Required parameter "nodeId" was null or undefined when calling createNodeUser().',
+      );
+    }
+
+    if (requestParameters["idempotencyKey"] == null) {
+      throw new runtime.RequiredError(
+        "idempotencyKey",
+        'Required parameter "idempotencyKey" was null or undefined when calling createNodeUser().',
+      );
+    }
+
+    if (requestParameters["userCreateRequest"] == null) {
+      throw new runtime.RequiredError(
+        "userCreateRequest",
+        'Required parameter "userCreateRequest" was null or undefined when calling createNodeUser().',
+      );
+    }
+
+    const queryParameters: any = {};
+
+    const headerParameters: runtime.HTTPHeaders = {};
+
+    headerParameters["Content-Type"] = "application/json";
+
+    if (requestParameters["idempotencyKey"] != null) {
+      headerParameters["Idempotency-Key"] = String(
+        requestParameters["idempotencyKey"],
+      );
+    }
+
+    if (requestParameters["ifMatch"] != null) {
+      headerParameters["If-Match"] = String(requestParameters["ifMatch"]);
+    }
+
+    if (this.configuration && this.configuration.accessToken) {
+      const token = this.configuration.accessToken;
+      const tokenString = await token("bearerAuth", []);
+
+      if (tokenString) {
+        headerParameters["Authorization"] = `Bearer ${tokenString}`;
+      }
+    }
+
+    let urlPath = `/nodes/{node_id}/users`;
+    urlPath = urlPath.replace(
+      "{node_id}",
+      encodeURIComponent(String(requestParameters["nodeId"])),
+    );
+
+    return {
+      path: urlPath,
+      method: "POST",
+      headers: headerParameters,
+      query: queryParameters,
+      body: UserCreateRequestToJSON(requestParameters["userCreateRequest"]),
+    };
+  }
+
+  /**
+   * Queue creation of one node-scoped user
+   */
+  async createNodeUserRaw(
+    requestParameters: CreateNodeUserRequest,
+    initOverrides?: RequestInit | runtime.InitOverrideFunction,
+  ): Promise<runtime.ApiResponse<Operation>> {
+    const requestOptions =
+      await this.createNodeUserRequestOpts(requestParameters);
+    const response = await this.request(requestOptions, initOverrides);
+
+    return new runtime.JSONApiResponse(response, (jsonValue) =>
+      OperationFromJSON(jsonValue),
+    );
+  }
+
+  /**
+   * Queue creation of one node-scoped user
+   */
+  async createNodeUser(
+    requestParameters: CreateNodeUserRequest,
+    initOverrides?: RequestInit | runtime.InitOverrideFunction,
+  ): Promise<Operation> {
+    const response = await this.createNodeUserRaw(
+      requestParameters,
+      initOverrides,
+    );
+    return await response.value();
+  }
+
+  /**
    * Creates request options for createSyntheticCommand without sending the request
    */
   async createSyntheticCommandRequestOpts(
@@ -375,6 +639,116 @@ export class OperationsApi extends runtime.BaseAPI {
     initOverrides?: RequestInit | runtime.InitOverrideFunction,
   ): Promise<Operation> {
     const response = await this.createSyntheticCommandRaw(
+      requestParameters,
+      initOverrides,
+    );
+    return await response.value();
+  }
+
+  /**
+   * Creates request options for disableNodeUser without sending the request
+   */
+  async disableNodeUserRequestOpts(
+    requestParameters: DisableNodeUserRequest,
+  ): Promise<runtime.RequestOpts> {
+    if (requestParameters["nodeId"] == null) {
+      throw new runtime.RequiredError(
+        "nodeId",
+        'Required parameter "nodeId" was null or undefined when calling disableNodeUser().',
+      );
+    }
+
+    if (requestParameters["username"] == null) {
+      throw new runtime.RequiredError(
+        "username",
+        'Required parameter "username" was null or undefined when calling disableNodeUser().',
+      );
+    }
+
+    if (requestParameters["idempotencyKey"] == null) {
+      throw new runtime.RequiredError(
+        "idempotencyKey",
+        'Required parameter "idempotencyKey" was null or undefined when calling disableNodeUser().',
+      );
+    }
+
+    if (requestParameters["desiredMutationRequest"] == null) {
+      throw new runtime.RequiredError(
+        "desiredMutationRequest",
+        'Required parameter "desiredMutationRequest" was null or undefined when calling disableNodeUser().',
+      );
+    }
+
+    const queryParameters: any = {};
+
+    const headerParameters: runtime.HTTPHeaders = {};
+
+    headerParameters["Content-Type"] = "application/json";
+
+    if (requestParameters["idempotencyKey"] != null) {
+      headerParameters["Idempotency-Key"] = String(
+        requestParameters["idempotencyKey"],
+      );
+    }
+
+    if (requestParameters["ifMatch"] != null) {
+      headerParameters["If-Match"] = String(requestParameters["ifMatch"]);
+    }
+
+    if (this.configuration && this.configuration.accessToken) {
+      const token = this.configuration.accessToken;
+      const tokenString = await token("bearerAuth", []);
+
+      if (tokenString) {
+        headerParameters["Authorization"] = `Bearer ${tokenString}`;
+      }
+    }
+
+    let urlPath = `/nodes/{node_id}/users/{username}:disable`;
+    urlPath = urlPath.replace(
+      "{node_id}",
+      encodeURIComponent(String(requestParameters["nodeId"])),
+    );
+    urlPath = urlPath.replace(
+      "{username}",
+      encodeURIComponent(String(requestParameters["username"])),
+    );
+
+    return {
+      path: urlPath,
+      method: "POST",
+      headers: headerParameters,
+      query: queryParameters,
+      body: DesiredMutationRequestToJSON(
+        requestParameters["desiredMutationRequest"],
+      ),
+    };
+  }
+
+  /**
+   * Queue disabling one node-scoped user
+   */
+  async disableNodeUserRaw(
+    requestParameters: DisableNodeUserRequest,
+    initOverrides?: RequestInit | runtime.InitOverrideFunction,
+  ): Promise<runtime.ApiResponse<Operation>> {
+    const requestOptions =
+      await this.disableNodeUserRequestOpts(requestParameters);
+    const response = await this.request(requestOptions, initOverrides);
+
+    return new runtime.JSONApiResponse(response, (jsonValue) =>
+      OperationFromJSON(jsonValue),
+    );
+  }
+
+  /**
+   * Queue disabling one node-scoped user
+   */
+  async disableNodeUser(
+    requestParameters: DisableNodeUserRequest,
+    initOverrides?: RequestInit | runtime.InitOverrideFunction,
+  ): Promise<Operation> {
+    const response = await this.disableNodeUserRaw(
       requestParameters,
       initOverrides,
     );
@@ -485,6 +859,116 @@ export class OperationsApi extends runtime.BaseAPI {
     initOverrides?: RequestInit | runtime.InitOverrideFunction,
   ): Promise<Operation> {
     const response = await this.disconnectNodeSessionRaw(
+      requestParameters,
+      initOverrides,
+    );
+    return await response.value();
+  }
+
+  /**
+   * Creates request options for enableNodeUser without sending the request
+   */
+  async enableNodeUserRequestOpts(
+    requestParameters: EnableNodeUserRequest,
+  ): Promise<runtime.RequestOpts> {
+    if (requestParameters["nodeId"] == null) {
+      throw new runtime.RequiredError(
+        "nodeId",
+        'Required parameter "nodeId" was null or undefined when calling enableNodeUser().',
+      );
+    }
+
+    if (requestParameters["username"] == null) {
+      throw new runtime.RequiredError(
+        "username",
+        'Required parameter "username" was null or undefined when calling enableNodeUser().',
+      );
+    }
+
+    if (requestParameters["idempotencyKey"] == null) {
+      throw new runtime.RequiredError(
+        "idempotencyKey",
+        'Required parameter "idempotencyKey" was null or undefined when calling enableNodeUser().',
+      );
+    }
+
+    if (requestParameters["desiredMutationRequest"] == null) {
+      throw new runtime.RequiredError(
+        "desiredMutationRequest",
+        'Required parameter "desiredMutationRequest" was null or undefined when calling enableNodeUser().',
+      );
+    }
+
+    const queryParameters: any = {};
+
+    const headerParameters: runtime.HTTPHeaders = {};
+
+    headerParameters["Content-Type"] = "application/json";
+
+    if (requestParameters["idempotencyKey"] != null) {
+      headerParameters["Idempotency-Key"] = String(
+        requestParameters["idempotencyKey"],
+      );
+    }
+
+    if (requestParameters["ifMatch"] != null) {
+      headerParameters["If-Match"] = String(requestParameters["ifMatch"]);
+    }
+
+    if (this.configuration && this.configuration.accessToken) {
+      const token = this.configuration.accessToken;
+      const tokenString = await token("bearerAuth", []);
+
+      if (tokenString) {
+        headerParameters["Authorization"] = `Bearer ${tokenString}`;
+      }
+    }
+
+    let urlPath = `/nodes/{node_id}/users/{username}:enable`;
+    urlPath = urlPath.replace(
+      "{node_id}",
+      encodeURIComponent(String(requestParameters["nodeId"])),
+    );
+    urlPath = urlPath.replace(
+      "{username}",
+      encodeURIComponent(String(requestParameters["username"])),
+    );
+
+    return {
+      path: urlPath,
+      method: "POST",
+      headers: headerParameters,
+      query: queryParameters,
+      body: DesiredMutationRequestToJSON(
+        requestParameters["desiredMutationRequest"],
+      ),
+    };
+  }
+
+  /**
+   * Queue enabling one node-scoped user without changing its password or groups
+   */
+  async enableNodeUserRaw(
+    requestParameters: EnableNodeUserRequest,
+    initOverrides?: RequestInit | runtime.InitOverrideFunction,
+  ): Promise<runtime.ApiResponse<Operation>> {
+    const requestOptions =
+      await this.enableNodeUserRequestOpts(requestParameters);
+    const response = await this.request(requestOptions, initOverrides);
+
+    return new runtime.JSONApiResponse(response, (jsonValue) =>
+      OperationFromJSON(jsonValue),
+    );
+  }
+
+  /**
+   * Queue enabling one node-scoped user without changing its password or groups
+   */
+  async enableNodeUser(
+    requestParameters: EnableNodeUserRequest,
+    initOverrides?: RequestInit | runtime.InitOverrideFunction,
+  ): Promise<Operation> {
+    const response = await this.enableNodeUserRaw(
       requestParameters,
       initOverrides,
     );
@@ -894,6 +1378,116 @@ export class OperationsApi extends runtime.BaseAPI {
     initOverrides?: RequestInit | runtime.InitOverrideFunction,
   ): Promise<Operation> {
     const response = await this.removeNodeIpBanRaw(
+      requestParameters,
+      initOverrides,
+    );
+    return await response.value();
+  }
+
+  /**
+   * Creates request options for rotateNodeUserPassword without sending the request
+   */
+  async rotateNodeUserPasswordRequestOpts(
+    requestParameters: RotateNodeUserPasswordRequest,
+  ): Promise<runtime.RequestOpts> {
+    if (requestParameters["nodeId"] == null) {
+      throw new runtime.RequiredError(
+        "nodeId",
+        'Required parameter "nodeId" was null or undefined when calling rotateNodeUserPassword().',
+      );
+    }
+
+    if (requestParameters["username"] == null) {
+      throw new runtime.RequiredError(
+        "username",
+        'Required parameter "username" was null or undefined when calling rotateNodeUserPassword().',
+      );
+    }
+
+    if (requestParameters["idempotencyKey"] == null) {
+      throw new runtime.RequiredError(
+        "idempotencyKey",
+        'Required parameter "idempotencyKey" was null or undefined when calling rotateNodeUserPassword().',
+      );
+    }
+
+    if (requestParameters["passwordRotateRequest"] == null) {
+      throw new runtime.RequiredError(
+        "passwordRotateRequest",
+        'Required parameter "passwordRotateRequest" was null or undefined when calling rotateNodeUserPassword().',
+      );
+    }
+
+    const queryParameters: any = {};
+
+    const headerParameters: runtime.HTTPHeaders = {};
+
+    headerParameters["Content-Type"] = "application/json";
+
+    if (requestParameters["idempotencyKey"] != null) {
+      headerParameters["Idempotency-Key"] = String(
+        requestParameters["idempotencyKey"],
+      );
+    }
+
+    if (requestParameters["ifMatch"] != null) {
+      headerParameters["If-Match"] = String(requestParameters["ifMatch"]);
+    }
+
+    if (this.configuration && this.configuration.accessToken) {
+      const token = this.configuration.accessToken;
+      const tokenString = await token("bearerAuth", []);
+
+      if (tokenString) {
+        headerParameters["Authorization"] = `Bearer ${tokenString}`;
+      }
+    }
+
+    let urlPath = `/nodes/{node_id}/users/{username}:rotate-password`;
+    urlPath = urlPath.replace(
+      "{node_id}",
+      encodeURIComponent(String(requestParameters["nodeId"])),
+    );
+    urlPath = urlPath.replace(
+      "{username}",
+      encodeURIComponent(String(requestParameters["username"])),
+    );
+
+    return {
+      path: urlPath,
+      method: "POST",
+      headers: headerParameters,
+      query: queryParameters,
+      body: PasswordRotateRequestToJSON(
+        requestParameters["passwordRotateRequest"],
+      ),
+    };
+  }
+
+  /**
+   * Queue write-only password rotation using node-sealed ciphertext
+   */
+  async rotateNodeUserPasswordRaw(
+    requestParameters: RotateNodeUserPasswordRequest,
+    initOverrides?: RequestInit | runtime.InitOverrideFunction,
+  ): Promise<runtime.ApiResponse<Operation>> {
+    const requestOptions =
+      await this.rotateNodeUserPasswordRequestOpts(requestParameters);
+    const response = await this.request(requestOptions, initOverrides);
+
+    return new runtime.JSONApiResponse(response, (jsonValue) =>
+      OperationFromJSON(jsonValue),
+    );
+  }
+
+  /**
+   * Queue write-only password rotation using node-sealed ciphertext
+   */
+  async rotateNodeUserPassword(
+    requestParameters: RotateNodeUserPasswordRequest,
+    initOverrides?: RequestInit | runtime.InitOverrideFunction,
+  ): Promise<Operation> {
+    const response = await this.rotateNodeUserPasswordRaw(
       requestParameters,
       initOverrides,
     );

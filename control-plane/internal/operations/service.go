@@ -265,10 +265,23 @@ func (s *Service) Claim(ctx context.Context, workerID uuid.UUID, limit int, leas
 		SELECT outbox.id, command.id, command.operation_id, command.node_id, outbox.payload, command.traceparent
 		FROM outbox_events AS outbox
 		JOIN commands AS command ON command.id=outbox.command_id
-		WHERE outbox.published_at IS NULL AND outbox.available_at<=now()
-		  AND (outbox.locked_until IS NULL OR outbox.locked_until<=now())
-		  AND command.state IN ('queued','unknown') AND command.expires_at>now()
-		ORDER BY outbox.available_at,outbox.id FOR UPDATE OF outbox SKIP LOCKED LIMIT $1`, limit)
+		JOIN nodes AS node ON node.id=command.node_id AND node.status='active'
+			WHERE outbox.published_at IS NULL AND outbox.available_at<=now()
+			  AND (outbox.locked_until IS NULL OR outbox.locked_until<=now())
+			  AND command.state IN ('queued','unknown') AND command.expires_at>now()
+			  AND (
+			    command.resource_type IS NULL OR command.resource_key IS NULL OR NOT EXISTS (
+			      SELECT 1
+			      FROM commands AS prior
+			      WHERE prior.node_id=command.node_id
+			        AND prior.resource_type=command.resource_type
+			        AND prior.resource_key=command.resource_key
+			        AND prior.id<>command.id
+			        AND prior.expected_version<command.expected_version
+			        AND prior.state IN ('queued','dispatched','accepted','running','unknown')
+			    )
+			  )
+			ORDER BY outbox.available_at,outbox.id FOR UPDATE OF outbox SKIP LOCKED LIMIT $1`, limit)
 	if err != nil {
 		return nil, fmt.Errorf("select outbox candidates: %w", err)
 	}

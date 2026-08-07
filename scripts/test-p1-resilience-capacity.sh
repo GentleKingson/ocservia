@@ -21,13 +21,22 @@ rejects 1 1 30001 1 1
 rejects 1 1 1 1 4097
 
 invalid_run_id="I08-invalid-concurrency-$$"
-if RUN_ID="${invalid_run_id}" TMPDIR="${temporary}" REQUEST_CONCURRENCY=33 \
+invalid_prefix="$(printf '%s' "${invalid_run_id}" | tr '[:upper:]_' '[:lower:]-' | tr -cd 'a-z0-9-')"
+if RUN_ID="${invalid_run_id}" RUNNER_TEMP="${temporary}" REQUEST_CONCURRENCY=33 \
   "${ROOT}/scripts/p1-resilience-capacity.sh" >"${temporary}/invalid.out" 2>"${temporary}/invalid.err"; then
   echo "capacity harness accepted excessive request concurrency" >&2
   exit 1
 fi
 grep -Fq 'REQUEST_CONCURRENCY exceeds the I08 envelope maximum 32' "${temporary}/invalid.err"
-test ! -e "${temporary}/ocservia-${invalid_run_id}"
+test ! -e "${temporary}/ocservia-${invalid_prefix}"
+
+invalid_profile_id="I08-invalid-profile-$$"
+if RUN_ID="${invalid_profile_id}" RUNNER_TEMP="${temporary}" P1_PROFILE=custom \
+  "${ROOT}/scripts/p1-resilience-capacity.sh" >"${temporary}/profile.out" 2>"${temporary}/profile.err"; then
+  echo "capacity harness accepted an unknown profile" >&2
+  exit 1
+fi
+grep -Fq 'P1_PROFILE must be smoke or full' "${temporary}/profile.err"
 
 interrupted_operation_is_final unknown
 for state in queued dispatched accepted running; do
@@ -51,6 +60,23 @@ test ! -s "${state_file}"
 always_running() { printf '%s\n' running; }
 if wait_for_interrupted_operation operation-id 2 0 always_running >/dev/null 2>&1; then
   echo "interrupted operation timeout was accepted" >&2
+  exit 1
+fi
+
+initial_operation="${temporary}/interrupted-operation-initial.json"
+final_operation="${temporary}/interrupted-operation-final.json"
+operation_summary="${temporary}/interrupted-operation-summary.json"
+jq -n '{id:"operation-id",state:"queued"}' >"${initial_operation}"
+jq -n '{id:"operation-id",state:"unknown",attempts:1}' >"${final_operation}"
+write_interrupted_operation_evidence "${initial_operation}" "${final_operation}" "${operation_summary}"
+jq -e '.state == "queued"' "${initial_operation}" >/dev/null
+jq -e '.state == "unknown"' "${final_operation}" >/dev/null
+jq -e '.operation_id == "operation-id" and .initial_state == "queued" and .final_state == "unknown"' \
+  "${operation_summary}" >/dev/null
+jq -n '{id:"operation-id",state:"running"}' >"${final_operation}"
+if write_interrupted_operation_evidence "${initial_operation}" "${final_operation}" "${operation_summary}" \
+  >/dev/null 2>&1; then
+  echo "non-final interrupted operation evidence was accepted" >&2
   exit 1
 fi
 
@@ -93,8 +119,14 @@ fi
 SAMPLER_EXIT=0
 SAMPLER_REAPED=0
 SAMPLER_STOP_REQUESTED=0
-bash -c 'trap "exit 0" TERM; while :; do sleep 1; done' &
+sampler_ready="${temporary}/sampler-ready"
+bash -c 'trap "exit 0" TERM; : >"$1"; while :; do sleep 1; done' _ "${sampler_ready}" &
 SAMPLE_PID=$!
+for _ in $(seq 1 100); do
+  [[ -f "${sampler_ready}" ]] && break
+  sleep 0.01
+done
+test -f "${sampler_ready}"
 stop_sampler
 test "${SAMPLER_EXIT}" = 0
 
@@ -102,9 +134,12 @@ cleanup_marker="${temporary}/cleanup-ran"
 if (
   trap 'touch "${cleanup_marker}"' EXIT
   SAMPLER_EXIT=0
+  # shellcheck disable=SC2034
   SAMPLER_REAPED=0
+  # shellcheck disable=SC2034
   SAMPLER_STOP_REQUESTED=0
   bash -c 'exit 7' &
+  # shellcheck disable=SC2034
   SAMPLE_PID=$!
   sleep 0.1
   check_sampler 2>/dev/null

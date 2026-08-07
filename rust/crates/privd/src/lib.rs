@@ -13,7 +13,7 @@ use ocservia_agent_protocol::{
     ErrorKind, PrivdError, PrivdRequest, PrivdResponse, privd_request, privd_response, read_frame,
     write_frame,
 };
-use ocservia_ocserv_adapter::Adapter;
+use ocservia_ocserv_adapter::{Adapter, EffectIdentity};
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::Semaphore;
 use uuid::Uuid;
@@ -133,7 +133,14 @@ async fn dispatch(request: PrivdRequest, adapter: &Adapter) -> PrivdResponse {
     let request_id = request.request_id.clone();
     let result = match validate_request(&request) {
         Ok(deadline) => {
-            match tokio::time::timeout(deadline, execute(request.operation, adapter)).await {
+            let effect = EffectIdentity {
+                command_id: &request.command_id,
+                idempotency_key: &request.idempotency_key,
+                semantic_payload_sha256: &request.semantic_payload_sha256,
+                expires_at_unix_seconds: request.command_expires_at_unix_seconds,
+            };
+            match tokio::time::timeout(deadline, execute(request.operation, effect, adapter)).await
+            {
                 Ok(result) => result,
                 Err(_) => privd_response::Result::Error(error(
                     ErrorKind::DeadlineExceeded,
@@ -164,6 +171,38 @@ fn validate_request(request: &PrivdRequest) -> Result<Duration, PrivdError> {
             "read-only operation required",
         ));
     }
+    let desired_operation = matches!(
+        request.operation,
+        Some(
+            privd_request::Operation::DesiredEffectObserve(_)
+                | privd_request::Operation::UserCreate(_)
+                | privd_request::Operation::UserDisable(_)
+                | privd_request::Operation::UserEnable(_)
+                | privd_request::Operation::UserPasswordRotate(_)
+                | privd_request::Operation::GroupApply(_)
+        )
+    );
+    if desired_operation {
+        if request.command_id.len() != 16
+            || request.idempotency_key.len() != 16
+            || request.semantic_payload_sha256.len() != 32
+            || request.command_expires_at_unix_seconds <= 0
+        {
+            return Err(error(
+                ErrorKind::InvalidRequest,
+                "desired effect identity invalid",
+            ));
+        }
+    } else if !request.command_id.is_empty()
+        || !request.idempotency_key.is_empty()
+        || !request.semantic_payload_sha256.is_empty()
+        || request.command_expires_at_unix_seconds != 0
+    {
+        return Err(error(
+            ErrorKind::InvalidRequest,
+            "effect identity is not allowed for this operation",
+        ));
+    }
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_err(|_| error(ErrorKind::Unavailable, "system clock unavailable"))?;
@@ -185,8 +224,10 @@ fn validate_request(request: &PrivdRequest) -> Result<Duration, PrivdError> {
     Ok(remaining)
 }
 
+#[allow(clippy::too_many_lines)]
 async fn execute(
     operation: Option<privd_request::Operation>,
+    effect: EffectIdentity<'_>,
     adapter: &Adapter,
 ) -> privd_response::Result {
     let Some(operation) = operation else {
@@ -231,6 +272,32 @@ async fn execute(
                 .await
                 .map(privd_response::Result::ConfigFingerprint),
         ),
+        privd_request::Operation::UserList(_) => (
+            "user_list",
+            adapter
+                .user_list()
+                .await
+                .map(privd_response::Result::UserList),
+        ),
+        privd_request::Operation::GroupList(_) => (
+            "group_list",
+            adapter
+                .group_list()
+                .await
+                .map(privd_response::Result::GroupList),
+        ),
+        privd_request::Operation::DesiredEffectObserve(request) => (
+            "desired_effect_observe",
+            adapter
+                .desired_effect_observe(
+                    &request.mutation_kind,
+                    &request.resource_key,
+                    request.desired_revision,
+                    effect,
+                )
+                .await
+                .map(privd_response::Result::DesiredEffectObservation),
+        ),
         privd_request::Operation::SessionDisconnect(request) => (
             "session_disconnect",
             adapter
@@ -256,6 +323,58 @@ async fn execute(
             "service_reload",
             adapter
                 .service_reload()
+                .await
+                .map(privd_response::Result::Mutation),
+        ),
+        privd_request::Operation::UserCreate(request) => (
+            "user_create",
+            adapter
+                .user_create(
+                    &request.username,
+                    &request.secret_key_id,
+                    &request.sealed_password,
+                    request.desired_revision,
+                    effect,
+                )
+                .await
+                .map(privd_response::Result::Mutation),
+        ),
+        privd_request::Operation::UserDisable(request) => (
+            "user_disable",
+            adapter
+                .user_disable(&request.username, request.desired_revision, effect)
+                .await
+                .map(privd_response::Result::Mutation),
+        ),
+        privd_request::Operation::UserEnable(request) => (
+            "user_enable",
+            adapter
+                .user_enable(&request.username, request.desired_revision, effect)
+                .await
+                .map(privd_response::Result::Mutation),
+        ),
+        privd_request::Operation::UserPasswordRotate(request) => (
+            "user_password_rotate",
+            adapter
+                .user_password_rotate(
+                    &request.username,
+                    &request.secret_key_id,
+                    &request.sealed_password,
+                    request.desired_revision,
+                    effect,
+                )
+                .await
+                .map(privd_response::Result::Mutation),
+        ),
+        privd_request::Operation::GroupApply(request) => (
+            "group_apply",
+            adapter
+                .group_apply(
+                    &request.group_name,
+                    &request.members,
+                    request.desired_revision,
+                    effect,
+                )
                 .await
                 .map(privd_response::Result::Mutation),
         ),
@@ -308,6 +427,10 @@ mod tests {
         let expired = PrivdRequest {
             request_id: Uuid::now_v7().as_bytes().to_vec(),
             deadline_unix_ms: 1,
+            command_id: Vec::new(),
+            idempotency_key: Vec::new(),
+            semantic_payload_sha256: Vec::new(),
+            command_expires_at_unix_seconds: 0,
             operation: Some(privd_request::Operation::ServiceStatus(ReadRequest {})),
         };
         let response = dispatch(expired, &adapter).await;
@@ -319,6 +442,10 @@ mod tests {
         let missing = PrivdRequest {
             request_id: Uuid::now_v7().as_bytes().to_vec(),
             deadline_unix_ms: u64::MAX,
+            command_id: Vec::new(),
+            idempotency_key: Vec::new(),
+            semantic_payload_sha256: Vec::new(),
+            command_expires_at_unix_seconds: 0,
             operation: None,
         };
         let response = dispatch(missing, &adapter).await;

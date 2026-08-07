@@ -10,6 +10,12 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 /// Maximum encoded local RPC frame size.
 pub const MAX_FRAME_BYTES: usize = 64 * 1024;
 
+/// Maximum users, groups, members in one group, and aggregate memberships per node.
+///
+/// This bound keeps every complete supported snapshot and mutation below the
+/// fixed local RPC and telemetry frame limits without partial-state semantics.
+pub const MAX_MANAGED_RESOURCES: usize = 384;
+
 /// Empty marker used by every fixed read-only request.
 #[derive(Clone, Copy, PartialEq, Eq, Message)]
 pub struct ReadRequest {}
@@ -23,10 +29,22 @@ pub struct PrivdRequest {
     /// Absolute Unix epoch deadline in milliseconds.
     #[prost(uint64, tag = "2")]
     pub deadline_unix_ms: u64,
+    /// Controller command identity for desired-state mutations and reconciliation.
+    #[prost(bytes = "vec", tag = "3")]
+    pub command_id: Vec<u8>,
+    /// Stable idempotency identity for desired-state mutations and reconciliation.
+    #[prost(bytes = "vec", tag = "4")]
+    pub idempotency_key: Vec<u8>,
+    /// Canonical semantic payload hash, never password material or a password hash.
+    #[prost(bytes = "vec", tag = "5")]
+    pub semantic_payload_sha256: Vec<u8>,
+    /// Command expiry after which local effect evidence may be safely collected.
+    #[prost(int64, tag = "6")]
+    pub command_expires_at_unix_seconds: i64,
     /// One of the permanently fixed operations.
     #[prost(
         oneof = "privd_request::Operation",
-        tags = "10, 11, 12, 13, 14, 30, 31, 32, 33"
+        tags = "10, 11, 12, 13, 14, 15, 16, 17, 30, 31, 32, 33, 34, 35, 36, 37, 38"
     )]
     pub operation: Option<privd_request::Operation>,
 }
@@ -35,7 +53,11 @@ pub struct PrivdRequest {
 pub mod privd_request {
     use prost::Oneof;
 
-    use super::{IpBanRemoveRequest, ReadRequest, ServiceReloadRequest, SessionMutationRequest};
+    use super::{
+        DesiredEffectObserveRequest, GroupApplyRequest, IpBanRemoveRequest, ReadRequest,
+        ServiceReloadRequest, SessionMutationRequest, UserDisableRequest, UserEnableRequest,
+        UserSecretRequest,
+    };
 
     /// Read-only operation allowlist.
     #[derive(Clone, PartialEq, Eq, Oneof)]
@@ -55,6 +77,15 @@ pub mod privd_request {
         /// Fingerprint the fixed ocserv configuration file.
         #[prost(message, tag = "14")]
         ConfigFingerprint(ReadRequest),
+        /// List users from the fixed ocpasswd file without hashes.
+        #[prost(message, tag = "15")]
+        UserList(ReadRequest),
+        /// List groups derived from authoritative ocpasswd records.
+        #[prost(message, tag = "16")]
+        GroupList(ReadRequest),
+        /// Check bounded non-secret evidence for one desired-state replacement.
+        #[prost(message, tag = "17")]
+        DesiredEffectObserve(DesiredEffectObserveRequest),
         /// Disconnect one numeric session without invalidating its cookie.
         #[prost(message, tag = "30")]
         SessionDisconnect(SessionMutationRequest),
@@ -67,6 +98,21 @@ pub mod privd_request {
         /// Reload only the fixed `ocserv.service` unit.
         #[prost(message, tag = "33")]
         ServiceReload(ServiceReloadRequest),
+        /// Create a user through the fixed ocpasswd resource.
+        #[prost(message, tag = "34")]
+        UserCreate(UserSecretRequest),
+        /// Disable a user through the fixed ocpasswd resource.
+        #[prost(message, tag = "35")]
+        UserDisable(UserDisableRequest),
+        /// Rotate a user's write-only password.
+        #[prost(message, tag = "36")]
+        UserPasswordRotate(UserSecretRequest),
+        /// Atomically replace one group membership record.
+        #[prost(message, tag = "37")]
+        GroupApply(GroupApplyRequest),
+        /// Enable a user without changing its password or groups.
+        #[prost(message, tag = "38")]
+        UserEnable(UserEnableRequest),
     }
 }
 
@@ -89,6 +135,117 @@ pub struct IpBanRemoveRequest {
 /// Empty marker for reloading the fixed Ocserv systemd unit.
 #[derive(Clone, Copy, PartialEq, Eq, Message)]
 pub struct ServiceReloadRequest {}
+
+/// User request carrying only ciphertext sealed for the node's root helper.
+#[derive(Clone, PartialEq, Eq, Message)]
+pub struct UserSecretRequest {
+    #[prost(string, tag = "1")]
+    pub username: String,
+    #[prost(bytes = "vec", tag = "2")]
+    pub sealed_password: Vec<u8>,
+    #[prost(string, tag = "3")]
+    pub secret_key_id: String,
+    #[prost(uint64, tag = "4")]
+    pub desired_revision: u64,
+}
+
+/// User disable request with no password material.
+#[derive(Clone, PartialEq, Eq, Message)]
+pub struct UserDisableRequest {
+    #[prost(string, tag = "1")]
+    pub username: String,
+    #[prost(uint64, tag = "2")]
+    pub desired_revision: u64,
+}
+
+/// User enable request with no password material.
+#[derive(Clone, PartialEq, Eq, Message)]
+pub struct UserEnableRequest {
+    #[prost(string, tag = "1")]
+    pub username: String,
+    #[prost(uint64, tag = "2")]
+    pub desired_revision: u64,
+}
+
+/// Canonical group membership replacement.
+#[derive(Clone, PartialEq, Eq, Message)]
+pub struct GroupApplyRequest {
+    #[prost(string, tag = "1")]
+    pub group_name: String,
+    #[prost(string, repeated, tag = "2")]
+    pub members: Vec<String>,
+    #[prost(uint64, tag = "3")]
+    pub desired_revision: u64,
+}
+
+/// Identifies one desired-state effect without carrying password material or hashes.
+#[derive(Clone, PartialEq, Eq, Message)]
+pub struct DesiredEffectObserveRequest {
+    #[prost(string, tag = "1")]
+    pub mutation_kind: String,
+    #[prost(string, tag = "2")]
+    pub resource_key: String,
+    #[prost(uint64, tag = "3")]
+    pub desired_revision: u64,
+}
+
+/// Stable result of independently checking one desired-state effect.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, prost::Enumeration)]
+#[repr(i32)]
+pub enum DesiredEffectState {
+    /// No trustworthy conclusion was possible.
+    Unspecified = 0,
+    /// This exact command and revision was durably applied.
+    AppliedExact = 1,
+    /// A newer revision of the same mutation kind is authoritative.
+    SupersededByNewerRevision = 2,
+    /// The store proves that the effect was not applied.
+    Absent = 3,
+    /// Evidence exists but does not match the current authoritative state.
+    Unknown = 4,
+}
+
+/// Result of checking the bounded root-owned desired-effect store.
+#[derive(Clone, Copy, PartialEq, Eq, Message)]
+pub struct DesiredEffectObservation {
+    #[prost(enumeration = "DesiredEffectState", tag = "1")]
+    pub state: i32,
+    /// Latest stored revision for this mutation kind and resource, if any.
+    #[prost(uint64, tag = "2")]
+    pub observed_revision: u64,
+}
+
+/// Observed user without password material.
+#[derive(Clone, PartialEq, Eq, Message)]
+pub struct ObservedUser {
+    #[prost(string, tag = "1")]
+    pub username: String,
+    #[prost(bool, tag = "2")]
+    pub enabled: bool,
+}
+
+/// Bounded observed user collection.
+#[derive(Clone, PartialEq, Eq, Message)]
+pub struct UserList {
+    #[prost(message, repeated, tag = "1")]
+    pub users: Vec<ObservedUser>,
+}
+
+/// Observed group membership.
+#[derive(Clone, PartialEq, Eq, Message)]
+pub struct ObservedGroup {
+    #[prost(string, tag = "1")]
+    pub group_name: String,
+    #[prost(string, repeated, tag = "2")]
+    pub members: Vec<String>,
+}
+
+/// Bounded observed group collection.
+#[derive(Clone, PartialEq, Eq, Message)]
+pub struct GroupList {
+    #[prost(message, repeated, tag = "1")]
+    pub groups: Vec<ObservedGroup>,
+}
 
 /// Bounded acknowledgement for a fixed mutation.
 #[derive(Clone, PartialEq, Eq, Message)]
@@ -205,6 +362,8 @@ pub enum ErrorKind {
     MalformedOutput = 6,
     /// Fixed local resource was unavailable.
     Unavailable = 7,
+    /// A mutation would exceed a bounded authoritative-state capacity.
+    CapacityExceeded = 8,
 }
 
 /// A response from privd.
@@ -214,7 +373,10 @@ pub struct PrivdResponse {
     #[prost(bytes = "vec", tag = "1")]
     pub request_id: Vec<u8>,
     /// Exactly one stable result or error.
-    #[prost(oneof = "privd_response::Result", tags = "10, 11, 12, 13, 14, 15, 20")]
+    #[prost(
+        oneof = "privd_response::Result",
+        tags = "10, 11, 12, 13, 14, 15, 16, 17, 18, 20"
+    )]
     pub result: Option<privd_response::Result>,
 }
 
@@ -223,8 +385,8 @@ pub mod privd_response {
     use prost::Oneof;
 
     use super::{
-        ConfigFingerprint, IpBanList, MutationResult, OcservVersion, PrivdError, ServiceStatus,
-        SessionList,
+        ConfigFingerprint, DesiredEffectObservation, GroupList, IpBanList, MutationResult,
+        OcservVersion, PrivdError, ServiceStatus, SessionList, UserList,
     };
 
     /// Result allowlist.
@@ -248,6 +410,15 @@ pub mod privd_response {
         /// Fixed mutation acknowledgement.
         #[prost(message, tag = "15")]
         Mutation(MutationResult),
+        /// Observed users without password material.
+        #[prost(message, tag = "16")]
+        UserList(UserList),
+        /// Observed groups.
+        #[prost(message, tag = "17")]
+        GroupList(GroupList),
+        /// Non-secret authoritative desired-effect observation.
+        #[prost(message, tag = "18")]
+        DesiredEffectObservation(DesiredEffectObservation),
         /// Stable failure.
         #[prost(message, tag = "20")]
         Error(PrivdError),
@@ -312,6 +483,10 @@ mod tests {
         let request = PrivdRequest {
             request_id: vec![7; 16],
             deadline_unix_ms: 42,
+            command_id: Vec::new(),
+            idempotency_key: Vec::new(),
+            semantic_payload_sha256: Vec::new(),
+            command_expires_at_unix_seconds: 0,
             operation: Some(privd_request::Operation::ServiceStatus(ReadRequest {})),
         };
         let mut bytes = Vec::new();
@@ -334,5 +509,78 @@ mod tests {
                 .kind(),
             io::ErrorKind::InvalidData
         );
+    }
+
+    fn maximum_name(prefix: &str, index: usize) -> String {
+        format!("{prefix}{index:06}{}", "x".repeat(64 - prefix.len() - 6))
+    }
+
+    #[tokio::test]
+    async fn maximum_supported_user_group_frames_round_trip() {
+        let members = (0..MAX_MANAGED_RESOURCES)
+            .map(|index| maximum_name("m", index))
+            .collect::<Vec<_>>();
+        let request = PrivdRequest {
+            request_id: vec![7; 16],
+            deadline_unix_ms: u64::MAX,
+            command_id: vec![8; 16],
+            idempotency_key: vec![9; 16],
+            semantic_payload_sha256: vec![10; 32],
+            command_expires_at_unix_seconds: i64::MAX,
+            operation: Some(privd_request::Operation::GroupApply(GroupApplyRequest {
+                group_name: maximum_name("g", 0),
+                members,
+                desired_revision: u64::MAX,
+            })),
+        };
+        let (mut request_writer, mut request_reader) =
+            tokio::net::UnixStream::pair().expect("pair");
+        let (write_result, read_result) = tokio::join!(
+            write_frame(&mut request_writer, &request),
+            read_frame::<PrivdRequest, _>(&mut request_reader)
+        );
+        write_result.expect("maximum group apply frame");
+        let decoded = read_result.expect("decode maximum group apply");
+        assert_eq!(decoded, request);
+
+        let users = PrivdResponse {
+            request_id: vec![7; 16],
+            result: Some(privd_response::Result::UserList(UserList {
+                users: (0..MAX_MANAGED_RESOURCES)
+                    .map(|index| ObservedUser {
+                        username: maximum_name("u", index),
+                        enabled: true,
+                    })
+                    .collect(),
+            })),
+        };
+        let (mut user_writer, mut user_reader) = tokio::net::UnixStream::pair().expect("pair");
+        let (write_result, read_result) = tokio::join!(
+            write_frame(&mut user_writer, &users),
+            read_frame::<PrivdResponse, _>(&mut user_reader)
+        );
+        write_result.expect("maximum user list frame");
+        let decoded = read_result.expect("decode maximum user list");
+        assert_eq!(decoded, users);
+
+        let groups = PrivdResponse {
+            request_id: vec![7; 16],
+            result: Some(privd_response::Result::GroupList(GroupList {
+                groups: (0..MAX_MANAGED_RESOURCES)
+                    .map(|index| ObservedGroup {
+                        group_name: maximum_name("g", index),
+                        members: vec![maximum_name("u", index)],
+                    })
+                    .collect(),
+            })),
+        };
+        let (mut group_writer, mut group_reader) = tokio::net::UnixStream::pair().expect("pair");
+        let (write_result, read_result) = tokio::join!(
+            write_frame(&mut group_writer, &groups),
+            read_frame::<PrivdResponse, _>(&mut group_reader)
+        );
+        write_result.expect("maximum group list frame");
+        let decoded = read_result.expect("decode maximum group list");
+        assert_eq!(decoded, groups);
     }
 }

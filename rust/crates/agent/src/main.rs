@@ -7,22 +7,26 @@ use std::time::{Duration, SystemTime};
 use iroh::endpoint::{QuicTransportConfig, RelayMode, VarInt, presets};
 use iroh::{Endpoint, EndpointAddr, EndpointId};
 use ocservia_agent::{
-    CommandContext, CommandError, CommandExecutor, ExternalPreparation, MAX_COMMAND_BYTES,
-    MAX_WRITE_QUEUE, PrivdClient,
+    CommandContext, CommandError, CommandExecutor, ExternalEffectObservation, ExternalPreparation,
+    MAX_COMMAND_BYTES, MAX_WRITE_QUEUE, PrivdClient,
 };
 use ocservia_agent_protocol::{
-    ErrorKind, IpBanRemoveRequest, PrivdResponse, ServiceReloadRequest, SessionMutationRequest,
+    DesiredEffectObserveRequest, DesiredEffectState, ErrorKind, GroupApplyRequest,
+    IpBanRemoveRequest, MAX_MANAGED_RESOURCES, PrivdResponse, ServiceReloadRequest,
+    SessionMutationRequest, UserDisableRequest, UserEnableRequest, UserSecretRequest,
     privd_request, privd_response,
 };
 use ocservia_command_journal::{CommandRecord, CommandState, Journal, TelemetryInsert};
 use ocservia_contracts::decode_strict_command_envelope;
 use ocservia_contracts::generated::ocserv::platform::agent::v1::{
     AgentEvent, AgentEventType, CommandDeliveryMode, CommandEnvelope, CommandResult,
-    CommandResultState, HandshakeResult, IpBanObservation, MetricSample, ObservedSnapshot,
-    SemanticPayloadHashVersion, SessionHandshake, SessionHandshakeResponse, SessionObservation,
-    TelemetryBatch, TelemetryDropCounters, TelemetryPriority, command_envelope,
+    CommandResultState, GroupObservation, HandshakeResult, IpBanObservation, MetricSample,
+    ObservedSnapshot, SemanticPayloadHashVersion, SessionHandshake, SessionHandshakeResponse,
+    SessionObservation, TelemetryBatch, TelemetryDropCounters, TelemetryPriority, UserObservation,
+    command_envelope,
 };
 use prost::Message;
+use sha2::Digest;
 use uuid::Uuid;
 
 const AGENT_ALPN: &[u8] = b"ocserv-platform/agent/1";
@@ -155,6 +159,8 @@ async fn connect_once(
             "ocserv.session.terminate".to_owned(),
             "ocserv.ip_ban.remove".to_owned(),
             "ocserv.service.reload".to_owned(),
+            "ocserv.users.write".to_owned(),
+            "ocserv.groups.write".to_owned(),
         ],
         ocserv_version: "unknown".to_owned(),
         os_release: session.os_release.to_owned(),
@@ -203,7 +209,7 @@ async fn connect_once(
                 let observations=session.privd.snapshot().await?;
                 sequence=sequence.saturating_add(1);
                 let drops=session.journal.telemetry_drop_counters()?;
-                let batch=build_telemetry(session,sequence,&observations,&connection,drops);
+                let batch=build_telemetry(session,sequence,&observations,&connection,drops)?;
                 let payload=batch.encode_to_vec();
                 let batch_id: [u8;16]=batch.batch_id.as_slice().try_into().map_err(|_| invalid("telemetry batch ID invalid"))?;
                 let now=SystemTime::now().duration_since(SystemTime::UNIX_EPOCH)?.as_secs();
@@ -248,6 +254,8 @@ async fn handle_command_stream(
             "ocserv.session.terminate",
             "ocserv.ip_ban.remove",
             "ocserv.service.reload",
+            "ocserv.users.write",
+            "ocserv.groups.write",
         ]),
         now_unix_seconds,
         cancelled: false,
@@ -259,6 +267,11 @@ async fn handle_command_stream(
                 | command_envelope::Payload::SessionTerminate(_)
                 | command_envelope::Payload::IpBanRemove(_)
                 | command_envelope::Payload::ServiceReload(_)
+                | command_envelope::Payload::UserCreate(_)
+                | command_envelope::Payload::UserDisable(_)
+                | command_envelope::Payload::UserEnable(_)
+                | command_envelope::Payload::UserPasswordRotate(_)
+                | command_envelope::Payload::GroupApply(_)
         )
     );
     let execution = if external {
@@ -301,6 +314,7 @@ async fn handle_command_stream(
     Ok(())
 }
 
+#[allow(clippy::too_many_lines)]
 async fn execute_external_command(
     session: &mut SessionContext<'_>,
     envelope: &CommandEnvelope,
@@ -353,24 +367,84 @@ async fn execute_external_command(
         Some(command_envelope::Payload::ServiceReload(_)) => {
             privd_request::Operation::ServiceReload(ServiceReloadRequest {})
         }
+        Some(command_envelope::Payload::UserCreate(payload)) => {
+            privd_request::Operation::UserCreate(UserSecretRequest {
+                username: payload.username.clone(),
+                sealed_password: payload.sealed_password.clone(),
+                secret_key_id: payload.secret_key_id.clone(),
+                desired_revision: payload.desired_revision,
+            })
+        }
+        Some(command_envelope::Payload::UserDisable(payload)) => {
+            privd_request::Operation::UserDisable(UserDisableRequest {
+                username: payload.username.clone(),
+                desired_revision: payload.desired_revision,
+            })
+        }
+        Some(command_envelope::Payload::UserEnable(payload)) => {
+            privd_request::Operation::UserEnable(UserEnableRequest {
+                username: payload.username.clone(),
+                desired_revision: payload.desired_revision,
+            })
+        }
+        Some(command_envelope::Payload::UserPasswordRotate(payload)) => {
+            privd_request::Operation::UserPasswordRotate(UserSecretRequest {
+                username: payload.username.clone(),
+                sealed_password: payload.sealed_password.clone(),
+                secret_key_id: payload.secret_key_id.clone(),
+                desired_revision: payload.desired_revision,
+            })
+        }
+        Some(command_envelope::Payload::GroupApply(payload)) => {
+            privd_request::Operation::GroupApply(GroupApplyRequest {
+                group_name: payload.group_name.clone(),
+                members: payload.members.clone(),
+                desired_revision: payload.desired_revision,
+            })
+        }
         _ => return Err(CommandError::Rejected("capability_rejected")),
     };
-    match session.privd.call(operation).await {
+    let expires_at = envelope
+        .expires_at
+        .as_ref()
+        .ok_or(CommandError::Rejected("expires_at_missing"))?
+        .seconds;
+    let response = if desired_resource(envelope).is_some() {
+        session
+            .privd
+            .call_desired(
+                operation,
+                &envelope.command_id,
+                &envelope.idempotency_key,
+                &envelope.semantic_payload_sha256,
+                expires_at,
+            )
+            .await
+    } else {
+        session.privd.call(operation).await
+    };
+    match response {
         Ok(response) => match response.result {
-            Some(privd_response::Result::Mutation(result)) if result.applied => session
-                .command_executor
-                .complete_external(&command, Ok(b"applied"), now),
-            Some(privd_response::Result::Error(error))
-                if matches!(
-                    ErrorKind::try_from(error.kind).unwrap_or(ErrorKind::Unspecified),
-                    ErrorKind::InvalidRequest
-                        | ErrorKind::PermissionDenied
-                        | ErrorKind::MalformedOutput
-                ) =>
-            {
+            Some(privd_response::Result::Mutation(result)) if result.applied => {
+                if let Some((resource_type, resource_key, revision)) = desired_resource(envelope) {
+                    session.command_executor.complete_external_applied(
+                        &command,
+                        resource_type,
+                        resource_key,
+                        revision,
+                        now,
+                    )
+                } else {
+                    session
+                        .command_executor
+                        .complete_external(&command, Ok(b"applied"), now)
+                }
+            }
+            Some(privd_response::Result::Error(error)) if terminal_privd_error(error.kind) => {
+                let code = terminal_privd_error_code(error.kind).unwrap_or("privd_rejected");
                 session
                     .command_executor
-                    .complete_external(&command, Err("privd_rejected"), now)
+                    .complete_external(&command, Err(code), now)
             }
             _ => session.command_executor.mark_external_unknown(
                 &command,
@@ -386,21 +460,63 @@ async fn execute_external_command(
     }
 }
 
-async fn observe_external_effect(privd: &PrivdClient, envelope: &CommandEnvelope) -> Option<bool> {
+fn terminal_privd_error(kind: i32) -> bool {
+    terminal_privd_error_code(kind).is_some()
+}
+
+fn terminal_privd_error_code(kind: i32) -> Option<&'static str> {
+    match ErrorKind::try_from(kind).unwrap_or(ErrorKind::Unspecified) {
+        ErrorKind::CapacityExceeded => Some("capacity_exceeded"),
+        ErrorKind::InvalidRequest | ErrorKind::PermissionDenied | ErrorKind::MalformedOutput => {
+            Some("privd_rejected")
+        }
+        _ => None,
+    }
+}
+
+fn desired_resource(envelope: &CommandEnvelope) -> Option<(&'static str, &str, u64)> {
+    match envelope.payload.as_ref()? {
+        command_envelope::Payload::UserCreate(value) => {
+            Some(("user", &value.username, value.desired_revision))
+        }
+        command_envelope::Payload::UserDisable(value) => {
+            Some(("user", &value.username, value.desired_revision))
+        }
+        command_envelope::Payload::UserEnable(value) => {
+            Some(("user", &value.username, value.desired_revision))
+        }
+        command_envelope::Payload::UserPasswordRotate(value) => {
+            Some(("user", &value.username, value.desired_revision))
+        }
+        command_envelope::Payload::GroupApply(value) => {
+            Some(("group", &value.group_name, value.desired_revision))
+        }
+        _ => None,
+    }
+}
+
+async fn observe_external_effect(
+    privd: &PrivdClient,
+    envelope: &CommandEnvelope,
+) -> ExternalEffectObservation {
     let target_boot = match envelope.payload.as_ref() {
         Some(command_envelope::Payload::SessionDisconnect(target)) => Some(&target.boot_id),
         Some(command_envelope::Payload::SessionTerminate(target)) => Some(&target.boot_id),
         _ => None,
     };
     if let Some(target_boot) = target_boot {
-        let current_boot = tokio::fs::read_to_string("/proc/sys/kernel/random/boot_id")
-            .await
-            .ok()?;
+        let Ok(current_boot) = tokio::fs::read_to_string("/proc/sys/kernel/random/boot_id").await
+        else {
+            return ExternalEffectObservation::Unknown;
+        };
         if current_boot.trim() != target_boot {
-            return None;
+            return ExternalEffectObservation::Unknown;
         }
     }
-    let operation = match envelope.payload.as_ref()? {
+    let Some(payload) = envelope.payload.as_ref() else {
+        return ExternalEffectObservation::Unknown;
+    };
+    let operation = match payload {
         command_envelope::Payload::SessionDisconnect(_)
         | command_envelope::Payload::SessionTerminate(_) => {
             privd_request::Operation::SessionList(ocservia_agent_protocol::ReadRequest {})
@@ -408,32 +524,129 @@ async fn observe_external_effect(privd: &PrivdClient, envelope: &CommandEnvelope
         command_envelope::Payload::IpBanRemove(_) => {
             privd_request::Operation::IpBanList(ocservia_agent_protocol::ReadRequest {})
         }
-        _ => return None,
+        payload if desired_effect_identity(payload).is_some() => {
+            let Some((mutation_kind, resource_key, desired_revision)) =
+                desired_effect_identity(payload)
+            else {
+                return ExternalEffectObservation::Unknown;
+            };
+            privd_request::Operation::DesiredEffectObserve(DesiredEffectObserveRequest {
+                mutation_kind: mutation_kind.to_owned(),
+                resource_key: resource_key.to_owned(),
+                desired_revision,
+            })
+        }
+        _ => return ExternalEffectObservation::Unknown,
     };
-    let response = privd.call(operation).await.ok()?;
-    match (envelope.payload.as_ref()?, response.result?) {
+    let response = if desired_effect_identity(payload).is_some() {
+        let Some(expires_at) = envelope.expires_at.as_ref() else {
+            return ExternalEffectObservation::Unknown;
+        };
+        privd
+            .call_desired(
+                operation,
+                &envelope.command_id,
+                &envelope.idempotency_key,
+                &envelope.semantic_payload_sha256,
+                expires_at.seconds,
+            )
+            .await
+    } else {
+        privd.call(operation).await
+    };
+    let Ok(response) = response else {
+        return ExternalEffectObservation::Unknown;
+    };
+    let Some(result) = response.result else {
+        return ExternalEffectObservation::Unknown;
+    };
+    map_external_effect(payload, result)
+}
+
+fn map_external_effect(
+    payload: &command_envelope::Payload,
+    result: privd_response::Result,
+) -> ExternalEffectObservation {
+    match (payload, result) {
         (
             command_envelope::Payload::SessionDisconnect(target),
             privd_response::Result::SessionList(current),
-        ) => Some(
-            !current
+        ) => {
+            if current
                 .sessions
                 .iter()
-                .any(|session| session.id == target.session_id),
-        ),
+                .any(|session| session.id == target.session_id)
+            {
+                ExternalEffectObservation::Absent
+            } else {
+                ExternalEffectObservation::AppliedExact
+            }
+        }
         (
             command_envelope::Payload::SessionTerminate(target),
             privd_response::Result::SessionList(current),
-        ) => Some(
-            !current
+        ) => {
+            if current
                 .sessions
                 .iter()
-                .any(|session| session.id == target.session_id),
-        ),
+                .any(|session| session.id == target.session_id)
+            {
+                ExternalEffectObservation::Absent
+            } else {
+                ExternalEffectObservation::AppliedExact
+            }
+        }
         (
             command_envelope::Payload::IpBanRemove(target),
             privd_response::Result::IpBanList(current),
-        ) => Some(!current.bans.iter().any(|ban| ban.ip == target.ip)),
+        ) => {
+            if current.bans.iter().any(|ban| ban.ip == target.ip) {
+                ExternalEffectObservation::Absent
+            } else {
+                ExternalEffectObservation::AppliedExact
+            }
+        }
+        (payload, privd_response::Result::DesiredEffectObservation(observation))
+            if desired_effect_identity(payload).is_some() =>
+        {
+            match DesiredEffectState::try_from(observation.state)
+                .unwrap_or(DesiredEffectState::Unspecified)
+            {
+                DesiredEffectState::AppliedExact => ExternalEffectObservation::AppliedExact,
+                DesiredEffectState::SupersededByNewerRevision => {
+                    ExternalEffectObservation::SupersededByNewerRevision
+                }
+                DesiredEffectState::Absent => ExternalEffectObservation::Absent,
+                DesiredEffectState::Unknown | DesiredEffectState::Unspecified => {
+                    ExternalEffectObservation::Unknown
+                }
+            }
+        }
+        _ => ExternalEffectObservation::Unknown,
+    }
+}
+
+fn desired_effect_identity(
+    payload: &command_envelope::Payload,
+) -> Option<(&'static str, &str, u64)> {
+    match payload {
+        command_envelope::Payload::UserCreate(value) => {
+            Some(("user_create", &value.username, value.desired_revision))
+        }
+        command_envelope::Payload::UserDisable(value) => {
+            Some(("user_disable", &value.username, value.desired_revision))
+        }
+        command_envelope::Payload::UserEnable(value) => {
+            Some(("user_enable", &value.username, value.desired_revision))
+        }
+        command_envelope::Payload::UserPasswordRotate(value) => Some((
+            "user_password_rotate",
+            &value.username,
+            value.desired_revision,
+        )),
+        command_envelope::Payload::GroupApply(value) => {
+            Some(("group_apply", &value.group_name, value.desired_revision))
+        }
         _ => None,
     }
 }
@@ -507,18 +720,23 @@ async fn send_telemetry(
     Ok(())
 }
 
+#[allow(clippy::too_many_lines)]
 fn build_telemetry(
     session: &SessionContext<'_>,
     sequence: u64,
     observations: &[PrivdResponse],
     connection: &iroh::endpoint::Connection,
     drops: [u64; 4],
-) -> TelemetryBatch {
+) -> Result<TelemetryBatch, io::Error> {
     let now = SystemTime::now();
     let mut service = serde_json::json!({"active_state":"unknown","sub_state":"unknown"});
     let mut version = "unknown".to_owned();
     let mut sessions = Vec::new();
     let mut ip_bans = Vec::new();
+    let mut users = Vec::new();
+    let mut groups = Vec::new();
+    let mut user_snapshot_complete = false;
+    let mut group_snapshot_complete = false;
     let mut fingerprint = serde_json::json!({});
     for observation in observations {
         match &observation.result {
@@ -555,8 +773,84 @@ fn build_telemetry(
                     })
                     .collect();
             }
+            Some(privd_response::Result::UserList(value)) => {
+                user_snapshot_complete = true;
+                users = value
+                    .users
+                    .iter()
+                    .map(|user| {
+                        let canonical = format!(
+                            "{{\"name\":\"{}\",\"enabled\":{}}}",
+                            user.username, user.enabled
+                        );
+                        UserObservation {
+                            username: user.username.clone(),
+                            enabled: user.enabled,
+                            revision: session
+                                .journal
+                                .applied_revision("user", &user.username)
+                                .ok()
+                                .flatten()
+                                .unwrap_or(0),
+                            fingerprint_sha256: sha2::Sha256::digest(canonical.as_bytes()).to_vec(),
+                        }
+                    })
+                    .collect();
+            }
+            Some(privd_response::Result::GroupList(value)) => {
+                group_snapshot_complete = true;
+                groups = value
+                    .groups
+                    .iter()
+                    .map(|group| {
+                        let encoded_members = group
+                            .members
+                            .iter()
+                            .map(|member| format!("\"{member}\""))
+                            .collect::<Vec<_>>()
+                            .join(",");
+                        let canonical = format!(
+                            "{{\"name\":\"{}\",\"members\":[{}]}}",
+                            group.group_name, encoded_members
+                        );
+                        GroupObservation {
+                            group_name: group.group_name.clone(),
+                            members: group.members.clone(),
+                            revision: session
+                                .journal
+                                .applied_revision("group", &group.group_name)
+                                .ok()
+                                .flatten()
+                                .unwrap_or(0),
+                            fingerprint_sha256: sha2::Sha256::digest(canonical.as_bytes()).to_vec(),
+                        }
+                    })
+                    .collect();
+            }
             _ => {}
         }
+    }
+    if !user_snapshot_complete || !group_snapshot_complete {
+        return Err(invalid("privd user/group snapshot incomplete"));
+    }
+    if let Ok(applied_groups) = session.journal.applied_revisions("group") {
+        for (group_name, revision) in applied_groups {
+            if groups.iter().any(|group| group.group_name == group_name) {
+                continue;
+            }
+            let canonical = format!("{{\"name\":\"{group_name}\",\"members\":[]}}");
+            groups.push(GroupObservation {
+                group_name,
+                members: Vec::new(),
+                revision,
+                fingerprint_sha256: sha2::Sha256::digest(canonical.as_bytes()).to_vec(),
+            });
+        }
+        groups.sort_by(|left, right| left.group_name.cmp(&right.group_name));
+    }
+    if users.len() > MAX_MANAGED_RESOURCES || groups.len() > MAX_MANAGED_RESOURCES.saturating_mul(2)
+    {
+        return Err(invalid("user/group telemetry capacity exceeded"));
     }
     let paths = connection.paths();
     let selected = paths.iter().find(iroh::endpoint::Path::is_selected);
@@ -575,7 +869,7 @@ fn build_telemetry(
     let ocserv = serde_json::json!({"service":service,"configuration":fingerprint});
     let path = serde_json::json!({"mode":mode,"rtt_ms":rtt});
     let session_count = f64::from(u32::try_from(sessions.len()).unwrap_or(u32::MAX));
-    TelemetryBatch {
+    let batch = TelemetryBatch {
         batch_id: Uuid::now_v7().as_bytes().to_vec(),
         node_id: session.node_id.as_bytes().to_vec(),
         sequence,
@@ -605,7 +899,13 @@ fn build_telemetry(
         }],
         security_events: Vec::new(),
         ip_bans,
+        users,
+        groups,
+    };
+    if batch.encoded_len() > 512 * 1024 {
+        return Err(invalid("telemetry payload size invalid"));
     }
+    Ok(batch)
 }
 
 async fn shutdown_signal() {
@@ -678,4 +978,100 @@ fn required(args: &mut impl Iterator<Item = String>, name: &str) -> Result<Strin
 
 fn invalid(detail: &str) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidInput, detail)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ocservia_agent_protocol::{
+        DesiredEffectObservation, PrivdRequest, read_frame, write_frame,
+    };
+    use ocservia_contracts::generated::ocserv::platform::agent::v1::UserPasswordRotate;
+
+    #[test]
+    fn authoritative_precondition_rejection_is_terminal() {
+        assert!(terminal_privd_error(ErrorKind::InvalidRequest.into()));
+        assert!(terminal_privd_error(ErrorKind::CapacityExceeded.into()));
+        assert_eq!(
+            terminal_privd_error_code(ErrorKind::CapacityExceeded.into()),
+            Some("capacity_exceeded")
+        );
+        assert!(!terminal_privd_error(ErrorKind::OutputLimit.into()));
+        assert!(!terminal_privd_error(ErrorKind::Unavailable.into()));
+        assert!(!terminal_privd_error(ErrorKind::CommandFailed.into()));
+    }
+
+    #[test]
+    fn unexpected_privd_result_cannot_prove_a_password_effect() {
+        let payload = command_envelope::Payload::UserPasswordRotate(UserPasswordRotate {
+            username: "alice".to_owned(),
+            sealed_password: vec![0xa5; 64],
+            secret_key_id: "node-key-1".to_owned(),
+            desired_revision: 7,
+        });
+        let result = privd_response::Result::Mutation(ocservia_agent_protocol::MutationResult {
+            applied: true,
+        });
+
+        assert_eq!(
+            map_external_effect(&payload, result),
+            ExternalEffectObservation::Unknown
+        );
+    }
+
+    #[tokio::test]
+    async fn password_reconcile_uses_non_secret_authoritative_effect_store() {
+        let socket = PathBuf::from(format!("/tmp/ocsm-{}.sock", Uuid::now_v7().simple()));
+        let listener = tokio::net::UnixListener::bind(&socket).expect("bind effect fixture");
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("accept");
+            let request: PrivdRequest = read_frame(&mut stream).await.expect("request");
+            let Some(privd_request::Operation::DesiredEffectObserve(observe)) = request.operation
+            else {
+                panic!("desired effect observation required")
+            };
+            assert_eq!(observe.mutation_kind, "user_password_rotate");
+            assert_eq!(observe.resource_key, "alice");
+            assert_eq!(observe.desired_revision, 7);
+            write_frame(
+                &mut stream,
+                &PrivdResponse {
+                    request_id: request.request_id,
+                    result: Some(privd_response::Result::DesiredEffectObservation(
+                        DesiredEffectObservation {
+                            state: DesiredEffectState::AppliedExact.into(),
+                            observed_revision: observe.desired_revision,
+                        },
+                    )),
+                },
+            )
+            .await
+            .expect("response");
+        });
+        let client = PrivdClient::new(socket.clone(), Duration::from_secs(2)).expect("client");
+        let envelope = CommandEnvelope {
+            command_id: Uuid::now_v7().as_bytes().to_vec(),
+            idempotency_key: Uuid::now_v7().as_bytes().to_vec(),
+            semantic_payload_sha256: vec![0x5a; 32],
+            expires_at: Some(prost_types::Timestamp {
+                seconds: i64::MAX,
+                nanos: 0,
+            }),
+            payload: Some(command_envelope::Payload::UserPasswordRotate(
+                UserPasswordRotate {
+                    username: "alice".to_owned(),
+                    sealed_password: vec![0xa5; 64],
+                    secret_key_id: "node-key-1".to_owned(),
+                    desired_revision: 7,
+                },
+            )),
+            ..CommandEnvelope::default()
+        };
+        assert_eq!(
+            observe_external_effect(&client, &envelope).await,
+            ExternalEffectObservation::AppliedExact
+        );
+        server.await.expect("server");
+        std::fs::remove_file(socket).expect("remove socket");
+    }
 }

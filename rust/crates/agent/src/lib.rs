@@ -11,7 +11,9 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use ocservia_agent_protocol::{
     PrivdRequest, PrivdResponse, ReadRequest, privd_request, read_frame, write_frame,
 };
-use ocservia_command_journal::{AcceptOutcome, CommandRecord, CommandState, Journal};
+use ocservia_command_journal::{
+    AcceptOutcome, AppliedResourceRevision, CommandRecord, CommandState, Journal,
+};
 use ocservia_contracts::generated::ocserv::platform::agent::v1::{
     CommandDeliveryMode, CommandEnvelope, SemanticPayloadHashVersion, command_envelope,
 };
@@ -33,9 +35,8 @@ const MAX_FUTURE_SKEW_SECONDS: i64 = 300;
 #[derive(Clone, Debug)]
 pub struct CommandContext {
     pub node_id: [u8; 16],
-    /// Locally authoritative revision when one exists. Production node commands
-    /// rely on the Controller's transactional revision check and bind that
-    /// revision into the semantic hash instead of inventing a local value.
+    /// Optional revision supplied by read-only/synthetic fixtures. Desired user
+    /// and group mutations are fenced by the durable Agent Journal instead.
     pub observed_revision: Option<u64>,
     pub capabilities: HashSet<&'static str>,
     pub now_unix_seconds: i64,
@@ -70,6 +71,22 @@ pub struct ExternalCommand {
 pub enum ExternalPreparation {
     Execute(ExternalCommand),
     Replay(CommandOutcome),
+}
+
+/// Independent effect evidence used to resolve an external Unknown safely.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ExternalEffectObservation {
+    AppliedExact,
+    SupersededByNewerRevision,
+    Absent,
+    Unknown,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum DesiredRevisionFence {
+    Current,
+    Superseded,
+    Gap,
 }
 
 /// Refusal, storage failure, or an intentional fault boundary.
@@ -227,6 +244,14 @@ impl CommandExecutor {
         if !validated.external {
             return Err(CommandError::Rejected("external_command_required"));
         }
+        if self
+            .journal
+            .command(&validated.key)
+            .map_err(pre_effect_failure)?
+            .is_none()
+        {
+            self.require_current_desired_revision(envelope)?;
+        }
         let acceptance = self
             .journal
             .accept_command(
@@ -335,6 +360,48 @@ impl CommandExecutor {
         })
     }
 
+    /// Atomically persists a successful desired-state result and applied revision.
+    ///
+    /// # Errors
+    ///
+    /// Reports an unknown outcome if the post-effect `SQLite` transaction cannot commit.
+    pub fn complete_external_applied(
+        &mut self,
+        command: &ExternalCommand,
+        resource_type: &str,
+        resource_key: &str,
+        revision: u64,
+        now: i64,
+    ) -> Result<CommandOutcome, CommandError> {
+        let before = self
+            .journal
+            .command(&command.key)
+            .map_err(pre_effect_failure)?
+            .ok_or(CommandError::Rejected("command_not_accepted"))?;
+        let record = self
+            .journal
+            .complete_external_with_revision(
+                &command.key,
+                &command.command_id,
+                AppliedResourceRevision {
+                    resource_type,
+                    resource_key,
+                    revision,
+                },
+                b"applied",
+                now,
+            )
+            .map_err(|source| CommandError::OutcomeUnknown {
+                code: "result_persistence_failed",
+                record: Box::new(before),
+                source: Box::new(source),
+            })?;
+        Ok(CommandOutcome {
+            record,
+            replayed: false,
+        })
+    }
+
     /// Persists an uncertain external outcome without permitting an automatic retry.
     ///
     /// # Errors
@@ -372,10 +439,10 @@ impl CommandExecutor {
     ///
     /// Rejects invalid or mismatched commands and propagates journal failures.
     pub fn reconcile_external(
-        &self,
+        &mut self,
         envelope: &CommandEnvelope,
         context: &CommandContext,
-        applied: Option<bool>,
+        observation: ExternalEffectObservation,
     ) -> Result<CommandOutcome, CommandError> {
         let validated = validate_command(envelope, context)?;
         if !validated.external {
@@ -388,10 +455,48 @@ impl CommandExecutor {
                 replayed: true,
             });
         }
-        let (state, result, code) = match applied {
-            Some(true) => (CommandState::Succeeded, Some(b"observed".as_slice()), None),
-            Some(false) => (CommandState::Unknown, None, Some("effect_absent")),
-            None => (
+        let observation = match self.desired_revision_fence(envelope)? {
+            DesiredRevisionFence::Current => observation,
+            DesiredRevisionFence::Superseded => {
+                ExternalEffectObservation::SupersededByNewerRevision
+            }
+            DesiredRevisionFence::Gap => return Err(CommandError::Rejected("revision_gap")),
+        };
+        if observation == ExternalEffectObservation::AppliedExact
+            && let Some((resource_type, resource_key, revision)) = desired_resource(envelope)
+        {
+            let record = self
+                .journal
+                .reconcile_external_with_revision(
+                    &validated.key,
+                    &validated.command_id,
+                    AppliedResourceRevision {
+                        resource_type,
+                        resource_key,
+                        revision,
+                    },
+                    b"observed",
+                    context.now_unix_seconds,
+                )
+                .map_err(pre_effect_failure)?;
+            return Ok(CommandOutcome {
+                record,
+                replayed: true,
+            });
+        }
+        let (state, result, code) = match observation {
+            ExternalEffectObservation::AppliedExact => {
+                (CommandState::Succeeded, Some(b"observed".as_slice()), None)
+            }
+            ExternalEffectObservation::SupersededByNewerRevision => (
+                CommandState::Failed,
+                None,
+                Some("effect_superseded_by_newer_revision"),
+            ),
+            ExternalEffectObservation::Absent => {
+                (CommandState::Unknown, None, Some("effect_absent"))
+            }
+            ExternalEffectObservation::Unknown => (
                 CommandState::Unknown,
                 None,
                 Some("manual_reconciliation_required"),
@@ -438,6 +543,7 @@ impl CommandExecutor {
         {
             return Err(CommandError::Rejected("reconciliation_required"));
         }
+        self.require_current_desired_revision(envelope)?;
         self.journal
             .transition_command(
                 &validated.key,
@@ -452,6 +558,38 @@ impl CommandExecutor {
             key: validated.key,
             command_id: validated.command_id,
         })
+    }
+
+    fn desired_revision_fence(
+        &self,
+        envelope: &CommandEnvelope,
+    ) -> Result<DesiredRevisionFence, CommandError> {
+        let Some((resource_type, resource_key, _)) = desired_resource(envelope) else {
+            return Ok(DesiredRevisionFence::Current);
+        };
+        let local_revision = self
+            .journal
+            .applied_revision(resource_type, resource_key)
+            .map_err(pre_effect_failure)?
+            .unwrap_or(0);
+        Ok(match local_revision.cmp(&envelope.expected_revision) {
+            std::cmp::Ordering::Equal => DesiredRevisionFence::Current,
+            std::cmp::Ordering::Greater => DesiredRevisionFence::Superseded,
+            std::cmp::Ordering::Less => DesiredRevisionFence::Gap,
+        })
+    }
+
+    fn require_current_desired_revision(
+        &self,
+        envelope: &CommandEnvelope,
+    ) -> Result<(), CommandError> {
+        match self.desired_revision_fence(envelope)? {
+            DesiredRevisionFence::Current => Ok(()),
+            DesiredRevisionFence::Superseded => Err(CommandError::Rejected(
+                "effect_superseded_by_newer_revision",
+            )),
+            DesiredRevisionFence::Gap => Err(CommandError::Rejected("revision_gap")),
+        }
     }
 
     /// Explicitly retries an Unknown synthetic command only after reconciliation proved absence.
@@ -631,6 +769,27 @@ impl CommandExecutor {
     }
 }
 
+fn desired_resource(envelope: &CommandEnvelope) -> Option<(&'static str, &str, u64)> {
+    match envelope.payload.as_ref()? {
+        command_envelope::Payload::UserCreate(value) => {
+            Some(("user", &value.username, value.desired_revision))
+        }
+        command_envelope::Payload::UserDisable(value) => {
+            Some(("user", &value.username, value.desired_revision))
+        }
+        command_envelope::Payload::UserEnable(value) => {
+            Some(("user", &value.username, value.desired_revision))
+        }
+        command_envelope::Payload::UserPasswordRotate(value) => {
+            Some(("user", &value.username, value.desired_revision))
+        }
+        command_envelope::Payload::GroupApply(value) => {
+            Some(("group", &value.group_name, value.desired_revision))
+        }
+        _ => None,
+    }
+}
+
 struct ValidatedCommand {
     key: [u8; 16],
     command_id: [u8; 16],
@@ -667,6 +826,21 @@ pub fn semantic_payload_hash(envelope: &CommandEnvelope) -> Result<[u8; 32], Com
         }
         Some(command_envelope::Payload::ServiceReload(payload)) => {
             ("ocserv.service.reload", payload.encode_to_vec())
+        }
+        Some(command_envelope::Payload::UserCreate(payload)) => {
+            ("ocserv.users.write", payload.encode_to_vec())
+        }
+        Some(command_envelope::Payload::UserDisable(payload)) => {
+            ("ocserv.users.write", payload.encode_to_vec())
+        }
+        Some(command_envelope::Payload::UserEnable(payload)) => {
+            ("ocserv.users.write", payload.encode_to_vec())
+        }
+        Some(command_envelope::Payload::UserPasswordRotate(payload)) => {
+            ("ocserv.users.write", payload.encode_to_vec())
+        }
+        Some(command_envelope::Payload::GroupApply(payload)) => {
+            ("ocserv.groups.write", payload.encode_to_vec())
         }
         _ => return Err(CommandError::Rejected("capability_rejected")),
     };
@@ -727,6 +901,40 @@ pub fn semantic_payload_hash_v1(envelope: &CommandEnvelope) -> Result<[u8; 32], 
             out.extend_from_slice(utf8);
             (113_u32, out)
         }
+        Some(command_envelope::Payload::UserCreate(payload)) => (
+            101_u32,
+            canonical_secret_payload(
+                &payload.username,
+                &payload.secret_key_id,
+                &payload.sealed_password,
+                payload.desired_revision,
+            )?,
+        ),
+        Some(command_envelope::Payload::UserDisable(payload)) => (
+            102_u32,
+            canonical_named_payload(&payload.username, &[], payload.desired_revision)?,
+        ),
+        Some(command_envelope::Payload::UserPasswordRotate(payload)) => (
+            114_u32,
+            canonical_secret_payload(
+                &payload.username,
+                &payload.secret_key_id,
+                &payload.sealed_password,
+                payload.desired_revision,
+            )?,
+        ),
+        Some(command_envelope::Payload::GroupApply(payload)) => (
+            115_u32,
+            canonical_named_payload(
+                &payload.group_name,
+                &payload.members,
+                payload.desired_revision,
+            )?,
+        ),
+        Some(command_envelope::Payload::UserEnable(payload)) => (
+            116_u32,
+            canonical_named_payload(&payload.username, &[], payload.desired_revision)?,
+        ),
         _ => return Err(CommandError::Rejected("capability_rejected")),
     };
     let mut hash = Sha256::new();
@@ -782,6 +990,7 @@ fn validate_command(
         return Err(CommandError::Rejected("revision_mismatch"));
     }
     let (capability, result, external) = validate_payload(envelope)?;
+    validate_desired_transition(envelope)?;
     if !context.capabilities.contains(capability) {
         return Err(CommandError::Rejected("capability_rejected"));
     }
@@ -865,8 +1074,67 @@ fn validate_payload(
         Some(command_envelope::Payload::ServiceReload(_)) => {
             ("ocserv.service.reload", Vec::new(), true)
         }
+        Some(command_envelope::Payload::UserCreate(payload)) => {
+            validate_name(&payload.username)?;
+            validate_sealed_secret(
+                &payload.secret_key_id,
+                &payload.sealed_password,
+                payload.desired_revision,
+            )?;
+            ("ocserv.users.write", Vec::new(), true)
+        }
+        Some(command_envelope::Payload::UserDisable(payload)) => {
+            validate_name(&payload.username)?;
+            validate_revision(payload.desired_revision)?;
+            ("ocserv.users.write", Vec::new(), true)
+        }
+        Some(command_envelope::Payload::UserEnable(payload)) => {
+            validate_name(&payload.username)?;
+            validate_revision(payload.desired_revision)?;
+            ("ocserv.users.write", Vec::new(), true)
+        }
+        Some(command_envelope::Payload::UserPasswordRotate(payload)) => {
+            validate_name(&payload.username)?;
+            validate_sealed_secret(
+                &payload.secret_key_id,
+                &payload.sealed_password,
+                payload.desired_revision,
+            )?;
+            ("ocserv.users.write", Vec::new(), true)
+        }
+        Some(command_envelope::Payload::GroupApply(payload)) => {
+            validate_name(&payload.group_name)?;
+            validate_revision(payload.desired_revision)?;
+            if payload.members.len() > ocservia_agent_protocol::MAX_MANAGED_RESOURCES {
+                return Err(CommandError::Rejected("group_members_invalid"));
+            }
+            let mut previous = None;
+            for member in &payload.members {
+                validate_name(member)?;
+                if previous.is_some_and(|value: &String| value >= member) {
+                    return Err(CommandError::Rejected("group_members_invalid"));
+                }
+                previous = Some(member);
+            }
+            ("ocserv.groups.write", Vec::new(), true)
+        }
         _ => return Err(CommandError::Rejected("capability_rejected")),
     })
+}
+
+fn validate_desired_transition(envelope: &CommandEnvelope) -> Result<(), CommandError> {
+    let desired = match envelope.payload.as_ref() {
+        Some(command_envelope::Payload::UserCreate(value)) => Some(value.desired_revision),
+        Some(command_envelope::Payload::UserDisable(value)) => Some(value.desired_revision),
+        Some(command_envelope::Payload::UserEnable(value)) => Some(value.desired_revision),
+        Some(command_envelope::Payload::UserPasswordRotate(value)) => Some(value.desired_revision),
+        Some(command_envelope::Payload::GroupApply(value)) => Some(value.desired_revision),
+        _ => None,
+    };
+    if desired.is_some_and(|revision| revision != envelope.expected_revision.saturating_add(1)) {
+        return Err(CommandError::Rejected("revision_mismatch"));
+    }
+    Ok(())
 }
 
 fn validate_session_payload(session_id: &str, boot_id: &str) -> Result<(), CommandError> {
@@ -880,6 +1148,84 @@ fn validate_session_payload(session_id: &str, boot_id: &str) -> Result<(), Comma
         return Err(CommandError::Rejected("boot_id_invalid"));
     }
     Ok(())
+}
+
+fn validate_name(value: &str) -> Result<(), CommandError> {
+    if value.is_empty()
+        || value.len() > 64
+        || !value.as_bytes().iter().enumerate().all(|(index, byte)| {
+            byte.is_ascii_alphanumeric() || (index > 0 && matches!(byte, b'_' | b'.' | b'-'))
+        })
+    {
+        return Err(CommandError::Rejected("name_invalid"));
+    }
+    Ok(())
+}
+
+fn validate_revision(value: u64) -> Result<(), CommandError> {
+    if value == 0 {
+        return Err(CommandError::Rejected("revision_invalid"));
+    }
+    Ok(())
+}
+fn validate_sealed_secret(key_id: &str, secret: &[u8], revision: u64) -> Result<(), CommandError> {
+    validate_revision(revision)?;
+    if key_id.is_empty() || key_id.len() > 128 || secret.len() < 32 || secret.len() > 4096 {
+        return Err(CommandError::Rejected("sealed_secret_invalid"));
+    }
+    Ok(())
+}
+
+fn canonical_named_payload(
+    name: &str,
+    values: &[String],
+    revision: u64,
+) -> Result<Vec<u8>, CommandError> {
+    validate_name(name)?;
+    validate_revision(revision)?;
+    let mut all = Vec::with_capacity(values.len() + 1);
+    all.push(name);
+    for value in values {
+        all.push(value);
+    }
+    let mut out = Vec::new();
+    for value in all {
+        out.extend_from_slice(
+            &u32::try_from(value.len())
+                .map_err(|_| CommandError::Rejected("payload_size_invalid"))?
+                .to_be_bytes(),
+        );
+        out.extend_from_slice(value.as_bytes());
+    }
+    out.extend_from_slice(&0_u32.to_be_bytes());
+    out.extend_from_slice(&revision.to_be_bytes());
+    Ok(out)
+}
+fn canonical_secret_payload(
+    name: &str,
+    key_id: &str,
+    secret: &[u8],
+    revision: u64,
+) -> Result<Vec<u8>, CommandError> {
+    validate_name(name)?;
+    validate_sealed_secret(key_id, secret, revision)?;
+    let mut out = Vec::new();
+    for value in [name, key_id] {
+        out.extend_from_slice(
+            &u32::try_from(value.len())
+                .map_err(|_| CommandError::Rejected("payload_size_invalid"))?
+                .to_be_bytes(),
+        );
+        out.extend_from_slice(value.as_bytes());
+    }
+    out.extend_from_slice(
+        &u32::try_from(secret.len())
+            .map_err(|_| CommandError::Rejected("payload_size_invalid"))?
+            .to_be_bytes(),
+    );
+    out.extend_from_slice(secret);
+    out.extend_from_slice(&revision.to_be_bytes());
+    Ok(out)
 }
 
 fn canonical_session_payload(session_id: &str, boot_id: &str) -> Result<Vec<u8>, CommandError> {
@@ -960,6 +1306,7 @@ impl Backoff {
 pub struct PrivdClient {
     socket: std::path::PathBuf,
     timeout: Duration,
+    desired_timeout: Duration,
 }
 
 impl PrivdClient {
@@ -975,7 +1322,12 @@ impl PrivdClient {
                 "privd timeout invalid",
             ));
         }
-        Ok(Self { socket, timeout })
+        let desired_timeout = timeout.saturating_mul(4).min(Duration::from_secs(30));
+        Ok(Self {
+            socket,
+            timeout,
+            desired_timeout,
+        })
     }
 
     /// Calls exactly one fixed read-only operation.
@@ -987,8 +1339,55 @@ impl PrivdClient {
         &self,
         operation: privd_request::Operation,
     ) -> Result<PrivdResponse, io::Error> {
+        self.call_inner(operation, &[], &[], &[], 0, self.timeout)
+            .await
+    }
+
+    /// Calls one desired-state operation with its stable non-secret command identity.
+    ///
+    /// # Errors
+    ///
+    /// Returns an I/O or deadline error and rejects malformed identity lengths.
+    pub async fn call_desired(
+        &self,
+        operation: privd_request::Operation,
+        command_id: &[u8],
+        idempotency_key: &[u8],
+        semantic_payload_sha256: &[u8],
+        expires_at_unix_seconds: i64,
+    ) -> Result<PrivdResponse, io::Error> {
+        if command_id.len() != 16
+            || idempotency_key.len() != 16
+            || semantic_payload_sha256.len() != 32
+            || expires_at_unix_seconds <= 0
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "desired effect identity invalid",
+            ));
+        }
+        self.call_inner(
+            operation,
+            command_id,
+            idempotency_key,
+            semantic_payload_sha256,
+            expires_at_unix_seconds,
+            self.desired_timeout,
+        )
+        .await
+    }
+
+    async fn call_inner(
+        &self,
+        operation: privd_request::Operation,
+        command_id: &[u8],
+        idempotency_key: &[u8],
+        semantic_payload_sha256: &[u8],
+        expires_at_unix_seconds: i64,
+        timeout: Duration,
+    ) -> Result<PrivdResponse, io::Error> {
         let deadline = SystemTime::now()
-            .checked_add(self.timeout)
+            .checked_add(timeout)
             .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "privd deadline overflow"))?
             .duration_since(UNIX_EPOCH)
             .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "system clock unavailable"))?;
@@ -997,17 +1396,28 @@ impl PrivdClient {
         let request = PrivdRequest {
             request_id: Uuid::now_v7().as_bytes().to_vec(),
             deadline_unix_ms,
+            command_id: command_id.to_vec(),
+            idempotency_key: idempotency_key.to_vec(),
+            semantic_payload_sha256: semantic_payload_sha256.to_vec(),
+            command_expires_at_unix_seconds: expires_at_unix_seconds,
             operation: Some(operation),
         };
-        let mut stream = tokio::time::timeout(self.timeout, UnixStream::connect(&self.socket))
-            .await
-            .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "privd connect timed out"))??;
-        tokio::time::timeout(self.timeout, write_frame(&mut stream, &request))
+        let transport_deadline = tokio::time::Instant::now() + timeout;
+        let mut stream =
+            tokio::time::timeout_at(transport_deadline, UnixStream::connect(&self.socket))
+                .await
+                .map_err(|_| {
+                    io::Error::new(io::ErrorKind::TimedOut, "privd connect timed out")
+                })??;
+        tokio::time::timeout_at(transport_deadline, write_frame(&mut stream, &request))
             .await
             .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "privd request timed out"))??;
-        let response: PrivdResponse = tokio::time::timeout(self.timeout, read_frame(&mut stream))
-            .await
-            .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "privd response timed out"))??;
+        let response: PrivdResponse =
+            tokio::time::timeout_at(transport_deadline, read_frame(&mut stream))
+                .await
+                .map_err(|_| {
+                    io::Error::new(io::ErrorKind::TimedOut, "privd response timed out")
+                })??;
         if response.request_id != request.request_id {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
@@ -1017,7 +1427,7 @@ impl PrivdClient {
         Ok(response)
     }
 
-    /// Reads all five I06 observations with at most four active tasks.
+    /// Reads all seven routine observations with at most four active tasks.
     ///
     /// # Errors
     ///
@@ -1029,6 +1439,8 @@ impl PrivdClient {
             privd_request::Operation::SessionList(ReadRequest {}),
             privd_request::Operation::IpBanList(ReadRequest {}),
             privd_request::Operation::ConfigFingerprint(ReadRequest {}),
+            privd_request::Operation::UserList(ReadRequest {}),
+            privd_request::Operation::GroupList(ReadRequest {}),
         ];
         let permits = std::sync::Arc::new(tokio::sync::Semaphore::new(MAX_READ_CONCURRENCY));
         let mut tasks = tokio::task::JoinSet::new();
@@ -1043,7 +1455,7 @@ impl PrivdClient {
                 client.call(operation).await
             });
         }
-        let mut responses = Vec::with_capacity(5);
+        let mut responses = Vec::with_capacity(7);
         while let Some(result) = tasks.join_next().await {
             responses.push(result.map_err(|_| io::Error::other("read task failed"))??);
         }
@@ -1137,8 +1549,8 @@ pub async fn read_boot_id() -> Result<String, io::Error> {
 #[cfg(test)]
 mod tests {
     use ocservia_contracts::generated::ocserv::platform::agent::v1::{
-        IpBanRemove, ServiceReload, SessionDisconnect, SessionTerminate, SyntheticEcho,
-        SyntheticNoop, command_envelope,
+        GroupApply, IpBanRemove, ServiceReload, SessionDisconnect, SessionTerminate, SyntheticEcho,
+        SyntheticNoop, UserCreate, UserDisable, UserEnable, UserPasswordRotate, command_envelope,
     };
     use prost_types::Timestamp;
     use rand::{SeedableRng, rngs::StdRng};
@@ -1146,6 +1558,36 @@ mod tests {
     use std::process::Command;
 
     use super::*;
+
+    #[test]
+    fn desired_privd_deadline_exceeds_each_child_budget() {
+        let client = PrivdClient::new(
+            std::path::PathBuf::from("/tmp/ocservia-test-privd.sock"),
+            Duration::from_secs(5),
+        )
+        .expect("client");
+        assert_eq!(client.timeout, Duration::from_secs(5));
+        assert_eq!(client.desired_timeout, Duration::from_secs(20));
+        assert!(client.desired_timeout > client.timeout);
+    }
+
+    #[test]
+    fn oversized_group_apply_is_terminally_rejected_before_privd() {
+        let envelope = CommandEnvelope {
+            payload: Some(command_envelope::Payload::GroupApply(GroupApply {
+                group_name: "staff".to_owned(),
+                members: (0..=ocservia_agent_protocol::MAX_MANAGED_RESOURCES)
+                    .map(|index| format!("member{index:03}"))
+                    .collect(),
+                desired_revision: 1,
+            })),
+            ..CommandEnvelope::default()
+        };
+        assert!(matches!(
+            validate_payload(&envelope),
+            Err(CommandError::Rejected("group_members_invalid"))
+        ));
+    }
 
     #[test]
     fn root_is_refused() {
@@ -1284,6 +1726,390 @@ mod tests {
             .join(format!("ocservia-agent-{label}-{}.db", Uuid::now_v7()))
     }
 
+    #[derive(Clone, Copy)]
+    enum DesiredMutation {
+        Create,
+        Rotate,
+        Disable,
+        Enable,
+        Group,
+    }
+
+    fn desired_command(
+        node_id: [u8; 16],
+        mutation: DesiredMutation,
+        name: &str,
+        expected_revision: u64,
+        desired_revision: u64,
+        now: i64,
+    ) -> CommandEnvelope {
+        let mut envelope = command(node_id, *Uuid::now_v7().as_bytes(), "", now);
+        envelope.expected_revision = expected_revision;
+        envelope.payload = Some(match mutation {
+            DesiredMutation::Create => command_envelope::Payload::UserCreate(UserCreate {
+                username: name.to_owned(),
+                sealed_password: vec![0xa1; 64],
+                secret_key_id: "node-key-1".to_owned(),
+                desired_revision,
+            }),
+            DesiredMutation::Rotate => {
+                command_envelope::Payload::UserPasswordRotate(UserPasswordRotate {
+                    username: name.to_owned(),
+                    sealed_password: vec![u8::try_from(desired_revision).unwrap_or(0xa5); 64],
+                    secret_key_id: "node-key-1".to_owned(),
+                    desired_revision,
+                })
+            }
+            DesiredMutation::Disable => command_envelope::Payload::UserDisable(UserDisable {
+                username: name.to_owned(),
+                desired_revision,
+            }),
+            DesiredMutation::Enable => command_envelope::Payload::UserEnable(UserEnable {
+                username: name.to_owned(),
+                desired_revision,
+            }),
+            DesiredMutation::Group => command_envelope::Payload::GroupApply(GroupApply {
+                group_name: name.to_owned(),
+                members: vec!["alice".to_owned()],
+                desired_revision,
+            }),
+        });
+        envelope.semantic_payload_hash_version = SemanticPayloadHashVersion::V1 as i32;
+        envelope.semantic_payload_sha256 = semantic_payload_hash_v1(&envelope)
+            .expect("desired semantic hash")
+            .to_vec();
+        envelope
+    }
+
+    fn desired_context(node_id: [u8; 16], now: i64) -> CommandContext {
+        let mut command_context = context(node_id, now);
+        command_context.observed_revision = None;
+        command_context.capabilities = HashSet::from(["ocserv.users.write", "ocserv.groups.write"]);
+        command_context
+    }
+
+    fn apply_desired(
+        executor: &mut CommandExecutor,
+        envelope: &CommandEnvelope,
+        context: &CommandContext,
+        now: i64,
+        privd_calls: &mut usize,
+    ) {
+        let ExternalPreparation::Execute(command) = executor
+            .prepare_external(envelope, context)
+            .expect("desired command preparation")
+        else {
+            panic!("fresh desired command must execute")
+        };
+        *privd_calls += 1;
+        let (resource_type, resource_key, revision) =
+            desired_resource(envelope).expect("desired resource");
+        executor
+            .complete_external_applied(&command, resource_type, resource_key, revision, now)
+            .expect("complete desired command");
+    }
+
+    #[test]
+    fn stale_cross_kind_user_mutations_are_rejected_before_privd() {
+        let path = temporary_journal("stale-cross-kind");
+        let node = *Uuid::now_v7().as_bytes();
+        let command_context = desired_context(node, 100);
+        let mut executor = CommandExecutor::new(Journal::open(&path).expect("journal"));
+        let mut privd_calls = 0;
+        for (name, applied, stale) in [
+            (
+                "alice",
+                [
+                    DesiredMutation::Create,
+                    DesiredMutation::Rotate,
+                    DesiredMutation::Disable,
+                ],
+                DesiredMutation::Rotate,
+            ),
+            (
+                "bob",
+                [
+                    DesiredMutation::Create,
+                    DesiredMutation::Rotate,
+                    DesiredMutation::Disable,
+                ],
+                DesiredMutation::Enable,
+            ),
+            (
+                "carol",
+                [
+                    DesiredMutation::Create,
+                    DesiredMutation::Rotate,
+                    DesiredMutation::Rotate,
+                ],
+                DesiredMutation::Disable,
+            ),
+        ] {
+            for (index, mutation) in applied.into_iter().enumerate() {
+                let expected = u64::try_from(index).expect("expected revision");
+                apply_desired(
+                    &mut executor,
+                    &desired_command(node, mutation, name, expected, expected + 1, 100),
+                    &command_context,
+                    101 + i64::try_from(index).expect("revision"),
+                    &mut privd_calls,
+                );
+            }
+            let stale = desired_command(node, stale, name, 1, 2, 100);
+            assert!(matches!(
+                executor.prepare_external(&stale, &command_context),
+                Err(CommandError::Rejected(
+                    "effect_superseded_by_newer_revision"
+                ))
+            ));
+        }
+        assert_eq!(privd_calls, 9);
+        for name in ["alice", "bob", "carol"] {
+            assert_eq!(
+                executor
+                    .journal()
+                    .applied_revision("user", name)
+                    .expect("user revision"),
+                Some(3)
+            );
+        }
+        cleanup_journal(&path);
+    }
+
+    #[test]
+    fn stale_group_apply_is_rejected_before_privd() {
+        let path = temporary_journal("stale-group");
+        let node = *Uuid::now_v7().as_bytes();
+        let command_context = desired_context(node, 100);
+        let mut executor = CommandExecutor::new(Journal::open(&path).expect("journal"));
+        let mut privd_calls = 0;
+        for revision in 1..=3 {
+            apply_desired(
+                &mut executor,
+                &desired_command(
+                    node,
+                    DesiredMutation::Group,
+                    "staff",
+                    revision - 1,
+                    revision,
+                    100,
+                ),
+                &command_context,
+                100 + i64::try_from(revision).expect("revision"),
+                &mut privd_calls,
+            );
+        }
+        let stale = desired_command(node, DesiredMutation::Group, "staff", 1, 2, 100);
+        assert!(matches!(
+            executor.prepare_external(&stale, &command_context),
+            Err(CommandError::Rejected(
+                "effect_superseded_by_newer_revision"
+            ))
+        ));
+        assert_eq!(privd_calls, 3);
+        assert_eq!(
+            executor
+                .journal()
+                .applied_revision("group", "staff")
+                .expect("group revision"),
+            Some(3)
+        );
+        cleanup_journal(&path);
+    }
+
+    #[test]
+    fn durable_revision_fence_survives_agent_restart() {
+        let path = temporary_journal("revision-restart");
+        let node = *Uuid::now_v7().as_bytes();
+        let command_context = desired_context(node, 100);
+        let mut privd_calls = 0;
+        {
+            let mut executor = CommandExecutor::new(Journal::open(&path).expect("journal"));
+            for (mutation, expected, desired) in [
+                (DesiredMutation::Create, 0, 1),
+                (DesiredMutation::Rotate, 1, 2),
+                (DesiredMutation::Disable, 2, 3),
+            ] {
+                apply_desired(
+                    &mut executor,
+                    &desired_command(node, mutation, "alice", expected, desired, 100),
+                    &command_context,
+                    101 + i64::try_from(desired).expect("revision"),
+                    &mut privd_calls,
+                );
+            }
+        }
+        let mut restarted = CommandExecutor::new(Journal::open(&path).expect("restart"));
+        let stale = desired_command(node, DesiredMutation::Rotate, "alice", 1, 2, 100);
+        assert!(matches!(
+            restarted.prepare_external(&stale, &command_context),
+            Err(CommandError::Rejected(
+                "effect_superseded_by_newer_revision"
+            ))
+        ));
+        assert_eq!(privd_calls, 3);
+        cleanup_journal(&path);
+    }
+
+    #[test]
+    fn revision_gap_is_rejected_before_privd() {
+        let path = temporary_journal("revision-gap");
+        let node = *Uuid::now_v7().as_bytes();
+        let command_context = desired_context(node, 100);
+        let mut executor = CommandExecutor::new(Journal::open(&path).expect("journal"));
+        let mut privd_calls = 0;
+        apply_desired(
+            &mut executor,
+            &desired_command(node, DesiredMutation::Create, "alice", 0, 1, 100),
+            &command_context,
+            101,
+            &mut privd_calls,
+        );
+        let gap = desired_command(node, DesiredMutation::Disable, "alice", 2, 3, 100);
+        assert!(matches!(
+            executor.prepare_external(&gap, &command_context),
+            Err(CommandError::Rejected("revision_gap"))
+        ));
+        assert_eq!(privd_calls, 1);
+        cleanup_journal(&path);
+    }
+
+    #[test]
+    fn failed_revision_can_be_replaced_without_claiming_it_was_applied() {
+        let path = temporary_journal("failed-revision-replacement");
+        let node = *Uuid::now_v7().as_bytes();
+        let command_context = desired_context(node, 100);
+        let mut executor = CommandExecutor::new(Journal::open(&path).expect("journal"));
+        let mut privd_calls = 0;
+        apply_desired(
+            &mut executor,
+            &desired_command(node, DesiredMutation::Create, "alice", 0, 1, 100),
+            &command_context,
+            101,
+            &mut privd_calls,
+        );
+
+        let failed = desired_command(node, DesiredMutation::Rotate, "alice", 1, 2, 100);
+        let ExternalPreparation::Execute(failed_command) = executor
+            .prepare_external(&failed, &command_context)
+            .expect("prepare failed revision")
+        else {
+            panic!("fresh revision must execute")
+        };
+        executor
+            .complete_external(&failed_command, Err("privd_rejected"), 102)
+            .expect("record deterministic failure");
+        assert_eq!(
+            executor
+                .journal()
+                .applied_revision("user", "alice")
+                .expect("applied revision"),
+            Some(1)
+        );
+
+        let replacement = desired_command(node, DesiredMutation::Rotate, "alice", 1, 2, 100);
+        apply_desired(
+            &mut executor,
+            &replacement,
+            &command_context,
+            103,
+            &mut privd_calls,
+        );
+        assert_eq!(
+            executor
+                .journal()
+                .applied_revision("user", "alice")
+                .expect("replacement revision"),
+            Some(2)
+        );
+        assert_eq!(privd_calls, 2);
+        cleanup_journal(&path);
+    }
+
+    #[test]
+    fn expired_pre_effect_revision_can_be_replaced_without_advancing_applied_revision() {
+        let path = temporary_journal("expired-revision-replacement");
+        let node = *Uuid::now_v7().as_bytes();
+        let command_context = desired_context(node, 100);
+        let mut executor = CommandExecutor::new(Journal::open(&path).expect("journal"));
+        let mut privd_calls = 0;
+        apply_desired(
+            &mut executor,
+            &desired_command(node, DesiredMutation::Create, "alice", 0, 1, 100),
+            &command_context,
+            101,
+            &mut privd_calls,
+        );
+
+        let mut expired = desired_command(node, DesiredMutation::Rotate, "alice", 1, 2, 100);
+        expired.expires_at = Some(prost_types::Timestamp {
+            seconds: command_context.now_unix_seconds,
+            nanos: 0,
+        });
+        assert!(matches!(
+            executor.prepare_external(&expired, &command_context),
+            Err(CommandError::Rejected("command_expired"))
+        ));
+        assert_eq!(
+            executor
+                .journal()
+                .applied_revision("user", "alice")
+                .expect("pre-effect rejection revision"),
+            Some(1)
+        );
+
+        let replacement = desired_command(node, DesiredMutation::Rotate, "alice", 1, 2, 100);
+        apply_desired(
+            &mut executor,
+            &replacement,
+            &command_context,
+            102,
+            &mut privd_calls,
+        );
+        assert_eq!(
+            executor
+                .journal()
+                .applied_revision("user", "alice")
+                .expect("replacement revision"),
+            Some(2)
+        );
+        assert_eq!(privd_calls, 2);
+        cleanup_journal(&path);
+    }
+
+    #[test]
+    fn sequential_cross_kind_user_mutations_advance_one_resource_revision() {
+        let path = temporary_journal("sequential-cross-kind");
+        let node = *Uuid::now_v7().as_bytes();
+        let command_context = desired_context(node, 100);
+        let mut executor = CommandExecutor::new(Journal::open(&path).expect("journal"));
+        let mut privd_calls = 0;
+        for (mutation, expected, desired) in [
+            (DesiredMutation::Create, 0, 1),
+            (DesiredMutation::Rotate, 1, 2),
+            (DesiredMutation::Disable, 2, 3),
+            (DesiredMutation::Enable, 3, 4),
+            (DesiredMutation::Rotate, 4, 5),
+        ] {
+            apply_desired(
+                &mut executor,
+                &desired_command(node, mutation, "alice", expected, desired, 100),
+                &command_context,
+                101 + i64::try_from(desired).expect("revision"),
+                &mut privd_calls,
+            );
+        }
+        assert_eq!(privd_calls, 5);
+        assert_eq!(
+            executor
+                .journal()
+                .applied_revision("user", "alice")
+                .expect("user revision"),
+            Some(5)
+        );
+        cleanup_journal(&path);
+    }
+
     #[test]
     fn external_command_is_durable_and_duplicate_delivery_replays() {
         let path = temporary_journal("external");
@@ -1321,6 +2147,295 @@ mod tests {
         };
         assert!(replayed.replayed);
         assert_eq!(replayed.record.state, CommandState::Succeeded);
+        cleanup_journal(&path);
+    }
+
+    #[test]
+    fn desired_unknown_reconcile_recovers_result_and_applied_revision_after_restart() {
+        let path = temporary_journal("desired-reconcile");
+        let node = *Uuid::now_v7().as_bytes();
+        let key = *Uuid::now_v7().as_bytes();
+        let mut envelope = command(node, key, "", 100);
+        envelope.payload = Some(command_envelope::Payload::UserPasswordRotate(
+            UserPasswordRotate {
+                username: "alice".to_owned(),
+                sealed_password: vec![0xa5; 64],
+                secret_key_id: "node-key-1".to_owned(),
+                desired_revision: 2,
+            },
+        ));
+        envelope.semantic_payload_hash_version = SemanticPayloadHashVersion::V1 as i32;
+        envelope.semantic_payload_sha256 = semantic_payload_hash_v1(&envelope)
+            .expect("password hash")
+            .to_vec();
+        let mut command_context = context(node, 100);
+        command_context.observed_revision = None;
+        command_context.capabilities = HashSet::from(["ocserv.users.write"]);
+        {
+            let mut executor = CommandExecutor::new(Journal::open(&path).expect("journal"));
+            let mut privd_calls = 0;
+            apply_desired(
+                &mut executor,
+                &desired_command(node, DesiredMutation::Create, "alice", 0, 1, 100),
+                &command_context,
+                100,
+                &mut privd_calls,
+            );
+            let ExternalPreparation::Execute(command) = executor
+                .prepare_external(&envelope, &command_context)
+                .expect("prepare")
+            else {
+                panic!("execute preparation")
+            };
+            let unknown = executor
+                .mark_external_unknown(&command, "privd_transport_unknown", 101)
+                .expect("unknown after lost response");
+            assert_eq!(unknown.record.state, CommandState::Unknown);
+        }
+        command_context.now_unix_seconds = 102;
+        let mut executor = CommandExecutor::new(Journal::open(&path).expect("restart"));
+        let recovered = executor
+            .reconcile_external(
+                &envelope,
+                &command_context,
+                ExternalEffectObservation::AppliedExact,
+            )
+            .expect("effect store proves effect");
+        assert_eq!(recovered.record.state, CommandState::Succeeded);
+        assert_eq!(
+            executor
+                .journal()
+                .applied_revision("user", "alice")
+                .expect("applied revision"),
+            Some(2)
+        );
+        drop(executor);
+        cleanup_journal(&path);
+    }
+
+    #[test]
+    fn password_unknown_remains_nonterminal_until_effect_observation() {
+        let path = temporary_journal("password-absence");
+        let node = *Uuid::now_v7().as_bytes();
+        let mut envelope = command(node, *Uuid::now_v7().as_bytes(), "", 100);
+        envelope.payload = Some(command_envelope::Payload::UserPasswordRotate(
+            UserPasswordRotate {
+                username: "alice".to_owned(),
+                sealed_password: vec![0xa5; 64],
+                secret_key_id: "node-key-1".to_owned(),
+                desired_revision: 2,
+            },
+        ));
+        envelope.semantic_payload_hash_version = SemanticPayloadHashVersion::V1 as i32;
+        envelope.semantic_payload_sha256 = semantic_payload_hash_v1(&envelope).unwrap().to_vec();
+        let mut command_context = context(node, 100);
+        command_context.observed_revision = None;
+        command_context.capabilities = HashSet::from(["ocserv.users.write"]);
+        let mut executor = CommandExecutor::new(Journal::open(&path).expect("journal"));
+        let mut privd_calls = 0;
+        apply_desired(
+            &mut executor,
+            &desired_command(node, DesiredMutation::Create, "alice", 0, 1, 100),
+            &command_context,
+            100,
+            &mut privd_calls,
+        );
+        let ExternalPreparation::Execute(command) = executor
+            .prepare_external(&envelope, &command_context)
+            .expect("prepare")
+        else {
+            panic!("execute preparation")
+        };
+        executor
+            .mark_external_unknown(&command, "privd_transport_unknown", 101)
+            .expect("unknown");
+        command_context.now_unix_seconds = 102;
+        let reconciled = executor
+            .reconcile_external(
+                &envelope,
+                &command_context,
+                ExternalEffectObservation::Absent,
+            )
+            .expect("effect absence");
+        assert_eq!(reconciled.record.state, CommandState::Unknown);
+        assert_eq!(
+            reconciled.record.error_code.as_deref(),
+            Some("effect_absent")
+        );
+        assert_eq!(
+            executor
+                .journal()
+                .applied_revision("user", "alice")
+                .unwrap(),
+            Some(1)
+        );
+        drop(executor);
+        cleanup_journal(&path);
+    }
+
+    #[test]
+    fn older_unknown_password_revision_is_reconciled_before_newer_success() {
+        let path = temporary_journal("password-superseded");
+        let node = *Uuid::now_v7().as_bytes();
+        let mut command_context = context(node, 100);
+        command_context.observed_revision = None;
+        command_context.capabilities = HashSet::from(["ocserv.users.write"]);
+        let mut old = command(node, *Uuid::now_v7().as_bytes(), "", 100);
+        old.payload = Some(command_envelope::Payload::UserPasswordRotate(
+            UserPasswordRotate {
+                username: "alice".to_owned(),
+                sealed_password: vec![0xa2; 64],
+                secret_key_id: "node-key-1".to_owned(),
+                desired_revision: 2,
+            },
+        ));
+        old.semantic_payload_hash_version = SemanticPayloadHashVersion::V1 as i32;
+        old.semantic_payload_sha256 = semantic_payload_hash_v1(&old).unwrap().to_vec();
+        let mut newer = command(node, *Uuid::now_v7().as_bytes(), "", 100);
+        newer.expected_revision = 2;
+        newer.payload = Some(command_envelope::Payload::UserPasswordRotate(
+            UserPasswordRotate {
+                username: "alice".to_owned(),
+                sealed_password: vec![0xa3; 64],
+                secret_key_id: "node-key-1".to_owned(),
+                desired_revision: 3,
+            },
+        ));
+        newer.semantic_payload_hash_version = SemanticPayloadHashVersion::V1 as i32;
+        newer.semantic_payload_sha256 = semantic_payload_hash_v1(&newer).unwrap().to_vec();
+
+        let mut executor = CommandExecutor::new(Journal::open(&path).expect("journal"));
+        let mut privd_calls = 0;
+        apply_desired(
+            &mut executor,
+            &desired_command(node, DesiredMutation::Create, "alice", 0, 1, 100),
+            &command_context,
+            100,
+            &mut privd_calls,
+        );
+        let ExternalPreparation::Execute(old_command) = executor
+            .prepare_external(&old, &command_context)
+            .expect("prepare old")
+        else {
+            panic!("old execute preparation")
+        };
+        executor
+            .mark_external_unknown(&old_command, "privd_transport_unknown", 101)
+            .expect("old unknown");
+        assert!(matches!(
+            executor.prepare_external(&newer, &command_context),
+            Err(CommandError::Rejected("revision_gap"))
+        ));
+        executor
+            .reconcile_external(
+                &old,
+                &command_context,
+                ExternalEffectObservation::AppliedExact,
+            )
+            .expect("old applied observation");
+        let ExternalPreparation::Execute(new_command) = executor
+            .prepare_external(&newer, &command_context)
+            .expect("prepare newer")
+        else {
+            panic!("new execute preparation")
+        };
+        executor
+            .complete_external_applied(&new_command, "user", "alice", 3, 102)
+            .expect("newer applied");
+        command_context.now_unix_seconds = 103;
+        let replayed = executor
+            .reconcile_external(
+                &old,
+                &command_context,
+                ExternalEffectObservation::SupersededByNewerRevision,
+            )
+            .expect("old terminal replay");
+        assert_eq!(replayed.record.state, CommandState::Succeeded);
+        assert_eq!(
+            executor
+                .journal()
+                .applied_revision("user", "alice")
+                .expect("applied revision"),
+            Some(3)
+        );
+        cleanup_journal(&path);
+    }
+
+    #[test]
+    fn stale_effect_absent_retry_is_blocked_by_applied_revision() {
+        let path = temporary_journal("password-stale-retry");
+        let node = *Uuid::now_v7().as_bytes();
+        let mut command_context = context(node, 100);
+        command_context.observed_revision = None;
+        command_context.capabilities = HashSet::from(["ocserv.users.write"]);
+        let mut old = command(node, *Uuid::now_v7().as_bytes(), "", 100);
+        old.payload = Some(command_envelope::Payload::UserPasswordRotate(
+            UserPasswordRotate {
+                username: "alice".to_owned(),
+                sealed_password: vec![0xa2; 64],
+                secret_key_id: "node-key-1".to_owned(),
+                desired_revision: 2,
+            },
+        ));
+        old.semantic_payload_hash_version = SemanticPayloadHashVersion::V1 as i32;
+        old.semantic_payload_sha256 = semantic_payload_hash_v1(&old).unwrap().to_vec();
+        let mut newer = old.clone();
+        newer.command_id = Uuid::now_v7().as_bytes().to_vec();
+        newer.idempotency_key = Uuid::now_v7().as_bytes().to_vec();
+        let Some(command_envelope::Payload::UserPasswordRotate(payload)) = newer.payload.as_mut()
+        else {
+            unreachable!()
+        };
+        payload.desired_revision = 3;
+        payload.sealed_password.fill(0xa3);
+        newer.expected_revision = 2;
+        newer.semantic_payload_sha256 = semantic_payload_hash_v1(&newer).unwrap().to_vec();
+        let mut executor = CommandExecutor::new(Journal::open(&path).expect("journal"));
+        let mut privd_calls = 0;
+        apply_desired(
+            &mut executor,
+            &desired_command(node, DesiredMutation::Create, "alice", 0, 1, 100),
+            &command_context,
+            100,
+            &mut privd_calls,
+        );
+        let ExternalPreparation::Execute(old_command) = executor
+            .prepare_external(&old, &command_context)
+            .expect("prepare old")
+        else {
+            panic!("old execute preparation")
+        };
+        executor
+            .mark_external_unknown(&old_command, "privd_transport_unknown", 101)
+            .expect("old unknown");
+        command_context.now_unix_seconds = 102;
+        executor
+            .reconcile_external(&old, &command_context, ExternalEffectObservation::Absent)
+            .expect("old absent");
+        let replacement = desired_command(node, DesiredMutation::Rotate, "alice", 1, 2, 100);
+        apply_desired(
+            &mut executor,
+            &replacement,
+            &command_context,
+            102,
+            &mut privd_calls,
+        );
+        let ExternalPreparation::Execute(new_command) = executor
+            .prepare_external(&newer, &command_context)
+            .expect("prepare newer")
+        else {
+            panic!("new execute preparation")
+        };
+        executor
+            .complete_external_applied(&new_command, "user", "alice", 3, 103)
+            .expect("newer applied");
+        command_context.now_unix_seconds = 104;
+        assert!(matches!(
+            executor.retry_external(&old, &command_context),
+            Err(CommandError::Rejected(
+                "effect_superseded_by_newer_revision"
+            ))
+        ));
         cleanup_journal(&path);
     }
 

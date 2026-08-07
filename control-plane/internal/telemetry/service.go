@@ -2,12 +2,15 @@ package telemetry
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"math"
 	"net"
+	"regexp"
+	"slices"
 	"time"
 
 	agentv1 "github.com/GentleKingson/ocservia/control-plane/gen/proto/ocserv/platform/agent/v1"
@@ -18,8 +21,10 @@ import (
 )
 
 const (
-	MaxBatchBytes = 512 << 10
-	OfflineAfter  = 90 * time.Second
+	MaxBatchBytes       = 512 << 10
+	MaxManagedResources = 384
+	MaxReportedGroups   = MaxManagedResources * 2
+	OfflineAfter        = 90 * time.Second
 )
 
 var allowedMetrics = map[string]bool{
@@ -62,6 +67,20 @@ type IPBan struct {
 	SecondsRemaining *uint64 `json:"seconds_remaining,omitempty"`
 }
 
+type User struct {
+	Username    string `json:"username"`
+	Enabled     bool   `json:"enabled"`
+	Revision    uint64 `json:"revision"`
+	Fingerprint []byte `json:"fingerprint_sha256"`
+}
+
+type Group struct {
+	Name        string   `json:"name"`
+	Members     []string `json:"members"`
+	Revision    uint64   `json:"revision"`
+	Fingerprint []byte   `json:"fingerprint_sha256"`
+}
+
 type Sample struct {
 	SampledAt time.Time `json:"sampled_at"`
 	Metric    string    `json:"metric"`
@@ -86,6 +105,8 @@ type Batch struct {
 	IPBans   []IPBan         `json:"ip_bans"`
 	Samples  []Sample        `json:"samples"`
 	Security []SecurityEvent `json:"security_events"`
+	Users    []User          `json:"users"`
+	Groups   []Group         `json:"groups"`
 }
 
 type Node struct {
@@ -146,28 +167,36 @@ type Service struct {
 func New(pool *pgxpool.Pool) *Service { return &Service{pool: pool, now: time.Now} }
 
 func (s *Service) IngestWire(ctx context.Context, payload []byte) (bool, error) {
+	batch, err := decodeWire(payload)
+	if err != nil {
+		return false, err
+	}
+	return s.Ingest(ctx, batch)
+}
+
+func decodeWire(payload []byte) (Batch, error) {
 	if len(payload) == 0 || len(payload) > MaxBatchBytes {
-		return false, errors.New("telemetry wire batch size invalid")
+		return Batch{}, errors.New("telemetry wire batch size invalid")
 	}
 	var wire agentv1.TelemetryBatch
 	if err := proto.Unmarshal(payload, &wire); err != nil {
-		return false, errors.New("telemetry wire protobuf invalid")
+		return Batch{}, errors.New("telemetry wire protobuf invalid")
 	}
 	batchID, err := uuid.FromBytes(wire.GetBatchId())
 	if err != nil {
-		return false, errors.New("telemetry batch ID invalid")
+		return Batch{}, errors.New("telemetry batch ID invalid")
 	}
 	nodeID, err := uuid.FromBytes(wire.GetNodeId())
 	if err != nil {
-		return false, errors.New("telemetry node ID invalid")
+		return Batch{}, errors.New("telemetry node ID invalid")
 	}
 	snapshot := wire.GetSnapshot()
 	if snapshot == nil || snapshot.GetObservedAt() == nil || snapshot.GetObservedAt().CheckValid() != nil {
-		return false, errors.New("telemetry observed timestamp invalid")
+		return Batch{}, errors.New("telemetry observed timestamp invalid")
 	}
 	instance, err := uuid.FromBytes(snapshot.GetAgentInstanceId())
 	if err != nil {
-		return false, errors.New("telemetry agent instance invalid")
+		return Batch{}, errors.New("telemetry agent instance invalid")
 	}
 	kinds := map[agentv1.TelemetryPriority]string{agentv1.TelemetryPriority_TELEMETRY_PRIORITY_SECURITY: "security", agentv1.TelemetryPriority_TELEMETRY_PRIORITY_CURRENT_HEALTH: "current_health", agentv1.TelemetryPriority_TELEMETRY_PRIORITY_AGGREGATE: "aggregate", agentv1.TelemetryPriority_TELEMETRY_PRIORITY_RAW_HISTORY: "raw_history"}
 	kind := kinds[wire.GetPriority()]
@@ -178,33 +207,39 @@ func (s *Service) IngestWire(ctx context.Context, payload []byte) (bool, error) 
 	}
 	for _, item := range wire.GetSessions() {
 		if item.GetConnectedAt() == nil || item.GetConnectedAt().CheckValid() != nil {
-			return false, errors.New("session timestamp invalid")
+			return Batch{}, errors.New("session timestamp invalid")
 		}
 		if item.GetBytesIn() > math.MaxInt64 || item.GetBytesOut() > math.MaxInt64 {
-			return false, errors.New("session byte count invalid")
+			return Batch{}, errors.New("session byte count invalid")
 		}
 		batch.Sessions = append(batch.Sessions, Session{ID: item.GetSessionId(), Username: item.GetUsername(), ClientIP: item.GetClientIp(), ConnectedAt: item.GetConnectedAt().AsTime(), BytesIn: int64(item.GetBytesIn()), BytesOut: int64(item.GetBytesOut())})
 	}
 	for _, item := range wire.GetIpBans() {
 		batch.IPBans = append(batch.IPBans, IPBan{IP: item.GetIp(), SecondsRemaining: item.SecondsRemaining})
 	}
+	for _, item := range wire.GetUsers() {
+		batch.Users = append(batch.Users, User{Username: item.GetUsername(), Enabled: item.GetEnabled(), Revision: item.GetRevision(), Fingerprint: item.GetFingerprintSha256()})
+	}
+	for _, item := range wire.GetGroups() {
+		batch.Groups = append(batch.Groups, Group{Name: item.GetGroupName(), Members: item.GetMembers(), Revision: item.GetRevision(), Fingerprint: item.GetFingerprintSha256()})
+	}
 	for _, item := range wire.GetSamples() {
 		if item.GetSampledAt() == nil || item.GetSampledAt().CheckValid() != nil {
-			return false, errors.New("sample timestamp invalid")
+			return Batch{}, errors.New("sample timestamp invalid")
 		}
 		batch.Samples = append(batch.Samples, Sample{SampledAt: item.GetSampledAt().AsTime(), Metric: item.GetMetric(), Value: item.GetValue()})
 	}
 	for _, item := range wire.GetSecurityEvents() {
 		id, err := uuid.FromBytes(item.GetEventId())
 		if err != nil {
-			return false, errors.New("security event ID invalid")
+			return Batch{}, errors.New("security event ID invalid")
 		}
 		if item.GetObservedAt() == nil || item.GetObservedAt().CheckValid() != nil {
-			return false, errors.New("security event timestamp invalid")
+			return Batch{}, errors.New("security event timestamp invalid")
 		}
 		batch.Security = append(batch.Security, SecurityEvent{ID: id, ObservedAt: item.GetObservedAt().AsTime(), Severity: item.GetSeverity(), Type: item.GetEventType(), Detail: item.GetDetailJson()})
 	}
-	return s.Ingest(ctx, batch)
+	return batch, nil
 }
 
 func (s *Service) Ingest(ctx context.Context, batch Batch) (bool, error) {
@@ -266,8 +301,27 @@ func (s *Service) Ingest(ctx context.Context, batch Batch) (bool, error) {
 				return false, fmt.Errorf("insert observed IP ban: %w", err)
 			}
 		}
+		if _, err := tx.Exec(ctx, `DELETE FROM observed_users WHERE node_id=$1`, batch.NodeID); err != nil {
+			return false, err
+		}
+		for _, user := range batch.Users {
+			if _, err := tx.Exec(ctx, `INSERT INTO observed_users(node_id,username,enabled,revision,fingerprint,observed_at) VALUES($1,$2,$3,$4,$5,$6)`, batch.NodeID, user.Username, user.Enabled, user.Revision, user.Fingerprint, batch.Snapshot.ObservedAt); err != nil {
+				return false, fmt.Errorf("insert observed user: %w", err)
+			}
+		}
+		if _, err := tx.Exec(ctx, `DELETE FROM observed_groups WHERE node_id=$1`, batch.NodeID); err != nil {
+			return false, err
+		}
+		for _, group := range batch.Groups {
+			if _, err := tx.Exec(ctx, `INSERT INTO observed_groups(node_id,group_name,members,revision,fingerprint,observed_at) VALUES($1,$2,$3,$4,$5,$6)`, batch.NodeID, group.Name, group.Members, group.Revision, group.Fingerprint, batch.Snapshot.ObservedAt); err != nil {
+				return false, fmt.Errorf("insert observed group: %w", err)
+			}
+		}
 		if batch.Snapshot.ObservedAt.After(s.now().Add(-OfflineAfter)) {
 			if _, err := tx.Exec(ctx, `UPDATE nodes SET status='active',updated_at=GREATEST(updated_at,$2),version=version+1 WHERE id=$1 AND status='offline'`, batch.NodeID, batch.Snapshot.ObservedAt); err != nil {
+				return false, err
+			}
+			if _, err := tx.Exec(ctx, `SELECT pg_notify('ocservia_outbox',$1)`, batch.NodeID.String()); err != nil {
 				return false, err
 			}
 		}
@@ -311,8 +365,31 @@ func validateBatch(batch Batch, now time.Time) error {
 			return errors.New("observed documents must be JSON objects")
 		}
 	}
-	if len(batch.Sessions) > 10000 || len(batch.IPBans) > 4096 || len(batch.Samples) > 8192 || len(batch.Security) > 1024 {
+	if len(batch.Sessions) > 10000 || len(batch.IPBans) > 4096 || len(batch.Samples) > 8192 || len(batch.Security) > 1024 || len(batch.Users) > MaxManagedResources || len(batch.Groups) > MaxReportedGroups {
 		return errors.New("telemetry collection count exceeds limit")
+	}
+	namePattern := regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$`)
+	for _, user := range batch.Users {
+		if !namePattern.MatchString(user.Username) || user.Revision > math.MaxInt64 || len(user.Fingerprint) != sha256.Size {
+			return errors.New("user observation is invalid")
+		}
+	}
+	totalMemberships := 0
+	for _, group := range batch.Groups {
+		totalMemberships += len(group.Members)
+		if !namePattern.MatchString(group.Name) || group.Revision > math.MaxInt64 || len(group.Fingerprint) != sha256.Size || len(group.Members) > MaxManagedResources || totalMemberships > MaxManagedResources {
+			return errors.New("group observation is invalid")
+		}
+		copyMembers := slices.Clone(group.Members)
+		slices.Sort(copyMembers)
+		if !slices.Equal(copyMembers, slices.Compact(copyMembers)) || !slices.Equal(copyMembers, group.Members) {
+			return errors.New("group members must be sorted and unique")
+		}
+		for _, member := range group.Members {
+			if !namePattern.MatchString(member) {
+				return errors.New("group member observation is invalid")
+			}
+		}
 	}
 	for _, ban := range batch.IPBans {
 		parsed := net.ParseIP(ban.IP)

@@ -2251,11 +2251,14 @@ version = "0.1.0"
 dependencies = [
  "hex",
  "ocservia-agent-protocol",
+ "rand 0.9.5",
+ "rusqlite",
  "rustix",
  "serde_json",
  "sha2 0.10.9",
  "tokio",
  "uuid",
+ "zeroize",
 ]
 
 [[package]]

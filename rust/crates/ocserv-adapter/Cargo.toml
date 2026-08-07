@@ -9,11 +9,14 @@ publish = false
 [dependencies]
 hex.workspace = true
 ocservia-agent-protocol = { version = "=0.1.0", path = "../agent-protocol" }
+rand.workspace = true
+rusqlite.workspace = true
 rustix.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 tokio = { workspace = true, features = ["fs", "io-util", "macros", "process", "rt", "sync", "time"] }
 uuid.workspace = true
+zeroize.workspace = true
 
 [dev-dependencies]
 uuid = { workspace = true, features = ["v7"] }

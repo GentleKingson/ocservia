@@ -21,7 +21,7 @@ rmdir /usr/libexec/ocservia 2>/dev/null || true
 systemctl daemon-reload
 
 if [[ ${PURGE_STATE} == true ]]; then
-  rm -rf /var/lib/ocservia-agent /etc/ocservia-agent
+  rm -rf /var/lib/ocservia-agent /var/lib/ocservia-privd /etc/ocservia-agent
   userdel ocserv-agent 2>/dev/null || true
   groupdel ocserv-agent 2>/dev/null || true
 fi

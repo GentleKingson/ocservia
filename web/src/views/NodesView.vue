@@ -9,10 +9,17 @@ import {
   Server,
   ShieldOff,
   Users,
+  UserPlus,
+  UserX,
+  UserCheck,
+  KeyRound,
+  ListPlus,
+  CircleStop,
 } from "@lucide/vue";
 import { computed, onMounted, ref } from "vue";
 
 import { useFleetStore } from "../shared/fleet";
+import { recoveryDialogKind } from "../shared/desired-recovery";
 
 const fleet = useFleetStore();
 const pendingAction = ref<{
@@ -22,19 +29,24 @@ const pendingAction = ref<{
 }>();
 const reason = ref("");
 const approvalId = ref("");
-const operationBusy = computed(() =>
-  fleet.latestOperation
-    ? ![
-        "succeeded",
-        "failed",
-        "unknown",
-        "expired",
-        "rolled_back",
-        "drifted",
-        "superseded",
-      ].includes(fleet.latestOperation.state)
-    : false,
+const stateTab = ref<"users" | "groups">("users");
+const desiredDialog = ref<{
+  kind: "create" | "disable" | "enable" | "rotate" | "group";
+  name: string;
+  version: number;
+}>();
+const desiredName = ref("");
+const sealedPassword = ref("");
+const secretKeyId = ref("");
+const groupMembers = ref("");
+const desiredReason = ref("");
+const usersState = computed(() =>
+  fleet.userGroupState.filter((item) => item.kind === "user"),
 );
+const groupsState = computed(() =>
+  fleet.userGroupState.filter((item) => item.kind === "group"),
+);
+const operationBusy = computed(() => fleet.operationTracking);
 onMounted(async () => {
   await fleet.rebuild();
   void fleet.connect();
@@ -67,6 +79,62 @@ async function submitAction(): Promise<void> {
   else if (action.kind === "unban")
     await fleet.removeIpBan(action.target, explanation);
   else await fleet.reloadService(explanation, approvalId.value.trim());
+}
+
+function openDesired(
+  kind: "create" | "disable" | "enable" | "rotate" | "group",
+  name = "",
+  version = 0,
+): void {
+  desiredDialog.value = { kind, name, version };
+  desiredName.value = name;
+  sealedPassword.value = "";
+  secretKeyId.value = "";
+  groupMembers.value =
+    kind === "group"
+      ? (
+          groupsState.value.find((item) => item.name === name)
+            ?.desiredMembers ?? []
+        ).join(", ")
+      : "";
+  desiredReason.value = "";
+}
+async function submitDesired(): Promise<void> {
+  const dialog = desiredDialog.value;
+  const explanation = desiredReason.value.trim();
+  if (!dialog || !explanation) return;
+  desiredDialog.value = undefined;
+  if (dialog.kind === "create")
+    await fleet.createUser(
+      desiredName.value.trim(),
+      dialog.version,
+      sealedPassword.value.trim(),
+      secretKeyId.value.trim(),
+      explanation,
+    );
+  else if (dialog.kind === "disable")
+    await fleet.disableUser(dialog.name, dialog.version, explanation);
+  else if (dialog.kind === "enable")
+    await fleet.enableUser(dialog.name, dialog.version, explanation);
+  else if (dialog.kind === "rotate")
+    await fleet.rotateUserPassword(
+      dialog.name,
+      dialog.version,
+      sealedPassword.value.trim(),
+      secretKeyId.value.trim(),
+      explanation,
+    );
+  else
+    await fleet.applyGroup(
+      desiredName.value.trim(),
+      dialog.version,
+      groupMembers.value
+        .split(",")
+        .map((value) => value.trim())
+        .filter(Boolean)
+        .sort(),
+      explanation,
+    );
 }
 </script>
 
@@ -176,6 +244,19 @@ async function submitAction(): Promise<void> {
           <strong :class="fleet.latestOperation.state">{{
             $t(`operation_${fleet.latestOperation.state}`)
           }}</strong>
+          <button
+            v-if="
+              fleet.operationTracking &&
+              fleet.latestOperation.state === 'unknown'
+            "
+            type="button"
+            class="icon-command"
+            :title="$t('stopTrackingOperation')"
+            :aria-label="$t('stopTrackingOperation')"
+            @click="fleet.detachOperation"
+          >
+            <CircleStop :size="15" />
+          </button>
         </div>
         <p v-if="fleet.operationError" class="operation-error" role="alert">
           {{ fleet.operationError }}
@@ -198,6 +279,175 @@ async function submitAction(): Promise<void> {
             <dd>{{ fleet.sessions.length }}</dd>
           </div>
         </dl>
+        <div class="state-toolbar">
+          <div class="segmented" role="tablist">
+            <button
+              type="button"
+              :class="{ active: stateTab === 'users' }"
+              @click="stateTab = 'users'"
+            >
+              {{ $t("users") }}
+            </button>
+            <button
+              type="button"
+              :class="{ active: stateTab === 'groups' }"
+              @click="stateTab = 'groups'"
+            >
+              {{ $t("groups") }}
+            </button>
+          </div>
+          <button
+            v-if="stateTab === 'users'"
+            type="button"
+            class="icon-command"
+            :title="$t('createUser')"
+            @click="openDesired('create')"
+          >
+            <UserPlus :size="15" />
+          </button>
+          <button
+            v-else
+            type="button"
+            class="icon-command"
+            :title="$t('applyGroup')"
+            @click="openDesired('group')"
+          >
+            <ListPlus :size="15" />
+          </button>
+        </div>
+        <div class="desired-state-list" v-if="stateTab === 'users'">
+          <div v-for="item in usersState" :key="item.name">
+            <span
+              ><strong>{{ item.name }}</strong
+              ><small :class="item.convergence">{{
+                $t(`convergence_${item.convergence}`)
+              }}</small
+              ><small
+                v-if="item.recoveryRequired && !item.recoveryMutationKind"
+                class="drifted"
+                >{{ $t("manualReconciliationRequired") }}</small
+              ></span
+            >
+            <span class="session-actions">
+              <button
+                v-if="recoveryDialogKind(item) === 'create'"
+                type="button"
+                :disabled="operationBusy || !item.desiredVersion"
+                :title="$t('retryCreateUser')"
+                @click="
+                  openDesired('create', item.name, item.desiredVersion ?? 0)
+                "
+              >
+                <UserPlus :size="14" />
+              </button>
+              <button
+                v-else-if="recoveryDialogKind(item) === 'rotate'"
+                type="button"
+                :disabled="operationBusy || !item.desiredVersion"
+                :title="$t('retryRotatePassword')"
+                @click="
+                  openDesired('rotate', item.name, item.desiredVersion ?? 0)
+                "
+              >
+                <KeyRound :size="14" />
+              </button>
+              <button
+                v-else-if="recoveryDialogKind(item) === 'disable'"
+                type="button"
+                class="danger"
+                :disabled="operationBusy || !item.desiredVersion"
+                :title="$t('retryDisableUser')"
+                @click="
+                  openDesired('disable', item.name, item.desiredVersion ?? 0)
+                "
+              >
+                <UserX :size="14" />
+              </button>
+              <button
+                v-else-if="recoveryDialogKind(item) === 'enable'"
+                type="button"
+                :disabled="operationBusy || !item.desiredVersion"
+                :title="$t('retryEnableUser')"
+                @click="
+                  openDesired('enable', item.name, item.desiredVersion ?? 0)
+                "
+              >
+                <UserCheck :size="14" />
+              </button>
+              <button
+                v-if="!item.recoveryRequired"
+                type="button"
+                :disabled="operationBusy || !item.desiredVersion"
+                :title="$t('rotatePassword')"
+                @click="
+                  openDesired('rotate', item.name, item.desiredVersion ?? 0)
+                "
+              >
+                <KeyRound :size="14" />
+              </button>
+              <button
+                v-if="!item.recoveryRequired && item.desiredEnabled === false"
+                type="button"
+                :disabled="operationBusy || !item.desiredVersion"
+                :title="$t('enableUser')"
+                @click="
+                  openDesired('enable', item.name, item.desiredVersion ?? 0)
+                "
+              >
+                <UserCheck :size="14" />
+              </button>
+              <button
+                v-else-if="!item.recoveryRequired"
+                type="button"
+                class="danger"
+                :disabled="operationBusy || !item.desiredVersion"
+                :title="$t('disableUser')"
+                @click="
+                  openDesired('disable', item.name, item.desiredVersion ?? 0)
+                "
+              >
+                <UserX :size="14" />
+              </button>
+            </span>
+          </div>
+          <p v-if="usersState.length === 0">{{ $t("noUsers") }}</p>
+        </div>
+        <div class="desired-state-list" v-else>
+          <div v-for="item in groupsState" :key="item.name">
+            <span
+              ><strong>{{ item.name }}</strong
+              ><small :class="item.convergence">{{
+                $t(`convergence_${item.convergence}`)
+              }}</small
+              ><small
+                v-if="item.recoveryRequired && !item.recoveryMutationKind"
+                class="drifted"
+                >{{ $t("manualReconciliationRequired") }}</small
+              ></span
+            >
+            <button
+              v-if="recoveryDialogKind(item) === 'group'"
+              type="button"
+              class="icon-command"
+              :disabled="operationBusy"
+              :title="$t('retryApplyGroup')"
+              @click="openDesired('group', item.name, item.desiredVersion ?? 0)"
+            >
+              <ListPlus :size="14" />
+            </button>
+            <button
+              v-else-if="!item.recoveryRequired"
+              type="button"
+              class="icon-command"
+              :disabled="operationBusy"
+              :title="$t('applyGroup')"
+              @click="openDesired('group', item.name, item.desiredVersion ?? 0)"
+            >
+              <ListPlus :size="14" />
+            </button>
+          </div>
+          <p v-if="groupsState.length === 0">{{ $t("noGroups") }}</p>
+        </div>
         <div class="session-list">
           <h3>{{ $t("currentSessions") }}</h3>
           <div v-for="session in fleet.sessions" :key="session.id">
@@ -285,6 +535,94 @@ async function submitAction(): Promise<void> {
               !reason.trim() ||
               (pendingAction.kind === 'reload' && !approvalId.trim())
             "
+          >
+            {{ $t("confirm") }}
+          </button>
+        </footer>
+      </form>
+    </div>
+    <div
+      v-if="desiredDialog"
+      class="dialog-backdrop"
+      @click.self="desiredDialog = undefined"
+    >
+      <form class="operation-dialog" @submit.prevent="submitDesired">
+        <header>
+          <h2>
+            {{
+              $t(
+                desiredDialog.kind === "create"
+                  ? "createUser"
+                  : desiredDialog.kind === "disable"
+                    ? "disableUser"
+                    : desiredDialog.kind === "enable"
+                      ? "enableUser"
+                      : desiredDialog.kind === "rotate"
+                        ? "rotatePassword"
+                        : "applyGroup",
+              )
+            }}
+          </h2>
+          <code v-if="desiredDialog.name">{{ desiredDialog.name }}</code>
+        </header>
+        <template
+          v-if="
+            desiredDialog.kind === 'create' || desiredDialog.kind === 'group'
+          "
+          ><label for="desired-name">{{
+            $t(desiredDialog.kind === "group" ? "group" : "user")
+          }}</label
+          ><input
+            id="desired-name"
+            v-model="desiredName"
+            :disabled="
+              desiredDialog.kind === 'create' && desiredDialog.version > 0
+            "
+            maxlength="64"
+            required
+        /></template>
+        <template
+          v-if="
+            desiredDialog.kind === 'create' || desiredDialog.kind === 'rotate'
+          "
+          ><label for="secret-key-id">{{ $t("secretKeyId") }}</label
+          ><input
+            id="secret-key-id"
+            v-model="secretKeyId"
+            maxlength="128"
+            autocomplete="off"
+            required
+          /><label for="sealed-password">{{ $t("sealedPassword") }}</label
+          ><textarea
+            id="sealed-password"
+            v-model="sealedPassword"
+            maxlength="5464"
+            autocomplete="off"
+            required
+          ></textarea>
+        </template>
+        <template v-if="desiredDialog.kind === 'group'"
+          ><label for="group-members">{{ $t("members") }}</label
+          ><textarea
+            id="group-members"
+            v-model="groupMembers"
+            maxlength="65535"
+          ></textarea>
+        </template>
+        <label for="desired-reason">{{ $t("reason") }}</label
+        ><textarea
+          id="desired-reason"
+          v-model="desiredReason"
+          maxlength="512"
+          required
+        ></textarea>
+        <footer>
+          <button type="button" @click="desiredDialog = undefined">
+            {{ $t("cancel") }}</button
+          ><button
+            type="submit"
+            class="primary"
+            :disabled="!desiredReason.trim()"
           >
             {{ $t("confirm") }}
           </button>

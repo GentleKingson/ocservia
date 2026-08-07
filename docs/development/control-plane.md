@@ -58,6 +58,12 @@ Run the browser-to-simulator E2E with `make e2e`. The script scopes every
 container, network, and volume to `COMPOSE_PROJECT` and removes them on success,
 failure, or interruption.
 
+The same Compose stack is used by the browser E2E phase of the `Web` GitHub Actions job. CI gives
+each run and attempt a unique Compose project, retains the Playwright HTML
+report, traces, screenshots, videos, test results, Compose logs, and container
+status as a workflow artifact, then verifies scoped cleanup. `make e2e` is the
+local reproduction command; it is not a separate acceptance environment.
+
 Roll back an unshipped development deployment by stopping the stack, removing
 its named volume, and reverting migration `000002_local_slice` before
 `000001_foundation`. Shipped schema changes use a forward fix or database

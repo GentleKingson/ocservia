@@ -402,6 +402,8 @@ fn new_telemetry_event(
         ],
         security_events: Vec::new(),
         ip_bans: Vec::new(),
+        users: Vec::new(),
+        groups: Vec::new(),
     };
     new_event(
         node_id,

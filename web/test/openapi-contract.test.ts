@@ -20,6 +20,21 @@ interface OpenApiDocument {
           token?: { readOnly?: unknown; writeOnly?: unknown };
         };
       };
+      GroupApplyRequest?: {
+        properties?: { members?: { maxItems?: unknown } };
+      };
+      UserGroupResourceState?: {
+        required?: unknown;
+        properties?: {
+          desired_members?: { maxItems?: unknown };
+          observed_members?: { maxItems?: unknown };
+          recovery_required?: { type?: unknown };
+          recovery_mutation_kind?: { enum?: unknown };
+        };
+      };
+      UserGroupStatePage?: {
+        properties?: { items?: { maxItems?: unknown } };
+      };
     };
   };
 }
@@ -93,5 +108,34 @@ describe("OpenAPI invariants", () => {
         },
       },
     });
+  });
+
+  it("publishes the transport-safe user and group capacity", async () => {
+    const source = await readFile(
+      resolve(import.meta.dirname, "../../openapi/openapi.yaml"),
+      "utf8",
+    );
+    const schemas = (parse(source) as OpenApiDocument).components?.schemas;
+
+    expect(schemas?.GroupApplyRequest?.properties?.members?.maxItems).toBe(384);
+    expect(
+      schemas?.UserGroupResourceState?.properties?.desired_members?.maxItems,
+    ).toBe(384);
+    expect(
+      schemas?.UserGroupResourceState?.properties?.observed_members?.maxItems,
+    ).toBe(384);
+    expect(schemas?.UserGroupStatePage?.properties?.items?.maxItems).toBe(1536);
+    expect(schemas?.UserGroupResourceState?.required).toContain(
+      "recovery_required",
+    );
+    expect(
+      schemas?.UserGroupResourceState?.properties?.recovery_mutation_kind?.enum,
+    ).toEqual([
+      "user_create",
+      "user_disable",
+      "user_enable",
+      "user_password_rotate",
+      "group_apply",
+    ]);
   });
 });

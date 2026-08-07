@@ -13,6 +13,7 @@ import {
   type NodeIpBanPage,
   type NodePage,
   type NodeSessionPage,
+  type UserGroupStatePage,
   type SimulationScenario,
   type Workspace,
 } from "@ocservia/api-client";
@@ -244,6 +245,149 @@ export async function listNodeIpBans(
   signal?: AbortSignal,
 ): Promise<NodeIpBanPage> {
   return nodes.listNodeIpBans({ nodeId }, requestInit(signal));
+}
+
+export async function listNodeUserGroupState(
+  nodeId: string,
+  signal?: AbortSignal,
+): Promise<UserGroupStatePage> {
+  return nodes.listNodeUserGroupState({ nodeId }, requestInit(signal));
+}
+
+function desiredRequest(version: number, reason: string) {
+  return {
+    idempotencyKey: crypto.randomUUID(),
+    ifMatch: `"revision-${String(version)}"`,
+    reason,
+    expectedVersion: version,
+    ttlSeconds: 86400,
+  };
+}
+
+export async function createUser(
+  nodeId: string,
+  name: string,
+  version: number,
+  sealedPassword: string,
+  secretKeyId: string,
+  reason: string,
+  signal?: AbortSignal,
+): Promise<Operation> {
+  const request = desiredRequest(version, reason);
+  return operations.createNodeUser(
+    {
+      nodeId,
+      idempotencyKey: request.idempotencyKey,
+      ifMatch: request.ifMatch,
+      userCreateRequest: {
+        name,
+        sealedPassword,
+        secretKeyId,
+        reason: request.reason,
+        expectedVersion: request.expectedVersion,
+        ttlSeconds: request.ttlSeconds,
+      },
+    },
+    requestInit(signal),
+  );
+}
+export async function disableUser(
+  nodeId: string,
+  username: string,
+  version: number,
+  reason: string,
+  signal?: AbortSignal,
+): Promise<Operation> {
+  const request = desiredRequest(version, reason);
+  return operations.disableNodeUser(
+    {
+      nodeId,
+      username,
+      idempotencyKey: request.idempotencyKey,
+      ifMatch: request.ifMatch,
+      desiredMutationRequest: {
+        reason: request.reason,
+        expectedVersion: version,
+        ttlSeconds: request.ttlSeconds,
+      },
+    },
+    requestInit(signal),
+  );
+}
+export async function enableUser(
+  nodeId: string,
+  username: string,
+  version: number,
+  reason: string,
+  signal?: AbortSignal,
+): Promise<Operation> {
+  const request = desiredRequest(version, reason);
+  return operations.enableNodeUser(
+    {
+      nodeId,
+      username,
+      idempotencyKey: request.idempotencyKey,
+      ifMatch: request.ifMatch,
+      desiredMutationRequest: {
+        reason: request.reason,
+        expectedVersion: version,
+        ttlSeconds: request.ttlSeconds,
+      },
+    },
+    requestInit(signal),
+  );
+}
+export async function rotateUserPassword(
+  nodeId: string,
+  username: string,
+  version: number,
+  sealedPassword: string,
+  secretKeyId: string,
+  reason: string,
+  signal?: AbortSignal,
+): Promise<Operation> {
+  const request = desiredRequest(version, reason);
+  return operations.rotateNodeUserPassword(
+    {
+      nodeId,
+      username,
+      idempotencyKey: request.idempotencyKey,
+      ifMatch: request.ifMatch,
+      passwordRotateRequest: {
+        sealedPassword,
+        secretKeyId,
+        reason: request.reason,
+        expectedVersion: version,
+        ttlSeconds: request.ttlSeconds,
+      },
+    },
+    requestInit(signal),
+  );
+}
+export async function applyGroup(
+  nodeId: string,
+  groupName: string,
+  version: number,
+  members: string[],
+  reason: string,
+  signal?: AbortSignal,
+): Promise<Operation> {
+  const request = desiredRequest(version, reason);
+  return operations.applyNodeGroup(
+    {
+      nodeId,
+      groupName,
+      idempotencyKey: request.idempotencyKey,
+      ifMatch: request.ifMatch,
+      groupApplyRequest: {
+        members: new Set(members),
+        reason: request.reason,
+        expectedVersion: version,
+        ttlSeconds: request.ttlSeconds,
+      },
+    },
+    requestInit(signal),
+  );
 }
 
 function controlledRequest(node: NodeObservedState, reason: string) {

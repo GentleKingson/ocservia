@@ -176,6 +176,22 @@ message TelemetryBatch {
   repeated MetricSample samples = 7;
   repeated SecurityObservation security_events = 8;
   repeated IpBanObservation ip_bans = 9;
+  repeated UserObservation users = 10;
+  repeated GroupObservation groups = 11;
+}
+
+message UserObservation {
+  string username = 1;
+  bool enabled = 2;
+  uint64 revision = 3;
+  bytes fingerprint_sha256 = 4;
+}
+
+message GroupObservation {
+  string group_name = 1;
+  repeated string members = 2;
+  uint64 revision = 3;
+  bytes fingerprint_sha256 = 4;
 }
 
 message CommandEnvelope {
@@ -206,6 +222,9 @@ message CommandEnvelope {
     SyntheticEcho synthetic_echo = 108;
     SessionTerminate session_terminate = 112;
     IpBanRemove ip_ban_remove = 113;
+    UserPasswordRotate user_password_rotate = 114;
+    GroupApply group_apply = 115;
+    UserEnable user_enable = 116;
   }
   CommandDeliveryMode delivery_mode = 109;
   SemanticPayloadHashVersion semantic_payload_hash_version = 110;
@@ -228,10 +247,32 @@ message IpBanRemove {
 
 message UserCreate {
   string username = 1;
+  bytes sealed_password = 2;
+  string secret_key_id = 3;
+  uint64 desired_revision = 4;
 }
 
 message UserDisable {
   string username = 1;
+  uint64 desired_revision = 2;
+}
+
+message UserEnable {
+  string username = 1;
+  uint64 desired_revision = 2;
+}
+
+message UserPasswordRotate {
+  string username = 1;
+  bytes sealed_password = 2;
+  string secret_key_id = 3;
+  uint64 desired_revision = 4;
+}
+
+message GroupApply {
+  string group_name = 1;
+  repeated string members = 2;
+  uint64 desired_revision = 3;
 }
 
 message ConfigPlan {

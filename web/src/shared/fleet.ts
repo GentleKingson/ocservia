@@ -3,6 +3,7 @@ import type {
   NodeObservedState,
   NodeSession,
   Operation,
+  UserGroupResourceState,
 } from "@ocservia/api-client";
 import { defineStore } from "pinia";
 import { computed, onScopeDispose, ref } from "vue";
@@ -22,25 +23,60 @@ import {
   probeAuthentication,
   workspaceContext,
   workspaceChangedEvent,
+  listNodeUserGroupState,
+  createUser,
+  disableUser,
+  enableUser,
+  rotateUserPassword,
+  applyGroup,
   type WorkspaceContext,
 } from "../api/client";
 
 const terminalStates = new Set([
   "succeeded",
   "failed",
-  "unknown",
   "expired",
   "rolled_back",
   "drifted",
   "superseded",
 ]);
+const recoveryPollDelays = [1_500, 3_000, 5_000] as const;
+
+function pollDelay(state: Operation["state"], recoveryAttempt: number): number {
+  if (state !== "unknown") return 750;
+  return (
+    recoveryPollDelays[
+      Math.min(recoveryAttempt, recoveryPollDelays.length - 1)
+    ] ?? 5_000
+  );
+}
+
+function waitForPoll(delay: number, signal: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(finish, delay);
+    function finish(): void {
+      signal.removeEventListener("abort", abort);
+      resolve();
+    }
+    function abort(): void {
+      clearTimeout(timer);
+      signal.removeEventListener("abort", abort);
+      reject(new DOMException("Operation polling aborted", "AbortError"));
+    }
+    if (signal.aborted) abort();
+    else signal.addEventListener("abort", abort, { once: true });
+  });
+}
 
 export const useFleetStore = defineStore("fleet", () => {
   const nodes = ref<NodeObservedState[]>([]);
   const selected = ref<NodeObservedState>();
   const sessions = ref<NodeSession[]>([]);
   const ipBans = ref<NodeIpBan[]>([]);
+  const userGroupState = ref<UserGroupResourceState[]>([]);
   const latestOperation = ref<Operation>();
+  const activeOperation = ref<Operation>();
+  const operationTracking = ref(false);
   const operationError = ref("");
   const loading = ref(false);
   const unavailable = ref(false);
@@ -77,6 +113,8 @@ export const useFleetStore = defineStore("fleet", () => {
     rebuildController = undefined;
     selectController = undefined;
     operationController = undefined;
+    activeOperation.value = undefined;
+    operationTracking.value = false;
     rebuildSequence += 1;
     selectSequence += 1;
     operationSequence += 1;
@@ -167,6 +205,13 @@ export const useFleetStore = defineStore("fleet", () => {
   }
 
   async function select(nodeId: string): Promise<void> {
+    if (selected.value && selected.value.id !== nodeId) {
+      cancelRequest(operationController);
+      operationController = undefined;
+      activeOperation.value = undefined;
+      operationTracking.value = false;
+      operationSequence += 1;
+    }
     cancelRequest(selectController);
     const controller = trackRequest();
     selectController = controller;
@@ -195,10 +240,14 @@ export const useFleetStore = defineStore("fleet", () => {
       if (!isLatestSelect()) return;
       const rebuiltIpBans = (await listNodeIpBans(nodeId, controller.signal))
         .items;
+      const rebuiltUserGroupState = (
+        await listNodeUserGroupState(nodeId, controller.signal)
+      ).items;
       if (!isLatestSelect()) return;
       selected.value = node;
       sessions.value = rebuiltSessions;
       ipBans.value = rebuiltIpBans;
+      userGroupState.value = rebuiltUserGroupState;
       unavailable.value = false;
     } catch {
       if (!context) return;
@@ -220,16 +269,12 @@ export const useFleetStore = defineStore("fleet", () => {
       signal: AbortSignal,
     ) => Promise<Operation>,
   ): Promise<void> {
-    if (
-      !selected.value ||
-      (latestOperation.value &&
-        !terminalStates.has(latestOperation.value.state))
-    )
-      return;
+    if (!selected.value || operationTracking.value) return;
     cancelRequest(operationController);
     const context = workspaceContext();
     const controller = trackRequest();
     operationController = controller;
+    operationTracking.value = true;
     const sequence = ++operationSequence;
     const selectSequenceAtStart = selectSequence;
     const isLatestOperation = () =>
@@ -242,8 +287,14 @@ export const useFleetStore = defineStore("fleet", () => {
       let currentOperation = await create(node, controller.signal);
       if (!isLatestOperation()) return;
       latestOperation.value = currentOperation;
+      activeOperation.value = currentOperation;
+      let recoveryAttempt = 0;
       while (!terminalStates.has(currentOperation.state)) {
-        await new Promise((resolve) => setTimeout(resolve, 750));
+        const recovering = currentOperation.state === "unknown";
+        await waitForPoll(
+          pollDelay(currentOperation.state, recoveryAttempt),
+          controller.signal,
+        );
         if (!isLatestOperation()) return;
         currentOperation = await getOperation(
           currentOperation.id,
@@ -251,6 +302,8 @@ export const useFleetStore = defineStore("fleet", () => {
         );
         if (!isLatestOperation()) return;
         latestOperation.value = currentOperation;
+        activeOperation.value = currentOperation;
+        recoveryAttempt = recovering ? recoveryAttempt + 1 : 0;
       }
       if (
         isLatestOperation() &&
@@ -266,8 +319,21 @@ export const useFleetStore = defineStore("fleet", () => {
         error instanceof Error ? error.message : "Operation failed";
     } finally {
       releaseRequest(controller);
-      if (operationController === controller) operationController = undefined;
+      if (operationController === controller) {
+        operationController = undefined;
+        activeOperation.value = undefined;
+        operationTracking.value = false;
+      }
     }
+  }
+
+  function detachOperation(): void {
+    if (!operationController) return;
+    cancelRequest(operationController);
+    operationController = undefined;
+    activeOperation.value = undefined;
+    operationTracking.value = false;
+    operationSequence += 1;
   }
 
   async function disconnectSessionAction(
@@ -292,6 +358,73 @@ export const useFleetStore = defineStore("fleet", () => {
   async function reload(reason: string, approvalId: string): Promise<void> {
     await runOperation((node, signal) =>
       reloadService(node, reason, approvalId, signal),
+    );
+  }
+
+  async function createUserAction(
+    name: string,
+    version: number,
+    sealedPassword: string,
+    secretKeyId: string,
+    reason: string,
+  ): Promise<void> {
+    await runOperation((node, signal) =>
+      createUser(
+        node.id,
+        name,
+        version,
+        sealedPassword,
+        secretKeyId,
+        reason,
+        signal,
+      ),
+    );
+  }
+  async function disableUserAction(
+    username: string,
+    version: number,
+    reason: string,
+  ): Promise<void> {
+    await runOperation((node, signal) =>
+      disableUser(node.id, username, version, reason, signal),
+    );
+  }
+  async function enableUserAction(
+    username: string,
+    version: number,
+    reason: string,
+  ): Promise<void> {
+    await runOperation((node, signal) =>
+      enableUser(node.id, username, version, reason, signal),
+    );
+  }
+  async function rotatePasswordAction(
+    username: string,
+    version: number,
+    sealedPassword: string,
+    secretKeyId: string,
+    reason: string,
+  ): Promise<void> {
+    await runOperation((node, signal) =>
+      rotateUserPassword(
+        node.id,
+        username,
+        version,
+        sealedPassword,
+        secretKeyId,
+        reason,
+        signal,
+      ),
+    );
+  }
+  async function applyGroupAction(
+    groupName: string,
+    version: number,
+    members: string[],
+    reason: string,
+  ): Promise<void> {
+    await runOperation((node, signal) =>
+      applyGroup(node.id, groupName, version, members, reason, signal),
     );
   }
 
@@ -350,7 +483,10 @@ export const useFleetStore = defineStore("fleet", () => {
     selected.value = undefined;
     sessions.value = [];
     ipBans.value = [];
+    userGroupState.value = [];
     latestOperation.value = undefined;
+    activeOperation.value = undefined;
+    operationTracking.value = false;
     operationError.value = "";
     loading.value = false;
     void rebuild().then(() => connect());
@@ -367,7 +503,10 @@ export const useFleetStore = defineStore("fleet", () => {
     selected,
     sessions,
     ipBans,
+    userGroupState,
     latestOperation,
+    activeOperation,
+    operationTracking,
     operationError,
     loading,
     unavailable,
@@ -382,5 +521,11 @@ export const useFleetStore = defineStore("fleet", () => {
     terminateSession: terminate,
     removeIpBan: unban,
     reloadService: reload,
+    createUser: createUserAction,
+    disableUser: disableUserAction,
+    enableUser: enableUserAction,
+    rotateUserPassword: rotatePasswordAction,
+    applyGroup: applyGroupAction,
+    detachOperation,
   };
 });

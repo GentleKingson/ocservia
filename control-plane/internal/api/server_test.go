@@ -13,6 +13,7 @@ import (
 
 	"github.com/GentleKingson/ocservia/control-plane/internal/enrollment"
 	"github.com/GentleKingson/ocservia/control-plane/internal/localslice"
+	"github.com/GentleKingson/ocservia/control-plane/internal/userstate"
 )
 
 func TestLiveAndRequestID(t *testing.T) {
@@ -50,6 +51,52 @@ func TestOperationsRequireAuthenticatedPrincipal(t *testing.T) {
 		}
 		if response.Header().Get("WWW-Authenticate") != "OIDC" {
 			t.Fatalf("%s missing OIDC challenge", path)
+		}
+	}
+}
+
+func TestUserStateCapacityErrorUsesConflictProblem(t *testing.T) {
+	server := &Server{logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/nodes/node/users", nil)
+	response := httptest.NewRecorder()
+	server.writeUserStateError(response, request, userstate.ErrCapacityExceeded)
+	if response.Code != http.StatusConflict {
+		t.Fatalf("status = %d", response.Code)
+	}
+	var problem struct {
+		Type string `json:"type"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &problem); err != nil {
+		t.Fatal(err)
+	}
+	if problem.Type != "https://ocservia.dev/problems/capacity-exceeded" {
+		t.Fatalf("problem type = %q", problem.Type)
+	}
+}
+
+func TestUserStateRevisionSlotErrorsUseConflictProblems(t *testing.T) {
+	tests := []struct {
+		err         error
+		problemType string
+	}{
+		{userstate.ErrRevisionPending, "https://ocservia.dev/problems/desired-revision-pending"},
+		{userstate.ErrRevisionRecovery, "https://ocservia.dev/problems/desired-revision-recovery-required"},
+	}
+	server := &Server{logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
+	for _, test := range tests {
+		response := httptest.NewRecorder()
+		server.writeUserStateError(response, httptest.NewRequest(http.MethodPost, "/api/v1/nodes/node/users", nil), test.err)
+		if response.Code != http.StatusConflict {
+			t.Fatalf("%s status = %d", test.problemType, response.Code)
+		}
+		var problem struct {
+			Type string `json:"type"`
+		}
+		if err := json.Unmarshal(response.Body.Bytes(), &problem); err != nil {
+			t.Fatal(err)
+		}
+		if problem.Type != test.problemType {
+			t.Fatalf("problem type = %q want %q", problem.Type, test.problemType)
 		}
 	}
 }

@@ -8,7 +8,7 @@ publish = false
 
 [dependencies]
 prost.workspace = true
-tokio = { workspace = true, features = ["io-util", "macros", "rt"] }
+tokio = { workspace = true, features = ["io-util", "macros", "net", "rt"] }
 
 [lints]
 workspace = true

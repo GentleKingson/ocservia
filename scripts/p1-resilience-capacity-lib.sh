@@ -49,6 +49,28 @@ interrupted_operation_is_final() {
   [[ $1 == "unknown" ]]
 }
 
+write_interrupted_operation_evidence() {
+  local initial_file=$1 final_file=$2 summary_file=$3
+  local initial_id final_id initial_state final_state
+
+  if ! initial_id="$(jq -er '.id | strings | select(length > 0)' "${initial_file}")" \
+    || ! final_id="$(jq -er '.id | strings | select(length > 0)' "${final_file}")" \
+    || ! initial_state="$(jq -er '.state | select(. == "queued" or . == "dispatched")' "${initial_file}")" \
+    || ! final_state="$(jq -er '.state | select(. == "unknown")' "${final_file}")"; then
+    echo "interrupted operation evidence has invalid state or identity" >&2
+    return 1
+  fi
+  if [[ "${initial_id}" != "${final_id}" ]]; then
+    echo "interrupted operation evidence identity mismatch" >&2
+    return 1
+  fi
+
+  jq -n --arg operation_id "${initial_id}" --arg initial_state "${initial_state}" \
+    --arg final_state "${final_state}" \
+    '{operation_id:$operation_id,initial_state:$initial_state,final_state:$final_state}' \
+    >"${summary_file}"
+}
+
 wait_for_interrupted_operation() {
   local operation_id=$1 attempts=$2 delay=$3 reader=$4
   local attempt state="unread"

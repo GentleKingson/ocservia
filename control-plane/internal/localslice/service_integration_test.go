@@ -502,6 +502,61 @@ func TestUnknownSchedulesExplicitReconcileThenSafeRetryIntegration(t *testing.T)
 	assertOutboxMode(agentv1.CommandDeliveryMode_COMMAND_DELIVERY_MODE_RETRY_IF_EFFECT_ABSENT)
 }
 
+func TestCapacityExceededResultFailsWithoutReconciliationIntegration(t *testing.T) {
+	fixture := newCommandResultFixture(t)
+	failed := fixture.validResult()
+	failed.State = agentv1.CommandResultState_COMMAND_RESULT_STATE_FAILED
+	failed.Result = nil
+	failed.ErrorCode = "capacity_exceeded"
+	if _, err := fixture.ingestResult(t, failed); err != nil {
+		t.Fatal(err)
+	}
+
+	var operationState, commandState, errorCode string
+	var recoveryEvents int
+	if err := fixture.pool.QueryRow(context.Background(), `SELECT (SELECT state FROM operations WHERE id=$1),(SELECT state FROM commands WHERE id=$2),(SELECT error_code FROM agent_command_results WHERE command_id=$2),(SELECT count(*) FROM outbox_events WHERE command_id=$2 AND published_at IS NULL)`, fixture.operationID, fixture.commandID).Scan(&operationState, &commandState, &errorCode, &recoveryEvents); err != nil {
+		t.Fatal(err)
+	}
+	if operationState != "failed" || commandState != "failed" || errorCode != "capacity_exceeded" || recoveryEvents != 0 {
+		t.Fatalf("capacity result operation=%s command=%s error=%s recovery=%d", operationState, commandState, errorCode, recoveryEvents)
+	}
+}
+
+func TestPrivdUnknownResultsScheduleReconcileOnlyIntegration(t *testing.T) {
+	for _, reason := range []string{"privd_transport_unknown", "privd_outcome_unknown"} {
+		t.Run(reason, func(t *testing.T) {
+			fixture := newCommandResultFixture(t)
+			outboxID := uuid.Must(uuid.NewV7())
+			envelopeBytes, err := proto.Marshal(fixture.envelope)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := fixture.pool.Exec(context.Background(), `INSERT INTO outbox_events(id,command_id,event_type,payload,available_at,published_at,created_at) VALUES($1,$2,'command.dispatch',$3,$4,$4,$4)`, outboxID, fixture.commandID, envelopeBytes, fixture.issuedAt); err != nil {
+				t.Fatal(err)
+			}
+			unknown := fixture.validResult()
+			unknown.State = agentv1.CommandResultState_COMMAND_RESULT_STATE_UNKNOWN
+			unknown.Result = nil
+			unknown.ErrorCode = reason
+			if _, err := fixture.ingestResult(t, unknown); err != nil {
+				t.Fatal(err)
+			}
+			var payload []byte
+			var unpublished bool
+			if err := fixture.pool.QueryRow(context.Background(), `SELECT payload,published_at IS NULL FROM outbox_events WHERE id=$1`, outboxID).Scan(&payload, &unpublished); err != nil {
+				t.Fatal(err)
+			}
+			var recovered agentv1.CommandEnvelope
+			if err := proto.Unmarshal(payload, &recovered); err != nil {
+				t.Fatal(err)
+			}
+			if recovered.GetDeliveryMode() != agentv1.CommandDeliveryMode_COMMAND_DELIVERY_MODE_RECONCILE_ONLY || !unpublished {
+				t.Fatalf("recovery mode=%s unpublished=%v", recovered.GetDeliveryMode(), unpublished)
+			}
+		})
+	}
+}
+
 // ---- Canonical Semantic Payload Hash v1 ----
 //
 // The tests below pin the v1 algorithm defined in

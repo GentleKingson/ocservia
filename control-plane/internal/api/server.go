@@ -23,6 +23,7 @@ import (
 	"github.com/GentleKingson/ocservia/control-plane/internal/rbac"
 	telemetrystore "github.com/GentleKingson/ocservia/control-plane/internal/telemetry"
 	"github.com/GentleKingson/ocservia/control-plane/internal/transportclient"
+	"github.com/GentleKingson/ocservia/control-plane/internal/userstate"
 	"github.com/GentleKingson/ocservia/control-plane/migrations"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
@@ -56,6 +57,7 @@ type Server struct {
 	rbac           *rbac.Service
 	approvals      *approvals.Service
 	audit          *audit.Manager
+	userstate      *userstate.Service
 }
 
 func New(address string, pool *pgxpool.Pool, build BuildInfo, logger *slog.Logger, bodyLimit int64, requestTimeout time.Duration, devAuth bool, devAuthToken string, expectedSchema int64) *Server {
@@ -91,6 +93,10 @@ func New(address string, pool *pgxpool.Pool, build BuildInfo, logger *slog.Logge
 	mux.HandleFunc("GET /api/v1/nodes/{node_id}/sessions", s.requireOperationAuth(s.listNodeSessions))
 	mux.HandleFunc("GET /api/v1/nodes/{node_id}/ip-bans", s.requireOperationAuth(s.listNodeIPBans))
 	mux.HandleFunc("GET /api/v1/nodes/{node_id}/telemetry", s.requireOperationAuth(s.listNodeTelemetry))
+	mux.HandleFunc("GET /api/v1/nodes/{node_id}/user-group-state", s.requireOperationAuth(s.listUserGroupState))
+	mux.HandleFunc("POST /api/v1/nodes/{node_id}/users", s.requireOperationAuth(s.createUser))
+	mux.HandleFunc("POST /api/v1/nodes/{node_id}/users/{user_action}", s.requireOperationAuth(s.userAction))
+	mux.HandleFunc("PUT /api/v1/nodes/{node_id}/groups/{group_name}", s.requireOperationAuth(s.applyGroup))
 	mux.HandleFunc("POST /api/v1/approval-requests", s.requireOperationAuth(s.createApproval))
 	mux.HandleFunc("POST /api/v1/approval-requests/{approval_id}", s.requireOperationAuth(s.approveRequest))
 	mux.HandleFunc("GET /api/v1/audit/events", s.requireOperationAuth(s.listAuditEvents))
@@ -105,6 +111,8 @@ func New(address string, pool *pgxpool.Pool, build BuildInfo, logger *slog.Logge
 func (s *Server) EnableTelemetry(service *telemetrystore.Service) { s.telemetry = service }
 
 func (s *Server) EnableOperations(service *operationstore.Service) { s.operations = service }
+
+func (s *Server) EnableUserState(service *userstate.Service) { s.userstate = service }
 
 func (s *Server) EnableAuthorization(authn *auth.Service, authz *rbac.Service, approvalService *approvals.Service, auditManager *audit.Manager) {
 	s.auth, s.rbac, s.approvals, s.audit = authn, authz, approvalService, auditManager
@@ -211,8 +219,17 @@ func routeMethod(path string) (string, bool) {
 	if len(parts) == 4 && parts[0] == "api" && parts[1] == "v1" && parts[2] == "nodes" && parts[3] != "" {
 		return http.MethodGet, true
 	}
-	if len(parts) == 5 && parts[0] == "api" && parts[1] == "v1" && parts[2] == "nodes" && parts[3] != "" && (parts[4] == "sessions" || parts[4] == "telemetry" || parts[4] == "ip-bans") {
+	if len(parts) == 5 && parts[0] == "api" && parts[1] == "v1" && parts[2] == "nodes" && parts[3] != "" && (parts[4] == "sessions" || parts[4] == "telemetry" || parts[4] == "ip-bans" || parts[4] == "user-group-state") {
 		return http.MethodGet, true
+	}
+	if len(parts) == 5 && parts[0] == "api" && parts[1] == "v1" && parts[2] == "nodes" && parts[3] != "" && parts[4] == "users" {
+		return http.MethodPost, true
+	}
+	if len(parts) == 6 && parts[0] == "api" && parts[1] == "v1" && parts[2] == "nodes" && parts[3] != "" && parts[4] == "users" && (strings.HasSuffix(parts[5], ":disable") || strings.HasSuffix(parts[5], ":enable") || strings.HasSuffix(parts[5], ":rotate-password")) {
+		return http.MethodPost, true
+	}
+	if len(parts) == 6 && parts[0] == "api" && parts[1] == "v1" && parts[2] == "nodes" && parts[3] != "" && parts[4] == "groups" && parts[5] != "" {
+		return http.MethodPut, true
 	}
 	if len(parts) == 5 && parts[0] == "api" && parts[1] == "v1" && parts[2] == "nodes" && parts[3] != "" && parts[4] == "synthetic-commands" {
 		return http.MethodPost, true
