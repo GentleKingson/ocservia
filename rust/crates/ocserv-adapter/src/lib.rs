@@ -3599,9 +3599,9 @@ mod tests {
         let users = directory.join("ocpasswd");
         let original = b"alice:staff:!$6$original-hash\n";
         std::fs::write(&users, original).expect("original");
-        let openssl = executable("openssl-fast", "printf rotated-password");
+        let openssl = executable("openssl-fast", "cat >/dev/null; printf rotated-password");
         let openssl_directory = openssl.parent().expect("openssl parent").to_owned();
-        let slow_ocpasswd = executable("ocpasswd-slow", "sleep 5");
+        let slow_ocpasswd = executable("ocpasswd-slow", "cat >/dev/null; sleep 5");
         let slow_directory = slow_ocpasswd
             .parent()
             .expect("slow ocpasswd parent")
@@ -4520,7 +4520,7 @@ mod tests {
 
     #[tokio::test]
     async fn child_timeout_and_output_limit_are_enforced() {
-        let timeout_program = executable("slow-ocserv", "while :; do :; done");
+        let timeout_program = executable("slow-ocserv", "sleep 5");
         let timeout_directory = timeout_program.parent().expect("fixture parent").to_owned();
         let resources = FixedResources::new(
             PathBuf::from("/bin/false"),
@@ -4533,19 +4533,20 @@ mod tests {
         let adapter = Adapter::new(
             resources,
             Limits {
-                timeout: Duration::from_millis(50),
+                timeout: Duration::from_millis(500),
                 output_bytes: 1024,
             },
         );
-        assert!(matches!(
-            adapter.ocserv_version().await,
-            Err(AdapterError::DeadlineExceeded)
-        ));
+        let timeout_result = adapter.ocserv_version().await;
+        assert!(
+            matches!(timeout_result, Err(AdapterError::DeadlineExceeded)),
+            "unexpected child timeout result: {timeout_result:?}"
+        );
         std::fs::remove_dir_all(timeout_directory).expect("remove timeout fixture");
 
         let noisy_program = executable(
             "noisy-ocserv",
-            "dd if=/dev/zero bs=4096 count=1 2>/dev/null",
+            "i=0; while [ $i -lt 2048 ]; do printf xx; i=$((i + 1)); done",
         );
         let noisy_directory = noisy_program.parent().expect("fixture parent").to_owned();
         let resources = FixedResources::new(
@@ -4559,14 +4560,15 @@ mod tests {
         let adapter = Adapter::new(
             resources,
             Limits {
-                timeout: Duration::from_secs(5),
+                timeout: Duration::from_secs(30),
                 output_bytes: 1024,
             },
         );
-        assert!(matches!(
-            adapter.ocserv_version().await,
-            Err(AdapterError::OutputLimit)
-        ));
+        let output_result = adapter.ocserv_version().await;
+        assert!(
+            matches!(output_result, Err(AdapterError::OutputLimit)),
+            "unexpected child output-limit result: {output_result:?}"
+        );
         std::fs::remove_dir_all(noisy_directory).expect("remove noisy fixture");
     }
 
