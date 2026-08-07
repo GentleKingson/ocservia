@@ -146,7 +146,10 @@ func TestConfigPlanCreateReplayStaleAndTypedEnvelopeIntegration(t *testing.T) {
 	}
 	applyOperationID := uuid.Must(uuid.Parse(apply.ID))
 	applyCommandID := uuid.Must(uuid.FromBytes(applyEnvelope.GetCommandId()))
-	if _, err := pool.Exec(ctx, `UPDATE operations SET state='dispatched' WHERE id=$1; UPDATE commands SET state='dispatched' WHERE id=$2`, applyOperationID, applyCommandID); err != nil {
+	if _, err := pool.Exec(ctx, `UPDATE operations SET state='dispatched' WHERE id=$1`, applyOperationID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `UPDATE commands SET state='dispatched' WHERE id=$1`, applyCommandID); err != nil {
 		t.Fatal(err)
 	}
 	resultBytes, err = proto.Marshal(&agentv1.ConfigApplyResult{CandidateHash: hash, PreviousHash: currentHash, Healthy: false, FailedCritical: true, FailureCode: "rollback_health_failed"})
