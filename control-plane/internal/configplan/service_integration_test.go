@@ -46,11 +46,11 @@ func TestConfigPlanCreateReplayStaleAndTypedEnvelopeIntegration(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	t.Cleanup(func() {
+	defer func() {
 		if err := cleanupConfigPlanIntegration(context.Background(), ownerPool, workspaceID); err != nil {
 			t.Error(err)
 		}
-	})
+	}()
 
 	service := New(pool, operations.New(pool))
 	request := CreateRequest{NodeID: nodeID, ExpectedRevision: 0, Template: Template{Name: "baseline", Directives: []Directive{
