@@ -145,11 +145,11 @@ VALUES(
     'mmtaee/ocserv-dashboard',
     'v4.9',
     'b8f59026c4d879f40c1da43dc00d97e34f9790bc',
-    'master-after-v4.9',
+    'master',
     '4d25478580d899b77460bdf0cf0a590cfdd26030',
     '{"A":[],"B":["web/src/components/auth/SetupForm.vue"],"C":["quota and expiry semantics mapped to node-scoped desired policy and scheduler"],"D":["Docker/native occtl execution","local cron journal","direct password/config files","permanent deletion"]}'::jsonb,
-    'revert the standalone I14 commit and apply migration 000013 down before policy data is relied upon',
-    '2026-08-07T00:00:00Z'
+    'publication: revert PR15 independently; implementation: stop I14 scheduler/API, reconcile commands, revert PR14, then apply migration 000013 down only when policy and batch data need not be retained',
+    '2026-08-07T16:41:52Z'
 );
 
 COMMENT ON COLUMN desired_user_policies.quota_bytes IS 'Integer bytes. Monthly periods reset at 00:00:00 UTC on the first day of each calendar month.';

@@ -5,6 +5,10 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # shellcheck source=scripts/env.sh
 source "${ROOT}/scripts/env.sh"
 
+UPSTREAM_MANIFEST="${ROOT}/docs/upstream/v4.9-post1.manifest.json"
+EXPECTED_UPSTREAM_RECORD="$(jq -r '[(.repository | sub("^https://github.com/"; "")), .old.ref, .old.commit, .new.ref, .new.commit, .imported_at] | join("|")' "${UPSTREAM_MANIFEST}")"
+EXPECTED_UPSTREAM_ROLLBACK='publication: revert PR15 independently; implementation: stop I14 scheduler/API, reconcile commands, revert PR14, then apply migration 000013 down only when policy and batch data need not be retained'
+
 RUN_ID="${RUN_ID:-database-${GITHUB_RUN_ID:-local}-${GITHUB_RUN_ATTEMPT:-1}-${GITHUB_JOB:-job}-$(date -u +%Y%m%dT%H%M%SZ)-$$}"
 PREFIX="$(printf '%s' "${RUN_ID}" | tr '[:upper:]_' '[:lower:]-' | tr -cd 'a-z0-9-')"
 TMP_BASE="${RUNNER_TEMP:-${TMPDIR:-/tmp}}"
@@ -135,6 +139,8 @@ for major in 17 18; do
   test "$(docker exec "${container}" psql -U ocservia_owner -d ocservia -Atc "SELECT count(*) FROM schema_migrations WHERE version = 13")" = "1"
   test "$(docker exec "${container}" psql -U ocservia_owner -d ocservia -Atc "SELECT count(*) FROM information_schema.tables WHERE table_schema = 'public' AND table_name IN ('desired_users','desired_groups','observed_users','observed_groups')")" = "4"
   test "$(docker exec "${container}" psql -U ocservia_owner -d ocservia -Atc "SELECT count(*) FROM information_schema.tables WHERE table_schema = 'public' AND table_name IN ('desired_user_policies','user_policy_mutations','observed_user_usage','user_usage_cursors','scheduler_leases','user_policy_enforcements','batch_operations','batch_operation_items','upstream_sync_records')")" = "9"
+  test "$(docker exec "${container}" psql -U ocservia_owner -d ocservia -Atc "SELECT concat_ws('|',repository,old_ref,old_commit,new_ref,new_commit,to_char(synced_at AT TIME ZONE 'UTC','YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"')) FROM upstream_sync_records")" = "${EXPECTED_UPSTREAM_RECORD}"
+  test "$(docker exec "${container}" psql -U ocservia_owner -d ocservia -Atc "SELECT rollback_ref FROM upstream_sync_records")" = "${EXPECTED_UPSTREAM_ROLLBACK}"
   test "$(docker exec "${container}" psql -U ocservia_owner -d ocservia -Atc "SELECT count(*) FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'operations' AND column_name = 'command_id' AND data_type = 'uuid'")" = "1"
   test "$(docker exec "${container}" psql -U ocservia_owner -d ocservia -Atc "SELECT count(*) FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'agent_command_results' AND column_name = 'semantic_payload_hash_version' AND data_type = 'smallint'")" = "1"
   test "$(docker exec "${container}" psql -U ocservia_owner -d ocservia -Atc "SELECT count(*) FROM pg_constraint WHERE conrelid = 'agent_command_results'::regclass AND conname = 'agent_command_results_semantic_payload_hash_version_supported'")" = "1"
