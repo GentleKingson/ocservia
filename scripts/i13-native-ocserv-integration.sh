@@ -66,6 +66,7 @@ cleanup() {
   persist_artifacts || cleanup_status=1
   scan_artifacts || cleanup_status=1
   if [[ -n "${ARTIFACT_DIR}" && -d "${ARTIFACT_DIR}" ]]; then
+    chown -R "${RUN_AS_USER}:${RUN_AS_GROUP}" "${ARTIFACT_DIR}" || cleanup_status=1
     chmod -R u=rwX,go=rX "${ARTIFACT_DIR}" || cleanup_status=1
   fi
   for _ in $(seq 1 50); do
@@ -98,6 +99,7 @@ fi
 
 umask 077
 mkdir -p "${NATIVE_ROOT}/groups"
+chmod 755 "${NATIVE_ROOT}" "${NATIVE_ROOT}/groups"
 P1="$(openssl rand -base64 36 | tr -d '\n')"
 P2="$(openssl rand -base64 36 | tr -d '\n')"
 P3="$(openssl rand -base64 36 | tr -d '\n')"
