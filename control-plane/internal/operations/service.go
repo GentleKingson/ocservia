@@ -214,7 +214,7 @@ func (s *Service) CreateSynthetic(ctx context.Context, request CreateRequest) (O
 		var planState string
 		err := tx.QueryRow(ctx, `SELECT p.workspace_id,p.node_id,p.expected_revision,p.candidate_hash,p.expires_at,o.state,
 			COALESCE((SELECT r.result FROM agent_command_results r WHERE r.command_id=o.command_id AND r.state='succeeded' ORDER BY r.created_at DESC LIMIT 1),''::bytea)
-			FROM config_plans p JOIN operations o ON o.id=p.operation_id WHERE p.id=$1 FOR SHARE`, request.ApplyMetadata.PlanID).
+			FROM config_plans p JOIN operations o ON o.id=p.operation_id WHERE p.id=$1`, request.ApplyMetadata.PlanID).
 			Scan(&planWorkspace, &planNode, &planRevision, &planHash, &planExpires, &planState, &resultBytes)
 		if err != nil {
 			return Operation{}, false, fmt.Errorf("lock configuration plan: %w", err)
