@@ -280,6 +280,14 @@ message ConfigPlan {
   bytes candidate_hash = 2;
 }
 
+message ConfigPlanResult {
+  bytes candidate_hash = 1;
+  string diff_redacted = 2;
+  repeated string warnings = 3;
+  bool current_unchanged = 4;
+  bool staging_cleaned = 5;
+}
+
 message ConfigApply {
   bytes candidate_hash = 1;
 }

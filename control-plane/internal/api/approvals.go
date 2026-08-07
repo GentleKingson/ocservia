@@ -1,6 +1,7 @@
 package api
 
 import (
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -69,10 +70,31 @@ func (s *Server) createApproval(w http.ResponseWriter, r *http.Request) {
 		hash := useroperations.BatchRequestHash(body.BatchItems)
 		requestHash = hash[:]
 		requestSummary, _ = json.Marshal(body.BatchItems)
+	} else if strings.TrimSpace(body.Action) == "config.apply" {
+		if resource.Type != "config_plan" || s.configplans == nil {
+			writeProblem(w, r, http.StatusBadRequest, "https://ocservia.dev/problems/invalid-request", "Invalid request", "configuration approval requires an existing validated plan")
+			return
+		}
+		plan, planErr := s.configplans.Get(r.Context(), resourceID)
+		if planErr != nil || plan.Validation != "valid" || !plan.ExpiresAt.After(time.Now().UTC()) {
+			writeProblem(w, r, http.StatusConflict, "https://ocservia.dev/problems/config-plan-not-ready", "Configuration plan is not ready", "the plan must be valid and unexpired before approval")
+			return
+		}
+		if plan.WorkspaceID != resource.WorkspaceID {
+			writeProblem(w, r, http.StatusBadRequest, "https://ocservia.dev/problems/invalid-request", "Invalid request", "the plan is outside the selected workspace")
+			return
+		}
+		node := rbac.Resource{WorkspaceID: plan.WorkspaceID, Type: "node", ID: plan.NodeID}
+		if !s.devAuth && s.rbac.Authorize(r.Context(), actor.IdentityID, "config.apply", node, actor.BreakGlass) != nil {
+			s.writeAuthorizationError(w, r, rbac.ErrForbidden)
+			return
+		}
+		requestHash, _ = hex.DecodeString(plan.CandidateHash)
+		requestSummary, _ = json.Marshal(map[string]any{"node_id": plan.NodeID, "expected_revision": plan.ExpectedRevision, "candidate_hash": plan.CandidateHash, "expires_at": plan.ExpiresAt})
 	}
 	// Approval requests cannot be used to ask another user to authorize an action
 	// that the requester could not perform themselves.
-	if !s.devAuth && strings.TrimSpace(body.Action) != "user.batch.disable" {
+	if !s.devAuth && strings.TrimSpace(body.Action) != "user.batch.disable" && strings.TrimSpace(body.Action) != "config.apply" {
 		if err := s.rbac.Authorize(r.Context(), actor.IdentityID, strings.TrimSpace(body.Action), resource, actor.BreakGlass); err != nil {
 			s.writeAuthorizationError(w, r, err)
 			return

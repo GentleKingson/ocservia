@@ -11,10 +11,10 @@ use ocservia_agent::{
     MAX_COMMAND_BYTES, MAX_WRITE_QUEUE, PrivdClient,
 };
 use ocservia_agent_protocol::{
-    DesiredEffectObserveRequest, DesiredEffectState, ErrorKind, GroupApplyRequest,
-    IpBanRemoveRequest, MAX_MANAGED_RESOURCES, PrivdResponse, ServiceReloadRequest,
-    SessionMutationRequest, UserDisableRequest, UserEnableRequest, UserSecretRequest,
-    privd_request, privd_response,
+    ConfigPlanRequest, DesiredEffectObserveRequest, DesiredEffectState, ErrorKind,
+    GroupApplyRequest, IpBanRemoveRequest, MAX_MANAGED_RESOURCES, PrivdResponse,
+    ServiceReloadRequest, SessionMutationRequest, UserDisableRequest, UserEnableRequest,
+    UserSecretRequest, privd_request, privd_response,
 };
 use ocservia_command_journal::{CommandRecord, CommandState, Journal, TelemetryInsert};
 use ocservia_contracts::decode_strict_command_envelope;
@@ -161,6 +161,13 @@ async fn connect_once(
             "ocserv.service.reload".to_owned(),
             "ocserv.users.write".to_owned(),
             "ocserv.groups.write".to_owned(),
+            "ocserv.config.plan".to_owned(),
+            "config.auth".to_owned(),
+            "config.tls".to_owned(),
+            "config.sessions".to_owned(),
+            "config.network".to_owned(),
+            "config.limits".to_owned(),
+            "config.runtime".to_owned(),
         ],
         ocserv_version: "unknown".to_owned(),
         os_release: session.os_release.to_owned(),
@@ -256,6 +263,7 @@ async fn handle_command_stream(
             "ocserv.service.reload",
             "ocserv.users.write",
             "ocserv.groups.write",
+            "ocserv.config.plan",
         ]),
         now_unix_seconds,
         cancelled: false,
@@ -272,6 +280,7 @@ async fn handle_command_stream(
                 | command_envelope::Payload::UserEnable(_)
                 | command_envelope::Payload::UserPasswordRotate(_)
                 | command_envelope::Payload::GroupApply(_)
+                | command_envelope::Payload::ConfigPlan(_)
         )
     );
     let execution = if external {
@@ -402,6 +411,12 @@ async fn execute_external_command(
                 desired_revision: payload.desired_revision,
             })
         }
+        Some(command_envelope::Payload::ConfigPlan(payload)) => {
+            privd_request::Operation::ConfigPlan(ConfigPlanRequest {
+                candidate: payload.candidate.clone(),
+                candidate_hash: payload.candidate_hash.clone(),
+            })
+        }
         _ => return Err(CommandError::Rejected("capability_rejected")),
     };
     let expires_at = envelope
@@ -440,6 +455,9 @@ async fn execute_external_command(
                         .complete_external(&command, Ok(b"applied"), now)
                 }
             }
+            Some(privd_response::Result::ConfigPlan(result)) => session
+                .command_executor
+                .complete_external(&command, Ok(&result.encode_to_vec()), now),
             Some(privd_response::Result::Error(error)) if terminal_privd_error(error.kind) => {
                 let code = terminal_privd_error_code(error.kind).unwrap_or("privd_rejected");
                 session
@@ -499,6 +517,14 @@ async fn observe_external_effect(
     privd: &PrivdClient,
     envelope: &CommandEnvelope,
 ) -> ExternalEffectObservation {
+    // Planning is side-effect free. After privd startup cleanup, an interrupted
+    // validation can always be retried from the immutable candidate.
+    if matches!(
+        envelope.payload,
+        Some(command_envelope::Payload::ConfigPlan(_))
+    ) {
+        return ExternalEffectObservation::Absent;
+    }
     let target_boot = match envelope.payload.as_ref() {
         Some(command_envelope::Payload::SessionDisconnect(target)) => Some(&target.boot_id),
         Some(command_envelope::Payload::SessionTerminate(target)) => Some(&target.boot_id),
@@ -986,7 +1012,9 @@ mod tests {
     use ocservia_agent_protocol::{
         DesiredEffectObservation, PrivdRequest, read_frame, write_frame,
     };
-    use ocservia_contracts::generated::ocserv::platform::agent::v1::UserPasswordRotate;
+    use ocservia_contracts::generated::ocserv::platform::agent::v1::{
+        ConfigPlan, UserPasswordRotate,
+    };
 
     #[test]
     fn authoritative_precondition_rejection_is_terminal() {
@@ -1073,5 +1101,22 @@ mod tests {
         );
         server.await.expect("server");
         std::fs::remove_file(socket).expect("remove socket");
+    }
+
+    #[tokio::test]
+    async fn interrupted_config_plan_is_safe_to_retry() {
+        let socket = std::env::temp_dir().join(format!("missing-{}.sock", Uuid::now_v7()));
+        let client = PrivdClient::new(socket, Duration::from_millis(20)).expect("client");
+        let envelope = CommandEnvelope {
+            payload: Some(command_envelope::Payload::ConfigPlan(ConfigPlan {
+                candidate: b"tcp-port = 443\n".to_vec(),
+                candidate_hash: vec![0x5a; 32],
+            })),
+            ..CommandEnvelope::default()
+        };
+        assert_eq!(
+            observe_external_effect(&client, &envelope).await,
+            ExternalEffectObservation::Absent
+        );
     }
 }

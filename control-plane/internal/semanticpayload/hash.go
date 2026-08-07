@@ -53,6 +53,13 @@ func HashV1(envelope *agentv1.CommandEnvelope) ([sha256.Size]byte, error) {
 		canonicalPayload = canonicalStrings(envelope.GetSessionDisconnect().GetSessionId(), envelope.GetSessionDisconnect().GetBootId())
 	case *agentv1.CommandEnvelope_ServiceReload:
 		payloadKind = 105
+	case *agentv1.CommandEnvelope_ConfigPlan:
+		payloadKind = 103
+		payload := envelope.GetConfigPlan()
+		if len(payload.GetCandidateHash()) != sha256.Size {
+			return [sha256.Size]byte{}, errors.New("candidate hash is malformed")
+		}
+		canonicalPayload = append(canonicalPayload, payload.GetCandidateHash()...)
 	case *agentv1.CommandEnvelope_SessionTerminate:
 		payloadKind = 112
 		canonicalPayload = canonicalStrings(envelope.GetSessionTerminate().GetSessionId(), envelope.GetSessionTerminate().GetBootId())

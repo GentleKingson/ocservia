@@ -16,7 +16,9 @@ import {
   ListPlus,
   CircleStop,
   SlidersHorizontal,
+  FileCheck2,
 } from "@lucide/vue";
+import type { ConfigPlan } from "@ocservia/api-client";
 import { computed, onMounted, ref } from "vue";
 
 import { useFleetStore } from "../shared/fleet";
@@ -28,6 +30,7 @@ import {
   type UserPolicyForm,
 } from "../adapters/user-policy";
 import UserPolicyFields from "../upstream/UserPolicyFields.vue";
+import { createConfigPlan, getConfigPlan } from "../api/client";
 
 const fleet = useFleetStore();
 const pendingAction = ref<{
@@ -53,6 +56,17 @@ const policyForm = ref<UserPolicyForm>(policyToForm());
 const policyReason = ref("");
 const policyLoading = ref(false);
 const policyError = ref("");
+const configDialog = ref(false);
+const configPlan = ref<ConfigPlan>();
+const configError = ref("");
+const configLoading = ref(false);
+const configPort = ref(443);
+const configMaxClients = ref(128);
+const configRoute = ref("default");
+const configSecretProvider = ref("node");
+const configCertificateKey = ref("tls/server-certificate");
+const configPrivateKey = ref("tls/server-private-key");
+const configReason = ref("");
 const usersState = computed(() =>
   fleet.userGroupState.filter((item) => item.kind === "user"),
 );
@@ -195,6 +209,68 @@ async function submitPolicy(): Promise<void> {
     policyLoading.value = false;
   }
 }
+
+function openConfigPlan(): void {
+  configDialog.value = true;
+  configPlan.value = undefined;
+  configError.value = "";
+  configReason.value = "";
+}
+
+async function submitConfigPlan(): Promise<void> {
+  if (!fleet.selected || !configReason.value.trim()) return;
+  configLoading.value = true;
+  configError.value = "";
+  try {
+    let plan = await createConfigPlan(fleet.selected.id, {
+      expectedRevision: 0,
+      template: {
+        name: "node-baseline",
+        directives: [
+          { name: "auth", value: "plain[passwd=/etc/ocserv/ocpasswd]" },
+          { name: "max-clients", value: String(configMaxClients.value) },
+          { name: "route", value: configRoute.value.trim() },
+          {
+            name: "server-cert",
+            secretRef: {
+              provider: configSecretProvider.value.trim(),
+              key: configCertificateKey.value.trim(),
+            },
+          },
+          {
+            name: "server-key",
+            secretRef: {
+              provider: configSecretProvider.value.trim(),
+              key: configPrivateKey.value.trim(),
+            },
+          },
+          { name: "socket-file", value: "/run/ocserv.socket" },
+          { name: "tcp-port", value: String(configPort.value) },
+        ],
+      },
+      ttlSeconds: 900,
+      reason: configReason.value.trim(),
+    });
+    configPlan.value = plan;
+    for (
+      let attempt = 0;
+      attempt < 30 &&
+      !["succeeded", "failed", "rejected", "unknown", "expired"].includes(
+        plan.state,
+      );
+      attempt += 1
+    ) {
+      await new Promise((resolve) => setTimeout(resolve, 500));
+      plan = await getConfigPlan(plan.id);
+      configPlan.value = plan;
+    }
+  } catch (error) {
+    configError.value =
+      error instanceof Error ? error.message : "Configuration plan failed";
+  } finally {
+    configLoading.value = false;
+  }
+}
 </script>
 
 <template>
@@ -285,6 +361,14 @@ async function submitPolicy(): Promise<void> {
           }}</span>
         </header>
         <div class="node-actions">
+          <button
+            type="button"
+            :disabled="operationBusy"
+            :title="$t('configPlan')"
+            @click="openConfigPlan"
+          >
+            <FileCheck2 :size="15" />{{ $t("plan") }}
+          </button>
           <button
             type="button"
             :disabled="operationBusy"
@@ -728,6 +812,103 @@ async function submitPolicy(): Promise<void> {
             :disabled="policyLoading || !policyReason.trim()"
           >
             {{ $t("confirm") }}
+          </button>
+        </footer>
+      </form>
+    </div>
+    <div
+      v-if="configDialog"
+      class="dialog-backdrop"
+      @click.self="configDialog = false"
+    >
+      <form
+        class="operation-dialog config-plan-dialog"
+        @submit.prevent="submitConfigPlan"
+      >
+        <header>
+          <h2>{{ $t("configPlan") }}</h2>
+          <code>{{ fleet.selected?.name }}</code>
+        </header>
+        <label for="config-port">{{ $t("tcpPort") }}</label>
+        <input
+          id="config-port"
+          v-model.number="configPort"
+          type="number"
+          min="1"
+          max="65535"
+          required
+        />
+        <label for="config-clients">{{ $t("maxClients") }}</label>
+        <input
+          id="config-clients"
+          v-model.number="configMaxClients"
+          type="number"
+          min="1"
+          max="100000"
+          required
+        />
+        <label for="config-route">{{ $t("route") }}</label>
+        <input
+          id="config-route"
+          v-model="configRoute"
+          maxlength="256"
+          required
+        />
+        <label for="config-secret-provider">{{ $t("secretProvider") }}</label>
+        <input
+          id="config-secret-provider"
+          v-model="configSecretProvider"
+          maxlength="64"
+          required
+        />
+        <label for="config-certificate-key">{{ $t("certificateRef") }}</label>
+        <input
+          id="config-certificate-key"
+          v-model="configCertificateKey"
+          maxlength="256"
+          required
+        />
+        <label for="config-private-key">{{ $t("privateKeyRef") }}</label>
+        <input
+          id="config-private-key"
+          v-model="configPrivateKey"
+          maxlength="256"
+          required
+        />
+        <label for="config-reason">{{ $t("reason") }}</label>
+        <textarea
+          id="config-reason"
+          v-model="configReason"
+          maxlength="512"
+          required
+        ></textarea>
+        <div v-if="configPlan" class="config-plan-result" aria-live="polite">
+          <span class="freshness-badge" :class="configPlan.validation">{{
+            configPlan.validation
+          }}</span>
+          <code>{{ configPlan.candidateHash }}</code>
+          <pre v-if="configPlan.diffRedacted">{{
+            configPlan.diffRedacted
+          }}</pre>
+          <ul v-if="configPlan.warnings.length">
+            <li v-for="warning in configPlan.warnings" :key="warning">
+              {{ warning }}
+            </li>
+          </ul>
+        </div>
+        <p v-if="configError" class="operation-error" role="alert">
+          {{ configError }}
+        </p>
+        <footer>
+          <button type="button" @click="configDialog = false">
+            {{ $t("cancel") }}
+          </button>
+          <button
+            type="submit"
+            class="primary"
+            :disabled="configLoading || !configReason.trim()"
+          >
+            {{ $t("plan") }}
           </button>
         </footer>
       </form>

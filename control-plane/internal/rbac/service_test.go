@@ -17,4 +17,7 @@ func TestBaselineRoleMatrixKeepsAdministrativeFunctionsSeparate(t *testing.T) {
 	if !slices.Contains(roleActions["SecurityAdmin"], "approval.approve") || !slices.Contains(roleActions["PlatformAdmin"], "*") {
 		t.Fatal("administrative role policy is incomplete")
 	}
+	if !slices.Contains(roleActions["ConfigManager"], "config.plan") || !slices.Contains(roleActions["SecurityAdmin"], "config.review") || slices.Contains(roleActions["Operator"], "config.plan") {
+		t.Fatal("configuration planning and independent review permissions regressed")
+	}
 }

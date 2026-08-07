@@ -135,6 +135,13 @@ jobs:
           mkdir -p "${ARTIFACT_DIR}"
           set -o pipefail
           scripts/i14-quota-expiry-backport.sh 2>&1 | tee "${ARTIFACT_DIR}/i14-contracts.log"
+      - name: I15 deterministic config-plan boundary
+        env:
+          ARTIFACT_DIR: ${{ runner.temp }}/artifacts/go/i15-config-plan
+        run: |
+          mkdir -p "${ARTIFACT_DIR}"
+          set -o pipefail
+          scripts/i15-config-plan.sh 2>&1 | tee "${ARTIFACT_DIR}/i15-config-plan.log"
       - name: Go, PostgreSQL, UDS, and Rust stub integration
         env:
           ARTIFACT_DIR: ${{ runner.temp }}/artifacts/go/local-slice

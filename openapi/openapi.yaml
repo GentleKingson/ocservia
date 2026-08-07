@@ -24,6 +24,8 @@ tags:
     description: One-time node enrollment credentials.
   - name: nodes
     description: Explicit node trust lifecycle.
+  - name: configuration
+    description: Side-effect-free configuration rendering and remote validation.
 paths:
   /livez:
     get:
@@ -777,6 +779,50 @@ paths:
               schema: { $ref: "#/components/schemas/UserOperationMetrics" }
         "403": { $ref: "#/components/responses/Problem" }
         default: { $ref: "#/components/responses/Problem" }
+  /nodes/{node_id}/config-plans:
+    post:
+      operationId: createConfigPlan
+      summary: Render and remotely validate an immutable configuration candidate
+      tags: [configuration]
+      parameters:
+        - $ref: "#/components/parameters/NodeId"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ConfigPlanRequest" }
+      responses:
+        "202":
+          description: The side-effect-free validation operation was accepted.
+          headers:
+            Location: { schema: { type: string, format: uri-reference } }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ConfigPlan" }
+        "400": { $ref: "#/components/responses/Problem" }
+        "403": { $ref: "#/components/responses/Problem" }
+        "409": { $ref: "#/components/responses/Problem" }
+        default: { $ref: "#/components/responses/Problem" }
+  /config-plans/{plan_id}:
+    get:
+      operationId: getConfigPlan
+      summary: Get validation, safe diff, warnings, and approval state for a configuration plan
+      tags: [configuration]
+      parameters:
+        - name: plan_id
+          in: path
+          required: true
+          schema: { $ref: "#/components/schemas/UuidV7" }
+      responses:
+        "200":
+          description: Current immutable plan state.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ConfigPlan" }
+        "403": { $ref: "#/components/responses/Problem" }
+        "404": { $ref: "#/components/responses/Problem" }
+        default: { $ref: "#/components/responses/Problem" }
   /nodes/{node_id}/groups/{group_name}:
     put:
       operationId: applyNodeGroup
@@ -1343,6 +1389,77 @@ components:
           type: array
           maxItems: 1536
           items: { $ref: "#/components/schemas/UserGroupResourceState" }
+    ConfigSecretRef:
+      type: object
+      additionalProperties: false
+      required: [provider, key]
+      properties:
+        provider: { type: string, minLength: 1, maxLength: 64, pattern: "^[A-Za-z0-9][A-Za-z0-9._-]*$" }
+        key: { type: string, minLength: 1, maxLength: 256, pattern: "^[A-Za-z0-9][A-Za-z0-9._/-]*$" }
+    ConfigDirective:
+      type: object
+      additionalProperties: false
+      required: [name]
+      description: Exactly one of value and secret_ref must be provided.
+      properties:
+        name: { type: string, minLength: 1, maxLength: 64, pattern: "^[a-z][a-z0-9-]*$" }
+        value: { type: string, minLength: 1, maxLength: 4096 }
+        secret_ref: { $ref: "#/components/schemas/ConfigSecretRef" }
+    ConfigTemplate:
+      type: object
+      additionalProperties: false
+      required: [name, directives]
+      properties:
+        name: { type: string, minLength: 1, maxLength: 128, pattern: "^[A-Za-z0-9][A-Za-z0-9._-]*$" }
+        directives:
+          type: array
+          minItems: 1
+          maxItems: 256
+          items: { $ref: "#/components/schemas/ConfigDirective" }
+    ConfigPlanRequest:
+      type: object
+      additionalProperties: false
+      required: [expected_revision, template, ttl_seconds, reason]
+      properties:
+        expected_revision: { type: integer, format: int64, minimum: 0 }
+        template: { $ref: "#/components/schemas/ConfigTemplate" }
+        node_variables:
+          type: object
+          maxProperties: 128
+          additionalProperties: { type: string, minLength: 1, maxLength: 4096 }
+        ttl_seconds: { type: integer, format: int64, minimum: 60, maximum: 3600 }
+        reason: { type: string, minLength: 1, maxLength: 512 }
+    ConfigPlan:
+      type: object
+      additionalProperties: false
+      required: [id, workspace_id, node_id, operation_id, template_name, expected_revision, candidate_hash, state, validation, diff_redacted, warnings, current_unchanged, staging_cleaned, expires_at, created_at]
+      properties:
+        id: { $ref: "#/components/schemas/UuidV7" }
+        workspace_id: { $ref: "#/components/schemas/UuidV7" }
+        node_id: { $ref: "#/components/schemas/UuidV7" }
+        operation_id: { $ref: "#/components/schemas/UuidV7" }
+        template_name: { type: string, minLength: 1, maxLength: 128 }
+        expected_revision: { type: integer, format: int64, minimum: 0 }
+        candidate_hash: { type: string, pattern: "^[0-9a-f]{64}$" }
+        state: { $ref: "#/components/schemas/OperationState" }
+        validation: { type: string, enum: [pending, valid, failed, rejected, unknown, expired] }
+        diff_redacted: { type: string, maxLength: 262144, description: Secret-safe line diff; secret keys and values are never included. }
+        warnings: { type: array, maxItems: 128, items: { type: string, maxLength: 256 } }
+        current_unchanged: { type: boolean }
+        staging_cleaned: { type: boolean }
+        approval_id: { $ref: "#/components/schemas/UuidV7" }
+        approval_status: { type: string, enum: [pending, approved, rejected, expired, consumed] }
+        expires_at: { $ref: "#/components/schemas/UtcDateTime" }
+        created_at: { $ref: "#/components/schemas/UtcDateTime" }
+    ConfigPlanApprovalSummary:
+      type: object
+      additionalProperties: false
+      required: [node_id, expected_revision, candidate_hash, expires_at]
+      properties:
+        node_id: { $ref: "#/components/schemas/UuidV7" }
+        expected_revision: { type: integer, format: int64, minimum: 0 }
+        candidate_hash: { type: string, pattern: "^[0-9a-f]{64}$" }
+        expires_at: { $ref: "#/components/schemas/UtcDateTime" }
     UserPolicyRequest:
       type: object
       additionalProperties: false
@@ -1845,11 +1962,13 @@ components:
         request_hash:
           type: string
           pattern: "^[0-9a-f]{64}$"
-          description: Canonical SHA-256 of the ordered batch items when the approval is content-bound.
+          description: Canonical SHA-256 of the immutable reviewed content when the approval is content-bound.
         request_summary:
-          type: array
-          maxItems: 500
-          items: { $ref: "#/components/schemas/UserBatchItemRequest" }
+          oneOf:
+            - type: array
+              maxItems: 500
+              items: { $ref: "#/components/schemas/UserBatchItemRequest" }
+            - $ref: "#/components/schemas/ConfigPlanApprovalSummary"
         expires_at: { $ref: "#/components/schemas/UtcDateTime" }
         created_at: { $ref: "#/components/schemas/UtcDateTime" }
     AuditEventPage:

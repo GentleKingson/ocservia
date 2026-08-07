@@ -17,6 +17,7 @@ import (
 	"github.com/GentleKingson/ocservia/control-plane/internal/approvals"
 	"github.com/GentleKingson/ocservia/control-plane/internal/audit"
 	"github.com/GentleKingson/ocservia/control-plane/internal/auth"
+	"github.com/GentleKingson/ocservia/control-plane/internal/configplan"
 	"github.com/GentleKingson/ocservia/control-plane/internal/enrollment"
 	"github.com/GentleKingson/ocservia/control-plane/internal/localslice"
 	operationstore "github.com/GentleKingson/ocservia/control-plane/internal/operations"
@@ -60,6 +61,7 @@ type Server struct {
 	audit          *audit.Manager
 	userstate      *userstate.Service
 	useroperations *useroperations.Service
+	configplans    *configplan.Service
 }
 
 func New(address string, pool *pgxpool.Pool, build BuildInfo, logger *slog.Logger, bodyLimit int64, requestTimeout time.Duration, devAuth bool, devAuthToken string, expectedSchema int64) *Server {
@@ -104,6 +106,8 @@ func New(address string, pool *pgxpool.Pool, build BuildInfo, logger *slog.Logge
 	mux.HandleFunc("POST /api/v1/user-batches", s.requireOperationAuth(s.createUserBatch))
 	mux.HandleFunc("GET /api/v1/user-batches/{batch_id}", s.requireOperationAuth(s.getUserBatch))
 	mux.HandleFunc("GET /api/v1/user-operations/metrics", s.requireOperationAuth(s.userOperationMetrics))
+	mux.HandleFunc("POST /api/v1/nodes/{node_id}/config-plans", s.requireOperationAuth(s.createConfigPlan))
+	mux.HandleFunc("GET /api/v1/config-plans/{plan_id}", s.requireOperationAuth(s.getConfigPlan))
 	mux.HandleFunc("POST /api/v1/approval-requests", s.requireOperationAuth(s.createApproval))
 	mux.HandleFunc("GET /api/v1/approval-requests/{approval_id}", s.requireOperationAuth(s.getApproval))
 	mux.HandleFunc("POST /api/v1/approval-requests/{approval_id}", s.requireOperationAuth(s.approveRequest))
@@ -123,6 +127,8 @@ func (s *Server) EnableOperations(service *operationstore.Service) { s.operation
 func (s *Server) EnableUserState(service *userstate.Service) { s.userstate = service }
 
 func (s *Server) EnableUserOperations(service *useroperations.Service) { s.useroperations = service }
+
+func (s *Server) EnableConfigPlans(service *configplan.Service) { s.configplans = service }
 
 func (s *Server) EnableAuthorization(authn *auth.Service, authz *rbac.Service, approvalService *approvals.Service, auditManager *audit.Manager) {
 	s.auth, s.rbac, s.approvals, s.audit = authn, authz, approvalService, auditManager
@@ -254,6 +260,12 @@ func routeMethod(path string) (string, bool) {
 	}
 	if len(parts) == 5 && parts[0] == "api" && parts[1] == "v1" && parts[2] == "nodes" && parts[3] != "" && parts[4] == "synthetic-commands" {
 		return http.MethodPost, true
+	}
+	if len(parts) == 5 && parts[0] == "api" && parts[1] == "v1" && parts[2] == "nodes" && parts[3] != "" && parts[4] == "config-plans" {
+		return http.MethodPost, true
+	}
+	if len(parts) == 4 && parts[0] == "api" && parts[1] == "v1" && parts[2] == "config-plans" && parts[3] != "" {
+		return http.MethodGet, true
 	}
 	if len(parts) == 6 && parts[0] == "api" && parts[1] == "v1" && parts[2] == "nodes" && parts[3] != "" && parts[4] == "sessions" && (strings.HasSuffix(parts[5], ":disconnect") || strings.HasSuffix(parts[5], ":terminate")) {
 		return http.MethodPost, true

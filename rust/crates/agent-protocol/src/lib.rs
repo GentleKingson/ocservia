@@ -8,7 +8,7 @@ use prost::Message;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 /// Maximum encoded local RPC frame size.
-pub const MAX_FRAME_BYTES: usize = 64 * 1024;
+pub const MAX_FRAME_BYTES: usize = 320 * 1024;
 
 /// Maximum users, groups, members in one group, and aggregate memberships per node.
 ///
@@ -44,7 +44,7 @@ pub struct PrivdRequest {
     /// One of the permanently fixed operations.
     #[prost(
         oneof = "privd_request::Operation",
-        tags = "10, 11, 12, 13, 14, 15, 16, 17, 30, 31, 32, 33, 34, 35, 36, 37, 38"
+        tags = "10, 11, 12, 13, 14, 15, 16, 17, 18, 30, 31, 32, 33, 34, 35, 36, 37, 38"
     )]
     pub operation: Option<privd_request::Operation>,
 }
@@ -54,9 +54,9 @@ pub mod privd_request {
     use prost::Oneof;
 
     use super::{
-        DesiredEffectObserveRequest, GroupApplyRequest, IpBanRemoveRequest, ReadRequest,
-        ServiceReloadRequest, SessionMutationRequest, UserDisableRequest, UserEnableRequest,
-        UserSecretRequest,
+        ConfigPlanRequest, DesiredEffectObserveRequest, GroupApplyRequest, IpBanRemoveRequest,
+        ReadRequest, ServiceReloadRequest, SessionMutationRequest, UserDisableRequest,
+        UserEnableRequest, UserSecretRequest,
     };
 
     /// Read-only operation allowlist.
@@ -86,6 +86,9 @@ pub mod privd_request {
         /// Check bounded non-secret evidence for one desired-state replacement.
         #[prost(message, tag = "17")]
         DesiredEffectObserve(DesiredEffectObserveRequest),
+        /// Validate one candidate in a fixed staging directory without changing current config.
+        #[prost(message, tag = "18")]
+        ConfigPlan(ConfigPlanRequest),
         /// Disconnect one numeric session without invalidating its cookie.
         #[prost(message, tag = "30")]
         SessionDisconnect(SessionMutationRequest),
@@ -114,6 +117,30 @@ pub mod privd_request {
         #[prost(message, tag = "38")]
         UserEnable(UserEnableRequest),
     }
+}
+
+/// Side-effect-free candidate validation request. No path is accepted from the caller.
+#[derive(Clone, PartialEq, Eq, Message)]
+pub struct ConfigPlanRequest {
+    #[prost(bytes = "vec", tag = "1")]
+    pub candidate: Vec<u8>,
+    #[prost(bytes = "vec", tag = "2")]
+    pub candidate_hash: Vec<u8>,
+}
+
+/// Secret-safe result of validating a staged candidate.
+#[derive(Clone, PartialEq, Eq, Message)]
+pub struct ConfigPlanResult {
+    #[prost(bytes = "vec", tag = "1")]
+    pub candidate_hash: Vec<u8>,
+    #[prost(string, tag = "2")]
+    pub diff_redacted: String,
+    #[prost(string, repeated, tag = "3")]
+    pub warnings: Vec<String>,
+    #[prost(bool, tag = "4")]
+    pub current_unchanged: bool,
+    #[prost(bool, tag = "5")]
+    pub staging_cleaned: bool,
 }
 
 /// One stable numeric session scoped to the current boot.
@@ -375,7 +402,7 @@ pub struct PrivdResponse {
     /// Exactly one stable result or error.
     #[prost(
         oneof = "privd_response::Result",
-        tags = "10, 11, 12, 13, 14, 15, 16, 17, 18, 20"
+        tags = "10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20"
     )]
     pub result: Option<privd_response::Result>,
 }
@@ -385,8 +412,8 @@ pub mod privd_response {
     use prost::Oneof;
 
     use super::{
-        ConfigFingerprint, DesiredEffectObservation, GroupList, IpBanList, MutationResult,
-        OcservVersion, PrivdError, ServiceStatus, SessionList, UserList,
+        ConfigFingerprint, ConfigPlanResult, DesiredEffectObservation, GroupList, IpBanList,
+        MutationResult, OcservVersion, PrivdError, ServiceStatus, SessionList, UserList,
     };
 
     /// Result allowlist.
@@ -419,6 +446,9 @@ pub mod privd_response {
         /// Non-secret authoritative desired-effect observation.
         #[prost(message, tag = "18")]
         DesiredEffectObservation(DesiredEffectObservation),
+        /// Side-effect-free staged configuration validation result.
+        #[prost(message, tag = "19")]
+        ConfigPlan(ConfigPlanResult),
         /// Stable failure.
         #[prost(message, tag = "20")]
         Error(PrivdError),

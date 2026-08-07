@@ -13,13 +13,13 @@
  */
 
 import { mapValues } from "../runtime";
-import type { UserBatchItemRequest } from "./UserBatchItemRequest";
+import type { ApprovalRequestSummary } from "./ApprovalRequestSummary";
 import {
-  UserBatchItemRequestFromJSON,
-  UserBatchItemRequestFromJSONTyped,
-  UserBatchItemRequestToJSON,
-  UserBatchItemRequestToJSONTyped,
-} from "./UserBatchItemRequest";
+  ApprovalRequestSummaryFromJSON,
+  ApprovalRequestSummaryFromJSONTyped,
+  ApprovalRequestSummaryToJSON,
+  ApprovalRequestSummaryToJSONTyped,
+} from "./ApprovalRequestSummary";
 
 /**
  *
@@ -82,17 +82,17 @@ export interface Approval {
    */
   status: ApprovalStatusEnum;
   /**
-   * Canonical SHA-256 of the ordered batch items when the approval is content-bound.
+   * Canonical SHA-256 of the immutable reviewed content when the approval is content-bound.
    * @type {string}
    * @memberof Approval
    */
   requestHash?: string;
   /**
    *
-   * @type {Array<UserBatchItemRequest>}
+   * @type {ApprovalRequestSummary}
    * @memberof Approval
    */
-  requestSummary?: Array<UserBatchItemRequest>;
+  requestSummary?: ApprovalRequestSummary;
   /**
    * RFC 3339 timestamp normalized to UTC.
    * @type {Date}
@@ -199,9 +199,7 @@ export function ApprovalFromJSONTyped(
     requestSummary:
       json["request_summary"] == null
         ? undefined
-        : (json["request_summary"] as Array<any>).map(
-            UserBatchItemRequestFromJSON,
-          ),
+        : ApprovalRequestSummaryFromJSON(json["request_summary"]),
     expiresAt: new Date(json["expires_at"]),
     createdAt: new Date(json["created_at"]),
   };
@@ -230,12 +228,7 @@ export function ApprovalToJSONTyped(
     reason: value["reason"],
     status: value["status"],
     request_hash: value["requestHash"],
-    request_summary:
-      value["requestSummary"] == null
-        ? undefined
-        : (value["requestSummary"] as Array<any>).map(
-            UserBatchItemRequestToJSON,
-          ),
+    request_summary: ApprovalRequestSummaryToJSON(value["requestSummary"]),
     expires_at: value["expiresAt"].toISOString(),
     created_at: value["createdAt"].toISOString(),
   };
