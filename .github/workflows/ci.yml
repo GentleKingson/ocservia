@@ -30,6 +30,7 @@ jobs:
         run: |
           scripts/check-public-repository.sh
           scripts/test-public-repository-policy.sh
+          scripts/test-bootstrap-profiles.sh
           scripts/docs-check.sh
 
   contracts:
@@ -48,9 +49,13 @@ jobs:
         with:
           path: |
             .cache/downloads
-            .cache/npm
             .tools
-          key: tooling-contracts-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'scripts/checksums.txt', 'web/package-lock.json') }}
+          key: tooling-v2-contracts-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'scripts/checksums.txt', 'scripts/bootstrap.sh', 'scripts/env.sh') }}
+      - name: Restore npm download cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: .cache/npm
+          key: npm-v2-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'web/package-lock.json') }}
       - name: Bootstrap and verify pinned tools
         run: scripts/bootstrap.sh contracts
       - name: Generate contracts
@@ -98,9 +103,8 @@ jobs:
         with:
           path: |
             .cache/downloads
-            .cache/npm
             .tools
-          key: tooling-go-integration-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'scripts/checksums.txt', 'web/package-lock.json') }}
+          key: tooling-v2-go-integration-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'scripts/checksums.txt', 'scripts/bootstrap.sh', 'scripts/env.sh') }}
       - name: Restore Go and integration build caches
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
@@ -109,9 +113,7 @@ jobs:
             .cache/go-mod
             .cache/gopath
             rust/target
-          key: go-integration-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'scripts/checksums.txt', 'control-plane/go.sum', 'rust/Cargo.lock') }}
-          restore-keys: |
-            go-integration-${{ runner.os }}-${{ runner.arch }}-
+          key: go-v2-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'go.work', 'go.work.sum', 'control-plane/go.mod', 'control-plane/go.sum', 'rust/Cargo.lock') }}
       - name: Bootstrap and verify pinned tools
         run: scripts/bootstrap.sh go-integration
       - name: Go checks
@@ -155,16 +157,13 @@ jobs:
         with:
           path: |
             .cache/downloads
-            .cache/npm
             .tools
-          key: tooling-rust-validation-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'scripts/checksums.txt', 'web/package-lock.json') }}
+          key: tooling-v2-rust-validation-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'scripts/checksums.txt', 'scripts/bootstrap.sh', 'scripts/env.sh') }}
       - name: Restore Rust target cache
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: rust/target
-          key: rust-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'rust/Cargo.lock') }}
-          restore-keys: |
-            rust-${{ runner.os }}-${{ runner.arch }}-
+          key: rust-v2-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'rust/Cargo.lock', 'rust/Cargo.toml', 'rust/rust-toolchain.toml', 'rust/crates/**/Cargo.toml') }}
       - name: Bootstrap and verify pinned tools
         run: scripts/bootstrap.sh rust-validation
       - name: Rust checks
@@ -193,14 +192,18 @@ jobs:
           persist-credentials: false
       - name: Runner preflight
         run: scripts/ci-preflight.sh
-      - name: Restore verified tools and npm cache
+      - name: Restore verified tools
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: |
             .cache/downloads
-            .cache/npm
             .tools
-          key: tooling-web-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'scripts/checksums.txt', 'web/package-lock.json') }}
+          key: tooling-v2-web-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'scripts/checksums.txt', 'scripts/bootstrap.sh', 'scripts/env.sh') }}
+      - name: Restore npm download cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: .cache/npm
+          key: npm-v2-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'web/package-lock.json') }}
       - name: Bootstrap and verify pinned tools
         run: scripts/bootstrap.sh web
       - name: Web checks
@@ -239,9 +242,8 @@ jobs:
         with:
           path: |
             .cache/downloads
-            .cache/npm
             .tools
-          key: tooling-native-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'scripts/checksums.txt', 'web/package-lock.json') }}
+          key: tooling-v2-native-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'scripts/checksums.txt', 'scripts/bootstrap.sh', 'scripts/env.sh') }}
       - name: Bootstrap and verify pinned tools
         run: scripts/bootstrap.sh native
       - name: Install ephemeral native fixtures
@@ -317,9 +319,13 @@ jobs:
         with:
           path: |
             .cache/downloads
-            .cache/npm
             .tools
-          key: tooling-security-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'scripts/checksums.txt', 'web/package-lock.json') }}
+          key: tooling-v2-security-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'scripts/checksums.txt', 'scripts/bootstrap.sh', 'scripts/env.sh') }}
+      - name: Restore npm download cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: .cache/npm
+          key: npm-v2-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'web/package-lock.json') }}
       - name: Bootstrap and verify pinned tools
         run: scripts/bootstrap.sh security
       - name: Security and license checks

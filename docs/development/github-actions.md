@@ -33,12 +33,15 @@ workspace tests, so their scripts remain local reproduction commands.
 
 `toolchains.lock` is the version source and `scripts/checksums.txt` authenticates
 downloaded binaries. CI does not add an independent setup action or toolchain
-version source. Cache keys include runner OS and architecture plus the relevant
-toolchain, checksum, Go, Cargo, or npm lockfiles. Tool downloads, Go build/module
-caches, Rust targets, and npm's download cache may be restored. A cache miss is
-fully supported, bootstrap still checks versions and checksums after restore,
-and `node_modules`, credentials, environment files, logs, and test artifacts are
-never cached.
+version source. Every tool-dependent job passes an explicit, job-oriented
+bootstrap profile and restores a versioned cache for that profile. Tooling keys
+also include the bootstrap and environment scripts, so layout changes invalidate
+old entries. npm's download cache is separate and is used only by Contracts,
+Web, and Security and Licenses; Go build/module caches and Rust targets use their
+own dependency inputs. A cache miss is fully supported, bootstrap still checks
+versions and checksums after restore, and `node_modules`, credentials,
+environment files, logs, and test artifacts are never cached. Locally,
+`make bootstrap` explicitly selects the complete `all` profile.
 
 All external Actions are pinned to full commits. Checkout does not persist its
 credential. The workflows do not use secrets, `pull_request_target`, production

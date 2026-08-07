@@ -5,11 +5,19 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TOOLS="${ROOT}/.tools"
 CACHE="${ROOT}/.cache/downloads"
 CHECKSUMS="${ROOT}/scripts/checksums.txt"
-PROFILE="${1:-all}"
+PROFILE="${1:-}"
 
 if (($# > 1)); then
   echo "usage: $0 [all|contracts|go-integration|rust-validation|native|web|security]" >&2
   exit 2
+fi
+
+if [[ -z "${PROFILE}" ]]; then
+  if [[ "${GITHUB_ACTIONS:-}" == "true" ]]; then
+    echo "bootstrap profile must be explicit in GitHub Actions" >&2
+    exit 2
+  fi
+  PROFILE="all"
 fi
 
 case "${PROFILE}" in
@@ -306,6 +314,7 @@ verify_java() {
 }
 
 # shellcheck source=scripts/env.sh
+# shellcheck disable=SC1091
 source "${ROOT}/scripts/env.sh"
 
 case "${PROFILE}" in

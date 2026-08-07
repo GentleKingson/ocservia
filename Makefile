@@ -5,7 +5,7 @@ SHELL := /usr/bin/env bash
 .PHONY: bootstrap generate format lint test verify docs-check generated-clean generated-clean-test policy-check contracts-breaking go-check rust-check web-check security-check license-check database-integration integration e2e p1-smoke p1-full
 
 bootstrap:
-	./scripts/bootstrap.sh
+	./scripts/bootstrap.sh all
 
 generate:
 	./scripts/generate.sh
