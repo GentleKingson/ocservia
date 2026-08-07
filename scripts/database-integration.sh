@@ -184,10 +184,26 @@ for major in 17 18; do
     exit 1
   fi
   test "$(docker exec "${container}" psql -U ocservia_owner -d ocservia -Atc "SELECT count(*) FROM pg_indexes WHERE schemaname='public' AND tablename='agent_command_results' AND indexname IN ('agent_command_results_pkey','agent_command_results_command_created_idx')")" = "2"
+  docker exec "${container}" psql -v ON_ERROR_STOP=1 -U ocservia_owner -d ocservia -c "
+    INSERT INTO operations(id,workspace_id,node_id,state,version,request_id,idempotency_key,request_hash,created_at,updated_at,completed_at)
+    VALUES('00000000-0000-7000-8000-000000000140','00000000-0000-7000-8000-000000000001','00000000-0000-7000-8000-000000000003','queued',1,'i15-down-history','i15-down-history',decode(repeat('14',32),'hex'),now(),now(),NULL);
+    INSERT INTO commands(id,operation_id,workspace_id,node_id,state,payload_type,envelope,idempotency_key,expected_version,traceparent,expires_at,created_at,updated_at)
+    VALUES('00000000-0000-7000-8000-000000000141','00000000-0000-7000-8000-000000000140','00000000-0000-7000-8000-000000000001','00000000-0000-7000-8000-000000000003','queued','config_plan',decode('00','hex'),'i15-down-history',1,'00-0123456789abcdef0123456789abcdef-0123456789abcdef-01',now()+interval '1 hour',now(),now());
+  " >/dev/null
+  if docker exec -i "${container}" psql -v ON_ERROR_STOP=1 -U ocservia_owner -d ocservia \
+    <"${ROOT}/control-plane/migrations/000014_config_plan.down.sql" >"${TMP_ROOT}/pg${major}-i15-active-down.log" 2>&1; then
+    echo "I15 down accepted a nonterminal config-plan command" >&2
+    exit 1
+  fi
+  grep -Fq 'cannot remove config planning while config_plan commands are nonterminal' "${TMP_ROOT}/pg${major}-i15-active-down.log"
+  docker exec "${container}" psql -v ON_ERROR_STOP=1 -U ocservia_owner -d ocservia -c "UPDATE commands SET state='succeeded',updated_at=now() WHERE id='00000000-0000-7000-8000-000000000141'; UPDATE operations SET state='succeeded',updated_at=now(),completed_at=now() WHERE id='00000000-0000-7000-8000-000000000140';" >/dev/null
   docker exec -i "${container}" psql -v ON_ERROR_STOP=1 -U ocservia_owner -d ocservia \
     <"${ROOT}/control-plane/migrations/000014_config_plan.down.sql" >/dev/null
   docker exec "${container}" psql -v ON_ERROR_STOP=1 -U ocservia_owner -d ocservia -c \
     "DELETE FROM schema_migrations WHERE version = 14" >/dev/null
+  test "$(docker exec "${container}" psql -U ocservia_owner -d ocservia -Atc "SELECT count(*) FROM commands WHERE id='00000000-0000-7000-8000-000000000141' AND payload_type='config_plan' AND state='succeeded'")" = "1"
+  test "$(docker exec "${container}" psql -U ocservia_owner -d ocservia -Atc "SELECT pg_get_constraintdef(oid) LIKE '%config_plan%' FROM pg_constraint WHERE conrelid='commands'::regclass AND conname='commands_payload_type_check'")" = "t"
+  docker exec "${container}" psql -v ON_ERROR_STOP=1 -U ocservia_owner -d ocservia -c "DELETE FROM commands WHERE id='00000000-0000-7000-8000-000000000141'; DELETE FROM operations WHERE id='00000000-0000-7000-8000-000000000140';" >/dev/null
   docker exec -i "${container}" psql -v ON_ERROR_STOP=1 -U ocservia_owner -d ocservia \
     <"${ROOT}/control-plane/migrations/000013_quota_expiry_batch_backport.down.sql" >/dev/null
   docker exec "${container}" psql -v ON_ERROR_STOP=1 -U ocservia_owner -d ocservia -c \
