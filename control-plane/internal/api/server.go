@@ -17,6 +17,7 @@ import (
 	"github.com/GentleKingson/ocservia/control-plane/internal/approvals"
 	"github.com/GentleKingson/ocservia/control-plane/internal/audit"
 	"github.com/GentleKingson/ocservia/control-plane/internal/auth"
+	"github.com/GentleKingson/ocservia/control-plane/internal/certificates"
 	"github.com/GentleKingson/ocservia/control-plane/internal/configplan"
 	"github.com/GentleKingson/ocservia/control-plane/internal/enrollment"
 	"github.com/GentleKingson/ocservia/control-plane/internal/localslice"
@@ -62,6 +63,7 @@ type Server struct {
 	userstate      *userstate.Service
 	useroperations *useroperations.Service
 	configplans    *configplan.Service
+	certificates   *certificates.Service
 }
 
 func New(address string, pool *pgxpool.Pool, build BuildInfo, logger *slog.Logger, bodyLimit int64, requestTimeout time.Duration, devAuth bool, devAuthToken string, expectedSchema int64) *Server {
@@ -109,6 +111,14 @@ func New(address string, pool *pgxpool.Pool, build BuildInfo, logger *slog.Logge
 	mux.HandleFunc("POST /api/v1/nodes/{node_id}/config-plans", s.requireOperationAuth(s.createConfigPlan))
 	mux.HandleFunc("GET /api/v1/config-plans/{plan_id}", s.requireOperationAuth(s.getConfigPlan))
 	mux.HandleFunc("POST /api/v1/config-plans/{plan_id}/apply", s.requireOperationAuth(s.applyConfigPlan))
+	mux.HandleFunc("POST /api/v1/nodes/{node_id}/certificates", s.requireOperationAuth(s.createCertificate))
+	mux.HandleFunc("GET /api/v1/nodes/{node_id}/certificates", s.requireOperationAuth(s.listNodeCertificates))
+	mux.HandleFunc("GET /api/v1/certificates/{certificate_id}", s.requireOperationAuth(s.getCertificate))
+	mux.HandleFunc("POST /api/v1/certificates/{certificate_action}", s.requireOperationAuth(s.certificateAction))
+	mux.HandleFunc("GET /api/v1/artifacts/{artifact_id}", s.requireOperationAuth(s.downloadArtifact))
+	mux.HandleFunc("POST /api/v1/secret-provider-refs", s.requireOperationAuth(s.createSecretRef))
+	mux.HandleFunc("GET /api/v1/secret-provider-refs/{secret_ref_id}", s.requireOperationAuth(s.getSecretRef))
+	mux.HandleFunc("POST /api/v1/secret-provider-refs/{secret_ref_action}", s.requireOperationAuth(s.rotateSecretRef))
 	mux.HandleFunc("POST /api/v1/approval-requests", s.requireOperationAuth(s.createApproval))
 	mux.HandleFunc("GET /api/v1/approval-requests/{approval_id}", s.requireOperationAuth(s.getApproval))
 	mux.HandleFunc("POST /api/v1/approval-requests/{approval_id}", s.requireOperationAuth(s.approveRequest))
@@ -130,6 +140,21 @@ func (s *Server) EnableUserState(service *userstate.Service) { s.userstate = ser
 func (s *Server) EnableUserOperations(service *useroperations.Service) { s.useroperations = service }
 
 func (s *Server) EnableConfigPlans(service *configplan.Service) { s.configplans = service }
+
+func (s *Server) EnableCertificates(service *certificates.Service) { s.certificates = service }
+
+func (s *Server) certificateAction(w http.ResponseWriter, r *http.Request) {
+	switch {
+	case strings.HasSuffix(r.PathValue("certificate_action"), ":issue"):
+		s.issueCertificate(w, r)
+	case strings.HasSuffix(r.PathValue("certificate_action"), ":revoke"):
+		s.revokeCertificate(w, r)
+	case strings.HasSuffix(r.PathValue("certificate_action"), ":p12"):
+		s.createCertificateP12(w, r)
+	default:
+		writeProblem(w, r, http.StatusNotFound, "https://ocservia.dev/problems/not-found", "Resource not found", "the certificate action does not exist")
+	}
+}
 
 func (s *Server) EnableAuthorization(authn *auth.Service, authz *rbac.Service, approvalService *approvals.Service, auditManager *audit.Manager) {
 	s.auth, s.rbac, s.approvals, s.audit = authn, authz, approvalService, auditManager
@@ -234,7 +259,25 @@ func routeMethod(path string) (string, bool) {
 	case "/api/v1/enrollment-tokens", "/api/v1/auth/logout", "/api/v1/auth/break-glass", "/api/v1/approval-requests", "/api/v1/audit:verify", "/api/v1/role-bindings", "/api/v1/user-batches":
 		return http.MethodPost, true
 	}
+	if path == "/api/v1/secret-provider-refs" {
+		return http.MethodPost, true
+	}
 	parts := strings.Split(strings.Trim(path, "/"), "/")
+	if len(parts) == 4 && parts[0] == "api" && parts[1] == "v1" && parts[2] == "certificates" && parts[3] != "" {
+		if strings.HasSuffix(parts[3], ":issue") || strings.HasSuffix(parts[3], ":revoke") || strings.HasSuffix(parts[3], ":p12") {
+			return http.MethodPost, true
+		}
+		return http.MethodGet, true
+	}
+	if len(parts) == 4 && parts[0] == "api" && parts[1] == "v1" && parts[2] == "artifacts" && parts[3] != "" {
+		return http.MethodGet, true
+	}
+	if len(parts) == 4 && parts[0] == "api" && parts[1] == "v1" && parts[2] == "secret-provider-refs" && parts[3] != "" {
+		if strings.HasSuffix(parts[3], ":rotate") {
+			return http.MethodPost, true
+		}
+		return http.MethodGet, true
+	}
 	if len(parts) == 5 && parts[0] == "api" && parts[1] == "v1" && parts[2] == "nodes" && parts[3] != "" && (parts[4] == "approval" || parts[4] == "revocation") {
 		return http.MethodPost, true
 	}
@@ -263,6 +306,9 @@ func routeMethod(path string) (string, bool) {
 		return http.MethodPost, true
 	}
 	if len(parts) == 5 && parts[0] == "api" && parts[1] == "v1" && parts[2] == "nodes" && parts[3] != "" && parts[4] == "config-plans" {
+		return http.MethodPost, true
+	}
+	if len(parts) == 5 && parts[0] == "api" && parts[1] == "v1" && parts[2] == "nodes" && parts[3] != "" && parts[4] == "certificates" {
 		return http.MethodPost, true
 	}
 	if len(parts) == 4 && parts[0] == "api" && parts[1] == "v1" && parts[2] == "config-plans" && parts[3] != "" {

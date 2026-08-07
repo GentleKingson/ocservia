@@ -38,20 +38,21 @@ type Decision struct {
 }
 
 type Approval struct {
-	ID                uuid.UUID       `json:"id"`
-	WorkspaceID       uuid.UUID       `json:"workspace_id"`
-	RequesterID       uuid.UUID       `json:"requester_id"`
-	ApproverID        *uuid.UUID      `json:"approver_id,omitempty"`
-	Action            string          `json:"action"`
-	ResourceType      string          `json:"resource_type"`
-	ResourceID        uuid.UUID       `json:"resource_id"`
-	Reason            string          `json:"reason"`
-	Status            string          `json:"status"`
-	ExpiresAt         time.Time       `json:"expires_at"`
-	CreatedAt         time.Time       `json:"created_at"`
-	RequestHash       string          `json:"request_hash,omitempty"`
-	RequestSummary    json.RawMessage `json:"request_summary,omitempty"`
-	ConfigPlanSummary json.RawMessage `json:"config_plan_summary,omitempty"`
+	ID                 uuid.UUID       `json:"id"`
+	WorkspaceID        uuid.UUID       `json:"workspace_id"`
+	RequesterID        uuid.UUID       `json:"requester_id"`
+	ApproverID         *uuid.UUID      `json:"approver_id,omitempty"`
+	Action             string          `json:"action"`
+	ResourceType       string          `json:"resource_type"`
+	ResourceID         uuid.UUID       `json:"resource_id"`
+	Reason             string          `json:"reason"`
+	Status             string          `json:"status"`
+	ExpiresAt          time.Time       `json:"expires_at"`
+	CreatedAt          time.Time       `json:"created_at"`
+	RequestHash        string          `json:"request_hash,omitempty"`
+	RequestSummary     json.RawMessage `json:"request_summary,omitempty"`
+	ConfigPlanSummary  json.RawMessage `json:"config_plan_summary,omitempty"`
+	CertificateSummary json.RawMessage `json:"certificate_summary,omitempty"`
 }
 
 type Service struct {
@@ -83,6 +84,8 @@ func (s *Service) Create(ctx context.Context, request Request) (Approval, error)
 		approval.RequestHash = fmt.Sprintf("%x", request.RequestHash)
 		if request.ResourceType == "config_plan" {
 			approval.ConfigPlanSummary = request.RequestSummary
+		} else if request.ResourceType == "certificate" {
+			approval.CertificateSummary = request.RequestSummary
 		} else {
 			approval.RequestSummary = request.RequestSummary
 		}
@@ -142,6 +145,18 @@ func Consume(ctx context.Context, tx pgx.Tx, approvalID, workspaceID, requesterI
 
 func ConsumeBound(ctx context.Context, tx pgx.Tx, approvalID, workspaceID, requesterID uuid.UUID, action, resourceType string, resourceID uuid.UUID, requestHash []byte) error {
 	return consume(ctx, tx, approvalID, workspaceID, requesterID, action, resourceType, resourceID, requestHash)
+}
+
+func (s *Service) ValidateApprovedBound(ctx context.Context, approvalID, workspaceID, requesterID uuid.UUID, action, resourceType string, resourceID uuid.UUID, requestHash []byte) error {
+	var valid bool
+	err := s.pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM approval_requests WHERE id=$1 AND workspace_id=$2 AND requester_id=$3 AND action=$4 AND resource_type=$5 AND resource_id=$6 AND request_hash=$7 AND status='approved' AND approver_id IS DISTINCT FROM requester_id AND expires_at>now())`, approvalID, workspaceID, requesterID, action, resourceType, resourceID, requestHash).Scan(&valid)
+	if err != nil {
+		return err
+	}
+	if !valid {
+		return ErrNotReady
+	}
+	return nil
 }
 
 func consume(ctx context.Context, tx pgx.Tx, approvalID, workspaceID, requesterID uuid.UUID, action, resourceType string, resourceID uuid.UUID, requestHash []byte) error {
@@ -214,6 +229,9 @@ func scan(row pgx.Row) (Approval, error) {
 	if err == nil && value.ResourceType == "config_plan" {
 		value.ConfigPlanSummary = value.RequestSummary
 		value.RequestSummary = nil
+	} else if err == nil && value.ResourceType == "certificate" {
+		value.CertificateSummary = value.RequestSummary
+		value.RequestSummary = nil
 	}
 	return value, err
 }
@@ -225,6 +243,9 @@ func approvalSummary(value Approval) json.RawMessage {
 	summary := value.RequestSummary
 	if len(summary) == 0 {
 		summary = value.ConfigPlanSummary
+	}
+	if len(summary) == 0 {
+		summary = value.CertificateSummary
 	}
 	result, _ := json.Marshal(map[string]any{"request_hash": value.RequestHash, "request_summary": summary})
 	return result

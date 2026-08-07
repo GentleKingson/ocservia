@@ -845,6 +845,235 @@ paths:
         "403": { $ref: "#/components/responses/Problem" }
         "409": { $ref: "#/components/responses/Problem" }
         default: { $ref: "#/components/responses/Problem" }
+  /nodes/{node_id}/certificates:
+    get:
+      operationId: listNodeCertificates
+      summary: List the newest node-scoped certificate lifecycle records
+      tags: [certificates]
+      parameters:
+        - $ref: "#/components/parameters/NodeId"
+      responses:
+        "200":
+          description: At most 100 certificate records, newest first.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    maxItems: 100
+                    items: { $ref: "#/components/schemas/Certificate" }
+        "403": { $ref: "#/components/responses/Problem" }
+        default: { $ref: "#/components/responses/Problem" }
+    post:
+      operationId: createCertificate
+      summary: Generate a node-local private key and queue a CSR operation
+      tags: [certificates]
+      parameters:
+        - $ref: "#/components/parameters/NodeId"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/CertificateRequest" }
+      responses:
+        "202":
+          description: Node-local key and CSR generation accepted.
+          headers:
+            Location: { schema: { type: string, format: uri-reference } }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Certificate" }
+        "400": { $ref: "#/components/responses/Problem" }
+        "403": { $ref: "#/components/responses/Problem" }
+        "409": { $ref: "#/components/responses/Problem" }
+        default: { $ref: "#/components/responses/Problem" }
+  /certificates/{certificate_id}:
+    get:
+      operationId: getCertificate
+      summary: Get node-scoped certificate lifecycle state and public metadata
+      tags: [certificates]
+      parameters:
+        - name: certificate_id
+          in: path
+          required: true
+          schema: { $ref: "#/components/schemas/UuidV7" }
+      responses:
+        "200":
+          description: Certificate state without CSR private material or secret values.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Certificate" }
+        "403": { $ref: "#/components/responses/Problem" }
+        "404": { $ref: "#/components/responses/Problem" }
+        default: { $ref: "#/components/responses/Problem" }
+  /certificates/{certificate_id}:issue:
+    post:
+      operationId: issueCertificate
+      summary: Ask the configured external PKI signer to issue a ready CSR
+      tags: [certificates]
+      parameters:
+        - name: certificate_id
+          in: path
+          required: true
+          schema: { $ref: "#/components/schemas/UuidV7" }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/CertificateIssueRequest" }
+      responses:
+        "200":
+          description: Certificate issued by the external signer.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Certificate" }
+        "400": { $ref: "#/components/responses/Problem" }
+        "403": { $ref: "#/components/responses/Problem" }
+        "409": { $ref: "#/components/responses/Problem" }
+        "503": { $ref: "#/components/responses/Problem" }
+        default: { $ref: "#/components/responses/Problem" }
+  /certificates/{certificate_id}:revoke:
+    post:
+      operationId: revokeCertificate
+      summary: Revoke an issued certificate and remove its node-local private key
+      tags: [certificates]
+      parameters:
+        - name: certificate_id
+          in: path
+          required: true
+          schema: { $ref: "#/components/schemas/UuidV7" }
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/CertificateRevokeRequest" }
+      responses:
+        "202": { $ref: "#/components/responses/OperationAccepted" }
+        "400": { $ref: "#/components/responses/Problem" }
+        "403": { $ref: "#/components/responses/Problem" }
+        "409": { $ref: "#/components/responses/Problem" }
+        "503": { $ref: "#/components/responses/Problem" }
+        default: { $ref: "#/components/responses/Problem" }
+  /certificates/{certificate_id}:p12:
+    post:
+      operationId: createCertificateP12
+      summary: Create a short-lived one-time encrypted P12 artifact
+      tags: [certificates]
+      parameters:
+        - name: certificate_id
+          in: path
+          required: true
+          schema: { $ref: "#/components/schemas/UuidV7" }
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/CertificateP12Request" }
+      responses:
+        "202":
+          description: Artifact generation queued; password and download token appear only in the initial response.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ArtifactGrant" }
+        "400": { $ref: "#/components/responses/Problem" }
+        "403": { $ref: "#/components/responses/Problem" }
+        "409": { $ref: "#/components/responses/Problem" }
+        "503": { $ref: "#/components/responses/Problem" }
+        default: { $ref: "#/components/responses/Problem" }
+  /artifacts/{artifact_id}:
+    get:
+      operationId: downloadArtifact
+      summary: Stream one ready artifact once with its separate bearer token
+      tags: [certificates]
+      parameters:
+        - name: artifact_id
+          in: path
+          required: true
+          schema: { $ref: "#/components/schemas/UuidV7" }
+        - name: X-Artifact-Token
+          in: header
+          required: true
+          description: Short-lived one-time capability returned only by the initial artifact request.
+          schema: { type: string, minLength: 43, maxLength: 43 }
+      responses:
+        "200":
+          description: Bounded P12 stream. A completed response consumes the artifact token.
+          content:
+            application/x-pkcs12:
+              schema: { type: string, format: binary, maxLength: 67108864 }
+        "403": { $ref: "#/components/responses/Problem" }
+        "404": { $ref: "#/components/responses/Problem" }
+        "503": { $ref: "#/components/responses/Problem" }
+        default: { $ref: "#/components/responses/Problem" }
+  /secret-provider-refs:
+    post:
+      operationId: createSecretProviderRef
+      summary: Register opaque external secret metadata without a secret value
+      tags: [certificates]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/SecretProviderRefRequest" }
+      responses:
+        "201":
+          description: Opaque secret reference registered.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SecretProviderRef" }
+        "400": { $ref: "#/components/responses/Problem" }
+        "403": { $ref: "#/components/responses/Problem" }
+        default: { $ref: "#/components/responses/Problem" }
+  /secret-provider-refs/{secret_ref_id}:
+    get:
+      operationId: getSecretProviderRef
+      summary: Read opaque provider/version metadata
+      tags: [certificates]
+      parameters:
+        - name: secret_ref_id
+          in: path
+          required: true
+          schema: { $ref: "#/components/schemas/UuidV7" }
+      responses:
+        "200":
+          description: Secret metadata without the secret value.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SecretProviderRef" }
+        "403": { $ref: "#/components/responses/Problem" }
+        "404": { $ref: "#/components/responses/Problem" }
+        default: { $ref: "#/components/responses/Problem" }
+  /secret-provider-refs/{secret_ref_id}:rotate:
+    post:
+      operationId: rotateSecretProviderRef
+      summary: Record an externally completed secret version rotation
+      tags: [certificates]
+      parameters:
+        - name: secret_ref_id
+          in: path
+          required: true
+          schema: { $ref: "#/components/schemas/UuidV7" }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/SecretProviderRotateRequest" }
+      responses:
+        "200":
+          description: Rotation metadata updated.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SecretProviderRef" }
+        "400": { $ref: "#/components/responses/Problem" }
+        "403": { $ref: "#/components/responses/Problem" }
+        "404": { $ref: "#/components/responses/Problem" }
+        default: { $ref: "#/components/responses/Problem" }
   /nodes/{node_id}/groups/{group_name}:
     put:
       operationId: applyNodeGroup
@@ -1499,6 +1728,111 @@ components:
         candidate_hash: { type: string, pattern: "^[0-9a-f]{64}$" }
         current_hash: { type: string, pattern: "^[0-9a-f]{64}$" }
         expires_at: { $ref: "#/components/schemas/UtcDateTime" }
+    CertificateRequest:
+      type: object
+      additionalProperties: false
+      required: [expected_version, common_name, key_bits, reason]
+      properties:
+        expected_version: { type: integer, format: int64, minimum: 1 }
+        common_name: { type: string, minLength: 1, maxLength: 253, pattern: "^[A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?$" }
+        dns_names:
+          type: array
+          maxItems: 32
+          uniqueItems: true
+          items: { type: string, minLength: 1, maxLength: 253 }
+        key_bits: { type: integer, format: int32, enum: [2048, 3072, 4096] }
+        reason: { type: string, minLength: 1, maxLength: 512 }
+    CertificateIssueRequest:
+      type: object
+      additionalProperties: false
+      required: [approval_id, reason]
+      properties:
+        approval_id: { $ref: "#/components/schemas/UuidV7" }
+        reason: { type: string, minLength: 1, maxLength: 512 }
+    CertificateRevokeRequest:
+      type: object
+      additionalProperties: false
+      required: [expected_version, reason]
+      properties:
+        expected_version: { type: integer, format: int64, minimum: 1 }
+        reason: { type: string, minLength: 1, maxLength: 128 }
+    CertificateP12Request:
+      type: object
+      additionalProperties: false
+      required: [expected_version, reason]
+      properties:
+        expected_version: { type: integer, format: int64, minimum: 1 }
+        reason: { type: string, minLength: 1, maxLength: 512 }
+    ArtifactGrant:
+      type: object
+      additionalProperties: false
+      required: [artifact_id, operation, expires_at]
+      properties:
+        artifact_id: { $ref: "#/components/schemas/UuidV7" }
+        operation: { $ref: "#/components/schemas/Operation" }
+        download_token: { type: string, minLength: 43, maxLength: 43, writeOnly: true }
+        password: { type: string, minLength: 32, maxLength: 32, writeOnly: true }
+        expires_at: { $ref: "#/components/schemas/UtcDateTime" }
+    SecretProviderRefRequest:
+      type: object
+      additionalProperties: false
+      required: [provider, key_path, version, reason]
+      properties:
+        provider: { type: string, pattern: "^[A-Za-z0-9._-]{1,64}$" }
+        key_path: { type: string, minLength: 1, maxLength: 512 }
+        version: { type: string, minLength: 1, maxLength: 128 }
+        reason: { type: string, minLength: 1, maxLength: 512 }
+    SecretProviderRotateRequest:
+      type: object
+      additionalProperties: false
+      required: [version, reason]
+      properties:
+        version: { type: string, minLength: 1, maxLength: 128 }
+        reason: { type: string, minLength: 1, maxLength: 512 }
+    SecretProviderRef:
+      type: object
+      additionalProperties: false
+      required: [id, workspace_id, provider, key_path, version, state, created_at, updated_at]
+      properties:
+        id: { $ref: "#/components/schemas/UuidV7" }
+        workspace_id: { $ref: "#/components/schemas/UuidV7" }
+        provider: { type: string, maxLength: 64 }
+        key_path: { type: string, maxLength: 512 }
+        version: { type: string, maxLength: 128 }
+        state: { type: string, enum: [active, rotating, disabled, unavailable] }
+        rotated_at: { $ref: "#/components/schemas/UtcDateTime" }
+        created_at: { $ref: "#/components/schemas/UtcDateTime" }
+        updated_at: { $ref: "#/components/schemas/UtcDateTime" }
+    CertificateApprovalSummary:
+      type: object
+      additionalProperties: false
+      required: [certificate_id, node_id, common_name, dns_names, csr_sha256]
+      properties:
+        certificate_id: { $ref: "#/components/schemas/UuidV7" }
+        node_id: { $ref: "#/components/schemas/UuidV7" }
+        common_name: { type: string, minLength: 1, maxLength: 253 }
+        dns_names: { type: array, maxItems: 32, items: { type: string, maxLength: 253 } }
+        csr_sha256: { type: string, pattern: "^[0-9a-f]{64}$" }
+    Certificate:
+      type: object
+      additionalProperties: false
+      required: [id, workspace_id, node_id, operation_id, common_name, dns_names, key_bits, state, created_at, updated_at]
+      properties:
+        id: { $ref: "#/components/schemas/UuidV7" }
+        workspace_id: { $ref: "#/components/schemas/UuidV7" }
+        node_id: { $ref: "#/components/schemas/UuidV7" }
+        operation_id: { $ref: "#/components/schemas/UuidV7" }
+        common_name: { type: string, minLength: 1, maxLength: 253 }
+        dns_names: { type: array, maxItems: 32, items: { type: string, maxLength: 253 } }
+        key_bits: { type: integer, format: int32, enum: [2048, 3072, 4096] }
+        state: { type: string, enum: [csr_pending, csr_ready, signer_unavailable, issued, expiring, revoking, revoked, failed, unknown] }
+        public_key_sha256: { type: string, format: byte, description: SHA-256 of the node-local public key. }
+        serial_number: { type: string, maxLength: 128 }
+        not_before: { $ref: "#/components/schemas/UtcDateTime" }
+        not_after: { $ref: "#/components/schemas/UtcDateTime" }
+        revoked_at: { $ref: "#/components/schemas/UtcDateTime" }
+        created_at: { $ref: "#/components/schemas/UtcDateTime" }
+        updated_at: { $ref: "#/components/schemas/UtcDateTime" }
     UserPolicyRequest:
       type: object
       additionalProperties: false
@@ -2016,6 +2350,8 @@ components:
           items: { $ref: "#/components/schemas/UserBatchItemRequest" }
         config_plan_summary:
           $ref: "#/components/schemas/ConfigPlanApprovalSummary"
+        certificate_summary:
+          $ref: "#/components/schemas/CertificateApprovalSummary"
         expires_at: { $ref: "#/components/schemas/UtcDateTime" }
         created_at: { $ref: "#/components/schemas/UtcDateTime" }
     AuditEventPage:

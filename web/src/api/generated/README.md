@@ -15,9 +15,9 @@ Next, try it out.
 ```ts
 import {
   Configuration,
-  ConfigurationApi,
+  CertificatesApi,
 } from '@ocservia/api-client';
-import type { ApplyConfigPlanRequest } from '@ocservia/api-client';
+import type { CreateCertificateRequest } from '@ocservia/api-client';
 
 async function example() {
   console.log("🚀 Testing @ocservia/api-client SDK...");
@@ -27,19 +27,19 @@ async function example() {
     // Configure HTTP bearer authorization: bearerAuth
     accessToken: "YOUR BEARER TOKEN",
   });
-  const api = new ConfigurationApi(config);
+  const api = new CertificatesApi(config);
 
   const body = {
     // string
-    planId: 38400000-8cf0-11bd-b23e-10b96e4ef00d,
+    nodeId: 38400000-8cf0-11bd-b23e-10b96e4ef00d,
     // string
     idempotencyKey: idempotencyKey_example,
-    // ConfigApplyRequest
-    configApplyRequest: ...,
-  } satisfies ApplyConfigPlanRequest;
+    // CertificateRequest
+    certificateRequest: ...,
+  } satisfies CreateCertificateRequest;
 
   try {
-    const data = await api.applyConfigPlan(body);
+    const data = await api.createCertificate(body);
     console.log(data);
   } catch (error) {
     console.error(error);
@@ -58,6 +58,16 @@ All URIs are relative to _/api/v1_
 
 | Class              | Method                                                                         | HTTP request                                               | Description                                                                      |
 | ------------------ | ------------------------------------------------------------------------------ | ---------------------------------------------------------- | -------------------------------------------------------------------------------- |
+| _CertificatesApi_  | [**createCertificate**](docs/CertificatesApi.md#createcertificate)             | **POST** /nodes/{node_id}/certificates                     | Generate a node-local private key and queue a CSR operation                      |
+| _CertificatesApi_  | [**createCertificateP12**](docs/CertificatesApi.md#createcertificatep12)       | **POST** /certificates/{certificate_id}:p12                | Create a short-lived one-time encrypted P12 artifact                             |
+| _CertificatesApi_  | [**createSecretProviderRef**](docs/CertificatesApi.md#createsecretproviderref) | **POST** /secret-provider-refs                             | Register opaque external secret metadata without a secret value                  |
+| _CertificatesApi_  | [**downloadArtifact**](docs/CertificatesApi.md#downloadartifact)               | **GET** /artifacts/{artifact_id}                           | Stream one ready artifact once with its separate bearer token                    |
+| _CertificatesApi_  | [**getCertificate**](docs/CertificatesApi.md#getcertificate)                   | **GET** /certificates/{certificate_id}                     | Get node-scoped certificate lifecycle state and public metadata                  |
+| _CertificatesApi_  | [**getSecretProviderRef**](docs/CertificatesApi.md#getsecretproviderref)       | **GET** /secret-provider-refs/{secret_ref_id}              | Read opaque provider/version metadata                                            |
+| _CertificatesApi_  | [**issueCertificate**](docs/CertificatesApi.md#issuecertificate)               | **POST** /certificates/{certificate_id}:issue              | Ask the configured external PKI signer to issue a ready CSR                      |
+| _CertificatesApi_  | [**listNodeCertificates**](docs/CertificatesApi.md#listnodecertificates)       | **GET** /nodes/{node_id}/certificates                      | List the newest node-scoped certificate lifecycle records                        |
+| _CertificatesApi_  | [**revokeCertificate**](docs/CertificatesApi.md#revokecertificate)             | **POST** /certificates/{certificate_id}:revoke             | Revoke an issued certificate and remove its node-local private key               |
+| _CertificatesApi_  | [**rotateSecretProviderRef**](docs/CertificatesApi.md#rotatesecretproviderref) | **POST** /secret-provider-refs/{secret_ref_id}:rotate      | Record an externally completed secret version rotation                           |
 | _ConfigurationApi_ | [**applyConfigPlan**](docs/ConfigurationApi.md#applyconfigplan)                | **POST** /config-plans/{plan_id}/apply                     | Queue atomic application of an unexpired independently approved plan             |
 | _ConfigurationApi_ | [**createConfigPlan**](docs/ConfigurationApi.md#createconfigplan)              | **POST** /nodes/{node_id}/config-plans                     | Render and remotely validate an immutable configuration candidate                |
 | _ConfigurationApi_ | [**getConfigPlan**](docs/ConfigurationApi.md#getconfigplan)                    | **GET** /config-plans/{plan_id}                            | Get validation, safe diff, warnings, and approval state for a configuration plan |
@@ -113,10 +123,17 @@ All URIs are relative to _/api/v1_
 - [Approval](docs/Approval.md)
 - [ApprovalDecision](docs/ApprovalDecision.md)
 - [ApprovalRequest](docs/ApprovalRequest.md)
+- [ArtifactGrant](docs/ArtifactGrant.md)
 - [AuditEventPage](docs/AuditEventPage.md)
 - [AuditVerification](docs/AuditVerification.md)
 - [BreakGlassRequest](docs/BreakGlassRequest.md)
 - [BuildInfo](docs/BuildInfo.md)
+- [Certificate](docs/Certificate.md)
+- [CertificateApprovalSummary](docs/CertificateApprovalSummary.md)
+- [CertificateIssueRequest](docs/CertificateIssueRequest.md)
+- [CertificateP12Request](docs/CertificateP12Request.md)
+- [CertificateRequest](docs/CertificateRequest.md)
+- [CertificateRevokeRequest](docs/CertificateRevokeRequest.md)
 - [ConfigApplyRequest](docs/ConfigApplyRequest.md)
 - [ConfigDirective](docs/ConfigDirective.md)
 - [ConfigPlan](docs/ConfigPlan.md)
@@ -133,6 +150,7 @@ All URIs are relative to _/api/v1_
 - [EnrollmentTokenRequest](docs/EnrollmentTokenRequest.md)
 - [GroupApplyRequest](docs/GroupApplyRequest.md)
 - [Health](docs/Health.md)
+- [ListNodeCertificates200Response](docs/ListNodeCertificates200Response.md)
 - [NodeApproval](docs/NodeApproval.md)
 - [NodeIpBan](docs/NodeIpBan.md)
 - [NodeIpBanPage](docs/NodeIpBanPage.md)
@@ -155,6 +173,9 @@ All URIs are relative to _/api/v1_
 - [Readiness](docs/Readiness.md)
 - [RoleBinding](docs/RoleBinding.md)
 - [RoleBindingRequest](docs/RoleBindingRequest.md)
+- [SecretProviderRef](docs/SecretProviderRef.md)
+- [SecretProviderRefRequest](docs/SecretProviderRefRequest.md)
+- [SecretProviderRotateRequest](docs/SecretProviderRotateRequest.md)
 - [SimulationScenario](docs/SimulationScenario.md)
 - [SyntheticCommandRequest](docs/SyntheticCommandRequest.md)
 - [TelemetryMetric](docs/TelemetryMetric.md)

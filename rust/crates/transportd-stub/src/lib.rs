@@ -9,14 +9,15 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use ocservia_contracts::decode_strict_command_envelope;
 use ocservia_contracts::generated::ocserv::platform::agent::v1::{
-    CommandDeliveryMode, MetricSample, ObservedSnapshot, SimulationProbe, TelemetryBatch,
-    TelemetryDropCounters, TelemetryPriority, command_envelope,
+    ArtifactChunk, CommandDeliveryMode, MetricSample, ObservedSnapshot, SimulationProbe,
+    TelemetryBatch, TelemetryDropCounters, TelemetryPriority, command_envelope,
 };
 use ocservia_contracts::generated::ocserv::platform::transport::v1::{
-    CloseNodeRequest, CloseNodeResponse, ConnectionPath, GetNodeConnectionRequest, HealthRequest,
-    HealthResponse, HealthStatus, NodeConnection, SendCommandRequest, SendCommandResponse,
-    TransportEvent, TransportEventType, UpdateNodeTrustRequest, UpdateNodeTrustResponse,
-    WatchEventsRequest, transport_service_server::TransportService,
+    CloseNodeRequest, CloseNodeResponse, ConnectionPath, FetchArtifactRequest,
+    GetNodeConnectionRequest, HealthRequest, HealthResponse, HealthStatus, NodeConnection,
+    SendCommandRequest, SendCommandResponse, TransportEvent, TransportEventType,
+    UpdateNodeTrustRequest, UpdateNodeTrustResponse, WatchEventsRequest,
+    transport_service_server::TransportService,
 };
 use prost::Message;
 use tokio::sync::{Mutex, Semaphore, mpsc, watch};
@@ -29,6 +30,7 @@ const MAX_HEARTBEATS: u32 = 32;
 const MAX_DELAY: Duration = Duration::from_secs(30);
 
 type EventStream = Pin<Box<dyn Stream<Item = Result<TransportEvent, Status>> + Send>>;
+type ArtifactStream = Pin<Box<dyn Stream<Item = Result<ArtifactChunk, Status>> + Send>>;
 
 #[derive(Clone)]
 pub struct StubService {
@@ -435,6 +437,16 @@ impl StubService {
 #[tonic::async_trait]
 impl TransportService for StubService {
     type WatchEventsStream = EventStream;
+    type FetchArtifactStream = ArtifactStream;
+
+    async fn fetch_artifact(
+        &self,
+        _request: Request<FetchArtifactRequest>,
+    ) -> Result<Response<Self::FetchArtifactStream>, Status> {
+        Err(Status::unavailable(
+            "artifact streaming requires a connected real agent",
+        ))
+    }
 
     async fn health(
         &self,

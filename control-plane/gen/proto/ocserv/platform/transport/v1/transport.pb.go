@@ -765,6 +765,74 @@ func (*UpdateNodeTrustResponse) Descriptor() ([]byte, []int) {
 	return file_ocserv_platform_transport_v1_transport_proto_rawDescGZIP(), []int{9}
 }
 
+type FetchArtifactRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	NodeId        []byte                 `protobuf:"bytes,1,opt,name=node_id,json=nodeId,proto3" json:"node_id,omitempty"`
+	ArtifactId    []byte                 `protobuf:"bytes,2,opt,name=artifact_id,json=artifactId,proto3" json:"artifact_id,omitempty"`
+	Purpose       string                 `protobuf:"bytes,3,opt,name=purpose,proto3" json:"purpose,omitempty"`
+	MaxBytes      uint64                 `protobuf:"varint,4,opt,name=max_bytes,json=maxBytes,proto3" json:"max_bytes,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *FetchArtifactRequest) Reset() {
+	*x = FetchArtifactRequest{}
+	mi := &file_ocserv_platform_transport_v1_transport_proto_msgTypes[10]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *FetchArtifactRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*FetchArtifactRequest) ProtoMessage() {}
+
+func (x *FetchArtifactRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_ocserv_platform_transport_v1_transport_proto_msgTypes[10]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use FetchArtifactRequest.ProtoReflect.Descriptor instead.
+func (*FetchArtifactRequest) Descriptor() ([]byte, []int) {
+	return file_ocserv_platform_transport_v1_transport_proto_rawDescGZIP(), []int{10}
+}
+
+func (x *FetchArtifactRequest) GetNodeId() []byte {
+	if x != nil {
+		return x.NodeId
+	}
+	return nil
+}
+
+func (x *FetchArtifactRequest) GetArtifactId() []byte {
+	if x != nil {
+		return x.ArtifactId
+	}
+	return nil
+}
+
+func (x *FetchArtifactRequest) GetPurpose() string {
+	if x != nil {
+		return x.Purpose
+	}
+	return ""
+}
+
+func (x *FetchArtifactRequest) GetMaxBytes() uint64 {
+	if x != nil {
+		return x.MaxBytes
+	}
+	return 0
+}
+
 type CheckEndpointRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	EndpointId    []byte                 `protobuf:"bytes,1,opt,name=endpoint_id,json=endpointId,proto3" json:"endpoint_id,omitempty"`
@@ -775,7 +843,7 @@ type CheckEndpointRequest struct {
 
 func (x *CheckEndpointRequest) Reset() {
 	*x = CheckEndpointRequest{}
-	mi := &file_ocserv_platform_transport_v1_transport_proto_msgTypes[10]
+	mi := &file_ocserv_platform_transport_v1_transport_proto_msgTypes[11]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -787,7 +855,7 @@ func (x *CheckEndpointRequest) String() string {
 func (*CheckEndpointRequest) ProtoMessage() {}
 
 func (x *CheckEndpointRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_ocserv_platform_transport_v1_transport_proto_msgTypes[10]
+	mi := &file_ocserv_platform_transport_v1_transport_proto_msgTypes[11]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -800,7 +868,7 @@ func (x *CheckEndpointRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CheckEndpointRequest.ProtoReflect.Descriptor instead.
 func (*CheckEndpointRequest) Descriptor() ([]byte, []int) {
-	return file_ocserv_platform_transport_v1_transport_proto_rawDescGZIP(), []int{10}
+	return file_ocserv_platform_transport_v1_transport_proto_rawDescGZIP(), []int{11}
 }
 
 func (x *CheckEndpointRequest) GetEndpointId() []byte {
@@ -826,7 +894,7 @@ type CheckEndpointResponse struct {
 
 func (x *CheckEndpointResponse) Reset() {
 	*x = CheckEndpointResponse{}
-	mi := &file_ocserv_platform_transport_v1_transport_proto_msgTypes[11]
+	mi := &file_ocserv_platform_transport_v1_transport_proto_msgTypes[12]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -838,7 +906,7 @@ func (x *CheckEndpointResponse) String() string {
 func (*CheckEndpointResponse) ProtoMessage() {}
 
 func (x *CheckEndpointResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_ocserv_platform_transport_v1_transport_proto_msgTypes[11]
+	mi := &file_ocserv_platform_transport_v1_transport_proto_msgTypes[12]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -851,7 +919,7 @@ func (x *CheckEndpointResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CheckEndpointResponse.ProtoReflect.Descriptor instead.
 func (*CheckEndpointResponse) Descriptor() ([]byte, []int) {
-	return file_ocserv_platform_transport_v1_transport_proto_rawDescGZIP(), []int{11}
+	return file_ocserv_platform_transport_v1_transport_proto_rawDescGZIP(), []int{12}
 }
 
 func (x *CheckEndpointResponse) GetPermitted() bool {
@@ -871,7 +939,7 @@ type AuthorizeSessionRequest struct {
 
 func (x *AuthorizeSessionRequest) Reset() {
 	*x = AuthorizeSessionRequest{}
-	mi := &file_ocserv_platform_transport_v1_transport_proto_msgTypes[12]
+	mi := &file_ocserv_platform_transport_v1_transport_proto_msgTypes[13]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -883,7 +951,7 @@ func (x *AuthorizeSessionRequest) String() string {
 func (*AuthorizeSessionRequest) ProtoMessage() {}
 
 func (x *AuthorizeSessionRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_ocserv_platform_transport_v1_transport_proto_msgTypes[12]
+	mi := &file_ocserv_platform_transport_v1_transport_proto_msgTypes[13]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -896,7 +964,7 @@ func (x *AuthorizeSessionRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use AuthorizeSessionRequest.ProtoReflect.Descriptor instead.
 func (*AuthorizeSessionRequest) Descriptor() ([]byte, []int) {
-	return file_ocserv_platform_transport_v1_transport_proto_rawDescGZIP(), []int{12}
+	return file_ocserv_platform_transport_v1_transport_proto_rawDescGZIP(), []int{13}
 }
 
 func (x *AuthorizeSessionRequest) GetRemoteEndpointId() []byte {
@@ -922,7 +990,7 @@ type WatchEventsRequest struct {
 
 func (x *WatchEventsRequest) Reset() {
 	*x = WatchEventsRequest{}
-	mi := &file_ocserv_platform_transport_v1_transport_proto_msgTypes[13]
+	mi := &file_ocserv_platform_transport_v1_transport_proto_msgTypes[14]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -934,7 +1002,7 @@ func (x *WatchEventsRequest) String() string {
 func (*WatchEventsRequest) ProtoMessage() {}
 
 func (x *WatchEventsRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_ocserv_platform_transport_v1_transport_proto_msgTypes[13]
+	mi := &file_ocserv_platform_transport_v1_transport_proto_msgTypes[14]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -947,7 +1015,7 @@ func (x *WatchEventsRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use WatchEventsRequest.ProtoReflect.Descriptor instead.
 func (*WatchEventsRequest) Descriptor() ([]byte, []int) {
-	return file_ocserv_platform_transport_v1_transport_proto_rawDescGZIP(), []int{13}
+	return file_ocserv_platform_transport_v1_transport_proto_rawDescGZIP(), []int{14}
 }
 
 func (x *WatchEventsRequest) GetAfterEventId() []byte {
@@ -971,7 +1039,7 @@ type TransportEvent struct {
 
 func (x *TransportEvent) Reset() {
 	*x = TransportEvent{}
-	mi := &file_ocserv_platform_transport_v1_transport_proto_msgTypes[14]
+	mi := &file_ocserv_platform_transport_v1_transport_proto_msgTypes[15]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -983,7 +1051,7 @@ func (x *TransportEvent) String() string {
 func (*TransportEvent) ProtoMessage() {}
 
 func (x *TransportEvent) ProtoReflect() protoreflect.Message {
-	mi := &file_ocserv_platform_transport_v1_transport_proto_msgTypes[14]
+	mi := &file_ocserv_platform_transport_v1_transport_proto_msgTypes[15]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -996,7 +1064,7 @@ func (x *TransportEvent) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use TransportEvent.ProtoReflect.Descriptor instead.
 func (*TransportEvent) Descriptor() ([]byte, []int) {
-	return file_ocserv_platform_transport_v1_transport_proto_rawDescGZIP(), []int{14}
+	return file_ocserv_platform_transport_v1_transport_proto_rawDescGZIP(), []int{15}
 }
 
 func (x *TransportEvent) GetEventId() []byte {
@@ -1079,7 +1147,13 @@ const file_ocserv_platform_transport_v1_transport_proto_rawDesc = "" +
 	"\x05state\x18\x03 \x01(\x0e2,.ocserv.platform.transport.v1.NodeTrustStateR\x05state\x12\x16\n" +
 	"\x06reason\x18\x04 \x01(\tR\x06reason\x12\x1a\n" +
 	"\brevision\x18\x05 \x01(\x04R\brevision\"\x19\n" +
-	"\x17UpdateNodeTrustResponse\"K\n" +
+	"\x17UpdateNodeTrustResponse\"\x87\x01\n" +
+	"\x14FetchArtifactRequest\x12\x17\n" +
+	"\anode_id\x18\x01 \x01(\fR\x06nodeId\x12\x1f\n" +
+	"\vartifact_id\x18\x02 \x01(\fR\n" +
+	"artifactId\x12\x18\n" +
+	"\apurpose\x18\x03 \x01(\tR\apurpose\x12\x1b\n" +
+	"\tmax_bytes\x18\x04 \x01(\x04R\bmaxBytes\"K\n" +
 	"\x14CheckEndpointRequest\x12\x1f\n" +
 	"\vendpoint_id\x18\x01 \x01(\fR\n" +
 	"endpointId\x12\x12\n" +
@@ -1120,14 +1194,15 @@ const file_ocserv_platform_transport_v1_transport_proto_rawDesc = "" +
 	"\x0eNodeTrustState\x12 \n" +
 	"\x1cNODE_TRUST_STATE_UNSPECIFIED\x10\x00\x12\x1b\n" +
 	"\x17NODE_TRUST_STATE_ACTIVE\x10\x01\x12\x1c\n" +
-	"\x18NODE_TRUST_STATE_REVOKED\x10\x022\xc5\x05\n" +
+	"\x18NODE_TRUST_STATE_REVOKED\x10\x022\xb5\x06\n" +
 	"\x10TransportService\x12c\n" +
 	"\x06Health\x12+.ocserv.platform.transport.v1.HealthRequest\x1a,.ocserv.platform.transport.v1.HealthResponse\x12y\n" +
 	"\x11GetNodeConnection\x126.ocserv.platform.transport.v1.GetNodeConnectionRequest\x1a,.ocserv.platform.transport.v1.NodeConnection\x12r\n" +
 	"\vSendCommand\x120.ocserv.platform.transport.v1.SendCommandRequest\x1a1.ocserv.platform.transport.v1.SendCommandResponse\x12l\n" +
 	"\tCloseNode\x12..ocserv.platform.transport.v1.CloseNodeRequest\x1a/.ocserv.platform.transport.v1.CloseNodeResponse\x12o\n" +
 	"\vWatchEvents\x120.ocserv.platform.transport.v1.WatchEventsRequest\x1a,.ocserv.platform.transport.v1.TransportEvent0\x01\x12~\n" +
-	"\x0fUpdateNodeTrust\x124.ocserv.platform.transport.v1.UpdateNodeTrustRequest\x1a5.ocserv.platform.transport.v1.UpdateNodeTrustResponse2\xe4\x02\n" +
+	"\x0fUpdateNodeTrust\x124.ocserv.platform.transport.v1.UpdateNodeTrustRequest\x1a5.ocserv.platform.transport.v1.UpdateNodeTrustResponse\x12n\n" +
+	"\rFetchArtifact\x122.ocserv.platform.transport.v1.FetchArtifactRequest\x1a'.ocserv.platform.agent.v1.ArtifactChunk0\x012\xe4\x02\n" +
 	"\fTrustService\x12x\n" +
 	"\rCheckEndpoint\x122.ocserv.platform.transport.v1.CheckEndpointRequest\x1a3.ocserv.platform.transport.v1.CheckEndpointResponse\x12[\n" +
 	"\x06Enroll\x12'.ocserv.platform.agent.v1.EnrollRequest\x1a(.ocserv.platform.agent.v1.EnrollResponse\x12}\n" +
@@ -1147,7 +1222,7 @@ func file_ocserv_platform_transport_v1_transport_proto_rawDescGZIP() []byte {
 }
 
 var file_ocserv_platform_transport_v1_transport_proto_enumTypes = make([]protoimpl.EnumInfo, 4)
-var file_ocserv_platform_transport_v1_transport_proto_msgTypes = make([]protoimpl.MessageInfo, 15)
+var file_ocserv_platform_transport_v1_transport_proto_msgTypes = make([]protoimpl.MessageInfo, 16)
 var file_ocserv_platform_transport_v1_transport_proto_goTypes = []any{
 	(HealthStatus)(0),                   // 0: ocserv.platform.transport.v1.HealthStatus
 	(ConnectionPath)(0),                 // 1: ocserv.platform.transport.v1.ConnectionPath
@@ -1163,46 +1238,50 @@ var file_ocserv_platform_transport_v1_transport_proto_goTypes = []any{
 	(*CloseNodeResponse)(nil),           // 11: ocserv.platform.transport.v1.CloseNodeResponse
 	(*UpdateNodeTrustRequest)(nil),      // 12: ocserv.platform.transport.v1.UpdateNodeTrustRequest
 	(*UpdateNodeTrustResponse)(nil),     // 13: ocserv.platform.transport.v1.UpdateNodeTrustResponse
-	(*CheckEndpointRequest)(nil),        // 14: ocserv.platform.transport.v1.CheckEndpointRequest
-	(*CheckEndpointResponse)(nil),       // 15: ocserv.platform.transport.v1.CheckEndpointResponse
-	(*AuthorizeSessionRequest)(nil),     // 16: ocserv.platform.transport.v1.AuthorizeSessionRequest
-	(*WatchEventsRequest)(nil),          // 17: ocserv.platform.transport.v1.WatchEventsRequest
-	(*TransportEvent)(nil),              // 18: ocserv.platform.transport.v1.TransportEvent
-	(*timestamppb.Timestamp)(nil),       // 19: google.protobuf.Timestamp
-	(*v1.SessionHandshake)(nil),         // 20: ocserv.platform.agent.v1.SessionHandshake
-	(*v1.EnrollRequest)(nil),            // 21: ocserv.platform.agent.v1.EnrollRequest
-	(*v1.EnrollResponse)(nil),           // 22: ocserv.platform.agent.v1.EnrollResponse
-	(*v1.SessionHandshakeResponse)(nil), // 23: ocserv.platform.agent.v1.SessionHandshakeResponse
+	(*FetchArtifactRequest)(nil),        // 14: ocserv.platform.transport.v1.FetchArtifactRequest
+	(*CheckEndpointRequest)(nil),        // 15: ocserv.platform.transport.v1.CheckEndpointRequest
+	(*CheckEndpointResponse)(nil),       // 16: ocserv.platform.transport.v1.CheckEndpointResponse
+	(*AuthorizeSessionRequest)(nil),     // 17: ocserv.platform.transport.v1.AuthorizeSessionRequest
+	(*WatchEventsRequest)(nil),          // 18: ocserv.platform.transport.v1.WatchEventsRequest
+	(*TransportEvent)(nil),              // 19: ocserv.platform.transport.v1.TransportEvent
+	(*timestamppb.Timestamp)(nil),       // 20: google.protobuf.Timestamp
+	(*v1.SessionHandshake)(nil),         // 21: ocserv.platform.agent.v1.SessionHandshake
+	(*v1.EnrollRequest)(nil),            // 22: ocserv.platform.agent.v1.EnrollRequest
+	(*v1.ArtifactChunk)(nil),            // 23: ocserv.platform.agent.v1.ArtifactChunk
+	(*v1.EnrollResponse)(nil),           // 24: ocserv.platform.agent.v1.EnrollResponse
+	(*v1.SessionHandshakeResponse)(nil), // 25: ocserv.platform.agent.v1.SessionHandshakeResponse
 }
 var file_ocserv_platform_transport_v1_transport_proto_depIdxs = []int32{
 	0,  // 0: ocserv.platform.transport.v1.HealthResponse.status:type_name -> ocserv.platform.transport.v1.HealthStatus
 	1,  // 1: ocserv.platform.transport.v1.NodeConnection.path:type_name -> ocserv.platform.transport.v1.ConnectionPath
-	19, // 2: ocserv.platform.transport.v1.NodeConnection.connected_at:type_name -> google.protobuf.Timestamp
-	19, // 3: ocserv.platform.transport.v1.NodeConnection.last_seen:type_name -> google.protobuf.Timestamp
+	20, // 2: ocserv.platform.transport.v1.NodeConnection.connected_at:type_name -> google.protobuf.Timestamp
+	20, // 3: ocserv.platform.transport.v1.NodeConnection.last_seen:type_name -> google.protobuf.Timestamp
 	3,  // 4: ocserv.platform.transport.v1.UpdateNodeTrustRequest.state:type_name -> ocserv.platform.transport.v1.NodeTrustState
-	20, // 5: ocserv.platform.transport.v1.AuthorizeSessionRequest.handshake:type_name -> ocserv.platform.agent.v1.SessionHandshake
+	21, // 5: ocserv.platform.transport.v1.AuthorizeSessionRequest.handshake:type_name -> ocserv.platform.agent.v1.SessionHandshake
 	2,  // 6: ocserv.platform.transport.v1.TransportEvent.type:type_name -> ocserv.platform.transport.v1.TransportEventType
-	19, // 7: ocserv.platform.transport.v1.TransportEvent.occurred_at:type_name -> google.protobuf.Timestamp
+	20, // 7: ocserv.platform.transport.v1.TransportEvent.occurred_at:type_name -> google.protobuf.Timestamp
 	4,  // 8: ocserv.platform.transport.v1.TransportService.Health:input_type -> ocserv.platform.transport.v1.HealthRequest
 	6,  // 9: ocserv.platform.transport.v1.TransportService.GetNodeConnection:input_type -> ocserv.platform.transport.v1.GetNodeConnectionRequest
 	8,  // 10: ocserv.platform.transport.v1.TransportService.SendCommand:input_type -> ocserv.platform.transport.v1.SendCommandRequest
 	10, // 11: ocserv.platform.transport.v1.TransportService.CloseNode:input_type -> ocserv.platform.transport.v1.CloseNodeRequest
-	17, // 12: ocserv.platform.transport.v1.TransportService.WatchEvents:input_type -> ocserv.platform.transport.v1.WatchEventsRequest
+	18, // 12: ocserv.platform.transport.v1.TransportService.WatchEvents:input_type -> ocserv.platform.transport.v1.WatchEventsRequest
 	12, // 13: ocserv.platform.transport.v1.TransportService.UpdateNodeTrust:input_type -> ocserv.platform.transport.v1.UpdateNodeTrustRequest
-	14, // 14: ocserv.platform.transport.v1.TrustService.CheckEndpoint:input_type -> ocserv.platform.transport.v1.CheckEndpointRequest
-	21, // 15: ocserv.platform.transport.v1.TrustService.Enroll:input_type -> ocserv.platform.agent.v1.EnrollRequest
-	16, // 16: ocserv.platform.transport.v1.TrustService.AuthorizeSession:input_type -> ocserv.platform.transport.v1.AuthorizeSessionRequest
-	5,  // 17: ocserv.platform.transport.v1.TransportService.Health:output_type -> ocserv.platform.transport.v1.HealthResponse
-	7,  // 18: ocserv.platform.transport.v1.TransportService.GetNodeConnection:output_type -> ocserv.platform.transport.v1.NodeConnection
-	9,  // 19: ocserv.platform.transport.v1.TransportService.SendCommand:output_type -> ocserv.platform.transport.v1.SendCommandResponse
-	11, // 20: ocserv.platform.transport.v1.TransportService.CloseNode:output_type -> ocserv.platform.transport.v1.CloseNodeResponse
-	18, // 21: ocserv.platform.transport.v1.TransportService.WatchEvents:output_type -> ocserv.platform.transport.v1.TransportEvent
-	13, // 22: ocserv.platform.transport.v1.TransportService.UpdateNodeTrust:output_type -> ocserv.platform.transport.v1.UpdateNodeTrustResponse
-	15, // 23: ocserv.platform.transport.v1.TrustService.CheckEndpoint:output_type -> ocserv.platform.transport.v1.CheckEndpointResponse
-	22, // 24: ocserv.platform.transport.v1.TrustService.Enroll:output_type -> ocserv.platform.agent.v1.EnrollResponse
-	23, // 25: ocserv.platform.transport.v1.TrustService.AuthorizeSession:output_type -> ocserv.platform.agent.v1.SessionHandshakeResponse
-	17, // [17:26] is the sub-list for method output_type
-	8,  // [8:17] is the sub-list for method input_type
+	14, // 14: ocserv.platform.transport.v1.TransportService.FetchArtifact:input_type -> ocserv.platform.transport.v1.FetchArtifactRequest
+	15, // 15: ocserv.platform.transport.v1.TrustService.CheckEndpoint:input_type -> ocserv.platform.transport.v1.CheckEndpointRequest
+	22, // 16: ocserv.platform.transport.v1.TrustService.Enroll:input_type -> ocserv.platform.agent.v1.EnrollRequest
+	17, // 17: ocserv.platform.transport.v1.TrustService.AuthorizeSession:input_type -> ocserv.platform.transport.v1.AuthorizeSessionRequest
+	5,  // 18: ocserv.platform.transport.v1.TransportService.Health:output_type -> ocserv.platform.transport.v1.HealthResponse
+	7,  // 19: ocserv.platform.transport.v1.TransportService.GetNodeConnection:output_type -> ocserv.platform.transport.v1.NodeConnection
+	9,  // 20: ocserv.platform.transport.v1.TransportService.SendCommand:output_type -> ocserv.platform.transport.v1.SendCommandResponse
+	11, // 21: ocserv.platform.transport.v1.TransportService.CloseNode:output_type -> ocserv.platform.transport.v1.CloseNodeResponse
+	19, // 22: ocserv.platform.transport.v1.TransportService.WatchEvents:output_type -> ocserv.platform.transport.v1.TransportEvent
+	13, // 23: ocserv.platform.transport.v1.TransportService.UpdateNodeTrust:output_type -> ocserv.platform.transport.v1.UpdateNodeTrustResponse
+	23, // 24: ocserv.platform.transport.v1.TransportService.FetchArtifact:output_type -> ocserv.platform.agent.v1.ArtifactChunk
+	16, // 25: ocserv.platform.transport.v1.TrustService.CheckEndpoint:output_type -> ocserv.platform.transport.v1.CheckEndpointResponse
+	24, // 26: ocserv.platform.transport.v1.TrustService.Enroll:output_type -> ocserv.platform.agent.v1.EnrollResponse
+	25, // 27: ocserv.platform.transport.v1.TrustService.AuthorizeSession:output_type -> ocserv.platform.agent.v1.SessionHandshakeResponse
+	18, // [18:28] is the sub-list for method output_type
+	8,  // [8:18] is the sub-list for method input_type
 	8,  // [8:8] is the sub-list for extension type_name
 	8,  // [8:8] is the sub-list for extension extendee
 	0,  // [0:8] is the sub-list for field type_name
@@ -1219,7 +1298,7 @@ func file_ocserv_platform_transport_v1_transport_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_ocserv_platform_transport_v1_transport_proto_rawDesc), len(file_ocserv_platform_transport_v1_transport_proto_rawDesc)),
 			NumEnums:      4,
-			NumMessages:   15,
+			NumMessages:   16,
 			NumExtensions: 0,
 			NumServices:   2,
 		},

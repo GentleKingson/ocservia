@@ -16,15 +16,17 @@ use iroh::protocol::{AcceptError, ProtocolHandler, Router};
 use iroh::{Endpoint, EndpointId, SecretKey};
 use ocservia_contracts::decode_strict_command_envelope;
 use ocservia_contracts::generated::ocserv::platform::agent::v1::{
-    AgentEvent, AgentEventType, CommandEnvelope, CommandResult, CommandResultState, EnrollRequest,
-    EnrollResponse, HandshakeResult, SessionHandshake, SessionHandshakeResponse, TelemetryBatch,
+    AgentEvent, AgentEventType, ArtifactChunk, ArtifactFetchRequest, CommandEnvelope,
+    CommandResult, CommandResultState, EnrollRequest, EnrollResponse, HandshakeResult,
+    SessionHandshake, SessionHandshakeResponse, TelemetryBatch,
 };
 use ocservia_contracts::generated::ocserv::platform::transport::v1::{
     AuthorizeSessionRequest, CheckEndpointRequest, CloseNodeRequest, CloseNodeResponse,
-    ConnectionPath, GetNodeConnectionRequest, HealthRequest, HealthResponse, HealthStatus,
-    NodeConnection, NodeTrustState, SendCommandRequest, SendCommandResponse, TransportEvent,
-    TransportEventType, UpdateNodeTrustRequest, UpdateNodeTrustResponse, WatchEventsRequest,
-    transport_service_server::TransportService, trust_service_client::TrustServiceClient,
+    ConnectionPath, FetchArtifactRequest, GetNodeConnectionRequest, HealthRequest, HealthResponse,
+    HealthStatus, NodeConnection, NodeTrustState, SendCommandRequest, SendCommandResponse,
+    TransportEvent, TransportEventType, UpdateNodeTrustRequest, UpdateNodeTrustResponse,
+    WatchEventsRequest, transport_service_server::TransportService,
+    trust_service_client::TrustServiceClient,
 };
 use prost::Message;
 use tokio::sync::{Mutex, OwnedSemaphorePermit, Semaphore, mpsc, watch};
@@ -54,6 +56,7 @@ const MAX_TRUST_CHECKS: usize = 16;
 const MAX_RESPONSE_FRAMES: usize = 128;
 
 type EventStream = Pin<Box<dyn Stream<Item = Result<TransportEvent, Status>> + Send>>;
+type ArtifactStream = Pin<Box<dyn Stream<Item = Result<ArtifactChunk, Status>> + Send>>;
 
 /// A bounded, transport-only identity policy supplied at process startup.
 #[derive(Clone, Debug, Default)]
@@ -518,6 +521,7 @@ impl IrohTransportService {
 #[tonic::async_trait]
 impl TransportService for IrohTransportService {
     type WatchEventsStream = EventStream;
+    type FetchArtifactStream = ArtifactStream;
 
     async fn health(
         &self,
@@ -613,6 +617,98 @@ impl TransportService for IrohTransportService {
             command,
         ));
         Ok(Response::new(SendCommandResponse { accepted: true }))
+    }
+
+    async fn fetch_artifact(
+        &self,
+        request: Request<FetchArtifactRequest>,
+    ) -> Result<Response<Self::FetchArtifactStream>, Status> {
+        let request = request.into_inner();
+        let node_id = validate_uuid(&request.node_id, "node_id")?;
+        let artifact_id = validate_uuid(&request.artifact_id, "artifact_id")?;
+        if request.purpose != "certificate_p12"
+            || request.max_bytes == 0
+            || request.max_bytes > 64 * 1024 * 1024
+        {
+            return Err(Status::invalid_argument("artifact request is invalid"));
+        }
+        let connection = self
+            .shared
+            .inner
+            .connections
+            .lock()
+            .await
+            .get(&node_id)
+            .map(|entry| entry.connection.clone())
+            .ok_or_else(|| Status::unavailable("node is not connected"))?;
+        let payload = ArtifactFetchRequest {
+            artifact_id,
+            purpose: request.purpose,
+            max_bytes: request.max_bytes,
+        }
+        .encode_to_vec();
+        let (sender, receiver) = mpsc::channel::<Result<ArtifactChunk, Status>>(8);
+        tokio::spawn(async move {
+            let outcome = async {
+                let (mut send, mut recv) = connection
+                    .open_bi()
+                    .await
+                    .map_err(|_| Status::unavailable("failed to open artifact stream"))?;
+                let length = u32::try_from(payload.len())
+                    .map_err(|_| Status::resource_exhausted("artifact request is too large"))?
+                    | (1 << 31);
+                send.write_all(&length.to_be_bytes())
+                    .await
+                    .map_err(|_| Status::unavailable("failed to write artifact request length"))?;
+                send.write_all(&payload)
+                    .await
+                    .map_err(|_| Status::unavailable("failed to write artifact request"))?;
+                send.finish()
+                    .map_err(|_| Status::unavailable("failed to finish artifact request"))?;
+                let mut expected_offset = 0_u64;
+                loop {
+                    let mut size = [0_u8; 4];
+                    tokio::time::timeout(Duration::from_secs(30), recv.read_exact(&mut size))
+                        .await
+                        .map_err(|_| Status::deadline_exceeded("artifact stream timed out"))?
+                        .map_err(|_| Status::unavailable("artifact stream ended"))?;
+                    let size = u32::from_be_bytes(size) as usize;
+                    if size == 0 || size > MAX_FRAME_BYTES {
+                        return Err(Status::resource_exhausted("artifact chunk is invalid"));
+                    }
+                    let mut bytes = vec![0; size];
+                    recv.read_exact(&mut bytes)
+                        .await
+                        .map_err(|_| Status::unavailable("artifact chunk ended"))?;
+                    let chunk = ArtifactChunk::decode(bytes.as_slice())
+                        .map_err(|_| Status::data_loss("artifact chunk protobuf is invalid"))?;
+                    if chunk.artifact_id != request.artifact_id
+                        || chunk.offset != expected_offset
+                        || chunk.data.len() > 256 * 1024
+                        || expected_offset.saturating_add(chunk.data.len() as u64)
+                            > request.max_bytes
+                        || (!chunk.eof && !chunk.sha256.is_empty())
+                        || (chunk.eof && chunk.sha256.len() != 32)
+                    {
+                        return Err(Status::data_loss("artifact chunk is inconsistent"));
+                    }
+                    expected_offset = expected_offset.saturating_add(chunk.data.len() as u64);
+                    let eof = chunk.eof;
+                    sender
+                        .send(Ok(chunk))
+                        .await
+                        .map_err(|_| Status::cancelled("artifact consumer disconnected"))?;
+                    if eof {
+                        return Ok(());
+                    }
+                }
+            }
+            .await;
+            if let Err(error) = outcome {
+                let _ = sender.send(Err(error)).await;
+            }
+        });
+        Ok(Response::new(Box::pin(ReceiverStream::new(receiver))))
     }
 
     async fn close_node(

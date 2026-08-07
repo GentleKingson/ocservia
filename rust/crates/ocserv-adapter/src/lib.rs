@@ -4,7 +4,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::fs::OpenOptions as StdOpenOptions;
-use std::io;
+use std::io::{self, Write};
 use std::net::IpAddr;
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
@@ -15,10 +15,10 @@ use std::sync::atomic::{AtomicU8, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use ocservia_agent_protocol::{
-    ConfigApplyResult, ConfigFingerprint, ConfigPlanResult, DesiredEffectObservation,
-    DesiredEffectState, ErrorKind, GroupList, IpBan, IpBanList, MAX_MANAGED_RESOURCES,
-    MutationResult, ObservedGroup, ObservedUser, OcservVersion, PrivdError, ServiceStatus, Session,
-    SessionList, UserList,
+    CertificateArtifactResult, CertificateCsrResult, CertificateRevokeResult, ConfigApplyResult,
+    ConfigFingerprint, ConfigPlanResult, DesiredEffectObservation, DesiredEffectState, ErrorKind,
+    GroupList, IpBan, IpBanList, MAX_MANAGED_RESOURCES, MutationResult, ObservedGroup,
+    ObservedUser, OcservVersion, PrivdError, ServiceStatus, Session, SessionList, UserList,
 };
 use rand::RngCore;
 use rusqlite::{Connection, OpenFlags, OptionalExtension, TransactionBehavior, params};
@@ -189,6 +189,22 @@ fn valid_secret_key_byte(value: u8) -> bool {
     valid_label_byte(value) || value == b'/'
 }
 
+fn valid_dns_name(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 253
+        && !value.starts_with('.')
+        && !value.ends_with('.')
+        && value.split('.').all(|label| {
+            !label.is_empty()
+                && label.len() <= 63
+                && !label.starts_with('-')
+                && !label.ends_with('-')
+                && label
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+        })
+}
+
 fn redacted_candidate_diff(candidate: &str) -> Result<String, AdapterError> {
     let mut output = String::from("- <current configuration redacted>\n");
     for line in candidate.lines() {
@@ -241,6 +257,7 @@ pub struct FixedResources {
     secret_key_id: String,
     effect_store: PathBuf,
     effect_store_key: PathBuf,
+    certificate_key_dir: PathBuf,
 }
 
 impl Default for FixedResources {
@@ -258,6 +275,7 @@ impl Default for FixedResources {
             secret_key_id: String::from("default"),
             effect_store: PathBuf::from("/var/lib/ocservia-privd/desired-effects.sqlite3"),
             effect_store_key: PathBuf::from("/var/lib/ocservia-privd/desired-effects.key"),
+            certificate_key_dir: PathBuf::from("/var/lib/ocservia-privd/certificates"),
         }
     }
 }
@@ -339,6 +357,19 @@ impl FixedResources {
         }
         self.effect_store = effect_store;
         self.effect_store_key = effect_store_key;
+        Ok(self)
+    }
+
+    /// Overrides the fixed private-key directory for isolated deployments or tests.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AdapterError::InvalidResource`] when the directory is not absolute.
+    pub fn with_certificate_key_dir(mut self, directory: PathBuf) -> Result<Self, AdapterError> {
+        if !directory.is_absolute() {
+            return Err(AdapterError::InvalidResource);
+        }
+        self.certificate_key_dir = directory;
         Ok(self)
     }
 }
@@ -1430,6 +1461,45 @@ impl Adapter {
             }
         }
         sync_directory(parent).await
+    }
+
+    /// Removes only expired UUID-addressed encrypted P12 artifacts and their staging files.
+    ///
+    /// # Errors
+    ///
+    /// Returns an I/O error when the fixed artifact directory cannot be inspected or cleaned.
+    pub async fn cleanup_stale_certificate_artifacts(&self) -> Result<(), AdapterError> {
+        let directory = self.resources.certificate_key_dir.join("artifacts");
+        let mut entries = match tokio::fs::read_dir(&directory).await {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => return Err(AdapterError::Io(error)),
+        };
+        let cutoff = SystemTime::now()
+            .checked_sub(Duration::from_hours(1))
+            .ok_or(AdapterError::InvalidResource)?;
+        while let Some(entry) = entries.next_entry().await.map_err(AdapterError::Io)? {
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            let id_text = name.strip_suffix(".p12").or_else(|| {
+                name.strip_prefix('.')
+                    .and_then(|value| value.strip_suffix(".chain.pem"))
+            });
+            let Some(id_text) = id_text else { continue };
+            let Ok(id) = Uuid::parse_str(id_text) else {
+                continue;
+            };
+            if id.get_version_num() != 7 {
+                continue;
+            }
+            let metadata = entry.metadata().await.map_err(AdapterError::Io)?;
+            if metadata.is_file() && metadata.modified().map_err(AdapterError::Io)? < cutoff {
+                tokio::fs::remove_file(entry.path())
+                    .await
+                    .map_err(AdapterError::Io)?;
+            }
+        }
+        Ok(())
     }
 
     async fn ensure_boot_id(&self, expected: &str) -> Result<(), AdapterError> {
@@ -4656,5 +4726,579 @@ mod tests {
             adapter.service_reload().await,
             Err(AdapterError::CommandFailed { .. })
         ));
+    }
+
+    #[tokio::test]
+    async fn certificate_csr_keeps_private_key_local() {
+        let directory = std::env::temp_dir().join(format!("ocservia-cert-{}", Uuid::now_v7()));
+        std::fs::create_dir(&directory).expect("certificate directory");
+        std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o700))
+            .expect("certificate directory mode");
+        let resources = FixedResources::default()
+            .with_certificate_key_dir(directory.clone())
+            .expect("certificate resources");
+        let adapter = Adapter::new(
+            resources,
+            Limits {
+                timeout: Duration::from_secs(10),
+                output_bytes: DEFAULT_OUTPUT_BYTES,
+            },
+        );
+        let id = Uuid::now_v7();
+        let result = adapter
+            .certificate_csr(
+                id.as_bytes(),
+                "vpn.example.test",
+                &["alt.example.test".to_owned()],
+                2048,
+            )
+            .await
+            .expect("generate CSR");
+        assert_eq!(result.certificate_id, id.as_bytes());
+        assert!(result.csr_der.len() > 64);
+        assert_eq!(result.public_key_sha256.len(), 32);
+        assert!(!String::from_utf8_lossy(&result.csr_der).contains("PRIVATE KEY"));
+        let key = directory.join(format!("{id}.key.pem"));
+        let metadata = std::fs::metadata(&key).expect("local private key");
+        assert_eq!(metadata.permissions().mode() & 0o777, 0o600);
+
+        let repeated = adapter
+            .certificate_csr(
+                id.as_bytes(),
+                "vpn.example.test",
+                &["alt.example.test".to_owned()],
+                2048,
+            )
+            .await
+            .expect("repeat CSR with the same private key");
+        assert_eq!(repeated.public_key_sha256, result.public_key_sha256);
+        std::fs::remove_dir_all(directory).expect("cleanup certificate directory");
+    }
+
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)]
+    async fn certificate_p12_is_encrypted_bounded_and_replayable() {
+        use std::io::Write as _;
+        use std::process::{Command, Stdio};
+
+        let directory = std::env::temp_dir().join(format!("ocservia-p12-{}", Uuid::now_v7()));
+        std::fs::create_dir(&directory).expect("certificate directory");
+        std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o700))
+            .expect("certificate directory mode");
+        let sealing_key = directory.join("sealing-private.pem");
+        let sealing_public = directory.join("sealing-public.pem");
+        assert!(
+            Command::new("/usr/bin/openssl")
+                .args([
+                    "genpkey",
+                    "-algorithm",
+                    "RSA",
+                    "-pkeyopt",
+                    "rsa_keygen_bits:2048",
+                    "-out",
+                ])
+                .arg(&sealing_key)
+                .status()
+                .expect("generate sealing key")
+                .success()
+        );
+        std::fs::set_permissions(&sealing_key, std::fs::Permissions::from_mode(0o600))
+            .expect("sealing key mode");
+        assert!(
+            Command::new("/usr/bin/openssl")
+                .args(["pkey", "-in"])
+                .arg(&sealing_key)
+                .args(["-pubout", "-out"])
+                .arg(&sealing_public)
+                .status()
+                .expect("derive sealing public key")
+                .success()
+        );
+        let resources = FixedResources::default()
+            .with_user_resources(
+                PathBuf::from("/usr/bin/true"),
+                directory.join("unused-user-file"),
+                PathBuf::from("/usr/bin/openssl"),
+                sealing_key,
+                "fixture-key".to_owned(),
+            )
+            .expect("fixed secret resources")
+            .with_certificate_key_dir(directory.clone())
+            .expect("fixed certificate resources");
+        let adapter = Adapter::new(
+            resources,
+            Limits {
+                timeout: Duration::from_secs(10),
+                output_bytes: DEFAULT_OUTPUT_BYTES,
+            },
+        );
+        let certificate_id = Uuid::now_v7();
+        let csr = adapter
+            .certificate_csr(certificate_id.as_bytes(), "vpn.example.test", &[], 2048)
+            .await
+            .expect("generate CSR");
+        let csr_path = directory.join("request.der");
+        let csr_pem_path = directory.join("request.pem");
+        let certificate_path = directory.join("certificate.pem");
+        std::fs::write(&csr_path, csr.csr_der).expect("write public CSR fixture");
+        let key_path = directory.join(format!("{certificate_id}.key.pem"));
+        assert!(
+            Command::new("/usr/bin/openssl")
+                .args(["req", "-inform", "DER", "-in"])
+                .arg(&csr_path)
+                .args(["-out"])
+                .arg(&csr_pem_path)
+                .status()
+                .expect("convert fixture CSR")
+                .success()
+        );
+        assert!(
+            Command::new("/usr/bin/openssl")
+                .args(["x509", "-req", "-in"])
+                .arg(&csr_pem_path)
+                .args(["-signkey"])
+                .arg(&key_path)
+                .args(["-days", "1", "-out"])
+                .arg(&certificate_path)
+                .status()
+                .expect("self-sign fixture certificate")
+                .success()
+        );
+        let password = b"unique-random-password-fixture";
+        let mut seal = Command::new("/usr/bin/openssl")
+            .args(["pkeyutl", "-encrypt", "-pubin", "-inkey"])
+            .arg(&sealing_public)
+            .args([
+                "-pkeyopt",
+                "rsa_padding_mode:oaep",
+                "-pkeyopt",
+                "rsa_oaep_md:sha256",
+            ])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .expect("start sealing fixture");
+        seal.stdin
+            .take()
+            .expect("sealing stdin")
+            .write_all(password)
+            .expect("seal password input");
+        let sealed = seal.wait_with_output().expect("seal password");
+        assert!(sealed.status.success());
+        let chain = std::fs::read(&certificate_path).expect("read certificate chain");
+        let artifact_id = Uuid::now_v7();
+        let result = adapter
+            .certificate_p12(
+                certificate_id.as_bytes(),
+                artifact_id.as_bytes(),
+                &chain,
+                &sealed.stdout,
+                "fixture-key",
+            )
+            .await
+            .expect("create encrypted P12");
+        let artifact = directory
+            .join("artifacts")
+            .join(format!("{artifact_id}.p12"));
+        let bytes = std::fs::read(&artifact).expect("read encrypted P12");
+        assert_eq!(result.artifact_size, bytes.len() as u64);
+        assert_eq!(result.artifact_sha256, Sha256::digest(&bytes).to_vec());
+        assert!(
+            !bytes
+                .windows(password.len())
+                .any(|window| window == password)
+        );
+        assert!(
+            Command::new("/usr/bin/openssl")
+                .args(["pkcs12", "-in"])
+                .arg(&artifact)
+                .args([
+                    "-passin",
+                    &format!("pass:{}", String::from_utf8_lossy(password)),
+                    "-noout"
+                ])
+                .status()
+                .expect("open encrypted P12")
+                .success()
+        );
+        let replay = adapter
+            .certificate_p12(
+                certificate_id.as_bytes(),
+                artifact_id.as_bytes(),
+                &chain,
+                &sealed.stdout,
+                "fixture-key",
+            )
+            .await
+            .expect("replay P12 creation");
+        assert_eq!(replay.artifact_sha256, result.artifact_sha256);
+        let lookalike = directory.join("artifacts").join("not-a-uuid.p12");
+        std::fs::write(&lookalike, b"preserve").expect("write cleanup lookalike");
+        assert!(
+            Command::new("/usr/bin/touch")
+                .args(["-t", "200001010000"])
+                .arg(&artifact)
+                .arg(&lookalike)
+                .status()
+                .expect("age artifact fixtures")
+                .success()
+        );
+        adapter
+            .cleanup_stale_certificate_artifacts()
+            .await
+            .expect("clean stale encrypted artifact");
+        assert!(!artifact.exists());
+        assert!(lookalike.exists());
+        assert!(
+            adapter
+                .certificate_revoke(certificate_id.as_bytes())
+                .await
+                .expect("remove node key")
+                .key_removed
+        );
+        assert!(
+            adapter
+                .certificate_revoke(certificate_id.as_bytes())
+                .await
+                .expect("repeat node key removal")
+                .key_removed
+        );
+        std::fs::remove_dir_all(directory).expect("cleanup certificate directory");
+    }
+}
+#[allow(clippy::items_after_test_module)]
+impl Adapter {
+    /// Generates a private key in the fixed root-owned key directory and returns only CSR bytes
+    /// and a digest of the corresponding public key.
+    ///
+    /// # Errors
+    ///
+    /// Returns a validation, resource, process, or I/O error if key generation cannot complete.
+    #[allow(clippy::too_many_lines)]
+    pub async fn certificate_csr(
+        &self,
+        certificate_id: &[u8],
+        common_name: &str,
+        dns_names: &[String],
+        key_bits: u32,
+    ) -> Result<CertificateCsrResult, AdapterError> {
+        let id = Uuid::from_slice(certificate_id).map_err(|_| AdapterError::InvalidRequest)?;
+        if id.get_version_num() != 7
+            || !valid_dns_name(common_name)
+            || dns_names.len() > 32
+            || !dns_names.iter().all(|name| valid_dns_name(name))
+            || !matches!(key_bits, 2048 | 3072 | 4096)
+        {
+            return Err(AdapterError::InvalidRequest);
+        }
+        tokio::fs::create_dir_all(&self.resources.certificate_key_dir)
+            .await
+            .map_err(AdapterError::Io)?;
+        let metadata = tokio::fs::symlink_metadata(&self.resources.certificate_key_dir)
+            .await
+            .map_err(AdapterError::Io)?;
+        if !metadata.is_dir()
+            || metadata.file_type().is_symlink()
+            || metadata.permissions().mode() & 0o022 != 0
+        {
+            return Err(AdapterError::InvalidResource);
+        }
+        let key_path = self
+            .resources
+            .certificate_key_dir
+            .join(format!("{id}.key.pem"));
+        let existing_key = match tokio::fs::symlink_metadata(&key_path).await {
+            Ok(key_metadata)
+                if key_metadata.is_file()
+                    && !key_metadata.file_type().is_symlink()
+                    && key_metadata.permissions().mode().trailing_zeros() >= 6 =>
+            {
+                true
+            }
+            Ok(_) => return Err(AdapterError::InvalidResource),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+            Err(error) => return Err(AdapterError::Io(error)),
+        };
+        let subject = format!("/CN={common_name}");
+        let key_spec = format!("rsa:{key_bits}");
+        let key_path_text = key_path.to_str().ok_or(AdapterError::InvalidResource)?;
+        let mut owned = vec!["req".to_owned(), "-new".to_owned()];
+        if existing_key {
+            owned.extend(["-key".to_owned(), key_path_text.to_owned()]);
+        } else {
+            owned.extend([
+                "-newkey".to_owned(),
+                key_spec,
+                "-nodes".to_owned(),
+                "-keyout".to_owned(),
+                key_path_text.to_owned(),
+            ]);
+        }
+        owned.extend([
+            "-subj".to_owned(),
+            subject,
+            "-outform".to_owned(),
+            "DER".to_owned(),
+        ]);
+        if !dns_names.is_empty() {
+            owned.push("-addext".to_owned());
+            owned.push(format!(
+                "subjectAltName={}",
+                dns_names
+                    .iter()
+                    .map(|name| format!("DNS:{name}"))
+                    .collect::<Vec<_>>()
+                    .join(",")
+            ));
+        }
+        let args = owned.iter().map(String::as_str).collect::<Vec<_>>();
+        let csr = match self.execute(&self.resources.openssl, &args).await {
+            Ok(output) if output.stdout.len() >= 64 && output.stdout.len() <= 64 * 1024 => {
+                output.stdout
+            }
+            Ok(_) => {
+                if !existing_key {
+                    let _ = tokio::fs::remove_file(&key_path).await;
+                }
+                return Err(AdapterError::MalformedOutput);
+            }
+            Err(error) => {
+                if !existing_key {
+                    let _ = tokio::fs::remove_file(&key_path).await;
+                }
+                return Err(error);
+            }
+        };
+        if !existing_key {
+            tokio::fs::set_permissions(&key_path, std::fs::Permissions::from_mode(0o600))
+                .await
+                .map_err(AdapterError::Io)?;
+        }
+        let public = self
+            .execute(
+                &self.resources.openssl,
+                &["pkey", "-in", key_path_text, "-pubout", "-outform", "DER"],
+            )
+            .await;
+        let public = match public {
+            Ok(output) if !output.stdout.is_empty() && output.stdout.len() <= 64 * 1024 => {
+                output.stdout
+            }
+            Ok(_) => {
+                if !existing_key {
+                    let _ = tokio::fs::remove_file(&key_path).await;
+                }
+                return Err(AdapterError::MalformedOutput);
+            }
+            Err(error) => {
+                if !existing_key {
+                    let _ = tokio::fs::remove_file(&key_path).await;
+                }
+                return Err(error);
+            }
+        };
+        Ok(CertificateCsrResult {
+            certificate_id: certificate_id.to_vec(),
+            csr_der: csr,
+            public_key_sha256: Sha256::digest(public).to_vec(),
+        })
+    }
+
+    /// Removes only the private key derived from the supplied certificate UUID.
+    ///
+    /// # Errors
+    ///
+    /// Returns a validation, resource, or I/O error if the fixed key cannot be removed safely.
+    pub async fn certificate_revoke(
+        &self,
+        certificate_id: &[u8],
+    ) -> Result<CertificateRevokeResult, AdapterError> {
+        let id = Uuid::from_slice(certificate_id).map_err(|_| AdapterError::InvalidRequest)?;
+        if id.get_version_num() != 7 {
+            return Err(AdapterError::InvalidRequest);
+        }
+        let key_path = self
+            .resources
+            .certificate_key_dir
+            .join(format!("{id}.key.pem"));
+        match tokio::fs::symlink_metadata(&key_path).await {
+            Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
+                return Err(AdapterError::InvalidResource);
+            }
+            Ok(_) => tokio::fs::remove_file(&key_path)
+                .await
+                .map_err(AdapterError::Io)?,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(AdapterError::Io(error)),
+        }
+        Ok(CertificateRevokeResult {
+            certificate_id: certificate_id.to_vec(),
+            key_removed: true,
+        })
+    }
+
+    /// Creates an encrypted P12 only in the fixed UUID-addressed artifact spool.
+    ///
+    /// # Errors
+    ///
+    /// Returns a validation, resource, process, or I/O error if packaging cannot complete.
+    #[allow(clippy::too_many_lines)]
+    pub async fn certificate_p12(
+        &self,
+        certificate_id: &[u8],
+        artifact_id: &[u8],
+        certificate_chain_pem: &[u8],
+        sealed_password: &[u8],
+        secret_key_id: &str,
+    ) -> Result<CertificateArtifactResult, AdapterError> {
+        let certificate =
+            Uuid::from_slice(certificate_id).map_err(|_| AdapterError::InvalidRequest)?;
+        let artifact = Uuid::from_slice(artifact_id).map_err(|_| AdapterError::InvalidRequest)?;
+        if certificate.get_version_num() != 7
+            || artifact.get_version_num() != 7
+            || certificate_chain_pem.len() < 64
+            || certificate_chain_pem.len() > 256 * 1024
+            || sealed_password.len() < 32
+            || sealed_password.len() > 16 * 1024
+            || secret_key_id != self.resources.secret_key_id
+        {
+            return Err(AdapterError::InvalidRequest);
+        }
+        let key_path = self
+            .resources
+            .certificate_key_dir
+            .join(format!("{certificate}.key.pem"));
+        let key_metadata = tokio::fs::symlink_metadata(&key_path)
+            .await
+            .map_err(AdapterError::Io)?;
+        if !key_metadata.is_file()
+            || key_metadata.file_type().is_symlink()
+            || key_metadata.permissions().mode() & 0o077 != 0
+        {
+            return Err(AdapterError::InvalidResource);
+        }
+        let artifact_dir = self.resources.certificate_key_dir.join("artifacts");
+        tokio::fs::create_dir_all(&artifact_dir)
+            .await
+            .map_err(AdapterError::Io)?;
+        let directory_metadata = tokio::fs::symlink_metadata(&artifact_dir)
+            .await
+            .map_err(AdapterError::Io)?;
+        if !directory_metadata.is_dir()
+            || directory_metadata.file_type().is_symlink()
+            || directory_metadata.permissions().mode() & 0o022 != 0
+        {
+            return Err(AdapterError::InvalidResource);
+        }
+        let chain_path = artifact_dir.join(format!(".{artifact}.chain.pem"));
+        let output_path = artifact_dir.join(format!("{artifact}.p12"));
+        if tokio::fs::symlink_metadata(&output_path).await.is_ok() {
+            let data = tokio::fs::read(&output_path)
+                .await
+                .map_err(AdapterError::Io)?;
+            if data.is_empty() || data.len() > 64 * 1024 * 1024 {
+                return Err(AdapterError::InvalidResource);
+            }
+            return Ok(CertificateArtifactResult {
+                certificate_id: certificate_id.to_vec(),
+                artifact_id: artifact_id.to_vec(),
+                artifact_sha256: Sha256::digest(&data).to_vec(),
+                artifact_size: u64::try_from(data.len()).map_err(|_| AdapterError::OutputLimit)?,
+            });
+        }
+        let mut chain_file = StdOpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&chain_path)
+            .map_err(AdapterError::Io)?;
+        chain_file
+            .write_all(certificate_chain_pem)
+            .map_err(AdapterError::Io)?;
+        chain_file.sync_all().map_err(AdapterError::Io)?;
+        drop(chain_file);
+        let key = self
+            .resources
+            .secret_key
+            .to_str()
+            .ok_or(AdapterError::InvalidResource)?;
+        let decrypted = self
+            .execute_with_input(
+                &self.resources.openssl,
+                &[
+                    "pkeyutl",
+                    "-decrypt",
+                    "-inkey",
+                    key,
+                    "-pkeyopt",
+                    "rsa_padding_mode:oaep",
+                    "-pkeyopt",
+                    "rsa_oaep_md:sha256",
+                ],
+                sealed_password,
+            )
+            .await;
+        let password = match decrypted {
+            Ok(value)
+                if !value.stdout.is_empty()
+                    && value.stdout.len() <= 1024
+                    && !value
+                        .stdout
+                        .iter()
+                        .any(|byte| matches!(byte, b'\0' | b'\r' | b'\n')) =>
+            {
+                Zeroizing::new(value.stdout)
+            }
+            Ok(_) => {
+                let _ = tokio::fs::remove_file(&chain_path).await;
+                return Err(AdapterError::MalformedOutput);
+            }
+            Err(error) => {
+                let _ = tokio::fs::remove_file(&chain_path).await;
+                return Err(error);
+            }
+        };
+        let key_text = key_path.to_str().ok_or(AdapterError::InvalidResource)?;
+        let chain_text = chain_path.to_str().ok_or(AdapterError::InvalidResource)?;
+        let output_text = output_path.to_str().ok_or(AdapterError::InvalidResource)?;
+        let created = self
+            .execute_with_input(
+                &self.resources.openssl,
+                &[
+                    "pkcs12",
+                    "-export",
+                    "-inkey",
+                    key_text,
+                    "-in",
+                    chain_text,
+                    "-out",
+                    output_text,
+                    "-passout",
+                    "stdin",
+                ],
+                &password,
+            )
+            .await;
+        let _ = tokio::fs::remove_file(&chain_path).await;
+        if let Err(error) = created {
+            let _ = tokio::fs::remove_file(&output_path).await;
+            return Err(error);
+        }
+        let data = tokio::fs::read(&output_path)
+            .await
+            .map_err(AdapterError::Io)?;
+        if data.is_empty() || data.len() > 64 * 1024 * 1024 {
+            let _ = tokio::fs::remove_file(&output_path).await;
+            return Err(AdapterError::OutputLimit);
+        }
+        tokio::fs::set_permissions(&output_path, std::fs::Permissions::from_mode(0o644))
+            .await
+            .map_err(AdapterError::Io)?;
+        Ok(CertificateArtifactResult {
+            certificate_id: certificate_id.to_vec(),
+            artifact_id: artifact_id.to_vec(),
+            artifact_sha256: Sha256::digest(&data).to_vec(),
+            artifact_size: u64::try_from(data.len()).map_err(|_| AdapterError::OutputLimit)?,
+        })
     }
 }

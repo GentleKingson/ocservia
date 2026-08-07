@@ -16,6 +16,15 @@ import (
 type principalKey struct{}
 type workspaceKey struct{}
 
+func firstNonempty(values ...string) string {
+	for _, value := range values {
+		if value != "" {
+			return value
+		}
+	}
+	return ""
+}
+
 func (s *Server) authenticate(r *http.Request) (auth.Principal, error) {
 	if s.hasOperationPrincipal(r) {
 		return auth.Principal{Subject: "developer", Issuer: "development", BreakGlass: true}, nil
@@ -87,6 +96,15 @@ func (s *Server) authorizeRoute(r *http.Request, principal auth.Principal) (cont
 				return nil, rbac.ErrForbidden
 			}
 			resource = rbac.Resource{WorkspaceID: workspaceID, Type: "node", ID: nodeID}
+		} else if approval.ResourceType == "certificate" {
+			if s.certificates == nil {
+				return nil, pgx.ErrNoRows
+			}
+			workspaceID, nodeID, resourceErr := s.certificates.Resource(r.Context(), approval.ResourceID)
+			if resourceErr != nil || workspaceID != approval.WorkspaceID {
+				return nil, rbac.ErrForbidden
+			}
+			resource = rbac.Resource{WorkspaceID: workspaceID, Type: "node", ID: nodeID}
 		} else {
 			resource = rbac.Resource{WorkspaceID: approval.WorkspaceID, Type: approval.ResourceType, ID: approval.ResourceID}
 		}
@@ -100,6 +118,36 @@ func (s *Server) authorizeRoute(r *http.Request, principal auth.Principal) (cont
 			return nil, resourceErr
 		}
 		resource = rbac.Resource{WorkspaceID: workspaceID, Type: "node", ID: nodeID}
+	} else if certificateText := firstNonempty(r.PathValue("certificate_id"), r.PathValue("certificate_action")); certificateText != "" {
+		certificateID, parseErr := uuid.Parse(strings.TrimSuffix(strings.TrimSuffix(strings.TrimSuffix(certificateText, ":revoke"), ":issue"), ":p12"))
+		if parseErr != nil || certificateID.Version() != 7 || s.certificates == nil {
+			return nil, pgx.ErrNoRows
+		}
+		workspaceID, nodeID, resourceErr := s.certificates.Resource(r.Context(), certificateID)
+		if resourceErr != nil {
+			return nil, resourceErr
+		}
+		resource = rbac.Resource{WorkspaceID: workspaceID, Type: "node", ID: nodeID}
+	} else if artifactText := r.PathValue("artifact_id"); artifactText != "" {
+		artifactID, parseErr := uuid.Parse(artifactText)
+		if parseErr != nil || artifactID.Version() != 7 || s.certificates == nil {
+			return nil, pgx.ErrNoRows
+		}
+		workspaceID, nodeID, resourceErr := s.certificates.ArtifactResource(r.Context(), artifactID)
+		if resourceErr != nil {
+			return nil, resourceErr
+		}
+		resource = rbac.Resource{WorkspaceID: workspaceID, Type: "node", ID: nodeID}
+	} else if secretText := firstNonempty(r.PathValue("secret_ref_id"), r.PathValue("secret_ref_action")); secretText != "" {
+		secretID, parseErr := uuid.Parse(strings.TrimSuffix(secretText, ":rotate"))
+		if parseErr != nil || secretID.Version() != 7 || s.certificates == nil {
+			return nil, pgx.ErrNoRows
+		}
+		workspaceID, resourceErr := s.certificates.SecretRefResource(r.Context(), secretID)
+		if resourceErr != nil {
+			return nil, resourceErr
+		}
+		resource = rbac.Resource{WorkspaceID: workspaceID, Type: "workspace", ID: workspaceID}
 	} else {
 		workspaceText := strings.TrimSpace(r.Header.Get("X-Workspace-ID"))
 		if workspaceText == "" && r.URL.Path == "/api/v1/events/stream" {
@@ -182,6 +230,26 @@ func routeAction(r *http.Request) string {
 		return "operation.read"
 	case r.Method == http.MethodPost && strings.HasSuffix(path, "/config-plans"):
 		return "config.plan"
+	case r.Method == http.MethodPost && strings.HasSuffix(path, "/certificates"):
+		return "certificate.issue"
+	case r.Method == http.MethodGet && strings.HasSuffix(path, "/certificates"):
+		return "certificate.read"
+	case r.Method == http.MethodGet && strings.HasPrefix(path, "/api/v1/certificates/"):
+		return "certificate.read"
+	case r.Method == http.MethodPost && strings.HasSuffix(path, ":issue") && strings.Contains(path, "/certificates/"):
+		return "certificate.issue"
+	case r.Method == http.MethodPost && strings.HasSuffix(path, ":revoke") && strings.Contains(path, "/certificates/"):
+		return "certificate.revoke"
+	case r.Method == http.MethodPost && strings.HasSuffix(path, ":p12") && strings.Contains(path, "/certificates/"):
+		return "certificate.issue"
+	case r.Method == http.MethodGet && strings.HasPrefix(path, "/api/v1/artifacts/"):
+		return "certificate.read"
+	case r.Method == http.MethodPost && path == "/api/v1/secret-provider-refs":
+		return "secret.manage"
+	case r.Method == http.MethodPost && strings.HasSuffix(path, ":rotate") && strings.Contains(path, "/secret-provider-refs/"):
+		return "secret.manage"
+	case r.Method == http.MethodGet && strings.HasPrefix(path, "/api/v1/secret-provider-refs/"):
+		return "secret.read"
 	case r.Method == http.MethodGet && strings.HasPrefix(path, "/api/v1/config-plans/"):
 		return "config.review"
 	case strings.Contains(path, "/groups/"):

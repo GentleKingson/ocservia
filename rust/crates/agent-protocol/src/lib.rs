@@ -44,7 +44,7 @@ pub struct PrivdRequest {
     /// One of the permanently fixed operations.
     #[prost(
         oneof = "privd_request::Operation",
-        tags = "10, 11, 12, 13, 14, 15, 16, 17, 18, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39"
+        tags = "10, 11, 12, 13, 14, 15, 16, 17, 18, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42"
     )]
     pub operation: Option<privd_request::Operation>,
 }
@@ -54,9 +54,10 @@ pub mod privd_request {
     use prost::Oneof;
 
     use super::{
-        ConfigApplyRequest, ConfigPlanRequest, DesiredEffectObserveRequest, GroupApplyRequest,
-        IpBanRemoveRequest, ReadRequest, ServiceReloadRequest, SessionMutationRequest,
-        UserDisableRequest, UserEnableRequest, UserSecretRequest,
+        CertificateCsrRequest, CertificateP12Request, CertificateRevokeRequest, ConfigApplyRequest,
+        ConfigPlanRequest, DesiredEffectObserveRequest, GroupApplyRequest, IpBanRemoveRequest,
+        ReadRequest, ServiceReloadRequest, SessionMutationRequest, UserDisableRequest,
+        UserEnableRequest, UserSecretRequest,
     };
 
     /// Read-only operation allowlist.
@@ -119,7 +120,78 @@ pub mod privd_request {
         /// Atomically apply one approved immutable configuration candidate.
         #[prost(message, tag = "39")]
         ConfigApply(ConfigApplyRequest),
+        /// Generate one private key locally and return only its CSR and public-key digest.
+        #[prost(message, tag = "40")]
+        CertificateCsr(CertificateCsrRequest),
+        /// Remove one locally held certificate private key by certificate ID.
+        #[prost(message, tag = "41")]
+        CertificateRevoke(CertificateRevokeRequest),
+        /// Build an encrypted P12 in the fixed artifact spool.
+        #[prost(message, tag = "42")]
+        CertificateP12(CertificateP12Request),
     }
+}
+
+#[derive(Clone, PartialEq, Eq, Message)]
+pub struct CertificateCsrRequest {
+    #[prost(bytes = "vec", tag = "1")]
+    pub certificate_id: Vec<u8>,
+    #[prost(string, tag = "2")]
+    pub common_name: String,
+    #[prost(string, repeated, tag = "3")]
+    pub dns_names: Vec<String>,
+    #[prost(uint32, tag = "4")]
+    pub key_bits: u32,
+}
+
+#[derive(Clone, PartialEq, Eq, Message)]
+pub struct CertificateCsrResult {
+    #[prost(bytes = "vec", tag = "1")]
+    pub certificate_id: Vec<u8>,
+    #[prost(bytes = "vec", tag = "2")]
+    pub csr_der: Vec<u8>,
+    #[prost(bytes = "vec", tag = "3")]
+    pub public_key_sha256: Vec<u8>,
+}
+
+#[derive(Clone, PartialEq, Eq, Message)]
+pub struct CertificateRevokeRequest {
+    #[prost(bytes = "vec", tag = "1")]
+    pub certificate_id: Vec<u8>,
+}
+
+#[derive(Clone, PartialEq, Eq, Message)]
+pub struct CertificateRevokeResult {
+    #[prost(bytes = "vec", tag = "1")]
+    pub certificate_id: Vec<u8>,
+    #[prost(bool, tag = "2")]
+    pub key_removed: bool,
+}
+
+#[derive(Clone, PartialEq, Eq, Message)]
+pub struct CertificateP12Request {
+    #[prost(bytes = "vec", tag = "1")]
+    pub certificate_id: Vec<u8>,
+    #[prost(bytes = "vec", tag = "2")]
+    pub artifact_id: Vec<u8>,
+    #[prost(bytes = "vec", tag = "3")]
+    pub certificate_chain_pem: Vec<u8>,
+    #[prost(bytes = "vec", tag = "4")]
+    pub sealed_password: Vec<u8>,
+    #[prost(string, tag = "5")]
+    pub secret_key_id: String,
+}
+
+#[derive(Clone, PartialEq, Eq, Message)]
+pub struct CertificateArtifactResult {
+    #[prost(bytes = "vec", tag = "1")]
+    pub certificate_id: Vec<u8>,
+    #[prost(bytes = "vec", tag = "2")]
+    pub artifact_id: Vec<u8>,
+    #[prost(bytes = "vec", tag = "3")]
+    pub artifact_sha256: Vec<u8>,
+    #[prost(uint64, tag = "4")]
+    pub artifact_size: u64,
 }
 
 /// Side-effect-free candidate validation request. No path is accepted from the caller.
@@ -441,7 +513,7 @@ pub struct PrivdResponse {
     /// Exactly one stable result or error.
     #[prost(
         oneof = "privd_response::Result",
-        tags = "10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21"
+        tags = "10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24"
     )]
     pub result: Option<privd_response::Result>,
 }
@@ -451,6 +523,7 @@ pub mod privd_response {
     use prost::Oneof;
 
     use super::{
+        CertificateArtifactResult, CertificateCsrResult, CertificateRevokeResult,
         ConfigApplyResult, ConfigFingerprint, ConfigPlanResult, DesiredEffectObservation,
         GroupList, IpBanList, MutationResult, OcservVersion, PrivdError, ServiceStatus,
         SessionList, UserList,
@@ -491,6 +564,12 @@ pub mod privd_response {
         ConfigPlan(ConfigPlanResult),
         #[prost(message, tag = "21")]
         ConfigApply(ConfigApplyResult),
+        #[prost(message, tag = "22")]
+        CertificateCsr(CertificateCsrResult),
+        #[prost(message, tag = "23")]
+        CertificateRevoke(CertificateRevokeResult),
+        #[prost(message, tag = "24")]
+        CertificateP12(CertificateArtifactResult),
         /// Stable failure.
         #[prost(message, tag = "20")]
         Error(PrivdError),

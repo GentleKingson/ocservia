@@ -1,7 +1,7 @@
 use std::collections::HashSet;
 use std::env;
 use std::io;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
 use iroh::endpoint::{QuicTransportConfig, RelayMode, VarInt, presets};
@@ -11,19 +11,20 @@ use ocservia_agent::{
     MAX_COMMAND_BYTES, MAX_WRITE_QUEUE, PrivdClient,
 };
 use ocservia_agent_protocol::{
-    ConfigApplyRequest, ConfigPlanRequest, DesiredEffectObserveRequest, DesiredEffectState,
-    ErrorKind, GroupApplyRequest, IpBanRemoveRequest, MAX_MANAGED_RESOURCES, PrivdResponse,
+    CertificateCsrRequest, CertificateP12Request, CertificateRevokeRequest, ConfigApplyRequest,
+    ConfigPlanRequest, DesiredEffectObserveRequest, DesiredEffectState, ErrorKind,
+    GroupApplyRequest, IpBanRemoveRequest, MAX_MANAGED_RESOURCES, PrivdResponse,
     ServiceReloadRequest, SessionMutationRequest, UserDisableRequest, UserEnableRequest,
     UserSecretRequest, privd_request, privd_response,
 };
 use ocservia_command_journal::{CommandRecord, CommandState, Journal, TelemetryInsert};
 use ocservia_contracts::decode_strict_command_envelope;
 use ocservia_contracts::generated::ocserv::platform::agent::v1::{
-    AgentEvent, AgentEventType, CommandDeliveryMode, CommandEnvelope, CommandResult,
-    CommandResultState, GroupObservation, HandshakeResult, IpBanObservation, MetricSample,
-    ObservedSnapshot, SemanticPayloadHashVersion, SessionHandshake, SessionHandshakeResponse,
-    SessionObservation, TelemetryBatch, TelemetryDropCounters, TelemetryPriority, UserObservation,
-    command_envelope,
+    AgentEvent, AgentEventType, ArtifactChunk, ArtifactFetchRequest, CommandDeliveryMode,
+    CommandEnvelope, CommandResult, CommandResultState, GroupObservation, HandshakeResult,
+    IpBanObservation, MetricSample, ObservedSnapshot, SemanticPayloadHashVersion, SessionHandshake,
+    SessionHandshakeResponse, SessionObservation, TelemetryBatch, TelemetryDropCounters,
+    TelemetryPriority, UserObservation, command_envelope,
 };
 use prost::Message;
 use sha2::Digest;
@@ -99,6 +100,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                 boot_id: &boot_id,
                 os_release: &os_release,
                 agent_instance_id,
+                artifact_dir: &config.artifact_dir,
             };
             match connect_once(&endpoint, controller, &mut session).await {
                 Ok(()) => attempt = 0,
@@ -128,6 +130,7 @@ struct SessionContext<'a> {
     boot_id: &'a str,
     os_release: &'a str,
     agent_instance_id: Uuid,
+    artifact_dir: &'a PathBuf,
 }
 
 async fn connect_once(
@@ -168,6 +171,8 @@ async fn connect_once(
             "config.network".to_owned(),
             "config.limits".to_owned(),
             "config.runtime".to_owned(),
+            "ocserv.certificate.issue".to_owned(),
+            "ocserv.certificate.revoke".to_owned(),
         ],
         ocserv_version: "unknown".to_owned(),
         os_release: session.os_release.to_owned(),
@@ -231,6 +236,7 @@ async fn connect_once(
     }
 }
 
+#[allow(clippy::too_many_lines)]
 async fn handle_command_stream(
     mut send: iroh::endpoint::SendStream,
     mut recv: iroh::endpoint::RecvStream,
@@ -240,7 +246,17 @@ async fn handle_command_stream(
     tokio::time::timeout(HANDSHAKE_TIMEOUT, recv.read_exact(&mut length))
         .await
         .map_err(|_| invalid("command length timed out"))??;
-    let length = u32::from_be_bytes(length) as usize;
+    let framed_length = u32::from_be_bytes(length);
+    if framed_length & (1 << 31) != 0 {
+        return handle_artifact_stream(
+            send,
+            recv,
+            framed_length & !(1 << 31),
+            session.artifact_dir,
+        )
+        .await;
+    }
+    let length = framed_length as usize;
     if length == 0 || length > MAX_COMMAND_BYTES {
         return Err(invalid("command size invalid").into());
     }
@@ -265,6 +281,8 @@ async fn handle_command_stream(
             "ocserv.groups.write",
             "ocserv.config.plan",
             "ocserv.config.apply",
+            "ocserv.certificate.issue",
+            "ocserv.certificate.revoke",
         ]),
         now_unix_seconds,
         cancelled: false,
@@ -283,6 +301,9 @@ async fn handle_command_stream(
                 | command_envelope::Payload::GroupApply(_)
                 | command_envelope::Payload::ConfigPlan(_)
                 | command_envelope::Payload::ConfigApply(_)
+                | command_envelope::Payload::CertificateCsr(_)
+                | command_envelope::Payload::CertificateRevoke(_)
+                | command_envelope::Payload::CertificateP12(_)
         )
     );
     let execution = if external {
@@ -321,6 +342,63 @@ async fn handle_command_stream(
     send.write_all(&u32::try_from(encoded.len())?.to_be_bytes())
         .await?;
     send.write_all(&encoded).await?;
+    send.finish()?;
+    Ok(())
+}
+
+async fn handle_artifact_stream(
+    mut send: iroh::endpoint::SendStream,
+    mut recv: iroh::endpoint::RecvStream,
+    length: u32,
+    artifact_dir: &Path,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let length = usize::try_from(length)?;
+    if length == 0 || length > 64 * 1024 {
+        return Err(invalid("artifact request size invalid").into());
+    }
+    let mut bytes = vec![0; length];
+    tokio::time::timeout(HANDSHAKE_TIMEOUT, recv.read_exact(&mut bytes))
+        .await
+        .map_err(|_| invalid("artifact request timed out"))??;
+    let request = ArtifactFetchRequest::decode(bytes.as_slice())?;
+    let artifact =
+        Uuid::from_slice(&request.artifact_id).map_err(|_| invalid("artifact ID invalid"))?;
+    if artifact.get_version_num() != 7
+        || request.purpose != "certificate_p12"
+        || request.max_bytes == 0
+        || request.max_bytes > 64 * 1024 * 1024
+        || !artifact_dir.is_absolute()
+    {
+        return Err(invalid("artifact request invalid").into());
+    }
+    let path = artifact_dir.join(format!("{artifact}.p12"));
+    let metadata = tokio::fs::symlink_metadata(&path).await?;
+    if !metadata.is_file()
+        || metadata.file_type().is_symlink()
+        || metadata.len() == 0
+        || metadata.len() > request.max_bytes
+    {
+        return Err(invalid("artifact resource invalid").into());
+    }
+    let data = tokio::fs::read(&path).await?;
+    let digest = sha2::Sha256::digest(&data).to_vec();
+    let mut offset = 0_usize;
+    while offset < data.len() {
+        let end = (offset + 256 * 1024).min(data.len());
+        let eof = end == data.len();
+        let chunk = ArtifactChunk {
+            artifact_id: request.artifact_id.clone(),
+            offset: u64::try_from(offset)?,
+            data: data[offset..end].to_vec(),
+            eof,
+            sha256: if eof { digest.clone() } else { Vec::new() },
+        }
+        .encode_to_vec();
+        send.write_all(&u32::try_from(chunk.len())?.to_be_bytes())
+            .await?;
+        send.write_all(&chunk).await?;
+        offset = end;
+    }
     send.finish()?;
     Ok(())
 }
@@ -427,6 +505,28 @@ async fn execute_external_command(
                 desired_revision: payload.desired_revision,
             })
         }
+        Some(command_envelope::Payload::CertificateCsr(payload)) => {
+            privd_request::Operation::CertificateCsr(CertificateCsrRequest {
+                certificate_id: payload.certificate_id.clone(),
+                common_name: payload.common_name.clone(),
+                dns_names: payload.dns_names.clone(),
+                key_bits: payload.key_bits,
+            })
+        }
+        Some(command_envelope::Payload::CertificateRevoke(payload)) => {
+            privd_request::Operation::CertificateRevoke(CertificateRevokeRequest {
+                certificate_id: payload.certificate_id.clone(),
+            })
+        }
+        Some(command_envelope::Payload::CertificateP12(payload)) => {
+            privd_request::Operation::CertificateP12(CertificateP12Request {
+                certificate_id: payload.certificate_id.clone(),
+                artifact_id: payload.artifact_id.clone(),
+                certificate_chain_pem: payload.certificate_chain_pem.clone(),
+                sealed_password: payload.sealed_password.clone(),
+                secret_key_id: payload.secret_key_id.clone(),
+            })
+        }
         _ => return Err(CommandError::Rejected("capability_rejected")),
     };
     let expires_at = envelope
@@ -455,7 +555,7 @@ async fn execute_external_command(
                     session.command_executor.complete_external_applied(
                         &command,
                         resource_type,
-                        resource_key,
+                        &resource_key,
                         revision,
                         now,
                     )
@@ -469,6 +569,15 @@ async fn execute_external_command(
                 .command_executor
                 .complete_external(&command, Ok(&result.encode_to_vec()), now),
             Some(privd_response::Result::ConfigApply(result)) => session
+                .command_executor
+                .complete_external(&command, Ok(&result.encode_to_vec()), now),
+            Some(privd_response::Result::CertificateCsr(result)) => session
+                .command_executor
+                .complete_external(&command, Ok(&result.encode_to_vec()), now),
+            Some(privd_response::Result::CertificateRevoke(result)) => session
+                .command_executor
+                .complete_external(&command, Ok(&result.encode_to_vec()), now),
+            Some(privd_response::Result::CertificateP12(result)) => session
                 .command_executor
                 .complete_external(&command, Ok(&result.encode_to_vec()), now),
             Some(privd_response::Result::Error(error)) if terminal_privd_error(error.kind) => {
@@ -505,22 +614,49 @@ fn terminal_privd_error_code(kind: i32) -> Option<&'static str> {
     }
 }
 
-fn desired_resource(envelope: &CommandEnvelope) -> Option<(&'static str, &str, u64)> {
+fn desired_resource(envelope: &CommandEnvelope) -> Option<(&'static str, String, u64)> {
     match envelope.payload.as_ref()? {
         command_envelope::Payload::UserCreate(value) => {
-            Some(("user", &value.username, value.desired_revision))
+            Some(("user", value.username.clone(), value.desired_revision))
         }
         command_envelope::Payload::UserDisable(value) => {
-            Some(("user", &value.username, value.desired_revision))
+            Some(("user", value.username.clone(), value.desired_revision))
         }
         command_envelope::Payload::UserEnable(value) => {
-            Some(("user", &value.username, value.desired_revision))
+            Some(("user", value.username.clone(), value.desired_revision))
         }
         command_envelope::Payload::UserPasswordRotate(value) => {
-            Some(("user", &value.username, value.desired_revision))
+            Some(("user", value.username.clone(), value.desired_revision))
         }
         command_envelope::Payload::GroupApply(value) => {
-            Some(("group", &value.group_name, value.desired_revision))
+            Some(("group", value.group_name.clone(), value.desired_revision))
+        }
+        command_envelope::Payload::CertificateCsr(value) => {
+            Uuid::from_slice(&value.certificate_id).ok().map(|id| {
+                (
+                    "certificate_key",
+                    id.to_string(),
+                    envelope.expected_revision,
+                )
+            })
+        }
+        command_envelope::Payload::CertificateRevoke(value) => {
+            Uuid::from_slice(&value.certificate_id).ok().map(|id| {
+                (
+                    "certificate_revoke",
+                    id.to_string(),
+                    envelope.expected_revision,
+                )
+            })
+        }
+        command_envelope::Payload::CertificateP12(value) => {
+            Uuid::from_slice(&value.artifact_id).ok().map(|id| {
+                (
+                    "certificate_artifact",
+                    id.to_string(),
+                    envelope.expected_revision,
+                )
+            })
         }
         _ => None,
     }
@@ -535,6 +671,18 @@ async fn observe_external_effect(
     if matches!(
         envelope.payload,
         Some(command_envelope::Payload::ConfigPlan(_))
+    ) {
+        return ExternalEffectObservation::Absent;
+    }
+    // Certificate key creation and deletion are both idempotent for their
+    // controller-issued UUID. Retrying is safer than guessing a terminal state.
+    if matches!(
+        envelope.payload,
+        Some(
+            command_envelope::Payload::CertificateCsr(_)
+                | command_envelope::Payload::CertificateRevoke(_)
+                | command_envelope::Payload::CertificateP12(_)
+        )
     ) {
         return ExternalEffectObservation::Absent;
     }
@@ -990,6 +1138,7 @@ struct Config {
     controller: Option<EndpointId>,
     node_id: Option<Uuid>,
     probe_only: bool,
+    artifact_dir: PathBuf,
 }
 
 fn parse_args() -> Result<Config, io::Error> {
@@ -1000,6 +1149,7 @@ fn parse_args() -> Result<Config, io::Error> {
         controller: None,
         node_id: None,
         probe_only: false,
+        artifact_dir: PathBuf::from("/var/lib/ocservia-privd/certificates/artifacts"),
     };
     let mut args = env::args().skip(1);
     while let Some(argument) = args.next() {
@@ -1026,8 +1176,14 @@ fn parse_args() -> Result<Config, io::Error> {
                 );
             }
             "--probe-privd-only" => config.probe_only = true,
+            "--artifact-dir" => {
+                config.artifact_dir = PathBuf::from(required(&mut args, "--artifact-dir")?);
+            }
             _ => return Err(invalid("unknown agent argument")),
         }
+    }
+    if !config.artifact_dir.is_absolute() {
+        return Err(invalid("artifact directory must be absolute"));
     }
     Ok(config)
 }

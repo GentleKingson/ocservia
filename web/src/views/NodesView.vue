@@ -17,8 +17,14 @@ import {
   CircleStop,
   SlidersHorizontal,
   FileCheck2,
+  BadgeCheck,
+  Download,
 } from "@lucide/vue";
-import type { ConfigPlan } from "@ocservia/api-client";
+import type {
+  ArtifactGrant,
+  Certificate,
+  ConfigPlan,
+} from "@ocservia/api-client";
 import { computed, onMounted, ref } from "vue";
 
 import { useFleetStore } from "../shared/fleet";
@@ -34,6 +40,13 @@ import {
   applyConfigPlan,
   createConfigPlan,
   getConfigPlan,
+  createCertificate,
+  createCertificateP12,
+  downloadCertificateArtifact,
+  getCertificate,
+  issueCertificate,
+  listNodeCertificates,
+  revokeCertificate,
 } from "../api/client";
 
 const fleet = useFleetStore();
@@ -73,6 +86,15 @@ const configPrivateKey = ref("tls/server-private-key");
 const configReason = ref("");
 const configApplyApproval = ref("");
 const configApplyReason = ref("");
+const certificateDialog = ref(false);
+const certificate = ref<Certificate>();
+const certificateGrant = ref<ArtifactGrant>();
+const certificateCommonName = ref("");
+const certificateDnsNames = ref("");
+const certificateReason = ref("");
+const certificateApproval = ref("");
+const certificateError = ref("");
+const certificateLoading = ref(false);
 const usersState = computed(() =>
   fleet.userGroupState.filter((item) => item.kind === "user"),
 );
@@ -303,6 +325,154 @@ async function submitConfigApply(): Promise<void> {
     configLoading.value = false;
   }
 }
+
+async function openCertificate(): Promise<void> {
+  certificateDialog.value = true;
+  certificate.value = undefined;
+  certificateGrant.value = undefined;
+  certificateCommonName.value = fleet.selected?.name ?? "";
+  certificateDnsNames.value = "";
+  certificateReason.value = "";
+  certificateApproval.value = "";
+  certificateError.value = "";
+  if (!fleet.selected) return;
+  certificateLoading.value = true;
+  try {
+    const records = await listNodeCertificates(fleet.selected.id);
+    certificate.value = records.find((record) => record.state !== "revoked");
+  } catch (error) {
+    certificateError.value =
+      error instanceof Error ? error.message : "Certificate records failed";
+  } finally {
+    certificateLoading.value = false;
+  }
+}
+
+async function submitCertificateRequest(): Promise<void> {
+  if (
+    !fleet.selected ||
+    !certificateCommonName.value.trim() ||
+    !certificateReason.value.trim()
+  )
+    return;
+  certificateLoading.value = true;
+  certificateError.value = "";
+  try {
+    let value = await createCertificate(fleet.selected.id, {
+      expectedVersion: fleet.selected.version,
+      commonName: certificateCommonName.value.trim(),
+      dnsNames: new Set(
+        certificateDnsNames.value
+          .split(",")
+          .map((name) => name.trim())
+          .filter(Boolean),
+      ),
+      keyBits: 3072,
+      reason: certificateReason.value.trim(),
+    });
+    certificate.value = value;
+    for (
+      let attempt = 0;
+      attempt < 30 && value.state === "csr_pending";
+      attempt += 1
+    ) {
+      await new Promise((resolve) => setTimeout(resolve, 500));
+      value = await getCertificate(value.id);
+      certificate.value = value;
+    }
+  } catch (error) {
+    certificateError.value =
+      error instanceof Error ? error.message : "Certificate request failed";
+  } finally {
+    certificateLoading.value = false;
+  }
+}
+
+async function submitCertificateIssue(): Promise<void> {
+  if (
+    !certificate.value ||
+    !certificateApproval.value.trim() ||
+    !certificateReason.value.trim()
+  )
+    return;
+  certificateLoading.value = true;
+  certificateError.value = "";
+  try {
+    certificate.value = await issueCertificate(certificate.value.id, {
+      approvalId: certificateApproval.value.trim(),
+      reason: certificateReason.value.trim(),
+    });
+  } catch (error) {
+    certificateError.value =
+      error instanceof Error ? error.message : "Certificate issue failed";
+  } finally {
+    certificateLoading.value = false;
+  }
+}
+
+async function createP12(): Promise<void> {
+  if (!certificate.value || !fleet.selected || !certificateReason.value.trim())
+    return;
+  certificateLoading.value = true;
+  certificateError.value = "";
+  try {
+    certificateGrant.value = await createCertificateP12(certificate.value.id, {
+      expectedVersion: fleet.selected.version,
+      reason: certificateReason.value.trim(),
+    });
+    await fleet.trackOperation(certificateGrant.value.operation.id);
+  } catch (error) {
+    certificateError.value =
+      error instanceof Error ? error.message : "P12 creation failed";
+  } finally {
+    certificateLoading.value = false;
+  }
+}
+
+async function downloadP12(): Promise<void> {
+  const grant = certificateGrant.value;
+  if (!grant?.downloadToken) return;
+  certificateLoading.value = true;
+  certificateError.value = "";
+  try {
+    const blob = await downloadCertificateArtifact(
+      grant.artifactId,
+      grant.downloadToken,
+    );
+    const link = document.createElement("a");
+    link.href = URL.createObjectURL(blob);
+    link.download = "certificate.p12";
+    link.click();
+    URL.revokeObjectURL(link.href);
+    const { downloadToken: _consumed, ...consumedGrant } = grant;
+    certificateGrant.value = consumedGrant;
+  } catch (error) {
+    certificateError.value =
+      error instanceof Error ? error.message : "P12 download failed";
+  } finally {
+    certificateLoading.value = false;
+  }
+}
+
+async function revokeCurrentCertificate(): Promise<void> {
+  if (!certificate.value || !fleet.selected || !certificateReason.value.trim())
+    return;
+  certificateLoading.value = true;
+  certificateError.value = "";
+  try {
+    const operation = await revokeCertificate(certificate.value.id, {
+      expectedVersion: fleet.selected.version,
+      reason: certificateReason.value.trim(),
+    });
+    await fleet.trackOperation(operation.id);
+    certificate.value = await getCertificate(certificate.value.id);
+  } catch (error) {
+    certificateError.value =
+      error instanceof Error ? error.message : "Certificate revoke failed";
+  } finally {
+    certificateLoading.value = false;
+  }
+}
 </script>
 
 <template>
@@ -393,6 +563,14 @@ async function submitConfigApply(): Promise<void> {
           }}</span>
         </header>
         <div class="node-actions">
+          <button
+            type="button"
+            :disabled="operationBusy"
+            :title="$t('certificateLifecycle')"
+            @click="openCertificate"
+          >
+            <BadgeCheck :size="15" />{{ $t("certificate") }}
+          </button>
           <button
             type="button"
             :disabled="operationBusy"
@@ -682,6 +860,138 @@ async function submitConfigApply(): Promise<void> {
         </div>
       </aside>
     </section>
+    <div
+      v-if="certificateDialog"
+      class="dialog-backdrop"
+      @click.self="certificateDialog = false"
+    >
+      <form class="operation-dialog" @submit.prevent="submitCertificateRequest">
+        <header>
+          <h2>{{ $t("certificateLifecycle") }}</h2>
+          <code>{{ fleet.selected?.name }}</code>
+        </header>
+        <template v-if="!certificate">
+          <label for="certificate-cn">{{ $t("commonName") }}</label>
+          <input
+            id="certificate-cn"
+            v-model="certificateCommonName"
+            maxlength="253"
+            required
+          />
+          <label for="certificate-dns">{{ $t("dnsNames") }}</label>
+          <input
+            id="certificate-dns"
+            v-model="certificateDnsNames"
+            maxlength="4096"
+          />
+        </template>
+        <template v-else>
+          <div class="config-plan-result" aria-live="polite">
+            <span class="freshness-badge" :class="certificate.state">{{
+              certificate.state
+            }}</span>
+            <code>{{ certificate.id }}</code>
+            <small v-if="certificate.notAfter"
+              >{{ $t("expires") }}
+              {{ certificate.notAfter.toLocaleString() }}</small
+            >
+          </div>
+          <template
+            v-if="
+              certificate.state === 'csr_ready' ||
+              certificate.state === 'signer_unavailable'
+            "
+          >
+            <label for="certificate-approval">{{ $t("approvalId") }}</label>
+            <input
+              id="certificate-approval"
+              v-model="certificateApproval"
+              autocomplete="off"
+              required
+            />
+          </template>
+          <template v-if="certificateGrant">
+            <label for="certificate-password">{{ $t("p12Password") }}</label>
+            <input
+              id="certificate-password"
+              :value="certificateGrant.password"
+              readonly
+              autocomplete="off"
+            />
+            <small>{{ $t("oneTimeCredential") }}</small>
+          </template>
+        </template>
+        <label for="certificate-reason">{{ $t("reason") }}</label>
+        <textarea
+          id="certificate-reason"
+          v-model="certificateReason"
+          maxlength="512"
+          required
+        ></textarea>
+        <p v-if="certificateError" class="operation-error" role="alert">
+          {{ certificateError }}
+        </p>
+        <footer>
+          <button type="button" @click="certificateDialog = false">
+            {{ $t("cancel") }}
+          </button>
+          <button
+            v-if="!certificate"
+            type="submit"
+            class="primary"
+            :disabled="certificateLoading || !certificateReason.trim()"
+          >
+            {{ $t("requestCsr") }}
+          </button>
+          <button
+            v-else-if="
+              certificate.state === 'csr_ready' ||
+              certificate.state === 'signer_unavailable'
+            "
+            type="button"
+            class="primary"
+            :disabled="
+              certificateLoading ||
+              !certificateApproval.trim() ||
+              !certificateReason.trim()
+            "
+            @click="submitCertificateIssue"
+          >
+            {{ $t("issueCertificate") }}
+          </button>
+          <template
+            v-else-if="
+              certificate.state === 'issued' || certificate.state === 'expiring'
+            "
+          >
+            <button
+              type="button"
+              :disabled="certificateLoading || !certificateReason.trim()"
+              @click="createP12"
+            >
+              <KeyRound :size="15" />{{ $t("createP12") }}
+            </button>
+            <button
+              v-if="certificateGrant?.downloadToken"
+              type="button"
+              class="primary"
+              :disabled="certificateLoading"
+              @click="downloadP12"
+            >
+              <Download :size="15" />{{ $t("download") }}
+            </button>
+            <button
+              type="button"
+              class="danger"
+              :disabled="certificateLoading || !certificateReason.trim()"
+              @click="revokeCurrentCertificate"
+            >
+              {{ $t("revoke") }}
+            </button>
+          </template>
+        </footer>
+      </form>
+    </div>
     <div
       v-if="pendingAction"
       class="dialog-backdrop"

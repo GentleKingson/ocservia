@@ -91,10 +91,26 @@ func (s *Server) createApproval(w http.ResponseWriter, r *http.Request) {
 		}
 		requestHash, _ = hex.DecodeString(plan.CandidateHash)
 		requestSummary, _ = json.Marshal(map[string]any{"node_id": plan.NodeID, "expected_revision": plan.ExpectedRevision, "candidate_hash": plan.CandidateHash, "current_hash": plan.CurrentHash, "expires_at": plan.ExpiresAt})
+	} else if strings.TrimSpace(body.Action) == "certificate.issue" {
+		if resource.Type != "certificate" || s.certificates == nil {
+			writeProblem(w, r, http.StatusBadRequest, "https://ocservia.dev/problems/invalid-request", "Invalid request", "certificate approval requires a ready CSR")
+			return
+		}
+		workspaceID, nodeID, hash, summary, bindingErr := s.certificates.ApprovalBinding(r.Context(), resourceID)
+		if bindingErr != nil || workspaceID != resource.WorkspaceID {
+			writeProblem(w, r, http.StatusConflict, "https://ocservia.dev/problems/certificate-not-ready", "Certificate is not ready", "certificate approval requires a ready CSR in the selected workspace")
+			return
+		}
+		node := rbac.Resource{WorkspaceID: workspaceID, Type: "node", ID: nodeID}
+		if !s.devAuth && s.rbac.Authorize(r.Context(), actor.IdentityID, "certificate.issue", node, actor.BreakGlass) != nil {
+			s.writeAuthorizationError(w, r, rbac.ErrForbidden)
+			return
+		}
+		requestHash, requestSummary = hash, summary
 	}
 	// Approval requests cannot be used to ask another user to authorize an action
 	// that the requester could not perform themselves.
-	if !s.devAuth && strings.TrimSpace(body.Action) != "user.batch.disable" && strings.TrimSpace(body.Action) != "config.apply" {
+	if !s.devAuth && strings.TrimSpace(body.Action) != "user.batch.disable" && strings.TrimSpace(body.Action) != "config.apply" && strings.TrimSpace(body.Action) != "certificate.issue" {
 		if err := s.rbac.Authorize(r.Context(), actor.IdentityID, strings.TrimSpace(body.Action), resource, actor.BreakGlass); err != nil {
 			s.writeAuthorizationError(w, r, err)
 			return

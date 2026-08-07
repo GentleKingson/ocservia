@@ -13,6 +13,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     adapter.cleanup_stale_user_staging().await?;
     adapter.cleanup_stale_config_plans().await?;
     adapter.cleanup_stale_config_apply_staging().await?;
+    adapter.cleanup_stale_certificate_artifacts().await?;
     let listener = bind_socket(&config)?;
     tracing::info!(socket = %config.socket.display(), agent_uid = config.agent_uid, "privd serving on AF_UNIX");
     let result = serve(listener, config.clone(), adapter, shutdown()).await;
