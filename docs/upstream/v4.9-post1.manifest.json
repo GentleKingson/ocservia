@@ -44,7 +44,7 @@
     "verbatim_upstream_files": []
   },
   "publication": {
-    "review_pr": "pending",
+    "review_pr": "https://github.com/GentleKingson/ocservia/pull/15",
     "implementation_pr": "https://github.com/GentleKingson/ocservia/pull/14"
   }
 }
