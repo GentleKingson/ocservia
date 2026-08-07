@@ -254,6 +254,7 @@ jobs:
         env:
           ARTIFACT_DIR: ${{ runner.temp }}/artifacts/native-ocserv
         run: |
+          mkdir -p "${ARTIFACT_DIR}"
           port=$((40000 + GITHUB_RUN_ID % 10000))
           sudo --preserve-env=RUNNER_TEMP,ARTIFACT_DIR env \
             RUN_ID="I13-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-native-ocserv" \

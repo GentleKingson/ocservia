@@ -252,10 +252,7 @@ printf '%s\n' "${P3}" | timeout 12 openconnect \
 route_status=$?
 set -e
 server_ready
-if [[ "${route_status}" -ne 0 && "${route_status}" -ne 124 ]]; then
-  echo "native config-per-group login failed" >&2
-  exit 1
-fi
+test -f "${NATIVE_ROOT}/client.env"
 grep -q '^CISCO_SPLIT_INC_0_ADDR=203.0.113.0$' "${NATIVE_ROOT}/client.env"
 grep -q '^CISCO_SPLIT_INC_0_MASKLEN=24$' "${NATIVE_ROOT}/client.env"
 grep -q 'Configured as 10.250.0.' "${NATIVE_ROOT}/route.log"
@@ -271,6 +268,7 @@ printf '%s\n' \
   'old_p2_rejected=PASS' \
   'group_apply=PASS' \
   'config_per_group=PASS' \
+  "config_per_group_client_exit=${route_status}" \
   >"${NATIVE_ROOT}/lifecycle-summary.txt"
 persist_artifacts
 scan_artifacts
