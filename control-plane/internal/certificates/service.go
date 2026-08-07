@@ -311,6 +311,9 @@ func (s *Service) Revoke(ctx context.Context, request RevokeRequest) (operations
 	if err != nil {
 		return operationstore.Operation{}, false, err
 	}
+	if replay && op.State == "expired" {
+		return op, true, ErrNotReady
+	}
 	if replay && state == "revoked" {
 		return op, true, nil
 	}

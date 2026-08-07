@@ -266,6 +266,10 @@ func TestCertificateIssueArtifactAndRevokeIntegration(t *testing.T) {
 	if _, err := service.OpenArtifact(ctx, hashGrant.ArtifactID, hashGrant.DownloadToken); !errors.Is(err, ErrArtifactDenied) {
 		t.Fatalf("certificate expiry left artifact downloadable: %v", err)
 	}
+	var expiringAlerts, expiredAlerts int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FILTER(WHERE kind='certificate.expiring'),count(*) FILTER(WHERE kind='certificate.expired') FROM security_alerts WHERE workspace_id=$1 AND node_id=$2 AND resource_type='certificate' AND resource_id=$3`, workspaceID, nodeID, certificate.ID).Scan(&expiringAlerts, &expiredAlerts); err != nil || expiringAlerts != 1 || expiredAlerts != 1 {
+		t.Fatalf("certificate alerts expiring=%d expired=%d err=%v", expiringAlerts, expiredAlerts, err)
+	}
 	if _, _, err := service.CreateP12(ctx, P12Request{CertificateID: certificate.ID, ActorIdentityID: requesterID, ActorSessionID: requesterSession, ExpectedVersion: 1, IdempotencyKey: "i17-p12-after-certificate-expiry", Reason: "reject expired certificate", RequestID: "p12-after-certificate-expiry"}); !errors.Is(err, ErrNotReady) {
 		t.Fatalf("expired certificate P12 err=%v", err)
 	}
@@ -280,9 +284,19 @@ func TestCertificateIssueArtifactAndRevokeIntegration(t *testing.T) {
 		t.Fatalf("durable revoke intent state=%q held=%v err=%v", revokeState, held, err)
 	}
 	pki.revokeUnavailable = false
+	if _, err := pool.Exec(ctx, `UPDATE commands SET expires_at=created_at+interval '1 microsecond' WHERE operation_id=$1::uuid`, op.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := operations.New(pool).Expire(ctx); err != nil {
+		t.Fatal(err)
+	}
 	op, replayed, err = service.Revoke(ctx, RevokeRequest{CertificateID: certificate.ID, ActorIdentityID: approverID, ActorSessionID: approverSession, ExpectedVersion: 1, IdempotencyKey: "i17-revoke", Reason: "retire certificate", RequestID: "revoke-request", Traceparent: "00-2123456789abcdef0123456789abcdef-0123456789abcdef-01"})
-	if err != nil || !replayed || op.ID == "" || !pki.revoked {
-		t.Fatalf("revoke=%+v replay=%v external=%v err=%v", op, replayed, pki.revoked, err)
+	if !errors.Is(err, ErrNotReady) || !replayed || pki.revoked {
+		t.Fatalf("expired revoke retry=%+v replay=%v external=%v err=%v", op, replayed, pki.revoked, err)
+	}
+	op, replayed, err = service.Revoke(ctx, RevokeRequest{CertificateID: certificate.ID, ActorIdentityID: approverID, ActorSessionID: approverSession, ExpectedVersion: 1, IdempotencyKey: "i17-revoke-recovered", Reason: "retire certificate", RequestID: "revoke-recovered", Traceparent: "00-2123456789abcdef0123456789abcdef-0123456789abcdef-01"})
+	if err != nil || replayed || op.ID == "" || !pki.revoked {
+		t.Fatalf("recovered revoke=%+v replay=%v external=%v err=%v", op, replayed, pki.revoked, err)
 	}
 	if err := pool.QueryRow(ctx, `SELECT available_at<=now() FROM outbox_events WHERE command_id=(SELECT command_id FROM operations WHERE id=$1::uuid)`, op.ID).Scan(&held); err != nil || !held {
 		t.Fatalf("released revoke outbox=%v err=%v", held, err)

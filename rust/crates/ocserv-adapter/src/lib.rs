@@ -1485,10 +1485,15 @@ impl Adapter {
             let name = entry.file_name();
             let name = name.to_string_lossy();
             let is_staging = name.starts_with('.');
-            let id_text = name.strip_suffix(".p12").or_else(|| {
-                name.strip_prefix('.')
-                    .and_then(|value| value.strip_suffix(".chain.pem"))
-            });
+            let id_text = if is_staging {
+                name.strip_prefix('.').and_then(|value| {
+                    value
+                        .strip_suffix(".p12")
+                        .or_else(|| value.strip_suffix(".chain.pem"))
+                })
+            } else {
+                name.strip_suffix(".p12")
+            };
             let Some(id_text) = id_text else { continue };
             let Ok(id) = Uuid::parse_str(id_text) else {
                 continue;
@@ -4897,12 +4902,6 @@ mod tests {
         let chain = std::fs::read(&certificate_path).expect("read certificate chain");
         let artifact_id = Uuid::now_v7();
         let artifact_directory = directory.join("artifacts");
-        std::fs::create_dir(&artifact_directory).expect("artifact directory");
-        std::fs::set_permissions(&artifact_directory, std::fs::Permissions::from_mode(0o700))
-            .expect("artifact directory mode");
-        let interrupted_staging = artifact_directory.join(format!(".{artifact_id}.chain.pem"));
-        std::fs::write(&interrupted_staging, b"interrupted staging fixture")
-            .expect("interrupted staging file");
         let result = adapter
             .certificate_p12(
                 certificate_id.as_bytes(),
@@ -4916,7 +4915,14 @@ mod tests {
         let artifact = directory
             .join("artifacts")
             .join(format!("{artifact_id}.p12"));
-        assert!(!interrupted_staging.exists());
+        assert_eq!(
+            std::fs::metadata(&artifact_directory)
+                .expect("artifact directory metadata")
+                .permissions()
+                .mode()
+                & 0o777,
+            0o710
+        );
         let bytes = std::fs::read(&artifact).expect("read encrypted P12");
         assert_eq!(
             std::fs::metadata(&artifact)
@@ -4924,7 +4930,7 @@ mod tests {
                 .permissions()
                 .mode()
                 & 0o777,
-            0o600
+            0o640
         );
         assert_eq!(result.artifact_size, bytes.len() as u64);
         assert_eq!(result.artifact_sha256, Sha256::digest(&bytes).to_vec());
@@ -4957,6 +4963,41 @@ mod tests {
             .await
             .expect("replay P12 creation");
         assert_eq!(replay.artifact_sha256, result.artifact_sha256);
+        std::fs::write(&artifact, b"truncated").expect("corrupt final P12 fixture");
+        let recovered = adapter
+            .certificate_p12(
+                certificate_id.as_bytes(),
+                artifact_id.as_bytes(),
+                &chain,
+                &sealed.stdout,
+                "fixture-key",
+            )
+            .await
+            .expect("replace invalid final P12");
+        assert_ne!(
+            recovered.artifact_sha256,
+            Sha256::digest(b"truncated").to_vec()
+        );
+        let interrupted_artifact = Uuid::now_v7();
+        let interrupted_chain =
+            artifact_directory.join(format!(".{interrupted_artifact}.chain.pem"));
+        let interrupted_output = artifact_directory.join(format!(".{interrupted_artifact}.p12"));
+        std::fs::write(&interrupted_chain, b"interrupted chain fixture")
+            .expect("interrupted chain file");
+        std::fs::write(&interrupted_output, b"interrupted output fixture")
+            .expect("interrupted output file");
+        adapter
+            .certificate_p12(
+                certificate_id.as_bytes(),
+                interrupted_artifact.as_bytes(),
+                &chain,
+                &sealed.stdout,
+                "fixture-key",
+            )
+            .await
+            .expect("recover interrupted P12 staging");
+        assert!(!interrupted_chain.exists());
+        assert!(!interrupted_output.exists());
         let lookalike = directory.join("artifacts").join("not-a-uuid.p12");
         std::fs::write(&lookalike, b"preserve").expect("write cleanup lookalike");
         assert!(
@@ -5019,6 +5060,12 @@ impl Adapter {
         tokio::fs::create_dir_all(&self.resources.certificate_key_dir)
             .await
             .map_err(AdapterError::Io)?;
+        tokio::fs::set_permissions(
+            &self.resources.certificate_key_dir,
+            std::fs::Permissions::from_mode(0o710),
+        )
+        .await
+        .map_err(AdapterError::Io)?;
         let metadata = tokio::fs::symlink_metadata(&self.resources.certificate_key_dir)
             .await
             .map_err(AdapterError::Io)?;
@@ -5207,6 +5254,9 @@ impl Adapter {
         tokio::fs::create_dir_all(&artifact_dir)
             .await
             .map_err(AdapterError::Io)?;
+        tokio::fs::set_permissions(&artifact_dir, std::fs::Permissions::from_mode(0o710))
+            .await
+            .map_err(AdapterError::Io)?;
         let directory_metadata = tokio::fs::symlink_metadata(&artifact_dir)
             .await
             .map_err(AdapterError::Io)?;
@@ -5217,42 +5267,8 @@ impl Adapter {
             return Err(AdapterError::InvalidResource);
         }
         let chain_path = artifact_dir.join(format!(".{artifact}.chain.pem"));
+        let staging_path = artifact_dir.join(format!(".{artifact}.p12"));
         let output_path = artifact_dir.join(format!("{artifact}.p12"));
-        if tokio::fs::symlink_metadata(&output_path).await.is_ok() {
-            let data = tokio::fs::read(&output_path)
-                .await
-                .map_err(AdapterError::Io)?;
-            if data.is_empty() || data.len() > 64 * 1024 * 1024 {
-                return Err(AdapterError::InvalidResource);
-            }
-            return Ok(CertificateArtifactResult {
-                certificate_id: certificate_id.to_vec(),
-                artifact_id: artifact_id.to_vec(),
-                artifact_sha256: Sha256::digest(&data).to_vec(),
-                artifact_size: u64::try_from(data.len()).map_err(|_| AdapterError::OutputLimit)?,
-            });
-        }
-        match tokio::fs::symlink_metadata(&chain_path).await {
-            Ok(metadata) if metadata.is_file() && !metadata.file_type().is_symlink() => {
-                tokio::fs::remove_file(&chain_path)
-                    .await
-                    .map_err(AdapterError::Io)?;
-            }
-            Ok(_) => return Err(AdapterError::InvalidResource),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => return Err(AdapterError::Io(error)),
-        }
-        let mut chain_file = StdOpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o600)
-            .open(&chain_path)
-            .map_err(AdapterError::Io)?;
-        chain_file
-            .write_all(certificate_chain_pem)
-            .map_err(AdapterError::Io)?;
-        chain_file.sync_all().map_err(AdapterError::Io)?;
-        drop(chain_file);
         let key = self
             .resources
             .secret_key
@@ -5294,9 +5310,73 @@ impl Adapter {
                 return Err(error);
             }
         };
+        match tokio::fs::symlink_metadata(&output_path).await {
+            Ok(metadata) if metadata.is_file() && !metadata.file_type().is_symlink() => {
+                let output_text = output_path.to_str().ok_or(AdapterError::InvalidResource)?;
+                if self
+                    .execute_with_input(
+                        &self.resources.openssl,
+                        &["pkcs12", "-in", output_text, "-passin", "stdin", "-noout"],
+                        &password,
+                    )
+                    .await
+                    .is_ok()
+                {
+                    let data = tokio::fs::read(&output_path)
+                        .await
+                        .map_err(AdapterError::Io)?;
+                    if !data.is_empty() && data.len() <= 64 * 1024 * 1024 {
+                        return Ok(CertificateArtifactResult {
+                            certificate_id: certificate_id.to_vec(),
+                            artifact_id: artifact_id.to_vec(),
+                            artifact_sha256: Sha256::digest(&data).to_vec(),
+                            artifact_size: u64::try_from(data.len())
+                                .map_err(|_| AdapterError::OutputLimit)?,
+                        });
+                    }
+                }
+                tokio::fs::remove_file(&output_path)
+                    .await
+                    .map_err(AdapterError::Io)?;
+            }
+            Ok(_) => return Err(AdapterError::InvalidResource),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(AdapterError::Io(error)),
+        }
+        for stale in [&chain_path, &staging_path] {
+            match tokio::fs::symlink_metadata(stale).await {
+                Ok(metadata) if metadata.is_file() && !metadata.file_type().is_symlink() => {
+                    tokio::fs::remove_file(stale)
+                        .await
+                        .map_err(AdapterError::Io)?;
+                }
+                Ok(_) => return Err(AdapterError::InvalidResource),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(AdapterError::Io(error)),
+            }
+        }
+        let mut chain_file = StdOpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&chain_path)
+            .map_err(AdapterError::Io)?;
+        chain_file
+            .write_all(certificate_chain_pem)
+            .map_err(AdapterError::Io)?;
+        chain_file.sync_all().map_err(AdapterError::Io)?;
+        drop(chain_file);
         let key_text = key_path.to_str().ok_or(AdapterError::InvalidResource)?;
         let chain_text = chain_path.to_str().ok_or(AdapterError::InvalidResource)?;
-        let output_text = output_path.to_str().ok_or(AdapterError::InvalidResource)?;
+        let staging_text = staging_path.to_str().ok_or(AdapterError::InvalidResource)?;
+        drop(
+            StdOpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o600)
+                .open(&staging_path)
+                .map_err(AdapterError::Io)?,
+        );
         let created = self
             .execute_with_input(
                 &self.resources.openssl,
@@ -5308,7 +5388,7 @@ impl Adapter {
                     "-in",
                     chain_text,
                     "-out",
-                    output_text,
+                    staging_text,
                     "-passout",
                     "stdin",
                 ],
@@ -5317,19 +5397,31 @@ impl Adapter {
             .await;
         let _ = tokio::fs::remove_file(&chain_path).await;
         if let Err(error) = created {
-            let _ = tokio::fs::remove_file(&output_path).await;
+            let _ = tokio::fs::remove_file(&staging_path).await;
             return Err(error);
         }
-        let data = tokio::fs::read(&output_path)
+        if let Err(error) = self
+            .execute_with_input(
+                &self.resources.openssl,
+                &["pkcs12", "-in", staging_text, "-passin", "stdin", "-noout"],
+                &password,
+            )
+            .await
+        {
+            let _ = tokio::fs::remove_file(&staging_path).await;
+            return Err(error);
+        }
+        let data = tokio::fs::read(&staging_path)
             .await
             .map_err(AdapterError::Io)?;
         if data.is_empty() || data.len() > 64 * 1024 * 1024 {
-            let _ = tokio::fs::remove_file(&output_path).await;
+            let _ = tokio::fs::remove_file(&staging_path).await;
             return Err(AdapterError::OutputLimit);
         }
-        tokio::fs::set_permissions(&output_path, std::fs::Permissions::from_mode(0o600))
+        tokio::fs::set_permissions(&staging_path, std::fs::Permissions::from_mode(0o640))
             .await
             .map_err(AdapterError::Io)?;
+        atomic_replace(&staging_path, &output_path).await?;
         Ok(CertificateArtifactResult {
             certificate_id: certificate_id.to_vec(),
             artifact_id: artifact_id.to_vec(),
