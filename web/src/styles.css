@@ -643,6 +643,34 @@ h1 {
 .operation-dialog input {
   min-height: 38px;
 }
+.policy-fields {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1.4fr);
+  gap: 9px 12px;
+  margin: 0;
+  padding: 12px;
+  border: 1px solid #d4ddd9;
+  border-radius: 6px;
+}
+.policy-fields legend {
+  padding: 0 5px;
+  font-size: 13px;
+  font-weight: 700;
+}
+.policy-fields select {
+  min-width: 0;
+  min-height: 38px;
+  padding: 7px;
+  border: 1px solid #bac7c2;
+  border-radius: 5px;
+  background: #fff;
+  font: inherit;
+}
+.policy-size {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 86px;
+  gap: 6px;
+}
 .operation-dialog footer {
   display: flex;
   justify-content: flex-end;

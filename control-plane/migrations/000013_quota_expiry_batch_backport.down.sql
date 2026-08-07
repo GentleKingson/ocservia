@@ -1,0 +1,9 @@
+DROP TABLE upstream_sync_records;
+DROP TABLE batch_operation_items;
+DROP TABLE batch_operations;
+DROP TABLE user_policy_enforcements;
+DROP TABLE scheduler_leases;
+DROP TABLE user_usage_cursors;
+DROP TABLE observed_user_usage;
+DROP TABLE user_policy_mutations;
+DROP TABLE desired_user_policies;

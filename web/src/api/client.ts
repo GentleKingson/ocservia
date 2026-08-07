@@ -14,6 +14,8 @@ import {
   type NodePage,
   type NodeSessionPage,
   type UserGroupStatePage,
+  type UserPolicy,
+  type UserPolicyRequest,
   type SimulationScenario,
   type Workspace,
 } from "@ocservia/api-client";
@@ -385,6 +387,31 @@ export async function applyGroup(
         expectedVersion: version,
         ttlSeconds: request.ttlSeconds,
       },
+    },
+    requestInit(signal),
+  );
+}
+
+export async function getUserPolicy(
+  nodeId: string,
+  username: string,
+  signal?: AbortSignal,
+): Promise<UserPolicy> {
+  return nodes.getNodeUserPolicy({ nodeId, username }, requestInit(signal));
+}
+
+export async function setUserPolicy(
+  nodeId: string,
+  username: string,
+  policy: UserPolicyRequest,
+  signal?: AbortSignal,
+): Promise<UserPolicy> {
+  return operations.setNodeUserPolicy(
+    {
+      nodeId,
+      username,
+      idempotencyKey: crypto.randomUUID(),
+      userPolicyRequest: policy,
     },
     requestInit(signal),
   );

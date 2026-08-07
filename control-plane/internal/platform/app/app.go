@@ -20,6 +20,7 @@ import (
 	telemetrystore "github.com/GentleKingson/ocservia/control-plane/internal/telemetry"
 	"github.com/GentleKingson/ocservia/control-plane/internal/transportclient"
 	"github.com/GentleKingson/ocservia/control-plane/internal/trustserver"
+	"github.com/GentleKingson/ocservia/control-plane/internal/useroperations"
 	"github.com/GentleKingson/ocservia/control-plane/internal/userstate"
 	"github.com/GentleKingson/ocservia/control-plane/migrations"
 )
@@ -102,12 +103,18 @@ func Run(ctx context.Context, cfg config.Config, build BuildInfo, logger *slog.L
 		go func() { workerErr <- operationWorker.Run(componentCtx) }()
 	}
 	telemetryService := telemetrystore.New(pool)
+	userStateService := userstate.New(pool)
+	userOperationsService := useroperations.New(pool, userStateService)
 	auditManager := audit.NewManager(pool, cfg.AuditCheckpointKey)
 	if cfg.RunsScheduler() {
 		go func() {
 			ticker := time.NewTicker(30 * time.Second)
 			defer ticker.Stop()
 			for {
+				if err := userOperationsService.RunOnce(componentCtx); err != nil {
+					maintenanceErr <- err
+					return
+				}
 				if err := telemetryService.Maintain(componentCtx); err != nil {
 					maintenanceErr <- err
 					return
@@ -154,7 +161,8 @@ func Run(ctx context.Context, cfg config.Config, build BuildInfo, logger *slog.L
 	}
 	server.EnableAuthorization(authService, rbac.New(pool), approvals.New(pool), auditManager)
 	server.EnableOperations(operationService)
-	server.EnableUserState(userstate.New(pool))
+	server.EnableUserState(userStateService)
+	server.EnableUserOperations(userOperationsService)
 	server.EnableTelemetry(telemetryService)
 	if cfg.ControllerEndpointID != "" {
 		transport, transportErr := transportclient.New(cfg.TransportSocket, cfg.TransportTimeout, cfg.TransportQueue)

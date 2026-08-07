@@ -128,6 +128,13 @@ jobs:
           ARTIFACT_DIR: ${{ runner.temp }}/artifacts/go/database-integration
           RUN_ID: database-${{ github.run_id }}-${{ github.run_attempt }}-go
         run: scripts/database-integration.sh
+      - name: I14 quota, expiry, batch, and backport contracts
+        env:
+          ARTIFACT_DIR: ${{ runner.temp }}/artifacts/go/i14-contracts
+        run: |
+          mkdir -p "${ARTIFACT_DIR}"
+          set -o pipefail
+          scripts/i14-quota-expiry-backport.sh 2>&1 | tee "${ARTIFACT_DIR}/i14-contracts.log"
       - name: Go, PostgreSQL, UDS, and Rust stub integration
         env:
           ARTIFACT_DIR: ${{ runner.temp }}/artifacts/go/local-slice

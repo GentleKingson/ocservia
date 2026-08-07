@@ -277,3 +277,23 @@ func TestControlledOperationRoutesRequireAuthentication(t *testing.T) {
 		}
 	}
 }
+
+func TestI14RoutesRequireAuthentication(t *testing.T) {
+	server := New("127.0.0.1:0", nil, BuildInfo{}, slog.New(slog.NewTextHandler(io.Discard, nil)), 1024, time.Second, false, "", 1)
+	tests := []struct {
+		method string
+		path   string
+	}{
+		{http.MethodGet, "/api/v1/nodes/019fc0a4-6d92-765c-a8a1-4af556614cc3/users/alice/policy"},
+		{http.MethodPut, "/api/v1/nodes/019fc0a4-6d92-765c-a8a1-4af556614cc3/users/alice/policy"},
+		{http.MethodPost, "/api/v1/user-batches"},
+		{http.MethodGet, "/api/v1/user-batches/019fc0a4-6d92-765c-a8a1-4af556614cc3"},
+	}
+	for _, test := range tests {
+		response := httptest.NewRecorder()
+		server.http.Handler.ServeHTTP(response, httptest.NewRequest(test.method, test.path, nil))
+		if response.Code != http.StatusUnauthorized {
+			t.Fatalf("%s %s status = %d", test.method, test.path, response.Code)
+		}
+	}
+}

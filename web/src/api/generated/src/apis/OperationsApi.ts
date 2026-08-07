@@ -74,10 +74,30 @@ import {
   SyntheticCommandRequestToJSON,
 } from "../models/SyntheticCommandRequest";
 import {
+  type UserBatch,
+  UserBatchFromJSON,
+  UserBatchToJSON,
+} from "../models/UserBatch";
+import {
+  type UserBatchRequest,
+  UserBatchRequestFromJSON,
+  UserBatchRequestToJSON,
+} from "../models/UserBatchRequest";
+import {
   type UserCreateRequest,
   UserCreateRequestFromJSON,
   UserCreateRequestToJSON,
 } from "../models/UserCreateRequest";
+import {
+  type UserPolicy,
+  UserPolicyFromJSON,
+  UserPolicyToJSON,
+} from "../models/UserPolicy";
+import {
+  type UserPolicyRequest,
+  UserPolicyRequestFromJSON,
+  UserPolicyRequestToJSON,
+} from "../models/UserPolicyRequest";
 
 export interface ApplyNodeGroupRequest {
   nodeId: string;
@@ -111,6 +131,13 @@ export interface CreateSyntheticCommandRequest {
   ifMatch?: string;
 }
 
+export interface CreateUserBatchRequest {
+  idempotencyKey: string;
+  userBatchRequest: UserBatchRequest;
+  xWorkspaceID?: string;
+  xApprovalID?: string;
+}
+
 export interface DisableNodeUserRequest {
   nodeId: string;
   username: string;
@@ -137,6 +164,11 @@ export interface EnableNodeUserRequest {
 
 export interface GetOperationRequest {
   operationId: string;
+}
+
+export interface GetUserBatchRequest {
+  batchId: string;
+  xWorkspaceID?: string;
 }
 
 export interface ListOperationsRequest {
@@ -167,6 +199,13 @@ export interface RotateNodeUserPasswordRequest {
   idempotencyKey: string;
   passwordRotateRequest: PasswordRotateRequest;
   ifMatch?: string;
+}
+
+export interface SetNodeUserPolicyRequest {
+  nodeId: string;
+  username: string;
+  idempotencyKey: string;
+  userPolicyRequest: UserPolicyRequest;
 }
 
 export interface TerminateNodeSessionRequest {
@@ -646,6 +685,100 @@ export class OperationsApi extends runtime.BaseAPI {
   }
 
   /**
+   * Creates request options for createUserBatch without sending the request
+   */
+  async createUserBatchRequestOpts(
+    requestParameters: CreateUserBatchRequest,
+  ): Promise<runtime.RequestOpts> {
+    if (requestParameters["idempotencyKey"] == null) {
+      throw new runtime.RequiredError(
+        "idempotencyKey",
+        'Required parameter "idempotencyKey" was null or undefined when calling createUserBatch().',
+      );
+    }
+
+    if (requestParameters["userBatchRequest"] == null) {
+      throw new runtime.RequiredError(
+        "userBatchRequest",
+        'Required parameter "userBatchRequest" was null or undefined when calling createUserBatch().',
+      );
+    }
+
+    const queryParameters: any = {};
+
+    const headerParameters: runtime.HTTPHeaders = {};
+
+    headerParameters["Content-Type"] = "application/json";
+
+    if (requestParameters["xWorkspaceID"] != null) {
+      headerParameters["X-Workspace-ID"] = String(
+        requestParameters["xWorkspaceID"],
+      );
+    }
+
+    if (requestParameters["idempotencyKey"] != null) {
+      headerParameters["Idempotency-Key"] = String(
+        requestParameters["idempotencyKey"],
+      );
+    }
+
+    if (requestParameters["xApprovalID"] != null) {
+      headerParameters["X-Approval-ID"] = String(
+        requestParameters["xApprovalID"],
+      );
+    }
+
+    if (this.configuration && this.configuration.accessToken) {
+      const token = this.configuration.accessToken;
+      const tokenString = await token("bearerAuth", []);
+
+      if (tokenString) {
+        headerParameters["Authorization"] = `Bearer ${tokenString}`;
+      }
+    }
+
+    let urlPath = `/user-batches`;
+
+    return {
+      path: urlPath,
+      method: "POST",
+      headers: headerParameters,
+      query: queryParameters,
+      body: UserBatchRequestToJSON(requestParameters["userBatchRequest"]),
+    };
+  }
+
+  /**
+   * Create a parent batch whose items are authorized and executed independently
+   */
+  async createUserBatchRaw(
+    requestParameters: CreateUserBatchRequest,
+    initOverrides?: RequestInit | runtime.InitOverrideFunction,
+  ): Promise<runtime.ApiResponse<UserBatch>> {
+    const requestOptions =
+      await this.createUserBatchRequestOpts(requestParameters);
+    const response = await this.request(requestOptions, initOverrides);
+
+    return new runtime.JSONApiResponse(response, (jsonValue) =>
+      UserBatchFromJSON(jsonValue),
+    );
+  }
+
+  /**
+   * Create a parent batch whose items are authorized and executed independently
+   */
+  async createUserBatch(
+    requestParameters: CreateUserBatchRequest,
+    initOverrides?: RequestInit | runtime.InitOverrideFunction,
+  ): Promise<UserBatch> {
+    const response = await this.createUserBatchRaw(
+      requestParameters,
+      initOverrides,
+    );
+    return await response.value();
+  }
+
+  /**
    * Creates request options for disableNodeUser without sending the request
    */
   async disableNodeUserRequestOpts(
@@ -1097,6 +1230,82 @@ export class OperationsApi extends runtime.BaseAPI {
   }
 
   /**
+   * Creates request options for getUserBatch without sending the request
+   */
+  async getUserBatchRequestOpts(
+    requestParameters: GetUserBatchRequest,
+  ): Promise<runtime.RequestOpts> {
+    if (requestParameters["batchId"] == null) {
+      throw new runtime.RequiredError(
+        "batchId",
+        'Required parameter "batchId" was null or undefined when calling getUserBatch().',
+      );
+    }
+
+    const queryParameters: any = {};
+
+    const headerParameters: runtime.HTTPHeaders = {};
+
+    if (requestParameters["xWorkspaceID"] != null) {
+      headerParameters["X-Workspace-ID"] = String(
+        requestParameters["xWorkspaceID"],
+      );
+    }
+
+    if (this.configuration && this.configuration.accessToken) {
+      const token = this.configuration.accessToken;
+      const tokenString = await token("bearerAuth", []);
+
+      if (tokenString) {
+        headerParameters["Authorization"] = `Bearer ${tokenString}`;
+      }
+    }
+
+    let urlPath = `/user-batches/{batch_id}`;
+    urlPath = urlPath.replace(
+      "{batch_id}",
+      encodeURIComponent(String(requestParameters["batchId"])),
+    );
+
+    return {
+      path: urlPath,
+      method: "GET",
+      headers: headerParameters,
+      query: queryParameters,
+    };
+  }
+
+  /**
+   * Get parent and per-item authorization, command, and result state
+   */
+  async getUserBatchRaw(
+    requestParameters: GetUserBatchRequest,
+    initOverrides?: RequestInit | runtime.InitOverrideFunction,
+  ): Promise<runtime.ApiResponse<UserBatch>> {
+    const requestOptions =
+      await this.getUserBatchRequestOpts(requestParameters);
+    const response = await this.request(requestOptions, initOverrides);
+
+    return new runtime.JSONApiResponse(response, (jsonValue) =>
+      UserBatchFromJSON(jsonValue),
+    );
+  }
+
+  /**
+   * Get parent and per-item authorization, command, and result state
+   */
+  async getUserBatch(
+    requestParameters: GetUserBatchRequest,
+    initOverrides?: RequestInit | runtime.InitOverrideFunction,
+  ): Promise<UserBatch> {
+    const response = await this.getUserBatchRaw(
+      requestParameters,
+      initOverrides,
+    );
+    return await response.value();
+  }
+
+  /**
    * Creates request options for listOperations without sending the request
    */
   async listOperationsRequestOpts(
@@ -1488,6 +1697,110 @@ export class OperationsApi extends runtime.BaseAPI {
     initOverrides?: RequestInit | runtime.InitOverrideFunction,
   ): Promise<Operation> {
     const response = await this.rotateNodeUserPasswordRaw(
+      requestParameters,
+      initOverrides,
+    );
+    return await response.value();
+  }
+
+  /**
+   * Creates request options for setNodeUserPolicy without sending the request
+   */
+  async setNodeUserPolicyRequestOpts(
+    requestParameters: SetNodeUserPolicyRequest,
+  ): Promise<runtime.RequestOpts> {
+    if (requestParameters["nodeId"] == null) {
+      throw new runtime.RequiredError(
+        "nodeId",
+        'Required parameter "nodeId" was null or undefined when calling setNodeUserPolicy().',
+      );
+    }
+
+    if (requestParameters["username"] == null) {
+      throw new runtime.RequiredError(
+        "username",
+        'Required parameter "username" was null or undefined when calling setNodeUserPolicy().',
+      );
+    }
+
+    if (requestParameters["idempotencyKey"] == null) {
+      throw new runtime.RequiredError(
+        "idempotencyKey",
+        'Required parameter "idempotencyKey" was null or undefined when calling setNodeUserPolicy().',
+      );
+    }
+
+    if (requestParameters["userPolicyRequest"] == null) {
+      throw new runtime.RequiredError(
+        "userPolicyRequest",
+        'Required parameter "userPolicyRequest" was null or undefined when calling setNodeUserPolicy().',
+      );
+    }
+
+    const queryParameters: any = {};
+
+    const headerParameters: runtime.HTTPHeaders = {};
+
+    headerParameters["Content-Type"] = "application/json";
+
+    if (requestParameters["idempotencyKey"] != null) {
+      headerParameters["Idempotency-Key"] = String(
+        requestParameters["idempotencyKey"],
+      );
+    }
+
+    if (this.configuration && this.configuration.accessToken) {
+      const token = this.configuration.accessToken;
+      const tokenString = await token("bearerAuth", []);
+
+      if (tokenString) {
+        headerParameters["Authorization"] = `Bearer ${tokenString}`;
+      }
+    }
+
+    let urlPath = `/nodes/{node_id}/users/{username}/policy`;
+    urlPath = urlPath.replace(
+      "{node_id}",
+      encodeURIComponent(String(requestParameters["nodeId"])),
+    );
+    urlPath = urlPath.replace(
+      "{username}",
+      encodeURIComponent(String(requestParameters["username"])),
+    );
+
+    return {
+      path: urlPath,
+      method: "PUT",
+      headers: headerParameters,
+      query: queryParameters,
+      body: UserPolicyRequestToJSON(requestParameters["userPolicyRequest"]),
+    };
+  }
+
+  /**
+   * Set byte quota and exact UTC expiry for one node-scoped user
+   */
+  async setNodeUserPolicyRaw(
+    requestParameters: SetNodeUserPolicyRequest,
+    initOverrides?: RequestInit | runtime.InitOverrideFunction,
+  ): Promise<runtime.ApiResponse<UserPolicy>> {
+    const requestOptions =
+      await this.setNodeUserPolicyRequestOpts(requestParameters);
+    const response = await this.request(requestOptions, initOverrides);
+
+    return new runtime.JSONApiResponse(response, (jsonValue) =>
+      UserPolicyFromJSON(jsonValue),
+    );
+  }
+
+  /**
+   * Set byte quota and exact UTC expiry for one node-scoped user
+   */
+  async setNodeUserPolicy(
+    requestParameters: SetNodeUserPolicyRequest,
+    initOverrides?: RequestInit | runtime.InitOverrideFunction,
+  ): Promise<UserPolicy> {
+    const response = await this.setNodeUserPolicyRaw(
       requestParameters,
       initOverrides,
     );

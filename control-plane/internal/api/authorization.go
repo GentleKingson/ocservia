@@ -112,6 +112,15 @@ func routeAction(r *http.Request) string {
 		return "service.reload"
 	case strings.HasSuffix(path, ":disable"), strings.HasSuffix(path, ":enable"), strings.HasSuffix(path, ":rotate-password"), strings.HasSuffix(path, "/users"):
 		return "user.manage"
+	case strings.Contains(path, "/users/") && strings.HasSuffix(path, "/policy"):
+		if r.Method == http.MethodPut {
+			return "user.manage"
+		}
+		return "node.read"
+	case path == "/api/v1/user-batches":
+		return "user.manage"
+	case strings.HasPrefix(path, "/api/v1/user-batches/"):
+		return "operation.read"
 	case strings.Contains(path, "/groups/"):
 		return "group.manage"
 	case strings.HasSuffix(path, "/approval"):
