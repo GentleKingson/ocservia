@@ -2630,8 +2630,8 @@ func (x *ConfigPlanResult) GetCurrentHash() []byte {
 
 type ConfigApply struct {
 	state               protoimpl.MessageState `protogen:"open.v1"`
-	Candidate           []byte                 `protobuf:"bytes,1,opt,name=candidate,proto3" json:"candidate,omitempty"`
-	CandidateHash       []byte                 `protobuf:"bytes,2,opt,name=candidate_hash,json=candidateHash,proto3" json:"candidate_hash,omitempty"`
+	CandidateHash       []byte                 `protobuf:"bytes,1,opt,name=candidate_hash,json=candidateHash,proto3" json:"candidate_hash,omitempty"`
+	Candidate           []byte                 `protobuf:"bytes,2,opt,name=candidate,proto3" json:"candidate,omitempty"`
 	ExpectedCurrentHash []byte                 `protobuf:"bytes,3,opt,name=expected_current_hash,json=expectedCurrentHash,proto3" json:"expected_current_hash,omitempty"`
 	DesiredRevision     uint64                 `protobuf:"varint,4,opt,name=desired_revision,json=desiredRevision,proto3" json:"desired_revision,omitempty"`
 	unknownFields       protoimpl.UnknownFields
@@ -2668,16 +2668,16 @@ func (*ConfigApply) Descriptor() ([]byte, []int) {
 	return file_ocserv_platform_agent_v1_agent_proto_rawDescGZIP(), []int{26}
 }
 
-func (x *ConfigApply) GetCandidate() []byte {
+func (x *ConfigApply) GetCandidateHash() []byte {
 	if x != nil {
-		return x.Candidate
+		return x.CandidateHash
 	}
 	return nil
 }
 
-func (x *ConfigApply) GetCandidateHash() []byte {
+func (x *ConfigApply) GetCandidate() []byte {
 	if x != nil {
-		return x.CandidateHash
+		return x.Candidate
 	}
 	return nil
 }
@@ -3213,9 +3213,9 @@ const file_ocserv_platform_agent_v1_agent_proto_rawDesc = "" +
 	"\x11current_unchanged\x18\x04 \x01(\bR\x10currentUnchanged\x12'\n" +
 	"\x0fstaging_cleaned\x18\x05 \x01(\bR\x0estagingCleaned\x12!\n" +
 	"\fcurrent_hash\x18\x06 \x01(\fR\vcurrentHash\"\xb1\x01\n" +
-	"\vConfigApply\x12\x1c\n" +
-	"\tcandidate\x18\x01 \x01(\fR\tcandidate\x12%\n" +
-	"\x0ecandidate_hash\x18\x02 \x01(\fR\rcandidateHash\x122\n" +
+	"\vConfigApply\x12%\n" +
+	"\x0ecandidate_hash\x18\x01 \x01(\fR\rcandidateHash\x12\x1c\n" +
+	"\tcandidate\x18\x02 \x01(\fR\tcandidate\x122\n" +
 	"\x15expected_current_hash\x18\x03 \x01(\fR\x13expectedCurrentHash\x12)\n" +
 	"\x10desired_revision\x18\x04 \x01(\x04R\x0fdesiredRevision\"\xb6\x02\n" +
 	"\x11ConfigApplyResult\x12%\n" +

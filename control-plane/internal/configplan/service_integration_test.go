@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -123,7 +124,7 @@ func TestConfigPlanCreateReplayStaleAndTypedEnvelopeIntegration(t *testing.T) {
 		t.Fatalf("validated plan=%+v err=%v", validated, err)
 	}
 	requesterID, approverID, approvalID := uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7())
-	if _, err := pool.Exec(ctx, `INSERT INTO identities(id,issuer,subject,created_at,updated_at)VALUES($1,'test','i16-'||$1::text,now(),now()),($2,'test','i16-'||$2::text,now(),now())`, requesterID, approverID); err != nil {
+	if _, err := pool.Exec(ctx, `INSERT INTO identities(id,issuer,subject,created_at,updated_at)VALUES($1::uuid,'test','i16-'||$1::text,now(),now()),($2::uuid,'test','i16-'||$2::text,now(),now())`, requesterID, approverID); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := pool.Exec(ctx, `INSERT INTO approval_requests(id,workspace_id,requester_id,action,resource_type,resource_id,reason,status,approver_id,approval_reason,expires_at,approved_at,created_at,request_hash,request_summary)
@@ -211,7 +212,11 @@ func cleanupConfigPlanIntegration(ctx context.Context, pool *pgxpool.Pool, works
 		`DELETE FROM workspaces WHERE id=$1`,
 	}
 	for _, statement := range statements {
-		if _, err := pool.Exec(ctx, statement, workspaceID); err != nil {
+		args := []any(nil)
+		if strings.Contains(statement, "$1") {
+			args = append(args, workspaceID)
+		}
+		if _, err := pool.Exec(ctx, statement, args...); err != nil {
 			return err
 		}
 	}

@@ -290,8 +290,8 @@ message ConfigPlanResult {
 }
 
 message ConfigApply {
-  bytes candidate = 1;
-  bytes candidate_hash = 2;
+  bytes candidate_hash = 1;
+  bytes candidate = 2;
   bytes expected_current_hash = 3;
   uint64 desired_revision = 4;
 }
