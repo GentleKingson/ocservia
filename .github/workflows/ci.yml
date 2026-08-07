@@ -149,6 +149,13 @@ jobs:
           mkdir -p "${ARTIFACT_DIR}"
           set -o pipefail
           scripts/i16-config-apply.sh 2>&1 | tee "${ARTIFACT_DIR}/i16-config-apply.log"
+      - name: I17 certificate and secret lifecycle boundary
+        env:
+          ARTIFACT_DIR: ${{ runner.temp }}/artifacts/go/i17-certificate-secret
+        run: |
+          mkdir -p "${ARTIFACT_DIR}"
+          set -o pipefail
+          scripts/i17-certificate-secret.sh 2>&1 | tee "${ARTIFACT_DIR}/i17-certificate-secret.log"
       - name: Go, PostgreSQL, UDS, and Rust stub integration
         env:
           ARTIFACT_DIR: ${{ runner.temp }}/artifacts/go/local-slice

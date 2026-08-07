@@ -1,6 +1,11 @@
 package localslice
 
 import (
+	"crypto/rand"
+	"crypto/rsa"
+	"crypto/sha256"
+	"crypto/x509"
+	"crypto/x509/pkix"
 	"encoding/json"
 	"strings"
 	"testing"
@@ -9,6 +14,31 @@ import (
 	transportv1 "github.com/GentleKingson/ocservia/control-plane/gen/proto/ocserv/platform/transport/v1"
 	"google.golang.org/protobuf/proto"
 )
+
+func TestCertificateCSRResultRejectsSubjectSubstitution(t *testing.T) {
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatal(err)
+	}
+	csrDER, err := x509.CreateCertificateRequest(rand.Reader, &x509.CertificateRequest{Subject: pkix.Name{CommonName: "attacker.example.test"}, DNSNames: []string{"attacker.example.test"}}, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	publicDER, err := x509.MarshalPKIXPublicKey(&key.PublicKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	digest := sha256.Sum256(publicDER)
+	id := []byte("0123456789abcdef")
+	envelope := &agentv1.CommandEnvelope{Payload: &agentv1.CommandEnvelope_CertificateCsr{CertificateCsr: &agentv1.CertificateCsr{CertificateId: id, CommonName: "node.example.test", DnsNames: []string{"node.example.test"}, KeyBits: 2048}}}
+	encoded, err := proto.Marshal(&agentv1.CertificateCsrResult{CertificateId: id, CsrDer: csrDER, PublicKeySha256: digest[:]})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := normalizeCertificateCSRResult(envelope, "succeeded", encoded); err == nil {
+		t.Fatal("substituted CSR subject was accepted")
+	}
+}
 
 func TestOperationJSONOmitsAbsentIdentifiers(t *testing.T) {
 	payload, err := json.Marshal(Operation{ID: "019cf000-0000-7000-8000-000000000001", State: "draft"})

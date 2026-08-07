@@ -225,6 +225,9 @@ message CommandEnvelope {
     UserPasswordRotate user_password_rotate = 114;
     GroupApply group_apply = 115;
     UserEnable user_enable = 116;
+    CertificateCsr certificate_csr = 117;
+    CertificateP12 certificate_p12 = 118;
+    CertificateRevoke certificate_revoke = 119;
   }
   CommandDeliveryMode delivery_mode = 109;
   SemanticPayloadHashVersion semantic_payload_hash_version = 110;
@@ -305,6 +308,58 @@ message ConfigApplyResult {
   bool rolled_back = 6;
   bool failed_critical = 7;
   string failure_code = 8;
+}
+
+message CertificateCsr {
+  bytes certificate_id = 1;
+  string common_name = 2;
+  repeated string dns_names = 3;
+  uint32 key_bits = 4;
+}
+
+message CertificateCsrResult {
+  bytes certificate_id = 1;
+  bytes csr_der = 2;
+  bytes public_key_sha256 = 3;
+}
+
+message CertificateP12 {
+  bytes certificate_id = 1;
+  bytes certificate_chain_pem = 2;
+  bytes sealed_password = 3;
+  string secret_key_id = 4;
+  bytes artifact_id = 5;
+}
+
+message CertificateArtifactResult {
+  bytes certificate_id = 1;
+  bytes artifact_id = 2;
+  bytes artifact_sha256 = 3;
+  uint64 artifact_size = 4;
+}
+
+message CertificateRevoke {
+  bytes certificate_id = 1;
+  string reason = 2;
+}
+
+message CertificateRevokeResult {
+  bytes certificate_id = 1;
+  bool key_removed = 2;
+}
+
+message ArtifactFetchRequest {
+  bytes artifact_id = 1;
+  string purpose = 2;
+  uint64 max_bytes = 3;
+}
+
+message ArtifactChunk {
+  bytes artifact_id = 1;
+  uint64 offset = 2;
+  bytes data = 3;
+  bool eof = 4;
+  bytes sha256 = 5;
 }
 
 message ServiceReload {}

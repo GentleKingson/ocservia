@@ -3,10 +3,14 @@ package localslice
 import (
 	"bytes"
 	"context"
+	"crypto/rsa"
 	"crypto/sha256"
+	"crypto/x509"
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"slices"
+	"sort"
 	"time"
 
 	agentv1 "github.com/GentleKingson/ocservia/control-plane/gen/proto/ocserv/platform/agent/v1"
@@ -573,6 +577,18 @@ func ingestAgentCommandResult(ctx context.Context, tx pgx.Tx, eventID, nodeID uu
 		resultBytes = []byte{}
 	}
 	effectiveState, applyResult, normalizationErr := normalizeConfigApplyResult(&envelope, state, resultBytes)
+	csrResult, csrErr := normalizeCertificateCSRResult(&envelope, state, resultBytes)
+	revokeResult, revokeErr := normalizeCertificateRevokeResult(&envelope, state, resultBytes)
+	artifactResult, artifactErr := normalizeCertificateArtifactResult(&envelope, state, resultBytes)
+	if normalizationErr == nil && csrErr != nil {
+		normalizationErr = csrErr
+	}
+	if normalizationErr == nil && revokeErr != nil {
+		normalizationErr = revokeErr
+	}
+	if normalizationErr == nil && artifactErr != nil {
+		normalizationErr = artifactErr
+	}
 	recoveryReason := result.GetErrorCode()
 	if normalizationErr != nil {
 		effectiveState = "unknown"
@@ -659,6 +675,57 @@ func ingestAgentCommandResult(ctx context.Context, tx pgx.Tx, eventID, nodeID uu
 			}
 		}
 	}
+	if csr := envelope.GetCertificateCsr(); csr != nil {
+		certificateID, parseErr := uuid.FromBytes(csr.GetCertificateId())
+		if parseErr != nil {
+			return errors.New("certificate command ID is invalid")
+		}
+		certificateState := "failed"
+		if effectiveState == "unknown" {
+			certificateState = "unknown"
+		} else if effectiveState == "succeeded" && csrResult != nil {
+			certificateState = "csr_ready"
+		}
+		var csrDER, publicHash any
+		if csrResult != nil {
+			csrDER, publicHash = csrResult.GetCsrDer(), csrResult.GetPublicKeySha256()
+		}
+		if _, err := tx.Exec(ctx, `UPDATE certificates SET state=$2,csr_der=COALESCE($3,csr_der),public_key_sha256=COALESCE($4,public_key_sha256),updated_at=$5 WHERE id=$1 AND operation_id=$6`, certificateID, certificateState, csrDER, publicHash, observedAt, operationID); err != nil {
+			return fmt.Errorf("update certificate CSR outcome: %w", err)
+		}
+	}
+	if revoke := envelope.GetCertificateRevoke(); revoke != nil {
+		certificateID, parseErr := uuid.FromBytes(revoke.GetCertificateId())
+		if parseErr != nil {
+			return errors.New("certificate revoke ID is invalid")
+		}
+		certificateState := "revoking"
+		var revokedAt any
+		if effectiveState == "unknown" {
+			certificateState = "unknown"
+		} else if effectiveState == "succeeded" && revokeResult != nil {
+			certificateState, revokedAt = "revoked", observedAt
+		}
+		if _, err := tx.Exec(ctx, `UPDATE certificates SET state=$2,revoked_at=COALESCE($3,revoked_at),revocation_reason=CASE WHEN $2='revoked' THEN $4 ELSE revocation_reason END,updated_at=$5 WHERE id=$1 AND node_id=$6`, certificateID, certificateState, revokedAt, revoke.GetReason(), observedAt, nodeID); err != nil {
+			return fmt.Errorf("update certificate revocation outcome: %w", err)
+		}
+	}
+	if artifact := envelope.GetCertificateP12(); artifact != nil {
+		artifactID, parseErr := uuid.FromBytes(artifact.GetArtifactId())
+		if parseErr != nil {
+			return errors.New("certificate artifact ID is invalid")
+		}
+		artifactState := "failed"
+		var digest, size any
+		if effectiveState == "unknown" {
+			artifactState = "pending"
+		} else if effectiveState == "succeeded" && artifactResult != nil {
+			artifactState, digest, size = "ready", artifactResult.GetArtifactSha256(), int64(artifactResult.GetArtifactSize())
+		}
+		if _, err := tx.Exec(ctx, `UPDATE artifact_operations SET state=$2,content_sha256=COALESCE($3,content_sha256),content_size=COALESCE($4,content_size),updated_at=$5 WHERE id=$1 AND operation_id=$6`, artifactID, artifactState, digest, size, observedAt, operationID); err != nil {
+			return fmt.Errorf("update certificate artifact outcome: %w", err)
+		}
+	}
 	if _, err := tx.Exec(ctx, `INSERT INTO operation_events(id,operation_id,state,occurred_at) VALUES($1,$2,$3,$4)`, operationEventID, operationID, operationState, observedAt); err != nil {
 		return fmt.Errorf("append Agent operation result event: %w", err)
 	}
@@ -678,6 +745,69 @@ func ingestAgentCommandResult(ctx context.Context, tx pgx.Tx, eventID, nodeID uu
 		}
 	}
 	return nil
+}
+
+func normalizeCertificateCSRResult(envelope *agentv1.CommandEnvelope, state string, resultBytes []byte) (*agentv1.CertificateCsrResult, error) {
+	request := envelope.GetCertificateCsr()
+	if request == nil || state != "succeeded" {
+		return nil, nil
+	}
+	var result agentv1.CertificateCsrResult
+	if len(resultBytes) == 0 || proto.Unmarshal(resultBytes, &result) != nil {
+		return nil, errors.New("certificate CSR result is malformed")
+	}
+	if !bytes.Equal(result.GetCertificateId(), request.GetCertificateId()) || len(result.GetCsrDer()) < 64 || len(result.GetCsrDer()) > 64*1024 || len(result.GetPublicKeySha256()) != sha256.Size {
+		return nil, errors.New("certificate CSR result is inconsistent")
+	}
+	csr, err := x509.ParseCertificateRequest(result.GetCsrDer())
+	if err != nil || csr.CheckSignature() != nil {
+		return nil, errors.New("certificate CSR signature is invalid")
+	}
+	key, ok := csr.PublicKey.(*rsa.PublicKey)
+	requestedNames, actualNames := slices.Clone(request.GetDnsNames()), slices.Clone(csr.DNSNames)
+	sort.Strings(requestedNames)
+	sort.Strings(actualNames)
+	if !ok || uint32(key.N.BitLen()) != request.GetKeyBits() || csr.Subject.CommonName != request.GetCommonName() || len(csr.Subject.Names) != 1 || !csr.Subject.Names[0].Type.Equal([]int{2, 5, 4, 3}) || !slices.Equal(requestedNames, actualNames) || len(csr.EmailAddresses) != 0 || len(csr.IPAddresses) != 0 || len(csr.URIs) != 0 {
+		return nil, errors.New("certificate CSR identity does not match the requested subject")
+	}
+	for _, extension := range csr.Extensions {
+		if !extension.Id.Equal([]int{2, 5, 29, 17}) {
+			return nil, errors.New("certificate CSR contains an unsupported extension")
+		}
+	}
+	publicKey, err := x509.MarshalPKIXPublicKey(csr.PublicKey)
+	if err != nil {
+		return nil, errors.New("certificate CSR public key is invalid")
+	}
+	digest := sha256.Sum256(publicKey)
+	if !bytes.Equal(result.GetPublicKeySha256(), digest[:]) {
+		return nil, errors.New("certificate CSR public key digest mismatch")
+	}
+	return &result, nil
+}
+
+func normalizeCertificateRevokeResult(envelope *agentv1.CommandEnvelope, state string, resultBytes []byte) (*agentv1.CertificateRevokeResult, error) {
+	request := envelope.GetCertificateRevoke()
+	if request == nil || state != "succeeded" {
+		return nil, nil
+	}
+	var result agentv1.CertificateRevokeResult
+	if len(resultBytes) == 0 || proto.Unmarshal(resultBytes, &result) != nil || !bytes.Equal(result.GetCertificateId(), request.GetCertificateId()) || !result.GetKeyRemoved() {
+		return nil, errors.New("certificate revoke result is inconsistent")
+	}
+	return &result, nil
+}
+
+func normalizeCertificateArtifactResult(envelope *agentv1.CommandEnvelope, state string, resultBytes []byte) (*agentv1.CertificateArtifactResult, error) {
+	request := envelope.GetCertificateP12()
+	if request == nil || state != "succeeded" {
+		return nil, nil
+	}
+	var result agentv1.CertificateArtifactResult
+	if len(resultBytes) == 0 || proto.Unmarshal(resultBytes, &result) != nil || !bytes.Equal(result.GetCertificateId(), request.GetCertificateId()) || !bytes.Equal(result.GetArtifactId(), request.GetArtifactId()) || len(result.GetArtifactSha256()) != sha256.Size || result.GetArtifactSize() == 0 || result.GetArtifactSize() > 64*1024*1024 {
+		return nil, errors.New("certificate artifact result is inconsistent")
+	}
+	return &result, nil
 }
 
 func normalizeConfigApplyResult(envelope *agentv1.CommandEnvelope, state string, resultBytes []byte) (string, *agentv1.ConfigApplyResult, error) {
@@ -732,6 +862,12 @@ func commandAuditAction(envelope *agentv1.CommandEnvelope) string {
 		return "config.plan"
 	case *agentv1.CommandEnvelope_ConfigApply:
 		return "config.apply"
+	case *agentv1.CommandEnvelope_CertificateCsr:
+		return "certificate.csr.generate"
+	case *agentv1.CommandEnvelope_CertificateP12:
+		return "certificate.p12.create"
+	case *agentv1.CommandEnvelope_CertificateRevoke:
+		return "certificate.revoke"
 	default:
 		return "synthetic.command"
 	}

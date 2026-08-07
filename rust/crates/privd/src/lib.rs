@@ -180,6 +180,9 @@ fn validate_request(request: &PrivdRequest) -> Result<Duration, PrivdError> {
                 | privd_request::Operation::UserEnable(_)
                 | privd_request::Operation::UserPasswordRotate(_)
                 | privd_request::Operation::GroupApply(_)
+                | privd_request::Operation::CertificateCsr(_)
+                | privd_request::Operation::CertificateRevoke(_)
+                | privd_request::Operation::CertificateP12(_)
         )
     );
     if desired_operation {
@@ -316,6 +319,38 @@ async fn execute(
                 )
                 .await
                 .map(privd_response::Result::ConfigApply),
+        ),
+        privd_request::Operation::CertificateCsr(request) => (
+            "certificate_csr",
+            adapter
+                .certificate_csr(
+                    &request.certificate_id,
+                    &request.common_name,
+                    &request.dns_names,
+                    request.key_bits,
+                )
+                .await
+                .map(privd_response::Result::CertificateCsr),
+        ),
+        privd_request::Operation::CertificateRevoke(request) => (
+            "certificate_revoke",
+            adapter
+                .certificate_revoke(&request.certificate_id)
+                .await
+                .map(privd_response::Result::CertificateRevoke),
+        ),
+        privd_request::Operation::CertificateP12(request) => (
+            "certificate_p12",
+            adapter
+                .certificate_p12(
+                    &request.certificate_id,
+                    &request.artifact_id,
+                    &request.certificate_chain_pem,
+                    &request.sealed_password,
+                    &request.secret_key_id,
+                )
+                .await
+                .map(privd_response::Result::CertificateP12),
         ),
         privd_request::Operation::SessionDisconnect(request) => (
             "session_disconnect",

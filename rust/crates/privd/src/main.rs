@@ -1,6 +1,7 @@
 use std::env;
 use std::io;
 use std::path::PathBuf;
+use std::time::Duration;
 
 use ocservia_ocserv_adapter::{Adapter, FixedResources, Limits};
 use ocservia_privd::{ServerConfig, bind_socket, remove_socket, serve};
@@ -13,9 +14,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     adapter.cleanup_stale_user_staging().await?;
     adapter.cleanup_stale_config_plans().await?;
     adapter.cleanup_stale_config_apply_staging().await?;
+    adapter.cleanup_stale_certificate_artifacts().await?;
     let listener = bind_socket(&config)?;
+    let cleanup_adapter = adapter.clone();
+    let cleanup_task = tokio::spawn(async move {
+        let mut interval = tokio::time::interval(Duration::from_mins(5));
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        interval.tick().await;
+        loop {
+            interval.tick().await;
+            if let Err(error) = cleanup_adapter.cleanup_stale_certificate_artifacts().await {
+                tracing::warn!(error = %error, "certificate artifact cleanup failed");
+            }
+        }
+    });
     tracing::info!(socket = %config.socket.display(), agent_uid = config.agent_uid, "privd serving on AF_UNIX");
     let result = serve(listener, config.clone(), adapter, shutdown()).await;
+    cleanup_task.abort();
     let cleanup = remove_socket(&config.socket);
     result?;
     cleanup?;

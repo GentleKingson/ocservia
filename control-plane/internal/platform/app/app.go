@@ -11,6 +11,7 @@ import (
 	"github.com/GentleKingson/ocservia/control-plane/internal/approvals"
 	"github.com/GentleKingson/ocservia/control-plane/internal/audit"
 	"github.com/GentleKingson/ocservia/control-plane/internal/auth"
+	"github.com/GentleKingson/ocservia/control-plane/internal/certificates"
 	"github.com/GentleKingson/ocservia/control-plane/internal/configplan"
 	"github.com/GentleKingson/ocservia/control-plane/internal/enrollment"
 	"github.com/GentleKingson/ocservia/control-plane/internal/localslice"
@@ -109,6 +110,23 @@ func Run(ctx context.Context, cfg config.Config, build BuildInfo, logger *slog.L
 	userStateService := userstate.New(pool)
 	userOperationsService := useroperations.NewWithConcurrency(pool, userStateService, cfg.UserOperationConcurrency)
 	auditManager := audit.NewManager(pool, cfg.AuditCheckpointKey)
+	var apiTransport *transportclient.Client
+	if cfg.ControllerEndpointID != "" {
+		apiTransport, err = transportclient.New(cfg.TransportSocket, cfg.TransportTimeout, cfg.TransportQueue)
+		if err != nil {
+			return fmt.Errorf("configure API transport: %w", err)
+		}
+	}
+	var certificateService *certificates.Service
+	if cfg.CertificateSignerURL != "" {
+		signer, signerErr := certificates.NewHTTPSigner(cfg.CertificateSignerURL, cfg.CertificateSignerToken, cfg.CertificateSignerTimeout)
+		if signerErr != nil {
+			return fmt.Errorf("configure external certificate signer: %w", signerErr)
+		}
+		certificateService = certificates.NewWithDependencies(pool, operationService, signer, signer, apiTransport)
+	} else {
+		certificateService = certificates.New(pool, operationService)
+	}
 	if cfg.RunsScheduler() {
 		go func() {
 			ticker := time.NewTicker(30 * time.Second)
@@ -130,6 +148,16 @@ func Run(ctx context.Context, cfg config.Config, build BuildInfo, logger *slog.L
 					maintenanceErr <- err
 					return
 				}
+				certificateCtx, certificateSpan := otel.Tracer("ocservia.certificates").Start(componentCtx, "certificates.maintenance.run")
+				if err := certificateService.Maintain(certificateCtx); err != nil {
+					certificateSpan.RecordError(err)
+					certificateSpan.SetStatus(codes.Error, "certificate maintenance failed")
+					certificateSpan.End()
+					logger.ErrorContext(componentCtx, "certificate maintenance failed", "alert_kind", "certificate.maintenance_failed", "error", err)
+					maintenanceErr <- err
+					return
+				}
+				certificateSpan.End()
 				if err := auditManager.CheckpointAll(componentCtx); err != nil {
 					maintenanceErr <- err
 					return
@@ -175,13 +203,10 @@ func Run(ctx context.Context, cfg config.Config, build BuildInfo, logger *slog.L
 	server.EnableUserState(userStateService)
 	server.EnableUserOperations(userOperationsService)
 	server.EnableConfigPlans(configplan.New(pool, operationService))
+	server.EnableCertificates(certificateService)
 	server.EnableTelemetry(telemetryService)
 	if cfg.ControllerEndpointID != "" {
-		transport, transportErr := transportclient.New(cfg.TransportSocket, cfg.TransportTimeout, cfg.TransportQueue)
-		if transportErr != nil {
-			return fmt.Errorf("configure enrollment transport: %w", transportErr)
-		}
-		server.EnableEnrollment(enrollment.New(pool, cfg.ControllerEndpointID, build.Version), transport)
+		server.EnableEnrollment(enrollment.New(pool, cfg.ControllerEndpointID, build.Version), apiTransport)
 	}
 	server.EnableLocalSlice(sliceService)
 	server.SetLocalSimulatorEnabled(cfg.LocalSimulator)

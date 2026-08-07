@@ -107,6 +107,9 @@ enum MessageKind {
     UserDisable,
     ConfigPlan,
     ConfigApply,
+    CertificateCsr,
+    CertificateP12,
+    CertificateRevoke,
     ServiceReload,
     SimulationProbe,
     SyntheticNoop,
@@ -123,6 +126,9 @@ impl MessageKind {
             Self::UserDisable => "UserDisable",
             Self::ConfigPlan => "ConfigPlan",
             Self::ConfigApply => "ConfigApply",
+            Self::CertificateCsr => "CertificateCsr",
+            Self::CertificateP12 => "CertificateP12",
+            Self::CertificateRevoke => "CertificateRevoke",
             Self::ServiceReload => "ServiceReload",
             Self::SimulationProbe => "SimulationProbe",
             Self::SyntheticNoop => "SyntheticNoop",
@@ -183,8 +189,9 @@ fn take_nested(bytes: &mut Bytes, message: &'static str) -> Result<Bytes, Strict
 fn field_kind(message: MessageKind, tag: u32) -> Option<FieldKind> {
     use FieldKind::{Nested, Scalar};
     use MessageKind::{
-        CommandEnvelope, ConfigApply, ConfigPlan, ServiceReload, SessionDisconnect,
-        SimulationProbe, SyntheticEcho, SyntheticNoop, Timestamp, UserCreate, UserDisable,
+        CertificateCsr, CertificateP12, CertificateRevoke, CommandEnvelope, ConfigApply,
+        ConfigPlan, ServiceReload, SessionDisconnect, SimulationProbe, SyntheticEcho,
+        SyntheticNoop, Timestamp, UserCreate, UserDisable,
     };
     use WireType::{LengthDelimited, Varint};
 
@@ -202,6 +209,9 @@ fn field_kind(message: MessageKind, tag: u32) -> Option<FieldKind> {
             106 => Some(Nested(SimulationProbe)),
             107 => Some(Nested(SyntheticNoop)),
             108 => Some(Nested(SyntheticEcho)),
+            117 => Some(Nested(CertificateCsr)),
+            118 => Some(Nested(CertificateP12)),
+            119 => Some(Nested(CertificateRevoke)),
             _ => None,
         },
         Timestamp => match tag {
@@ -213,6 +223,19 @@ fn field_kind(message: MessageKind, tag: u32) -> Option<FieldKind> {
             _ => None,
         },
         ConfigPlan => match tag {
+            1 | 2 => Some(Scalar(LengthDelimited)),
+            _ => None,
+        },
+        CertificateCsr => match tag {
+            1..=3 => Some(Scalar(LengthDelimited)),
+            4 => Some(Scalar(Varint)),
+            _ => None,
+        },
+        CertificateP12 => match tag {
+            1..=5 => Some(Scalar(LengthDelimited)),
+            _ => None,
+        },
+        CertificateRevoke => match tag {
             1 | 2 => Some(Scalar(LengthDelimited)),
             _ => None,
         },

@@ -1,10 +1,13 @@
 package transportclient
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"errors"
 	"fmt"
+	"io"
 	"math/big"
 	"net"
 	"os"
@@ -12,6 +15,7 @@ import (
 	"time"
 
 	transportv1 "github.com/GentleKingson/ocservia/control-plane/gen/proto/ocserv/platform/transport/v1"
+	"github.com/google/uuid"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/trace"
 	"google.golang.org/grpc"
@@ -75,6 +79,56 @@ func (c *Client) SendCommand(ctx context.Context, nodeID, envelope []byte) error
 		return errors.New("transport rejected simulator command")
 	}
 	return nil
+}
+
+func (c *Client) FetchArtifact(ctx context.Context, nodeID, artifactID uuid.UUID, maxBytes int64) (io.ReadCloser, error) {
+	if nodeID == uuid.Nil || artifactID == uuid.Nil || maxBytes < 1 || maxBytes > 64<<20 {
+		return nil, errors.New("artifact request is invalid")
+	}
+	connection, err := c.dial()
+	if err != nil {
+		return nil, err
+	}
+	stream, err := transportv1.NewTransportServiceClient(connection).FetchArtifact(ctx, &transportv1.FetchArtifactRequest{NodeId: nodeID[:], ArtifactId: artifactID[:], Purpose: "certificate_p12", MaxBytes: uint64(maxBytes)})
+	if err != nil {
+		connection.Close()
+		return nil, fmt.Errorf("fetch artifact: %w", err)
+	}
+	reader, writer := io.Pipe()
+	go func() {
+		defer connection.Close()
+		hash := sha256.New()
+		var offset int64
+		for {
+			chunk, receiveErr := stream.Recv()
+			if receiveErr != nil {
+				_ = writer.CloseWithError(receiveErr)
+				return
+			}
+			if !bytes.Equal(chunk.GetArtifactId(), artifactID[:]) || chunk.GetOffset() != uint64(offset) || len(chunk.GetData()) > 256<<10 || offset+int64(len(chunk.GetData())) > maxBytes {
+				_ = writer.CloseWithError(errors.New("artifact stream is inconsistent"))
+				return
+			}
+			if _, writeErr := hash.Write(chunk.GetData()); writeErr != nil {
+				_ = writer.CloseWithError(writeErr)
+				return
+			}
+			if _, writeErr := writer.Write(chunk.GetData()); writeErr != nil {
+				_ = writer.CloseWithError(writeErr)
+				return
+			}
+			offset += int64(len(chunk.GetData()))
+			if chunk.GetEof() {
+				if offset == 0 || len(chunk.GetSha256()) != sha256.Size || !bytes.Equal(hash.Sum(nil), chunk.GetSha256()) {
+					_ = writer.CloseWithError(errors.New("artifact digest mismatch"))
+					return
+				}
+				_ = writer.Close()
+				return
+			}
+		}
+	}()
+	return reader, nil
 }
 
 func (c *Client) RunWatch(ctx context.Context, cursors CursorStore, handler EventHandler) error {

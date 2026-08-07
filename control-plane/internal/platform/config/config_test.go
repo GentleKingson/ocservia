@@ -135,3 +135,32 @@ func TestUserOperationConcurrency(t *testing.T) {
 		t.Fatal("accepted user operation concurrency above the batch bound")
 	}
 }
+
+func TestCertificateSignerRequiresHTTPSAndCompleteCredentials(t *testing.T) {
+	tests := []struct {
+		name, endpoint, token string
+		ok                    bool
+	}{
+		{name: "disabled", ok: true},
+		{name: "https", endpoint: "https://pki.example.test/v1/sign", token: "fixture-token", ok: true},
+		{name: "http", endpoint: "http://pki.example.test/v1/sign", token: "fixture-token"},
+		{name: "userinfo", endpoint: "https://user@pki.example.test/v1/sign", token: "fixture-token"},
+		{name: "missing token", endpoint: "https://pki.example.test/v1/sign"},
+		{name: "missing endpoint", token: "fixture-token"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			values := map[string]string{"OCSERV_DATABASE_URL": "postgres://db/test"}
+			if test.endpoint != "" {
+				values["OCSERV_CERTIFICATE_SIGNER_URL"] = test.endpoint
+			}
+			if test.token != "" {
+				values["OCSERV_CERTIFICATE_SIGNER_TOKEN"] = test.token
+			}
+			_, err := Load(nil, func(key string) (string, bool) { value, ok := values[key]; return value, ok })
+			if (err == nil) != test.ok {
+				t.Fatalf("Load() error=%v want success=%v", err, test.ok)
+			}
+		})
+	}
+}

@@ -20,6 +20,13 @@ import {
   ConfigPlanApprovalSummaryToJSON,
   ConfigPlanApprovalSummaryToJSONTyped,
 } from "./ConfigPlanApprovalSummary";
+import type { CertificateApprovalSummary } from "./CertificateApprovalSummary";
+import {
+  CertificateApprovalSummaryFromJSON,
+  CertificateApprovalSummaryFromJSONTyped,
+  CertificateApprovalSummaryToJSON,
+  CertificateApprovalSummaryToJSONTyped,
+} from "./CertificateApprovalSummary";
 import type { UserBatchItemRequest } from "./UserBatchItemRequest";
 import {
   UserBatchItemRequestFromJSON,
@@ -106,6 +113,12 @@ export interface Approval {
    * @memberof Approval
    */
   configPlanSummary?: ConfigPlanApprovalSummary;
+  /**
+   *
+   * @type {CertificateApprovalSummary}
+   * @memberof Approval
+   */
+  certificateSummary?: CertificateApprovalSummary;
   /**
    * RFC 3339 timestamp normalized to UTC.
    * @type {Date}
@@ -219,6 +232,10 @@ export function ApprovalFromJSONTyped(
       json["config_plan_summary"] == null
         ? undefined
         : ConfigPlanApprovalSummaryFromJSON(json["config_plan_summary"]),
+    certificateSummary:
+      json["certificate_summary"] == null
+        ? undefined
+        : CertificateApprovalSummaryFromJSON(json["certificate_summary"]),
     expiresAt: new Date(json["expires_at"]),
     createdAt: new Date(json["created_at"]),
   };
@@ -255,6 +272,9 @@ export function ApprovalToJSONTyped(
           ),
     config_plan_summary: ConfigPlanApprovalSummaryToJSON(
       value["configPlanSummary"],
+    ),
+    certificate_summary: CertificateApprovalSummaryToJSON(
+      value["certificateSummary"],
     ),
     expires_at: value["expiresAt"].toISOString(),
     created_at: value["createdAt"].toISOString(),

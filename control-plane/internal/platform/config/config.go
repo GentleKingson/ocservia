@@ -52,6 +52,9 @@ type Config struct {
 	TransportQueue           int
 	UserOperationConcurrency int
 	LocalSimulator           bool
+	CertificateSignerURL     string
+	CertificateSignerToken   string
+	CertificateSignerTimeout time.Duration
 }
 
 type LookupEnv func(string) (string, bool)
@@ -62,7 +65,7 @@ func Load(args []string, lookup LookupEnv) (Config, error) {
 		BodyLimit: 1 << 20, RequestTimeout: 15 * time.Second, ShutdownTimeout: 10 * time.Second,
 		LogLevelName: "info", TransportSocket: "/run/ocserv-platform/transportd.sock",
 		TrustSocket:      "/run/ocserv-trust/control-plane.sock",
-		TransportTimeout: 3 * time.Second, TransportQueue: 256, UserOperationConcurrency: 50, SessionTTL: 8 * time.Hour,
+		TransportTimeout: 3 * time.Second, TransportQueue: 256, UserOperationConcurrency: 50, SessionTTL: 8 * time.Hour, CertificateSignerTimeout: 10 * time.Second,
 	}
 	setString(lookup, "OCSERV_ENVIRONMENT", &cfg.Environment)
 	setString(lookup, "OCSERV_HTTP_ADDRESS", &cfg.HTTPAddress)
@@ -78,6 +81,8 @@ func Load(args []string, lookup LookupEnv) (Config, error) {
 	setString(lookup, "OCSERV_OIDC_CLIENT_ID", &cfg.OIDCClientID)
 	setString(lookup, "OCSERV_OIDC_CLIENT_SECRET", &cfg.OIDCClientSecret)
 	setString(lookup, "OCSERV_OIDC_REDIRECT_URL", &cfg.OIDCRedirectURL)
+	setString(lookup, "OCSERV_CERTIFICATE_SIGNER_URL", &cfg.CertificateSignerURL)
+	setString(lookup, "OCSERV_CERTIFICATE_SIGNER_TOKEN", &cfg.CertificateSignerToken)
 	if err := setHex(lookup, "OCSERV_SESSION_KEY", &cfg.SessionKey); err != nil {
 		return Config{}, err
 	}
@@ -100,6 +105,9 @@ func Load(args []string, lookup LookupEnv) (Config, error) {
 		return Config{}, err
 	}
 	if err := setDuration(lookup, "OCSERV_TRANSPORT_TIMEOUT", &cfg.TransportTimeout); err != nil {
+		return Config{}, err
+	}
+	if err := setDuration(lookup, "OCSERV_CERTIFICATE_SIGNER_TIMEOUT", &cfg.CertificateSignerTimeout); err != nil {
 		return Config{}, err
 	}
 	if err := setInt(lookup, "OCSERV_TRANSPORT_QUEUE_CAPACITY", &cfg.TransportQueue); err != nil {
@@ -212,6 +220,13 @@ func (c Config) Validate() error {
 	}
 	if c.UserOperationConcurrency < 1 || c.UserOperationConcurrency > 500 {
 		return errors.New("user operation concurrency must be between 1 and 500")
+	}
+	signerConfigured := c.CertificateSignerURL != "" || c.CertificateSignerToken != ""
+	if signerConfigured {
+		signerURL, signerErr := url.Parse(c.CertificateSignerURL)
+		if signerErr != nil || signerURL.Scheme != "https" || signerURL.Host == "" || signerURL.User != nil || signerURL.RawQuery != "" || signerURL.Fragment != "" || c.CertificateSignerToken == "" || c.CertificateSignerTimeout < time.Second || c.CertificateSignerTimeout > 30*time.Second {
+			return errors.New("certificate signer requires an HTTPS URL, token, and timeout from 1s to 30s")
+		}
 	}
 	if !strings.HasPrefix(c.TrustSocket, "/") {
 		return errors.New("trust UDS path is invalid")

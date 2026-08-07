@@ -833,6 +833,15 @@ pub fn semantic_payload_hash(envelope: &CommandEnvelope) -> Result<[u8; 32], Com
         Some(command_envelope::Payload::ConfigApply(payload)) => {
             ("ocserv.config.apply", payload.encode_to_vec())
         }
+        Some(command_envelope::Payload::CertificateCsr(payload)) => {
+            ("ocserv.certificate.issue", payload.encode_to_vec())
+        }
+        Some(command_envelope::Payload::CertificateP12(payload)) => {
+            ("ocserv.certificate.issue", payload.encode_to_vec())
+        }
+        Some(command_envelope::Payload::CertificateRevoke(payload)) => {
+            ("ocserv.certificate.revoke", payload.encode_to_vec())
+        }
         Some(command_envelope::Payload::UserCreate(payload)) => {
             ("ocserv.users.write", payload.encode_to_vec())
         }
@@ -873,6 +882,7 @@ const SEMANTIC_HASH_V1_DOMAIN_SEPARATOR: &[u8] = b"ocservia.command.semantic-has
 /// # Errors
 ///
 /// Rejects unsupported payload types.
+#[allow(clippy::too_many_lines)]
 pub fn semantic_payload_hash_v1(envelope: &CommandEnvelope) -> Result<[u8; 32], CommandError> {
     let (payload_kind, canonical_payload) = match envelope.payload.as_ref() {
         Some(command_envelope::Payload::SyntheticNoop(_)) => (107_u32, Vec::new()),
@@ -910,6 +920,68 @@ pub fn semantic_payload_hash_v1(envelope: &CommandEnvelope) -> Result<[u8; 32], 
             out.extend_from_slice(&payload.expected_current_hash);
             out.extend_from_slice(&payload.desired_revision.to_be_bytes());
             (104_u32, out)
+        }
+        Some(command_envelope::Payload::CertificateCsr(payload)) => {
+            if payload.certificate_id.len() != 16
+                || payload.common_name.is_empty()
+                || payload.dns_names.len() > 32
+                || !matches!(payload.key_bits, 2048 | 3072 | 4096)
+            {
+                return Err(CommandError::Rejected("certificate_csr_invalid"));
+            }
+            let values = std::iter::once(payload.common_name.as_str())
+                .chain(payload.dns_names.iter().map(String::as_str))
+                .collect::<Vec<_>>();
+            (
+                117_u32,
+                canonical_strings_and_bytes(
+                    &values,
+                    &payload.certificate_id,
+                    u64::from(payload.key_bits),
+                )?,
+            )
+        }
+        Some(command_envelope::Payload::CertificateP12(payload)) => {
+            if payload.certificate_id.len() != 16
+                || payload.artifact_id.len() != 16
+                || payload.certificate_chain_pem.len() < 64
+                || payload.certificate_chain_pem.len() > 256 * 1024
+                || payload.sealed_password.len() < 32
+                || payload.sealed_password.len() > 16 * 1024
+                || payload.secret_key_id.is_empty()
+            {
+                return Err(CommandError::Rejected("certificate_p12_invalid"));
+            }
+            let mut data = Vec::with_capacity(
+                payload.certificate_id.len()
+                    + payload.artifact_id.len()
+                    + payload.certificate_chain_pem.len()
+                    + payload.sealed_password.len(),
+            );
+            data.extend_from_slice(&payload.certificate_id);
+            data.extend_from_slice(&payload.artifact_id);
+            data.extend_from_slice(&payload.certificate_chain_pem);
+            data.extend_from_slice(&payload.sealed_password);
+            (
+                118_u32,
+                canonical_strings_and_bytes(&[payload.secret_key_id.as_str()], &data, 0)?,
+            )
+        }
+        Some(command_envelope::Payload::CertificateRevoke(payload)) => {
+            if payload.certificate_id.len() != 16
+                || payload.reason.is_empty()
+                || payload.reason.len() > 128
+            {
+                return Err(CommandError::Rejected("certificate_revoke_invalid"));
+            }
+            (
+                119_u32,
+                canonical_strings_and_bytes(
+                    &[payload.reason.as_str()],
+                    &payload.certificate_id,
+                    0,
+                )?,
+            )
         }
         Some(command_envelope::Payload::SessionTerminate(payload)) => (
             112_u32,
@@ -1123,6 +1195,40 @@ fn validate_payload(
             }
             ("ocserv.config.apply", Vec::new(), true)
         }
+        Some(command_envelope::Payload::CertificateCsr(payload)) => {
+            if payload.certificate_id.len() != 16
+                || payload.common_name.is_empty()
+                || payload.common_name.len() > 253
+                || payload.dns_names.len() > 32
+                || !matches!(payload.key_bits, 2048 | 3072 | 4096)
+            {
+                return Err(CommandError::Rejected("certificate_csr_invalid"));
+            }
+            ("ocserv.certificate.issue", Vec::new(), true)
+        }
+        Some(command_envelope::Payload::CertificateP12(payload)) => {
+            if payload.certificate_id.len() != 16
+                || payload.artifact_id.len() != 16
+                || payload.certificate_chain_pem.len() < 64
+                || payload.certificate_chain_pem.len() > 256 * 1024
+                || payload.sealed_password.len() < 32
+                || payload.sealed_password.len() > 16 * 1024
+                || payload.secret_key_id.is_empty()
+                || payload.secret_key_id.len() > 128
+            {
+                return Err(CommandError::Rejected("certificate_p12_invalid"));
+            }
+            ("ocserv.certificate.issue", Vec::new(), true)
+        }
+        Some(command_envelope::Payload::CertificateRevoke(payload)) => {
+            if payload.certificate_id.len() != 16
+                || payload.reason.is_empty()
+                || payload.reason.len() > 128
+            {
+                return Err(CommandError::Rejected("certificate_revoke_invalid"));
+            }
+            ("ocserv.certificate.revoke", Vec::new(), true)
+        }
         Some(command_envelope::Payload::UserCreate(payload)) => {
             validate_name(&payload.username)?;
             validate_sealed_secret(
@@ -1273,6 +1379,30 @@ fn canonical_secret_payload(
             .to_be_bytes(),
     );
     out.extend_from_slice(secret);
+    out.extend_from_slice(&revision.to_be_bytes());
+    Ok(out)
+}
+
+fn canonical_strings_and_bytes(
+    values: &[&str],
+    bytes: &[u8],
+    revision: u64,
+) -> Result<Vec<u8>, CommandError> {
+    let mut out = Vec::new();
+    for value in values {
+        out.extend_from_slice(
+            &u32::try_from(value.len())
+                .map_err(|_| CommandError::Rejected("payload_size_invalid"))?
+                .to_be_bytes(),
+        );
+        out.extend_from_slice(value.as_bytes());
+    }
+    out.extend_from_slice(
+        &u32::try_from(bytes.len())
+            .map_err(|_| CommandError::Rejected("payload_size_invalid"))?
+            .to_be_bytes(),
+    );
+    out.extend_from_slice(bytes);
     out.extend_from_slice(&revision.to_be_bytes());
     Ok(out)
 }

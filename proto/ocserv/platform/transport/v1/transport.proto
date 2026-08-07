@@ -13,6 +13,7 @@ service TransportService {
   rpc CloseNode(CloseNodeRequest) returns (CloseNodeResponse);
   rpc WatchEvents(WatchEventsRequest) returns (stream TransportEvent);
   rpc UpdateNodeTrust(UpdateNodeTrustRequest) returns (UpdateNodeTrustResponse);
+  rpc FetchArtifact(FetchArtifactRequest) returns (stream ocserv.platform.agent.v1.ArtifactChunk);
 }
 
 // TrustService is implemented by the Go control plane on a private UDS.
@@ -99,6 +100,13 @@ message UpdateNodeTrustRequest {
 }
 
 message UpdateNodeTrustResponse {}
+
+message FetchArtifactRequest {
+  bytes node_id = 1;
+  bytes artifact_id = 2;
+  string purpose = 3;
+  uint64 max_bytes = 4;
+}
 
 message CheckEndpointRequest {
   bytes endpoint_id = 1;

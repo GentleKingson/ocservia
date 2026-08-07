@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -46,6 +47,9 @@ const (
 	ServiceReload     SyntheticKind = "service_reload"
 	ConfigPlan        SyntheticKind = "config_plan"
 	ConfigApply       SyntheticKind = "config_apply"
+	CertificateCSR    SyntheticKind = "certificate_csr"
+	CertificateP12    SyntheticKind = "certificate_p12"
+	CertificateRevoke SyntheticKind = "certificate_revoke"
 )
 
 type CreateRequest struct {
@@ -61,8 +65,18 @@ type CreateRequest struct {
 	PlanRevision        uint64
 	PlanMetadata        *ConfigPlanMetadata
 	ApplyMetadata       *ConfigApplyMetadata
+	ArtifactMetadata    *ArtifactMetadata
 	OcservVersion       string
 	PlanCapabilities    []string
+	CertificateID       uuid.UUID
+	CommonName          string
+	DNSNames            []string
+	KeyBits             uint32
+	CertificateChain    []byte
+	SealedPassword      []byte
+	SecretKeyID         string
+	ArtifactID          uuid.UUID
+	RevocationReason    string
 	SessionID           string
 	BootID              string
 	IP                  string
@@ -73,6 +87,7 @@ type CreateRequest struct {
 	Action              string
 	Reason              string
 	SupersedePending    bool
+	HoldDispatch        bool
 	TTL                 time.Duration
 	RequestID           string
 	Traceparent         string
@@ -89,6 +104,12 @@ type ConfigPlanMetadata struct {
 // ConfigApplyMetadata binds an approved immutable plan to its dispatch intent.
 type ConfigApplyMetadata struct {
 	PlanID uuid.UUID
+}
+
+type ArtifactMetadata struct {
+	TokenSHA256 []byte
+	RequestHash []byte
+	ExpiresAt   time.Time
 }
 
 type Operation struct {
@@ -321,15 +342,33 @@ func (s *Service) CreateSynthetic(ctx context.Context, request CreateRequest) (O
 			return Operation{}, false, fmt.Errorf("insert configuration apply: %w", err)
 		}
 	}
+	if request.Kind == CertificateCSR {
+		dnsNames, err := json.Marshal(request.DNSNames)
+		if err != nil {
+			return Operation{}, false, fmt.Errorf("marshal certificate DNS names: %w", err)
+		}
+		if _, err := tx.Exec(ctx, `INSERT INTO certificates(id,workspace_id,node_id,operation_id,common_name,dns_names,key_bits,state,created_at,updated_at) VALUES($1,$2,$3,$4,$5,$6,$7,'csr_pending',$8,$8)`, request.CertificateID, workspaceID, request.NodeID, operationID, request.CommonName, dnsNames, request.KeyBits, now); err != nil {
+			return Operation{}, false, fmt.Errorf("insert certificate request: %w", err)
+		}
+	}
+	if request.Kind == CertificateP12 {
+		if _, err := tx.Exec(ctx, `INSERT INTO artifact_operations(id,workspace_id,node_id,certificate_id,operation_id,purpose,state,token_sha256,request_hash,expires_at,created_at,updated_at) VALUES($1,$2,$3,$4,$5,'certificate_p12','pending',$6,$7,$8,$9,$9)`, request.ArtifactID, workspaceID, request.NodeID, request.CertificateID, operationID, request.ArtifactMetadata.TokenSHA256, request.ArtifactMetadata.RequestHash, request.ArtifactMetadata.ExpiresAt, now); err != nil {
+			return Operation{}, false, fmt.Errorf("insert certificate artifact operation: %w", err)
+		}
+	}
 	if _, err := tx.Exec(ctx, `
 		INSERT INTO commands (id, operation_id, workspace_id, node_id, state, payload_type, envelope, idempotency_key, expected_version, traceparent, expires_at, created_at, updated_at)
 		VALUES ($1,$2,$3,$4,'queued',$5,$6,$7,$8,$9,$10,$11,$11)`,
 		commandID, operationID, workspaceID, request.NodeID, payloadType, envelope, request.IdempotencyKey, request.ExpectedVersion, request.Traceparent, expiresAt, now); err != nil {
 		return Operation{}, false, fmt.Errorf("insert command: %w", err)
 	}
+	availableAt := now
+	if request.HoldDispatch {
+		availableAt = expiresAt
+	}
 	if _, err := tx.Exec(ctx, `
 		INSERT INTO outbox_events (id, command_id, event_type, payload, available_at, created_at)
-		VALUES ($1,$2,'command.dispatch',$3,$4,$4)`, outboxID, commandID, envelope, now); err != nil {
+		VALUES ($1,$2,'command.dispatch',$3,$4,$5)`, outboxID, commandID, envelope, availableAt, now); err != nil {
 		return Operation{}, false, fmt.Errorf("insert outbox event: %w", err)
 	}
 	if _, err := tx.Exec(ctx, `INSERT INTO operation_events (id, operation_id, state, occurred_at) VALUES ($1,$2,'queued',$3)`, eventID, operationID, now); err != nil {
@@ -709,7 +748,7 @@ func validateCreate(r CreateRequest) error {
 	if len(r.IdempotencyKey) < 1 || len(r.IdempotencyKey) > 128 || strings.TrimSpace(r.IdempotencyKey) != r.IdempotencyKey {
 		return ErrInvalidRequest
 	}
-	if r.Kind != SyntheticNoop && r.Kind != SyntheticEcho && r.Kind != SessionDisconnect && r.Kind != SessionTerminate && r.Kind != IPBanRemove && r.Kind != ServiceReload && r.Kind != ConfigPlan && r.Kind != ConfigApply {
+	if r.Kind != SyntheticNoop && r.Kind != SyntheticEcho && r.Kind != SessionDisconnect && r.Kind != SessionTerminate && r.Kind != IPBanRemove && r.Kind != ServiceReload && r.Kind != ConfigPlan && r.Kind != ConfigApply && r.Kind != CertificateCSR && r.Kind != CertificateP12 && r.Kind != CertificateRevoke {
 		return ErrInvalidRequest
 	}
 	if r.Kind == SyntheticNoop && r.Message != "" || len(r.Message) > 4096 {
@@ -733,6 +772,25 @@ func validateCreate(r CreateRequest) error {
 			return ErrInvalidRequest
 		}
 	}
+	if r.Kind == CertificateCSR {
+		if r.CertificateID == uuid.Nil || r.CertificateID.Version() != 7 || !validDNSName(r.CommonName) || len(r.DNSNames) > 32 || (r.KeyBits != 2048 && r.KeyBits != 3072 && r.KeyBits != 4096) {
+			return ErrInvalidRequest
+		}
+		for _, name := range r.DNSNames {
+			if !validDNSName(name) {
+				return ErrInvalidRequest
+			}
+		}
+	}
+	if r.Kind == CertificateP12 && (r.CertificateID == uuid.Nil || r.CertificateID.Version() != 7 || r.ArtifactID == uuid.Nil || r.ArtifactID.Version() != 7 || len(r.CertificateChain) < 64 || len(r.CertificateChain) > 256*1024 || len(r.SealedPassword) < 32 || len(r.SealedPassword) > 16*1024 || strings.TrimSpace(r.SecretKeyID) == "" || len(r.SecretKeyID) > 128 || r.ArtifactMetadata == nil || len(r.ArtifactMetadata.TokenSHA256) != sha256.Size || len(r.ArtifactMetadata.RequestHash) != sha256.Size || !r.ArtifactMetadata.ExpiresAt.After(time.Now().UTC()) || r.ArtifactMetadata.ExpiresAt.After(time.Now().UTC().Add(30*time.Minute))) {
+		return ErrInvalidRequest
+	}
+	if r.Kind == CertificateRevoke && (r.CertificateID == uuid.Nil || r.CertificateID.Version() != 7 || strings.TrimSpace(r.RevocationReason) == "" || len(r.RevocationReason) > 128) {
+		return ErrInvalidRequest
+	}
+	if r.HoldDispatch && r.Kind != CertificateRevoke {
+		return ErrInvalidRequest
+	}
 	if r.Kind != ConfigPlan && r.Kind != ConfigApply && (len(r.Candidate) != 0 || len(r.CandidateHash) != 0 || len(r.ExpectedCurrentHash) != 0 || r.DesiredRevision != 0 || r.PlanRevision != 0 || r.PlanMetadata != nil || r.ApplyMetadata != nil || r.OcservVersion != "" || len(r.PlanCapabilities) != 0) {
 		return ErrInvalidRequest
 	}
@@ -752,7 +810,7 @@ func validateCreate(r CreateRequest) error {
 			return ErrInvalidRequest
 		}
 	}
-	if (r.Kind == SessionDisconnect || r.Kind == SessionTerminate || r.Kind == IPBanRemove || r.Kind == ServiceReload || r.Kind == ConfigPlan || r.Kind == ConfigApply) && (r.Action == "" || r.Reason == "" || len(r.Reason) > 512) {
+	if (r.Kind == SessionDisconnect || r.Kind == SessionTerminate || r.Kind == IPBanRemove || r.Kind == ServiceReload || r.Kind == ConfigPlan || r.Kind == ConfigApply || r.Kind == CertificateCSR || r.Kind == CertificateP12 || r.Kind == CertificateRevoke) && (r.Action == "" || r.Reason == "" || len(r.Reason) > 512) {
 		return ErrInvalidRequest
 	}
 	if r.Kind == ConfigPlan && r.ActorID == "" {
@@ -770,40 +828,93 @@ func requestHash(r CreateRequest) [32]byte {
 	// field that selects the target, effect, authorization action, actor, audit
 	// reason, revision, or delivery behavior is deliberately bound here.
 	intent := struct {
-		NodeID              uuid.UUID     `json:"node_id"`
-		Kind                SyntheticKind `json:"kind"`
-		Message             string        `json:"message"`
-		SessionID           string        `json:"session_id"`
-		BootID              string        `json:"boot_id"`
-		IP                  string        `json:"ip"`
-		ExpectedVersion     int64         `json:"expected_version"`
-		SupersedePending    bool          `json:"supersede_pending"`
-		TTLSeconds          int64         `json:"ttl_seconds"`
-		ActorID             string        `json:"actor_id"`
-		Action              string        `json:"action"`
-		Reason              string        `json:"reason"`
-		ActorSessionID      uuid.UUID     `json:"actor_session_id"`
-		ActorIdentityID     uuid.UUID     `json:"actor_identity_id"`
-		ApprovalID          uuid.UUID     `json:"approval_id"`
-		CandidateHash       string        `json:"candidate_hash"`
-		ExpectedCurrentHash string        `json:"expected_current_hash"`
-		DesiredRevision     uint64        `json:"desired_revision"`
-		PlanID              uuid.UUID     `json:"plan_id"`
-		PlanRevision        uint64        `json:"plan_revision"`
-		PlanTemplate        string        `json:"plan_template"`
-		OcservVersion       string        `json:"ocserv_version"`
-		PlanCapabilities    []string      `json:"plan_capabilities"`
+		NodeID               uuid.UUID     `json:"node_id"`
+		Kind                 SyntheticKind `json:"kind"`
+		Message              string        `json:"message"`
+		SessionID            string        `json:"session_id"`
+		BootID               string        `json:"boot_id"`
+		IP                   string        `json:"ip"`
+		ExpectedVersion      int64         `json:"expected_version"`
+		SupersedePending     bool          `json:"supersede_pending"`
+		HoldDispatch         bool          `json:"hold_dispatch,omitempty"`
+		TTLSeconds           int64         `json:"ttl_seconds"`
+		ActorID              string        `json:"actor_id"`
+		Action               string        `json:"action"`
+		Reason               string        `json:"reason"`
+		ActorSessionID       uuid.UUID     `json:"actor_session_id"`
+		ActorIdentityID      uuid.UUID     `json:"actor_identity_id"`
+		ApprovalID           uuid.UUID     `json:"approval_id"`
+		CandidateHash        string        `json:"candidate_hash"`
+		ExpectedCurrentHash  string        `json:"expected_current_hash"`
+		DesiredRevision      uint64        `json:"desired_revision"`
+		PlanID               uuid.UUID     `json:"plan_id"`
+		PlanRevision         uint64        `json:"plan_revision"`
+		PlanTemplate         string        `json:"plan_template"`
+		OcservVersion        string        `json:"ocserv_version"`
+		PlanCapabilities     []string      `json:"plan_capabilities"`
+		CertificateID        uuid.UUID     `json:"certificate_id"`
+		CommonName           string        `json:"common_name"`
+		DNSNames             []string      `json:"dns_names"`
+		KeyBits              uint32        `json:"key_bits"`
+		ArtifactID           uuid.UUID     `json:"artifact_id"`
+		CertificateChainHash string        `json:"certificate_chain_hash"`
+		SealedPasswordHash   string        `json:"sealed_password_hash"`
+		SecretKeyID          string        `json:"secret_key_id"`
+		ArtifactTokenHash    string        `json:"artifact_token_hash"`
+		ArtifactRequestHash  string        `json:"artifact_request_hash"`
+		ArtifactExpiresAt    string        `json:"artifact_expires_at"`
+		RevocationReason     string        `json:"revocation_reason"`
 	}{NodeID: r.NodeID, Kind: r.Kind, Message: r.Message, SessionID: r.SessionID, BootID: r.BootID, IP: r.IP,
-		ExpectedVersion: r.ExpectedVersion, SupersedePending: r.SupersedePending, TTLSeconds: int64(r.TTL / time.Second),
+		ExpectedVersion: r.ExpectedVersion, SupersedePending: r.SupersedePending, HoldDispatch: r.HoldDispatch, TTLSeconds: int64(r.TTL / time.Second),
 		ActorID: actorID, Action: action, Reason: reason, ActorSessionID: r.ActorSessionID, ActorIdentityID: r.ActorIdentityID,
 		ApprovalID: r.ApprovalID, CandidateHash: fmt.Sprintf("%x", r.CandidateHash), ExpectedCurrentHash: fmt.Sprintf("%x", r.ExpectedCurrentHash),
 		DesiredRevision: r.DesiredRevision, PlanID: applyPlanID(r.ApplyMetadata), PlanRevision: r.PlanRevision,
-		PlanTemplate: planTemplate(r.PlanMetadata), OcservVersion: r.OcservVersion, PlanCapabilities: r.PlanCapabilities}
+		PlanTemplate: planTemplate(r.PlanMetadata), OcservVersion: r.OcservVersion, PlanCapabilities: r.PlanCapabilities,
+		CertificateID: idempotencyCertificateID(r), CommonName: r.CommonName, DNSNames: r.DNSNames, KeyBits: r.KeyBits, ArtifactID: r.ArtifactID,
+		CertificateChainHash: hashBytes(r.CertificateChain), SealedPasswordHash: hashBytes(r.SealedPassword), SecretKeyID: r.SecretKeyID,
+		ArtifactTokenHash: artifactTokenHash(r.ArtifactMetadata), ArtifactRequestHash: artifactRequestHash(r.ArtifactMetadata), ArtifactExpiresAt: artifactExpiry(r.ArtifactMetadata),
+		RevocationReason: r.RevocationReason}
 	encoded, err := json.Marshal(intent)
 	if err != nil {
 		panic("marshal fixed idempotency intent: " + err.Error())
 	}
 	return sha256.Sum256(encoded)
+}
+
+func idempotencyCertificateID(request CreateRequest) uuid.UUID {
+	if request.Kind == CertificateCSR {
+		return uuid.Nil
+	}
+	return request.CertificateID
+}
+
+func hashBytes(value []byte) string {
+	if len(value) == 0 {
+		return ""
+	}
+	digest := sha256.Sum256(value)
+	return hex.EncodeToString(digest[:])
+}
+
+func artifactTokenHash(metadata *ArtifactMetadata) string {
+	if metadata == nil {
+		return ""
+	}
+	return hex.EncodeToString(metadata.TokenSHA256)
+}
+
+func artifactRequestHash(metadata *ArtifactMetadata) string {
+	if metadata == nil {
+		return ""
+	}
+	return hex.EncodeToString(metadata.RequestHash)
+}
+
+func artifactExpiry(metadata *ArtifactMetadata) string {
+	if metadata == nil {
+		return ""
+	}
+	return metadata.ExpiresAt.UTC().Format(time.RFC3339Nano)
 }
 
 func planTemplate(metadata *ConfigPlanMetadata) string {
@@ -868,6 +979,15 @@ func marshalEnvelope(r CreateRequest, operationID, commandID uuid.UUID, now, exp
 		payloadType = "config_apply"
 		envelope.ExpectedRevision = r.PlanRevision
 		envelope.Payload = &agentv1.CommandEnvelope_ConfigApply{ConfigApply: &agentv1.ConfigApply{Candidate: r.Candidate, CandidateHash: r.CandidateHash, ExpectedCurrentHash: r.ExpectedCurrentHash, DesiredRevision: r.DesiredRevision}}
+	case CertificateCSR:
+		payloadType = "certificate_csr"
+		envelope.Payload = &agentv1.CommandEnvelope_CertificateCsr{CertificateCsr: &agentv1.CertificateCsr{CertificateId: r.CertificateID[:], CommonName: r.CommonName, DnsNames: r.DNSNames, KeyBits: r.KeyBits}}
+	case CertificateP12:
+		payloadType = "certificate_p12"
+		envelope.Payload = &agentv1.CommandEnvelope_CertificateP12{CertificateP12: &agentv1.CertificateP12{CertificateId: r.CertificateID[:], CertificateChainPem: r.CertificateChain, SealedPassword: r.SealedPassword, SecretKeyId: r.SecretKeyID, ArtifactId: r.ArtifactID[:]}}
+	case CertificateRevoke:
+		payloadType = "certificate_revoke"
+		envelope.Payload = &agentv1.CommandEnvelope_CertificateRevoke{CertificateRevoke: &agentv1.CertificateRevoke{CertificateId: r.CertificateID[:], Reason: r.RevocationReason}}
 	}
 	if err := semanticpayload.PopulateV1(envelope); err != nil {
 		return nil, "", fmt.Errorf("compute semantic payload hash: %w", err)
@@ -893,9 +1013,30 @@ func capabilityFor(kind SyntheticKind) string {
 		return "ocserv.config.plan"
 	case ConfigApply:
 		return "ocserv.config.apply"
+	case CertificateCSR, CertificateP12:
+		return "ocserv.certificate.issue"
+	case CertificateRevoke:
+		return "ocserv.certificate.revoke"
 	default:
 		return ""
 	}
+}
+
+func validDNSName(value string) bool {
+	if len(value) < 1 || len(value) > 253 || strings.HasPrefix(value, ".") || strings.HasSuffix(value, ".") {
+		return false
+	}
+	for _, label := range strings.Split(value, ".") {
+		if len(label) < 1 || len(label) > 63 || strings.HasPrefix(label, "-") || strings.HasSuffix(label, "-") {
+			return false
+		}
+		for _, r := range label {
+			if !(r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '-') {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 func findIdempotent(ctx context.Context, tx pgx.Tx, workspaceID uuid.UUID, key string, hash []byte) (Operation, bool, error) {

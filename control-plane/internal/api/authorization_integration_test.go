@@ -1,7 +1,11 @@
 package api
 
 import (
+	"bytes"
 	"context"
+	"crypto/sha256"
+	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -10,12 +14,129 @@ import (
 
 	approvalstore "github.com/GentleKingson/ocservia/control-plane/internal/approvals"
 	"github.com/GentleKingson/ocservia/control-plane/internal/auth"
+	certificatestore "github.com/GentleKingson/ocservia/control-plane/internal/certificates"
 	configplanstore "github.com/GentleKingson/ocservia/control-plane/internal/configplan"
 	operationstore "github.com/GentleKingson/ocservia/control-plane/internal/operations"
 	"github.com/GentleKingson/ocservia/control-plane/internal/rbac"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
+
+type certificateArtifactFixture struct{ data []byte }
+
+func (f certificateArtifactFixture) FetchArtifact(context.Context, uuid.UUID, uuid.UUID, int64) (io.ReadCloser, error) {
+	return io.NopCloser(bytes.NewReader(f.data)), nil
+}
+
+type invalidatingArtifactFixture struct {
+	pool       *pgxpool.Pool
+	artifactID uuid.UUID
+	data       []byte
+}
+
+func (f invalidatingArtifactFixture) FetchArtifact(ctx context.Context, _ uuid.UUID, _ uuid.UUID, _ int64) (io.ReadCloser, error) {
+	if _, err := f.pool.Exec(ctx, `UPDATE artifact_operations SET state='failed',lease_until=NULL WHERE id=$1`, f.artifactID); err != nil {
+		return nil, err
+	}
+	return io.NopCloser(bytes.NewReader(f.data)), nil
+}
+
+type failingArtifactWriter struct {
+	header http.Header
+}
+
+func (w *failingArtifactWriter) Header() http.Header { return w.header }
+func (*failingArtifactWriter) WriteHeader(int)       {}
+func (*failingArtifactWriter) Write(value []byte) (int, error) {
+	return len(value) / 2, io.ErrUnexpectedEOF
+}
+
+func TestCertificateRoutesUseNodeScopedAuthorizationIntegration(t *testing.T) {
+	databaseURL := os.Getenv("OCSERV_TEST_DATABASE_URL")
+	if databaseURL == "" {
+		t.Skip("OCSERV_TEST_DATABASE_URL is not set")
+	}
+	ctx := context.Background()
+	pool, err := pgxpool.New(ctx, databaseURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pool.Close()
+	workspaceID, managerID, securityID := uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7())
+	nodeA, nodeB, operationID, certificateID, artifactID := uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7())
+	managerBinding, securityBinding := uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7())
+	if _, err := pool.Exec(ctx, `INSERT INTO workspaces(id,name,slug,created_at,updated_at) VALUES($1,'certificate auth',$2,now(),now());
+		INSERT INTO identities(id,issuer,subject,created_at,updated_at) VALUES($3,'integration',$4,now(),now()),($5,'integration',$6,now(),now());
+		INSERT INTO nodes(id,workspace_id,name,status,version,created_at,updated_at) VALUES($7,$1,'cert-node-a','active',1,now(),now()),($8,$1,'cert-node-b','active',1,now(),now());
+		INSERT INTO operations(id,workspace_id,node_id,state,version,request_id,idempotency_key,request_hash,created_at,updated_at) VALUES($9,$1,$7,'succeeded',1,'certificate-auth','certificate-auth',decode(repeat('00',32),'hex'),now(),now());
+		INSERT INTO certificates(id,workspace_id,node_id,operation_id,common_name,dns_names,key_bits,state,created_at,updated_at) VALUES($10,$1,$7,$9,'node-a.example.test','[]',2048,'csr_pending',now(),now());
+		INSERT INTO artifact_operations(id,workspace_id,node_id,certificate_id,operation_id,purpose,state,token_sha256,request_hash,expires_at,created_at,updated_at) VALUES($11,$1,$7,$10,$9,'certificate_p12','pending',decode(repeat('01',32),'hex'),decode(repeat('02',32),'hex'),now()+interval '10 minutes',now(),now());
+		INSERT INTO role_bindings(id,identity_id,workspace_id,role_name,resource_type,resource_id,created_by,created_at) VALUES($12,$3,$1,'ConfigManager','node',$7,$3,now()),($13,$5,$1,'SecurityAdmin','node',$8,$5,now())`, workspaceID, "certificate-auth-"+workspaceID.String(), managerID, managerID.String(), securityID, securityID.String(), nodeA, nodeB, operationID, certificateID, artifactID, managerBinding, securityBinding); err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		_, _ = pool.Exec(context.Background(), `DELETE FROM role_bindings WHERE id IN($1,$2); DELETE FROM artifact_operations WHERE id=$3; DELETE FROM certificates WHERE id=$4; DELETE FROM operations WHERE id=$5; DELETE FROM nodes WHERE workspace_id=$6; DELETE FROM identities WHERE id IN($7,$8); DELETE FROM workspaces WHERE id=$6`, managerBinding, securityBinding, artifactID, certificateID, operationID, workspaceID, managerID, securityID)
+	}()
+	artifactData := []byte("encrypted artifact response")
+	server := &Server{rbac: rbac.New(pool), certificates: certificatestore.NewWithDependencies(pool, operationstore.New(pool), nil, nil, certificateArtifactFixture{data: artifactData})}
+	manager := auth.Principal{IdentityID: managerID, Issuer: "integration"}
+	security := auth.Principal{IdentityID: securityID, Issuer: "integration"}
+	tests := []struct {
+		name, method, path, pathKey, pathValue string
+		principal                              auth.Principal
+		allowed                                bool
+	}{
+		{"manager lists own node", http.MethodGet, "/api/v1/nodes/" + nodeA.String() + "/certificates", "node_id", nodeA.String(), manager, true},
+		{"manager cannot list other node", http.MethodGet, "/api/v1/nodes/" + nodeB.String() + "/certificates", "node_id", nodeB.String(), manager, false},
+		{"manager issues own node", http.MethodPost, "/api/v1/nodes/" + nodeA.String() + "/certificates", "node_id", nodeA.String(), manager, true},
+		{"manager creates p12", http.MethodPost, "/api/v1/certificates/" + certificateID.String() + ":p12", "certificate_action", certificateID.String() + ":p12", manager, true},
+		{"manager cannot revoke", http.MethodPost, "/api/v1/certificates/" + certificateID.String() + ":revoke", "certificate_action", certificateID.String() + ":revoke", manager, false},
+		{"cross-node security cannot revoke", http.MethodPost, "/api/v1/certificates/" + certificateID.String() + ":revoke", "certificate_action", certificateID.String() + ":revoke", security, false},
+		{"manager reads artifact", http.MethodGet, "/api/v1/artifacts/" + artifactID.String(), "artifact_id", artifactID.String(), manager, true},
+		{"cross-node security cannot read artifact", http.MethodGet, "/api/v1/artifacts/" + artifactID.String(), "artifact_id", artifactID.String(), security, false},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			request := httptest.NewRequest(test.method, test.path, nil)
+			request.SetPathValue(test.pathKey, test.pathValue)
+			_, err := server.authorizeRoute(request, test.principal)
+			if test.allowed && err != nil {
+				t.Fatalf("expected authorization: %v", err)
+			}
+			if !test.allowed && !errors.Is(err, rbac.ErrForbidden) {
+				t.Fatalf("expected forbidden, got %v", err)
+			}
+		})
+	}
+	token := strings.Repeat("a", 43)
+	tokenHash, artifactHash := sha256.Sum256([]byte(token)), sha256.Sum256(artifactData)
+	if _, err := pool.Exec(ctx, `UPDATE certificates SET state='issued',certificate_chain_pem=decode(repeat('41',64),'hex'),serial_number='1',not_before=now()-interval '1 minute',not_after=now()+interval '1 hour' WHERE id=$1; UPDATE artifact_operations SET state='ready',token_sha256=$3,content_sha256=$4,content_size=$5 WHERE id=$2`, certificateID, artifactID, tokenHash[:], artifactHash[:], len(artifactData)); err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(http.MethodGet, "/api/v1/artifacts/"+artifactID.String(), nil)
+	request.SetPathValue("artifact_id", artifactID.String())
+	request.Header.Set("X-Artifact-Token", token)
+	request = request.WithContext(context.WithValue(context.WithValue(request.Context(), principalKey{}, manager), requestIDKey{}, "artifact-interruption"))
+	response := &failingArtifactWriter{header: make(http.Header)}
+	server.downloadArtifact(response, request)
+	var artifactState string
+	if err := pool.QueryRow(ctx, `SELECT state FROM artifact_operations WHERE id=$1`, artifactID).Scan(&artifactState); err != nil || artifactState != "consumed" {
+		t.Fatalf("one-time download state=%q err=%v", artifactState, err)
+	}
+	if _, err := pool.Exec(ctx, `UPDATE artifact_operations SET state='ready',consumed_at=NULL,content_sha256=$2,content_size=$3 WHERE id=$1`, artifactID, artifactHash[:], len(artifactData)); err != nil {
+		t.Fatal(err)
+	}
+	failureServer := &Server{certificates: certificatestore.NewWithDependencies(pool, operationstore.New(pool), nil, nil, invalidatingArtifactFixture{pool: pool, artifactID: artifactID, data: artifactData})}
+	failureRequest := httptest.NewRequest(http.MethodGet, "/api/v1/artifacts/"+artifactID.String(), nil)
+	failureRequest.SetPathValue("artifact_id", artifactID.String())
+	failureRequest.Header.Set("X-Artifact-Token", token)
+	failureRequest = failureRequest.WithContext(context.WithValue(context.WithValue(failureRequest.Context(), principalKey{}, manager), requestIDKey{}, "artifact-completion-failure"))
+	failureResponse := httptest.NewRecorder()
+	failureServer.downloadArtifact(failureResponse, failureRequest)
+	if failureResponse.Code != http.StatusForbidden || failureResponse.Header().Get("Content-Disposition") != "" || failureResponse.Header().Get("Content-Length") != "" || !strings.Contains(failureResponse.Header().Get("Content-Type"), "application/problem+json") {
+		t.Fatalf("completion failure status=%d headers=%v body=%s", failureResponse.Code, failureResponse.Header(), failureResponse.Body.String())
+	}
+}
 
 func TestSyntheticCommandAuditUsesAuthenticatedOperator(t *testing.T) {
 	databaseURL := os.Getenv("OCSERV_TEST_DATABASE_URL")

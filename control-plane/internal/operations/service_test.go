@@ -113,9 +113,10 @@ func TestRequestHashBindsTargetActorAndActionButNotAttemptMetadata(t *testing.T)
 	base := CreateRequest{NodeID: uuid.Must(uuid.NewV7()), IdempotencyKey: "stable-key", ExpectedVersion: 4, Kind: ServiceReload, ActorID: "operator", Action: "service.reload", Reason: "support case", TTL: time.Minute, RequestID: "request-one", Traceparent: "00-0123456789abcdef0123456789abcdef-0123456789abcdef-01"}
 	baseHash := requestHash(base)
 	for name, mutate := range map[string]func(*CreateRequest){
-		"node":   func(r *CreateRequest) { r.NodeID = uuid.Must(uuid.NewV7()) },
-		"actor":  func(r *CreateRequest) { r.ActorID = "other-operator" },
-		"action": func(r *CreateRequest) { r.Action = "other.action" },
+		"node":          func(r *CreateRequest) { r.NodeID = uuid.Must(uuid.NewV7()) },
+		"actor":         func(r *CreateRequest) { r.ActorID = "other-operator" },
+		"action":        func(r *CreateRequest) { r.Action = "other.action" },
+		"hold dispatch": func(r *CreateRequest) { r.HoldDispatch = true },
 	} {
 		t.Run(name, func(t *testing.T) {
 			request := base

@@ -7,6 +7,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"net"
+	"strings"
 
 	agentv1 "github.com/GentleKingson/ocservia/control-plane/gen/proto/ocserv/platform/agent/v1"
 )
@@ -103,6 +104,30 @@ func HashV1(envelope *agentv1.CommandEnvelope) ([sha256.Size]byte, error) {
 		payload := envelope.GetGroupApply()
 		values := append([]string{payload.GetGroupName()}, payload.GetMembers()...)
 		canonicalPayload = canonicalStringsAndBytes(values, nil, payload.GetDesiredRevision())
+	case *agentv1.CommandEnvelope_CertificateCsr:
+		payloadKind = 117
+		payload := envelope.GetCertificateCsr()
+		if len(payload.GetCertificateId()) != 16 {
+			return [sha256.Size]byte{}, errors.New("certificate ID is malformed")
+		}
+		values := append([]string{payload.GetCommonName()}, payload.GetDnsNames()...)
+		canonicalPayload = canonicalStringsAndBytes(values, payload.GetCertificateId(), uint64(payload.GetKeyBits()))
+	case *agentv1.CommandEnvelope_CertificateP12:
+		payloadKind = 118
+		payload := envelope.GetCertificateP12()
+		if len(payload.GetCertificateId()) != 16 || len(payload.GetArtifactId()) != 16 {
+			return [sha256.Size]byte{}, errors.New("certificate artifact identity is malformed")
+		}
+		data := append(append(append([]byte(nil), payload.GetCertificateId()...), payload.GetArtifactId()...), payload.GetCertificateChainPem()...)
+		data = append(data, payload.GetSealedPassword()...)
+		canonicalPayload = canonicalStringsAndBytes([]string{payload.GetSecretKeyId()}, data, 0)
+	case *agentv1.CommandEnvelope_CertificateRevoke:
+		payloadKind = 119
+		payload := envelope.GetCertificateRevoke()
+		if len(payload.GetCertificateId()) != 16 || strings.TrimSpace(payload.GetReason()) == "" {
+			return [sha256.Size]byte{}, errors.New("certificate revoke payload is malformed")
+		}
+		canonicalPayload = canonicalStringsAndBytes([]string{payload.GetReason()}, payload.GetCertificateId(), 0)
 	default:
 		return [sha256.Size]byte{}, errors.New("command payload type is not reconcilable")
 	}
