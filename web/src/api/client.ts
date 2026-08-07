@@ -21,6 +21,7 @@ import {
   type Workspace,
   type ConfigPlan,
   type ConfigPlanRequest,
+  type ConfigApplyRequest,
 } from "@ocservia/api-client";
 
 const devAuthToken = import.meta.env.VITE_DEV_AUTH_TOKEN;
@@ -101,6 +102,21 @@ export async function getConfigPlan(
   signal?: AbortSignal,
 ): Promise<ConfigPlan> {
   return configPlans.getConfigPlan({ planId }, requestInit(signal));
+}
+
+export async function applyConfigPlan(
+  planId: string,
+  request: ConfigApplyRequest,
+  signal?: AbortSignal,
+): Promise<Operation> {
+  return configPlans.applyConfigPlan(
+    {
+      planId,
+      idempotencyKey: newIdempotencyKey(),
+      configApplyRequest: request,
+    },
+    requestInit(signal),
+  );
 }
 
 function setSelectedWorkspace(workspace: Workspace | undefined): void {

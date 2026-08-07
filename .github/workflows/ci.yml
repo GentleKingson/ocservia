@@ -142,6 +142,13 @@ jobs:
           mkdir -p "${ARTIFACT_DIR}"
           set -o pipefail
           scripts/i15-config-plan.sh 2>&1 | tee "${ARTIFACT_DIR}/i15-config-plan.log"
+      - name: I16 atomic config-apply and rollback boundary
+        env:
+          ARTIFACT_DIR: ${{ runner.temp }}/artifacts/go/i16-config-apply
+        run: |
+          mkdir -p "${ARTIFACT_DIR}"
+          set -o pipefail
+          scripts/i16-config-apply.sh 2>&1 | tee "${ARTIFACT_DIR}/i16-config-apply.log"
       - name: Go, PostgreSQL, UDS, and Rust stub integration
         env:
           ARTIFACT_DIR: ${{ runner.temp }}/artifacts/go/local-slice

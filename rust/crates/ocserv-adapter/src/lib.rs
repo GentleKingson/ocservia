@@ -6,16 +6,19 @@ use std::collections::{HashMap, HashSet};
 use std::fs::OpenOptions as StdOpenOptions;
 use std::io;
 use std::net::IpAddr;
-use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::Arc;
+#[cfg(test)]
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use ocservia_agent_protocol::{
-    ConfigFingerprint, ConfigPlanResult, DesiredEffectObservation, DesiredEffectState, ErrorKind,
-    GroupList, IpBan, IpBanList, MAX_MANAGED_RESOURCES, MutationResult, ObservedGroup,
-    ObservedUser, OcservVersion, PrivdError, ServiceStatus, Session, SessionList, UserList,
+    ConfigApplyResult, ConfigFingerprint, ConfigPlanResult, DesiredEffectObservation,
+    DesiredEffectState, ErrorKind, GroupList, IpBan, IpBanList, MAX_MANAGED_RESOURCES,
+    MutationResult, ObservedGroup, ObservedUser, OcservVersion, PrivdError, ServiceStatus, Session,
+    SessionList, UserList,
 };
 use rand::RngCore;
 use rusqlite::{Connection, OpenFlags, OptionalExtension, TransactionBehavior, params};
@@ -378,6 +381,8 @@ pub struct Adapter {
     limits: Limits,
     user_file_lock: Arc<Mutex<()>>,
     config_plan_lock: Arc<Mutex<()>>,
+    #[cfg(test)]
+    config_apply_fault: Arc<AtomicU8>,
 }
 
 impl Adapter {
@@ -389,7 +394,21 @@ impl Adapter {
             limits,
             user_file_lock: Arc::new(Mutex::new(())),
             config_plan_lock: Arc::new(Mutex::new(())),
+            #[cfg(test)]
+            config_apply_fault: Arc::new(AtomicU8::new(0)),
         }
+    }
+
+    #[cfg(test)]
+    fn inject_config_apply_fault(&self, point: u8) {
+        self.config_apply_fault.store(point, Ordering::SeqCst);
+    }
+
+    #[cfg(test)]
+    fn take_config_apply_fault(&self, point: u8) -> bool {
+        self.config_apply_fault
+            .compare_exchange(point, 0, Ordering::SeqCst, Ordering::SeqCst)
+            .is_ok()
     }
 
     /// Returns the fixed `ocserv.service` state.
@@ -501,6 +520,7 @@ impl Adapter {
         let text = std::str::from_utf8(candidate).map_err(|_| AdapterError::InvalidRequest)?;
         validate_config_candidate(text)?;
         let _guard = self.config_plan_lock.lock().await;
+        let _file_lock = lock_config_file(&self.resources.config)?;
         let before = self.config_fingerprint().await?;
         let parent = self
             .resources
@@ -538,7 +558,298 @@ impl Adapter {
             warnings,
             current_unchanged,
             staging_cleaned: !staging_path.exists(),
+            current_hash: hex::decode(before.sha256).map_err(|_| AdapterError::MalformedOutput)?,
         })
+    }
+
+    /// Applies one approved immutable candidate to the fixed Ocserv config.
+    ///
+    /// The mutation is serialized with planning, uses same-filesystem staging and backup files,
+    /// fsyncs both file and directory boundaries, and either returns a healthy new config or a
+    /// verified rollback result. A failed rollback is explicitly marked critical.
+    ///
+    /// # Errors
+    ///
+    /// Rejects invalid candidates and stale fingerprints, and reports fixed-path I/O or command
+    /// failures that occur before a typed apply or rollback outcome can be established.
+    #[allow(clippy::too_many_lines)]
+    pub async fn config_apply(
+        &self,
+        candidate: &[u8],
+        candidate_hash: &[u8],
+        expected_current_hash: &[u8],
+        desired_revision: u64,
+    ) -> Result<ConfigApplyResult, AdapterError> {
+        if candidate.is_empty()
+            || candidate.len() > MAX_CONFIG_PLAN_BYTES
+            || candidate_hash.len() != 32
+            || expected_current_hash.len() != 32
+            || desired_revision == 0
+            || Sha256::digest(candidate).as_slice() != candidate_hash
+        {
+            return Err(AdapterError::InvalidRequest);
+        }
+        let text = std::str::from_utf8(candidate).map_err(|_| AdapterError::InvalidRequest)?;
+        validate_config_candidate(text)?;
+        if text.lines().any(|line| line.contains("${secret:")) {
+            return Err(AdapterError::InvalidRequest);
+        }
+        let _guard = self.config_plan_lock.lock().await;
+        let _file_lock = lock_config_file(&self.resources.config)?;
+        let before = self.config_fingerprint().await?;
+        let previous_hash =
+            hex::decode(&before.sha256).map_err(|_| AdapterError::MalformedOutput)?;
+        if previous_hash == candidate_hash {
+            let parent = self
+                .resources
+                .config
+                .parent()
+                .ok_or(AdapterError::InvalidResource)?;
+            let backup = self.find_config_recovery(expected_current_hash).await?;
+            if self.config_health().await.is_ok() {
+                let Some(path) = backup else {
+                    return Err(AdapterError::Unavailable);
+                };
+                if path
+                    .file_name()
+                    .is_some_and(|name| name.to_string_lossy().starts_with(".ocservia-backup-"))
+                {
+                    let retained = parent.join(format!(".ocservia-success-{}", Uuid::now_v7()));
+                    tokio::fs::rename(path, retained)
+                        .await
+                        .map_err(AdapterError::Io)?;
+                    sync_directory(parent).await?;
+                    self.prune_config_backups().await?;
+                }
+                return Ok(ConfigApplyResult {
+                    candidate_hash: candidate_hash.to_vec(),
+                    previous_hash: expected_current_hash.to_vec(),
+                    observed_hash: candidate_hash.to_vec(),
+                    applied_revision: desired_revision,
+                    healthy: true,
+                    rolled_back: false,
+                    failed_critical: false,
+                    failure_code: String::new(),
+                });
+            }
+            if let Some(path) = backup
+                && atomic_replace(&path, &self.resources.config).await.is_ok()
+                && self.config_health().await.is_ok()
+                && self.config_fingerprint().await?.sha256 == hex::encode(expected_current_hash)
+            {
+                return Ok(ConfigApplyResult {
+                    candidate_hash: candidate_hash.to_vec(),
+                    previous_hash: expected_current_hash.to_vec(),
+                    observed_hash: expected_current_hash.to_vec(),
+                    applied_revision: 0,
+                    healthy: true,
+                    rolled_back: true,
+                    failed_critical: false,
+                    failure_code: "recovered_health_check_failed".to_owned(),
+                });
+            }
+            return Ok(ConfigApplyResult {
+                candidate_hash: candidate_hash.to_vec(),
+                previous_hash: expected_current_hash.to_vec(),
+                observed_hash: Vec::new(),
+                applied_revision: 0,
+                healthy: false,
+                rolled_back: false,
+                failed_critical: true,
+                failure_code: "recovery_rollback_failed".to_owned(),
+            });
+        }
+        if previous_hash != expected_current_hash {
+            return Err(AdapterError::Unavailable);
+        }
+        let parent = self
+            .resources
+            .config
+            .parent()
+            .ok_or(AdapterError::InvalidResource)?;
+        let id = Uuid::now_v7();
+        let stage_path = parent.join(format!(".ocservia-apply-{id}"));
+        let backup_path = parent.join(format!(".ocservia-backup-{id}"));
+        let mut stage = StagingFile::new(stage_path.clone());
+        let mut backup = StagingFile::new(backup_path.clone());
+        let identity = file_identity(&self.resources.config).await?;
+        #[cfg(test)]
+        if self.take_config_apply_fault(1) {
+            return Err(AdapterError::Io(io::Error::from_raw_os_error(28)));
+        }
+        write_new_synced(
+            &backup_path,
+            &tokio::fs::read(&self.resources.config)
+                .await
+                .map_err(AdapterError::Io)?,
+            identity,
+        )
+        .await?;
+        #[cfg(test)]
+        if self.take_config_apply_fault(2) {
+            return Err(AdapterError::Unavailable);
+        }
+        write_new_synced(&stage_path, candidate, identity).await?;
+        sync_directory(parent).await?;
+        #[cfg(test)]
+        if self.take_config_apply_fault(3) {
+            return Err(AdapterError::Unavailable);
+        }
+        // From this point onward, cancellation may race the rename or directory fsync.
+        // Retain the durable backup even when publication has not yet become observable.
+        backup.disarm();
+        atomic_replace(&stage_path, &self.resources.config).await?;
+        stage.disarm();
+        #[cfg(test)]
+        if self.take_config_apply_fault(4) {
+            return Err(AdapterError::Unavailable);
+        }
+
+        let new_health = self.config_health().await;
+        if new_health.is_ok() {
+            let retained = parent.join(format!(".ocservia-success-{id}"));
+            tokio::fs::rename(&backup_path, &retained)
+                .await
+                .map_err(AdapterError::Io)?;
+            backup.disarm();
+            sync_directory(parent).await?;
+            self.prune_config_backups().await?;
+            let observed = self.config_fingerprint().await?;
+            return Ok(ConfigApplyResult {
+                candidate_hash: candidate_hash.to_vec(),
+                previous_hash,
+                observed_hash: hex::decode(observed.sha256)
+                    .map_err(|_| AdapterError::MalformedOutput)?,
+                applied_revision: desired_revision,
+                healthy: true,
+                rolled_back: false,
+                failed_critical: false,
+                failure_code: String::new(),
+            });
+        }
+
+        let rollback = async {
+            atomic_replace(&backup_path, &self.resources.config).await?;
+            backup.disarm();
+            self.config_health().await?;
+            let observed = self.config_fingerprint().await?;
+            if observed.sha256 != before.sha256 {
+                return Err(AdapterError::Unavailable);
+            }
+            Ok::<ConfigFingerprint, AdapterError>(observed)
+        }
+        .await;
+        match rollback {
+            Ok(observed) => Ok(ConfigApplyResult {
+                candidate_hash: candidate_hash.to_vec(),
+                previous_hash: previous_hash.clone(),
+                observed_hash: hex::decode(observed.sha256)
+                    .map_err(|_| AdapterError::MalformedOutput)?,
+                applied_revision: 0,
+                healthy: true,
+                rolled_back: true,
+                failed_critical: false,
+                failure_code: "health_check_failed".to_owned(),
+            }),
+            Err(_) => Ok(ConfigApplyResult {
+                candidate_hash: candidate_hash.to_vec(),
+                previous_hash,
+                observed_hash: Vec::new(),
+                applied_revision: 0,
+                healthy: false,
+                rolled_back: false,
+                failed_critical: true,
+                failure_code: "rollback_failed".to_owned(),
+            }),
+        }
+    }
+
+    async fn config_health(&self) -> Result<(), AdapterError> {
+        self.execute(
+            &self.resources.ocserv,
+            &[
+                "-t",
+                "-c",
+                self.resources
+                    .config
+                    .to_str()
+                    .ok_or(AdapterError::InvalidResource)?,
+            ],
+        )
+        .await?;
+        self.service_reload().await?;
+        let status = self.service_status().await?;
+        if status.load_state != "loaded"
+            || status.active_state != "active"
+            || status.sub_state != "running"
+        {
+            return Err(AdapterError::Unavailable);
+        }
+        self.session_list().await?;
+        Ok(())
+    }
+
+    async fn prune_config_backups(&self) -> Result<(), AdapterError> {
+        let parent = self
+            .resources
+            .config
+            .parent()
+            .ok_or(AdapterError::InvalidResource)?;
+        let mut entries = tokio::fs::read_dir(parent)
+            .await
+            .map_err(AdapterError::Io)?;
+        let mut backups = Vec::new();
+        while let Some(entry) = entries.next_entry().await.map_err(AdapterError::Io)? {
+            let name = entry.file_name();
+            if name.to_string_lossy().starts_with(".ocservia-success-") {
+                backups.push((name, entry.path()));
+            }
+        }
+        backups.sort_by(|left, right| left.0.cmp(&right.0));
+        let remove = backups.len().saturating_sub(10);
+        for (_, path) in backups.into_iter().take(remove) {
+            tokio::fs::remove_file(path)
+                .await
+                .map_err(AdapterError::Io)?;
+        }
+        sync_directory(parent).await
+    }
+
+    async fn find_config_recovery(
+        &self,
+        expected_hash: &[u8],
+    ) -> Result<Option<PathBuf>, AdapterError> {
+        let parent = self
+            .resources
+            .config
+            .parent()
+            .ok_or(AdapterError::InvalidResource)?;
+        let mut entries = tokio::fs::read_dir(parent)
+            .await
+            .map_err(AdapterError::Io)?;
+        let mut backups = Vec::new();
+        let mut successes = Vec::new();
+        while let Some(entry) = entries.next_entry().await.map_err(AdapterError::Io)? {
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            if !name.starts_with(".ocservia-backup-") && !name.starts_with(".ocservia-success-") {
+                continue;
+            }
+            let bytes = tokio::fs::read(entry.path())
+                .await
+                .map_err(AdapterError::Io)?;
+            if bytes.len() <= MAX_CONFIG_BYTES && Sha256::digest(&bytes).as_slice() == expected_hash
+            {
+                if name.starts_with(".ocservia-backup-") {
+                    backups.push(entry.path());
+                } else {
+                    successes.push(entry.path());
+                }
+            }
+        }
+        backups.sort();
+        successes.sort();
+        Ok(backups.pop().or_else(|| successes.pop()))
     }
 
     /// Lists fixed ocpasswd identities without returning password hashes.
@@ -1086,6 +1397,39 @@ impl Adapter {
             }
         }
         Ok(())
+    }
+
+    /// Removes only uncommitted config-apply staging files after a privd restart.
+    ///
+    /// # Errors
+    ///
+    /// Returns a fixed-path I/O error when the config directory cannot be read or a recognized
+    /// stale staging file cannot be removed.
+    pub async fn cleanup_stale_config_apply_staging(&self) -> Result<(), AdapterError> {
+        let _guard = self.config_plan_lock.lock().await;
+        let parent = self
+            .resources
+            .config
+            .parent()
+            .ok_or(AdapterError::InvalidResource)?;
+        let mut entries = tokio::fs::read_dir(parent)
+            .await
+            .map_err(AdapterError::Io)?;
+        while let Some(entry) = entries.next_entry().await.map_err(AdapterError::Io)? {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            let Some(suffix) = name.strip_prefix(".ocservia-apply-") else {
+                continue;
+            };
+            let Ok(id) = Uuid::parse_str(suffix) else {
+                continue;
+            };
+            if id.get_version_num() == 7 {
+                tokio::fs::remove_file(entry.path())
+                    .await
+                    .map_err(AdapterError::Io)?;
+            }
+        }
+        sync_directory(parent).await
     }
 
     async fn ensure_boot_id(&self, expected: &str) -> Result<(), AdapterError> {
@@ -1955,12 +2299,42 @@ async fn read_optional_secret_file(path: &Path) -> Result<Zeroizing<Vec<u8>>, Ad
     }
 }
 
+#[derive(Clone, Copy)]
+struct FileIdentity {
+    mode: u32,
+    uid: u32,
+    gid: u32,
+}
+
+async fn file_identity(path: &Path) -> Result<FileIdentity, AdapterError> {
+    match tokio::fs::metadata(path).await {
+        Ok(metadata) => Ok(FileIdentity {
+            mode: metadata.permissions().mode() & 0o777,
+            uid: metadata.uid(),
+            gid: metadata.gid(),
+        }),
+        Err(error) => Err(AdapterError::Io(error)),
+    }
+}
+
 async fn file_mode(path: &Path) -> Result<u32, AdapterError> {
     match tokio::fs::metadata(path).await {
         Ok(metadata) => Ok(metadata.permissions().mode() & 0o777),
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(0o660),
         Err(error) => Err(AdapterError::Io(error)),
     }
+}
+
+fn lock_config_file(config: &Path) -> Result<std::fs::File, AdapterError> {
+    let parent = config.parent().ok_or(AdapterError::InvalidResource)?;
+    let path = parent.join(".ocservia-config.lock");
+    reject_symlink(&path)?;
+    let mut options = StdOpenOptions::new();
+    options.read(true).write(true).create(true).mode(0o600);
+    let file = options.open(path).map_err(AdapterError::Io)?;
+    rustix::fs::flock(&file, rustix::fs::FlockOperation::LockExclusive)
+        .map_err(|error| AdapterError::Io(error.into()))?;
+    Ok(file)
 }
 
 async fn atomic_replace(staging: &Path, path: &Path) -> Result<(), AdapterError> {
@@ -1974,6 +2348,28 @@ async fn atomic_replace(staging: &Path, path: &Path) -> Result<(), AdapterError>
         .await
         .map_err(AdapterError::Io)?;
     let parent = path.parent().ok_or(AdapterError::InvalidResource)?;
+    sync_directory(parent).await
+}
+
+async fn write_new_synced(
+    path: &Path,
+    bytes: &[u8],
+    identity: FileIdentity,
+) -> Result<(), AdapterError> {
+    let mut options = tokio::fs::OpenOptions::new();
+    options.write(true).create_new(true).mode(identity.mode);
+    let mut file = options.open(path).await.map_err(AdapterError::Io)?;
+    rustix::fs::fchown(
+        &file,
+        Some(rustix::fs::Uid::from_raw(identity.uid)),
+        Some(rustix::fs::Gid::from_raw(identity.gid)),
+    )
+    .map_err(|error| AdapterError::Io(error.into()))?;
+    file.write_all(bytes).await.map_err(AdapterError::Io)?;
+    file.sync_all().await.map_err(AdapterError::Io)
+}
+
+async fn sync_directory(parent: &Path) -> Result<(), AdapterError> {
     let directory = tokio::fs::File::open(parent)
         .await
         .map_err(AdapterError::Io)?;
@@ -2364,6 +2760,7 @@ mod tests {
             .await
             .expect("validate candidate");
         assert!(result.current_unchanged && result.staging_cleaned);
+        assert_eq!(result.current_hash, Sha256::digest(original).as_slice());
         assert!(result.diff_redacted.contains("<secret-ref:node>"));
         assert!(!result.diff_redacted.contains("tls/server"));
         assert_eq!(
@@ -2402,6 +2799,441 @@ mod tests {
             Err(AdapterError::CommandFailed { .. })
         ));
         std::fs::remove_dir_all(directory).expect("remove plan fixture");
+    }
+
+    #[tokio::test]
+    async fn config_apply_commits_rolls_back_and_marks_critical_failure() {
+        async fn run_case(validator_body: &str) -> (ConfigApplyResult, Vec<u8>, PathBuf) {
+            let validator = executable("ocserv-apply", validator_body);
+            let directory = validator.parent().expect("fixture parent").to_owned();
+            let systemctl = directory.join("systemctl");
+            std::fs::write(&systemctl, "#!/bin/sh\nif [ \"$1\" = show ]; then printf 'LoadState=loaded\\nActiveState=active\\nSubState=running\\n'; fi\n")
+                .expect("write systemctl");
+            std::fs::set_permissions(&systemctl, std::fs::Permissions::from_mode(0o700))
+                .expect("systemctl executable");
+            let occtl = executable("occtl-apply", "printf '[]'");
+            let config = directory.join("ocserv.conf");
+            let original = b"# generated by ocservia config-plan/v1\ntcp-port = 444\n".to_vec();
+            std::fs::write(&config, &original).expect("write config");
+            std::fs::set_permissions(&config, std::fs::Permissions::from_mode(0o640))
+                .expect("set config permissions");
+            let original_metadata = std::fs::metadata(&config).expect("config metadata");
+            let resources = FixedResources::new(
+                systemctl,
+                validator,
+                occtl,
+                config.clone(),
+                PathBuf::from("/proc/sys/kernel/random/boot_id"),
+            )
+            .expect("fixed resources");
+            let candidate = b"# generated by ocservia config-plan/v1\ntcp-port = 443\n";
+            let adapter = Adapter::new(resources, Limits::default());
+            let result = adapter
+                .config_apply(
+                    candidate,
+                    &Sha256::digest(candidate),
+                    &Sha256::digest(&original),
+                    1,
+                )
+                .await
+                .expect("typed apply outcome");
+            if result.healthy && !result.rolled_back && !result.failed_critical {
+                let replay = adapter
+                    .config_apply(
+                        candidate,
+                        &Sha256::digest(candidate),
+                        &Sha256::digest(&original),
+                        1,
+                    )
+                    .await
+                    .expect("duplicate apply replay");
+                assert!(replay.healthy && !replay.rolled_back && !replay.failed_critical);
+            }
+            let result_metadata = std::fs::metadata(&config).expect("result config metadata");
+            assert_eq!(result_metadata.permissions().mode() & 0o777, 0o640);
+            assert_eq!(result_metadata.uid(), original_metadata.uid());
+            assert_eq!(result_metadata.gid(), original_metadata.gid());
+            (
+                result,
+                std::fs::read(config).expect("read result config"),
+                directory,
+            )
+        }
+
+        let (success, current, success_dir) = run_case("exit 0").await;
+        assert!(success.healthy && !success.rolled_back && !success.failed_critical);
+        assert!(
+            String::from_utf8(current)
+                .expect("config utf8")
+                .contains("tcp-port = 443")
+        );
+        assert_eq!(
+            std::fs::read_dir(&success_dir)
+                .expect("success backups")
+                .filter_map(Result::ok)
+                .filter(|entry| entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(".ocservia-success-"))
+                .count(),
+            1
+        );
+        std::fs::remove_dir_all(success_dir).expect("remove success fixture");
+
+        let (rolled_back, current, rollback_dir) =
+            run_case("grep -q 'tcp-port = 443' \"$3\" && exit 9; exit 0").await;
+        assert!(rolled_back.healthy && rolled_back.rolled_back && !rolled_back.failed_critical);
+        assert!(
+            String::from_utf8(current)
+                .expect("config utf8")
+                .contains("tcp-port = 444")
+        );
+        std::fs::remove_dir_all(rollback_dir).expect("remove rollback fixture");
+
+        let (critical, _, critical_dir) = run_case("exit 9").await;
+        assert!(critical.failed_critical && !critical.healthy);
+        std::fs::remove_dir_all(critical_dir).expect("remove critical fixture");
+    }
+
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)]
+    async fn config_apply_fault_points_and_health_commands_fail_closed() {
+        fn fixture(
+            name: &str,
+            systemctl_body: &str,
+            occtl_body: &str,
+        ) -> (Adapter, PathBuf, PathBuf, Vec<u8>, Vec<u8>) {
+            let validator = executable(name, "exit 0");
+            let directory = validator.parent().expect("fixture parent").to_owned();
+            let systemctl = directory.join("systemctl");
+            std::fs::write(&systemctl, format!("#!/bin/sh\n{systemctl_body}\n"))
+                .expect("write systemctl");
+            std::fs::set_permissions(&systemctl, std::fs::Permissions::from_mode(0o700))
+                .expect("systemctl executable");
+            let occtl = directory.join("occtl");
+            std::fs::write(&occtl, format!("#!/bin/sh\n{occtl_body}\n")).expect("write occtl");
+            std::fs::set_permissions(&occtl, std::fs::Permissions::from_mode(0o700))
+                .expect("occtl executable");
+            let config = directory.join("ocserv.conf");
+            let original = b"# generated by ocservia config-plan/v1\ntcp-port = 444\n".to_vec();
+            let candidate = b"# generated by ocservia config-plan/v1\ntcp-port = 443\n".to_vec();
+            std::fs::write(&config, &original).expect("write config");
+            let resources = FixedResources::new(
+                systemctl,
+                validator,
+                occtl,
+                config.clone(),
+                PathBuf::from("/proc/sys/kernel/random/boot_id"),
+            )
+            .expect("fixed resources");
+            (
+                Adapter::new(resources, Limits::default()),
+                directory,
+                config,
+                original,
+                candidate,
+            )
+        }
+
+        let healthy_systemctl = "if [ \"$1\" = show ]; then printf 'LoadState=loaded\\nActiveState=active\\nSubState=running\\n'; fi";
+        for point in 1..=4 {
+            let (adapter, directory, config, original, candidate) =
+                fixture("ocserv-apply-fault", healthy_systemctl, "printf '[]'");
+            adapter.inject_config_apply_fault(point);
+            let error = adapter
+                .config_apply(
+                    &candidate,
+                    &Sha256::digest(&candidate),
+                    &Sha256::digest(&original),
+                    point.into(),
+                )
+                .await
+                .expect_err("injected phase must interrupt apply");
+            if point == 1 {
+                assert!(matches!(
+                    error,
+                    AdapterError::Io(ref source) if source.raw_os_error() == Some(28)
+                ));
+            } else {
+                assert!(matches!(error, AdapterError::Unavailable));
+            }
+            if point < 4 {
+                assert_eq!(std::fs::read(&config).expect("unchanged config"), original);
+                assert!(
+                    !std::fs::read_dir(&directory)
+                        .expect("fixture directory")
+                        .filter_map(Result::ok)
+                        .any(|entry| {
+                            let name = entry.file_name();
+                            let name = name.to_string_lossy();
+                            name.starts_with(".ocservia-apply-")
+                                || name.starts_with(".ocservia-backup-")
+                        })
+                );
+            } else {
+                assert_eq!(std::fs::read(&config).expect("published config"), candidate);
+                assert!(
+                    std::fs::read_dir(&directory)
+                        .expect("fixture directory")
+                        .filter_map(Result::ok)
+                        .any(|entry| entry
+                            .file_name()
+                            .to_string_lossy()
+                            .starts_with(".ocservia-backup-"))
+                );
+                let recovered = adapter
+                    .config_apply(
+                        &candidate,
+                        &Sha256::digest(&candidate),
+                        &Sha256::digest(&original),
+                        point.into(),
+                    )
+                    .await
+                    .expect("recover post-publish interruption");
+                assert!(recovered.healthy && !recovered.rolled_back);
+            }
+            std::fs::remove_dir_all(directory).expect("remove fault fixture");
+        }
+
+        let health_failures = [
+            (
+                "reload",
+                "if [ \"$1\" = reload ] && [ ! -f \"$0.once\" ]; then : > \"$0.once\"; exit 9; fi; if [ \"$1\" = show ]; then printf 'LoadState=loaded\\nActiveState=active\\nSubState=running\\n'; fi",
+                "printf '[]'",
+            ),
+            (
+                "status",
+                "if [ \"$1\" = show ]; then if [ ! -f \"$0.once\" ]; then : > \"$0.once\"; printf 'LoadState=loaded\\nActiveState=inactive\\nSubState=dead\\n'; else printf 'LoadState=loaded\\nActiveState=active\\nSubState=running\\n'; fi; fi",
+                "printf '[]'",
+            ),
+            (
+                "occtl",
+                healthy_systemctl,
+                "if [ ! -f \"$0.once\" ]; then : > \"$0.once\"; exit 9; fi; printf '[]'",
+            ),
+        ];
+        for (name, systemctl, occtl) in health_failures {
+            let (adapter, directory, config, original, candidate) = fixture(name, systemctl, occtl);
+            let result = adapter
+                .config_apply(
+                    &candidate,
+                    &Sha256::digest(&candidate),
+                    &Sha256::digest(&original),
+                    9,
+                )
+                .await
+                .expect("health failure must produce typed rollback");
+            assert!(result.healthy && result.rolled_back && !result.failed_critical);
+            assert_eq!(std::fs::read(config).expect("rolled back config"), original);
+            std::fs::remove_dir_all(directory).expect("remove health fixture");
+        }
+    }
+
+    #[tokio::test]
+    async fn config_apply_recovers_after_publish_before_result() {
+        let validator = executable(
+            "ocserv-apply-recovery",
+            "if [ -f \"$0.fail\" ] && grep -q 'tcp-port = 443' \"$3\"; then exit 9; fi; exit 0",
+        );
+        let directory = validator.parent().expect("fixture parent").to_owned();
+        let systemctl = directory.join("systemctl");
+        std::fs::write(&systemctl, "#!/bin/sh\nif [ \"$1\" = show ]; then printf 'LoadState=loaded\\nActiveState=active\\nSubState=running\\n'; fi\n")
+            .expect("write systemctl");
+        std::fs::set_permissions(&systemctl, std::fs::Permissions::from_mode(0o700))
+            .expect("systemctl executable");
+        let occtl = executable("occtl-apply-recovery", "printf '[]'");
+        let config = directory.join("ocserv.conf");
+        let original = b"# generated by ocservia config-plan/v1\ntcp-port = 444\n";
+        let candidate = b"# generated by ocservia config-plan/v1\ntcp-port = 443\n";
+        let resources = FixedResources::new(
+            systemctl,
+            validator.clone(),
+            occtl,
+            config.clone(),
+            PathBuf::from("/proc/sys/kernel/random/boot_id"),
+        )
+        .expect("fixed resources");
+        let adapter = Adapter::new(resources, Limits::default());
+
+        std::fs::write(&config, candidate).expect("write unproven matching candidate");
+        assert!(matches!(
+            adapter
+                .config_apply(
+                    candidate,
+                    &Sha256::digest(candidate),
+                    &Sha256::digest(original),
+                    7,
+                )
+                .await,
+            Err(AdapterError::Unavailable)
+        ));
+        let backup = directory.join(format!(".ocservia-backup-{}", Uuid::now_v7()));
+        std::fs::write(&backup, original).expect("write recovery backup");
+        std::fs::write(&config, candidate).expect("publish candidate before result");
+        let finalized = adapter
+            .config_apply(
+                candidate,
+                &Sha256::digest(candidate),
+                &Sha256::digest(original),
+                7,
+            )
+            .await
+            .expect("finalize recovered apply");
+        assert!(finalized.healthy && !finalized.rolled_back && !finalized.failed_critical);
+        assert_eq!(finalized.applied_revision, 7);
+        assert!(!backup.exists());
+
+        let rollback_backup = directory.join(format!(".ocservia-backup-{}", Uuid::now_v7()));
+        std::fs::write(&rollback_backup, original).expect("write rollback recovery backup");
+        std::fs::write(&config, candidate).expect("publish unhealthy candidate");
+        std::fs::write(format!("{}.fail", validator.display()), b"")
+            .expect("enable unhealthy candidate");
+        let recovered = adapter
+            .config_apply(
+                candidate,
+                &Sha256::digest(candidate),
+                &Sha256::digest(original),
+                8,
+            )
+            .await
+            .expect("recover unhealthy publish");
+        assert!(recovered.healthy && recovered.rolled_back && !recovered.failed_critical);
+        assert_eq!(
+            std::fs::read(&config).expect("rolled back config"),
+            original
+        );
+        assert!(!rollback_backup.exists());
+        std::fs::remove_dir_all(directory).expect("remove recovery fixture");
+    }
+
+    #[tokio::test]
+    async fn config_apply_read_only_directory_is_pre_effect() {
+        if rustix::process::geteuid().as_raw() == 0 {
+            return;
+        }
+        let validator = executable("ocserv-apply-readonly", "exit 0");
+        let directory = validator.parent().expect("fixture parent").to_owned();
+        let systemctl = executable(
+            "systemctl-apply-readonly",
+            "if [ \"$1\" = show ]; then printf 'LoadState=loaded\\nActiveState=active\\nSubState=running\\n'; fi",
+        );
+        let occtl = executable("occtl-apply-readonly", "printf '[]'");
+        let config = directory.join("ocserv.conf");
+        let original = b"# generated by ocservia config-plan/v1\ntcp-port = 444\n";
+        let candidate = b"# generated by ocservia config-plan/v1\ntcp-port = 443\n";
+        std::fs::write(&config, original).expect("write config");
+        std::fs::write(directory.join(".ocservia-config.lock"), b"").expect("write lock");
+        let resources = FixedResources::new(
+            systemctl,
+            validator,
+            occtl,
+            config.clone(),
+            PathBuf::from("/proc/sys/kernel/random/boot_id"),
+        )
+        .expect("fixed resources");
+        let adapter = Adapter::new(resources, Limits::default());
+        std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o500))
+            .expect("make fixture read only");
+        let result = adapter
+            .config_apply(
+                candidate,
+                &Sha256::digest(candidate),
+                &Sha256::digest(original),
+                1,
+            )
+            .await;
+        std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o700))
+            .expect("restore fixture permissions");
+        assert!(matches!(result, Err(AdapterError::Io(_))));
+        assert_eq!(std::fs::read(&config).expect("unchanged config"), original);
+        assert!(
+            !std::fs::read_dir(&directory)
+                .expect("fixture directory")
+                .filter_map(Result::ok)
+                .any(|entry| {
+                    let name = entry.file_name();
+                    let name = name.to_string_lossy();
+                    name.starts_with(".ocservia-apply-") || name.starts_with(".ocservia-backup-")
+                })
+        );
+        std::fs::remove_dir_all(directory).expect("remove read-only fixture");
+    }
+
+    #[tokio::test]
+    async fn config_apply_cancellation_after_publish_retains_recovery_backup() {
+        let validator = executable("ocserv-apply-cancel", "sleep 5");
+        let directory = validator.parent().expect("fixture parent").to_owned();
+        let systemctl = executable(
+            "systemctl-apply-cancel",
+            "if [ \"$1\" = show ]; then printf 'LoadState=loaded\\nActiveState=active\\nSubState=running\\n'; fi",
+        );
+        let occtl = executable("occtl-apply-cancel", "printf '[]'");
+        let config = directory.join("ocserv.conf");
+        let original = b"# generated by ocservia config-plan/v1\ntcp-port = 444\n";
+        let candidate = b"# generated by ocservia config-plan/v1\ntcp-port = 443\n";
+        std::fs::write(&config, original).expect("write config");
+        let resources = FixedResources::new(
+            systemctl,
+            validator.clone(),
+            occtl,
+            config.clone(),
+            PathBuf::from("/proc/sys/kernel/random/boot_id"),
+        )
+        .expect("fixed resources");
+        let applying = Adapter::new(resources.clone(), Limits::default());
+        let task = tokio::spawn(async move {
+            applying
+                .config_apply(
+                    candidate,
+                    &Sha256::digest(candidate),
+                    &Sha256::digest(original),
+                    4,
+                )
+                .await
+        });
+        for _ in 0..200 {
+            if std::fs::read(&config).is_ok_and(|bytes| bytes == candidate)
+                && std::fs::read_dir(&directory)
+                    .expect("fixture directory")
+                    .filter_map(Result::ok)
+                    .any(|entry| {
+                        entry
+                            .file_name()
+                            .to_string_lossy()
+                            .starts_with(".ocservia-backup-")
+                    })
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        task.abort();
+        let _ = task.await;
+        assert_eq!(std::fs::read(&config).expect("published config"), candidate);
+        assert!(
+            std::fs::read_dir(&directory)
+                .expect("fixture directory")
+                .filter_map(Result::ok)
+                .any(|entry| entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(".ocservia-backup-"))
+        );
+
+        std::fs::write(&validator, "#!/bin/sh\nexit 0\n").expect("repair validator");
+        std::fs::set_permissions(&validator, std::fs::Permissions::from_mode(0o700))
+            .expect("validator executable");
+        let recovered = Adapter::new(resources, Limits::default())
+            .config_apply(
+                candidate,
+                &Sha256::digest(candidate),
+                &Sha256::digest(original),
+                4,
+            )
+            .await
+            .expect("recover cancelled apply");
+        assert!(recovered.healthy && !recovered.rolled_back && !recovered.failed_critical);
+        std::fs::remove_dir_all(directory).expect("remove cancellation fixture");
     }
 
     #[tokio::test]
@@ -2769,7 +3601,7 @@ mod tests {
         std::fs::write(&users, original).expect("original");
         let openssl = executable("openssl-fast", "printf rotated-password");
         let openssl_directory = openssl.parent().expect("openssl parent").to_owned();
-        let slow_ocpasswd = executable("ocpasswd-slow", "sleep 2");
+        let slow_ocpasswd = executable("ocpasswd-slow", "sleep 5");
         let slow_directory = slow_ocpasswd
             .parent()
             .expect("slow ocpasswd parent")
@@ -2791,23 +3623,24 @@ mod tests {
         let adapter = Adapter::new(
             resources,
             Limits {
-                timeout: Duration::from_millis(50),
+                timeout: Duration::from_millis(500),
                 output_bytes: DEFAULT_OUTPUT_BYTES,
             },
         );
-        assert!(matches!(
-            adapter
-                .user_password_rotate("alice", "test-key", &[7_u8; 64], 2, test_effect())
-                .await,
-            Err(AdapterError::DeadlineExceeded)
-        ));
+        let timeout_result = adapter
+            .user_password_rotate("alice", "test-key", &[7_u8; 64], 2, test_effect())
+            .await;
+        assert!(
+            matches!(timeout_result, Err(AdapterError::DeadlineExceeded)),
+            "unexpected password staging timeout result: {timeout_result:?}"
+        );
         assert!(staging_files(&directory).is_empty());
         assert_eq!(
             std::fs::read(&users).expect("preserved after timeout"),
             original
         );
 
-        let slow_openssl = executable("openssl-slow", "sleep 2");
+        let slow_openssl = executable("openssl-slow", "sleep 5");
         let slow_openssl_directory = slow_openssl
             .parent()
             .expect("slow openssl parent")
@@ -2825,16 +3658,17 @@ mod tests {
                 )
                 .expect("slow decrypt resources"),
             Limits {
-                timeout: Duration::from_millis(50),
+                timeout: Duration::from_millis(500),
                 output_bytes: DEFAULT_OUTPUT_BYTES,
             },
         );
-        assert!(matches!(
-            decrypt_adapter
-                .user_password_rotate("alice", "test-key", &[7_u8; 64], 2, test_effect())
-                .await,
-            Err(AdapterError::DeadlineExceeded)
-        ));
+        let decrypt_timeout_result = decrypt_adapter
+            .user_password_rotate("alice", "test-key", &[7_u8; 64], 2, test_effect())
+            .await;
+        assert!(
+            matches!(decrypt_timeout_result, Err(AdapterError::DeadlineExceeded)),
+            "unexpected password decrypt timeout result: {decrypt_timeout_result:?}"
+        );
         assert!(staging_files(&directory).is_empty());
         assert_eq!(
             std::fs::read(&users).expect("preserved after decrypt timeout"),
@@ -2886,7 +3720,7 @@ mod tests {
 
         let lock_ocpasswd = executable(
             "ocpasswd-lock-slow",
-            "if [ \"$3\" = \"-l\" ]; then sleep 2; exit 0; fi\nprintf '%s\\n' 'alice:staff:$6$new-hash' > \"$2\"",
+            "if [ \"$3\" = \"-l\" ]; then sleep 5; exit 0; fi\nprintf '%s\\n' 'alice:staff:$6$new-hash' > \"$2\"",
         );
         let lock_directory = lock_ocpasswd
             .parent()
@@ -2906,16 +3740,17 @@ mod tests {
         let lock_adapter = Adapter::new(
             lock_resources,
             Limits {
-                timeout: Duration::from_millis(50),
+                timeout: Duration::from_millis(500),
                 output_bytes: DEFAULT_OUTPUT_BYTES,
             },
         );
-        assert!(matches!(
-            lock_adapter
-                .user_password_rotate("alice", "test-key", &[7_u8; 64], 2, test_effect())
-                .await,
-            Err(AdapterError::DeadlineExceeded)
-        ));
+        let lock_timeout_result = lock_adapter
+            .user_password_rotate("alice", "test-key", &[7_u8; 64], 2, test_effect())
+            .await;
+        assert!(
+            matches!(lock_timeout_result, Err(AdapterError::DeadlineExceeded)),
+            "unexpected password lock timeout result: {lock_timeout_result:?}"
+        );
         assert!(staging_files(&directory).is_empty());
         assert_eq!(
             std::fs::read(&users).expect("preserved after lock timeout"),

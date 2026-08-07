@@ -17,7 +17,7 @@ import {
   Configuration,
   ConfigurationApi,
 } from '@ocservia/api-client';
-import type { CreateConfigPlanRequest } from '@ocservia/api-client';
+import type { ApplyConfigPlanRequest } from '@ocservia/api-client';
 
 async function example() {
   console.log("🚀 Testing @ocservia/api-client SDK...");
@@ -31,15 +31,15 @@ async function example() {
 
   const body = {
     // string
-    nodeId: 38400000-8cf0-11bd-b23e-10b96e4ef00d,
+    planId: 38400000-8cf0-11bd-b23e-10b96e4ef00d,
     // string
     idempotencyKey: idempotencyKey_example,
-    // ConfigPlanRequest
-    configPlanRequest: ...,
-  } satisfies CreateConfigPlanRequest;
+    // ConfigApplyRequest
+    configApplyRequest: ...,
+  } satisfies ApplyConfigPlanRequest;
 
   try {
-    const data = await api.createConfigPlan(body);
+    const data = await api.applyConfigPlan(body);
     console.log(data);
   } catch (error) {
     console.error(error);
@@ -58,6 +58,7 @@ All URIs are relative to _/api/v1_
 
 | Class              | Method                                                                         | HTTP request                                               | Description                                                                      |
 | ------------------ | ------------------------------------------------------------------------------ | ---------------------------------------------------------- | -------------------------------------------------------------------------------- |
+| _ConfigurationApi_ | [**applyConfigPlan**](docs/ConfigurationApi.md#applyconfigplan)                | **POST** /config-plans/{plan_id}/apply                     | Queue atomic application of an unexpired independently approved plan             |
 | _ConfigurationApi_ | [**createConfigPlan**](docs/ConfigurationApi.md#createconfigplan)              | **POST** /nodes/{node_id}/config-plans                     | Render and remotely validate an immutable configuration candidate                |
 | _ConfigurationApi_ | [**getConfigPlan**](docs/ConfigurationApi.md#getconfigplan)                    | **GET** /config-plans/{plan_id}                            | Get validation, safe diff, warnings, and approval state for a configuration plan |
 | _DevelopmentApi_   | [**createLocalSimulation**](docs/DevelopmentApi.md#createlocalsimulation)      | **POST** /development/simulations                          | Start a side-effect-free local agent simulation                                  |
@@ -116,6 +117,7 @@ All URIs are relative to _/api/v1_
 - [AuditVerification](docs/AuditVerification.md)
 - [BreakGlassRequest](docs/BreakGlassRequest.md)
 - [BuildInfo](docs/BuildInfo.md)
+- [ConfigApplyRequest](docs/ConfigApplyRequest.md)
 - [ConfigDirective](docs/ConfigDirective.md)
 - [ConfigPlan](docs/ConfigPlan.md)
 - [ConfigPlanApprovalSummary](docs/ConfigPlanApprovalSummary.md)

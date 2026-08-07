@@ -110,6 +110,12 @@ export interface ConfigPlan {
    * @type {string}
    * @memberof ConfigPlan
    */
+  currentHash?: string;
+  /**
+   *
+   * @type {string}
+   * @memberof ConfigPlan
+   */
   approvalId?: string;
   /**
    *
@@ -272,6 +278,8 @@ export function ConfigPlanFromJSONTyped(
     warnings: json["warnings"],
     currentUnchanged: json["current_unchanged"],
     stagingCleaned: json["staging_cleaned"],
+    currentHash:
+      json["current_hash"] == null ? undefined : json["current_hash"],
     approvalId: json["approval_id"] == null ? undefined : json["approval_id"],
     approvalStatus:
       json["approval_status"] == null ? undefined : json["approval_status"],
@@ -306,6 +314,7 @@ export function ConfigPlanToJSONTyped(
     warnings: value["warnings"],
     current_unchanged: value["currentUnchanged"],
     staging_cleaned: value["stagingCleaned"],
+    current_hash: value["currentHash"],
     approval_id: value["approvalId"],
     approval_status: value["approvalStatus"],
     expires_at: value["expiresAt"].toISOString(),

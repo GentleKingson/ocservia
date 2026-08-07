@@ -38,6 +38,12 @@ export interface ConfigPlanApprovalSummary {
    */
   candidateHash: string;
   /**
+   *
+   * @type {string}
+   * @memberof ConfigPlanApprovalSummary
+   */
+  currentHash: string;
+  /**
    * RFC 3339 timestamp normalized to UTC.
    * @type {Date}
    * @memberof ConfigPlanApprovalSummary
@@ -73,6 +79,13 @@ export function instanceOfConfigPlanApprovalSummary(
   )
     return false;
   if (
+    (!("currentHash" in (value as Record<string, any>)) &&
+      !("current_hash" in (value as Record<string, any>))) ||
+    ((value as Record<string, any>)["currentHash"] === undefined &&
+      (value as Record<string, any>)["current_hash"] === undefined)
+  )
+    return false;
+  if (
     (!("expiresAt" in (value as Record<string, any>)) &&
       !("expires_at" in (value as Record<string, any>))) ||
     ((value as Record<string, any>)["expiresAt"] === undefined &&
@@ -99,6 +112,7 @@ export function ConfigPlanApprovalSummaryFromJSONTyped(
     nodeId: json["node_id"],
     expectedRevision: json["expected_revision"],
     candidateHash: json["candidate_hash"],
+    currentHash: json["current_hash"],
     expiresAt: new Date(json["expires_at"]),
   };
 }
@@ -121,6 +135,7 @@ export function ConfigPlanApprovalSummaryToJSONTyped(
     node_id: value["nodeId"],
     expected_revision: value["expectedRevision"],
     candidate_hash: value["candidateHash"],
+    current_hash: value["currentHash"],
     expires_at: value["expiresAt"].toISOString(),
   };
 }

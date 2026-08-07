@@ -823,6 +823,28 @@ paths:
         "403": { $ref: "#/components/responses/Problem" }
         "404": { $ref: "#/components/responses/Problem" }
         default: { $ref: "#/components/responses/Problem" }
+  /config-plans/{plan_id}/apply:
+    post:
+      operationId: applyConfigPlan
+      summary: Queue atomic application of an unexpired independently approved plan
+      tags: [configuration]
+      parameters:
+        - name: plan_id
+          in: path
+          required: true
+          schema: { $ref: "#/components/schemas/UuidV7" }
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ConfigApplyRequest" }
+      responses:
+        "202": { $ref: "#/components/responses/OperationAccepted" }
+        "400": { $ref: "#/components/responses/Problem" }
+        "403": { $ref: "#/components/responses/Problem" }
+        "409": { $ref: "#/components/responses/Problem" }
+        default: { $ref: "#/components/responses/Problem" }
   /nodes/{node_id}/groups/{group_name}:
     put:
       operationId: applyNodeGroup
@@ -1243,6 +1265,14 @@ components:
           $ref: "#/components/schemas/UuidV7"
         command_id:
           $ref: "#/components/schemas/UuidV7"
+        config_apply_state:
+          type: string
+          enum: [queued, dispatched, accepted, running, succeeded, failed, rolled_back, failed_critical, unknown, expired]
+          description: Typed configuration outcome when this operation applies a configuration plan.
+        config_apply_failure_code:
+          type: string
+          minLength: 1
+          maxLength: 128
         version:
           type: integer
           format: int64
@@ -1447,18 +1477,27 @@ components:
         warnings: { type: array, maxItems: 128, items: { type: string, maxLength: 256 } }
         current_unchanged: { type: boolean }
         staging_cleaned: { type: boolean }
+        current_hash: { type: string, pattern: "^[0-9a-f]{64}$" }
         approval_id: { $ref: "#/components/schemas/UuidV7" }
         approval_status: { type: string, enum: [pending, approved, rejected, expired, consumed] }
         expires_at: { $ref: "#/components/schemas/UtcDateTime" }
         created_at: { $ref: "#/components/schemas/UtcDateTime" }
+    ConfigApplyRequest:
+      type: object
+      additionalProperties: false
+      required: [approval_id, reason]
+      properties:
+        approval_id: { $ref: "#/components/schemas/UuidV7" }
+        reason: { type: string, minLength: 1, maxLength: 512 }
     ConfigPlanApprovalSummary:
       type: object
       additionalProperties: false
-      required: [node_id, expected_revision, candidate_hash, expires_at]
+      required: [node_id, expected_revision, candidate_hash, current_hash, expires_at]
       properties:
         node_id: { $ref: "#/components/schemas/UuidV7" }
         expected_revision: { type: integer, format: int64, minimum: 0 }
         candidate_hash: { type: string, pattern: "^[0-9a-f]{64}$" }
+        current_hash: { type: string, pattern: "^[0-9a-f]{64}$" }
         expires_at: { $ref: "#/components/schemas/UtcDateTime" }
     UserPolicyRequest:
       type: object
@@ -1550,7 +1589,7 @@ components:
     QueueMetrics:
       type: object
       additionalProperties: false
-      required: [outbox_unpublished_total, outbox_oldest_age_seconds, command_queue_depth, command_unknown_total]
+      required: [outbox_unpublished_total, outbox_oldest_age_seconds, command_queue_depth, command_unknown_total, config_rollback_total, config_failed_critical_total]
       properties:
         outbox_unpublished_total:
           type: integer
@@ -1565,6 +1604,14 @@ components:
           format: int64
           minimum: 0
         command_unknown_total:
+          type: integer
+          format: int64
+          minimum: 0
+        config_rollback_total:
+          type: integer
+          format: int64
+          minimum: 0
+        config_failed_critical_total:
           type: integer
           format: int64
           minimum: 0

@@ -44,7 +44,7 @@ pub struct PrivdRequest {
     /// One of the permanently fixed operations.
     #[prost(
         oneof = "privd_request::Operation",
-        tags = "10, 11, 12, 13, 14, 15, 16, 17, 18, 30, 31, 32, 33, 34, 35, 36, 37, 38"
+        tags = "10, 11, 12, 13, 14, 15, 16, 17, 18, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39"
     )]
     pub operation: Option<privd_request::Operation>,
 }
@@ -54,9 +54,9 @@ pub mod privd_request {
     use prost::Oneof;
 
     use super::{
-        ConfigPlanRequest, DesiredEffectObserveRequest, GroupApplyRequest, IpBanRemoveRequest,
-        ReadRequest, ServiceReloadRequest, SessionMutationRequest, UserDisableRequest,
-        UserEnableRequest, UserSecretRequest,
+        ConfigApplyRequest, ConfigPlanRequest, DesiredEffectObserveRequest, GroupApplyRequest,
+        IpBanRemoveRequest, ReadRequest, ServiceReloadRequest, SessionMutationRequest,
+        UserDisableRequest, UserEnableRequest, UserSecretRequest,
     };
 
     /// Read-only operation allowlist.
@@ -116,6 +116,9 @@ pub mod privd_request {
         /// Enable a user without changing its password or groups.
         #[prost(message, tag = "38")]
         UserEnable(UserEnableRequest),
+        /// Atomically apply one approved immutable configuration candidate.
+        #[prost(message, tag = "39")]
+        ConfigApply(ConfigApplyRequest),
     }
 }
 
@@ -141,6 +144,42 @@ pub struct ConfigPlanResult {
     pub current_unchanged: bool,
     #[prost(bool, tag = "5")]
     pub staging_cleaned: bool,
+    #[prost(bytes = "vec", tag = "6")]
+    pub current_hash: Vec<u8>,
+}
+
+/// Approved immutable configuration apply request. No caller-selected path is accepted.
+#[derive(Clone, PartialEq, Eq, Message)]
+pub struct ConfigApplyRequest {
+    #[prost(bytes = "vec", tag = "1")]
+    pub candidate: Vec<u8>,
+    #[prost(bytes = "vec", tag = "2")]
+    pub candidate_hash: Vec<u8>,
+    #[prost(bytes = "vec", tag = "3")]
+    pub expected_current_hash: Vec<u8>,
+    #[prost(uint64, tag = "4")]
+    pub desired_revision: u64,
+}
+
+/// Secret-safe final transaction outcome.
+#[derive(Clone, PartialEq, Eq, Message)]
+pub struct ConfigApplyResult {
+    #[prost(bytes = "vec", tag = "1")]
+    pub candidate_hash: Vec<u8>,
+    #[prost(bytes = "vec", tag = "2")]
+    pub previous_hash: Vec<u8>,
+    #[prost(bytes = "vec", tag = "3")]
+    pub observed_hash: Vec<u8>,
+    #[prost(uint64, tag = "4")]
+    pub applied_revision: u64,
+    #[prost(bool, tag = "5")]
+    pub healthy: bool,
+    #[prost(bool, tag = "6")]
+    pub rolled_back: bool,
+    #[prost(bool, tag = "7")]
+    pub failed_critical: bool,
+    #[prost(string, tag = "8")]
+    pub failure_code: String,
 }
 
 /// One stable numeric session scoped to the current boot.
@@ -402,7 +441,7 @@ pub struct PrivdResponse {
     /// Exactly one stable result or error.
     #[prost(
         oneof = "privd_response::Result",
-        tags = "10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20"
+        tags = "10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21"
     )]
     pub result: Option<privd_response::Result>,
 }
@@ -412,8 +451,9 @@ pub mod privd_response {
     use prost::Oneof;
 
     use super::{
-        ConfigFingerprint, ConfigPlanResult, DesiredEffectObservation, GroupList, IpBanList,
-        MutationResult, OcservVersion, PrivdError, ServiceStatus, SessionList, UserList,
+        ConfigApplyResult, ConfigFingerprint, ConfigPlanResult, DesiredEffectObservation,
+        GroupList, IpBanList, MutationResult, OcservVersion, PrivdError, ServiceStatus,
+        SessionList, UserList,
     };
 
     /// Result allowlist.
@@ -449,6 +489,8 @@ pub mod privd_response {
         /// Side-effect-free staged configuration validation result.
         #[prost(message, tag = "19")]
         ConfigPlan(ConfigPlanResult),
+        #[prost(message, tag = "21")]
+        ConfigApply(ConfigApplyResult),
         /// Stable failure.
         #[prost(message, tag = "20")]
         Error(PrivdError),

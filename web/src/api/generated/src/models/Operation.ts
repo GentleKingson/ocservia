@@ -52,6 +52,18 @@ export interface Operation {
    */
   commandId?: string;
   /**
+   * Typed configuration outcome when this operation applies a configuration plan.
+   * @type {OperationConfigApplyStateEnum}
+   * @memberof Operation
+   */
+  configApplyState?: OperationConfigApplyStateEnum;
+  /**
+   *
+   * @type {string}
+   * @memberof Operation
+   */
+  configApplyFailureCode?: string;
+  /**
    *
    * @type {number}
    * @memberof Operation
@@ -76,6 +88,24 @@ export interface Operation {
    */
   expiresAt?: Date;
 }
+
+/**
+ * @export
+ */
+export const OperationConfigApplyStateEnum = {
+  Queued: "queued",
+  Dispatched: "dispatched",
+  Accepted: "accepted",
+  Running: "running",
+  Succeeded: "succeeded",
+  Failed: "failed",
+  RolledBack: "rolled_back",
+  FailedCritical: "failed_critical",
+  Unknown: "unknown",
+  Expired: "expired",
+} as const;
+export type OperationConfigApplyStateEnum =
+  (typeof OperationConfigApplyStateEnum)[keyof typeof OperationConfigApplyStateEnum];
 
 /**
  * Check if a given object implements the Operation interface.
@@ -117,6 +147,14 @@ export function OperationFromJSONTyped(
     state: OperationStateFromJSON(json["state"]),
     nodeId: json["node_id"] == null ? undefined : json["node_id"],
     commandId: json["command_id"] == null ? undefined : json["command_id"],
+    configApplyState:
+      json["config_apply_state"] == null
+        ? undefined
+        : json["config_apply_state"],
+    configApplyFailureCode:
+      json["config_apply_failure_code"] == null
+        ? undefined
+        : json["config_apply_failure_code"],
     version: json["version"],
     createdAt: new Date(json["created_at"]),
     updatedAt: new Date(json["updated_at"]),
@@ -142,6 +180,8 @@ export function OperationToJSONTyped(
     state: OperationStateToJSON(value["state"]),
     node_id: value["nodeId"],
     command_id: value["commandId"],
+    config_apply_state: value["configApplyState"],
+    config_apply_failure_code: value["configApplyFailureCode"],
     version: value["version"],
     created_at: value["createdAt"].toISOString(),
     updated_at: value["updatedAt"].toISOString(),

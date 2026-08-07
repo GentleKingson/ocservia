@@ -60,6 +60,17 @@ func HashV1(envelope *agentv1.CommandEnvelope) ([sha256.Size]byte, error) {
 			return [sha256.Size]byte{}, errors.New("candidate hash is malformed")
 		}
 		canonicalPayload = append(canonicalPayload, payload.GetCandidateHash()...)
+	case *agentv1.CommandEnvelope_ConfigApply:
+		payloadKind = 104
+		payload := envelope.GetConfigApply()
+		if len(payload.GetCandidateHash()) != sha256.Size || len(payload.GetExpectedCurrentHash()) != sha256.Size || payload.GetDesiredRevision() == 0 {
+			return [sha256.Size]byte{}, errors.New("configuration apply identity is malformed")
+		}
+		canonicalPayload = append(canonicalPayload, payload.GetCandidateHash()...)
+		canonicalPayload = append(canonicalPayload, payload.GetExpectedCurrentHash()...)
+		var desired [8]byte
+		binary.BigEndian.PutUint64(desired[:], payload.GetDesiredRevision())
+		canonicalPayload = append(canonicalPayload, desired[:]...)
 	case *agentv1.CommandEnvelope_SessionTerminate:
 		payloadKind = 112
 		canonicalPayload = canonicalStrings(envelope.GetSessionTerminate().GetSessionId(), envelope.GetSessionTerminate().GetBootId())

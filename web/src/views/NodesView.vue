@@ -30,7 +30,11 @@ import {
   type UserPolicyForm,
 } from "../adapters/user-policy";
 import UserPolicyFields from "../upstream/UserPolicyFields.vue";
-import { createConfigPlan, getConfigPlan } from "../api/client";
+import {
+  applyConfigPlan,
+  createConfigPlan,
+  getConfigPlan,
+} from "../api/client";
 
 const fleet = useFleetStore();
 const pendingAction = ref<{
@@ -67,6 +71,8 @@ const configSecretProvider = ref("node");
 const configCertificateKey = ref("tls/server-certificate");
 const configPrivateKey = ref("tls/server-private-key");
 const configReason = ref("");
+const configApplyApproval = ref("");
+const configApplyReason = ref("");
 const usersState = computed(() =>
   fleet.userGroupState.filter((item) => item.kind === "user"),
 );
@@ -215,6 +221,8 @@ function openConfigPlan(): void {
   configPlan.value = undefined;
   configError.value = "";
   configReason.value = "";
+  configApplyApproval.value = "";
+  configApplyReason.value = "";
 }
 
 async function submitConfigPlan(): Promise<void> {
@@ -267,6 +275,30 @@ async function submitConfigPlan(): Promise<void> {
   } catch (error) {
     configError.value =
       error instanceof Error ? error.message : "Configuration plan failed";
+  } finally {
+    configLoading.value = false;
+  }
+}
+
+async function submitConfigApply(): Promise<void> {
+  if (
+    !configPlan.value ||
+    !configApplyApproval.value.trim() ||
+    !configApplyReason.value.trim()
+  )
+    return;
+  configLoading.value = true;
+  configError.value = "";
+  try {
+    const operation = await applyConfigPlan(configPlan.value.id, {
+      approvalId: configApplyApproval.value.trim(),
+      reason: configApplyReason.value.trim(),
+    });
+    configDialog.value = false;
+    await fleet.trackOperation(operation.id);
+  } catch (error) {
+    configError.value =
+      error instanceof Error ? error.message : "Configuration apply failed";
   } finally {
     configLoading.value = false;
   }
@@ -895,6 +927,32 @@ async function submitConfigPlan(): Promise<void> {
               {{ warning }}
             </li>
           </ul>
+          <template v-if="configPlan.validation === 'valid'">
+            <label for="config-apply-approval">{{ $t("approvalId") }}</label>
+            <input
+              id="config-apply-approval"
+              v-model="configApplyApproval"
+              required
+            />
+            <label for="config-apply-reason">{{ $t("reason") }}</label>
+            <textarea
+              id="config-apply-reason"
+              v-model="configApplyReason"
+              maxlength="512"
+            ></textarea>
+            <button
+              type="button"
+              class="primary"
+              :disabled="
+                configLoading ||
+                !configApplyApproval.trim() ||
+                !configApplyReason.trim()
+              "
+              @click="submitConfigApply"
+            >
+              {{ $t("apply") }}
+            </button>
+          </template>
         </div>
         <p v-if="configError" class="operation-error" role="alert">
           {{ configError }}

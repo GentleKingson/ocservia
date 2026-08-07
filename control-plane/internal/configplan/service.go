@@ -52,10 +52,23 @@ type Plan struct {
 	Warnings         []string   `json:"warnings"`
 	CurrentUnchanged bool       `json:"current_unchanged"`
 	StagingCleaned   bool       `json:"staging_cleaned"`
+	CurrentHash      string     `json:"current_hash,omitempty"`
 	ApprovalID       *uuid.UUID `json:"approval_id,omitempty"`
 	ApprovalStatus   string     `json:"approval_status,omitempty"`
 	ExpiresAt        time.Time  `json:"expires_at"`
 	CreatedAt        time.Time  `json:"created_at"`
+}
+
+type ApplyRequest struct {
+	PlanID          uuid.UUID
+	ApprovalID      uuid.UUID
+	IdempotencyKey  string
+	ActorID         string
+	ActorIdentityID uuid.UUID
+	ActorSessionID  uuid.UUID
+	RequestID       string
+	Traceparent     string
+	Reason          string
 }
 
 type Service struct {
@@ -166,12 +179,53 @@ func (s *Service) Get(ctx context.Context, id uuid.UUID) (Plan, error) {
 				plan.Warnings = append(plan.Warnings, validation.GetWarnings()...)
 				plan.CurrentUnchanged = true
 				plan.StagingCleaned = true
+				if len(validation.GetCurrentHash()) == 32 {
+					plan.CurrentHash = hex.EncodeToString(validation.GetCurrentHash())
+				} else {
+					plan.Validation = "failed"
+				}
 			} else {
 				plan.Validation = "failed"
 			}
 		}
 	}
 	return plan, nil
+}
+
+// Apply atomically consumes the independent approval and queues the exact validated candidate.
+func (s *Service) Apply(ctx context.Context, request ApplyRequest) (operations.Operation, bool, error) {
+	if request.PlanID == uuid.Nil || request.ApprovalID == uuid.Nil || strings.TrimSpace(request.IdempotencyKey) == "" || strings.TrimSpace(request.Reason) == "" || len(request.Reason) > 512 {
+		return operations.Operation{}, false, ErrInvalid
+	}
+	plan, err := s.Get(ctx, request.PlanID)
+	if err != nil {
+		return operations.Operation{}, false, err
+	}
+	if plan.Validation != "valid" || plan.CurrentHash == "" || !plan.ExpiresAt.After(s.now()) {
+		return operations.Operation{}, false, ErrStaleRevision
+	}
+	var nodeVersion int64
+	var envelopeBytes []byte
+	if err := s.pool.QueryRow(ctx, `SELECT n.version,c.envelope FROM nodes n JOIN config_plans p ON p.node_id=n.id JOIN commands c ON c.operation_id=p.operation_id WHERE p.id=$1`, request.PlanID).Scan(&nodeVersion, &envelopeBytes); err != nil {
+		return operations.Operation{}, false, err
+	}
+	var envelope agentv1.CommandEnvelope
+	if proto.Unmarshal(envelopeBytes, &envelope) != nil || envelope.GetConfigPlan() == nil {
+		return operations.Operation{}, false, ErrInvalid
+	}
+	previousHash, err := hex.DecodeString(plan.CurrentHash)
+	if err != nil || len(previousHash) != 32 {
+		return operations.Operation{}, false, ErrInvalid
+	}
+	return s.operations.CreateSynthetic(ctx, operations.CreateRequest{
+		NodeID: plan.NodeID, IdempotencyKey: request.IdempotencyKey, ExpectedVersion: nodeVersion,
+		Kind: operations.ConfigApply, Candidate: envelope.GetConfigPlan().GetCandidate(), CandidateHash: envelope.GetConfigPlan().GetCandidateHash(),
+		ExpectedCurrentHash: previousHash, PlanRevision: uint64(plan.ExpectedRevision), DesiredRevision: uint64(plan.ExpectedRevision) + 1,
+		ApplyMetadata: &operations.ConfigApplyMetadata{PlanID: request.PlanID}, ApprovalID: request.ApprovalID,
+		TTL: 15 * time.Minute, RequestID: request.RequestID, Traceparent: request.Traceparent,
+		ActorID: request.ActorID, ActorIdentityID: request.ActorIdentityID, ActorSessionID: request.ActorSessionID,
+		Action: "config.apply", Reason: request.Reason,
+	})
 }
 
 func (s *Service) Resource(ctx context.Context, id uuid.UUID) (workspaceID, nodeID uuid.UUID, err error) {
