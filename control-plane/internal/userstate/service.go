@@ -204,8 +204,8 @@ func (s *Service) Mutate(ctx context.Context, request MutationRequest) (operatio
 func (s *Service) List(ctx context.Context, nodeID uuid.UUID) ([]ResourceState, error) {
 	rows, err := s.pool.Query(ctx, `
 		SELECT kind,name,desired_enabled,observed_enabled,desired_members,observed_members,
-		       desired_version,desired_revision,observed_revision,encode(desired_fingerprint,'hex'),
-		       encode(observed_fingerprint,'hex'),node_status,operation_id::text,operation_state,
+		       desired_version,desired_revision,observed_revision,COALESCE(encode(desired_fingerprint,'hex'),''),
+		       COALESCE(encode(observed_fingerprint,'hex'),''),node_status,operation_id::text,operation_state,
 		       command_state,payload_type,safe_rejected,observed_at
 		FROM (
 		 SELECT 'user'::text kind,COALESCE(d.username,o.username) name,d.enabled desired_enabled,o.enabled observed_enabled,
