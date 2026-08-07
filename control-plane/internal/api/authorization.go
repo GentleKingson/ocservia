@@ -179,6 +179,8 @@ func routeAction(r *http.Request) string {
 		return "operation.read"
 	case strings.HasPrefix(path, "/api/v1/events"):
 		return "operation.read"
+	case r.Method == http.MethodPost && strings.HasSuffix(path, "/synthetic-commands"):
+		return "operation.create"
 	case strings.HasPrefix(path, "/api/v1/nodes"):
 		return "node.read"
 	default:

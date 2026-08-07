@@ -35,7 +35,7 @@ func New(pool *pgxpool.Pool) *Service { return &Service{pool: pool} }
 
 var roleActions = map[string][]string{
 	"Viewer":        {"node.read", "operation.read"},
-	"Operator":      {"node.read", "operation.read", "session.disconnect", "session.terminate", "ip_ban.remove", "service.reload", "approval.request"},
+	"Operator":      {"node.read", "operation.read", "operation.create", "session.disconnect", "session.terminate", "ip_ban.remove", "service.reload", "approval.request"},
 	"UserManager":   {"node.read", "operation.read", "user.manage", "user.batch.disable", "group.manage", "approval.request"},
 	"ConfigManager": {"node.read", "operation.read", "config.plan", "config.apply", "approval.request"},
 	"Auditor":       {"node.read", "operation.read", "audit.read", "audit.verify"},

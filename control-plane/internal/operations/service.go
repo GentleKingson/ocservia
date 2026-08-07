@@ -30,6 +30,7 @@ var (
 	ErrNodeUnavailable     = errors.New("node is unavailable")
 	ErrCapabilityMissing   = errors.New("node capability is unavailable")
 	ErrTargetNotObserved   = errors.New("target is not present in observed state")
+	ErrBacklogExceeded     = commandlimit.ErrBacklogExceeded
 )
 
 type SyntheticKind string
@@ -200,6 +201,9 @@ func (s *Service) CreateSynthetic(ctx context.Context, request CreateRequest) (O
 			return Operation{}, false, err
 		}
 	}
+	if err := commandlimit.ReserveBacklog(ctx, tx, workspaceID, request.NodeID); err != nil {
+		return Operation{}, false, err
+	}
 	if _, err := tx.Exec(ctx, `
 		INSERT INTO operations (id, workspace_id, node_id, command_id, state, version, request_id, trace_id, idempotency_key, request_hash, expires_at, created_at, updated_at)
 		VALUES ($1,$2,$3,$4,'queued',1,$5,$6,$7,$8,$9,$10,$10)`,
@@ -271,34 +275,40 @@ func (s *Service) Claim(ctx context.Context, workerID uuid.UUID, limit int, leas
 	if err != nil {
 		return nil, fmt.Errorf("reserve global dispatch capacity: %w", err)
 	}
-	limit = min(limit, available)
-	if limit == 0 {
-		if err := tx.Commit(ctx); err != nil {
-			return nil, fmt.Errorf("commit empty outbox claim: %w", err)
-		}
-		return nil, nil
-	}
 	rows, err := tx.Query(ctx, `
+		WITH ranked AS (
+		  SELECT outbox.id AS outbox_id,command.id AS command_id,command.operation_id,command.node_id,
+		         outbox.payload,command.traceparent,command.state,outbox.available_at,
+		         row_number() OVER(PARTITION BY command.node_id ORDER BY CASE WHEN command.state='unknown' THEN 0 ELSE 1 END,outbox.available_at,outbox.id) AS node_rank
+		  FROM outbox_events AS outbox
+		  JOIN commands AS command ON command.id=outbox.command_id
+		  JOIN nodes AS node ON node.id=command.node_id AND node.status='active'
+		  WHERE outbox.published_at IS NULL AND outbox.available_at<=now()
+		    AND (outbox.locked_until IS NULL OR outbox.locked_until<=now())
+		    AND command.state IN ('queued','unknown') AND command.expires_at>now()
+		    AND NOT EXISTS(SELECT 1 FROM node_command_leases lease WHERE lease.node_id=command.node_id)
+		    AND (command.resource_type IS NULL OR command.resource_key IS NULL OR NOT EXISTS (
+		      SELECT 1 FROM commands AS prior
+		      WHERE prior.node_id=command.node_id AND prior.resource_type=command.resource_type
+		        AND prior.resource_key=command.resource_key AND prior.id<>command.id
+		        AND prior.expected_version<command.expected_version
+		        AND prior.state IN ('queued','dispatched','accepted','running','unknown')
+		    ))
+		), unknown_candidates AS (
+		  SELECT * FROM ranked WHERE node_rank=1 AND state='unknown'
+		  ORDER BY available_at,outbox_id LIMIT $1
+		), queued_candidates AS (
+		  SELECT * FROM ranked WHERE node_rank=1 AND state='queued'
+		  ORDER BY available_at,outbox_id
+		  LIMIT LEAST($2,GREATEST(0,$1-(SELECT count(*) FROM unknown_candidates)))
+		), selected AS (
+		  SELECT * FROM unknown_candidates UNION ALL SELECT * FROM queued_candidates
+		)
 		SELECT outbox.id, command.id, command.operation_id, command.node_id, outbox.payload, command.traceparent
-		FROM outbox_events AS outbox
-		JOIN commands AS command ON command.id=outbox.command_id
-		JOIN nodes AS node ON node.id=command.node_id AND node.status='active'
-			WHERE outbox.published_at IS NULL AND outbox.available_at<=now()
-			  AND (outbox.locked_until IS NULL OR outbox.locked_until<=now())
-			  AND command.state IN ('queued','unknown') AND command.expires_at>now()
-			  AND (
-			    command.resource_type IS NULL OR command.resource_key IS NULL OR NOT EXISTS (
-			      SELECT 1
-			      FROM commands AS prior
-			      WHERE prior.node_id=command.node_id
-			        AND prior.resource_type=command.resource_type
-			        AND prior.resource_key=command.resource_key
-			        AND prior.id<>command.id
-			        AND prior.expected_version<command.expected_version
-			        AND prior.state IN ('queued','dispatched','accepted','running','unknown')
-			    )
-			  )
-			ORDER BY outbox.available_at,outbox.id FOR UPDATE OF outbox SKIP LOCKED LIMIT $1`, limit)
+		FROM selected JOIN outbox_events AS outbox ON outbox.id=selected.outbox_id
+		JOIN commands AS command ON command.id=selected.command_id
+		ORDER BY CASE WHEN selected.state='unknown' THEN 0 ELSE 1 END,selected.available_at,selected.outbox_id
+		FOR UPDATE OF outbox SKIP LOCKED`, limit, available)
 	if err != nil {
 		return nil, fmt.Errorf("select outbox candidates: %w", err)
 	}
@@ -319,9 +329,6 @@ func (s *Service) Claim(ctx context.Context, workerID uuid.UUID, limit int, leas
 	rows.Close()
 	claimed := make([]Dispatch, 0, len(candidates))
 	for _, c := range candidates {
-		if _, err := tx.Exec(ctx, `DELETE FROM node_command_leases WHERE node_id=$1 AND leased_until<=now()`, c.nodeID); err != nil {
-			return nil, err
-		}
 		attemptID, token, err := twoIDs()
 		if err != nil {
 			return nil, err
@@ -369,6 +376,9 @@ func (s *Service) finishDispatch(ctx context.Context, d Dispatch, sent bool, mes
 		return err
 	}
 	defer rollback(tx)
+	if err := commandlimit.Lock(ctx, tx); err != nil {
+		return fmt.Errorf("serialize dispatch completion: %w", err)
+	}
 	var valid bool
 	if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM node_command_leases WHERE node_id=$1 AND command_id=$2 AND lease_token=$3 AND leased_until>now())`, d.NodeID, d.CommandID, d.LeaseToken).Scan(&valid); err != nil {
 		return err
@@ -419,6 +429,9 @@ func (s *Service) Reap(ctx context.Context, maxAttempts int) error {
 		return err
 	}
 	defer rollback(tx)
+	if err := commandlimit.Lock(ctx, tx); err != nil {
+		return fmt.Errorf("serialize dispatch lease reaping: %w", err)
+	}
 	if _, err = tx.Exec(ctx, `UPDATE command_attempts AS attempt SET state='unknown',finished_at=now(),error_code='lease_expired' FROM node_command_leases AS lease WHERE attempt.command_id=lease.command_id AND attempt.state='sending' AND lease.leased_until<=now()`); err != nil {
 		return err
 	}

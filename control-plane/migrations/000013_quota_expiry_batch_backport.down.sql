@@ -1,4 +1,5 @@
 DROP INDEX operations_active_command_limit_idx;
+DROP INDEX operations_queued_backlog_idx;
 DROP TABLE upstream_sync_records;
 DROP TABLE batch_operation_items;
 DROP TABLE batch_operations;

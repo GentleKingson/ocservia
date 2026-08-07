@@ -122,6 +122,10 @@ CREATE INDEX operations_active_command_limit_idx
     ON operations (state, id)
     WHERE state IN ('dispatched', 'accepted', 'running', 'unknown');
 
+CREATE INDEX operations_queued_backlog_idx
+    ON operations (workspace_id, node_id, id)
+    WHERE state IN ('queued', 'offline_pending');
+
 CREATE TABLE upstream_sync_records (
     id uuid PRIMARY KEY,
     repository text NOT NULL,

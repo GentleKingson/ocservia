@@ -30,6 +30,9 @@ work for an offline node does not consume execution capacity. Parent results
 retain forbidden, failed, unknown, and offline-pending child states instead of
 reducing the batch to a misleading boolean. Set
 `OCSERV_USER_OPERATION_CONCURRENCY` from 1 through 500 to change the limit.
+Durable queued work is separately bounded at 500 commands per node and 5,000
+per workspace; callers receive a retryable service-unavailable response when a
+backlog is full.
 
 Any batch containing a disable action requires independent approval. The client
 generates the UUIDv7 batch identifier first, obtains approval for action

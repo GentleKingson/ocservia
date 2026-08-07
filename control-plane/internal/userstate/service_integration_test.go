@@ -820,6 +820,86 @@ func TestOfflineQueueDoesNotConsumeGlobalDispatchCapacityIntegration(t *testing.
 	}
 }
 
+func TestExpiredLeaseStaysChargedUntilReapedIntegration(t *testing.T) {
+	_, pool, workspaceID, firstNodeID := integrationService(t, "active")
+	secondNodeID := uuid.Must(uuid.NewV7())
+	if _, err := pool.Exec(context.Background(), `INSERT INTO nodes(id,workspace_id,name,status,version,created_at,updated_at) VALUES($1,$2,$3,'active',1,now(),now())`, secondNodeID, workspaceID, "lease-"+secondNodeID.String()); err != nil {
+		t.Fatal(err)
+	}
+	service := operationstore.NewWithConcurrency(pool, 1)
+	for index, nodeID := range []uuid.UUID{firstNodeID, secondNodeID} {
+		key := fmt.Sprintf("lease-cap-%d", index)
+		if _, _, err := service.CreateSynthetic(context.Background(), operationstore.CreateRequest{NodeID: nodeID, IdempotencyKey: key, ExpectedVersion: 1, Kind: operationstore.SyntheticNoop, TTL: time.Minute, RequestID: "request-" + key, Traceparent: testTraceparent}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	first, err := service.Claim(context.Background(), uuid.Must(uuid.NewV7()), 1, 20*time.Millisecond)
+	if err != nil || len(first) != 1 {
+		t.Fatalf("first dispatch claim=%+v err=%v", first, err)
+	}
+	time.Sleep(30 * time.Millisecond)
+	blocked, err := service.Claim(context.Background(), uuid.Must(uuid.NewV7()), 1, time.Minute)
+	if err != nil || len(blocked) != 0 {
+		t.Fatalf("expired unreaped lease released capacity=%+v err=%v", blocked, err)
+	}
+	if err := service.Reap(context.Background(), 3); err != nil {
+		t.Fatal(err)
+	}
+	afterReap, err := service.Claim(context.Background(), uuid.Must(uuid.NewV7()), 1, time.Minute)
+	if err != nil || len(afterReap) != 1 {
+		t.Fatalf("reaped lease did not release exactly one slot=%+v err=%v", afterReap, err)
+	}
+}
+
+func TestUnknownReconciliationBypassesConsumedDispatchSlotIntegration(t *testing.T) {
+	_, pool, _, nodeID := integrationService(t, "active")
+	service := operationstore.NewWithConcurrency(pool, 1)
+	op, _, err := service.CreateSynthetic(context.Background(), operationstore.CreateRequest{NodeID: nodeID, IdempotencyKey: "unknown-reconcile", ExpectedVersion: 1, Kind: operationstore.SyntheticNoop, TTL: time.Minute, RequestID: "request-unknown-reconcile", Traceparent: testTraceparent})
+	if err != nil {
+		t.Fatal(err)
+	}
+	operationID := uuid.MustParse(op.ID)
+	if _, err := pool.Exec(context.Background(), `UPDATE operations SET state='unknown' WHERE id=$1`, operationID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(context.Background(), `UPDATE commands SET state='unknown' WHERE operation_id=$1`, operationID); err != nil {
+		t.Fatal(err)
+	}
+	dispatches, err := service.Claim(context.Background(), uuid.Must(uuid.NewV7()), 1, time.Minute)
+	if err != nil || len(dispatches) != 1 || dispatches[0].OperationID != operationID {
+		t.Fatalf("unknown reconciliation claim=%+v err=%v", dispatches, err)
+	}
+}
+
+func TestDispatchCandidateFairnessAcrossNodesIntegration(t *testing.T) {
+	_, pool, workspaceID, busyNodeID := integrationService(t, "active")
+	otherNodeID := uuid.Must(uuid.NewV7())
+	if _, err := pool.Exec(context.Background(), `INSERT INTO nodes(id,workspace_id,name,status,version,created_at,updated_at) VALUES($1,$2,$3,'active',1,now(),now())`, otherNodeID, workspaceID, "fair-"+otherNodeID.String()); err != nil {
+		t.Fatal(err)
+	}
+	service := operationstore.NewWithConcurrency(pool, 50)
+	for index := range 20 {
+		key := fmt.Sprintf("busy-%02d", index)
+		if _, _, err := service.CreateSynthetic(context.Background(), operationstore.CreateRequest{NodeID: busyNodeID, IdempotencyKey: key, ExpectedVersion: 1, Kind: operationstore.SyntheticNoop, TTL: time.Minute, RequestID: "request-" + key, Traceparent: testTraceparent}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, _, err := service.CreateSynthetic(context.Background(), operationstore.CreateRequest{NodeID: otherNodeID, IdempotencyKey: "other-node", ExpectedVersion: 1, Kind: operationstore.SyntheticNoop, TTL: time.Minute, RequestID: "request-other-node", Traceparent: testTraceparent}); err != nil {
+		t.Fatal(err)
+	}
+	dispatches, err := service.Claim(context.Background(), uuid.Must(uuid.NewV7()), 16, time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	seen := map[uuid.UUID]bool{}
+	for _, dispatch := range dispatches {
+		seen[dispatch.NodeID] = true
+	}
+	if len(dispatches) != 2 || !seen[busyNodeID] || !seen[otherNodeID] {
+		t.Fatalf("cross-node candidate fairness=%+v", dispatches)
+	}
+}
+
 func integrationService(t *testing.T, status string) (*Service, *pgxpool.Pool, uuid.UUID, uuid.UUID) {
 	t.Helper()
 	url := os.Getenv("OCSERV_TEST_DATABASE_URL")
