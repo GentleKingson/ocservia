@@ -22,3 +22,12 @@ ALTER TABLE commands ADD CONSTRAINT commands_payload_type_check CHECK (
 );
 COMMENT ON CONSTRAINT commands_payload_type_check ON commands IS
     'Only typed command payloads are dispatchable; terminal config apply history remains admissible after rollback.';
+
+-- I15 configuration approvals use object summaries, so retain the widened
+-- closed JSON shape when rolling back only the I16 apply implementation.
+ALTER TABLE approval_requests DROP CONSTRAINT approval_requests_request_summary_check;
+ALTER TABLE approval_requests ADD CONSTRAINT approval_requests_request_summary_check CHECK (
+    request_summary IS NULL OR jsonb_typeof(request_summary) IN ('array', 'object')
+);
+COMMENT ON CONSTRAINT approval_requests_request_summary_check ON approval_requests IS
+    'Batch approvals use arrays; configuration approvals use a typed object summary.';

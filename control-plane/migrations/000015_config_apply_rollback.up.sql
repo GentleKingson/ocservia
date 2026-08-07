@@ -5,6 +5,13 @@ ALTER TABLE commands ADD CONSTRAINT commands_payload_type_check CHECK (
 COMMENT ON CONSTRAINT commands_payload_type_check ON commands IS
     'Only typed command payloads are dispatchable; raw shell, occtl, and systemctl operations are forbidden.';
 
+ALTER TABLE approval_requests DROP CONSTRAINT approval_requests_request_summary_check;
+ALTER TABLE approval_requests ADD CONSTRAINT approval_requests_request_summary_check CHECK (
+    request_summary IS NULL OR jsonb_typeof(request_summary) IN ('array', 'object')
+);
+COMMENT ON CONSTRAINT approval_requests_request_summary_check ON approval_requests IS
+    'Batch approvals use arrays; configuration approvals use a typed object summary.';
+
 ALTER TABLE node_config_state
     ADD COLUMN automation_locked boolean NOT NULL DEFAULT false,
     ADD COLUMN automation_lock_reason text CHECK (automation_lock_reason IS NULL OR length(automation_lock_reason) BETWEEN 1 AND 128),

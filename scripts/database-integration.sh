@@ -141,6 +141,7 @@ for major in 17 18; do
   test "$(docker exec "${container}" psql -U ocservia_owner -d ocservia -Atc "SELECT count(*) FROM schema_migrations WHERE version = 15")" = "1"
   test "$(docker exec "${container}" psql -U ocservia_owner -d ocservia -Atc "SELECT count(*) FROM information_schema.tables WHERE table_schema='public' AND table_name IN ('node_config_state','config_plans','config_apply_operations')")" = "3"
   test "$(docker exec "${container}" psql -U ocservia_owner -d ocservia -Atc "SELECT pg_get_constraintdef(oid) LIKE '%config_plan%' FROM pg_constraint WHERE conrelid='commands'::regclass AND conname='commands_payload_type_check'")" = "t"
+  test "$(docker exec "${container}" psql -U ocservia_owner -d ocservia -Atc "SELECT pg_get_constraintdef(oid) LIKE '%object%' FROM pg_constraint WHERE conrelid='approval_requests'::regclass AND conname='approval_requests_request_summary_check'")" = "t"
   test "$(docker exec "${container}" psql -U ocservia_owner -d ocservia -Atc "SELECT has_table_privilege('ocservia_app','node_config_state','SELECT,INSERT,UPDATE')")" = "t"
   test "$(docker exec "${container}" psql -U ocservia_owner -d ocservia -Atc "SELECT has_table_privilege('ocservia_app','config_plans','SELECT,INSERT')")" = "t"
   test "$(docker exec "${container}" psql -U ocservia_owner -d ocservia -Atc "SELECT has_table_privilege('ocservia_app','config_apply_operations','SELECT,INSERT,UPDATE')")" = "t"
@@ -202,6 +203,7 @@ for major in 17 18; do
   docker exec "${container}" psql -v ON_ERROR_STOP=1 -U ocservia_owner -d ocservia -c "DELETE FROM schema_migrations WHERE version=15" >/dev/null
   test "$(docker exec "${container}" psql -U ocservia_owner -d ocservia -Atc "SELECT count(*) FROM commands WHERE id='00000000-0000-7000-8000-000000000151' AND payload_type='config_apply' AND state='succeeded'")" = "1"
   test "$(docker exec "${container}" psql -U ocservia_owner -d ocservia -Atc "SELECT pg_get_constraintdef(oid) LIKE '%config_apply%' FROM pg_constraint WHERE conrelid='commands'::regclass AND conname='commands_payload_type_check'")" = "t"
+  test "$(docker exec "${container}" psql -U ocservia_owner -d ocservia -Atc "SELECT pg_get_constraintdef(oid) LIKE '%object%' FROM pg_constraint WHERE conrelid='approval_requests'::regclass AND conname='approval_requests_request_summary_check'")" = "t"
   docker exec "${container}" psql -v ON_ERROR_STOP=1 -U ocservia_owner -d ocservia -c "DELETE FROM commands WHERE id='00000000-0000-7000-8000-000000000151'; DELETE FROM operations WHERE id='00000000-0000-7000-8000-000000000150';" >/dev/null
   docker exec "${container}" psql -v ON_ERROR_STOP=1 -U ocservia_owner -d ocservia -c "
     INSERT INTO operations(id,workspace_id,node_id,state,version,request_id,idempotency_key,request_hash,created_at,updated_at,completed_at)
