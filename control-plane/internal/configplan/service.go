@@ -18,7 +18,7 @@ import (
 )
 
 var (
-	ErrStaleRevision = errors.New("configuration revision is stale")
+	ErrStaleRevision = operations.ErrStaleRevision
 	ErrCapability    = errors.New("configuration planning capability is unavailable")
 	ErrIdempotency   = operations.ErrIdempotencyConflict
 )
