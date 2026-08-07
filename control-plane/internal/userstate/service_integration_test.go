@@ -871,6 +871,9 @@ func TestUnknownReconciliationBypassesConsumedDispatchSlotIntegration(t *testing
 	if _, err := pool.Exec(context.Background(), `UPDATE commands SET state='unknown' WHERE operation_id=$1`, operationID); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := pool.Exec(context.Background(), `UPDATE outbox_events SET available_at='2000-01-01T00:00:00Z' WHERE command_id=(SELECT command_id FROM operations WHERE id=$1)`, operationID); err != nil {
+		t.Fatal(err)
+	}
 	dispatches, err := service.Claim(context.Background(), uuid.Must(uuid.NewV7()), 1, time.Minute)
 	if err != nil || len(dispatches) != 1 || dispatches[0].OperationID != operationID {
 		t.Fatalf("unknown reconciliation claim=%+v err=%v", dispatches, err)
@@ -884,16 +887,31 @@ func TestDispatchCandidateFairnessAcrossNodesIntegration(t *testing.T) {
 		t.Fatal(err)
 	}
 	service := operationstore.NewWithConcurrency(pool, 50)
+	operationIDs := make([]uuid.UUID, 0, 21)
 	for index := range 20 {
 		key := fmt.Sprintf("busy-%02d", index)
-		if _, _, err := service.CreateSynthetic(context.Background(), operationstore.CreateRequest{NodeID: busyNodeID, IdempotencyKey: key, ExpectedVersion: 1, Kind: operationstore.SyntheticNoop, TTL: time.Minute, RequestID: "request-" + key, Traceparent: testTraceparent}); err != nil {
+		operation, _, err := service.CreateSynthetic(context.Background(), operationstore.CreateRequest{NodeID: busyNodeID, IdempotencyKey: key, ExpectedVersion: 1, Kind: operationstore.SyntheticNoop, TTL: time.Minute, RequestID: "request-" + key, Traceparent: testTraceparent})
+		if err != nil {
+			t.Fatal(err)
+		}
+		operationIDs = append(operationIDs, uuid.MustParse(operation.ID))
+	}
+	otherOperation, _, err := service.CreateSynthetic(context.Background(), operationstore.CreateRequest{NodeID: otherNodeID, IdempotencyKey: "other-node", ExpectedVersion: 1, Kind: operationstore.SyntheticNoop, TTL: time.Minute, RequestID: "request-other-node", Traceparent: testTraceparent})
+	if err != nil {
+		t.Fatal(err)
+	}
+	operationIDs = append(operationIDs, uuid.MustParse(otherOperation.ID))
+	for index, operationID := range operationIDs {
+		if _, err := pool.Exec(context.Background(), `WITH updated_operation AS (
+			UPDATE operations SET state='unknown' WHERE id=$1
+		), updated_command AS (
+			UPDATE commands SET state='unknown' WHERE operation_id=$1 RETURNING id
+		)
+		UPDATE outbox_events SET available_at='2000-01-01T00:00:00Z'::timestamptz+$2::interval WHERE command_id=(SELECT id FROM updated_command)`, operationID, (time.Duration(index) * time.Second).String()); err != nil {
 			t.Fatal(err)
 		}
 	}
-	if _, _, err := service.CreateSynthetic(context.Background(), operationstore.CreateRequest{NodeID: otherNodeID, IdempotencyKey: "other-node", ExpectedVersion: 1, Kind: operationstore.SyntheticNoop, TTL: time.Minute, RequestID: "request-other-node", Traceparent: testTraceparent}); err != nil {
-		t.Fatal(err)
-	}
-	dispatches, err := service.Claim(context.Background(), uuid.Must(uuid.NewV7()), 16, time.Minute)
+	dispatches, err := service.Claim(context.Background(), uuid.Must(uuid.NewV7()), 2, time.Minute)
 	if err != nil {
 		t.Fatal(err)
 	}
