@@ -14,6 +14,7 @@ import (
 
 	agentv1 "github.com/GentleKingson/ocservia/control-plane/gen/proto/ocserv/platform/agent/v1"
 	transportv1 "github.com/GentleKingson/ocservia/control-plane/gen/proto/ocserv/platform/transport/v1"
+	"github.com/GentleKingson/ocservia/control-plane/internal/audit"
 	"github.com/GentleKingson/ocservia/control-plane/internal/localslice"
 	operationstore "github.com/GentleKingson/ocservia/control-plane/internal/operations"
 	"github.com/google/uuid"
@@ -202,9 +203,7 @@ func TestFreshObservedUsersBoundCreateCapacityIntegration(t *testing.T) {
 	}
 }
 
-func TestI13IntentAndTerminalAuditActionsMatchIntegration(t *testing.T) {
-	service, pool, _, nodeID := integrationService(t, "active")
-	ingest := localslice.New(pool)
+func TestI13IntentAndTerminalAuditIdentityMatchIntegration(t *testing.T) {
 	tests := []struct {
 		kind    MutationKind
 		name    string
@@ -218,57 +217,100 @@ func TestI13IntentAndTerminalAuditActionsMatchIntegration(t *testing.T) {
 		{UserEnable, "alice", 3, "user.enable", nil},
 		{GroupApply, "staff", 0, "group.apply", []string{"alice"}},
 	}
-	for index, test := range tests {
-		request := mutation(nodeID, "terminal-audit-"+test.action, test.kind, test.name, test.version)
-		request.Members = test.members
-		operation, replayed, err := service.Mutate(context.Background(), request)
-		if err != nil || replayed || operation.CommandID == nil {
-			t.Fatalf("%s mutation=%+v replayed=%v err=%v", test.action, operation, replayed, err)
-		}
-		commandID := uuid.MustParse(*operation.CommandID)
-		var encoded []byte
-		if err := pool.QueryRow(context.Background(), `UPDATE commands SET state='dispatched' WHERE id=$1 RETURNING envelope`, commandID).Scan(&encoded); err != nil {
-			t.Fatal(err)
-		}
-		if _, err := pool.Exec(context.Background(), `UPDATE operations SET state='dispatched' WHERE id=$1`, uuid.MustParse(operation.ID)); err != nil {
-			t.Fatal(err)
-		}
-		var envelope agentv1.CommandEnvelope
-		if err := proto.Unmarshal(encoded, &envelope); err != nil {
-			t.Fatal(err)
-		}
-		completed := time.Now().UTC().Add(time.Duration(index+1) * time.Millisecond)
-		result := agentv1.CommandResult{
-			CommandId: envelope.GetCommandId(), IdempotencyKey: envelope.GetIdempotencyKey(),
-			PayloadSha256: envelope.GetSemanticPayloadSha256(), SemanticPayloadHashVersion: agentv1.SemanticPayloadHashVersion_SEMANTIC_PAYLOAD_HASH_VERSION_V1,
-			State: agentv1.CommandResultState_COMMAND_RESULT_STATE_SUCCEEDED, Result: []byte("applied"),
-			AcceptedAt: timestamppb.New(completed), CompletedAt: timestamppb.New(completed),
-		}
-		payload, err := proto.Marshal(&result)
-		if err != nil {
-			t.Fatal(err)
-		}
-		eventID := uuid.Must(uuid.NewV7())
-		if err := ingest.Ingest(context.Background(), &transportv1.TransportEvent{
-			EventId: eventID[:], NodeId: nodeID[:],
-			Type:       transportv1.TransportEventType_TRANSPORT_EVENT_TYPE_COMMAND_RESULT,
-			OccurredAt: timestamppb.New(completed), Traceparent: request.Traceparent, Payload: payload,
-		}); err != nil {
-			t.Fatalf("%s terminal result: %v", test.action, err)
-		}
-		var count, distinct int
-		var action string
-		if err := pool.QueryRow(context.Background(), `SELECT count(*),count(DISTINCT action),min(action) FROM audit_events WHERE command_id=$1`, commandID).Scan(&count, &distinct, &action); err != nil {
-			t.Fatal(err)
-		}
-		if count != 2 || distinct != 1 || action != test.action {
-			t.Fatalf("%s audit count=%d distinct=%d action=%q", test.action, count, distinct, action)
-		}
-		// The runtime test role intentionally cannot delete immutable results. Keep
-		// retained fixtures compatible with the migration rollback exercised after
-		// this package finishes.
-		if _, err := pool.Exec(context.Background(), `UPDATE commands SET payload_type='synthetic_echo',expected_version=1 WHERE id=$1`, commandID); err != nil {
-			t.Fatal(err)
+	for _, test := range tests {
+		for _, terminal := range []string{"succeeded", "failed"} {
+			t.Run(test.action+"/"+terminal, func(t *testing.T) {
+				service, pool, workspaceID, nodeID := integrationService(t, "active")
+				ingest := localslice.New(pool)
+				if test.kind != UserCreate && test.kind != GroupApply {
+					enabled := test.kind != UserEnable
+					fingerprint := desiredFingerprint(UserCreate, test.name, nil)
+					if !enabled {
+						fingerprint = desiredFingerprint(UserDisable, test.name, nil)
+					}
+					if _, err := pool.Exec(context.Background(), `INSERT INTO desired_users(node_id,username,enabled,version,revision,fingerprint,created_at,updated_at) VALUES($1,$2,$3,$4,$4,$5,now(),now())`, nodeID, test.name, enabled, test.version, fingerprint[:]); err != nil {
+						t.Fatal(err)
+					}
+				}
+				request := mutation(nodeID, "terminal-audit-"+terminal+"-"+test.action, test.kind, test.name, test.version)
+				request.Members = test.members
+				operation, replayed, err := service.Mutate(context.Background(), request)
+				if err != nil || replayed || operation.CommandID == nil {
+					t.Fatalf("%s mutation=%+v replayed=%v err=%v", test.action, operation, replayed, err)
+				}
+				operationID := uuid.MustParse(operation.ID)
+				commandID := uuid.MustParse(*operation.CommandID)
+				var encoded []byte
+				if err := pool.QueryRow(context.Background(), `UPDATE commands SET state='dispatched' WHERE id=$1 RETURNING envelope`, commandID).Scan(&encoded); err != nil {
+					t.Fatal(err)
+				}
+				if _, err := pool.Exec(context.Background(), `UPDATE operations SET state='dispatched' WHERE id=$1`, operationID); err != nil {
+					t.Fatal(err)
+				}
+				var envelope agentv1.CommandEnvelope
+				if err := proto.Unmarshal(encoded, &envelope); err != nil {
+					t.Fatal(err)
+				}
+				completed := time.Now().UTC().Add(time.Millisecond)
+				result := agentv1.CommandResult{
+					CommandId: envelope.GetCommandId(), IdempotencyKey: envelope.GetIdempotencyKey(),
+					PayloadSha256: envelope.GetSemanticPayloadSha256(), SemanticPayloadHashVersion: agentv1.SemanticPayloadHashVersion_SEMANTIC_PAYLOAD_HASH_VERSION_V1,
+					State:      agentv1.CommandResultState_COMMAND_RESULT_STATE_SUCCEEDED,
+					Result:     []byte("applied"),
+					AcceptedAt: timestamppb.New(completed), CompletedAt: timestamppb.New(completed),
+				}
+				if terminal == "failed" {
+					result.State = agentv1.CommandResultState_COMMAND_RESULT_STATE_FAILED
+					result.Result = nil
+					result.ErrorCode = "privd_rejected"
+				}
+				payload, err := proto.Marshal(&result)
+				if err != nil {
+					t.Fatal(err)
+				}
+				eventID := uuid.Must(uuid.NewV7())
+				if err := ingest.Ingest(context.Background(), &transportv1.TransportEvent{
+					EventId: eventID[:], NodeId: nodeID[:],
+					Type:       transportv1.TransportEventType_TRANSPORT_EVENT_TYPE_COMMAND_RESULT,
+					OccurredAt: timestamppb.New(completed), Traceparent: request.Traceparent, Payload: payload,
+				}); err != nil {
+					t.Fatalf("%s terminal result: %v", test.action, err)
+				}
+
+				rows, err := pool.Query(context.Background(), `SELECT action,resource_type,resource_id,node_id,command_id,request_id,COALESCE(trace_id,''),reason,result FROM audit_events WHERE command_id=$1 ORDER BY occurred_at,id`, commandID)
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer rows.Close()
+				var results []string
+				for rows.Next() {
+					var action, resourceType, requestID, traceID, reason, resultState string
+					var resourceID, auditedNodeID, auditedCommandID uuid.UUID
+					if err := rows.Scan(&action, &resourceType, &resourceID, &auditedNodeID, &auditedCommandID, &requestID, &traceID, &reason, &resultState); err != nil {
+						t.Fatal(err)
+					}
+					if action != test.action || resourceType != "operation" || resourceID != operationID || auditedNodeID != nodeID || auditedCommandID != commandID || requestID != request.RequestID || traceID != request.Traceparent[3:35] || reason != request.Reason {
+						t.Fatalf("audit identity action=%q resource=%s/%s node=%s command=%s request=%q trace=%q reason=%q", action, resourceType, resourceID, auditedNodeID, auditedCommandID, requestID, traceID, reason)
+					}
+					results = append(results, resultState)
+				}
+				if err := rows.Err(); err != nil {
+					t.Fatal(err)
+				}
+				if !slices.Equal(results, []string{"intent", terminal}) {
+					t.Fatalf("audit results=%v", results)
+				}
+				verification, err := audit.NewManager(pool, nil).Verify(context.Background(), workspaceID)
+				if err != nil || !verification.Valid || verification.Events != 2 {
+					t.Fatalf("audit chain=%+v err=%v", verification, err)
+				}
+				// The runtime test role intentionally cannot delete immutable results. Keep
+				// retained fixtures compatible with the migration rollback exercised after
+				// this package finishes.
+				if _, err := pool.Exec(context.Background(), `UPDATE commands SET payload_type='synthetic_echo',expected_version=1 WHERE id=$1`, commandID); err != nil {
+					t.Fatal(err)
+				}
+			})
 		}
 	}
 }
@@ -284,6 +326,7 @@ func TestOfflineSupersedePreservesNonSubstitutableUserCommandsIntegration(t *tes
 	apply("alice-create", UserCreate, "alice", 0)
 	apply("alice-rotate", UserPasswordRotate, "alice", 1)
 	apply("alice-disable", UserDisable, "alice", 2)
+	apply("alice-rotate-later", UserPasswordRotate, "alice", 3)
 	apply("bob-create", UserCreate, "bob", 0)
 	apply("bob-disable", UserDisable, "bob", 1)
 	apply("bob-rotate", UserPasswordRotate, "bob", 2)
@@ -332,9 +375,9 @@ func TestOfflineSupersedePreservesNonSubstitutableUserCommandsIntegration(t *tes
 		}
 	}
 	queued := map[string]int{"queued": 1}
-	assertStates("alice", map[MutationKind]map[string]int{UserCreate: queued, UserPasswordRotate: queued, UserDisable: queued})
+	assertStates("alice", map[MutationKind]map[string]int{UserCreate: queued, UserPasswordRotate: {"queued": 2}, UserDisable: queued})
 	assertStates("bob", map[MutationKind]map[string]int{UserCreate: queued, UserDisable: queued, UserPasswordRotate: queued})
-	assertStates("carol", map[MutationKind]map[string]int{UserCreate: queued, UserDisable: {"superseded": 1}, UserEnable: queued})
+	assertStates("carol", map[MutationKind]map[string]int{UserCreate: queued, UserDisable: queued, UserEnable: queued})
 	assertStates("dave", map[MutationKind]map[string]int{UserCreate: queued, UserPasswordRotate: {"queued": 1, "superseded": 1}})
 	var queuedGroups, supersededGroups int
 	if err := pool.QueryRow(context.Background(), `SELECT count(*) FILTER(WHERE state='queued'),count(*) FILTER(WHERE state='superseded') FROM commands WHERE node_id=$1 AND resource_type='group' AND resource_key='staff'`, nodeID).Scan(&queuedGroups, &supersededGroups); err != nil {
@@ -342,6 +385,192 @@ func TestOfflineSupersedePreservesNonSubstitutableUserCommandsIntegration(t *tes
 	}
 	if queuedGroups != 1 || supersededGroups != 1 {
 		t.Fatalf("group supersede queued=%d superseded=%d", queuedGroups, supersededGroups)
+	}
+}
+
+func TestResourceDispatchWaitsForPriorCrossKindRevisionIntegration(t *testing.T) {
+	service, pool, _, nodeID := integrationService(t, "active")
+	created, _, err := service.Mutate(context.Background(), mutation(nodeID, "ordered-create", UserCreate, "alice", 0))
+	if err != nil || created.CommandID == nil {
+		t.Fatalf("create setup=%+v err=%v", created, err)
+	}
+	if _, err := pool.Exec(context.Background(), `UPDATE commands SET state='succeeded' WHERE id=$1`, uuid.MustParse(*created.CommandID)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(context.Background(), `UPDATE operations SET state='succeeded',completed_at=now() WHERE id=$1`, uuid.MustParse(created.ID)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(context.Background(), `UPDATE outbox_events SET published_at=now() WHERE command_id=$1`, uuid.MustParse(*created.CommandID)); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, request := range []MutationRequest{
+		mutation(nodeID, "ordered-rotate", UserPasswordRotate, "alice", 1),
+		mutation(nodeID, "ordered-disable", UserDisable, "alice", 2),
+		mutation(nodeID, "ordered-enable", UserEnable, "alice", 3),
+	} {
+		if _, _, err := service.Mutate(context.Background(), request); err != nil {
+			t.Fatalf("queue %s: %v", request.Kind, err)
+		}
+	}
+
+	dispatcher := operationstore.New(pool)
+	claimKind := func(want MutationKind) operationstore.Dispatch {
+		t.Helper()
+		dispatches, err := dispatcher.Claim(context.Background(), uuid.Must(uuid.NewV7()), 8, time.Second)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, dispatch := range dispatches {
+			if dispatch.NodeID != nodeID {
+				continue
+			}
+			var kind MutationKind
+			if err := pool.QueryRow(context.Background(), `SELECT payload_type FROM commands WHERE id=$1`, dispatch.CommandID).Scan(&kind); err != nil {
+				t.Fatal(err)
+			}
+			if kind != want {
+				t.Fatalf("claimed %s before %s", kind, want)
+			}
+			return dispatch
+		}
+		t.Fatalf("no dispatch for %s", want)
+		return operationstore.Dispatch{}
+	}
+	assertBlocked := func() {
+		t.Helper()
+		dispatches, err := dispatcher.Claim(context.Background(), uuid.Must(uuid.NewV7()), 8, time.Second)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if slices.ContainsFunc(dispatches, func(dispatch operationstore.Dispatch) bool { return dispatch.NodeID == nodeID }) {
+			t.Fatalf("later resource revision dispatched early: %+v", dispatches)
+		}
+	}
+	complete := func(dispatch operationstore.Dispatch) {
+		t.Helper()
+		if _, err := pool.Exec(context.Background(), `UPDATE commands SET state='succeeded' WHERE id=$1`, dispatch.CommandID); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := pool.Exec(context.Background(), `UPDATE operations SET state='succeeded',completed_at=now() WHERE id=$1`, dispatch.OperationID); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	rotate := claimKind(UserPasswordRotate)
+	if err := dispatcher.MarkSent(context.Background(), rotate); err != nil {
+		t.Fatal(err)
+	}
+	assertBlocked()
+	complete(rotate)
+	disable := claimKind(UserDisable)
+	if err := dispatcher.MarkSent(context.Background(), disable); err != nil {
+		t.Fatal(err)
+	}
+	assertBlocked()
+	complete(disable)
+	enable := claimKind(UserEnable)
+	if err := dispatcher.MarkSent(context.Background(), enable); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestSameKindSupersedeCoalescesAgentRevisionIntegration(t *testing.T) {
+	service, pool, _, nodeID := integrationService(t, "active")
+	created, _, err := service.Mutate(context.Background(), mutation(nodeID, "coalesce-create", UserCreate, "alice", 0))
+	if err != nil || created.CommandID == nil {
+		t.Fatalf("create setup=%+v err=%v", created, err)
+	}
+	if _, err := pool.Exec(context.Background(), `UPDATE commands SET state='succeeded' WHERE id=$1`, uuid.MustParse(*created.CommandID)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(context.Background(), `UPDATE operations SET state='succeeded',completed_at=now() WHERE id=$1`, uuid.MustParse(created.ID)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(context.Background(), `UPDATE outbox_events SET published_at=now() WHERE command_id=$1`, uuid.MustParse(*created.CommandID)); err != nil {
+		t.Fatal(err)
+	}
+
+	firstRotate, _, err := service.Mutate(context.Background(), mutation(nodeID, "coalesce-rotate-one", UserPasswordRotate, "alice", 1))
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondRotate, _, err := service.Mutate(context.Background(), mutation(nodeID, "coalesce-rotate-two", UserPasswordRotate, "alice", 2))
+	if err != nil || secondRotate.CommandID == nil {
+		t.Fatalf("replacement rotate=%+v err=%v", secondRotate, err)
+	}
+	assertCoalesced := func(first, second operationstore.Operation, payload func(*agentv1.CommandEnvelope) (uint64, uint64), expectedVersion, expectedRevision, desiredRevision int64) {
+		t.Helper()
+		if first.CommandID == nil || second.CommandID == nil {
+			t.Fatal("coalesced operations must have command ids")
+		}
+		var firstState, secondState string
+		var storedExpected int64
+		var encoded []byte
+		if err := pool.QueryRow(context.Background(), `SELECT state FROM commands WHERE id=$1`, uuid.MustParse(*first.CommandID)).Scan(&firstState); err != nil {
+			t.Fatal(err)
+		}
+		if err := pool.QueryRow(context.Background(), `SELECT state,expected_version,envelope FROM commands WHERE id=$1`, uuid.MustParse(*second.CommandID)).Scan(&secondState, &storedExpected, &encoded); err != nil {
+			t.Fatal(err)
+		}
+		var envelope agentv1.CommandEnvelope
+		if err := proto.Unmarshal(encoded, &envelope); err != nil {
+			t.Fatal(err)
+		}
+		actualExpected, actualDesired := payload(&envelope)
+		if firstState != "superseded" || secondState != "queued" || storedExpected != expectedVersion || actualExpected != uint64(expectedRevision) || actualDesired != uint64(desiredRevision) {
+			t.Fatalf("coalesced states=%s/%s stored_expected=%d envelope=%d->%d", firstState, secondState, storedExpected, actualExpected, actualDesired)
+		}
+	}
+	assertCoalesced(firstRotate, secondRotate, func(envelope *agentv1.CommandEnvelope) (uint64, uint64) {
+		return envelope.GetExpectedRevision(), envelope.GetUserPasswordRotate().GetDesiredRevision()
+	}, 1, 1, 2)
+	var userVersion, userRevision int64
+	if err := pool.QueryRow(context.Background(), `SELECT version,revision FROM desired_users WHERE node_id=$1 AND username='alice'`, nodeID).Scan(&userVersion, &userRevision); err != nil {
+		t.Fatal(err)
+	}
+	if userVersion != 3 || userRevision != 2 {
+		t.Fatalf("coalesced user version/revision=%d/%d", userVersion, userRevision)
+	}
+
+	firstGroup, _, err := service.Mutate(context.Background(), mutation(nodeID, "coalesce-group-one", GroupApply, "staff", 0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondGroup, _, err := service.Mutate(context.Background(), mutation(nodeID, "coalesce-group-two", GroupApply, "staff", 1))
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertCoalesced(firstGroup, secondGroup, func(envelope *agentv1.CommandEnvelope) (uint64, uint64) {
+		return envelope.GetExpectedRevision(), envelope.GetGroupApply().GetDesiredRevision()
+	}, 0, 0, 1)
+	var groupVersion, groupRevision int64
+	if err := pool.QueryRow(context.Background(), `SELECT version,revision FROM desired_groups WHERE node_id=$1 AND group_name='staff'`, nodeID).Scan(&groupVersion, &groupRevision); err != nil {
+		t.Fatal(err)
+	}
+	if groupVersion != 2 || groupRevision != 1 {
+		t.Fatalf("coalesced group version/revision=%d/%d", groupVersion, groupRevision)
+	}
+
+	dispatcher := operationstore.New(pool)
+	claimed := map[uuid.UUID]bool{}
+	for range 2 {
+		dispatches, err := dispatcher.Claim(context.Background(), uuid.Must(uuid.NewV7()), 8, time.Second)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, dispatch := range dispatches {
+			if dispatch.NodeID != nodeID {
+				continue
+			}
+			claimed[dispatch.CommandID] = true
+			if err := dispatcher.MarkSent(context.Background(), dispatch); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	if !claimed[uuid.MustParse(*secondRotate.CommandID)] || !claimed[uuid.MustParse(*secondGroup.CommandID)] {
+		t.Fatalf("coalesced commands did not become dispatchable: %+v", claimed)
 	}
 }
 

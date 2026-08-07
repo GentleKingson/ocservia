@@ -35,9 +35,8 @@ const MAX_FUTURE_SKEW_SECONDS: i64 = 300;
 #[derive(Clone, Debug)]
 pub struct CommandContext {
     pub node_id: [u8; 16],
-    /// Locally authoritative revision when one exists. Production node commands
-    /// rely on the Controller's transactional revision check and bind that
-    /// revision into the semantic hash instead of inventing a local value.
+    /// Optional revision supplied by read-only/synthetic fixtures. Desired user
+    /// and group mutations are fenced by the durable Agent Journal instead.
     pub observed_revision: Option<u64>,
     pub capabilities: HashSet<&'static str>,
     pub now_unix_seconds: i64,
@@ -81,6 +80,13 @@ pub enum ExternalEffectObservation {
     SupersededByNewerRevision,
     Absent,
     Unknown,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum DesiredRevisionFence {
+    Current,
+    Superseded,
+    Gap,
 }
 
 /// Refusal, storage failure, or an intentional fault boundary.
@@ -237,6 +243,14 @@ impl CommandExecutor {
         let validated = validate_command(envelope, context)?;
         if !validated.external {
             return Err(CommandError::Rejected("external_command_required"));
+        }
+        if self
+            .journal
+            .command(&validated.key)
+            .map_err(pre_effect_failure)?
+            .is_none()
+        {
+            self.require_current_desired_revision(envelope)?;
         }
         let acceptance = self
             .journal
@@ -441,6 +455,13 @@ impl CommandExecutor {
                 replayed: true,
             });
         }
+        let observation = match self.desired_revision_fence(envelope)? {
+            DesiredRevisionFence::Current => observation,
+            DesiredRevisionFence::Superseded => {
+                ExternalEffectObservation::SupersededByNewerRevision
+            }
+            DesiredRevisionFence::Gap => return Err(CommandError::Rejected("revision_gap")),
+        };
         if observation == ExternalEffectObservation::AppliedExact
             && let Some((resource_type, resource_key, revision)) = desired_resource(envelope)
         {
@@ -522,17 +543,7 @@ impl CommandExecutor {
         {
             return Err(CommandError::Rejected("reconciliation_required"));
         }
-        if let Some((resource_type, resource_key, revision)) = desired_resource(envelope)
-            && self
-                .journal
-                .applied_revision(resource_type, resource_key)
-                .map_err(pre_effect_failure)?
-                .is_some_and(|applied| applied > revision)
-        {
-            return Err(CommandError::Rejected(
-                "effect_superseded_by_newer_revision",
-            ));
-        }
+        self.require_current_desired_revision(envelope)?;
         self.journal
             .transition_command(
                 &validated.key,
@@ -547,6 +558,38 @@ impl CommandExecutor {
             key: validated.key,
             command_id: validated.command_id,
         })
+    }
+
+    fn desired_revision_fence(
+        &self,
+        envelope: &CommandEnvelope,
+    ) -> Result<DesiredRevisionFence, CommandError> {
+        let Some((resource_type, resource_key, _)) = desired_resource(envelope) else {
+            return Ok(DesiredRevisionFence::Current);
+        };
+        let local_revision = self
+            .journal
+            .applied_revision(resource_type, resource_key)
+            .map_err(pre_effect_failure)?
+            .unwrap_or(0);
+        Ok(match local_revision.cmp(&envelope.expected_revision) {
+            std::cmp::Ordering::Equal => DesiredRevisionFence::Current,
+            std::cmp::Ordering::Greater => DesiredRevisionFence::Superseded,
+            std::cmp::Ordering::Less => DesiredRevisionFence::Gap,
+        })
+    }
+
+    fn require_current_desired_revision(
+        &self,
+        envelope: &CommandEnvelope,
+    ) -> Result<(), CommandError> {
+        match self.desired_revision_fence(envelope)? {
+            DesiredRevisionFence::Current => Ok(()),
+            DesiredRevisionFence::Superseded => Err(CommandError::Rejected(
+                "effect_superseded_by_newer_revision",
+            )),
+            DesiredRevisionFence::Gap => Err(CommandError::Rejected("revision_gap")),
+        }
     }
 
     /// Explicitly retries an Unknown synthetic command only after reconciliation proved absence.
@@ -1507,7 +1550,7 @@ pub async fn read_boot_id() -> Result<String, io::Error> {
 mod tests {
     use ocservia_contracts::generated::ocserv::platform::agent::v1::{
         GroupApply, IpBanRemove, ServiceReload, SessionDisconnect, SessionTerminate, SyntheticEcho,
-        SyntheticNoop, UserPasswordRotate, command_envelope,
+        SyntheticNoop, UserCreate, UserDisable, UserEnable, UserPasswordRotate, command_envelope,
     };
     use prost_types::Timestamp;
     use rand::{SeedableRng, rngs::StdRng};
@@ -1683,6 +1726,287 @@ mod tests {
             .join(format!("ocservia-agent-{label}-{}.db", Uuid::now_v7()))
     }
 
+    #[derive(Clone, Copy)]
+    enum DesiredMutation {
+        Create,
+        Rotate,
+        Disable,
+        Enable,
+        Group,
+    }
+
+    fn desired_command(
+        node_id: [u8; 16],
+        mutation: DesiredMutation,
+        name: &str,
+        expected_revision: u64,
+        desired_revision: u64,
+        now: i64,
+    ) -> CommandEnvelope {
+        let mut envelope = command(node_id, *Uuid::now_v7().as_bytes(), "", now);
+        envelope.expected_revision = expected_revision;
+        envelope.payload = Some(match mutation {
+            DesiredMutation::Create => command_envelope::Payload::UserCreate(UserCreate {
+                username: name.to_owned(),
+                sealed_password: vec![0xa1; 64],
+                secret_key_id: "node-key-1".to_owned(),
+                desired_revision,
+            }),
+            DesiredMutation::Rotate => {
+                command_envelope::Payload::UserPasswordRotate(UserPasswordRotate {
+                    username: name.to_owned(),
+                    sealed_password: vec![u8::try_from(desired_revision).unwrap_or(0xa5); 64],
+                    secret_key_id: "node-key-1".to_owned(),
+                    desired_revision,
+                })
+            }
+            DesiredMutation::Disable => command_envelope::Payload::UserDisable(UserDisable {
+                username: name.to_owned(),
+                desired_revision,
+            }),
+            DesiredMutation::Enable => command_envelope::Payload::UserEnable(UserEnable {
+                username: name.to_owned(),
+                desired_revision,
+            }),
+            DesiredMutation::Group => command_envelope::Payload::GroupApply(GroupApply {
+                group_name: name.to_owned(),
+                members: vec!["alice".to_owned()],
+                desired_revision,
+            }),
+        });
+        envelope.semantic_payload_hash_version = SemanticPayloadHashVersion::V1 as i32;
+        envelope.semantic_payload_sha256 = semantic_payload_hash_v1(&envelope)
+            .expect("desired semantic hash")
+            .to_vec();
+        envelope
+    }
+
+    fn desired_context(node_id: [u8; 16], now: i64) -> CommandContext {
+        let mut command_context = context(node_id, now);
+        command_context.observed_revision = None;
+        command_context.capabilities = HashSet::from(["ocserv.users.write", "ocserv.groups.write"]);
+        command_context
+    }
+
+    fn apply_desired(
+        executor: &mut CommandExecutor,
+        envelope: &CommandEnvelope,
+        context: &CommandContext,
+        now: i64,
+        privd_calls: &mut usize,
+    ) {
+        let ExternalPreparation::Execute(command) = executor
+            .prepare_external(envelope, context)
+            .expect("desired command preparation")
+        else {
+            panic!("fresh desired command must execute")
+        };
+        *privd_calls += 1;
+        let (resource_type, resource_key, revision) =
+            desired_resource(envelope).expect("desired resource");
+        executor
+            .complete_external_applied(&command, resource_type, resource_key, revision, now)
+            .expect("complete desired command");
+    }
+
+    #[test]
+    fn stale_cross_kind_user_mutations_are_rejected_before_privd() {
+        let path = temporary_journal("stale-cross-kind");
+        let node = *Uuid::now_v7().as_bytes();
+        let command_context = desired_context(node, 100);
+        let mut executor = CommandExecutor::new(Journal::open(&path).expect("journal"));
+        let mut privd_calls = 0;
+        for (name, applied, stale) in [
+            (
+                "alice",
+                [
+                    DesiredMutation::Create,
+                    DesiredMutation::Rotate,
+                    DesiredMutation::Disable,
+                ],
+                DesiredMutation::Rotate,
+            ),
+            (
+                "bob",
+                [
+                    DesiredMutation::Create,
+                    DesiredMutation::Rotate,
+                    DesiredMutation::Disable,
+                ],
+                DesiredMutation::Enable,
+            ),
+            (
+                "carol",
+                [
+                    DesiredMutation::Create,
+                    DesiredMutation::Rotate,
+                    DesiredMutation::Rotate,
+                ],
+                DesiredMutation::Disable,
+            ),
+        ] {
+            for (index, mutation) in applied.into_iter().enumerate() {
+                let expected = u64::try_from(index).expect("expected revision");
+                apply_desired(
+                    &mut executor,
+                    &desired_command(node, mutation, name, expected, expected + 1, 100),
+                    &command_context,
+                    101 + i64::try_from(index).expect("revision"),
+                    &mut privd_calls,
+                );
+            }
+            let stale = desired_command(node, stale, name, 1, 2, 100);
+            assert!(matches!(
+                executor.prepare_external(&stale, &command_context),
+                Err(CommandError::Rejected(
+                    "effect_superseded_by_newer_revision"
+                ))
+            ));
+        }
+        assert_eq!(privd_calls, 9);
+        for name in ["alice", "bob", "carol"] {
+            assert_eq!(
+                executor
+                    .journal()
+                    .applied_revision("user", name)
+                    .expect("user revision"),
+                Some(3)
+            );
+        }
+        cleanup_journal(&path);
+    }
+
+    #[test]
+    fn stale_group_apply_is_rejected_before_privd() {
+        let path = temporary_journal("stale-group");
+        let node = *Uuid::now_v7().as_bytes();
+        let command_context = desired_context(node, 100);
+        let mut executor = CommandExecutor::new(Journal::open(&path).expect("journal"));
+        let mut privd_calls = 0;
+        for revision in 1..=3 {
+            apply_desired(
+                &mut executor,
+                &desired_command(
+                    node,
+                    DesiredMutation::Group,
+                    "staff",
+                    revision - 1,
+                    revision,
+                    100,
+                ),
+                &command_context,
+                100 + i64::try_from(revision).expect("revision"),
+                &mut privd_calls,
+            );
+        }
+        let stale = desired_command(node, DesiredMutation::Group, "staff", 1, 2, 100);
+        assert!(matches!(
+            executor.prepare_external(&stale, &command_context),
+            Err(CommandError::Rejected(
+                "effect_superseded_by_newer_revision"
+            ))
+        ));
+        assert_eq!(privd_calls, 3);
+        assert_eq!(
+            executor
+                .journal()
+                .applied_revision("group", "staff")
+                .expect("group revision"),
+            Some(3)
+        );
+        cleanup_journal(&path);
+    }
+
+    #[test]
+    fn durable_revision_fence_survives_agent_restart() {
+        let path = temporary_journal("revision-restart");
+        let node = *Uuid::now_v7().as_bytes();
+        let command_context = desired_context(node, 100);
+        let mut privd_calls = 0;
+        {
+            let mut executor = CommandExecutor::new(Journal::open(&path).expect("journal"));
+            for (mutation, expected, desired) in [
+                (DesiredMutation::Create, 0, 1),
+                (DesiredMutation::Rotate, 1, 2),
+                (DesiredMutation::Disable, 2, 3),
+            ] {
+                apply_desired(
+                    &mut executor,
+                    &desired_command(node, mutation, "alice", expected, desired, 100),
+                    &command_context,
+                    101 + i64::try_from(desired).expect("revision"),
+                    &mut privd_calls,
+                );
+            }
+        }
+        let mut restarted = CommandExecutor::new(Journal::open(&path).expect("restart"));
+        let stale = desired_command(node, DesiredMutation::Rotate, "alice", 1, 2, 100);
+        assert!(matches!(
+            restarted.prepare_external(&stale, &command_context),
+            Err(CommandError::Rejected(
+                "effect_superseded_by_newer_revision"
+            ))
+        ));
+        assert_eq!(privd_calls, 3);
+        cleanup_journal(&path);
+    }
+
+    #[test]
+    fn revision_gap_is_rejected_before_privd() {
+        let path = temporary_journal("revision-gap");
+        let node = *Uuid::now_v7().as_bytes();
+        let command_context = desired_context(node, 100);
+        let mut executor = CommandExecutor::new(Journal::open(&path).expect("journal"));
+        let mut privd_calls = 0;
+        apply_desired(
+            &mut executor,
+            &desired_command(node, DesiredMutation::Create, "alice", 0, 1, 100),
+            &command_context,
+            101,
+            &mut privd_calls,
+        );
+        let gap = desired_command(node, DesiredMutation::Disable, "alice", 2, 3, 100);
+        assert!(matches!(
+            executor.prepare_external(&gap, &command_context),
+            Err(CommandError::Rejected("revision_gap"))
+        ));
+        assert_eq!(privd_calls, 1);
+        cleanup_journal(&path);
+    }
+
+    #[test]
+    fn sequential_cross_kind_user_mutations_advance_one_resource_revision() {
+        let path = temporary_journal("sequential-cross-kind");
+        let node = *Uuid::now_v7().as_bytes();
+        let command_context = desired_context(node, 100);
+        let mut executor = CommandExecutor::new(Journal::open(&path).expect("journal"));
+        let mut privd_calls = 0;
+        for (mutation, expected, desired) in [
+            (DesiredMutation::Create, 0, 1),
+            (DesiredMutation::Rotate, 1, 2),
+            (DesiredMutation::Disable, 2, 3),
+            (DesiredMutation::Enable, 3, 4),
+            (DesiredMutation::Rotate, 4, 5),
+        ] {
+            apply_desired(
+                &mut executor,
+                &desired_command(node, mutation, "alice", expected, desired, 100),
+                &command_context,
+                101 + i64::try_from(desired).expect("revision"),
+                &mut privd_calls,
+            );
+        }
+        assert_eq!(privd_calls, 5);
+        assert_eq!(
+            executor
+                .journal()
+                .applied_revision("user", "alice")
+                .expect("user revision"),
+            Some(5)
+        );
+        cleanup_journal(&path);
+    }
+
     #[test]
     fn external_command_is_durable_and_duplicate_delivery_replays() {
         let path = temporary_journal("external");
@@ -1746,6 +2070,14 @@ mod tests {
         command_context.capabilities = HashSet::from(["ocserv.users.write"]);
         {
             let mut executor = CommandExecutor::new(Journal::open(&path).expect("journal"));
+            let mut privd_calls = 0;
+            apply_desired(
+                &mut executor,
+                &desired_command(node, DesiredMutation::Create, "alice", 0, 1, 100),
+                &command_context,
+                100,
+                &mut privd_calls,
+            );
             let ExternalPreparation::Execute(command) = executor
                 .prepare_external(&envelope, &command_context)
                 .expect("prepare")
@@ -1797,6 +2129,14 @@ mod tests {
         command_context.observed_revision = None;
         command_context.capabilities = HashSet::from(["ocserv.users.write"]);
         let mut executor = CommandExecutor::new(Journal::open(&path).expect("journal"));
+        let mut privd_calls = 0;
+        apply_desired(
+            &mut executor,
+            &desired_command(node, DesiredMutation::Create, "alice", 0, 1, 100),
+            &command_context,
+            100,
+            &mut privd_calls,
+        );
         let ExternalPreparation::Execute(command) = executor
             .prepare_external(&envelope, &command_context)
             .expect("prepare")
@@ -1824,14 +2164,14 @@ mod tests {
                 .journal()
                 .applied_revision("user", "alice")
                 .unwrap(),
-            None
+            Some(1)
         );
         drop(executor);
         cleanup_journal(&path);
     }
 
     #[test]
-    fn older_unknown_password_revision_is_obsolete_after_newer_success() {
+    fn older_unknown_password_revision_is_reconciled_before_newer_success() {
         let path = temporary_journal("password-superseded");
         let node = *Uuid::now_v7().as_bytes();
         let mut command_context = context(node, 100);
@@ -1862,6 +2202,14 @@ mod tests {
         newer.semantic_payload_sha256 = semantic_payload_hash_v1(&newer).unwrap().to_vec();
 
         let mut executor = CommandExecutor::new(Journal::open(&path).expect("journal"));
+        let mut privd_calls = 0;
+        apply_desired(
+            &mut executor,
+            &desired_command(node, DesiredMutation::Create, "alice", 0, 1, 100),
+            &command_context,
+            100,
+            &mut privd_calls,
+        );
         let ExternalPreparation::Execute(old_command) = executor
             .prepare_external(&old, &command_context)
             .expect("prepare old")
@@ -1871,6 +2219,17 @@ mod tests {
         executor
             .mark_external_unknown(&old_command, "privd_transport_unknown", 101)
             .expect("old unknown");
+        assert!(matches!(
+            executor.prepare_external(&newer, &command_context),
+            Err(CommandError::Rejected("revision_gap"))
+        ));
+        executor
+            .reconcile_external(
+                &old,
+                &command_context,
+                ExternalEffectObservation::AppliedExact,
+            )
+            .expect("old applied observation");
         let ExternalPreparation::Execute(new_command) = executor
             .prepare_external(&newer, &command_context)
             .expect("prepare newer")
@@ -1881,18 +2240,14 @@ mod tests {
             .complete_external_applied(&new_command, "user", "alice", 3, 102)
             .expect("newer applied");
         command_context.now_unix_seconds = 103;
-        let obsolete = executor
+        let replayed = executor
             .reconcile_external(
                 &old,
                 &command_context,
                 ExternalEffectObservation::SupersededByNewerRevision,
             )
-            .expect("old reconcile");
-        assert_eq!(obsolete.record.state, CommandState::Failed);
-        assert_eq!(
-            obsolete.record.error_code.as_deref(),
-            Some("effect_superseded_by_newer_revision")
-        );
+            .expect("old terminal replay");
+        assert_eq!(replayed.record.state, CommandState::Succeeded);
         assert_eq!(
             executor
                 .journal()
@@ -1933,6 +2288,14 @@ mod tests {
         newer.expected_revision = 2;
         newer.semantic_payload_sha256 = semantic_payload_hash_v1(&newer).unwrap().to_vec();
         let mut executor = CommandExecutor::new(Journal::open(&path).expect("journal"));
+        let mut privd_calls = 0;
+        apply_desired(
+            &mut executor,
+            &desired_command(node, DesiredMutation::Create, "alice", 0, 1, 100),
+            &command_context,
+            100,
+            &mut privd_calls,
+        );
         let ExternalPreparation::Execute(old_command) = executor
             .prepare_external(&old, &command_context)
             .expect("prepare old")
@@ -1946,6 +2309,14 @@ mod tests {
         executor
             .reconcile_external(&old, &command_context, ExternalEffectObservation::Absent)
             .expect("old absent");
+        let replacement = desired_command(node, DesiredMutation::Rotate, "alice", 1, 2, 100);
+        apply_desired(
+            &mut executor,
+            &replacement,
+            &command_context,
+            102,
+            &mut privd_calls,
+        );
         let ExternalPreparation::Execute(new_command) = executor
             .prepare_external(&newer, &command_context)
             .expect("prepare newer")

@@ -138,7 +138,22 @@ func (s *Service) Mutate(ctx context.Context, request MutationRequest) (operatio
 	if err := ensureMutationCapacity(ctx, tx, request, currentVersion == 0, now); err != nil {
 		return operationstore.Operation{}, false, err
 	}
+	resourceType := "user"
+	if request.Kind == GroupApply {
+		resourceType = "group"
+	}
+	coalesced, err := supersedePending(ctx, tx, request.NodeID, resourceType, request.Name, request.Kind, currentRevision, now)
+	if err != nil {
+		return operationstore.Operation{}, false, err
+	}
 	nextVersion, nextRevision := currentVersion+1, currentRevision+1
+	commandExpectedRevision := currentRevision
+	if coalesced {
+		// Replacing a command that never left the queue must not create a hole in
+		// the Agent's durable resource revision sequence.
+		nextRevision = currentRevision
+		commandExpectedRevision = currentRevision - 1
+	}
 	fingerprint := desiredFingerprint(request.Kind, request.Name, request.Members)
 	if err := writeDesired(ctx, tx, request, nextVersion, nextRevision, fingerprint[:], now); err != nil {
 		return operationstore.Operation{}, false, err
@@ -149,21 +164,14 @@ func (s *Service) Mutate(ctx context.Context, request MutationRequest) (operatio
 		return operationstore.Operation{}, false, err
 	}
 	expiresAt := now.Add(request.TTL)
-	envelope, err := marshalEnvelope(request, operationID, commandID, uint64(currentRevision), uint64(nextRevision), now, expiresAt)
+	envelope, err := marshalEnvelope(request, operationID, commandID, uint64(commandExpectedRevision), uint64(nextRevision), now, expiresAt)
 	if err != nil {
-		return operationstore.Operation{}, false, err
-	}
-	resourceType := "user"
-	if request.Kind == GroupApply {
-		resourceType = "group"
-	}
-	if err := supersedePending(ctx, tx, request.NodeID, resourceType, request.Name, request.Kind, now); err != nil {
 		return operationstore.Operation{}, false, err
 	}
 	if _, err := tx.Exec(ctx, `INSERT INTO operations(id,workspace_id,node_id,command_id,state,version,request_id,trace_id,idempotency_key,request_hash,expires_at,created_at,updated_at) VALUES($1,$2,$3,$4,'queued',1,$5,$6,$7,$8,$9,$10,$10)`, operationID, workspaceID, request.NodeID, commandID, request.RequestID, traceID(request.Traceparent), request.IdempotencyKey, hash[:], expiresAt, now); err != nil {
 		return operationstore.Operation{}, false, fmt.Errorf("insert user operation: %w", err)
 	}
-	if _, err := tx.Exec(ctx, `INSERT INTO commands(id,operation_id,workspace_id,node_id,state,payload_type,envelope,idempotency_key,expected_version,traceparent,expires_at,created_at,updated_at,resource_type,resource_key) VALUES($1,$2,$3,$4,'queued',$5,$6,$7,$8,$9,$10,$11,$11,$12,$13)`, commandID, operationID, workspaceID, request.NodeID, request.Kind, envelope, request.IdempotencyKey, currentRevision, request.Traceparent, expiresAt, now, resourceType, request.Name); err != nil {
+	if _, err := tx.Exec(ctx, `INSERT INTO commands(id,operation_id,workspace_id,node_id,state,payload_type,envelope,idempotency_key,expected_version,traceparent,expires_at,created_at,updated_at,resource_type,resource_key) VALUES($1,$2,$3,$4,'queued',$5,$6,$7,$8,$9,$10,$11,$11,$12,$13)`, commandID, operationID, workspaceID, request.NodeID, request.Kind, envelope, request.IdempotencyKey, commandExpectedRevision, request.Traceparent, expiresAt, now, resourceType, request.Name); err != nil {
 		return operationstore.Operation{}, false, fmt.Errorf("insert user command: %w", err)
 	}
 	if _, err := tx.Exec(ctx, `INSERT INTO outbox_events(id,command_id,event_type,payload,available_at,created_at) VALUES($1,$2,'command.dispatch',$3,$4,$4)`, outboxID, commandID, envelope, now); err != nil {
@@ -172,7 +180,7 @@ func (s *Service) Mutate(ctx context.Context, request MutationRequest) (operatio
 	if _, err := tx.Exec(ctx, `INSERT INTO operation_events(id,operation_id,state,occurred_at) VALUES($1,$2,'queued',$3)`, eventID, operationID, now); err != nil {
 		return operationstore.Operation{}, false, err
 	}
-	if err := audit.AppendChain(ctx, tx, audit.ChainRecord{EventID: auditID, WorkspaceID: workspaceID, ActorType: "user", ActorID: request.ActorID, SessionID: optionalUUID(request.ActorSessionID), Action: actionFor(request.Kind), ResourceType: resourceType, ResourceID: operationID, NodeID: &request.NodeID, CommandID: &commandID, RequestID: request.RequestID, TraceID: traceID(request.Traceparent), Reason: request.Reason, At: now}); err != nil {
+	if err := audit.AppendChain(ctx, tx, audit.ChainRecord{EventID: auditID, WorkspaceID: workspaceID, ActorType: "user", ActorID: request.ActorID, SessionID: optionalUUID(request.ActorSessionID), Action: actionFor(request.Kind), ResourceType: "operation", ResourceID: operationID, NodeID: &request.NodeID, CommandID: &commandID, RequestID: request.RequestID, TraceID: traceID(request.Traceparent), Reason: request.Reason, At: now}); err != nil {
 		return operationstore.Operation{}, false, fmt.Errorf("append desired state audit intent: %w", err)
 	}
 	if _, err := tx.Exec(ctx, `SELECT pg_notify('ocservia_outbox',$1)`, outboxID.String()); err != nil {
@@ -450,23 +458,25 @@ func findIdempotent(ctx context.Context, tx pgx.Tx, workspaceID uuid.UUID, key s
 	return op, same, nil
 }
 
-func supersedePending(ctx context.Context, tx pgx.Tx, nodeID uuid.UUID, resourceType, resourceKey string, kind MutationKind, now time.Time) error {
+func supersedePending(ctx context.Context, tx pgx.Tx, nodeID uuid.UUID, resourceType, resourceKey string, kind MutationKind, currentRevision int64, now time.Time) (bool, error) {
 	var replaceable []string
 	switch kind {
 	case GroupApply:
 		replaceable = []string{string(GroupApply)}
 	case UserPasswordRotate:
 		replaceable = []string{string(UserPasswordRotate)}
-	case UserDisable, UserEnable:
-		replaceable = []string{string(UserDisable), string(UserEnable)}
+	case UserDisable:
+		replaceable = []string{string(UserDisable)}
+	case UserEnable:
+		replaceable = []string{string(UserEnable)}
 	case UserCreate:
-		return nil
+		return false, nil
 	default:
-		return ErrInvalidRequest
+		return false, ErrInvalidRequest
 	}
-	rows, err := tx.Query(ctx, `UPDATE commands c SET state='superseded',updated_at=$5 FROM outbox_events o WHERE c.node_id=$1 AND c.resource_type=$2 AND c.resource_key=$3 AND c.payload_type=ANY($4) AND c.state='queued' AND o.command_id=c.id AND o.locked_by IS NULL AND NOT EXISTS(SELECT 1 FROM node_command_leases l WHERE l.command_id=c.id) RETURNING c.id,c.operation_id`, nodeID, resourceType, resourceKey, replaceable, now)
+	rows, err := tx.Query(ctx, `UPDATE commands c SET state='superseded',updated_at=$6 FROM outbox_events o WHERE c.node_id=$1 AND c.resource_type=$2 AND c.resource_key=$3 AND c.payload_type=ANY($4) AND c.expected_version=$5 AND c.state='queued' AND o.command_id=c.id AND o.locked_by IS NULL AND NOT EXISTS(SELECT 1 FROM node_command_leases l WHERE l.command_id=c.id) RETURNING c.id,c.operation_id`, nodeID, resourceType, resourceKey, replaceable, currentRevision-1, now)
 	if err != nil {
-		return err
+		return false, err
 	}
 	defer rows.Close()
 	type old struct{ command, operation uuid.UUID }
@@ -474,26 +484,29 @@ func supersedePending(ctx context.Context, tx pgx.Tx, nodeID uuid.UUID, resource
 	for rows.Next() {
 		var value old
 		if err := rows.Scan(&value.command, &value.operation); err != nil {
-			return err
+			return false, err
 		}
 		olds = append(olds, value)
 	}
 	for _, value := range olds {
 		eventID, err := uuid.NewV7()
 		if err != nil {
-			return err
+			return false, err
 		}
 		if _, err = tx.Exec(ctx, `UPDATE operations SET state='superseded',version=version+1,updated_at=$2,completed_at=$2 WHERE id=$1 AND state='queued'`, value.operation, now); err != nil {
-			return err
+			return false, err
 		}
 		if _, err = tx.Exec(ctx, `UPDATE outbox_events SET published_at=$2,last_error='superseded by newer desired revision' WHERE command_id=$1`, value.command, now); err != nil {
-			return err
+			return false, err
 		}
 		if _, err = tx.Exec(ctx, `INSERT INTO operation_events(id,operation_id,state,occurred_at)VALUES($1,$2,'superseded',$3)`, eventID, value.operation, now); err != nil {
-			return err
+			return false, err
 		}
 	}
-	return rows.Err()
+	if err := rows.Err(); err != nil {
+		return false, err
+	}
+	return len(olds) > 0, nil
 }
 
 func newIDs() (uuid.UUID, uuid.UUID, uuid.UUID, uuid.UUID, uuid.UUID, error) {
