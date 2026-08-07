@@ -35,12 +35,38 @@ import {
 const terminalStates = new Set([
   "succeeded",
   "failed",
-  "unknown",
   "expired",
   "rolled_back",
   "drifted",
   "superseded",
 ]);
+const recoveryPollDelays = [1_500, 3_000, 5_000] as const;
+
+function pollDelay(state: Operation["state"], recoveryAttempt: number): number {
+  if (state !== "unknown") return 750;
+  return (
+    recoveryPollDelays[
+      Math.min(recoveryAttempt, recoveryPollDelays.length - 1)
+    ] ?? 5_000
+  );
+}
+
+function waitForPoll(delay: number, signal: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(finish, delay);
+    function finish(): void {
+      signal.removeEventListener("abort", abort);
+      resolve();
+    }
+    function abort(): void {
+      clearTimeout(timer);
+      signal.removeEventListener("abort", abort);
+      reject(new DOMException("Operation polling aborted", "AbortError"));
+    }
+    if (signal.aborted) abort();
+    else signal.addEventListener("abort", abort, { once: true });
+  });
+}
 
 export const useFleetStore = defineStore("fleet", () => {
   const nodes = ref<NodeObservedState[]>([]);
@@ -175,6 +201,11 @@ export const useFleetStore = defineStore("fleet", () => {
   }
 
   async function select(nodeId: string): Promise<void> {
+    if (selected.value && selected.value.id !== nodeId) {
+      cancelRequest(operationController);
+      operationController = undefined;
+      operationSequence += 1;
+    }
     cancelRequest(selectController);
     const controller = trackRequest();
     selectController = controller;
@@ -254,8 +285,13 @@ export const useFleetStore = defineStore("fleet", () => {
       let currentOperation = await create(node, controller.signal);
       if (!isLatestOperation()) return;
       latestOperation.value = currentOperation;
+      let recoveryAttempt = 0;
       while (!terminalStates.has(currentOperation.state)) {
-        await new Promise((resolve) => setTimeout(resolve, 750));
+        const recovering = currentOperation.state === "unknown";
+        await waitForPoll(
+          pollDelay(currentOperation.state, recoveryAttempt),
+          controller.signal,
+        );
         if (!isLatestOperation()) return;
         currentOperation = await getOperation(
           currentOperation.id,
@@ -263,6 +299,7 @@ export const useFleetStore = defineStore("fleet", () => {
         );
         if (!isLatestOperation()) return;
         latestOperation.value = currentOperation;
+        recoveryAttempt = recovering ? recoveryAttempt + 1 : 0;
       }
       if (
         isLatestOperation() &&

@@ -14,6 +14,8 @@ import {
   listNodeUserGroupState,
   listNodes,
   listNodeSessions,
+  workspaceContext,
+  workspaceChangedEvent,
 } from "../src/api/client";
 import { useFleetStore } from "../src/shared/fleet";
 
@@ -30,6 +32,7 @@ vi.mock("../src/api/client", () => ({
   removeIpBan: vi.fn(),
   terminateSession: vi.fn(),
   workspaceContext: vi.fn().mockReturnValue({ id: "workspace", generation: 1 }),
+  workspaceChangedEvent: "ocservia:workspace-changed",
 }));
 
 const node: NodeObservedState = {
@@ -92,6 +95,10 @@ describe("controlled fleet operations", () => {
     vi.mocked(listNodes).mockReset();
     vi.mocked(listNodeSessions).mockReset();
     vi.mocked(disconnectSession).mockReset();
+    vi.mocked(workspaceContext).mockReturnValue({
+      id: "workspace",
+      generation: 1,
+    });
     vi.mocked(getNode).mockResolvedValue(node);
     vi.mocked(listNodeIpBans).mockResolvedValue({ items: [] });
     vi.mocked(listNodeUserGroupState).mockResolvedValue({ items: [] });
@@ -101,7 +108,10 @@ describe("controlled fleet operations", () => {
     });
   });
 
-  afterEach(() => vi.useRealTimers());
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.useRealTimers();
+  });
 
   it("keeps observed state until the asynchronous operation succeeds", async () => {
     vi.mocked(disconnectSession).mockResolvedValue(operation("queued"));
@@ -121,6 +131,135 @@ describe("controlled fleet operations", () => {
     await completion;
     expect(store.latestOperation?.state).toBe("succeeded");
     expect(store.sessions).toEqual([]);
+  });
+
+  it("continues polling from unknown until the operation succeeds", async () => {
+    vi.mocked(disconnectSession).mockResolvedValue(operation("queued"));
+    vi.mocked(getOperation)
+      .mockResolvedValueOnce(operation("unknown"))
+      .mockResolvedValueOnce(operation("succeeded"));
+    vi.mocked(listNodeSessions)
+      .mockResolvedValueOnce({ items: [session], page: { hasMore: false } })
+      .mockResolvedValueOnce({ items: [], page: { hasMore: false } });
+    const store = useFleetStore();
+    await store.select(node.id);
+
+    const completion = store.disconnectSession(session.id, "support case");
+    await vi.advanceTimersByTimeAsync(750);
+    expect(store.latestOperation?.state).toBe("unknown");
+    await vi.advanceTimersByTimeAsync(1_500);
+    await completion;
+
+    expect(store.latestOperation?.state).toBe("succeeded");
+    expect(store.sessions).toEqual([]);
+    expect(getOperation).toHaveBeenCalledTimes(2);
+    store.$dispose();
+  });
+
+  it("continues polling from unknown until the operation fails", async () => {
+    vi.mocked(disconnectSession).mockResolvedValue(operation("queued"));
+    vi.mocked(getOperation)
+      .mockResolvedValueOnce(operation("unknown"))
+      .mockResolvedValueOnce(operation("failed"));
+    const store = useFleetStore();
+    await store.select(node.id);
+
+    const completion = store.disconnectSession(session.id, "support case");
+    await vi.advanceTimersByTimeAsync(750);
+    expect(store.latestOperation?.state).toBe("unknown");
+    await vi.advanceTimersByTimeAsync(1_500);
+    await completion;
+
+    expect(store.latestOperation?.state).toBe("failed");
+    expect(getOperation).toHaveBeenCalledTimes(2);
+    store.$dispose();
+  });
+
+  it("backs off bounded unknown polling without overlapping requests", async () => {
+    vi.mocked(disconnectSession).mockResolvedValue(operation("queued"));
+    vi.mocked(getOperation).mockResolvedValue(operation("unknown"));
+    const store = useFleetStore();
+    await store.select(node.id);
+
+    const completion = store.disconnectSession(session.id, "support case");
+    await vi.advanceTimersByTimeAsync(750);
+    expect(getOperation).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(1_500);
+    expect(getOperation).toHaveBeenCalledTimes(2);
+    await vi.advanceTimersByTimeAsync(3_000);
+    expect(getOperation).toHaveBeenCalledTimes(3);
+    await vi.advanceTimersByTimeAsync(4_999);
+    expect(getOperation).toHaveBeenCalledTimes(3);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(getOperation).toHaveBeenCalledTimes(4);
+
+    store.$dispose();
+    await completion;
+  });
+
+  it("cancels unknown polling when the selected node changes", async () => {
+    let pollingSignal: AbortSignal | undefined;
+    vi.mocked(disconnectSession).mockResolvedValue(operation("queued"));
+    vi.mocked(getOperation).mockImplementation((_operationId, signal) => {
+      pollingSignal = signal;
+      return new Promise((_resolve, reject) => {
+        signal?.addEventListener(
+          "abort",
+          () => {
+            reject(new DOMException("aborted", "AbortError"));
+          },
+          { once: true },
+        );
+      });
+    });
+    vi.mocked(getNode).mockImplementation((nodeId) =>
+      Promise.resolve(nodeId === nodeB.id ? nodeB : node),
+    );
+    const store = useFleetStore();
+    await store.select(node.id);
+
+    const completion = store.disconnectSession(session.id, "support case");
+    await vi.advanceTimersByTimeAsync(750);
+    await store.select(nodeB.id);
+    await completion;
+
+    expect(pollingSignal?.aborted).toBe(true);
+    expect(store.selected?.id).toBe(nodeB.id);
+    expect(store.latestOperation?.state).toBe("queued");
+    store.$dispose();
+  });
+
+  it("cancels unknown polling when the workspace changes", async () => {
+    let pollingSignal: AbortSignal | undefined;
+    vi.stubGlobal("window", new EventTarget());
+    vi.mocked(disconnectSession).mockResolvedValue(operation("queued"));
+    vi.mocked(getOperation).mockImplementation((_operationId, signal) => {
+      pollingSignal = signal;
+      return new Promise((_resolve, reject) => {
+        signal?.addEventListener(
+          "abort",
+          () => {
+            reject(new DOMException("aborted", "AbortError"));
+          },
+          { once: true },
+        );
+      });
+    });
+    const store = useFleetStore();
+    await store.select(node.id);
+
+    const completion = store.disconnectSession(session.id, "support case");
+    await vi.advanceTimersByTimeAsync(750);
+    vi.mocked(workspaceContext).mockReturnValue({
+      id: "other-workspace",
+      generation: 2,
+    });
+    window.dispatchEvent(new Event(workspaceChangedEvent));
+    await completion;
+
+    expect(pollingSignal?.aborted).toBe(true);
+    expect(store.latestOperation).toBeUndefined();
+    store.$dispose();
   });
 
   it("does not let an older rebuild overwrite a newer same-workspace snapshot", async () => {
