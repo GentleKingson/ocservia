@@ -152,13 +152,26 @@ func TestConfigPlanCreateReplayStaleAndTypedEnvelopeIntegration(t *testing.T) {
 	if _, err := pool.Exec(ctx, `UPDATE commands SET state='dispatched' WHERE id=$1`, applyCommandID); err != nil {
 		t.Fatal(err)
 	}
-	resultBytes, err = proto.Marshal(&agentv1.ConfigApplyResult{CandidateHash: hash, PreviousHash: currentHash, Healthy: false, FailedCritical: true, FailureCode: "rollback_health_failed"})
+	resultBytes, err = proto.Marshal(&agentv1.ConfigApplyResult{CandidateHash: hash, PreviousHash: currentHash, Healthy: false, FailedCritical: true, FailureCode: "rollback_failed"})
 	if err != nil {
 		t.Fatal(err)
 	}
 	payloadHash, err := semanticpayload.HashV1(&applyEnvelope)
 	if err != nil {
 		t.Fatal(err)
+	}
+	invalidResultBytes, err := proto.Marshal(&agentv1.CommandResult{CommandId: applyEnvelope.GetCommandId(), IdempotencyKey: applyEnvelope.GetIdempotencyKey(), PayloadSha256: payloadHash[:], SemanticPayloadHashVersion: agentv1.SemanticPayloadHashVersion_SEMANTIC_PAYLOAD_HASH_VERSION_V1, State: agentv1.CommandResultState_COMMAND_RESULT_STATE_SUCCEEDED, AcceptedAt: timestamppb.Now(), CompletedAt: timestamppb.Now()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	invalidEventID := uuid.Must(uuid.NewV7())
+	if err := localslice.New(pool).Ingest(ctx, &transportv1.TransportEvent{EventId: invalidEventID[:], NodeId: nodeID[:], Type: transportv1.TransportEventType_TRANSPORT_EVENT_TYPE_COMMAND_RESULT, OccurredAt: timestamppb.Now(), Traceparent: request.Traceparent, Payload: invalidResultBytes}); err == nil {
+		t.Fatal("empty configuration apply result was accepted")
+	}
+	var preEvidenceState string
+	var preEvidenceRevision int64
+	if err := pool.QueryRow(ctx, `SELECT x.state,s.revision FROM config_apply_operations x JOIN node_config_state s ON s.node_id=x.node_id WHERE x.operation_id=$1`, applyOperationID).Scan(&preEvidenceState, &preEvidenceRevision); err != nil || preEvidenceState != "dispatched" || preEvidenceRevision != 0 {
+		t.Fatalf("invalid evidence changed state=%s revision=%d err=%v", preEvidenceState, preEvidenceRevision, err)
 	}
 	commandResultBytes, err := proto.Marshal(&agentv1.CommandResult{CommandId: applyEnvelope.GetCommandId(), IdempotencyKey: applyEnvelope.GetIdempotencyKey(), PayloadSha256: payloadHash[:], SemanticPayloadHashVersion: agentv1.SemanticPayloadHashVersion_SEMANTIC_PAYLOAD_HASH_VERSION_V1, State: agentv1.CommandResultState_COMMAND_RESULT_STATE_SUCCEEDED, Result: resultBytes, AcceptedAt: timestamppb.Now(), CompletedAt: timestamppb.Now()})
 	if err != nil {
@@ -177,6 +190,21 @@ func TestConfigPlanCreateReplayStaleAndTypedEnvelopeIntegration(t *testing.T) {
 	metrics, err := operations.New(pool).Metrics(ctx)
 	if err != nil || applyState != "failed_critical" || !automationLocked || lockReason != "config_apply_rollback_failed" || criticalAlerts != 1 || metrics.ConfigFailedCritical < 1 {
 		t.Fatalf("critical apply state=%s locked=%v reason=%s alerts=%d metrics=%+v err=%v", applyState, automationLocked, lockReason, criticalAlerts, metrics, err)
+	}
+	publicApply, err := operations.New(pool).Get(ctx, applyOperationID)
+	if err != nil || publicApply.ConfigApplyState != "failed_critical" || publicApply.ConfigApplyFailureCode != "rollback_failed" || publicApply.NodeID == nil || *publicApply.NodeID != nodeID.String() {
+		t.Fatalf("public critical apply=%+v err=%v", publicApply, err)
+	}
+	replayedResultBytes, err := proto.Marshal(&agentv1.CommandResult{CommandId: applyEnvelope.GetCommandId(), IdempotencyKey: applyEnvelope.GetIdempotencyKey(), PayloadSha256: payloadHash[:], SemanticPayloadHashVersion: agentv1.SemanticPayloadHashVersion_SEMANTIC_PAYLOAD_HASH_VERSION_V1, State: agentv1.CommandResultState_COMMAND_RESULT_STATE_SUCCEEDED, Result: resultBytes, AcceptedAt: timestamppb.Now(), CompletedAt: timestamppb.Now(), Replayed: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	replayEventID := uuid.Must(uuid.NewV7())
+	if err := localslice.New(pool).Ingest(ctx, &transportv1.TransportEvent{EventId: replayEventID[:], NodeId: nodeID[:], Type: transportv1.TransportEventType_TRANSPORT_EVENT_TYPE_COMMAND_RESULT, OccurredAt: timestamppb.Now(), Traceparent: request.Traceparent, Payload: replayedResultBytes}); err != nil {
+		t.Fatalf("critical result replay failed: %v", err)
+	}
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM security_alerts WHERE workspace_id=$1 AND kind='config_apply.rollback_failed'`, workspaceID).Scan(&criticalAlerts); err != nil || criticalAlerts != 1 {
+		t.Fatalf("critical replay alerts=%d err=%v", criticalAlerts, err)
 	}
 	if _, err := pool.Exec(ctx, `UPDATE node_config_state SET revision=1,automation_locked=false,automation_lock_reason=NULL WHERE node_id=$1`, nodeID); err != nil {
 		t.Fatal(err)

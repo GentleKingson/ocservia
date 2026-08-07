@@ -5,7 +5,9 @@ import (
 	"strings"
 	"testing"
 
+	agentv1 "github.com/GentleKingson/ocservia/control-plane/gen/proto/ocserv/platform/agent/v1"
 	transportv1 "github.com/GentleKingson/ocservia/control-plane/gen/proto/ocserv/platform/transport/v1"
+	"google.golang.org/protobuf/proto"
 )
 
 func TestOperationJSONOmitsAbsentIdentifiers(t *testing.T) {
@@ -71,4 +73,74 @@ func TestScenarioDefaultsPreservePresence(t *testing.T) {
 	if _, _, err := normalizeScenario(Scenario{DelayMillis: &overLimit}); err == nil {
 		t.Fatal("delay above 30 seconds was accepted")
 	}
+}
+
+func TestNormalizeConfigApplyResultRejectsUnprovedOutcomes(t *testing.T) {
+	candidate := bytesOf(0x11)
+	previous := bytesOf(0x22)
+	envelope := &agentv1.CommandEnvelope{Payload: &agentv1.CommandEnvelope_ConfigApply{ConfigApply: &agentv1.ConfigApply{
+		CandidateHash: candidate, ExpectedCurrentHash: previous, DesiredRevision: 7,
+	}}}
+	valid := &agentv1.ConfigApplyResult{CandidateHash: candidate, PreviousHash: previous, ObservedHash: candidate, AppliedRevision: 7, Healthy: true}
+	validBytes, err := proto.Marshal(valid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state, _, err := normalizeConfigApplyResult(envelope, "succeeded", validBytes); err != nil || state != "succeeded" {
+		t.Fatalf("valid success state=%q err=%v", state, err)
+	}
+	invalid := []*agentv1.ConfigApplyResult{
+		{},
+		{CandidateHash: bytesOf(0x33), PreviousHash: previous, ObservedHash: candidate, AppliedRevision: 7, Healthy: true},
+		{CandidateHash: candidate, PreviousHash: previous, ObservedHash: candidate, AppliedRevision: 6, Healthy: true},
+		{CandidateHash: candidate, PreviousHash: previous, ObservedHash: candidate, AppliedRevision: 7},
+		{CandidateHash: candidate, PreviousHash: previous, ObservedHash: previous, Healthy: true, RolledBack: true, FailedCritical: true, FailureCode: "health_check_failed"},
+	}
+	for index, outcome := range invalid {
+		encoded, marshalErr := proto.Marshal(outcome)
+		if marshalErr != nil {
+			t.Fatal(marshalErr)
+		}
+		if _, _, err := normalizeConfigApplyResult(envelope, "succeeded", encoded); err == nil {
+			t.Fatalf("invalid outcome %d was accepted", index)
+		}
+	}
+	for index, raw := range [][]byte{nil, {0xff}} {
+		if _, _, err := normalizeConfigApplyResult(envelope, "succeeded", raw); err == nil {
+			t.Fatalf("malformed outcome %d was accepted", index)
+		}
+	}
+}
+
+func TestNormalizeConfigApplyResultSupportsIdempotentTerminalStates(t *testing.T) {
+	candidate := bytesOf(0x11)
+	previous := bytesOf(0x22)
+	envelope := &agentv1.CommandEnvelope{Payload: &agentv1.CommandEnvelope_ConfigApply{ConfigApply: &agentv1.ConfigApply{
+		CandidateHash: candidate, ExpectedCurrentHash: previous, DesiredRevision: 7,
+	}}}
+	cases := []struct {
+		want   string
+		result *agentv1.ConfigApplyResult
+	}{
+		{"rolled_back", &agentv1.ConfigApplyResult{CandidateHash: candidate, PreviousHash: previous, ObservedHash: previous, Healthy: true, RolledBack: true, FailureCode: "health_check_failed"}},
+		{"failed", &agentv1.ConfigApplyResult{CandidateHash: candidate, PreviousHash: previous, FailedCritical: true, FailureCode: "rollback_failed"}},
+	}
+	for _, test := range cases {
+		encoded, err := proto.Marshal(test.result)
+		if err != nil {
+			t.Fatal(err)
+		}
+		state, _, err := normalizeConfigApplyResult(envelope, "succeeded", encoded)
+		if err != nil || state != test.want {
+			t.Fatalf("normalized state=%q want=%q err=%v", state, test.want, err)
+		}
+	}
+}
+
+func bytesOf(value byte) []byte {
+	result := make([]byte, 32)
+	for index := range result {
+		result[index] = value
+	}
+	return result
 }

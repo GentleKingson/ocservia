@@ -555,12 +555,6 @@ func ingestAgentCommandResult(ctx context.Context, tx pgx.Tx, eventID, nodeID uu
 			return errors.New("command result payload hash mismatch")
 		}
 	}
-	if (currentState == "succeeded" || currentState == "failed" || currentState == "rejected") && currentState != state {
-		return errors.New("command result contradicts a terminal state")
-	}
-	if currentState == "expired" || currentState == "rolled_back" || currentState == "superseded" {
-		return errors.New("command result contradicts a terminal state")
-	}
 	var payloadHash any
 	if len(result.GetPayloadSha256()) == 32 {
 		payloadHash = result.GetPayloadSha256()
@@ -578,21 +572,18 @@ func ingestAgentCommandResult(ctx context.Context, tx pgx.Tx, eventID, nodeID uu
 	if resultBytes == nil {
 		resultBytes = []byte{}
 	}
+	effectiveState, applyResult, err := normalizeConfigApplyResult(&envelope, state, resultBytes)
+	if err != nil {
+		return err
+	}
+	if (currentState == "succeeded" || currentState == "failed" || currentState == "rejected" || currentState == "rolled_back") && currentState != effectiveState {
+		return errors.New("command result contradicts a terminal state")
+	}
+	if currentState == "expired" || currentState == "superseded" {
+		return errors.New("command result contradicts a terminal state")
+	}
 	if _, err := tx.Exec(ctx, `INSERT INTO agent_command_results(event_id,command_id,idempotency_key,payload_sha256,semantic_payload_hash_version,state,result,error_code,accepted_at,completed_at,replayed,created_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`, eventID, commandID, idempotencyKey, payloadHash, hashVersion, state, resultBytes, errorCode, acceptedAtValue, completedTime, result.GetReplayed(), observedAt); err != nil {
 		return fmt.Errorf("persist Agent command result: %w", err)
-	}
-	effectiveState := state
-	var applyResult *agentv1.ConfigApplyResult
-	if envelope.GetConfigApply() != nil && state == "succeeded" {
-		var decoded agentv1.ConfigApplyResult
-		if proto.Unmarshal(resultBytes, &decoded) == nil {
-			applyResult = &decoded
-			if decoded.GetFailedCritical() {
-				effectiveState = "failed"
-			} else if decoded.GetRolledBack() {
-				effectiveState = "rolled_back"
-			}
-		}
 	}
 	operationEventID, err := uuid.NewV7()
 	if err != nil {
@@ -676,6 +667,34 @@ func ingestAgentCommandResult(ctx context.Context, tx pgx.Tx, eventID, nodeID uu
 		}
 	}
 	return nil
+}
+
+func normalizeConfigApplyResult(envelope *agentv1.CommandEnvelope, state string, resultBytes []byte) (string, *agentv1.ConfigApplyResult, error) {
+	apply := envelope.GetConfigApply()
+	if apply == nil || state != "succeeded" {
+		return state, nil, nil
+	}
+	var result agentv1.ConfigApplyResult
+	if len(resultBytes) == 0 || proto.Unmarshal(resultBytes, &result) != nil {
+		return "", nil, errors.New("configuration apply result is malformed")
+	}
+	if !bytes.Equal(result.GetCandidateHash(), apply.GetCandidateHash()) || !bytes.Equal(result.GetPreviousHash(), apply.GetExpectedCurrentHash()) {
+		return "", nil, errors.New("configuration apply result hash mismatch")
+	}
+	switch {
+	case result.GetHealthy() && !result.GetRolledBack() && !result.GetFailedCritical() && result.GetFailureCode() == "" &&
+		bytes.Equal(result.GetObservedHash(), apply.GetCandidateHash()) && result.GetAppliedRevision() == apply.GetDesiredRevision():
+		return "succeeded", &result, nil
+	case result.GetHealthy() && result.GetRolledBack() && !result.GetFailedCritical() && result.GetAppliedRevision() == 0 &&
+		bytes.Equal(result.GetObservedHash(), apply.GetExpectedCurrentHash()) &&
+		(result.GetFailureCode() == "health_check_failed" || result.GetFailureCode() == "recovered_health_check_failed"):
+		return "rolled_back", &result, nil
+	case !result.GetHealthy() && !result.GetRolledBack() && result.GetFailedCritical() && result.GetAppliedRevision() == 0 && len(result.GetObservedHash()) == 0 &&
+		(result.GetFailureCode() == "rollback_failed" || result.GetFailureCode() == "recovery_rollback_failed"):
+		return "failed", &result, nil
+	default:
+		return "", nil, errors.New("configuration apply result has an invalid outcome")
+	}
 }
 
 func commandAuditAction(envelope *agentv1.CommandEnvelope) string {

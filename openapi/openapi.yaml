@@ -1265,6 +1265,14 @@ components:
           $ref: "#/components/schemas/UuidV7"
         command_id:
           $ref: "#/components/schemas/UuidV7"
+        config_apply_state:
+          type: string
+          enum: [queued, dispatched, accepted, running, succeeded, failed, rolled_back, failed_critical, unknown, expired]
+          description: Typed configuration outcome when this operation applies a configuration plan.
+        config_apply_failure_code:
+          type: string
+          minLength: 1
+          maxLength: 128
         version:
           type: integer
           format: int64

@@ -35,4 +35,6 @@ CREATE TABLE config_apply_operations (
     FOREIGN KEY (workspace_id, node_id) REFERENCES nodes(workspace_id, id) ON DELETE RESTRICT
 );
 CREATE INDEX config_apply_operations_node_created_idx ON config_apply_operations(node_id, created_at DESC, operation_id DESC);
+CREATE UNIQUE INDEX config_apply_operations_one_active_node_idx ON config_apply_operations(node_id)
+    WHERE state IN ('queued','dispatched','accepted','running','unknown');
 COMMENT ON TABLE config_apply_operations IS 'Approved configuration transactions and secret-safe apply/rollback outcomes.';

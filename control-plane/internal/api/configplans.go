@@ -121,6 +121,8 @@ func writeConfigPlanError(w http.ResponseWriter, r *http.Request, err error) {
 		writeProblem(w, r, http.StatusConflict, "https://ocservia.dev/problems/capability-unavailable", "Capability is unavailable", "the node cannot validate this configuration")
 	case errors.Is(err, operationstore.ErrIdempotencyConflict):
 		writeProblem(w, r, http.StatusConflict, "https://ocservia.dev/problems/idempotency-conflict", "Idempotency conflict", "the idempotency key was used for different configuration content")
+	case errors.Is(err, operationstore.ErrConfigApplyActive):
+		writeProblem(w, r, http.StatusConflict, "https://ocservia.dev/problems/config-apply-active", "Configuration apply already active", "wait for the active apply or its reconciliation to reach a terminal state")
 	case errors.Is(err, pgx.ErrNoRows):
 		writeProblem(w, r, http.StatusNotFound, "https://ocservia.dev/problems/not-found", "Resource not found", "the configuration plan or node does not exist")
 	default:

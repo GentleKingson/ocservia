@@ -29,6 +29,7 @@ var (
 	ErrIdempotencyConflict = errors.New("idempotency key was reused with different input")
 	ErrStaleRevision       = errors.New("resource revision is stale")
 	ErrNodeUnavailable     = errors.New("node is unavailable")
+	ErrConfigApplyActive   = errors.New("a configuration apply is already active for this node")
 	ErrCapabilityMissing   = errors.New("node capability is unavailable")
 	ErrTargetNotObserved   = errors.New("target is not present in observed state")
 	ErrBacklogExceeded     = commandlimit.ErrBacklogExceeded
@@ -91,14 +92,16 @@ type ConfigApplyMetadata struct {
 }
 
 type Operation struct {
-	ID        string     `json:"id"`
-	State     string     `json:"state"`
-	NodeID    *string    `json:"node_id,omitempty"`
-	CommandID *string    `json:"command_id,omitempty"`
-	Version   int64      `json:"version"`
-	CreatedAt time.Time  `json:"created_at"`
-	UpdatedAt time.Time  `json:"updated_at"`
-	ExpiresAt *time.Time `json:"expires_at,omitempty"`
+	ID                     string     `json:"id"`
+	State                  string     `json:"state"`
+	NodeID                 *string    `json:"node_id,omitempty"`
+	CommandID              *string    `json:"command_id,omitempty"`
+	ConfigApplyState       string     `json:"config_apply_state,omitempty"`
+	ConfigApplyFailureCode string     `json:"config_apply_failure_code,omitempty"`
+	Version                int64      `json:"version"`
+	CreatedAt              time.Time  `json:"created_at"`
+	UpdatedAt              time.Time  `json:"updated_at"`
+	ExpiresAt              *time.Time `json:"expires_at,omitempty"`
 }
 
 type Event struct {
@@ -231,6 +234,13 @@ func (s *Service) CreateSynthetic(ctx context.Context, request CreateRequest) (O
 		if locked || revision != planRevision || request.DesiredRevision != uint64(planRevision)+1 {
 			return Operation{}, false, ErrStaleRevision
 		}
+		var applyActive bool
+		if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM config_apply_operations WHERE node_id=$1 AND state IN('queued','dispatched','accepted','running','unknown'))`, request.NodeID).Scan(&applyActive); err != nil {
+			return Operation{}, false, fmt.Errorf("check active configuration apply: %w", err)
+		}
+		if applyActive {
+			return Operation{}, false, ErrConfigApplyActive
+		}
 		if err := approvals.ConsumeBound(ctx, tx, request.ApprovalID, workspaceID, request.ActorIdentityID, "config.apply", "config_plan", request.ApplyMetadata.PlanID, planHash); err != nil {
 			return Operation{}, false, err
 		}
@@ -343,11 +353,15 @@ func (s *Service) CreateSynthetic(ctx context.Context, request CreateRequest) (O
 		return Operation{}, false, fmt.Errorf("commit operation transaction: %w", err)
 	}
 	nodeText, commandText := request.NodeID.String(), commandID.String()
-	return Operation{ID: operationID.String(), State: "queued", NodeID: &nodeText, CommandID: &commandText, Version: 1, CreatedAt: now, UpdatedAt: now, ExpiresAt: &expiresAt}, false, nil
+	operation := Operation{ID: operationID.String(), State: "queued", NodeID: &nodeText, CommandID: &commandText, Version: 1, CreatedAt: now, UpdatedAt: now, ExpiresAt: &expiresAt}
+	if request.Kind == ConfigApply {
+		operation.ConfigApplyState = "queued"
+	}
+	return operation, false, nil
 }
 
 func (s *Service) Get(ctx context.Context, id uuid.UUID) (Operation, error) {
-	return scanOperation(s.pool.QueryRow(ctx, `SELECT id::text,state,node_id::text,command_id::text,version,created_at,updated_at,expires_at FROM operations WHERE id=$1`, id))
+	return scanOperation(s.pool.QueryRow(ctx, `SELECT o.id::text,o.state,o.node_id::text,o.command_id::text,o.version,o.created_at,o.updated_at,o.expires_at,COALESCE(x.state,''),COALESCE(x.failure_code,'') FROM operations o LEFT JOIN config_apply_operations x ON x.operation_id=o.id WHERE o.id=$1`, id))
 }
 
 func (s *Service) ListEvents(ctx context.Context, operationID, after uuid.UUID, limit int) ([]Event, error) {
@@ -829,11 +843,11 @@ func capabilityFor(kind SyntheticKind) string {
 }
 
 func findIdempotent(ctx context.Context, tx pgx.Tx, workspaceID uuid.UUID, key string, hash []byte) (Operation, bool, error) {
-	row := tx.QueryRow(ctx, `SELECT id::text,state,node_id::text,command_id::text,version,created_at,updated_at,expires_at,request_hash=$3 FROM operations WHERE workspace_id=$1 AND idempotency_key=$2`, workspaceID, key, hash)
+	row := tx.QueryRow(ctx, `SELECT o.id::text,o.state,o.node_id::text,o.command_id::text,o.version,o.created_at,o.updated_at,o.expires_at,o.request_hash=$3,COALESCE(x.state,''),COALESCE(x.failure_code,'') FROM operations o LEFT JOIN config_apply_operations x ON x.operation_id=o.id WHERE o.workspace_id=$1 AND o.idempotency_key=$2`, workspaceID, key, hash)
 	var op Operation
 	var nodeID, commandID *string
 	var same bool
-	err := row.Scan(&op.ID, &op.State, &nodeID, &commandID, &op.Version, &op.CreatedAt, &op.UpdatedAt, &op.ExpiresAt, &same)
+	err := row.Scan(&op.ID, &op.State, &nodeID, &commandID, &op.Version, &op.CreatedAt, &op.UpdatedAt, &op.ExpiresAt, &same, &op.ConfigApplyState, &op.ConfigApplyFailureCode)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Operation{}, false, nil
 	}
@@ -848,7 +862,7 @@ func findIdempotent(ctx context.Context, tx pgx.Tx, workspaceID uuid.UUID, key s
 func scanOperation(row pgx.Row) (Operation, error) {
 	var op Operation
 	var nodeID, commandID *string
-	err := row.Scan(&op.ID, &op.State, &nodeID, &commandID, &op.Version, &op.CreatedAt, &op.UpdatedAt, &op.ExpiresAt)
+	err := row.Scan(&op.ID, &op.State, &nodeID, &commandID, &op.Version, &op.CreatedAt, &op.UpdatedAt, &op.ExpiresAt, &op.ConfigApplyState, &op.ConfigApplyFailureCode)
 	if err != nil {
 		return Operation{}, err
 	}
