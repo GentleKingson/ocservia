@@ -108,6 +108,7 @@ func New(address string, pool *pgxpool.Pool, build BuildInfo, logger *slog.Logge
 	mux.HandleFunc("GET /api/v1/user-operations/metrics", s.requireOperationAuth(s.userOperationMetrics))
 	mux.HandleFunc("POST /api/v1/nodes/{node_id}/config-plans", s.requireOperationAuth(s.createConfigPlan))
 	mux.HandleFunc("GET /api/v1/config-plans/{plan_id}", s.requireOperationAuth(s.getConfigPlan))
+	mux.HandleFunc("POST /api/v1/config-plans/{plan_id}/apply", s.requireOperationAuth(s.applyConfigPlan))
 	mux.HandleFunc("POST /api/v1/approval-requests", s.requireOperationAuth(s.createApproval))
 	mux.HandleFunc("GET /api/v1/approval-requests/{approval_id}", s.requireOperationAuth(s.getApproval))
 	mux.HandleFunc("POST /api/v1/approval-requests/{approval_id}", s.requireOperationAuth(s.approveRequest))

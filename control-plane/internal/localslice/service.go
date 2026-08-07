@@ -581,20 +581,33 @@ func ingestAgentCommandResult(ctx context.Context, tx pgx.Tx, eventID, nodeID uu
 	if _, err := tx.Exec(ctx, `INSERT INTO agent_command_results(event_id,command_id,idempotency_key,payload_sha256,semantic_payload_hash_version,state,result,error_code,accepted_at,completed_at,replayed,created_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`, eventID, commandID, idempotencyKey, payloadHash, hashVersion, state, resultBytes, errorCode, acceptedAtValue, completedTime, result.GetReplayed(), observedAt); err != nil {
 		return fmt.Errorf("persist Agent command result: %w", err)
 	}
+	effectiveState := state
+	var applyResult *agentv1.ConfigApplyResult
+	if envelope.GetConfigApply() != nil && state == "succeeded" {
+		var decoded agentv1.ConfigApplyResult
+		if proto.Unmarshal(resultBytes, &decoded) == nil {
+			applyResult = &decoded
+			if decoded.GetFailedCritical() {
+				effectiveState = "failed"
+			} else if decoded.GetRolledBack() {
+				effectiveState = "rolled_back"
+			}
+		}
+	}
 	operationEventID, err := uuid.NewV7()
 	if err != nil {
 		return fmt.Errorf("generate operation result event ID: %w", err)
 	}
-	terminal := state == "succeeded" || state == "failed" || state == "rejected"
-	commandTag, err := tx.Exec(ctx, `UPDATE commands SET state=$2,updated_at=GREATEST(updated_at,$3) WHERE id=$1 AND state IN ('dispatched','accepted','running','unknown')`, commandID, state, observedAt)
+	terminal := effectiveState == "succeeded" || effectiveState == "failed" || effectiveState == "rejected" || effectiveState == "rolled_back"
+	commandTag, err := tx.Exec(ctx, `UPDATE commands SET state=$2,updated_at=GREATEST(updated_at,$3) WHERE id=$1 AND state IN ('dispatched','accepted','running','unknown')`, commandID, effectiveState, observedAt)
 	if err != nil {
 		return fmt.Errorf("apply Agent command result: %w", err)
 	}
 	if commandTag.RowsAffected() == 0 {
 		return nil
 	}
-	operationState := state
-	if state == "rejected" {
+	operationState := effectiveState
+	if effectiveState == "rejected" {
 		operationState = "failed"
 	}
 	var operationID, workspaceID uuid.UUID
@@ -605,6 +618,44 @@ func ingestAgentCommandResult(ctx context.Context, tx pgx.Tx, eventID, nodeID uu
 	}
 	if errors.Is(err, pgx.ErrNoRows) {
 		return errors.New("command result does not match a mutable operation")
+	}
+	if apply := envelope.GetConfigApply(); apply != nil {
+		applyState := operationState
+		failureCode := any(nil)
+		if result.GetErrorCode() != "" {
+			failureCode = result.GetErrorCode()
+		}
+		if applyResult != nil {
+			if applyResult.GetFailureCode() != "" {
+				failureCode = applyResult.GetFailureCode()
+			}
+			if applyResult.GetFailedCritical() {
+				applyState = "failed_critical"
+			}
+		}
+		if _, err := tx.Exec(ctx, `UPDATE config_apply_operations SET state=$2,failure_code=$3,updated_at=$4 WHERE operation_id=$1`, operationID, applyState, failureCode, observedAt); err != nil {
+			return fmt.Errorf("update configuration apply outcome: %w", err)
+		}
+		if applyState == "succeeded" {
+			tag, err := tx.Exec(ctx, `INSERT INTO node_config_state(node_id,revision,candidate_hash,redacted_config,automation_locked,last_apply_operation_id,updated_at)
+				SELECT x.node_id,$2,$3,p.candidate_redacted,false,$1,$4 FROM config_apply_operations x JOIN config_plans p ON p.id=x.plan_id WHERE x.operation_id=$1 AND x.node_id=$5
+				ON CONFLICT(node_id) DO UPDATE SET revision=EXCLUDED.revision,candidate_hash=EXCLUDED.candidate_hash,redacted_config=EXCLUDED.redacted_config,automation_locked=false,automation_lock_reason=NULL,last_apply_operation_id=EXCLUDED.last_apply_operation_id,updated_at=EXCLUDED.updated_at`, operationID, apply.GetDesiredRevision(), apply.GetCandidateHash(), observedAt, nodeID)
+			if err != nil {
+				return fmt.Errorf("advance configuration revision: %w", err)
+			}
+			if tag.RowsAffected() != 1 {
+				return errors.New("configuration apply result has no immutable plan")
+			}
+		}
+		if applyState == "failed_critical" {
+			if _, err := tx.Exec(ctx, `INSERT INTO node_config_state(node_id,revision,redacted_config,automation_locked,automation_lock_reason,last_apply_operation_id,updated_at)
+				VALUES($1,0,'',true,'config_apply_rollback_failed',$2,$3) ON CONFLICT(node_id) DO UPDATE SET automation_locked=true,automation_lock_reason='config_apply_rollback_failed',last_apply_operation_id=EXCLUDED.last_apply_operation_id,updated_at=EXCLUDED.updated_at`, nodeID, operationID, observedAt); err != nil {
+				return fmt.Errorf("lock configuration automation: %w", err)
+			}
+			if _, err := tx.Exec(ctx, `INSERT INTO security_alerts(id,workspace_id,severity,kind,created_at) VALUES($1,$2,'critical','config_apply.rollback_failed',$3)`, uuid.Must(uuid.NewV7()), workspaceID, observedAt); err != nil {
+				return fmt.Errorf("emit configuration rollback alert: %w", err)
+			}
+		}
 	}
 	if _, err := tx.Exec(ctx, `INSERT INTO operation_events(id,operation_id,state,occurred_at) VALUES($1,$2,$3,$4)`, operationEventID, operationID, operationState, observedAt); err != nil {
 		return fmt.Errorf("append Agent operation result event: %w", err)
@@ -647,6 +698,10 @@ func commandAuditAction(envelope *agentv1.CommandEnvelope) string {
 		return "user.password.rotate"
 	case *agentv1.CommandEnvelope_GroupApply:
 		return "group.apply"
+	case *agentv1.CommandEnvelope_ConfigPlan:
+		return "config.plan"
+	case *agentv1.CommandEnvelope_ConfigApply:
+		return "config.apply"
 	default:
 		return "synthetic.command"
 	}

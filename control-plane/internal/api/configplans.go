@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/GentleKingson/ocservia/control-plane/internal/approvals"
 	"github.com/GentleKingson/ocservia/control-plane/internal/configplan"
 	operationstore "github.com/GentleKingson/ocservia/control-plane/internal/operations"
 	"github.com/google/uuid"
@@ -18,6 +19,11 @@ type createConfigPlanRequest struct {
 	NodeVariables    map[string]string   `json:"node_variables,omitempty"`
 	TTLSeconds       int64               `json:"ttl_seconds"`
 	Reason           string              `json:"reason"`
+}
+
+type applyConfigPlanRequest struct {
+	ApprovalID string `json:"approval_id"`
+	Reason     string `json:"reason"`
 }
 
 func (s *Server) createConfigPlan(w http.ResponseWriter, r *http.Request) {
@@ -71,12 +77,46 @@ func (s *Server) getConfigPlan(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, value)
 }
 
+func (s *Server) applyConfigPlan(w http.ResponseWriter, r *http.Request) {
+	planID, err := parseUUIDv7(r.PathValue("plan_id"))
+	if err != nil {
+		writeProblem(w, r, http.StatusBadRequest, "https://ocservia.dev/problems/invalid-id", "Invalid identifier", "plan_id must be UUIDv7")
+		return
+	}
+	key := strings.TrimSpace(r.Header.Get("Idempotency-Key"))
+	var body applyConfigPlanRequest
+	if key == "" || !decodeStrict(w, r, &body) {
+		if key == "" {
+			writeProblem(w, r, http.StatusBadRequest, "https://ocservia.dev/problems/idempotency-key-required", "Idempotency key is required", "Idempotency-Key must be provided")
+		}
+		return
+	}
+	approvalID, err := parseUUIDv7(body.ApprovalID)
+	if err != nil {
+		writeProblem(w, r, http.StatusBadRequest, "https://ocservia.dev/problems/invalid-id", "Invalid identifier", "approval_id must be UUIDv7")
+		return
+	}
+	actor := principal(r)
+	value, replayed, err := s.configplans.Apply(r.Context(), configplan.ApplyRequest{PlanID: planID, ApprovalID: approvalID, IdempotencyKey: key, ActorID: actorID(r), ActorIdentityID: actor.IdentityID, ActorSessionID: actor.SessionID, RequestID: requestID(r), Traceparent: requestTraceparent(r), Reason: body.Reason})
+	if err != nil {
+		writeConfigPlanError(w, r, err)
+		return
+	}
+	if replayed {
+		w.Header().Set("Idempotency-Replayed", "true")
+	}
+	w.Header().Set("Location", "/api/v1/operations/"+value.ID)
+	writeJSON(w, http.StatusAccepted, value)
+}
+
 func writeConfigPlanError(w http.ResponseWriter, r *http.Request, err error) {
 	switch {
 	case errors.Is(err, configplan.ErrInvalid), errors.Is(err, operationstore.ErrInvalidRequest):
 		writeProblem(w, r, http.StatusBadRequest, "https://ocservia.dev/problems/config-plan-invalid", "Configuration plan is invalid", "the template, variables, revision, or lifetime is invalid")
 	case errors.Is(err, configplan.ErrStaleRevision), errors.Is(err, operationstore.ErrStaleRevision):
 		writeProblem(w, r, http.StatusConflict, "https://ocservia.dev/problems/stale-revision", "Configuration revision is stale", "refresh configuration state and plan again")
+	case errors.Is(err, approvals.ErrNotReady):
+		writeProblem(w, r, http.StatusConflict, "https://ocservia.dev/problems/approval-not-ready", "Approval is not ready", "an unexpired independent approval for this exact plan is required")
 	case errors.Is(err, configplan.ErrCapability), errors.Is(err, operationstore.ErrCapabilityMissing):
 		writeProblem(w, r, http.StatusConflict, "https://ocservia.dev/problems/capability-unavailable", "Capability is unavailable", "the node cannot validate this configuration")
 	case errors.Is(err, operationstore.ErrIdempotencyConflict):

@@ -90,7 +90,7 @@ func (s *Server) createApproval(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		requestHash, _ = hex.DecodeString(plan.CandidateHash)
-		requestSummary, _ = json.Marshal(map[string]any{"node_id": plan.NodeID, "expected_revision": plan.ExpectedRevision, "candidate_hash": plan.CandidateHash, "expires_at": plan.ExpiresAt})
+		requestSummary, _ = json.Marshal(map[string]any{"node_id": plan.NodeID, "expected_revision": plan.ExpectedRevision, "candidate_hash": plan.CandidateHash, "current_hash": plan.CurrentHash, "expires_at": plan.ExpiresAt})
 	}
 	// Approval requests cannot be used to ask another user to authorize an action
 	// that the requester could not perform themselves.

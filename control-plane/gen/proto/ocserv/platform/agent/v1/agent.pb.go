@@ -2551,6 +2551,7 @@ type ConfigPlanResult struct {
 	Warnings         []string               `protobuf:"bytes,3,rep,name=warnings,proto3" json:"warnings,omitempty"`
 	CurrentUnchanged bool                   `protobuf:"varint,4,opt,name=current_unchanged,json=currentUnchanged,proto3" json:"current_unchanged,omitempty"`
 	StagingCleaned   bool                   `protobuf:"varint,5,opt,name=staging_cleaned,json=stagingCleaned,proto3" json:"staging_cleaned,omitempty"`
+	CurrentHash      []byte                 `protobuf:"bytes,6,opt,name=current_hash,json=currentHash,proto3" json:"current_hash,omitempty"`
 	unknownFields    protoimpl.UnknownFields
 	sizeCache        protoimpl.SizeCache
 }
@@ -2620,11 +2621,21 @@ func (x *ConfigPlanResult) GetStagingCleaned() bool {
 	return false
 }
 
+func (x *ConfigPlanResult) GetCurrentHash() []byte {
+	if x != nil {
+		return x.CurrentHash
+	}
+	return nil
+}
+
 type ConfigApply struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	CandidateHash []byte                 `protobuf:"bytes,1,opt,name=candidate_hash,json=candidateHash,proto3" json:"candidate_hash,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	state               protoimpl.MessageState `protogen:"open.v1"`
+	Candidate           []byte                 `protobuf:"bytes,1,opt,name=candidate,proto3" json:"candidate,omitempty"`
+	CandidateHash       []byte                 `protobuf:"bytes,2,opt,name=candidate_hash,json=candidateHash,proto3" json:"candidate_hash,omitempty"`
+	ExpectedCurrentHash []byte                 `protobuf:"bytes,3,opt,name=expected_current_hash,json=expectedCurrentHash,proto3" json:"expected_current_hash,omitempty"`
+	DesiredRevision     uint64                 `protobuf:"varint,4,opt,name=desired_revision,json=desiredRevision,proto3" json:"desired_revision,omitempty"`
+	unknownFields       protoimpl.UnknownFields
+	sizeCache           protoimpl.SizeCache
 }
 
 func (x *ConfigApply) Reset() {
@@ -2657,11 +2668,132 @@ func (*ConfigApply) Descriptor() ([]byte, []int) {
 	return file_ocserv_platform_agent_v1_agent_proto_rawDescGZIP(), []int{26}
 }
 
+func (x *ConfigApply) GetCandidate() []byte {
+	if x != nil {
+		return x.Candidate
+	}
+	return nil
+}
+
 func (x *ConfigApply) GetCandidateHash() []byte {
 	if x != nil {
 		return x.CandidateHash
 	}
 	return nil
+}
+
+func (x *ConfigApply) GetExpectedCurrentHash() []byte {
+	if x != nil {
+		return x.ExpectedCurrentHash
+	}
+	return nil
+}
+
+func (x *ConfigApply) GetDesiredRevision() uint64 {
+	if x != nil {
+		return x.DesiredRevision
+	}
+	return 0
+}
+
+type ConfigApplyResult struct {
+	state           protoimpl.MessageState `protogen:"open.v1"`
+	CandidateHash   []byte                 `protobuf:"bytes,1,opt,name=candidate_hash,json=candidateHash,proto3" json:"candidate_hash,omitempty"`
+	PreviousHash    []byte                 `protobuf:"bytes,2,opt,name=previous_hash,json=previousHash,proto3" json:"previous_hash,omitempty"`
+	ObservedHash    []byte                 `protobuf:"bytes,3,opt,name=observed_hash,json=observedHash,proto3" json:"observed_hash,omitempty"`
+	AppliedRevision uint64                 `protobuf:"varint,4,opt,name=applied_revision,json=appliedRevision,proto3" json:"applied_revision,omitempty"`
+	Healthy         bool                   `protobuf:"varint,5,opt,name=healthy,proto3" json:"healthy,omitempty"`
+	RolledBack      bool                   `protobuf:"varint,6,opt,name=rolled_back,json=rolledBack,proto3" json:"rolled_back,omitempty"`
+	FailedCritical  bool                   `protobuf:"varint,7,opt,name=failed_critical,json=failedCritical,proto3" json:"failed_critical,omitempty"`
+	FailureCode     string                 `protobuf:"bytes,8,opt,name=failure_code,json=failureCode,proto3" json:"failure_code,omitempty"`
+	unknownFields   protoimpl.UnknownFields
+	sizeCache       protoimpl.SizeCache
+}
+
+func (x *ConfigApplyResult) Reset() {
+	*x = ConfigApplyResult{}
+	mi := &file_ocserv_platform_agent_v1_agent_proto_msgTypes[27]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ConfigApplyResult) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ConfigApplyResult) ProtoMessage() {}
+
+func (x *ConfigApplyResult) ProtoReflect() protoreflect.Message {
+	mi := &file_ocserv_platform_agent_v1_agent_proto_msgTypes[27]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ConfigApplyResult.ProtoReflect.Descriptor instead.
+func (*ConfigApplyResult) Descriptor() ([]byte, []int) {
+	return file_ocserv_platform_agent_v1_agent_proto_rawDescGZIP(), []int{27}
+}
+
+func (x *ConfigApplyResult) GetCandidateHash() []byte {
+	if x != nil {
+		return x.CandidateHash
+	}
+	return nil
+}
+
+func (x *ConfigApplyResult) GetPreviousHash() []byte {
+	if x != nil {
+		return x.PreviousHash
+	}
+	return nil
+}
+
+func (x *ConfigApplyResult) GetObservedHash() []byte {
+	if x != nil {
+		return x.ObservedHash
+	}
+	return nil
+}
+
+func (x *ConfigApplyResult) GetAppliedRevision() uint64 {
+	if x != nil {
+		return x.AppliedRevision
+	}
+	return 0
+}
+
+func (x *ConfigApplyResult) GetHealthy() bool {
+	if x != nil {
+		return x.Healthy
+	}
+	return false
+}
+
+func (x *ConfigApplyResult) GetRolledBack() bool {
+	if x != nil {
+		return x.RolledBack
+	}
+	return false
+}
+
+func (x *ConfigApplyResult) GetFailedCritical() bool {
+	if x != nil {
+		return x.FailedCritical
+	}
+	return false
+}
+
+func (x *ConfigApplyResult) GetFailureCode() string {
+	if x != nil {
+		return x.FailureCode
+	}
+	return ""
 }
 
 type ServiceReload struct {
@@ -2672,7 +2804,7 @@ type ServiceReload struct {
 
 func (x *ServiceReload) Reset() {
 	*x = ServiceReload{}
-	mi := &file_ocserv_platform_agent_v1_agent_proto_msgTypes[27]
+	mi := &file_ocserv_platform_agent_v1_agent_proto_msgTypes[28]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2684,7 +2816,7 @@ func (x *ServiceReload) String() string {
 func (*ServiceReload) ProtoMessage() {}
 
 func (x *ServiceReload) ProtoReflect() protoreflect.Message {
-	mi := &file_ocserv_platform_agent_v1_agent_proto_msgTypes[27]
+	mi := &file_ocserv_platform_agent_v1_agent_proto_msgTypes[28]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2697,7 +2829,7 @@ func (x *ServiceReload) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ServiceReload.ProtoReflect.Descriptor instead.
 func (*ServiceReload) Descriptor() ([]byte, []int) {
-	return file_ocserv_platform_agent_v1_agent_proto_rawDescGZIP(), []int{27}
+	return file_ocserv_platform_agent_v1_agent_proto_rawDescGZIP(), []int{28}
 }
 
 // Synthetic commands exercise delivery without changing remote state.
@@ -2709,7 +2841,7 @@ type SyntheticNoop struct {
 
 func (x *SyntheticNoop) Reset() {
 	*x = SyntheticNoop{}
-	mi := &file_ocserv_platform_agent_v1_agent_proto_msgTypes[28]
+	mi := &file_ocserv_platform_agent_v1_agent_proto_msgTypes[29]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2721,7 +2853,7 @@ func (x *SyntheticNoop) String() string {
 func (*SyntheticNoop) ProtoMessage() {}
 
 func (x *SyntheticNoop) ProtoReflect() protoreflect.Message {
-	mi := &file_ocserv_platform_agent_v1_agent_proto_msgTypes[28]
+	mi := &file_ocserv_platform_agent_v1_agent_proto_msgTypes[29]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2734,7 +2866,7 @@ func (x *SyntheticNoop) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SyntheticNoop.ProtoReflect.Descriptor instead.
 func (*SyntheticNoop) Descriptor() ([]byte, []int) {
-	return file_ocserv_platform_agent_v1_agent_proto_rawDescGZIP(), []int{28}
+	return file_ocserv_platform_agent_v1_agent_proto_rawDescGZIP(), []int{29}
 }
 
 type SyntheticEcho struct {
@@ -2746,7 +2878,7 @@ type SyntheticEcho struct {
 
 func (x *SyntheticEcho) Reset() {
 	*x = SyntheticEcho{}
-	mi := &file_ocserv_platform_agent_v1_agent_proto_msgTypes[29]
+	mi := &file_ocserv_platform_agent_v1_agent_proto_msgTypes[30]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2758,7 +2890,7 @@ func (x *SyntheticEcho) String() string {
 func (*SyntheticEcho) ProtoMessage() {}
 
 func (x *SyntheticEcho) ProtoReflect() protoreflect.Message {
-	mi := &file_ocserv_platform_agent_v1_agent_proto_msgTypes[29]
+	mi := &file_ocserv_platform_agent_v1_agent_proto_msgTypes[30]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2771,7 +2903,7 @@ func (x *SyntheticEcho) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SyntheticEcho.ProtoReflect.Descriptor instead.
 func (*SyntheticEcho) Descriptor() ([]byte, []int) {
-	return file_ocserv_platform_agent_v1_agent_proto_rawDescGZIP(), []int{29}
+	return file_ocserv_platform_agent_v1_agent_proto_rawDescGZIP(), []int{30}
 }
 
 func (x *SyntheticEcho) GetMessage() string {
@@ -2795,7 +2927,7 @@ type SimulationProbe struct {
 
 func (x *SimulationProbe) Reset() {
 	*x = SimulationProbe{}
-	mi := &file_ocserv_platform_agent_v1_agent_proto_msgTypes[30]
+	mi := &file_ocserv_platform_agent_v1_agent_proto_msgTypes[31]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2807,7 +2939,7 @@ func (x *SimulationProbe) String() string {
 func (*SimulationProbe) ProtoMessage() {}
 
 func (x *SimulationProbe) ProtoReflect() protoreflect.Message {
-	mi := &file_ocserv_platform_agent_v1_agent_proto_msgTypes[30]
+	mi := &file_ocserv_platform_agent_v1_agent_proto_msgTypes[31]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2820,7 +2952,7 @@ func (x *SimulationProbe) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SimulationProbe.ProtoReflect.Descriptor instead.
 func (*SimulationProbe) Descriptor() ([]byte, []int) {
-	return file_ocserv_platform_agent_v1_agent_proto_rawDescGZIP(), []int{30}
+	return file_ocserv_platform_agent_v1_agent_proto_rawDescGZIP(), []int{31}
 }
 
 func (x *SimulationProbe) GetHeartbeatCount() uint32 {
@@ -3073,15 +3205,29 @@ const file_ocserv_platform_agent_v1_agent_proto_rawDesc = "" +
 	"\n" +
 	"ConfigPlan\x12\x1c\n" +
 	"\tcandidate\x18\x01 \x01(\fR\tcandidate\x12%\n" +
-	"\x0ecandidate_hash\x18\x02 \x01(\fR\rcandidateHash\"\xd0\x01\n" +
+	"\x0ecandidate_hash\x18\x02 \x01(\fR\rcandidateHash\"\xf3\x01\n" +
 	"\x10ConfigPlanResult\x12%\n" +
 	"\x0ecandidate_hash\x18\x01 \x01(\fR\rcandidateHash\x12#\n" +
 	"\rdiff_redacted\x18\x02 \x01(\tR\fdiffRedacted\x12\x1a\n" +
 	"\bwarnings\x18\x03 \x03(\tR\bwarnings\x12+\n" +
 	"\x11current_unchanged\x18\x04 \x01(\bR\x10currentUnchanged\x12'\n" +
-	"\x0fstaging_cleaned\x18\x05 \x01(\bR\x0estagingCleaned\"4\n" +
-	"\vConfigApply\x12%\n" +
-	"\x0ecandidate_hash\x18\x01 \x01(\fR\rcandidateHash\"\x0f\n" +
+	"\x0fstaging_cleaned\x18\x05 \x01(\bR\x0estagingCleaned\x12!\n" +
+	"\fcurrent_hash\x18\x06 \x01(\fR\vcurrentHash\"\xb1\x01\n" +
+	"\vConfigApply\x12\x1c\n" +
+	"\tcandidate\x18\x01 \x01(\fR\tcandidate\x12%\n" +
+	"\x0ecandidate_hash\x18\x02 \x01(\fR\rcandidateHash\x122\n" +
+	"\x15expected_current_hash\x18\x03 \x01(\fR\x13expectedCurrentHash\x12)\n" +
+	"\x10desired_revision\x18\x04 \x01(\x04R\x0fdesiredRevision\"\xb6\x02\n" +
+	"\x11ConfigApplyResult\x12%\n" +
+	"\x0ecandidate_hash\x18\x01 \x01(\fR\rcandidateHash\x12#\n" +
+	"\rprevious_hash\x18\x02 \x01(\fR\fpreviousHash\x12#\n" +
+	"\robserved_hash\x18\x03 \x01(\fR\fobservedHash\x12)\n" +
+	"\x10applied_revision\x18\x04 \x01(\x04R\x0fappliedRevision\x12\x18\n" +
+	"\ahealthy\x18\x05 \x01(\bR\ahealthy\x12\x1f\n" +
+	"\vrolled_back\x18\x06 \x01(\bR\n" +
+	"rolledBack\x12'\n" +
+	"\x0ffailed_critical\x18\a \x01(\bR\x0efailedCritical\x12!\n" +
+	"\ffailure_code\x18\b \x01(\tR\vfailureCode\"\x0f\n" +
 	"\rServiceReload\"\x0f\n" +
 	"\rSyntheticNoop\")\n" +
 	"\rSyntheticEcho\x12\x18\n" +
@@ -3142,7 +3288,7 @@ func file_ocserv_platform_agent_v1_agent_proto_rawDescGZIP() []byte {
 }
 
 var file_ocserv_platform_agent_v1_agent_proto_enumTypes = make([]protoimpl.EnumInfo, 6)
-var file_ocserv_platform_agent_v1_agent_proto_msgTypes = make([]protoimpl.MessageInfo, 31)
+var file_ocserv_platform_agent_v1_agent_proto_msgTypes = make([]protoimpl.MessageInfo, 32)
 var file_ocserv_platform_agent_v1_agent_proto_goTypes = []any{
 	(HandshakeResult)(0),             // 0: ocserv.platform.agent.v1.HandshakeResult
 	(AgentEventType)(0),              // 1: ocserv.platform.agent.v1.AgentEventType
@@ -3177,27 +3323,28 @@ var file_ocserv_platform_agent_v1_agent_proto_goTypes = []any{
 	(*ConfigPlan)(nil),               // 30: ocserv.platform.agent.v1.ConfigPlan
 	(*ConfigPlanResult)(nil),         // 31: ocserv.platform.agent.v1.ConfigPlanResult
 	(*ConfigApply)(nil),              // 32: ocserv.platform.agent.v1.ConfigApply
-	(*ServiceReload)(nil),            // 33: ocserv.platform.agent.v1.ServiceReload
-	(*SyntheticNoop)(nil),            // 34: ocserv.platform.agent.v1.SyntheticNoop
-	(*SyntheticEcho)(nil),            // 35: ocserv.platform.agent.v1.SyntheticEcho
-	(*SimulationProbe)(nil),          // 36: ocserv.platform.agent.v1.SimulationProbe
-	(*timestamppb.Timestamp)(nil),    // 37: google.protobuf.Timestamp
+	(*ConfigApplyResult)(nil),        // 33: ocserv.platform.agent.v1.ConfigApplyResult
+	(*ServiceReload)(nil),            // 34: ocserv.platform.agent.v1.ServiceReload
+	(*SyntheticNoop)(nil),            // 35: ocserv.platform.agent.v1.SyntheticNoop
+	(*SyntheticEcho)(nil),            // 36: ocserv.platform.agent.v1.SyntheticEcho
+	(*SimulationProbe)(nil),          // 37: ocserv.platform.agent.v1.SimulationProbe
+	(*timestamppb.Timestamp)(nil),    // 38: google.protobuf.Timestamp
 }
 var file_ocserv_platform_agent_v1_agent_proto_depIdxs = []int32{
-	37, // 0: ocserv.platform.agent.v1.EnrollRequest.time:type_name -> google.protobuf.Timestamp
+	38, // 0: ocserv.platform.agent.v1.EnrollRequest.time:type_name -> google.protobuf.Timestamp
 	0,  // 1: ocserv.platform.agent.v1.EnrollResponse.result:type_name -> ocserv.platform.agent.v1.HandshakeResult
-	37, // 2: ocserv.platform.agent.v1.SessionHandshake.time:type_name -> google.protobuf.Timestamp
+	38, // 2: ocserv.platform.agent.v1.SessionHandshake.time:type_name -> google.protobuf.Timestamp
 	0,  // 3: ocserv.platform.agent.v1.SessionHandshakeResponse.result:type_name -> ocserv.platform.agent.v1.HandshakeResult
 	1,  // 4: ocserv.platform.agent.v1.AgentEvent.type:type_name -> ocserv.platform.agent.v1.AgentEventType
 	2,  // 5: ocserv.platform.agent.v1.CommandResult.state:type_name -> ocserv.platform.agent.v1.CommandResultState
-	37, // 6: ocserv.platform.agent.v1.CommandResult.accepted_at:type_name -> google.protobuf.Timestamp
-	37, // 7: ocserv.platform.agent.v1.CommandResult.completed_at:type_name -> google.protobuf.Timestamp
+	38, // 6: ocserv.platform.agent.v1.CommandResult.accepted_at:type_name -> google.protobuf.Timestamp
+	38, // 7: ocserv.platform.agent.v1.CommandResult.completed_at:type_name -> google.protobuf.Timestamp
 	4,  // 8: ocserv.platform.agent.v1.CommandResult.semantic_payload_hash_version:type_name -> ocserv.platform.agent.v1.SemanticPayloadHashVersion
-	37, // 9: ocserv.platform.agent.v1.ObservedSnapshot.observed_at:type_name -> google.protobuf.Timestamp
+	38, // 9: ocserv.platform.agent.v1.ObservedSnapshot.observed_at:type_name -> google.protobuf.Timestamp
 	12, // 10: ocserv.platform.agent.v1.ObservedSnapshot.dropped:type_name -> ocserv.platform.agent.v1.TelemetryDropCounters
-	37, // 11: ocserv.platform.agent.v1.SessionObservation.connected_at:type_name -> google.protobuf.Timestamp
-	37, // 12: ocserv.platform.agent.v1.MetricSample.sampled_at:type_name -> google.protobuf.Timestamp
-	37, // 13: ocserv.platform.agent.v1.SecurityObservation.observed_at:type_name -> google.protobuf.Timestamp
+	38, // 11: ocserv.platform.agent.v1.SessionObservation.connected_at:type_name -> google.protobuf.Timestamp
+	38, // 12: ocserv.platform.agent.v1.MetricSample.sampled_at:type_name -> google.protobuf.Timestamp
+	38, // 13: ocserv.platform.agent.v1.SecurityObservation.observed_at:type_name -> google.protobuf.Timestamp
 	5,  // 14: ocserv.platform.agent.v1.TelemetryBatch.priority:type_name -> ocserv.platform.agent.v1.TelemetryPriority
 	13, // 15: ocserv.platform.agent.v1.TelemetryBatch.snapshot:type_name -> ocserv.platform.agent.v1.ObservedSnapshot
 	14, // 16: ocserv.platform.agent.v1.TelemetryBatch.sessions:type_name -> ocserv.platform.agent.v1.SessionObservation
@@ -3206,17 +3353,17 @@ var file_ocserv_platform_agent_v1_agent_proto_depIdxs = []int32{
 	15, // 19: ocserv.platform.agent.v1.TelemetryBatch.ip_bans:type_name -> ocserv.platform.agent.v1.IpBanObservation
 	19, // 20: ocserv.platform.agent.v1.TelemetryBatch.users:type_name -> ocserv.platform.agent.v1.UserObservation
 	20, // 21: ocserv.platform.agent.v1.TelemetryBatch.groups:type_name -> ocserv.platform.agent.v1.GroupObservation
-	37, // 22: ocserv.platform.agent.v1.CommandEnvelope.issued_at:type_name -> google.protobuf.Timestamp
-	37, // 23: ocserv.platform.agent.v1.CommandEnvelope.expires_at:type_name -> google.protobuf.Timestamp
+	38, // 22: ocserv.platform.agent.v1.CommandEnvelope.issued_at:type_name -> google.protobuf.Timestamp
+	38, // 23: ocserv.platform.agent.v1.CommandEnvelope.expires_at:type_name -> google.protobuf.Timestamp
 	22, // 24: ocserv.platform.agent.v1.CommandEnvelope.session_disconnect:type_name -> ocserv.platform.agent.v1.SessionDisconnect
 	25, // 25: ocserv.platform.agent.v1.CommandEnvelope.user_create:type_name -> ocserv.platform.agent.v1.UserCreate
 	26, // 26: ocserv.platform.agent.v1.CommandEnvelope.user_disable:type_name -> ocserv.platform.agent.v1.UserDisable
 	30, // 27: ocserv.platform.agent.v1.CommandEnvelope.config_plan:type_name -> ocserv.platform.agent.v1.ConfigPlan
 	32, // 28: ocserv.platform.agent.v1.CommandEnvelope.config_apply:type_name -> ocserv.platform.agent.v1.ConfigApply
-	33, // 29: ocserv.platform.agent.v1.CommandEnvelope.service_reload:type_name -> ocserv.platform.agent.v1.ServiceReload
-	36, // 30: ocserv.platform.agent.v1.CommandEnvelope.simulation_probe:type_name -> ocserv.platform.agent.v1.SimulationProbe
-	34, // 31: ocserv.platform.agent.v1.CommandEnvelope.synthetic_noop:type_name -> ocserv.platform.agent.v1.SyntheticNoop
-	35, // 32: ocserv.platform.agent.v1.CommandEnvelope.synthetic_echo:type_name -> ocserv.platform.agent.v1.SyntheticEcho
+	34, // 29: ocserv.platform.agent.v1.CommandEnvelope.service_reload:type_name -> ocserv.platform.agent.v1.ServiceReload
+	37, // 30: ocserv.platform.agent.v1.CommandEnvelope.simulation_probe:type_name -> ocserv.platform.agent.v1.SimulationProbe
+	35, // 31: ocserv.platform.agent.v1.CommandEnvelope.synthetic_noop:type_name -> ocserv.platform.agent.v1.SyntheticNoop
+	36, // 32: ocserv.platform.agent.v1.CommandEnvelope.synthetic_echo:type_name -> ocserv.platform.agent.v1.SyntheticEcho
 	23, // 33: ocserv.platform.agent.v1.CommandEnvelope.session_terminate:type_name -> ocserv.platform.agent.v1.SessionTerminate
 	24, // 34: ocserv.platform.agent.v1.CommandEnvelope.ip_ban_remove:type_name -> ocserv.platform.agent.v1.IpBanRemove
 	28, // 35: ocserv.platform.agent.v1.CommandEnvelope.user_password_rotate:type_name -> ocserv.platform.agent.v1.UserPasswordRotate
@@ -3259,7 +3406,7 @@ func file_ocserv_platform_agent_v1_agent_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_ocserv_platform_agent_v1_agent_proto_rawDesc), len(file_ocserv_platform_agent_v1_agent_proto_rawDesc)),
 			NumEnums:      6,
-			NumMessages:   31,
+			NumMessages:   32,
 			NumExtensions: 0,
 			NumServices:   0,
 		},

@@ -286,10 +286,25 @@ message ConfigPlanResult {
   repeated string warnings = 3;
   bool current_unchanged = 4;
   bool staging_cleaned = 5;
+  bytes current_hash = 6;
 }
 
 message ConfigApply {
+  bytes candidate = 1;
+  bytes candidate_hash = 2;
+  bytes expected_current_hash = 3;
+  uint64 desired_revision = 4;
+}
+
+message ConfigApplyResult {
   bytes candidate_hash = 1;
+  bytes previous_hash = 2;
+  bytes observed_hash = 3;
+  uint64 applied_revision = 4;
+  bool healthy = 5;
+  bool rolled_back = 6;
+  bool failed_critical = 7;
+  string failure_code = 8;
 }
 
 message ServiceReload {}

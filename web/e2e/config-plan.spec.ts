@@ -3,6 +3,8 @@ import { expect, test } from "@playwright/test";
 const workspaceId = "019fc0a4-6d92-765c-a8a1-4af556614dd1";
 const nodeId = "019fc0a4-6d92-765c-a8a1-4af556614dd2";
 const planId = "019fc0a4-6d92-765c-a8a1-4af556614dd3";
+const approvalId = "019fc0a4-6d92-765c-a8a1-4af556614dd4";
+const operationId = "019fc0a4-6d92-765c-a8a1-4af556614dd5";
 const node = {
   id: nodeId,
   name: "Config node",
@@ -84,6 +86,7 @@ test("submits a typed configuration plan and renders a safe diff", async ({
     template_name: "node-baseline",
     expected_revision: 0,
     candidate_hash: "a".repeat(64),
+    current_hash: "b".repeat(64),
     state: "succeeded",
     validation: "valid",
     diff_redacted:
@@ -105,6 +108,36 @@ test("submits a typed configuration plan and renders a safe diff", async ({
       body: JSON.stringify(plan),
     });
   });
+  let applied: Record<string, unknown> | undefined;
+  await page.route(`**/api/v1/config-plans/${planId}/apply`, async (route) => {
+    applied = (await route.request().postDataJSON()) as Record<string, unknown>;
+    await route.fulfill({
+      status: 202,
+      contentType: "application/json",
+      body: JSON.stringify({
+        id: operationId,
+        state: "queued",
+        node_id: nodeId,
+        version: 1,
+        created_at: "2026-08-08T00:46:00Z",
+        updated_at: "2026-08-08T00:46:00Z",
+      }),
+    });
+  });
+  await page.route(`**/api/v1/operations/${operationId}`, (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        id: operationId,
+        state: "succeeded",
+        node_id: nodeId,
+        version: 1,
+        created_at: "2026-08-08T00:46:00Z",
+        updated_at: "2026-08-08T00:46:01Z",
+      }),
+    }),
+  );
 
   await page.goto("/nodes");
   await page.getByText("Config node").click();
@@ -134,4 +167,16 @@ test("submits a typed configuration plan and renders a safe diff", async ({
     },
   });
   expect(JSON.stringify(submitted)).not.toContain("target_path");
+
+  await page.locator("#config-apply-approval").fill(approvalId);
+  await page
+    .locator("#config-apply-reason")
+    .fill("apply independently approved plan");
+  await page.getByRole("button", { name: "Apply", exact: true }).click();
+  await expect
+    .poll(() => applied)
+    .toEqual({
+      approval_id: approvalId,
+      reason: "apply independently approved plan",
+    });
 });

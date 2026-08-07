@@ -7,6 +7,7 @@ export * from "./AuditEventPage";
 export * from "./AuditVerification";
 export * from "./BreakGlassRequest";
 export * from "./BuildInfo";
+export * from "./ConfigApplyRequest";
 export * from "./ConfigDirective";
 export * from "./ConfigPlan";
 export * from "./ConfigPlanApprovalSummary";

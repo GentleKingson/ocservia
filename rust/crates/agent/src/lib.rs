@@ -830,6 +830,9 @@ pub fn semantic_payload_hash(envelope: &CommandEnvelope) -> Result<[u8; 32], Com
         Some(command_envelope::Payload::ConfigPlan(payload)) => {
             ("ocserv.config.plan", payload.encode_to_vec())
         }
+        Some(command_envelope::Payload::ConfigApply(payload)) => {
+            ("ocserv.config.apply", payload.encode_to_vec())
+        }
         Some(command_envelope::Payload::UserCreate(payload)) => {
             ("ocserv.users.write", payload.encode_to_vec())
         }
@@ -894,6 +897,19 @@ pub fn semantic_payload_hash_v1(envelope: &CommandEnvelope) -> Result<[u8; 32], 
                 return Err(CommandError::Rejected("candidate_hash_invalid"));
             }
             (103_u32, payload.candidate_hash.clone())
+        }
+        Some(command_envelope::Payload::ConfigApply(payload)) => {
+            if payload.candidate_hash.len() != 32
+                || payload.expected_current_hash.len() != 32
+                || payload.desired_revision == 0
+            {
+                return Err(CommandError::Rejected("config_apply_invalid"));
+            }
+            let mut out = Vec::with_capacity(72);
+            out.extend_from_slice(&payload.candidate_hash);
+            out.extend_from_slice(&payload.expected_current_hash);
+            out.extend_from_slice(&payload.desired_revision.to_be_bytes());
+            (104_u32, out)
         }
         Some(command_envelope::Payload::SessionTerminate(payload)) => (
             112_u32,
@@ -1048,6 +1064,7 @@ fn validate_command(
     })
 }
 
+#[allow(clippy::too_many_lines)]
 fn validate_payload(
     envelope: &CommandEnvelope,
 ) -> Result<(&'static str, Vec<u8>, bool), CommandError> {
@@ -1092,6 +1109,19 @@ fn validate_payload(
                 return Err(CommandError::Rejected("config_candidate_invalid"));
             }
             ("ocserv.config.plan", Vec::new(), true)
+        }
+        Some(command_envelope::Payload::ConfigApply(payload)) => {
+            if payload.candidate.is_empty()
+                || payload.candidate.len() > 256 * 1024
+                || payload.candidate_hash.len() != 32
+                || payload.expected_current_hash.len() != 32
+                || payload.desired_revision == 0
+                || envelope.expected_revision.checked_add(1) != Some(payload.desired_revision)
+                || Sha256::digest(&payload.candidate).as_slice() != payload.candidate_hash
+            {
+                return Err(CommandError::Rejected("config_apply_invalid"));
+            }
+            ("ocserv.config.apply", Vec::new(), true)
         }
         Some(command_envelope::Payload::UserCreate(payload)) => {
             validate_name(&payload.username)?;

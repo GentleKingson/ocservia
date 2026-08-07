@@ -44,33 +44,37 @@ const (
 	IPBanRemove       SyntheticKind = "ip_ban_remove"
 	ServiceReload     SyntheticKind = "service_reload"
 	ConfigPlan        SyntheticKind = "config_plan"
+	ConfigApply       SyntheticKind = "config_apply"
 )
 
 type CreateRequest struct {
-	NodeID           uuid.UUID
-	IdempotencyKey   string
-	ExpectedVersion  int64
-	Kind             SyntheticKind
-	Message          string
-	Candidate        []byte
-	CandidateHash    []byte
-	PlanRevision     uint64
-	PlanMetadata     *ConfigPlanMetadata
-	OcservVersion    string
-	PlanCapabilities []string
-	SessionID        string
-	BootID           string
-	IP               string
-	ActorID          string
-	ActorIdentityID  uuid.UUID
-	ActorSessionID   uuid.UUID
-	ApprovalID       uuid.UUID
-	Action           string
-	Reason           string
-	SupersedePending bool
-	TTL              time.Duration
-	RequestID        string
-	Traceparent      string
+	NodeID              uuid.UUID
+	IdempotencyKey      string
+	ExpectedVersion     int64
+	Kind                SyntheticKind
+	Message             string
+	Candidate           []byte
+	CandidateHash       []byte
+	ExpectedCurrentHash []byte
+	DesiredRevision     uint64
+	PlanRevision        uint64
+	PlanMetadata        *ConfigPlanMetadata
+	ApplyMetadata       *ConfigApplyMetadata
+	OcservVersion       string
+	PlanCapabilities    []string
+	SessionID           string
+	BootID              string
+	IP                  string
+	ActorID             string
+	ActorIdentityID     uuid.UUID
+	ActorSessionID      uuid.UUID
+	ApprovalID          uuid.UUID
+	Action              string
+	Reason              string
+	SupersedePending    bool
+	TTL                 time.Duration
+	RequestID           string
+	Traceparent         string
 }
 
 // ConfigPlanMetadata is written atomically with the remote validation intent.
@@ -79,6 +83,11 @@ type ConfigPlanMetadata struct {
 	CandidateRedacted string
 	Warnings          []string
 	CreatedBy         uuid.UUID
+}
+
+// ConfigApplyMetadata binds an approved immutable plan to its dispatch intent.
+type ConfigApplyMetadata struct {
+	PlanID uuid.UUID
 }
 
 type Operation struct {
@@ -112,10 +121,12 @@ type Dispatch struct {
 }
 
 type QueueMetrics struct {
-	Unpublished int64   `json:"outbox_unpublished_total"`
-	OldestAge   float64 `json:"outbox_oldest_age_seconds"`
-	Queued      int64   `json:"command_queue_depth"`
-	Unknown     int64   `json:"command_unknown_total"`
+	Unpublished          int64   `json:"outbox_unpublished_total"`
+	OldestAge            float64 `json:"outbox_oldest_age_seconds"`
+	Queued               int64   `json:"command_queue_depth"`
+	Unknown              int64   `json:"command_unknown_total"`
+	ConfigRollbacks      int64   `json:"config_rollback_total"`
+	ConfigFailedCritical int64   `json:"config_failed_critical_total"`
 }
 
 type Service struct {
@@ -195,6 +206,35 @@ func (s *Service) CreateSynthetic(ctx context.Context, request CreateRequest) (O
 			}
 		}
 	}
+	if request.Kind == ConfigApply {
+		var planWorkspace, planNode uuid.UUID
+		var planRevision int64
+		var planHash, resultBytes []byte
+		var planExpires time.Time
+		var planState string
+		err := tx.QueryRow(ctx, `SELECT p.workspace_id,p.node_id,p.expected_revision,p.candidate_hash,p.expires_at,o.state,
+			COALESCE((SELECT r.result FROM agent_command_results r WHERE r.command_id=o.command_id AND r.state='succeeded' ORDER BY r.created_at DESC LIMIT 1),''::bytea)
+			FROM config_plans p JOIN operations o ON o.id=p.operation_id WHERE p.id=$1 FOR SHARE`, request.ApplyMetadata.PlanID).
+			Scan(&planWorkspace, &planNode, &planRevision, &planHash, &planExpires, &planState, &resultBytes)
+		if err != nil {
+			return Operation{}, false, fmt.Errorf("lock configuration plan: %w", err)
+		}
+		var validation agentv1.ConfigPlanResult
+		if planWorkspace != workspaceID || planNode != request.NodeID || planRevision < 0 || uint64(planRevision) != request.PlanRevision || !bytes.Equal(planHash, request.CandidateHash) || !planExpires.After(now) || planState != "succeeded" || proto.Unmarshal(resultBytes, &validation) != nil || !validation.GetCurrentUnchanged() || !validation.GetStagingCleaned() || !bytes.Equal(validation.GetCandidateHash(), planHash) || !bytes.Equal(validation.GetCurrentHash(), request.ExpectedCurrentHash) {
+			return Operation{}, false, ErrStaleRevision
+		}
+		var revision int64
+		var locked bool
+		if err := tx.QueryRow(ctx, `SELECT COALESCE((SELECT revision FROM node_config_state WHERE node_id=$1),0),COALESCE((SELECT automation_locked FROM node_config_state WHERE node_id=$1),false)`, request.NodeID).Scan(&revision, &locked); err != nil {
+			return Operation{}, false, fmt.Errorf("read configuration apply fence: %w", err)
+		}
+		if locked || revision != planRevision || request.DesiredRevision != uint64(planRevision)+1 {
+			return Operation{}, false, ErrStaleRevision
+		}
+		if err := approvals.ConsumeBound(ctx, tx, request.ApprovalID, workspaceID, request.ActorIdentityID, "config.apply", "config_plan", request.ApplyMetadata.PlanID, planHash); err != nil {
+			return Operation{}, false, err
+		}
+	}
 	if capability := capabilityFor(request.Kind); capability != "" {
 		var approved bool
 		if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM node_capabilities WHERE node_id=$1 AND capability=$2 AND approved=true)`, request.NodeID, capability).Scan(&approved); err != nil {
@@ -265,6 +305,12 @@ func (s *Service) CreateSynthetic(ctx context.Context, request CreateRequest) (O
 			return Operation{}, false, fmt.Errorf("insert configuration plan: %w", err)
 		}
 	}
+	if request.Kind == ConfigApply {
+		if _, err := tx.Exec(ctx, `INSERT INTO config_apply_operations(operation_id,workspace_id,node_id,plan_id,approval_id,expected_revision,desired_revision,candidate_hash,previous_hash,state,created_at,updated_at)
+			VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,'queued',$10,$10)`, operationID, workspaceID, request.NodeID, request.ApplyMetadata.PlanID, request.ApprovalID, request.PlanRevision, request.DesiredRevision, request.CandidateHash, request.ExpectedCurrentHash, now); err != nil {
+			return Operation{}, false, fmt.Errorf("insert configuration apply: %w", err)
+		}
+	}
 	if _, err := tx.Exec(ctx, `
 		INSERT INTO commands (id, operation_id, workspace_id, node_id, state, payload_type, envelope, idempotency_key, expected_version, traceparent, expires_at, created_at, updated_at)
 		VALUES ($1,$2,$3,$4,'queued',$5,$6,$7,$8,$9,$10,$11,$11)`,
@@ -283,6 +329,9 @@ func (s *Service) CreateSynthetic(ctx context.Context, request CreateRequest) (O
 	var auditSummary json.RawMessage
 	if request.Kind == ConfigPlan {
 		auditSummary, _ = json.Marshal(map[string]any{"candidate_hash": fmt.Sprintf("%x", request.CandidateHash), "expected_revision": request.PlanRevision})
+	}
+	if request.Kind == ConfigApply {
+		auditSummary, _ = json.Marshal(map[string]any{"plan_id": request.ApplyMetadata.PlanID, "candidate_hash": fmt.Sprintf("%x", request.CandidateHash), "previous_hash": fmt.Sprintf("%x", request.ExpectedCurrentHash), "desired_revision": request.DesiredRevision})
 	}
 	if err := audit.AppendChain(ctx, tx, audit.ChainRecord{EventID: auditID, WorkspaceID: workspaceID, ActorType: "user", ActorID: actorID, SessionID: optionalUUID(request.ActorSessionID), Action: action, ResourceType: "operation", ResourceID: operationID, NodeID: &request.NodeID, CommandID: &commandID, ApprovalID: optionalUUID(request.ApprovalID), RequestID: request.RequestID, TraceID: traceID(request.Traceparent), Reason: reason, AfterSummary: auditSummary, At: now}); err != nil {
 		return Operation{}, false, fmt.Errorf("append operation audit intent: %w", err)
@@ -459,6 +508,9 @@ func (s *Service) finishDispatch(ctx context.Context, d Dispatch, sent bool, mes
 		if _, err = tx.Exec(ctx, `UPDATE operations SET state='dispatched',version=version+1,updated_at=now() WHERE id=$1 AND state='queued'`, d.OperationID); err != nil {
 			return err
 		}
+		if _, err = tx.Exec(ctx, `UPDATE config_apply_operations SET state='dispatched',updated_at=now() WHERE operation_id=$1 AND state IN('queued','unknown')`, d.OperationID); err != nil {
+			return err
+		}
 		if _, err = tx.Exec(ctx, `UPDATE command_attempts SET state='sent',finished_at=now() WHERE id=$1 AND state='sending'`, d.AttemptID); err != nil {
 			return err
 		}
@@ -520,6 +572,9 @@ func (s *Service) Reap(ctx context.Context, maxAttempts int) error {
 		if _, err = tx.Exec(ctx, `UPDATE operations SET state='unknown',version=version+1,updated_at=now() WHERE id=$1 AND state='queued'`, row.operationID); err != nil {
 			return err
 		}
+		if _, err = tx.Exec(ctx, `UPDATE config_apply_operations SET state='unknown',updated_at=now() WHERE operation_id=$1 AND state='queued'`, row.operationID); err != nil {
+			return err
+		}
 		if _, err = tx.Exec(ctx, `UPDATE outbox_events SET published_at=now(),locked_by=NULL,locked_until=NULL,last_error='dispatch outcome unknown' WHERE id=$1`, row.outboxID); err != nil {
 			return err
 		}
@@ -561,13 +616,16 @@ func (s *Service) Expire(ctx context.Context) error {
 		if _, err := tx.Exec(ctx, `INSERT INTO operation_events(id,operation_id,state,occurred_at)VALUES($1,$2,'expired',now())`, eventID, operationID); err != nil {
 			return err
 		}
+		if _, err := tx.Exec(ctx, `UPDATE config_apply_operations SET state='expired',updated_at=now() WHERE operation_id=$1 AND state='queued'`, operationID); err != nil {
+			return err
+		}
 	}
 	return tx.Commit(ctx)
 }
 
 func (s *Service) Metrics(ctx context.Context) (QueueMetrics, error) {
 	var m QueueMetrics
-	err := s.pool.QueryRow(ctx, `SELECT count(*) FILTER(WHERE published_at IS NULL),COALESCE(extract(epoch FROM now()-min(created_at) FILTER(WHERE published_at IS NULL)),0),(SELECT count(*) FROM commands WHERE state='queued'),(SELECT count(*) FROM commands WHERE state='unknown') FROM outbox_events`).Scan(&m.Unpublished, &m.OldestAge, &m.Queued, &m.Unknown)
+	err := s.pool.QueryRow(ctx, `SELECT count(*) FILTER(WHERE published_at IS NULL),COALESCE(extract(epoch FROM now()-min(created_at) FILTER(WHERE published_at IS NULL)),0),(SELECT count(*) FROM commands WHERE state='queued'),(SELECT count(*) FROM commands WHERE state='unknown'),(SELECT count(*) FROM config_apply_operations WHERE state='rolled_back'),(SELECT count(*) FROM config_apply_operations WHERE state='failed_critical') FROM outbox_events`).Scan(&m.Unpublished, &m.OldestAge, &m.Queued, &m.Unknown, &m.ConfigRollbacks, &m.ConfigFailedCritical)
 	if err != nil {
 		return QueueMetrics{}, fmt.Errorf("read queue metrics: %w", err)
 	}
@@ -581,13 +639,13 @@ func validateCreate(r CreateRequest) error {
 	if len(r.IdempotencyKey) < 1 || len(r.IdempotencyKey) > 128 || strings.TrimSpace(r.IdempotencyKey) != r.IdempotencyKey {
 		return ErrInvalidRequest
 	}
-	if r.Kind != SyntheticNoop && r.Kind != SyntheticEcho && r.Kind != SessionDisconnect && r.Kind != SessionTerminate && r.Kind != IPBanRemove && r.Kind != ServiceReload && r.Kind != ConfigPlan {
+	if r.Kind != SyntheticNoop && r.Kind != SyntheticEcho && r.Kind != SessionDisconnect && r.Kind != SessionTerminate && r.Kind != IPBanRemove && r.Kind != ServiceReload && r.Kind != ConfigPlan && r.Kind != ConfigApply {
 		return ErrInvalidRequest
 	}
 	if r.Kind == SyntheticNoop && r.Message != "" || len(r.Message) > 4096 {
 		return ErrInvalidRequest
 	}
-	if r.Kind == ConfigPlan && (len(r.Candidate) == 0 || len(r.Candidate) > 256*1024 || len(r.CandidateHash) != sha256.Size || r.PlanRevision > uint64(^uint64(0)>>1) || r.PlanMetadata == nil || strings.TrimSpace(r.PlanMetadata.TemplateName) == "" || len(r.PlanMetadata.TemplateName) > 128 || len(r.PlanMetadata.CandidateRedacted) == 0 || len(r.PlanMetadata.CandidateRedacted) > 256*1024 || len(r.PlanCapabilities) == 0) {
+	if r.Kind == ConfigPlan && (len(r.Candidate) == 0 || len(r.Candidate) > 256*1024 || len(r.CandidateHash) != sha256.Size || len(r.ExpectedCurrentHash) != 0 || r.DesiredRevision != 0 || r.ApplyMetadata != nil || r.PlanRevision > uint64(^uint64(0)>>1) || r.PlanMetadata == nil || strings.TrimSpace(r.PlanMetadata.TemplateName) == "" || len(r.PlanMetadata.TemplateName) > 128 || len(r.PlanMetadata.CandidateRedacted) == 0 || len(r.PlanMetadata.CandidateRedacted) > 256*1024 || len(r.PlanCapabilities) == 0) {
 		return ErrInvalidRequest
 	}
 	if r.Kind == ConfigPlan {
@@ -596,7 +654,16 @@ func validateCreate(r CreateRequest) error {
 			return ErrInvalidRequest
 		}
 	}
-	if r.Kind != ConfigPlan && (len(r.Candidate) != 0 || len(r.CandidateHash) != 0 || r.PlanRevision != 0 || r.PlanMetadata != nil || r.OcservVersion != "" || len(r.PlanCapabilities) != 0) {
+	if r.Kind == ConfigApply && (len(r.Candidate) == 0 || len(r.Candidate) > 256*1024 || len(r.CandidateHash) != sha256.Size || len(r.ExpectedCurrentHash) != sha256.Size || r.PlanRevision > uint64(^uint64(0)>>1) || r.DesiredRevision != r.PlanRevision+1 || r.ApplyMetadata == nil || r.ApplyMetadata.PlanID == uuid.Nil) {
+		return ErrInvalidRequest
+	}
+	if r.Kind == ConfigApply {
+		digest := sha256.Sum256(r.Candidate)
+		if !bytes.Equal(digest[:], r.CandidateHash) || r.ActorID == "" || r.ActorIdentityID == uuid.Nil || r.ActorSessionID == uuid.Nil || r.ApprovalID == uuid.Nil {
+			return ErrInvalidRequest
+		}
+	}
+	if r.Kind != ConfigPlan && r.Kind != ConfigApply && (len(r.Candidate) != 0 || len(r.CandidateHash) != 0 || len(r.ExpectedCurrentHash) != 0 || r.DesiredRevision != 0 || r.PlanRevision != 0 || r.PlanMetadata != nil || r.ApplyMetadata != nil || r.OcservVersion != "" || len(r.PlanCapabilities) != 0) {
 		return ErrInvalidRequest
 	}
 	if r.Kind == SessionDisconnect || r.Kind == SessionTerminate {
@@ -615,7 +682,7 @@ func validateCreate(r CreateRequest) error {
 			return ErrInvalidRequest
 		}
 	}
-	if (r.Kind == SessionDisconnect || r.Kind == SessionTerminate || r.Kind == IPBanRemove || r.Kind == ServiceReload || r.Kind == ConfigPlan) && (r.Action == "" || r.Reason == "" || len(r.Reason) > 512) {
+	if (r.Kind == SessionDisconnect || r.Kind == SessionTerminate || r.Kind == IPBanRemove || r.Kind == ServiceReload || r.Kind == ConfigPlan || r.Kind == ConfigApply) && (r.Action == "" || r.Reason == "" || len(r.Reason) > 512) {
 		return ErrInvalidRequest
 	}
 	if r.Kind == ConfigPlan && r.ActorID == "" {
@@ -633,27 +700,35 @@ func requestHash(r CreateRequest) [32]byte {
 	// field that selects the target, effect, authorization action, actor, audit
 	// reason, revision, or delivery behavior is deliberately bound here.
 	intent := struct {
-		NodeID           uuid.UUID     `json:"node_id"`
-		Kind             SyntheticKind `json:"kind"`
-		Message          string        `json:"message"`
-		SessionID        string        `json:"session_id"`
-		BootID           string        `json:"boot_id"`
-		IP               string        `json:"ip"`
-		ExpectedVersion  int64         `json:"expected_version"`
-		SupersedePending bool          `json:"supersede_pending"`
-		TTLSeconds       int64         `json:"ttl_seconds"`
-		ActorID          string        `json:"actor_id"`
-		Action           string        `json:"action"`
-		Reason           string        `json:"reason"`
-		ActorSessionID   uuid.UUID     `json:"actor_session_id"`
-		ActorIdentityID  uuid.UUID     `json:"actor_identity_id"`
-		ApprovalID       uuid.UUID     `json:"approval_id"`
-		CandidateHash    string        `json:"candidate_hash"`
-		PlanRevision     uint64        `json:"plan_revision"`
-		PlanTemplate     string        `json:"plan_template"`
-		OcservVersion    string        `json:"ocserv_version"`
-		PlanCapabilities []string      `json:"plan_capabilities"`
-	}{r.NodeID, r.Kind, r.Message, r.SessionID, r.BootID, r.IP, r.ExpectedVersion, r.SupersedePending, int64(r.TTL / time.Second), actorID, action, reason, r.ActorSessionID, r.ActorIdentityID, r.ApprovalID, fmt.Sprintf("%x", r.CandidateHash), r.PlanRevision, planTemplate(r.PlanMetadata), r.OcservVersion, r.PlanCapabilities}
+		NodeID              uuid.UUID     `json:"node_id"`
+		Kind                SyntheticKind `json:"kind"`
+		Message             string        `json:"message"`
+		SessionID           string        `json:"session_id"`
+		BootID              string        `json:"boot_id"`
+		IP                  string        `json:"ip"`
+		ExpectedVersion     int64         `json:"expected_version"`
+		SupersedePending    bool          `json:"supersede_pending"`
+		TTLSeconds          int64         `json:"ttl_seconds"`
+		ActorID             string        `json:"actor_id"`
+		Action              string        `json:"action"`
+		Reason              string        `json:"reason"`
+		ActorSessionID      uuid.UUID     `json:"actor_session_id"`
+		ActorIdentityID     uuid.UUID     `json:"actor_identity_id"`
+		ApprovalID          uuid.UUID     `json:"approval_id"`
+		CandidateHash       string        `json:"candidate_hash"`
+		ExpectedCurrentHash string        `json:"expected_current_hash"`
+		DesiredRevision     uint64        `json:"desired_revision"`
+		PlanID              uuid.UUID     `json:"plan_id"`
+		PlanRevision        uint64        `json:"plan_revision"`
+		PlanTemplate        string        `json:"plan_template"`
+		OcservVersion       string        `json:"ocserv_version"`
+		PlanCapabilities    []string      `json:"plan_capabilities"`
+	}{NodeID: r.NodeID, Kind: r.Kind, Message: r.Message, SessionID: r.SessionID, BootID: r.BootID, IP: r.IP,
+		ExpectedVersion: r.ExpectedVersion, SupersedePending: r.SupersedePending, TTLSeconds: int64(r.TTL / time.Second),
+		ActorID: actorID, Action: action, Reason: reason, ActorSessionID: r.ActorSessionID, ActorIdentityID: r.ActorIdentityID,
+		ApprovalID: r.ApprovalID, CandidateHash: fmt.Sprintf("%x", r.CandidateHash), ExpectedCurrentHash: fmt.Sprintf("%x", r.ExpectedCurrentHash),
+		DesiredRevision: r.DesiredRevision, PlanID: applyPlanID(r.ApplyMetadata), PlanRevision: r.PlanRevision,
+		PlanTemplate: planTemplate(r.PlanMetadata), OcservVersion: r.OcservVersion, PlanCapabilities: r.PlanCapabilities}
 	encoded, err := json.Marshal(intent)
 	if err != nil {
 		panic("marshal fixed idempotency intent: " + err.Error())
@@ -666,6 +741,13 @@ func planTemplate(metadata *ConfigPlanMetadata) string {
 		return ""
 	}
 	return metadata.TemplateName
+}
+
+func applyPlanID(metadata *ConfigApplyMetadata) uuid.UUID {
+	if metadata == nil {
+		return uuid.Nil
+	}
+	return metadata.PlanID
 }
 
 func normalizedAuditIntent(r CreateRequest) (actorID, action, reason string) {
@@ -712,6 +794,10 @@ func marshalEnvelope(r CreateRequest, operationID, commandID uuid.UUID, now, exp
 		payloadType = "config_plan"
 		envelope.ExpectedRevision = r.PlanRevision
 		envelope.Payload = &agentv1.CommandEnvelope_ConfigPlan{ConfigPlan: &agentv1.ConfigPlan{Candidate: r.Candidate, CandidateHash: r.CandidateHash}}
+	case ConfigApply:
+		payloadType = "config_apply"
+		envelope.ExpectedRevision = r.PlanRevision
+		envelope.Payload = &agentv1.CommandEnvelope_ConfigApply{ConfigApply: &agentv1.ConfigApply{Candidate: r.Candidate, CandidateHash: r.CandidateHash, ExpectedCurrentHash: r.ExpectedCurrentHash, DesiredRevision: r.DesiredRevision}}
 	}
 	if err := semanticpayload.PopulateV1(envelope); err != nil {
 		return nil, "", fmt.Errorf("compute semantic payload hash: %w", err)
@@ -735,6 +821,8 @@ func capabilityFor(kind SyntheticKind) string {
 		return "ocserv.service.reload"
 	case ConfigPlan:
 		return "ocserv.config.plan"
+	case ConfigApply:
+		return "ocserv.config.apply"
 	default:
 		return ""
 	}

@@ -361,6 +361,10 @@ export const useFleetStore = defineStore("fleet", () => {
     );
   }
 
+  async function trackOperation(operationId: string): Promise<void> {
+    await runOperation((_node, signal) => getOperation(operationId, signal));
+  }
+
   async function createUserAction(
     name: string,
     version: number,
@@ -526,6 +530,7 @@ export const useFleetStore = defineStore("fleet", () => {
     enableUser: enableUserAction,
     rotateUserPassword: rotatePasswordAction,
     applyGroup: applyGroupAction,
+    trackOperation,
     detachOperation,
   };
 });

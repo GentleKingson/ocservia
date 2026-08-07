@@ -21,10 +21,10 @@ if grep -REnE 'target_path|shell[.]exec|command[.]run|occtl[.]raw|systemctl[.]ra
   exit 1
 fi
 
-if grep -REnE 'rename|service_reload|ConfigApply' \
+if grep -REnE 'os[.]Rename|tokio::fs::rename|service_reload' \
   "${ROOT}/control-plane/internal/configplan" \
   "${ROOT}/control-plane/internal/api/configplans.go"; then
-  echo "I15 plan path contains apply, reload, or current-file replacement behavior" >&2
+  echo "I15 planning path contains reload or current-file replacement behavior" >&2
   exit 1
 fi
 

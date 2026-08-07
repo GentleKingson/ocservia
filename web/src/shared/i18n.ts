@@ -87,6 +87,7 @@ export const i18n = createI18n({
       quotaAndExpiry: "Quota and expiry",
       configPlan: "Configuration plan",
       plan: "Plan",
+      apply: "Apply",
       tcpPort: "TCP port",
       maxClients: "Maximum clients",
       route: "Route",

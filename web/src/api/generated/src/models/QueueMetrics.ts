@@ -43,6 +43,18 @@ export interface QueueMetrics {
    * @memberof QueueMetrics
    */
   commandUnknownTotal: number;
+  /**
+   *
+   * @type {number}
+   * @memberof QueueMetrics
+   */
+  configRollbackTotal: number;
+  /**
+   *
+   * @type {number}
+   * @memberof QueueMetrics
+   */
+  configFailedCriticalTotal: number;
 }
 
 /**
@@ -77,6 +89,22 @@ export function instanceOfQueueMetrics(value: object): value is QueueMetrics {
       (value as Record<string, any>)["command_unknown_total"] === undefined)
   )
     return false;
+  if (
+    (!("configRollbackTotal" in (value as Record<string, any>)) &&
+      !("config_rollback_total" in (value as Record<string, any>))) ||
+    ((value as Record<string, any>)["configRollbackTotal"] === undefined &&
+      (value as Record<string, any>)["config_rollback_total"] === undefined)
+  )
+    return false;
+  if (
+    (!("configFailedCriticalTotal" in (value as Record<string, any>)) &&
+      !("config_failed_critical_total" in (value as Record<string, any>))) ||
+    ((value as Record<string, any>)["configFailedCriticalTotal"] ===
+      undefined &&
+      (value as Record<string, any>)["config_failed_critical_total"] ===
+        undefined)
+  )
+    return false;
   return true;
 }
 
@@ -96,6 +124,8 @@ export function QueueMetricsFromJSONTyped(
     outboxOldestAgeSeconds: json["outbox_oldest_age_seconds"],
     commandQueueDepth: json["command_queue_depth"],
     commandUnknownTotal: json["command_unknown_total"],
+    configRollbackTotal: json["config_rollback_total"],
+    configFailedCriticalTotal: json["config_failed_critical_total"],
   };
 }
 
@@ -116,5 +146,7 @@ export function QueueMetricsToJSONTyped(
     outbox_oldest_age_seconds: value["outboxOldestAgeSeconds"],
     command_queue_depth: value["commandQueueDepth"],
     command_unknown_total: value["commandUnknownTotal"],
+    config_rollback_total: value["configRollbackTotal"],
+    config_failed_critical_total: value["configFailedCriticalTotal"],
   };
 }

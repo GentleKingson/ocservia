@@ -14,6 +14,11 @@
 
 import * as runtime from "../runtime";
 import {
+  type ConfigApplyRequest,
+  ConfigApplyRequestFromJSON,
+  ConfigApplyRequestToJSON,
+} from "../models/ConfigApplyRequest";
+import {
   type ConfigPlan,
   ConfigPlanFromJSON,
   ConfigPlanToJSON,
@@ -24,10 +29,21 @@ import {
   ConfigPlanRequestToJSON,
 } from "../models/ConfigPlanRequest";
 import {
+  type Operation,
+  OperationFromJSON,
+  OperationToJSON,
+} from "../models/Operation";
+import {
   type Problem,
   ProblemFromJSON,
   ProblemToJSON,
 } from "../models/Problem";
+
+export interface ApplyConfigPlanRequest {
+  planId: string;
+  idempotencyKey: string;
+  configApplyRequest: ConfigApplyRequest;
+}
 
 export interface CreateConfigPlanRequest {
   nodeId: string;
@@ -43,6 +59,99 @@ export interface GetConfigPlanRequest {
  *
  */
 export class ConfigurationApi extends runtime.BaseAPI {
+  /**
+   * Creates request options for applyConfigPlan without sending the request
+   */
+  async applyConfigPlanRequestOpts(
+    requestParameters: ApplyConfigPlanRequest,
+  ): Promise<runtime.RequestOpts> {
+    if (requestParameters["planId"] == null) {
+      throw new runtime.RequiredError(
+        "planId",
+        'Required parameter "planId" was null or undefined when calling applyConfigPlan().',
+      );
+    }
+
+    if (requestParameters["idempotencyKey"] == null) {
+      throw new runtime.RequiredError(
+        "idempotencyKey",
+        'Required parameter "idempotencyKey" was null or undefined when calling applyConfigPlan().',
+      );
+    }
+
+    if (requestParameters["configApplyRequest"] == null) {
+      throw new runtime.RequiredError(
+        "configApplyRequest",
+        'Required parameter "configApplyRequest" was null or undefined when calling applyConfigPlan().',
+      );
+    }
+
+    const queryParameters: any = {};
+
+    const headerParameters: runtime.HTTPHeaders = {};
+
+    headerParameters["Content-Type"] = "application/json";
+
+    if (requestParameters["idempotencyKey"] != null) {
+      headerParameters["Idempotency-Key"] = String(
+        requestParameters["idempotencyKey"],
+      );
+    }
+
+    if (this.configuration && this.configuration.accessToken) {
+      const token = this.configuration.accessToken;
+      const tokenString = await token("bearerAuth", []);
+
+      if (tokenString) {
+        headerParameters["Authorization"] = `Bearer ${tokenString}`;
+      }
+    }
+
+    let urlPath = `/config-plans/{plan_id}/apply`;
+    urlPath = urlPath.replace(
+      "{plan_id}",
+      encodeURIComponent(String(requestParameters["planId"])),
+    );
+
+    return {
+      path: urlPath,
+      method: "POST",
+      headers: headerParameters,
+      query: queryParameters,
+      body: ConfigApplyRequestToJSON(requestParameters["configApplyRequest"]),
+    };
+  }
+
+  /**
+   * Queue atomic application of an unexpired independently approved plan
+   */
+  async applyConfigPlanRaw(
+    requestParameters: ApplyConfigPlanRequest,
+    initOverrides?: RequestInit | runtime.InitOverrideFunction,
+  ): Promise<runtime.ApiResponse<Operation>> {
+    const requestOptions =
+      await this.applyConfigPlanRequestOpts(requestParameters);
+    const response = await this.request(requestOptions, initOverrides);
+
+    return new runtime.JSONApiResponse(response, (jsonValue) =>
+      OperationFromJSON(jsonValue),
+    );
+  }
+
+  /**
+   * Queue atomic application of an unexpired independently approved plan
+   */
+  async applyConfigPlan(
+    requestParameters: ApplyConfigPlanRequest,
+    initOverrides?: RequestInit | runtime.InitOverrideFunction,
+  ): Promise<Operation> {
+    const response = await this.applyConfigPlanRaw(
+      requestParameters,
+      initOverrides,
+    );
+    return await response.value();
+  }
+
   /**
    * Creates request options for createConfigPlan without sending the request
    */

@@ -305,6 +305,18 @@ async fn execute(
                 .await
                 .map(privd_response::Result::ConfigPlan),
         ),
+        privd_request::Operation::ConfigApply(request) => (
+            "config_apply",
+            adapter
+                .config_apply(
+                    &request.candidate,
+                    &request.candidate_hash,
+                    &request.expected_current_hash,
+                    request.desired_revision,
+                )
+                .await
+                .map(privd_response::Result::ConfigApply),
+        ),
         privd_request::Operation::SessionDisconnect(request) => (
             "session_disconnect",
             adapter

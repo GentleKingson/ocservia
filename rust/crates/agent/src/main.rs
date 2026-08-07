@@ -11,8 +11,8 @@ use ocservia_agent::{
     MAX_COMMAND_BYTES, MAX_WRITE_QUEUE, PrivdClient,
 };
 use ocservia_agent_protocol::{
-    ConfigPlanRequest, DesiredEffectObserveRequest, DesiredEffectState, ErrorKind,
-    GroupApplyRequest, IpBanRemoveRequest, MAX_MANAGED_RESOURCES, PrivdResponse,
+    ConfigApplyRequest, ConfigPlanRequest, DesiredEffectObserveRequest, DesiredEffectState,
+    ErrorKind, GroupApplyRequest, IpBanRemoveRequest, MAX_MANAGED_RESOURCES, PrivdResponse,
     ServiceReloadRequest, SessionMutationRequest, UserDisableRequest, UserEnableRequest,
     UserSecretRequest, privd_request, privd_response,
 };
@@ -264,6 +264,7 @@ async fn handle_command_stream(
             "ocserv.users.write",
             "ocserv.groups.write",
             "ocserv.config.plan",
+            "ocserv.config.apply",
         ]),
         now_unix_seconds,
         cancelled: false,
@@ -281,6 +282,7 @@ async fn handle_command_stream(
                 | command_envelope::Payload::UserPasswordRotate(_)
                 | command_envelope::Payload::GroupApply(_)
                 | command_envelope::Payload::ConfigPlan(_)
+                | command_envelope::Payload::ConfigApply(_)
         )
     );
     let execution = if external {
@@ -417,6 +419,14 @@ async fn execute_external_command(
                 candidate_hash: payload.candidate_hash.clone(),
             })
         }
+        Some(command_envelope::Payload::ConfigApply(payload)) => {
+            privd_request::Operation::ConfigApply(ConfigApplyRequest {
+                candidate: payload.candidate.clone(),
+                candidate_hash: payload.candidate_hash.clone(),
+                expected_current_hash: payload.expected_current_hash.clone(),
+                desired_revision: payload.desired_revision,
+            })
+        }
         _ => return Err(CommandError::Rejected("capability_rejected")),
     };
     let expires_at = envelope
@@ -456,6 +466,9 @@ async fn execute_external_command(
                 }
             }
             Some(privd_response::Result::ConfigPlan(result)) => session
+                .command_executor
+                .complete_external(&command, Ok(&result.encode_to_vec()), now),
+            Some(privd_response::Result::ConfigApply(result)) => session
                 .command_executor
                 .complete_external(&command, Ok(&result.encode_to_vec()), now),
             Some(privd_response::Result::Error(error)) if terminal_privd_error(error.kind) => {
@@ -524,6 +537,28 @@ async fn observe_external_effect(
         Some(command_envelope::Payload::ConfigPlan(_))
     ) {
         return ExternalEffectObservation::Absent;
+    }
+    if let Some(command_envelope::Payload::ConfigApply(payload)) = envelope.payload.as_ref() {
+        let response = privd
+            .call(privd_request::Operation::ConfigFingerprint(
+                ocservia_agent_protocol::ReadRequest {},
+            ))
+            .await;
+        let Ok(response) = response else {
+            return ExternalEffectObservation::Unknown;
+        };
+        let Some(privd_response::Result::ConfigFingerprint(value)) = response.result else {
+            return ExternalEffectObservation::Unknown;
+        };
+        let Ok(observed) = hex::decode(value.sha256) else {
+            return ExternalEffectObservation::Unknown;
+        };
+        if observed == payload.candidate_hash || observed == payload.expected_current_hash {
+            // Applying again is the recovery protocol: privd rechecks health and either
+            // finalizes the retained backup or performs the verified rollback.
+            return ExternalEffectObservation::Absent;
+        }
+        return ExternalEffectObservation::Unknown;
     }
     let target_boot = match envelope.payload.as_ref() {
         Some(command_envelope::Payload::SessionDisconnect(target)) => Some(&target.boot_id),
@@ -1010,10 +1045,10 @@ fn invalid(detail: &str) -> io::Error {
 mod tests {
     use super::*;
     use ocservia_agent_protocol::{
-        DesiredEffectObservation, PrivdRequest, read_frame, write_frame,
+        ConfigFingerprint, DesiredEffectObservation, PrivdRequest, read_frame, write_frame,
     };
     use ocservia_contracts::generated::ocserv::platform::agent::v1::{
-        ConfigPlan, UserPasswordRotate,
+        ConfigApply, ConfigPlan, UserPasswordRotate,
     };
 
     #[test]
@@ -1117,6 +1152,64 @@ mod tests {
         assert_eq!(
             observe_external_effect(&client, &envelope).await,
             ExternalEffectObservation::Absent
+        );
+    }
+
+    #[tokio::test]
+    async fn interrupted_config_apply_retries_only_known_fingerprints() {
+        async fn observe(hash: Vec<u8>) -> ExternalEffectObservation {
+            let socket = std::env::temp_dir().join(format!("apply-{}.sock", Uuid::now_v7()));
+            let listener =
+                tokio::net::UnixListener::bind(&socket).expect("bind fingerprint fixture");
+            let server = tokio::spawn(async move {
+                let (mut stream, _) = listener.accept().await.expect("accept");
+                let request: PrivdRequest = read_frame(&mut stream).await.expect("request");
+                assert!(matches!(
+                    request.operation,
+                    Some(privd_request::Operation::ConfigFingerprint(_))
+                ));
+                write_frame(
+                    &mut stream,
+                    &PrivdResponse {
+                        request_id: request.request_id,
+                        result: Some(privd_response::Result::ConfigFingerprint(
+                            ConfigFingerprint {
+                                sha256: hex::encode(hash),
+                                size_bytes: 128,
+                            },
+                        )),
+                    },
+                )
+                .await
+                .expect("response");
+            });
+            let client = PrivdClient::new(socket.clone(), Duration::from_secs(2)).expect("client");
+            let envelope = CommandEnvelope {
+                payload: Some(command_envelope::Payload::ConfigApply(ConfigApply {
+                    candidate: b"tcp-port = 443\n".to_vec(),
+                    candidate_hash: vec![0x5a; 32],
+                    expected_current_hash: vec![0x4b; 32],
+                    desired_revision: 2,
+                })),
+                ..CommandEnvelope::default()
+            };
+            let result = observe_external_effect(&client, &envelope).await;
+            server.await.expect("server");
+            std::fs::remove_file(socket).expect("remove socket");
+            result
+        }
+
+        assert_eq!(
+            observe(vec![0x5a; 32]).await,
+            ExternalEffectObservation::Absent
+        );
+        assert_eq!(
+            observe(vec![0x4b; 32]).await,
+            ExternalEffectObservation::Absent
+        );
+        assert_eq!(
+            observe(vec![0x3c; 32]).await,
+            ExternalEffectObservation::Unknown
         );
     }
 }
