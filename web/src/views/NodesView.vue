@@ -19,6 +19,7 @@ import {
 import { computed, onMounted, ref } from "vue";
 
 import { useFleetStore } from "../shared/fleet";
+import { recoveryDialogKind } from "../shared/desired-recovery";
 
 const fleet = useFleetStore();
 const pendingAction = ref<{
@@ -106,6 +107,7 @@ async function submitDesired(): Promise<void> {
   if (dialog.kind === "create")
     await fleet.createUser(
       desiredName.value.trim(),
+      dialog.version,
       sealedPassword.value.trim(),
       secretKeyId.value.trim(),
       explanation,
@@ -319,10 +321,61 @@ async function submitDesired(): Promise<void> {
               ><strong>{{ item.name }}</strong
               ><small :class="item.convergence">{{
                 $t(`convergence_${item.convergence}`)
-              }}</small></span
+              }}</small
+              ><small
+                v-if="item.recoveryRequired && !item.recoveryMutationKind"
+                class="drifted"
+                >{{ $t("manualReconciliationRequired") }}</small
+              ></span
             >
             <span class="session-actions">
               <button
+                v-if="recoveryDialogKind(item) === 'create'"
+                type="button"
+                :disabled="operationBusy || !item.desiredVersion"
+                :title="$t('retryCreateUser')"
+                @click="
+                  openDesired('create', item.name, item.desiredVersion ?? 0)
+                "
+              >
+                <UserPlus :size="14" />
+              </button>
+              <button
+                v-else-if="recoveryDialogKind(item) === 'rotate'"
+                type="button"
+                :disabled="operationBusy || !item.desiredVersion"
+                :title="$t('retryRotatePassword')"
+                @click="
+                  openDesired('rotate', item.name, item.desiredVersion ?? 0)
+                "
+              >
+                <KeyRound :size="14" />
+              </button>
+              <button
+                v-else-if="recoveryDialogKind(item) === 'disable'"
+                type="button"
+                class="danger"
+                :disabled="operationBusy || !item.desiredVersion"
+                :title="$t('retryDisableUser')"
+                @click="
+                  openDesired('disable', item.name, item.desiredVersion ?? 0)
+                "
+              >
+                <UserX :size="14" />
+              </button>
+              <button
+                v-else-if="recoveryDialogKind(item) === 'enable'"
+                type="button"
+                :disabled="operationBusy || !item.desiredVersion"
+                :title="$t('retryEnableUser')"
+                @click="
+                  openDesired('enable', item.name, item.desiredVersion ?? 0)
+                "
+              >
+                <UserCheck :size="14" />
+              </button>
+              <button
+                v-if="!item.recoveryRequired"
                 type="button"
                 :disabled="operationBusy || !item.desiredVersion"
                 :title="$t('rotatePassword')"
@@ -333,7 +386,7 @@ async function submitDesired(): Promise<void> {
                 <KeyRound :size="14" />
               </button>
               <button
-                v-if="item.desiredEnabled === false"
+                v-if="!item.recoveryRequired && item.desiredEnabled === false"
                 type="button"
                 :disabled="operationBusy || !item.desiredVersion"
                 :title="$t('enableUser')"
@@ -344,7 +397,7 @@ async function submitDesired(): Promise<void> {
                 <UserCheck :size="14" />
               </button>
               <button
-                v-else
+                v-else-if="!item.recoveryRequired"
                 type="button"
                 class="danger"
                 :disabled="operationBusy || !item.desiredVersion"
@@ -365,9 +418,25 @@ async function submitDesired(): Promise<void> {
               ><strong>{{ item.name }}</strong
               ><small :class="item.convergence">{{
                 $t(`convergence_${item.convergence}`)
-              }}</small></span
+              }}</small
+              ><small
+                v-if="item.recoveryRequired && !item.recoveryMutationKind"
+                class="drifted"
+                >{{ $t("manualReconciliationRequired") }}</small
+              ></span
             >
             <button
+              v-if="recoveryDialogKind(item) === 'group'"
+              type="button"
+              class="icon-command"
+              :disabled="operationBusy"
+              :title="$t('retryApplyGroup')"
+              @click="openDesired('group', item.name, item.desiredVersion ?? 0)"
+            >
+              <ListPlus :size="14" />
+            </button>
+            <button
+              v-else-if="!item.recoveryRequired"
               type="button"
               class="icon-command"
               :disabled="operationBusy"
@@ -506,6 +575,9 @@ async function submitDesired(): Promise<void> {
           ><input
             id="desired-name"
             v-model="desiredName"
+            :disabled="
+              desiredDialog.kind === 'create' && desiredDialog.version > 0
+            "
             maxlength="64"
             required
         /></template>

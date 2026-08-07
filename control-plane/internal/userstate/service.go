@@ -60,21 +60,23 @@ type MutationRequest struct {
 }
 
 type ResourceState struct {
-	Kind                string     `json:"kind"`
-	Name                string     `json:"name"`
-	DesiredEnabled      *bool      `json:"desired_enabled,omitempty"`
-	ObservedEnabled     *bool      `json:"observed_enabled,omitempty"`
-	DesiredMembers      []string   `json:"desired_members,omitempty"`
-	ObservedMembers     []string   `json:"observed_members,omitempty"`
-	DesiredVersion      *int64     `json:"desired_version,omitempty"`
-	DesiredRevision     *int64     `json:"desired_revision,omitempty"`
-	ObservedRevision    *int64     `json:"observed_revision,omitempty"`
-	DesiredFingerprint  string     `json:"desired_fingerprint,omitempty"`
-	ObservedFingerprint string     `json:"observed_fingerprint,omitempty"`
-	Convergence         string     `json:"convergence"`
-	OperationID         *string    `json:"operation_id,omitempty"`
-	OperationState      *string    `json:"operation_state,omitempty"`
-	ObservedAt          *time.Time `json:"observed_at,omitempty"`
+	Kind                 string        `json:"kind"`
+	Name                 string        `json:"name"`
+	DesiredEnabled       *bool         `json:"desired_enabled,omitempty"`
+	ObservedEnabled      *bool         `json:"observed_enabled,omitempty"`
+	DesiredMembers       []string      `json:"desired_members,omitempty"`
+	ObservedMembers      []string      `json:"observed_members,omitempty"`
+	DesiredVersion       *int64        `json:"desired_version,omitempty"`
+	DesiredRevision      *int64        `json:"desired_revision,omitempty"`
+	ObservedRevision     *int64        `json:"observed_revision,omitempty"`
+	DesiredFingerprint   string        `json:"desired_fingerprint,omitempty"`
+	ObservedFingerprint  string        `json:"observed_fingerprint,omitempty"`
+	Convergence          string        `json:"convergence"`
+	OperationID          *string       `json:"operation_id,omitempty"`
+	OperationState       *string       `json:"operation_state,omitempty"`
+	RecoveryRequired     bool          `json:"recovery_required"`
+	RecoveryMutationKind *MutationKind `json:"recovery_mutation_kind,omitempty"`
+	ObservedAt           *time.Time    `json:"observed_at,omitempty"`
 }
 
 type Service struct {
@@ -203,22 +205,42 @@ func (s *Service) List(ctx context.Context, nodeID uuid.UUID) ([]ResourceState, 
 	rows, err := s.pool.Query(ctx, `
 		SELECT kind,name,desired_enabled,observed_enabled,desired_members,observed_members,
 		       desired_version,desired_revision,observed_revision,encode(desired_fingerprint,'hex'),
-		       encode(observed_fingerprint,'hex'),node_status,operation_id::text,operation_state,observed_at
+		       encode(observed_fingerprint,'hex'),node_status,operation_id::text,operation_state,
+		       command_state,payload_type,safe_rejected,observed_at
 		FROM (
 		 SELECT 'user'::text kind,COALESCE(d.username,o.username) name,d.enabled desired_enabled,o.enabled observed_enabled,
 		        NULL::text[] desired_members,NULL::text[] observed_members,d.version desired_version,d.revision desired_revision,
 		        o.revision observed_revision,d.fingerprint desired_fingerprint,o.fingerprint observed_fingerprint,n.status node_status,
-		        latest.operation_id,latest.operation_state,o.observed_at
+		        latest.operation_id,latest.operation_state,latest.command_state,latest.payload_type,latest.safe_rejected,o.observed_at
 		 FROM desired_users d FULL JOIN observed_users o USING(node_id,username)
 		 JOIN nodes n ON n.id=COALESCE(d.node_id,o.node_id)
-		 LEFT JOIN LATERAL (SELECT op.id operation_id,op.state operation_state FROM commands c JOIN operations op ON op.command_id=c.id WHERE c.node_id=n.id AND c.resource_type='user' AND c.resource_key=COALESCE(d.username,o.username) ORDER BY c.created_at DESC LIMIT 1) latest ON true
+		 LEFT JOIN LATERAL (
+		   SELECT op.id operation_id,op.state operation_state,c.state command_state,c.payload_type,
+		          c.state='rejected'
+		          AND EXISTS(SELECT 1 FROM agent_command_results result WHERE result.command_id=c.id AND result.state='rejected')
+		          AND NOT EXISTS(SELECT 1 FROM agent_command_results result WHERE result.command_id=c.id AND (result.state='unknown' OR result.accepted_at IS NOT NULL))
+		          AND (SELECT count(*) FROM command_attempts attempt WHERE attempt.command_id=c.id) <= 1 safe_rejected
+		   FROM commands c JOIN operations op ON op.command_id=c.id
+		   WHERE c.node_id=n.id AND c.resource_type='user' AND c.resource_key=COALESCE(d.username,o.username)
+		   ORDER BY c.created_at DESC,c.id DESC LIMIT 1
+		 ) latest ON true
 		 WHERE COALESCE(d.node_id,o.node_id)=$1
 		 UNION ALL
 		 SELECT 'group',COALESCE(d.group_name,o.group_name),NULL,NULL,d.members,o.members,d.version,d.revision,o.revision,
-		        d.fingerprint,o.fingerprint,n.status,latest.operation_id,latest.operation_state,o.observed_at
+		        d.fingerprint,o.fingerprint,n.status,latest.operation_id,latest.operation_state,
+		        latest.command_state,latest.payload_type,latest.safe_rejected,o.observed_at
 		 FROM desired_groups d FULL JOIN observed_groups o USING(node_id,group_name)
 		 JOIN nodes n ON n.id=COALESCE(d.node_id,o.node_id)
-		 LEFT JOIN LATERAL (SELECT op.id operation_id,op.state operation_state FROM commands c JOIN operations op ON op.command_id=c.id WHERE c.node_id=n.id AND c.resource_type='group' AND c.resource_key=COALESCE(d.group_name,o.group_name) ORDER BY c.created_at DESC LIMIT 1) latest ON true
+		 LEFT JOIN LATERAL (
+		   SELECT op.id operation_id,op.state operation_state,c.state command_state,c.payload_type,
+		          c.state='rejected'
+		          AND EXISTS(SELECT 1 FROM agent_command_results result WHERE result.command_id=c.id AND result.state='rejected')
+		          AND NOT EXISTS(SELECT 1 FROM agent_command_results result WHERE result.command_id=c.id AND (result.state='unknown' OR result.accepted_at IS NOT NULL))
+		          AND (SELECT count(*) FROM command_attempts attempt WHERE attempt.command_id=c.id) <= 1 safe_rejected
+		   FROM commands c JOIN operations op ON op.command_id=c.id
+		   WHERE c.node_id=n.id AND c.resource_type='group' AND c.resource_key=COALESCE(d.group_name,o.group_name)
+		   ORDER BY c.created_at DESC,c.id DESC LIMIT 1
+		 ) latest ON true
 		 WHERE COALESCE(d.node_id,o.node_id)=$1
 		) state ORDER BY kind,name`, nodeID)
 	if err != nil {
@@ -229,9 +251,12 @@ func (s *Service) List(ctx context.Context, nodeID uuid.UUID) ([]ResourceState, 
 	for rows.Next() {
 		var item ResourceState
 		var nodeStatus string
-		if err := rows.Scan(&item.Kind, &item.Name, &item.DesiredEnabled, &item.ObservedEnabled, &item.DesiredMembers, &item.ObservedMembers, &item.DesiredVersion, &item.DesiredRevision, &item.ObservedRevision, &item.DesiredFingerprint, &item.ObservedFingerprint, &nodeStatus, &item.OperationID, &item.OperationState, &item.ObservedAt); err != nil {
+		var commandState, payloadType *string
+		var safeRejected *bool
+		if err := rows.Scan(&item.Kind, &item.Name, &item.DesiredEnabled, &item.ObservedEnabled, &item.DesiredMembers, &item.ObservedMembers, &item.DesiredVersion, &item.DesiredRevision, &item.ObservedRevision, &item.DesiredFingerprint, &item.ObservedFingerprint, &nodeStatus, &item.OperationID, &item.OperationState, &commandState, &payloadType, &safeRejected, &item.ObservedAt); err != nil {
 			return nil, err
 		}
+		item.RecoveryRequired, item.RecoveryMutationKind = recoveryMetadata(commandState, payloadType, safeRejected)
 		item.Convergence = convergence(item, nodeStatus)
 		result = append(result, item)
 	}
@@ -296,7 +321,14 @@ func revisionReplacement(ctx context.Context, tx pgx.Tx, nodeID uuid.UUID, resou
 	}
 	var state string
 	var priorKind MutationKind
-	err := tx.QueryRow(ctx, `SELECT state,payload_type FROM commands WHERE node_id=$1 AND resource_type=$2 AND resource_key=$3 AND expected_version=$4 ORDER BY created_at DESC,id DESC LIMIT 1`, nodeID, resourceType, resourceKey, currentRevision-1).Scan(&state, &priorKind)
+	var safeRejected bool
+	err := tx.QueryRow(ctx, `SELECT c.state,c.payload_type,
+		c.state='rejected'
+		AND EXISTS(SELECT 1 FROM agent_command_results result WHERE result.command_id=c.id AND result.state='rejected')
+		AND NOT EXISTS(SELECT 1 FROM agent_command_results result WHERE result.command_id=c.id AND (result.state='unknown' OR result.accepted_at IS NOT NULL))
+		AND (SELECT count(*) FROM command_attempts attempt WHERE attempt.command_id=c.id) <= 1
+		FROM commands c WHERE c.node_id=$1 AND c.resource_type=$2 AND c.resource_key=$3 AND c.expected_version=$4
+		ORDER BY c.created_at DESC,c.id DESC LIMIT 1`, nodeID, resourceType, resourceKey, currentRevision-1).Scan(&state, &priorKind, &safeRejected)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return false, nil
 	}
@@ -311,6 +343,11 @@ func revisionReplacement(ctx context.Context, tx pgx.Tx, nodeID uuid.UUID, resou
 			return false, ErrRevisionRecovery
 		}
 		return true, nil
+	case "rejected":
+		if !safeRejected || priorKind != kind {
+			return false, ErrRevisionRecovery
+		}
+		return true, nil
 	case "queued":
 		if priorKind == kind {
 			return false, nil
@@ -320,6 +357,24 @@ func revisionReplacement(ctx context.Context, tx pgx.Tx, nodeID uuid.UUID, resou
 		return false, ErrRevisionPending
 	default:
 		return false, ErrRevisionRecovery
+	}
+}
+
+func recoveryMetadata(commandState, payloadType *string, safeRejected *bool) (bool, *MutationKind) {
+	if commandState == nil || payloadType == nil {
+		return false, nil
+	}
+	required := *commandState == "failed" || *commandState == "expired" || *commandState == "rolled_back" || *commandState == "rejected"
+	replaceable := *commandState == "failed" || *commandState == "expired" || *commandState == "rolled_back" || (*commandState == "rejected" && safeRejected != nil && *safeRejected)
+	if !replaceable {
+		return required, nil
+	}
+	kind := MutationKind(*payloadType)
+	switch kind {
+	case UserCreate, UserDisable, UserEnable, UserPasswordRotate, GroupApply:
+		return required, &kind
+	default:
+		return required, nil
 	}
 }
 

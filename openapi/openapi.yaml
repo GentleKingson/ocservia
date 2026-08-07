@@ -1194,7 +1194,7 @@ components:
     UserGroupResourceState:
       type: object
       additionalProperties: false
-      required: [kind, name, convergence]
+      required: [kind, name, convergence, recovery_required]
       properties:
         kind: { type: string, enum: [user, group] }
         name: { $ref: "#/components/schemas/OcservName" }
@@ -1210,6 +1210,10 @@ components:
         convergence: { type: string, enum: [converged, pending, offline_pending, drifted] }
         operation_id: { $ref: "#/components/schemas/UuidV7" }
         operation_state: { $ref: "#/components/schemas/OperationState" }
+        recovery_required: { type: boolean }
+        recovery_mutation_kind:
+          type: string
+          enum: [user_create, user_disable, user_enable, user_password_rotate, group_apply]
         observed_at: { $ref: "#/components/schemas/UtcDateTime" }
     UserGroupStatePage:
       type: object

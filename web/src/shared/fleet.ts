@@ -363,12 +363,21 @@ export const useFleetStore = defineStore("fleet", () => {
 
   async function createUserAction(
     name: string,
+    version: number,
     sealedPassword: string,
     secretKeyId: string,
     reason: string,
   ): Promise<void> {
     await runOperation((node, signal) =>
-      createUser(node.id, name, sealedPassword, secretKeyId, reason, signal),
+      createUser(
+        node.id,
+        name,
+        version,
+        sealedPassword,
+        secretKeyId,
+        reason,
+        signal,
+      ),
     );
   }
   async function disableUserAction(

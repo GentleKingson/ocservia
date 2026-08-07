@@ -24,9 +24,12 @@ interface OpenApiDocument {
         properties?: { members?: { maxItems?: unknown } };
       };
       UserGroupResourceState?: {
+        required?: unknown;
         properties?: {
           desired_members?: { maxItems?: unknown };
           observed_members?: { maxItems?: unknown };
+          recovery_required?: { type?: unknown };
+          recovery_mutation_kind?: { enum?: unknown };
         };
       };
       UserGroupStatePage?: {
@@ -122,5 +125,17 @@ describe("OpenAPI invariants", () => {
       schemas?.UserGroupResourceState?.properties?.observed_members?.maxItems,
     ).toBe(384);
     expect(schemas?.UserGroupStatePage?.properties?.items?.maxItems).toBe(1536);
+    expect(schemas?.UserGroupResourceState?.required).toContain(
+      "recovery_required",
+    );
+    expect(
+      schemas?.UserGroupResourceState?.properties?.recovery_mutation_kind?.enum,
+    ).toEqual([
+      "user_create",
+      "user_disable",
+      "user_enable",
+      "user_password_rotate",
+      "group_apply",
+    ]);
   });
 });

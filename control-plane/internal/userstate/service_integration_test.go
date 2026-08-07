@@ -410,11 +410,25 @@ func TestTerminalDesiredRevisionRequiresSameKindReplacementIntegration(t *testin
 			actualDesired = payload.UserCreate.GetDesiredRevision()
 		case *agentv1.CommandEnvelope_UserPasswordRotate:
 			actualDesired = payload.UserPasswordRotate.GetDesiredRevision()
+		case *agentv1.CommandEnvelope_UserDisable:
+			actualDesired = payload.UserDisable.GetDesiredRevision()
+		case *agentv1.CommandEnvelope_UserEnable:
+			actualDesired = payload.UserEnable.GetDesiredRevision()
 		case *agentv1.CommandEnvelope_GroupApply:
 			actualDesired = payload.GroupApply.GetDesiredRevision()
 		}
 		if actualDesired != desired {
 			t.Fatalf("desired revision=%d want=%d", actualDesired, desired)
+		}
+	}
+	assertRecovery := func(t *testing.T, service *Service, nodeID uuid.UUID, kind MutationKind, version int64) {
+		t.Helper()
+		states, err := service.List(context.Background(), nodeID)
+		if err != nil || len(states) != 1 {
+			t.Fatalf("recovery state=%+v err=%v", states, err)
+		}
+		if !states[0].RecoveryRequired || states[0].RecoveryMutationKind == nil || *states[0].RecoveryMutationKind != kind || states[0].DesiredVersion == nil || *states[0].DesiredVersion != version {
+			t.Fatalf("recovery metadata=%+v want kind=%s version=%d", states[0], kind, version)
 		}
 	}
 
@@ -425,6 +439,7 @@ func TestTerminalDesiredRevisionRequiresSameKindReplacementIntegration(t *testin
 			t.Fatal(err)
 		}
 		markTerminal(t, pool, first, "failed")
+		assertRecovery(t, service, nodeID, UserCreate, 1)
 		recovery, _, err := service.Mutate(context.Background(), mutation(nodeID, "create-recovery", UserCreate, "alice", 1))
 		if err != nil {
 			t.Fatalf("create recovery: %v", err)
@@ -443,6 +458,7 @@ func TestTerminalDesiredRevisionRequiresSameKindReplacementIntegration(t *testin
 			t.Fatal(err)
 		}
 		markTerminal(t, pool, rotate, "failed")
+		assertRecovery(t, service, nodeID, UserPasswordRotate, 2)
 		if _, _, err := service.Mutate(context.Background(), mutation(nodeID, "disable-after-failed-password", UserDisable, "alice", 2)); !errors.Is(err, ErrRevisionRecovery) {
 			t.Fatalf("cross-kind recovery error=%v", err)
 		}
@@ -460,12 +476,55 @@ func TestTerminalDesiredRevisionRequiresSameKindReplacementIntegration(t *testin
 			t.Fatal(err)
 		}
 		markTerminal(t, pool, first, "expired")
+		assertRecovery(t, service, nodeID, GroupApply, 1)
 		recovery, _, err := service.Mutate(context.Background(), mutation(nodeID, "group-recovery", GroupApply, "staff", 1))
 		if err != nil {
 			t.Fatalf("group recovery: %v", err)
 		}
 		assertEnvelope(t, pool, recovery, 0, 1)
 	})
+
+	for _, test := range []struct {
+		name            string
+		kind            MutationKind
+		initialEnabled  bool
+		expectedEnabled bool
+	}{
+		{"failed disable", UserDisable, true, false},
+		{"failed enable", UserEnable, false, true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			service, pool, _, nodeID := integrationService(t, "active")
+			fingerprint := desiredFingerprint(UserCreate, "alice", nil)
+			if !test.initialEnabled {
+				fingerprint = desiredFingerprint(UserDisable, "alice", nil)
+			}
+			if _, err := pool.Exec(context.Background(), `INSERT INTO desired_users(node_id,username,enabled,version,revision,fingerprint,created_at,updated_at)VALUES($1,'alice',$2,1,1,$3,now(),now())`, nodeID, test.initialEnabled, fingerprint[:]); err != nil {
+				t.Fatal(err)
+			}
+			first, _, err := service.Mutate(context.Background(), mutation(nodeID, test.name, test.kind, "alice", 1))
+			if err != nil {
+				t.Fatal(err)
+			}
+			markTerminal(t, pool, first, "failed")
+			assertRecovery(t, service, nodeID, test.kind, 2)
+
+			recovery, _, err := service.Mutate(context.Background(), mutation(nodeID, test.name+" recovery", test.kind, "alice", 2))
+			if err != nil {
+				t.Fatalf("same-kind recovery: %v", err)
+			}
+			assertEnvelope(t, pool, recovery, 1, 2)
+			markTerminal(t, pool, recovery, "succeeded")
+			appliedFingerprint := desiredFingerprint(test.kind, "alice", nil)
+			if _, err := pool.Exec(context.Background(), `INSERT INTO observed_users(node_id,username,enabled,revision,fingerprint,observed_at)VALUES($1,'alice',$2,2,$3,now())`, nodeID, test.expectedEnabled, appliedFingerprint[:]); err != nil {
+				t.Fatal(err)
+			}
+			states, err := service.List(context.Background(), nodeID)
+			if err != nil || len(states) != 1 || states[0].RecoveryRequired || states[0].RecoveryMutationKind != nil || states[0].Convergence != "converged" {
+				t.Fatalf("successful recovery state=%+v err=%v", states, err)
+			}
+		})
+	}
 }
 
 func TestSameKindSupersedeCoalescesAgentRevisionIntegration(t *testing.T) {
@@ -565,6 +624,99 @@ func TestSameKindSupersedeCoalescesAgentRevisionIntegration(t *testing.T) {
 	if !claimed[uuid.MustParse(*secondRotate.CommandID)] || !claimed[uuid.MustParse(*secondGroup.CommandID)] {
 		t.Fatalf("coalesced commands did not become dispatchable: %+v", claimed)
 	}
+}
+
+func TestRejectedRevisionSlotRequiresProofThatNoEffectWasAcceptedIntegration(t *testing.T) {
+	ingestResult := func(t *testing.T, pool *pgxpool.Pool, nodeID uuid.UUID, operation operationstore.Operation, state agentv1.CommandResultState, errorCode string) {
+		t.Helper()
+		commandID := uuid.MustParse(*operation.CommandID)
+		var encoded []byte
+		if err := pool.QueryRow(context.Background(), `UPDATE commands SET state=CASE WHEN state='queued' THEN 'dispatched' ELSE state END WHERE id=$1 RETURNING envelope`, commandID).Scan(&encoded); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := pool.Exec(context.Background(), `UPDATE operations SET state=CASE WHEN state='queued' THEN 'dispatched' ELSE state END WHERE id=$1`, uuid.MustParse(operation.ID)); err != nil {
+			t.Fatal(err)
+		}
+		var envelope agentv1.CommandEnvelope
+		if err := proto.Unmarshal(encoded, &envelope); err != nil {
+			t.Fatal(err)
+		}
+		completed := time.Now().UTC().Add(time.Millisecond)
+		result := agentv1.CommandResult{
+			CommandId: envelope.GetCommandId(), IdempotencyKey: envelope.GetIdempotencyKey(),
+			State: state, ErrorCode: errorCode, CompletedAt: timestamppb.New(completed),
+		}
+		if state == agentv1.CommandResultState_COMMAND_RESULT_STATE_UNKNOWN {
+			result.PayloadSha256 = envelope.GetSemanticPayloadSha256()
+			result.SemanticPayloadHashVersion = agentv1.SemanticPayloadHashVersion_SEMANTIC_PAYLOAD_HASH_VERSION_V1
+			result.AcceptedAt = timestamppb.New(completed)
+		}
+		payload, err := proto.Marshal(&result)
+		if err != nil {
+			t.Fatal(err)
+		}
+		eventID := uuid.Must(uuid.NewV7())
+		if err := localslice.New(pool).Ingest(context.Background(), &transportv1.TransportEvent{
+			EventId: eventID[:], NodeId: nodeID[:], Type: transportv1.TransportEventType_TRANSPORT_EVENT_TYPE_COMMAND_RESULT,
+			OccurredAt: timestamppb.New(completed), Traceparent: testTraceparent, Payload: payload,
+		}); err != nil {
+			t.Fatalf("ingest %s result: %v", state, err)
+		}
+	}
+	seed := func(t *testing.T, pool *pgxpool.Pool, nodeID uuid.UUID) {
+		t.Helper()
+		fingerprint := desiredFingerprint(UserCreate, "alice", nil)
+		if _, err := pool.Exec(context.Background(), `INSERT INTO desired_users(node_id,username,enabled,version,revision,fingerprint,created_at,updated_at)VALUES($1,'alice',true,1,1,$2,now(),now())`, nodeID, fingerprint[:]); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	t.Run("pre-effect rejection permits same-kind slot reuse", func(t *testing.T) {
+		service, pool, _, nodeID := integrationService(t, "active")
+		seed(t, pool, nodeID)
+		rotate, _, err := service.Mutate(context.Background(), mutation(nodeID, "rejected-rotate", UserPasswordRotate, "alice", 1))
+		if err != nil {
+			t.Fatal(err)
+		}
+		ingestResult(t, pool, nodeID, rotate, agentv1.CommandResultState_COMMAND_RESULT_STATE_REJECTED, "command_expired")
+		states, err := service.List(context.Background(), nodeID)
+		if err != nil || len(states) != 1 || !states[0].RecoveryRequired || states[0].RecoveryMutationKind == nil || *states[0].RecoveryMutationKind != UserPasswordRotate {
+			t.Fatalf("safe rejected metadata=%+v err=%v", states, err)
+		}
+		replacement, _, err := service.Mutate(context.Background(), mutation(nodeID, "replacement-rotate", UserPasswordRotate, "alice", 2))
+		if err != nil {
+			t.Fatalf("pre-effect replacement: %v", err)
+		}
+		var encoded []byte
+		if err := pool.QueryRow(context.Background(), `SELECT envelope FROM commands WHERE id=$1`, uuid.MustParse(*replacement.CommandID)).Scan(&encoded); err != nil {
+			t.Fatal(err)
+		}
+		var envelope agentv1.CommandEnvelope
+		if err := proto.Unmarshal(encoded, &envelope); err != nil {
+			t.Fatal(err)
+		}
+		if envelope.GetExpectedRevision() != 1 || envelope.GetUserPasswordRotate().GetDesiredRevision() != 2 {
+			t.Fatalf("replacement revisions expected=%d desired=%d", envelope.GetExpectedRevision(), envelope.GetUserPasswordRotate().GetDesiredRevision())
+		}
+	})
+
+	t.Run("accepted unknown cannot be retired by a later rejection", func(t *testing.T) {
+		service, pool, _, nodeID := integrationService(t, "active")
+		seed(t, pool, nodeID)
+		rotate, _, err := service.Mutate(context.Background(), mutation(nodeID, "unknown-rotate", UserPasswordRotate, "alice", 1))
+		if err != nil {
+			t.Fatal(err)
+		}
+		ingestResult(t, pool, nodeID, rotate, agentv1.CommandResultState_COMMAND_RESULT_STATE_UNKNOWN, "privd_outcome_unknown")
+		ingestResult(t, pool, nodeID, rotate, agentv1.CommandResultState_COMMAND_RESULT_STATE_REJECTED, "command_expired")
+		states, err := service.List(context.Background(), nodeID)
+		if err != nil || len(states) != 1 || !states[0].RecoveryRequired || states[0].RecoveryMutationKind != nil {
+			t.Fatalf("ambiguous rejected metadata=%+v err=%v", states, err)
+		}
+		if _, _, err := service.Mutate(context.Background(), mutation(nodeID, "unsafe-replacement", UserPasswordRotate, "alice", 2)); !errors.Is(err, ErrRevisionRecovery) {
+			t.Fatalf("ambiguous rejected replacement=%v", err)
+		}
+	})
 }
 
 func mutation(nodeID uuid.UUID, key string, kind MutationKind, name string, version int64) MutationRequest {

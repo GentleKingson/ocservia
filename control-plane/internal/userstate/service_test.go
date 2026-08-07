@@ -92,3 +92,21 @@ func TestConvergenceRequiresAppliedRevisionAndPendingWins(t *testing.T) {
 		t.Fatalf("matching revision and fingerprint reported %q", got)
 	}
 }
+
+func TestRecoveryMetadataExposesOnlyReplaceableMutationKinds(t *testing.T) {
+	failed, rotate := "failed", string(UserPasswordRotate)
+	required, kind := recoveryMetadata(&failed, &rotate, nil)
+	if !required || kind == nil || *kind != UserPasswordRotate {
+		t.Fatalf("failed recovery required=%v kind=%v", required, kind)
+	}
+	rejected, safe := "rejected", true
+	required, kind = recoveryMetadata(&rejected, &rotate, &safe)
+	if !required || kind == nil || *kind != UserPasswordRotate {
+		t.Fatalf("safe rejection required=%v kind=%v", required, kind)
+	}
+	unsafe := false
+	required, kind = recoveryMetadata(&rejected, &rotate, &unsafe)
+	if !required || kind != nil {
+		t.Fatalf("ambiguous rejection required=%v kind=%v", required, kind)
+	}
+}

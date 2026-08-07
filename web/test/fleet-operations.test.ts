@@ -7,6 +7,7 @@ import { createPinia, setActivePinia } from "pinia";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
+  createUser,
   disconnectSession,
   getNode,
   getOperation,
@@ -20,7 +21,11 @@ import {
 import { useFleetStore } from "../src/shared/fleet";
 
 vi.mock("../src/api/client", () => ({
+  applyGroup: vi.fn(),
+  createUser: vi.fn(),
+  disableUser: vi.fn(),
   disconnectSession: vi.fn(),
+  enableUser: vi.fn(),
   getWorkspace: vi.fn().mockResolvedValue({ id: "workspace" }),
   getNode: vi.fn(),
   getOperation: vi.fn(),
@@ -30,6 +35,7 @@ vi.mock("../src/api/client", () => ({
   listNodes: vi.fn(),
   reloadService: vi.fn(),
   removeIpBan: vi.fn(),
+  rotateUserPassword: vi.fn(),
   terminateSession: vi.fn(),
   workspaceContext: vi.fn().mockReturnValue({ id: "workspace", generation: 1 }),
   workspaceChangedEvent: "ocservia:workspace-changed",
@@ -95,6 +101,7 @@ describe("controlled fleet operations", () => {
     vi.mocked(listNodes).mockReset();
     vi.mocked(listNodeSessions).mockReset();
     vi.mocked(disconnectSession).mockReset();
+    vi.mocked(createUser).mockReset();
     vi.mocked(workspaceContext).mockReturnValue({
       id: "workspace",
       generation: 1,
@@ -131,6 +138,31 @@ describe("controlled fleet operations", () => {
     await completion;
     expect(store.latestOperation?.state).toBe("succeeded");
     expect(store.sessions).toEqual([]);
+  });
+
+  it("retries a failed create at the current desired version", async () => {
+    vi.mocked(createUser).mockResolvedValue(operation("succeeded"));
+    const store = useFleetStore();
+    await store.select(node.id);
+
+    await store.createUser(
+      "alice",
+      1,
+      "sealed-password",
+      "node-key-1",
+      "retry failed create",
+    );
+
+    expect(createUser).toHaveBeenCalledWith(
+      node.id,
+      "alice",
+      1,
+      "sealed-password",
+      "node-key-1",
+      "retry failed create",
+      expect.any(AbortSignal),
+    );
+    store.$dispose();
   });
 
   it("continues polling from unknown until the operation succeeds", async () => {

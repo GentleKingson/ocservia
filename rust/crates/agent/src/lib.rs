@@ -2027,6 +2027,57 @@ mod tests {
     }
 
     #[test]
+    fn expired_pre_effect_revision_can_be_replaced_without_advancing_applied_revision() {
+        let path = temporary_journal("expired-revision-replacement");
+        let node = *Uuid::now_v7().as_bytes();
+        let command_context = desired_context(node, 100);
+        let mut executor = CommandExecutor::new(Journal::open(&path).expect("journal"));
+        let mut privd_calls = 0;
+        apply_desired(
+            &mut executor,
+            &desired_command(node, DesiredMutation::Create, "alice", 0, 1, 100),
+            &command_context,
+            101,
+            &mut privd_calls,
+        );
+
+        let mut expired = desired_command(node, DesiredMutation::Rotate, "alice", 1, 2, 100);
+        expired.expires_at = Some(prost_types::Timestamp {
+            seconds: command_context.now_unix_seconds,
+            nanos: 0,
+        });
+        assert!(matches!(
+            executor.prepare_external(&expired, &command_context),
+            Err(CommandError::Rejected("command_expired"))
+        ));
+        assert_eq!(
+            executor
+                .journal()
+                .applied_revision("user", "alice")
+                .expect("pre-effect rejection revision"),
+            Some(1)
+        );
+
+        let replacement = desired_command(node, DesiredMutation::Rotate, "alice", 1, 2, 100);
+        apply_desired(
+            &mut executor,
+            &replacement,
+            &command_context,
+            102,
+            &mut privd_calls,
+        );
+        assert_eq!(
+            executor
+                .journal()
+                .applied_revision("user", "alice")
+                .expect("replacement revision"),
+            Some(2)
+        );
+        assert_eq!(privd_calls, 2);
+        cleanup_journal(&path);
+    }
+
+    #[test]
     fn sequential_cross_kind_user_mutations_advance_one_resource_revision() {
         let path = temporary_journal("sequential-cross-kind");
         let node = *Uuid::now_v7().as_bytes();

@@ -112,6 +112,18 @@ export interface UserGroupResourceState {
    */
   operationState?: OperationState;
   /**
+   *
+   * @type {boolean}
+   * @memberof UserGroupResourceState
+   */
+  recoveryRequired: boolean;
+  /**
+   *
+   * @type {UserGroupResourceStateRecoveryMutationKindEnum}
+   * @memberof UserGroupResourceState
+   */
+  recoveryMutationKind?: UserGroupResourceStateRecoveryMutationKindEnum;
+  /**
    * RFC 3339 timestamp normalized to UTC.
    * @type {Date}
    * @memberof UserGroupResourceState
@@ -142,6 +154,19 @@ export type UserGroupResourceStateConvergenceEnum =
   (typeof UserGroupResourceStateConvergenceEnum)[keyof typeof UserGroupResourceStateConvergenceEnum];
 
 /**
+ * @export
+ */
+export const UserGroupResourceStateRecoveryMutationKindEnum = {
+  UserCreate: "user_create",
+  UserDisable: "user_disable",
+  UserEnable: "user_enable",
+  UserPasswordRotate: "user_password_rotate",
+  GroupApply: "group_apply",
+} as const;
+export type UserGroupResourceStateRecoveryMutationKindEnum =
+  (typeof UserGroupResourceStateRecoveryMutationKindEnum)[keyof typeof UserGroupResourceStateRecoveryMutationKindEnum];
+
+/**
  * Check if a given object implements the UserGroupResourceState interface.
  */
 export function instanceOfUserGroupResourceState(
@@ -150,6 +175,13 @@ export function instanceOfUserGroupResourceState(
   if (!("kind" in value) || value["kind"] === undefined) return false;
   if (!("name" in value) || value["name"] === undefined) return false;
   if (!("convergence" in value) || value["convergence"] === undefined)
+    return false;
+  if (
+    (!("recoveryRequired" in (value as Record<string, any>)) &&
+      !("recovery_required" in (value as Record<string, any>))) ||
+    ((value as Record<string, any>)["recoveryRequired"] === undefined &&
+      (value as Record<string, any>)["recovery_required"] === undefined)
+  )
     return false;
   return true;
 }
@@ -199,6 +231,11 @@ export function UserGroupResourceStateFromJSONTyped(
       json["operation_state"] == null
         ? undefined
         : OperationStateFromJSON(json["operation_state"]),
+    recoveryRequired: json["recovery_required"],
+    recoveryMutationKind:
+      json["recovery_mutation_kind"] == null
+        ? undefined
+        : json["recovery_mutation_kind"],
     observedAt:
       json["observed_at"] == null ? undefined : new Date(json["observed_at"]),
   };
@@ -233,6 +270,8 @@ export function UserGroupResourceStateToJSONTyped(
     convergence: value["convergence"],
     operation_id: value["operationId"],
     operation_state: OperationStateToJSON(value["operationState"]),
+    recovery_required: value["recoveryRequired"],
+    recovery_mutation_kind: value["recoveryMutationKind"],
     observed_at:
       value["observedAt"] == null
         ? value["observedAt"]

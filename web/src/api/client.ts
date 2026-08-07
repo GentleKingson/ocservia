@@ -267,12 +267,13 @@ function desiredRequest(version: number, reason: string) {
 export async function createUser(
   nodeId: string,
   name: string,
+  version: number,
   sealedPassword: string,
   secretKeyId: string,
   reason: string,
   signal?: AbortSignal,
 ): Promise<Operation> {
-  const request = desiredRequest(0, reason);
+  const request = desiredRequest(version, reason);
   return operations.createNodeUser(
     {
       nodeId,
