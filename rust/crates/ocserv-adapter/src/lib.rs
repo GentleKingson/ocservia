@@ -3150,6 +3150,7 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[tokio::test]
+    #[allow(clippy::too_many_lines)]
     #[ignore = "requires native ocpasswd, OpenSSL, and an isolated test directory"]
     async fn native_user_and_group_operations() {
         let root = PathBuf::from(std::env::var("OCSERVIA_I13_NATIVE_ROOT").expect("native root"));
@@ -3202,7 +3203,7 @@ mod tests {
                 assert_eq!(listed.users[0].username, "alice");
                 assert!(listed.users[0].enabled);
                 let (groups, hash) = record();
-                assert!(groups.is_empty());
+                assert_eq!(groups, "*");
                 assert!(!hash.starts_with('!'));
             }
             "rotate-p2" => {

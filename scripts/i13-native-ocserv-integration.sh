@@ -65,6 +65,9 @@ cleanup() {
   fi
   persist_artifacts || cleanup_status=1
   scan_artifacts || cleanup_status=1
+  if [[ -n "${ARTIFACT_DIR}" && -d "${ARTIFACT_DIR}" ]]; then
+    chmod -R u=rwX,go=rX "${ARTIFACT_DIR}" || cleanup_status=1
+  fi
   for _ in $(seq 1 50); do
     if ! ss -H -ltn "sport = :${PORT}" | grep -q .; then
       break
