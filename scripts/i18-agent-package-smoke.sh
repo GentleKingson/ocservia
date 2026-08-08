@@ -56,13 +56,13 @@ sudo install -o 61000 -g 61000 -m 0600 /dev/null "${rootfs}/var/lib/ocservia-age
 
 sudo env DESTDIR="${rootfs}" AGENT_UID=61000 AGENT_GID=61000 INSTALL_PRODUCTION_RELAYS=true \
   "${package_root}/scripts/upgrade-agent.sh"
-test -x "${rootfs}/var/lib/ocservia-agent/upgrade-backup/ocservia-agent.previous" \
+sudo test -x "${rootfs}/var/lib/ocservia-agent/upgrade-backup/ocservia-agent.previous" \
   || { echo "Agent upgrade backup is missing" >&2; exit 1; }
 echo "agent package upgrade passed"
 sudo env DESTDIR="${rootfs}" "${package_root}/scripts/uninstall-agent.sh"
-test -f "${rootfs}/var/lib/ocservia-agent/identity/controller.key" \
+sudo test -f "${rootfs}/var/lib/ocservia-agent/identity/controller.key" \
   || { echo "uninstall removed the controller key" >&2; exit 1; }
-test -f "${rootfs}/var/lib/ocservia-agent/agent.db" \
+sudo test -f "${rootfs}/var/lib/ocservia-agent/agent.db" \
   || { echo "uninstall removed the command journal" >&2; exit 1; }
 test ! -e "${rootfs}/usr/libexec/ocservia/ocservia-agent" \
   || { echo "uninstall retained the Agent binary" >&2; exit 1; }
