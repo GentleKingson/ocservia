@@ -161,6 +161,10 @@ jobs:
           ARTIFACT_DIR: ${{ runner.temp }}/artifacts/go/i18-production
           RUN_ID: production-${{ github.run_id }}-${{ github.run_attempt }}-go
         run: scripts/i18-production-relays.sh
+      - name: I19 five-minute Agent offline recovery
+        env:
+          ARTIFACT_DIR: ${{ runner.temp }}/artifacts/go/i19-offline-recovery
+        run: timeout 300s scripts/i19-five-minute-offline-recovery.sh
       - name: Go, PostgreSQL, UDS, and Rust stub integration
         env:
           ARTIFACT_DIR: ${{ runner.temp }}/artifacts/go/local-slice

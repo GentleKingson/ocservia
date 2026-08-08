@@ -9,7 +9,7 @@ shown offline after its latest heartbeat is more than 90 seconds old.
 
 - Security observations, current health, aggregate metrics, and raw history
   have separate priorities.
-- The Agent persists at most 64 MiB for at most 24 hours. It evicts oldest raw
+- The Agent persists at most 64 MiB for at most five minutes. It evicts oldest raw
   history before aggregate, health, and security data and reports drop counts.
 - A wire batch is limited to 512 KiB. Session, username, and client IP fields
   are stored in the node session read model and must not be metric labels.

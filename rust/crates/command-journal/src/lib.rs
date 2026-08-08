@@ -10,6 +10,9 @@ use rusqlite::{Connection, OpenFlags, TransactionBehavior};
 
 const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// Maximum time that telemetry remains buffered while an Agent is offline.
+pub const OFFLINE_RECOVERY_RETENTION_SECONDS: u64 = 300;
+
 /// SQLite-backed Agent local state.
 #[derive(Debug)]
 pub struct Journal {
@@ -995,6 +998,68 @@ mod tests {
         for suffix in ["", "-wal", "-shm"] {
             let _ = std::fs::remove_file(format!("{}{}", path.display(), suffix));
         }
+    }
+
+    #[test]
+    fn five_minute_offline_recovery_expires_stale_telemetry_at_boundary() {
+        let recovery_seconds = i64::try_from(OFFLINE_RECOVERY_RETENTION_SECONDS).expect("seconds");
+        let path = temporary_path("five-minute-offline-recovery");
+        let mut journal = Journal::open(&path).expect("open");
+        let before = *uuid::Uuid::now_v7().as_bytes();
+        let fresh = *uuid::Uuid::now_v7().as_bytes();
+        let recovered = *uuid::Uuid::now_v7().as_bytes();
+        journal
+            .enqueue_telemetry(&TelemetryInsert {
+                batch_id: &before,
+                priority: 2,
+                observed_at: 1_000,
+                expires_at: 1_000 + recovery_seconds,
+                payload: b"before-offline",
+                now: 1_000,
+                max_bytes: 1_024,
+            })
+            .expect("initial telemetry");
+        journal
+            .enqueue_telemetry(&TelemetryInsert {
+                batch_id: &fresh,
+                priority: 2,
+                observed_at: 1_299,
+                expires_at: 1_299 + recovery_seconds,
+                payload: b"still-retained",
+                now: 1_299,
+                max_bytes: 1_024,
+            })
+            .expect("telemetry before boundary");
+        assert!(
+            journal
+                .telemetry_pending(10)
+                .expect("pending")
+                .iter()
+                .any(|item| item.0 == before)
+        );
+
+        journal
+            .enqueue_telemetry(&TelemetryInsert {
+                batch_id: &recovered,
+                priority: 2,
+                observed_at: 1_300,
+                expires_at: 1_300 + recovery_seconds,
+                payload: b"reconnected",
+                now: 1_300,
+                max_bytes: 1_024,
+            })
+            .expect("recovery telemetry");
+        let pending = journal
+            .telemetry_pending(10)
+            .expect("pending after recovery");
+        assert!(!pending.iter().any(|item| item.0 == before));
+        assert!(pending.iter().any(|item| item.0 == recovered));
+        assert_eq!(
+            journal.telemetry_drop_counters().expect("drops"),
+            [0, 1, 0, 0]
+        );
+        drop(journal);
+        cleanup(&path);
     }
 
     #[test]

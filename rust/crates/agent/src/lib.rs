@@ -2206,23 +2206,23 @@ mod tests {
     }
 
     #[test]
-    fn expired_pre_effect_revision_can_be_replaced_without_advancing_applied_revision() {
-        let path = temporary_journal("expired-revision-replacement");
+    fn five_minute_offline_recovery_rejects_expired_command_before_effect() {
+        let path = temporary_journal("five-minute-expired-revision");
         let node = *Uuid::now_v7().as_bytes();
-        let command_context = desired_context(node, 100);
+        let command_context = desired_context(node, 1_300);
         let mut executor = CommandExecutor::new(Journal::open(&path).expect("journal"));
         let mut privd_calls = 0;
         apply_desired(
             &mut executor,
-            &desired_command(node, DesiredMutation::Create, "alice", 0, 1, 100),
+            &desired_command(node, DesiredMutation::Create, "alice", 0, 1, 1_300),
             &command_context,
             101,
             &mut privd_calls,
         );
 
-        let mut expired = desired_command(node, DesiredMutation::Rotate, "alice", 1, 2, 100);
+        let mut expired = desired_command(node, DesiredMutation::Rotate, "alice", 1, 2, 1_000);
         expired.expires_at = Some(prost_types::Timestamp {
-            seconds: command_context.now_unix_seconds,
+            seconds: 1_300,
             nanos: 0,
         });
         assert!(matches!(
@@ -2237,7 +2237,7 @@ mod tests {
             Some(1)
         );
 
-        let replacement = desired_command(node, DesiredMutation::Rotate, "alice", 1, 2, 100);
+        let replacement = desired_command(node, DesiredMutation::Rotate, "alice", 1, 2, 1_300);
         apply_desired(
             &mut executor,
             &replacement,

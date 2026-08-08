@@ -18,7 +18,9 @@ use ocservia_agent_protocol::{
     ServiceReloadRequest, SessionMutationRequest, UserDisableRequest, UserEnableRequest,
     UserSecretRequest, privd_request, privd_response,
 };
-use ocservia_command_journal::{CommandRecord, CommandState, Journal, TelemetryInsert};
+use ocservia_command_journal::{
+    CommandRecord, CommandState, Journal, OFFLINE_RECOVERY_RETENTION_SECONDS, TelemetryInsert,
+};
 use ocservia_contracts::decode_strict_command_envelope;
 use ocservia_contracts::generated::ocserv::platform::agent::v1::{
     AgentEvent, AgentEventType, ArtifactChunk, ArtifactFetchRequest, CommandDeliveryMode,
@@ -30,6 +32,7 @@ use ocservia_contracts::generated::ocserv::platform::agent::v1::{
 use prost::Message;
 use sha2::Digest;
 use uuid::Uuid;
+
 use zeroize::Zeroizing;
 
 const AGENT_ALPN: &[u8] = b"ocserv-platform/agent/1";
@@ -270,7 +273,7 @@ async fn connect_once(
                 let payload=batch.encode_to_vec();
                 let batch_id: [u8;16]=batch.batch_id.as_slice().try_into().map_err(|_| invalid("telemetry batch ID invalid"))?;
                 let now=SystemTime::now().duration_since(SystemTime::UNIX_EPOCH)?.as_secs();
-                session.journal.enqueue_telemetry(&TelemetryInsert { batch_id: &batch_id, priority: 2, observed_at: i64::try_from(now)?, expires_at: i64::try_from(now+24*60*60)?, payload: &payload, now: i64::try_from(now)?, max_bytes: 64*1024*1024 })?;
+                session.journal.enqueue_telemetry(&TelemetryInsert { batch_id: &batch_id, priority: 2, observed_at: i64::try_from(now)?, expires_at: i64::try_from(now+OFFLINE_RECOVERY_RETENTION_SECONDS)?, payload: &payload, now: i64::try_from(now)?, max_bytes: 64*1024*1024 })?;
                 for (pending_id,pending) in session.journal.telemetry_pending(32)? {
                     send_telemetry(&connection,&pending).await?;
                     session.journal.acknowledge_telemetry(&pending_id)?;
