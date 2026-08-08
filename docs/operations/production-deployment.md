@@ -2,7 +2,7 @@
 
 The production example in `deploy/production/compose.yaml` runs the HTTPS gateway, control plane, transport service, PostgreSQL, OpenTelemetry collector, and backup worker. It publishes only TCP 443. Database, application, and observability traffic remain on internal networks.
 
-Use digest-pinned images for every `OCSERV_*_IMAGE` variable. Put referenced secret files on a protected host filesystem outside the checkout. Generate the Controller Iroh key into the protected `controller-iroh.key` secret before startup. The Controller key and relay token must be owned by UID 65532 with mode `0600`; other secret files must not be group/world writable. Do not place credentials in Compose environment variables.
+Use digest-pinned images for every `OCSERV_*_IMAGE` variable. Put referenced secret files in a launcher-owned, mode-`0700` `OCSERV_SECRET_DIR` outside the checkout. File-backed Compose secrets retain their host ownership and mode. General secrets must be launcher-owned mode `0444`: the private parent directory prevents host traversal while the read-only file allows each explicitly mounted non-root service to read it. The Controller key and relay token must instead be owned by UID/GID 65532 with mode `0400`. The launchers reject missing files, symbolic links, and any ownership or mode mismatch. Do not place credentials in Compose environment variables.
 
 Provision the backup bind mount for the non-root PostgreSQL UID before startup. The launcher rejects missing, symbolic-link, incorrectly owned, or overly permissive paths:
 

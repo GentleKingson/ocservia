@@ -17,6 +17,7 @@ cleanup() {
   local status=$?
   docker volume rm -f "${trust_volume}" >/dev/null 2>&1 || true
   docker image rm -f "${runtime_transport_image}" "${runtime_control_image}" >/dev/null 2>&1 || true
+  sudo chown -R "$(id -u):$(id -g)" "${work}" >/dev/null 2>&1 || status=1
   rm -rf -- "${work}"
   if docker volume inspect "${trust_volume}" >/dev/null 2>&1; then
     echo "scoped trust volume cleanup failed" >&2
@@ -41,6 +42,15 @@ done
 for secret in relay-access-token tls.crt tls.key; do
   printf 'test-only\n' >"${work}/relay-secrets/${secret}"
 done
+general_secrets=(tls.crt tls.key postgres-owner-password postgres-app-password postgres-backup-password \
+  postgres.pgpass database-owner-url database-app-url oidc-client-secret session-key \
+  audit-checkpoint-key certificate-signer-token otel-client.crt otel-client.key otel-ca.crt)
+chmod 0444 "${general_secrets[@]/#/${work}\/secrets/}"
+chmod 0444 "${work}/relay-secrets/tls.crt" "${work}/relay-secrets/tls.key"
+chmod 0400 "${work}/secrets/relay-access-token" "${work}/secrets/controller-iroh.key" \
+  "${work}/relay-secrets/relay-access-token"
+sudo chown 65532:65532 "${work}/secrets/relay-access-token" "${work}/secrets/controller-iroh.key" \
+  "${work}/relay-secrets/relay-access-token"
 
 image="example.invalid/ocservia/test@sha256:$(printf '%064d' 0)"
 export OCSERV_GATEWAY_IMAGE="${image}" OCSERV_CONTROL_IMAGE="${image}"
@@ -178,6 +188,13 @@ docker run --rm --name "${trust_volume}-init" \
 docker run --rm --name "${trust_volume}-control" \
   -v "${trust_volume}:/run/ocserv-trust" --entrypoint /bin/sh "${runtime_control_image}" \
   -c 'test "$(stat -c %u:%g:%a /run/ocserv-trust)" = "65534:65532:750" && test -w /run/ocserv-trust && : > /run/ocserv-trust/control-plane.sock'
+docker run --rm -v "${work}/secrets/database-app-url:/run/secrets/test:ro" \
+  --entrypoint /bin/sh "${runtime_control_image}" -c 'test -r /run/secrets/test && test ! -w /run/secrets/test'
+docker run --rm --user 999:999 -v "${work}/secrets/postgres-app-password:/run/secrets/test:ro" \
+  --entrypoint /bin/sh "${POSTGRES_IMAGE:-postgres:17.10-bookworm@sha256:9b18b78397054fce88a9552e9d5a3ad5bb7fd258c5b3cc1c5028e46373d6ea8f}" \
+  -c 'test -r /run/secrets/test && test ! -w /run/secrets/test'
+docker run --rm --user 10001:10001 -v "${work}/secrets/otel-client.key:/run/secrets/test:ro" \
+  --entrypoint /bin/sh "${runtime_control_image}" -c 'test -r /run/secrets/test && test ! -w /run/secrets/test'
 docker volume rm "${trust_volume}" >/dev/null
 docker image rm "${runtime_transport_image}" "${runtime_control_image}" >/dev/null
 
