@@ -11,7 +11,11 @@ fi
 work="${RUNNER_TEMP:-/tmp}/ocservia-i18-package-${RUN_ID}"
 mkdir -p "${work}" "${ARTIFACT_DIR}"
 chmod 0700 "${work}"
-cleanup() { rm -rf -- "${work}"; }
+cleanup() {
+  local status=$?
+  sudo rm -rf -- "${work}" || status=1
+  exit "${status}"
+}
 trap cleanup EXIT INT TERM
 
 (cd "${ROOT}/rust" && cargo build --locked --release --package ocservia-agent --package ocservia-privd)
