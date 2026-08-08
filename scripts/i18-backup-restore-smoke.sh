@@ -31,6 +31,10 @@ cleanup() {
   if ! docker network rm "${network}" >/dev/null 2>&1; then
     status=1
   fi
+  if ! docker run --rm -v "${work}:/work" --entrypoint chown "${POSTGRES_IMAGE}" \
+    -R "$(id -u):$(id -g)" /work >/dev/null 2>&1; then
+    status=1
+  fi
   rm -rf -- "${work}"
   if docker ps -a --format '{{.Names}}' | grep -Fq "${network}"; then
     echo "scoped container cleanup failed" >&2
