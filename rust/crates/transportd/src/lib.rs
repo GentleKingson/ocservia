@@ -2609,6 +2609,23 @@ mod tests {
             "dedicated relays accepted a client without the configured token"
         );
         unauthenticated.close().await;
+        let wrong_token = Endpoint::builder(presets::Minimal)
+            .relay_mode(RelayMode::Custom(
+                relay_map.clone().with_auth_token("wrong-token"),
+            ))
+            .ca_tls_config(CaTlsConfig::insecure_skip_verify())
+            .clear_address_lookup()
+            .clear_ip_transports()
+            .bind()
+            .await
+            .expect("build wrong-token relay endpoint");
+        assert!(
+            tokio::time::timeout(Duration::from_secs(2), wrong_token.online())
+                .await
+                .is_err(),
+            "dedicated relays accepted a client with the wrong token"
+        );
+        wrong_token.close().await;
         let relay_map = relay_map.with_auth_token(RELAY_TOKEN);
         let client_key = SecretKey::generate();
         let client = Endpoint::builder(presets::Minimal)
