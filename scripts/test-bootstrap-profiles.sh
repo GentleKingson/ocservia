@@ -74,10 +74,10 @@ reject("unexpected workflow bootstrap caller") unless all_bootstrap_calls.map(&:
 cache_steps = {}
 jobs.each do |job_id, job|
   cache_steps[job_id] = Array(job.fetch("steps")).select do |step|
-    step["uses"].to_s.start_with?("actions/cache@")
+    step["uses"].to_s.start_with?("actions/cache")
   end
   cache_steps[job_id].each do |step|
-    reject("#{job_id} cache action must be pinned to a full commit SHA") unless step.fetch("uses").match?(/\Aactions\/cache@[0-9a-f]{40}\z/)
+    reject("#{job_id} cache action must be pinned to a full commit SHA") unless step.fetch("uses").match?(/\Aactions\/cache(?:\/restore)?@[0-9a-f]{40}\z/)
     reject("#{job_id} cache must not use restore-keys") if step.fetch("with", {}).key?("restore-keys")
   end
 end
@@ -119,7 +119,10 @@ backend_key = backend_cache.fetch("with").fetch("key")
 end
 expected_backend_paths = [".cache/go-build", ".cache/go-mod", ".cache/gopath"]
 reject("Backend Integration cache paths changed unexpectedly") unless paths(backend_cache).sort == expected_backend_paths.sort
-reject("Backend Integration must not own rust/target") if paths(backend_cache).include?("rust/target")
+backend_rust = cache_steps.fetch("backend-integration").find { |step| step.fetch("uses").start_with?("actions/cache/restore@") }
+reject("Backend Integration must restore the Quality Rust cache without saving it") unless backend_rust
+reject("Backend Integration Rust restore path must be rust/target") unless paths(backend_rust) == ["rust/target"]
+reject("Backend Integration must use the Quality Rust cache key") unless backend_rust.fetch("with").fetch("key").start_with?("rust-v3-quality-")
 
 quality_caches = cache_steps.fetch("quality-security-native")
 rust_cache = quality_caches.find { |step| step.fetch("with").fetch("key").start_with?("rust-v3-quality-") }

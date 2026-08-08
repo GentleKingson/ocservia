@@ -40,6 +40,11 @@ jobs:
             .cache/go-mod
             .cache/gopath
           key: go-v3-backend-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'go.work', 'go.work.sum', 'control-plane/go.mod', 'control-plane/go.sum') }}
+      - name: Restore Quality-owned Rust target cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: rust/target
+          key: rust-v3-quality-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'rust/Cargo.lock', 'rust/Cargo.toml', 'rust/rust-toolchain.toml', 'rust/crates/**/Cargo.toml') }}
       - name: Bootstrap and verify pinned tools
         run: scripts/bootstrap.sh go-integration
       - name: Go checks

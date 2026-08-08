@@ -51,16 +51,18 @@ Cache ownership is intentionally narrow:
 
 | Job | Cached paths |
 | --- | --- |
-| Backend Integration | `.cache/downloads`, `.tools`, `.cache/go-build`, `.cache/go-mod`, `.cache/gopath` |
+| Backend Integration | `.cache/downloads`, `.tools`, `.cache/go-build`, `.cache/go-mod`, `.cache/gopath`; restore-only access to Quality's `rust/target` cache |
 | Web & Smoke | `.cache/downloads`, `.tools`, `.cache/npm` |
 | Quality, Security & Native | `.cache/downloads`, `.tools`, `.cache/npm`, `.cache/go-mod`, `rust/target` |
 
 Keys include the lockfiles and scripts that determine their contents. There are
 no broad restore keys. A cache miss is fully supported, and bootstrap still
 checks versions and checksums after restore. CI never caches `node_modules`,
-credentials, environment files, logs, or test artifacts. Backend does not cache
-`rust/target`; Quality owns that build cache. Locally, `make bootstrap`
-explicitly selects the complete `all` profile.
+credentials, environment files, logs, or test artifacts. Quality is the only
+writer for `rust/target`; Backend uses `actions/cache/restore` with the same key
+as a read-only consumer so its focused Rust boundary tests do not lengthen the
+critical path. Locally, `make bootstrap` explicitly selects the complete `all`
+profile.
 
 All external Actions are pinned to full commits. Checkout does not persist its
 credential. The workflows do not use secrets, `pull_request_target`, production
