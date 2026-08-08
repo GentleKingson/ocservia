@@ -1,7 +1,17 @@
 #!/usr/bin/env bash
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-"${ROOT}/scripts/generate.sh"
+if (($# > 1)); then
+  echo "usage: $0 [--skip-generate]" >&2
+  exit 2
+fi
+if [[ "${1:-}" != "--skip-generate" ]]; then
+  [[ $# -eq 0 ]] || {
+    echo "usage: $0 [--skip-generate]" >&2
+    exit 2
+  }
+  "${ROOT}/scripts/generate.sh"
+fi
 git -C "${ROOT}" diff --exit-code -- \
   control-plane/gen/proto \
   rust/crates/contracts/src/generated \

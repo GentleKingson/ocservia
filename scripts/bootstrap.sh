@@ -8,7 +8,7 @@ CHECKSUMS="${ROOT}/scripts/checksums.txt"
 PROFILE="${1:-}"
 
 if (($# > 1)); then
-  echo "usage: $0 [all|contracts|go-integration|rust-validation|native|web|security]" >&2
+  echo "usage: $0 [all|ci-quality|contracts|go-integration|rust-validation|native|web|security]" >&2
   exit 2
 fi
 
@@ -21,7 +21,7 @@ if [[ -z "${PROFILE}" ]]; then
 fi
 
 case "${PROFILE}" in
-  all | contracts | go-integration | rust-validation | native | web | security) ;;
+  all | ci-quality | contracts | go-integration | rust-validation | native | web | security) ;;
   *)
     echo "unsupported bootstrap profile: ${PROFILE}" >&2
     exit 2
@@ -327,6 +327,19 @@ case "${PROFILE}" in
     install_protoc
     install_gitleaks
     install_go_quality_tools
+    install_rust_quality_tools
+    verify_java
+    verify_host_command jq
+    verify_host_command shellcheck
+    install_web_dependencies
+    ;;
+  ci-quality)
+    install_go
+    install_node
+    install_npm
+    install_rust
+    install_contract_tools
+    install_gitleaks
     install_rust_quality_tools
     verify_java
     verify_host_command jq

@@ -15,83 +15,10 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  public-policy:
-    name: Public Repository Policy
+  backend-integration:
+    name: Backend Integration
     runs-on: ubuntu-24.04
-    timeout-minutes: 5
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-        with:
-          fetch-depth: 0
-          persist-credentials: false
-      - name: Runner preflight
-        run: scripts/ci-preflight.sh
-      - name: Repository policy and docs
-        run: |
-          scripts/check-public-repository.sh
-          scripts/test-public-repository-policy.sh
-          scripts/test-bootstrap-profiles.sh
-          scripts/docs-check.sh
-
-  contracts:
-    name: Contracts
-    runs-on: ubuntu-24.04
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-        with:
-          fetch-depth: 0
-          persist-credentials: false
-      - name: Runner preflight
-        run: scripts/ci-preflight.sh
-      - name: Restore verified toolchain downloads
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
-        with:
-          path: |
-            .cache/downloads
-            .tools
-          key: tooling-v2-contracts-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'scripts/checksums.txt', 'scripts/bootstrap.sh', 'scripts/env.sh') }}
-      - name: Restore npm download cache
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
-        with:
-          path: .cache/npm
-          key: npm-v2-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'web/package-lock.json') }}
-      - name: Bootstrap and verify pinned tools
-        run: scripts/bootstrap.sh contracts
-      - name: Generate contracts
-        run: scripts/generate.sh
-      - name: Lint contract sources
-        run: |
-          source scripts/env.sh
-          (cd proto && buf format --diff --exit-code && buf lint)
-          (cd web && npx --no-install redocly lint --config ../openapi/.redocly.yaml ../openapi/openapi.yaml)
-      - name: Check breaking changes
-        run: scripts/check-breaking.sh
-      - name: Check generated output
-        run: |
-          scripts/generated-clean.sh
-          scripts/test-generated-clean.sh
-      - name: Capture generated-output diagnostics
-        if: always()
-        env:
-          ARTIFACT_DIR: ${{ runner.temp }}/artifacts/contracts
-        run: |
-          mkdir -p "${ARTIFACT_DIR}"
-          git status --short >"${ARTIFACT_DIR}/git-status.txt"
-          git diff --binary >"${ARTIFACT_DIR}/generated-output.diff"
-      - name: Upload contract diagnostics
-        if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
-        with:
-          name: contracts-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/artifacts/contracts
-          if-no-files-found: error
-          retention-days: 14
-
-  go:
-    name: Go
-    runs-on: ubuntu-24.04
-    timeout-minutes: 35
+    timeout-minutes: 40
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
@@ -104,247 +31,154 @@ jobs:
           path: |
             .cache/downloads
             .tools
-          key: tooling-v2-go-integration-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'scripts/checksums.txt', 'scripts/bootstrap.sh', 'scripts/env.sh') }}
-      - name: Restore Go and integration build caches
+          key: tooling-v3-go-integration-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'scripts/checksums.txt', 'scripts/bootstrap.sh', 'scripts/env.sh') }}
+      - name: Restore Go build and module caches
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: |
             .cache/go-build
             .cache/go-mod
             .cache/gopath
-            rust/target
-          key: go-v2-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'go.work', 'go.work.sum', 'control-plane/go.mod', 'control-plane/go.sum', 'rust/Cargo.lock') }}
+          key: go-v3-backend-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'go.work', 'go.work.sum', 'control-plane/go.mod', 'control-plane/go.sum') }}
+      - name: Restore Quality-owned Rust target cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: rust/target
+          key: rust-v3-quality-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'rust/Cargo.lock', 'rust/Cargo.toml', 'rust/rust-toolchain.toml', 'rust/crates/**/Cargo.toml') }}
       - name: Bootstrap and verify pinned tools
         run: scripts/bootstrap.sh go-integration
       - name: Go checks
         env:
-          ARTIFACT_DIR: ${{ runner.temp }}/artifacts/go/go-check
+          ARTIFACT_DIR: ${{ runner.temp }}/artifacts/backend/go-check
         run: |
           mkdir -p "${ARTIFACT_DIR}"
           set -o pipefail
           scripts/go-check.sh 2>&1 | tee "${ARTIFACT_DIR}/go-check.log"
       - name: PostgreSQL 17 and 18 integration
         env:
-          ARTIFACT_DIR: ${{ runner.temp }}/artifacts/go/database-integration
-          RUN_ID: database-${{ github.run_id }}-${{ github.run_attempt }}-go
+          ARTIFACT_DIR: ${{ runner.temp }}/artifacts/backend/database-integration
+          RUN_ID: database-${{ github.run_id }}-${{ github.run_attempt }}-be
         run: scripts/database-integration.sh
       - name: I14 quota, expiry, batch, and backport contracts
         env:
-          ARTIFACT_DIR: ${{ runner.temp }}/artifacts/go/i14-contracts
+          ARTIFACT_DIR: ${{ runner.temp }}/artifacts/backend/i14
         run: |
           mkdir -p "${ARTIFACT_DIR}"
           set -o pipefail
-          scripts/i14-quota-expiry-backport.sh 2>&1 | tee "${ARTIFACT_DIR}/i14-contracts.log"
+          scripts/i14-quota-expiry-backport.sh 2>&1 | tee "${ARTIFACT_DIR}/i14.log"
       - name: I15 deterministic config-plan boundary
         env:
-          ARTIFACT_DIR: ${{ runner.temp }}/artifacts/go/i15-config-plan
+          ARTIFACT_DIR: ${{ runner.temp }}/artifacts/backend/i15
         run: |
           mkdir -p "${ARTIFACT_DIR}"
           set -o pipefail
-          scripts/i15-config-plan.sh 2>&1 | tee "${ARTIFACT_DIR}/i15-config-plan.log"
+          scripts/i15-config-plan.sh 2>&1 | tee "${ARTIFACT_DIR}/i15.log"
       - name: I16 atomic config-apply and rollback boundary
         env:
-          ARTIFACT_DIR: ${{ runner.temp }}/artifacts/go/i16-config-apply
+          ARTIFACT_DIR: ${{ runner.temp }}/artifacts/backend/i16
         run: |
           mkdir -p "${ARTIFACT_DIR}"
           set -o pipefail
-          scripts/i16-config-apply.sh 2>&1 | tee "${ARTIFACT_DIR}/i16-config-apply.log"
+          scripts/i16-config-apply.sh 2>&1 | tee "${ARTIFACT_DIR}/i16.log"
       - name: I17 certificate and secret lifecycle boundary
         env:
-          ARTIFACT_DIR: ${{ runner.temp }}/artifacts/go/i17-certificate-secret
+          ARTIFACT_DIR: ${{ runner.temp }}/artifacts/backend/i17
         run: |
           mkdir -p "${ARTIFACT_DIR}"
           set -o pipefail
-          scripts/i17-certificate-secret.sh 2>&1 | tee "${ARTIFACT_DIR}/i17-certificate-secret.log"
+          scripts/i17-certificate-secret.sh 2>&1 | tee "${ARTIFACT_DIR}/i17.log"
       - name: I18 production topology and dedicated relay recovery
         env:
-          ARTIFACT_DIR: ${{ runner.temp }}/artifacts/go/i18-production
-          RUN_ID: production-${{ github.run_id }}-${{ github.run_attempt }}-go
+          ARTIFACT_DIR: ${{ runner.temp }}/artifacts/backend/i18
+          RUN_ID: production-${{ github.run_id }}-${{ github.run_attempt }}-be
         run: scripts/i18-production-relays.sh
       - name: I19 five-minute Agent offline recovery
         env:
-          ARTIFACT_DIR: ${{ runner.temp }}/artifacts/go/i19-offline-recovery
+          ARTIFACT_DIR: ${{ runner.temp }}/artifacts/backend/i19
         run: timeout 300s scripts/i19-five-minute-offline-recovery.sh
-      - name: Go, PostgreSQL, UDS, and Rust stub integration
+      - name: Go, PostgreSQL, UDS, and Rust stub local slice
         env:
-          ARTIFACT_DIR: ${{ runner.temp }}/artifacts/go/local-slice
-          RUN_ID: local-slice-${{ github.run_id }}-${{ github.run_attempt }}-go
+          ARTIFACT_DIR: ${{ runner.temp }}/artifacts/backend/local-slice
+          RUN_ID: local-slice-${{ github.run_id }}-${{ github.run_attempt }}-be
         run: scripts/local-slice-integration.sh
-      - name: Upload Go and integration diagnostics
+      - name: Upload Backend Integration diagnostics
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
-          name: go-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/artifacts/go
+          name: backend-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/artifacts/backend
           if-no-files-found: warn
           retention-days: 14
 
-  rust:
-    name: Rust
+  web-smoke:
+    name: Web & Smoke
     runs-on: ubuntu-24.04
-    timeout-minutes: 20
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-        with:
-          persist-credentials: false
-      - name: Runner preflight
-        run: scripts/ci-preflight.sh
-      - name: Restore verified tools
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
-        with:
-          path: |
-            .cache/downloads
-            .tools
-          key: tooling-v2-rust-validation-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'scripts/checksums.txt', 'scripts/bootstrap.sh', 'scripts/env.sh') }}
-      - name: Restore Rust target cache
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
-        with:
-          path: rust/target
-          key: rust-v2-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'rust/Cargo.lock', 'rust/Cargo.toml', 'rust/rust-toolchain.toml', 'rust/crates/**/Cargo.toml') }}
-      - name: Bootstrap and verify pinned tools
-        run: scripts/bootstrap.sh rust-validation
-      - name: Rust checks
-        env:
-          ARTIFACT_DIR: ${{ runner.temp }}/artifacts/rust
-        run: |
-          mkdir -p "${ARTIFACT_DIR}"
-          set -o pipefail
-          scripts/rust-check.sh 2>&1 | tee "${ARTIFACT_DIR}/rust-check.log"
-      - name: Upload Rust diagnostics
-        if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
-        with:
-          name: rust-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/artifacts/rust
-          if-no-files-found: error
-          retention-days: 14
-
-  web:
-    name: Web
-    runs-on: ubuntu-24.04
-    timeout-minutes: 30
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-        with:
-          persist-credentials: false
-      - name: Runner preflight
-        run: scripts/ci-preflight.sh
-      - name: Restore verified tools
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
-        with:
-          path: |
-            .cache/downloads
-            .tools
-          key: tooling-v2-web-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'scripts/checksums.txt', 'scripts/bootstrap.sh', 'scripts/env.sh') }}
-      - name: Restore npm download cache
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
-        with:
-          path: .cache/npm
-          key: npm-v2-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'web/package-lock.json') }}
-      - name: Bootstrap and verify pinned tools
-        run: scripts/bootstrap.sh web
-      - name: Web checks
-        env:
-          ARTIFACT_DIR: ${{ runner.temp }}/artifacts/web/web-check
-        run: |
-          mkdir -p "${ARTIFACT_DIR}"
-          set -o pipefail
-          scripts/web-check.sh 2>&1 | tee "${ARTIFACT_DIR}/web-check.log"
-      - name: Docker Compose Playwright E2E
-        env:
-          ARTIFACT_DIR: ${{ runner.temp }}/artifacts/web/browser-e2e
-          COMPOSE_PROJECT: ocservia-e2e-${{ github.run_id }}-${{ github.run_attempt }}-web
-        run: scripts/e2e.sh
-      - name: Upload Web and browser diagnostics
-        if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
-        with:
-          name: web-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/artifacts/web
-          if-no-files-found: warn
-          retention-days: 14
-
-  native-ocserv:
-    name: Native Ocserv
-    runs-on: ubuntu-24.04
-    timeout-minutes: 20
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-        with:
-          persist-credentials: false
-      - name: Runner preflight
-        run: scripts/ci-preflight.sh
-      - name: Restore verified tools
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
-        with:
-          path: |
-            .cache/downloads
-            .tools
-          key: tooling-v2-native-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'scripts/checksums.txt', 'scripts/bootstrap.sh', 'scripts/env.sh') }}
-      - name: Bootstrap and verify pinned tools
-        run: scripts/bootstrap.sh native
-      - name: Install ephemeral native fixtures
-        run: |
-          sudo apt-get update
-          sudo apt-get install --yes ocserv openconnect ssl-cert
-      - name: Native ocpasswd, OpenSSL, and Ocserv login
-        env:
-          ARTIFACT_DIR: ${{ runner.temp }}/artifacts/native-ocserv
-        run: |
-          mkdir -p "${ARTIFACT_DIR}"
-          port=$((40000 + GITHUB_RUN_ID % 10000))
-          sudo --preserve-env=RUNNER_TEMP,ARTIFACT_DIR env \
-            RUN_ID="I13-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-native-ocserv" \
-            OCSERVIA_I13_OCSERV_PORT="${port}" \
-            scripts/i13-native-ocserv-integration.sh
-      - name: Upload native Ocserv diagnostics
-        if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
-        with:
-          name: native-ocserv-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/artifacts/native-ocserv
-          if-no-files-found: warn
-          retention-days: 14
-
-  p1-smoke:
-    name: P1 Smoke
-    runs-on: ubuntu-24.04
-    timeout-minutes: 25
+    timeout-minutes: 35
     env:
       AGENT_COUNT: 24
-      COMPOSE_PROJECT: ocservia-p1-smoke-${{ github.run_id }}-${{ github.run_attempt }}-p1-smoke
       HEARTBEAT_COUNT: 2
       HEARTBEAT_INTERVAL_MS: 500
       MINIMUM_RESOURCE_SAMPLES: 8
       P1_PROFILE: smoke
       QUEUE_CAPACITY: 256
       REQUEST_CONCURRENCY: 8
-      RUN_ID: p1-smoke-${{ github.run_id }}-${{ github.run_attempt }}-p1-smoke
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
       - name: Runner preflight
         run: scripts/ci-preflight.sh
-      - name: Harness boundary tests
-        run: scripts/test-p1-resilience-capacity.sh
-      - name: Hosted-runner smoke profile
+      - name: Restore verified tools
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: |
+            .cache/downloads
+            .tools
+          key: tooling-v3-web-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'scripts/checksums.txt', 'scripts/bootstrap.sh', 'scripts/env.sh') }}
+      - name: Restore npm download cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: .cache/npm
+          key: npm-v3-web-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'web/package-lock.json') }}
+      - name: Bootstrap and verify pinned tools
+        run: scripts/bootstrap.sh web
+      - name: Web checks
         env:
-          ARTIFACT_DIR: ${{ runner.temp }}/artifacts/p1-smoke
+          ARTIFACT_DIR: ${{ runner.temp }}/artifacts/web-smoke/web-check
+        run: |
+          mkdir -p "${ARTIFACT_DIR}"
+          set -o pipefail
+          scripts/web-check.sh 2>&1 | tee "${ARTIFACT_DIR}/web-check.log"
+      - name: Docker Compose Playwright E2E
+        env:
+          ARTIFACT_DIR: ${{ runner.temp }}/artifacts/web-smoke/browser-e2e
+          COMPOSE_PROJECT: ocservia-e2e-${{ github.run_id }}-${{ github.run_attempt }}-web-smoke
+          RUN_ID: e2e-${{ github.run_id }}-${{ github.run_attempt }}-web-smoke
+        run: scripts/e2e.sh
+      - name: P1 harness boundary tests
+        env:
+          COMPOSE_PROJECT: ocservia-p1-smoke-${{ github.run_id }}-${{ github.run_attempt }}-web-smoke
+          RUN_ID: p1-smoke-${{ github.run_id }}-${{ github.run_attempt }}-web-smoke
+        run: scripts/test-p1-resilience-capacity.sh
+      - name: P1 hosted-runner smoke profile
+        env:
+          ARTIFACT_DIR: ${{ runner.temp }}/artifacts/web-smoke/p1-smoke
+          COMPOSE_PROJECT: ocservia-p1-smoke-${{ github.run_id }}-${{ github.run_attempt }}-web-smoke
+          RUN_ID: p1-smoke-${{ github.run_id }}-${{ github.run_attempt }}-web-smoke
         run: scripts/p1-resilience-capacity.sh
-      - name: Upload P1 smoke evidence
+      - name: Upload Web and Smoke diagnostics
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
-          name: p1-smoke-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/artifacts/p1-smoke
+          name: web-smoke-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/artifacts/web-smoke
           if-no-files-found: warn
           retention-days: 14
 
-  security-licenses:
-    name: Security and Licenses
+  quality-security-native:
+    name: Quality, Security & Native
     runs-on: ubuntu-24.04
-    timeout-minutes: 10
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
@@ -358,73 +192,92 @@ jobs:
           path: |
             .cache/downloads
             .tools
-          key: tooling-v2-security-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'scripts/checksums.txt', 'scripts/bootstrap.sh', 'scripts/env.sh') }}
+          key: tooling-v3-ci-quality-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'scripts/checksums.txt', 'scripts/bootstrap.sh', 'scripts/env.sh') }}
       - name: Restore npm download cache
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: .cache/npm
-          key: npm-v2-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'web/package-lock.json') }}
+          key: npm-v3-ci-quality-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'web/package-lock.json') }}
+      - name: Restore Rust target cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: rust/target
+          key: rust-v3-quality-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'rust/Cargo.lock', 'rust/Cargo.toml', 'rust/rust-toolchain.toml', 'rust/crates/**/Cargo.toml') }}
+      - name: Restore Go module cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: .cache/go-mod
+          key: go-mod-v3-quality-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'go.work', 'go.work.sum', 'control-plane/go.mod', 'control-plane/go.sum', 'scripts/license-check.sh') }}
       - name: Bootstrap and verify pinned tools
-        run: scripts/bootstrap.sh security
-      - name: Security and license checks
+        run: scripts/bootstrap.sh ci-quality
+      - name: Repository policy
         run: |
-          scripts/agent-boundary-check.sh
-          scripts/transport-boundary-check.sh
-          scripts/security-check.sh
-          scripts/license-check.sh
-
-  ci-gate:
-    name: CI Gate
-    if: always()
-    needs:
-      - public-policy
-      - contracts
-      - go
-      - rust
-      - web
-      - native-ocserv
-      - p1-smoke
-      - security-licenses
-    runs-on: ubuntu-24.04
-    timeout-minutes: 5
-    env:
-      PUBLIC_POLICY_RESULT: ${{ needs.public-policy.result }}
-      CONTRACTS_RESULT: ${{ needs.contracts.result }}
-      GO_RESULT: ${{ needs.go.result }}
-      RUST_RESULT: ${{ needs.rust.result }}
-      WEB_RESULT: ${{ needs.web.result }}
-      NATIVE_OCSERV_RESULT: ${{ needs.native-ocserv.result }}
-      P1_SMOKE_RESULT: ${{ needs.p1-smoke.result }}
-      SECURITY_LICENSES_RESULT: ${{ needs.security-licenses.result }}
-    steps:
-      - name: Verify required execution jobs
+          scripts/check-public-repository.sh
+          scripts/test-public-repository-policy.sh
+      - name: Documentation
+        run: scripts/docs-check.sh
+      - name: CI workflow policy tests
+        run: scripts/test-bootstrap-profiles.sh
+      - name: Generate contract outputs
+        run: scripts/generate.sh
+      - name: Lint contract sources
         run: |
-          {
-            echo '## CI Gate'
-            echo
-            echo '| Job | Result |'
-            echo '| --- | --- |'
-            echo "| Public Repository Policy | ${PUBLIC_POLICY_RESULT} |"
-            echo "| Contracts | ${CONTRACTS_RESULT} |"
-            echo "| Go | ${GO_RESULT} |"
-            echo "| Rust | ${RUST_RESULT} |"
-            echo "| Web | ${WEB_RESULT} |"
-            echo "| Native Ocserv | ${NATIVE_OCSERV_RESULT} |"
-            echo "| P1 Smoke | ${P1_SMOKE_RESULT} |"
-            echo "| Security and Licenses | ${SECURITY_LICENSES_RESULT} |"
-          } >>"${GITHUB_STEP_SUMMARY}"
-
-          for result in \
-            "${PUBLIC_POLICY_RESULT}" \
-            "${CONTRACTS_RESULT}" \
-            "${GO_RESULT}" \
-            "${RUST_RESULT}" \
-            "${WEB_RESULT}" \
-            "${NATIVE_OCSERV_RESULT}" \
-            "${P1_SMOKE_RESULT}" \
-            "${SECURITY_LICENSES_RESULT}"; do
-            if [[ "${result}" != success ]]; then
-              echo "CI Gate rejected upstream result: ${result}" >&2
-              exit 1
-            fi
-          done
+          source scripts/env.sh
+          (cd proto && buf format --diff --exit-code && buf lint)
+          (cd web && npx --no-install redocly lint --config ../openapi/.redocly.yaml ../openapi/openapi.yaml)
+      - name: Check contract breaking changes
+        run: scripts/check-breaking.sh
+      - name: Check generated output
+        run: |
+          scripts/generated-clean.sh --skip-generate
+          scripts/test-generated-clean.sh
+      - name: Rust checks
+        env:
+          ARTIFACT_DIR: ${{ runner.temp }}/artifacts/quality/rust
+        run: |
+          mkdir -p "${ARTIFACT_DIR}"
+          set -o pipefail
+          scripts/rust-check.sh 2>&1 | tee "${ARTIFACT_DIR}/rust-check.log"
+      - name: Agent privilege boundary
+        run: scripts/agent-boundary-check.sh
+      - name: Transport boundary
+        run: scripts/transport-boundary-check.sh
+      - name: Secret scan
+        run: scripts/security-check.sh
+      - name: License checks
+        run: scripts/license-check.sh
+      - name: Install ephemeral native fixtures
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes ocserv openconnect ssl-cert
+      - name: Native ocpasswd, OpenSSL, and Ocserv login
+        env:
+          ARTIFACT_DIR: ${{ runner.temp }}/artifacts/quality/native-ocserv
+        run: |
+          mkdir -p "${ARTIFACT_DIR}"
+          port=$((40000 + GITHUB_RUN_ID % 10000))
+          native_target="${RUNNER_TEMP}/ocservia-native-target-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          native_status=0
+          sudo --preserve-env=RUNNER_TEMP,ARTIFACT_DIR env \
+            CARGO_TARGET_DIR="${native_target}" \
+            RUN_ID="I13-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-quality-native" \
+            OCSERVIA_I13_OCSERV_PORT="${port}" \
+            scripts/i13-native-ocserv-integration.sh || native_status=$?
+          sudo rm -rf "${native_target}" || native_status=1
+          exit "${native_status}"
+      - name: Capture contract diagnostics
+        if: always()
+        env:
+          ARTIFACT_DIR: ${{ runner.temp }}/artifacts/quality/contracts
+        run: |
+          mkdir -p "${ARTIFACT_DIR}"
+          git status --short >"${ARTIFACT_DIR}/git-status.txt"
+          git diff --binary >"${ARTIFACT_DIR}/generated-output.diff"
+      - name: Upload Quality, Security, and Native diagnostics
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: quality-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/artifacts/quality
+          if-no-files-found: error
+          retention-days: 14
