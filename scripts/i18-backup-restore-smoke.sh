@@ -57,7 +57,8 @@ docker run -d --name "${source_container}" --network "${network}" \
   "${POSTGRES_IMAGE}" >/dev/null
 source_ready=false
 for _ in $(seq 1 60); do
-  if docker exec -e PGPASSWORD="${password}" "${source_container}" pg_isready -U postgres -d ocservia >/dev/null 2>&1; then
+  if docker logs "${source_container}" 2>&1 | grep -Fq 'PostgreSQL init process complete; ready for start up.' \
+    && docker exec -e PGPASSWORD="${password}" "${source_container}" pg_isready -U postgres -d ocservia >/dev/null 2>&1; then
     source_ready=true
     break
   fi
