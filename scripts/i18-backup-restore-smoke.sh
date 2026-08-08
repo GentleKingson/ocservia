@@ -67,7 +67,7 @@ if [[ "${source_ready}" != true ]]; then
   echo "source PostgreSQL did not become ready" >&2
   exit 1
 fi
-docker exec "${source_container}" sh -c \
+docker exec -u postgres "${source_container}" sh -c \
   "printf '%s\\n' 'host replication postgres all scram-sha-256' >>\"\${PGDATA}/pg_hba.conf\" && pg_ctl reload" \
   >"${ARTIFACT_DIR}/replication-hba.log"
 docker exec -e PGPASSWORD="${password}" "${source_container}" \
