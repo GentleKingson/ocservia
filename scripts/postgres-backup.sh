@@ -69,11 +69,11 @@ run_backup() {
   printf '%s\n' "${timestamp}" >"${latest_tmp}"
   mv -- "${latest_tmp}" "${BACKUP_ROOT}/LATEST"
 
-  mapfile -t backups < <(find "${BACKUP_ROOT}/base" -mindepth 1 -maxdepth 1 -type d -name '20????????T??????Z' -print | sort -r)
+  mapfile -t backups < <(find "${BACKUP_ROOT}/base" -mindepth 1 -maxdepth 1 -type d -name '20??????T??????Z' -print | sort -r)
   if (( ${#backups[@]} > BACKUP_RETENTION_COUNT )); then
     printf '%s\0' "${backups[@]:BACKUP_RETENTION_COUNT}" | xargs -0r rm -rf --
   fi
-  mapfile -t backups < <(find "${BACKUP_ROOT}/base" -mindepth 1 -maxdepth 1 -type d -name '20????????T??????Z' -print | sort)
+  mapfile -t backups < <(find "${BACKUP_ROOT}/base" -mindepth 1 -maxdepth 1 -type d -name '20??????T??????Z' -print | sort)
   oldest_wal="$(sed -n 's/^START WAL LOCATION:.*(file \([0-9A-F]\{24\}\)).*/\1/p' "${backups[0]}/backup_label")"
   if [[ ! "${oldest_wal}" =~ ^[0-9A-F]{24}$ ]]; then
     echo "oldest retained backup has no valid WAL start" >&2
