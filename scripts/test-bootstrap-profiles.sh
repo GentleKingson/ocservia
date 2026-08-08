@@ -33,8 +33,7 @@ execution_profiles = {
   "web-smoke" => "web",
   "quality-security-native" => "ci-quality"
 }
-compatibility_jobs = execution_profiles.keys + ["ci-gate"]
-reject("primary workflow must contain three execution jobs and the compatibility CI Gate") unless jobs.keys.sort == compatibility_jobs.sort
+reject("primary workflow must contain exactly three execution jobs") unless jobs.keys.sort == execution_profiles.keys.sort
 
 legacy_job_ids = %w[public-policy contracts go rust web native-ocserv p1-smoke security-licenses]
 reject("legacy execution job ID remains") unless (jobs.keys & legacy_job_ids).empty?
@@ -160,9 +159,7 @@ execution_profiles.each_key do |job_id|
   reject("#{job_id} upload action must be pinned") unless uploads.first.fetch("uses").match?(/\Aactions\/upload-artifact@[0-9a-f]{40}\z/)
 end
 
-gate = jobs.fetch("ci-gate")
-reject("CI Gate must run regardless of upstream result") unless gate.fetch("if") == "always()"
-reject("CI Gate must depend on exactly the three execution jobs") unless Array(gate.fetch("needs")).sort == execution_profiles.keys.sort
+reject("primary workflow must not contain a CI Gate job") if jobs.key?("ci-gate")
 
 web = jobs.fetch("web-smoke")
 web_env = web.fetch("env")

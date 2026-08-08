@@ -7,10 +7,6 @@ requests and pushes to `main` run the workflow, and maintainers can also start
 it manually. Local commands reproduce behavior but never replace required
 checks.
 
-During the required-check migration, a temporary `CI Gate` compatibility job
-depends on the three execution jobs. It is removed after the branch ruleset
-requires the three execution checks directly.
-
 ## Coverage
 
 | Job | Commands and level | Bootstrap profile | Trigger | Hard timeout |
@@ -104,10 +100,8 @@ up-to-date checking:
 - `Quality, Security & Native`
 
 GitHub's required-check AND semantics replace the old single-runner gate. Never
-remove the compatibility `CI Gate` from the workflow while a ruleset still
-requires it. Confirm the three new checks succeed first, update only the
-ruleset's required-status-check set, read it back, and then remove the
-compatibility job.
+replace these check names in the workflow before the branch ruleset is safely
+migrated to the new successful checks.
 
 ## Deferred native validation
 

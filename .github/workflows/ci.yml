@@ -276,39 +276,3 @@ jobs:
           path: ${{ runner.temp }}/artifacts/quality
           if-no-files-found: error
           retention-days: 14
-
-  ci-gate:
-    name: CI Gate
-    if: always()
-    needs:
-      - backend-integration
-      - web-smoke
-      - quality-security-native
-    runs-on: ubuntu-24.04
-    timeout-minutes: 5
-    env:
-      BACKEND_RESULT: ${{ needs.backend-integration.result }}
-      WEB_SMOKE_RESULT: ${{ needs.web-smoke.result }}
-      QUALITY_RESULT: ${{ needs.quality-security-native.result }}
-    steps:
-      - name: Verify required execution jobs
-        run: |
-          {
-            echo '## CI Gate'
-            echo
-            echo '| Job | Result |'
-            echo '| --- | --- |'
-            echo "| Backend Integration | ${BACKEND_RESULT} |"
-            echo "| Web & Smoke | ${WEB_SMOKE_RESULT} |"
-            echo "| Quality, Security & Native | ${QUALITY_RESULT} |"
-          } >>"${GITHUB_STEP_SUMMARY}"
-
-          for result in \
-            "${BACKEND_RESULT}" \
-            "${WEB_SMOKE_RESULT}" \
-            "${QUALITY_RESULT}"; do
-            if [[ "${result}" != success ]]; then
-              echo "CI Gate rejected upstream result: ${result}" >&2
-              exit 1
-            fi
-          done
