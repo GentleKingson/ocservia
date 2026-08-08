@@ -87,6 +87,7 @@ docker run --name "${backup_container}" --network "${network}" \
 
 docker rm "${backup_container}" >/dev/null
 touch "${work}/backup/wal/000000010000000000000000"
+rm "${work}/backup/.backup.lock"
 mkdir "${work}/backup/.backup.lock"
 sleep 1
 docker run --name "${backup_container}" --network "${network}" \
