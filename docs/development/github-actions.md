@@ -33,7 +33,9 @@ Native Ocserv is deliberately last in Quality, Security & Native. Its ephemeral
 package installation and root fixture cannot affect policy, contract, Rust,
 security, or license validation earlier on the VM. The fixture still captures
 diagnostics before performing scoped cleanup and fails if cleanup or artifact
-secret scanning fails.
+secret scanning fails. Its root-side Cargo build uses a unique target below
+`RUNNER_TEMP`, which is removed after the fixture, so it cannot change the
+user-owned `rust/target` cache.
 
 P1 Full Validation remains a separate `workflow_dispatch` workflow because the
 500-Agent profile is capacity evidence, not ordinary pull-request feedback. The

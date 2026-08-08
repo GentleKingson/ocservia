@@ -187,6 +187,7 @@ quality_steps = Array(jobs.fetch("quality-security-native").fetch("steps"))
 step_names = quality_steps.map { |step| step["name"] }
 native_index = step_names.index("Install ephemeral native fixtures")
 upload_index = step_names.index("Upload Quality, Security, and Native diagnostics")
+native_run = quality_steps.find { |step| step["name"] == "Native ocpasswd, OpenSSL, and Ocserv login" }.fetch("run")
 required_before_native = [
   "Repository policy",
   "Documentation",
@@ -207,6 +208,8 @@ required_before_native.each do |name|
   reject("#{name} must execute before Native Ocserv") unless index && index < native_index
 end
 reject("Native Ocserv must execute before artifact upload") unless native_index < upload_index
+reject("Native Ocserv must use an isolated Cargo target") unless native_run.include?("CARGO_TARGET_DIR=\"${native_target}\"")
+reject("Native Ocserv must remove its isolated Cargo target") unless native_run.include?("sudo rm -rf \"${native_target}\"")
 
 trigger = p1_workflow.fetch(true)
 reject("P1 Full must remain workflow_dispatch-only") unless trigger.keys == ["workflow_dispatch"]

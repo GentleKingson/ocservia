@@ -52,7 +52,7 @@ jobs:
       - name: PostgreSQL 17 and 18 integration
         env:
           ARTIFACT_DIR: ${{ runner.temp }}/artifacts/backend/database-integration
-          RUN_ID: database-${{ github.run_id }}-${{ github.run_attempt }}-backend
+          RUN_ID: database-${{ github.run_id }}-${{ github.run_attempt }}-be
         run: scripts/database-integration.sh
       - name: I14 quota, expiry, batch, and backport contracts
         env:
@@ -85,7 +85,7 @@ jobs:
       - name: I18 production topology and dedicated relay recovery
         env:
           ARTIFACT_DIR: ${{ runner.temp }}/artifacts/backend/i18
-          RUN_ID: production-${{ github.run_id }}-${{ github.run_attempt }}-backend
+          RUN_ID: production-${{ github.run_id }}-${{ github.run_attempt }}-be
         run: scripts/i18-production-relays.sh
       - name: I19 five-minute Agent offline recovery
         env:
@@ -94,7 +94,7 @@ jobs:
       - name: Go, PostgreSQL, UDS, and Rust stub local slice
         env:
           ARTIFACT_DIR: ${{ runner.temp }}/artifacts/backend/local-slice
-          RUN_ID: local-slice-${{ github.run_id }}-${{ github.run_attempt }}-backend
+          RUN_ID: local-slice-${{ github.run_id }}-${{ github.run_attempt }}-be
         run: scripts/local-slice-integration.sh
       - name: Upload Backend Integration diagnostics
         if: always()
@@ -251,10 +251,15 @@ jobs:
         run: |
           mkdir -p "${ARTIFACT_DIR}"
           port=$((40000 + GITHUB_RUN_ID % 10000))
+          native_target="${RUNNER_TEMP}/ocservia-native-target-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          native_status=0
           sudo --preserve-env=RUNNER_TEMP,ARTIFACT_DIR env \
+            CARGO_TARGET_DIR="${native_target}" \
             RUN_ID="I13-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-quality-native" \
             OCSERVIA_I13_OCSERV_PORT="${port}" \
-            scripts/i13-native-ocserv-integration.sh
+            scripts/i13-native-ocserv-integration.sh || native_status=$?
+          sudo rm -rf "${native_target}" || native_status=1
+          exit "${native_status}"
       - name: Capture contract diagnostics
         if: always()
         env:
