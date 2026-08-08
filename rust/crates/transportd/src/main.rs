@@ -10,6 +10,7 @@ use iroh::{EndpointId, RelayMap, RelayUrl, SecretKey};
 use ocservia_contracts::generated::ocserv::platform::transport::v1::transport_service_server::TransportServiceServer;
 use ocservia_transportd::{
     IdentityPolicy, IrohTransportService, TrustAuthority, build_router, build_router_with_trust,
+    spawn_dedicated_relay_failover,
 };
 use tokio::net::UnixListener;
 use tokio_stream::wrappers::UnixListenerStream;
@@ -37,6 +38,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         )
         .init();
     let config = parse_args()?;
+    let relay_failover = match &config.relay_mode {
+        RelayMode::Custom(relays) => Some(relays.clone()),
+        _ => None,
+    };
     let key = load_key(&config.key_file)?;
     let (listener, socket_identity) = bind_socket(&config.socket)?;
     let policy = IdentityPolicy::new(config.approved, config.revoked);
@@ -68,6 +73,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         socket = %config.socket.display(),
         "transportd serving"
     );
+    if let Some(relays) = relay_failover {
+        spawn_dedicated_relay_failover(router.endpoint().clone(), relays);
+    }
 
     let (health_reporter, health_service) = tonic_health::server::health_reporter();
     health_reporter
@@ -223,9 +231,12 @@ fn read_relay_token(path: &Path) -> Result<String, io::Error> {
         .read(true)
         .custom_flags(libc_o_nofollow())
         .open(path)?;
-    if !file.metadata()?.file_type().is_file() {
-        return Err(invalid("relay token path must be a regular file"));
-    }
+    validate_key_file(&file, rustix::process::geteuid().as_raw()).map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "relay token must be owned by the process user with mode 0600 or stricter",
+        )
+    })?;
     let mut raw = Vec::with_capacity(129);
     std::io::Read::read_to_end(&mut std::io::Read::take(&mut file, 513), &mut raw)?;
     let raw = Zeroizing::new(raw);
@@ -478,6 +489,8 @@ mod tests {
         std::fs::create_dir(&directory).expect("create test directory");
         let token = directory.join("relay.token");
         std::fs::write(&token, "0123456789abcdef0123456789abcdef\n").expect("write token");
+        std::fs::set_permissions(&token, std::fs::Permissions::from_mode(0o600))
+            .expect("protect token");
 
         let mode = build_relay_mode(
             "custom",
@@ -498,6 +511,19 @@ mod tests {
                 "custom",
                 vec!["https://relay-a.example.test".into()],
                 Some(&token)
+            )
+            .is_err()
+        );
+        std::fs::set_permissions(&token, std::fs::Permissions::from_mode(0o644))
+            .expect("make token insecure");
+        assert!(
+            build_relay_mode(
+                "custom",
+                vec![
+                    "https://relay-a.example.test".into(),
+                    "https://relay-b.example.test".into(),
+                ],
+                Some(&token),
             )
             .is_err()
         );

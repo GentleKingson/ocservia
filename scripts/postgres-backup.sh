@@ -30,8 +30,13 @@ done
 
 run_backup() {
   local lock="${BACKUP_ROOT}/.backup.lock"
-  local timestamp staging final latest_tmp
-  if ! mkdir "${lock}" 2>/dev/null; then
+  local timestamp staging final latest_tmp oldest_wal
+  if [[ -d "${lock}" ]] && ! rmdir "${lock}" 2>/dev/null; then
+    echo "legacy backup lock directory is not empty" >&2
+    return 1
+  fi
+  exec 9>"${lock}"
+  if ! flock -n 9; then
     echo "another backup is active" >&2
     return 1
   fi
@@ -42,7 +47,8 @@ run_backup() {
   cleanup_backup() {
     rm -rf -- "${staging}"
     rm -f -- "${latest_tmp}"
-    rmdir "${lock}" 2>/dev/null || true
+    flock -u 9 || true
+    exec 9>&-
   }
   trap cleanup_backup RETURN
 
@@ -67,6 +73,13 @@ run_backup() {
   if (( ${#backups[@]} > BACKUP_RETENTION_COUNT )); then
     printf '%s\0' "${backups[@]:BACKUP_RETENTION_COUNT}" | xargs -0r rm -rf --
   fi
+  mapfile -t backups < <(find "${BACKUP_ROOT}/base" -mindepth 1 -maxdepth 1 -type d -name '20????????T??????Z' -print | sort)
+  oldest_wal="$(sed -n 's/^START WAL LOCATION:.*(file \([0-9A-F]\{24\}\)).*/\1/p' "${backups[0]}/backup_label")"
+  if [[ ! "${oldest_wal}" =~ ^[0-9A-F]{24}$ ]]; then
+    echo "oldest retained backup has no valid WAL start" >&2
+    return 1
+  fi
+  pg_archivecleanup "${BACKUP_ROOT}/wal" "${oldest_wal}"
   echo "backup completed id=${timestamp}"
 }
 

@@ -17,10 +17,22 @@ trap cleanup EXIT INT TERM
 (cd "${ROOT}/rust" && cargo build --locked --release --package ocservia-agent --package ocservia-privd)
 openssl genpkey -algorithm ED25519 -out "${work}/signing.key" >/dev/null 2>&1
 chmod 0600 "${work}/signing.key"
+openssl pkey -in "${work}/signing.key" -pubout -out "${work}/trusted.pub.pem" >/dev/null 2>&1
+openssl pkey -pubin -in "${work}/trusted.pub.pem" -outform DER -out "${work}/trusted.der"
+trusted_fingerprint="$(sha256sum "${work}/trusted.der" | awk '{print $1}')"
 archive="$(OUTPUT_DIR="${ARTIFACT_DIR}" AGENT_SIGNING_KEY="${work}/signing.key" VERSION=1.0.0 \
   SOURCE_DATE_EPOCH=1786147200 "${ROOT}/scripts/package-agent.sh")"
-"${ROOT}/scripts/verify-agent-package.sh" "${archive}" "${archive}.sha256" \
-  "${archive}.sha256.sig" "${archive}.sha256.pub.pem" >"${ARTIFACT_DIR}/verification.log"
+AGENT_TRUSTED_KEY_SHA256="${trusted_fingerprint}" "${ROOT}/scripts/verify-agent-package.sh" "${archive}" "${archive}.sha256" \
+  "${archive}.sha256.sig" "${work}/trusted.pub.pem" >"${ARTIFACT_DIR}/verification.log"
+
+openssl genpkey -algorithm ED25519 -out "${work}/substitute.key" >/dev/null 2>&1
+openssl pkey -in "${work}/substitute.key" -pubout -out "${work}/substitute.pub.pem" >/dev/null 2>&1
+openssl pkeyutl -sign -rawin -inkey "${work}/substitute.key" -in "${archive}.sha256" -out "${work}/substitute.sig"
+if AGENT_TRUSTED_KEY_SHA256="${trusted_fingerprint}" "${ROOT}/scripts/verify-agent-package.sh" \
+  "${archive}" "${archive}.sha256" "${work}/substitute.sig" "${work}/substitute.pub.pem" >/dev/null 2>&1; then
+  echo "substituted package signing key was trusted" >&2
+  exit 1
+fi
 
 tar -xzf "${archive}" -C "${work}"
 package_root="${work}/ocservia-agent-1.0.0"

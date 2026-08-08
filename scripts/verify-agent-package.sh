@@ -5,6 +5,7 @@ archive="${1:?archive required}"
 checksum="${2:?checksum required}"
 signature="${3:?signature required}"
 public_key="${4:?public key required}"
+trusted_fingerprint="${AGENT_TRUSTED_KEY_SHA256:?AGENT_TRUSTED_KEY_SHA256 is required}"
 
 for file in "${archive}" "${checksum}" "${signature}" "${public_key}"; do
   if [[ ! -f "${file}" || -L "${file}" ]]; then
@@ -12,6 +13,18 @@ for file in "${archive}" "${checksum}" "${signature}" "${public_key}"; do
     exit 1
   fi
 done
+if [[ ! "${trusted_fingerprint}" =~ ^[0-9a-f]{64}$ ]]; then
+  echo "trusted signing-key fingerprint must be 64 lowercase hexadecimal characters" >&2
+  exit 2
+fi
+public_der="$(mktemp "${TMPDIR:-/tmp}/ocservia-agent-public.XXXXXX")"
+trap 'rm -f -- "${public_der}"' EXIT INT TERM
+openssl pkey -pubin -in "${public_key}" -outform DER -out "${public_der}"
+actual_fingerprint="$(sha256sum "${public_der}" | awk '{print $1}')"
+if [[ "${actual_fingerprint}" != "${trusted_fingerprint}" ]]; then
+  echo "package signing key is not the trusted release key" >&2
+  exit 1
+fi
 expected_name="$(basename "${archive}")"
 if [[ "$(awk 'NR == 1 { print $2 }' "${checksum}")" != "${expected_name}" ]] || [[ "$(wc -l <"${checksum}")" -ne 1 ]]; then
   echo "checksum manifest must name exactly the supplied archive" >&2

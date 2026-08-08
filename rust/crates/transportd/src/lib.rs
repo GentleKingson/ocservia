@@ -13,7 +13,7 @@ use iroh::endpoint::{
     VarInt, presets,
 };
 use iroh::protocol::{AcceptError, ProtocolHandler, Router};
-use iroh::{Endpoint, EndpointId, SecretKey};
+use iroh::{Endpoint, EndpointId, RelayMap, SecretKey, Watcher as _};
 use ocservia_contracts::decode_strict_command_envelope;
 use ocservia_contracts::generated::ocserv::platform::agent::v1::{
     AgentEvent, AgentEventType, ArtifactChunk, ArtifactFetchRequest, CommandEnvelope,
@@ -38,6 +38,35 @@ use uuid::Uuid;
 pub const ENROLL_ALPN: &[u8] = b"ocserv-platform/enroll/1";
 /// ALPN for approved agent sessions.
 pub const AGENT_ALPN: &[u8] = b"ocserv-platform/agent/1";
+
+/// Temporarily removes a failed home relay so Iroh selects another member of
+/// the configured dedicated set instead of waiting for a periodic net report.
+pub fn spawn_dedicated_relay_failover(endpoint: Endpoint, configured: RelayMap) {
+    if configured.len() < 2 {
+        return;
+    }
+    tokio::spawn(async move {
+        let mut watcher = endpoint.home_relay_status();
+        loop {
+            let failed = watcher
+                .get()
+                .into_iter()
+                .find(|status| !status.is_connected() && status.last_error().is_some())
+                .map(|status| status.url().clone());
+            if let Some(failed) = failed
+                && let Some(config) = configured.get(&failed)
+                && endpoint.remove_relay(&failed).await.is_some()
+            {
+                tracing::warn!(relay = %failed, "temporarily removed failed dedicated relay");
+                tokio::time::sleep(Duration::from_mins(1)).await;
+                let _ = endpoint.insert_relay(failed, config).await;
+            }
+            if watcher.updated().await.is_err() {
+                return;
+            }
+        }
+    });
+}
 
 const PROTOCOL_MAJOR: u32 = 1;
 const PROTOCOL_MINOR: u32 = 0;
@@ -2533,12 +2562,57 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::too_many_lines)]
     async fn dedicated_relay_failure_moves_traffic_to_second_relay() {
         const TEST_ALPN: &[u8] = b"ocservia/relay-failover-test/1";
-        let (relay_map, relay_url, relay_one) = iroh::test_utils::run_relay_server()
+        const RELAY_TOKEN: &str = "i18-dedicated-relay-token";
+
+        #[derive(Debug)]
+        struct TokenAccess;
+
+        impl iroh_relay::server::AccessControl for TokenAccess {
+            async fn on_connect(
+                &self,
+                request: &iroh_relay::server::ClientRequest,
+            ) -> iroh_relay::server::Access {
+                if request.auth_token().as_deref() == Some(RELAY_TOKEN) {
+                    iroh_relay::server::Access::Allow
+                } else {
+                    iroh_relay::server::Access::Deny { reason: None }
+                }
+            }
+        }
+
+        let access = Arc::new(TokenAccess);
+        let (relay_map, relay_url, relay_one) =
+            iroh::test_utils::run_relay_server_with_access(false, access.clone())
+                .await
+                .expect("start first dedicated relay");
+        let (second_map, second_url, relay_two) =
+            iroh::test_utils::run_relay_server_with_access(false, access)
+                .await
+                .expect("start second dedicated relay");
+        relay_map.extend(&second_map);
+        assert_eq!(relay_map.len(), 2);
+        let unauthenticated = Endpoint::builder(presets::Minimal)
+            .relay_mode(RelayMode::Custom(relay_map.clone()))
+            .ca_tls_config(CaTlsConfig::insecure_skip_verify())
+            .clear_address_lookup()
+            .clear_ip_transports()
+            .bind()
             .await
-            .expect("start first dedicated relay");
+            .expect("build unauthenticated relay endpoint");
+        assert!(
+            tokio::time::timeout(Duration::from_secs(2), unauthenticated.online())
+                .await
+                .is_err(),
+            "dedicated relays accepted a client without the configured token"
+        );
+        unauthenticated.close().await;
+        let relay_map = relay_map.with_auth_token(RELAY_TOKEN);
+        let client_key = SecretKey::generate();
         let client = Endpoint::builder(presets::Minimal)
+            .secret_key(client_key.clone())
             .relay_mode(RelayMode::Custom(relay_map.clone()))
             .ca_tls_config(CaTlsConfig::insecure_skip_verify())
             .clear_address_lookup()
@@ -2547,12 +2621,13 @@ mod tests {
             .await
             .expect("build relay-only client");
         let server = Endpoint::builder(presets::Minimal)
-            .relay_mode(RelayMode::Custom(relay_map))
+            .relay_mode(RelayMode::Custom(relay_map.clone()))
             .ca_tls_config(CaTlsConfig::insecure_skip_verify())
             .alpns(vec![TEST_ALPN.to_vec()])
             .bind()
             .await
             .expect("build relay-only server");
+        spawn_dedicated_relay_failover(server.clone(), relay_map.clone());
 
         let echo = tokio::spawn({
             let server = server.clone();
@@ -2575,6 +2650,11 @@ mod tests {
 
         server.online().await;
         let mut address = server.addr();
+        let active_url = address
+            .relay_urls()
+            .next()
+            .expect("server selected a dedicated relay")
+            .clone();
         address
             .addrs
             .retain(|address| !matches!(address, TransportAddr::Ip(_)));
@@ -2592,38 +2672,68 @@ mod tests {
             b"relay-one"
         );
         connection.close(0_u32.into(), b"first relay complete");
+        connection.closed().await;
+        client.close().await;
 
-        let (new_map, new_url, relay_two) = iroh::test_utils::run_relay_server()
-            .await
-            .expect("start second dedicated relay");
-        let new_config = new_map.get(&new_url).expect("second relay config").clone();
         let mut addresses = server.watch_addr().stream();
-        let _ = server
-            .insert_relay(new_url.clone(), new_config.clone())
-            .await;
-        let _ = client.insert_relay(new_url.clone(), new_config).await;
-        let _ = server.remove_relay(&relay_url).await;
-        let _ = client.remove_relay(&relay_url).await;
-        drop(relay_one);
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        let mut relay_status = server.home_relay_status();
+        let (failed_relay, surviving_relay, surviving_url) = if active_url == relay_url {
+            (relay_one, relay_two, second_url)
+        } else {
+            (relay_two, relay_one, relay_url)
+        };
+        failed_relay
+            .shutdown()
+            .await
+            .expect("stop selected dedicated relay");
 
-        let mut address = tokio::time::timeout(Duration::from_secs(10), async {
+        let mut address = tokio::time::timeout(Duration::from_secs(20), async {
             loop {
                 let address = addresses.next().await.expect("address update");
-                if address.relay_urls().any(|url| url == &new_url) {
+                if address.relay_urls().any(|url| url == &surviving_url) {
                     break address;
                 }
             }
         })
         .await
         .expect("publish second relay address");
+        tokio::time::timeout(Duration::from_secs(20), async {
+            loop {
+                if relay_status
+                    .get()
+                    .iter()
+                    .any(|status| status.url() == &surviving_url && status.is_connected())
+                {
+                    break;
+                }
+                relay_status.updated().await.expect("relay status update");
+            }
+        })
+        .await
+        .expect("connect server to surviving relay");
         address
             .addrs
             .retain(|address| !matches!(address, TransportAddr::Ip(_)));
-        let connection = client
-            .connect(address, TEST_ALPN)
+        let replacement = Endpoint::builder(presets::Minimal)
+            .secret_key(client_key)
+            .relay_mode(RelayMode::Custom(relay_map.clone()))
+            .ca_tls_config(CaTlsConfig::insecure_skip_verify())
+            .clear_address_lookup()
+            .clear_ip_transports()
+            .bind()
             .await
-            .expect("connect through second relay");
+            .expect("rebuild relay-only client after outage");
+        spawn_dedicated_relay_failover(replacement.clone(), relay_map);
+        tokio::time::timeout(Duration::from_secs(20), replacement.online())
+            .await
+            .expect("replacement client selected surviving relay");
+        let connection = tokio::time::timeout(
+            Duration::from_secs(20),
+            replacement.connect(address, TEST_ALPN),
+        )
+        .await
+        .expect("second relay connection completed")
+        .expect("connect through second relay");
         let (mut send, mut recv) = connection.open_bi().await.expect("open second stream");
         send.write_all(b"relay-two")
             .await
@@ -2635,10 +2745,16 @@ mod tests {
         );
         connection.close(0_u32.into(), b"second relay complete");
 
-        echo.await.expect("echo task");
-        client.close().await;
+        tokio::time::timeout(Duration::from_secs(5), echo)
+            .await
+            .expect("echo task completed")
+            .expect("echo task");
+        replacement.close().await;
         server.close().await;
-        relay_two.shutdown().await.expect("stop second relay");
+        surviving_relay
+            .shutdown()
+            .await
+            .expect("stop surviving relay");
     }
 
     #[tokio::test]

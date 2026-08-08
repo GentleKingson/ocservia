@@ -7,6 +7,10 @@ x-service-defaults: &service-defaults
   security_opt:
     - no-new-privileges:true
   init: true
+  ulimits:
+    nofile:
+      soft: 1024
+      hard: 4096
 
 services:
   gateway:
@@ -136,8 +140,6 @@ services:
     depends_on:
       migrate:
         condition: service_completed_successfully
-      transportd:
-        condition: service_healthy
       otel-collector:
         condition: service_started
     healthcheck:
@@ -171,8 +173,16 @@ services:
       - --relay-token-file
       - /run/secrets/relay_access_token
     secrets:
-      - relay_access_token
-      - controller_iroh_key
+      - source: relay_access_token
+        target: relay_access_token
+        uid: "65532"
+        gid: "65532"
+        mode: 0400
+      - source: controller_iroh_key
+        target: controller_iroh_key
+        uid: "65532"
+        gid: "65532"
+        mode: 0400
     volumes:
       - transport-runtime:/run/ocserv-platform
       - trust-runtime:/run/ocserv-trust
@@ -221,7 +231,7 @@ services:
       PGPORT: "5432"
       PGDATABASE: ocservia
       PGUSER: ocservia_backup
-      PGPASSFILE: /run/secrets/postgres_pgpass
+      PGPASS_SOURCE: /run/secrets/postgres_pgpass
       BACKUP_ROOT: /var/lib/ocservia-backup
       BACKUP_INTERVAL_SECONDS: ${OCSERV_BACKUP_INTERVAL_SECONDS:-900}
       BACKUP_RETENTION_COUNT: ${OCSERV_BACKUP_RETENTION_COUNT:-8}
@@ -235,6 +245,11 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "find /var/lib/ocservia-backup/LATEST -mmin -31 -type f | grep -q ."]
+      interval: 5m
+      timeout: 5s
+      retries: 2
     deploy:
       resources:
         limits:

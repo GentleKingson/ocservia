@@ -9,11 +9,19 @@ services:
     security_opt:
       - no-new-privileges:true
     init: true
+    ulimits:
+      nofile:
+        soft: 1024
+        hard: 4096
     command: ["--config-path", "/etc/iroh-relay/relay.toml"]
     environment:
       IROH_RELAY_ACCESS_TOKEN_FILE: /run/secrets/relay_access_token
     secrets:
-      - relay_access_token
+      - source: relay_access_token
+        target: relay_access_token
+        uid: "65532"
+        gid: "65532"
+        mode: 0400
       - relay_tls_certificate
       - relay_tls_private_key
     volumes:

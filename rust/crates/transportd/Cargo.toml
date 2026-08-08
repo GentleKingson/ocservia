@@ -27,6 +27,7 @@ hyper-util.workspace = true
 
 [dev-dependencies]
 iroh = { workspace = true, features = ["test-utils"] }
+iroh-relay.workspace = true
 
 [lints]
 workspace = true

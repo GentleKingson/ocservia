@@ -16,5 +16,6 @@ WHERE NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'ocservia_app') \gexec
 SELECT format('CREATE ROLE ocservia_backup LOGIN REPLICATION PASSWORD %L', :'backup_password')
 WHERE NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'ocservia_backup') \gexec
 SQL
+printf '%s\n' 'host replication ocservia_backup all scram-sha-256' >>"${PGDATA}/pg_hba.conf"
 unset password
 unset backup_password

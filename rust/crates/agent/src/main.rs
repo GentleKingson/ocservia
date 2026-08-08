@@ -1,12 +1,12 @@
 use std::collections::HashSet;
 use std::env;
 use std::io;
-use std::os::unix::fs::OpenOptionsExt;
+use std::os::unix::fs::{MetadataExt as _, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
 use iroh::endpoint::{QuicTransportConfig, RelayMode, VarInt, presets};
-use iroh::{Endpoint, EndpointAddr, EndpointId, RelayMap, RelayUrl};
+use iroh::{Endpoint, EndpointAddr, EndpointId, RelayMap, RelayUrl, Watcher as _};
 use ocservia_agent::{
     CommandContext, CommandError, CommandExecutor, ExternalEffectObservation, ExternalPreparation,
     MAX_COMMAND_BYTES, MAX_WRITE_QUEUE, PrivdClient,
@@ -80,12 +80,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // The CLI receives the controller's stable endpoint ID, so the production
     // endpoint must retain N0 address discovery instead of requiring an
     // out-of-band direct or relay address.
-    let endpoint = Endpoint::builder(presets::N0)
-        .secret_key(identity.secret_key().clone())
-        .relay_mode(config.relay_mode.clone())
-        .transport_config(transport)
-        .bind()
-        .await?;
     let boot_id = ocservia_agent::read_boot_id().await?;
     let os_release = ocservia_agent::read_os_release().await?;
     let agent_instance_id = Uuid::now_v7();
@@ -93,6 +87,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let mut attempt = 0_u32;
         let backoff = ocservia_agent::Backoff::default();
         loop {
+            let endpoint = match Endpoint::builder(presets::N0)
+                .secret_key(identity.secret_key().clone())
+                .relay_mode(config.relay_mode.clone())
+                .transport_config(transport.clone())
+                .bind()
+                .await
+            {
+                Ok(endpoint) => endpoint,
+                Err(error) => {
+                    tracing::warn!(error = %error, attempt, "agent endpoint creation failed");
+                    attempt = attempt.saturating_add(1);
+                    let delay = backoff.delay(attempt, &mut rand::rng());
+                    tokio::time::sleep(delay).await;
+                    continue;
+                }
+            };
+            spawn_dedicated_relay_failover(&endpoint, &config.relay_mode);
             let mut session = SessionContext {
                 node_id,
                 endpoint_id: identity.endpoint_id(),
@@ -111,6 +122,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                     attempt = attempt.saturating_add(1);
                 }
             }
+            endpoint.close().await;
             let delay = backoff.delay(attempt, &mut rand::rng());
             tokio::time::sleep(delay).await;
         }
@@ -119,8 +131,39 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         () = run => {}
         () = shutdown_signal() => tracing::info!("agent shutdown requested"),
     }
-    endpoint.close().await;
     Ok(())
+}
+
+fn spawn_dedicated_relay_failover(endpoint: &Endpoint, mode: &RelayMode) {
+    let RelayMode::Custom(configured) = mode else {
+        return;
+    };
+    if configured.len() < 2 {
+        return;
+    }
+    let endpoint = endpoint.clone();
+    let configured = configured.clone();
+    tokio::spawn(async move {
+        let mut watcher = endpoint.home_relay_status();
+        loop {
+            let failed = watcher
+                .get()
+                .into_iter()
+                .find(|status| !status.is_connected() && status.last_error().is_some())
+                .map(|status| status.url().clone());
+            if let Some(failed) = failed
+                && let Some(config) = configured.get(&failed)
+                && endpoint.remove_relay(&failed).await.is_some()
+            {
+                tracing::warn!(relay = %failed, "temporarily removed failed dedicated relay");
+                tokio::time::sleep(Duration::from_mins(1)).await;
+                let _ = endpoint.insert_relay(failed, config).await;
+            }
+            if watcher.updated().await.is_err() {
+                return;
+            }
+        }
+    });
 }
 
 struct SessionContext<'a> {
@@ -1250,13 +1293,27 @@ fn build_relay_mode(
     }
 }
 
+#[allow(clippy::verbose_bit_mask)]
 fn read_relay_token(path: &Path) -> Result<String, io::Error> {
     let mut file = std::fs::OpenOptions::new()
         .read(true)
         .custom_flags(libc_o_nofollow())
         .open(path)?;
-    if !file.metadata()?.file_type().is_file() {
+    let metadata = file.metadata()?;
+    if !metadata.file_type().is_file() {
         return Err(invalid("relay token path must be a regular file"));
+    }
+    let mode = metadata.mode();
+    let owner_only = metadata.uid() == rustix::process::geteuid().as_raw() && mode & 0o077 == 0;
+    let protected_group = metadata.uid() == 0
+        && metadata.gid() == rustix::process::getegid().as_raw()
+        && mode & 0o027 == 0
+        && mode & 0o040 != 0;
+    if !owner_only && !protected_group {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "relay token must be process-owned mode 0600 or root:agent mode 0640",
+        ));
     }
     let mut raw = Vec::with_capacity(129);
     std::io::Read::read_to_end(&mut std::io::Read::take(&mut file, 513), &mut raw)?;
@@ -1300,6 +1357,7 @@ mod tests {
     use ocservia_contracts::generated::ocserv::platform::agent::v1::{
         ConfigApply, ConfigPlan, UserPasswordRotate,
     };
+    use std::os::unix::fs::PermissionsExt as _;
 
     #[test]
     fn production_relay_selection_is_closed_and_redundant() {
@@ -1308,6 +1366,8 @@ mod tests {
         std::fs::create_dir(&directory).expect("create test directory");
         let token = directory.join("relay.token");
         std::fs::write(&token, "0123456789abcdef0123456789abcdef").expect("write token");
+        std::fs::set_permissions(&token, std::fs::Permissions::from_mode(0o600))
+            .expect("protect token");
 
         let mode = build_relay_mode(
             "custom",
@@ -1325,6 +1385,19 @@ mod tests {
                 "custom",
                 vec!["https://relay-a.example.test".into()],
                 Some(&token)
+            )
+            .is_err()
+        );
+        std::fs::set_permissions(&token, std::fs::Permissions::from_mode(0o644))
+            .expect("make token insecure");
+        assert!(
+            build_relay_mode(
+                "custom",
+                vec![
+                    "https://relay-a.example.test".into(),
+                    "https://relay-b.example.test".into(),
+                ],
+                Some(&token),
             )
             .is_err()
         );
