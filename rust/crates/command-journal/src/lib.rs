@@ -10,6 +10,9 @@ use rusqlite::{Connection, OpenFlags, TransactionBehavior};
 
 const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// Maximum time that telemetry remains buffered while an Agent is offline.
+pub const OFFLINE_RECOVERY_RETENTION_SECONDS: u64 = 300;
+
 /// SQLite-backed Agent local state.
 #[derive(Debug)]
 pub struct Journal {
@@ -685,19 +688,7 @@ impl Journal {
             return Err(rusqlite::Error::InvalidQuery);
         }
         let transaction = self.connection.transaction()?;
-        let mut expired = transaction.prepare(
-            "SELECT priority, count(*) FROM telemetry_buffer WHERE expires_at <= ?1 GROUP BY priority",
-        )?;
-        let expired_counts = expired
-            .query_map([now], |row| {
-                Ok((row.get::<_, u8>(0)?, row.get::<_, u64>(1)?))
-            })?
-            .collect::<Result<Vec<_>, _>>()?;
-        drop(expired);
-        transaction.execute("DELETE FROM telemetry_buffer WHERE expires_at <= ?1", [now])?;
-        for (expired_priority, count) in expired_counts {
-            increment_drop(&transaction, expired_priority, count)?;
-        }
+        prune_expired_telemetry(&transaction, now)?;
         transaction.execute(
             "INSERT INTO telemetry_buffer (batch_id,priority,observed_at,expires_at,payload) VALUES (?1,?2,?3,?4,?5) ON CONFLICT(batch_id) DO NOTHING",
             rusqlite::params![batch_id.as_slice(), priority, observed_at, expires_at, payload],
@@ -727,28 +718,35 @@ impl Journal {
         Ok(retained)
     }
 
-    /// Returns buffered payloads in delivery priority and observation order.
+    /// Prunes records past their stored expiry or maximum offline recovery age,
+    /// then returns eligible payloads in delivery priority and observation order.
     ///
     /// # Errors
     ///
     /// Returns a query error.
     pub fn telemetry_pending(
-        &self,
+        &mut self,
         limit: usize,
+        now: i64,
     ) -> Result<Vec<PendingTelemetry>, rusqlite::Error> {
         if limit == 0 || limit > 256 {
             return Err(rusqlite::Error::InvalidQuery);
         }
-        let mut statement = self.connection.prepare(
+        let transaction = self.connection.transaction()?;
+        prune_expired_telemetry(&transaction, now)?;
+        let mut statement = transaction.prepare(
             "SELECT batch_id,payload FROM telemetry_buffer ORDER BY priority,observed_at,batch_id LIMIT ?1",
         )?;
-        statement
+        let pending = statement
             .query_map([limit], |row| {
                 let id = row.get::<_, Vec<u8>>(0)?;
                 let id: [u8; 16] = id.try_into().map_err(|_| rusqlite::Error::InvalidQuery)?;
                 Ok((id, row.get(1)?))
             })?
-            .collect()
+            .collect::<Result<Vec<_>, _>>()?;
+        drop(statement);
+        transaction.commit()?;
+        Ok(pending)
     }
 
     /// Removes a delivered batch idempotently.
@@ -897,6 +895,32 @@ fn increment_drop(
     Ok(())
 }
 
+fn prune_expired_telemetry(
+    transaction: &rusqlite::Transaction<'_>,
+    now: i64,
+) -> Result<(), rusqlite::Error> {
+    let recovery_seconds = i64::try_from(OFFLINE_RECOVERY_RETENTION_SECONDS)
+        .map_err(|_| rusqlite::Error::InvalidQuery)?;
+    let observed_cutoff = now.saturating_sub(recovery_seconds);
+    let mut expired = transaction.prepare(
+        "SELECT priority, count(*) FROM telemetry_buffer WHERE expires_at <= ?1 OR observed_at <= ?2 GROUP BY priority",
+    )?;
+    let expired_counts = expired
+        .query_map(rusqlite::params![now, observed_cutoff], |row| {
+            Ok((row.get::<_, u8>(0)?, row.get::<_, u64>(1)?))
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    drop(expired);
+    transaction.execute(
+        "DELETE FROM telemetry_buffer WHERE expires_at <= ?1 OR observed_at <= ?2",
+        rusqlite::params![now, observed_cutoff],
+    )?;
+    for (expired_priority, count) in expired_counts {
+        increment_drop(transaction, expired_priority, count)?;
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use std::os::unix::fs::PermissionsExt as _;
@@ -982,7 +1006,7 @@ mod tests {
                 })
                 .expect("raw")
         );
-        let pending = journal.telemetry_pending(10).expect("pending");
+        let pending = journal.telemetry_pending(10, 20).expect("pending");
         assert_eq!(pending.len(), 1);
         assert_eq!(pending[0].0, security);
         assert_eq!(
@@ -990,11 +1014,75 @@ mod tests {
             [0, 0, 0, 1]
         );
         journal.acknowledge_telemetry(&security).expect("ack");
-        assert!(journal.telemetry_pending(10).expect("empty").is_empty());
+        assert!(journal.telemetry_pending(10, 20).expect("empty").is_empty());
         drop(journal);
         for suffix in ["", "-wal", "-shm"] {
             let _ = std::fs::remove_file(format!("{}{}", path.display(), suffix));
         }
+    }
+
+    #[test]
+    fn five_minute_offline_recovery_caps_legacy_telemetry_at_boundary() {
+        let recovery_seconds = i64::try_from(OFFLINE_RECOVERY_RETENTION_SECONDS).expect("seconds");
+        let path = temporary_path("five-minute-offline-recovery");
+        let mut journal = Journal::open(&path).expect("open");
+        let legacy = *uuid::Uuid::now_v7().as_bytes();
+        let recovered = *uuid::Uuid::now_v7().as_bytes();
+        journal
+            .enqueue_telemetry(&TelemetryInsert {
+                batch_id: &legacy,
+                priority: 2,
+                observed_at: 1_000,
+                expires_at: 1_000 + 86_400,
+                payload: b"legacy-day-window",
+                now: 1_000,
+                max_bytes: 1_024,
+            })
+            .expect("legacy telemetry");
+        drop(journal);
+
+        let mut journal = Journal::open(&path).expect("reopen upgraded journal");
+        assert!(
+            journal
+                .telemetry_pending(10, 1_299)
+                .expect("pending before boundary")
+                .iter()
+                .any(|item| item.0 == legacy)
+        );
+        assert!(
+            journal
+                .telemetry_pending(10, 1_300)
+                .expect("pending at boundary")
+                .iter()
+                .all(|item| item.0 != legacy)
+        );
+        assert_eq!(
+            journal.telemetry_drop_counters().expect("boundary drop"),
+            [0, 1, 0, 0]
+        );
+
+        journal
+            .enqueue_telemetry(&TelemetryInsert {
+                batch_id: &recovered,
+                priority: 2,
+                observed_at: 1_300,
+                expires_at: 1_300 + recovery_seconds,
+                payload: b"reconnected",
+                now: 1_300,
+                max_bytes: 1_024,
+            })
+            .expect("recovery telemetry");
+        let pending = journal
+            .telemetry_pending(10, 1_301)
+            .expect("pending after recovery");
+        assert!(!pending.iter().any(|item| item.0 == legacy));
+        assert!(pending.iter().any(|item| item.0 == recovered));
+        assert_eq!(
+            journal.telemetry_drop_counters().expect("drops"),
+            [0, 1, 0, 0]
+        );
+        drop(journal);
+        cleanup(&path);
     }
 
     #[test]

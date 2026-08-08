@@ -111,6 +111,14 @@ func TestIngestOrderingRollupOfflineAndRecoveryIntegration(t *testing.T) {
 	if _, err = pool.Exec(ctx, `INSERT INTO nodes(id,workspace_id,name,status,created_at,updated_at) VALUES($1,$2,'node','active',now(),now())`, nodeID, workspaceID); err != nil {
 		t.Fatal(err)
 	}
+	desiredUserFingerprint := sha256.Sum256([]byte(`{"name":"alice","enabled":true}`))
+	desiredGroupFingerprint := sha256.Sum256([]byte(`{"name":"staff","members":["alice"]}`))
+	if _, err = pool.Exec(ctx, `INSERT INTO desired_users(node_id,username,enabled,version,revision,fingerprint,created_at,updated_at) VALUES($1,'alice',true,1,1,$2,now(),now())`, nodeID, desiredUserFingerprint[:]); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = pool.Exec(ctx, `INSERT INTO desired_groups(node_id,group_name,members,version,revision,fingerprint,created_at,updated_at) VALUES($1,'staff',ARRAY['alice'],1,1,$2,now(),now())`, nodeID, desiredGroupFingerprint[:]); err != nil {
+		t.Fatal(err)
+	}
 	t.Cleanup(func() {
 		cleanupCtx := context.Background()
 		_, _ = pool.Exec(cleanupCtx, `DELETE FROM telemetry_security_events WHERE node_id=$1`, nodeID)
@@ -157,7 +165,7 @@ func TestIngestOrderingRollupOfflineAndRecoveryIntegration(t *testing.T) {
 	if err != nil || len(history) == 0 {
 		t.Fatalf("rollup missing: %v %v", history, err)
 	}
-	service.now = func() time.Time { return now.Add(OfflineAfter + 2*time.Second) }
+	service.now = func() time.Time { return now.Add(5*time.Minute - time.Second) }
 	if err := service.Maintain(ctx); err != nil {
 		t.Fatal(err)
 	}
@@ -173,18 +181,23 @@ func TestIngestOrderingRollupOfflineAndRecoveryIntegration(t *testing.T) {
 	if err != nil || node.ConnectionState != "offline" {
 		t.Fatalf("stale telemetry revived node: %#v %v", node, err)
 	}
-	recovered := testBatch(nodeID, 3, now.Add(OfflineAfter+3*time.Second))
+	service.now = func() time.Time { return now.Add(5 * time.Minute) }
+	recovered := testBatch(nodeID, 3, now.Add(5*time.Minute))
 	recovered.IPBans = nil
 	userFingerprint := sha256.Sum256([]byte(`{"name":"alice","enabled":true}`))
 	groupFingerprint := sha256.Sum256([]byte(`{"name":"staff","members":["alice"]}`))
-	recovered.Users = []User{{Username: "alice", Enabled: true, Fingerprint: userFingerprint[:]}}
-	recovered.Groups = []Group{{Name: "staff", Members: []string{"alice"}, Fingerprint: groupFingerprint[:]}}
+	recovered.Users = []User{{Username: "alice", Enabled: true, Revision: 1, Fingerprint: userFingerprint[:]}}
+	recovered.Groups = []Group{{Name: "staff", Members: []string{"alice"}, Revision: 1, Fingerprint: groupFingerprint[:]}}
 	if inserted, err = service.Ingest(ctx, recovered); err != nil || !inserted {
 		t.Fatalf("recovery: %v %v", inserted, err)
 	}
 	var observedUsers, observedGroups int
 	if err := pool.QueryRow(ctx, `SELECT (SELECT count(*) FROM observed_users WHERE node_id=$1),(SELECT count(*) FROM observed_groups WHERE node_id=$1)`, nodeID).Scan(&observedUsers, &observedGroups); err != nil || observedUsers != 1 || observedGroups != 1 {
 		t.Fatalf("user/group observations without IP bans: users=%d groups=%d err=%v", observedUsers, observedGroups, err)
+	}
+	var desiredObservedMatch bool
+	if err := pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM desired_users d JOIN observed_users o USING(node_id,username) WHERE d.node_id=$1 AND d.enabled=o.enabled AND d.revision=o.revision AND d.fingerprint=o.fingerprint) AND EXISTS(SELECT 1 FROM desired_groups d JOIN observed_groups o USING(node_id) WHERE d.node_id=$1 AND d.group_name=o.group_name AND d.members=o.members AND d.revision=o.revision AND d.fingerprint=o.fingerprint)`, nodeID).Scan(&desiredObservedMatch); err != nil || !desiredObservedMatch {
+		t.Fatalf("desired/observed state did not reconcile after five-minute recovery: %v %v", desiredObservedMatch, err)
 	}
 	node, err = service.GetNode(ctx, nodeID)
 	if err != nil || node.ConnectionState != "online" {
