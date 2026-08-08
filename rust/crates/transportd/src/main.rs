@@ -6,7 +6,7 @@ use std::os::unix::net::UnixStream as StdUnixStream;
 use std::path::{Path, PathBuf};
 
 use iroh::endpoint::RelayMode;
-use iroh::{EndpointId, SecretKey};
+use iroh::{EndpointId, RelayMap, RelayUrl, SecretKey};
 use ocservia_contracts::generated::ocserv::platform::transport::v1::transport_service_server::TransportServiceServer;
 use ocservia_transportd::{
     IdentityPolicy, IrohTransportService, TrustAuthority, build_router, build_router_with_trust,
@@ -96,7 +96,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 fn parse_args() -> Result<Config, io::Error> {
     let mut socket = PathBuf::from("/run/ocserv-platform/transportd.sock");
     let mut key_file = None;
-    let mut relay_mode = RelayMode::Default;
+    let mut relay_mode = String::from("default");
+    let mut relay_urls = Vec::new();
+    let mut relay_token_file = None;
     let mut approved = HashMap::new();
     let mut revoked = HashSet::new();
     let mut event_capacity = 256_usize;
@@ -109,11 +111,16 @@ fn parse_args() -> Result<Config, io::Error> {
                 key_file = Some(PathBuf::from(required_value(&mut args, "--key-file")?));
             }
             "--relay-mode" => {
-                relay_mode = match required_value(&mut args, "--relay-mode")?.as_str() {
-                    "default" => RelayMode::Default,
-                    "disabled" => RelayMode::Disabled,
-                    _ => return Err(invalid("relay mode must be default or disabled")),
-                };
+                relay_mode = required_value(&mut args, "--relay-mode")?;
+            }
+            "--relay-url" => {
+                relay_urls.push(required_value(&mut args, "--relay-url")?);
+            }
+            "--relay-token-file" => {
+                relay_token_file = Some(PathBuf::from(required_value(
+                    &mut args,
+                    "--relay-token-file",
+                )?));
             }
             "--approved-binding" => {
                 let (endpoint, node_id) =
@@ -142,6 +149,9 @@ fn parse_args() -> Result<Config, io::Error> {
     let key_file = key_file.ok_or_else(|| invalid("--key-file is required"))?;
     if !socket.is_absolute()
         || !key_file.is_absolute()
+        || relay_token_file
+            .as_ref()
+            .is_some_and(|path| !path.is_absolute())
         || trust_socket
             .as_ref()
             .is_some_and(|path| !path.is_absolute())
@@ -151,6 +161,7 @@ fn parse_args() -> Result<Config, io::Error> {
     if event_capacity == 0 || event_capacity > 4096 {
         return Err(invalid("event capacity must be 1..4096"));
     }
+    let relay_mode = build_relay_mode(&relay_mode, relay_urls, relay_token_file.as_deref())?;
     Ok(Config {
         socket,
         key_file,
@@ -160,6 +171,73 @@ fn parse_args() -> Result<Config, io::Error> {
         event_capacity,
         trust_socket,
     })
+}
+
+fn build_relay_mode(
+    mode: &str,
+    raw_urls: Vec<String>,
+    token_file: Option<&Path>,
+) -> Result<RelayMode, io::Error> {
+    match mode {
+        "default" if raw_urls.is_empty() && token_file.is_none() => Ok(RelayMode::Default),
+        "disabled" if raw_urls.is_empty() && token_file.is_none() => Ok(RelayMode::Disabled),
+        "default" | "disabled" => Err(invalid(
+            "relay URLs and token are accepted only with custom relay mode",
+        )),
+        "custom" => {
+            if !(2..=8).contains(&raw_urls.len()) {
+                return Err(invalid("custom relay mode requires 2..8 relay URLs"));
+            }
+            let token_file = token_file
+                .ok_or_else(|| invalid("custom relay mode requires --relay-token-file"))?;
+            let mut urls = Vec::with_capacity(raw_urls.len());
+            for raw in raw_urls {
+                let url: RelayUrl = raw.parse().map_err(|_| invalid("relay URL is invalid"))?;
+                if url.scheme() != "https"
+                    || !url.username().is_empty()
+                    || url.password().is_some()
+                    || url.query().is_some()
+                    || url.fragment().is_some()
+                    || url.host_str().is_none()
+                {
+                    return Err(invalid(
+                        "relay URL must be credential-free HTTPS without query or fragment",
+                    ));
+                }
+                if urls.contains(&url) {
+                    return Err(invalid("relay URLs must be unique"));
+                }
+                urls.push(url);
+            }
+            let token = read_relay_token(token_file)?;
+            Ok(RelayMode::Custom(
+                RelayMap::from_iter(urls).with_auth_token(token),
+            ))
+        }
+        _ => Err(invalid("relay mode must be default, disabled, or custom")),
+    }
+}
+
+fn read_relay_token(path: &Path) -> Result<String, io::Error> {
+    let mut file = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc_o_nofollow())
+        .open(path)?;
+    if !file.metadata()?.file_type().is_file() {
+        return Err(invalid("relay token path must be a regular file"));
+    }
+    let mut raw = Vec::with_capacity(129);
+    std::io::Read::read_to_end(&mut std::io::Read::take(&mut file, 513), &mut raw)?;
+    let raw = Zeroizing::new(raw);
+    let token = std::str::from_utf8(&raw)
+        .map_err(|_| invalid("relay token must be UTF-8"))?
+        .trim_end_matches(['\n', '\r']);
+    if !(32..=512).contains(&token.len()) || token.chars().any(char::is_whitespace) {
+        return Err(invalid(
+            "relay token must be 32..512 non-whitespace UTF-8 bytes",
+        ));
+    }
+    Ok(token.to_owned())
 }
 
 fn required_value(
@@ -391,6 +469,72 @@ mod tests {
         assert!(
             parse_binding(&format!("not-a-uuid={}", hex::encode(endpoint.as_bytes()))).is_err()
         );
+    }
+
+    #[test]
+    fn production_relays_require_two_unique_https_urls_and_a_token() {
+        let directory =
+            std::env::temp_dir().join(format!("ocservia-relay-{}", uuid::Uuid::now_v7()));
+        std::fs::create_dir(&directory).expect("create test directory");
+        let token = directory.join("relay.token");
+        std::fs::write(&token, "0123456789abcdef0123456789abcdef\n").expect("write token");
+
+        let mode = build_relay_mode(
+            "custom",
+            vec![
+                "https://relay-a.example.test".to_owned(),
+                "https://relay-b.example.test".to_owned(),
+            ],
+            Some(&token),
+        )
+        .expect("valid production relay set");
+        let RelayMode::Custom(map) = mode else {
+            panic!("expected custom relay mode");
+        };
+        assert_eq!(map.len(), 2);
+
+        assert!(
+            build_relay_mode(
+                "custom",
+                vec!["https://relay-a.example.test".into()],
+                Some(&token)
+            )
+            .is_err()
+        );
+        assert!(
+            build_relay_mode(
+                "custom",
+                vec![
+                    "https://relay-a.example.test".into(),
+                    "https://relay-a.example.test".into(),
+                ],
+                Some(&token),
+            )
+            .is_err()
+        );
+        assert!(
+            build_relay_mode(
+                "custom",
+                vec![
+                    "http://relay-a.example.test".into(),
+                    "https://relay-b.example.test".into(),
+                ],
+                Some(&token),
+            )
+            .is_err()
+        );
+        assert!(
+            build_relay_mode(
+                "custom",
+                vec![
+                    "https://relay-a.example.test".into(),
+                    "https://relay-b.example.test".into(),
+                ],
+                None,
+            )
+            .is_err()
+        );
+        std::fs::remove_dir_all(directory).expect("remove test directory");
     }
 
     #[tokio::test]

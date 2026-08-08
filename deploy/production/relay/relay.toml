@@ -1,0 +1,18 @@
+enable_relay = true
+http_bind_addr = "0.0.0.0:8080"
+enable_quic_addr_discovery = true
+enable_metrics = false
+key_cache_capacity = 8192
+
+[tls]
+https_bind_addr = "0.0.0.0:8443"
+quic_bind_addr = "0.0.0.0:7842"
+cert_mode = "Manual"
+manual_cert_path = "/run/secrets/relay_tls_certificate"
+manual_key_path = "/run/secrets/relay_tls_private_key"
+
+[limits.client.rx]
+max_burst_bytes = 4194304
+bytes_per_second = 2097152
+
+access.shared_token = ["replaced-by-entrypoint"]

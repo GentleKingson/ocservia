@@ -25,5 +25,8 @@ futures-util.workspace = true
 tower.workspace = true
 hyper-util.workspace = true
 
+[dev-dependencies]
+iroh = { workspace = true, features = ["test-utils"] }
+
 [lints]
 workspace = true

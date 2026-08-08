@@ -1627,6 +1627,7 @@ pub async fn shutdown(
 
 #[cfg(test)]
 mod tests {
+    use iroh::{TransportAddr, Watcher as _, tls::CaTlsConfig};
     use ocservia_contracts::generated::ocserv::platform::agent::v1::{
         CommandDeliveryMode, GroupObservation, SemanticPayloadHashVersion, UserObservation,
     };
@@ -2529,6 +2530,115 @@ mod tests {
 
         shutdown(&service, router).await.expect("shutdown router");
         client.close().await;
+    }
+
+    #[tokio::test]
+    async fn dedicated_relay_failure_moves_traffic_to_second_relay() {
+        const TEST_ALPN: &[u8] = b"ocservia/relay-failover-test/1";
+        let (relay_map, relay_url, relay_one) = iroh::test_utils::run_relay_server()
+            .await
+            .expect("start first dedicated relay");
+        let client = Endpoint::builder(presets::Minimal)
+            .relay_mode(RelayMode::Custom(relay_map.clone()))
+            .ca_tls_config(CaTlsConfig::insecure_skip_verify())
+            .clear_address_lookup()
+            .clear_ip_transports()
+            .bind()
+            .await
+            .expect("build relay-only client");
+        let server = Endpoint::builder(presets::Minimal)
+            .relay_mode(RelayMode::Custom(relay_map))
+            .ca_tls_config(CaTlsConfig::insecure_skip_verify())
+            .alpns(vec![TEST_ALPN.to_vec()])
+            .bind()
+            .await
+            .expect("build relay-only server");
+
+        let echo = tokio::spawn({
+            let server = server.clone();
+            async move {
+                for _ in 0..2 {
+                    let connection = server
+                        .accept()
+                        .await
+                        .expect("incoming relay connection")
+                        .await
+                        .expect("complete relay handshake");
+                    let (mut send, mut recv) = connection.accept_bi().await.expect("accept stream");
+                    let bytes = recv.read_to_end(1024).await.expect("read relay payload");
+                    send.write_all(&bytes).await.expect("echo relay payload");
+                    send.finish().expect("finish echo");
+                    connection.closed().await;
+                }
+            }
+        });
+
+        server.online().await;
+        let mut address = server.addr();
+        address
+            .addrs
+            .retain(|address| !matches!(address, TransportAddr::Ip(_)));
+        let connection = client
+            .connect(address, TEST_ALPN)
+            .await
+            .expect("connect through first relay");
+        let (mut send, mut recv) = connection.open_bi().await.expect("open first stream");
+        send.write_all(b"relay-one")
+            .await
+            .expect("write first payload");
+        send.finish().expect("finish first payload");
+        assert_eq!(
+            recv.read_to_end(1024).await.expect("read first echo"),
+            b"relay-one"
+        );
+        connection.close(0_u32.into(), b"first relay complete");
+
+        let (new_map, new_url, relay_two) = iroh::test_utils::run_relay_server()
+            .await
+            .expect("start second dedicated relay");
+        let new_config = new_map.get(&new_url).expect("second relay config").clone();
+        let mut addresses = server.watch_addr().stream();
+        let _ = server
+            .insert_relay(new_url.clone(), new_config.clone())
+            .await;
+        let _ = client.insert_relay(new_url.clone(), new_config).await;
+        let _ = server.remove_relay(&relay_url).await;
+        let _ = client.remove_relay(&relay_url).await;
+        drop(relay_one);
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        let mut address = tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let address = addresses.next().await.expect("address update");
+                if address.relay_urls().any(|url| url == &new_url) {
+                    break address;
+                }
+            }
+        })
+        .await
+        .expect("publish second relay address");
+        address
+            .addrs
+            .retain(|address| !matches!(address, TransportAddr::Ip(_)));
+        let connection = client
+            .connect(address, TEST_ALPN)
+            .await
+            .expect("connect through second relay");
+        let (mut send, mut recv) = connection.open_bi().await.expect("open second stream");
+        send.write_all(b"relay-two")
+            .await
+            .expect("write second payload");
+        send.finish().expect("finish second payload");
+        assert_eq!(
+            recv.read_to_end(1024).await.expect("read second echo"),
+            b"relay-two"
+        );
+        connection.close(0_u32.into(), b"second relay complete");
+
+        echo.await.expect("echo task");
+        client.close().await;
+        server.close().await;
+        relay_two.shutdown().await.expect("stop second relay");
     }
 
     #[tokio::test]

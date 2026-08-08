@@ -29,6 +29,10 @@ Go/Rust tests are included in the language jobs and its boundary assertions run
 in the security job. Separate focused jobs would repeat the same expensive
 workspace tests, so their scripts remain local reproduction commands.
 
+The Go job also validates the hardened production Compose topology, a
+controlled two-relay failover, PostgreSQL base-backup restore, and the signed
+Agent package install, upgrade, uninstall, and state-retention lifecycle.
+
 ## Reproducibility and caches
 
 `toolchains.lock` is the version source and `scripts/checksums.txt` authenticates
@@ -82,8 +86,9 @@ Rust tests. These tests are not reported as hosted validation:
   service. It should move with the same ephemeral systemd fixture.
 - `relay_only_connection_and_disabled_relay_failure` and
   `relay_and_direct_paths_converge_to_direct` depend on a public Iroh relay and
-  are unsuitable as deterministic required checks. A controlled disposable
-  relay fixture is needed.
+  remain deferred. The required I18 check instead uses two controlled local
+  relays and deliberately removes the first relay before proving reconnection
+  through the second.
 
 A change is fully validated only when all required checks for its exact commit
 pass, applicable diagnostic artifacts are available, cleanup succeeded, and any

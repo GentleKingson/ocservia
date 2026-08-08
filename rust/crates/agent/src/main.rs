@@ -1,11 +1,12 @@
 use std::collections::HashSet;
 use std::env;
 use std::io;
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
 use iroh::endpoint::{QuicTransportConfig, RelayMode, VarInt, presets};
-use iroh::{Endpoint, EndpointAddr, EndpointId};
+use iroh::{Endpoint, EndpointAddr, EndpointId, RelayMap, RelayUrl};
 use ocservia_agent::{
     CommandContext, CommandError, CommandExecutor, ExternalEffectObservation, ExternalPreparation,
     MAX_COMMAND_BYTES, MAX_WRITE_QUEUE, PrivdClient,
@@ -29,6 +30,7 @@ use ocservia_contracts::generated::ocserv::platform::agent::v1::{
 use prost::Message;
 use sha2::Digest;
 use uuid::Uuid;
+use zeroize::Zeroizing;
 
 const AGENT_ALPN: &[u8] = b"ocserv-platform/agent/1";
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
@@ -80,7 +82,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // out-of-band direct or relay address.
     let endpoint = Endpoint::builder(presets::N0)
         .secret_key(identity.secret_key().clone())
-        .relay_mode(RelayMode::Default)
+        .relay_mode(config.relay_mode.clone())
         .transport_config(transport)
         .bind()
         .await?;
@@ -1139,6 +1141,7 @@ struct Config {
     node_id: Option<Uuid>,
     probe_only: bool,
     artifact_dir: PathBuf,
+    relay_mode: RelayMode,
 }
 
 fn parse_args() -> Result<Config, io::Error> {
@@ -1150,7 +1153,11 @@ fn parse_args() -> Result<Config, io::Error> {
         node_id: None,
         probe_only: false,
         artifact_dir: PathBuf::from("/var/lib/ocservia-privd/certificates/artifacts"),
+        relay_mode: RelayMode::Default,
     };
+    let mut relay_mode = String::from("default");
+    let mut relay_urls = Vec::new();
+    let mut relay_token_file = None;
     let mut args = env::args().skip(1);
     while let Some(argument) = args.next() {
         match argument.as_str() {
@@ -1179,13 +1186,100 @@ fn parse_args() -> Result<Config, io::Error> {
             "--artifact-dir" => {
                 config.artifact_dir = PathBuf::from(required(&mut args, "--artifact-dir")?);
             }
+            "--relay-mode" => relay_mode = required(&mut args, "--relay-mode")?,
+            "--relay-url" => relay_urls.push(required(&mut args, "--relay-url")?),
+            "--relay-token-file" => {
+                relay_token_file = Some(PathBuf::from(required(&mut args, "--relay-token-file")?));
+            }
             _ => return Err(invalid("unknown agent argument")),
         }
     }
-    if !config.artifact_dir.is_absolute() {
-        return Err(invalid("artifact directory must be absolute"));
+    if !config.artifact_dir.is_absolute()
+        || relay_token_file
+            .as_ref()
+            .is_some_and(|path| !path.is_absolute())
+    {
+        return Err(invalid("artifact and relay token paths must be absolute"));
     }
+    config.relay_mode = build_relay_mode(&relay_mode, relay_urls, relay_token_file.as_deref())?;
     Ok(config)
+}
+
+fn build_relay_mode(
+    mode: &str,
+    raw_urls: Vec<String>,
+    token_file: Option<&Path>,
+) -> Result<RelayMode, io::Error> {
+    match mode {
+        "default" if raw_urls.is_empty() && token_file.is_none() => Ok(RelayMode::Default),
+        "disabled" if raw_urls.is_empty() && token_file.is_none() => Ok(RelayMode::Disabled),
+        "default" | "disabled" => Err(invalid(
+            "relay URLs and token are accepted only with custom relay mode",
+        )),
+        "custom" => {
+            if !(2..=8).contains(&raw_urls.len()) {
+                return Err(invalid("custom relay mode requires 2..8 relay URLs"));
+            }
+            let token_file = token_file
+                .ok_or_else(|| invalid("custom relay mode requires --relay-token-file"))?;
+            let mut urls = Vec::with_capacity(raw_urls.len());
+            for raw in raw_urls {
+                let url: RelayUrl = raw.parse().map_err(|_| invalid("relay URL is invalid"))?;
+                if url.scheme() != "https"
+                    || !url.username().is_empty()
+                    || url.password().is_some()
+                    || url.query().is_some()
+                    || url.fragment().is_some()
+                    || url.host_str().is_none()
+                {
+                    return Err(invalid(
+                        "relay URL must be credential-free HTTPS without query or fragment",
+                    ));
+                }
+                if urls.contains(&url) {
+                    return Err(invalid("relay URLs must be unique"));
+                }
+                urls.push(url);
+            }
+            let token = read_relay_token(token_file)?;
+            Ok(RelayMode::Custom(
+                RelayMap::from_iter(urls).with_auth_token(token),
+            ))
+        }
+        _ => Err(invalid("relay mode must be default, disabled, or custom")),
+    }
+}
+
+fn read_relay_token(path: &Path) -> Result<String, io::Error> {
+    let mut file = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc_o_nofollow())
+        .open(path)?;
+    if !file.metadata()?.file_type().is_file() {
+        return Err(invalid("relay token path must be a regular file"));
+    }
+    let mut raw = Vec::with_capacity(129);
+    std::io::Read::read_to_end(&mut std::io::Read::take(&mut file, 513), &mut raw)?;
+    let raw = Zeroizing::new(raw);
+    let token = std::str::from_utf8(&raw)
+        .map_err(|_| invalid("relay token must be UTF-8"))?
+        .trim_end_matches(['\n', '\r']);
+    if !(32..=512).contains(&token.len()) || token.chars().any(char::is_whitespace) {
+        return Err(invalid(
+            "relay token must be 32..512 non-whitespace UTF-8 bytes",
+        ));
+    }
+    Ok(token.to_owned())
+}
+
+#[cfg(target_os = "linux")]
+const fn libc_o_nofollow() -> i32 {
+    0x20_000
+}
+
+#[cfg(target_os = "macos")]
+const fn libc_o_nofollow() -> i32 {
+    0x100
 }
 
 fn required(args: &mut impl Iterator<Item = String>, name: &str) -> Result<String, io::Error> {
@@ -1206,6 +1300,47 @@ mod tests {
     use ocservia_contracts::generated::ocserv::platform::agent::v1::{
         ConfigApply, ConfigPlan, UserPasswordRotate,
     };
+
+    #[test]
+    fn production_relay_selection_is_closed_and_redundant() {
+        let directory =
+            std::env::temp_dir().join(format!("ocservia-agent-relay-{}", Uuid::now_v7()));
+        std::fs::create_dir(&directory).expect("create test directory");
+        let token = directory.join("relay.token");
+        std::fs::write(&token, "0123456789abcdef0123456789abcdef").expect("write token");
+
+        let mode = build_relay_mode(
+            "custom",
+            vec![
+                "https://relay-a.example.test".to_owned(),
+                "https://relay-b.example.test".to_owned(),
+            ],
+            Some(&token),
+        )
+        .expect("valid custom relay mode");
+        assert!(matches!(mode, RelayMode::Custom(_)));
+        assert!(build_relay_mode("default", Vec::new(), None).is_ok());
+        assert!(
+            build_relay_mode(
+                "custom",
+                vec!["https://relay-a.example.test".into()],
+                Some(&token)
+            )
+            .is_err()
+        );
+        assert!(
+            build_relay_mode(
+                "custom",
+                vec![
+                    "https://user@relay-a.example.test".into(),
+                    "https://relay-b.example.test".into(),
+                ],
+                Some(&token),
+            )
+            .is_err()
+        );
+        std::fs::remove_dir_all(directory).expect("remove test directory");
+    }
 
     #[test]
     fn authoritative_precondition_rejection_is_terminal() {

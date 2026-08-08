@@ -1,0 +1,293 @@
+name: ocservia-production
+
+x-service-defaults: &service-defaults
+  restart: unless-stopped
+  read_only: true
+  cap_drop: [ALL]
+  security_opt:
+    - no-new-privileges:true
+  init: true
+
+services:
+  gateway:
+    <<: *service-defaults
+    image: ${OCSERV_GATEWAY_IMAGE:?set OCSERV_GATEWAY_IMAGE to a digest-pinned image}
+    ports:
+      - "${OCSERV_HTTPS_ADDRESS:-0.0.0.0}:443:8443/tcp"
+    environment:
+      OCSERV_PUBLIC_HOST: ${OCSERV_PUBLIC_HOST:?set OCSERV_PUBLIC_HOST}
+    secrets:
+      - tls_certificate
+      - tls_private_key
+    tmpfs:
+      - /config:size=1m,mode=0700
+      - /data:size=8m,mode=0700
+      - /tmp:size=8m,mode=0700
+    networks: [frontend, application]
+    depends_on:
+      control-plane:
+        condition: service_healthy
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 256M
+          pids: 256
+
+  postgres:
+    <<: *service-defaults
+    image: ${OCSERV_POSTGRES_IMAGE:?set OCSERV_POSTGRES_IMAGE to a digest-pinned PostgreSQL 17 image}
+    environment:
+      POSTGRES_DB: ocservia
+      POSTGRES_USER: ocservia_owner
+      POSTGRES_PASSWORD_FILE: /run/secrets/postgres_owner_password
+      POSTGRES_INITDB_ARGS: --auth-host=scram-sha-256 --data-checksums
+    secrets:
+      - postgres_owner_password
+      - postgres_app_password
+      - postgres_backup_password
+    command: ["postgres", "-c", "config_file=/etc/postgresql/postgresql.conf"]
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ${OCSERV_BACKUP_DIR:?set OCSERV_BACKUP_DIR to a separately protected backup mount}:/var/lib/ocservia-backup
+      - ./postgresql.conf:/etc/postgresql/postgresql.conf:ro
+      - ./postgres-init:/docker-entrypoint-initdb.d:ro
+    tmpfs:
+      - /run/postgresql:size=16m,uid=999,gid=999,mode=0770
+      - /tmp:size=16m,uid=999,gid=999,mode=0700
+    networks: [database]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ocservia_owner -d ocservia"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+    deploy:
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: 2G
+          pids: 256
+
+  migrate:
+    <<: *service-defaults
+    restart: "no"
+    image: ${OCSERV_CONTROL_IMAGE:?set OCSERV_CONTROL_IMAGE to a digest-pinned image}
+    command: ["--migrate-only"]
+    environment:
+      OCSERV_ENVIRONMENT: production
+      OCSERV_DATABASE_URL_FILE: /run/secrets/database_owner_url
+      OCSERV_RUNTIME_DATABASE_ROLE: ocservia_app
+      OCSERV_OIDC_ISSUER: ${OCSERV_OIDC_ISSUER:?set OCSERV_OIDC_ISSUER}
+      OCSERV_OIDC_CLIENT_ID: ${OCSERV_OIDC_CLIENT_ID:?set OCSERV_OIDC_CLIENT_ID}
+      OCSERV_OIDC_CLIENT_SECRET_FILE: /run/secrets/oidc_client_secret
+      OCSERV_OIDC_REDIRECT_URL: https://${OCSERV_PUBLIC_HOST}/api/v1/auth/callback
+      OCSERV_SESSION_KEY_FILE: /run/secrets/session_key
+      OCSERV_AUDIT_CHECKPOINT_KEY_FILE: /run/secrets/audit_checkpoint_key
+    secrets:
+      - database_owner_url
+      - oidc_client_secret
+      - session_key
+      - audit_checkpoint_key
+    tmpfs:
+      - /tmp:size=8m,mode=0700
+    networks: [database]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 256M
+          pids: 128
+
+  control-plane:
+    <<: *service-defaults
+    image: ${OCSERV_CONTROL_IMAGE:?set OCSERV_CONTROL_IMAGE to a digest-pinned image}
+    command: ["--role=all"]
+    environment:
+      OCSERV_ENVIRONMENT: production
+      OCSERV_HTTP_ADDRESS: 0.0.0.0:8080
+      OCSERV_DATABASE_URL_FILE: /run/secrets/database_app_url
+      OCSERV_OIDC_ISSUER: ${OCSERV_OIDC_ISSUER:?set OCSERV_OIDC_ISSUER}
+      OCSERV_OIDC_CLIENT_ID: ${OCSERV_OIDC_CLIENT_ID:?set OCSERV_OIDC_CLIENT_ID}
+      OCSERV_OIDC_CLIENT_SECRET_FILE: /run/secrets/oidc_client_secret
+      OCSERV_OIDC_REDIRECT_URL: https://${OCSERV_PUBLIC_HOST}/api/v1/auth/callback
+      OCSERV_SESSION_KEY_FILE: /run/secrets/session_key
+      OCSERV_AUDIT_CHECKPOINT_KEY_FILE: /run/secrets/audit_checkpoint_key
+      OCSERV_TRANSPORT_SOCKET: /run/ocserv-platform/transportd.sock
+      OCSERV_TRUST_SOCKET: /run/ocserv-trust/control-plane.sock
+      OCSERV_CONTROLLER_ENDPOINT_ID: ${OCSERV_CONTROLLER_ENDPOINT_ID:?set OCSERV_CONTROLLER_ENDPOINT_ID}
+      OCSERV_CERTIFICATE_SIGNER_URL: ${OCSERV_CERTIFICATE_SIGNER_URL:?set OCSERV_CERTIFICATE_SIGNER_URL}
+      OCSERV_CERTIFICATE_SIGNER_TOKEN_FILE: /run/secrets/certificate_signer_token
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
+    secrets:
+      - database_app_url
+      - oidc_client_secret
+      - session_key
+      - audit_checkpoint_key
+      - certificate_signer_token
+    volumes:
+      - transport-runtime:/run/ocserv-platform
+      - trust-runtime:/run/ocserv-trust
+    tmpfs:
+      - /tmp:size=16m,mode=0700
+    networks: [application, database, observability]
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      transportd:
+        condition: service_healthy
+      otel-collector:
+        condition: service_started
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "--silent", "http://127.0.0.1:8080/readyz"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+    deploy:
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: 1G
+          pids: 256
+
+  transportd:
+    <<: *service-defaults
+    image: ${OCSERV_TRANSPORT_IMAGE:?set OCSERV_TRANSPORT_IMAGE to a digest-pinned image}
+    command:
+      - --socket
+      - /run/ocserv-platform/transportd.sock
+      - --trust-socket
+      - /run/ocserv-trust/control-plane.sock
+      - --key-file
+      - /run/secrets/controller_iroh_key
+      - --relay-mode
+      - custom
+      - --relay-url
+      - ${OCSERV_RELAY_URL_A:?set the first dedicated HTTPS relay URL}
+      - --relay-url
+      - ${OCSERV_RELAY_URL_B:?set the second dedicated HTTPS relay URL}
+      - --relay-token-file
+      - /run/secrets/relay_access_token
+    secrets:
+      - relay_access_token
+      - controller_iroh_key
+    volumes:
+      - transport-runtime:/run/ocserv-platform
+      - trust-runtime:/run/ocserv-trust
+    tmpfs:
+      - /tmp:size=8m,mode=0700
+    networks: [application, observability]
+    healthcheck:
+      test: ["CMD-SHELL", "test -S /run/ocserv-platform/transportd.sock"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+    deploy:
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: 512M
+          pids: 256
+
+  otel-collector:
+    <<: *service-defaults
+    image: ${OCSERV_OTEL_IMAGE:?set OCSERV_OTEL_IMAGE to a digest-pinned OpenTelemetry Collector image}
+    command: ["--config=/etc/otelcol/config.yaml"]
+    environment:
+      OCSERV_OTEL_BACKEND_ENDPOINT: ${OCSERV_OTEL_BACKEND_ENDPOINT:?set the TLS OTLP backend endpoint}
+    secrets:
+      - otel_client_certificate
+      - otel_client_key
+      - otel_ca_certificate
+    volumes:
+      - ./otel-collector.yaml:/etc/otelcol/config.yaml:ro
+    tmpfs:
+      - /tmp:size=16m,mode=0700
+    networks: [observability]
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 512M
+          pids: 256
+
+  backup:
+    <<: *service-defaults
+    image: ${OCSERV_BACKUP_IMAGE:?set OCSERV_BACKUP_IMAGE to the repository backup image}
+    environment:
+      PGHOST: postgres
+      PGPORT: "5432"
+      PGDATABASE: ocservia
+      PGUSER: ocservia_backup
+      PGPASSFILE: /run/secrets/postgres_pgpass
+      BACKUP_ROOT: /var/lib/ocservia-backup
+      BACKUP_INTERVAL_SECONDS: ${OCSERV_BACKUP_INTERVAL_SECONDS:-900}
+      BACKUP_RETENTION_COUNT: ${OCSERV_BACKUP_RETENTION_COUNT:-8}
+    secrets:
+      - postgres_pgpass
+    volumes:
+      - ${OCSERV_BACKUP_DIR}:/var/lib/ocservia-backup
+    tmpfs:
+      - /tmp:size=32m,mode=0700
+    networks: [database]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 512M
+          pids: 256
+
+networks:
+  frontend: {}
+  application:
+    internal: true
+  database:
+    internal: true
+  observability:
+    internal: true
+
+volumes:
+  postgres-data: {}
+  transport-runtime: {}
+  trust-runtime: {}
+
+secrets:
+  tls_certificate:
+    file: ${OCSERV_SECRET_DIR:?set OCSERV_SECRET_DIR}/tls.crt
+  tls_private_key:
+    file: ${OCSERV_SECRET_DIR}/tls.key
+  postgres_owner_password:
+    file: ${OCSERV_SECRET_DIR}/postgres-owner-password
+  postgres_app_password:
+    file: ${OCSERV_SECRET_DIR}/postgres-app-password
+  postgres_backup_password:
+    file: ${OCSERV_SECRET_DIR}/postgres-backup-password
+  postgres_pgpass:
+    file: ${OCSERV_SECRET_DIR}/postgres.pgpass
+  database_owner_url:
+    file: ${OCSERV_SECRET_DIR}/database-owner-url
+  database_app_url:
+    file: ${OCSERV_SECRET_DIR}/database-app-url
+  oidc_client_secret:
+    file: ${OCSERV_SECRET_DIR}/oidc-client-secret
+  session_key:
+    file: ${OCSERV_SECRET_DIR}/session-key
+  audit_checkpoint_key:
+    file: ${OCSERV_SECRET_DIR}/audit-checkpoint-key
+  certificate_signer_token:
+    file: ${OCSERV_SECRET_DIR}/certificate-signer-token
+  relay_access_token:
+    file: ${OCSERV_SECRET_DIR}/relay-access-token
+  controller_iroh_key:
+    file: ${OCSERV_SECRET_DIR}/controller-iroh.key
+  otel_client_certificate:
+    file: ${OCSERV_SECRET_DIR}/otel-client.crt
+  otel_client_key:
+    file: ${OCSERV_SECRET_DIR}/otel-client.key
+  otel_ca_certificate:
+    file: ${OCSERV_SECRET_DIR}/otel-ca.crt

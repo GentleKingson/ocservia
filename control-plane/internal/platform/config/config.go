@@ -5,9 +5,12 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"net/url"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -69,7 +72,9 @@ func Load(args []string, lookup LookupEnv) (Config, error) {
 	}
 	setString(lookup, "OCSERV_ENVIRONMENT", &cfg.Environment)
 	setString(lookup, "OCSERV_HTTP_ADDRESS", &cfg.HTTPAddress)
-	setString(lookup, "OCSERV_DATABASE_URL", &cfg.DatabaseURL)
+	if err := setStringOrFile(lookup, "OCSERV_DATABASE_URL", &cfg.DatabaseURL); err != nil {
+		return Config{}, err
+	}
 	setString(lookup, "OCSERV_RUNTIME_DATABASE_ROLE", &cfg.RuntimeDBRole)
 	setString(lookup, "OTEL_EXPORTER_OTLP_ENDPOINT", &cfg.OTLPEndpoint)
 	setString(lookup, "OCSERV_LOG_LEVEL", &cfg.LogLevelName)
@@ -79,17 +84,21 @@ func Load(args []string, lookup LookupEnv) (Config, error) {
 	setString(lookup, "OCSERV_DEV_AUTH_TOKEN", &cfg.DevAuthToken)
 	setString(lookup, "OCSERV_OIDC_ISSUER", &cfg.OIDCIssuer)
 	setString(lookup, "OCSERV_OIDC_CLIENT_ID", &cfg.OIDCClientID)
-	setString(lookup, "OCSERV_OIDC_CLIENT_SECRET", &cfg.OIDCClientSecret)
+	if err := setStringOrFile(lookup, "OCSERV_OIDC_CLIENT_SECRET", &cfg.OIDCClientSecret); err != nil {
+		return Config{}, err
+	}
 	setString(lookup, "OCSERV_OIDC_REDIRECT_URL", &cfg.OIDCRedirectURL)
 	setString(lookup, "OCSERV_CERTIFICATE_SIGNER_URL", &cfg.CertificateSignerURL)
-	setString(lookup, "OCSERV_CERTIFICATE_SIGNER_TOKEN", &cfg.CertificateSignerToken)
-	if err := setHex(lookup, "OCSERV_SESSION_KEY", &cfg.SessionKey); err != nil {
+	if err := setStringOrFile(lookup, "OCSERV_CERTIFICATE_SIGNER_TOKEN", &cfg.CertificateSignerToken); err != nil {
 		return Config{}, err
 	}
-	if err := setHex(lookup, "OCSERV_AUDIT_CHECKPOINT_KEY", &cfg.AuditCheckpointKey); err != nil {
+	if err := setHexOrFile(lookup, "OCSERV_SESSION_KEY", &cfg.SessionKey); err != nil {
 		return Config{}, err
 	}
-	if err := setHex(lookup, "OCSERV_BREAK_GLASS_TOKEN_SHA256", &cfg.BreakGlassTokenHash); err != nil {
+	if err := setHexOrFile(lookup, "OCSERV_AUDIT_CHECKPOINT_KEY", &cfg.AuditCheckpointKey); err != nil {
+		return Config{}, err
+	}
+	if err := setHexOrFile(lookup, "OCSERV_BREAK_GLASS_TOKEN_SHA256", &cfg.BreakGlassTokenHash); err != nil {
 		return Config{}, err
 	}
 	if err := setDuration(lookup, "OCSERV_SESSION_TTL", &cfg.SessionTTL); err != nil {
@@ -262,6 +271,64 @@ func setString(lookup LookupEnv, name string, target *string) {
 	}
 }
 
+func setStringOrFile(lookup LookupEnv, name string, target *string) error {
+	value, hasValue := lookup(name)
+	path, hasFile := lookup(name + "_FILE")
+	if hasValue && hasFile {
+		return fmt.Errorf("%s and %s_FILE are mutually exclusive", name, name)
+	}
+	if hasValue {
+		*target = value
+		return nil
+	}
+	if !hasFile {
+		return nil
+	}
+	secret, err := readSecretFile(path)
+	if err != nil {
+		return fmt.Errorf("%s_FILE: %w", name, err)
+	}
+	*target = secret
+	return nil
+}
+
+func readSecretFile(path string) (string, error) {
+	if !filepath.IsAbs(path) {
+		return "", errors.New("secret file path must be absolute")
+	}
+	before, err := os.Lstat(path)
+	if err != nil {
+		return "", err
+	}
+	if !before.Mode().IsRegular() {
+		return "", errors.New("secret file must be a regular file")
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer file.Close()
+	after, err := file.Stat()
+	if err != nil {
+		return "", err
+	}
+	if !os.SameFile(before, after) {
+		return "", errors.New("secret file changed while opening")
+	}
+	raw, err := io.ReadAll(io.LimitReader(file, 4097))
+	if err != nil {
+		return "", err
+	}
+	if len(raw) == 0 || len(raw) > 4096 {
+		return "", errors.New("secret file must contain 1..4096 bytes")
+	}
+	value := strings.TrimSuffix(strings.TrimSuffix(string(raw), "\n"), "\r")
+	if value == "" || strings.ContainsRune(value, '\x00') {
+		return "", errors.New("secret file contains an invalid value")
+	}
+	return value, nil
+}
+
 func setInt64(lookup LookupEnv, name string, target *int64) error {
 	value, ok := lookup(name)
 	if !ok {
@@ -301,9 +368,20 @@ func setDuration(lookup LookupEnv, name string, target *time.Duration) error {
 	return nil
 }
 
-func setHex(lookup LookupEnv, name string, target *[]byte) error {
-	value, ok := lookup(name)
-	if !ok || value == "" {
+func setHexOrFile(lookup LookupEnv, name string, target *[]byte) error {
+	value, hasValue := lookup(name)
+	path, hasFile := lookup(name + "_FILE")
+	if hasValue && hasFile {
+		return fmt.Errorf("%s and %s_FILE are mutually exclusive", name, name)
+	}
+	if hasFile {
+		secret, err := readSecretFile(path)
+		if err != nil {
+			return fmt.Errorf("%s_FILE: %w", name, err)
+		}
+		value, hasValue = secret, true
+	}
+	if !hasValue || value == "" {
 		return nil
 	}
 	decoded, err := hex.DecodeString(value)
