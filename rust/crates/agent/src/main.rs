@@ -274,7 +274,7 @@ async fn connect_once(
                 let batch_id: [u8;16]=batch.batch_id.as_slice().try_into().map_err(|_| invalid("telemetry batch ID invalid"))?;
                 let now=SystemTime::now().duration_since(SystemTime::UNIX_EPOCH)?.as_secs();
                 session.journal.enqueue_telemetry(&TelemetryInsert { batch_id: &batch_id, priority: 2, observed_at: i64::try_from(now)?, expires_at: i64::try_from(now+OFFLINE_RECOVERY_RETENTION_SECONDS)?, payload: &payload, now: i64::try_from(now)?, max_bytes: 64*1024*1024 })?;
-                for (pending_id,pending) in session.journal.telemetry_pending(32)? {
+                for (pending_id,pending) in session.journal.telemetry_pending(32, i64::try_from(now)?)? {
                     send_telemetry(&connection,&pending).await?;
                     session.journal.acknowledge_telemetry(&pending_id)?;
                 }
