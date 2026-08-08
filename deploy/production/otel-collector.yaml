@@ -1,0 +1,32 @@
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+
+processors:
+  memory_limiter:
+    check_interval: 1s
+    limit_mib: 384
+    spike_limit_mib: 64
+  batch:
+    send_batch_size: 512
+    timeout: 5s
+
+exporters:
+  otlp:
+    endpoint: ${env:OCSERV_OTEL_BACKEND_ENDPOINT}
+    tls:
+      ca_file: /run/secrets/otel_ca_certificate
+      cert_file: /run/secrets/otel_client_certificate
+      key_file: /run/secrets/otel_client_key
+
+service:
+  telemetry:
+    logs:
+      level: info
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [memory_limiter, batch]
+      exporters: [otlp]

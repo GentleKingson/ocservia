@@ -102,6 +102,20 @@ func TestOIDCAuthorizationCodePKCEIntegration(t *testing.T) {
 	if authenticated, err := service.Authenticate(ctx, sessionCookie); err != nil || authenticated.IdentityID != principal.IdentityID {
 		t.Fatalf("authenticate established session: %#v, %v", authenticated, err)
 	}
+	service.discover = func(context.Context) (oauth2.Config, *oidc.IDTokenVerifier, error) {
+		return oauth2.Config{}, nil, errors.New("issuer unavailable")
+	}
+	if _, _, err := service.BeginLogin(ctx); err == nil {
+		t.Fatal("new login succeeded while the OIDC issuer was unavailable")
+	}
+	if authenticated, err := service.Authenticate(ctx, sessionCookie); err != nil || authenticated.IdentityID != principal.IdentityID {
+		t.Fatalf("bounded existing session failed during issuer outage: %#v, %v", authenticated, err)
+	}
+	service.discover = func(context.Context) (oauth2.Config, *oidc.IDTokenVerifier, error) {
+		oauth := oauth2.Config{ClientID: "client", ClientSecret: "secret", RedirectURL: redirectURL, Endpoint: oauth2.Endpoint{AuthURL: issuer + "/authorize", TokenURL: issuer + "/token"}, Scopes: []string{oidc.ScopeOpenID}}
+		verifier := oidc.NewVerifier(issuer, oidc.NewRemoteKeySet(ctx, issuer+"/keys"), &oidc.Config{ClientID: "client"})
+		return oauth, verifier, nil
+	}
 
 	_, loginCookie, err = service.BeginLogin(ctx)
 	if err != nil {

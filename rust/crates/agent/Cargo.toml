@@ -24,6 +24,7 @@ rustix.workspace = true
 tokio = { workspace = true, features = ["fs", "io-util", "macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
 tracing.workspace = true
 uuid = { workspace = true, features = ["v7"] }
+zeroize.workspace = true
 
 [lints]
 workspace = true

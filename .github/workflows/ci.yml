@@ -156,6 +156,11 @@ jobs:
           mkdir -p "${ARTIFACT_DIR}"
           set -o pipefail
           scripts/i17-certificate-secret.sh 2>&1 | tee "${ARTIFACT_DIR}/i17-certificate-secret.log"
+      - name: I18 production topology and dedicated relay recovery
+        env:
+          ARTIFACT_DIR: ${{ runner.temp }}/artifacts/go/i18-production
+          RUN_ID: production-${{ github.run_id }}-${{ github.run_attempt }}-go
+        run: scripts/i18-production-relays.sh
       - name: Go, PostgreSQL, UDS, and Rust stub integration
         env:
           ARTIFACT_DIR: ${{ runner.temp }}/artifacts/go/local-slice

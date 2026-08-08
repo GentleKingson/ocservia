@@ -1,0 +1,53 @@
+name: ocservia-relay
+
+services:
+  relay:
+    image: ${OCSERV_RELAY_IMAGE:?set OCSERV_RELAY_IMAGE to a digest-pinned image}
+    restart: unless-stopped
+    read_only: true
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    init: true
+    ulimits:
+      nofile:
+        soft: 1024
+        hard: 4096
+    command: ["--config-path", "/etc/iroh-relay/relay.toml"]
+    environment:
+      IROH_RELAY_ACCESS_TOKEN_FILE: /run/secrets/relay_access_token
+    secrets:
+      - source: relay_access_token
+        target: relay_access_token
+        uid: "65532"
+        gid: "65532"
+        mode: 0400
+      - relay_tls_certificate
+      - relay_tls_private_key
+    volumes:
+      - ./relay.toml:/etc/iroh-relay/relay.toml:ro
+    tmpfs:
+      - /tmp:size=16m,mode=0700
+    ports:
+      - "0.0.0.0:80:8080/tcp"
+      - "0.0.0.0:443:8443/tcp"
+      - "0.0.0.0:7842:7842/udp"
+    healthcheck:
+      test: ["CMD", "relay-healthcheck"]
+      interval: 10s
+      timeout: 3s
+      retries: 12
+    deploy:
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: 1G
+          pids: 256
+
+secrets:
+  relay_access_token:
+    file: ${OCSERV_RELAY_SECRET_DIR:?set OCSERV_RELAY_SECRET_DIR}/relay-access-token
+  relay_tls_certificate:
+    file: ${OCSERV_RELAY_SECRET_DIR}/tls.crt
+  relay_tls_private_key:
+    file: ${OCSERV_RELAY_SECRET_DIR}/tls.key

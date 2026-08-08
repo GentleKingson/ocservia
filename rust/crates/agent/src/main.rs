@@ -1,11 +1,12 @@
 use std::collections::HashSet;
 use std::env;
 use std::io;
+use std::os::unix::fs::{MetadataExt as _, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
 use iroh::endpoint::{QuicTransportConfig, RelayMode, VarInt, presets};
-use iroh::{Endpoint, EndpointAddr, EndpointId};
+use iroh::{Endpoint, EndpointAddr, EndpointId, RelayMap, RelayUrl, Watcher as _};
 use ocservia_agent::{
     CommandContext, CommandError, CommandExecutor, ExternalEffectObservation, ExternalPreparation,
     MAX_COMMAND_BYTES, MAX_WRITE_QUEUE, PrivdClient,
@@ -29,6 +30,7 @@ use ocservia_contracts::generated::ocserv::platform::agent::v1::{
 use prost::Message;
 use sha2::Digest;
 use uuid::Uuid;
+use zeroize::Zeroizing;
 
 const AGENT_ALPN: &[u8] = b"ocserv-platform/agent/1";
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
@@ -78,12 +80,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // The CLI receives the controller's stable endpoint ID, so the production
     // endpoint must retain N0 address discovery instead of requiring an
     // out-of-band direct or relay address.
-    let endpoint = Endpoint::builder(presets::N0)
-        .secret_key(identity.secret_key().clone())
-        .relay_mode(RelayMode::Default)
-        .transport_config(transport)
-        .bind()
-        .await?;
     let boot_id = ocservia_agent::read_boot_id().await?;
     let os_release = ocservia_agent::read_os_release().await?;
     let agent_instance_id = Uuid::now_v7();
@@ -91,6 +87,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let mut attempt = 0_u32;
         let backoff = ocservia_agent::Backoff::default();
         loop {
+            let endpoint = match Endpoint::builder(presets::N0)
+                .secret_key(identity.secret_key().clone())
+                .relay_mode(config.relay_mode.clone())
+                .transport_config(transport.clone())
+                .bind()
+                .await
+            {
+                Ok(endpoint) => endpoint,
+                Err(error) => {
+                    tracing::warn!(error = %error, attempt, "agent endpoint creation failed");
+                    attempt = attempt.saturating_add(1);
+                    let delay = backoff.delay(attempt, &mut rand::rng());
+                    tokio::time::sleep(delay).await;
+                    continue;
+                }
+            };
+            spawn_dedicated_relay_failover(&endpoint, &config.relay_mode);
             let mut session = SessionContext {
                 node_id,
                 endpoint_id: identity.endpoint_id(),
@@ -109,6 +122,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                     attempt = attempt.saturating_add(1);
                 }
             }
+            endpoint.close().await;
             let delay = backoff.delay(attempt, &mut rand::rng());
             tokio::time::sleep(delay).await;
         }
@@ -117,8 +131,39 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         () = run => {}
         () = shutdown_signal() => tracing::info!("agent shutdown requested"),
     }
-    endpoint.close().await;
     Ok(())
+}
+
+fn spawn_dedicated_relay_failover(endpoint: &Endpoint, mode: &RelayMode) {
+    let RelayMode::Custom(configured) = mode else {
+        return;
+    };
+    if configured.len() < 2 {
+        return;
+    }
+    let endpoint = endpoint.clone();
+    let configured = configured.clone();
+    tokio::spawn(async move {
+        let mut watcher = endpoint.home_relay_status();
+        loop {
+            let failed = watcher
+                .get()
+                .into_iter()
+                .find(|status| !status.is_connected() && status.last_error().is_some())
+                .map(|status| status.url().clone());
+            if let Some(failed) = failed
+                && let Some(config) = configured.get(&failed)
+                && endpoint.remove_relay(&failed).await.is_some()
+            {
+                tracing::warn!(relay = %failed, "temporarily removed failed dedicated relay");
+                tokio::time::sleep(Duration::from_mins(1)).await;
+                let _ = endpoint.insert_relay(failed, config).await;
+            }
+            if watcher.updated().await.is_err() {
+                return;
+            }
+        }
+    });
 }
 
 struct SessionContext<'a> {
@@ -1139,6 +1184,7 @@ struct Config {
     node_id: Option<Uuid>,
     probe_only: bool,
     artifact_dir: PathBuf,
+    relay_mode: RelayMode,
 }
 
 fn parse_args() -> Result<Config, io::Error> {
@@ -1150,7 +1196,11 @@ fn parse_args() -> Result<Config, io::Error> {
         node_id: None,
         probe_only: false,
         artifact_dir: PathBuf::from("/var/lib/ocservia-privd/certificates/artifacts"),
+        relay_mode: RelayMode::Default,
     };
+    let mut relay_mode = String::from("default");
+    let mut relay_urls = Vec::new();
+    let mut relay_token_file = None;
     let mut args = env::args().skip(1);
     while let Some(argument) = args.next() {
         match argument.as_str() {
@@ -1179,13 +1229,114 @@ fn parse_args() -> Result<Config, io::Error> {
             "--artifact-dir" => {
                 config.artifact_dir = PathBuf::from(required(&mut args, "--artifact-dir")?);
             }
+            "--relay-mode" => relay_mode = required(&mut args, "--relay-mode")?,
+            "--relay-url" => relay_urls.push(required(&mut args, "--relay-url")?),
+            "--relay-token-file" => {
+                relay_token_file = Some(PathBuf::from(required(&mut args, "--relay-token-file")?));
+            }
             _ => return Err(invalid("unknown agent argument")),
         }
     }
-    if !config.artifact_dir.is_absolute() {
-        return Err(invalid("artifact directory must be absolute"));
+    if !config.artifact_dir.is_absolute()
+        || relay_token_file
+            .as_ref()
+            .is_some_and(|path| !path.is_absolute())
+    {
+        return Err(invalid("artifact and relay token paths must be absolute"));
     }
+    config.relay_mode = build_relay_mode(&relay_mode, relay_urls, relay_token_file.as_deref())?;
     Ok(config)
+}
+
+fn build_relay_mode(
+    mode: &str,
+    raw_urls: Vec<String>,
+    token_file: Option<&Path>,
+) -> Result<RelayMode, io::Error> {
+    match mode {
+        "default" if raw_urls.is_empty() && token_file.is_none() => Ok(RelayMode::Default),
+        "disabled" if raw_urls.is_empty() && token_file.is_none() => Ok(RelayMode::Disabled),
+        "default" | "disabled" => Err(invalid(
+            "relay URLs and token are accepted only with custom relay mode",
+        )),
+        "custom" => {
+            if !(2..=8).contains(&raw_urls.len()) {
+                return Err(invalid("custom relay mode requires 2..8 relay URLs"));
+            }
+            let token_file = token_file
+                .ok_or_else(|| invalid("custom relay mode requires --relay-token-file"))?;
+            let mut urls = Vec::with_capacity(raw_urls.len());
+            for raw in raw_urls {
+                let url: RelayUrl = raw.parse().map_err(|_| invalid("relay URL is invalid"))?;
+                if url.scheme() != "https"
+                    || !url.username().is_empty()
+                    || url.password().is_some()
+                    || url.query().is_some()
+                    || url.fragment().is_some()
+                    || url.host_str().is_none()
+                {
+                    return Err(invalid(
+                        "relay URL must be credential-free HTTPS without query or fragment",
+                    ));
+                }
+                if urls.contains(&url) {
+                    return Err(invalid("relay URLs must be unique"));
+                }
+                urls.push(url);
+            }
+            let token = read_relay_token(token_file)?;
+            Ok(RelayMode::Custom(
+                RelayMap::from_iter(urls).with_auth_token(token),
+            ))
+        }
+        _ => Err(invalid("relay mode must be default, disabled, or custom")),
+    }
+}
+
+#[allow(clippy::verbose_bit_mask)]
+fn read_relay_token(path: &Path) -> Result<String, io::Error> {
+    let mut file = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc_o_nofollow())
+        .open(path)?;
+    let metadata = file.metadata()?;
+    if !metadata.file_type().is_file() {
+        return Err(invalid("relay token path must be a regular file"));
+    }
+    let mode = metadata.mode();
+    let owner_only = metadata.uid() == rustix::process::geteuid().as_raw() && mode & 0o077 == 0;
+    let protected_group = metadata.uid() == 0
+        && metadata.gid() == rustix::process::getegid().as_raw()
+        && mode & 0o027 == 0
+        && mode & 0o040 != 0;
+    if !owner_only && !protected_group {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "relay token must be process-owned mode 0600 or root:agent mode 0640",
+        ));
+    }
+    let mut raw = Vec::with_capacity(129);
+    std::io::Read::read_to_end(&mut std::io::Read::take(&mut file, 513), &mut raw)?;
+    let raw = Zeroizing::new(raw);
+    let token = std::str::from_utf8(&raw)
+        .map_err(|_| invalid("relay token must be UTF-8"))?
+        .trim_end_matches(['\n', '\r']);
+    if !(32..=512).contains(&token.len()) || token.chars().any(char::is_whitespace) {
+        return Err(invalid(
+            "relay token must be 32..512 non-whitespace UTF-8 bytes",
+        ));
+    }
+    Ok(token.to_owned())
+}
+
+#[cfg(target_os = "linux")]
+const fn libc_o_nofollow() -> i32 {
+    0x20_000
+}
+
+#[cfg(target_os = "macos")]
+const fn libc_o_nofollow() -> i32 {
+    0x100
 }
 
 fn required(args: &mut impl Iterator<Item = String>, name: &str) -> Result<String, io::Error> {
@@ -1206,6 +1357,63 @@ mod tests {
     use ocservia_contracts::generated::ocserv::platform::agent::v1::{
         ConfigApply, ConfigPlan, UserPasswordRotate,
     };
+    use std::os::unix::fs::PermissionsExt as _;
+
+    #[test]
+    fn production_relay_selection_is_closed_and_redundant() {
+        let directory =
+            std::env::temp_dir().join(format!("ocservia-agent-relay-{}", Uuid::now_v7()));
+        std::fs::create_dir(&directory).expect("create test directory");
+        let token = directory.join("relay.token");
+        std::fs::write(&token, "0123456789abcdef0123456789abcdef").expect("write token");
+        std::fs::set_permissions(&token, std::fs::Permissions::from_mode(0o600))
+            .expect("protect token");
+
+        let mode = build_relay_mode(
+            "custom",
+            vec![
+                "https://relay-a.example.test".to_owned(),
+                "https://relay-b.example.test".to_owned(),
+            ],
+            Some(&token),
+        )
+        .expect("valid custom relay mode");
+        assert!(matches!(mode, RelayMode::Custom(_)));
+        assert!(build_relay_mode("default", Vec::new(), None).is_ok());
+        assert!(
+            build_relay_mode(
+                "custom",
+                vec!["https://relay-a.example.test".into()],
+                Some(&token)
+            )
+            .is_err()
+        );
+        std::fs::set_permissions(&token, std::fs::Permissions::from_mode(0o644))
+            .expect("make token insecure");
+        assert!(
+            build_relay_mode(
+                "custom",
+                vec![
+                    "https://relay-a.example.test".into(),
+                    "https://relay-b.example.test".into(),
+                ],
+                Some(&token),
+            )
+            .is_err()
+        );
+        assert!(
+            build_relay_mode(
+                "custom",
+                vec![
+                    "https://user@relay-a.example.test".into(),
+                    "https://relay-b.example.test".into(),
+                ],
+                Some(&token),
+            )
+            .is_err()
+        );
+        std::fs::remove_dir_all(directory).expect("remove test directory");
+    }
 
     #[test]
     fn authoritative_precondition_rejection_is_terminal() {

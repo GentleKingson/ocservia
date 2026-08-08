@@ -3,6 +3,7 @@ package auth
 import (
 	"context"
 	"net/http"
+	"net/http/httptest"
 	"net/url"
 	"testing"
 	"time"
@@ -11,6 +12,33 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"golang.org/x/oauth2"
 )
+
+func TestOIDCTLSAndIssuerOutagesFailClosed(t *testing.T) {
+	tlsIssuer := httptest.NewTLSServer(http.NotFoundHandler())
+	defer tlsIssuer.Close()
+	service, err := New(context.Background(), &pgxpool.Pool{}, Config{Issuer: tlsIssuer.URL, ClientID: "client", ClientSecret: "secret", RedirectURL: "https://console.example/api/v1/auth/callback", SessionKey: make([]byte, 32), SessionTTL: time.Hour})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if location, cookie, err := service.BeginLogin(ctx); err == nil || location != "" || cookie != nil {
+		t.Fatalf("untrusted issuer TLS did not fail closed: location=%q cookie=%v err=%v", location, cookie, err)
+	}
+
+	unavailable := httptest.NewTLSServer(http.NotFoundHandler())
+	issuer := unavailable.URL
+	unavailable.Close()
+	service, err = New(context.Background(), &pgxpool.Pool{}, Config{Issuer: issuer, ClientID: "client", ClientSecret: "secret", RedirectURL: "https://console.example/api/v1/auth/callback", SessionKey: make([]byte, 32), SessionTTL: time.Hour})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel = context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if location, cookie, err := service.BeginLogin(ctx); err == nil || location != "" || cookie != nil {
+		t.Fatalf("unavailable issuer did not fail closed: location=%q cookie=%v err=%v", location, cookie, err)
+	}
+}
 
 func TestBeginLoginUsesPKCES256StateNonceAndSecureCookie(t *testing.T) {
 	service, err := New(context.Background(), &pgxpool.Pool{}, Config{Issuer: "https://idp.example", ClientID: "client", ClientSecret: "secret", RedirectURL: "https://console.example/api/v1/auth/callback", SessionKey: make([]byte, 32), SessionTTL: time.Hour})

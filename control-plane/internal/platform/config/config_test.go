@@ -1,9 +1,48 @@
 package config
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
+
+func TestSensitiveConfigurationFiles(t *testing.T) {
+	directory := t.TempDir()
+	database := filepath.Join(directory, "database-url")
+	session := filepath.Join(directory, "session-key")
+	if err := os.WriteFile(database, []byte("postgres://app:secret@postgres/ocservia\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(session, []byte(strings.Repeat("a", 64)+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	values := map[string]string{
+		"OCSERV_DATABASE_URL_FILE":         database,
+		"OCSERV_AUDIT_CHECKPOINT_KEY_FILE": session,
+	}
+	cfg, err := Load(nil, func(key string) (string, bool) { value, ok := values[key]; return value, ok })
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if cfg.DatabaseURL != "postgres://app:secret@postgres/ocservia" || len(cfg.AuditCheckpointKey) != 32 {
+		t.Fatalf("unexpected file-backed config: database=%q key=%d", cfg.DatabaseURL, len(cfg.AuditCheckpointKey))
+	}
+
+	values["OCSERV_DATABASE_URL"] = "postgres://inline/ocservia"
+	if _, err := Load(nil, func(key string) (string, bool) { value, ok := values[key]; return value, ok }); err == nil {
+		t.Fatal("Load() accepted both inline and file-backed database credentials")
+	}
+	delete(values, "OCSERV_DATABASE_URL")
+	symlink := filepath.Join(directory, "database-link")
+	if err := os.Symlink(database, symlink); err != nil {
+		t.Fatal(err)
+	}
+	values["OCSERV_DATABASE_URL_FILE"] = symlink
+	if _, err := Load(nil, func(key string) (string, bool) { value, ok := values[key]; return value, ok }); err == nil {
+		t.Fatal("Load() accepted a symlinked secret file")
+	}
+}
 
 func TestDevAuthGuard(t *testing.T) {
 	tests := []struct {
