@@ -2,3 +2,5 @@
 5a45012e67f1cccb080d5cbeec1faa07cc5acf7a:control-plane/internal/certificates/service_integration_test.go:generic-api-key:273
 f068b077476178b4e7445f59ef8d4de69d38589f:rust/crates/transportd/src/main.rs:generic-api-key:480
 f068b077476178b4e7445f59ef8d4de69d38589f:rust/crates/agent/src/main.rs:generic-api-key:1310
+bcef1f2c5f11ff911750e3d835f6fe4f42d47a68:rust/crates/transportd/src/main.rs:generic-api-key:491
+bcef1f2c5f11ff911750e3d835f6fe4f42d47a68:rust/crates/agent/src/main.rs:generic-api-key:1368
