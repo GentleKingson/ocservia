@@ -12,4 +12,21 @@ for variable in OCSERV_GATEWAY_IMAGE OCSERV_CONTROL_IMAGE OCSERV_TRANSPORT_IMAGE
   fi
 done
 
+for argument in "$@"; do
+  case "${argument}" in
+    up|create|run)
+      backup_dir="${OCSERV_BACKUP_DIR:-}"
+      if [[ -z "${backup_dir}" || ! -d "${backup_dir}" || -L "${backup_dir}" ]]; then
+        echo "OCSERV_BACKUP_DIR must be an existing real directory" >&2
+        exit 2
+      fi
+      if [[ "$(stat -c '%u:%g:%a' "${backup_dir}")" != "999:999:700" ]]; then
+        echo "OCSERV_BACKUP_DIR must be owned by uid:gid 999:999 with mode 0700" >&2
+        exit 2
+      fi
+      break
+      ;;
+  esac
+done
+
 exec docker compose -f "${ROOT}/deploy/production/compose.yaml" "$@"

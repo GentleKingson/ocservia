@@ -86,6 +86,13 @@ if OCSERV_RELAY_IMAGE=example.invalid/ocservia/relay:latest \
   echo "relay launcher accepted a mutable image tag" >&2
   exit 1
 fi
+mkdir "${work}/invalid-backup-owner"
+chmod 0755 "${work}/invalid-backup-owner"
+if OCSERV_BACKUP_DIR="${work}/invalid-backup-owner" \
+  "${ROOT}/deploy/production/compose.sh" up --no-start >/dev/null 2>&1; then
+  echo "production launcher accepted an unsafe backup directory" >&2
+  exit 1
+fi
 
 python3 - "${ARTIFACT_DIR}/platform-compose.json" "${ARTIFACT_DIR}/relay-compose.json" <<'PY'
 import json
@@ -131,6 +138,8 @@ for name in ("relay_access_token", "controller_iroh_key"):
     assert transport_secrets[name]["mode"] == "0400"
 assert services["control-plane"]["command"] == ["--role=all"]
 assert "transportd" not in services["control-plane"].get("depends_on", {})
+assert any("uid=999" in item and "gid=999" in item and "mode=0700" in item for item in services["backup"]["tmpfs"])
+assert "BACKUP_INTERVAL_SECONDS" in services["backup"]["healthcheck"]["test"][1]
 
 relay_service = relay["services"]["relay"]
 hardened(relay_service)
@@ -142,6 +151,12 @@ relay_token = next(item for item in relay_service["secrets"] if item["target"] =
 assert relay_token["uid"] == "65532" and relay_token["gid"] == "65532" and relay_token["mode"] == "0400"
 print("I18 production topology validation passed")
 PY
+
+if grep -R -E 'docker compose .*deploy/production/(compose|relay/compose)\.yaml' \
+  "${ROOT}/docs/operations"; then
+  echo "production documentation bypasses the digest-validating launcher" >&2
+  exit 1
+fi
 
 docker build --check -f "${ROOT}/control-plane/Dockerfile" "${ROOT}" \
   >"${ARTIFACT_DIR}/control-image-check.log"

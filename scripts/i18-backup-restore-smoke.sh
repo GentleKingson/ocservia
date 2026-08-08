@@ -17,8 +17,8 @@ restore_container="${network}-restore"
 backup_container="${network}-backup"
 backup_image="${network}-image"
 password="$(openssl rand -hex 24)"
-mkdir -p "${work}/backup" "${work}/restore" "${ARTIFACT_DIR}"
-chmod 0700 "${work}" "${work}/backup" "${work}/restore"
+mkdir -p "${work}/backup" "${work}/production-backup" "${work}/restore" "${ARTIFACT_DIR}"
+chmod 0700 "${work}" "${work}/backup" "${work}/production-backup" "${work}/restore"
 printf '%s:5432:replication:postgres:%s\n' "${source_container}" "${password}" >"${work}/postgres.pgpass"
 chmod 0644 "${work}/postgres.pgpass"
 
@@ -56,6 +56,8 @@ trap cleanup EXIT INT TERM
 docker network create "${network}" >/dev/null
 docker build -f "${ROOT}/deploy/production/backup.Dockerfile" -t "${backup_image}" "${ROOT}" \
   >"${ARTIFACT_DIR}/backup-image-build.log"
+docker run --rm -v "${work}:/work" --entrypoint chown "${POSTGRES_IMAGE}" \
+  -R 999:999 /work/production-backup
 docker run -d --name "${source_container}" --network "${network}" \
   -e POSTGRES_PASSWORD="${password}" -e POSTGRES_DB=ocservia \
   "${POSTGRES_IMAGE}" >/dev/null
@@ -79,6 +81,17 @@ docker exec -e PGPASSWORD="${password}" "${source_container}" \
   psql -v ON_ERROR_STOP=1 -U postgres -d ocservia \
   -c "CREATE TABLE restore_marker(value text NOT NULL); INSERT INTO restore_marker VALUES ('i18-restored');" \
   >"${ARTIFACT_DIR}/source-seed.log"
+
+docker run --name "${backup_container}" --network "${network}" \
+  --tmpfs /tmp:rw,noexec,nosuid,size=32m,mode=0700,uid=999,gid=999 \
+  -e PGHOST="${source_container}" -e PGDATABASE=ocservia -e PGUSER=postgres \
+  -e PGPASS_SOURCE=/run/secrets/postgres_pgpass -e BACKUP_ROOT=/var/lib/ocservia-backup \
+  -e RUN_ID="${RUN_ID}-production-user" \
+  -v "${work}/postgres.pgpass:/run/secrets/postgres_pgpass:ro" \
+  -v "${work}/production-backup:/var/lib/ocservia-backup" \
+  "${backup_image}" --once >"${ARTIFACT_DIR}/production-user-backup.log"
+docker rm "${backup_container}" >/dev/null
+test -s "${work}/production-backup/LATEST"
 
 docker run --name "${backup_container}" --network "${network}" \
   --user "$(id -u):$(id -g)" \

@@ -240,13 +240,13 @@ services:
     volumes:
       - ${OCSERV_BACKUP_DIR}:/var/lib/ocservia-backup
     tmpfs:
-      - /tmp:size=32m,mode=0700
+      - /tmp:size=32m,uid=999,gid=999,mode=0700
     networks: [database]
     depends_on:
       postgres:
         condition: service_healthy
     healthcheck:
-      test: ["CMD-SHELL", "find /var/lib/ocservia-backup/LATEST -mmin -31 -type f | grep -q ."]
+      test: ["CMD-SHELL", "find /var/lib/ocservia-backup/LATEST -mmin \"-$$((BACKUP_INTERVAL_SECONDS / 60 + 11))\" -type f | grep -q ."]
       interval: 5m
       timeout: 5s
       retries: 2

@@ -4,6 +4,12 @@ The production example in `deploy/production/compose.yaml` runs the HTTPS gatewa
 
 Use digest-pinned images for every `OCSERV_*_IMAGE` variable. Put referenced secret files on a protected host filesystem outside the checkout. Generate the Controller Iroh key into the protected `controller-iroh.key` secret before startup. The Controller key and relay token must be owned by UID 65532 with mode `0600`; other secret files must not be group/world writable. Do not place credentials in Compose environment variables.
 
+Provision the backup bind mount for the non-root PostgreSQL UID before startup. The launcher rejects missing, symbolic-link, incorrectly owned, or overly permissive paths:
+
+```bash
+sudo install -d -o 999 -g 999 -m 0700 "$OCSERV_BACKUP_DIR"
+```
+
 Launch the platform with `deploy/production/compose.sh up -d` and each dedicated relay with `deploy/production/relay/compose.sh up -d`. These launchers reject mutable image tags; direct Compose invocation is not a supported production path.
 
 Backups retain the configured number of verified base backups. WAL cleanup is anchored to the oldest retained base backup, so point-in-time recovery remains possible across the retained window without allowing the local archive to grow forever. Monitor backup-worker health and the `LATEST` timestamp, copy each completed base backup plus its required WAL range to protected off-host storage, and confirm the off-host copy before reducing local retention.
@@ -22,8 +28,8 @@ The control plane runs `--role=all`. Terminate public TLS at the gateway. Config
 Before starting, validate rendered configuration without printing secret contents:
 
 ```bash
-docker compose -f deploy/production/compose.yaml config --quiet
-docker compose -f deploy/production/compose.yaml up -d
+deploy/production/compose.sh config --quiet
+deploy/production/compose.sh up -d
 ```
 
 Verify `/readyz`, an authenticated read, a node connection through each relay, OTLP delivery, and a restore from the newest backup. Never expose PostgreSQL, Unix sockets, Docker sockets, or host `/proc` and `/sys` mounts.
