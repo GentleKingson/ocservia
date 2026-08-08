@@ -91,7 +91,8 @@ docker run --name "${backup_container}" --network "${network}" \
   -v "${work}/production-backup:/var/lib/ocservia-backup" \
   "${backup_image}" --once >"${ARTIFACT_DIR}/production-user-backup.log"
 docker rm "${backup_container}" >/dev/null
-test -s "${work}/production-backup/LATEST"
+docker run --rm -v "${work}/production-backup:/backup:ro" --entrypoint test \
+  "${POSTGRES_IMAGE}" -s /backup/LATEST
 
 docker run --name "${backup_container}" --network "${network}" \
   --user "$(id -u):$(id -g)" \
