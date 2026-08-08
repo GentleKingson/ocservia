@@ -19,7 +19,7 @@ backup_image="${network}-image"
 password="$(openssl rand -hex 24)"
 mkdir -p "${work}/backup" "${work}/restore" "${ARTIFACT_DIR}"
 chmod 0700 "${work}" "${work}/backup" "${work}/restore"
-printf '%s:5432:ocservia:postgres:%s\n' "${source_container}" "${password}" >"${work}/postgres.pgpass"
+printf '%s:5432:replication:postgres:%s\n' "${source_container}" "${password}" >"${work}/postgres.pgpass"
 chmod 0644 "${work}/postgres.pgpass"
 
 cleanup() {
