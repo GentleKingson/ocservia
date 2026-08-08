@@ -1,51 +1,68 @@
 # GitHub Actions validation
 
-GitHub Actions is the authoritative merge-time validation environment. Every
-formal job uses a fresh GitHub-hosted `ubuntu-24.04` VM with read-only repository
-permissions. Pull requests and pushes to `main` run the primary workflow;
-maintainers can also start it manually. The full P1 profile is a separate manual
-workflow. Local commands reproduce behavior but never replace required checks.
-The primary workflow uses eight execution jobs and one final `CI Gate`. Each
-execution job bootstraps and verifies its own pinned tools; there is no separate
-toolchain job because jobs do not share a runner filesystem.
+GitHub Actions is the authoritative merge-time validation environment. The
+primary workflow runs three independent execution jobs in parallel on fresh
+GitHub-hosted `ubuntu-24.04` VMs with read-only repository permissions. Pull
+requests and pushes to `main` run the workflow, and maintainers can also start
+it manually. Local commands reproduce behavior but never replace required
+checks.
+
+During the required-check migration, a temporary `CI Gate` compatibility job
+depends on the three execution jobs. It is removed after the branch ruleset
+requires the three execution checks directly.
 
 ## Coverage
 
-| Job                      | Commands and level                                                                     | Dependencies                                    | Trigger            | Typical budget   |
-| ------------------------ | -------------------------------------------------------------------------------------- | ----------------------------------------------- | ------------------ | ---------------- |
-| Public Repository Policy | repository policy tests and `docs-check.sh`                                            | Git                                             | PR, `main`, manual | under 2 minutes  |
-| Contracts                | generation, Buf format/lint/breaking, OpenAPI lint/compatibility, generated-clean      | pinned toolchain, Git history                   | PR, `main`, manual | 2-5 minutes      |
-| Go                       | language checks, PostgreSQL 17/18, then Go/PostgreSQL/UDS/Rust-stub local slice        | Go, Rust, Docker, `/proc`, loopback/UDS         | PR, `main`, manual | 8-25 minutes     |
-| Rust                     | fmt, check, clippy, workspace tests, docs, audit and deny                              | Cargo                                           | PR, `main`, manual | 5-15 minutes     |
-| Native Ocserv            | native `ocpasswd`/OpenSSL adapter and real loopback Ocserv login                       | ephemeral Ubuntu packages and safe root fixture | PR, `main`, manual | 5-15 minutes     |
-| Web                      | static/unit/build/audit checks, then isolated Compose Playwright desktop/mobile E2E    | Node/npm and Docker Compose                     | PR, `main`, manual | 8-20 minutes     |
-| P1 Smoke                 | boundary tests plus all resilience phases at reduced load                              | Docker Compose, curl, jq                        | PR, `main`, manual | 8-20 minutes     |
-| Security and Licenses    | privilege/transport boundaries, secret scan and licenses                               | Git history and pinned scanners                 | PR, `main`, manual | 2-5 minutes      |
-| CI Gate                  | rejects any failed, cancelled, or skipped execution job                                | results of all eight execution jobs             | PR, `main`, manual | under 2 minutes  |
-| P1 Full Validation       | default 500-Agent single-VM profile and all fault phases                               | Docker Compose, standard runner resources       | manual only        | up to 45 minutes |
+| Job | Commands and level | Bootstrap profile | Trigger | Hard timeout |
+| --- | --- | --- | --- | --- |
+| Backend Integration | Go checks, PostgreSQL 17/18, I14-I19 boundaries, production topology and relay recovery, and the Go/PostgreSQL/UDS/Rust-stub local slice | `go-integration` | PR, `main`, manual | 40 minutes |
+| Web & Smoke | Web static/unit/build/audit checks, isolated Compose Playwright desktop/mobile E2E, P1 harness tests, and the unchanged 24-Agent smoke profile | `web` | PR, `main`, manual | 35 minutes |
+| Quality, Security & Native | repository policy, docs, workflow policy, contracts, Rust, privilege and transport boundaries, secret and license checks, then native Ocserv | `ci-quality` | PR, `main`, manual | 30 minutes |
+| P1 Full Validation | default 500-Agent single-VM profile and all fault phases | none | manual only | 45 minutes |
 
 The focused I10 journal tests are included in the Rust workspace run. The I11
-Go/Rust tests are included in the language jobs and its boundary assertions run
-in the security job. Separate focused jobs would repeat the same expensive
+Go/Rust tests are included in the language checks and its boundary assertions
+run in the quality job. Separate focused jobs would repeat the same expensive
 workspace tests, so their scripts remain local reproduction commands.
 
-The Go job also validates the hardened production Compose topology, a
+Backend Integration also validates the hardened production Compose topology, a
 controlled two-relay failover, PostgreSQL base-backup restore, and the signed
 Agent package install, upgrade, uninstall, and state-retention lifecycle.
 
+Native Ocserv is deliberately last in Quality, Security & Native. Its ephemeral
+package installation and root fixture cannot affect policy, contract, Rust,
+security, or license validation earlier on the VM. The fixture still captures
+diagnostics before performing scoped cleanup and fails if cleanup or artifact
+secret scanning fails.
+
+P1 Full Validation remains a separate `workflow_dispatch` workflow because the
+500-Agent profile is capacity evidence, not ordinary pull-request feedback. The
+primary workflow runs the unchanged smoke parameters only.
+
 ## Reproducibility and caches
 
-`toolchains.lock` is the version source and `scripts/checksums.txt` authenticates
-downloaded binaries. CI does not add an independent setup action or toolchain
-version source. Every tool-dependent job passes an explicit, job-oriented
-bootstrap profile and restores a versioned cache for that profile. Tooling keys
-also include the bootstrap and environment scripts, so layout changes invalidate
-old entries. npm's download cache is separate and is used only by Contracts,
-Web, and Security and Licenses; Go build/module caches and Rust targets use their
-own dependency inputs. A cache miss is fully supported, bootstrap still checks
-versions and checksums after restore, and `node_modules`, credentials,
-environment files, logs, and test artifacts are never cached. Locally,
-`make bootstrap` explicitly selects the complete `all` profile.
+`toolchains.lock` is the only version source and `scripts/checksums.txt`
+authenticates downloaded binaries. Each execution job invokes exactly one
+explicit bootstrap profile. The combined `ci-quality` profile installs Go,
+Node/npm, Rust, Buf, OpenAPI Generator, oasdiff, gitleaks, rustfmt, clippy,
+`cargo-audit`, and `cargo-deny`, then installs Web dependencies once. It relies
+on the runner's Java runtime for OpenAPI Generator and does not install protoc
+because contract generation uses pinned Buf remote plugins.
+
+Cache ownership is intentionally narrow:
+
+| Job | Cached paths |
+| --- | --- |
+| Backend Integration | `.cache/downloads`, `.tools`, `.cache/go-build`, `.cache/go-mod`, `.cache/gopath` |
+| Web & Smoke | `.cache/downloads`, `.tools`, `.cache/npm` |
+| Quality, Security & Native | `.cache/downloads`, `.tools`, `.cache/npm`, `.cache/go-mod`, `rust/target` |
+
+Keys include the lockfiles and scripts that determine their contents. There are
+no broad restore keys. A cache miss is fully supported, and bootstrap still
+checks versions and checksums after restore. CI never caches `node_modules`,
+credentials, environment files, logs, or test artifacts. Backend does not cache
+`rust/target`; Quality owns that build cache. Locally, `make bootstrap`
+explicitly selects the complete `all` profile.
 
 All external Actions are pinned to full commits. Checkout does not persist its
 credential. The workflows do not use secrets, `pull_request_target`, production
@@ -53,31 +70,48 @@ services, self-hosted runners, or application access to the Docker socket.
 
 ## Artifacts and debugging
 
-Integration scripts write only to `RUNNER_TEMP`, capture diagnostics before
-cleanup, remove their own uniquely named resources, and fail when scoped
-resources remain. Artifacts are named with the workflow run and attempt:
+Each execution job uploads one top-level artifact named with the workflow run
+and attempt:
 
-| Suite                   | Artifact contents                                                                                                   |
-| ----------------------- | ------------------------------------------------------------------------------------------------------------------- |
-| Contracts               | generated-output diff and Git status                                                                                |
-| Go                      | Go check log plus separate database-integration and local-slice diagnostic directories                             |
-| Rust                    | complete check log                                                                                                  |
-| Native Ocserv           | Ocserv and OpenConnect logs without keys or passwords                                                               |
-| Web                     | Web check log plus Playwright report/results/traces/screenshots/videos and Compose diagnostics                      |
-| P1 Smoke/Full           | parameters, metrics, summary, resource samples, fault outputs, disk snapshots, Compose logs, status and exit status |
+| Artifact | Suite directories and contents |
+| --- | --- |
+| `backend-<run>-<attempt>` | Go check, database integration, I14-I19, and local-slice logs and diagnostics |
+| `web-smoke-<run>-<attempt>` | Web check log, Playwright report/results/traces/screenshots/videos, P1 metrics, fault outputs, and Compose diagnostics |
+| `quality-<run>-<attempt>` | generated-output diff and status, Rust check log, and native Ocserv/OpenConnect diagnostics without keys or passwords |
+| `p1-full-<run>-<attempt>` | manual full-profile parameters, metrics, resource samples, fault outputs, disk snapshots, Compose logs, and exit status |
 
-Open the failed workflow run, download the artifact for its job, and inspect the
-exit-status or suite log first. Reproduce from the same commit with
-`make bootstrap` and the script named by the job; set a unique `RUN_ID` or
-`COMPOSE_PROJECT` for Docker tests. `make verify` covers the local language,
-contract, security, generated, and policy baseline, while `make e2e` reproduces
-the browser stack.
+E2E and P1 Smoke have different `RUN_ID`, `COMPOSE_PROJECT`, and artifact
+directories. Their scripts capture diagnostics before cleanup, run Compose
+`down --volumes --remove-orphans`, remove only their scoped resources, preserve
+the original test result, and turn cleanup leftovers into job failures.
+
+Open the failed workflow run, select the named step, then download its job
+artifact and inspect the suite log or exit status. Reproduce from the same
+commit with `make bootstrap` and the script named by the step. Use unique
+`RUN_ID` and `COMPOSE_PROJECT` values for Docker tests. `make verify` covers the
+local language, contract, security, generated, and policy baseline; `make e2e`
+reproduces the browser stack.
+
+## Required checks
+
+The final branch ruleset requires all three execution check names with strict
+up-to-date checking:
+
+- `Backend Integration`
+- `Web & Smoke`
+- `Quality, Security & Native`
+
+GitHub's required-check AND semantics replace the old single-runner gate. Never
+remove the compatibility `CI Gate` from the workflow while a ruleset still
+requires it. Confirm the three new checks succeed first, update only the
+ruleset's required-status-check set, read it back, and then remove the
+compatibility job.
 
 ## Deferred native validation
 
 The `native_user_and_group_operations` ignored test and the real I13 loopback
-login are automated in `Native Ocserv`. Pure adapter logic remains in ordinary
-Rust tests. These tests are not reported as hosted validation:
+login are automated in Quality, Security & Native. Pure adapter logic remains
+in ordinary Rust tests. These tests are not reported as hosted validation:
 
 - `native_controlled_operations` needs prepared live sessions, an IP ban, and a
   real `ocserv.service` lifecycle. A future isolated fixture must create those
@@ -86,11 +120,11 @@ Rust tests. These tests are not reported as hosted validation:
   service. It should move with the same ephemeral systemd fixture.
 - `relay_only_connection_and_disabled_relay_failure` and
   `relay_and_direct_paths_converge_to_direct` depend on a public Iroh relay and
-  remain deferred. The required I18 check instead uses two controlled local
-  relays and deliberately removes the first relay before proving reconnection
-  through the second.
+  remain deferred. The required Backend Integration check instead uses two
+  controlled local relays and deliberately removes the first relay before
+  proving reconnection through the second.
 
-A change is fully validated only when all required checks for its exact commit
-pass, applicable diagnostic artifacts are available, cleanup succeeded, and any
-deferred native or independent gate requirement is either completed in its
-defined environment or explicitly remains `IN_REVIEW`.
+A change is fully validated only when required checks for its exact commit pass,
+diagnostic artifacts are available, cleanup succeeded, and any deferred native
+or independent gate requirement is completed in its defined environment or
+explicitly remains `IN_REVIEW`.
