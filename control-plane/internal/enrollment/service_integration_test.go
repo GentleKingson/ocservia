@@ -259,7 +259,10 @@ func TestEnrollmentTrustLifecycleIntegration(t *testing.T) {
 	if err != nil || !ed25519.Verify(service.signer.PublicKey(), canonical, grant.GetSignature()) {
 		t.Fatalf("Controller session grant signature invalid: %v", err)
 	}
-	if _, err := pool.Exec(ctx, `UPDATE node_capabilities SET approved=false WHERE node_id=$1 AND capability='ocserv.status.read'; UPDATE nodes SET authorization_revision=authorization_revision+1 WHERE id=$1`, nodeID); err != nil {
+	if _, err := pool.Exec(ctx, `UPDATE node_capabilities SET approved=false WHERE node_id=$1 AND capability='ocserv.status.read'`, nodeID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `UPDATE nodes SET authorization_revision=authorization_revision+1 WHERE id=$1`, nodeID); err != nil {
 		t.Fatal(err)
 	}
 	handshake.Capabilities = []string{"ocserv.status.read"}
