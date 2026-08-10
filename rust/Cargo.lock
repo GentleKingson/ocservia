@@ -2434,10 +2434,12 @@ dependencies = [
 name = "ocservia-agent"
 version = "0.1.0"
 dependencies = [
+ "ed25519-dalek",
  "hex",
  "iroh",
  "ocservia-agent-identity",
  "ocservia-agent-protocol",
+ "ocservia-command-authorization",
  "ocservia-command-journal",
  "ocservia-contracts",
  "ocservia-observability",
@@ -2470,6 +2472,19 @@ version = "0.1.0"
 dependencies = [
  "prost",
  "tokio",
+]
+
+[[package]]
+name = "ocservia-command-authorization"
+version = "0.1.0"
+dependencies = [
+ "ed25519-dalek",
+ "hex",
+ "ocservia-contracts",
+ "prost-types",
+ "rustix",
+ "serde_json",
+ "sha2 0.10.9",
 ]
 
 [[package]]

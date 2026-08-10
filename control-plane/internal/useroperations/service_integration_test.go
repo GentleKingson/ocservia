@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/GentleKingson/ocservia/control-plane/internal/approvals"
+	"github.com/GentleKingson/ocservia/control-plane/internal/commandauth"
 	"github.com/GentleKingson/ocservia/control-plane/internal/userstate"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -59,7 +60,9 @@ func TestQuotaExpirySchedulerBatchAndUsageIntegration(t *testing.T) {
 	}
 
 	now := time.Date(2026, 8, 7, 12, 0, 0, 0, time.UTC)
-	service := New(pool, userstate.New(pool))
+	var commandSeed [32]byte
+	commandSeed[0] = 3
+	service := New(pool, userstate.NewWithSigner(pool, commandauth.NewSignerFromSeed(commandSeed)))
 	service.now = func() time.Time { return now }
 	request := PolicyRequest{NodeID: nodeID, Username: "alice", QuotaPeriod: "monthly", QuotaDirection: "rxtx", QuotaBytes: 300, ExpectedVersion: 0, IdempotencyKey: "alice-policy", ActorID: "operator", Reason: "ticket", RequestID: "request-policy", Traceparent: testTraceparent}
 	policy, replayed, err := service.SetPolicy(ctx, request)

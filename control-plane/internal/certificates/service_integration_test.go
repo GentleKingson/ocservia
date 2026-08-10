@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/GentleKingson/ocservia/control-plane/internal/approvals"
+	"github.com/GentleKingson/ocservia/control-plane/internal/commandauth"
 	"github.com/GentleKingson/ocservia/control-plane/internal/operations"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -126,7 +127,9 @@ func TestCertificateIssueArtifactAndRevokeIntegration(t *testing.T) {
 	}()
 	pki := newFixturePKI(t)
 	artifactBytes := []byte("encrypted-p12-fixture")
-	service := NewWithDependencies(pool, operations.New(pool), pki, pki, fixtureArtifacts{data: artifactBytes})
+	var commandSeed [32]byte
+	commandSeed[0] = 5
+	service := NewWithDependencies(pool, operations.NewWithSigner(pool, 50, commandauth.NewSignerFromSeed(commandSeed)), pki, pki, fixtureArtifacts{data: artifactBytes})
 	certificate, replayed, err := service.Create(ctx, CreateRequest{NodeID: nodeID, ActorIdentityID: requesterID, ActorSessionID: requesterSession, ExpectedVersion: 1, IdempotencyKey: "i17-csr", CommonName: "node.example.test", DNSNames: []string{"node.example.test"}, KeyBits: 2048, ActorID: requesterID.String(), Reason: "issue node certificate", RequestID: "i17-csr-request", Traceparent: "00-0123456789abcdef0123456789abcdef-0123456789abcdef-01"})
 	if err != nil || replayed {
 		t.Fatalf("create certificate replay=%v err=%v", replayed, err)

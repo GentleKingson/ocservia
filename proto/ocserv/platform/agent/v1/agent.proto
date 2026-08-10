@@ -96,6 +96,21 @@ enum SemanticPayloadHashVersion {
   SEMANTIC_PAYLOAD_HASH_VERSION_V1 = 1;
 }
 
+// CommandAuthorizationVersion selects the canonical Controller authorization
+// format. Command authorization is independent of Protobuf serialization.
+enum CommandAuthorizationVersion {
+  COMMAND_AUTHORIZATION_VERSION_UNSPECIFIED = 0;
+  COMMAND_AUTHORIZATION_VERSION_V1 = 1;
+}
+
+// CommandAuthorizationProof is issued by the Controller and only relayed by
+// transportd. The signature covers CommandAuthorizationV1 canonical bytes.
+message CommandAuthorizationProof {
+  CommandAuthorizationVersion version = 1;
+  string key_id = 2;
+  bytes signature = 3;
+}
+
 // CommandResult is persisted before it is placed on the response stream.
 message CommandResult {
   bytes command_id = 1;
@@ -232,6 +247,12 @@ message CommandEnvelope {
   CommandDeliveryMode delivery_mode = 109;
   SemanticPayloadHashVersion semantic_payload_hash_version = 110;
   bytes semantic_payload_sha256 = 111;
+  bytes operation_id = 120;
+  string action = 121;
+  string required_capability = 122;
+  bytes approval_id = 123;
+  bytes approval_request_sha256 = 124;
+  CommandAuthorizationProof authorization = 125;
 }
 
 message SessionDisconnect {

@@ -11,6 +11,7 @@ iroh.workspace = true
 hex.workspace = true
 ocservia-agent-identity = { version = "=0.1.0", path = "../agent-identity" }
 ocservia-agent-protocol = { version = "=0.1.0", path = "../agent-protocol" }
+ocservia-command-authorization = { version = "=0.1.0", path = "../command-authorization" }
 ocservia-command-journal = { version = "=0.1.0", path = "../command-journal" }
 ocservia-contracts = { version = "=0.1.0", path = "../contracts" }
 ocservia-observability = { version = "=0.1.0", path = "../observability" }
@@ -25,6 +26,9 @@ tokio = { workspace = true, features = ["fs", "io-util", "macros", "net", "rt-mu
 tracing.workspace = true
 uuid = { workspace = true, features = ["v7"] }
 zeroize.workspace = true
+
+[dev-dependencies]
+ed25519-dalek.workspace = true
 
 [lints]
 workspace = true

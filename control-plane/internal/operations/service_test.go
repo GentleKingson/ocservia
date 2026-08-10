@@ -1,11 +1,22 @@
 package operations
 
 import (
+	"crypto/ed25519"
 	"testing"
 	"time"
 
+	agentv1 "github.com/GentleKingson/ocservia/control-plane/gen/proto/ocserv/platform/agent/v1"
+	"github.com/GentleKingson/ocservia/control-plane/internal/commandauth"
 	"github.com/google/uuid"
+	"google.golang.org/protobuf/proto"
 )
+
+func testCommandSigner(t *testing.T) *commandauth.Signer {
+	t.Helper()
+	var seed [32]byte
+	seed[0] = 1
+	return commandauth.NewSignerFromSeed(seed)
+}
 
 func TestValidateCreateRejectsUntypedOrOversizedSyntheticPayload(t *testing.T) {
 	base := CreateRequest{NodeID: uuid.Must(uuid.NewV7()), IdempotencyKey: "stable-key", ExpectedVersion: 1, Kind: SyntheticNoop, TTL: time.Minute, RequestID: "request", Traceparent: "00-0123456789abcdef0123456789abcdef-0123456789abcdef-01"}
@@ -27,9 +38,25 @@ func TestValidateCreateRejectsUntypedOrOversizedSyntheticPayload(t *testing.T) {
 
 func TestMarshalEnvelopeUsesTypedOneof(t *testing.T) {
 	request := CreateRequest{NodeID: uuid.Must(uuid.NewV7()), IdempotencyKey: "stable-key", ExpectedVersion: 4, Kind: SyntheticEcho, Message: "hello", TTL: time.Minute, RequestID: "request", Traceparent: "00-0123456789abcdef0123456789abcdef-0123456789abcdef-01"}
-	data, payloadType, err := marshalEnvelope(request, uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7()), time.Now(), time.Now().Add(time.Minute))
+	signer := testCommandSigner(t)
+	data, payloadType, err := marshalEnvelope(request, uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7()), time.Now(), time.Now().Add(time.Minute), signer)
 	if err != nil || payloadType != "synthetic_echo" || len(data) == 0 {
 		t.Fatalf("marshalEnvelope() = %q, %d bytes, %v", payloadType, len(data), err)
+	}
+	var envelope agentv1.CommandEnvelope
+	if err := proto.Unmarshal(data, &envelope); err != nil {
+		t.Fatal(err)
+	}
+	claims, err := commandauth.ClaimsFromEnvelopeV1(&envelope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	canonical, err := commandauth.CanonicalV1(claims)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if envelope.GetProtocolVersion() != commandauth.ProtocolVersion || envelope.GetAction() != "operation.create" || envelope.GetRequiredCapability() != "synthetic.echo" || !ed25519.Verify(signer.PublicKey(), canonical, envelope.GetAuthorization().GetSignature()) {
+		t.Fatal("typed command was not authorized after its final semantic fields")
 	}
 }
 
@@ -73,7 +100,7 @@ func TestControlledOperationsRequireTypedTargetsAndReason(t *testing.T) {
 			if err := validateCreate(request); err != nil {
 				t.Fatalf("validateCreate() = %v", err)
 			}
-			data, payloadType, err := marshalEnvelope(request, uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7()), time.Now(), time.Now().Add(time.Minute))
+			data, payloadType, err := marshalEnvelope(request, uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7()), time.Now(), time.Now().Add(time.Minute), testCommandSigner(t))
 			if err != nil || len(data) == 0 || payloadType == "" {
 				t.Fatalf("marshalEnvelope() = %q, %d, %v", payloadType, len(data), err)
 			}

@@ -2,6 +2,7 @@ package localslice
 
 import (
 	"context"
+	"crypto/ed25519"
 	"crypto/sha256"
 	"encoding/binary"
 	"encoding/hex"
@@ -15,6 +16,7 @@ import (
 
 	agentv1 "github.com/GentleKingson/ocservia/control-plane/gen/proto/ocserv/platform/agent/v1"
 	transportv1 "github.com/GentleKingson/ocservia/control-plane/gen/proto/ocserv/platform/transport/v1"
+	"github.com/GentleKingson/ocservia/control-plane/internal/commandauth"
 	"github.com/GentleKingson/ocservia/control-plane/internal/semanticpayload"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -92,7 +94,7 @@ func TestDisconnectedEventPreservesUntrustedNodeStatesIntegration(t *testing.T) 
 			t.Fatal(err)
 		}
 		eventID := uuid.Must(uuid.NewV7())
-		err = New(pool).Ingest(ctx, &transportv1.TransportEvent{EventId: eventID[:], NodeId: nodeID[:], Type: transportv1.TransportEventType_TRANSPORT_EVENT_TYPE_DISCONNECTED, OccurredAt: timestamppb.Now(), Traceparent: "00-0123456789abcdef0123456789abcdef-0123456789abcdef-01", Payload: []byte(initialStatus + " disconnect")})
+		err = NewWithSigner(pool, integrationCommandSigner()).Ingest(ctx, &transportv1.TransportEvent{EventId: eventID[:], NodeId: nodeID[:], Type: transportv1.TransportEventType_TRANSPORT_EVENT_TYPE_DISCONNECTED, OccurredAt: timestamppb.Now(), Traceparent: "00-0123456789abcdef0123456789abcdef-0123456789abcdef-01", Payload: []byte(initialStatus + " disconnect")})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -141,7 +143,14 @@ func TestStructuredAgentResultPersistsUnknownBeforeReconciledSuccessIntegration(
 	operationID, commandID, idempotencyKey := uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7())
 	messageID := uuid.Must(uuid.NewV7())
 	now := time.Now().UTC()
-	envelope := agentv1.CommandEnvelope{ProtocolVersion: "1.0", MessageId: messageID[:], CommandId: commandID[:], IdempotencyKey: idempotencyKey[:], NodeId: nodeID[:], Sequence: 1, IssuedAt: timestamppb.New(now), ExpiresAt: timestamppb.New(now.Add(time.Minute)), ExpectedRevision: 1, Traceparent: "00-0123456789abcdef0123456789abcdef-0123456789abcdef-01", ActorId: "test", Reason: "I10 result ingestion", DeliveryMode: agentv1.CommandDeliveryMode_COMMAND_DELIVERY_MODE_EXECUTE_OR_REPLAY, Payload: &agentv1.CommandEnvelope_SyntheticEcho{SyntheticEcho: &agentv1.SyntheticEcho{Message: "hello"}}}
+	signer := integrationCommandSigner()
+	envelope := agentv1.CommandEnvelope{ProtocolVersion: commandauth.ProtocolVersion, MessageId: messageID[:], CommandId: commandID[:], IdempotencyKey: idempotencyKey[:], NodeId: nodeID[:], Sequence: 1, IssuedAt: timestamppb.New(now), ExpiresAt: timestamppb.New(now.Add(time.Minute)), ExpectedRevision: 1, Traceparent: "00-0123456789abcdef0123456789abcdef-0123456789abcdef-01", ActorId: "test", Reason: "I10 result ingestion", OperationId: operationID[:], Action: "operation.create", RequiredCapability: "synthetic.echo", DeliveryMode: agentv1.CommandDeliveryMode_COMMAND_DELIVERY_MODE_EXECUTE_OR_REPLAY, Payload: &agentv1.CommandEnvelope_SyntheticEcho{SyntheticEcho: &agentv1.SyntheticEcho{Message: "hello"}}}
+	if err := semanticpayload.PopulateV1(&envelope); err != nil {
+		t.Fatal(err)
+	}
+	if err := signer.Authorize(&envelope); err != nil {
+		t.Fatal(err)
+	}
 	envelopeBytes, err := proto.Marshal(&envelope)
 	if err != nil {
 		t.Fatal(err)
@@ -152,13 +161,13 @@ func TestStructuredAgentResultPersistsUnknownBeforeReconciledSuccessIntegration(
 	if _, err := pool.Exec(ctx, `INSERT INTO commands(id,operation_id,workspace_id,node_id,state,payload_type,envelope,idempotency_key,expected_version,sequence,traceparent,expires_at,created_at,updated_at) VALUES($1,$2,$3,$4,'dispatched','synthetic_echo',$5,'journal-result',1,1,$6,$7,$8,$8)`, commandID, operationID, workspaceID, nodeID, envelopeBytes, envelope.GetTraceparent(), now.Add(time.Minute), now); err != nil {
 		t.Fatal(err)
 	}
-	payloadHash, err := agentPayloadHash(&envelope)
+	payloadHash, err := semanticpayload.HashV1(&envelope)
 	if err != nil {
 		t.Fatal(err)
 	}
 	ingest := func(state agentv1.CommandResultState, replayed bool) {
 		t.Helper()
-		result := &agentv1.CommandResult{CommandId: envelope.GetCommandId(), IdempotencyKey: envelope.GetIdempotencyKey(), PayloadSha256: payloadHash[:], State: state, Result: []byte("hello"), AcceptedAt: timestamppb.Now(), CompletedAt: timestamppb.Now(), Replayed: replayed}
+		result := &agentv1.CommandResult{CommandId: envelope.GetCommandId(), IdempotencyKey: envelope.GetIdempotencyKey(), PayloadSha256: payloadHash[:], State: state, Result: []byte("hello"), AcceptedAt: timestamppb.Now(), CompletedAt: timestamppb.Now(), Replayed: replayed, SemanticPayloadHashVersion: agentv1.SemanticPayloadHashVersion_SEMANTIC_PAYLOAD_HASH_VERSION_V1}
 		if state == agentv1.CommandResultState_COMMAND_RESULT_STATE_UNKNOWN {
 			result.Result = nil
 			result.ErrorCode = "outcome_requires_reconciliation"
@@ -168,7 +177,7 @@ func TestStructuredAgentResultPersistsUnknownBeforeReconciledSuccessIntegration(
 			t.Fatal(err)
 		}
 		eventID := uuid.Must(uuid.NewV7())
-		if err := New(pool).Ingest(ctx, &transportv1.TransportEvent{EventId: eventID[:], NodeId: nodeID[:], Type: transportv1.TransportEventType_TRANSPORT_EVENT_TYPE_COMMAND_RESULT, OccurredAt: timestamppb.Now(), Traceparent: envelope.GetTraceparent(), Payload: payload}); err != nil {
+		if err := NewWithSigner(pool, signer).Ingest(ctx, &transportv1.TransportEvent{EventId: eventID[:], NodeId: nodeID[:], Type: transportv1.TransportEventType_TRANSPORT_EVENT_TYPE_COMMAND_RESULT, OccurredAt: timestamppb.Now(), Traceparent: envelope.GetTraceparent(), Payload: payload}); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -190,6 +199,7 @@ func TestStructuredAgentResultPersistsUnknownBeforeReconciledSuccessIntegration(
 type commandResultFixture struct {
 	pool         *pgxpool.Pool
 	service      *Service
+	signer       *commandauth.Signer
 	workspaceID  uuid.UUID
 	nodeID       uuid.UUID
 	operationID  uuid.UUID
@@ -217,13 +227,21 @@ func newCommandResultFixture(t *testing.T) commandResultFixture {
 	messageID := uuid.Must(uuid.NewV7())
 	now := time.Now().UTC().Truncate(time.Microsecond)
 	traceparent := "00-1123456789abcdef0123456789abcdef-1123456789abcdef-01"
+	signer := integrationCommandSigner()
 	envelope := agentv1.CommandEnvelope{
-		ProtocolVersion: "1.0", MessageId: messageID[:], CommandId: commandID[:],
+		ProtocolVersion: commandauth.ProtocolVersion, MessageId: messageID[:], CommandId: commandID[:],
 		IdempotencyKey: key[:], NodeId: nodeID[:], Sequence: 1,
 		IssuedAt: timestamppb.New(now), ExpiresAt: timestamppb.New(now.Add(time.Hour)),
 		ExpectedRevision: 1, Traceparent: traceparent, ActorId: "test", Reason: "strict result validation",
+		OperationId: operationID[:], Action: "operation.create", RequiredCapability: "synthetic.echo",
 		DeliveryMode: agentv1.CommandDeliveryMode_COMMAND_DELIVERY_MODE_EXECUTE_OR_REPLAY,
 		Payload:      &agentv1.CommandEnvelope_SyntheticEcho{SyntheticEcho: &agentv1.SyntheticEcho{Message: "hello"}},
+	}
+	if err := semanticpayload.PopulateV1(&envelope); err != nil {
+		t.Fatal(err)
+	}
+	if err := signer.Authorize(&envelope); err != nil {
+		t.Fatal(err)
 	}
 	envelopeBytes, err := proto.Marshal(&envelope)
 	if err != nil {
@@ -241,7 +259,7 @@ func newCommandResultFixture(t *testing.T) commandResultFixture {
 	if _, err := pool.Exec(ctx, `INSERT INTO commands(id,operation_id,workspace_id,node_id,state,payload_type,envelope,idempotency_key,expected_version,sequence,traceparent,expires_at,created_at,updated_at) VALUES($1,$2,$3,$4,'dispatched','synthetic_echo',$5,'strict-result',1,1,$6,$7,$8,$8)`, commandID, operationID, workspaceID, nodeID, envelopeBytes, traceparent, now.Add(time.Hour), now); err != nil {
 		t.Fatal(err)
 	}
-	payloadHash, err := agentPayloadHash(&envelope)
+	payloadHash, err := semanticpayload.HashV1(&envelope)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -258,7 +276,13 @@ func newCommandResultFixture(t *testing.T) commandResultFixture {
 		}
 		pool.Close()
 	})
-	return commandResultFixture{pool: pool, service: New(pool), workspaceID: workspaceID, nodeID: nodeID, operationID: operationID, commandID: commandID, envelope: &envelope, payloadHash: payloadHash, traceparent: traceparent, issuedAt: now, originalTime: now}
+	return commandResultFixture{pool: pool, service: NewWithSigner(pool, signer), signer: signer, workspaceID: workspaceID, nodeID: nodeID, operationID: operationID, commandID: commandID, envelope: &envelope, payloadHash: payloadHash, traceparent: traceparent, issuedAt: now, originalTime: now}
+}
+
+func integrationCommandSigner() *commandauth.Signer {
+	var seed [32]byte
+	seed[0] = 6
+	return commandauth.NewSignerFromSeed(seed)
 }
 
 func (fixture *commandResultFixture) validResult() *agentv1.CommandResult {
@@ -266,6 +290,7 @@ func (fixture *commandResultFixture) validResult() *agentv1.CommandResult {
 		CommandId: fixture.commandID[:], IdempotencyKey: fixture.envelope.GetIdempotencyKey(),
 		PayloadSha256: fixture.payloadHash[:], State: agentv1.CommandResultState_COMMAND_RESULT_STATE_SUCCEEDED,
 		Result: []byte("hello"), AcceptedAt: timestamppb.New(fixture.issuedAt), CompletedAt: timestamppb.New(fixture.issuedAt),
+		SemanticPayloadHashVersion: agentv1.SemanticPayloadHashVersion_SEMANTIC_PAYLOAD_HASH_VERSION_V1,
 	}
 }
 
@@ -488,6 +513,7 @@ func TestUnknownSchedulesExplicitReconcileThenSafeRetryIntegration(t *testing.T)
 		if envelope.GetDeliveryMode() != expected || !unpublished {
 			t.Fatalf("recovery dispatch = %s, unpublished=%v", envelope.GetDeliveryMode(), unpublished)
 		}
+		assertCommandAuthorization(t, fixture.signer, &envelope)
 	}
 	assertOutboxMode(agentv1.CommandDeliveryMode_COMMAND_DELIVERY_MODE_RECONCILE_ONLY)
 
@@ -553,7 +579,23 @@ func TestPrivdUnknownResultsScheduleReconcileOnlyIntegration(t *testing.T) {
 			if recovered.GetDeliveryMode() != agentv1.CommandDeliveryMode_COMMAND_DELIVERY_MODE_RECONCILE_ONLY || !unpublished {
 				t.Fatalf("recovery mode=%s unpublished=%v", recovered.GetDeliveryMode(), unpublished)
 			}
+			assertCommandAuthorization(t, fixture.signer, &recovered)
 		})
+	}
+}
+
+func assertCommandAuthorization(t *testing.T, signer *commandauth.Signer, envelope *agentv1.CommandEnvelope) {
+	t.Helper()
+	claims, err := commandauth.ClaimsFromEnvelopeV1(envelope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	canonical, err := commandauth.CanonicalV1(claims)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ed25519.Verify(signer.PublicKey(), canonical, envelope.GetAuthorization().GetSignature()) {
+		t.Fatal("recovery command authorization is invalid")
 	}
 }
 

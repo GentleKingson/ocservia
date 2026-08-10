@@ -342,7 +342,7 @@ func integrationService(t *testing.T) (*Service, *pgxpool.Pool, uuid.UUID, uuid.
 		}
 		pool.Close()
 	})
-	return New(pool), pool, workspaceID, nodeID
+	return NewWithSigner(pool, 50, testCommandSigner(t)), pool, workspaceID, nodeID
 }
 
 func controlledTestRequest(nodeID uuid.UUID, key string, kind SyntheticKind, action, bootID, sessionID, ip string) CreateRequest {

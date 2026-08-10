@@ -769,6 +769,7 @@ mod tests {
             payload: Some(command_envelope::Payload::SimulationProbe(probe)),
             semantic_payload_hash_version: SemanticPayloadHashVersion::Unspecified as i32,
             semantic_payload_sha256: Vec::new(),
+            ..CommandEnvelope::default()
         };
         SendCommandRequest {
             node_id,

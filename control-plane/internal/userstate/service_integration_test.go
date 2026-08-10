@@ -14,6 +14,7 @@ import (
 	agentv1 "github.com/GentleKingson/ocservia/control-plane/gen/proto/ocserv/platform/agent/v1"
 	transportv1 "github.com/GentleKingson/ocservia/control-plane/gen/proto/ocserv/platform/transport/v1"
 	"github.com/GentleKingson/ocservia/control-plane/internal/audit"
+	"github.com/GentleKingson/ocservia/control-plane/internal/commandauth"
 	"github.com/GentleKingson/ocservia/control-plane/internal/commandlimit"
 	"github.com/GentleKingson/ocservia/control-plane/internal/localslice"
 	operationstore "github.com/GentleKingson/ocservia/control-plane/internal/operations"
@@ -222,7 +223,7 @@ func TestI13IntentAndTerminalAuditIdentityMatchIntegration(t *testing.T) {
 		for _, terminal := range []string{"succeeded", "failed"} {
 			t.Run(test.action+"/"+terminal, func(t *testing.T) {
 				service, pool, workspaceID, nodeID := integrationService(t, "active")
-				ingest := localslice.New(pool)
+				ingest := localslice.NewWithSigner(pool, integrationCommandSigner())
 				if test.kind != UserCreate && test.kind != GroupApply {
 					enabled := test.kind != UserEnable
 					fingerprint := desiredFingerprint(UserCreate, test.name, nil)
@@ -658,7 +659,7 @@ func TestRejectedRevisionSlotRequiresProofThatNoEffectWasAcceptedIntegration(t *
 			t.Fatal(err)
 		}
 		eventID := uuid.Must(uuid.NewV7())
-		if err := localslice.New(pool).Ingest(context.Background(), &transportv1.TransportEvent{
+		if err := localslice.NewWithSigner(pool, integrationCommandSigner()).Ingest(context.Background(), &transportv1.TransportEvent{
 			EventId: eventID[:], NodeId: nodeID[:], Type: transportv1.TransportEventType_TRANSPORT_EVENT_TYPE_COMMAND_RESULT,
 			OccurredAt: timestamppb.New(completed), Traceparent: testTraceparent, Payload: payload,
 		}); err != nil {
@@ -747,8 +748,8 @@ func TestGlobalCommandLimitAcrossProducersIntegration(t *testing.T) {
 	if _, err := pool.Exec(context.Background(), `INSERT INTO node_capabilities(node_id,capability,approved) VALUES($1,'ocserv.users.write',true)`, secondNodeID); err != nil {
 		t.Fatal(err)
 	}
-	users := New(pool)
-	operations := operationstore.New(pool)
+	users := NewWithSigner(pool, integrationCommandSigner())
+	operations := operationstore.NewWithSigner(pool, 50, integrationCommandSigner())
 	if _, _, err := users.Mutate(context.Background(), mutation(nodeID, "limited-user", UserCreate, "limited", 0)); err != nil {
 		t.Fatal(err)
 	}
@@ -800,7 +801,7 @@ func TestOfflineQueueDoesNotConsumeGlobalDispatchCapacityIntegration(t *testing.
 	if _, err := pool.Exec(context.Background(), `INSERT INTO nodes(id,workspace_id,name,status,version,created_at,updated_at) VALUES($1,$2,$3,'offline',1,now(),now())`, offlineNodeID, workspaceID, "offline-"+offlineNodeID.String()); err != nil {
 		t.Fatal(err)
 	}
-	operations := operationstore.New(pool)
+	operations := operationstore.NewWithSigner(pool, 50, integrationCommandSigner())
 	for _, item := range []struct {
 		node uuid.UUID
 		key  string
@@ -832,7 +833,7 @@ func TestExpiredLeaseStaysChargedUntilReapedIntegration(t *testing.T) {
 	if err := pool.QueryRow(context.Background(), `SELECT count(*) FROM (SELECT operation.id FROM operations operation JOIN commands command ON command.operation_id=operation.id WHERE operation.state IN('dispatched','accepted','running','unknown') UNION SELECT command.operation_id FROM node_command_leases lease JOIN commands command ON command.id=lease.command_id) active`).Scan(&baseline); err != nil {
 		t.Fatal(err)
 	}
-	service := operationstore.NewWithConcurrency(pool, baseline+1)
+	service := operationstore.NewWithSigner(pool, baseline+1, integrationCommandSigner())
 	for index, nodeID := range []uuid.UUID{firstNodeID, secondNodeID} {
 		key := fmt.Sprintf("lease-cap-%d", index)
 		if _, _, err := service.CreateSynthetic(context.Background(), operationstore.CreateRequest{NodeID: nodeID, IdempotencyKey: key, ExpectedVersion: 1, Kind: operationstore.SyntheticNoop, TTL: time.Minute, RequestID: "request-" + key, Traceparent: testTraceparent}); err != nil {
@@ -859,7 +860,7 @@ func TestExpiredLeaseStaysChargedUntilReapedIntegration(t *testing.T) {
 
 func TestUnknownReconciliationBypassesConsumedDispatchSlotIntegration(t *testing.T) {
 	_, pool, _, nodeID := integrationService(t, "active")
-	service := operationstore.NewWithConcurrency(pool, 1)
+	service := operationstore.NewWithSigner(pool, 1, integrationCommandSigner())
 	op, _, err := service.CreateSynthetic(context.Background(), operationstore.CreateRequest{NodeID: nodeID, IdempotencyKey: "unknown-reconcile", ExpectedVersion: 1, Kind: operationstore.SyntheticNoop, TTL: time.Minute, RequestID: "request-unknown-reconcile", Traceparent: testTraceparent})
 	if err != nil {
 		t.Fatal(err)
@@ -886,7 +887,7 @@ func TestDispatchCandidateFairnessAcrossNodesIntegration(t *testing.T) {
 	if _, err := pool.Exec(context.Background(), `INSERT INTO nodes(id,workspace_id,name,status,version,created_at,updated_at) VALUES($1,$2,$3,'active',1,now(),now())`, otherNodeID, workspaceID, "fair-"+otherNodeID.String()); err != nil {
 		t.Fatal(err)
 	}
-	service := operationstore.NewWithConcurrency(pool, 50)
+	service := operationstore.NewWithSigner(pool, 50, integrationCommandSigner())
 	operationIDs := make([]uuid.UUID, 0, 21)
 	for index := range 20 {
 		key := fmt.Sprintf("busy-%02d", index)
@@ -927,7 +928,7 @@ func TestDispatchCandidateFairnessAcrossNodesIntegration(t *testing.T) {
 func TestNodeBacklogBoundaryConcurrencyAndReplayIntegration(t *testing.T) {
 	_, pool, workspaceID, nodeID := integrationService(t, "active")
 	seedQueuedOperations(t, pool, workspaceID, []uuid.UUID{nodeID}, commandlimit.MaxNodeBacklog-1)
-	service := operationstore.New(pool)
+	service := operationstore.NewWithSigner(pool, 50, integrationCommandSigner())
 	requests := []operationstore.CreateRequest{
 		{NodeID: nodeID, IdempotencyKey: "node-boundary-a", ExpectedVersion: 1, Kind: operationstore.SyntheticNoop, TTL: time.Minute, RequestID: "request-node-boundary-a", Traceparent: testTraceparent},
 		{NodeID: nodeID, IdempotencyKey: "node-boundary-b", ExpectedVersion: 1, Kind: operationstore.SyntheticNoop, TTL: time.Minute, RequestID: "request-node-boundary-b", Traceparent: testTraceparent},
@@ -976,7 +977,7 @@ func TestWorkspaceBacklogBoundaryAcrossNodesIntegration(t *testing.T) {
 		nodeIDs = append(nodeIDs, nodeID)
 	}
 	seedQueuedOperations(t, pool, workspaceID, nodeIDs, commandlimit.MaxWorkspaceBacklog-1)
-	service := operationstore.New(pool)
+	service := operationstore.NewWithSigner(pool, 50, integrationCommandSigner())
 	requests := []operationstore.CreateRequest{
 		{NodeID: nodeIDs[9], IdempotencyKey: "workspace-boundary-a", ExpectedVersion: 1, Kind: operationstore.SyntheticNoop, TTL: time.Minute, RequestID: "request-workspace-boundary-a", Traceparent: testTraceparent},
 		{NodeID: nodeIDs[10], IdempotencyKey: "workspace-boundary-b", ExpectedVersion: 1, Kind: operationstore.SyntheticNoop, TTL: time.Minute, RequestID: "request-workspace-boundary-b", Traceparent: testTraceparent},
@@ -1048,5 +1049,11 @@ func integrationService(t *testing.T, status string) (*Service, *pgxpool.Pool, u
 		}
 		pool.Close()
 	})
-	return New(pool), pool, workspaceID, nodeID
+	return NewWithSigner(pool, integrationCommandSigner()), pool, workspaceID, nodeID
+}
+
+func integrationCommandSigner() *commandauth.Signer {
+	var seed [32]byte
+	seed[0] = 2
+	return commandauth.NewSignerFromSeed(seed)
 }

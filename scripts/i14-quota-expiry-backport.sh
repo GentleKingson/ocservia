@@ -47,7 +47,19 @@ test -f "${ROOT}/web/src/upstream/UserPolicyFields.vue"
 test -f "${ROOT}/web/src/adapters/user-policy.ts"
 
 rejected_execution_pattern='occtl|systemctl|docker[.]sock|privileged'
-rejected_local_path_pattern='/etc/ocserv|/proc|/sys'
+# Require a path-token boundary before privileged local roots. Without the
+# boundary, safe package imports such as golang.org/x/sys/unix are false hits.
+rejected_local_path_pattern='(^|[^[:alnum:]_.-])/(etc/ocserv|proc|sys)(/|$|[^[:alnum:]_.-])'
+if printf '%s\n' 'import "golang.org/x/sys/unix"' | grep -Eq "${rejected_local_path_pattern}"; then
+  echo "I14 local-path boundary pattern rejected a package import" >&2
+  exit 1
+fi
+for protected_path in /etc/ocserv/ocpasswd /proc/self/status /sys/kernel; do
+  if ! printf 'open("%s")\n' "${protected_path}" | grep -Eq "${rejected_local_path_pattern}"; then
+    echo "I14 local-path boundary pattern missed ${protected_path}" >&2
+    exit 1
+  fi
+done
 if command -v rg >/dev/null 2>&1; then
   boundary_scanner='rg'
   boundary_matches() {

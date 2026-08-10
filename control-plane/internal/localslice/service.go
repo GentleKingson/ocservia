@@ -16,6 +16,7 @@ import (
 	agentv1 "github.com/GentleKingson/ocservia/control-plane/gen/proto/ocserv/platform/agent/v1"
 	transportv1 "github.com/GentleKingson/ocservia/control-plane/gen/proto/ocserv/platform/transport/v1"
 	"github.com/GentleKingson/ocservia/control-plane/internal/audit"
+	"github.com/GentleKingson/ocservia/control-plane/internal/commandauth"
 	"github.com/GentleKingson/ocservia/control-plane/internal/semanticpayload"
 	telemetrystore "github.com/GentleKingson/ocservia/control-plane/internal/telemetry"
 	"github.com/google/uuid"
@@ -67,12 +68,20 @@ type Job struct {
 }
 
 type Service struct {
-	pool *pgxpool.Pool
-	now  func() time.Time
+	pool   *pgxpool.Pool
+	now    func() time.Time
+	signer *commandauth.Signer
 }
 
 func New(pool *pgxpool.Pool) *Service {
 	return &Service{pool: pool, now: func() time.Time { return time.Now().UTC() }}
+}
+
+// NewWithSigner configures recovery redispatches with a Controller signer.
+func NewWithSigner(pool *pgxpool.Pool, signer *commandauth.Signer) *Service {
+	service := New(pool)
+	service.signer = signer
+	return service
 }
 
 func (s *Service) Create(ctx context.Context, scenario Scenario, requestID, traceparent string) (Operation, error) {
@@ -390,7 +399,7 @@ func (s *Service) Ingest(ctx context.Context, event *transportv1.TransportEvent)
 	}
 	structuredCommandResult := eventType == "command_result"
 	if eventType == "command_result" {
-		if err := ingestAgentCommandResult(ctx, tx, eventID, nodeID, event.GetPayload(), occurredAt.AsTime(), observedAt); err != nil {
+		if err := ingestAgentCommandResult(ctx, tx, eventID, nodeID, event.GetPayload(), occurredAt.AsTime(), observedAt, s.signer); err != nil {
 			return err
 		}
 	}
@@ -441,7 +450,7 @@ func (s *Service) Ingest(ctx context.Context, event *transportv1.TransportEvent)
 	return nil
 }
 
-func ingestAgentCommandResult(ctx context.Context, tx pgx.Tx, eventID, nodeID uuid.UUID, payload []byte, occurredAt, observedAt time.Time) error {
+func ingestAgentCommandResult(ctx context.Context, tx pgx.Tx, eventID, nodeID uuid.UUID, payload []byte, occurredAt, observedAt time.Time, signer *commandauth.Signer) error {
 	var result agentv1.CommandResult
 	if err := proto.Unmarshal(payload, &result); err != nil {
 		return fmt.Errorf("decode structured Agent command result: %w", err)
@@ -740,7 +749,7 @@ func ingestAgentCommandResult(ctx context.Context, tx pgx.Tx, eventID, nodeID uu
 		}
 	}
 	if effectiveState == "unknown" {
-		if err := scheduleCommandRecovery(ctx, tx, commandID, &envelope, recoveryReason, observedAt); err != nil {
+		if err := scheduleCommandRecovery(ctx, tx, commandID, &envelope, recoveryReason, observedAt, signer); err != nil {
 			return err
 		}
 	}
@@ -873,7 +882,7 @@ func commandAuditAction(envelope *agentv1.CommandEnvelope) string {
 	}
 }
 
-func scheduleCommandRecovery(ctx context.Context, tx pgx.Tx, commandID uuid.UUID, envelope *agentv1.CommandEnvelope, reason string, observedAt time.Time) error {
+func scheduleCommandRecovery(ctx context.Context, tx pgx.Tx, commandID uuid.UUID, envelope *agentv1.CommandEnvelope, reason string, observedAt time.Time, signer *commandauth.Signer) error {
 	var mode agentv1.CommandDeliveryMode
 	switch reason {
 	case "effect_absent":
@@ -903,6 +912,9 @@ func scheduleCommandRecovery(ctx context.Context, tx pgx.Tx, commandID uuid.UUID
 	}
 	envelope.MessageId = messageID[:]
 	envelope.DeliveryMode = mode
+	if err := signer.Authorize(envelope); err != nil {
+		return fmt.Errorf("authorize reconciliation command: %w", err)
+	}
 	payload, err := proto.Marshal(envelope)
 	if err != nil {
 		return fmt.Errorf("encode reconciliation command: %w", err)

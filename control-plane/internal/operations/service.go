@@ -16,6 +16,7 @@ import (
 	agentv1 "github.com/GentleKingson/ocservia/control-plane/gen/proto/ocserv/platform/agent/v1"
 	"github.com/GentleKingson/ocservia/control-plane/internal/approvals"
 	"github.com/GentleKingson/ocservia/control-plane/internal/audit"
+	"github.com/GentleKingson/ocservia/control-plane/internal/commandauth"
 	"github.com/GentleKingson/ocservia/control-plane/internal/commandlimit"
 	"github.com/GentleKingson/ocservia/control-plane/internal/semanticpayload"
 	"github.com/google/uuid"
@@ -84,6 +85,7 @@ type CreateRequest struct {
 	ActorIdentityID     uuid.UUID
 	ActorSessionID      uuid.UUID
 	ApprovalID          uuid.UUID
+	ApprovalRequestHash []byte
 	Action              string
 	Reason              string
 	SupersedePending    bool
@@ -157,6 +159,7 @@ type Service struct {
 	pool         *pgxpool.Pool
 	now          func() time.Time
 	commandLimit int
+	signer       *commandauth.Signer
 }
 
 func New(pool *pgxpool.Pool) *Service {
@@ -165,6 +168,13 @@ func New(pool *pgxpool.Pool) *Service {
 
 func NewWithConcurrency(pool *pgxpool.Pool, commandLimit int) *Service {
 	return &Service{pool: pool, now: func() time.Time { return time.Now().UTC() }, commandLimit: commandLimit}
+}
+
+// NewWithSigner configures command issuance with an end-to-end Controller signer.
+func NewWithSigner(pool *pgxpool.Pool, commandLimit int, signer *commandauth.Signer) *Service {
+	service := NewWithConcurrency(pool, commandLimit)
+	service.signer = signer
+	return service
 }
 
 func (s *Service) CreateSynthetic(ctx context.Context, request CreateRequest) (Operation, bool, error) {
@@ -265,6 +275,7 @@ func (s *Service) CreateSynthetic(ctx context.Context, request CreateRequest) (O
 		if err := approvals.ConsumeBound(ctx, tx, request.ApprovalID, workspaceID, request.ActorIdentityID, "config.apply", "config_plan", request.ApplyMetadata.PlanID, planHash); err != nil {
 			return Operation{}, false, err
 		}
+		request.ApprovalRequestHash = append([]byte(nil), planHash...)
 	}
 	if capability := capabilityFor(request.Kind); capability != "" {
 		var approved bool
@@ -304,7 +315,7 @@ func (s *Service) CreateSynthetic(ctx context.Context, request CreateRequest) (O
 		return Operation{}, false, err
 	}
 	expiresAt := now.Add(request.TTL)
-	envelope, payloadType, err := marshalEnvelope(request, operationID, commandID, now, expiresAt)
+	envelope, payloadType, err := marshalEnvelope(request, operationID, commandID, now, expiresAt, s.signer)
 	if err != nil {
 		return Operation{}, false, err
 	}
@@ -671,6 +682,9 @@ func (s *Service) Reap(ctx context.Context, maxAttempts int) error {
 		envelope.MessageId = messageID[:]
 		envelope.DeliveryMode = agentv1.CommandDeliveryMode_COMMAND_DELIVERY_MODE_RECONCILE_ONLY
 		envelope.ExpiresAt = timestamppb.New(deadline)
+		if err := s.signer.Authorize(&envelope); err != nil {
+			return fmt.Errorf("authorize configuration apply reconciliation: %w", err)
+		}
 		payload, err := proto.Marshal(&envelope)
 		if err != nil {
 			return fmt.Errorf("encode expired configuration apply reconciliation: %w", err)
@@ -746,6 +760,9 @@ func validateCreate(r CreateRequest) error {
 		return ErrInvalidRequest
 	}
 	if len(r.IdempotencyKey) < 1 || len(r.IdempotencyKey) > 128 || strings.TrimSpace(r.IdempotencyKey) != r.IdempotencyKey {
+		return ErrInvalidRequest
+	}
+	if len(r.ApprovalRequestHash) != 0 {
 		return ErrInvalidRequest
 	}
 	if r.Kind != SyntheticNoop && r.Kind != SyntheticEcho && r.Kind != SessionDisconnect && r.Kind != SessionTerminate && r.Kind != IPBanRemove && r.Kind != ServiceReload && r.Kind != ConfigPlan && r.Kind != ConfigApply && r.Kind != CertificateCSR && r.Kind != CertificateP12 && r.Kind != CertificateRevoke {
@@ -937,7 +954,7 @@ func normalizedAuditIntent(r CreateRequest) (actorID, action, reason string) {
 		actorID = "developer"
 	}
 	if action == "" {
-		action = "synthetic.command"
+		action = "operation.create"
 	}
 	if reason == "" {
 		reason = "side-effect-free delivery validation"
@@ -945,13 +962,19 @@ func normalizedAuditIntent(r CreateRequest) (actorID, action, reason string) {
 	return actorID, action, reason
 }
 
-func marshalEnvelope(r CreateRequest, operationID, commandID uuid.UUID, now, expires time.Time) ([]byte, string, error) {
+func marshalEnvelope(r CreateRequest, operationID, commandID uuid.UUID, now, expires time.Time, signer *commandauth.Signer) ([]byte, string, error) {
 	messageID, err := uuid.NewV7()
 	if err != nil {
 		return nil, "", err
 	}
-	actorID, _, reason := normalizedAuditIntent(r)
-	envelope := &agentv1.CommandEnvelope{ProtocolVersion: "1.0", MessageId: messageID[:], CommandId: commandID[:], IdempotencyKey: operationID[:], NodeId: r.NodeID[:], Sequence: 1, IssuedAt: timestamppb.New(now), ExpiresAt: timestamppb.New(expires), ExpectedRevision: uint64(r.ExpectedVersion), Traceparent: r.Traceparent, ActorId: actorID, Reason: reason, DeliveryMode: agentv1.CommandDeliveryMode_COMMAND_DELIVERY_MODE_EXECUTE_OR_REPLAY}
+	actorID, action, reason := normalizedAuditIntent(r)
+	envelope := &agentv1.CommandEnvelope{ProtocolVersion: commandauth.ProtocolVersion, MessageId: messageID[:], CommandId: commandID[:], IdempotencyKey: operationID[:], NodeId: r.NodeID[:], Sequence: 1, IssuedAt: timestamppb.New(now), ExpiresAt: timestamppb.New(expires), ExpectedRevision: uint64(r.ExpectedVersion), Traceparent: r.Traceparent, ActorId: actorID, Reason: reason, OperationId: operationID[:], Action: action, DeliveryMode: agentv1.CommandDeliveryMode_COMMAND_DELIVERY_MODE_EXECUTE_OR_REPLAY}
+	if r.ApprovalID != uuid.Nil {
+		envelope.ApprovalId = r.ApprovalID[:]
+	}
+	if len(r.ApprovalRequestHash) != 0 {
+		envelope.ApprovalRequestSha256 = append([]byte(nil), r.ApprovalRequestHash...)
+	}
 	payloadType := "synthetic_noop"
 	switch r.Kind {
 	case SyntheticEcho:
@@ -991,6 +1014,18 @@ func marshalEnvelope(r CreateRequest, operationID, commandID uuid.UUID, now, exp
 	}
 	if err := semanticpayload.PopulateV1(envelope); err != nil {
 		return nil, "", fmt.Errorf("compute semantic payload hash: %w", err)
+	}
+	envelope.RequiredCapability = capabilityFor(r.Kind)
+	if envelope.RequiredCapability == "" {
+		switch r.Kind {
+		case SyntheticNoop:
+			envelope.RequiredCapability = "synthetic.noop"
+		case SyntheticEcho:
+			envelope.RequiredCapability = "synthetic.echo"
+		}
+	}
+	if err := signer.Authorize(envelope); err != nil {
+		return nil, "", fmt.Errorf("authorize typed command: %w", err)
 	}
 	data, err := proto.Marshal(envelope)
 	if err != nil {

@@ -42,6 +42,7 @@ type Config struct {
 	SessionKey               []byte
 	SessionTTL               time.Duration
 	AuditCheckpointKey       []byte
+	CommandSigningKeyFile    string
 	BreakGlassEnabled        bool
 	BreakGlassTokenHash      []byte
 	BodyLimit                int64
@@ -98,6 +99,7 @@ func Load(args []string, lookup LookupEnv) (Config, error) {
 	if err := setHexOrFile(lookup, "OCSERV_AUDIT_CHECKPOINT_KEY", &cfg.AuditCheckpointKey); err != nil {
 		return Config{}, err
 	}
+	setString(lookup, "OCSERV_COMMAND_SIGNING_KEY_FILE", &cfg.CommandSigningKeyFile)
 	if err := setHexOrFile(lookup, "OCSERV_BREAK_GLASS_TOKEN_SHA256", &cfg.BreakGlassTokenHash); err != nil {
 		return Config{}, err
 	}
@@ -214,6 +216,12 @@ func (c Config) Validate() error {
 	}
 	if c.Environment == "production" && len(c.AuditCheckpointKey) != 32 {
 		return errors.New("audit checkpoint key is required in production")
+	}
+	if c.CommandSigningKeyFile != "" && !filepath.IsAbs(c.CommandSigningKeyFile) {
+		return errors.New("command signing key file path must be absolute")
+	}
+	if c.Environment == "production" && !c.MigrateOnly && c.CommandSigningKeyFile == "" {
+		return errors.New("controller command signing key file is required in production")
 	}
 	if c.BreakGlassEnabled && len(c.BreakGlassTokenHash) != 32 {
 		return errors.New("enabled break-glass requires a 32-byte token SHA-256 hash")

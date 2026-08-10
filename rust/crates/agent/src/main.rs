@@ -18,6 +18,7 @@ use ocservia_agent_protocol::{
     ServiceReloadRequest, SessionMutationRequest, UserDisableRequest, UserEnableRequest,
     UserSecretRequest, privd_request, privd_response,
 };
+use ocservia_command_authorization::{ControllerCommandKeyring, load_verification_key};
 use ocservia_command_journal::{
     CommandRecord, CommandState, Journal, OFFLINE_RECOVERY_RETENTION_SECONDS, TelemetryInsert,
 };
@@ -43,6 +44,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     ocservia_observability::init("ocservia-agent")?;
     ocservia_agent::ensure_unprivileged(rustix::process::geteuid().as_raw())?;
     let config = parse_args()?;
+    let command_keys = load_controller_command_keys(&config)?;
     let mut journal = Journal::open(&config.journal)?;
     let mut command_executor = CommandExecutor::new(Journal::open(&config.journal)?);
     let privd = PrivdClient::new(config.privd_socket, Duration::from_secs(5))?;
@@ -69,6 +71,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     if config.probe_only {
         return Ok(());
     }
+
+    let command_keys = command_keys.expect("non-probe Agent requires command keys");
 
     let controller = config
         .controller
@@ -117,6 +121,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                 os_release: &os_release,
                 agent_instance_id,
                 artifact_dir: &config.artifact_dir,
+                command_keys: &command_keys,
             };
             match connect_once(&endpoint, controller, &mut session).await {
                 Ok(()) => attempt = 0,
@@ -179,6 +184,7 @@ struct SessionContext<'a> {
     os_release: &'a str,
     agent_instance_id: Uuid,
     artifact_dir: &'a PathBuf,
+    command_keys: &'a ControllerCommandKeyring,
 }
 
 async fn connect_once(
@@ -332,6 +338,7 @@ async fn handle_command_stream(
             "ocserv.certificate.issue",
             "ocserv.certificate.revoke",
         ]),
+        command_keys: session.command_keys.clone(),
         now_unix_seconds,
         cancelled: false,
     };
@@ -1188,6 +1195,26 @@ struct Config {
     probe_only: bool,
     artifact_dir: PathBuf,
     relay_mode: RelayMode,
+    command_verification_key_files: Vec<PathBuf>,
+}
+
+fn load_controller_command_keys(
+    config: &Config,
+) -> Result<Option<ControllerCommandKeyring>, Box<dyn std::error::Error + Send + Sync>> {
+    if config.probe_only {
+        return Ok(None);
+    }
+    if config.command_verification_key_files.is_empty() {
+        return Err(invalid("--controller-command-key-file is required").into());
+    }
+    let expected_owner = rustix::process::geteuid().as_raw();
+    let expected_group = rustix::process::getegid().as_raw();
+    let keys = config
+        .command_verification_key_files
+        .iter()
+        .map(|path| load_verification_key(path, expected_owner, expected_group))
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(Some(ControllerCommandKeyring::new(keys)?))
 }
 
 fn parse_args() -> Result<Config, io::Error> {
@@ -1200,6 +1227,7 @@ fn parse_args() -> Result<Config, io::Error> {
         probe_only: false,
         artifact_dir: PathBuf::from("/var/lib/ocservia-privd/certificates/artifacts"),
         relay_mode: RelayMode::Default,
+        command_verification_key_files: Vec::new(),
     };
     let mut relay_mode = String::from("default");
     let mut relay_urls = Vec::new();
@@ -1232,6 +1260,19 @@ fn parse_args() -> Result<Config, io::Error> {
             "--artifact-dir" => {
                 config.artifact_dir = PathBuf::from(required(&mut args, "--artifact-dir")?);
             }
+            "--controller-command-key-file" => {
+                if config.command_verification_key_files.len() == 8 {
+                    return Err(invalid(
+                        "at most eight Controller command verification keys are allowed",
+                    ));
+                }
+                config
+                    .command_verification_key_files
+                    .push(PathBuf::from(required(
+                        &mut args,
+                        "--controller-command-key-file",
+                    )?));
+            }
             "--relay-mode" => relay_mode = required(&mut args, "--relay-mode")?,
             "--relay-url" => relay_urls.push(required(&mut args, "--relay-url")?),
             "--relay-token-file" => {
@@ -1241,11 +1282,17 @@ fn parse_args() -> Result<Config, io::Error> {
         }
     }
     if !config.artifact_dir.is_absolute()
+        || config
+            .command_verification_key_files
+            .iter()
+            .any(|path| !path.is_absolute())
         || relay_token_file
             .as_ref()
             .is_some_and(|path| !path.is_absolute())
     {
-        return Err(invalid("artifact and relay token paths must be absolute"));
+        return Err(invalid(
+            "artifact, Controller command key, and relay token paths must be absolute",
+        ));
     }
     config.relay_mode = build_relay_mode(&relay_mode, relay_urls, relay_token_file.as_deref())?;
     Ok(config)
@@ -1361,6 +1408,30 @@ mod tests {
         ConfigApply, ConfigPlan, UserPasswordRotate,
     };
     use std::os::unix::fs::PermissionsExt as _;
+
+    fn command_key_config(probe_only: bool) -> Config {
+        Config {
+            identity_dir: PathBuf::from("/var/lib/ocservia-agent/identity"),
+            journal: PathBuf::from("/var/lib/ocservia-agent/agent.db"),
+            privd_socket: PathBuf::from("/run/ocserv-platform/privd.sock"),
+            controller: None,
+            node_id: None,
+            probe_only,
+            artifact_dir: PathBuf::from("/var/lib/ocservia-privd/certificates/artifacts"),
+            relay_mode: RelayMode::Default,
+            command_verification_key_files: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn network_agent_requires_a_controller_command_verification_key() {
+        assert!(load_controller_command_keys(&command_key_config(false)).is_err());
+        assert!(
+            load_controller_command_keys(&command_key_config(true))
+                .expect("read-only probe exception")
+                .is_none()
+        );
+    }
 
     #[test]
     fn production_relay_selection_is_closed_and_redundant() {
