@@ -191,8 +191,9 @@ func (s *Service) CreateSynthetic(ctx context.Context, request CreateRequest) (O
 
 	var workspaceID uuid.UUID
 	var nodeVersion int64
+	var authorizationRevision uint64
 	var nodeStatus string
-	if err := tx.QueryRow(ctx, `SELECT workspace_id, version, status FROM nodes WHERE id = $1 FOR UPDATE`, request.NodeID).Scan(&workspaceID, &nodeVersion, &nodeStatus); err != nil {
+	if err := tx.QueryRow(ctx, `SELECT workspace_id, version, authorization_revision, status FROM nodes WHERE id = $1 FOR UPDATE`, request.NodeID).Scan(&workspaceID, &nodeVersion, &authorizationRevision, &nodeStatus); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return Operation{}, false, ErrNodeUnavailable
 		}
@@ -257,12 +258,12 @@ func (s *Service) CreateSynthetic(ctx context.Context, request CreateRequest) (O
 		if planWorkspace != workspaceID || planNode != request.NodeID || planRevision < 0 || uint64(planRevision) != request.PlanRevision || !bytes.Equal(planHash, request.CandidateHash) || !planExpires.After(now) || planState != "succeeded" || proto.Unmarshal(resultBytes, &validation) != nil || !validation.GetCurrentUnchanged() || !validation.GetStagingCleaned() || !bytes.Equal(validation.GetCandidateHash(), planHash) || !bytes.Equal(validation.GetCurrentHash(), request.ExpectedCurrentHash) {
 			return Operation{}, false, ErrStaleRevision
 		}
-		var revision int64
+		var revision, highestDesiredRevision int64
 		var locked bool
-		if err := tx.QueryRow(ctx, `SELECT COALESCE((SELECT revision FROM node_config_state WHERE node_id=$1),0),COALESCE((SELECT automation_locked FROM node_config_state WHERE node_id=$1),false)`, request.NodeID).Scan(&revision, &locked); err != nil {
+		if err := tx.QueryRow(ctx, `SELECT COALESCE((SELECT revision FROM node_config_state WHERE node_id=$1),0),COALESCE((SELECT desired_revision FROM node_config_state WHERE node_id=$1),0),COALESCE((SELECT automation_locked FROM node_config_state WHERE node_id=$1),false)`, request.NodeID).Scan(&revision, &highestDesiredRevision, &locked); err != nil {
 			return Operation{}, false, fmt.Errorf("read configuration apply fence: %w", err)
 		}
-		if locked || revision != planRevision || request.DesiredRevision != uint64(planRevision)+1 {
+		if locked || revision != planRevision || highestDesiredRevision < revision || request.DesiredRevision != uint64(highestDesiredRevision)+1 {
 			return Operation{}, false, ErrStaleRevision
 		}
 		var applyActive bool
@@ -315,7 +316,7 @@ func (s *Service) CreateSynthetic(ctx context.Context, request CreateRequest) (O
 		return Operation{}, false, err
 	}
 	expiresAt := now.Add(request.TTL)
-	envelope, payloadType, err := marshalEnvelope(request, operationID, commandID, now, expiresAt, s.signer)
+	envelope, payloadType, err := marshalEnvelope(request, operationID, commandID, authorizationRevision, now, expiresAt, s.signer)
 	if err != nil {
 		return Operation{}, false, err
 	}
@@ -351,6 +352,15 @@ func (s *Service) CreateSynthetic(ctx context.Context, request CreateRequest) (O
 		if _, err := tx.Exec(ctx, `INSERT INTO config_apply_operations(operation_id,workspace_id,node_id,plan_id,approval_id,expected_revision,desired_revision,candidate_hash,previous_hash,state,created_at,updated_at)
 			VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,'queued',$10,$10)`, operationID, workspaceID, request.NodeID, request.ApplyMetadata.PlanID, request.ApprovalID, request.PlanRevision, request.DesiredRevision, request.CandidateHash, request.ExpectedCurrentHash, now); err != nil {
 			return Operation{}, false, fmt.Errorf("insert configuration apply: %w", err)
+		}
+		tag, err := tx.Exec(ctx, `INSERT INTO node_config_state(node_id,revision,desired_revision,redacted_config,updated_at) VALUES($1,0,$2,'',$3)
+			ON CONFLICT(node_id) DO UPDATE SET desired_revision=EXCLUDED.desired_revision,updated_at=EXCLUDED.updated_at
+			WHERE node_config_state.desired_revision=$2-1`, request.NodeID, request.DesiredRevision, now)
+		if err != nil {
+			return Operation{}, false, fmt.Errorf("advance configuration desired revision: %w", err)
+		}
+		if tag.RowsAffected() != 1 {
+			return Operation{}, false, ErrStaleRevision
 		}
 	}
 	if request.Kind == CertificateCSR {
@@ -780,7 +790,7 @@ func validateCreate(r CreateRequest) error {
 			return ErrInvalidRequest
 		}
 	}
-	if r.Kind == ConfigApply && (len(r.Candidate) == 0 || len(r.Candidate) > 256*1024 || len(r.CandidateHash) != sha256.Size || len(r.ExpectedCurrentHash) != sha256.Size || r.PlanRevision > uint64(^uint64(0)>>1) || r.DesiredRevision != r.PlanRevision+1 || r.ApplyMetadata == nil || r.ApplyMetadata.PlanID == uuid.Nil) {
+	if r.Kind == ConfigApply && (len(r.Candidate) == 0 || len(r.Candidate) > 256*1024 || len(r.CandidateHash) != sha256.Size || len(r.ExpectedCurrentHash) != sha256.Size || r.PlanRevision > uint64(^uint64(0)>>1) || r.DesiredRevision <= r.PlanRevision || r.ApplyMetadata == nil || r.ApplyMetadata.PlanID == uuid.Nil) {
 		return ErrInvalidRequest
 	}
 	if r.Kind == ConfigApply {
@@ -962,13 +972,13 @@ func normalizedAuditIntent(r CreateRequest) (actorID, action, reason string) {
 	return actorID, action, reason
 }
 
-func marshalEnvelope(r CreateRequest, operationID, commandID uuid.UUID, now, expires time.Time, signer *commandauth.Signer) ([]byte, string, error) {
+func marshalEnvelope(r CreateRequest, operationID, commandID uuid.UUID, authorizationRevision uint64, now, expires time.Time, signer *commandauth.Signer) ([]byte, string, error) {
 	messageID, err := uuid.NewV7()
 	if err != nil {
 		return nil, "", err
 	}
 	actorID, action, reason := normalizedAuditIntent(r)
-	envelope := &agentv1.CommandEnvelope{ProtocolVersion: commandauth.ProtocolVersion, MessageId: messageID[:], CommandId: commandID[:], IdempotencyKey: operationID[:], NodeId: r.NodeID[:], Sequence: 1, IssuedAt: timestamppb.New(now), ExpiresAt: timestamppb.New(expires), ExpectedRevision: uint64(r.ExpectedVersion), Traceparent: r.Traceparent, ActorId: actorID, Reason: reason, OperationId: operationID[:], Action: action, DeliveryMode: agentv1.CommandDeliveryMode_COMMAND_DELIVERY_MODE_EXECUTE_OR_REPLAY}
+	envelope := &agentv1.CommandEnvelope{ProtocolVersion: commandauth.ProtocolVersion, MessageId: messageID[:], CommandId: commandID[:], IdempotencyKey: operationID[:], NodeId: r.NodeID[:], Sequence: 1, IssuedAt: timestamppb.New(now), ExpiresAt: timestamppb.New(expires), ExpectedRevision: authorizationRevision, Traceparent: r.Traceparent, ActorId: actorID, Reason: reason, OperationId: operationID[:], Action: action, DeliveryMode: agentv1.CommandDeliveryMode_COMMAND_DELIVERY_MODE_EXECUTE_OR_REPLAY}
 	if r.ApprovalID != uuid.Nil {
 		envelope.ApprovalId = r.ApprovalID[:]
 	}
@@ -996,11 +1006,9 @@ func marshalEnvelope(r CreateRequest, operationID, commandID uuid.UUID, now, exp
 		envelope.Payload = &agentv1.CommandEnvelope_ServiceReload{ServiceReload: &agentv1.ServiceReload{}}
 	case ConfigPlan:
 		payloadType = "config_plan"
-		envelope.ExpectedRevision = r.PlanRevision
-		envelope.Payload = &agentv1.CommandEnvelope_ConfigPlan{ConfigPlan: &agentv1.ConfigPlan{Candidate: r.Candidate, CandidateHash: r.CandidateHash}}
+		envelope.Payload = &agentv1.CommandEnvelope_ConfigPlan{ConfigPlan: &agentv1.ConfigPlan{Candidate: r.Candidate, CandidateHash: r.CandidateHash, ExpectedRevision: r.PlanRevision}}
 	case ConfigApply:
 		payloadType = "config_apply"
-		envelope.ExpectedRevision = r.PlanRevision
 		envelope.Payload = &agentv1.CommandEnvelope_ConfigApply{ConfigApply: &agentv1.ConfigApply{Candidate: r.Candidate, CandidateHash: r.CandidateHash, ExpectedCurrentHash: r.ExpectedCurrentHash, DesiredRevision: r.DesiredRevision}}
 	case CertificateCSR:
 		payloadType = "certificate_csr"
@@ -1012,7 +1020,7 @@ func marshalEnvelope(r CreateRequest, operationID, commandID uuid.UUID, now, exp
 		payloadType = "certificate_revoke"
 		envelope.Payload = &agentv1.CommandEnvelope_CertificateRevoke{CertificateRevoke: &agentv1.CertificateRevoke{CertificateId: r.CertificateID[:], Reason: r.RevocationReason}}
 	}
-	if err := semanticpayload.PopulateV1(envelope); err != nil {
+	if err := semanticpayload.PopulateV2(envelope); err != nil {
 		return nil, "", fmt.Errorf("compute semantic payload hash: %w", err)
 	}
 	envelope.RequiredCapability = capabilityFor(r.Kind)

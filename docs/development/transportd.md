@@ -53,6 +53,12 @@ non-evictable global 600-attempt-per-minute limit and a 16-request concurrency
 limit, including authorization and the registration trust recheck.
 Connection queries report the agent instance, selected direct
 or relay path, path detail, RTT, connection time, and last-seen time.
+They also report the Controller-negotiated capability set, nonzero
+authorization revision, and signed-session expiry. In database-backed mode,
+transportd accepts those values only from the Controller handshake response;
+it cannot manufacture a grant. Command dispatch checks the retained capability,
+revision, and expiry before opening a stream. A higher authoritative trust
+revision closes a connection retaining an older session grant.
 
 Iroh is pinned to `1.0.0` in `Cargo.toml`; `Cargo.lock` pins the complete resolved
 graph. Patch upgrades within 1.0.x still require direct, relay, ALPN rejection,

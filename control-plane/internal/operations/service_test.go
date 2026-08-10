@@ -39,7 +39,7 @@ func TestValidateCreateRejectsUntypedOrOversizedSyntheticPayload(t *testing.T) {
 func TestMarshalEnvelopeUsesTypedOneof(t *testing.T) {
 	request := CreateRequest{NodeID: uuid.Must(uuid.NewV7()), IdempotencyKey: "stable-key", ExpectedVersion: 4, Kind: SyntheticEcho, Message: "hello", TTL: time.Minute, RequestID: "request", Traceparent: "00-0123456789abcdef0123456789abcdef-0123456789abcdef-01"}
 	signer := testCommandSigner(t)
-	data, payloadType, err := marshalEnvelope(request, uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7()), time.Now(), time.Now().Add(time.Minute), signer)
+	data, payloadType, err := marshalEnvelope(request, uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7()), 1, time.Now(), time.Now().Add(time.Minute), signer)
 	if err != nil || payloadType != "synthetic_echo" || len(data) == 0 {
 		t.Fatalf("marshalEnvelope() = %q, %d bytes, %v", payloadType, len(data), err)
 	}
@@ -55,7 +55,7 @@ func TestMarshalEnvelopeUsesTypedOneof(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if envelope.GetProtocolVersion() != commandauth.ProtocolVersion || envelope.GetAction() != "operation.create" || envelope.GetRequiredCapability() != "synthetic.echo" || !ed25519.Verify(signer.PublicKey(), canonical, envelope.GetAuthorization().GetSignature()) {
+	if envelope.GetProtocolVersion() != commandauth.ProtocolVersion || envelope.GetSemanticPayloadHashVersion() != agentv1.SemanticPayloadHashVersion_SEMANTIC_PAYLOAD_HASH_VERSION_V2 || envelope.GetAction() != "operation.create" || envelope.GetRequiredCapability() != "synthetic.echo" || !ed25519.Verify(signer.PublicKey(), canonical, envelope.GetAuthorization().GetSignature()) {
 		t.Fatal("typed command was not authorized after its final semantic fields")
 	}
 }
@@ -100,7 +100,7 @@ func TestControlledOperationsRequireTypedTargetsAndReason(t *testing.T) {
 			if err := validateCreate(request); err != nil {
 				t.Fatalf("validateCreate() = %v", err)
 			}
-			data, payloadType, err := marshalEnvelope(request, uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7()), time.Now(), time.Now().Add(time.Minute), testCommandSigner(t))
+			data, payloadType, err := marshalEnvelope(request, uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7()), 1, time.Now(), time.Now().Add(time.Minute), testCommandSigner(t))
 			if err != nil || len(data) == 0 || payloadType == "" {
 				t.Fatalf("marshalEnvelope() = %q, %d, %v", payloadType, len(data), err)
 			}

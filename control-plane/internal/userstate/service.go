@@ -113,7 +113,8 @@ func (s *Service) Mutate(ctx context.Context, request MutationRequest) (operatio
 
 	var workspaceID uuid.UUID
 	var nodeStatus string
-	if err := tx.QueryRow(ctx, `SELECT workspace_id,status FROM nodes WHERE id=$1 FOR UPDATE`, request.NodeID).Scan(&workspaceID, &nodeStatus); err != nil {
+	var authorizationRevision uint64
+	if err := tx.QueryRow(ctx, `SELECT workspace_id,status,authorization_revision FROM nodes WHERE id=$1 FOR UPDATE`, request.NodeID).Scan(&workspaceID, &nodeStatus, &authorizationRevision); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return operationstore.Operation{}, false, ErrNodeUnavailable
 		}
@@ -186,7 +187,7 @@ func (s *Service) Mutate(ctx context.Context, request MutationRequest) (operatio
 		return operationstore.Operation{}, false, err
 	}
 	expiresAt := now.Add(request.TTL)
-	envelope, err := marshalEnvelope(request, operationID, commandID, uint64(commandExpectedRevision), uint64(nextRevision), now, expiresAt, s.signer)
+	envelope, err := marshalEnvelope(request, operationID, commandID, authorizationRevision, uint64(nextRevision), now, expiresAt, s.signer)
 	if err != nil {
 		return operationstore.Operation{}, false, err
 	}
@@ -451,12 +452,12 @@ func writeDesired(ctx context.Context, tx pgx.Tx, request MutationRequest, versi
 	}
 }
 
-func marshalEnvelope(request MutationRequest, operationID, commandID uuid.UUID, expectedRevision, desiredRevision uint64, now, expires time.Time, signer *commandauth.Signer) ([]byte, error) {
+func marshalEnvelope(request MutationRequest, operationID, commandID uuid.UUID, authorizationRevision, desiredRevision uint64, now, expires time.Time, signer *commandauth.Signer) ([]byte, error) {
 	messageID, err := uuid.NewV7()
 	if err != nil {
 		return nil, err
 	}
-	envelope := &agentv1.CommandEnvelope{ProtocolVersion: commandauth.ProtocolVersion, MessageId: messageID[:], CommandId: commandID[:], IdempotencyKey: operationID[:], NodeId: request.NodeID[:], Sequence: 1, IssuedAt: timestamppb.New(now), ExpiresAt: timestamppb.New(expires), ExpectedRevision: expectedRevision, Traceparent: request.Traceparent, ActorId: request.ActorID, Reason: request.Reason, OperationId: operationID[:], Action: actionFor(request.Kind), RequiredCapability: capabilityFor(request.Kind), DeliveryMode: agentv1.CommandDeliveryMode_COMMAND_DELIVERY_MODE_EXECUTE_OR_REPLAY}
+	envelope := &agentv1.CommandEnvelope{ProtocolVersion: commandauth.ProtocolVersion, MessageId: messageID[:], CommandId: commandID[:], IdempotencyKey: operationID[:], NodeId: request.NodeID[:], Sequence: 1, IssuedAt: timestamppb.New(now), ExpiresAt: timestamppb.New(expires), ExpectedRevision: authorizationRevision, Traceparent: request.Traceparent, ActorId: request.ActorID, Reason: request.Reason, OperationId: operationID[:], Action: actionFor(request.Kind), RequiredCapability: capabilityFor(request.Kind), DeliveryMode: agentv1.CommandDeliveryMode_COMMAND_DELIVERY_MODE_EXECUTE_OR_REPLAY}
 	switch request.Kind {
 	case UserCreate:
 		envelope.Payload = &agentv1.CommandEnvelope_UserCreate{UserCreate: &agentv1.UserCreate{Username: request.Name, SealedPassword: request.SealedPassword, SecretKeyId: request.SecretKeyID, DesiredRevision: desiredRevision}}
@@ -471,7 +472,7 @@ func marshalEnvelope(request MutationRequest, operationID, commandID uuid.UUID, 
 	default:
 		return nil, ErrInvalidRequest
 	}
-	if err := semanticpayload.PopulateV1(envelope); err != nil {
+	if err := semanticpayload.PopulateV2(envelope); err != nil {
 		return nil, err
 	}
 	if err := signer.Authorize(envelope); err != nil {

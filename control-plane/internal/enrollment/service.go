@@ -19,6 +19,7 @@ import (
 	transportv1 "github.com/GentleKingson/ocservia/control-plane/gen/proto/ocserv/platform/transport/v1"
 	approvalstore "github.com/GentleKingson/ocservia/control-plane/internal/approvals"
 	"github.com/GentleKingson/ocservia/control-plane/internal/audit"
+	"github.com/GentleKingson/ocservia/control-plane/internal/commandauth"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -28,8 +29,9 @@ const (
 	DefaultTokenTTL = 15 * time.Minute
 	MaxPendingNodes = 100
 	MaxClockSkew    = 5 * time.Minute
+	SessionGrantTTL = 5 * time.Minute
 	ProtocolMajor   = 1
-	ProtocolMinor   = 0
+	ProtocolMinor   = 1
 	MaxMessageSize  = 1 << 20
 )
 
@@ -90,10 +92,11 @@ type Service struct {
 	random               io.Reader
 	controllerEndpointID string
 	controllerVersion    string
+	signer               *commandauth.Signer
 }
 
-func New(pool *pgxpool.Pool, controllerEndpointID, controllerVersion string) *Service {
-	return &Service{pool: pool, now: time.Now, random: rand.Reader, controllerEndpointID: controllerEndpointID, controllerVersion: controllerVersion}
+func New(pool *pgxpool.Pool, controllerEndpointID, controllerVersion string, signer *commandauth.Signer) *Service {
+	return &Service{pool: pool, now: time.Now, random: rand.Reader, controllerEndpointID: controllerEndpointID, controllerVersion: controllerVersion, signer: signer}
 }
 
 func (s *Service) CreateToken(ctx context.Context, spec TokenSpec) (Token, error) {
@@ -288,7 +291,7 @@ func (s *Service) Approve(ctx context.Context, approval Approval) (NodeTrust, er
 	var endpointID []byte
 	var currentStatus string
 	var revision uint64
-	err = tx.QueryRow(ctx, `SELECT n.workspace_id,k.endpoint_id,n.status,n.version FROM nodes n JOIN node_endpoint_keys k ON k.node_id=n.id WHERE n.id=$1 AND n.status IN ('pending','active','offline') FOR UPDATE OF n,k`, approval.NodeID).Scan(&workspaceID, &endpointID, &currentStatus, &revision)
+	err = tx.QueryRow(ctx, `SELECT n.workspace_id,k.endpoint_id,n.status,n.authorization_revision FROM nodes n JOIN node_endpoint_keys k ON k.node_id=n.id WHERE n.id=$1 AND n.status IN ('pending','active','offline') FOR UPDATE OF n,k`, approval.NodeID).Scan(&workspaceID, &endpointID, &currentStatus, &revision)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return NodeTrust{}, ErrInvalidTransition
 	}
@@ -306,7 +309,7 @@ func (s *Service) Approve(ctx context.Context, approval Approval) (NodeTrust, er
 	}
 	labels := mapToJSON(approval.Labels)
 	now := s.now().UTC()
-	if err := tx.QueryRow(ctx, `UPDATE nodes SET status='active',labels=$2::jsonb,policy=$3,version=version+1,updated_at=$4 WHERE id=$1 RETURNING version`, approval.NodeID, labels, approval.Policy, now).Scan(&revision); err != nil {
+	if err := tx.QueryRow(ctx, `UPDATE nodes SET status='active',labels=$2::jsonb,policy=$3,version=version+1,authorization_revision=authorization_revision+1,updated_at=$4 WHERE id=$1 RETURNING authorization_revision`, approval.NodeID, labels, approval.Policy, now).Scan(&revision); err != nil {
 		return NodeTrust{}, fmt.Errorf("activate node: %w", err)
 	}
 	if _, err := tx.Exec(ctx, `UPDATE node_endpoint_keys SET state='active' WHERE node_id=$1`, approval.NodeID); err != nil {
@@ -342,7 +345,7 @@ func (s *Service) Revoke(ctx context.Context, revocation Revocation) (NodeTrust,
 	var endpointID []byte
 	var currentStatus string
 	var revision uint64
-	err = tx.QueryRow(ctx, `SELECT n.workspace_id,k.endpoint_id,n.status,n.version FROM nodes n JOIN node_endpoint_keys k ON k.node_id=n.id WHERE n.id=$1 FOR UPDATE OF n,k`, revocation.NodeID).Scan(&workspaceID, &endpointID, &currentStatus, &revision)
+	err = tx.QueryRow(ctx, `SELECT n.workspace_id,k.endpoint_id,n.status,n.authorization_revision FROM nodes n JOIN node_endpoint_keys k ON k.node_id=n.id WHERE n.id=$1 FOR UPDATE OF n,k`, revocation.NodeID).Scan(&workspaceID, &endpointID, &currentStatus, &revision)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return NodeTrust{}, ErrInvalidTransition
 	}
@@ -359,7 +362,7 @@ func (s *Service) Revoke(ctx context.Context, revocation Revocation) (NodeTrust,
 		return NodeTrust{}, err
 	}
 	now := s.now().UTC()
-	if err := tx.QueryRow(ctx, `UPDATE nodes SET status='revoked',version=version+1,updated_at=$2 WHERE id=$1 RETURNING version`, revocation.NodeID, now).Scan(&revision); err != nil {
+	if err := tx.QueryRow(ctx, `UPDATE nodes SET status='revoked',version=version+1,authorization_revision=authorization_revision+1,updated_at=$2 WHERE id=$1 RETURNING authorization_revision`, revocation.NodeID, now).Scan(&revision); err != nil {
 		return NodeTrust{}, err
 	}
 	if _, err := tx.Exec(ctx, `UPDATE node_endpoint_keys SET state='revoked',revoked_at=$2 WHERE node_id=$1`, revocation.NodeID, now); err != nil {
@@ -429,30 +432,72 @@ func (s *Service) AuthorizeSession(ctx context.Context, request *transportv1.Aut
 		response.Result = agentv1.HandshakeResult_HANDSHAKE_RESULT_CLOCK_SKEW
 		return response, nil
 	}
-	rows, err := s.pool.Query(ctx, `SELECT capability FROM node_capabilities WHERE node_id=$1 AND approved=true`, nodeID)
+	if !validCapabilities(handshake.GetCapabilities()) {
+		response.Result = agentv1.HandshakeResult_HANDSHAKE_RESULT_CAPABILITY_REJECTED
+		return response, nil
+	}
+	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead})
+	if err != nil {
+		return nil, fmt.Errorf("begin session authorization: %w", err)
+	}
+	defer rollback(tx)
+	var authorizationRevision uint64
+	err = tx.QueryRow(ctx, `SELECT n.id,n.status,k.state,n.authorization_revision FROM nodes n JOIN node_endpoint_keys k ON k.node_id=n.id WHERE k.endpoint_id=$1 FOR SHARE OF n,k`, request.GetRemoteEndpointId()).Scan(&nodeID, &status, &endpointState, &authorizationRevision)
+	if errors.Is(err, pgx.ErrNoRows) {
+		response.Result = agentv1.HandshakeResult_HANDSHAKE_RESULT_REVOKED
+		return response, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("lock session authority: %w", err)
+	}
+	if (status != "active" && status != "offline") || endpointState != "active" || authorizationRevision == 0 || !slices.Equal(nodeID[:], handshake.GetNodeId()) {
+		response.Result = agentv1.HandshakeResult_HANDSHAKE_RESULT_REVOKED
+		return response, nil
+	}
+	rows, err := tx.Query(ctx, `SELECT capability FROM node_capabilities WHERE node_id=$1 AND approved=true ORDER BY capability`, nodeID)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	approved := map[string]bool{}
+	approved := map[string]struct{}{}
 	for rows.Next() {
 		var capability string
 		if err := rows.Scan(&capability); err != nil {
 			return nil, err
 		}
-		approved[capability] = true
+		approved[capability] = struct{}{}
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
-	for _, capability := range handshake.GetCapabilities() {
-		if !approved[capability] {
-			response.Result = agentv1.HandshakeResult_HANDSHAKE_RESULT_CAPABILITY_REJECTED
-			return response, nil
+	negotiated := make([]string, 0, len(handshake.GetCapabilities()))
+	for _, capability := range normalizedCapabilities(handshake.GetCapabilities()) {
+		if _, ok := approved[capability]; ok && (handshake.GetProtocolMinor() >= ProtocolMinor || strings.HasSuffix(capability, ".read")) {
+			negotiated = append(negotiated, capability)
+		}
+	}
+	slices.Sort(negotiated)
+	response.ProtocolMinor = handshake.GetProtocolMinor()
+	response.NegotiatedCapabilities = negotiated
+	if handshake.GetProtocolMinor() >= ProtocolMinor {
+		if s.signer == nil {
+			return nil, errors.New("controller session signer is unavailable")
+		}
+		var fixedNode [16]byte
+		var fixedEndpoint [32]byte
+		copy(fixedNode[:], nodeID[:])
+		copy(fixedEndpoint[:], request.GetRemoteEndpointId())
+		now := s.now().UTC()
+		response.SessionGrant, err = s.signer.IssueSessionGrant(fixedNode, fixedEndpoint, authorizationRevision, negotiated, ProtocolMajor, ProtocolMinor, now, now.Add(SessionGrantTTL))
+		if err != nil {
+			return nil, fmt.Errorf("issue session grant: %w", err)
 		}
 	}
 	response.Result = agentv1.HandshakeResult_HANDSHAKE_RESULT_ACCEPTED
 	response.MaxMessageSize = min(handshake.GetMaxMessageSize(), MaxMessageSize)
+	if err := tx.Commit(ctx); err != nil {
+		return nil, fmt.Errorf("commit session authorization: %w", err)
+	}
 	return response, nil
 }
 

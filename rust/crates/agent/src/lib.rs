@@ -16,7 +16,8 @@ use ocservia_command_journal::{
     AcceptOutcome, AppliedResourceRevision, CommandRecord, CommandState, Journal,
 };
 use ocservia_contracts::generated::ocserv::platform::agent::v1::{
-    CommandDeliveryMode, CommandEnvelope, SemanticPayloadHashVersion, command_envelope,
+    CommandDeliveryMode, CommandEnvelope, ConfigApplyResult, SemanticPayloadHashVersion,
+    command_envelope,
 };
 use prost::Message;
 use rand::Rng;
@@ -36,10 +37,9 @@ const MAX_FUTURE_SKEW_SECONDS: i64 = 300;
 #[derive(Clone, Debug)]
 pub struct CommandContext {
     pub node_id: [u8; 16],
-    /// Optional revision supplied by read-only/synthetic fixtures. Desired user
-    /// and group mutations are fenced by the durable Agent Journal instead.
-    pub observed_revision: Option<u64>,
-    pub capabilities: HashSet<&'static str>,
+    pub authorization_revision: u64,
+    pub capabilities: HashSet<String>,
+    pub session_expires_at_unix_seconds: i64,
     pub command_keys: ControllerCommandKeyring,
     pub now_unix_seconds: i64,
     pub cancelled: bool,
@@ -373,6 +373,7 @@ impl CommandExecutor {
         resource_type: &str,
         resource_key: &str,
         revision: u64,
+        result: &[u8],
         now: i64,
     ) -> Result<CommandOutcome, CommandError> {
         let before = self
@@ -390,7 +391,7 @@ impl CommandExecutor {
                     resource_key,
                     revision,
                 },
-                b"applied",
+                result,
                 now,
             )
             .map_err(|source| CommandError::OutcomeUnknown {
@@ -440,6 +441,7 @@ impl CommandExecutor {
     /// # Errors
     ///
     /// Rejects invalid or mismatched commands and propagates journal failures.
+    #[allow(clippy::too_many_lines)]
     pub fn reconcile_external(
         &mut self,
         envelope: &CommandEnvelope,
@@ -450,7 +452,30 @@ impl CommandExecutor {
         if !validated.external {
             return Err(CommandError::Rejected("external_command_required"));
         }
-        let record = self.matching_record(&validated)?;
+        let (record, rebuilt_journal) = match self.matching_record(&validated) {
+            Ok(record) => (record, false),
+            Err(CommandError::Rejected("command_not_accepted")) => {
+                let record = match self
+                    .journal
+                    .accept_command(
+                        &validated.key,
+                        &validated.command_id,
+                        &validated.payload_hash,
+                        validated.hash_version as i32,
+                        context.now_unix_seconds,
+                    )
+                    .map_err(pre_effect_failure)?
+                {
+                    AcceptOutcome::Accepted(record) | AcceptOutcome::Replay(record) => record,
+                    AcceptOutcome::PayloadConflict(_) => return Err(CommandError::PayloadConflict),
+                    AcceptOutcome::IdentityConflict(_) => {
+                        return Err(CommandError::IdentityConflict);
+                    }
+                };
+                (record, true)
+            }
+            Err(error) => return Err(error),
+        };
         if matches!(record.state, CommandState::Succeeded | CommandState::Failed) {
             return Ok(CommandOutcome {
                 record,
@@ -459,6 +484,11 @@ impl CommandExecutor {
         }
         let observation = match self.desired_revision_fence(envelope)? {
             DesiredRevisionFence::Current => observation,
+            DesiredRevisionFence::Gap
+                if rebuilt_journal && observation == ExternalEffectObservation::AppliedExact =>
+            {
+                observation
+            }
             DesiredRevisionFence::Superseded => {
                 ExternalEffectObservation::SupersededByNewerRevision
             }
@@ -467,6 +497,7 @@ impl CommandExecutor {
         if observation == ExternalEffectObservation::AppliedExact
             && let Some((resource_type, resource_key, revision)) = desired_resource(envelope)
         {
+            let result = observed_result(envelope);
             let record = self
                 .journal
                 .reconcile_external_with_revision(
@@ -477,7 +508,7 @@ impl CommandExecutor {
                         resource_key,
                         revision,
                     },
-                    b"observed",
+                    &result,
                     context.now_unix_seconds,
                 )
                 .map_err(pre_effect_failure)?;
@@ -566,15 +597,19 @@ impl CommandExecutor {
         &self,
         envelope: &CommandEnvelope,
     ) -> Result<DesiredRevisionFence, CommandError> {
-        let Some((resource_type, resource_key, _)) = desired_resource(envelope) else {
+        let Some((resource_type, resource_key, desired_revision)) = desired_resource(envelope)
+        else {
             return Ok(DesiredRevisionFence::Current);
         };
+        let expected_previous = desired_revision
+            .checked_sub(1)
+            .ok_or(CommandError::Rejected("desired_revision_invalid"))?;
         let local_revision = self
             .journal
             .applied_revision(resource_type, resource_key)
             .map_err(pre_effect_failure)?
             .unwrap_or(0);
-        Ok(match local_revision.cmp(&envelope.expected_revision) {
+        Ok(match local_revision.cmp(&expected_previous) {
             std::cmp::Ordering::Equal => DesiredRevisionFence::Current,
             std::cmp::Ordering::Greater => DesiredRevisionFence::Superseded,
             std::cmp::Ordering::Less => DesiredRevisionFence::Gap,
@@ -788,7 +823,27 @@ fn desired_resource(envelope: &CommandEnvelope) -> Option<(&'static str, &str, u
         command_envelope::Payload::GroupApply(value) => {
             Some(("group", &value.group_name, value.desired_revision))
         }
+        command_envelope::Payload::ConfigApply(value) => {
+            Some(("config", "ocserv.conf", value.desired_revision))
+        }
         _ => None,
+    }
+}
+
+fn observed_result(envelope: &CommandEnvelope) -> Vec<u8> {
+    match envelope.payload.as_ref() {
+        Some(command_envelope::Payload::ConfigApply(payload)) => ConfigApplyResult {
+            candidate_hash: payload.candidate_hash.clone(),
+            previous_hash: Vec::new(),
+            observed_hash: payload.candidate_hash.clone(),
+            applied_revision: payload.desired_revision,
+            healthy: true,
+            rolled_back: false,
+            failed_critical: false,
+            failure_code: String::new(),
+        }
+        .encode_to_vec(),
+        _ => b"observed".to_vec(),
     }
 }
 
@@ -809,7 +864,8 @@ struct ValidatedCommand {
 /// # Errors
 ///
 /// Rejects unsupported payload types.
-pub fn semantic_payload_hash(envelope: &CommandEnvelope) -> Result<[u8; 32], CommandError> {
+#[cfg(test)]
+fn semantic_payload_hash(envelope: &CommandEnvelope) -> Result<[u8; 32], CommandError> {
     let (capability, payload_bytes) = match envelope.payload.as_ref() {
         Some(command_envelope::Payload::SyntheticNoop(payload)) => {
             ("synthetic.noop", payload.encode_to_vec())
@@ -886,6 +942,24 @@ const SEMANTIC_HASH_V1_DOMAIN_SEPARATOR: &[u8] = b"ocservia.command.semantic-has
 /// Rejects unsupported payload types.
 #[allow(clippy::too_many_lines)]
 pub fn semantic_payload_hash_v1(envelope: &CommandEnvelope) -> Result<[u8; 32], CommandError> {
+    canonical_semantic_payload_hash(envelope, SemanticPayloadHashVersion::V1)
+}
+
+/// Computes semantic hash v2, which additionally binds the `ConfigPlan` desired
+/// state revision while preserving v1 as a frozen compatibility algorithm.
+///
+/// # Errors
+///
+/// Rejects malformed or unsupported typed command payloads.
+pub fn semantic_payload_hash_v2(envelope: &CommandEnvelope) -> Result<[u8; 32], CommandError> {
+    canonical_semantic_payload_hash(envelope, SemanticPayloadHashVersion::V2)
+}
+
+#[allow(clippy::too_many_lines)]
+fn canonical_semantic_payload_hash(
+    envelope: &CommandEnvelope,
+    version: SemanticPayloadHashVersion,
+) -> Result<[u8; 32], CommandError> {
     let (payload_kind, canonical_payload) = match envelope.payload.as_ref() {
         Some(command_envelope::Payload::SyntheticNoop(_)) => (107_u32, Vec::new()),
         Some(command_envelope::Payload::SyntheticEcho(payload)) => {
@@ -908,7 +982,12 @@ pub fn semantic_payload_hash_v1(envelope: &CommandEnvelope) -> Result<[u8; 32], 
             if payload.candidate_hash.len() != 32 {
                 return Err(CommandError::Rejected("candidate_hash_invalid"));
             }
-            (103_u32, payload.candidate_hash.clone())
+            let mut out = Vec::with_capacity(40);
+            out.extend_from_slice(&payload.candidate_hash);
+            if version == SemanticPayloadHashVersion::V2 {
+                out.extend_from_slice(&payload.expected_revision.to_be_bytes());
+            }
+            (103_u32, out)
         }
         Some(command_envelope::Payload::ConfigApply(payload)) => {
             if payload.candidate_hash.len() != 32
@@ -1037,7 +1116,13 @@ pub fn semantic_payload_hash_v1(envelope: &CommandEnvelope) -> Result<[u8; 32], 
         _ => return Err(CommandError::Rejected("capability_rejected")),
     };
     let mut hash = Sha256::new();
-    hash.update(SEMANTIC_HASH_V1_DOMAIN_SEPARATOR);
+    match version {
+        SemanticPayloadHashVersion::V1 => hash.update(SEMANTIC_HASH_V1_DOMAIN_SEPARATOR),
+        SemanticPayloadHashVersion::V2 => hash.update(b"ocservia.command.semantic-hash.v2\0"),
+        SemanticPayloadHashVersion::Unspecified => {
+            return Err(CommandError::Rejected("semantic_hash_version_unsupported"));
+        }
+    }
     hash.update(&envelope.node_id);
     hash.update(envelope.expected_revision.to_be_bytes());
     hash.update(payload_kind.to_be_bytes());
@@ -1082,14 +1167,15 @@ fn validate_command(
     {
         return Err(CommandError::Rejected("clock_skew"));
     }
-    if context
-        .observed_revision
-        .is_some_and(|revision| envelope.expected_revision != revision)
+    if context.authorization_revision == 0
+        || envelope.expected_revision != context.authorization_revision
     {
         return Err(CommandError::Rejected("revision_mismatch"));
     }
+    if context.session_expires_at_unix_seconds <= context.now_unix_seconds {
+        return Err(CommandError::Rejected("session_grant_expired"));
+    }
     let (capability, result, external) = validate_payload(envelope)?;
-    validate_desired_transition(envelope)?;
     if !context.capabilities.contains(capability) {
         return Err(CommandError::Rejected("capability_rejected"));
     }
@@ -1101,28 +1187,9 @@ fn validate_command(
     if Uuid::from_bytes(command_id).get_version_num() != 7 {
         return Err(CommandError::Rejected("command_id_invalid"));
     }
-    let version = SemanticPayloadHashVersion::try_from(envelope.semantic_payload_hash_version)
+    let hash_version = SemanticPayloadHashVersion::try_from(envelope.semantic_payload_hash_version)
         .map_err(|_| CommandError::Rejected("semantic_hash_version_unsupported"))?;
-    let (payload_hash, hash_version) = match version {
-        SemanticPayloadHashVersion::Unspecified => {
-            return Err(CommandError::Rejected("semantic_hash_version_unsupported"));
-        }
-        SemanticPayloadHashVersion::V1 => {
-            let recomputed = semantic_payload_hash_v1(envelope)?;
-            if envelope.semantic_payload_sha256.len() != 32 {
-                return Err(CommandError::Rejected("semantic_payload_hash_missing"));
-            }
-            let expected: [u8; 32] = envelope
-                .semantic_payload_sha256
-                .as_slice()
-                .try_into()
-                .map_err(|_| CommandError::Rejected("semantic_payload_hash_malformed"))?;
-            if recomputed != expected {
-                return Err(CommandError::Rejected("semantic_payload_hash_mismatch"));
-            }
-            (recomputed, SemanticPayloadHashVersion::V1)
-        }
-    };
+    let payload_hash = verify_semantic_payload_hash(envelope, hash_version)?;
     context
         .command_keys
         .verify(envelope)
@@ -1135,6 +1202,28 @@ fn validate_command(
         result,
         external,
     })
+}
+
+fn verify_semantic_payload_hash(
+    envelope: &CommandEnvelope,
+    version: SemanticPayloadHashVersion,
+) -> Result<[u8; 32], CommandError> {
+    let recomputed = match version {
+        SemanticPayloadHashVersion::V1 => semantic_payload_hash_v1(envelope)?,
+        SemanticPayloadHashVersion::V2 => semantic_payload_hash_v2(envelope)?,
+        SemanticPayloadHashVersion::Unspecified => {
+            return Err(CommandError::Rejected("semantic_hash_version_unsupported"));
+        }
+    };
+    let expected: [u8; 32] = envelope
+        .semantic_payload_sha256
+        .as_slice()
+        .try_into()
+        .map_err(|_| CommandError::Rejected("semantic_payload_hash_missing"))?;
+    if recomputed != expected {
+        return Err(CommandError::Rejected("semantic_payload_hash_mismatch"));
+    }
+    Ok(recomputed)
 }
 
 #[allow(clippy::too_many_lines)]
@@ -1189,7 +1278,6 @@ fn validate_payload(
                 || payload.candidate_hash.len() != 32
                 || payload.expected_current_hash.len() != 32
                 || payload.desired_revision == 0
-                || envelope.expected_revision.checked_add(1) != Some(payload.desired_revision)
                 || Sha256::digest(&payload.candidate).as_slice() != payload.candidate_hash
             {
                 return Err(CommandError::Rejected("config_apply_invalid"));
@@ -1276,21 +1364,6 @@ fn validate_payload(
         }
         _ => return Err(CommandError::Rejected("capability_rejected")),
     })
-}
-
-fn validate_desired_transition(envelope: &CommandEnvelope) -> Result<(), CommandError> {
-    let desired = match envelope.payload.as_ref() {
-        Some(command_envelope::Payload::UserCreate(value)) => Some(value.desired_revision),
-        Some(command_envelope::Payload::UserDisable(value)) => Some(value.desired_revision),
-        Some(command_envelope::Payload::UserEnable(value)) => Some(value.desired_revision),
-        Some(command_envelope::Payload::UserPasswordRotate(value)) => Some(value.desired_revision),
-        Some(command_envelope::Payload::GroupApply(value)) => Some(value.desired_revision),
-        _ => None,
-    };
-    if desired.is_some_and(|revision| revision != envelope.expected_revision.saturating_add(1)) {
-        return Err(CommandError::Rejected("revision_mismatch"));
-    }
-    Ok(())
 }
 
 fn validate_session_payload(session_id: &str, boot_id: &str) -> Result<(), CommandError> {
@@ -1733,9 +1806,10 @@ mod tests {
         ControllerCommandKeyring, canonical_v1, claims_from_envelope_v1, verification_key_id,
     };
     use ocservia_contracts::generated::ocserv::platform::agent::v1::{
-        CommandAuthorizationProof, CommandAuthorizationVersion, GroupApply, IpBanRemove,
-        ServiceReload, SessionDisconnect, SessionTerminate, SyntheticEcho, SyntheticNoop,
-        UserCreate, UserDisable, UserEnable, UserPasswordRotate, command_envelope,
+        CommandAuthorizationProof, CommandAuthorizationVersion, ConfigApply, ConfigApplyResult,
+        ConfigPlan, GroupApply, IpBanRemove, ServiceReload, SessionDisconnect, SessionTerminate,
+        SyntheticEcho, SyntheticNoop, UserCreate, UserDisable, UserEnable, UserPasswordRotate,
+        command_envelope,
     };
     use prost_types::Timestamp;
     use rand::{SeedableRng, rngs::StdRng};
@@ -1743,6 +1817,10 @@ mod tests {
     use std::process::Command;
 
     use super::*;
+
+    fn capabilities(values: &[&str]) -> HashSet<String> {
+        values.iter().map(|value| (*value).to_owned()).collect()
+    }
 
     #[test]
     fn desired_privd_deadline_exceeds_each_child_budget() {
@@ -1910,8 +1988,9 @@ mod tests {
     fn context(node_id: [u8; 16], now: i64) -> CommandContext {
         CommandContext {
             node_id,
-            observed_revision: Some(1),
-            capabilities: HashSet::from(["synthetic.noop", "synthetic.echo"]),
+            authorization_revision: 1,
+            capabilities: capabilities(&["synthetic.noop", "synthetic.echo"]),
+            session_expires_at_unix_seconds: now + 300,
             command_keys: test_keyring(),
             now_unix_seconds: now,
             cancelled: false,
@@ -1938,12 +2017,12 @@ mod tests {
         node_id: [u8; 16],
         mutation: DesiredMutation,
         name: &str,
-        expected_revision: u64,
+        _expected_revision: u64,
         desired_revision: u64,
         now: i64,
     ) -> CommandEnvelope {
         let mut envelope = command(node_id, *Uuid::now_v7().as_bytes(), "", now);
-        envelope.expected_revision = expected_revision;
+        envelope.expected_revision = 1;
         envelope.payload = Some(match mutation {
             DesiredMutation::Create => command_envelope::Payload::UserCreate(UserCreate {
                 username: name.to_owned(),
@@ -2024,6 +2103,9 @@ mod tests {
             Some(command_envelope::Payload::GroupApply(_)) => {
                 ("group.apply", "ocserv.groups.write")
             }
+            Some(command_envelope::Payload::ConfigApply(_)) => {
+                ("config.apply", "ocserv.config.apply")
+            }
             _ => panic!("test command payload is unsupported"),
         };
         envelope.protocol_version =
@@ -2048,9 +2130,68 @@ mod tests {
 
     fn desired_context(node_id: [u8; 16], now: i64) -> CommandContext {
         let mut command_context = context(node_id, now);
-        command_context.observed_revision = None;
-        command_context.capabilities = HashSet::from(["ocserv.users.write", "ocserv.groups.write"]);
+        command_context.capabilities = capabilities(&["ocserv.users.write", "ocserv.groups.write"]);
         command_context
+    }
+
+    #[test]
+    fn config_reconciliation_rebuilds_lost_journal_from_exact_durable_effect() {
+        let path = temporary_journal("config-journal-rebuild");
+        let node = *Uuid::now_v7().as_bytes();
+        let candidate = b"# generated by ocservia config-plan/v1\ntcp-port = 443\n";
+        let candidate_hash = Sha256::digest(candidate).to_vec();
+        let mut envelope = command(node, *Uuid::now_v7().as_bytes(), "", 100);
+        envelope.payload = Some(command_envelope::Payload::ConfigApply(ConfigApply {
+            candidate: candidate.to_vec(),
+            candidate_hash: candidate_hash.clone(),
+            expected_current_hash: vec![0x44; 32],
+            desired_revision: 7,
+        }));
+        envelope.delivery_mode = CommandDeliveryMode::ReconcileOnly.into();
+        envelope.semantic_payload_hash_version = SemanticPayloadHashVersion::V1.into();
+        envelope.semantic_payload_sha256 = semantic_payload_hash_v1(&envelope)
+            .expect("config semantic hash")
+            .to_vec();
+        authorize_test_command(&mut envelope);
+        let mut command_context = context(node, 100);
+        command_context.capabilities = capabilities(&["ocserv.config.apply"]);
+        let mut executor = CommandExecutor::new(Journal::open(&path).expect("empty journal"));
+
+        let outcome = executor
+            .reconcile_external(
+                &envelope,
+                &command_context,
+                ExternalEffectObservation::AppliedExact,
+            )
+            .expect("rebuild exact config evidence");
+        assert_eq!(outcome.record.state, CommandState::Succeeded);
+        assert_eq!(
+            executor
+                .journal()
+                .applied_revision("config", "ocserv.conf")
+                .expect("config revision"),
+            Some(7)
+        );
+        let result = ConfigApplyResult::decode(
+            outcome
+                .record
+                .result
+                .as_deref()
+                .expect("typed config result"),
+        )
+        .expect("decode config result");
+        assert_eq!(result.applied_revision, 7);
+        assert_eq!(result.observed_hash, candidate_hash);
+
+        let replay = executor
+            .reconcile_external(
+                &envelope,
+                &command_context,
+                ExternalEffectObservation::AppliedExact,
+            )
+            .expect("strict idempotent reconciliation replay");
+        assert_eq!(replay.record.result, outcome.record.result);
+        cleanup_journal(&path);
     }
 
     fn apply_desired(
@@ -2070,7 +2211,14 @@ mod tests {
         let (resource_type, resource_key, revision) =
             desired_resource(envelope).expect("desired resource");
         executor
-            .complete_external_applied(&command, resource_type, resource_key, revision, now)
+            .complete_external_applied(
+                &command,
+                resource_type,
+                resource_key,
+                revision,
+                b"applied",
+                now,
+            )
             .expect("complete desired command");
     }
 
@@ -2393,7 +2541,7 @@ mod tests {
             .to_vec();
         authorize_test_command(&mut envelope);
         let mut command_context = context(node, 100);
-        command_context.capabilities = HashSet::from(["ocserv.session.disconnect"]);
+        command_context.capabilities = capabilities(&["ocserv.session.disconnect"]);
         let mut executor = CommandExecutor::new(Journal::open(&path).expect("journal"));
         let ExternalPreparation::Execute(command) = executor
             .prepare_external(&envelope, &command_context)
@@ -2436,8 +2584,7 @@ mod tests {
             .to_vec();
         authorize_test_command(&mut envelope);
         let mut command_context = context(node, 100);
-        command_context.observed_revision = None;
-        command_context.capabilities = HashSet::from(["ocserv.users.write"]);
+        command_context.capabilities = capabilities(&["ocserv.users.write"]);
         {
             let mut executor = CommandExecutor::new(Journal::open(&path).expect("journal"));
             let mut privd_calls = 0;
@@ -2497,8 +2644,7 @@ mod tests {
         envelope.semantic_payload_sha256 = semantic_payload_hash_v1(&envelope).unwrap().to_vec();
         authorize_test_command(&mut envelope);
         let mut command_context = context(node, 100);
-        command_context.observed_revision = None;
-        command_context.capabilities = HashSet::from(["ocserv.users.write"]);
+        command_context.capabilities = capabilities(&["ocserv.users.write"]);
         let mut executor = CommandExecutor::new(Journal::open(&path).expect("journal"));
         let mut privd_calls = 0;
         apply_desired(
@@ -2546,8 +2692,7 @@ mod tests {
         let path = temporary_journal("password-superseded");
         let node = *Uuid::now_v7().as_bytes();
         let mut command_context = context(node, 100);
-        command_context.observed_revision = None;
-        command_context.capabilities = HashSet::from(["ocserv.users.write"]);
+        command_context.capabilities = capabilities(&["ocserv.users.write"]);
         let mut old = command(node, *Uuid::now_v7().as_bytes(), "", 100);
         old.payload = Some(command_envelope::Payload::UserPasswordRotate(
             UserPasswordRotate {
@@ -2561,7 +2706,7 @@ mod tests {
         old.semantic_payload_sha256 = semantic_payload_hash_v1(&old).unwrap().to_vec();
         authorize_test_command(&mut old);
         let mut newer = command(node, *Uuid::now_v7().as_bytes(), "", 100);
-        newer.expected_revision = 2;
+        newer.expected_revision = 1;
         newer.payload = Some(command_envelope::Payload::UserPasswordRotate(
             UserPasswordRotate {
                 username: "alice".to_owned(),
@@ -2610,7 +2755,7 @@ mod tests {
             panic!("new execute preparation")
         };
         executor
-            .complete_external_applied(&new_command, "user", "alice", 3, 102)
+            .complete_external_applied(&new_command, "user", "alice", 3, b"applied", 102)
             .expect("newer applied");
         command_context.now_unix_seconds = 103;
         let replayed = executor
@@ -2636,8 +2781,7 @@ mod tests {
         let path = temporary_journal("password-stale-retry");
         let node = *Uuid::now_v7().as_bytes();
         let mut command_context = context(node, 100);
-        command_context.observed_revision = None;
-        command_context.capabilities = HashSet::from(["ocserv.users.write"]);
+        command_context.capabilities = capabilities(&["ocserv.users.write"]);
         let mut old = command(node, *Uuid::now_v7().as_bytes(), "", 100);
         old.payload = Some(command_envelope::Payload::UserPasswordRotate(
             UserPasswordRotate {
@@ -2659,7 +2803,7 @@ mod tests {
         };
         payload.desired_revision = 3;
         payload.sealed_password.fill(0xa3);
-        newer.expected_revision = 2;
+        newer.expected_revision = 1;
         newer.semantic_payload_sha256 = semantic_payload_hash_v1(&newer).unwrap().to_vec();
         authorize_test_command(&mut newer);
         let mut executor = CommandExecutor::new(Journal::open(&path).expect("journal"));
@@ -2699,7 +2843,7 @@ mod tests {
             panic!("new execute preparation")
         };
         executor
-            .complete_external_applied(&new_command, "user", "alice", 3, 103)
+            .complete_external_applied(&new_command, "user", "alice", 3, b"applied", 103)
             .expect("newer applied");
         command_context.now_unix_seconds = 104;
         assert!(matches!(
@@ -2967,6 +3111,12 @@ mod tests {
             executor.execute(&base, &no_capability, None),
             Err(CommandError::Rejected("capability_rejected"))
         ));
+        let mut expired_session = base_context.clone();
+        expired_session.session_expires_at_unix_seconds = expired_session.now_unix_seconds;
+        assert!(matches!(
+            executor.execute(&base, &expired_session, None),
+            Err(CommandError::Rejected("session_grant_expired"))
+        ));
         let mut oversized = base.clone();
         oversized.payload = Some(command_envelope::Payload::SyntheticEcho(SyntheticEcho {
             message: "x".repeat(4097),
@@ -2999,8 +3149,7 @@ mod tests {
         let node_id = *Uuid::now_v7().as_bytes();
         let base = command(node_id, *Uuid::now_v7().as_bytes(), "authorized", 100);
         let mut executor = CommandExecutor::new(Journal::open(&path).expect("open"));
-        let mut base_context = context(node_id, 100);
-        base_context.observed_revision = None;
+        let base_context = context(node_id, 100);
 
         let mut changed_command = base.clone();
         changed_command.command_id = Uuid::now_v7().as_bytes().to_vec();
@@ -3071,7 +3220,7 @@ mod tests {
             &mut executor,
             &changed_revision,
             &base_context,
-            "command_authorization_signature_invalid",
+            "revision_mismatch",
         );
 
         let mut changed_semantic_hash = base.clone();
@@ -3138,7 +3287,7 @@ mod tests {
             .to_vec();
         authorize_test_command(&mut privileged);
         let mut privileged_context = base_context.clone();
-        privileged_context.capabilities = HashSet::from(["ocserv.session.disconnect"]);
+        privileged_context.capabilities = capabilities(&["ocserv.session.disconnect"]);
 
         let mut unsigned = privileged.clone();
         unsigned.authorization = None;
@@ -3662,6 +3811,54 @@ mod tests {
                 "vector {name:?} production digest mismatch"
             );
         }
+    }
+
+    #[test]
+    fn canonical_semantic_hash_v2_matches_shared_config_plan_vector() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../../testdata/semantic-payload-hash-v2.json");
+        let fixture: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(&path)
+                .unwrap_or_else(|error| panic!("read {}: {error}", path.display())),
+        )
+        .unwrap_or_else(|error| panic!("parse {}: {error}", path.display()));
+        let vector = fixture.get("vector").expect("vector");
+        let node_id =
+            hex::decode(vector["node_id_hex"].as_str().expect("node ID")).expect("node ID hex");
+        let candidate_hash = hex::decode(
+            vector["candidate_hash_hex"]
+                .as_str()
+                .expect("candidate hash"),
+        )
+        .expect("candidate hash hex");
+        let expected_revision = vector["config_expected_revision"]
+            .as_u64()
+            .expect("config revision");
+        let mut envelope = CommandEnvelope {
+            node_id,
+            expected_revision: vector["authorization_revision"]
+                .as_u64()
+                .expect("authorization revision"),
+            payload: Some(command_envelope::Payload::ConfigPlan(ConfigPlan {
+                candidate_hash,
+                expected_revision,
+                ..ConfigPlan::default()
+            })),
+            ..CommandEnvelope::default()
+        };
+        let digest = semantic_payload_hash_v2(&envelope).expect("v2 hash");
+        assert_eq!(
+            hex::encode(digest),
+            vector["expected_sha256"].as_str().expect("expected hash")
+        );
+        let Some(command_envelope::Payload::ConfigPlan(payload)) = envelope.payload.as_mut() else {
+            panic!("ConfigPlan payload");
+        };
+        payload.expected_revision += 1;
+        assert_ne!(
+            semantic_payload_hash_v2(&envelope).expect("changed v2 hash"),
+            digest
+        );
     }
 
     #[test]

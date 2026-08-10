@@ -204,9 +204,9 @@ func (s *Service) Apply(ctx context.Context, request ApplyRequest) (operations.O
 	if plan.Validation != "valid" || plan.CurrentHash == "" || !plan.ExpiresAt.After(s.now()) {
 		return operations.Operation{}, false, ErrStaleRevision
 	}
-	var nodeVersion int64
+	var nodeVersion, highestDesiredRevision int64
 	var envelopeBytes []byte
-	if err := s.pool.QueryRow(ctx, `SELECT n.version,c.envelope FROM nodes n JOIN config_plans p ON p.node_id=n.id JOIN commands c ON c.operation_id=p.operation_id WHERE p.id=$1`, request.PlanID).Scan(&nodeVersion, &envelopeBytes); err != nil {
+	if err := s.pool.QueryRow(ctx, `SELECT n.version,COALESCE(state.desired_revision,0),c.envelope FROM nodes n JOIN config_plans p ON p.node_id=n.id JOIN commands c ON c.operation_id=p.operation_id LEFT JOIN node_config_state state ON state.node_id=n.id WHERE p.id=$1`, request.PlanID).Scan(&nodeVersion, &highestDesiredRevision, &envelopeBytes); err != nil {
 		return operations.Operation{}, false, err
 	}
 	var envelope agentv1.CommandEnvelope
@@ -220,7 +220,7 @@ func (s *Service) Apply(ctx context.Context, request ApplyRequest) (operations.O
 	return s.operations.CreateSynthetic(ctx, operations.CreateRequest{
 		NodeID: plan.NodeID, IdempotencyKey: request.IdempotencyKey, ExpectedVersion: nodeVersion,
 		Kind: operations.ConfigApply, Candidate: envelope.GetConfigPlan().GetCandidate(), CandidateHash: envelope.GetConfigPlan().GetCandidateHash(),
-		ExpectedCurrentHash: previousHash, PlanRevision: uint64(plan.ExpectedRevision), DesiredRevision: uint64(plan.ExpectedRevision) + 1,
+		ExpectedCurrentHash: previousHash, PlanRevision: uint64(plan.ExpectedRevision), DesiredRevision: uint64(highestDesiredRevision) + 1,
 		ApplyMetadata: &operations.ConfigApplyMetadata{PlanID: request.PlanID}, ApprovalID: request.ApprovalID,
 		TTL: 15 * time.Minute, RequestID: request.RequestID, Traceparent: request.Traceparent,
 		ActorID: request.ActorID, ActorIdentityID: request.ActorIdentityID, ActorSessionID: request.ActorSessionID,

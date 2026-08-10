@@ -1,0 +1,14 @@
+{
+  "version": 2,
+  "domain": "ocservia.command.semantic-hash.v2\u0000",
+  "vector": {
+    "name": "config-plan-authority-and-desired-revision",
+    "node_id_hex": "00112233445566778899aabbccddeeff",
+    "authorization_revision": 7,
+    "payload_kind": 103,
+    "candidate_hash_hex": "4242424242424242424242424242424242424242424242424242424242424242",
+    "config_expected_revision": 3,
+    "canonical_preimage_hex": "6f637365727669612e636f6d6d616e642e73656d616e7469632d686173682e76320000112233445566778899aabbccddeeff00000000000000070000006742424242424242424242424242424242424242424242424242424242424242420000000000000003",
+    "expected_sha256": "46dc187ca3bcffdcb9ca59ebc5657c0d49c2279afb2243fc4acfe54007ac21c7"
+  }
+}
