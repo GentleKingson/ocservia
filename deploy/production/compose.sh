@@ -28,6 +28,12 @@ for secret in "${general_secrets[@]}"; do
     exit 2
   fi
 done
+command_signing_key="${secret_dir}/controller-command-signing-key.pem"
+if [[ ! -f "${command_signing_key}" || -L "${command_signing_key}" \
+  || "$(stat -c '%u:%g:%a' "${command_signing_key}")" != "65534:65532:400" ]]; then
+  echo "${command_signing_key} must be owned by uid:gid 65534:65532 with mode 0400" >&2
+  exit 2
+fi
 for secret in relay-access-token controller-iroh.key; do
   path="${secret_dir}/${secret}"
   if [[ ! -f "${path}" || -L "${path}" || "$(stat -c '%u:%g:%a' "${path}")" != "65532:65532:400" ]]; then

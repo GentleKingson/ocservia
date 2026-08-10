@@ -14,6 +14,7 @@ import (
 
 	agentv1 "github.com/GentleKingson/ocservia/control-plane/gen/proto/ocserv/platform/agent/v1"
 	"github.com/GentleKingson/ocservia/control-plane/internal/audit"
+	"github.com/GentleKingson/ocservia/control-plane/internal/commandauth"
 	"github.com/GentleKingson/ocservia/control-plane/internal/commandlimit"
 	operationstore "github.com/GentleKingson/ocservia/control-plane/internal/operations"
 	"github.com/GentleKingson/ocservia/control-plane/internal/semanticpayload"
@@ -82,12 +83,20 @@ type ResourceState struct {
 }
 
 type Service struct {
-	pool *pgxpool.Pool
-	now  func() time.Time
+	pool   *pgxpool.Pool
+	now    func() time.Time
+	signer *commandauth.Signer
 }
 
 func New(pool *pgxpool.Pool) *Service {
 	return &Service{pool: pool, now: func() time.Time { return time.Now().UTC() }}
+}
+
+// NewWithSigner configures desired-state mutations with a Controller signer.
+func NewWithSigner(pool *pgxpool.Pool, signer *commandauth.Signer) *Service {
+	service := New(pool)
+	service.signer = signer
+	return service
 }
 
 func (s *Service) Mutate(ctx context.Context, request MutationRequest) (operationstore.Operation, bool, error) {
@@ -177,7 +186,7 @@ func (s *Service) Mutate(ctx context.Context, request MutationRequest) (operatio
 		return operationstore.Operation{}, false, err
 	}
 	expiresAt := now.Add(request.TTL)
-	envelope, err := marshalEnvelope(request, operationID, commandID, uint64(commandExpectedRevision), uint64(nextRevision), now, expiresAt)
+	envelope, err := marshalEnvelope(request, operationID, commandID, uint64(commandExpectedRevision), uint64(nextRevision), now, expiresAt, s.signer)
 	if err != nil {
 		return operationstore.Operation{}, false, err
 	}
@@ -442,12 +451,12 @@ func writeDesired(ctx context.Context, tx pgx.Tx, request MutationRequest, versi
 	}
 }
 
-func marshalEnvelope(request MutationRequest, operationID, commandID uuid.UUID, expectedRevision, desiredRevision uint64, now, expires time.Time) ([]byte, error) {
+func marshalEnvelope(request MutationRequest, operationID, commandID uuid.UUID, expectedRevision, desiredRevision uint64, now, expires time.Time, signer *commandauth.Signer) ([]byte, error) {
 	messageID, err := uuid.NewV7()
 	if err != nil {
 		return nil, err
 	}
-	envelope := &agentv1.CommandEnvelope{ProtocolVersion: "1.0", MessageId: messageID[:], CommandId: commandID[:], IdempotencyKey: operationID[:], NodeId: request.NodeID[:], Sequence: 1, IssuedAt: timestamppb.New(now), ExpiresAt: timestamppb.New(expires), ExpectedRevision: expectedRevision, Traceparent: request.Traceparent, ActorId: request.ActorID, Reason: request.Reason, DeliveryMode: agentv1.CommandDeliveryMode_COMMAND_DELIVERY_MODE_EXECUTE_OR_REPLAY}
+	envelope := &agentv1.CommandEnvelope{ProtocolVersion: commandauth.ProtocolVersion, MessageId: messageID[:], CommandId: commandID[:], IdempotencyKey: operationID[:], NodeId: request.NodeID[:], Sequence: 1, IssuedAt: timestamppb.New(now), ExpiresAt: timestamppb.New(expires), ExpectedRevision: expectedRevision, Traceparent: request.Traceparent, ActorId: request.ActorID, Reason: request.Reason, OperationId: operationID[:], Action: actionFor(request.Kind), RequiredCapability: capabilityFor(request.Kind), DeliveryMode: agentv1.CommandDeliveryMode_COMMAND_DELIVERY_MODE_EXECUTE_OR_REPLAY}
 	switch request.Kind {
 	case UserCreate:
 		envelope.Payload = &agentv1.CommandEnvelope_UserCreate{UserCreate: &agentv1.UserCreate{Username: request.Name, SealedPassword: request.SealedPassword, SecretKeyId: request.SecretKeyID, DesiredRevision: desiredRevision}}
@@ -464,6 +473,9 @@ func marshalEnvelope(request MutationRequest, operationID, commandID uuid.UUID, 
 	}
 	if err := semanticpayload.PopulateV1(envelope); err != nil {
 		return nil, err
+	}
+	if err := signer.Authorize(envelope); err != nil {
+		return nil, fmt.Errorf("authorize desired-state command: %w", err)
 	}
 	return proto.Marshal(envelope)
 }

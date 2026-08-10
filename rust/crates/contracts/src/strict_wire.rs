@@ -101,10 +101,16 @@ pub fn validate_strict_command_envelope(bytes: &[u8]) -> Result<(), StrictWireEr
 #[derive(Clone, Copy)]
 enum MessageKind {
     CommandEnvelope,
+    CommandAuthorizationProof,
     Timestamp,
     SessionDisconnect,
+    SessionTerminate,
+    IpBanRemove,
     UserCreate,
     UserDisable,
+    UserEnable,
+    UserPasswordRotate,
+    GroupApply,
     ConfigPlan,
     ConfigApply,
     CertificateCsr,
@@ -120,10 +126,16 @@ impl MessageKind {
     const fn name(self) -> &'static str {
         match self {
             Self::CommandEnvelope => "CommandEnvelope",
+            Self::CommandAuthorizationProof => "CommandAuthorizationProof",
             Self::Timestamp => "Timestamp",
             Self::SessionDisconnect => "SessionDisconnect",
+            Self::SessionTerminate => "SessionTerminate",
+            Self::IpBanRemove => "IpBanRemove",
             Self::UserCreate => "UserCreate",
             Self::UserDisable => "UserDisable",
+            Self::UserEnable => "UserEnable",
+            Self::UserPasswordRotate => "UserPasswordRotate",
+            Self::GroupApply => "GroupApply",
             Self::ConfigPlan => "ConfigPlan",
             Self::ConfigApply => "ConfigApply",
             Self::CertificateCsr => "CertificateCsr",
@@ -189,17 +201,19 @@ fn take_nested(bytes: &mut Bytes, message: &'static str) -> Result<Bytes, Strict
 fn field_kind(message: MessageKind, tag: u32) -> Option<FieldKind> {
     use FieldKind::{Nested, Scalar};
     use MessageKind::{
-        CertificateCsr, CertificateP12, CertificateRevoke, CommandEnvelope, ConfigApply,
-        ConfigPlan, ServiceReload, SessionDisconnect, SimulationProbe, SyntheticEcho,
-        SyntheticNoop, Timestamp, UserCreate, UserDisable,
+        CertificateCsr, CertificateP12, CertificateRevoke, CommandAuthorizationProof,
+        CommandEnvelope, ConfigApply, ConfigPlan, GroupApply, IpBanRemove, ServiceReload,
+        SessionDisconnect, SessionTerminate, SimulationProbe, SyntheticEcho, SyntheticNoop,
+        Timestamp, UserCreate, UserDisable, UserEnable, UserPasswordRotate,
     };
     use WireType::{LengthDelimited, Varint};
 
     match message {
         CommandEnvelope => match tag {
-            1..=5 | 10..=12 | 111 => Some(Scalar(LengthDelimited)),
+            1..=5 | 10..=12 | 111 | 120..=124 => Some(Scalar(LengthDelimited)),
             6 | 9 | 109 | 110 => Some(Scalar(Varint)),
             7 | 8 => Some(Nested(Timestamp)),
+            125 => Some(Nested(CommandAuthorizationProof)),
             100 => Some(Nested(SessionDisconnect)),
             101 => Some(Nested(UserCreate)),
             102 => Some(Nested(UserDisable)),
@@ -209,6 +223,11 @@ fn field_kind(message: MessageKind, tag: u32) -> Option<FieldKind> {
             106 => Some(Nested(SimulationProbe)),
             107 => Some(Nested(SyntheticNoop)),
             108 => Some(Nested(SyntheticEcho)),
+            112 => Some(Nested(SessionTerminate)),
+            113 => Some(Nested(IpBanRemove)),
+            114 => Some(Nested(UserPasswordRotate)),
+            115 => Some(Nested(GroupApply)),
+            116 => Some(Nested(UserEnable)),
             117 => Some(Nested(CertificateCsr)),
             118 => Some(Nested(CertificateP12)),
             119 => Some(Nested(CertificateRevoke)),
@@ -218,17 +237,36 @@ fn field_kind(message: MessageKind, tag: u32) -> Option<FieldKind> {
             1 | 2 => Some(Scalar(Varint)),
             _ => None,
         },
-        SessionDisconnect | UserCreate | UserDisable | SyntheticEcho | ConfigApply => match tag {
+        CommandAuthorizationProof => match tag {
+            1 => Some(Scalar(Varint)),
+            2 | 3 => Some(Scalar(LengthDelimited)),
+            _ => None,
+        },
+        SessionDisconnect | SessionTerminate => match tag {
+            1 | 2 => Some(Scalar(LengthDelimited)),
+            _ => None,
+        },
+        IpBanRemove | SyntheticEcho => match tag {
             1 => Some(Scalar(LengthDelimited)),
+            _ => None,
+        },
+        UserCreate | UserPasswordRotate | ConfigApply | CertificateCsr => match tag {
+            1..=3 => Some(Scalar(LengthDelimited)),
+            4 => Some(Scalar(Varint)),
+            _ => None,
+        },
+        UserDisable | UserEnable => match tag {
+            1 => Some(Scalar(LengthDelimited)),
+            2 => Some(Scalar(Varint)),
+            _ => None,
+        },
+        GroupApply => match tag {
+            1 | 2 => Some(Scalar(LengthDelimited)),
+            3 => Some(Scalar(Varint)),
             _ => None,
         },
         ConfigPlan => match tag {
             1 | 2 => Some(Scalar(LengthDelimited)),
-            _ => None,
-        },
-        CertificateCsr => match tag {
-            1..=3 => Some(Scalar(LengthDelimited)),
-            4 => Some(Scalar(Varint)),
             _ => None,
         },
         CertificateP12 => match tag {
@@ -251,7 +289,7 @@ fn field_kind(message: MessageKind, tag: u32) -> Option<FieldKind> {
 mod tests {
     use super::*;
     use crate::generated::ocserv::platform::agent::v1::{
-        CommandEnvelope, SyntheticEcho, command_envelope,
+        CommandAuthorizationProof, CommandEnvelope, SyntheticEcho, command_envelope,
     };
     use prost::Message;
     use prost_types::Timestamp;
@@ -270,6 +308,11 @@ mod tests {
             payload: Some(command_envelope::Payload::SyntheticEcho(SyntheticEcho {
                 message: "hello".to_owned(),
             })),
+            authorization: Some(CommandAuthorizationProof {
+                version: 1,
+                key_id: "test-key".to_owned(),
+                signature: vec![0xa5; 64],
+            }),
             ..CommandEnvelope::default()
         }
     }
@@ -297,12 +340,12 @@ mod tests {
     #[test]
     fn rejects_unknown_top_level_field() {
         let mut bytes = envelope().encode_to_vec();
-        bytes.extend([0xc0, 0x07, 0x01]);
+        bytes.extend([0xf0, 0x07, 0x01]);
         assert!(matches!(
             validate_strict_command_envelope(&bytes),
             Err(StrictWireError::UnknownField {
                 message: "CommandEnvelope",
-                tag: 120
+                tag: 126
             })
         ));
     }
@@ -327,6 +370,31 @@ mod tests {
             validate_strict_command_envelope(&bytes),
             Err(StrictWireError::UnknownField {
                 message: "SyntheticEcho",
+                tag: 99
+            })
+        ));
+    }
+
+    #[test]
+    fn rejects_unknown_authorization_field() {
+        let mut authorization = envelope()
+            .authorization
+            .as_ref()
+            .expect("authorization")
+            .encode_to_vec();
+        authorization.extend([0x98, 0x06, 0x01]);
+
+        let mut without_authorization = envelope();
+        without_authorization.authorization = None;
+        let mut bytes = without_authorization.encode_to_vec();
+        bytes.extend([0xea, 0x07]);
+        append_varint(&mut bytes, authorization.len());
+        bytes.extend(authorization);
+
+        assert!(matches!(
+            validate_strict_command_envelope(&bytes),
+            Err(StrictWireError::UnknownField {
+                message: "CommandAuthorizationProof",
                 tag: 99
             })
         ));

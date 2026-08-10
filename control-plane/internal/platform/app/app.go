@@ -12,6 +12,7 @@ import (
 	"github.com/GentleKingson/ocservia/control-plane/internal/audit"
 	"github.com/GentleKingson/ocservia/control-plane/internal/auth"
 	"github.com/GentleKingson/ocservia/control-plane/internal/certificates"
+	"github.com/GentleKingson/ocservia/control-plane/internal/commandauth"
 	"github.com/GentleKingson/ocservia/control-plane/internal/configplan"
 	"github.com/GentleKingson/ocservia/control-plane/internal/enrollment"
 	"github.com/GentleKingson/ocservia/control-plane/internal/localslice"
@@ -70,10 +71,23 @@ func Run(ctx context.Context, cfg config.Config, build BuildInfo, logger *slog.L
 	}
 
 	logger.Info("control plane starting", "role", cfg.Role)
+	var commandSigner *commandauth.Signer
+	if cfg.CommandSigningKeyFile != "" {
+		commandSigner, err = commandauth.LoadSigner(cfg.CommandSigningKeyFile)
+		if err != nil {
+			return fmt.Errorf("load Controller command signing key: %w", err)
+		}
+	} else {
+		commandSigner, err = commandauth.NewRandomSigner()
+		if err != nil {
+			return err
+		}
+		logger.Warn("using an ephemeral Controller command signing key", "environment", cfg.Environment)
+	}
 	componentCtx, stopComponents := context.WithCancel(ctx)
 	defer stopComponents()
-	sliceService := localslice.New(pool)
-	operationService := operationstore.NewWithConcurrency(pool, cfg.UserOperationConcurrency)
+	sliceService := localslice.NewWithSigner(pool, commandSigner)
+	operationService := operationstore.NewWithSigner(pool, cfg.UserOperationConcurrency, commandSigner)
 	workerErr := make(chan error, 2)
 	maintenanceErr := make(chan error, 1)
 	var trust *trustserver.Server
@@ -107,7 +121,7 @@ func Run(ctx context.Context, cfg config.Config, build BuildInfo, logger *slog.L
 		go func() { workerErr <- operationWorker.Run(componentCtx) }()
 	}
 	telemetryService := telemetrystore.New(pool)
-	userStateService := userstate.New(pool)
+	userStateService := userstate.NewWithSigner(pool, commandSigner)
 	userOperationsService := useroperations.NewWithConcurrency(pool, userStateService, cfg.UserOperationConcurrency)
 	auditManager := audit.NewManager(pool, cfg.AuditCheckpointKey)
 	var apiTransport *transportclient.Client

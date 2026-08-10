@@ -1658,10 +1658,13 @@ pub async fn shutdown(
 mod tests {
     use iroh::{TransportAddr, Watcher as _, tls::CaTlsConfig};
     use ocservia_contracts::generated::ocserv::platform::agent::v1::{
-        CommandDeliveryMode, GroupObservation, SemanticPayloadHashVersion, UserObservation,
+        CommandAuthorizationProof, CommandAuthorizationVersion, CommandDeliveryMode,
+        GroupObservation, SemanticPayloadHashVersion, UserObservation,
     };
 
     use super::*;
+
+    const RELAYED_AUTHORIZATION_SIGNATURE: &[u8] = &[0xa5; 64];
 
     fn handshake(key: &SecretKey) -> SessionHandshake {
         SessionHandshake {
@@ -1692,7 +1695,7 @@ mod tests {
 
     fn command_envelope(node_id: &[u8], traceparent: &str, reason: String) -> Vec<u8> {
         CommandEnvelope {
-            protocol_version: "1.0".to_owned(),
+            protocol_version: "1.1".to_owned(),
             message_id: Uuid::now_v7().as_bytes().to_vec(),
             command_id: Uuid::now_v7().as_bytes().to_vec(),
             idempotency_key: Uuid::now_v7().as_bytes().to_vec(),
@@ -1704,10 +1707,16 @@ mod tests {
             traceparent: traceparent.to_owned(),
             actor_id: "test".to_owned(),
             reason,
+            authorization: Some(CommandAuthorizationProof {
+                version: CommandAuthorizationVersion::V1.into(),
+                key_id: "ed25519-sha256:test-transport-relay-only".to_owned(),
+                signature: RELAYED_AUTHORIZATION_SIGNATURE.to_vec(),
+            }),
             delivery_mode: CommandDeliveryMode::ExecuteOrReplay.into(),
             payload: None,
             semantic_payload_hash_version: SemanticPayloadHashVersion::Unspecified as i32,
             semantic_payload_sha256: Vec::new(),
+            ..CommandEnvelope::default()
         }
         .encode_to_vec()
     }
@@ -1741,7 +1750,14 @@ mod tests {
             .expect("read command length");
         let mut command = vec![0_u8; u32::from_be_bytes(length) as usize];
         recv.read_exact(&mut command).await.expect("read command");
-        CommandEnvelope::decode(command.as_slice()).expect("decode command");
+        let decoded = CommandEnvelope::decode(command.as_slice()).expect("decode command");
+        assert_eq!(
+            decoded
+                .authorization
+                .expect("relayed authorization")
+                .signature,
+            RELAYED_AUTHORIZATION_SIGNATURE
+        );
         let response = AgentEvent {
             r#type: AgentEventType::CommandResult.into(),
             payload: b"completed".to_vec(),
@@ -1763,7 +1779,14 @@ mod tests {
             .expect("read command length");
         let mut command = vec![0_u8; u32::from_be_bytes(length) as usize];
         recv.read_exact(&mut command).await.expect("read command");
-        CommandEnvelope::decode(command.as_slice()).expect("decode command");
+        let decoded = CommandEnvelope::decode(command.as_slice()).expect("decode command");
+        assert_eq!(
+            decoded
+                .authorization
+                .expect("relayed authorization")
+                .signature,
+            RELAYED_AUTHORIZATION_SIGNATURE
+        );
         send.finish().expect("finish empty response");
     }
 
@@ -2381,7 +2404,7 @@ mod tests {
     async fn command_responses_are_published_with_negotiated_limits() {
         let agent_key = SecretKey::generate();
         let mut handshake = handshake(&agent_key);
-        handshake.max_message_size = 256;
+        handshake.max_message_size = 512;
         let service = IrohTransportService::new(16);
         let router = build_router(
             SecretKey::generate(),
@@ -2407,7 +2430,7 @@ mod tests {
 
         let traceparent = new_traceparent();
         let baseline_last_seen = last_seen(&service, &handshake.node_id).await;
-        let oversized = command_envelope(&handshake.node_id, &traceparent, "x".repeat(256));
+        let oversized = command_envelope(&handshake.node_id, &traceparent, "x".repeat(512));
         let error = service
             .send_command(Request::new(SendCommandRequest {
                 node_id: handshake.node_id.clone(),

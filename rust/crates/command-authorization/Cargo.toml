@@ -1,0 +1,21 @@
+[package]
+name = "ocservia-command-authorization"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+ed25519-dalek.workspace = true
+hex.workspace = true
+ocservia-contracts = { version = "=0.1.0", path = "../contracts" }
+rustix.workspace = true
+sha2.workspace = true
+
+[dev-dependencies]
+prost-types.workspace = true
+serde_json.workspace = true
+
+[lints]
+workspace = true

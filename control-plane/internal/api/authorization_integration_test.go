@@ -15,6 +15,7 @@ import (
 	approvalstore "github.com/GentleKingson/ocservia/control-plane/internal/approvals"
 	"github.com/GentleKingson/ocservia/control-plane/internal/auth"
 	certificatestore "github.com/GentleKingson/ocservia/control-plane/internal/certificates"
+	"github.com/GentleKingson/ocservia/control-plane/internal/commandauth"
 	configplanstore "github.com/GentleKingson/ocservia/control-plane/internal/configplan"
 	operationstore "github.com/GentleKingson/ocservia/control-plane/internal/operations"
 	"github.com/GentleKingson/ocservia/control-plane/internal/rbac"
@@ -78,7 +79,7 @@ func TestCertificateRoutesUseNodeScopedAuthorizationIntegration(t *testing.T) {
 		_, _ = pool.Exec(context.Background(), `DELETE FROM role_bindings WHERE id IN($1,$2); DELETE FROM artifact_operations WHERE id=$3; DELETE FROM certificates WHERE id=$4; DELETE FROM operations WHERE id=$5; DELETE FROM nodes WHERE workspace_id=$6; DELETE FROM identities WHERE id IN($7,$8); DELETE FROM workspaces WHERE id=$6`, managerBinding, securityBinding, artifactID, certificateID, operationID, workspaceID, managerID, securityID)
 	}()
 	artifactData := []byte("encrypted artifact response")
-	server := &Server{rbac: rbac.New(pool), certificates: certificatestore.NewWithDependencies(pool, operationstore.New(pool), nil, nil, certificateArtifactFixture{data: artifactData})}
+	server := &Server{rbac: rbac.New(pool), certificates: certificatestore.NewWithDependencies(pool, apiOperationService(pool), nil, nil, certificateArtifactFixture{data: artifactData})}
 	manager := auth.Principal{IdentityID: managerID, Issuer: "integration"}
 	security := auth.Principal{IdentityID: securityID, Issuer: "integration"}
 	tests := []struct {
@@ -126,7 +127,7 @@ func TestCertificateRoutesUseNodeScopedAuthorizationIntegration(t *testing.T) {
 	if _, err := pool.Exec(ctx, `UPDATE artifact_operations SET state='ready',consumed_at=NULL,content_sha256=$2,content_size=$3 WHERE id=$1`, artifactID, artifactHash[:], len(artifactData)); err != nil {
 		t.Fatal(err)
 	}
-	failureServer := &Server{certificates: certificatestore.NewWithDependencies(pool, operationstore.New(pool), nil, nil, invalidatingArtifactFixture{pool: pool, artifactID: artifactID, data: artifactData})}
+	failureServer := &Server{certificates: certificatestore.NewWithDependencies(pool, apiOperationService(pool), nil, nil, invalidatingArtifactFixture{pool: pool, artifactID: artifactID, data: artifactData})}
 	failureRequest := httptest.NewRequest(http.MethodGet, "/api/v1/artifacts/"+artifactID.String(), nil)
 	failureRequest.SetPathValue("artifact_id", artifactID.String())
 	failureRequest.Header.Set("X-Artifact-Token", token)
@@ -172,7 +173,7 @@ func TestSyntheticCommandAuditUsesAuthenticatedOperator(t *testing.T) {
 		}
 	}()
 
-	server := &Server{rbac: rbac.New(pool), operations: operationstore.New(pool)}
+	server := &Server{rbac: rbac.New(pool), operations: apiOperationService(pool)}
 	request := httptest.NewRequest(http.MethodPost, "/api/v1/nodes/"+nodeID.String()+"/synthetic-commands", strings.NewReader(`{"kind":"noop","expected_version":1}`))
 	request.SetPathValue("node_id", nodeID.String())
 	request.Header.Set("Idempotency-Key", "authenticated-operator-audit")
@@ -223,13 +224,19 @@ func TestConfigPlanApprovalResolvesNodeScopedApprover(t *testing.T) {
 	defer func() {
 		_, _ = pool.Exec(context.Background(), `DELETE FROM role_bindings WHERE id=$1; DELETE FROM approval_requests WHERE id=$2; DELETE FROM config_plans WHERE id=$3; DELETE FROM operations WHERE id=$3; DELETE FROM nodes WHERE id=$4; DELETE FROM identities WHERE id IN($5,$6); DELETE FROM workspaces WHERE id=$7`, bindingID, approvalID, operationID, nodeID, requesterID, approverID, workspaceID)
 	}()
-	operationService := operationstore.New(pool)
+	operationService := apiOperationService(pool)
 	server := &Server{rbac: rbac.New(pool), approvals: approvalstore.New(pool), configplans: configplanstore.New(pool, operationService)}
 	request := httptest.NewRequest(http.MethodGet, "/api/v1/approval-requests/"+approvalID.String(), nil)
 	request.SetPathValue("approval_id", approvalID.String())
 	if _, err := server.authorizeRoute(request, auth.Principal{IdentityID: approverID, Issuer: "integration"}); err != nil {
 		t.Fatalf("node-scoped config approver: %v", err)
 	}
+}
+
+func apiOperationService(pool *pgxpool.Pool) *operationstore.Service {
+	var seed [32]byte
+	seed[0] = 7
+	return operationstore.NewWithSigner(pool, 50, commandauth.NewSignerFromSeed(seed))
 }
 
 func TestBatchRouteAllowsNodeScopedPerItemAuthorization(t *testing.T) {

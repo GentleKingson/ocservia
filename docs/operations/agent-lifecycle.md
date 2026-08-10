@@ -15,3 +15,10 @@ AGENT_TRUSTED_KEY_SHA256=<pinned-public-key-der-sha256> \
 Provision the verification public key and its DER SHA-256 fingerprint through a separate trusted channel; never trust the `.pub.pem` published beside a package. Verify signature, trusted-key fingerprint, checksum, and archive contents before extracting as root. Set `INSTALL_PRODUCTION_RELAYS=true` during installation and fill `/etc/ocservia-agent/relays.env` with both dedicated HTTPS relay URLs. Install the relay token at `/etc/ocservia-agent/relay-access-token` as `root:ocserv-agent` mode `0640`.
 
 `upgrade-agent.sh` retains the previous binaries and preserves endpoint identity, the durable Agent database, journal, and configuration. Verify service health and Controller connectivity after upgrade. To roll back, stop both units, restore the previous binaries, reload systemd, and start privd before Agent. `uninstall-agent.sh` preserves identity and journal by default; `--purge-state` is irreversible and is appropriate only after revoking the node identity and preserving required audit material.
+
+Command protocol `1.1` is fail closed: provision the Controller command
+verification public key before upgrading the Agent. A new Agent rejects unsigned
+legacy mutations, so schedule the Agent rollout and Controller signing-key
+enablement as one maintenance window. Keep both old and new public keys pinned
+during a signing-key rotation until old authorizations have expired and all
+Unknown outcomes have been reconciled.

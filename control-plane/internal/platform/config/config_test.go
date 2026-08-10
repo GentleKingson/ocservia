@@ -140,6 +140,36 @@ func TestLocalSimulatorIsRejectedInProduction(t *testing.T) {
 	}
 }
 
+func TestProductionRequiresAbsoluteControllerCommandSigningKey(t *testing.T) {
+	cfg, err := Load(nil, func(key string) (string, bool) {
+		if key == "OCSERV_DATABASE_URL" {
+			return "postgres://db/test", true
+		}
+		return "", false
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.Environment = "production"
+	cfg.OIDCIssuer = "https://id.example.test"
+	cfg.OIDCClientID = "ocservia"
+	cfg.OIDCClientSecret = "test-secret"
+	cfg.OIDCRedirectURL = "https://ocservia.example.test/api/v1/auth/callback"
+	cfg.SessionKey = make([]byte, 32)
+	cfg.AuditCheckpointKey = make([]byte, 32)
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "command signing key") {
+		t.Fatalf("missing production command key error = %v", err)
+	}
+	cfg.CommandSigningKeyFile = "relative/controller.pem"
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "absolute") {
+		t.Fatalf("relative production command key error = %v", err)
+	}
+	cfg.CommandSigningKeyFile = "/run/secrets/controller_command_signing_key"
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("absolute production command key rejected: %v", err)
+	}
+}
+
 func TestControllerEndpointIDValidation(t *testing.T) {
 	for _, value := range []string{"ABC", strings.Repeat("z", 64), strings.Repeat("A", 64)} {
 		_, err := Load(nil, func(key string) (string, bool) {

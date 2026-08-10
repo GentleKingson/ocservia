@@ -167,21 +167,29 @@ protocol_version
 message_id
 command_id
 idempotency_key
+operation_id
 sequence
 issued_at
 expires_at
 traceparent
 actor_id
 reason
+action
+required_capability
+approval_id
+approval_request_sha256
 delivery_mode
 semantic_hash_version
 semantic_payload_sha256
+authorization
 ```
 
-- `command_id` and `idempotency_key` identity is enforced by the journal's
-  independent uniqueness constraints.
-- `delivery_mode` only selects execute, reconcile, or safe-retry behavior.
-- Timestamps, tracing, and actor metadata are delivery and audit data.
+- `CommandAuthorizationV1` independently signs the command and operation
+  identities, actor, action, required capability, approval binding, delivery
+  mode, timestamps, revision, payload kind, and semantic digest.
+- The journal also enforces independent command and idempotency uniqueness.
+- Tracing and human-readable reason metadata remain outside both semantic
+  payload identity and authorization.
 
 Changing any excluded field while leaving the included fields identical must not
 change the hash.
