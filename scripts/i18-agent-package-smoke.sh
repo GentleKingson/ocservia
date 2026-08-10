@@ -187,7 +187,35 @@ if capture_upgrade "${ARTIFACT_DIR}/legacy-upgrade-unsafe-key.log"; then
 fi
 grep -Fq 'blocked before modification' "${ARTIFACT_DIR}/legacy-upgrade-unsafe-key.log"
 assert_rejected_upgrade_untouched "upgrade with an unsafe key"
-sudo chmod 0640 "${rootfs}/etc/ocservia-agent/controller-command-verification-key.pem"
+sudo install -o 61000 -g 61000 -m 0600 "${work}/controller-command.pub.pem" \
+  "${rootfs}/etc/ocservia-agent/controller-command-verification-key.pem"
+before_agent_owned_key_rejection="$({
+  installed_state
+  sudo sha256sum \
+    "${rootfs}/etc/ocservia-agent/agent.env" \
+    "${rootfs}/etc/ocservia-agent/controller-command-verification-key.pem"
+  sudo stat -c '%n:%u:%g:%a:%h:%i:%Y:%s' \
+    "${rootfs}/etc/ocservia-agent/agent.env" \
+    "${rootfs}/etc/ocservia-agent/controller-command-verification-key.pem"
+})"
+if capture_upgrade "${ARTIFACT_DIR}/legacy-upgrade-agent-owned-key.log"; then
+  echo "legacy Agent upgrade accepted an Agent-owned command verification key" >&2
+  exit 1
+fi
+grep -Fq 'blocked before modification' "${ARTIFACT_DIR}/legacy-upgrade-agent-owned-key.log"
+grep -Fq 'so Agent and privd can both load it' "${ARTIFACT_DIR}/legacy-upgrade-agent-owned-key.log"
+assert_rejected_upgrade_untouched "upgrade with an Agent-owned key"
+test "${before_agent_owned_key_rejection}" = "$({
+  installed_state
+  sudo sha256sum \
+    "${rootfs}/etc/ocservia-agent/agent.env" \
+    "${rootfs}/etc/ocservia-agent/controller-command-verification-key.pem"
+  sudo stat -c '%n:%u:%g:%a:%h:%i:%Y:%s' \
+    "${rootfs}/etc/ocservia-agent/agent.env" \
+    "${rootfs}/etc/ocservia-agent/controller-command-verification-key.pem"
+})" || { echo "rejected Agent-owned key upgrade modified installed state" >&2; exit 1; }
+sudo install -o root -g 61000 -m 0640 "${work}/controller-command.pub.pem" \
+  "${rootfs}/etc/ocservia-agent/controller-command-verification-key.pem"
 sudo install -d -o root -g 61000 -m 0770 "${rootfs}/etc/ocservia-agent/unsafe"
 sudo install -o root -g 61000 -m 0640 "${work}/controller-command.pub.pem" \
   "${rootfs}/etc/ocservia-agent/unsafe/controller-command-verification-key.pem"
@@ -201,9 +229,25 @@ if capture_upgrade "${ARTIFACT_DIR}/legacy-upgrade-unsafe-ancestry.log"; then
 fi
 grep -Fq 'blocked before modification' "${ARTIFACT_DIR}/legacy-upgrade-unsafe-ancestry.log"
 assert_rejected_upgrade_untouched "upgrade with unsafe key ancestry"
+sudo install -d -o 61000 -g 61000 -m 0700 "${rootfs}/etc/ocservia-agent/agent-owned"
+sudo install -o root -g 61000 -m 0640 "${work}/controller-command.pub.pem" \
+  "${rootfs}/etc/ocservia-agent/agent-owned/controller-command-verification-key.pem"
+sed 's|=/etc/ocservia-agent/controller-command|=/etc/ocservia-agent/agent-owned/controller-command|' \
+  "${work}/legacy-agent.env" >"${work}/agent-owned-ancestry-agent.env"
+sudo install -o root -g 61000 -m 0640 "${work}/agent-owned-ancestry-agent.env" \
+  "${rootfs}/etc/ocservia-agent/agent.env"
+if capture_upgrade "${ARTIFACT_DIR}/legacy-upgrade-agent-owned-ancestry.log"; then
+  echo "legacy Agent upgrade accepted Agent-owned command key ancestry" >&2
+  exit 1
+fi
+grep -Fq 'blocked before modification' "${ARTIFACT_DIR}/legacy-upgrade-agent-owned-ancestry.log"
+assert_rejected_upgrade_untouched "upgrade with Agent-owned key ancestry"
 sudo install -o root -g 61000 -m 0640 "${work}/legacy-agent.env" \
   "${rootfs}/etc/ocservia-agent/agent.env"
 echo "legacy Agent upgrade fail-closed preflight passed"
+
+test "$(sudo stat -c '%u:%g:%a' -- "${rootfs}/etc/ocservia-agent/controller-command-verification-key.pem")" = "0:61000:640" \
+  || { echo "trusted shared command key metadata changed before upgrade" >&2; exit 1; }
 
 sudo env DESTDIR="${rootfs}" AGENT_UID=61000 AGENT_GID=61000 INSTALL_PRODUCTION_RELAYS=true \
   "${package_root}/scripts/upgrade-agent.sh"

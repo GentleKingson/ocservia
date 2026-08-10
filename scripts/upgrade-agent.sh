@@ -10,7 +10,7 @@ BACKUP_DIR="${BACKUP_DIR:-${DESTDIR}/var/lib/ocservia-agent/upgrade-backup}"
 
 upgrade_preflight_error() {
   echo "Agent upgrade blocked before modification: $1" >&2
-  echo "Install an Ed25519 Controller verification public key as root:ocserv-agent mode 0640," >&2
+  echo "Install an Ed25519 Controller verification public key as root:ocserv-agent mode 0440 or 0640," >&2
   echo "set CONTROLLER_COMMAND_VERIFICATION_KEY_FILE to its absolute path in ${SYSCONFDIR}/ocservia-agent/agent.env, then rerun the upgrade." >&2
   exit 1
 }
@@ -40,7 +40,9 @@ validate_safe_ancestry() {
     fi
     uid="$(stat -c '%u' -- "${actual_path}")"
     mode="$(stat -c '%a' -- "${actual_path}")"
-    if [[ "${uid}" != 0 && "${uid}" != "${AGENT_UID}" ]] || (( (8#${mode} & 8#022) != 0 )); then
+    # Agent and privd load this same trust anchor independently. Their safe
+    # ancestry intersection is root-owned and not group/world writable.
+    if [[ "${uid}" != 0 ]] || (( (8#${mode} & 8#022) != 0 )); then
       upgrade_preflight_error "Controller command key ancestor ${runtime_path} has unsafe ownership or mode"
     fi
   done
@@ -85,9 +87,9 @@ validate_controller_command_key() {
   if [[ "${key_links}" != 1 || "${key_size}" -lt 1 || "${key_size}" -gt 4096 ]]; then
     upgrade_preflight_error "${key_path} must be a one-link regular file containing 1..4096 bytes"
   fi
-  if ! { [[ "${key_uid}" == "${AGENT_UID}" && ( "${key_mode}" == 400 || "${key_mode}" == 600 ) ]] || \
-    [[ "${key_uid}" == 0 && "${key_gid}" == "${AGENT_GID}" && ( "${key_mode}" == 440 || "${key_mode}" == 640 ) ]]; }; then
-    upgrade_preflight_error "${key_path} ownership and mode do not match the Agent key loader"
+  if [[ "${key_uid}" != 0 || "${key_gid}" != "${AGENT_GID}" ]] || \
+    ! { [[ "${key_mode}" == 440 ]] || [[ "${key_mode}" == 640 ]]; }; then
+    upgrade_preflight_error "${key_path} must be root:ocserv-agent mode 0440 or 0640 so Agent and privd can both load it"
   fi
   if ! key_description="$(openssl pkey -pubin -in "${key_file}" -noout -text 2>/dev/null)" || \
     [[ "${key_description}" != ED25519\ Public-Key:* ]]; then

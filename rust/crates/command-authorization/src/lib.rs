@@ -930,10 +930,13 @@ pub fn load_verification_key(
         ));
     }
     let mode = metadata.permissions().mode() & 0o777;
-    let process_owned = metadata.uid() == expected_owner && matches!(mode, 0o400 | 0o600);
-    let root_group_readable =
-        metadata.uid() == 0 && metadata.gid() == expected_group && matches!(mode, 0o440 | 0o640);
-    if !process_owned && !root_group_readable {
+    if !verification_key_metadata_allowed(
+        metadata.uid(),
+        metadata.gid(),
+        mode,
+        expected_owner,
+        expected_group,
+    ) {
         return Err(invalid(
             "Controller command verification key owner/mode must be process 0400/0600 or root:process-group 0440/0640",
         ));
@@ -949,6 +952,17 @@ pub fn load_verification_key(
         .map_err(|_| invalid("Controller command verification key PEM must be UTF-8"))?;
     VerifyingKey::from_public_key_pem(text)
         .map_err(|_| invalid("Controller command verification key must be Ed25519 SPKI PEM"))
+}
+
+const fn verification_key_metadata_allowed(
+    uid: u32,
+    gid: u32,
+    mode: u32,
+    expected_owner: u32,
+    expected_group: u32,
+) -> bool {
+    (uid == expected_owner && matches!(mode, 0o400 | 0o600))
+        || (uid == 0 && gid == expected_group && matches!(mode, 0o440 | 0o640))
 }
 
 fn validate_directory(directory: &File, process_uid: u32) -> Result<(), io::Error> {
@@ -1259,6 +1273,32 @@ mod tests {
         fs::remove_file(&link_path).expect("remove link");
         fs::remove_file(&key_path).expect("remove key");
         fs::remove_dir(&directory).expect("remove test directory");
+    }
+
+    #[test]
+    fn shared_agent_privd_key_requires_root_group_readable_metadata() {
+        let agent_owner = 997;
+        let agent_group = 998;
+        let allowed_for_agent = |uid, gid, mode| {
+            verification_key_metadata_allowed(uid, gid, mode, agent_owner, agent_group)
+        };
+        let allowed_for_privd =
+            |uid, gid, mode| verification_key_metadata_allowed(uid, gid, mode, 0, agent_group);
+
+        for mode in [0o440, 0o640] {
+            assert!(allowed_for_agent(0, agent_group, mode));
+            assert!(allowed_for_privd(0, agent_group, mode));
+        }
+
+        for mode in [0o400, 0o600] {
+            assert!(allowed_for_agent(agent_owner, agent_group, mode));
+            assert!(!allowed_for_privd(agent_owner, agent_group, mode));
+            assert!(!allowed_for_agent(0, agent_group, mode));
+            assert!(allowed_for_privd(0, agent_group, mode));
+        }
+
+        assert!(!allowed_for_agent(0, agent_group + 1, 0o640));
+        assert!(!allowed_for_privd(0, agent_group + 1, 0o640));
     }
 
     fn load_fixture() -> Value {
