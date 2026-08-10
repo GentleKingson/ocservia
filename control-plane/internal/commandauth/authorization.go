@@ -17,10 +17,13 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
+	"time"
 
 	agentv1 "github.com/GentleKingson/ocservia/control-plane/gen/proto/ocserv/platform/agent/v1"
 	"golang.org/x/sys/unix"
+	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
 const (
@@ -31,6 +34,7 @@ const (
 )
 
 var authorizationV1Domain = []byte("ocservia/controller-command/v1\x00")
+var sessionGrantV1Domain = []byte("ocservia/controller-session-grant/v1\x00")
 
 // ClaimsV1 is the independent, non-Protobuf CommandAuthorizationV1 signing
 // input. CanonicalV1 defines its exact cross-language byte representation.
@@ -62,6 +66,23 @@ type ClaimsV1 struct {
 type Signer struct {
 	privateKey ed25519.PrivateKey
 	keyID      string
+}
+
+// SessionGrantClaimsV1 is the independent canonical authorization for one
+// mutation-capable Agent session.
+type SessionGrantClaimsV1 struct {
+	Version                uint32
+	KeyID                  string
+	ProtocolMajor          uint32
+	ProtocolMinor          uint32
+	NodeID                 [16]byte
+	EndpointID             [32]byte
+	AuthorizationRevision  uint64
+	NegotiatedCapabilities []string
+	IssuedAtSeconds        int64
+	IssuedAtNanos          uint32
+	ExpiresAtSeconds       int64
+	ExpiresAtNanos         uint32
 }
 
 // NewSignerFromSeed constructs a signer from an Ed25519 seed.
@@ -141,6 +162,73 @@ func (s *Signer) Authorize(envelope *agentv1.CommandEnvelope) error {
 	return nil
 }
 
+// IssueSessionGrant signs the exact Controller-authorized capability subset and
+// trust revision for one Agent endpoint. Capabilities must already be sorted.
+func (s *Signer) IssueSessionGrant(nodeID [16]byte, endpointID [32]byte, authorizationRevision uint64, negotiatedCapabilities []string, protocolMajor, protocolMinor uint32, issuedAt, expiresAt time.Time) (*agentv1.SessionGrantV1, error) {
+	if s == nil || len(s.privateKey) != ed25519.PrivateKeySize {
+		return nil, errors.New("controller command signing key is unavailable")
+	}
+	claims := SessionGrantClaimsV1{
+		Version: uint32(agentv1.SessionGrantVersion_SESSION_GRANT_VERSION_V1),
+		KeyID:   s.keyID, ProtocolMajor: protocolMajor, ProtocolMinor: protocolMinor,
+		NodeID: nodeID, EndpointID: endpointID, AuthorizationRevision: authorizationRevision,
+		NegotiatedCapabilities: append([]string(nil), negotiatedCapabilities...),
+		IssuedAtSeconds:        issuedAt.Unix(), IssuedAtNanos: uint32(issuedAt.Nanosecond()),
+		ExpiresAtSeconds: expiresAt.Unix(), ExpiresAtNanos: uint32(expiresAt.Nanosecond()),
+	}
+	canonical, err := CanonicalSessionGrantV1(claims)
+	if err != nil {
+		return nil, err
+	}
+	return &agentv1.SessionGrantV1{
+		Version: agentv1.SessionGrantVersion_SESSION_GRANT_VERSION_V1,
+		KeyId:   s.keyID, ProtocolMajor: protocolMajor, ProtocolMinor: protocolMinor,
+		NodeId: nodeID[:], EndpointId: endpointID[:], AuthorizationRevision: authorizationRevision,
+		NegotiatedCapabilities: append([]string(nil), negotiatedCapabilities...),
+		IssuedAt:               timestamppb.New(issuedAt), ExpiresAt: timestamppb.New(expiresAt),
+		Signature: ed25519.Sign(s.privateKey, canonical),
+	}, nil
+}
+
+// CanonicalSessionGrantV1 returns the exact domain-separated session grant
+// signing bytes. It never serializes Protobuf.
+func CanonicalSessionGrantV1(claims SessionGrantClaimsV1) ([]byte, error) {
+	if claims.Version != 1 || claims.KeyID == "" || claims.ProtocolMajor == 0 || claims.AuthorizationRevision == 0 || claims.IssuedAtNanos >= 1_000_000_000 || claims.ExpiresAtNanos >= 1_000_000_000 || claims.ExpiresAtSeconds < claims.IssuedAtSeconds || (claims.ExpiresAtSeconds == claims.IssuedAtSeconds && claims.ExpiresAtNanos <= claims.IssuedAtNanos) {
+		return nil, errors.New("session grant v1 claims are invalid")
+	}
+	if len(claims.NegotiatedCapabilities) > 128 || !slices.IsSorted(claims.NegotiatedCapabilities) {
+		return nil, errors.New("session grant capabilities are invalid")
+	}
+	for index, capability := range claims.NegotiatedCapabilities {
+		if capability == "" || len(capability) > 128 || (index > 0 && claims.NegotiatedCapabilities[index-1] == capability) {
+			return nil, errors.New("session grant capabilities are invalid")
+		}
+	}
+	var encoded bytes.Buffer
+	encoded.Grow(512)
+	encoded.Write(sessionGrantV1Domain)
+	writeUint32(&encoded, claims.Version)
+	if err := writeString(&encoded, claims.KeyID); err != nil {
+		return nil, err
+	}
+	writeUint32(&encoded, claims.ProtocolMajor)
+	writeUint32(&encoded, claims.ProtocolMinor)
+	encoded.Write(claims.NodeID[:])
+	encoded.Write(claims.EndpointID[:])
+	writeUint64(&encoded, claims.AuthorizationRevision)
+	writeUint32(&encoded, uint32(len(claims.NegotiatedCapabilities)))
+	for _, capability := range claims.NegotiatedCapabilities {
+		if err := writeString(&encoded, capability); err != nil {
+			return nil, err
+		}
+	}
+	writeInt64(&encoded, claims.IssuedAtSeconds)
+	writeUint32(&encoded, claims.IssuedAtNanos)
+	writeInt64(&encoded, claims.ExpiresAtSeconds)
+	writeUint32(&encoded, claims.ExpiresAtNanos)
+	return encoded.Bytes(), nil
+}
+
 // ClaimsFromEnvelopeV1 validates and projects a command envelope into the
 // independent authorization claims model.
 func ClaimsFromEnvelopeV1(envelope *agentv1.CommandEnvelope) (ClaimsV1, error) {
@@ -187,7 +275,7 @@ func ClaimsFromEnvelopeV1(envelope *agentv1.CommandEnvelope) (ClaimsV1, error) {
 	if err != nil {
 		return ClaimsV1{}, err
 	}
-	if envelope.GetSemanticPayloadHashVersion() != agentv1.SemanticPayloadHashVersion_SEMANTIC_PAYLOAD_HASH_VERSION_V1 {
+	if envelope.GetSemanticPayloadHashVersion() != agentv1.SemanticPayloadHashVersion_SEMANTIC_PAYLOAD_HASH_VERSION_V1 && envelope.GetSemanticPayloadHashVersion() != agentv1.SemanticPayloadHashVersion_SEMANTIC_PAYLOAD_HASH_VERSION_V2 {
 		return ClaimsV1{}, errors.New("semantic payload hash version must be v1")
 	}
 	issuedAt, expiresAt := envelope.GetIssuedAt(), envelope.GetExpiresAt()

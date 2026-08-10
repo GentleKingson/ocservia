@@ -20,6 +20,13 @@ database, rejects later handshakes, and asks the transport to close the current
 connection. Approval and revocation retries are idempotent so transport
 synchronization can be retried after a temporary UDS failure.
 
+The Agent handshake advertises supported capabilities. The Controller computes
+the sorted intersection with the approved database set and returns only that
+negotiated subset. Supporting extra capabilities does not prevent enrollment or
+connection. Handshake protocol `1.1` signs the negotiated subset, EndpointID,
+node ID, authorization revision, and expiry in `SessionGrantV1`; protocol `1.0`
+is limited to approved read-only capabilities.
+
 Enable the trust service on worker or all roles by setting both:
 
 ```text

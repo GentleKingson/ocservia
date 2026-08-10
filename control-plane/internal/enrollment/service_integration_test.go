@@ -3,9 +3,11 @@ package enrollment
 import (
 	"bytes"
 	"context"
+	"crypto/ed25519"
 	"errors"
 	"fmt"
 	"os"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -14,6 +16,7 @@ import (
 	agentv1 "github.com/GentleKingson/ocservia/control-plane/gen/proto/ocserv/platform/agent/v1"
 	transportv1 "github.com/GentleKingson/ocservia/control-plane/gen/proto/ocserv/platform/transport/v1"
 	approvalstore "github.com/GentleKingson/ocservia/control-plane/internal/approvals"
+	"github.com/GentleKingson/ocservia/control-plane/internal/commandauth"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"google.golang.org/protobuf/types/known/timestamppb"
@@ -30,7 +33,7 @@ func TestCreateTokenUnknownWorkspaceIntegration(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer pool.Close()
-	service := New(pool, "", "test")
+	service := newTestService(t, pool, "", "test")
 	_, err = service.CreateToken(ctx, TokenSpec{WorkspaceID: uuid.Must(uuid.NewV7()), Environment: "test", ActorID: "integration", Reason: "unknown workspace", RequestID: uuid.Must(uuid.NewV7()).String()})
 	if !errors.Is(err, ErrNotFound) {
 		t.Fatalf("unknown workspace error=%v", err)
@@ -55,7 +58,7 @@ func TestConcurrentAuditChainIntegration(t *testing.T) {
 	}
 	defer cleanupWorkspace(ctx, pool, workspaceID)
 
-	service := New(pool, "", "test")
+	service := newTestService(t, pool, "", "test")
 	endpoint := bytes.Repeat([]byte{0x2a}, 32)
 	enrollmentToken, err := service.CreateToken(ctx, TokenSpec{WorkspaceID: workspaceID, Environment: "test", ExpectedEndpointID: endpoint, ActorID: "integration", Reason: "concurrent enrollment", RequestID: "audit-enrollment-token"})
 	if err != nil {
@@ -128,7 +131,7 @@ func TestEnrollmentTrustLifecycleIntegration(t *testing.T) {
 	}
 	defer cleanupWorkspace(ctx, pool, workspaceID)
 
-	service := New(pool, string(make([]byte, 64)), "test")
+	service := newTestService(t, pool, string(make([]byte, 64)), "test")
 	endpoint := make([]byte, 32)
 	endpoint[0] = 7
 	token := createToken(t, service, workspaceID, endpoint)
@@ -210,6 +213,9 @@ func TestEnrollmentTrustLifecycleIntegration(t *testing.T) {
 	if err != nil || response.GetResult() != agentv1.HandshakeResult_HANDSHAKE_RESULT_ACCEPTED {
 		t.Fatalf("active authorization = %v, %v", response, err)
 	}
+	if !slices.Equal(response.GetNegotiatedCapabilities(), []string{"ocserv.status.read"}) || response.GetSessionGrant() != nil {
+		t.Fatalf("legacy authorization negotiated=%v grant=%v", response.GetNegotiatedCapabilities(), response.GetSessionGrant())
+	}
 	handshake.ProtocolMajor = 2
 	response, err = service.AuthorizeSession(ctx, &transportv1.AuthorizeSessionRequest{RemoteEndpointId: endpoint, Handshake: handshake})
 	if err != nil || response.GetResult() != agentv1.HandshakeResult_HANDSHAKE_RESULT_INCOMPATIBLE_PROTOCOL {
@@ -219,12 +225,53 @@ func TestEnrollmentTrustLifecycleIntegration(t *testing.T) {
 		t.Fatalf("controller version = %q", response.GetControllerVersion())
 	}
 	handshake.ProtocolMajor = 1
-	handshake.ProtocolMinor = 1
+	handshake.ProtocolMinor = ProtocolMinor + 1
 	response, err = service.AuthorizeSession(ctx, &transportv1.AuthorizeSessionRequest{RemoteEndpointId: endpoint, Handshake: handshake})
 	if err != nil || response.GetResult() != agentv1.HandshakeResult_HANDSHAKE_RESULT_UPGRADE_REQUIRED {
 		t.Fatalf("minor protocol mismatch = %v, %v", response, err)
 	}
+	handshake.ProtocolMinor = ProtocolMinor
+	handshake.Capabilities = []string{"ocserv.status.read", "ocserv.users.write", "unsupported.agent.feature"}
+	response, err = service.AuthorizeSession(ctx, &transportv1.AuthorizeSessionRequest{RemoteEndpointId: endpoint, Handshake: handshake})
+	if err != nil || response.GetResult() != agentv1.HandshakeResult_HANDSHAKE_RESULT_ACCEPTED {
+		t.Fatalf("subset capability authorization = %v, %v", response, err)
+	}
+	if !slices.Equal(response.GetNegotiatedCapabilities(), []string{"ocserv.status.read"}) {
+		t.Fatalf("negotiated capabilities = %v", response.GetNegotiatedCapabilities())
+	}
+	grant := response.GetSessionGrant()
+	if grant == nil || grant.GetAuthorizationRevision() != trust.Revision || !slices.Equal(grant.GetNegotiatedCapabilities(), response.GetNegotiatedCapabilities()) {
+		t.Fatalf("signed session grant = %v", grant)
+	}
+	var signedNode [16]byte
+	var signedEndpoint [32]byte
+	copy(signedNode[:], grant.GetNodeId())
+	copy(signedEndpoint[:], grant.GetEndpointId())
+	canonical, err := commandauth.CanonicalSessionGrantV1(commandauth.SessionGrantClaimsV1{
+		Version: uint32(grant.GetVersion()), KeyID: grant.GetKeyId(),
+		ProtocolMajor: grant.GetProtocolMajor(), ProtocolMinor: grant.GetProtocolMinor(),
+		NodeID: signedNode, EndpointID: signedEndpoint,
+		AuthorizationRevision:  grant.GetAuthorizationRevision(),
+		NegotiatedCapabilities: grant.GetNegotiatedCapabilities(),
+		IssuedAtSeconds:        grant.GetIssuedAt().GetSeconds(), IssuedAtNanos: uint32(grant.GetIssuedAt().GetNanos()),
+		ExpiresAtSeconds: grant.GetExpiresAt().GetSeconds(), ExpiresAtNanos: uint32(grant.GetExpiresAt().GetNanos()),
+	})
+	if err != nil || !ed25519.Verify(service.signer.PublicKey(), canonical, grant.GetSignature()) {
+		t.Fatalf("Controller session grant signature invalid: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `UPDATE node_capabilities SET approved=false WHERE node_id=$1 AND capability='ocserv.status.read'`, nodeID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `UPDATE nodes SET authorization_revision=authorization_revision+1 WHERE id=$1`, nodeID); err != nil {
+		t.Fatal(err)
+	}
+	handshake.Capabilities = []string{"ocserv.status.read"}
+	response, err = service.AuthorizeSession(ctx, &transportv1.AuthorizeSessionRequest{RemoteEndpointId: endpoint, Handshake: handshake})
+	if err != nil || response.GetResult() != agentv1.HandshakeResult_HANDSHAKE_RESULT_ACCEPTED || len(response.GetNegotiatedCapabilities()) != 0 || response.GetSessionGrant().GetAuthorizationRevision() != trust.Revision+1 {
+		t.Fatalf("revoked capability session authority = %v, %v", response, err)
+	}
 	handshake.ProtocolMinor = 0
+	handshake.Capabilities = []string{"ocserv.status.read"}
 	if _, err := pool.Exec(ctx, `UPDATE nodes SET status='offline' WHERE id=$1`, nodeID); err != nil {
 		t.Fatal(err)
 	}
@@ -287,7 +334,7 @@ func TestExpiredAndSubstitutedEnrollmentTokensIntegration(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer cleanupWorkspace(ctx, pool, workspaceID)
-	service := New(pool, "", "test")
+	service := newTestService(t, pool, "", "test")
 	endpoint := make([]byte, 32)
 	endpoint[0] = 9
 	token := createToken(t, service, workspaceID, endpoint)
@@ -328,7 +375,7 @@ func TestLegacyPendingNodeCanBeReenrolledIntegration(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	service := New(pool, "", "test")
+	service := newTestService(t, pool, "", "test")
 	endpoint := make([]byte, 32)
 	endpoint[0] = 11
 	token, err := service.CreateToken(ctx, TokenSpec{WorkspaceID: workspaceID, Environment: "test", ExpectedNodeName: legacyName, ExpectedEndpointID: endpoint, ActorID: "integration", Reason: "re-enroll legacy node", RequestID: uuid.Must(uuid.NewV7()).String()})
@@ -356,6 +403,16 @@ func createToken(t *testing.T, service *Service, workspaceID uuid.UUID, endpoint
 	}
 	return token
 }
+
+func newTestService(t *testing.T, pool *pgxpool.Pool, controllerEndpointID, controllerVersion string) *Service {
+	t.Helper()
+	signer, err := commandauth.NewRandomSigner()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return New(pool, controllerEndpointID, controllerVersion, signer)
+}
+
 func enrollmentRequest(token string, endpoint []byte) *agentv1.EnrollRequest {
 	return &agentv1.EnrollRequest{Token: token, EndpointId: endpoint, AgentVersion: "test", OsRelease: "test", OcservVersion: "test", BootId: "boot", AgentInstanceId: uuidBytes(), Capabilities: []string{"ocserv.status.read"}, Environment: "test", Nonce: make([]byte, 16), Time: timestamppb.Now()}
 }

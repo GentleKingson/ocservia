@@ -67,6 +67,9 @@ message NodeConnection {
   bytes agent_instance_id = 6;
   string path_detail = 7;
   google.protobuf.Timestamp last_seen = 8;
+  repeated string negotiated_capabilities = 9;
+  uint64 authorization_revision = 10;
+  google.protobuf.Timestamp session_expires_at = 11;
 }
 
 message SendCommandRequest {

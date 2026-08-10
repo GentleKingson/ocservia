@@ -59,6 +59,29 @@ message SessionHandshakeResponse {
   uint32 protocol_minor = 3;
   uint32 max_message_size = 4;
   string controller_version = 5;
+  repeated string negotiated_capabilities = 6;
+  SessionGrantV1 session_grant = 7;
+}
+
+enum SessionGrantVersion {
+  SESSION_GRANT_VERSION_UNSPECIFIED = 0;
+  SESSION_GRANT_VERSION_V1 = 1;
+}
+
+// SessionGrantV1 is signed by the Controller over an independent canonical
+// representation. transportd relays and retains it but cannot mint it.
+message SessionGrantV1 {
+  SessionGrantVersion version = 1;
+  string key_id = 2;
+  uint32 protocol_major = 3;
+  uint32 protocol_minor = 4;
+  bytes node_id = 5;
+  bytes endpoint_id = 6;
+  uint64 authorization_revision = 7;
+  repeated string negotiated_capabilities = 8;
+  google.protobuf.Timestamp issued_at = 9;
+  google.protobuf.Timestamp expires_at = 10;
+  bytes signature = 11;
 }
 
 enum AgentEventType {
@@ -90,10 +113,11 @@ enum CommandDeliveryMode {
 }
 
 // SemanticPayloadHashVersion identifies the canonical command identity
-// algorithm. See docs/development/command-semantic-hash-v1.md.
+// algorithm. See docs/development/command-semantic-hash-v1.md and v2.md.
 enum SemanticPayloadHashVersion {
   SEMANTIC_PAYLOAD_HASH_VERSION_UNSPECIFIED = 0;
   SEMANTIC_PAYLOAD_HASH_VERSION_V1 = 1;
+  SEMANTIC_PAYLOAD_HASH_VERSION_V2 = 2;
 }
 
 // CommandAuthorizationVersion selects the canonical Controller authorization
@@ -302,6 +326,7 @@ message GroupApply {
 message ConfigPlan {
   bytes candidate = 1;
   bytes candidate_hash = 2;
+  uint64 expected_revision = 3;
 }
 
 message ConfigPlanResult {

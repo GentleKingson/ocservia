@@ -93,7 +93,7 @@ func Run(ctx context.Context, cfg config.Config, build BuildInfo, logger *slog.L
 	var trust *trustserver.Server
 	trustErr := make(chan error, 1)
 	if cfg.RunsWorker() && cfg.ControllerEndpointID != "" {
-		trust, err = trustserver.New(cfg.TrustSocket, trustserver.NewHandler(enrollment.New(pool, cfg.ControllerEndpointID, build.Version)))
+		trust, err = trustserver.New(cfg.TrustSocket, trustserver.NewHandler(enrollment.New(pool, cfg.ControllerEndpointID, build.Version, commandSigner)))
 		if err != nil {
 			return fmt.Errorf("configure trust server: %w", err)
 		}
@@ -220,7 +220,7 @@ func Run(ctx context.Context, cfg config.Config, build BuildInfo, logger *slog.L
 	server.EnableCertificates(certificateService)
 	server.EnableTelemetry(telemetryService)
 	if cfg.ControllerEndpointID != "" {
-		server.EnableEnrollment(enrollment.New(pool, cfg.ControllerEndpointID, build.Version), apiTransport)
+		server.EnableEnrollment(enrollment.New(pool, cfg.ControllerEndpointID, build.Version, commandSigner), apiTransport)
 	}
 	server.EnableLocalSlice(sliceService)
 	server.SetLocalSimulatorEnabled(cfg.LocalSimulator)

@@ -612,6 +612,7 @@ impl Adapter {
         candidate_hash: &[u8],
         expected_current_hash: &[u8],
         desired_revision: u64,
+        effect: EffectIdentity<'_>,
     ) -> Result<ConfigApplyResult, AdapterError> {
         if candidate.is_empty()
             || candidate.len() > MAX_CONFIG_PLAN_BYTES
@@ -630,8 +631,40 @@ impl Adapter {
         let _guard = self.config_plan_lock.lock().await;
         let _file_lock = lock_config_file(&self.resources.config)?;
         let before = self.config_fingerprint().await?;
+        let before_bytes = tokio::fs::read(&self.resources.config)
+            .await
+            .map_err(AdapterError::Io)?;
         let previous_hash =
             hex::decode(&before.sha256).map_err(|_| AdapterError::MalformedOutput)?;
+        // Reject a stale plan while the config lock still proves no effect occurred. A current
+        // candidate remains eligible for post-publish crash recovery below.
+        if previous_hash != expected_current_hash && previous_hash != candidate_hash {
+            return Err(AdapterError::Unavailable);
+        }
+        let mut effect_store = EffectStore::open_for_mutation(&self.resources)?;
+        let preparation = effect_store.prepare(
+            "config_apply",
+            "ocserv.conf",
+            desired_revision,
+            effect,
+            &before_bytes,
+            candidate,
+        )?;
+        if preparation == PrepareEffect::AlreadyApplied {
+            if previous_hash != candidate_hash {
+                return Err(AdapterError::Unavailable);
+            }
+            return Ok(ConfigApplyResult {
+                candidate_hash: candidate_hash.to_vec(),
+                previous_hash: expected_current_hash.to_vec(),
+                observed_hash: candidate_hash.to_vec(),
+                applied_revision: desired_revision,
+                healthy: true,
+                rolled_back: false,
+                failed_critical: false,
+                failure_code: String::new(),
+            });
+        }
         if previous_hash == candidate_hash {
             let parent = self
                 .resources
@@ -654,6 +687,12 @@ impl Adapter {
                     sync_directory(parent).await?;
                     self.prune_config_backups().await?;
                 }
+                effect_store.mark_applied(
+                    "config_apply",
+                    "ocserv.conf",
+                    desired_revision,
+                    effect,
+                )?;
                 return Ok(ConfigApplyResult {
                     candidate_hash: candidate_hash.to_vec(),
                     previous_hash: expected_current_hash.to_vec(),
@@ -670,6 +709,12 @@ impl Adapter {
                 && self.config_health().await.is_ok()
                 && self.config_fingerprint().await?.sha256 == hex::encode(expected_current_hash)
             {
+                effect_store.mark_absent(
+                    "config_apply",
+                    "ocserv.conf",
+                    desired_revision,
+                    effect,
+                )?;
                 return Ok(ConfigApplyResult {
                     candidate_hash: candidate_hash.to_vec(),
                     previous_hash: expected_current_hash.to_vec(),
@@ -691,9 +736,6 @@ impl Adapter {
                 failed_critical: true,
                 failure_code: "recovery_rollback_failed".to_owned(),
             });
-        }
-        if previous_hash != expected_current_hash {
-            return Err(AdapterError::Unavailable);
         }
         let parent = self
             .resources
@@ -748,6 +790,7 @@ impl Adapter {
             sync_directory(parent).await?;
             self.prune_config_backups().await?;
             let observed = self.config_fingerprint().await?;
+            effect_store.mark_applied("config_apply", "ocserv.conf", desired_revision, effect)?;
             return Ok(ConfigApplyResult {
                 candidate_hash: candidate_hash.to_vec(),
                 previous_hash,
@@ -773,17 +816,25 @@ impl Adapter {
         }
         .await;
         match rollback {
-            Ok(observed) => Ok(ConfigApplyResult {
-                candidate_hash: candidate_hash.to_vec(),
-                previous_hash: previous_hash.clone(),
-                observed_hash: hex::decode(observed.sha256)
-                    .map_err(|_| AdapterError::MalformedOutput)?,
-                applied_revision: 0,
-                healthy: true,
-                rolled_back: true,
-                failed_critical: false,
-                failure_code: "health_check_failed".to_owned(),
-            }),
+            Ok(observed) => {
+                effect_store.mark_absent(
+                    "config_apply",
+                    "ocserv.conf",
+                    desired_revision,
+                    effect,
+                )?;
+                Ok(ConfigApplyResult {
+                    candidate_hash: candidate_hash.to_vec(),
+                    previous_hash: previous_hash.clone(),
+                    observed_hash: hex::decode(observed.sha256)
+                        .map_err(|_| AdapterError::MalformedOutput)?,
+                    applied_revision: 0,
+                    healthy: true,
+                    rolled_back: true,
+                    failed_critical: false,
+                    failure_code: "health_check_failed".to_owned(),
+                })
+            }
             Err(_) => Ok(ConfigApplyResult {
                 candidate_hash: candidate_hash.to_vec(),
                 previous_hash,
@@ -1291,6 +1342,19 @@ impl Adapter {
         effect: EffectIdentity<'_>,
     ) -> Result<DesiredEffectObservation, AdapterError> {
         validate_effect_identity(mutation_kind, resource_key, desired_revision)?;
+        if mutation_kind == "config_apply" {
+            let _guard = self.config_plan_lock.lock().await;
+            let current = tokio::fs::read(&self.resources.config)
+                .await
+                .map_err(AdapterError::Io)?;
+            return EffectStore::open_existing(&self.resources)?.observe(
+                mutation_kind,
+                resource_key,
+                desired_revision,
+                effect,
+                &current,
+            );
+        }
         let _guard = self.user_file_lock.lock().await;
         let current = read_optional_secret_file(&self.resources.user_file).await?;
         EffectStore::open_existing(&self.resources)?.observe(
@@ -1738,7 +1802,12 @@ fn validate_effect_identity(
 ) -> Result<(), AdapterError> {
     if !matches!(
         mutation_kind,
-        "user_create" | "user_disable" | "user_enable" | "user_password_rotate" | "group_apply"
+        "user_create"
+            | "user_disable"
+            | "user_enable"
+            | "user_password_rotate"
+            | "group_apply"
+            | "config_apply"
     ) || desired_revision == 0
     {
         return Err(AdapterError::InvalidRequest);
@@ -1849,7 +1918,7 @@ impl EffectStore {
                    idempotency_key BLOB NOT NULL CHECK(length(idempotency_key)=16),
                    payload_sha256 BLOB NOT NULL CHECK(length(payload_sha256)=32),
                    expires_at INTEGER NOT NULL,
-                   state TEXT NOT NULL CHECK(state IN ('prepared','applied')),
+                   state TEXT NOT NULL CHECK(state IN ('prepared','applied','absent')),
                    before_hmac BLOB NOT NULL CHECK(length(before_hmac)=32),
                    after_hmac BLOB NOT NULL CHECK(length(after_hmac)=32),
                    record_hmac BLOB NOT NULL CHECK(length(record_hmac)=32),
@@ -1871,8 +1940,48 @@ impl EffectStore {
             connection,
             hmac_key,
         };
+        store.migrate_schema()?;
         store.validate_identity()?;
         Ok(store)
+    }
+
+    fn migrate_schema(&self) -> Result<(), AdapterError> {
+        let schema: String = self
+            .connection
+            .query_row(
+                "SELECT sql FROM sqlite_master WHERE type='table' AND name='desired_effects'",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(sqlite_io)?;
+        if schema.contains("'absent'") {
+            return Ok(());
+        }
+        self.connection
+            .execute_batch(
+                "BEGIN IMMEDIATE;
+                 ALTER TABLE desired_effects RENAME TO desired_effects_legacy;
+                 CREATE TABLE desired_effects (
+                   mutation_kind TEXT NOT NULL,
+                   resource_key TEXT NOT NULL,
+                   revision INTEGER NOT NULL CHECK(revision > 0),
+                   command_id BLOB NOT NULL CHECK(length(command_id)=16),
+                   idempotency_key BLOB NOT NULL CHECK(length(idempotency_key)=16),
+                   payload_sha256 BLOB NOT NULL CHECK(length(payload_sha256)=32),
+                   expires_at INTEGER NOT NULL,
+                   state TEXT NOT NULL CHECK(state IN ('prepared','applied','absent')),
+                   before_hmac BLOB NOT NULL CHECK(length(before_hmac)=32),
+                   after_hmac BLOB NOT NULL CHECK(length(after_hmac)=32),
+                   record_hmac BLOB NOT NULL CHECK(length(record_hmac)=32),
+                   updated_at INTEGER NOT NULL,
+                   PRIMARY KEY(mutation_kind,resource_key)
+                 ) STRICT;
+                 INSERT INTO desired_effects
+                    SELECT * FROM desired_effects_legacy;
+                 DROP TABLE desired_effects_legacy;
+                 COMMIT;",
+            )
+            .map_err(sqlite_io)
     }
 
     fn validate_identity(&self) -> Result<(), AdapterError> {
@@ -1912,18 +2021,14 @@ impl EffectStore {
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(sqlite_io)?;
-        transaction
-            .execute(
-                "DELETE FROM desired_effects WHERE state='applied' AND expires_at <= ?1",
-                [now],
-            )
-            .map_err(sqlite_io)?;
         let current_hmac = authenticate_file(&self.hmac_key, before);
-        let prepared = query_prepared_effects(&transaction)?;
+        let prepared = query_prepared_effects(&transaction, mutation_kind == "config_apply")?;
         for record in prepared {
             validate_effect_record(&self.hmac_key, &record)?;
             if current_hmac == record.after_hmac {
-                update_effect_state(&transaction, &self.hmac_key, record, "applied", now)?;
+                if record.mutation_kind != "config_apply" {
+                    update_effect_state(&transaction, &self.hmac_key, record, "applied", now)?;
+                }
                 continue;
             }
             let same_pending = record.mutation_kind == mutation_kind
@@ -1946,6 +2051,10 @@ impl EffectStore {
                     return Ok(PrepareEffect::AlreadyApplied);
                 }
                 if current_hmac == existing.after_hmac {
+                    if mutation_kind == "config_apply" {
+                        transaction.commit().map_err(sqlite_io)?;
+                        return Ok(PrepareEffect::Proceed);
+                    }
                     update_effect_state(&transaction, &self.hmac_key, existing, "applied", now)?;
                     transaction.commit().map_err(sqlite_io)?;
                     return Ok(PrepareEffect::AlreadyApplied);
@@ -2009,6 +2118,27 @@ impl EffectStore {
         transaction.commit().map_err(sqlite_io)
     }
 
+    fn mark_absent(
+        &mut self,
+        mutation_kind: &str,
+        resource_key: &str,
+        revision: u64,
+        identity: EffectIdentity<'_>,
+    ) -> Result<(), AdapterError> {
+        let now = effect_now()?;
+        let identity = validate_effect_context(mutation_kind, resource_key, revision, identity, 0)?;
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(sqlite_io)?;
+        let record = query_effect(&transaction, mutation_kind, resource_key)?
+            .ok_or(AdapterError::Unavailable)?;
+        validate_effect_record(&self.hmac_key, &record)?;
+        validate_same_effect(&record, identity)?;
+        update_effect_state(&transaction, &self.hmac_key, record, "absent", now)?;
+        transaction.commit().map_err(sqlite_io)
+    }
+
     fn observe(
         &mut self,
         mutation_kind: &str,
@@ -2023,12 +2153,6 @@ impl EffectStore {
         let transaction = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
-            .map_err(sqlite_io)?;
-        transaction
-            .execute(
-                "DELETE FROM desired_effects WHERE state='applied' AND expires_at <= ?1",
-                [now],
-            )
             .map_err(sqlite_io)?;
         let Some(record) = query_effect(&transaction, mutation_kind, resource_key)? else {
             transaction.commit().map_err(sqlite_io)?;
@@ -2060,10 +2184,19 @@ impl EffectStore {
                 revision,
             ));
         }
+        if record.state == "absent" {
+            transaction.commit().map_err(sqlite_io)?;
+            return Ok(effect_observation(DesiredEffectState::Absent, revision));
+        }
         let current_hmac = authenticate_file(&self.hmac_key, current);
-        let state = if current_hmac == record.after_hmac {
+        let state = if current_hmac == record.after_hmac && mutation_kind == "config_apply" {
+            DesiredEffectState::Absent
+        } else if current_hmac == record.after_hmac {
             update_effect_state(&transaction, &self.hmac_key, record, "applied", now)?;
             DesiredEffectState::AppliedExact
+        } else if current_hmac == record.before_hmac && mutation_kind == "config_apply" {
+            update_effect_state(&transaction, &self.hmac_key, record, "absent", now)?;
+            DesiredEffectState::Absent
         } else if current_hmac == record.before_hmac {
             DesiredEffectState::Absent
         } else {
@@ -2194,6 +2327,7 @@ fn query_effect(
                     state: match row.get::<_, String>(7)?.as_str() {
                         "prepared" => "prepared",
                         "applied" => "applied",
+                        "absent" => "absent",
                         _ => return Err(rusqlite::Error::InvalidQuery),
                     },
                     before_hmac: fixed_blob(row.get(8)?)?,
@@ -2206,14 +2340,17 @@ fn query_effect(
         .map_err(sqlite_io)
 }
 
-fn query_prepared_effects(connection: &Connection) -> Result<Vec<EffectRecord>, AdapterError> {
+fn query_prepared_effects(
+    connection: &Connection,
+    config_effects: bool,
+) -> Result<Vec<EffectRecord>, AdapterError> {
     let mut statement = connection
         .prepare(
-            "SELECT mutation_kind,resource_key,revision,command_id,idempotency_key,payload_sha256,expires_at,state,before_hmac,after_hmac,record_hmac FROM desired_effects WHERE state='prepared' ORDER BY mutation_kind,resource_key",
+            "SELECT mutation_kind,resource_key,revision,command_id,idempotency_key,payload_sha256,expires_at,state,before_hmac,after_hmac,record_hmac FROM desired_effects WHERE state='prepared' AND (mutation_kind='config_apply')=?1 ORDER BY mutation_kind,resource_key",
         )
         .map_err(sqlite_io)?;
     let rows = statement
-        .query_map([], |row| {
+        .query_map([config_effects], |row| {
             let revision: i64 = row.get(2)?;
             Ok(EffectRecord {
                 mutation_kind: row.get(0)?,
@@ -2247,7 +2384,6 @@ fn validate_same_effect(
     if record.command_id != *identity.command_id
         || record.idempotency_key != *identity.idempotency_key
         || record.payload_sha256 != *identity.payload_sha256
-        || record.expires_at != identity.expires_at
     {
         return Err(AdapterError::InvalidRequest);
     }
@@ -2909,7 +3045,12 @@ mod tests {
                 config.clone(),
                 PathBuf::from("/proc/sys/kernel/random/boot_id"),
             )
-            .expect("fixed resources");
+            .expect("fixed resources")
+            .with_effect_store(
+                directory.join("desired-effects.sqlite3"),
+                directory.join("desired-effects.key"),
+            )
+            .expect("effect store");
             let candidate = b"# generated by ocservia config-plan/v1\ntcp-port = 443\n";
             let adapter = Adapter::new(resources, Limits::default());
             let result = adapter
@@ -2918,6 +3059,7 @@ mod tests {
                     &Sha256::digest(candidate),
                     &Sha256::digest(&original),
                     1,
+                    test_effect(),
                 )
                 .await
                 .expect("typed apply outcome");
@@ -2928,6 +3070,7 @@ mod tests {
                         &Sha256::digest(candidate),
                         &Sha256::digest(&original),
                         1,
+                        test_effect(),
                     )
                     .await
                     .expect("duplicate apply replay");
@@ -3009,7 +3152,12 @@ mod tests {
                 config.clone(),
                 PathBuf::from("/proc/sys/kernel/random/boot_id"),
             )
-            .expect("fixed resources");
+            .expect("fixed resources")
+            .with_effect_store(
+                directory.join("desired-effects.sqlite3"),
+                directory.join("desired-effects.key"),
+            )
+            .expect("effect store");
             (
                 Adapter::new(resources, Limits::default()),
                 directory,
@@ -3030,6 +3178,7 @@ mod tests {
                     &Sha256::digest(&candidate),
                     &Sha256::digest(&original),
                     point.into(),
+                    test_effect(),
                 )
                 .await
                 .expect_err("injected phase must interrupt apply");
@@ -3071,6 +3220,7 @@ mod tests {
                         &Sha256::digest(&candidate),
                         &Sha256::digest(&original),
                         point.into(),
+                        test_effect(),
                     )
                     .await
                     .expect("recover post-publish interruption");
@@ -3104,6 +3254,7 @@ mod tests {
                     &Sha256::digest(&candidate),
                     &Sha256::digest(&original),
                     9,
+                    test_effect(),
                 )
                 .await
                 .expect("health failure must produce typed rollback");
@@ -3136,7 +3287,13 @@ mod tests {
             config.clone(),
             PathBuf::from("/proc/sys/kernel/random/boot_id"),
         )
-        .expect("fixed resources");
+        .expect("fixed resources")
+        .with_effect_store(
+            directory.join("effect/desired-effects.sqlite3"),
+            directory.join("effect/desired-effects.key"),
+        )
+        .expect("effect store");
+        drop(EffectStore::open_for_mutation(&resources).expect("initialize effect store"));
         let adapter = Adapter::new(resources, Limits::default());
 
         std::fs::write(&config, candidate).expect("write unproven matching candidate");
@@ -3147,6 +3304,7 @@ mod tests {
                     &Sha256::digest(candidate),
                     &Sha256::digest(original),
                     7,
+                    test_effect(),
                 )
                 .await,
             Err(AdapterError::Unavailable)
@@ -3160,6 +3318,7 @@ mod tests {
                 &Sha256::digest(candidate),
                 &Sha256::digest(original),
                 7,
+                test_effect(),
             )
             .await
             .expect("finalize recovered apply");
@@ -3178,6 +3337,7 @@ mod tests {
                 &Sha256::digest(candidate),
                 &Sha256::digest(original),
                 8,
+                test_effect(),
             )
             .await
             .expect("recover unhealthy publish");
@@ -3188,6 +3348,97 @@ mod tests {
         );
         assert!(!rollback_backup.exists());
         std::fs::remove_dir_all(directory).expect("remove recovery fixture");
+    }
+
+    #[tokio::test]
+    async fn stale_config_apply_does_not_poison_next_revision_after_restart() {
+        let validator = executable("ocserv-apply-stale", "exit 0");
+        let directory = validator.parent().expect("fixture parent").to_owned();
+        let systemctl = directory.join("systemctl");
+        std::fs::write(&systemctl, "#!/bin/sh\nif [ \"$1\" = show ]; then printf 'LoadState=loaded\\nActiveState=active\\nSubState=running\\n'; fi\n")
+            .expect("write systemctl");
+        std::fs::set_permissions(&systemctl, std::fs::Permissions::from_mode(0o700))
+            .expect("systemctl executable");
+        let occtl = directory.join("occtl");
+        std::fs::write(&occtl, "#!/bin/sh\nprintf '[]'\n").expect("write occtl");
+        std::fs::set_permissions(&occtl, std::fs::Permissions::from_mode(0o700))
+            .expect("occtl executable");
+        let config = directory.join("ocserv.conf");
+        let planned_from = b"# generated by ocservia config-plan/v1\ntcp-port = 441\n";
+        let current = b"# generated by ocservia config-plan/v1\ntcp-port = 442\n";
+        let stale_candidate = b"# generated by ocservia config-plan/v1\ntcp-port = 443\n";
+        let next_candidate = b"# generated by ocservia config-plan/v1\ntcp-port = 444\n";
+        std::fs::write(&config, current).expect("write current config");
+        let resources = FixedResources::new(
+            systemctl,
+            validator,
+            occtl,
+            config.clone(),
+            PathBuf::from("/proc/sys/kernel/random/boot_id"),
+        )
+        .expect("fixed resources")
+        .with_effect_store(
+            directory.join("effect/desired-effects.sqlite3"),
+            directory.join("effect/desired-effects.key"),
+        )
+        .expect("effect store");
+        drop(EffectStore::open_for_mutation(&resources).expect("initialize effect store"));
+
+        let adapter = Adapter::new(resources.clone(), Limits::default());
+        assert!(matches!(
+            adapter
+                .config_apply(
+                    stale_candidate,
+                    &Sha256::digest(stale_candidate),
+                    &Sha256::digest(planned_from),
+                    7,
+                    test_effect(),
+                )
+                .await,
+            Err(AdapterError::Unavailable)
+        ));
+        assert_eq!(std::fs::read(&config).expect("unchanged config"), current);
+        drop(adapter);
+
+        let store = EffectStore::open_existing(&resources).expect("restart effect store");
+        let stale_records: i64 = store
+            .connection
+            .query_row(
+                "SELECT count(*) FROM desired_effects WHERE mutation_kind='config_apply' AND resource_key='ocserv.conf'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("count stale records");
+        assert_eq!(stale_records, 0);
+        drop(store);
+
+        let next_command_id = [2, 2, 3, 4, 5, 6, 0x70, 8, 0x80, 10, 11, 12, 13, 14, 15, 16];
+        let next_idempotency_key = [17, 15, 14, 13, 12, 11, 0x70, 9, 0x80, 7, 6, 5, 4, 3, 2, 1];
+        let next_payload_hash = [10; 32];
+        let next_effect = EffectIdentity {
+            command_id: &next_command_id,
+            idempotency_key: &next_idempotency_key,
+            semantic_payload_sha256: &next_payload_hash,
+            expires_at_unix_seconds: i64::MAX,
+        };
+        let restarted = Adapter::new(resources.clone(), Limits::default());
+        let applied = restarted
+            .config_apply(
+                next_candidate,
+                &Sha256::digest(next_candidate),
+                &Sha256::digest(current),
+                8,
+                next_effect,
+            )
+            .await
+            .expect("apply next revision after restart");
+        assert!(applied.healthy && !applied.rolled_back && !applied.failed_critical);
+        assert_eq!(applied.applied_revision, 8);
+        assert_eq!(
+            std::fs::read(&config).expect("read applied config"),
+            next_candidate
+        );
+        std::fs::remove_dir_all(directory).expect("remove stale fixture");
     }
 
     #[tokio::test]
@@ -3214,7 +3465,13 @@ mod tests {
             config.clone(),
             PathBuf::from("/proc/sys/kernel/random/boot_id"),
         )
-        .expect("fixed resources");
+        .expect("fixed resources")
+        .with_effect_store(
+            directory.join("effect/desired-effects.sqlite3"),
+            directory.join("effect/desired-effects.key"),
+        )
+        .expect("effect store");
+        drop(EffectStore::open_for_mutation(&resources).expect("initialize effect store"));
         let adapter = Adapter::new(resources, Limits::default());
         std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o500))
             .expect("make fixture read only");
@@ -3224,6 +3481,7 @@ mod tests {
                 &Sha256::digest(candidate),
                 &Sha256::digest(original),
                 1,
+                test_effect(),
             )
             .await;
         std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o700))
@@ -3263,7 +3521,12 @@ mod tests {
             config.clone(),
             PathBuf::from("/proc/sys/kernel/random/boot_id"),
         )
-        .expect("fixed resources");
+        .expect("fixed resources")
+        .with_effect_store(
+            directory.join("desired-effects.sqlite3"),
+            directory.join("desired-effects.key"),
+        )
+        .expect("effect store");
         let applying = Adapter::new(resources.clone(), Limits::default());
         let task = tokio::spawn(async move {
             applying
@@ -3272,6 +3535,7 @@ mod tests {
                     &Sha256::digest(candidate),
                     &Sha256::digest(original),
                     4,
+                    test_effect(),
                 )
                 .await
         });
@@ -3313,6 +3577,7 @@ mod tests {
                 &Sha256::digest(candidate),
                 &Sha256::digest(original),
                 4,
+                test_effect(),
             )
             .await
             .expect("recover cancelled apply");
@@ -4428,6 +4693,225 @@ mod tests {
             DesiredEffectState::AppliedExact as i32
         );
         drop(restarted);
+        std::fs::remove_dir_all(directory).expect("cleanup");
+    }
+
+    #[test]
+    fn config_effect_store_persists_absent_reconciliation_before_new_revision() {
+        let directory =
+            std::env::temp_dir().join(format!("ocservia-config-absent-{}", Uuid::now_v7()));
+        std::fs::create_dir(&directory).expect("directory");
+        let resources = FixedResources::default()
+            .with_effect_store(
+                directory.join("effects.sqlite3"),
+                directory.join("effects.key"),
+            )
+            .expect("effect resources");
+        let commands = [*Uuid::now_v7().as_bytes(), *Uuid::now_v7().as_bytes()];
+        let idempotency = [*Uuid::now_v7().as_bytes(), *Uuid::now_v7().as_bytes()];
+        let payload_hashes = [Sha256::digest(b"stale"), Sha256::digest(b"next")];
+        let effect = |index: usize| EffectIdentity {
+            command_id: &commands[index],
+            idempotency_key: &idempotency[index],
+            semantic_payload_sha256: payload_hashes[index].as_slice(),
+            expires_at_unix_seconds: i64::MAX,
+        };
+        let mut store = EffectStore::open_for_mutation(&resources).expect("initialize store");
+        store
+            .prepare(
+                "config_apply",
+                "ocserv.conf",
+                7,
+                effect(0),
+                b"current",
+                b"stale-candidate",
+            )
+            .expect("prepare interrupted config effect");
+        drop(store);
+
+        let mut restarted = EffectStore::open_existing(&resources).expect("restart store");
+        let observation = restarted
+            .observe("config_apply", "ocserv.conf", 7, effect(0), b"current")
+            .expect("reconcile confirmed absent effect");
+        assert_eq!(observation.state, DesiredEffectState::Absent as i32);
+        assert_eq!(
+            restarted
+                .connection
+                .query_row(
+                    "SELECT state FROM desired_effects WHERE mutation_kind='config_apply' AND resource_key='ocserv.conf'",
+                    [],
+                    |row| row.get::<_, String>(0),
+                )
+                .expect("persisted effect state"),
+            "absent"
+        );
+        assert_eq!(
+            restarted
+                .prepare(
+                    "config_apply",
+                    "ocserv.conf",
+                    8,
+                    effect(1),
+                    b"current",
+                    b"next-candidate",
+                )
+                .expect("prepare next revision"),
+            PrepareEffect::Proceed
+        );
+        drop(restarted);
+        std::fs::remove_dir_all(directory).expect("cleanup");
+    }
+
+    #[test]
+    fn config_effect_store_rejects_hash_aba_and_old_authorization_after_restart() {
+        let directory =
+            std::env::temp_dir().join(format!("ocservia-config-aba-{}", Uuid::now_v7()));
+        std::fs::create_dir(&directory).expect("directory");
+        let resources = FixedResources::default()
+            .with_effect_store(
+                directory.join("effects.sqlite3"),
+                directory.join("effects.key"),
+            )
+            .expect("effect resources");
+        let commands = [
+            *Uuid::now_v7().as_bytes(),
+            *Uuid::now_v7().as_bytes(),
+            *Uuid::now_v7().as_bytes(),
+        ];
+        let idempotency = [
+            *Uuid::now_v7().as_bytes(),
+            *Uuid::now_v7().as_bytes(),
+            *Uuid::now_v7().as_bytes(),
+        ];
+        let hashes = [
+            Sha256::digest(b"A1"),
+            Sha256::digest(b"B2"),
+            Sha256::digest(b"A3"),
+        ];
+        let effect = |index: usize| EffectIdentity {
+            command_id: &commands[index],
+            idempotency_key: &idempotency[index],
+            semantic_payload_sha256: hashes[index].as_slice(),
+            expires_at_unix_seconds: i64::MAX,
+        };
+        let mut store = EffectStore::open_for_mutation(&resources).expect("initialize store");
+        store
+            .prepare("config_apply", "ocserv.conf", 1, effect(0), b"X", b"A")
+            .expect("prepare A revision 1");
+        store
+            .mark_applied("config_apply", "ocserv.conf", 1, effect(0))
+            .expect("apply A revision 1");
+        store
+            .prepare("config_apply", "ocserv.conf", 2, effect(1), b"A", b"B")
+            .expect("prepare B revision 2");
+        store
+            .mark_applied("config_apply", "ocserv.conf", 2, effect(1))
+            .expect("apply B revision 2");
+        store
+            .prepare("config_apply", "ocserv.conf", 3, effect(2), b"B", b"A")
+            .expect("prepare A revision 3");
+        store
+            .mark_applied("config_apply", "ocserv.conf", 3, effect(2))
+            .expect("apply A revision 3");
+        drop(store);
+
+        let mut restarted = EffectStore::open_existing(&resources).expect("restart store");
+        let refreshed_effect = EffectIdentity {
+            expires_at_unix_seconds: i64::MAX - 1,
+            ..effect(2)
+        };
+        assert_eq!(
+            restarted
+                .observe("config_apply", "ocserv.conf", 3, refreshed_effect, b"A")
+                .expect("reconcile exact effect under refreshed authorization")
+                .state,
+            DesiredEffectState::AppliedExact as i32
+        );
+        assert!(matches!(
+            restarted.prepare("config_apply", "ocserv.conf", 1, effect(0), b"A", b"A"),
+            Err(AdapterError::InvalidRequest)
+        ));
+        let observation = restarted
+            .observe("config_apply", "ocserv.conf", 1, effect(0), b"A")
+            .expect("observe old A proof");
+        assert_eq!(
+            observation.state,
+            DesiredEffectState::SupersededByNewerRevision as i32
+        );
+        assert_eq!(observation.observed_revision, 3);
+        drop(restarted);
+        std::fs::remove_dir_all(directory).expect("cleanup");
+    }
+
+    #[test]
+    fn effect_store_schema_migration_preserves_config_revision_fence() {
+        let directory =
+            std::env::temp_dir().join(format!("ocservia-effect-schema-{}", Uuid::now_v7()));
+        std::fs::create_dir(&directory).expect("directory");
+        let resources = FixedResources::default()
+            .with_effect_store(
+                directory.join("effects.sqlite3"),
+                directory.join("effects.key"),
+            )
+            .expect("effect resources");
+        let mut store = EffectStore::open_for_mutation(&resources).expect("initialize store");
+        store
+            .prepare("config_apply", "ocserv.conf", 1, test_effect(), b"X", b"A")
+            .expect("prepare legacy config effect");
+        store
+            .mark_applied("config_apply", "ocserv.conf", 1, test_effect())
+            .expect("commit legacy config effect");
+        drop(store);
+
+        let legacy = Connection::open(&resources.effect_store).expect("open legacy schema");
+        legacy
+            .execute_batch(
+                "BEGIN IMMEDIATE;
+                 ALTER TABLE desired_effects RENAME TO desired_effects_current;
+                 CREATE TABLE desired_effects (
+                   mutation_kind TEXT NOT NULL,
+                   resource_key TEXT NOT NULL,
+                   revision INTEGER NOT NULL CHECK(revision > 0),
+                   command_id BLOB NOT NULL CHECK(length(command_id)=16),
+                   idempotency_key BLOB NOT NULL CHECK(length(idempotency_key)=16),
+                   payload_sha256 BLOB NOT NULL CHECK(length(payload_sha256)=32),
+                   expires_at INTEGER NOT NULL,
+                   state TEXT NOT NULL CHECK(state IN ('prepared','applied')),
+                   before_hmac BLOB NOT NULL CHECK(length(before_hmac)=32),
+                   after_hmac BLOB NOT NULL CHECK(length(after_hmac)=32),
+                   record_hmac BLOB NOT NULL CHECK(length(record_hmac)=32),
+                   updated_at INTEGER NOT NULL,
+                   PRIMARY KEY(mutation_kind,resource_key)
+                 ) STRICT;
+                 INSERT INTO desired_effects SELECT * FROM desired_effects_current;
+                 DROP TABLE desired_effects_current;
+                 COMMIT;",
+            )
+            .expect("downgrade fixture schema");
+        drop(legacy);
+
+        let mut upgraded = EffectStore::open_existing(&resources).expect("migrate effect store");
+        assert_eq!(
+            upgraded
+                .observe("config_apply", "ocserv.conf", 1, test_effect(), b"A")
+                .expect("observe preserved effect")
+                .state,
+            DesiredEffectState::AppliedExact as i32
+        );
+        upgraded
+            .prepare("config_apply", "ocserv.conf", 2, test_effect(), b"A", b"B")
+            .expect("prepare next revision after migration");
+        upgraded
+            .mark_absent("config_apply", "ocserv.conf", 2, test_effect())
+            .expect("record rolled-back revision");
+        assert_eq!(
+            upgraded
+                .observe("config_apply", "ocserv.conf", 2, test_effect(), b"A")
+                .expect("observe rolled-back revision")
+                .state,
+            DesiredEffectState::Absent as i32
+        );
+        drop(upgraded);
         std::fs::remove_dir_all(directory).expect("cleanup");
     }
 

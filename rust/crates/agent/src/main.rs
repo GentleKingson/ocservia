@@ -18,7 +18,9 @@ use ocservia_agent_protocol::{
     ServiceReloadRequest, SessionMutationRequest, UserDisableRequest, UserEnableRequest,
     UserSecretRequest, privd_request, privd_response,
 };
-use ocservia_command_authorization::{ControllerCommandKeyring, load_verification_key};
+use ocservia_command_authorization::{
+    ControllerCommandKeyring, VerifiedSessionGrant, load_verification_key,
+};
 use ocservia_command_journal::{
     CommandRecord, CommandState, Journal, OFFLINE_RECOVERY_RETENTION_SECONDS, TelemetryInsert,
 };
@@ -187,6 +189,45 @@ struct SessionContext<'a> {
     command_keys: &'a ControllerCommandKeyring,
 }
 
+struct ActiveSessionAuthority {
+    negotiated_capabilities: HashSet<String>,
+    authorization_revision: u64,
+    expires_at_unix_seconds: i64,
+}
+
+fn supported_capabilities() -> Vec<String> {
+    [
+        "ocserv.status.read",
+        "ocserv.version.read",
+        "ocserv.sessions.read",
+        "ocserv.ip_bans.read",
+        "ocserv.config_fingerprint.read",
+        "synthetic.noop",
+        "synthetic.echo",
+        "command.semantic-hash.v1",
+        "command.strict-wire.v1",
+        "ocserv.session.disconnect",
+        "ocserv.session.terminate",
+        "ocserv.ip_ban.remove",
+        "ocserv.service.reload",
+        "ocserv.users.write",
+        "ocserv.groups.write",
+        "ocserv.config.plan",
+        "ocserv.config.apply",
+        "config.auth",
+        "config.tls",
+        "config.sessions",
+        "config.network",
+        "config.limits",
+        "config.runtime",
+        "ocserv.certificate.issue",
+        "ocserv.certificate.revoke",
+    ]
+    .into_iter()
+    .map(str::to_owned)
+    .collect()
+}
+
 async fn connect_once(
     endpoint: &Endpoint,
     controller: EndpointId,
@@ -195,39 +236,15 @@ async fn connect_once(
     let connection = endpoint
         .connect(EndpointAddr::new(controller), AGENT_ALPN)
         .await?;
+    let supported_capabilities = supported_capabilities();
     let handshake = SessionHandshake {
         protocol_major: 1,
-        protocol_minor: 0,
+        protocol_minor: 1,
         agent_version: env!("CARGO_PKG_VERSION").to_owned(),
         controller_version: String::new(),
         node_id: session.node_id.as_bytes().to_vec(),
         endpoint_id: session.endpoint_id.as_bytes().to_vec(),
-        capabilities: vec![
-            "ocserv.status.read".to_owned(),
-            "ocserv.version.read".to_owned(),
-            "ocserv.sessions.read".to_owned(),
-            "ocserv.ip_bans.read".to_owned(),
-            "ocserv.config_fingerprint.read".to_owned(),
-            "synthetic.noop".to_owned(),
-            "synthetic.echo".to_owned(),
-            "command.semantic-hash.v1".to_owned(),
-            "command.strict-wire.v1".to_owned(),
-            "ocserv.session.disconnect".to_owned(),
-            "ocserv.session.terminate".to_owned(),
-            "ocserv.ip_ban.remove".to_owned(),
-            "ocserv.service.reload".to_owned(),
-            "ocserv.users.write".to_owned(),
-            "ocserv.groups.write".to_owned(),
-            "ocserv.config.plan".to_owned(),
-            "config.auth".to_owned(),
-            "config.tls".to_owned(),
-            "config.sessions".to_owned(),
-            "config.network".to_owned(),
-            "config.limits".to_owned(),
-            "config.runtime".to_owned(),
-            "ocserv.certificate.issue".to_owned(),
-            "ocserv.certificate.revoke".to_owned(),
-        ],
+        capabilities: supported_capabilities.clone(),
         ocserv_version: "unknown".to_owned(),
         os_release: session.os_release.to_owned(),
         boot_id: session.boot_id.to_owned(),
@@ -261,15 +278,30 @@ async fn connect_once(
     if response.result != i32::from(HandshakeResult::Accepted) {
         return Err(invalid("controller refused agent handshake").into());
     }
+    let authority = verify_session_authority(
+        &response,
+        &supported_capabilities,
+        session.node_id,
+        session.endpoint_id,
+        session.command_keys,
+    )?;
     tracing::info!(controller = %controller, "agent session accepted");
     let mut heartbeat = tokio::time::interval(Duration::from_secs(30));
+    let session_lifetime = u64::try_from(
+        authority
+            .expires_at_unix_seconds
+            .saturating_sub(unix_seconds()?),
+    )?;
+    let session_expiry = tokio::time::sleep(Duration::from_secs(session_lifetime));
+    tokio::pin!(session_expiry);
     let mut sequence = 0_u64;
     loop {
         tokio::select! {
             _ = connection.closed() => return Ok(()),
+            () = &mut session_expiry => return Err(invalid("Controller session grant expired").into()),
             stream = connection.accept_bi() => {
                 let (send,recv)=stream?;
-                handle_command_stream(send,recv,session).await?;
+                handle_command_stream(send,recv,session,&authority).await?;
             },
             _ = heartbeat.tick() => {
                 let observations=session.privd.snapshot().await?;
@@ -290,11 +322,71 @@ async fn connect_once(
     }
 }
 
+fn verify_session_authority(
+    response: &SessionHandshakeResponse,
+    supported_capabilities: &[String],
+    node_id: Uuid,
+    endpoint_id: EndpointId,
+    command_keys: &ControllerCommandKeyring,
+) -> Result<ActiveSessionAuthority, Box<dyn std::error::Error + Send + Sync>> {
+    if response.protocol_major != 1 || response.protocol_minor != 1 {
+        return Err(invalid("Controller session protocol is not mutation-capable").into());
+    }
+    let grant = response
+        .session_grant
+        .as_ref()
+        .ok_or_else(|| invalid("Controller session grant is required"))?;
+    if grant.protocol_major != response.protocol_major
+        || grant.protocol_minor != response.protocol_minor
+        || grant.negotiated_capabilities != response.negotiated_capabilities
+    {
+        return Err(invalid("Controller session grant response mismatch").into());
+    }
+    let supported = supported_capabilities.iter().collect::<HashSet<_>>();
+    let mut previous: Option<&str> = None;
+    for capability in &response.negotiated_capabilities {
+        if !supported.contains(capability)
+            || previous.is_some_and(|value| value >= capability.as_str())
+        {
+            return Err(invalid("Controller negotiated capability set is invalid").into());
+        }
+        previous = Some(capability);
+    }
+    let now = unix_seconds()?;
+    let VerifiedSessionGrant {
+        authorization_revision,
+        negotiated_capabilities,
+        expires_at_seconds,
+    } = command_keys.verify_session_grant(
+        grant,
+        node_id.as_bytes(),
+        endpoint_id.as_bytes(),
+        now,
+    )?;
+    if negotiated_capabilities != response.negotiated_capabilities {
+        return Err(invalid("verified session capabilities do not match response").into());
+    }
+    Ok(ActiveSessionAuthority {
+        negotiated_capabilities: negotiated_capabilities.into_iter().collect(),
+        authorization_revision,
+        expires_at_unix_seconds: expires_at_seconds,
+    })
+}
+
+fn unix_seconds() -> Result<i64, Box<dyn std::error::Error + Send + Sync>> {
+    Ok(i64::try_from(
+        SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)?
+            .as_secs(),
+    )?)
+}
+
 #[allow(clippy::too_many_lines)]
 async fn handle_command_stream(
     mut send: iroh::endpoint::SendStream,
     mut recv: iroh::endpoint::RecvStream,
     session: &mut SessionContext<'_>,
+    authority: &ActiveSessionAuthority,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let mut length = [0_u8; 4];
     tokio::time::timeout(HANDSHAKE_TIMEOUT, recv.read_exact(&mut length))
@@ -323,21 +415,9 @@ async fn handle_command_stream(
     let now_unix_seconds = i64::try_from(now.as_secs())?;
     let context = CommandContext {
         node_id: *session.node_id.as_bytes(),
-        observed_revision: None,
-        capabilities: HashSet::from([
-            "synthetic.noop",
-            "synthetic.echo",
-            "ocserv.session.disconnect",
-            "ocserv.session.terminate",
-            "ocserv.ip_ban.remove",
-            "ocserv.service.reload",
-            "ocserv.users.write",
-            "ocserv.groups.write",
-            "ocserv.config.plan",
-            "ocserv.config.apply",
-            "ocserv.certificate.issue",
-            "ocserv.certificate.revoke",
-        ]),
+        authorization_revision: authority.authorization_revision,
+        capabilities: authority.negotiated_capabilities.clone(),
+        session_expires_at_unix_seconds: authority.expires_at_unix_seconds,
         command_keys: session.command_keys.clone(),
         now_unix_seconds,
         cancelled: false,
@@ -607,11 +687,13 @@ async fn execute_external_command(
         Ok(response) => match response.result {
             Some(privd_response::Result::Mutation(result)) if result.applied => {
                 if let Some((resource_type, resource_key, revision)) = desired_resource(envelope) {
+                    let result = result.encode_to_vec();
                     session.command_executor.complete_external_applied(
                         &command,
                         resource_type,
                         &resource_key,
                         revision,
+                        &result,
                         now,
                     )
                 } else {
@@ -623,9 +705,21 @@ async fn execute_external_command(
             Some(privd_response::Result::ConfigPlan(result)) => session
                 .command_executor
                 .complete_external(&command, Ok(&result.encode_to_vec()), now),
-            Some(privd_response::Result::ConfigApply(result)) => session
-                .command_executor
-                .complete_external(&command, Ok(&result.encode_to_vec()), now),
+            Some(privd_response::Result::ConfigApply(result)) => {
+                let bytes = result.encode_to_vec();
+                let Some((resource_type, resource_key, revision)) = desired_resource(envelope)
+                else {
+                    return Err(CommandError::Rejected("config_apply_invalid"));
+                };
+                session.command_executor.complete_external_applied(
+                    &command,
+                    resource_type,
+                    &resource_key,
+                    revision,
+                    &bytes,
+                    now,
+                )
+            }
             Some(privd_response::Result::CertificateCsr(result)) => session
                 .command_executor
                 .complete_external(&command, Ok(&result.encode_to_vec()), now),
@@ -686,6 +780,9 @@ fn desired_resource(envelope: &CommandEnvelope) -> Option<(&'static str, String,
         command_envelope::Payload::GroupApply(value) => {
             Some(("group", value.group_name.clone(), value.desired_revision))
         }
+        command_envelope::Payload::ConfigApply(value) => {
+            Some(("config", "ocserv.conf".to_owned(), value.desired_revision))
+        }
         command_envelope::Payload::CertificateCsr(value) => {
             Uuid::from_slice(&value.certificate_id).ok().map(|id| {
                 (
@@ -740,28 +837,6 @@ async fn observe_external_effect(
         )
     ) {
         return ExternalEffectObservation::Absent;
-    }
-    if let Some(command_envelope::Payload::ConfigApply(payload)) = envelope.payload.as_ref() {
-        let response = privd
-            .call(privd_request::Operation::ConfigFingerprint(
-                ocservia_agent_protocol::ReadRequest {},
-            ))
-            .await;
-        let Ok(response) = response else {
-            return ExternalEffectObservation::Unknown;
-        };
-        let Some(privd_response::Result::ConfigFingerprint(value)) = response.result else {
-            return ExternalEffectObservation::Unknown;
-        };
-        let Ok(observed) = hex::decode(value.sha256) else {
-            return ExternalEffectObservation::Unknown;
-        };
-        if observed == payload.candidate_hash || observed == payload.expected_current_hash {
-            // Applying again is the recovery protocol: privd rechecks health and either
-            // finalizes the retained backup or performs the verified rollback.
-            return ExternalEffectObservation::Absent;
-        }
-        return ExternalEffectObservation::Unknown;
     }
     let target_boot = match envelope.payload.as_ref() {
         Some(command_envelope::Payload::SessionDisconnect(target)) => Some(&target.boot_id),
@@ -910,6 +985,9 @@ fn desired_effect_identity(
         )),
         command_envelope::Payload::GroupApply(value) => {
             Some(("group_apply", &value.group_name, value.desired_revision))
+        }
+        command_envelope::Payload::ConfigApply(value) => {
+            Some(("config_apply", "ocserv.conf", value.desired_revision))
         }
         _ => None,
     }
@@ -1402,7 +1480,7 @@ fn invalid(detail: &str) -> io::Error {
 mod tests {
     use super::*;
     use ocservia_agent_protocol::{
-        ConfigFingerprint, DesiredEffectObservation, PrivdRequest, read_frame, write_frame,
+        DesiredEffectObservation, PrivdRequest, read_frame, write_frame,
     };
     use ocservia_contracts::generated::ocserv::platform::agent::v1::{
         ConfigApply, ConfigPlan, UserPasswordRotate,
@@ -1584,6 +1662,7 @@ mod tests {
             payload: Some(command_envelope::Payload::ConfigPlan(ConfigPlan {
                 candidate: b"tcp-port = 443\n".to_vec(),
                 candidate_hash: vec![0x5a; 32],
+                expected_revision: 0,
             })),
             ..CommandEnvelope::default()
         };
@@ -1594,26 +1673,33 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn interrupted_config_apply_retries_only_known_fingerprints() {
-        async fn observe(hash: Vec<u8>) -> ExternalEffectObservation {
+    async fn interrupted_config_apply_uses_durable_revision_and_effect_identity() {
+        async fn observe(
+            state: DesiredEffectState,
+            observed_revision: u64,
+        ) -> ExternalEffectObservation {
             let socket = std::env::temp_dir().join(format!("apply-{}.sock", Uuid::now_v7()));
             let listener =
                 tokio::net::UnixListener::bind(&socket).expect("bind fingerprint fixture");
             let server = tokio::spawn(async move {
                 let (mut stream, _) = listener.accept().await.expect("accept");
                 let request: PrivdRequest = read_frame(&mut stream).await.expect("request");
-                assert!(matches!(
-                    request.operation,
-                    Some(privd_request::Operation::ConfigFingerprint(_))
-                ));
+                let Some(privd_request::Operation::DesiredEffectObserve(observe)) =
+                    request.operation
+                else {
+                    panic!("config desired-effect observation required")
+                };
+                assert_eq!(observe.mutation_kind, "config_apply");
+                assert_eq!(observe.resource_key, "ocserv.conf");
+                assert_eq!(observe.desired_revision, 2);
                 write_frame(
                     &mut stream,
                     &PrivdResponse {
                         request_id: request.request_id,
-                        result: Some(privd_response::Result::ConfigFingerprint(
-                            ConfigFingerprint {
-                                sha256: hex::encode(hash),
-                                size_bytes: 128,
+                        result: Some(privd_response::Result::DesiredEffectObservation(
+                            DesiredEffectObservation {
+                                state: state.into(),
+                                observed_revision,
                             },
                         )),
                     },
@@ -1623,6 +1709,13 @@ mod tests {
             });
             let client = PrivdClient::new(socket.clone(), Duration::from_secs(2)).expect("client");
             let envelope = CommandEnvelope {
+                command_id: Uuid::now_v7().as_bytes().to_vec(),
+                idempotency_key: Uuid::now_v7().as_bytes().to_vec(),
+                semantic_payload_sha256: vec![0x6a; 32],
+                expires_at: Some(prost_types::Timestamp {
+                    seconds: i64::MAX,
+                    nanos: 0,
+                }),
                 payload: Some(command_envelope::Payload::ConfigApply(ConfigApply {
                     candidate: b"tcp-port = 443\n".to_vec(),
                     candidate_hash: vec![0x5a; 32],
@@ -1638,15 +1731,19 @@ mod tests {
         }
 
         assert_eq!(
-            observe(vec![0x5a; 32]).await,
+            observe(DesiredEffectState::AppliedExact, 2).await,
+            ExternalEffectObservation::AppliedExact
+        );
+        assert_eq!(
+            observe(DesiredEffectState::Absent, 2).await,
             ExternalEffectObservation::Absent
         );
         assert_eq!(
-            observe(vec![0x4b; 32]).await,
-            ExternalEffectObservation::Absent
+            observe(DesiredEffectState::SupersededByNewerRevision, 3).await,
+            ExternalEffectObservation::SupersededByNewerRevision
         );
         assert_eq!(
-            observe(vec![0x3c; 32]).await,
+            observe(DesiredEffectState::Unknown, 0).await,
             ExternalEffectObservation::Unknown
         );
     }

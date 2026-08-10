@@ -19,7 +19,8 @@ import (
 func ValidateVersion(version agentv1.SemanticPayloadHashVersion) error {
 	switch version {
 	case agentv1.SemanticPayloadHashVersion_SEMANTIC_PAYLOAD_HASH_VERSION_UNSPECIFIED,
-		agentv1.SemanticPayloadHashVersion_SEMANTIC_PAYLOAD_HASH_VERSION_V1:
+		agentv1.SemanticPayloadHashVersion_SEMANTIC_PAYLOAD_HASH_VERSION_V1,
+		agentv1.SemanticPayloadHashVersion_SEMANTIC_PAYLOAD_HASH_VERSION_V2:
 		return nil
 	default:
 		return errors.New("semantic payload hash version is unsupported")
@@ -29,6 +30,7 @@ func ValidateVersion(version agentv1.SemanticPayloadHashVersion) error {
 // domainSeparatorV1 is the ASCII label plus NUL terminator defined by
 // docs/development/command-semantic-hash-v1.md.
 var domainSeparatorV1 = []byte("ocservia.command.semantic-hash.v1\x00")
+var domainSeparatorV2 = []byte("ocservia.command.semantic-hash.v2\x00")
 
 // HashV1 computes the versioned canonical semantic hash (v1) for a reconcilable
 // command envelope.
@@ -38,6 +40,16 @@ var domainSeparatorV1 = []byte("ocservia.command.semantic-hash.v1\x00")
 // Only explicitly mapped typed payloads are reconcilable; other payload types
 // (including SimulationProbe) return an error.
 func HashV1(envelope *agentv1.CommandEnvelope) ([sha256.Size]byte, error) {
+	return hash(envelope, agentv1.SemanticPayloadHashVersion_SEMANTIC_PAYLOAD_HASH_VERSION_V1)
+}
+
+// HashV2 binds the authorization revision and the independent ConfigPlan
+// expected revision without changing the frozen v1 layout.
+func HashV2(envelope *agentv1.CommandEnvelope) ([sha256.Size]byte, error) {
+	return hash(envelope, agentv1.SemanticPayloadHashVersion_SEMANTIC_PAYLOAD_HASH_VERSION_V2)
+}
+
+func hash(envelope *agentv1.CommandEnvelope, version agentv1.SemanticPayloadHashVersion) ([sha256.Size]byte, error) {
 	var payloadKind uint32
 	var canonicalPayload []byte
 	switch envelope.Payload.(type) {
@@ -61,6 +73,11 @@ func HashV1(envelope *agentv1.CommandEnvelope) ([sha256.Size]byte, error) {
 			return [sha256.Size]byte{}, errors.New("candidate hash is malformed")
 		}
 		canonicalPayload = append(canonicalPayload, payload.GetCandidateHash()...)
+		if version == agentv1.SemanticPayloadHashVersion_SEMANTIC_PAYLOAD_HASH_VERSION_V2 {
+			var expected [8]byte
+			binary.BigEndian.PutUint64(expected[:], payload.GetExpectedRevision())
+			canonicalPayload = append(canonicalPayload, expected[:]...)
+		}
 	case *agentv1.CommandEnvelope_ConfigApply:
 		payloadKind = 104
 		payload := envelope.GetConfigApply()
@@ -132,7 +149,14 @@ func HashV1(envelope *agentv1.CommandEnvelope) ([sha256.Size]byte, error) {
 		return [sha256.Size]byte{}, errors.New("command payload type is not reconcilable")
 	}
 	h := sha256.New()
-	h.Write(domainSeparatorV1)
+	switch version {
+	case agentv1.SemanticPayloadHashVersion_SEMANTIC_PAYLOAD_HASH_VERSION_V1:
+		h.Write(domainSeparatorV1)
+	case agentv1.SemanticPayloadHashVersion_SEMANTIC_PAYLOAD_HASH_VERSION_V2:
+		h.Write(domainSeparatorV2)
+	default:
+		return [sha256.Size]byte{}, errors.New("semantic payload hash version is unsupported")
+	}
 	h.Write(envelope.GetNodeId())
 	var rev [8]byte
 	binary.BigEndian.PutUint64(rev[:], envelope.GetExpectedRevision())
@@ -182,6 +206,17 @@ func PopulateV1(envelope *agentv1.CommandEnvelope) error {
 		return err
 	}
 	envelope.SemanticPayloadHashVersion = agentv1.SemanticPayloadHashVersion_SEMANTIC_PAYLOAD_HASH_VERSION_V1
+	envelope.SemanticPayloadSha256 = digest[:]
+	return nil
+}
+
+// PopulateV2 fills the current semantic identity on a command envelope.
+func PopulateV2(envelope *agentv1.CommandEnvelope) error {
+	digest, err := HashV2(envelope)
+	if err != nil {
+		return err
+	}
+	envelope.SemanticPayloadHashVersion = agentv1.SemanticPayloadHashVersion_SEMANTIC_PAYLOAD_HASH_VERSION_V2
 	envelope.SemanticPayloadSha256 = digest[:]
 	return nil
 }

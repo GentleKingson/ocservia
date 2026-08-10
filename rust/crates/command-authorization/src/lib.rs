@@ -12,7 +12,8 @@ use std::path::{Component, Path};
 use ed25519_dalek::pkcs8::DecodePublicKey as _;
 use ed25519_dalek::{Signature, VerifyingKey};
 use ocservia_contracts::generated::ocserv::platform::agent::v1::{
-    CommandAuthorizationVersion, CommandEnvelope, SemanticPayloadHashVersion, command_envelope,
+    CommandAuthorizationVersion, CommandEnvelope, SemanticPayloadHashVersion, SessionGrantV1,
+    SessionGrantVersion, command_envelope,
 };
 use rustix::fs::{Mode, OFlags};
 use sha2::{Digest as _, Sha256};
@@ -20,7 +21,9 @@ use sha2::{Digest as _, Sha256};
 /// The command protocol revision that requires authorization v1.
 pub const COMMAND_PROTOCOL_VERSION: &str = "1.1";
 const DOMAIN_SEPARATOR: &[u8] = b"ocservia/controller-command/v1\0";
+const SESSION_GRANT_DOMAIN_SEPARATOR: &[u8] = b"ocservia/controller-session-grant/v1\0";
 const KEY_ID_PREFIX: &str = "ed25519-sha256:";
+const MAX_FUTURE_SKEW_SECONDS: i64 = 300;
 
 /// Independent, non-Protobuf `CommandAuthorizationV1` claims.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -46,6 +49,31 @@ pub struct CommandAuthorizationV1 {
     pub issued_at_nanos: u32,
     pub expires_at_seconds: i64,
     pub expires_at_nanos: u32,
+}
+
+/// Independent, non-Protobuf canonical claims for one Agent session.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SessionGrantClaimsV1 {
+    pub version: u32,
+    pub key_id: String,
+    pub protocol_major: u32,
+    pub protocol_minor: u32,
+    pub node_id: [u8; 16],
+    pub endpoint_id: [u8; 32],
+    pub authorization_revision: u64,
+    pub negotiated_capabilities: Vec<String>,
+    pub issued_at_seconds: i64,
+    pub issued_at_nanos: u32,
+    pub expires_at_seconds: i64,
+    pub expires_at_nanos: u32,
+}
+
+/// Verified Controller authority retained for exactly one connected session.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct VerifiedSessionGrant {
+    pub authorization_revision: u64,
+    pub negotiated_capabilities: Vec<String>,
+    pub expires_at_seconds: i64,
 }
 
 /// A fail-closed authorization validation error.
@@ -150,6 +178,155 @@ impl ControllerCommandKeyring {
         key.verify_strict(&canonical, &signature)
             .map_err(|_| AuthorizationError::SignatureInvalid)
     }
+
+    /// Verifies a Controller-signed session grant against the local node and
+    /// pinned Iroh endpoint identities.
+    ///
+    /// # Errors
+    ///
+    /// Rejects unknown keys, invalid signatures, malformed or mismatched
+    /// claims, future issuance, and expired grants.
+    pub fn verify_session_grant(
+        &self,
+        grant: &SessionGrantV1,
+        expected_node_id: &[u8; 16],
+        expected_endpoint_id: &[u8; 32],
+        now_unix_seconds: i64,
+    ) -> Result<VerifiedSessionGrant, AuthorizationError> {
+        let version = SessionGrantVersion::try_from(grant.version)
+            .unwrap_or(SessionGrantVersion::Unspecified);
+        if version != SessionGrantVersion::V1 {
+            return Err(AuthorizationError::UnsupportedVersion);
+        }
+        let key = self
+            .keys
+            .get(&grant.key_id)
+            .ok_or(AuthorizationError::UnknownKey)?;
+        let claims = session_grant_claims_v1(grant)?;
+        if &claims.node_id != expected_node_id {
+            return Err(AuthorizationError::ClaimsInvalid(
+                "session_grant_node_mismatch",
+            ));
+        }
+        if &claims.endpoint_id != expected_endpoint_id {
+            return Err(AuthorizationError::ClaimsInvalid(
+                "session_grant_endpoint_mismatch",
+            ));
+        }
+        if claims.expires_at_seconds <= now_unix_seconds {
+            return Err(AuthorizationError::ClaimsInvalid("session_grant_expired"));
+        }
+        if claims.issued_at_seconds > now_unix_seconds.saturating_add(MAX_FUTURE_SKEW_SECONDS) {
+            return Err(AuthorizationError::ClaimsInvalid(
+                "session_grant_clock_skew",
+            ));
+        }
+        let canonical = canonical_session_grant_v1(&claims)?;
+        let signature = Signature::from_slice(&grant.signature)
+            .map_err(|_| AuthorizationError::SignatureMalformed)?;
+        key.verify_strict(&canonical, &signature)
+            .map_err(|_| AuthorizationError::SignatureInvalid)?;
+        Ok(VerifiedSessionGrant {
+            authorization_revision: claims.authorization_revision,
+            negotiated_capabilities: claims.negotiated_capabilities,
+            expires_at_seconds: claims.expires_at_seconds,
+        })
+    }
+}
+
+/// Projects a Protobuf carrier into the independent session grant claims.
+///
+/// # Errors
+///
+/// Rejects missing timestamps and malformed fixed-width identifiers.
+pub fn session_grant_claims_v1(
+    grant: &SessionGrantV1,
+) -> Result<SessionGrantClaimsV1, AuthorizationError> {
+    let issued_at = grant
+        .issued_at
+        .as_ref()
+        .ok_or(AuthorizationError::ClaimsInvalid(
+            "session_grant_issued_at_missing",
+        ))?;
+    let expires_at = grant
+        .expires_at
+        .as_ref()
+        .ok_or(AuthorizationError::ClaimsInvalid(
+            "session_grant_expires_at_missing",
+        ))?;
+    Ok(SessionGrantClaimsV1 {
+        version: u32::try_from(grant.version)
+            .map_err(|_| AuthorizationError::UnsupportedVersion)?,
+        key_id: grant.key_id.clone(),
+        protocol_major: grant.protocol_major,
+        protocol_minor: grant.protocol_minor,
+        node_id: fixed::<16>(&grant.node_id, "session_grant_node_invalid")?,
+        endpoint_id: fixed::<32>(&grant.endpoint_id, "session_grant_endpoint_invalid")?,
+        authorization_revision: grant.authorization_revision,
+        negotiated_capabilities: grant.negotiated_capabilities.clone(),
+        issued_at_seconds: issued_at.seconds,
+        issued_at_nanos: timestamp_nanos(issued_at.nanos)?,
+        expires_at_seconds: expires_at.seconds,
+        expires_at_nanos: timestamp_nanos(expires_at.nanos)?,
+    })
+}
+
+/// Produces the exact bytes signed for `SessionGrantV1` without serializing Protobuf.
+///
+/// # Errors
+///
+/// Rejects invalid versions, revisions, timestamps, key IDs, or unsorted and
+/// duplicate capabilities.
+pub fn canonical_session_grant_v1(
+    claims: &SessionGrantClaimsV1,
+) -> Result<Vec<u8>, AuthorizationError> {
+    if claims.version != 1
+        || claims.key_id.is_empty()
+        || claims.protocol_major == 0
+        || claims.authorization_revision == 0
+        || claims.negotiated_capabilities.len() > 128
+        || claims.expires_at_seconds < claims.issued_at_seconds
+        || (claims.expires_at_seconds == claims.issued_at_seconds
+            && claims.expires_at_nanos <= claims.issued_at_nanos)
+    {
+        return Err(AuthorizationError::ClaimsInvalid(
+            "session_grant_claims_invalid",
+        ));
+    }
+    let mut previous: Option<&str> = None;
+    for capability in &claims.negotiated_capabilities {
+        if capability.is_empty()
+            || capability.len() > 128
+            || previous.is_some_and(|value| value >= capability.as_str())
+        {
+            return Err(AuthorizationError::ClaimsInvalid(
+                "session_grant_capabilities_invalid",
+            ));
+        }
+        previous = Some(capability);
+    }
+    let mut encoded = Vec::with_capacity(512);
+    encoded.extend_from_slice(SESSION_GRANT_DOMAIN_SEPARATOR);
+    encoded.extend_from_slice(&claims.version.to_be_bytes());
+    append_string(&mut encoded, &claims.key_id)?;
+    encoded.extend_from_slice(&claims.protocol_major.to_be_bytes());
+    encoded.extend_from_slice(&claims.protocol_minor.to_be_bytes());
+    encoded.extend_from_slice(&claims.node_id);
+    encoded.extend_from_slice(&claims.endpoint_id);
+    encoded.extend_from_slice(&claims.authorization_revision.to_be_bytes());
+    encoded.extend_from_slice(
+        &u32::try_from(claims.negotiated_capabilities.len())
+            .map_err(|_| AuthorizationError::ClaimsInvalid("session_grant_capabilities_invalid"))?
+            .to_be_bytes(),
+    );
+    for capability in &claims.negotiated_capabilities {
+        append_string(&mut encoded, capability)?;
+    }
+    encoded.extend_from_slice(&claims.issued_at_seconds.to_be_bytes());
+    encoded.extend_from_slice(&claims.issued_at_nanos.to_be_bytes());
+    encoded.extend_from_slice(&claims.expires_at_seconds.to_be_bytes());
+    encoded.extend_from_slice(&claims.expires_at_nanos.to_be_bytes());
+    Ok(encoded)
 }
 
 /// Returns the stable key ID carried in authorization proofs.
@@ -224,10 +401,11 @@ pub fn claims_from_envelope_v1(
             "command_authorization_time_order_invalid",
         ));
     }
-    if SemanticPayloadHashVersion::try_from(envelope.semantic_payload_hash_version)
-        .unwrap_or(SemanticPayloadHashVersion::Unspecified)
-        != SemanticPayloadHashVersion::V1
-    {
+    if !matches!(
+        SemanticPayloadHashVersion::try_from(envelope.semantic_payload_hash_version)
+            .unwrap_or(SemanticPayloadHashVersion::Unspecified),
+        SemanticPayloadHashVersion::V1 | SemanticPayloadHashVersion::V2
+    ) {
         return Err(AuthorizationError::ClaimsInvalid(
             "semantic_hash_version_unsupported",
         ));
@@ -573,6 +751,110 @@ mod tests {
                 .verify(&envelope)
                 .unwrap_or_else(|error| panic!("{} Go signature: {error}", string(vector, "name")));
         }
+    }
+
+    #[test]
+    fn rust_verifies_go_session_grant_and_shared_canonical_vector() {
+        let path =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../testdata/session-grant-v1.json");
+        let raw = fs::read_to_string(&path)
+            .unwrap_or_else(|error| panic!("read {}: {error}", path.display()));
+        let fixture: Value = serde_json::from_str(&raw).expect("session grant fixture");
+        let public_key = VerifyingKey::from_bytes(&fixed::<32>(string(&fixture, "public_key_hex")))
+            .expect("fixture public key");
+        let keyring = ControllerCommandKeyring::new([public_key]).expect("fixture keyring");
+        let capabilities = fixture["negotiated_capabilities"]
+            .as_array()
+            .expect("capability array")
+            .iter()
+            .map(|value| value.as_str().expect("capability string").to_owned())
+            .collect::<Vec<_>>();
+        let claims = SessionGrantClaimsV1 {
+            version: u32::try_from(number(&fixture, "version")).expect("version"),
+            key_id: string(&fixture, "key_id").to_owned(),
+            protocol_major: u32::try_from(number(&fixture, "protocol_major"))
+                .expect("protocol major"),
+            protocol_minor: u32::try_from(number(&fixture, "protocol_minor"))
+                .expect("protocol minor"),
+            node_id: fixed::<16>(string(&fixture, "node_id_hex")),
+            endpoint_id: fixed::<32>(string(&fixture, "endpoint_id_hex")),
+            authorization_revision: number(&fixture, "authorization_revision"),
+            negotiated_capabilities: capabilities,
+            issued_at_seconds: signed_number(&fixture, "issued_at_seconds"),
+            issued_at_nanos: u32::try_from(number(&fixture, "issued_at_nanos"))
+                .expect("issued nanos"),
+            expires_at_seconds: signed_number(&fixture, "expires_at_seconds"),
+            expires_at_nanos: u32::try_from(number(&fixture, "expires_at_nanos"))
+                .expect("expiry nanos"),
+        };
+        let canonical = canonical_session_grant_v1(&claims).expect("canonical session grant");
+        assert_eq!(
+            hex::encode(&canonical),
+            string(&fixture, "canonical_preimage_hex")
+        );
+        let mut grant = SessionGrantV1 {
+            version: SessionGrantVersion::V1.into(),
+            key_id: claims.key_id.clone(),
+            protocol_major: claims.protocol_major,
+            protocol_minor: claims.protocol_minor,
+            node_id: claims.node_id.to_vec(),
+            endpoint_id: claims.endpoint_id.to_vec(),
+            authorization_revision: claims.authorization_revision,
+            negotiated_capabilities: claims.negotiated_capabilities.clone(),
+            issued_at: Some(Timestamp {
+                seconds: claims.issued_at_seconds,
+                nanos: i32::try_from(claims.issued_at_nanos).expect("issued nanos"),
+            }),
+            expires_at: Some(Timestamp {
+                seconds: claims.expires_at_seconds,
+                nanos: i32::try_from(claims.expires_at_nanos).expect("expiry nanos"),
+            }),
+            signature: hex::decode(string(&fixture, "signature_hex")).expect("signature hex"),
+        };
+        let verified = keyring
+            .verify_session_grant(
+                &grant,
+                &claims.node_id,
+                &claims.endpoint_id,
+                claims.issued_at_seconds,
+            )
+            .expect("Go-signed session grant");
+        assert_eq!(
+            verified.authorization_revision,
+            claims.authorization_revision
+        );
+        assert_eq!(
+            keyring.verify_session_grant(
+                &grant,
+                &claims.node_id,
+                &claims.endpoint_id,
+                claims.expires_at_seconds,
+            ),
+            Err(AuthorizationError::ClaimsInvalid("session_grant_expired"))
+        );
+
+        let mut unknown_key = grant.clone();
+        unknown_key.key_id = "ed25519-sha256:unknown".to_owned();
+        assert_eq!(
+            keyring.verify_session_grant(
+                &unknown_key,
+                &claims.node_id,
+                &claims.endpoint_id,
+                claims.issued_at_seconds,
+            ),
+            Err(AuthorizationError::UnknownKey)
+        );
+
+        grant.authorization_revision += 1;
+        assert_eq!(
+            keyring.verify_session_grant(
+                &grant,
+                &claims.node_id,
+                &claims.endpoint_id,
+                claims.issued_at_seconds,
+            ),
+            Err(AuthorizationError::SignatureInvalid)
+        );
     }
 
     #[test]

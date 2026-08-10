@@ -21,6 +21,21 @@ automation for the node and emits a critical security alert. Operators must
 repair and verify the node locally before clearing that lock in a later recovery
 workflow.
 
+The Controller persists a separate, monotonically increasing desired effect
+revision when it queues ConfigApply. A rolled-back or unknown attempt consumes
+that desired revision even though the applied configuration revision does not
+advance. New attempts therefore cannot reuse a revision after a failure or an
+`A -> B -> A` hash transition.
+
+Privd's root-owned effect store prepares and commits the fixed identity
+`config_apply / ocserv.conf / desired_revision` together with the command,
+idempotency, and semantic hashes. Applied and rolled-back evidence is retained
+after proof expiry. A refreshed Controller authorization may extend the
+reconciliation deadline, but its expiry is admission metadata rather than part
+of the durable effect identity. Reconciliation uses that durable identity rather
+than file fingerprint equality; rebuilding or losing the Agent journal cannot
+make an old configuration authorization current again.
+
 Before migration rollback, stop new apply requests and reconcile every
 nonterminal `config_apply` command. Migration rollback refuses active work and
 retains terminal typed command history for audit and compatibility.

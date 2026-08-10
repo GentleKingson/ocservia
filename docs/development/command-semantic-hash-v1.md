@@ -140,6 +140,9 @@ canonical_payload = candidate_hash
 `candidate_hash` is exactly 32 bytes and is independently verified against the
 bounded candidate before validation. The candidate is immutable for that hash;
 delivery metadata and the temporary fixed staging filename are excluded.
+V1 does not include the ConfigPlan expected desired-state revision. Controllers
+using signed session authority emit semantic hash v2 instead; v1 remains frozen
+for validation of existing durable command history.
 
 ### IpBanRemove
 

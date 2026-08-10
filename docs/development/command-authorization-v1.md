@@ -44,7 +44,7 @@ serialization. Fields appear exactly once, in the following order:
 | required capability | length-prefixed UTF-8 |
 | approval ID | `0x00` if absent; otherwise `0x01` then exactly 16 UUID bytes |
 | approval request hash | `0x00` if absent; otherwise `0x01` then exactly 32 bytes |
-| expected/trust revision | unsigned 64-bit integer, big-endian |
+| Controller authorization revision | unsigned 64-bit integer, big-endian |
 | semantic hash version | unsigned 32-bit integer, big-endian |
 | semantic payload hash | exactly 32 bytes |
 | payload kind | unsigned 32-bit big-endian Protobuf oneof field number |
@@ -69,7 +69,7 @@ the Agent.
 ## Verification
 
 Before accepting a command, the Agent validates the protocol and bounded typed
-payload, target node, time window, revision when available, required capability,
+payload, target node, time window, exact active-session authorization revision, required capability,
 UUID identities, semantic hash version, and recomputed semantic hash. It then
 reconstructs the canonical authorization input, selects the pinned key by
 `key_id`, and performs strict Ed25519 verification. Any failure occurs before a
@@ -78,6 +78,46 @@ journal write and before a privileged request.
 The shared Go/Rust vectors are in
 `testdata/command-authorization-v1.json`. They include exact canonical bytes and
 deterministic Go-generated signatures that the Rust verifier must accept.
+
+## Signed session authority
+
+Handshake protocol `1.1` treats the Agent advertisement as its supported
+capability set. The Controller reads the approved set and returns their sorted
+intersection. It also signs `SessionGrantV1`; transportd relays the grant and
+retains its negotiated metadata but has no signing key. An Agent does not enter
+a mutation-capable session until it verifies the grant with the same pinned
+Controller keyring used for commands.
+
+The session grant canonical input is never Protobuf serialization. Fields are
+encoded in this exact order:
+
+| Field | Encoding |
+|---|---|
+| domain | ASCII `ocservia/controller-session-grant/v1`, followed by `0x00` |
+| grant version | unsigned 32-bit integer, big-endian; v1 is `1` |
+| `key_id` | length-prefixed UTF-8 |
+| protocol major, protocol minor | two unsigned 32-bit integers, big-endian |
+| `node_id` | exactly 16 UUID bytes in network order |
+| Agent EndpointID | exactly 32 public-key bytes |
+| authorization revision | unsigned 64-bit integer, big-endian and nonzero |
+| capability count | unsigned 32-bit integer, big-endian |
+| capabilities | strictly sorted, unique, individually length-prefixed UTF-8 strings |
+| `issued_at.seconds` | signed 64-bit big-endian integer |
+| `issued_at.nanos` | unsigned 32-bit big-endian integer |
+| `expires_at.seconds` | signed 64-bit big-endian integer |
+| `expires_at.nanos` | unsigned 32-bit big-endian integer |
+
+The Agent checks the signature, `key_id`, node, EndpointID, protocol, sorted
+capability set, issuance window, and expiry. Each command must then carry the
+same nonzero authorization revision and a capability in the verified set.
+transportd independently rejects a mismatched revision, expired session, or
+unnegotiated capability before opening the Agent command stream. A higher
+authoritative trust revision closes a connection using an older grant.
+
+Handshake `1.0` compatibility is read-only: it receives no session grant and
+may negotiate only approved capabilities ending in `.read`. It cannot create a
+mutation-capable Agent command context. The shared session grant vector is
+`testdata/session-grant-v1.json`.
 
 ## Provisioning and rotation
 

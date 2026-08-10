@@ -558,6 +558,8 @@ func ingestAgentCommandResult(ctx context.Context, tx pgx.Tx, eventID, nodeID uu
 		switch resultHashVersion {
 		case agentv1.SemanticPayloadHashVersion_SEMANTIC_PAYLOAD_HASH_VERSION_V1:
 			expectedHash, err = semanticpayload.HashV1(&envelope)
+		case agentv1.SemanticPayloadHashVersion_SEMANTIC_PAYLOAD_HASH_VERSION_V2:
+			expectedHash, err = semanticpayload.HashV2(&envelope)
 		case agentv1.SemanticPayloadHashVersion_SEMANTIC_PAYLOAD_HASH_VERSION_UNSPECIFIED:
 			expectedHash, err = agentPayloadHash(&envelope)
 		}
@@ -658,15 +660,17 @@ func ingestAgentCommandResult(ctx context.Context, tx pgx.Tx, eventID, nodeID uu
 			}
 			if applyResult.GetFailedCritical() {
 				applyState = "failed_critical"
+			} else if applyResult.GetRolledBack() {
+				applyState = "rolled_back"
 			}
 		}
 		if _, err := tx.Exec(ctx, `UPDATE config_apply_operations SET state=$2,failure_code=$3,updated_at=$4 WHERE operation_id=$1`, operationID, applyState, failureCode, observedAt); err != nil {
 			return fmt.Errorf("update configuration apply outcome: %w", err)
 		}
 		if applyState == "succeeded" {
-			tag, err := tx.Exec(ctx, `INSERT INTO node_config_state(node_id,revision,candidate_hash,redacted_config,automation_locked,last_apply_operation_id,updated_at)
-				SELECT x.node_id,$2,$3,p.candidate_redacted,false,$1,$4 FROM config_apply_operations x JOIN config_plans p ON p.id=x.plan_id WHERE x.operation_id=$1 AND x.node_id=$5
-				ON CONFLICT(node_id) DO UPDATE SET revision=EXCLUDED.revision,candidate_hash=EXCLUDED.candidate_hash,redacted_config=EXCLUDED.redacted_config,automation_locked=false,automation_lock_reason=NULL,last_apply_operation_id=EXCLUDED.last_apply_operation_id,updated_at=EXCLUDED.updated_at`, operationID, apply.GetDesiredRevision(), apply.GetCandidateHash(), observedAt, nodeID)
+			tag, err := tx.Exec(ctx, `INSERT INTO node_config_state(node_id,revision,desired_revision,candidate_hash,redacted_config,automation_locked,last_apply_operation_id,updated_at)
+					SELECT x.node_id,$2,$2,$3,p.candidate_redacted,false,$1,$4 FROM config_apply_operations x JOIN config_plans p ON p.id=x.plan_id WHERE x.operation_id=$1 AND x.node_id=$5
+					ON CONFLICT(node_id) DO UPDATE SET revision=EXCLUDED.revision,desired_revision=GREATEST(node_config_state.desired_revision,EXCLUDED.desired_revision),candidate_hash=EXCLUDED.candidate_hash,redacted_config=EXCLUDED.redacted_config,automation_locked=false,automation_lock_reason=NULL,last_apply_operation_id=EXCLUDED.last_apply_operation_id,updated_at=EXCLUDED.updated_at`, operationID, apply.GetDesiredRevision(), apply.GetCandidateHash(), observedAt, nodeID)
 			if err != nil {
 				return fmt.Errorf("advance configuration revision: %w", err)
 			}
@@ -675,8 +679,8 @@ func ingestAgentCommandResult(ctx context.Context, tx pgx.Tx, eventID, nodeID uu
 			}
 		}
 		if applyState == "failed_critical" {
-			if _, err := tx.Exec(ctx, `INSERT INTO node_config_state(node_id,revision,redacted_config,automation_locked,automation_lock_reason,last_apply_operation_id,updated_at)
-				VALUES($1,0,'',true,'config_apply_rollback_failed',$2,$3) ON CONFLICT(node_id) DO UPDATE SET automation_locked=true,automation_lock_reason='config_apply_rollback_failed',last_apply_operation_id=EXCLUDED.last_apply_operation_id,updated_at=EXCLUDED.updated_at`, nodeID, operationID, observedAt); err != nil {
+			if _, err := tx.Exec(ctx, `INSERT INTO node_config_state(node_id,revision,desired_revision,redacted_config,automation_locked,automation_lock_reason,last_apply_operation_id,updated_at)
+					VALUES($1,0,$4,'',true,'config_apply_rollback_failed',$2,$3) ON CONFLICT(node_id) DO UPDATE SET desired_revision=GREATEST(node_config_state.desired_revision,EXCLUDED.desired_revision),automation_locked=true,automation_lock_reason='config_apply_rollback_failed',last_apply_operation_id=EXCLUDED.last_apply_operation_id,updated_at=EXCLUDED.updated_at`, nodeID, operationID, observedAt, apply.GetDesiredRevision()); err != nil {
 				return fmt.Errorf("lock configuration automation: %w", err)
 			}
 			if _, err := tx.Exec(ctx, `INSERT INTO security_alerts(id,workspace_id,severity,kind,created_at) VALUES($1,$2,'critical','config_apply.rollback_failed',$3)`, uuid.Must(uuid.NewV7()), workspaceID, observedAt); err != nil {

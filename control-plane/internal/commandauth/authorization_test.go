@@ -46,6 +46,25 @@ type goldenVector struct {
 	SignatureHex             string `json:"signature_hex"`
 }
 
+type sessionGrantGolden struct {
+	Version                uint32   `json:"version"`
+	TestSeedHex            string   `json:"test_seed_hex"`
+	PublicKeyHex           string   `json:"public_key_hex"`
+	KeyID                  string   `json:"key_id"`
+	ProtocolMajor          uint32   `json:"protocol_major"`
+	ProtocolMinor          uint32   `json:"protocol_minor"`
+	NodeIDHex              string   `json:"node_id_hex"`
+	EndpointIDHex          string   `json:"endpoint_id_hex"`
+	AuthorizationRevision  uint64   `json:"authorization_revision"`
+	NegotiatedCapabilities []string `json:"negotiated_capabilities"`
+	IssuedAtSeconds        int64    `json:"issued_at_seconds"`
+	IssuedAtNanos          uint32   `json:"issued_at_nanos"`
+	ExpiresAtSeconds       int64    `json:"expires_at_seconds"`
+	ExpiresAtNanos         uint32   `json:"expires_at_nanos"`
+	CanonicalPreimageHex   string   `json:"canonical_preimage_hex"`
+	SignatureHex           string   `json:"signature_hex"`
+}
+
 func TestCanonicalV1AndGoSignaturesMatchSharedGoldenVectors(t *testing.T) {
 	document := loadGoldenDocument(t)
 	if document.Version != 1 || len(document.Vectors) < 2 {
@@ -77,6 +96,42 @@ func TestCanonicalV1AndGoSignaturesMatchSharedGoldenVectors(t *testing.T) {
 				t.Fatalf("Go signature mismatch\ngot  %s\nwant %s", got, vector.SignatureHex)
 			}
 		})
+	}
+}
+
+func TestSessionGrantV1CanonicalAndGoSignatureMatchSharedGolden(t *testing.T) {
+	raw, err := os.ReadFile(filepath.Join("..", "..", "..", "testdata", "session-grant-v1.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var vector sessionGrantGolden
+	if err := json.Unmarshal(raw, &vector); err != nil {
+		t.Fatal(err)
+	}
+	seed := testFixed32(t, vector.TestSeedHex)
+	signer := NewSignerFromSeed(seed)
+	claims := SessionGrantClaimsV1{
+		Version: vector.Version, KeyID: vector.KeyID,
+		ProtocolMajor: vector.ProtocolMajor, ProtocolMinor: vector.ProtocolMinor,
+		NodeID: testFixed16(t, vector.NodeIDHex), EndpointID: testFixed32(t, vector.EndpointIDHex),
+		AuthorizationRevision:  vector.AuthorizationRevision,
+		NegotiatedCapabilities: vector.NegotiatedCapabilities,
+		IssuedAtSeconds:        vector.IssuedAtSeconds, IssuedAtNanos: vector.IssuedAtNanos,
+		ExpiresAtSeconds: vector.ExpiresAtSeconds, ExpiresAtNanos: vector.ExpiresAtNanos,
+	}
+	canonical, err := CanonicalSessionGrantV1(claims)
+	if err != nil {
+		t.Fatal(err)
+	}
+	signature := ed25519.Sign(signer.privateKey, canonical)
+	if vector.CanonicalPreimageHex == "" || vector.SignatureHex == "" {
+		t.Fatalf("populate fixture: canonical=%s signature=%s", hex.EncodeToString(canonical), hex.EncodeToString(signature))
+	}
+	if got := hex.EncodeToString(canonical); got != vector.CanonicalPreimageHex {
+		t.Fatalf("canonical bytes mismatch\ngot  %s\nwant %s", got, vector.CanonicalPreimageHex)
+	}
+	if got := hex.EncodeToString(signature); got != vector.SignatureHex {
+		t.Fatalf("Go signature mismatch\ngot  %s\nwant %s", got, vector.SignatureHex)
 	}
 }
 

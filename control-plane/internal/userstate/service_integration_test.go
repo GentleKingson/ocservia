@@ -256,7 +256,7 @@ func TestI13IntentAndTerminalAuditIdentityMatchIntegration(t *testing.T) {
 				completed := time.Now().UTC().Add(time.Millisecond)
 				result := agentv1.CommandResult{
 					CommandId: envelope.GetCommandId(), IdempotencyKey: envelope.GetIdempotencyKey(),
-					PayloadSha256: envelope.GetSemanticPayloadSha256(), SemanticPayloadHashVersion: agentv1.SemanticPayloadHashVersion_SEMANTIC_PAYLOAD_HASH_VERSION_V1,
+					PayloadSha256: envelope.GetSemanticPayloadSha256(), SemanticPayloadHashVersion: agentv1.SemanticPayloadHashVersion_SEMANTIC_PAYLOAD_HASH_VERSION_V2,
 					State:      agentv1.CommandResultState_COMMAND_RESULT_STATE_SUCCEEDED,
 					Result:     []byte("applied"),
 					AcceptedAt: timestamppb.New(completed), CompletedAt: timestamppb.New(completed),
@@ -447,7 +447,7 @@ func TestTerminalDesiredRevisionRequiresSameKindReplacementIntegration(t *testin
 		if err != nil {
 			t.Fatalf("create recovery: %v", err)
 		}
-		assertEnvelope(t, pool, recovery, 0, 1)
+		assertEnvelope(t, pool, recovery, 1, 1)
 	})
 
 	t.Run("failed password", func(t *testing.T) {
@@ -484,7 +484,7 @@ func TestTerminalDesiredRevisionRequiresSameKindReplacementIntegration(t *testin
 		if err != nil {
 			t.Fatalf("group recovery: %v", err)
 		}
-		assertEnvelope(t, pool, recovery, 0, 1)
+		assertEnvelope(t, pool, recovery, 1, 1)
 	})
 
 	for _, test := range []struct {
@@ -598,7 +598,7 @@ func TestSameKindSupersedeCoalescesAgentRevisionIntegration(t *testing.T) {
 	}
 	assertCoalesced(firstGroup, secondGroup, func(envelope *agentv1.CommandEnvelope) (uint64, uint64) {
 		return envelope.GetExpectedRevision(), envelope.GetGroupApply().GetDesiredRevision()
-	}, 0, 0, 1)
+	}, 0, 1, 1)
 	var groupVersion, groupRevision int64
 	if err := pool.QueryRow(context.Background(), `SELECT version,revision FROM desired_groups WHERE node_id=$1 AND group_name='staff'`, nodeID).Scan(&groupVersion, &groupRevision); err != nil {
 		t.Fatal(err)
@@ -651,7 +651,7 @@ func TestRejectedRevisionSlotRequiresProofThatNoEffectWasAcceptedIntegration(t *
 		}
 		if state == agentv1.CommandResultState_COMMAND_RESULT_STATE_UNKNOWN {
 			result.PayloadSha256 = envelope.GetSemanticPayloadSha256()
-			result.SemanticPayloadHashVersion = agentv1.SemanticPayloadHashVersion_SEMANTIC_PAYLOAD_HASH_VERSION_V1
+			result.SemanticPayloadHashVersion = agentv1.SemanticPayloadHashVersion_SEMANTIC_PAYLOAD_HASH_VERSION_V2
 			result.AcceptedAt = timestamppb.New(completed)
 		}
 		payload, err := proto.Marshal(&result)

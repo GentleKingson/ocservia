@@ -69,7 +69,7 @@ pub fn spawn_dedicated_relay_failover(endpoint: Endpoint, configured: RelayMap) 
 }
 
 const PROTOCOL_MAJOR: u32 = 1;
-const PROTOCOL_MINOR: u32 = 0;
+const PROTOCOL_MINOR: u32 = 1;
 const MAX_HANDSHAKE_BYTES: usize = 64 * 1024;
 const MAX_FRAME_BYTES: usize = 1024 * 1024;
 const MAX_FRAME_BYTES_U32: u32 = 1024 * 1024;
@@ -144,6 +144,16 @@ impl IdentityPolicy {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .revoked
             .contains(&endpoint)
+    }
+
+    fn revision(&self, endpoint: EndpointId) -> u64 {
+        self.state
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .revisions
+            .get(&endpoint)
+            .copied()
+            .unwrap_or(0)
     }
 
     fn update(
@@ -432,6 +442,16 @@ struct RegisteredConnection {
     metadata: NodeConnection,
     connection: Connection,
     max_message_size: usize,
+    negotiated_capabilities: HashSet<String>,
+    authorization_revision: u64,
+    session_expires_at: Option<SystemTime>,
+}
+
+struct NegotiatedSession {
+    handshake: SessionHandshake,
+    negotiated_capabilities: HashSet<String>,
+    authorization_revision: u64,
+    session_expires_at: Option<SystemTime>,
 }
 
 struct EventState {
@@ -601,15 +621,44 @@ impl TransportService for IrohTransportService {
         }
         validate_traceparent(&command.traceparent)?;
         let response_deadline = command_response_deadline(&command)?;
-        let (connection, max_message_size) = self
+        let (
+            connection,
+            max_message_size,
+            negotiated_capabilities,
+            authorization_revision,
+            session_expires_at,
+        ) = self
             .shared
             .inner
             .connections
             .lock()
             .await
             .get_mut(&node_id)
-            .map(|entry| (entry.connection.clone(), entry.max_message_size))
+            .map(|entry| {
+                (
+                    entry.connection.clone(),
+                    entry.max_message_size,
+                    entry.negotiated_capabilities.clone(),
+                    entry.authorization_revision,
+                    entry.session_expires_at,
+                )
+            })
             .ok_or_else(|| Status::unavailable("node is not connected"))?;
+        if !negotiated_capabilities.contains(&command.required_capability) {
+            return Err(Status::permission_denied(
+                "command capability was not negotiated for this session",
+            ));
+        }
+        if authorization_revision != 0 && command.expected_revision != authorization_revision {
+            return Err(Status::failed_precondition(
+                "command authorization revision does not match the active session",
+            ));
+        }
+        if session_expires_at.is_some_and(|expires_at| expires_at <= SystemTime::now()) {
+            return Err(Status::failed_precondition(
+                "Controller session grant has expired",
+            ));
+        }
         if request.command_envelope.len() > max_message_size {
             return Err(Status::resource_exhausted(
                 "command exceeds the agent's negotiated message size",
@@ -830,6 +879,7 @@ impl TransportService for IrohTransportService {
         if state == NodeTrustState::Unspecified {
             return Err(Status::invalid_argument("trust state is unspecified"));
         }
+        let previous_revision = self.policy.revision(endpoint);
         if !self
             .policy
             .update(endpoint, node_id.clone(), state, request.revision)
@@ -838,8 +888,24 @@ impl TransportService for IrohTransportService {
                 "endpoint-to-node substitution refused",
             ));
         }
-        if state == NodeTrustState::Revoked {
-            let _ = self.shared.remove(&node_id, b"node revoked").await;
+        let retained_revision = self.policy.revision(endpoint);
+        if retained_revision > previous_revision {
+            let should_close = self
+                .shared
+                .inner
+                .connections
+                .lock()
+                .await
+                .get(&node_id)
+                .is_some_and(|entry| entry.authorization_revision < retained_revision);
+            if should_close {
+                let reason = if state == NodeTrustState::Revoked {
+                    b"node revoked".as_slice()
+                } else {
+                    b"node authorization changed".as_slice()
+                };
+                let _ = self.shared.remove(&node_id, reason).await;
+            }
         }
         Ok(Response::new(UpdateNodeTrustResponse {}))
     }
@@ -869,12 +935,13 @@ impl std::fmt::Debug for SessionHandler {
 }
 
 impl SessionHandler {
+    #[allow(clippy::too_many_lines)]
     async fn negotiate(
         &self,
         connection: &Connection,
         send: &mut iroh::endpoint::SendStream,
         recv: &mut iroh::endpoint::RecvStream,
-    ) -> Result<Option<SessionHandshake>, AcceptError> {
+    ) -> Result<Option<NegotiatedSession>, AcceptError> {
         if matches!(self.kind, ProtocolKind::Enroll) && self.trust.is_some() {
             let request = read_enrollment(recv).await?;
             validate_enrollment(&request, connection.remote_id())?;
@@ -915,7 +982,13 @@ impl SessionHandler {
                     .policy
                     .matches_node(connection.remote_id(), &handshake.node_id) =>
             {
-                local_handshake_response(HandshakeResult::Accepted, handshake.max_message_size)
+                let mut response =
+                    local_handshake_response(HandshakeResult::Accepted, handshake.max_message_size);
+                response
+                    .negotiated_capabilities
+                    .clone_from(&handshake.capabilities);
+                response.negotiated_capabilities.sort();
+                response
             }
             ProtocolKind::Agent => {
                 return Err(protocol_error("endpoint is not bound to the claimed node"));
@@ -940,9 +1013,34 @@ impl SessionHandler {
         {
             return Err(protocol_error("negotiated message size is invalid"));
         }
+        let negotiated_capabilities = validate_negotiated_session(
+            &handshake,
+            connection.remote_id(),
+            &response,
+            self.trust.is_some(),
+        )?;
+        let (authorization_revision, session_expires_at) = response
+            .session_grant
+            .as_ref()
+            .map(|grant| {
+                let expires_at = grant
+                    .expires_at
+                    .as_ref()
+                    .ok_or_else(|| protocol_error("session grant expiry is missing"))?;
+                let expires_at = SystemTime::try_from(*expires_at)
+                    .map_err(|_| protocol_error("session grant expiry is invalid"))?;
+                Ok::<_, AcceptError>((grant.authorization_revision, Some(expires_at)))
+            })
+            .transpose()?
+            .unwrap_or((0, None));
         let mut handshake = handshake;
         handshake.max_message_size = response.max_message_size;
-        Ok(Some(handshake))
+        Ok(Some(NegotiatedSession {
+            handshake,
+            negotiated_capabilities,
+            authorization_revision,
+            session_expires_at,
+        }))
     }
 }
 
@@ -960,14 +1058,15 @@ impl ProtocolHandler for SessionHandler {
             .await
             .map_err(|_| protocol_error("handshake stream timed out"))?
             .map_err(|_| protocol_error("handshake stream failed"))?;
-        let Some(handshake) = self.negotiate(&connection, &mut send, &mut recv).await? else {
+        let Some(session) = self.negotiate(&connection, &mut send, &mut recv).await? else {
             drop(permit);
             return Ok(());
         };
+        let max_message_size = session.handshake.max_message_size as usize;
 
         connection.set_max_concurrent_bi_streams(VarInt::from_u32(MAX_STREAMS));
         connection.set_max_concurrent_uni_streams(VarInt::from_u32(2));
-        let metadata = metadata(&handshake, &connection).await;
+        let metadata = metadata(&session, &connection).await;
         let node_id = metadata.node_id.clone();
         let registration_token = self.shared.registration_token(&node_id).await;
         if let Some(trust) = &self.trust {
@@ -1003,7 +1102,10 @@ impl ProtocolHandler for SessionHandler {
             RegisteredConnection {
                 metadata: metadata.clone(),
                 connection: connection.clone(),
-                max_message_size: handshake.max_message_size as usize,
+                max_message_size,
+                negotiated_capabilities: session.negotiated_capabilities,
+                authorization_revision: session.authorization_revision,
+                session_expires_at: session.session_expires_at,
             },
         );
         if let Some(previous) = replaced {
@@ -1033,7 +1135,7 @@ impl ProtocolHandler for SessionHandler {
                 self.shared.clone(),
                 node_id.clone(),
                 connection.clone(),
-                handshake.max_message_size as usize,
+                max_message_size,
             ),
         );
         let _closed = connection.closed().await;
@@ -1367,7 +1469,73 @@ fn local_handshake_response(
         protocol_minor: PROTOCOL_MINOR,
         max_message_size,
         controller_version: env!("CARGO_PKG_VERSION").to_owned(),
+        negotiated_capabilities: Vec::new(),
+        session_grant: None,
     }
+}
+
+fn validate_negotiated_session(
+    handshake: &SessionHandshake,
+    endpoint: EndpointId,
+    response: &SessionHandshakeResponse,
+    controller_authoritative: bool,
+) -> Result<HashSet<String>, AcceptError> {
+    if response.protocol_major != PROTOCOL_MAJOR
+        || response.protocol_minor > PROTOCOL_MINOR
+        || response.protocol_minor > handshake.protocol_minor
+    {
+        return Err(protocol_error("negotiated protocol version is invalid"));
+    }
+    let supported = handshake.capabilities.iter().collect::<HashSet<_>>();
+    let mut previous: Option<&str> = None;
+    for capability in &response.negotiated_capabilities {
+        if capability.is_empty()
+            || capability.len() > 128
+            || !supported.contains(capability)
+            || previous.is_some_and(|value| value >= capability.as_str())
+        {
+            return Err(protocol_error("negotiated capability set is invalid"));
+        }
+        previous = Some(capability);
+    }
+    if !controller_authoritative {
+        return Ok(response.negotiated_capabilities.iter().cloned().collect());
+    }
+    if response.protocol_minor == 0 {
+        if response
+            .negotiated_capabilities
+            .iter()
+            .any(|capability| !capability.as_bytes().ends_with(b".read"))
+        {
+            return Err(protocol_error(
+                "legacy sessions may negotiate read-only capabilities only",
+            ));
+        }
+        if response.session_grant.is_some() {
+            return Err(protocol_error("legacy session grant is invalid"));
+        }
+        return Ok(response.negotiated_capabilities.iter().cloned().collect());
+    }
+    let grant = response
+        .session_grant
+        .as_ref()
+        .ok_or_else(|| protocol_error("Controller session grant is required"))?;
+    if grant.protocol_major != response.protocol_major
+        || grant.protocol_minor != response.protocol_minor
+        || grant.node_id != handshake.node_id
+        || grant.endpoint_id != endpoint.as_bytes()
+        || grant.authorization_revision == 0
+        || grant.key_id.is_empty()
+        || grant.signature.len() != 64
+        || grant.negotiated_capabilities != response.negotiated_capabilities
+        || grant.issued_at.is_none()
+        || grant.expires_at.is_none()
+    {
+        return Err(protocol_error(
+            "Controller session grant claims are inconsistent",
+        ));
+    }
+    Ok(response.negotiated_capabilities.iter().cloned().collect())
 }
 
 fn validate_enrollment(request: &EnrollRequest, remote: EndpointId) -> Result<(), AcceptError> {
@@ -1454,7 +1622,8 @@ fn protocol_error(message: &str) -> AcceptError {
     ))
 }
 
-async fn metadata(handshake: &SessionHandshake, connection: &Connection) -> NodeConnection {
+async fn metadata(session: &NegotiatedSession, connection: &Connection) -> NodeConnection {
+    let handshake = &session.handshake;
     let path_metadata = tokio::time::timeout(Duration::from_secs(2), async {
         loop {
             let next = metadata_path(connection);
@@ -1477,6 +1646,17 @@ async fn metadata(handshake: &SessionHandshake, connection: &Connection) -> Node
         agent_instance_id: handshake.agent_instance_id.clone(),
         path_detail: detail,
         last_seen: Some(now),
+        negotiated_capabilities: {
+            let mut capabilities = session
+                .negotiated_capabilities
+                .iter()
+                .cloned()
+                .collect::<Vec<_>>();
+            capabilities.sort();
+            capabilities
+        },
+        authorization_revision: session.authorization_revision,
+        session_expires_at: session.session_expires_at.map(Into::into),
     }
 }
 
@@ -1706,6 +1886,7 @@ mod tests {
             expected_revision: 0,
             traceparent: traceparent.to_owned(),
             actor_id: "test".to_owned(),
+            required_capability: "ocserv.status.read".to_owned(),
             reason,
             authorization: Some(CommandAuthorizationProof {
                 version: CommandAuthorizationVersion::V1.into(),
@@ -2175,7 +2356,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn direct_connection_is_registered_and_shutdown_is_graceful() {
+    async fn newer_authority_revision_closes_the_retained_session() {
         let agent_key = SecretKey::generate();
         let handshake = handshake(&agent_key);
         let policy = identity_policy(&agent_key, &handshake);
@@ -2227,15 +2408,15 @@ mod tests {
             .update_node_trust(Request::new(UpdateNodeTrustRequest {
                 node_id: metadata.node_id,
                 endpoint_id: agent_key.public().as_bytes().to_vec(),
-                state: NodeTrustState::Revoked.into(),
-                reason: "integration revocation".to_owned(),
+                state: NodeTrustState::Active.into(),
+                reason: "capability authority changed".to_owned(),
                 revision: 2,
             }))
             .await
-            .expect("revoke connected node");
+            .expect("advance connected node authority");
         tokio::time::timeout(Duration::from_secs(2), connection.closed())
             .await
-            .expect("connection closed after revocation");
+            .expect("connection closed after authority revision changed");
 
         shutdown(&service, router).await.expect("shutdown router");
         client.close().await;
@@ -2401,6 +2582,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::too_many_lines)]
     async fn command_responses_are_published_with_negotiated_limits() {
         let agent_key = SecretKey::generate();
         let mut handshake = handshake(&agent_key);
@@ -2427,6 +2609,77 @@ mod tests {
         let response = send_handshake(&connection, &handshake).await;
         assert_eq!(response.result, i32::from(HandshakeResult::Accepted));
         wait_until_registered(&service, &handshake.node_id).await;
+        let metadata = service
+            .get_node_connection(Request::new(GetNodeConnectionRequest {
+                node_id: handshake.node_id.clone(),
+            }))
+            .await
+            .expect("query negotiated session")
+            .into_inner();
+        assert_eq!(metadata.negotiated_capabilities, handshake.capabilities);
+
+        let mut unapproved = CommandEnvelope::decode(
+            command_envelope(&handshake.node_id, &new_traceparent(), String::new()).as_slice(),
+        )
+        .expect("decode unapproved command");
+        unapproved.required_capability = "ocserv.service.reload".to_owned();
+        let error = service
+            .send_command(Request::new(SendCommandRequest {
+                node_id: handshake.node_id.clone(),
+                command_envelope: unapproved.encode_to_vec(),
+            }))
+            .await
+            .expect_err("unnegotiated capability rejected before transport");
+        assert_eq!(error.code(), tonic::Code::PermissionDenied);
+
+        {
+            let mut connections = service.shared.inner.connections.lock().await;
+            let registered = connections
+                .get_mut(&handshake.node_id)
+                .expect("registered session");
+            registered.authorization_revision = 7;
+        }
+        let error = service
+            .send_command(Request::new(SendCommandRequest {
+                node_id: handshake.node_id.clone(),
+                command_envelope: command_envelope(
+                    &handshake.node_id,
+                    &new_traceparent(),
+                    String::new(),
+                ),
+            }))
+            .await
+            .expect_err("stale command revision rejected before transport");
+        assert_eq!(error.code(), tonic::Code::FailedPrecondition);
+        {
+            let mut connections = service.shared.inner.connections.lock().await;
+            let registered = connections
+                .get_mut(&handshake.node_id)
+                .expect("registered session");
+            registered.authorization_revision = 0;
+            registered.session_expires_at = Some(SystemTime::UNIX_EPOCH);
+        }
+        let error = service
+            .send_command(Request::new(SendCommandRequest {
+                node_id: handshake.node_id.clone(),
+                command_envelope: command_envelope(
+                    &handshake.node_id,
+                    &new_traceparent(),
+                    String::new(),
+                ),
+            }))
+            .await
+            .expect_err("expired session grant rejected before transport");
+        assert_eq!(error.code(), tonic::Code::FailedPrecondition);
+        service
+            .shared
+            .inner
+            .connections
+            .lock()
+            .await
+            .get_mut(&handshake.node_id)
+            .expect("registered session")
+            .session_expires_at = None;
 
         let traceparent = new_traceparent();
         let baseline_last_seen = last_seen(&service, &handshake.node_id).await;

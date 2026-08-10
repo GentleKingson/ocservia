@@ -193,7 +193,7 @@ impl Journal {
                 dropped INTEGER NOT NULL DEFAULT 0 CHECK (dropped >= 0)
              ) STRICT;
              CREATE TABLE IF NOT EXISTS applied_resource_revisions (
-                resource_type TEXT NOT NULL CHECK (resource_type IN ('user','group')),
+                resource_type TEXT NOT NULL CHECK (resource_type IN ('user','group','config')),
                 resource_key TEXT NOT NULL CHECK (length(resource_key) BETWEEN 1 AND 64),
                 revision INTEGER NOT NULL CHECK (revision > 0),
                 updated_at INTEGER NOT NULL,
@@ -201,6 +201,7 @@ impl Journal {
              ) STRICT;",
         )?;
         migrate_command_journal(&connection)?;
+        migrate_applied_resource_revisions(&connection)?;
         let integrity: String =
             connection.pragma_query_value(None, "quick_check", |row| row.get(0))?;
         if integrity != "ok" {
@@ -327,7 +328,7 @@ impl Journal {
         result: &[u8],
         now: i64,
     ) -> Result<CommandRecord, rusqlite::Error> {
-        if !matches!(resource.resource_type, "user" | "group")
+        if !matches!(resource.resource_type, "user" | "group" | "config")
             || resource.resource_key.is_empty()
             || resource.resource_key.len() > 64
             || resource.revision == 0
@@ -384,7 +385,7 @@ impl Journal {
         result: &[u8],
         now: i64,
     ) -> Result<CommandRecord, rusqlite::Error> {
-        if !matches!(resource.resource_type, "user" | "group")
+        if !matches!(resource.resource_type, "user" | "group" | "config")
             || resource.resource_key.is_empty()
             || resource.resource_key.len() > 64
             || resource.revision == 0
@@ -466,7 +467,7 @@ impl Journal {
         &self,
         resource_type: &str,
     ) -> Result<Vec<(String, u64)>, rusqlite::Error> {
-        if !matches!(resource_type, "user" | "group") {
+        if !matches!(resource_type, "user" | "group" | "config") {
             return Err(rusqlite::Error::InvalidQuery);
         }
         let mut statement = self.connection.prepare(
@@ -802,6 +803,33 @@ fn migrate_command_journal(connection: &Connection) -> Result<(), rusqlite::Erro
         )?;
     }
     Ok(())
+}
+
+fn migrate_applied_resource_revisions(connection: &Connection) -> Result<(), rusqlite::Error> {
+    let schema: String = connection.query_row(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='applied_resource_revisions'",
+        [],
+        |row| row.get(0),
+    )?;
+    if schema.contains("'config'") {
+        return Ok(());
+    }
+    connection.execute_batch(
+        "BEGIN IMMEDIATE;
+         ALTER TABLE applied_resource_revisions RENAME TO applied_resource_revisions_legacy;
+         CREATE TABLE applied_resource_revisions (
+            resource_type TEXT NOT NULL CHECK (resource_type IN ('user','group','config')),
+            resource_key TEXT NOT NULL CHECK (length(resource_key) BETWEEN 1 AND 64),
+            revision INTEGER NOT NULL CHECK (revision > 0),
+            updated_at INTEGER NOT NULL,
+            PRIMARY KEY(resource_type,resource_key)
+         ) STRICT;
+         INSERT INTO applied_resource_revisions(resource_type,resource_key,revision,updated_at)
+            SELECT resource_type,resource_key,revision,updated_at
+            FROM applied_resource_revisions_legacy;
+         DROP TABLE applied_resource_revisions_legacy;
+         COMMIT;",
+    )
 }
 
 /// Returns `true` when `command_journal` has a column named `column`.
@@ -1178,6 +1206,69 @@ mod tests {
                 .expect("record")
                 .state,
             CommandState::Succeeded
+        );
+        drop(journal);
+        cleanup(&path);
+    }
+
+    #[test]
+    fn legacy_resource_revision_schema_migrates_without_losing_fences() {
+        let path = temporary_path("resource-revision-schema");
+        let legacy = Connection::open(&path).expect("open legacy database");
+        legacy
+            .execute_batch(
+                "CREATE TABLE applied_resource_revisions (
+                    resource_type TEXT NOT NULL CHECK (resource_type IN ('user','group')),
+                    resource_key TEXT NOT NULL CHECK (length(resource_key) BETWEEN 1 AND 64),
+                    revision INTEGER NOT NULL CHECK (revision > 0),
+                    updated_at INTEGER NOT NULL,
+                    PRIMARY KEY(resource_type,resource_key)
+                 ) STRICT;
+                 INSERT INTO applied_resource_revisions VALUES ('user','alice',4,10);",
+            )
+            .expect("seed legacy revision fence");
+        drop(legacy);
+
+        let mut journal = Journal::open(&path).expect("migrate journal");
+        assert_eq!(
+            journal
+                .applied_revision("user", "alice")
+                .expect("preserved user revision"),
+            Some(4)
+        );
+        let key = *uuid::Uuid::now_v7().as_bytes();
+        let command = *uuid::Uuid::now_v7().as_bytes();
+        journal
+            .accept_command(&key, &command, &[9; 32], 1, 11)
+            .expect("accept config command");
+        journal
+            .transition_command(
+                &key,
+                &[CommandState::Accepted],
+                CommandState::Running,
+                None,
+                None,
+                12,
+            )
+            .expect("run config command");
+        journal
+            .complete_external_with_revision(
+                &key,
+                &command,
+                AppliedResourceRevision {
+                    resource_type: "config",
+                    resource_key: "ocserv.conf",
+                    revision: 1,
+                },
+                b"applied",
+                13,
+            )
+            .expect("persist config fence");
+        assert_eq!(
+            journal
+                .applied_revision("config", "ocserv.conf")
+                .expect("config revision"),
+            Some(1)
         );
         drop(journal);
         cleanup(&path);

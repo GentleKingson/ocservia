@@ -180,6 +180,7 @@ fn validate_request(request: &PrivdRequest) -> Result<Duration, PrivdError> {
                 | privd_request::Operation::UserEnable(_)
                 | privd_request::Operation::UserPasswordRotate(_)
                 | privd_request::Operation::GroupApply(_)
+                | privd_request::Operation::ConfigApply(_)
                 | privd_request::Operation::CertificateCsr(_)
                 | privd_request::Operation::CertificateRevoke(_)
                 | privd_request::Operation::CertificateP12(_)
@@ -316,6 +317,7 @@ async fn execute(
                     &request.candidate_hash,
                     &request.expected_current_hash,
                     request.desired_revision,
+                    effect,
                 )
                 .await
                 .map(privd_response::Result::ConfigApply),
