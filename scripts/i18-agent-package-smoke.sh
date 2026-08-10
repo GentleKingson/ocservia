@@ -90,6 +90,14 @@ assert_production_agent_exec_start() {
 
 expected_production_agent_exec_start="/usr/libexec/ocservia/ocservia-agent --controller \$CONTROLLER_ENDPOINT_ID --node-id \$NODE_ID --controller-command-key-file \$CONTROLLER_COMMAND_VERIFICATION_KEY_FILE --relay-mode custom --relay-url \$RELAY_URL_A --relay-url \$RELAY_URL_B --relay-token-file /etc/ocservia-agent/relay-access-token"
 assert_production_agent_exec_start
+assert_privd_command_authority() {
+  local unit="${rootfs}/usr/lib/systemd/system/ocservia-privd.service"
+  grep -Fxq 'EnvironmentFile=/etc/ocservia-agent/agent.env' "${unit}" \
+    || { echo "privd does not load the pinned node/key environment" >&2; exit 1; }
+  grep -Fxq 'ExecStart=/usr/libexec/ocservia/ocservia-privd --agent-uid $AGENT_UID --node-id $NODE_ID --controller-command-key-file $CONTROLLER_COMMAND_VERIFICATION_KEY_FILE' "${unit}" \
+    || { echo "privd does not independently pin command authority" >&2; exit 1; }
+}
+assert_privd_command_authority
 echo "agent package install passed"
 sudo install -o 61000 -g 61000 -m 0600 /dev/null "${rootfs}/var/lib/ocservia-agent/identity/controller.key"
 sudo install -o 61000 -g 61000 -m 0600 /dev/null "${rootfs}/var/lib/ocservia-agent/agent.db"
@@ -121,11 +129,13 @@ installed_state() {
     "${rootfs}/usr/libexec/ocservia/ocservia-agent" \
     "${rootfs}/usr/libexec/ocservia/ocservia-privd" \
     "${rootfs}/usr/lib/systemd/system/ocservia-agent.service" \
+    "${rootfs}/usr/lib/systemd/system/ocservia-privd.service" \
     "${rootfs}/usr/lib/systemd/system/ocservia-agent.service.d/10-production-relays.conf"
   sudo stat -c '%n:%i:%Y:%s' \
     "${rootfs}/usr/libexec/ocservia/ocservia-agent" \
     "${rootfs}/usr/libexec/ocservia/ocservia-privd" \
     "${rootfs}/usr/lib/systemd/system/ocservia-agent.service" \
+    "${rootfs}/usr/lib/systemd/system/ocservia-privd.service" \
     "${rootfs}/usr/lib/systemd/system/ocservia-agent.service.d/10-production-relays.conf"
 }
 
@@ -200,6 +210,7 @@ sudo env DESTDIR="${rootfs}" AGENT_UID=61000 AGENT_GID=61000 INSTALL_PRODUCTION_
 sudo test -x "${rootfs}/var/lib/ocservia-agent/upgrade-backup/ocservia-agent.previous" \
   || { echo "Agent upgrade backup is missing" >&2; exit 1; }
 assert_production_agent_exec_start
+assert_privd_command_authority
 echo "agent package upgrade passed"
 sudo env DESTDIR="${rootfs}" "${package_root}/scripts/uninstall-agent.sh"
 sudo test -f "${rootfs}/var/lib/ocservia-agent/identity/controller.key" \

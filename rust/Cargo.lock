@@ -2470,6 +2470,7 @@ dependencies = [
 name = "ocservia-agent-protocol"
 version = "0.1.0"
 dependencies = [
+ "ocservia-contracts",
  "prost",
  "tokio",
 ]
@@ -2533,10 +2534,16 @@ dependencies = [
 name = "ocservia-privd"
 version = "0.1.0"
 dependencies = [
+ "ed25519-dalek",
  "ocservia-agent-protocol",
+ "ocservia-command-authorization",
+ "ocservia-contracts",
  "ocservia-observability",
  "ocservia-ocserv-adapter",
+ "prost",
+ "prost-types",
  "rustix",
+ "sha2 0.10.9",
  "tokio",
  "tracing",
  "uuid",

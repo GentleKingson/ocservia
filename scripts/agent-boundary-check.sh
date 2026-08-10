@@ -27,6 +27,8 @@ fi
 grep -Fxq 'User=ocserv-agent' "${ROOT}/deploy/systemd/ocservia-agent.service"
 grep -Fxq 'CapabilityBoundingSet=' "${ROOT}/deploy/systemd/ocservia-agent.service"
 grep -Fxq 'CapabilityBoundingSet=CAP_DAC_OVERRIDE' "${ROOT}/deploy/systemd/ocservia-privd.service"
+grep -Fxq 'EnvironmentFile=/etc/ocservia-agent/agent.env' "${ROOT}/deploy/systemd/ocservia-privd.service"
+grep -Fxq 'ExecStart=/usr/libexec/ocservia/ocservia-privd --agent-uid $AGENT_UID --node-id $NODE_ID --controller-command-key-file $CONTROLLER_COMMAND_VERIFICATION_KEY_FILE' "${ROOT}/deploy/systemd/ocservia-privd.service"
 grep -Fxq 'RestrictAddressFamilies=AF_UNIX AF_NETLINK' "${ROOT}/deploy/systemd/ocservia-privd.service"
 grep -Fxq 'IPAddressDeny=any' "${ROOT}/deploy/systemd/ocservia-privd.service"
 grep -Fxq 'StateDirectory=ocservia-privd' "${ROOT}/deploy/systemd/ocservia-privd.service"

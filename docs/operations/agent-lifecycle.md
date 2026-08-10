@@ -30,8 +30,10 @@ before Agent. `uninstall-agent.sh` preserves identity and journal by default;
 identity and preserving required audit material.
 
 Command protocol `1.1` is fail closed: provision the Controller command
-verification public key before upgrading the Agent. A new Agent rejects unsigned
-legacy mutations, so schedule the Agent rollout and Controller signing-key
-enablement as one maintenance window. Keep both old and new public keys pinned
-during a signing-key rotation until old authorizations have expired and all
-Unknown outcomes have been reconciled.
+verification public key before upgrading the Agent and privd pair. Both
+services load it independently, and privd also pins `NODE_ID`. New binaries
+reject unsigned legacy mutations at both the command journal and root-effect
+boundaries, so schedule rollout and Controller signing-key enablement as one
+maintenance window. Keep both old and new public keys pinned during a
+signing-key rotation until old authorizations have expired and all Unknown
+outcomes have been reconciled.

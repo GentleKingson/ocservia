@@ -7,9 +7,10 @@ a Controller signing key and cannot mint or alter an executable command.
 
 The Controller signs only after RBAC, approval consumption, operation identity,
 required capability, revision, delivery mode, and the semantic payload hash are
-final. The Agent pins one or more Controller public keys and verifies the proof
-before writing its command journal or invoking `privd`. There is no unsigned
-mutation compatibility path.
+final. The Agent and privd independently pin Controller public keys. The Agent
+verifies before writing its command journal; privd verifies the original proof
+again before reserving or executing a root effect. There is no unsigned
+mutation compatibility path at either boundary.
 
 ## Key identity
 
@@ -63,8 +64,8 @@ input.
 The signed delivery mode prevents an untrusted relay from turning an
 observation-only reconciliation into an execution or retry. Payload kind,
 action, and required capability must match the typed command according to the
-frozen protocol mapping. The semantic hash remains independently recomputed by
-the Agent.
+frozen protocol mapping. The semantic hash is independently recomputed by both
+the Agent and privd.
 
 ## Verification
 
@@ -74,6 +75,16 @@ UUID identities, semantic hash version, and recomputed semantic hash. It then
 reconstructs the canonical authorization input, selects the pinned key by
 `key_id`, and performs strict Ed25519 verification. Any failure occurs before a
 journal write and before a privileged request.
+
+The local RPC carries the original signed `CommandEnvelope`, not a second set
+of Agent-selected mutation arguments. Privd pins its own node ID and keyring,
+repeats strict signature, expiry, node, UUID, action, delivery-mode, and
+semantic-hash validation, and derives the fixed adapter call and effect identity
+from the signed typed payload. Its authenticated durable effect ledger binds
+node, command, operation, idempotency key, action, revisions, semantic hash,
+effect kind, and resource. An exact successful replay returns the stored typed
+result without executing a second root effect; a prepared unknown remains fail
+closed until an explicitly Controller-signed retry-after-absence flow.
 
 The shared Go/Rust vectors are in
 `testdata/command-authorization-v1.json`. They include exact canonical bytes and
@@ -134,10 +145,11 @@ chmod 0400 controller-command-signing-key.pem
 
 Install the public key on each node as `root:ocserv-agent` mode `0640` beneath
 a root-controlled, non-writable ancestry. Configure the Controller with
-`OCSERV_COMMAND_SIGNING_KEY_FILE` and the Agent with one or more
-`--controller-command-key-file` arguments. Production startup fails if the
-required key is absent or its type, owner, mode, link count, symlink status, or
-ancestry is unsafe.
+`OCSERV_COMMAND_SIGNING_KEY_FILE`; configure both the Agent and privd with one
+or more `--controller-command-key-file` arguments. Production startup fails if
+either verifier lacks the required key or its type, owner, mode, link count,
+symlink status, or ancestry is unsafe. Privd also requires the locally pinned
+node UUID and rejects proofs issued for another node.
 
 For rotation, first add the new public key to every Agent, then switch the
 Controller to the new private key. Retain the old public key until every command

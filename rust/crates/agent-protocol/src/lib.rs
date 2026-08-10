@@ -4,11 +4,12 @@
 
 use std::io;
 
+use ocservia_contracts::generated::ocserv::platform::agent::v1::CommandEnvelope;
 use prost::Message;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 /// Maximum encoded local RPC frame size.
-pub const MAX_FRAME_BYTES: usize = 320 * 1024;
+pub const MAX_FRAME_BYTES: usize = 384 * 1024;
 
 /// Maximum users, groups, members in one group, and aggregate memberships per node.
 ///
@@ -29,24 +30,30 @@ pub struct PrivdRequest {
     /// Absolute Unix epoch deadline in milliseconds.
     #[prost(uint64, tag = "2")]
     pub deadline_unix_ms: u64,
-    /// Controller command identity for desired-state mutations and reconciliation.
-    #[prost(bytes = "vec", tag = "3")]
-    pub command_id: Vec<u8>,
-    /// Stable idempotency identity for desired-state mutations and reconciliation.
-    #[prost(bytes = "vec", tag = "4")]
-    pub idempotency_key: Vec<u8>,
-    /// Canonical semantic payload hash, never password material or a password hash.
-    #[prost(bytes = "vec", tag = "5")]
-    pub semantic_payload_sha256: Vec<u8>,
-    /// Command expiry after which local effect evidence may be safely collected.
-    #[prost(int64, tag = "6")]
-    pub command_expires_at_unix_seconds: i64,
+    /// Original Controller-signed command. Privd derives every privileged
+    /// operation and effect identity from this carrier after independent
+    /// signature and semantic-hash verification.
+    #[prost(message, optional, tag = "7")]
+    pub authorization_command: Option<CommandEnvelope>,
+    /// Whether the signed command is being executed or reconciled.
+    #[prost(enumeration = "PrivilegedRequestMode", tag = "8")]
+    pub privileged_mode: i32,
     /// One of the permanently fixed operations.
     #[prost(
         oneof = "privd_request::Operation",
         tags = "10, 11, 12, 13, 14, 15, 16, 17, 18, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42"
     )]
     pub operation: Option<privd_request::Operation>,
+}
+
+/// Privileged local-RPC intent. The Controller authorization separately binds
+/// command delivery mode, so Agent cannot turn reconciliation into execution.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, prost::Enumeration)]
+#[repr(i32)]
+pub enum PrivilegedRequestMode {
+    Unspecified = 0,
+    Execute = 1,
+    Reconcile = 2,
 }
 
 /// Fixed request variants. There is intentionally no raw command or path variant.
@@ -634,10 +641,8 @@ mod tests {
         let request = PrivdRequest {
             request_id: vec![7; 16],
             deadline_unix_ms: 42,
-            command_id: Vec::new(),
-            idempotency_key: Vec::new(),
-            semantic_payload_sha256: Vec::new(),
-            command_expires_at_unix_seconds: 0,
+            authorization_command: None,
+            privileged_mode: PrivilegedRequestMode::Unspecified.into(),
             operation: Some(privd_request::Operation::ServiceStatus(ReadRequest {})),
         };
         let mut bytes = Vec::new();
@@ -674,15 +679,20 @@ mod tests {
         let request = PrivdRequest {
             request_id: vec![7; 16],
             deadline_unix_ms: u64::MAX,
-            command_id: vec![8; 16],
-            idempotency_key: vec![9; 16],
-            semantic_payload_sha256: vec![10; 32],
-            command_expires_at_unix_seconds: i64::MAX,
-            operation: Some(privd_request::Operation::GroupApply(GroupApplyRequest {
-                group_name: maximum_name("g", 0),
-                members,
-                desired_revision: u64::MAX,
-            })),
+            authorization_command: Some(CommandEnvelope {
+                payload: Some(
+                    ocservia_contracts::generated::ocserv::platform::agent::v1::command_envelope::Payload::GroupApply(
+                        ocservia_contracts::generated::ocserv::platform::agent::v1::GroupApply {
+                            group_name: maximum_name("g", 0),
+                            members,
+                            desired_revision: u64::MAX,
+                        },
+                    ),
+                ),
+                ..CommandEnvelope::default()
+            }),
+            privileged_mode: PrivilegedRequestMode::Execute.into(),
+            operation: None,
         };
         let (mut request_writer, mut request_reader) =
             tokio::net::UnixStream::pair().expect("pair");
