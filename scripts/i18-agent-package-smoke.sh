@@ -54,6 +54,42 @@ sudo env DESTDIR="${rootfs}" AGENT_UID=61000 AGENT_GID=61000 INSTALL_PRODUCTION_
 test -x "${rootfs}/usr/libexec/ocservia/ocservia-agent" || { echo "installed Agent binary is missing" >&2; exit 1; }
 test -f "${rootfs}/usr/lib/systemd/system/ocservia-agent.service.d/10-production-relays.conf" \
   || { echo "production relay drop-in is missing" >&2; exit 1; }
+
+production_agent_exec_start() {
+  awk '
+    /^ExecStart=/ {
+      value = substr($0, length("ExecStart=") + 1)
+      if (value == "") {
+        count = 0
+        delete commands
+      } else {
+        commands[++count] = value
+      }
+    }
+    END {
+      if (count != 1) {
+        exit 1
+      }
+      print commands[1]
+    }
+  ' \
+    "${rootfs}/usr/lib/systemd/system/ocservia-agent.service" \
+    "${rootfs}/usr/lib/systemd/system/ocservia-agent.service.d/10-production-relays.conf"
+}
+
+assert_production_agent_exec_start() {
+  local effective_exec_start
+
+  effective_exec_start="$(production_agent_exec_start)" \
+    || { echo "production Agent must have exactly one effective ExecStart" >&2; exit 1; }
+  if [[ "${effective_exec_start}" != "${expected_production_agent_exec_start}" ]]; then
+    echo "production Agent effective ExecStart does not match the authenticated relay command" >&2
+    exit 1
+  fi
+}
+
+expected_production_agent_exec_start="/usr/libexec/ocservia/ocservia-agent --controller \$CONTROLLER_ENDPOINT_ID --node-id \$NODE_ID --controller-command-key-file \$CONTROLLER_COMMAND_VERIFICATION_KEY_FILE --relay-mode custom --relay-url \$RELAY_URL_A --relay-url \$RELAY_URL_B --relay-token-file /etc/ocservia-agent/relay-access-token"
+assert_production_agent_exec_start
 echo "agent package install passed"
 sudo install -o 61000 -g 61000 -m 0600 /dev/null "${rootfs}/var/lib/ocservia-agent/identity/controller.key"
 sudo install -o 61000 -g 61000 -m 0600 /dev/null "${rootfs}/var/lib/ocservia-agent/agent.db"
@@ -68,9 +104,15 @@ sed 's/ --controller-command-key-file [^ ]*//' \
   "${rootfs}/usr/lib/systemd/system/ocservia-agent.service" >"${work}/legacy-agent.service"
 sudo install -o root -g root -m 0644 "${work}/legacy-agent.service" \
   "${rootfs}/usr/lib/systemd/system/ocservia-agent.service"
+sed 's/ --controller-command-key-file [^ ]*//' \
+  "${rootfs}/usr/lib/systemd/system/ocservia-agent.service.d/10-production-relays.conf" \
+  >"${work}/legacy-agent-relays.conf"
+sudo install -o root -g root -m 0644 "${work}/legacy-agent-relays.conf" \
+  "${rootfs}/usr/lib/systemd/system/ocservia-agent.service.d/10-production-relays.conf"
 if grep -Fq -- '--controller-command-key-file' \
-  "${rootfs}/usr/lib/systemd/system/ocservia-agent.service"; then
-  echo "legacy systemd unit fixture still requires the new key argument" >&2
+  "${rootfs}/usr/lib/systemd/system/ocservia-agent.service" \
+  "${rootfs}/usr/lib/systemd/system/ocservia-agent.service.d/10-production-relays.conf"; then
+  echo "legacy systemd fixture still requires the new key argument" >&2
   exit 1
 fi
 
@@ -78,11 +120,13 @@ installed_state() {
   sudo sha256sum \
     "${rootfs}/usr/libexec/ocservia/ocservia-agent" \
     "${rootfs}/usr/libexec/ocservia/ocservia-privd" \
-    "${rootfs}/usr/lib/systemd/system/ocservia-agent.service"
+    "${rootfs}/usr/lib/systemd/system/ocservia-agent.service" \
+    "${rootfs}/usr/lib/systemd/system/ocservia-agent.service.d/10-production-relays.conf"
   sudo stat -c '%n:%i:%Y:%s' \
     "${rootfs}/usr/libexec/ocservia/ocservia-agent" \
     "${rootfs}/usr/libexec/ocservia/ocservia-privd" \
-    "${rootfs}/usr/lib/systemd/system/ocservia-agent.service"
+    "${rootfs}/usr/lib/systemd/system/ocservia-agent.service" \
+    "${rootfs}/usr/lib/systemd/system/ocservia-agent.service.d/10-production-relays.conf"
 }
 
 capture_upgrade() {
@@ -155,6 +199,7 @@ sudo env DESTDIR="${rootfs}" AGENT_UID=61000 AGENT_GID=61000 INSTALL_PRODUCTION_
   "${package_root}/scripts/upgrade-agent.sh"
 sudo test -x "${rootfs}/var/lib/ocservia-agent/upgrade-backup/ocservia-agent.previous" \
   || { echo "Agent upgrade backup is missing" >&2; exit 1; }
+assert_production_agent_exec_start
 echo "agent package upgrade passed"
 sudo env DESTDIR="${rootfs}" "${package_root}/scripts/uninstall-agent.sh"
 sudo test -f "${rootfs}/var/lib/ocservia-agent/identity/controller.key" \
