@@ -62,8 +62,11 @@ systemctl status ocservia-privd.service ocservia-agent.service
 ```
 
 The installer creates the locked `ocserv-agent` service account and preserves
-an existing enrollment configuration. `upgrade-agent.sh` keeps one previous
-binary pair under the private state directory before restarting the units.
+an existing enrollment configuration. Before changing any installed file,
+`upgrade-agent.sh` rejects legacy configuration that does not name a valid,
+safely provisioned Ed25519 Controller command verification key. After this
+preflight it keeps one previous binary pair under the private state directory
+before restarting the units.
 
 ## Rollback and removal
 
