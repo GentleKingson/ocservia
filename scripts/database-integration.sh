@@ -206,6 +206,14 @@ for major in 17 18; do
     INSERT INTO certificates(id,workspace_id,node_id,operation_id,common_name,dns_names,key_bits,state,created_at,updated_at)
     VALUES('00000000-0000-7000-8000-000000000162','00000000-0000-7000-8000-000000000001','00000000-0000-7000-8000-000000000003','00000000-0000-7000-8000-000000000160','node.example.test','[\"node.example.test\"]',2048,'csr_pending',now(),now());
   " >/dev/null
+  if docker exec -i "${container}" psql -v ON_ERROR_STOP=1 -U ocservia_owner -d ocservia \
+    <"${ROOT}/control-plane/migrations/000017_capability_session_config_fence.down.sql" >"${TMP_ROOT}/pg${major}-p1-02-v2-down.log" 2>&1; then
+    echo "P1-02 down accepted semantic hash v2 command history" >&2
+    exit 1
+  fi
+  grep -Fq 'cannot roll back session authority while semantic hash v2 results exist' "${TMP_ROOT}/pg${major}-p1-02-v2-down.log"
+  docker exec "${container}" psql -v ON_ERROR_STOP=1 -U ocservia_owner -d ocservia -c \
+    "DELETE FROM agent_command_results WHERE semantic_payload_hash_version=2" >/dev/null
   docker exec -i "${container}" psql -v ON_ERROR_STOP=1 -U ocservia_owner -d ocservia <"${ROOT}/control-plane/migrations/000017_capability_session_config_fence.down.sql" >/dev/null
   docker exec "${container}" psql -v ON_ERROR_STOP=1 -U ocservia_owner -d ocservia -c "DELETE FROM schema_migrations WHERE version=17" >/dev/null
   if docker exec -i "${container}" psql -v ON_ERROR_STOP=1 -U ocservia_owner -d ocservia <"${ROOT}/control-plane/migrations/000016_certificate_secret_lifecycle.down.sql" >"${TMP_ROOT}/pg${major}-i17-active-down.log" 2>&1; then
