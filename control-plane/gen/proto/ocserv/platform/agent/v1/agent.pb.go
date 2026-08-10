@@ -292,7 +292,7 @@ func (CommandDeliveryMode) EnumDescriptor() ([]byte, []int) {
 }
 
 // SemanticPayloadHashVersion identifies the canonical command identity
-// algorithm. See docs/development/command-semantic-hash-v1.md.
+// algorithm. See docs/development/command-semantic-hash-v1.md and v2.md.
 type SemanticPayloadHashVersion int32
 
 const (

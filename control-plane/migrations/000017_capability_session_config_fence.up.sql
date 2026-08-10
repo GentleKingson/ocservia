@@ -19,8 +19,37 @@ ALTER TABLE node_config_state
 
 UPDATE node_config_state SET desired_revision = revision;
 
-ALTER TABLE config_apply_operations
-    DROP CONSTRAINT config_apply_operations_desired_revision_check;
+DO $$
+DECLARE
+    previous_revision_constraint name;
+BEGIN
+    SELECT constraint_record.conname
+    INTO STRICT previous_revision_constraint
+    FROM pg_constraint AS constraint_record
+    WHERE constraint_record.conrelid = 'config_apply_operations'::regclass
+      AND constraint_record.contype = 'c'
+      AND array_length(constraint_record.conkey, 1) = 2
+      AND constraint_record.conkey @> ARRAY[
+          (
+              SELECT attribute_record.attnum
+              FROM pg_attribute AS attribute_record
+              WHERE attribute_record.attrelid = 'config_apply_operations'::regclass
+                AND attribute_record.attname = 'expected_revision'
+          ),
+          (
+              SELECT attribute_record.attnum
+              FROM pg_attribute AS attribute_record
+              WHERE attribute_record.attrelid = 'config_apply_operations'::regclass
+                AND attribute_record.attname = 'desired_revision'
+          )
+      ];
+
+    EXECUTE format(
+        'ALTER TABLE config_apply_operations DROP CONSTRAINT %I',
+        previous_revision_constraint
+    );
+END;
+$$;
 
 ALTER TABLE config_apply_operations
     ADD CONSTRAINT config_apply_operations_desired_revision_check CHECK (
