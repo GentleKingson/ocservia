@@ -234,6 +234,10 @@ func TestCertificateIssueArtifactAndRevokeIntegration(t *testing.T) {
 	if err := service.Maintain(ctx); err != nil {
 		t.Fatal(err)
 	}
+	issued, err = service.Get(ctx, certificate.ID)
+	if err != nil || issued.State != "expiring" {
+		t.Fatalf("maintained certificate=%+v err=%v", issued, err)
+	}
 	hashArtifactID := uuid.Must(uuid.NewV7())
 	hashApprovalID := approvedCertificateAction(t, ctx, service, approvalService, workspaceID, nodeID, certificate.ID, requesterID, requesterSession, approverID, approverSession, "certificate.private_key.export", issued.Version, "certificate_p12", hashArtifactID)
 	hashGrant, replayed, err := service.CreateP12(ctx, P12Request{CertificateID: certificate.ID, ApprovalID: hashApprovalID, ArtifactRequestID: hashArtifactID, CertificateVersion: issued.Version, ActorIdentityID: requesterID, ActorSessionID: requesterSession, ExpectedVersion: 1, IdempotencyKey: "i17-p12-hash", Reason: "integrity export", RequestID: "p12-hash-request", Traceparent: "00-4123456789abcdef0123456789abcdef-0123456789abcdef-01"})
