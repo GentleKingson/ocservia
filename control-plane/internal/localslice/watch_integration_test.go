@@ -23,6 +23,9 @@ import (
 type retainedEventServer struct {
 	transportv1.UnimplementedTransportServiceServer
 	events          []*transportv1.TransportEvent
+	eventsDelivered chan struct{}
+	releaseStream   chan struct{}
+	deliveryOnce    sync.Once
 	finalCursorSeen chan struct{}
 	finalOnce       sync.Once
 }
@@ -48,7 +51,13 @@ func (s *retainedEventServer) WatchEvents(request *transportv1.WatchEventsReques
 		<-stream.Context().Done()
 		return stream.Context().Err()
 	}
-	return nil
+	s.deliveryOnce.Do(func() { close(s.eventsDelivered) })
+	select {
+	case <-s.releaseStream:
+		return nil
+	case <-stream.Context().Done():
+		return stream.Context().Err()
+	}
 }
 
 func TestRunWatchAdvancesPastRevokedTerminalDisconnectIntegration(t *testing.T) {
@@ -112,7 +121,12 @@ func TestRunWatchAdvancesPastRevokedTerminalDisconnectIntegration(t *testing.T) 
 		{EventId: disconnectID[:], NodeId: revokedNodeID[:], EndpointId: revokedEndpoint[:], Type: transportv1.TransportEventType_TRANSPORT_EVENT_TYPE_DISCONNECTED, OccurredAt: timestamppb.Now(), Traceparent: "00-0123456789abcdef0123456789abcdef-0123456789abcdef-01", Payload: []byte("revoked")},
 		{EventId: heartbeatID[:], NodeId: activeNodeID[:], EndpointId: activeEndpoint[:], Type: transportv1.TransportEventType_TRANSPORT_EVENT_TYPE_HEARTBEAT, OccurredAt: timestamppb.Now(), Traceparent: "00-1123456789abcdef0123456789abcdef-1123456789abcdef-01", Payload: []byte("active")},
 	}
-	serverImpl := &retainedEventServer{events: events, finalCursorSeen: make(chan struct{})}
+	serverImpl := &retainedEventServer{
+		events:          events,
+		eventsDelivered: make(chan struct{}),
+		releaseStream:   make(chan struct{}),
+		finalCursorSeen: make(chan struct{}),
+	}
 	socketRoot, err := os.MkdirTemp(filepath.Join("..", "..", ".."), ".watch-")
 	if err != nil {
 		t.Fatal(err)
@@ -150,6 +164,26 @@ func TestRunWatchAdvancesPastRevokedTerminalDisconnectIntegration(t *testing.T) 
 	watchCtx, watchCancel := context.WithCancel(testCtx)
 	watchResult := make(chan error, 1)
 	go func() { watchResult <- client.RunWatch(watchCtx, service, service) }()
+	select {
+	case <-serverImpl.eventsDelivered:
+	case <-testCtx.Done():
+		t.Fatal("transport stream did not deliver the test events")
+	}
+	for {
+		cursor, err := service.LastEventID(testCtx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if bytes.Equal(cursor, heartbeatID[:]) {
+			break
+		}
+		select {
+		case <-time.After(10 * time.Millisecond):
+		case <-testCtx.Done():
+			t.Fatal("watch handler did not commit the revoked disconnect and following heartbeat")
+		}
+	}
+	close(serverImpl.releaseStream)
 	select {
 	case <-serverImpl.finalCursorSeen:
 	case <-testCtx.Done():
