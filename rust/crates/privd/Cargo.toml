@@ -8,12 +8,20 @@ publish = false
 
 [dependencies]
 ocservia-agent-protocol = { version = "=0.1.0", path = "../agent-protocol" }
+ocservia-command-authorization = { version = "=0.1.0", path = "../command-authorization" }
+ocservia-contracts = { version = "=0.1.0", path = "../contracts", default-features = false }
 ocservia-observability = { version = "=0.1.0", path = "../observability" }
 ocservia-ocserv-adapter = { version = "=0.1.0", path = "../ocserv-adapter" }
+prost.workspace = true
 rustix.workspace = true
+sha2.workspace = true
 tokio = { workspace = true, features = ["macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
 tracing.workspace = true
 uuid = { workspace = true, features = ["v7"] }
+
+[dev-dependencies]
+ed25519-dalek.workspace = true
+prost-types.workspace = true
 
 [lints]
 workspace = true

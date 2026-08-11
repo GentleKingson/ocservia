@@ -16,22 +16,40 @@ Provision the verification public key and its DER SHA-256 fingerprint through a 
 
 `upgrade-agent.sh` first verifies that the existing `agent.env` contains exactly
 one absolute `CONTROLLER_COMMAND_VERIFICATION_KEY_FILE` and that the referenced
-Ed25519 public key satisfies the Agent's type, ownership, mode, link, symlink,
-size, and ancestry requirements. This preflight happens before backups,
-binaries, systemd units, or services are changed. A legacy two-line
-`agent.env`, missing key, or unsafe key therefore stops the upgrade with
-provisioning instructions instead of installing an Agent that cannot restart.
-After the preflight, the script retains the previous binaries and preserves
-endpoint identity, the durable Agent database, journal, and configuration.
-Verify service health and Controller connectivity after upgrade. To roll back,
-stop both units, restore the previous binaries, reload systemd, and start privd
-before Agent. `uninstall-agent.sh` preserves identity and journal by default;
+Ed25519 public key satisfies the intersection of the Agent and privd type,
+ownership, mode, link, symlink, size, and ancestry requirements. The shared key
+must be independently provisioned as `root:ocserv-agent` mode `0440` or `0640`
+beneath root-controlled ancestry. An Agent-owned legacy key is rejected rather
+than promoted into a root trust anchor. This preflight happens before backups,
+binaries, systemd units, or services are changed. A legacy two-line `agent.env`,
+missing key, or unsafe key therefore stops the upgrade with provisioning
+instructions instead of installing an Agent that cannot restart.
+After the preflight, the script retains one matched snapshot of the previous
+Agent and privd binaries, both base systemd units, and the production relay
+drop-in presence and content. It also preserves endpoint identity, the durable
+Agent database, journal, and configuration. Verify service health and
+Controller connectivity after upgrade. To roll back the complete matched
+snapshot, run:
+
+```bash
+sudo /usr/libexec/ocservia/ocservia-agent-rollback
+```
+
+The command validates the complete snapshot before stopping either unit, then
+restores binaries and units together, reloads systemd, and starts privd before
+Agent. Restoring only the binaries is unsupported because their CLI and local
+wire contract may require the matching units. A rollback also restores the
+previous release's security properties, so use it only for a controlled
+recovery window and return to a fixed release promptly. `uninstall-agent.sh` preserves
+identity and journal by default;
 `--purge-state` is irreversible and is appropriate only after revoking the node
 identity and preserving required audit material.
 
 Command protocol `1.1` is fail closed: provision the Controller command
-verification public key before upgrading the Agent. A new Agent rejects unsigned
-legacy mutations, so schedule the Agent rollout and Controller signing-key
-enablement as one maintenance window. Keep both old and new public keys pinned
-during a signing-key rotation until old authorizations have expired and all
-Unknown outcomes have been reconciled.
+verification public key before upgrading the Agent and privd pair. Both
+services load it independently, and privd also pins `NODE_ID`. New binaries
+reject unsigned legacy mutations at both the command journal and root-effect
+boundaries, so schedule rollout and Controller signing-key enablement as one
+maintenance window. Keep both old and new public keys pinned during a
+signing-key rotation until old authorizations have expired and all Unknown
+outcomes have been reconciled.

@@ -10,10 +10,20 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use ocservia_agent_protocol::{
-    ErrorKind, PrivdError, PrivdRequest, PrivdResponse, privd_request, privd_response, read_frame,
-    write_frame,
+    ErrorKind, PrivdError, PrivdRequest, PrivdResponse, PrivilegedRequestMode, privd_request,
+    privd_response, read_frame, write_frame,
 };
-use ocservia_ocserv_adapter::{Adapter, EffectIdentity};
+use ocservia_command_authorization::{
+    AuthorizationError, CommandAuthorizationV1, ControllerCommandKeyring,
+};
+use ocservia_contracts::generated::ocserv::platform::agent::v1::{
+    CommandDeliveryMode, CommandEnvelope, command_envelope,
+};
+use ocservia_ocserv_adapter::{
+    Adapter, AuthorizedEffectDecision, AuthorizedEffectIdentity, EffectIdentity,
+};
+use prost::Message as _;
+use sha2::{Digest as _, Sha256};
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::Semaphore;
 use uuid::Uuid;
@@ -28,6 +38,10 @@ pub struct ServerConfig {
     pub socket: PathBuf,
     /// Only this peer UID may issue requests.
     pub agent_uid: u32,
+    /// Local node UUID pinned independently from the Agent request.
+    pub node_id: [u8; 16],
+    /// Controller verification keys loaded by root at startup.
+    pub command_keys: ControllerCommandKeyring,
 }
 
 /// Binds a root-controlled `AF_UNIX` socket with mode 0660.
@@ -96,9 +110,13 @@ pub async fn serve(
                 };
                 let adapter = adapter.clone();
                 let agent_uid = config.agent_uid;
+                let node_id = config.node_id;
+                let command_keys = config.command_keys.clone();
                 tokio::spawn(async move {
                     let _permit = permit;
-                    if let Err(error) = handle_client(stream, agent_uid, adapter).await {
+                    if let Err(error) =
+                        handle_client(stream, agent_uid, node_id, command_keys, adapter).await
+                    {
                         tracing::warn!(error = %error, "privd client failed");
                     }
                 });
@@ -110,6 +128,8 @@ pub async fn serve(
 async fn handle_client(
     mut stream: UnixStream,
     agent_uid: u32,
+    node_id: [u8; 16],
+    command_keys: ControllerCommandKeyring,
     adapter: Adapter,
 ) -> Result<(), io::Error> {
     let credentials = stream.peer_cred()?;
@@ -122,30 +142,46 @@ async fn handle_client(
     let request: PrivdRequest = tokio::time::timeout(MAX_REQUEST_LIFETIME, read_frame(&mut stream))
         .await
         .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "privd request read timed out"))??;
-    let response = dispatch(request, &adapter).await;
+    let response = dispatch(request, &node_id, &command_keys, &adapter).await;
     tokio::time::timeout(MAX_REQUEST_LIFETIME, write_frame(&mut stream, &response))
         .await
         .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "privd response write timed out"))??;
     Ok(())
 }
 
-async fn dispatch(request: PrivdRequest, adapter: &Adapter) -> PrivdResponse {
+async fn dispatch(
+    request: PrivdRequest,
+    node_id: &[u8; 16],
+    command_keys: &ControllerCommandKeyring,
+    adapter: &Adapter,
+) -> PrivdResponse {
     let request_id = request.request_id.clone();
-    let result = match validate_request(&request) {
-        Ok(deadline) => {
-            let effect = EffectIdentity {
-                command_id: &request.command_id,
-                idempotency_key: &request.idempotency_key,
-                semantic_payload_sha256: &request.semantic_payload_sha256,
-                expires_at_unix_seconds: request.command_expires_at_unix_seconds,
-            };
-            match tokio::time::timeout(deadline, execute(request.operation, effect, adapter)).await
+    let result = match validate_request(&request, node_id, command_keys) {
+        Ok((deadline, ValidatedRequest::Read)) => {
+            match tokio::time::timeout(deadline, execute_read(request.operation, adapter)).await {
+                Ok(result) => result,
+                Err(_) => deadline_error(),
+            }
+        }
+        Ok((deadline, ValidatedRequest::Execute(claims))) => {
+            let command = request
+                .authorization_command
+                .expect("validated command must be present");
+            match tokio::time::timeout(deadline, execute_command(&command, &claims, adapter)).await
             {
                 Ok(result) => result,
-                Err(_) => privd_response::Result::Error(error(
-                    ErrorKind::DeadlineExceeded,
-                    "request deadline exceeded",
-                )),
+                Err(_) => deadline_error(),
+            }
+        }
+        Ok((deadline, ValidatedRequest::Reconcile(claims))) => {
+            let command = request
+                .authorization_command
+                .expect("validated command must be present");
+            match tokio::time::timeout(deadline, reconcile_command(&command, &claims, adapter))
+                .await
+            {
+                Ok(result) => result,
+                Err(_) => deadline_error(),
             }
         }
         Err(failure) => privd_response::Result::Error(failure),
@@ -156,55 +192,23 @@ async fn dispatch(request: PrivdRequest, adapter: &Adapter) -> PrivdResponse {
     }
 }
 
-fn validate_request(request: &PrivdRequest) -> Result<Duration, PrivdError> {
+enum ValidatedRequest {
+    Read,
+    Execute(CommandAuthorizationV1),
+    Reconcile(CommandAuthorizationV1),
+}
+
+fn validate_request(
+    request: &PrivdRequest,
+    node_id: &[u8; 16],
+    command_keys: &ControllerCommandKeyring,
+) -> Result<(Duration, ValidatedRequest), PrivdError> {
     let id = Uuid::from_slice(&request.request_id)
         .map_err(|_| error(ErrorKind::InvalidRequest, "request_id must be UUIDv7"))?;
     if id.get_version_num() != 7 {
         return Err(error(
             ErrorKind::InvalidRequest,
             "request_id must be UUIDv7",
-        ));
-    }
-    if request.operation.is_none() {
-        return Err(error(
-            ErrorKind::InvalidRequest,
-            "read-only operation required",
-        ));
-    }
-    let desired_operation = matches!(
-        request.operation,
-        Some(
-            privd_request::Operation::DesiredEffectObserve(_)
-                | privd_request::Operation::UserCreate(_)
-                | privd_request::Operation::UserDisable(_)
-                | privd_request::Operation::UserEnable(_)
-                | privd_request::Operation::UserPasswordRotate(_)
-                | privd_request::Operation::GroupApply(_)
-                | privd_request::Operation::ConfigApply(_)
-                | privd_request::Operation::CertificateCsr(_)
-                | privd_request::Operation::CertificateRevoke(_)
-                | privd_request::Operation::CertificateP12(_)
-        )
-    );
-    if desired_operation {
-        if request.command_id.len() != 16
-            || request.idempotency_key.len() != 16
-            || request.semantic_payload_sha256.len() != 32
-            || request.command_expires_at_unix_seconds <= 0
-        {
-            return Err(error(
-                ErrorKind::InvalidRequest,
-                "desired effect identity invalid",
-            ));
-        }
-    } else if !request.command_id.is_empty()
-        || !request.idempotency_key.is_empty()
-        || !request.semantic_payload_sha256.is_empty()
-        || request.command_expires_at_unix_seconds != 0
-    {
-        return Err(error(
-            ErrorKind::InvalidRequest,
-            "effect identity is not allowed for this operation",
         ));
     }
     let now = SystemTime::now()
@@ -225,13 +229,188 @@ fn validate_request(request: &PrivdRequest) -> Result<Duration, PrivdError> {
             "request deadline too far in future",
         ));
     }
-    Ok(remaining)
+    let mode = PrivilegedRequestMode::try_from(request.privileged_mode)
+        .unwrap_or(PrivilegedRequestMode::Unspecified);
+    let validated = if let Some(command) = request.authorization_command.as_ref() {
+        if request.operation.is_some() || mode == PrivilegedRequestMode::Unspecified {
+            return Err(error(
+                ErrorKind::InvalidRequest,
+                "signed command request shape invalid",
+            ));
+        }
+        let now_seconds = i64::try_from(now.as_secs())
+            .map_err(|_| error(ErrorKind::Unavailable, "system clock unavailable"))?;
+        let claims = command_keys
+            .verify_command(command, node_id, now_seconds)
+            .map_err(|failure| authorization_error(&failure))?;
+        validate_privileged_payload(command, &claims)?;
+        let delivery = CommandDeliveryMode::try_from(command.delivery_mode)
+            .unwrap_or(CommandDeliveryMode::Unspecified);
+        match (mode, delivery) {
+            (
+                PrivilegedRequestMode::Execute,
+                CommandDeliveryMode::ExecuteOrReplay | CommandDeliveryMode::RetryIfEffectAbsent,
+            ) => ValidatedRequest::Execute(claims),
+            (PrivilegedRequestMode::Reconcile, CommandDeliveryMode::ReconcileOnly) => {
+                if desired_effect_binding(command).is_none() {
+                    return Err(error(
+                        ErrorKind::InvalidRequest,
+                        "command does not support privd reconciliation",
+                    ));
+                }
+                ValidatedRequest::Reconcile(claims)
+            }
+            _ => {
+                return Err(error(
+                    ErrorKind::PermissionDenied,
+                    "signed command delivery mode mismatch",
+                ));
+            }
+        }
+    } else {
+        if mode != PrivilegedRequestMode::Unspecified {
+            return Err(error(
+                ErrorKind::PermissionDenied,
+                "Controller command authorization required",
+            ));
+        }
+        if !matches!(
+            request.operation,
+            Some(
+                privd_request::Operation::ServiceStatus(_)
+                    | privd_request::Operation::OcservVersion(_)
+                    | privd_request::Operation::SessionList(_)
+                    | privd_request::Operation::IpBanList(_)
+                    | privd_request::Operation::ConfigFingerprint(_)
+                    | privd_request::Operation::UserList(_)
+                    | privd_request::Operation::GroupList(_)
+            )
+        ) {
+            return Err(error(
+                ErrorKind::PermissionDenied,
+                "Controller command authorization required",
+            ));
+        }
+        ValidatedRequest::Read
+    };
+    Ok((remaining, validated))
 }
 
-#[allow(clippy::too_many_lines)]
-async fn execute(
+fn authorization_error(failure: &AuthorizationError) -> PrivdError {
+    error(ErrorKind::PermissionDenied, failure.code())
+}
+
+fn validate_privileged_payload(
+    command: &CommandEnvelope,
+    claims: &CommandAuthorizationV1,
+) -> Result<(), PrivdError> {
+    for value in [
+        claims.command_id,
+        claims.idempotency_key,
+        claims.node_id,
+        claims.operation_id,
+    ] {
+        if Uuid::from_bytes(value).get_version_num() != 7 {
+            return Err(error(
+                ErrorKind::InvalidRequest,
+                "signed command UUID identity invalid",
+            ));
+        }
+    }
+    match command.payload.as_ref() {
+        Some(command_envelope::Payload::ConfigPlan(payload)) => {
+            validate_candidate(&payload.candidate, &payload.candidate_hash)?;
+        }
+        Some(command_envelope::Payload::ConfigApply(payload)) => {
+            validate_candidate(&payload.candidate, &payload.candidate_hash)?;
+        }
+        Some(command_envelope::Payload::SessionDisconnect(payload)) => {
+            validate_session(&payload.session_id, &payload.boot_id)?;
+        }
+        Some(command_envelope::Payload::SessionTerminate(payload)) => {
+            validate_session(&payload.session_id, &payload.boot_id)?;
+        }
+        Some(command_envelope::Payload::IpBanRemove(payload)) => {
+            let canonical = payload
+                .ip
+                .parse::<std::net::IpAddr>()
+                .map_err(|_| error(ErrorKind::InvalidRequest, "IP address invalid"))?
+                .to_string();
+            if canonical != payload.ip {
+                return Err(error(
+                    ErrorKind::InvalidRequest,
+                    "IP address must be canonical",
+                ));
+            }
+        }
+        Some(command_envelope::Payload::GroupApply(payload)) => {
+            if payload.members.len() > ocservia_agent_protocol::MAX_MANAGED_RESOURCES
+                || payload.members.windows(2).any(|pair| pair[0] >= pair[1])
+            {
+                return Err(error(ErrorKind::InvalidRequest, "group members invalid"));
+            }
+        }
+        Some(command_envelope::Payload::CertificateCsr(payload)) => {
+            validate_uuid(&payload.certificate_id, "certificate ID invalid")?;
+        }
+        Some(command_envelope::Payload::CertificateRevoke(payload)) => {
+            validate_uuid(&payload.certificate_id, "certificate ID invalid")?;
+        }
+        Some(command_envelope::Payload::CertificateP12(payload)) => {
+            validate_uuid(&payload.certificate_id, "certificate ID invalid")?;
+            validate_uuid(&payload.artifact_id, "artifact ID invalid")?;
+        }
+        Some(
+            command_envelope::Payload::ServiceReload(_)
+            | command_envelope::Payload::UserCreate(_)
+            | command_envelope::Payload::UserDisable(_)
+            | command_envelope::Payload::UserEnable(_)
+            | command_envelope::Payload::UserPasswordRotate(_),
+        ) => {}
+        _ => {
+            return Err(error(
+                ErrorKind::PermissionDenied,
+                "payload is not a privileged privd command",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_candidate(candidate: &[u8], candidate_hash: &[u8]) -> Result<(), PrivdError> {
+    if candidate.is_empty()
+        || candidate.len() > 256 * 1024
+        || candidate_hash.len() != 32
+        || Sha256::digest(candidate).as_slice() != candidate_hash
+    {
+        return Err(error(
+            ErrorKind::InvalidRequest,
+            "configuration candidate binding invalid",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_session(session_id: &str, boot_id: &str) -> Result<(), PrivdError> {
+    let parsed = session_id
+        .parse::<u64>()
+        .map_err(|_| error(ErrorKind::InvalidRequest, "session ID invalid"))?;
+    if parsed == 0 || parsed.to_string() != session_id || Uuid::parse_str(boot_id).is_err() {
+        return Err(error(ErrorKind::InvalidRequest, "session target invalid"));
+    }
+    Ok(())
+}
+
+fn validate_uuid(value: &[u8], detail: &str) -> Result<(), PrivdError> {
+    let id = Uuid::from_slice(value).map_err(|_| error(ErrorKind::InvalidRequest, detail))?;
+    if id.get_version_num() != 7 {
+        return Err(error(ErrorKind::InvalidRequest, detail));
+    }
+    Ok(())
+}
+
+async fn execute_read(
     operation: Option<privd_request::Operation>,
-    effect: EffectIdentity<'_>,
     adapter: &Adapter,
 ) -> privd_response::Result {
     let Some(operation) = operation else {
@@ -290,151 +469,412 @@ async fn execute(
                 .await
                 .map(privd_response::Result::GroupList),
         ),
-        privd_request::Operation::DesiredEffectObserve(request) => (
-            "desired_effect_observe",
-            adapter
-                .desired_effect_observe(
-                    &request.mutation_kind,
-                    &request.resource_key,
-                    request.desired_revision,
-                    effect,
-                )
-                .await
-                .map(privd_response::Result::DesiredEffectObservation),
+        _ => {
+            return privd_response::Result::Error(error(
+                ErrorKind::PermissionDenied,
+                "Controller command authorization required",
+            ));
+        }
+    };
+    finish_operation(operation_name, result)
+}
+
+struct CommandEffectBinding {
+    effect_kind: &'static str,
+    resource_key: String,
+    effect_revision: u64,
+}
+
+fn effect_binding(
+    command: &CommandEnvelope,
+    claims: &CommandAuthorizationV1,
+) -> Option<CommandEffectBinding> {
+    let (effect_kind, resource_key, effect_revision) = match command.payload.as_ref()? {
+        command_envelope::Payload::SessionDisconnect(payload) => (
+            "session_disconnect",
+            format!("{}:{}", payload.boot_id, payload.session_id),
+            claims.expected_revision,
         ),
-        privd_request::Operation::ConfigPlan(request) => (
-            "config_plan",
-            adapter
-                .config_plan(&request.candidate, &request.candidate_hash)
-                .await
-                .map(privd_response::Result::ConfigPlan),
+        command_envelope::Payload::SessionTerminate(payload) => (
+            "session_terminate",
+            format!("{}:{}", payload.boot_id, payload.session_id),
+            claims.expected_revision,
         ),
-        privd_request::Operation::ConfigApply(request) => (
+        command_envelope::Payload::IpBanRemove(payload) => (
+            "ip_ban_remove",
+            payload.ip.clone(),
+            claims.expected_revision,
+        ),
+        command_envelope::Payload::ServiceReload(_) => (
+            "service_reload",
+            "ocserv.service".to_owned(),
+            claims.expected_revision,
+        ),
+        command_envelope::Payload::UserCreate(payload) => (
+            "user_create",
+            payload.username.clone(),
+            payload.desired_revision,
+        ),
+        command_envelope::Payload::UserDisable(payload) => (
+            "user_disable",
+            payload.username.clone(),
+            payload.desired_revision,
+        ),
+        command_envelope::Payload::UserEnable(payload) => (
+            "user_enable",
+            payload.username.clone(),
+            payload.desired_revision,
+        ),
+        command_envelope::Payload::UserPasswordRotate(payload) => (
+            "user_password_rotate",
+            payload.username.clone(),
+            payload.desired_revision,
+        ),
+        command_envelope::Payload::GroupApply(payload) => (
+            "group_apply",
+            payload.group_name.clone(),
+            payload.desired_revision,
+        ),
+        command_envelope::Payload::ConfigApply(payload) => (
             "config_apply",
-            adapter
-                .config_apply(
-                    &request.candidate,
-                    &request.candidate_hash,
-                    &request.expected_current_hash,
-                    request.desired_revision,
-                    effect,
-                )
-                .await
-                .map(privd_response::Result::ConfigApply),
+            "ocserv.conf".to_owned(),
+            payload.desired_revision,
         ),
-        privd_request::Operation::CertificateCsr(request) => (
+        command_envelope::Payload::CertificateCsr(payload) => (
             "certificate_csr",
-            adapter
-                .certificate_csr(
-                    &request.certificate_id,
-                    &request.common_name,
-                    &request.dns_names,
-                    request.key_bits,
-                )
-                .await
-                .map(privd_response::Result::CertificateCsr),
+            Uuid::from_slice(&payload.certificate_id).ok()?.to_string(),
+            claims.expected_revision,
         ),
-        privd_request::Operation::CertificateRevoke(request) => (
+        command_envelope::Payload::CertificateRevoke(payload) => (
             "certificate_revoke",
-            adapter
-                .certificate_revoke(&request.certificate_id)
-                .await
-                .map(privd_response::Result::CertificateRevoke),
+            Uuid::from_slice(&payload.certificate_id).ok()?.to_string(),
+            claims.expected_revision,
         ),
-        privd_request::Operation::CertificateP12(request) => (
+        command_envelope::Payload::CertificateP12(payload) => (
             "certificate_p12",
-            adapter
-                .certificate_p12(
-                    &request.certificate_id,
-                    &request.artifact_id,
-                    &request.certificate_chain_pem,
-                    &request.sealed_password,
-                    &request.secret_key_id,
-                )
-                .await
-                .map(privd_response::Result::CertificateP12),
+            format!(
+                "{}:{}",
+                Uuid::from_slice(&payload.certificate_id).ok()?,
+                Uuid::from_slice(&payload.artifact_id).ok()?
+            ),
+            claims.expected_revision,
         ),
-        privd_request::Operation::SessionDisconnect(request) => (
+        _ => return None,
+    };
+    Some(CommandEffectBinding {
+        effect_kind,
+        resource_key,
+        effect_revision,
+    })
+}
+
+fn desired_effect_binding(command: &CommandEnvelope) -> Option<CommandEffectBinding> {
+    let (effect_kind, resource_key, effect_revision) = match command.payload.as_ref()? {
+        command_envelope::Payload::UserCreate(payload) => (
+            "user_create",
+            payload.username.clone(),
+            payload.desired_revision,
+        ),
+        command_envelope::Payload::UserDisable(payload) => (
+            "user_disable",
+            payload.username.clone(),
+            payload.desired_revision,
+        ),
+        command_envelope::Payload::UserEnable(payload) => (
+            "user_enable",
+            payload.username.clone(),
+            payload.desired_revision,
+        ),
+        command_envelope::Payload::UserPasswordRotate(payload) => (
+            "user_password_rotate",
+            payload.username.clone(),
+            payload.desired_revision,
+        ),
+        command_envelope::Payload::GroupApply(payload) => (
+            "group_apply",
+            payload.group_name.clone(),
+            payload.desired_revision,
+        ),
+        command_envelope::Payload::ConfigApply(payload) => (
+            "config_apply",
+            "ocserv.conf".to_owned(),
+            payload.desired_revision,
+        ),
+        _ => return None,
+    };
+    Some(CommandEffectBinding {
+        effect_kind,
+        resource_key,
+        effect_revision,
+    })
+}
+
+fn adapter_effect(claims: &CommandAuthorizationV1) -> EffectIdentity<'_> {
+    EffectIdentity {
+        command_id: &claims.command_id,
+        idempotency_key: &claims.idempotency_key,
+        semantic_payload_sha256: &claims.semantic_payload_sha256,
+        expires_at_unix_seconds: claims.expires_at_seconds,
+    }
+}
+
+fn authorized_effect<'a>(
+    command: &CommandEnvelope,
+    claims: &'a CommandAuthorizationV1,
+    binding: &'a CommandEffectBinding,
+) -> AuthorizedEffectIdentity<'a> {
+    AuthorizedEffectIdentity {
+        node_id: &claims.node_id,
+        command_id: &claims.command_id,
+        operation_id: &claims.operation_id,
+        idempotency_key: &claims.idempotency_key,
+        semantic_payload_sha256: &claims.semantic_payload_sha256,
+        action: &claims.action,
+        authorization_revision: claims.expected_revision,
+        effect_kind: binding.effect_kind,
+        resource_key: &binding.resource_key,
+        effect_revision: binding.effect_revision,
+        expires_at_unix_seconds: claims.expires_at_seconds,
+        retry_if_absent: CommandDeliveryMode::try_from(command.delivery_mode)
+            .is_ok_and(|mode| mode == CommandDeliveryMode::RetryIfEffectAbsent),
+    }
+}
+
+async fn execute_command(
+    command: &CommandEnvelope,
+    claims: &CommandAuthorizationV1,
+    adapter: &Adapter,
+) -> privd_response::Result {
+    let binding = effect_binding(command, claims);
+    if let Some(binding) = binding.as_ref() {
+        match adapter.prepare_authorized_effect(authorized_effect(command, claims, binding)) {
+            Ok(AuthorizedEffectDecision::Execute) => {}
+            Ok(AuthorizedEffectDecision::Replay(encoded)) => {
+                return decode_cached_result(&encoded);
+            }
+            Ok(AuthorizedEffectDecision::Pending) => {
+                return privd_response::Result::Error(error(
+                    ErrorKind::Unavailable,
+                    "authorized effect outcome requires reconciliation",
+                ));
+            }
+            Err(failure) => {
+                return privd_response::Result::Error(PrivdError::from(failure));
+            }
+        }
+    }
+    let (operation_name, result) = execute_signed_payload(command, claims, adapter).await;
+    let result = finish_operation(operation_name, result);
+    if matches!(result, privd_response::Result::Error(_)) {
+        return result;
+    }
+    if let Some(binding) = binding.as_ref() {
+        let cached = PrivdResponse {
+            request_id: Vec::new(),
+            result: Some(result.clone()),
+        }
+        .encode_to_vec();
+        if let Err(failure) =
+            adapter.complete_authorized_effect(authorized_effect(command, claims, binding), &cached)
+        {
+            return privd_response::Result::Error(PrivdError::from(failure));
+        }
+    }
+    result
+}
+
+#[allow(clippy::too_many_lines)]
+async fn execute_signed_payload(
+    command: &CommandEnvelope,
+    claims: &CommandAuthorizationV1,
+    adapter: &Adapter,
+) -> (
+    &'static str,
+    Result<privd_response::Result, ocservia_ocserv_adapter::AdapterError>,
+) {
+    let effect = adapter_effect(claims);
+    match command.payload.as_ref() {
+        Some(command_envelope::Payload::SessionDisconnect(payload)) => (
             "session_disconnect",
             adapter
-                .session_disconnect(&request.session_id, &request.boot_id)
+                .session_disconnect(&payload.session_id, &payload.boot_id)
                 .await
                 .map(privd_response::Result::Mutation),
         ),
-        privd_request::Operation::SessionTerminate(request) => (
+        Some(command_envelope::Payload::SessionTerminate(payload)) => (
             "session_terminate",
             adapter
-                .session_terminate(&request.session_id, &request.boot_id)
+                .session_terminate(&payload.session_id, &payload.boot_id)
                 .await
                 .map(privd_response::Result::Mutation),
         ),
-        privd_request::Operation::IpBanRemove(request) => (
+        Some(command_envelope::Payload::IpBanRemove(payload)) => (
             "ip_ban_remove",
             adapter
-                .ip_ban_remove(&request.ip)
+                .ip_ban_remove(&payload.ip)
                 .await
                 .map(privd_response::Result::Mutation),
         ),
-        privd_request::Operation::ServiceReload(_) => (
+        Some(command_envelope::Payload::ServiceReload(_)) => (
             "service_reload",
             adapter
                 .service_reload()
                 .await
                 .map(privd_response::Result::Mutation),
         ),
-        privd_request::Operation::UserCreate(request) => (
+        Some(command_envelope::Payload::UserCreate(payload)) => (
             "user_create",
             adapter
                 .user_create(
-                    &request.username,
-                    &request.secret_key_id,
-                    &request.sealed_password,
-                    request.desired_revision,
+                    &payload.username,
+                    &payload.secret_key_id,
+                    &payload.sealed_password,
+                    payload.desired_revision,
                     effect,
                 )
                 .await
                 .map(privd_response::Result::Mutation),
         ),
-        privd_request::Operation::UserDisable(request) => (
+        Some(command_envelope::Payload::UserDisable(payload)) => (
             "user_disable",
             adapter
-                .user_disable(&request.username, request.desired_revision, effect)
+                .user_disable(&payload.username, payload.desired_revision, effect)
                 .await
                 .map(privd_response::Result::Mutation),
         ),
-        privd_request::Operation::UserEnable(request) => (
+        Some(command_envelope::Payload::UserEnable(payload)) => (
             "user_enable",
             adapter
-                .user_enable(&request.username, request.desired_revision, effect)
+                .user_enable(&payload.username, payload.desired_revision, effect)
                 .await
                 .map(privd_response::Result::Mutation),
         ),
-        privd_request::Operation::UserPasswordRotate(request) => (
+        Some(command_envelope::Payload::UserPasswordRotate(payload)) => (
             "user_password_rotate",
             adapter
                 .user_password_rotate(
-                    &request.username,
-                    &request.secret_key_id,
-                    &request.sealed_password,
-                    request.desired_revision,
+                    &payload.username,
+                    &payload.secret_key_id,
+                    &payload.sealed_password,
+                    payload.desired_revision,
                     effect,
                 )
                 .await
                 .map(privd_response::Result::Mutation),
         ),
-        privd_request::Operation::GroupApply(request) => (
+        Some(command_envelope::Payload::GroupApply(payload)) => (
             "group_apply",
             adapter
                 .group_apply(
-                    &request.group_name,
-                    &request.members,
-                    request.desired_revision,
+                    &payload.group_name,
+                    &payload.members,
+                    payload.desired_revision,
                     effect,
                 )
                 .await
                 .map(privd_response::Result::Mutation),
         ),
+        Some(command_envelope::Payload::ConfigPlan(payload)) => (
+            "config_plan",
+            adapter
+                .config_plan(&payload.candidate, &payload.candidate_hash)
+                .await
+                .map(privd_response::Result::ConfigPlan),
+        ),
+        Some(command_envelope::Payload::ConfigApply(payload)) => (
+            "config_apply",
+            adapter
+                .config_apply(
+                    &payload.candidate,
+                    &payload.candidate_hash,
+                    &payload.expected_current_hash,
+                    payload.desired_revision,
+                    effect,
+                )
+                .await
+                .map(privd_response::Result::ConfigApply),
+        ),
+        Some(command_envelope::Payload::CertificateCsr(payload)) => (
+            "certificate_csr",
+            adapter
+                .certificate_csr(
+                    &payload.certificate_id,
+                    &payload.common_name,
+                    &payload.dns_names,
+                    payload.key_bits,
+                )
+                .await
+                .map(privd_response::Result::CertificateCsr),
+        ),
+        Some(command_envelope::Payload::CertificateRevoke(payload)) => (
+            "certificate_revoke",
+            adapter
+                .certificate_revoke(&payload.certificate_id)
+                .await
+                .map(privd_response::Result::CertificateRevoke),
+        ),
+        Some(command_envelope::Payload::CertificateP12(payload)) => (
+            "certificate_p12",
+            adapter
+                .certificate_p12(
+                    &payload.certificate_id,
+                    &payload.artifact_id,
+                    &payload.certificate_chain_pem,
+                    &payload.sealed_password,
+                    &payload.secret_key_id,
+                )
+                .await
+                .map(privd_response::Result::CertificateP12),
+        ),
+        _ => (
+            "privileged_command",
+            Err(ocservia_ocserv_adapter::AdapterError::InvalidRequest),
+        ),
+    }
+}
+
+async fn reconcile_command(
+    command: &CommandEnvelope,
+    claims: &CommandAuthorizationV1,
+    adapter: &Adapter,
+) -> privd_response::Result {
+    let Some(binding) = desired_effect_binding(command) else {
+        return privd_response::Result::Error(error(
+            ErrorKind::InvalidRequest,
+            "desired effect binding unavailable",
+        ));
     };
+    let result = adapter
+        .desired_effect_observe(
+            binding.effect_kind,
+            &binding.resource_key,
+            binding.effect_revision,
+            adapter_effect(claims),
+        )
+        .await
+        .map(privd_response::Result::DesiredEffectObservation);
+    finish_operation("desired_effect_observe", result)
+}
+
+fn decode_cached_result(encoded: &[u8]) -> privd_response::Result {
+    match PrivdResponse::decode(encoded) {
+        Ok(response) if response.request_id.is_empty() => response.result.unwrap_or_else(|| {
+            privd_response::Result::Error(error(
+                ErrorKind::Unavailable,
+                "cached authorized effect result missing",
+            ))
+        }),
+        _ => privd_response::Result::Error(error(
+            ErrorKind::Unavailable,
+            "cached authorized effect result invalid",
+        )),
+    }
+}
+
+fn finish_operation(
+    operation_name: &str,
+    result: Result<privd_response::Result, ocservia_ocserv_adapter::AdapterError>,
+) -> privd_response::Result {
     let result =
         result.unwrap_or_else(|failure| privd_response::Result::Error(PrivdError::from(failure)));
     if let privd_response::Result::Error(mut error) = result {
@@ -443,6 +883,13 @@ async fn execute(
     } else {
         result
     }
+}
+
+fn deadline_error() -> privd_response::Result {
+    privd_response::Result::Error(error(
+        ErrorKind::DeadlineExceeded,
+        "request deadline exceeded",
+    ))
 }
 
 fn error(kind: ErrorKind, detail: &str) -> PrivdError {
@@ -473,23 +920,204 @@ pub fn remove_socket(path: &Path) -> Result<(), io::Error> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use ocservia_agent_protocol::{ReadRequest, privd_request};
+    use std::os::unix::fs::PermissionsExt as _;
+
+    use ed25519_dalek::{Signer as _, SigningKey};
+    use ocservia_agent_protocol::{
+        CertificateCsrRequest, ConfigApplyRequest, ConfigPlanRequest, GroupApplyRequest,
+        IpBanRemoveRequest, ReadRequest, ServiceReloadRequest, SessionMutationRequest,
+        UserSecretRequest, privd_request,
+    };
+    use ocservia_command_authorization::{
+        canonical_v1, claims_from_envelope_v1, semantic_payload_hash_v2, verification_key_id,
+    };
+    use ocservia_contracts::generated::ocserv::platform::agent::v1::{
+        CommandAuthorizationProof, CommandAuthorizationVersion, CommandDeliveryMode, ConfigApply,
+        SemanticPayloadHashVersion, ServiceReload, command_envelope,
+    };
     use ocservia_ocserv_adapter::{FixedResources, Limits};
+    use prost_types::Timestamp;
+
+    use super::*;
+
+    fn keyring(key: &SigningKey) -> ControllerCommandKeyring {
+        ControllerCommandKeyring::new([key.verifying_key()]).expect("test keyring")
+    }
+
+    fn unix_seconds() -> i64 {
+        i64::try_from(
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("test clock")
+                .as_secs(),
+        )
+        .expect("test time")
+    }
+
+    fn deadline() -> u64 {
+        u64::try_from(
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("test clock")
+                .as_millis(),
+        )
+        .expect("test time")
+            + 5_000
+    }
+
+    fn signed_service_reload(
+        key: &SigningKey,
+        node_id: [u8; 16],
+        issued_at: i64,
+        expires_at: i64,
+    ) -> CommandEnvelope {
+        signed_command(
+            key,
+            node_id,
+            issued_at,
+            expires_at,
+            "service.reload",
+            "ocserv.service.reload",
+            command_envelope::Payload::ServiceReload(ServiceReload {}),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn signed_command(
+        key: &SigningKey,
+        node_id: [u8; 16],
+        issued_at: i64,
+        expires_at: i64,
+        action: &str,
+        capability: &str,
+        payload: command_envelope::Payload,
+    ) -> CommandEnvelope {
+        let mut command = CommandEnvelope {
+            protocol_version: ocservia_command_authorization::COMMAND_PROTOCOL_VERSION.to_owned(),
+            message_id: Uuid::now_v7().as_bytes().to_vec(),
+            command_id: Uuid::now_v7().as_bytes().to_vec(),
+            idempotency_key: Uuid::now_v7().as_bytes().to_vec(),
+            node_id: node_id.to_vec(),
+            sequence: 1,
+            issued_at: Some(Timestamp {
+                seconds: issued_at,
+                nanos: 0,
+            }),
+            expires_at: Some(Timestamp {
+                seconds: expires_at,
+                nanos: 0,
+            }),
+            expected_revision: 7,
+            actor_id: "controller:test".to_owned(),
+            operation_id: Uuid::now_v7().as_bytes().to_vec(),
+            action: action.to_owned(),
+            required_capability: capability.to_owned(),
+            delivery_mode: CommandDeliveryMode::ExecuteOrReplay.into(),
+            semantic_payload_hash_version: SemanticPayloadHashVersion::V2.into(),
+            payload: Some(payload),
+            authorization: Some(CommandAuthorizationProof {
+                version: CommandAuthorizationVersion::V1.into(),
+                key_id: verification_key_id(&key.verifying_key()),
+                signature: Vec::new(),
+            }),
+            ..CommandEnvelope::default()
+        };
+        command.semantic_payload_sha256 = semantic_payload_hash_v2(&command)
+            .expect("semantic hash")
+            .to_vec();
+        let claims = claims_from_envelope_v1(&command).expect("authorization claims");
+        let signature = key.sign(&canonical_v1(&claims).expect("canonical authorization"));
+        command
+            .authorization
+            .as_mut()
+            .expect("authorization")
+            .signature = signature.to_bytes().to_vec();
+        command
+    }
+
+    fn command_request(command: CommandEnvelope) -> PrivdRequest {
+        PrivdRequest {
+            request_id: Uuid::now_v7().as_bytes().to_vec(),
+            deadline_unix_ms: deadline(),
+            authorization_command: Some(command),
+            privileged_mode: PrivilegedRequestMode::Execute.into(),
+            operation: None,
+        }
+    }
+
+    fn unsigned_request(operation: Option<privd_request::Operation>) -> PrivdRequest {
+        PrivdRequest {
+            request_id: Uuid::now_v7().as_bytes().to_vec(),
+            deadline_unix_ms: deadline(),
+            authorization_command: None,
+            privileged_mode: PrivilegedRequestMode::Unspecified.into(),
+            operation,
+        }
+    }
+
+    fn test_adapter() -> (Adapter, FixedResources, PathBuf, PathBuf) {
+        let directory = PathBuf::from("/tmp").join(format!("ocp-{}", Uuid::now_v7().simple()));
+        std::fs::create_dir(&directory).expect("create test directory");
+        std::fs::set_permissions(&directory, fs::Permissions::from_mode(0o700))
+            .expect("secure test directory");
+        let counter = directory.join("reload-count");
+        let systemctl = directory.join("systemctl");
+        std::fs::write(
+            &systemctl,
+            format!("#!/bin/sh\nprintf x >> '{}'\n", counter.display()),
+        )
+        .expect("write fixed test command");
+        std::fs::set_permissions(&systemctl, fs::Permissions::from_mode(0o700))
+            .expect("make fixed test command executable");
+        let config = directory.join("ocserv.conf");
+        let boot = directory.join("boot_id");
+        std::fs::write(&config, b"fixture\n").expect("write config fixture");
+        std::fs::write(&boot, Uuid::now_v7().to_string()).expect("write boot fixture");
+        let resources = FixedResources::new(
+            systemctl,
+            PathBuf::from("/bin/true"),
+            PathBuf::from("/bin/true"),
+            config,
+            boot,
+        )
+        .expect("fixed resources")
+        .with_effect_store(
+            directory.join("effects.sqlite3"),
+            directory.join("effects.key"),
+        )
+        .expect("effect resources");
+        (
+            Adapter::new(resources.clone(), Limits::default()),
+            resources,
+            counter,
+            directory,
+        )
+    }
+
+    fn assert_permission_denied(response: &PrivdResponse) {
+        let Some(privd_response::Result::Error(failure)) = response.result.as_ref() else {
+            panic!("privileged request must be rejected")
+        };
+        assert_eq!(
+            ErrorKind::try_from(failure.kind).unwrap_or(ErrorKind::Unspecified),
+            ErrorKind::PermissionDenied
+        );
+    }
 
     #[tokio::test]
     async fn rejects_expired_and_missing_operations() {
+        let signing = SigningKey::from_bytes(&[7; 32]);
+        let keys = keyring(&signing);
+        let node_id = *Uuid::now_v7().as_bytes();
         let adapter = Adapter::new(FixedResources::default(), Limits::default());
         let expired = PrivdRequest {
             request_id: Uuid::now_v7().as_bytes().to_vec(),
             deadline_unix_ms: 1,
-            command_id: Vec::new(),
-            idempotency_key: Vec::new(),
-            semantic_payload_sha256: Vec::new(),
-            command_expires_at_unix_seconds: 0,
+            authorization_command: None,
+            privileged_mode: PrivilegedRequestMode::Unspecified.into(),
             operation: Some(privd_request::Operation::ServiceStatus(ReadRequest {})),
         };
-        let response = dispatch(expired, &adapter).await;
+        let response = dispatch(expired, &node_id, &keys, &adapter).await;
         assert!(matches!(
             response.result,
             Some(privd_response::Result::Error(_))
@@ -497,17 +1125,231 @@ mod tests {
 
         let missing = PrivdRequest {
             request_id: Uuid::now_v7().as_bytes().to_vec(),
-            deadline_unix_ms: u64::MAX,
-            command_id: Vec::new(),
-            idempotency_key: Vec::new(),
-            semantic_payload_sha256: Vec::new(),
-            command_expires_at_unix_seconds: 0,
+            deadline_unix_ms: deadline(),
+            authorization_command: None,
+            privileged_mode: PrivilegedRequestMode::Unspecified.into(),
             operation: None,
         };
-        let response = dispatch(missing, &adapter).await;
+        let response = dispatch(missing, &node_id, &keys, &adapter).await;
+        assert_permission_denied(&response);
+    }
+
+    #[tokio::test]
+    async fn signed_effect_executes_once_and_replays_after_restart() {
+        let signing = SigningKey::from_bytes(&[8; 32]);
+        let keys = keyring(&signing);
+        let node_id = *Uuid::now_v7().as_bytes();
+        let now = unix_seconds();
+        let command = signed_service_reload(&signing, node_id, now, now + 60);
+        let (adapter, resources, counter, directory) = test_adapter();
+
+        let first = dispatch(command_request(command.clone()), &node_id, &keys, &adapter).await;
+        assert!(matches!(
+            first.result,
+            Some(privd_response::Result::Mutation(ref result)) if result.applied
+        ));
+        drop(adapter);
+        let restarted = Adapter::new(resources, Limits::default());
+        let replay = dispatch(command_request(command), &node_id, &keys, &restarted).await;
+        assert!(matches!(
+            replay.result,
+            Some(privd_response::Result::Mutation(ref result)) if result.applied
+        ));
+        assert_eq!(
+            std::fs::read_to_string(counter).expect("effect counter"),
+            "x"
+        );
+        std::fs::remove_dir_all(directory).expect("cleanup test directory");
+    }
+
+    #[tokio::test]
+    async fn signed_claim_or_effect_tampering_is_rejected_before_root_effect() {
+        let signing = SigningKey::from_bytes(&[9; 32]);
+        let keys = keyring(&signing);
+        let node_id = *Uuid::now_v7().as_bytes();
+        let now = unix_seconds();
+        let command = signed_service_reload(&signing, node_id, now, now + 60);
+        let (adapter, _, counter, directory) = test_adapter();
+        let mut variants = Vec::new();
+
+        let mut changed = command.clone();
+        changed.node_id = Uuid::now_v7().as_bytes().to_vec();
+        variants.push(changed);
+        let mut changed = command.clone();
+        changed.expected_revision += 1;
+        variants.push(changed);
+        let mut changed = command.clone();
+        changed.command_id = Uuid::now_v7().as_bytes().to_vec();
+        variants.push(changed);
+        let mut changed = command.clone();
+        changed.idempotency_key = Uuid::now_v7().as_bytes().to_vec();
+        variants.push(changed);
+        let mut changed = command.clone();
+        changed.required_capability = "ocserv.config.apply".to_owned();
+        variants.push(changed);
+        let mut changed = command.clone();
+        changed.semantic_payload_sha256[0] ^= 1;
+        variants.push(changed);
+        let mut changed = command.clone();
+        changed.operation_id = Uuid::now_v7().as_bytes().to_vec();
+        variants.push(changed);
+        let mut changed = command.clone();
+        changed.actor_id = "forged-controller".to_owned();
+        variants.push(changed);
+        let mut changed = command.clone();
+        changed.payload = Some(command_envelope::Payload::IpBanRemove(
+            ocservia_contracts::generated::ocserv::platform::agent::v1::IpBanRemove {
+                ip: "192.0.2.1".to_owned(),
+            },
+        ));
+        variants.push(changed);
+        let mut changed = command.clone();
+        changed
+            .authorization
+            .as_mut()
+            .expect("authorization")
+            .signature[0] ^= 1;
+        variants.push(changed);
+
+        for changed in variants {
+            let response = dispatch(command_request(changed), &node_id, &keys, &adapter).await;
+            assert_permission_denied(&response);
+        }
+        let mut agent_selected_effect = command_request(command);
+        agent_selected_effect.operation =
+            Some(privd_request::Operation::IpBanRemove(IpBanRemoveRequest {
+                ip: "192.0.2.1".to_owned(),
+            }));
+        let response = dispatch(agent_selected_effect, &node_id, &keys, &adapter).await;
         assert!(matches!(
             response.result,
-            Some(privd_response::Result::Error(_))
+            Some(privd_response::Result::Error(ref failure))
+                if ErrorKind::try_from(failure.kind).unwrap_or(ErrorKind::Unspecified)
+                    == ErrorKind::InvalidRequest
         ));
+        assert!(!counter.exists());
+        std::fs::remove_dir_all(directory).expect("cleanup test directory");
+    }
+
+    #[tokio::test]
+    async fn signed_config_hash_cannot_authorize_substituted_candidate_bytes() {
+        let signing = SigningKey::from_bytes(&[14; 32]);
+        let keys = keyring(&signing);
+        let node_id = *Uuid::now_v7().as_bytes();
+        let now = unix_seconds();
+        let candidate = b"# generated by ocservia config-plan/v1\ntcp-port = 443\n".to_vec();
+        let candidate_hash = Sha256::digest(&candidate).to_vec();
+        let mut command = signed_command(
+            &signing,
+            node_id,
+            now,
+            now + 60,
+            "config.apply",
+            "ocserv.config.apply",
+            command_envelope::Payload::ConfigApply(ConfigApply {
+                candidate,
+                candidate_hash,
+                expected_current_hash: vec![0x44; 32],
+                desired_revision: 2,
+            }),
+        );
+        let Some(command_envelope::Payload::ConfigApply(payload)) = command.payload.as_mut() else {
+            panic!("config payload")
+        };
+        payload.candidate[0] ^= 1;
+        let adapter = Adapter::new(FixedResources::default(), Limits::default());
+        let response = dispatch(command_request(command), &node_id, &keys, &adapter).await;
+        assert!(matches!(
+            response.result,
+            Some(privd_response::Result::Error(ref failure))
+                if ErrorKind::try_from(failure.kind).unwrap_or(ErrorKind::Unspecified)
+                    == ErrorKind::InvalidRequest
+        ));
+    }
+
+    #[tokio::test]
+    async fn expired_and_unknown_controller_proofs_are_rejected() {
+        let trusted = SigningKey::from_bytes(&[10; 32]);
+        let unknown = SigningKey::from_bytes(&[11; 32]);
+        let keys = keyring(&trusted);
+        let node_id = *Uuid::now_v7().as_bytes();
+        let now = unix_seconds();
+        let adapter = Adapter::new(FixedResources::default(), Limits::default());
+        let expired = signed_service_reload(&trusted, node_id, now - 60, now - 1);
+        assert_permission_denied(
+            &dispatch(command_request(expired), &node_id, &keys, &adapter).await,
+        );
+        let another_node =
+            signed_service_reload(&trusted, *Uuid::now_v7().as_bytes(), now, now + 60);
+        assert_permission_denied(
+            &dispatch(command_request(another_node), &node_id, &keys, &adapter).await,
+        );
+        let unknown = signed_service_reload(&unknown, node_id, now, now + 60);
+        assert_permission_denied(
+            &dispatch(command_request(unknown), &node_id, &keys, &adapter).await,
+        );
+    }
+
+    #[tokio::test]
+    async fn every_unsigned_legacy_mutation_family_fails_closed() {
+        let signing = SigningKey::from_bytes(&[12; 32]);
+        let keys = keyring(&signing);
+        let node_id = *Uuid::now_v7().as_bytes();
+        let adapter = Adapter::new(FixedResources::default(), Limits::default());
+        let mutations = vec![
+            privd_request::Operation::UserPasswordRotate(UserSecretRequest::default()),
+            privd_request::Operation::GroupApply(GroupApplyRequest::default()),
+            privd_request::Operation::ConfigPlan(ConfigPlanRequest::default()),
+            privd_request::Operation::ConfigApply(ConfigApplyRequest::default()),
+            privd_request::Operation::CertificateCsr(CertificateCsrRequest::default()),
+            privd_request::Operation::SessionDisconnect(SessionMutationRequest::default()),
+            privd_request::Operation::IpBanRemove(IpBanRemoveRequest::default()),
+            privd_request::Operation::ServiceReload(ServiceReloadRequest {}),
+        ];
+        for mutation in mutations {
+            let response =
+                dispatch(unsigned_request(Some(mutation)), &node_id, &keys, &adapter).await;
+            assert_permission_denied(&response);
+        }
+    }
+
+    #[tokio::test]
+    async fn same_uid_direct_socket_caller_cannot_forge_root_effect() {
+        let signing = SigningKey::from_bytes(&[13; 32]);
+        let keys = keyring(&signing);
+        let node_id = *Uuid::now_v7().as_bytes();
+        let (adapter, _, counter, directory) = test_adapter();
+        let socket = directory.join("privd.sock");
+        let config = ServerConfig {
+            socket: socket.clone(),
+            agent_uid: rustix_uid(),
+            node_id,
+            command_keys: keys,
+        };
+        let listener = bind_socket(&config).expect("bind privd fixture");
+        let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
+        let server_config = config.clone();
+        let server = tokio::spawn(async move {
+            serve(listener, server_config, adapter, async {
+                let _ = shutdown_rx.await;
+            })
+            .await
+        });
+        let mut stream = UnixStream::connect(&socket)
+            .await
+            .expect("same UID connect");
+        let request = unsigned_request(Some(privd_request::Operation::ServiceReload(
+            ServiceReloadRequest {},
+        )));
+        write_frame(&mut stream, &request)
+            .await
+            .expect("write forged request");
+        let response: PrivdResponse = read_frame(&mut stream).await.expect("read rejection");
+        assert_permission_denied(&response);
+        assert!(!counter.exists());
+        shutdown_tx.send(()).expect("stop server");
+        server.await.expect("join server").expect("serve fixture");
+        remove_socket(&socket).expect("remove fixture socket");
+        std::fs::remove_dir_all(directory).expect("cleanup test directory");
     }
 }

@@ -157,6 +157,13 @@ impl ControllerCommandKeyring {
     ///
     /// Rejects missing/unknown proofs, malformed claims, and invalid signatures.
     pub fn verify(&self, envelope: &CommandEnvelope) -> Result<(), AuthorizationError> {
+        self.verify_claims(envelope).map(|_| ())
+    }
+
+    fn verify_claims(
+        &self,
+        envelope: &CommandEnvelope,
+    ) -> Result<CommandAuthorizationV1, AuthorizationError> {
         let proof = envelope
             .authorization
             .as_ref()
@@ -176,7 +183,39 @@ impl ControllerCommandKeyring {
         let signature = Signature::from_slice(&proof.signature)
             .map_err(|_| AuthorizationError::SignatureMalformed)?;
         key.verify_strict(&canonical, &signature)
-            .map_err(|_| AuthorizationError::SignatureInvalid)
+            .map_err(|_| AuthorizationError::SignatureInvalid)?;
+        Ok(claims)
+    }
+
+    /// Independently verifies a command for one local node at the supplied
+    /// wall-clock time, including its signed semantic payload identity.
+    ///
+    /// # Errors
+    ///
+    /// Rejects invalid signatures, another node's proof, expired or
+    /// future-issued commands, zero authority revisions, and semantic hash
+    /// mismatches.
+    pub fn verify_command(
+        &self,
+        envelope: &CommandEnvelope,
+        expected_node_id: &[u8; 16],
+        now_unix_seconds: i64,
+    ) -> Result<CommandAuthorizationV1, AuthorizationError> {
+        let claims = self.verify_claims(envelope)?;
+        if &claims.node_id != expected_node_id {
+            return Err(AuthorizationError::ClaimsInvalid("node_id_mismatch"));
+        }
+        if claims.expected_revision == 0 {
+            return Err(AuthorizationError::ClaimsInvalid("revision_invalid"));
+        }
+        if claims.expires_at_seconds <= now_unix_seconds {
+            return Err(AuthorizationError::ClaimsInvalid("command_expired"));
+        }
+        if claims.issued_at_seconds > now_unix_seconds.saturating_add(MAX_FUTURE_SKEW_SECONDS) {
+            return Err(AuthorizationError::ClaimsInvalid("clock_skew"));
+        }
+        verify_semantic_payload_hash(envelope)?;
+        Ok(claims)
     }
 
     /// Verifies a Controller-signed session grant against the local node and
@@ -505,6 +544,328 @@ pub fn canonical_v1(claims: &CommandAuthorizationV1) -> Result<Vec<u8>, Authoriz
     Ok(encoded)
 }
 
+/// Computes the frozen v1 semantic payload hash without serializing Protobuf.
+///
+/// # Errors
+///
+/// Rejects malformed or unsupported typed payloads.
+pub fn semantic_payload_hash_v1(
+    envelope: &CommandEnvelope,
+) -> Result<[u8; 32], AuthorizationError> {
+    canonical_semantic_payload_hash(envelope, SemanticPayloadHashVersion::V1)
+}
+
+/// Computes the v2 semantic payload hash, including the `ConfigPlan` desired
+/// revision added by protocol 1.1.
+///
+/// # Errors
+///
+/// Rejects malformed or unsupported typed payloads.
+pub fn semantic_payload_hash_v2(
+    envelope: &CommandEnvelope,
+) -> Result<[u8; 32], AuthorizationError> {
+    canonical_semantic_payload_hash(envelope, SemanticPayloadHashVersion::V2)
+}
+
+/// Recomputes and compares the semantic payload hash selected by the envelope.
+///
+/// # Errors
+///
+/// Rejects unsupported versions, malformed typed payloads, and mismatches.
+pub fn verify_semantic_payload_hash(
+    envelope: &CommandEnvelope,
+) -> Result<[u8; 32], AuthorizationError> {
+    let version = SemanticPayloadHashVersion::try_from(envelope.semantic_payload_hash_version)
+        .unwrap_or(SemanticPayloadHashVersion::Unspecified);
+    let recomputed = match version {
+        SemanticPayloadHashVersion::V1 => semantic_payload_hash_v1(envelope)?,
+        SemanticPayloadHashVersion::V2 => semantic_payload_hash_v2(envelope)?,
+        SemanticPayloadHashVersion::Unspecified => {
+            return Err(AuthorizationError::ClaimsInvalid(
+                "semantic_hash_version_unsupported",
+            ));
+        }
+    };
+    let expected: [u8; 32] = envelope
+        .semantic_payload_sha256
+        .as_slice()
+        .try_into()
+        .map_err(|_| AuthorizationError::ClaimsInvalid("semantic_payload_hash_missing"))?;
+    if recomputed != expected {
+        return Err(AuthorizationError::ClaimsInvalid(
+            "semantic_payload_hash_mismatch",
+        ));
+    }
+    Ok(recomputed)
+}
+
+#[allow(clippy::too_many_lines)]
+fn canonical_semantic_payload_hash(
+    envelope: &CommandEnvelope,
+    version: SemanticPayloadHashVersion,
+) -> Result<[u8; 32], AuthorizationError> {
+    let (payload_kind, canonical_payload) = match envelope.payload.as_ref() {
+        Some(command_envelope::Payload::SyntheticNoop(_)) => (107_u32, Vec::new()),
+        Some(command_envelope::Payload::SyntheticEcho(payload)) => {
+            let mut out = Vec::with_capacity(4 + payload.message.len());
+            append_semantic_bytes(&mut out, payload.message.as_bytes())?;
+            (108_u32, out)
+        }
+        Some(command_envelope::Payload::SessionDisconnect(payload)) => (
+            100_u32,
+            canonical_session_payload(&payload.session_id, &payload.boot_id)?,
+        ),
+        Some(command_envelope::Payload::ServiceReload(_)) => (105_u32, Vec::new()),
+        Some(command_envelope::Payload::ConfigPlan(payload)) => {
+            if payload.candidate_hash.len() != 32 {
+                return Err(invalid_claim("candidate_hash_invalid"));
+            }
+            let mut out = Vec::with_capacity(40);
+            out.extend_from_slice(&payload.candidate_hash);
+            if version == SemanticPayloadHashVersion::V2 {
+                out.extend_from_slice(&payload.expected_revision.to_be_bytes());
+            }
+            (103_u32, out)
+        }
+        Some(command_envelope::Payload::ConfigApply(payload)) => {
+            if payload.candidate_hash.len() != 32
+                || payload.expected_current_hash.len() != 32
+                || payload.desired_revision == 0
+            {
+                return Err(invalid_claim("config_apply_invalid"));
+            }
+            let mut out = Vec::with_capacity(72);
+            out.extend_from_slice(&payload.candidate_hash);
+            out.extend_from_slice(&payload.expected_current_hash);
+            out.extend_from_slice(&payload.desired_revision.to_be_bytes());
+            (104_u32, out)
+        }
+        Some(command_envelope::Payload::CertificateCsr(payload)) => {
+            if payload.certificate_id.len() != 16
+                || payload.common_name.is_empty()
+                || payload.dns_names.len() > 32
+                || !matches!(payload.key_bits, 2048 | 3072 | 4096)
+            {
+                return Err(invalid_claim("certificate_csr_invalid"));
+            }
+            let values = std::iter::once(payload.common_name.as_str())
+                .chain(payload.dns_names.iter().map(String::as_str))
+                .collect::<Vec<_>>();
+            (
+                117_u32,
+                canonical_strings_and_bytes(
+                    &values,
+                    &payload.certificate_id,
+                    u64::from(payload.key_bits),
+                )?,
+            )
+        }
+        Some(command_envelope::Payload::CertificateP12(payload)) => {
+            if payload.certificate_id.len() != 16
+                || payload.artifact_id.len() != 16
+                || payload.certificate_chain_pem.len() < 64
+                || payload.certificate_chain_pem.len() > 256 * 1024
+                || payload.sealed_password.len() < 32
+                || payload.sealed_password.len() > 16 * 1024
+                || payload.secret_key_id.is_empty()
+            {
+                return Err(invalid_claim("certificate_p12_invalid"));
+            }
+            let mut data = Vec::with_capacity(
+                payload.certificate_id.len()
+                    + payload.artifact_id.len()
+                    + payload.certificate_chain_pem.len()
+                    + payload.sealed_password.len(),
+            );
+            data.extend_from_slice(&payload.certificate_id);
+            data.extend_from_slice(&payload.artifact_id);
+            data.extend_from_slice(&payload.certificate_chain_pem);
+            data.extend_from_slice(&payload.sealed_password);
+            (
+                118_u32,
+                canonical_strings_and_bytes(&[payload.secret_key_id.as_str()], &data, 0)?,
+            )
+        }
+        Some(command_envelope::Payload::CertificateRevoke(payload)) => {
+            if payload.certificate_id.len() != 16
+                || payload.reason.is_empty()
+                || payload.reason.len() > 128
+            {
+                return Err(invalid_claim("certificate_revoke_invalid"));
+            }
+            (
+                119_u32,
+                canonical_strings_and_bytes(
+                    &[payload.reason.as_str()],
+                    &payload.certificate_id,
+                    0,
+                )?,
+            )
+        }
+        Some(command_envelope::Payload::SessionTerminate(payload)) => (
+            112_u32,
+            canonical_session_payload(&payload.session_id, &payload.boot_id)?,
+        ),
+        Some(command_envelope::Payload::IpBanRemove(payload)) => {
+            let mut out = Vec::with_capacity(4 + payload.ip.len());
+            append_semantic_bytes(&mut out, payload.ip.as_bytes())?;
+            (113_u32, out)
+        }
+        Some(command_envelope::Payload::UserCreate(payload)) => (
+            101_u32,
+            canonical_secret_payload(
+                &payload.username,
+                &payload.secret_key_id,
+                &payload.sealed_password,
+                payload.desired_revision,
+            )?,
+        ),
+        Some(command_envelope::Payload::UserDisable(payload)) => (
+            102_u32,
+            canonical_named_payload(&payload.username, &[], payload.desired_revision)?,
+        ),
+        Some(command_envelope::Payload::UserPasswordRotate(payload)) => (
+            114_u32,
+            canonical_secret_payload(
+                &payload.username,
+                &payload.secret_key_id,
+                &payload.sealed_password,
+                payload.desired_revision,
+            )?,
+        ),
+        Some(command_envelope::Payload::GroupApply(payload)) => (
+            115_u32,
+            canonical_named_payload(
+                &payload.group_name,
+                &payload.members,
+                payload.desired_revision,
+            )?,
+        ),
+        Some(command_envelope::Payload::UserEnable(payload)) => (
+            116_u32,
+            canonical_named_payload(&payload.username, &[], payload.desired_revision)?,
+        ),
+        _ => return Err(AuthorizationError::PayloadUnsupported),
+    };
+    let mut hash = Sha256::new();
+    match version {
+        SemanticPayloadHashVersion::V1 => {
+            hash.update(b"ocservia.command.semantic-hash.v1\0");
+        }
+        SemanticPayloadHashVersion::V2 => {
+            hash.update(b"ocservia.command.semantic-hash.v2\0");
+        }
+        SemanticPayloadHashVersion::Unspecified => {
+            return Err(invalid_claim("semantic_hash_version_unsupported"));
+        }
+    }
+    hash.update(&envelope.node_id);
+    hash.update(envelope.expected_revision.to_be_bytes());
+    hash.update(payload_kind.to_be_bytes());
+    hash.update(canonical_payload);
+    Ok(hash.finalize().into())
+}
+
+fn canonical_named_payload(
+    name: &str,
+    values: &[String],
+    revision: u64,
+) -> Result<Vec<u8>, AuthorizationError> {
+    validate_semantic_name(name)?;
+    validate_semantic_revision(revision)?;
+    let mut out = Vec::new();
+    append_semantic_bytes(&mut out, name.as_bytes())?;
+    for value in values {
+        validate_semantic_name(value)?;
+        append_semantic_bytes(&mut out, value.as_bytes())?;
+    }
+    out.extend_from_slice(&0_u32.to_be_bytes());
+    out.extend_from_slice(&revision.to_be_bytes());
+    Ok(out)
+}
+
+fn canonical_secret_payload(
+    name: &str,
+    key_id: &str,
+    secret: &[u8],
+    revision: u64,
+) -> Result<Vec<u8>, AuthorizationError> {
+    validate_semantic_name(name)?;
+    validate_semantic_revision(revision)?;
+    if key_id.is_empty() || key_id.len() > 128 || secret.len() < 32 || secret.len() > 4096 {
+        return Err(invalid_claim("sealed_secret_invalid"));
+    }
+    let mut out = Vec::new();
+    append_semantic_bytes(&mut out, name.as_bytes())?;
+    append_semantic_bytes(&mut out, key_id.as_bytes())?;
+    append_semantic_bytes(&mut out, secret)?;
+    out.extend_from_slice(&revision.to_be_bytes());
+    Ok(out)
+}
+
+fn canonical_strings_and_bytes(
+    values: &[&str],
+    bytes: &[u8],
+    revision: u64,
+) -> Result<Vec<u8>, AuthorizationError> {
+    let mut out = Vec::new();
+    for value in values {
+        append_semantic_bytes(&mut out, value.as_bytes())?;
+    }
+    append_semantic_bytes(&mut out, bytes)?;
+    out.extend_from_slice(&revision.to_be_bytes());
+    Ok(out)
+}
+
+fn canonical_session_payload(
+    session_id: &str,
+    boot_id: &str,
+) -> Result<Vec<u8>, AuthorizationError> {
+    let parsed = session_id
+        .parse::<u64>()
+        .map_err(|_| invalid_claim("session_id_invalid"))?;
+    if parsed == 0 || parsed.to_string() != session_id || boot_id.is_empty() || boot_id.len() > 64 {
+        return Err(invalid_claim("session_id_invalid"));
+    }
+    let mut out = Vec::with_capacity(8 + session_id.len() + boot_id.len());
+    append_semantic_bytes(&mut out, session_id.as_bytes())?;
+    append_semantic_bytes(&mut out, boot_id.as_bytes())?;
+    Ok(out)
+}
+
+fn append_semantic_bytes(target: &mut Vec<u8>, value: &[u8]) -> Result<(), AuthorizationError> {
+    target.extend_from_slice(
+        &u32::try_from(value.len())
+            .map_err(|_| invalid_claim("payload_size_invalid"))?
+            .to_be_bytes(),
+    );
+    target.extend_from_slice(value);
+    Ok(())
+}
+
+fn validate_semantic_name(value: &str) -> Result<(), AuthorizationError> {
+    if value.is_empty()
+        || value.len() > 64
+        || !value.bytes().enumerate().all(|(index, byte)| {
+            byte.is_ascii_alphanumeric() || (index > 0 && matches!(byte, b'_' | b'.' | b'-'))
+        })
+    {
+        return Err(invalid_claim("name_invalid"));
+    }
+    Ok(())
+}
+
+fn validate_semantic_revision(value: u64) -> Result<(), AuthorizationError> {
+    if value == 0 {
+        return Err(invalid_claim("revision_invalid"));
+    }
+    Ok(())
+}
+
+const fn invalid_claim(code: &'static str) -> AuthorizationError {
+    AuthorizationError::ClaimsInvalid(code)
+}
+
 /// Loads one PEM `SubjectPublicKeyInfo` through a descriptor-relative, no-follow path walk.
 ///
 /// # Errors
@@ -569,10 +930,13 @@ pub fn load_verification_key(
         ));
     }
     let mode = metadata.permissions().mode() & 0o777;
-    let process_owned = metadata.uid() == expected_owner && matches!(mode, 0o400 | 0o600);
-    let root_group_readable =
-        metadata.uid() == 0 && metadata.gid() == expected_group && matches!(mode, 0o440 | 0o640);
-    if !process_owned && !root_group_readable {
+    if !verification_key_metadata_allowed(
+        metadata.uid(),
+        metadata.gid(),
+        mode,
+        expected_owner,
+        expected_group,
+    ) {
         return Err(invalid(
             "Controller command verification key owner/mode must be process 0400/0600 or root:process-group 0440/0640",
         ));
@@ -588,6 +952,17 @@ pub fn load_verification_key(
         .map_err(|_| invalid("Controller command verification key PEM must be UTF-8"))?;
     VerifyingKey::from_public_key_pem(text)
         .map_err(|_| invalid("Controller command verification key must be Ed25519 SPKI PEM"))
+}
+
+const fn verification_key_metadata_allowed(
+    uid: u32,
+    gid: u32,
+    mode: u32,
+    expected_owner: u32,
+    expected_group: u32,
+) -> bool {
+    (uid == expected_owner && matches!(mode, 0o400 | 0o600))
+        || (uid == 0 && gid == expected_group && matches!(mode, 0o440 | 0o640))
 }
 
 fn validate_directory(directory: &File, process_uid: u32) -> Result<(), io::Error> {
@@ -898,6 +1273,32 @@ mod tests {
         fs::remove_file(&link_path).expect("remove link");
         fs::remove_file(&key_path).expect("remove key");
         fs::remove_dir(&directory).expect("remove test directory");
+    }
+
+    #[test]
+    fn shared_agent_privd_key_requires_root_group_readable_metadata() {
+        let agent_owner = 997;
+        let agent_group = 998;
+        let allowed_for_agent = |uid, gid, mode| {
+            verification_key_metadata_allowed(uid, gid, mode, agent_owner, agent_group)
+        };
+        let allowed_for_privd =
+            |uid, gid, mode| verification_key_metadata_allowed(uid, gid, mode, 0, agent_group);
+
+        for mode in [0o440, 0o640] {
+            assert!(allowed_for_agent(0, agent_group, mode));
+            assert!(allowed_for_privd(0, agent_group, mode));
+        }
+
+        for mode in [0o400, 0o600] {
+            assert!(allowed_for_agent(agent_owner, agent_group, mode));
+            assert!(!allowed_for_privd(agent_owner, agent_group, mode));
+            assert!(!allowed_for_agent(0, agent_group, mode));
+            assert!(allowed_for_privd(0, agent_group, mode));
+        }
+
+        assert!(!allowed_for_agent(0, agent_group + 1, 0o640));
+        assert!(!allowed_for_privd(0, agent_group + 1, 0o640));
     }
 
     fn load_fixture() -> Value {

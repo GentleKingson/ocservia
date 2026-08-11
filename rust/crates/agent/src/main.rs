@@ -12,11 +12,8 @@ use ocservia_agent::{
     MAX_COMMAND_BYTES, MAX_WRITE_QUEUE, PrivdClient,
 };
 use ocservia_agent_protocol::{
-    CertificateCsrRequest, CertificateP12Request, CertificateRevokeRequest, ConfigApplyRequest,
-    ConfigPlanRequest, DesiredEffectObserveRequest, DesiredEffectState, ErrorKind,
-    GroupApplyRequest, IpBanRemoveRequest, MAX_MANAGED_RESOURCES, PrivdResponse,
-    ServiceReloadRequest, SessionMutationRequest, UserDisableRequest, UserEnableRequest,
-    UserSecretRequest, privd_request, privd_response,
+    DesiredEffectState, ErrorKind, MAX_MANAGED_RESOURCES, PrivdResponse, privd_request,
+    privd_response,
 };
 use ocservia_command_authorization::{
     ControllerCommandKeyring, VerifiedSessionGrant, load_verification_key,
@@ -570,119 +567,7 @@ async fn execute_external_command(
             return Err(CommandError::Rejected("delivery_mode_invalid"));
         }
     };
-    let operation = match envelope.payload.as_ref() {
-        Some(command_envelope::Payload::SessionDisconnect(payload)) => {
-            privd_request::Operation::SessionDisconnect(SessionMutationRequest {
-                session_id: payload.session_id.clone(),
-                boot_id: payload.boot_id.clone(),
-            })
-        }
-        Some(command_envelope::Payload::SessionTerminate(payload)) => {
-            privd_request::Operation::SessionTerminate(SessionMutationRequest {
-                session_id: payload.session_id.clone(),
-                boot_id: payload.boot_id.clone(),
-            })
-        }
-        Some(command_envelope::Payload::IpBanRemove(payload)) => {
-            privd_request::Operation::IpBanRemove(IpBanRemoveRequest {
-                ip: payload.ip.clone(),
-            })
-        }
-        Some(command_envelope::Payload::ServiceReload(_)) => {
-            privd_request::Operation::ServiceReload(ServiceReloadRequest {})
-        }
-        Some(command_envelope::Payload::UserCreate(payload)) => {
-            privd_request::Operation::UserCreate(UserSecretRequest {
-                username: payload.username.clone(),
-                sealed_password: payload.sealed_password.clone(),
-                secret_key_id: payload.secret_key_id.clone(),
-                desired_revision: payload.desired_revision,
-            })
-        }
-        Some(command_envelope::Payload::UserDisable(payload)) => {
-            privd_request::Operation::UserDisable(UserDisableRequest {
-                username: payload.username.clone(),
-                desired_revision: payload.desired_revision,
-            })
-        }
-        Some(command_envelope::Payload::UserEnable(payload)) => {
-            privd_request::Operation::UserEnable(UserEnableRequest {
-                username: payload.username.clone(),
-                desired_revision: payload.desired_revision,
-            })
-        }
-        Some(command_envelope::Payload::UserPasswordRotate(payload)) => {
-            privd_request::Operation::UserPasswordRotate(UserSecretRequest {
-                username: payload.username.clone(),
-                sealed_password: payload.sealed_password.clone(),
-                secret_key_id: payload.secret_key_id.clone(),
-                desired_revision: payload.desired_revision,
-            })
-        }
-        Some(command_envelope::Payload::GroupApply(payload)) => {
-            privd_request::Operation::GroupApply(GroupApplyRequest {
-                group_name: payload.group_name.clone(),
-                members: payload.members.clone(),
-                desired_revision: payload.desired_revision,
-            })
-        }
-        Some(command_envelope::Payload::ConfigPlan(payload)) => {
-            privd_request::Operation::ConfigPlan(ConfigPlanRequest {
-                candidate: payload.candidate.clone(),
-                candidate_hash: payload.candidate_hash.clone(),
-            })
-        }
-        Some(command_envelope::Payload::ConfigApply(payload)) => {
-            privd_request::Operation::ConfigApply(ConfigApplyRequest {
-                candidate: payload.candidate.clone(),
-                candidate_hash: payload.candidate_hash.clone(),
-                expected_current_hash: payload.expected_current_hash.clone(),
-                desired_revision: payload.desired_revision,
-            })
-        }
-        Some(command_envelope::Payload::CertificateCsr(payload)) => {
-            privd_request::Operation::CertificateCsr(CertificateCsrRequest {
-                certificate_id: payload.certificate_id.clone(),
-                common_name: payload.common_name.clone(),
-                dns_names: payload.dns_names.clone(),
-                key_bits: payload.key_bits,
-            })
-        }
-        Some(command_envelope::Payload::CertificateRevoke(payload)) => {
-            privd_request::Operation::CertificateRevoke(CertificateRevokeRequest {
-                certificate_id: payload.certificate_id.clone(),
-            })
-        }
-        Some(command_envelope::Payload::CertificateP12(payload)) => {
-            privd_request::Operation::CertificateP12(CertificateP12Request {
-                certificate_id: payload.certificate_id.clone(),
-                artifact_id: payload.artifact_id.clone(),
-                certificate_chain_pem: payload.certificate_chain_pem.clone(),
-                sealed_password: payload.sealed_password.clone(),
-                secret_key_id: payload.secret_key_id.clone(),
-            })
-        }
-        _ => return Err(CommandError::Rejected("capability_rejected")),
-    };
-    let expires_at = envelope
-        .expires_at
-        .as_ref()
-        .ok_or(CommandError::Rejected("expires_at_missing"))?
-        .seconds;
-    let response = if desired_resource(envelope).is_some() {
-        session
-            .privd
-            .call_desired(
-                operation,
-                &envelope.command_id,
-                &envelope.idempotency_key,
-                &envelope.semantic_payload_sha256,
-                expires_at,
-            )
-            .await
-    } else {
-        session.privd.call(operation).await
-    };
+    let response = session.privd.call_command(envelope).await;
     match response {
         Ok(response) => match response.result {
             Some(privd_response::Result::Mutation(result)) if result.applied => {
@@ -855,43 +740,26 @@ async fn observe_external_effect(
     let Some(payload) = envelope.payload.as_ref() else {
         return ExternalEffectObservation::Unknown;
     };
-    let operation = match payload {
+    let response = match payload {
         command_envelope::Payload::SessionDisconnect(_)
         | command_envelope::Payload::SessionTerminate(_) => {
-            privd_request::Operation::SessionList(ocservia_agent_protocol::ReadRequest {})
+            privd
+                .call(privd_request::Operation::SessionList(
+                    ocservia_agent_protocol::ReadRequest {},
+                ))
+                .await
         }
         command_envelope::Payload::IpBanRemove(_) => {
-            privd_request::Operation::IpBanList(ocservia_agent_protocol::ReadRequest {})
+            privd
+                .call(privd_request::Operation::IpBanList(
+                    ocservia_agent_protocol::ReadRequest {},
+                ))
+                .await
         }
         payload if desired_effect_identity(payload).is_some() => {
-            let Some((mutation_kind, resource_key, desired_revision)) =
-                desired_effect_identity(payload)
-            else {
-                return ExternalEffectObservation::Unknown;
-            };
-            privd_request::Operation::DesiredEffectObserve(DesiredEffectObserveRequest {
-                mutation_kind: mutation_kind.to_owned(),
-                resource_key: resource_key.to_owned(),
-                desired_revision,
-            })
+            privd.call_reconcile(envelope).await
         }
         _ => return ExternalEffectObservation::Unknown,
-    };
-    let response = if desired_effect_identity(payload).is_some() {
-        let Some(expires_at) = envelope.expires_at.as_ref() else {
-            return ExternalEffectObservation::Unknown;
-        };
-        privd
-            .call_desired(
-                operation,
-                &envelope.command_id,
-                &envelope.idempotency_key,
-                &envelope.semantic_payload_sha256,
-                expires_at.seconds,
-            )
-            .await
-    } else {
-        privd.call(operation).await
     };
     let Ok(response) = response else {
         return ExternalEffectObservation::Unknown;
@@ -1605,12 +1473,20 @@ mod tests {
         let server = tokio::spawn(async move {
             let (mut stream, _) = listener.accept().await.expect("accept");
             let request: PrivdRequest = read_frame(&mut stream).await.expect("request");
-            let Some(privd_request::Operation::DesiredEffectObserve(observe)) = request.operation
+            assert!(request.operation.is_none());
+            assert_eq!(
+                ocservia_agent_protocol::PrivilegedRequestMode::try_from(request.privileged_mode)
+                    .expect("privileged mode"),
+                ocservia_agent_protocol::PrivilegedRequestMode::Reconcile
+            );
+            let Some(CommandEnvelope {
+                payload: Some(command_envelope::Payload::UserPasswordRotate(observe)),
+                ..
+            }) = request.authorization_command
             else {
                 panic!("desired effect observation required")
             };
-            assert_eq!(observe.mutation_kind, "user_password_rotate");
-            assert_eq!(observe.resource_key, "alice");
+            assert_eq!(observe.username, "alice");
             assert_eq!(observe.desired_revision, 7);
             write_frame(
                 &mut stream,
@@ -1684,13 +1560,14 @@ mod tests {
             let server = tokio::spawn(async move {
                 let (mut stream, _) = listener.accept().await.expect("accept");
                 let request: PrivdRequest = read_frame(&mut stream).await.expect("request");
-                let Some(privd_request::Operation::DesiredEffectObserve(observe)) =
-                    request.operation
+                assert!(request.operation.is_none());
+                let Some(CommandEnvelope {
+                    payload: Some(command_envelope::Payload::ConfigApply(observe)),
+                    ..
+                }) = request.authorization_command
                 else {
                     panic!("config desired-effect observation required")
                 };
-                assert_eq!(observe.mutation_kind, "config_apply");
-                assert_eq!(observe.resource_key, "ocserv.conf");
                 assert_eq!(observe.desired_revision, 2);
                 write_frame(
                     &mut stream,

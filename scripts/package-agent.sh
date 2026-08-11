@@ -34,7 +34,7 @@ install -m 0644 "${ROOT}/deploy/systemd/agent.env.example" "${ROOT}/deploy/syste
 install -m 0644 "${ROOT}/deploy/production/systemd/ocservia-agent-relays.conf" \
   "${ROOT}/deploy/production/systemd/relays.env.example" "${package_root}/deploy/production/systemd/"
 install -m 0755 "${ROOT}/scripts/install-agent.sh" "${ROOT}/scripts/upgrade-agent.sh" \
-  "${ROOT}/scripts/uninstall-agent.sh" "${package_root}/scripts/"
+  "${ROOT}/scripts/rollback-agent.sh" "${ROOT}/scripts/uninstall-agent.sh" "${package_root}/scripts/"
 printf 'version=%s\nagent_protocol=1.1\nplatform_compatibility=N,N-1 minor\n' "${VERSION}" >"${package_root}/MANIFEST"
 
 archive="${OUTPUT_DIR}/ocservia-agent-${VERSION}-linux-amd64.tar.gz"

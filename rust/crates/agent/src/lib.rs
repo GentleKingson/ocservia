@@ -9,7 +9,8 @@ use std::path::Path;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use ocservia_agent_protocol::{
-    PrivdRequest, PrivdResponse, ReadRequest, privd_request, read_frame, write_frame,
+    PrivdRequest, PrivdResponse, PrivilegedRequestMode, ReadRequest, privd_request, read_frame,
+    write_frame,
 };
 use ocservia_command_authorization::ControllerCommandKeyring;
 use ocservia_command_journal::{
@@ -925,12 +926,6 @@ fn semantic_payload_hash(envelope: &CommandEnvelope) -> Result<[u8; 32], Command
     Ok(hash.finalize().into())
 }
 
-/// Domain separator for v1 canonical semantic hashes.
-///
-/// Includes the trailing `0x00` terminator required by
-/// `docs/development/command-semantic-hash-v1.md`.
-const SEMANTIC_HASH_V1_DOMAIN_SEPARATOR: &[u8] = b"ocservia.command.semantic-hash.v1\0";
-
 /// Computes the versioned canonical semantic hash (v1) for a command envelope.
 ///
 /// Follows `docs/development/command-semantic-hash-v1.md`. The preimage is
@@ -942,7 +937,8 @@ const SEMANTIC_HASH_V1_DOMAIN_SEPARATOR: &[u8] = b"ocservia.command.semantic-has
 /// Rejects unsupported payload types.
 #[allow(clippy::too_many_lines)]
 pub fn semantic_payload_hash_v1(envelope: &CommandEnvelope) -> Result<[u8; 32], CommandError> {
-    canonical_semantic_payload_hash(envelope, SemanticPayloadHashVersion::V1)
+    ocservia_command_authorization::semantic_payload_hash_v1(envelope)
+        .map_err(|error| CommandError::Rejected(error.code()))
 }
 
 /// Computes semantic hash v2, which additionally binds the `ConfigPlan` desired
@@ -952,182 +948,8 @@ pub fn semantic_payload_hash_v1(envelope: &CommandEnvelope) -> Result<[u8; 32], 
 ///
 /// Rejects malformed or unsupported typed command payloads.
 pub fn semantic_payload_hash_v2(envelope: &CommandEnvelope) -> Result<[u8; 32], CommandError> {
-    canonical_semantic_payload_hash(envelope, SemanticPayloadHashVersion::V2)
-}
-
-#[allow(clippy::too_many_lines)]
-fn canonical_semantic_payload_hash(
-    envelope: &CommandEnvelope,
-    version: SemanticPayloadHashVersion,
-) -> Result<[u8; 32], CommandError> {
-    let (payload_kind, canonical_payload) = match envelope.payload.as_ref() {
-        Some(command_envelope::Payload::SyntheticNoop(_)) => (107_u32, Vec::new()),
-        Some(command_envelope::Payload::SyntheticEcho(payload)) => {
-            let utf8 = payload.message.as_bytes();
-            let mut out = Vec::with_capacity(4 + utf8.len());
-            out.extend_from_slice(
-                &u32::try_from(utf8.len())
-                    .map_err(|_| CommandError::Rejected("payload_size_invalid"))?
-                    .to_be_bytes(),
-            );
-            out.extend_from_slice(utf8);
-            (108_u32, out)
-        }
-        Some(command_envelope::Payload::SessionDisconnect(payload)) => (
-            100_u32,
-            canonical_session_payload(&payload.session_id, &payload.boot_id)?,
-        ),
-        Some(command_envelope::Payload::ServiceReload(_)) => (105_u32, Vec::new()),
-        Some(command_envelope::Payload::ConfigPlan(payload)) => {
-            if payload.candidate_hash.len() != 32 {
-                return Err(CommandError::Rejected("candidate_hash_invalid"));
-            }
-            let mut out = Vec::with_capacity(40);
-            out.extend_from_slice(&payload.candidate_hash);
-            if version == SemanticPayloadHashVersion::V2 {
-                out.extend_from_slice(&payload.expected_revision.to_be_bytes());
-            }
-            (103_u32, out)
-        }
-        Some(command_envelope::Payload::ConfigApply(payload)) => {
-            if payload.candidate_hash.len() != 32
-                || payload.expected_current_hash.len() != 32
-                || payload.desired_revision == 0
-            {
-                return Err(CommandError::Rejected("config_apply_invalid"));
-            }
-            let mut out = Vec::with_capacity(72);
-            out.extend_from_slice(&payload.candidate_hash);
-            out.extend_from_slice(&payload.expected_current_hash);
-            out.extend_from_slice(&payload.desired_revision.to_be_bytes());
-            (104_u32, out)
-        }
-        Some(command_envelope::Payload::CertificateCsr(payload)) => {
-            if payload.certificate_id.len() != 16
-                || payload.common_name.is_empty()
-                || payload.dns_names.len() > 32
-                || !matches!(payload.key_bits, 2048 | 3072 | 4096)
-            {
-                return Err(CommandError::Rejected("certificate_csr_invalid"));
-            }
-            let values = std::iter::once(payload.common_name.as_str())
-                .chain(payload.dns_names.iter().map(String::as_str))
-                .collect::<Vec<_>>();
-            (
-                117_u32,
-                canonical_strings_and_bytes(
-                    &values,
-                    &payload.certificate_id,
-                    u64::from(payload.key_bits),
-                )?,
-            )
-        }
-        Some(command_envelope::Payload::CertificateP12(payload)) => {
-            if payload.certificate_id.len() != 16
-                || payload.artifact_id.len() != 16
-                || payload.certificate_chain_pem.len() < 64
-                || payload.certificate_chain_pem.len() > 256 * 1024
-                || payload.sealed_password.len() < 32
-                || payload.sealed_password.len() > 16 * 1024
-                || payload.secret_key_id.is_empty()
-            {
-                return Err(CommandError::Rejected("certificate_p12_invalid"));
-            }
-            let mut data = Vec::with_capacity(
-                payload.certificate_id.len()
-                    + payload.artifact_id.len()
-                    + payload.certificate_chain_pem.len()
-                    + payload.sealed_password.len(),
-            );
-            data.extend_from_slice(&payload.certificate_id);
-            data.extend_from_slice(&payload.artifact_id);
-            data.extend_from_slice(&payload.certificate_chain_pem);
-            data.extend_from_slice(&payload.sealed_password);
-            (
-                118_u32,
-                canonical_strings_and_bytes(&[payload.secret_key_id.as_str()], &data, 0)?,
-            )
-        }
-        Some(command_envelope::Payload::CertificateRevoke(payload)) => {
-            if payload.certificate_id.len() != 16
-                || payload.reason.is_empty()
-                || payload.reason.len() > 128
-            {
-                return Err(CommandError::Rejected("certificate_revoke_invalid"));
-            }
-            (
-                119_u32,
-                canonical_strings_and_bytes(
-                    &[payload.reason.as_str()],
-                    &payload.certificate_id,
-                    0,
-                )?,
-            )
-        }
-        Some(command_envelope::Payload::SessionTerminate(payload)) => (
-            112_u32,
-            canonical_session_payload(&payload.session_id, &payload.boot_id)?,
-        ),
-        Some(command_envelope::Payload::IpBanRemove(payload)) => {
-            let utf8 = payload.ip.as_bytes();
-            let mut out = Vec::with_capacity(4 + utf8.len());
-            out.extend_from_slice(
-                &u32::try_from(utf8.len())
-                    .map_err(|_| CommandError::Rejected("payload_size_invalid"))?
-                    .to_be_bytes(),
-            );
-            out.extend_from_slice(utf8);
-            (113_u32, out)
-        }
-        Some(command_envelope::Payload::UserCreate(payload)) => (
-            101_u32,
-            canonical_secret_payload(
-                &payload.username,
-                &payload.secret_key_id,
-                &payload.sealed_password,
-                payload.desired_revision,
-            )?,
-        ),
-        Some(command_envelope::Payload::UserDisable(payload)) => (
-            102_u32,
-            canonical_named_payload(&payload.username, &[], payload.desired_revision)?,
-        ),
-        Some(command_envelope::Payload::UserPasswordRotate(payload)) => (
-            114_u32,
-            canonical_secret_payload(
-                &payload.username,
-                &payload.secret_key_id,
-                &payload.sealed_password,
-                payload.desired_revision,
-            )?,
-        ),
-        Some(command_envelope::Payload::GroupApply(payload)) => (
-            115_u32,
-            canonical_named_payload(
-                &payload.group_name,
-                &payload.members,
-                payload.desired_revision,
-            )?,
-        ),
-        Some(command_envelope::Payload::UserEnable(payload)) => (
-            116_u32,
-            canonical_named_payload(&payload.username, &[], payload.desired_revision)?,
-        ),
-        _ => return Err(CommandError::Rejected("capability_rejected")),
-    };
-    let mut hash = Sha256::new();
-    match version {
-        SemanticPayloadHashVersion::V1 => hash.update(SEMANTIC_HASH_V1_DOMAIN_SEPARATOR),
-        SemanticPayloadHashVersion::V2 => hash.update(b"ocservia.command.semantic-hash.v2\0"),
-        SemanticPayloadHashVersion::Unspecified => {
-            return Err(CommandError::Rejected("semantic_hash_version_unsupported"));
-        }
-    }
-    hash.update(&envelope.node_id);
-    hash.update(envelope.expected_revision.to_be_bytes());
-    hash.update(payload_kind.to_be_bytes());
-    hash.update(&canonical_payload);
-    Ok(hash.finalize().into())
+    ocservia_command_authorization::semantic_payload_hash_v2(envelope)
+        .map_err(|error| CommandError::Rejected(error.code()))
 }
 
 fn validate_command(
@@ -1405,96 +1227,6 @@ fn validate_sealed_secret(key_id: &str, secret: &[u8], revision: u64) -> Result<
     Ok(())
 }
 
-fn canonical_named_payload(
-    name: &str,
-    values: &[String],
-    revision: u64,
-) -> Result<Vec<u8>, CommandError> {
-    validate_name(name)?;
-    validate_revision(revision)?;
-    let mut all = Vec::with_capacity(values.len() + 1);
-    all.push(name);
-    for value in values {
-        all.push(value);
-    }
-    let mut out = Vec::new();
-    for value in all {
-        out.extend_from_slice(
-            &u32::try_from(value.len())
-                .map_err(|_| CommandError::Rejected("payload_size_invalid"))?
-                .to_be_bytes(),
-        );
-        out.extend_from_slice(value.as_bytes());
-    }
-    out.extend_from_slice(&0_u32.to_be_bytes());
-    out.extend_from_slice(&revision.to_be_bytes());
-    Ok(out)
-}
-fn canonical_secret_payload(
-    name: &str,
-    key_id: &str,
-    secret: &[u8],
-    revision: u64,
-) -> Result<Vec<u8>, CommandError> {
-    validate_name(name)?;
-    validate_sealed_secret(key_id, secret, revision)?;
-    let mut out = Vec::new();
-    for value in [name, key_id] {
-        out.extend_from_slice(
-            &u32::try_from(value.len())
-                .map_err(|_| CommandError::Rejected("payload_size_invalid"))?
-                .to_be_bytes(),
-        );
-        out.extend_from_slice(value.as_bytes());
-    }
-    out.extend_from_slice(
-        &u32::try_from(secret.len())
-            .map_err(|_| CommandError::Rejected("payload_size_invalid"))?
-            .to_be_bytes(),
-    );
-    out.extend_from_slice(secret);
-    out.extend_from_slice(&revision.to_be_bytes());
-    Ok(out)
-}
-
-fn canonical_strings_and_bytes(
-    values: &[&str],
-    bytes: &[u8],
-    revision: u64,
-) -> Result<Vec<u8>, CommandError> {
-    let mut out = Vec::new();
-    for value in values {
-        out.extend_from_slice(
-            &u32::try_from(value.len())
-                .map_err(|_| CommandError::Rejected("payload_size_invalid"))?
-                .to_be_bytes(),
-        );
-        out.extend_from_slice(value.as_bytes());
-    }
-    out.extend_from_slice(
-        &u32::try_from(bytes.len())
-            .map_err(|_| CommandError::Rejected("payload_size_invalid"))?
-            .to_be_bytes(),
-    );
-    out.extend_from_slice(bytes);
-    out.extend_from_slice(&revision.to_be_bytes());
-    Ok(out)
-}
-
-fn canonical_session_payload(session_id: &str, boot_id: &str) -> Result<Vec<u8>, CommandError> {
-    validate_session_payload(session_id, boot_id)?;
-    let mut out = Vec::with_capacity(8 + session_id.len() + boot_id.len());
-    for value in [session_id.as_bytes(), boot_id.as_bytes()] {
-        out.extend_from_slice(
-            &u32::try_from(value.len())
-                .map_err(|_| CommandError::Rejected("payload_size_invalid"))?
-                .to_be_bytes(),
-        );
-        out.extend_from_slice(value);
-    }
-    Ok(out)
-}
-
 fn fixed<const N: usize>(value: &[u8], code: &'static str) -> Result<[u8; N], CommandError> {
     value.try_into().map_err(|_| CommandError::Rejected(code))
 }
@@ -1592,39 +1324,48 @@ impl PrivdClient {
         &self,
         operation: privd_request::Operation,
     ) -> Result<PrivdResponse, io::Error> {
-        self.call_inner(operation, &[], &[], &[], 0, self.timeout)
-            .await
+        self.call_inner(
+            Some(operation),
+            None,
+            PrivilegedRequestMode::Unspecified,
+            self.timeout,
+        )
+        .await
     }
 
-    /// Calls one desired-state operation with its stable non-secret command identity.
+    /// Sends one original Controller-signed command for independent privd
+    /// verification and execution.
     ///
     /// # Errors
     ///
-    /// Returns an I/O or deadline error and rejects malformed identity lengths.
-    pub async fn call_desired(
+    /// Returns an I/O or deadline error.
+    pub async fn call_command(
         &self,
-        operation: privd_request::Operation,
-        command_id: &[u8],
-        idempotency_key: &[u8],
-        semantic_payload_sha256: &[u8],
-        expires_at_unix_seconds: i64,
+        command: &CommandEnvelope,
     ) -> Result<PrivdResponse, io::Error> {
-        if command_id.len() != 16
-            || idempotency_key.len() != 16
-            || semantic_payload_sha256.len() != 32
-            || expires_at_unix_seconds <= 0
-        {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "desired effect identity invalid",
-            ));
-        }
         self.call_inner(
-            operation,
-            command_id,
-            idempotency_key,
-            semantic_payload_sha256,
-            expires_at_unix_seconds,
+            None,
+            Some(command),
+            PrivilegedRequestMode::Execute,
+            self.desired_timeout,
+        )
+        .await
+    }
+
+    /// Sends a Controller-signed reconciliation command. Privd derives the
+    /// exact effect identity from the signed typed payload.
+    ///
+    /// # Errors
+    ///
+    /// Returns an I/O or deadline error.
+    pub async fn call_reconcile(
+        &self,
+        command: &CommandEnvelope,
+    ) -> Result<PrivdResponse, io::Error> {
+        self.call_inner(
+            None,
+            Some(command),
+            PrivilegedRequestMode::Reconcile,
             self.desired_timeout,
         )
         .await
@@ -1632,11 +1373,9 @@ impl PrivdClient {
 
     async fn call_inner(
         &self,
-        operation: privd_request::Operation,
-        command_id: &[u8],
-        idempotency_key: &[u8],
-        semantic_payload_sha256: &[u8],
-        expires_at_unix_seconds: i64,
+        operation: Option<privd_request::Operation>,
+        command: Option<&CommandEnvelope>,
+        mode: PrivilegedRequestMode,
         timeout: Duration,
     ) -> Result<PrivdResponse, io::Error> {
         let deadline = SystemTime::now()
@@ -1649,11 +1388,9 @@ impl PrivdClient {
         let request = PrivdRequest {
             request_id: Uuid::now_v7().as_bytes().to_vec(),
             deadline_unix_ms,
-            command_id: command_id.to_vec(),
-            idempotency_key: idempotency_key.to_vec(),
-            semantic_payload_sha256: semantic_payload_sha256.to_vec(),
-            command_expires_at_unix_seconds: expires_at_unix_seconds,
-            operation: Some(operation),
+            authorization_command: command.cloned(),
+            privileged_mode: mode.into(),
+            operation,
         };
         let transport_deadline = tokio::time::Instant::now() + timeout;
         let mut stream =

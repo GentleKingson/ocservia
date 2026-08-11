@@ -9,7 +9,7 @@ publish = false
 [dependencies]
 ed25519-dalek.workspace = true
 hex.workspace = true
-ocservia-contracts = { version = "=0.1.0", path = "../contracts" }
+ocservia-contracts = { version = "=0.1.0", path = "../contracts", default-features = false }
 rustix.workspace = true
 sha2.workspace = true
 

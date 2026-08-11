@@ -7,6 +7,7 @@ pub mod ocserv {
                 include!("ocserv/platform/agent/v1/ocserv.platform.agent.v1.rs");
             }
         }
+        #[cfg(feature = "transport")]
         pub mod transport {
             pub mod v1 {
                 include!("ocserv/platform/transport/v1/ocserv.platform.transport.v1.rs");

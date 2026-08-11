@@ -38,7 +38,7 @@ if awk -F/ '$1 == "" || $0 ~ /(^|\/)\.\.($|\/)/ { bad = 1 } END { exit bad ? 0 :
   echo "package contains an unsafe path" >&2
   exit 1
 fi
-for required in MANIFEST scripts/install-agent.sh scripts/upgrade-agent.sh scripts/uninstall-agent.sh rust/target/release/ocservia-agent rust/target/release/ocservia-privd; do
+for required in MANIFEST scripts/install-agent.sh scripts/upgrade-agent.sh scripts/rollback-agent.sh scripts/uninstall-agent.sh rust/target/release/ocservia-agent rust/target/release/ocservia-privd; do
   if ! grep -Eq "^[^/]+/${required}$" "${archive_listing}"; then
     echo "package is missing ${required}" >&2
     exit 1
