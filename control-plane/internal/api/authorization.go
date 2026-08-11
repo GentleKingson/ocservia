@@ -85,9 +85,23 @@ func (s *Server) authorizeRoute(r *http.Request, principal auth.Principal) (cont
 			return nil, getErr
 		}
 		scopes, scopeErr := s.approvals.AuthorityResources(r.Context(), approvalID)
-		if scopeErr == nil && len(scopes) > 0 {
-			resource = rbac.Resource{WorkspaceID: scopes[0].WorkspaceID, Type: scopes[0].Type, ID: scopes[0].ID}
-		} else if approval.ResourceType == "config_plan" {
+		if scopeErr != nil {
+			return nil, scopeErr
+		}
+		if len(scopes) > 0 {
+			for _, scope := range scopes {
+				if scope.WorkspaceID != approval.WorkspaceID {
+					return nil, rbac.ErrForbidden
+				}
+				resource = rbac.Resource{WorkspaceID: scope.WorkspaceID, Type: scope.Type, ID: scope.ID}
+				if err := s.rbac.Authorize(r.Context(), principal.IdentityID, action, resource, principal.BreakGlass); err != nil {
+					return nil, err
+				}
+			}
+			ctx := context.WithValue(r.Context(), principalKey{}, principal)
+			return context.WithValue(ctx, workspaceKey{}, approval.WorkspaceID), nil
+		}
+		if approval.ResourceType == "config_plan" {
 			if s.configplans == nil {
 				return nil, pgx.ErrNoRows
 			}
