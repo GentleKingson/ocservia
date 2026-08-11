@@ -309,7 +309,7 @@ func TestCertificateIssueArtifactAndRevokeIntegration(t *testing.T) {
 	}
 	crashArtifactID := uuid.Must(uuid.NewV7())
 	crashApprovalID := approvedCertificateAction(t, ctx, service, approvalService, workspaceID, nodeID, certificate.ID, requesterID, requesterSession, approverID, approverSession, "certificate.private_key.export", certificateAfterMaintenance.Version, "certificate_p12", crashArtifactID)
-	crashGrant, _, err := service.CreateP12(ctx, P12Request{CertificateID: certificate.ID, ApprovalID: crashApprovalID, ArtifactRequestID: crashArtifactID, CertificateVersion: certificateAfterMaintenance.Version, ActorIdentityID: requesterID, ActorSessionID: requesterSession, ExpectedVersion: 1, IdempotencyKey: "i17-p12-crash-recovery", Reason: "test crash recovery", RequestID: "p12-crash-recovery"})
+	crashGrant, _, err := service.CreateP12(ctx, P12Request{CertificateID: certificate.ID, ApprovalID: crashApprovalID, ArtifactRequestID: crashArtifactID, CertificateVersion: certificateAfterMaintenance.Version, ActorIdentityID: requesterID, ActorSessionID: requesterSession, ExpectedVersion: 1, IdempotencyKey: "i17-p12-crash-recovery", Reason: "test crash recovery", RequestID: "p12-crash-recovery", Traceparent: "00-3123456789abcdef0123456789abcdef-1123456789abcdef-01"})
 	if err != nil {
 		t.Fatal(err)
 	}
