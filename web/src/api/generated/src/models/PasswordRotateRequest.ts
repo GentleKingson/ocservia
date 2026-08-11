@@ -13,6 +13,14 @@
  */
 
 import { mapValues } from "../runtime";
+import type { UserPasswordSealedSecretV1 } from "./UserPasswordSealedSecretV1";
+import {
+  UserPasswordSealedSecretV1FromJSON,
+  UserPasswordSealedSecretV1FromJSONTyped,
+  UserPasswordSealedSecretV1ToJSON,
+  UserPasswordSealedSecretV1ToJSONTyped,
+} from "./UserPasswordSealedSecretV1";
+
 /**
  *
  * @export
@@ -21,16 +29,10 @@ import { mapValues } from "../runtime";
 export interface PasswordRotateRequest {
   /**
    *
-   * @type {string}
+   * @type {UserPasswordSealedSecretV1}
    * @memberof PasswordRotateRequest
    */
-  sealedPassword: string;
-  /**
-   *
-   * @type {string}
-   * @memberof PasswordRotateRequest
-   */
-  secretKeyId: string;
+  sealedPassword: UserPasswordSealedSecretV1;
   /**
    *
    * @type {string}
@@ -64,13 +66,6 @@ export function instanceOfPasswordRotateRequest(
       (value as Record<string, any>)["sealed_password"] === undefined)
   )
     return false;
-  if (
-    (!("secretKeyId" in (value as Record<string, any>)) &&
-      !("secret_key_id" in (value as Record<string, any>))) ||
-    ((value as Record<string, any>)["secretKeyId"] === undefined &&
-      (value as Record<string, any>)["secret_key_id"] === undefined)
-  )
-    return false;
   if (!("reason" in value) || value["reason"] === undefined) return false;
   return true;
 }
@@ -89,8 +84,7 @@ export function PasswordRotateRequestFromJSONTyped(
     return json;
   }
   return {
-    sealedPassword: json["sealed_password"],
-    secretKeyId: json["secret_key_id"],
+    sealedPassword: UserPasswordSealedSecretV1FromJSON(json["sealed_password"]),
     reason: json["reason"],
     expectedVersion:
       json["expected_version"] == null ? undefined : json["expected_version"],
@@ -111,8 +105,7 @@ export function PasswordRotateRequestToJSONTyped(
   }
 
   return {
-    sealed_password: value["sealedPassword"],
-    secret_key_id: value["secretKeyId"],
+    sealed_password: UserPasswordSealedSecretV1ToJSON(value["sealedPassword"]),
     reason: value["reason"],
     expected_version: value["expectedVersion"],
     ttl_seconds: value["ttlSeconds"],

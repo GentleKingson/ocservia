@@ -48,19 +48,32 @@ sudo ./scripts/install-agent.sh
 ```
 
 Before enabling the units, install the independently provisioned Controller
-command verification key and edit `/etc/ocservia-agent/agent.env` with its path,
-the approved controller EndpointID, and the node UUID:
+command verification key and two distinct RSA private keys for user-password
+and P12-password unsealing. Edit `/etc/ocservia-agent/agent.env` with the
+Controller key path, controller EndpointID, node UUID, distinct sealing key
+IDs, and the lowercase SHA-256 of each public key's DER encoding:
 
 ```bash
 sudo install -o root -g ocserv-agent -m 0640 \
   controller-command-verification-key.pem \
   /etc/ocservia-agent/controller-command-verification-key.pem
+sudo install -o root -g root -m 0600 user-password-seal-private.pem \
+  /etc/ocservia-agent/user-password-seal-private.pem
+sudo install -o root -g root -m 0600 p12-password-seal-private.pem \
+  /etc/ocservia-agent/p12-password-seal-private.pem
 ```
 
-Both services refuse production startup without this pinned Ed25519 public key.
-They independently validate it with no-follow, owner, mode, regular-file,
-single-link, and safe-ancestry checks. Privd also reads the configured `NODE_ID`
+Both services refuse production startup without the pinned Ed25519 public key
+and exact purpose-separated sealing key configuration. Privd derives each RSA
+public key at startup, compares it with the enrolled fingerprint, and refuses
+reused key pairs.
+The command verification key uses descriptor-relative no-follow loading; the
+sealing keys require root ownership, private mode, regular single-link files,
+and safe ancestry. Privd also reads the configured `NODE_ID`
 and rejects a valid Controller proof for any other node.
+Enrollment signs and persists both public-key descriptors. Later sessions and
+password operations fail closed if the advertised or selected key ID no longer
+matches that enrollment binding.
 
 Then enable the services:
 

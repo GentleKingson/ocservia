@@ -431,8 +431,12 @@ export async function createUser(
       ifMatch: request.ifMatch,
       userCreateRequest: {
         name,
-        sealedPassword,
-        secretKeyId,
+        sealedPassword: {
+          version: 1,
+          purpose: "user_password",
+          keyId: secretKeyId,
+          ciphertext: sealedPassword,
+        },
         reason: request.reason,
         expectedVersion: request.expectedVersion,
         ttlSeconds: request.ttlSeconds,
@@ -504,8 +508,12 @@ export async function rotateUserPassword(
       idempotencyKey: request.idempotencyKey,
       ifMatch: request.ifMatch,
       passwordRotateRequest: {
-        sealedPassword,
-        secretKeyId,
+        sealedPassword: {
+          version: 1,
+          purpose: "user_password",
+          keyId: secretKeyId,
+          ciphertext: sealedPassword,
+        },
         reason: request.reason,
         expectedVersion: version,
         ttlSeconds: request.ttlSeconds,

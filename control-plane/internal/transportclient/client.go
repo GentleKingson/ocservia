@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"time"
 
+	agentv1 "github.com/GentleKingson/ocservia/control-plane/gen/proto/ocserv/platform/agent/v1"
 	transportv1 "github.com/GentleKingson/ocservia/control-plane/gen/proto/ocserv/platform/transport/v1"
 	"github.com/GentleKingson/ocservia/control-plane/internal/udssecurity"
 	"github.com/google/uuid"
@@ -83,15 +84,24 @@ func (c *Client) SendCommand(ctx context.Context, nodeID, envelope []byte) error
 	return nil
 }
 
-func (c *Client) FetchArtifact(ctx context.Context, nodeID, artifactID uuid.UUID, maxBytes int64) (io.ReadCloser, error) {
-	if nodeID == uuid.Nil || artifactID == uuid.Nil || maxBytes < 1 || maxBytes > 64<<20 {
+func (c *Client) FetchArtifact(ctx context.Context, grant *agentv1.ArtifactGrantV1) (io.ReadCloser, error) {
+	if grant == nil || len(grant.GetNodeId()) != 16 || len(grant.GetArtifactId()) != 16 || grant.GetMaxBytes() < 1 || grant.GetMaxBytes() > 64<<20 {
 		return nil, errors.New("artifact request is invalid")
 	}
+	nodeID, err := uuid.FromBytes(grant.GetNodeId())
+	if err != nil {
+		return nil, errors.New("artifact node is invalid")
+	}
+	artifactID, err := uuid.FromBytes(grant.GetArtifactId())
+	if err != nil {
+		return nil, errors.New("artifact ID is invalid")
+	}
+	maxBytes := int64(grant.GetMaxBytes())
 	connection, err := c.dial()
 	if err != nil {
 		return nil, err
 	}
-	stream, err := transportv1.NewTransportServiceClient(connection).FetchArtifact(ctx, &transportv1.FetchArtifactRequest{NodeId: nodeID[:], ArtifactId: artifactID[:], Purpose: "certificate_p12", MaxBytes: uint64(maxBytes)})
+	stream, err := transportv1.NewTransportServiceClient(connection).FetchArtifact(ctx, &transportv1.FetchArtifactRequest{NodeId: nodeID[:], ArtifactId: artifactID[:], Purpose: "certificate_p12", MaxBytes: uint64(maxBytes), Grant: grant})
 	if err != nil {
 		connection.Close()
 		return nil, fmt.Errorf("fetch artifact: %w", err)
@@ -131,6 +141,32 @@ func (c *Client) FetchArtifact(ctx context.Context, nodeID, artifactID uuid.UUID
 		}
 	}()
 	return reader, nil
+}
+
+func (c *Client) ConsumeArtifact(ctx context.Context, grant *agentv1.ArtifactGrantV1, digest []byte, size int64) error {
+	if grant == nil || len(grant.GetNodeId()) != 16 || len(grant.GetArtifactId()) != 16 || len(grant.GetGrantId()) != 16 || len(digest) != sha256.Size || size < 1 || uint64(size) != grant.GetMaxBytes() {
+		return errors.New("artifact consumption request is invalid")
+	}
+	connection, err := c.dial()
+	if err != nil {
+		return err
+	}
+	defer connection.Close()
+	rpcCtx, cancel := context.WithTimeout(ctx, c.deadline)
+	defer cancel()
+	response, err := transportv1.NewTransportServiceClient(connection).ConsumeArtifact(rpcCtx, &transportv1.ConsumeArtifactRequest{
+		NodeId: grant.GetNodeId(),
+		Grant:  grant,
+		Sha256: bytes.Clone(digest),
+		Size:   uint64(size),
+	})
+	if err != nil {
+		return fmt.Errorf("consume artifact: %w", err)
+	}
+	if !response.GetConsumed() {
+		return errors.New("transport did not consume artifact")
+	}
+	return nil
 }
 
 func (c *Client) RunWatch(ctx context.Context, cursors CursorStore, handler EventHandler) error {

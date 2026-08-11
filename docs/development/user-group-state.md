@@ -4,7 +4,25 @@ Users and groups are scoped to a node. The control plane records desired state, 
 
 Mutations require `Idempotency-Key`, an expected desired version in `If-Match` or the request body, and a reason. Use `revision-0` only when creating a new user or group. Superseding is limited to complete substitutes: group apply replaces an older group apply, password rotation replaces an older password rotation, and enable/disable replace an older queued enable/disable. Create and cross-kind password/lock operations retain their execution order because later commands do not carry the missing password or lock intent.
 
-Password endpoints accept only an RSA-OAEP-SHA256 ciphertext in `sealed_password` plus the node's `secret_key_id`. Plaintext passwords are not accepted by the control plane. The root adapter accepts only its configured key identifier, decrypts with fixed `openssl` arguments and `/etc/ocservia/password-seal-private.pem`, and applies the password to a same-directory staging copy with the fixed `ocpasswd` executable. Create atomically requires the authoritative user record to be absent; rotation atomically requires it to exist. Existing groups and lock state are preserved before the staging file is fsynced and atomically renamed. Each child process has a five-second budget while the complete desired mutation has a 20-second RPC budget. Cancellation-safe cleanup removes its uniquely named staging file, and privd removes only valid stale adapter staging names before accepting requests. A conflict, timeout, cancellation, or failed password change leaves the authoritative record unchanged. Responses, observations, audit events, logs, and traces never contain password material or password hashes. Provision the matching public key and identifier through the node bootstrap channel; the private key must be root-readable only.
+Password endpoints accept only a versioned `SealedSecretV1` with the
+`user_password` purpose, the enrolled user-password key ID, and an
+RSA-OAEP-SHA256 ciphertext. Plaintext passwords and legacy untyped ciphertext
+fields are rejected. The P12 password uses a different enrolled key pair and
+the `certificate_p12_password` purpose, so ciphertext cannot be replayed across
+the two operations. Privd keeps both private keys root-only and independently
+checks the signed typed command before selecting the matching key.
+
+The root adapter decrypts with fixed `openssl` arguments and applies a user
+password to a same-directory staging copy with the fixed `ocpasswd` executable.
+Create atomically requires the authoritative user record to be absent; rotation
+atomically requires it to exist. Existing groups and lock state are preserved
+before the staging file is fsynced and atomically renamed. Each child process
+has a five-second budget while the complete desired mutation has a 20-second
+RPC budget. Cancellation-safe cleanup removes its uniquely named staging file,
+and privd removes only valid stale adapter staging names before accepting
+requests. A conflict, timeout, cancellation, or failed password change leaves
+the authoritative record unchanged. Responses, observations, audit events,
+logs, and traces never contain password material or password hashes.
 
 Plain authentication stores groups in the second field of each `/etc/ocserv/ocpasswd` record. Group apply updates that authoritative field for every affected user, preserves password hashes and lock markers, and commits with a same-directory, fsynced atomic rename. Observed groups are derived from the same records, not a sidecar file. Usernames, group names, and members use the ASCII pattern `^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$`; callers cannot supply executable or file paths.
 

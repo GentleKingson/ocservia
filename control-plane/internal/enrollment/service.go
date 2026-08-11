@@ -200,6 +200,10 @@ func (s *Service) Enroll(ctx context.Context, request *agentv1.EnrollRequest) (*
 			}
 			return nil, fmt.Errorf("check enrollment retry: %w", err)
 		}
+		matching, err := sealingKeysMatch(ctx, tx, *consumedNodeID, request.GetSealingKeys())
+		if err != nil || !matching {
+			return nil, ErrInvalidToken
+		}
 		result := agentv1.HandshakeResult_HANDSHAKE_RESULT_PENDING_APPROVAL
 		if (nodeStatus == "active" || nodeStatus == "offline") && endpointState == "active" {
 			result = agentv1.HandshakeResult_HANDSHAKE_RESULT_ACCEPTED
@@ -212,6 +216,54 @@ func (s *Service) Enroll(ctx context.Context, request *agentv1.EnrollRequest) (*
 		return nil, err
 	}
 	now := s.now().UTC()
+	var existingNodeID uuid.UUID
+	var existingNodeName, existingNodeStatus, existingEndpointState string
+	existingErr := tx.QueryRow(ctx, `SELECT n.id,n.name,n.status,k.state FROM nodes n JOIN node_endpoint_keys k ON k.node_id=n.id
+		WHERE n.workspace_id=$1 AND k.endpoint_id=$2 FOR UPDATE OF n,k`, workspaceID, request.GetEndpointId()).
+		Scan(&existingNodeID, &existingNodeName, &existingNodeStatus, &existingEndpointState)
+	if existingErr == nil {
+		var sealingKeyCount int
+		if err := tx.QueryRow(ctx, `SELECT count(*) FROM node_sealing_keys WHERE node_id=$1`, existingNodeID).Scan(&sealingKeyCount); err != nil {
+			return nil, fmt.Errorf("count existing password sealing keys: %w", err)
+		}
+		capabilitiesMatch, err := supportedCapabilitiesMatch(ctx, tx, existingNodeID, request.GetCapabilities())
+		if err != nil {
+			return nil, fmt.Errorf("verify existing node capabilities: %w", err)
+		}
+		validState := (existingNodeStatus == "active" || existingNodeStatus == "offline") && existingEndpointState == "active" ||
+			existingNodeStatus == "pending" && existingEndpointState == "pending"
+		if sealingKeyCount != 0 || !capabilitiesMatch || !validState || expectedName != nil && *expectedName != existingNodeName {
+			return nil, ErrInvalidToken
+		}
+		sealingKeys := slices.Clone(request.GetSealingKeys())
+		slices.SortFunc(sealingKeys, func(a, b *agentv1.SealingKeyDescriptorV1) int { return int(a.GetPurpose() - b.GetPurpose()) })
+		for _, key := range sealingKeys {
+			if _, err := tx.Exec(ctx, `INSERT INTO node_sealing_keys(node_id,purpose,version,key_id,public_key_sha256,created_at) VALUES($1,$2,$3,$4,$5,$6)`, existingNodeID, key.GetPurpose(), key.GetVersion(), key.GetKeyId(), key.GetPublicKeySha256(), now); err != nil {
+				return nil, fmt.Errorf("bind existing node password sealing key: %w", err)
+			}
+		}
+		command, err := tx.Exec(ctx, `UPDATE enrollment_tokens SET consumed_at=$1,consumed_node_id=$2 WHERE id=$3 AND consumed_at IS NULL`, now, existingNodeID, tokenID)
+		if err != nil {
+			return nil, fmt.Errorf("consume sealing key enrollment token: %w", err)
+		}
+		if command.RowsAffected() != 1 {
+			return nil, ErrInvalidToken
+		}
+		if err := audit.AppendChain(ctx, tx, audit.ChainRecord{WorkspaceID: workspaceID, ActorType: "agent", ActorID: fmt.Sprintf("endpoint:%x", request.GetEndpointId()), Action: "node.sealing_keys.bind", ResourceType: "node", ResourceID: existingNodeID, RequestID: uuid.Must(uuid.NewV7()).String(), At: now}); err != nil {
+			return nil, err
+		}
+		if err := tx.Commit(ctx); err != nil {
+			return nil, fmt.Errorf("commit existing node password sealing keys: %w", err)
+		}
+		result := agentv1.HandshakeResult_HANDSHAKE_RESULT_PENDING_APPROVAL
+		if existingNodeStatus == "active" || existingNodeStatus == "offline" {
+			result = agentv1.HandshakeResult_HANDSHAKE_RESULT_ACCEPTED
+		}
+		return &agentv1.EnrollResponse{Result: result, NodeId: existingNodeID[:], ControllerEndpointId: s.controllerEndpointID}, nil
+	}
+	if !errors.Is(existingErr, pgx.ErrNoRows) {
+		return nil, fmt.Errorf("lock existing endpoint binding: %w", existingErr)
+	}
 	name := "node-" + fmt.Sprintf("%x", request.GetEndpointId()[:6])
 	var nodeID uuid.UUID
 	claimedLegacyNode := false
@@ -244,6 +296,13 @@ func (s *Service) Enroll(ctx context.Context, request *agentv1.EnrollRequest) (*
 	}
 	if _, err := tx.Exec(ctx, `INSERT INTO node_endpoint_keys (node_id,endpoint_id,state,bound_at) VALUES ($1,$2,'pending',$3)`, nodeID, request.GetEndpointId(), now); err != nil {
 		return nil, fmt.Errorf("bind pending endpoint: %w", err)
+	}
+	sealingKeys := slices.Clone(request.GetSealingKeys())
+	slices.SortFunc(sealingKeys, func(a, b *agentv1.SealingKeyDescriptorV1) int { return int(a.GetPurpose() - b.GetPurpose()) })
+	for _, key := range sealingKeys {
+		if _, err := tx.Exec(ctx, `INSERT INTO node_sealing_keys(node_id,purpose,version,key_id,public_key_sha256,created_at) VALUES($1,$2,$3,$4,$5,$6)`, nodeID, key.GetPurpose(), key.GetVersion(), key.GetKeyId(), key.GetPublicKeySha256(), now); err != nil {
+			return nil, fmt.Errorf("record password sealing key: %w", err)
+		}
 	}
 	for _, capability := range normalizedCapabilities(request.GetCapabilities()) {
 		if _, err := tx.Exec(ctx, `INSERT INTO node_capabilities (node_id,capability,approved) VALUES ($1,$2,false)`, nodeID, capability); err != nil {
@@ -533,6 +592,15 @@ func (s *Service) AuthorizeSession(ctx context.Context, request *transportv1.Aut
 		response.Result = agentv1.HandshakeResult_HANDSHAKE_RESULT_REVOKED
 		return response, nil
 	}
+	matchingSealingKeys, err := sealingKeysMatch(ctx, tx, nodeID, handshake.GetSealingKeys())
+	if err != nil {
+		return nil, fmt.Errorf("verify session sealing keys: %w", err)
+	}
+	legacyReadOnlySealingFallback := len(handshake.GetSealingKeys()) == 0
+	if !matchingSealingKeys && !legacyReadOnlySealingFallback {
+		response.Result = agentv1.HandshakeResult_HANDSHAKE_RESULT_CAPABILITY_REJECTED
+		return response, nil
+	}
 	rows, err := tx.Query(ctx, `SELECT capability FROM node_capabilities WHERE node_id=$1 AND approved=true ORDER BY capability`, nodeID)
 	if err != nil {
 		return nil, err
@@ -551,7 +619,8 @@ func (s *Service) AuthorizeSession(ctx context.Context, request *transportv1.Aut
 	}
 	negotiated := make([]string, 0, len(handshake.GetCapabilities()))
 	for _, capability := range normalizedCapabilities(handshake.GetCapabilities()) {
-		if _, ok := approved[capability]; ok && (handshake.GetProtocolMinor() >= ProtocolMinor || strings.HasSuffix(capability, ".read")) {
+		mutationCapable := handshake.GetProtocolMinor() >= ProtocolMinor && !legacyReadOnlySealingFallback
+		if _, ok := approved[capability]; ok && (mutationCapable || strings.HasSuffix(capability, ".read")) {
 			negotiated = append(negotiated, capability)
 		}
 	}
@@ -590,7 +659,61 @@ func validateEnrollment(request *agentv1.EnrollRequest) error {
 	if !validCapabilities(request.GetCapabilities()) {
 		return errors.New("invalid enrollment capabilities")
 	}
+	keys := slices.Clone(request.GetSealingKeys())
+	slices.SortFunc(keys, func(a, b *agentv1.SealingKeyDescriptorV1) int { return int(a.GetPurpose() - b.GetPurpose()) })
+	if err := validateSealingKeys(keys); err != nil {
+		return err
+	}
 	return nil
+}
+
+func sealingKeysMatch(ctx context.Context, tx pgx.Tx, nodeID uuid.UUID, advertised []*agentv1.SealingKeyDescriptorV1) (bool, error) {
+	keys := slices.Clone(advertised)
+	slices.SortFunc(keys, func(a, b *agentv1.SealingKeyDescriptorV1) int { return int(a.GetPurpose() - b.GetPurpose()) })
+	if err := validateSealingKeys(keys); err != nil {
+		return false, nil
+	}
+	rows, err := tx.Query(ctx, `SELECT purpose,version,key_id,public_key_sha256 FROM node_sealing_keys WHERE node_id=$1 ORDER BY purpose`, nodeID)
+	if err != nil {
+		return false, err
+	}
+	defer rows.Close()
+	index := 0
+	for rows.Next() {
+		if index >= len(keys) {
+			return false, nil
+		}
+		var purpose, version int32
+		var keyID string
+		var digest []byte
+		if err := rows.Scan(&purpose, &version, &keyID, &digest); err != nil {
+			return false, err
+		}
+		key := keys[index]
+		if purpose != int32(key.GetPurpose()) || version != int32(key.GetVersion()) || keyID != key.GetKeyId() || subtle.ConstantTimeCompare(digest, key.GetPublicKeySha256()) != 1 {
+			return false, nil
+		}
+		index++
+	}
+	return index == len(keys), rows.Err()
+}
+
+func supportedCapabilitiesMatch(ctx context.Context, tx pgx.Tx, nodeID uuid.UUID, advertised []string) (bool, error) {
+	want := normalizedCapabilities(advertised)
+	rows, err := tx.Query(ctx, `SELECT capability FROM node_capabilities WHERE node_id=$1 ORDER BY capability`, nodeID)
+	if err != nil {
+		return false, err
+	}
+	defer rows.Close()
+	have := make([]string, 0, len(want))
+	for rows.Next() {
+		var capability string
+		if err := rows.Scan(&capability); err != nil {
+			return false, err
+		}
+		have = append(have, capability)
+	}
+	return slices.Equal(have, want), rows.Err()
 }
 
 func enqueueTrustConvergence(ctx context.Context, tx pgx.Tx, nodeID uuid.UUID, endpointID []byte, state string, revision uint64, reason string, now time.Time) error {

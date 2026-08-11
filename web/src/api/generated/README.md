@@ -194,6 +194,7 @@ All URIs are relative to _/api/v1_
 - [UserGroupResourceState](docs/UserGroupResourceState.md)
 - [UserGroupStatePage](docs/UserGroupStatePage.md)
 - [UserOperationMetrics](docs/UserOperationMetrics.md)
+- [UserPasswordSealedSecretV1](docs/UserPasswordSealedSecretV1.md)
 - [UserPolicy](docs/UserPolicy.md)
 - [UserPolicyRequest](docs/UserPolicyRequest.md)
 - [Workspace](docs/Workspace.md)

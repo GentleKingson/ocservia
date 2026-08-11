@@ -18,8 +18,10 @@ import (
 	"strings"
 	"time"
 
+	agentv1 "github.com/GentleKingson/ocservia/control-plane/gen/proto/ocserv/platform/agent/v1"
 	"github.com/GentleKingson/ocservia/control-plane/internal/approvals"
 	"github.com/GentleKingson/ocservia/control-plane/internal/audit"
+	"github.com/GentleKingson/ocservia/control-plane/internal/commandauth"
 	operationstore "github.com/GentleKingson/ocservia/control-plane/internal/operations"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -51,11 +53,12 @@ type Signer interface {
 }
 
 type SecretSealer interface {
-	Seal(context.Context, uuid.UUID, []byte) (sealed []byte, keyID string, err error)
+	Seal(context.Context, uuid.UUID, agentv1.SealedSecretPurpose, []byte) (*agentv1.SealedSecretV1, error)
 }
 
 type ArtifactFetcher interface {
-	FetchArtifact(context.Context, uuid.UUID, uuid.UUID, int64) (io.ReadCloser, error)
+	FetchArtifact(context.Context, *agentv1.ArtifactGrantV1) (io.ReadCloser, error)
+	ConsumeArtifact(context.Context, *agentv1.ArtifactGrantV1, []byte, int64) error
 }
 
 type RevokeSignerRequest struct {
@@ -65,13 +68,14 @@ type RevokeSignerRequest struct {
 }
 
 type Service struct {
-	pool       *pgxpool.Pool
-	operations *operationstore.Service
-	approvals  *approvals.Service
-	signer     Signer
-	sealer     SecretSealer
-	artifacts  ArtifactFetcher
-	now        func() time.Time
+	pool        *pgxpool.Pool
+	operations  *operationstore.Service
+	approvals   *approvals.Service
+	signer      Signer
+	sealer      SecretSealer
+	artifacts   ArtifactFetcher
+	grantSigner *commandauth.Signer
+	now         func() time.Time
 }
 
 type CreateRequest struct {
@@ -134,6 +138,8 @@ type ArtifactDownload struct {
 	ExpectedSHA256 []byte
 	Size           int64
 	NodeID         uuid.UUID
+	GrantID        uuid.UUID
+	Grant          *agentv1.ArtifactGrantV1
 }
 
 func New(pool *pgxpool.Pool, operations *operationstore.Service) *Service {
@@ -146,9 +152,9 @@ func NewWithSigner(pool *pgxpool.Pool, operations *operationstore.Service, signe
 	return service
 }
 
-func NewWithDependencies(pool *pgxpool.Pool, operations *operationstore.Service, signer Signer, sealer SecretSealer, artifacts ArtifactFetcher) *Service {
+func NewWithDependencies(pool *pgxpool.Pool, operations *operationstore.Service, signer Signer, sealer SecretSealer, artifacts ArtifactFetcher, grantSigner *commandauth.Signer) *Service {
 	service := NewWithSigner(pool, operations, signer)
-	service.sealer, service.artifacts = sealer, artifacts
+	service.sealer, service.artifacts, service.grantSigner = sealer, artifacts, grantSigner
 	return service
 }
 
@@ -375,7 +381,7 @@ func (s *Service) Revoke(ctx context.Context, request RevokeRequest) (operations
 	if state != "issued" && state != "expiring" && state != "expired" && state != "revoking" && state != "revocation_unknown" && state != "revoked" || serialNumber == "" {
 		return operationstore.Operation{}, false, ErrNotReady
 	}
-	op, replay, err := s.operations.CreateSynthetic(ctx, operationstore.CreateRequest{NodeID: nodeID, ExpectedVersion: request.ExpectedVersion, IdempotencyKey: request.IdempotencyKey, Kind: operationstore.CertificateRevoke, CertificateID: request.CertificateID, RevocationReason: request.Reason, ActorID: request.ActorIdentityID.String(), ActorIdentityID: request.ActorIdentityID, ActorSessionID: request.ActorSessionID, ApprovalID: request.ApprovalID, ApprovalRequestHash: requestHash, Action: "certificate.revoke", Reason: request.Reason, RequestID: request.RequestID, Traceparent: request.Traceparent, TTL: 15 * time.Minute, HoldDispatch: true})
+	op, replay, err := s.operations.CreateSynthetic(ctx, operationstore.CreateRequest{NodeID: nodeID, ExpectedVersion: request.ExpectedVersion, IdempotencyKey: request.IdempotencyKey, Kind: operationstore.CertificateRevoke, CertificateID: request.CertificateID, CertificateVersion: uint64(request.CertificateVersion), RevocationReason: request.Reason, ActorID: request.ActorIdentityID.String(), ActorIdentityID: request.ActorIdentityID, ActorSessionID: request.ActorSessionID, ApprovalID: request.ApprovalID, ApprovalRequestHash: requestHash, Action: "certificate.revoke", Reason: request.Reason, RequestID: request.RequestID, Traceparent: request.Traceparent, TTL: 15 * time.Minute, HoldDispatch: true})
 	if err != nil {
 		return operationstore.Operation{}, false, err
 	}
@@ -385,7 +391,20 @@ func (s *Service) Revoke(ctx context.Context, request RevokeRequest) (operations
 	if replay && state == "revoked" {
 		return op, true, nil
 	}
-	_, _ = s.pool.Exec(ctx, `UPDATE certificates SET state='revoking',version=version+1,updated_at=$2 WHERE id=$1 AND state IN ('issued','expiring','expired','revocation_unknown')`, request.CertificateID, s.now())
+	tx, txErr := s.pool.Begin(ctx)
+	if txErr != nil {
+		return op, replay, txErr
+	}
+	defer func() { _ = tx.Rollback(context.Background()) }()
+	if _, txErr = tx.Exec(ctx, `UPDATE certificates SET state='revoking',version=version+1,updated_at=$2 WHERE id=$1 AND state IN ('issued','expiring','expired','revocation_unknown')`, request.CertificateID, s.now()); txErr != nil {
+		return op, replay, txErr
+	}
+	if _, txErr = tx.Exec(ctx, `UPDATE artifact_operations SET state='revoked',lease_until=NULL,active_grant_expires_at=now(),updated_at=now() WHERE certificate_id=$1 AND state IN ('pending','ready','leased')`, request.CertificateID); txErr != nil {
+		return op, replay, txErr
+	}
+	if txErr = tx.Commit(ctx); txErr != nil {
+		return op, replay, txErr
+	}
 	if err := s.signer.Revoke(ctx, RevokeSignerRequest{CertificateID: request.CertificateID, SerialNumber: serialNumber, Reason: request.Reason}); err != nil {
 		_, _ = s.pool.Exec(context.WithoutCancel(ctx), `UPDATE certificates SET state='revocation_unknown',version=version+1,updated_at=$2 WHERE id=$1 AND state='revoking'`, request.CertificateID, s.now())
 		return op, replay, fmt.Errorf("%w: %v", ErrSignerUnavailable, err)
@@ -485,9 +504,16 @@ func (s *Service) CreateP12(ctx context.Context, request P12Request) (ArtifactGr
 	for index := range passwordBytes {
 		passwordBytes[index] = 0
 	}
-	sealed, keyID, err := s.sealer.Seal(ctx, nodeID, []byte(password))
+	sealed, err := s.sealer.Seal(ctx, nodeID, agentv1.SealedSecretPurpose_SEALED_SECRET_PURPOSE_CERTIFICATE_P12_PASSWORD, []byte(password))
 	if err != nil {
 		return ArtifactGrant{}, false, fmt.Errorf("%w: %v", ErrSignerUnavailable, err)
+	}
+	var registeredKey bool
+	if err := s.pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM node_sealing_keys WHERE node_id=$1 AND purpose=2 AND version=$2 AND key_id=$3)`, nodeID, sealed.GetVersion(), sealed.GetKeyId()).Scan(&registeredKey); err != nil {
+		return ArtifactGrant{}, false, err
+	}
+	if !registeredKey {
+		return ArtifactGrant{}, false, ErrSignerUnavailable
 	}
 	artifactID := request.ArtifactRequestID
 	expiresAt := s.now().Add(10 * time.Minute)
@@ -496,7 +522,7 @@ func (s *Service) CreateP12(ctx context.Context, request P12Request) (ArtifactGr
 	if err != nil {
 		return ArtifactGrant{}, false, err
 	}
-	op, replay, err := s.operations.CreateSynthetic(ctx, operationstore.CreateRequest{NodeID: nodeID, ExpectedVersion: request.ExpectedVersion, IdempotencyKey: request.IdempotencyKey, Kind: operationstore.CertificateP12, CertificateID: request.CertificateID, CertificateChain: chain, SealedPassword: sealed, SecretKeyID: keyID, ArtifactID: artifactID, ArtifactMetadata: &operationstore.ArtifactMetadata{TokenSHA256: tokenHash[:], RequestHash: intentHash[:], ExpiresAt: expiresAt}, ActorID: request.ActorIdentityID.String(), ActorIdentityID: request.ActorIdentityID, ActorSessionID: request.ActorSessionID, ApprovalID: request.ApprovalID, ApprovalRequestHash: approvalHash, Action: "certificate.private_key.export", Reason: request.Reason, RequestID: request.RequestID, Traceparent: request.Traceparent, TTL: 15 * time.Minute})
+	op, replay, err := s.operations.CreateSynthetic(ctx, operationstore.CreateRequest{NodeID: nodeID, ExpectedVersion: request.ExpectedVersion, IdempotencyKey: request.IdempotencyKey, Kind: operationstore.CertificateP12, CertificateID: request.CertificateID, CertificateVersion: uint64(certificateVersion), CertificateChain: chain, SealedPassword: sealed, ArtifactID: artifactID, ArtifactMetadata: &operationstore.ArtifactMetadata{TokenSHA256: tokenHash[:], RequestHash: intentHash[:], ExpiresAt: expiresAt}, ActorID: request.ActorIdentityID.String(), ActorIdentityID: request.ActorIdentityID, ActorSessionID: request.ActorSessionID, ApprovalID: request.ApprovalID, ApprovalRequestHash: approvalHash, Action: "certificate.private_key.export", Reason: request.Reason, RequestID: request.RequestID, Traceparent: request.Traceparent, TTL: 15 * time.Minute})
 	if err != nil {
 		if errors.Is(err, operationstore.ErrIdempotencyConflict) {
 			var id, operationID uuid.UUID
@@ -529,8 +555,8 @@ func (s *Service) ArtifactResource(ctx context.Context, id uuid.UUID) (workspace
 	return
 }
 
-func (s *Service) OpenArtifact(ctx context.Context, id uuid.UUID, token string) (ArtifactDownload, error) {
-	if id == uuid.Nil || len(token) != 43 || s.artifacts == nil {
+func (s *Service) OpenArtifact(ctx context.Context, id uuid.UUID, token string, subject uuid.UUID) (ArtifactDownload, error) {
+	if id == uuid.Nil || subject == uuid.Nil || len(token) != 43 || s.artifacts == nil || s.grantSigner == nil {
 		return ArtifactDownload{}, ErrArtifactDenied
 	}
 	tokenHash := sha256.Sum256([]byte(token))
@@ -549,35 +575,66 @@ func (s *Service) OpenArtifact(ctx context.Context, id uuid.UUID, token string) 
 	if active >= 4 {
 		return ArtifactDownload{}, ErrArtifactCapacity
 	}
-	var nodeID uuid.UUID
+	var nodeID, certificateID, operationID uuid.UUID
 	var expected []byte
 	var size int64
-	err = tx.QueryRow(ctx, `SELECT a.node_id,a.content_sha256,a.content_size FROM artifact_operations a JOIN certificates c ON c.id=a.certificate_id WHERE a.id=$1 AND a.token_sha256=$2 AND a.expires_at>now() AND c.not_after>now() AND c.state IN ('issued','expiring') AND (a.state='ready' OR (a.state='leased' AND a.lease_until<now())) FOR UPDATE OF a`, id, tokenHash[:]).Scan(&nodeID, &expected, &size)
+	var certificateVersion uint64
+	var artifactExpires, certificateExpires time.Time
+	err = tx.QueryRow(ctx, `SELECT a.node_id,a.certificate_id,a.operation_id,a.certificate_version,a.content_sha256,a.content_size,a.expires_at,c.not_after FROM artifact_operations a JOIN certificates c ON c.id=a.certificate_id WHERE a.id=$1 AND a.token_sha256=$2 AND a.expires_at>now() AND c.not_after>now() AND c.state IN ('issued','expiring') AND (a.state='ready' OR (a.state='leased' AND a.lease_until<now())) FOR UPDATE OF a`, id, tokenHash[:]).Scan(&nodeID, &certificateID, &operationID, &certificateVersion, &expected, &size, &artifactExpires, &certificateExpires)
 	if err != nil {
 		return ArtifactDownload{}, ErrArtifactDenied
 	}
-	if _, err := tx.Exec(ctx, `UPDATE artifact_operations SET state='leased',lease_until=now()+interval '1 minute',updated_at=now() WHERE id=$1`, id); err != nil {
+	grantID := uuid.Must(uuid.NewV7())
+	issuedAt := s.now().UTC()
+	grantExpires := issuedAt.Add(time.Minute)
+	if artifactExpires.Before(grantExpires) {
+		grantExpires = artifactExpires
+	}
+	if certificateExpires.Before(grantExpires) {
+		grantExpires = certificateExpires
+	}
+	grant, err := s.grantSigner.IssueArtifactGrant(nodeID, id, certificateID, certificateVersion, operationID, subject.String(), uint64(size), grantID, issuedAt, grantExpires)
+	if err != nil {
+		return ArtifactDownload{}, err
+	}
+	if _, err := tx.Exec(ctx, `UPDATE artifact_operations SET state='leased',lease_until=$2,active_grant_id=$3,active_grant_subject=$4,active_grant_expires_at=$2,updated_at=now() WHERE id=$1`, id, grantExpires, grantID, subject.String()); err != nil {
 		return ArtifactDownload{}, err
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return ArtifactDownload{}, err
 	}
-	reader, err := s.artifacts.FetchArtifact(ctx, nodeID, id, min(size, 64<<20))
+	reader, err := s.artifacts.FetchArtifact(ctx, grant)
 	if err != nil {
-		_ = s.AbortArtifact(context.WithoutCancel(ctx), id)
+		_ = s.AbortArtifact(context.WithoutCancel(ctx), id, grantID)
 		return ArtifactDownload{}, err
 	}
-	return ArtifactDownload{Reader: reader, ExpectedSHA256: expected, Size: size, NodeID: nodeID}, nil
+	return ArtifactDownload{Reader: reader, ExpectedSHA256: expected, Size: size, NodeID: nodeID, GrantID: grantID, Grant: grant}, nil
 }
 
-func (s *Service) CompleteArtifact(ctx context.Context, id uuid.UUID, digest []byte, size int64, actorID, sessionID uuid.UUID, requestID string) error {
+func (s *Service) CompleteArtifact(ctx context.Context, id, grantID uuid.UUID, grant *agentv1.ArtifactGrantV1, digest []byte, size int64, actorID, sessionID uuid.UUID, requestID string) error {
+	if grant == nil || actorID == uuid.Nil || grant.GetAuthorizedSubject() != actorID.String() || !bytes.Equal(grant.GetArtifactId(), id[:]) || !bytes.Equal(grant.GetGrantId(), grantID[:]) || len(digest) != sha256.Size || size < 1 || uint64(size) != grant.GetMaxBytes() {
+		return ErrArtifactDenied
+	}
+	var eligible bool
+	if err := s.pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM artifact_operations WHERE id=$1 AND active_grant_id=$2 AND active_grant_subject=$5 AND state='leased' AND content_sha256=$3 AND content_size=$4 AND expires_at>now())`, id, grantID, digest, size, actorID.String()).Scan(&eligible); err != nil {
+		return err
+	}
+	if !eligible {
+		return ErrArtifactDenied
+	}
+	// Root consumption happens only after the Control Plane has received and
+	// verified the full stream. A failed transfer leaves the bounded lease in
+	// place and can recover after expiry without allowing concurrent reads.
+	if err := s.artifacts.ConsumeArtifact(ctx, grant, digest, size); err != nil {
+		return err
+	}
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return err
 	}
 	defer func() { _ = tx.Rollback(context.Background()) }()
 	var workspaceID, nodeID, certificateID uuid.UUID
-	err = tx.QueryRow(ctx, `UPDATE artifact_operations SET state='consumed',consumed_at=now(),lease_until=NULL,updated_at=now() WHERE id=$1 AND state='leased' AND content_sha256=$2 AND content_size=$3 AND expires_at>now() RETURNING workspace_id,node_id,certificate_id`, id, digest, size).Scan(&workspaceID, &nodeID, &certificateID)
+	err = tx.QueryRow(ctx, `UPDATE artifact_operations SET state='consumed',consumed_at=now(),lease_until=NULL,updated_at=now() WHERE id=$1 AND active_grant_id=$2 AND state='leased' AND content_sha256=$3 AND content_size=$4 AND expires_at>now() RETURNING workspace_id,node_id,certificate_id`, id, grantID, digest, size).Scan(&workspaceID, &nodeID, &certificateID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return ErrArtifactDenied
 	}
@@ -591,8 +648,10 @@ func (s *Service) CompleteArtifact(ctx context.Context, id uuid.UUID, digest []b
 	return tx.Commit(ctx)
 }
 
-func (s *Service) AbortArtifact(ctx context.Context, id uuid.UUID) error {
-	_, err := s.pool.Exec(ctx, `UPDATE artifact_operations SET state=CASE WHEN expires_at>now() THEN 'ready' ELSE 'expired' END,lease_until=NULL,updated_at=now() WHERE id=$1 AND state='leased'`, id)
+func (s *Service) AbortArtifact(ctx context.Context, id, grantID uuid.UUID) error {
+	// Preserve the durable lease until its bounded expiry. A transport failure
+	// must not make a second concurrently valid grant immediately issuable.
+	_, err := s.pool.Exec(ctx, `UPDATE artifact_operations SET updated_at=now() WHERE id=$1 AND active_grant_id=$2 AND state='leased'`, id, grantID)
 	return err
 }
 

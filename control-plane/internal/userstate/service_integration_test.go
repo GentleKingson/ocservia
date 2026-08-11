@@ -734,8 +734,7 @@ func TestRejectedRevisionSlotRequiresProofThatNoEffectWasAcceptedIntegration(t *
 func mutation(nodeID uuid.UUID, key string, kind MutationKind, name string, version int64) MutationRequest {
 	request := MutationRequest{NodeID: nodeID, Kind: kind, Name: name, IdempotencyKey: key, ExpectedVersion: version, TTL: time.Hour, ActorID: "operator", Reason: "ticket", RequestID: "request-" + key, Traceparent: testTraceparent}
 	if kind == UserCreate || kind == UserPasswordRotate {
-		request.SealedPassword = bytes.Repeat([]byte{0xa5}, 64)
-		request.SecretKeyID = "node-key-1"
+		request.SealedPassword = &SealedSecret{Version: 1, Purpose: "user_password", KeyID: "node-key-1", Ciphertext: bytes.Repeat([]byte{0xa5}, 64)}
 	}
 	return request
 }
@@ -1041,6 +1040,9 @@ func integrationService(t *testing.T, status string) (*Service, *pgxpool.Pool, u
 		_, err = pool.Exec(context.Background(), `INSERT INTO node_capabilities(node_id,capability,approved)VALUES($1,'ocserv.users.write',true),($1,'ocserv.groups.write',true)`, nodeID)
 	}
 	if err == nil {
+		_, err = pool.Exec(context.Background(), `INSERT INTO node_sealing_keys(node_id,purpose,version,key_id,public_key_sha256,created_at) VALUES($1,1,1,'node-key-1',decode(repeat('11',32),'hex'),now()),($1,2,1,'p12-key-1',decode(repeat('22',32),'hex'),now())`, nodeID)
+	}
+	if err == nil {
 		endpointState := "active"
 		if status == "pending" {
 			endpointState = "pending"
@@ -1054,7 +1056,7 @@ func integrationService(t *testing.T, status string) (*Service, *pgxpool.Pool, u
 		t.Fatal(err)
 	}
 	t.Cleanup(func() {
-		for _, statement := range []string{`DELETE FROM agent_command_results WHERE command_id IN(SELECT id FROM commands WHERE workspace_id=$1)`, `DELETE FROM transport_events WHERE node_id IN(SELECT id FROM nodes WHERE workspace_id=$1)`, `DELETE FROM node_command_leases WHERE command_id IN(SELECT id FROM commands WHERE workspace_id=$1)`, `DELETE FROM command_attempts WHERE command_id IN(SELECT id FROM commands WHERE workspace_id=$1)`, `DELETE FROM outbox_events WHERE command_id IN(SELECT id FROM commands WHERE workspace_id=$1)`, `DELETE FROM operation_events WHERE operation_id IN(SELECT id FROM operations WHERE workspace_id=$1)`, `DELETE FROM commands WHERE workspace_id=$1`, `DELETE FROM operations WHERE workspace_id=$1`, `DELETE FROM audit_events WHERE workspace_id=$1`, `DELETE FROM observed_groups WHERE node_id IN(SELECT id FROM nodes WHERE workspace_id=$1)`, `DELETE FROM observed_users WHERE node_id IN(SELECT id FROM nodes WHERE workspace_id=$1)`, `DELETE FROM desired_groups WHERE node_id IN(SELECT id FROM nodes WHERE workspace_id=$1)`, `DELETE FROM desired_users WHERE node_id IN(SELECT id FROM nodes WHERE workspace_id=$1)`, `DELETE FROM node_capabilities WHERE node_id IN(SELECT id FROM nodes WHERE workspace_id=$1)`, `DELETE FROM node_endpoint_keys WHERE node_id IN(SELECT id FROM nodes WHERE workspace_id=$1)`, `DELETE FROM nodes WHERE workspace_id=$1`, `DELETE FROM workspaces WHERE id=$1`} {
+		for _, statement := range []string{`DELETE FROM agent_command_results WHERE command_id IN(SELECT id FROM commands WHERE workspace_id=$1)`, `DELETE FROM transport_events WHERE node_id IN(SELECT id FROM nodes WHERE workspace_id=$1)`, `DELETE FROM node_command_leases WHERE command_id IN(SELECT id FROM commands WHERE workspace_id=$1)`, `DELETE FROM command_attempts WHERE command_id IN(SELECT id FROM commands WHERE workspace_id=$1)`, `DELETE FROM outbox_events WHERE command_id IN(SELECT id FROM commands WHERE workspace_id=$1)`, `DELETE FROM operation_events WHERE operation_id IN(SELECT id FROM operations WHERE workspace_id=$1)`, `DELETE FROM commands WHERE workspace_id=$1`, `DELETE FROM operations WHERE workspace_id=$1`, `DELETE FROM audit_events WHERE workspace_id=$1`, `DELETE FROM observed_groups WHERE node_id IN(SELECT id FROM nodes WHERE workspace_id=$1)`, `DELETE FROM observed_users WHERE node_id IN(SELECT id FROM nodes WHERE workspace_id=$1)`, `DELETE FROM desired_groups WHERE node_id IN(SELECT id FROM nodes WHERE workspace_id=$1)`, `DELETE FROM desired_users WHERE node_id IN(SELECT id FROM nodes WHERE workspace_id=$1)`, `DELETE FROM node_sealing_keys WHERE node_id IN(SELECT id FROM nodes WHERE workspace_id=$1)`, `DELETE FROM node_capabilities WHERE node_id IN(SELECT id FROM nodes WHERE workspace_id=$1)`, `DELETE FROM node_endpoint_keys WHERE node_id IN(SELECT id FROM nodes WHERE workspace_id=$1)`, `DELETE FROM nodes WHERE workspace_id=$1`, `DELETE FROM workspaces WHERE id=$1`} {
 			_, _ = pool.Exec(context.Background(), statement, workspaceID)
 		}
 		pool.Close()

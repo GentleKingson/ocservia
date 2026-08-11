@@ -103,7 +103,11 @@ func hash(envelope *agentv1.CommandEnvelope, version agentv1.SemanticPayloadHash
 	case *agentv1.CommandEnvelope_UserCreate:
 		payloadKind = 101
 		payload := envelope.GetUserCreate()
-		canonicalPayload = canonicalStringsAndBytes([]string{payload.GetUsername(), payload.GetSecretKeyId()}, payload.GetSealedPassword(), payload.GetDesiredRevision())
+		secret, err := canonicalSecret(payload.GetSealedPasswordV1(), agentv1.SealedSecretPurpose_SEALED_SECRET_PURPOSE_USER_PASSWORD)
+		if err != nil || len(payload.GetSealedPassword()) != 0 || payload.GetSecretKeyId() != "" {
+			return [sha256.Size]byte{}, errors.New("user sealed secret is malformed")
+		}
+		canonicalPayload = canonicalStringsAndBytes([]string{payload.GetUsername(), payload.GetSealedPasswordV1().GetKeyId()}, secret, payload.GetDesiredRevision())
 	case *agentv1.CommandEnvelope_UserDisable:
 		payloadKind = 102
 		payload := envelope.GetUserDisable()
@@ -115,7 +119,11 @@ func hash(envelope *agentv1.CommandEnvelope, version agentv1.SemanticPayloadHash
 	case *agentv1.CommandEnvelope_UserPasswordRotate:
 		payloadKind = 114
 		payload := envelope.GetUserPasswordRotate()
-		canonicalPayload = canonicalStringsAndBytes([]string{payload.GetUsername(), payload.GetSecretKeyId()}, payload.GetSealedPassword(), payload.GetDesiredRevision())
+		secret, err := canonicalSecret(payload.GetSealedPasswordV1(), agentv1.SealedSecretPurpose_SEALED_SECRET_PURPOSE_USER_PASSWORD)
+		if err != nil || len(payload.GetSealedPassword()) != 0 || payload.GetSecretKeyId() != "" {
+			return [sha256.Size]byte{}, errors.New("user sealed secret is malformed")
+		}
+		canonicalPayload = canonicalStringsAndBytes([]string{payload.GetUsername(), payload.GetSealedPasswordV1().GetKeyId()}, secret, payload.GetDesiredRevision())
 	case *agentv1.CommandEnvelope_GroupApply:
 		payloadKind = 115
 		payload := envelope.GetGroupApply()
@@ -135,16 +143,28 @@ func hash(envelope *agentv1.CommandEnvelope, version agentv1.SemanticPayloadHash
 		if len(payload.GetCertificateId()) != 16 || len(payload.GetArtifactId()) != 16 {
 			return [sha256.Size]byte{}, errors.New("certificate artifact identity is malformed")
 		}
+		secret, err := canonicalSecret(payload.GetSealedPasswordV1(), agentv1.SealedSecretPurpose_SEALED_SECRET_PURPOSE_CERTIFICATE_P12_PASSWORD)
+		expires := payload.GetArtifactExpiresAt()
+		if err != nil || len(payload.GetSealedPassword()) != 0 || payload.GetSecretKeyId() != "" || payload.GetCertificateVersion() == 0 || expires == nil || !expires.IsValid() {
+			return [sha256.Size]byte{}, errors.New("certificate P12 binding is malformed")
+		}
 		data := append(append(append([]byte(nil), payload.GetCertificateId()...), payload.GetArtifactId()...), payload.GetCertificateChainPem()...)
-		data = append(data, payload.GetSealedPassword()...)
-		canonicalPayload = canonicalStringsAndBytes([]string{payload.GetSecretKeyId()}, data, 0)
+		data = append(data, secret...)
+		var expiry [12]byte
+		binary.BigEndian.PutUint64(expiry[:8], uint64(expires.GetSeconds()))
+		binary.BigEndian.PutUint32(expiry[8:], uint32(expires.GetNanos()))
+		data = append(data, expiry[:]...)
+		canonicalPayload = canonicalStringsAndBytes([]string{payload.GetSealedPasswordV1().GetKeyId()}, data, payload.GetCertificateVersion())
 	case *agentv1.CommandEnvelope_CertificateRevoke:
 		payloadKind = 119
 		payload := envelope.GetCertificateRevoke()
 		if len(payload.GetCertificateId()) != 16 || strings.TrimSpace(payload.GetReason()) == "" {
 			return [sha256.Size]byte{}, errors.New("certificate revoke payload is malformed")
 		}
-		canonicalPayload = canonicalStringsAndBytes([]string{payload.GetReason()}, payload.GetCertificateId(), 0)
+		if payload.GetCertificateVersion() == 0 {
+			return [sha256.Size]byte{}, errors.New("certificate revoke version is malformed")
+		}
+		canonicalPayload = canonicalStringsAndBytes([]string{payload.GetReason()}, payload.GetCertificateId(), payload.GetCertificateVersion())
 	default:
 		return [sha256.Size]byte{}, errors.New("command payload type is not reconcilable")
 	}
@@ -168,6 +188,16 @@ func hash(envelope *agentv1.CommandEnvelope, version agentv1.SemanticPayloadHash
 	var out [sha256.Size]byte
 	copy(out[:], h.Sum(nil))
 	return out, nil
+}
+
+func canonicalSecret(secret *agentv1.SealedSecretV1, purpose agentv1.SealedSecretPurpose) ([]byte, error) {
+	if secret == nil || secret.GetVersion() != agentv1.SealedSecretVersion_SEALED_SECRET_VERSION_V1 || secret.GetPurpose() != purpose || strings.TrimSpace(secret.GetKeyId()) == "" || len(secret.GetCiphertext()) < 32 || len(secret.GetCiphertext()) > 16*1024 {
+		return nil, errors.New("sealed secret is malformed")
+	}
+	out := make([]byte, 8, 8+len(secret.GetCiphertext()))
+	binary.BigEndian.PutUint32(out[:4], uint32(secret.GetVersion()))
+	binary.BigEndian.PutUint32(out[4:8], uint32(secret.GetPurpose()))
+	return append(out, secret.GetCiphertext()...), nil
 }
 
 func canonicalStringsAndBytes(values []string, value []byte, revision uint64) []byte {

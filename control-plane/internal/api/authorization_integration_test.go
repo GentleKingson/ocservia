@@ -13,6 +13,7 @@ import (
 	"strings"
 	"testing"
 
+	agentv1 "github.com/GentleKingson/ocservia/control-plane/gen/proto/ocserv/platform/agent/v1"
 	approvalstore "github.com/GentleKingson/ocservia/control-plane/internal/approvals"
 	"github.com/GentleKingson/ocservia/control-plane/internal/auth"
 	certificatestore "github.com/GentleKingson/ocservia/control-plane/internal/certificates"
@@ -26,8 +27,12 @@ import (
 
 type certificateArtifactFixture struct{ data []byte }
 
-func (f certificateArtifactFixture) FetchArtifact(context.Context, uuid.UUID, uuid.UUID, int64) (io.ReadCloser, error) {
+func (f certificateArtifactFixture) FetchArtifact(context.Context, *agentv1.ArtifactGrantV1) (io.ReadCloser, error) {
 	return io.NopCloser(bytes.NewReader(f.data)), nil
+}
+
+func (certificateArtifactFixture) ConsumeArtifact(context.Context, *agentv1.ArtifactGrantV1, []byte, int64) error {
+	return nil
 }
 
 type invalidatingArtifactFixture struct {
@@ -36,11 +41,15 @@ type invalidatingArtifactFixture struct {
 	data       []byte
 }
 
-func (f invalidatingArtifactFixture) FetchArtifact(ctx context.Context, _ uuid.UUID, _ uuid.UUID, _ int64) (io.ReadCloser, error) {
+func (f invalidatingArtifactFixture) FetchArtifact(ctx context.Context, _ *agentv1.ArtifactGrantV1) (io.ReadCloser, error) {
 	if _, err := f.pool.Exec(ctx, `UPDATE artifact_operations SET state='failed',lease_until=NULL WHERE id=$1`, f.artifactID); err != nil {
 		return nil, err
 	}
 	return io.NopCloser(bytes.NewReader(f.data)), nil
+}
+
+func (invalidatingArtifactFixture) ConsumeArtifact(context.Context, *agentv1.ArtifactGrantV1, []byte, int64) error {
+	return nil
 }
 
 type failingArtifactWriter struct {
@@ -72,7 +81,7 @@ func TestCertificateRoutesUseNodeScopedAuthorizationIntegration(t *testing.T) {
 		INSERT INTO nodes(id,workspace_id,name,status,version,created_at,updated_at) VALUES($7,$1,'cert-node-a','active',1,now(),now()),($8,$1,'cert-node-b','active',1,now(),now());
 		INSERT INTO operations(id,workspace_id,node_id,state,version,request_id,idempotency_key,request_hash,created_at,updated_at) VALUES($9,$1,$7,'succeeded',1,'certificate-auth','certificate-auth',decode(repeat('00',32),'hex'),now(),now());
 		INSERT INTO certificates(id,workspace_id,node_id,operation_id,common_name,dns_names,key_bits,state,created_at,updated_at) VALUES($10,$1,$7,$9,'node-a.example.test','[]',2048,'csr_pending',now(),now());
-		INSERT INTO artifact_operations(id,workspace_id,node_id,certificate_id,operation_id,purpose,state,token_sha256,request_hash,expires_at,created_at,updated_at) VALUES($11,$1,$7,$10,$9,'certificate_p12','pending',decode(repeat('01',32),'hex'),decode(repeat('02',32),'hex'),now()+interval '10 minutes',now(),now());
+		INSERT INTO artifact_operations(id,workspace_id,node_id,certificate_id,certificate_version,operation_id,purpose,state,token_sha256,request_hash,expires_at,created_at,updated_at) VALUES($11,$1,$7,$10,1,$9,'certificate_p12','pending',decode(repeat('01',32),'hex'),decode(repeat('02',32),'hex'),now()+interval '10 minutes',now(),now());
 		INSERT INTO role_bindings(id,identity_id,workspace_id,role_name,resource_type,resource_id,created_by,created_at) VALUES($12,$3,$1,'ConfigManager','node',$7,$3,now()),($13,$5,$1,'SecurityAdmin','node',$8,$5,now())`, workspaceID, "certificate-auth-"+workspaceID.String(), managerID, managerID.String(), securityID, securityID.String(), nodeA, nodeB, operationID, certificateID, artifactID, managerBinding, securityBinding); err != nil {
 		t.Fatal(err)
 	}
@@ -80,7 +89,8 @@ func TestCertificateRoutesUseNodeScopedAuthorizationIntegration(t *testing.T) {
 		_, _ = pool.Exec(context.Background(), `DELETE FROM role_bindings WHERE id IN($1,$2); DELETE FROM artifact_operations WHERE id=$3; DELETE FROM certificates WHERE id=$4; DELETE FROM operations WHERE id=$5; DELETE FROM nodes WHERE workspace_id=$6; DELETE FROM identities WHERE id IN($7,$8); DELETE FROM workspaces WHERE id=$6`, managerBinding, securityBinding, artifactID, certificateID, operationID, workspaceID, managerID, securityID)
 	}()
 	artifactData := []byte("encrypted artifact response")
-	server := &Server{rbac: rbac.New(pool), certificates: certificatestore.NewWithDependencies(pool, apiOperationService(pool), nil, nil, certificateArtifactFixture{data: artifactData})}
+	grantSigner := commandauth.NewSignerFromSeed([32]byte{7})
+	server := &Server{rbac: rbac.New(pool), certificates: certificatestore.NewWithDependencies(pool, apiOperationService(pool), nil, nil, certificateArtifactFixture{data: artifactData}, grantSigner)}
 	manager := auth.Principal{IdentityID: managerID, Issuer: "integration"}
 	security := auth.Principal{IdentityID: securityID, Issuer: "integration"}
 	tests := []struct {
@@ -128,7 +138,7 @@ func TestCertificateRoutesUseNodeScopedAuthorizationIntegration(t *testing.T) {
 	if _, err := pool.Exec(ctx, `UPDATE artifact_operations SET state='ready',consumed_at=NULL,content_sha256=$2,content_size=$3 WHERE id=$1`, artifactID, artifactHash[:], len(artifactData)); err != nil {
 		t.Fatal(err)
 	}
-	failureServer := &Server{certificates: certificatestore.NewWithDependencies(pool, apiOperationService(pool), nil, nil, invalidatingArtifactFixture{pool: pool, artifactID: artifactID, data: artifactData})}
+	failureServer := &Server{certificates: certificatestore.NewWithDependencies(pool, apiOperationService(pool), nil, nil, invalidatingArtifactFixture{pool: pool, artifactID: artifactID, data: artifactData}, grantSigner)}
 	failureRequest := httptest.NewRequest(http.MethodGet, "/api/v1/artifacts/"+artifactID.String(), nil)
 	failureRequest.SetPathValue("artifact_id", artifactID.String())
 	failureRequest.Header.Set("X-Artifact-Token", token)

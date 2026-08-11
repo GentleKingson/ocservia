@@ -14,13 +14,15 @@ use ocservia_agent_protocol::{
     privd_response, read_frame, write_frame,
 };
 use ocservia_command_authorization::{
-    AuthorizationError, CommandAuthorizationV1, ControllerCommandKeyring,
+    ArtifactGrantClaimsV1, AuthorizationError, CommandAuthorizationV1, ControllerCommandKeyring,
 };
 use ocservia_contracts::generated::ocserv::platform::agent::v1::{
-    CommandDeliveryMode, CommandEnvelope, command_envelope,
+    CommandDeliveryMode, CommandEnvelope, SealedSecretPurpose, SealedSecretVersion,
+    command_envelope,
 };
 use ocservia_ocserv_adapter::{
-    Adapter, AuthorizedEffectDecision, AuthorizedEffectIdentity, EffectIdentity,
+    Adapter, ArtifactLeaseIdentity, AuthorizedEffectDecision, AuthorizedEffectIdentity,
+    EffectIdentity,
 };
 use prost::Message as _;
 use sha2::{Digest as _, Sha256};
@@ -184,6 +186,34 @@ async fn dispatch(
                 Err(_) => deadline_error(),
             }
         }
+        Ok((deadline, ValidatedRequest::ArtifactRead(claims, offset))) => {
+            match tokio::time::timeout(
+                deadline,
+                adapter.artifact_read(artifact_identity(&claims), offset),
+            )
+            .await
+            {
+                Ok(result) => finish_operation(
+                    "artifact_read",
+                    result.map(privd_response::Result::ArtifactData),
+                ),
+                Err(_) => deadline_error(),
+            }
+        }
+        Ok((deadline, ValidatedRequest::ArtifactConsume(claims, digest, size))) => {
+            match tokio::time::timeout(
+                deadline,
+                adapter.artifact_consume(artifact_identity(&claims), &digest, size),
+            )
+            .await
+            {
+                Ok(result) => finish_operation(
+                    "artifact_consume",
+                    result.map(privd_response::Result::Mutation),
+                ),
+                Err(_) => deadline_error(),
+            }
+        }
         Err(failure) => privd_response::Result::Error(failure),
     };
     PrivdResponse {
@@ -196,8 +226,11 @@ enum ValidatedRequest {
     Read,
     Execute(CommandAuthorizationV1),
     Reconcile(CommandAuthorizationV1),
+    ArtifactRead(ArtifactGrantClaimsV1, u64),
+    ArtifactConsume(ArtifactGrantClaimsV1, Vec<u8>, u64),
 }
 
+#[allow(clippy::too_many_lines)]
 fn validate_request(
     request: &PrivdRequest,
     node_id: &[u8; 16],
@@ -274,7 +307,64 @@ fn validate_request(
                 "Controller command authorization required",
             ));
         }
-        if !matches!(
+        if let Some(privd_request::Operation::ArtifactRead(value)) = request.operation.as_ref() {
+            let grant = value
+                .grant
+                .as_ref()
+                .ok_or_else(|| error(ErrorKind::PermissionDenied, "artifact grant required"))?;
+            let artifact_id: [u8; 16] = grant
+                .artifact_id
+                .as_slice()
+                .try_into()
+                .map_err(|_| error(ErrorKind::InvalidRequest, "artifact ID invalid"))?;
+            let claims = command_keys
+                .verify_artifact_grant(
+                    grant,
+                    node_id,
+                    &artifact_id,
+                    "certificate_p12",
+                    grant.max_bytes,
+                    i64::try_from(now.as_secs())
+                        .map_err(|_| error(ErrorKind::Unavailable, "system clock unavailable"))?,
+                )
+                .map_err(|failure| authorization_error(&failure))?;
+            validate_artifact_claims(&claims)?;
+            if value.offset > claims.max_bytes {
+                return Err(error(ErrorKind::InvalidRequest, "artifact offset invalid"));
+            }
+            ValidatedRequest::ArtifactRead(claims, value.offset)
+        } else if let Some(privd_request::Operation::ArtifactConsume(value)) =
+            request.operation.as_ref()
+        {
+            let grant = value
+                .grant
+                .as_ref()
+                .ok_or_else(|| error(ErrorKind::PermissionDenied, "artifact grant required"))?;
+            let artifact_id: [u8; 16] = grant
+                .artifact_id
+                .as_slice()
+                .try_into()
+                .map_err(|_| error(ErrorKind::InvalidRequest, "artifact ID invalid"))?;
+            let claims = command_keys
+                .verify_artifact_grant(
+                    grant,
+                    node_id,
+                    &artifact_id,
+                    "certificate_p12",
+                    grant.max_bytes,
+                    i64::try_from(now.as_secs())
+                        .map_err(|_| error(ErrorKind::Unavailable, "system clock unavailable"))?,
+                )
+                .map_err(|failure| authorization_error(&failure))?;
+            validate_artifact_claims(&claims)?;
+            if value.sha256.len() != 32 || value.size == 0 || value.size > claims.max_bytes {
+                return Err(error(
+                    ErrorKind::InvalidRequest,
+                    "artifact consumption evidence invalid",
+                ));
+            }
+            ValidatedRequest::ArtifactConsume(claims, value.sha256.clone(), value.size)
+        } else if !matches!(
             request.operation,
             Some(
                 privd_request::Operation::ServiceStatus(_)
@@ -290,16 +380,55 @@ fn validate_request(
                 ErrorKind::PermissionDenied,
                 "Controller command authorization required",
             ));
+        } else {
+            ValidatedRequest::Read
         }
-        ValidatedRequest::Read
     };
     Ok((remaining, validated))
+}
+
+fn validate_artifact_claims(claims: &ArtifactGrantClaimsV1) -> Result<(), PrivdError> {
+    if [
+        claims.node_id,
+        claims.artifact_id,
+        claims.certificate_id,
+        claims.operation_id,
+        claims.grant_id,
+    ]
+    .into_iter()
+    .any(|value| Uuid::from_bytes(value).get_version_num() != 7)
+        || claims.certificate_version == 0
+        || claims.max_bytes == 0
+        || claims.max_bytes > 64 * 1024 * 1024
+        || claims.authorized_subject.is_empty()
+        || claims.authorized_subject.len() > 256
+    {
+        return Err(error(
+            ErrorKind::InvalidRequest,
+            "artifact grant claims invalid",
+        ));
+    }
+    Ok(())
+}
+
+fn artifact_identity(claims: &ArtifactGrantClaimsV1) -> ArtifactLeaseIdentity<'_> {
+    ArtifactLeaseIdentity {
+        artifact_id: &claims.artifact_id,
+        certificate_id: &claims.certificate_id,
+        certificate_version: claims.certificate_version,
+        operation_id: &claims.operation_id,
+        authorized_subject: &claims.authorized_subject,
+        max_bytes: claims.max_bytes,
+        grant_id: &claims.grant_id,
+        expires_at_unix_seconds: claims.expires_at_seconds,
+    }
 }
 
 fn authorization_error(failure: &AuthorizationError) -> PrivdError {
     error(ErrorKind::PermissionDenied, failure.code())
 }
 
+#[allow(clippy::too_many_lines)]
 fn validate_privileged_payload(
     command: &CommandEnvelope,
     claims: &CommandAuthorizationV1,
@@ -355,17 +484,59 @@ fn validate_privileged_payload(
         }
         Some(command_envelope::Payload::CertificateRevoke(payload)) => {
             validate_uuid(&payload.certificate_id, "certificate ID invalid")?;
+            if payload.certificate_version == 0 {
+                return Err(error(
+                    ErrorKind::InvalidRequest,
+                    "certificate version invalid",
+                ));
+            }
         }
         Some(command_envelope::Payload::CertificateP12(payload)) => {
             validate_uuid(&payload.certificate_id, "certificate ID invalid")?;
             validate_uuid(&payload.artifact_id, "artifact ID invalid")?;
+            validate_sealed_secret(
+                payload.sealed_password_v1.as_ref(),
+                SealedSecretPurpose::CertificateP12Password,
+            )?;
+            if !payload.sealed_password.is_empty()
+                || !payload.secret_key_id.is_empty()
+                || payload.certificate_version == 0
+                || payload.artifact_expires_at.is_none()
+            {
+                return Err(error(
+                    ErrorKind::InvalidRequest,
+                    "P12 secret binding invalid",
+                ));
+            }
+        }
+        Some(command_envelope::Payload::UserCreate(payload)) => {
+            validate_sealed_secret(
+                payload.sealed_password_v1.as_ref(),
+                SealedSecretPurpose::UserPassword,
+            )?;
+            if !payload.sealed_password.is_empty() || !payload.secret_key_id.is_empty() {
+                return Err(error(
+                    ErrorKind::InvalidRequest,
+                    "user secret binding invalid",
+                ));
+            }
+        }
+        Some(command_envelope::Payload::UserPasswordRotate(payload)) => {
+            validate_sealed_secret(
+                payload.sealed_password_v1.as_ref(),
+                SealedSecretPurpose::UserPassword,
+            )?;
+            if !payload.sealed_password.is_empty() || !payload.secret_key_id.is_empty() {
+                return Err(error(
+                    ErrorKind::InvalidRequest,
+                    "user secret binding invalid",
+                ));
+            }
         }
         Some(
             command_envelope::Payload::ServiceReload(_)
-            | command_envelope::Payload::UserCreate(_)
             | command_envelope::Payload::UserDisable(_)
-            | command_envelope::Payload::UserEnable(_)
-            | command_envelope::Payload::UserPasswordRotate(_),
+            | command_envelope::Payload::UserEnable(_),
         ) => {}
         _ => {
             return Err(error(
@@ -373,6 +544,24 @@ fn validate_privileged_payload(
                 "payload is not a privileged privd command",
             ));
         }
+    }
+    Ok(())
+}
+
+fn validate_sealed_secret(
+    secret: Option<&ocservia_contracts::generated::ocserv::platform::agent::v1::SealedSecretV1>,
+    purpose: SealedSecretPurpose,
+) -> Result<(), PrivdError> {
+    let secret =
+        secret.ok_or_else(|| error(ErrorKind::InvalidRequest, "sealed secret required"))?;
+    if SealedSecretVersion::try_from(secret.version).ok() != Some(SealedSecretVersion::V1)
+        || SealedSecretPurpose::try_from(secret.purpose).ok() != Some(purpose)
+        || secret.key_id.is_empty()
+        || secret.key_id.len() > 128
+        || secret.ciphertext.len() < 32
+        || secret.ciphertext.len() > 16 * 1024
+    {
+        return Err(error(ErrorKind::InvalidRequest, "sealed secret invalid"));
     }
     Ok(())
 }
@@ -727,8 +916,16 @@ async fn execute_signed_payload(
             adapter
                 .user_create(
                     &payload.username,
-                    &payload.secret_key_id,
-                    &payload.sealed_password,
+                    &payload
+                        .sealed_password_v1
+                        .as_ref()
+                        .expect("validated secret")
+                        .key_id,
+                    &payload
+                        .sealed_password_v1
+                        .as_ref()
+                        .expect("validated secret")
+                        .ciphertext,
                     payload.desired_revision,
                     effect,
                 )
@@ -754,8 +951,16 @@ async fn execute_signed_payload(
             adapter
                 .user_password_rotate(
                     &payload.username,
-                    &payload.secret_key_id,
-                    &payload.sealed_password,
+                    &payload
+                        .sealed_password_v1
+                        .as_ref()
+                        .expect("validated secret")
+                        .key_id,
+                    &payload
+                        .sealed_password_v1
+                        .as_ref()
+                        .expect("validated secret")
+                        .ciphertext,
                     payload.desired_revision,
                     effect,
                 )
@@ -809,7 +1014,7 @@ async fn execute_signed_payload(
         Some(command_envelope::Payload::CertificateRevoke(payload)) => (
             "certificate_revoke",
             adapter
-                .certificate_revoke(&payload.certificate_id)
+                .certificate_revoke(&payload.certificate_id, payload.certificate_version)
                 .await
                 .map(privd_response::Result::CertificateRevoke),
         ),
@@ -820,8 +1025,17 @@ async fn execute_signed_payload(
                     &payload.certificate_id,
                     &payload.artifact_id,
                     &payload.certificate_chain_pem,
-                    &payload.sealed_password,
-                    &payload.secret_key_id,
+                    payload
+                        .sealed_password_v1
+                        .as_ref()
+                        .expect("validated secret"),
+                    payload.certificate_version,
+                    &claims.operation_id,
+                    payload
+                        .artifact_expires_at
+                        .as_ref()
+                        .expect("validated expiry")
+                        .seconds,
                 )
                 .await
                 .map(privd_response::Result::CertificateP12),
@@ -924,16 +1138,17 @@ mod tests {
 
     use ed25519_dalek::{Signer as _, SigningKey};
     use ocservia_agent_protocol::{
-        CertificateCsrRequest, ConfigApplyRequest, ConfigPlanRequest, GroupApplyRequest,
-        IpBanRemoveRequest, ReadRequest, ServiceReloadRequest, SessionMutationRequest,
-        UserSecretRequest, privd_request,
+        ArtifactConsumeRequest, ArtifactReadRequest, CertificateCsrRequest, ConfigApplyRequest,
+        ConfigPlanRequest, GroupApplyRequest, IpBanRemoveRequest, ReadRequest,
+        ServiceReloadRequest, SessionMutationRequest, UserSecretRequest, privd_request,
     };
     use ocservia_command_authorization::{
         canonical_v1, claims_from_envelope_v1, semantic_payload_hash_v2, verification_key_id,
     };
     use ocservia_contracts::generated::ocserv::platform::agent::v1::{
-        CommandAuthorizationProof, CommandAuthorizationVersion, CommandDeliveryMode, ConfigApply,
-        SemanticPayloadHashVersion, ServiceReload, command_envelope,
+        CertificateP12, CommandAuthorizationProof, CommandAuthorizationVersion,
+        CommandDeliveryMode, ConfigApply, SealedSecretPurpose, SealedSecretV1, SealedSecretVersion,
+        SemanticPayloadHashVersion, ServiceReload, UserCreate, command_envelope,
     };
     use ocservia_ocserv_adapter::{FixedResources, Limits};
     use prost_types::Timestamp;
@@ -1232,6 +1447,86 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn cross_purpose_password_envelopes_fail_before_root_effect() {
+        let signing = SigningKey::from_bytes(&[19; 32]);
+        let keys = keyring(&signing);
+        let node_id = *Uuid::now_v7().as_bytes();
+        let now = unix_seconds();
+        let adapter = Adapter::new(FixedResources::default(), Limits::default());
+        let user_secret = SealedSecretV1 {
+            version: SealedSecretVersion::V1 as i32,
+            purpose: SealedSecretPurpose::UserPassword as i32,
+            key_id: "user-key-v1".to_owned(),
+            ciphertext: vec![0xa5; 256],
+        };
+        let mut user_command = signed_command(
+            &signing,
+            node_id,
+            now,
+            now + 60,
+            "user.create",
+            "ocserv.users.write",
+            command_envelope::Payload::UserCreate(UserCreate {
+                username: "alice".to_owned(),
+                sealed_password: Vec::new(),
+                secret_key_id: String::new(),
+                desired_revision: 1,
+                sealed_password_v1: Some(user_secret),
+            }),
+        );
+        let Some(command_envelope::Payload::UserCreate(payload)) = user_command.payload.as_mut()
+        else {
+            unreachable!()
+        };
+        payload
+            .sealed_password_v1
+            .as_mut()
+            .expect("typed user secret")
+            .purpose = SealedSecretPurpose::CertificateP12Password as i32;
+        let response = dispatch(command_request(user_command), &node_id, &keys, &adapter).await;
+        assert_permission_denied(&response);
+
+        let p12_secret = SealedSecretV1 {
+            version: SealedSecretVersion::V1 as i32,
+            purpose: SealedSecretPurpose::CertificateP12Password as i32,
+            key_id: "p12-key-v1".to_owned(),
+            ciphertext: vec![0x5a; 256],
+        };
+        let mut p12_command = signed_command(
+            &signing,
+            node_id,
+            now,
+            now + 60,
+            "certificate.private_key.export",
+            "ocserv.certificate.issue",
+            command_envelope::Payload::CertificateP12(CertificateP12 {
+                certificate_id: Uuid::now_v7().as_bytes().to_vec(),
+                certificate_chain_pem: vec![b'A'; 64],
+                sealed_password: Vec::new(),
+                secret_key_id: String::new(),
+                artifact_id: Uuid::now_v7().as_bytes().to_vec(),
+                sealed_password_v1: Some(p12_secret),
+                certificate_version: 1,
+                artifact_expires_at: Some(Timestamp {
+                    seconds: now + 60,
+                    nanos: 0,
+                }),
+            }),
+        );
+        let Some(command_envelope::Payload::CertificateP12(payload)) = p12_command.payload.as_mut()
+        else {
+            unreachable!()
+        };
+        payload
+            .sealed_password_v1
+            .as_mut()
+            .expect("typed P12 secret")
+            .purpose = SealedSecretPurpose::UserPassword as i32;
+        let response = dispatch(command_request(p12_command), &node_id, &keys, &adapter).await;
+        assert_permission_denied(&response);
+    }
+
+    #[tokio::test]
     async fn signed_config_hash_cannot_authorize_substituted_candidate_bytes() {
         let signing = SigningKey::from_bytes(&[14; 32]);
         let keys = keyring(&signing);
@@ -1305,6 +1600,8 @@ mod tests {
             privd_request::Operation::SessionDisconnect(SessionMutationRequest::default()),
             privd_request::Operation::IpBanRemove(IpBanRemoveRequest::default()),
             privd_request::Operation::ServiceReload(ServiceReloadRequest {}),
+            privd_request::Operation::ArtifactRead(ArtifactReadRequest::default()),
+            privd_request::Operation::ArtifactConsume(ArtifactConsumeRequest::default()),
         ];
         for mutation in mutations {
             let response =

@@ -16,7 +16,7 @@ import (
 const (
 	EnrollmentProofVersionV1 = 1
 	EnrollmentProtocolMajor  = 1
-	EnrollmentProtocolMinor  = 0
+	EnrollmentProtocolMinor  = 1
 )
 
 var enrollmentProofDomainV1 = []byte("ocservia/agent-enrollment/v1\x00")
@@ -40,6 +40,11 @@ func EnrollmentCanonicalV1(request *agentv1.EnrollRequest) ([]byte, error) {
 			return nil, errors.New("enrollment proof capabilities are invalid")
 		}
 	}
+	sealingKeys := slices.Clone(request.GetSealingKeys())
+	slices.SortFunc(sealingKeys, func(a, b *agentv1.SealingKeyDescriptorV1) int { return int(a.GetPurpose() - b.GetPurpose()) })
+	if err := validateSealingKeys(sealingKeys); err != nil {
+		return nil, err
+	}
 	tokenHash := sha256.Sum256([]byte(request.GetToken()))
 	var encoded bytes.Buffer
 	encoded.Grow(1024)
@@ -61,6 +66,17 @@ func EnrollmentCanonicalV1(request *agentv1.EnrollRequest) ([]byte, error) {
 			return nil, err
 		}
 	}
+	writeEnrollmentUint32(&encoded, uint32(len(sealingKeys)))
+	for _, key := range sealingKeys {
+		writeEnrollmentUint32(&encoded, uint32(key.GetVersion()))
+		writeEnrollmentUint32(&encoded, uint32(key.GetPurpose()))
+		if err := writeEnrollmentBytes(&encoded, []byte(key.GetKeyId())); err != nil {
+			return nil, err
+		}
+		if err := writeEnrollmentBytes(&encoded, key.GetPublicKeySha256()); err != nil {
+			return nil, err
+		}
+	}
 	if err := writeEnrollmentBytes(&encoded, []byte(request.GetEnvironment())); err != nil {
 		return nil, err
 	}
@@ -70,6 +86,33 @@ func EnrollmentCanonicalV1(request *agentv1.EnrollRequest) ([]byte, error) {
 	writeEnrollmentUint64(&encoded, uint64(request.GetTime().Seconds))
 	writeEnrollmentUint32(&encoded, uint32(request.GetTime().Nanos))
 	return encoded.Bytes(), nil
+}
+
+func validateSealingKeys(keys []*agentv1.SealingKeyDescriptorV1) error {
+	if len(keys) != 2 || keys[0] == nil || keys[1] == nil || keys[0].GetPurpose() != agentv1.SealedSecretPurpose_SEALED_SECRET_PURPOSE_USER_PASSWORD || keys[1].GetPurpose() != agentv1.SealedSecretPurpose_SEALED_SECRET_PURPOSE_CERTIFICATE_P12_PASSWORD {
+		return errors.New("enrollment sealing keys are invalid")
+	}
+	for _, key := range keys {
+		if key.GetVersion() != agentv1.SealedSecretVersion_SEALED_SECRET_VERSION_V1 || !validKeyID(key.GetKeyId()) || len(key.GetPublicKeySha256()) != sha256.Size {
+			return errors.New("enrollment sealing keys are invalid")
+		}
+	}
+	if keys[0].GetKeyId() == keys[1].GetKeyId() || bytes.Equal(keys[0].GetPublicKeySha256(), keys[1].GetPublicKeySha256()) {
+		return errors.New("password sealing keys must be distinct")
+	}
+	return nil
+}
+
+func validKeyID(value string) bool {
+	if len(value) < 1 || len(value) > 128 {
+		return false
+	}
+	for _, value := range []byte(value) {
+		if !(value >= 'a' && value <= 'z' || value >= 'A' && value <= 'Z' || value >= '0' && value <= '9' || value == '.' || value == '_' || value == '-') {
+			return false
+		}
+	}
+	return true
 }
 
 func verifyEnrollmentProof(request *agentv1.EnrollRequest) error {

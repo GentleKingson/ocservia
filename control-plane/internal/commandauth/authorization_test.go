@@ -65,6 +65,28 @@ type sessionGrantGolden struct {
 	SignatureHex           string   `json:"signature_hex"`
 }
 
+type artifactGrantGolden struct {
+	Version              uint32 `json:"version"`
+	TestSeedHex          string `json:"test_seed_hex"`
+	PublicKeyHex         string `json:"public_key_hex"`
+	KeyID                string `json:"key_id"`
+	NodeIDHex            string `json:"node_id_hex"`
+	ArtifactIDHex        string `json:"artifact_id_hex"`
+	CertificateIDHex     string `json:"certificate_id_hex"`
+	CertificateVersion   uint64 `json:"certificate_version"`
+	OperationIDHex       string `json:"operation_id_hex"`
+	AuthorizedSubject    string `json:"authorized_subject"`
+	Purpose              string `json:"purpose"`
+	MaxBytes             uint64 `json:"max_bytes"`
+	IssuedAtSeconds      int64  `json:"issued_at_seconds"`
+	IssuedAtNanos        uint32 `json:"issued_at_nanos"`
+	ExpiresAtSeconds     int64  `json:"expires_at_seconds"`
+	ExpiresAtNanos       uint32 `json:"expires_at_nanos"`
+	GrantIDHex           string `json:"grant_id_hex"`
+	CanonicalPreimageHex string `json:"canonical_preimage_hex"`
+	SignatureHex         string `json:"signature_hex"`
+}
+
 func TestCanonicalV1AndGoSignaturesMatchSharedGoldenVectors(t *testing.T) {
 	document := loadGoldenDocument(t)
 	if document.Version != 1 || len(document.Vectors) < 2 {
@@ -120,6 +142,46 @@ func TestSessionGrantV1CanonicalAndGoSignatureMatchSharedGolden(t *testing.T) {
 		ExpiresAtSeconds: vector.ExpiresAtSeconds, ExpiresAtNanos: vector.ExpiresAtNanos,
 	}
 	canonical, err := CanonicalSessionGrantV1(claims)
+	if err != nil {
+		t.Fatal(err)
+	}
+	signature := ed25519.Sign(signer.privateKey, canonical)
+	if vector.CanonicalPreimageHex == "" || vector.SignatureHex == "" {
+		t.Fatalf("populate fixture: canonical=%s signature=%s", hex.EncodeToString(canonical), hex.EncodeToString(signature))
+	}
+	if got := hex.EncodeToString(canonical); got != vector.CanonicalPreimageHex {
+		t.Fatalf("canonical bytes mismatch\ngot  %s\nwant %s", got, vector.CanonicalPreimageHex)
+	}
+	if got := hex.EncodeToString(signature); got != vector.SignatureHex {
+		t.Fatalf("Go signature mismatch\ngot  %s\nwant %s", got, vector.SignatureHex)
+	}
+}
+
+func TestArtifactGrantV1CanonicalAndGoSignatureMatchSharedGolden(t *testing.T) {
+	raw, err := os.ReadFile(filepath.Join("..", "..", "..", "testdata", "artifact-grant-v1.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var vector artifactGrantGolden
+	if err := json.Unmarshal(raw, &vector); err != nil {
+		t.Fatal(err)
+	}
+	seed := testFixed32(t, vector.TestSeedHex)
+	signer := NewSignerFromSeed(seed)
+	if hex.EncodeToString(signer.PublicKey()) != vector.PublicKeyHex || signer.KeyID() != vector.KeyID {
+		t.Fatal("artifact grant fixture key does not match seed")
+	}
+	claims := ArtifactGrantClaimsV1{
+		Version: vector.Version, KeyID: vector.KeyID,
+		NodeID: testFixed16(t, vector.NodeIDHex), ArtifactID: testFixed16(t, vector.ArtifactIDHex),
+		CertificateID: testFixed16(t, vector.CertificateIDHex), CertificateVersion: vector.CertificateVersion,
+		OperationID: testFixed16(t, vector.OperationIDHex), AuthorizedSubject: vector.AuthorizedSubject,
+		Purpose: vector.Purpose, MaxBytes: vector.MaxBytes,
+		IssuedAtSeconds: vector.IssuedAtSeconds, IssuedAtNanos: vector.IssuedAtNanos,
+		ExpiresAtSeconds: vector.ExpiresAtSeconds, ExpiresAtNanos: vector.ExpiresAtNanos,
+		GrantID: testFixed16(t, vector.GrantIDHex),
+	}
+	canonical, err := CanonicalArtifactGrantV1(claims)
 	if err != nil {
 		t.Fatal(err)
 	}

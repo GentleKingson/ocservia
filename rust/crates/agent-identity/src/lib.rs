@@ -9,7 +9,7 @@ use std::path::Path;
 
 use iroh::{EndpointId, SecretKey};
 use ocservia_contracts::generated::ocserv::platform::agent::v1::{
-    EnrollRequest, EnrollmentProofV1,
+    EnrollRequest, EnrollmentProofV1, SealedSecretPurpose, SealedSecretVersion,
 };
 use sha2::{Digest as _, Sha256};
 use zeroize::Zeroizing;
@@ -19,7 +19,7 @@ const CONTROLLER_FILE: &str = "controller.endpoint";
 const ENROLLMENT_PROOF_DOMAIN_V1: &[u8] = b"ocservia/agent-enrollment/v1\0";
 pub const ENROLLMENT_PROOF_VERSION_V1: u32 = 1;
 pub const ENROLLMENT_PROTOCOL_MAJOR: u32 = 1;
-pub const ENROLLMENT_PROTOCOL_MINOR: u32 = 0;
+pub const ENROLLMENT_PROTOCOL_MINOR: u32 = 1;
 
 /// A long-lived Agent endpoint key paired with its immutable controller pin.
 #[derive(Clone)]
@@ -129,6 +129,7 @@ pub fn authorize_enrollment(
     request.enrollment_protocol_major = ENROLLMENT_PROTOCOL_MAJOR;
     request.enrollment_protocol_minor = ENROLLMENT_PROTOCOL_MINOR;
     request.capabilities.sort();
+    request.sealing_keys.sort_by_key(|key| key.purpose);
     request.proof = None;
     let canonical = enrollment_canonical_v1(request)?;
     request.proof = Some(EnrollmentProofV1 {
@@ -157,8 +158,27 @@ pub fn enrollment_canonical_v1(request: &EnrollRequest) -> Result<Vec<u8>, io::E
         || !(0..1_000_000_000).contains(&timestamp.nanos)
         || request.capabilities.is_empty()
         || request.capabilities.len() > 128
+        || request.sealing_keys.len() != 2
     {
         return Err(invalid("enrollment proof claims are invalid"));
+    }
+    let mut sealing_keys = request.sealing_keys.clone();
+    sealing_keys.sort_by_key(|key| key.purpose);
+    if sealing_keys.iter().enumerate().any(|(index, key)| {
+        key.version != i32::from(SealedSecretVersion::V1)
+            || key.purpose
+                != i32::from(if index == 0 {
+                    SealedSecretPurpose::UserPassword
+                } else {
+                    SealedSecretPurpose::CertificateP12Password
+                })
+            || key.key_id.is_empty()
+            || key.key_id.len() > 128
+            || key.public_key_sha256.len() != 32
+    }) || sealing_keys[0].key_id == sealing_keys[1].key_id
+        || sealing_keys[0].public_key_sha256 == sealing_keys[1].public_key_sha256
+    {
+        return Err(invalid("enrollment sealing keys are invalid"));
     }
     let mut capabilities = request.capabilities.clone();
     capabilities.sort();
@@ -192,6 +212,22 @@ pub fn enrollment_canonical_v1(request: &EnrollRequest) -> Result<Vec<u8>, io::E
     );
     for capability in capabilities {
         write_bytes(&mut encoded, capability.as_bytes())?;
+    }
+    write_u32(
+        &mut encoded,
+        u32::try_from(sealing_keys.len()).map_err(|_| invalid("too many sealing keys"))?,
+    );
+    for key in sealing_keys {
+        write_u32(
+            &mut encoded,
+            u32::try_from(key.version).map_err(|_| invalid("sealing key version invalid"))?,
+        );
+        write_u32(
+            &mut encoded,
+            u32::try_from(key.purpose).map_err(|_| invalid("sealing key purpose invalid"))?,
+        );
+        write_bytes(&mut encoded, key.key_id.as_bytes())?;
+        write_bytes(&mut encoded, &key.public_key_sha256)?;
     }
     write_bytes(&mut encoded, request.environment.as_bytes())?;
     write_bytes(&mut encoded, &request.nonce)?;
@@ -341,6 +377,7 @@ const fn no_follow() -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ocservia_contracts::generated::ocserv::platform::agent::v1::SealingKeyDescriptorV1;
     use std::path::PathBuf;
 
     fn test_dir() -> PathBuf {
@@ -402,6 +439,20 @@ mod tests {
             enrollment_protocol_major: ENROLLMENT_PROTOCOL_MAJOR,
             enrollment_protocol_minor: ENROLLMENT_PROTOCOL_MINOR,
             proof: None,
+            sealing_keys: vec![
+                SealingKeyDescriptorV1 {
+                    version: SealedSecretVersion::V1 as i32,
+                    purpose: SealedSecretPurpose::UserPassword as i32,
+                    key_id: "fixture-user-key-v1".into(),
+                    public_key_sha256: vec![0x11; 32],
+                },
+                SealingKeyDescriptorV1 {
+                    version: SealedSecretVersion::V1 as i32,
+                    purpose: SealedSecretPurpose::CertificateP12Password as i32,
+                    key_id: "fixture-p12-key-v1".into(),
+                    public_key_sha256: vec![0x22; 32],
+                },
+            ],
         };
         let fixture = include_str!("../../../../testdata/enrollment-proof-v1.txt");
         let fields: Vec<_> = fixture.split_whitespace().collect();

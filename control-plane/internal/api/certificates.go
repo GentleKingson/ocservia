@@ -185,7 +185,8 @@ func (s *Server) downloadArtifact(w http.ResponseWriter, r *http.Request) {
 		writeProblem(w, r, http.StatusForbidden, "https://ocservia.dev/problems/artifact-denied", "Artifact unavailable", "the artifact token is invalid, expired, or consumed")
 		return
 	}
-	download, err := s.certificates.OpenArtifact(r.Context(), id, token)
+	actor := principal(r)
+	download, err := s.certificates.OpenArtifact(r.Context(), id, token, actor.IdentityID)
 	if err != nil {
 		writeCertificateError(w, r, err)
 		return
@@ -194,12 +195,11 @@ func (s *Server) downloadArtifact(w http.ResponseWriter, r *http.Request) {
 	data, readErr := io.ReadAll(io.LimitReader(download.Reader, download.Size+1))
 	digest := sha256.Sum256(data)
 	if readErr != nil || int64(len(data)) != download.Size || !bytes.Equal(digest[:], download.ExpectedSHA256) {
-		_ = s.certificates.AbortArtifact(context.WithoutCancel(r.Context()), id)
+		_ = s.certificates.AbortArtifact(context.WithoutCancel(r.Context()), id, download.GrantID)
 		writeProblem(w, r, http.StatusServiceUnavailable, "https://ocservia.dev/problems/artifact-unavailable", "Artifact unavailable", "the bounded artifact stream failed integrity verification")
 		return
 	}
-	actor := principal(r)
-	if err := s.certificates.CompleteArtifact(context.WithoutCancel(r.Context()), id, digest[:], int64(len(data)), actor.IdentityID, actor.SessionID, requestID(r)); err != nil {
+	if err := s.certificates.CompleteArtifact(context.WithoutCancel(r.Context()), id, download.GrantID, download.Grant, digest[:], int64(len(data)), actor.IdentityID, actor.SessionID, requestID(r)); err != nil {
 		writeCertificateError(w, r, err)
 		return
 	}

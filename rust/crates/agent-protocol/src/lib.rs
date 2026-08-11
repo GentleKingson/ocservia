@@ -4,7 +4,9 @@
 
 use std::io;
 
-use ocservia_contracts::generated::ocserv::platform::agent::v1::CommandEnvelope;
+use ocservia_contracts::generated::ocserv::platform::agent::v1::{
+    ArtifactGrantV1, CommandEnvelope,
+};
 use prost::Message;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
@@ -41,7 +43,7 @@ pub struct PrivdRequest {
     /// One of the permanently fixed operations.
     #[prost(
         oneof = "privd_request::Operation",
-        tags = "10, 11, 12, 13, 14, 15, 16, 17, 18, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42"
+        tags = "10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43"
     )]
     pub operation: Option<privd_request::Operation>,
 }
@@ -61,10 +63,11 @@ pub mod privd_request {
     use prost::Oneof;
 
     use super::{
-        CertificateCsrRequest, CertificateP12Request, CertificateRevokeRequest, ConfigApplyRequest,
-        ConfigPlanRequest, DesiredEffectObserveRequest, GroupApplyRequest, IpBanRemoveRequest,
-        ReadRequest, ServiceReloadRequest, SessionMutationRequest, UserDisableRequest,
-        UserEnableRequest, UserSecretRequest,
+        ArtifactConsumeRequest, ArtifactReadRequest, CertificateCsrRequest, CertificateP12Request,
+        CertificateRevokeRequest, ConfigApplyRequest, ConfigPlanRequest,
+        DesiredEffectObserveRequest, GroupApplyRequest, IpBanRemoveRequest, ReadRequest,
+        ServiceReloadRequest, SessionMutationRequest, UserDisableRequest, UserEnableRequest,
+        UserSecretRequest,
     };
 
     /// Read-only operation allowlist.
@@ -97,6 +100,9 @@ pub mod privd_request {
         /// Validate one candidate in a fixed staging directory without changing current config.
         #[prost(message, tag = "18")]
         ConfigPlan(ConfigPlanRequest),
+        /// Read one bounded chunk under a Controller-signed artifact lease.
+        #[prost(message, tag = "19")]
+        ArtifactRead(ArtifactReadRequest),
         /// Disconnect one numeric session without invalidating its cookie.
         #[prost(message, tag = "30")]
         SessionDisconnect(SessionMutationRequest),
@@ -136,6 +142,9 @@ pub mod privd_request {
         /// Build an encrypted P12 in the fixed artifact spool.
         #[prost(message, tag = "42")]
         CertificateP12(CertificateP12Request),
+        /// Durably consume and delete an artifact after successful delivery.
+        #[prost(message, tag = "43")]
+        ArtifactConsume(ArtifactConsumeRequest),
     }
 }
 
@@ -165,6 +174,8 @@ pub struct CertificateCsrResult {
 pub struct CertificateRevokeRequest {
     #[prost(bytes = "vec", tag = "1")]
     pub certificate_id: Vec<u8>,
+    #[prost(uint64, tag = "2")]
+    pub certificate_version: u64,
 }
 
 #[derive(Clone, PartialEq, Eq, Message)]
@@ -183,10 +194,49 @@ pub struct CertificateP12Request {
     pub artifact_id: Vec<u8>,
     #[prost(bytes = "vec", tag = "3")]
     pub certificate_chain_pem: Vec<u8>,
+    #[prost(message, optional, tag = "4")]
+    pub sealed_password:
+        Option<ocservia_contracts::generated::ocserv::platform::agent::v1::SealedSecretV1>,
+    #[prost(uint64, tag = "5")]
+    pub certificate_version: u64,
+    #[prost(bytes = "vec", tag = "6")]
+    pub operation_id: Vec<u8>,
+    #[prost(int64, tag = "7")]
+    pub artifact_expires_at_unix_seconds: i64,
+}
+
+#[derive(Clone, PartialEq, Eq, Message)]
+pub struct ArtifactReadRequest {
+    #[prost(message, optional, tag = "1")]
+    pub grant: Option<ArtifactGrantV1>,
+    #[prost(uint64, tag = "2")]
+    pub offset: u64,
+}
+
+#[derive(Clone, PartialEq, Eq, Message)]
+pub struct ArtifactConsumeRequest {
+    #[prost(message, optional, tag = "1")]
+    pub grant: Option<ArtifactGrantV1>,
+    #[prost(bytes = "vec", tag = "2")]
+    pub sha256: Vec<u8>,
+    #[prost(uint64, tag = "3")]
+    pub size: u64,
+}
+
+#[derive(Clone, PartialEq, Eq, Message)]
+pub struct ArtifactData {
+    #[prost(bytes = "vec", tag = "1")]
+    pub artifact_id: Vec<u8>,
+    #[prost(bytes = "vec", tag = "2")]
+    pub grant_id: Vec<u8>,
+    #[prost(uint64, tag = "3")]
+    pub offset: u64,
     #[prost(bytes = "vec", tag = "4")]
-    pub sealed_password: Vec<u8>,
-    #[prost(string, tag = "5")]
-    pub secret_key_id: String,
+    pub data: Vec<u8>,
+    #[prost(bool, tag = "5")]
+    pub eof: bool,
+    #[prost(bytes = "vec", tag = "6")]
+    pub sha256: Vec<u8>,
 }
 
 #[derive(Clone, PartialEq, Eq, Message)]
@@ -520,7 +570,7 @@ pub struct PrivdResponse {
     /// Exactly one stable result or error.
     #[prost(
         oneof = "privd_response::Result",
-        tags = "10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24"
+        tags = "10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25"
     )]
     pub result: Option<privd_response::Result>,
 }
@@ -530,7 +580,7 @@ pub mod privd_response {
     use prost::Oneof;
 
     use super::{
-        CertificateArtifactResult, CertificateCsrResult, CertificateRevokeResult,
+        ArtifactData, CertificateArtifactResult, CertificateCsrResult, CertificateRevokeResult,
         ConfigApplyResult, ConfigFingerprint, ConfigPlanResult, DesiredEffectObservation,
         GroupList, IpBanList, MutationResult, OcservVersion, PrivdError, ServiceStatus,
         SessionList, UserList,
@@ -577,6 +627,9 @@ pub mod privd_response {
         CertificateRevoke(CertificateRevokeResult),
         #[prost(message, tag = "24")]
         CertificateP12(CertificateArtifactResult),
+        /// One bounded artifact chunk read by privd under a verified grant.
+        #[prost(message, tag = "25")]
+        ArtifactData(ArtifactData),
         /// Stable failure.
         #[prost(message, tag = "20")]
         Error(PrivdError),

@@ -17,6 +17,7 @@ import (
 	"testing"
 	"time"
 
+	agentv1 "github.com/GentleKingson/ocservia/control-plane/gen/proto/ocserv/platform/agent/v1"
 	"github.com/GentleKingson/ocservia/control-plane/internal/approvals"
 	"github.com/GentleKingson/ocservia/control-plane/internal/commandauth"
 	"github.com/GentleKingson/ocservia/control-plane/internal/operations"
@@ -73,18 +74,39 @@ func (f *fixturePKI) Revoke(_ context.Context, _ RevokeSignerRequest) error {
 	f.revoked = true
 	return nil
 }
-func (f *fixturePKI) Seal(_ context.Context, _ uuid.UUID, plaintext []byte) ([]byte, string, error) {
+func (f *fixturePKI) Seal(_ context.Context, _ uuid.UUID, purpose agentv1.SealedSecretPurpose, plaintext []byte) (*agentv1.SealedSecretV1, error) {
 	digest := sha256.Sum256(plaintext)
-	return append(digest[:], digest[:]...), "fixture-node-key", nil
+	return &agentv1.SealedSecretV1{
+		Version:    agentv1.SealedSecretVersion_SEALED_SECRET_VERSION_V1,
+		Purpose:    purpose,
+		KeyId:      "fixture-p12-key",
+		Ciphertext: append(digest[:], digest[:]...),
+	}, nil
 }
 
-type fixtureArtifacts struct{ data []byte }
+type fixtureArtifacts struct {
+	data         []byte
+	consumeCount int
+	consumeErr   error
+}
 
-func (f fixtureArtifacts) FetchArtifact(_ context.Context, _ uuid.UUID, _ uuid.UUID, max int64) (io.ReadCloser, error) {
-	if int64(len(f.data)) > max {
+func (f *fixtureArtifacts) FetchArtifact(_ context.Context, grant *agentv1.ArtifactGrantV1) (io.ReadCloser, error) {
+	if grant == nil || uint64(len(f.data)) > grant.GetMaxBytes() {
 		return nil, errors.New("too large")
 	}
 	return io.NopCloser(bytes.NewReader(f.data)), nil
+}
+
+func (f *fixtureArtifacts) ConsumeArtifact(_ context.Context, grant *agentv1.ArtifactGrantV1, digest []byte, size int64) error {
+	if f.consumeErr != nil {
+		return f.consumeErr
+	}
+	expected := sha256.Sum256(f.data)
+	if grant == nil || size != int64(len(f.data)) || !bytes.Equal(digest, expected[:]) {
+		return errors.New("artifact consumption mismatch")
+	}
+	f.consumeCount++
+	return nil
 }
 
 func TestCertificateIssueArtifactAndRevokeIntegration(t *testing.T) {
@@ -115,6 +137,7 @@ func TestCertificateIssueArtifactAndRevokeIntegration(t *testing.T) {
 		{`INSERT INTO nodes(id,workspace_id,name,status,version,created_at,updated_at)VALUES($1,$2,$3,'offline',1,now(),now())`, []any{nodeID, workspaceID, "node-" + nodeID.String()}},
 		{`INSERT INTO identities(id,issuer,subject,created_at,updated_at)VALUES($1,'test',$2,now(),now()),($3,'test',$4,now(),now())`, []any{requesterID, "i17-requester-" + requesterID.String(), approverID, "i17-approver-" + approverID.String()}},
 		{`INSERT INTO node_capabilities(node_id,capability,approved)VALUES($1,'ocserv.certificate.issue',true),($1,'ocserv.certificate.revoke',true)`, []any{nodeID}},
+		{`INSERT INTO node_sealing_keys(node_id,purpose,version,key_id,public_key_sha256,created_at)VALUES($1,1,1,'fixture-user-key',decode(repeat('11',32),'hex'),now()),($1,2,1,'fixture-p12-key',decode(repeat('22',32),'hex'),now())`, []any{nodeID}},
 		{`INSERT INTO role_bindings(id,identity_id,workspace_id,role_name,resource_type,resource_id,created_at)VALUES($1,$2,$3,'SecurityAdmin','node',$4,now()-interval '1 minute'),($5,$6,$3,'SecurityAdmin','node',$4,now()-interval '1 minute')`, []any{uuid.Must(uuid.NewV7()), approverID, workspaceID, nodeID, uuid.Must(uuid.NewV7()), requesterID}},
 	} {
 		if _, err = pool.Exec(ctx, setup.query, setup.args...); err != nil {
@@ -130,7 +153,9 @@ func TestCertificateIssueArtifactAndRevokeIntegration(t *testing.T) {
 	artifactBytes := []byte("encrypted-p12-fixture")
 	var commandSeed [32]byte
 	commandSeed[0] = 5
-	service := NewWithDependencies(pool, operations.NewWithSigner(pool, 50, commandauth.NewSignerFromSeed(commandSeed)), pki, pki, fixtureArtifacts{data: artifactBytes})
+	commandSigner := commandauth.NewSignerFromSeed(commandSeed)
+	artifactTransport := &fixtureArtifacts{data: artifactBytes}
+	service := NewWithDependencies(pool, operations.NewWithSigner(pool, 50, commandSigner), pki, pki, artifactTransport, commandSigner)
 	certificate, replayed, err := service.Create(ctx, CreateRequest{NodeID: nodeID, ActorIdentityID: requesterID, ActorSessionID: requesterSession, ExpectedVersion: 1, IdempotencyKey: "i17-csr", CommonName: "node.example.test", DNSNames: []string{"node.example.test"}, KeyBits: 2048, ActorID: requesterID.String(), Reason: "issue node certificate", RequestID: "i17-csr-request", Traceparent: "00-0123456789abcdef0123456789abcdef-0123456789abcdef-01"})
 	if err != nil || replayed {
 		t.Fatalf("create certificate replay=%v err=%v", replayed, err)
@@ -192,10 +217,10 @@ func TestCertificateIssueArtifactAndRevokeIntegration(t *testing.T) {
 	if _, err = pool.Exec(ctx, `UPDATE artifact_operations SET state='ready',content_sha256=$2,content_size=$3 WHERE id=$1`, grant.ArtifactID, digest[:], len(artifactBytes)); err != nil {
 		t.Fatal(err)
 	}
-	if _, err = service.OpenArtifact(ctx, grant.ArtifactID, strings.Repeat("x", 43)); !errors.Is(err, ErrArtifactDenied) {
+	if _, err = service.OpenArtifact(ctx, grant.ArtifactID, strings.Repeat("x", 43), requesterID); !errors.Is(err, ErrArtifactDenied) {
 		t.Fatalf("wrong artifact token err=%v", err)
 	}
-	download, err := service.OpenArtifact(ctx, grant.ArtifactID, grant.DownloadToken)
+	download, err := service.OpenArtifact(ctx, grant.ArtifactID, grant.DownloadToken, requesterID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -204,20 +229,68 @@ func TestCertificateIssueArtifactAndRevokeIntegration(t *testing.T) {
 	if err != nil || !bytes.Equal(received, artifactBytes) {
 		t.Fatalf("download=%q err=%v", received, err)
 	}
-	if err = service.AbortArtifact(ctx, grant.ArtifactID); err != nil {
+	if err = service.AbortArtifact(ctx, grant.ArtifactID, download.GrantID); err != nil {
 		t.Fatal(err)
 	}
-	download, err = service.OpenArtifact(ctx, grant.ArtifactID, grant.DownloadToken)
+	if artifactTransport.consumeCount != 0 {
+		t.Fatal("interrupted artifact transfer was consumed")
+	}
+	if _, err = service.OpenArtifact(ctx, grant.ArtifactID, grant.DownloadToken, requesterID); !errors.Is(err, ErrArtifactDenied) {
+		t.Fatalf("active interrupted lease was reissued: %v", err)
+	}
+	if _, err = pool.Exec(ctx, `UPDATE artifact_operations SET lease_until=now()-interval '1 second',active_grant_expires_at=now()-interval '1 second' WHERE id=$1`, grant.ArtifactID); err != nil {
+		t.Fatal(err)
+	}
+	download, err = service.OpenArtifact(ctx, grant.ArtifactID, grant.DownloadToken, requesterID)
 	if err != nil {
 		t.Fatalf("resume interrupted artifact: %v", err)
 	}
 	_, _ = io.Copy(io.Discard, download.Reader)
 	_ = download.Reader.Close()
-	if err = service.CompleteArtifact(ctx, grant.ArtifactID, digest[:], int64(len(artifactBytes)), requesterID, requesterSession, "artifact-download"); err != nil {
+	if err = service.CompleteArtifact(ctx, grant.ArtifactID, download.GrantID, download.Grant, digest[:], int64(len(artifactBytes)), requesterID, requesterSession, "artifact-download"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err = service.OpenArtifact(ctx, grant.ArtifactID, grant.DownloadToken); !errors.Is(err, ErrArtifactDenied) {
+	if artifactTransport.consumeCount != 1 {
+		t.Fatalf("artifact consume count=%d", artifactTransport.consumeCount)
+	}
+	if _, err = service.OpenArtifact(ctx, grant.ArtifactID, grant.DownloadToken, requesterID); !errors.Is(err, ErrArtifactDenied) {
 		t.Fatalf("second download err=%v", err)
+	}
+	consumeFailureArtifactID := uuid.Must(uuid.NewV7())
+	consumeFailureApproval := approvedCertificateAction(t, ctx, service, approvalService, workspaceID, nodeID, certificate.ID, requesterID, requesterSession, approverID, approverSession, "certificate.private_key.export", certificate.Version, "certificate_p12", consumeFailureArtifactID)
+	consumeFailureGrant, _, err := service.CreateP12(ctx, P12Request{CertificateID: certificate.ID, ApprovalID: consumeFailureApproval, ArtifactRequestID: consumeFailureArtifactID, CertificateVersion: certificate.Version, ActorIdentityID: requesterID, ActorSessionID: requesterSession, ExpectedVersion: 1, IdempotencyKey: "i17-p12-consume-recovery", Reason: "test finalize recovery", RequestID: "p12-consume-recovery"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = pool.Exec(ctx, `UPDATE artifact_operations SET state='ready',content_sha256=$2,content_size=$3 WHERE id=$1`, consumeFailureGrant.ArtifactID, digest[:], len(artifactBytes)); err != nil {
+		t.Fatal(err)
+	}
+	consumeFailureDownload, err := service.OpenArtifact(ctx, consumeFailureGrant.ArtifactID, consumeFailureGrant.DownloadToken, requesterID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = io.Copy(io.Discard, consumeFailureDownload.Reader)
+	_ = consumeFailureDownload.Reader.Close()
+	artifactTransport.consumeErr = errors.New("finalize unavailable")
+	if err = service.CompleteArtifact(ctx, consumeFailureGrant.ArtifactID, consumeFailureDownload.GrantID, consumeFailureDownload.Grant, digest[:], int64(len(artifactBytes)), requesterID, requesterSession, "artifact-consume-failure"); err == nil {
+		t.Fatal("root consumption failure was accepted")
+	}
+	var consumeFailureState string
+	if err = pool.QueryRow(ctx, `SELECT state FROM artifact_operations WHERE id=$1`, consumeFailureGrant.ArtifactID).Scan(&consumeFailureState); err != nil || consumeFailureState != "leased" {
+		t.Fatalf("failed consumption state=%q err=%v", consumeFailureState, err)
+	}
+	artifactTransport.consumeErr = nil
+	if _, err = pool.Exec(ctx, `UPDATE artifact_operations SET lease_until=now()-interval '1 second',active_grant_expires_at=now()-interval '1 second' WHERE id=$1`, consumeFailureGrant.ArtifactID); err != nil {
+		t.Fatal(err)
+	}
+	consumeFailureDownload, err = service.OpenArtifact(ctx, consumeFailureGrant.ArtifactID, consumeFailureGrant.DownloadToken, requesterID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = io.Copy(io.Discard, consumeFailureDownload.Reader)
+	_ = consumeFailureDownload.Reader.Close()
+	if err = service.CompleteArtifact(ctx, consumeFailureGrant.ArtifactID, consumeFailureDownload.GrantID, consumeFailureDownload.Grant, digest[:], int64(len(artifactBytes)), requesterID, requesterSession, "artifact-consume-recovered"); err != nil {
+		t.Fatalf("recover root consumption: %v", err)
 	}
 	expiredArtifactID := uuid.Must(uuid.NewV7())
 	expiredApprovalID := approvedCertificateAction(t, ctx, service, approvalService, workspaceID, nodeID, certificate.ID, requesterID, requesterSession, approverID, approverSession, "certificate.private_key.export", issued.Version, "certificate_p12", expiredArtifactID)
@@ -228,7 +301,7 @@ func TestCertificateIssueArtifactAndRevokeIntegration(t *testing.T) {
 	if _, err = pool.Exec(ctx, `UPDATE artifact_operations SET state='ready',content_sha256=$2,content_size=$3,expires_at=now()-interval '1 second' WHERE id=$1`, expiredGrant.ArtifactID, digest[:], len(artifactBytes)); err != nil {
 		t.Fatal(err)
 	}
-	if _, err = service.OpenArtifact(ctx, expiredGrant.ArtifactID, expiredGrant.DownloadToken); !errors.Is(err, ErrArtifactDenied) {
+	if _, err = service.OpenArtifact(ctx, expiredGrant.ArtifactID, expiredGrant.DownloadToken, requesterID); !errors.Is(err, ErrArtifactDenied) {
 		t.Fatalf("expired artifact err=%v", err)
 	}
 	if err := service.Maintain(ctx); err != nil {
@@ -248,16 +321,16 @@ func TestCertificateIssueArtifactAndRevokeIntegration(t *testing.T) {
 	if _, err = pool.Exec(ctx, `UPDATE artifact_operations SET state='ready',content_sha256=$2,content_size=$3 WHERE id=$1`, hashGrant.ArtifactID, wrongDigest[:], len(artifactBytes)); err != nil {
 		t.Fatal(err)
 	}
-	download, err = service.OpenArtifact(ctx, hashGrant.ArtifactID, hashGrant.DownloadToken)
+	download, err = service.OpenArtifact(ctx, hashGrant.ArtifactID, hashGrant.DownloadToken, requesterID)
 	if err != nil {
 		t.Fatal(err)
 	}
 	_, _ = io.Copy(io.Discard, download.Reader)
 	_ = download.Reader.Close()
-	if err := service.CompleteArtifact(ctx, hashGrant.ArtifactID, digest[:], int64(len(artifactBytes)), requesterID, requesterSession, "artifact-hash-mismatch"); !errors.Is(err, ErrArtifactDenied) {
+	if err := service.CompleteArtifact(ctx, hashGrant.ArtifactID, download.GrantID, download.Grant, digest[:], int64(len(artifactBytes)), requesterID, requesterSession, "artifact-hash-mismatch"); !errors.Is(err, ErrArtifactDenied) {
 		t.Fatalf("artifact hash mismatch err=%v", err)
 	}
-	if err := service.AbortArtifact(ctx, hashGrant.ArtifactID); err != nil {
+	if err := service.AbortArtifact(ctx, hashGrant.ArtifactID, download.GrantID); err != nil {
 		t.Fatal(err)
 	}
 	secretRef, err := service.CreateSecretRef(ctx, SecretRefRequest{WorkspaceID: workspaceID, ActorID: approverID, SessionID: approverSession, Provider: "vault", KeyPath: "production/ocserv/tls", Version: "version-1", Reason: "register external reference", RequestID: "secret-create"})
@@ -278,7 +351,7 @@ func TestCertificateIssueArtifactAndRevokeIntegration(t *testing.T) {
 	if err != nil || expired.State != "expired" {
 		t.Fatalf("expired certificate=%+v err=%v", expired, err)
 	}
-	if _, err := service.OpenArtifact(ctx, hashGrant.ArtifactID, hashGrant.DownloadToken); !errors.Is(err, ErrArtifactDenied) {
+	if _, err := service.OpenArtifact(ctx, hashGrant.ArtifactID, hashGrant.DownloadToken, requesterID); !errors.Is(err, ErrArtifactDenied) {
 		t.Fatalf("certificate expiry left artifact downloadable: %v", err)
 	}
 	var expiringAlerts, expiredAlerts int
@@ -350,7 +423,7 @@ func cleanupCertificateIntegration(ctx context.Context, pool *pgxpool.Pool, work
 	defer func() {
 		_, _ = pool.Exec(context.Background(), `ALTER TABLE audit_events ENABLE TRIGGER audit_events_append_only`)
 	}()
-	statements := []string{`DELETE FROM artifact_operations WHERE workspace_id=$1`, `DELETE FROM certificates WHERE workspace_id=$1`, `DELETE FROM secret_provider_refs WHERE workspace_id=$1`, `DELETE FROM agent_command_results WHERE command_id IN(SELECT id FROM commands WHERE workspace_id=$1)`, `DELETE FROM node_command_leases WHERE command_id IN(SELECT id FROM commands WHERE workspace_id=$1)`, `DELETE FROM command_attempts WHERE command_id IN(SELECT id FROM commands WHERE workspace_id=$1)`, `DELETE FROM outbox_events WHERE command_id IN(SELECT id FROM commands WHERE workspace_id=$1)`, `DELETE FROM operation_events WHERE operation_id IN(SELECT id FROM operations WHERE workspace_id=$1)`, `DELETE FROM audit_events WHERE workspace_id=$1`, `DELETE FROM security_alerts WHERE workspace_id=$1`, `DELETE FROM approval_requests WHERE workspace_id=$1`, `DELETE FROM commands WHERE workspace_id=$1`, `DELETE FROM operations WHERE workspace_id=$1`, `DELETE FROM role_bindings WHERE workspace_id=$1`, `DELETE FROM node_capabilities WHERE node_id IN(SELECT id FROM nodes WHERE workspace_id=$1)`, `DELETE FROM nodes WHERE workspace_id=$1`, `DELETE FROM identities WHERE issuer='test' AND subject LIKE 'i17-%'`, `DELETE FROM workspaces WHERE id=$1`}
+	statements := []string{`DELETE FROM artifact_operations WHERE workspace_id=$1`, `DELETE FROM certificates WHERE workspace_id=$1`, `DELETE FROM secret_provider_refs WHERE workspace_id=$1`, `DELETE FROM agent_command_results WHERE command_id IN(SELECT id FROM commands WHERE workspace_id=$1)`, `DELETE FROM node_command_leases WHERE command_id IN(SELECT id FROM commands WHERE workspace_id=$1)`, `DELETE FROM command_attempts WHERE command_id IN(SELECT id FROM commands WHERE workspace_id=$1)`, `DELETE FROM outbox_events WHERE command_id IN(SELECT id FROM commands WHERE workspace_id=$1)`, `DELETE FROM operation_events WHERE operation_id IN(SELECT id FROM operations WHERE workspace_id=$1)`, `DELETE FROM audit_events WHERE workspace_id=$1`, `DELETE FROM security_alerts WHERE workspace_id=$1`, `DELETE FROM approval_requests WHERE workspace_id=$1`, `DELETE FROM commands WHERE workspace_id=$1`, `DELETE FROM operations WHERE workspace_id=$1`, `DELETE FROM role_bindings WHERE workspace_id=$1`, `DELETE FROM node_sealing_keys WHERE node_id IN(SELECT id FROM nodes WHERE workspace_id=$1)`, `DELETE FROM node_capabilities WHERE node_id IN(SELECT id FROM nodes WHERE workspace_id=$1)`, `DELETE FROM nodes WHERE workspace_id=$1`, `DELETE FROM identities WHERE issuer='test' AND subject LIKE 'i17-%'`, `DELETE FROM workspaces WHERE id=$1`}
 	for _, statement := range statements {
 		args := []any(nil)
 		if strings.Contains(statement, "$1") {

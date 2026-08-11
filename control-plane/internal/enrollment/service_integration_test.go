@@ -219,7 +219,7 @@ func TestEnrollmentTrustLifecycleIntegration(t *testing.T) {
 	if err != nil || !permitted {
 		t.Fatalf("active enrollment recovery permitted=%v err=%v", permitted, err)
 	}
-	handshake := &agentv1.SessionHandshake{ProtocolMajor: 1, ProtocolMinor: 0, AgentVersion: "test", NodeId: nodeID[:], EndpointId: endpoint, Capabilities: []string{"ocserv.status.read"}, OsRelease: "test", BootId: "boot", AgentInstanceId: uuidBytes(), MaxMessageSize: 1024, Time: timestamppb.Now(), Nonce: make([]byte, 16)}
+	handshake := &agentv1.SessionHandshake{ProtocolMajor: 1, ProtocolMinor: 0, AgentVersion: "test", NodeId: nodeID[:], EndpointId: endpoint, Capabilities: []string{"ocserv.status.read"}, OsRelease: "test", BootId: "boot", AgentInstanceId: uuidBytes(), MaxMessageSize: 1024, Time: timestamppb.Now(), Nonce: make([]byte, 16), SealingKeys: enrollmentSealingKeys()}
 	response, err := service.AuthorizeSession(ctx, &transportv1.AuthorizeSessionRequest{RemoteEndpointId: endpoint, Handshake: handshake})
 	if err != nil || response.GetResult() != agentv1.HandshakeResult_HANDSHAKE_RESULT_ACCEPTED {
 		t.Fatalf("active authorization = %v, %v", response, err)
@@ -242,6 +242,13 @@ func TestEnrollmentTrustLifecycleIntegration(t *testing.T) {
 		t.Fatalf("minor protocol mismatch = %v, %v", response, err)
 	}
 	handshake.ProtocolMinor = ProtocolMinor
+	handshake.SealingKeys = nil
+	handshake.Capabilities = []string{"ocserv.status.read", "ocserv.users.write"}
+	response, err = service.AuthorizeSession(ctx, &transportv1.AuthorizeSessionRequest{RemoteEndpointId: endpoint, Handshake: handshake})
+	if err != nil || response.GetResult() != agentv1.HandshakeResult_HANDSHAKE_RESULT_ACCEPTED || !slices.Equal(response.GetNegotiatedCapabilities(), []string{"ocserv.status.read"}) || response.GetSessionGrant() == nil {
+		t.Fatalf("legacy sealing-key rollback authorization = %v, %v", response, err)
+	}
+	handshake.SealingKeys = enrollmentSealingKeys()
 	handshake.Capabilities = []string{"ocserv.status.read", "ocserv.users.write", "unsupported.agent.feature"}
 	response, err = service.AuthorizeSession(ctx, &transportv1.AuthorizeSessionRequest{RemoteEndpointId: endpoint, Handshake: handshake})
 	if err != nil || response.GetResult() != agentv1.HandshakeResult_HANDSHAKE_RESULT_ACCEPTED {
@@ -483,6 +490,60 @@ func TestLegacyPendingNodeCanBeReenrolledIntegration(t *testing.T) {
 	}
 }
 
+func TestExistingActiveNodeBindsSealingKeysOnceIntegration(t *testing.T) {
+	databaseURL := os.Getenv("OCSERV_TEST_DATABASE_URL")
+	if databaseURL == "" {
+		t.Skip("OCSERV_TEST_DATABASE_URL is not set")
+	}
+	ctx := context.Background()
+	pool, err := pgxpool.New(ctx, databaseURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pool.Close()
+	workspaceID := uuid.Must(uuid.NewV7())
+	nodeID := uuid.Must(uuid.NewV7())
+	endpoint := endpointFixture(12)
+	_, err = pool.Exec(ctx, `
+		INSERT INTO workspaces (id,name,slug,created_at,updated_at) VALUES ($1,'Existing sealing migration',$2,now(),now());
+		INSERT INTO nodes (id,workspace_id,name,status,created_at,updated_at) VALUES ($3,$1,'existing-node','active',now(),now());
+		INSERT INTO node_endpoint_keys(node_id,endpoint_id,state,bound_at) VALUES($3,$4,'active',now());
+		INSERT INTO node_capabilities(node_id,capability,approved) VALUES($3,'ocserv.status.read',true)`, workspaceID, "existing-seal-"+workspaceID.String(), nodeID, endpoint)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cleanupWorkspace(ctx, pool, workspaceID)
+	service := newTestService(t, pool, "", "test")
+	token, err := service.CreateToken(ctx, TokenSpec{WorkspaceID: workspaceID, Environment: "test", ExpectedNodeName: "existing-node", ExpectedEndpointID: endpoint, ActorID: "integration", Reason: "bind purpose-specific sealing keys", RequestID: uuid.Must(uuid.NewV7()).String()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := enrollmentRequest(token.Value, endpoint)
+	response, err := service.Enroll(ctx, request)
+	if err != nil || response.GetResult() != agentv1.HandshakeResult_HANDSHAKE_RESULT_ACCEPTED || !bytes.Equal(response.GetNodeId(), nodeID[:]) {
+		t.Fatalf("existing node sealing enrollment response=%v err=%v", response, err)
+	}
+	var keyCount int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM node_sealing_keys WHERE node_id=$1`, nodeID).Scan(&keyCount); err != nil || keyCount != 2 {
+		t.Fatalf("existing node sealing key count=%d err=%v", keyCount, err)
+	}
+	retry, err := service.Enroll(ctx, request)
+	if err != nil || retry.GetResult() != agentv1.HandshakeResult_HANDSHAKE_RESULT_ACCEPTED || !bytes.Equal(retry.GetNodeId(), nodeID[:]) {
+		t.Fatalf("existing node consumed-token retry=%v err=%v", retry, err)
+	}
+	second, err := service.CreateToken(ctx, TokenSpec{WorkspaceID: workspaceID, Environment: "test", ExpectedNodeName: "existing-node", ExpectedEndpointID: endpoint, ActorID: "integration", Reason: "must not replace sealing keys", RequestID: uuid.Must(uuid.NewV7()).String()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.Enroll(ctx, enrollmentRequest(second.Value, endpoint)); !errors.Is(err, ErrInvalidToken) {
+		t.Fatalf("second sealing key binding err=%v", err)
+	}
+	var consumedAt *time.Time
+	if err := pool.QueryRow(ctx, `SELECT consumed_at FROM enrollment_tokens WHERE id=$1`, second.ID).Scan(&consumedAt); err != nil || consumedAt != nil {
+		t.Fatalf("replacement token consumed_at=%v err=%v", consumedAt, err)
+	}
+}
+
 func createToken(t *testing.T, service *Service, workspaceID uuid.UUID, endpoint []byte) Token {
 	t.Helper()
 	token, err := service.CreateToken(context.Background(), TokenSpec{WorkspaceID: workspaceID, Environment: "test", ExpectedEndpointID: endpoint, ActorID: "integration", Reason: "test enrollment", RequestID: uuid.Must(uuid.NewV7()).String()})
@@ -502,7 +563,7 @@ func newTestService(t *testing.T, pool *pgxpool.Pool, controllerEndpointID, cont
 }
 
 func enrollmentRequest(token string, endpoint []byte) *agentv1.EnrollRequest {
-	request := &agentv1.EnrollRequest{Token: token, EndpointId: endpoint, AgentVersion: "test", OsRelease: "test", OcservVersion: "test", BootId: "boot", AgentInstanceId: uuidBytes(), Capabilities: []string{"ocserv.status.read"}, Environment: "test", Nonce: make([]byte, 16), Time: timestamppb.Now(), EnrollmentProtocolMajor: EnrollmentProtocolMajor, EnrollmentProtocolMinor: EnrollmentProtocolMinor}
+	request := &agentv1.EnrollRequest{Token: token, EndpointId: endpoint, AgentVersion: "test", OsRelease: "test", OcservVersion: "test", BootId: "boot", AgentInstanceId: uuidBytes(), Capabilities: []string{"ocserv.status.read"}, Environment: "test", Nonce: make([]byte, 16), Time: timestamppb.Now(), EnrollmentProtocolMajor: EnrollmentProtocolMajor, EnrollmentProtocolMinor: EnrollmentProtocolMinor, SealingKeys: enrollmentSealingKeys()}
 	privateKey, ok := endpointPrivateKeys.Load(string(endpoint))
 	if !ok {
 		panic("missing enrollment endpoint private key fixture")
@@ -513,6 +574,13 @@ func enrollmentRequest(token string, endpoint []byte) *agentv1.EnrollRequest {
 	}
 	request.Proof = &agentv1.EnrollmentProofV1{Version: EnrollmentProofVersionV1, Signature: ed25519.Sign(privateKey.(ed25519.PrivateKey), canonical)}
 	return request
+}
+
+func enrollmentSealingKeys() []*agentv1.SealingKeyDescriptorV1 {
+	return []*agentv1.SealingKeyDescriptorV1{
+		{Version: agentv1.SealedSecretVersion_SEALED_SECRET_VERSION_V1, Purpose: agentv1.SealedSecretPurpose_SEALED_SECRET_PURPOSE_USER_PASSWORD, KeyId: "fixture-user-key-v1", PublicKeySha256: bytes.Repeat([]byte{0x11}, 32)},
+		{Version: agentv1.SealedSecretVersion_SEALED_SECRET_VERSION_V1, Purpose: agentv1.SealedSecretPurpose_SEALED_SECRET_PURPOSE_CERTIFICATE_P12_PASSWORD, KeyId: "fixture-p12-key-v1", PublicKeySha256: bytes.Repeat([]byte{0x22}, 32)},
+	}
 }
 
 var endpointPrivateKeys sync.Map

@@ -13,6 +13,14 @@
  */
 
 import { mapValues } from "../runtime";
+import type { UserPasswordSealedSecretV1 } from "./UserPasswordSealedSecretV1";
+import {
+  UserPasswordSealedSecretV1FromJSON,
+  UserPasswordSealedSecretV1FromJSONTyped,
+  UserPasswordSealedSecretV1ToJSON,
+  UserPasswordSealedSecretV1ToJSONTyped,
+} from "./UserPasswordSealedSecretV1";
+
 /**
  *
  * @export
@@ -26,17 +34,11 @@ export interface UserCreateRequest {
    */
   name: string;
   /**
-   * RSA-OAEP-SHA256 ciphertext sealed to the selected node key; plaintext is never accepted.
-   * @type {string}
-   * @memberof UserCreateRequest
-   */
-  sealedPassword: string;
-  /**
    *
-   * @type {string}
+   * @type {UserPasswordSealedSecretV1}
    * @memberof UserCreateRequest
    */
-  secretKeyId: string;
+  sealedPassword: UserPasswordSealedSecretV1;
   /**
    *
    * @type {string}
@@ -71,13 +73,6 @@ export function instanceOfUserCreateRequest(
       (value as Record<string, any>)["sealed_password"] === undefined)
   )
     return false;
-  if (
-    (!("secretKeyId" in (value as Record<string, any>)) &&
-      !("secret_key_id" in (value as Record<string, any>))) ||
-    ((value as Record<string, any>)["secretKeyId"] === undefined &&
-      (value as Record<string, any>)["secret_key_id"] === undefined)
-  )
-    return false;
   if (!("reason" in value) || value["reason"] === undefined) return false;
   return true;
 }
@@ -95,8 +90,7 @@ export function UserCreateRequestFromJSONTyped(
   }
   return {
     name: json["name"],
-    sealedPassword: json["sealed_password"],
-    secretKeyId: json["secret_key_id"],
+    sealedPassword: UserPasswordSealedSecretV1FromJSON(json["sealed_password"]),
     reason: json["reason"],
     expectedVersion:
       json["expected_version"] == null ? undefined : json["expected_version"],
@@ -118,8 +112,7 @@ export function UserCreateRequestToJSONTyped(
 
   return {
     name: value["name"],
-    sealed_password: value["sealedPassword"],
-    secret_key_id: value["secretKeyId"],
+    sealed_password: UserPasswordSealedSecretV1ToJSON(value["sealedPassword"]),
     reason: value["reason"],
     expected_version: value["expectedVersion"],
     ttl_seconds: value["ttlSeconds"],
