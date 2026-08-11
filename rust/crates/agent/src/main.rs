@@ -12,8 +12,8 @@ use ocservia_agent::{
     MAX_COMMAND_BYTES, MAX_WRITE_QUEUE, PrivdClient,
 };
 use ocservia_agent_protocol::{
-    DesiredEffectState, ErrorKind, MAX_MANAGED_RESOURCES, PrivdResponse, privd_request,
-    privd_response,
+    ArtifactConsumeRequest, ArtifactReadRequest, DesiredEffectState, ErrorKind,
+    MAX_MANAGED_RESOURCES, PrivdResponse, privd_request, privd_response,
 };
 use ocservia_command_authorization::{
     ControllerCommandKeyring, VerifiedSessionGrant, load_verification_key,
@@ -23,9 +23,12 @@ use ocservia_command_journal::{
 };
 use ocservia_contracts::decode_strict_command_envelope;
 use ocservia_contracts::generated::ocserv::platform::agent::v1::{
-    AgentEvent, AgentEventType, ArtifactChunk, ArtifactFetchRequest, CommandDeliveryMode,
-    CommandEnvelope, CommandResult, CommandResultState, EnrollRequest, EnrollResponse,
-    GroupObservation, HandshakeResult, IpBanObservation, MetricSample, ObservedSnapshot,
+    AgentEvent, AgentEventType, ArtifactChunk,
+    ArtifactConsumeRequest as ArtifactConsumeFinalizeRequest,
+    ArtifactConsumeResponse as ArtifactConsumeFinalizeResponse, ArtifactFetchRequest,
+    CommandDeliveryMode, CommandEnvelope, CommandResult, CommandResultState, EnrollRequest,
+    EnrollResponse, GroupObservation, HandshakeResult, IpBanObservation, MetricSample,
+    ObservedSnapshot, SealedSecretPurpose, SealedSecretVersion, SealingKeyDescriptorV1,
     SemanticPayloadHashVersion, SessionHandshake, SessionHandshakeResponse, SessionObservation,
     TelemetryBatch, TelemetryDropCounters, TelemetryPriority, UserObservation, command_envelope,
 };
@@ -38,6 +41,9 @@ use zeroize::Zeroizing;
 const AGENT_ALPN: &[u8] = b"ocserv-platform/agent/1";
 const ENROLL_ALPN: &[u8] = b"ocserv-platform/enroll/1";
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
+const ARTIFACT_FRAME_MASK: u32 = 3 << 30;
+const ARTIFACT_FETCH_FRAME: u32 = 1 << 31;
+const ARTIFACT_CONSUME_FRAME: u32 = 3 << 30;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
@@ -126,8 +132,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                 boot_id: &boot_id,
                 os_release: &os_release,
                 agent_instance_id,
-                artifact_dir: &config.artifact_dir,
                 command_keys: &command_keys,
+                sealing_keys: &config.sealing_keys,
             };
             match connect_once(&endpoint, controller, &mut session).await {
                 Ok(()) => attempt = 0,
@@ -211,6 +217,7 @@ async fn enroll_agent(
         enrollment_protocol_major: 0,
         enrollment_protocol_minor: 0,
         proof: None,
+        sealing_keys: config.sealing_keys.clone(),
     };
     identity.authorize_enrollment(&mut request)?;
     let response: EnrollResponse = exchange_message(&connection, &request, "enrollment").await?;
@@ -301,8 +308,8 @@ struct SessionContext<'a> {
     boot_id: &'a str,
     os_release: &'a str,
     agent_instance_id: Uuid,
-    artifact_dir: &'a PathBuf,
     command_keys: &'a ControllerCommandKeyring,
+    sealing_keys: &'a [SealingKeyDescriptorV1],
 }
 
 struct ActiveSessionAuthority {
@@ -369,6 +376,7 @@ async fn connect_once(
         max_message_size: 1024 * 1024,
         time: Some(SystemTime::now().into()),
         nonce: Uuid::now_v7().as_bytes().to_vec(),
+        sealing_keys: session.sealing_keys.to_vec(),
     };
     let bytes = handshake.encode_to_vec();
     let response = tokio::time::timeout(HANDSHAKE_TIMEOUT, async {
@@ -509,14 +517,30 @@ async fn handle_command_stream(
         .await
         .map_err(|_| invalid("command length timed out"))??;
     let framed_length = u32::from_be_bytes(length);
-    if framed_length & (1 << 31) != 0 {
+    if framed_length & ARTIFACT_FRAME_MASK == ARTIFACT_FETCH_FRAME {
         return handle_artifact_stream(
             send,
             recv,
-            framed_length & !(1 << 31),
-            session.artifact_dir,
+            framed_length & !ARTIFACT_FRAME_MASK,
+            session.node_id,
+            session.command_keys,
+            session.privd,
         )
         .await;
+    }
+    if framed_length & ARTIFACT_FRAME_MASK == ARTIFACT_CONSUME_FRAME {
+        return handle_artifact_consume(
+            send,
+            recv,
+            framed_length & !ARTIFACT_FRAME_MASK,
+            session.node_id,
+            session.command_keys,
+            session.privd,
+        )
+        .await;
+    }
+    if framed_length & ARTIFACT_FRAME_MASK != 0 {
+        return Err(invalid("command frame kind invalid").into());
     }
     let length = framed_length as usize;
     if length == 0 || length > MAX_COMMAND_BYTES {
@@ -601,7 +625,9 @@ async fn handle_artifact_stream(
     mut send: iroh::endpoint::SendStream,
     mut recv: iroh::endpoint::RecvStream,
     length: u32,
-    artifact_dir: &Path,
+    node_id: Uuid,
+    command_keys: &ControllerCommandKeyring,
+    privd: &PrivdClient,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let length = usize::try_from(length)?;
     if length == 0 || length > 64 * 1024 {
@@ -614,42 +640,159 @@ async fn handle_artifact_stream(
     let request = ArtifactFetchRequest::decode(bytes.as_slice())?;
     let artifact =
         Uuid::from_slice(&request.artifact_id).map_err(|_| invalid("artifact ID invalid"))?;
+    let grant = request
+        .grant
+        .as_ref()
+        .ok_or_else(|| invalid("artifact grant required"))?;
     if artifact.get_version_num() != 7
         || request.purpose != "certificate_p12"
         || request.max_bytes == 0
         || request.max_bytes > 64 * 1024 * 1024
-        || !artifact_dir.is_absolute()
     {
         return Err(invalid("artifact request invalid").into());
     }
-    let path = artifact_dir.join(format!("{artifact}.p12"));
-    let metadata = tokio::fs::symlink_metadata(&path).await?;
-    if !metadata.is_file()
-        || metadata.file_type().is_symlink()
-        || metadata.len() == 0
-        || metadata.len() > request.max_bytes
-    {
-        return Err(invalid("artifact resource invalid").into());
-    }
-    let data = tokio::fs::read(&path).await?;
-    let digest = sha2::Sha256::digest(&data).to_vec();
-    let mut offset = 0_usize;
-    while offset < data.len() {
-        let end = (offset + 256 * 1024).min(data.len());
-        let eof = end == data.len();
+    command_keys.verify_artifact_grant(
+        grant,
+        node_id.as_bytes(),
+        artifact.as_bytes(),
+        &request.purpose,
+        request.max_bytes,
+        unix_seconds()?,
+    )?;
+    let mut offset = 0_u64;
+    let mut hasher = sha2::Sha256::new();
+    let digest;
+    loop {
+        let response = privd
+            .call(privd_request::Operation::ArtifactRead(
+                ArtifactReadRequest {
+                    grant: Some(grant.clone()),
+                    offset,
+                },
+            ))
+            .await?;
+        let data = match response.result {
+            Some(privd_response::Result::ArtifactData(value)) => value,
+            Some(privd_response::Result::Error(error)) => {
+                return Err(invalid(&error.detail).into());
+            }
+            _ => return Err(invalid("privd artifact response invalid").into()),
+        };
+        if data.artifact_id != request.artifact_id
+            || data.grant_id != grant.grant_id
+            || data.offset != offset
+            || data.data.is_empty()
+            || data.data.len() > 256 * 1024
+            || offset.saturating_add(data.data.len() as u64) > request.max_bytes
+            || (data.eof && data.sha256.len() != 32)
+            || (!data.eof && !data.sha256.is_empty())
+        {
+            return Err(invalid("privd artifact chunk invalid").into());
+        }
+        hasher.update(&data.data);
+        let next_offset = offset.saturating_add(data.data.len() as u64);
         let chunk = ArtifactChunk {
             artifact_id: request.artifact_id.clone(),
-            offset: u64::try_from(offset)?,
-            data: data[offset..end].to_vec(),
-            eof,
-            sha256: if eof { digest.clone() } else { Vec::new() },
+            offset,
+            data: data.data,
+            eof: data.eof,
+            sha256: data.sha256.clone(),
         }
         .encode_to_vec();
         send.write_all(&u32::try_from(chunk.len())?.to_be_bytes())
             .await?;
         send.write_all(&chunk).await?;
-        offset = end;
+        offset = next_offset;
+        if data.eof {
+            digest = data.sha256;
+            break;
+        }
     }
+    send.finish()?;
+    let stopped = tokio::time::timeout(Duration::from_secs(30), send.stopped())
+        .await
+        .map_err(|_| invalid("artifact delivery acknowledgement timed out"))??;
+    if stopped.is_some() || hasher.finalize().as_slice() != digest {
+        return Err(invalid("artifact delivery integrity failed").into());
+    }
+    Ok(())
+}
+
+async fn handle_artifact_consume(
+    mut send: iroh::endpoint::SendStream,
+    mut recv: iroh::endpoint::RecvStream,
+    length: u32,
+    node_id: Uuid,
+    command_keys: &ControllerCommandKeyring,
+    privd: &PrivdClient,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let length = usize::try_from(length)?;
+    if length == 0 || length > 64 * 1024 {
+        return Err(invalid("artifact finalize request size invalid").into());
+    }
+    let mut bytes = vec![0; length];
+    tokio::time::timeout(HANDSHAKE_TIMEOUT, recv.read_exact(&mut bytes))
+        .await
+        .map_err(|_| invalid("artifact finalize request timed out"))??;
+    let request = ArtifactConsumeFinalizeRequest::decode(bytes.as_slice())?;
+    let grant = request
+        .grant
+        .as_ref()
+        .ok_or_else(|| invalid("artifact grant required"))?;
+    let artifact =
+        Uuid::from_slice(&grant.artifact_id).map_err(|_| invalid("artifact ID invalid"))?;
+    if artifact.get_version_num() != 7
+        || request.sha256.len() != 32
+        || request.size == 0
+        || request.size != grant.max_bytes
+        || grant.purpose != "certificate_p12"
+    {
+        return Err(invalid("artifact finalize request invalid").into());
+    }
+    if request.confirm_only {
+        command_keys.verify_artifact_grant_for_confirmation(
+            grant,
+            node_id.as_bytes(),
+            artifact.as_bytes(),
+            "certificate_p12",
+            request.size,
+            unix_seconds()?,
+        )?;
+    } else {
+        command_keys.verify_artifact_grant(
+            grant,
+            node_id.as_bytes(),
+            artifact.as_bytes(),
+            "certificate_p12",
+            request.size,
+            unix_seconds()?,
+        )?;
+    }
+    let response = privd
+        .call(privd_request::Operation::ArtifactConsume(
+            ArtifactConsumeRequest {
+                grant: Some(grant.clone()),
+                sha256: request.sha256,
+                size: request.size,
+                confirm_only: request.confirm_only,
+            },
+        ))
+        .await?;
+    let Some(privd_response::Result::Mutation(result)) = response.result else {
+        return Err(invalid("artifact consumption failed").into());
+    };
+    if !request.confirm_only && !result.applied {
+        return Err(invalid("artifact consumption failed").into());
+    }
+    let response = ArtifactConsumeFinalizeResponse {
+        artifact_id: grant.artifact_id.clone(),
+        grant_id: grant.grant_id.clone(),
+        consumed: result.applied,
+    }
+    .encode_to_vec();
+    send.write_all(&u32::try_from(response.len())?.to_be_bytes())
+        .await?;
+    send.write_all(&response).await?;
     send.finish()?;
     Ok(())
 }
@@ -1258,12 +1401,12 @@ struct Config {
     controller: Option<EndpointId>,
     node_id: Option<Uuid>,
     probe_only: bool,
-    artifact_dir: PathBuf,
     relay_mode: RelayMode,
     command_verification_key_files: Vec<PathBuf>,
     prepare_enrollment: bool,
     enrollment_token_file: Option<PathBuf>,
     enrollment_environment: Option<String>,
+    sealing_keys: Vec<SealingKeyDescriptorV1>,
 }
 
 fn load_controller_command_keys(
@@ -1285,6 +1428,7 @@ fn load_controller_command_keys(
     Ok(Some(ControllerCommandKeyring::new(keys)?))
 }
 
+#[allow(clippy::too_many_lines)]
 fn parse_args() -> Result<Config, io::Error> {
     let mut config = Config {
         identity_dir: PathBuf::from("/var/lib/ocservia-agent/identity"),
@@ -1293,16 +1437,20 @@ fn parse_args() -> Result<Config, io::Error> {
         controller: None,
         node_id: None,
         probe_only: false,
-        artifact_dir: PathBuf::from("/var/lib/ocservia-privd/certificates/artifacts"),
         relay_mode: RelayMode::Default,
         command_verification_key_files: Vec::new(),
         prepare_enrollment: false,
         enrollment_token_file: None,
         enrollment_environment: None,
+        sealing_keys: Vec::new(),
     };
     let mut relay_mode = String::from("default");
     let mut relay_urls = Vec::new();
     let mut relay_token_file = None;
+    let mut user_seal_key_id = None;
+    let mut user_seal_key_sha256 = None;
+    let mut p12_seal_key_id = None;
+    let mut p12_seal_key_sha256 = None;
     let mut args = env::args().skip(1);
     while let Some(argument) = args.next() {
         match argument.as_str() {
@@ -1328,9 +1476,6 @@ fn parse_args() -> Result<Config, io::Error> {
                 );
             }
             "--probe-privd-only" => config.probe_only = true,
-            "--artifact-dir" => {
-                config.artifact_dir = PathBuf::from(required(&mut args, "--artifact-dir")?);
-            }
             "--controller-command-key-file" => {
                 if config.command_verification_key_files.len() == 8 {
                     return Err(invalid(
@@ -1355,6 +1500,24 @@ fn parse_args() -> Result<Config, io::Error> {
                 config.enrollment_environment =
                     Some(required(&mut args, "--enrollment-environment")?);
             }
+            "--user-password-seal-key-id" => {
+                user_seal_key_id = Some(required(&mut args, "--user-password-seal-key-id")?);
+            }
+            "--user-password-seal-public-key-sha256" => {
+                user_seal_key_sha256 = Some(required(
+                    &mut args,
+                    "--user-password-seal-public-key-sha256",
+                )?);
+            }
+            "--p12-password-seal-key-id" => {
+                p12_seal_key_id = Some(required(&mut args, "--p12-password-seal-key-id")?);
+            }
+            "--p12-password-seal-public-key-sha256" => {
+                p12_seal_key_sha256 = Some(required(
+                    &mut args,
+                    "--p12-password-seal-public-key-sha256",
+                )?);
+            }
             "--relay-mode" => relay_mode = required(&mut args, "--relay-mode")?,
             "--relay-url" => relay_urls.push(required(&mut args, "--relay-url")?),
             "--relay-token-file" => {
@@ -1372,13 +1535,78 @@ fn parse_args() -> Result<Config, io::Error> {
         ));
     }
     validate_enrollment_mode(&config)?;
+    config.sealing_keys = build_sealing_keys(
+        &config,
+        user_seal_key_id,
+        user_seal_key_sha256,
+        p12_seal_key_id,
+        p12_seal_key_sha256,
+    )?;
     config.relay_mode = build_relay_mode(&relay_mode, relay_urls, relay_token_file.as_deref())?;
     Ok(config)
 }
 
+fn build_sealing_keys(
+    config: &Config,
+    user_key_id: Option<String>,
+    user_sha256: Option<String>,
+    p12_key_id: Option<String>,
+    p12_sha256: Option<String>,
+) -> io::Result<Vec<SealingKeyDescriptorV1>> {
+    if config.probe_only || config.prepare_enrollment {
+        if user_key_id.is_some()
+            || user_sha256.is_some()
+            || p12_key_id.is_some()
+            || p12_sha256.is_some()
+        {
+            return Err(invalid(
+                "probe and preparation modes do not accept sealing keys",
+            ));
+        }
+        return Ok(Vec::new());
+    }
+    let keys = [
+        (SealedSecretPurpose::UserPassword, user_key_id, user_sha256),
+        (
+            SealedSecretPurpose::CertificateP12Password,
+            p12_key_id,
+            p12_sha256,
+        ),
+    ]
+    .into_iter()
+    .map(|(purpose, key_id, digest)| {
+        let key_id = key_id.ok_or_else(|| invalid("both password sealing keys are required"))?;
+        let digest =
+            digest.ok_or_else(|| invalid("both password sealing key fingerprints are required"))?;
+        if key_id.is_empty()
+            || key_id.len() > 128
+            || !key_id
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+            || digest.len() != 64
+            || !digest
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        {
+            return Err(invalid("password sealing key descriptor invalid"));
+        }
+        Ok(SealingKeyDescriptorV1 {
+            version: SealedSecretVersion::V1.into(),
+            purpose: purpose.into(),
+            key_id,
+            public_key_sha256: hex::decode(digest)
+                .map_err(|_| invalid("password sealing key fingerprint invalid"))?,
+        })
+    })
+    .collect::<io::Result<Vec<_>>>()?;
+    if keys[0].key_id == keys[1].key_id || keys[0].public_key_sha256 == keys[1].public_key_sha256 {
+        return Err(invalid("password sealing keys must be distinct"));
+    }
+    Ok(keys)
+}
+
 fn validate_absolute_paths(config: &Config, relay_token_file: Option<&Path>) -> io::Result<()> {
     if !config.identity_dir.is_absolute()
-        || !config.artifact_dir.is_absolute()
         || config
             .command_verification_key_files
             .iter()
@@ -1390,7 +1618,7 @@ fn validate_absolute_paths(config: &Config, relay_token_file: Option<&Path>) -> 
             .is_some_and(|path| !path.is_absolute())
     {
         return Err(invalid(
-            "identity, artifact, Controller command key, and token paths must be absolute",
+            "identity, Controller command key, and token paths must be absolute",
         ));
     }
     Ok(())
@@ -1558,9 +1786,35 @@ mod tests {
         DesiredEffectObservation, PrivdRequest, read_frame, write_frame,
     };
     use ocservia_contracts::generated::ocserv::platform::agent::v1::{
-        ConfigApply, ConfigPlan, UserPasswordRotate,
+        ConfigApply, ConfigPlan, SealedSecretV1, UserPasswordRotate,
     };
     use std::os::unix::fs::PermissionsExt as _;
+
+    fn test_sealing_keys() -> Vec<SealingKeyDescriptorV1> {
+        vec![
+            SealingKeyDescriptorV1 {
+                version: SealedSecretVersion::V1 as i32,
+                purpose: SealedSecretPurpose::UserPassword as i32,
+                key_id: "node-key-1".to_owned(),
+                public_key_sha256: vec![0x11; 32],
+            },
+            SealingKeyDescriptorV1 {
+                version: SealedSecretVersion::V1 as i32,
+                purpose: SealedSecretPurpose::CertificateP12Password as i32,
+                key_id: "node-p12-key-1".to_owned(),
+                public_key_sha256: vec![0x22; 32],
+            },
+        ]
+    }
+
+    fn test_user_password(ciphertext: Vec<u8>) -> SealedSecretV1 {
+        SealedSecretV1 {
+            version: SealedSecretVersion::V1 as i32,
+            purpose: SealedSecretPurpose::UserPassword as i32,
+            key_id: "node-key-1".to_owned(),
+            ciphertext,
+        }
+    }
 
     fn command_key_config(probe_only: bool) -> Config {
         Config {
@@ -1570,12 +1824,12 @@ mod tests {
             controller: None,
             node_id: None,
             probe_only,
-            artifact_dir: PathBuf::from("/var/lib/ocservia-privd/certificates/artifacts"),
             relay_mode: RelayMode::Default,
             command_verification_key_files: Vec::new(),
             prepare_enrollment: false,
             enrollment_token_file: None,
             enrollment_environment: None,
+            sealing_keys: test_sealing_keys(),
         }
     }
 
@@ -1586,6 +1840,32 @@ mod tests {
             load_controller_command_keys(&command_key_config(true))
                 .expect("read-only probe exception")
                 .is_none()
+        );
+    }
+
+    #[test]
+    fn network_agent_requires_two_distinct_password_sealing_keys() {
+        let config = command_key_config(false);
+        assert!(build_sealing_keys(&config, None, None, None, None).is_err());
+        assert!(
+            build_sealing_keys(
+                &config,
+                Some("shared".to_owned()),
+                Some("11".repeat(32)),
+                Some("shared".to_owned()),
+                Some("22".repeat(32)),
+            )
+            .is_err()
+        );
+        assert!(
+            build_sealing_keys(
+                &config,
+                Some("user".to_owned()),
+                Some("11".repeat(32)),
+                Some("p12".to_owned()),
+                Some("11".repeat(32)),
+            )
+            .is_err()
         );
     }
 
@@ -1645,6 +1925,7 @@ mod tests {
             enrollment_protocol_major: 0,
             enrollment_protocol_minor: 0,
             proof: None,
+            sealing_keys: config.sealing_keys.clone(),
         };
         identity
             .authorize_enrollment(&mut request)
@@ -1756,9 +2037,10 @@ mod tests {
     fn unexpected_privd_result_cannot_prove_a_password_effect() {
         let payload = command_envelope::Payload::UserPasswordRotate(UserPasswordRotate {
             username: "alice".to_owned(),
-            sealed_password: vec![0xa5; 64],
-            secret_key_id: "node-key-1".to_owned(),
+            sealed_password: Vec::new(),
+            secret_key_id: String::new(),
             desired_revision: 7,
+            sealed_password_v1: Some(test_user_password(vec![0xa5; 64])),
         });
         let result = privd_response::Result::Mutation(ocservia_agent_protocol::MutationResult {
             applied: true,
@@ -1819,9 +2101,10 @@ mod tests {
             payload: Some(command_envelope::Payload::UserPasswordRotate(
                 UserPasswordRotate {
                     username: "alice".to_owned(),
-                    sealed_password: vec![0xa5; 64],
-                    secret_key_id: "node-key-1".to_owned(),
+                    sealed_password: Vec::new(),
+                    secret_key_id: String::new(),
                     desired_revision: 7,
+                    sealed_password_v1: Some(test_user_password(vec![0xa5; 64])),
                 },
             )),
             ..CommandEnvelope::default()

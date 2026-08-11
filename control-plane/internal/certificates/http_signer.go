@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	agentv1 "github.com/GentleKingson/ocservia/control-plane/gen/proto/ocserv/platform/agent/v1"
 	"github.com/google/uuid"
 )
 
@@ -91,7 +92,10 @@ func (s *HTTPSigner) Revoke(ctx context.Context, request RevokeSignerRequest) er
 	return nil
 }
 
-func (s *HTTPSigner) Seal(ctx context.Context, nodeID uuid.UUID, plaintext []byte) ([]byte, string, error) {
+func (s *HTTPSigner) Seal(ctx context.Context, nodeID uuid.UUID, purpose agentv1.SealedSecretPurpose, plaintext []byte) (*agentv1.SealedSecretV1, error) {
+	if purpose != agentv1.SealedSecretPurpose_SEALED_SECRET_PURPOSE_USER_PASSWORD && purpose != agentv1.SealedSecretPurpose_SEALED_SECRET_PURPOSE_CERTIFICATE_P12_PASSWORD {
+		return nil, errors.New("secret sealing purpose is invalid")
+	}
 	body := append([]byte(nil), plaintext...)
 	defer func() {
 		for index := range body {
@@ -100,30 +104,44 @@ func (s *HTTPSigner) Seal(ctx context.Context, nodeID uuid.UUID, plaintext []byt
 	}()
 	httpRequest, err := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(s.endpoint, "/")+"/seal", bytes.NewReader(body))
 	if err != nil {
-		return nil, "", err
+		return nil, err
 	}
 	httpRequest.Header.Set("Authorization", "Bearer "+s.token)
 	httpRequest.Header.Set("Content-Type", "application/octet-stream")
 	httpRequest.Header.Set("X-Ocservia-Node-ID", nodeID.String())
+	purposeName := sealPurposeName(purpose)
+	httpRequest.Header.Set("X-Ocservia-Seal-Purpose", purposeName)
 	response, err := s.client.Do(httpRequest)
 	if err != nil {
-		return nil, "", err
+		return nil, err
 	}
 	defer response.Body.Close()
 	data, err := io.ReadAll(io.LimitReader(response.Body, 20*1024))
 	if err != nil || response.StatusCode != http.StatusOK {
-		return nil, "", errors.New("external secret provider rejected sealing")
+		return nil, errors.New("external secret provider rejected sealing")
 	}
 	var decoded struct {
-		Sealed string `json:"sealed"`
-		KeyID  string `json:"key_id"`
+		Sealed  string `json:"sealed"`
+		KeyID   string `json:"key_id"`
+		Version uint32 `json:"version"`
+		Purpose string `json:"purpose"`
 	}
-	if json.Unmarshal(data, &decoded) != nil || decoded.KeyID == "" || len(decoded.KeyID) > 128 {
-		return nil, "", errors.New("external secret provider response is invalid")
+	if json.Unmarshal(data, &decoded) != nil || decoded.Version != 1 || decoded.Purpose != purposeName || decoded.KeyID == "" || len(decoded.KeyID) > 128 {
+		return nil, errors.New("external secret provider response is invalid")
 	}
 	sealed, err := base64.StdEncoding.DecodeString(decoded.Sealed)
 	if err != nil || len(sealed) < 32 || len(sealed) > 16*1024 {
-		return nil, "", errors.New("external secret provider response is invalid")
+		return nil, errors.New("external secret provider response is invalid")
 	}
-	return sealed, decoded.KeyID, nil
+	return &agentv1.SealedSecretV1{Version: agentv1.SealedSecretVersion_SEALED_SECRET_VERSION_V1, Purpose: purpose, KeyId: decoded.KeyID, Ciphertext: sealed}, nil
+}
+
+func sealPurposeName(purpose agentv1.SealedSecretPurpose) string {
+	if purpose == agentv1.SealedSecretPurpose_SEALED_SECRET_PURPOSE_USER_PASSWORD {
+		return "user_password"
+	}
+	if purpose == agentv1.SealedSecretPurpose_SEALED_SECRET_PURPOSE_CERTIFICATE_P12_PASSWORD {
+		return "certificate_p12_password"
+	}
+	return ""
 }

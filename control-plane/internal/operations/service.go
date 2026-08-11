@@ -74,8 +74,8 @@ type CreateRequest struct {
 	DNSNames            []string
 	KeyBits             uint32
 	CertificateChain    []byte
-	SealedPassword      []byte
-	SecretKeyID         string
+	SealedPassword      *agentv1.SealedSecretV1
+	CertificateVersion  uint64
 	ArtifactID          uuid.UUID
 	RevocationReason    string
 	SessionID           string
@@ -380,7 +380,7 @@ func (s *Service) CreateSynthetic(ctx context.Context, request CreateRequest) (O
 		}
 	}
 	if request.Kind == CertificateP12 {
-		if _, err := tx.Exec(ctx, `INSERT INTO artifact_operations(id,workspace_id,node_id,certificate_id,operation_id,purpose,state,token_sha256,request_hash,expires_at,created_at,updated_at,approval_id) VALUES($1,$2,$3,$4,$5,'certificate_p12','pending',$6,$7,$8,$9,$9,$10)`, request.ArtifactID, workspaceID, request.NodeID, request.CertificateID, operationID, request.ArtifactMetadata.TokenSHA256, request.ArtifactMetadata.RequestHash, request.ArtifactMetadata.ExpiresAt, now, request.ApprovalID); err != nil {
+		if _, err := tx.Exec(ctx, `INSERT INTO artifact_operations(id,workspace_id,node_id,certificate_id,certificate_version,operation_id,purpose,state,token_sha256,request_hash,expires_at,created_at,updated_at,approval_id) VALUES($1,$2,$3,$4,$5,$6,'certificate_p12','pending',$7,$8,$9,$10,$10,$11)`, request.ArtifactID, workspaceID, request.NodeID, request.CertificateID, request.CertificateVersion, operationID, request.ArtifactMetadata.TokenSHA256, request.ArtifactMetadata.RequestHash, request.ArtifactMetadata.ExpiresAt, now, request.ApprovalID); err != nil {
 			return Operation{}, false, fmt.Errorf("insert certificate artifact operation: %w", err)
 		}
 	}
@@ -816,13 +816,13 @@ func validateCreate(r CreateRequest) error {
 			}
 		}
 	}
-	if r.Kind == CertificateP12 && (r.CertificateID == uuid.Nil || r.CertificateID.Version() != 7 || r.ArtifactID == uuid.Nil || r.ArtifactID.Version() != 7 || len(r.CertificateChain) < 64 || len(r.CertificateChain) > 256*1024 || len(r.SealedPassword) < 32 || len(r.SealedPassword) > 16*1024 || strings.TrimSpace(r.SecretKeyID) == "" || len(r.SecretKeyID) > 128 || r.ArtifactMetadata == nil || len(r.ArtifactMetadata.TokenSHA256) != sha256.Size || len(r.ArtifactMetadata.RequestHash) != sha256.Size || !r.ArtifactMetadata.ExpiresAt.After(time.Now().UTC()) || r.ArtifactMetadata.ExpiresAt.After(time.Now().UTC().Add(30*time.Minute))) {
+	if r.Kind == CertificateP12 && (r.CertificateID == uuid.Nil || r.CertificateID.Version() != 7 || r.CertificateVersion == 0 || r.ArtifactID == uuid.Nil || r.ArtifactID.Version() != 7 || len(r.CertificateChain) < 64 || len(r.CertificateChain) > 256*1024 || !validSealedP12(r.SealedPassword) || r.ArtifactMetadata == nil || len(r.ArtifactMetadata.TokenSHA256) != sha256.Size || len(r.ArtifactMetadata.RequestHash) != sha256.Size || !r.ArtifactMetadata.ExpiresAt.After(time.Now().UTC()) || r.ArtifactMetadata.ExpiresAt.After(time.Now().UTC().Add(30*time.Minute))) {
 		return ErrInvalidRequest
 	}
 	if (r.Kind == CertificateP12 || r.Kind == CertificateRevoke) && (r.ApprovalID == uuid.Nil || r.ActorIdentityID == uuid.Nil || len(r.ApprovalRequestHash) != sha256.Size) {
 		return ErrInvalidRequest
 	}
-	if r.Kind == CertificateRevoke && (r.CertificateID == uuid.Nil || r.CertificateID.Version() != 7 || strings.TrimSpace(r.RevocationReason) == "" || len(r.RevocationReason) > 128) {
+	if r.Kind == CertificateRevoke && (r.CertificateID == uuid.Nil || r.CertificateID.Version() != 7 || r.CertificateVersion == 0 || strings.TrimSpace(r.RevocationReason) == "" || len(r.RevocationReason) > 128) {
 		return ErrInvalidRequest
 	}
 	if r.HoldDispatch && r.Kind != CertificateRevoke {
@@ -897,6 +897,9 @@ func requestHash(r CreateRequest) [32]byte {
 		CertificateChainHash string        `json:"certificate_chain_hash"`
 		SealedPasswordHash   string        `json:"sealed_password_hash"`
 		SecretKeyID          string        `json:"secret_key_id"`
+		SecretVersion        int32         `json:"secret_version"`
+		SecretPurpose        int32         `json:"secret_purpose"`
+		CertificateVersion   uint64        `json:"certificate_version"`
 		ArtifactTokenHash    string        `json:"artifact_token_hash"`
 		ArtifactRequestHash  string        `json:"artifact_request_hash"`
 		ArtifactExpiresAt    string        `json:"artifact_expires_at"`
@@ -908,7 +911,7 @@ func requestHash(r CreateRequest) [32]byte {
 		DesiredRevision: r.DesiredRevision, PlanID: applyPlanID(r.ApplyMetadata), PlanRevision: r.PlanRevision,
 		PlanTemplate: planTemplate(r.PlanMetadata), OcservVersion: r.OcservVersion, PlanCapabilities: r.PlanCapabilities,
 		CertificateID: idempotencyCertificateID(r), CommonName: r.CommonName, DNSNames: r.DNSNames, KeyBits: r.KeyBits, ArtifactID: r.ArtifactID,
-		CertificateChainHash: hashBytes(r.CertificateChain), SealedPasswordHash: hashBytes(r.SealedPassword), SecretKeyID: r.SecretKeyID,
+		CertificateChainHash: hashBytes(r.CertificateChain), SealedPasswordHash: sealedPasswordHash(r.SealedPassword), SecretKeyID: sealedPasswordKeyID(r.SealedPassword), SecretVersion: sealedPasswordVersion(r.SealedPassword), SecretPurpose: sealedPasswordPurpose(r.SealedPassword), CertificateVersion: r.CertificateVersion,
 		ArtifactTokenHash: artifactTokenHash(r.ArtifactMetadata), ArtifactRequestHash: artifactRequestHash(r.ArtifactMetadata), ArtifactExpiresAt: artifactExpiry(r.ArtifactMetadata),
 		RevocationReason: r.RevocationReason}
 	encoded, err := json.Marshal(intent)
@@ -931,6 +934,34 @@ func hashBytes(value []byte) string {
 	}
 	digest := sha256.Sum256(value)
 	return hex.EncodeToString(digest[:])
+}
+
+func validSealedP12(secret *agentv1.SealedSecretV1) bool {
+	return secret != nil && secret.GetVersion() == agentv1.SealedSecretVersion_SEALED_SECRET_VERSION_V1 && secret.GetPurpose() == agentv1.SealedSecretPurpose_SEALED_SECRET_PURPOSE_CERTIFICATE_P12_PASSWORD && strings.TrimSpace(secret.GetKeyId()) != "" && len(secret.GetKeyId()) <= 128 && len(secret.GetCiphertext()) >= 32 && len(secret.GetCiphertext()) <= 16*1024
+}
+func sealedPasswordHash(secret *agentv1.SealedSecretV1) string {
+	if secret == nil {
+		return ""
+	}
+	return hashBytes(secret.GetCiphertext())
+}
+func sealedPasswordKeyID(secret *agentv1.SealedSecretV1) string {
+	if secret == nil {
+		return ""
+	}
+	return secret.GetKeyId()
+}
+func sealedPasswordVersion(secret *agentv1.SealedSecretV1) int32 {
+	if secret == nil {
+		return 0
+	}
+	return int32(secret.GetVersion())
+}
+func sealedPasswordPurpose(secret *agentv1.SealedSecretV1) int32 {
+	if secret == nil {
+		return 0
+	}
+	return int32(secret.GetPurpose())
 }
 
 func artifactTokenHash(metadata *ArtifactMetadata) string {
@@ -1025,10 +1056,10 @@ func marshalEnvelope(r CreateRequest, operationID, commandID uuid.UUID, authoriz
 		envelope.Payload = &agentv1.CommandEnvelope_CertificateCsr{CertificateCsr: &agentv1.CertificateCsr{CertificateId: r.CertificateID[:], CommonName: r.CommonName, DnsNames: r.DNSNames, KeyBits: r.KeyBits}}
 	case CertificateP12:
 		payloadType = "certificate_p12"
-		envelope.Payload = &agentv1.CommandEnvelope_CertificateP12{CertificateP12: &agentv1.CertificateP12{CertificateId: r.CertificateID[:], CertificateChainPem: r.CertificateChain, SealedPassword: r.SealedPassword, SecretKeyId: r.SecretKeyID, ArtifactId: r.ArtifactID[:]}}
+		envelope.Payload = &agentv1.CommandEnvelope_CertificateP12{CertificateP12: &agentv1.CertificateP12{CertificateId: r.CertificateID[:], CertificateChainPem: r.CertificateChain, SealedPasswordV1: r.SealedPassword, ArtifactId: r.ArtifactID[:], CertificateVersion: r.CertificateVersion, ArtifactExpiresAt: timestamppb.New(r.ArtifactMetadata.ExpiresAt)}}
 	case CertificateRevoke:
 		payloadType = "certificate_revoke"
-		envelope.Payload = &agentv1.CommandEnvelope_CertificateRevoke{CertificateRevoke: &agentv1.CertificateRevoke{CertificateId: r.CertificateID[:], Reason: r.RevocationReason}}
+		envelope.Payload = &agentv1.CommandEnvelope_CertificateRevoke{CertificateRevoke: &agentv1.CertificateRevoke{CertificateId: r.CertificateID[:], Reason: r.RevocationReason, CertificateVersion: r.CertificateVersion}}
 	}
 	if err := semanticpayload.PopulateV2(envelope); err != nil {
 		return nil, "", fmt.Errorf("compute semantic payload hash: %w", err)

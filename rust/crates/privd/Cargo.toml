@@ -7,6 +7,7 @@ rust-version.workspace = true
 publish = false
 
 [dependencies]
+hex.workspace = true
 ocservia-agent-protocol = { version = "=0.1.0", path = "../agent-protocol" }
 ocservia-command-authorization = { version = "=0.1.0", path = "../command-authorization" }
 ocservia-contracts = { version = "=0.1.0", path = "../contracts", default-features = false }

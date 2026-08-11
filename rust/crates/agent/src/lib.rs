@@ -17,8 +17,8 @@ use ocservia_command_journal::{
     AcceptOutcome, AppliedResourceRevision, CommandRecord, CommandState, Journal,
 };
 use ocservia_contracts::generated::ocserv::platform::agent::v1::{
-    CommandDeliveryMode, CommandEnvelope, ConfigApplyResult, SemanticPayloadHashVersion,
-    command_envelope,
+    CommandDeliveryMode, CommandEnvelope, ConfigApplyResult, SealedSecretPurpose, SealedSecretV1,
+    SealedSecretVersion, SemanticPayloadHashVersion, command_envelope,
 };
 use prost::Message;
 use rand::Rng;
@@ -1122,19 +1122,24 @@ fn validate_payload(
                 || payload.artifact_id.len() != 16
                 || payload.certificate_chain_pem.len() < 64
                 || payload.certificate_chain_pem.len() > 256 * 1024
-                || payload.sealed_password.len() < 32
-                || payload.sealed_password.len() > 16 * 1024
-                || payload.secret_key_id.is_empty()
-                || payload.secret_key_id.len() > 128
+                || !payload.sealed_password.is_empty()
+                || !payload.secret_key_id.is_empty()
+                || payload.certificate_version == 0
+                || payload.artifact_expires_at.is_none()
             {
                 return Err(CommandError::Rejected("certificate_p12_invalid"));
             }
+            validate_typed_secret(
+                payload.sealed_password_v1.as_ref(),
+                SealedSecretPurpose::CertificateP12Password,
+            )?;
             ("ocserv.certificate.issue", Vec::new(), true)
         }
         Some(command_envelope::Payload::CertificateRevoke(payload)) => {
             if payload.certificate_id.len() != 16
                 || payload.reason.is_empty()
                 || payload.reason.len() > 128
+                || payload.certificate_version == 0
             {
                 return Err(CommandError::Rejected("certificate_revoke_invalid"));
             }
@@ -1143,8 +1148,9 @@ fn validate_payload(
         Some(command_envelope::Payload::UserCreate(payload)) => {
             validate_name(&payload.username)?;
             validate_sealed_secret(
-                &payload.secret_key_id,
+                payload.sealed_password_v1.as_ref(),
                 &payload.sealed_password,
+                &payload.secret_key_id,
                 payload.desired_revision,
             )?;
             ("ocserv.users.write", Vec::new(), true)
@@ -1162,8 +1168,9 @@ fn validate_payload(
         Some(command_envelope::Payload::UserPasswordRotate(payload)) => {
             validate_name(&payload.username)?;
             validate_sealed_secret(
-                &payload.secret_key_id,
+                payload.sealed_password_v1.as_ref(),
                 &payload.sealed_password,
+                &payload.secret_key_id,
                 payload.desired_revision,
             )?;
             ("ocserv.users.write", Vec::new(), true)
@@ -1219,9 +1226,31 @@ fn validate_revision(value: u64) -> Result<(), CommandError> {
     }
     Ok(())
 }
-fn validate_sealed_secret(key_id: &str, secret: &[u8], revision: u64) -> Result<(), CommandError> {
+fn validate_sealed_secret(
+    secret: Option<&SealedSecretV1>,
+    legacy_secret: &[u8],
+    legacy_key_id: &str,
+    revision: u64,
+) -> Result<(), CommandError> {
     validate_revision(revision)?;
-    if key_id.is_empty() || key_id.len() > 128 || secret.len() < 32 || secret.len() > 4096 {
+    if !legacy_secret.is_empty() || !legacy_key_id.is_empty() {
+        return Err(CommandError::Rejected("sealed_secret_invalid"));
+    }
+    validate_typed_secret(secret, SealedSecretPurpose::UserPassword)
+}
+
+fn validate_typed_secret(
+    secret: Option<&SealedSecretV1>,
+    purpose: SealedSecretPurpose,
+) -> Result<(), CommandError> {
+    let secret = secret.ok_or(CommandError::Rejected("sealed_secret_invalid"))?;
+    if SealedSecretVersion::try_from(secret.version).ok() != Some(SealedSecretVersion::V1)
+        || SealedSecretPurpose::try_from(secret.purpose).ok() != Some(purpose)
+        || secret.key_id.is_empty()
+        || secret.key_id.len() > 128
+        || secret.ciphertext.len() < 32
+        || secret.ciphertext.len() > 16 * 1024
+    {
         return Err(CommandError::Rejected("sealed_secret_invalid"));
     }
     Ok(())
@@ -1559,6 +1588,15 @@ mod tests {
         values.iter().map(|value| (*value).to_owned()).collect()
     }
 
+    fn user_password(ciphertext: Vec<u8>) -> SealedSecretV1 {
+        SealedSecretV1 {
+            version: SealedSecretVersion::V1 as i32,
+            purpose: SealedSecretPurpose::UserPassword as i32,
+            key_id: "node-key-1".to_owned(),
+            ciphertext,
+        }
+    }
+
     #[test]
     fn desired_privd_deadline_exceeds_each_child_budget() {
         let client = PrivdClient::new(
@@ -1763,16 +1801,22 @@ mod tests {
         envelope.payload = Some(match mutation {
             DesiredMutation::Create => command_envelope::Payload::UserCreate(UserCreate {
                 username: name.to_owned(),
-                sealed_password: vec![0xa1; 64],
-                secret_key_id: "node-key-1".to_owned(),
+                sealed_password: Vec::new(),
+                secret_key_id: String::new(),
                 desired_revision,
+                sealed_password_v1: Some(user_password(vec![0xa1; 64])),
             }),
             DesiredMutation::Rotate => {
                 command_envelope::Payload::UserPasswordRotate(UserPasswordRotate {
                     username: name.to_owned(),
-                    sealed_password: vec![u8::try_from(desired_revision).unwrap_or(0xa5); 64],
-                    secret_key_id: "node-key-1".to_owned(),
+                    sealed_password: Vec::new(),
+                    secret_key_id: String::new(),
                     desired_revision,
+                    sealed_password_v1: Some(user_password(vec![
+                        u8::try_from(desired_revision)
+                            .unwrap_or(0xa5);
+                        64
+                    ])),
                 })
             }
             DesiredMutation::Disable => command_envelope::Payload::UserDisable(UserDisable {
@@ -2310,9 +2354,10 @@ mod tests {
         envelope.payload = Some(command_envelope::Payload::UserPasswordRotate(
             UserPasswordRotate {
                 username: "alice".to_owned(),
-                sealed_password: vec![0xa5; 64],
-                secret_key_id: "node-key-1".to_owned(),
+                sealed_password: Vec::new(),
+                secret_key_id: String::new(),
                 desired_revision: 2,
+                sealed_password_v1: Some(user_password(vec![0xa5; 64])),
             },
         ));
         envelope.semantic_payload_hash_version = SemanticPayloadHashVersion::V1 as i32;
@@ -2372,9 +2417,10 @@ mod tests {
         envelope.payload = Some(command_envelope::Payload::UserPasswordRotate(
             UserPasswordRotate {
                 username: "alice".to_owned(),
-                sealed_password: vec![0xa5; 64],
-                secret_key_id: "node-key-1".to_owned(),
+                sealed_password: Vec::new(),
+                secret_key_id: String::new(),
                 desired_revision: 2,
+                sealed_password_v1: Some(user_password(vec![0xa5; 64])),
             },
         ));
         envelope.semantic_payload_hash_version = SemanticPayloadHashVersion::V1 as i32;
@@ -2434,9 +2480,10 @@ mod tests {
         old.payload = Some(command_envelope::Payload::UserPasswordRotate(
             UserPasswordRotate {
                 username: "alice".to_owned(),
-                sealed_password: vec![0xa2; 64],
-                secret_key_id: "node-key-1".to_owned(),
+                sealed_password: Vec::new(),
+                secret_key_id: String::new(),
                 desired_revision: 2,
+                sealed_password_v1: Some(user_password(vec![0xa2; 64])),
             },
         ));
         old.semantic_payload_hash_version = SemanticPayloadHashVersion::V1 as i32;
@@ -2447,9 +2494,10 @@ mod tests {
         newer.payload = Some(command_envelope::Payload::UserPasswordRotate(
             UserPasswordRotate {
                 username: "alice".to_owned(),
-                sealed_password: vec![0xa3; 64],
-                secret_key_id: "node-key-1".to_owned(),
+                sealed_password: Vec::new(),
+                secret_key_id: String::new(),
                 desired_revision: 3,
+                sealed_password_v1: Some(user_password(vec![0xa3; 64])),
             },
         ));
         newer.semantic_payload_hash_version = SemanticPayloadHashVersion::V1 as i32;
@@ -2523,9 +2571,10 @@ mod tests {
         old.payload = Some(command_envelope::Payload::UserPasswordRotate(
             UserPasswordRotate {
                 username: "alice".to_owned(),
-                sealed_password: vec![0xa2; 64],
-                secret_key_id: "node-key-1".to_owned(),
+                sealed_password: Vec::new(),
+                secret_key_id: String::new(),
                 desired_revision: 2,
+                sealed_password_v1: Some(user_password(vec![0xa2; 64])),
             },
         ));
         old.semantic_payload_hash_version = SemanticPayloadHashVersion::V1 as i32;
@@ -2539,7 +2588,12 @@ mod tests {
             unreachable!()
         };
         payload.desired_revision = 3;
-        payload.sealed_password.fill(0xa3);
+        payload
+            .sealed_password_v1
+            .as_mut()
+            .expect("typed password")
+            .ciphertext
+            .fill(0xa3);
         newer.expected_revision = 1;
         newer.semantic_payload_sha256 = semantic_payload_hash_v1(&newer).unwrap().to_vec();
         authorize_test_command(&mut newer);

@@ -15,11 +15,14 @@ use std::sync::atomic::{AtomicU8, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use ocservia_agent_protocol::{
-    CertificateArtifactResult, CertificateCsrResult, CertificateRevokeResult, ConfigApplyResult,
-    ConfigFingerprint, ConfigPlanResult, DesiredEffectObservation, DesiredEffectState, ErrorKind,
-    GroupList, IpBan, IpBanList, MAX_FRAME_BYTES, MAX_MANAGED_RESOURCES, MutationResult,
-    ObservedGroup, ObservedUser, OcservVersion, PrivdError, ServiceStatus, Session, SessionList,
-    UserList,
+    ArtifactData, CertificateArtifactResult, CertificateCsrResult, CertificateRevokeResult,
+    ConfigApplyResult, ConfigFingerprint, ConfigPlanResult, DesiredEffectObservation,
+    DesiredEffectState, ErrorKind, GroupList, IpBan, IpBanList, MAX_FRAME_BYTES,
+    MAX_MANAGED_RESOURCES, MutationResult, ObservedGroup, ObservedUser, OcservVersion, PrivdError,
+    ServiceStatus, Session, SessionList, UserList,
+};
+use ocservia_contracts::generated::ocserv::platform::agent::v1::{
+    SealedSecretPurpose, SealedSecretV1, SealedSecretVersion,
 };
 use rand::RngCore;
 use rusqlite::{Connection, OpenFlags, OptionalExtension, TransactionBehavior, params};
@@ -36,6 +39,8 @@ const MAX_USER_FILE_BYTES: usize = 16 * 1024 * 1024;
 const DEFAULT_OUTPUT_BYTES: usize = 256 * 1024;
 const EFFECT_STORE_KEY_BYTES: usize = 32;
 const MAX_EFFECT_RECORDS: i64 = 65_536;
+const ARTIFACT_CHUNK_BYTES: usize = 256 * 1024;
+const MAX_ARTIFACT_BYTES: usize = 64 * 1024 * 1024;
 
 const CONFIG_DIRECTIVES: &[&str] = &[
     "auth",
@@ -254,8 +259,10 @@ pub struct FixedResources {
     ocpasswd: PathBuf,
     user_file: PathBuf,
     openssl: PathBuf,
-    secret_key: PathBuf,
-    secret_key_id: String,
+    user_secret_key: PathBuf,
+    user_secret_key_id: String,
+    p12_secret_key: PathBuf,
+    p12_secret_key_id: String,
     effect_store: PathBuf,
     effect_store_key: PathBuf,
     certificate_key_dir: PathBuf,
@@ -272,8 +279,10 @@ impl Default for FixedResources {
             ocpasswd: PathBuf::from("/usr/bin/ocpasswd"),
             user_file: PathBuf::from("/etc/ocserv/ocpasswd"),
             openssl: PathBuf::from("/usr/bin/openssl"),
-            secret_key: PathBuf::from("/etc/ocservia/password-seal-private.pem"),
-            secret_key_id: String::from("default"),
+            user_secret_key: PathBuf::from("/etc/ocservia/user-password-seal-private.pem"),
+            user_secret_key_id: String::from("user-default"),
+            p12_secret_key: PathBuf::from("/etc/ocservia/p12-password-seal-private.pem"),
+            p12_secret_key_id: String::from("p12-default"),
             effect_store: PathBuf::from("/var/lib/ocservia-privd/desired-effects.sqlite3"),
             effect_store_key: PathBuf::from("/var/lib/ocservia-privd/desired-effects.key"),
             certificate_key_dir: PathBuf::from("/var/lib/ocservia-privd/certificates"),
@@ -335,8 +344,54 @@ impl FixedResources {
         self.ocpasswd = ocpasswd;
         self.user_file = user_file;
         self.openssl = openssl;
-        self.secret_key = secret_key;
-        self.secret_key_id = secret_key_id;
+        self.user_secret_key = secret_key;
+        self.user_secret_key_id = secret_key_id;
+        Ok(self)
+    }
+
+    /// Overrides the fixed P12-password unsealing key at process startup.
+    ///
+    /// # Errors
+    ///
+    /// Rejects non-absolute paths and invalid configured key identifiers.
+    pub fn with_p12_resources(
+        mut self,
+        secret_key: PathBuf,
+        secret_key_id: String,
+    ) -> Result<Self, AdapterError> {
+        if !secret_key.is_absolute() || !valid_key_id(&secret_key_id) {
+            return Err(AdapterError::InvalidResource);
+        }
+        self.p12_secret_key = secret_key;
+        self.p12_secret_key_id = secret_key_id;
+        Ok(self)
+    }
+
+    /// Configures the two purpose-separated production unsealing keys.
+    ///
+    /// # Errors
+    ///
+    /// Rejects reused paths or identifiers and invalid key configuration.
+    pub fn with_password_sealing_keys(
+        mut self,
+        user_key: PathBuf,
+        user_key_id: String,
+        p12_key: PathBuf,
+        p12_key_id: String,
+    ) -> Result<Self, AdapterError> {
+        if !user_key.is_absolute()
+            || !p12_key.is_absolute()
+            || user_key == p12_key
+            || !valid_key_id(&user_key_id)
+            || !valid_key_id(&p12_key_id)
+            || user_key_id == p12_key_id
+        {
+            return Err(AdapterError::InvalidResource);
+        }
+        self.user_secret_key = user_key;
+        self.user_secret_key_id = user_key_id;
+        self.p12_secret_key = p12_key;
+        self.p12_secret_key_id = p12_key_id;
         Ok(self)
     }
 
@@ -405,6 +460,20 @@ pub struct AuthorizedEffectIdentity<'a> {
     pub effect_revision: u64,
     pub expires_at_unix_seconds: i64,
     pub retry_if_absent: bool,
+}
+
+/// Exact, independently verified Controller grant identity used by the
+/// root-owned artifact lifecycle store.
+#[derive(Clone, Copy, Debug)]
+pub struct ArtifactLeaseIdentity<'a> {
+    pub artifact_id: &'a [u8],
+    pub certificate_id: &'a [u8],
+    pub certificate_version: u64,
+    pub operation_id: &'a [u8],
+    pub authorized_subject: &'a str,
+    pub max_bytes: u64,
+    pub grant_id: &'a [u8],
+    pub expires_at_unix_seconds: i64,
 }
 
 /// Durable command-level idempotency decision returned before a root effect.
@@ -1134,7 +1203,7 @@ impl Adapter {
     ) -> Result<MutationResult, AdapterError> {
         validate_name(username)?;
         if !valid_key_id(key_id)
-            || key_id != self.resources.secret_key_id
+            || key_id != self.resources.user_secret_key_id
             || sealed_password.len() < 32
             || sealed_password.len() > 4096
             || desired_revision == 0
@@ -1159,7 +1228,7 @@ impl Adapter {
         drop(records);
         let key = self
             .resources
-            .secret_key
+            .user_secret_key
             .to_str()
             .ok_or(AdapterError::InvalidResource)?;
         let output = self
@@ -1593,6 +1662,28 @@ impl Adapter {
     pub async fn cleanup_stale_certificate_artifacts(&self) -> Result<(), AdapterError> {
         let _guard = self.certificate_artifact_lock.lock().await;
         let directory = self.resources.certificate_key_dir.join("artifacts");
+        let directory_metadata = match tokio::fs::symlink_metadata(&directory).await {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => return Err(AdapterError::Io(error)),
+        };
+        if !directory_metadata.is_dir() || directory_metadata.file_type().is_symlink() {
+            return Err(AdapterError::InvalidResource);
+        }
+        // Close the legacy group-readable directory before inspecting or deleting
+        // any pre-grant files. This happens during privd startup before Agent runs.
+        tokio::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o700))
+            .await
+            .map_err(AdapterError::Io)?;
+        let hardened = tokio::fs::symlink_metadata(&directory)
+            .await
+            .map_err(AdapterError::Io)?;
+        if !hardened.is_dir() || hardened.file_type().is_symlink() || hardened.mode() & 0o077 != 0 {
+            return Err(AdapterError::InvalidResource);
+        }
+        let mut store = EffectStore::open_for_mutation(&self.resources)?;
+        let terminal: HashSet<[u8; 16]> = store.reconcile_artifacts()?.into_iter().collect();
+        let tracked: HashSet<[u8; 16]> = store.tracked_artifact_ids()?.into_iter().collect();
         let mut entries = match tokio::fs::read_dir(&directory).await {
             Ok(entries) => entries,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
@@ -1624,16 +1715,20 @@ impl Adapter {
             let metadata = tokio::fs::symlink_metadata(entry.path())
                 .await
                 .map_err(AdapterError::Io)?;
-            if metadata.is_file()
-                && !metadata.file_type().is_symlink()
-                && (is_staging || metadata.modified().map_err(AdapterError::Io)? < cutoff)
-            {
+            if !metadata.is_file() || metadata.file_type().is_symlink() {
+                return Err(AdapterError::InvalidResource);
+            }
+            let is_tracked = tracked.contains(id.as_bytes());
+            let should_remove = !is_tracked
+                || terminal.contains(id.as_bytes())
+                || (is_staging && metadata.modified().map_err(AdapterError::Io)? < cutoff);
+            if should_remove {
                 tokio::fs::remove_file(entry.path())
                     .await
                     .map_err(AdapterError::Io)?;
             }
         }
-        Ok(())
+        sync_directory(&directory).await
     }
 
     async fn ensure_boot_id(&self, expected: &str) -> Result<(), AdapterError> {
@@ -1911,6 +2006,23 @@ struct AuthorizedEffectRecord {
     record_hmac: [u8; 32],
 }
 
+#[derive(Debug)]
+struct ArtifactRecord {
+    artifact_id: [u8; 16],
+    certificate_id: [u8; 16],
+    certificate_version: u64,
+    operation_id: [u8; 16],
+    content_sha256: [u8; 32],
+    content_size: u64,
+    artifact_expires_at: i64,
+    state: &'static str,
+    active_grant_id: Option<[u8; 16]>,
+    active_subject: String,
+    grant_expires_at: Option<i64>,
+    active_offset: u64,
+    record_hmac: [u8; 32],
+}
+
 #[derive(Clone, Copy)]
 struct ValidatedAuthorizedEffect<'a> {
     command_id: &'a [u8; 16],
@@ -2052,6 +2164,7 @@ impl EffectStore {
         };
         store.migrate_schema()?;
         store.ensure_authorized_schema()?;
+        store.ensure_artifact_schema()?;
         store.validate_identity()?;
         Ok(store)
     }
@@ -2118,6 +2231,445 @@ impl EffectStore {
                  ) STRICT;",
             )
             .map_err(sqlite_io)
+    }
+
+    fn ensure_artifact_schema(&self) -> Result<(), AdapterError> {
+        self.connection
+            .execute_batch(
+                "CREATE TABLE IF NOT EXISTS certificate_artifacts (
+                   artifact_id BLOB PRIMARY KEY CHECK(length(artifact_id)=16),
+                   certificate_id BLOB NOT NULL CHECK(length(certificate_id)=16),
+                   certificate_version INTEGER NOT NULL CHECK(certificate_version > 0),
+                   operation_id BLOB NOT NULL CHECK(length(operation_id)=16),
+                   content_sha256 BLOB NOT NULL CHECK(length(content_sha256)=32),
+                   content_size INTEGER NOT NULL CHECK(content_size BETWEEN 0 AND 67108864),
+                   artifact_expires_at INTEGER NOT NULL,
+                   state TEXT NOT NULL CHECK(state IN ('prepared','available','leased','consumed','expired','revoked')),
+                   active_grant_id BLOB CHECK(active_grant_id IS NULL OR length(active_grant_id)=16),
+                   active_subject TEXT NOT NULL CHECK(length(active_subject) <= 256),
+                   grant_expires_at INTEGER,
+                   active_offset INTEGER NOT NULL CHECK(active_offset BETWEEN 0 AND content_size),
+                   record_hmac BLOB NOT NULL CHECK(length(record_hmac)=32),
+                   updated_at INTEGER NOT NULL,
+                   CHECK((state='leased' AND active_grant_id IS NOT NULL AND grant_expires_at IS NOT NULL AND length(active_subject)>0) OR state<>'leased'),
+                   CHECK((state='prepared' AND content_size=0) OR (state IN ('expired','revoked')) OR (state NOT IN ('prepared','expired','revoked') AND content_size>=1))
+                 ) STRICT;
+                 CREATE INDEX IF NOT EXISTS certificate_artifacts_certificate_idx
+                   ON certificate_artifacts(certificate_id);",
+            )
+            .map_err(sqlite_io)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn register_artifact(
+        &mut self,
+        artifact_id: &[u8],
+        certificate_id: &[u8],
+        certificate_version: u64,
+        operation_id: &[u8],
+        content_sha256: &[u8],
+        content_size: u64,
+        artifact_expires_at: i64,
+    ) -> Result<(), AdapterError> {
+        let now = effect_now()?;
+        let artifact_id: &[u8; 16] = artifact_id
+            .try_into()
+            .map_err(|_| AdapterError::InvalidRequest)?;
+        let certificate_id: &[u8; 16] = certificate_id
+            .try_into()
+            .map_err(|_| AdapterError::InvalidRequest)?;
+        let operation_id: &[u8; 16] = operation_id
+            .try_into()
+            .map_err(|_| AdapterError::InvalidRequest)?;
+        let digest: [u8; 32] = content_sha256
+            .try_into()
+            .map_err(|_| AdapterError::InvalidRequest)?;
+        if [artifact_id, certificate_id, operation_id]
+            .into_iter()
+            .any(|value| Uuid::from_bytes(*value).get_version_num() != 7)
+            || certificate_version == 0
+            || content_size == 0
+            || content_size > MAX_ARTIFACT_BYTES as u64
+            || artifact_expires_at <= now
+        {
+            return Err(AdapterError::InvalidRequest);
+        }
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(sqlite_io)?;
+        let mut record =
+            query_artifact(&transaction, artifact_id)?.ok_or(AdapterError::InvalidRequest)?;
+        validate_artifact_record(&self.hmac_key, &record)?;
+        if record.certificate_id != *certificate_id
+            || record.certificate_version != certificate_version
+            || record.operation_id != *operation_id
+            || record.artifact_expires_at != artifact_expires_at
+        {
+            return Err(AdapterError::InvalidRequest);
+        }
+        if matches!(record.state, "available" | "leased") {
+            if record.content_sha256 != digest || record.content_size != content_size {
+                return Err(AdapterError::InvalidRequest);
+            }
+            transaction.commit().map_err(sqlite_io)?;
+            return Ok(());
+        }
+        if record.state != "prepared" {
+            return Err(AdapterError::InvalidRequest);
+        }
+        record.content_sha256 = digest;
+        record.content_size = content_size;
+        record.state = "available";
+        record.record_hmac = authenticate_artifact_record(&self.hmac_key, &record);
+        let changed = transaction
+            .execute(
+                "UPDATE certificate_artifacts SET content_sha256=?2,content_size=?3,state='available',record_hmac=?4,updated_at=?5 WHERE artifact_id=?1 AND state='prepared'",
+                params![
+                    record.artifact_id.as_slice(),
+                    record.content_sha256.as_slice(),
+                    i64::try_from(record.content_size).map_err(|_| AdapterError::InvalidRequest)?,
+                    record.record_hmac.as_slice(),
+                    now,
+                ],
+            )
+            .map_err(sqlite_io)?;
+        if changed != 1 {
+            return Err(AdapterError::Unavailable);
+        }
+        transaction.commit().map_err(sqlite_io)
+    }
+
+    fn prepare_artifact(
+        &mut self,
+        artifact_id: &[u8; 16],
+        certificate_id: &[u8; 16],
+        certificate_version: u64,
+        operation_id: &[u8; 16],
+        artifact_expires_at: i64,
+    ) -> Result<(), AdapterError> {
+        let now = effect_now()?;
+        if certificate_version == 0 || artifact_expires_at <= now {
+            return Err(AdapterError::InvalidRequest);
+        }
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(sqlite_io)?;
+        if let Some(existing) = query_artifact(&transaction, artifact_id)? {
+            validate_artifact_record(&self.hmac_key, &existing)?;
+            if existing.certificate_id != *certificate_id
+                || existing.certificate_version != certificate_version
+                || existing.operation_id != *operation_id
+                || existing.artifact_expires_at != artifact_expires_at
+                || !matches!(existing.state, "prepared" | "available" | "leased")
+            {
+                return Err(AdapterError::InvalidRequest);
+            }
+            transaction.commit().map_err(sqlite_io)?;
+            return Ok(());
+        }
+        let mut record = ArtifactRecord {
+            artifact_id: *artifact_id,
+            certificate_id: *certificate_id,
+            certificate_version,
+            operation_id: *operation_id,
+            content_sha256: [0; 32],
+            content_size: 0,
+            artifact_expires_at,
+            state: "prepared",
+            active_grant_id: None,
+            active_subject: String::new(),
+            grant_expires_at: None,
+            active_offset: 0,
+            record_hmac: [0; 32],
+        };
+        record.record_hmac = authenticate_artifact_record(&self.hmac_key, &record);
+        transaction
+            .execute(
+                "INSERT INTO certificate_artifacts(artifact_id,certificate_id,certificate_version,operation_id,content_sha256,content_size,artifact_expires_at,state,active_grant_id,active_subject,grant_expires_at,active_offset,record_hmac,updated_at)
+                 VALUES(?1,?2,?3,?4,?5,0,?6,'prepared',NULL,'',NULL,0,?7,?8)",
+                params![record.artifact_id.as_slice(), record.certificate_id.as_slice(), i64::try_from(record.certificate_version).map_err(|_| AdapterError::InvalidRequest)?, record.operation_id.as_slice(), record.content_sha256.as_slice(), record.artifact_expires_at, record.record_hmac.as_slice(), now],
+            )
+            .map_err(sqlite_io)?;
+        transaction.commit().map_err(sqlite_io)
+    }
+
+    fn artifact_is_registered(
+        &self,
+        artifact_id: &[u8; 16],
+        certificate_id: &[u8; 16],
+        certificate_version: u64,
+        operation_id: &[u8; 16],
+        artifact_expires_at: i64,
+    ) -> Result<bool, AdapterError> {
+        let Some(record) = query_artifact(&self.connection, artifact_id)? else {
+            return Ok(false);
+        };
+        validate_artifact_record(&self.hmac_key, &record)?;
+        if record.certificate_id != *certificate_id
+            || record.certificate_version != certificate_version
+            || record.operation_id != *operation_id
+            || record.artifact_expires_at != artifact_expires_at
+            || !matches!(record.state, "prepared" | "available" | "leased")
+        {
+            return Err(AdapterError::InvalidRequest);
+        }
+        Ok(record.state != "prepared")
+    }
+
+    fn lease_artifact(
+        &mut self,
+        identity: ArtifactLeaseIdentity<'_>,
+    ) -> Result<ArtifactRecord, AdapterError> {
+        let now = effect_now()?;
+        let identity = validate_artifact_identity(identity, now)?;
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(sqlite_io)?;
+        let mut record = query_artifact(&transaction, identity.artifact_id)?
+            .ok_or(AdapterError::InvalidRequest)?;
+        validate_artifact_record(&self.hmac_key, &record)?;
+        if record.certificate_id != *identity.certificate_id
+            || record.certificate_version != identity.certificate_version
+            || record.operation_id != *identity.operation_id
+            || record.content_size > identity.max_bytes
+            || record.artifact_expires_at <= now
+            || !matches!(record.state, "available" | "leased")
+        {
+            return Err(AdapterError::InvalidRequest);
+        }
+        if record.state == "leased"
+            && record.active_grant_id != Some(*identity.grant_id)
+            && record.grant_expires_at.is_some_and(|expiry| expiry > now)
+        {
+            return Err(AdapterError::Unavailable);
+        }
+        if record.state == "leased"
+            && record.active_grant_id == Some(*identity.grant_id)
+            && (record.active_subject != identity.authorized_subject
+                || record.grant_expires_at != Some(identity.expires_at))
+        {
+            return Err(AdapterError::InvalidRequest);
+        }
+        if record.state != "leased" || record.active_grant_id != Some(*identity.grant_id) {
+            record.state = "leased";
+            record.active_grant_id = Some(*identity.grant_id);
+            identity
+                .authorized_subject
+                .clone_into(&mut record.active_subject);
+            record.grant_expires_at = Some(identity.expires_at);
+            record.active_offset = 0;
+            record.record_hmac = authenticate_artifact_record(&self.hmac_key, &record);
+            let changed = transaction
+                .execute(
+                    "UPDATE certificate_artifacts SET state='leased',active_grant_id=?2,active_subject=?3,grant_expires_at=?4,active_offset=0,record_hmac=?5,updated_at=?6 WHERE artifact_id=?1",
+                    params![record.artifact_id.as_slice(), identity.grant_id.as_slice(), identity.authorized_subject, identity.expires_at, record.record_hmac.as_slice(), now],
+                )
+                .map_err(sqlite_io)?;
+            if changed != 1 {
+                return Err(AdapterError::Unavailable);
+            }
+        }
+        transaction.commit().map_err(sqlite_io)?;
+        Ok(record)
+    }
+
+    fn advance_artifact(
+        &mut self,
+        identity: ArtifactLeaseIdentity<'_>,
+        expected_offset: u64,
+        next_offset: u64,
+    ) -> Result<(), AdapterError> {
+        let now = effect_now()?;
+        let identity = validate_artifact_identity(identity, now)?;
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(sqlite_io)?;
+        let mut record = query_artifact(&transaction, identity.artifact_id)?
+            .ok_or(AdapterError::InvalidRequest)?;
+        validate_artifact_record(&self.hmac_key, &record)?;
+        if record.state != "leased"
+            || record.active_grant_id != Some(*identity.grant_id)
+            || record.active_subject != identity.authorized_subject
+            || record.grant_expires_at != Some(identity.expires_at)
+            || record.certificate_id != *identity.certificate_id
+            || record.certificate_version != identity.certificate_version
+            || record.operation_id != *identity.operation_id
+            || record.active_offset != expected_offset
+            || next_offset <= expected_offset
+            || next_offset > record.content_size
+        {
+            return Err(AdapterError::InvalidRequest);
+        }
+        record.active_offset = next_offset;
+        record.record_hmac = authenticate_artifact_record(&self.hmac_key, &record);
+        let changed = transaction
+            .execute(
+                "UPDATE certificate_artifacts SET active_offset=?2,record_hmac=?3,updated_at=?4 WHERE artifact_id=?1 AND state='leased' AND active_offset=?5",
+                params![record.artifact_id.as_slice(), i64::try_from(next_offset).map_err(|_| AdapterError::InvalidRequest)?, record.record_hmac.as_slice(), now, i64::try_from(expected_offset).map_err(|_| AdapterError::InvalidRequest)?],
+            )
+            .map_err(sqlite_io)?;
+        if changed != 1 {
+            return Err(AdapterError::Unavailable);
+        }
+        transaction.commit().map_err(sqlite_io)
+    }
+
+    fn consume_artifact(
+        &mut self,
+        identity: ArtifactLeaseIdentity<'_>,
+        content_sha256: &[u8],
+        content_size: u64,
+    ) -> Result<(), AdapterError> {
+        let now = effect_now()?;
+        let identity = validate_artifact_identity(identity, now)?;
+        let digest: [u8; 32] = content_sha256
+            .try_into()
+            .map_err(|_| AdapterError::InvalidRequest)?;
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(sqlite_io)?;
+        let mut record = query_artifact(&transaction, identity.artifact_id)?
+            .ok_or(AdapterError::InvalidRequest)?;
+        validate_artifact_record(&self.hmac_key, &record)?;
+        let exact_identity = record.active_grant_id == Some(*identity.grant_id)
+            && record.active_subject == identity.authorized_subject
+            && record.grant_expires_at == Some(identity.expires_at)
+            && record.certificate_id == *identity.certificate_id
+            && record.certificate_version == identity.certificate_version
+            && record.operation_id == *identity.operation_id
+            && record.content_sha256 == digest
+            && record.content_size == content_size
+            && record.active_offset == record.content_size;
+        if record.state == "consumed" && exact_identity {
+            transaction.commit().map_err(sqlite_io)?;
+            return Ok(());
+        }
+        if record.state != "leased" || !exact_identity {
+            return Err(AdapterError::InvalidRequest);
+        }
+        record.state = "consumed";
+        record.record_hmac = authenticate_artifact_record(&self.hmac_key, &record);
+        let changed = transaction
+            .execute(
+                "UPDATE certificate_artifacts SET state='consumed',record_hmac=?2,updated_at=?3 WHERE artifact_id=?1 AND state='leased'",
+                params![record.artifact_id.as_slice(), record.record_hmac.as_slice(), now],
+            )
+            .map_err(sqlite_io)?;
+        if changed != 1 {
+            return Err(AdapterError::Unavailable);
+        }
+        transaction.commit().map_err(sqlite_io)
+    }
+
+    fn confirm_artifact_consumed(
+        &self,
+        identity: ArtifactLeaseIdentity<'_>,
+        content_sha256: &[u8],
+        content_size: u64,
+    ) -> Result<bool, AdapterError> {
+        let identity = validate_artifact_identity_for_confirmation(identity)?;
+        let digest: [u8; 32] = content_sha256
+            .try_into()
+            .map_err(|_| AdapterError::InvalidRequest)?;
+        let record = query_artifact(&self.connection, identity.artifact_id)?
+            .ok_or(AdapterError::InvalidRequest)?;
+        validate_artifact_record(&self.hmac_key, &record)?;
+        let same_artifact = record.certificate_id == *identity.certificate_id
+            && record.certificate_version == identity.certificate_version
+            && record.operation_id == *identity.operation_id
+            && record.content_sha256 == digest
+            && record.content_size == content_size;
+        if !same_artifact {
+            return Err(AdapterError::InvalidRequest);
+        }
+        let exact_grant = record.active_grant_id == Some(*identity.grant_id)
+            && record.active_subject == identity.authorized_subject
+            && record.grant_expires_at == Some(identity.expires_at)
+            && record.active_offset == record.content_size;
+        match record.state {
+            "consumed" if exact_grant => Ok(true),
+            "leased" if exact_grant => Ok(false),
+            "available" | "expired" | "revoked" => Ok(false),
+            _ => Err(AdapterError::InvalidRequest),
+        }
+    }
+
+    fn revoke_certificate_artifacts(
+        &mut self,
+        certificate_id: &[u8; 16],
+    ) -> Result<Vec<[u8; 16]>, AdapterError> {
+        let now = effect_now()?;
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(sqlite_io)?;
+        let artifact_ids = query_certificate_artifacts(&transaction, certificate_id)?;
+        for artifact_id in &artifact_ids {
+            let mut record =
+                query_artifact(&transaction, artifact_id)?.ok_or(AdapterError::InvalidResource)?;
+            validate_artifact_record(&self.hmac_key, &record)?;
+            if record.state != "consumed" {
+                record.state = "revoked";
+                record.record_hmac = authenticate_artifact_record(&self.hmac_key, &record);
+                transaction
+                    .execute(
+                        "UPDATE certificate_artifacts SET state='revoked',record_hmac=?2,updated_at=?3 WHERE artifact_id=?1",
+                        params![artifact_id.as_slice(), record.record_hmac.as_slice(), now],
+                    )
+                    .map_err(sqlite_io)?;
+            }
+        }
+        transaction.commit().map_err(sqlite_io)?;
+        Ok(artifact_ids)
+    }
+
+    fn reconcile_artifacts(&mut self) -> Result<Vec<[u8; 16]>, AdapterError> {
+        let now = effect_now()?;
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(sqlite_io)?;
+        let artifact_ids = query_all_artifacts(&transaction)?;
+        let mut terminal = Vec::new();
+        for artifact_id in artifact_ids {
+            let mut record =
+                query_artifact(&transaction, &artifact_id)?.ok_or(AdapterError::InvalidResource)?;
+            validate_artifact_record(&self.hmac_key, &record)?;
+            if record.artifact_expires_at <= now
+                && matches!(record.state, "prepared" | "available" | "leased")
+            {
+                record.state = "expired";
+            } else if record.state == "leased"
+                && record.grant_expires_at.is_some_and(|expiry| expiry <= now)
+            {
+                record.state = "available";
+                record.active_grant_id = None;
+                record.active_subject.clear();
+                record.grant_expires_at = None;
+                record.active_offset = 0;
+            }
+            if matches!(record.state, "consumed" | "expired" | "revoked") {
+                terminal.push(record.artifact_id);
+            }
+            record.record_hmac = authenticate_artifact_record(&self.hmac_key, &record);
+            transaction
+                .execute(
+                    "UPDATE certificate_artifacts SET state=?2,active_grant_id=?3,active_subject=?4,grant_expires_at=?5,active_offset=?6,record_hmac=?7,updated_at=?8 WHERE artifact_id=?1",
+                    params![record.artifact_id.as_slice(), record.state, record.active_grant_id.map(|value| value.to_vec()), record.active_subject, record.grant_expires_at, record.active_offset, record.record_hmac.as_slice(), now],
+                )
+                .map_err(sqlite_io)?;
+        }
+        transaction.commit().map_err(sqlite_io)?;
+        Ok(terminal)
+    }
+
+    fn tracked_artifact_ids(&self) -> Result<Vec<[u8; 16]>, AdapterError> {
+        query_all_artifacts(&self.connection)
     }
 
     fn validate_identity(&self) -> Result<(), AdapterError> {
@@ -2522,6 +3074,72 @@ struct ValidatedEffectIdentity<'a> {
     expires_at: i64,
 }
 
+#[derive(Clone, Copy)]
+struct ValidatedArtifactIdentity<'a> {
+    artifact_id: &'a [u8; 16],
+    certificate_id: &'a [u8; 16],
+    certificate_version: u64,
+    operation_id: &'a [u8; 16],
+    authorized_subject: &'a str,
+    max_bytes: u64,
+    grant_id: &'a [u8; 16],
+    expires_at: i64,
+}
+
+fn validate_artifact_identity(
+    identity: ArtifactLeaseIdentity<'_>,
+    now: i64,
+) -> Result<ValidatedArtifactIdentity<'_>, AdapterError> {
+    let validated = validate_artifact_identity_for_confirmation(identity)?;
+    if validated.expires_at <= now {
+        return Err(AdapterError::InvalidRequest);
+    }
+    Ok(validated)
+}
+
+fn validate_artifact_identity_for_confirmation(
+    identity: ArtifactLeaseIdentity<'_>,
+) -> Result<ValidatedArtifactIdentity<'_>, AdapterError> {
+    let artifact_id: &[u8; 16] = identity
+        .artifact_id
+        .try_into()
+        .map_err(|_| AdapterError::InvalidRequest)?;
+    let certificate_id: &[u8; 16] = identity
+        .certificate_id
+        .try_into()
+        .map_err(|_| AdapterError::InvalidRequest)?;
+    let operation_id: &[u8; 16] = identity
+        .operation_id
+        .try_into()
+        .map_err(|_| AdapterError::InvalidRequest)?;
+    let grant_id: &[u8; 16] = identity
+        .grant_id
+        .try_into()
+        .map_err(|_| AdapterError::InvalidRequest)?;
+    if [artifact_id, certificate_id, operation_id, grant_id]
+        .into_iter()
+        .any(|value| Uuid::from_bytes(*value).get_version_num() != 7)
+        || identity.certificate_version == 0
+        || identity.authorized_subject.is_empty()
+        || identity.authorized_subject.len() > 256
+        || identity.max_bytes == 0
+        || identity.max_bytes > MAX_ARTIFACT_BYTES as u64
+        || identity.expires_at_unix_seconds <= 0
+    {
+        return Err(AdapterError::InvalidRequest);
+    }
+    Ok(ValidatedArtifactIdentity {
+        artifact_id,
+        certificate_id,
+        certificate_version: identity.certificate_version,
+        operation_id,
+        authorized_subject: identity.authorized_subject,
+        max_bytes: identity.max_bytes,
+        grant_id,
+        expires_at: identity.expires_at_unix_seconds,
+    })
+}
+
 fn effect_now() -> Result<i64, AdapterError> {
     i64::try_from(
         SystemTime::now()
@@ -2702,6 +3320,122 @@ fn query_authorized_effect(
         )
         .optional()
         .map_err(sqlite_io)
+}
+
+fn query_artifact(
+    connection: &Connection,
+    artifact_id: &[u8; 16],
+) -> Result<Option<ArtifactRecord>, AdapterError> {
+    connection
+        .query_row(
+            "SELECT artifact_id,certificate_id,certificate_version,operation_id,content_sha256,content_size,artifact_expires_at,state,active_grant_id,active_subject,grant_expires_at,active_offset,record_hmac FROM certificate_artifacts WHERE artifact_id=?1",
+            [artifact_id.as_slice()],
+            |row| {
+                let certificate_version: i64 = row.get(2)?;
+                let content_size: i64 = row.get(5)?;
+                let active_offset: i64 = row.get(11)?;
+                let active_grant: Option<Vec<u8>> = row.get(8)?;
+                Ok(ArtifactRecord {
+                    artifact_id: fixed_blob(row.get(0)?)?,
+                    certificate_id: fixed_blob(row.get(1)?)?,
+                    certificate_version: u64::try_from(certificate_version).map_err(|_| rusqlite::Error::InvalidQuery)?,
+                    operation_id: fixed_blob(row.get(3)?)?,
+                    content_sha256: fixed_blob(row.get(4)?)?,
+                    content_size: u64::try_from(content_size).map_err(|_| rusqlite::Error::InvalidQuery)?,
+                    artifact_expires_at: row.get(6)?,
+                    state: match row.get::<_, String>(7)?.as_str() {
+                        "prepared" => "prepared",
+                        "available" => "available",
+                        "leased" => "leased",
+                        "consumed" => "consumed",
+                        "expired" => "expired",
+                        "revoked" => "revoked",
+                        _ => return Err(rusqlite::Error::InvalidQuery),
+                    },
+                    active_grant_id: active_grant.map(fixed_blob).transpose()?,
+                    active_subject: row.get(9)?,
+                    grant_expires_at: row.get(10)?,
+                    active_offset: u64::try_from(active_offset).map_err(|_| rusqlite::Error::InvalidQuery)?,
+                    record_hmac: fixed_blob(row.get(12)?)?,
+                })
+            },
+        )
+        .optional()
+        .map_err(sqlite_io)
+}
+
+fn query_certificate_artifacts(
+    connection: &Connection,
+    certificate_id: &[u8; 16],
+) -> Result<Vec<[u8; 16]>, AdapterError> {
+    let mut statement = connection
+        .prepare("SELECT artifact_id FROM certificate_artifacts WHERE certificate_id=?1")
+        .map_err(sqlite_io)?;
+    let rows = statement
+        .query_map([certificate_id.as_slice()], |row| fixed_blob(row.get(0)?))
+        .map_err(sqlite_io)?;
+    rows.collect::<Result<Vec<_>, _>>().map_err(sqlite_io)
+}
+
+fn query_all_artifacts(connection: &Connection) -> Result<Vec<[u8; 16]>, AdapterError> {
+    let mut statement = connection
+        .prepare("SELECT artifact_id FROM certificate_artifacts ORDER BY artifact_id")
+        .map_err(sqlite_io)?;
+    let rows = statement
+        .query_map([], |row| fixed_blob(row.get(0)?))
+        .map_err(sqlite_io)?;
+    rows.collect::<Result<Vec<_>, _>>().map_err(sqlite_io)
+}
+
+fn validate_artifact_record(key: &[u8; 32], record: &ArtifactRecord) -> Result<(), AdapterError> {
+    if record.content_size > MAX_ARTIFACT_BYTES as u64
+        || (record.state == "prepared" && record.content_size != 0)
+        || (!matches!(record.state, "prepared" | "expired" | "revoked") && record.content_size == 0)
+        || !matches!(
+            record.state,
+            "prepared" | "available" | "leased" | "consumed" | "expired" | "revoked"
+        )
+        || (record.state == "leased"
+            && (record.active_grant_id.is_none()
+                || record.active_subject.is_empty()
+                || record.grant_expires_at.is_none()))
+        || record.active_offset > record.content_size
+        || (record.state == "available" && record.active_offset != 0)
+        || authenticate_artifact_record(key, record) != record.record_hmac
+    {
+        return Err(AdapterError::InvalidResource);
+    }
+    Ok(())
+}
+
+fn authenticate_artifact_record(key: &[u8; 32], record: &ArtifactRecord) -> [u8; 32] {
+    let mut preimage = Vec::with_capacity(512);
+    preimage.extend_from_slice(b"ocservia.certificate-artifact-record.v1\0");
+    preimage.extend_from_slice(&record.artifact_id);
+    preimage.extend_from_slice(&record.certificate_id);
+    preimage.extend_from_slice(&record.certificate_version.to_be_bytes());
+    preimage.extend_from_slice(&record.operation_id);
+    preimage.extend_from_slice(&record.content_sha256);
+    preimage.extend_from_slice(&record.content_size.to_be_bytes());
+    preimage.extend_from_slice(&record.artifact_expires_at.to_be_bytes());
+    append_effect_field(&mut preimage, record.state.as_bytes());
+    match record.active_grant_id {
+        Some(grant_id) => {
+            preimage.push(1);
+            preimage.extend_from_slice(&grant_id);
+        }
+        None => preimage.push(0),
+    }
+    append_effect_field(&mut preimage, record.active_subject.as_bytes());
+    match record.grant_expires_at {
+        Some(expires) => {
+            preimage.push(1);
+            preimage.extend_from_slice(&expires.to_be_bytes());
+        }
+        None => preimage.push(0),
+    }
+    preimage.extend_from_slice(&record.active_offset.to_be_bytes());
+    hmac_sha256(key, &[&preimage])
 }
 
 fn prune_expired_authorized_effects(
@@ -3619,7 +4353,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[allow(clippy::too_many_lines)]
+    #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
     async fn config_apply_fault_points_and_health_commands_fail_closed() {
         fn fixture(
             name: &str,
@@ -5858,46 +6592,61 @@ mod tests {
         std::fs::create_dir(&directory).expect("certificate directory");
         std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o700))
             .expect("certificate directory mode");
-        let sealing_key = directory.join("sealing-private.pem");
-        let sealing_public = directory.join("sealing-public.pem");
-        assert!(
-            Command::new("/usr/bin/openssl")
-                .args([
-                    "genpkey",
-                    "-algorithm",
-                    "RSA",
-                    "-pkeyopt",
-                    "rsa_keygen_bits:2048",
-                    "-out",
-                ])
-                .arg(&sealing_key)
-                .status()
-                .expect("generate sealing key")
-                .success()
-        );
-        std::fs::set_permissions(&sealing_key, std::fs::Permissions::from_mode(0o600))
-            .expect("sealing key mode");
-        assert!(
-            Command::new("/usr/bin/openssl")
-                .args(["pkey", "-in"])
-                .arg(&sealing_key)
-                .args(["-pubout", "-out"])
-                .arg(&sealing_public)
-                .status()
-                .expect("derive sealing public key")
-                .success()
-        );
+        let user_sealing_key = directory.join("user-sealing-private.pem");
+        let user_sealing_public = directory.join("user-sealing-public.pem");
+        let p12_sealing_key = directory.join("p12-sealing-private.pem");
+        let p12_sealing_public = directory.join("p12-sealing-public.pem");
+        for (private, public) in [
+            (&user_sealing_key, &user_sealing_public),
+            (&p12_sealing_key, &p12_sealing_public),
+        ] {
+            assert!(
+                Command::new("/usr/bin/openssl")
+                    .args([
+                        "genpkey",
+                        "-algorithm",
+                        "RSA",
+                        "-pkeyopt",
+                        "rsa_keygen_bits:2048",
+                        "-out",
+                    ])
+                    .arg(private)
+                    .status()
+                    .expect("generate sealing key")
+                    .success()
+            );
+            std::fs::set_permissions(private, std::fs::Permissions::from_mode(0o600))
+                .expect("sealing key mode");
+            assert!(
+                Command::new("/usr/bin/openssl")
+                    .args(["pkey", "-in"])
+                    .arg(private)
+                    .args(["-pubout", "-out"])
+                    .arg(public)
+                    .status()
+                    .expect("derive sealing public key")
+                    .success()
+            );
+        }
         let resources = FixedResources::default()
             .with_user_resources(
                 PathBuf::from("/usr/bin/true"),
                 directory.join("unused-user-file"),
                 PathBuf::from("/usr/bin/openssl"),
-                sealing_key,
-                "fixture-key".to_owned(),
+                user_sealing_key,
+                "fixture-user-key".to_owned(),
             )
             .expect("fixed secret resources")
+            .with_p12_resources(p12_sealing_key, "fixture-key".to_owned())
+            .expect("fixed P12 resources")
+            .with_effect_store(
+                directory.join("desired-effects.sqlite3"),
+                directory.join("desired-effects.key"),
+            )
+            .expect("fixed effect store")
             .with_certificate_key_dir(directory.clone())
             .expect("fixed certificate resources");
+        let restart_resources = resources.clone();
         let adapter = Adapter::new(
             resources,
             Limits {
@@ -5940,7 +6689,7 @@ mod tests {
         let password = b"unique-random-password-fixture";
         let mut seal = Command::new("/usr/bin/openssl")
             .args(["pkeyutl", "-encrypt", "-pubin", "-inkey"])
-            .arg(&sealing_public)
+            .arg(&p12_sealing_public)
             .args([
                 "-pkeyopt",
                 "rsa_padding_mode:oaep",
@@ -5958,16 +6707,114 @@ mod tests {
             .expect("seal password input");
         let sealed = seal.wait_with_output().expect("seal password");
         assert!(sealed.status.success());
+        let sealed_password = SealedSecretV1 {
+            version: SealedSecretVersion::V1 as i32,
+            purpose: SealedSecretPurpose::CertificateP12Password as i32,
+            key_id: "fixture-key".to_owned(),
+            ciphertext: sealed.stdout,
+        };
+        let mut seal_user = Command::new("/usr/bin/openssl")
+            .args(["pkeyutl", "-encrypt", "-pubin", "-inkey"])
+            .arg(&user_sealing_public)
+            .args([
+                "-pkeyopt",
+                "rsa_padding_mode:oaep",
+                "-pkeyopt",
+                "rsa_oaep_md:sha256",
+            ])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .expect("start user-purpose sealing fixture");
+        seal_user
+            .stdin
+            .take()
+            .expect("user sealing stdin")
+            .write_all(password)
+            .expect("user sealing input");
+        let user_sealed = seal_user.wait_with_output().expect("seal user password");
+        assert!(user_sealed.status.success());
         let chain = std::fs::read(&certificate_path).expect("read certificate chain");
         let artifact_id = Uuid::now_v7();
+        let operation_id = Uuid::now_v7();
+        let expires_at = effect_now().expect("current time") + 600;
         let artifact_directory = directory.join("artifacts");
+        let mut modified_secret = sealed_password.clone();
+        modified_secret.ciphertext[0] ^= 1;
+        assert!(
+            adapter
+                .certificate_p12(
+                    certificate_id.as_bytes(),
+                    Uuid::now_v7().as_bytes(),
+                    &chain,
+                    &modified_secret,
+                    1,
+                    Uuid::now_v7().as_bytes(),
+                    expires_at,
+                )
+                .await
+                .is_err()
+        );
+        let mut cross_purpose = sealed_password.clone();
+        cross_purpose.purpose = SealedSecretPurpose::UserPassword as i32;
+        cross_purpose.key_id = "fixture-user-key".to_owned();
+        assert!(matches!(
+            adapter
+                .certificate_p12(
+                    certificate_id.as_bytes(),
+                    Uuid::now_v7().as_bytes(),
+                    &chain,
+                    &cross_purpose,
+                    1,
+                    Uuid::now_v7().as_bytes(),
+                    expires_at,
+                )
+                .await,
+            Err(AdapterError::InvalidRequest)
+        ));
+        let user_ciphertext_in_p12 = SealedSecretV1 {
+            version: SealedSecretVersion::V1 as i32,
+            purpose: SealedSecretPurpose::CertificateP12Password as i32,
+            key_id: "fixture-key".to_owned(),
+            ciphertext: user_sealed.stdout,
+        };
+        assert!(
+            adapter
+                .certificate_p12(
+                    certificate_id.as_bytes(),
+                    Uuid::now_v7().as_bytes(),
+                    &chain,
+                    &user_ciphertext_in_p12,
+                    1,
+                    Uuid::now_v7().as_bytes(),
+                    expires_at,
+                )
+                .await
+                .is_err(),
+            "user-purpose ciphertext must not decrypt on the P12 key"
+        );
+        assert!(
+            adapter
+                .user_create(
+                    "cross-purpose",
+                    "fixture-user-key",
+                    &sealed_password.ciphertext,
+                    1,
+                    test_effect(),
+                )
+                .await
+                .is_err(),
+            "P12-purpose ciphertext must not decrypt on the user key"
+        );
         let result = adapter
             .certificate_p12(
                 certificate_id.as_bytes(),
                 artifact_id.as_bytes(),
                 &chain,
-                &sealed.stdout,
-                "fixture-key",
+                &sealed_password,
+                1,
+                operation_id.as_bytes(),
+                expires_at,
             )
             .await
             .expect("create encrypted P12");
@@ -5980,7 +6827,7 @@ mod tests {
                 .permissions()
                 .mode()
                 & 0o777,
-            0o710
+            0o700
         );
         let bytes = std::fs::read(&artifact).expect("read encrypted P12");
         assert_eq!(
@@ -5989,7 +6836,7 @@ mod tests {
                 .permissions()
                 .mode()
                 & 0o777,
-            0o640
+            0o600
         );
         assert_eq!(result.artifact_size, bytes.len() as u64);
         assert_eq!(result.artifact_sha256, Sha256::digest(&bytes).to_vec());
@@ -6016,28 +6863,31 @@ mod tests {
                 certificate_id.as_bytes(),
                 artifact_id.as_bytes(),
                 &chain,
-                &sealed.stdout,
-                "fixture-key",
+                &sealed_password,
+                1,
+                operation_id.as_bytes(),
+                expires_at,
             )
             .await
             .expect("replay P12 creation");
         assert_eq!(replay.artifact_sha256, result.artifact_sha256);
         std::fs::write(&artifact, b"truncated").expect("corrupt final P12 fixture");
-        let recovered = adapter
+        let recovery_error = adapter
             .certificate_p12(
                 certificate_id.as_bytes(),
                 artifact_id.as_bytes(),
                 &chain,
-                &sealed.stdout,
-                "fixture-key",
+                &sealed_password,
+                1,
+                operation_id.as_bytes(),
+                expires_at,
             )
             .await
-            .expect("replace invalid final P12");
-        assert_ne!(
-            recovered.artifact_sha256,
-            Sha256::digest(b"truncated").to_vec()
-        );
+            .expect_err("registered artifact corruption must fail closed");
+        assert!(matches!(recovery_error, AdapterError::InvalidResource));
+        assert!(!artifact.exists());
         let interrupted_artifact = Uuid::now_v7();
+        let interrupted_operation = Uuid::now_v7();
         let interrupted_chain =
             artifact_directory.join(format!(".{interrupted_artifact}.chain.pem"));
         let interrupted_output = artifact_directory.join(format!(".{interrupted_artifact}.p12"));
@@ -6045,24 +6895,215 @@ mod tests {
             .expect("interrupted chain file");
         std::fs::write(&interrupted_output, b"interrupted output fixture")
             .expect("interrupted output file");
-        adapter
+        let interrupted_result = adapter
             .certificate_p12(
                 certificate_id.as_bytes(),
                 interrupted_artifact.as_bytes(),
                 &chain,
-                &sealed.stdout,
-                "fixture-key",
+                &sealed_password,
+                1,
+                interrupted_operation.as_bytes(),
+                expires_at,
             )
             .await
             .expect("recover interrupted P12 staging");
         assert!(!interrupted_chain.exists());
         assert!(!interrupted_output.exists());
+        let grant_id = Uuid::now_v7();
+        let subject = Uuid::now_v7().to_string();
+        let grant_expires = effect_now().expect("current time") + 300;
+        let lease = ArtifactLeaseIdentity {
+            artifact_id: interrupted_artifact.as_bytes(),
+            certificate_id: certificate_id.as_bytes(),
+            certificate_version: 1,
+            operation_id: interrupted_operation.as_bytes(),
+            authorized_subject: &subject,
+            max_bytes: interrupted_result.artifact_size,
+            grant_id: grant_id.as_bytes(),
+            expires_at_unix_seconds: grant_expires,
+        };
+        let (first_attempt, duplicate_attempt) = tokio::join!(
+            adapter.artifact_read(lease, 0),
+            adapter.artifact_read(lease, 0)
+        );
+        assert!(first_attempt.is_ok() ^ duplicate_attempt.is_ok());
+        let first_chunk = first_attempt
+            .or(duplicate_attempt)
+            .expect("one concurrent fetch owns the signed lease");
+        assert!(first_chunk.eof);
+        assert_eq!(first_chunk.sha256, interrupted_result.artifact_sha256);
+
+        let restarted = Adapter::new(
+            restart_resources.clone(),
+            Limits {
+                timeout: Duration::from_secs(10),
+                output_bytes: DEFAULT_OUTPUT_BYTES,
+            },
+        );
+        let other_grant = Uuid::now_v7();
+        let conflicting_lease = ArtifactLeaseIdentity {
+            grant_id: other_grant.as_bytes(),
+            ..lease
+        };
+        assert!(matches!(
+            restarted.artifact_read(conflicting_lease, 0).await,
+            Err(AdapterError::Unavailable)
+        ));
+        let wrong_version = ArtifactLeaseIdentity {
+            certificate_version: 2,
+            ..lease
+        };
+        assert!(matches!(
+            restarted.artifact_read(wrong_version, 0).await,
+            Err(AdapterError::InvalidRequest)
+        ));
+        assert!(matches!(
+            restarted.artifact_read(lease, 0).await,
+            Err(AdapterError::InvalidRequest)
+        ));
+        assert!(
+            !restarted
+                .artifact_confirm_consumed(
+                    lease,
+                    &interrupted_result.artifact_sha256,
+                    interrupted_result.artifact_size,
+                )
+                .await
+                .expect("confirmation cannot mutate an active lease")
+                .applied
+        );
+        let released_grant_expiry = effect_now().expect("current time") - 1;
+        let mut store =
+            EffectStore::open_for_mutation(&restart_resources).expect("open leased artifact store");
+        let mut released_record =
+            query_artifact(&store.connection, interrupted_artifact.as_bytes())
+                .expect("query leased artifact")
+                .expect("leased artifact record");
+        released_record.grant_expires_at = Some(released_grant_expiry);
+        released_record.record_hmac =
+            authenticate_artifact_record(&store.hmac_key, &released_record);
+        store
+            .connection
+            .execute(
+                "UPDATE certificate_artifacts SET grant_expires_at=?2,record_hmac=?3 WHERE artifact_id=?1",
+                params![
+                    released_record.artifact_id.as_slice(),
+                    released_grant_expiry,
+                    released_record.record_hmac.as_slice()
+                ],
+            )
+            .expect("expire unconsumed root lease fixture");
+        store
+            .reconcile_artifacts()
+            .expect("release expired unconsumed root lease");
+        let released_lease = ArtifactLeaseIdentity {
+            expires_at_unix_seconds: released_grant_expiry,
+            ..lease
+        };
+        assert!(
+            !restarted
+                .artifact_confirm_consumed(
+                    released_lease,
+                    &interrupted_result.artifact_sha256,
+                    interrupted_result.artifact_size,
+                )
+                .await
+                .expect("released exact artifact confirms not consumed")
+                .applied
+        );
+        let recovered_grant = Uuid::now_v7();
+        let recovered_lease = ArtifactLeaseIdentity {
+            grant_id: recovered_grant.as_bytes(),
+            expires_at_unix_seconds: effect_now().expect("current time") + 300,
+            ..lease
+        };
+        let recovered_chunk = restarted
+            .artifact_read(recovered_lease, 0)
+            .await
+            .expect("released artifact can be leased again");
+        assert!(recovered_chunk.eof);
+        restarted
+            .artifact_consume(
+                recovered_lease,
+                &interrupted_result.artifact_sha256,
+                interrupted_result.artifact_size,
+            )
+            .await
+            .expect("consume recovered lease once");
+        restarted
+            .artifact_consume(
+                recovered_lease,
+                &interrupted_result.artifact_sha256,
+                interrupted_result.artifact_size,
+            )
+            .await
+            .expect("repeat finalize reconciles without a second read or delete");
+        let elapsed_grant_expiry = effect_now().expect("current time") - 1;
+        let store = EffectStore::open_for_mutation(&restart_resources)
+            .expect("open consumed artifact store");
+        let mut consumed_record =
+            query_artifact(&store.connection, interrupted_artifact.as_bytes())
+                .expect("query consumed artifact")
+                .expect("consumed artifact record");
+        consumed_record.grant_expires_at = Some(elapsed_grant_expiry);
+        consumed_record.record_hmac =
+            authenticate_artifact_record(&store.hmac_key, &consumed_record);
+        store
+            .connection
+            .execute(
+                "UPDATE certificate_artifacts SET grant_expires_at=?2,record_hmac=?3 WHERE artifact_id=?1",
+                params![
+                    consumed_record.artifact_id.as_slice(),
+					elapsed_grant_expiry,
+                    consumed_record.record_hmac.as_slice()
+                ],
+            )
+            .expect("expire consumed grant fixture");
+        let expired_lease = ArtifactLeaseIdentity {
+            expires_at_unix_seconds: elapsed_grant_expiry,
+            ..recovered_lease
+        };
+        assert!(
+            restarted
+                .artifact_confirm_consumed(
+                    expired_lease,
+                    &interrupted_result.artifact_sha256,
+                    interrupted_result.artifact_size,
+                )
+                .await
+                .expect("expired exact grant confirms consumed record")
+                .applied
+        );
+        assert!(matches!(
+            restarted
+                .artifact_consume(
+                    expired_lease,
+                    &interrupted_result.artifact_sha256,
+                    interrupted_result.artifact_size,
+                )
+                .await,
+            Err(AdapterError::InvalidRequest)
+        ));
+        assert!(matches!(
+            restarted.artifact_read(recovered_lease, 0).await,
+            Err(AdapterError::InvalidRequest)
+        ));
+        assert!(
+            !artifact_directory
+                .join(format!("{interrupted_artifact}.p12"))
+                .exists()
+        );
         let lookalike = directory.join("artifacts").join("not-a-uuid.p12");
         std::fs::write(&lookalike, b"preserve").expect("write cleanup lookalike");
+        let legacy_untracked = Uuid::now_v7();
+        let legacy_untracked_path = artifact_directory.join(format!("{legacy_untracked}.p12"));
+        std::fs::write(&legacy_untracked_path, b"recent legacy artifact")
+            .expect("write recent legacy artifact");
+        std::fs::set_permissions(&artifact_directory, std::fs::Permissions::from_mode(0o710))
+            .expect("set legacy artifact directory mode");
         assert!(
             Command::new("/usr/bin/touch")
                 .args(["-t", "200001010000"])
-                .arg(&artifact)
                 .arg(&lookalike)
                 .status()
                 .expect("age artifact fixtures")
@@ -6073,21 +7114,132 @@ mod tests {
             .await
             .expect("clean stale encrypted artifact");
         assert!(!artifact.exists());
+        assert!(!legacy_untracked_path.exists());
+        assert_eq!(
+            std::fs::symlink_metadata(&artifact_directory)
+                .expect("hardened artifact directory")
+                .mode()
+                & 0o777,
+            0o700
+        );
         assert!(lookalike.exists());
+        let available_artifact = Uuid::now_v7();
+        let available_operation = Uuid::now_v7();
+        let available_result = adapter
+            .certificate_p12(
+                certificate_id.as_bytes(),
+                available_artifact.as_bytes(),
+                &chain,
+                &sealed_password,
+                1,
+                available_operation.as_bytes(),
+                expires_at,
+            )
+            .await
+            .expect("create artifact revoked before first fetch");
+        let leased_artifact = Uuid::now_v7();
+        let leased_operation = Uuid::now_v7();
+        let leased_result = adapter
+            .certificate_p12(
+                certificate_id.as_bytes(),
+                leased_artifact.as_bytes(),
+                &chain,
+                &sealed_password,
+                1,
+                leased_operation.as_bytes(),
+                expires_at,
+            )
+            .await
+            .expect("create artifact revoked during lease");
+        let revoked_grant = Uuid::now_v7();
+        let revoked_subject = Uuid::now_v7().to_string();
+        let revoked_lease = ArtifactLeaseIdentity {
+            artifact_id: leased_artifact.as_bytes(),
+            certificate_id: certificate_id.as_bytes(),
+            certificate_version: 1,
+            operation_id: leased_operation.as_bytes(),
+            authorized_subject: &revoked_subject,
+            max_bytes: leased_result.artifact_size,
+            grant_id: revoked_grant.as_bytes(),
+            expires_at_unix_seconds: effect_now().expect("current time") + 300,
+        };
+        adapter
+            .artifact_read(revoked_lease, 0)
+            .await
+            .expect("lease artifact before certificate revoke");
+        let revoke_staging = [
+            artifact_directory.join(format!(".{available_artifact}.p12")),
+            artifact_directory.join(format!(".{available_artifact}.chain.pem")),
+        ];
+        for path in &revoke_staging {
+            std::fs::write(path, b"staging").expect("create revocation staging fixture");
+        }
+        let prepared_artifact = Uuid::now_v7();
+        let prepared_operation = Uuid::now_v7();
+        EffectStore::open_for_mutation(&restart_resources)
+            .expect("open artifact store")
+            .prepare_artifact(
+                prepared_artifact.as_bytes(),
+                certificate_id.as_bytes(),
+                1,
+                prepared_operation.as_bytes(),
+                expires_at,
+            )
+            .expect("persist prepared artifact mapping");
+        let prepared_staging = [
+            artifact_directory.join(format!(".{prepared_artifact}.p12")),
+            artifact_directory.join(format!(".{prepared_artifact}.chain.pem")),
+        ];
+        for path in &prepared_staging {
+            std::fs::write(path, b"crash staging").expect("create prepared staging fixture");
+        }
         assert!(
             adapter
-                .certificate_revoke(certificate_id.as_bytes())
+                .certificate_revoke(certificate_id.as_bytes(), 1)
                 .await
                 .expect("remove node key")
                 .key_removed
         );
         assert!(
             adapter
-                .certificate_revoke(certificate_id.as_bytes())
+                .certificate_revoke(certificate_id.as_bytes(), 1)
                 .await
                 .expect("repeat node key removal")
                 .key_removed
         );
+        for artifact_id in [available_artifact, leased_artifact] {
+            assert!(
+                !artifact_directory
+                    .join(format!("{artifact_id}.p12"))
+                    .exists(),
+                "certificate revoke must delete every derived P12"
+            );
+        }
+        assert!(
+            revoke_staging
+                .iter()
+                .chain(prepared_staging.iter())
+                .all(|path| !path.exists())
+        );
+        let unavailable_grant = Uuid::now_v7();
+        let unavailable_lease = ArtifactLeaseIdentity {
+            artifact_id: available_artifact.as_bytes(),
+            certificate_id: certificate_id.as_bytes(),
+            certificate_version: 1,
+            operation_id: available_operation.as_bytes(),
+            authorized_subject: &revoked_subject,
+            max_bytes: available_result.artifact_size,
+            grant_id: unavailable_grant.as_bytes(),
+            expires_at_unix_seconds: effect_now().expect("current time") + 300,
+        };
+        assert!(matches!(
+            adapter.artifact_read(unavailable_lease, 0).await,
+            Err(AdapterError::InvalidRequest)
+        ));
+        assert!(matches!(
+            adapter.artifact_read(revoked_lease, 0).await,
+            Err(AdapterError::InvalidRequest)
+        ));
         std::fs::remove_dir_all(directory).expect("cleanup certificate directory");
     }
 }
@@ -6243,10 +7395,34 @@ impl Adapter {
     pub async fn certificate_revoke(
         &self,
         certificate_id: &[u8],
+        certificate_version: u64,
     ) -> Result<CertificateRevokeResult, AdapterError> {
         let id = Uuid::from_slice(certificate_id).map_err(|_| AdapterError::InvalidRequest)?;
-        if id.get_version_num() != 7 {
+        if id.get_version_num() != 7 || certificate_version == 0 {
             return Err(AdapterError::InvalidRequest);
+        }
+        let _guard = self.certificate_artifact_lock.lock().await;
+        let artifact_ids = EffectStore::open_for_mutation(&self.resources)?
+            .revoke_certificate_artifacts(id.as_bytes())?;
+        let artifact_dir = self.resources.certificate_key_dir.join("artifacts");
+        for artifact_id in artifact_ids {
+            let artifact = Uuid::from_bytes(artifact_id);
+            for path in [
+                artifact_dir.join(format!("{artifact}.p12")),
+                artifact_dir.join(format!(".{artifact}.p12")),
+                artifact_dir.join(format!(".{artifact}.chain.pem")),
+            ] {
+                match tokio::fs::symlink_metadata(&path).await {
+                    Ok(metadata) if metadata.is_file() && !metadata.file_type().is_symlink() => {
+                        tokio::fs::remove_file(path)
+                            .await
+                            .map_err(AdapterError::Io)?;
+                    }
+                    Ok(_) => return Err(AdapterError::InvalidResource),
+                    Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                    Err(error) => return Err(AdapterError::Io(error)),
+                }
+            }
         }
         let key_path = self
             .resources
@@ -6273,25 +7449,35 @@ impl Adapter {
     /// # Errors
     ///
     /// Returns a validation, resource, process, or I/O error if packaging cannot complete.
-    #[allow(clippy::too_many_lines)]
+    #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
     pub async fn certificate_p12(
         &self,
         certificate_id: &[u8],
         artifact_id: &[u8],
         certificate_chain_pem: &[u8],
-        sealed_password: &[u8],
-        secret_key_id: &str,
+        sealed_password: &SealedSecretV1,
+        certificate_version: u64,
+        operation_id: &[u8],
+        artifact_expires_at_unix_seconds: i64,
     ) -> Result<CertificateArtifactResult, AdapterError> {
         let certificate =
             Uuid::from_slice(certificate_id).map_err(|_| AdapterError::InvalidRequest)?;
         let artifact = Uuid::from_slice(artifact_id).map_err(|_| AdapterError::InvalidRequest)?;
+        let operation = Uuid::from_slice(operation_id).map_err(|_| AdapterError::InvalidRequest)?;
         if certificate.get_version_num() != 7
             || artifact.get_version_num() != 7
+            || operation.get_version_num() != 7
+            || certificate_version == 0
             || certificate_chain_pem.len() < 64
             || certificate_chain_pem.len() > 256 * 1024
-            || sealed_password.len() < 32
-            || sealed_password.len() > 16 * 1024
-            || secret_key_id != self.resources.secret_key_id
+            || SealedSecretVersion::try_from(sealed_password.version).ok()
+                != Some(SealedSecretVersion::V1)
+            || SealedSecretPurpose::try_from(sealed_password.purpose).ok()
+                != Some(SealedSecretPurpose::CertificateP12Password)
+            || sealed_password.ciphertext.len() < 32
+            || sealed_password.ciphertext.len() > 16 * 1024
+            || sealed_password.key_id != self.resources.p12_secret_key_id
+            || artifact_expires_at_unix_seconds <= effect_now()?
         {
             return Err(AdapterError::InvalidRequest);
         }
@@ -6313,7 +7499,7 @@ impl Adapter {
         tokio::fs::create_dir_all(&artifact_dir)
             .await
             .map_err(AdapterError::Io)?;
-        tokio::fs::set_permissions(&artifact_dir, std::fs::Permissions::from_mode(0o710))
+        tokio::fs::set_permissions(&artifact_dir, std::fs::Permissions::from_mode(0o700))
             .await
             .map_err(AdapterError::Io)?;
         let directory_metadata = tokio::fs::symlink_metadata(&artifact_dir)
@@ -6328,9 +7514,25 @@ impl Adapter {
         let chain_path = artifact_dir.join(format!(".{artifact}.chain.pem"));
         let staging_path = artifact_dir.join(format!(".{artifact}.p12"));
         let output_path = artifact_dir.join(format!("{artifact}.p12"));
+        let mut effect_store = EffectStore::open_for_mutation(&self.resources)?;
+        effect_store.prepare_artifact(
+            artifact.as_bytes(),
+            certificate.as_bytes(),
+            certificate_version,
+            operation.as_bytes(),
+            artifact_expires_at_unix_seconds,
+        )?;
+        let artifact_registered = effect_store.artifact_is_registered(
+            artifact.as_bytes(),
+            certificate.as_bytes(),
+            certificate_version,
+            operation.as_bytes(),
+            artifact_expires_at_unix_seconds,
+        )?;
+        drop(effect_store);
         let key = self
             .resources
-            .secret_key
+            .p12_secret_key
             .to_str()
             .ok_or(AdapterError::InvalidResource)?;
         let decrypted = self
@@ -6346,7 +7548,7 @@ impl Adapter {
                     "-pkeyopt",
                     "rsa_oaep_md:sha256",
                 ],
-                sealed_password,
+                &sealed_password.ciphertext,
             )
             .await;
         let password = match decrypted {
@@ -6385,10 +7587,20 @@ impl Adapter {
                         .await
                         .map_err(AdapterError::Io)?;
                     if !data.is_empty() && data.len() <= 64 * 1024 * 1024 {
+                        let digest = Sha256::digest(&data).to_vec();
+                        EffectStore::open_for_mutation(&self.resources)?.register_artifact(
+                            artifact_id,
+                            certificate_id,
+                            certificate_version,
+                            operation_id,
+                            &digest,
+                            u64::try_from(data.len()).map_err(|_| AdapterError::OutputLimit)?,
+                            artifact_expires_at_unix_seconds,
+                        )?;
                         return Ok(CertificateArtifactResult {
                             certificate_id: certificate_id.to_vec(),
                             artifact_id: artifact_id.to_vec(),
-                            artifact_sha256: Sha256::digest(&data).to_vec(),
+                            artifact_sha256: digest,
                             artifact_size: u64::try_from(data.len())
                                 .map_err(|_| AdapterError::OutputLimit)?,
                         });
@@ -6397,9 +7609,16 @@ impl Adapter {
                 tokio::fs::remove_file(&output_path)
                     .await
                     .map_err(AdapterError::Io)?;
+                if artifact_registered {
+                    return Err(AdapterError::InvalidResource);
+                }
             }
             Ok(_) => return Err(AdapterError::InvalidResource),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                if artifact_registered {
+                    return Err(AdapterError::InvalidResource);
+                }
+            }
             Err(error) => return Err(AdapterError::Io(error)),
         }
         for stale in [&chain_path, &staging_path] {
@@ -6477,15 +7696,139 @@ impl Adapter {
             let _ = tokio::fs::remove_file(&staging_path).await;
             return Err(AdapterError::OutputLimit);
         }
-        tokio::fs::set_permissions(&staging_path, std::fs::Permissions::from_mode(0o640))
+        tokio::fs::set_permissions(&staging_path, std::fs::Permissions::from_mode(0o600))
             .await
             .map_err(AdapterError::Io)?;
         atomic_replace(&staging_path, &output_path).await?;
+        let digest = Sha256::digest(&data).to_vec();
+        let size = u64::try_from(data.len()).map_err(|_| AdapterError::OutputLimit)?;
+        EffectStore::open_for_mutation(&self.resources)?.register_artifact(
+            artifact_id,
+            certificate_id,
+            certificate_version,
+            operation_id,
+            &digest,
+            size,
+            artifact_expires_at_unix_seconds,
+        )?;
         Ok(CertificateArtifactResult {
             certificate_id: certificate_id.to_vec(),
             artifact_id: artifact_id.to_vec(),
-            artifact_sha256: Sha256::digest(&data).to_vec(),
-            artifact_size: u64::try_from(data.len()).map_err(|_| AdapterError::OutputLimit)?,
+            artifact_sha256: digest,
+            artifact_size: size,
         })
+    }
+
+    /// Reads one fixed-size artifact chunk only while the exact signed grant
+    /// owns the durable root-side lease.
+    ///
+    /// # Errors
+    ///
+    /// Returns a validation, authorization, resource, or I/O error when the
+    /// lease cannot be acquired or the stored artifact cannot be read safely.
+    pub async fn artifact_read(
+        &self,
+        identity: ArtifactLeaseIdentity<'_>,
+        offset: u64,
+    ) -> Result<ArtifactData, AdapterError> {
+        let _guard = self.certificate_artifact_lock.lock().await;
+        let record = EffectStore::open_for_mutation(&self.resources)?.lease_artifact(identity)?;
+        if offset != record.active_offset || offset > record.content_size {
+            return Err(AdapterError::InvalidRequest);
+        }
+        let artifact = Uuid::from_bytes(record.artifact_id);
+        let path = self
+            .resources
+            .certificate_key_dir
+            .join("artifacts")
+            .join(format!("{artifact}.p12"));
+        let metadata = tokio::fs::symlink_metadata(&path)
+            .await
+            .map_err(AdapterError::Io)?;
+        if !metadata.is_file()
+            || metadata.file_type().is_symlink()
+            || metadata.permissions().mode() & 0o077 != 0
+            || metadata.len() != record.content_size
+        {
+            return Err(AdapterError::InvalidResource);
+        }
+        let data = tokio::fs::read(&path).await.map_err(AdapterError::Io)?;
+        if data.len() > MAX_ARTIFACT_BYTES
+            || Sha256::digest(&data).as_slice() != record.content_sha256
+        {
+            return Err(AdapterError::InvalidResource);
+        }
+        let start = usize::try_from(offset).map_err(|_| AdapterError::InvalidRequest)?;
+        let end = start.saturating_add(ARTIFACT_CHUNK_BYTES).min(data.len());
+        EffectStore::open_for_mutation(&self.resources)?.advance_artifact(
+            identity,
+            offset,
+            u64::try_from(end).map_err(|_| AdapterError::OutputLimit)?,
+        )?;
+        Ok(ArtifactData {
+            artifact_id: record.artifact_id.to_vec(),
+            grant_id: identity.grant_id.to_vec(),
+            offset,
+            data: data[start..end].to_vec(),
+            eof: end == data.len(),
+            sha256: record.content_sha256.to_vec(),
+        })
+    }
+
+    /// Commits one artifact consumption and removes the root-owned bytes.
+    ///
+    /// # Errors
+    ///
+    /// Returns a validation, authorization, resource, or I/O error when the
+    /// exact lease cannot be consumed or the artifact cannot be removed.
+    pub async fn artifact_consume(
+        &self,
+        identity: ArtifactLeaseIdentity<'_>,
+        sha256: &[u8],
+        size: u64,
+    ) -> Result<MutationResult, AdapterError> {
+        let _guard = self.certificate_artifact_lock.lock().await;
+        EffectStore::open_for_mutation(&self.resources)?
+            .consume_artifact(identity, sha256, size)?;
+        let artifact =
+            Uuid::from_slice(identity.artifact_id).map_err(|_| AdapterError::InvalidRequest)?;
+        let path = self
+            .resources
+            .certificate_key_dir
+            .join("artifacts")
+            .join(format!("{artifact}.p12"));
+        match tokio::fs::symlink_metadata(&path).await {
+            Ok(metadata) if metadata.is_file() && !metadata.file_type().is_symlink() => {
+                tokio::fs::remove_file(&path)
+                    .await
+                    .map_err(AdapterError::Io)?;
+            }
+            Ok(_) => return Err(AdapterError::InvalidResource),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(AdapterError::Io(error)),
+        }
+        if let Some(parent) = path.parent() {
+            sync_directory(parent).await?;
+        }
+        Ok(MutationResult { applied: true })
+    }
+
+    /// Confirms an exact already-consumed record without reading, deleting, or
+    /// changing either the root ledger or artifact bytes.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the signed identity or evidence does not exactly
+    /// match the authenticated root ledger record.
+    pub async fn artifact_confirm_consumed(
+        &self,
+        identity: ArtifactLeaseIdentity<'_>,
+        sha256: &[u8],
+        size: u64,
+    ) -> Result<MutationResult, AdapterError> {
+        let _guard = self.certificate_artifact_lock.lock().await;
+        let consumed = EffectStore::open_existing(&self.resources)?
+            .confirm_artifact_consumed(identity, sha256, size)?;
+        Ok(MutationResult { applied: consumed })
     }
 }

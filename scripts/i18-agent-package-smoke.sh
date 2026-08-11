@@ -113,13 +113,13 @@ assert_production_agent_exec_start() {
   fi
 }
 
-expected_production_agent_exec_start="/usr/libexec/ocservia/ocservia-agent --controller \$CONTROLLER_ENDPOINT_ID --node-id \$NODE_ID --controller-command-key-file \$CONTROLLER_COMMAND_VERIFICATION_KEY_FILE --relay-mode custom --relay-url \$RELAY_URL_A --relay-url \$RELAY_URL_B --relay-token-file /etc/ocservia-agent/relay-access-token"
+expected_production_agent_exec_start="/usr/libexec/ocservia/ocservia-agent --controller \$CONTROLLER_ENDPOINT_ID --node-id \$NODE_ID --controller-command-key-file \$CONTROLLER_COMMAND_VERIFICATION_KEY_FILE --user-password-seal-key-id \$USER_PASSWORD_SEAL_KEY_ID --user-password-seal-public-key-sha256 \$USER_PASSWORD_SEAL_PUBLIC_KEY_SHA256 --p12-password-seal-key-id \$P12_PASSWORD_SEAL_KEY_ID --p12-password-seal-public-key-sha256 \$P12_PASSWORD_SEAL_PUBLIC_KEY_SHA256 --relay-mode custom --relay-url \$RELAY_URL_A --relay-url \$RELAY_URL_B --relay-token-file /etc/ocservia-agent/relay-access-token"
 assert_production_agent_exec_start
 assert_privd_command_authority() {
   local unit="${rootfs}/usr/lib/systemd/system/ocservia-privd.service"
   grep -Fxq 'EnvironmentFile=/etc/ocservia-agent/agent.env' "${unit}" \
     || { echo "privd does not load the pinned node/key environment" >&2; exit 1; }
-  grep -Fxq "ExecStart=/usr/libexec/ocservia/ocservia-privd --agent-uid \$AGENT_UID --node-id \$NODE_ID --controller-command-key-file \$CONTROLLER_COMMAND_VERIFICATION_KEY_FILE" "${unit}" \
+  grep -Fxq "ExecStart=/usr/libexec/ocservia/ocservia-privd --agent-uid \$AGENT_UID --node-id \$NODE_ID --controller-command-key-file \$CONTROLLER_COMMAND_VERIFICATION_KEY_FILE --user-password-seal-key-file \$USER_PASSWORD_SEAL_PRIVATE_KEY_FILE --user-password-seal-key-id \$USER_PASSWORD_SEAL_KEY_ID --user-password-seal-public-key-sha256 \$USER_PASSWORD_SEAL_PUBLIC_KEY_SHA256 --p12-password-seal-key-file \$P12_PASSWORD_SEAL_PRIVATE_KEY_FILE --p12-password-seal-key-id \$P12_PASSWORD_SEAL_KEY_ID --p12-password-seal-public-key-sha256 \$P12_PASSWORD_SEAL_PUBLIC_KEY_SHA256" "${unit}" \
     || { echo "privd does not independently pin command authority" >&2; exit 1; }
 }
 assert_privd_command_authority
@@ -127,23 +127,31 @@ echo "agent package install passed"
 sudo install -o 61000 -g 61000 -m 0600 /dev/null "${rootfs}/var/lib/ocservia-agent/identity/controller.key"
 sudo install -o 61000 -g 61000 -m 0600 /dev/null "${rootfs}/var/lib/ocservia-agent/agent.db"
 
-cat >"${work}/legacy-agent.env" <<'EOF'
-CONTROLLER_ENDPOINT_ID=replace-with-approved-controller-endpoint-id
+cat >"${work}/legacy-agent.env" <<EOF
+CONTROLLER_ENDPOINT_ID=${controller_endpoint}
 NODE_ID=00000000-0000-7000-8000-000000000000
 EOF
 sudo install -o root -g 61000 -m 0640 "${work}/legacy-agent.env" \
   "${rootfs}/etc/ocservia-agent/agent.env"
-sed 's/ --controller-command-key-file [^ ]*//' \
+sed -e 's/ --controller-command-key-file [^ ]*//' \
+  -e 's/ --user-password-seal-key-id [^ ]*//' \
+  -e 's/ --user-password-seal-public-key-sha256 [^ ]*//' \
+  -e 's/ --p12-password-seal-key-id [^ ]*//' \
+  -e 's/ --p12-password-seal-public-key-sha256 [^ ]*//' \
   "${rootfs}/usr/lib/systemd/system/ocservia-agent.service" >"${work}/legacy-agent.service"
 sudo install -o root -g root -m 0644 "${work}/legacy-agent.service" \
   "${rootfs}/usr/lib/systemd/system/ocservia-agent.service"
-sed 's/ --controller-command-key-file [^ ]*//' \
+sed -e 's/ --controller-command-key-file [^ ]*//' \
+  -e 's/ --user-password-seal-key-id [^ ]*//' \
+  -e 's/ --user-password-seal-public-key-sha256 [^ ]*//' \
+  -e 's/ --p12-password-seal-key-id [^ ]*//' \
+  -e 's/ --p12-password-seal-public-key-sha256 [^ ]*//' \
   "${rootfs}/usr/lib/systemd/system/ocservia-agent.service.d/10-production-relays.conf" \
   >"${work}/legacy-agent-relays.conf"
 sudo install -o root -g root -m 0644 "${work}/legacy-agent-relays.conf" \
   "${rootfs}/usr/lib/systemd/system/ocservia-agent.service.d/10-production-relays.conf"
 sed -e '/^EnvironmentFile=\/etc\/ocservia-agent\/agent.env$/d' \
-  -e 's/ --node-id [^ ]* --controller-command-key-file [^ ]*//' \
+  -e 's/ --node-id .*//' \
   "${rootfs}/usr/lib/systemd/system/ocservia-privd.service" >"${work}/legacy-privd.service"
 sudo install -o root -g root -m 0644 "${work}/legacy-privd.service" \
   "${rootfs}/usr/lib/systemd/system/ocservia-privd.service"
@@ -293,6 +301,13 @@ test "${before_agent_owned_key_rejection}" = "$({
 })" || { echo "rejected Agent-owned key upgrade modified installed state" >&2; exit 1; }
 sudo install -o root -g 61000 -m 0640 "${work}/controller-command.pub.pem" \
   "${rootfs}/etc/ocservia-agent/controller-command-verification-key.pem"
+if capture_upgrade "${ARTIFACT_DIR}/legacy-upgrade-missing-password-sealing-keys.log"; then
+  echo "legacy Agent upgrade proceeded without purpose-separated password sealing keys" >&2
+  exit 1
+fi
+grep -Fq 'blocked before modification' "${ARTIFACT_DIR}/legacy-upgrade-missing-password-sealing-keys.log"
+grep -Fq 'password sealing key' "${ARTIFACT_DIR}/legacy-upgrade-missing-password-sealing-keys.log"
+assert_rejected_upgrade_untouched "upgrade without password sealing keys"
 sudo install -d -o root -g 61000 -m 0770 "${rootfs}/etc/ocservia-agent/unsafe"
 sudo install -o root -g 61000 -m 0640 "${work}/controller-command.pub.pem" \
   "${rootfs}/etc/ocservia-agent/unsafe/controller-command-verification-key.pem"
@@ -323,11 +338,62 @@ sudo install -o root -g 61000 -m 0640 "${work}/legacy-agent.env" \
   "${rootfs}/etc/ocservia-agent/agent.env"
 echo "legacy Agent upgrade fail-closed preflight passed"
 
-test "$(sudo stat -c '%u:%g:%a' -- "${rootfs}/etc/ocservia-agent/controller-command-verification-key.pem")" = "0:61000:640" \
-  || { echo "trusted shared command key metadata changed before upgrade" >&2; exit 1; }
+openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 \
+  -out "${work}/user-password-seal-private.pem" >/dev/null 2>&1
+openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 \
+  -out "${work}/p12-password-seal-private.pem" >/dev/null 2>&1
+user_seal_hash="$(openssl rsa -in "${work}/user-password-seal-private.pem" -pubout -outform DER 2>/dev/null | sha256sum | awk '{print $1}')"
+p12_seal_hash="$(openssl rsa -in "${work}/p12-password-seal-private.pem" -pubout -outform DER 2>/dev/null | sha256sum | awk '{print $1}')"
+cat >>"${work}/legacy-agent.env" <<EOF
+USER_PASSWORD_SEAL_KEY_ID=user-password-v1
+USER_PASSWORD_SEAL_PUBLIC_KEY_SHA256=${user_seal_hash}
+P12_PASSWORD_SEAL_KEY_ID=p12-password-v1
+P12_PASSWORD_SEAL_PUBLIC_KEY_SHA256=${p12_seal_hash}
+EOF
+sudo install -o root -g 61000 -m 0640 "${work}/legacy-agent.env" \
+  "${rootfs}/etc/ocservia-agent/agent.env"
+sudo install -o root -g root -m 0600 "${work}/user-password-seal-private.pem" \
+  "${rootfs}/etc/ocservia-agent/user-password-seal-private.pem"
+sudo install -o root -g root -m 0600 "${work}/p12-password-seal-private.pem" \
+  "${rootfs}/etc/ocservia-agent/p12-password-seal-private.pem"
 
-sudo env DESTDIR="${rootfs}" AGENT_UID=61000 AGENT_GID=61000 INSTALL_PRODUCTION_RELAYS=true \
-  "${package_root}/scripts/upgrade-agent.sh"
+	test "$(sudo stat -c '%u:%g:%a' -- "${rootfs}/etc/ocservia-agent/controller-command-verification-key.pem")" = "0:61000:640" \
+	  || { echo "trusted shared command key metadata changed before upgrade" >&2; exit 1; }
+	if capture_upgrade "${ARTIFACT_DIR}/legacy-upgrade-missing-sealing-enrollment.log"; then
+	  echo "legacy Agent upgrade proceeded without Controller-side sealing-key enrollment" >&2
+	  exit 1
+	fi
+	grep -Fq 'blocked before modification' "${ARTIFACT_DIR}/legacy-upgrade-missing-sealing-enrollment.log"
+	grep -Fq 'one-time sealing-key enrollment' "${ARTIFACT_DIR}/legacy-upgrade-missing-sealing-enrollment.log"
+	assert_rejected_upgrade_untouched "upgrade without sealing-key enrollment"
+
+	legacy_artifact_id="018f0c2e-7b1a-7c3d-8e9f-0123456789ab"
+	legacy_artifact_dir="${rootfs}/var/lib/ocservia-privd/certificates/artifacts"
+	sudo install -d -o root -g 61000 -m 0710 "${rootfs}/var/lib/ocservia-privd"
+	sudo install -d -o root -g 61000 -m 0710 "${rootfs}/var/lib/ocservia-privd/certificates"
+	sudo install -d -o root -g 61000 -m 0710 "${legacy_artifact_dir}"
+	printf 'legacy-p12' >"${work}/legacy-artifact.p12"
+	sudo install -o root -g 61000 -m 0640 "${work}/legacy-artifact.p12" \
+	  "${legacy_artifact_dir}/${legacy_artifact_id}.p12"
+	sudo sh -c 'cd "$1" && exec setpriv --reuid=61000 --regid=61000 --clear-groups test -r "./$2.p12"' \
+	  sh "${legacy_artifact_dir}" "${legacy_artifact_id}" \
+	  || { echo "legacy fixture was not readable by the Agent UID" >&2; exit 1; }
+
+	sudo env DESTDIR="${rootfs}" AGENT_UID=61000 AGENT_GID=61000 INSTALL_PRODUCTION_RELAYS=true \
+	  ENROLLMENT_MIGRATION_CONFIRMED=true \
+	  "${package_root}/scripts/upgrade-agent.sh"
+	test "$(sudo stat -c '%u:%a' -- "${legacy_artifact_dir}")" = "0:700"
+	sudo test ! -e "${legacy_artifact_dir}/${legacy_artifact_id}.p12"
+	if sudo sh -c 'cd "$1" && exec setpriv --reuid=61000 --regid=61000 --clear-groups test -r "./$2.p12"' \
+	  sh "${legacy_artifact_dir}" "${legacy_artifact_id}"; then
+	  echo "Agent UID retained access to a legacy P12 after upgrade" >&2
+	  exit 1
+	fi
+	test "$(sudo stat -c '%u:%g:%a' -- "${rootfs}/etc/ocservia-agent/sealing-keys-bound")" = "0:0:600"
+	sudo grep -Fxq "node_id=00000000-0000-7000-8000-000000000000" \
+	  "${rootfs}/etc/ocservia-agent/sealing-keys-bound"
+	sudo grep -Fxq "user_sha256=${user_seal_hash}" "${rootfs}/etc/ocservia-agent/sealing-keys-bound"
+	sudo grep -Fxq "p12_sha256=${p12_seal_hash}" "${rootfs}/etc/ocservia-agent/sealing-keys-bound"
 for backup in \
   ocservia-agent.previous \
   ocservia-privd.previous \

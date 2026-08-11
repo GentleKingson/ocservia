@@ -1573,35 +1573,37 @@ components:
     UserCreateRequest:
       type: object
       additionalProperties: false
-      required: [name, sealed_password, secret_key_id, reason]
+      required: [name, sealed_password, reason]
       properties:
         name: { $ref: "#/components/schemas/OcservName" }
-        sealed_password:
-          type: string
-          format: byte
-          minLength: 44
-          maxLength: 5464
-          writeOnly: true
-          description: RSA-OAEP-SHA256 ciphertext sealed to the selected node key; plaintext is never accepted.
-        secret_key_id: { type: string, minLength: 1, maxLength: 128, pattern: "^[A-Za-z0-9_.-]+$" }
+        sealed_password: { $ref: "#/components/schemas/UserPasswordSealedSecretV1" }
         reason: { type: string, minLength: 1, maxLength: 512 }
         expected_version: { type: integer, format: int64, minimum: 0 }
         ttl_seconds: { type: integer, format: int64, minimum: 1, maximum: 86400, default: 86400 }
     PasswordRotateRequest:
       type: object
       additionalProperties: false
-      required: [sealed_password, secret_key_id, reason]
+      required: [sealed_password, reason]
       properties:
-        sealed_password:
+        sealed_password: { $ref: "#/components/schemas/UserPasswordSealedSecretV1" }
+        reason: { type: string, minLength: 1, maxLength: 512 }
+        expected_version: { type: integer, format: int64, minimum: 1 }
+        ttl_seconds: { type: integer, format: int64, minimum: 1, maximum: 86400, default: 86400 }
+    UserPasswordSealedSecretV1:
+      type: object
+      additionalProperties: false
+      required: [version, purpose, key_id, ciphertext]
+      properties:
+        version: { type: integer, format: int32, enum: [1] }
+        purpose: { type: string, enum: [user_password] }
+        key_id: { type: string, minLength: 1, maxLength: 128, pattern: "^[A-Za-z0-9_.-]+$" }
+        ciphertext:
           type: string
           format: byte
           minLength: 44
           maxLength: 5464
           writeOnly: true
-        secret_key_id: { type: string, minLength: 1, maxLength: 128, pattern: "^[A-Za-z0-9_.-]+$" }
-        reason: { type: string, minLength: 1, maxLength: 512 }
-        expected_version: { type: integer, format: int64, minimum: 1 }
-        ttl_seconds: { type: integer, format: int64, minimum: 1, maximum: 86400, default: 86400 }
+          description: Purpose-specific RSA-OAEP-SHA256 ciphertext; plaintext and cross-purpose ciphertext are never accepted.
     GroupApplyRequest:
       type: object
       additionalProperties: false

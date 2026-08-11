@@ -19,6 +19,7 @@ message EnrollRequest {
   uint32 enrollment_protocol_major = 12;
   uint32 enrollment_protocol_minor = 13;
   EnrollmentProofV1 proof = 14;
+  repeated SealingKeyDescriptorV1 sealing_keys = 15;
 }
 
 // EnrollmentProofV1 is signed by the Agent's long-lived Iroh Endpoint
@@ -62,6 +63,36 @@ message SessionHandshake {
   uint32 max_message_size = 13;
   google.protobuf.Timestamp time = 14;
   bytes nonce = 15;
+  repeated SealingKeyDescriptorV1 sealing_keys = 16;
+}
+
+enum SealedSecretVersion {
+  SEALED_SECRET_VERSION_UNSPECIFIED = 0;
+  SEALED_SECRET_VERSION_V1 = 1;
+}
+
+enum SealedSecretPurpose {
+  SEALED_SECRET_PURPOSE_UNSPECIFIED = 0;
+  SEALED_SECRET_PURPOSE_USER_PASSWORD = 1;
+  SEALED_SECRET_PURPOSE_CERTIFICATE_P12_PASSWORD = 2;
+}
+
+// SealingKeyDescriptorV1 identifies one purpose-specific RSA-OAEP-SHA256
+// public key. Enrollment proof binds the complete advertised set.
+message SealingKeyDescriptorV1 {
+  SealedSecretVersion version = 1;
+  SealedSecretPurpose purpose = 2;
+  string key_id = 3;
+  bytes public_key_sha256 = 4;
+}
+
+// SealedSecretV1 is purpose-bound metadata plus ciphertext. Purpose isolation
+// is additionally enforced by distinct private keys at privd.
+message SealedSecretV1 {
+  SealedSecretVersion version = 1;
+  SealedSecretPurpose purpose = 2;
+  string key_id = 3;
+  bytes ciphertext = 4;
 }
 
 message SessionHandshakeResponse {
@@ -306,9 +337,11 @@ message IpBanRemove {
 
 message UserCreate {
   string username = 1;
+  // Deprecated wire fields are rejected by protocol 1.1 execution.
   bytes sealed_password = 2;
   string secret_key_id = 3;
   uint64 desired_revision = 4;
+  SealedSecretV1 sealed_password_v1 = 5;
 }
 
 message UserDisable {
@@ -323,9 +356,11 @@ message UserEnable {
 
 message UserPasswordRotate {
   string username = 1;
+  // Deprecated wire fields are rejected by protocol 1.1 execution.
   bytes sealed_password = 2;
   string secret_key_id = 3;
   uint64 desired_revision = 4;
+  SealedSecretV1 sealed_password_v1 = 5;
 }
 
 message GroupApply {
@@ -383,9 +418,13 @@ message CertificateCsrResult {
 message CertificateP12 {
   bytes certificate_id = 1;
   bytes certificate_chain_pem = 2;
+  // Deprecated wire fields are rejected by protocol 1.1 execution.
   bytes sealed_password = 3;
   string secret_key_id = 4;
   bytes artifact_id = 5;
+  SealedSecretV1 sealed_password_v1 = 6;
+  uint64 certificate_version = 7;
+  google.protobuf.Timestamp artifact_expires_at = 8;
 }
 
 message CertificateArtifactResult {
@@ -398,6 +437,7 @@ message CertificateArtifactResult {
 message CertificateRevoke {
   bytes certificate_id = 1;
   string reason = 2;
+  uint64 certificate_version = 3;
 }
 
 message CertificateRevokeResult {
@@ -409,6 +449,48 @@ message ArtifactFetchRequest {
   bytes artifact_id = 1;
   string purpose = 2;
   uint64 max_bytes = 3;
+  ArtifactGrantV1 grant = 4;
+}
+
+// ArtifactConsumeRequest is sent only after the Control Plane has received and
+// verified the complete artifact. The same signed grant authorizes deletion.
+message ArtifactConsumeRequest {
+  ArtifactGrantV1 grant = 1;
+  bytes sha256 = 2;
+  uint64 size = 3;
+  // Confirmation is read-only and may use an expired grant only to prove that
+  // the exact root-owned ledger record was already consumed.
+  bool confirm_only = 4;
+}
+
+message ArtifactConsumeResponse {
+  bytes artifact_id = 1;
+  bytes grant_id = 2;
+  bool consumed = 3;
+}
+
+enum ArtifactGrantVersion {
+  ARTIFACT_GRANT_VERSION_UNSPECIFIED = 0;
+  ARTIFACT_GRANT_VERSION_V1 = 1;
+}
+
+// ArtifactGrantV1 is signed by the Controller over an independent canonical
+// representation. transportd only relays this proof.
+message ArtifactGrantV1 {
+  ArtifactGrantVersion version = 1;
+  string key_id = 2;
+  bytes node_id = 3;
+  bytes artifact_id = 4;
+  bytes certificate_id = 5;
+  uint64 certificate_version = 6;
+  bytes operation_id = 7;
+  string authorized_subject = 8;
+  string purpose = 9;
+  uint64 max_bytes = 10;
+  google.protobuf.Timestamp issued_at = 11;
+  google.protobuf.Timestamp expires_at = 12;
+  bytes grant_id = 13;
+  bytes signature = 14;
 }
 
 message ArtifactChunk {

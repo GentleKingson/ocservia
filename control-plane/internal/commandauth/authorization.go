@@ -35,6 +35,7 @@ const (
 
 var authorizationV1Domain = []byte("ocservia/controller-command/v1\x00")
 var sessionGrantV1Domain = []byte("ocservia/controller-session-grant/v1\x00")
+var artifactGrantV1Domain = []byte("ocservia/artifact-grant/v1\x00")
 
 // ClaimsV1 is the independent, non-Protobuf CommandAuthorizationV1 signing
 // input. CanonicalV1 defines its exact cross-language byte representation.
@@ -83,6 +84,26 @@ type SessionGrantClaimsV1 struct {
 	IssuedAtNanos          uint32
 	ExpiresAtSeconds       int64
 	ExpiresAtNanos         uint32
+}
+
+// ArtifactGrantClaimsV1 is the independent canonical authorization for one
+// bounded P12 fetch. It is never derived from Protobuf serialization bytes.
+type ArtifactGrantClaimsV1 struct {
+	Version            uint32
+	KeyID              string
+	NodeID             [16]byte
+	ArtifactID         [16]byte
+	CertificateID      [16]byte
+	CertificateVersion uint64
+	OperationID        [16]byte
+	AuthorizedSubject  string
+	Purpose            string
+	MaxBytes           uint64
+	IssuedAtSeconds    int64
+	IssuedAtNanos      uint32
+	ExpiresAtSeconds   int64
+	ExpiresAtNanos     uint32
+	GrantID            [16]byte
 }
 
 // NewSignerFromSeed constructs a signer from an Ed25519 seed.
@@ -188,6 +209,70 @@ func (s *Signer) IssueSessionGrant(nodeID [16]byte, endpointID [32]byte, authori
 		IssuedAt:               timestamppb.New(issuedAt), ExpiresAt: timestamppb.New(expiresAt),
 		Signature: ed25519.Sign(s.privateKey, canonical),
 	}, nil
+}
+
+// IssueArtifactGrant authorizes exactly one bounded P12 artifact lease.
+func (s *Signer) IssueArtifactGrant(nodeID, artifactID, certificateID [16]byte, certificateVersion uint64, operationID [16]byte, authorizedSubject string, maxBytes uint64, grantID [16]byte, issuedAt, expiresAt time.Time) (*agentv1.ArtifactGrantV1, error) {
+	if s == nil || len(s.privateKey) != ed25519.PrivateKeySize {
+		return nil, errors.New("controller command signing key is unavailable")
+	}
+	claims := ArtifactGrantClaimsV1{
+		Version: uint32(agentv1.ArtifactGrantVersion_ARTIFACT_GRANT_VERSION_V1), KeyID: s.keyID,
+		NodeID: nodeID, ArtifactID: artifactID, CertificateID: certificateID,
+		CertificateVersion: certificateVersion, OperationID: operationID,
+		AuthorizedSubject: authorizedSubject, Purpose: "certificate_p12", MaxBytes: maxBytes,
+		IssuedAtSeconds: issuedAt.Unix(), IssuedAtNanos: uint32(issuedAt.Nanosecond()),
+		ExpiresAtSeconds: expiresAt.Unix(), ExpiresAtNanos: uint32(expiresAt.Nanosecond()), GrantID: grantID,
+	}
+	canonical, err := CanonicalArtifactGrantV1(claims)
+	if err != nil {
+		return nil, err
+	}
+	return &agentv1.ArtifactGrantV1{
+		Version: agentv1.ArtifactGrantVersion_ARTIFACT_GRANT_VERSION_V1, KeyId: s.keyID,
+		NodeId: nodeID[:], ArtifactId: artifactID[:], CertificateId: certificateID[:],
+		CertificateVersion: certificateVersion, OperationId: operationID[:], AuthorizedSubject: authorizedSubject,
+		Purpose: "certificate_p12", MaxBytes: maxBytes, IssuedAt: timestamppb.New(issuedAt),
+		ExpiresAt: timestamppb.New(expiresAt), GrantId: grantID[:], Signature: ed25519.Sign(s.privateKey, canonical),
+	}, nil
+}
+
+// CanonicalArtifactGrantV1 returns the exact domain-separated artifact grant
+// signing bytes using fixed-width big-endian integers and length-prefixed UTF-8.
+func CanonicalArtifactGrantV1(claims ArtifactGrantClaimsV1) ([]byte, error) {
+	if claims.Version != 1 || claims.KeyID == "" || len(claims.KeyID) > 128 ||
+		claims.CertificateVersion == 0 || claims.AuthorizedSubject == "" || len(claims.AuthorizedSubject) > 256 ||
+		claims.Purpose != "certificate_p12" || claims.MaxBytes == 0 || claims.MaxBytes > 64<<20 ||
+		claims.IssuedAtNanos >= 1_000_000_000 || claims.ExpiresAtNanos >= 1_000_000_000 ||
+		claims.ExpiresAtSeconds < claims.IssuedAtSeconds ||
+		(claims.ExpiresAtSeconds == claims.IssuedAtSeconds && claims.ExpiresAtNanos <= claims.IssuedAtNanos) {
+		return nil, errors.New("artifact grant v1 claims are invalid")
+	}
+	var encoded bytes.Buffer
+	encoded.Grow(512)
+	encoded.Write(artifactGrantV1Domain)
+	writeUint32(&encoded, claims.Version)
+	if err := writeString(&encoded, claims.KeyID); err != nil {
+		return nil, err
+	}
+	encoded.Write(claims.NodeID[:])
+	encoded.Write(claims.ArtifactID[:])
+	encoded.Write(claims.CertificateID[:])
+	writeUint64(&encoded, claims.CertificateVersion)
+	encoded.Write(claims.OperationID[:])
+	if err := writeString(&encoded, claims.AuthorizedSubject); err != nil {
+		return nil, err
+	}
+	if err := writeString(&encoded, claims.Purpose); err != nil {
+		return nil, err
+	}
+	writeUint64(&encoded, claims.MaxBytes)
+	writeInt64(&encoded, claims.IssuedAtSeconds)
+	writeUint32(&encoded, claims.IssuedAtNanos)
+	writeInt64(&encoded, claims.ExpiresAtSeconds)
+	writeUint32(&encoded, claims.ExpiresAtNanos)
+	encoded.Write(claims.GrantID[:])
+	return encoded.Bytes(), nil
 }
 
 // CanonicalSessionGrantV1 returns the exact domain-separated session grant

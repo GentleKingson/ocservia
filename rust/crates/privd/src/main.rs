@@ -1,11 +1,14 @@
 use std::env;
 use std::io;
-use std::path::PathBuf;
+use std::os::unix::fs::{MetadataExt, PermissionsExt};
+use std::path::{Component, Path, PathBuf};
+use std::process::Command;
 use std::time::Duration;
 
 use ocservia_command_authorization::{ControllerCommandKeyring, load_verification_key};
 use ocservia_ocserv_adapter::{Adapter, FixedResources, Limits};
 use ocservia_privd::{ServerConfig, bind_socket, remove_socket, serve};
+use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 #[tokio::main]
@@ -47,6 +50,7 @@ fn parse_args() -> Result<(ServerConfig, FixedResources, Limits), io::Error> {
     parse_args_from(env::args().skip(1))
 }
 
+#[allow(clippy::too_many_lines)]
 fn parse_args_from(
     mut args: impl Iterator<Item = String>,
 ) -> Result<(ServerConfig, FixedResources, Limits), io::Error> {
@@ -54,6 +58,12 @@ fn parse_args_from(
     let mut agent_uid = None;
     let mut node_id = None;
     let mut command_key_files = Vec::new();
+    let mut user_seal_key_file = None;
+    let mut user_seal_key_id = None;
+    let mut user_seal_public_key_sha256 = None;
+    let mut p12_seal_key_file = None;
+    let mut p12_seal_key_id = None;
+    let mut p12_seal_public_key_sha256 = None;
     while let Some(argument) = args.next() {
         match argument.as_str() {
             "--socket" => socket = PathBuf::from(required(&mut args, "--socket")?),
@@ -83,6 +93,36 @@ fn parse_args_from(
                     "--controller-command-key-file",
                 )?));
             }
+            "--user-password-seal-key-file" => {
+                user_seal_key_file = Some(PathBuf::from(required(
+                    &mut args,
+                    "--user-password-seal-key-file",
+                )?));
+            }
+            "--user-password-seal-key-id" => {
+                user_seal_key_id = Some(required(&mut args, "--user-password-seal-key-id")?);
+            }
+            "--user-password-seal-public-key-sha256" => {
+                user_seal_public_key_sha256 = Some(required(
+                    &mut args,
+                    "--user-password-seal-public-key-sha256",
+                )?);
+            }
+            "--p12-password-seal-key-file" => {
+                p12_seal_key_file = Some(PathBuf::from(required(
+                    &mut args,
+                    "--p12-password-seal-key-file",
+                )?));
+            }
+            "--p12-password-seal-key-id" => {
+                p12_seal_key_id = Some(required(&mut args, "--p12-password-seal-key-id")?);
+            }
+            "--p12-password-seal-public-key-sha256" => {
+                p12_seal_public_key_sha256 = Some(required(
+                    &mut args,
+                    "--p12-password-seal-public-key-sha256",
+                )?);
+            }
             _ => return Err(invalid("unknown privd argument")),
         }
     }
@@ -97,6 +137,31 @@ fn parse_args_from(
         .collect::<Result<Vec<_>, _>>()?;
     let command_keys = ControllerCommandKeyring::new(keys)
         .map_err(|_| invalid("Controller command verification keyring invalid"))?;
+    let user_seal_key_file =
+        user_seal_key_file.ok_or_else(|| invalid("--user-password-seal-key-file is required"))?;
+    let p12_seal_key_file =
+        p12_seal_key_file.ok_or_else(|| invalid("--p12-password-seal-key-file is required"))?;
+    let user_seal_public_key_sha256 = user_seal_public_key_sha256
+        .ok_or_else(|| invalid("--user-password-seal-public-key-sha256 is required"))?;
+    let p12_seal_public_key_sha256 = p12_seal_public_key_sha256
+        .ok_or_else(|| invalid("--p12-password-seal-public-key-sha256 is required"))?;
+    let user_public_key =
+        validate_private_key_file(&user_seal_key_file, &user_seal_public_key_sha256)?;
+    let p12_public_key =
+        validate_private_key_file(&p12_seal_key_file, &p12_seal_public_key_sha256)?;
+    if user_public_key == p12_public_key {
+        return Err(invalid(
+            "password sealing keys must use distinct RSA key pairs",
+        ));
+    }
+    let resources = FixedResources::default()
+        .with_password_sealing_keys(
+            user_seal_key_file,
+            user_seal_key_id.ok_or_else(|| invalid("--user-password-seal-key-id is required"))?,
+            p12_seal_key_file,
+            p12_seal_key_id.ok_or_else(|| invalid("--p12-password-seal-key-id is required"))?,
+        )
+        .map_err(|_| invalid("password sealing key configuration invalid"))?;
     Ok((
         ServerConfig {
             socket,
@@ -104,9 +169,88 @@ fn parse_args_from(
             node_id: node_id.ok_or_else(|| invalid("--node-id is required"))?,
             command_keys,
         },
-        FixedResources::default(),
+        resources,
         Limits::default(),
     ))
+}
+
+fn validate_private_key_file(
+    path: &Path,
+    expected_public_key_sha256: &str,
+) -> io::Result<[u8; 32]> {
+    if !path.is_absolute()
+        || path
+            .components()
+            .any(|component| matches!(component, Component::CurDir | Component::ParentDir))
+    {
+        return Err(invalid("password sealing key path invalid"));
+    }
+    let expected_owner = rustix::process::geteuid().as_raw();
+    let metadata = std::fs::symlink_metadata(path)?;
+    if !metadata.is_file()
+        || metadata.file_type().is_symlink()
+        || metadata.uid() != expected_owner
+        || metadata.nlink() != 1
+        || !matches!(metadata.permissions().mode() & 0o777, 0o400 | 0o600)
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "password sealing key metadata invalid",
+        ));
+    }
+    let mut current = path.parent();
+    while let Some(directory) = current {
+        let metadata = std::fs::symlink_metadata(directory)?;
+        if !metadata.is_dir()
+            || metadata.file_type().is_symlink()
+            || (metadata.uid() != expected_owner && metadata.uid() != 0)
+            || metadata.permissions().mode() & 0o022 != 0
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "password sealing key ancestry invalid",
+            ));
+        }
+        current = directory.parent();
+    }
+    let bytes = std::fs::read(path)?;
+    if bytes.len() < 256
+        || bytes.len() > 32 * 1024
+        || !bytes.starts_with(b"-----BEGIN ")
+        || !bytes
+            .windows(b"PRIVATE KEY-----".len())
+            .any(|value| value == b"PRIVATE KEY-----")
+    {
+        return Err(invalid("password sealing private key invalid"));
+    }
+    let expected = hex::decode(expected_public_key_sha256)
+        .ok()
+        .and_then(|value| <[u8; 32]>::try_from(value).ok())
+        .filter(|_| {
+            expected_public_key_sha256.len() == 64
+                && expected_public_key_sha256
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        })
+        .ok_or_else(|| invalid("password sealing public key fingerprint invalid"))?;
+    let output = Command::new("/usr/bin/openssl")
+        .args(["rsa", "-in"])
+        .arg(path)
+        .args(["-pubout", "-outform", "DER"])
+        .output()?;
+    if !output.status.success() || output.stdout.is_empty() || output.stdout.len() > 32 * 1024 {
+        return Err(invalid(
+            "password sealing private key is not a valid RSA key",
+        ));
+    }
+    let actual: [u8; 32] = Sha256::digest(output.stdout).into();
+    if actual != expected {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "password sealing private key does not match its pinned public fingerprint",
+        ));
+    }
+    Ok(actual)
 }
 
 fn required(args: &mut impl Iterator<Item = String>, name: &str) -> Result<String, io::Error> {
@@ -120,6 +264,11 @@ fn invalid(detail: &str) -> io::Error {
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
+
+    use ed25519_dalek::pkcs8::spki::der::pem::LineEnding;
+    use ed25519_dalek::{SigningKey, pkcs8::EncodePublicKey as _};
+
     use super::*;
 
     #[test]
@@ -137,5 +286,101 @@ mod tests {
         .expect_err("privd must not start without a Controller key");
         assert_eq!(failure.kind(), io::ErrorKind::InvalidInput);
         assert!(failure.to_string().contains("key-file is required"));
+    }
+
+    #[test]
+    fn production_startup_rejects_reused_or_mismatched_sealing_keys() {
+        let directory = std::env::current_dir()
+            .expect("current directory")
+            .join(format!(".privd-sealing-test-{}", Uuid::now_v7()));
+        fs::create_dir(&directory).expect("create secure key directory");
+        fs::set_permissions(&directory, fs::Permissions::from_mode(0o700))
+            .expect("secure key directory mode");
+        let command_key = directory.join("controller.pem");
+        fs::write(
+            &command_key,
+            SigningKey::from_bytes(&[7; 32])
+                .verifying_key()
+                .to_public_key_pem(LineEnding::LF)
+                .expect("encode Controller key"),
+        )
+        .expect("write Controller key");
+        fs::set_permissions(&command_key, fs::Permissions::from_mode(0o600))
+            .expect("Controller key mode");
+        let missing_sealing = parse_args_from(
+            [
+                "--agent-uid".to_owned(),
+                "997".to_owned(),
+                "--node-id".to_owned(),
+                Uuid::now_v7().to_string(),
+                "--controller-command-key-file".to_owned(),
+                command_key.display().to_string(),
+            ]
+            .into_iter(),
+        )
+        .expect_err("privd must not start without both password sealing keys");
+        assert!(
+            missing_sealing
+                .to_string()
+                .contains("user-password-seal-key-file is required")
+        );
+        let user_key = directory.join("user.pem");
+        assert!(
+            Command::new("/usr/bin/openssl")
+                .args([
+                    "genpkey",
+                    "-algorithm",
+                    "RSA",
+                    "-pkeyopt",
+                    "rsa_keygen_bits:2048",
+                    "-out",
+                ])
+                .arg(&user_key)
+                .status()
+                .expect("generate RSA key")
+                .success()
+        );
+        fs::set_permissions(&user_key, fs::Permissions::from_mode(0o600)).expect("RSA key mode");
+        let p12_key = directory.join("p12.pem");
+        fs::copy(&user_key, &p12_key).expect("copy reused RSA key");
+        fs::set_permissions(&p12_key, fs::Permissions::from_mode(0o600))
+            .expect("copied RSA key mode");
+        let public = Command::new("/usr/bin/openssl")
+            .args(["rsa", "-in"])
+            .arg(&user_key)
+            .args(["-pubout", "-outform", "DER"])
+            .output()
+            .expect("derive RSA public key");
+        assert!(public.status.success());
+        let fingerprint = hex::encode(Sha256::digest(public.stdout));
+        let arguments = |p12_fingerprint: &str| {
+            vec![
+                "--agent-uid".to_owned(),
+                "997".to_owned(),
+                "--node-id".to_owned(),
+                Uuid::now_v7().to_string(),
+                "--controller-command-key-file".to_owned(),
+                command_key.display().to_string(),
+                "--user-password-seal-key-file".to_owned(),
+                user_key.display().to_string(),
+                "--user-password-seal-key-id".to_owned(),
+                "user-v1".to_owned(),
+                "--user-password-seal-public-key-sha256".to_owned(),
+                fingerprint.clone(),
+                "--p12-password-seal-key-file".to_owned(),
+                p12_key.display().to_string(),
+                "--p12-password-seal-key-id".to_owned(),
+                "p12-v1".to_owned(),
+                "--p12-password-seal-public-key-sha256".to_owned(),
+                p12_fingerprint.to_owned(),
+            ]
+        };
+        let mismatch = parse_args_from(arguments(&"00".repeat(32)).into_iter())
+            .expect_err("mismatched sealing key fingerprint must fail startup");
+        assert!(mismatch.to_string().contains("does not match"));
+        let reused = parse_args_from(arguments(&fingerprint).into_iter())
+            .expect_err("reused RSA pair must fail startup");
+        assert!(reused.to_string().contains("distinct RSA key pairs"));
+        fs::remove_dir_all(directory).expect("remove key fixtures");
     }
 }

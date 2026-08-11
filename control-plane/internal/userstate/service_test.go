@@ -13,7 +13,7 @@ import (
 const testTraceparent = "00-0123456789abcdef0123456789abcdef-0123456789abcdef-01"
 
 func TestMutationValidationAndPasswordFingerprintRedaction(t *testing.T) {
-	base := MutationRequest{NodeID: uuid.Must(uuid.NewV7()), Kind: UserCreate, Name: "alice", SealedPassword: bytes.Repeat([]byte{0xa5}, 64), SecretKeyID: "node-key-1", IdempotencyKey: "key", ExpectedVersion: 0, TTL: time.Hour, ActorID: "operator", Reason: "ticket", RequestID: "request", Traceparent: testTraceparent}
+	base := MutationRequest{NodeID: uuid.Must(uuid.NewV7()), Kind: UserCreate, Name: "alice", SealedPassword: &SealedSecret{Version: 1, Purpose: "user_password", KeyID: "node-key-1", Ciphertext: bytes.Repeat([]byte{0xa5}, 64)}, IdempotencyKey: "key", ExpectedVersion: 0, TTL: time.Hour, ActorID: "operator", Reason: "ticket", RequestID: "request", Traceparent: testTraceparent}
 	if err := validateMutation(base); err != nil {
 		t.Fatalf("valid create: %v", err)
 	}
@@ -45,10 +45,9 @@ func TestMembersAreCanonicalAndRequestHashBindsCiphertext(t *testing.T) {
 	secret.Kind = UserCreate
 	secret.Name = "alice"
 	secret.Members = nil
-	secret.SecretKeyID = "key"
-	secret.SealedPassword = bytes.Repeat([]byte{1}, 32)
+	secret.SealedPassword = &SealedSecret{Version: 1, Purpose: "user_password", KeyID: "key", Ciphertext: bytes.Repeat([]byte{1}, 32)}
 	changed := secret
-	changed.SealedPassword = bytes.Repeat([]byte{2}, 32)
+	changed.SealedPassword = &SealedSecret{Version: 1, Purpose: "user_password", KeyID: "key", Ciphertext: bytes.Repeat([]byte{2}, 32)}
 	if requestHash(secret) == requestHash(changed) {
 		t.Fatal("idempotency hash did not bind sealed ciphertext")
 	}

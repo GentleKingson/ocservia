@@ -16,17 +16,19 @@ use iroh::protocol::{AcceptError, ProtocolHandler, Router};
 use iroh::{Endpoint, EndpointId, RelayMap, SecretKey, Watcher as _};
 use ocservia_contracts::decode_strict_command_envelope;
 use ocservia_contracts::generated::ocserv::platform::agent::v1::{
-    AgentEvent, AgentEventType, ArtifactChunk, ArtifactFetchRequest, CommandEnvelope,
+    AgentEvent, AgentEventType, ArtifactChunk,
+    ArtifactConsumeRequest as AgentArtifactConsumeRequest,
+    ArtifactConsumeResponse as AgentArtifactConsumeResponse, ArtifactFetchRequest, CommandEnvelope,
     CommandResult, CommandResultState, EnrollRequest, EnrollResponse, HandshakeResult,
     SessionHandshake, SessionHandshakeResponse, TelemetryBatch,
 };
 use ocservia_contracts::generated::ocserv::platform::transport::v1::{
     AuthorizeSessionRequest, CheckEndpointRequest, CloseNodeRequest, CloseNodeResponse,
-    ConnectionPath, FetchArtifactRequest, GetNodeConnectionRequest, HealthRequest, HealthResponse,
-    HealthStatus, NodeConnection, NodeTrustState, SendCommandRequest, SendCommandResponse,
-    TransportEvent, TransportEventType, TrustUpdateDisposition, UpdateNodeTrustRequest,
-    UpdateNodeTrustResponse, WatchEventsRequest, transport_service_server::TransportService,
-    trust_service_client::TrustServiceClient,
+    ConnectionPath, ConsumeArtifactRequest, ConsumeArtifactResponse, FetchArtifactRequest,
+    GetNodeConnectionRequest, HealthRequest, HealthResponse, HealthStatus, NodeConnection,
+    NodeTrustState, SendCommandRequest, SendCommandResponse, TransportEvent, TransportEventType,
+    TrustUpdateDisposition, UpdateNodeTrustRequest, UpdateNodeTrustResponse, WatchEventsRequest,
+    transport_service_server::TransportService, trust_service_client::TrustServiceClient,
 };
 use prost::Message;
 use tokio::sync::{Mutex, OwnedSemaphorePermit, Semaphore, mpsc, watch};
@@ -38,6 +40,9 @@ use uuid::Uuid;
 pub const ENROLL_ALPN: &[u8] = b"ocserv-platform/enroll/1";
 /// ALPN for approved agent sessions.
 pub const AGENT_ALPN: &[u8] = b"ocserv-platform/agent/1";
+
+const ARTIFACT_FETCH_FRAME: u32 = 1 << 31;
+const ARTIFACT_CONSUME_FRAME: u32 = 3 << 30;
 
 /// Temporarily removes a failed home relay so Iroh selects another member of
 /// the configured dedicated set instead of waiting for a periodic net report.
@@ -746,9 +751,17 @@ impl TransportService for IrohTransportService {
         let request = request.into_inner();
         let node_id = validate_uuid(&request.node_id, "node_id")?;
         let artifact_id = validate_uuid(&request.artifact_id, "artifact_id")?;
+        let grant = request
+            .grant
+            .as_ref()
+            .ok_or_else(|| Status::permission_denied("artifact grant is required"))?;
         if request.purpose != "certificate_p12"
             || request.max_bytes == 0
             || request.max_bytes > 64 * 1024 * 1024
+            || grant.node_id != request.node_id
+            || grant.artifact_id != request.artifact_id
+            || grant.purpose != request.purpose
+            || grant.max_bytes != request.max_bytes
         {
             return Err(Status::invalid_argument("artifact request is invalid"));
         }
@@ -765,6 +778,7 @@ impl TransportService for IrohTransportService {
             artifact_id,
             purpose: request.purpose,
             max_bytes: request.max_bytes,
+            grant: request.grant,
         }
         .encode_to_vec();
         let (sender, receiver) = mpsc::channel::<Result<ArtifactChunk, Status>>(8);
@@ -776,7 +790,7 @@ impl TransportService for IrohTransportService {
                     .map_err(|_| Status::unavailable("failed to open artifact stream"))?;
                 let length = u32::try_from(payload.len())
                     .map_err(|_| Status::resource_exhausted("artifact request is too large"))?
-                    | (1 << 31);
+                    | ARTIFACT_FETCH_FRAME;
                 send.write_all(&length.to_be_bytes())
                     .await
                     .map_err(|_| Status::unavailable("failed to write artifact request length"))?;
@@ -829,6 +843,94 @@ impl TransportService for IrohTransportService {
             }
         });
         Ok(Response::new(Box::pin(ReceiverStream::new(receiver))))
+    }
+
+    async fn consume_artifact(
+        &self,
+        request: Request<ConsumeArtifactRequest>,
+    ) -> Result<Response<ConsumeArtifactResponse>, Status> {
+        let request = request.into_inner();
+        let node_id = validate_uuid(&request.node_id, "node_id")?;
+        let grant = request
+            .grant
+            .as_ref()
+            .ok_or_else(|| Status::permission_denied("artifact grant is required"))?;
+        if grant.node_id != request.node_id
+            || grant.artifact_id.len() != 16
+            || grant.grant_id.len() != 16
+            || grant.purpose != "certificate_p12"
+            || request.sha256.len() != 32
+            || request.size == 0
+            || request.size != grant.max_bytes
+        {
+            return Err(Status::invalid_argument(
+                "artifact consumption request is invalid",
+            ));
+        }
+        let expected_artifact_id = grant.artifact_id.clone();
+        let expected_grant_id = grant.grant_id.clone();
+        let confirm_only = request.confirm_only;
+        let connection = self
+            .shared
+            .inner
+            .connections
+            .lock()
+            .await
+            .get(&node_id)
+            .map(|entry| entry.connection.clone())
+            .ok_or_else(|| Status::unavailable("node is not connected"))?;
+        let payload = AgentArtifactConsumeRequest {
+            grant: request.grant,
+            sha256: request.sha256,
+            size: request.size,
+            confirm_only,
+        }
+        .encode_to_vec();
+        let response = tokio::time::timeout(STREAM_TIMEOUT, async move {
+            let (mut send, mut recv) = connection
+                .open_bi()
+                .await
+                .map_err(|_| Status::unavailable("failed to open artifact finalize stream"))?;
+            let length = u32::try_from(payload.len()).map_err(|_| {
+                Status::resource_exhausted("artifact finalize request is too large")
+            })? | ARTIFACT_CONSUME_FRAME;
+            send.write_all(&length.to_be_bytes())
+                .await
+                .map_err(|_| Status::unavailable("failed to write artifact finalize length"))?;
+            send.write_all(&payload)
+                .await
+                .map_err(|_| Status::unavailable("failed to write artifact finalize request"))?;
+            send.finish()
+                .map_err(|_| Status::unavailable("failed to finish artifact finalize request"))?;
+            let mut size = [0_u8; 4];
+            recv.read_exact(&mut size)
+                .await
+                .map_err(|_| Status::unavailable("artifact finalize response ended"))?;
+            let size = u32::from_be_bytes(size) as usize;
+            if size == 0 || size > 64 * 1024 {
+                return Err(Status::data_loss("artifact finalize response is invalid"));
+            }
+            let mut bytes = vec![0; size];
+            recv.read_exact(&mut bytes)
+                .await
+                .map_err(|_| Status::unavailable("artifact finalize response ended"))?;
+            let response = AgentArtifactConsumeResponse::decode(bytes.as_slice())
+                .map_err(|_| Status::data_loss("artifact finalize response is invalid"))?;
+            if response.artifact_id != expected_artifact_id
+                || response.grant_id != expected_grant_id
+                || (!confirm_only && !response.consumed)
+            {
+                return Err(Status::data_loss(
+                    "artifact finalize response is inconsistent",
+                ));
+            }
+            Ok::<_, Status>(response)
+        })
+        .await
+        .map_err(|_| Status::deadline_exceeded("artifact finalize stream timed out"))??;
+        Ok(Response::new(ConsumeArtifactResponse {
+            consumed: response.consumed,
+        }))
     }
 
     async fn close_node(
@@ -1610,7 +1712,7 @@ fn validate_enrollment(request: &EnrollRequest, remote: EndpointId) -> Result<()
         .map_err(|status| status_to_accept(&status))?;
     if request.endpoint_id != remote.as_bytes()
         || request.enrollment_protocol_major != 1
-        || request.enrollment_protocol_minor != 0
+        || request.enrollment_protocol_minor != 1
         || request
             .proof
             .as_ref()
@@ -1920,12 +2022,30 @@ mod tests {
     use iroh::{TransportAddr, Watcher as _, tls::CaTlsConfig};
     use ocservia_contracts::generated::ocserv::platform::agent::v1::{
         CommandAuthorizationProof, CommandAuthorizationVersion, CommandDeliveryMode,
-        GroupObservation, SemanticPayloadHashVersion, UserObservation,
+        GroupObservation, SealedSecretPurpose, SealedSecretVersion, SealingKeyDescriptorV1,
+        SemanticPayloadHashVersion, UserObservation,
     };
 
     use super::*;
 
     const RELAYED_AUTHORIZATION_SIGNATURE: &[u8] = &[0xa5; 64];
+
+    fn sealing_keys() -> Vec<SealingKeyDescriptorV1> {
+        vec![
+            SealingKeyDescriptorV1 {
+                version: SealedSecretVersion::V1 as i32,
+                purpose: SealedSecretPurpose::UserPassword as i32,
+                key_id: "fixture-user-key-v1".into(),
+                public_key_sha256: vec![0x11; 32],
+            },
+            SealingKeyDescriptorV1 {
+                version: SealedSecretVersion::V1 as i32,
+                purpose: SealedSecretPurpose::CertificateP12Password as i32,
+                key_id: "fixture-p12-key-v1".into(),
+                public_key_sha256: vec![0x22; 32],
+            },
+        ]
+    }
 
     fn handshake(key: &SecretKey) -> SessionHandshake {
         SessionHandshake {
@@ -1944,6 +2064,7 @@ mod tests {
             max_message_size: MAX_FRAME_BYTES_U32,
             time: Some(now_timestamp()),
             nonce: vec![7; 32],
+            sealing_keys: sealing_keys(),
         }
     }
 
@@ -2247,6 +2368,7 @@ mod tests {
             enrollment_protocol_major: 0,
             enrollment_protocol_minor: 0,
             proof: None,
+            sealing_keys: sealing_keys(),
         };
         ocservia_agent_identity::authorize_enrollment(&mut request, &key)
             .expect("sign enrollment request");
@@ -2373,6 +2495,7 @@ mod tests {
             max_message_size: MAX_FRAME_BYTES_U32,
             time: Some(now_timestamp()),
             nonce: vec![7; 32],
+            sealing_keys: sealing_keys(),
         };
         assert!(validate_handshake(&handshake, remote_key.public()).is_ok());
         assert!(validate_protocol_version(&handshake).is_ok());
@@ -3206,6 +3329,37 @@ mod tests {
             .shutdown()
             .await
             .expect("stop surviving relay");
+    }
+
+    #[tokio::test]
+    async fn unsigned_artifact_requests_fail_before_connection_lookup() {
+        let service = IrohTransportService::new(8);
+        let node_id = Uuid::now_v7();
+        let artifact_id = Uuid::now_v7();
+        let Err(fetch) = service
+            .fetch_artifact(Request::new(FetchArtifactRequest {
+                node_id: node_id.as_bytes().to_vec(),
+                artifact_id: artifact_id.as_bytes().to_vec(),
+                purpose: "certificate_p12".to_owned(),
+                max_bytes: 32,
+                grant: None,
+            }))
+            .await
+        else {
+            panic!("unsigned artifact fetch must fail");
+        };
+        assert_eq!(fetch.code(), tonic::Code::PermissionDenied);
+        let consume = service
+            .consume_artifact(Request::new(ConsumeArtifactRequest {
+                node_id: node_id.as_bytes().to_vec(),
+                grant: None,
+                sha256: vec![0; 32],
+                size: 32,
+                confirm_only: false,
+            }))
+            .await
+            .expect_err("unsigned artifact consume must fail");
+        assert_eq!(consume.code(), tonic::Code::PermissionDenied);
     }
 
     #[tokio::test]

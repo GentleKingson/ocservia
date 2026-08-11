@@ -97,6 +97,46 @@ const normalizeSecurityMigrations = (baselineDocument, candidateDocument) => {
   assertExact("ConfigPlanApprovalSummary", candidateSchemas.ConfigPlanApprovalSummary, configPlanSummary);
   schemas.ConfigPlanApprovalSummary = configPlanSummary;
 
+  const sealedSecret = {
+    type: "object",
+    additionalProperties: false,
+    required: ["version", "purpose", "key_id", "ciphertext"],
+    properties: {
+      version: { type: "integer", format: "int32", enum: [1] },
+      purpose: { type: "string", enum: ["user_password"] },
+      key_id: {
+        type: "string",
+        minLength: 1,
+        maxLength: 128,
+        pattern: "^[A-Za-z0-9_.-]+$",
+      },
+      ciphertext: {
+        type: "string",
+        format: "byte",
+        minLength: 44,
+        maxLength: 5464,
+        writeOnly: true,
+        description: "Purpose-specific RSA-OAEP-SHA256 ciphertext; plaintext and cross-purpose ciphertext are never accepted.",
+      },
+    },
+  };
+  assertExact(
+    "UserPasswordSealedSecretV1",
+    candidateSchemas.UserPasswordSealedSecretV1,
+    sealedSecret,
+  );
+  schemas.UserPasswordSealedSecretV1 = sealedSecret;
+  for (const name of ["UserCreateRequest", "PasswordRotateRequest"]) {
+    const request = structuredClone(schemas[name]);
+    request.required = request.required.filter((field) => field !== "secret_key_id");
+    delete request.properties.secret_key_id;
+    request.properties.sealed_password = {
+      $ref: "#/components/schemas/UserPasswordSealedSecretV1",
+    };
+    assertExact(name, candidateSchemas[name], request);
+    schemas[name] = request;
+  }
+
   for (const name of ["CertificateRevokeRequest", "CertificateP12Request"]) {
     const request = structuredClone(schemas[name]);
     request.required = ["expected_version", "certificate_version", "approval_id", "reason"];
@@ -106,7 +146,9 @@ const normalizeSecurityMigrations = (baselineDocument, candidateDocument) => {
     schemas[name] = request;
   }
 
-  const certificateIssueSummary = structuredClone(schemas.CertificateApprovalSummary);
+  const certificateIssueSummary = structuredClone(
+    schemas.CertificateIssueApprovalSummary ?? schemas.CertificateApprovalSummary,
+  );
   assertExact(
     "CertificateIssueApprovalSummary",
     candidateSchemas.CertificateIssueApprovalSummary,
@@ -151,12 +193,15 @@ const normalizeSecurityMigrations = (baselineDocument, candidateDocument) => {
   assertExact("ApprovalDecision", candidateSchemas.ApprovalDecision, approvalDecision);
   schemas.ApprovalDecision = approvalDecision;
 
-  const requestSummary = {
-    oneOf: [
-      structuredClone(schemas.Approval.properties.request_summary),
-      { type: "object", additionalProperties: true },
-    ],
-  };
+  const existingRequestSummary = schemas.Approval.properties.request_summary;
+  const requestSummary = existingRequestSummary.oneOf
+    ? structuredClone(existingRequestSummary)
+    : {
+        oneOf: [
+          structuredClone(existingRequestSummary),
+          { type: "object", additionalProperties: true },
+        ],
+      };
   assertExact(
     "Approval.request_summary",
     candidateSchemas.Approval?.properties?.request_summary,

@@ -142,7 +142,7 @@ func Run(ctx context.Context, cfg config.Config, build BuildInfo, logger *slog.L
 		if signerErr != nil {
 			return fmt.Errorf("configure external certificate signer: %w", signerErr)
 		}
-		certificateService = certificates.NewWithDependencies(pool, operationService, signer, signer, apiTransport)
+		certificateService = certificates.NewWithDependencies(pool, operationService, signer, signer, apiTransport, commandSigner)
 	} else {
 		certificateService = certificates.New(pool, operationService)
 	}

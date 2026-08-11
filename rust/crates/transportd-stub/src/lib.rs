@@ -13,11 +13,11 @@ use ocservia_contracts::generated::ocserv::platform::agent::v1::{
     TelemetryBatch, TelemetryDropCounters, TelemetryPriority, command_envelope,
 };
 use ocservia_contracts::generated::ocserv::platform::transport::v1::{
-    CloseNodeRequest, CloseNodeResponse, ConnectionPath, FetchArtifactRequest,
-    GetNodeConnectionRequest, HealthRequest, HealthResponse, HealthStatus, NodeConnection,
-    SendCommandRequest, SendCommandResponse, TransportEvent, TransportEventType,
-    TrustUpdateDisposition, UpdateNodeTrustRequest, UpdateNodeTrustResponse, WatchEventsRequest,
-    transport_service_server::TransportService,
+    CloseNodeRequest, CloseNodeResponse, ConnectionPath, ConsumeArtifactRequest,
+    ConsumeArtifactResponse, FetchArtifactRequest, GetNodeConnectionRequest, HealthRequest,
+    HealthResponse, HealthStatus, NodeConnection, SendCommandRequest, SendCommandResponse,
+    TransportEvent, TransportEventType, TrustUpdateDisposition, UpdateNodeTrustRequest,
+    UpdateNodeTrustResponse, WatchEventsRequest, transport_service_server::TransportService,
 };
 use prost::Message;
 use sha2::{Digest as _, Sha256};
@@ -449,6 +449,15 @@ impl TransportService for StubService {
     ) -> Result<Response<Self::FetchArtifactStream>, Status> {
         Err(Status::unavailable(
             "artifact streaming requires a connected real agent",
+        ))
+    }
+
+    async fn consume_artifact(
+        &self,
+        _request: Request<ConsumeArtifactRequest>,
+    ) -> Result<Response<ConsumeArtifactResponse>, Status> {
+        Err(Status::unavailable(
+            "artifact consumption requires a connected real agent",
         ))
     }
 

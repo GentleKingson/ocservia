@@ -9,6 +9,7 @@ publish = false
 [dependencies]
 hex.workspace = true
 ocservia-agent-protocol = { version = "=0.1.0", path = "../agent-protocol" }
+ocservia-contracts = { version = "=0.1.0", path = "../contracts", default-features = false }
 rand.workspace = true
 rusqlite.workspace = true
 rustix.workspace = true

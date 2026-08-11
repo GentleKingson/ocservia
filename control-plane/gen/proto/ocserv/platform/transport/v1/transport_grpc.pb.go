@@ -27,6 +27,7 @@ const (
 	TransportService_WatchEvents_FullMethodName       = "/ocserv.platform.transport.v1.TransportService/WatchEvents"
 	TransportService_UpdateNodeTrust_FullMethodName   = "/ocserv.platform.transport.v1.TransportService/UpdateNodeTrust"
 	TransportService_FetchArtifact_FullMethodName     = "/ocserv.platform.transport.v1.TransportService/FetchArtifact"
+	TransportService_ConsumeArtifact_FullMethodName   = "/ocserv.platform.transport.v1.TransportService/ConsumeArtifact"
 )
 
 // TransportServiceClient is the client API for TransportService service.
@@ -42,6 +43,7 @@ type TransportServiceClient interface {
 	WatchEvents(ctx context.Context, in *WatchEventsRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[TransportEvent], error)
 	UpdateNodeTrust(ctx context.Context, in *UpdateNodeTrustRequest, opts ...grpc.CallOption) (*UpdateNodeTrustResponse, error)
 	FetchArtifact(ctx context.Context, in *FetchArtifactRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[v1.ArtifactChunk], error)
+	ConsumeArtifact(ctx context.Context, in *ConsumeArtifactRequest, opts ...grpc.CallOption) (*ConsumeArtifactResponse, error)
 }
 
 type transportServiceClient struct {
@@ -140,6 +142,16 @@ func (c *transportServiceClient) FetchArtifact(ctx context.Context, in *FetchArt
 // This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
 type TransportService_FetchArtifactClient = grpc.ServerStreamingClient[v1.ArtifactChunk]
 
+func (c *transportServiceClient) ConsumeArtifact(ctx context.Context, in *ConsumeArtifactRequest, opts ...grpc.CallOption) (*ConsumeArtifactResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ConsumeArtifactResponse)
+	err := c.cc.Invoke(ctx, TransportService_ConsumeArtifact_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // TransportServiceServer is the server API for TransportService service.
 // All implementations must embed UnimplementedTransportServiceServer
 // for forward compatibility.
@@ -153,6 +165,7 @@ type TransportServiceServer interface {
 	WatchEvents(*WatchEventsRequest, grpc.ServerStreamingServer[TransportEvent]) error
 	UpdateNodeTrust(context.Context, *UpdateNodeTrustRequest) (*UpdateNodeTrustResponse, error)
 	FetchArtifact(*FetchArtifactRequest, grpc.ServerStreamingServer[v1.ArtifactChunk]) error
+	ConsumeArtifact(context.Context, *ConsumeArtifactRequest) (*ConsumeArtifactResponse, error)
 	mustEmbedUnimplementedTransportServiceServer()
 }
 
@@ -183,6 +196,9 @@ func (UnimplementedTransportServiceServer) UpdateNodeTrust(context.Context, *Upd
 }
 func (UnimplementedTransportServiceServer) FetchArtifact(*FetchArtifactRequest, grpc.ServerStreamingServer[v1.ArtifactChunk]) error {
 	return status.Error(codes.Unimplemented, "method FetchArtifact not implemented")
+}
+func (UnimplementedTransportServiceServer) ConsumeArtifact(context.Context, *ConsumeArtifactRequest) (*ConsumeArtifactResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ConsumeArtifact not implemented")
 }
 func (UnimplementedTransportServiceServer) mustEmbedUnimplementedTransportServiceServer() {}
 func (UnimplementedTransportServiceServer) testEmbeddedByValue()                          {}
@@ -317,6 +333,24 @@ func _TransportService_FetchArtifact_Handler(srv interface{}, stream grpc.Server
 // This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
 type TransportService_FetchArtifactServer = grpc.ServerStreamingServer[v1.ArtifactChunk]
 
+func _TransportService_ConsumeArtifact_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ConsumeArtifactRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(TransportServiceServer).ConsumeArtifact(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: TransportService_ConsumeArtifact_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(TransportServiceServer).ConsumeArtifact(ctx, req.(*ConsumeArtifactRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // TransportService_ServiceDesc is the grpc.ServiceDesc for TransportService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -343,6 +377,10 @@ var TransportService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "UpdateNodeTrust",
 			Handler:    _TransportService_UpdateNodeTrust_Handler,
+		},
+		{
+			MethodName: "ConsumeArtifact",
+			Handler:    _TransportService_ConsumeArtifact_Handler,
 		},
 	},
 	Streams: []grpc.StreamDesc{

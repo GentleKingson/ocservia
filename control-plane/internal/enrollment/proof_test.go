@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/ed25519"
+	"crypto/sha256"
 	"encoding/hex"
 	"errors"
 	"os"
@@ -69,6 +70,7 @@ func TestEnrollmentProofV1GoldenAndBindings(t *testing.T) {
 		{"endpoint", func(value *agentv1.EnrollRequest) { value.EndpointId[0] ^= 1 }},
 		{"token", func(value *agentv1.EnrollRequest) { value.Token += "x" }},
 		{"capability", func(value *agentv1.EnrollRequest) { value.Capabilities[0] += ".changed" }},
+		{"sealing key", func(value *agentv1.EnrollRequest) { value.SealingKeys[0].KeyId += ".changed" }},
 		{"signature", func(value *agentv1.EnrollRequest) { value.Proof.Signature[0] ^= 1 }},
 	}
 	for _, test := range mutations {
@@ -86,14 +88,18 @@ func enrollmentGoldenRequest(endpoint []byte) *agentv1.EnrollRequest {
 	instanceID, _ := hex.DecodeString("00112233445566778899aabbccddeeff")
 	nonce, _ := hex.DecodeString("ffeeddccbbaa99887766554433221100")
 	return &agentv1.EnrollRequest{
-		Token:                   "enrollment-token-fixture",
-		EndpointId:              bytes.Clone(endpoint),
-		AgentVersion:            "agent-1.2.3",
-		OsRelease:               "FixtureOS 9",
-		OcservVersion:           "1.3.0",
-		BootId:                  "boot-fixture",
-		AgentInstanceId:         instanceID,
-		Capabilities:            []string{"ocserv.users.write", "ocserv.status.read"},
+		Token:           "enrollment-token-fixture",
+		EndpointId:      bytes.Clone(endpoint),
+		AgentVersion:    "agent-1.2.3",
+		OsRelease:       "FixtureOS 9",
+		OcservVersion:   "1.3.0",
+		BootId:          "boot-fixture",
+		AgentInstanceId: instanceID,
+		Capabilities:    []string{"ocserv.users.write", "ocserv.status.read"},
+		SealingKeys: []*agentv1.SealingKeyDescriptorV1{
+			{Version: agentv1.SealedSecretVersion_SEALED_SECRET_VERSION_V1, Purpose: agentv1.SealedSecretPurpose_SEALED_SECRET_PURPOSE_USER_PASSWORD, KeyId: "fixture-user-key-v1", PublicKeySha256: bytes.Repeat([]byte{0x11}, sha256.Size)},
+			{Version: agentv1.SealedSecretVersion_SEALED_SECRET_VERSION_V1, Purpose: agentv1.SealedSecretPurpose_SEALED_SECRET_PURPOSE_CERTIFICATE_P12_PASSWORD, KeyId: "fixture-p12-key-v1", PublicKeySha256: bytes.Repeat([]byte{0x22}, sha256.Size)},
+		},
 		Environment:             "production",
 		Nonce:                   nonce,
 		Time:                    &timestamppb.Timestamp{Seconds: 1_700_000_000, Nanos: 123_456_789},

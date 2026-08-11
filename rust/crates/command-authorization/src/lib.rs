@@ -12,8 +12,9 @@ use std::path::{Component, Path};
 use ed25519_dalek::pkcs8::DecodePublicKey as _;
 use ed25519_dalek::{Signature, VerifyingKey};
 use ocservia_contracts::generated::ocserv::platform::agent::v1::{
-    CommandAuthorizationVersion, CommandEnvelope, SemanticPayloadHashVersion, SessionGrantV1,
-    SessionGrantVersion, command_envelope,
+    ArtifactGrantV1, ArtifactGrantVersion, CommandAuthorizationVersion, CommandEnvelope,
+    SealedSecretPurpose, SealedSecretV1, SealedSecretVersion, SemanticPayloadHashVersion,
+    SessionGrantV1, SessionGrantVersion, command_envelope,
 };
 use rustix::fs::{Mode, OFlags};
 use sha2::{Digest as _, Sha256};
@@ -22,6 +23,7 @@ use sha2::{Digest as _, Sha256};
 pub const COMMAND_PROTOCOL_VERSION: &str = "1.1";
 const DOMAIN_SEPARATOR: &[u8] = b"ocservia/controller-command/v1\0";
 const SESSION_GRANT_DOMAIN_SEPARATOR: &[u8] = b"ocservia/controller-session-grant/v1\0";
+const ARTIFACT_GRANT_DOMAIN_SEPARATOR: &[u8] = b"ocservia/artifact-grant/v1\0";
 const KEY_ID_PREFIX: &str = "ed25519-sha256:";
 const MAX_FUTURE_SKEW_SECONDS: i64 = 300;
 
@@ -66,6 +68,26 @@ pub struct SessionGrantClaimsV1 {
     pub issued_at_nanos: u32,
     pub expires_at_seconds: i64,
     pub expires_at_nanos: u32,
+}
+
+/// Independent, non-Protobuf canonical claims for one bounded artifact fetch.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ArtifactGrantClaimsV1 {
+    pub version: u32,
+    pub key_id: String,
+    pub node_id: [u8; 16],
+    pub artifact_id: [u8; 16],
+    pub certificate_id: [u8; 16],
+    pub certificate_version: u64,
+    pub operation_id: [u8; 16],
+    pub authorized_subject: String,
+    pub purpose: String,
+    pub max_bytes: u64,
+    pub issued_at_seconds: i64,
+    pub issued_at_nanos: u32,
+    pub expires_at_seconds: i64,
+    pub expires_at_nanos: u32,
+    pub grant_id: [u8; 16],
 }
 
 /// Verified Controller authority retained for exactly one connected session.
@@ -271,6 +293,201 @@ impl ControllerCommandKeyring {
             expires_at_seconds: claims.expires_at_seconds,
         })
     }
+
+    /// Verifies a Controller-signed artifact grant for the local node and the
+    /// exact request carrier. transportd cannot mint or alter these claims.
+    ///
+    /// # Errors
+    ///
+    /// Returns an authorization error when the grant is malformed, expired,
+    /// signed by an unknown key, has an invalid signature, or does not match
+    /// the expected request claims.
+    pub fn verify_artifact_grant(
+        &self,
+        grant: &ArtifactGrantV1,
+        expected_node_id: &[u8; 16],
+        expected_artifact_id: &[u8; 16],
+        expected_purpose: &str,
+        expected_max_bytes: u64,
+        now_unix_seconds: i64,
+    ) -> Result<ArtifactGrantClaimsV1, AuthorizationError> {
+        self.verify_artifact_grant_inner(
+            grant,
+            expected_node_id,
+            expected_artifact_id,
+            expected_purpose,
+            expected_max_bytes,
+            now_unix_seconds,
+            true,
+        )
+    }
+
+    /// Verifies the signature and exact claims for a read-only consumed-state
+    /// confirmation. Expiry is intentionally not enforced because this method
+    /// cannot authorize a lease, read, deletion, or any other mutation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an authorization error when the signature or exact request
+    /// claims are invalid, even though expiry is not enforced.
+    pub fn verify_artifact_grant_for_confirmation(
+        &self,
+        grant: &ArtifactGrantV1,
+        expected_node_id: &[u8; 16],
+        expected_artifact_id: &[u8; 16],
+        expected_purpose: &str,
+        expected_max_bytes: u64,
+        now_unix_seconds: i64,
+    ) -> Result<ArtifactGrantClaimsV1, AuthorizationError> {
+        self.verify_artifact_grant_inner(
+            grant,
+            expected_node_id,
+            expected_artifact_id,
+            expected_purpose,
+            expected_max_bytes,
+            now_unix_seconds,
+            false,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn verify_artifact_grant_inner(
+        &self,
+        grant: &ArtifactGrantV1,
+        expected_node_id: &[u8; 16],
+        expected_artifact_id: &[u8; 16],
+        expected_purpose: &str,
+        expected_max_bytes: u64,
+        now_unix_seconds: i64,
+        require_unexpired: bool,
+    ) -> Result<ArtifactGrantClaimsV1, AuthorizationError> {
+        let version = ArtifactGrantVersion::try_from(grant.version)
+            .unwrap_or(ArtifactGrantVersion::Unspecified);
+        if version != ArtifactGrantVersion::V1 {
+            return Err(AuthorizationError::UnsupportedVersion);
+        }
+        let key = self
+            .keys
+            .get(&grant.key_id)
+            .ok_or(AuthorizationError::UnknownKey)?;
+        let claims = artifact_grant_claims_v1(grant)?;
+        if &claims.node_id != expected_node_id {
+            return Err(AuthorizationError::ClaimsInvalid(
+                "artifact_grant_node_mismatch",
+            ));
+        }
+        if &claims.artifact_id != expected_artifact_id {
+            return Err(AuthorizationError::ClaimsInvalid(
+                "artifact_grant_artifact_mismatch",
+            ));
+        }
+        if claims.purpose != expected_purpose || claims.max_bytes != expected_max_bytes {
+            return Err(AuthorizationError::ClaimsInvalid(
+                "artifact_grant_request_mismatch",
+            ));
+        }
+        if require_unexpired && claims.expires_at_seconds <= now_unix_seconds {
+            return Err(AuthorizationError::ClaimsInvalid("artifact_grant_expired"));
+        }
+        if claims.issued_at_seconds > now_unix_seconds.saturating_add(MAX_FUTURE_SKEW_SECONDS) {
+            return Err(AuthorizationError::ClaimsInvalid(
+                "artifact_grant_clock_skew",
+            ));
+        }
+        let canonical = canonical_artifact_grant_v1(&claims)?;
+        let signature = Signature::from_slice(&grant.signature)
+            .map_err(|_| AuthorizationError::SignatureMalformed)?;
+        key.verify_strict(&canonical, &signature)
+            .map_err(|_| AuthorizationError::SignatureInvalid)?;
+        Ok(claims)
+    }
+}
+
+/// Projects a Protobuf artifact grant into its independent claims model.
+///
+/// # Errors
+///
+/// Returns an authorization error when a required claim is missing or has an
+/// invalid fixed-width or timestamp encoding.
+pub fn artifact_grant_claims_v1(
+    grant: &ArtifactGrantV1,
+) -> Result<ArtifactGrantClaimsV1, AuthorizationError> {
+    let issued_at = grant
+        .issued_at
+        .as_ref()
+        .ok_or(AuthorizationError::ClaimsInvalid(
+            "artifact_grant_issued_at_missing",
+        ))?;
+    let expires_at = grant
+        .expires_at
+        .as_ref()
+        .ok_or(AuthorizationError::ClaimsInvalid(
+            "artifact_grant_expires_at_missing",
+        ))?;
+    Ok(ArtifactGrantClaimsV1 {
+        version: u32::try_from(grant.version)
+            .map_err(|_| AuthorizationError::UnsupportedVersion)?,
+        key_id: grant.key_id.clone(),
+        node_id: fixed::<16>(&grant.node_id, "artifact_grant_node_invalid")?,
+        artifact_id: fixed::<16>(&grant.artifact_id, "artifact_grant_artifact_invalid")?,
+        certificate_id: fixed::<16>(&grant.certificate_id, "artifact_grant_certificate_invalid")?,
+        certificate_version: grant.certificate_version,
+        operation_id: fixed::<16>(&grant.operation_id, "artifact_grant_operation_invalid")?,
+        authorized_subject: grant.authorized_subject.clone(),
+        purpose: grant.purpose.clone(),
+        max_bytes: grant.max_bytes,
+        issued_at_seconds: issued_at.seconds,
+        issued_at_nanos: timestamp_nanos(issued_at.nanos)?,
+        expires_at_seconds: expires_at.seconds,
+        expires_at_nanos: timestamp_nanos(expires_at.nanos)?,
+        grant_id: fixed::<16>(&grant.grant_id, "artifact_grant_id_invalid")?,
+    })
+}
+
+/// Produces the exact domain-separated bytes signed for `ArtifactGrantV1`.
+///
+/// # Errors
+///
+/// Returns an authorization error when a claim is outside the canonical V1
+/// constraints or a variable-width value exceeds the encoding limit.
+pub fn canonical_artifact_grant_v1(
+    claims: &ArtifactGrantClaimsV1,
+) -> Result<Vec<u8>, AuthorizationError> {
+    if claims.version != 1
+        || claims.key_id.is_empty()
+        || claims.key_id.len() > 128
+        || claims.certificate_version == 0
+        || claims.authorized_subject.is_empty()
+        || claims.authorized_subject.len() > 256
+        || claims.purpose != "certificate_p12"
+        || claims.max_bytes == 0
+        || claims.max_bytes > 64 * 1024 * 1024
+        || claims.expires_at_seconds < claims.issued_at_seconds
+        || (claims.expires_at_seconds == claims.issued_at_seconds
+            && claims.expires_at_nanos <= claims.issued_at_nanos)
+    {
+        return Err(AuthorizationError::ClaimsInvalid(
+            "artifact_grant_claims_invalid",
+        ));
+    }
+    let mut encoded = Vec::with_capacity(512);
+    encoded.extend_from_slice(ARTIFACT_GRANT_DOMAIN_SEPARATOR);
+    encoded.extend_from_slice(&claims.version.to_be_bytes());
+    append_string(&mut encoded, &claims.key_id)?;
+    encoded.extend_from_slice(&claims.node_id);
+    encoded.extend_from_slice(&claims.artifact_id);
+    encoded.extend_from_slice(&claims.certificate_id);
+    encoded.extend_from_slice(&claims.certificate_version.to_be_bytes());
+    encoded.extend_from_slice(&claims.operation_id);
+    append_string(&mut encoded, &claims.authorized_subject)?;
+    append_string(&mut encoded, &claims.purpose)?;
+    encoded.extend_from_slice(&claims.max_bytes.to_be_bytes());
+    encoded.extend_from_slice(&claims.issued_at_seconds.to_be_bytes());
+    encoded.extend_from_slice(&claims.issued_at_nanos.to_be_bytes());
+    encoded.extend_from_slice(&claims.expires_at_seconds.to_be_bytes());
+    encoded.extend_from_slice(&claims.expires_at_nanos.to_be_bytes());
+    encoded.extend_from_slice(&claims.grant_id);
+    Ok(encoded)
 }
 
 /// Projects a Protobuf carrier into the independent session grant claims.
@@ -661,35 +878,58 @@ fn canonical_semantic_payload_hash(
             )
         }
         Some(command_envelope::Payload::CertificateP12(payload)) => {
+            let secret = payload
+                .sealed_password_v1
+                .as_ref()
+                .ok_or_else(|| invalid_claim("certificate_p12_secret_missing"))?;
+            let expires = payload
+                .artifact_expires_at
+                .as_ref()
+                .ok_or_else(|| invalid_claim("certificate_p12_expiry_missing"))?;
             if payload.certificate_id.len() != 16
                 || payload.artifact_id.len() != 16
                 || payload.certificate_chain_pem.len() < 64
                 || payload.certificate_chain_pem.len() > 256 * 1024
-                || payload.sealed_password.len() < 32
-                || payload.sealed_password.len() > 16 * 1024
-                || payload.secret_key_id.is_empty()
+                || !payload.sealed_password.is_empty()
+                || !payload.secret_key_id.is_empty()
+                || payload.certificate_version == 0
+                || !(0..=999_999_999).contains(&expires.nanos)
             {
                 return Err(invalid_claim("certificate_p12_invalid"));
             }
+            let secret_bytes =
+                canonical_sealed_secret(secret, SealedSecretPurpose::CertificateP12Password)?;
             let mut data = Vec::with_capacity(
                 payload.certificate_id.len()
                     + payload.artifact_id.len()
                     + payload.certificate_chain_pem.len()
-                    + payload.sealed_password.len(),
+                    + secret_bytes.len()
+                    + 12,
             );
             data.extend_from_slice(&payload.certificate_id);
             data.extend_from_slice(&payload.artifact_id);
             data.extend_from_slice(&payload.certificate_chain_pem);
-            data.extend_from_slice(&payload.sealed_password);
+            data.extend_from_slice(&secret_bytes);
+            data.extend_from_slice(&expires.seconds.to_be_bytes());
+            data.extend_from_slice(
+                &u32::try_from(expires.nanos)
+                    .map_err(|_| invalid_claim("certificate_p12_expiry_invalid"))?
+                    .to_be_bytes(),
+            );
             (
                 118_u32,
-                canonical_strings_and_bytes(&[payload.secret_key_id.as_str()], &data, 0)?,
+                canonical_strings_and_bytes(
+                    &[secret.key_id.as_str()],
+                    &data,
+                    payload.certificate_version,
+                )?,
             )
         }
         Some(command_envelope::Payload::CertificateRevoke(payload)) => {
             if payload.certificate_id.len() != 16
                 || payload.reason.is_empty()
                 || payload.reason.len() > 128
+                || payload.certificate_version == 0
             {
                 return Err(invalid_claim("certificate_revoke_invalid"));
             }
@@ -698,7 +938,7 @@ fn canonical_semantic_payload_hash(
                 canonical_strings_and_bytes(
                     &[payload.reason.as_str()],
                     &payload.certificate_id,
-                    0,
+                    payload.certificate_version,
                 )?,
             )
         }
@@ -715,8 +955,9 @@ fn canonical_semantic_payload_hash(
             101_u32,
             canonical_secret_payload(
                 &payload.username,
-                &payload.secret_key_id,
+                payload.sealed_password_v1.as_ref(),
                 &payload.sealed_password,
+                &payload.secret_key_id,
                 payload.desired_revision,
             )?,
         ),
@@ -728,8 +969,9 @@ fn canonical_semantic_payload_hash(
             114_u32,
             canonical_secret_payload(
                 &payload.username,
-                &payload.secret_key_id,
+                payload.sealed_password_v1.as_ref(),
                 &payload.sealed_password,
+                &payload.secret_key_id,
                 payload.desired_revision,
             )?,
         ),
@@ -786,20 +1028,51 @@ fn canonical_named_payload(
 
 fn canonical_secret_payload(
     name: &str,
-    key_id: &str,
-    secret: &[u8],
+    secret: Option<&SealedSecretV1>,
+    legacy_ciphertext: &[u8],
+    legacy_key_id: &str,
     revision: u64,
 ) -> Result<Vec<u8>, AuthorizationError> {
     validate_semantic_name(name)?;
     validate_semantic_revision(revision)?;
-    if key_id.is_empty() || key_id.len() > 128 || secret.len() < 32 || secret.len() > 4096 {
+    if !legacy_ciphertext.is_empty() || !legacy_key_id.is_empty() {
         return Err(invalid_claim("sealed_secret_invalid"));
     }
+    let secret = secret.ok_or_else(|| invalid_claim("sealed_secret_missing"))?;
+    let secret_bytes = canonical_sealed_secret(secret, SealedSecretPurpose::UserPassword)?;
     let mut out = Vec::new();
     append_semantic_bytes(&mut out, name.as_bytes())?;
-    append_semantic_bytes(&mut out, key_id.as_bytes())?;
-    append_semantic_bytes(&mut out, secret)?;
+    append_semantic_bytes(&mut out, secret.key_id.as_bytes())?;
+    append_semantic_bytes(&mut out, &secret_bytes)?;
     out.extend_from_slice(&revision.to_be_bytes());
+    Ok(out)
+}
+
+fn canonical_sealed_secret(
+    secret: &SealedSecretV1,
+    expected_purpose: SealedSecretPurpose,
+) -> Result<Vec<u8>, AuthorizationError> {
+    if SealedSecretVersion::try_from(secret.version).ok() != Some(SealedSecretVersion::V1)
+        || SealedSecretPurpose::try_from(secret.purpose).ok() != Some(expected_purpose)
+        || secret.key_id.is_empty()
+        || secret.key_id.len() > 128
+        || secret.ciphertext.len() < 32
+        || secret.ciphertext.len() > 16 * 1024
+    {
+        return Err(invalid_claim("sealed_secret_invalid"));
+    }
+    let mut out = Vec::with_capacity(8 + secret.ciphertext.len());
+    out.extend_from_slice(
+        &u32::try_from(secret.version)
+            .map_err(|_| invalid_claim("sealed_secret_invalid"))?
+            .to_be_bytes(),
+    );
+    out.extend_from_slice(
+        &u32::try_from(secret.purpose)
+            .map_err(|_| invalid_claim("sealed_secret_invalid"))?
+            .to_be_bytes(),
+    );
+    out.extend_from_slice(&secret.ciphertext);
     Ok(out)
 }
 
@@ -1232,6 +1505,172 @@ mod tests {
             ),
             Err(AuthorizationError::SignatureInvalid)
         );
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn rust_verifies_go_artifact_grant_and_rejects_modified_or_expired_claims() {
+        type ArtifactMutation = (&'static str, fn(&mut ArtifactGrantV1));
+
+        let path =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../testdata/artifact-grant-v1.json");
+        let raw = fs::read_to_string(&path)
+            .unwrap_or_else(|error| panic!("read {}: {error}", path.display()));
+        let fixture: Value = serde_json::from_str(&raw).expect("artifact grant fixture");
+        let public_key = VerifyingKey::from_bytes(&fixed::<32>(string(&fixture, "public_key_hex")))
+            .expect("fixture public key");
+        let keyring = ControllerCommandKeyring::new([public_key]).expect("fixture keyring");
+        let claims = ArtifactGrantClaimsV1 {
+            version: u32::try_from(number(&fixture, "version")).expect("version"),
+            key_id: string(&fixture, "key_id").to_owned(),
+            node_id: fixed::<16>(string(&fixture, "node_id_hex")),
+            artifact_id: fixed::<16>(string(&fixture, "artifact_id_hex")),
+            certificate_id: fixed::<16>(string(&fixture, "certificate_id_hex")),
+            certificate_version: number(&fixture, "certificate_version"),
+            operation_id: fixed::<16>(string(&fixture, "operation_id_hex")),
+            authorized_subject: string(&fixture, "authorized_subject").to_owned(),
+            purpose: string(&fixture, "purpose").to_owned(),
+            max_bytes: number(&fixture, "max_bytes"),
+            issued_at_seconds: signed_number(&fixture, "issued_at_seconds"),
+            issued_at_nanos: u32::try_from(number(&fixture, "issued_at_nanos"))
+                .expect("issued nanos"),
+            expires_at_seconds: signed_number(&fixture, "expires_at_seconds"),
+            expires_at_nanos: u32::try_from(number(&fixture, "expires_at_nanos"))
+                .expect("expiry nanos"),
+            grant_id: fixed::<16>(string(&fixture, "grant_id_hex")),
+        };
+        let canonical = canonical_artifact_grant_v1(&claims).expect("canonical artifact grant");
+        assert_eq!(
+            hex::encode(canonical),
+            string(&fixture, "canonical_preimage_hex")
+        );
+        let grant = ArtifactGrantV1 {
+            version: ArtifactGrantVersion::V1.into(),
+            key_id: claims.key_id.clone(),
+            node_id: claims.node_id.to_vec(),
+            artifact_id: claims.artifact_id.to_vec(),
+            certificate_id: claims.certificate_id.to_vec(),
+            certificate_version: claims.certificate_version,
+            operation_id: claims.operation_id.to_vec(),
+            authorized_subject: claims.authorized_subject.clone(),
+            purpose: claims.purpose.clone(),
+            max_bytes: claims.max_bytes,
+            issued_at: Some(Timestamp {
+                seconds: claims.issued_at_seconds,
+                nanos: i32::try_from(claims.issued_at_nanos).expect("issued nanos"),
+            }),
+            expires_at: Some(Timestamp {
+                seconds: claims.expires_at_seconds,
+                nanos: i32::try_from(claims.expires_at_nanos).expect("expiry nanos"),
+            }),
+            grant_id: claims.grant_id.to_vec(),
+            signature: hex::decode(string(&fixture, "signature_hex")).expect("signature hex"),
+        };
+        keyring
+            .verify_artifact_grant(
+                &grant,
+                &claims.node_id,
+                &claims.artifact_id,
+                &claims.purpose,
+                claims.max_bytes,
+                claims.issued_at_seconds,
+            )
+            .expect("Go-signed artifact grant");
+        assert_eq!(
+            keyring.verify_artifact_grant(
+                &grant,
+                &claims.node_id,
+                &claims.artifact_id,
+                &claims.purpose,
+                claims.max_bytes,
+                claims.expires_at_seconds,
+            ),
+            Err(AuthorizationError::ClaimsInvalid("artifact_grant_expired"))
+        );
+        keyring
+            .verify_artifact_grant_for_confirmation(
+                &grant,
+                &claims.node_id,
+                &claims.artifact_id,
+                &claims.purpose,
+                claims.max_bytes,
+                claims.expires_at_seconds,
+            )
+            .expect("expired exact grant remains valid only for read-only confirmation");
+        let mut forged_confirmation = grant.clone();
+        forged_confirmation.signature[0] ^= 1;
+        assert_eq!(
+            keyring.verify_artifact_grant_for_confirmation(
+                &forged_confirmation,
+                &claims.node_id,
+                &claims.artifact_id,
+                &claims.purpose,
+                claims.max_bytes,
+                claims.expires_at_seconds,
+            ),
+            Err(AuthorizationError::SignatureInvalid)
+        );
+
+        let mut unknown_key = grant.clone();
+        unknown_key.key_id = "ed25519-sha256:unknown".to_owned();
+        assert_eq!(
+            keyring.verify_artifact_grant(
+                &unknown_key,
+                &claims.node_id,
+                &claims.artifact_id,
+                &claims.purpose,
+                claims.max_bytes,
+                claims.issued_at_seconds,
+            ),
+            Err(AuthorizationError::UnknownKey)
+        );
+
+        let mut wrong_node = claims.node_id;
+        wrong_node[0] ^= 1;
+        assert_eq!(
+            keyring.verify_artifact_grant(
+                &grant,
+                &wrong_node,
+                &claims.artifact_id,
+                &claims.purpose,
+                claims.max_bytes,
+                claims.issued_at_seconds,
+            ),
+            Err(AuthorizationError::ClaimsInvalid(
+                "artifact_grant_node_mismatch"
+            ))
+        );
+
+        let mutations: [ArtifactMutation; 4] = [
+            ("certificate version", |value: &mut ArtifactGrantV1| {
+                value.certificate_version += 1;
+            }),
+            ("operation", |value: &mut ArtifactGrantV1| {
+                value.operation_id[0] ^= 1;
+            }),
+            ("grant ID", |value: &mut ArtifactGrantV1| {
+                value.grant_id[0] ^= 1;
+            }),
+            ("signature", |value: &mut ArtifactGrantV1| {
+                value.signature[0] ^= 1;
+            }),
+        ];
+        for (name, mutate) in mutations {
+            let mut modified = grant.clone();
+            mutate(&mut modified);
+            assert_eq!(
+                keyring.verify_artifact_grant(
+                    &modified,
+                    &claims.node_id,
+                    &claims.artifact_id,
+                    &claims.purpose,
+                    claims.max_bytes,
+                    claims.issued_at_seconds,
+                ),
+                Err(AuthorizationError::SignatureInvalid),
+                "{name} mutation"
+            );
+        }
     }
 
     #[test]

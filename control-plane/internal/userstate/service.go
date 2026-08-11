@@ -54,12 +54,19 @@ const (
 type MutationRequest struct {
 	NodeID, ActorIdentityID, ActorSessionID uuid.UUID
 	Kind                                    MutationKind
-	Name, SecretKeyID, IdempotencyKey       string
+	Name, IdempotencyKey                    string
 	Members                                 []string
-	SealedPassword                          []byte
+	SealedPassword                          *SealedSecret
 	ExpectedVersion                         int64
 	TTL                                     time.Duration
 	ActorID, Reason, RequestID, Traceparent string
+}
+
+type SealedSecret struct {
+	Version    uint32
+	Purpose    string
+	KeyID      string
+	Ciphertext []byte
 }
 
 type ResourceState struct {
@@ -122,6 +129,15 @@ func (s *Service) Mutate(ctx context.Context, request MutationRequest) (operatio
 	}
 	if nodeStatus != "active" && nodeStatus != "offline" {
 		return operationstore.Operation{}, false, ErrNodeUnavailable
+	}
+	if request.SealedPassword != nil {
+		var registered bool
+		if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM node_sealing_keys WHERE node_id=$1 AND purpose=1 AND version=$2 AND key_id=$3)`, request.NodeID, request.SealedPassword.Version, request.SealedPassword.KeyID).Scan(&registered); err != nil {
+			return operationstore.Operation{}, false, err
+		}
+		if !registered {
+			return operationstore.Operation{}, false, ErrInvalidRequest
+		}
 	}
 	if existing, same, err := findIdempotent(ctx, tx, workspaceID, request.IdempotencyKey, hash[:]); err != nil {
 		return operationstore.Operation{}, false, err
@@ -283,10 +299,10 @@ func validateMutation(request MutationRequest) error {
 		return ErrInvalidRequest
 	}
 	if request.Kind == UserCreate || request.Kind == UserPasswordRotate {
-		if len(request.SealedPassword) < 32 || len(request.SealedPassword) > 4096 || request.SecretKeyID == "" || len(request.SecretKeyID) > 128 {
+		if request.SealedPassword == nil || request.SealedPassword.Version != 1 || request.SealedPassword.Purpose != "user_password" || request.SealedPassword.KeyID == "" || len(request.SealedPassword.KeyID) > 128 || len(request.SealedPassword.Ciphertext) < 32 || len(request.SealedPassword.Ciphertext) > 4096 {
 			return ErrInvalidRequest
 		}
-	} else if len(request.SealedPassword) != 0 || request.SecretKeyID != "" {
+	} else if request.SealedPassword != nil {
 		return ErrInvalidRequest
 	}
 	if request.Kind == GroupApply {
@@ -460,13 +476,13 @@ func marshalEnvelope(request MutationRequest, operationID, commandID uuid.UUID, 
 	envelope := &agentv1.CommandEnvelope{ProtocolVersion: commandauth.ProtocolVersion, MessageId: messageID[:], CommandId: commandID[:], IdempotencyKey: operationID[:], NodeId: request.NodeID[:], Sequence: 1, IssuedAt: timestamppb.New(now), ExpiresAt: timestamppb.New(expires), ExpectedRevision: authorizationRevision, Traceparent: request.Traceparent, ActorId: request.ActorID, Reason: request.Reason, OperationId: operationID[:], Action: actionFor(request.Kind), RequiredCapability: capabilityFor(request.Kind), DeliveryMode: agentv1.CommandDeliveryMode_COMMAND_DELIVERY_MODE_EXECUTE_OR_REPLAY}
 	switch request.Kind {
 	case UserCreate:
-		envelope.Payload = &agentv1.CommandEnvelope_UserCreate{UserCreate: &agentv1.UserCreate{Username: request.Name, SealedPassword: request.SealedPassword, SecretKeyId: request.SecretKeyID, DesiredRevision: desiredRevision}}
+		envelope.Payload = &agentv1.CommandEnvelope_UserCreate{UserCreate: &agentv1.UserCreate{Username: request.Name, SealedPasswordV1: sealedSecretProto(request.SealedPassword), DesiredRevision: desiredRevision}}
 	case UserDisable:
 		envelope.Payload = &agentv1.CommandEnvelope_UserDisable{UserDisable: &agentv1.UserDisable{Username: request.Name, DesiredRevision: desiredRevision}}
 	case UserEnable:
 		envelope.Payload = &agentv1.CommandEnvelope_UserEnable{UserEnable: &agentv1.UserEnable{Username: request.Name, DesiredRevision: desiredRevision}}
 	case UserPasswordRotate:
-		envelope.Payload = &agentv1.CommandEnvelope_UserPasswordRotate{UserPasswordRotate: &agentv1.UserPasswordRotate{Username: request.Name, SealedPassword: request.SealedPassword, SecretKeyId: request.SecretKeyID, DesiredRevision: desiredRevision}}
+		envelope.Payload = &agentv1.CommandEnvelope_UserPasswordRotate{UserPasswordRotate: &agentv1.UserPasswordRotate{Username: request.Name, SealedPasswordV1: sealedSecretProto(request.SealedPassword), DesiredRevision: desiredRevision}}
 	case GroupApply:
 		envelope.Payload = &agentv1.CommandEnvelope_GroupApply{GroupApply: &agentv1.GroupApply{GroupName: request.Name, Members: request.Members, DesiredRevision: desiredRevision}}
 	default:
@@ -479,6 +495,13 @@ func marshalEnvelope(request MutationRequest, operationID, commandID uuid.UUID, 
 		return nil, fmt.Errorf("authorize desired-state command: %w", err)
 	}
 	return proto.Marshal(envelope)
+}
+
+func sealedSecretProto(secret *SealedSecret) *agentv1.SealedSecretV1 {
+	if secret == nil {
+		return nil
+	}
+	return &agentv1.SealedSecretV1{Version: agentv1.SealedSecretVersion(secret.Version), Purpose: agentv1.SealedSecretPurpose_SEALED_SECRET_PURPOSE_USER_PASSWORD, KeyId: secret.KeyID, Ciphertext: append([]byte(nil), secret.Ciphertext...)}
 }
 
 func desiredFingerprint(kind MutationKind, name string, members []string) [32]byte {
@@ -508,9 +531,22 @@ func requestHash(request MutationRequest) [32]byte {
 		Version       int64
 		TTL           int64
 		Actor, Reason string
-	}{request.NodeID, request.Kind, request.Name, request.SecretKeyID, normalizeMembers(request.Members), request.SealedPassword, request.ExpectedVersion, int64(request.TTL / time.Second), request.ActorID, request.Reason}
+	}{request.NodeID, request.Kind, request.Name, sealedKey(request.SealedPassword), normalizeMembers(request.Members), sealedBytes(request.SealedPassword), request.ExpectedVersion, int64(request.TTL / time.Second), request.ActorID, request.Reason}
 	encoded, _ := json.Marshal(value)
 	return sha256.Sum256(encoded)
+}
+
+func sealedKey(secret *SealedSecret) string {
+	if secret == nil {
+		return ""
+	}
+	return fmt.Sprintf("%d:%s:%s", secret.Version, secret.Purpose, secret.KeyID)
+}
+func sealedBytes(secret *SealedSecret) []byte {
+	if secret == nil {
+		return nil
+	}
+	return secret.Ciphertext
 }
 
 func normalizeMembers(members []string) []string {

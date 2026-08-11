@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	agentv1 "github.com/GentleKingson/ocservia/control-plane/gen/proto/ocserv/platform/agent/v1"
 	"github.com/google/uuid"
 )
 
@@ -30,10 +31,10 @@ func TestHTTPSignerUsesFixedBoundedAuthenticatedEndpoints(t *testing.T) {
 			w.WriteHeader(http.StatusNoContent)
 		case "/sign/seal":
 			body, _ := io.ReadAll(r.Body)
-			if string(body) != "one-time-password" || r.Header.Get("X-Ocservia-Node-ID") == "" {
+			if string(body) != "one-time-password" || r.Header.Get("X-Ocservia-Node-ID") == "" || r.Header.Get("X-Ocservia-Seal-Purpose") != "certificate_p12_password" {
 				t.Error("seal request did not bind the node and plaintext")
 			}
-			_ = json.NewEncoder(w).Encode(map[string]string{"sealed": base64.StdEncoding.EncodeToString([]byte(strings.Repeat("s", 64))), "key_id": "node-key-v1"})
+			_ = json.NewEncoder(w).Encode(map[string]any{"sealed": base64.StdEncoding.EncodeToString([]byte(strings.Repeat("s", 64))), "key_id": "node-key-v1", "version": 1, "purpose": "certificate_p12_password"})
 		default:
 			http.NotFound(w, r)
 		}
@@ -50,9 +51,9 @@ func TestHTTPSignerUsesFixedBoundedAuthenticatedEndpoints(t *testing.T) {
 	if err := signer.Revoke(context.Background(), RevokeSignerRequest{CertificateID: id, SerialNumber: "42", Reason: "retired"}); err != nil {
 		t.Fatal(err)
 	}
-	sealed, keyID, err := signer.Seal(context.Background(), id, []byte("one-time-password"))
-	if err != nil || len(sealed) != 64 || keyID != "node-key-v1" {
-		t.Fatalf("sealed=%d key=%q err=%v", len(sealed), keyID, err)
+	sealed, err := signer.Seal(context.Background(), id, agentv1.SealedSecretPurpose_SEALED_SECRET_PURPOSE_CERTIFICATE_P12_PASSWORD, []byte("one-time-password"))
+	if err != nil || len(sealed.GetCiphertext()) != 64 || sealed.GetKeyId() != "node-key-v1" || sealed.GetVersion() != agentv1.SealedSecretVersion_SEALED_SECRET_VERSION_V1 || sealed.GetPurpose() != agentv1.SealedSecretPurpose_SEALED_SECRET_PURPOSE_CERTIFICATE_P12_PASSWORD {
+		t.Fatalf("sealed=%+v err=%v", sealed, err)
 	}
 }
 

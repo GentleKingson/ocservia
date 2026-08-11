@@ -15,13 +15,19 @@ import (
 )
 
 type desiredMutationRequest struct {
-	Name            string   `json:"name,omitempty"`
-	Members         []string `json:"members,omitempty"`
-	SealedPassword  []byte   `json:"sealed_password,omitempty"`
-	SecretKeyID     string   `json:"secret_key_id,omitempty"`
-	ExpectedVersion *int64   `json:"expected_version,omitempty"`
-	TTLSeconds      *int64   `json:"ttl_seconds,omitempty"`
-	Reason          string   `json:"reason"`
+	Name            string               `json:"name,omitempty"`
+	Members         []string             `json:"members,omitempty"`
+	SealedPassword  *sealedSecretRequest `json:"sealed_password,omitempty"`
+	ExpectedVersion *int64               `json:"expected_version,omitempty"`
+	TTLSeconds      *int64               `json:"ttl_seconds,omitempty"`
+	Reason          string               `json:"reason"`
+}
+
+type sealedSecretRequest struct {
+	Version    uint32 `json:"version"`
+	Purpose    string `json:"purpose"`
+	KeyID      string `json:"key_id"`
+	Ciphertext []byte `json:"ciphertext"`
 }
 
 func (s *Server) listUserGroupState(w http.ResponseWriter, r *http.Request) {
@@ -106,9 +112,13 @@ func (s *Server) mutateUserGroup(w http.ResponseWriter, r *http.Request, kind us
 	}
 	actor := principal(r)
 	actorText := actorID(r)
+	var sealedPassword *userstate.SealedSecret
+	if body.SealedPassword != nil {
+		sealedPassword = &userstate.SealedSecret{Version: body.SealedPassword.Version, Purpose: strings.TrimSpace(body.SealedPassword.Purpose), KeyID: strings.TrimSpace(body.SealedPassword.KeyID), Ciphertext: body.SealedPassword.Ciphertext}
+	}
 	operation, replayed, err := s.userstate.Mutate(r.Context(), userstate.MutationRequest{
 		NodeID: nodeID, Kind: kind, Name: name, Members: body.Members,
-		SealedPassword: body.SealedPassword, SecretKeyID: strings.TrimSpace(body.SecretKeyID),
+		SealedPassword: sealedPassword,
 		IdempotencyKey: idempotencyKey, ExpectedVersion: expected, TTL: time.Duration(ttl) * time.Second,
 		ActorID: actorText, ActorIdentityID: actor.IdentityID, ActorSessionID: actor.SessionID,
 		Reason: strings.TrimSpace(body.Reason), RequestID: requestID(r), Traceparent: requestTraceparent(r),
