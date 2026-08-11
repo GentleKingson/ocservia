@@ -84,6 +84,23 @@ func (s *Server) authorizeRoute(r *http.Request, principal auth.Principal) (cont
 		if getErr != nil {
 			return nil, getErr
 		}
+		scopes, scopeErr := s.approvals.AuthorityResources(r.Context(), approvalID)
+		if scopeErr != nil {
+			return nil, scopeErr
+		}
+		if len(scopes) > 0 {
+			for _, scope := range scopes {
+				if scope.WorkspaceID != approval.WorkspaceID {
+					return nil, rbac.ErrForbidden
+				}
+				resource = rbac.Resource{WorkspaceID: scope.WorkspaceID, Type: scope.Type, ID: scope.ID}
+				if err := s.rbac.Authorize(r.Context(), principal.IdentityID, action, resource, principal.BreakGlass); err != nil {
+					return nil, err
+				}
+			}
+			ctx := context.WithValue(r.Context(), principalKey{}, principal)
+			return context.WithValue(ctx, workspaceKey{}, approval.WorkspaceID), nil
+		}
 		if approval.ResourceType == "config_plan" {
 			if s.configplans == nil {
 				return nil, pgx.ErrNoRows
@@ -147,7 +164,7 @@ func (s *Server) authorizeRoute(r *http.Request, principal auth.Principal) (cont
 		if resourceErr != nil {
 			return nil, resourceErr
 		}
-		resource = rbac.Resource{WorkspaceID: workspaceID, Type: "workspace", ID: workspaceID}
+		resource = rbac.Resource{WorkspaceID: workspaceID, Type: "secret_ref", ID: secretID}
 	} else {
 		workspaceText := strings.TrimSpace(r.Header.Get("X-Workspace-ID"))
 		if workspaceText == "" && r.URL.Path == "/api/v1/events/stream" {
@@ -241,7 +258,7 @@ func routeAction(r *http.Request) string {
 	case r.Method == http.MethodPost && strings.HasSuffix(path, ":revoke") && strings.Contains(path, "/certificates/"):
 		return "certificate.revoke"
 	case r.Method == http.MethodPost && strings.HasSuffix(path, ":p12") && strings.Contains(path, "/certificates/"):
-		return "certificate.issue"
+		return "certificate.private_key.export"
 	case r.Method == http.MethodGet && strings.HasPrefix(path, "/api/v1/artifacts/"):
 		return "certificate.read"
 	case r.Method == http.MethodPost && path == "/api/v1/secret-provider-refs":

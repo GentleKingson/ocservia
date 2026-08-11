@@ -120,6 +120,21 @@ func (s *Service) Create(ctx context.Context, request CreateRequest) (Plan, bool
 	if !hasPlan {
 		return Plan{}, false, ErrCapability
 	}
+	for index := range request.Template.Directives {
+		ref := request.Template.Directives[index].SecretRef
+		if ref == nil {
+			continue
+		}
+		if ref.ID == uuid.Nil || ref.Provider != "" || ref.Key != "" || ref.Version != "" {
+			return Plan{}, false, ErrInvalid
+		}
+		if err := s.pool.QueryRow(ctx, `SELECT provider,key_path,version FROM secret_provider_refs WHERE id=$1 AND workspace_id=$2 AND state='active'`, ref.ID, workspaceID).Scan(&ref.Provider, &ref.Key, &ref.Version); err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				return Plan{}, false, ErrInvalid
+			}
+			return Plan{}, false, err
+		}
+	}
 	rendered, err := Render(RenderInput{Template: request.Template, NodeVariables: request.NodeVariables, OcservVersion: ocservVersion, Capabilities: capabilities})
 	if err != nil {
 		return Plan{}, false, err

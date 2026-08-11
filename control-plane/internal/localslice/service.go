@@ -726,7 +726,7 @@ func ingestAgentCommandResult(ctx context.Context, tx pgx.Tx, eventID, nodeID uu
 		if csrResult != nil {
 			csrDER, publicHash = csrResult.GetCsrDer(), csrResult.GetPublicKeySha256()
 		}
-		if _, err := tx.Exec(ctx, `UPDATE certificates SET state=$2,csr_der=COALESCE($3,csr_der),public_key_sha256=COALESCE($4,public_key_sha256),updated_at=$5 WHERE id=$1 AND operation_id=$6`, certificateID, certificateState, csrDER, publicHash, observedAt, operationID); err != nil {
+		if _, err := tx.Exec(ctx, `UPDATE certificates SET state=$2,version=version+1,csr_der=COALESCE($3,csr_der),public_key_sha256=COALESCE($4,public_key_sha256),updated_at=$5 WHERE id=$1 AND operation_id=$6`, certificateID, certificateState, csrDER, publicHash, observedAt, operationID); err != nil {
 			return fmt.Errorf("update certificate CSR outcome: %w", err)
 		}
 	}
@@ -742,7 +742,7 @@ func ingestAgentCommandResult(ctx context.Context, tx pgx.Tx, eventID, nodeID uu
 		} else if effectiveState == "succeeded" && revokeResult != nil {
 			certificateState, revokedAt = "revoked", observedAt
 		}
-		if _, err := tx.Exec(ctx, `UPDATE certificates SET state=$2,revoked_at=COALESCE($3,revoked_at),revocation_reason=CASE WHEN $2='revoked' THEN $4 ELSE revocation_reason END,updated_at=$5 WHERE id=$1 AND node_id=$6`, certificateID, certificateState, revokedAt, revoke.GetReason(), observedAt, nodeID); err != nil {
+		if _, err := tx.Exec(ctx, `UPDATE certificates SET state=$2,version=version+1,revoked_at=COALESCE($3,revoked_at),revocation_reason=CASE WHEN $2='revoked' THEN $4 ELSE revocation_reason END,updated_at=$5 WHERE id=$1 AND node_id=$6`, certificateID, certificateState, revokedAt, revoke.GetReason(), observedAt, nodeID); err != nil {
 			return fmt.Errorf("update certificate revocation outcome: %w", err)
 		}
 	}
@@ -901,7 +901,7 @@ func commandAuditAction(envelope *agentv1.CommandEnvelope) string {
 	case *agentv1.CommandEnvelope_CertificateCsr:
 		return "certificate.csr.generate"
 	case *agentv1.CommandEnvelope_CertificateP12:
-		return "certificate.p12.create"
+		return "certificate.private_key.export"
 	case *agentv1.CommandEnvelope_CertificateRevoke:
 		return "certificate.revoke"
 	default:

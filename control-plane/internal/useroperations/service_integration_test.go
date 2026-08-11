@@ -198,6 +198,9 @@ func TestQuotaExpirySchedulerBatchAndUsageIntegration(t *testing.T) {
 	if _, err := pool.Exec(ctx, `INSERT INTO approval_requests(id,workspace_id,requester_id,action,resource_type,resource_id,reason,status,approver_id,approval_reason,expires_at,approved_at,created_at,request_hash,request_summary)VALUES($1,$2,$3,'user.batch.disable','batch_operation',$4,'integration','approved',$5,'independent',now()+interval '1 hour',now(),now(),$6,$7)`, approvalID, workspaceID, requesterID, batchID, approverID, batchHash[:], `[{"node_id":"`+nodeID.String()+`","username":"bob","action":"disable","expected_version":1},{"node_id":"`+nodeID.String()+`","username":"charlie","action":"disable","expected_version":1}]`); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := pool.Exec(ctx, `INSERT INTO approval_batch_items(approval_id,item_index,node_id,username,action,expected_version)VALUES($1,0,$2,'bob','disable',1),($1,1,$2,'charlie','disable',1)`, approvalID, nodeID); err != nil {
+		t.Fatal(err)
+	}
 	batchRequest := BatchRequest{ID: batchID, WorkspaceID: workspaceID, ActorIdentityID: requesterID, ApprovalID: approvalID, ActorID: "operator", Reason: "ticket", RequestID: "request-batch", Traceparent: testTraceparent, IdempotencyKey: "batch-one", Items: batchItems}
 	substituted := batchRequest
 	substituted.Items = append([]BatchItemRequest(nil), batchRequest.Items...)

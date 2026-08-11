@@ -44,6 +44,12 @@ export interface ConfigPlanApprovalSummary {
    */
   currentHash: string;
   /**
+   * Approver-visible secret-safe diff containing exact secret reference identifiers, providers, and versions without provider keys or values.
+   * @type {string}
+   * @memberof ConfigPlanApprovalSummary
+   */
+  diffRedacted: string;
+  /**
    * RFC 3339 timestamp normalized to UTC.
    * @type {Date}
    * @memberof ConfigPlanApprovalSummary
@@ -86,6 +92,13 @@ export function instanceOfConfigPlanApprovalSummary(
   )
     return false;
   if (
+    (!("diffRedacted" in (value as Record<string, any>)) &&
+      !("diff_redacted" in (value as Record<string, any>))) ||
+    ((value as Record<string, any>)["diffRedacted"] === undefined &&
+      (value as Record<string, any>)["diff_redacted"] === undefined)
+  )
+    return false;
+  if (
     (!("expiresAt" in (value as Record<string, any>)) &&
       !("expires_at" in (value as Record<string, any>))) ||
     ((value as Record<string, any>)["expiresAt"] === undefined &&
@@ -113,6 +126,7 @@ export function ConfigPlanApprovalSummaryFromJSONTyped(
     expectedRevision: json["expected_revision"],
     candidateHash: json["candidate_hash"],
     currentHash: json["current_hash"],
+    diffRedacted: json["diff_redacted"],
     expiresAt: new Date(json["expires_at"]),
   };
 }
@@ -136,6 +150,7 @@ export function ConfigPlanApprovalSummaryToJSONTyped(
     expected_revision: value["expectedRevision"],
     candidate_hash: value["candidateHash"],
     current_hash: value["currentHash"],
+    diff_redacted: value["diffRedacted"],
     expires_at: value["expiresAt"].toISOString(),
   };
 }

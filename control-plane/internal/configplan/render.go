@@ -9,6 +9,8 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+
+	"github.com/google/uuid"
 )
 
 const MaxCandidateBytes = 256 * 1024
@@ -28,8 +30,10 @@ type Directive struct {
 
 // SecretRef names secret material without resolving or storing it.
 type SecretRef struct {
-	Provider string `json:"provider"`
-	Key      string `json:"key"`
+	ID       uuid.UUID `json:"secret_ref_id"`
+	Provider string    `json:"-"`
+	Key      string    `json:"-"`
+	Version  string    `json:"-"`
 }
 
 // Template is a bounded, non-executable configuration document.
@@ -113,11 +117,11 @@ func Render(input RenderInput) (Rendered, error) {
 			if directive.Name != "server-key" && directive.Name != "server-cert" && directive.Name != "ca-cert" {
 				return Rendered{}, fmt.Errorf("%w: directive %q cannot use SecretRef", ErrInvalid, directive.Name)
 			}
-			if !validLabel(directive.SecretRef.Provider, 64) || !validSecretKey(directive.SecretRef.Key) {
+			if directive.SecretRef.ID == uuid.Nil || !validLabel(directive.SecretRef.Provider, 64) || !validSecretKey(directive.SecretRef.Key) || !validLabel(directive.SecretRef.Version, 128) {
 				return Rendered{}, ErrInvalid
 			}
 			value = "${secret:" + directive.SecretRef.Provider + ":" + directive.SecretRef.Key + "}"
-			safe = "<secret-ref:" + directive.SecretRef.Provider + ">"
+			safe = "<secret-ref:" + directive.SecretRef.ID.String() + ":" + directive.SecretRef.Provider + ":" + directive.SecretRef.Version + ">"
 		} else {
 			resolved, err := expand(directive.Value, variables)
 			if err != nil || !validValue(resolved) {

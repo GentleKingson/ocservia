@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"slices"
 	"strings"
 	"time"
 
@@ -16,12 +17,33 @@ import (
 )
 
 type createApprovalRequest struct {
-	Action       string                            `json:"action"`
-	ResourceType string                            `json:"resource_type"`
-	ResourceID   string                            `json:"resource_id"`
-	Reason       string                            `json:"reason"`
-	TTLSeconds   int64                             `json:"ttl_seconds"`
-	BatchItems   []useroperations.BatchItemRequest `json:"batch_items,omitempty"`
+	Action       string                             `json:"action"`
+	ResourceType string                             `json:"resource_type"`
+	ResourceID   string                             `json:"resource_id"`
+	Reason       string                             `json:"reason"`
+	TTLSeconds   int64                              `json:"ttl_seconds"`
+	BatchItems   []useroperations.BatchItemRequest  `json:"batch_items,omitempty"`
+	NodeApproval *nodeApprovalBindingRequest        `json:"node_approval,omitempty"`
+	Certificate  *certificateApprovalBindingRequest `json:"certificate,omitempty"`
+	RoleBinding  *roleBindingApprovalRequest        `json:"role_binding,omitempty"`
+}
+
+type nodeApprovalBindingRequest struct {
+	Labels       map[string]string `json:"labels,omitempty"`
+	Policy       string            `json:"policy"`
+	Capabilities []string          `json:"capabilities"`
+}
+type certificateApprovalBindingRequest struct {
+	ExpectedVersion   int64  `json:"expected_version"`
+	Purpose           string `json:"purpose,omitempty"`
+	ArtifactRequestID string `json:"artifact_request_id,omitempty"`
+	Reason            string `json:"reason"`
+}
+type roleBindingApprovalRequest struct {
+	IdentityID   string `json:"identity_id"`
+	Role         string `json:"role"`
+	ResourceType string `json:"resource_type"`
+	ResourceID   string `json:"resource_id,omitempty"`
 }
 
 type approvalDecision struct {
@@ -38,7 +60,18 @@ func (s *Server) createApproval(w http.ResponseWriter, r *http.Request) {
 	if !decodeStrict(w, r, &body) {
 		return
 	}
-	resourceID, err := parseUUIDv7(body.ResourceID)
+	action := strings.TrimSpace(body.Action)
+	var resourceID uuid.UUID
+	var err error
+	if action == "user.batch.disable" {
+		if strings.TrimSpace(body.ResourceID) != "" {
+			writeProblem(w, r, http.StatusBadRequest, "https://ocservia.dev/problems/invalid-request", "Invalid request", "batch resource identifiers are server generated")
+			return
+		}
+		resourceID = uuid.Must(uuid.NewV7())
+	} else {
+		resourceID, err = parseUUIDv7(body.ResourceID)
+	}
 	if err != nil || body.TTLSeconds < 60 || body.TTLSeconds > 86400 {
 		writeProblem(w, r, http.StatusBadRequest, "https://ocservia.dev/problems/invalid-request", "Invalid request", "resource_id and ttl_seconds are invalid")
 		return
@@ -47,21 +80,25 @@ func (s *Server) createApproval(w http.ResponseWriter, r *http.Request) {
 	actor := principal(r)
 	var requestHash []byte
 	var requestSummary json.RawMessage
-	if strings.TrimSpace(body.Action) == "user.batch.disable" {
+	authorityResources := []approvals.AuthorityResource{}
+	boundBatchItems := []approvals.BoundBatchItem{}
+	if action == "user.batch.disable" {
 		if resource.Type != "batch_operation" || useroperations.ValidateBatchItems(body.BatchItems) != nil {
 			writeProblem(w, r, http.StatusBadRequest, "https://ocservia.dev/problems/invalid-request", "Invalid request", "batch approval requires the complete valid batch item set")
 			return
 		}
-		allowed := false
+		allowed := true
 		for _, item := range body.BatchItems {
 			node, nodeErr := s.rbac.Node(r.Context(), item.NodeID)
 			if nodeErr != nil || node.WorkspaceID != resource.WorkspaceID {
 				writeProblem(w, r, http.StatusBadRequest, "https://ocservia.dev/problems/invalid-request", "Invalid request", "every batch item must reference the selected workspace")
 				return
 			}
-			if s.devAuth || s.rbac.Authorize(r.Context(), actor.IdentityID, "user.manage", node, actor.BreakGlass) == nil {
-				allowed = true
+			if !s.devAuth && s.rbac.Authorize(r.Context(), actor.IdentityID, "user.manage", node, actor.BreakGlass) != nil {
+				allowed = false
 			}
+			authorityResources = append(authorityResources, approvals.AuthorityResource{WorkspaceID: node.WorkspaceID, Type: "node", ID: item.NodeID})
+			boundBatchItems = append(boundBatchItems, approvals.BoundBatchItem{NodeID: item.NodeID, Username: item.Username, Action: item.Action, ExpectedVersion: item.ExpectedVersion})
 		}
 		if !allowed {
 			s.writeAuthorizationError(w, r, rbac.ErrForbidden)
@@ -70,7 +107,23 @@ func (s *Server) createApproval(w http.ResponseWriter, r *http.Request) {
 		hash := useroperations.BatchRequestHash(body.BatchItems)
 		requestHash = hash[:]
 		requestSummary, _ = json.Marshal(body.BatchItems)
-	} else if strings.TrimSpace(body.Action) == "config.apply" {
+	} else if action == "node.approve" {
+		if resource.Type != "node" || body.NodeApproval == nil || s.enrollment == nil {
+			writeProblem(w, r, http.StatusBadRequest, "https://ocservia.dev/problems/invalid-request", "Invalid request", "node approval requires exact proposed trust content")
+			return
+		}
+		workspaceID, hash, summary, bindingErr := s.enrollment.ApprovalBinding(r.Context(), resourceID, body.NodeApproval.Labels, body.NodeApproval.Policy, body.NodeApproval.Capabilities)
+		if bindingErr != nil || workspaceID != resource.WorkspaceID {
+			writeProblem(w, r, http.StatusConflict, "https://ocservia.dev/problems/node-not-ready", "Node is not ready", "node approval content does not match a pending enrollment")
+			return
+		}
+		requestHash, requestSummary = hash, summary
+		authorityResources = append(authorityResources, approvals.AuthorityResource{WorkspaceID: workspaceID, Type: "node", ID: resourceID})
+		if !s.devAuth && s.rbac.Authorize(r.Context(), actor.IdentityID, "node.approve", rbac.Resource{WorkspaceID: workspaceID, Type: "node", ID: resourceID}, actor.BreakGlass) != nil {
+			s.writeAuthorizationError(w, r, rbac.ErrForbidden)
+			return
+		}
+	} else if action == "config.apply" {
 		if resource.Type != "config_plan" || s.configplans == nil {
 			writeProblem(w, r, http.StatusBadRequest, "https://ocservia.dev/problems/invalid-request", "Invalid request", "configuration approval requires an existing validated plan")
 			return
@@ -85,13 +138,14 @@ func (s *Server) createApproval(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		node := rbac.Resource{WorkspaceID: plan.WorkspaceID, Type: "node", ID: plan.NodeID}
+		authorityResources = append(authorityResources, approvals.AuthorityResource{WorkspaceID: plan.WorkspaceID, Type: "node", ID: plan.NodeID})
 		if !s.devAuth && s.rbac.Authorize(r.Context(), actor.IdentityID, "config.apply", node, actor.BreakGlass) != nil {
 			s.writeAuthorizationError(w, r, rbac.ErrForbidden)
 			return
 		}
 		requestHash, _ = hex.DecodeString(plan.CandidateHash)
-		requestSummary, _ = json.Marshal(map[string]any{"node_id": plan.NodeID, "expected_revision": plan.ExpectedRevision, "candidate_hash": plan.CandidateHash, "current_hash": plan.CurrentHash, "expires_at": plan.ExpiresAt})
-	} else if strings.TrimSpace(body.Action) == "certificate.issue" {
+		requestSummary, _ = json.Marshal(map[string]any{"node_id": plan.NodeID, "expected_revision": plan.ExpectedRevision, "candidate_hash": plan.CandidateHash, "current_hash": plan.CurrentHash, "diff_redacted": plan.DiffRedacted, "expires_at": plan.ExpiresAt})
+	} else if action == "certificate.issue" {
 		if resource.Type != "certificate" || s.certificates == nil {
 			writeProblem(w, r, http.StatusBadRequest, "https://ocservia.dev/problems/invalid-request", "Invalid request", "certificate approval requires a ready CSR")
 			return
@@ -102,21 +156,90 @@ func (s *Server) createApproval(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		node := rbac.Resource{WorkspaceID: workspaceID, Type: "node", ID: nodeID}
+		authorityResources = append(authorityResources, approvals.AuthorityResource{WorkspaceID: workspaceID, Type: "node", ID: nodeID})
 		if !s.devAuth && s.rbac.Authorize(r.Context(), actor.IdentityID, "certificate.issue", node, actor.BreakGlass) != nil {
 			s.writeAuthorizationError(w, r, rbac.ErrForbidden)
 			return
 		}
 		requestHash, requestSummary = hash, summary
+	} else if action == "certificate.revoke" || action == "certificate.private_key.export" {
+		if resource.Type != "certificate" || body.Certificate == nil || s.certificates == nil {
+			writeProblem(w, r, http.StatusBadRequest, "https://ocservia.dev/problems/invalid-request", "Invalid request", "certificate approval requires exact action content")
+			return
+		}
+		artifactID := uuid.Nil
+		if body.Certificate.ArtifactRequestID != "" {
+			artifactID, err = parseUUIDv7(body.Certificate.ArtifactRequestID)
+			if err != nil {
+				writeProblem(w, r, http.StatusBadRequest, "https://ocservia.dev/problems/invalid-request", "Invalid request", "artifact_request_id must be UUIDv7")
+				return
+			}
+		}
+		purpose := body.Certificate.Purpose
+		if action == "certificate.revoke" {
+			purpose = body.Certificate.Reason
+		}
+		workspaceID, nodeID, hash, summary, bindingErr := s.certificates.ActionApprovalBinding(r.Context(), action, resourceID, body.Certificate.ExpectedVersion, purpose, artifactID)
+		if bindingErr != nil || workspaceID != resource.WorkspaceID {
+			writeProblem(w, r, http.StatusConflict, "https://ocservia.dev/problems/certificate-not-ready", "Certificate is not ready", "certificate content changed before approval")
+			return
+		}
+		node := rbac.Resource{WorkspaceID: workspaceID, Type: "node", ID: nodeID}
+		if !s.devAuth && s.rbac.Authorize(r.Context(), actor.IdentityID, action, node, actor.BreakGlass) != nil {
+			s.writeAuthorizationError(w, r, rbac.ErrForbidden)
+			return
+		}
+		requestHash, requestSummary = hash, summary
+		authorityResources = append(authorityResources, approvals.AuthorityResource{WorkspaceID: workspaceID, Type: "node", ID: nodeID})
+	} else if action == "role_binding.elevate" {
+		if resource.Type != "role_binding" || body.RoleBinding == nil {
+			writeProblem(w, r, http.StatusBadRequest, "https://ocservia.dev/problems/invalid-request", "Invalid request", "role elevation approval requires exact binding content")
+			return
+		}
+		identityID, parseErr := parseUUIDv7(body.RoleBinding.IdentityID)
+		if parseErr != nil || identityID != resourceID {
+			writeProblem(w, r, http.StatusBadRequest, "https://ocservia.dev/problems/invalid-request", "Invalid request", "role binding identity does not match resource_id")
+			return
+		}
+		bindingResourceID := uuid.Nil
+		if body.RoleBinding.ResourceID != "" {
+			bindingResourceID, parseErr = parseUUIDv7(body.RoleBinding.ResourceID)
+			if parseErr != nil {
+				writeProblem(w, r, http.StatusBadRequest, "https://ocservia.dev/problems/invalid-request", "Invalid request", "role binding resource is invalid")
+				return
+			}
+		}
+		if !slices.Contains([]string{"SecurityAdmin", "PlatformAdmin"}, body.RoleBinding.Role) {
+			writeProblem(w, r, http.StatusBadRequest, "https://ocservia.dev/problems/invalid-request", "Invalid request", "only high privilege roles use elevation approval")
+			return
+		}
+		requestHash, requestSummary = rbac.BindingApprovalContent(identityID, resource.WorkspaceID, body.RoleBinding.Role, body.RoleBinding.ResourceType, bindingResourceID)
+		scopeType, scopeID := body.RoleBinding.ResourceType, bindingResourceID
+		if scopeType == "workspace" {
+			scopeID = uuid.Nil
+		}
+		authorityResources = append(authorityResources, approvals.AuthorityResource{WorkspaceID: resource.WorkspaceID, Type: scopeType, ID: scopeID})
+		if !s.devAuth && s.rbac.Authorize(r.Context(), actor.IdentityID, "role_binding.manage", rbac.Resource{WorkspaceID: resource.WorkspaceID, Type: scopeType, ID: scopeID}, actor.BreakGlass) != nil {
+			s.writeAuthorizationError(w, r, rbac.ErrForbidden)
+			return
+		}
+	} else {
+		requestHash, requestSummary = approvals.GenericBinding(action, resource.Type, resource.ID)
+		authorityID := resource.ID
+		if resource.Type == "workspace" {
+			authorityID = uuid.Nil
+		}
+		authorityResources = append(authorityResources, approvals.AuthorityResource{WorkspaceID: resource.WorkspaceID, Type: resource.Type, ID: authorityID})
 	}
 	// Approval requests cannot be used to ask another user to authorize an action
 	// that the requester could not perform themselves.
-	if !s.devAuth && strings.TrimSpace(body.Action) != "user.batch.disable" && strings.TrimSpace(body.Action) != "config.apply" && strings.TrimSpace(body.Action) != "certificate.issue" {
-		if err := s.rbac.Authorize(r.Context(), actor.IdentityID, strings.TrimSpace(body.Action), resource, actor.BreakGlass); err != nil {
+	if !s.devAuth && action != "user.batch.disable" && action != "config.apply" && action != "certificate.issue" && action != "certificate.revoke" && action != "certificate.private_key.export" && action != "node.approve" && action != "role_binding.elevate" {
+		if err := s.rbac.Authorize(r.Context(), actor.IdentityID, action, resource, actor.BreakGlass); err != nil {
 			s.writeAuthorizationError(w, r, err)
 			return
 		}
 	}
-	value, err := s.approvals.Create(r.Context(), approvals.Request{WorkspaceID: resource.WorkspaceID, RequesterID: actor.IdentityID, ResourceID: resourceID, Action: body.Action, ResourceType: body.ResourceType, Reason: body.Reason, TTL: time.Duration(body.TTLSeconds) * time.Second, SessionID: actor.SessionID, RequestID: requestID(r), RequestHash: requestHash, RequestSummary: requestSummary})
+	value, err := s.approvals.Create(r.Context(), approvals.Request{WorkspaceID: resource.WorkspaceID, RequesterID: actor.IdentityID, ResourceID: resourceID, Action: action, ResourceType: body.ResourceType, Reason: body.Reason, TTL: time.Duration(body.TTLSeconds) * time.Second, SessionID: actor.SessionID, RequestID: requestID(r), RequestHash: requestHash, RequestSummary: requestSummary, AuthorityResources: authorityResources, BatchItems: boundBatchItems})
 	if err != nil {
 		writeApprovalError(w, r, err)
 		return

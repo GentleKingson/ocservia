@@ -5,6 +5,8 @@ const nodeId = "019fc0a4-6d92-765c-a8a1-4af556614dd2";
 const planId = "019fc0a4-6d92-765c-a8a1-4af556614dd3";
 const approvalId = "019fc0a4-6d92-765c-a8a1-4af556614dd4";
 const operationId = "019fc0a4-6d92-765c-a8a1-4af556614dd5";
+const certificateSecretRefId = "019fc0a4-6d92-765c-a8a1-4af556614dd6";
+const privateKeySecretRefId = "019fc0a4-6d92-765c-a8a1-4af556614dd7";
 const node = {
   id: nodeId,
   name: "Config node",
@@ -144,6 +146,8 @@ test("submits a typed configuration plan and renders a safe diff", async ({
   await page.getByTitle("Configuration plan").click();
   await page.getByLabel("TCP port").fill("8443");
   await page.getByLabel("Maximum clients").fill("256");
+  await page.getByLabel("Certificate reference").fill(certificateSecretRefId);
+  await page.getByLabel("Private key reference").fill(privateKeySecretRefId);
   await page.getByLabel("Reason").fill("review edge configuration");
   await page.getByRole("button", { name: "Plan", exact: true }).last().click();
 
@@ -159,8 +163,19 @@ test("submits a typed configuration plan and renders a safe diff", async ({
         {
           name: "server-key",
           secret_ref: {
-            provider: "node",
-            key: "tls/server-private-key",
+            secret_ref_id: privateKeySecretRefId,
+          },
+        },
+      ]),
+    },
+  });
+  expect(submitted).toMatchObject({
+    template: {
+      directives: expect.arrayContaining([
+        {
+          name: "server-cert",
+          secret_ref: {
+            secret_ref_id: certificateSecretRefId,
           },
         },
       ]),

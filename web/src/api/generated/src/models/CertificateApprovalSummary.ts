@@ -12,88 +12,28 @@
  * Do not edit the class manually.
  */
 
-import { mapValues } from "../runtime";
-/**
- *
- * @export
- * @interface CertificateApprovalSummary
- */
-export interface CertificateApprovalSummary {
-  /**
-   *
-   * @type {string}
-   * @memberof CertificateApprovalSummary
-   */
-  certificateId: string;
-  /**
-   *
-   * @type {string}
-   * @memberof CertificateApprovalSummary
-   */
-  nodeId: string;
-  /**
-   *
-   * @type {string}
-   * @memberof CertificateApprovalSummary
-   */
-  commonName: string;
-  /**
-   *
-   * @type {Array<string>}
-   * @memberof CertificateApprovalSummary
-   */
-  dnsNames: Array<string>;
-  /**
-   *
-   * @type {string}
-   * @memberof CertificateApprovalSummary
-   */
-  csrSha256: string;
-}
+import type { CertificateActionApprovalSummary } from "./CertificateActionApprovalSummary";
+import {
+  instanceOfCertificateActionApprovalSummary,
+  CertificateActionApprovalSummaryFromJSON,
+  CertificateActionApprovalSummaryFromJSONTyped,
+  CertificateActionApprovalSummaryToJSON,
+} from "./CertificateActionApprovalSummary";
+import type { CertificateIssueApprovalSummary } from "./CertificateIssueApprovalSummary";
+import {
+  instanceOfCertificateIssueApprovalSummary,
+  CertificateIssueApprovalSummaryFromJSON,
+  CertificateIssueApprovalSummaryFromJSONTyped,
+  CertificateIssueApprovalSummaryToJSON,
+} from "./CertificateIssueApprovalSummary";
 
 /**
- * Check if a given object implements the CertificateApprovalSummary interface.
+ * @type CertificateApprovalSummary
+ *
+ * @export
  */
-export function instanceOfCertificateApprovalSummary(
-  value: object,
-): value is CertificateApprovalSummary {
-  if (
-    (!("certificateId" in (value as Record<string, any>)) &&
-      !("certificate_id" in (value as Record<string, any>))) ||
-    ((value as Record<string, any>)["certificateId"] === undefined &&
-      (value as Record<string, any>)["certificate_id"] === undefined)
-  )
-    return false;
-  if (
-    (!("nodeId" in (value as Record<string, any>)) &&
-      !("node_id" in (value as Record<string, any>))) ||
-    ((value as Record<string, any>)["nodeId"] === undefined &&
-      (value as Record<string, any>)["node_id"] === undefined)
-  )
-    return false;
-  if (
-    (!("commonName" in (value as Record<string, any>)) &&
-      !("common_name" in (value as Record<string, any>))) ||
-    ((value as Record<string, any>)["commonName"] === undefined &&
-      (value as Record<string, any>)["common_name"] === undefined)
-  )
-    return false;
-  if (
-    (!("dnsNames" in (value as Record<string, any>)) &&
-      !("dns_names" in (value as Record<string, any>))) ||
-    ((value as Record<string, any>)["dnsNames"] === undefined &&
-      (value as Record<string, any>)["dns_names"] === undefined)
-  )
-    return false;
-  if (
-    (!("csrSha256" in (value as Record<string, any>)) &&
-      !("csr_sha256" in (value as Record<string, any>))) ||
-    ((value as Record<string, any>)["csrSha256"] === undefined &&
-      (value as Record<string, any>)["csr_sha256"] === undefined)
-  )
-    return false;
-  return true;
-}
+export type CertificateApprovalSummary =
+  CertificateActionApprovalSummary | CertificateIssueApprovalSummary;
 
 export function CertificateApprovalSummaryFromJSON(
   json: any,
@@ -108,18 +48,19 @@ export function CertificateApprovalSummaryFromJSONTyped(
   if (json == null) {
     return json;
   }
-  return {
-    certificateId: json["certificate_id"],
-    nodeId: json["node_id"],
-    commonName: json["common_name"],
-    dnsNames: json["dns_names"],
-    csrSha256: json["csr_sha256"],
-  };
+  if (typeof json !== "object") {
+    return json;
+  }
+  if (instanceOfCertificateActionApprovalSummary(json)) {
+    return CertificateActionApprovalSummaryFromJSONTyped(json, true);
+  }
+  if (instanceOfCertificateIssueApprovalSummary(json)) {
+    return CertificateIssueApprovalSummaryFromJSONTyped(json, true);
+  }
+  return {} as any;
 }
 
-export function CertificateApprovalSummaryToJSON(
-  json: any,
-): CertificateApprovalSummary {
+export function CertificateApprovalSummaryToJSON(json: any): any {
   return CertificateApprovalSummaryToJSONTyped(json, false);
 }
 
@@ -130,12 +71,18 @@ export function CertificateApprovalSummaryToJSONTyped(
   if (value == null) {
     return value;
   }
-
-  return {
-    certificate_id: value["certificateId"],
-    node_id: value["nodeId"],
-    common_name: value["commonName"],
-    dns_names: value["dnsNames"],
-    csr_sha256: value["csrSha256"],
-  };
+  if (typeof value !== "object") {
+    return value;
+  }
+  if (instanceOfCertificateActionApprovalSummary(value)) {
+    return CertificateActionApprovalSummaryToJSON(
+      value as CertificateActionApprovalSummary,
+    );
+  }
+  if (instanceOfCertificateIssueApprovalSummary(value)) {
+    return CertificateIssueApprovalSummaryToJSON(
+      value as CertificateIssueApprovalSummary,
+    );
+  }
+  return {};
 }

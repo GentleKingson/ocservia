@@ -55,6 +55,12 @@ export interface RoleBindingRequest {
    * @memberof RoleBindingRequest
    */
   reason: string;
+  /**
+   * Required for SecurityAdmin and PlatformAdmin grants.
+   * @type {string}
+   * @memberof RoleBindingRequest
+   */
+  approvalId?: string;
 }
 
 /**
@@ -79,6 +85,11 @@ export const RoleBindingRequestResourceTypeEnum = {
   Workspace: "workspace",
   Node: "node",
   Resource: "resource",
+  SecretRef: "secret_ref",
+  Certificate: "certificate",
+  ConfigPlan: "config_plan",
+  BatchOperation: "batch_operation",
+  RoleBinding: "role_binding",
 } as const;
 export type RoleBindingRequestResourceTypeEnum =
   (typeof RoleBindingRequestResourceTypeEnum)[keyof typeof RoleBindingRequestResourceTypeEnum];
@@ -133,6 +144,7 @@ export function RoleBindingRequestFromJSONTyped(
     resourceType: json["resource_type"],
     resourceId: json["resource_id"] == null ? undefined : json["resource_id"],
     reason: json["reason"],
+    approvalId: json["approval_id"] == null ? undefined : json["approval_id"],
   };
 }
 
@@ -155,5 +167,6 @@ export function RoleBindingRequestToJSONTyped(
     resource_type: value["resourceType"],
     resource_id: value["resourceId"],
     reason: value["reason"],
+    approval_id: value["approvalId"],
   };
 }

@@ -13,6 +13,27 @@
  */
 
 import { mapValues } from "../runtime";
+import type { ApprovalRequestCertificate } from "./ApprovalRequestCertificate";
+import {
+  ApprovalRequestCertificateFromJSON,
+  ApprovalRequestCertificateFromJSONTyped,
+  ApprovalRequestCertificateToJSON,
+  ApprovalRequestCertificateToJSONTyped,
+} from "./ApprovalRequestCertificate";
+import type { NodeApproval } from "./NodeApproval";
+import {
+  NodeApprovalFromJSON,
+  NodeApprovalFromJSONTyped,
+  NodeApprovalToJSON,
+  NodeApprovalToJSONTyped,
+} from "./NodeApproval";
+import type { ApprovalRequestRoleBinding } from "./ApprovalRequestRoleBinding";
+import {
+  ApprovalRequestRoleBindingFromJSON,
+  ApprovalRequestRoleBindingFromJSONTyped,
+  ApprovalRequestRoleBindingToJSON,
+  ApprovalRequestRoleBindingToJSONTyped,
+} from "./ApprovalRequestRoleBinding";
 import type { UserBatchItemRequest } from "./UserBatchItemRequest";
 import {
   UserBatchItemRequestFromJSON,
@@ -44,7 +65,7 @@ export interface ApprovalRequest {
    * @type {string}
    * @memberof ApprovalRequest
    */
-  resourceId: string;
+  resourceId?: string;
   /**
    *
    * @type {string}
@@ -63,6 +84,24 @@ export interface ApprovalRequest {
    * @memberof ApprovalRequest
    */
   batchItems?: Array<UserBatchItemRequest>;
+  /**
+   *
+   * @type {NodeApproval}
+   * @memberof ApprovalRequest
+   */
+  nodeApproval?: NodeApproval;
+  /**
+   *
+   * @type {ApprovalRequestCertificate}
+   * @memberof ApprovalRequest
+   */
+  certificate?: ApprovalRequestCertificate;
+  /**
+   *
+   * @type {ApprovalRequestRoleBinding}
+   * @memberof ApprovalRequest
+   */
+  roleBinding?: ApprovalRequestRoleBinding;
 }
 
 /**
@@ -77,13 +116,6 @@ export function instanceOfApprovalRequest(
       !("resource_type" in (value as Record<string, any>))) ||
     ((value as Record<string, any>)["resourceType"] === undefined &&
       (value as Record<string, any>)["resource_type"] === undefined)
-  )
-    return false;
-  if (
-    (!("resourceId" in (value as Record<string, any>)) &&
-      !("resource_id" in (value as Record<string, any>))) ||
-    ((value as Record<string, any>)["resourceId"] === undefined &&
-      (value as Record<string, any>)["resource_id"] === undefined)
   )
     return false;
   if (!("reason" in value) || value["reason"] === undefined) return false;
@@ -111,13 +143,25 @@ export function ApprovalRequestFromJSONTyped(
   return {
     action: json["action"],
     resourceType: json["resource_type"],
-    resourceId: json["resource_id"],
+    resourceId: json["resource_id"] == null ? undefined : json["resource_id"],
     reason: json["reason"],
     ttlSeconds: json["ttl_seconds"],
     batchItems:
       json["batch_items"] == null
         ? undefined
         : (json["batch_items"] as Array<any>).map(UserBatchItemRequestFromJSON),
+    nodeApproval:
+      json["node_approval"] == null
+        ? undefined
+        : NodeApprovalFromJSON(json["node_approval"]),
+    certificate:
+      json["certificate"] == null
+        ? undefined
+        : ApprovalRequestCertificateFromJSON(json["certificate"]),
+    roleBinding:
+      json["role_binding"] == null
+        ? undefined
+        : ApprovalRequestRoleBindingFromJSON(json["role_binding"]),
   };
 }
 
@@ -143,5 +187,8 @@ export function ApprovalRequestToJSONTyped(
       value["batchItems"] == null
         ? undefined
         : (value["batchItems"] as Array<any>).map(UserBatchItemRequestToJSON),
+    node_approval: NodeApprovalToJSON(value["nodeApproval"]),
+    certificate: ApprovalRequestCertificateToJSON(value["certificate"]),
+    role_binding: ApprovalRequestRoleBindingToJSON(value["roleBinding"]),
   };
 }

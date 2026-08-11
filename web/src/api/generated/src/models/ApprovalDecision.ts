@@ -30,7 +30,7 @@ export interface ApprovalDecision {
    * @type {string}
    * @memberof ApprovalDecision
    */
-  expectedRequestHash?: string;
+  expectedRequestHash: string;
 }
 
 /**
@@ -40,6 +40,13 @@ export function instanceOfApprovalDecision(
   value: object,
 ): value is ApprovalDecision {
   if (!("reason" in value) || value["reason"] === undefined) return false;
+  if (
+    (!("expectedRequestHash" in (value as Record<string, any>)) &&
+      !("expected_request_hash" in (value as Record<string, any>))) ||
+    ((value as Record<string, any>)["expectedRequestHash"] === undefined &&
+      (value as Record<string, any>)["expected_request_hash"] === undefined)
+  )
+    return false;
   return true;
 }
 
@@ -56,10 +63,7 @@ export function ApprovalDecisionFromJSONTyped(
   }
   return {
     reason: json["reason"],
-    expectedRequestHash:
-      json["expected_request_hash"] == null
-        ? undefined
-        : json["expected_request_hash"],
+    expectedRequestHash: json["expected_request_hash"],
   };
 }
 

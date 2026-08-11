@@ -26,9 +26,8 @@ type userPolicyRequest struct {
 }
 
 type userBatchRequest struct {
-	BatchID uuid.UUID                         `json:"batch_id"`
-	Reason  string                            `json:"reason"`
-	Items   []useroperations.BatchItemRequest `json:"items"`
+	Reason string                            `json:"reason"`
+	Items  []useroperations.BatchItemRequest `json:"items"`
 }
 
 func (s *Server) getUserPolicy(w http.ResponseWriter, r *http.Request) {
@@ -115,7 +114,7 @@ func (s *Server) createUserBatch(w http.ResponseWriter, r *http.Request) {
 		}
 		body.Items[index].Authorized = principal.Issuer == "development" || s.rbac.Authorize(r.Context(), principal.IdentityID, "user.manage", resource, principal.BreakGlass) == nil
 	}
-	batch, replayed, err := s.useroperations.CreateBatch(r.Context(), useroperations.BatchRequest{ID: body.BatchID, WorkspaceID: workspaceID, ActorIdentityID: principal.IdentityID, ActorSessionID: principal.SessionID, ApprovalID: approvalID(r), ActorID: actorID(r), Reason: strings.TrimSpace(body.Reason), RequestID: requestID(r), Traceparent: requestTraceparent(r), IdempotencyKey: idempotencyKey, Items: body.Items})
+	batch, replayed, err := s.useroperations.CreateBatch(r.Context(), useroperations.BatchRequest{WorkspaceID: workspaceID, ActorIdentityID: principal.IdentityID, ActorSessionID: principal.SessionID, ApprovalID: approvalID(r), ActorID: actorID(r), Reason: strings.TrimSpace(body.Reason), RequestID: requestID(r), Traceparent: requestTraceparent(r), IdempotencyKey: idempotencyKey, Items: body.Items})
 	if err != nil {
 		s.writeUserOperationsError(w, r, err)
 		return
