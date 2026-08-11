@@ -385,14 +385,21 @@ func (s *Service) Ingest(ctx context.Context, event *transportv1.TransportEvent)
 		return fmt.Errorf("begin event transaction: %w", err)
 	}
 	defer rollback(tx)
-	var ingressActive bool
-	if err := tx.QueryRow(ctx, `SELECT true
+	var nodeStatus, endpointState string
+	if err := tx.QueryRow(ctx, `SELECT n.status,k.state
 		FROM nodes n JOIN node_endpoint_keys k ON k.node_id=n.id
-		WHERE n.id=$1 AND k.endpoint_id=$2 AND n.status IN ('active','offline') AND k.state='active'
-		FOR SHARE OF n,k`, nodeID, event.GetEndpointId()).Scan(&ingressActive); errors.Is(err, pgx.ErrNoRows) {
+		WHERE n.id=$1 AND k.endpoint_id=$2
+		FOR SHARE OF n,k`, nodeID, event.GetEndpointId()).Scan(&nodeStatus, &endpointState); errors.Is(err, pgx.ErrNoRows) {
 		return errors.New("transport event node is not authoritatively active")
 	} else if err != nil {
 		return fmt.Errorf("check authoritative node ingress trust: %w", err)
+	}
+	activeIngress := (nodeStatus == "active" || nodeStatus == "offline") && endpointState == "active"
+	// Revocation commits the tombstone before transportd closes the old session.
+	// Only its exact node/endpoint terminal event may cross that closed trust boundary.
+	revokedTerminalDisconnect := eventType == "disconnected" && nodeStatus == "revoked" && endpointState == "revoked"
+	if !activeIngress && !revokedTerminalDisconnect {
+		return errors.New("transport event node is not authoritatively active")
 	}
 	if eventType == "telemetry" {
 		if _, err := telemetrystore.New(s.pool).IngestWireTx(ctx, tx, nodeID, event.GetPayload()); err != nil {

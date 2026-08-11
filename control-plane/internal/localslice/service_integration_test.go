@@ -88,6 +88,7 @@ func TestDisconnectedEventPreservesUntrustedNodeStatesIntegration(t *testing.T) 
 		t.Fatal(err)
 	}
 	t.Cleanup(func() {
+		_, _ = pool.Exec(context.Background(), `DELETE FROM transport_events WHERE node_id IN(SELECT id FROM nodes WHERE workspace_id=$1)`, workspaceID)
 		_, _ = pool.Exec(context.Background(), `DELETE FROM node_endpoint_keys WHERE node_id IN(SELECT id FROM nodes WHERE workspace_id=$1)`, workspaceID)
 		_, _ = pool.Exec(context.Background(), `DELETE FROM nodes WHERE workspace_id=$1`, workspaceID)
 		_, _ = pool.Exec(context.Background(), `DELETE FROM workspaces WHERE id=$1`, workspaceID)
@@ -102,9 +103,21 @@ func TestDisconnectedEventPreservesUntrustedNodeStatesIntegration(t *testing.T) 
 		if _, err := pool.Exec(ctx, `INSERT INTO node_endpoint_keys(node_id,endpoint_id,state,bound_at,revoked_at) VALUES($1,$2,$3,now(),CASE WHEN $3='revoked' THEN now() END)`, nodeID, endpoint[:], endpointState); err != nil {
 			t.Fatal(err)
 		}
+		if initialStatus == "revoked" {
+			wrongEndpoint := endpoint
+			wrongEndpoint[0] ^= 0xff
+			wrongEventID := uuid.Must(uuid.NewV7())
+			err = NewWithSigner(pool, integrationCommandSigner()).Ingest(ctx, &transportv1.TransportEvent{EventId: wrongEventID[:], NodeId: nodeID[:], EndpointId: wrongEndpoint[:], Type: transportv1.TransportEventType_TRANSPORT_EVENT_TYPE_DISCONNECTED, OccurredAt: timestamppb.Now(), Traceparent: "00-0123456789abcdef0123456789abcdef-0123456789abcdef-01", Payload: []byte("wrong endpoint disconnect")})
+			if err == nil {
+				t.Fatal("revoked node disconnect with a non-tombstoned endpoint was accepted")
+			}
+		}
 		eventID := uuid.Must(uuid.NewV7())
 		err = NewWithSigner(pool, integrationCommandSigner()).Ingest(ctx, &transportv1.TransportEvent{EventId: eventID[:], NodeId: nodeID[:], EndpointId: endpoint[:], Type: transportv1.TransportEventType_TRANSPORT_EVENT_TYPE_DISCONNECTED, OccurredAt: timestamppb.Now(), Traceparent: "00-0123456789abcdef0123456789abcdef-0123456789abcdef-01", Payload: []byte(initialStatus + " disconnect")})
-		if err == nil {
+		if initialStatus == "revoked" && err != nil {
+			t.Fatalf("revoked tombstone disconnect was rejected: %v", err)
+		}
+		if initialStatus != "revoked" && err == nil {
 			t.Fatalf("%s node event was accepted after trust ended", initialStatus)
 		}
 		var status string
