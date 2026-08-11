@@ -11,8 +11,12 @@ fi
 work="${RUNNER_TEMP:-/tmp}/ocservia-i18-package-${RUN_ID}"
 mkdir -p "${work}" "${ARTIFACT_DIR}"
 chmod 0700 "${work}"
+runner_temp_mode=""
 cleanup() {
   local status=$?
+  if [[ -n "${runner_temp_mode}" ]]; then
+    sudo chmod "${runner_temp_mode}" "${RUNNER_TEMP:-/tmp}" || status=1
+  fi
   sudo rm -rf -- "${work}" || status=1
   exit "${status}"
 }
@@ -376,6 +380,8 @@ sudo install -o root -g root -m 0600 "${work}/p12-password-seal-private.pem" \
 	printf 'legacy-p12' >"${work}/legacy-artifact.p12"
 	sudo install -o root -g 61000 -m 0640 "${work}/legacy-artifact.p12" \
 	  "${legacy_artifact_dir}/${legacy_artifact_id}.p12"
+	runner_temp_mode="$(stat -c '%a' "${RUNNER_TEMP:-/tmp}")"
+	sudo chmod o+x "${RUNNER_TEMP:-/tmp}"
 	chmod 0711 "${work}"
 	sudo setpriv --reuid=61000 --regid=61000 --clear-groups \
 	  test -r "${legacy_artifact_dir}/${legacy_artifact_id}.p12" \
@@ -392,6 +398,8 @@ sudo install -o root -g root -m 0600 "${work}/p12-password-seal-private.pem" \
 	  exit 1
 	fi
 	chmod 0700 "${work}"
+	sudo chmod "${runner_temp_mode}" "${RUNNER_TEMP:-/tmp}"
+	runner_temp_mode=""
 	test "$(sudo stat -c '%u:%g:%a' -- "${rootfs}/etc/ocservia-agent/sealing-keys-bound")" = "0:0:600"
 	sudo grep -Fxq "node_id=00000000-0000-7000-8000-000000000000" \
 	  "${rootfs}/etc/ocservia-agent/sealing-keys-bound"
