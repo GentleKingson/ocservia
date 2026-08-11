@@ -35,8 +35,13 @@ The production containers intentionally use separate service identities:
 Controller UID 65534, transportd UID 65532, and shared socket GID 65532. Keep
 the Compose `OCSERV_TRANSPORT_UID`/`OCSERV_TRANSPORT_GID` and transportd
 `--control-plane-uid`/`--control-plane-gid` values aligned with those service
-users. The runtime volumes must retain their image-provisioned `0750`
-directories; do not make either socket parent client-writable.
+users. The production launcher stops the Controller and transportd before
+running a root-owned, network-disabled runtime initializer. The initializer
+accepts only the current `65532:65532 0750` transport volume or the exact
+legacy `65532:65532 0770` state, seals the directory before inspecting it,
+removes only a trusted stale transport socket, and finishes at `0750`.
+Unexpected owners, entries, links, or modes fail closed. Do not invoke Compose
+directly or make either socket parent client-writable.
 
 Before starting, validate rendered configuration without printing secret contents:
 

@@ -1,11 +1,27 @@
 # Node enrollment development
 
-Enrollment is explicit and does not activate a node. An authenticated operator
-first creates a token with `POST /api/v1/enrollment-tokens`. Every token must
-name the expected 32-byte EndpointID; unbound production tokens are rejected.
-The response is marked `Cache-Control: no-store` and returns the plaintext
-token once; only its SHA-256 digest is stored. Tokens expire after at most 15
-minutes.
+Enrollment is explicit and does not activate a node. On a fresh node, prepare
+the long-lived endpoint identity before requesting a token:
+
+```bash
+sudo -u ocserv-agent ocservia-agent \
+  --identity-dir /var/lib/ocservia-agent/identity \
+  --controller "$CONTROLLER_ENDPOINT_ID" \
+  --prepare-enrollment
+```
+
+This offline preparation mode creates or reads only the protected identity and
+controller pin, then prints the Agent's 64-character lowercase hexadecimal
+EndpointID. It does not read an enrollment token, contact the Controller, or
+start an Agent session. Repeating the command with the same controller pin
+prints the same EndpointID; a substituted controller pin is rejected.
+
+An authenticated operator then creates a token with
+`POST /api/v1/enrollment-tokens`, passing that value as
+`expected_endpoint_id`. Every token must name the expected 32-byte EndpointID;
+unbound production tokens are rejected. The response is marked
+`Cache-Control: no-store` and returns the plaintext token once; only its
+SHA-256 digest is stored. Tokens expire after at most 15 minutes.
 
 The Agent keeps its endpoint key in an owner-only local directory and pins the
 controller EndpointID. Reusing the directory preserves the Agent EndpointID;
@@ -22,8 +38,8 @@ approval; revocation permanently ends recovery. Pending nodes cannot use the
 agent ALPN. The pending endpoint binding and advertised supported capabilities
 are retained for approval.
 
-Run enrollment with the same protected identity directory that the installed
-Agent will use:
+Place the returned token in the protected token file, then run enrollment with
+the same identity directory used during preparation:
 
 ```bash
 sudo -u ocserv-agent ocservia-agent \

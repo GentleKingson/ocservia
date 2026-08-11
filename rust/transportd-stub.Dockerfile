@@ -8,6 +8,7 @@ FROM debian:bookworm-slim
 RUN groupadd --system --gid 65532 ocservia \
     && useradd --system --uid 65533 --gid ocservia transportd-stub \
     && install -d -o transportd-stub -g ocservia -m 0750 /run/ocserv-platform
+COPY --chmod=0555 deploy/prepare-transport-runtime.sh /usr/local/libexec/ocservia-prepare-transport-runtime
 COPY --from=build /src/target/release/ocservia-transportd-stub /usr/local/bin/ocservia-transportd-stub
 USER transportd-stub:ocservia
 ENTRYPOINT ["/usr/local/bin/ocservia-transportd-stub"]

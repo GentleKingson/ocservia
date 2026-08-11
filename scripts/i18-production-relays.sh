@@ -13,16 +13,21 @@ work="${RUNNER_TEMP:-/tmp}/ocservia-i18-production-${RUN_ID}"
 runtime_transport_image="ocservia-i18-transport-runtime:${RUN_ID}"
 runtime_control_image="ocservia-i18-control-runtime:${RUN_ID}"
 trust_volume="ocservia-i18-trust-${RUN_ID}"
+transport_volume="ocservia-i18-transport-${RUN_ID}"
+development_transport_volume="ocservia-i18-development-transport-${RUN_ID}"
 cleanup() {
   local status=$?
-  docker volume rm -f "${trust_volume}" >/dev/null 2>&1 || true
+  docker volume rm -f "${trust_volume}" "${transport_volume}" \
+    "${development_transport_volume}" >/dev/null 2>&1 || true
   docker image rm -f "${runtime_transport_image}" "${runtime_control_image}" >/dev/null 2>&1 || true
   sudo chown -R "$(id -u):$(id -g)" "${work}" >/dev/null 2>&1 || status=1
   rm -rf -- "${work}"
-  if docker volume inspect "${trust_volume}" >/dev/null 2>&1; then
-    echo "scoped trust volume cleanup failed" >&2
-    status=1
-  fi
+  for volume in "${trust_volume}" "${transport_volume}" "${development_transport_volume}"; do
+    if docker volume inspect "${volume}" >/dev/null 2>&1; then
+      echo "scoped runtime volume cleanup failed: ${volume}" >&2
+      status=1
+    fi
+  done
   for image in "${runtime_transport_image}" "${runtime_control_image}"; do
     if docker image inspect "${image}" >/dev/null 2>&1; then
       echo "scoped runtime image cleanup failed: ${image}" >&2
@@ -130,10 +135,25 @@ def hardened(service):
         assert forbidden not in serialized
 
 services = platform["services"]
-assert set(services) == {"gateway", "postgres", "migrate", "control-plane", "transportd", "otel-collector", "backup"}
-for service in services.values():
+assert set(services) == {"transport-runtime-init", "gateway", "postgres", "migrate", "control-plane", "transportd", "otel-collector", "backup"}
+for name, service in services.items():
+    if name == "transport-runtime-init":
+        continue
     hardened(service)
     assert re.fullmatch(r"[^\s]+@sha256:[0-9a-f]{64}", service["image"])
+runtime_init = services["transport-runtime-init"]
+assert re.fullmatch(r"[^\s]+@sha256:[0-9a-f]{64}", runtime_init["image"])
+assert runtime_init["user"] == "0:0"
+assert runtime_init["read_only"] is True
+assert runtime_init["cap_drop"] == ["ALL"]
+assert set(runtime_init["cap_add"]) == {"CHOWN", "FOWNER", "DAC_OVERRIDE"}
+assert runtime_init["network_mode"] == "none"
+assert runtime_init["restart"] == "no"
+assert runtime_init["entrypoint"] == ["/usr/local/libexec/ocservia-prepare-transport-runtime"]
+assert runtime_init["command"] == ["/run/ocserv-platform", "65532", "65532", "65532"]
+assert runtime_init["volumes"][0]["target"] == "/run/ocserv-platform"
+assert services["transportd"]["depends_on"]["transport-runtime-init"]["condition"] == "service_completed_successfully"
+assert services["control-plane"]["depends_on"]["transport-runtime-init"]["condition"] == "service_completed_successfully"
 assert services["gateway"].get("ports") and all(not service.get("ports") for name, service in services.items() if name != "gateway")
 for name in ("application", "database", "observability"):
     assert platform["networks"][name]["internal"] is True
@@ -193,6 +213,29 @@ docker build --target runtime-base -t "${runtime_transport_image}" \
 docker build --target runtime-base -t "${runtime_control_image}" \
   -f "${ROOT}/control-plane/Dockerfile" "${ROOT}" \
   >"${ARTIFACT_DIR}/control-runtime-build.log"
+docker volume create "${transport_volume}" >/dev/null
+docker run --rm --user 0:0 --cap-add CHOWN --cap-add FOWNER --cap-add DAC_OVERRIDE \
+  -v "${transport_volume}:/run/ocserv-platform" --entrypoint /bin/sh "${runtime_transport_image}" \
+  -c 'chown 65532:65532 /run/ocserv-platform && chmod 0770 /run/ocserv-platform'
+docker run --rm --user 0:0 --cap-drop ALL --cap-add CHOWN --cap-add FOWNER --cap-add DAC_OVERRIDE \
+  --network none -v "${transport_volume}:/run/ocserv-platform" \
+  --entrypoint /usr/local/libexec/ocservia-prepare-transport-runtime "${runtime_transport_image}" \
+  /run/ocserv-platform 65532 65532 65532
+docker run --rm --user 65532:65532 -v "${transport_volume}:/run/ocserv-platform" \
+  --entrypoint /bin/sh "${runtime_transport_image}" \
+  -c 'test "$(stat -c %u:%g:%a /run/ocserv-platform)" = "65532:65532:750" && : > /run/ocserv-platform/bind-probe && rm /run/ocserv-platform/bind-probe'
+
+docker volume create "${development_transport_volume}" >/dev/null
+docker run --rm --user 0:0 --cap-add CHOWN --cap-add FOWNER --cap-add DAC_OVERRIDE \
+  -v "${development_transport_volume}:/run/ocserv-platform" --entrypoint /bin/sh "${runtime_transport_image}" \
+  -c 'chown 65534:65532 /run/ocserv-platform && chmod 0770 /run/ocserv-platform'
+docker run --rm --user 0:0 --cap-drop ALL --cap-add CHOWN --cap-add FOWNER --cap-add DAC_OVERRIDE \
+  --network none -v "${development_transport_volume}:/run/ocserv-platform" \
+  --entrypoint /usr/local/libexec/ocservia-prepare-transport-runtime "${runtime_transport_image}" \
+  /run/ocserv-platform 65533 65532 65534
+docker run --rm --user 65533:65532 -v "${development_transport_volume}:/run/ocserv-platform" \
+  --entrypoint /bin/sh "${runtime_transport_image}" \
+  -c 'test "$(stat -c %u:%g:%a /run/ocserv-platform)" = "65533:65532:750" && : > /run/ocserv-platform/bind-probe && rm /run/ocserv-platform/bind-probe'
 docker volume create "${trust_volume}" >/dev/null
 docker run --rm --name "${trust_volume}-init" \
   -v "${trust_volume}:/run/ocserv-trust" --entrypoint /bin/true "${runtime_transport_image}"
@@ -209,7 +252,7 @@ docker run --rm --user 999:999 -v "${work}/secrets/postgres-app-password:/run/se
   -c 'test -r /run/secrets/test && test ! -w /run/secrets/test'
 docker run --rm --user 10001:10001 -v "${work}/secrets/otel-client.key:/run/secrets/test:ro" \
   --entrypoint /bin/sh "${runtime_control_image}" -c 'test -r /run/secrets/test && test ! -w /run/secrets/test'
-docker volume rm "${trust_volume}" >/dev/null
+docker volume rm "${trust_volume}" "${transport_volume}" "${development_transport_volume}" >/dev/null
 docker image rm "${runtime_transport_image}" "${runtime_control_image}" >/dev/null
 
 (cd "${ROOT}/rust" && cargo test --locked -p ocservia-transportd \

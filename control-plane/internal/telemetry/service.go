@@ -167,21 +167,27 @@ type Service struct {
 
 func New(pool *pgxpool.Pool) *Service { return &Service{pool: pool, now: time.Now} }
 
-func (s *Service) IngestWire(ctx context.Context, payload []byte) (bool, error) {
+func (s *Service) IngestWire(ctx context.Context, expectedNodeID uuid.UUID, payload []byte) (bool, error) {
 	batch, err := decodeWire(payload)
 	if err != nil {
 		return false, err
+	}
+	if batch.NodeID != expectedNodeID {
+		return false, errors.New("telemetry node identity mismatch")
 	}
 	return s.Ingest(ctx, batch)
 }
 
 // IngestWireTx writes a validated telemetry batch using the caller's
-// transaction so an authoritative endpoint check and every resulting state
-// change share one commit boundary.
-func (s *Service) IngestWireTx(ctx context.Context, tx pgx.Tx, payload []byte) (bool, error) {
+// authenticated node identity and transaction so the authoritative endpoint
+// check and every resulting state change share one commit boundary.
+func (s *Service) IngestWireTx(ctx context.Context, tx pgx.Tx, expectedNodeID uuid.UUID, payload []byte) (bool, error) {
 	batch, err := decodeWire(payload)
 	if err != nil {
 		return false, err
+	}
+	if batch.NodeID != expectedNodeID {
+		return false, errors.New("telemetry node identity mismatch")
 	}
 	payloadBytes, err := s.validateForIngest(batch)
 	if err != nil {

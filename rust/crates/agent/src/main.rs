@@ -44,8 +44,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     ocservia_observability::init("ocservia-agent")?;
     ocservia_agent::ensure_unprivileged(rustix::process::geteuid().as_raw())?;
     let config = parse_args()?;
-    if let Some(token_file) = config.enrollment_token_file.as_deref() {
-        enroll_agent(&config, token_file).await?;
+    if run_one_shot_mode(&config).await? {
         return Ok(());
     }
     let command_keys = load_controller_command_keys(&config)?;
@@ -144,6 +143,28 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         () = shutdown_signal() => tracing::info!("agent shutdown requested"),
     }
     Ok(())
+}
+
+async fn run_one_shot_mode(
+    config: &Config,
+) -> Result<bool, Box<dyn std::error::Error + Send + Sync>> {
+    if config.prepare_enrollment {
+        println!("{}", prepare_enrollment(config)?);
+        return Ok(true);
+    }
+    if let Some(token_file) = config.enrollment_token_file.as_deref() {
+        enroll_agent(config, token_file).await?;
+        return Ok(true);
+    }
+    Ok(false)
+}
+
+fn prepare_enrollment(config: &Config) -> Result<String, io::Error> {
+    let controller = config
+        .controller
+        .ok_or_else(|| invalid("--controller is required for enrollment preparation"))?;
+    let identity = ocservia_agent_identity::Identity::provision(&config.identity_dir, controller)?;
+    Ok(hex::encode(identity.endpoint_id().as_bytes()))
 }
 
 async fn enroll_agent(
@@ -1233,6 +1254,7 @@ struct Config {
     artifact_dir: PathBuf,
     relay_mode: RelayMode,
     command_verification_key_files: Vec<PathBuf>,
+    prepare_enrollment: bool,
     enrollment_token_file: Option<PathBuf>,
     enrollment_environment: Option<String>,
 }
@@ -1240,7 +1262,7 @@ struct Config {
 fn load_controller_command_keys(
     config: &Config,
 ) -> Result<Option<ControllerCommandKeyring>, Box<dyn std::error::Error + Send + Sync>> {
-    if config.probe_only || config.enrollment_token_file.is_some() {
+    if config.probe_only || config.prepare_enrollment || config.enrollment_token_file.is_some() {
         return Ok(None);
     }
     if config.command_verification_key_files.is_empty() {
@@ -1267,6 +1289,7 @@ fn parse_args() -> Result<Config, io::Error> {
         artifact_dir: PathBuf::from("/var/lib/ocservia-privd/certificates/artifacts"),
         relay_mode: RelayMode::Default,
         command_verification_key_files: Vec::new(),
+        prepare_enrollment: false,
         enrollment_token_file: None,
         enrollment_environment: None,
     };
@@ -1314,6 +1337,7 @@ fn parse_args() -> Result<Config, io::Error> {
                         "--controller-command-key-file",
                     )?));
             }
+            "--prepare-enrollment" => config.prepare_enrollment = true,
             "--enrollment-token-file" => {
                 config.enrollment_token_file = Some(PathBuf::from(required(
                     &mut args,
@@ -1332,21 +1356,12 @@ fn parse_args() -> Result<Config, io::Error> {
             _ => return Err(invalid("unknown agent argument")),
         }
     }
-    if !config.artifact_dir.is_absolute()
-        || config
-            .command_verification_key_files
-            .iter()
-            .any(|path| !path.is_absolute())
-        || relay_token_file
-            .as_ref()
-            .is_some_and(|path| !path.is_absolute())
-        || config
-            .enrollment_token_file
-            .as_ref()
-            .is_some_and(|path| !path.is_absolute())
+    validate_absolute_paths(&config, relay_token_file.as_deref())?;
+    if config.prepare_enrollment
+        && (relay_mode != "default" || !relay_urls.is_empty() || relay_token_file.is_some())
     {
         return Err(invalid(
-            "artifact, Controller command key, and relay token paths must be absolute",
+            "enrollment preparation does not accept relay configuration",
         ));
     }
     validate_enrollment_mode(&config)?;
@@ -1354,8 +1369,35 @@ fn parse_args() -> Result<Config, io::Error> {
     Ok(config)
 }
 
+fn validate_absolute_paths(config: &Config, relay_token_file: Option<&Path>) -> io::Result<()> {
+    if !config.identity_dir.is_absolute()
+        || !config.artifact_dir.is_absolute()
+        || config
+            .command_verification_key_files
+            .iter()
+            .any(|path| !path.is_absolute())
+        || relay_token_file.is_some_and(|path| !path.is_absolute())
+        || config
+            .enrollment_token_file
+            .as_ref()
+            .is_some_and(|path| !path.is_absolute())
+    {
+        return Err(invalid(
+            "identity, artifact, Controller command key, and token paths must be absolute",
+        ));
+    }
+    Ok(())
+}
+
 fn validate_enrollment_mode(config: &Config) -> Result<(), io::Error> {
-    if config.enrollment_token_file.is_some() != config.enrollment_environment.is_some()
+    if config.prepare_enrollment
+        && (config.controller.is_none()
+            || config.enrollment_token_file.is_some()
+            || config.enrollment_environment.is_some()
+            || config.node_id.is_some()
+            || config.probe_only
+            || !config.command_verification_key_files.is_empty())
+        || config.enrollment_token_file.is_some() != config.enrollment_environment.is_some()
         || config.enrollment_token_file.is_some() && (config.node_id.is_some() || config.probe_only)
         || config.enrollment_environment.as_ref().is_some_and(|value| {
             value.is_empty() || value.len() > 64 || value.chars().any(char::is_whitespace)
@@ -1524,6 +1566,7 @@ mod tests {
             artifact_dir: PathBuf::from("/var/lib/ocservia-privd/certificates/artifacts"),
             relay_mode: RelayMode::Default,
             command_verification_key_files: Vec::new(),
+            prepare_enrollment: false,
             enrollment_token_file: None,
             enrollment_environment: None,
         }
@@ -1552,18 +1595,79 @@ mod tests {
     }
 
     #[test]
+    fn fresh_enrollment_preparation_reuses_the_endpoint_key_for_proof() {
+        use ed25519_dalek::{Signature, Verifier as _, VerifyingKey};
+
+        let directory =
+            std::env::temp_dir().join(format!("ocservia-agent-prepare-{}", Uuid::now_v7()));
+        let controller = iroh::SecretKey::generate().public();
+        let mut config = command_key_config(false);
+        config.identity_dir.clone_from(&directory);
+        config.controller = Some(controller);
+        config.prepare_enrollment = true;
+
+        validate_enrollment_mode(&config).expect("standalone preparation mode");
+        assert!(
+            load_controller_command_keys(&config)
+                .expect("preparation has no command session")
+                .is_none()
+        );
+        let endpoint = prepare_enrollment(&config).expect("prepare fresh endpoint identity");
+        assert_eq!(endpoint.len(), 64);
+        assert!(
+            endpoint
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
+        );
+
+        let identity = ocservia_agent_identity::Identity::provision(&directory, controller)
+            .expect("reload prepared identity");
+        assert_eq!(endpoint, hex::encode(identity.endpoint_id().as_bytes()));
+        let mut request = EnrollRequest {
+            token: "a".repeat(43),
+            endpoint_id: identity.endpoint_id().as_bytes().to_vec(),
+            agent_version: "test".to_owned(),
+            os_release: "test".to_owned(),
+            ocserv_version: "test".to_owned(),
+            boot_id: "boot".to_owned(),
+            agent_instance_id: Uuid::now_v7().as_bytes().to_vec(),
+            capabilities: supported_capabilities(),
+            environment: "production".to_owned(),
+            nonce: Uuid::now_v7().as_bytes().to_vec(),
+            time: Some(SystemTime::now().into()),
+            enrollment_protocol_major: 0,
+            enrollment_protocol_minor: 0,
+            proof: None,
+        };
+        identity
+            .authorize_enrollment(&mut request)
+            .expect("authorize enrollment with prepared key");
+        let canonical = ocservia_agent_identity::enrollment_canonical_v1(&request)
+            .expect("canonical enrollment claims");
+        let proof = request.proof.expect("signed proof");
+        let verification_key =
+            VerifyingKey::from_bytes(identity.endpoint_id().as_bytes()).expect("endpoint key");
+        let signature = Signature::from_slice(&proof.signature).expect("Ed25519 signature");
+        verification_key
+            .verify(&canonical, &signature)
+            .expect("prepared endpoint proves possession");
+
+        std::fs::remove_dir_all(directory).expect("remove enrollment preparation fixture");
+    }
+
+    #[test]
     fn enrollment_token_file_requires_strict_metadata_and_format() {
         let directory =
             std::env::temp_dir().join(format!("ocservia-agent-enrollment-{}", Uuid::now_v7()));
         std::fs::create_dir(&directory).expect("create test directory");
         let token = directory.join("enrollment.token");
-        std::fs::write(&token, "0123456789abcdef0123456789abcdef01234567890\n")
-            .expect("write token");
+        let valid_token = "0".repeat(43);
+        std::fs::write(&token, format!("{valid_token}\n")).expect("write token");
         std::fs::set_permissions(&token, std::fs::Permissions::from_mode(0o600))
             .expect("protect token");
         assert_eq!(
             read_enrollment_token(&token).expect("valid token"),
-            "0123456789abcdef0123456789abcdef01234567890"
+            valid_token
         );
 
         std::fs::set_permissions(&token, std::fs::Permissions::from_mode(0o644))

@@ -177,6 +177,111 @@ func TestOfflineTelemetryIngressSharesTheAuthoritativeTrustTransactionIntegratio
 	}
 }
 
+func TestTelemetryPayloadCannotWriteAnotherNodeIntegration(t *testing.T) {
+	databaseURL := os.Getenv("OCSERV_TEST_DATABASE_URL")
+	if databaseURL == "" {
+		t.Skip("OCSERV_TEST_DATABASE_URL is not set")
+	}
+	ctx := context.Background()
+	pool, err := pgxpool.New(ctx, databaseURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pool.Close()
+
+	workspaceA, workspaceB := uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7())
+	nodeA, nodeB := uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7())
+	endpointA, endpointB := integrationEndpoint(nodeA), integrationEndpoint(nodeB)
+	for _, workspace := range []struct {
+		id   uuid.UUID
+		name string
+	}{{workspaceA, "Cross-node A"}, {workspaceB, "Cross-node B"}} {
+		if _, err := pool.Exec(ctx, `INSERT INTO workspaces(id,name,slug,created_at,updated_at) VALUES($1,$2,$3,now(),now())`, workspace.id, workspace.name, "cross-node-"+workspace.id.String()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, node := range []struct {
+		id        uuid.UUID
+		workspace uuid.UUID
+		status    string
+		endpoint  [32]byte
+	}{{nodeA, workspaceA, "active", endpointA}, {nodeB, workspaceB, "offline", endpointB}} {
+		if _, err := pool.Exec(ctx, `INSERT INTO nodes(id,workspace_id,name,status,created_at,updated_at) VALUES($1,$2,$3,$4,now(),now())`, node.id, node.workspace, "node-"+node.id.String(), node.status); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := pool.Exec(ctx, `INSERT INTO node_endpoint_keys(node_id,endpoint_id,state,bound_at) VALUES($1,$2,'active',now())`, node.id, node.endpoint[:]); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Cleanup(func() {
+		cleanup := context.Background()
+		for _, statement := range []string{
+			`DELETE FROM transport_events WHERE node_id IN($1,$2)`,
+			`DELETE FROM telemetry_security_events WHERE node_id IN($1,$2)`,
+			`DELETE FROM telemetry_ingest_batches WHERE node_id IN($1,$2)`,
+			`DELETE FROM node_endpoint_keys WHERE node_id IN($1,$2)`,
+			`DELETE FROM nodes WHERE id IN($1,$2)`,
+		} {
+			_, _ = pool.Exec(cleanup, statement, nodeA, nodeB)
+		}
+		_, _ = pool.Exec(cleanup, `DELETE FROM workspaces WHERE id IN($1,$2)`, workspaceA, workspaceB)
+	})
+
+	now := time.Now().UTC().Truncate(time.Second)
+	batchID, instanceID, securityID := uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7())
+	remaining := uint64(60)
+	payload, err := proto.Marshal(&agentv1.TelemetryBatch{
+		BatchId: batchID[:], NodeId: nodeB[:], Sequence: 1,
+		Priority: agentv1.TelemetryPriority_TELEMETRY_PRIORITY_CURRENT_HEALTH,
+		Snapshot: &agentv1.ObservedSnapshot{
+			ObservedAt: timestamppb.New(now), BootId: "cross-node", AgentInstanceId: instanceID[:],
+			AgentVersion: "test", OcservVersion: "test", OsRelease: "test",
+			OcservJson: []byte(`{}`), SystemJson: []byte(`{}`), PathJson: []byte(`{}`),
+		},
+		Sessions:       []*agentv1.SessionObservation{{SessionId: "forged", Username: "alice", ClientIp: "192.0.2.10", ConnectedAt: timestamppb.New(now.Add(-time.Minute)), BytesIn: 1, BytesOut: 2}},
+		IpBans:         []*agentv1.IpBanObservation{{Ip: "192.0.2.20", SecondsRemaining: &remaining}},
+		Users:          []*agentv1.UserObservation{{Username: "alice", Enabled: true, Revision: 1, FingerprintSha256: make([]byte, sha256.Size)}},
+		Groups:         []*agentv1.GroupObservation{{GroupName: "staff", Members: []string{"alice"}, Revision: 1, FingerprintSha256: make([]byte, sha256.Size)}},
+		Samples:        []*agentv1.MetricSample{{SampledAt: timestamppb.New(now), Metric: "session_count", Value: 1}},
+		SecurityEvents: []*agentv1.SecurityObservation{{EventId: securityID[:], ObservedAt: timestamppb.New(now), Severity: "critical", EventType: "forged", DetailJson: []byte(`{}`)}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	eventID := uuid.Must(uuid.NewV7())
+	err = NewWithSigner(pool, integrationCommandSigner()).Ingest(ctx, &transportv1.TransportEvent{
+		EventId: eventID[:], NodeId: nodeA[:], EndpointId: endpointA[:],
+		Type:       transportv1.TransportEventType_TRANSPORT_EVENT_TYPE_TELEMETRY,
+		OccurredAt: timestamppb.New(now), Traceparent: "00-0123456789abcdef0123456789abcdef-0123456789abcdef-01", Payload: payload,
+	})
+	if err == nil || !strings.Contains(err.Error(), "telemetry node identity mismatch") {
+		t.Fatalf("cross-node telemetry result = %v", err)
+	}
+
+	var status string
+	var transportCount, mutatedRows int
+	if err := pool.QueryRow(ctx, `SELECT status FROM nodes WHERE id=$1`, nodeB).Scan(&status); err != nil {
+		t.Fatal(err)
+	}
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM transport_events WHERE event_id=$1`, eventID).Scan(&transportCount); err != nil {
+		t.Fatal(err)
+	}
+	if err := pool.QueryRow(ctx, `SELECT
+		(SELECT count(*) FROM telemetry_ingest_batches WHERE node_id=$1) +
+		(SELECT count(*) FROM node_observed_snapshots WHERE node_id=$1) +
+		(SELECT count(*) FROM node_sessions WHERE node_id=$1) +
+		(SELECT count(*) FROM node_ip_bans WHERE node_id=$1) +
+		(SELECT count(*) FROM observed_users WHERE node_id=$1) +
+		(SELECT count(*) FROM observed_groups WHERE node_id=$1) +
+		(SELECT count(*) FROM telemetry_security_events WHERE node_id=$1) +
+		(SELECT count(*) FROM telemetry_samples WHERE node_id=$1)`, nodeB).Scan(&mutatedRows); err != nil {
+		t.Fatal(err)
+	}
+	if status != "offline" || transportCount != 0 || mutatedRows != 0 {
+		t.Fatalf("cross-node telemetry changed state: status=%s transport=%d rows=%d", status, transportCount, mutatedRows)
+	}
+}
+
 func TestStructuredAgentResultPersistsUnknownBeforeReconciledSuccessIntegration(t *testing.T) {
 	databaseURL := os.Getenv("OCSERV_TEST_DATABASE_URL")
 	if databaseURL == "" {

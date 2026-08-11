@@ -395,7 +395,7 @@ func (s *Service) Ingest(ctx context.Context, event *transportv1.TransportEvent)
 		return fmt.Errorf("check authoritative node ingress trust: %w", err)
 	}
 	if eventType == "telemetry" {
-		if _, err := telemetrystore.New(s.pool).IngestWireTx(ctx, tx, event.GetPayload()); err != nil {
+		if _, err := telemetrystore.New(s.pool).IngestWireTx(ctx, tx, nodeID, event.GetPayload()); err != nil {
 			return fmt.Errorf("ingest telemetry payload: %w", err)
 		}
 	}
