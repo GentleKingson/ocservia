@@ -504,13 +504,18 @@ func TestExistingActiveNodeBindsSealingKeysOnceIntegration(t *testing.T) {
 	workspaceID := uuid.Must(uuid.NewV7())
 	nodeID := uuid.Must(uuid.NewV7())
 	endpoint := endpointFixture(12)
-	_, err = pool.Exec(ctx, `
-		INSERT INTO workspaces (id,name,slug,created_at,updated_at) VALUES ($1,'Existing sealing migration',$2,now(),now());
-		INSERT INTO nodes (id,workspace_id,name,status,created_at,updated_at) VALUES ($3,$1,'existing-node','active',now(),now());
-		INSERT INTO node_endpoint_keys(node_id,endpoint_id,state,bound_at) VALUES($3,$4,'active',now());
-		INSERT INTO node_capabilities(node_id,capability,approved) VALUES($3,'ocserv.status.read',true)`, workspaceID, "existing-seal-"+workspaceID.String(), nodeID, endpoint)
-	if err != nil {
-		t.Fatal(err)
+	for _, setup := range []struct {
+		query string
+		args  []any
+	}{
+		{`INSERT INTO workspaces (id,name,slug,created_at,updated_at) VALUES ($1,'Existing sealing migration',$2,now(),now())`, []any{workspaceID, "existing-seal-" + workspaceID.String()}},
+		{`INSERT INTO nodes (id,workspace_id,name,status,created_at,updated_at) VALUES ($1,$2,'existing-node','active',now(),now())`, []any{nodeID, workspaceID}},
+		{`INSERT INTO node_endpoint_keys(node_id,endpoint_id,state,bound_at) VALUES($1,$2,'active',now())`, []any{nodeID, endpoint}},
+		{`INSERT INTO node_capabilities(node_id,capability,approved) VALUES($1,'ocserv.status.read',true)`, []any{nodeID}},
+	} {
+		if _, err = pool.Exec(ctx, setup.query, setup.args...); err != nil {
+			t.Fatal(err)
+		}
 	}
 	defer cleanupWorkspace(ctx, pool, workspaceID)
 	service := newTestService(t, pool, "", "test")

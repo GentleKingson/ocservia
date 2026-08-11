@@ -51,7 +51,13 @@ func TestDesiredStateAtomicOfflineDriftVersionAndNodeScopeIntegration(t *testing
 	if err := proto.Unmarshal(envelope, &command); err != nil {
 		t.Fatal(err)
 	}
-	if command.GetUserCreate().GetUsername() != "alice" || len(command.GetUserCreate().GetSealedPassword()) != 64 {
+	sealed := command.GetUserCreate().GetSealedPasswordV1()
+	if command.GetUserCreate().GetUsername() != "alice" ||
+		len(command.GetUserCreate().GetSealedPassword()) != 0 ||
+		sealed.GetVersion() != 1 ||
+		sealed.GetPurpose() != agentv1.SealedSecretPurpose_SEALED_SECRET_PURPOSE_USER_PASSWORD ||
+		sealed.GetKeyId() != "node-key-1" ||
+		len(sealed.GetCiphertext()) != 64 {
 		t.Fatalf("typed command=%v", &command)
 	}
 

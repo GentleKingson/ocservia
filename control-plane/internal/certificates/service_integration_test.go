@@ -257,8 +257,8 @@ func TestCertificateIssueArtifactAndRevokeIntegration(t *testing.T) {
 		t.Fatalf("second download err=%v", err)
 	}
 	consumeFailureArtifactID := uuid.Must(uuid.NewV7())
-	consumeFailureApproval := approvedCertificateAction(t, ctx, service, approvalService, workspaceID, nodeID, certificate.ID, requesterID, requesterSession, approverID, approverSession, "certificate.private_key.export", certificate.Version, "certificate_p12", consumeFailureArtifactID)
-	consumeFailureGrant, _, err := service.CreateP12(ctx, P12Request{CertificateID: certificate.ID, ApprovalID: consumeFailureApproval, ArtifactRequestID: consumeFailureArtifactID, CertificateVersion: certificate.Version, ActorIdentityID: requesterID, ActorSessionID: requesterSession, ExpectedVersion: 1, IdempotencyKey: "i17-p12-consume-recovery", Reason: "test finalize recovery", RequestID: "p12-consume-recovery"})
+	consumeFailureApproval := approvedCertificateAction(t, ctx, service, approvalService, workspaceID, nodeID, certificate.ID, requesterID, requesterSession, approverID, approverSession, "certificate.private_key.export", issued.Version, "certificate_p12", consumeFailureArtifactID)
+	consumeFailureGrant, _, err := service.CreateP12(ctx, P12Request{CertificateID: certificate.ID, ApprovalID: consumeFailureApproval, ArtifactRequestID: consumeFailureArtifactID, CertificateVersion: issued.Version, ActorIdentityID: requesterID, ActorSessionID: requesterSession, ExpectedVersion: 1, IdempotencyKey: "i17-p12-consume-recovery", Reason: "test finalize recovery", RequestID: "p12-consume-recovery"})
 	if err != nil {
 		t.Fatal(err)
 	}
