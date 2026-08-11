@@ -42,7 +42,7 @@ const EFFECT_STORE_KEY_BYTES: usize = 32;
 const MAX_EFFECT_RECORDS: i64 = 65_536;
 const ARTIFACT_CHUNK_BYTES: usize = 256 * 1024;
 const MAX_ARTIFACT_BYTES: usize = 64 * 1024 * 1024;
-const USER_FILE_MODE: u16 = 0o600;
+const USER_FILE_MODE: u32 = 0o600;
 
 const CONFIG_DIRECTIVES: &[&str] = &[
     "auth",
@@ -1549,7 +1549,7 @@ impl Adapter {
                 | rustix::fs::OFlags::EXCL
                 | rustix::fs::OFlags::NOFOLLOW
                 | rustix::fs::OFlags::CLOEXEC,
-            rustix::fs::Mode::from_raw_mode(USER_FILE_MODE),
+            rustix::fs::Mode::RUSR | rustix::fs::Mode::WUSR,
         )
         .map_err(|error| AdapterError::Io(error.into()))?;
         let file = File::from(file);
@@ -3862,7 +3862,7 @@ fn validate_authoritative_user_file(
         || metadata.nlink() != 1
         || metadata.uid() != uid
         || metadata.gid() != gid
-        || metadata.permissions().mode() & 0o777 != u32::from(USER_FILE_MODE)
+        || metadata.permissions().mode() & 0o777 != USER_FILE_MODE
     {
         return Err(AdapterError::InvalidResource);
     }
@@ -3876,7 +3876,7 @@ fn set_authoritative_user_metadata(file: &File, uid: u32, gid: u32) -> Result<()
         Some(rustix::fs::Gid::from_raw(gid)),
     )
     .map_err(|error| AdapterError::Io(error.into()))?;
-    rustix::fs::fchmod(file, rustix::fs::Mode::from_raw_mode(USER_FILE_MODE))
+    rustix::fs::fchmod(file, rustix::fs::Mode::RUSR | rustix::fs::Mode::WUSR)
         .map_err(|error| AdapterError::Io(error.into()))
 }
 
@@ -4354,11 +4354,8 @@ mod tests {
 
     fn write_user_fixture(path: &Path, bytes: impl AsRef<[u8]>) {
         std::fs::write(path, bytes).expect("write ocpasswd fixture");
-        std::fs::set_permissions(
-            path,
-            std::fs::Permissions::from_mode(u32::from(USER_FILE_MODE)),
-        )
-        .expect("secure ocpasswd fixture");
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(USER_FILE_MODE))
+            .expect("secure ocpasswd fixture");
     }
 
     #[test]
@@ -5215,10 +5212,7 @@ mod tests {
         let (uid, gid) = authoritative_user_owner();
         assert_eq!(metadata.uid(), uid);
         assert_eq!(metadata.gid(), gid);
-        assert_eq!(
-            metadata.permissions().mode() & 0o777,
-            u32::from(USER_FILE_MODE)
-        );
+        assert_eq!(metadata.permissions().mode() & 0o777, USER_FILE_MODE);
         assert_eq!(metadata.nlink(), 1);
 
         std::fs::set_permissions(&users, std::fs::Permissions::from_mode(0o660))
@@ -5227,11 +5221,8 @@ mod tests {
             adapter.user_list().await,
             Err(AdapterError::InvalidResource)
         ));
-        std::fs::set_permissions(
-            &users,
-            std::fs::Permissions::from_mode(u32::from(USER_FILE_MODE)),
-        )
-        .expect("restore secure mode");
+        std::fs::set_permissions(&users, std::fs::Permissions::from_mode(USER_FILE_MODE))
+            .expect("restore secure mode");
 
         let second_link = directory.join("ocpasswd-copy");
         std::fs::hard_link(&users, &second_link).expect("hard link fixture");
