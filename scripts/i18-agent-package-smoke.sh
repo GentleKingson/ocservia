@@ -156,8 +156,8 @@ sudo cmp -s "${package_root}/rust/target/release/ocservia-agent" \
   "${rootfs}/usr/libexec/ocservia/ocservia-agent" \
   || { echo "install reopened the replaced untrusted archive" >&2; exit 1; }
 echo "agent package signature verification and trusted staging passed"
-test -x "${rootfs}/usr/libexec/ocservia/ocservia-agent" || { echo "installed Agent binary is missing" >&2; exit 1; }
-test -f "${rootfs}/usr/lib/systemd/system/ocservia-agent.service.d/10-production-relays.conf" \
+sudo test -x "${rootfs}/usr/libexec/ocservia/ocservia-agent" || { echo "installed Agent binary is missing" >&2; exit 1; }
+sudo test -f "${rootfs}/usr/lib/systemd/system/ocservia-agent.service.d/10-production-relays.conf" \
   || { echo "production relay drop-in is missing" >&2; exit 1; }
 
 production_agent_exec_start() {
@@ -319,7 +319,7 @@ capture_upgrade() {
 before_rejected_upgrade="$(installed_state)"
 assert_rejected_upgrade_untouched() {
   local reason="$1"
-  test ! -e "${rootfs}/var/lib/ocservia-privd/upgrade-backup" \
+  sudo test ! -e "${rootfs}/var/lib/ocservia-privd/upgrade-backup" \
     || { echo "${reason} created a backup directory" >&2; exit 1; }
   test "${before_rejected_upgrade}" = "$(installed_state)" \
     || { echo "${reason} modified installed files" >&2; exit 1; }
@@ -621,17 +621,17 @@ sudo test -f "${rootfs}/var/lib/ocservia-agent/identity/controller.key" \
   || { echo "uninstall removed the controller key" >&2; exit 1; }
 sudo test -f "${rootfs}/var/lib/ocservia-agent/agent.db" \
   || { echo "uninstall removed the command journal" >&2; exit 1; }
-test ! -e "${rootfs}/usr/libexec/ocservia/ocservia-agent" \
+sudo test ! -e "${rootfs}/usr/libexec/ocservia/ocservia-agent" \
   || { echo "uninstall retained the Agent binary" >&2; exit 1; }
-test ! -e "${rootfs}/usr/libexec/ocservia/ocservia-agent-rollback" \
+sudo test ! -e "${rootfs}/usr/libexec/ocservia/ocservia-agent-rollback" \
   || { echo "uninstall retained the rollback command" >&2; exit 1; }
 echo "agent package uninstall preservation passed"
 
 sudo env DESTDIR="${rootfs}" AGENT_UID=61000 AGENT_GID=61000 INSTALL_PRODUCTION_RELAYS=true \
   "${package_root}/scripts/install-agent.sh"
 sudo env DESTDIR="${rootfs}" "${package_root}/scripts/uninstall-agent.sh" --purge-state
-test ! -e "${rootfs}/var/lib/ocservia-agent" || { echo "purge retained Agent state" >&2; exit 1; }
-test ! -e "${rootfs}/etc/ocservia-agent" || { echo "purge retained Agent configuration" >&2; exit 1; }
+sudo test ! -e "${rootfs}/var/lib/ocservia-agent" || { echo "purge retained Agent state" >&2; exit 1; }
+sudo test ! -e "${rootfs}/etc/ocservia-agent" || { echo "purge retained Agent configuration" >&2; exit 1; }
 echo "agent package purge passed"
 printf 'trusted_staging=pass\nsame_basename=pass\narchive_types=pass\ninstall_path=pass\ninstall=pass\nlegacy_upgrade_preflight=pass\nupgrade=pass\nrollback_substitution=pass\nrollback=pass\nuninstall_preserves_state=pass\npurge=pass\n' \
   >"${ARTIFACT_DIR}/lifecycle-summary.txt"
