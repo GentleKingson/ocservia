@@ -73,15 +73,18 @@ The installer creates the locked `ocserv-agent` service account and preserves
 an existing enrollment configuration. Before changing any installed file,
 `upgrade-agent.sh` rejects legacy configuration that does not name a valid,
 safely provisioned Ed25519 Controller command verification key. After this
-preflight it keeps one previous binary pair under the private state directory
-before restarting the units.
+preflight it keeps one matched snapshot of the previous binary pair, base
+systemd units, and production relay drop-in state under the private state
+directory before restarting the units.
 
 ## Rollback and removal
 
-To roll back an upgrade, stop both units, restore both `.previous` binaries
-from `/var/lib/ocservia-agent/upgrade-backup`, run `systemctl daemon-reload`,
-then start privd before the Agent. The two binaries must always be rolled back
-together.
+Run `sudo /usr/libexec/ocservia/ocservia-agent-rollback` to roll back an
+upgrade. It validates and restores the Agent binary, privd binary, both base
+units, and the relay drop-in state from
+`/var/lib/ocservia-agent/upgrade-backup`, then reloads systemd and starts privd
+before the Agent. Restoring either binary without its matched unit and peer
+binary is unsupported.
 
 `sudo ./scripts/uninstall-agent.sh` removes units and binaries but retains node
 identity, the Agent journal, and privd desired-effect evidence. Use

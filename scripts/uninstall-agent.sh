@@ -29,7 +29,9 @@ rm -f "${DESTDIR}${PREFIX}/lib/systemd/system/ocservia-agent.service" \
   "${DESTDIR}${PREFIX}/lib/systemd/system/ocservia-privd.service" \
   "${DESTDIR}${PREFIX}/lib/systemd/system/ocservia-agent.service.d/10-production-relays.conf"
 rmdir "${DESTDIR}${PREFIX}/lib/systemd/system/ocservia-agent.service.d" 2>/dev/null || true
-rm -f "${DESTDIR}${PREFIX}/libexec/ocservia/ocservia-agent" "${DESTDIR}${PREFIX}/libexec/ocservia/ocservia-privd"
+rm -f "${DESTDIR}${PREFIX}/libexec/ocservia/ocservia-agent" \
+  "${DESTDIR}${PREFIX}/libexec/ocservia/ocservia-privd" \
+  "${DESTDIR}${PREFIX}/libexec/ocservia/ocservia-agent-rollback"
 rmdir "${DESTDIR}${PREFIX}/libexec/ocservia" 2>/dev/null || true
 if [[ -z "${DESTDIR}" ]]; then
   systemctl daemon-reload

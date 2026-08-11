@@ -3,15 +3,22 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 DESTDIR="${DESTDIR:-}"
+PREFIX="${PREFIX:-/usr}"
 SYSCONFDIR="${SYSCONFDIR:-/etc}"
+STATE_DIR="${STATE_DIR:-/var/lib/ocservia-agent}"
 AGENT_UID="${AGENT_UID:-997}"
 AGENT_GID="${AGENT_GID:-997}"
-BACKUP_DIR="${BACKUP_DIR:-${DESTDIR}/var/lib/ocservia-agent/upgrade-backup}"
+BACKUP_DIR="${BACKUP_DIR:-${DESTDIR}${STATE_DIR}/upgrade-backup}"
 
 upgrade_preflight_error() {
   echo "Agent upgrade blocked before modification: $1" >&2
   echo "Install an Ed25519 Controller verification public key as root:ocserv-agent mode 0440 or 0640," >&2
   echo "set CONTROLLER_COMMAND_VERIFICATION_KEY_FILE to its absolute path in ${SYSCONFDIR}/ocservia-agent/agent.env, then rerun the upgrade." >&2
+  exit 1
+}
+
+installed_pair_preflight_error() {
+  echo "Agent upgrade blocked before modification: $1" >&2
   exit 1
 }
 
@@ -103,8 +110,8 @@ if [[ ${EUID} -ne 0 ]]; then
 fi
 
 if [[ -n "${DESTDIR}" && ( "${DESTDIR}" != /* || "${DESTDIR}" == "/" ) ]] || \
-  [[ "${SYSCONFDIR}" != /* ]]; then
-  echo "DESTDIR and SYSCONFDIR must identify absolute staging paths" >&2
+  [[ "${PREFIX}" != /* || "${SYSCONFDIR}" != /* || "${STATE_DIR}" != /* || "${BACKUP_DIR}" != /* ]]; then
+  echo "DESTDIR, PREFIX, SYSCONFDIR, STATE_DIR, and BACKUP_DIR must identify absolute paths" >&2
   exit 2
 fi
 if [[ -z "${DESTDIR}" ]]; then
@@ -123,12 +130,38 @@ fi
 # either service so a legacy two-line agent.env remains fully untouched.
 validate_controller_command_key
 
-install -d -o root -g root -m 0700 "${BACKUP_DIR}"
-for binary in ocservia-agent ocservia-privd; do
-  if [[ -f "${DESTDIR}/usr/libexec/ocservia/${binary}" ]]; then
-    install -m 0755 "${DESTDIR}/usr/libexec/ocservia/${binary}" "${BACKUP_DIR}/${binary}.previous"
+installed_agent="${DESTDIR}${PREFIX}/libexec/ocservia/ocservia-agent"
+installed_privd="${DESTDIR}${PREFIX}/libexec/ocservia/ocservia-privd"
+installed_agent_unit="${DESTDIR}${PREFIX}/lib/systemd/system/ocservia-agent.service"
+installed_privd_unit="${DESTDIR}${PREFIX}/lib/systemd/system/ocservia-privd.service"
+installed_relay_dropin="${DESTDIR}${PREFIX}/lib/systemd/system/ocservia-agent.service.d/10-production-relays.conf"
+for installed_file in \
+  "${installed_agent}" \
+  "${installed_privd}" \
+  "${installed_agent_unit}" \
+  "${installed_privd_unit}"; do
+  if [[ ! -f "${installed_file}" || -L "${installed_file}" ]]; then
+    installed_pair_preflight_error "the installed Agent/privd pair and base units must be regular files"
   fi
 done
+if [[ -e "${installed_relay_dropin}" || -L "${installed_relay_dropin}" ]] && \
+  [[ ! -f "${installed_relay_dropin}" || -L "${installed_relay_dropin}" ]]; then
+  installed_pair_preflight_error "the installed production relay drop-in must be a regular file"
+fi
+
+install -d -o root -g root -m 0700 "${BACKUP_DIR}"
+install -m 0755 "${installed_agent}" "${BACKUP_DIR}/ocservia-agent.previous"
+install -m 0755 "${installed_privd}" "${BACKUP_DIR}/ocservia-privd.previous"
+install -m 0644 "${installed_agent_unit}" "${BACKUP_DIR}/ocservia-agent.service.previous"
+install -m 0644 "${installed_privd_unit}" "${BACKUP_DIR}/ocservia-privd.service.previous"
+rm -f -- "${BACKUP_DIR}/ocservia-agent-relays.conf.previous" \
+  "${BACKUP_DIR}/ocservia-agent-relays.conf.absent"
+if [[ -f "${installed_relay_dropin}" ]]; then
+  install -m 0644 "${installed_relay_dropin}" \
+    "${BACKUP_DIR}/ocservia-agent-relays.conf.previous"
+else
+  install -m 0600 /dev/null "${BACKUP_DIR}/ocservia-agent-relays.conf.absent"
+fi
 
 "${ROOT}/scripts/install-agent.sh"
 if [[ -z "${DESTDIR}" ]]; then

@@ -39,6 +39,7 @@ install -d -o "${agent_owner}" -g "${agent_group}" -m 0700 "${DESTDIR}${STATE_DI
 install -d -o root -g "${agent_group}" -m 0750 "${DESTDIR}${SYSCONFDIR}/ocservia-agent"
 install -m 0755 "${ROOT}/rust/target/release/ocservia-agent" "${DESTDIR}${PREFIX}/libexec/ocservia/ocservia-agent"
 install -m 0755 "${ROOT}/rust/target/release/ocservia-privd" "${DESTDIR}${PREFIX}/libexec/ocservia/ocservia-privd"
+install -m 0755 "${ROOT}/scripts/rollback-agent.sh" "${DESTDIR}${PREFIX}/libexec/ocservia/ocservia-agent-rollback"
 install -m 0644 "${ROOT}/deploy/systemd/ocservia-agent.service" "${DESTDIR}${PREFIX}/lib/systemd/system/ocservia-agent.service"
 install -m 0644 "${ROOT}/deploy/systemd/ocservia-privd.service" "${DESTDIR}${PREFIX}/lib/systemd/system/ocservia-privd.service"
 

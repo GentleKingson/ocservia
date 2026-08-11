@@ -24,11 +24,24 @@ than promoted into a root trust anchor. This preflight happens before backups,
 binaries, systemd units, or services are changed. A legacy two-line `agent.env`,
 missing key, or unsafe key therefore stops the upgrade with provisioning
 instructions instead of installing an Agent that cannot restart.
-After the preflight, the script retains the previous binaries and preserves
-endpoint identity, the durable Agent database, journal, and configuration.
-Verify service health and Controller connectivity after upgrade. To roll back,
-stop both units, restore the previous binaries, reload systemd, and start privd
-before Agent. `uninstall-agent.sh` preserves identity and journal by default;
+After the preflight, the script retains one matched snapshot of the previous
+Agent and privd binaries, both base systemd units, and the production relay
+drop-in presence and content. It also preserves endpoint identity, the durable
+Agent database, journal, and configuration. Verify service health and
+Controller connectivity after upgrade. To roll back the complete matched
+snapshot, run:
+
+```bash
+sudo /usr/libexec/ocservia/ocservia-agent-rollback
+```
+
+The command validates the complete snapshot before stopping either unit, then
+restores binaries and units together, reloads systemd, and starts privd before
+Agent. Restoring only the binaries is unsupported because their CLI and local
+wire contract may require the matching units. A rollback also restores the
+previous release's security properties, so use it only for a controlled
+recovery window and return to a fixed release promptly. `uninstall-agent.sh` preserves
+identity and journal by default;
 `--purge-state` is irreversible and is appropriate only after revoking the node
 identity and preserving required audit material.
 

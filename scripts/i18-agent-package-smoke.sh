@@ -94,7 +94,7 @@ assert_privd_command_authority() {
   local unit="${rootfs}/usr/lib/systemd/system/ocservia-privd.service"
   grep -Fxq 'EnvironmentFile=/etc/ocservia-agent/agent.env' "${unit}" \
     || { echo "privd does not load the pinned node/key environment" >&2; exit 1; }
-  grep -Fxq 'ExecStart=/usr/libexec/ocservia/ocservia-privd --agent-uid $AGENT_UID --node-id $NODE_ID --controller-command-key-file $CONTROLLER_COMMAND_VERIFICATION_KEY_FILE' "${unit}" \
+  grep -Fxq "ExecStart=/usr/libexec/ocservia/ocservia-privd --agent-uid \$AGENT_UID --node-id \$NODE_ID --controller-command-key-file \$CONTROLLER_COMMAND_VERIFICATION_KEY_FILE" "${unit}" \
     || { echo "privd does not independently pin command authority" >&2; exit 1; }
 }
 assert_privd_command_authority
@@ -117,23 +117,75 @@ sed 's/ --controller-command-key-file [^ ]*//' \
   >"${work}/legacy-agent-relays.conf"
 sudo install -o root -g root -m 0644 "${work}/legacy-agent-relays.conf" \
   "${rootfs}/usr/lib/systemd/system/ocservia-agent.service.d/10-production-relays.conf"
+sed -e '/^EnvironmentFile=\/etc\/ocservia-agent\/agent.env$/d' \
+  -e 's/ --node-id [^ ]* --controller-command-key-file [^ ]*//' \
+  "${rootfs}/usr/lib/systemd/system/ocservia-privd.service" >"${work}/legacy-privd.service"
+sudo install -o root -g root -m 0644 "${work}/legacy-privd.service" \
+  "${rootfs}/usr/lib/systemd/system/ocservia-privd.service"
 if grep -Fq -- '--controller-command-key-file' \
   "${rootfs}/usr/lib/systemd/system/ocservia-agent.service" \
-  "${rootfs}/usr/lib/systemd/system/ocservia-agent.service.d/10-production-relays.conf"; then
+  "${rootfs}/usr/lib/systemd/system/ocservia-agent.service.d/10-production-relays.conf" \
+  "${rootfs}/usr/lib/systemd/system/ocservia-privd.service"; then
   echo "legacy systemd fixture still requires the new key argument" >&2
   exit 1
 fi
+
+cat >"${work}/legacy-agent" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --controller|--node-id|--relay-url|--relay-token-file)
+      [[ $# -ge 2 ]]
+      shift 2
+      ;;
+    --relay-mode)
+      [[ $# -ge 2 && "$2" == custom ]]
+      shift 2
+      ;;
+    *)
+      echo "legacy Agent unknown argument: $1" >&2
+      exit 2
+      ;;
+  esac
+done
+echo "legacy Agent arguments accepted"
+EOF
+cat >"${work}/legacy-privd" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --socket|--agent-uid)
+      [[ $# -ge 2 ]]
+      shift 2
+      ;;
+    *)
+      echo "legacy privd unknown argument: $1" >&2
+      exit 2
+      ;;
+  esac
+done
+echo "legacy privd arguments accepted"
+EOF
+chmod 0755 "${work}/legacy-agent" "${work}/legacy-privd"
+sudo install -o root -g root -m 0755 "${work}/legacy-agent" \
+  "${rootfs}/usr/libexec/ocservia/ocservia-agent"
+sudo install -o root -g root -m 0755 "${work}/legacy-privd" \
+  "${rootfs}/usr/libexec/ocservia/ocservia-privd"
 
 installed_state() {
   sudo sha256sum \
     "${rootfs}/usr/libexec/ocservia/ocservia-agent" \
     "${rootfs}/usr/libexec/ocservia/ocservia-privd" \
+    "${rootfs}/usr/libexec/ocservia/ocservia-agent-rollback" \
     "${rootfs}/usr/lib/systemd/system/ocservia-agent.service" \
     "${rootfs}/usr/lib/systemd/system/ocservia-privd.service" \
     "${rootfs}/usr/lib/systemd/system/ocservia-agent.service.d/10-production-relays.conf"
   sudo stat -c '%n:%i:%Y:%s' \
     "${rootfs}/usr/libexec/ocservia/ocservia-agent" \
     "${rootfs}/usr/libexec/ocservia/ocservia-privd" \
+    "${rootfs}/usr/libexec/ocservia/ocservia-agent-rollback" \
     "${rootfs}/usr/lib/systemd/system/ocservia-agent.service" \
     "${rootfs}/usr/lib/systemd/system/ocservia-privd.service" \
     "${rootfs}/usr/lib/systemd/system/ocservia-agent.service.d/10-production-relays.conf"
@@ -251,11 +303,67 @@ test "$(sudo stat -c '%u:%g:%a' -- "${rootfs}/etc/ocservia-agent/controller-comm
 
 sudo env DESTDIR="${rootfs}" AGENT_UID=61000 AGENT_GID=61000 INSTALL_PRODUCTION_RELAYS=true \
   "${package_root}/scripts/upgrade-agent.sh"
-sudo test -x "${rootfs}/var/lib/ocservia-agent/upgrade-backup/ocservia-agent.previous" \
-  || { echo "Agent upgrade backup is missing" >&2; exit 1; }
+for backup in \
+  ocservia-agent.previous \
+  ocservia-privd.previous \
+  ocservia-agent.service.previous \
+  ocservia-privd.service.previous \
+  ocservia-agent-relays.conf.previous; do
+  sudo test -f "${rootfs}/var/lib/ocservia-agent/upgrade-backup/${backup}" \
+    || { echo "matched rollback snapshot is missing ${backup}" >&2; exit 1; }
+done
 assert_production_agent_exec_start
 assert_privd_command_authority
 echo "agent package upgrade passed"
+
+sudo test ! -e "${rootfs}/var/lib/ocservia-agent/upgrade-backup/ocservia-agent-relays.conf.absent" \
+  || { echo "rollback snapshot records conflicting relay states" >&2; exit 1; }
+sudo cmp -s "${work}/legacy-agent" \
+  "${rootfs}/var/lib/ocservia-agent/upgrade-backup/ocservia-agent.previous"
+sudo cmp -s "${work}/legacy-privd" \
+  "${rootfs}/var/lib/ocservia-agent/upgrade-backup/ocservia-privd.previous"
+sudo cmp -s "${work}/legacy-agent.service" \
+  "${rootfs}/var/lib/ocservia-agent/upgrade-backup/ocservia-agent.service.previous"
+sudo cmp -s "${work}/legacy-privd.service" \
+  "${rootfs}/var/lib/ocservia-agent/upgrade-backup/ocservia-privd.service.previous"
+sudo cmp -s "${work}/legacy-agent-relays.conf" \
+  "${rootfs}/var/lib/ocservia-agent/upgrade-backup/ocservia-agent-relays.conf.previous"
+
+sudo env DESTDIR="${rootfs}" \
+  "${rootfs}/usr/libexec/ocservia/ocservia-agent-rollback"
+sudo cmp -s "${work}/legacy-agent" "${rootfs}/usr/libexec/ocservia/ocservia-agent"
+sudo cmp -s "${work}/legacy-privd" "${rootfs}/usr/libexec/ocservia/ocservia-privd"
+sudo cmp -s "${work}/legacy-agent.service" \
+  "${rootfs}/usr/lib/systemd/system/ocservia-agent.service"
+sudo cmp -s "${work}/legacy-privd.service" \
+  "${rootfs}/usr/lib/systemd/system/ocservia-privd.service"
+sudo cmp -s "${work}/legacy-agent-relays.conf" \
+  "${rootfs}/usr/lib/systemd/system/ocservia-agent.service.d/10-production-relays.conf"
+grep -Fxq "ExecStart=/usr/libexec/ocservia/ocservia-privd --agent-uid \$AGENT_UID" \
+  "${rootfs}/usr/lib/systemd/system/ocservia-privd.service"
+sudo "${rootfs}/usr/libexec/ocservia/ocservia-privd" --agent-uid 61000 \
+  | grep -Fxq 'legacy privd arguments accepted'
+sudo "${rootfs}/usr/libexec/ocservia/ocservia-agent" \
+  --controller legacy-controller --node-id 00000000-0000-7000-8000-000000000000 \
+  --relay-mode custom --relay-url https://relay-a.invalid \
+  --relay-url https://relay-b.invalid --relay-token-file /etc/ocservia-agent/relay-access-token \
+  | grep -Fxq 'legacy Agent arguments accepted'
+echo "matched Agent/privd binary and systemd rollback passed"
+
+sudo rm -f -- \
+  "${rootfs}/usr/lib/systemd/system/ocservia-agent.service.d/10-production-relays.conf"
+sudo env DESTDIR="${rootfs}" AGENT_UID=61000 AGENT_GID=61000 INSTALL_PRODUCTION_RELAYS=true \
+  "${package_root}/scripts/upgrade-agent.sh"
+sudo test -f "${rootfs}/var/lib/ocservia-agent/upgrade-backup/ocservia-agent-relays.conf.absent"
+sudo test ! -e "${rootfs}/var/lib/ocservia-agent/upgrade-backup/ocservia-agent-relays.conf.previous"
+sudo test -f \
+  "${rootfs}/usr/lib/systemd/system/ocservia-agent.service.d/10-production-relays.conf"
+sudo env DESTDIR="${rootfs}" \
+  "${rootfs}/usr/libexec/ocservia/ocservia-agent-rollback"
+sudo test ! -e \
+  "${rootfs}/usr/lib/systemd/system/ocservia-agent.service.d/10-production-relays.conf"
+echo "absent production relay drop-in rollback passed"
+
 sudo env DESTDIR="${rootfs}" "${package_root}/scripts/uninstall-agent.sh"
 sudo test -f "${rootfs}/var/lib/ocservia-agent/identity/controller.key" \
   || { echo "uninstall removed the controller key" >&2; exit 1; }
@@ -263,6 +371,8 @@ sudo test -f "${rootfs}/var/lib/ocservia-agent/agent.db" \
   || { echo "uninstall removed the command journal" >&2; exit 1; }
 test ! -e "${rootfs}/usr/libexec/ocservia/ocservia-agent" \
   || { echo "uninstall retained the Agent binary" >&2; exit 1; }
+test ! -e "${rootfs}/usr/libexec/ocservia/ocservia-agent-rollback" \
+  || { echo "uninstall retained the rollback command" >&2; exit 1; }
 echo "agent package uninstall preservation passed"
 
 sudo env DESTDIR="${rootfs}" AGENT_UID=61000 AGENT_GID=61000 INSTALL_PRODUCTION_RELAYS=true \
@@ -271,5 +381,5 @@ sudo env DESTDIR="${rootfs}" "${package_root}/scripts/uninstall-agent.sh" --purg
 test ! -e "${rootfs}/var/lib/ocservia-agent" || { echo "purge retained Agent state" >&2; exit 1; }
 test ! -e "${rootfs}/etc/ocservia-agent" || { echo "purge retained Agent configuration" >&2; exit 1; }
 echo "agent package purge passed"
-printf 'install=pass\nlegacy_upgrade_preflight=pass\nupgrade=pass\nuninstall_preserves_state=pass\npurge=pass\n' \
+printf 'install=pass\nlegacy_upgrade_preflight=pass\nupgrade=pass\nrollback=pass\nuninstall_preserves_state=pass\npurge=pass\n' \
   >"${ARTIFACT_DIR}/lifecycle-summary.txt"
