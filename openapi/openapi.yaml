@@ -1726,7 +1726,7 @@ components:
         expected_revision: { type: integer, format: int64, minimum: 0 }
         candidate_hash: { type: string, pattern: "^[0-9a-f]{64}$" }
         current_hash: { type: string, pattern: "^[0-9a-f]{64}$" }
-        diff_redacted: { type: string, maxLength: 262144, description: Approver-visible secret-safe diff containing exact secret reference identifiers, providers, and versions without provider keys or values. }
+        diff_redacted: { type: string, maxLength: 262144, description: "Approver-visible secret-safe diff containing exact secret reference identifiers, providers, and versions without provider keys or values." }
         expires_at: { $ref: "#/components/schemas/UtcDateTime" }
     CertificateRequest:
       type: object
