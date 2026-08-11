@@ -68,6 +68,9 @@ func TestDesiredStateAtomicOfflineDriftVersionAndNodeScopeIntegration(t *testing
 	if _, err := pool.Exec(context.Background(), `INSERT INTO node_capabilities(node_id,capability,approved)VALUES($1,'ocserv.users.write',true)`, otherNode); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := pool.Exec(context.Background(), `INSERT INTO node_sealing_keys(node_id,purpose,version,key_id,public_key_sha256,created_at)VALUES($1,1,1,'node-key-1',decode(repeat('11',32),'hex'),now())`, otherNode); err != nil {
+		t.Fatal(err)
+	}
 	other := mutation(otherNode, "other-alice", UserCreate, "alice", 0)
 	if _, _, err := service.Mutate(context.Background(), other); err != nil {
 		t.Fatalf("same username on other node: %v", err)
