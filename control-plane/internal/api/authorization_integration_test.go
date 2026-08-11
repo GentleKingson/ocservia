@@ -60,6 +60,32 @@ func (invalidatingArtifactFixture) ConfirmArtifactConsumed(context.Context, *age
 	return true, nil
 }
 
+type terminalArtifactFixture struct {
+	pool       *pgxpool.Pool
+	artifactID uuid.UUID
+	state      string
+	data       []byte
+}
+
+func (f terminalArtifactFixture) FetchArtifact(context.Context, *agentv1.ArtifactGrantV1) (io.ReadCloser, error) {
+	return io.NopCloser(bytes.NewReader(f.data)), nil
+}
+
+func (f terminalArtifactFixture) ConsumeArtifact(ctx context.Context, _ *agentv1.ArtifactGrantV1, _ []byte, _ int64) error {
+	command, err := f.pool.Exec(ctx, `UPDATE artifact_operations SET state=$2,lease_until=NULL,active_grant_expires_at=now(),updated_at=now() WHERE id=$1 AND state='consuming'`, f.artifactID, f.state)
+	if err != nil {
+		return err
+	}
+	if command.RowsAffected() != 1 {
+		return errors.New("terminal artifact race did not win")
+	}
+	return nil
+}
+
+func (terminalArtifactFixture) ConfirmArtifactConsumed(context.Context, *agentv1.ArtifactGrantV1, []byte, int64) (bool, error) {
+	return true, nil
+}
+
 type failingArtifactWriter struct {
 	header http.Header
 }
@@ -156,6 +182,27 @@ func TestCertificateRoutesUseNodeScopedAuthorizationIntegration(t *testing.T) {
 	failureServer.downloadArtifact(failureResponse, failureRequest)
 	if failureResponse.Code != http.StatusForbidden || failureResponse.Header().Get("Content-Disposition") != "" || failureResponse.Header().Get("Content-Length") != "" || !strings.Contains(failureResponse.Header().Get("Content-Type"), "application/problem+json") {
 		t.Fatalf("completion failure status=%d headers=%v body=%s", failureResponse.Code, failureResponse.Header(), failureResponse.Body.String())
+	}
+	for _, terminalState := range []string{"revoked", "expired"} {
+		t.Run("terminal "+terminalState+" prevents delivery", func(t *testing.T) {
+			if _, err := pool.Exec(ctx, `UPDATE artifact_operations SET state='ready',consumed_at=NULL,lease_until=NULL,active_grant_id=NULL,active_grant_subject=NULL,active_grant_expires_at=NULL,consume_grant=NULL,consume_sha256=NULL,consume_size=NULL,consume_actor_id=NULL,consume_session_id=NULL,consume_request_id=NULL,content_sha256=$2,content_size=$3 WHERE id=$1`, artifactID, artifactHash[:], len(artifactData)); err != nil {
+				t.Fatal(err)
+			}
+			terminalServer := &Server{certificates: certificatestore.NewWithDependencies(pool, apiOperationService(pool), nil, nil, terminalArtifactFixture{pool: pool, artifactID: artifactID, state: terminalState, data: artifactData}, grantSigner)}
+			terminalRequest := httptest.NewRequest(http.MethodGet, "/api/v1/artifacts/"+artifactID.String(), nil)
+			terminalRequest.SetPathValue("artifact_id", artifactID.String())
+			terminalRequest.Header.Set("X-Artifact-Token", token)
+			terminalRequest = terminalRequest.WithContext(context.WithValue(context.WithValue(terminalRequest.Context(), principalKey{}, manager), requestIDKey{}, "artifact-terminal-race-"+terminalState))
+			terminalResponse := httptest.NewRecorder()
+			terminalServer.downloadArtifact(terminalResponse, terminalRequest)
+			if terminalResponse.Code != http.StatusForbidden || terminalResponse.Header().Get("Content-Disposition") != "" || terminalResponse.Header().Get("Content-Length") != "" || bytes.Contains(terminalResponse.Body.Bytes(), artifactData) {
+				t.Fatalf("terminal race state=%s status=%d headers=%v body=%q", terminalState, terminalResponse.Code, terminalResponse.Header(), terminalResponse.Body.Bytes())
+			}
+			var retainedState string
+			if err := pool.QueryRow(ctx, `SELECT state FROM artifact_operations WHERE id=$1`, artifactID).Scan(&retainedState); err != nil || retainedState != terminalState {
+				t.Fatalf("terminal race retained state=%q err=%v", retainedState, err)
+			}
+		})
 	}
 }
 

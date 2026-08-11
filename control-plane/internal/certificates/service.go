@@ -646,13 +646,31 @@ func (s *Service) CompleteArtifact(ctx context.Context, id, grantID uuid.UUID, g
 	if err := s.artifacts.ConsumeArtifact(ctx, grant, digest, size); err != nil {
 		return err
 	}
-	return s.finalizeArtifactConsumption(ctx, id, grantID)
-}
-
-func (s *Service) finalizeArtifactConsumption(ctx context.Context, id, grantID uuid.UUID) error {
-	tx, err := s.pool.Begin(ctx)
+	result, err := s.finalizeArtifactConsumption(ctx, id, grantID)
 	if err != nil {
 		return err
+	}
+	switch result {
+	case artifactConsumptionFinalized, artifactConsumptionAlreadyFinalized:
+		return nil
+	default:
+		return ErrArtifactDenied
+	}
+}
+
+type artifactConsumptionFinalization uint8
+
+const (
+	artifactConsumptionFinalized artifactConsumptionFinalization = iota
+	artifactConsumptionAlreadyFinalized
+	artifactConsumptionRevoked
+	artifactConsumptionExpired
+)
+
+func (s *Service) finalizeArtifactConsumption(ctx context.Context, id, grantID uuid.UUID) (artifactConsumptionFinalization, error) {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return 0, err
 	}
 	defer func() { _ = tx.Rollback(context.Background()) }()
 	var workspaceID, nodeID, certificateID, actorID, sessionID uuid.UUID
@@ -663,26 +681,30 @@ func (s *Service) finalizeArtifactConsumption(ctx context.Context, id, grantID u
 	if errors.Is(err, pgx.ErrNoRows) {
 		var state string
 		if queryErr := tx.QueryRow(ctx, `SELECT state FROM artifact_operations WHERE id=$1 AND active_grant_id=$2`, id, grantID).Scan(&state); queryErr != nil {
-			return ErrArtifactDenied
+			return 0, ErrArtifactDenied
 		}
 		switch state {
-		case "consumed", "revoked", "expired":
-			// Consumption, revocation, and expiry are competing terminal
-			// transitions. The first committed state wins without turning a
-			// legitimate race into a global maintenance failure.
-			return nil
+		case "consumed":
+			return artifactConsumptionAlreadyFinalized, nil
+		case "revoked":
+			return artifactConsumptionRevoked, nil
+		case "expired":
+			return artifactConsumptionExpired, nil
 		default:
-			return ErrArtifactDenied
+			return 0, ErrArtifactDenied
 		}
 	}
 	if err != nil {
-		return err
+		return 0, err
 	}
 	now := s.now()
 	if err := audit.AppendChain(ctx, tx, audit.ChainRecord{WorkspaceID: workspaceID, ActorType: "user", ActorID: actorID.String(), SessionID: &sessionID, Action: "certificate.p12.download", ResourceType: "artifact", ResourceID: id, NodeID: &nodeID, RequestID: requestID, Result: "succeeded", AfterSummary: json.RawMessage(fmt.Sprintf(`{"certificate_id":%q,"sha256":%q,"size":%d}`, certificateID, hex.EncodeToString(digest), size)), At: now}); err != nil {
-		return err
+		return 0, err
 	}
-	return tx.Commit(ctx)
+	if err := tx.Commit(ctx); err != nil {
+		return 0, err
+	}
+	return artifactConsumptionFinalized, nil
 }
 
 func (s *Service) reconcileConsumingArtifacts(ctx context.Context) error {
@@ -737,7 +759,11 @@ func (s *Service) reconcileConsumingArtifacts(ctx context.Context) error {
 			consumed = true
 		}
 		if consumed {
-			if err := s.finalizeArtifactConsumption(ctx, value.id, value.grantID); err != nil {
+			// Revocation and expiry may win the terminal transition after root
+			// confirmation. They are benign for reconciliation, but the explicit
+			// result prevents an in-flight HTTP request from treating them as a
+			// successful delivery.
+			if _, err := s.finalizeArtifactConsumption(ctx, value.id, value.grantID); err != nil {
 				return err
 			}
 		} else if !value.expiresAt.After(s.now()) {
