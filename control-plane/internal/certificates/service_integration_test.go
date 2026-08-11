@@ -89,6 +89,7 @@ type fixtureArtifacts struct {
 	data         []byte
 	consumeCount int
 	consumeErr   error
+	confirmErr   error
 	consumed     map[string]bool
 }
 
@@ -116,6 +117,9 @@ func (f *fixtureArtifacts) ConsumeArtifact(_ context.Context, grant *agentv1.Art
 }
 
 func (f *fixtureArtifacts) ConfirmArtifactConsumed(_ context.Context, grant *agentv1.ArtifactGrantV1, digest []byte, size int64) (bool, error) {
+	if f.confirmErr != nil {
+		return false, f.confirmErr
+	}
 	expected := sha256.Sum256(f.data)
 	if grant == nil || size != int64(len(f.data)) || !bytes.Equal(digest, expected[:]) {
 		return false, errors.New("artifact confirmation mismatch")
@@ -296,6 +300,18 @@ func TestCertificateIssueArtifactAndRevokeIntegration(t *testing.T) {
 	if err = pool.QueryRow(ctx, `SELECT state FROM artifact_operations WHERE id=$1`, consumeFailureGrant.ArtifactID).Scan(&consumeFailureState); err != nil || consumeFailureState != "consuming" {
 		t.Fatalf("failed consumption state=%q err=%v", consumeFailureState, err)
 	}
+	artifactTransport.confirmErr = errors.New("agent temporarily unavailable")
+	if err = service.Maintain(ctx); err != nil {
+		t.Fatalf("transient artifact confirmation stopped maintenance: %v", err)
+	}
+	if err = pool.QueryRow(ctx, `SELECT state FROM artifact_operations WHERE id=$1`, consumeFailureGrant.ArtifactID).Scan(&consumeFailureState); err != nil || consumeFailureState != "consuming" {
+		t.Fatalf("transient confirmation state=%q err=%v", consumeFailureState, err)
+	}
+	certificateDuringOutage, err := service.Get(ctx, certificate.ID)
+	if err != nil || certificateDuringOutage.State != "expiring" {
+		t.Fatalf("certificate maintenance during artifact outage state=%q err=%v", certificateDuringOutage.State, err)
+	}
+	artifactTransport.confirmErr = nil
 	artifactTransport.consumeErr = nil
 	if err = service.Maintain(ctx); err != nil {
 		t.Fatalf("recover root consumption: %v", err)
@@ -306,6 +322,46 @@ func TestCertificateIssueArtifactAndRevokeIntegration(t *testing.T) {
 	certificateAfterMaintenance, err := service.Get(ctx, certificate.ID)
 	if err != nil {
 		t.Fatal(err)
+	}
+	releasedArtifactID := uuid.Must(uuid.NewV7())
+	releasedApprovalID := approvedCertificateAction(t, ctx, service, approvalService, workspaceID, nodeID, certificate.ID, requesterID, requesterSession, approverID, approverSession, "certificate.private_key.export", certificateAfterMaintenance.Version, "certificate_p12", releasedArtifactID)
+	releasedGrant, _, err := service.CreateP12(ctx, P12Request{CertificateID: certificate.ID, ApprovalID: releasedApprovalID, ArtifactRequestID: releasedArtifactID, CertificateVersion: certificateAfterMaintenance.Version, ActorIdentityID: requesterID, ActorSessionID: requesterSession, ExpectedVersion: 1, IdempotencyKey: "i17-p12-released-lease", Reason: "test released lease recovery", RequestID: "p12-released-lease", Traceparent: "00-2923456789abcdef0123456789abcdef-1123456789abcdef-01"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = pool.Exec(ctx, `UPDATE artifact_operations SET state='ready',content_sha256=$2,content_size=$3 WHERE id=$1`, releasedGrant.ArtifactID, digest[:], len(artifactBytes)); err != nil {
+		t.Fatal(err)
+	}
+	releasedDownload, err := service.OpenArtifact(ctx, releasedGrant.ArtifactID, releasedGrant.DownloadToken, requesterID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = io.Copy(io.Discard, releasedDownload.Reader)
+	_ = releasedDownload.Reader.Close()
+	releasedGrantBytes, err := proto.MarshalOptions{Deterministic: true}.Marshal(releasedDownload.Grant)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = pool.Exec(ctx, `UPDATE artifact_operations SET state='consuming',consume_grant=$3,consume_sha256=$4,consume_size=$5,consume_actor_id=$6,consume_session_id=$7,consume_request_id='artifact-released-window' WHERE id=$1 AND active_grant_id=$2 AND state='leased'`, releasedGrant.ArtifactID, releasedDownload.GrantID, releasedGrantBytes, digest[:], len(artifactBytes), requesterID, requesterSession); err != nil {
+		t.Fatal(err)
+	}
+	releasedRecovery := NewWithDependencies(pool, operations.NewWithSigner(pool, 50, commandSigner), pki, pki, artifactTransport, commandSigner)
+	releasedRecovery.now = func() time.Time { return releasedDownload.Grant.GetExpiresAt().AsTime().Add(time.Second) }
+	if err = releasedRecovery.Maintain(ctx); err != nil {
+		t.Fatalf("recover released root lease: %v", err)
+	}
+	var releasedState string
+	if err = pool.QueryRow(ctx, `SELECT state FROM artifact_operations WHERE id=$1`, releasedGrant.ArtifactID).Scan(&releasedState); err != nil || releasedState != "ready" {
+		t.Fatalf("released lease state=%q err=%v", releasedState, err)
+	}
+	releasedDownload, err = service.OpenArtifact(ctx, releasedGrant.ArtifactID, releasedGrant.DownloadToken, requesterID)
+	if err != nil {
+		t.Fatalf("re-lease recovered artifact: %v", err)
+	}
+	_, _ = io.Copy(io.Discard, releasedDownload.Reader)
+	_ = releasedDownload.Reader.Close()
+	if err = service.CompleteArtifact(ctx, releasedGrant.ArtifactID, releasedDownload.GrantID, releasedDownload.Grant, digest[:], int64(len(artifactBytes)), requesterID, requesterSession, "artifact-released-retry"); err != nil {
+		t.Fatalf("consume re-leased artifact: %v", err)
 	}
 	crashArtifactID := uuid.Must(uuid.NewV7())
 	crashApprovalID := approvedCertificateAction(t, ctx, service, approvalService, workspaceID, nodeID, certificate.ID, requesterID, requesterSession, approverID, approverSession, "certificate.private_key.export", certificateAfterMaintenance.Version, "certificate_p12", crashArtifactID)

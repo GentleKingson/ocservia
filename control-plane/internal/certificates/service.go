@@ -713,7 +713,10 @@ func (s *Service) reconcileConsumingArtifacts(ctx context.Context) error {
 	for _, value := range values {
 		consumed, confirmErr := s.artifacts.ConfirmArtifactConsumed(ctx, value.grant, value.digest, value.size)
 		if confirmErr != nil {
-			return confirmErr
+			// Reconciliation is item-scoped. A disconnected node or restarting
+			// Agent must not turn one durable artifact into a global scheduler
+			// failure; exact evidence remains in consuming for the next pass.
+			continue
 		}
 		grantExpires := value.grant.GetExpiresAt()
 		if grantExpires == nil {
@@ -721,7 +724,7 @@ func (s *Service) reconcileConsumingArtifacts(ctx context.Context) error {
 		}
 		if !consumed && grantExpires.AsTime().After(s.now()) {
 			if err := s.artifacts.ConsumeArtifact(ctx, value.grant, value.digest, value.size); err != nil {
-				return err
+				continue
 			}
 			consumed = true
 		}
@@ -730,9 +733,11 @@ func (s *Service) reconcileConsumingArtifacts(ctx context.Context) error {
 				return err
 			}
 		} else if !value.expiresAt.After(s.now()) {
-			if _, err := s.pool.Exec(ctx, `UPDATE artifact_operations SET state='expired',lease_until=NULL,updated_at=now() WHERE id=$1 AND active_grant_id=$2 AND state='consuming'`, value.id, value.grantID); err != nil {
+			if _, err := s.pool.Exec(ctx, `UPDATE artifact_operations SET state='expired',lease_until=NULL,active_grant_id=NULL,active_grant_subject=NULL,active_grant_expires_at=NULL,consume_grant=NULL,consume_sha256=NULL,consume_size=NULL,consume_actor_id=NULL,consume_session_id=NULL,consume_request_id=NULL,updated_at=now() WHERE id=$1 AND active_grant_id=$2 AND state='consuming'`, value.id, value.grantID); err != nil {
 				return err
 			}
+		} else if _, err := s.pool.Exec(ctx, `UPDATE artifact_operations SET state='ready',lease_until=NULL,active_grant_id=NULL,active_grant_subject=NULL,active_grant_expires_at=NULL,consume_grant=NULL,consume_sha256=NULL,consume_size=NULL,consume_actor_id=NULL,consume_session_id=NULL,consume_request_id=NULL,updated_at=now() WHERE id=$1 AND active_grant_id=$2 AND state='consuming'`, value.id, value.grantID); err != nil {
+			return err
 		}
 	}
 	return nil

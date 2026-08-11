@@ -2579,19 +2579,24 @@ impl EffectStore {
         let record = query_artifact(&self.connection, identity.artifact_id)?
             .ok_or(AdapterError::InvalidRequest)?;
         validate_artifact_record(&self.hmac_key, &record)?;
-        let exact_identity = record.active_grant_id == Some(*identity.grant_id)
-            && record.active_subject == identity.authorized_subject
-            && record.grant_expires_at == Some(identity.expires_at)
-            && record.certificate_id == *identity.certificate_id
+        let same_artifact = record.certificate_id == *identity.certificate_id
             && record.certificate_version == identity.certificate_version
             && record.operation_id == *identity.operation_id
             && record.content_sha256 == digest
-            && record.content_size == content_size
-            && record.active_offset == record.content_size;
-        if !exact_identity {
+            && record.content_size == content_size;
+        if !same_artifact {
             return Err(AdapterError::InvalidRequest);
         }
-        Ok(record.state == "consumed")
+        let exact_grant = record.active_grant_id == Some(*identity.grant_id)
+            && record.active_subject == identity.authorized_subject
+            && record.grant_expires_at == Some(identity.expires_at)
+            && record.active_offset == record.content_size;
+        match record.state {
+            "consumed" if exact_grant => Ok(true),
+            "leased" if exact_grant => Ok(false),
+            "available" | "expired" | "revoked" => Ok(false),
+            _ => Err(AdapterError::InvalidRequest),
+        }
     }
 
     fn revoke_certificate_artifacts(
@@ -2654,8 +2659,8 @@ impl EffectStore {
             record.record_hmac = authenticate_artifact_record(&self.hmac_key, &record);
             transaction
                 .execute(
-                    "UPDATE certificate_artifacts SET state=?2,active_grant_id=?3,active_subject=?4,grant_expires_at=?5,record_hmac=?6,updated_at=?7 WHERE artifact_id=?1",
-                    params![record.artifact_id.as_slice(), record.state, record.active_grant_id.map(|value| value.to_vec()), record.active_subject, record.grant_expires_at, record.record_hmac.as_slice(), now],
+                    "UPDATE certificate_artifacts SET state=?2,active_grant_id=?3,active_subject=?4,grant_expires_at=?5,active_offset=?6,record_hmac=?7,updated_at=?8 WHERE artifact_id=?1",
+                    params![record.artifact_id.as_slice(), record.state, record.active_grant_id.map(|value| value.to_vec()), record.active_subject, record.grant_expires_at, record.active_offset, record.record_hmac.as_slice(), now],
                 )
                 .map_err(sqlite_io)?;
         }
@@ -6967,17 +6972,67 @@ mod tests {
                 .expect("confirmation cannot mutate an active lease")
                 .applied
         );
+        let released_grant_expiry = effect_now().expect("current time") - 1;
+        let mut store =
+            EffectStore::open_for_mutation(&restart_resources).expect("open leased artifact store");
+        let mut released_record =
+            query_artifact(&store.connection, interrupted_artifact.as_bytes())
+                .expect("query leased artifact")
+                .expect("leased artifact record");
+        released_record.grant_expires_at = Some(released_grant_expiry);
+        released_record.record_hmac =
+            authenticate_artifact_record(&store.hmac_key, &released_record);
+        store
+            .connection
+            .execute(
+                "UPDATE certificate_artifacts SET grant_expires_at=?2,record_hmac=?3 WHERE artifact_id=?1",
+                params![
+                    released_record.artifact_id.as_slice(),
+                    released_grant_expiry,
+                    released_record.record_hmac.as_slice()
+                ],
+            )
+            .expect("expire unconsumed root lease fixture");
+        store
+            .reconcile_artifacts()
+            .expect("release expired unconsumed root lease");
+        let released_lease = ArtifactLeaseIdentity {
+            expires_at_unix_seconds: released_grant_expiry,
+            ..lease
+        };
+        assert!(
+            !restarted
+                .artifact_confirm_consumed(
+                    released_lease,
+                    &interrupted_result.artifact_sha256,
+                    interrupted_result.artifact_size,
+                )
+                .await
+                .expect("released exact artifact confirms not consumed")
+                .applied
+        );
+        let recovered_grant = Uuid::now_v7();
+        let recovered_lease = ArtifactLeaseIdentity {
+            grant_id: recovered_grant.as_bytes(),
+            expires_at_unix_seconds: effect_now().expect("current time") + 300,
+            ..lease
+        };
+        let recovered_chunk = restarted
+            .artifact_read(recovered_lease, 0)
+            .await
+            .expect("released artifact can be leased again");
+        assert!(recovered_chunk.eof);
         restarted
             .artifact_consume(
-                lease,
+                recovered_lease,
                 &interrupted_result.artifact_sha256,
                 interrupted_result.artifact_size,
             )
             .await
-            .expect("consume exact lease once");
+            .expect("consume recovered lease once");
         restarted
             .artifact_consume(
-                lease,
+                recovered_lease,
                 &interrupted_result.artifact_sha256,
                 interrupted_result.artifact_size,
             )
@@ -7006,7 +7061,7 @@ mod tests {
             .expect("expire consumed grant fixture");
         let expired_lease = ArtifactLeaseIdentity {
             expires_at_unix_seconds: elapsed_grant_expiry,
-            ..lease
+            ..recovered_lease
         };
         assert!(
             restarted
@@ -7030,7 +7085,7 @@ mod tests {
             Err(AdapterError::InvalidRequest)
         ));
         assert!(matches!(
-            restarted.artifact_read(lease, 0).await,
+            restarted.artifact_read(recovered_lease, 0).await,
             Err(AdapterError::InvalidRequest)
         ));
         assert!(
