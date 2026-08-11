@@ -90,6 +90,7 @@ type fixtureArtifacts struct {
 	consumeCount int
 	consumeErr   error
 	confirmErr   error
+	confirmHook  func() error
 	consumed     map[string]bool
 }
 
@@ -119,6 +120,13 @@ func (f *fixtureArtifacts) ConsumeArtifact(_ context.Context, grant *agentv1.Art
 func (f *fixtureArtifacts) ConfirmArtifactConsumed(_ context.Context, grant *agentv1.ArtifactGrantV1, digest []byte, size int64) (bool, error) {
 	if f.confirmErr != nil {
 		return false, f.confirmErr
+	}
+	if f.confirmHook != nil {
+		hook := f.confirmHook
+		f.confirmHook = nil
+		if err := hook(); err != nil {
+			return false, err
+		}
 	}
 	expected := sha256.Sum256(f.data)
 	if grant == nil || size != int64(len(f.data)) || !bytes.Equal(digest, expected[:]) {
@@ -362,6 +370,52 @@ func TestCertificateIssueArtifactAndRevokeIntegration(t *testing.T) {
 	_ = releasedDownload.Reader.Close()
 	if err = service.CompleteArtifact(ctx, releasedGrant.ArtifactID, releasedDownload.GrantID, releasedDownload.Grant, digest[:], int64(len(artifactBytes)), requesterID, requesterSession, "artifact-released-retry"); err != nil {
 		t.Fatalf("consume re-leased artifact: %v", err)
+	}
+	revokeRaceArtifactID := uuid.Must(uuid.NewV7())
+	revokeRaceApprovalID := approvedCertificateAction(t, ctx, service, approvalService, workspaceID, nodeID, certificate.ID, requesterID, requesterSession, approverID, approverSession, "certificate.private_key.export", certificateAfterMaintenance.Version, "certificate_p12", revokeRaceArtifactID)
+	revokeRaceGrant, _, err := service.CreateP12(ctx, P12Request{CertificateID: certificate.ID, ApprovalID: revokeRaceApprovalID, ArtifactRequestID: revokeRaceArtifactID, CertificateVersion: certificateAfterMaintenance.Version, ActorIdentityID: requesterID, ActorSessionID: requesterSession, ExpectedVersion: 1, IdempotencyKey: "i17-p12-revoke-race", Reason: "test revoke finalization race", RequestID: "p12-revoke-race", Traceparent: "00-3023456789abcdef0123456789abcdef-1123456789abcdef-01"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = pool.Exec(ctx, `UPDATE artifact_operations SET state='ready',content_sha256=$2,content_size=$3 WHERE id=$1`, revokeRaceGrant.ArtifactID, digest[:], len(artifactBytes)); err != nil {
+		t.Fatal(err)
+	}
+	revokeRaceDownload, err := service.OpenArtifact(ctx, revokeRaceGrant.ArtifactID, revokeRaceGrant.DownloadToken, requesterID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = io.Copy(io.Discard, revokeRaceDownload.Reader)
+	_ = revokeRaceDownload.Reader.Close()
+	revokeRaceGrantBytes, err := proto.MarshalOptions{Deterministic: true}.Marshal(revokeRaceDownload.Grant)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = pool.Exec(ctx, `UPDATE artifact_operations SET state='consuming',consume_grant=$3,consume_sha256=$4,consume_size=$5,consume_actor_id=$6,consume_session_id=$7,consume_request_id='artifact-revoke-race' WHERE id=$1 AND active_grant_id=$2 AND state='leased'`, revokeRaceGrant.ArtifactID, revokeRaceDownload.GrantID, revokeRaceGrantBytes, digest[:], len(artifactBytes), requesterID, requesterSession); err != nil {
+		t.Fatal(err)
+	}
+	if err = artifactTransport.ConsumeArtifact(ctx, revokeRaceDownload.Grant, digest[:], int64(len(artifactBytes))); err != nil {
+		t.Fatal(err)
+	}
+	artifactTransport.confirmHook = func() error {
+		command, hookErr := pool.Exec(ctx, `UPDATE artifact_operations SET state='revoked',lease_until=NULL,active_grant_expires_at=now(),updated_at=now() WHERE id=$1 AND state='consuming'`, revokeRaceGrant.ArtifactID)
+		if hookErr != nil {
+			return hookErr
+		}
+		if command.RowsAffected() != 1 {
+			return errors.New("revoke race did not win the terminal transition")
+		}
+		return nil
+	}
+	if err = service.Maintain(ctx); err != nil {
+		t.Fatalf("concurrent revoke stopped artifact maintenance: %v", err)
+	}
+	var revokeRaceState string
+	if err = pool.QueryRow(ctx, `SELECT state FROM artifact_operations WHERE id=$1`, revokeRaceGrant.ArtifactID).Scan(&revokeRaceState); err != nil || revokeRaceState != "revoked" {
+		t.Fatalf("revoke race state=%q err=%v", revokeRaceState, err)
+	}
+	certificateAfterRevokeRace, err := service.Get(ctx, certificate.ID)
+	if err != nil || certificateAfterRevokeRace.State != "expiring" {
+		t.Fatalf("certificate maintenance after revoke race state=%q err=%v", certificateAfterRevokeRace.State, err)
 	}
 	crashArtifactID := uuid.Must(uuid.NewV7())
 	crashApprovalID := approvedCertificateAction(t, ctx, service, approvalService, workspaceID, nodeID, certificate.ID, requesterID, requesterSession, approverID, approverSession, "certificate.private_key.export", certificateAfterMaintenance.Version, "certificate_p12", crashArtifactID)

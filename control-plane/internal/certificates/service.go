@@ -661,11 +661,19 @@ func (s *Service) finalizeArtifactConsumption(ctx context.Context, id, grantID u
 	var requestID string
 	err = tx.QueryRow(ctx, `UPDATE artifact_operations SET state='consumed',consumed_at=now(),lease_until=NULL,updated_at=now() WHERE id=$1 AND active_grant_id=$2 AND state='consuming' RETURNING workspace_id,node_id,certificate_id,consume_actor_id,consume_session_id,consume_request_id,consume_sha256,consume_size`, id, grantID).Scan(&workspaceID, &nodeID, &certificateID, &actorID, &sessionID, &requestID, &digest, &size)
 	if errors.Is(err, pgx.ErrNoRows) {
-		var consumed bool
-		if queryErr := tx.QueryRow(ctx, `SELECT state='consumed' FROM artifact_operations WHERE id=$1 AND active_grant_id=$2`, id, grantID).Scan(&consumed); queryErr == nil && consumed {
-			return nil
+		var state string
+		if queryErr := tx.QueryRow(ctx, `SELECT state FROM artifact_operations WHERE id=$1 AND active_grant_id=$2`, id, grantID).Scan(&state); queryErr != nil {
+			return ErrArtifactDenied
 		}
-		return ErrArtifactDenied
+		switch state {
+		case "consumed", "revoked", "expired":
+			// Consumption, revocation, and expiry are competing terminal
+			// transitions. The first committed state wins without turning a
+			// legitimate race into a global maintenance failure.
+			return nil
+		default:
+			return ErrArtifactDenied
+		}
 	}
 	if err != nil {
 		return err
