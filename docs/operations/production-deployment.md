@@ -31,6 +31,21 @@ export OCSERV_RELAY_URL_B=https://relay-b.example.com
 
 The control plane runs `--role=all`. Terminate public TLS at the gateway. Configure the OIDC redirect URI as `https://$OCSERV_PUBLIC_HOST/api/v1/auth/callback` and use an HTTPS certificate signer.
 
+The production containers intentionally use separate service identities:
+Controller UID 65534, transportd UID 65532, and shared socket GID 65532. Keep
+the Compose `OCSERV_TRANSPORT_UID`/`OCSERV_TRANSPORT_GID` and transportd
+`--control-plane-uid`/`--control-plane-gid` values aligned with those service
+users. The production launcher stops the Controller and transportd before
+running a root-owned, network-disabled runtime initializer. The initializer
+accepts only a fresh root-owned Docker volume, the current `65532:65532 0750`
+transport volume, or the exact legacy `65532:65532 0770` state; it seals the
+directory before inspecting it, removes only a trusted stale transport socket,
+and finishes at `0750`.
+All services mount this volume with copy-up disabled so the container runtime
+cannot replace the initializer's validated ownership or mode from image data.
+Unexpected owners, entries, links, or modes fail closed. Do not invoke Compose
+directly or make either socket parent client-writable.
+
 Before starting, validate rendered configuration without printing secret contents:
 
 ```bash

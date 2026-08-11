@@ -2462,7 +2462,10 @@ version = "0.1.0"
 dependencies = [
  "hex",
  "iroh",
+ "ocservia-contracts",
+ "prost-types",
  "rustix",
+ "sha2 0.10.9",
  "zeroize",
 ]
 
@@ -2558,6 +2561,7 @@ dependencies = [
  "hyper-util",
  "iroh",
  "iroh-relay",
+ "ocservia-agent-identity",
  "ocservia-contracts",
  "prost",
  "prost-types",
@@ -2580,7 +2584,9 @@ dependencies = [
  "ocservia-contracts",
  "prost",
  "prost-types",
+ "rustix",
  "serde_json",
+ "sha2 0.10.9",
  "tokio",
  "tokio-stream",
  "tonic",

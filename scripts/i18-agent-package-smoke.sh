@@ -21,11 +21,36 @@ trap cleanup EXIT INT TERM
 (cd "${ROOT}/rust" && cargo build --locked --release --package ocservia-agent --package ocservia-privd)
 echo "agent package release build passed"
 openssl genpkey -algorithm ED25519 -out "${work}/signing.key" >/dev/null 2>&1
+openssl genpkey -algorithm ED25519 -out "${work}/controller-command.key" >/dev/null 2>&1
+controller_endpoint="$(openssl pkey -in "${work}/signing.key" -pubout -outform DER \
+  | tail -c 32 | od -An -tx1 | tr -d ' \n')"
+substitute_controller_endpoint="$(openssl pkey -in "${work}/controller-command.key" -pubout -outform DER \
+  | tail -c 32 | od -An -tx1 | tr -d ' \n')"
+fresh_identity="${work}/fresh-identity"
+mkdir -m 0700 "${fresh_identity}"
+prepared_endpoint="$("${ROOT}/rust/target/release/ocservia-agent" \
+  --identity-dir "${fresh_identity}" --controller "${controller_endpoint}" \
+  --prepare-enrollment)"
+[[ "${prepared_endpoint}" =~ ^[0-9a-f]{64}$ ]] \
+  || { echo "fresh enrollment did not print a lowercase hexadecimal EndpointID" >&2; exit 1; }
+test "${prepared_endpoint}" = "$("${ROOT}/rust/target/release/ocservia-agent" \
+  --identity-dir "${fresh_identity}" --controller "${controller_endpoint}" \
+  --prepare-enrollment)" \
+  || { echo "fresh enrollment preparation rotated the endpoint identity" >&2; exit 1; }
+test "$(stat -c '%a' "${fresh_identity}/endpoint.key")" = 600
+test "$(stat -c '%a' "${fresh_identity}/controller.endpoint")" = 600
+if "${ROOT}/rust/target/release/ocservia-agent" \
+  --identity-dir "${fresh_identity}" \
+  --controller "${substitute_controller_endpoint}" \
+  --prepare-enrollment >/dev/null 2>&1; then
+  echo "fresh enrollment preparation accepted controller pin substitution" >&2
+  exit 1
+fi
+echo "fresh enrollment identity preparation passed"
 chmod 0600 "${work}/signing.key"
 openssl pkey -in "${work}/signing.key" -pubout -out "${work}/trusted.pub.pem" >/dev/null 2>&1
 openssl pkey -pubin -in "${work}/trusted.pub.pem" -outform DER -out "${work}/trusted.der"
 trusted_fingerprint="$(sha256sum "${work}/trusted.der" | awk '{print $1}')"
-openssl genpkey -algorithm ED25519 -out "${work}/controller-command.key" >/dev/null 2>&1
 openssl pkey -in "${work}/controller-command.key" -pubout \
   -out "${work}/controller-command.pub.pem" >/dev/null 2>&1
 archive="$(OUTPUT_DIR="${ARTIFACT_DIR}" AGENT_SIGNING_KEY="${work}/signing.key" VERSION=1.0.0 \

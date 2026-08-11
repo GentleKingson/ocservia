@@ -42,7 +42,7 @@ export interface EnrollmentTokenRequest {
    * @type {string}
    * @memberof EnrollmentTokenRequest
    */
-  expectedEndpointId?: string;
+  expectedEndpointId: string;
   /**
    *
    * @type {number}
@@ -72,6 +72,13 @@ export function instanceOfEnrollmentTokenRequest(
     return false;
   if (!("environment" in value) || value["environment"] === undefined)
     return false;
+  if (
+    (!("expectedEndpointId" in (value as Record<string, any>)) &&
+      !("expected_endpoint_id" in (value as Record<string, any>))) ||
+    ((value as Record<string, any>)["expectedEndpointId"] === undefined &&
+      (value as Record<string, any>)["expected_endpoint_id"] === undefined)
+  )
+    return false;
   if (!("reason" in value) || value["reason"] === undefined) return false;
   return true;
 }
@@ -96,10 +103,7 @@ export function EnrollmentTokenRequestFromJSONTyped(
       json["expected_node_name"] == null
         ? undefined
         : json["expected_node_name"],
-    expectedEndpointId:
-      json["expected_endpoint_id"] == null
-        ? undefined
-        : json["expected_endpoint_id"],
+    expectedEndpointId: json["expected_endpoint_id"],
     ttlSeconds: json["ttl_seconds"] == null ? undefined : json["ttl_seconds"],
     reason: json["reason"],
   };

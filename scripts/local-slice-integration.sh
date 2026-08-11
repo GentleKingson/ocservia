@@ -7,7 +7,9 @@ source "${ROOT}/scripts/env.sh"
 
 RUN_ID="${RUN_ID:-local-slice-${GITHUB_RUN_ID:-local}-${GITHUB_RUN_ATTEMPT:-1}-${GITHUB_JOB:-job}-$(date -u +%Y%m%dT%H%M%SZ)-$$}"
 PREFIX="$(printf '%s' "${RUN_ID}" | tr '[:upper:]_' '[:lower:]-' | tr -cd 'a-z0-9-')"
-TMP_BASE="${RUNNER_TEMP:-${TMPDIR:-/tmp}}"
+TMP_BASE="${RUNNER_TEMP:-${ROOT}/tmp}"
+mkdir -p "${TMP_BASE}"
+chmod 0700 "${TMP_BASE}"
 # Keep Unix socket paths below Linux sockaddr_un.sun_path while mktemp supplies
 # per-run uniqueness inside the runner-owned temporary directory.
 TMP_ROOT="$(mktemp -d "${TMP_BASE%/}/ocsv-ls-XXXXXX")"
@@ -80,6 +82,7 @@ OCSERV_ENVIRONMENT=test OCSERV_DATABASE_URL="${owner_url}" OCSERV_RUNTIME_DATABA
 
 start_stub() {
   "${ROOT}/rust/target/debug/ocservia-transportd-stub" --socket "${SOCKET}" --queue-capacity 8 \
+    --control-plane-uid "$(id -u)" --control-plane-gid "$(id -g)" \
     >"${TMP_ROOT}/transportd.log" 2>&1 &
   STUB_PID=$!
   PIDS+=("${STUB_PID}")
@@ -96,6 +99,7 @@ start_control() {
     OCSERV_DATABASE_URL="${runtime_url}" OCSERV_LOCAL_SIMULATOR=true \
     OCSERV_DEV_AUTH_TOKEN="${AUTH_TOKEN}" \
     OCSERV_TRANSPORT_SOCKET="${SOCKET}" OCSERV_TRANSPORT_QUEUE_CAPACITY=8 \
+    OCSERV_TRANSPORT_UID="$(id -u)" OCSERV_TRANSPORT_GID="$(id -g)" \
     OCSERV_TRUST_SOCKET="${TRUST_SOCKET}" \
     "${TMP_ROOT}/ocserv-control" --role=all >"${TMP_ROOT}/control.log" 2>&1 &
   CONTROL_PID=$!

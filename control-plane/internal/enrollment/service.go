@@ -38,6 +38,7 @@ const (
 var (
 	ErrInvalidToken      = errors.New("enrollment token is invalid or expired")
 	ErrEndpointMismatch  = errors.New("endpoint does not match enrollment token")
+	ErrEndpointProof     = errors.New("endpoint proof of possession is invalid")
 	ErrPendingLimit      = errors.New("pending node limit reached")
 	ErrInvalidTransition = errors.New("node state transition is invalid")
 	ErrNotFound          = errors.New("resource not found")
@@ -101,7 +102,7 @@ func New(pool *pgxpool.Pool, controllerEndpointID, controllerVersion string, sig
 
 func (s *Service) CreateToken(ctx context.Context, spec TokenSpec) (Token, error) {
 	if spec.WorkspaceID == uuid.Nil || !validShort(spec.Environment, 64) || !validOptional(spec.ExpectedNodeName, 128) ||
-		(len(spec.ExpectedEndpointID) != 0 && len(spec.ExpectedEndpointID) != 32) || !validActor(spec.ActorID, spec.RequestID, spec.Reason) {
+		len(spec.ExpectedEndpointID) != 32 || !validActor(spec.ActorID, spec.RequestID, spec.Reason) {
 		return Token{}, ErrInvalidRequest
 	}
 	ttl := spec.TTL
@@ -123,10 +124,6 @@ func (s *Service) CreateToken(ctx context.Context, spec TokenSpec) (Token, error
 	if spec.ExpectedNodeName != "" {
 		expectedName = spec.ExpectedNodeName
 	}
-	var expectedEndpoint any
-	if len(spec.ExpectedEndpointID) != 0 {
-		expectedEndpoint = spec.ExpectedEndpointID
-	}
 	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{})
 	if err != nil {
 		return Token{}, fmt.Errorf("begin token transaction: %w", err)
@@ -142,7 +139,7 @@ func (s *Service) CreateToken(ctx context.Context, spec TokenSpec) (Token, error
 	_, err = tx.Exec(ctx, `INSERT INTO enrollment_tokens
         (id, workspace_id, token_hash, expected_environment, expected_node_name, expected_endpoint_id, expires_at, created_by, created_at)
 		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
-		token.ID, spec.WorkspaceID, digest[:], spec.Environment, expectedName, expectedEndpoint, token.ExpiresAt, spec.ActorID, now)
+		token.ID, spec.WorkspaceID, digest[:], spec.Environment, expectedName, spec.ExpectedEndpointID, token.ExpiresAt, spec.ActorID, now)
 	if err != nil {
 		return Token{}, fmt.Errorf("insert enrollment token: %w", err)
 	}
@@ -158,6 +155,9 @@ func (s *Service) CreateToken(ctx context.Context, spec TokenSpec) (Token, error
 func (s *Service) Enroll(ctx context.Context, request *agentv1.EnrollRequest) (*agentv1.EnrollResponse, error) {
 	if err := validateEnrollment(request); err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrInvalidRequest, err)
+	}
+	if err := verifyEnrollmentProof(request); err != nil {
+		return nil, err
 	}
 	raw, err := base64.RawURLEncoding.DecodeString(request.GetToken())
 	if err != nil || len(raw) != 32 {
@@ -185,7 +185,7 @@ func (s *Service) Enroll(ctx context.Context, request *agentv1.EnrollRequest) (*
 	if environment != request.GetEnvironment() {
 		return nil, ErrInvalidToken
 	}
-	if len(expectedEndpoint) != 0 && subtle.ConstantTimeCompare(expectedEndpoint, request.GetEndpointId()) != 1 {
+	if len(expectedEndpoint) != 32 || subtle.ConstantTimeCompare(expectedEndpoint, request.GetEndpointId()) != 1 {
 		return nil, ErrEndpointMismatch
 	}
 	if consumedAt != nil {
@@ -315,6 +315,9 @@ func (s *Service) Approve(ctx context.Context, approval Approval) (NodeTrust, er
 	if _, err := tx.Exec(ctx, `UPDATE node_endpoint_keys SET state='active' WHERE node_id=$1`, approval.NodeID); err != nil {
 		return NodeTrust{}, fmt.Errorf("activate endpoint: %w", err)
 	}
+	if err := enqueueTrustConvergence(ctx, tx, approval.NodeID, endpointID, "active", revision, approval.Reason, now); err != nil {
+		return NodeTrust{}, err
+	}
 	if _, err := tx.Exec(ctx, `UPDATE node_capabilities SET approved=false WHERE node_id=$1`, approval.NodeID); err != nil {
 		return NodeTrust{}, err
 	}
@@ -366,6 +369,9 @@ func (s *Service) Revoke(ctx context.Context, revocation Revocation) (NodeTrust,
 		return NodeTrust{}, err
 	}
 	if _, err := tx.Exec(ctx, `UPDATE node_endpoint_keys SET state='revoked',revoked_at=$2 WHERE node_id=$1`, revocation.NodeID, now); err != nil {
+		return NodeTrust{}, err
+	}
+	if err := enqueueTrustConvergence(ctx, tx, revocation.NodeID, endpointID, "revoked", revision, revocation.Reason, now); err != nil {
 		return NodeTrust{}, err
 	}
 	if err := audit.AppendChain(ctx, tx, audit.ChainRecord{WorkspaceID: workspaceID, ActorType: "user", ActorID: revocation.ActorID, SessionID: &revocation.SessionID, ApprovalID: &revocation.ApprovalID, NodeID: &revocation.NodeID, Action: "node.revoke", ResourceType: "node", ResourceID: revocation.NodeID, RequestID: revocation.RequestID, Reason: revocation.Reason, At: now}); err != nil {
@@ -504,11 +510,26 @@ func (s *Service) AuthorizeSession(ctx context.Context, request *transportv1.Aut
 func validateEnrollment(request *agentv1.EnrollRequest) error {
 	if request == nil || len(request.GetEndpointId()) != 32 || !validShort(request.GetAgentVersion(), 128) || !validShort(request.GetOsRelease(), 256) ||
 		!validShort(request.GetBootId(), 256) || len(request.GetAgentInstanceId()) != 16 || len(request.GetNonce()) < 16 || len(request.GetNonce()) > 64 ||
-		request.GetTime() == nil || request.GetTime().CheckValid() != nil || !validShort(request.GetEnvironment(), 64) || len(request.GetCapabilities()) > 128 {
+		request.GetTime() == nil || request.GetTime().CheckValid() != nil || !validShort(request.GetEnvironment(), 64) || len(request.GetCapabilities()) > 128 ||
+		request.GetEnrollmentProtocolMajor() != EnrollmentProtocolMajor || request.GetEnrollmentProtocolMinor() != EnrollmentProtocolMinor {
 		return errors.New("invalid enrollment request")
 	}
 	if !validCapabilities(request.GetCapabilities()) {
 		return errors.New("invalid enrollment capabilities")
+	}
+	return nil
+}
+
+func enqueueTrustConvergence(ctx context.Context, tx pgx.Tx, nodeID uuid.UUID, endpointID []byte, state string, revision uint64, reason string, now time.Time) error {
+	_, err := tx.Exec(ctx, `INSERT INTO node_trust_convergence
+		(node_id,endpoint_id,desired_state,revision,reason,close_required,available_at,created_at,updated_at)
+		VALUES($1,$2,$3,$4,$5,$3::text='revoked',$6,$6,$6)
+		ON CONFLICT(node_id) DO UPDATE SET endpoint_id=EXCLUDED.endpoint_id,desired_state=EXCLUDED.desired_state,
+		revision=EXCLUDED.revision,reason=EXCLUDED.reason,update_applied=false,close_required=EXCLUDED.close_required,
+		close_applied=false,available_at=EXCLUDED.available_at,locked_by=NULL,locked_until=NULL,last_error=NULL,updated_at=EXCLUDED.updated_at
+		WHERE node_trust_convergence.revision < EXCLUDED.revision`, nodeID, endpointID, state, revision, reason, now)
+	if err != nil {
+		return fmt.Errorf("enqueue node trust convergence: %w", err)
 	}
 	return nil
 }

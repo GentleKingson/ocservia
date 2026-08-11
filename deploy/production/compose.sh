@@ -42,6 +42,7 @@ for secret in relay-access-token controller-iroh.key; do
   fi
 done
 
+prepare_transport_runtime=false
 for argument in "$@"; do
   case "${argument}" in
     up|create|run)
@@ -54,9 +55,18 @@ for argument in "$@"; do
         echo "OCSERV_BACKUP_DIR must be owned by uid:gid 999:999 with mode 0700" >&2
         exit 2
       fi
+      if [[ "${argument}" == "up" ]]; then
+        prepare_transport_runtime=true
+      fi
       break
       ;;
   esac
 done
 
-exec docker compose -f "${ROOT}/deploy/production/compose.yaml" "$@"
+compose=(docker compose -f "${ROOT}/deploy/production/compose.yaml")
+if [[ "${prepare_transport_runtime}" == true ]]; then
+  "${compose[@]}" stop control-plane transportd
+  "${compose[@]}" run --rm --no-deps transport-runtime-init
+fi
+
+exec "${compose[@]}" "$@"

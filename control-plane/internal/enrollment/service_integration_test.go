@@ -6,6 +6,8 @@ import (
 	"crypto/ed25519"
 	"errors"
 	"fmt"
+	"io"
+	"log/slog"
 	"os"
 	"slices"
 	"sync"
@@ -34,7 +36,7 @@ func TestCreateTokenUnknownWorkspaceIntegration(t *testing.T) {
 	}
 	defer pool.Close()
 	service := newTestService(t, pool, "", "test")
-	_, err = service.CreateToken(ctx, TokenSpec{WorkspaceID: uuid.Must(uuid.NewV7()), Environment: "test", ActorID: "integration", Reason: "unknown workspace", RequestID: uuid.Must(uuid.NewV7()).String()})
+	_, err = service.CreateToken(ctx, TokenSpec{WorkspaceID: uuid.Must(uuid.NewV7()), Environment: "test", ExpectedEndpointID: endpointFixture(1), ActorID: "integration", Reason: "unknown workspace", RequestID: uuid.Must(uuid.NewV7()).String()})
 	if !errors.Is(err, ErrNotFound) {
 		t.Fatalf("unknown workspace error=%v", err)
 	}
@@ -59,7 +61,7 @@ func TestConcurrentAuditChainIntegration(t *testing.T) {
 	defer cleanupWorkspace(ctx, pool, workspaceID)
 
 	service := newTestService(t, pool, "", "test")
-	endpoint := bytes.Repeat([]byte{0x2a}, 32)
+	endpoint := endpointFixture(2)
 	enrollmentToken, err := service.CreateToken(ctx, TokenSpec{WorkspaceID: workspaceID, Environment: "test", ExpectedEndpointID: endpoint, ActorID: "integration", Reason: "concurrent enrollment", RequestID: "audit-enrollment-token"})
 	if err != nil {
 		t.Fatal(err)
@@ -75,7 +77,7 @@ func TestConcurrentAuditChainIntegration(t *testing.T) {
 				errors <- enrollErr
 				return
 			}
-			_, createErr := service.CreateToken(ctx, TokenSpec{WorkspaceID: workspaceID, Environment: "test", ActorID: "integration", Reason: "concurrent audit", RequestID: fmt.Sprintf("audit-%d", index)})
+			_, createErr := service.CreateToken(ctx, TokenSpec{WorkspaceID: workspaceID, Environment: "test", ExpectedEndpointID: endpointFixture(byte(index + 2)), ActorID: "integration", Reason: "concurrent audit", RequestID: fmt.Sprintf("audit-%d", index)})
 			errors <- createErr
 		}()
 	}
@@ -132,8 +134,7 @@ func TestEnrollmentTrustLifecycleIntegration(t *testing.T) {
 	defer cleanupWorkspace(ctx, pool, workspaceID)
 
 	service := newTestService(t, pool, string(make([]byte, 64)), "test")
-	endpoint := make([]byte, 32)
-	endpoint[0] = 7
+	endpoint := endpointFixture(7)
 	token := createToken(t, service, workspaceID, endpoint)
 	request := enrollmentRequest(token.Value, endpoint)
 
@@ -304,6 +305,45 @@ func TestEnrollmentTrustLifecycleIntegration(t *testing.T) {
 	if _, err := service.Revoke(ctx, Revocation{NodeID: trust.NodeID, ActorID: revokeIdentityID.String(), ApprovalID: revokeApprovalID, IdentityID: revokeIdentityID, SessionID: revokeSessionID, Reason: "retry revocation", RequestID: uuid.Must(uuid.NewV7()).String()}); err != nil {
 		t.Fatalf("revoked node retry error = %v", err)
 	}
+	transport := &failingTrustTransport{updateFailures: 1, closeFailures: 1}
+	worker, err := NewTrustConvergenceWorker(pool, transport, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if worked, runErr := worker.RunOnce(ctx); !worked || runErr == nil {
+		t.Fatalf("failed transport update was not retained for retry: worked=%v err=%v", worked, runErr)
+	}
+	if transport.closeCalls != 0 {
+		t.Fatal("node close ran before the exact trust update was acknowledged")
+	}
+	var updateApplied, closeApplied bool
+	if err := pool.QueryRow(ctx, `SELECT update_applied,close_applied FROM node_trust_convergence WHERE node_id=$1`, nodeID).Scan(&updateApplied, &closeApplied); err != nil || updateApplied || closeApplied {
+		t.Fatalf("failed trust convergence state update=%v close=%v err=%v", updateApplied, closeApplied, err)
+	}
+	if _, err := pool.Exec(ctx, `UPDATE node_trust_convergence SET available_at=now() WHERE node_id=$1`, nodeID); err != nil {
+		t.Fatal(err)
+	}
+	if worked, runErr := worker.RunOnce(ctx); !worked || runErr == nil {
+		t.Fatalf("failed node close was not retained for retry: worked=%v err=%v", worked, runErr)
+	}
+	if transport.updateCalls != 2 || transport.closeCalls != 1 {
+		t.Fatalf("transport convergence calls update=%d close=%d", transport.updateCalls, transport.closeCalls)
+	}
+	if err := pool.QueryRow(ctx, `SELECT update_applied,close_applied FROM node_trust_convergence WHERE node_id=$1`, nodeID).Scan(&updateApplied, &closeApplied); err != nil || !updateApplied || closeApplied {
+		t.Fatalf("failed close convergence state update=%v close=%v err=%v", updateApplied, closeApplied, err)
+	}
+	if _, err := pool.Exec(ctx, `UPDATE node_trust_convergence SET available_at=now() WHERE node_id=$1`, nodeID); err != nil {
+		t.Fatal(err)
+	}
+	if worked, runErr := worker.RunOnce(ctx); !worked || runErr != nil {
+		t.Fatalf("trust convergence retry worked=%v err=%v", worked, runErr)
+	}
+	if transport.updateCalls != 2 || transport.closeCalls != 2 {
+		t.Fatalf("transport convergence retry calls update=%d close=%d", transport.updateCalls, transport.closeCalls)
+	}
+	if err := pool.QueryRow(ctx, `SELECT update_applied,close_applied FROM node_trust_convergence WHERE node_id=$1`, nodeID).Scan(&updateApplied, &closeApplied); err != nil || !updateApplied || !closeApplied {
+		t.Fatalf("completed trust convergence state update=%v close=%v err=%v", updateApplied, closeApplied, err)
+	}
 	permitted, err = service.CheckEndpoint(ctx, &transportv1.CheckEndpointRequest{EndpointId: endpoint, Alpn: "ocserv-platform/agent/1"})
 	if err != nil || permitted {
 		t.Fatalf("revoked endpoint permitted=%v err=%v", permitted, err)
@@ -335,11 +375,9 @@ func TestExpiredAndSubstitutedEnrollmentTokensIntegration(t *testing.T) {
 	}
 	defer cleanupWorkspace(ctx, pool, workspaceID)
 	service := newTestService(t, pool, "", "test")
-	endpoint := make([]byte, 32)
-	endpoint[0] = 9
+	endpoint := endpointFixture(9)
 	token := createToken(t, service, workspaceID, endpoint)
-	substitute := make([]byte, 32)
-	substitute[0] = 10
+	substitute := endpointFixture(10)
 	if _, err := service.Enroll(ctx, enrollmentRequest(token.Value, substitute)); !errors.Is(err, ErrEndpointMismatch) {
 		t.Fatalf("substitution error=%v", err)
 	}
@@ -348,6 +386,46 @@ func TestExpiredAndSubstitutedEnrollmentTokensIntegration(t *testing.T) {
 	}
 	if _, err := service.Enroll(ctx, enrollmentRequest(token.Value, endpoint)); !errors.Is(err, ErrInvalidToken) {
 		t.Fatalf("expiry error=%v", err)
+	}
+}
+
+func TestDirectTrustCallerCannotForgeEndpointProofIntegration(t *testing.T) {
+	databaseURL := os.Getenv("OCSERV_TEST_DATABASE_URL")
+	if databaseURL == "" {
+		t.Skip("OCSERV_TEST_DATABASE_URL is not set")
+	}
+	ctx := context.Background()
+	pool, err := pgxpool.New(ctx, databaseURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pool.Close()
+	workspaceID := uuid.Must(uuid.NewV7())
+	if _, err := pool.Exec(ctx, `INSERT INTO workspaces (id,name,slug,created_at,updated_at) VALUES ($1,'Direct trust proof',$2,now(),now())`, workspaceID, "direct-trust-"+workspaceID.String()); err != nil {
+		t.Fatal(err)
+	}
+	defer cleanupWorkspace(ctx, pool, workspaceID)
+
+	service := newTestService(t, pool, "", "test")
+	expectedEndpoint := endpointFixture(12)
+	forgerEndpoint := endpointFixture(13)
+	token := createToken(t, service, workspaceID, expectedEndpoint)
+	forged := enrollmentRequest(token.Value, expectedEndpoint)
+	canonical, err := EnrollmentCanonicalV1(forged)
+	if err != nil {
+		t.Fatal(err)
+	}
+	forgerKey, ok := endpointPrivateKeys.Load(string(forgerEndpoint))
+	if !ok {
+		t.Fatal("missing forger key fixture")
+	}
+	forged.Proof.Signature = ed25519.Sign(forgerKey.(ed25519.PrivateKey), canonical)
+	if _, err := service.Enroll(ctx, forged); !errors.Is(err, ErrEndpointProof) {
+		t.Fatalf("direct trust caller forged endpoint error = %v", err)
+	}
+	var consumedAt *time.Time
+	if err := pool.QueryRow(ctx, `SELECT consumed_at FROM enrollment_tokens WHERE id=$1`, token.ID).Scan(&consumedAt); err != nil || consumedAt != nil {
+		t.Fatalf("forged enrollment consumed token at %v, err=%v", consumedAt, err)
 	}
 }
 
@@ -376,8 +454,7 @@ func TestLegacyPendingNodeCanBeReenrolledIntegration(t *testing.T) {
 	}
 
 	service := newTestService(t, pool, "", "test")
-	endpoint := make([]byte, 32)
-	endpoint[0] = 11
+	endpoint := endpointFixture(11)
 	token, err := service.CreateToken(ctx, TokenSpec{WorkspaceID: workspaceID, Environment: "test", ExpectedNodeName: legacyName, ExpectedEndpointID: endpoint, ActorID: "integration", Reason: "re-enroll legacy node", RequestID: uuid.Must(uuid.NewV7()).String()})
 	if err != nil {
 		t.Fatal(err)
@@ -414,7 +491,51 @@ func newTestService(t *testing.T, pool *pgxpool.Pool, controllerEndpointID, cont
 }
 
 func enrollmentRequest(token string, endpoint []byte) *agentv1.EnrollRequest {
-	return &agentv1.EnrollRequest{Token: token, EndpointId: endpoint, AgentVersion: "test", OsRelease: "test", OcservVersion: "test", BootId: "boot", AgentInstanceId: uuidBytes(), Capabilities: []string{"ocserv.status.read"}, Environment: "test", Nonce: make([]byte, 16), Time: timestamppb.Now()}
+	request := &agentv1.EnrollRequest{Token: token, EndpointId: endpoint, AgentVersion: "test", OsRelease: "test", OcservVersion: "test", BootId: "boot", AgentInstanceId: uuidBytes(), Capabilities: []string{"ocserv.status.read"}, Environment: "test", Nonce: make([]byte, 16), Time: timestamppb.Now(), EnrollmentProtocolMajor: EnrollmentProtocolMajor, EnrollmentProtocolMinor: EnrollmentProtocolMinor}
+	privateKey, ok := endpointPrivateKeys.Load(string(endpoint))
+	if !ok {
+		panic("missing enrollment endpoint private key fixture")
+	}
+	canonical, err := EnrollmentCanonicalV1(request)
+	if err != nil {
+		panic(err)
+	}
+	request.Proof = &agentv1.EnrollmentProofV1{Version: EnrollmentProofVersionV1, Signature: ed25519.Sign(privateKey.(ed25519.PrivateKey), canonical)}
+	return request
+}
+
+var endpointPrivateKeys sync.Map
+
+type failingTrustTransport struct {
+	updateFailures int
+	closeFailures  int
+	updateCalls    int
+	closeCalls     int
+}
+
+func (transport *failingTrustTransport) UpdateNodeTrust(_ context.Context, _, _ []byte, _ transportv1.NodeTrustState, _ string, _ uint64) error {
+	transport.updateCalls++
+	if transport.updateFailures > 0 {
+		transport.updateFailures--
+		return errors.New("injected trust transport failure")
+	}
+	return nil
+}
+
+func (transport *failingTrustTransport) CloseNode(_ context.Context, _ []byte, _ string) error {
+	transport.closeCalls++
+	if transport.closeFailures > 0 {
+		transport.closeFailures--
+		return errors.New("injected node close failure")
+	}
+	return nil
+}
+
+func endpointFixture(seed byte) []byte {
+	privateKey := ed25519.NewKeyFromSeed(bytes.Repeat([]byte{seed}, ed25519.SeedSize))
+	publicKey := slices.Clone(privateKey.Public().(ed25519.PublicKey))
+	endpointPrivateKeys.Store(string(publicKey), privateKey)
+	return publicKey
 }
 
 func uuidBytes() []byte {
@@ -423,6 +544,7 @@ func uuidBytes() []byte {
 }
 
 func cleanupWorkspace(ctx context.Context, pool *pgxpool.Pool, workspaceID uuid.UUID) {
+	_, _ = pool.Exec(ctx, `DELETE FROM node_trust_convergence WHERE node_id IN (SELECT id FROM nodes WHERE workspace_id=$1)`, workspaceID)
 	_, _ = pool.Exec(ctx, `DELETE FROM audit_events WHERE workspace_id=$1`, workspaceID)
 	_, _ = pool.Exec(ctx, `DELETE FROM enrollment_tokens WHERE workspace_id=$1`, workspaceID)
 	_, _ = pool.Exec(ctx, `DELETE FROM node_capabilities WHERE node_id IN (SELECT id FROM nodes WHERE workspace_id=$1)`, workspaceID)

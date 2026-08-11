@@ -157,6 +157,9 @@ func TestProductionRequiresAbsoluteControllerCommandSigningKey(t *testing.T) {
 	cfg.OIDCRedirectURL = "https://ocservia.example.test/api/v1/auth/callback"
 	cfg.SessionKey = make([]byte, 32)
 	cfg.AuditCheckpointKey = make([]byte, 32)
+	cfg.TransportUID = uint32(os.Geteuid() + 1)
+	cfg.TransportGID = uint32(os.Getegid())
+	cfg.TransportIdentitySet = true
 	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "command signing key") {
 		t.Fatalf("missing production command key error = %v", err)
 	}
@@ -167,6 +170,26 @@ func TestProductionRequiresAbsoluteControllerCommandSigningKey(t *testing.T) {
 	cfg.CommandSigningKeyFile = "/run/secrets/controller_command_signing_key"
 	if err := cfg.Validate(); err != nil {
 		t.Fatalf("absolute production command key rejected: %v", err)
+	}
+}
+
+func TestProductionRequiresDistinctTransportIdentity(t *testing.T) {
+	values := map[string]string{
+		"OCSERV_DATABASE_URL":  "postgres://db/test",
+		"OCSERV_TRANSPORT_UID": "12345",
+		"OCSERV_TRANSPORT_GID": "12346",
+	}
+	cfg, err := Load(nil, func(key string) (string, bool) { value, ok := values[key]; return value, ok })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.TransportIdentitySet || cfg.TransportUID != 12345 || cfg.TransportGID != 12346 {
+		t.Fatalf("unexpected transport identity: %+v", cfg)
+	}
+
+	delete(values, "OCSERV_TRANSPORT_GID")
+	if _, err := Load(nil, func(key string) (string, bool) { value, ok := values[key]; return value, ok }); err == nil {
+		t.Fatal("accepted a transport UID without a transport GID")
 	}
 }
 

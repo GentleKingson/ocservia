@@ -3,7 +3,9 @@
 `ocservia-transportd` owns one Iroh 1.0.x endpoint and routes only
 `ocserv-platform/enroll/1` and `ocserv-platform/agent/1`. The Go boundary remains
 the versioned gRPC service on a `0660` Unix socket; Go code does not import Iroh
-types. The process has no database client or database credentials.
+types. The process has no database client or database credentials. Both the
+administrative socket and trust socket require configured, exact peer UIDs;
+shared group membership grants pathname access but is not authentication.
 The transport and control-plane containers share the numeric `ocservia` group
 (GID 65532), while retaining distinct non-root users, so only that group can
 traverse the runtime directory and connect to the socket.
@@ -16,9 +18,14 @@ in an image, source tree, command-line argument, or log. The endpoint identifier
 which is public, is logged at startup.
 
 For the database-backed lifecycle, pass
-`--trust-socket /run/ocserv-trust/control-plane.sock`. The Iroh hook
+`--trust-socket /run/ocserv-trust/control-plane.sock`,
+`--control-plane-uid 65534`, and `--control-plane-gid 65532`. The Iroh hook
 then checks remote EndpointIDs with the Go trust service before reading
-application data. The startup-only `--approved-binding NODE_UUID=ENDPOINT_ID`
+application data. The trust client verifies the socket and server identity;
+the Controller trust server independently verifies transportd's exact UID.
+Each socket path must be a non-symlink Unix socket with exact UID/GID/mode under
+trusted, non-writable ancestry, and clients reject a pathname identity change
+during connection. The startup-only `--approved-binding NODE_UUID=ENDPOINT_ID`
 and `--revoked-endpoint ENDPOINT_ID` flags remain available for isolated tests
 and rollback. Endpoint IDs are 32-byte lowercase hexadecimal public
 identifiers and node IDs are UUIDv7 values.
@@ -42,7 +49,9 @@ ocservia-transportd \
   --socket /run/ocserv-platform/transportd.sock \
   --key-file /run/secrets/controller-iroh.key \
   --relay-mode default \
-  --trust-socket /run/ocserv-trust/control-plane.sock
+  --trust-socket /run/ocserv-trust/control-plane.sock \
+  --control-plane-uid 65534 \
+  --control-plane-gid 65532
 ```
 
 Use `--relay-mode disabled` for isolated direct-path tests. The endpoint limits
@@ -59,6 +68,12 @@ transportd accepts those values only from the Controller handshake response;
 it cannot manufacture a grant. Command dispatch checks the retained capability,
 revision, and expiry before opening a stream. A higher authoritative trust
 revision closes a connection retaining an older session grant.
+
+Trust updates report `applied`, `stale`, or `rejected` together with the exact
+retained state and revision. Revoked EndpointIDs remain tombstoned with their
+original node binding: neither a stale nor a higher-revision ordinary Active
+update can reactivate or rebind them. Connection side effects occur only after
+the exact authoritative transition advances the retained state.
 
 Iroh is pinned to `1.0.0` in `Cargo.toml`; `Cargo.lock` pins the complete resolved
 graph. Patch upgrades within 1.0.x still require direct, relay, ALPN rejection,

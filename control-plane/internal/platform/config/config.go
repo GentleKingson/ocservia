@@ -51,6 +51,9 @@ type Config struct {
 	LogLevelName             string
 	TransportSocket          string
 	TrustSocket              string
+	TransportUID             uint32
+	TransportGID             uint32
+	TransportIdentitySet     bool
 	ControllerEndpointID     string
 	TransportTimeout         time.Duration
 	TransportQueue           int
@@ -70,6 +73,7 @@ func Load(args []string, lookup LookupEnv) (Config, error) {
 		LogLevelName: "info", TransportSocket: "/run/ocserv-platform/transportd.sock",
 		TrustSocket:      "/run/ocserv-trust/control-plane.sock",
 		TransportTimeout: 3 * time.Second, TransportQueue: 256, UserOperationConcurrency: 50, SessionTTL: 8 * time.Hour, CertificateSignerTimeout: 10 * time.Second,
+		TransportUID: uint32(os.Geteuid()), TransportGID: uint32(os.Getegid()),
 	}
 	setString(lookup, "OCSERV_ENVIRONMENT", &cfg.Environment)
 	setString(lookup, "OCSERV_HTTP_ADDRESS", &cfg.HTTPAddress)
@@ -82,6 +86,22 @@ func Load(args []string, lookup LookupEnv) (Config, error) {
 	setString(lookup, "OCSERV_TRANSPORT_SOCKET", &cfg.TransportSocket)
 	setString(lookup, "OCSERV_TRUST_SOCKET", &cfg.TrustSocket)
 	setString(lookup, "OCSERV_CONTROLLER_ENDPOINT_ID", &cfg.ControllerEndpointID)
+	transportUID, hasTransportUID := lookup("OCSERV_TRANSPORT_UID")
+	transportGID, hasTransportGID := lookup("OCSERV_TRANSPORT_GID")
+	if hasTransportUID != hasTransportGID {
+		return Config{}, errors.New("OCSERV_TRANSPORT_UID and OCSERV_TRANSPORT_GID must be set together")
+	}
+	if hasTransportUID {
+		uid, err := strconv.ParseUint(transportUID, 10, 32)
+		if err != nil {
+			return Config{}, errors.New("OCSERV_TRANSPORT_UID must be uint32")
+		}
+		gid, err := strconv.ParseUint(transportGID, 10, 32)
+		if err != nil {
+			return Config{}, errors.New("OCSERV_TRANSPORT_GID must be uint32")
+		}
+		cfg.TransportUID, cfg.TransportGID, cfg.TransportIdentitySet = uint32(uid), uint32(gid), true
+	}
 	setString(lookup, "OCSERV_DEV_AUTH_TOKEN", &cfg.DevAuthToken)
 	setString(lookup, "OCSERV_OIDC_ISSUER", &cfg.OIDCIssuer)
 	setString(lookup, "OCSERV_OIDC_CLIENT_ID", &cfg.OIDCClientID)
@@ -222,6 +242,9 @@ func (c Config) Validate() error {
 	}
 	if c.Environment == "production" && !c.MigrateOnly && c.CommandSigningKeyFile == "" {
 		return errors.New("controller command signing key file is required in production")
+	}
+	if c.Environment == "production" && !c.MigrateOnly && (!c.TransportIdentitySet || c.TransportUID == uint32(os.Geteuid())) {
+		return errors.New("production transport UDS requires an explicit, distinct transport UID/GID")
 	}
 	if c.BreakGlassEnabled && len(c.BreakGlassTokenHash) != 32 {
 		return errors.New("enabled break-glass requires a 32-byte token SHA-256 hash")

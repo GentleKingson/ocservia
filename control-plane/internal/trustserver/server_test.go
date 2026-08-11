@@ -30,7 +30,11 @@ func TestListenRejectsWritableParentDirectory(t *testing.T) {
 }
 
 func TestListenAcceptsPrivateOwnedParentDirectory(t *testing.T) {
-	parent, err := os.MkdirTemp("/tmp", "trust-")
+	workingDirectory, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	parent, err := os.MkdirTemp(workingDirectory, ".trust-test-")
 	if err != nil {
 		t.Fatal(err)
 	}

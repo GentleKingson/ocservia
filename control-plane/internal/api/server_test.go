@@ -153,6 +153,24 @@ func TestEnrollmentErrorsDistinguishInvalidRequestsFromBackendFailures(t *testin
 	}
 }
 
+func TestCreateEnrollmentTokenRejectsUnboundEndpoint(t *testing.T) {
+	server := &Server{
+		logger:     slog.New(slog.NewTextHandler(io.Discard, nil)),
+		devAuth:    true,
+		enrollment: &enrollment.Service{},
+	}
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/enrollment-tokens", strings.NewReader(`{
+		"workspace_id":"019fc0a4-6d92-765c-a8a1-4af556614cc3",
+		"environment":"production",
+		"reason":"provision a bound production node"
+	}`))
+	response := httptest.NewRecorder()
+	server.createEnrollmentToken(response, request)
+	if response.Code != http.StatusBadRequest {
+		t.Fatalf("unbound token status = %d, body = %s", response.Code, response.Body.String())
+	}
+}
+
 func TestOperationsAcceptConfiguredDevelopmentBearer(t *testing.T) {
 	server := New("127.0.0.1:0", nil, BuildInfo{}, slog.New(slog.NewTextHandler(io.Discard, nil)), 1024, time.Second, false, "local-development-token-32-characters", 1)
 	response := httptest.NewRecorder()

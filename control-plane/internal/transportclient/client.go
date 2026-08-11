@@ -10,11 +10,11 @@ import (
 	"io"
 	"math/big"
 	"net"
-	"os"
 	"path/filepath"
 	"time"
 
 	transportv1 "github.com/GentleKingson/ocservia/control-plane/gen/proto/ocserv/platform/transport/v1"
+	"github.com/GentleKingson/ocservia/control-plane/internal/udssecurity"
 	"github.com/google/uuid"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/trace"
@@ -46,16 +46,18 @@ type Client struct {
 	path          string
 	deadline      time.Duration
 	queueCapacity int
+	expectedUID   uint32
+	expectedGID   uint32
 }
 
-func New(path string, deadline time.Duration, queueCapacity int) (*Client, error) {
+func New(path string, deadline time.Duration, queueCapacity int, expectedUID, expectedGID uint32) (*Client, error) {
 	if !filepath.IsAbs(path) {
 		return nil, errors.New("transport socket path must be absolute")
 	}
 	if deadline <= 0 || queueCapacity < 1 || queueCapacity > 4096 {
 		return nil, errors.New("transport deadline and queue capacity are invalid")
 	}
-	return &Client{path: path, deadline: deadline, queueCapacity: queueCapacity}, nil
+	return &Client{path: filepath.Clean(path), deadline: deadline, queueCapacity: queueCapacity, expectedUID: expectedUID, expectedGID: expectedGID}, nil
 }
 
 func (c *Client) SendCommand(ctx context.Context, nodeID, envelope []byte) error {
@@ -206,9 +208,12 @@ func (c *Client) UpdateNodeTrust(ctx context.Context, nodeID, endpointID []byte,
 	defer connection.Close()
 	rpcCtx, cancel := context.WithTimeout(ctx, c.deadline)
 	defer cancel()
-	_, err = transportv1.NewTransportServiceClient(connection).UpdateNodeTrust(rpcCtx, &transportv1.UpdateNodeTrustRequest{NodeId: nodeID, EndpointId: endpointID, State: state, Reason: reason, Revision: revision})
+	response, err := transportv1.NewTransportServiceClient(connection).UpdateNodeTrust(rpcCtx, &transportv1.UpdateNodeTrustRequest{NodeId: nodeID, EndpointId: endpointID, State: state, Reason: reason, Revision: revision})
 	if err != nil {
 		return fmt.Errorf("update transport node trust: %w", err)
+	}
+	if response.GetDisposition() != transportv1.TrustUpdateDisposition_TRUST_UPDATE_DISPOSITION_APPLIED || response.GetRetainedRevision() != revision || response.GetRetainedState() != state {
+		return fmt.Errorf("transport retained trust state %s at revision %d with disposition %s", response.GetRetainedState(), response.GetRetainedRevision(), response.GetDisposition())
 	}
 	return nil
 }
@@ -300,20 +305,29 @@ func (c *Client) watchOnce(ctx context.Context, cursors CursorStore, handler Eve
 }
 
 func (c *Client) dial() (*grpc.ClientConn, error) {
-	info, err := os.Stat(filepath.Dir(c.path))
-	if err != nil {
-		return nil, fmt.Errorf("inspect transport socket directory: %w", err)
-	}
-	if !info.IsDir() || info.Mode().Perm()&0o002 != 0 {
-		return nil, errors.New("transport socket directory is not controlled")
-	}
 	target := "passthrough:///transportd"
 	connection, err := grpc.NewClient(
 		target,
 		grpc.WithTransportCredentials(insecure.NewCredentials()),
 		grpc.WithContextDialer(func(ctx context.Context, _ string) (net.Conn, error) {
+			identity, err := udssecurity.ValidateSocket(c.path, c.expectedUID, c.expectedGID, 0o660)
+			if err != nil {
+				return nil, fmt.Errorf("validate transport socket: %w", err)
+			}
 			var dialer net.Dialer
-			return dialer.DialContext(ctx, "unix", c.path)
+			connection, err := dialer.DialContext(ctx, "unix", c.path)
+			if err != nil {
+				return nil, err
+			}
+			if err := udssecurity.RequirePeerUID(connection, c.expectedUID); err != nil {
+				_ = connection.Close()
+				return nil, err
+			}
+			if err := udssecurity.SameSocket(c.path, identity); err != nil {
+				_ = connection.Close()
+				return nil, err
+			}
+			return connection, nil
 		}),
 		grpc.WithDefaultCallOptions(grpc.MaxCallRecvMsgSize(maxMessageBytes), grpc.MaxCallSendMsgSize(maxMessageBytes)),
 	)

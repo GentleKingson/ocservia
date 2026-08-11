@@ -53,13 +53,10 @@ func (s *Server) createEnrollmentToken(w http.ResponseWriter, r *http.Request) {
 		writeProblem(w, r, http.StatusForbidden, "https://ocservia.dev/problems/forbidden", "Access denied", "workspace_id is outside the authorized scope")
 		return
 	}
-	var endpoint []byte
-	if body.ExpectedEndpointID != "" {
-		endpoint, err = hex.DecodeString(body.ExpectedEndpointID)
-		if err != nil || len(endpoint) != 32 || strings.ToLower(body.ExpectedEndpointID) != body.ExpectedEndpointID {
-			writeProblem(w, r, http.StatusBadRequest, "https://ocservia.dev/problems/invalid-request", "Invalid request", "expected_endpoint_id must be 32-byte lowercase hex")
-			return
-		}
+	endpoint, err := hex.DecodeString(body.ExpectedEndpointID)
+	if err != nil || len(endpoint) != 32 || strings.ToLower(body.ExpectedEndpointID) != body.ExpectedEndpointID {
+		writeProblem(w, r, http.StatusBadRequest, "https://ocservia.dev/problems/invalid-request", "Invalid request", "expected_endpoint_id must be 32-byte lowercase hex")
+		return
 	}
 	if !validEnrollmentTTLSeconds(body.TTLSeconds) {
 		writeProblem(w, r, http.StatusBadRequest, "https://ocservia.dev/problems/invalid-request", "Invalid request", "ttl_seconds must be between 1 and 900")
@@ -126,7 +123,10 @@ func (s *Server) revokeNode(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	syncErr := s.transport.UpdateNodeTrust(r.Context(), trust.NodeID[:], trust.EndpointID, transportv1.NodeTrustState_NODE_TRUST_STATE_REVOKED, body.Reason, trust.Revision)
-	closeErr := s.transport.CloseNode(r.Context(), trust.NodeID[:], "node revoked")
+	var closeErr error
+	if syncErr == nil {
+		closeErr = s.transport.CloseNode(r.Context(), trust.NodeID[:], "node revoked")
+	}
 	if syncErr != nil || closeErr != nil {
 		writeProblem(w, r, http.StatusServiceUnavailable, "https://ocservia.dev/problems/transport-unavailable", "Revocation committed", "the node is revoked but transport disconnect synchronization is pending")
 		return

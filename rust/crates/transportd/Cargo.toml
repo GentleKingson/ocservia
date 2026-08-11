@@ -28,6 +28,7 @@ hyper-util.workspace = true
 [dev-dependencies]
 iroh = { workspace = true, features = ["test-utils"] }
 iroh-relay.workspace = true
+ocservia-agent-identity = { version = "=0.1.0", path = "../agent-identity" }
 
 [lints]
 workspace = true

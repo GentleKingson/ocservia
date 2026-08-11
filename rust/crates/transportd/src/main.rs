@@ -3,7 +3,7 @@ use std::env;
 use std::io;
 use std::os::unix::fs::{FileTypeExt, MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::os::unix::net::UnixStream as StdUnixStream;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 use iroh::endpoint::RelayMode;
 use iroh::{EndpointId, RelayMap, RelayUrl, SecretKey};
@@ -13,6 +13,7 @@ use ocservia_transportd::{
     spawn_dedicated_relay_failover,
 };
 use tokio::net::UnixListener;
+use tokio_stream::StreamExt;
 use tokio_stream::wrappers::UnixListenerStream;
 use tonic::transport::Server;
 use zeroize::Zeroizing;
@@ -26,9 +27,12 @@ struct Config {
     revoked: HashSet<EndpointId>,
     event_capacity: usize,
     trust_socket: Option<PathBuf>,
+    control_plane_uid: u32,
+    control_plane_gid: u32,
 }
 
 #[tokio::main]
+#[allow(clippy::similar_names)]
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     tracing_subscriber::fmt()
         .json()
@@ -46,12 +50,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let (listener, socket_identity) = bind_socket(&config.socket)?;
     let policy = IdentityPolicy::new(config.approved, config.revoked);
     let service = IrohTransportService::new_with_policy(config.event_capacity, policy.clone());
-    let router = if let Some(trust_socket) = config.trust_socket {
+    let router = if let Some(trust_socket) = config.trust_socket.clone() {
+        let control_plane_uid = config.control_plane_uid;
+        let control_plane_gid = config.control_plane_gid;
         let channel = tonic::transport::Endpoint::try_from("http://[::]:50051")?
             .connect_with_connector(tower::service_fn(move |_| {
                 let path = trust_socket.clone();
                 async move {
-                    tokio::net::UnixStream::connect(path)
+                    connect_verified_socket(&path, control_plane_uid, control_plane_gid)
                         .await
                         .map(hyper_util::rt::TokioIo::new)
                 }
@@ -82,10 +88,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         .set_serving::<TransportServiceServer<IrohTransportService>>()
         .await;
     let shutdown_service = service.clone();
+    let control_plane_uid = config.control_plane_uid;
+    let incoming =
+        UnixListenerStream::new(listener).filter_map(move |connection| match connection {
+            Ok(stream) => match authenticate_peer(&stream, control_plane_uid) {
+                Ok(()) => Some(Ok(stream)),
+                Err(error) => {
+                    tracing::warn!(%error, "rejected transport UDS peer");
+                    None
+                }
+            },
+            Err(error) => Some(Err(error)),
+        });
     let result = Server::builder()
         .add_service(health_service)
         .add_service(TransportServiceServer::new(service.clone()))
-        .serve_with_incoming_shutdown(UnixListenerStream::new(listener), async move {
+        .serve_with_incoming_shutdown(incoming, async move {
             shutdown_signal().await;
             shutdown_service.begin_shutdown().await;
         })
@@ -101,6 +119,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     Ok(())
 }
 
+#[allow(clippy::similar_names)]
 fn parse_args() -> Result<Config, io::Error> {
     let mut socket = PathBuf::from("/run/ocserv-platform/transportd.sock");
     let mut key_file = None;
@@ -111,6 +130,8 @@ fn parse_args() -> Result<Config, io::Error> {
     let mut revoked = HashSet::new();
     let mut event_capacity = 256_usize;
     let mut trust_socket = None;
+    let mut control_plane_uid = None;
+    let mut control_plane_gid = None;
     let mut args = env::args().skip(1);
     while let Some(argument) = args.next() {
         match argument.as_str() {
@@ -151,10 +172,26 @@ fn parse_args() -> Result<Config, io::Error> {
             "--trust-socket" => {
                 trust_socket = Some(PathBuf::from(required_value(&mut args, "--trust-socket")?));
             }
+            "--control-plane-uid" => {
+                control_plane_uid = Some(parse_u32(
+                    &required_value(&mut args, "--control-plane-uid")?,
+                    "control-plane UID",
+                )?);
+            }
+            "--control-plane-gid" => {
+                control_plane_gid = Some(parse_u32(
+                    &required_value(&mut args, "--control-plane-gid")?,
+                    "control-plane GID",
+                )?);
+            }
             _ => return Err(invalid(&format!("unknown argument: {argument}"))),
         }
     }
     let key_file = key_file.ok_or_else(|| invalid("--key-file is required"))?;
+    let control_plane_uid =
+        control_plane_uid.ok_or_else(|| invalid("--control-plane-uid is required"))?;
+    let control_plane_gid =
+        control_plane_gid.ok_or_else(|| invalid("--control-plane-gid is required"))?;
     if !socket.is_absolute()
         || !key_file.is_absolute()
         || relay_token_file
@@ -178,7 +215,15 @@ fn parse_args() -> Result<Config, io::Error> {
         revoked,
         event_capacity,
         trust_socket,
+        control_plane_uid,
+        control_plane_gid,
     })
+}
+
+fn parse_u32(value: &str, name: &str) -> Result<u32, io::Error> {
+    value
+        .parse::<u32>()
+        .map_err(|_| invalid(&format!("{name} must be an unsigned 32-bit integer")))
 }
 
 fn build_relay_mode(
@@ -346,25 +391,27 @@ struct SocketIdentity {
 }
 
 fn bind_socket(path: &Path) -> Result<(UnixListener, SocketIdentity), io::Error> {
-    let parent = path
-        .parent()
-        .ok_or_else(|| invalid("socket path has no parent"))?;
-    if !std::fs::metadata(parent)?.is_dir() {
-        return Err(invalid("socket parent is not a directory"));
-    }
+    validate_ancestry(path, rustix::process::geteuid().as_raw())?;
     match std::fs::symlink_metadata(path) {
-        Ok(metadata) if metadata.file_type().is_socket() => match StdUnixStream::connect(path) {
-            Ok(_) => {
-                return Err(io::Error::new(
-                    io::ErrorKind::AlreadyExists,
-                    "socket is already accepting connections",
-                ));
+        Ok(metadata) if metadata.file_type().is_socket() => {
+            validate_socket(
+                path,
+                rustix::process::geteuid().as_raw(),
+                rustix::process::getegid().as_raw(),
+            )?;
+            match StdUnixStream::connect(path) {
+                Ok(_) => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::AlreadyExists,
+                        "socket is already accepting connections",
+                    ));
+                }
+                Err(error) if error.kind() == io::ErrorKind::ConnectionRefused => {
+                    std::fs::remove_file(path)?;
+                }
+                Err(error) => return Err(error),
             }
-            Err(error) if error.kind() == io::ErrorKind::ConnectionRefused => {
-                std::fs::remove_file(path)?;
-            }
-            Err(error) => return Err(error),
-        },
+        }
         Ok(_) => {
             return Err(io::Error::new(
                 io::ErrorKind::AlreadyExists,
@@ -376,14 +423,105 @@ fn bind_socket(path: &Path) -> Result<(UnixListener, SocketIdentity), io::Error>
     }
     let listener = UnixListener::bind(path)?;
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o660))?;
+    let identity = validate_socket(
+        path,
+        rustix::process::geteuid().as_raw(),
+        rustix::process::getegid().as_raw(),
+    )?;
+    Ok((listener, identity))
+}
+
+fn validate_ancestry(path: &Path, expected_owner: u32) -> Result<(), io::Error> {
+    if !path.is_absolute()
+        || path
+            .components()
+            .any(|component| !matches!(component, Component::RootDir | Component::Normal(_)))
+    {
+        return Err(invalid("Unix socket path must be absolute and normalized"));
+    }
+    let mut current = path
+        .parent()
+        .ok_or_else(|| invalid("socket path has no parent"))?;
+    loop {
+        let metadata = std::fs::symlink_metadata(current)?;
+        if !metadata.file_type().is_dir()
+            || (metadata.uid() != 0 && metadata.uid() != expected_owner)
+            || metadata.mode() & 0o022 != 0
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "Unix socket ancestry must be trusted-owner controlled and not group or world writable",
+            ));
+        }
+        let Some(parent) = current.parent() else {
+            break;
+        };
+        if parent == current {
+            break;
+        }
+        current = parent;
+    }
+    Ok(())
+}
+
+#[allow(clippy::similar_names)]
+fn validate_socket(
+    path: &Path,
+    expected_uid: u32,
+    expected_gid: u32,
+) -> Result<SocketIdentity, io::Error> {
+    validate_ancestry(path, expected_uid)?;
     let metadata = std::fs::symlink_metadata(path)?;
-    Ok((
-        listener,
-        SocketIdentity {
-            device: metadata.dev(),
-            inode: metadata.ino(),
-        },
-    ))
+    if !metadata.file_type().is_socket()
+        || metadata.uid() != expected_uid
+        || metadata.gid() != expected_gid
+        || metadata.mode() & 0o777 != 0o660
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "Unix socket type, owner, group, or mode is invalid",
+        ));
+    }
+    Ok(SocketIdentity {
+        device: metadata.dev(),
+        inode: metadata.ino(),
+    })
+}
+
+#[allow(clippy::similar_names)]
+async fn connect_verified_socket(
+    path: &Path,
+    expected_uid: u32,
+    expected_gid: u32,
+) -> Result<tokio::net::UnixStream, io::Error> {
+    let identity = validate_socket(path, expected_uid, expected_gid)?;
+    let stream = tokio::net::UnixStream::connect(path).await?;
+    let credentials = stream.peer_cred()?;
+    if credentials.uid() != expected_uid {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "Unix socket server UID is not authorized",
+        ));
+    }
+    let retained = validate_socket(path, expected_uid, expected_gid)?;
+    if retained != identity {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "Unix socket pathname changed while connecting",
+        ));
+    }
+    Ok(stream)
+}
+
+fn authenticate_peer(stream: &tokio::net::UnixStream, expected_uid: u32) -> Result<(), io::Error> {
+    let credentials = stream.peer_cred()?;
+    if credentials.uid() != expected_uid {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "Unix socket client UID is not authorized",
+        ));
+    }
+    Ok(())
 }
 
 fn remove_socket(path: &Path, expected: SocketIdentity) -> Result<(), io::Error> {
@@ -426,6 +564,18 @@ async fn shutdown_signal() {
 mod tests {
     use super::*;
     use std::io::Write;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    fn socket_test_directory() -> PathBuf {
+        static NEXT_DIRECTORY: AtomicUsize = AtomicUsize::new(0);
+        std::env::current_dir()
+            .expect("current test directory")
+            .join(format!(
+                ".s-{}-{}",
+                std::process::id(),
+                NEXT_DIRECTORY.fetch_add(1, Ordering::Relaxed)
+            ))
+    }
 
     #[test]
     fn key_loader_rejects_world_readable_file() {
@@ -565,10 +715,9 @@ mod tests {
 
     #[tokio::test]
     async fn second_instance_cannot_replace_a_live_socket() {
-        let directory =
-            std::env::temp_dir().join(format!("ocservia-socket-{}", uuid::Uuid::now_v7()));
+        let directory = socket_test_directory();
         std::fs::create_dir(&directory).expect("create test directory");
-        let path = directory.join("transportd.sock");
+        let path = directory.join("s");
         let (listener, identity) = bind_socket(&path).expect("bind first socket");
 
         assert_eq!(
@@ -590,10 +739,9 @@ mod tests {
 
     #[tokio::test]
     async fn shutdown_does_not_unlink_a_replacement_socket() {
-        let directory =
-            std::env::temp_dir().join(format!("ocservia-socket-{}", uuid::Uuid::now_v7()));
+        let directory = socket_test_directory();
         std::fs::create_dir(&directory).expect("create test directory");
-        let path = directory.join("transportd.sock");
+        let path = directory.join("s");
         let (first_listener, first_identity) = bind_socket(&path).expect("bind first socket");
         std::fs::remove_file(&path).expect("remove first socket path");
         let (replacement_listener, replacement_identity) =
@@ -610,6 +758,51 @@ mod tests {
         drop(first_listener);
         drop(replacement_listener);
         remove_socket(&path, replacement_identity).expect("remove replacement socket");
+        std::fs::remove_dir(directory).expect("remove test directory");
+    }
+
+    #[tokio::test]
+    async fn transport_server_rejects_a_foreign_peer_uid() {
+        let directory = socket_test_directory();
+        std::fs::create_dir(&directory).expect("create test directory");
+        std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o700))
+            .expect("protect test directory");
+        let path = directory.join("s");
+        let (listener, identity) = bind_socket(&path).expect("bind socket");
+        let client = StdUnixStream::connect(&path).expect("connect socket");
+        let (server, _) = listener.accept().await.expect("accept socket");
+        let foreign_uid = rustix::process::geteuid().as_raw().wrapping_add(1);
+        assert_eq!(
+            authenticate_peer(&server, foreign_uid)
+                .expect_err("foreign peer rejected")
+                .kind(),
+            io::ErrorKind::PermissionDenied
+        );
+        drop(client);
+        drop(server);
+        drop(listener);
+        remove_socket(&path, identity).expect("remove socket");
+        std::fs::remove_dir(directory).expect("remove test directory");
+    }
+
+    #[tokio::test]
+    async fn trust_client_rejects_a_foreign_owned_socket() {
+        let directory = socket_test_directory();
+        std::fs::create_dir(&directory).expect("create test directory");
+        std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o700))
+            .expect("protect test directory");
+        let path = directory.join("s");
+        let (listener, identity) = bind_socket(&path).expect("bind fake trust socket");
+        let foreign_uid = rustix::process::geteuid().as_raw().wrapping_add(1);
+        assert_eq!(
+            connect_verified_socket(&path, foreign_uid, rustix::process::getegid().as_raw(),)
+                .await
+                .expect_err("foreign-owned trust socket rejected")
+                .kind(),
+            io::ErrorKind::PermissionDenied
+        );
+        drop(listener);
+        remove_socket(&path, identity).expect("remove socket");
         std::fs::remove_dir(directory).expect("remove test directory");
     }
 }

@@ -16,10 +16,11 @@ use ocservia_contracts::generated::ocserv::platform::transport::v1::{
     CloseNodeRequest, CloseNodeResponse, ConnectionPath, FetchArtifactRequest,
     GetNodeConnectionRequest, HealthRequest, HealthResponse, HealthStatus, NodeConnection,
     SendCommandRequest, SendCommandResponse, TransportEvent, TransportEventType,
-    UpdateNodeTrustRequest, UpdateNodeTrustResponse, WatchEventsRequest,
+    TrustUpdateDisposition, UpdateNodeTrustRequest, UpdateNodeTrustResponse, WatchEventsRequest,
     transport_service_server::TransportService,
 };
 use prost::Message;
+use sha2::{Digest as _, Sha256};
 use tokio::sync::{Mutex, Semaphore, mpsc, watch};
 use tokio_stream::{Stream, wrappers::ReceiverStream};
 use tonic::{Request, Response, Status};
@@ -217,7 +218,7 @@ impl StubService {
             ActiveNode {
                 connection: NodeConnection {
                     node_id: node_id.clone(),
-                    endpoint_id: Uuid::now_v7().as_bytes().to_vec(),
+                    endpoint_id: simulator_endpoint(&node_id),
                     path: path.into(),
                     round_trip_time_millis: probe.delay_millis.into(),
                     connected_at: Some(connected_at),
@@ -594,7 +595,11 @@ impl TransportService for StubService {
         {
             return Err(Status::invalid_argument("trust update is invalid"));
         }
-        Ok(Response::new(UpdateNodeTrustResponse {}))
+        Ok(Response::new(UpdateNodeTrustResponse {
+            disposition: TrustUpdateDisposition::Applied.into(),
+            retained_revision: request.revision,
+            retained_state: request.state,
+        }))
     }
 
     async fn watch_events(
@@ -713,7 +718,15 @@ fn new_event(
         occurred_at: Some(now_timestamp()),
         payload,
         traceparent: traceparent.to_owned(),
+        endpoint_id: simulator_endpoint(node_id),
     }
+}
+
+fn simulator_endpoint(node_id: &[u8]) -> Vec<u8> {
+    let mut digest = Sha256::new();
+    digest.update(b"ocservia/development-simulator/");
+    digest.update(node_id);
+    digest.finalize().to_vec()
 }
 
 fn now_timestamp() -> prost_types::Timestamp {

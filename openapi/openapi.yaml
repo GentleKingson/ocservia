@@ -2007,7 +2007,7 @@ components:
     EnrollmentTokenRequest:
       type: object
       additionalProperties: false
-      required: [workspace_id, environment, reason]
+      required: [workspace_id, environment, expected_endpoint_id, reason]
       properties:
         workspace_id:
           $ref: "#/components/schemas/UuidV7"

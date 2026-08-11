@@ -3,6 +3,7 @@ package userstate
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"os"
@@ -272,7 +273,7 @@ func TestI13IntentAndTerminalAuditIdentityMatchIntegration(t *testing.T) {
 				}
 				eventID := uuid.Must(uuid.NewV7())
 				if err := ingest.Ingest(context.Background(), &transportv1.TransportEvent{
-					EventId: eventID[:], NodeId: nodeID[:],
+					EventId: eventID[:], NodeId: nodeID[:], EndpointId: integrationEndpoint(nodeID),
 					Type:       transportv1.TransportEventType_TRANSPORT_EVENT_TYPE_COMMAND_RESULT,
 					OccurredAt: timestamppb.New(completed), Traceparent: request.Traceparent, Payload: payload,
 				}); err != nil {
@@ -660,7 +661,7 @@ func TestRejectedRevisionSlotRequiresProofThatNoEffectWasAcceptedIntegration(t *
 		}
 		eventID := uuid.Must(uuid.NewV7())
 		if err := localslice.NewWithSigner(pool, integrationCommandSigner()).Ingest(context.Background(), &transportv1.TransportEvent{
-			EventId: eventID[:], NodeId: nodeID[:], Type: transportv1.TransportEventType_TRANSPORT_EVENT_TYPE_COMMAND_RESULT,
+			EventId: eventID[:], NodeId: nodeID[:], EndpointId: integrationEndpoint(nodeID), Type: transportv1.TransportEventType_TRANSPORT_EVENT_TYPE_COMMAND_RESULT,
 			OccurredAt: timestamppb.New(completed), Traceparent: testTraceparent, Payload: payload,
 		}); err != nil {
 			t.Fatalf("ingest %s result: %v", state, err)
@@ -1039,12 +1040,21 @@ func integrationService(t *testing.T, status string) (*Service, *pgxpool.Pool, u
 	if err == nil {
 		_, err = pool.Exec(context.Background(), `INSERT INTO node_capabilities(node_id,capability,approved)VALUES($1,'ocserv.users.write',true),($1,'ocserv.groups.write',true)`, nodeID)
 	}
+	if err == nil {
+		endpointState := "active"
+		if status == "pending" {
+			endpointState = "pending"
+		} else if status == "revoked" {
+			endpointState = "revoked"
+		}
+		_, err = pool.Exec(context.Background(), `INSERT INTO node_endpoint_keys(node_id,endpoint_id,state,bound_at,revoked_at) VALUES($1,$2,$3,now(),CASE WHEN $3='revoked' THEN now() END)`, nodeID, integrationEndpoint(nodeID), endpointState)
+	}
 	if err != nil {
 		pool.Close()
 		t.Fatal(err)
 	}
 	t.Cleanup(func() {
-		for _, statement := range []string{`DELETE FROM agent_command_results WHERE command_id IN(SELECT id FROM commands WHERE workspace_id=$1)`, `DELETE FROM transport_events WHERE node_id IN(SELECT id FROM nodes WHERE workspace_id=$1)`, `DELETE FROM node_command_leases WHERE command_id IN(SELECT id FROM commands WHERE workspace_id=$1)`, `DELETE FROM command_attempts WHERE command_id IN(SELECT id FROM commands WHERE workspace_id=$1)`, `DELETE FROM outbox_events WHERE command_id IN(SELECT id FROM commands WHERE workspace_id=$1)`, `DELETE FROM operation_events WHERE operation_id IN(SELECT id FROM operations WHERE workspace_id=$1)`, `DELETE FROM commands WHERE workspace_id=$1`, `DELETE FROM operations WHERE workspace_id=$1`, `DELETE FROM audit_events WHERE workspace_id=$1`, `DELETE FROM observed_groups WHERE node_id IN(SELECT id FROM nodes WHERE workspace_id=$1)`, `DELETE FROM observed_users WHERE node_id IN(SELECT id FROM nodes WHERE workspace_id=$1)`, `DELETE FROM desired_groups WHERE node_id IN(SELECT id FROM nodes WHERE workspace_id=$1)`, `DELETE FROM desired_users WHERE node_id IN(SELECT id FROM nodes WHERE workspace_id=$1)`, `DELETE FROM node_capabilities WHERE node_id IN(SELECT id FROM nodes WHERE workspace_id=$1)`, `DELETE FROM nodes WHERE workspace_id=$1`, `DELETE FROM workspaces WHERE id=$1`} {
+		for _, statement := range []string{`DELETE FROM agent_command_results WHERE command_id IN(SELECT id FROM commands WHERE workspace_id=$1)`, `DELETE FROM transport_events WHERE node_id IN(SELECT id FROM nodes WHERE workspace_id=$1)`, `DELETE FROM node_command_leases WHERE command_id IN(SELECT id FROM commands WHERE workspace_id=$1)`, `DELETE FROM command_attempts WHERE command_id IN(SELECT id FROM commands WHERE workspace_id=$1)`, `DELETE FROM outbox_events WHERE command_id IN(SELECT id FROM commands WHERE workspace_id=$1)`, `DELETE FROM operation_events WHERE operation_id IN(SELECT id FROM operations WHERE workspace_id=$1)`, `DELETE FROM commands WHERE workspace_id=$1`, `DELETE FROM operations WHERE workspace_id=$1`, `DELETE FROM audit_events WHERE workspace_id=$1`, `DELETE FROM observed_groups WHERE node_id IN(SELECT id FROM nodes WHERE workspace_id=$1)`, `DELETE FROM observed_users WHERE node_id IN(SELECT id FROM nodes WHERE workspace_id=$1)`, `DELETE FROM desired_groups WHERE node_id IN(SELECT id FROM nodes WHERE workspace_id=$1)`, `DELETE FROM desired_users WHERE node_id IN(SELECT id FROM nodes WHERE workspace_id=$1)`, `DELETE FROM node_capabilities WHERE node_id IN(SELECT id FROM nodes WHERE workspace_id=$1)`, `DELETE FROM node_endpoint_keys WHERE node_id IN(SELECT id FROM nodes WHERE workspace_id=$1)`, `DELETE FROM nodes WHERE workspace_id=$1`, `DELETE FROM workspaces WHERE id=$1`} {
 			_, _ = pool.Exec(context.Background(), statement, workspaceID)
 		}
 		pool.Close()
@@ -1056,4 +1066,9 @@ func integrationCommandSigner() *commandauth.Signer {
 	var seed [32]byte
 	seed[0] = 2
 	return commandauth.NewSignerFromSeed(seed)
+}
+
+func integrationEndpoint(nodeID uuid.UUID) []byte {
+	digest := sha256.Sum256(append([]byte("ocservia/userstate-integration/"), nodeID[:]...))
+	return digest[:]
 }
