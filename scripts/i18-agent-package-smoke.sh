@@ -127,8 +127,8 @@ echo "agent package install passed"
 sudo install -o 61000 -g 61000 -m 0600 /dev/null "${rootfs}/var/lib/ocservia-agent/identity/controller.key"
 sudo install -o 61000 -g 61000 -m 0600 /dev/null "${rootfs}/var/lib/ocservia-agent/agent.db"
 
-cat >"${work}/legacy-agent.env" <<'EOF'
-CONTROLLER_ENDPOINT_ID=replace-with-approved-controller-endpoint-id
+cat >"${work}/legacy-agent.env" <<EOF
+CONTROLLER_ENDPOINT_ID=${controller_endpoint}
 NODE_ID=00000000-0000-7000-8000-000000000000
 EOF
 sudo install -o root -g 61000 -m 0640 "${work}/legacy-agent.env" \
