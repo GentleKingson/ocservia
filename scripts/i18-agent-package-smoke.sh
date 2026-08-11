@@ -370,6 +370,7 @@ sudo install -o root -g root -m 0600 "${work}/p12-password-seal-private.pem" \
 	legacy_artifact_id="018f0c2e-7b1a-7c3d-8e9f-0123456789ab"
 	legacy_artifact_dir="${rootfs}/var/lib/ocservia-privd/certificates/artifacts"
 	sudo install -d -o root -g 61000 -m 0710 "${rootfs}/var/lib/ocservia-privd"
+	sudo install -d -o root -g 61000 -m 0710 "${rootfs}/var/lib/ocservia-privd/certificates"
 	sudo install -d -o root -g 61000 -m 0710 "${legacy_artifact_dir}"
 	printf 'legacy-p12' >"${work}/legacy-artifact.p12"
 	sudo install -o root -g 61000 -m 0640 "${work}/legacy-artifact.p12" \
