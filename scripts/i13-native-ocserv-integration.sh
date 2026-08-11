@@ -137,6 +137,19 @@ run_native_phase() {
 }
 
 run_native_phase create-p1
+test "$(stat -c '%u:%g:%a:%h' -- "${NATIVE_ROOT}/ocpasswd")" = "0:0:600:1" \
+  || { echo "native ocpasswd does not have authoritative root-only metadata" >&2; exit 1; }
+if setpriv --reuid="$(id -u "${RUN_AS_USER}")" --regid="$(id -g "${RUN_AS_USER}")" \
+  --clear-groups test -r "${NATIVE_ROOT}/ocpasswd"; then
+  echo "unprivileged Agent-equivalent identity can read ocpasswd hashes" >&2
+  exit 1
+fi
+if setpriv --reuid="$(id -u "${RUN_AS_USER}")" --regid="$(id -g "${RUN_AS_USER}")" \
+  --clear-groups test -w "${NATIVE_ROOT}/ocpasswd"; then
+  echo "unprivileged Agent-equivalent identity can write ocpasswd hashes" >&2
+  exit 1
+fi
+echo "native ocpasswd root-only metadata passed"
 
 printf '%s\n' '#!/bin/sh' "env >\"${NATIVE_ROOT}/client.env\"" 'exit 0' >"${NATIVE_ROOT}/capture.sh"
 chmod 700 "${NATIVE_ROOT}/capture.sh"

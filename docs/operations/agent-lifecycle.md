@@ -5,14 +5,25 @@ Build the Agent and privd release binaries, then create a deterministic signed p
 ```bash
 OUTPUT_DIR=dist AGENT_SIGNING_KEY=/secure/release-ed25519.key \
   VERSION=1.0.0 SOURCE_DATE_EPOCH=1786147200 scripts/package-agent.sh
-AGENT_TRUSTED_KEY_SHA256=<pinned-public-key-der-sha256> \
+VERIFIED_PACKAGE="$(sudo AGENT_TRUSTED_KEY_SHA256=<pinned-public-key-der-sha256> \
   scripts/verify-agent-package.sh dist/ocservia-agent-1.0.0-linux-amd64.tar.gz \
   dist/ocservia-agent-1.0.0-linux-amd64.tar.gz.sha256 \
   dist/ocservia-agent-1.0.0-linux-amd64.tar.gz.sha256.sig \
-  /etc/ocservia/release-signing.pub.pem
+  /etc/ocservia/release-signing.pub.pem)"
+sudo INSTALL_PRODUCTION_RELAYS=true \
+  "${VERIFIED_PACKAGE}/scripts/install-agent.sh"
 ```
 
 Provision the verification public key and its DER SHA-256 fingerprint through a separate trusted channel; never trust the `.pub.pem` published beside a package. Verify signature, trusted-key fingerprint, checksum, and archive contents before extracting as root. Set `INSTALL_PRODUCTION_RELAYS=true` during installation and fill `/etc/ocservia-agent/relays.env` with both dedicated HTTPS relay URLs. Install the relay token at `/etc/ocservia-agent/relay-access-token` as `root:ocserv-agent` mode `0640`.
+
+The verifier copies the archive, signed checksum, signature, and pinned public
+key into a unique `root:root` mode `0700` directory below
+`/var/lib/ocservia-privd/package-staging`. It verifies the exact copied checksum,
+computes the exact copied archive digest, rejects unsafe archive paths and
+member types, and extracts that same root-owned archive. Install and upgrade
+scripts accept only the verified directory printed by the verifier. Do not
+extract or run installers from a download directory, and remove the verified
+staging directory after the lifecycle operation succeeds.
 
 `upgrade-agent.sh` first verifies that the existing `agent.env` contains exactly
 one absolute `CONTROLLER_COMMAND_VERIFICATION_KEY_FILE` and that the referenced
@@ -52,8 +63,11 @@ with read-only capabilities; mutation capability requires the two exact bound
 descriptors.
 After the preflight, the script retains one matched snapshot of the previous
 Agent and privd binaries, both base systemd units, and the production relay
-drop-in presence and content. It also preserves endpoint identity, the durable
-Agent database, journal, and configuration. Verify service health and
+drop-in presence and content under the root-only
+`/var/lib/ocservia-privd/upgrade-backup` hierarchy. A root-owned manifest binds
+the exact snapshot digests, and rollback rejects unsafe ancestry, symlinks,
+hard links, ownership, modes, or replacement. It also preserves endpoint
+identity, the durable Agent database, journal, and configuration. Verify service health and
 Controller connectivity after upgrade. To roll back the complete matched
 snapshot, run:
 

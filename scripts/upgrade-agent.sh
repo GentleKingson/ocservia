@@ -9,10 +9,70 @@ STATE_DIR="${STATE_DIR:-/var/lib/ocservia-agent}"
 PRIVD_STATE_DIR="${PRIVD_STATE_DIR:-/var/lib/ocservia-privd}"
 AGENT_UID="${AGENT_UID:-997}"
 AGENT_GID="${AGENT_GID:-997}"
-BACKUP_DIR="${BACKUP_DIR:-${DESTDIR}${STATE_DIR}/upgrade-backup}"
+BACKUP_DIR="${BACKUP_DIR:-${DESTDIR}${PRIVD_STATE_DIR}/upgrade-backup}"
 ENROLLMENT_TOKEN_FILE="${ENROLLMENT_TOKEN_FILE:-}"
 ENROLLMENT_ENVIRONMENT="${ENROLLMENT_ENVIRONMENT:-}"
 ENROLLMENT_MIGRATION_CONFIRMED="${ENROLLMENT_MIGRATION_CONFIRMED:-false}"
+
+validate_verified_package_source() {
+  local trusted_root="${DESTDIR}/var/lib/ocservia-privd/package-staging"
+  local current="" relative component uid mode marker archive_hash package_name source
+  local -a components=()
+
+  case "${ROOT}" in
+    "${trusted_root}"/ocservia-agent-package.*/extracted/ocservia-agent-*) ;;
+    *) installed_pair_preflight_error "upgrade must run from the root-owned verified package staging hierarchy" ;;
+  esac
+  if [[ -n "${DESTDIR}" ]]; then
+    if [[ "${DESTDIR}" != /* || "${DESTDIR}" == "/" || "${DESTDIR}" == */ || ! -d "${DESTDIR}" || -L "${DESTDIR}" || \
+          "$(stat -c '%u:%g:%a' -- "${DESTDIR}")" != "0:0:700" ]]; then
+      installed_pair_preflight_error "DESTDIR must be an absolute root:root mode 0700 staging root"
+    fi
+    current="${DESTDIR}"
+    relative="${ROOT#"${DESTDIR}"}"
+  else
+    relative="${ROOT}"
+  fi
+  IFS='/' read -r -a components <<<"${relative#/}"
+  for component in "${components[@]}"; do
+    [[ -n "${component}" ]] || continue
+    current="${current}/${component}"
+    if [[ ! -d "${current}" || -L "${current}" ]]; then
+      installed_pair_preflight_error "verified package ancestry contains a non-directory or symlink"
+    fi
+    read -r uid mode < <(stat -c '%u %a' -- "${current}")
+    if [[ "${uid}" != 0 ]] || (( (8#${mode} & 8#022) != 0 )); then
+      installed_pair_preflight_error "verified package ancestry must be root-owned and not group/world writable"
+    fi
+  done
+  marker="${ROOT}/.ocservia-package-verified"
+  if [[ ! -f "${marker}" || -L "${marker}" || "$(stat -c '%u:%g:%a:%h' -- "${marker}")" != "0:0:600:1" ]]; then
+    installed_pair_preflight_error "verified package marker is missing or unsafe"
+  fi
+  archive_hash="$(sed -n 's/^archive_sha256=//p' "${marker}")"
+  package_name="$(sed -n 's/^package=//p' "${marker}")"
+  if [[ "$(sed -n 's/^version=//p' "${marker}")" != 1 || ! "${archive_hash}" =~ ^[0-9a-f]{64}$ || \
+        "${package_name}" != "$(basename -- "${ROOT}")" || "$(wc -l <"${marker}")" -ne 3 ]]; then
+    installed_pair_preflight_error "verified package marker is malformed"
+  fi
+  for source in \
+    "${ROOT}/rust/target/release/ocservia-agent" \
+    "${ROOT}/rust/target/release/ocservia-privd" \
+    "${ROOT}/scripts/install-agent.sh" \
+    "${ROOT}/scripts/upgrade-agent.sh" \
+    "${ROOT}/scripts/rollback-agent.sh" \
+    "${ROOT}/scripts/uninstall-agent.sh" \
+    "${ROOT}/deploy/systemd/agent.env.example" \
+    "${ROOT}/deploy/systemd/ocservia-agent.service" \
+    "${ROOT}/deploy/systemd/ocservia-privd.service" \
+    "${ROOT}/deploy/production/systemd/ocservia-agent-relays.conf" \
+    "${ROOT}/deploy/production/systemd/relays.env.example"; do
+    if [[ ! -f "${source}" || -L "${source}" || "$(stat -c '%u:%g:%h' -- "${source}")" != "0:0:1" ]] || \
+      (( (8#$(stat -c '%a' -- "${source}") & 8#022) != 0 )); then
+      installed_pair_preflight_error "verified package source has unsafe type, ownership, mode, or link count"
+    fi
+  done
+}
 
 upgrade_preflight_error() {
   echo "Agent upgrade blocked before modification: $1" >&2
@@ -24,6 +84,94 @@ upgrade_preflight_error() {
 installed_pair_preflight_error() {
   echo "Agent upgrade blocked before modification: $1" >&2
   exit 1
+}
+
+validate_root_ancestry() {
+  local path="$1" current="" relative component uid mode
+  local -a components=()
+  if [[ -n "${DESTDIR}" ]]; then
+    case "${path}" in
+      "${DESTDIR}"|"${DESTDIR}"/*) ;;
+      *) installed_pair_preflight_error "trusted filesystem path escapes DESTDIR" ;;
+    esac
+    current="${DESTDIR}"
+    relative="${path#"${DESTDIR}"}"
+    read -r uid mode < <(stat -c '%u %a' -- "${current}")
+    if [[ "${uid}" != 0 ]] || (( (8#${mode} & 8#022) != 0 )); then
+      installed_pair_preflight_error "DESTDIR must remain root-owned and not group/world writable"
+    fi
+  else
+    relative="${path}"
+  fi
+  IFS='/' read -r -a components <<<"${relative#/}"
+  for component in "${components[@]}"; do
+    [[ -n "${component}" ]] || continue
+    current="${current}/${component}"
+    if [[ ! -d "${current}" || -L "${current}" ]]; then
+      installed_pair_preflight_error "trusted filesystem ancestry contains a non-directory or symlink: ${current}"
+    fi
+    read -r uid mode < <(stat -c '%u %a' -- "${current}")
+    if [[ "${uid}" != 0 ]] || (( (8#${mode} & 8#022) != 0 )); then
+      installed_pair_preflight_error "trusted filesystem ancestry must be root-owned and not group/world writable: ${current}"
+    fi
+  done
+}
+
+validate_installed_snapshot_source() {
+  local path="$1" expected_mode="$2" uid gid mode links
+  validate_root_ancestry "$(dirname -- "${path}")"
+  if [[ ! -f "${path}" || -L "${path}" ]]; then
+    installed_pair_preflight_error "installed rollback source must be a regular file: ${path}"
+  fi
+  read -r uid gid mode links < <(stat -c '%u %g %a %h' -- "${path}")
+  if [[ "${uid}:${gid}:${mode}:${links}" != "0:0:${expected_mode}:1" ]]; then
+    installed_pair_preflight_error "installed rollback source has unsafe owner, group, mode, or link count: ${path}"
+  fi
+}
+
+write_snapshot_manifest() {
+  local directory="$1" manifest name digest
+  manifest="${directory}/MANIFEST.sha256"
+  : >"${manifest}"
+  chmod 0600 -- "${manifest}"
+  chown root:root -- "${manifest}"
+  for name in \
+    ocservia-agent.previous \
+    ocservia-privd.previous \
+    ocservia-agent.service.previous \
+    ocservia-privd.service.previous; do
+    digest="$(sha256sum -- "${directory}/${name}" | awk '{print $1}')"
+    printf '%s  %s\n' "${digest}" "${name}" >>"${manifest}"
+  done
+  if [[ -f "${directory}/ocservia-agent-relays.conf.previous" ]]; then
+    name=ocservia-agent-relays.conf.previous
+  else
+    name=ocservia-agent-relays.conf.absent
+  fi
+  digest="$(sha256sum -- "${directory}/${name}" | awk '{print $1}')"
+  printf '%s  %s\n' "${digest}" "${name}" >>"${manifest}"
+  sync -f "${manifest}"
+  sync -f "${directory}"
+}
+
+ensure_root_private_directory() {
+  local path="$1" uid mode
+  if [[ -e "${path}" || -L "${path}" ]]; then
+    if [[ ! -d "${path}" || -L "${path}" ]]; then
+      installed_pair_preflight_error "trusted state path must be a real directory: ${path}"
+    fi
+    validate_root_ancestry "$(dirname -- "${path}")"
+    read -r uid mode < <(stat -c '%u %a' -- "${path}")
+    if [[ "${uid}" != 0 ]] || (( (8#${mode} & 8#022) != 0 )); then
+      installed_pair_preflight_error "trusted state directory must already be root-owned and not group/world writable: ${path}"
+    fi
+    chown root:root -- "${path}"
+    chmod 0700 -- "${path}"
+  else
+    validate_root_ancestry "$(dirname -- "${path}")"
+    install -d -o root -g root -m 0700 -- "${path}"
+  fi
+  validate_root_ancestry "${path}"
 }
 
 validate_safe_ancestry() {
@@ -197,7 +345,7 @@ bind_legacy_password_sealing_keys() {
       upgrade_preflight_error "sealing-key enrollment returned a different node identity"
     fi
   fi
-  install -o root -g root -m 0600 /dev/null "${marker}"
+  install -o root -g root -m 0600 -- /dev/null "${marker}"
   printf '%s\n' "${expected}" >"${marker}"
 }
 
@@ -255,10 +403,19 @@ if [[ ${EUID} -ne 0 ]]; then
   echo "upgrade-agent.sh must run as root" >&2
   exit 1
 fi
+validate_verified_package_source
 
-if [[ -n "${DESTDIR}" && ( "${DESTDIR}" != /* || "${DESTDIR}" == "/" ) ]] || \
+if [[ -n "${DESTDIR}" && ( "${DESTDIR}" != /* || "${DESTDIR}" == "/" || "${DESTDIR}" == */ ) ]] || \
   [[ "${PREFIX}" != /* || "${SYSCONFDIR}" != /* || "${STATE_DIR}" != /* || "${PRIVD_STATE_DIR}" != /* || "${BACKUP_DIR}" != /* ]]; then
   echo "DESTDIR, PREFIX, SYSCONFDIR, STATE_DIR, PRIVD_STATE_DIR, and BACKUP_DIR must identify absolute paths" >&2
+  exit 2
+fi
+if [[ "${BACKUP_DIR}" != "${DESTDIR}${PRIVD_STATE_DIR}/upgrade-backup" ]]; then
+  echo "BACKUP_DIR must use the fixed privd-owned upgrade-backup location" >&2
+  exit 2
+fi
+if [[ "${PRIVD_STATE_DIR}" != "/var/lib/ocservia-privd" ]]; then
+  echo "PRIVD_STATE_DIR must use the fixed root-owned /var/lib/ocservia-privd hierarchy" >&2
   exit 2
 fi
 if [[ -z "${DESTDIR}" ]]; then
@@ -297,26 +454,42 @@ if [[ -e "${installed_relay_dropin}" || -L "${installed_relay_dropin}" ]] && \
   installed_pair_preflight_error "the installed production relay drop-in must be a regular file"
 fi
 
+validate_installed_snapshot_source "${installed_agent}" 755
+validate_installed_snapshot_source "${installed_privd}" 755
+validate_installed_snapshot_source "${installed_agent_unit}" 644
+validate_installed_snapshot_source "${installed_privd_unit}" 644
+if [[ -f "${installed_relay_dropin}" ]]; then
+  validate_installed_snapshot_source "${installed_relay_dropin}" 644
+fi
+
 # A pre-P1-06 node has no Controller-side sealing-key binding. Use the verified
 # new Agent binary to bind both descriptors through the existing EndpointID and
-# a fresh operator-issued token before replacing any installed file. A strict
-# root-owned marker makes a later rollback/re-upgrade deterministic.
+# a fresh operator-issued token only after every rollback source is known-safe.
+# A strict root-owned marker makes a later rollback/re-upgrade deterministic.
 bind_legacy_password_sealing_keys "${installed_agent_unit}"
 harden_legacy_artifact_spool "${installed_privd_unit}"
 
-install -d -o root -g root -m 0700 "${BACKUP_DIR}"
-install -m 0755 "${installed_agent}" "${BACKUP_DIR}/ocservia-agent.previous"
-install -m 0755 "${installed_privd}" "${BACKUP_DIR}/ocservia-privd.previous"
-install -m 0644 "${installed_agent_unit}" "${BACKUP_DIR}/ocservia-agent.service.previous"
-install -m 0644 "${installed_privd_unit}" "${BACKUP_DIR}/ocservia-privd.service.previous"
+ensure_root_private_directory "${DESTDIR}${PRIVD_STATE_DIR}"
+ensure_root_private_directory "${BACKUP_DIR}"
+validate_root_ancestry "${BACKUP_DIR}"
+if [[ "$(stat -c '%u:%g:%a' -- "${DESTDIR}${PRIVD_STATE_DIR}")" != "0:0:700" || \
+      "$(stat -c '%u:%g:%a' -- "${BACKUP_DIR}")" != "0:0:700" ]]; then
+  installed_pair_preflight_error "privd state and upgrade backup directories must be root:root mode 0700"
+fi
+rm -f -- "${BACKUP_DIR}/MANIFEST.sha256"
+install -o root -g root -m 0755 -- "${installed_agent}" "${BACKUP_DIR}/ocservia-agent.previous"
+install -o root -g root -m 0755 -- "${installed_privd}" "${BACKUP_DIR}/ocservia-privd.previous"
+install -o root -g root -m 0644 -- "${installed_agent_unit}" "${BACKUP_DIR}/ocservia-agent.service.previous"
+install -o root -g root -m 0644 -- "${installed_privd_unit}" "${BACKUP_DIR}/ocservia-privd.service.previous"
 rm -f -- "${BACKUP_DIR}/ocservia-agent-relays.conf.previous" \
   "${BACKUP_DIR}/ocservia-agent-relays.conf.absent"
 if [[ -f "${installed_relay_dropin}" ]]; then
-  install -m 0644 "${installed_relay_dropin}" \
+  install -o root -g root -m 0644 -- "${installed_relay_dropin}" \
     "${BACKUP_DIR}/ocservia-agent-relays.conf.previous"
 else
-  install -m 0600 /dev/null "${BACKUP_DIR}/ocservia-agent-relays.conf.absent"
+  install -o root -g root -m 0600 -- /dev/null "${BACKUP_DIR}/ocservia-agent-relays.conf.absent"
 fi
+write_snapshot_manifest "${BACKUP_DIR}"
 
 "${ROOT}/scripts/install-agent.sh"
 if [[ -z "${DESTDIR}" ]]; then

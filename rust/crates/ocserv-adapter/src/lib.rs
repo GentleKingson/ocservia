@@ -3,11 +3,12 @@
 #![forbid(unsafe_code)]
 
 use std::collections::{HashMap, HashSet};
-use std::fs::OpenOptions as StdOpenOptions;
+use std::ffi::OsString;
+use std::fs::{File, OpenOptions as StdOpenOptions};
 use std::io::{self, Write};
 use std::net::IpAddr;
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::process::Stdio;
 use std::sync::Arc;
 #[cfg(test)]
@@ -41,6 +42,7 @@ const EFFECT_STORE_KEY_BYTES: usize = 32;
 const MAX_EFFECT_RECORDS: i64 = 65_536;
 const ARTIFACT_CHUNK_BYTES: usize = 256 * 1024;
 const MAX_ARTIFACT_BYTES: usize = 64 * 1024 * 1024;
+const USER_FILE_MODE: u16 = 0o600;
 
 const CONFIG_DIRECTIVES: &[&str] = &[
     "auth",
@@ -1067,7 +1069,7 @@ impl Adapter {
     ///
     /// Returns a stable adapter error for unreadable or malformed data.
     pub async fn user_list(&self) -> Result<UserList, AdapterError> {
-        let bytes = read_optional_secret_file(&self.resources.user_file).await?;
+        let bytes = read_optional_user_file(&self.resources.user_file).await?;
         parse_user_file(&bytes)
     }
 
@@ -1077,7 +1079,7 @@ impl Adapter {
     ///
     /// Returns a stable adapter error for unreadable or malformed data.
     pub async fn group_list(&self) -> Result<GroupList, AdapterError> {
-        let bytes = read_optional_secret_file(&self.resources.user_file).await?;
+        let bytes = read_optional_user_file(&self.resources.user_file).await?;
         parse_groups_from_user_file(&bytes)
     }
 
@@ -1211,7 +1213,7 @@ impl Adapter {
             return Err(AdapterError::InvalidRequest);
         }
         let _guard = self.user_file_lock.lock().await;
-        let current = read_optional_secret_file(&self.resources.user_file).await?;
+        let current = read_optional_user_file(&self.resources.user_file).await?;
         let records = parse_secret_user_records(&current)?;
         let metadata = records
             .iter()
@@ -1339,7 +1341,7 @@ impl Adapter {
             return Err(AdapterError::InvalidRequest);
         }
         let _guard = self.user_file_lock.lock().await;
-        let current = read_optional_secret_file(&self.resources.user_file).await?;
+        let current = read_optional_user_file(&self.resources.user_file).await?;
         if find_user_metadata(&current, username)?.is_none() {
             return Err(AdapterError::InvalidRequest);
         }
@@ -1400,7 +1402,7 @@ impl Adapter {
             previous = member;
         }
         let _guard = self.user_file_lock.lock().await;
-        let bytes = read_optional_secret_file(&self.resources.user_file).await?;
+        let bytes = read_optional_user_file(&self.resources.user_file).await?;
         let records = parse_secret_user_records(&bytes)?;
         let requested: HashSet<&str> = members.iter().map(String::as_str).collect();
         let existing: HashSet<&str> = records
@@ -1481,7 +1483,7 @@ impl Adapter {
             );
         }
         let _guard = self.user_file_lock.lock().await;
-        let current = read_optional_secret_file(&self.resources.user_file).await?;
+        let current = read_optional_user_file(&self.resources.user_file).await?;
         EffectStore::open_existing(&self.resources)?.observe(
             mutation_kind,
             resource_key,
@@ -1500,7 +1502,7 @@ impl Adapter {
         desired_revision: u64,
         effect: EffectIdentity<'_>,
     ) -> Result<(), AdapterError> {
-        let after = read_optional_secret_file(staging.path()).await?;
+        let after = normalize_and_read_user_staging(staging.path()).await?;
         parse_secret_user_records(&after)?;
         let mut store = EffectStore::open_for_mutation(&self.resources)?;
         match store.prepare(
@@ -1517,7 +1519,7 @@ impl Adapter {
             }
             PrepareEffect::Proceed => {}
         }
-        atomic_replace(staging.path(), &self.resources.user_file).await?;
+        publish_user_staging(staging.path(), &self.resources.user_file)?;
         staging.disarm();
         store.mark_applied(mutation_kind, resource_key, desired_revision, effect)
     }
@@ -1530,13 +1532,29 @@ impl Adapter {
             .and_then(|value| value.to_str())
             .ok_or(AdapterError::InvalidResource)?;
         let staging = StagingFile::new(parent.join(format!(".{name}.ocservia-{}", Uuid::now_v7())));
-        let mode = file_mode(path).await?;
-        let mut options = tokio::fs::OpenOptions::new();
-        options.write(true).create_new(true).mode(mode);
-        let mut file = options
-            .open(staging.path())
-            .await
-            .map_err(AdapterError::Io)?;
+        // Recheck the authoritative target before creating a replacement. A
+        // legacy permissive, symlinked, or hard-linked ocpasswd file is never
+        // inherited into a new root trust boundary.
+        let _ = read_optional_user_file(path).await?;
+        let (directory, _, uid, gid) = open_user_directory(path)?;
+        let staging_name = staging
+            .path()
+            .file_name()
+            .ok_or(AdapterError::InvalidResource)?;
+        let file = rustix::fs::openat(
+            &directory,
+            staging_name,
+            rustix::fs::OFlags::WRONLY
+                | rustix::fs::OFlags::CREATE
+                | rustix::fs::OFlags::EXCL
+                | rustix::fs::OFlags::NOFOLLOW
+                | rustix::fs::OFlags::CLOEXEC,
+            rustix::fs::Mode::from_raw_mode(USER_FILE_MODE),
+        )
+        .map_err(|error| AdapterError::Io(error.into()))?;
+        let file = File::from(file);
+        set_authoritative_user_metadata(&file, uid, gid)?;
+        let mut file = tokio::fs::File::from_std(file);
         async {
             file.write_all(bytes).await.map_err(AdapterError::Io)?;
             file.sync_all().await.map_err(AdapterError::Io)
@@ -1552,6 +1570,7 @@ impl Adapter {
     /// Returns an error if the fixed user-file directory cannot be inspected or cleaned.
     pub async fn cleanup_stale_user_staging(&self) -> Result<(), AdapterError> {
         let _guard = self.user_file_lock.lock().await;
+        let (directory, _, uid, gid) = open_user_directory(&self.resources.user_file)?;
         let parent = self
             .resources
             .user_file
@@ -1578,9 +1597,19 @@ impl Adapter {
                 continue;
             };
             if id.get_version_num() == 7 {
-                tokio::fs::remove_file(entry.path())
-                    .await
-                    .map_err(AdapterError::Io)?;
+                let stale = rustix::fs::openat(
+                    &directory,
+                    candidate.as_str(),
+                    rustix::fs::OFlags::RDONLY
+                        | rustix::fs::OFlags::NOFOLLOW
+                        | rustix::fs::OFlags::CLOEXEC,
+                    rustix::fs::Mode::empty(),
+                )
+                .map(File::from)
+                .map_err(|error| AdapterError::Io(error.into()))?;
+                validate_authoritative_user_file(&stale, uid, gid)?;
+                rustix::fs::unlinkat(&directory, candidate.as_str(), rustix::fs::AtFlags::empty())
+                    .map_err(|error| AdapterError::Io(error.into()))?;
             }
         }
         Ok(())
@@ -3741,12 +3770,208 @@ fn sqlite_io(error: rusqlite::Error) -> AdapterError {
     AdapterError::Io(io::Error::other(error))
 }
 
-async fn read_optional_secret_file(path: &Path) -> Result<Zeroizing<Vec<u8>>, AdapterError> {
-    match tokio::fs::read(path).await {
-        Ok(value) => Ok(Zeroizing::new(value)),
-        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(Zeroizing::new(Vec::new())),
-        Err(error) => Err(AdapterError::Io(error)),
+fn authoritative_user_owner() -> (u32, u32) {
+    let uid = rustix::process::geteuid().as_raw();
+    let gid = if uid == 0 {
+        0
+    } else {
+        rustix::process::getegid().as_raw()
+    };
+    (uid, gid)
+}
+
+fn open_user_directory(path: &Path) -> Result<(File, OsString, u32, u32), AdapterError> {
+    let name = path
+        .file_name()
+        .ok_or(AdapterError::InvalidResource)?
+        .to_os_string();
+    let (uid, gid) = authoritative_user_owner();
+    if uid == 0 && !cfg!(test) {
+        if !path.is_absolute() {
+            return Err(AdapterError::InvalidResource);
+        }
+        let mut components = path.components();
+        if components.next() != Some(Component::RootDir) {
+            return Err(AdapterError::InvalidResource);
+        }
+        let names = components
+            .map(|component| match component {
+                Component::Normal(name) => Ok(name),
+                _ => Err(AdapterError::InvalidResource),
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let (_, directories) = names.split_last().ok_or(AdapterError::InvalidResource)?;
+        let root = rustix::fs::open(
+            "/",
+            rustix::fs::OFlags::RDONLY
+                | rustix::fs::OFlags::DIRECTORY
+                | rustix::fs::OFlags::CLOEXEC,
+            rustix::fs::Mode::empty(),
+        )
+        .map_err(|error| AdapterError::Io(error.into()))?;
+        let mut directory = File::from(root);
+        validate_user_directory(&directory, uid)?;
+        for component in directories {
+            let next = rustix::fs::openat(
+                &directory,
+                *component,
+                rustix::fs::OFlags::RDONLY
+                    | rustix::fs::OFlags::DIRECTORY
+                    | rustix::fs::OFlags::NOFOLLOW
+                    | rustix::fs::OFlags::CLOEXEC,
+                rustix::fs::Mode::empty(),
+            )
+            .map_err(|error| AdapterError::Io(error.into()))?;
+            let next = File::from(next);
+            validate_user_directory(&next, uid)?;
+            directory = next;
+        }
+        return Ok((directory, name, uid, gid));
     }
+
+    let parent = path.parent().ok_or(AdapterError::InvalidResource)?;
+    let directory = rustix::fs::open(
+        parent,
+        rustix::fs::OFlags::RDONLY
+            | rustix::fs::OFlags::DIRECTORY
+            | rustix::fs::OFlags::NOFOLLOW
+            | rustix::fs::OFlags::CLOEXEC,
+        rustix::fs::Mode::empty(),
+    )
+    .map_err(|error| AdapterError::Io(error.into()))?;
+    let directory = File::from(directory);
+    validate_user_directory(&directory, uid)?;
+    Ok((directory, name, uid, gid))
+}
+
+fn validate_user_directory(directory: &File, uid: u32) -> Result<(), AdapterError> {
+    let metadata = directory.metadata().map_err(AdapterError::Io)?;
+    if !metadata.is_dir() || metadata.uid() != uid || metadata.permissions().mode() & 0o022 != 0 {
+        return Err(AdapterError::InvalidResource);
+    }
+    Ok(())
+}
+
+fn validate_authoritative_user_file(
+    file: &File,
+    uid: u32,
+    gid: u32,
+) -> Result<std::fs::Metadata, AdapterError> {
+    let metadata = file.metadata().map_err(AdapterError::Io)?;
+    if !metadata.is_file()
+        || metadata.nlink() != 1
+        || metadata.uid() != uid
+        || metadata.gid() != gid
+        || metadata.permissions().mode() & 0o777 != u32::from(USER_FILE_MODE)
+    {
+        return Err(AdapterError::InvalidResource);
+    }
+    Ok(metadata)
+}
+
+fn set_authoritative_user_metadata(file: &File, uid: u32, gid: u32) -> Result<(), AdapterError> {
+    rustix::fs::fchown(
+        file,
+        Some(rustix::fs::Uid::from_raw(uid)),
+        Some(rustix::fs::Gid::from_raw(gid)),
+    )
+    .map_err(|error| AdapterError::Io(error.into()))?;
+    rustix::fs::fchmod(file, rustix::fs::Mode::from_raw_mode(USER_FILE_MODE))
+        .map_err(|error| AdapterError::Io(error.into()))
+}
+
+async fn read_user_file(path: &Path, optional: bool) -> Result<Zeroizing<Vec<u8>>, AdapterError> {
+    let (directory, name, uid, gid) = open_user_directory(path)?;
+    let file = match rustix::fs::openat(
+        &directory,
+        &name,
+        rustix::fs::OFlags::RDONLY | rustix::fs::OFlags::NOFOLLOW | rustix::fs::OFlags::CLOEXEC,
+        rustix::fs::Mode::empty(),
+    ) {
+        Ok(file) => File::from(file),
+        Err(rustix::io::Errno::NOENT) if optional => return Ok(Zeroizing::new(Vec::new())),
+        Err(error) => return Err(AdapterError::Io(error.into())),
+    };
+    validate_authoritative_user_file(&file, uid, gid)?;
+    let mut file = tokio::fs::File::from_std(file).take((MAX_USER_FILE_BYTES + 1) as u64);
+    let mut value = Zeroizing::new(Vec::new());
+    file.read_to_end(&mut value)
+        .await
+        .map_err(AdapterError::Io)?;
+    if value.len() > MAX_USER_FILE_BYTES {
+        return Err(AdapterError::OutputLimit);
+    }
+    Ok(value)
+}
+
+async fn read_optional_user_file(path: &Path) -> Result<Zeroizing<Vec<u8>>, AdapterError> {
+    read_user_file(path, true).await
+}
+
+async fn normalize_and_read_user_staging(path: &Path) -> Result<Zeroizing<Vec<u8>>, AdapterError> {
+    let (directory, name, uid, gid) = open_user_directory(path)?;
+    let file = rustix::fs::openat(
+        &directory,
+        &name,
+        rustix::fs::OFlags::RDWR | rustix::fs::OFlags::NOFOLLOW | rustix::fs::OFlags::CLOEXEC,
+        rustix::fs::Mode::empty(),
+    )
+    .map_err(|error| AdapterError::Io(error.into()))?;
+    let file = File::from(file);
+    let metadata = file.metadata().map_err(AdapterError::Io)?;
+    if !metadata.is_file() || metadata.nlink() != 1 {
+        return Err(AdapterError::InvalidResource);
+    }
+    set_authoritative_user_metadata(&file, uid, gid)?;
+    rustix::fs::fsync(&file).map_err(|error| AdapterError::Io(error.into()))?;
+    read_user_file(path, false).await
+}
+
+fn publish_user_staging(staging: &Path, target: &Path) -> Result<(), AdapterError> {
+    if staging.parent() != target.parent() {
+        return Err(AdapterError::InvalidResource);
+    }
+    let (directory, target_name, uid, gid) = open_user_directory(target)?;
+    let staging_name = staging.file_name().ok_or(AdapterError::InvalidResource)?;
+    let staging_file = rustix::fs::openat(
+        &directory,
+        staging_name,
+        rustix::fs::OFlags::RDONLY | rustix::fs::OFlags::NOFOLLOW | rustix::fs::OFlags::CLOEXEC,
+        rustix::fs::Mode::empty(),
+    )
+    .map(File::from)
+    .map_err(|error| AdapterError::Io(error.into()))?;
+    let staging_metadata = validate_authoritative_user_file(&staging_file, uid, gid)?;
+    match rustix::fs::openat(
+        &directory,
+        &target_name,
+        rustix::fs::OFlags::RDONLY | rustix::fs::OFlags::NOFOLLOW | rustix::fs::OFlags::CLOEXEC,
+        rustix::fs::Mode::empty(),
+    ) {
+        Ok(file) => {
+            validate_authoritative_user_file(&File::from(file), uid, gid)?;
+        }
+        Err(rustix::io::Errno::NOENT) => {}
+        Err(error) => return Err(AdapterError::Io(error.into())),
+    }
+    rustix::fs::renameat(&directory, staging_name, &directory, &target_name)
+        .map_err(|error| AdapterError::Io(error.into()))?;
+    let published = rustix::fs::openat(
+        &directory,
+        &target_name,
+        rustix::fs::OFlags::RDONLY | rustix::fs::OFlags::NOFOLLOW | rustix::fs::OFlags::CLOEXEC,
+        rustix::fs::Mode::empty(),
+    )
+    .map(File::from)
+    .map_err(|error| AdapterError::Io(error.into()))?;
+    let published_metadata = validate_authoritative_user_file(&published, uid, gid)?;
+    if published_metadata.dev() != staging_metadata.dev()
+        || published_metadata.ino() != staging_metadata.ino()
+    {
+        return Err(AdapterError::InvalidResource);
+    }
+    rustix::fs::fsync(&published).map_err(|error| AdapterError::Io(error.into()))?;
+    rustix::fs::fsync(&directory).map_err(|error| AdapterError::Io(error.into()))
 }
 
 #[derive(Clone, Copy)]
@@ -3763,14 +3988,6 @@ async fn file_identity(path: &Path) -> Result<FileIdentity, AdapterError> {
             uid: metadata.uid(),
             gid: metadata.gid(),
         }),
-        Err(error) => Err(AdapterError::Io(error)),
-    }
-}
-
-async fn file_mode(path: &Path) -> Result<u32, AdapterError> {
-    match tokio::fs::metadata(path).await {
-        Ok(metadata) => Ok(metadata.permissions().mode() & 0o777),
-        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(0o660),
         Err(error) => Err(AdapterError::Io(error)),
     }
 }
@@ -4133,6 +4350,15 @@ mod tests {
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700))
             .expect("make fixture executable");
         path
+    }
+
+    fn write_user_fixture(path: &Path, bytes: impl AsRef<[u8]>) {
+        std::fs::write(path, bytes).expect("write ocpasswd fixture");
+        std::fs::set_permissions(
+            path,
+            std::fs::Permissions::from_mode(u32::from(USER_FILE_MODE)),
+        )
+        .expect("secure ocpasswd fixture");
     }
 
     #[test]
@@ -4956,12 +5182,89 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn ocpasswd_publish_enforces_owner_mode_links_and_real_parent() {
+        let directory =
+            std::env::temp_dir().join(format!("ocservia-ocpasswd-metadata-{}", Uuid::now_v7()));
+        std::fs::create_dir(&directory).expect("fixture directory");
+        let users = directory.join("ocpasswd");
+        let resources = FixedResources::default()
+            .with_user_resources(
+                PathBuf::from("/bin/false"),
+                users.clone(),
+                PathBuf::from("/bin/false"),
+                directory.join("key.pem"),
+                String::from("test-key"),
+            )
+            .expect("resources")
+            .with_effect_store(
+                directory.join("effects.sqlite3"),
+                directory.join("effects.key"),
+            )
+            .expect("effect resources");
+        let adapter = Adapter::new(resources, Limits::default());
+        let desired = b"alice:staff:$6$hash\n";
+        let mut staging = adapter
+            .stage_user_file(desired)
+            .await
+            .expect("secure staging");
+        adapter
+            .commit_desired_staging(&mut staging, b"", "user_create", "alice", 1, test_effect())
+            .await
+            .expect("secure publish");
+        let metadata = std::fs::metadata(&users).expect("published metadata");
+        let (uid, gid) = authoritative_user_owner();
+        assert_eq!(metadata.uid(), uid);
+        assert_eq!(metadata.gid(), gid);
+        assert_eq!(
+            metadata.permissions().mode() & 0o777,
+            u32::from(USER_FILE_MODE)
+        );
+        assert_eq!(metadata.nlink(), 1);
+
+        std::fs::set_permissions(&users, std::fs::Permissions::from_mode(0o660))
+            .expect("make legacy file unsafe");
+        assert!(matches!(
+            adapter.user_list().await,
+            Err(AdapterError::InvalidResource)
+        ));
+        std::fs::set_permissions(
+            &users,
+            std::fs::Permissions::from_mode(u32::from(USER_FILE_MODE)),
+        )
+        .expect("restore secure mode");
+
+        let second_link = directory.join("ocpasswd-copy");
+        std::fs::hard_link(&users, &second_link).expect("hard link fixture");
+        assert!(matches!(
+            adapter.user_list().await,
+            Err(AdapterError::InvalidResource)
+        ));
+        std::fs::remove_file(&second_link).expect("remove hard link fixture");
+
+        let real_users = directory.join("ocpasswd-real");
+        std::fs::rename(&users, &real_users).expect("preserve real file");
+        std::os::unix::fs::symlink(&real_users, &users).expect("symlink fixture");
+        assert!(adapter.user_list().await.is_err());
+        std::fs::remove_file(&users).expect("remove symlink fixture");
+        std::fs::rename(&real_users, &users).expect("restore real file");
+
+        std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o770))
+            .expect("make parent unsafe");
+        assert!(matches!(
+            adapter.user_list().await,
+            Err(AdapterError::InvalidResource)
+        ));
+        std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o700))
+            .expect("restore fixture directory");
+        std::fs::remove_dir_all(directory).expect("cleanup");
+    }
+
+    #[tokio::test]
     async fn group_apply_is_atomic_when_replacement_fails() {
         let directory = std::env::temp_dir().join(format!("ocservia-group-{}", Uuid::now_v7()));
         std::fs::create_dir(&directory).expect("directory");
         let users = directory.join("ocpasswd");
-        std::fs::write(&users, b"alice:staff:$6$alice-hash\nbob:*:!$6$bob-hash\n")
-            .expect("initial users");
+        write_user_fixture(&users, b"alice:staff:$6$alice-hash\nbob:*:!$6$bob-hash\n");
         let resources = FixedResources::default()
             .with_user_resources(
                 PathBuf::from("/bin/false"),
@@ -5033,7 +5336,7 @@ mod tests {
             original.push_str(member);
             original.push_str(":*:$6$test-hash\n");
         }
-        std::fs::write(&users, original).expect("initial users");
+        write_user_fixture(&users, original);
         let resources = FixedResources::default()
             .with_user_resources(
                 PathBuf::from("/bin/false"),
@@ -5082,7 +5385,7 @@ mod tests {
         for index in 0..MAX_MANAGED_RESOURCES {
             original.extend_from_slice(format!("user{index:03}:legacy:$6$test-hash\n").as_bytes());
         }
-        std::fs::write(&users, &original).expect("initial users");
+        write_user_fixture(&users, &original);
         let effect_database = directory.join("effects.sqlite3");
         let effect_key = directory.join("effects.key");
         let resources = FixedResources::default()
@@ -5125,7 +5428,7 @@ mod tests {
         std::fs::create_dir(&directory).expect("directory");
         let users = directory.join("ocpasswd");
         let original = b"alice:admins,staff:!$6$original-hash\n";
-        std::fs::write(&users, original).expect("original");
+        write_user_fixture(&users, original);
         let openssl = executable("openssl-fixture", "printf rotated-password");
         let openssl_directory = openssl.parent().expect("openssl parent").to_owned();
         let ocpasswd = executable("ocpasswd-fixture", "printf corrupted > \"$2\"; exit 1");
@@ -5177,7 +5480,7 @@ mod tests {
         std::fs::create_dir(&directory).expect("directory");
         let users = directory.join("ocpasswd");
         let original = b"alice:staff:!$6$original-hash\n";
-        std::fs::write(&users, original).expect("original");
+        write_user_fixture(&users, original);
         let openssl = executable("openssl-fast", "cat >/dev/null; printf rotated-password");
         let openssl_directory = openssl.parent().expect("openssl parent").to_owned();
         let slow_ocpasswd = executable("ocpasswd-slow", "cat >/dev/null; sleep 5");
@@ -5338,7 +5641,7 @@ mod tests {
 
         let stale = directory.join(format!(".ocpasswd.ocservia-{}", Uuid::now_v7()));
         let lookalike = directory.join(".ocpasswd.ocservia-not-a-uuid");
-        std::fs::write(&stale, b"secret hash staging").expect("stale staging");
+        write_user_fixture(&stale, b"secret hash staging");
         std::fs::write(&lookalike, b"preserve").expect("lookalike");
         lock_adapter
             .cleanup_stale_user_staging()
@@ -5361,7 +5664,7 @@ mod tests {
         std::fs::create_dir(&directory).expect("directory");
         let users = directory.join("ocpasswd");
         let original = b"alice:admins,staff:!$6$original-hash\n";
-        std::fs::write(&users, original).expect("original");
+        write_user_fixture(&users, original);
         let resources = FixedResources::default()
             .with_user_resources(
                 PathBuf::from("/bin/false"),
@@ -5404,7 +5707,7 @@ mod tests {
         for index in 0..MAX_MANAGED_RESOURCES {
             original.extend_from_slice(format!("user{index:03}:*:$6$test-hash\n").as_bytes());
         }
-        std::fs::write(&users, &original).expect("maximum users");
+        write_user_fixture(&users, &original);
 
         let openssl_marker = directory.join("openssl-called");
         let ocpasswd_marker = directory.join("ocpasswd-called");
@@ -5464,7 +5767,7 @@ mod tests {
         for index in 0..(MAX_MANAGED_RESOURCES - 1) {
             original.extend_from_slice(format!("user{index:03}:*:$6$test-hash\n").as_bytes());
         }
-        std::fs::write(&users, &original).expect("users below capacity");
+        write_user_fixture(&users, &original);
         let effect_database = directory.join("effects.sqlite3");
         let effect_key = directory.join("effects.key");
         let resources = FixedResources::default()
