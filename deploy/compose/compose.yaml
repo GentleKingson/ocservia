@@ -17,7 +17,11 @@ services:
       - no-new-privileges:true
     network_mode: none
     volumes:
-      - transport-runtime:/run/ocserv-platform
+      - type: volume
+        source: transport-runtime
+        target: /run/ocserv-platform
+        volume:
+          nocopy: true
 
   postgres:
     image: postgres:17.10-bookworm
@@ -46,7 +50,11 @@ services:
       context: ../..
       dockerfile: rust/transportd-stub.Dockerfile
     volumes:
-      - transport-runtime:/run/ocserv-platform
+      - type: volume
+        source: transport-runtime
+        target: /run/ocserv-platform
+        volume:
+          nocopy: true
     healthcheck:
       test: ["CMD-SHELL", "test -S /run/ocserv-platform/transportd.sock"]
       interval: 2s
@@ -91,7 +99,11 @@ services:
       OCSERV_TRANSPORT_UID: "65533"
       OCSERV_TRANSPORT_GID: "65532"
     volumes:
-      - transport-runtime:/run/ocserv-platform
+      - type: volume
+        source: transport-runtime
+        target: /run/ocserv-platform
+        volume:
+          nocopy: true
     ports:
       - "127.0.0.1:${OCSERV_HTTP_PORT:-8080}:8080"
     depends_on:

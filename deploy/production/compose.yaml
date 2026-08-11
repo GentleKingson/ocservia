@@ -23,7 +23,11 @@ services:
     network_mode: none
     cap_add: [CHOWN, FOWNER, DAC_OVERRIDE]
     volumes:
-      - transport-runtime:/run/ocserv-platform
+      - type: volume
+        source: transport-runtime
+        target: /run/ocserv-platform
+        volume:
+          nocopy: true
     deploy:
       resources:
         limits:
@@ -158,7 +162,11 @@ services:
         gid: "65532"
         mode: 0400
     volumes:
-      - transport-runtime:/run/ocserv-platform
+      - type: volume
+        source: transport-runtime
+        target: /run/ocserv-platform
+        volume:
+          nocopy: true
       - trust-runtime:/run/ocserv-trust
     tmpfs:
       - /tmp:size=16m,mode=0700
@@ -216,7 +224,11 @@ services:
         gid: "65532"
         mode: 0400
     volumes:
-      - transport-runtime:/run/ocserv-platform
+      - type: volume
+        source: transport-runtime
+        target: /run/ocserv-platform
+        volume:
+          nocopy: true
       - trust-runtime:/run/ocserv-trust
     tmpfs:
       - /tmp:size=8m,mode=0700

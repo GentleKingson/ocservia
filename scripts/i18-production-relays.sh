@@ -151,7 +151,13 @@ assert runtime_init["network_mode"] == "none"
 assert runtime_init["restart"] == "no"
 assert runtime_init["entrypoint"] == ["/usr/local/libexec/ocservia-prepare-transport-runtime"]
 assert runtime_init["command"] == ["/run/ocserv-platform", "65532", "65532", "65532"]
-assert runtime_init["volumes"][0]["target"] == "/run/ocserv-platform"
+for name in ("transport-runtime-init", "transportd", "control-plane"):
+    runtime_mount = next(
+        item for item in services[name]["volumes"]
+        if item["target"] == "/run/ocserv-platform"
+    )
+    assert runtime_mount["source"] == "transport-runtime"
+    assert runtime_mount["volume"]["nocopy"] is True
 assert services["transportd"]["depends_on"]["transport-runtime-init"]["condition"] == "service_completed_successfully"
 assert services["control-plane"]["depends_on"]["transport-runtime-init"]["condition"] == "service_completed_successfully"
 assert services["gateway"].get("ports") and all(not service.get("ports") for name, service in services.items() if name != "gateway")
@@ -218,10 +224,11 @@ docker run --rm --user 0:0 --cap-add CHOWN --cap-add FOWNER --cap-add DAC_OVERRI
   -v "${transport_volume}:/run/ocserv-platform" --entrypoint /bin/sh "${runtime_transport_image}" \
   -c 'chown 65532:65532 /run/ocserv-platform && chmod 0770 /run/ocserv-platform'
 docker run --rm --user 0:0 --cap-drop ALL --cap-add CHOWN --cap-add FOWNER --cap-add DAC_OVERRIDE \
-  --network none -v "${transport_volume}:/run/ocserv-platform" \
+  --network none --mount "type=volume,source=${transport_volume},target=/run/ocserv-platform,volume-nocopy" \
   --entrypoint /usr/local/libexec/ocservia-prepare-transport-runtime "${runtime_transport_image}" \
   /run/ocserv-platform 65532 65532 65532
-docker run --rm --user 65532:65532 -v "${transport_volume}:/run/ocserv-platform" \
+docker run --rm --user 65532:65532 \
+  --mount "type=volume,source=${transport_volume},target=/run/ocserv-platform,volume-nocopy" \
   --entrypoint /bin/sh "${runtime_transport_image}" \
   -c 'test "$(stat -c %u:%g:%a /run/ocserv-platform)" = "65532:65532:750" && : > /run/ocserv-platform/bind-probe && rm /run/ocserv-platform/bind-probe'
 
@@ -230,10 +237,11 @@ docker run --rm --user 0:0 --cap-add CHOWN --cap-add FOWNER --cap-add DAC_OVERRI
   -v "${development_transport_volume}:/run/ocserv-platform" --entrypoint /bin/sh "${runtime_transport_image}" \
   -c 'chown 65534:65532 /run/ocserv-platform && chmod 0770 /run/ocserv-platform'
 docker run --rm --user 0:0 --cap-drop ALL --cap-add CHOWN --cap-add FOWNER --cap-add DAC_OVERRIDE \
-  --network none -v "${development_transport_volume}:/run/ocserv-platform" \
+  --network none --mount "type=volume,source=${development_transport_volume},target=/run/ocserv-platform,volume-nocopy" \
   --entrypoint /usr/local/libexec/ocservia-prepare-transport-runtime "${runtime_transport_image}" \
   /run/ocserv-platform 65533 65532 65534
-docker run --rm --user 65533:65532 -v "${development_transport_volume}:/run/ocserv-platform" \
+docker run --rm --user 65533:65532 \
+  --mount "type=volume,source=${development_transport_volume},target=/run/ocserv-platform,volume-nocopy" \
   --entrypoint /bin/sh "${runtime_transport_image}" \
   -c 'test "$(stat -c %u:%g:%a /run/ocserv-platform)" = "65533:65532:750" && : > /run/ocserv-platform/bind-probe && rm /run/ocserv-platform/bind-probe'
 docker volume create "${trust_volume}" >/dev/null
