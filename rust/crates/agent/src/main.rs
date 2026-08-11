@@ -24,10 +24,10 @@ use ocservia_command_journal::{
 use ocservia_contracts::decode_strict_command_envelope;
 use ocservia_contracts::generated::ocserv::platform::agent::v1::{
     AgentEvent, AgentEventType, ArtifactChunk, ArtifactFetchRequest, CommandDeliveryMode,
-    CommandEnvelope, CommandResult, CommandResultState, GroupObservation, HandshakeResult,
-    IpBanObservation, MetricSample, ObservedSnapshot, SemanticPayloadHashVersion, SessionHandshake,
-    SessionHandshakeResponse, SessionObservation, TelemetryBatch, TelemetryDropCounters,
-    TelemetryPriority, UserObservation, command_envelope,
+    CommandEnvelope, CommandResult, CommandResultState, EnrollRequest, EnrollResponse,
+    GroupObservation, HandshakeResult, IpBanObservation, MetricSample, ObservedSnapshot,
+    SemanticPayloadHashVersion, SessionHandshake, SessionHandshakeResponse, SessionObservation,
+    TelemetryBatch, TelemetryDropCounters, TelemetryPriority, UserObservation, command_envelope,
 };
 use prost::Message;
 use sha2::Digest;
@@ -36,6 +36,7 @@ use uuid::Uuid;
 use zeroize::Zeroizing;
 
 const AGENT_ALPN: &[u8] = b"ocserv-platform/agent/1";
+const ENROLL_ALPN: &[u8] = b"ocserv-platform/enroll/1";
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[tokio::main]
@@ -43,6 +44,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     ocservia_observability::init("ocservia-agent")?;
     ocservia_agent::ensure_unprivileged(rustix::process::geteuid().as_raw())?;
     let config = parse_args()?;
+    if let Some(token_file) = config.enrollment_token_file.as_deref() {
+        enroll_agent(&config, token_file).await?;
+        return Ok(());
+    }
     let command_keys = load_controller_command_keys(&config)?;
     let mut journal = Journal::open(&config.journal)?;
     let mut command_executor = CommandExecutor::new(Journal::open(&config.journal)?);
@@ -139,6 +144,92 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         () = shutdown_signal() => tracing::info!("agent shutdown requested"),
     }
     Ok(())
+}
+
+async fn enroll_agent(
+    config: &Config,
+    token_file: &Path,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let controller = config
+        .controller
+        .ok_or_else(|| invalid("--controller is required for enrollment"))?;
+    let environment = config
+        .enrollment_environment
+        .as_deref()
+        .ok_or_else(|| invalid("--enrollment-environment is required"))?;
+    let token = read_enrollment_token(token_file)?;
+    let identity = ocservia_agent_identity::Identity::provision(&config.identity_dir, controller)?;
+    let endpoint = Endpoint::builder(presets::N0)
+        .secret_key(identity.secret_key().clone())
+        .relay_mode(config.relay_mode.clone())
+        .bind()
+        .await?;
+    spawn_dedicated_relay_failover(&endpoint, &config.relay_mode);
+    let connection = endpoint
+        .connect(EndpointAddr::new(controller), ENROLL_ALPN)
+        .await?;
+    let mut request = EnrollRequest {
+        token,
+        endpoint_id: identity.endpoint_id().as_bytes().to_vec(),
+        agent_version: env!("CARGO_PKG_VERSION").to_owned(),
+        os_release: ocservia_agent::read_os_release().await?,
+        ocserv_version: "unknown".to_owned(),
+        boot_id: ocservia_agent::read_boot_id().await?,
+        agent_instance_id: Uuid::now_v7().as_bytes().to_vec(),
+        capabilities: supported_capabilities(),
+        environment: environment.to_owned(),
+        nonce: Uuid::now_v7().as_bytes().to_vec(),
+        time: Some(SystemTime::now().into()),
+        enrollment_protocol_major: 0,
+        enrollment_protocol_minor: 0,
+        proof: None,
+    };
+    identity.authorize_enrollment(&mut request)?;
+    let response: EnrollResponse = exchange_message(&connection, &request, "enrollment").await?;
+    let node_id = Uuid::from_slice(&response.node_id)
+        .map_err(|_| invalid("Controller returned an invalid enrollment node ID"))?;
+    if node_id.get_version_num() != 7
+        || !matches!(
+            HandshakeResult::try_from(response.result),
+            Ok(HandshakeResult::PendingApproval | HandshakeResult::Accepted)
+        )
+    {
+        return Err(invalid("Controller rejected enrollment").into());
+    }
+    println!("{node_id}");
+    connection.close(VarInt::from_u32(0), b"enrollment complete");
+    endpoint.close().await;
+    Ok(())
+}
+
+async fn exchange_message<M: Message, R: Message + Default>(
+    connection: &iroh::endpoint::Connection,
+    request: &M,
+    kind: &str,
+) -> Result<R, Box<dyn std::error::Error + Send + Sync>> {
+    let bytes = request.encode_to_vec();
+    if bytes.is_empty() || bytes.len() > 64 * 1024 {
+        return Err(invalid(&format!("{kind} request size is invalid")).into());
+    }
+    let response = tokio::time::timeout(HANDSHAKE_TIMEOUT, async {
+        let (mut send, mut recv) = connection.open_bi().await?;
+        send.write_all(&u32::try_from(bytes.len())?.to_be_bytes())
+            .await?;
+        send.write_all(&bytes).await?;
+        send.finish()?;
+        let mut length = [0_u8; 4];
+        recv.read_exact(&mut length).await?;
+        let length = u32::from_be_bytes(length) as usize;
+        if length == 0 || length > 64 * 1024 {
+            return Err(invalid(&format!("{kind} response size is invalid")).into());
+        }
+        let mut response = vec![0_u8; length];
+        recv.read_exact(&mut response).await?;
+        Ok::<R, Box<dyn std::error::Error + Send + Sync>>(R::decode(response.as_slice())?)
+    })
+    .await
+    .map_err(|_| invalid(&format!("{kind} timed out")))??;
+    Ok(response)
 }
 
 fn spawn_dedicated_relay_failover(endpoint: &Endpoint, mode: &RelayMode) {
@@ -1142,12 +1233,14 @@ struct Config {
     artifact_dir: PathBuf,
     relay_mode: RelayMode,
     command_verification_key_files: Vec<PathBuf>,
+    enrollment_token_file: Option<PathBuf>,
+    enrollment_environment: Option<String>,
 }
 
 fn load_controller_command_keys(
     config: &Config,
 ) -> Result<Option<ControllerCommandKeyring>, Box<dyn std::error::Error + Send + Sync>> {
-    if config.probe_only {
+    if config.probe_only || config.enrollment_token_file.is_some() {
         return Ok(None);
     }
     if config.command_verification_key_files.is_empty() {
@@ -1174,6 +1267,8 @@ fn parse_args() -> Result<Config, io::Error> {
         artifact_dir: PathBuf::from("/var/lib/ocservia-privd/certificates/artifacts"),
         relay_mode: RelayMode::Default,
         command_verification_key_files: Vec::new(),
+        enrollment_token_file: None,
+        enrollment_environment: None,
     };
     let mut relay_mode = String::from("default");
     let mut relay_urls = Vec::new();
@@ -1219,6 +1314,16 @@ fn parse_args() -> Result<Config, io::Error> {
                         "--controller-command-key-file",
                     )?));
             }
+            "--enrollment-token-file" => {
+                config.enrollment_token_file = Some(PathBuf::from(required(
+                    &mut args,
+                    "--enrollment-token-file",
+                )?));
+            }
+            "--enrollment-environment" => {
+                config.enrollment_environment =
+                    Some(required(&mut args, "--enrollment-environment")?);
+            }
             "--relay-mode" => relay_mode = required(&mut args, "--relay-mode")?,
             "--relay-url" => relay_urls.push(required(&mut args, "--relay-url")?),
             "--relay-token-file" => {
@@ -1235,13 +1340,66 @@ fn parse_args() -> Result<Config, io::Error> {
         || relay_token_file
             .as_ref()
             .is_some_and(|path| !path.is_absolute())
+        || config
+            .enrollment_token_file
+            .as_ref()
+            .is_some_and(|path| !path.is_absolute())
     {
         return Err(invalid(
             "artifact, Controller command key, and relay token paths must be absolute",
         ));
     }
+    validate_enrollment_mode(&config)?;
     config.relay_mode = build_relay_mode(&relay_mode, relay_urls, relay_token_file.as_deref())?;
     Ok(config)
+}
+
+fn validate_enrollment_mode(config: &Config) -> Result<(), io::Error> {
+    if config.enrollment_token_file.is_some() != config.enrollment_environment.is_some()
+        || config.enrollment_token_file.is_some() && (config.node_id.is_some() || config.probe_only)
+        || config.enrollment_environment.as_ref().is_some_and(|value| {
+            value.is_empty() || value.len() > 64 || value.chars().any(char::is_whitespace)
+        })
+    {
+        return Err(invalid("enrollment mode arguments are invalid"));
+    }
+    Ok(())
+}
+
+fn read_enrollment_token(path: &Path) -> Result<String, io::Error> {
+    let mut file = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc_o_nofollow())
+        .open(path)?;
+    let metadata = file.metadata()?;
+    let owner_only = metadata.file_type().is_file()
+        && metadata.uid() == rustix::process::geteuid().as_raw()
+        && metadata.mode().trailing_zeros() >= 6;
+    let protected_group = metadata.file_type().is_file()
+        && metadata.uid() == 0
+        && metadata.gid() == rustix::process::getegid().as_raw()
+        && metadata.mode() & 0o027 == 0
+        && metadata.mode() & 0o040 != 0;
+    if !owner_only && !protected_group {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "enrollment token must be process-owned mode 0600 or root:agent mode 0640",
+        ));
+    }
+    let mut raw = Vec::with_capacity(44);
+    std::io::Read::read_to_end(&mut std::io::Read::take(&mut file, 45), &mut raw)?;
+    let raw = Zeroizing::new(raw);
+    let token = std::str::from_utf8(&raw)
+        .map_err(|_| invalid("enrollment token must be UTF-8"))?
+        .trim_end_matches(['\n', '\r']);
+    if token.len() != 43
+        || !token
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+    {
+        return Err(invalid("enrollment token is invalid"));
+    }
+    Ok(token.to_owned())
 }
 
 fn build_relay_mode(
@@ -1366,6 +1524,8 @@ mod tests {
             artifact_dir: PathBuf::from("/var/lib/ocservia-privd/certificates/artifacts"),
             relay_mode: RelayMode::Default,
             command_verification_key_files: Vec::new(),
+            enrollment_token_file: None,
+            enrollment_environment: None,
         }
     }
 
@@ -1377,6 +1537,39 @@ mod tests {
                 .expect("read-only probe exception")
                 .is_none()
         );
+    }
+
+    #[test]
+    fn enrollment_mode_uses_endpoint_identity_without_command_keys() {
+        let mut config = command_key_config(false);
+        config.enrollment_token_file = Some(PathBuf::from("/run/secrets/enrollment-token"));
+        config.enrollment_environment = Some("production".to_owned());
+        assert!(
+            load_controller_command_keys(&config)
+                .expect("enrollment has no mutation-capable command session")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn enrollment_token_file_requires_strict_metadata_and_format() {
+        let directory =
+            std::env::temp_dir().join(format!("ocservia-agent-enrollment-{}", Uuid::now_v7()));
+        std::fs::create_dir(&directory).expect("create test directory");
+        let token = directory.join("enrollment.token");
+        std::fs::write(&token, "0123456789abcdef0123456789abcdef01234567890\n")
+            .expect("write token");
+        std::fs::set_permissions(&token, std::fs::Permissions::from_mode(0o600))
+            .expect("protect token");
+        assert_eq!(
+            read_enrollment_token(&token).expect("valid token"),
+            "0123456789abcdef0123456789abcdef01234567890"
+        );
+
+        std::fs::set_permissions(&token, std::fs::Permissions::from_mode(0o644))
+            .expect("make token insecure");
+        assert!(read_enrollment_token(&token).is_err());
+        std::fs::remove_dir_all(directory).expect("remove test directory");
     }
 
     #[test]

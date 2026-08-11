@@ -9,7 +9,10 @@ publish = false
 [dependencies]
 hex.workspace = true
 iroh.workspace = true
+ocservia-contracts = { version = "=0.1.0", path = "../contracts" }
+prost-types.workspace = true
 rustix.workspace = true
+sha2.workspace = true
 zeroize.workspace = true
 
 [lints]

@@ -144,6 +144,8 @@ assert len(set(urls)) == 2 and all(url.startswith("https://") for url in urls)
 assert all("n0" not in url and "iroh.link" not in url for url in urls)
 assert "/run/secrets/relay_access_token" in command
 assert "/run/secrets/controller_iroh_key" in command
+assert command[command.index("--control-plane-uid") + 1] == "65534"
+assert command[command.index("--control-plane-gid") + 1] == "65532"
 transport_secrets = {item["target"]: item for item in services["transportd"]["secrets"]}
 for name in ("relay_access_token", "controller_iroh_key"):
     assert transport_secrets[name]["uid"] == "65532"
@@ -151,6 +153,8 @@ for name in ("relay_access_token", "controller_iroh_key"):
     assert transport_secrets[name]["mode"] == "0400"
 assert services["control-plane"]["command"] == ["--role=all"]
 assert services["control-plane"]["environment"]["OCSERV_COMMAND_SIGNING_KEY_FILE"] == "/run/secrets/controller_command_signing_key"
+assert services["control-plane"]["environment"]["OCSERV_TRANSPORT_UID"] == "65532"
+assert services["control-plane"]["environment"]["OCSERV_TRANSPORT_GID"] == "65532"
 control_secrets = {item["target"]: item for item in services["control-plane"]["secrets"]}
 command_key = control_secrets["controller_command_signing_key"]
 assert command_key["uid"] == "65534" and command_key["gid"] == "65532" and command_key["mode"] == "0400"

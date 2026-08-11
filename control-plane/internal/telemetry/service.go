@@ -175,6 +175,21 @@ func (s *Service) IngestWire(ctx context.Context, payload []byte) (bool, error) 
 	return s.Ingest(ctx, batch)
 }
 
+// IngestWireTx writes a validated telemetry batch using the caller's
+// transaction so an authoritative endpoint check and every resulting state
+// change share one commit boundary.
+func (s *Service) IngestWireTx(ctx context.Context, tx pgx.Tx, payload []byte) (bool, error) {
+	batch, err := decodeWire(payload)
+	if err != nil {
+		return false, err
+	}
+	payloadBytes, err := s.validateForIngest(batch)
+	if err != nil {
+		return false, err
+	}
+	return s.ingestTx(ctx, tx, batch, payloadBytes)
+}
+
 func decodeWire(payload []byte) (Batch, error) {
 	if len(payload) == 0 || len(payload) > MaxBatchBytes {
 		return Batch{}, errors.New("telemetry wire batch size invalid")
@@ -244,11 +259,8 @@ func decodeWire(payload []byte) (Batch, error) {
 }
 
 func (s *Service) Ingest(ctx context.Context, batch Batch) (bool, error) {
-	payload, err := json.Marshal(batch)
-	if err != nil || len(payload) > MaxBatchBytes {
-		return false, errors.New("telemetry batch exceeds 512 KiB or is invalid")
-	}
-	if err := validateBatch(batch, s.now()); err != nil {
+	payloadBytes, err := s.validateForIngest(batch)
+	if err != nil {
 		return false, err
 	}
 	tx, err := s.pool.Begin(ctx)
@@ -256,14 +268,36 @@ func (s *Service) Ingest(ctx context.Context, batch Batch) (bool, error) {
 		return false, fmt.Errorf("begin telemetry ingest: %w", err)
 	}
 	defer rollback(tx)
+	ingested, err := s.ingestTx(ctx, tx, batch, payloadBytes)
+	if err != nil {
+		return false, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return false, err
+	}
+	return ingested, nil
+}
+
+func (s *Service) validateForIngest(batch Batch) (int, error) {
+	payload, err := json.Marshal(batch)
+	if err != nil || len(payload) > MaxBatchBytes {
+		return 0, errors.New("telemetry batch exceeds 512 KiB or is invalid")
+	}
+	if err := validateBatch(batch, s.now()); err != nil {
+		return 0, err
+	}
+	return len(payload), nil
+}
+
+func (s *Service) ingestTx(ctx context.Context, tx pgx.Tx, batch Batch, payloadBytes int) (bool, error) {
 	result, err := tx.Exec(ctx, `INSERT INTO telemetry_ingest_batches
 		(batch_id,node_id,sequence,kind,observed_at,payload_bytes) VALUES ($1,$2,$3,$4,$5,$6)
-		ON CONFLICT DO NOTHING`, batch.ID, batch.NodeID, batch.Sequence, batch.Kind, batch.Snapshot.ObservedAt, len(payload))
+		ON CONFLICT DO NOTHING`, batch.ID, batch.NodeID, batch.Sequence, batch.Kind, batch.Snapshot.ObservedAt, payloadBytes)
 	if err != nil {
 		return false, fmt.Errorf("insert telemetry batch: %w", err)
 	}
 	if result.RowsAffected() == 0 {
-		return false, tx.Commit(ctx)
+		return false, nil
 	}
 
 	updated, err := tx.Exec(ctx, `INSERT INTO node_observed_snapshots
@@ -347,7 +381,7 @@ func (s *Service) Ingest(ctx context.Context, batch Batch) (bool, error) {
 			return false, fmt.Errorf("insert telemetry sample: %w", err)
 		}
 	}
-	return true, tx.Commit(ctx)
+	return true, nil
 }
 
 func validateBatch(batch Batch, now time.Time) error {

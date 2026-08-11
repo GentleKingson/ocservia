@@ -13,6 +13,7 @@ import (
 	agentv1 "github.com/GentleKingson/ocservia/control-plane/gen/proto/ocserv/platform/agent/v1"
 	transportv1 "github.com/GentleKingson/ocservia/control-plane/gen/proto/ocserv/platform/transport/v1"
 	"github.com/GentleKingson/ocservia/control-plane/internal/enrollment"
+	"github.com/GentleKingson/ocservia/control-plane/internal/udssecurity"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -36,7 +37,7 @@ func (h *Handler) CheckEndpoint(ctx context.Context, request *transportv1.CheckE
 func (h *Handler) Enroll(ctx context.Context, request *agentv1.EnrollRequest) (*agentv1.EnrollResponse, error) {
 	response, err := h.service.Enroll(ctx, request)
 	switch {
-	case errors.Is(err, enrollment.ErrInvalidToken), errors.Is(err, enrollment.ErrEndpointMismatch):
+	case errors.Is(err, enrollment.ErrInvalidToken), errors.Is(err, enrollment.ErrEndpointMismatch), errors.Is(err, enrollment.ErrEndpointProof):
 		return nil, status.Error(codes.PermissionDenied, "enrollment rejected")
 	case errors.Is(err, enrollment.ErrPendingLimit):
 		return nil, status.Error(codes.ResourceExhausted, "pending enrollment capacity reached")
@@ -64,14 +65,33 @@ type Server struct {
 	identity socketIdentity
 }
 
-func New(path string, handler *Handler) (*Server, error) {
+func New(path string, handler *Handler, transportUID uint32) (*Server, error) {
 	listener, identity, err := listen(path)
 	if err != nil {
 		return nil, err
 	}
 	server := grpc.NewServer(grpc.MaxRecvMsgSize(64<<10), grpc.MaxSendMsgSize(64<<10))
 	transportv1.RegisterTrustServiceServer(server, handler)
+	listener = &credentialListener{Listener: listener, expectedUID: transportUID}
 	return &Server{grpc: server, listener: listener, path: listener.Addr().String(), identity: identity}, nil
+}
+
+type credentialListener struct {
+	net.Listener
+	expectedUID uint32
+}
+
+func (l *credentialListener) Accept() (net.Conn, error) {
+	for {
+		connection, err := l.Listener.Accept()
+		if err != nil {
+			return nil, err
+		}
+		if err := udssecurity.RequirePeerUID(connection, l.expectedUID); err == nil {
+			return connection, nil
+		}
+		_ = connection.Close()
+	}
 }
 
 func (s *Server) Serve() error {
@@ -104,35 +124,16 @@ func listen(path string) (net.Listener, socketIdentity, error) {
 	if !filepath.IsAbs(path) {
 		return nil, socketIdentity{}, errors.New("trust socket path must be absolute")
 	}
-	requestedParent := filepath.Dir(path)
-	parent, err := os.Lstat(requestedParent)
-	if err != nil || !parent.IsDir() {
-		return nil, socketIdentity{}, errors.New("trust socket parent must exist")
-	}
-	parentStat, ok := parent.Sys().(*syscall.Stat_t)
-	if !ok || int(parentStat.Uid) != os.Geteuid() || parent.Mode().Perm()&0o022 != 0 {
-		return nil, socketIdentity{}, errors.New("trust socket parent must be owned by this process and not group or world writable")
-	}
-	parentPath, err := filepath.EvalSymlinks(requestedParent)
+	path, err := udssecurity.ValidateParent(path, uint32(os.Geteuid()))
 	if err != nil {
-		return nil, socketIdentity{}, fmt.Errorf("resolve trust socket parent: %w", err)
+		return nil, socketIdentity{}, fmt.Errorf("validate trust socket ancestry: %w", err)
 	}
-	for ancestor := parentPath; ; ancestor = filepath.Dir(ancestor) {
-		info, err := os.Lstat(ancestor)
-		if err != nil || !info.IsDir() {
-			return nil, socketIdentity{}, errors.New("trust socket ancestor must be a directory")
-		}
-		if info.Mode().Perm()&0o022 != 0 && info.Mode()&os.ModeSticky == 0 {
-			return nil, socketIdentity{}, errors.New("trust socket ancestor must not be attacker writable")
-		}
-		if next := filepath.Dir(ancestor); next == ancestor {
-			break
-		}
-	}
-	path = filepath.Join(parentPath, filepath.Base(path))
 	if info, err := os.Lstat(path); err == nil {
 		if info.Mode()&os.ModeSocket == 0 {
 			return nil, socketIdentity{}, errors.New("refusing to replace non-socket trust path")
+		}
+		if _, err := udssecurity.ValidateSocket(path, uint32(os.Geteuid()), uint32(os.Getegid()), 0o660); err != nil {
+			return nil, socketIdentity{}, fmt.Errorf("validate existing trust socket: %w", err)
 		}
 		probe, dialErr := net.DialTimeout("unix", path, 250*time.Millisecond)
 		if dialErr == nil {
@@ -153,6 +154,11 @@ func listen(path string) (net.Listener, socketIdentity, error) {
 		return nil, socketIdentity{}, fmt.Errorf("listen on trust socket: %w", err)
 	}
 	if err := os.Chmod(path, 0o660); err != nil {
+		_ = listener.Close()
+		_ = os.Remove(path)
+		return nil, socketIdentity{}, err
+	}
+	if _, err := udssecurity.ValidateSocket(path, uint32(os.Geteuid()), uint32(os.Getegid()), 0o660); err != nil {
 		_ = listener.Close()
 		_ = os.Remove(path)
 		return nil, socketIdentity{}, err

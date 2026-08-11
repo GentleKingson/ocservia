@@ -122,6 +122,8 @@ services:
       OCSERV_COMMAND_SIGNING_KEY_FILE: /run/secrets/controller_command_signing_key
       OCSERV_TRANSPORT_SOCKET: /run/ocserv-platform/transportd.sock
       OCSERV_TRUST_SOCKET: /run/ocserv-trust/control-plane.sock
+      OCSERV_TRANSPORT_UID: "65532"
+      OCSERV_TRANSPORT_GID: "65532"
       OCSERV_CONTROLLER_ENDPOINT_ID: ${OCSERV_CONTROLLER_ENDPOINT_ID:?set OCSERV_CONTROLLER_ENDPOINT_ID}
       OCSERV_CERTIFICATE_SIGNER_URL: ${OCSERV_CERTIFICATE_SIGNER_URL:?set OCSERV_CERTIFICATE_SIGNER_URL}
       OCSERV_CERTIFICATE_SIGNER_TOKEN_FILE: /run/secrets/certificate_signer_token
@@ -168,6 +170,10 @@ services:
       - /run/ocserv-platform/transportd.sock
       - --trust-socket
       - /run/ocserv-trust/control-plane.sock
+      - --control-plane-uid
+      - "65534"
+      - --control-plane-gid
+      - "65532"
       - --key-file
       - /run/secrets/controller_iroh_key
       - --relay-mode

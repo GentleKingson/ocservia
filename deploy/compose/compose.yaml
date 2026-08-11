@@ -66,6 +66,8 @@ services:
       OCSERV_LOCAL_SIMULATOR: "true"
       OCSERV_DEV_AUTH_TOKEN: local-development-token-32-characters
       OCSERV_TRANSPORT_SOCKET: /run/ocserv-platform/transportd.sock
+      OCSERV_TRANSPORT_UID: "65533"
+      OCSERV_TRANSPORT_GID: "65532"
     volumes:
       - transport-runtime:/run/ocserv-platform
     ports:

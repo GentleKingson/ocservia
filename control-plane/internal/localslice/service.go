@@ -121,6 +121,10 @@ func (s *Service) Create(ctx context.Context, scenario Scenario, requestID, trac
 		VALUES ($1, $2, $3, 'active', $4, $4)`, nodeID, workspaceID, "sim-"+nodeID.String(), now); err != nil {
 		return Operation{}, fmt.Errorf("insert simulator node: %w", err)
 	}
+	simulatorEndpoint := sha256.Sum256(append([]byte("ocservia/development-simulator/"), nodeID[:]...))
+	if _, err := tx.Exec(ctx, `INSERT INTO node_endpoint_keys(node_id,endpoint_id,state,bound_at) VALUES($1,$2,'active',$3)`, nodeID, simulatorEndpoint[:], now); err != nil {
+		return Operation{}, fmt.Errorf("bind simulator endpoint: %w", err)
+	}
 	if _, err := tx.Exec(ctx, `
 		INSERT INTO operations (id, workspace_id, node_id, command_id, state, request_id, trace_id, created_at, updated_at)
 		VALUES ($1, $2, $3, $4, 'queued', $5, $6, $7, $7)`, operationID, workspaceID, nodeID, commandID, requestID, traceID(traceparent), now); err != nil {
@@ -363,6 +367,9 @@ func (s *Service) Ingest(ctx context.Context, event *transportv1.TransportEvent)
 	if err != nil || nodeID.Version() != 7 {
 		return errors.New("node_id must be UUIDv7")
 	}
+	if len(event.GetEndpointId()) != 32 {
+		return errors.New("endpoint_id must be 32 bytes")
+	}
 	if !validTraceparent(event.GetTraceparent()) {
 		return errors.New("event traceparent is invalid")
 	}
@@ -373,8 +380,22 @@ func (s *Service) Ingest(ctx context.Context, event *transportv1.TransportEvent)
 	if err != nil {
 		return err
 	}
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin event transaction: %w", err)
+	}
+	defer rollback(tx)
+	var ingressActive bool
+	if err := tx.QueryRow(ctx, `SELECT true
+		FROM nodes n JOIN node_endpoint_keys k ON k.node_id=n.id
+		WHERE n.id=$1 AND k.endpoint_id=$2 AND n.status IN ('active','offline') AND k.state='active'
+		FOR SHARE OF n,k`, nodeID, event.GetEndpointId()).Scan(&ingressActive); errors.Is(err, pgx.ErrNoRows) {
+		return errors.New("transport event node is not authoritatively active")
+	} else if err != nil {
+		return fmt.Errorf("check authoritative node ingress trust: %w", err)
+	}
 	if eventType == "telemetry" {
-		if _, err := telemetrystore.New(s.pool).IngestWire(ctx, event.GetPayload()); err != nil {
+		if _, err := telemetrystore.New(s.pool).IngestWireTx(ctx, tx, event.GetPayload()); err != nil {
 			return fmt.Errorf("ingest telemetry payload: %w", err)
 		}
 	}
@@ -382,11 +403,6 @@ func (s *Service) Ingest(ctx context.Context, event *transportv1.TransportEvent)
 	if occurredAt == nil || occurredAt.CheckValid() != nil {
 		return errors.New("event occurred_at is invalid")
 	}
-	tx, err := s.pool.Begin(ctx)
-	if err != nil {
-		return fmt.Errorf("begin event transaction: %w", err)
-	}
-	defer rollback(tx)
 	result, err := tx.Exec(ctx, `
 		INSERT INTO transport_events (event_id, node_id, event_type, occurred_at, traceparent, payload)
 		VALUES ($1, $2, $3, $4, $5, $6)

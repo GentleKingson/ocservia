@@ -16,6 +16,17 @@ message EnrollRequest {
   string environment = 9;
   bytes nonce = 10;
   google.protobuf.Timestamp time = 11;
+  uint32 enrollment_protocol_major = 12;
+  uint32 enrollment_protocol_minor = 13;
+  EnrollmentProofV1 proof = 14;
+}
+
+// EnrollmentProofV1 is signed by the Agent's long-lived Iroh Endpoint
+// SecretKey over an independent canonical representation. transportd relays
+// it but cannot substitute the endpoint or advertised capabilities.
+message EnrollmentProofV1 {
+  uint32 version = 1;
+  bytes signature = 2;
 }
 
 message EnrollResponse {

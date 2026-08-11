@@ -24,8 +24,8 @@ use ocservia_contracts::generated::ocserv::platform::transport::v1::{
     AuthorizeSessionRequest, CheckEndpointRequest, CloseNodeRequest, CloseNodeResponse,
     ConnectionPath, FetchArtifactRequest, GetNodeConnectionRequest, HealthRequest, HealthResponse,
     HealthStatus, NodeConnection, NodeTrustState, SendCommandRequest, SendCommandResponse,
-    TransportEvent, TransportEventType, UpdateNodeTrustRequest, UpdateNodeTrustResponse,
-    WatchEventsRequest, transport_service_server::TransportService,
+    TransportEvent, TransportEventType, TrustUpdateDisposition, UpdateNodeTrustRequest,
+    UpdateNodeTrustResponse, WatchEventsRequest, transport_service_server::TransportService,
     trust_service_client::TrustServiceClient,
 };
 use prost::Message;
@@ -96,8 +96,15 @@ pub struct IdentityPolicy {
 #[derive(Debug, Default)]
 struct IdentityState {
     approved: HashMap<EndpointId, Vec<u8>>,
-    revoked: HashSet<EndpointId>,
+    revoked: HashMap<EndpointId, Vec<u8>>,
     revisions: HashMap<EndpointId, u64>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PolicyUpdateDisposition {
+    Applied,
+    Stale,
+    Rejected,
 }
 
 impl IdentityPolicy {
@@ -112,7 +119,10 @@ impl IdentityPolicy {
         Self {
             state: Arc::new(RwLock::new(IdentityState {
                 approved,
-                revoked,
+                revoked: revoked
+                    .into_iter()
+                    .map(|endpoint| (endpoint, Vec::new()))
+                    .collect(),
                 revisions,
             })),
         }
@@ -123,7 +133,7 @@ impl IdentityPolicy {
             .state
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if state.revoked.contains(&endpoint) {
+        if state.revoked.contains_key(&endpoint) {
             return false;
         }
         alpn == ENROLL_ALPN || (alpn == AGENT_ALPN && state.approved.contains_key(&endpoint))
@@ -143,7 +153,7 @@ impl IdentityPolicy {
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .revoked
-            .contains(&endpoint)
+            .contains_key(&endpoint)
     }
 
     fn revision(&self, endpoint: EndpointId) -> u64 {
@@ -162,27 +172,38 @@ impl IdentityPolicy {
         node_id: Vec<u8>,
         state: NodeTrustState,
         revision: u64,
-    ) -> bool {
+    ) -> PolicyUpdateDisposition {
         let mut identities = self
             .state
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let current_revision = identities.revisions.get(&endpoint).copied().unwrap_or(0);
         if revision < current_revision {
-            return true;
+            return PolicyUpdateDisposition::Stale;
         }
         if revision == current_revision && current_revision != 0 {
-            return match state {
+            let matches = match state {
                 NodeTrustState::Active => identities
                     .approved
                     .get(&endpoint)
                     .is_some_and(|bound_node| bound_node == &node_id),
-                NodeTrustState::Revoked => identities.revoked.contains(&endpoint),
+                NodeTrustState::Revoked => identities
+                    .revoked
+                    .get(&endpoint)
+                    .is_some_and(|bound_node| bound_node.is_empty() || bound_node == &node_id),
                 NodeTrustState::Unspecified => false,
+            };
+            return if matches {
+                PolicyUpdateDisposition::Applied
+            } else {
+                PolicyUpdateDisposition::Rejected
             };
         }
         match state {
             NodeTrustState::Active => {
+                if identities.revoked.contains_key(&endpoint) {
+                    return PolicyUpdateDisposition::Rejected;
+                }
                 if identities
                     .approved
                     .iter()
@@ -191,9 +212,8 @@ impl IdentityPolicy {
                             || (*bound_endpoint != endpoint && bound_node == &node_id)
                     })
                 {
-                    return false;
+                    return PolicyUpdateDisposition::Rejected;
                 }
-                identities.revoked.remove(&endpoint);
                 identities.approved.insert(endpoint, node_id);
             }
             NodeTrustState::Revoked => {
@@ -202,15 +222,36 @@ impl IdentityPolicy {
                     .get(&endpoint)
                     .is_some_and(|bound_node| bound_node != &node_id)
                 {
-                    return false;
+                    return PolicyUpdateDisposition::Rejected;
+                }
+                if identities
+                    .revoked
+                    .get(&endpoint)
+                    .is_some_and(|bound_node| !bound_node.is_empty() && bound_node != &node_id)
+                {
+                    return PolicyUpdateDisposition::Rejected;
                 }
                 identities.approved.remove(&endpoint);
-                identities.revoked.insert(endpoint);
+                identities.revoked.insert(endpoint, node_id);
             }
-            NodeTrustState::Unspecified => {}
+            NodeTrustState::Unspecified => return PolicyUpdateDisposition::Rejected,
         }
         identities.revisions.insert(endpoint, revision);
-        true
+        PolicyUpdateDisposition::Applied
+    }
+
+    fn retained_state(&self, endpoint: EndpointId) -> NodeTrustState {
+        let identities = self
+            .state
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if identities.revoked.contains_key(&endpoint) {
+            NodeTrustState::Revoked
+        } else if identities.approved.contains_key(&endpoint) {
+            NodeTrustState::Active
+        } else {
+            NodeTrustState::Unspecified
+        }
     }
 }
 
@@ -503,6 +544,7 @@ impl Shared {
             registered.connection.close(VarInt::from_u32(0x104), reason);
             self.publish(event(
                 node_id,
+                &registered.metadata.endpoint_id,
                 TransportEventType::Disconnected,
                 reason.to_vec(),
             ))
@@ -880,16 +922,16 @@ impl TransportService for IrohTransportService {
             return Err(Status::invalid_argument("trust state is unspecified"));
         }
         let previous_revision = self.policy.revision(endpoint);
-        if !self
+        let disposition = self
             .policy
-            .update(endpoint, node_id.clone(), state, request.revision)
-        {
-            return Err(Status::failed_precondition(
-                "endpoint-to-node substitution refused",
-            ));
-        }
+            .update(endpoint, node_id.clone(), state, request.revision);
         let retained_revision = self.policy.revision(endpoint);
-        if retained_revision > previous_revision {
+        let retained_state = self.policy.retained_state(endpoint);
+        if disposition == PolicyUpdateDisposition::Applied
+            && retained_revision == request.revision
+            && retained_state == state
+            && retained_revision > previous_revision
+        {
             let should_close = self
                 .shared
                 .inner
@@ -907,7 +949,16 @@ impl TransportService for IrohTransportService {
                 let _ = self.shared.remove(&node_id, reason).await;
             }
         }
-        Ok(Response::new(UpdateNodeTrustResponse {}))
+        let disposition = match disposition {
+            PolicyUpdateDisposition::Applied => TrustUpdateDisposition::Applied,
+            PolicyUpdateDisposition::Stale => TrustUpdateDisposition::Stale,
+            PolicyUpdateDisposition::Rejected => TrustUpdateDisposition::Rejected,
+        };
+        Ok(Response::new(UpdateNodeTrustResponse {
+            disposition: disposition.into(),
+            retained_revision,
+            retained_state: retained_state.into(),
+        }))
     }
 }
 
@@ -1115,6 +1166,7 @@ impl ProtocolHandler for SessionHandler {
             self.shared
                 .publish(event(
                     &node_id,
+                    &previous.metadata.endpoint_id,
                     TransportEventType::Disconnected,
                     b"connection superseded".to_vec(),
                 ))
@@ -1123,6 +1175,7 @@ impl ProtocolHandler for SessionHandler {
         self.shared
             .publish(event(
                 &node_id,
+                &metadata.endpoint_id,
                 TransportEventType::Connected,
                 metadata.path_detail.as_bytes().to_vec(),
             ))
@@ -1162,6 +1215,7 @@ async fn finish_session(
         shared
             .publish(event(
                 node_id,
+                connection.remote_id().as_bytes(),
                 TransportEventType::Disconnected,
                 b"connection closed".to_vec(),
             ))
@@ -1212,7 +1266,12 @@ fn monitor_telemetry(
                 break;
             }
             shared
-                .publish(event(&node_id, TransportEventType::Telemetry, payload))
+                .publish(event(
+                    &node_id,
+                    connection.remote_id().as_bytes(),
+                    TransportEventType::Telemetry,
+                    payload,
+                ))
                 .await;
         }
     })
@@ -1247,6 +1306,7 @@ fn monitor_paths(
             shared
                 .publish(event(
                     &node_id,
+                    connection.remote_id().as_bytes(),
                     TransportEventType::PathChanged,
                     next.1.into_bytes(),
                 ))
@@ -1324,7 +1384,13 @@ async fn read_agent_events(
         );
         publish_agent_event(
             event_context,
-            event_with_traceparent(&node_id, event_type, agent_event.payload, &traceparent),
+            event_with_traceparent(
+                &node_id,
+                connection.remote_id().as_bytes(),
+                event_type,
+                agent_event.payload,
+                &traceparent,
+            ),
         )
         .await;
         if terminal {
@@ -1361,6 +1427,7 @@ async fn publish_command_unknown(
         (shared, node_id, traceparent, connection),
         event_with_traceparent(
             node_id,
+            connection.remote_id().as_bytes(),
             TransportEventType::CommandResult,
             result.encode_to_vec(),
             traceparent,
@@ -1541,7 +1608,14 @@ fn validate_negotiated_session(
 fn validate_enrollment(request: &EnrollRequest, remote: EndpointId) -> Result<(), AcceptError> {
     validate_uuid(&request.agent_instance_id, "agent_instance_id")
         .map_err(|status| status_to_accept(&status))?;
-    if request.endpoint_id != remote.as_bytes() {
+    if request.endpoint_id != remote.as_bytes()
+        || request.enrollment_protocol_major != 1
+        || request.enrollment_protocol_minor != 0
+        || request
+            .proof
+            .as_ref()
+            .is_none_or(|proof| proof.version != 1 || proof.signature.len() != 64)
+    {
         return Err(protocol_error("endpoint identity mismatch"));
     }
     if request.token.len() != 43 || request.nonce.len() < 16 || request.nonce.len() > 64 {
@@ -1692,12 +1766,18 @@ fn validate_uuid(value: &[u8], name: &'static str) -> Result<Vec<u8>, Status> {
     Ok(value.to_vec())
 }
 
-fn event(node_id: &[u8], kind: TransportEventType, payload: Vec<u8>) -> TransportEvent {
-    event_with_traceparent(node_id, kind, payload, &new_traceparent())
+fn event(
+    node_id: &[u8],
+    endpoint_id: &[u8],
+    kind: TransportEventType,
+    payload: Vec<u8>,
+) -> TransportEvent {
+    event_with_traceparent(node_id, endpoint_id, kind, payload, &new_traceparent())
 }
 
 fn event_with_traceparent(
     node_id: &[u8],
+    endpoint_id: &[u8],
     kind: TransportEventType,
     payload: Vec<u8>,
     traceparent: &str,
@@ -1709,6 +1789,7 @@ fn event_with_traceparent(
         occurred_at: Some(now_timestamp()),
         payload,
         traceparent: traceparent.to_owned(),
+        endpoint_id: endpoint_id.to_vec(),
     }
 }
 
@@ -2041,22 +2122,93 @@ mod tests {
         assert!(!policy.permits(SecretKey::generate().public(), AGENT_ALPN));
         let dynamic = SecretKey::generate().public();
         let dynamic_node = Uuid::now_v7().as_bytes().to_vec();
-        assert!(policy.update(dynamic, dynamic_node.clone(), NodeTrustState::Active, 1));
+        assert_eq!(
+            policy.update(dynamic, dynamic_node.clone(), NodeTrustState::Active, 1),
+            PolicyUpdateDisposition::Applied
+        );
         assert!(policy.matches_node(dynamic, &dynamic_node));
-        assert!(policy.update(dynamic, dynamic_node.clone(), NodeTrustState::Revoked, 2));
-        assert!(policy.update(dynamic, dynamic_node, NodeTrustState::Active, 1));
+        assert_eq!(
+            policy.update(dynamic, dynamic_node.clone(), NodeTrustState::Revoked, 2),
+            PolicyUpdateDisposition::Applied
+        );
+        assert_eq!(
+            policy.update(dynamic, dynamic_node.clone(), NodeTrustState::Active, 1),
+            PolicyUpdateDisposition::Stale
+        );
+        assert_eq!(
+            policy.update(dynamic, dynamic_node, NodeTrustState::Active, 3),
+            PolicyUpdateDisposition::Rejected
+        );
         assert!(!policy.permits(dynamic, AGENT_ALPN));
         assert!(policy.revoked(dynamic));
 
         let restored_revocation = SecretKey::generate().public();
         let restored = IdentityPolicy::new(HashMap::new(), HashSet::from([restored_revocation]));
-        assert!(restored.update(
-            restored_revocation,
-            Uuid::now_v7().as_bytes().to_vec(),
-            NodeTrustState::Active,
-            1,
-        ));
+        assert_eq!(
+            restored.update(
+                restored_revocation,
+                Uuid::now_v7().as_bytes().to_vec(),
+                NodeTrustState::Active,
+                u64::MAX,
+            ),
+            PolicyUpdateDisposition::Rejected
+        );
         assert!(restored.revoked(restored_revocation));
+    }
+
+    #[tokio::test]
+    async fn trust_update_reports_stale_and_rejects_tombstone_reactivation() {
+        let service = IrohTransportService::new(8);
+        let endpoint = SecretKey::generate().public();
+        let node_id = Uuid::now_v7().as_bytes().to_vec();
+        let update = |state: NodeTrustState, revision: u64| UpdateNodeTrustRequest {
+            node_id: node_id.clone(),
+            endpoint_id: endpoint.as_bytes().to_vec(),
+            state: state.into(),
+            reason: "trust transition fixture".into(),
+            revision,
+        };
+        let active = service
+            .update_node_trust(Request::new(update(NodeTrustState::Active, 2)))
+            .await
+            .expect("activate endpoint")
+            .into_inner();
+        assert_eq!(
+            active.disposition,
+            i32::from(TrustUpdateDisposition::Applied)
+        );
+        let stale = service
+            .update_node_trust(Request::new(update(NodeTrustState::Active, 1)))
+            .await
+            .expect("report stale update")
+            .into_inner();
+        assert_eq!(stale.disposition, i32::from(TrustUpdateDisposition::Stale));
+        assert_eq!(stale.retained_revision, 2);
+        assert_eq!(stale.retained_state, i32::from(NodeTrustState::Active));
+
+        let revoked = service
+            .update_node_trust(Request::new(update(NodeTrustState::Revoked, 3)))
+            .await
+            .expect("revoke endpoint")
+            .into_inner();
+        assert_eq!(
+            revoked.disposition,
+            i32::from(TrustUpdateDisposition::Applied)
+        );
+        let reactivation = service
+            .update_node_trust(Request::new(update(NodeTrustState::Active, 4)))
+            .await
+            .expect("report rejected reactivation")
+            .into_inner();
+        assert_eq!(
+            reactivation.disposition,
+            i32::from(TrustUpdateDisposition::Rejected)
+        );
+        assert_eq!(reactivation.retained_revision, 3);
+        assert_eq!(
+            reactivation.retained_state,
+            i32::from(NodeTrustState::Revoked)
+        );
     }
 
     #[tokio::test]
@@ -2080,7 +2232,7 @@ mod tests {
     #[test]
     fn enrollment_request_binds_the_authenticated_endpoint() {
         let key = SecretKey::generate();
-        let request = EnrollRequest {
+        let mut request = EnrollRequest {
             token: "a".repeat(43),
             endpoint_id: key.public().as_bytes().to_vec(),
             agent_version: "test".to_owned(),
@@ -2092,7 +2244,12 @@ mod tests {
             environment: "test".to_owned(),
             nonce: vec![0; 16],
             time: Some(now_timestamp()),
+            enrollment_protocol_major: 0,
+            enrollment_protocol_minor: 0,
+            proof: None,
         };
+        ocservia_agent_identity::authorize_enrollment(&mut request, &key)
+            .expect("sign enrollment request");
         assert!(validate_enrollment(&request, key.public()).is_ok());
         assert!(validate_enrollment(&request, SecretKey::generate().public()).is_err());
         let mut unicode = request;
@@ -2284,6 +2441,7 @@ mod tests {
     fn transport_events_have_a_valid_root_traceparent() {
         let traceparent = event(
             Uuid::now_v7().as_bytes(),
+            SecretKey::generate().public().as_bytes(),
             TransportEventType::Connected,
             Vec::new(),
         )

@@ -31,6 +31,13 @@ export OCSERV_RELAY_URL_B=https://relay-b.example.com
 
 The control plane runs `--role=all`. Terminate public TLS at the gateway. Configure the OIDC redirect URI as `https://$OCSERV_PUBLIC_HOST/api/v1/auth/callback` and use an HTTPS certificate signer.
 
+The production containers intentionally use separate service identities:
+Controller UID 65534, transportd UID 65532, and shared socket GID 65532. Keep
+the Compose `OCSERV_TRANSPORT_UID`/`OCSERV_TRANSPORT_GID` and transportd
+`--control-plane-uid`/`--control-plane-gid` values aligned with those service
+users. The runtime volumes must retain their image-provisioned `0750`
+directories; do not make either socket parent client-writable.
+
 Before starting, validate rendered configuration without printing secret contents:
 
 ```bash

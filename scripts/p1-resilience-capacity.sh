@@ -129,6 +129,10 @@ printf '%s\n' \
   '      - /run/ocserv-platform/transportd.sock' \
   '      - --queue-capacity' \
   "      - \"${QUEUE_CAPACITY}\"" \
+  '      - --control-plane-uid' \
+  '      - "65534"' \
+  '      - --control-plane-gid' \
+  '      - "65532"' \
   '      - --capacity-telemetry' \
   '      - --stats-file' \
   '      - /run/ocserv-platform/stats.json' \

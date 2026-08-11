@@ -1,20 +1,22 @@
 use std::env;
 use std::io;
 use std::io::Write;
-use std::os::unix::fs::{FileTypeExt, PermissionsExt};
-use std::path::{Path, PathBuf};
+use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt};
+use std::os::unix::net::UnixStream as StdUnixStream;
+use std::path::{Component, Path, PathBuf};
 use std::time::Duration;
 
 use ocservia_contracts::generated::ocserv::platform::transport::v1::transport_service_server::TransportServiceServer;
 use ocservia_transportd_stub::{StubService, StubStats};
 use tokio::net::UnixListener;
+use tokio_stream::StreamExt;
 use tokio_stream::wrappers::UnixListenerStream;
 use tonic::transport::Server;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let config = parse_args()?;
-    let listener = bind_socket(&config.socket)?;
+    let (listener, socket_identity) = bind_socket(&config.socket)?;
     let service = if config.capacity_telemetry {
         StubService::new_capacity(config.queue_capacity)
     } else {
@@ -26,10 +28,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .await;
 
     let stats_service = service.clone();
+    let control_plane_uid = config.control_plane_uid;
+    let incoming =
+        UnixListenerStream::new(listener).filter_map(move |connection| match connection {
+            Ok(stream) => match stream.peer_cred() {
+                Ok(credentials) if credentials.uid() == control_plane_uid => Some(Ok(stream)),
+                Ok(_) | Err(_) => None,
+            },
+            Err(error) => Some(Err(error)),
+        });
     let server = Server::builder()
         .add_service(health_service)
         .add_service(TransportServiceServer::new(service))
-        .serve_with_incoming_shutdown(UnixListenerStream::new(listener), shutdown());
+        .serve_with_incoming_shutdown(incoming, shutdown());
     tokio::pin!(server);
     let result: Result<(), Box<dyn std::error::Error>> = if let Some(path) = config.stats_file {
         let mut writer = tokio::spawn(write_stats(stats_service, path));
@@ -50,7 +61,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     } else {
         server.await.map_err(Into::into)
     };
-    let socket_result = remove_socket(&config.socket);
+    let socket_result = remove_socket(&config.socket, socket_identity);
     result?;
     socket_result?;
     Ok(())
@@ -61,6 +72,8 @@ struct Config {
     queue_capacity: usize,
     capacity_telemetry: bool,
     stats_file: Option<PathBuf>,
+    control_plane_uid: u32,
+    control_plane_gid: u32,
 }
 
 fn parse_args() -> Result<Config, io::Error> {
@@ -69,6 +82,8 @@ fn parse_args() -> Result<Config, io::Error> {
         queue_capacity: 256,
         capacity_telemetry: false,
         stats_file: None,
+        control_plane_uid: u32::MAX,
+        control_plane_gid: u32::MAX,
     };
     let mut args = env::args().skip(1);
     while let Some(arg) = args.next() {
@@ -98,6 +113,28 @@ fn parse_args() -> Result<Config, io::Error> {
                     io::Error::new(io::ErrorKind::InvalidInput, "--stats-file requires a path")
                 })?));
             }
+            "--control-plane-uid" => {
+                config.control_plane_uid = parse_u32(
+                    &args.next().ok_or_else(|| {
+                        io::Error::new(
+                            io::ErrorKind::InvalidInput,
+                            "--control-plane-uid requires a value",
+                        )
+                    })?,
+                    "control-plane UID",
+                )?;
+            }
+            "--control-plane-gid" => {
+                config.control_plane_gid = parse_u32(
+                    &args.next().ok_or_else(|| {
+                        io::Error::new(
+                            io::ErrorKind::InvalidInput,
+                            "--control-plane-gid requires a value",
+                        )
+                    })?,
+                    "control-plane GID",
+                )?;
+            }
             _ => {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidInput,
@@ -109,6 +146,8 @@ fn parse_args() -> Result<Config, io::Error> {
     if !config.socket.is_absolute()
         || config.queue_capacity == 0
         || config.queue_capacity > 4096
+        || config.control_plane_uid == u32::MAX
+        || config.control_plane_gid == u32::MAX
         || config
             .stats_file
             .as_ref()
@@ -116,10 +155,19 @@ fn parse_args() -> Result<Config, io::Error> {
     {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
-            "socket and stats paths must be absolute and queue capacity must be 1..4096",
+            "socket and stats paths must be absolute, peer identity is required, and queue capacity must be 1..4096",
         ));
     }
     Ok(config)
+}
+
+fn parse_u32(value: &str, name: &str) -> io::Result<u32> {
+    value.parse::<u32>().map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("{name} must be an unsigned 32-bit integer"),
+        )
+    })
 }
 
 async fn write_stats(service: StubService, path: PathBuf) -> io::Result<()> {
@@ -172,18 +220,33 @@ fn stats_json(stats: StubStats) -> Vec<u8> {
     .expect("simulator stats contain only integers")
 }
 
-fn bind_socket(path: &Path) -> Result<UnixListener, io::Error> {
-    let parent = path
-        .parent()
-        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "socket path has no parent"))?;
-    if !std::fs::metadata(parent)?.is_dir() {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "socket parent is not a directory",
-        ));
-    }
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct SocketIdentity {
+    device: u64,
+    inode: u64,
+}
+
+#[allow(clippy::similar_names)]
+fn bind_socket(path: &Path) -> Result<(UnixListener, SocketIdentity), io::Error> {
+    let process_uid = rustix::process::geteuid().as_raw();
+    let process_gid = rustix::process::getegid().as_raw();
+    validate_ancestry(path, process_uid)?;
     match std::fs::symlink_metadata(path) {
-        Ok(metadata) if metadata.file_type().is_socket() => std::fs::remove_file(path)?,
+        Ok(metadata) if metadata.file_type().is_socket() => {
+            validate_socket(path, process_uid, process_gid)?;
+            match StdUnixStream::connect(path) {
+                Ok(_) => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::AlreadyExists,
+                        "socket is already accepting connections",
+                    ));
+                }
+                Err(error) if error.kind() == io::ErrorKind::ConnectionRefused => {
+                    std::fs::remove_file(path)?;
+                }
+                Err(error) => return Err(error),
+            }
+        }
         Ok(_) => {
             return Err(io::Error::new(
                 io::ErrorKind::AlreadyExists,
@@ -195,12 +258,79 @@ fn bind_socket(path: &Path) -> Result<UnixListener, io::Error> {
     }
     let listener = UnixListener::bind(path)?;
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o660))?;
-    Ok(listener)
+    let identity = validate_socket(path, process_uid, process_gid)?;
+    Ok((listener, identity))
 }
 
-fn remove_socket(path: &Path) -> Result<(), io::Error> {
+fn validate_ancestry(path: &Path, expected_owner: u32) -> Result<(), io::Error> {
+    if !path.is_absolute()
+        || path
+            .components()
+            .any(|component| !matches!(component, Component::RootDir | Component::Normal(_)))
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "Unix socket path must be absolute and normalized",
+        ));
+    }
+    let mut current = path
+        .parent()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "socket path has no parent"))?;
+    loop {
+        let metadata = std::fs::symlink_metadata(current)?;
+        if !metadata.file_type().is_dir()
+            || (metadata.uid() != 0 && metadata.uid() != expected_owner)
+            || metadata.mode() & 0o022 != 0
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "Unix socket ancestry must be trusted-owner controlled and not group or world writable",
+            ));
+        }
+        let Some(parent) = current.parent() else {
+            break;
+        };
+        if parent == current {
+            break;
+        }
+        current = parent;
+    }
+    Ok(())
+}
+
+#[allow(clippy::similar_names)]
+fn validate_socket(
+    path: &Path,
+    expected_uid: u32,
+    expected_gid: u32,
+) -> Result<SocketIdentity, io::Error> {
+    validate_ancestry(path, expected_uid)?;
+    let metadata = std::fs::symlink_metadata(path)?;
+    if !metadata.file_type().is_socket()
+        || metadata.uid() != expected_uid
+        || metadata.gid() != expected_gid
+        || metadata.mode() & 0o777 != 0o660
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "Unix socket type, owner, group, or mode is invalid",
+        ));
+    }
+    Ok(SocketIdentity {
+        device: metadata.dev(),
+        inode: metadata.ino(),
+    })
+}
+
+fn remove_socket(path: &Path, expected: SocketIdentity) -> Result<(), io::Error> {
     match std::fs::symlink_metadata(path) {
-        Ok(metadata) if metadata.file_type().is_socket() => std::fs::remove_file(path),
+        Ok(metadata)
+            if metadata.file_type().is_socket()
+                && metadata.dev() == expected.device
+                && metadata.ino() == expected.inode =>
+        {
+            std::fs::remove_file(path)
+        }
         Ok(_) => Err(io::Error::other("socket path changed during shutdown")),
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
         Err(error) => Err(error),
@@ -214,6 +344,18 @@ async fn shutdown() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    fn socket_test_directory() -> PathBuf {
+        static NEXT_DIRECTORY: AtomicUsize = AtomicUsize::new(0);
+        std::env::current_dir()
+            .expect("current test directory")
+            .join(format!(
+                ".s-{}-{}",
+                std::process::id(),
+                NEXT_DIRECTORY.fetch_add(1, Ordering::Relaxed)
+            ))
+    }
 
     fn empty_stats() -> StubStats {
         StubStats {
@@ -227,23 +369,39 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn bind_socket_preserves_existing_parent_permissions() {
-        let parent = PathBuf::from("/tmp").join(format!("ocservia-stub-{}", uuid::Uuid::now_v7()));
+    async fn bind_socket_requires_private_ancestry() {
+        let parent = socket_test_directory();
         std::fs::create_dir(&parent).expect("create test directory");
-        std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o1777))
+        std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o700))
             .expect("set test directory permissions");
-        let socket = parent.join("transportd.sock");
+        let socket = parent.join("s");
 
-        let listener = bind_socket(&socket).expect("bind socket");
+        let (listener, identity) = bind_socket(&socket).expect("bind socket");
         let mode = std::fs::metadata(&parent)
             .expect("inspect test directory")
             .permissions()
             .mode()
             & 0o7777;
 
-        assert_eq!(mode, 0o1777);
+        assert_eq!(mode, 0o700);
         drop(listener);
-        remove_socket(&socket).expect("remove socket");
+        remove_socket(&socket, identity).expect("remove socket");
+        std::fs::remove_dir(parent).expect("remove test directory");
+    }
+
+    #[tokio::test]
+    async fn bind_socket_rejects_client_writable_ancestry() {
+        let parent = socket_test_directory();
+        std::fs::create_dir(&parent).expect("create test directory");
+        std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o770))
+            .expect("set test directory permissions");
+        let socket = parent.join("s");
+        assert_eq!(
+            bind_socket(&socket)
+                .expect_err("writable ancestry rejected")
+                .kind(),
+            io::ErrorKind::PermissionDenied
+        );
         std::fs::remove_dir(parent).expect("remove test directory");
     }
 

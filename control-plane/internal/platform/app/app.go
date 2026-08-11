@@ -88,12 +88,12 @@ func Run(ctx context.Context, cfg config.Config, build BuildInfo, logger *slog.L
 	defer stopComponents()
 	sliceService := localslice.NewWithSigner(pool, commandSigner)
 	operationService := operationstore.NewWithSigner(pool, cfg.UserOperationConcurrency, commandSigner)
-	workerErr := make(chan error, 2)
+	workerErr := make(chan error, 3)
 	maintenanceErr := make(chan error, 1)
 	var trust *trustserver.Server
 	trustErr := make(chan error, 1)
 	if cfg.RunsWorker() && cfg.ControllerEndpointID != "" {
-		trust, err = trustserver.New(cfg.TrustSocket, trustserver.NewHandler(enrollment.New(pool, cfg.ControllerEndpointID, build.Version, commandSigner)))
+		trust, err = trustserver.New(cfg.TrustSocket, trustserver.NewHandler(enrollment.New(pool, cfg.ControllerEndpointID, build.Version, commandSigner)), cfg.TransportUID)
 		if err != nil {
 			return fmt.Errorf("configure trust server: %w", err)
 		}
@@ -108,7 +108,7 @@ func Run(ctx context.Context, cfg config.Config, build BuildInfo, logger *slog.L
 		return trust.Shutdown(shutdownCtx)
 	}
 	if cfg.RunsWorker() && (cfg.LocalSimulator || cfg.ControllerEndpointID != "") {
-		transport, err := transportclient.New(cfg.TransportSocket, cfg.TransportTimeout, cfg.TransportQueue)
+		transport, err := transportclient.New(cfg.TransportSocket, cfg.TransportTimeout, cfg.TransportQueue, cfg.TransportUID, cfg.TransportGID)
 		if err != nil {
 			return fmt.Errorf("configure transport client: %w", err)
 		}
@@ -119,6 +119,11 @@ func Run(ctx context.Context, cfg config.Config, build BuildInfo, logger *slog.L
 			return fmt.Errorf("configure outbox worker: %w", workerConfigErr)
 		}
 		go func() { workerErr <- operationWorker.Run(componentCtx) }()
+		trustWorker, workerConfigErr := enrollment.NewTrustConvergenceWorker(pool, transport, logger)
+		if workerConfigErr != nil {
+			return fmt.Errorf("configure trust convergence worker: %w", workerConfigErr)
+		}
+		go func() { workerErr <- trustWorker.Run(componentCtx) }()
 	}
 	telemetryService := telemetrystore.New(pool)
 	userStateService := userstate.NewWithSigner(pool, commandSigner)
@@ -126,7 +131,7 @@ func Run(ctx context.Context, cfg config.Config, build BuildInfo, logger *slog.L
 	auditManager := audit.NewManager(pool, cfg.AuditCheckpointKey)
 	var apiTransport *transportclient.Client
 	if cfg.ControllerEndpointID != "" {
-		apiTransport, err = transportclient.New(cfg.TransportSocket, cfg.TransportTimeout, cfg.TransportQueue)
+		apiTransport, err = transportclient.New(cfg.TransportSocket, cfg.TransportTimeout, cfg.TransportQueue, cfg.TransportUID, cfg.TransportGID)
 		if err != nil {
 			return fmt.Errorf("configure API transport: %w", err)
 		}

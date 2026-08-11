@@ -8,10 +8,18 @@ use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt};
 use std::path::Path;
 
 use iroh::{EndpointId, SecretKey};
+use ocservia_contracts::generated::ocserv::platform::agent::v1::{
+    EnrollRequest, EnrollmentProofV1,
+};
+use sha2::{Digest as _, Sha256};
 use zeroize::Zeroizing;
 
 const KEY_FILE: &str = "endpoint.key";
 const CONTROLLER_FILE: &str = "controller.endpoint";
+const ENROLLMENT_PROOF_DOMAIN_V1: &[u8] = b"ocservia/agent-enrollment/v1\0";
+pub const ENROLLMENT_PROOF_VERSION_V1: u32 = 1;
+pub const ENROLLMENT_PROTOCOL_MAJOR: u32 = 1;
+pub const ENROLLMENT_PROTOCOL_MINOR: u32 = 0;
 
 /// A long-lived Agent endpoint key paired with its immutable controller pin.
 #[derive(Clone)]
@@ -89,6 +97,127 @@ impl Identity {
     pub const fn secret_key(&self) -> &SecretKey {
         &self.key
     }
+
+    /// Signs one enrollment request with this identity's long-lived Endpoint
+    /// `SecretKey` after every advertised claim has reached its final value.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the request is not bound to this identity or a
+    /// canonical claim is invalid.
+    pub fn authorize_enrollment(&self, request: &mut EnrollRequest) -> Result<(), io::Error> {
+        if request.endpoint_id != self.endpoint_id().as_bytes() {
+            return Err(invalid("enrollment endpoint does not match local identity"));
+        }
+        authorize_enrollment(request, &self.key)
+    }
+}
+
+/// Signs an enrollment request with the supplied Iroh Endpoint `SecretKey`.
+///
+/// # Errors
+///
+/// Returns an error when the request endpoint differs from the supplied key or
+/// a canonical claim is invalid.
+pub fn authorize_enrollment(
+    request: &mut EnrollRequest,
+    secret_key: &SecretKey,
+) -> Result<(), io::Error> {
+    if request.endpoint_id != secret_key.public().as_bytes() {
+        return Err(invalid("enrollment endpoint does not match local identity"));
+    }
+    request.enrollment_protocol_major = ENROLLMENT_PROTOCOL_MAJOR;
+    request.enrollment_protocol_minor = ENROLLMENT_PROTOCOL_MINOR;
+    request.capabilities.sort();
+    request.proof = None;
+    let canonical = enrollment_canonical_v1(request)?;
+    request.proof = Some(EnrollmentProofV1 {
+        version: ENROLLMENT_PROOF_VERSION_V1,
+        signature: secret_key.sign(&canonical).to_bytes().to_vec(),
+    });
+    Ok(())
+}
+
+/// Produces the cross-language canonical `EnrollmentProofV1` signing input.
+///
+/// # Errors
+///
+/// Returns an error for a missing, malformed, duplicate, or out-of-range
+/// canonical claim.
+pub fn enrollment_canonical_v1(request: &EnrollRequest) -> Result<Vec<u8>, io::Error> {
+    let timestamp = request
+        .time
+        .as_ref()
+        .ok_or_else(|| invalid("enrollment proof timestamp is missing"))?;
+    if request.enrollment_protocol_major != ENROLLMENT_PROTOCOL_MAJOR
+        || request.enrollment_protocol_minor != ENROLLMENT_PROTOCOL_MINOR
+        || request.endpoint_id.len() != 32
+        || request.agent_instance_id.len() != 16
+        || !(16..=64).contains(&request.nonce.len())
+        || !(0..1_000_000_000).contains(&timestamp.nanos)
+        || request.capabilities.is_empty()
+        || request.capabilities.len() > 128
+    {
+        return Err(invalid("enrollment proof claims are invalid"));
+    }
+    let mut capabilities = request.capabilities.clone();
+    capabilities.sort();
+    if capabilities.windows(2).any(|pair| pair[0] == pair[1])
+        || capabilities
+            .iter()
+            .any(|value| value.is_empty() || value.len() > 128)
+    {
+        return Err(invalid("enrollment proof capabilities are invalid"));
+    }
+    let token_hash = Sha256::digest(request.token.as_bytes());
+    let mut encoded = Vec::with_capacity(1024);
+    encoded.extend_from_slice(ENROLLMENT_PROOF_DOMAIN_V1);
+    write_u32(&mut encoded, ENROLLMENT_PROOF_VERSION_V1);
+    write_u32(&mut encoded, request.enrollment_protocol_major);
+    write_u32(&mut encoded, request.enrollment_protocol_minor);
+    encoded.extend_from_slice(&token_hash);
+    encoded.extend_from_slice(&request.endpoint_id);
+    for value in [
+        &request.agent_version,
+        &request.os_release,
+        &request.ocserv_version,
+        &request.boot_id,
+    ] {
+        write_bytes(&mut encoded, value.as_bytes())?;
+    }
+    encoded.extend_from_slice(&request.agent_instance_id);
+    write_u32(
+        &mut encoded,
+        u32::try_from(capabilities.len()).map_err(|_| invalid("too many capabilities"))?,
+    );
+    for capability in capabilities {
+        write_bytes(&mut encoded, capability.as_bytes())?;
+    }
+    write_bytes(&mut encoded, request.environment.as_bytes())?;
+    write_bytes(&mut encoded, &request.nonce)?;
+    encoded.extend_from_slice(&timestamp.seconds.to_be_bytes());
+    write_u32(
+        &mut encoded,
+        u32::try_from(timestamp.nanos).map_err(|_| invalid("timestamp nanos are invalid"))?,
+    );
+    Ok(encoded)
+}
+
+fn write_bytes(output: &mut Vec<u8>, value: &[u8]) -> Result<(), io::Error> {
+    write_u32(
+        output,
+        u32::try_from(value.len()).map_err(|_| invalid("enrollment proof field is too large"))?,
+    );
+    output.extend_from_slice(value);
+    Ok(())
+}
+
+fn write_u32(output: &mut Vec<u8>, value: u32) {
+    output.extend_from_slice(&value.to_be_bytes());
+}
+
+fn invalid(message: &str) -> io::Error {
+    io::Error::new(io::ErrorKind::InvalidData, message)
 }
 
 fn path_exists(path: &Path) -> Result<bool, io::Error> {
@@ -245,5 +374,46 @@ mod tests {
         assert!(!directory.join(KEY_FILE).exists());
         assert!(directory.join(CONTROLLER_FILE).exists());
         std::fs::remove_dir_all(directory).expect("remove identity fixture");
+    }
+
+    #[test]
+    fn enrollment_proof_matches_the_go_golden_vector() {
+        let mut seed = [0_u8; 32];
+        for (index, byte) in seed.iter_mut().enumerate() {
+            *byte = u8::try_from(index).expect("seed index");
+        }
+        let secret_key = SecretKey::from_bytes(&seed);
+        let mut request = EnrollRequest {
+            token: "enrollment-token-fixture".into(),
+            endpoint_id: secret_key.public().as_bytes().to_vec(),
+            agent_version: "agent-1.2.3".into(),
+            os_release: "FixtureOS 9".into(),
+            ocserv_version: "1.3.0".into(),
+            boot_id: "boot-fixture".into(),
+            agent_instance_id: hex::decode("00112233445566778899aabbccddeeff")
+                .expect("instance fixture"),
+            capabilities: vec!["ocserv.users.write".into(), "ocserv.status.read".into()],
+            environment: "production".into(),
+            nonce: hex::decode("ffeeddccbbaa99887766554433221100").expect("nonce fixture"),
+            time: Some(prost_types::Timestamp {
+                seconds: 1_700_000_000,
+                nanos: 123_456_789,
+            }),
+            enrollment_protocol_major: ENROLLMENT_PROTOCOL_MAJOR,
+            enrollment_protocol_minor: ENROLLMENT_PROTOCOL_MINOR,
+            proof: None,
+        };
+        let fixture = include_str!("../../../../testdata/enrollment-proof-v1.txt");
+        let fields: Vec<_> = fixture.split_whitespace().collect();
+        assert_eq!(fields.len(), 2);
+        assert_eq!(
+            hex::encode(enrollment_canonical_v1(&request).expect("canonical enrollment proof")),
+            fields[0]
+        );
+        authorize_enrollment(&mut request, &secret_key).expect("sign enrollment proof");
+        assert_eq!(
+            hex::encode(&request.proof.expect("proof").signature),
+            fields[1]
+        );
     }
 }
