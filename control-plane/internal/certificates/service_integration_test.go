@@ -373,7 +373,7 @@ func TestCertificateIssueArtifactAndRevokeIntegration(t *testing.T) {
 	}
 	revokeRaceArtifactID := uuid.Must(uuid.NewV7())
 	revokeRaceApprovalID := approvedCertificateAction(t, ctx, service, approvalService, workspaceID, nodeID, certificate.ID, requesterID, requesterSession, approverID, approverSession, "certificate.private_key.export", certificateAfterMaintenance.Version, "certificate_p12", revokeRaceArtifactID)
-	revokeRaceGrant, _, err := service.CreateP12(ctx, P12Request{CertificateID: certificate.ID, ApprovalID: revokeRaceApprovalID, ArtifactRequestID: revokeRaceArtifactID, CertificateVersion: certificateAfterMaintenance.Version, ActorIdentityID: requesterID, ActorSessionID: requesterSession, ExpectedVersion: 1, IdempotencyKey: "i17-p12-revoke-race", Reason: "test revoke finalization race", RequestID: "p12-revoke-race", Traceparent: "00-3023456789abcdef0123456789abcdef-1123456789abcdef-01"})
+	revokeRaceGrant, _, err := service.CreateP12(ctx, P12Request{CertificateID: certificate.ID, ApprovalID: revokeRaceApprovalID, ArtifactRequestID: revokeRaceArtifactID, CertificateVersion: certificateAfterMaintenance.Version, ActorIdentityID: requesterID, ActorSessionID: requesterSession, ExpectedVersion: 1, IdempotencyKey: "race", Reason: "test revoke finalization race", RequestID: "p12-revoke-race", Traceparent: "00-3023456789abcdef0123456789abcdef-1123456789abcdef-01"})
 	if err != nil {
 		t.Fatal(err)
 	}
