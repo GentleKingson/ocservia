@@ -50,7 +50,7 @@ case "${metadata}" in
   "directory:${legacy_uid}:${expected_gid}:770"|\
   directory:0:0:700|directory:0:0:750|directory:0:0:770) ;;
   *)
-    echo "transport runtime metadata is neither current nor an approved legacy state" >&2
+    echo "transport runtime metadata is neither current nor an approved legacy state: ${metadata}" >&2
     exit 2
     ;;
 esac
