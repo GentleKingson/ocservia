@@ -118,6 +118,10 @@ func TestRunWatchAdvancesPastRevokedTerminalDisconnectIntegration(t *testing.T) 
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = os.RemoveAll(socketRoot) })
+	socketRoot, err = filepath.Abs(socketRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
 	socketPath := filepath.Join(socketRoot, "transportd.sock")
 	listener, err := net.Listen("unix", socketPath)
 	if err != nil {
