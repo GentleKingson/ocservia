@@ -113,7 +113,7 @@ func TestRunWatchAdvancesPastRevokedTerminalDisconnectIntegration(t *testing.T) 
 		{EventId: heartbeatID[:], NodeId: activeNodeID[:], EndpointId: activeEndpoint[:], Type: transportv1.TransportEventType_TRANSPORT_EVENT_TYPE_HEARTBEAT, OccurredAt: timestamppb.Now(), Traceparent: "00-1123456789abcdef0123456789abcdef-1123456789abcdef-01", Payload: []byte("active")},
 	}
 	serverImpl := &retainedEventServer{events: events, finalCursorSeen: make(chan struct{})}
-	socketRoot, err := os.MkdirTemp(".", ".watch-integration-")
+	socketRoot, err := os.MkdirTemp(filepath.Join("..", "..", ".."), ".watch-")
 	if err != nil {
 		t.Fatal(err)
 	}
