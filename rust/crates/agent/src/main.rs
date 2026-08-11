@@ -749,31 +749,45 @@ async fn handle_artifact_consume(
     {
         return Err(invalid("artifact finalize request invalid").into());
     }
-    command_keys.verify_artifact_grant(
-        grant,
-        node_id.as_bytes(),
-        artifact.as_bytes(),
-        "certificate_p12",
-        request.size,
-        unix_seconds()?,
-    )?;
+    if request.confirm_only {
+        command_keys.verify_artifact_grant_for_confirmation(
+            grant,
+            node_id.as_bytes(),
+            artifact.as_bytes(),
+            "certificate_p12",
+            request.size,
+            unix_seconds()?,
+        )?;
+    } else {
+        command_keys.verify_artifact_grant(
+            grant,
+            node_id.as_bytes(),
+            artifact.as_bytes(),
+            "certificate_p12",
+            request.size,
+            unix_seconds()?,
+        )?;
+    }
     let response = privd
         .call(privd_request::Operation::ArtifactConsume(
             ArtifactConsumeRequest {
                 grant: Some(grant.clone()),
                 sha256: request.sha256,
                 size: request.size,
+                confirm_only: request.confirm_only,
             },
         ))
         .await?;
-    if !matches!(response.result, Some(privd_response::Result::Mutation(ref result)) if result.applied)
-    {
+    let Some(privd_response::Result::Mutation(result)) = response.result else {
+        return Err(invalid("artifact consumption failed").into());
+    };
+    if !request.confirm_only && !result.applied {
         return Err(invalid("artifact consumption failed").into());
     }
     let response = ArtifactConsumeFinalizeResponse {
         artifact_id: grant.artifact_id.clone(),
         grant_id: grant.grant_id.clone(),
-        consumed: true,
+        consumed: result.applied,
     }
     .encode_to_vec();
     send.write_all(&u32::try_from(response.len())?.to_be_bytes())

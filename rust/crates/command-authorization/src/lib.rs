@@ -311,6 +311,56 @@ impl ControllerCommandKeyring {
         expected_max_bytes: u64,
         now_unix_seconds: i64,
     ) -> Result<ArtifactGrantClaimsV1, AuthorizationError> {
+        self.verify_artifact_grant_inner(
+            grant,
+            expected_node_id,
+            expected_artifact_id,
+            expected_purpose,
+            expected_max_bytes,
+            now_unix_seconds,
+            true,
+        )
+    }
+
+    /// Verifies the signature and exact claims for a read-only consumed-state
+    /// confirmation. Expiry is intentionally not enforced because this method
+    /// cannot authorize a lease, read, deletion, or any other mutation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an authorization error when the signature or exact request
+    /// claims are invalid, even though expiry is not enforced.
+    pub fn verify_artifact_grant_for_confirmation(
+        &self,
+        grant: &ArtifactGrantV1,
+        expected_node_id: &[u8; 16],
+        expected_artifact_id: &[u8; 16],
+        expected_purpose: &str,
+        expected_max_bytes: u64,
+        now_unix_seconds: i64,
+    ) -> Result<ArtifactGrantClaimsV1, AuthorizationError> {
+        self.verify_artifact_grant_inner(
+            grant,
+            expected_node_id,
+            expected_artifact_id,
+            expected_purpose,
+            expected_max_bytes,
+            now_unix_seconds,
+            false,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn verify_artifact_grant_inner(
+        &self,
+        grant: &ArtifactGrantV1,
+        expected_node_id: &[u8; 16],
+        expected_artifact_id: &[u8; 16],
+        expected_purpose: &str,
+        expected_max_bytes: u64,
+        now_unix_seconds: i64,
+        require_unexpired: bool,
+    ) -> Result<ArtifactGrantClaimsV1, AuthorizationError> {
         let version = ArtifactGrantVersion::try_from(grant.version)
             .unwrap_or(ArtifactGrantVersion::Unspecified);
         if version != ArtifactGrantVersion::V1 {
@@ -336,7 +386,7 @@ impl ControllerCommandKeyring {
                 "artifact_grant_request_mismatch",
             ));
         }
-        if claims.expires_at_seconds <= now_unix_seconds {
+        if require_unexpired && claims.expires_at_seconds <= now_unix_seconds {
             return Err(AuthorizationError::ClaimsInvalid("artifact_grant_expired"));
         }
         if claims.issued_at_seconds > now_unix_seconds.saturating_add(MAX_FUTURE_SKEW_SECONDS) {
@@ -1536,6 +1586,29 @@ mod tests {
                 claims.expires_at_seconds,
             ),
             Err(AuthorizationError::ClaimsInvalid("artifact_grant_expired"))
+        );
+        keyring
+            .verify_artifact_grant_for_confirmation(
+                &grant,
+                &claims.node_id,
+                &claims.artifact_id,
+                &claims.purpose,
+                claims.max_bytes,
+                claims.expires_at_seconds,
+            )
+            .expect("expired exact grant remains valid only for read-only confirmation");
+        let mut forged_confirmation = grant.clone();
+        forged_confirmation.signature[0] ^= 1;
+        assert_eq!(
+            keyring.verify_artifact_grant_for_confirmation(
+                &forged_confirmation,
+                &claims.node_id,
+                &claims.artifact_id,
+                &claims.purpose,
+                claims.max_bytes,
+                claims.expires_at_seconds,
+            ),
+            Err(AuthorizationError::SignatureInvalid)
         );
 
         let mut unknown_key = grant.clone();

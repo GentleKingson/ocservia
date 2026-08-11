@@ -6,6 +6,7 @@ DESTDIR="${DESTDIR:-}"
 PREFIX="${PREFIX:-/usr}"
 SYSCONFDIR="${SYSCONFDIR:-/etc}"
 STATE_DIR="${STATE_DIR:-/var/lib/ocservia-agent}"
+PRIVD_STATE_DIR="${PRIVD_STATE_DIR:-/var/lib/ocservia-privd}"
 AGENT_UID="${AGENT_UID:-997}"
 AGENT_GID="${AGENT_GID:-997}"
 BACKUP_DIR="${BACKUP_DIR:-${DESTDIR}${STATE_DIR}/upgrade-backup}"
@@ -200,14 +201,64 @@ bind_legacy_password_sealing_keys() {
   printf '%s\n' "${expected}" >"${marker}"
 }
 
+harden_legacy_artifact_spool() {
+  local installed_unit="$1"
+  local directory="${DESTDIR}${PRIVD_STATE_DIR}/certificates/artifacts"
+  local uid mode entry name ancestor ancestor_uid ancestor_mode
+  if grep -Fq -- '--p12-password-seal-key-id' "${installed_unit}"; then
+    return
+  fi
+  if [[ ! -e "${directory}" && ! -L "${directory}" ]]; then
+    return
+  fi
+  if [[ ! -d "${directory}" || -L "${directory}" ]]; then
+    installed_pair_preflight_error "legacy P12 artifact spool must be a real directory"
+  fi
+  for ancestor in \
+    "${DESTDIR}${PRIVD_STATE_DIR}" \
+    "${DESTDIR}${PRIVD_STATE_DIR}/certificates" \
+    "${directory}"; do
+    if [[ ! -d "${ancestor}" || -L "${ancestor}" ]]; then
+      installed_pair_preflight_error "legacy P12 artifact ancestry must contain only real directories"
+    fi
+    read -r ancestor_uid ancestor_mode < <(stat -c '%u %a' -- "${ancestor}")
+    if [[ "${ancestor_uid}" != 0 ]] || (( (8#${ancestor_mode} & 8#022) != 0 )); then
+      installed_pair_preflight_error "legacy P12 artifact ancestry has unsafe ownership or mode"
+    fi
+  done
+  read -r uid mode < <(stat -c '%u %a' -- "${directory}")
+  if [[ "${uid}" != 0 ]]; then
+    installed_pair_preflight_error "legacy P12 artifact spool must be root-owned"
+  fi
+  # Remove group traversal before examining any legacy file. Pre-P1-06
+  # packages have no authenticated root ledger, so every recognized artifact
+  # is untrusted and must be removed without an mtime grace period.
+  chmod 0700 -- "${directory}"
+  for entry in "${directory}"/* "${directory}"/.*; do
+    [[ -e "${entry}" || -L "${entry}" ]] || continue
+    name="$(basename -- "${entry}")"
+    [[ "${name}" != . && "${name}" != .. ]] || continue
+    if [[ "${name}" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\.p12$ || \
+          "${name}" =~ ^\.[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\.(p12|chain\.pem)$ ]]; then
+      if [[ ! -f "${entry}" || -L "${entry}" ]] || [[ "$(stat -c '%u:%h' -- "${entry}")" != "0:1" ]]; then
+        installed_pair_preflight_error "legacy P12 artifact entry ${name} has unsafe type, owner, or link count"
+      fi
+      rm -f -- "${entry}"
+    fi
+  done
+  mode="$(stat -c '%a' -- "${directory}")"
+  [[ "${mode}" == 700 ]] || installed_pair_preflight_error "legacy P12 artifact spool could not be hardened"
+  sync -f "${directory}"
+}
+
 if [[ ${EUID} -ne 0 ]]; then
   echo "upgrade-agent.sh must run as root" >&2
   exit 1
 fi
 
 if [[ -n "${DESTDIR}" && ( "${DESTDIR}" != /* || "${DESTDIR}" == "/" ) ]] || \
-  [[ "${PREFIX}" != /* || "${SYSCONFDIR}" != /* || "${STATE_DIR}" != /* || "${BACKUP_DIR}" != /* ]]; then
-  echo "DESTDIR, PREFIX, SYSCONFDIR, STATE_DIR, and BACKUP_DIR must identify absolute paths" >&2
+  [[ "${PREFIX}" != /* || "${SYSCONFDIR}" != /* || "${STATE_DIR}" != /* || "${PRIVD_STATE_DIR}" != /* || "${BACKUP_DIR}" != /* ]]; then
+  echo "DESTDIR, PREFIX, SYSCONFDIR, STATE_DIR, PRIVD_STATE_DIR, and BACKUP_DIR must identify absolute paths" >&2
   exit 2
 fi
 if [[ -z "${DESTDIR}" ]]; then
@@ -251,6 +302,7 @@ fi
 # a fresh operator-issued token before replacing any installed file. A strict
 # root-owned marker makes a later rollback/re-upgrade deterministic.
 bind_legacy_password_sealing_keys "${installed_agent_unit}"
+harden_legacy_artifact_spool "${installed_privd_unit}"
 
 install -d -o root -g root -m 0700 "${BACKUP_DIR}"
 install -m 0755 "${installed_agent}" "${BACKUP_DIR}/ocservia-agent.previous"

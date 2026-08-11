@@ -869,6 +869,7 @@ impl TransportService for IrohTransportService {
         }
         let expected_artifact_id = grant.artifact_id.clone();
         let expected_grant_id = grant.grant_id.clone();
+        let confirm_only = request.confirm_only;
         let connection = self
             .shared
             .inner
@@ -882,6 +883,7 @@ impl TransportService for IrohTransportService {
             grant: request.grant,
             sha256: request.sha256,
             size: request.size,
+            confirm_only,
         }
         .encode_to_vec();
         let response = tokio::time::timeout(STREAM_TIMEOUT, async move {
@@ -916,7 +918,7 @@ impl TransportService for IrohTransportService {
                 .map_err(|_| Status::data_loss("artifact finalize response is invalid"))?;
             if response.artifact_id != expected_artifact_id
                 || response.grant_id != expected_grant_id
-                || !response.consumed
+                || (!confirm_only && !response.consumed)
             {
                 return Err(Status::data_loss(
                     "artifact finalize response is inconsistent",
@@ -3353,6 +3355,7 @@ mod tests {
                 grant: None,
                 sha256: vec![0; 32],
                 size: 32,
+                confirm_only: false,
             }))
             .await
             .expect_err("unsigned artifact consume must fail");

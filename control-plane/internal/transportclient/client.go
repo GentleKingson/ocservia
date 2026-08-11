@@ -144,29 +144,42 @@ func (c *Client) FetchArtifact(ctx context.Context, grant *agentv1.ArtifactGrant
 }
 
 func (c *Client) ConsumeArtifact(ctx context.Context, grant *agentv1.ArtifactGrantV1, digest []byte, size int64) error {
+	consumed, err := c.consumeArtifact(ctx, grant, digest, size, false)
+	if err != nil {
+		return err
+	}
+	if !consumed {
+		return errors.New("transport did not consume artifact")
+	}
+	return nil
+}
+
+func (c *Client) ConfirmArtifactConsumed(ctx context.Context, grant *agentv1.ArtifactGrantV1, digest []byte, size int64) (bool, error) {
+	return c.consumeArtifact(ctx, grant, digest, size, true)
+}
+
+func (c *Client) consumeArtifact(ctx context.Context, grant *agentv1.ArtifactGrantV1, digest []byte, size int64, confirmOnly bool) (bool, error) {
 	if grant == nil || len(grant.GetNodeId()) != 16 || len(grant.GetArtifactId()) != 16 || len(grant.GetGrantId()) != 16 || len(digest) != sha256.Size || size < 1 || uint64(size) != grant.GetMaxBytes() {
-		return errors.New("artifact consumption request is invalid")
+		return false, errors.New("artifact consumption request is invalid")
 	}
 	connection, err := c.dial()
 	if err != nil {
-		return err
+		return false, err
 	}
 	defer connection.Close()
 	rpcCtx, cancel := context.WithTimeout(ctx, c.deadline)
 	defer cancel()
 	response, err := transportv1.NewTransportServiceClient(connection).ConsumeArtifact(rpcCtx, &transportv1.ConsumeArtifactRequest{
-		NodeId: grant.GetNodeId(),
-		Grant:  grant,
-		Sha256: bytes.Clone(digest),
-		Size:   uint64(size),
+		NodeId:      grant.GetNodeId(),
+		Grant:       grant,
+		Sha256:      bytes.Clone(digest),
+		Size:        uint64(size),
+		ConfirmOnly: confirmOnly,
 	})
 	if err != nil {
-		return fmt.Errorf("consume artifact: %w", err)
+		return false, fmt.Errorf("consume artifact: %w", err)
 	}
-	if !response.GetConsumed() {
-		return errors.New("transport did not consume artifact")
-	}
-	return nil
+	return response.GetConsumed(), nil
 }
 
 func (c *Client) RunWatch(ctx context.Context, cursors CursorStore, handler EventHandler) error {

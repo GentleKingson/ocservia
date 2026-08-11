@@ -458,6 +458,9 @@ message ArtifactConsumeRequest {
   ArtifactGrantV1 grant = 1;
   bytes sha256 = 2;
   uint64 size = 3;
+  // Confirmation is read-only and may use an expired grant only to prove that
+  // the exact root-owned ledger record was already consumed.
+  bool confirm_only = 4;
 }
 
 message ArtifactConsumeResponse {

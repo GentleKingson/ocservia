@@ -23,6 +23,7 @@ import (
 	"github.com/GentleKingson/ocservia/control-plane/internal/operations"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"google.golang.org/protobuf/proto"
 )
 
 type fixturePKI struct {
@@ -88,6 +89,7 @@ type fixtureArtifacts struct {
 	data         []byte
 	consumeCount int
 	consumeErr   error
+	consumed     map[string]bool
 }
 
 func (f *fixtureArtifacts) FetchArtifact(_ context.Context, grant *agentv1.ArtifactGrantV1) (io.ReadCloser, error) {
@@ -106,7 +108,19 @@ func (f *fixtureArtifacts) ConsumeArtifact(_ context.Context, grant *agentv1.Art
 		return errors.New("artifact consumption mismatch")
 	}
 	f.consumeCount++
+	if f.consumed == nil {
+		f.consumed = make(map[string]bool)
+	}
+	f.consumed[string(grant.GetGrantId())] = true
 	return nil
+}
+
+func (f *fixtureArtifacts) ConfirmArtifactConsumed(_ context.Context, grant *agentv1.ArtifactGrantV1, digest []byte, size int64) (bool, error) {
+	expected := sha256.Sum256(f.data)
+	if grant == nil || size != int64(len(f.data)) || !bytes.Equal(digest, expected[:]) {
+		return false, errors.New("artifact confirmation mismatch")
+	}
+	return f.consumed[string(grant.GetGrantId())], nil
 }
 
 func TestCertificateIssueArtifactAndRevokeIntegration(t *testing.T) {
@@ -220,6 +234,9 @@ func TestCertificateIssueArtifactAndRevokeIntegration(t *testing.T) {
 	if _, err = service.OpenArtifact(ctx, grant.ArtifactID, strings.Repeat("x", 43), requesterID); !errors.Is(err, ErrArtifactDenied) {
 		t.Fatalf("wrong artifact token err=%v", err)
 	}
+	if _, err = service.OpenArtifact(ctx, grant.ArtifactID, grant.DownloadToken, approverID); !errors.Is(err, ErrArtifactDenied) {
+		t.Fatalf("another SecurityAdmin used the requester's artifact token: %v", err)
+	}
 	download, err := service.OpenArtifact(ctx, grant.ArtifactID, grant.DownloadToken, requesterID)
 	if err != nil {
 		t.Fatal(err)
@@ -276,21 +293,57 @@ func TestCertificateIssueArtifactAndRevokeIntegration(t *testing.T) {
 		t.Fatal("root consumption failure was accepted")
 	}
 	var consumeFailureState string
-	if err = pool.QueryRow(ctx, `SELECT state FROM artifact_operations WHERE id=$1`, consumeFailureGrant.ArtifactID).Scan(&consumeFailureState); err != nil || consumeFailureState != "leased" {
+	if err = pool.QueryRow(ctx, `SELECT state FROM artifact_operations WHERE id=$1`, consumeFailureGrant.ArtifactID).Scan(&consumeFailureState); err != nil || consumeFailureState != "consuming" {
 		t.Fatalf("failed consumption state=%q err=%v", consumeFailureState, err)
 	}
 	artifactTransport.consumeErr = nil
-	if _, err = pool.Exec(ctx, `UPDATE artifact_operations SET lease_until=now()-interval '1 second',active_grant_expires_at=now()-interval '1 second' WHERE id=$1`, consumeFailureGrant.ArtifactID); err != nil {
-		t.Fatal(err)
+	if err = service.Maintain(ctx); err != nil {
+		t.Fatalf("recover root consumption: %v", err)
 	}
-	consumeFailureDownload, err = service.OpenArtifact(ctx, consumeFailureGrant.ArtifactID, consumeFailureGrant.DownloadToken, requesterID)
+	if err = pool.QueryRow(ctx, `SELECT state FROM artifact_operations WHERE id=$1`, consumeFailureGrant.ArtifactID).Scan(&consumeFailureState); err != nil || consumeFailureState != "consumed" {
+		t.Fatalf("recovered consumption state=%q err=%v", consumeFailureState, err)
+	}
+	crashArtifactID := uuid.Must(uuid.NewV7())
+	crashApprovalID := approvedCertificateAction(t, ctx, service, approvalService, workspaceID, nodeID, certificate.ID, requesterID, requesterSession, approverID, approverSession, "certificate.private_key.export", issued.Version, "certificate_p12", crashArtifactID)
+	crashGrant, _, err := service.CreateP12(ctx, P12Request{CertificateID: certificate.ID, ApprovalID: crashApprovalID, ArtifactRequestID: crashArtifactID, CertificateVersion: issued.Version, ActorIdentityID: requesterID, ActorSessionID: requesterSession, ExpectedVersion: 1, IdempotencyKey: "i17-p12-crash-recovery", Reason: "test crash recovery", RequestID: "p12-crash-recovery"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, _ = io.Copy(io.Discard, consumeFailureDownload.Reader)
-	_ = consumeFailureDownload.Reader.Close()
-	if err = service.CompleteArtifact(ctx, consumeFailureGrant.ArtifactID, consumeFailureDownload.GrantID, consumeFailureDownload.Grant, digest[:], int64(len(artifactBytes)), requesterID, requesterSession, "artifact-consume-recovered"); err != nil {
-		t.Fatalf("recover root consumption: %v", err)
+	if _, err = pool.Exec(ctx, `UPDATE artifact_operations SET state='ready',content_sha256=$2,content_size=$3 WHERE id=$1`, crashGrant.ArtifactID, digest[:], len(artifactBytes)); err != nil {
+		t.Fatal(err)
+	}
+	crashDownload, err := service.OpenArtifact(ctx, crashGrant.ArtifactID, crashGrant.DownloadToken, requesterID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = io.Copy(io.Discard, crashDownload.Reader)
+	_ = crashDownload.Reader.Close()
+	crashGrantBytes, err := proto.MarshalOptions{Deterministic: true}.Marshal(crashDownload.Grant)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = pool.Exec(ctx, `UPDATE artifact_operations SET state='consuming',consume_grant=$3,consume_sha256=$4,consume_size=$5,consume_actor_id=$6,consume_session_id=$7,consume_request_id='artifact-crash-window' WHERE id=$1 AND active_grant_id=$2 AND state='leased'`, crashGrant.ArtifactID, crashDownload.GrantID, crashGrantBytes, digest[:], len(artifactBytes), requesterID, requesterSession); err != nil {
+		t.Fatal(err)
+	}
+	if err = artifactTransport.ConsumeArtifact(ctx, crashDownload.Grant, digest[:], int64(len(artifactBytes))); err != nil {
+		t.Fatal(err)
+	}
+	consumeCountAfterRoot := artifactTransport.consumeCount
+	restartedService := NewWithDependencies(pool, operations.NewWithSigner(pool, 50, commandSigner), pki, pki, artifactTransport, commandSigner)
+	restartedService.now = func() time.Time { return crashDownload.Grant.GetExpiresAt().AsTime().Add(time.Second) }
+	if err = restartedService.Maintain(ctx); err != nil {
+		t.Fatalf("reconcile consumed root record after grant expiry: %v", err)
+	}
+	var crashState string
+	if err = pool.QueryRow(ctx, `SELECT state FROM artifact_operations WHERE id=$1`, crashGrant.ArtifactID).Scan(&crashState); err != nil || crashState != "consumed" {
+		t.Fatalf("crash recovery state=%q err=%v", crashState, err)
+	}
+	if artifactTransport.consumeCount != consumeCountAfterRoot {
+		t.Fatal("recovery re-consumed an already deleted root artifact")
+	}
+	issued, err = service.Get(ctx, certificate.ID)
+	if err != nil {
+		t.Fatal(err)
 	}
 	expiredArtifactID := uuid.Must(uuid.NewV7())
 	expiredApprovalID := approvedCertificateAction(t, ctx, service, approvalService, workspaceID, nodeID, certificate.ID, requesterID, requesterSession, approverID, approverSession, "certificate.private_key.export", issued.Version, "certificate_p12", expiredArtifactID)

@@ -129,6 +129,9 @@ message ConsumeArtifactRequest {
   ocserv.platform.agent.v1.ArtifactGrantV1 grant = 2;
   bytes sha256 = 3;
   uint64 size = 4;
+  // Never consumes bytes. It only confirms an exact already-consumed root
+  // ledger record, including after the signed grant has expired.
+  bool confirm_only = 5;
 }
 
 message ConsumeArtifactResponse {

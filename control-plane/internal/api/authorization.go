@@ -260,7 +260,7 @@ func routeAction(r *http.Request) string {
 	case r.Method == http.MethodPost && strings.HasSuffix(path, ":p12") && strings.Contains(path, "/certificates/"):
 		return "certificate.private_key.export"
 	case r.Method == http.MethodGet && strings.HasPrefix(path, "/api/v1/artifacts/"):
-		return "certificate.read"
+		return "certificate.private_key.export"
 	case r.Method == http.MethodPost && path == "/api/v1/secret-provider-refs":
 		return "secret.manage"
 	case r.Method == http.MethodPost && strings.HasSuffix(path, ":rotate") && strings.Contains(path, "/secret-provider-refs/"):

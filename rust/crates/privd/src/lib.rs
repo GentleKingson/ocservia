@@ -200,11 +200,18 @@ async fn dispatch(
                 Err(_) => deadline_error(),
             }
         }
-        Ok((deadline, ValidatedRequest::ArtifactConsume(claims, digest, size))) => {
-            match tokio::time::timeout(
-                deadline,
-                adapter.artifact_consume(artifact_identity(&claims), &digest, size),
-            )
+        Ok((deadline, ValidatedRequest::ArtifactConsume(claims, digest, size, confirm_only))) => {
+            match tokio::time::timeout(deadline, async {
+                if confirm_only {
+                    adapter
+                        .artifact_confirm_consumed(artifact_identity(&claims), &digest, size)
+                        .await
+                } else {
+                    adapter
+                        .artifact_consume(artifact_identity(&claims), &digest, size)
+                        .await
+                }
+            })
             .await
             {
                 Ok(result) => finish_operation(
@@ -227,7 +234,7 @@ enum ValidatedRequest {
     Execute(CommandAuthorizationV1),
     Reconcile(CommandAuthorizationV1),
     ArtifactRead(ArtifactGrantClaimsV1, u64),
-    ArtifactConsume(ArtifactGrantClaimsV1, Vec<u8>, u64),
+    ArtifactConsume(ArtifactGrantClaimsV1, Vec<u8>, u64, bool),
 }
 
 #[allow(clippy::too_many_lines)]
@@ -345,8 +352,8 @@ fn validate_request(
                 .as_slice()
                 .try_into()
                 .map_err(|_| error(ErrorKind::InvalidRequest, "artifact ID invalid"))?;
-            let claims = command_keys
-                .verify_artifact_grant(
+            let claims = if value.confirm_only {
+                command_keys.verify_artifact_grant_for_confirmation(
                     grant,
                     node_id,
                     &artifact_id,
@@ -355,7 +362,18 @@ fn validate_request(
                     i64::try_from(now.as_secs())
                         .map_err(|_| error(ErrorKind::Unavailable, "system clock unavailable"))?,
                 )
-                .map_err(|failure| authorization_error(&failure))?;
+            } else {
+                command_keys.verify_artifact_grant(
+                    grant,
+                    node_id,
+                    &artifact_id,
+                    "certificate_p12",
+                    grant.max_bytes,
+                    i64::try_from(now.as_secs())
+                        .map_err(|_| error(ErrorKind::Unavailable, "system clock unavailable"))?,
+                )
+            }
+            .map_err(|failure| authorization_error(&failure))?;
             validate_artifact_claims(&claims)?;
             if value.sha256.len() != 32 || value.size == 0 || value.size > claims.max_bytes {
                 return Err(error(
@@ -363,7 +381,12 @@ fn validate_request(
                     "artifact consumption evidence invalid",
                 ));
             }
-            ValidatedRequest::ArtifactConsume(claims, value.sha256.clone(), value.size)
+            ValidatedRequest::ArtifactConsume(
+                claims,
+                value.sha256.clone(),
+                value.size,
+                value.confirm_only,
+            )
         } else if !matches!(
             request.operation,
             Some(

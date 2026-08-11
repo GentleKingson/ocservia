@@ -624,6 +624,10 @@ pub struct ArtifactConsumeRequest {
     pub sha256: ::prost::alloc::vec::Vec<u8>,
     #[prost(uint64, tag="3")]
     pub size: u64,
+    /// Confirmation is read-only and may use an expired grant only to prove that
+    /// the exact root-owned ledger record was already consumed.
+    #[prost(bool, tag="4")]
+    pub confirm_only: bool,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct ArtifactConsumeResponse {

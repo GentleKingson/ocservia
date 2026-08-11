@@ -1665,6 +1665,25 @@ impl Adapter {
         let mut store = EffectStore::open_for_mutation(&self.resources)?;
         let terminal: HashSet<[u8; 16]> = store.reconcile_artifacts()?.into_iter().collect();
         let tracked: HashSet<[u8; 16]> = store.tracked_artifact_ids()?.into_iter().collect();
+        let directory_metadata = match tokio::fs::symlink_metadata(&directory).await {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => return Err(AdapterError::Io(error)),
+        };
+        if !directory_metadata.is_dir() || directory_metadata.file_type().is_symlink() {
+            return Err(AdapterError::InvalidResource);
+        }
+        // Close the legacy group-readable directory before inspecting or deleting
+        // any pre-grant files. This happens during privd startup before Agent runs.
+        tokio::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o700))
+            .await
+            .map_err(AdapterError::Io)?;
+        let hardened = tokio::fs::symlink_metadata(&directory)
+            .await
+            .map_err(AdapterError::Io)?;
+        if !hardened.is_dir() || hardened.file_type().is_symlink() || hardened.mode() & 0o077 != 0 {
+            return Err(AdapterError::InvalidResource);
+        }
         let mut entries = match tokio::fs::read_dir(&directory).await {
             Ok(entries) => entries,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
@@ -1699,13 +1718,10 @@ impl Adapter {
             if !metadata.is_file() || metadata.file_type().is_symlink() {
                 return Err(AdapterError::InvalidResource);
             }
-            let should_remove = if is_staging {
-                metadata.modified().map_err(AdapterError::Io)? < cutoff
-            } else {
-                terminal.contains(id.as_bytes())
-                    || (!tracked.contains(id.as_bytes())
-                        && metadata.modified().map_err(AdapterError::Io)? < cutoff)
-            };
+            let is_tracked = tracked.contains(id.as_bytes());
+            let should_remove = !is_tracked
+                || terminal.contains(id.as_bytes())
+                || (is_staging && metadata.modified().map_err(AdapterError::Io)? < cutoff);
             if should_remove {
                 tokio::fs::remove_file(entry.path())
                     .await
@@ -2550,6 +2566,34 @@ impl EffectStore {
         transaction.commit().map_err(sqlite_io)
     }
 
+    fn confirm_artifact_consumed(
+        &self,
+        identity: ArtifactLeaseIdentity<'_>,
+        content_sha256: &[u8],
+        content_size: u64,
+    ) -> Result<bool, AdapterError> {
+        let identity = validate_artifact_identity_for_confirmation(identity)?;
+        let digest: [u8; 32] = content_sha256
+            .try_into()
+            .map_err(|_| AdapterError::InvalidRequest)?;
+        let record = query_artifact(&self.connection, identity.artifact_id)?
+            .ok_or(AdapterError::InvalidRequest)?;
+        validate_artifact_record(&self.hmac_key, &record)?;
+        let exact_identity = record.active_grant_id == Some(*identity.grant_id)
+            && record.active_subject == identity.authorized_subject
+            && record.grant_expires_at == Some(identity.expires_at)
+            && record.certificate_id == *identity.certificate_id
+            && record.certificate_version == identity.certificate_version
+            && record.operation_id == *identity.operation_id
+            && record.content_sha256 == digest
+            && record.content_size == content_size
+            && record.active_offset == record.content_size;
+        if !exact_identity {
+            return Err(AdapterError::InvalidRequest);
+        }
+        Ok(record.state == "consumed")
+    }
+
     fn revoke_certificate_artifacts(
         &mut self,
         certificate_id: &[u8; 16],
@@ -3041,6 +3085,16 @@ fn validate_artifact_identity(
     identity: ArtifactLeaseIdentity<'_>,
     now: i64,
 ) -> Result<ValidatedArtifactIdentity<'_>, AdapterError> {
+    let validated = validate_artifact_identity_for_confirmation(identity)?;
+    if validated.expires_at <= now {
+        return Err(AdapterError::InvalidRequest);
+    }
+    Ok(validated)
+}
+
+fn validate_artifact_identity_for_confirmation(
+    identity: ArtifactLeaseIdentity<'_>,
+) -> Result<ValidatedArtifactIdentity<'_>, AdapterError> {
     let artifact_id: &[u8; 16] = identity
         .artifact_id
         .try_into()
@@ -3065,7 +3119,7 @@ fn validate_artifact_identity(
         || identity.authorized_subject.len() > 256
         || identity.max_bytes == 0
         || identity.max_bytes > MAX_ARTIFACT_BYTES as u64
-        || identity.expires_at_unix_seconds <= now
+        || identity.expires_at_unix_seconds <= 0
     {
         return Err(AdapterError::InvalidRequest);
     }
@@ -6902,6 +6956,17 @@ mod tests {
             restarted.artifact_read(lease, 0).await,
             Err(AdapterError::InvalidRequest)
         ));
+        assert!(
+            !restarted
+                .artifact_confirm_consumed(
+                    lease,
+                    &interrupted_result.artifact_sha256,
+                    interrupted_result.artifact_size,
+                )
+                .await
+                .expect("confirmation cannot mutate an active lease")
+                .applied
+        );
         restarted
             .artifact_consume(
                 lease,
@@ -6918,6 +6983,52 @@ mod tests {
             )
             .await
             .expect("repeat finalize reconciles without a second read or delete");
+        let elapsed_grant_expiry = effect_now().expect("current time") - 1;
+        let store = EffectStore::open_for_mutation(&restart_resources)
+            .expect("open consumed artifact store");
+        let mut consumed_record =
+            query_artifact(&store.connection, interrupted_artifact.as_bytes())
+                .expect("query consumed artifact")
+                .expect("consumed artifact record");
+        consumed_record.grant_expires_at = Some(elapsed_grant_expiry);
+        consumed_record.record_hmac =
+            authenticate_artifact_record(&store.hmac_key, &consumed_record);
+        store
+            .connection
+            .execute(
+                "UPDATE certificate_artifacts SET grant_expires_at=?2,record_hmac=?3 WHERE artifact_id=?1",
+                params![
+                    consumed_record.artifact_id.as_slice(),
+					elapsed_grant_expiry,
+                    consumed_record.record_hmac.as_slice()
+                ],
+            )
+            .expect("expire consumed grant fixture");
+        let expired_lease = ArtifactLeaseIdentity {
+            expires_at_unix_seconds: elapsed_grant_expiry,
+            ..lease
+        };
+        assert!(
+            restarted
+                .artifact_confirm_consumed(
+                    expired_lease,
+                    &interrupted_result.artifact_sha256,
+                    interrupted_result.artifact_size,
+                )
+                .await
+                .expect("expired exact grant confirms consumed record")
+                .applied
+        );
+        assert!(matches!(
+            restarted
+                .artifact_consume(
+                    expired_lease,
+                    &interrupted_result.artifact_sha256,
+                    interrupted_result.artifact_size,
+                )
+                .await,
+            Err(AdapterError::InvalidRequest)
+        ));
         assert!(matches!(
             restarted.artifact_read(lease, 0).await,
             Err(AdapterError::InvalidRequest)
@@ -6929,6 +7040,12 @@ mod tests {
         );
         let lookalike = directory.join("artifacts").join("not-a-uuid.p12");
         std::fs::write(&lookalike, b"preserve").expect("write cleanup lookalike");
+        let legacy_untracked = Uuid::now_v7();
+        let legacy_untracked_path = artifact_directory.join(format!("{legacy_untracked}.p12"));
+        std::fs::write(&legacy_untracked_path, b"recent legacy artifact")
+            .expect("write recent legacy artifact");
+        std::fs::set_permissions(&artifact_directory, std::fs::Permissions::from_mode(0o710))
+            .expect("set legacy artifact directory mode");
         assert!(
             Command::new("/usr/bin/touch")
                 .args(["-t", "200001010000"])
@@ -6942,6 +7059,14 @@ mod tests {
             .await
             .expect("clean stale encrypted artifact");
         assert!(!artifact.exists());
+        assert!(!legacy_untracked_path.exists());
+        assert_eq!(
+            std::fs::symlink_metadata(&artifact_directory)
+                .expect("hardened artifact directory")
+                .mode()
+                & 0o777,
+            0o700
+        );
         assert!(lookalike.exists());
         let available_artifact = Uuid::now_v7();
         let available_operation = Uuid::now_v7();
@@ -7631,5 +7756,24 @@ impl Adapter {
             sync_directory(parent).await?;
         }
         Ok(MutationResult { applied: true })
+    }
+
+    /// Confirms an exact already-consumed record without reading, deleting, or
+    /// changing either the root ledger or artifact bytes.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the signed identity or evidence does not exactly
+    /// match the authenticated root ledger record.
+    pub async fn artifact_confirm_consumed(
+        &self,
+        identity: ArtifactLeaseIdentity<'_>,
+        sha256: &[u8],
+        size: u64,
+    ) -> Result<MutationResult, AdapterError> {
+        let _guard = self.certificate_artifact_lock.lock().await;
+        let consumed = EffectStore::open_existing(&self.resources)?
+            .confirm_artifact_consumed(identity, sha256, size)?;
+        Ok(MutationResult { applied: consumed })
     }
 }

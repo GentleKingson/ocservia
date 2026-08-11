@@ -4075,10 +4075,13 @@ func (x *ArtifactFetchRequest) GetGrant() *ArtifactGrantV1 {
 // ArtifactConsumeRequest is sent only after the Control Plane has received and
 // verified the complete artifact. The same signed grant authorizes deletion.
 type ArtifactConsumeRequest struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Grant         *ArtifactGrantV1       `protobuf:"bytes,1,opt,name=grant,proto3" json:"grant,omitempty"`
-	Sha256        []byte                 `protobuf:"bytes,2,opt,name=sha256,proto3" json:"sha256,omitempty"`
-	Size          uint64                 `protobuf:"varint,3,opt,name=size,proto3" json:"size,omitempty"`
+	state  protoimpl.MessageState `protogen:"open.v1"`
+	Grant  *ArtifactGrantV1       `protobuf:"bytes,1,opt,name=grant,proto3" json:"grant,omitempty"`
+	Sha256 []byte                 `protobuf:"bytes,2,opt,name=sha256,proto3" json:"sha256,omitempty"`
+	Size   uint64                 `protobuf:"varint,3,opt,name=size,proto3" json:"size,omitempty"`
+	// Confirmation is read-only and may use an expired grant only to prove that
+	// the exact root-owned ledger record was already consumed.
+	ConfirmOnly   bool `protobuf:"varint,4,opt,name=confirm_only,json=confirmOnly,proto3" json:"confirm_only,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -4132,6 +4135,13 @@ func (x *ArtifactConsumeRequest) GetSize() uint64 {
 		return x.Size
 	}
 	return 0
+}
+
+func (x *ArtifactConsumeRequest) GetConfirmOnly() bool {
+	if x != nil {
+		return x.ConfirmOnly
+	}
+	return false
 }
 
 type ArtifactConsumeResponse struct {
@@ -4945,11 +4955,12 @@ const file_ocserv_platform_agent_v1_agent_proto_rawDesc = "" +
 	"artifactId\x12\x18\n" +
 	"\apurpose\x18\x02 \x01(\tR\apurpose\x12\x1b\n" +
 	"\tmax_bytes\x18\x03 \x01(\x04R\bmaxBytes\x12?\n" +
-	"\x05grant\x18\x04 \x01(\v2).ocserv.platform.agent.v1.ArtifactGrantV1R\x05grant\"\x85\x01\n" +
+	"\x05grant\x18\x04 \x01(\v2).ocserv.platform.agent.v1.ArtifactGrantV1R\x05grant\"\xa8\x01\n" +
 	"\x16ArtifactConsumeRequest\x12?\n" +
 	"\x05grant\x18\x01 \x01(\v2).ocserv.platform.agent.v1.ArtifactGrantV1R\x05grant\x12\x16\n" +
 	"\x06sha256\x18\x02 \x01(\fR\x06sha256\x12\x12\n" +
-	"\x04size\x18\x03 \x01(\x04R\x04size\"q\n" +
+	"\x04size\x18\x03 \x01(\x04R\x04size\x12!\n" +
+	"\fconfirm_only\x18\x04 \x01(\bR\vconfirmOnly\"q\n" +
 	"\x17ArtifactConsumeResponse\x12\x1f\n" +
 	"\vartifact_id\x18\x01 \x01(\fR\n" +
 	"artifactId\x12\x19\n" +

@@ -221,6 +221,8 @@ pub struct ArtifactConsumeRequest {
     pub sha256: Vec<u8>,
     #[prost(uint64, tag = "3")]
     pub size: u64,
+    #[prost(bool, tag = "4")]
+    pub confirm_only: bool,
 }
 
 #[derive(Clone, PartialEq, Eq, Message)]

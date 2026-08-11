@@ -107,6 +107,10 @@ pub struct ConsumeArtifactRequest {
     pub sha256: ::prost::alloc::vec::Vec<u8>,
     #[prost(uint64, tag="4")]
     pub size: u64,
+    /// Never consumes bytes. It only confirms an exact already-consumed root
+    /// ledger record, including after the signed grant has expired.
+    #[prost(bool, tag="5")]
+    pub confirm_only: bool,
 }
 #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct ConsumeArtifactResponse {
