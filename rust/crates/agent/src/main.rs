@@ -41,9 +41,12 @@ const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    ocservia_observability::init("ocservia-agent")?;
     ocservia_agent::ensure_unprivileged(rustix::process::geteuid().as_raw())?;
     let config = parse_args()?;
+    if prepare_enrollment_if_requested(&config)? {
+        return Ok(());
+    }
+    ocservia_observability::init("ocservia-agent")?;
     if run_one_shot_mode(&config).await? {
         return Ok(());
     }
@@ -145,13 +148,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     Ok(())
 }
 
+fn prepare_enrollment_if_requested(config: &Config) -> Result<bool, io::Error> {
+    if !config.prepare_enrollment {
+        return Ok(false);
+    }
+    println!("{}", prepare_enrollment(config)?);
+    Ok(true)
+}
+
 async fn run_one_shot_mode(
     config: &Config,
 ) -> Result<bool, Box<dyn std::error::Error + Send + Sync>> {
-    if config.prepare_enrollment {
-        println!("{}", prepare_enrollment(config)?);
-        return Ok(true);
-    }
     if let Some(token_file) = config.enrollment_token_file.as_deref() {
         enroll_agent(config, token_file).await?;
         return Ok(true);
