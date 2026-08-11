@@ -37,9 +37,10 @@ the Compose `OCSERV_TRANSPORT_UID`/`OCSERV_TRANSPORT_GID` and transportd
 `--control-plane-uid`/`--control-plane-gid` values aligned with those service
 users. The production launcher stops the Controller and transportd before
 running a root-owned, network-disabled runtime initializer. The initializer
-accepts only the current `65532:65532 0750` transport volume or the exact
-legacy `65532:65532 0770` state, seals the directory before inspecting it,
-removes only a trusted stale transport socket, and finishes at `0750`.
+accepts only a fresh root-owned Docker volume, the current `65532:65532 0750`
+transport volume, or the exact legacy `65532:65532 0770` state; it seals the
+directory before inspecting it, removes only a trusted stale transport socket,
+and finishes at `0750`.
 All services mount this volume with copy-up disabled so the container runtime
 cannot replace the initializer's validated ownership or mode from image data.
 Unexpected owners, entries, links, or modes fail closed. Do not invoke Compose

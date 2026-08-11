@@ -49,6 +49,7 @@ if [ "${metadata}" != "directory:${expected_uid}:${expected_gid}:750" ] \
   && [ "${metadata}" != "directory:${legacy_uid}:${expected_gid}:770" ] \
   && [ "${metadata}" != directory:0:0:700 ] \
   && [ "${metadata}" != directory:0:0:750 ] \
+  && [ "${metadata}" != directory:0:0:755 ] \
   && [ "${metadata}" != directory:0:0:770 ]; then
   echo "transport runtime metadata is neither current nor an approved legacy state: ${metadata}; expected=${expected_uid}:${expected_gid}; legacy=${legacy_uid}:${expected_gid}" >&2
   exit 2
