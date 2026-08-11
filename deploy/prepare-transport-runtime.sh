@@ -45,15 +45,14 @@ esac
 
 identity=$(stat -c '%d:%i' -- "${target}")
 metadata=$(stat -c '%F:%u:%g:%a' -- "${target}")
-case "${metadata}" in
-  "directory:${expected_uid}:${expected_gid}:750"|\
-  "directory:${legacy_uid}:${expected_gid}:770"|\
-  directory:0:0:700|directory:0:0:750|directory:0:0:770) ;;
-  *)
-    echo "transport runtime metadata is neither current nor an approved legacy state: ${metadata}" >&2
-    exit 2
-    ;;
-esac
+if [ "${metadata}" != "directory:${expected_uid}:${expected_gid}:750" ] \
+  && [ "${metadata}" != "directory:${legacy_uid}:${expected_gid}:770" ] \
+  && [ "${metadata}" != directory:0:0:700 ] \
+  && [ "${metadata}" != directory:0:0:750 ] \
+  && [ "${metadata}" != directory:0:0:770 ]; then
+  echo "transport runtime metadata is neither current nor an approved legacy state: ${metadata}" >&2
+  exit 2
+fi
 
 # Seize the mount root before inspecting its contents. This removes legacy
 # shared-group write access before any pathname is trusted or removed.
