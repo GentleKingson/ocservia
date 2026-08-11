@@ -382,7 +382,7 @@ func payloadAuthorization(envelope *agentv1.CommandEnvelope) (uint32, string, st
 	case *agentv1.CommandEnvelope_CertificateCsr:
 		return 117, "certificate.issue", "ocserv.certificate.issue", nil
 	case *agentv1.CommandEnvelope_CertificateP12:
-		return 118, "certificate.p12.create", "ocserv.certificate.issue", nil
+		return 118, "certificate.private_key.export", "ocserv.certificate.issue", nil
 	case *agentv1.CommandEnvelope_CertificateRevoke:
 		return 119, "certificate.revoke", "ocserv.certificate.revoke", nil
 	default:

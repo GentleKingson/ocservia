@@ -84,7 +84,10 @@ func (s *Server) authorizeRoute(r *http.Request, principal auth.Principal) (cont
 		if getErr != nil {
 			return nil, getErr
 		}
-		if approval.ResourceType == "config_plan" {
+		scopes, scopeErr := s.approvals.AuthorityResources(r.Context(), approvalID)
+		if scopeErr == nil && len(scopes) > 0 {
+			resource = rbac.Resource{WorkspaceID: scopes[0].WorkspaceID, Type: scopes[0].Type, ID: scopes[0].ID}
+		} else if approval.ResourceType == "config_plan" {
 			if s.configplans == nil {
 				return nil, pgx.ErrNoRows
 			}
@@ -147,7 +150,7 @@ func (s *Server) authorizeRoute(r *http.Request, principal auth.Principal) (cont
 		if resourceErr != nil {
 			return nil, resourceErr
 		}
-		resource = rbac.Resource{WorkspaceID: workspaceID, Type: "workspace", ID: workspaceID}
+		resource = rbac.Resource{WorkspaceID: workspaceID, Type: "secret_ref", ID: secretID}
 	} else {
 		workspaceText := strings.TrimSpace(r.Header.Get("X-Workspace-ID"))
 		if workspaceText == "" && r.URL.Path == "/api/v1/events/stream" {
@@ -241,7 +244,7 @@ func routeAction(r *http.Request) string {
 	case r.Method == http.MethodPost && strings.HasSuffix(path, ":revoke") && strings.Contains(path, "/certificates/"):
 		return "certificate.revoke"
 	case r.Method == http.MethodPost && strings.HasSuffix(path, ":p12") && strings.Contains(path, "/certificates/"):
-		return "certificate.issue"
+		return "certificate.private_key.export"
 	case r.Method == http.MethodGet && strings.HasPrefix(path, "/api/v1/artifacts/"):
 		return "certificate.read"
 	case r.Method == http.MethodPost && path == "/api/v1/secret-provider-refs":

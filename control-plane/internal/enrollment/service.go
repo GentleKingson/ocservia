@@ -291,7 +291,8 @@ func (s *Service) Approve(ctx context.Context, approval Approval) (NodeTrust, er
 	var endpointID []byte
 	var currentStatus string
 	var revision uint64
-	err = tx.QueryRow(ctx, `SELECT n.workspace_id,k.endpoint_id,n.status,n.authorization_revision FROM nodes n JOIN node_endpoint_keys k ON k.node_id=n.id WHERE n.id=$1 AND n.status IN ('pending','active','offline') FOR UPDATE OF n,k`, approval.NodeID).Scan(&workspaceID, &endpointID, &currentStatus, &revision)
+	var nodeVersion int64
+	err = tx.QueryRow(ctx, `SELECT n.workspace_id,k.endpoint_id,n.status,n.authorization_revision,n.version FROM nodes n JOIN node_endpoint_keys k ON k.node_id=n.id WHERE n.id=$1 AND n.status IN ('pending','active','offline') FOR UPDATE OF n,k`, approval.NodeID).Scan(&workspaceID, &endpointID, &currentStatus, &revision, &nodeVersion)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return NodeTrust{}, ErrInvalidTransition
 	}
@@ -299,12 +300,26 @@ func (s *Service) Approve(ctx context.Context, approval Approval) (NodeTrust, er
 		return NodeTrust{}, fmt.Errorf("lock pending node: %w", err)
 	}
 	if currentStatus == "active" || currentStatus == "offline" {
-		if err := approvalstore.ValidateConsumed(ctx, tx, approval.ApprovalID, workspaceID, approval.IdentityID, "node.approve", "node", approval.NodeID); err != nil {
+		// Activation increments the node version once. Reconstruct the original
+		// approved content so an idempotent retry cannot substitute policy,
+		// labels, or capabilities after approval.
+		if nodeVersion < 2 {
+			return NodeTrust{}, ErrInvalidTransition
+		}
+		requestHash, _, bindingErr := nodeApprovalBinding(ctx, tx, approval.NodeID, endpointID, nodeVersion-1, approval.Labels, approval.Policy, capabilities)
+		if bindingErr != nil {
+			return NodeTrust{}, bindingErr
+		}
+		if err := approvalstore.ValidateConsumedBound(ctx, tx, approval.ApprovalID, workspaceID, approval.IdentityID, "node.approve", "node", approval.NodeID, requestHash); err != nil {
 			return NodeTrust{}, err
 		}
 		return NodeTrust{NodeID: approval.NodeID, EndpointID: endpointID, Revision: revision}, nil
 	}
-	if err := approvalstore.Consume(ctx, tx, approval.ApprovalID, workspaceID, approval.IdentityID, "node.approve", "node", approval.NodeID); err != nil {
+	requestHash, _, err := nodeApprovalBinding(ctx, tx, approval.NodeID, endpointID, nodeVersion, approval.Labels, approval.Policy, capabilities)
+	if err != nil {
+		return NodeTrust{}, err
+	}
+	if err := approvalstore.ConsumeBound(ctx, tx, approval.ApprovalID, workspaceID, approval.IdentityID, "node.approve", "node", approval.NodeID, requestHash); err != nil {
 		return NodeTrust{}, err
 	}
 	labels := mapToJSON(approval.Labels)
@@ -335,6 +350,63 @@ func (s *Service) Approve(ctx context.Context, approval Approval) (NodeTrust, er
 	return NodeTrust{NodeID: approval.NodeID, EndpointID: endpointID, Revision: revision}, nil
 }
 
+func (s *Service) ApprovalBinding(ctx context.Context, nodeID uuid.UUID, labels map[string]string, policy string, capabilities []string) (uuid.UUID, []byte, json.RawMessage, error) {
+	capabilities = normalizedCapabilities(capabilities)
+	if nodeID == uuid.Nil || !validPolicy(policy) || len(labels) > 32 || !validCapabilities(capabilities) || len(capabilities) == 0 {
+		return uuid.Nil, nil, nil, ErrInvalidRequest
+	}
+	for key, value := range labels {
+		if !validShort(key, 64) || !validShort(value, 128) {
+			return uuid.Nil, nil, nil, ErrInvalidRequest
+		}
+	}
+	var workspaceID uuid.UUID
+	var endpointID []byte
+	var version int64
+	if err := s.pool.QueryRow(ctx, `SELECT n.workspace_id,k.endpoint_id,n.version FROM nodes n JOIN node_endpoint_keys k ON k.node_id=n.id WHERE n.id=$1 AND n.status='pending' AND k.state='pending'`, nodeID).Scan(&workspaceID, &endpointID, &version); err != nil {
+		return uuid.Nil, nil, nil, err
+	}
+	hash, summary, err := nodeApprovalBinding(ctx, s.pool, nodeID, endpointID, version, labels, policy, capabilities)
+	return workspaceID, hash, summary, err
+}
+
+type queryRower interface {
+	QueryRow(context.Context, string, ...any) pgx.Row
+}
+
+func nodeApprovalBinding(ctx context.Context, q queryRower, nodeID uuid.UUID, endpointID []byte, version int64, labels map[string]string, policy string, capabilities []string) ([]byte, json.RawMessage, error) {
+	for _, capability := range capabilities {
+		var supported bool
+		if err := q.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM node_capabilities WHERE node_id=$1 AND capability=$2)`, nodeID, capability).Scan(&supported); err != nil {
+			return nil, nil, err
+		}
+		if !supported {
+			return nil, nil, ErrInvalidRequest
+		}
+	}
+	labelKeys := make([]string, 0, len(labels))
+	for key := range labels {
+		labelKeys = append(labelKeys, key)
+	}
+	slices.Sort(labelKeys)
+	orderedLabels := make([][2]string, 0, len(labelKeys))
+	for _, key := range labelKeys {
+		orderedLabels = append(orderedLabels, [2]string{key, labels[key]})
+	}
+	capabilities = append([]string(nil), capabilities...)
+	slices.Sort(capabilities)
+	summary, _ := json.Marshal(struct {
+		NodeID       uuid.UUID   `json:"node_id"`
+		EndpointID   string      `json:"endpoint_id"`
+		NodeVersion  int64       `json:"node_version"`
+		Policy       string      `json:"policy"`
+		Labels       [][2]string `json:"labels"`
+		Capabilities []string    `json:"capabilities"`
+	}{nodeID, fmt.Sprintf("%x", endpointID), version, policy, orderedLabels, capabilities})
+	digest := sha256.Sum256(append([]byte("ocservia/node-approval/v1\x00"), summary...))
+	return digest[:], summary, nil
+}
+
 func (s *Service) Revoke(ctx context.Context, revocation Revocation) (NodeTrust, error) {
 	if revocation.NodeID == uuid.Nil || revocation.ApprovalID == uuid.Nil || revocation.IdentityID == uuid.Nil || revocation.SessionID == uuid.Nil || !validActor(revocation.ActorID, revocation.RequestID, revocation.Reason) {
 		return NodeTrust{}, ErrInvalidRequest
@@ -355,13 +427,14 @@ func (s *Service) Revoke(ctx context.Context, revocation Revocation) (NodeTrust,
 	if err != nil {
 		return NodeTrust{}, fmt.Errorf("lock node for revocation: %w", err)
 	}
+	revokeHash, _ := approvalstore.GenericBinding("node.revoke", "node", revocation.NodeID)
 	if currentStatus == "revoked" {
-		if err := approvalstore.ValidateConsumed(ctx, tx, revocation.ApprovalID, workspaceID, revocation.IdentityID, "node.revoke", "node", revocation.NodeID); err != nil {
+		if err := approvalstore.ValidateConsumedBound(ctx, tx, revocation.ApprovalID, workspaceID, revocation.IdentityID, "node.revoke", "node", revocation.NodeID, revokeHash); err != nil {
 			return NodeTrust{}, err
 		}
 		return NodeTrust{NodeID: revocation.NodeID, EndpointID: endpointID, Revision: revision}, nil
 	}
-	if err := approvalstore.Consume(ctx, tx, revocation.ApprovalID, workspaceID, revocation.IdentityID, "node.revoke", "node", revocation.NodeID); err != nil {
+	if err := approvalstore.ConsumeBound(ctx, tx, revocation.ApprovalID, workspaceID, revocation.IdentityID, "node.revoke", "node", revocation.NodeID, revokeHash); err != nil {
 		return NodeTrust{}, err
 	}
 	now := s.now().UTC()

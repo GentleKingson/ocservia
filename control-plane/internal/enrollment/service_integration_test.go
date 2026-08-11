@@ -196,7 +196,17 @@ func TestEnrollmentTrustLifecycleIntegration(t *testing.T) {
 	if err != nil || string(expiredRetry.GetNodeId()) != string(nodeID[:]) {
 		t.Fatalf("expired consumed-token retry = %v, %v", expiredRetry, err)
 	}
-	approvalID, identityID, sessionID := approvedMetadata(t, pool, workspaceID, nodeID, "node.approve")
+	if _, _, _, err := service.ApprovalBinding(ctx, nodeID, map[string]string{"region": "test"}, "readonly", []string{"ocserv.status.read", "ocserv.user.manage"}); !errors.Is(err, ErrInvalidRequest) {
+		t.Fatalf("unsupported approved capability err=%v", err)
+	}
+	_, approvalHash, approvalSummary, bindingErr := service.ApprovalBinding(ctx, nodeID, map[string]string{"region": "test"}, "readonly", []string{"ocserv.status.read"})
+	if bindingErr != nil {
+		t.Fatal(bindingErr)
+	}
+	approvalID, identityID, sessionID := approvedMetadata(t, pool, workspaceID, nodeID, "node.approve", approvalHash, approvalSummary)
+	if _, err := service.Approve(ctx, Approval{NodeID: nodeID, Labels: map[string]string{"region": "changed"}, Policy: "readonly", Capabilities: []string{"ocserv.status.read"}, ActorID: identityID.String(), ApprovalID: approvalID, IdentityID: identityID, SessionID: sessionID, Reason: "tampered approval content", RequestID: uuid.Must(uuid.NewV7()).String()}); !errors.Is(err, approvalstore.ErrNotReady) {
+		t.Fatalf("changed node approval content err=%v", err)
+	}
 	trust, err := service.Approve(ctx, Approval{NodeID: nodeID, Labels: map[string]string{"region": "test"}, Policy: "readonly", Capabilities: []string{"ocserv.status.read"}, ActorID: identityID.String(), ApprovalID: approvalID, IdentityID: identityID, SessionID: sessionID, Reason: "approve fixture", RequestID: uuid.Must(uuid.NewV7()).String()})
 	if err != nil {
 		t.Fatal(err)
@@ -295,7 +305,8 @@ func TestEnrollmentTrustLifecycleIntegration(t *testing.T) {
 	if err != nil || response.GetResult() != agentv1.HandshakeResult_HANDSHAKE_RESULT_CLOCK_SKEW {
 		t.Fatalf("clock skew authorization = %v, %v", response, err)
 	}
-	revokeApprovalID, revokeIdentityID, revokeSessionID := approvedMetadata(t, pool, workspaceID, nodeID, "node.revoke")
+	revokeHash, revokeSummary := approvalstore.GenericBinding("node.revoke", "node", nodeID)
+	revokeApprovalID, revokeIdentityID, revokeSessionID := approvedMetadata(t, pool, workspaceID, nodeID, "node.revoke", revokeHash, revokeSummary)
 	if _, err := service.Revoke(ctx, Revocation{NodeID: trust.NodeID, ActorID: revokeIdentityID.String(), ApprovalID: revokeApprovalID, IdentityID: revokeIdentityID, SessionID: revokeSessionID, Reason: "revoke fixture", RequestID: uuid.Must(uuid.NewV7()).String()}); err != nil {
 		t.Fatal(err)
 	}
@@ -553,7 +564,7 @@ func cleanupWorkspace(ctx context.Context, pool *pgxpool.Pool, workspaceID uuid.
 	_, _ = pool.Exec(ctx, `DELETE FROM workspaces WHERE id=$1`, workspaceID)
 }
 
-func approvedMetadata(t *testing.T, pool *pgxpool.Pool, workspaceID, resourceID uuid.UUID, action string) (uuid.UUID, uuid.UUID, uuid.UUID) {
+func approvedMetadata(t *testing.T, pool *pgxpool.Pool, workspaceID, resourceID uuid.UUID, action string, requestHash []byte, requestSummary []byte) (uuid.UUID, uuid.UUID, uuid.UUID) {
 	t.Helper()
 	requesterID, approverID, sessionID, approvalID := uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7())
 	if _, err := pool.Exec(context.Background(), `INSERT INTO identities(id,issuer,subject,created_at,updated_at) VALUES($1,'test',$2,now(),now()),($3,'test',$4,now(),now())`, requesterID, "requester-"+requesterID.String(), approverID, "approver-"+approverID.String()); err != nil {
@@ -562,7 +573,7 @@ func approvedMetadata(t *testing.T, pool *pgxpool.Pool, workspaceID, resourceID 
 	if _, err := pool.Exec(context.Background(), `INSERT INTO auth_sessions(id,identity_id,expires_at,created_at) VALUES($1,$2,now()+interval '1 hour',now())`, sessionID, requesterID); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := pool.Exec(context.Background(), `INSERT INTO approval_requests(id,workspace_id,requester_id,action,resource_type,resource_id,reason,status,approver_id,approval_reason,expires_at,approved_at,created_at) VALUES($1,$2,$3,$4,'node',$5,'integration','approved',$6,'independent',now()+interval '1 hour',now(),now())`, approvalID, workspaceID, requesterID, action, resourceID, approverID); err != nil {
+	if _, err := pool.Exec(context.Background(), `INSERT INTO approval_requests(id,workspace_id,requester_id,action,resource_type,resource_id,reason,status,approver_id,approval_reason,expires_at,approved_at,created_at,request_hash,request_summary) VALUES($1,$2,$3,$4,'node',$5,'integration','approved',$6,'independent',now()+interval '1 hour',now(),now(),$7,$8)`, approvalID, workspaceID, requesterID, action, resourceID, approverID, requestHash, requestSummary); err != nil {
 		t.Fatal(err)
 	}
 	return approvalID, requesterID, sessionID

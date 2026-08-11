@@ -2,6 +2,7 @@ package approvals
 
 import (
 	"context"
+	"crypto/sha256"
 	"errors"
 	"os"
 	"testing"
@@ -22,28 +23,39 @@ func TestTwoPersonApprovalAndSingleConsumptionIntegration(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer pool.Close()
-	workspaceID, nodeID, requesterID, approverID, requesterSession, approverSession := uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7())
+	workspaceID, nodeID, requesterID, approverID, lateApproverID, requesterSession, approverSession, lateApproverSession := uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7())
 	if _, err := pool.Exec(ctx, `INSERT INTO workspaces(id,name,slug,created_at,updated_at)VALUES($1,'I12 approvals',$2,now(),now())`, workspaceID, "i12-"+workspaceID.String()); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := pool.Exec(ctx, `INSERT INTO nodes(id,workspace_id,name,status,created_at,updated_at)VALUES($1,$2,'node','active',now(),now())`, nodeID, workspaceID); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := pool.Exec(ctx, `INSERT INTO identities(id,issuer,subject,created_at,updated_at)VALUES($1,'test',$2,now(),now()),($3,'test',$4,now(),now())`, requesterID, "requester-"+requesterID.String(), approverID, "approver-"+approverID.String()); err != nil {
+	if _, err := pool.Exec(ctx, `INSERT INTO identities(id,issuer,subject,created_at,updated_at)VALUES($1,'test',$2,now(),now()),($3,'test',$4,now(),now()),($5,'test',$6,now(),now())`, requesterID, "requester-"+requesterID.String(), approverID, "approver-"+approverID.String(), lateApproverID, "late-approver-"+lateApproverID.String()); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := pool.Exec(ctx, `INSERT INTO auth_sessions(id,identity_id,expires_at,created_at)VALUES($1,$2,now()+interval '1 hour',now()),($3,$4,now()+interval '1 hour',now())`, requesterSession, requesterID, approverSession, approverID); err != nil {
+	if _, err := pool.Exec(ctx, `INSERT INTO auth_sessions(id,identity_id,expires_at,created_at)VALUES($1,$2,now()+interval '1 hour',now()),($3,$4,now()+interval '1 hour',now()),($5,$6,now()+interval '1 hour',now())`, requesterSession, requesterID, approverSession, approverID, lateApproverSession, lateApproverID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `INSERT INTO role_bindings(id,identity_id,workspace_id,role_name,resource_type,resource_id,created_at)VALUES($1,$2,$3,'SecurityAdmin','node',$4,now()-interval '1 minute')`, uuid.Must(uuid.NewV7()), approverID, workspaceID, nodeID); err != nil {
 		t.Fatal(err)
 	}
 	service := New(pool)
-	approval, err := service.Create(ctx, Request{WorkspaceID: workspaceID, RequesterID: requesterID, ResourceID: nodeID, Action: "service.reload", ResourceType: "node", Reason: "planned maintenance", TTL: time.Hour, SessionID: requesterSession, RequestID: "request-create"})
+	summary := []byte(`{"action":"service.reload","resource_type":"node"}`)
+	digest := sha256.Sum256(summary)
+	approval, err := service.Create(ctx, Request{WorkspaceID: workspaceID, RequesterID: requesterID, ResourceID: nodeID, Action: "service.reload", ResourceType: "node", Reason: "planned maintenance", TTL: time.Hour, SessionID: requesterSession, RequestID: "request-create", RequestHash: digest[:], RequestSummary: summary, AuthorityResources: []AuthorityResource{{WorkspaceID: workspaceID, Type: "node", ID: nodeID}}})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if _, err := service.Approve(ctx, Decision{ApprovalID: approval.ID, ApproverID: requesterID, SessionID: requesterSession, Reason: "self", RequestID: "request-self"}); !errors.Is(err, ErrSelf) {
 		t.Fatalf("self approval error = %v", err)
 	}
-	approved, err := service.Approve(ctx, Decision{ApprovalID: approval.ID, ApproverID: approverID, SessionID: approverSession, Reason: "independent review", RequestID: "request-approve"})
+	if _, err := pool.Exec(ctx, `INSERT INTO role_bindings(id,identity_id,workspace_id,role_name,resource_type,resource_id,created_at)VALUES($1,$2,$3,'SecurityAdmin','node',$4,now()+interval '1 second')`, uuid.Must(uuid.NewV7()), lateApproverID, workspaceID, nodeID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.Approve(ctx, Decision{ApprovalID: approval.ID, ApproverID: lateApproverID, SessionID: lateApproverSession, Reason: "late authority", RequestID: "request-late", ExpectedRequestHash: approval.RequestHash}); !errors.Is(err, ErrNotReady) {
+		t.Fatalf("post-snapshot approver error = %v", err)
+	}
+	approved, err := service.Approve(ctx, Decision{ApprovalID: approval.ID, ApproverID: approverID, SessionID: approverSession, Reason: "independent review", RequestID: "request-approve", ExpectedRequestHash: approval.RequestHash})
 	if err != nil || approved.Status != "approved" {
 		t.Fatalf("approval = %+v, %v", approved, err)
 	}
@@ -51,7 +63,7 @@ func TestTwoPersonApprovalAndSingleConsumptionIntegration(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := Consume(ctx, tx, approval.ID, workspaceID, requesterID, "service.reload", "node", nodeID); err != nil {
+	if err := ConsumeBound(ctx, tx, approval.ID, workspaceID, requesterID, "service.reload", "node", nodeID, digest[:]); err != nil {
 		t.Fatal(err)
 	}
 	if err := tx.Commit(ctx); err != nil {
@@ -62,12 +74,12 @@ func TestTwoPersonApprovalAndSingleConsumptionIntegration(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer tx.Rollback(ctx)
-	if err := Consume(ctx, tx, approval.ID, workspaceID, requesterID, "service.reload", "node", nodeID); !errors.Is(err, ErrNotReady) {
+	if err := ConsumeBound(ctx, tx, approval.ID, workspaceID, requesterID, "service.reload", "node", nodeID, digest[:]); !errors.Is(err, ErrNotReady) {
 		t.Fatalf("reused approval error = %v", err)
 	}
 	boundHash := make([]byte, 32)
 	boundHash[0] = 0x42
-	bound, err := service.Create(ctx, Request{WorkspaceID: workspaceID, RequesterID: requesterID, ResourceID: uuid.Must(uuid.NewV7()), Action: "user.batch.disable", ResourceType: "batch_operation", Reason: "bulk review", TTL: time.Hour, SessionID: requesterSession, RequestID: "request-bound", RequestHash: boundHash, RequestSummary: []byte(`[{"node_id":"019fc0a4-6d92-765c-a8a1-4af556614cc3","username":"alice","action":"disable","expected_version":1}]`)})
+	bound, err := service.Create(ctx, Request{WorkspaceID: workspaceID, RequesterID: requesterID, ResourceID: uuid.Must(uuid.NewV7()), Action: "user.batch.disable", ResourceType: "batch_operation", Reason: "bulk review", TTL: time.Hour, SessionID: requesterSession, RequestID: "request-bound", RequestHash: boundHash, RequestSummary: []byte(`[{"node_id":"019fc0a4-6d92-765c-a8a1-4af556614cc3","username":"alice","action":"disable","expected_version":1}]`), AuthorityResources: []AuthorityResource{{WorkspaceID: workspaceID, Type: "node", ID: nodeID}}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -80,6 +92,21 @@ func TestTwoPersonApprovalAndSingleConsumptionIntegration(t *testing.T) {
 	}
 	if _, err := service.Approve(ctx, Decision{ApprovalID: bound.ID, ApproverID: approverID, SessionID: approverSession, Reason: "reviewed details", RequestID: "request-bound-approve", ExpectedRequestHash: details.RequestHash}); err != nil {
 		t.Fatalf("approve reviewed bound content: %v", err)
+	}
+	secondNodeID, fullApproverID, fullApproverSession := uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7())
+	if _, err := pool.Exec(ctx, `INSERT INTO nodes(id,workspace_id,name,status,created_at,updated_at)VALUES($1,$2,'node-two','active',now(),now());INSERT INTO identities(id,issuer,subject,created_at,updated_at)VALUES($3,'test',$4,now(),now());INSERT INTO auth_sessions(id,identity_id,expires_at,created_at)VALUES($5,$3,now()+interval '1 hour',now());INSERT INTO role_bindings(id,identity_id,workspace_id,role_name,resource_type,resource_id,created_at)VALUES($6,$3,$2,'SecurityAdmin','node',$7,now()-interval '1 minute'),($8,$3,$2,'SecurityAdmin','node',$1,now()-interval '1 minute')`, secondNodeID, workspaceID, fullApproverID, "full-approver-"+fullApproverID.String(), fullApproverSession, uuid.Must(uuid.NewV7()), nodeID, uuid.Must(uuid.NewV7())); err != nil {
+		t.Fatal(err)
+	}
+	multiHash := sha256.Sum256([]byte("two-node-batch"))
+	multi, err := service.Create(ctx, Request{WorkspaceID: workspaceID, RequesterID: requesterID, ResourceID: uuid.Must(uuid.NewV7()), Action: "user.batch.disable", ResourceType: "batch_operation", Reason: "all nodes require authority", TTL: time.Hour, SessionID: requesterSession, RequestID: "request-multi-node", RequestHash: multiHash[:], RequestSummary: []byte(`[{"node_id":"first"},{"node_id":"second"}]`), AuthorityResources: []AuthorityResource{{WorkspaceID: workspaceID, Type: "node", ID: nodeID}, {WorkspaceID: workspaceID, Type: "node", ID: secondNodeID}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.Approve(ctx, Decision{ApprovalID: multi.ID, ApproverID: approverID, SessionID: approverSession, Reason: "partial scope", RequestID: "request-partial", ExpectedRequestHash: multi.RequestHash}); !errors.Is(err, ErrNotReady) {
+		t.Fatalf("partial batch authority err=%v", err)
+	}
+	if _, err := service.Approve(ctx, Decision{ApprovalID: multi.ID, ApproverID: fullApproverID, SessionID: fullApproverSession, Reason: "all scopes reviewed", RequestID: "request-full", ExpectedRequestHash: multi.RequestHash}); err != nil {
+		t.Fatalf("full batch authority err=%v", err)
 	}
 	var auditCount int
 	if err := pool.QueryRow(ctx, `SELECT count(*) FROM audit_events WHERE workspace_id=$1 AND approval_id=$2`, workspaceID, approval.ID).Scan(&auditCount); err != nil || auditCount != 2 {

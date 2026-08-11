@@ -13,6 +13,13 @@
  */
 
 import { mapValues } from "../runtime";
+import type { ApprovalRequestSummary } from "./ApprovalRequestSummary";
+import {
+  ApprovalRequestSummaryFromJSON,
+  ApprovalRequestSummaryFromJSONTyped,
+  ApprovalRequestSummaryToJSON,
+  ApprovalRequestSummaryToJSONTyped,
+} from "./ApprovalRequestSummary";
 import type { ConfigPlanApprovalSummary } from "./ConfigPlanApprovalSummary";
 import {
   ConfigPlanApprovalSummaryFromJSON,
@@ -27,13 +34,6 @@ import {
   CertificateApprovalSummaryToJSON,
   CertificateApprovalSummaryToJSONTyped,
 } from "./CertificateApprovalSummary";
-import type { UserBatchItemRequest } from "./UserBatchItemRequest";
-import {
-  UserBatchItemRequestFromJSON,
-  UserBatchItemRequestFromJSONTyped,
-  UserBatchItemRequestToJSON,
-  UserBatchItemRequestToJSONTyped,
-} from "./UserBatchItemRequest";
 
 /**
  *
@@ -103,10 +103,10 @@ export interface Approval {
   requestHash?: string;
   /**
    *
-   * @type {Array<UserBatchItemRequest>}
+   * @type {ApprovalRequestSummary}
    * @memberof Approval
    */
-  requestSummary?: Array<UserBatchItemRequest>;
+  requestSummary?: ApprovalRequestSummary;
   /**
    *
    * @type {ConfigPlanApprovalSummary}
@@ -225,9 +225,7 @@ export function ApprovalFromJSONTyped(
     requestSummary:
       json["request_summary"] == null
         ? undefined
-        : (json["request_summary"] as Array<any>).map(
-            UserBatchItemRequestFromJSON,
-          ),
+        : ApprovalRequestSummaryFromJSON(json["request_summary"]),
     configPlanSummary:
       json["config_plan_summary"] == null
         ? undefined
@@ -264,12 +262,7 @@ export function ApprovalToJSONTyped(
     reason: value["reason"],
     status: value["status"],
     request_hash: value["requestHash"],
-    request_summary:
-      value["requestSummary"] == null
-        ? undefined
-        : (value["requestSummary"] as Array<any>).map(
-            UserBatchItemRequestToJSON,
-          ),
+    request_summary: ApprovalRequestSummaryToJSON(value["requestSummary"]),
     config_plan_summary: ConfigPlanApprovalSummaryToJSON(
       value["configPlanSummary"],
     ),

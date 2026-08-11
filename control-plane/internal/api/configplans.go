@@ -9,6 +9,7 @@ import (
 	"github.com/GentleKingson/ocservia/control-plane/internal/approvals"
 	"github.com/GentleKingson/ocservia/control-plane/internal/configplan"
 	operationstore "github.com/GentleKingson/ocservia/control-plane/internal/operations"
+	"github.com/GentleKingson/ocservia/control-plane/internal/rbac"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 )
@@ -46,6 +47,24 @@ func (s *Server) createConfigPlan(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	actor := principal(r)
+	for _, directive := range body.Template.Directives {
+		if directive.SecretRef == nil {
+			continue
+		}
+		if s.certificates == nil {
+			writeProblem(w, r, http.StatusServiceUnavailable, "https://ocservia.dev/problems/service-unavailable", "Service unavailable", "secret reference service is unavailable")
+			return
+		}
+		workspaceID, resourceErr := s.certificates.SecretRefResource(r.Context(), directive.SecretRef.ID)
+		if resourceErr != nil || workspaceID != workspace(r) {
+			s.writeAuthorizationError(w, r, rbac.ErrForbidden)
+			return
+		}
+		if !s.devAuth && s.rbac.Authorize(r.Context(), actor.IdentityID, "secret.use", rbac.Resource{WorkspaceID: workspaceID, Type: "secret_ref", ID: directive.SecretRef.ID}, actor.BreakGlass) != nil {
+			s.writeAuthorizationError(w, r, rbac.ErrForbidden)
+			return
+		}
+	}
 	value, replayed, err := s.configplans.Create(r.Context(), configplan.CreateRequest{
 		NodeID: nodeID, ExpectedRevision: body.ExpectedRevision, Template: body.Template,
 		NodeVariables: body.NodeVariables, TTL: time.Duration(body.TTLSeconds) * time.Second,

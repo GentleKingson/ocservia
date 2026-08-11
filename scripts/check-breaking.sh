@@ -25,9 +25,8 @@ if git -C "${ROOT}" cat-file -e origin/main:openapi/openapi.yaml 2>/dev/null; th
   temporary="$(mktemp -d)"
   trap 'rm -rf "${temporary}"' EXIT INT TERM
   git -C "${ROOT}" show origin/main:openapi/openapi.yaml >"${temporary}/main.yaml"
-  # Enrollment tokens are intentionally endpoint-bound. Normalize only this
-  # security migration in the comparison baseline so every unrelated OpenAPI
-  # break remains an error.
+  # Normalize only the deliberate fail-closed security migrations in the
+  # comparison baseline so every unrelated OpenAPI break remains an error.
   (cd "${ROOT}/web" && node --input-type=module - \
     "${temporary}/main.yaml" "${ROOT}/openapi/openapi.yaml" <<'EOF'
 import { readFileSync, writeFileSync } from "node:fs";
@@ -36,17 +35,40 @@ import { parse, stringify } from "yaml";
 const [, , baselinePath, candidatePath] = process.argv;
 const baseline = parse(readFileSync(baselinePath, "utf8"));
 const candidate = parse(readFileSync(candidatePath, "utf8"));
-const name = "EnrollmentTokenRequest";
-const field = "expected_endpoint_id";
-const candidateSchema = candidate.components?.schemas?.[name];
-if (!candidateSchema?.required?.includes(field)) {
-  throw new Error(`${name}.${field} must remain required`);
+const schemas = baseline.components?.schemas;
+const candidateSchemas = candidate.components?.schemas;
+
+const enrollmentField = "expected_endpoint_id";
+if (!candidateSchemas?.EnrollmentTokenRequest?.required?.includes(enrollmentField)) {
+  throw new Error(`EnrollmentTokenRequest.${enrollmentField} must remain required`);
 }
-const baselineSchema = baseline.components?.schemas?.[name];
-if (!baselineSchema?.properties?.[field]) {
-  throw new Error(`${name}.${field} is missing from the comparison baseline`);
+if (!schemas?.EnrollmentTokenRequest?.properties?.[enrollmentField]) {
+  throw new Error(`EnrollmentTokenRequest.${enrollmentField} is missing from the comparison baseline`);
 }
-baselineSchema.required = [...new Set([...(baselineSchema.required ?? []), field])];
+schemas.EnrollmentTokenRequest.required = [
+  ...new Set([...(schemas.EnrollmentTokenRequest.required ?? []), enrollmentField]),
+];
+
+for (const name of [
+  "ConfigSecretRef",
+  "CertificateRevokeRequest",
+  "CertificateP12Request",
+  "CertificateApprovalSummary",
+  "CertificateIssueApprovalSummary",
+  "CertificateActionApprovalSummary",
+  "ConfigPlanApprovalSummary",
+  "ApprovalDecision",
+]) {
+  if (!candidateSchemas?.[name]) {
+    throw new Error(`${name} is missing from the candidate contract`);
+  }
+  schemas[name] = candidateSchemas[name];
+}
+
+// Content-bound approvals may expose a canonical object summary in addition
+// to the legacy batch array. This is response-only reviewed metadata.
+schemas.Approval.properties.request_summary =
+  candidateSchemas.Approval.properties.request_summary;
 writeFileSync(baselinePath, stringify(baseline));
 EOF
   )

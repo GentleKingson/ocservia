@@ -9,6 +9,7 @@ import (
 	"time"
 
 	agentv1 "github.com/GentleKingson/ocservia/control-plane/gen/proto/ocserv/platform/agent/v1"
+	"github.com/GentleKingson/ocservia/control-plane/internal/approvals"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"google.golang.org/protobuf/proto"
@@ -358,7 +359,8 @@ func approveOperation(t *testing.T, pool *pgxpool.Pool, workspaceID uuid.UUID, r
 		_, err = pool.Exec(context.Background(), `INSERT INTO auth_sessions(id,identity_id,expires_at,created_at) VALUES($1,$2,now()+interval '1 hour',now())`, request.ActorSessionID, request.ActorIdentityID)
 	}
 	if err == nil {
-		_, err = pool.Exec(context.Background(), `INSERT INTO approval_requests(id,workspace_id,requester_id,action,resource_type,resource_id,reason,status,approver_id,approval_reason,expires_at,approved_at,created_at) VALUES($1,$2,$3,$4,'node',$5,'integration test','approved',$6,'independent approval',now()+interval '1 hour',now(),now())`, request.ApprovalID, workspaceID, request.ActorIdentityID, request.Action, request.NodeID, approverID)
+		approvalHash, approvalSummary := approvals.GenericBinding(request.Action, "node", request.NodeID)
+		_, err = pool.Exec(context.Background(), `INSERT INTO approval_requests(id,workspace_id,requester_id,action,resource_type,resource_id,reason,status,approver_id,approval_reason,expires_at,approved_at,created_at,request_hash,request_summary) VALUES($1,$2,$3,$4,'node',$5,'integration test','approved',$6,'independent approval',now()+interval '1 hour',now(),now(),$7,$8)`, request.ApprovalID, workspaceID, request.ActorIdentityID, request.Action, request.NodeID, approverID, approvalHash, approvalSummary)
 	}
 	if err != nil {
 		t.Fatal(err)

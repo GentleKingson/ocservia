@@ -1024,9 +1024,11 @@ fn payload_authorization(
         Some(command_envelope::Payload::CertificateCsr(_)) => {
             (117, "certificate.issue", "ocserv.certificate.issue")
         }
-        Some(command_envelope::Payload::CertificateP12(_)) => {
-            (118, "certificate.p12.create", "ocserv.certificate.issue")
-        }
+        Some(command_envelope::Payload::CertificateP12(_)) => (
+            118,
+            "certificate.private_key.export",
+            "ocserv.certificate.issue",
+        ),
         Some(command_envelope::Payload::CertificateRevoke(_)) => {
             (119, "certificate.revoke", "ocserv.certificate.revoke")
         }

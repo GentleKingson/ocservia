@@ -28,12 +28,6 @@ import {
  */
 export interface UserBatchRequest {
   /**
-   * Client-generated identifier used to bind independent approval before submission.
-   * @type {string}
-   * @memberof UserBatchRequest
-   */
-  batchId: string;
-  /**
    *
    * @type {string}
    * @memberof UserBatchRequest
@@ -53,13 +47,6 @@ export interface UserBatchRequest {
 export function instanceOfUserBatchRequest(
   value: object,
 ): value is UserBatchRequest {
-  if (
-    (!("batchId" in (value as Record<string, any>)) &&
-      !("batch_id" in (value as Record<string, any>))) ||
-    ((value as Record<string, any>)["batchId"] === undefined &&
-      (value as Record<string, any>)["batch_id"] === undefined)
-  )
-    return false;
   if (!("reason" in value) || value["reason"] === undefined) return false;
   if (!("items" in value) || value["items"] === undefined) return false;
   return true;
@@ -77,7 +64,6 @@ export function UserBatchRequestFromJSONTyped(
     return json;
   }
   return {
-    batchId: json["batch_id"],
     reason: json["reason"],
     items: (json["items"] as Array<any>).map(UserBatchItemRequestFromJSON),
   };
@@ -96,7 +82,6 @@ export function UserBatchRequestToJSONTyped(
   }
 
   return {
-    batch_id: value["batchId"],
     reason: value["reason"],
     items: (value["items"] as Array<any>).map(UserBatchItemRequestToJSON),
   };

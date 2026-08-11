@@ -24,13 +24,7 @@ export interface ConfigSecretRef {
    * @type {string}
    * @memberof ConfigSecretRef
    */
-  provider: string;
-  /**
-   *
-   * @type {string}
-   * @memberof ConfigSecretRef
-   */
-  key: string;
+  secretRefId: string;
 }
 
 /**
@@ -39,8 +33,13 @@ export interface ConfigSecretRef {
 export function instanceOfConfigSecretRef(
   value: object,
 ): value is ConfigSecretRef {
-  if (!("provider" in value) || value["provider"] === undefined) return false;
-  if (!("key" in value) || value["key"] === undefined) return false;
+  if (
+    (!("secretRefId" in (value as Record<string, any>)) &&
+      !("secret_ref_id" in (value as Record<string, any>))) ||
+    ((value as Record<string, any>)["secretRefId"] === undefined &&
+      (value as Record<string, any>)["secret_ref_id"] === undefined)
+  )
+    return false;
   return true;
 }
 
@@ -56,8 +55,7 @@ export function ConfigSecretRefFromJSONTyped(
     return json;
   }
   return {
-    provider: json["provider"],
-    key: json["key"],
+    secretRefId: json["secret_ref_id"],
   };
 }
 
@@ -74,7 +72,6 @@ export function ConfigSecretRefToJSONTyped(
   }
 
   return {
-    provider: value["provider"],
-    key: value["key"],
+    secret_ref_id: value["secretRefId"],
   };
 }

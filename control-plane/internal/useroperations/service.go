@@ -253,6 +253,9 @@ func readPolicy(ctx context.Context, q queryer, nodeID uuid.UUID, username strin
 }
 
 func (s *Service) CreateBatch(ctx context.Context, request BatchRequest) (Batch, bool, error) {
+	if request.ID == uuid.Nil {
+		request.ID = s.newID()
+	}
 	if err := validateBatchRequest(request); err != nil {
 		return Batch{}, false, err
 	}
@@ -262,11 +265,42 @@ func (s *Service) CreateBatch(ctx context.Context, request BatchRequest) (Batch,
 		return Batch{}, false, err
 	}
 	defer rollback(tx)
+	if hasDisable(request.Items) {
+		var approvedID uuid.UUID
+		var approvedHash []byte
+		if err := tx.QueryRow(ctx, `SELECT resource_id,request_hash FROM approval_requests WHERE id=$1 AND workspace_id=$2 AND requester_id=$3 AND action='user.batch.disable' AND resource_type='batch_operation'`, request.ApprovalID, request.WorkspaceID, request.ActorIdentityID).Scan(&approvedID, &approvedHash); err != nil {
+			return Batch{}, false, approvals.ErrNotReady
+		}
+		if !slices.Equal(approvedHash, hash[:]) {
+			return Batch{}, false, approvals.ErrNotReady
+		}
+		rows, queryErr := tx.Query(ctx, `SELECT node_id,username,action,expected_version FROM approval_batch_items WHERE approval_id=$1 ORDER BY item_index`, request.ApprovalID)
+		if queryErr != nil {
+			return Batch{}, false, queryErr
+		}
+		var persisted []BatchItemRequest
+		for rows.Next() {
+			var item BatchItemRequest
+			if err := rows.Scan(&item.NodeID, &item.Username, &item.Action, &item.ExpectedVersion); err != nil {
+				rows.Close()
+				return Batch{}, false, err
+			}
+			persisted = append(persisted, item)
+		}
+		rows.Close()
+		if rows.Err() != nil {
+			return Batch{}, false, rows.Err()
+		}
+		if len(persisted) != len(request.Items) || BatchRequestHash(persisted) != hash {
+			return Batch{}, false, approvals.ErrNotReady
+		}
+		request.ID = approvedID
+	}
 	var existing uuid.UUID
 	var existingHash []byte
 	err = tx.QueryRow(ctx, `SELECT id,request_hash FROM batch_operations WHERE workspace_id=$1 AND idempotency_key=$2`, request.WorkspaceID, request.IdempotencyKey).Scan(&existing, &existingHash)
 	if err == nil {
-		if existing != request.ID || !slices.Equal(existingHash, hash[:]) {
+		if (hasDisable(request.Items) && existing != request.ID) || !slices.Equal(existingHash, hash[:]) {
 			return Batch{}, false, ErrIdempotencyConflict
 		}
 		if hasDisable(request.Items) {

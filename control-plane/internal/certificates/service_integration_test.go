@@ -115,6 +115,7 @@ func TestCertificateIssueArtifactAndRevokeIntegration(t *testing.T) {
 		{`INSERT INTO nodes(id,workspace_id,name,status,version,created_at,updated_at)VALUES($1,$2,$3,'offline',1,now(),now())`, []any{nodeID, workspaceID, "node-" + nodeID.String()}},
 		{`INSERT INTO identities(id,issuer,subject,created_at,updated_at)VALUES($1,'test',$2,now(),now()),($3,'test',$4,now(),now())`, []any{requesterID, "i17-requester-" + requesterID.String(), approverID, "i17-approver-" + approverID.String()}},
 		{`INSERT INTO node_capabilities(node_id,capability,approved)VALUES($1,'ocserv.certificate.issue',true),($1,'ocserv.certificate.revoke',true)`, []any{nodeID}},
+		{`INSERT INTO role_bindings(id,identity_id,workspace_id,role_name,resource_type,resource_id,created_at)VALUES($1,$2,$3,'SecurityAdmin','node',$4,now()-interval '1 minute'),($5,$6,$3,'SecurityAdmin','node',$4,now()-interval '1 minute')`, []any{uuid.Must(uuid.NewV7()), approverID, workspaceID, nodeID, uuid.Must(uuid.NewV7()), requesterID}},
 	} {
 		if _, err = pool.Exec(ctx, setup.query, setup.args...); err != nil {
 			t.Fatal(err)
@@ -156,7 +157,7 @@ func TestCertificateIssueArtifactAndRevokeIntegration(t *testing.T) {
 		t.Fatal(err)
 	}
 	approvalService := approvals.New(pool)
-	approval, err := approvalService.Create(ctx, approvals.Request{WorkspaceID: workspaceID, RequesterID: requesterID, ResourceID: certificate.ID, Action: "certificate.issue", ResourceType: "certificate", Reason: "approve certificate", TTL: time.Hour, SessionID: requesterSession, RequestID: "approval-request", RequestHash: bindingHash, RequestSummary: summary})
+	approval, err := approvalService.Create(ctx, approvals.Request{WorkspaceID: workspaceID, RequesterID: requesterID, ResourceID: certificate.ID, Action: "certificate.issue", ResourceType: "certificate", Reason: "approve certificate", TTL: time.Hour, SessionID: requesterSession, RequestID: "approval-request", RequestHash: bindingHash, RequestSummary: summary, AuthorityResources: []approvals.AuthorityResource{{WorkspaceID: workspaceID, Type: "node", ID: nodeID}}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -177,11 +178,13 @@ func TestCertificateIssueArtifactAndRevokeIntegration(t *testing.T) {
 	if err != nil || issued.State != "issued" || issued.SerialNumber == "" {
 		t.Fatalf("issued=%+v err=%v", issued, err)
 	}
-	grant, replayed, err := service.CreateP12(ctx, P12Request{CertificateID: certificate.ID, ActorIdentityID: requesterID, ActorSessionID: requesterSession, ExpectedVersion: 1, IdempotencyKey: "i17-p12", Reason: "export certificate", RequestID: "p12-request", Traceparent: "00-1123456789abcdef0123456789abcdef-0123456789abcdef-01"})
+	p12ArtifactID := uuid.Must(uuid.NewV7())
+	p12ApprovalID := approvedCertificateAction(t, ctx, service, approvalService, workspaceID, nodeID, certificate.ID, requesterID, requesterSession, approverID, approverSession, "certificate.private_key.export", issued.Version, "certificate_p12", p12ArtifactID)
+	grant, replayed, err := service.CreateP12(ctx, P12Request{CertificateID: certificate.ID, ApprovalID: p12ApprovalID, ArtifactRequestID: p12ArtifactID, CertificateVersion: issued.Version, ActorIdentityID: requesterID, ActorSessionID: requesterSession, ExpectedVersion: 1, IdempotencyKey: "i17-p12", Reason: "export certificate", RequestID: "p12-request", Traceparent: "00-1123456789abcdef0123456789abcdef-0123456789abcdef-01"})
 	if err != nil || replayed || grant.Password == "" || grant.DownloadToken == "" {
 		t.Fatalf("grant=%+v replay=%v err=%v", grant, replayed, err)
 	}
-	replayedGrant, replayed, err := service.CreateP12(ctx, P12Request{CertificateID: certificate.ID, ActorIdentityID: requesterID, ActorSessionID: requesterSession, ExpectedVersion: 1, IdempotencyKey: "i17-p12", Reason: "export certificate", RequestID: "p12-request", Traceparent: "00-1123456789abcdef0123456789abcdef-0123456789abcdef-01"})
+	replayedGrant, replayed, err := service.CreateP12(ctx, P12Request{CertificateID: certificate.ID, ApprovalID: p12ApprovalID, ArtifactRequestID: p12ArtifactID, CertificateVersion: issued.Version, ActorIdentityID: requesterID, ActorSessionID: requesterSession, ExpectedVersion: 1, IdempotencyKey: "i17-p12", Reason: "export certificate", RequestID: "p12-request", Traceparent: "00-1123456789abcdef0123456789abcdef-0123456789abcdef-01"})
 	if err != nil || !replayed || replayedGrant.ArtifactID != grant.ArtifactID || replayedGrant.Password != "" || replayedGrant.DownloadToken != "" {
 		t.Fatalf("replayed grant=%+v replay=%v err=%v", replayedGrant, replayed, err)
 	}
@@ -216,7 +219,9 @@ func TestCertificateIssueArtifactAndRevokeIntegration(t *testing.T) {
 	if _, err = service.OpenArtifact(ctx, grant.ArtifactID, grant.DownloadToken); !errors.Is(err, ErrArtifactDenied) {
 		t.Fatalf("second download err=%v", err)
 	}
-	expiredGrant, replayed, err := service.CreateP12(ctx, P12Request{CertificateID: certificate.ID, ActorIdentityID: requesterID, ActorSessionID: requesterSession, ExpectedVersion: 1, IdempotencyKey: "i17-p12-expired", Reason: "expired export", RequestID: "p12-expired-request", Traceparent: "00-3123456789abcdef0123456789abcdef-0123456789abcdef-01"})
+	expiredArtifactID := uuid.Must(uuid.NewV7())
+	expiredApprovalID := approvedCertificateAction(t, ctx, service, approvalService, workspaceID, nodeID, certificate.ID, requesterID, requesterSession, approverID, approverSession, "certificate.private_key.export", issued.Version, "certificate_p12", expiredArtifactID)
+	expiredGrant, replayed, err := service.CreateP12(ctx, P12Request{CertificateID: certificate.ID, ApprovalID: expiredApprovalID, ArtifactRequestID: expiredArtifactID, CertificateVersion: issued.Version, ActorIdentityID: requesterID, ActorSessionID: requesterSession, ExpectedVersion: 1, IdempotencyKey: "i17-p12-expired", Reason: "expired export", RequestID: "p12-expired-request", Traceparent: "00-3123456789abcdef0123456789abcdef-0123456789abcdef-01"})
 	if err != nil || replayed {
 		t.Fatalf("expired fixture grant=%+v replay=%v err=%v", expiredGrant, replayed, err)
 	}
@@ -229,7 +234,9 @@ func TestCertificateIssueArtifactAndRevokeIntegration(t *testing.T) {
 	if err := service.Maintain(ctx); err != nil {
 		t.Fatal(err)
 	}
-	hashGrant, replayed, err := service.CreateP12(ctx, P12Request{CertificateID: certificate.ID, ActorIdentityID: requesterID, ActorSessionID: requesterSession, ExpectedVersion: 1, IdempotencyKey: "i17-p12-hash", Reason: "integrity export", RequestID: "p12-hash-request", Traceparent: "00-4123456789abcdef0123456789abcdef-0123456789abcdef-01"})
+	hashArtifactID := uuid.Must(uuid.NewV7())
+	hashApprovalID := approvedCertificateAction(t, ctx, service, approvalService, workspaceID, nodeID, certificate.ID, requesterID, requesterSession, approverID, approverSession, "certificate.private_key.export", issued.Version, "certificate_p12", hashArtifactID)
+	hashGrant, replayed, err := service.CreateP12(ctx, P12Request{CertificateID: certificate.ID, ApprovalID: hashApprovalID, ArtifactRequestID: hashArtifactID, CertificateVersion: issued.Version, ActorIdentityID: requesterID, ActorSessionID: requesterSession, ExpectedVersion: 1, IdempotencyKey: "i17-p12-hash", Reason: "integrity export", RequestID: "p12-hash-request", Traceparent: "00-4123456789abcdef0123456789abcdef-0123456789abcdef-01"})
 	if err != nil || replayed {
 		t.Fatalf("hash fixture grant=%+v replay=%v err=%v", hashGrant, replayed, err)
 	}
@@ -263,7 +270,8 @@ func TestCertificateIssueArtifactAndRevokeIntegration(t *testing.T) {
 	if err := service.Maintain(ctx); err != nil {
 		t.Fatal(err)
 	}
-	if expired, err := service.Get(ctx, certificate.ID); err != nil || expired.State != "expired" {
+	expired, err := service.Get(ctx, certificate.ID)
+	if err != nil || expired.State != "expired" {
 		t.Fatalf("expired certificate=%+v err=%v", expired, err)
 	}
 	if _, err := service.OpenArtifact(ctx, hashGrant.ArtifactID, hashGrant.DownloadToken); !errors.Is(err, ErrArtifactDenied) {
@@ -273,11 +281,14 @@ func TestCertificateIssueArtifactAndRevokeIntegration(t *testing.T) {
 	if err := pool.QueryRow(ctx, `SELECT count(*) FILTER(WHERE kind='certificate.expiring'),count(*) FILTER(WHERE kind='certificate.expired') FROM security_alerts WHERE workspace_id=$1 AND node_id=$2 AND resource_type='certificate' AND resource_id=$3`, workspaceID, nodeID, certificate.ID).Scan(&expiringAlerts, &expiredAlerts); err != nil || expiringAlerts != 1 || expiredAlerts != 1 {
 		t.Fatalf("certificate alerts expiring=%d expired=%d err=%v", expiringAlerts, expiredAlerts, err)
 	}
-	if _, _, err := service.CreateP12(ctx, P12Request{CertificateID: certificate.ID, ActorIdentityID: requesterID, ActorSessionID: requesterSession, ExpectedVersion: 1, IdempotencyKey: "i17-p12-after-certificate-expiry", Reason: "reject expired certificate", RequestID: "p12-after-certificate-expiry"}); !errors.Is(err, ErrNotReady) {
+	afterExpiryArtifact := uuid.Must(uuid.NewV7())
+	afterExpiryApproval := approvedCertificateAction(t, ctx, service, approvalService, workspaceID, nodeID, certificate.ID, requesterID, requesterSession, approverID, approverSession, "certificate.private_key.export", expired.Version, "certificate_p12", afterExpiryArtifact)
+	if _, _, err := service.CreateP12(ctx, P12Request{CertificateID: certificate.ID, ApprovalID: afterExpiryApproval, ArtifactRequestID: afterExpiryArtifact, CertificateVersion: expired.Version, ActorIdentityID: requesterID, ActorSessionID: requesterSession, ExpectedVersion: 1, IdempotencyKey: "i17-p12-after-certificate-expiry", Reason: "reject expired certificate", RequestID: "p12-after-certificate-expiry"}); !errors.Is(err, ErrNotReady) {
 		t.Fatalf("expired certificate P12 err=%v", err)
 	}
 	pki.revokeUnavailable = true
-	op, replayed, err := service.Revoke(ctx, RevokeRequest{CertificateID: certificate.ID, ActorIdentityID: approverID, ActorSessionID: approverSession, ExpectedVersion: 1, IdempotencyKey: "i17-revoke", Reason: "retire certificate", RequestID: "revoke-request", Traceparent: "00-2123456789abcdef0123456789abcdef-0123456789abcdef-01"})
+	revokeApprovalID := approvedCertificateAction(t, ctx, service, approvalService, workspaceID, nodeID, certificate.ID, requesterID, requesterSession, approverID, approverSession, "certificate.revoke", expired.Version, "retire certificate", uuid.Nil)
+	op, replayed, err := service.Revoke(ctx, RevokeRequest{CertificateID: certificate.ID, ApprovalID: revokeApprovalID, CertificateVersion: expired.Version, ActorIdentityID: requesterID, ActorSessionID: requesterSession, ExpectedVersion: 1, IdempotencyKey: "i17-revoke", Reason: "retire certificate", RequestID: "revoke-request", Traceparent: "00-2123456789abcdef0123456789abcdef-0123456789abcdef-01"})
 	if !errors.Is(err, ErrSignerUnavailable) || replayed || op.ID == "" {
 		t.Fatalf("durable revoke=%+v replay=%v err=%v", op, replayed, err)
 	}
@@ -293,17 +304,39 @@ func TestCertificateIssueArtifactAndRevokeIntegration(t *testing.T) {
 	if err := operations.New(pool).Expire(ctx); err != nil {
 		t.Fatal(err)
 	}
-	op, replayed, err = service.Revoke(ctx, RevokeRequest{CertificateID: certificate.ID, ActorIdentityID: approverID, ActorSessionID: approverSession, ExpectedVersion: 1, IdempotencyKey: "i17-revoke", Reason: "retire certificate", RequestID: "revoke-request", Traceparent: "00-2123456789abcdef0123456789abcdef-0123456789abcdef-01"})
+	op, replayed, err = service.Revoke(ctx, RevokeRequest{CertificateID: certificate.ID, ApprovalID: revokeApprovalID, CertificateVersion: expired.Version, ActorIdentityID: requesterID, ActorSessionID: requesterSession, ExpectedVersion: 1, IdempotencyKey: "i17-revoke", Reason: "retire certificate", RequestID: "revoke-request", Traceparent: "00-2123456789abcdef0123456789abcdef-0123456789abcdef-01"})
 	if !errors.Is(err, ErrNotReady) || !replayed || pki.revoked {
 		t.Fatalf("expired revoke retry=%+v replay=%v external=%v err=%v", op, replayed, pki.revoked, err)
 	}
-	op, replayed, err = service.Revoke(ctx, RevokeRequest{CertificateID: certificate.ID, ActorIdentityID: approverID, ActorSessionID: approverSession, ExpectedVersion: 1, IdempotencyKey: "i17-revoke-recovered", Reason: "retire certificate", RequestID: "revoke-recovered", Traceparent: "00-2123456789abcdef0123456789abcdef-0123456789abcdef-01"})
+	revocationUnknown, fetchErr := service.Get(ctx, certificate.ID)
+	if fetchErr != nil {
+		t.Fatal(fetchErr)
+	}
+	recoveredApprovalID := approvedCertificateAction(t, ctx, service, approvalService, workspaceID, nodeID, certificate.ID, requesterID, requesterSession, approverID, approverSession, "certificate.revoke", revocationUnknown.Version, "retire certificate", uuid.Nil)
+	op, replayed, err = service.Revoke(ctx, RevokeRequest{CertificateID: certificate.ID, ApprovalID: recoveredApprovalID, CertificateVersion: revocationUnknown.Version, ActorIdentityID: requesterID, ActorSessionID: requesterSession, ExpectedVersion: 1, IdempotencyKey: "i17-revoke-recovered", Reason: "retire certificate", RequestID: "revoke-recovered", Traceparent: "00-2123456789abcdef0123456789abcdef-0123456789abcdef-01"})
 	if err != nil || replayed || op.ID == "" || !pki.revoked {
 		t.Fatalf("recovered revoke=%+v replay=%v external=%v err=%v", op, replayed, pki.revoked, err)
 	}
 	if err := pool.QueryRow(ctx, `SELECT available_at<=now() FROM outbox_events WHERE command_id=(SELECT command_id FROM operations WHERE id=$1::uuid)`, op.ID).Scan(&held); err != nil || !held {
 		t.Fatalf("released revoke outbox=%v err=%v", held, err)
 	}
+}
+
+func approvedCertificateAction(t *testing.T, ctx context.Context, service *Service, approvalService *approvals.Service, workspaceID, nodeID, certificateID, requesterID, requesterSession, approverID, approverSession uuid.UUID, action string, certificateVersion int64, purpose string, artifactID uuid.UUID) uuid.UUID {
+	t.Helper()
+	boundWorkspace, boundNode, hash, summary, err := service.ActionApprovalBinding(ctx, action, certificateID, certificateVersion, purpose, artifactID)
+	if err != nil || boundWorkspace != workspaceID || boundNode != nodeID {
+		t.Fatalf("action binding workspace=%s node=%s err=%v", boundWorkspace, boundNode, err)
+	}
+	approval, err := approvalService.Create(ctx, approvals.Request{WorkspaceID: workspaceID, RequesterID: requesterID, ResourceID: certificateID, Action: action, ResourceType: "certificate", Reason: "review certificate action", TTL: time.Hour, SessionID: requesterSession, RequestID: uuid.Must(uuid.NewV7()).String(), RequestHash: hash, RequestSummary: summary, AuthorityResources: []approvals.AuthorityResource{{WorkspaceID: workspaceID, Type: "node", ID: nodeID}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	approval, err = approvalService.Approve(ctx, approvals.Decision{ApprovalID: approval.ID, ApproverID: approverID, SessionID: approverSession, Reason: "independent review", RequestID: uuid.Must(uuid.NewV7()).String(), ExpectedRequestHash: approval.RequestHash})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return approval.ID
 }
 
 func cleanupCertificateIntegration(ctx context.Context, pool *pgxpool.Pool, workspaceID uuid.UUID) error {
@@ -313,7 +346,7 @@ func cleanupCertificateIntegration(ctx context.Context, pool *pgxpool.Pool, work
 	defer func() {
 		_, _ = pool.Exec(context.Background(), `ALTER TABLE audit_events ENABLE TRIGGER audit_events_append_only`)
 	}()
-	statements := []string{`DELETE FROM artifact_operations WHERE workspace_id=$1`, `DELETE FROM certificates WHERE workspace_id=$1`, `DELETE FROM secret_provider_refs WHERE workspace_id=$1`, `DELETE FROM agent_command_results WHERE command_id IN(SELECT id FROM commands WHERE workspace_id=$1)`, `DELETE FROM node_command_leases WHERE command_id IN(SELECT id FROM commands WHERE workspace_id=$1)`, `DELETE FROM command_attempts WHERE command_id IN(SELECT id FROM commands WHERE workspace_id=$1)`, `DELETE FROM outbox_events WHERE command_id IN(SELECT id FROM commands WHERE workspace_id=$1)`, `DELETE FROM operation_events WHERE operation_id IN(SELECT id FROM operations WHERE workspace_id=$1)`, `DELETE FROM audit_events WHERE workspace_id=$1`, `DELETE FROM security_alerts WHERE workspace_id=$1`, `DELETE FROM approval_requests WHERE workspace_id=$1`, `DELETE FROM commands WHERE workspace_id=$1`, `DELETE FROM operations WHERE workspace_id=$1`, `DELETE FROM node_capabilities WHERE node_id IN(SELECT id FROM nodes WHERE workspace_id=$1)`, `DELETE FROM nodes WHERE workspace_id=$1`, `DELETE FROM identities WHERE issuer='test' AND subject LIKE 'i17-%'`, `DELETE FROM workspaces WHERE id=$1`}
+	statements := []string{`DELETE FROM artifact_operations WHERE workspace_id=$1`, `DELETE FROM certificates WHERE workspace_id=$1`, `DELETE FROM secret_provider_refs WHERE workspace_id=$1`, `DELETE FROM agent_command_results WHERE command_id IN(SELECT id FROM commands WHERE workspace_id=$1)`, `DELETE FROM node_command_leases WHERE command_id IN(SELECT id FROM commands WHERE workspace_id=$1)`, `DELETE FROM command_attempts WHERE command_id IN(SELECT id FROM commands WHERE workspace_id=$1)`, `DELETE FROM outbox_events WHERE command_id IN(SELECT id FROM commands WHERE workspace_id=$1)`, `DELETE FROM operation_events WHERE operation_id IN(SELECT id FROM operations WHERE workspace_id=$1)`, `DELETE FROM audit_events WHERE workspace_id=$1`, `DELETE FROM security_alerts WHERE workspace_id=$1`, `DELETE FROM approval_requests WHERE workspace_id=$1`, `DELETE FROM commands WHERE workspace_id=$1`, `DELETE FROM operations WHERE workspace_id=$1`, `DELETE FROM role_bindings WHERE workspace_id=$1`, `DELETE FROM node_capabilities WHERE node_id IN(SELECT id FROM nodes WHERE workspace_id=$1)`, `DELETE FROM nodes WHERE workspace_id=$1`, `DELETE FROM identities WHERE issuer='test' AND subject LIKE 'i17-%'`, `DELETE FROM workspaces WHERE id=$1`}
 	for _, statement := range statements {
 		args := []any(nil)
 		if strings.Contains(statement, "$1") {

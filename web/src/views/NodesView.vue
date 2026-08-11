@@ -80,9 +80,8 @@ const configLoading = ref(false);
 const configPort = ref(443);
 const configMaxClients = ref(128);
 const configRoute = ref("default");
-const configSecretProvider = ref("node");
-const configCertificateKey = ref("tls/server-certificate");
-const configPrivateKey = ref("tls/server-private-key");
+const configCertificateSecretRefId = ref("");
+const configPrivateKeySecretRefId = ref("");
 const configReason = ref("");
 const configApplyApproval = ref("");
 const configApplyReason = ref("");
@@ -263,15 +262,13 @@ async function submitConfigPlan(): Promise<void> {
           {
             name: "server-cert",
             secretRef: {
-              provider: configSecretProvider.value.trim(),
-              key: configCertificateKey.value.trim(),
+              secretRefId: configCertificateSecretRefId.value.trim(),
             },
           },
           {
             name: "server-key",
             secretRef: {
-              provider: configSecretProvider.value.trim(),
-              key: configPrivateKey.value.trim(),
+              secretRefId: configPrivateKeySecretRefId.value.trim(),
             },
           },
           { name: "socket-file", value: "/run/ocserv.socket" },
@@ -411,13 +408,20 @@ async function submitCertificateIssue(): Promise<void> {
 }
 
 async function createP12(): Promise<void> {
-  if (!certificate.value || !fleet.selected || !certificateReason.value.trim())
+  if (
+    !certificate.value ||
+    !fleet.selected ||
+    !certificateReason.value.trim() ||
+    !certificateApproval.value.trim()
+  )
     return;
   certificateLoading.value = true;
   certificateError.value = "";
   try {
     certificateGrant.value = await createCertificateP12(certificate.value.id, {
       expectedVersion: fleet.selected.version,
+      certificateVersion: certificate.value.version,
+      approvalId: certificateApproval.value.trim(),
       reason: certificateReason.value.trim(),
     });
     await fleet.trackOperation(certificateGrant.value.operation.id);
@@ -455,13 +459,20 @@ async function downloadP12(): Promise<void> {
 }
 
 async function revokeCurrentCertificate(): Promise<void> {
-  if (!certificate.value || !fleet.selected || !certificateReason.value.trim())
+  if (
+    !certificate.value ||
+    !fleet.selected ||
+    !certificateReason.value.trim() ||
+    !certificateApproval.value.trim()
+  )
     return;
   certificateLoading.value = true;
   certificateError.value = "";
   try {
     const operation = await revokeCertificate(certificate.value.id, {
       expectedVersion: fleet.selected.version,
+      certificateVersion: certificate.value.version,
+      approvalId: certificateApproval.value.trim(),
       reason: certificateReason.value.trim(),
     });
     await fleet.trackOperation(operation.id);
@@ -1196,25 +1207,18 @@ async function revokeCurrentCertificate(): Promise<void> {
           maxlength="256"
           required
         />
-        <label for="config-secret-provider">{{ $t("secretProvider") }}</label>
-        <input
-          id="config-secret-provider"
-          v-model="configSecretProvider"
-          maxlength="64"
-          required
-        />
         <label for="config-certificate-key">{{ $t("certificateRef") }}</label>
         <input
           id="config-certificate-key"
-          v-model="configCertificateKey"
-          maxlength="256"
+          v-model="configCertificateSecretRefId"
+          maxlength="36"
           required
         />
         <label for="config-private-key">{{ $t("privateKeyRef") }}</label>
         <input
           id="config-private-key"
-          v-model="configPrivateKey"
-          maxlength="256"
+          v-model="configPrivateKeySecretRefId"
+          maxlength="36"
           required
         />
         <label for="config-reason">{{ $t("reason") }}</label>

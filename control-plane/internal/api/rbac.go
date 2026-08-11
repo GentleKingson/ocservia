@@ -15,6 +15,7 @@ type roleBindingRequest struct {
 	ResourceType string `json:"resource_type"`
 	ResourceID   string `json:"resource_id,omitempty"`
 	Reason       string `json:"reason"`
+	ApprovalID   string `json:"approval_id,omitempty"`
 }
 
 func (s *Server) listWorkspaces(w http.ResponseWriter, r *http.Request) {
@@ -68,7 +69,15 @@ func (s *Server) createRoleBinding(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	actor := principal(r)
-	id, err := s.rbac.CreateBinding(r.Context(), rbac.BindingRequest{IdentityID: identityID, WorkspaceID: workspaceID, ResourceID: resourceID, ActorID: actor.IdentityID, SessionID: actor.SessionID, Role: body.Role, ResourceType: body.ResourceType, RequestID: requestID(r), Reason: body.Reason})
+	approvalID := uuid.Nil
+	if body.ApprovalID != "" {
+		approvalID, err = parseUUIDv7(body.ApprovalID)
+		if err != nil {
+			writeProblem(w, r, http.StatusBadRequest, "https://ocservia.dev/problems/invalid-request", "Invalid request", "approval_id must be UUIDv7")
+			return
+		}
+	}
+	id, err := s.rbac.CreateBinding(r.Context(), rbac.BindingRequest{IdentityID: identityID, WorkspaceID: workspaceID, ResourceID: resourceID, ActorID: actor.IdentityID, SessionID: actor.SessionID, ApprovalID: approvalID, Role: body.Role, ResourceType: body.ResourceType, RequestID: requestID(r), Reason: body.Reason})
 	if err != nil {
 		if errors.Is(err, rbac.ErrGrantForbidden) {
 			writeProblem(w, r, http.StatusForbidden, "https://ocservia.dev/problems/forbidden", "Access denied", "the requested role exceeds the actor's effective permissions")

@@ -29,13 +29,17 @@ type issueCertificateRequest struct {
 }
 
 type revokeCertificateRequest struct {
-	ExpectedVersion int64  `json:"expected_version"`
-	Reason          string `json:"reason"`
+	ExpectedVersion    int64  `json:"expected_version"`
+	CertificateVersion int64  `json:"certificate_version"`
+	ApprovalID         string `json:"approval_id"`
+	Reason             string `json:"reason"`
 }
 
 type createP12Request struct {
-	ExpectedVersion int64  `json:"expected_version"`
-	Reason          string `json:"reason"`
+	ExpectedVersion    int64  `json:"expected_version"`
+	CertificateVersion int64  `json:"certificate_version"`
+	ApprovalID         string `json:"approval_id"`
+	Reason             string `json:"reason"`
 }
 
 func (s *Server) createCertificate(w http.ResponseWriter, r *http.Request) {
@@ -122,7 +126,12 @@ func (s *Server) revokeCertificate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	actor := principal(r)
-	value, replayed, err := s.certificates.Revoke(r.Context(), certificates.RevokeRequest{CertificateID: id, ActorIdentityID: actor.IdentityID, ActorSessionID: actor.SessionID, ExpectedVersion: body.ExpectedVersion, IdempotencyKey: key, Reason: body.Reason, RequestID: requestID(r), Traceparent: requestTraceparent(r)})
+	approvalID, parseErr := parseUUIDv7(body.ApprovalID)
+	if parseErr != nil {
+		writeProblem(w, r, http.StatusBadRequest, "https://ocservia.dev/problems/invalid-id", "Invalid identifier", "approval_id must be UUIDv7")
+		return
+	}
+	value, replayed, err := s.certificates.Revoke(r.Context(), certificates.RevokeRequest{CertificateID: id, ApprovalID: approvalID, CertificateVersion: body.CertificateVersion, ActorIdentityID: actor.IdentityID, ActorSessionID: actor.SessionID, ExpectedVersion: body.ExpectedVersion, IdempotencyKey: key, Reason: body.Reason, RequestID: requestID(r), Traceparent: requestTraceparent(r)})
 	if err != nil {
 		writeCertificateError(w, r, err)
 		return
@@ -148,7 +157,12 @@ func (s *Server) createCertificateP12(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	actor := principal(r)
-	value, replayed, err := s.certificates.CreateP12(r.Context(), certificates.P12Request{CertificateID: id, ActorIdentityID: actor.IdentityID, ActorSessionID: actor.SessionID, ExpectedVersion: body.ExpectedVersion, IdempotencyKey: key, Reason: body.Reason, RequestID: requestID(r), Traceparent: requestTraceparent(r)})
+	approvalID, parseErr := parseUUIDv7(body.ApprovalID)
+	if parseErr != nil {
+		writeProblem(w, r, http.StatusBadRequest, "https://ocservia.dev/problems/invalid-id", "Invalid identifier", "approval_id must be UUIDv7")
+		return
+	}
+	value, replayed, err := s.certificates.CreateP12(r.Context(), certificates.P12Request{CertificateID: id, ApprovalID: approvalID, CertificateVersion: body.CertificateVersion, ActorIdentityID: actor.IdentityID, ActorSessionID: actor.SessionID, ExpectedVersion: body.ExpectedVersion, IdempotencyKey: key, Reason: body.Reason, RequestID: requestID(r), Traceparent: requestTraceparent(r)})
 	if err != nil {
 		writeCertificateError(w, r, err)
 		return

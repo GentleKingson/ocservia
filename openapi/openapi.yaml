@@ -1651,10 +1651,9 @@ components:
     ConfigSecretRef:
       type: object
       additionalProperties: false
-      required: [provider, key]
+      required: [secret_ref_id]
       properties:
-        provider: { type: string, minLength: 1, maxLength: 64, pattern: "^[A-Za-z0-9][A-Za-z0-9._-]*$" }
-        key: { type: string, minLength: 1, maxLength: 256, pattern: "^[A-Za-z0-9][A-Za-z0-9._/-]*$" }
+        secret_ref_id: { $ref: "#/components/schemas/UuidV7" }
     ConfigDirective:
       type: object
       additionalProperties: false
@@ -1721,12 +1720,13 @@ components:
     ConfigPlanApprovalSummary:
       type: object
       additionalProperties: false
-      required: [node_id, expected_revision, candidate_hash, current_hash, expires_at]
+      required: [node_id, expected_revision, candidate_hash, current_hash, diff_redacted, expires_at]
       properties:
         node_id: { $ref: "#/components/schemas/UuidV7" }
         expected_revision: { type: integer, format: int64, minimum: 0 }
         candidate_hash: { type: string, pattern: "^[0-9a-f]{64}$" }
         current_hash: { type: string, pattern: "^[0-9a-f]{64}$" }
+        diff_redacted: { type: string, maxLength: 262144, description: Approver-visible secret-safe diff containing exact secret reference identifiers, providers, and versions without provider keys or values. }
         expires_at: { $ref: "#/components/schemas/UtcDateTime" }
     CertificateRequest:
       type: object
@@ -1752,16 +1752,20 @@ components:
     CertificateRevokeRequest:
       type: object
       additionalProperties: false
-      required: [expected_version, reason]
+      required: [expected_version, certificate_version, approval_id, reason]
       properties:
         expected_version: { type: integer, format: int64, minimum: 1 }
+        certificate_version: { type: integer, format: int64, minimum: 1 }
+        approval_id: { $ref: "#/components/schemas/UuidV7" }
         reason: { type: string, minLength: 1, maxLength: 128 }
     CertificateP12Request:
       type: object
       additionalProperties: false
-      required: [expected_version, reason]
+      required: [expected_version, certificate_version, approval_id, reason]
       properties:
         expected_version: { type: integer, format: int64, minimum: 1 }
+        certificate_version: { type: integer, format: int64, minimum: 1 }
+        approval_id: { $ref: "#/components/schemas/UuidV7" }
         reason: { type: string, minLength: 1, maxLength: 512 }
     ArtifactGrant:
       type: object
@@ -1804,6 +1808,10 @@ components:
         created_at: { $ref: "#/components/schemas/UtcDateTime" }
         updated_at: { $ref: "#/components/schemas/UtcDateTime" }
     CertificateApprovalSummary:
+      oneOf:
+        - $ref: "#/components/schemas/CertificateIssueApprovalSummary"
+        - $ref: "#/components/schemas/CertificateActionApprovalSummary"
+    CertificateIssueApprovalSummary:
       type: object
       additionalProperties: false
       required: [certificate_id, node_id, common_name, dns_names, csr_sha256]
@@ -1813,10 +1821,23 @@ components:
         common_name: { type: string, minLength: 1, maxLength: 253 }
         dns_names: { type: array, maxItems: 32, items: { type: string, maxLength: 253 } }
         csr_sha256: { type: string, pattern: "^[0-9a-f]{64}$" }
+    CertificateActionApprovalSummary:
+      type: object
+      additionalProperties: false
+      required: [action, certificate_id, certificate_version, node_id]
+      properties:
+        action: { type: string, enum: [certificate.revoke, certificate.private_key.export] }
+        certificate_id: { $ref: "#/components/schemas/UuidV7" }
+        certificate_version: { type: integer, format: int64, minimum: 1 }
+        node_id: { $ref: "#/components/schemas/UuidV7" }
+        purpose: { type: string, maxLength: 512 }
+        artifact_request_id: { $ref: "#/components/schemas/UuidV7" }
+        serial_number: { type: string, maxLength: 128 }
+        certificate_sha256: { type: string, pattern: "^[0-9a-f]{64}$" }
     Certificate:
       type: object
       additionalProperties: false
-      required: [id, workspace_id, node_id, operation_id, common_name, dns_names, key_bits, state, created_at, updated_at]
+      required: [id, workspace_id, node_id, operation_id, common_name, dns_names, key_bits, state, version, created_at, updated_at]
       properties:
         id: { $ref: "#/components/schemas/UuidV7" }
         workspace_id: { $ref: "#/components/schemas/UuidV7" }
@@ -1826,6 +1847,7 @@ components:
         dns_names: { type: array, maxItems: 32, items: { type: string, maxLength: 253 } }
         key_bits: { type: integer, format: int32, enum: [2048, 3072, 4096] }
         state: { type: string, enum: [csr_pending, csr_ready, signing, signer_unavailable, issued, expiring, expired, revoking, revocation_unknown, revoked, failed, unknown] }
+        version: { type: integer, format: int64, minimum: 1 }
         public_key_sha256: { type: string, format: byte, description: SHA-256 of the node-local public key. }
         serial_number: { type: string, maxLength: 128 }
         not_before: { $ref: "#/components/schemas/UtcDateTime" }
@@ -1882,11 +1904,8 @@ components:
     UserBatchRequest:
       type: object
       additionalProperties: false
-      required: [batch_id, reason, items]
+      required: [reason, items]
       properties:
-        batch_id:
-          allOf: [{ $ref: "#/components/schemas/UuidV7" }]
-          description: Client-generated identifier used to bind independent approval before submission.
         reason: { type: string, minLength: 1, maxLength: 512 }
         items:
           type: array
@@ -2291,9 +2310,12 @@ components:
         identity_id: { $ref: "#/components/schemas/UuidV7" }
         workspace_id: { $ref: "#/components/schemas/UuidV7" }
         role: { type: string, enum: [Viewer, Operator, UserManager, ConfigManager, Auditor, SecurityAdmin, PlatformAdmin] }
-        resource_type: { type: string, enum: [workspace, node, resource] }
+        resource_type: { type: string, enum: [workspace, node, resource, secret_ref, certificate, config_plan, batch_operation, role_binding] }
         resource_id: { $ref: "#/components/schemas/UuidV7" }
         reason: { type: string, minLength: 1, maxLength: 512 }
+        approval_id:
+          allOf: [{ $ref: "#/components/schemas/UuidV7" }]
+          description: Required for SecurityAdmin and PlatformAdmin grants.
     RoleBinding:
       type: object
       additionalProperties: false
@@ -2303,7 +2325,7 @@ components:
     ApprovalRequest:
       type: object
       additionalProperties: false
-      required: [action, resource_type, resource_id, reason, ttl_seconds]
+      required: [action, resource_type, reason, ttl_seconds]
       properties:
         action: { type: string, minLength: 1, maxLength: 128 }
         resource_type: { type: string, minLength: 1, maxLength: 64 }
@@ -2316,10 +2338,30 @@ components:
           maxItems: 500
           description: Required for user.batch.disable so the approver reviews the immutable batch contents.
           items: { $ref: "#/components/schemas/UserBatchItemRequest" }
+        node_approval:
+          $ref: "#/components/schemas/NodeApproval"
+        certificate:
+          type: object
+          additionalProperties: false
+          required: [expected_version, reason]
+          properties:
+            expected_version: { type: integer, format: int64, minimum: 1 }
+            purpose: { type: string, enum: [certificate_p12] }
+            artifact_request_id: { $ref: "#/components/schemas/UuidV7" }
+            reason: { type: string, minLength: 1, maxLength: 512 }
+        role_binding:
+          type: object
+          additionalProperties: false
+          required: [identity_id, role, resource_type]
+          properties:
+            identity_id: { $ref: "#/components/schemas/UuidV7" }
+            role: { type: string, enum: [SecurityAdmin, PlatformAdmin] }
+            resource_type: { type: string, enum: [workspace, node, resource, secret_ref, certificate, config_plan, batch_operation, role_binding] }
+            resource_id: { $ref: "#/components/schemas/UuidV7" }
     ApprovalDecision:
       type: object
       additionalProperties: false
-      required: [reason]
+      required: [reason, expected_request_hash]
       properties:
         reason: { type: string, minLength: 1, maxLength: 512 }
         expected_request_hash:
@@ -2345,9 +2387,12 @@ components:
           pattern: "^[0-9a-f]{64}$"
           description: Canonical SHA-256 of the immutable reviewed content when the approval is content-bound.
         request_summary:
-          type: array
-          maxItems: 500
-          items: { $ref: "#/components/schemas/UserBatchItemRequest" }
+          oneOf:
+            - type: array
+              maxItems: 500
+              items: { $ref: "#/components/schemas/UserBatchItemRequest" }
+            - type: object
+              additionalProperties: true
         config_plan_summary:
           $ref: "#/components/schemas/ConfigPlanApprovalSummary"
         certificate_summary:

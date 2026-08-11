@@ -68,6 +68,12 @@ export interface Certificate {
    */
   state: CertificateStateEnum;
   /**
+   *
+   * @type {number}
+   * @memberof Certificate
+   */
+  version: number;
+  /**
    * SHA-256 of the node-local public key.
    * @type {string}
    * @memberof Certificate
@@ -190,6 +196,7 @@ export function instanceOfCertificate(value: object): value is Certificate {
   )
     return false;
   if (!("state" in value) || value["state"] === undefined) return false;
+  if (!("version" in value) || value["version"] === undefined) return false;
   if (
     (!("createdAt" in (value as Record<string, any>)) &&
       !("created_at" in (value as Record<string, any>))) ||
@@ -227,6 +234,7 @@ export function CertificateFromJSONTyped(
     dnsNames: json["dns_names"],
     keyBits: json["key_bits"],
     state: json["state"],
+    version: json["version"],
     publicKeySha256:
       json["public_key_sha256"] == null ? undefined : json["public_key_sha256"],
     serialNumber:
@@ -263,6 +271,7 @@ export function CertificateToJSONTyped(
     dns_names: value["dnsNames"],
     key_bits: value["keyBits"],
     state: value["state"],
+    version: value["version"],
     public_key_sha256: value["publicKeySha256"],
     serial_number: value["serialNumber"],
     not_before:

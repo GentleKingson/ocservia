@@ -278,6 +278,11 @@ func (s *Service) CreateSynthetic(ctx context.Context, request CreateRequest) (O
 		}
 		request.ApprovalRequestHash = append([]byte(nil), planHash...)
 	}
+	if request.Kind == CertificateP12 || request.Kind == CertificateRevoke {
+		if err := approvals.ConsumeBound(ctx, tx, request.ApprovalID, workspaceID, request.ActorIdentityID, request.Action, "certificate", request.CertificateID, request.ApprovalRequestHash); err != nil {
+			return Operation{}, false, err
+		}
+	}
 	if capability := capabilityFor(request.Kind); capability != "" {
 		var approved bool
 		if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM node_capabilities WHERE node_id=$1 AND capability=$2 AND approved=true)`, request.NodeID, capability).Scan(&approved); err != nil {
@@ -306,9 +311,11 @@ func (s *Service) CreateSynthetic(ctx context.Context, request CreateRequest) (O
 		}
 	}
 	if request.Kind == ServiceReload {
-		if err := approvals.Consume(ctx, tx, request.ApprovalID, workspaceID, request.ActorIdentityID, request.Action, "node", request.NodeID); err != nil {
+		approvalHash, _ := approvals.GenericBinding(request.Action, "node", request.NodeID)
+		if err := approvals.ConsumeBound(ctx, tx, request.ApprovalID, workspaceID, request.ActorIdentityID, request.Action, "node", request.NodeID, approvalHash); err != nil {
 			return Operation{}, false, err
 		}
+		request.ApprovalRequestHash = approvalHash
 	}
 
 	operationID, commandID, outboxID, auditID, eventID, err := newIDs(5)
@@ -373,7 +380,7 @@ func (s *Service) CreateSynthetic(ctx context.Context, request CreateRequest) (O
 		}
 	}
 	if request.Kind == CertificateP12 {
-		if _, err := tx.Exec(ctx, `INSERT INTO artifact_operations(id,workspace_id,node_id,certificate_id,operation_id,purpose,state,token_sha256,request_hash,expires_at,created_at,updated_at) VALUES($1,$2,$3,$4,$5,'certificate_p12','pending',$6,$7,$8,$9,$9)`, request.ArtifactID, workspaceID, request.NodeID, request.CertificateID, operationID, request.ArtifactMetadata.TokenSHA256, request.ArtifactMetadata.RequestHash, request.ArtifactMetadata.ExpiresAt, now); err != nil {
+		if _, err := tx.Exec(ctx, `INSERT INTO artifact_operations(id,workspace_id,node_id,certificate_id,operation_id,purpose,state,token_sha256,request_hash,expires_at,created_at,updated_at,approval_id) VALUES($1,$2,$3,$4,$5,'certificate_p12','pending',$6,$7,$8,$9,$9,$10)`, request.ArtifactID, workspaceID, request.NodeID, request.CertificateID, operationID, request.ArtifactMetadata.TokenSHA256, request.ArtifactMetadata.RequestHash, request.ArtifactMetadata.ExpiresAt, now, request.ApprovalID); err != nil {
 			return Operation{}, false, fmt.Errorf("insert certificate artifact operation: %w", err)
 		}
 	}
@@ -772,7 +779,7 @@ func validateCreate(r CreateRequest) error {
 	if len(r.IdempotencyKey) < 1 || len(r.IdempotencyKey) > 128 || strings.TrimSpace(r.IdempotencyKey) != r.IdempotencyKey {
 		return ErrInvalidRequest
 	}
-	if len(r.ApprovalRequestHash) != 0 {
+	if len(r.ApprovalRequestHash) != 0 && r.Kind != CertificateP12 && r.Kind != CertificateRevoke {
 		return ErrInvalidRequest
 	}
 	if r.Kind != SyntheticNoop && r.Kind != SyntheticEcho && r.Kind != SessionDisconnect && r.Kind != SessionTerminate && r.Kind != IPBanRemove && r.Kind != ServiceReload && r.Kind != ConfigPlan && r.Kind != ConfigApply && r.Kind != CertificateCSR && r.Kind != CertificateP12 && r.Kind != CertificateRevoke {
@@ -810,6 +817,9 @@ func validateCreate(r CreateRequest) error {
 		}
 	}
 	if r.Kind == CertificateP12 && (r.CertificateID == uuid.Nil || r.CertificateID.Version() != 7 || r.ArtifactID == uuid.Nil || r.ArtifactID.Version() != 7 || len(r.CertificateChain) < 64 || len(r.CertificateChain) > 256*1024 || len(r.SealedPassword) < 32 || len(r.SealedPassword) > 16*1024 || strings.TrimSpace(r.SecretKeyID) == "" || len(r.SecretKeyID) > 128 || r.ArtifactMetadata == nil || len(r.ArtifactMetadata.TokenSHA256) != sha256.Size || len(r.ArtifactMetadata.RequestHash) != sha256.Size || !r.ArtifactMetadata.ExpiresAt.After(time.Now().UTC()) || r.ArtifactMetadata.ExpiresAt.After(time.Now().UTC().Add(30*time.Minute))) {
+		return ErrInvalidRequest
+	}
+	if (r.Kind == CertificateP12 || r.Kind == CertificateRevoke) && (r.ApprovalID == uuid.Nil || r.ActorIdentityID == uuid.Nil || len(r.ApprovalRequestHash) != sha256.Size) {
 		return ErrInvalidRequest
 	}
 	if r.Kind == CertificateRevoke && (r.CertificateID == uuid.Nil || r.CertificateID.Version() != 7 || strings.TrimSpace(r.RevocationReason) == "" || len(r.RevocationReason) > 128) {
