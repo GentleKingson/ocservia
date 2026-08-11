@@ -357,7 +357,7 @@ test "${interrupted_state}" = "running"
 sample_phase_now transport-interrupt
 pause_periodic_sampler transport-recovery
 "${COMPOSE[@]}" kill -s SIGKILL transportd-stub >/dev/null
-"${COMPOSE[@]}" up -d transportd-stub >/dev/null
+"${COMPOSE[@]}" up -d --no-deps transportd-stub >/dev/null
 for _ in $(seq 1 60); do
   if "${COMPOSE[@]}" exec -T transportd-stub test -S /run/ocserv-platform/transportd.sock; then break; fi
   sleep 1
