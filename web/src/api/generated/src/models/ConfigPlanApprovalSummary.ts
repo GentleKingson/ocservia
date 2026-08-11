@@ -44,7 +44,7 @@ export interface ConfigPlanApprovalSummary {
    */
   currentHash: string;
   /**
-   * Approver-visible secret-safe diff containing exact secret reference identifiers
+   * Approver-visible secret-safe diff containing exact secret reference identifiers, providers, and versions without provider keys or values.
    * @type {string}
    * @memberof ConfigPlanApprovalSummary
    */
