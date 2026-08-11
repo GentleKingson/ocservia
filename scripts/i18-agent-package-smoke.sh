@@ -371,10 +371,10 @@ sudo install -o root -g root -m 0600 "${work}/p12-password-seal-private.pem" \
 	  ENROLLMENT_MIGRATION_CONFIRMED=true \
 	  "${package_root}/scripts/upgrade-agent.sh"
 	test "$(sudo stat -c '%u:%g:%a' -- "${rootfs}/etc/ocservia-agent/sealing-keys-bound")" = "0:0:600"
-	grep -Fxq "node_id=00000000-0000-7000-8000-000000000000" \
+	sudo grep -Fxq "node_id=00000000-0000-7000-8000-000000000000" \
 	  "${rootfs}/etc/ocservia-agent/sealing-keys-bound"
-	grep -Fxq "user_sha256=${user_seal_hash}" "${rootfs}/etc/ocservia-agent/sealing-keys-bound"
-	grep -Fxq "p12_sha256=${p12_seal_hash}" "${rootfs}/etc/ocservia-agent/sealing-keys-bound"
+	sudo grep -Fxq "user_sha256=${user_seal_hash}" "${rootfs}/etc/ocservia-agent/sealing-keys-bound"
+	sudo grep -Fxq "p12_sha256=${p12_seal_hash}" "${rootfs}/etc/ocservia-agent/sealing-keys-bound"
 for backup in \
   ocservia-agent.previous \
   ocservia-privd.previous \
