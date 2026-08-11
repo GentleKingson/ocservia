@@ -1662,9 +1662,6 @@ impl Adapter {
     pub async fn cleanup_stale_certificate_artifacts(&self) -> Result<(), AdapterError> {
         let _guard = self.certificate_artifact_lock.lock().await;
         let directory = self.resources.certificate_key_dir.join("artifacts");
-        let mut store = EffectStore::open_for_mutation(&self.resources)?;
-        let terminal: HashSet<[u8; 16]> = store.reconcile_artifacts()?.into_iter().collect();
-        let tracked: HashSet<[u8; 16]> = store.tracked_artifact_ids()?.into_iter().collect();
         let directory_metadata = match tokio::fs::symlink_metadata(&directory).await {
             Ok(metadata) => metadata,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
@@ -1684,6 +1681,9 @@ impl Adapter {
         if !hardened.is_dir() || hardened.file_type().is_symlink() || hardened.mode() & 0o077 != 0 {
             return Err(AdapterError::InvalidResource);
         }
+        let mut store = EffectStore::open_for_mutation(&self.resources)?;
+        let terminal: HashSet<[u8; 16]> = store.reconcile_artifacts()?.into_iter().collect();
+        let tracked: HashSet<[u8; 16]> = store.tracked_artifact_ids()?.into_iter().collect();
         let mut entries = match tokio::fs::read_dir(&directory).await {
             Ok(entries) => entries,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
