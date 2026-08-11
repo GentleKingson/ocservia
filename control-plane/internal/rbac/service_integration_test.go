@@ -130,10 +130,20 @@ func TestResourceTypePreventsUUIDScopeAliasIntegration(t *testing.T) {
 	}
 	defer pool.Close()
 	workspaceID, identityID, sharedID, bindingID := uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7())
-	if _, err = pool.Exec(ctx, `INSERT INTO workspaces(id,name,slug,created_at,updated_at)VALUES($1,'typed scope',$2,now(),now());INSERT INTO identities(id,issuer,subject,created_at,updated_at)VALUES($3,'test',$4,now(),now());INSERT INTO role_bindings(id,identity_id,workspace_id,role_name,resource_type,resource_id,created_at)VALUES($5,$3,$1,'ConfigManager','secret_ref',$6,now())`, workspaceID, "typed-"+workspaceID.String(), identityID, "typed-"+identityID.String(), bindingID, sharedID); err != nil {
+	if _, err = pool.Exec(ctx, `INSERT INTO workspaces(id,name,slug,created_at,updated_at)VALUES($1,'typed scope',$2,now(),now())`, workspaceID, "typed-"+workspaceID.String()); err != nil {
 		t.Fatal(err)
 	}
-	defer pool.Exec(context.Background(), `DELETE FROM role_bindings WHERE id=$1;DELETE FROM identities WHERE id=$2;DELETE FROM workspaces WHERE id=$3`, bindingID, identityID, workspaceID)
+	if _, err = pool.Exec(ctx, `INSERT INTO identities(id,issuer,subject,created_at,updated_at)VALUES($1,'test',$2,now(),now())`, identityID, "typed-"+identityID.String()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = pool.Exec(ctx, `INSERT INTO role_bindings(id,identity_id,workspace_id,role_name,resource_type,resource_id,created_at)VALUES($1,$2,$3,'ConfigManager','secret_ref',$4,now())`, bindingID, identityID, workspaceID, sharedID); err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		_, _ = pool.Exec(context.Background(), `DELETE FROM role_bindings WHERE id=$1`, bindingID)
+		_, _ = pool.Exec(context.Background(), `DELETE FROM identities WHERE id=$1`, identityID)
+		_, _ = pool.Exec(context.Background(), `DELETE FROM workspaces WHERE id=$1`, workspaceID)
+	}()
 	service := New(pool)
 	if err := service.Authorize(ctx, identityID, "secret.use", Resource{WorkspaceID: workspaceID, Type: "secret_ref", ID: sharedID}, false); err != nil {
 		t.Fatal(err)

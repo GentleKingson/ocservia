@@ -94,7 +94,16 @@ func TestTwoPersonApprovalAndSingleConsumptionIntegration(t *testing.T) {
 		t.Fatalf("approve reviewed bound content: %v", err)
 	}
 	secondNodeID, fullApproverID, fullApproverSession := uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7())
-	if _, err := pool.Exec(ctx, `INSERT INTO nodes(id,workspace_id,name,status,created_at,updated_at)VALUES($1,$2,'node-two','active',now(),now());INSERT INTO identities(id,issuer,subject,created_at,updated_at)VALUES($3,'test',$4,now(),now());INSERT INTO auth_sessions(id,identity_id,expires_at,created_at)VALUES($5,$3,now()+interval '1 hour',now());INSERT INTO role_bindings(id,identity_id,workspace_id,role_name,resource_type,resource_id,created_at)VALUES($6,$3,$2,'SecurityAdmin','node',$7,now()-interval '1 minute'),($8,$3,$2,'SecurityAdmin','node',$1,now()-interval '1 minute')`, secondNodeID, workspaceID, fullApproverID, "full-approver-"+fullApproverID.String(), fullApproverSession, uuid.Must(uuid.NewV7()), nodeID, uuid.Must(uuid.NewV7())); err != nil {
+	if _, err := pool.Exec(ctx, `INSERT INTO nodes(id,workspace_id,name,status,created_at,updated_at)VALUES($1,$2,'node-two','active',now(),now())`, secondNodeID, workspaceID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `INSERT INTO identities(id,issuer,subject,created_at,updated_at)VALUES($1,'test',$2,now(),now())`, fullApproverID, "full-approver-"+fullApproverID.String()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `INSERT INTO auth_sessions(id,identity_id,expires_at,created_at)VALUES($1,$2,now()+interval '1 hour',now())`, fullApproverSession, fullApproverID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `INSERT INTO role_bindings(id,identity_id,workspace_id,role_name,resource_type,resource_id,created_at)VALUES($1,$2,$3,'SecurityAdmin','node',$4,now()-interval '1 minute'),($5,$2,$3,'SecurityAdmin','node',$6,now()-interval '1 minute')`, uuid.Must(uuid.NewV7()), fullApproverID, workspaceID, nodeID, uuid.Must(uuid.NewV7()), secondNodeID); err != nil {
 		t.Fatal(err)
 	}
 	multiHash := sha256.Sum256([]byte("two-node-batch"))

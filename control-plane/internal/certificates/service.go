@@ -443,8 +443,9 @@ func (s *Service) CreateP12(ctx context.Context, request P12Request) (ArtifactGr
 	}
 	var workspaceID, nodeID uuid.UUID
 	var chain []byte
+	var serialNumber string
 	var certificateVersion int64
-	if err := s.pool.QueryRow(ctx, `SELECT workspace_id,node_id,certificate_chain_pem,version FROM certificates WHERE id=$1 AND state IN ('issued','expiring') AND not_after>now()`, request.CertificateID).Scan(&workspaceID, &nodeID, &chain, &certificateVersion); err != nil {
+	if err := s.pool.QueryRow(ctx, `SELECT workspace_id,node_id,certificate_chain_pem,serial_number,version FROM certificates WHERE id=$1 AND state IN ('issued','expiring') AND not_after>now()`, request.CertificateID).Scan(&workspaceID, &nodeID, &chain, &serialNumber, &certificateVersion); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return ArtifactGrant{}, false, ErrNotReady
 		}
@@ -491,7 +492,7 @@ func (s *Service) CreateP12(ctx context.Context, request P12Request) (ArtifactGr
 	artifactID := request.ArtifactRequestID
 	expiresAt := s.now().Add(10 * time.Minute)
 	tokenHash := sha256.Sum256([]byte(token))
-	approvalHash, _, err := certificateActionBinding("certificate.private_key.export", request.CertificateID, nodeID, certificateVersion, "certificate_p12", artifactID, "", chain)
+	approvalHash, _, err := certificateActionBinding("certificate.private_key.export", request.CertificateID, nodeID, certificateVersion, "certificate_p12", artifactID, serialNumber, chain)
 	if err != nil {
 		return ArtifactGrant{}, false, err
 	}
