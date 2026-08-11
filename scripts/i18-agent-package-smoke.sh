@@ -161,7 +161,7 @@ sudo test -f "${rootfs}/usr/lib/systemd/system/ocservia-agent.service.d/10-produ
   || { echo "production relay drop-in is missing" >&2; exit 1; }
 
 production_agent_exec_start() {
-  awk '
+  sudo awk '
     /^ExecStart=/ {
       value = substr($0, length("ExecStart=") + 1)
       if (value == "") {
@@ -197,9 +197,9 @@ expected_production_agent_exec_start="/usr/libexec/ocservia/ocservia-agent --con
 assert_production_agent_exec_start
 assert_privd_command_authority() {
   local unit="${rootfs}/usr/lib/systemd/system/ocservia-privd.service"
-  grep -Fxq 'EnvironmentFile=/etc/ocservia-agent/agent.env' "${unit}" \
+  sudo grep -Fxq 'EnvironmentFile=/etc/ocservia-agent/agent.env' "${unit}" \
     || { echo "privd does not load the pinned node/key environment" >&2; exit 1; }
-  grep -Fxq "ExecStart=/usr/libexec/ocservia/ocservia-privd --agent-uid \$AGENT_UID --node-id \$NODE_ID --controller-command-key-file \$CONTROLLER_COMMAND_VERIFICATION_KEY_FILE --user-password-seal-key-file \$USER_PASSWORD_SEAL_PRIVATE_KEY_FILE --user-password-seal-key-id \$USER_PASSWORD_SEAL_KEY_ID --user-password-seal-public-key-sha256 \$USER_PASSWORD_SEAL_PUBLIC_KEY_SHA256 --p12-password-seal-key-file \$P12_PASSWORD_SEAL_PRIVATE_KEY_FILE --p12-password-seal-key-id \$P12_PASSWORD_SEAL_KEY_ID --p12-password-seal-public-key-sha256 \$P12_PASSWORD_SEAL_PUBLIC_KEY_SHA256" "${unit}" \
+  sudo grep -Fxq "ExecStart=/usr/libexec/ocservia/ocservia-privd --agent-uid \$AGENT_UID --node-id \$NODE_ID --controller-command-key-file \$CONTROLLER_COMMAND_VERIFICATION_KEY_FILE --user-password-seal-key-file \$USER_PASSWORD_SEAL_PRIVATE_KEY_FILE --user-password-seal-key-id \$USER_PASSWORD_SEAL_KEY_ID --user-password-seal-public-key-sha256 \$USER_PASSWORD_SEAL_PUBLIC_KEY_SHA256 --p12-password-seal-key-file \$P12_PASSWORD_SEAL_PRIVATE_KEY_FILE --p12-password-seal-key-id \$P12_PASSWORD_SEAL_KEY_ID --p12-password-seal-public-key-sha256 \$P12_PASSWORD_SEAL_PUBLIC_KEY_SHA256" "${unit}" \
     || { echo "privd does not independently pin command authority" >&2; exit 1; }
 }
 assert_privd_command_authority
@@ -213,29 +213,31 @@ NODE_ID=00000000-0000-7000-8000-000000000000
 EOF
 sudo install -o root -g 61000 -m 0640 "${work}/legacy-agent.env" \
   "${rootfs}/etc/ocservia-agent/agent.env"
-sed -e 's/ --controller-command-key-file [^ ]*//' \
+sudo sed -e 's/ --controller-command-key-file [^ ]*//' \
   -e 's/ --user-password-seal-key-id [^ ]*//' \
   -e 's/ --user-password-seal-public-key-sha256 [^ ]*//' \
   -e 's/ --p12-password-seal-key-id [^ ]*//' \
   -e 's/ --p12-password-seal-public-key-sha256 [^ ]*//' \
-  "${rootfs}/usr/lib/systemd/system/ocservia-agent.service" >"${work}/legacy-agent.service"
+  "${rootfs}/usr/lib/systemd/system/ocservia-agent.service" \
+  | tee "${work}/legacy-agent.service" >/dev/null
 sudo install -o root -g root -m 0644 "${work}/legacy-agent.service" \
   "${rootfs}/usr/lib/systemd/system/ocservia-agent.service"
-sed -e 's/ --controller-command-key-file [^ ]*//' \
+sudo sed -e 's/ --controller-command-key-file [^ ]*//' \
   -e 's/ --user-password-seal-key-id [^ ]*//' \
   -e 's/ --user-password-seal-public-key-sha256 [^ ]*//' \
   -e 's/ --p12-password-seal-key-id [^ ]*//' \
   -e 's/ --p12-password-seal-public-key-sha256 [^ ]*//' \
   "${rootfs}/usr/lib/systemd/system/ocservia-agent.service.d/10-production-relays.conf" \
-  >"${work}/legacy-agent-relays.conf"
+  | tee "${work}/legacy-agent-relays.conf" >/dev/null
 sudo install -o root -g root -m 0644 "${work}/legacy-agent-relays.conf" \
   "${rootfs}/usr/lib/systemd/system/ocservia-agent.service.d/10-production-relays.conf"
-sed -e '/^EnvironmentFile=\/etc\/ocservia-agent\/agent.env$/d' \
+sudo sed -e '/^EnvironmentFile=\/etc\/ocservia-agent\/agent.env$/d' \
   -e 's/ --node-id .*//' \
-  "${rootfs}/usr/lib/systemd/system/ocservia-privd.service" >"${work}/legacy-privd.service"
+  "${rootfs}/usr/lib/systemd/system/ocservia-privd.service" \
+  | tee "${work}/legacy-privd.service" >/dev/null
 sudo install -o root -g root -m 0644 "${work}/legacy-privd.service" \
   "${rootfs}/usr/lib/systemd/system/ocservia-privd.service"
-if grep -Fq -- '--controller-command-key-file' \
+if sudo grep -Fq -- '--controller-command-key-file' \
   "${rootfs}/usr/lib/systemd/system/ocservia-agent.service" \
   "${rootfs}/usr/lib/systemd/system/ocservia-agent.service.d/10-production-relays.conf" \
   "${rootfs}/usr/lib/systemd/system/ocservia-privd.service"; then
@@ -591,7 +593,7 @@ sudo cmp -s "${work}/legacy-privd.service" \
   "${rootfs}/usr/lib/systemd/system/ocservia-privd.service"
 sudo cmp -s "${work}/legacy-agent-relays.conf" \
   "${rootfs}/usr/lib/systemd/system/ocservia-agent.service.d/10-production-relays.conf"
-grep -Fxq "ExecStart=/usr/libexec/ocservia/ocservia-privd --agent-uid \$AGENT_UID" \
+sudo grep -Fxq "ExecStart=/usr/libexec/ocservia/ocservia-privd --agent-uid \$AGENT_UID" \
   "${rootfs}/usr/lib/systemd/system/ocservia-privd.service"
 sudo "${rootfs}/usr/libexec/ocservia/ocservia-privd" --agent-uid 61000 \
   | grep -Fxq 'legacy privd arguments accepted'
