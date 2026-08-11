@@ -375,6 +375,7 @@ sudo install -o root -g root -m 0600 "${work}/p12-password-seal-private.pem" \
 	printf 'legacy-p12' >"${work}/legacy-artifact.p12"
 	sudo install -o root -g 61000 -m 0640 "${work}/legacy-artifact.p12" \
 	  "${legacy_artifact_dir}/${legacy_artifact_id}.p12"
+	chmod 0711 "${work}"
 	sudo setpriv --reuid=61000 --regid=61000 --clear-groups \
 	  test -r "${legacy_artifact_dir}/${legacy_artifact_id}.p12" \
 	  || { echo "legacy fixture was not readable by the Agent UID" >&2; exit 1; }
@@ -389,6 +390,7 @@ sudo install -o root -g root -m 0600 "${work}/p12-password-seal-private.pem" \
 	  echo "Agent UID retained access to a legacy P12 after upgrade" >&2
 	  exit 1
 	fi
+	chmod 0700 "${work}"
 	test "$(sudo stat -c '%u:%g:%a' -- "${rootfs}/etc/ocservia-agent/sealing-keys-bound")" = "0:0:600"
 	sudo grep -Fxq "node_id=00000000-0000-7000-8000-000000000000" \
 	  "${rootfs}/etc/ocservia-agent/sealing-keys-bound"
