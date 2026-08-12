@@ -1,22 +1,27 @@
 package telemetry
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"math"
 	"net"
 	"regexp"
 	"slices"
+	"strings"
 	"time"
+	"unicode/utf8"
 
 	agentv1 "github.com/GentleKingson/ocservia/control-plane/gen/proto/ocserv/platform/agent/v1"
 	"github.com/GentleKingson/ocservia/control-plane/internal/userusage"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"google.golang.org/protobuf/proto"
 )
@@ -319,6 +324,9 @@ func (s *Service) validateForIngest(batch Batch) (int, error) {
 }
 
 func (s *Service) ingestTx(ctx context.Context, tx pgx.Tx, batch Batch, payloadBytes int) (bool, error) {
+	if err := validatePostgresJSONDocuments(ctx, tx, batch); err != nil {
+		return false, err
+	}
 	result, err := tx.Exec(ctx, `INSERT INTO telemetry_ingest_batches
 		(batch_id,node_id,sequence,kind,observed_at,payload_bytes) VALUES ($1,$2,$3,$4,$5,$6)
 		ON CONFLICT DO NOTHING`, batch.ID, batch.NodeID, batch.Sequence, batch.Kind, batch.Snapshot.ObservedAt, payloadBytes)
@@ -428,11 +436,11 @@ func validateBatch(batch Batch, now time.Time) error {
 	}
 	earliest := now.Add(-MaxTelemetryAge)
 	latest := now.Add(MaxTelemetrySkew)
-	if batch.Snapshot.ObservedAt.IsZero() || batch.Snapshot.ObservedAt.Before(earliest) || batch.Snapshot.ObservedAt.After(latest) || len(batch.Snapshot.BootID) == 0 || len(batch.Snapshot.BootID) > 128 || batch.Snapshot.AgentInstance == uuid.Nil {
+	if batch.Snapshot.ObservedAt.IsZero() || batch.Snapshot.ObservedAt.Before(earliest) || batch.Snapshot.ObservedAt.After(latest) || !validPostgresText(batch.Snapshot.BootID, 128) || batch.Snapshot.AgentInstance == uuid.Nil {
 		return errors.New("observed snapshot identity or time is invalid")
 	}
 	for _, value := range []string{batch.Snapshot.AgentVersion, batch.Snapshot.OcservVersion, batch.Snapshot.OSRelease} {
-		if len(value) == 0 || len(value) > 128 {
+		if !validPostgresText(value, 128) {
 			return errors.New("observed version is invalid")
 		}
 	}
@@ -500,7 +508,7 @@ func validateBatch(batch Batch, now time.Time) error {
 	}
 	sessionIDs := make(map[string]struct{}, len(batch.Sessions))
 	for _, session := range batch.Sessions {
-		if session.ID == "" || len(session.ID) > 256 || !namePattern.MatchString(session.Username) || net.ParseIP(session.ClientIP) == nil || session.BytesIn < 0 || session.BytesOut < 0 || session.ConnectedAt.IsZero() {
+		if !validPostgresText(session.ID, 256) || !namePattern.MatchString(session.Username) || net.ParseIP(session.ClientIP) == nil || session.BytesIn < 0 || session.BytesOut < 0 || session.ConnectedAt.IsZero() {
 			return errors.New("session observation is invalid")
 		}
 		if !insertUnique(sessionIDs, session.ID) {
@@ -513,7 +521,7 @@ func validateBatch(batch Batch, now time.Time) error {
 		}
 	}
 	for _, event := range batch.Security {
-		if event.ID == uuid.Nil || event.ID.Version() != 7 || event.ObservedAt.IsZero() || event.ObservedAt.Before(earliest) || event.ObservedAt.After(latest) || (event.Severity != "info" && event.Severity != "warning" && event.Severity != "critical") || event.Type == "" || len(event.Type) > 128 || !validObject(event.Detail) {
+		if event.ID == uuid.Nil || event.ID.Version() != 7 || event.ObservedAt.IsZero() || event.ObservedAt.Before(earliest) || event.ObservedAt.After(latest) || (event.Severity != "info" && event.Severity != "warning" && event.Severity != "critical") || !validPostgresText(event.Type, 128) || !validObject(event.Detail) {
 			return errors.New("security telemetry is invalid")
 		}
 	}
@@ -528,9 +536,49 @@ func insertUnique[T comparable](values map[T]struct{}, value T) bool {
 	return true
 }
 
+func validPostgresText(value string, maxBytes int) bool {
+	return value != "" && len(value) <= maxBytes && utf8.ValidString(value) && strings.IndexByte(value, 0) < 0
+}
+
 func validObject(value json.RawMessage) bool {
+	if len(value) == 0 || !utf8.Valid(value) {
+		return false
+	}
+	decoder := json.NewDecoder(bytes.NewReader(value))
+	decoder.UseNumber()
 	var object map[string]any
-	return len(value) > 0 && json.Unmarshal(value, &object) == nil && object != nil
+	if err := decoder.Decode(&object); err != nil || object == nil {
+		return false
+	}
+	return decoder.Decode(&struct{}{}) == io.EOF
+}
+
+func validatePostgresJSONDocuments(ctx context.Context, tx pgx.Tx, batch Batch) error {
+	documents := make([]json.RawMessage, 0, 3+len(batch.Security))
+	documents = append(documents, batch.Snapshot.Ocserv, batch.Snapshot.System, batch.Snapshot.Path)
+	for _, event := range batch.Security {
+		documents = append(documents, event.Detail)
+	}
+	encoded, err := json.Marshal(documents)
+	if err != nil {
+		return fmt.Errorf("%w: encode JSON documents", ErrInvalidTelemetry)
+	}
+	var documentCount int
+	err = tx.QueryRow(ctx, `SELECT jsonb_array_length($1::jsonb)`, string(encoded)).Scan(&documentCount)
+	if err != nil {
+		var postgresError *pgconn.PgError
+		// This statement performs only the input cast, so its data exceptions
+		// describe deterministic payload incompatibility rather than a failed
+		// business write. Operational database errors remain retryable.
+		if errors.As(err, &postgresError) && (strings.HasPrefix(postgresError.Code, "22") || postgresError.Code == "54001") {
+			return fmt.Errorf("%w: JSON document is not PostgreSQL-compatible", ErrInvalidTelemetry)
+		}
+		return fmt.Errorf("validate telemetry JSON storage compatibility: %w", err)
+	}
+	if documentCount != len(documents) {
+		return fmt.Errorf("%w: JSON document count changed during validation", ErrInvalidTelemetry)
+	}
+	return nil
 }
 
 func (s *Service) ListNodes(ctx context.Context, after uuid.UUID, limit int) ([]Node, bool, error) {

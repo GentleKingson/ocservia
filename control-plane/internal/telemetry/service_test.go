@@ -108,6 +108,64 @@ func TestValidateBatchRejectsSessionUsernameOutsideUsageSchema(t *testing.T) {
 	}
 }
 
+func TestValidateBatchRejectsPostgresUnsafeText(t *testing.T) {
+	now := time.Now().UTC()
+	tests := []struct {
+		name   string
+		mutate func(*Batch)
+	}{
+		{name: "boot ID", mutate: func(batch *Batch) { batch.Snapshot.BootID = "boot\x00poison" }},
+		{name: "Agent version", mutate: func(batch *Batch) { batch.Snapshot.AgentVersion = "agent\x00poison" }},
+		{name: "ocserv version", mutate: func(batch *Batch) { batch.Snapshot.OcservVersion = "ocserv\x00poison" }},
+		{name: "OS release", mutate: func(batch *Batch) { batch.Snapshot.OSRelease = "os\x00poison" }},
+		{name: "session ID", mutate: func(batch *Batch) { batch.Sessions[0].ID = "session\x00poison" }},
+		{name: "security event type", mutate: func(batch *Batch) {
+			batch.Security = []SecurityEvent{{ID: uuid.Must(uuid.NewV7()), ObservedAt: now, Severity: "warning", Type: "event\x00poison", Detail: json.RawMessage(`{}`)}}
+		}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			batch := testBatch(uuid.Must(uuid.NewV7()), 1, now)
+			test.mutate(&batch)
+			if err := validateBatch(batch, now); err == nil {
+				t.Fatal("PostgreSQL-unsafe telemetry text was accepted")
+			}
+		})
+	}
+}
+
+func TestValidateBatchRejectsInvalidUTF8JSON(t *testing.T) {
+	now := time.Now().UTC()
+	batch := testBatch(uuid.Must(uuid.NewV7()), 1, now)
+	batch.Snapshot.Path = json.RawMessage([]byte{'{', '"', 'x', '"', ':', '"', 0xff, '"', '}'})
+	if err := validateBatch(batch, now); err == nil {
+		t.Fatal("invalid UTF-8 telemetry JSON was accepted")
+	}
+}
+
+func TestValidObjectAcceptsPostgresSafeUnicode(t *testing.T) {
+	for _, document := range []json.RawMessage{
+		json.RawMessage(`{"label":"replacement �"}`),
+		json.RawMessage(`{"label":"\ud83d\ude00"}`),
+		json.RawMessage(`{"escaped":"\\u0000"}`),
+	} {
+		if !validObject(document) {
+			t.Fatalf("PostgreSQL-safe JSON rejected: %s", document)
+		}
+	}
+}
+
+func TestValidObjectDefersPostgresSpecificConstraints(t *testing.T) {
+	for _, document := range []json.RawMessage{
+		json.RawMessage(`{"label":"\u0000"}`),
+		json.RawMessage(`{"outside_postgres_numeric":1e131072}`),
+	} {
+		if !validObject(document) {
+			t.Fatalf("syntactically valid JSON did not reach PostgreSQL compatibility validation: %s", document)
+		}
+	}
+}
+
 func TestValidateBatchRejectsTelemetryOutsideRetentionWindow(t *testing.T) {
 	now := time.Now().UTC()
 	tests := []struct {
