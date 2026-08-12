@@ -44,8 +44,19 @@ restore, and binary rollback.
 cd rust
 cargo build --locked --release --package ocservia-agent --package ocservia-privd
 cd ..
-sudo ./scripts/install-agent.sh
+OUTPUT_DIR=dist AGENT_SIGNING_KEY=/secure/release-ed25519.key \
+  VERSION=1.0.0 SOURCE_DATE_EPOCH=1786147200 ./scripts/package-agent.sh
+VERIFIED_PACKAGE="$(sudo AGENT_TRUSTED_KEY_SHA256=<pinned-public-key-der-sha256> \
+  ./scripts/verify-agent-package.sh dist/ocservia-agent-1.0.0-linux-amd64.tar.gz \
+  dist/ocservia-agent-1.0.0-linux-amd64.tar.gz.sha256 \
+  dist/ocservia-agent-1.0.0-linux-amd64.tar.gz.sha256.sig \
+  /etc/ocservia/release-signing.pub.pem)"
+sudo "${VERIFIED_PACKAGE}/scripts/install-agent.sh"
 ```
+
+The verifier is the only supported extraction path. It stages and verifies the
+exact archive below root-only `/var/lib/ocservia-upgrade/package-staging`; the
+installer refuses a source tree or an independently extracted download.
 
 Before enabling the units, install the independently provisioned Controller
 command verification key and two distinct RSA private keys for user-password
@@ -87,15 +98,20 @@ an existing enrollment configuration. Before changing any installed file,
 `upgrade-agent.sh` rejects legacy configuration that does not name a valid,
 safely provisioned Ed25519 Controller command verification key. After this
 preflight it keeps one matched snapshot of the previous binary pair, base
-systemd units, and production relay drop-in state under the private state
-directory before restarting the units.
+systemd units, and production relay drop-in state under the root-only
+`/var/lib/ocservia-upgrade` hierarchy, outside privd's systemd-managed runtime
+state, before restarting the units. Privd publishes `/etc/ocserv/ocpasswd`
+as a one-link `root:root` mode `0600` regular file through descriptor-relative,
+no-follow operations and rejects unsafe legacy ownership, modes, links, or
+parent ancestry instead of inheriting them.
 
 ## Rollback and removal
 
 Run `sudo /usr/libexec/ocservia/ocservia-agent-rollback` to roll back an
 upgrade. It validates and restores the Agent binary, privd binary, both base
 units, and the relay drop-in state from
-`/var/lib/ocservia-agent/upgrade-backup`, then reloads systemd and starts privd
+`/var/lib/ocservia-upgrade/upgrade-backup`, after verifying its root-only
+ancestry and trusted digest manifest. It then reloads systemd and starts privd
 before the Agent. Restoring either binary without its matched unit and peer
 binary is unsupported.
 

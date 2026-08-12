@@ -33,5 +33,5 @@ grep -Fxq 'ExecStart=/usr/libexec/ocservia/ocservia-privd --agent-uid $AGENT_UID
 grep -Fxq 'RestrictAddressFamilies=AF_UNIX AF_NETLINK' "${ROOT}/deploy/systemd/ocservia-privd.service"
 grep -Fxq 'IPAddressDeny=any' "${ROOT}/deploy/systemd/ocservia-privd.service"
 grep -Fxq 'StateDirectory=ocservia-privd' "${ROOT}/deploy/systemd/ocservia-privd.service"
-grep -Fxq 'StateDirectoryMode=0710' "${ROOT}/deploy/systemd/ocservia-privd.service"
+grep -Fxq 'StateDirectoryMode=0700' "${ROOT}/deploy/systemd/ocservia-privd.service"
 grep -Fxq 'ReadWritePaths=-/etc/ocserv /var/lib/ocservia-privd' "${ROOT}/deploy/systemd/ocservia-privd.service"

@@ -1,5 +1,12 @@
 #!/usr/bin/env bash
-set -euo pipefail
+set -Eeuo pipefail
+
+report_error_line() {
+  local status=$?
+  printf 'agent package lifecycle failed at line %s\n' "${BASH_LINENO[0]:-unknown}" >&2
+  return "${status}"
+}
+trap report_error_line ERR
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 RUN_ID="${RUN_ID:?RUN_ID is required}"
@@ -9,11 +16,34 @@ if [[ "${RUN_ID}" == *[^a-zA-Z0-9._-]* ]]; then
   exit 2
 fi
 work="${RUNNER_TEMP:-/tmp}/ocservia-i18-package-${RUN_ID}"
+rootfs="${work}/rootfs"
+verified_staging=""
+systemd_unit=""
+systemd_state_name=""
+systemd_test_group="$(id -gn)"
+systemd_test_gid="$(id -g)"
+if [[ "${systemd_test_gid}" == 0 ]]; then
+  echo "systemd ownership fixture requires a real non-root host group" >&2
+  exit 2
+fi
 mkdir -p "${work}" "${ARTIFACT_DIR}"
 chmod 0700 "${work}"
+sudo install -d -o root -g root -m 0700 -- "${rootfs}"
 cleanup() {
   local status=$?
-  sudo rm -rf -- "${work}" || status=1
+  local load_state=""
+  if [[ -n "${systemd_unit}" ]]; then
+    load_state="$(sudo systemctl show --property=LoadState --value "${systemd_unit}" 2>/dev/null || true)"
+    if [[ -n "${load_state}" && "${load_state}" != "not-found" ]]; then
+      sudo systemctl stop "${systemd_unit}" >/dev/null 2>&1 || status=1
+      sudo systemctl reset-failed "${systemd_unit}" >/dev/null 2>&1 || status=1
+    fi
+  fi
+  if [[ "${systemd_state_name}" == ocservia-i18-state-* ]]; then
+    sudo rm -rf -- "/var/lib/${systemd_state_name}" || status=1
+  fi
+  sudo rm -rf -- "${rootfs}" || status=1
+  rm -rf -- "${work}" || status=1
   exit "${status}"
 }
 trap cleanup EXIT INT TERM
@@ -55,33 +85,127 @@ openssl pkey -in "${work}/controller-command.key" -pubout \
   -out "${work}/controller-command.pub.pem" >/dev/null 2>&1
 archive="$(OUTPUT_DIR="${ARTIFACT_DIR}" AGENT_SIGNING_KEY="${work}/signing.key" VERSION=1.0.0 \
   SOURCE_DATE_EPOCH=1786147200 "${ROOT}/scripts/package-agent.sh")"
-AGENT_TRUSTED_KEY_SHA256="${trusted_fingerprint}" "${ROOT}/scripts/verify-agent-package.sh" "${archive}" "${archive}.sha256" \
-  "${archive}.sha256.sig" "${work}/trusted.pub.pem" >"${ARTIFACT_DIR}/verification.log"
-echo "agent package signature verification passed"
 
 openssl genpkey -algorithm ED25519 -out "${work}/substitute.key" >/dev/null 2>&1
 openssl pkey -in "${work}/substitute.key" -pubout -out "${work}/substitute.pub.pem" >/dev/null 2>&1
 openssl pkeyutl -sign -rawin -inkey "${work}/substitute.key" -in "${archive}.sha256" -out "${work}/substitute.sig"
-if AGENT_TRUSTED_KEY_SHA256="${trusted_fingerprint}" "${ROOT}/scripts/verify-agent-package.sh" \
+if sudo env DESTDIR="${rootfs}" AGENT_TRUSTED_KEY_SHA256="${trusted_fingerprint}" "${ROOT}/scripts/verify-agent-package.sh" \
   "${archive}" "${archive}.sha256" "${work}/substitute.sig" "${work}/substitute.pub.pem" >/dev/null 2>&1; then
   echo "substituted package signing key was trusted" >&2
   exit 1
 fi
 echo "agent package signer substitution rejection passed"
 
-tar -xzf "${archive}" -C "${work}"
-package_root="${work}/ocservia-agent-1.0.0"
-rootfs="${work}/rootfs"
-grep -Fxq 'agent_protocol=1.1' "${package_root}/MANIFEST"
-mkdir -p "${rootfs}"
+same_name_archive_dir="${work}/same-name/archive"
+same_name_manifest_dir="${work}/same-name/manifest"
+mkdir -p "${same_name_archive_dir}" "${same_name_manifest_dir}"
+archive_name="$(basename -- "${archive}")"
+cp -- "${archive}" "${same_name_archive_dir}/${archive_name}"
+cp -- "${archive}.sha256" "${same_name_archive_dir}/${archive_name}.sha256"
+printf '%064d  %s\n' 0 "${archive_name}" >"${same_name_manifest_dir}/${archive_name}.sha256"
+openssl pkeyutl -sign -rawin -inkey "${work}/signing.key" \
+  -in "${same_name_manifest_dir}/${archive_name}.sha256" \
+  -out "${same_name_manifest_dir}/${archive_name}.sha256.sig"
+if sudo env DESTDIR="${rootfs}" AGENT_TRUSTED_KEY_SHA256="${trusted_fingerprint}" \
+  "${ROOT}/scripts/verify-agent-package.sh" \
+  "${same_name_archive_dir}/${archive_name}" \
+  "${same_name_manifest_dir}/${archive_name}.sha256" \
+  "${same_name_manifest_dir}/${archive_name}.sha256.sig" \
+  "${work}/trusted.pub.pem" >/dev/null 2>&1; then
+  echo "verifier reopened a same-basename checksum beside the archive" >&2
+  exit 1
+fi
+echo "same-basename checksum substitution rejection passed"
+
+cp -- "${archive}.sha256" "${work}/-checksum"
+if sudo env DESTDIR="${rootfs}" AGENT_TRUSTED_KEY_SHA256="${trusted_fingerprint}" \
+  "${ROOT}/scripts/verify-agent-package.sh" "${archive}" "${work}/-checksum" \
+  "${archive}.sha256.sig" "${work}/trusted.pub.pem" >/dev/null 2>&1; then
+  echo "verifier accepted an option-like input basename" >&2
+  exit 1
+fi
+echo "option-like input basename rejection passed"
+
+evil_root="${work}/evil/ocservia-agent-9.9.9"
+mkdir -p "${evil_root}/scripts" "${evil_root}/rust/target/release"
+for required in MANIFEST scripts/install-agent.sh scripts/upgrade-agent.sh scripts/rollback-agent.sh \
+  scripts/uninstall-agent.sh rust/target/release/ocservia-agent rust/target/release/ocservia-privd; do
+  : >"${evil_root}/${required}"
+done
+ln -s /etc/shadow "${evil_root}/shadow-link"
+evil_archive="${work}/ocservia-agent-9.9.9-linux-amd64.tar.gz"
+tar -C "${work}/evil" -czf "${evil_archive}" ocservia-agent-9.9.9
+printf '%s  %s\n' "$(sha256sum -- "${evil_archive}" | awk '{print $1}')" \
+  "$(basename -- "${evil_archive}")" >"${evil_archive}.sha256"
+openssl pkeyutl -sign -rawin -inkey "${work}/signing.key" \
+  -in "${evil_archive}.sha256" -out "${evil_archive}.sha256.sig"
+if sudo env DESTDIR="${rootfs}" AGENT_TRUSTED_KEY_SHA256="${trusted_fingerprint}" \
+  "${ROOT}/scripts/verify-agent-package.sh" "${evil_archive}" "${evil_archive}.sha256" \
+  "${evil_archive}.sha256.sig" "${work}/trusted.pub.pem" >/dev/null 2>&1; then
+  echo "verifier accepted an archive symlink member" >&2
+  exit 1
+fi
+echo "archive link member rejection passed"
+
+mkdir -p "${work}/download"
+download_archive="${work}/download/${archive_name}"
+cp -- "${archive}" "${download_archive}"
+package_root="$(sudo env DESTDIR="${rootfs}" AGENT_TRUSTED_KEY_SHA256="${trusted_fingerprint}" \
+  "${ROOT}/scripts/verify-agent-package.sh" "${download_archive}" "${archive}.sha256" \
+  "${archive}.sha256.sig" "${work}/trusted.pub.pem")"
+printf '%s\n' "${package_root}" >"${ARTIFACT_DIR}/verification.log"
+verified_staging="${package_root%%/extracted/*}"
+test "$(sudo stat -c '%u:%g:%a' -- "${verified_staging}")" = "0:0:700"
+sudo grep -Fxq 'agent_protocol=1.1' "${package_root}/MANIFEST"
+printf 'untrusted archive replaced after trusted staging\n' >"${download_archive}"
+
+sudo install -d -o 61000 -g 61000 -m 0700 -- \
+  "${rootfs}/var/lib/ocservia-agent"
+printf 'identity target' >"${work}/identity-target"
+identity_target_state="$(stat -c '%u:%g:%a:%h:%s' -- "${work}/identity-target")"
+sudo ln -s -- "${work}/identity-target" \
+  "${rootfs}/var/lib/ocservia-agent/identity"
+if sudo env DESTDIR="${rootfs}" AGENT_UID=61000 AGENT_GID=61000 \
+  "${package_root}/scripts/install-agent.sh" >/dev/null 2>&1; then
+  echo "installer accepted an Agent-controlled identity symlink" >&2
+  exit 1
+fi
+test "${identity_target_state}" = "$(stat -c '%u:%g:%a:%h:%s' -- "${work}/identity-target")" \
+  || { echo "rejected identity symlink changed its target" >&2; exit 1; }
+sudo test ! -e "${rootfs}/usr/libexec/ocservia/ocservia-agent"
+sudo rm -rf -- "${rootfs}/var/lib/ocservia-agent" "${rootfs}/usr" "${rootfs}/etc"
+echo "Agent-controlled install pathname rejection passed"
+
+for target in PREFIX SYSCONFDIR STATE_DIR PRIVD_STATE_DIR; do
+  if sudo env DESTDIR="${rootfs}" AGENT_UID=61000 AGENT_GID=61000 \
+    "${target}=relative/path" "${package_root}/scripts/install-agent.sh" >/dev/null 2>&1; then
+    echo "installer accepted relative ${target}" >&2
+    exit 1
+  fi
+done
+for unsafe_prefix in /usr/../usr /usr/./lib /usr//lib /usr/; do
+  if sudo env DESTDIR="${rootfs}" AGENT_UID=61000 AGENT_GID=61000 \
+    PREFIX="${unsafe_prefix}" "${package_root}/scripts/install-agent.sh" >/dev/null 2>&1; then
+    echo "installer accepted non-canonical PREFIX ${unsafe_prefix}" >&2
+    exit 1
+  fi
+done
+sudo test ! -e "${rootfs}/usr/libexec/ocservia/ocservia-agent" \
+  || { echo "rejected install target modified installed state" >&2; exit 1; }
+echo "absolute install destination validation passed"
+
 sudo env DESTDIR="${rootfs}" AGENT_UID=61000 AGENT_GID=61000 INSTALL_PRODUCTION_RELAYS=true \
   "${package_root}/scripts/install-agent.sh"
-test -x "${rootfs}/usr/libexec/ocservia/ocservia-agent" || { echo "installed Agent binary is missing" >&2; exit 1; }
-test -f "${rootfs}/usr/lib/systemd/system/ocservia-agent.service.d/10-production-relays.conf" \
+sudo cmp -s "${package_root}/rust/target/release/ocservia-agent" \
+  "${rootfs}/usr/libexec/ocservia/ocservia-agent" \
+  || { echo "install reopened the replaced untrusted archive" >&2; exit 1; }
+echo "agent package signature verification and trusted staging passed"
+sudo test -x "${rootfs}/usr/libexec/ocservia/ocservia-agent" || { echo "installed Agent binary is missing" >&2; exit 1; }
+sudo test -f "${rootfs}/usr/lib/systemd/system/ocservia-agent.service.d/10-production-relays.conf" \
   || { echo "production relay drop-in is missing" >&2; exit 1; }
 
 production_agent_exec_start() {
-  awk '
+  sudo awk '
     /^ExecStart=/ {
       value = substr($0, length("ExecStart=") + 1)
       if (value == "") {
@@ -117,9 +241,9 @@ expected_production_agent_exec_start="/usr/libexec/ocservia/ocservia-agent --con
 assert_production_agent_exec_start
 assert_privd_command_authority() {
   local unit="${rootfs}/usr/lib/systemd/system/ocservia-privd.service"
-  grep -Fxq 'EnvironmentFile=/etc/ocservia-agent/agent.env' "${unit}" \
+  sudo grep -Fxq 'EnvironmentFile=/etc/ocservia-agent/agent.env' "${unit}" \
     || { echo "privd does not load the pinned node/key environment" >&2; exit 1; }
-  grep -Fxq "ExecStart=/usr/libexec/ocservia/ocservia-privd --agent-uid \$AGENT_UID --node-id \$NODE_ID --controller-command-key-file \$CONTROLLER_COMMAND_VERIFICATION_KEY_FILE --user-password-seal-key-file \$USER_PASSWORD_SEAL_PRIVATE_KEY_FILE --user-password-seal-key-id \$USER_PASSWORD_SEAL_KEY_ID --user-password-seal-public-key-sha256 \$USER_PASSWORD_SEAL_PUBLIC_KEY_SHA256 --p12-password-seal-key-file \$P12_PASSWORD_SEAL_PRIVATE_KEY_FILE --p12-password-seal-key-id \$P12_PASSWORD_SEAL_KEY_ID --p12-password-seal-public-key-sha256 \$P12_PASSWORD_SEAL_PUBLIC_KEY_SHA256" "${unit}" \
+  sudo grep -Fxq "ExecStart=/usr/libexec/ocservia/ocservia-privd --agent-uid \$AGENT_UID --node-id \$NODE_ID --controller-command-key-file \$CONTROLLER_COMMAND_VERIFICATION_KEY_FILE --user-password-seal-key-file \$USER_PASSWORD_SEAL_PRIVATE_KEY_FILE --user-password-seal-key-id \$USER_PASSWORD_SEAL_KEY_ID --user-password-seal-public-key-sha256 \$USER_PASSWORD_SEAL_PUBLIC_KEY_SHA256 --p12-password-seal-key-file \$P12_PASSWORD_SEAL_PRIVATE_KEY_FILE --p12-password-seal-key-id \$P12_PASSWORD_SEAL_KEY_ID --p12-password-seal-public-key-sha256 \$P12_PASSWORD_SEAL_PUBLIC_KEY_SHA256" "${unit}" \
     || { echo "privd does not independently pin command authority" >&2; exit 1; }
 }
 assert_privd_command_authority
@@ -133,29 +257,31 @@ NODE_ID=00000000-0000-7000-8000-000000000000
 EOF
 sudo install -o root -g 61000 -m 0640 "${work}/legacy-agent.env" \
   "${rootfs}/etc/ocservia-agent/agent.env"
-sed -e 's/ --controller-command-key-file [^ ]*//' \
+sudo sed -e 's/ --controller-command-key-file [^ ]*//' \
   -e 's/ --user-password-seal-key-id [^ ]*//' \
   -e 's/ --user-password-seal-public-key-sha256 [^ ]*//' \
   -e 's/ --p12-password-seal-key-id [^ ]*//' \
   -e 's/ --p12-password-seal-public-key-sha256 [^ ]*//' \
-  "${rootfs}/usr/lib/systemd/system/ocservia-agent.service" >"${work}/legacy-agent.service"
+  "${rootfs}/usr/lib/systemd/system/ocservia-agent.service" \
+  | tee "${work}/legacy-agent.service" >/dev/null
 sudo install -o root -g root -m 0644 "${work}/legacy-agent.service" \
   "${rootfs}/usr/lib/systemd/system/ocservia-agent.service"
-sed -e 's/ --controller-command-key-file [^ ]*//' \
+sudo sed -e 's/ --controller-command-key-file [^ ]*//' \
   -e 's/ --user-password-seal-key-id [^ ]*//' \
   -e 's/ --user-password-seal-public-key-sha256 [^ ]*//' \
   -e 's/ --p12-password-seal-key-id [^ ]*//' \
   -e 's/ --p12-password-seal-public-key-sha256 [^ ]*//' \
   "${rootfs}/usr/lib/systemd/system/ocservia-agent.service.d/10-production-relays.conf" \
-  >"${work}/legacy-agent-relays.conf"
+  | tee "${work}/legacy-agent-relays.conf" >/dev/null
 sudo install -o root -g root -m 0644 "${work}/legacy-agent-relays.conf" \
   "${rootfs}/usr/lib/systemd/system/ocservia-agent.service.d/10-production-relays.conf"
-sed -e '/^EnvironmentFile=\/etc\/ocservia-agent\/agent.env$/d' \
+sudo sed -e '/^EnvironmentFile=\/etc\/ocservia-agent\/agent.env$/d' \
   -e 's/ --node-id .*//' \
-  "${rootfs}/usr/lib/systemd/system/ocservia-privd.service" >"${work}/legacy-privd.service"
+  "${rootfs}/usr/lib/systemd/system/ocservia-privd.service" \
+  | tee "${work}/legacy-privd.service" >/dev/null
 sudo install -o root -g root -m 0644 "${work}/legacy-privd.service" \
   "${rootfs}/usr/lib/systemd/system/ocservia-privd.service"
-if grep -Fq -- '--controller-command-key-file' \
+if sudo grep -Fq -- '--controller-command-key-file' \
   "${rootfs}/usr/lib/systemd/system/ocservia-agent.service" \
   "${rootfs}/usr/lib/systemd/system/ocservia-agent.service.d/10-production-relays.conf" \
   "${rootfs}/usr/lib/systemd/system/ocservia-privd.service"; then
@@ -239,7 +365,7 @@ capture_upgrade() {
 before_rejected_upgrade="$(installed_state)"
 assert_rejected_upgrade_untouched() {
   local reason="$1"
-  test ! -e "${rootfs}/var/lib/ocservia-agent/upgrade-backup" \
+  sudo test ! -e "${rootfs}/var/lib/ocservia-upgrade/upgrade-backup" \
     || { echo "${reason} created a backup directory" >&2; exit 1; }
   test "${before_rejected_upgrade}" = "$(installed_state)" \
     || { echo "${reason} modified installed files" >&2; exit 1; }
@@ -400,25 +526,145 @@ for backup in \
   ocservia-agent.service.previous \
   ocservia-privd.service.previous \
   ocservia-agent-relays.conf.previous; do
-  sudo test -f "${rootfs}/var/lib/ocservia-agent/upgrade-backup/${backup}" \
+  sudo test -f "${rootfs}/var/lib/ocservia-upgrade/upgrade-backup/${backup}" \
     || { echo "matched rollback snapshot is missing ${backup}" >&2; exit 1; }
 done
+backup_dir="${rootfs}/var/lib/ocservia-upgrade/upgrade-backup"
+test "$(sudo stat -c '%u:%g:%a' -- "${rootfs}/var/lib/ocservia-upgrade")" = "0:0:700"
+test "$(sudo stat -c '%u:%g:%a' -- "${backup_dir}")" = "0:0:700"
+test "$(sudo stat -c '%u:%g:%a:%h' -- "${backup_dir}/MANIFEST.sha256")" = "0:0:600:1"
+test "$(sudo awk 'END { print NR }' "${backup_dir}/MANIFEST.sha256")" -eq 5
+if sudo setpriv --reuid=61000 --regid=61000 --clear-groups test -r "${backup_dir}/ocservia-agent.previous"; then
+  echo "Agent UID can read a root-only rollback snapshot" >&2
+  exit 1
+fi
+if sudo setpriv --reuid=61000 --regid=61000 --clear-groups test -w "${backup_dir}"; then
+  echo "Agent UID can replace a root-only rollback snapshot" >&2
+  exit 1
+fi
+
+# Exercise the production StateDirectory ownership rule through the real host
+# service manager. A run-scoped state name avoids touching any installed
+# service while preserving the exact User/Group/StateDirectory semantics.
+# The runtime tree must follow User=root/Group=ocserv-agent, while rollback
+# evidence outside that tree remains root:root and usable afterwards.
+systemd_state_name="ocservia-i18-state-${RUN_ID:0:80}"
+systemd_unit="${systemd_state_name}.service"
+sudo install -d -o root -g root -m 0700 -- "/var/lib/${systemd_state_name}"
+sudo install -o root -g root -m 0600 -- /dev/null \
+  "/var/lib/${systemd_state_name}/systemd-ownership-sentinel"
+sudo systemd-run --wait --collect --unit="${systemd_unit}" \
+  --property=Type=oneshot \
+  --property=User=root \
+  --property=Group="${systemd_test_group}" \
+  --property=StateDirectory="${systemd_state_name}" \
+  --property=StateDirectoryMode=0700 \
+  /usr/bin/true
+test "$(sudo stat -c '%u:%g:%a' -- "/var/lib/${systemd_state_name}")" = "0:${systemd_test_gid}:700"
+test "$(sudo stat -c '%u:%g:%a' -- "/var/lib/${systemd_state_name}/systemd-ownership-sentinel")" = "0:${systemd_test_gid}:600"
+test "$(sudo stat -c '%u:%g:%a' -- "${rootfs}/var/lib/ocservia-upgrade")" = "0:0:700"
+test "$(sudo stat -c '%u:%g:%a' -- "${backup_dir}")" = "0:0:700"
+test "$(sudo stat -c '%u:%g:%a:%h' -- "${backup_dir}/MANIFEST.sha256")" = "0:0:600:1"
+for snapshot in \
+  ocservia-agent.previous \
+  ocservia-privd.previous \
+  ocservia-agent.service.previous \
+  ocservia-privd.service.previous \
+  ocservia-agent-relays.conf.previous; do
+  case "${snapshot}" in
+    ocservia-agent.previous|ocservia-privd.previous) expected_mode=755 ;;
+    *) expected_mode=644 ;;
+  esac
+  test "$(sudo stat -c '%u:%g:%a:%h' -- "${backup_dir}/${snapshot}")" = "0:0:${expected_mode}:1"
+done
+sudo rm -rf -- "/var/lib/${systemd_state_name}"
+systemd_state_name=""
+echo "systemd StateDirectory ownership isolation passed"
+
 assert_production_agent_exec_start
 assert_privd_command_authority
 echo "agent package upgrade passed"
 
-sudo test ! -e "${rootfs}/var/lib/ocservia-agent/upgrade-backup/ocservia-agent-relays.conf.absent" \
+sudo test ! -e "${backup_dir}/ocservia-agent-relays.conf.absent" \
   || { echo "rollback snapshot records conflicting relay states" >&2; exit 1; }
 sudo cmp -s "${work}/legacy-agent" \
-  "${rootfs}/var/lib/ocservia-agent/upgrade-backup/ocservia-agent.previous"
+  "${backup_dir}/ocservia-agent.previous"
 sudo cmp -s "${work}/legacy-privd" \
-  "${rootfs}/var/lib/ocservia-agent/upgrade-backup/ocservia-privd.previous"
+  "${backup_dir}/ocservia-privd.previous"
 sudo cmp -s "${work}/legacy-agent.service" \
-  "${rootfs}/var/lib/ocservia-agent/upgrade-backup/ocservia-agent.service.previous"
+  "${backup_dir}/ocservia-agent.service.previous"
 sudo cmp -s "${work}/legacy-privd.service" \
-  "${rootfs}/var/lib/ocservia-agent/upgrade-backup/ocservia-privd.service.previous"
+  "${backup_dir}/ocservia-privd.service.previous"
 sudo cmp -s "${work}/legacy-agent-relays.conf" \
-  "${rootfs}/var/lib/ocservia-agent/upgrade-backup/ocservia-agent-relays.conf.previous"
+  "${backup_dir}/ocservia-agent-relays.conf.previous"
+
+capture_rollback() {
+  local log="$1" output status
+  set +e
+  output="$(sudo env DESTDIR="${rootfs}" \
+    "${rootfs}/usr/libexec/ocservia/ocservia-agent-rollback" 2>&1)"
+  status=$?
+  set -e
+  printf '%s\n' "${output}" >"${log}"
+  return "${status}"
+}
+
+post_upgrade_state="$(installed_state)"
+assert_rejected_rollback_untouched() {
+  local reason="$1"
+  test "${post_upgrade_state}" = "$(installed_state)" \
+    || { echo "${reason} modified installed files" >&2; exit 1; }
+}
+
+printf 'replacement' >"${work}/replacement"
+sudo install -o root -g root -m 0755 "${work}/replacement" \
+  "${backup_dir}/ocservia-agent.previous"
+if capture_rollback "${ARTIFACT_DIR}/rollback-digest-replacement.log"; then
+  echo "rollback accepted a replaced binary" >&2
+  exit 1
+fi
+assert_rejected_rollback_untouched "rollback with replaced binary"
+sudo install -o root -g root -m 0755 "${work}/legacy-agent" \
+  "${backup_dir}/ocservia-agent.previous"
+
+sudo mv -- "${backup_dir}/ocservia-agent.previous" \
+  "${backup_dir}/ocservia-agent.previous.trusted"
+sudo ln -s -- "${backup_dir}/ocservia-agent.previous.trusted" \
+  "${backup_dir}/ocservia-agent.previous"
+if capture_rollback "${ARTIFACT_DIR}/rollback-symlink.log"; then
+  echo "rollback accepted a symlinked binary snapshot" >&2
+  exit 1
+fi
+assert_rejected_rollback_untouched "rollback with symlinked binary"
+sudo rm -- "${backup_dir}/ocservia-agent.previous"
+sudo mv -- "${backup_dir}/ocservia-agent.previous.trusted" \
+  "${backup_dir}/ocservia-agent.previous"
+
+sudo chown 61000:61000 -- "${backup_dir}/ocservia-agent.previous"
+if capture_rollback "${ARTIFACT_DIR}/rollback-owner.log"; then
+  echo "rollback accepted an Agent-owned binary snapshot" >&2
+  exit 1
+fi
+assert_rejected_rollback_untouched "rollback with Agent-owned binary"
+sudo chown root:root -- "${backup_dir}/ocservia-agent.previous"
+
+sudo chmod 0775 -- "${backup_dir}/ocservia-agent.previous"
+if capture_rollback "${ARTIFACT_DIR}/rollback-mode.log"; then
+  echo "rollback accepted a writable binary snapshot" >&2
+  exit 1
+fi
+assert_rejected_rollback_untouched "rollback with writable binary"
+sudo chmod 0755 -- "${backup_dir}/ocservia-agent.previous"
+
+sudo ln -- "${backup_dir}/ocservia-agent.previous" \
+  "${backup_dir}/ocservia-agent.previous.hardlink"
+if capture_rollback "${ARTIFACT_DIR}/rollback-hardlink.log"; then
+  echo "rollback accepted a hard-linked binary snapshot" >&2
+  exit 1
+fi
+assert_rejected_rollback_untouched "rollback with hard-linked binary"
+sudo rm -- "${backup_dir}/ocservia-agent.previous.hardlink"
+echo "rollback snapshot substitution rejection passed"
 
 sudo env DESTDIR="${rootfs}" \
   "${rootfs}/usr/libexec/ocservia/ocservia-agent-rollback"
@@ -430,7 +676,7 @@ sudo cmp -s "${work}/legacy-privd.service" \
   "${rootfs}/usr/lib/systemd/system/ocservia-privd.service"
 sudo cmp -s "${work}/legacy-agent-relays.conf" \
   "${rootfs}/usr/lib/systemd/system/ocservia-agent.service.d/10-production-relays.conf"
-grep -Fxq "ExecStart=/usr/libexec/ocservia/ocservia-privd --agent-uid \$AGENT_UID" \
+sudo grep -Fxq "ExecStart=/usr/libexec/ocservia/ocservia-privd --agent-uid \$AGENT_UID" \
   "${rootfs}/usr/lib/systemd/system/ocservia-privd.service"
 sudo "${rootfs}/usr/libexec/ocservia/ocservia-privd" --agent-uid 61000 \
   | grep -Fxq 'legacy privd arguments accepted'
@@ -445,8 +691,8 @@ sudo rm -f -- \
   "${rootfs}/usr/lib/systemd/system/ocservia-agent.service.d/10-production-relays.conf"
 sudo env DESTDIR="${rootfs}" AGENT_UID=61000 AGENT_GID=61000 INSTALL_PRODUCTION_RELAYS=true \
   "${package_root}/scripts/upgrade-agent.sh"
-sudo test -f "${rootfs}/var/lib/ocservia-agent/upgrade-backup/ocservia-agent-relays.conf.absent"
-sudo test ! -e "${rootfs}/var/lib/ocservia-agent/upgrade-backup/ocservia-agent-relays.conf.previous"
+sudo test -f "${backup_dir}/ocservia-agent-relays.conf.absent"
+sudo test ! -e "${backup_dir}/ocservia-agent-relays.conf.previous"
 sudo test -f \
   "${rootfs}/usr/lib/systemd/system/ocservia-agent.service.d/10-production-relays.conf"
 sudo env DESTDIR="${rootfs}" \
@@ -460,17 +706,17 @@ sudo test -f "${rootfs}/var/lib/ocservia-agent/identity/controller.key" \
   || { echo "uninstall removed the controller key" >&2; exit 1; }
 sudo test -f "${rootfs}/var/lib/ocservia-agent/agent.db" \
   || { echo "uninstall removed the command journal" >&2; exit 1; }
-test ! -e "${rootfs}/usr/libexec/ocservia/ocservia-agent" \
+sudo test ! -e "${rootfs}/usr/libexec/ocservia/ocservia-agent" \
   || { echo "uninstall retained the Agent binary" >&2; exit 1; }
-test ! -e "${rootfs}/usr/libexec/ocservia/ocservia-agent-rollback" \
+sudo test ! -e "${rootfs}/usr/libexec/ocservia/ocservia-agent-rollback" \
   || { echo "uninstall retained the rollback command" >&2; exit 1; }
 echo "agent package uninstall preservation passed"
 
 sudo env DESTDIR="${rootfs}" AGENT_UID=61000 AGENT_GID=61000 INSTALL_PRODUCTION_RELAYS=true \
   "${package_root}/scripts/install-agent.sh"
 sudo env DESTDIR="${rootfs}" "${package_root}/scripts/uninstall-agent.sh" --purge-state
-test ! -e "${rootfs}/var/lib/ocservia-agent" || { echo "purge retained Agent state" >&2; exit 1; }
-test ! -e "${rootfs}/etc/ocservia-agent" || { echo "purge retained Agent configuration" >&2; exit 1; }
+sudo test ! -e "${rootfs}/var/lib/ocservia-agent" || { echo "purge retained Agent state" >&2; exit 1; }
+sudo test ! -e "${rootfs}/etc/ocservia-agent" || { echo "purge retained Agent configuration" >&2; exit 1; }
 echo "agent package purge passed"
-printf 'install=pass\nlegacy_upgrade_preflight=pass\nupgrade=pass\nrollback=pass\nuninstall_preserves_state=pass\npurge=pass\n' \
+printf 'trusted_staging=pass\nsame_basename=pass\narchive_types=pass\ninstall_path=pass\ninstall=pass\nlegacy_upgrade_preflight=pass\nupgrade=pass\nsystemd_state_ownership=pass\nrollback_substitution=pass\nrollback=pass\nuninstall_preserves_state=pass\npurge=pass\n' \
   >"${ARTIFACT_DIR}/lifecycle-summary.txt"

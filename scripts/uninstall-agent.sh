@@ -5,6 +5,7 @@ DESTDIR="${DESTDIR:-}"
 PREFIX="${PREFIX:-/usr}"
 SYSCONFDIR="${SYSCONFDIR:-/etc}"
 STATE_DIR="${STATE_DIR:-/var/lib/ocservia-agent}"
+UPGRADE_STATE_DIR="/var/lib/ocservia-upgrade"
 PURGE_STATE=false
 if [[ ${1:-} == "--purge-state" ]]; then
   PURGE_STATE=true
@@ -38,7 +39,8 @@ if [[ -z "${DESTDIR}" ]]; then
 fi
 
 if [[ ${PURGE_STATE} == true ]]; then
-  rm -rf "${DESTDIR}${STATE_DIR}" "${DESTDIR}/var/lib/ocservia-privd" "${DESTDIR}${SYSCONFDIR}/ocservia-agent"
+  rm -rf "${DESTDIR}${STATE_DIR}" "${DESTDIR}/var/lib/ocservia-privd" \
+    "${DESTDIR}${UPGRADE_STATE_DIR}" "${DESTDIR}${SYSCONFDIR}/ocservia-agent"
   if [[ -z "${DESTDIR}" ]]; then
     userdel ocserv-agent 2>/dev/null || true
     groupdel ocserv-agent 2>/dev/null || true
