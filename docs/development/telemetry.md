@@ -17,6 +17,19 @@ shown offline after its latest heartbeat is more than 90 seconds old.
 - Raw samples are monthly PostgreSQL partitions. Scheduler maintenance builds
   5-minute and 1-hour rollups and applies the 14-day, 90-day, and 13-month
   retention periods idempotently.
+- The Controller accepts snapshot, metric, and security-observation timestamps
+  from the preceding 14 days through five minutes in the future. Events outside
+  that window are rejected before PostgreSQL partition selection.
+
+## Transport ingestion recovery
+
+The Controller classifies authenticated transport ingestion failures before it
+updates the retained event cursor. Transaction or database failures retain the
+previous cursor and use the bounded reconnect backoff. Permanently invalid
+business payloads are rolled back, recorded as bounded metadata without their
+raw payload, and advance the durable cursor in the same transaction. A high
+severity security alert identifies each newly quarantined event so one node
+cannot silently block later events from other nodes.
 
 Current state is available from `GET /api/v1/nodes`,
 `GET /api/v1/nodes/{node_id}`, and the node `sessions` resource. Bounded
@@ -29,6 +42,12 @@ rebuild authoritative state through REST after connecting or reconnecting.
 Apply database migration `000005_telemetry_observed` before deploying the new
 Controller, transportd, Agent, or Web images. The protocol change is additive,
 so older Agents continue to connect without emitting telemetry.
+
+Migration `000022_transport_event_quarantine` adds the durable global cursor
+and quarantine evidence. Deploy it before a Controller using the resilient
+ingestion path. Its down migration refuses to discard existing quarantine
+evidence; clear the underlying incident and preserve required evidence before
+an explicit schema rollback.
 
 To roll back application binaries, deploy the previous Controller and Agent
 versions first. The telemetry tables can remain in place for forward recovery.

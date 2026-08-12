@@ -26,7 +26,13 @@ const (
 	MaxManagedResources = 384
 	MaxReportedGroups   = MaxManagedResources * 2
 	OfflineAfter        = 90 * time.Second
+	MaxTelemetryAge     = 14 * 24 * time.Hour
+	MaxTelemetrySkew    = 5 * time.Minute
 )
+
+// ErrInvalidTelemetry identifies wire content that cannot become valid by
+// retrying it. Database and transaction failures are deliberately not wrapped.
+var ErrInvalidTelemetry = errors.New("telemetry payload is permanently invalid")
 
 var allowedMetrics = map[string]bool{
 	"cpu_usage_ratio": true, "memory_used_bytes": true,
@@ -168,32 +174,49 @@ type Service struct {
 func New(pool *pgxpool.Pool) *Service { return &Service{pool: pool, now: time.Now} }
 
 func (s *Service) IngestWire(ctx context.Context, expectedNodeID uuid.UUID, payload []byte) (bool, error) {
-	batch, err := decodeWire(payload)
+	batch, payloadBytes, err := s.validateWire(expectedNodeID, payload)
 	if err != nil {
 		return false, err
 	}
-	if batch.NodeID != expectedNodeID {
-		return false, errors.New("telemetry node identity mismatch")
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return false, fmt.Errorf("begin telemetry ingest: %w", err)
 	}
-	return s.Ingest(ctx, batch)
+	defer rollback(tx)
+	ingested, err := s.ingestTx(ctx, tx, batch, payloadBytes)
+	if err != nil {
+		return false, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return false, err
+	}
+	return ingested, nil
 }
 
 // IngestWireTx writes a validated telemetry batch using the caller's
 // authenticated node identity and transaction so the authoritative endpoint
 // check and every resulting state change share one commit boundary.
 func (s *Service) IngestWireTx(ctx context.Context, tx pgx.Tx, expectedNodeID uuid.UUID, payload []byte) (bool, error) {
-	batch, err := decodeWire(payload)
-	if err != nil {
-		return false, err
-	}
-	if batch.NodeID != expectedNodeID {
-		return false, errors.New("telemetry node identity mismatch")
-	}
-	payloadBytes, err := s.validateForIngest(batch)
+	batch, payloadBytes, err := s.validateWire(expectedNodeID, payload)
 	if err != nil {
 		return false, err
 	}
 	return s.ingestTx(ctx, tx, batch, payloadBytes)
+}
+
+func (s *Service) validateWire(expectedNodeID uuid.UUID, payload []byte) (Batch, int, error) {
+	batch, err := decodeWire(payload)
+	if err != nil {
+		return Batch{}, 0, fmt.Errorf("%w: %v", ErrInvalidTelemetry, err)
+	}
+	if batch.NodeID != expectedNodeID {
+		return Batch{}, 0, fmt.Errorf("%w: telemetry node identity mismatch", ErrInvalidTelemetry)
+	}
+	payloadBytes, err := s.validateForIngest(batch)
+	if err != nil {
+		return Batch{}, 0, fmt.Errorf("%w: %v", ErrInvalidTelemetry, err)
+	}
+	return batch, payloadBytes, nil
 }
 
 func decodeWire(payload []byte) (Batch, error) {
@@ -400,7 +423,9 @@ func validateBatch(batch Batch, now time.Time) error {
 	if batch.Kind != "security" && batch.Kind != "current_health" && batch.Kind != "aggregate" && batch.Kind != "raw_history" {
 		return errors.New("telemetry kind is invalid")
 	}
-	if batch.Snapshot.ObservedAt.IsZero() || batch.Snapshot.ObservedAt.After(now.Add(5*time.Minute)) || len(batch.Snapshot.BootID) == 0 || len(batch.Snapshot.BootID) > 128 || batch.Snapshot.AgentInstance == uuid.Nil {
+	earliest := now.Add(-MaxTelemetryAge)
+	latest := now.Add(MaxTelemetrySkew)
+	if batch.Snapshot.ObservedAt.IsZero() || batch.Snapshot.ObservedAt.Before(earliest) || batch.Snapshot.ObservedAt.After(latest) || len(batch.Snapshot.BootID) == 0 || len(batch.Snapshot.BootID) > 128 || batch.Snapshot.AgentInstance == uuid.Nil {
 		return errors.New("observed snapshot identity or time is invalid")
 	}
 	for _, value := range []string{batch.Snapshot.AgentVersion, batch.Snapshot.OcservVersion, batch.Snapshot.OSRelease} {
@@ -451,12 +476,12 @@ func validateBatch(batch Batch, now time.Time) error {
 		}
 	}
 	for _, sample := range batch.Samples {
-		if !allowedMetrics[sample.Metric] || math.IsNaN(sample.Value) || math.IsInf(sample.Value, 0) || sample.SampledAt.IsZero() || sample.SampledAt.After(now.Add(5*time.Minute)) {
+		if !allowedMetrics[sample.Metric] || math.IsNaN(sample.Value) || math.IsInf(sample.Value, 0) || sample.SampledAt.IsZero() || sample.SampledAt.Before(earliest) || sample.SampledAt.After(latest) {
 			return errors.New("telemetry sample is invalid")
 		}
 	}
 	for _, event := range batch.Security {
-		if event.ID == uuid.Nil || event.ID.Version() != 7 || (event.Severity != "info" && event.Severity != "warning" && event.Severity != "critical") || event.Type == "" || len(event.Type) > 128 || !validObject(event.Detail) {
+		if event.ID == uuid.Nil || event.ID.Version() != 7 || event.ObservedAt.IsZero() || event.ObservedAt.Before(earliest) || event.ObservedAt.After(latest) || (event.Severity != "info" && event.Severity != "warning" && event.Severity != "critical") || event.Type == "" || len(event.Type) > 128 || !validObject(event.Detail) {
 			return errors.New("security telemetry is invalid")
 		}
 	}

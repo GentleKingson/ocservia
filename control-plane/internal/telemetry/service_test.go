@@ -45,6 +45,34 @@ func TestValidateBatchRejectsHighCardinalityMetricNames(t *testing.T) {
 	}
 }
 
+func TestValidateBatchRejectsTelemetryOutsideRetentionWindow(t *testing.T) {
+	now := time.Now().UTC()
+	tests := []struct {
+		name   string
+		mutate func(*Batch)
+	}{
+		{name: "old snapshot", mutate: func(batch *Batch) { batch.Snapshot.ObservedAt = now.Add(-MaxTelemetryAge - time.Second) }},
+		{name: "future snapshot", mutate: func(batch *Batch) { batch.Snapshot.ObservedAt = now.Add(MaxTelemetrySkew + time.Second) }},
+		{name: "old sample", mutate: func(batch *Batch) { batch.Samples[0].SampledAt = now.Add(-MaxTelemetryAge - time.Second) }},
+		{name: "future sample", mutate: func(batch *Batch) { batch.Samples[0].SampledAt = now.Add(MaxTelemetrySkew + time.Second) }},
+		{name: "old security event", mutate: func(batch *Batch) {
+			batch.Security = []SecurityEvent{{ID: uuid.Must(uuid.NewV7()), ObservedAt: now.Add(-MaxTelemetryAge - time.Second), Severity: "warning", Type: "test", Detail: json.RawMessage(`{}`)}}
+		}},
+		{name: "future security event", mutate: func(batch *Batch) {
+			batch.Security = []SecurityEvent{{ID: uuid.Must(uuid.NewV7()), ObservedAt: now.Add(MaxTelemetrySkew + time.Second), Severity: "warning", Type: "test", Detail: json.RawMessage(`{}`)}}
+		}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			batch := testBatch(uuid.Must(uuid.NewV7()), 1, now)
+			test.mutate(&batch)
+			if err := validateBatch(batch, now); err == nil {
+				t.Fatal("telemetry outside the accepted retention window was accepted")
+			}
+		})
+	}
+}
+
 func TestMaximumUserGroupSnapshotFitsWireAndValidation(t *testing.T) {
 	now := time.Now().UTC().Truncate(time.Second)
 	maximumName := func(prefix string, index int) string {
