@@ -98,8 +98,9 @@ an existing enrollment configuration. Before changing any installed file,
 `upgrade-agent.sh` rejects legacy configuration that does not name a valid,
 safely provisioned Ed25519 Controller command verification key. After this
 preflight it keeps one matched snapshot of the previous binary pair, base
-systemd units, and production relay drop-in state under the private state
-directory before restarting the units. Privd publishes `/etc/ocserv/ocpasswd`
+systemd units, and production relay drop-in state under the root-only
+`/var/lib/ocservia-upgrade` hierarchy, outside privd's systemd-managed runtime
+state, before restarting the units. Privd publishes `/etc/ocserv/ocpasswd`
 as a one-link `root:root` mode `0600` regular file through descriptor-relative,
 no-follow operations and rejects unsafe legacy ownership, modes, links, or
 parent ancestry instead of inheriting them.
@@ -109,7 +110,7 @@ parent ancestry instead of inheriting them.
 Run `sudo /usr/libexec/ocservia/ocservia-agent-rollback` to roll back an
 upgrade. It validates and restores the Agent binary, privd binary, both base
 units, and the relay drop-in state from
-`/var/lib/ocservia-privd/upgrade-backup`, after verifying its root-only
+`/var/lib/ocservia-upgrade/upgrade-backup`, after verifying its root-only
 ancestry and trusted digest manifest. It then reloads systemd and starts privd
 before the Agent. Restoring either binary without its matched unit and peer
 binary is unsupported.

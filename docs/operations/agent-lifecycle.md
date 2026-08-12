@@ -64,7 +64,9 @@ descriptors.
 After the preflight, the script retains one matched snapshot of the previous
 Agent and privd binaries, both base systemd units, and the production relay
 drop-in presence and content under the root-only
-`/var/lib/ocservia-privd/upgrade-backup` hierarchy. A root-owned manifest binds
+`/var/lib/ocservia-upgrade/upgrade-backup` hierarchy. This directory is outside
+privd's systemd-managed `StateDirectory`, so service startup cannot rewrite
+rollback evidence ownership. A root-owned manifest binds
 the exact snapshot digests, and rollback rejects unsafe ancestry, symlinks,
 hard links, ownership, modes, or replacement. It also preserves endpoint
 identity, the durable Agent database, journal, and configuration. Verify service health and

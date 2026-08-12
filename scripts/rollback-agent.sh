@@ -3,8 +3,8 @@ set -euo pipefail
 
 DESTDIR="${DESTDIR:-}"
 PREFIX="${PREFIX:-/usr}"
-PRIVD_STATE_DIR="${PRIVD_STATE_DIR:-/var/lib/ocservia-privd}"
-BACKUP_DIR="${BACKUP_DIR:-${DESTDIR}${PRIVD_STATE_DIR}/upgrade-backup}"
+UPGRADE_STATE_DIR="${UPGRADE_STATE_DIR:-/var/lib/ocservia-upgrade}"
+BACKUP_DIR="${BACKUP_DIR:-${DESTDIR}${UPGRADE_STATE_DIR}/upgrade-backup}"
 
 rollback_error() {
   echo "Agent rollback blocked before modification: $1" >&2
@@ -96,23 +96,23 @@ if [[ ${EUID} -ne 0 ]]; then
   exit 1
 fi
 if [[ -n "${DESTDIR}" && ( "${DESTDIR}" != /* || "${DESTDIR}" == "/" || "${DESTDIR}" == */ ) ]] || \
-  [[ "${PREFIX}" != /* || "${PRIVD_STATE_DIR}" != /* || "${BACKUP_DIR}" != /* ]]; then
-  echo "DESTDIR, PREFIX, PRIVD_STATE_DIR, and BACKUP_DIR must identify absolute paths" >&2
+  [[ "${PREFIX}" != /* || "${UPGRADE_STATE_DIR}" != /* || "${BACKUP_DIR}" != /* ]]; then
+  echo "DESTDIR, PREFIX, UPGRADE_STATE_DIR, and BACKUP_DIR must identify absolute paths" >&2
   exit 2
 fi
-if [[ "${BACKUP_DIR}" != "${DESTDIR}${PRIVD_STATE_DIR}/upgrade-backup" ]]; then
-  echo "BACKUP_DIR must use the fixed privd-owned upgrade-backup location" >&2
+if [[ "${BACKUP_DIR}" != "${DESTDIR}${UPGRADE_STATE_DIR}/upgrade-backup" ]]; then
+  echo "BACKUP_DIR must use the fixed root-only upgrade-backup location" >&2
   exit 2
 fi
-if [[ "${PRIVD_STATE_DIR}" != "/var/lib/ocservia-privd" ]]; then
-  echo "PRIVD_STATE_DIR must use the fixed root-owned /var/lib/ocservia-privd hierarchy" >&2
+if [[ "${UPGRADE_STATE_DIR}" != "/var/lib/ocservia-upgrade" ]]; then
+  echo "UPGRADE_STATE_DIR must use the fixed root-only /var/lib/ocservia-upgrade hierarchy" >&2
   exit 2
 fi
 
 validate_root_ancestry "${BACKUP_DIR}"
-if [[ "$(stat -c '%u:%g:%a' -- "${DESTDIR}${PRIVD_STATE_DIR}")" != "0:0:700" || \
+if [[ "$(stat -c '%u:%g:%a' -- "${DESTDIR}${UPGRADE_STATE_DIR}")" != "0:0:700" || \
       "$(stat -c '%u:%g:%a' -- "${BACKUP_DIR}")" != "0:0:700" ]]; then
-  rollback_error "privd state and rollback snapshot directories must be root:root mode 0700"
+  rollback_error "upgrade state and rollback snapshot directories must be root:root mode 0700"
 fi
 
 manifest="${BACKUP_DIR}/MANIFEST.sha256"

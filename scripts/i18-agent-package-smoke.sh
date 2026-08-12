@@ -11,11 +11,20 @@ fi
 work="${RUNNER_TEMP:-/tmp}/ocservia-i18-package-${RUN_ID}"
 rootfs="${work}/rootfs"
 verified_staging=""
+systemd_unit=""
 mkdir -p "${work}" "${ARTIFACT_DIR}"
 chmod 0700 "${work}"
 sudo install -d -o root -g root -m 0700 -- "${rootfs}"
 cleanup() {
   local status=$?
+  local load_state=""
+  if [[ -n "${systemd_unit}" ]]; then
+    load_state="$(sudo systemctl show --property=LoadState --value "${systemd_unit}" 2>/dev/null || true)"
+    if [[ -n "${load_state}" && "${load_state}" != "not-found" ]]; then
+      sudo systemctl stop "${systemd_unit}" >/dev/null 2>&1 || status=1
+      sudo systemctl reset-failed "${systemd_unit}" >/dev/null 2>&1 || status=1
+    fi
+  fi
   sudo rm -rf -- "${rootfs}" || status=1
   rm -rf -- "${work}" || status=1
   exit "${status}"
@@ -149,6 +158,24 @@ test "${identity_target_state}" = "$(stat -c '%u:%g:%a:%h:%s' -- "${work}/identi
 sudo test ! -e "${rootfs}/usr/libexec/ocservia/ocservia-agent"
 sudo rm -rf -- "${rootfs}/var/lib/ocservia-agent" "${rootfs}/usr" "${rootfs}/etc"
 echo "Agent-controlled install pathname rejection passed"
+
+for target in PREFIX SYSCONFDIR STATE_DIR PRIVD_STATE_DIR; do
+  if sudo env DESTDIR="${rootfs}" AGENT_UID=61000 AGENT_GID=61000 \
+    "${target}=relative/path" "${package_root}/scripts/install-agent.sh" >/dev/null 2>&1; then
+    echo "installer accepted relative ${target}" >&2
+    exit 1
+  fi
+done
+for unsafe_prefix in /usr/../usr /usr/./lib /usr//lib /usr/; do
+  if sudo env DESTDIR="${rootfs}" AGENT_UID=61000 AGENT_GID=61000 \
+    PREFIX="${unsafe_prefix}" "${package_root}/scripts/install-agent.sh" >/dev/null 2>&1; then
+    echo "installer accepted non-canonical PREFIX ${unsafe_prefix}" >&2
+    exit 1
+  fi
+done
+sudo test ! -e "${rootfs}/usr/libexec/ocservia/ocservia-agent" \
+  || { echo "rejected install target modified installed state" >&2; exit 1; }
+echo "absolute install destination validation passed"
 
 sudo env DESTDIR="${rootfs}" AGENT_UID=61000 AGENT_GID=61000 INSTALL_PRODUCTION_RELAYS=true \
   "${package_root}/scripts/install-agent.sh"
@@ -321,7 +348,7 @@ capture_upgrade() {
 before_rejected_upgrade="$(installed_state)"
 assert_rejected_upgrade_untouched() {
   local reason="$1"
-  sudo test ! -e "${rootfs}/var/lib/ocservia-privd/upgrade-backup" \
+  sudo test ! -e "${rootfs}/var/lib/ocservia-upgrade/upgrade-backup" \
     || { echo "${reason} created a backup directory" >&2; exit 1; }
   test "${before_rejected_upgrade}" = "$(installed_state)" \
     || { echo "${reason} modified installed files" >&2; exit 1; }
@@ -482,11 +509,11 @@ for backup in \
   ocservia-agent.service.previous \
   ocservia-privd.service.previous \
   ocservia-agent-relays.conf.previous; do
-  sudo test -f "${rootfs}/var/lib/ocservia-privd/upgrade-backup/${backup}" \
+  sudo test -f "${rootfs}/var/lib/ocservia-upgrade/upgrade-backup/${backup}" \
     || { echo "matched rollback snapshot is missing ${backup}" >&2; exit 1; }
 done
-backup_dir="${rootfs}/var/lib/ocservia-privd/upgrade-backup"
-test "$(sudo stat -c '%u:%g:%a' -- "${rootfs}/var/lib/ocservia-privd")" = "0:0:700"
+backup_dir="${rootfs}/var/lib/ocservia-upgrade/upgrade-backup"
+test "$(sudo stat -c '%u:%g:%a' -- "${rootfs}/var/lib/ocservia-upgrade")" = "0:0:700"
 test "$(sudo stat -c '%u:%g:%a' -- "${backup_dir}")" = "0:0:700"
 test "$(sudo stat -c '%u:%g:%a:%h' -- "${backup_dir}/MANIFEST.sha256")" = "0:0:600:1"
 test "$(sudo awk 'END { print NR }' "${backup_dir}/MANIFEST.sha256")" -eq 5
@@ -498,6 +525,49 @@ if sudo setpriv --reuid=61000 --regid=61000 --clear-groups test -w "${backup_dir
   echo "Agent UID can replace a root-only rollback snapshot" >&2
   exit 1
 fi
+
+# Exercise the production StateDirectory ownership rule through the real host
+# service manager while keeping every file below this run's isolated rootfs.
+# The runtime tree must follow User=root/Group=ocserv-agent, but rollback
+# evidence outside that tree must remain root:root and usable afterwards.
+sudo install -D -o root -g root -m 0755 -- /usr/bin/true "${rootfs}/usr/bin/true"
+while IFS= read -r library; do
+  [[ -n "${library}" ]] || continue
+  sudo install -D -o root -g root -m 0755 -- "${library}" "${rootfs}${library}"
+done < <(ldd /usr/bin/true | awk '{ for (i = 1; i <= NF; i++) if ($i ~ /^\//) { print $i; break } }')
+sudo chown -R root:root -- "${rootfs}/var/lib/ocservia-privd"
+sudo chmod 0700 -- "${rootfs}/var/lib/ocservia-privd"
+sudo install -o root -g root -m 0600 -- /dev/null \
+  "${rootfs}/var/lib/ocservia-privd/systemd-ownership-sentinel"
+systemd_unit="ocservia-i18-state-${RUN_ID:0:80}.service"
+sudo systemd-run --quiet --wait --collect --unit="${systemd_unit}" \
+  --property=Type=oneshot \
+  --property=User=root \
+  --property=Group=61000 \
+  --property=RootDirectory="${rootfs}" \
+  --property=StateDirectory=ocservia-privd \
+  --property=StateDirectoryMode=0700 \
+  /usr/bin/true
+test "$(sudo stat -c '%u:%g:%a' -- "${rootfs}/var/lib/ocservia-privd")" = "0:61000:700"
+test "$(sudo stat -c '%u:%g:%a' -- "${rootfs}/var/lib/ocservia-privd/systemd-ownership-sentinel")" = "0:61000:600"
+test "$(sudo stat -c '%u:%g:%a' -- "${rootfs}/var/lib/ocservia-upgrade")" = "0:0:700"
+test "$(sudo stat -c '%u:%g:%a' -- "${backup_dir}")" = "0:0:700"
+test "$(sudo stat -c '%u:%g:%a:%h' -- "${backup_dir}/MANIFEST.sha256")" = "0:0:600:1"
+for snapshot in \
+  ocservia-agent.previous \
+  ocservia-privd.previous \
+  ocservia-agent.service.previous \
+  ocservia-privd.service.previous \
+  ocservia-agent-relays.conf.previous; do
+  case "${snapshot}" in
+    ocservia-agent.previous|ocservia-privd.previous) expected_mode=755 ;;
+    *) expected_mode=644 ;;
+  esac
+  test "$(sudo stat -c '%u:%g:%a:%h' -- "${backup_dir}/${snapshot}")" = "0:0:${expected_mode}:1"
+done
+sudo rm -- "${rootfs}/var/lib/ocservia-privd/systemd-ownership-sentinel"
+echo "systemd StateDirectory ownership isolation passed"
+
 assert_production_agent_exec_start
 assert_privd_command_authority
 echo "agent package upgrade passed"
@@ -635,5 +705,5 @@ sudo env DESTDIR="${rootfs}" "${package_root}/scripts/uninstall-agent.sh" --purg
 sudo test ! -e "${rootfs}/var/lib/ocservia-agent" || { echo "purge retained Agent state" >&2; exit 1; }
 sudo test ! -e "${rootfs}/etc/ocservia-agent" || { echo "purge retained Agent configuration" >&2; exit 1; }
 echo "agent package purge passed"
-printf 'trusted_staging=pass\nsame_basename=pass\narchive_types=pass\ninstall_path=pass\ninstall=pass\nlegacy_upgrade_preflight=pass\nupgrade=pass\nrollback_substitution=pass\nrollback=pass\nuninstall_preserves_state=pass\npurge=pass\n' \
+printf 'trusted_staging=pass\nsame_basename=pass\narchive_types=pass\ninstall_path=pass\ninstall=pass\nlegacy_upgrade_preflight=pass\nupgrade=pass\nsystemd_state_ownership=pass\nrollback_substitution=pass\nrollback=pass\nuninstall_preserves_state=pass\npurge=pass\n' \
   >"${ARTIFACT_DIR}/lifecycle-summary.txt"

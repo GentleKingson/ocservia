@@ -162,14 +162,33 @@ ensure_agent_state() {
   chown "${agent_owner}:${agent_group}" -- "${state}"
 }
 
+validate_absolute_target() {
+  local name="$1" path="$2"
+  if [[ "${path}" != /* || "${path}" == / || "${path}" == */ ]]; then
+    echo "${name} must be a non-root absolute path without a trailing slash" >&2
+    exit 2
+  fi
+  case "/${path#/}/" in
+    *//*|*/./*|*/../*)
+      echo "${name} must not contain empty, dot, or parent path components" >&2
+      exit 2
+      ;;
+  esac
+}
+
 if [[ ${EUID} -ne 0 ]]; then
   echo "install-agent.sh must run as root" >&2
   exit 1
 fi
 validate_verified_package_source
 
+validate_absolute_target PREFIX "${PREFIX}"
+validate_absolute_target SYSCONFDIR "${SYSCONFDIR}"
+validate_absolute_target STATE_DIR "${STATE_DIR}"
+validate_absolute_target PRIVD_STATE_DIR "${PRIVD_STATE_DIR}"
+
 if [[ "${PRIVD_STATE_DIR}" != "/var/lib/ocservia-privd" ]]; then
-  echo "PRIVD_STATE_DIR must use the fixed root-owned /var/lib/ocservia-privd hierarchy" >&2
+  echo "PRIVD_STATE_DIR must use the fixed systemd-managed /var/lib/ocservia-privd hierarchy" >&2
   exit 2
 fi
 
@@ -196,7 +215,7 @@ fi
 ensure_root_directory "${DESTDIR}${PREFIX}/libexec/ocservia" root 0 0755
 ensure_root_directory "${DESTDIR}${PREFIX}/lib/systemd/system" root 0 0755
 ensure_agent_state
-ensure_root_directory "${DESTDIR}${PRIVD_STATE_DIR}" root 0 0700
+ensure_root_directory "${DESTDIR}${PRIVD_STATE_DIR}" "${agent_group}" "${AGENT_GID}" 0700
 ensure_root_directory "${DESTDIR}${SYSCONFDIR}/ocservia-agent" "${agent_group}" "${AGENT_GID}" 0750
 install -m 0755 -- "${ROOT}/rust/target/release/ocservia-agent" "${DESTDIR}${PREFIX}/libexec/ocservia/ocservia-agent"
 install -m 0755 -- "${ROOT}/rust/target/release/ocservia-privd" "${DESTDIR}${PREFIX}/libexec/ocservia/ocservia-privd"

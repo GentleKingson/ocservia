@@ -7,9 +7,10 @@ PREFIX="${PREFIX:-/usr}"
 SYSCONFDIR="${SYSCONFDIR:-/etc}"
 STATE_DIR="${STATE_DIR:-/var/lib/ocservia-agent}"
 PRIVD_STATE_DIR="${PRIVD_STATE_DIR:-/var/lib/ocservia-privd}"
+UPGRADE_STATE_DIR="${UPGRADE_STATE_DIR:-/var/lib/ocservia-upgrade}"
 AGENT_UID="${AGENT_UID:-997}"
 AGENT_GID="${AGENT_GID:-997}"
-BACKUP_DIR="${BACKUP_DIR:-${DESTDIR}${PRIVD_STATE_DIR}/upgrade-backup}"
+BACKUP_DIR="${BACKUP_DIR:-${DESTDIR}${UPGRADE_STATE_DIR}/upgrade-backup}"
 ENROLLMENT_TOKEN_FILE="${ENROLLMENT_TOKEN_FILE:-}"
 ENROLLMENT_ENVIRONMENT="${ENROLLMENT_ENVIRONMENT:-}"
 ENROLLMENT_MIGRATION_CONFIRMED="${ENROLLMENT_MIGRATION_CONFIRMED:-false}"
@@ -406,16 +407,20 @@ fi
 validate_verified_package_source
 
 if [[ -n "${DESTDIR}" && ( "${DESTDIR}" != /* || "${DESTDIR}" == "/" || "${DESTDIR}" == */ ) ]] || \
-  [[ "${PREFIX}" != /* || "${SYSCONFDIR}" != /* || "${STATE_DIR}" != /* || "${PRIVD_STATE_DIR}" != /* || "${BACKUP_DIR}" != /* ]]; then
-  echo "DESTDIR, PREFIX, SYSCONFDIR, STATE_DIR, PRIVD_STATE_DIR, and BACKUP_DIR must identify absolute paths" >&2
+  [[ "${PREFIX}" != /* || "${SYSCONFDIR}" != /* || "${STATE_DIR}" != /* || "${PRIVD_STATE_DIR}" != /* || "${UPGRADE_STATE_DIR}" != /* || "${BACKUP_DIR}" != /* ]]; then
+  echo "DESTDIR, PREFIX, SYSCONFDIR, STATE_DIR, PRIVD_STATE_DIR, UPGRADE_STATE_DIR, and BACKUP_DIR must identify absolute paths" >&2
   exit 2
 fi
-if [[ "${BACKUP_DIR}" != "${DESTDIR}${PRIVD_STATE_DIR}/upgrade-backup" ]]; then
-  echo "BACKUP_DIR must use the fixed privd-owned upgrade-backup location" >&2
+if [[ "${BACKUP_DIR}" != "${DESTDIR}${UPGRADE_STATE_DIR}/upgrade-backup" ]]; then
+  echo "BACKUP_DIR must use the fixed root-only upgrade-backup location" >&2
   exit 2
 fi
 if [[ "${PRIVD_STATE_DIR}" != "/var/lib/ocservia-privd" ]]; then
-  echo "PRIVD_STATE_DIR must use the fixed root-owned /var/lib/ocservia-privd hierarchy" >&2
+  echo "PRIVD_STATE_DIR must use the fixed systemd-managed /var/lib/ocservia-privd hierarchy" >&2
+  exit 2
+fi
+if [[ "${UPGRADE_STATE_DIR}" != "/var/lib/ocservia-upgrade" ]]; then
+  echo "UPGRADE_STATE_DIR must use the fixed root-only /var/lib/ocservia-upgrade hierarchy" >&2
   exit 2
 fi
 if [[ -z "${DESTDIR}" ]]; then
@@ -469,12 +474,12 @@ fi
 bind_legacy_password_sealing_keys "${installed_agent_unit}"
 harden_legacy_artifact_spool "${installed_privd_unit}"
 
-ensure_root_private_directory "${DESTDIR}${PRIVD_STATE_DIR}"
+ensure_root_private_directory "${DESTDIR}${UPGRADE_STATE_DIR}"
 ensure_root_private_directory "${BACKUP_DIR}"
 validate_root_ancestry "${BACKUP_DIR}"
-if [[ "$(stat -c '%u:%g:%a' -- "${DESTDIR}${PRIVD_STATE_DIR}")" != "0:0:700" || \
+if [[ "$(stat -c '%u:%g:%a' -- "${DESTDIR}${UPGRADE_STATE_DIR}")" != "0:0:700" || \
       "$(stat -c '%u:%g:%a' -- "${BACKUP_DIR}")" != "0:0:700" ]]; then
-  installed_pair_preflight_error "privd state and upgrade backup directories must be root:root mode 0700"
+  installed_pair_preflight_error "upgrade state and backup directories must be root:root mode 0700"
 fi
 rm -f -- "${BACKUP_DIR}/MANIFEST.sha256"
 install -o root -g root -m 0755 -- "${installed_agent}" "${BACKUP_DIR}/ocservia-agent.previous"
