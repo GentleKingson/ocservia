@@ -18,7 +18,7 @@ Provision the verification public key and its DER SHA-256 fingerprint through a 
 
 The verifier copies the archive, signed checksum, signature, and pinned public
 key into a unique `root:root` mode `0700` directory below
-`/var/lib/ocservia-privd/package-staging`. It verifies the exact copied checksum,
+`/var/lib/ocservia-upgrade/package-staging`. It verifies the exact copied checksum,
 computes the exact copied archive digest, rejects unsafe archive paths and
 member types, and extracts that same root-owned archive. Install and upgrade
 scripts accept only the verified directory printed by the verifier. Do not

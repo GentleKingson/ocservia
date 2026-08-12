@@ -55,7 +55,7 @@ sudo "${VERIFIED_PACKAGE}/scripts/install-agent.sh"
 ```
 
 The verifier is the only supported extraction path. It stages and verifies the
-exact archive below root-only `/var/lib/ocservia-privd/package-staging`; the
+exact archive below root-only `/var/lib/ocservia-upgrade/package-staging`; the
 installer refuses a source tree or an independently extracted download.
 
 Before enabling the units, install the independently provisioned Controller

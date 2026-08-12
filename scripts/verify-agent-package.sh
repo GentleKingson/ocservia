@@ -7,7 +7,7 @@ signature="${3:?signature required}"
 public_key="${4:?public key required}"
 trusted_fingerprint="${AGENT_TRUSTED_KEY_SHA256:?AGENT_TRUSTED_KEY_SHA256 is required}"
 DESTDIR="${DESTDIR:-}"
-trusted_root="${DESTDIR}/var/lib/ocservia-privd/package-staging"
+trusted_root="${DESTDIR}/var/lib/ocservia-upgrade/package-staging"
 
 if [[ ${EUID} -ne 0 ]]; then
   echo "verify-agent-package.sh must run as root so verification and extraction use trusted staging" >&2
@@ -83,7 +83,7 @@ for directory in "${DESTDIR}/var" "${DESTDIR}/var/lib"; do
     install -d -o root -g root -m 0755 -- "${directory}"
   fi
 done
-for directory in "${DESTDIR}/var/lib/ocservia-privd" "${trusted_root}"; do
+for directory in "${DESTDIR}/var/lib/ocservia-upgrade" "${trusted_root}"; do
   if [[ -e "${directory}" || -L "${directory}" ]]; then
     if [[ ! -d "${directory}" || -L "${directory}" ]]; then
       echo "trusted package staging path must be a real directory: ${directory}" >&2

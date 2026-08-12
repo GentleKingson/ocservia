@@ -12,7 +12,7 @@ AGENT_GID="${AGENT_GID:-997}"
 INSTALL_PRODUCTION_RELAYS="${INSTALL_PRODUCTION_RELAYS:-false}"
 
 validate_verified_package_source() {
-  local trusted_root="${DESTDIR}/var/lib/ocservia-privd/package-staging"
+  local trusted_root="${DESTDIR}/var/lib/ocservia-upgrade/package-staging"
   local current="" relative component uid mode marker archive_hash package_name source
   local -a components=()
 
