@@ -19,6 +19,7 @@ work="${RUNNER_TEMP:-/tmp}/ocservia-i18-package-${RUN_ID}"
 rootfs="${work}/rootfs"
 verified_staging=""
 systemd_unit=""
+systemd_state_name=""
 systemd_test_group="$(id -gn)"
 systemd_test_gid="$(id -g)"
 if [[ "${systemd_test_gid}" == 0 ]]; then
@@ -37,6 +38,9 @@ cleanup() {
       sudo systemctl stop "${systemd_unit}" >/dev/null 2>&1 || status=1
       sudo systemctl reset-failed "${systemd_unit}" >/dev/null 2>&1 || status=1
     fi
+  fi
+  if [[ "${systemd_state_name}" == ocservia-i18-state-* ]]; then
+    sudo rm -rf -- "/var/lib/${systemd_state_name}" || status=1
   fi
   sudo rm -rf -- "${rootfs}" || status=1
   rm -rf -- "${work}" || status=1
@@ -540,29 +544,24 @@ if sudo setpriv --reuid=61000 --regid=61000 --clear-groups test -w "${backup_dir
 fi
 
 # Exercise the production StateDirectory ownership rule through the real host
-# service manager while keeping every file below this run's isolated rootfs.
-# The runtime tree must follow User=root/Group=ocserv-agent, but rollback
-# evidence outside that tree must remain root:root and usable afterwards.
-sudo install -D -o root -g root -m 0755 -- /usr/bin/true "${rootfs}/usr/bin/true"
-while IFS= read -r library; do
-  [[ -n "${library}" ]] || continue
-  sudo install -D -o root -g root -m 0755 -- "${library}" "${rootfs}${library}"
-done < <(ldd /usr/bin/true | awk '{ for (i = 1; i <= NF; i++) if ($i ~ /^\//) { print $i; break } }')
-sudo chown -R root:root -- "${rootfs}/var/lib/ocservia-privd"
-sudo chmod 0700 -- "${rootfs}/var/lib/ocservia-privd"
+# service manager. A run-scoped state name avoids touching any installed
+# service while preserving the exact User/Group/StateDirectory semantics.
+# The runtime tree must follow User=root/Group=ocserv-agent, while rollback
+# evidence outside that tree remains root:root and usable afterwards.
+systemd_state_name="ocservia-i18-state-${RUN_ID:0:80}"
+systemd_unit="${systemd_state_name}.service"
+sudo install -d -o root -g root -m 0700 -- "/var/lib/${systemd_state_name}"
 sudo install -o root -g root -m 0600 -- /dev/null \
-  "${rootfs}/var/lib/ocservia-privd/systemd-ownership-sentinel"
-systemd_unit="ocservia-i18-state-${RUN_ID:0:80}.service"
+  "/var/lib/${systemd_state_name}/systemd-ownership-sentinel"
 sudo systemd-run --wait --collect --unit="${systemd_unit}" \
   --property=Type=oneshot \
   --property=User=root \
   --property=Group="${systemd_test_group}" \
-  --property=RootDirectory="${rootfs}" \
-  --property=StateDirectory=ocservia-privd \
+  --property=StateDirectory="${systemd_state_name}" \
   --property=StateDirectoryMode=0700 \
   /usr/bin/true
-test "$(sudo stat -c '%u:%g:%a' -- "${rootfs}/var/lib/ocservia-privd")" = "0:${systemd_test_gid}:700"
-test "$(sudo stat -c '%u:%g:%a' -- "${rootfs}/var/lib/ocservia-privd/systemd-ownership-sentinel")" = "0:${systemd_test_gid}:600"
+test "$(sudo stat -c '%u:%g:%a' -- "/var/lib/${systemd_state_name}")" = "0:${systemd_test_gid}:700"
+test "$(sudo stat -c '%u:%g:%a' -- "/var/lib/${systemd_state_name}/systemd-ownership-sentinel")" = "0:${systemd_test_gid}:600"
 test "$(sudo stat -c '%u:%g:%a' -- "${rootfs}/var/lib/ocservia-upgrade")" = "0:0:700"
 test "$(sudo stat -c '%u:%g:%a' -- "${backup_dir}")" = "0:0:700"
 test "$(sudo stat -c '%u:%g:%a:%h' -- "${backup_dir}/MANIFEST.sha256")" = "0:0:600:1"
@@ -578,7 +577,8 @@ for snapshot in \
   esac
   test "$(sudo stat -c '%u:%g:%a:%h' -- "${backup_dir}/${snapshot}")" = "0:0:${expected_mode}:1"
 done
-sudo rm -- "${rootfs}/var/lib/ocservia-privd/systemd-ownership-sentinel"
+sudo rm -rf -- "/var/lib/${systemd_state_name}"
+systemd_state_name=""
 echo "systemd StateDirectory ownership isolation passed"
 
 assert_production_agent_exec_start
