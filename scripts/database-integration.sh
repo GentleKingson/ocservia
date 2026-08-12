@@ -250,7 +250,7 @@ for major in 17 18; do
   fi
   grep -Fq 'cannot remove audit event authentication while authenticated audit history exists' "${TMP_ROOT}/pg${major}-audit-auth-down.log"
   docker exec "${container}" psql -v ON_ERROR_STOP=1 -U ocservia_owner -d ocservia -c \
-    "ALTER TABLE audit_events DISABLE TRIGGER audit_events_append_only; DELETE FROM audit_checkpoints; DELETE FROM audit_events; ALTER TABLE audit_events ENABLE TRIGGER audit_events_append_only" >/dev/null
+    "BEGIN; ALTER TABLE audit_checkpoints DISABLE TRIGGER audit_checkpoints_append_only; ALTER TABLE audit_events DISABLE TRIGGER audit_events_append_only; DELETE FROM audit_checkpoints; DELETE FROM audit_events; ALTER TABLE audit_events ENABLE TRIGGER audit_events_append_only; ALTER TABLE audit_checkpoints ENABLE TRIGGER audit_checkpoints_append_only; COMMIT" >/dev/null
   docker exec -i "${container}" psql -v ON_ERROR_STOP=1 -U ocservia_owner -d ocservia <"${ROOT}/control-plane/migrations/000021_audit_event_authenticity.down.sql" >/dev/null
   docker exec "${container}" psql -v ON_ERROR_STOP=1 -U ocservia_owner -d ocservia -c "DELETE FROM schema_migrations WHERE version=21" >/dev/null
   docker exec -i "${container}" psql -v ON_ERROR_STOP=1 -U ocservia_owner -d ocservia <"${ROOT}/control-plane/migrations/000020_p12_artifact_grants.down.sql" >/dev/null
