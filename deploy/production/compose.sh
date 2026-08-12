@@ -18,6 +18,21 @@ if [[ -z "${secret_dir}" || ! -d "${secret_dir}" || -L "${secret_dir}" \
   echo "OCSERV_SECRET_DIR must be an existing mode-0700 directory owned by the launcher user" >&2
   exit 2
 fi
+if [[ "${secret_dir}" != /* || "$(realpath -e -- "${secret_dir}")" != "${secret_dir}" ]]; then
+  echo "OCSERV_SECRET_DIR must be an absolute canonical path without symlink ancestry" >&2
+  exit 2
+fi
+ancestor="${secret_dir}"
+while true; do
+  IFS=: read -r ancestor_uid ancestor_mode < <(stat -c '%u:%a' "${ancestor}")
+  if [[ "${ancestor_uid}" != "0" && "${ancestor_uid}" != "$(id -u)" ]] \
+    || (( (8#${ancestor_mode} & 8#022) != 0 )); then
+    echo "OCSERV_SECRET_DIR ancestry must be root- or launcher-owned and not group/world writable" >&2
+    exit 2
+  fi
+  [[ "${ancestor}" == "/" ]] && break
+  ancestor="$(dirname -- "${ancestor}")"
+done
 general_secrets=(tls.crt tls.key postgres-owner-password postgres-app-password postgres-backup-password \
   postgres.pgpass database-owner-url database-app-url oidc-client-secret session-key \
   audit-checkpoint-key certificate-signer-token otel-client.crt otel-client.key otel-ca.crt)
@@ -28,12 +43,14 @@ for secret in "${general_secrets[@]}"; do
     exit 2
   fi
 done
-command_signing_key="${secret_dir}/controller-command-signing-key.pem"
-if [[ ! -f "${command_signing_key}" || -L "${command_signing_key}" \
-  || "$(stat -c '%u:%g:%a' "${command_signing_key}")" != "65534:65532:400" ]]; then
-  echo "${command_signing_key} must be owned by uid:gid 65534:65532 with mode 0400" >&2
-  exit 2
-fi
+for secret in audit-event-key controller-command-signing-key.pem; do
+  path="${secret_dir}/${secret}"
+  if [[ ! -f "${path}" || -L "${path}" \
+    || "$(stat -c '%u:%g:%a' "${path}")" != "65534:65532:400" ]]; then
+    echo "${path} must be owned by uid:gid 65534:65532 with mode 0400" >&2
+    exit 2
+  fi
+done
 for secret in relay-access-token controller-iroh.key; do
   path="${secret_dir}/${secret}"
   if [[ ! -f "${path}" || -L "${path}" || "$(stat -c '%u:%g:%a' "${path}")" != "65532:65532:400" ]]; then

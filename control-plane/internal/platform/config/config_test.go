@@ -8,24 +8,30 @@ import (
 )
 
 func TestSensitiveConfigurationFiles(t *testing.T) {
-	directory := t.TempDir()
+	directory := secureKeyTestDirectory(t)
 	database := filepath.Join(directory, "database-url")
 	session := filepath.Join(directory, "session-key")
+	eventKey := filepath.Join(directory, "audit-event-key")
 	if err := os.WriteFile(database, []byte("postgres://app:secret@postgres/ocservia\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(session, []byte(strings.Repeat("a", 64)+"\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	if err := os.WriteFile(eventKey, []byte(strings.Repeat("b", 64)+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	values := map[string]string{
 		"OCSERV_DATABASE_URL_FILE":         database,
 		"OCSERV_AUDIT_CHECKPOINT_KEY_FILE": session,
+		"OCSERV_AUDIT_EVENT_KEY_ID":        "audit-event-v1",
+		"OCSERV_AUDIT_EVENT_KEY_FILE":      eventKey,
 	}
 	cfg, err := Load(nil, func(key string) (string, bool) { value, ok := values[key]; return value, ok })
 	if err != nil {
 		t.Fatalf("Load() error = %v", err)
 	}
-	if cfg.DatabaseURL != "postgres://app:secret@postgres/ocservia" || len(cfg.AuditCheckpointKey) != 32 {
+	if cfg.DatabaseURL != "postgres://app:secret@postgres/ocservia" || len(cfg.AuditCheckpointKey) != 32 || len(cfg.AuditEventKey) != 32 {
 		t.Fatalf("unexpected file-backed config: database=%q key=%d", cfg.DatabaseURL, len(cfg.AuditCheckpointKey))
 	}
 
@@ -41,6 +47,112 @@ func TestSensitiveConfigurationFiles(t *testing.T) {
 	values["OCSERV_DATABASE_URL_FILE"] = symlink
 	if _, err := Load(nil, func(key string) (string, bool) { value, ok := values[key]; return value, ok }); err == nil {
 		t.Fatal("Load() accepted a symlinked secret file")
+	}
+}
+
+func TestAuditEventKeyFileSecurity(t *testing.T) {
+	directory := secureKeyTestDirectory(t)
+	keyPath := filepath.Join(directory, "audit-event-key")
+	if err := os.WriteFile(keyPath, []byte(strings.Repeat("a", 64)+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if key, err := readStrictHexKeyFile(keyPath, uint32(os.Geteuid())); err != nil || len(key) != 32 {
+		t.Fatalf("secure audit event key rejected: key=%d err=%v", len(key), err)
+	}
+	if err := os.Chmod(keyPath, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := readStrictHexKeyFile(keyPath, uint32(os.Geteuid())); err == nil {
+		t.Fatal("world-readable audit event key accepted")
+	}
+	if err := os.Chmod(keyPath, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	linkPath := filepath.Join(directory, "audit-event-key-link")
+	if err := os.Symlink(keyPath, linkPath); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := readStrictHexKeyFile(linkPath, uint32(os.Geteuid())); err == nil {
+		t.Fatal("symlinked audit event key accepted")
+	}
+	hardlinkPath := filepath.Join(directory, "audit-event-key-hardlink")
+	if err := os.Link(keyPath, hardlinkPath); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := readStrictHexKeyFile(keyPath, uint32(os.Geteuid())); err == nil {
+		t.Fatal("hard-linked audit event key accepted")
+	}
+	if err := os.Remove(hardlinkPath); err != nil {
+		t.Fatal(err)
+	}
+	unsafeDirectory := filepath.Join(directory, "unsafe")
+	if err := os.Mkdir(unsafeDirectory, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	unsafeKey := filepath.Join(unsafeDirectory, "key")
+	if err := os.WriteFile(unsafeKey, []byte(strings.Repeat("b", 64)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(unsafeDirectory, 0o770); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := readStrictHexKeyFile(unsafeKey, uint32(os.Geteuid())); err == nil {
+		t.Fatal("audit event key under writable ancestry accepted")
+	}
+}
+
+func secureKeyTestDirectory(t *testing.T) string {
+	t.Helper()
+	directory, err := os.MkdirTemp(".", ".audit-key-test-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(directory) })
+	absolute, err := filepath.Abs(directory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resolved, err := filepath.EvalSymlinks(absolute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return resolved
+}
+
+func TestAuditEventTestKeyCannotBeUsedInProduction(t *testing.T) {
+	values := map[string]string{
+		"OCSERV_ENVIRONMENT":              "production",
+		"OCSERV_TEST_AUDIT_EVENT_KEY_HEX": strings.Repeat("11", 32),
+		"OCSERV_AUDIT_EVENT_KEY_ID":       "test-key",
+		"OCSERV_DATABASE_URL":             "postgres://owner:test@postgres/ocservia",
+		"OCSERV_OIDC_ISSUER":              "https://issuer.example.test",
+		"OCSERV_OIDC_CLIENT_ID":           "client",
+		"OCSERV_OIDC_CLIENT_SECRET":       strings.Repeat("x", 32),
+		"OCSERV_OIDC_REDIRECT_URL":        "https://app.example.test/api/v1/auth/callback",
+		"OCSERV_SESSION_KEY":              strings.Repeat("11", 32),
+		"OCSERV_AUDIT_CHECKPOINT_KEY":     strings.Repeat("22", 32),
+		"OCSERV_COMMAND_SIGNING_KEY_FILE": "/run/secrets/controller-command-signing-key.pem",
+		"OCSERV_CONTROLLER_ENDPOINT_ID":   strings.Repeat("0", 64),
+		"OCSERV_CERTIFICATE_SIGNER_URL":   "https://signer.example.test",
+		"OCSERV_CERTIFICATE_SIGNER_TOKEN": strings.Repeat("t", 32),
+	}
+	_, err := Load(nil, func(key string) (string, bool) { value, ok := values[key]; return value, ok })
+	if err == nil || !strings.Contains(err.Error(), "test-only") {
+		t.Fatalf("production test key error = %v", err)
+	}
+}
+
+func TestAuditEventAndCheckpointKeysMustBeDistinct(t *testing.T) {
+	values := map[string]string{
+		"OCSERV_ENVIRONMENT":              "test",
+		"OCSERV_DATABASE_URL":             "postgres://db/test",
+		"OCSERV_AUDIT_EVENT_KEY_ID":       "test-key",
+		"OCSERV_TEST_AUDIT_EVENT_KEY_HEX": strings.Repeat("11", 32),
+		"OCSERV_AUDIT_CHECKPOINT_KEY":     strings.Repeat("11", 32),
+	}
+	_, err := Load(nil, func(key string) (string, bool) { value, ok := values[key]; return value, ok })
+	if err == nil || !strings.Contains(err.Error(), "must be distinct") {
+		t.Fatalf("reused audit key error = %v", err)
 	}
 }
 
@@ -157,6 +269,8 @@ func TestProductionRequiresAbsoluteControllerCommandSigningKey(t *testing.T) {
 	cfg.OIDCRedirectURL = "https://ocservia.example.test/api/v1/auth/callback"
 	cfg.SessionKey = make([]byte, 32)
 	cfg.AuditCheckpointKey = make([]byte, 32)
+	cfg.AuditEventKeyID = "audit-event-v1"
+	cfg.AuditEventKey = []byte(strings.Repeat("a", 32))
 	cfg.TransportUID = uint32(os.Geteuid() + 1)
 	cfg.TransportGID = uint32(os.Getegid())
 	cfg.TransportIdentitySet = true

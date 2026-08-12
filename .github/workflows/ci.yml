@@ -92,6 +92,11 @@ jobs:
           ARTIFACT_DIR: ${{ runner.temp }}/artifacts/backend/i18
           RUN_ID: production-${{ github.run_id }}-${{ github.run_attempt }}-be
         run: scripts/i18-production-relays.sh
+      - name: PostgreSQL application and backup credential rotation
+        env:
+          ARTIFACT_DIR: ${{ runner.temp }}/artifacts/backend/postgres-credential-rotation
+          RUN_ID: postgres-rotation-${{ github.run_id }}-${{ github.run_attempt }}-be
+        run: scripts/i18-postgres-credential-rotation.sh
       - name: I19 five-minute Agent offline recovery
         env:
           ARTIFACT_DIR: ${{ runner.temp }}/artifacts/backend/i19

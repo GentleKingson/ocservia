@@ -18,6 +18,8 @@ TRUST_SOCKET="${TMP_ROOT}/trust/control-plane.sock"
 POSTGRES="${PREFIX}-postgres"
 API_PORT=$((20000 + $(printf '%s' "${RUN_ID}" | cksum | awk '{print $1}') % 20000))
 AUTH_TOKEN="local-slice-integration-token-32-characters"
+AUDIT_EVENT_KEY_ID="local-slice-audit-event-v1"
+AUDIT_EVENT_KEY_HEX="2222222222222222222222222222222222222222222222222222222222222222"
 ARTIFACT_DIR="${ARTIFACT_DIR:-}"
 PIDS=()
 
@@ -78,6 +80,8 @@ runtime_url="postgres://ocservia_app:test-runtime-only@127.0.0.1:${port}/ocservi
 docker exec "${POSTGRES}" psql -v ON_ERROR_STOP=1 -U ocservia_owner -d ocservia -c \
   "CREATE ROLE ocservia_app LOGIN PASSWORD 'test-runtime-only'" >/dev/null
 OCSERV_ENVIRONMENT=test OCSERV_DATABASE_URL="${owner_url}" OCSERV_RUNTIME_DATABASE_ROLE=ocservia_app \
+  OCSERV_AUDIT_EVENT_KEY_ID="${AUDIT_EVENT_KEY_ID}" \
+  OCSERV_TEST_AUDIT_EVENT_KEY_HEX="${AUDIT_EVENT_KEY_HEX}" \
   "${TMP_ROOT}/ocserv-control" --migrate-only
 
 start_stub() {
@@ -101,6 +105,8 @@ start_control() {
     OCSERV_TRANSPORT_SOCKET="${SOCKET}" OCSERV_TRANSPORT_QUEUE_CAPACITY=8 \
     OCSERV_TRANSPORT_UID="$(id -u)" OCSERV_TRANSPORT_GID="$(id -g)" \
     OCSERV_TRUST_SOCKET="${TRUST_SOCKET}" \
+    OCSERV_AUDIT_EVENT_KEY_ID="${AUDIT_EVENT_KEY_ID}" \
+    OCSERV_TEST_AUDIT_EVENT_KEY_HEX="${AUDIT_EVENT_KEY_HEX}" \
     "${TMP_ROOT}/ocserv-control" --role=all >"${TMP_ROOT}/control.log" 2>&1 &
   CONTROL_PID=$!
   PIDS+=("${CONTROL_PID}")

@@ -1,6 +1,7 @@
 package config
 
 import (
+	"bytes"
 	"encoding/hex"
 	"errors"
 	"flag"
@@ -14,6 +15,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"golang.org/x/sys/unix"
 )
 
 type Role string
@@ -42,6 +45,8 @@ type Config struct {
 	SessionKey               []byte
 	SessionTTL               time.Duration
 	AuditCheckpointKey       []byte
+	AuditEventKeyID          string
+	AuditEventKey            []byte
 	CommandSigningKeyFile    string
 	BreakGlassEnabled        bool
 	BreakGlassTokenHash      []byte
@@ -118,6 +123,27 @@ func Load(args []string, lookup LookupEnv) (Config, error) {
 	}
 	if err := setHexOrFile(lookup, "OCSERV_AUDIT_CHECKPOINT_KEY", &cfg.AuditCheckpointKey); err != nil {
 		return Config{}, err
+	}
+	setString(lookup, "OCSERV_AUDIT_EVENT_KEY_ID", &cfg.AuditEventKeyID)
+	if path, ok := lookup("OCSERV_AUDIT_EVENT_KEY_FILE"); ok {
+		key, err := readStrictHexKeyFile(path, uint32(os.Geteuid()))
+		if err != nil {
+			return Config{}, fmt.Errorf("OCSERV_AUDIT_EVENT_KEY_FILE: %w", err)
+		}
+		cfg.AuditEventKey = key
+	}
+	if testKey, ok := lookup("OCSERV_TEST_AUDIT_EVENT_KEY_HEX"); ok {
+		if cfg.Environment == "production" || len(cfg.AuditEventKey) != 0 {
+			return Config{}, errors.New("OCSERV_TEST_AUDIT_EVENT_KEY_HEX is test-only and cannot override a key file")
+		}
+		key, err := hex.DecodeString(testKey)
+		if err != nil || len(key) != 32 || strings.ToLower(testKey) != testKey {
+			return Config{}, errors.New("OCSERV_TEST_AUDIT_EVENT_KEY_HEX must contain exactly 32 bytes as lowercase hex")
+		}
+		cfg.AuditEventKey = key
+		if cfg.AuditEventKeyID == "" {
+			cfg.AuditEventKeyID = "test-audit-event-v1"
+		}
 	}
 	setString(lookup, "OCSERV_COMMAND_SIGNING_KEY_FILE", &cfg.CommandSigningKeyFile)
 	if err := setHexOrFile(lookup, "OCSERV_BREAK_GLASS_TOKEN_SHA256", &cfg.BreakGlassTokenHash); err != nil {
@@ -236,6 +262,16 @@ func (c Config) Validate() error {
 	}
 	if c.Environment == "production" && len(c.AuditCheckpointKey) != 32 {
 		return errors.New("audit checkpoint key is required in production")
+	}
+	auditEventConfigured := c.AuditEventKeyID != "" || len(c.AuditEventKey) != 0
+	if auditEventConfigured && (!validKeyID(c.AuditEventKeyID) || len(c.AuditEventKey) != 32) {
+		return errors.New("audit event authentication requires a valid key ID and 32-byte key file")
+	}
+	if c.Environment == "production" && !auditEventConfigured {
+		return errors.New("audit event authentication key is required in production")
+	}
+	if len(c.AuditEventKey) == 32 && len(c.AuditCheckpointKey) == 32 && bytes.Equal(c.AuditEventKey, c.AuditCheckpointKey) {
+		return errors.New("audit event and checkpoint keys must be distinct")
 	}
 	if c.CommandSigningKeyFile != "" && !filepath.IsAbs(c.CommandSigningKeyFile) {
 		return errors.New("command signing key file path must be absolute")
@@ -358,6 +394,96 @@ func readSecretFile(path string) (string, error) {
 		return "", errors.New("secret file contains an invalid value")
 	}
 	return value, nil
+}
+
+func readStrictHexKeyFile(path string, expectedUID uint32) ([]byte, error) {
+	if !filepath.IsAbs(path) || filepath.Clean(path) != path {
+		return nil, errors.New("key path must be absolute and clean")
+	}
+	components := strings.Split(strings.TrimPrefix(path, string(filepath.Separator)), string(filepath.Separator))
+	if len(components) == 0 || components[len(components)-1] == "" {
+		return nil, errors.New("key path is invalid")
+	}
+	directoryFD, err := unix.Open(string(filepath.Separator), unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
+	if err != nil {
+		return nil, fmt.Errorf("open key root: %w", err)
+	}
+	defer func() { _ = unix.Close(directoryFD) }()
+	if err := validateKeyDirectoryFD(directoryFD, expectedUID); err != nil {
+		return nil, err
+	}
+	for _, component := range components[:len(components)-1] {
+		if component == "" || component == "." || component == ".." {
+			return nil, errors.New("key ancestry is invalid")
+		}
+		nextFD, openErr := unix.Openat(directoryFD, component, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+		if openErr != nil {
+			return nil, fmt.Errorf("open key ancestor: %w", openErr)
+		}
+		if err := validateKeyDirectoryFD(nextFD, expectedUID); err != nil {
+			_ = unix.Close(nextFD)
+			return nil, err
+		}
+		_ = unix.Close(directoryFD)
+		directoryFD = nextFD
+	}
+	fileFD, err := unix.Openat(directoryFD, components[len(components)-1], unix.O_RDONLY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+	if err != nil {
+		return nil, fmt.Errorf("open key file: %w", err)
+	}
+	file := os.NewFile(uintptr(fileFD), path)
+	if file == nil {
+		_ = unix.Close(fileFD)
+		return nil, errors.New("open key file descriptor")
+	}
+	defer file.Close()
+	var stat unix.Stat_t
+	if err := unix.Fstat(fileFD, &stat); err != nil {
+		return nil, fmt.Errorf("stat key file: %w", err)
+	}
+	if stat.Mode&unix.S_IFMT != unix.S_IFREG || stat.Uid != expectedUID || stat.Nlink != 1 {
+		return nil, errors.New("key must be a process-owned regular file with one link")
+	}
+	mode := stat.Mode & 0o777
+	if mode != 0o400 && mode != 0o600 {
+		return nil, errors.New("key mode must be 0400 or 0600")
+	}
+	raw, err := io.ReadAll(io.LimitReader(file, 67))
+	if err != nil {
+		return nil, err
+	}
+	value := strings.TrimSuffix(strings.TrimSuffix(string(raw), "\n"), "\r")
+	if len(value) != 64 || strings.ToLower(value) != value {
+		return nil, errors.New("key must contain exactly 32 bytes as lowercase hex")
+	}
+	decoded, err := hex.DecodeString(value)
+	if err != nil {
+		return nil, errors.New("key must contain exactly 32 bytes as lowercase hex")
+	}
+	return decoded, nil
+}
+
+func validateKeyDirectoryFD(fd int, expectedUID uint32) error {
+	var stat unix.Stat_t
+	if err := unix.Fstat(fd, &stat); err != nil {
+		return fmt.Errorf("stat key ancestry: %w", err)
+	}
+	if stat.Mode&unix.S_IFMT != unix.S_IFDIR || (stat.Uid != 0 && stat.Uid != expectedUID) || stat.Mode&0o022 != 0 {
+		return errors.New("key ancestry must be root- or process-owned and not group/world writable")
+	}
+	return nil
+}
+
+func validKeyID(value string) bool {
+	if len(value) < 1 || len(value) > 128 {
+		return false
+	}
+	for _, character := range value {
+		if (character < 'a' || character > 'z') && (character < 'A' || character > 'Z') && (character < '0' || character > '9') && character != '.' && character != '_' && character != '-' {
+			return false
+		}
+	}
+	return true
 }
 
 func setInt64(lookup LookupEnv, name string, target *int64) error {

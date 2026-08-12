@@ -35,7 +35,11 @@ The binary accepts `--role=api`, `--role=worker`, `--role=scheduler`, or
 `--role=all`. `OCSERV_DATABASE_URL` is required; production may instead use
 `OCSERV_DATABASE_URL_FILE`. The OIDC client secret, certificate-signer token,
 session key, audit checkpoint key, and break-glass hash support the same
-exclusive `_FILE` form for mounted secrets. Development authentication is
+exclusive `_FILE` form for mounted secrets. Audit event authentication uses
+`OCSERV_AUDIT_EVENT_KEY_ID` plus the strict `OCSERV_AUDIT_EVENT_KEY_FILE`; raw
+event key environment values are not accepted outside the repository's
+development and test fixtures and are rejected in production.
+Development authentication is
 disabled by default and can only be enabled with `OCSERV_DEV_AUTH=true` when
 the environment is `development` and the HTTP listener is loopback-only. A
 non-loopback development stack must instead set an explicit bearer credential
