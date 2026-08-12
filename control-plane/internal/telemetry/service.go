@@ -1,22 +1,28 @@
 package telemetry
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"math"
 	"net"
 	"regexp"
 	"slices"
+	"strings"
 	"time"
+	"unicode/utf8"
 
 	agentv1 "github.com/GentleKingson/ocservia/control-plane/gen/proto/ocserv/platform/agent/v1"
+	"github.com/GentleKingson/ocservia/control-plane/internal/postgresinput"
 	"github.com/GentleKingson/ocservia/control-plane/internal/userusage"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"google.golang.org/protobuf/proto"
 )
@@ -26,7 +32,13 @@ const (
 	MaxManagedResources = 384
 	MaxReportedGroups   = MaxManagedResources * 2
 	OfflineAfter        = 90 * time.Second
+	MaxTelemetryAge     = 14 * 24 * time.Hour
+	MaxTelemetrySkew    = 5 * time.Minute
 )
+
+// ErrInvalidTelemetry identifies wire content that cannot become valid by
+// retrying it. Database and transaction failures are deliberately not wrapped.
+var ErrInvalidTelemetry = errors.New("telemetry payload is permanently invalid")
 
 var allowedMetrics = map[string]bool{
 	"cpu_usage_ratio": true, "memory_used_bytes": true,
@@ -168,32 +180,49 @@ type Service struct {
 func New(pool *pgxpool.Pool) *Service { return &Service{pool: pool, now: time.Now} }
 
 func (s *Service) IngestWire(ctx context.Context, expectedNodeID uuid.UUID, payload []byte) (bool, error) {
-	batch, err := decodeWire(payload)
+	batch, payloadBytes, err := s.validateWire(expectedNodeID, payload)
 	if err != nil {
 		return false, err
 	}
-	if batch.NodeID != expectedNodeID {
-		return false, errors.New("telemetry node identity mismatch")
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return false, fmt.Errorf("begin telemetry ingest: %w", err)
 	}
-	return s.Ingest(ctx, batch)
+	defer rollback(tx)
+	ingested, err := s.ingestTx(ctx, tx, batch, payloadBytes)
+	if err != nil {
+		return false, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return false, err
+	}
+	return ingested, nil
 }
 
 // IngestWireTx writes a validated telemetry batch using the caller's
 // authenticated node identity and transaction so the authoritative endpoint
 // check and every resulting state change share one commit boundary.
 func (s *Service) IngestWireTx(ctx context.Context, tx pgx.Tx, expectedNodeID uuid.UUID, payload []byte) (bool, error) {
-	batch, err := decodeWire(payload)
-	if err != nil {
-		return false, err
-	}
-	if batch.NodeID != expectedNodeID {
-		return false, errors.New("telemetry node identity mismatch")
-	}
-	payloadBytes, err := s.validateForIngest(batch)
+	batch, payloadBytes, err := s.validateWire(expectedNodeID, payload)
 	if err != nil {
 		return false, err
 	}
 	return s.ingestTx(ctx, tx, batch, payloadBytes)
+}
+
+func (s *Service) validateWire(expectedNodeID uuid.UUID, payload []byte) (Batch, int, error) {
+	batch, err := decodeWire(payload)
+	if err != nil {
+		return Batch{}, 0, fmt.Errorf("%w: %v", ErrInvalidTelemetry, err)
+	}
+	if batch.NodeID != expectedNodeID {
+		return Batch{}, 0, fmt.Errorf("%w: telemetry node identity mismatch", ErrInvalidTelemetry)
+	}
+	payloadBytes, err := s.validateForIngest(batch)
+	if err != nil {
+		return Batch{}, 0, fmt.Errorf("%w: %v", ErrInvalidTelemetry, err)
+	}
+	return batch, payloadBytes, nil
 }
 
 func decodeWire(payload []byte) (Batch, error) {
@@ -296,6 +325,9 @@ func (s *Service) validateForIngest(batch Batch) (int, error) {
 }
 
 func (s *Service) ingestTx(ctx context.Context, tx pgx.Tx, batch Batch, payloadBytes int) (bool, error) {
+	if err := validatePostgresJSONDocuments(ctx, tx, batch); err != nil {
+		return false, err
+	}
 	result, err := tx.Exec(ctx, `INSERT INTO telemetry_ingest_batches
 		(batch_id,node_id,sequence,kind,observed_at,payload_bytes) VALUES ($1,$2,$3,$4,$5,$6)
 		ON CONFLICT DO NOTHING`, batch.ID, batch.NodeID, batch.Sequence, batch.Kind, batch.Snapshot.ObservedAt, payloadBytes)
@@ -331,6 +363,9 @@ func (s *Service) ingestTx(ctx context.Context, tx pgx.Tx, batch Batch, payloadB
 			usage = append(usage, userusage.Sample{SessionID: session.ID, Username: session.Username, Connected: session.ConnectedAt, RXBytes: session.BytesIn, TXBytes: session.BytesOut, ObservedAt: batch.Snapshot.ObservedAt})
 		}
 		if err := userusage.RecordTx(ctx, tx, batch.NodeID, usage); err != nil {
+			if errors.Is(err, userusage.ErrInvalidSample) {
+				return false, fmt.Errorf("%w: session usage identity conflict", ErrInvalidTelemetry)
+			}
 			return false, fmt.Errorf("record observed user usage: %w", err)
 		}
 		if _, err := tx.Exec(ctx, `DELETE FROM node_sessions WHERE node_id=$1`, batch.NodeID); err != nil {
@@ -400,11 +435,13 @@ func validateBatch(batch Batch, now time.Time) error {
 	if batch.Kind != "security" && batch.Kind != "current_health" && batch.Kind != "aggregate" && batch.Kind != "raw_history" {
 		return errors.New("telemetry kind is invalid")
 	}
-	if batch.Snapshot.ObservedAt.IsZero() || batch.Snapshot.ObservedAt.After(now.Add(5*time.Minute)) || len(batch.Snapshot.BootID) == 0 || len(batch.Snapshot.BootID) > 128 || batch.Snapshot.AgentInstance == uuid.Nil {
+	earliest := now.Add(-MaxTelemetryAge)
+	latest := now.Add(MaxTelemetrySkew)
+	if batch.Snapshot.ObservedAt.IsZero() || batch.Snapshot.ObservedAt.Before(earliest) || batch.Snapshot.ObservedAt.After(latest) || !postgresinput.ValidText(batch.Snapshot.BootID, 128) || batch.Snapshot.AgentInstance == uuid.Nil {
 		return errors.New("observed snapshot identity or time is invalid")
 	}
 	for _, value := range []string{batch.Snapshot.AgentVersion, batch.Snapshot.OcservVersion, batch.Snapshot.OSRelease} {
-		if len(value) == 0 || len(value) > 128 {
+		if !postgresinput.ValidText(value, 128) {
 			return errors.New("observed version is invalid")
 		}
 	}
@@ -413,20 +450,38 @@ func validateBatch(batch Batch, now time.Time) error {
 			return errors.New("observed documents must be JSON objects")
 		}
 	}
+	for _, counter := range []uint64{
+		batch.Snapshot.Dropped.Security,
+		batch.Snapshot.Dropped.Health,
+		batch.Snapshot.Dropped.Aggregate,
+		batch.Snapshot.Dropped.Raw,
+	} {
+		if counter > math.MaxInt64 {
+			return errors.New("telemetry drop counter exceeds int64")
+		}
+	}
 	if len(batch.Sessions) > 10000 || len(batch.IPBans) > 4096 || len(batch.Samples) > 8192 || len(batch.Security) > 1024 || len(batch.Users) > MaxManagedResources || len(batch.Groups) > MaxReportedGroups {
 		return errors.New("telemetry collection count exceeds limit")
 	}
 	namePattern := regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$`)
+	usernames := make(map[string]struct{}, len(batch.Users))
 	for _, user := range batch.Users {
 		if !namePattern.MatchString(user.Username) || user.Revision > math.MaxInt64 || len(user.Fingerprint) != sha256.Size {
 			return errors.New("user observation is invalid")
 		}
+		if !insertUnique(usernames, user.Username) {
+			return errors.New("duplicate user observation")
+		}
 	}
 	totalMemberships := 0
+	groupNames := make(map[string]struct{}, len(batch.Groups))
 	for _, group := range batch.Groups {
 		totalMemberships += len(group.Members)
 		if !namePattern.MatchString(group.Name) || group.Revision > math.MaxInt64 || len(group.Fingerprint) != sha256.Size || len(group.Members) > MaxManagedResources || totalMemberships > MaxManagedResources {
 			return errors.New("group observation is invalid")
+		}
+		if !insertUnique(groupNames, group.Name) {
+			return errors.New("duplicate group observation")
 		}
 		copyMembers := slices.Clone(group.Members)
 		slices.Sort(copyMembers)
@@ -439,33 +494,88 @@ func validateBatch(batch Batch, now time.Time) error {
 			}
 		}
 	}
+	banIPs := make(map[string]struct{}, len(batch.IPBans))
 	for _, ban := range batch.IPBans {
+		if ban.SecondsRemaining != nil && *ban.SecondsRemaining > math.MaxInt64 {
+			return errors.New("IP ban remaining duration exceeds int64")
+		}
 		parsed := net.ParseIP(ban.IP)
 		if parsed == nil || parsed.String() != ban.IP {
 			return errors.New("IP ban observation is invalid")
 		}
+		if !insertUnique(banIPs, ban.IP) {
+			return errors.New("duplicate IP ban observation")
+		}
 	}
+	sessionIDs := make(map[string]struct{}, len(batch.Sessions))
 	for _, session := range batch.Sessions {
-		if session.ID == "" || len(session.ID) > 256 || session.Username == "" || len(session.Username) > 256 || net.ParseIP(session.ClientIP) == nil || session.BytesIn < 0 || session.BytesOut < 0 || session.ConnectedAt.IsZero() {
+		if !postgresinput.ValidText(session.ID, 256) || !namePattern.MatchString(session.Username) || net.ParseIP(session.ClientIP) == nil || session.BytesIn < 0 || session.BytesOut < 0 || session.ConnectedAt.IsZero() {
 			return errors.New("session observation is invalid")
+		}
+		if !insertUnique(sessionIDs, session.ID) {
+			return errors.New("duplicate session observation")
 		}
 	}
 	for _, sample := range batch.Samples {
-		if !allowedMetrics[sample.Metric] || math.IsNaN(sample.Value) || math.IsInf(sample.Value, 0) || sample.SampledAt.IsZero() || sample.SampledAt.After(now.Add(5*time.Minute)) {
+		if !allowedMetrics[sample.Metric] || math.IsNaN(sample.Value) || math.IsInf(sample.Value, 0) || sample.SampledAt.IsZero() || sample.SampledAt.Before(earliest) || sample.SampledAt.After(latest) {
 			return errors.New("telemetry sample is invalid")
 		}
 	}
 	for _, event := range batch.Security {
-		if event.ID == uuid.Nil || event.ID.Version() != 7 || (event.Severity != "info" && event.Severity != "warning" && event.Severity != "critical") || event.Type == "" || len(event.Type) > 128 || !validObject(event.Detail) {
+		if event.ID == uuid.Nil || event.ID.Version() != 7 || event.ObservedAt.IsZero() || event.ObservedAt.Before(earliest) || event.ObservedAt.After(latest) || (event.Severity != "info" && event.Severity != "warning" && event.Severity != "critical") || !postgresinput.ValidText(event.Type, 128) || !validObject(event.Detail) {
 			return errors.New("security telemetry is invalid")
 		}
 	}
 	return nil
 }
 
+func insertUnique[T comparable](values map[T]struct{}, value T) bool {
+	if _, exists := values[value]; exists {
+		return false
+	}
+	values[value] = struct{}{}
+	return true
+}
+
 func validObject(value json.RawMessage) bool {
+	if len(value) == 0 || !utf8.Valid(value) {
+		return false
+	}
+	decoder := json.NewDecoder(bytes.NewReader(value))
+	decoder.UseNumber()
 	var object map[string]any
-	return len(value) > 0 && json.Unmarshal(value, &object) == nil && object != nil
+	if err := decoder.Decode(&object); err != nil || object == nil {
+		return false
+	}
+	return decoder.Decode(&struct{}{}) == io.EOF
+}
+
+func validatePostgresJSONDocuments(ctx context.Context, tx pgx.Tx, batch Batch) error {
+	documents := make([]json.RawMessage, 0, 3+len(batch.Security))
+	documents = append(documents, batch.Snapshot.Ocserv, batch.Snapshot.System, batch.Snapshot.Path)
+	for _, event := range batch.Security {
+		documents = append(documents, event.Detail)
+	}
+	encoded, err := json.Marshal(documents)
+	if err != nil {
+		return fmt.Errorf("%w: encode JSON documents", ErrInvalidTelemetry)
+	}
+	var documentCount int
+	err = tx.QueryRow(ctx, `SELECT jsonb_array_length($1::jsonb)`, string(encoded)).Scan(&documentCount)
+	if err != nil {
+		var postgresError *pgconn.PgError
+		// This statement performs only the input cast, so its data exceptions
+		// describe deterministic payload incompatibility rather than a failed
+		// business write. Operational database errors remain retryable.
+		if errors.As(err, &postgresError) && (strings.HasPrefix(postgresError.Code, "22") || postgresError.Code == "54001") {
+			return fmt.Errorf("%w: JSON document is not PostgreSQL-compatible", ErrInvalidTelemetry)
+		}
+		return fmt.Errorf("validate telemetry JSON storage compatibility: %w", err)
+	}
+	if documentCount != len(documents) {
+		return fmt.Errorf("%w: JSON document count changed during validation", ErrInvalidTelemetry)
+	}
+	return nil
 }
 
 func (s *Service) ListNodes(ctx context.Context, after uuid.UUID, limit int) ([]Node, bool, error) {

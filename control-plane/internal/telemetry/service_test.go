@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
+	"math"
 	"os"
 	"strings"
 	"testing"
@@ -42,6 +43,154 @@ func TestValidateBatchRejectsHighCardinalityMetricNames(t *testing.T) {
 	batch.Samples[0].Metric = "session_019fc0a4"
 	if err := validateBatch(batch, now); err == nil {
 		t.Fatal("high-cardinality metric name accepted")
+	}
+}
+
+func TestValidateBatchRejectsPostgresBigintOverflow(t *testing.T) {
+	now := time.Now().UTC()
+	remaining := uint64(math.MaxUint64)
+	tests := []struct {
+		name   string
+		mutate func(*Batch)
+	}{
+		{name: "dropped security", mutate: func(batch *Batch) { batch.Snapshot.Dropped.Security = uint64(math.MaxInt64) + 1 }},
+		{name: "dropped health", mutate: func(batch *Batch) { batch.Snapshot.Dropped.Health = uint64(math.MaxInt64) + 1 }},
+		{name: "dropped aggregate", mutate: func(batch *Batch) { batch.Snapshot.Dropped.Aggregate = uint64(math.MaxInt64) + 1 }},
+		{name: "dropped raw", mutate: func(batch *Batch) { batch.Snapshot.Dropped.Raw = uint64(math.MaxInt64) + 1 }},
+		{name: "IP ban remaining", mutate: func(batch *Batch) { batch.IPBans[0].SecondsRemaining = &remaining }},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			batch := testBatch(uuid.Must(uuid.NewV7()), 1, now)
+			test.mutate(&batch)
+			if err := validateBatch(batch, now); err == nil {
+				t.Fatal("telemetry value exceeding PostgreSQL bigint was accepted")
+			}
+		})
+	}
+}
+
+func TestValidateBatchRejectsDuplicateResourceKeys(t *testing.T) {
+	now := time.Now().UTC()
+	fingerprint := make([]byte, sha256.Size)
+	tests := []struct {
+		name   string
+		mutate func(*Batch)
+	}{
+		{name: "session ID", mutate: func(batch *Batch) { batch.Sessions = append(batch.Sessions, batch.Sessions[0]) }},
+		{name: "IP ban", mutate: func(batch *Batch) { batch.IPBans = append(batch.IPBans, batch.IPBans[0]) }},
+		{name: "username", mutate: func(batch *Batch) {
+			user := User{Username: "alice", Enabled: true, Revision: 1, Fingerprint: fingerprint}
+			batch.Users = []User{user, user}
+		}},
+		{name: "group name", mutate: func(batch *Batch) {
+			group := Group{Name: "staff", Members: []string{"alice"}, Revision: 1, Fingerprint: fingerprint}
+			batch.Groups = []Group{group, group}
+		}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			batch := testBatch(uuid.Must(uuid.NewV7()), 1, now)
+			test.mutate(&batch)
+			if err := validateBatch(batch, now); err == nil {
+				t.Fatal("duplicate telemetry resource key was accepted")
+			}
+		})
+	}
+}
+
+func TestValidateBatchRejectsSessionUsernameOutsideUsageSchema(t *testing.T) {
+	now := time.Now().UTC()
+	batch := testBatch(uuid.Must(uuid.NewV7()), 1, now)
+	batch.Sessions[0].Username = strings.Repeat("a", 65)
+	if err := validateBatch(batch, now); err == nil {
+		t.Fatal("session username outside the usage schema was accepted")
+	}
+}
+
+func TestValidateBatchRejectsPostgresUnsafeText(t *testing.T) {
+	now := time.Now().UTC()
+	tests := []struct {
+		name   string
+		mutate func(*Batch)
+	}{
+		{name: "boot ID", mutate: func(batch *Batch) { batch.Snapshot.BootID = "boot\x00poison" }},
+		{name: "Agent version", mutate: func(batch *Batch) { batch.Snapshot.AgentVersion = "agent\x00poison" }},
+		{name: "ocserv version", mutate: func(batch *Batch) { batch.Snapshot.OcservVersion = "ocserv\x00poison" }},
+		{name: "OS release", mutate: func(batch *Batch) { batch.Snapshot.OSRelease = "os\x00poison" }},
+		{name: "session ID", mutate: func(batch *Batch) { batch.Sessions[0].ID = "session\x00poison" }},
+		{name: "security event type", mutate: func(batch *Batch) {
+			batch.Security = []SecurityEvent{{ID: uuid.Must(uuid.NewV7()), ObservedAt: now, Severity: "warning", Type: "event\x00poison", Detail: json.RawMessage(`{}`)}}
+		}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			batch := testBatch(uuid.Must(uuid.NewV7()), 1, now)
+			test.mutate(&batch)
+			if err := validateBatch(batch, now); err == nil {
+				t.Fatal("PostgreSQL-unsafe telemetry text was accepted")
+			}
+		})
+	}
+}
+
+func TestValidateBatchRejectsInvalidUTF8JSON(t *testing.T) {
+	now := time.Now().UTC()
+	batch := testBatch(uuid.Must(uuid.NewV7()), 1, now)
+	batch.Snapshot.Path = json.RawMessage([]byte{'{', '"', 'x', '"', ':', '"', 0xff, '"', '}'})
+	if err := validateBatch(batch, now); err == nil {
+		t.Fatal("invalid UTF-8 telemetry JSON was accepted")
+	}
+}
+
+func TestValidObjectAcceptsPostgresSafeUnicode(t *testing.T) {
+	for _, document := range []json.RawMessage{
+		json.RawMessage(`{"label":"replacement �"}`),
+		json.RawMessage(`{"label":"\ud83d\ude00"}`),
+		json.RawMessage(`{"escaped":"\\u0000"}`),
+	} {
+		if !validObject(document) {
+			t.Fatalf("PostgreSQL-safe JSON rejected: %s", document)
+		}
+	}
+}
+
+func TestValidObjectDefersPostgresSpecificConstraints(t *testing.T) {
+	for _, document := range []json.RawMessage{
+		json.RawMessage(`{"label":"\u0000"}`),
+		json.RawMessage(`{"outside_postgres_numeric":1e131072}`),
+	} {
+		if !validObject(document) {
+			t.Fatalf("syntactically valid JSON did not reach PostgreSQL compatibility validation: %s", document)
+		}
+	}
+}
+
+func TestValidateBatchRejectsTelemetryOutsideRetentionWindow(t *testing.T) {
+	now := time.Now().UTC()
+	tests := []struct {
+		name   string
+		mutate func(*Batch)
+	}{
+		{name: "old snapshot", mutate: func(batch *Batch) { batch.Snapshot.ObservedAt = now.Add(-MaxTelemetryAge - time.Second) }},
+		{name: "future snapshot", mutate: func(batch *Batch) { batch.Snapshot.ObservedAt = now.Add(MaxTelemetrySkew + time.Second) }},
+		{name: "old sample", mutate: func(batch *Batch) { batch.Samples[0].SampledAt = now.Add(-MaxTelemetryAge - time.Second) }},
+		{name: "future sample", mutate: func(batch *Batch) { batch.Samples[0].SampledAt = now.Add(MaxTelemetrySkew + time.Second) }},
+		{name: "old security event", mutate: func(batch *Batch) {
+			batch.Security = []SecurityEvent{{ID: uuid.Must(uuid.NewV7()), ObservedAt: now.Add(-MaxTelemetryAge - time.Second), Severity: "warning", Type: "test", Detail: json.RawMessage(`{}`)}}
+		}},
+		{name: "future security event", mutate: func(batch *Batch) {
+			batch.Security = []SecurityEvent{{ID: uuid.Must(uuid.NewV7()), ObservedAt: now.Add(MaxTelemetrySkew + time.Second), Severity: "warning", Type: "test", Detail: json.RawMessage(`{}`)}}
+		}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			batch := testBatch(uuid.Must(uuid.NewV7()), 1, now)
+			test.mutate(&batch)
+			if err := validateBatch(batch, now); err == nil {
+				t.Fatal("telemetry outside the accepted retention window was accepted")
+			}
+		})
 	}
 }
 

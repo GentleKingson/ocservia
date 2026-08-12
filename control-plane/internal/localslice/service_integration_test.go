@@ -108,17 +108,21 @@ func TestDisconnectedEventPreservesUntrustedNodeStatesIntegration(t *testing.T) 
 			wrongEndpoint[0] ^= 0xff
 			wrongEventID := uuid.Must(uuid.NewV7())
 			err = NewWithSigner(pool, integrationCommandSigner()).Ingest(ctx, &transportv1.TransportEvent{EventId: wrongEventID[:], NodeId: nodeID[:], EndpointId: wrongEndpoint[:], Type: transportv1.TransportEventType_TRANSPORT_EVENT_TYPE_DISCONNECTED, OccurredAt: timestamppb.Now(), Traceparent: "00-0123456789abcdef0123456789abcdef-0123456789abcdef-01", Payload: []byte("wrong endpoint disconnect")})
-			if err == nil {
-				t.Fatal("revoked node disconnect with a non-tombstoned endpoint was accepted")
+			if err != nil {
+				t.Fatalf("quarantine wrong-endpoint disconnect: %v", err)
 			}
+			assertEventQuarantined(t, pool, wrongEventID, nodeID, "node_endpoint_not_active")
 		}
 		eventID := uuid.Must(uuid.NewV7())
 		err = NewWithSigner(pool, integrationCommandSigner()).Ingest(ctx, &transportv1.TransportEvent{EventId: eventID[:], NodeId: nodeID[:], EndpointId: endpoint[:], Type: transportv1.TransportEventType_TRANSPORT_EVENT_TYPE_DISCONNECTED, OccurredAt: timestamppb.Now(), Traceparent: "00-0123456789abcdef0123456789abcdef-0123456789abcdef-01", Payload: []byte(initialStatus + " disconnect")})
 		if initialStatus == "revoked" && err != nil {
 			t.Fatalf("revoked tombstone disconnect was rejected: %v", err)
 		}
-		if initialStatus != "revoked" && err == nil {
-			t.Fatalf("%s node event was accepted after trust ended", initialStatus)
+		if initialStatus != "revoked" {
+			if err != nil {
+				t.Fatalf("quarantine %s node event: %v", initialStatus, err)
+			}
+			assertEventQuarantined(t, pool, eventID, nodeID, "node_endpoint_not_active")
 		}
 		var status string
 		if err := pool.QueryRow(ctx, `SELECT status FROM nodes WHERE id=$1`, nodeID).Scan(&status); err != nil {
@@ -267,9 +271,10 @@ func TestTelemetryPayloadCannotWriteAnotherNodeIntegration(t *testing.T) {
 		Type:       transportv1.TransportEventType_TRANSPORT_EVENT_TYPE_TELEMETRY,
 		OccurredAt: timestamppb.New(now), Traceparent: "00-0123456789abcdef0123456789abcdef-0123456789abcdef-01", Payload: payload,
 	})
-	if err == nil || !strings.Contains(err.Error(), "telemetry node identity mismatch") {
-		t.Fatalf("cross-node telemetry result = %v", err)
+	if err != nil {
+		t.Fatalf("quarantine cross-node telemetry: %v", err)
 	}
+	assertEventQuarantined(t, pool, eventID, nodeA, "invalid_telemetry")
 
 	var status string
 	var transportCount, mutatedRows int
@@ -486,6 +491,32 @@ func integrationEndpoint(nodeID uuid.UUID) [32]byte {
 	return sha256.Sum256(append([]byte("ocservia/development-simulator/"), nodeID[:]...))
 }
 
+func assertEventQuarantined(t *testing.T, pool *pgxpool.Pool, eventID, nodeID uuid.UUID, reasonCode string) {
+	t.Helper()
+	var quarantinedNode, cursorID uuid.UUID
+	var quarantinedReason string
+	var payloadHash []byte
+	var eventCount int
+	if err := pool.QueryRow(context.Background(), `SELECT node_id,reason_code,payload_sha256 FROM transport_event_quarantine WHERE event_id=$1`, eventID).Scan(&quarantinedNode, &quarantinedReason, &payloadHash); err != nil {
+		t.Fatalf("read quarantined event %s: %v", eventID, err)
+	}
+	if quarantinedNode != nodeID || quarantinedReason != reasonCode || len(payloadHash) != sha256.Size {
+		t.Fatalf("quarantine evidence node=%s reason=%q hash_bytes=%d", quarantinedNode, quarantinedReason, len(payloadHash))
+	}
+	if err := pool.QueryRow(context.Background(), `SELECT event_id FROM transport_event_cursor WHERE singleton AND valid`).Scan(&cursorID); err != nil {
+		t.Fatalf("read durable transport cursor: %v", err)
+	}
+	if cursorID != eventID {
+		t.Fatalf("durable cursor=%s, want quarantined event %s", cursorID, eventID)
+	}
+	if err := pool.QueryRow(context.Background(), `SELECT count(*) FROM transport_events WHERE event_id=$1`, eventID).Scan(&eventCount); err != nil {
+		t.Fatal(err)
+	}
+	if eventCount != 0 {
+		t.Fatalf("quarantined event %s reached the business event table", eventID)
+	}
+}
+
 func (fixture *commandResultFixture) validResult() *agentv1.CommandResult {
 	return &agentv1.CommandResult{
 		CommandId: fixture.commandID[:], IdempotencyKey: fixture.envelope.GetIdempotencyKey(),
@@ -516,9 +547,10 @@ func TestMalformedCommandResultRollsBackTransactionIntegration(t *testing.T) {
 		EventId: eventID[:], NodeId: fixture.nodeID[:], EndpointId: fixture.endpointID[:], Type: transportv1.TransportEventType_TRANSPORT_EVENT_TYPE_COMMAND_RESULT,
 		OccurredAt: timestamppb.Now(), Traceparent: fixture.traceparent, Payload: []byte{0x80},
 	})
-	if err == nil {
-		t.Fatal("malformed command_result was accepted")
+	if err != nil {
+		t.Fatalf("quarantine malformed command_result: %v", err)
 	}
+	assertEventQuarantined(t, fixture.pool, eventID, fixture.nodeID, "invalid_command_result")
 	var transportCount, resultCount, operationEventCount int
 	var operationState, commandState string
 	if err := fixture.pool.QueryRow(context.Background(), `SELECT (SELECT count(*) FROM transport_events WHERE event_id=$1),(SELECT count(*) FROM agent_command_results WHERE command_id=$2),(SELECT count(*) FROM operation_events WHERE operation_id=$3),(SELECT state FROM operations WHERE id=$3),(SELECT state FROM commands WHERE id=$2)`, eventID, fixture.commandID, fixture.operationID).Scan(&transportCount, &resultCount, &operationEventCount, &operationState, &commandState); err != nil {
@@ -564,9 +596,10 @@ func TestStoredCommandHashVersionMustMatchResultIntegration(t *testing.T) {
 				SemanticPayloadHashVersion: test.version,
 			}
 			eventID, err := fixture.ingestResult(t, result)
-			if err == nil {
-				t.Fatalf("stored V1 envelope accepted result hash version %v", test.version)
+			if err != nil {
+				t.Fatalf("quarantine result hash version %v: %v", test.version, err)
 			}
+			assertEventQuarantined(t, fixture.pool, eventID, fixture.nodeID, "invalid_command_result")
 			var transportCount, resultCount int
 			var operationState, commandState string
 			if queryErr := fixture.pool.QueryRow(context.Background(), `SELECT (SELECT count(*) FROM transport_events WHERE event_id=$1),(SELECT count(*) FROM agent_command_results WHERE command_id=$2),(SELECT state FROM operations WHERE id=$3),(SELECT state FROM commands WHERE id=$2)`, eventID, fixture.commandID, fixture.operationID).Scan(&transportCount, &resultCount, &operationState, &commandState); queryErr != nil {
@@ -591,6 +624,21 @@ func TestInvalidCommandResultStatesAndTimesFailClosedIntegration(t *testing.T) {
 		{"unknown_without_reason", func(result *agentv1.CommandResult, _ time.Time) {
 			result.State = agentv1.CommandResultState_COMMAND_RESULT_STATE_UNKNOWN
 			result.Result = nil
+		}},
+		{"failed_with_nul_error", func(result *agentv1.CommandResult, _ time.Time) {
+			result.State = agentv1.CommandResultState_COMMAND_RESULT_STATE_FAILED
+			result.ErrorCode = "poison\x00code"
+		}},
+		{"unknown_with_nul_error", func(result *agentv1.CommandResult, _ time.Time) {
+			result.State = agentv1.CommandResultState_COMMAND_RESULT_STATE_UNKNOWN
+			result.Result = nil
+			result.ErrorCode = "poison\x00code"
+		}},
+		{"rejected_with_nul_error", func(result *agentv1.CommandResult, _ time.Time) {
+			result.State = agentv1.CommandResultState_COMMAND_RESULT_STATE_REJECTED
+			result.AcceptedAt = nil
+			result.Result = nil
+			result.ErrorCode = "poison\x00code"
 		}},
 		{"rejected_with_accepted_at", func(result *agentv1.CommandResult, _ time.Time) {
 			result.State = agentv1.CommandResultState_COMMAND_RESULT_STATE_REJECTED
@@ -617,12 +665,22 @@ func TestInvalidCommandResultStatesAndTimesFailClosedIntegration(t *testing.T) {
 			result := fixture.validResult()
 			test.mutate(result, fixture.issuedAt)
 			eventID, err := fixture.ingestResult(t, result)
-			if err == nil {
-				t.Fatal("invalid result was accepted")
+			if err != nil {
+				t.Fatalf("quarantine invalid result: %v", err)
 			}
-			var count int
-			if err := fixture.pool.QueryRow(context.Background(), `SELECT count(*) FROM transport_events WHERE event_id=$1`, eventID).Scan(&count); err != nil || count != 0 {
-				t.Fatalf("invalid result was partially persisted: count=%d err=%v", count, err)
+			assertEventQuarantined(t, fixture.pool, eventID, fixture.nodeID, "invalid_command_result")
+			var transportCount, resultCount, operationEventCount int
+			var operationState, commandState string
+			if err := fixture.pool.QueryRow(context.Background(), `SELECT
+				(SELECT count(*) FROM transport_events WHERE event_id=$1),
+				(SELECT count(*) FROM agent_command_results WHERE command_id=$2),
+				(SELECT count(*) FROM operation_events WHERE operation_id=$3),
+				(SELECT state FROM operations WHERE id=$3),
+				(SELECT state FROM commands WHERE id=$2)`, eventID, fixture.commandID, fixture.operationID).Scan(&transportCount, &resultCount, &operationEventCount, &operationState, &commandState); err != nil {
+				t.Fatal(err)
+			}
+			if transportCount != 0 || resultCount != 0 || operationEventCount != 0 || operationState != "dispatched" || commandState != "dispatched" {
+				t.Fatalf("invalid result left partial state: transport=%d results=%d operation_events=%d operation=%s command=%s", transportCount, resultCount, operationEventCount, operationState, commandState)
 			}
 		})
 	}
@@ -658,9 +716,10 @@ func TestContradictoryTerminalResultRollsBackIntegration(t *testing.T) {
 	contradiction.State = agentv1.CommandResultState_COMMAND_RESULT_STATE_FAILED
 	contradiction.ErrorCode = "late_failure"
 	eventID, err := fixture.ingestResult(t, contradiction)
-	if err == nil {
-		t.Fatal("contradictory terminal result was accepted")
+	if err != nil {
+		t.Fatalf("quarantine contradictory terminal result: %v", err)
 	}
+	assertEventQuarantined(t, fixture.pool, eventID, fixture.nodeID, "invalid_command_result")
 	var transportCount, resultCount int
 	var operationState, commandState string
 	if err := fixture.pool.QueryRow(context.Background(), `SELECT (SELECT count(*) FROM transport_events WHERE event_id=$1),(SELECT count(*) FROM agent_command_results WHERE command_id=$2),(SELECT state FROM operations WHERE id=$3),(SELECT state FROM commands WHERE id=$2)`, eventID, fixture.commandID, fixture.operationID).Scan(&transportCount, &resultCount, &operationState, &commandState); err != nil {
@@ -686,9 +745,10 @@ func TestUnknownSchedulesExplicitReconcileThenSafeRetryIntegration(t *testing.T)
 	unauthorizedRetry.Result = nil
 	unauthorizedRetry.ErrorCode = "effect_absent"
 	unauthorizedEventID, err := fixture.ingestResult(t, unauthorizedRetry)
-	if err == nil {
-		t.Fatal("effect absence without a prior reconcile was accepted")
+	if err != nil {
+		t.Fatalf("quarantine effect absence without prior reconciliation: %v", err)
 	}
+	assertEventQuarantined(t, fixture.pool, unauthorizedEventID, fixture.nodeID, "invalid_command_result")
 	var unauthorizedCount int
 	if err := fixture.pool.QueryRow(context.Background(), `SELECT count(*) FROM transport_events WHERE event_id=$1`, unauthorizedEventID).Scan(&unauthorizedCount); err != nil || unauthorizedCount != 0 {
 		t.Fatalf("unauthorized safe retry was partially persisted: count=%d err=%v", unauthorizedCount, err)

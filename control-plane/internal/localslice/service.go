@@ -17,6 +17,7 @@ import (
 	transportv1 "github.com/GentleKingson/ocservia/control-plane/gen/proto/ocserv/platform/transport/v1"
 	"github.com/GentleKingson/ocservia/control-plane/internal/audit"
 	"github.com/GentleKingson/ocservia/control-plane/internal/commandauth"
+	"github.com/GentleKingson/ocservia/control-plane/internal/postgresinput"
 	"github.com/GentleKingson/ocservia/control-plane/internal/semanticpayload"
 	telemetrystore "github.com/GentleKingson/ocservia/control-plane/internal/telemetry"
 	"github.com/google/uuid"
@@ -71,6 +72,25 @@ type Service struct {
 	pool   *pgxpool.Pool
 	now    func() time.Time
 	signer *commandauth.Signer
+}
+
+const (
+	maxTransportEventAge = telemetrystore.MaxTelemetryAge
+	maxQuarantineDetail  = 256
+)
+
+type permanentInvalidEvent struct {
+	reasonCode string
+	detail     string
+}
+
+func (e *permanentInvalidEvent) Error() string { return e.detail }
+
+func invalidEvent(reasonCode, detail string) error {
+	if len(detail) > maxQuarantineDetail {
+		detail = detail[:maxQuarantineDetail]
+	}
+	return &permanentInvalidEvent{reasonCode: reasonCode, detail: detail}
 }
 
 func New(pool *pgxpool.Pool) *Service {
@@ -244,7 +264,7 @@ func (s *Service) ListEventsInWorkspace(ctx context.Context, workspaceID, after 
 
 func (s *Service) LastEventID(ctx context.Context) ([]byte, error) {
 	var id uuid.UUID
-	if err := s.pool.QueryRow(ctx, "SELECT event_id FROM transport_events WHERE transport_cursor_valid ORDER BY ingest_sequence DESC LIMIT 1").Scan(&id); errors.Is(err, pgx.ErrNoRows) {
+	if err := s.pool.QueryRow(ctx, "SELECT event_id FROM transport_event_cursor WHERE singleton AND valid").Scan(&id); errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil
 	} else if err != nil {
 		return nil, fmt.Errorf("read event cursor: %w", err)
@@ -305,6 +325,9 @@ func (s *Service) ReconcileEventGap(ctx context.Context, nodeConnected func(cont
 	if _, err := tx.Exec(ctx, "UPDATE transport_events SET transport_cursor_valid = false WHERE transport_cursor_valid"); err != nil {
 		return fmt.Errorf("invalidate retained transport cursor after event gap: %w", err)
 	}
+	if _, err := tx.Exec(ctx, "UPDATE transport_event_cursor SET valid=false,updated_at=now() WHERE singleton"); err != nil {
+		return fmt.Errorf("invalidate durable transport cursor after event gap: %w", err)
+	}
 	commandTag, err := tx.Exec(ctx, `
 		UPDATE operations AS operation
 		SET state = 'unknown', updated_at = now()
@@ -361,69 +384,110 @@ func (s *Service) Ingest(ctx context.Context, event *transportv1.TransportEvent)
 	observedAt := s.now()
 	eventID, err := uuid.FromBytes(event.GetEventId())
 	if err != nil || eventID.Version() != 7 {
-		return errors.New("event_id must be UUIDv7")
+		return errors.New("transport event_id must be UUIDv7")
 	}
 	nodeID, err := uuid.FromBytes(event.GetNodeId())
 	if err != nil || nodeID.Version() != 7 {
-		return errors.New("node_id must be UUIDv7")
-	}
-	if len(event.GetEndpointId()) != 32 {
-		return errors.New("endpoint_id must be 32 bytes")
-	}
-	if !validTraceparent(event.GetTraceparent()) {
-		return errors.New("event traceparent is invalid")
-	}
-	if len(event.GetPayload()) > 1<<20 {
-		return errors.New("event payload exceeds 1 MiB")
-	}
-	eventType, err := eventName(event.GetType())
-	if err != nil {
-		return err
+		return errors.New("transport node_id must be UUIDv7")
 	}
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return fmt.Errorf("begin event transaction: %w", err)
 	}
 	defer rollback(tx)
+	if _, err := tx.Exec(ctx, "SAVEPOINT transport_event_business"); err != nil {
+		return fmt.Errorf("create transport event savepoint: %w", err)
+	}
+	workspaceID, err := s.ingestTransportEventTx(ctx, tx, eventID, nodeID, event, observedAt)
+	if err != nil {
+		var permanent *permanentInvalidEvent
+		if !errors.As(err, &permanent) {
+			return err
+		}
+		if _, rollbackErr := tx.Exec(ctx, "ROLLBACK TO SAVEPOINT transport_event_business"); rollbackErr != nil {
+			return fmt.Errorf("rollback permanently invalid transport event: %w", rollbackErr)
+		}
+		if _, releaseErr := tx.Exec(ctx, "RELEASE SAVEPOINT transport_event_business"); releaseErr != nil {
+			return fmt.Errorf("release transport event savepoint: %w", releaseErr)
+		}
+		if err := quarantineTransportEvent(ctx, tx, eventID, nodeID, event, workspaceID, observedAt, permanent); err != nil {
+			return err
+		}
+	} else {
+		if _, err := tx.Exec(ctx, "RELEASE SAVEPOINT transport_event_business"); err != nil {
+			return fmt.Errorf("release transport event savepoint: %w", err)
+		}
+		if err := advanceTransportCursor(ctx, tx, eventID, observedAt); err != nil {
+			return err
+		}
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("commit event transaction: %w", err)
+	}
+	return nil
+}
+
+func (s *Service) ingestTransportEventTx(ctx context.Context, tx pgx.Tx, eventID, nodeID uuid.UUID, event *transportv1.TransportEvent, observedAt time.Time) (uuid.UUID, error) {
+	var workspaceID uuid.UUID
 	var nodeStatus, endpointState string
-	if err := tx.QueryRow(ctx, `SELECT n.status,k.state
+	if err := tx.QueryRow(ctx, `SELECT n.workspace_id,n.status,k.state
 		FROM nodes n JOIN node_endpoint_keys k ON k.node_id=n.id
 		WHERE n.id=$1 AND k.endpoint_id=$2
-		FOR SHARE OF n,k`, nodeID, event.GetEndpointId()).Scan(&nodeStatus, &endpointState); errors.Is(err, pgx.ErrNoRows) {
-		return errors.New("transport event node is not authoritatively active")
+		FOR SHARE OF n,k`, nodeID, event.GetEndpointId()).Scan(&workspaceID, &nodeStatus, &endpointState); errors.Is(err, pgx.ErrNoRows) {
+		return uuid.Nil, invalidEvent("node_endpoint_not_active", "transport event node and EndpointID are not authoritatively active")
 	} else if err != nil {
-		return fmt.Errorf("check authoritative node ingress trust: %w", err)
+		return uuid.Nil, fmt.Errorf("check authoritative node ingress trust: %w", err)
+	}
+	eventType, err := eventName(event.GetType())
+	if err != nil {
+		return workspaceID, invalidEvent("unsupported_event_type", err.Error())
 	}
 	activeIngress := (nodeStatus == "active" || nodeStatus == "offline") && endpointState == "active"
 	// Revocation commits the tombstone before transportd closes the old session.
 	// Only its exact node/endpoint terminal event may cross that closed trust boundary.
 	revokedTerminalDisconnect := eventType == "disconnected" && nodeStatus == "revoked" && endpointState == "revoked"
 	if !activeIngress && !revokedTerminalDisconnect {
-		return errors.New("transport event node is not authoritatively active")
+		return workspaceID, invalidEvent("node_endpoint_not_active", "transport event node is not authoritatively active")
 	}
-	if eventType == "telemetry" {
-		if _, err := telemetrystore.New(s.pool).IngestWireTx(ctx, tx, nodeID, event.GetPayload()); err != nil {
-			return fmt.Errorf("ingest telemetry payload: %w", err)
-		}
+	if len(event.GetEndpointId()) != 32 {
+		return workspaceID, invalidEvent("invalid_endpoint_id", "transport event endpoint_id must be 32 bytes")
+	}
+	if !validTraceparent(event.GetTraceparent()) {
+		return workspaceID, invalidEvent("invalid_traceparent", "transport event traceparent is invalid")
+	}
+	if len(event.GetPayload()) > 1<<20 {
+		return workspaceID, invalidEvent("payload_too_large", "transport event payload exceeds 1 MiB")
 	}
 	occurredAt := event.GetOccurredAt()
 	if occurredAt == nil || occurredAt.CheckValid() != nil {
-		return errors.New("event occurred_at is invalid")
+		return workspaceID, invalidEvent("invalid_occurred_at", "transport event occurred_at is invalid")
+	}
+	occurredTime := occurredAt.AsTime()
+	if occurredTime.Before(observedAt.Add(-maxTransportEventAge)) || occurredTime.After(observedAt.Add(telemetrystore.MaxTelemetrySkew)) {
+		return workspaceID, invalidEvent("occurred_at_out_of_range", "transport event occurred_at is outside the accepted retention window")
 	}
 	result, err := tx.Exec(ctx, `
 		INSERT INTO transport_events (event_id, node_id, event_type, occurred_at, traceparent, payload)
 		VALUES ($1, $2, $3, $4, $5, $6)
-		ON CONFLICT (event_id) DO NOTHING`, eventID, nodeID, eventType, occurredAt.AsTime(), event.GetTraceparent(), event.GetPayload())
+		ON CONFLICT (event_id) DO NOTHING`, eventID, nodeID, eventType, occurredTime, event.GetTraceparent(), event.GetPayload())
 	if err != nil {
-		return fmt.Errorf("insert transport event: %w", err)
+		return workspaceID, fmt.Errorf("insert transport event: %w", err)
 	}
 	if result.RowsAffected() == 0 {
-		return tx.Commit(ctx)
+		return workspaceID, nil
+	}
+	if eventType == "telemetry" {
+		if _, err := telemetrystore.New(s.pool).IngestWireTx(ctx, tx, nodeID, event.GetPayload()); err != nil {
+			if errors.Is(err, telemetrystore.ErrInvalidTelemetry) {
+				return workspaceID, invalidEvent("invalid_telemetry", err.Error())
+			}
+			return workspaceID, fmt.Errorf("ingest telemetry payload: %w", err)
+		}
 	}
 	structuredCommandResult := eventType == "command_result"
-	if eventType == "command_result" {
-		if err := ingestAgentCommandResult(ctx, tx, eventID, nodeID, event.GetPayload(), occurredAt.AsTime(), observedAt, s.signer); err != nil {
-			return err
+	if structuredCommandResult {
+		if err := ingestAgentCommandResult(ctx, tx, eventID, nodeID, event.GetPayload(), occurredTime, observedAt, s.signer); err != nil {
+			return workspaceID, err
 		}
 	}
 	status := "active"
@@ -431,8 +495,8 @@ func (s *Service) Ingest(ctx context.Context, event *transportv1.TransportEvent)
 		status = "offline"
 	}
 	if eventType != "telemetry" {
-		if _, err := tx.Exec(ctx, "UPDATE nodes SET status = $2, updated_at = $3, version = version + 1 WHERE id = $1 AND status IN ('active','offline')", nodeID, status, occurredAt.AsTime()); err != nil {
-			return fmt.Errorf("update node from transport event: %w", err)
+		if _, err := tx.Exec(ctx, "UPDATE nodes SET status = $2, updated_at = $3, version = version + 1 WHERE id = $1 AND status IN ('active','offline')", nodeID, status, occurredTime); err != nil {
+			return workspaceID, fmt.Errorf("update node from transport event: %w", err)
 		}
 	}
 	operationState := "running"
@@ -452,8 +516,8 @@ func (s *Service) Ingest(ctx context.Context, event *transportv1.TransportEvent)
 			WHERE operation.id = job.operation_id AND operation.node_id = $1
 			  AND job.dispatched_at IS NOT NULL
 			  AND operation.state NOT IN ('succeeded', 'failed', 'expired', 'rolled_back', 'superseded')`,
-			nodeID, occurredAt.AsTime()); err != nil {
-			return fmt.Errorf("mark disconnected operations unknown: %w", err)
+			nodeID, occurredTime); err != nil {
+			return workspaceID, fmt.Errorf("mark disconnected operations unknown: %w", err)
 		}
 	} else if eventType != "telemetry" && eventType != "path_changed" && !structuredCommandResult {
 		if _, err := tx.Exec(ctx, `
@@ -463,12 +527,52 @@ func (s *Service) Ingest(ctx context.Context, event *transportv1.TransportEvent)
 			WHERE operation.id = job.operation_id AND operation.node_id = $1
 			  AND job.traceparent = $4
 			  AND operation.state NOT IN ('succeeded', 'failed', 'expired', 'rolled_back', 'superseded')`,
-			nodeID, operationState, occurredAt.AsTime(), event.GetTraceparent()); err != nil {
-			return fmt.Errorf("update operation from transport event: %w", err)
+			nodeID, operationState, occurredTime, event.GetTraceparent()); err != nil {
+			return workspaceID, fmt.Errorf("update operation from transport event: %w", err)
 		}
 	}
-	if err := tx.Commit(ctx); err != nil {
-		return fmt.Errorf("commit event transaction: %w", err)
+	return workspaceID, nil
+}
+
+func quarantineTransportEvent(ctx context.Context, tx pgx.Tx, eventID, nodeID uuid.UUID, event *transportv1.TransportEvent, workspaceID uuid.UUID, observedAt time.Time, failure *permanentInvalidEvent) error {
+	payloadHash := sha256.Sum256(event.GetPayload())
+	result, err := tx.Exec(ctx, `INSERT INTO transport_event_quarantine
+		(event_id,node_id,event_type,payload_sha256,reason_code,reason_detail,observed_at)
+		VALUES($1,$2,$3,$4,$5,$6,$7) ON CONFLICT(event_id) DO NOTHING`,
+		eventID, nodeID, int32(event.GetType()), payloadHash[:], failure.reasonCode, failure.detail, observedAt)
+	if err != nil {
+		return fmt.Errorf("quarantine permanently invalid transport event: %w", err)
+	}
+	if result.RowsAffected() == 0 {
+		var existingNode uuid.UUID
+		var existingType int32
+		var existingHash []byte
+		if err := tx.QueryRow(ctx, `SELECT node_id,event_type,payload_sha256 FROM transport_event_quarantine WHERE event_id=$1`, eventID).Scan(&existingNode, &existingType, &existingHash); err != nil {
+			return fmt.Errorf("read quarantined transport event: %w", err)
+		}
+		if existingNode != nodeID || existingType != int32(event.GetType()) || !bytes.Equal(existingHash, payloadHash[:]) {
+			return errors.New("transport event ID collides with different quarantine evidence")
+		}
+	} else if workspaceID != uuid.Nil {
+		alertID, err := uuid.NewV7()
+		if err != nil {
+			return fmt.Errorf("generate transport quarantine alert ID: %w", err)
+		}
+		if _, err := tx.Exec(ctx, `INSERT INTO security_alerts
+			(id,workspace_id,severity,kind,node_id,resource_type,resource_id,created_at)
+			VALUES($1,$2,'high','transport_event.permanent_invalid',$3,'transport_event',$4,$5)`,
+			alertID, workspaceID, nodeID, eventID, observedAt); err != nil {
+			return fmt.Errorf("emit transport quarantine security alert: %w", err)
+		}
+	}
+	return advanceTransportCursor(ctx, tx, eventID, observedAt)
+}
+
+func advanceTransportCursor(ctx context.Context, tx pgx.Tx, eventID uuid.UUID, observedAt time.Time) error {
+	if _, err := tx.Exec(ctx, `INSERT INTO transport_event_cursor(singleton,event_id,valid,updated_at)
+		VALUES(true,$1,true,$2)
+		ON CONFLICT(singleton) DO UPDATE SET event_id=EXCLUDED.event_id,valid=true,updated_at=EXCLUDED.updated_at`, eventID, observedAt); err != nil {
+		return fmt.Errorf("advance durable transport cursor: %w", err)
 	}
 	return nil
 }
@@ -476,26 +580,27 @@ func (s *Service) Ingest(ctx context.Context, event *transportv1.TransportEvent)
 func ingestAgentCommandResult(ctx context.Context, tx pgx.Tx, eventID, nodeID uuid.UUID, payload []byte, occurredAt, observedAt time.Time, signer *commandauth.Signer) error {
 	var result agentv1.CommandResult
 	if err := proto.Unmarshal(payload, &result); err != nil {
-		return fmt.Errorf("decode structured Agent command result: %w", err)
+		return invalidCommandResult("structured Agent command result protobuf is invalid")
 	}
 	commandID, err := uuid.FromBytes(result.GetCommandId())
 	if err != nil || commandID.Version() != 7 {
-		return errors.New("command result command_id must be UUIDv7")
+		return invalidCommandResult("command result command_id must be UUIDv7")
 	}
 	idempotencyKey, err := uuid.FromBytes(result.GetIdempotencyKey())
 	if err != nil || idempotencyKey.Version() != 7 {
-		return errors.New("command result idempotency_key must be UUIDv7")
+		return invalidCommandResult("command result idempotency_key must be UUIDv7")
 	}
 	completedAt := result.GetCompletedAt()
 	if completedAt == nil || completedAt.CheckValid() != nil {
-		return errors.New("command result completed_at is invalid")
+		return invalidCommandResult("command result completed_at is invalid")
 	}
 	completedTime := completedAt.AsTime()
 	if completedTime.After(observedAt.Add(5*time.Minute)) || completedTime.After(occurredAt.Add(5*time.Minute)) {
-		return errors.New("command result completed_at exceeds clock skew bound")
+		return invalidCommandResult("command result completed_at exceeds clock skew bound")
 	}
-	if len(result.GetResult()) > 1<<20 || len(result.GetErrorCode()) > 128 {
-		return errors.New("command result field exceeds its bound")
+	errorCodeValue := result.GetErrorCode()
+	if len(result.GetResult()) > 1<<20 || (errorCodeValue != "" && !postgresinput.ValidText(errorCodeValue, 128)) {
+		return invalidCommandResult("command result field is invalid")
 	}
 	state := ""
 	switch result.GetState() {
@@ -508,35 +613,35 @@ func ingestAgentCommandResult(ctx context.Context, tx pgx.Tx, eventID, nodeID uu
 	case agentv1.CommandResultState_COMMAND_RESULT_STATE_REJECTED:
 		state = "rejected"
 	default:
-		return errors.New("command result state is invalid")
+		return invalidCommandResult("command result state is invalid")
 	}
 	var envelopeBytes []byte
 	var currentState string
 	var commandCreatedAt time.Time
 	if err := tx.QueryRow(ctx, `SELECT command.envelope,command.state,command.created_at FROM commands command JOIN operations operation ON operation.command_id=command.id WHERE command.id=$1 AND command.node_id=$2`, commandID, nodeID).Scan(&envelopeBytes, &currentState, &commandCreatedAt); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			return errors.New("command result does not match a dispatched command")
+			return invalidCommandResult("command result does not match a dispatched command")
 		}
 		return fmt.Errorf("load command envelope for result: %w", err)
 	}
 	var envelope agentv1.CommandEnvelope
 	if err := proto.Unmarshal(envelopeBytes, &envelope); err != nil {
-		return fmt.Errorf("decode stored command envelope: %w", err)
+		return invalidCommandResult("stored command envelope is invalid")
 	}
 	if !bytes.Equal(envelope.GetIdempotencyKey(), result.GetIdempotencyKey()) {
-		return errors.New("command result idempotency key mismatch")
+		return invalidCommandResult("command result idempotency key mismatch")
 	}
 	storedHashVersion := envelope.GetSemanticPayloadHashVersion()
 	if err := semanticpayload.ValidateVersion(storedHashVersion); err != nil {
-		return fmt.Errorf("stored command semantic payload hash version: %w", err)
+		return invalidCommandResult("stored command semantic payload hash version is invalid")
 	}
 	resultHashVersion := result.GetSemanticPayloadHashVersion()
 	if err := semanticpayload.ValidateVersion(resultHashVersion); err != nil {
-		return fmt.Errorf("command result semantic payload hash version: %w", err)
+		return invalidCommandResult("command result semantic payload hash version is invalid")
 	}
 	issuedAt := envelope.GetIssuedAt()
 	if issuedAt == nil || issuedAt.CheckValid() != nil {
-		return errors.New("stored command issued_at is invalid")
+		return invalidCommandResult("stored command issued_at is invalid")
 	}
 	issuedTime := issuedAt.AsTime()
 	lowerBound := issuedTime
@@ -544,36 +649,36 @@ func ingestAgentCommandResult(ctx context.Context, tx pgx.Tx, eventID, nodeID uu
 		lowerBound = commandCreatedAt
 	}
 	if completedTime.Before(lowerBound.Add(-5 * time.Minute)) {
-		return errors.New("command result completed_at precedes issued_at")
+		return invalidCommandResult("command result completed_at precedes issued_at")
 	}
 	acceptedAt := result.GetAcceptedAt()
 	if state == "rejected" {
 		if acceptedAt != nil || result.GetErrorCode() == "" || len(result.GetResult()) != 0 || (len(result.GetPayloadSha256()) != 0 && len(result.GetPayloadSha256()) != sha256.Size) {
-			return errors.New("rejected command result fields are invalid")
+			return invalidCommandResult("rejected command result fields are invalid")
 		}
 	} else {
 		if acceptedAt == nil || acceptedAt.CheckValid() != nil || len(result.GetPayloadSha256()) != sha256.Size {
-			return errors.New("accepted command result fields are invalid")
+			return invalidCommandResult("accepted command result fields are invalid")
 		}
 		if acceptedAt.AsTime().Before(lowerBound.Add(-5*time.Minute)) || acceptedAt.AsTime().After(completedTime) {
-			return errors.New("command result accepted_at is invalid")
+			return invalidCommandResult("command result accepted_at is invalid")
 		}
 		if state == "succeeded" && result.GetErrorCode() != "" {
-			return errors.New("succeeded command result must not contain an error code")
+			return invalidCommandResult("succeeded command result must not contain an error code")
 		}
 		if (state == "failed" || state == "unknown") && result.GetErrorCode() == "" {
-			return errors.New("non-success command result requires an error code")
+			return invalidCommandResult("non-success command result requires an error code")
 		}
 		if state == "unknown" && len(result.GetResult()) != 0 {
-			return errors.New("unknown command result must not contain result bytes")
+			return invalidCommandResult("unknown command result must not contain result bytes")
 		}
 	}
 	if state == "rejected" && len(result.GetPayloadSha256()) == 0 {
 		if resultHashVersion != agentv1.SemanticPayloadHashVersion_SEMANTIC_PAYLOAD_HASH_VERSION_UNSPECIFIED {
-			return errors.New("rejected command result must not declare a payload hash version")
+			return invalidCommandResult("rejected command result must not declare a payload hash version")
 		}
 	} else if resultHashVersion != storedHashVersion {
-		return errors.New("command result semantic payload hash version mismatch")
+		return invalidCommandResult("command result semantic payload hash version mismatch")
 	}
 	if len(result.GetPayloadSha256()) == sha256.Size {
 		var expectedHash [sha256.Size]byte
@@ -587,10 +692,10 @@ func ingestAgentCommandResult(ctx context.Context, tx pgx.Tx, eventID, nodeID uu
 			expectedHash, err = agentPayloadHash(&envelope)
 		}
 		if err != nil {
-			return err
+			return invalidCommandResult("stored command semantic payload cannot be hashed")
 		}
 		if !bytes.Equal(result.GetPayloadSha256(), expectedHash[:]) {
-			return errors.New("command result payload hash mismatch")
+			return invalidCommandResult("command result payload hash mismatch")
 		}
 	}
 	var payloadHash any
@@ -633,10 +738,10 @@ func ingestAgentCommandResult(ctx context.Context, tx pgx.Tx, eventID, nodeID uu
 		if normalizationErr != nil {
 			return nil
 		}
-		return errors.New("command result contradicts a terminal state")
+		return invalidCommandResult("command result contradicts a terminal state")
 	}
 	if currentState == "expired" || currentState == "superseded" {
-		return errors.New("command result contradicts a terminal state")
+		return invalidCommandResult("command result contradicts a terminal state")
 	}
 	if _, err := tx.Exec(ctx, `INSERT INTO agent_command_results(event_id,command_id,idempotency_key,payload_sha256,semantic_payload_hash_version,state,result,error_code,accepted_at,completed_at,replayed,created_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`, eventID, commandID, idempotencyKey, payloadHash, hashVersion, state, resultBytes, errorCode, acceptedAtValue, completedTime, result.GetReplayed(), observedAt); err != nil {
 		return fmt.Errorf("persist Agent command result: %w", err)
@@ -664,7 +769,7 @@ func ingestAgentCommandResult(ctx context.Context, tx pgx.Tx, eventID, nodeID uu
 		return fmt.Errorf("apply Agent operation result: %w", err)
 	}
 	if errors.Is(err, pgx.ErrNoRows) {
-		return errors.New("command result does not match a mutable operation")
+		return invalidCommandResult("command result does not match a mutable operation")
 	}
 	if terminal {
 		if _, err := tx.Exec(ctx, `UPDATE outbox_events SET published_at=COALESCE(published_at,$2),locked_by=NULL,locked_until=NULL,last_error=NULL WHERE command_id=$1`, commandID, observedAt); err != nil {
@@ -698,7 +803,7 @@ func ingestAgentCommandResult(ctx context.Context, tx pgx.Tx, eventID, nodeID uu
 				return fmt.Errorf("advance configuration revision: %w", err)
 			}
 			if tag.RowsAffected() != 1 {
-				return errors.New("configuration apply result has no immutable plan")
+				return invalidCommandResult("configuration apply result has no immutable plan")
 			}
 		}
 		if applyState == "failed_critical" {
@@ -714,7 +819,7 @@ func ingestAgentCommandResult(ctx context.Context, tx pgx.Tx, eventID, nodeID uu
 	if csr := envelope.GetCertificateCsr(); csr != nil {
 		certificateID, parseErr := uuid.FromBytes(csr.GetCertificateId())
 		if parseErr != nil {
-			return errors.New("certificate command ID is invalid")
+			return invalidCommandResult("certificate command ID is invalid")
 		}
 		certificateState := "failed"
 		if effectiveState == "unknown" {
@@ -733,7 +838,7 @@ func ingestAgentCommandResult(ctx context.Context, tx pgx.Tx, eventID, nodeID uu
 	if revoke := envelope.GetCertificateRevoke(); revoke != nil {
 		certificateID, parseErr := uuid.FromBytes(revoke.GetCertificateId())
 		if parseErr != nil {
-			return errors.New("certificate revoke ID is invalid")
+			return invalidCommandResult("certificate revoke ID is invalid")
 		}
 		certificateState := "revoking"
 		var revokedAt any
@@ -749,7 +854,7 @@ func ingestAgentCommandResult(ctx context.Context, tx pgx.Tx, eventID, nodeID uu
 	if artifact := envelope.GetCertificateP12(); artifact != nil {
 		artifactID, parseErr := uuid.FromBytes(artifact.GetArtifactId())
 		if parseErr != nil {
-			return errors.New("certificate artifact ID is invalid")
+			return invalidCommandResult("certificate artifact ID is invalid")
 		}
 		artifactState := "failed"
 		var digest, size any
@@ -781,6 +886,10 @@ func ingestAgentCommandResult(ctx context.Context, tx pgx.Tx, eventID, nodeID uu
 		}
 	}
 	return nil
+}
+
+func invalidCommandResult(detail string) error {
+	return invalidEvent("invalid_command_result", detail)
 }
 
 func normalizeCertificateCSRResult(envelope *agentv1.CommandEnvelope, state string, resultBytes []byte) (*agentv1.CertificateCsrResult, error) {
@@ -914,7 +1023,7 @@ func scheduleCommandRecovery(ctx context.Context, tx pgx.Tx, commandID uuid.UUID
 	switch reason {
 	case "effect_absent":
 		if envelope.GetDeliveryMode() != agentv1.CommandDeliveryMode_COMMAND_DELIVERY_MODE_RECONCILE_ONLY {
-			return errors.New("effect absence was not observed during reconciliation")
+			return invalidCommandResult("effect absence was not observed during reconciliation")
 		}
 		mode = agentv1.CommandDeliveryMode_COMMAND_DELIVERY_MODE_RETRY_IF_EFFECT_ABSENT
 	case "outcome_requires_reconciliation", "result_persistence_failed", "privd_transport_unknown", "privd_outcome_unknown":
