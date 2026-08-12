@@ -86,7 +86,7 @@ services:
     command:
       - |
         url="\$(cat /run/secrets/database_app_url)"
-        case "\$url" in
+        case "\$\${url}" in
           *later-app-8%25r%3Acredential*) exit 43 ;;
           *new-app-4%23x%3Acredential*) sleep 3 ;;
         esac
