@@ -1,5 +1,12 @@
 #!/usr/bin/env bash
-set -euo pipefail
+set -Eeuo pipefail
+
+report_error_line() {
+  local status=$?
+  printf 'agent package lifecycle failed at line %s\n' "${BASH_LINENO[0]:-unknown}" >&2
+  return "${status}"
+}
+trap report_error_line ERR
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 RUN_ID="${RUN_ID:?RUN_ID is required}"
