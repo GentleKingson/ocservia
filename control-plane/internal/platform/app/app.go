@@ -54,12 +54,12 @@ func Run(ctx context.Context, cfg config.Config, build BuildInfo, logger *slog.L
 	databaseCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 	if cfg.MigrateOnly {
-		if err := migrations.Migrate(databaseCtx, pool); err != nil {
-			return fmt.Errorf("migrate database: %w", err)
-		}
 		auditManager, err := newAuditManager(pool, cfg)
 		if err != nil {
 			return err
+		}
+		if err := migrations.Migrate(databaseCtx, pool, auditManager.PreflightAuthenticityMigration); err != nil {
+			return fmt.Errorf("migrate database: %w", err)
 		}
 		if err := auditManager.EnsureAuthenticity(databaseCtx); err != nil {
 			return fmt.Errorf("transition audit event authentication: %w", err)

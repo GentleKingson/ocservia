@@ -8,8 +8,10 @@ new_app_file="${OCSERV_NEW_POSTGRES_APP_PASSWORD_FILE:-}"
 new_backup_file="${OCSERV_NEW_POSTGRES_BACKUP_PASSWORD_FILE:-}"
 terminate_sessions="${OCSERV_TERMINATE_OLD_POSTGRES_SESSIONS:-false}"
 wait_timeout="${OCSERV_ROTATION_WAIT_TIMEOUT_SECONDS:-180}"
+lock_timeout="${OCSERV_ROTATION_LOCK_TIMEOUT_SECONDS:-300}"
 launcher_uid="$(id -u)"
 recovery_dir=""
+rotation_lock_fd=""
 database_changed=false
 files_changed=false
 recovering=false
@@ -40,6 +42,22 @@ validate_new_secret() {
   local metadata
   metadata="$(stat -c '%u:%a:%h' "${path}")"
   [[ "${metadata}" == "${launcher_uid}:400:1" || "${metadata}" == "${launcher_uid}:600:1" ]] || fail "new credential must be a single-link launcher-owned file with mode 0400 or 0600"
+}
+
+acquire_rotation_lock() {
+  local lock_path="${secret_dir}/.postgres-credential-rotation.lock" metadata
+  command -v flock >/dev/null 2>&1 || fail "flock is required for PostgreSQL credential rotation"
+  if [[ -e "${lock_path}" || -L "${lock_path}" ]]; then
+    [[ -f "${lock_path}" && ! -L "${lock_path}" ]] || fail "credential rotation lock must be a regular file"
+    metadata="$(stat -c '%u:%a:%h' "${lock_path}")"
+    [[ "${metadata}" == "${launcher_uid}:600:1" ]] || fail "credential rotation lock must be a single-link launcher-owned file with mode 0600"
+  fi
+  umask 077
+  exec {rotation_lock_fd}>"${lock_path}"
+  chmod 0600 "${lock_path}"
+  metadata="$(stat -c '%u:%a:%h' "${lock_path}")"
+  [[ "${metadata}" == "${launcher_uid}:600:1" ]] || fail "credential rotation lock metadata changed unexpectedly"
+  flock --exclusive --timeout "${lock_timeout}" "${rotation_lock_fd}" || fail "another PostgreSQL credential rotation is still in progress"
 }
 
 read_password() {
@@ -141,23 +159,71 @@ restore_files() {
   done
 }
 
+credential_pair_active() {
+  local app_password="$1" backup_password="$2"
+  verify_login ocservia_app "${app_password}" ocservia >/dev/null 2>&1 &&
+    verify_login ocservia_backup "${backup_password}" postgres >/dev/null 2>&1
+}
+
+classify_database_state() {
+  if credential_pair_active "${new_app_password}" "${new_backup_password}" &&
+    ! verify_login ocservia_app "${old_app_password}" ocservia >/dev/null 2>&1 &&
+    ! verify_login ocservia_backup "${old_backup_password}" postgres >/dev/null 2>&1; then
+    printf '%s' new
+    return 0
+  fi
+  if credential_pair_active "${old_app_password}" "${old_backup_password}" &&
+    ! verify_login ocservia_app "${new_app_password}" ocservia >/dev/null 2>&1 &&
+    ! verify_login ocservia_backup "${new_backup_password}" postgres >/dev/null 2>&1; then
+    printf '%s' old
+    return 0
+  fi
+  return 1
+}
+
+file_matches_either() {
+  local path="$1" first="$2" second="$3" value
+  validate_current_secret "${path}" >/dev/null 2>&1 || return 1
+  value="$(cat -- "${path}")"
+  [[ "${value}" == "${first}" || "${value}" == "${second}" ]]
+}
+
+files_match_rotation_state() {
+  file_matches_either "${secret_dir}/postgres-app-password" "${old_app_password}" "${new_app_password}" &&
+    file_matches_either "${secret_dir}/postgres-backup-password" "${old_backup_password}" "${new_backup_password}" &&
+    file_matches_either "${secret_dir}/database-app-url" "${current_app_url}" "${new_app_url}" &&
+    file_matches_either "${secret_dir}/postgres.pgpass" "${current_pgpass}" "${new_pgpass}"
+}
+
 recover() {
-  local status=$?
+  local status=$? database_state="old" recovery_safe=true
   trap - ERR
   [[ "${recovering}" == false ]] || exit "${status}"
   recovering=true
   set +e
   if [[ "${database_changed}" == true ]]; then
+    if ! database_state="$(classify_database_state)"; then
+      recovery_safe=false
+    fi
+  fi
+  if [[ "${files_changed}" == true ]] && ! files_match_rotation_state; then
+    recovery_safe=false
+  fi
+  if [[ "${recovery_safe}" == true && "${database_state}" == new ]]; then
     alter_roles "${old_app_password}" "${old_backup_password}"
     database_recovered=$?
-  else
+  elif [[ "${recovery_safe}" == true ]]; then
     database_recovered=0
+  else
+    database_recovered=1
   fi
-  if [[ "${files_changed}" == true ]]; then
+  if [[ "${recovery_safe}" == true && "${files_changed}" == true ]]; then
     restore_files
     files_recovered=$?
-  else
+  elif [[ "${recovery_safe}" == true ]]; then
     files_recovered=0
+  else
+    files_recovered=1
   fi
   if (( database_recovered == 0 && files_recovered == 0 )); then
     restart_clients
@@ -182,8 +248,10 @@ recover() {
 
 [[ "${terminate_sessions}" == "true" || "${terminate_sessions}" == "false" ]] || fail "OCSERV_TERMINATE_OLD_POSTGRES_SESSIONS must be true or false"
 [[ "${wait_timeout}" =~ ^[1-9][0-9]*$ ]] || fail "OCSERV_ROTATION_WAIT_TIMEOUT_SECONDS must be a positive integer"
+[[ "${lock_timeout}" =~ ^[1-9][0-9]*$ ]] || fail "OCSERV_ROTATION_LOCK_TIMEOUT_SECONDS must be a positive integer"
 [[ -f "${COMPOSE_FILE}" && ! -L "${COMPOSE_FILE}" ]] || fail "rotation compose file must be a regular file"
 validate_private_directory "${secret_dir}"
+acquire_rotation_lock
 for name in postgres-app-password postgres-backup-password database-app-url postgres.pgpass; do
   validate_current_secret "${secret_dir}/${name}"
 done
@@ -198,6 +266,7 @@ new_backup_password="$(read_password "${new_backup_file}")"
 [[ "${new_backup_password}" != "${old_backup_password}" ]] || fail "new backup password must differ from the current password"
 
 current_app_url="$(cat -- "${secret_dir}/database-app-url")"
+current_pgpass="$(cat -- "${secret_dir}/postgres.pgpass")"
 [[ "${current_app_url}" == postgres://ocservia_app:*@* ]] || fail "database-app-url does not contain the expected application role"
 database_suffix="${current_app_url#*@}"
 new_app_url="postgres://ocservia_app:$(urlencode "${new_app_password}")@${database_suffix}"

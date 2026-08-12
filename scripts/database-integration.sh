@@ -122,6 +122,42 @@ for major in 17 18; do
     OCSERV_RUNTIME_DATABASE_ROLE=ocservia_app "${BIN}" --migrate-only \
     >"${TMP_ROOT}/pg${major}-migrate.log" 2>&1
 
+  docker exec -i "${container}" psql -v ON_ERROR_STOP=1 -U ocservia_owner -d ocservia \
+    <"${ROOT}/control-plane/migrations/000021_audit_event_authenticity.down.sql" >/dev/null
+  docker exec "${container}" psql -v ON_ERROR_STOP=1 -U ocservia_owner -d ocservia -c \
+    "DELETE FROM schema_migrations WHERE version=21" >/dev/null
+  legacy_workspace_id='00000000-0000-7000-8000-000000000021'
+  legacy_event_id='00000000-0000-7000-8000-000000000022'
+  legacy_occurred_at='2026-08-12T00:00:00Z'
+  legacy_payload="{\"previous\":null,\"event_id\":\"${legacy_event_id}\",\"workspace_id\":\"${legacy_workspace_id}\",\"occurred_at\":\"${legacy_occurred_at}\",\"actor_type\":\"controller\",\"actor_id\":\"legacy\",\"action\":\"legacy.event\",\"resource_type\":\"workspace\",\"resource_id\":\"${legacy_workspace_id}\",\"request_id\":\"legacy-preflight\",\"trace_id\":\"\",\"result\":\"succeeded\",\"reason\":\"\"}"
+  legacy_event_hash="$(printf '%s' "${legacy_payload}" | sha256sum | awk '{print $1}')"
+  docker exec "${container}" psql -v ON_ERROR_STOP=1 -U ocservia_owner -d ocservia -c "
+    INSERT INTO workspaces(id,name,slug,created_at,updated_at)
+    VALUES('${legacy_workspace_id}','legacy preflight','legacy-preflight',now(),now());
+    INSERT INTO audit_events(id,workspace_id,occurred_at,actor_type,actor_id,action,resource_type,resource_id,request_id,result,event_hash)
+    VALUES('${legacy_event_id}','${legacy_workspace_id}','${legacy_occurred_at}','controller','legacy','legacy.event','workspace','${legacy_workspace_id}','legacy-preflight','succeeded',decode('${legacy_event_hash}','hex'));
+  " >/dev/null
+  if OCSERV_ENVIRONMENT=test OCSERV_DATABASE_URL="${owner_url}" \
+    OCSERV_RUNTIME_DATABASE_ROLE=ocservia_app "${BIN}" --migrate-only \
+    >"${TMP_ROOT}/pg${major}-audit-preflight-rejected.log" 2>&1; then
+    echo "audit authenticity migration accepted an uncheckpointed legacy tail" >&2
+    exit 1
+  fi
+  grep -Fq 'legacy audit tail is not checkpointed' "${TMP_ROOT}/pg${major}-audit-preflight-rejected.log"
+  test "$(docker exec "${container}" psql -U ocservia_owner -d ocservia -Atc "SELECT COALESCE(MAX(version),0) FROM schema_migrations")" = "20"
+  test "$(docker exec "${container}" psql -U ocservia_owner -d ocservia -Atc "SELECT count(*) FROM information_schema.columns WHERE table_schema='public' AND table_name='audit_events' AND column_name IN ('auth_version','event_key_id','event_mac')")" = "0"
+  docker exec "${container}" psql -v ON_ERROR_STOP=1 -U ocservia_owner -d ocservia -c "
+    BEGIN;
+    ALTER TABLE audit_events DISABLE TRIGGER audit_events_append_only;
+    DELETE FROM audit_events WHERE id='${legacy_event_id}';
+    ALTER TABLE audit_events ENABLE TRIGGER audit_events_append_only;
+    DELETE FROM workspaces WHERE id='${legacy_workspace_id}';
+    COMMIT;
+  " >/dev/null
+  OCSERV_ENVIRONMENT=test OCSERV_DATABASE_URL="${owner_url}" \
+    OCSERV_RUNTIME_DATABASE_ROLE=ocservia_app "${BIN}" --migrate-only \
+    >"${TMP_ROOT}/pg${major}-audit-preflight-retry.log" 2>&1
+
   OCSERV_ENVIRONMENT=test OCSERV_HTTP_ADDRESS="127.0.0.1:${api_port}" \
     OCSERV_DATABASE_URL="${runtime_url}" "${BIN}" --role=all \
     >"${TMP_ROOT}/pg${major}-fresh.log" 2>&1 &

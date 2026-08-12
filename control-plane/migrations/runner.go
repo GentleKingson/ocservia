@@ -35,6 +35,8 @@ type appliedMigration struct {
 	Checksum []byte
 }
 
+type Preflight func(context.Context, pgx.Tx, int64) error
+
 func Open(ctx context.Context, databaseURL string) (*pgxpool.Pool, error) {
 	cfg, err := pgxpool.ParseConfig(databaseURL)
 	if err != nil {
@@ -52,7 +54,7 @@ func Open(ctx context.Context, databaseURL string) (*pgxpool.Pool, error) {
 	return pool, nil
 }
 
-func Migrate(ctx context.Context, pool *pgxpool.Pool) error {
+func Migrate(ctx context.Context, pool *pgxpool.Pool, preflights ...Preflight) error {
 	conn, err := pool.Acquire(ctx)
 	if err != nil {
 		return fmt.Errorf("acquire migration connection: %w", err)
@@ -88,7 +90,7 @@ func Migrate(ctx context.Context, pool *pgxpool.Pool) error {
 		if _, ok := appliedVersions[migration.Version]; ok {
 			continue
 		}
-		if err := applyMigration(ctx, conn, migration); err != nil {
+		if err := applyMigration(ctx, conn, migration, preflights); err != nil {
 			return err
 		}
 	}
@@ -229,7 +231,7 @@ func CurrentSchemaVersion(ctx context.Context, pool *pgxpool.Pool) (int64, error
 	return version, nil
 }
 
-func applyMigration(ctx context.Context, conn *pgxpool.Conn, migration Migration) error {
+func applyMigration(ctx context.Context, conn *pgxpool.Conn, migration Migration, preflights []Preflight) error {
 	tx, err := conn.BeginTx(ctx, pgx.TxOptions{})
 	if err != nil {
 		return fmt.Errorf("begin migration %d: %w", migration.Version, err)
@@ -239,6 +241,11 @@ func applyMigration(ctx context.Context, conn *pgxpool.Conn, migration Migration
 		defer cancel()
 		_ = tx.Rollback(rollbackCtx)
 	}()
+	for _, preflight := range preflights {
+		if err := preflight(ctx, tx, migration.Version); err != nil {
+			return fmt.Errorf("preflight migration %d: %w", migration.Version, err)
+		}
+	}
 	if _, err := tx.Exec(ctx, migration.SQL); err != nil {
 		return fmt.Errorf("apply migration %d: %w", migration.Version, err)
 	}

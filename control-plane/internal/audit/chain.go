@@ -28,6 +28,7 @@ const (
 	transitionActorTypeV1    = "controller"
 	transitionActorIDV1      = "audit-auth-v1"
 	transitionResourceTypeV1 = "audit_chain"
+	authenticityMigrationV1  = int64(21)
 )
 
 var eventKeyIDPattern = regexp.MustCompile(`^[A-Za-z0-9._-]{1,128}$`)
@@ -452,6 +453,87 @@ func (m *Manager) EnsureAuthenticity(ctx context.Context) error {
 		if err := m.ensureWorkspaceAuthenticity(ctx, workspaceID); err != nil {
 			return fmt.Errorf("initialize audit authenticity for workspace %s: %w", workspaceID, err)
 		}
+	}
+	return nil
+}
+
+func (m *Manager) PreflightAuthenticityMigration(ctx context.Context, tx pgx.Tx, version int64) error {
+	if version != authenticityMigrationV1 {
+		return nil
+	}
+	if _, err := tx.Exec(ctx, `LOCK TABLE audit_events, audit_checkpoints IN SHARE MODE`); err != nil {
+		return fmt.Errorf("lock legacy audit history: %w", err)
+	}
+	rows, err := tx.Query(ctx, `SELECT DISTINCT workspace_id FROM audit_events ORDER BY workspace_id`)
+	if err != nil {
+		return fmt.Errorf("list legacy audit workspaces: %w", err)
+	}
+	var workspaces []uuid.UUID
+	for rows.Next() {
+		var workspaceID uuid.UUID
+		if err := rows.Scan(&workspaceID); err != nil {
+			rows.Close()
+			return err
+		}
+		workspaces = append(workspaces, workspaceID)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	for _, workspaceID := range workspaces {
+		if err := m.preflightLegacyWorkspace(ctx, tx, workspaceID); err != nil {
+			return fmt.Errorf("preflight audit authenticity for workspace %s: %w", workspaceID, err)
+		}
+	}
+	return nil
+}
+
+func (m *Manager) preflightLegacyWorkspace(ctx context.Context, tx pgx.Tx, workspaceID uuid.UUID) error {
+	checkpoints, _, err := m.readCheckpoints(ctx, tx, workspaceID)
+	if err != nil {
+		return err
+	}
+	rows, err := tx.Query(ctx, `SELECT id,occurred_at,actor_type,actor_id,action,resource_type,resource_id,request_id,COALESCE(trace_id,''),result,COALESCE(reason,''),source_session_id,node_id,command_id,approval_id,before_summary,after_summary,COALESCE(error_type,''),previous_event_hash,event_hash FROM audit_events WHERE workspace_id=$1 ORDER BY occurred_at,id`, workspaceID)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	var previous, lastHash []byte
+	var lastID uuid.UUID
+	var events int64
+	for rows.Next() {
+		record := ChainRecord{WorkspaceID: workspaceID}
+		var resourceID *uuid.UUID
+		var storedPrevious, storedHash []byte
+		if err := rows.Scan(&record.EventID, &record.At, &record.ActorType, &record.ActorID, &record.Action, &record.ResourceType, &resourceID, &record.RequestID, &record.TraceID, &record.Result, &record.Reason, &record.SessionID, &record.NodeID, &record.CommandID, &record.ApprovalID, &record.BeforeSummary, &record.AfterSummary, &record.ErrorType, &storedPrevious, &storedHash); err != nil {
+			return err
+		}
+		if resourceID != nil {
+			record.ResourceID = *resourceID
+		}
+		payload, err := encodeChainPayload(previous, record)
+		if err != nil {
+			return err
+		}
+		digest := sha256.Sum256(payload)
+		if subtle.ConstantTimeCompare(storedPrevious, previous) != 1 || subtle.ConstantTimeCompare(storedHash, digest[:]) != 1 {
+			return errors.New("legacy audit chain integrity is invalid")
+		}
+		previous = append(previous[:0], storedHash...)
+		lastHash = append(lastHash[:0], storedHash...)
+		lastID = record.EventID
+		events++
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	if events == 0 {
+		return nil
+	}
+	checkpoint, ok := checkpoints[lastID]
+	if !ok || !m.validCheckpoint(workspaceID, checkpoint) || subtle.ConstantTimeCompare(checkpoint.eventHash, lastHash) != 1 {
+		return errors.New("legacy audit tail is not checkpointed")
 	}
 	return nil
 }

@@ -15,11 +15,17 @@ state_dir="${work}/state"
 secret_dir="${work}/secrets"
 new_dir="${work}/new"
 compose=(docker compose -p "${project}" -f "${compose_file}")
+rotation_pids=()
 
 cleanup() {
   local status=$?
   "${compose[@]}" ps --all >"${ARTIFACT_DIR}/docker-ps.txt" 2>&1 || true
   "${compose[@]}" logs --no-color >"${ARTIFACT_DIR}/docker-compose.log" 2>&1 || true
+  for pid in "${rotation_pids[@]:-}"; do
+    [[ -n "${pid}" ]] || continue
+    kill -TERM "${pid}" 2>/dev/null || true
+    wait "${pid}" 2>/dev/null || true
+  done
   "${compose[@]}" down --volumes --remove-orphans >/dev/null 2>&1 || true
   rm -rf -- "${work}"
   if docker ps -a --format '{{.Names}}' | grep -Fq "${project}"; then
@@ -36,6 +42,8 @@ old_app='old-app-9!z:credential'
 old_backup='old-backup-7@q:credential'
 new_app='new-app-4#x:credential'
 new_backup="new-backup-2\$v:credential"
+later_app='later-app-8%r:credential'
+later_backup='later-backup-6^m:credential'
 printf '%s\n' 'owner-fixture-password' >"${secret_dir}/postgres-owner-password"
 printf '%s\n' "${old_app}" >"${secret_dir}/postgres-app-password"
 printf '%s\n' "${old_backup}" >"${secret_dir}/postgres-backup-password"
@@ -43,8 +51,10 @@ printf '%s\n' 'postgres://ocservia_app:old-app-9%21z%3Acredential@postgres:5432/
 printf 'postgres:5432:replication:ocservia_backup:old-backup-7@q\\:credential\n' >"${secret_dir}/postgres.pgpass"
 printf '%s\n' "${new_app}" >"${new_dir}/app"
 printf '%s\n' "${new_backup}" >"${new_dir}/backup"
+printf '%s\n' "${later_app}" >"${new_dir}/later-app"
+printf '%s\n' "${later_backup}" >"${new_dir}/later-backup"
 chmod 0444 "${secret_dir}"/*
-chmod 0600 "${new_dir}/app" "${new_dir}/backup"
+chmod 0600 "${new_dir}/app" "${new_dir}/backup" "${new_dir}/later-app" "${new_dir}/later-backup"
 
 cat >"${compose_file}" <<YAML
 name: ${project}
@@ -75,8 +85,12 @@ services:
     entrypoint: ["/bin/sh", "-ceu"]
     command:
       - |
-        if [ -f /state/fail-once ]; then rm -f /state/fail-once; exit 42; fi
         url="\$(cat /run/secrets/database_app_url)"
+        case "\$url" in
+          *later-app-8%25r%3Acredential*) exit 43 ;;
+          *new-app-4%23x%3Acredential*) sleep 3 ;;
+        esac
+        if [ -f /state/fail-once ]; then rm -f /state/fail-once; exit 42; fi
         psql "\$\${url}" --no-password --command 'SELECT 1' >/dev/null
         touch /state/control-connected
         exec sleep infinity
@@ -147,7 +161,36 @@ OCSERV_SECRET_DIR="${secret_dir}" \
   OCSERV_ROTATION_COMPOSE_FILE="${compose_file}" \
   OCSERV_TERMINATE_OLD_POSTGRES_SESSIONS=true \
   OCSERV_ROTATION_WAIT_TIMEOUT_SECONDS=90 \
-  "${ROOT}/deploy/production/rotate-postgres-credentials.sh" >"${ARTIFACT_DIR}/success.log" 2>&1
+  "${ROOT}/deploy/production/rotate-postgres-credentials.sh" >"${ARTIFACT_DIR}/success.log" 2>&1 &
+rotation_a_pid=$!
+rotation_pids+=("${rotation_a_pid}")
+
+lock_held=false
+for _ in $(seq 1 100); do
+  if [[ -f "${secret_dir}/.postgres-credential-rotation.lock" ]] &&
+    ! flock --exclusive --nonblock "${secret_dir}/.postgres-credential-rotation.lock" true 2>/dev/null; then
+    lock_held=true
+    break
+  fi
+  sleep 0.1
+done
+[[ "${lock_held}" == true ]] || { echo "first credential rotation did not acquire its lifecycle lock" >&2; exit 1; }
+
+OCSERV_SECRET_DIR="${secret_dir}" \
+  OCSERV_NEW_POSTGRES_APP_PASSWORD_FILE="${new_dir}/later-app" \
+  OCSERV_NEW_POSTGRES_BACKUP_PASSWORD_FILE="${new_dir}/later-backup" \
+  OCSERV_ROTATION_COMPOSE_FILE="${compose_file}" \
+  OCSERV_ROTATION_WAIT_TIMEOUT_SECONDS=10 \
+  "${ROOT}/deploy/production/rotate-postgres-credentials.sh" >"${ARTIFACT_DIR}/concurrent-recovery.log" 2>&1 &
+rotation_b_pid=$!
+rotation_pids+=("${rotation_b_pid}")
+
+wait "${rotation_a_pid}"
+if wait "${rotation_b_pid}"; then
+  echo "second credential rotation unexpectedly succeeded through a forced client restart failure" >&2
+  exit 1
+fi
+grep -Fq 'previous verifier, secrets, and clients were restored' "${ARTIFACT_DIR}/concurrent-recovery.log"
 
 test "$(cat "${secret_dir}/postgres-app-password")" = "${new_app}"
 test "$(cat "${secret_dir}/postgres-backup-password")" = "${new_backup}"
@@ -161,8 +204,35 @@ control_after="$("${compose[@]}" ps -q control-plane)"
 backup_after="$("${compose[@]}" ps -q backup)"
 [[ "${control_after}" != "${control_before}" && "${backup_after}" != "${backup_before}" ]]
 
-for password in "${old_app}" "${old_backup}" "${new_app}" "${new_backup}"; do
-  if grep -Fq "${password}" "${ARTIFACT_DIR}/recovery.log" "${ARTIFACT_DIR}/success.log"; then
+verify_fixture_login() {
+  local role="$1" password="$2" database="$3"
+  # The single-quoted program is evaluated inside the PostgreSQL container.
+  # shellcheck disable=SC2016
+  printf '127.0.0.1:5432:%s:%s:%s\n' "${database}" "${role}" "${password//:/\\:}" |
+    "${compose[@]}" exec -T postgres sh -ceu '
+      passfile="$(mktemp)"
+      trap '\''rm -f -- "${passfile}"'\'' EXIT
+      chmod 0600 "${passfile}"
+      cat >"${passfile}"
+      PGPASSFILE="${passfile}" psql --no-password --host 127.0.0.1 --username "$1" --dbname "$2" --tuples-only --command "SELECT 1" >/dev/null
+    ' -- "${role}" "${database}"
+}
+
+verify_fixture_login ocservia_app "${new_app}" ocservia
+verify_fixture_login ocservia_backup "${new_backup}" postgres
+if verify_fixture_login ocservia_app "${old_app}" ocservia >/dev/null 2>&1 ||
+  verify_fixture_login ocservia_backup "${old_backup}" postgres >/dev/null 2>&1; then
+  echo "concurrent recovery re-enabled an original PostgreSQL credential" >&2
+  exit 1
+fi
+if verify_fixture_login ocservia_app "${later_app}" ocservia >/dev/null 2>&1 ||
+  verify_fixture_login ocservia_backup "${later_backup}" postgres >/dev/null 2>&1; then
+  echo "failed concurrent rotation credential remained active" >&2
+  exit 1
+fi
+
+for password in "${old_app}" "${old_backup}" "${new_app}" "${new_backup}" "${later_app}" "${later_backup}"; do
+  if grep -Fq "${password}" "${ARTIFACT_DIR}/recovery.log" "${ARTIFACT_DIR}/success.log" "${ARTIFACT_DIR}/concurrent-recovery.log"; then
     echo "credential rotation log exposed a password" >&2
     exit 1
   fi

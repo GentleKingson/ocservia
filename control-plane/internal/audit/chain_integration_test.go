@@ -219,10 +219,33 @@ func TestLegacyAuditTransitionRequiresCheckpointedTailIntegration(t *testing.T) 
 	}
 	checkpointKey := integrationCheckpointKey(t)
 	manager := NewManager(pool, checkpointKey)
+	ownerManager := NewManager(owner, checkpointKey)
+	preflightTx, err := owner.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := ownerManager.PreflightAuthenticityMigration(ctx, preflightTx, authenticityMigrationV1); err == nil {
+		_ = preflightTx.Rollback(ctx)
+		t.Fatal("migration preflight accepted an uncheckpointed legacy audit tail")
+	}
+	if err := preflightTx.Rollback(ctx); err != nil {
+		t.Fatal(err)
+	}
 	if err := manager.EnsureAuthenticity(ctx); err == nil {
 		t.Fatal("uncheckpointed legacy audit tail was accepted")
 	}
 	if _, err := owner.Exec(ctx, `INSERT INTO audit_checkpoints(id,workspace_id,through_event_id,through_event_hash,signature,created_at) VALUES($1,$2,$3,$4,$5,now())`, uuid.Must(uuid.NewV7()), workspaceID, eventID, eventHash[:], signCheckpoint(checkpointKey, workspaceID, eventID, eventHash[:])); err != nil {
+		t.Fatal(err)
+	}
+	preflightTx, err = owner.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := ownerManager.PreflightAuthenticityMigration(ctx, preflightTx, authenticityMigrationV1); err != nil {
+		_ = preflightTx.Rollback(ctx)
+		t.Fatal(err)
+	}
+	if err := preflightTx.Rollback(ctx); err != nil {
 		t.Fatal(err)
 	}
 	if err := manager.EnsureAuthenticity(ctx); err != nil {
