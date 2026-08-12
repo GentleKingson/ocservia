@@ -76,6 +76,8 @@ services:
       OCSERV_ENVIRONMENT: development
       OCSERV_DATABASE_URL: postgres://ocservia_owner:development-owner-only@postgres:5432/ocservia?sslmode=disable
       OCSERV_RUNTIME_DATABASE_ROLE: ocservia_app
+      OCSERV_AUDIT_EVENT_KEY_ID: development-audit-event-v1
+      OCSERV_TEST_AUDIT_EVENT_KEY_HEX: 3333333333333333333333333333333333333333333333333333333333333333
     depends_on:
       postgres:
         condition: service_healthy
@@ -92,6 +94,8 @@ services:
       OCSERV_ENVIRONMENT: development
       OCSERV_HTTP_ADDRESS: 0.0.0.0:8080
       OCSERV_DATABASE_URL: postgres://ocservia_app:development-runtime-only@postgres:5432/ocservia?sslmode=disable
+      OCSERV_AUDIT_EVENT_KEY_ID: development-audit-event-v1
+      OCSERV_TEST_AUDIT_EVENT_KEY_HEX: 3333333333333333333333333333333333333333333333333333333333333333
       OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
       OCSERV_LOCAL_SIMULATOR: "true"
       OCSERV_DEV_AUTH_TOKEN: local-development-token-32-characters

@@ -9,7 +9,8 @@ if [[ "${RUN_ID}" == *[^a-zA-Z0-9._-]* ]]; then
   exit 2
 fi
 
-work="${RUNNER_TEMP:-/tmp}/ocservia-i18-production-${RUN_ID}"
+tmp_base="$(realpath -e "${RUNNER_TEMP:-${TMPDIR:-/tmp}}")"
+work="${tmp_base}/ocservia-i18-production-${RUN_ID}"
 runtime_transport_image="ocservia-i18-transport-runtime:${RUN_ID}"
 runtime_control_image="ocservia-i18-control-runtime:${RUN_ID}"
 trust_volume="ocservia-i18-trust-${RUN_ID}"
@@ -45,6 +46,7 @@ for secret in tls.crt tls.key postgres-owner-password postgres-app-password post
   printf 'test-only\n' >"${work}/secrets/${secret}"
 done
 openssl genpkey -algorithm ED25519 -out "${work}/secrets/controller-command-signing-key.pem" >/dev/null 2>&1
+printf '%064d\n' 1 >"${work}/secrets/audit-event-key"
 for secret in relay-access-token tls.crt tls.key; do
   printf 'test-only\n' >"${work}/relay-secrets/${secret}"
 done
@@ -52,11 +54,11 @@ general_secrets=(tls.crt tls.key postgres-owner-password postgres-app-password p
   postgres.pgpass database-owner-url database-app-url oidc-client-secret session-key \
   audit-checkpoint-key certificate-signer-token otel-client.crt otel-client.key otel-ca.crt)
 chmod 0444 "${general_secrets[@]/#/${work}\/secrets/}"
-chmod 0400 "${work}/secrets/controller-command-signing-key.pem"
+chmod 0400 "${work}/secrets/controller-command-signing-key.pem" "${work}/secrets/audit-event-key"
 chmod 0444 "${work}/relay-secrets/tls.crt" "${work}/relay-secrets/tls.key"
 chmod 0400 "${work}/secrets/relay-access-token" "${work}/secrets/controller-iroh.key" \
   "${work}/relay-secrets/relay-access-token"
-sudo chown 65534:65532 "${work}/secrets/controller-command-signing-key.pem"
+sudo chown 65534:65532 "${work}/secrets/controller-command-signing-key.pem" "${work}/secrets/audit-event-key"
 sudo chown 65532:65532 "${work}/secrets/relay-access-token" "${work}/secrets/controller-iroh.key" \
   "${work}/relay-secrets/relay-access-token"
 
@@ -67,6 +69,7 @@ export OCSERV_POSTGRES_IMAGE="${image}" OCSERV_OTEL_IMAGE="${image}"
 export OCSERV_PUBLIC_HOST=ocservia.example.test OCSERV_SECRET_DIR="${work}/secrets"
 export OCSERV_BACKUP_DIR="${work}/backups"
 export OCSERV_OIDC_ISSUER=https://id.example.test OCSERV_OIDC_CLIENT_ID=ocservia
+export OCSERV_AUDIT_EVENT_KEY_ID=audit-event-v1
 export OCSERV_CONTROLLER_ENDPOINT_ID=0000000000000000000000000000000000000000000000000000000000000000
 export OCSERV_CERTIFICATE_SIGNER_URL=https://pki.example.test/v1
 export OCSERV_OTEL_BACKEND_ENDPOINT=otel.example.test:4317
@@ -179,11 +182,16 @@ for name in ("relay_access_token", "controller_iroh_key"):
     assert transport_secrets[name]["mode"] == "0400"
 assert services["control-plane"]["command"] == ["--role=all"]
 assert services["control-plane"]["environment"]["OCSERV_COMMAND_SIGNING_KEY_FILE"] == "/run/secrets/controller_command_signing_key"
+assert services["control-plane"]["environment"]["OCSERV_AUDIT_EVENT_KEY_ID"] == "audit-event-v1"
+assert services["migrate"]["environment"]["OCSERV_AUDIT_EVENT_KEY_ID"] == "audit-event-v1"
 assert services["control-plane"]["environment"]["OCSERV_TRANSPORT_UID"] == "65532"
 assert services["control-plane"]["environment"]["OCSERV_TRANSPORT_GID"] == "65532"
 control_secrets = {item["target"]: item for item in services["control-plane"]["secrets"]}
 command_key = control_secrets["controller_command_signing_key"]
 assert command_key["uid"] == "65534" and command_key["gid"] == "65532" and command_key["mode"] == "0400"
+for service_name in ("migrate", "control-plane"):
+    event_key = next(item for item in services[service_name]["secrets"] if item["target"] == "audit_event_key")
+    assert event_key["uid"] == "65534" and event_key["gid"] == "65532" and event_key["mode"] == "0400"
 assert "transportd" not in services["control-plane"].get("depends_on", {})
 assert any("uid=999" in item and "gid=999" in item and "mode=0700" in item for item in services["backup"]["tmpfs"])
 assert "BACKUP_INTERVAL_SECONDS" in services["backup"]["healthcheck"]["test"][1]
@@ -253,6 +261,9 @@ docker run --rm --name "${trust_volume}-control" \
 docker run --rm -v "${work}/secrets/database-app-url:/run/secrets/test:ro" \
   --entrypoint /bin/sh "${runtime_control_image}" -c 'test -r /run/secrets/test && test ! -w /run/secrets/test'
 docker run --rm -v "${work}/secrets/controller-command-signing-key.pem:/run/secrets/test:ro" \
+  --entrypoint /bin/sh "${runtime_control_image}" \
+  -c 'test "$(stat -c %u:%g:%a /run/secrets/test)" = "65534:65532:400" && test -r /run/secrets/test && test ! -w /run/secrets/test'
+docker run --rm -v "${work}/secrets/audit-event-key:/run/secrets/test:ro" \
   --entrypoint /bin/sh "${runtime_control_image}" \
   -c 'test "$(stat -c %u:%g:%a /run/secrets/test)" = "65534:65532:400" && test -r /run/secrets/test && test ! -w /run/secrets/test'
 docker run --rm --user 999:999 -v "${work}/secrets/postgres-app-password:/run/secrets/test:ro" \

@@ -26,6 +26,7 @@ import (
 	"github.com/GentleKingson/ocservia/control-plane/internal/useroperations"
 	"github.com/GentleKingson/ocservia/control-plane/internal/userstate"
 	"github.com/GentleKingson/ocservia/control-plane/migrations"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/codes"
 )
@@ -56,6 +57,13 @@ func Run(ctx context.Context, cfg config.Config, build BuildInfo, logger *slog.L
 		if err := migrations.Migrate(databaseCtx, pool); err != nil {
 			return fmt.Errorf("migrate database: %w", err)
 		}
+		auditManager, err := newAuditManager(pool, cfg)
+		if err != nil {
+			return err
+		}
+		if err := auditManager.EnsureAuthenticity(databaseCtx); err != nil {
+			return fmt.Errorf("transition audit event authentication: %w", err)
+		}
 		if err := migrations.GrantRuntimePrivileges(databaseCtx, pool, cfg.RuntimeDBRole); err != nil {
 			return fmt.Errorf("grant runtime database privileges: %w", err)
 		}
@@ -68,6 +76,13 @@ func Run(ctx context.Context, cfg config.Config, build BuildInfo, logger *slog.L
 	expectedSchemaVersion, err := migrations.LatestSchemaVersion()
 	if err != nil {
 		return err
+	}
+	auditManager, err := newAuditManager(pool, cfg)
+	if err != nil {
+		return err
+	}
+	if err := auditManager.EnsureAuthenticity(databaseCtx); err != nil {
+		return fmt.Errorf("verify audit event authentication: %w", err)
 	}
 
 	logger.Info("control plane starting", "role", cfg.Role)
@@ -128,7 +143,6 @@ func Run(ctx context.Context, cfg config.Config, build BuildInfo, logger *slog.L
 	telemetryService := telemetrystore.New(pool)
 	userStateService := userstate.NewWithSigner(pool, commandSigner)
 	userOperationsService := useroperations.NewWithConcurrency(pool, userStateService, cfg.UserOperationConcurrency)
-	auditManager := audit.NewManager(pool, cfg.AuditCheckpointKey)
 	var apiTransport *transportclient.Client
 	if cfg.ControllerEndpointID != "" {
 		apiTransport, err = transportclient.New(cfg.TransportSocket, cfg.TransportTimeout, cfg.TransportQueue, cfg.TransportUID, cfg.TransportGID)
@@ -272,6 +286,17 @@ func Run(ctx context.Context, cfg config.Config, build BuildInfo, logger *slog.L
 		logger.Info("control plane stopped", "role", cfg.Role)
 		return ctx.Err()
 	}
+}
+
+func newAuditManager(pool *pgxpool.Pool, cfg config.Config) (*audit.Manager, error) {
+	if len(cfg.AuditEventKey) == 0 {
+		return audit.NewManager(pool, cfg.AuditCheckpointKey), nil
+	}
+	manager, err := audit.NewManagerWithEventKey(pool, cfg.AuditCheckpointKey, cfg.AuditEventKeyID, cfg.AuditEventKey)
+	if err != nil {
+		return nil, fmt.Errorf("configure audit event authentication: %w", err)
+	}
+	return manager, nil
 }
 
 func operationAuthEnabled(cfg config.Config) bool {
