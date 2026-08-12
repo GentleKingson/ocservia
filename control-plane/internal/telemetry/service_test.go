@@ -70,6 +70,44 @@ func TestValidateBatchRejectsPostgresBigintOverflow(t *testing.T) {
 	}
 }
 
+func TestValidateBatchRejectsDuplicateResourceKeys(t *testing.T) {
+	now := time.Now().UTC()
+	fingerprint := make([]byte, sha256.Size)
+	tests := []struct {
+		name   string
+		mutate func(*Batch)
+	}{
+		{name: "session ID", mutate: func(batch *Batch) { batch.Sessions = append(batch.Sessions, batch.Sessions[0]) }},
+		{name: "IP ban", mutate: func(batch *Batch) { batch.IPBans = append(batch.IPBans, batch.IPBans[0]) }},
+		{name: "username", mutate: func(batch *Batch) {
+			user := User{Username: "alice", Enabled: true, Revision: 1, Fingerprint: fingerprint}
+			batch.Users = []User{user, user}
+		}},
+		{name: "group name", mutate: func(batch *Batch) {
+			group := Group{Name: "staff", Members: []string{"alice"}, Revision: 1, Fingerprint: fingerprint}
+			batch.Groups = []Group{group, group}
+		}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			batch := testBatch(uuid.Must(uuid.NewV7()), 1, now)
+			test.mutate(&batch)
+			if err := validateBatch(batch, now); err == nil {
+				t.Fatal("duplicate telemetry resource key was accepted")
+			}
+		})
+	}
+}
+
+func TestValidateBatchRejectsSessionUsernameOutsideUsageSchema(t *testing.T) {
+	now := time.Now().UTC()
+	batch := testBatch(uuid.Must(uuid.NewV7()), 1, now)
+	batch.Sessions[0].Username = strings.Repeat("a", 65)
+	if err := validateBatch(batch, now); err == nil {
+		t.Fatal("session username outside the usage schema was accepted")
+	}
+}
+
 func TestValidateBatchRejectsTelemetryOutsideRetentionWindow(t *testing.T) {
 	now := time.Now().UTC()
 	tests := []struct {

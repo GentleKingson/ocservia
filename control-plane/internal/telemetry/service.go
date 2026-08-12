@@ -354,6 +354,9 @@ func (s *Service) ingestTx(ctx context.Context, tx pgx.Tx, batch Batch, payloadB
 			usage = append(usage, userusage.Sample{SessionID: session.ID, Username: session.Username, Connected: session.ConnectedAt, RXBytes: session.BytesIn, TXBytes: session.BytesOut, ObservedAt: batch.Snapshot.ObservedAt})
 		}
 		if err := userusage.RecordTx(ctx, tx, batch.NodeID, usage); err != nil {
+			if errors.Is(err, userusage.ErrInvalidSample) {
+				return false, fmt.Errorf("%w: session usage identity conflict", ErrInvalidTelemetry)
+			}
 			return false, fmt.Errorf("record observed user usage: %w", err)
 		}
 		if _, err := tx.Exec(ctx, `DELETE FROM node_sessions WHERE node_id=$1`, batch.NodeID); err != nil {
@@ -452,16 +455,24 @@ func validateBatch(batch Batch, now time.Time) error {
 		return errors.New("telemetry collection count exceeds limit")
 	}
 	namePattern := regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$`)
+	usernames := make(map[string]struct{}, len(batch.Users))
 	for _, user := range batch.Users {
 		if !namePattern.MatchString(user.Username) || user.Revision > math.MaxInt64 || len(user.Fingerprint) != sha256.Size {
 			return errors.New("user observation is invalid")
 		}
+		if !insertUnique(usernames, user.Username) {
+			return errors.New("duplicate user observation")
+		}
 	}
 	totalMemberships := 0
+	groupNames := make(map[string]struct{}, len(batch.Groups))
 	for _, group := range batch.Groups {
 		totalMemberships += len(group.Members)
 		if !namePattern.MatchString(group.Name) || group.Revision > math.MaxInt64 || len(group.Fingerprint) != sha256.Size || len(group.Members) > MaxManagedResources || totalMemberships > MaxManagedResources {
 			return errors.New("group observation is invalid")
+		}
+		if !insertUnique(groupNames, group.Name) {
+			return errors.New("duplicate group observation")
 		}
 		copyMembers := slices.Clone(group.Members)
 		slices.Sort(copyMembers)
@@ -474,6 +485,7 @@ func validateBatch(batch Batch, now time.Time) error {
 			}
 		}
 	}
+	banIPs := make(map[string]struct{}, len(batch.IPBans))
 	for _, ban := range batch.IPBans {
 		if ban.SecondsRemaining != nil && *ban.SecondsRemaining > math.MaxInt64 {
 			return errors.New("IP ban remaining duration exceeds int64")
@@ -482,10 +494,17 @@ func validateBatch(batch Batch, now time.Time) error {
 		if parsed == nil || parsed.String() != ban.IP {
 			return errors.New("IP ban observation is invalid")
 		}
+		if !insertUnique(banIPs, ban.IP) {
+			return errors.New("duplicate IP ban observation")
+		}
 	}
+	sessionIDs := make(map[string]struct{}, len(batch.Sessions))
 	for _, session := range batch.Sessions {
-		if session.ID == "" || len(session.ID) > 256 || session.Username == "" || len(session.Username) > 256 || net.ParseIP(session.ClientIP) == nil || session.BytesIn < 0 || session.BytesOut < 0 || session.ConnectedAt.IsZero() {
+		if session.ID == "" || len(session.ID) > 256 || !namePattern.MatchString(session.Username) || net.ParseIP(session.ClientIP) == nil || session.BytesIn < 0 || session.BytesOut < 0 || session.ConnectedAt.IsZero() {
 			return errors.New("session observation is invalid")
+		}
+		if !insertUnique(sessionIDs, session.ID) {
+			return errors.New("duplicate session observation")
 		}
 	}
 	for _, sample := range batch.Samples {
@@ -499,6 +518,14 @@ func validateBatch(batch Batch, now time.Time) error {
 		}
 	}
 	return nil
+}
+
+func insertUnique[T comparable](values map[T]struct{}, value T) bool {
+	if _, exists := values[value]; exists {
+		return false
+	}
+	values[value] = struct{}{}
+	return true
 }
 
 func validObject(value json.RawMessage) bool {

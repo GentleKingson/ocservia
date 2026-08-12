@@ -639,6 +639,157 @@ func TestRunWatchQuarantinesTelemetryBigintOverflowAndContinuesIntegration(t *te
 	}
 }
 
+func TestRunWatchQuarantinesDuplicateAndConflictingSessionsIntegration(t *testing.T) {
+	fixture := newCommandResultFixture(t)
+	testCtx, testCancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer testCancel()
+	if _, err := fixture.pool.Exec(testCtx, `UPDATE transport_event_cursor SET valid=false,updated_at=now() WHERE singleton`); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_, _ = fixture.pool.Exec(context.Background(), `DELETE FROM telemetry_ingest_batches WHERE node_id=$1`, fixture.nodeID)
+	})
+
+	healthyNodeID := uuid.Must(uuid.NewV7())
+	healthyEndpoint := integrationEndpoint(healthyNodeID)
+	if _, err := fixture.pool.Exec(testCtx, `INSERT INTO nodes(id,workspace_id,name,status,created_at,updated_at) VALUES($1,$2,$3,'active',now(),now())`, healthyNodeID, fixture.workspaceID, "duplicate-healthy-"+healthyNodeID.String()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fixture.pool.Exec(testCtx, `INSERT INTO node_endpoint_keys(node_id,endpoint_id,state,bound_at) VALUES($1,$2,'active',now())`, healthyNodeID, healthyEndpoint[:]); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		cleanup := context.Background()
+		_, _ = fixture.pool.Exec(cleanup, `DELETE FROM transport_events WHERE node_id=$1`, healthyNodeID)
+		_, _ = fixture.pool.Exec(cleanup, `DELETE FROM node_endpoint_keys WHERE node_id=$1`, healthyNodeID)
+		_, _ = fixture.pool.Exec(cleanup, `DELETE FROM nodes WHERE id=$1`, healthyNodeID)
+	})
+
+	now := time.Now().UTC().Truncate(time.Microsecond)
+	connectedAt := now.Add(-time.Hour)
+	agentInstanceID := uuid.Must(uuid.NewV7())
+	buildTelemetry := func(batchID uuid.UUID, sequence uint64, observedAt time.Time, username string) *agentv1.TelemetryBatch {
+		return &agentv1.TelemetryBatch{
+			BatchId: batchID[:], NodeId: fixture.nodeID[:], Sequence: sequence,
+			Priority: agentv1.TelemetryPriority_TELEMETRY_PRIORITY_CURRENT_HEALTH,
+			Snapshot: &agentv1.ObservedSnapshot{
+				ObservedAt: timestamppb.New(observedAt), BootId: "boot", AgentInstanceId: agentInstanceID[:],
+				AgentVersion: "test", OcservVersion: "test", OsRelease: "test",
+				OcservJson: []byte(`{}`), SystemJson: []byte(`{}`), PathJson: []byte(`{}`),
+			},
+			Sessions: []*agentv1.SessionObservation{{
+				SessionId: "session-identity", Username: username, ClientIp: "192.0.2.10",
+				ConnectedAt: timestamppb.New(connectedAt), BytesIn: 10, BytesOut: 20,
+			}},
+		}
+	}
+	duplicateBatchID, validBatchID, conflictBatchID := uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7())
+	duplicateBatch := buildTelemetry(duplicateBatchID, 1, now, "alice")
+	duplicateBatch.Sessions = append(duplicateBatch.Sessions, duplicateBatch.Sessions[0])
+	validObservedAt := now.Add(time.Second)
+	validBatch := buildTelemetry(validBatchID, 2, validObservedAt, "alice")
+	conflictBatch := buildTelemetry(conflictBatchID, 3, now.Add(2*time.Second), "bob")
+	duplicatePayload, err := proto.Marshal(duplicateBatch)
+	if err != nil {
+		t.Fatal(err)
+	}
+	validPayload, err := proto.Marshal(validBatch)
+	if err != nil {
+		t.Fatal(err)
+	}
+	conflictPayload, err := proto.Marshal(conflictBatch)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resultPayload, err := proto.Marshal(fixture.validResult())
+	if err != nil {
+		t.Fatal(err)
+	}
+	duplicateID, heartbeatID, validID := uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7())
+	conflictID, resultID := uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7())
+	events := []*transportv1.TransportEvent{
+		{EventId: duplicateID[:], NodeId: fixture.nodeID[:], EndpointId: fixture.endpointID[:], Type: transportv1.TransportEventType_TRANSPORT_EVENT_TYPE_TELEMETRY, OccurredAt: timestamppb.New(now), Traceparent: fixture.traceparent, Payload: duplicatePayload},
+		{EventId: heartbeatID[:], NodeId: healthyNodeID[:], EndpointId: healthyEndpoint[:], Type: transportv1.TransportEventType_TRANSPORT_EVENT_TYPE_HEARTBEAT, OccurredAt: timestamppb.New(now), Traceparent: fixture.traceparent, Payload: []byte("healthy after duplicate session")},
+		{EventId: validID[:], NodeId: fixture.nodeID[:], EndpointId: fixture.endpointID[:], Type: transportv1.TransportEventType_TRANSPORT_EVENT_TYPE_TELEMETRY, OccurredAt: timestamppb.New(validObservedAt), Traceparent: fixture.traceparent, Payload: validPayload},
+		{EventId: conflictID[:], NodeId: fixture.nodeID[:], EndpointId: fixture.endpointID[:], Type: transportv1.TransportEventType_TRANSPORT_EVENT_TYPE_TELEMETRY, OccurredAt: timestamppb.New(now.Add(2 * time.Second)), Traceparent: fixture.traceparent, Payload: conflictPayload},
+		{EventId: resultID[:], NodeId: fixture.nodeID[:], EndpointId: fixture.endpointID[:], Type: transportv1.TransportEventType_TRANSPORT_EVENT_TYPE_COMMAND_RESULT, OccurredAt: timestamppb.New(now), Traceparent: fixture.traceparent, Payload: resultPayload},
+	}
+	serverImpl := &retainedEventServer{
+		events:          events,
+		eventsDelivered: make(chan struct{}),
+		releaseStream:   make(chan struct{}),
+		finalCursorSeen: make(chan struct{}),
+	}
+	client := newRetainedEventClient(t, serverImpl)
+
+	firstCtx, firstCancel := context.WithCancel(testCtx)
+	firstResult := make(chan error, 1)
+	go func() { firstResult <- client.RunWatch(firstCtx, fixture.service, fixture.service) }()
+	select {
+	case <-serverImpl.eventsDelivered:
+	case <-testCtx.Done():
+		t.Fatal("transport stream did not deliver duplicate/conflict sequence")
+	}
+	for {
+		cursor, err := fixture.service.LastEventID(testCtx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if bytes.Equal(cursor, resultID[:]) {
+			break
+		}
+		select {
+		case <-time.After(10 * time.Millisecond):
+		case <-testCtx.Done():
+			t.Fatal("invalid session telemetry blocked following events")
+		}
+	}
+	firstCancel()
+	if err := <-firstResult; err != context.Canceled {
+		t.Fatalf("first RunWatch returned %v after cancellation", err)
+	}
+
+	secondCtx, secondCancel := context.WithCancel(testCtx)
+	secondResult := make(chan error, 1)
+	go func() { secondResult <- client.RunWatch(secondCtx, fixture.service, fixture.service) }()
+	select {
+	case <-serverImpl.finalCursorSeen:
+	case <-testCtx.Done():
+		t.Fatal("restarted watch did not resume after session telemetry quarantine")
+	}
+	secondCancel()
+	if err := <-secondResult; err != context.Canceled {
+		t.Fatalf("second RunWatch returned %v after cancellation", err)
+	}
+
+	var quarantineCount, invalidBusinessEvents, validBusinessEvents int
+	var invalidBatches, validBatches, sessionCount, cursorCount, resultCount, alertCount int
+	var snapshotObservedAt time.Time
+	var sessionUsername, cursorUsername string
+	if err := fixture.pool.QueryRow(testCtx, `SELECT
+		(SELECT count(*) FROM transport_event_quarantine WHERE event_id IN($1,$2) AND reason_code='invalid_telemetry'),
+		(SELECT count(*) FROM transport_events WHERE event_id IN($1,$2)),
+		(SELECT count(*) FROM transport_events WHERE event_id IN($3,$4,$5)),
+		(SELECT count(*) FROM telemetry_ingest_batches WHERE batch_id IN($6,$7)),
+		(SELECT count(*) FROM telemetry_ingest_batches WHERE batch_id=$8),
+		(SELECT count(*) FROM node_sessions WHERE node_id=$9),
+		(SELECT count(*) FROM user_usage_cursors WHERE node_id=$9),
+		(SELECT count(*) FROM agent_command_results WHERE event_id=$5),
+		(SELECT count(*) FROM security_alerts WHERE kind='transport_event.permanent_invalid' AND node_id=$9 AND resource_id IN($1,$2)),
+		(SELECT observed_at FROM node_observed_snapshots WHERE node_id=$9),
+		(SELECT username FROM node_sessions WHERE node_id=$9 AND session_id='session-identity'),
+		(SELECT username FROM user_usage_cursors WHERE node_id=$9 AND session_id='session-identity' AND connected_at=$10)`,
+		duplicateID, conflictID, heartbeatID, validID, resultID, duplicateBatchID, conflictBatchID, validBatchID, fixture.nodeID, connectedAt).Scan(
+		&quarantineCount, &invalidBusinessEvents, &validBusinessEvents, &invalidBatches, &validBatches,
+		&sessionCount, &cursorCount, &resultCount, &alertCount, &snapshotObservedAt, &sessionUsername, &cursorUsername); err != nil {
+		t.Fatal(err)
+	}
+	if quarantineCount != 2 || invalidBusinessEvents != 0 || validBusinessEvents != 3 || invalidBatches != 0 || validBatches != 1 || sessionCount != 1 || cursorCount != 1 || resultCount != 1 || alertCount != 2 || !snapshotObservedAt.Equal(validObservedAt) || sessionUsername != "alice" || cursorUsername != "alice" {
+		t.Fatalf("session telemetry state quarantine=%d invalid=%d valid=%d invalid_batches=%d valid_batches=%d sessions=%d cursors=%d results=%d alerts=%d snapshot=%s session_user=%q cursor_user=%q",
+			quarantineCount, invalidBusinessEvents, validBusinessEvents, invalidBatches, validBatches, sessionCount, cursorCount, resultCount, alertCount, snapshotObservedAt, sessionUsername, cursorUsername)
+	}
+}
+
 func TestTransientDatabaseFailureDoesNotAdvanceTransportCursorIntegration(t *testing.T) {
 	fixture := newCommandResultFixture(t)
 	testCtx, testCancel := context.WithTimeout(context.Background(), 10*time.Second)
