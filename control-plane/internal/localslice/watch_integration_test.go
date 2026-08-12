@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"errors"
 	"net"
 	"os"
 	"path/filepath"
@@ -15,6 +16,7 @@ import (
 	transportv1 "github.com/GentleKingson/ocservia/control-plane/gen/proto/ocserv/platform/transport/v1"
 	"github.com/GentleKingson/ocservia/control-plane/internal/transportclient"
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/health"
@@ -31,6 +33,58 @@ type retainedEventServer struct {
 	deliveryOnce    sync.Once
 	finalCursorSeen chan struct{}
 	finalOnce       sync.Once
+}
+
+type legacyTransportCursor struct {
+	pool *pgxpool.Pool
+}
+
+func (cursor legacyTransportCursor) LastEventID(ctx context.Context) ([]byte, error) {
+	var eventID uuid.UUID
+	err := cursor.pool.QueryRow(ctx, `SELECT event_id FROM transport_events
+		WHERE transport_cursor_valid ORDER BY ingest_sequence DESC LIMIT 1`).Scan(&eventID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return eventID[:], nil
+}
+
+type captureEventHandler struct {
+	mu          sync.Mutex
+	eventIDs    [][]byte
+	cancel      context.CancelFunc
+	cancelAfter int
+	reject      bool
+}
+
+func (handler *captureEventHandler) Ingest(_ context.Context, event *transportv1.TransportEvent) error {
+	handler.mu.Lock()
+	handler.eventIDs = append(handler.eventIDs, bytes.Clone(event.GetEventId()))
+	count := len(handler.eventIDs)
+	handler.mu.Unlock()
+	if handler.reject {
+		if count >= handler.cancelAfter {
+			handler.cancel()
+		}
+		return errors.New("legacy Controller rejected permanent-invalid event")
+	}
+	if count >= handler.cancelAfter {
+		go handler.cancel()
+	}
+	return nil
+}
+
+func (handler *captureEventHandler) captured() [][]byte {
+	handler.mu.Lock()
+	defer handler.mu.Unlock()
+	result := make([][]byte, len(handler.eventIDs))
+	for index := range handler.eventIDs {
+		result[index] = bytes.Clone(handler.eventIDs[index])
+	}
+	return result
 }
 
 func (s *retainedEventServer) WatchEvents(request *transportv1.WatchEventsRequest, stream transportv1.TransportService_WatchEventsServer) error {
@@ -366,6 +420,94 @@ func TestRunWatchQuarantinesPermanentEventAndContinuesIntegration(t *testing.T) 
 	var quarantineCount int
 	if err := fixture.pool.QueryRow(testCtx, `SELECT count(*) FROM transport_event_quarantine WHERE event_id=$1`, invalidID).Scan(&quarantineCount); err != nil || quarantineCount != 1 {
 		t.Fatalf("restart duplicated quarantine evidence: count=%d err=%v", quarantineCount, err)
+	}
+}
+
+func TestLegacyCursorRollbackRequiresAcceptedTailIntegration(t *testing.T) {
+	fixture := newCommandResultFixture(t)
+	testCtx, testCancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer testCancel()
+	if _, err := fixture.pool.Exec(testCtx, `UPDATE transport_event_cursor SET valid=false,updated_at=now() WHERE singleton;
+		UPDATE transport_events SET transport_cursor_valid=false WHERE transport_cursor_valid`); err != nil {
+		t.Fatal(err)
+	}
+
+	invalidBatchID := uuid.Must(uuid.NewV7())
+	invalidPayload, err := proto.Marshal(&agentv1.TelemetryBatch{
+		BatchId: invalidBatchID[:], NodeId: fixture.nodeID[:], Sequence: 1,
+		Priority: agentv1.TelemetryPriority_TELEMETRY_PRIORITY_CURRENT_HEALTH,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	acceptedBeforeID, quarantinedID := uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7())
+	acceptedAfterID, followingID := uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7())
+	acceptedBefore := &transportv1.TransportEvent{EventId: acceptedBeforeID[:], NodeId: fixture.nodeID[:], EndpointId: fixture.endpointID[:], Type: transportv1.TransportEventType_TRANSPORT_EVENT_TYPE_HEARTBEAT, OccurredAt: timestamppb.New(now), Traceparent: fixture.traceparent, Payload: []byte("accepted before quarantine")}
+	quarantined := &transportv1.TransportEvent{EventId: quarantinedID[:], NodeId: fixture.nodeID[:], EndpointId: fixture.endpointID[:], Type: transportv1.TransportEventType_TRANSPORT_EVENT_TYPE_TELEMETRY, OccurredAt: timestamppb.New(now), Traceparent: fixture.traceparent, Payload: invalidPayload}
+	acceptedAfter := &transportv1.TransportEvent{EventId: acceptedAfterID[:], NodeId: fixture.nodeID[:], EndpointId: fixture.endpointID[:], Type: transportv1.TransportEventType_TRANSPORT_EVENT_TYPE_HEARTBEAT, OccurredAt: timestamppb.New(now), Traceparent: fixture.traceparent, Payload: []byte("accepted after quarantine")}
+	following := &transportv1.TransportEvent{EventId: followingID[:], NodeId: fixture.nodeID[:], EndpointId: fixture.endpointID[:], Type: transportv1.TransportEventType_TRANSPORT_EVENT_TYPE_HEARTBEAT, OccurredAt: timestamppb.New(now), Traceparent: fixture.traceparent, Payload: []byte("following legacy reconnect")}
+
+	if err := fixture.service.Ingest(testCtx, acceptedBefore); err != nil {
+		t.Fatal(err)
+	}
+	if err := fixture.service.Ingest(testCtx, quarantined); err != nil {
+		t.Fatal(err)
+	}
+	assertEventQuarantined(t, fixture.pool, quarantinedID, fixture.nodeID, "invalid_telemetry")
+
+	legacyCursor := legacyTransportCursor{pool: fixture.pool}
+	legacyID, err := legacyCursor.LastEventID(testCtx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(legacyID, acceptedBeforeID[:]) {
+		t.Fatalf("legacy cursor=%x, want accepted event %x", legacyID, acceptedBeforeID[:])
+	}
+
+	poisonServer := &retainedEventServer{
+		events:          []*transportv1.TransportEvent{acceptedBefore, quarantined},
+		eventsDelivered: make(chan struct{}), releaseStream: make(chan struct{}), finalCursorSeen: make(chan struct{}),
+	}
+	poisonClient := newRetainedEventClient(t, poisonServer)
+	poisonCtx, poisonCancel := context.WithCancel(testCtx)
+	poisonHandler := &captureEventHandler{cancel: poisonCancel, cancelAfter: 2, reject: true}
+	if err := poisonClient.RunWatch(poisonCtx, legacyCursor, poisonHandler); !errors.Is(err, context.Canceled) {
+		t.Fatalf("legacy poison watch returned %v", err)
+	}
+	poisonedIDs := poisonHandler.captured()
+	if len(poisonedIDs) != 2 || !bytes.Equal(poisonedIDs[0], quarantinedID[:]) || !bytes.Equal(poisonedIDs[1], quarantinedID[:]) {
+		t.Fatalf("legacy cursor did not repeatedly receive quarantine tail: %x", poisonedIDs)
+	}
+
+	if err := fixture.service.Ingest(testCtx, acceptedAfter); err != nil {
+		t.Fatal(err)
+	}
+	durableID, err := fixture.service.LastEventID(testCtx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacyID, err = legacyCursor.LastEventID(testCtx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(durableID, acceptedAfterID[:]) || !bytes.Equal(legacyID, acceptedAfterID[:]) {
+		t.Fatalf("rollback cursor compatibility durable=%x legacy=%x want=%x", durableID, legacyID, acceptedAfterID[:])
+	}
+
+	safeServer := &retainedEventServer{
+		events:          []*transportv1.TransportEvent{acceptedBefore, quarantined, acceptedAfter, following},
+		eventsDelivered: make(chan struct{}), releaseStream: make(chan struct{}), finalCursorSeen: make(chan struct{}),
+	}
+	safeClient := newRetainedEventClient(t, safeServer)
+	safeCtx, safeCancel := context.WithCancel(testCtx)
+	safeHandler := &captureEventHandler{cancel: safeCancel, cancelAfter: 1}
+	if err := safeClient.RunWatch(safeCtx, legacyCursor, safeHandler); !errors.Is(err, context.Canceled) {
+		t.Fatalf("legacy safe watch returned %v", err)
+	}
+	safeIDs := safeHandler.captured()
+	if len(safeIDs) != 1 || !bytes.Equal(safeIDs[0], followingID[:]) {
+		t.Fatalf("legacy reconnect replayed the quarantine tail: %x", safeIDs)
 	}
 }
 

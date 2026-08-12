@@ -46,12 +46,20 @@ so older Agents continue to connect without emitting telemetry.
 Migration `000022_transport_event_quarantine` adds the durable global cursor
 and quarantine evidence. Deploy it before a Controller using the resilient
 ingestion path. Its down migration refuses to discard existing quarantine
-evidence; clear the underlying incident and preserve required evidence before
-an explicit schema rollback.
+evidence. It also refuses to remove a durable cursor that the previous
+Controller cannot recover from `transport_events`. Before an explicit schema
+rollback, preserve and clear the quarantine evidence, resolve the underlying
+incident, and let the new Controller commit a later valid event. The down
+migration verifies that this accepted event is both the durable cursor and the
+latest legacy cursor; an archived quarantined tail alone is not sufficient.
 
-To roll back application binaries, deploy the previous Controller and Agent
-versions first. The telemetry tables can remain in place for forward recovery.
-If schema rollback is explicitly required, preserve any needed history, stop
-I07 writers and scheduler roles, then apply
+For a Controller rollback across migration `000022`, first stop event-ingestion
+writers while the new Controller is still the schema authority, satisfy the
+cursor compatibility guard, and apply the `000022` down migration. Only then
+start the previous Controller binary. The Agent does not need to roll back for
+this database-only protocol change.
+
+If the older I07 telemetry schema must also be removed, preserve any needed
+history, stop I07 writers and scheduler roles, then apply
 `000005_telemetry_observed.down.sql`. This removes I07 telemetry history and
 read models; it does not alter node trust or enrollment state.

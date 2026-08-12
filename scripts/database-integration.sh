@@ -297,6 +297,38 @@ for major in 17 18; do
   grep -Fq 'cannot remove transport quarantine while permanent-invalid evidence exists' "${TMP_ROOT}/pg${major}-transport-quarantine-down.log"
   docker exec "${container}" psql -v ON_ERROR_STOP=1 -U ocservia_owner -d ocservia -c \
     "DELETE FROM security_alerts WHERE kind='transport_event.permanent_invalid'; DELETE FROM transport_event_quarantine" >/dev/null
+
+  rollback_event_one='00000000-0000-7000-8000-000000000221'
+  rollback_event_two='00000000-0000-7000-8000-000000000222'
+  rollback_event_three='00000000-0000-7000-8000-000000000223'
+  docker exec "${container}" psql -v ON_ERROR_STOP=1 -U ocservia_owner -d ocservia -c "
+    INSERT INTO transport_events(event_id,node_id,event_type,occurred_at,traceparent,payload,transport_cursor_valid)
+    SELECT '${rollback_event_one}',id,'heartbeat',now(),'00-0123456789abcdef0123456789abcdef-0123456789abcdef-01',decode('01','hex'),true
+    FROM nodes ORDER BY id LIMIT 1;
+    INSERT INTO transport_event_quarantine(event_id,node_id,event_type,payload_sha256,reason_code,reason_detail,observed_at)
+    VALUES('${rollback_event_two}','00000000-0000-7000-8000-000000000001',5,decode(repeat('22',32),'hex'),'invalid_telemetry','archived rollback-tail evidence',now());
+    DELETE FROM transport_event_quarantine WHERE event_id='${rollback_event_two}';
+    UPDATE transport_event_cursor SET event_id='${rollback_event_two}',valid=true,updated_at=now() WHERE singleton;
+  " >/dev/null
+  if docker exec -i "${container}" psql -v ON_ERROR_STOP=1 -U ocservia_owner -d ocservia \
+    <"${ROOT}/control-plane/migrations/000022_transport_event_quarantine.down.sql" >"${TMP_ROOT}/pg${major}-transport-cursor-down.log" 2>&1; then
+    echo "transport cursor down migration discarded an unrepresentable quarantine-tail cursor" >&2
+    exit 1
+  fi
+  grep -Fq 'durable transport cursor cannot be represented by the legacy cursor' "${TMP_ROOT}/pg${major}-transport-cursor-down.log"
+  test "$(docker exec "${container}" psql -U ocservia_owner -d ocservia -Atc "SELECT count(*) FROM information_schema.tables WHERE table_schema='public' AND table_name IN ('transport_event_cursor','transport_event_quarantine')")" = "2"
+  test "$(docker exec "${container}" psql -U ocservia_owner -d ocservia -Atc "SELECT count(*) FROM schema_migrations WHERE version=22")" = "1"
+  test "$(docker exec "${container}" psql -U ocservia_owner -d ocservia -Atc "SELECT event_id FROM transport_event_cursor WHERE singleton AND valid")" = "${rollback_event_two}"
+  test "$(docker exec "${container}" psql -U ocservia_owner -d ocservia -Atc "SELECT event_id FROM transport_events WHERE transport_cursor_valid ORDER BY ingest_sequence DESC LIMIT 1")" = "${rollback_event_one}"
+
+  docker exec "${container}" psql -v ON_ERROR_STOP=1 -U ocservia_owner -d ocservia -c "
+    INSERT INTO transport_events(event_id,node_id,event_type,occurred_at,traceparent,payload,transport_cursor_valid)
+    SELECT '${rollback_event_three}',id,'heartbeat',now(),'00-1123456789abcdef0123456789abcdef-1123456789abcdef-01',decode('03','hex'),true
+    FROM nodes ORDER BY id LIMIT 1;
+    UPDATE transport_event_cursor SET event_id='${rollback_event_three}',valid=true,updated_at=now() WHERE singleton;
+  " >/dev/null
+  test "$(docker exec "${container}" psql -U ocservia_owner -d ocservia -Atc "SELECT event_id FROM transport_event_cursor WHERE singleton AND valid")" = "${rollback_event_three}"
+  test "$(docker exec "${container}" psql -U ocservia_owner -d ocservia -Atc "SELECT event_id FROM transport_events WHERE transport_cursor_valid ORDER BY ingest_sequence DESC LIMIT 1")" = "${rollback_event_three}"
   docker exec -i "${container}" psql -v ON_ERROR_STOP=1 -U ocservia_owner -d ocservia <"${ROOT}/control-plane/migrations/000022_transport_event_quarantine.down.sql" >/dev/null
   docker exec "${container}" psql -v ON_ERROR_STOP=1 -U ocservia_owner -d ocservia -c "DELETE FROM schema_migrations WHERE version=22" >/dev/null
   if docker exec -i "${container}" psql -v ON_ERROR_STOP=1 -U ocservia_owner -d ocservia \
