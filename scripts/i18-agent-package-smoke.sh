@@ -19,6 +19,12 @@ work="${RUNNER_TEMP:-/tmp}/ocservia-i18-package-${RUN_ID}"
 rootfs="${work}/rootfs"
 verified_staging=""
 systemd_unit=""
+systemd_test_group="$(id -gn)"
+systemd_test_gid="$(id -g)"
+if [[ "${systemd_test_gid}" == 0 ]]; then
+  echo "systemd ownership fixture requires a real non-root host group" >&2
+  exit 2
+fi
 mkdir -p "${work}" "${ARTIFACT_DIR}"
 chmod 0700 "${work}"
 sudo install -d -o root -g root -m 0700 -- "${rootfs}"
@@ -547,16 +553,16 @@ sudo chmod 0700 -- "${rootfs}/var/lib/ocservia-privd"
 sudo install -o root -g root -m 0600 -- /dev/null \
   "${rootfs}/var/lib/ocservia-privd/systemd-ownership-sentinel"
 systemd_unit="ocservia-i18-state-${RUN_ID:0:80}.service"
-sudo systemd-run --quiet --wait --collect --unit="${systemd_unit}" \
+sudo systemd-run --wait --collect --unit="${systemd_unit}" \
   --property=Type=oneshot \
   --property=User=root \
-  --property=Group=61000 \
+  --property=Group="${systemd_test_group}" \
   --property=RootDirectory="${rootfs}" \
   --property=StateDirectory=ocservia-privd \
   --property=StateDirectoryMode=0700 \
   /usr/bin/true
-test "$(sudo stat -c '%u:%g:%a' -- "${rootfs}/var/lib/ocservia-privd")" = "0:61000:700"
-test "$(sudo stat -c '%u:%g:%a' -- "${rootfs}/var/lib/ocservia-privd/systemd-ownership-sentinel")" = "0:61000:600"
+test "$(sudo stat -c '%u:%g:%a' -- "${rootfs}/var/lib/ocservia-privd")" = "0:${systemd_test_gid}:700"
+test "$(sudo stat -c '%u:%g:%a' -- "${rootfs}/var/lib/ocservia-privd/systemd-ownership-sentinel")" = "0:${systemd_test_gid}:600"
 test "$(sudo stat -c '%u:%g:%a' -- "${rootfs}/var/lib/ocservia-upgrade")" = "0:0:700"
 test "$(sudo stat -c '%u:%g:%a' -- "${backup_dir}")" = "0:0:700"
 test "$(sudo stat -c '%u:%g:%a:%h' -- "${backup_dir}/MANIFEST.sha256")" = "0:0:600:1"
