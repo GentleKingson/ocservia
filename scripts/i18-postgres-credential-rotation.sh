@@ -152,7 +152,9 @@ OCSERV_SECRET_DIR="${secret_dir}" \
 test "$(cat "${secret_dir}/postgres-app-password")" = "${new_app}"
 test "$(cat "${secret_dir}/postgres-backup-password")" = "${new_backup}"
 grep -Fq 'new-app-4%23x%3Acredential' "${secret_dir}/database-app-url"
-grep -Fq "new-backup-2\$v\\\\:credential" "${secret_dir}/postgres.pgpass"
+# The dollar sign is part of the literal password, not shell expansion.
+# shellcheck disable=SC2016
+grep -Fq 'new-backup-2$v\:credential' "${secret_dir}/postgres.pgpass"
 test -f "${state_dir}/control-connected"
 test -f "${state_dir}/backup-connected"
 control_after="$("${compose[@]}" ps -q control-plane)"
