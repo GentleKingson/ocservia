@@ -438,6 +438,16 @@ func validateBatch(batch Batch, now time.Time) error {
 			return errors.New("observed documents must be JSON objects")
 		}
 	}
+	for _, counter := range []uint64{
+		batch.Snapshot.Dropped.Security,
+		batch.Snapshot.Dropped.Health,
+		batch.Snapshot.Dropped.Aggregate,
+		batch.Snapshot.Dropped.Raw,
+	} {
+		if counter > math.MaxInt64 {
+			return errors.New("telemetry drop counter exceeds int64")
+		}
+	}
 	if len(batch.Sessions) > 10000 || len(batch.IPBans) > 4096 || len(batch.Samples) > 8192 || len(batch.Security) > 1024 || len(batch.Users) > MaxManagedResources || len(batch.Groups) > MaxReportedGroups {
 		return errors.New("telemetry collection count exceeds limit")
 	}
@@ -465,6 +475,9 @@ func validateBatch(batch Batch, now time.Time) error {
 		}
 	}
 	for _, ban := range batch.IPBans {
+		if ban.SecondsRemaining != nil && *ban.SecondsRemaining > math.MaxInt64 {
+			return errors.New("IP ban remaining duration exceeds int64")
+		}
 		parsed := net.ParseIP(ban.IP)
 		if parsed == nil || parsed.String() != ban.IP {
 			return errors.New("IP ban observation is invalid")

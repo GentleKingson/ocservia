@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"errors"
+	"math"
 	"net"
 	"os"
 	"path/filepath"
@@ -508,6 +509,133 @@ func TestLegacyCursorRollbackRequiresAcceptedTailIntegration(t *testing.T) {
 	safeIDs := safeHandler.captured()
 	if len(safeIDs) != 1 || !bytes.Equal(safeIDs[0], followingID[:]) {
 		t.Fatalf("legacy reconnect replayed the quarantine tail: %x", safeIDs)
+	}
+}
+
+func TestRunWatchQuarantinesTelemetryBigintOverflowAndContinuesIntegration(t *testing.T) {
+	fixture := newCommandResultFixture(t)
+	testCtx, testCancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer testCancel()
+	if _, err := fixture.pool.Exec(testCtx, `UPDATE transport_event_cursor SET valid=false,updated_at=now() WHERE singleton`); err != nil {
+		t.Fatal(err)
+	}
+
+	healthyNodeID := uuid.Must(uuid.NewV7())
+	healthyEndpoint := integrationEndpoint(healthyNodeID)
+	if _, err := fixture.pool.Exec(testCtx, `INSERT INTO nodes(id,workspace_id,name,status,created_at,updated_at) VALUES($1,$2,$3,'active',now(),now())`, healthyNodeID, fixture.workspaceID, "bigint-healthy-"+healthyNodeID.String()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fixture.pool.Exec(testCtx, `INSERT INTO node_endpoint_keys(node_id,endpoint_id,state,bound_at) VALUES($1,$2,'active',now())`, healthyNodeID, healthyEndpoint[:]); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		cleanup := context.Background()
+		_, _ = fixture.pool.Exec(cleanup, `DELETE FROM transport_events WHERE node_id=$1`, healthyNodeID)
+		_, _ = fixture.pool.Exec(cleanup, `DELETE FROM node_endpoint_keys WHERE node_id=$1`, healthyNodeID)
+		_, _ = fixture.pool.Exec(cleanup, `DELETE FROM nodes WHERE id=$1`, healthyNodeID)
+	})
+
+	now := time.Now().UTC()
+	agentInstanceID := uuid.Must(uuid.NewV7())
+	buildTelemetry := func(batchID uuid.UUID) *agentv1.TelemetryBatch {
+		return &agentv1.TelemetryBatch{
+			BatchId: batchID[:], NodeId: fixture.nodeID[:], Sequence: 1,
+			Priority: agentv1.TelemetryPriority_TELEMETRY_PRIORITY_CURRENT_HEALTH,
+			Snapshot: &agentv1.ObservedSnapshot{
+				ObservedAt: timestamppb.New(now), BootId: "boot", AgentInstanceId: agentInstanceID[:],
+				AgentVersion: "test", OcservVersion: "test", OsRelease: "test",
+				OcservJson: []byte(`{}`), SystemJson: []byte(`{}`), PathJson: []byte(`{}`),
+			},
+		}
+	}
+	dropBatch := buildTelemetry(uuid.Must(uuid.NewV7()))
+	dropBatch.Snapshot.Dropped = &agentv1.TelemetryDropCounters{Security: uint64(math.MaxInt64) + 1}
+	remaining := uint64(math.MaxUint64)
+	banBatch := buildTelemetry(uuid.Must(uuid.NewV7()))
+	banBatch.IpBans = []*agentv1.IpBanObservation{{Ip: "192.0.2.9", SecondsRemaining: &remaining}}
+	dropPayload, err := proto.Marshal(dropBatch)
+	if err != nil {
+		t.Fatal(err)
+	}
+	banPayload, err := proto.Marshal(banBatch)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resultPayload, err := proto.Marshal(fixture.validResult())
+	if err != nil {
+		t.Fatal(err)
+	}
+	dropID, heartbeatID := uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7())
+	banID, resultID := uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7())
+	events := []*transportv1.TransportEvent{
+		{EventId: dropID[:], NodeId: fixture.nodeID[:], EndpointId: fixture.endpointID[:], Type: transportv1.TransportEventType_TRANSPORT_EVENT_TYPE_TELEMETRY, OccurredAt: timestamppb.New(now), Traceparent: fixture.traceparent, Payload: dropPayload},
+		{EventId: heartbeatID[:], NodeId: healthyNodeID[:], EndpointId: healthyEndpoint[:], Type: transportv1.TransportEventType_TRANSPORT_EVENT_TYPE_HEARTBEAT, OccurredAt: timestamppb.New(now), Traceparent: fixture.traceparent, Payload: []byte("healthy after drop overflow")},
+		{EventId: banID[:], NodeId: fixture.nodeID[:], EndpointId: fixture.endpointID[:], Type: transportv1.TransportEventType_TRANSPORT_EVENT_TYPE_TELEMETRY, OccurredAt: timestamppb.New(now), Traceparent: fixture.traceparent, Payload: banPayload},
+		{EventId: resultID[:], NodeId: fixture.nodeID[:], EndpointId: fixture.endpointID[:], Type: transportv1.TransportEventType_TRANSPORT_EVENT_TYPE_COMMAND_RESULT, OccurredAt: timestamppb.New(now), Traceparent: fixture.traceparent, Payload: resultPayload},
+	}
+	serverImpl := &retainedEventServer{
+		events:          events,
+		eventsDelivered: make(chan struct{}),
+		releaseStream:   make(chan struct{}),
+		finalCursorSeen: make(chan struct{}),
+	}
+	client := newRetainedEventClient(t, serverImpl)
+
+	firstCtx, firstCancel := context.WithCancel(testCtx)
+	firstResult := make(chan error, 1)
+	go func() { firstResult <- client.RunWatch(firstCtx, fixture.service, fixture.service) }()
+	select {
+	case <-serverImpl.eventsDelivered:
+	case <-testCtx.Done():
+		t.Fatal("transport stream did not deliver bigint overflow sequence")
+	}
+	for {
+		cursor, err := fixture.service.LastEventID(testCtx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if bytes.Equal(cursor, resultID[:]) {
+			break
+		}
+		select {
+		case <-time.After(10 * time.Millisecond):
+		case <-testCtx.Done():
+			t.Fatal("bigint overflow blocked the following heartbeat or command result")
+		}
+	}
+	firstCancel()
+	if err := <-firstResult; err != context.Canceled {
+		t.Fatalf("first RunWatch returned %v after cancellation", err)
+	}
+
+	secondCtx, secondCancel := context.WithCancel(testCtx)
+	secondResult := make(chan error, 1)
+	go func() { secondResult <- client.RunWatch(secondCtx, fixture.service, fixture.service) }()
+	select {
+	case <-serverImpl.finalCursorSeen:
+	case <-testCtx.Done():
+		t.Fatal("restarted watch did not resume after bigint overflow quarantine")
+	}
+	secondCancel()
+	if err := <-secondResult; err != context.Canceled {
+		t.Fatalf("second RunWatch returned %v after cancellation", err)
+	}
+
+	var quarantineCount, invalidBusinessEvents, validBusinessEvents int
+	var snapshotCount, banCount, resultCount, alertCount int
+	if err := fixture.pool.QueryRow(testCtx, `SELECT
+		(SELECT count(*) FROM transport_event_quarantine WHERE event_id IN($1,$2) AND reason_code='invalid_telemetry'),
+		(SELECT count(*) FROM transport_events WHERE event_id IN($1,$2)),
+		(SELECT count(*) FROM transport_events WHERE event_id IN($3,$4)),
+		(SELECT count(*) FROM node_observed_snapshots WHERE node_id=$5),
+		(SELECT count(*) FROM node_ip_bans WHERE node_id=$5),
+		(SELECT count(*) FROM agent_command_results WHERE event_id=$4),
+		(SELECT count(*) FROM security_alerts WHERE kind='transport_event.permanent_invalid' AND node_id=$5 AND resource_id IN($1,$2))`,
+		dropID, banID, heartbeatID, resultID, fixture.nodeID).Scan(&quarantineCount, &invalidBusinessEvents, &validBusinessEvents, &snapshotCount, &banCount, &resultCount, &alertCount); err != nil {
+		t.Fatal(err)
+	}
+	if quarantineCount != 2 || invalidBusinessEvents != 0 || validBusinessEvents != 2 || snapshotCount != 0 || banCount != 0 || resultCount != 1 || alertCount != 2 {
+		t.Fatalf("bigint overflow state quarantine=%d invalid=%d valid=%d snapshots=%d bans=%d results=%d alerts=%d", quarantineCount, invalidBusinessEvents, validBusinessEvents, snapshotCount, banCount, resultCount, alertCount)
 	}
 }
 

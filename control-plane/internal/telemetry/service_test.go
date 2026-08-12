@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
+	"math"
 	"os"
 	"strings"
 	"testing"
@@ -42,6 +43,30 @@ func TestValidateBatchRejectsHighCardinalityMetricNames(t *testing.T) {
 	batch.Samples[0].Metric = "session_019fc0a4"
 	if err := validateBatch(batch, now); err == nil {
 		t.Fatal("high-cardinality metric name accepted")
+	}
+}
+
+func TestValidateBatchRejectsPostgresBigintOverflow(t *testing.T) {
+	now := time.Now().UTC()
+	remaining := uint64(math.MaxUint64)
+	tests := []struct {
+		name   string
+		mutate func(*Batch)
+	}{
+		{name: "dropped security", mutate: func(batch *Batch) { batch.Snapshot.Dropped.Security = uint64(math.MaxInt64) + 1 }},
+		{name: "dropped health", mutate: func(batch *Batch) { batch.Snapshot.Dropped.Health = uint64(math.MaxInt64) + 1 }},
+		{name: "dropped aggregate", mutate: func(batch *Batch) { batch.Snapshot.Dropped.Aggregate = uint64(math.MaxInt64) + 1 }},
+		{name: "dropped raw", mutate: func(batch *Batch) { batch.Snapshot.Dropped.Raw = uint64(math.MaxInt64) + 1 }},
+		{name: "IP ban remaining", mutate: func(batch *Batch) { batch.IPBans[0].SecondsRemaining = &remaining }},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			batch := testBatch(uuid.Must(uuid.NewV7()), 1, now)
+			test.mutate(&batch)
+			if err := validateBatch(batch, now); err == nil {
+				t.Fatal("telemetry value exceeding PostgreSQL bigint was accepted")
+			}
+		})
 	}
 }
 
