@@ -17,6 +17,7 @@ import (
 	transportv1 "github.com/GentleKingson/ocservia/control-plane/gen/proto/ocserv/platform/transport/v1"
 	"github.com/GentleKingson/ocservia/control-plane/internal/audit"
 	"github.com/GentleKingson/ocservia/control-plane/internal/commandauth"
+	"github.com/GentleKingson/ocservia/control-plane/internal/postgresinput"
 	"github.com/GentleKingson/ocservia/control-plane/internal/semanticpayload"
 	telemetrystore "github.com/GentleKingson/ocservia/control-plane/internal/telemetry"
 	"github.com/google/uuid"
@@ -597,8 +598,9 @@ func ingestAgentCommandResult(ctx context.Context, tx pgx.Tx, eventID, nodeID uu
 	if completedTime.After(observedAt.Add(5*time.Minute)) || completedTime.After(occurredAt.Add(5*time.Minute)) {
 		return invalidCommandResult("command result completed_at exceeds clock skew bound")
 	}
-	if len(result.GetResult()) > 1<<20 || len(result.GetErrorCode()) > 128 {
-		return invalidCommandResult("command result field exceeds its bound")
+	errorCodeValue := result.GetErrorCode()
+	if len(result.GetResult()) > 1<<20 || (errorCodeValue != "" && !postgresinput.ValidText(errorCodeValue, 128)) {
+		return invalidCommandResult("command result field is invalid")
 	}
 	state := ""
 	switch result.GetState() {

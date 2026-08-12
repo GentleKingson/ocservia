@@ -625,6 +625,21 @@ func TestInvalidCommandResultStatesAndTimesFailClosedIntegration(t *testing.T) {
 			result.State = agentv1.CommandResultState_COMMAND_RESULT_STATE_UNKNOWN
 			result.Result = nil
 		}},
+		{"failed_with_nul_error", func(result *agentv1.CommandResult, _ time.Time) {
+			result.State = agentv1.CommandResultState_COMMAND_RESULT_STATE_FAILED
+			result.ErrorCode = "poison\x00code"
+		}},
+		{"unknown_with_nul_error", func(result *agentv1.CommandResult, _ time.Time) {
+			result.State = agentv1.CommandResultState_COMMAND_RESULT_STATE_UNKNOWN
+			result.Result = nil
+			result.ErrorCode = "poison\x00code"
+		}},
+		{"rejected_with_nul_error", func(result *agentv1.CommandResult, _ time.Time) {
+			result.State = agentv1.CommandResultState_COMMAND_RESULT_STATE_REJECTED
+			result.AcceptedAt = nil
+			result.Result = nil
+			result.ErrorCode = "poison\x00code"
+		}},
 		{"rejected_with_accepted_at", func(result *agentv1.CommandResult, _ time.Time) {
 			result.State = agentv1.CommandResultState_COMMAND_RESULT_STATE_REJECTED
 			result.ErrorCode = "rejected"
@@ -654,9 +669,18 @@ func TestInvalidCommandResultStatesAndTimesFailClosedIntegration(t *testing.T) {
 				t.Fatalf("quarantine invalid result: %v", err)
 			}
 			assertEventQuarantined(t, fixture.pool, eventID, fixture.nodeID, "invalid_command_result")
-			var count int
-			if err := fixture.pool.QueryRow(context.Background(), `SELECT count(*) FROM transport_events WHERE event_id=$1`, eventID).Scan(&count); err != nil || count != 0 {
-				t.Fatalf("invalid result was partially persisted: count=%d err=%v", count, err)
+			var transportCount, resultCount, operationEventCount int
+			var operationState, commandState string
+			if err := fixture.pool.QueryRow(context.Background(), `SELECT
+				(SELECT count(*) FROM transport_events WHERE event_id=$1),
+				(SELECT count(*) FROM agent_command_results WHERE command_id=$2),
+				(SELECT count(*) FROM operation_events WHERE operation_id=$3),
+				(SELECT state FROM operations WHERE id=$3),
+				(SELECT state FROM commands WHERE id=$2)`, eventID, fixture.commandID, fixture.operationID).Scan(&transportCount, &resultCount, &operationEventCount, &operationState, &commandState); err != nil {
+				t.Fatal(err)
+			}
+			if transportCount != 0 || resultCount != 0 || operationEventCount != 0 || operationState != "dispatched" || commandState != "dispatched" {
+				t.Fatalf("invalid result left partial state: transport=%d results=%d operation_events=%d operation=%s command=%s", transportCount, resultCount, operationEventCount, operationState, commandState)
 			}
 		})
 	}

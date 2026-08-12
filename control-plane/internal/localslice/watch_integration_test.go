@@ -424,6 +424,128 @@ func TestRunWatchQuarantinesPermanentEventAndContinuesIntegration(t *testing.T) 
 	}
 }
 
+func TestRunWatchQuarantinesCommandResultNULAndContinuesIntegration(t *testing.T) {
+	fixture := newCommandResultFixture(t)
+	testCtx, testCancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer testCancel()
+	if _, err := fixture.pool.Exec(testCtx, `UPDATE transport_event_cursor SET valid=false,updated_at=now() WHERE singleton`); err != nil {
+		t.Fatal(err)
+	}
+
+	healthyNodeID := uuid.Must(uuid.NewV7())
+	healthyEndpoint := integrationEndpoint(healthyNodeID)
+	if _, err := fixture.pool.Exec(testCtx, `INSERT INTO nodes(id,workspace_id,name,status,created_at,updated_at) VALUES($1,$2,$3,'active',now(),now())`, healthyNodeID, fixture.workspaceID, "healthy-command-result-"+healthyNodeID.String()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fixture.pool.Exec(testCtx, `INSERT INTO node_endpoint_keys(node_id,endpoint_id,state,bound_at) VALUES($1,$2,'active',now())`, healthyNodeID, healthyEndpoint[:]); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		cleanup := context.Background()
+		_, _ = fixture.pool.Exec(cleanup, `DELETE FROM transport_events WHERE node_id=$1`, healthyNodeID)
+		_, _ = fixture.pool.Exec(cleanup, `DELETE FROM node_endpoint_keys WHERE node_id=$1`, healthyNodeID)
+		_, _ = fixture.pool.Exec(cleanup, `DELETE FROM nodes WHERE id=$1`, healthyNodeID)
+	})
+
+	poisonResult := fixture.validResult()
+	poisonResult.State = agentv1.CommandResultState_COMMAND_RESULT_STATE_FAILED
+	poisonResult.ErrorCode = "poison\x00code"
+	poisonPayload, err := proto.Marshal(poisonResult)
+	if err != nil {
+		t.Fatal(err)
+	}
+	validResultPayload, err := proto.Marshal(fixture.validResult())
+	if err != nil {
+		t.Fatal(err)
+	}
+	poisonID, heartbeatID, resultID := uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7())
+	now := time.Now().UTC()
+	events := []*transportv1.TransportEvent{
+		{EventId: poisonID[:], NodeId: fixture.nodeID[:], EndpointId: fixture.endpointID[:], Type: transportv1.TransportEventType_TRANSPORT_EVENT_TYPE_COMMAND_RESULT, OccurredAt: timestamppb.New(now), Traceparent: fixture.traceparent, Payload: poisonPayload},
+		{EventId: heartbeatID[:], NodeId: healthyNodeID[:], EndpointId: healthyEndpoint[:], Type: transportv1.TransportEventType_TRANSPORT_EVENT_TYPE_HEARTBEAT, OccurredAt: timestamppb.New(now), Traceparent: fixture.traceparent, Payload: []byte("healthy after command-result poison")},
+		{EventId: resultID[:], NodeId: fixture.nodeID[:], EndpointId: fixture.endpointID[:], Type: transportv1.TransportEventType_TRANSPORT_EVENT_TYPE_COMMAND_RESULT, OccurredAt: timestamppb.New(now), Traceparent: fixture.traceparent, Payload: validResultPayload},
+	}
+	serverImpl := &retainedEventServer{
+		events:          events,
+		eventsDelivered: make(chan struct{}),
+		releaseStream:   make(chan struct{}),
+		finalCursorSeen: make(chan struct{}),
+	}
+	client := newRetainedEventClient(t, serverImpl)
+
+	firstCtx, firstCancel := context.WithCancel(testCtx)
+	firstResult := make(chan error, 1)
+	go func() { firstResult <- client.RunWatch(firstCtx, fixture.service, fixture.service) }()
+	select {
+	case <-serverImpl.eventsDelivered:
+	case <-testCtx.Done():
+		t.Fatal("transport stream did not deliver poison/heartbeat/result sequence")
+	}
+	for {
+		cursor, err := fixture.service.LastEventID(testCtx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if bytes.Equal(cursor, resultID[:]) {
+			break
+		}
+		select {
+		case <-time.After(10 * time.Millisecond):
+		case <-testCtx.Done():
+			t.Fatal("invalid command result blocked the following heartbeat or command result")
+		}
+	}
+	firstCancel()
+	if err := <-firstResult; err != context.Canceled {
+		t.Fatalf("first RunWatch returned %v after cancellation", err)
+	}
+
+	secondCtx, secondCancel := context.WithCancel(testCtx)
+	secondResult := make(chan error, 1)
+	go func() { secondResult <- client.RunWatch(secondCtx, fixture.service, fixture.service) }()
+	select {
+	case <-serverImpl.finalCursorSeen:
+	case <-testCtx.Done():
+		t.Fatal("restarted watch did not resume after the final durable cursor")
+	}
+	secondCancel()
+	if err := <-secondResult; err != context.Canceled {
+		t.Fatalf("second RunWatch returned %v after cancellation", err)
+	}
+
+	expectedPayloadHash := sha256.Sum256(poisonPayload)
+	var quarantineNode uuid.UUID
+	var quarantineType int32
+	var quarantineHash []byte
+	var reasonCode, reasonDetail string
+	if err := fixture.pool.QueryRow(testCtx, `SELECT node_id,event_type,payload_sha256,reason_code,reason_detail FROM transport_event_quarantine WHERE event_id=$1`, poisonID).Scan(&quarantineNode, &quarantineType, &quarantineHash, &reasonCode, &reasonDetail); err != nil {
+		t.Fatal(err)
+	}
+	if quarantineNode != fixture.nodeID || quarantineType != int32(transportv1.TransportEventType_TRANSPORT_EVENT_TYPE_COMMAND_RESULT) || !bytes.Equal(quarantineHash, expectedPayloadHash[:]) || reasonCode != "invalid_command_result" || len(reasonDetail) == 0 || len(reasonDetail) > maxQuarantineDetail {
+		t.Fatalf("unexpected quarantine evidence node=%s type=%d hash=%x reason=%q detail_bytes=%d", quarantineNode, quarantineType, quarantineHash, reasonCode, len(reasonDetail))
+	}
+	var poisonBusinessEvents, validBusinessEvents, poisonResultCount, validResultCount, alertCount int
+	var operationState, commandState, healthyStatus string
+	if err := fixture.pool.QueryRow(testCtx, `SELECT
+		(SELECT count(*) FROM transport_events WHERE event_id=$1),
+		(SELECT count(*) FROM transport_events WHERE event_id IN($2,$3)),
+		(SELECT count(*) FROM agent_command_results WHERE event_id=$1),
+		(SELECT count(*) FROM agent_command_results WHERE event_id=$3),
+		(SELECT count(*) FROM security_alerts WHERE kind='transport_event.permanent_invalid' AND node_id=$4 AND resource_id=$1),
+		(SELECT state FROM operations WHERE id=$5),
+		(SELECT state FROM commands WHERE id=$6),
+		(SELECT status FROM nodes WHERE id=$7)`, poisonID, heartbeatID, resultID, fixture.nodeID, fixture.operationID, fixture.commandID, healthyNodeID).Scan(&poisonBusinessEvents, &validBusinessEvents, &poisonResultCount, &validResultCount, &alertCount, &operationState, &commandState, &healthyStatus); err != nil {
+		t.Fatal(err)
+	}
+	if poisonBusinessEvents != 0 || validBusinessEvents != 2 || poisonResultCount != 0 || validResultCount != 1 || alertCount != 1 || operationState != "succeeded" || commandState != "succeeded" || healthyStatus != "active" {
+		t.Fatalf("post-watch state poison=%d valid=%d poison_results=%d valid_results=%d alerts=%d operation=%s command=%s healthy=%s", poisonBusinessEvents, validBusinessEvents, poisonResultCount, validResultCount, alertCount, operationState, commandState, healthyStatus)
+	}
+	var quarantineCount int
+	if err := fixture.pool.QueryRow(testCtx, `SELECT count(*) FROM transport_event_quarantine WHERE event_id=$1`, poisonID).Scan(&quarantineCount); err != nil || quarantineCount != 1 {
+		t.Fatalf("restart duplicated quarantine evidence: count=%d err=%v", quarantineCount, err)
+	}
+}
+
 func TestLegacyCursorRollbackRequiresAcceptedTailIntegration(t *testing.T) {
 	fixture := newCommandResultFixture(t)
 	testCtx, testCancel := context.WithTimeout(context.Background(), 15*time.Second)

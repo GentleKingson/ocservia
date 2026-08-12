@@ -18,6 +18,7 @@ import (
 	"unicode/utf8"
 
 	agentv1 "github.com/GentleKingson/ocservia/control-plane/gen/proto/ocserv/platform/agent/v1"
+	"github.com/GentleKingson/ocservia/control-plane/internal/postgresinput"
 	"github.com/GentleKingson/ocservia/control-plane/internal/userusage"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -436,11 +437,11 @@ func validateBatch(batch Batch, now time.Time) error {
 	}
 	earliest := now.Add(-MaxTelemetryAge)
 	latest := now.Add(MaxTelemetrySkew)
-	if batch.Snapshot.ObservedAt.IsZero() || batch.Snapshot.ObservedAt.Before(earliest) || batch.Snapshot.ObservedAt.After(latest) || !validPostgresText(batch.Snapshot.BootID, 128) || batch.Snapshot.AgentInstance == uuid.Nil {
+	if batch.Snapshot.ObservedAt.IsZero() || batch.Snapshot.ObservedAt.Before(earliest) || batch.Snapshot.ObservedAt.After(latest) || !postgresinput.ValidText(batch.Snapshot.BootID, 128) || batch.Snapshot.AgentInstance == uuid.Nil {
 		return errors.New("observed snapshot identity or time is invalid")
 	}
 	for _, value := range []string{batch.Snapshot.AgentVersion, batch.Snapshot.OcservVersion, batch.Snapshot.OSRelease} {
-		if !validPostgresText(value, 128) {
+		if !postgresinput.ValidText(value, 128) {
 			return errors.New("observed version is invalid")
 		}
 	}
@@ -508,7 +509,7 @@ func validateBatch(batch Batch, now time.Time) error {
 	}
 	sessionIDs := make(map[string]struct{}, len(batch.Sessions))
 	for _, session := range batch.Sessions {
-		if !validPostgresText(session.ID, 256) || !namePattern.MatchString(session.Username) || net.ParseIP(session.ClientIP) == nil || session.BytesIn < 0 || session.BytesOut < 0 || session.ConnectedAt.IsZero() {
+		if !postgresinput.ValidText(session.ID, 256) || !namePattern.MatchString(session.Username) || net.ParseIP(session.ClientIP) == nil || session.BytesIn < 0 || session.BytesOut < 0 || session.ConnectedAt.IsZero() {
 			return errors.New("session observation is invalid")
 		}
 		if !insertUnique(sessionIDs, session.ID) {
@@ -521,7 +522,7 @@ func validateBatch(batch Batch, now time.Time) error {
 		}
 	}
 	for _, event := range batch.Security {
-		if event.ID == uuid.Nil || event.ID.Version() != 7 || event.ObservedAt.IsZero() || event.ObservedAt.Before(earliest) || event.ObservedAt.After(latest) || (event.Severity != "info" && event.Severity != "warning" && event.Severity != "critical") || !validPostgresText(event.Type, 128) || !validObject(event.Detail) {
+		if event.ID == uuid.Nil || event.ID.Version() != 7 || event.ObservedAt.IsZero() || event.ObservedAt.Before(earliest) || event.ObservedAt.After(latest) || (event.Severity != "info" && event.Severity != "warning" && event.Severity != "critical") || !postgresinput.ValidText(event.Type, 128) || !validObject(event.Detail) {
 			return errors.New("security telemetry is invalid")
 		}
 	}
@@ -534,10 +535,6 @@ func insertUnique[T comparable](values map[T]struct{}, value T) bool {
 	}
 	values[value] = struct{}{}
 	return true
-}
-
-func validPostgresText(value string, maxBytes int) bool {
-	return value != "" && len(value) <= maxBytes && utf8.ValidString(value) && strings.IndexByte(value, 0) < 0
 }
 
 func validObject(value json.RawMessage) bool {
