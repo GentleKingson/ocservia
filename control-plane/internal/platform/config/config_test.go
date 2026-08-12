@@ -8,10 +8,7 @@ import (
 )
 
 func TestSensitiveConfigurationFiles(t *testing.T) {
-	directory, err := filepath.EvalSymlinks(t.TempDir())
-	if err != nil {
-		t.Fatal(err)
-	}
+	directory := secureKeyTestDirectory(t)
 	database := filepath.Join(directory, "database-url")
 	session := filepath.Join(directory, "session-key")
 	eventKey := filepath.Join(directory, "audit-event-key")
@@ -54,10 +51,7 @@ func TestSensitiveConfigurationFiles(t *testing.T) {
 }
 
 func TestAuditEventKeyFileSecurity(t *testing.T) {
-	directory, err := filepath.EvalSymlinks(t.TempDir())
-	if err != nil {
-		t.Fatal(err)
-	}
+	directory := secureKeyTestDirectory(t)
 	keyPath := filepath.Join(directory, "audit-event-key")
 	if err := os.WriteFile(keyPath, []byte(strings.Repeat("a", 64)+"\n"), 0o600); err != nil {
 		t.Fatal(err)
@@ -105,6 +99,24 @@ func TestAuditEventKeyFileSecurity(t *testing.T) {
 	if _, err := readStrictHexKeyFile(unsafeKey, uint32(os.Geteuid())); err == nil {
 		t.Fatal("audit event key under writable ancestry accepted")
 	}
+}
+
+func secureKeyTestDirectory(t *testing.T) string {
+	t.Helper()
+	directory, err := os.MkdirTemp(".", ".audit-key-test-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(directory) })
+	absolute, err := filepath.Abs(directory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resolved, err := filepath.EvalSymlinks(absolute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return resolved
 }
 
 func TestAuditEventTestKeyCannotBeUsedInProduction(t *testing.T) {
