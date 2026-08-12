@@ -18,6 +18,8 @@ compose=(docker compose -p "${project}" -f "${compose_file}")
 
 cleanup() {
   local status=$?
+  "${compose[@]}" ps --all >"${ARTIFACT_DIR}/docker-ps.txt" 2>&1 || true
+  "${compose[@]}" logs --no-color >"${ARTIFACT_DIR}/docker-compose.log" 2>&1 || true
   "${compose[@]}" down --volumes --remove-orphans >/dev/null 2>&1 || true
   rm -rf -- "${work}"
   if docker ps -a --format '{{.Names}}' | grep -Fq "${project}"; then
@@ -61,6 +63,8 @@ services:
     volumes:
       - ${ROOT}/deploy/production/postgres-init/001-runtime-role.sh:/docker-entrypoint-initdb.d/001-runtime-role.sh:ro
       - pgdata:/var/lib/postgresql/data
+    tmpfs:
+      - /var/lib/ocservia-backup:uid=999,gid=999,mode=0700
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ocservia_owner -d ocservia"]
       interval: 1s
