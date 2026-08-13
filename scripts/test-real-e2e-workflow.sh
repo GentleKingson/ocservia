@@ -52,10 +52,16 @@ reject("test-only development auth must remain loopback-only") unless control.fe
 reject("Control Plane HTTP must not be published from the Controller VM") if control.key?("ports")
 RUBY
 
-if rg -n 'transportd-stub|OCSERV_LOCAL_SIMULATOR' "${WORKFLOW}" "${COMPOSE_FILE}" \
+if grep -En -- 'transportd-stub|OCSERV_LOCAL_SIMULATOR' "${WORKFLOW}" "${COMPOSE_FILE}" \
   "${ROOT}/scripts/real-e2e-controller.sh" "${ROOT}/scripts/real-e2e-node.sh"; then
   echo "Real E2E must not use the transport stub or local simulator" >&2
   exit 1
+else
+  grep_status=$?
+  if ((grep_status != 1)); then
+    echo "Real E2E forbidden-component scan failed with status ${grep_status}" >&2
+    exit "${grep_status}"
+  fi
 fi
 
 for script in real-e2e-artifact.sh real-e2e-controller.sh real-e2e-node.sh; do
