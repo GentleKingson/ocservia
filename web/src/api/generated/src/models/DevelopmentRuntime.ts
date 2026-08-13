@@ -13,6 +13,21 @@
  */
 
 import { mapValues } from "../runtime";
+import type { PrivdAttestationKeyStateMetric } from "./PrivdAttestationKeyStateMetric";
+import {
+  PrivdAttestationKeyStateMetricFromJSON,
+  PrivdAttestationKeyStateMetricFromJSONTyped,
+  PrivdAttestationKeyStateMetricToJSON,
+  PrivdAttestationKeyStateMetricToJSONTyped,
+} from "./PrivdAttestationKeyStateMetric";
+import type { PrivdReceiptVerificationMetric } from "./PrivdReceiptVerificationMetric";
+import {
+  PrivdReceiptVerificationMetricFromJSON,
+  PrivdReceiptVerificationMetricFromJSONTyped,
+  PrivdReceiptVerificationMetricToJSON,
+  PrivdReceiptVerificationMetricToJSONTyped,
+} from "./PrivdReceiptVerificationMetric";
+
 /**
  *
  * @export
@@ -43,6 +58,60 @@ export interface DevelopmentRuntime {
    * @memberof DevelopmentRuntime
    */
   dbTotal: number;
+  /**
+   *
+   * @type {number}
+   * @memberof DevelopmentRuntime
+   */
+  sseActiveStreams: number;
+  /**
+   *
+   * @type {number}
+   * @memberof DevelopmentRuntime
+   */
+  sseRejectedStreams: number;
+  /**
+   *
+   * @type {number}
+   * @memberof DevelopmentRuntime
+   */
+  sseWatchers: number;
+  /**
+   *
+   * @type {number}
+   * @memberof DevelopmentRuntime
+   */
+  sseUnhealthyWatchers: number;
+  /**
+   *
+   * @type {number}
+   * @memberof DevelopmentRuntime
+   */
+  sseSqlQueries: number;
+  /**
+   *
+   * @type {number}
+   * @memberof DevelopmentRuntime
+   */
+  sseSlowConsumerDisconnects: number;
+  /**
+   *
+   * @type {number}
+   * @memberof DevelopmentRuntime
+   */
+  sseDatabaseBackoffSeconds: number;
+  /**
+   *
+   * @type {Array<PrivdReceiptVerificationMetric>}
+   * @memberof DevelopmentRuntime
+   */
+  privdReceiptVerifications: Array<PrivdReceiptVerificationMetric>;
+  /**
+   *
+   * @type {Array<PrivdAttestationKeyStateMetric>}
+   * @memberof DevelopmentRuntime
+   */
+  privdAttestationKeyStates: Array<PrivdAttestationKeyStateMetric>;
 }
 
 /**
@@ -74,6 +143,77 @@ export function instanceOfDevelopmentRuntime(
       (value as Record<string, any>)["db_total"] === undefined)
   )
     return false;
+  if (
+    (!("sseActiveStreams" in (value as Record<string, any>)) &&
+      !("sse_active_streams" in (value as Record<string, any>))) ||
+    ((value as Record<string, any>)["sseActiveStreams"] === undefined &&
+      (value as Record<string, any>)["sse_active_streams"] === undefined)
+  )
+    return false;
+  if (
+    (!("sseRejectedStreams" in (value as Record<string, any>)) &&
+      !("sse_rejected_streams" in (value as Record<string, any>))) ||
+    ((value as Record<string, any>)["sseRejectedStreams"] === undefined &&
+      (value as Record<string, any>)["sse_rejected_streams"] === undefined)
+  )
+    return false;
+  if (
+    (!("sseWatchers" in (value as Record<string, any>)) &&
+      !("sse_watchers" in (value as Record<string, any>))) ||
+    ((value as Record<string, any>)["sseWatchers"] === undefined &&
+      (value as Record<string, any>)["sse_watchers"] === undefined)
+  )
+    return false;
+  if (
+    (!("sseUnhealthyWatchers" in (value as Record<string, any>)) &&
+      !("sse_unhealthy_watchers" in (value as Record<string, any>))) ||
+    ((value as Record<string, any>)["sseUnhealthyWatchers"] === undefined &&
+      (value as Record<string, any>)["sse_unhealthy_watchers"] === undefined)
+  )
+    return false;
+  if (
+    (!("sseSqlQueries" in (value as Record<string, any>)) &&
+      !("sse_sql_queries" in (value as Record<string, any>))) ||
+    ((value as Record<string, any>)["sseSqlQueries"] === undefined &&
+      (value as Record<string, any>)["sse_sql_queries"] === undefined)
+  )
+    return false;
+  if (
+    (!("sseSlowConsumerDisconnects" in (value as Record<string, any>)) &&
+      !("sse_slow_consumer_disconnects" in (value as Record<string, any>))) ||
+    ((value as Record<string, any>)["sseSlowConsumerDisconnects"] ===
+      undefined &&
+      (value as Record<string, any>)["sse_slow_consumer_disconnects"] ===
+        undefined)
+  )
+    return false;
+  if (
+    (!("sseDatabaseBackoffSeconds" in (value as Record<string, any>)) &&
+      !("sse_database_backoff_seconds" in (value as Record<string, any>))) ||
+    ((value as Record<string, any>)["sseDatabaseBackoffSeconds"] ===
+      undefined &&
+      (value as Record<string, any>)["sse_database_backoff_seconds"] ===
+        undefined)
+  )
+    return false;
+  if (
+    (!("privdReceiptVerifications" in (value as Record<string, any>)) &&
+      !("privd_receipt_verifications" in (value as Record<string, any>))) ||
+    ((value as Record<string, any>)["privdReceiptVerifications"] ===
+      undefined &&
+      (value as Record<string, any>)["privd_receipt_verifications"] ===
+        undefined)
+  )
+    return false;
+  if (
+    (!("privdAttestationKeyStates" in (value as Record<string, any>)) &&
+      !("privd_attestation_key_states" in (value as Record<string, any>))) ||
+    ((value as Record<string, any>)["privdAttestationKeyStates"] ===
+      undefined &&
+      (value as Record<string, any>)["privd_attestation_key_states"] ===
+        undefined)
+  )
+    return false;
   return true;
 }
 
@@ -93,6 +233,19 @@ export function DevelopmentRuntimeFromJSONTyped(
     dbAcquired: json["db_acquired"],
     dbIdle: json["db_idle"],
     dbTotal: json["db_total"],
+    sseActiveStreams: json["sse_active_streams"],
+    sseRejectedStreams: json["sse_rejected_streams"],
+    sseWatchers: json["sse_watchers"],
+    sseUnhealthyWatchers: json["sse_unhealthy_watchers"],
+    sseSqlQueries: json["sse_sql_queries"],
+    sseSlowConsumerDisconnects: json["sse_slow_consumer_disconnects"],
+    sseDatabaseBackoffSeconds: json["sse_database_backoff_seconds"],
+    privdReceiptVerifications: (
+      json["privd_receipt_verifications"] as Array<any>
+    ).map(PrivdReceiptVerificationMetricFromJSON),
+    privdAttestationKeyStates: (
+      json["privd_attestation_key_states"] as Array<any>
+    ).map(PrivdAttestationKeyStateMetricFromJSON),
   };
 }
 
@@ -113,5 +266,18 @@ export function DevelopmentRuntimeToJSONTyped(
     db_acquired: value["dbAcquired"],
     db_idle: value["dbIdle"],
     db_total: value["dbTotal"],
+    sse_active_streams: value["sseActiveStreams"],
+    sse_rejected_streams: value["sseRejectedStreams"],
+    sse_watchers: value["sseWatchers"],
+    sse_unhealthy_watchers: value["sseUnhealthyWatchers"],
+    sse_sql_queries: value["sseSqlQueries"],
+    sse_slow_consumer_disconnects: value["sseSlowConsumerDisconnects"],
+    sse_database_backoff_seconds: value["sseDatabaseBackoffSeconds"],
+    privd_receipt_verifications: (
+      value["privdReceiptVerifications"] as Array<any>
+    ).map(PrivdReceiptVerificationMetricToJSON),
+    privd_attestation_key_states: (
+      value["privdAttestationKeyStates"] as Array<any>
+    ).map(PrivdAttestationKeyStateMetricToJSON),
   };
 }

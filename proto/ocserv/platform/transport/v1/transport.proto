@@ -19,9 +19,24 @@ service TransportService {
 
 // TrustService is implemented by the Go control plane on a private UDS.
 service TrustService {
+  rpc ListNodeTrust(ListNodeTrustRequest) returns (ListNodeTrustResponse);
   rpc CheckEndpoint(CheckEndpointRequest) returns (CheckEndpointResponse);
+  rpc ValidateEnrollment(ValidateEnrollmentRequest) returns (ValidateEnrollmentResponse);
   rpc Enroll(ocserv.platform.agent.v1.EnrollRequest) returns (ocserv.platform.agent.v1.EnrollResponse);
   rpc AuthorizeSession(AuthorizeSessionRequest) returns (ocserv.platform.agent.v1.SessionHandshakeResponse);
+}
+
+message ListNodeTrustRequest {}
+
+message NodeTrustBinding {
+  bytes node_id = 1;
+  bytes endpoint_id = 2;
+  NodeTrustState state = 3;
+  uint64 revision = 4;
+}
+
+message ListNodeTrustResponse {
+  repeated NodeTrustBinding bindings = 1;
 }
 
 enum HealthStatus {
@@ -144,6 +159,14 @@ message CheckEndpointRequest {
 }
 
 message CheckEndpointResponse {
+  bool permitted = 1;
+}
+
+message ValidateEnrollmentRequest {
+  ocserv.platform.agent.v1.EnrollRequest enrollment = 1;
+}
+
+message ValidateEnrollmentResponse {
   bool permitted = 1;
 }
 

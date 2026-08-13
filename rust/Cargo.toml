@@ -9,6 +9,7 @@ members = [
   "crates/observability",
   "crates/ocserv-adapter",
   "crates/privd",
+  "crates/privd-attestation",
   "crates/transportd",
   "crates/transportd-stub",
 ]

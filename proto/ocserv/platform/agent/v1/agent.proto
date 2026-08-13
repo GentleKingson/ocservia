@@ -189,6 +189,91 @@ message CommandResult {
   google.protobuf.Timestamp completed_at = 8;
   bool replayed = 9;
   SemanticPayloadHashVersion semantic_payload_hash_version = 10;
+  PrivilegedResultProof privileged_result_proof = 11;
+}
+
+enum PrivdReceiptVersion {
+  PRIVD_RECEIPT_VERSION_UNSPECIFIED = 0;
+  PRIVD_RECEIPT_VERSION_V1 = 1;
+}
+
+enum PrivilegedCommandKind {
+  PRIVILEGED_COMMAND_KIND_UNSPECIFIED = 0;
+  PRIVILEGED_COMMAND_KIND_SESSION_DISCONNECT = 1;
+  PRIVILEGED_COMMAND_KIND_SESSION_TERMINATE = 2;
+  PRIVILEGED_COMMAND_KIND_IP_BAN_REMOVE = 3;
+  PRIVILEGED_COMMAND_KIND_SERVICE_RELOAD = 4;
+  PRIVILEGED_COMMAND_KIND_USER_CREATE = 5;
+  PRIVILEGED_COMMAND_KIND_USER_DISABLE = 6;
+  PRIVILEGED_COMMAND_KIND_USER_ENABLE = 7;
+  PRIVILEGED_COMMAND_KIND_USER_PASSWORD_ROTATE = 8;
+  PRIVILEGED_COMMAND_KIND_GROUP_APPLY = 9;
+  PRIVILEGED_COMMAND_KIND_CONFIG_PLAN = 10;
+  PRIVILEGED_COMMAND_KIND_CONFIG_APPLY = 11;
+  PRIVILEGED_COMMAND_KIND_CERTIFICATE_CSR = 12;
+  PRIVILEGED_COMMAND_KIND_CERTIFICATE_P12 = 13;
+  PRIVILEGED_COMMAND_KIND_CERTIFICATE_REVOKE = 14;
+}
+
+enum PrivilegedResultKind {
+  PRIVILEGED_RESULT_KIND_UNSPECIFIED = 0;
+  PRIVILEGED_RESULT_KIND_MUTATION = 1;
+  PRIVILEGED_RESULT_KIND_CONFIG_PLAN = 2;
+  PRIVILEGED_RESULT_KIND_CONFIG_APPLY = 3;
+  PRIVILEGED_RESULT_KIND_CERTIFICATE_CSR = 4;
+  PRIVILEGED_RESULT_KIND_CERTIFICATE_P12 = 5;
+  PRIVILEGED_RESULT_KIND_CERTIFICATE_REVOKE = 6;
+  PRIVILEGED_RESULT_KIND_ERROR = 7;
+}
+
+// PrivilegedResultProof is opaque evidence to Agent and transportd. Only
+// root-owned privd signs it and Controller reconstructs its canonical bytes.
+message PrivilegedResultProof {
+  PrivdReceiptVersion version = 1;
+  PrivdResultReceiptV1 receipt_v1 = 2;
+  bytes signature = 3;
+}
+
+message PrivdResultReceiptV1 {
+  PrivdReceiptVersion receipt_version = 1;
+  bytes node_id = 2;
+  string privd_attestation_key_id = 3;
+  bytes command_id = 4;
+  bytes operation_id = 5;
+  bytes idempotency_key = 6;
+  SemanticPayloadHashVersion semantic_payload_hash_version = 7;
+  bytes semantic_payload_sha256 = 8;
+  PrivilegedCommandKind command_kind = 9;
+  PrivilegedResultKind result_kind = 10;
+  CommandResultState terminal_state = 11;
+  bytes result_bytes_sha256 = 12;
+  bytes error_code_sha256 = 13;
+  bytes effect_record_id = 14;
+  uint64 effect_sequence = 15;
+  google.protobuf.Timestamp accepted_at = 16;
+  google.protobuf.Timestamp completed_at = 17;
+  bool replayed = 18;
+  PrivdCertificateReceiptBindingV1 certificate = 19;
+}
+
+message PrivdCertificateReceiptBindingV1 {
+  bytes certificate_id = 1;
+  bytes csr_der_sha256 = 2;
+  bytes public_key_sha256 = 3;
+  bytes requested_subject_sha256 = 4;
+  bytes root_effect_record_id = 5;
+}
+
+// PrivdAttestationRegistrationV1 proves possession of the new key while a
+// separately delivered root-only one-time credential establishes trust.
+message PrivdAttestationRegistrationV1 {
+  PrivdReceiptVersion version = 1;
+  bytes node_id = 2;
+  string privd_attestation_key_id = 3;
+  bytes public_key = 4;
+  bytes controller_nonce = 5;
+  bytes credential_context_sha256 = 6;
+  bytes signature = 7;
 }
 
 enum TelemetryPriority {

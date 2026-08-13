@@ -975,6 +975,35 @@ pub mod trust_service_client {
             self.inner = self.inner.max_encoding_message_size(limit);
             self
         }
+        pub async fn list_node_trust(
+            &mut self,
+            request: impl tonic::IntoRequest<super::ListNodeTrustRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::ListNodeTrustResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/ocserv.platform.transport.v1.TrustService/ListNodeTrust",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(
+                    GrpcMethod::new(
+                        "ocserv.platform.transport.v1.TrustService",
+                        "ListNodeTrust",
+                    ),
+                );
+            self.inner.unary(req, path, codec).await
+        }
         pub async fn check_endpoint(
             &mut self,
             request: impl tonic::IntoRequest<super::CheckEndpointRequest>,
@@ -1000,6 +1029,35 @@ pub mod trust_service_client {
                     GrpcMethod::new(
                         "ocserv.platform.transport.v1.TrustService",
                         "CheckEndpoint",
+                    ),
+                );
+            self.inner.unary(req, path, codec).await
+        }
+        pub async fn validate_enrollment(
+            &mut self,
+            request: impl tonic::IntoRequest<super::ValidateEnrollmentRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::ValidateEnrollmentResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/ocserv.platform.transport.v1.TrustService/ValidateEnrollment",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(
+                    GrpcMethod::new(
+                        "ocserv.platform.transport.v1.TrustService",
+                        "ValidateEnrollment",
                     ),
                 );
             self.inner.unary(req, path, codec).await
@@ -1079,11 +1137,25 @@ pub mod trust_service_server {
     /// Generated trait containing gRPC methods that should be implemented for use with TrustServiceServer.
     #[async_trait]
     pub trait TrustService: std::marker::Send + std::marker::Sync + 'static {
+        async fn list_node_trust(
+            &self,
+            request: tonic::Request<super::ListNodeTrustRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::ListNodeTrustResponse>,
+            tonic::Status,
+        >;
         async fn check_endpoint(
             &self,
             request: tonic::Request<super::CheckEndpointRequest>,
         ) -> std::result::Result<
             tonic::Response<super::CheckEndpointResponse>,
+            tonic::Status,
+        >;
+        async fn validate_enrollment(
+            &self,
+            request: tonic::Request<super::ValidateEnrollmentRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::ValidateEnrollmentResponse>,
             tonic::Status,
         >;
         async fn enroll(
@@ -1177,6 +1249,51 @@ pub mod trust_service_server {
         }
         fn call(&mut self, req: http::Request<B>) -> Self::Future {
             match req.uri().path() {
+                "/ocserv.platform.transport.v1.TrustService/ListNodeTrust" => {
+                    #[allow(non_camel_case_types)]
+                    struct ListNodeTrustSvc<T: TrustService>(pub Arc<T>);
+                    impl<
+                        T: TrustService,
+                    > tonic::server::UnaryService<super::ListNodeTrustRequest>
+                    for ListNodeTrustSvc<T> {
+                        type Response = super::ListNodeTrustResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::ListNodeTrustRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as TrustService>::list_node_trust(&inner, request).await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = ListNodeTrustSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
                 "/ocserv.platform.transport.v1.TrustService/CheckEndpoint" => {
                     #[allow(non_camel_case_types)]
                     struct CheckEndpointSvc<T: TrustService>(pub Arc<T>);
@@ -1207,6 +1324,52 @@ pub mod trust_service_server {
                     let inner = self.inner.clone();
                     let fut = async move {
                         let method = CheckEndpointSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/ocserv.platform.transport.v1.TrustService/ValidateEnrollment" => {
+                    #[allow(non_camel_case_types)]
+                    struct ValidateEnrollmentSvc<T: TrustService>(pub Arc<T>);
+                    impl<
+                        T: TrustService,
+                    > tonic::server::UnaryService<super::ValidateEnrollmentRequest>
+                    for ValidateEnrollmentSvc<T> {
+                        type Response = super::ValidateEnrollmentResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::ValidateEnrollmentRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as TrustService>::validate_enrollment(&inner, request)
+                                    .await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = ValidateEnrollmentSvc(inner);
                         let codec = tonic_prost::ProstCodec::default();
                         let mut grpc = tonic::server::Grpc::new(codec)
                             .apply_compression_config(

@@ -399,9 +399,11 @@ var TransportService_ServiceDesc = grpc.ServiceDesc{
 }
 
 const (
-	TrustService_CheckEndpoint_FullMethodName    = "/ocserv.platform.transport.v1.TrustService/CheckEndpoint"
-	TrustService_Enroll_FullMethodName           = "/ocserv.platform.transport.v1.TrustService/Enroll"
-	TrustService_AuthorizeSession_FullMethodName = "/ocserv.platform.transport.v1.TrustService/AuthorizeSession"
+	TrustService_ListNodeTrust_FullMethodName      = "/ocserv.platform.transport.v1.TrustService/ListNodeTrust"
+	TrustService_CheckEndpoint_FullMethodName      = "/ocserv.platform.transport.v1.TrustService/CheckEndpoint"
+	TrustService_ValidateEnrollment_FullMethodName = "/ocserv.platform.transport.v1.TrustService/ValidateEnrollment"
+	TrustService_Enroll_FullMethodName             = "/ocserv.platform.transport.v1.TrustService/Enroll"
+	TrustService_AuthorizeSession_FullMethodName   = "/ocserv.platform.transport.v1.TrustService/AuthorizeSession"
 )
 
 // TrustServiceClient is the client API for TrustService service.
@@ -410,7 +412,9 @@ const (
 //
 // TrustService is implemented by the Go control plane on a private UDS.
 type TrustServiceClient interface {
+	ListNodeTrust(ctx context.Context, in *ListNodeTrustRequest, opts ...grpc.CallOption) (*ListNodeTrustResponse, error)
 	CheckEndpoint(ctx context.Context, in *CheckEndpointRequest, opts ...grpc.CallOption) (*CheckEndpointResponse, error)
+	ValidateEnrollment(ctx context.Context, in *ValidateEnrollmentRequest, opts ...grpc.CallOption) (*ValidateEnrollmentResponse, error)
 	Enroll(ctx context.Context, in *v1.EnrollRequest, opts ...grpc.CallOption) (*v1.EnrollResponse, error)
 	AuthorizeSession(ctx context.Context, in *AuthorizeSessionRequest, opts ...grpc.CallOption) (*v1.SessionHandshakeResponse, error)
 }
@@ -423,10 +427,30 @@ func NewTrustServiceClient(cc grpc.ClientConnInterface) TrustServiceClient {
 	return &trustServiceClient{cc}
 }
 
+func (c *trustServiceClient) ListNodeTrust(ctx context.Context, in *ListNodeTrustRequest, opts ...grpc.CallOption) (*ListNodeTrustResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ListNodeTrustResponse)
+	err := c.cc.Invoke(ctx, TrustService_ListNodeTrust_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (c *trustServiceClient) CheckEndpoint(ctx context.Context, in *CheckEndpointRequest, opts ...grpc.CallOption) (*CheckEndpointResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(CheckEndpointResponse)
 	err := c.cc.Invoke(ctx, TrustService_CheckEndpoint_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *trustServiceClient) ValidateEnrollment(ctx context.Context, in *ValidateEnrollmentRequest, opts ...grpc.CallOption) (*ValidateEnrollmentResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ValidateEnrollmentResponse)
+	err := c.cc.Invoke(ctx, TrustService_ValidateEnrollment_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -459,7 +483,9 @@ func (c *trustServiceClient) AuthorizeSession(ctx context.Context, in *Authorize
 //
 // TrustService is implemented by the Go control plane on a private UDS.
 type TrustServiceServer interface {
+	ListNodeTrust(context.Context, *ListNodeTrustRequest) (*ListNodeTrustResponse, error)
 	CheckEndpoint(context.Context, *CheckEndpointRequest) (*CheckEndpointResponse, error)
+	ValidateEnrollment(context.Context, *ValidateEnrollmentRequest) (*ValidateEnrollmentResponse, error)
 	Enroll(context.Context, *v1.EnrollRequest) (*v1.EnrollResponse, error)
 	AuthorizeSession(context.Context, *AuthorizeSessionRequest) (*v1.SessionHandshakeResponse, error)
 	mustEmbedUnimplementedTrustServiceServer()
@@ -472,8 +498,14 @@ type TrustServiceServer interface {
 // pointer dereference when methods are called.
 type UnimplementedTrustServiceServer struct{}
 
+func (UnimplementedTrustServiceServer) ListNodeTrust(context.Context, *ListNodeTrustRequest) (*ListNodeTrustResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ListNodeTrust not implemented")
+}
 func (UnimplementedTrustServiceServer) CheckEndpoint(context.Context, *CheckEndpointRequest) (*CheckEndpointResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method CheckEndpoint not implemented")
+}
+func (UnimplementedTrustServiceServer) ValidateEnrollment(context.Context, *ValidateEnrollmentRequest) (*ValidateEnrollmentResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ValidateEnrollment not implemented")
 }
 func (UnimplementedTrustServiceServer) Enroll(context.Context, *v1.EnrollRequest) (*v1.EnrollResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method Enroll not implemented")
@@ -502,6 +534,24 @@ func RegisterTrustServiceServer(s grpc.ServiceRegistrar, srv TrustServiceServer)
 	s.RegisterService(&TrustService_ServiceDesc, srv)
 }
 
+func _TrustService_ListNodeTrust_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ListNodeTrustRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(TrustServiceServer).ListNodeTrust(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: TrustService_ListNodeTrust_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(TrustServiceServer).ListNodeTrust(ctx, req.(*ListNodeTrustRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _TrustService_CheckEndpoint_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(CheckEndpointRequest)
 	if err := dec(in); err != nil {
@@ -516,6 +566,24 @@ func _TrustService_CheckEndpoint_Handler(srv interface{}, ctx context.Context, d
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
 		return srv.(TrustServiceServer).CheckEndpoint(ctx, req.(*CheckEndpointRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _TrustService_ValidateEnrollment_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ValidateEnrollmentRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(TrustServiceServer).ValidateEnrollment(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: TrustService_ValidateEnrollment_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(TrustServiceServer).ValidateEnrollment(ctx, req.(*ValidateEnrollmentRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -564,8 +632,16 @@ var TrustService_ServiceDesc = grpc.ServiceDesc{
 	HandlerType: (*TrustServiceServer)(nil),
 	Methods: []grpc.MethodDesc{
 		{
+			MethodName: "ListNodeTrust",
+			Handler:    _TrustService_ListNodeTrust_Handler,
+		},
+		{
 			MethodName: "CheckEndpoint",
 			Handler:    _TrustService_CheckEndpoint_Handler,
+		},
+		{
+			MethodName: "ValidateEnrollment",
+			Handler:    _TrustService_ValidateEnrollment_Handler,
 		},
 		{
 			MethodName: "Enroll",
