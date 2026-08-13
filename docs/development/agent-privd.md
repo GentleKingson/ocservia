@@ -38,6 +38,80 @@ The unit grants write access only to this state directory and the fixed Ocserv
 directory. Keep the generated HMAC key and database together during backup,
 restore, and binary rollback.
 
+Every successful privileged terminal response also carries
+`PrivdResultReceiptV1`, signed with a per-node Ed25519 key stored only in the
+root-owned mode-`0700` privd state directory as a mode-`0600` single-link
+regular file. Creation is random, create-new, file-fsynced, atomically renamed,
+and parent-fsynced; unsafe owner, mode, length, type, link, or symlink state
+stops privd. The canonical receipt is independent of Protobuf encoding and
+binds node, command, operation, idempotency key, semantic hash, command/result
+kind, exact result digest, effect identity/revision, acceptance/completion time,
+and certificate-specific digests. The root effect store persists exact result
+bytes and signed proof before returning success; exact replay returns the same
+bytes and signature without another effect.
+
+The Agent treats proof as opaque. Its journal commits result and proof in one
+SQLite transaction and replays the stored bytes. Missing or malformed proof
+becomes Unknown. Transportd enforces only bounded shape/version and forwards it
+unchanged. Controller reconstructs the canonical transcript and accepts a
+privileged success only against an independently registered active key for that
+node. Failure emits audit and security-alert records and enters reconciliation;
+it cannot advance desired state.
+
+Reconciliation first asks privd for the exact authenticated effect record. A
+matching root record returns its original result bytes, receipt, and signature;
+the Agent then atomically restores that evidence before reporting a terminal
+result. Read-only desired-effect observation can prove absence for a safe retry,
+but it can never synthesize privileged success or failure without the original
+receipt. Missing or conflicting root evidence remains Unknown.
+
+## Privd receipt v1 canonical contract
+
+Privd signs the following transcript, not Protobuf marshal output. It begins
+with the ASCII domain `ocservia/privd-result-receipt/v1` plus a NUL byte. Enum
+and version values are unsigned 32-bit big-endian integers; effect sequence is
+unsigned 64-bit big-endian. Every byte string and UTF-8 string has an unsigned
+32-bit big-endian length prefix. Timestamps are signed 64-bit seconds followed
+by unsigned 32-bit nanoseconds, both big-endian; seconds must be nonnegative and
+nanoseconds must be below one billion. Booleans and optional-presence markers
+are one byte (`0` or `1`), so absent and present-but-empty are distinct.
+
+The fixed field order is receipt version, node ID, key ID, command ID,
+operation ID, idempotency key, semantic-hash version and digest, command kind,
+result kind, terminal state, exact result digest, error-code digest, effect
+record ID and sequence, accepted and completed timestamps, replay marker, then
+the optional certificate binding. That binding orders certificate ID, CSR
+digest, public-key digest, requested-subject digest, and root effect record ID.
+UUIDs are exactly 16-byte UUIDv7 values; digests and Ed25519 public keys are 32
+bytes; effect IDs are 16 to 32 bytes; signatures are 64 bytes; the complete
+canonical transcript is at most 2048 bytes and the encoded proof at most 64
+KiB. Unknown receipt versions and out-of-range enum, length, or timestamp values
+fail closed. Unknown Protobuf fields do not enter the transcript.
+
+Key trust is established with a random one-time Controller credential delivered
+only to root provisioning. Run the installed root-only
+`ocservia-privd attestation-registration <key-path> <node-uuidv7> <controller-nonce-hex> <credential-context-sha256-hex>`
+helper, then relay its public JSON plus the one-time credential to the
+registration endpoint. The helper is part of the installed privd binary, so the
+verified package and rollback path cannot omit a separate provisioning tool.
+Agent cannot read the key or credential and cannot register a
+self-selected key. Rotation creates a new key path and credential; Controller
+permits at most one old/new overlap for 24 hours. Explicit revocation also
+advances the node authorization revision. Set the root-managed
+`PRIVD_ATTESTATION_KEY_FILE` in `privd.env` to a new file name only during an
+operator-approved rotation, register and verify that key before retiring the
+predecessor, and never overwrite or copy a private key in place.
+
+Upgrade in this order: receipt-aware Controller and migration; initialize and
+independently register the privd key, whose root-authenticated credential
+consumption approves `privd_result_attestation_v1`; upgrade privd and Agent;
+verify the Agent advertises and negotiates that capability before dispatching
+privileged work. There is no production legacy-success mode. Historical certificate
+rows are migration legacy only to preserve schema rollback and cannot start new
+signing until a fresh attested CSR is produced. Rollback must stop privileged
+dispatch, reconcile Unknown work, and restore the matched Controller, Agent,
+privd, root effect store, and key state. Never roll back only one peer.
+
 ## Build and install
 
 ```bash

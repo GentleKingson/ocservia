@@ -6,6 +6,12 @@ by default, emits bounded representative telemetry, and assigns deterministic
 Direct and Relay path metadata. The harness also injects slow SSE consumption,
 Controller and transport restarts, a temporary PostgreSQL outage, and an
 interrupted operation whose outcome must remain explicit.
+It also keeps 16 concurrent Viewer streams in the smoke profile and 100 in the
+full profile. They share one workspace watcher across slow-consumer,
+Controller-restart, and database-outage phases. The harness fails if watcher or
+steady SQL query count grows with subscriber count, and records active and
+rejected streams, healthy/unhealthy watcher and query counters, slow-consumer disconnects, file
+descriptors, goroutines, RSS, and unrelated probe completion.
 
 The authoritative profiles run on a standard GitHub-hosted `ubuntu-24.04`
 runner. `P1 Smoke` runs for pull requests and `main` with 24 Agents, two
@@ -35,8 +41,8 @@ An operation that was running when transport stopped must converge to `unknown`
 within the bounded wait; `queued`, `dispatched`, `accepted`, and `running` are
 never accepted as final outcomes. Output includes request and completion
 p50/p95/p99, telemetry count, path mix, goroutines, Tokio simulator tasks, RSS,
-file descriptors, database pool activity, timestamps, phase counts, and sampler
-status.
+file descriptors, database pool activity, SSE admission and watcher counters,
+timestamps, phase counts, and sampler status.
 
 This is initial single-host evidence, not a production capacity claim. Simulated
 Relay metadata does not prove multi-host or multi-failure-domain Relay behavior.

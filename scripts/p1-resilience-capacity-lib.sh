@@ -150,6 +150,11 @@ validate_resource_samples() {
       (.epoch_seconds | number) and (.phase | type == "string" and length > 0) and
       (.runtime.goroutines | number) and (.runtime.db_acquired | number) and
       (.runtime.db_idle | number) and (.runtime.db_total | number) and
+      (.runtime.sse_active_streams | number) and (.runtime.sse_rejected_streams | number) and
+      (.runtime.sse_watchers | number) and
+      (.runtime.sse_unhealthy_watchers | number) and
+      (.runtime.sse_sql_queries | number) and (.runtime.sse_slow_consumer_disconnects | number) and
+      (.runtime.sse_database_backoff_seconds | number) and
       (.stub.active_tasks | number) and (.stub.task_capacity | number) and
       (.control_rss_kib | number) and (.control_fd | number) and
       (.stub_rss_kib | number) and (.stub_fd | number) and
@@ -178,6 +183,13 @@ validate_resource_samples() {
         max_db_acquired: (map(.runtime.db_acquired) | max),
         max_db_idle: (map(.runtime.db_idle) | max),
         max_db_total: (map(.runtime.db_total) | max),
+        max_sse_active_streams: (map(.runtime.sse_active_streams) | max),
+        sse_rejected_streams: (map(.runtime.sse_rejected_streams) | max),
+        max_sse_watchers: (map(.runtime.sse_watchers) | max),
+        max_sse_unhealthy_watchers: (map(.runtime.sse_unhealthy_watchers) | max),
+        max_sse_sql_queries: (map(.runtime.sse_sql_queries) | max),
+        sse_slow_consumer_disconnects: (map(.runtime.sse_slow_consumer_disconnects) | max),
+        max_sse_database_backoff_seconds: (map(.runtime.sse_database_backoff_seconds) | max),
         sampler_exit: $sampler_exit
       }
     end
