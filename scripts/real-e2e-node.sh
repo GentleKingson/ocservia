@@ -50,7 +50,8 @@ prepare_endpoint() {
 
 enroll() {
   local token_dir="${1:?enrollment token directory is required}"
-  local controller user_hash p12_hash node_id
+  local controller user_hash p12_hash enrollment_output node_id
+  local -a node_ids
   controller="$(<"${WORK}/controller-endpoint-id")"
   require_endpoint "${controller}"
   install -m 0600 "${token_dir}/enrollment-token" "${SECRETS}/enrollment-token"
@@ -61,7 +62,7 @@ enroll() {
   user_hash="$(sha256sum "${SECRETS}/user-password-seal.der" | awk '{print $1}')"
   p12_hash="$(sha256sum "${SECRETS}/p12-password-seal.der" | awk '{print $1}')"
   [[ "${user_hash}" != "${p12_hash}" ]]
-  node_id="$("${TARGET}/release/ocservia-agent" \
+  enrollment_output="$("${TARGET}/release/ocservia-agent" \
     --identity-dir "${IDENTITY}" \
     --controller "${controller}" \
     --enrollment-token-file "${SECRETS}/enrollment-token" \
@@ -70,10 +71,12 @@ enroll() {
     --user-password-seal-public-key-sha256 "${user_hash}" \
     --p12-password-seal-key-id real-e2e-p12-v1 \
     --p12-password-seal-public-key-sha256 "${p12_hash}")"
-  [[ "${node_id}" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$ ]] || {
+  mapfile -t node_ids < <(grep -E '^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$' <<<"${enrollment_output}")
+  [[ ${#node_ids[@]} -eq 1 ]] || {
     echo "enrollment did not return a UUIDv7 node ID" >&2
     return 1
   }
+  node_id="${node_ids[0]}"
   mkdir -p "${OUTBOX}/enrollment-result"
   printf '%s\n' "${node_id}" >"${OUTBOX}/enrollment-result/node-id"
   runner_instance_id >"${OUTBOX}/enrollment-result/runner-instance"
