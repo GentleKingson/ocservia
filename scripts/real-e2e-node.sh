@@ -18,12 +18,22 @@ require_endpoint() {
   [[ "${1:-}" =~ ^[0-9a-f]{64}$ ]] || { echo "invalid Controller EndpointID" >&2; return 1; }
 }
 
+runner_instance_id() {
+  local boot_id
+  boot_id="$(< /proc/sys/kernel/random/boot_id)"
+  [[ "${boot_id}" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$ ]] || {
+    echo "runner boot ID is unavailable or invalid" >&2
+    return 1
+  }
+  printf '%s\n' "${boot_id}"
+}
+
 prepare_endpoint() {
   local ready_dir="${1:?controller-ready directory is required}"
   local controller endpoint
   controller="$(<"${ready_dir}/controller-endpoint-id")"
   require_endpoint "${controller}"
-  [[ "$(<"${ready_dir}/runner-instance")" != "$(hostname)" ]] || {
+  [[ "$(<"${ready_dir}/runner-instance")" != "$(runner_instance_id)" ]] || {
     echo "Controller and Agent resolved to the same runner instance" >&2
     return 1
   }
@@ -34,7 +44,7 @@ prepare_endpoint() {
     --controller "${controller}" --prepare-enrollment)"
   require_endpoint "${endpoint}"
   printf '%s\n' "${endpoint}" >"${OUTBOX}/agent-endpoint/agent-endpoint-id"
-  hostname >"${OUTBOX}/agent-endpoint/runner-instance"
+  runner_instance_id >"${OUTBOX}/agent-endpoint/runner-instance"
   printf '%s\n' "${controller}" >"${WORK}/controller-endpoint-id"
 }
 
@@ -66,7 +76,7 @@ enroll() {
   }
   mkdir -p "${OUTBOX}/enrollment-result"
   printf '%s\n' "${node_id}" >"${OUTBOX}/enrollment-result/node-id"
-  hostname >"${OUTBOX}/enrollment-result/runner-instance"
+  runner_instance_id >"${OUTBOX}/enrollment-result/runner-instance"
 }
 
 collect_diagnostics() {

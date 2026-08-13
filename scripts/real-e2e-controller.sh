@@ -33,6 +33,16 @@ require_endpoint() {
   }
 }
 
+runner_instance_id() {
+  local boot_id
+  boot_id="$(< /proc/sys/kernel/random/boot_id)"
+  [[ "${boot_id}" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$ ]] || {
+    echo "runner boot ID is unavailable or invalid" >&2
+    return 1
+  }
+  printf '%s\n' "${boot_id}"
+}
+
 start_controller() {
   local endpoint
   mkdir -p "${STATE}" "${SECRETS}" "${OUTBOX}/controller-ready" "${ARTIFACT_DIR}"
@@ -78,7 +88,7 @@ start_controller() {
     -c "INSERT INTO workspaces(id,name,slug,created_at,updated_at) VALUES('${WORKSPACE_ID}','Cross-VM Real E2E','cross-vm-real-e2e',now(),now()) ON CONFLICT (id) DO NOTHING" >/dev/null
 
   printf '%s\n' "${endpoint}" >"${OUTBOX}/controller-ready/controller-endpoint-id"
-  hostname >"${OUTBOX}/controller-ready/runner-instance"
+  runner_instance_id >"${OUTBOX}/controller-ready/runner-instance"
   printf '%s\n' "${WORKSPACE_ID}" >"${OUTBOX}/controller-ready/workspace-id"
 }
 
@@ -88,7 +98,7 @@ issue_enrollment_token() {
   endpoint="$(<"${peer_dir}/agent-endpoint-id")"
   peer_runner="$(<"${peer_dir}/runner-instance")"
   require_endpoint "${endpoint}"
-  [[ -n "${peer_runner}" && "${peer_runner}" != "$(hostname)" ]] || {
+  [[ -n "${peer_runner}" && "${peer_runner}" != "$(runner_instance_id)" ]] || {
     echo "Controller and Agent must run on different runner instances" >&2
     return 1
   }

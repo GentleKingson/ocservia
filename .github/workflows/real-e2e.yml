@@ -69,7 +69,7 @@ jobs:
           name: real-e2e-controller-diagnostics-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/artifacts/real-e2e-controller
           if-no-files-found: warn
-          retention-days: 14
+          retention-days: 1
 
   real-node:
     name: Real Managed Node VM
@@ -135,4 +135,4 @@ jobs:
           name: real-e2e-node-diagnostics-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/artifacts/real-e2e-node
           if-no-files-found: warn
-          retention-days: 14
+          retention-days: 1
