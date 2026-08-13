@@ -339,11 +339,14 @@ printf '%s\n' "request latency seconds: ${latency_percentiles}" \
 sample_phase_now slow-sse
 last_event="$(curl --fail --silent -H "Authorization: Bearer ${AUTH_TOKEN}" \
   "http://127.0.0.1:${API_PORT}/api/v1/events?page_size=200" | jq -r '.items[-1].id')"
+workspace_id="$(psql_value 'SELECT workspace_id FROM operations ORDER BY created_at DESC LIMIT 1')"
+test -n "${workspace_id}"
+sse_url="http://127.0.0.1:${API_PORT}/api/v1/events/stream?workspace_id=${workspace_id}"
 stream_viewer() {
   while [[ ! -e "${TMP_ROOT}/sse-stop" ]]; do
-    curl --silent --no-buffer --max-time 20 \
+    curl --fail --silent --no-buffer --max-time 20 \
       -H "Authorization: Bearer ${AUTH_TOKEN}" -H "Last-Event-ID: ${last_event}" \
-      "http://127.0.0.1:${API_PORT}/api/v1/events/stream" >/dev/null || true
+      "${sse_url}" >/dev/null || true
   done
 }
 queries_before="$(curl --fail --silent "http://127.0.0.1:${API_PORT}/api/v1/development/runtime" | jq -r .sse_sql_queries)"
@@ -358,9 +361,9 @@ test "${active_streams}" -ge "${SSE_VIEWERS}"
 # A live reconnect from the durable cursor must receive the next committed
 # event, not replay the cursor or wait for a new watcher owned by that client.
 cursor_stream="${TMP_ROOT}/last-event-id-reconnect.sse"
-(curl --silent --no-buffer --max-time 20 \
+(curl --fail --silent --no-buffer --max-time 20 \
   -H "Authorization: Bearer ${AUTH_TOKEN}" -H "Last-Event-ID: ${last_event}" \
-  "http://127.0.0.1:${API_PORT}/api/v1/events/stream" >"${cursor_stream}" || true) &
+  "${sse_url}" >"${cursor_stream}" || true) &
 cursor_pid=$!
 before="$(psql_value "SELECT count(*) FROM operations WHERE state = 'succeeded'")"
 create_probe 1 25 >/dev/null
@@ -383,9 +386,9 @@ sse_runtime="$(curl --fail --silent "http://127.0.0.1:${API_PORT}/api/v1/develop
 test "$(jq -r .sse_watchers <<<"${sse_runtime}")" -eq 1
 shared_queries="$(( $(jq -r .sse_sql_queries <<<"${sse_runtime}") - queries_before ))"
 test "${shared_queries}" -le 20
-timeout 40s curl --silent --no-buffer --limit-rate 16 \
+timeout 40s curl --fail --silent --no-buffer --limit-rate 16 \
   -H "Authorization: Bearer ${AUTH_TOKEN}" -H "Last-Event-ID: ${last_event}" \
-  "http://127.0.0.1:${API_PORT}/api/v1/events/stream" >"${TMP_ROOT}/slow.sse" &
+  "${sse_url}" >"${TMP_ROOT}/slow.sse" &
 slow_pid=$!
 before="$(psql_value "SELECT count(*) FROM operations WHERE state = 'succeeded'")"
 for _ in $(seq 1 8); do create_probe 1 25 >/dev/null; done
