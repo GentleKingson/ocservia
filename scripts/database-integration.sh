@@ -104,6 +104,45 @@ stop_process() {
   return 0
 }
 
+assert_privd_attestation_schema() {
+  local container=$1 database=$2
+  test "$(docker exec "${container}" psql -U ocservia_owner -d "${database}" -Atc "SELECT count(*) FROM schema_migrations WHERE version=23")" = "1"
+  test "$(docker exec "${container}" psql -U ocservia_owner -d "${database}" -Atc "SELECT count(*) FROM information_schema.tables WHERE table_schema='public' AND table_name IN ('privd_attestation_enrollment_credentials','node_privd_attestation_keys')")" = "2"
+  test "$(docker exec "${container}" psql -U ocservia_owner -d "${database}" -Atc "SELECT count(*) FROM information_schema.columns WHERE table_schema='public' AND ((table_name='agent_command_results' AND column_name IN ('receipt_verification_status','receipt_failure_reason','privd_attestation_key_id','effect_record_id','effect_sequence','receipt_sha256','privileged_result_proof')) OR (table_name='certificates' AND column_name IN ('csr_receipt_verified_at','csr_receipt_sha256','csr_privd_attestation_key_id','csr_effect_record_id','csr_der_sha256','csr_requested_subject_sha256','issue_certificate_version')))")" = "14"
+}
+
+assert_privd_attestation_down_rejected() {
+  local container=$1 database=$2 label=$3
+  local log="${TMP_ROOT}/${label}-privd-attestation-down.log"
+  if docker exec -i "${container}" psql -v ON_ERROR_STOP=1 -U ocservia_owner -d "${database}" \
+    <"${ROOT}/control-plane/migrations/000023_privd_result_attestation.down.sql" >"${log}" 2>&1; then
+    echo "privd attestation down migration discarded ${label} evidence" >&2
+    exit 1
+  fi
+  grep -Fq 'cannot remove privd attestation while trusted keys or verified receipts exist' "${log}"
+  assert_privd_attestation_schema "${container}" "${database}"
+}
+
+clone_database() {
+  local container=$1 source=$2 destination=$3
+  docker exec "${container}" psql -v ON_ERROR_STOP=1 -U ocservia_owner -d postgres -c \
+    "CREATE DATABASE ${destination} TEMPLATE ${source}" >/dev/null
+}
+
+seed_verified_receipt() {
+  local container=$1 database=$2
+  docker exec "${container}" psql -v ON_ERROR_STOP=1 -U ocservia_owner -d "${database}" -c "
+    INSERT INTO operations(id,workspace_id,node_id,state,version,request_id,idempotency_key,request_hash,created_at,updated_at)
+    VALUES('00000000-0000-7000-8000-000000000230','00000000-0000-7000-8000-000000000001','00000000-0000-7000-8000-000000000003','succeeded',1,'p1-03-rollback-receipt','p1-03-rollback-receipt',decode(repeat('23',32),'hex'),now(),now());
+    INSERT INTO commands(id,operation_id,workspace_id,node_id,state,payload_type,envelope,idempotency_key,expected_version,traceparent,expires_at,created_at,updated_at)
+    VALUES('00000000-0000-7000-8000-000000000231','00000000-0000-7000-8000-000000000230','00000000-0000-7000-8000-000000000001','00000000-0000-7000-8000-000000000003','succeeded','certificate_p12',decode('00','hex'),'00000000-0000-7000-8000-000000000232',1,'00-23232323232323232323232323232323-2323232323232323-01',now()+interval '1 hour',now(),now());
+    INSERT INTO transport_events(event_id,node_id,event_type,occurred_at,traceparent,payload)
+    VALUES('00000000-0000-7000-8000-000000000233','00000000-0000-7000-8000-000000000003','command_result',now(),'00-23232323232323232323232323232323-2323232323232323-01',decode('00','hex'));
+    INSERT INTO agent_command_results(event_id,command_id,idempotency_key,payload_sha256,state,result,accepted_at,completed_at,replayed,created_at,receipt_verification_status,privd_attestation_key_id,effect_record_id,effect_sequence,receipt_sha256,privileged_result_proof)
+    VALUES('00000000-0000-7000-8000-000000000233','00000000-0000-7000-8000-000000000231','00000000-0000-7000-8000-000000000232',decode(repeat('23',32),'hex'),'succeeded',decode('01','hex'),now(),now(),false,now(),'verified','ed25519-sha256:'||repeat('23',32),decode(repeat('23',16),'hex'),1,decode(repeat('24',32),'hex'),decode('01','hex'));
+  " >/dev/null
+}
+
 for major in 17 18; do
   container="${PREFIX}-pg${major}"
   CONTAINERS+=("${container}")
@@ -121,6 +160,22 @@ for major in 17 18; do
   OCSERV_ENVIRONMENT=test OCSERV_DATABASE_URL="${owner_url}" \
     OCSERV_RUNTIME_DATABASE_ROLE=ocservia_app "${BIN}" --migrate-only \
     >"${TMP_ROOT}/pg${major}-migrate.log" 2>&1
+
+  clean_database="ocservia_clean23_${major}"
+  clone_database "${container}" ocservia "${clean_database}"
+  docker exec -i "${container}" psql -v ON_ERROR_STOP=1 -U ocservia_owner -d "${clean_database}" \
+    <"${ROOT}/control-plane/migrations/000023_privd_result_attestation.down.sql" >/dev/null
+  docker exec "${container}" psql -v ON_ERROR_STOP=1 -U ocservia_owner -d "${clean_database}" -c \
+    "DELETE FROM schema_migrations WHERE version=23" >/dev/null
+  test "$(docker exec "${container}" psql -U ocservia_owner -d "${clean_database}" -Atc "SELECT COALESCE(MAX(version),0) FROM schema_migrations")" = "22"
+  test "$(docker exec "${container}" psql -U ocservia_owner -d "${clean_database}" -Atc "SELECT count(*) FROM information_schema.tables WHERE table_schema='public' AND table_name IN ('privd_attestation_enrollment_credentials','node_privd_attestation_keys')")" = "0"
+  clean_url="postgres://ocservia_owner:test-owner-only@127.0.0.1:${port}/${clean_database}?sslmode=disable"
+  OCSERV_ENVIRONMENT=test OCSERV_DATABASE_URL="${clean_url}" \
+    OCSERV_RUNTIME_DATABASE_ROLE=ocservia_app "${BIN}" --migrate-only \
+    >"${TMP_ROOT}/pg${major}-privd-clean-forward.log" 2>&1
+  assert_privd_attestation_schema "${container}" "${clean_database}"
+  docker exec "${container}" psql -v ON_ERROR_STOP=1 -U ocservia_owner -d postgres -c \
+    "DROP DATABASE ${clean_database}" >/dev/null
 
   docker exec -i "${container}" psql -v ON_ERROR_STOP=1 -U ocservia_owner -d ocservia \
     <"${ROOT}/control-plane/migrations/000023_privd_result_attestation.down.sql" >/dev/null
@@ -250,6 +305,7 @@ for major in 17 18; do
     "SELECT telemetry_drop_expired_partitions(now() - interval '14 days')" >/dev/null
   test "$(docker exec "${container}" psql -U ocservia_owner -d ocservia -Atc "SELECT count(*) FROM pg_class WHERE relname = 'telemetry_samples_' || to_char(date_trunc('month', now()) - interval '2 months', 'YYYYMM')")" = "0"
   stop_process "${pid}"
+  rollback_database="ocservia_rollback_${major}"
   (cd "${ROOT}/control-plane" && OCSERV_TEST_DATABASE_URL="${runtime_url}" OCSERV_TEST_OWNER_DATABASE_URL="${owner_url}" \
     go test -p 1 ./internal/operations ./internal/enrollment ./internal/localslice ./internal/telemetry ./internal/userstate ./internal/useroperations ./internal/configplan ./internal/certificates ./internal/approvals ./internal/audit ./internal/rbac ./internal/auth ./internal/privdattestation -run Integration -count=1)
   (cd "${ROOT}/control-plane" && OCSERV_TEST_DATABASE_URL="${runtime_url}" \
@@ -283,6 +339,52 @@ for major in 17 18; do
   done
   [[ "${checkpoint_ready}" == true ]] || { echo "audit migration tail was not checkpointed" >&2; exit 1; }
   stop_process "${checkpoint_pid}"
+  clone_database "${container}" ocservia "${rollback_database}"
+
+  key_receipt_database="ocservia_attestation_both_${major}"
+  key_only_database="ocservia_attestation_key_${major}"
+  receipt_only_database="ocservia_attestation_receipt_${major}"
+  clone_database "${container}" ocservia "${key_receipt_database}"
+  clone_database "${container}" ocservia "${key_only_database}"
+  clone_database "${container}" ocservia "${receipt_only_database}"
+  seed_verified_receipt "${container}" "${key_receipt_database}"
+  seed_verified_receipt "${container}" "${key_only_database}"
+  seed_verified_receipt "${container}" "${receipt_only_database}"
+  test "$(docker exec "${container}" psql -U ocservia_owner -d "${key_receipt_database}" -Atc "SELECT count(*) FROM node_privd_attestation_keys")" -gt 0
+  test "$(docker exec "${container}" psql -U ocservia_owner -d "${key_receipt_database}" -Atc "SELECT count(*) FROM agent_command_results WHERE receipt_verification_status='verified'")" -gt 0
+  assert_privd_attestation_down_rejected "${container}" "${key_receipt_database}" "pg${major}-key-and-receipt"
+
+  docker exec "${container}" psql -v ON_ERROR_STOP=1 -U ocservia_owner -d "${key_only_database}" -c "
+    UPDATE agent_command_results SET receipt_verification_status='legacy';
+    UPDATE certificates SET csr_receipt_legacy=true WHERE csr_receipt_verified_at IS NOT NULL;
+  " >/dev/null
+  test "$(docker exec "${container}" psql -U ocservia_owner -d "${key_only_database}" -Atc "SELECT count(*) FROM node_privd_attestation_keys")" -gt 0
+  test "$(docker exec "${container}" psql -U ocservia_owner -d "${key_only_database}" -Atc "SELECT count(*) FROM agent_command_results WHERE receipt_verification_status='verified'")" = "0"
+  assert_privd_attestation_down_rejected "${container}" "${key_only_database}" "pg${major}-key-only"
+
+  docker exec "${container}" psql -v ON_ERROR_STOP=1 -U ocservia_owner -d "${receipt_only_database}" -c "
+    UPDATE certificates SET csr_receipt_legacy=true,csr_receipt_verified_at=NULL,csr_receipt_sha256=NULL,csr_privd_attestation_key_id=NULL,csr_effect_record_id=NULL,csr_der_sha256=NULL,csr_requested_subject_sha256=NULL WHERE csr_receipt_verified_at IS NOT NULL;
+    DELETE FROM node_privd_attestation_keys;
+    DELETE FROM privd_attestation_enrollment_credentials;
+  " >/dev/null
+  test "$(docker exec "${container}" psql -U ocservia_owner -d "${receipt_only_database}" -Atc "SELECT count(*) FROM node_privd_attestation_keys")" = "0"
+  test "$(docker exec "${container}" psql -U ocservia_owner -d "${receipt_only_database}" -Atc "SELECT count(*) FROM agent_command_results WHERE receipt_verification_status='verified'")" -gt 0
+  assert_privd_attestation_down_rejected "${container}" "${receipt_only_database}" "pg${major}-receipt-only"
+
+  docker exec "${container}" psql -v ON_ERROR_STOP=1 -U ocservia_owner -d "${rollback_database}" -c "
+    UPDATE agent_command_results SET receipt_verification_status='legacy';
+    UPDATE certificates SET csr_receipt_legacy=true,csr_receipt_verified_at=NULL,csr_receipt_sha256=NULL,csr_privd_attestation_key_id=NULL,csr_effect_record_id=NULL,csr_der_sha256=NULL,csr_requested_subject_sha256=NULL WHERE csr_receipt_verified_at IS NOT NULL;
+    DELETE FROM node_privd_attestation_keys;
+    DELETE FROM privd_attestation_enrollment_credentials;
+  " >/dev/null
+  for database in "${key_receipt_database}" "${key_only_database}" "${receipt_only_database}"; do
+    docker exec "${container}" psql -v ON_ERROR_STOP=1 -U ocservia_owner -d postgres -c \
+      "DROP DATABASE ${database}" >/dev/null
+  done
+  docker exec "${container}" psql -v ON_ERROR_STOP=1 -U ocservia_owner -d postgres -c \
+    "ALTER DATABASE ocservia RENAME TO ocservia_stateful_${major}" >/dev/null
+  docker exec "${container}" psql -v ON_ERROR_STOP=1 -U ocservia_owner -d postgres -c \
+    "ALTER DATABASE ${rollback_database} RENAME TO ocservia" >/dev/null
   if docker exec "${container}" psql -v ON_ERROR_STOP=1 -U ocservia_app -d ocservia -c "INSERT INTO operations (id, workspace_id, node_id, state, request_id, created_at, updated_at) VALUES ('00000000-0000-7000-8000-000000000005', '00000000-0000-7000-8000-000000000002', '00000000-0000-7000-8000-000000000003', 'draft', 'request', now(), now())" >/dev/null 2>&1; then
     echo "cross-workspace operation was accepted" >&2
     exit 1
@@ -517,6 +619,7 @@ for major in 17 18; do
   fi
   docker exec "${container}" psql -v ON_ERROR_STOP=1 -U ocservia_owner -d ocservia -c \
     "DELETE FROM schema_migrations WHERE version = 24" >/dev/null
+  echo "PostgreSQL ${major} database integration complete"
 done
 
 container="${PREFIX}-upgrade"
