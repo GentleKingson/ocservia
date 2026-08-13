@@ -36,9 +36,9 @@ func TestValidateLockedTokenPreservesQueryErrors(t *testing.T) {
 	}
 }
 
-func TestConsumedTokenValidationIgnoresExpiry(t *testing.T) {
-	if err := validateLockedToken(nil, true, time.Now().Add(-time.Minute), time.Now()); err != nil {
-		t.Fatalf("consumed token expiry should be checked by the idempotency path: %v", err)
+func TestConsumedAndExpiredTokensAreRejected(t *testing.T) {
+	if err := validateLockedToken(nil, true, time.Now().Add(time.Minute), time.Now()); !errors.Is(err, ErrInvalidToken) {
+		t.Fatalf("consumed token replay error = %v", err)
 	}
 	if err := validateLockedToken(nil, false, time.Now().Add(-time.Minute), time.Now()); !errors.Is(err, ErrInvalidToken) {
 		t.Fatalf("unconsumed expired token error = %v", err)

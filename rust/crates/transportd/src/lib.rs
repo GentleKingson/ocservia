@@ -4,6 +4,7 @@
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::pin::Pin;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock, Weak};
 use std::time::{Duration, Instant, SystemTime};
 
@@ -20,15 +21,16 @@ use ocservia_contracts::generated::ocserv::platform::agent::v1::{
     ArtifactConsumeRequest as AgentArtifactConsumeRequest,
     ArtifactConsumeResponse as AgentArtifactConsumeResponse, ArtifactFetchRequest, CommandEnvelope,
     CommandResult, CommandResultState, EnrollRequest, EnrollResponse, HandshakeResult,
-    SessionHandshake, SessionHandshakeResponse, TelemetryBatch,
+    SessionHandshake, SessionHandshakeResponse, TelemetryBatch, command_envelope,
 };
 use ocservia_contracts::generated::ocserv::platform::transport::v1::{
     AuthorizeSessionRequest, CheckEndpointRequest, CloseNodeRequest, CloseNodeResponse,
     ConnectionPath, ConsumeArtifactRequest, ConsumeArtifactResponse, FetchArtifactRequest,
     GetNodeConnectionRequest, HealthRequest, HealthResponse, HealthStatus, NodeConnection,
     NodeTrustState, SendCommandRequest, SendCommandResponse, TransportEvent, TransportEventType,
-    TrustUpdateDisposition, UpdateNodeTrustRequest, UpdateNodeTrustResponse, WatchEventsRequest,
-    transport_service_server::TransportService, trust_service_client::TrustServiceClient,
+    TrustUpdateDisposition, UpdateNodeTrustRequest, UpdateNodeTrustResponse,
+    ValidateEnrollmentRequest, WatchEventsRequest, transport_service_server::TransportService,
+    trust_service_client::TrustServiceClient,
 };
 use prost::Message;
 use tokio::sync::{Mutex, OwnedSemaphorePermit, Semaphore, mpsc, watch};
@@ -85,17 +87,252 @@ const MAX_CONNECTIONS: usize = 4096;
 const MAX_ENROLLMENT_CONNECTIONS: usize = 64;
 const MAX_AGENT_CONNECTIONS: usize = MAX_CONNECTIONS - MAX_ENROLLMENT_CONNECTIONS;
 const MAX_ATTEMPTS_PER_MINUTE: usize = 30;
-const MAX_TRUST_ATTEMPTS_PER_MINUTE: usize = 600;
-const MAX_TRUST_CHECKS: usize = 16;
+const MAX_TRUST_SNAPSHOT_BINDINGS: usize = 8192;
 const MAX_RESPONSE_FRAMES: usize = 128;
+
+/// One security domain with capacity that cannot be consumed by another domain.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum TrustClass {
+    /// Local admission for an `EndpointID` already present in the synchronized snapshot.
+    KnownAgentHandshake,
+    /// Live Controller authorization of a complete Agent session handshake.
+    AgentAuthorization,
+    /// High-priority live recheck immediately before connection registration.
+    AgentRegistrationRecheck,
+    /// Small local-only admission for an unknown enrollment `EndpointID`.
+    UnknownEnrollmentPreAuth,
+    /// Transactional completion after the bounded first frame's authority check.
+    EnrollmentCompletion,
+}
+
+impl TrustClass {
+    const COUNT: usize = 5;
+
+    fn index(self) -> usize {
+        match self {
+            Self::KnownAgentHandshake => 0,
+            Self::AgentAuthorization => 1,
+            Self::AgentRegistrationRecheck => 2,
+            Self::UnknownEnrollmentPreAuth => 3,
+            Self::EnrollmentCompletion => 4,
+        }
+    }
+
+    /// Stable bounded metric label.
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::KnownAgentHandshake => "known_agent_handshake",
+            Self::AgentAuthorization => "agent_authorization",
+            Self::AgentRegistrationRecheck => "agent_registration_recheck",
+            Self::UnknownEnrollmentPreAuth => "unknown_enrollment_pre_auth",
+            Self::EnrollmentCompletion => "enrollment_completion",
+        }
+    }
+}
+
+/// Per-class rolling-window and concurrency limits.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct TrustClassLimit {
+    /// Attempts accepted during one rolling minute.
+    pub attempts_per_minute: usize,
+    /// Checks that may be in flight in this class.
+    pub concurrency: usize,
+}
+
+/// Security defaults reserve substantially more capacity for approved Agents
+/// than for unauthenticated enrollment traffic.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TrustBudgetConfig {
+    limits: [TrustClassLimit; TrustClass::COUNT],
+}
+
+impl Default for TrustBudgetConfig {
+    fn default() -> Self {
+        Self {
+            limits: [
+                TrustClassLimit {
+                    attempts_per_minute: 2400,
+                    concurrency: 256,
+                },
+                TrustClassLimit {
+                    attempts_per_minute: 1200,
+                    concurrency: 48,
+                },
+                TrustClassLimit {
+                    attempts_per_minute: 1200,
+                    concurrency: 48,
+                },
+                TrustClassLimit {
+                    attempts_per_minute: 120,
+                    concurrency: 16,
+                },
+                TrustClassLimit {
+                    attempts_per_minute: 120,
+                    concurrency: 8,
+                },
+            ],
+        }
+    }
+}
+
+impl TrustBudgetConfig {
+    /// Replaces one class limit after validating the complete safe range.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when either limit is outside the enforced safe range.
+    pub fn with_limit(
+        mut self,
+        class: TrustClass,
+        limit: TrustClassLimit,
+    ) -> Result<Self, &'static str> {
+        if !(1..=10_000).contains(&limit.attempts_per_minute)
+            || !(1..=512).contains(&limit.concurrency)
+        {
+            return Err("trust class limits are outside the safe range");
+        }
+        self.limits[class.index()] = limit;
+        Ok(self)
+    }
+}
+
+#[derive(Debug)]
+struct TrustClassBudget {
+    attempts: Mutex<VecDeque<Instant>>,
+    checks: Arc<Semaphore>,
+    accepted: AtomicU64,
+    rate_rejected: AtomicU64,
+    capacity_rejected: AtomicU64,
+    in_flight: AtomicU64,
+    limit: TrustClassLimit,
+}
+
+#[derive(Debug)]
+struct TrustBudgetSet {
+    classes: [TrustClassBudget; TrustClass::COUNT],
+}
+
+impl TrustBudgetSet {
+    fn new(config: &TrustBudgetConfig) -> Self {
+        Self {
+            classes: std::array::from_fn(|index| {
+                let limit = config.limits[index];
+                TrustClassBudget {
+                    attempts: Mutex::new(VecDeque::with_capacity(limit.attempts_per_minute)),
+                    checks: Arc::new(Semaphore::new(limit.concurrency)),
+                    accepted: AtomicU64::new(0),
+                    rate_rejected: AtomicU64::new(0),
+                    capacity_rejected: AtomicU64::new(0),
+                    in_flight: AtomicU64::new(0),
+                    limit,
+                }
+            }),
+        }
+    }
+
+    async fn acquire(
+        self: &Arc<Self>,
+        class: TrustClass,
+    ) -> Result<TrustBudgetPermit, AttemptRejection> {
+        self.acquire_at(class, Instant::now()).await
+    }
+
+    async fn acquire_at(
+        self: &Arc<Self>,
+        class: TrustClass,
+        now: Instant,
+    ) -> Result<TrustBudgetPermit, AttemptRejection> {
+        let budget = &self.classes[class.index()];
+        let Ok(permit) = budget.checks.clone().try_acquire_owned() else {
+            budget.capacity_rejected.fetch_add(1, Ordering::Relaxed);
+            return Err(AttemptRejection::Capacity);
+        };
+        let mut attempts = budget.attempts.lock().await;
+        if let Err(rejection) =
+            record_global_attempt(&mut attempts, now, budget.limit.attempts_per_minute)
+        {
+            budget.rate_rejected.fetch_add(1, Ordering::Relaxed);
+            return Err(rejection);
+        }
+        drop(attempts);
+        budget.accepted.fetch_add(1, Ordering::Relaxed);
+        budget.in_flight.fetch_add(1, Ordering::Relaxed);
+        Ok(TrustBudgetPermit {
+            budgets: Arc::clone(self),
+            class,
+            _permit: permit,
+        })
+    }
+
+    fn acquire_capacity(
+        self: &Arc<Self>,
+        class: TrustClass,
+    ) -> Result<TrustBudgetPermit, AttemptRejection> {
+        let budget = &self.classes[class.index()];
+        let permit = budget.checks.clone().try_acquire_owned().map_err(|_| {
+            budget.capacity_rejected.fetch_add(1, Ordering::Relaxed);
+            AttemptRejection::Capacity
+        })?;
+        budget.in_flight.fetch_add(1, Ordering::Relaxed);
+        Ok(TrustBudgetPermit {
+            budgets: Arc::clone(self),
+            class,
+            _permit: permit,
+        })
+    }
+
+    fn snapshot(&self, class: TrustClass) -> TrustMetricsSnapshot {
+        let budget = &self.classes[class.index()];
+        TrustMetricsSnapshot {
+            accepted: budget.accepted.load(Ordering::Relaxed),
+            rate_rejected: budget.rate_rejected.load(Ordering::Relaxed),
+            capacity_rejected: budget.capacity_rejected.load(Ordering::Relaxed),
+            in_flight: budget.in_flight.load(Ordering::Relaxed),
+        }
+    }
+}
+
+struct TrustBudgetPermit {
+    budgets: Arc<TrustBudgetSet>,
+    class: TrustClass,
+    _permit: OwnedSemaphorePermit,
+}
+
+impl Drop for TrustBudgetPermit {
+    fn drop(&mut self) {
+        self.budgets.classes[self.class.index()]
+            .in_flight
+            .fetch_sub(1, Ordering::Relaxed);
+    }
+}
+
+/// Bounded counters backing trust metrics. No `EndpointID` is recorded.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct TrustMetricsSnapshot {
+    /// Accepted attempts.
+    pub accepted: u64,
+    /// Rolling-window refusals.
+    pub rate_rejected: u64,
+    /// Concurrency refusals.
+    pub capacity_rejected: u64,
+    /// Currently retained permits.
+    pub in_flight: u64,
+}
 
 type EventStream = Pin<Box<dyn Stream<Item = Result<TransportEvent, Status>> + Send>>;
 type ArtifactStream = Pin<Box<dyn Stream<Item = Result<ArtifactChunk, Status>> + Send>>;
 
 /// A bounded, transport-only identity policy supplied at process startup.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 pub struct IdentityPolicy {
     state: Arc<RwLock<IdentityState>>,
+}
+
+impl Default for IdentityPolicy {
+    fn default() -> Self {
+        Self::new(HashMap::new(), HashSet::new())
+    }
 }
 
 #[derive(Debug, Default)]
@@ -103,6 +340,7 @@ struct IdentityState {
     approved: HashMap<EndpointId, Vec<u8>>,
     revoked: HashMap<EndpointId, Vec<u8>>,
     revisions: HashMap<EndpointId, u64>,
+    synchronized: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -129,8 +367,50 @@ impl IdentityPolicy {
                     .map(|endpoint| (endpoint, Vec::new()))
                     .collect(),
                 revisions,
+                synchronized: true,
             })),
         }
+    }
+
+    fn replace_snapshot(
+        &self,
+        bindings: impl IntoIterator<Item = (EndpointId, Vec<u8>, NodeTrustState, u64)>,
+    ) -> Result<(), &'static str> {
+        let mut approved = HashMap::new();
+        let mut revoked = HashMap::new();
+        let mut revisions = HashMap::new();
+        for (endpoint, node_id, state, revision) in bindings {
+            if node_id.len() != 16
+                || revision == 0
+                || revisions.len() >= MAX_TRUST_SNAPSHOT_BINDINGS
+                || revisions.insert(endpoint, revision).is_some()
+            {
+                return Err("trust snapshot is invalid or exceeds capacity");
+            }
+            match state {
+                NodeTrustState::Active => {
+                    if approved.values().any(|bound| bound == &node_id) {
+                        return Err("trust snapshot contains a duplicate node binding");
+                    }
+                    approved.insert(endpoint, node_id);
+                }
+                NodeTrustState::Revoked => {
+                    revoked.insert(endpoint, node_id);
+                }
+                NodeTrustState::Unspecified => return Err("trust snapshot state is invalid"),
+            }
+        }
+        let mut state = self
+            .state
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        *state = IdentityState {
+            approved,
+            revoked,
+            revisions,
+            synchronized: true,
+        };
+        Ok(())
     }
 
     fn permits(&self, endpoint: EndpointId, alpn: &[u8]) -> bool {
@@ -138,7 +418,7 @@ impl IdentityPolicy {
             .state
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if state.revoked.contains_key(&endpoint) {
+        if !state.synchronized || state.revoked.contains_key(&endpoint) {
             return false;
         }
         alpn == ENROLL_ALPN || (alpn == AGENT_ALPN && state.approved.contains_key(&endpoint))
@@ -182,6 +462,11 @@ impl IdentityPolicy {
             .state
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if !identities.revisions.contains_key(&endpoint)
+            && identities.revisions.len() >= MAX_TRUST_SNAPSHOT_BINDINGS
+        {
+            return PolicyUpdateDisposition::Rejected;
+        }
         let current_revision = identities.revisions.get(&endpoint).copied().unwrap_or(0);
         if revision < current_revision {
             return PolicyUpdateDisposition::Stale;
@@ -263,43 +548,72 @@ impl IdentityPolicy {
 #[derive(Clone, Debug)]
 pub struct TrustAuthority {
     client: TrustServiceClient<tonic::transport::Channel>,
-    attempts: Arc<Mutex<VecDeque<Instant>>>,
-    checks: Arc<Semaphore>,
+    budgets: Arc<TrustBudgetSet>,
 }
 
 impl TrustAuthority {
     #[must_use]
     pub fn new(channel: tonic::transport::Channel) -> Self {
+        Self::new_with_config(channel, &TrustBudgetConfig::default())
+    }
+
+    /// Builds a trust client with independently validated class limits.
+    #[must_use]
+    pub fn new_with_config(channel: tonic::transport::Channel, config: &TrustBudgetConfig) -> Self {
         Self {
             client: TrustServiceClient::new(channel),
-            attempts: Arc::new(Mutex::new(VecDeque::new())),
-            checks: Arc::new(Semaphore::new(MAX_TRUST_CHECKS)),
+            budgets: Arc::new(TrustBudgetSet::new(config)),
         }
     }
 
-    async fn acquire_check(&self) -> Result<OwnedSemaphorePermit, AttemptRejection> {
-        let permit = self
-            .checks
-            .clone()
-            .try_acquire_owned()
-            .map_err(|_| AttemptRejection::Capacity)?;
-        let mut attempts = self.attempts.lock().await;
-        record_global_attempt(&mut attempts, Instant::now(), MAX_TRUST_ATTEMPTS_PER_MINUTE)?;
-        drop(attempts);
-        Ok(permit)
+    /// Returns a bounded metric snapshot for one fixed class label.
+    #[must_use]
+    pub fn metrics(&self, class: TrustClass) -> TrustMetricsSnapshot {
+        self.budgets.snapshot(class)
     }
 
-    async fn permits(&self, endpoint: EndpointId, alpn: &[u8]) -> Result<bool, AttemptRejection> {
-        let _permit = self.acquire_check().await?;
-        let Ok(alpn) = std::str::from_utf8(alpn) else {
-            return Ok(false);
-        };
+    async fn load_snapshot(&self, policy: &IdentityPolicy) -> Result<(), AcceptError> {
+        let mut client = self.client.clone();
+        let response = tokio::time::timeout(
+            HANDSHAKE_TIMEOUT,
+            client.list_node_trust(
+                ocservia_contracts::generated::ocserv::platform::transport::v1::ListNodeTrustRequest {},
+            ),
+        )
+        .await
+        .map_err(|_| protocol_error("initial trust snapshot timed out"))?
+        .map_err(|_| protocol_error("initial trust snapshot unavailable"))?
+        .into_inner();
+        let mut bindings = Vec::with_capacity(response.bindings.len());
+        for binding in response.bindings {
+            let endpoint = EndpointId::from_bytes(
+                binding
+                    .endpoint_id
+                    .as_slice()
+                    .try_into()
+                    .map_err(|_| protocol_error("initial trust snapshot invalid"))?,
+            )
+            .map_err(|_| protocol_error("initial trust snapshot invalid"))?;
+            let state = NodeTrustState::try_from(binding.state)
+                .map_err(|_| protocol_error("initial trust snapshot invalid"))?;
+            bindings.push((endpoint, binding.node_id, state, binding.revision));
+        }
+        policy
+            .replace_snapshot(bindings)
+            .map_err(|_| protocol_error("initial trust snapshot invalid"))
+    }
+
+    async fn recheck_agent(&self, endpoint: EndpointId) -> Result<bool, AttemptRejection> {
+        let _permit = self
+            .budgets
+            .acquire(TrustClass::AgentRegistrationRecheck)
+            .await?;
         let mut client = self.client.clone();
         Ok(tokio::time::timeout(
             HANDSHAKE_TIMEOUT,
             client.check_endpoint(CheckEndpointRequest {
                 endpoint_id: endpoint.as_bytes().to_vec(),
-                alpn: alpn.to_owned(),
+                alpn: String::from_utf8_lossy(AGENT_ALPN).into_owned(),
             }),
         )
         .await
@@ -309,7 +623,34 @@ impl TrustAuthority {
     }
 
     async fn enroll(&self, request: EnrollRequest) -> Result<EnrollResponse, AcceptError> {
-        let _permit = self.acquire_check().await.map_err(trust_rejection_error)?;
+        let validation_permit = self
+            .budgets
+            .acquire_capacity(TrustClass::UnknownEnrollmentPreAuth)
+            .map_err(trust_rejection_error)?;
+        let mut validation_client = self.client.clone();
+        let validated = tokio::time::timeout(
+            HANDSHAKE_TIMEOUT,
+            validation_client.validate_enrollment(ValidateEnrollmentRequest {
+                enrollment: Some(request.clone()),
+            }),
+        )
+        .await
+        .map_err(|_| protocol_error("enrollment credential validation timed out"))?
+        .map_err(|_| protocol_error("enrollment rejected"))?
+        .into_inner()
+        .permitted;
+        if !validated {
+            return Err(protocol_error("enrollment rejected"));
+        }
+        drop(validation_permit);
+        // Only a request carrying independently authenticated, currently
+        // unconsumed authority may enter completion capacity. Enroll locks and
+        // atomically consumes that same authority with the durable node write.
+        let _permit = self
+            .budgets
+            .acquire(TrustClass::EnrollmentCompletion)
+            .await
+            .map_err(trust_rejection_error)?;
         let mut client = self.client.clone();
         tokio::time::timeout(HANDSHAKE_TIMEOUT, client.enroll(request))
             .await
@@ -323,7 +664,11 @@ impl TrustAuthority {
         endpoint: EndpointId,
         handshake: SessionHandshake,
     ) -> Result<SessionHandshakeResponse, AcceptError> {
-        let _permit = self.acquire_check().await.map_err(trust_rejection_error)?;
+        let _permit = self
+            .budgets
+            .acquire(TrustClass::AgentAuthorization)
+            .await
+            .map_err(trust_rejection_error)?;
         let mut client = self.client.clone();
         tokio::time::timeout(
             HANDSHAKE_TIMEOUT,
@@ -342,18 +687,22 @@ impl TrustAuthority {
 #[derive(Debug)]
 struct SecurityHook {
     policy: IdentityPolicy,
-    trust: Option<TrustAuthority>,
     agent_attempts: Mutex<HashMap<EndpointId, VecDeque<Instant>>>,
     enrollment_attempts: Mutex<HashMap<EndpointId, VecDeque<Instant>>>,
+    budgets: Arc<TrustBudgetSet>,
 }
 
 impl SecurityHook {
-    fn new(policy: IdentityPolicy, trust: Option<TrustAuthority>) -> Self {
+    fn new(policy: IdentityPolicy, trust: Option<&TrustAuthority>) -> Self {
+        let budgets = trust.map_or_else(
+            || Arc::new(TrustBudgetSet::new(&TrustBudgetConfig::default())),
+            |authority| Arc::clone(&authority.budgets),
+        );
         Self {
             policy,
-            trust,
             agent_attempts: Mutex::new(HashMap::new()),
             enrollment_attempts: Mutex::new(HashMap::new()),
+            budgets,
         }
     }
 }
@@ -387,13 +736,7 @@ fn record_attempt(
         !endpoint_attempts.is_empty()
     });
     if !attempts.contains_key(&endpoint) && attempts.len() >= identity_capacity {
-        let oldest = attempts
-            .iter()
-            .min_by_key(|(_, endpoint_attempts)| endpoint_attempts.front().copied())
-            .map(|(endpoint, _)| *endpoint);
-        if let Some(oldest) = oldest {
-            attempts.remove(&oldest);
-        }
+        return Err(AttemptRejection::Capacity);
     }
     let endpoint_attempts = attempts.entry(endpoint).or_default();
     if endpoint_attempts.len() >= MAX_ATTEMPTS_PER_MINUTE {
@@ -428,6 +771,11 @@ impl EndpointHooks for SecurityHook {
         if alpn != ENROLL_ALPN && alpn != AGENT_ALPN {
             return reject(0x100, b"unsupported protocol");
         }
+        if self.policy.revoked(endpoint)
+            || (alpn == AGENT_ALPN && !self.policy.permits(endpoint, alpn))
+        {
+            return reject(0x101, b"endpoint not permitted");
+        }
         let (attempts, identity_capacity) = if alpn == ENROLL_ALPN {
             (&self.enrollment_attempts, MAX_ENROLLMENT_CONNECTIONS)
         } else {
@@ -438,27 +786,24 @@ impl EndpointHooks for SecurityHook {
             return reject(0x103, b"connection rate exceeded");
         }
         drop(attempts);
-        if self.policy.revoked(endpoint) {
-            return reject(0x101, b"endpoint not permitted");
-        }
-        let permitted = if let Some(trust) = &self.trust {
-            match trust.permits(endpoint, alpn).await {
-                Ok(permitted) => permitted,
-                Err(AttemptRejection::Capacity) => {
-                    return reject(0x102, b"trust authority capacity reached");
-                }
-                Err(AttemptRejection::Rate) => {
-                    return reject(0x103, b"trust authority rate exceeded");
-                }
-            }
+        let class = if alpn == ENROLL_ALPN {
+            TrustClass::UnknownEnrollmentPreAuth
         } else {
-            self.policy.permits(endpoint, alpn)
+            TrustClass::KnownAgentHandshake
         };
-        if permitted {
-            AfterHandshakeOutcome::Accept
-        } else {
-            reject(0x101, b"endpoint not permitted")
-        }
+        let _budget = match self.budgets.acquire(class).await {
+            Ok(permit) => permit,
+            Err(AttemptRejection::Capacity) => {
+                return reject(0x102, b"connection class capacity reached");
+            }
+            Err(AttemptRejection::Rate) => {
+                return reject(0x103, b"connection class rate exceeded");
+            }
+        };
+        // Enrollment has no token at this hook. It is admitted locally only;
+        // the first bounded application frame performs a pre-auth credential
+        // check, and only a valid credential reaches EnrollmentCompletion.
+        AfterHandshakeOutcome::Accept
     }
 }
 
@@ -1223,7 +1568,7 @@ impl ProtocolHandler for SessionHandler {
         let node_id = metadata.node_id.clone();
         let registration_token = self.shared.registration_token(&node_id).await;
         if let Some(trust) = &self.trust {
-            match trust.permits(connection.remote_id(), AGENT_ALPN).await {
+            match trust.recheck_agent(connection.remote_id()).await {
                 Ok(true) => {}
                 Ok(false) => {
                     connection.close(VarInt::from_u32(0x101), b"session trust changed");
@@ -1480,6 +1825,26 @@ async fn read_agent_events(
                 return;
             }
         };
+        if event_type == TransportEventType::CommandResult {
+            let Ok(result) = CommandResult::decode(agent_event.payload.as_slice()) else {
+                publish_command_unknown(
+                    event_context,
+                    &command,
+                    "Agent command result protobuf invalid",
+                )
+                .await;
+                return;
+            };
+            if !valid_privileged_result_proof(&command, &result) {
+                publish_command_unknown(
+                    event_context,
+                    &command,
+                    "privd result receipt missing or malformed",
+                )
+                .await;
+                return;
+            }
+        }
         let terminal = matches!(
             event_type,
             TransportEventType::CommandResult | TransportEventType::Error
@@ -1524,6 +1889,7 @@ async fn publish_command_unknown(
         completed_at: Some(now),
         replayed: false,
         semantic_payload_hash_version: command.semantic_payload_hash_version,
+        privileged_result_proof: None,
     };
     publish_agent_event(
         (shared, node_id, traceparent, connection),
@@ -1536,6 +1902,45 @@ async fn publish_command_unknown(
         ),
     )
     .await;
+}
+
+fn valid_privileged_result_proof(command: &CommandEnvelope, result: &CommandResult) -> bool {
+    let terminal = matches!(
+        CommandResultState::try_from(result.state),
+        Ok(CommandResultState::Succeeded | CommandResultState::Failed)
+    );
+    let privileged = !matches!(
+        command.payload,
+        Some(
+            command_envelope::Payload::SimulationProbe(_)
+                | command_envelope::Payload::SyntheticNoop(_)
+                | command_envelope::Payload::SyntheticEcho(_)
+        ) | None
+    );
+    if !terminal || !privileged {
+        return true;
+    }
+    let Some(proof) = result.privileged_result_proof.as_ref() else {
+        return false;
+    };
+    let Some(receipt) = proof.receipt_v1.as_ref() else {
+        return false;
+    };
+    proof.version == 1
+        && receipt.receipt_version == 1
+        && proof.signature.len() == 64
+        && proof.encoded_len() <= 65_536
+        && receipt.node_id.len() == 16
+        && receipt.command_id.len() == 16
+        && receipt.operation_id.len() == 16
+        && receipt.idempotency_key.len() == 16
+        && receipt.semantic_payload_sha256.len() == 32
+        && receipt.result_bytes_sha256.len() == 32
+        && receipt.error_code_sha256.len() == 32
+        && (16..=32).contains(&receipt.effect_record_id.len())
+        && receipt.effect_sequence > 0
+        && receipt.completed_at.is_some()
+        && receipt.accepted_at.is_some()
 }
 
 fn command_response_deadline(command: &CommandEnvelope) -> Result<tokio::time::Instant, Status> {
@@ -1932,7 +2337,8 @@ fn now_timestamp() -> prost_types::Timestamp {
 ///
 /// # Errors
 ///
-/// Returns an Iroh bind error when endpoint or transport initialization fails.
+/// Returns an error when the initial fail-closed trust snapshot is unavailable
+/// or Iroh endpoint initialization fails.
 pub async fn build_router(
     secret_key: SecretKey,
     relay_mode: RelayMode,
@@ -1953,8 +2359,11 @@ pub async fn build_router_with_trust(
     policy: IdentityPolicy,
     trust: TrustAuthority,
     service: &IrohTransportService,
-) -> Result<Router, iroh::endpoint::BindError> {
-    build_router_with_direct(secret_key, relay_mode, policy, Some(trust), service, true).await
+) -> Result<Router, AcceptError> {
+    trust.load_snapshot(&policy).await?;
+    build_router_with_direct(secret_key, relay_mode, policy, Some(trust), service, true)
+        .await
+        .map_err(|_| protocol_error("iroh transport bind failed"))
 }
 
 async fn build_router_with_direct(
@@ -1977,7 +2386,7 @@ async fn build_router_with_direct(
         .secret_key(secret_key)
         .relay_mode(relay_mode)
         .transport_config(transport)
-        .hooks(SecurityHook::new(policy.clone(), trust.clone()));
+        .hooks(SecurityHook::new(policy.clone(), trust.as_ref()));
     if !direct_enabled {
         endpoint_builder = endpoint_builder.clear_ip_transports();
     }
@@ -2382,7 +2791,7 @@ mod tests {
     }
 
     #[test]
-    fn enrollment_identity_churn_evicts_oldest_without_affecting_agents() {
+    fn enrollment_identity_churn_refuses_new_identity_without_evicting_oldest() {
         let now = Instant::now();
         let mut enrollment_attempts = HashMap::new();
         let oldest = SecretKey::generate().public();
@@ -2403,16 +2812,18 @@ mod tests {
             .expect("fill enrollment identity capacity");
         }
         let newcomer = SecretKey::generate().public();
-        record_attempt(
-            &mut enrollment_attempts,
-            newcomer,
-            now + Duration::from_millis(2),
-            MAX_ENROLLMENT_CONNECTIONS,
-        )
-        .expect("new enrollment identity evicts the oldest entry");
+        assert_eq!(
+            record_attempt(
+                &mut enrollment_attempts,
+                newcomer,
+                now + Duration::from_millis(2),
+                MAX_ENROLLMENT_CONNECTIONS,
+            ),
+            Err(AttemptRejection::Capacity)
+        );
         assert_eq!(enrollment_attempts.len(), MAX_ENROLLMENT_CONNECTIONS);
-        assert!(!enrollment_attempts.contains_key(&oldest));
-        assert!(enrollment_attempts.contains_key(&newcomer));
+        assert!(enrollment_attempts.contains_key(&oldest));
+        assert!(!enrollment_attempts.contains_key(&newcomer));
 
         let mut agent_attempts = HashMap::new();
         assert_eq!(
@@ -2450,9 +2861,109 @@ mod tests {
         let channel = tonic::transport::Endpoint::from_static("http://[::1]:50051").connect_lazy();
         let trust = TrustAuthority::new(channel);
         let clone = trust.clone();
-        assert!(Arc::ptr_eq(&trust.attempts, &clone.attempts));
-        assert!(Arc::ptr_eq(&trust.checks, &clone.checks));
-        assert_eq!(trust.checks.available_permits(), MAX_TRUST_CHECKS);
+        assert!(Arc::ptr_eq(&trust.budgets, &clone.budgets));
+        for class in [
+            TrustClass::KnownAgentHandshake,
+            TrustClass::AgentAuthorization,
+            TrustClass::AgentRegistrationRecheck,
+            TrustClass::UnknownEnrollmentPreAuth,
+            TrustClass::EnrollmentCompletion,
+        ] {
+            assert_eq!(trust.metrics(class), TrustMetricsSnapshot::default());
+            assert!(!class.label().contains("endpoint"));
+        }
+    }
+
+    #[tokio::test]
+    async fn unknown_enrollment_flood_cannot_consume_reserved_agent_budgets() {
+        let config = TrustBudgetConfig::default()
+            .with_limit(
+                TrustClass::UnknownEnrollmentPreAuth,
+                TrustClassLimit {
+                    attempts_per_minute: 20,
+                    concurrency: 20,
+                },
+            )
+            .expect("valid test limit")
+            .with_limit(
+                TrustClass::KnownAgentHandshake,
+                TrustClassLimit {
+                    attempts_per_minute: 3,
+                    concurrency: 3,
+                },
+            )
+            .expect("valid test limit")
+            .with_limit(
+                TrustClass::AgentAuthorization,
+                TrustClassLimit {
+                    attempts_per_minute: 3,
+                    concurrency: 3,
+                },
+            )
+            .expect("valid test limit")
+            .with_limit(
+                TrustClass::AgentRegistrationRecheck,
+                TrustClassLimit {
+                    attempts_per_minute: 3,
+                    concurrency: 3,
+                },
+            )
+            .expect("valid test limit")
+            .with_limit(
+                TrustClass::EnrollmentCompletion,
+                TrustClassLimit {
+                    attempts_per_minute: 3,
+                    concurrency: 3,
+                },
+            )
+            .expect("valid test limit");
+        let budgets = Arc::new(TrustBudgetSet::new(&config));
+        let now = Instant::now();
+        let mut enrollment = Vec::new();
+        for _ in 0..20 {
+            enrollment.push(
+                budgets
+                    .acquire_at(TrustClass::UnknownEnrollmentPreAuth, now)
+                    .await
+                    .expect("unknown enrollment receives only its own permits"),
+            );
+        }
+        assert_eq!(
+            budgets
+                .acquire_at(TrustClass::UnknownEnrollmentPreAuth, now)
+                .await
+                .err(),
+            Some(AttemptRejection::Capacity)
+        );
+        for class in [
+            TrustClass::KnownAgentHandshake,
+            TrustClass::AgentAuthorization,
+            TrustClass::AgentRegistrationRecheck,
+            TrustClass::EnrollmentCompletion,
+        ] {
+            let permit = budgets
+                .acquire_at(class, now)
+                .await
+                .expect("approved class retains independent capacity during enrollment flood");
+            assert_eq!(budgets.snapshot(class).accepted, 1);
+            drop(permit);
+        }
+        drop(enrollment);
+        assert_eq!(
+            budgets
+                .acquire_at(TrustClass::UnknownEnrollmentPreAuth, now)
+                .await
+                .err(),
+            Some(AttemptRejection::Rate)
+        );
+        let recovered = budgets
+            .acquire_at(
+                TrustClass::UnknownEnrollmentPreAuth,
+                now + Duration::from_mins(1),
+            )
+            .await
+            .expect("rolling window recovers deterministically");
+        drop(recovered);
     }
 
     #[test]

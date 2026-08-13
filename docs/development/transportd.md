@@ -20,8 +20,10 @@ which is public, is logged at startup.
 For the database-backed lifecycle, pass
 `--trust-socket /run/ocserv-trust/control-plane.sock`,
 `--control-plane-uid 65534`, and `--control-plane-gid 65532`. The Iroh hook
-then checks remote EndpointIDs with the Go trust service before reading
-application data. The trust client verifies the socket and server identity;
+then admits known Agent EndpointIDs from a bounded authoritative snapshot. Agent
+ALPN fails closed until the initial sync completes. An unknown enrollment
+EndpointID is limited by its local pre-auth class and never causes a Controller
+database call before application data. The trust client verifies the socket and server identity;
 the Controller trust server independently verifies transportd's exact UID.
 Each socket path must be a non-symlink Unix socket with exact UID/GID/mode under
 trusted, non-writable ancestry, and clients reject a pathname identity change
@@ -57,9 +59,28 @@ ocservia-transportd \
 Use `--relay-mode disabled` for isolated direct-path tests. The endpoint limits
 handshake size and time, frame and flow-control windows, remotely initiated
 streams, connection count, idle time, connection attempts, event retention, and
-UDS subscribers. Every database-backed trust-authority call shares a
-non-evictable global 600-attempt-per-minute limit and a 16-request concurrency
-limit, including authorization and the registration trust recheck.
+UDS subscribers. Trust admission is partitioned into known-Agent handshake,
+Agent authorization, Agent registration recheck, unknown-enrollment pre-auth,
+and enrollment-completion classes. Each has its own rolling window, semaphore,
+bounded metrics, and refusal reason. Unknown enrollment can never borrow the
+reserved Agent classes. When bounded identity state is full a new identity is
+refused; an old identity is not evicted to refresh attack capacity.
+The fixed class label is the only trust-series dimension for
+`trust_attempts_total`, `trust_budget_rejections_total`, and
+`trust_checks_in_flight`; EndpointIDs never become labels.
+
+Enrollment reads exactly one bounded first application frame under a short
+deadline. That frame carries the format-limited one-time token. Under only the
+unknown pre-auth connection limits, the Controller first validates the Endpoint
+proof and an unconsumed token without modifying state. Only that successful
+authority check enters the independent enrollment-completion class; the second
+transactional check locks and atomically consumes the token with the durable
+node write. Concurrent or later replay is rejected. Tokens and raw EndpointIDs
+are never metric labels. Approve, revoke, and endpoint rotation advance the
+synchronized snapshot; revoked identities remain fail closed while the
+Controller is unavailable. Direct and Relay paths use the same internal
+classes. Relay credentials remain defense in depth and are not an Agent
+principal or a substitute for reserved Controller capacity.
 Connection queries report the agent instance, selected direct
 or relay path, path detail, RTT, connection time, and last-seen time.
 They also report the Controller-negotiated capability set, nonzero

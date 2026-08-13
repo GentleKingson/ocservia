@@ -9,8 +9,8 @@ use iroh::endpoint::RelayMode;
 use iroh::{EndpointId, RelayMap, RelayUrl, SecretKey};
 use ocservia_contracts::generated::ocserv::platform::transport::v1::transport_service_server::TransportServiceServer;
 use ocservia_transportd::{
-    IdentityPolicy, IrohTransportService, TrustAuthority, build_router, build_router_with_trust,
-    spawn_dedicated_relay_failover,
+    IdentityPolicy, IrohTransportService, TrustAuthority, TrustBudgetConfig, TrustClass,
+    TrustClassLimit, build_router, build_router_with_trust, spawn_dedicated_relay_failover,
 };
 use tokio::net::UnixListener;
 use tokio_stream::StreamExt;
@@ -29,10 +29,11 @@ struct Config {
     trust_socket: Option<PathBuf>,
     control_plane_uid: u32,
     control_plane_gid: u32,
+    trust_budgets: TrustBudgetConfig,
 }
 
 #[tokio::main]
-#[allow(clippy::similar_names)]
+#[allow(clippy::similar_names, clippy::too_many_lines)]
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     tracing_subscriber::fmt()
         .json()
@@ -67,7 +68,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             key,
             config.relay_mode,
             policy,
-            TrustAuthority::new(channel),
+            TrustAuthority::new_with_config(channel, &config.trust_budgets),
             &service,
         )
         .await?
@@ -119,7 +120,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     Ok(())
 }
 
-#[allow(clippy::similar_names)]
+#[allow(clippy::similar_names, clippy::too_many_lines)]
 fn parse_args() -> Result<Config, io::Error> {
     let mut socket = PathBuf::from("/run/ocserv-platform/transportd.sock");
     let mut key_file = None;
@@ -132,6 +133,43 @@ fn parse_args() -> Result<Config, io::Error> {
     let mut trust_socket = None;
     let mut control_plane_uid = None;
     let mut control_plane_gid = None;
+    let mut trust_limits = [
+        (
+            TrustClass::KnownAgentHandshake,
+            TrustClassLimit {
+                attempts_per_minute: 2400,
+                concurrency: 256,
+            },
+        ),
+        (
+            TrustClass::AgentAuthorization,
+            TrustClassLimit {
+                attempts_per_minute: 1200,
+                concurrency: 48,
+            },
+        ),
+        (
+            TrustClass::AgentRegistrationRecheck,
+            TrustClassLimit {
+                attempts_per_minute: 1200,
+                concurrency: 48,
+            },
+        ),
+        (
+            TrustClass::UnknownEnrollmentPreAuth,
+            TrustClassLimit {
+                attempts_per_minute: 120,
+                concurrency: 16,
+            },
+        ),
+        (
+            TrustClass::EnrollmentCompletion,
+            TrustClassLimit {
+                attempts_per_minute: 120,
+                concurrency: 8,
+            },
+        ),
+    ];
     let mut args = env::args().skip(1);
     while let Some(argument) = args.next() {
         match argument.as_str() {
@@ -184,6 +222,66 @@ fn parse_args() -> Result<Config, io::Error> {
                     "control-plane GID",
                 )?);
             }
+            "--known-agent-handshake-rate" => {
+                trust_limits[0].1.attempts_per_minute = parse_usize(
+                    &required_value(&mut args, "--known-agent-handshake-rate")?,
+                    "known Agent handshake rate",
+                )?;
+            }
+            "--known-agent-handshake-concurrency" => {
+                trust_limits[0].1.concurrency = parse_usize(
+                    &required_value(&mut args, "--known-agent-handshake-concurrency")?,
+                    "known Agent handshake concurrency",
+                )?;
+            }
+            "--agent-authorization-rate" => {
+                trust_limits[1].1.attempts_per_minute = parse_usize(
+                    &required_value(&mut args, "--agent-authorization-rate")?,
+                    "Agent authorization rate",
+                )?;
+            }
+            "--agent-authorization-concurrency" => {
+                trust_limits[1].1.concurrency = parse_usize(
+                    &required_value(&mut args, "--agent-authorization-concurrency")?,
+                    "Agent authorization concurrency",
+                )?;
+            }
+            "--agent-registration-recheck-rate" => {
+                trust_limits[2].1.attempts_per_minute = parse_usize(
+                    &required_value(&mut args, "--agent-registration-recheck-rate")?,
+                    "Agent registration recheck rate",
+                )?;
+            }
+            "--agent-registration-recheck-concurrency" => {
+                trust_limits[2].1.concurrency = parse_usize(
+                    &required_value(&mut args, "--agent-registration-recheck-concurrency")?,
+                    "Agent registration recheck concurrency",
+                )?;
+            }
+            "--unknown-enrollment-preauth-rate" => {
+                trust_limits[3].1.attempts_per_minute = parse_usize(
+                    &required_value(&mut args, "--unknown-enrollment-preauth-rate")?,
+                    "unknown enrollment pre-auth rate",
+                )?;
+            }
+            "--unknown-enrollment-preauth-concurrency" => {
+                trust_limits[3].1.concurrency = parse_usize(
+                    &required_value(&mut args, "--unknown-enrollment-preauth-concurrency")?,
+                    "unknown enrollment pre-auth concurrency",
+                )?;
+            }
+            "--enrollment-completion-rate" => {
+                trust_limits[4].1.attempts_per_minute = parse_usize(
+                    &required_value(&mut args, "--enrollment-completion-rate")?,
+                    "enrollment completion rate",
+                )?;
+            }
+            "--enrollment-completion-concurrency" => {
+                trust_limits[4].1.concurrency = parse_usize(
+                    &required_value(&mut args, "--enrollment-completion-concurrency")?,
+                    "enrollment completion concurrency",
+                )?;
+            }
             _ => return Err(invalid(&format!("unknown argument: {argument}"))),
         }
     }
@@ -207,6 +305,10 @@ fn parse_args() -> Result<Config, io::Error> {
         return Err(invalid("event capacity must be 1..4096"));
     }
     let relay_mode = build_relay_mode(&relay_mode, relay_urls, relay_token_file.as_deref())?;
+    let mut trust_budgets = TrustBudgetConfig::default();
+    for (class, limit) in trust_limits {
+        trust_budgets = trust_budgets.with_limit(class, limit).map_err(invalid)?;
+    }
     Ok(Config {
         socket,
         key_file,
@@ -217,7 +319,14 @@ fn parse_args() -> Result<Config, io::Error> {
         trust_socket,
         control_plane_uid,
         control_plane_gid,
+        trust_budgets,
     })
+}
+
+fn parse_usize(value: &str, name: &str) -> Result<usize, io::Error> {
+    value
+        .parse()
+        .map_err(|_| invalid(&format!("{name} must be a positive integer")))
 }
 
 fn parse_u32(value: &str, name: &str) -> Result<u32, io::Error> {

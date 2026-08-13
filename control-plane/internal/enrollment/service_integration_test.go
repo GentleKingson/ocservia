@@ -137,6 +137,9 @@ func TestEnrollmentTrustLifecycleIntegration(t *testing.T) {
 	endpoint := endpointFixture(7)
 	token := createToken(t, service, workspaceID, endpoint)
 	request := enrollmentRequest(token.Value, endpoint)
+	if err := service.ValidateEnrollment(ctx, request); err != nil {
+		t.Fatalf("valid first application message was rejected: %v", err)
+	}
 
 	var successes atomic.Int32
 	nodeIDs := make(chan string, 12)
@@ -154,8 +157,8 @@ func TestEnrollmentTrustLifecycleIntegration(t *testing.T) {
 	}
 	wait.Wait()
 	close(nodeIDs)
-	if successes.Load() < 1 {
-		t.Fatalf("concurrent token successes = %d", successes.Load())
+	if successes.Load() != 1 {
+		t.Fatalf("concurrent one-time token successes = %d, want 1", successes.Load())
 	}
 	var concurrentNodeID string
 	for candidate := range nodeIDs {
@@ -166,9 +169,11 @@ func TestEnrollmentTrustLifecycleIntegration(t *testing.T) {
 			t.Fatal("concurrent enrollment retries returned different nodes")
 		}
 	}
-	retry, err := service.Enroll(ctx, request)
-	if err != nil {
-		t.Fatalf("pending retry response = %v, %v", retry, err)
+	if _, err := service.Enroll(ctx, request); !errors.Is(err, ErrInvalidToken) {
+		t.Fatalf("pending consumed-token replay error = %v", err)
+	}
+	if err := service.ValidateEnrollment(ctx, request); !errors.Is(err, ErrInvalidToken) {
+		t.Fatalf("consumed token passed pre-completion validation: %v", err)
 	}
 	permitted, err := service.CheckEndpoint(ctx, &transportv1.CheckEndpointRequest{EndpointId: endpoint, Alpn: "ocserv-platform/enroll/1"})
 	if err != nil || !permitted {
@@ -183,18 +188,14 @@ func TestEnrollmentTrustLifecycleIntegration(t *testing.T) {
 	if err := pool.QueryRow(ctx, `SELECT consumed_node_id FROM enrollment_tokens WHERE id=$1`, token.ID).Scan(&nodeID); err != nil {
 		t.Fatal(err)
 	}
-	if string(retry.GetNodeId()) != string(nodeID[:]) {
-		t.Fatal("pending enrollment retry returned a different node")
-	}
 	if concurrentNodeID != string(nodeID[:]) {
-		t.Fatal("concurrent enrollment retry returned a different node")
+		t.Fatal("successful concurrent enrollment returned a different node")
 	}
 	if _, err := pool.Exec(ctx, `UPDATE enrollment_tokens SET created_at=now()-interval '2 seconds', expires_at=now()-interval '1 second' WHERE id=$1`, token.ID); err != nil {
 		t.Fatal(err)
 	}
-	expiredRetry, err := service.Enroll(ctx, request)
-	if err != nil || string(expiredRetry.GetNodeId()) != string(nodeID[:]) {
-		t.Fatalf("expired consumed-token retry = %v, %v", expiredRetry, err)
+	if _, err := service.Enroll(ctx, request); !errors.Is(err, ErrInvalidToken) {
+		t.Fatalf("expired consumed-token replay error = %v", err)
 	}
 	if _, _, _, err := service.ApprovalBinding(ctx, nodeID, map[string]string{"region": "test"}, "readonly", []string{"ocserv.status.read", "ocserv.user.manage"}); !errors.Is(err, ErrInvalidRequest) {
 		t.Fatalf("unsupported approved capability err=%v", err)
@@ -211,9 +212,8 @@ func TestEnrollmentTrustLifecycleIntegration(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	approvedRetry, err := service.Enroll(ctx, request)
-	if err != nil || approvedRetry.GetResult() != agentv1.HandshakeResult_HANDSHAKE_RESULT_ACCEPTED || string(approvedRetry.GetNodeId()) != string(nodeID[:]) {
-		t.Fatalf("approved enrollment recovery = %v, %v", approvedRetry, err)
+	if _, err := service.Enroll(ctx, request); !errors.Is(err, ErrInvalidToken) {
+		t.Fatalf("approved consumed-token replay error = %v", err)
 	}
 	permitted, err = service.CheckEndpoint(ctx, &transportv1.CheckEndpointRequest{EndpointId: endpoint, Alpn: "ocserv-platform/enroll/1"})
 	if err != nil || !permitted {
@@ -532,9 +532,8 @@ func TestExistingActiveNodeBindsSealingKeysOnceIntegration(t *testing.T) {
 	if err := pool.QueryRow(ctx, `SELECT count(*) FROM node_sealing_keys WHERE node_id=$1`, nodeID).Scan(&keyCount); err != nil || keyCount != 2 {
 		t.Fatalf("existing node sealing key count=%d err=%v", keyCount, err)
 	}
-	retry, err := service.Enroll(ctx, request)
-	if err != nil || retry.GetResult() != agentv1.HandshakeResult_HANDSHAKE_RESULT_ACCEPTED || !bytes.Equal(retry.GetNodeId(), nodeID[:]) {
-		t.Fatalf("existing node consumed-token retry=%v err=%v", retry, err)
+	if _, err := service.Enroll(ctx, request); !errors.Is(err, ErrInvalidToken) {
+		t.Fatalf("existing node consumed-token replay err=%v", err)
 	}
 	second, err := service.CreateToken(ctx, TokenSpec{WorkspaceID: workspaceID, Environment: "test", ExpectedNodeName: "existing-node", ExpectedEndpointID: endpoint, ActorID: "integration", Reason: "must not replace sealing keys", RequestID: uuid.Must(uuid.NewV7()).String()})
 	if err != nil {
