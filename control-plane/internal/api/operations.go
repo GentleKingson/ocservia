@@ -199,58 +199,17 @@ func (s *Server) streamOperationEvents(w http.ResponseWriter, r *http.Request) {
 		writeProblem(w, r, http.StatusBadRequest, "https://ocservia.dev/problems/invalid-id", "Identifier is invalid", "operation_id must be a UUIDv7")
 		return
 	}
-	after := uuid.Nil
-	if cursor := strings.TrimSpace(r.Header.Get("Last-Event-ID")); cursor != "" {
-		after, err = uuid.Parse(cursor)
-		if err != nil || after.Version() != 7 {
-			writeProblem(w, r, http.StatusBadRequest, "https://ocservia.dev/problems/invalid-cursor", "Cursor is invalid", "Last-Event-ID must be a UUIDv7")
-			return
-		}
+	after, valid := eventStreamCursor(r)
+	if !valid {
+		writeProblem(w, r, http.StatusBadRequest, "https://ocservia.dev/problems/invalid-cursor", "Cursor is invalid", "Last-Event-ID or after must be a UUIDv7")
+		return
 	}
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		writeProblem(w, r, http.StatusInternalServerError, "https://ocservia.dev/problems/stream-unavailable", "Stream is unavailable", "streaming is not supported")
 		return
 	}
-	w.Header().Set("Content-Type", "text/event-stream")
-	w.Header().Set("Cache-Control", "no-cache")
-	w.Header().Set("X-Accel-Buffering", "no")
-	flusher.Flush()
-	poll := time.NewTicker(250 * time.Millisecond)
-	keepalive := time.NewTicker(10 * time.Second)
-	defer poll.Stop()
-	defer keepalive.Stop()
-	controller := http.NewResponseController(w)
-	for {
-		select {
-		case <-r.Context().Done():
-			return
-		case <-keepalive.C:
-			_ = controller.SetWriteDeadline(time.Now().Add(5 * time.Second))
-			if _, err := fmt.Fprint(w, ": keepalive\n\n"); err != nil {
-				return
-			}
-			flusher.Flush()
-		case <-poll.C:
-			events, err := s.operations.ListEvents(r.Context(), operationID, after, 100)
-			if err != nil {
-				s.logger.WarnContext(r.Context(), "poll operation events", "error", err)
-				continue
-			}
-			for _, event := range events {
-				data, err := json.Marshal(event)
-				if err != nil {
-					return
-				}
-				_ = controller.SetWriteDeadline(time.Now().Add(5 * time.Second))
-				if _, err := fmt.Fprintf(w, "id: %s\nevent: operation\ndata: %s\n\n", event.ID, data); err != nil {
-					return
-				}
-				flusher.Flush()
-				after, _ = uuid.Parse(event.ID)
-			}
-		}
-	}
+	s.serveEventStream(w, r, flusher, true, operationID.String(), "operation:"+operationID.String(), after)
 }
 
 func (s *Server) queueMetrics(w http.ResponseWriter, r *http.Request) {

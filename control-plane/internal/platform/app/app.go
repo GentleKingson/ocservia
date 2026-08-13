@@ -19,6 +19,7 @@ import (
 	operationstore "github.com/GentleKingson/ocservia/control-plane/internal/operations"
 	"github.com/GentleKingson/ocservia/control-plane/internal/platform/config"
 	"github.com/GentleKingson/ocservia/control-plane/internal/platform/telemetry"
+	"github.com/GentleKingson/ocservia/control-plane/internal/privdattestation"
 	"github.com/GentleKingson/ocservia/control-plane/internal/rbac"
 	telemetrystore "github.com/GentleKingson/ocservia/control-plane/internal/telemetry"
 	"github.com/GentleKingson/ocservia/control-plane/internal/transportclient"
@@ -224,6 +225,9 @@ func Run(ctx context.Context, cfg config.Config, build BuildInfo, logger *slog.L
 	}
 
 	server := api.New(cfg.HTTPAddress, pool, api.BuildInfo{Version: build.Version, Commit: build.Commit, Role: string(cfg.Role)}, logger, cfg.BodyLimit, cfg.RequestTimeout, operationAuthEnabled(cfg), cfg.DevAuthToken, expectedSchemaVersion)
+	if err := server.ConfigureEventStreams(cfg.EventStreams); err != nil {
+		return fmt.Errorf("configure SSE admission: %w", err)
+	}
 	var authService *auth.Service
 	if cfg.OIDCEnabled() {
 		authService, err = auth.New(ctx, pool, auth.Config{Issuer: cfg.OIDCIssuer, ClientID: cfg.OIDCClientID, ClientSecret: cfg.OIDCClientSecret, RedirectURL: cfg.OIDCRedirectURL, SessionKey: cfg.SessionKey, SessionTTL: cfg.SessionTTL, BreakGlassEnabled: cfg.BreakGlassEnabled, BreakGlassTokenHash: cfg.BreakGlassTokenHash})
@@ -237,6 +241,7 @@ func Run(ctx context.Context, cfg config.Config, build BuildInfo, logger *slog.L
 	server.EnableUserOperations(userOperationsService)
 	server.EnableConfigPlans(configplan.New(pool, operationService))
 	server.EnableCertificates(certificateService)
+	server.EnablePrivdAttestation(privdattestation.New(pool))
 	server.EnableTelemetry(telemetryService)
 	if cfg.ControllerEndpointID != "" {
 		server.EnableEnrollment(enrollment.New(pool, cfg.ControllerEndpointID, build.Version, commandSigner), apiTransport)
