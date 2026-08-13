@@ -27,11 +27,11 @@ func (s *Server) configureEventStreams(config eventstream.Config) error {
 	if err != nil {
 		return err
 	}
-	platformHub, err := eventstream.NewHub(config, s.fetchPlatformEvents)
+	platformHub, err := eventstream.NewHub(config, s.fetchPlatformEvents, s.resolvePlatformEventCursor)
 	if err != nil {
 		return err
 	}
-	operationHub, err := eventstream.NewHub(config, s.fetchOperationEvents)
+	operationHub, err := eventstream.NewHub(config, s.fetchOperationEvents, s.resolveOperationEventCursor)
 	if err != nil {
 		platformHub.Close()
 		return err
@@ -61,11 +61,11 @@ func (s *Server) eventStreamComponents(operation bool) (eventstream.Config, *eve
 		if err != nil {
 			panic(err)
 		}
-		platform, err := eventstream.NewHub(config, s.fetchPlatformEvents)
+		platform, err := eventstream.NewHub(config, s.fetchPlatformEvents, s.resolvePlatformEventCursor)
 		if err != nil {
 			panic(err)
 		}
-		operations, err := eventstream.NewHub(config, s.fetchOperationEvents)
+		operations, err := eventstream.NewHub(config, s.fetchOperationEvents, s.resolveOperationEventCursor)
 		if err != nil {
 			platform.Close()
 			panic(err)
@@ -134,9 +134,31 @@ func (s *Server) fetchPlatformEvents(ctx context.Context, scope string, after uu
 		if err != nil {
 			return nil, err
 		}
-		result = append(result, eventstream.Event{ID: id, Name: "platform", Data: data})
+		if event.Sequence <= 0 {
+			return nil, errors.New("stored platform event sequence is invalid")
+		}
+		result = append(result, eventstream.Event{ID: id, Sequence: uint64(event.Sequence), Name: "platform", Data: data})
 	}
 	return result, nil
+}
+
+func (s *Server) resolvePlatformEventCursor(ctx context.Context, scope string, cursor uuid.UUID) (uint64, error) {
+	workspaceID, err := uuid.Parse(scope)
+	if err != nil || workspaceID.Version() != 7 {
+		return 0, eventstream.ErrInvalidCursor
+	}
+	service := s.localSliceService()
+	if service == nil {
+		return 0, errors.New("platform event source is unavailable")
+	}
+	sequence, visible, err := service.EventSequenceInWorkspace(ctx, workspaceID, cursor)
+	if err != nil {
+		return 0, err
+	}
+	if !visible || sequence <= 0 {
+		return 0, eventstream.ErrInvalidCursor
+	}
+	return uint64(sequence), nil
 }
 
 func (s *Server) fetchOperationEvents(ctx context.Context, scope string, after uuid.UUID, limit int) ([]eventstream.Event, error) {
@@ -160,7 +182,10 @@ func (s *Server) fetchOperationEvents(ctx context.Context, scope string, after u
 			return nil, err
 		}
 		terminal = operationStateTerminal(event.State)
-		result = append(result, eventstream.Event{ID: id, Name: "operation", Data: data, Terminal: terminal})
+		if event.Sequence <= 0 {
+			return nil, errors.New("stored operation event sequence is invalid")
+		}
+		result = append(result, eventstream.Event{ID: id, Sequence: uint64(event.Sequence), Name: "operation", Data: data, Terminal: terminal})
 	}
 	if len(result) == 0 {
 		operation, err := s.operations.Get(ctx, operationID)
@@ -172,6 +197,21 @@ func (s *Server) fetchOperationEvents(ctx context.Context, scope string, after u
 		}
 	}
 	return result, nil
+}
+
+func (s *Server) resolveOperationEventCursor(ctx context.Context, scope string, cursor uuid.UUID) (uint64, error) {
+	operationID, err := uuid.Parse(scope)
+	if err != nil || operationID.Version() != 7 || s.operations == nil {
+		return 0, eventstream.ErrInvalidCursor
+	}
+	sequence, visible, err := s.operations.EventSequence(ctx, operationID, cursor)
+	if err != nil {
+		return 0, err
+	}
+	if !visible || sequence <= 0 {
+		return 0, eventstream.ErrInvalidCursor
+	}
+	return uint64(sequence), nil
 }
 
 func operationStateTerminal(state string) bool {
@@ -300,6 +340,11 @@ func (s *Server) revalidateEventStream(ctx context.Context, request *http.Reques
 
 func (s *Server) writeStreamAdmissionError(w http.ResponseWriter, r *http.Request, config eventstream.Config, err error) {
 	w.Header().Set("Retry-After", strconv.Itoa(int((config.RetryAfter+time.Second-1)/time.Second)))
+	if errors.Is(err, eventstream.ErrInvalidCursor) {
+		w.Header().Del("Retry-After")
+		writeProblem(w, r, http.StatusBadRequest, "https://ocservia.dev/problems/invalid-cursor", "Cursor is invalid", "Last-Event-ID is not visible in the authorized event scope")
+		return
+	}
 	if errors.Is(err, eventstream.ErrGlobalLimit) || errors.Is(err, eventstream.ErrWatcherLimit) || errors.Is(err, eventstream.ErrDatabaseBackoff) || errors.Is(err, eventstream.ErrClosed) {
 		writeProblem(w, r, http.StatusServiceUnavailable, "https://ocservia.dev/problems/event-stream-overloaded", "Event stream unavailable", "event stream capacity is temporarily unavailable")
 		return

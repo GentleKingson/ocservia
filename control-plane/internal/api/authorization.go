@@ -47,7 +47,19 @@ func (s *Server) authorizeRoute(r *http.Request, principal auth.Principal) (cont
 		return context.WithValue(r.Context(), principalKey{}, principal), nil
 	}
 	if principal.Issuer == "development" {
-		return context.WithValue(r.Context(), principalKey{}, principal), nil
+		ctx := context.WithValue(r.Context(), principalKey{}, principal)
+		if r.URL.Path != "/api/v1/events/stream" {
+			return ctx, nil
+		}
+		workspaceID, parseErr := uuid.Parse(strings.TrimSpace(r.URL.Query().Get("workspace_id")))
+		if parseErr != nil || workspaceID.Version() != 7 || s.rbac == nil {
+			return nil, rbac.ErrForbidden
+		}
+		resource, err := s.rbac.Workspace(r.Context(), workspaceID)
+		if err != nil {
+			return nil, err
+		}
+		return context.WithValue(ctx, workspaceKey{}, resource.WorkspaceID), nil
 	}
 	action := routeAction(r)
 	if action == "" {

@@ -1,7 +1,6 @@
 package eventstream
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	mathrand "math/rand/v2"
@@ -16,18 +15,21 @@ var (
 	ErrWatcherLimit    = errors.New("event watcher capacity reached")
 	ErrDatabaseBackoff = errors.New("event watcher database backoff is active")
 	ErrSlowConsumer    = errors.New("event stream subscriber queue overflowed")
+	ErrInvalidCursor   = errors.New("event stream cursor is not visible in this scope")
 )
 
 const watcherPageSize = 100
 
 type Event struct {
 	ID       uuid.UUID
+	Sequence uint64
 	Name     string
 	Data     []byte
 	Terminal bool
 }
 
 type FetchFunc func(context.Context, string, uuid.UUID, int) ([]Event, error)
+type ResolveFunc func(context.Context, string, uuid.UUID) (uint64, error)
 
 type HubSnapshot struct {
 	Watchers                int64
@@ -43,6 +45,7 @@ type Hub struct {
 	cancel   context.CancelFunc
 	config   Config
 	fetch    FetchFunc
+	resolve  ResolveFunc
 	mu       sync.Mutex
 	watchers map[string]*watcher
 	closed   bool
@@ -58,15 +61,18 @@ type hubMetrics struct {
 	backoffNanos   atomic.Int64
 }
 
-func NewHub(config Config, fetch FetchFunc) (*Hub, error) {
+func NewHub(config Config, fetch FetchFunc, resolve ResolveFunc) (*Hub, error) {
 	if err := config.Validate(); err != nil {
 		return nil, err
 	}
 	if fetch == nil {
 		return nil, errors.New("event source is required")
 	}
+	if resolve == nil {
+		return nil, errors.New("event cursor resolver is required")
+	}
 	ctx, cancel := context.WithCancel(context.Background())
-	return &Hub{ctx: ctx, cancel: cancel, config: config, fetch: fetch, watchers: make(map[string]*watcher)}, nil
+	return &Hub{ctx: ctx, cancel: cancel, config: config, fetch: fetch, resolve: resolve, watchers: make(map[string]*watcher)}, nil
 }
 
 func (h *Hub) Subscribe(ctx context.Context, scope string, after uuid.UUID) (*Subscription, error) {
@@ -118,7 +124,8 @@ func (h *Hub) watcher(scope string) (*watcher, error) {
 	w := &watcher{
 		hub: h, scope: scope, ctx: ctx, cancel: cancel,
 		subscribe: make(chan subscribeRequest), unsubscribe: make(chan uint64), done: make(chan struct{}),
-		subscribers: make(map[uint64]*subscriber), backoff: h.config.PollInterval,
+		subscribers: make(map[uint64]*subscriber), cursorSequences: make(map[uuid.UUID]uint64),
+		backoff: h.config.PollInterval,
 	}
 	h.watchers[scope] = w
 	h.metrics.watchers.Add(1)
@@ -174,11 +181,11 @@ type subscribeResponse struct {
 }
 
 type subscriber struct {
-	id     uint64
-	cursor uuid.UUID
-	events chan Event
-	done   chan error
-	once   sync.Once
+	id       uint64
+	sequence uint64
+	events   chan Event
+	done     chan error
+	once     sync.Once
 }
 
 func (s *subscriber) finish(err error) {
@@ -206,20 +213,25 @@ func (s *Subscription) Close() {
 }
 
 type watcher struct {
-	hub          *Hub
-	scope        string
-	ctx          context.Context
-	cancel       context.CancelFunc
-	subscribe    chan subscribeRequest
-	unsubscribe  chan uint64
-	done         chan struct{}
-	subscribers  map[uint64]*subscriber
-	nextID       uint64
-	cursor       uuid.UUID
-	hasCursor    bool
-	backoff      time.Duration
-	backoffUntil time.Time
-	unhealthy    bool
+	hub         *Hub
+	scope       string
+	ctx         context.Context
+	cancel      context.CancelFunc
+	subscribe   chan subscribeRequest
+	unsubscribe chan uint64
+	done        chan struct{}
+	subscribers map[uint64]*subscriber
+	nextID      uint64
+	cursor      uuid.UUID
+	// The watcher fetch cursor and each subscriber's delivered sequence are
+	// independent so reconnect replay cannot be skipped by shared fan-out.
+	cursorSequence  uint64
+	hasCursor       bool
+	cursorSequences map[uuid.UUID]uint64
+	cursorOrder     []uuid.UUID
+	backoff         time.Duration
+	backoffUntil    time.Time
+	unhealthy       bool
 }
 
 func (w *watcher) run() {
@@ -303,17 +315,57 @@ func (w *watcher) run() {
 }
 
 func (w *watcher) add(request subscribeRequest) (*subscriber, error) {
+	sequence, err := w.resolve(request.after)
+	if err != nil {
+		return nil, err
+	}
 	w.nextID++
 	subscriber := &subscriber{
-		id: w.nextID, cursor: request.after,
+		id: w.nextID, sequence: sequence,
 		events: make(chan Event, w.hub.config.SubscriberQueue), done: make(chan error, 1),
 	}
-	if !w.hasCursor || request.after == uuid.Nil || bytes.Compare(request.after[:], w.cursor[:]) < 0 {
+	if !w.hasCursor || sequence < w.cursorSequence {
 		w.cursor = request.after
+		w.cursorSequence = sequence
 		w.hasCursor = true
 	}
 	w.subscribers[subscriber.id] = subscriber
 	return subscriber, nil
+}
+
+func (w *watcher) resolve(cursor uuid.UUID) (uint64, error) {
+	if cursor == uuid.Nil {
+		return 0, nil
+	}
+	if sequence, ok := w.cursorSequences[cursor]; ok {
+		return sequence, nil
+	}
+	w.hub.metrics.queries.Add(1)
+	sequence, err := w.hub.resolve(w.ctx, w.scope, cursor)
+	if err != nil {
+		return 0, err
+	}
+	if sequence == 0 {
+		return 0, ErrInvalidCursor
+	}
+	w.remember(cursor, sequence)
+	return sequence, nil
+}
+
+func (w *watcher) remember(cursor uuid.UUID, sequence uint64) {
+	if cursor == uuid.Nil || sequence == 0 {
+		return
+	}
+	if _, exists := w.cursorSequences[cursor]; exists {
+		return
+	}
+	w.cursorSequences[cursor] = sequence
+	w.cursorOrder = append(w.cursorOrder, cursor)
+	if len(w.cursorOrder) > w.hub.config.SubscriberQueue {
+		oldest := w.cursorOrder[0]
+		w.cursorOrder = w.cursorOrder[1:]
+		delete(w.cursorSequences, oldest)
+	}
 }
 
 func (w *watcher) subscription(subscriber *subscriber) *Subscription {
@@ -341,8 +393,13 @@ func (w *watcher) poll() (bool, error) {
 	}
 	terminal := false
 	for _, event := range events {
+		if event.Name != "" && (event.ID == uuid.Nil || event.Sequence == 0 || event.Sequence <= w.cursorSequence) {
+			return false, errors.New("event source returned a non-advancing durable cursor")
+		}
 		if event.ID != uuid.Nil {
 			w.cursor = event.ID
+			w.cursorSequence = event.Sequence
+			w.remember(event.ID, event.Sequence)
 		}
 		if event.Terminal {
 			terminal = true
@@ -351,14 +408,12 @@ func (w *watcher) poll() (bool, error) {
 			continue
 		}
 		for id, subscriber := range w.subscribers {
-			if event.ID != uuid.Nil && subscriber.cursor != uuid.Nil && bytes.Compare(event.ID[:], subscriber.cursor[:]) <= 0 {
+			if event.Sequence <= subscriber.sequence {
 				continue
 			}
 			select {
 			case subscriber.events <- cloneEvent(event):
-				if event.ID != uuid.Nil {
-					subscriber.cursor = event.ID
-				}
+				subscriber.sequence = event.Sequence
 			default:
 				delete(w.subscribers, id)
 				w.hub.metrics.slowConsumers.Add(1)

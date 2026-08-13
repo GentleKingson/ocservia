@@ -462,6 +462,21 @@ func (s *Service) ListEvents(ctx context.Context, operationID, after uuid.UUID, 
 	return events, rows.Err()
 }
 
+func (s *Service) EventSequence(ctx context.Context, operationID, eventID uuid.UUID) (int64, bool, error) {
+	if operationID == uuid.Nil || eventID == uuid.Nil {
+		return 0, false, nil
+	}
+	var sequence int64
+	err := s.pool.QueryRow(ctx, `SELECT sequence FROM operation_events WHERE id=$1 AND operation_id=$2`, eventID, operationID).Scan(&sequence)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return 0, false, nil
+	}
+	if err != nil {
+		return 0, false, fmt.Errorf("resolve operation event cursor: %w", err)
+	}
+	return sequence, true, nil
+}
+
 func (s *Service) Claim(ctx context.Context, workerID uuid.UUID, limit int, lease time.Duration) ([]Dispatch, error) {
 	if workerID == uuid.Nil || limit < 1 || limit > 100 || lease <= 0 {
 		return nil, ErrInvalidRequest

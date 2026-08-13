@@ -232,8 +232,26 @@ curl --fail --silent -H "Authorization: Bearer ${AUTH_TOKEN}" "http://127.0.0.1:
   jq -e --arg cursor "${operations_cursor}" '(.items | length) >= 1 and all(.items[]; .id != $cursor)' >/dev/null
 
 first_event="$(jq -r '.items[0].id' <<<"${events}")"
+stream_workspace_id="$(docker exec "${POSTGRES}" psql -U ocservia_owner -d ocservia -Atc "SELECT workspace_id FROM nodes WHERE id='${normal_node}'")"
+foreign_workspace_id="019cf200-0000-7000-8000-000000000001"
+foreign_node_id="019cf200-0000-7000-8000-000000000002"
+foreign_event_id="019cf200-0000-7000-8000-000000000003"
+docker exec "${POSTGRES}" psql -v ON_ERROR_STOP=1 -U ocservia_owner -d ocservia -c "
+  INSERT INTO workspaces(id,name,slug,created_at,updated_at) VALUES('${foreign_workspace_id}','foreign SSE cursor','foreign-sse-cursor',now(),now());
+  INSERT INTO nodes(id,workspace_id,name,status,created_at,updated_at) VALUES('${foreign_node_id}','${foreign_workspace_id}','foreign-sse-node','active',now(),now());
+  INSERT INTO transport_events(event_id,node_id,event_type,occurred_at,traceparent,payload) VALUES('${foreign_event_id}','${foreign_node_id}','heartbeat',now(),'00-21212121212121212121212121212121-2121212121212121-01','');
+" >/dev/null
+test "$(curl --silent --output "${TMP_ROOT}/foreign-cursor.problem" --write-out '%{http_code}' \
+  -H "Authorization: Bearer ${AUTH_TOKEN}" -H "Last-Event-ID: ${foreign_event_id}" \
+  "http://127.0.0.1:${API_PORT}/api/v1/events/stream?workspace_id=${stream_workspace_id}")" = "400"
+jq -e '.status == 400 and .type == "https://ocservia.dev/problems/invalid-cursor"' "${TMP_ROOT}/foreign-cursor.problem" >/dev/null
+docker exec "${POSTGRES}" psql -v ON_ERROR_STOP=1 -U ocservia_owner -d ocservia -c "
+  DELETE FROM transport_events WHERE event_id='${foreign_event_id}';
+  DELETE FROM nodes WHERE id='${foreign_node_id}';
+  DELETE FROM workspaces WHERE id='${foreign_workspace_id}';
+" >/dev/null
 timeout 4s curl --no-buffer --silent --limit-rate 32 -H "Authorization: Bearer ${AUTH_TOKEN}" -H "Last-Event-ID: ${first_event}" \
-  "http://127.0.0.1:${API_PORT}/api/v1/events/stream" >"${TMP_ROOT}/resumed.sse" &
+  "http://127.0.0.1:${API_PORT}/api/v1/events/stream?workspace_id=${stream_workspace_id}" >"${TMP_ROOT}/resumed.sse" &
 sse_pid=$!
 PIDS+=("${sse_pid}")
 sleep 0.3
@@ -249,7 +267,7 @@ fi
 latest_event="$(curl --fail --silent -H "Authorization: Bearer ${AUTH_TOKEN}" "http://127.0.0.1:${API_PORT}/api/v1/events?page_size=200" | jq -r '.items[-1].id')"
 for subscriber in one two; do
   timeout 4s curl --no-buffer --silent -H "Authorization: Bearer ${AUTH_TOKEN}" -H "Last-Event-ID: ${latest_event}" \
-    "http://127.0.0.1:${API_PORT}/api/v1/events/stream" >"${TMP_ROOT}/subscriber-${subscriber}.sse" &
+    "http://127.0.0.1:${API_PORT}/api/v1/events/stream?workspace_id=${stream_workspace_id}" >"${TMP_ROOT}/subscriber-${subscriber}.sse" &
   PIDS+=("$!")
 done
 sleep 0.3

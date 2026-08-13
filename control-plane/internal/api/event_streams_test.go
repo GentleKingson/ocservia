@@ -72,6 +72,25 @@ func TestStreamGlobalOverloadWrites503BeforeSSEHeaders(t *testing.T) {
 	}
 }
 
+func TestInvisibleLastEventIDWrites400BeforeSSEHeaders(t *testing.T) {
+	server, _, principal, workspaceID := streamAdmissionFixture(t)
+	request := authorizedStreamRequest(principal, workspaceID)
+	response := httptest.NewRecorder()
+	server.serveEventStream(response, request, response, true, uuid.Must(uuid.NewV7()).String(), "operation", uuid.Must(uuid.NewV7()))
+	if response.Code != http.StatusBadRequest {
+		t.Fatalf("status=%d body=%s", response.Code, response.Body)
+	}
+	if response.Header().Get("Content-Type") != "application/problem+json" {
+		t.Fatalf("content type = %q", response.Header().Get("Content-Type"))
+	}
+	if response.Header().Get("Retry-After") != "" {
+		t.Fatalf("invalid cursor retry-after = %q", response.Header().Get("Retry-After"))
+	}
+	if snapshot := server.operationEvents.Snapshot(); snapshot.Queries != 1 {
+		t.Fatalf("invalid cursor database work was not limited to one visibility lookup: %+v", snapshot)
+	}
+}
+
 func TestEventStreamLifetimeCannotOutliveSession(t *testing.T) {
 	config := eventstream.DefaultConfig()
 	now := time.Unix(1_700_000_000, 0)

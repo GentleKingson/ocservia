@@ -60,6 +60,7 @@ type Event struct {
 	Type        string    `json:"type"`
 	Traceparent string    `json:"traceparent"`
 	OccurredAt  time.Time `json:"occurred_at"`
+	Sequence    int64     `json:"-"`
 }
 
 type Job struct {
@@ -234,7 +235,7 @@ func (s *Service) ListEventsInWorkspace(ctx context.Context, workspaceID, after 
 		return nil, false, errors.New("event page size must be between 1 and 200")
 	}
 	rows, err := s.pool.Query(ctx, `
-		SELECT event.event_id::text, event.node_id::text, event.event_type, event.traceparent, event.occurred_at
+		SELECT event.event_id::text, event.node_id::text, event.event_type, event.traceparent, event.occurred_at, event.ingest_sequence
 		FROM transport_events event JOIN nodes node ON node.id=event.node_id
 		WHERE ($1::uuid IS NULL OR event.ingest_sequence > (
 			SELECT ingest_sequence FROM transport_events WHERE event_id = $1
@@ -248,7 +249,7 @@ func (s *Service) ListEventsInWorkspace(ctx context.Context, workspaceID, after 
 	events := make([]Event, 0, limit+1)
 	for rows.Next() {
 		var event Event
-		if err := rows.Scan(&event.ID, &event.NodeID, &event.Type, &event.Traceparent, &event.OccurredAt); err != nil {
+		if err := rows.Scan(&event.ID, &event.NodeID, &event.Type, &event.Traceparent, &event.OccurredAt, &event.Sequence); err != nil {
 			return nil, false, fmt.Errorf("scan transport event: %w", err)
 		}
 		events = append(events, event)
@@ -261,6 +262,24 @@ func (s *Service) ListEventsInWorkspace(ctx context.Context, workspaceID, after 
 		events = events[:limit]
 	}
 	return events, hasMore, nil
+}
+
+func (s *Service) EventSequenceInWorkspace(ctx context.Context, workspaceID, eventID uuid.UUID) (int64, bool, error) {
+	if workspaceID == uuid.Nil || eventID == uuid.Nil {
+		return 0, false, nil
+	}
+	var sequence int64
+	err := s.pool.QueryRow(ctx, `
+		SELECT event.ingest_sequence
+		FROM transport_events event JOIN nodes node ON node.id=event.node_id
+		WHERE event.event_id=$1 AND node.workspace_id=$2`, eventID, workspaceID).Scan(&sequence)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return 0, false, nil
+	}
+	if err != nil {
+		return 0, false, fmt.Errorf("resolve transport event cursor: %w", err)
+	}
+	return sequence, true, nil
 }
 
 func (s *Service) LastEventID(ctx context.Context) ([]byte, error) {
