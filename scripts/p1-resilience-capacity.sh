@@ -109,6 +109,7 @@ cleanup() {
     [[ -f "${TMP_ROOT}/metrics.txt" ]] && cp -f "${TMP_ROOT}/metrics.txt" "${ARTIFACT_DIR}/p1-metrics.txt"
     [[ -f "${TMP_ROOT}/summary.json" ]] && cp -f "${TMP_ROOT}/summary.json" "${ARTIFACT_DIR}/p1-summary.json"
     [[ -f "${TMP_ROOT}/slow.sse" ]] && cp -f "${TMP_ROOT}/slow.sse" "${ARTIFACT_DIR}/slow.sse"
+    [[ -f "${TMP_ROOT}/last-event-id-reconnect.sse" ]] && cp -f "${TMP_ROOT}/last-event-id-reconnect.sse" "${ARTIFACT_DIR}/last-event-id-reconnect.sse"
     [[ -f "${TMP_ROOT}/interrupted-operation-initial.json" ]] && cp -f "${TMP_ROOT}/interrupted-operation-initial.json" "${ARTIFACT_DIR}/interrupted-operation-initial.json"
     [[ -f "${TMP_ROOT}/interrupted-operation-final.json" ]] && cp -f "${TMP_ROOT}/interrupted-operation-final.json" "${ARTIFACT_DIR}/interrupted-operation-final.json"
     [[ -f "${TMP_ROOT}/interrupted-operation-summary.json" ]] && cp -f "${TMP_ROOT}/interrupted-operation-summary.json" "${ARTIFACT_DIR}/interrupted-operation-summary.json"
@@ -353,6 +354,30 @@ for _ in $(seq 1 100); do
   sleep 0.1
 done
 test "${active_streams}" -ge "${SSE_VIEWERS}"
+
+# A live reconnect from the durable cursor must receive the next committed
+# event, not replay the cursor or wait for a new watcher owned by that client.
+cursor_stream="${TMP_ROOT}/last-event-id-reconnect.sse"
+(curl --silent --no-buffer --max-time 20 \
+  -H "Authorization: Bearer ${AUTH_TOKEN}" -H "Last-Event-ID: ${last_event}" \
+  "http://127.0.0.1:${API_PORT}/api/v1/events/stream" >"${cursor_stream}" || true) &
+cursor_pid=$!
+before="$(psql_value "SELECT count(*) FROM operations WHERE state = 'succeeded'")"
+create_probe 1 25 >/dev/null
+wait_succeeded "$((before + 1))"
+replayed_event=""
+for _ in $(seq 1 100); do
+  replayed_event="$(awk '/^id: / { sub(/\r$/, "", $2); if ($2 != "") { print $2; exit } }' "${cursor_stream}")"
+  [[ -n "${replayed_event}" ]] && break
+  sleep 0.1
+done
+test -n "${replayed_event}"
+test "${replayed_event}" != "${last_event}"
+kill -TERM "${cursor_pid}" 2>/dev/null || true
+wait "${cursor_pid}" 2>/dev/null || true
+echo "Last-Event-ID reconnect passed: ${last_event} -> ${replayed_event}"
+printf 'Last-Event-ID reconnect: %s -> %s\n' "${last_event}" "${replayed_event}" >>"${TMP_ROOT}/metrics.txt"
+
 sleep 3
 sse_runtime="$(curl --fail --silent "http://127.0.0.1:${API_PORT}/api/v1/development/runtime")"
 test "$(jq -r .sse_watchers <<<"${sse_runtime}")" -eq 1
@@ -456,6 +481,20 @@ echo "database outage recovery passed"
 for pid in "${SSE_PIDS[@]}"; do kill -TERM "${pid}" 2>/dev/null || true; done
 for pid in "${SSE_PIDS[@]}"; do wait "${pid}" 2>/dev/null || true; done
 SSE_PIDS=()
+for _ in $(seq 1 100); do
+  released_runtime="$(curl --fail --silent "http://127.0.0.1:${API_PORT}/api/v1/development/runtime")"
+  if [[ "$(jq -r .sse_active_streams <<<"${released_runtime}")" -eq 0 ]] && \
+    [[ "$(jq -r .sse_watchers <<<"${released_runtime}")" -eq 0 ]]; then
+    break
+  fi
+  sleep 0.1
+done
+test "$(jq -r .sse_active_streams <<<"${released_runtime}")" -eq 0
+test "$(jq -r .sse_watchers <<<"${released_runtime}")" -eq 0
+sample_phase_now sse-released
+printf 'sse released active: %s\nsse released watchers: %s\n' \
+  "$(jq -r .sse_active_streams <<<"${released_runtime}")" \
+  "$(jq -r .sse_watchers <<<"${released_runtime}")" >>"${TMP_ROOT}/metrics.txt"
 
 stop_sampler
 TOTAL_RUN_SECONDS=$(($(date -u +%s) - RUN_STARTED_EPOCH))

@@ -1,0 +1,30 @@
+diff --git a/rust/crates/transportd/src/lib.rs b/rust/crates/transportd/src/lib.rs
+index cd25d10..0000000 100644
+--- a/rust/crates/transportd/src/lib.rs
++++ b/rust/crates/transportd/src/lib.rs
+@@ -2445,6 +2445,25 @@ mod tests {
+         assert_eq!(trust.checks.available_permits(), MAX_TRUST_CHECKS);
+     }
+ 
++    #[tokio::test]
++    async fn shared_budget_baseline_positive_control() {
++        let channel = tonic::transport::Endpoint::from_static("http://[::1]:50051").connect_lazy();
++        let trust = TrustAuthority::new(channel);
++        for _ in 0..MAX_TRUST_ATTEMPTS_PER_MINUTE {
++            drop(
++                trust
++                    .acquire_check()
++                    .await
++                    .expect("shared enrollment-shaped attempt consumes the baseline budget"),
++            );
++        }
++        assert_eq!(
++            trust.acquire_check().await.err(),
++            Some(AttemptRejection::Rate),
++            "an Agent-shaped check must be denied after enrollment traffic exhausts the shared budget",
++        );
++    }
++
+     #[test]
+     fn command_response_wait_honors_envelope_expiration() {
+         let command = CommandEnvelope {

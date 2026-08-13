@@ -3043,6 +3043,95 @@ mod tests {
         drop(recovered);
     }
 
+    #[tokio::test]
+    async fn baseline_budget_parameters_remain_partitioned() {
+        let shared_limit = TrustClassLimit {
+            attempts_per_minute: 600,
+            concurrency: 16,
+        };
+        let mut config = TrustBudgetConfig::default();
+        for class in [
+            TrustClass::KnownAgentHandshake,
+            TrustClass::AgentAuthorization,
+            TrustClass::AgentRegistrationRecheck,
+            TrustClass::UnknownEnrollmentPreAuth,
+            TrustClass::EnrollmentCompletion,
+        ] {
+            config = config
+                .with_limit(class, shared_limit)
+                .expect("baseline-compatible trust limit");
+        }
+        let budgets = Arc::new(TrustBudgetSet::new(&config));
+        let now = Instant::now();
+        for _ in 0..shared_limit.attempts_per_minute {
+            drop(
+                budgets
+                    .acquire_at(TrustClass::UnknownEnrollmentPreAuth, now)
+                    .await
+                    .expect("enrollment consumes only its own rolling window"),
+            );
+        }
+        assert_eq!(
+            budgets
+                .acquire_at(TrustClass::UnknownEnrollmentPreAuth, now)
+                .await
+                .err(),
+            Some(AttemptRejection::Rate)
+        );
+        for class in [
+            TrustClass::KnownAgentHandshake,
+            TrustClass::AgentAuthorization,
+            TrustClass::AgentRegistrationRecheck,
+        ] {
+            drop(
+                budgets
+                    .acquire_at(class, now)
+                    .await
+                    .expect("Agent reserve survives enrollment exhaustion"),
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn router_restart_retains_identity_and_direct_connectivity() {
+        let controller_key = SecretKey::generate();
+        let controller_id = controller_key.public();
+        let agent_key = SecretKey::generate();
+        let handshake = handshake(&agent_key);
+        let node_id = handshake.node_id.clone();
+
+        for _ in 0..2 {
+            let service = IrohTransportService::new(8);
+            let router = build_router(
+                controller_key.clone(),
+                RelayMode::Disabled,
+                identity_policy(&agent_key, &handshake),
+                &service,
+            )
+            .await
+            .expect("build direct router");
+            assert_eq!(router.endpoint().id(), controller_id);
+            let client = Endpoint::builder(presets::N0)
+                .secret_key(agent_key.clone())
+                .relay_mode(RelayMode::Disabled)
+                .bind()
+                .await
+                .expect("build direct client");
+            let connection = client
+                .connect(router.endpoint().addr(), AGENT_ALPN)
+                .await
+                .expect("connect after router start");
+            let response = send_handshake(&connection, &handshake).await;
+            assert_eq!(response.result, i32::from(HandshakeResult::Accepted));
+            wait_until_registered(&service, &node_id).await;
+            connection.close(VarInt::from_u32(0), b"restart fixture");
+            client.close().await;
+            shutdown(&service, router)
+                .await
+                .expect("shutdown direct router");
+        }
+    }
+
     #[test]
     fn command_response_wait_honors_envelope_expiration() {
         let command = CommandEnvelope {
