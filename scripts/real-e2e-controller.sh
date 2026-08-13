@@ -15,12 +15,11 @@ WORKSPACE_ID="019d0000-0000-7000-8000-000000000001"
 case "${RUN_ID}${COMPOSE_PROJECT}" in
   *[!a-zA-Z0-9._-]*) echo "run or Compose project ID contains unsafe characters" >&2; exit 2 ;;
 esac
+umask 077
 
-OCSERV_REAL_E2E_DEV_AUTH_TOKEN="placeholder-placeholder-placeholder-1"
 OCSERV_CONTROLLER_ENDPOINT_ID="$(printf '0%.0s' {1..64})"
-[[ ! -s "${SECRETS}/dev-auth-token" ]] || OCSERV_REAL_E2E_DEV_AUTH_TOKEN="$(<"${SECRETS}/dev-auth-token")"
 [[ ! -s "${STATE}/controller-endpoint-id" ]] || OCSERV_CONTROLLER_ENDPOINT_ID="$(<"${STATE}/controller-endpoint-id")"
-export OCSERV_REAL_E2E_DEV_AUTH_TOKEN OCSERV_CONTROLLER_ENDPOINT_ID
+export OCSERV_CONTROLLER_ENDPOINT_ID
 
 compose() {
   docker compose --project-name "${COMPOSE_PROJECT}" --file "${COMPOSE_FILE}" "$@"
@@ -35,14 +34,11 @@ require_endpoint() {
 }
 
 start_controller() {
-  local endpoint port
+  local endpoint
   mkdir -p "${STATE}" "${SECRETS}" "${OUTBOX}/controller-ready" "${ARTIFACT_DIR}"
   chmod 0700 "${WORK}" "${SECRETS}"
-  umask 077
-  openssl rand -hex 32 >"${SECRETS}/dev-auth-token"
-  OCSERV_REAL_E2E_DEV_AUTH_TOKEN="$(<"${SECRETS}/dev-auth-token")"
   OCSERV_CONTROLLER_ENDPOINT_ID="$(printf '0%.0s' {1..64})"
-  export OCSERV_REAL_E2E_DEV_AUTH_TOKEN OCSERV_CONTROLLER_ENDPOINT_ID
+  export OCSERV_CONTROLLER_ENDPOINT_ID
 
   compose build controller-key-init migrate
   compose up --detach controller-key-init transport-runtime-init postgres
@@ -76,13 +72,8 @@ start_controller() {
     sleep 1
   done
   compose exec -T transportd test -S /run/ocserv-platform/transportd.sock
-  port="$(compose port control-plane 8080 | tail -1)"
-  [[ "${port}" =~ ^127\.0\.0\.1:[0-9]+$ ]] || {
-    echo "Control Plane did not publish a loopback HTTP port" >&2
-    return 1
-  }
-  printf 'http://%s\n' "${port}" >"${STATE}/control-plane-url"
-  curl --fail --silent --show-error "http://${port}/readyz" >/dev/null
+  compose exec -T control-plane curl --fail --silent --show-error \
+    http://127.0.0.1:8080/readyz >/dev/null
   compose exec -T postgres psql -v ON_ERROR_STOP=1 -U ocservia_owner -d ocservia \
     -c "INSERT INTO workspaces(id,name,slug,created_at,updated_at) VALUES('${WORKSPACE_ID}','Cross-VM Real E2E','cross-vm-real-e2e',now(),now()) ON CONFLICT (id) DO NOTHING" >/dev/null
 
@@ -93,7 +84,7 @@ start_controller() {
 
 issue_enrollment_token() {
   local peer_dir="${1:?agent endpoint directory is required}"
-  local endpoint peer_runner url token_response
+  local endpoint peer_runner token_response
   endpoint="$(<"${peer_dir}/agent-endpoint-id")"
   peer_runner="$(<"${peer_dir}/runner-instance")"
   require_endpoint "${endpoint}"
@@ -101,15 +92,12 @@ issue_enrollment_token() {
     echo "Controller and Agent must run on different runner instances" >&2
     return 1
   }
-  url="$(<"${STATE}/control-plane-url")"
   token_response="${SECRETS}/enrollment-token-response.json"
-  curl --fail --silent --show-error \
-    --header "Authorization: Bearer $(<"${SECRETS}/dev-auth-token")" \
+  compose exec -T control-plane curl --fail --silent --show-error \
     --header 'Content-Type: application/json' \
-    --output "${token_response}" \
     --data "$(jq -cn --arg workspace "${WORKSPACE_ID}" --arg endpoint "${endpoint}" \
       '{workspace_id:$workspace,environment:"development",expected_node_name:"github-hosted-node",expected_endpoint_id:$endpoint,ttl_seconds:600,reason:"cross-VM real Iroh enrollment smoke"}')" \
-    "${url}/api/v1/enrollment-tokens"
+    http://127.0.0.1:8080/api/v1/enrollment-tokens >"${token_response}"
   mkdir -p "${OUTBOX}/enrollment-token"
   jq -er '.token | select(type == "string" and length == 43)' "${token_response}" \
     >"${OUTBOX}/enrollment-token/enrollment-token"
@@ -143,7 +131,7 @@ collect_diagnostics() {
   compose logs --no-color postgres migrate control-plane transportd \
     >"${ARTIFACT_DIR}/controller-services.log" 2>&1 || true
   docker system df >"${ARTIFACT_DIR}/docker-storage.txt" 2>&1 || true
-  for secret in "${SECRETS}/dev-auth-token" "${SECRETS}/enrollment-token-response.json" \
+  for secret in "${SECRETS}/enrollment-token-response.json" \
     "${OUTBOX}/enrollment-token/enrollment-token"; do
     [[ -s "${secret}" ]] || continue
     while IFS= read -r hit; do

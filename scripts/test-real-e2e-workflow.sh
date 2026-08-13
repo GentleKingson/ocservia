@@ -34,6 +34,9 @@ reject("Real E2E Controller service set is incomplete") unless (required_service
 transport = compose.fetch("services").fetch("transportd")
 reject("transportd must use the production Dockerfile") unless transport.fetch("build").fetch("dockerfile") == "rust/transportd.Dockerfile"
 reject("transportd must use default Internet relay discovery") unless transport.fetch("command").each_slice(2).to_a.include?(["--relay-mode", "default"])
+control = compose.fetch("services").fetch("control-plane")
+reject("test-only development auth must remain loopback-only") unless control.fetch("environment").fetch("OCSERV_HTTP_ADDRESS") == "127.0.0.1:8080"
+reject("Control Plane HTTP must not be published from the Controller VM") if control.key?("ports")
 RUBY
 
 if rg -n 'transportd-stub|OCSERV_LOCAL_SIMULATOR' "${WORKFLOW}" "${COMPOSE_FILE}" \
@@ -60,7 +63,6 @@ if GITHUB_RUN_ID=123456 GITHUB_RUN_ATTEMPT=2 \
   exit 1
 fi
 
-OCSERV_REAL_E2E_DEV_AUTH_TOKEN=placeholder-placeholder-placeholder-1 \
 OCSERV_CONTROLLER_ENDPOINT_ID="$(printf '0%.0s' {1..64})" \
   docker compose --project-name ocservia-real-e2e-policy --file "${COMPOSE_FILE}" config --quiet
 
