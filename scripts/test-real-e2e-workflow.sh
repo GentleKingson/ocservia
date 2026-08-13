@@ -29,6 +29,19 @@ jobs.each do |job_id, job|
   end
 end
 
+node_steps = jobs.fetch("real-node").fetch("steps")
+node_step_names = node_steps.map { |step| step["name"] }.compact
+build_index = node_step_names.index("Build Agent")
+wait_index = node_step_names.index("Wait for Controller EndpointID")
+prepare_index = node_step_names.index("Prepare persistent Agent EndpointID")
+reject("Real E2E node must build the Agent") unless build_index
+reject("Real E2E node must wait for the Controller EndpointID") unless wait_index
+reject("Real E2E node must prepare a persistent Agent EndpointID") unless prepare_index
+reject("Agent build must run before the Controller rendezvous") unless build_index < wait_index
+reject("Agent identity preparation must follow the Controller rendezvous") unless wait_index < prepare_index
+reject("Agent build step must only invoke the node build phase") unless node_steps.find { |step| step["name"] == "Build Agent" }.fetch("run").include?("real-e2e-node.sh build")
+reject("Agent prepare step must consume the Controller artifact") unless node_steps.find { |step| step["name"] == "Prepare persistent Agent EndpointID" }.fetch("run").include?("real-e2e-node.sh prepare")
+
 required_services = %w[postgres migrate control-plane transportd transport-runtime-init controller-key-init]
 reject("Real E2E Controller service set is incomplete") unless (required_services - compose.fetch("services").keys).empty?
 transport = compose.fetch("services").fetch("transportd")

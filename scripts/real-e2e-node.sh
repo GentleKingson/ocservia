@@ -39,13 +39,21 @@ prepare_endpoint() {
   }
   mkdir -p "${IDENTITY}" "${SECRETS}" "${OUTBOX}/agent-endpoint" "${ARTIFACT_DIR}"
   chmod 0700 "${WORK}" "${IDENTITY}" "${SECRETS}"
-  (cd "${ROOT}/rust" && CARGO_TARGET_DIR="${TARGET}" cargo build --locked --release --package ocservia-agent)
+  [[ -x "${TARGET}/release/ocservia-agent" ]] || {
+    echo "Agent release binary is unavailable; run build first" >&2
+    return 1
+  }
   endpoint="$("${TARGET}/release/ocservia-agent" --identity-dir "${IDENTITY}" \
     --controller "${controller}" --prepare-enrollment)"
   require_endpoint "${endpoint}"
   printf '%s\n' "${endpoint}" >"${OUTBOX}/agent-endpoint/agent-endpoint-id"
   runner_instance_id >"${OUTBOX}/agent-endpoint/runner-instance"
   printf '%s\n' "${controller}" >"${WORK}/controller-endpoint-id"
+}
+
+build_agent() {
+  (cd "${ROOT}/rust" && CARGO_TARGET_DIR="${TARGET}" \
+    cargo build --locked --release --package ocservia-agent)
 }
 
 enroll() {
@@ -114,9 +122,10 @@ cleanup_node() {
 }
 
 case "${1:-}" in
+  build) build_agent ;;
   prepare) prepare_endpoint "${2:-}" ;;
   enroll) enroll "${2:-}" ;;
   diagnostics) collect_diagnostics ;;
   cleanup) cleanup_node ;;
-  *) echo "usage: $0 {prepare CONTROLLER_DIR|enroll TOKEN_DIR|diagnostics|cleanup}" >&2; exit 2 ;;
+  *) echo "usage: $0 {build|prepare CONTROLLER_DIR|enroll TOKEN_DIR|diagnostics|cleanup}" >&2; exit 2 ;;
 esac

@@ -94,14 +94,16 @@ jobs:
         run: scripts/bootstrap.sh native
       - name: Real E2E policy tests
         run: scripts/test-real-e2e-workflow.sh
+      - name: Build Agent
+        run: |
+          source scripts/env.sh
+          scripts/real-e2e-node.sh build
       - name: Wait for Controller EndpointID
         env:
           GITHUB_TOKEN: ${{ github.token }}
         run: scripts/real-e2e-artifact.sh wait-download "real-e2e-controller-ready-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" "${RUNNER_TEMP}/real-e2e-controller-ready" 600
-      - name: Build Agent and prepare persistent EndpointID
-        run: |
-          source scripts/env.sh
-          scripts/real-e2e-node.sh prepare "${RUNNER_TEMP}/real-e2e-controller-ready"
+      - name: Prepare persistent Agent EndpointID
+        run: scripts/real-e2e-node.sh prepare "${RUNNER_TEMP}/real-e2e-controller-ready"
       - name: Publish Agent EndpointID
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:

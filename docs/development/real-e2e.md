@@ -6,8 +6,9 @@ does not replace the pull-request CI workflow or its required checks.
 The Controller runner starts PostgreSQL, applies migrations, starts the Go
 Control Plane, and runs the repository's real `ocservia-transportd` image with
 Iroh's default Internet relay discovery. The managed-node runner builds the
-real Agent, persists a fresh identity, and exchanges its EndpointID through a
-run-attempt-scoped artifact. The Controller issues an EndpointID-bound,
+real Agent concurrently with the Controller build. Only after the Controller
+EndpointID is available does the node persist a fresh identity and exchange its
+EndpointID through a run-attempt-scoped artifact. The Controller issues an EndpointID-bound,
 ten-minute enrollment token; the Agent then enrolls through the real Iroh
 enrollment ALPN. The Controller requires a pending UUIDv7 node whose stored
 EndpointID matches the node runner's identity.
