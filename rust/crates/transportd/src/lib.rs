@@ -2428,12 +2428,16 @@ pub async fn shutdown(
 
 #[cfg(test)]
 mod tests {
+    use ed25519_dalek::SigningKey;
     use iroh::{TransportAddr, Watcher as _, tls::CaTlsConfig};
     use ocservia_contracts::generated::ocserv::platform::agent::v1::{
         CommandAuthorizationProof, CommandAuthorizationVersion, CommandDeliveryMode,
-        GroupObservation, SealedSecretPurpose, SealedSecretVersion, SealingKeyDescriptorV1,
-        SemanticPayloadHashVersion, UserObservation,
+        GroupObservation, PrivdReceiptVersion, PrivdResultReceiptV1, PrivilegedCommandKind,
+        PrivilegedResultKind, SealedSecretPurpose, SealedSecretVersion, SealingKeyDescriptorV1,
+        SemanticPayloadHashVersion, ServiceReload, UserObservation,
     };
+    use ocservia_privd_attestation::{key_id, sign_receipt, verify_receipt};
+    use sha2::{Digest as _, Sha256};
 
     use super::*;
 
@@ -2505,9 +2509,10 @@ mod tests {
                 signature: RELAYED_AUTHORIZATION_SIGNATURE.to_vec(),
             }),
             delivery_mode: CommandDeliveryMode::ExecuteOrReplay.into(),
-            payload: None,
-            semantic_payload_hash_version: SemanticPayloadHashVersion::Unspecified as i32,
-            semantic_payload_sha256: Vec::new(),
+            payload: Some(command_envelope::Payload::ServiceReload(ServiceReload {})),
+            semantic_payload_hash_version: SemanticPayloadHashVersion::V1 as i32,
+            semantic_payload_sha256: vec![0x11; 32],
+            operation_id: Uuid::now_v7().as_bytes().to_vec(),
             ..CommandEnvelope::default()
         }
         .encode_to_vec()
@@ -2534,7 +2539,56 @@ mod tests {
         SessionHandshakeResponse::decode(response.as_slice()).expect("decode response")
     }
 
-    async fn respond_to_command(connection: Connection) {
+    fn privileged_command_result(
+        command: &CommandEnvelope,
+        include_receipt: bool,
+    ) -> CommandResult {
+        let now = now_timestamp();
+        let result_bytes = b"completed".to_vec();
+        let signing_key = SigningKey::from_bytes(&[7; 32]);
+        let proof = include_receipt.then(|| {
+            sign_receipt(
+                PrivdResultReceiptV1 {
+                    receipt_version: PrivdReceiptVersion::V1.into(),
+                    node_id: command.node_id.clone(),
+                    privd_attestation_key_id: key_id(&signing_key.verifying_key()),
+                    command_id: command.command_id.clone(),
+                    operation_id: command.operation_id.clone(),
+                    idempotency_key: command.idempotency_key.clone(),
+                    semantic_payload_hash_version: command.semantic_payload_hash_version,
+                    semantic_payload_sha256: command.semantic_payload_sha256.clone(),
+                    command_kind: PrivilegedCommandKind::ServiceReload.into(),
+                    result_kind: PrivilegedResultKind::Mutation.into(),
+                    terminal_state: CommandResultState::Succeeded.into(),
+                    result_bytes_sha256: Sha256::digest(&result_bytes).to_vec(),
+                    error_code_sha256: Sha256::digest([]).to_vec(),
+                    effect_record_id: Uuid::now_v7().as_bytes().to_vec(),
+                    effect_sequence: 1,
+                    accepted_at: Some(now),
+                    completed_at: Some(now),
+                    replayed: false,
+                    certificate: None,
+                },
+                &signing_key,
+            )
+            .expect("sign root result receipt")
+        });
+        CommandResult {
+            command_id: command.command_id.clone(),
+            idempotency_key: command.idempotency_key.clone(),
+            payload_sha256: command.semantic_payload_sha256.clone(),
+            state: CommandResultState::Succeeded.into(),
+            result: result_bytes,
+            error_code: String::new(),
+            accepted_at: Some(now),
+            completed_at: Some(now),
+            replayed: false,
+            semantic_payload_hash_version: command.semantic_payload_hash_version,
+            privileged_result_proof: proof,
+        }
+    }
+
+    async fn respond_to_command(connection: Connection, include_receipt: bool) {
         let (mut send, mut recv) = connection.accept_bi().await.expect("accept command");
         let mut length = [0_u8; 4];
         recv.read_exact(&mut length)
@@ -2546,13 +2600,14 @@ mod tests {
         assert_eq!(
             decoded
                 .authorization
+                .as_ref()
                 .expect("relayed authorization")
                 .signature,
             RELAYED_AUTHORIZATION_SIGNATURE
         );
         let response = AgentEvent {
             r#type: AgentEventType::CommandResult.into(),
-            payload: b"completed".to_vec(),
+            payload: privileged_command_result(&decoded, include_receipt).encode_to_vec(),
         }
         .encode_to_vec();
         let response_len = u32::try_from(response.len()).expect("response length fits u32");
@@ -2561,6 +2616,28 @@ mod tests {
             .expect("write response length");
         send.write_all(&response).await.expect("write response");
         send.finish().expect("finish response");
+    }
+
+    #[test]
+    fn privileged_terminal_result_requires_a_well_formed_receipt() {
+        let node_id = Uuid::now_v7();
+        let command = CommandEnvelope::decode(
+            command_envelope(node_id.as_bytes(), &new_traceparent(), String::new()).as_slice(),
+        )
+        .expect("decode command");
+        let valid = privileged_command_result(&command, true);
+        assert!(valid_privileged_result_proof(&command, &valid));
+
+        let missing = privileged_command_result(&command, false);
+        assert!(!valid_privileged_result_proof(&command, &missing));
+
+        let mut malformed = valid;
+        malformed
+            .privileged_result_proof
+            .as_mut()
+            .expect("proof")
+            .version = PrivdReceiptVersion::Unspecified.into();
+        assert!(!valid_privileged_result_proof(&command, &malformed));
     }
 
     async fn end_command_without_response(connection: Connection) {
@@ -3490,7 +3567,7 @@ mod tests {
         );
 
         tokio::time::sleep(Duration::from_millis(2)).await;
-        let agent = tokio::spawn(respond_to_command(connection.clone()));
+        let agent = tokio::spawn(respond_to_command(connection.clone(), true));
         let mut events = service
             .watch_events(Request::new(WatchEventsRequest {
                 after_event_id: Vec::new(),
@@ -3499,6 +3576,8 @@ mod tests {
             .expect("watch events")
             .into_inner();
         let command = command_envelope(&handshake.node_id, &traceparent, String::new());
+        let sent_command =
+            CommandEnvelope::decode(command.as_slice()).expect("decode sent command");
         service
             .send_command(Request::new(SendCommandRequest {
                 node_id: handshake.node_id.clone(),
@@ -3510,10 +3589,62 @@ mod tests {
         let event = next_event(&mut events, TransportEventType::CommandResult).await;
         assert_eq!(event.node_id, handshake.node_id);
         assert_eq!(event.traceparent, traceparent);
-        assert_eq!(event.payload, b"completed");
+        let result = CommandResult::decode(event.payload.as_slice()).expect("command result");
+        assert_eq!(
+            CommandResultState::try_from(result.state).expect("result state"),
+            CommandResultState::Succeeded
+        );
+        assert_eq!(result.result, b"completed");
+        let proof = result
+            .privileged_result_proof
+            .as_ref()
+            .expect("root result receipt");
+        let signing_key = SigningKey::from_bytes(&[7; 32]);
+        let receipt =
+            verify_receipt(proof, &signing_key.verifying_key()).expect("valid root receipt");
+        assert_eq!(receipt.node_id, sent_command.node_id);
+        assert_eq!(receipt.command_id, sent_command.command_id);
+        assert_eq!(receipt.operation_id, sent_command.operation_id);
+        assert_eq!(receipt.idempotency_key, sent_command.idempotency_key);
+        assert_eq!(
+            receipt.result_bytes_sha256,
+            Sha256::digest(b"completed").to_vec()
+        );
         assert_ne!(
             last_seen(&service, &handshake.node_id).await,
             baseline_last_seen
+        );
+
+        let missing_receipt_traceparent = new_traceparent();
+        let agent = tokio::spawn(respond_to_command(connection.clone(), false));
+        let missing_receipt_command_bytes = command_envelope(
+            &handshake.node_id,
+            &missing_receipt_traceparent,
+            String::new(),
+        );
+        let missing_receipt_command =
+            CommandEnvelope::decode(missing_receipt_command_bytes.as_slice())
+                .expect("decode missing-receipt command");
+        service
+            .send_command(Request::new(SendCommandRequest {
+                node_id: handshake.node_id.clone(),
+                command_envelope: missing_receipt_command_bytes,
+            }))
+            .await
+            .expect("send command with missing receipt");
+        agent.await.expect("missing-receipt response task");
+        let event = next_event(&mut events, TransportEventType::CommandResult).await;
+        assert_eq!(event.traceparent, missing_receipt_traceparent);
+        let result = CommandResult::decode(event.payload.as_slice()).expect("unknown result");
+        assert_eq!(
+            CommandResultState::try_from(result.state).expect("result state"),
+            CommandResultState::Unknown
+        );
+        assert_eq!(result.error_code, "outcome_requires_reconciliation");
+        assert_eq!(result.command_id, missing_receipt_command.command_id);
+        assert_eq!(
+            result.idempotency_key,
+            missing_receipt_command.idempotency_key
         );
 
         let eof_traceparent = new_traceparent();

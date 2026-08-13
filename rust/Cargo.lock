@@ -2577,6 +2577,7 @@ dependencies = [
 name = "ocservia-transportd"
 version = "0.1.0"
 dependencies = [
+ "ed25519-dalek",
  "futures-util",
  "hex",
  "hyper-util",
@@ -2584,9 +2585,11 @@ dependencies = [
  "iroh-relay",
  "ocservia-agent-identity",
  "ocservia-contracts",
+ "ocservia-privd-attestation",
  "prost",
  "prost-types",
  "rustix",
+ "sha2 0.10.9",
  "tokio",
  "tokio-stream",
  "tonic",
