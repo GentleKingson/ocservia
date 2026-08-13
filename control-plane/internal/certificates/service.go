@@ -647,7 +647,7 @@ func (s *Service) OpenArtifact(ctx context.Context, id uuid.UUID, token string, 
 	var certificateVersion uint64
 	var artifactExpires, certificateExpires time.Time
 	var requesterID uuid.UUID
-	err = tx.QueryRow(ctx, `SELECT a.node_id,a.certificate_id,a.operation_id,a.certificate_version,a.content_sha256,a.content_size,a.expires_at,c.not_after,r.requester_id FROM artifact_operations a JOIN certificates c ON c.id=a.certificate_id JOIN approval_requests r ON r.id=a.approval_id WHERE a.id=$1 AND a.token_sha256=$2 AND a.expires_at>now() AND c.not_after>now() AND c.state IN ('issued','expiring') AND (a.state='ready' OR (a.state='leased' AND a.lease_until<now())) FOR UPDATE OF a`, id, tokenHash[:]).Scan(&nodeID, &certificateID, &operationID, &certificateVersion, &expected, &size, &artifactExpires, &certificateExpires, &requesterID)
+	err = tx.QueryRow(ctx, `SELECT a.node_id,a.certificate_id,a.operation_id,a.certificate_version,a.content_sha256,a.content_size,a.expires_at,c.not_after,r.requester_id FROM artifact_operations a JOIN certificates c ON c.id=a.certificate_id JOIN approval_requests r ON r.id=a.approval_id WHERE a.id=$1 AND a.token_sha256=$2 AND a.expires_at>now() AND a.certificate_version=c.version AND c.not_after>now() AND c.state IN ('issued','expiring') AND (a.state='ready' OR (a.state='leased' AND a.lease_until<now())) FOR UPDATE OF a`, id, tokenHash[:]).Scan(&nodeID, &certificateID, &operationID, &certificateVersion, &expected, &size, &artifactExpires, &certificateExpires, &requesterID)
 	if err != nil {
 		return ArtifactDownload{}, ErrArtifactDenied
 	}
@@ -682,7 +682,13 @@ func (s *Service) OpenArtifact(ctx context.Context, id uuid.UUID, token string, 
 }
 
 func (s *Service) CompleteArtifact(ctx context.Context, id, grantID uuid.UUID, grant *agentv1.ArtifactGrantV1, digest []byte, size int64, actorID, sessionID uuid.UUID, requestID string) error {
-	if grant == nil || actorID == uuid.Nil || sessionID == uuid.Nil || requestID == "" || len(requestID) > 128 || grant.GetAuthorizedSubject() != actorID.String() || !bytes.Equal(grant.GetArtifactId(), id[:]) || !bytes.Equal(grant.GetGrantId(), grantID[:]) || len(digest) != sha256.Size || size < 1 || uint64(size) != grant.GetMaxBytes() {
+	if grant == nil || actorID == uuid.Nil || sessionID == uuid.Nil || requestID == "" || len(requestID) > 128 || grant.GetVersion() != agentv1.ArtifactGrantVersion_ARTIFACT_GRANT_VERSION_V1 || grant.GetPurpose() != "certificate_p12" || grant.GetCertificateVersion() == 0 || grant.GetAuthorizedSubject() != actorID.String() || !bytes.Equal(grant.GetArtifactId(), id[:]) || !bytes.Equal(grant.GetGrantId(), grantID[:]) || len(digest) != sha256.Size || size < 1 || uint64(size) != grant.GetMaxBytes() {
+		return ErrArtifactDenied
+	}
+	nodeID, nodeErr := uuid.FromBytes(grant.GetNodeId())
+	certificateID, certificateErr := uuid.FromBytes(grant.GetCertificateId())
+	operationID, operationErr := uuid.FromBytes(grant.GetOperationId())
+	if nodeErr != nil || certificateErr != nil || operationErr != nil || nodeID.Version() != 7 || certificateID.Version() != 7 || operationID.Version() != 7 {
 		return ErrArtifactDenied
 	}
 	grantBytes, err := proto.MarshalOptions{Deterministic: true}.Marshal(grant)
@@ -694,11 +700,18 @@ func (s *Service) CompleteArtifact(ctx context.Context, id, grantID uuid.UUID, g
 		return err
 	}
 	defer func() { _ = tx.Rollback(context.Background()) }()
-	command, err := tx.Exec(ctx, `UPDATE artifact_operations SET state='consuming',consume_grant=$6,consume_sha256=$3,consume_size=$4,consume_actor_id=$7,consume_session_id=$8,consume_request_id=$9,updated_at=now() WHERE id=$1 AND active_grant_id=$2 AND active_grant_subject=$5 AND state='leased' AND content_sha256=$3 AND content_size=$4 AND expires_at>now()`, id, grantID, digest, size, actorID.String(), grantBytes, actorID, sessionID, requestID)
+	command, err := tx.Exec(ctx, `UPDATE artifact_operations a SET state='consuming',consume_grant=$6,consume_sha256=$3,consume_size=$4,consume_actor_id=$7,consume_session_id=$8,consume_request_id=$9,updated_at=now() FROM certificates c WHERE a.id=$1 AND a.active_grant_id=$2 AND a.active_grant_subject=$5 AND a.state='leased' AND a.content_sha256=$3 AND a.content_size=$4 AND a.expires_at>now() AND a.certificate_id=c.id AND a.node_id=$10 AND a.certificate_id=$11 AND a.certificate_version=$12 AND a.operation_id=$13 AND a.certificate_version=c.version AND c.state IN ('issued','expiring') AND c.not_after>now()`, id, grantID, digest, size, actorID.String(), grantBytes, actorID, sessionID, requestID, nodeID, certificateID, grant.GetCertificateVersion(), operationID)
 	if err != nil {
 		return err
 	}
 	if command.RowsAffected() != 1 {
+		var exactReplay bool
+		if queryErr := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM artifact_operations a JOIN certificates c ON c.id=a.certificate_id WHERE a.id=$1 AND a.active_grant_id=$2 AND a.state='consumed' AND a.consume_grant=$3 AND a.consume_sha256=$4 AND a.consume_size=$5 AND a.consume_actor_id=$6 AND a.consume_session_id=$7 AND a.consume_request_id=$8 AND a.node_id=$9 AND a.certificate_id=$10 AND a.certificate_version=$11 AND a.operation_id=$12 AND a.certificate_version=c.version AND c.state IN ('issued','expiring') AND c.not_after>now())`, id, grantID, grantBytes, digest, size, actorID, sessionID, requestID, nodeID, certificateID, grant.GetCertificateVersion(), operationID).Scan(&exactReplay); queryErr != nil {
+			return queryErr
+		}
+		if exactReplay {
+			return nil
+		}
 		return ErrArtifactDenied
 	}
 	if err := tx.Commit(ctx); err != nil {
