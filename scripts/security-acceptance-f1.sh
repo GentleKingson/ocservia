@@ -7,7 +7,8 @@ ARTIFACT_DIR="${ARTIFACT_DIR:?ARTIFACT_DIR is required}"
 BASELINE_SHA=13705da536d3c335f581601e5878b774a4b2af29
 work="${RUNNER_TEMP:-/tmp}/ocservia-f1-${RUN_ID}"
 baseline="${work}/baseline"
-target="${work}/target"
+baseline_target="${work}/baseline-target"
+candidate_target="${work}/candidate-target"
 
 case "${RUN_ID}" in
   *[!a-zA-Z0-9._-]*) echo "RUN_ID contains unsafe characters" >&2; exit 2 ;;
@@ -29,7 +30,7 @@ git -C "${baseline}" apply "${ROOT}/testdata/security-f1-shared-budget-baseline.
 set +e
 (
   cd "${baseline}/rust"
-  CARGO_TARGET_DIR="${target}" cargo test --locked -p ocservia-transportd \
+  CARGO_TARGET_DIR="${baseline_target}" cargo test --locked -p ocservia-transportd \
     shared_budget_baseline_positive_control -- --nocapture
 ) 2>&1 | tee "${ARTIFACT_DIR}/baseline-shared-budget.log"
 baseline_status=${PIPESTATUS[0]}
@@ -45,7 +46,7 @@ fi
 
 (
   cd "${ROOT}/rust"
-  CARGO_TARGET_DIR="${target}" cargo test --locked -p ocservia-transportd --lib -- --nocapture
+  CARGO_TARGET_DIR="${candidate_target}" cargo test --locked -p ocservia-transportd --lib -- --nocapture
 ) 2>&1 | tee "${ARTIFACT_DIR}/candidate-live-iroh.log"
 
 for scenario in \
