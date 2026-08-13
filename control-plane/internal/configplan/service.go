@@ -168,7 +168,7 @@ func (s *Service) Get(ctx context.Context, id uuid.UUID) (Plan, error) {
 	err := s.pool.QueryRow(ctx, `
 		SELECT p.id,p.workspace_id,p.node_id,p.operation_id,p.template_name,p.expected_revision,p.candidate_hash,
 		       o.state,p.candidate_redacted,p.warnings,p.expires_at,p.created_at,
-		       COALESCE((SELECT r.result FROM agent_command_results r WHERE r.command_id=o.command_id ORDER BY r.created_at DESC LIMIT 1),''::bytea),
+		       COALESCE((SELECT r.result FROM agent_command_results r WHERE r.command_id=o.command_id AND r.receipt_verification_status='verified' ORDER BY r.created_at DESC LIMIT 1),''::bytea),
 		       a.id,COALESCE(a.status,'')
 		FROM config_plans p JOIN operations o ON o.id=p.operation_id
 		LEFT JOIN LATERAL (SELECT id,status FROM approval_requests WHERE resource_type='config_plan' AND resource_id=p.id AND action='config.apply' ORDER BY created_at DESC LIMIT 1) a ON true

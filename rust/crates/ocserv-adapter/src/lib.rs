@@ -559,6 +559,19 @@ impl Adapter {
         EffectStore::open_existing(&self.resources)?.complete_authorized(identity, response)
     }
 
+    /// Reads the exact authenticated terminal response for reconciliation.
+    /// It never creates, advances, or retries a privileged effect.
+    ///
+    /// # Errors
+    ///
+    /// Rejects identity conflicts, corrupted records, and unavailable storage.
+    pub fn replay_authorized_effect(
+        &self,
+        identity: AuthorizedEffectIdentity<'_>,
+    ) -> Result<Option<Vec<u8>>, AdapterError> {
+        EffectStore::open_existing(&self.resources)?.replay_authorized(identity)
+    }
+
     #[cfg(test)]
     fn inject_config_apply_fault(&self, point: u8) {
         self.config_apply_fault.store(point, Ordering::SeqCst);
@@ -2850,6 +2863,22 @@ impl EffectStore {
             return Err(AdapterError::Unavailable);
         }
         transaction.commit().map_err(sqlite_io)
+    }
+
+    fn replay_authorized(
+        &mut self,
+        identity: AuthorizedEffectIdentity<'_>,
+    ) -> Result<Option<Vec<u8>>, AdapterError> {
+        let identity = validate_authorized_effect(identity, effect_now()?)?;
+        let Some(record) = query_authorized_effect(&self.connection, identity.command_id)? else {
+            return Ok(None);
+        };
+        validate_authorized_record(&self.hmac_key, &record)?;
+        validate_same_authorized_effect(&record, identity)?;
+        if record.state == "applied" {
+            return Ok(Some(record.response));
+        }
+        Ok(None)
     }
 
     fn prepare(

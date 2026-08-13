@@ -16,9 +16,11 @@ use ocservia_command_authorization::ControllerCommandKeyring;
 use ocservia_command_journal::{
     AcceptOutcome, AppliedResourceRevision, CommandRecord, CommandState, Journal,
 };
+#[cfg(test)]
+use ocservia_contracts::generated::ocserv::platform::agent::v1::ConfigApplyResult;
 use ocservia_contracts::generated::ocserv::platform::agent::v1::{
-    CommandDeliveryMode, CommandEnvelope, ConfigApplyResult, SealedSecretPurpose, SealedSecretV1,
-    SealedSecretVersion, SemanticPayloadHashVersion, command_envelope,
+    CommandDeliveryMode, CommandEnvelope, SealedSecretPurpose, SealedSecretV1, SealedSecretVersion,
+    SemanticPayloadHashVersion, command_envelope,
 };
 use prost::Message;
 use rand::Rng;
@@ -67,6 +69,15 @@ pub struct CommandOutcome {
 pub struct ExternalCommand {
     key: [u8; 16],
     command_id: [u8; 16],
+    accepted_at: i64,
+}
+
+impl ExternalCommand {
+    /// Journal acceptance time that privd must bind into the receipt.
+    #[must_use]
+    pub const fn accepted_at(&self) -> i64 {
+        self.accepted_at
+    }
 }
 
 /// Result of preparing an external effect.
@@ -311,9 +322,70 @@ impl CommandExecutor {
                 Ok(ExternalPreparation::Execute(ExternalCommand {
                     key: validated.key,
                     command_id: validated.command_id,
+                    accepted_at: context.now_unix_seconds,
                 }))
             }
         }
+    }
+
+    /// Moves an Unknown command back to Running only after privd returned an
+    /// exact cached root receipt. The caller must atomically persist that proof
+    /// with the terminal result next; a crash remains Unknown on replay.
+    ///
+    /// # Errors
+    ///
+    /// Rejects non-privileged, mismatched, or non-Unknown commands.
+    pub fn begin_attested_recovery(
+        &mut self,
+        envelope: &CommandEnvelope,
+        context: &CommandContext,
+    ) -> Result<ExternalCommand, CommandError> {
+        let validated = validate_command(envelope, context)?;
+        if !validated.external {
+            return Err(CommandError::Rejected("external_command_required"));
+        }
+        let record = match self.matching_record(&validated) {
+            Ok(record) => record,
+            Err(CommandError::Rejected("command_not_accepted")) => {
+                match self
+                    .journal
+                    .accept_command(
+                        &validated.key,
+                        &validated.command_id,
+                        &validated.payload_hash,
+                        validated.hash_version as i32,
+                        context.now_unix_seconds,
+                    )
+                    .map_err(pre_effect_failure)?
+                {
+                    AcceptOutcome::Accepted(record) | AcceptOutcome::Replay(record) => record,
+                    AcceptOutcome::PayloadConflict(_) => return Err(CommandError::PayloadConflict),
+                    AcceptOutcome::IdentityConflict(_) => {
+                        return Err(CommandError::IdentityConflict);
+                    }
+                }
+            }
+            Err(error) => return Err(error),
+        };
+        if !matches!(record.state, CommandState::Accepted | CommandState::Unknown) {
+            return Err(CommandError::Rejected("reconciliation_state_invalid"));
+        }
+        let record = self
+            .journal
+            .transition_command(
+                &validated.key,
+                &[CommandState::Accepted, CommandState::Unknown],
+                CommandState::Running,
+                None,
+                None,
+                context.now_unix_seconds,
+            )
+            .map_err(pre_effect_failure)?;
+        Ok(ExternalCommand {
+            key: validated.key,
+            command_id: validated.command_id,
+            accepted_at: record.accepted_at,
+        })
     }
 
     /// Persists the bounded result of an external privd call.
@@ -363,6 +435,55 @@ impl CommandExecutor {
         })
     }
 
+    /// Persists a privd result and its opaque root-signed proof in one journal write.
+    ///
+    /// # Errors
+    ///
+    /// Fails closed when proof persistence or the terminal transition fails.
+    pub fn complete_external_attested(
+        &self,
+        command: &ExternalCommand,
+        result: Result<&[u8], &'static str>,
+        proof: &[u8],
+        now: i64,
+    ) -> Result<CommandOutcome, CommandError> {
+        let (state, bytes, code) = match result {
+            Ok(bytes) if bytes.len() <= MAX_COMMAND_BYTES => {
+                (CommandState::Succeeded, Some(bytes), None)
+            }
+            Ok(_) => (CommandState::Failed, None, Some("result_too_large")),
+            Err(code) => (CommandState::Failed, None, Some(code)),
+        };
+        let before = self
+            .journal
+            .command(&command.key)
+            .map_err(pre_effect_failure)?
+            .ok_or(CommandError::Rejected("command_not_accepted"))?;
+        let record = self
+            .journal
+            .transition_command_attested(
+                &command.key,
+                &[CommandState::Running],
+                state,
+                bytes,
+                code,
+                proof,
+                now,
+            )
+            .map_err(|source| CommandError::OutcomeUnknown {
+                code: "attested_result_persistence_failed",
+                record: Box::new(before),
+                source: Box::new(source),
+            })?;
+        if record.command_id != command.command_id {
+            return Err(CommandError::IdentityConflict);
+        }
+        Ok(CommandOutcome {
+            record,
+            replayed: false,
+        })
+    }
+
     /// Atomically persists a successful desired-state result and applied revision.
     ///
     /// # Errors
@@ -397,6 +518,52 @@ impl CommandExecutor {
             )
             .map_err(|source| CommandError::OutcomeUnknown {
                 code: "result_persistence_failed",
+                record: Box::new(before),
+                source: Box::new(source),
+            })?;
+        Ok(CommandOutcome {
+            record,
+            replayed: false,
+        })
+    }
+
+    /// Atomically persists an applied revision with its root-signed proof.
+    ///
+    /// # Errors
+    ///
+    /// Reports unknown when result, revision, and proof cannot commit together.
+    #[allow(clippy::too_many_arguments)]
+    pub fn complete_external_applied_attested(
+        &mut self,
+        command: &ExternalCommand,
+        resource_type: &str,
+        resource_key: &str,
+        revision: u64,
+        result: &[u8],
+        proof: &[u8],
+        now: i64,
+    ) -> Result<CommandOutcome, CommandError> {
+        let before = self
+            .journal
+            .command(&command.key)
+            .map_err(pre_effect_failure)?
+            .ok_or(CommandError::Rejected("command_not_accepted"))?;
+        let record = self
+            .journal
+            .complete_external_with_revision_attested(
+                &command.key,
+                &command.command_id,
+                AppliedResourceRevision {
+                    resource_type,
+                    resource_key,
+                    revision,
+                },
+                result,
+                proof,
+                now,
+            )
+            .map_err(|source| CommandError::OutcomeUnknown {
+                code: "attested_result_persistence_failed",
                 record: Box::new(before),
                 source: Box::new(source),
             })?;
@@ -495,37 +662,17 @@ impl CommandExecutor {
             }
             DesiredRevisionFence::Gap => return Err(CommandError::Rejected("revision_gap")),
         };
-        if observation == ExternalEffectObservation::AppliedExact
-            && let Some((resource_type, resource_key, revision)) = desired_resource(envelope)
-        {
-            let result = observed_result(envelope);
-            let record = self
-                .journal
-                .reconcile_external_with_revision(
-                    &validated.key,
-                    &validated.command_id,
-                    AppliedResourceRevision {
-                        resource_type,
-                        resource_key,
-                        revision,
-                    },
-                    &result,
-                    context.now_unix_seconds,
-                )
-                .map_err(pre_effect_failure)?;
-            return Ok(CommandOutcome {
-                record,
-                replayed: true,
-            });
-        }
         let (state, result, code) = match observation {
+            // Observation can authorize a retry after proven absence, but it
+            // cannot replace the exact root receipt required for any terminal
+            // privileged outcome.
             ExternalEffectObservation::AppliedExact => {
-                (CommandState::Succeeded, Some(b"observed".as_slice()), None)
+                (CommandState::Unknown, None, Some("attested_result_missing"))
             }
             ExternalEffectObservation::SupersededByNewerRevision => (
-                CommandState::Failed,
+                CommandState::Unknown,
                 None,
-                Some("effect_superseded_by_newer_revision"),
+                Some("attested_result_superseded"),
             ),
             ExternalEffectObservation::Absent => {
                 (CommandState::Unknown, None, Some("effect_absent"))
@@ -591,6 +738,7 @@ impl CommandExecutor {
         Ok(ExternalCommand {
             key: validated.key,
             command_id: validated.command_id,
+            accepted_at: record.accepted_at,
         })
     }
 
@@ -831,6 +979,7 @@ fn desired_resource(envelope: &CommandEnvelope) -> Option<(&'static str, &str, u
     }
 }
 
+#[cfg(test)]
 fn observed_result(envelope: &CommandEnvelope) -> Vec<u8> {
     match envelope.payload.as_ref() {
         Some(command_envelope::Payload::ConfigApply(payload)) => ConfigApplyResult {
@@ -1358,6 +1507,7 @@ impl PrivdClient {
             None,
             PrivilegedRequestMode::Unspecified,
             self.timeout,
+            None,
         )
         .await
     }
@@ -1371,12 +1521,17 @@ impl PrivdClient {
     pub async fn call_command(
         &self,
         command: &CommandEnvelope,
+        accepted_at: i64,
     ) -> Result<PrivdResponse, io::Error> {
         self.call_inner(
             None,
             Some(command),
             PrivilegedRequestMode::Execute,
             self.desired_timeout,
+            Some(prost_types::Timestamp {
+                seconds: accepted_at,
+                nanos: 0,
+            }),
         )
         .await
     }
@@ -1396,6 +1551,7 @@ impl PrivdClient {
             Some(command),
             PrivilegedRequestMode::Reconcile,
             self.desired_timeout,
+            None,
         )
         .await
     }
@@ -1406,6 +1562,7 @@ impl PrivdClient {
         command: Option<&CommandEnvelope>,
         mode: PrivilegedRequestMode,
         timeout: Duration,
+        accepted_at: Option<prost_types::Timestamp>,
     ) -> Result<PrivdResponse, io::Error> {
         let deadline = SystemTime::now()
             .checked_add(timeout)
@@ -1417,6 +1574,7 @@ impl PrivdClient {
         let request = PrivdRequest {
             request_id: Uuid::now_v7().as_bytes().to_vec(),
             deadline_unix_ms,
+            accepted_at,
             authorization_command: command.cloned(),
             privileged_mode: mode.into(),
             operation,
@@ -1938,13 +2096,21 @@ mod tests {
         command_context.capabilities = capabilities(&["ocserv.config.apply"]);
         let mut executor = CommandExecutor::new(Journal::open(&path).expect("empty journal"));
 
+        let recovered = executor
+            .begin_attested_recovery(&envelope, &command_context)
+            .expect("accept exact root receipt after journal loss");
+        let result = observed_result(&envelope);
         let outcome = executor
-            .reconcile_external(
-                &envelope,
-                &command_context,
-                ExternalEffectObservation::AppliedExact,
+            .complete_external_applied_attested(
+                &recovered,
+                "config",
+                "ocserv.conf",
+                7,
+                &result,
+                b"root-receipt",
+                101,
             )
-            .expect("rebuild exact config evidence");
+            .expect("rebuild exact attested config evidence");
         assert_eq!(outcome.record.state, CommandState::Succeeded);
         assert_eq!(
             executor
@@ -2390,13 +2556,20 @@ mod tests {
         }
         command_context.now_unix_seconds = 102;
         let mut executor = CommandExecutor::new(Journal::open(&path).expect("restart"));
+        let recovered_command = executor
+            .begin_attested_recovery(&envelope, &command_context)
+            .expect("root receipt proves exact effect");
         let recovered = executor
-            .reconcile_external(
-                &envelope,
-                &command_context,
-                ExternalEffectObservation::AppliedExact,
+            .complete_external_applied_attested(
+                &recovered_command,
+                "user",
+                "alice",
+                2,
+                b"applied",
+                b"root-receipt",
+                102,
             )
-            .expect("effect store proves effect");
+            .expect("persist exact result and root receipt");
         assert_eq!(recovered.record.state, CommandState::Succeeded);
         assert_eq!(
             executor
@@ -2526,13 +2699,20 @@ mod tests {
             executor.prepare_external(&newer, &command_context),
             Err(CommandError::Rejected("revision_gap"))
         ));
+        let recovered_old = executor
+            .begin_attested_recovery(&old, &command_context)
+            .expect("recover old root receipt");
         executor
-            .reconcile_external(
-                &old,
-                &command_context,
-                ExternalEffectObservation::AppliedExact,
+            .complete_external_applied_attested(
+                &recovered_old,
+                "user",
+                "alice",
+                2,
+                b"applied",
+                b"root-receipt",
+                102,
             )
-            .expect("old applied observation");
+            .expect("persist old root receipt");
         let ExternalPreparation::Execute(new_command) = executor
             .prepare_external(&newer, &command_context)
             .expect("prepare newer")

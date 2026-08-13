@@ -5,7 +5,7 @@
 use std::io;
 
 use ocservia_contracts::generated::ocserv::platform::agent::v1::{
-    ArtifactGrantV1, CommandEnvelope,
+    ArtifactGrantV1, CommandEnvelope, PrivilegedResultProof,
 };
 use prost::Message;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
@@ -32,6 +32,10 @@ pub struct PrivdRequest {
     /// Absolute Unix epoch deadline in milliseconds.
     #[prost(uint64, tag = "2")]
     pub deadline_unix_ms: u64,
+    /// Agent journal acceptance time. Privd binds this exact value into the
+    /// root-signed receipt; Agent must not reconstruct it after execution.
+    #[prost(message, optional, tag = "3")]
+    pub accepted_at: Option<prost_types::Timestamp>,
     /// Original Controller-signed command. Privd derives every privileged
     /// operation and effect identity from this carrier after independent
     /// signature and semantic-hash verification.
@@ -569,6 +573,9 @@ pub struct PrivdResponse {
     /// Correlates the response to a request.
     #[prost(bytes = "vec", tag = "1")]
     pub request_id: Vec<u8>,
+    /// Root-signed evidence for terminal Controller-authorized effects.
+    #[prost(message, optional, tag = "2")]
+    pub privileged_result_proof: Option<PrivilegedResultProof>,
     /// Exactly one stable result or error.
     #[prost(
         oneof = "privd_response::Result",
@@ -696,6 +703,7 @@ mod tests {
         let request = PrivdRequest {
             request_id: vec![7; 16],
             deadline_unix_ms: 42,
+            accepted_at: None,
             authorization_command: None,
             privileged_mode: PrivilegedRequestMode::Unspecified.into(),
             operation: Some(privd_request::Operation::ServiceStatus(ReadRequest {})),
@@ -734,6 +742,7 @@ mod tests {
         let request = PrivdRequest {
             request_id: vec![7; 16],
             deadline_unix_ms: u64::MAX,
+            accepted_at: Some(prost_types::Timestamp { seconds: 1, nanos: 0 }),
             authorization_command: Some(CommandEnvelope {
                 payload: Some(
                     ocservia_contracts::generated::ocserv::platform::agent::v1::command_envelope::Payload::GroupApply(
@@ -761,6 +770,7 @@ mod tests {
 
         let users = PrivdResponse {
             request_id: vec![7; 16],
+            privileged_result_proof: None,
             result: Some(privd_response::Result::UserList(UserList {
                 users: (0..MAX_MANAGED_RESOURCES)
                     .map(|index| ObservedUser {
@@ -781,6 +791,7 @@ mod tests {
 
         let groups = PrivdResponse {
             request_id: vec![7; 16],
+            privileged_result_proof: None,
             result: Some(privd_response::Result::GroupList(GroupList {
                 groups: (0..MAX_MANAGED_RESOURCES)
                     .map(|index| ObservedGroup {

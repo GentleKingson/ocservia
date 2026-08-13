@@ -13,6 +13,7 @@ import (
 
 	agentv1 "github.com/GentleKingson/ocservia/control-plane/gen/proto/ocserv/platform/agent/v1"
 	transportv1 "github.com/GentleKingson/ocservia/control-plane/gen/proto/ocserv/platform/transport/v1"
+	"github.com/GentleKingson/ocservia/control-plane/internal/attestationtest"
 	"github.com/GentleKingson/ocservia/control-plane/internal/commandauth"
 	"github.com/GentleKingson/ocservia/control-plane/internal/localslice"
 	"github.com/GentleKingson/ocservia/control-plane/internal/operations"
@@ -47,6 +48,10 @@ func TestConfigPlanCreateReplayStaleAndTypedEnvelopeIntegration(t *testing.T) {
 		t.Fatal(err)
 	}
 	if _, err = pool.Exec(ctx, `INSERT INTO nodes(id,workspace_id,name,status,version,created_at,updated_at)VALUES($1,$2,$3,'active',1,now(),now())`, nodeID, workspaceID, "node-"+nodeID.String()); err != nil {
+		t.Fatal(err)
+	}
+	attestationKey, err := attestationtest.InstallKey(ctx, pool, nodeID)
+	if err != nil {
 		t.Fatal(err)
 	}
 	endpointID := sha256.Sum256(append([]byte("ocservia/configplan-integration/"), nodeID[:]...))
@@ -116,16 +121,30 @@ func TestConfigPlanCreateReplayStaleAndTypedEnvelopeIntegration(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err = pool.Exec(ctx, `INSERT INTO transport_events(event_id,node_id,event_type,occurred_at,traceparent,payload)VALUES($1,$2,'command_result',now(),$3,''::bytea)`, eventID, nodeID, request.Traceparent); err != nil {
+	if _, err = pool.Exec(ctx, `UPDATE commands SET state='dispatched',updated_at=now() WHERE id=$1`, commandID); err != nil {
 		t.Fatal(err)
 	}
-	if _, err = pool.Exec(ctx, `INSERT INTO agent_command_results(event_id,command_id,idempotency_key,payload_sha256,semantic_payload_hash_version,state,result,accepted_at,completed_at,replayed,created_at)VALUES($1,$2,$3,$4,1,'succeeded',$5,now(),now(),false,now())`, eventID, commandID, uuid.Must(uuid.FromBytes(envelope.GetIdempotencyKey())), envelope.GetSemanticPayloadSha256(), resultBytes); err != nil {
+	if _, err = pool.Exec(ctx, `UPDATE operations SET state='dispatched',updated_at=now() WHERE id=$1`, plan.OperationID); err != nil {
 		t.Fatal(err)
 	}
-	if _, err = pool.Exec(ctx, `UPDATE commands SET state='succeeded',updated_at=now() WHERE id=$1`, commandID); err != nil {
+	completedPlan := time.Now().UTC().Truncate(time.Microsecond)
+	planResult := &agentv1.CommandResult{
+		CommandId: envelope.GetCommandId(), IdempotencyKey: envelope.GetIdempotencyKey(),
+		PayloadSha256: envelope.GetSemanticPayloadSha256(), SemanticPayloadHashVersion: envelope.GetSemanticPayloadHashVersion(),
+		State: agentv1.CommandResultState_COMMAND_RESULT_STATE_SUCCEEDED, Result: resultBytes,
+		AcceptedAt: timestamppb.New(completedPlan), CompletedAt: timestamppb.New(completedPlan),
+	}
+	if err := attestationtest.AttachProof(&envelope, planResult, attestationKey, 1); err != nil {
 		t.Fatal(err)
 	}
-	if _, err = pool.Exec(ctx, `UPDATE operations SET state='succeeded',updated_at=now() WHERE id=$1`, plan.OperationID); err != nil {
+	encodedPlanResult, err := proto.Marshal(planResult)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := localslice.NewWithSigner(pool, commandSigner).Ingest(ctx, &transportv1.TransportEvent{
+		EventId: eventID[:], NodeId: nodeID[:], EndpointId: endpointID[:], Type: transportv1.TransportEventType_TRANSPORT_EVENT_TYPE_COMMAND_RESULT,
+		OccurredAt: timestamppb.New(completedPlan), Traceparent: request.Traceparent, Payload: encodedPlanResult,
+	}); err != nil {
 		t.Fatal(err)
 	}
 	validated, err := service.Get(ctx, plan.ID)
@@ -229,7 +248,11 @@ func TestConfigPlanCreateReplayStaleAndTypedEnvelopeIntegration(t *testing.T) {
 	if _, err := pool.Exec(ctx, `UPDATE config_apply_operations SET state='dispatched' WHERE operation_id=$1`, applyOperationID); err != nil {
 		t.Fatal(err)
 	}
-	commandResultBytes, err := proto.Marshal(&agentv1.CommandResult{CommandId: applyEnvelope.GetCommandId(), IdempotencyKey: applyEnvelope.GetIdempotencyKey(), PayloadSha256: payloadHash[:], SemanticPayloadHashVersion: agentv1.SemanticPayloadHashVersion_SEMANTIC_PAYLOAD_HASH_VERSION_V2, State: agentv1.CommandResultState_COMMAND_RESULT_STATE_SUCCEEDED, Result: resultBytes, AcceptedAt: timestamppb.Now(), CompletedAt: timestamppb.Now()})
+	validResult := &agentv1.CommandResult{CommandId: applyEnvelope.GetCommandId(), IdempotencyKey: applyEnvelope.GetIdempotencyKey(), PayloadSha256: payloadHash[:], SemanticPayloadHashVersion: agentv1.SemanticPayloadHashVersion_SEMANTIC_PAYLOAD_HASH_VERSION_V2, State: agentv1.CommandResultState_COMMAND_RESULT_STATE_SUCCEEDED, Result: resultBytes, AcceptedAt: timestamppb.Now(), CompletedAt: timestamppb.Now()}
+	if err := attestationtest.AttachProof(&applyEnvelope, validResult, attestationKey, 1); err != nil {
+		t.Fatal(err)
+	}
+	commandResultBytes, err := proto.Marshal(validResult)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -251,7 +274,7 @@ func TestConfigPlanCreateReplayStaleAndTypedEnvelopeIntegration(t *testing.T) {
 	if err != nil || publicApply.ConfigApplyState != "failed_critical" || publicApply.ConfigApplyFailureCode != "rollback_failed" || publicApply.NodeID == nil || *publicApply.NodeID != nodeID.String() {
 		t.Fatalf("public critical apply=%+v err=%v", publicApply, err)
 	}
-	replayedResultBytes, err := proto.Marshal(&agentv1.CommandResult{CommandId: applyEnvelope.GetCommandId(), IdempotencyKey: applyEnvelope.GetIdempotencyKey(), PayloadSha256: payloadHash[:], SemanticPayloadHashVersion: agentv1.SemanticPayloadHashVersion_SEMANTIC_PAYLOAD_HASH_VERSION_V2, State: agentv1.CommandResultState_COMMAND_RESULT_STATE_SUCCEEDED, Result: resultBytes, AcceptedAt: timestamppb.Now(), CompletedAt: timestamppb.Now(), Replayed: true})
+	replayedResultBytes, err := proto.Marshal(validResult)
 	if err != nil {
 		t.Fatal(err)
 	}

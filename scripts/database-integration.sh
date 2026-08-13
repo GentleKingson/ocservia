@@ -123,6 +123,10 @@ for major in 17 18; do
     >"${TMP_ROOT}/pg${major}-migrate.log" 2>&1
 
   docker exec -i "${container}" psql -v ON_ERROR_STOP=1 -U ocservia_owner -d ocservia \
+    <"${ROOT}/control-plane/migrations/000023_privd_result_attestation.down.sql" >/dev/null
+  docker exec "${container}" psql -v ON_ERROR_STOP=1 -U ocservia_owner -d ocservia -c \
+    "DELETE FROM schema_migrations WHERE version=23" >/dev/null
+  docker exec -i "${container}" psql -v ON_ERROR_STOP=1 -U ocservia_owner -d ocservia \
     <"${ROOT}/control-plane/migrations/000022_transport_event_quarantine.down.sql" >/dev/null
   docker exec "${container}" psql -v ON_ERROR_STOP=1 -U ocservia_owner -d ocservia -c \
     "DELETE FROM schema_migrations WHERE version=22" >/dev/null
@@ -190,6 +194,9 @@ for major in 17 18; do
   test "$(docker exec "${container}" psql -U ocservia_owner -d ocservia -Atc "SELECT count(*) FROM schema_migrations WHERE version = 20")" = "1"
   test "$(docker exec "${container}" psql -U ocservia_owner -d ocservia -Atc "SELECT count(*) FROM schema_migrations WHERE version = 21")" = "1"
   test "$(docker exec "${container}" psql -U ocservia_owner -d ocservia -Atc "SELECT count(*) FROM schema_migrations WHERE version = 22")" = "1"
+  test "$(docker exec "${container}" psql -U ocservia_owner -d ocservia -Atc "SELECT count(*) FROM schema_migrations WHERE version = 23")" = "1"
+  test "$(docker exec "${container}" psql -U ocservia_owner -d ocservia -Atc "SELECT count(*) FROM information_schema.tables WHERE table_schema='public' AND table_name IN ('privd_attestation_enrollment_credentials','node_privd_attestation_keys')")" = "2"
+  test "$(docker exec "${container}" psql -U ocservia_owner -d ocservia -Atc "SELECT count(*) FROM information_schema.columns WHERE table_schema='public' AND ((table_name='agent_command_results' AND column_name IN ('receipt_verification_status','receipt_failure_reason','privd_attestation_key_id','effect_record_id','effect_sequence','receipt_sha256','privileged_result_proof')) OR (table_name='certificates' AND column_name IN ('csr_receipt_verified_at','csr_receipt_sha256','csr_privd_attestation_key_id','csr_effect_record_id','csr_der_sha256','csr_requested_subject_sha256','issue_certificate_version')))")" = "14"
   test "$(docker exec "${container}" psql -U ocservia_owner -d ocservia -Atc "SELECT count(*) FROM information_schema.tables WHERE table_schema='public' AND table_name IN ('transport_event_cursor','transport_event_quarantine')")" = "2"
   test "$(docker exec "${container}" psql -U ocservia_owner -d ocservia -Atc "SELECT count(*) FROM information_schema.columns WHERE table_schema='public' AND table_name='transport_event_quarantine'")" = "7"
   test "$(docker exec "${container}" psql -U ocservia_owner -d ocservia -Atc "SELECT count(*) FROM information_schema.columns WHERE table_schema='public' AND table_name='transport_event_quarantine' AND column_name='payload'")" = "0"
@@ -244,7 +251,7 @@ for major in 17 18; do
   test "$(docker exec "${container}" psql -U ocservia_owner -d ocservia -Atc "SELECT count(*) FROM pg_class WHERE relname = 'telemetry_samples_' || to_char(date_trunc('month', now()) - interval '2 months', 'YYYYMM')")" = "0"
   stop_process "${pid}"
   (cd "${ROOT}/control-plane" && OCSERV_TEST_DATABASE_URL="${runtime_url}" OCSERV_TEST_OWNER_DATABASE_URL="${owner_url}" \
-    go test -p 1 ./internal/operations ./internal/enrollment ./internal/localslice ./internal/telemetry ./internal/userstate ./internal/useroperations ./internal/configplan ./internal/certificates ./internal/approvals ./internal/audit ./internal/rbac ./internal/auth -run Integration -count=1)
+    go test -p 1 ./internal/operations ./internal/enrollment ./internal/localslice ./internal/telemetry ./internal/userstate ./internal/useroperations ./internal/configplan ./internal/certificates ./internal/approvals ./internal/audit ./internal/rbac ./internal/auth ./internal/privdattestation -run Integration -count=1)
   (cd "${ROOT}/control-plane" && OCSERV_TEST_DATABASE_URL="${runtime_url}" \
     go test -p 1 ./internal/api -run '^TestApprovalDetailRequiresEveryAuthorityScopeIntegration$' -count=1)
   OCSERV_DATABASE_URL="${runtime_url}" "${BIN}" --role=scheduler \
@@ -329,6 +336,8 @@ for major in 17 18; do
   " >/dev/null
   test "$(docker exec "${container}" psql -U ocservia_owner -d ocservia -Atc "SELECT event_id FROM transport_event_cursor WHERE singleton AND valid")" = "${rollback_event_three}"
   test "$(docker exec "${container}" psql -U ocservia_owner -d ocservia -Atc "SELECT event_id FROM transport_events WHERE transport_cursor_valid ORDER BY ingest_sequence DESC LIMIT 1")" = "${rollback_event_three}"
+  docker exec -i "${container}" psql -v ON_ERROR_STOP=1 -U ocservia_owner -d ocservia <"${ROOT}/control-plane/migrations/000023_privd_result_attestation.down.sql" >/dev/null
+  docker exec "${container}" psql -v ON_ERROR_STOP=1 -U ocservia_owner -d ocservia -c "DELETE FROM schema_migrations WHERE version=23" >/dev/null
   docker exec -i "${container}" psql -v ON_ERROR_STOP=1 -U ocservia_owner -d ocservia <"${ROOT}/control-plane/migrations/000022_transport_event_quarantine.down.sql" >/dev/null
   docker exec "${container}" psql -v ON_ERROR_STOP=1 -U ocservia_owner -d ocservia -c "DELETE FROM schema_migrations WHERE version=22" >/dev/null
   if docker exec -i "${container}" psql -v ON_ERROR_STOP=1 -U ocservia_owner -d ocservia \
@@ -460,6 +469,7 @@ for major in 17 18; do
   test "$(docker exec "${container}" psql -U ocservia_owner -d ocservia -Atc "SELECT count(*) FROM schema_migrations WHERE version = 20")" = "1"
   test "$(docker exec "${container}" psql -U ocservia_owner -d ocservia -Atc "SELECT count(*) FROM schema_migrations WHERE version = 21")" = "1"
   test "$(docker exec "${container}" psql -U ocservia_owner -d ocservia -Atc "SELECT count(*) FROM schema_migrations WHERE version = 22")" = "1"
+  test "$(docker exec "${container}" psql -U ocservia_owner -d ocservia -Atc "SELECT count(*) FROM schema_migrations WHERE version = 23")" = "1"
   test "$(docker exec "${container}" psql -U ocservia_owner -d ocservia -Atc "SELECT count(*) FROM pg_indexes WHERE schemaname='public' AND tablename='agent_command_results' AND indexname IN ('agent_command_results_pkey','agent_command_results_command_created_idx')")" = "2"
   test "$(docker exec "${container}" psql -U ocservia_owner -d ocservia -Atc "SELECT count(*) FROM information_schema.columns WHERE table_schema='public' AND table_name='agent_command_results' AND column_name='semantic_payload_hash_version'")" = "1"
   test "$(docker exec "${container}" psql -U ocservia_owner -d ocservia -Atc "SELECT count(*) FROM pg_constraint WHERE conrelid = 'agent_command_results'::regclass AND conname = 'agent_command_results_semantic_payload_hash_version_supported'")" = "1"
@@ -474,12 +484,12 @@ for major in 17 18; do
   pid=$!
   PIDS+=("${pid}")
   wait_for_http "http://127.0.0.1:${api_port}/readyz"
-  test "$(docker exec "${container}" psql -U ocservia_owner -d ocservia -Atc "SELECT count(*) FROM schema_migrations")" = "22"
+  test "$(docker exec "${container}" psql -U ocservia_owner -d ocservia -Atc "SELECT count(*) FROM schema_migrations")" = "23"
   docker exec "${container}" psql -v ON_ERROR_STOP=1 -U ocservia_owner -d ocservia -c \
-    "INSERT INTO schema_migrations (version, name, checksum) VALUES (23, '000023_future.up.sql', decode(repeat('00', 32), 'hex'))" >/dev/null
+    "INSERT INTO schema_migrations (version, name, checksum) VALUES (24, '000024_future.up.sql', decode(repeat('00', 32), 'hex'))" >/dev/null
   test "$(curl --silent --output /dev/null --write-out '%{http_code}' "http://127.0.0.1:${api_port}/readyz")" = "503"
   docker exec "${container}" psql -v ON_ERROR_STOP=1 -U ocservia_owner -d ocservia -c \
-    "DELETE FROM schema_migrations WHERE version = 23" >/dev/null
+    "DELETE FROM schema_migrations WHERE version = 24" >/dev/null
   wait_for_http "http://127.0.0.1:${api_port}/readyz"
 
   docker stop "${container}" >/dev/null
@@ -493,20 +503,20 @@ for major in 17 18; do
   runtime_url="postgres://ocservia_app:test-runtime-only@127.0.0.1:${port}/ocservia?sslmode=disable"
   wait_for_tcp 127.0.0.1 "${port}"
   docker exec "${container}" psql -v ON_ERROR_STOP=1 -U ocservia_owner -d ocservia -c \
-    "INSERT INTO schema_migrations (version, name, checksum) VALUES (23, '000023_future.up.sql', decode(repeat('00', 32), 'hex'))" >/dev/null
+    "INSERT INTO schema_migrations (version, name, checksum) VALUES (24, '000024_future.up.sql', decode(repeat('00', 32), 'hex'))" >/dev/null
   if OCSERV_ENVIRONMENT=test OCSERV_HTTP_ADDRESS="127.0.0.1:${api_port}" \
     OCSERV_DATABASE_URL="${runtime_url}" "${BIN}" --role=all \
     >"${TMP_ROOT}/pg${major}-unknown-version.log" 2>&1; then
     echo "binary accepted an unknown schema version" >&2
     exit 1
   fi
-  if ! grep -Fq 'database schema version 23 is unknown to this binary' "${TMP_ROOT}/pg${major}-unknown-version.log"; then
+  if ! grep -Fq 'database schema version 24 is unknown to this binary' "${TMP_ROOT}/pg${major}-unknown-version.log"; then
     cat "${TMP_ROOT}/pg${major}-unknown-version.log" >&2
     echo "binary failed for an unexpected reason with an unknown schema version" >&2
     exit 1
   fi
   docker exec "${container}" psql -v ON_ERROR_STOP=1 -U ocservia_owner -d ocservia -c \
-    "DELETE FROM schema_migrations WHERE version = 23" >/dev/null
+    "DELETE FROM schema_migrations WHERE version = 24" >/dev/null
 done
 
 container="${PREFIX}-upgrade"
@@ -562,6 +572,7 @@ test "$(docker exec "${container}" psql -U ocservia_owner -d ocservia -Atc "SELE
 test "$(docker exec "${container}" psql -U ocservia_owner -d ocservia -Atc "SELECT count(*) FROM schema_migrations WHERE version = 20")" = "1"
 test "$(docker exec "${container}" psql -U ocservia_owner -d ocservia -Atc "SELECT count(*) FROM schema_migrations WHERE version = 21")" = "1"
 test "$(docker exec "${container}" psql -U ocservia_owner -d ocservia -Atc "SELECT count(*) FROM schema_migrations WHERE version = 22")" = "1"
+test "$(docker exec "${container}" psql -U ocservia_owner -d ocservia -Atc "SELECT count(*) FROM schema_migrations WHERE version = 23")" = "1"
 test "$(docker exec "${container}" psql -U ocservia_owner -d ocservia -Atc "SELECT count(*) FROM pg_constraint WHERE conrelid = 'agent_command_results'::regclass AND conname = 'agent_command_results_semantic_payload_hash_version_supported'")" = "1"
 test "$(docker exec "${container}" psql -U ocservia_owner -d ocservia -Atc "SELECT count(*) FROM pre_i03_marker WHERE id = 1")" = "1"
 test "$(docker exec "${container}" psql -U ocservia_owner -d ocservia -Atc "SELECT status FROM nodes WHERE id = '00000000-0000-7000-8000-000000000011'")" = "pending"
@@ -585,6 +596,10 @@ for role in scheduler api; do
   stop_process "${pid}"
 done
 
+docker exec -i "${container}" psql -v ON_ERROR_STOP=1 -U ocservia_owner -d ocservia \
+  <"${ROOT}/control-plane/migrations/000023_privd_result_attestation.down.sql" >/dev/null
+docker exec "${container}" psql -v ON_ERROR_STOP=1 -U ocservia_owner -d ocservia -c \
+  "DELETE FROM schema_migrations WHERE version = 23" >/dev/null
 docker exec -i "${container}" psql -v ON_ERROR_STOP=1 -U ocservia_owner -d ocservia \
   <"${ROOT}/control-plane/migrations/000022_transport_event_quarantine.down.sql" >/dev/null
 docker exec "${container}" psql -v ON_ERROR_STOP=1 -U ocservia_owner -d ocservia -c \
@@ -694,4 +709,5 @@ test "$(docker exec "${container}" psql -U ocservia_owner -d ocservia -Atc "SELE
 test "$(docker exec "${container}" psql -U ocservia_owner -d ocservia -Atc "SELECT count(*) FROM schema_migrations WHERE version = 20")" = "1"
 test "$(docker exec "${container}" psql -U ocservia_owner -d ocservia -Atc "SELECT count(*) FROM schema_migrations WHERE version = 21")" = "1"
 test "$(docker exec "${container}" psql -U ocservia_owner -d ocservia -Atc "SELECT count(*) FROM schema_migrations WHERE version = 22")" = "1"
+test "$(docker exec "${container}" psql -U ocservia_owner -d ocservia -Atc "SELECT count(*) FROM schema_migrations WHERE version = 23")" = "1"
 test "$(docker exec "${container}" psql -U ocservia_owner -d ocservia -Atc "SELECT count(*) FROM pg_constraint WHERE conrelid = 'agent_command_results'::regclass AND conname = 'agent_command_results_semantic_payload_hash_version_supported'")" = "1"

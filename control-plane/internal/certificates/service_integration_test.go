@@ -18,12 +18,16 @@ import (
 	"time"
 
 	agentv1 "github.com/GentleKingson/ocservia/control-plane/gen/proto/ocserv/platform/agent/v1"
+	transportv1 "github.com/GentleKingson/ocservia/control-plane/gen/proto/ocserv/platform/transport/v1"
 	"github.com/GentleKingson/ocservia/control-plane/internal/approvals"
+	"github.com/GentleKingson/ocservia/control-plane/internal/attestationtest"
 	"github.com/GentleKingson/ocservia/control-plane/internal/commandauth"
+	"github.com/GentleKingson/ocservia/control-plane/internal/localslice"
 	"github.com/GentleKingson/ocservia/control-plane/internal/operations"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
 type fixturePKI struct {
@@ -170,6 +174,14 @@ func TestCertificateIssueArtifactAndRevokeIntegration(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	attestationKey, err := attestationtest.InstallKey(ctx, pool, nodeID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	endpointID := sha256.Sum256(append([]byte("ocservia/certificate-integration/"), nodeID[:]...))
+	if _, err := pool.Exec(ctx, `INSERT INTO node_endpoint_keys(node_id,endpoint_id,state,bound_at) VALUES($1,$2,'active',now())`, nodeID, endpointID[:]); err != nil {
+		t.Fatal(err)
+	}
 	defer func() {
 		if err := cleanupCertificateIntegration(context.Background(), owner, workspaceID); err != nil {
 			t.Error(err)
@@ -200,7 +212,43 @@ func TestCertificateIssueArtifactAndRevokeIntegration(t *testing.T) {
 	}
 	publicDER, _ := x509.MarshalPKIXPublicKey(&key.PublicKey)
 	publicHash := sha256.Sum256(publicDER)
-	if _, err = pool.Exec(ctx, `UPDATE certificates SET state='csr_ready',csr_der=$2,public_key_sha256=$3 WHERE id=$1`, certificate.ID, csrDER, publicHash[:]); err != nil {
+	var csrEnvelopeBytes []byte
+	if err := pool.QueryRow(ctx, `SELECT c.envelope FROM commands c WHERE c.operation_id=$1`, certificate.OperationID).Scan(&csrEnvelopeBytes); err != nil {
+		t.Fatal(err)
+	}
+	var csrEnvelope agentv1.CommandEnvelope
+	if err := proto.Unmarshal(csrEnvelopeBytes, &csrEnvelope); err != nil {
+		t.Fatal(err)
+	}
+	csrResultBytes, err := proto.Marshal(&agentv1.CertificateCsrResult{CertificateId: certificate.ID[:], CsrDer: csrDER, PublicKeySha256: publicHash[:]})
+	if err != nil {
+		t.Fatal(err)
+	}
+	completed := time.Now().UTC().Truncate(time.Microsecond)
+	csrResult := &agentv1.CommandResult{
+		CommandId: csrEnvelope.GetCommandId(), IdempotencyKey: csrEnvelope.GetIdempotencyKey(),
+		PayloadSha256: csrEnvelope.GetSemanticPayloadSha256(), SemanticPayloadHashVersion: csrEnvelope.GetSemanticPayloadHashVersion(),
+		State: agentv1.CommandResultState_COMMAND_RESULT_STATE_SUCCEEDED, Result: csrResultBytes,
+		AcceptedAt: timestamppb.New(completed), CompletedAt: timestamppb.New(completed),
+	}
+	if err := attestationtest.AttachProof(&csrEnvelope, csrResult, attestationKey, 1); err != nil {
+		t.Fatal(err)
+	}
+	encodedCSRResult, err := proto.Marshal(csrResult)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `UPDATE commands SET state='dispatched' WHERE id=$1`, uuid.Must(uuid.FromBytes(csrEnvelope.GetCommandId()))); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `UPDATE operations SET state='dispatched' WHERE id=$1`, certificate.OperationID); err != nil {
+		t.Fatal(err)
+	}
+	eventID := uuid.Must(uuid.NewV7())
+	if err := localslice.NewWithSigner(pool, commandSigner).Ingest(ctx, &transportv1.TransportEvent{
+		EventId: eventID[:], NodeId: nodeID[:], EndpointId: endpointID[:], Type: transportv1.TransportEventType_TRANSPORT_EVENT_TYPE_COMMAND_RESULT,
+		OccurredAt: timestamppb.New(completed), Traceparent: "00-0123456789abcdef0123456789abcdef-0123456789abcdef-01", Payload: encodedCSRResult,
+	}); err != nil {
 		t.Fatal(err)
 	}
 	_, _, bindingHash, summary, err := service.ApprovalBinding(ctx, certificate.ID)
