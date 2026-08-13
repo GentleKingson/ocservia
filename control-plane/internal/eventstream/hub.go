@@ -44,12 +44,43 @@ type Hub struct {
 	ctx      context.Context
 	cancel   context.CancelFunc
 	config   Config
+	budget   *WatcherBudget
 	fetch    FetchFunc
 	resolve  ResolveFunc
 	mu       sync.Mutex
 	watchers map[string]*watcher
 	closed   bool
 	metrics  hubMetrics
+}
+
+// WatcherBudget bounds polling watchers across every hub that shares it.
+type WatcherBudget struct {
+	mu     sync.Mutex
+	limit  int
+	active int
+}
+
+func NewWatcherBudget(limit int) (*WatcherBudget, error) {
+	if limit < 1 {
+		return nil, errors.New("event watcher capacity must be positive")
+	}
+	return &WatcherBudget{limit: limit}, nil
+}
+
+func (b *WatcherBudget) acquire() bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.active >= b.limit {
+		return false
+	}
+	b.active++
+	return true
+}
+
+func (b *WatcherBudget) release() {
+	b.mu.Lock()
+	b.active--
+	b.mu.Unlock()
 }
 
 type hubMetrics struct {
@@ -62,8 +93,22 @@ type hubMetrics struct {
 }
 
 func NewHub(config Config, fetch FetchFunc, resolve ResolveFunc) (*Hub, error) {
+	budget, err := NewWatcherBudget(config.Watchers)
+	if err != nil {
+		return nil, err
+	}
+	return NewHubWithWatcherBudget(config, budget, fetch, resolve)
+}
+
+func NewHubWithWatcherBudget(config Config, budget *WatcherBudget, fetch FetchFunc, resolve ResolveFunc) (*Hub, error) {
 	if err := config.Validate(); err != nil {
 		return nil, err
+	}
+	if budget == nil {
+		return nil, errors.New("event watcher budget is required")
+	}
+	if budget.limit != config.Watchers {
+		return nil, errors.New("event watcher budget does not match configuration")
 	}
 	if fetch == nil {
 		return nil, errors.New("event source is required")
@@ -72,7 +117,7 @@ func NewHub(config Config, fetch FetchFunc, resolve ResolveFunc) (*Hub, error) {
 		return nil, errors.New("event cursor resolver is required")
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	return &Hub{ctx: ctx, cancel: cancel, config: config, fetch: fetch, resolve: resolve, watchers: make(map[string]*watcher)}, nil
+	return &Hub{ctx: ctx, cancel: cancel, config: config, budget: budget, fetch: fetch, resolve: resolve, watchers: make(map[string]*watcher)}, nil
 }
 
 func (h *Hub) Subscribe(ctx context.Context, scope string, after uuid.UUID) (*Subscription, error) {
@@ -117,7 +162,7 @@ func (h *Hub) watcher(scope string) (*watcher, error) {
 	if existing := h.watchers[scope]; existing != nil {
 		return existing, nil
 	}
-	if len(h.watchers) >= h.config.Watchers {
+	if !h.budget.acquire() {
 		return nil, ErrWatcherLimit
 	}
 	ctx, cancel := context.WithCancel(h.ctx)
@@ -138,6 +183,7 @@ func (h *Hub) remove(scope string, target *watcher) {
 	if h.watchers[scope] == target {
 		delete(h.watchers, scope)
 		h.metrics.watchers.Add(-1)
+		h.budget.release()
 	}
 	h.mu.Unlock()
 }

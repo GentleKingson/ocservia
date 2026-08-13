@@ -72,6 +72,32 @@ func TestStreamGlobalOverloadWrites503BeforeSSEHeaders(t *testing.T) {
 	}
 }
 
+func TestConfiguredHubsShareGlobalWatcherBudget(t *testing.T) {
+	server, config, _, _ := streamAdmissionFixture(t)
+	config.Watchers = 1
+	if err := server.ConfigureEventStreams(config); err != nil {
+		t.Fatal(err)
+	}
+	platform, err := server.platformEvents.Subscribe(context.Background(), "workspace-a", uuid.Nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := server.operationEvents.Subscribe(context.Background(), "operation-a", uuid.Nil); !errors.Is(err, eventstream.ErrWatcherLimit) {
+		t.Fatalf("mixed platform and operation watcher capacity error = %v", err)
+	}
+
+	platform.Close()
+	deadline := time.Now().Add(time.Second)
+	for server.platformEvents.Snapshot().Watchers != 0 && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	operation, err := server.operationEvents.Subscribe(context.Background(), "operation-a", uuid.Nil)
+	if err != nil {
+		t.Fatalf("shared watcher capacity was not released: %v", err)
+	}
+	operation.Close()
+}
+
 func TestInvisibleLastEventIDWrites400BeforeSSEHeaders(t *testing.T) {
 	server, _, principal, workspaceID := streamAdmissionFixture(t)
 	request := authorizedStreamRequest(principal, workspaceID)

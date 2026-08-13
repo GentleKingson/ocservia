@@ -27,12 +27,19 @@ func (s *Server) configureEventStreams(config eventstream.Config) error {
 	if err != nil {
 		return err
 	}
-	platformHub, err := eventstream.NewHub(config, s.fetchPlatformEvents, s.resolvePlatformEventCursor)
+	budget, err := eventstream.NewWatcherBudget(config.Watchers)
 	if err != nil {
+		manager.Close()
 		return err
 	}
-	operationHub, err := eventstream.NewHub(config, s.fetchOperationEvents, s.resolveOperationEventCursor)
+	platformHub, err := eventstream.NewHubWithWatcherBudget(config, budget, s.fetchPlatformEvents, s.resolvePlatformEventCursor)
 	if err != nil {
+		manager.Close()
+		return err
+	}
+	operationHub, err := eventstream.NewHubWithWatcherBudget(config, budget, s.fetchOperationEvents, s.resolveOperationEventCursor)
+	if err != nil {
+		manager.Close()
 		platformHub.Close()
 		return err
 	}
@@ -61,12 +68,19 @@ func (s *Server) eventStreamComponents(operation bool) (eventstream.Config, *eve
 		if err != nil {
 			panic(err)
 		}
-		platform, err := eventstream.NewHub(config, s.fetchPlatformEvents, s.resolvePlatformEventCursor)
+		budget, err := eventstream.NewWatcherBudget(config.Watchers)
 		if err != nil {
+			manager.Close()
 			panic(err)
 		}
-		operations, err := eventstream.NewHub(config, s.fetchOperationEvents, s.resolveOperationEventCursor)
+		platform, err := eventstream.NewHubWithWatcherBudget(config, budget, s.fetchPlatformEvents, s.resolvePlatformEventCursor)
 		if err != nil {
+			manager.Close()
+			panic(err)
+		}
+		operations, err := eventstream.NewHubWithWatcherBudget(config, budget, s.fetchOperationEvents, s.resolveOperationEventCursor)
+		if err != nil {
+			manager.Close()
 			platform.Close()
 			panic(err)
 		}

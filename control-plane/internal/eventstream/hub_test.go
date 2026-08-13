@@ -266,6 +266,48 @@ func TestWatcherCapacityRejectsRandomScopesAndReclaims(t *testing.T) {
 	reclaimed.Close()
 }
 
+func TestWatcherBudgetIsSharedAcrossPlatformAndOperationHubs(t *testing.T) {
+	config := DefaultConfig()
+	config.Watchers = 2
+	config.PollInterval = 100 * time.Millisecond
+	budget, err := NewWatcherBudget(config.Watchers)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fetch := func(context.Context, string, uuid.UUID, int) ([]Event, error) { return nil, nil }
+	platform, err := NewHubWithWatcherBudget(config, budget, fetch, rejectNonNilCursor)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer platform.Close()
+	operations, err := NewHubWithWatcherBudget(config, budget, fetch, rejectNonNilCursor)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer operations.Close()
+
+	platformSubscription, err := platform.Subscribe(context.Background(), "workspace-a", uuid.Nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	operationSubscription, err := operations.Subscribe(context.Background(), "operation-a", uuid.Nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer operationSubscription.Close()
+	if _, err := platform.Subscribe(context.Background(), "workspace-b", uuid.Nil); !errors.Is(err, ErrWatcherLimit) {
+		t.Fatalf("mixed hub watcher capacity error = %v", err)
+	}
+
+	platformSubscription.Close()
+	eventually(t, time.Second, func() bool { return platform.Snapshot().Watchers == 0 })
+	reclaimed, err := operations.Subscribe(context.Background(), "operation-b", uuid.Nil)
+	if err != nil {
+		t.Fatalf("shared watcher capacity was not reclaimed: %v", err)
+	}
+	reclaimed.Close()
+}
+
 func TestScopedWatchersPollFairly(t *testing.T) {
 	config := DefaultConfig()
 	config.PollInterval = 100 * time.Millisecond
