@@ -12,6 +12,7 @@ import {
   eventStreamPath,
   getWorkspace,
   getOperation,
+  listAuthorizedWorkspaces,
   listEvents,
   listOperations,
   probeAuthentication,
@@ -299,6 +300,12 @@ export const useLocalSliceStore = defineStore("local-slice", () => {
         );
       if (!isLatestRun()) return;
       const created = await createLocalSimulation(scenario, controller.signal);
+      if (runController !== controller || sequence !== runSequence) return;
+      if (!context.id) {
+        await listAuthorizedWorkspaces(true);
+        context = await currentContext();
+        void connect();
+      }
       if (!isLatestRun()) return;
       cancelRequest(pendingController);
       pendingController = undefined;
