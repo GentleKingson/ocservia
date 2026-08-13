@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
@@ -15,6 +16,7 @@ import (
 	"github.com/GentleKingson/ocservia/control-plane/internal/localslice"
 	operationstore "github.com/GentleKingson/ocservia/control-plane/internal/operations"
 	"github.com/GentleKingson/ocservia/control-plane/internal/userstate"
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 func TestLiveAndRequestID(t *testing.T) {
@@ -210,6 +212,36 @@ func TestDevelopmentRuntimeIsHiddenWhenSimulatorIsDisabled(t *testing.T) {
 
 	if response.Code != http.StatusNotFound {
 		t.Fatalf("development runtime status = %d, want 404", response.Code)
+	}
+}
+
+func TestDevelopmentRuntimeKeepsProcessMetricsWhenDatabaseIsUnavailable(t *testing.T) {
+	pool, err := pgxpool.New(context.Background(), "postgres://unused@localhost/unused?host=/tmp/ocservia-missing-postgres")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pool.Close()
+	server := New("127.0.0.1:0", pool, BuildInfo{}, slog.New(slog.NewTextHandler(io.Discard, nil)), 1024, time.Second, false, "", 1)
+	server.SetLocalSimulatorEnabled(true)
+	request := httptest.NewRequest(http.MethodGet, "/api/v1/development/runtime", nil)
+	response := httptest.NewRecorder()
+
+	server.developmentRuntime(response, request)
+
+	if response.Code != http.StatusOK {
+		t.Fatalf("development runtime status = %d, want 200: %s", response.Code, response.Body.String())
+	}
+	var body struct {
+		KeyStatesAvailable bool `json:"privd_attestation_key_states_available"`
+		KeyStates          []struct {
+			State string `json:"state"`
+		} `json:"privd_attestation_key_states"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if body.KeyStatesAvailable || len(body.KeyStates) != 3 {
+		t.Fatalf("unexpected key state fallback: %+v", body)
 	}
 }
 

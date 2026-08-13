@@ -247,24 +247,28 @@ func (s *Server) developmentRuntime(w http.ResponseWriter, r *http.Request) {
 	pool := s.pool.Stat()
 	admission, platformHub, operationHub := s.eventStreamSnapshots()
 	keyStates, err := privdattestation.KeyStateMetrics(r.Context(), s.pool)
+	keyStatesAvailable := err == nil
 	if err != nil {
-		writeProblem(w, r, http.StatusServiceUnavailable, "https://ocservia.dev/problems/database-unavailable", "Runtime metrics unavailable", "database dependency is unavailable")
-		return
+		// Keep process and SSE diagnostics available while PostgreSQL is down.
+		// The availability bit prevents the bounded zero-value series from being
+		// mistaken for a successful database observation.
+		keyStates, _ = privdattestation.KeyStateMetrics(r.Context(), nil)
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"goroutines":                    runtime.NumGoroutine(),
-		"db_acquired":                   pool.AcquiredConns(),
-		"db_idle":                       pool.IdleConns(),
-		"db_total":                      pool.TotalConns(),
-		"sse_active_streams":            admission.Active,
-		"sse_rejected_streams":          admission.RejectedGlobal + admission.RejectedIdentity + admission.RejectedSession + admission.RejectedWorkspace + admission.RejectedResource,
-		"sse_watchers":                  platformHub.Watchers + operationHub.Watchers,
-		"sse_unhealthy_watchers":        platformHub.UnhealthyWatchers + operationHub.UnhealthyWatchers,
-		"sse_sql_queries":               platformHub.Queries + operationHub.Queries,
-		"sse_slow_consumer_disconnects": platformHub.SlowConsumerDisconnects + operationHub.SlowConsumerDisconnects,
-		"sse_database_backoff_seconds":  (platformHub.DatabaseBackoff + operationHub.DatabaseBackoff).Seconds(),
-		"privd_receipt_verifications":   privdattestation.VerificationMetrics(),
-		"privd_attestation_key_states":  keyStates,
+		"goroutines":                             runtime.NumGoroutine(),
+		"db_acquired":                            pool.AcquiredConns(),
+		"db_idle":                                pool.IdleConns(),
+		"db_total":                               pool.TotalConns(),
+		"sse_active_streams":                     admission.Active,
+		"sse_rejected_streams":                   admission.RejectedGlobal + admission.RejectedIdentity + admission.RejectedSession + admission.RejectedWorkspace + admission.RejectedResource,
+		"sse_watchers":                           platformHub.Watchers + operationHub.Watchers,
+		"sse_unhealthy_watchers":                 platformHub.UnhealthyWatchers + operationHub.UnhealthyWatchers,
+		"sse_sql_queries":                        platformHub.Queries + operationHub.Queries,
+		"sse_slow_consumer_disconnects":          platformHub.SlowConsumerDisconnects + operationHub.SlowConsumerDisconnects,
+		"sse_database_backoff_seconds":           (platformHub.DatabaseBackoff + operationHub.DatabaseBackoff).Seconds(),
+		"privd_receipt_verifications":            privdattestation.VerificationMetrics(),
+		"privd_attestation_key_states":           keyStates,
+		"privd_attestation_key_states_available": keyStatesAvailable,
 	})
 }
 
