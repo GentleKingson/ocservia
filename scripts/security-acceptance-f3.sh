@@ -131,9 +131,8 @@ test "${second_pid}" -gt 1
 test "${second_pid}" != "${first_pid}"
 test "$(sudo sha256sum "${attestation_key}" | awk '{print $1}')" = "${first_key_hash}"
 
-sudo systemctl stop "${unit}"
 sudo chmod 0644 "${attestation_key}"
-if sudo systemctl start "${unit}"; then
+if sudo systemctl restart "${unit}"; then
   sleep 1
 fi
 test "$(sudo systemctl is-active "${unit}" 2>/dev/null || true)" != active
@@ -142,8 +141,8 @@ sudo journalctl -u "${unit}" --no-pager -n 100 \
 grep -Fq 'attestation key metadata invalid' "${ARTIFACT_DIR}/fail-closed-journal.log"
 sudo systemctl stop "${unit}" >/dev/null 2>&1 || true
 sudo chmod 0600 "${attestation_key}"
-sudo systemctl reset-failed "${unit}"
-sudo systemctl restart "${unit}"
+sudo systemctl reset-failed "${unit}" >/dev/null 2>&1 || true
+start_privd
 wait_active
 
 sudo "${binary}" attestation-registration "${attestation_key}" "${node_id}" \
