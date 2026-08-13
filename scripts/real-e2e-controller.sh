@@ -3,7 +3,7 @@ set -Eeuo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 RUN_ID="${RUN_ID:?RUN_ID is required}"
-ARTIFACT_DIR="${ARTIFACT_DIR:?ARTIFACT_DIR is required}"
+ARTIFACT_DIR="${ARTIFACT_DIR:-${RUNNER_TEMP:?RUNNER_TEMP is required}/artifacts/real-e2e-controller}"
 COMPOSE_PROJECT="${COMPOSE_PROJECT:?COMPOSE_PROJECT is required}"
 COMPOSE_FILE="${ROOT}/deploy/real-e2e/controller.compose.yaml"
 WORK="${RUNNER_TEMP:-/tmp}/ocservia-real-e2e-controller-${RUN_ID}"

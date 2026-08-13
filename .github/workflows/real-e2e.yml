@@ -17,7 +17,6 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     env:
-      ARTIFACT_DIR: ${{ runner.temp }}/artifacts/real-e2e-controller
       COMPOSE_PROJECT: ocservia-real-e2e-${{ github.run_id }}-${{ github.run_attempt }}-controller
       RUN_ID: real-e2e-${{ github.run_id }}-${{ github.run_attempt }}-controller
     steps:
@@ -77,7 +76,6 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     env:
-      ARTIFACT_DIR: ${{ runner.temp }}/artifacts/real-e2e-node
       RUN_ID: real-e2e-${{ github.run_id }}-${{ github.run_attempt }}-node
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
