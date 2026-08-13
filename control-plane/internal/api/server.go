@@ -246,7 +246,9 @@ func (s *Server) developmentRuntime(w http.ResponseWriter, r *http.Request) {
 	}
 	pool := s.pool.Stat()
 	admission, platformHub, operationHub := s.eventStreamSnapshots()
-	keyStates, err := privdattestation.KeyStateMetrics(r.Context(), s.pool)
+	metricsContext, cancelMetrics := context.WithTimeout(r.Context(), time.Second)
+	defer cancelMetrics()
+	keyStates, err := privdattestation.KeyStateMetrics(metricsContext, s.pool)
 	keyStatesAvailable := err == nil
 	if err != nil {
 		// Keep process and SSE diagnostics available while PostgreSQL is down.
