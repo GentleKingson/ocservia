@@ -1,0 +1,211 @@
+name: ocservia-real-e2e
+
+x-service-defaults: &service-defaults
+  restart: "no"
+  read_only: true
+  cap_drop: [ALL]
+  security_opt:
+    - no-new-privileges:true
+  init: true
+
+services:
+  controller-key-init:
+    <<: *service-defaults
+    build:
+      context: ../..
+      dockerfile: rust/transportd.Dockerfile
+    user: "0:0"
+    entrypoint: ["/bin/sh", "-eu", "-c"]
+    command:
+      - |
+        if [ ! -s /run/ocservia-secrets/controller.key ]; then
+          umask 077
+          dd if=/dev/urandom of=/run/ocservia-secrets/controller.key bs=32 count=1 status=none
+          chown 65532:65532 /run/ocservia-secrets/controller.key
+        fi
+        test "$$(stat -c '%u:%g:%a:%s' /run/ocservia-secrets/controller.key)" = "65532:65532:600:32"
+    network_mode: none
+    cap_add: [CHOWN, DAC_OVERRIDE]
+    volumes:
+      - type: volume
+        source: controller-secrets
+        target: /run/ocservia-secrets
+        volume:
+          nocopy: true
+
+  transport-runtime-init:
+    <<: *service-defaults
+    build:
+      context: ../..
+      dockerfile: rust/transportd.Dockerfile
+    user: "0:0"
+    entrypoint: ["/usr/local/libexec/ocservia-prepare-transport-runtime"]
+    command: ["/run/ocserv-platform", "65532", "65532", "65534"]
+    network_mode: none
+    cap_add: [CHOWN, FOWNER, DAC_OVERRIDE]
+    volumes:
+      - type: volume
+        source: transport-runtime
+        target: /run/ocserv-platform
+        volume:
+          nocopy: true
+
+  postgres:
+    image: postgres:17.10-bookworm
+    environment:
+      POSTGRES_DB: ocservia
+      POSTGRES_USER: ocservia_owner
+      POSTGRES_PASSWORD: real-e2e-owner-only
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ocservia_owner -d ocservia"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+    tmpfs:
+      - /tmp:size=16m,mode=0700
+      - /run/postgresql:size=16m,uid=999,gid=999,mode=0770
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ../compose/postgres-init:/docker-entrypoint-initdb.d:ro
+
+  migrate:
+    <<: *service-defaults
+    build:
+      context: ../..
+      dockerfile: control-plane/Dockerfile
+    command: ["--migrate-only"]
+    environment:
+      OCSERV_ENVIRONMENT: development
+      OCSERV_DATABASE_URL: postgres://ocservia_owner:real-e2e-owner-only@postgres:5432/ocservia?sslmode=disable
+      OCSERV_RUNTIME_DATABASE_ROLE: ocservia_app
+      OCSERV_AUDIT_EVENT_KEY_ID: real-e2e-audit-v1
+      OCSERV_TEST_AUDIT_EVENT_KEY_HEX: "4444444444444444444444444444444444444444444444444444444444444444"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  transport-endpoint-bootstrap:
+    <<: *service-defaults
+    profiles: [bootstrap]
+    build:
+      context: ../..
+      dockerfile: rust/transportd.Dockerfile
+    command:
+      - --socket
+      - /run/ocserv-platform/bootstrap.sock
+      - --key-file
+      - /run/ocservia-secrets/controller.key
+      - --control-plane-uid
+      - "65534"
+      - --control-plane-gid
+      - "65532"
+      - --relay-mode
+      - default
+    volumes:
+      - type: volume
+        source: transport-runtime
+        target: /run/ocserv-platform
+        volume:
+          nocopy: true
+      - type: volume
+        source: controller-secrets
+        target: /run/ocservia-secrets
+        read_only: true
+        volume:
+          nocopy: true
+    depends_on:
+      controller-key-init:
+        condition: service_completed_successfully
+      transport-runtime-init:
+        condition: service_completed_successfully
+
+  control-plane:
+    <<: *service-defaults
+    build:
+      context: ../..
+      dockerfile: control-plane/Dockerfile
+    command: ["--role=all"]
+    environment:
+      OCSERV_ENVIRONMENT: development
+      OCSERV_HTTP_ADDRESS: 0.0.0.0:8080
+      OCSERV_DATABASE_URL: postgres://ocservia_app:development-runtime-only@postgres:5432/ocservia?sslmode=disable
+      OCSERV_AUDIT_EVENT_KEY_ID: real-e2e-audit-v1
+      OCSERV_TEST_AUDIT_EVENT_KEY_HEX: "4444444444444444444444444444444444444444444444444444444444444444"
+      OCSERV_DEV_AUTH_TOKEN: ${OCSERV_REAL_E2E_DEV_AUTH_TOKEN:?set OCSERV_REAL_E2E_DEV_AUTH_TOKEN}
+      OCSERV_CONTROLLER_ENDPOINT_ID: ${OCSERV_CONTROLLER_ENDPOINT_ID:?set OCSERV_CONTROLLER_ENDPOINT_ID}
+      OCSERV_TRANSPORT_SOCKET: /run/ocserv-platform/transportd.sock
+      OCSERV_TRUST_SOCKET: /run/ocserv-trust/control-plane.sock
+      OCSERV_TRANSPORT_UID: "65532"
+      OCSERV_TRANSPORT_GID: "65532"
+    ports:
+      - target: 8080
+        host_ip: 127.0.0.1
+        published: "0"
+        protocol: tcp
+    tmpfs:
+      - /tmp:size=16m,mode=0700
+    volumes:
+      - type: volume
+        source: transport-runtime
+        target: /run/ocserv-platform
+        volume:
+          nocopy: true
+      - trust-runtime:/run/ocserv-trust
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "--silent", "http://127.0.0.1:8080/readyz"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  transportd:
+    <<: *service-defaults
+    build:
+      context: ../..
+      dockerfile: rust/transportd.Dockerfile
+    command:
+      - --socket
+      - /run/ocserv-platform/transportd.sock
+      - --trust-socket
+      - /run/ocserv-trust/control-plane.sock
+      - --key-file
+      - /run/ocservia-secrets/controller.key
+      - --control-plane-uid
+      - "65534"
+      - --control-plane-gid
+      - "65532"
+      - --relay-mode
+      - default
+    volumes:
+      - type: volume
+        source: transport-runtime
+        target: /run/ocserv-platform
+        volume:
+          nocopy: true
+      - trust-runtime:/run/ocserv-trust
+      - type: volume
+        source: controller-secrets
+        target: /run/ocservia-secrets
+        read_only: true
+        volume:
+          nocopy: true
+    depends_on:
+      controller-key-init:
+        condition: service_completed_successfully
+      transport-runtime-init:
+        condition: service_completed_successfully
+      control-plane:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "test -S /run/ocserv-platform/transportd.sock"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+volumes:
+  controller-secrets:
+  postgres-data:
+  transport-runtime:
+  trust-runtime:
