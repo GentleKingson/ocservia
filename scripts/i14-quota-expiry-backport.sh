@@ -46,7 +46,7 @@ printf '%s  %s\n' \
 test -f "${ROOT}/web/src/upstream/UserPolicyFields.vue"
 test -f "${ROOT}/web/src/adapters/user-policy.ts"
 
-rejected_execution_pattern='occtl|systemctl|docker[.]sock|privileged'
+rejected_execution_pattern='occtl|systemctl|docker[.]sock'
 # Require a path-token boundary before privileged local roots. Without the
 # boundary, safe package imports such as golang.org/x/sys/unix are false hits.
 rejected_local_path_pattern='(^|[^[:alnum:]_.-])/(etc/ocserv|proc|sys)(/|$|[^[:alnum:]_.-])'

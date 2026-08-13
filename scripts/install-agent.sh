@@ -223,7 +223,7 @@ install -m 0755 -- "${ROOT}/scripts/rollback-agent.sh" "${DESTDIR}${PREFIX}/libe
 install -m 0644 -- "${ROOT}/deploy/systemd/ocservia-agent.service" "${DESTDIR}${PREFIX}/lib/systemd/system/ocservia-agent.service"
 install -m 0644 -- "${ROOT}/deploy/systemd/ocservia-privd.service" "${DESTDIR}${PREFIX}/lib/systemd/system/ocservia-privd.service"
 
-printf 'AGENT_UID=%s\nUSER_PASSWORD_SEAL_PRIVATE_KEY_FILE=/etc/ocservia-agent/user-password-seal-private.pem\nP12_PASSWORD_SEAL_PRIVATE_KEY_FILE=/etc/ocservia-agent/p12-password-seal-private.pem\n' "${AGENT_UID}" >"${DESTDIR}${SYSCONFDIR}/ocservia-agent/privd.env"
+printf 'AGENT_UID=%s\nPRIVD_ATTESTATION_KEY_FILE=/var/lib/ocservia-privd/attestation.key\nUSER_PASSWORD_SEAL_PRIVATE_KEY_FILE=/etc/ocservia-agent/user-password-seal-private.pem\nP12_PASSWORD_SEAL_PRIVATE_KEY_FILE=/etc/ocservia-agent/p12-password-seal-private.pem\n' "${AGENT_UID}" >"${DESTDIR}${SYSCONFDIR}/ocservia-agent/privd.env"
 chmod 0640 -- "${DESTDIR}${SYSCONFDIR}/ocservia-agent/privd.env"
 chown root:"${agent_group}" -- "${DESTDIR}${SYSCONFDIR}/ocservia-agent/privd.env"
 if [[ ! -e "${DESTDIR}${SYSCONFDIR}/ocservia-agent/agent.env" ]]; then

@@ -243,7 +243,7 @@ assert_privd_command_authority() {
   local unit="${rootfs}/usr/lib/systemd/system/ocservia-privd.service"
   sudo grep -Fxq 'EnvironmentFile=/etc/ocservia-agent/agent.env' "${unit}" \
     || { echo "privd does not load the pinned node/key environment" >&2; exit 1; }
-  sudo grep -Fxq "ExecStart=/usr/libexec/ocservia/ocservia-privd --agent-uid \$AGENT_UID --node-id \$NODE_ID --controller-command-key-file \$CONTROLLER_COMMAND_VERIFICATION_KEY_FILE --user-password-seal-key-file \$USER_PASSWORD_SEAL_PRIVATE_KEY_FILE --user-password-seal-key-id \$USER_PASSWORD_SEAL_KEY_ID --user-password-seal-public-key-sha256 \$USER_PASSWORD_SEAL_PUBLIC_KEY_SHA256 --p12-password-seal-key-file \$P12_PASSWORD_SEAL_PRIVATE_KEY_FILE --p12-password-seal-key-id \$P12_PASSWORD_SEAL_KEY_ID --p12-password-seal-public-key-sha256 \$P12_PASSWORD_SEAL_PUBLIC_KEY_SHA256" "${unit}" \
+  sudo grep -Fxq "ExecStart=/usr/libexec/ocservia/ocservia-privd --agent-uid \$AGENT_UID --node-id \$NODE_ID --controller-command-key-file \$CONTROLLER_COMMAND_VERIFICATION_KEY_FILE --attestation-key-file \$PRIVD_ATTESTATION_KEY_FILE --user-password-seal-key-file \$USER_PASSWORD_SEAL_PRIVATE_KEY_FILE --user-password-seal-key-id \$USER_PASSWORD_SEAL_KEY_ID --user-password-seal-public-key-sha256 \$USER_PASSWORD_SEAL_PUBLIC_KEY_SHA256 --p12-password-seal-key-file \$P12_PASSWORD_SEAL_PRIVATE_KEY_FILE --p12-password-seal-key-id \$P12_PASSWORD_SEAL_KEY_ID --p12-password-seal-public-key-sha256 \$P12_PASSWORD_SEAL_PUBLIC_KEY_SHA256" "${unit}" \
     || { echo "privd does not independently pin command authority" >&2; exit 1; }
 }
 assert_privd_command_authority
@@ -276,6 +276,7 @@ sudo sed -e 's/ --controller-command-key-file [^ ]*//' \
 sudo install -o root -g root -m 0644 "${work}/legacy-agent-relays.conf" \
   "${rootfs}/usr/lib/systemd/system/ocservia-agent.service.d/10-production-relays.conf"
 sudo sed -e '/^EnvironmentFile=\/etc\/ocservia-agent\/agent.env$/d' \
+  -e 's/ --attestation-key-file [^ ]*//' \
   -e 's/ --node-id .*//' \
   "${rootfs}/usr/lib/systemd/system/ocservia-privd.service" \
   | tee "${work}/legacy-privd.service" >/dev/null

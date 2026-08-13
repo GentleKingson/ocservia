@@ -216,6 +216,17 @@ func (s *Service) CreateSynthetic(ctx context.Context, request CreateRequest) (O
 	if nodeVersion != request.ExpectedVersion {
 		return Operation{}, false, ErrStaleRevision
 	}
+	if request.Kind != SyntheticNoop && request.Kind != SyntheticEcho {
+		var attestationReady bool
+		if err := tx.QueryRow(ctx, `SELECT
+			EXISTS(SELECT 1 FROM node_capabilities WHERE node_id=$1 AND capability='privd_result_attestation_v1' AND approved=true)
+			AND EXISTS(SELECT 1 FROM node_privd_attestation_keys WHERE node_id=$1 AND state='active' AND (valid_until IS NULL OR valid_until>now()))`, request.NodeID).Scan(&attestationReady); err != nil {
+			return Operation{}, false, fmt.Errorf("recheck privd result attestation: %w", err)
+		}
+		if !attestationReady {
+			return Operation{}, false, ErrCapabilityMissing
+		}
+	}
 	if request.Kind == ConfigPlan {
 		var configRevision int64
 		if err := tx.QueryRow(ctx, `SELECT COALESCE((SELECT revision FROM node_config_state WHERE node_id=$1),0)`, request.NodeID).Scan(&configRevision); err != nil {
@@ -248,7 +259,7 @@ func (s *Service) CreateSynthetic(ctx context.Context, request CreateRequest) (O
 		var planExpires time.Time
 		var planState string
 		err := tx.QueryRow(ctx, `SELECT p.workspace_id,p.node_id,p.expected_revision,p.candidate_hash,p.expires_at,o.state,
-			COALESCE((SELECT r.result FROM agent_command_results r WHERE r.command_id=o.command_id AND r.state='succeeded' ORDER BY r.created_at DESC LIMIT 1),''::bytea)
+			COALESCE((SELECT r.result FROM agent_command_results r WHERE r.command_id=o.command_id AND r.state='succeeded' AND r.receipt_verification_status='verified' ORDER BY r.created_at DESC LIMIT 1),''::bytea)
 			FROM config_plans p JOIN operations o ON o.id=p.operation_id WHERE p.id=$1`, request.ApplyMetadata.PlanID).
 			Scan(&planWorkspace, &planNode, &planRevision, &planHash, &planExpires, &planState, &resultBytes)
 		if err != nil {
@@ -449,6 +460,21 @@ func (s *Service) ListEvents(ctx context.Context, operationID, after uuid.UUID, 
 		events = append(events, event)
 	}
 	return events, rows.Err()
+}
+
+func (s *Service) EventSequence(ctx context.Context, operationID, eventID uuid.UUID) (int64, bool, error) {
+	if operationID == uuid.Nil || eventID == uuid.Nil {
+		return 0, false, nil
+	}
+	var sequence int64
+	err := s.pool.QueryRow(ctx, `SELECT sequence FROM operation_events WHERE id=$1 AND operation_id=$2`, eventID, operationID).Scan(&sequence)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return 0, false, nil
+	}
+	if err != nil {
+		return 0, false, fmt.Errorf("resolve operation event cursor: %w", err)
+	}
+	return sequence, true, nil
 }
 
 func (s *Service) Claim(ctx context.Context, workerID uuid.UUID, limit int, lease time.Duration) ([]Dispatch, error) {

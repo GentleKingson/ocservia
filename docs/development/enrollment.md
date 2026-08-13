@@ -32,11 +32,12 @@ SecretKey over a versioned, domain-separated canonical request. It binds the
 token hash, EndpointID, protocol version, Agent metadata, environment, nonce,
 timestamp, and sorted advertised capabilities. The Controller verifies this
 proof independently; the EndpointID reported by transportd is only an
-additional channel binding. If the response is lost, the same authenticated
-EndpointID can reuse the consumed token to recover its node ID before or after
-approval; revocation permanently ends recovery. Pending nodes cannot use the
-agent ALPN. The pending endpoint binding and advertised supported capabilities
-are retained for approval.
+additional channel binding. The token is strictly one-time: a concurrent or
+later replay is rejected even if the first response was lost. Operators recover
+the pending node ID through the authenticated Controller inventory rather than
+reusing root enrollment authority. Pending nodes cannot use the agent ALPN. The
+pending endpoint binding and advertised supported capabilities are retained for
+approval.
 
 Place the returned token in the protected token file, then run enrollment with
 the same identity directory used during preparation:

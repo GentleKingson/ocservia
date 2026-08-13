@@ -63,6 +63,9 @@ pub struct CommandRecord {
     pub state: CommandState,
     pub result: Option<Vec<u8>>,
     pub error_code: Option<String>,
+    /// Exact encoded root-signed receipt. Agent persists and replays it
+    /// without reconstructing any attested field.
+    pub privileged_result_proof: Option<Vec<u8>>,
     pub accepted_at: i64,
     pub updated_at: i64,
 }
@@ -151,6 +154,7 @@ impl Journal {
                 state TEXT NOT NULL CHECK (state IN ('accepted','running','succeeded','failed','unknown')),
                 result BLOB,
                 error_code TEXT CHECK (error_code IS NULL OR length(error_code) BETWEEN 1 AND 128),
+                privileged_result_proof BLOB CHECK (privileged_result_proof IS NULL OR length(privileged_result_proof) BETWEEN 1 AND 65536),
                 accepted_at INTEGER NOT NULL,
                 updated_at INTEGER NOT NULL,
                 CHECK (length(idempotency_key) = 16),
@@ -231,7 +235,7 @@ impl Journal {
         let outcome = match (by_key, by_command) {
             (None, None) => {
                 transaction.execute(
-                    "INSERT INTO command_journal(idempotency_key,command_id,payload_sha256,payload_hash_version,state,result,error_code,accepted_at,updated_at) VALUES (?1,?2,?3,?4,'accepted',NULL,NULL,?5,?5)",
+                    "INSERT INTO command_journal(idempotency_key,command_id,payload_sha256,payload_hash_version,state,result,error_code,privileged_result_proof,accepted_at,updated_at) VALUES (?1,?2,?3,?4,'accepted',NULL,NULL,NULL,?5,?5)",
                     rusqlite::params![idempotency_key.as_slice(), command_id.as_slice(), payload_sha256.as_slice(), payload_hash_version, now],
                 )?;
                 AcceptOutcome::Accepted(
@@ -315,6 +319,45 @@ impl Journal {
             .ok_or(rusqlite::Error::QueryReturnedNoRows)
     }
 
+    /// Atomically persists a terminal result together with the exact privd proof.
+    ///
+    /// # Errors
+    ///
+    /// Rejects missing or oversized proof and every invalid state transition.
+    #[allow(clippy::too_many_arguments)]
+    pub fn transition_command_attested(
+        &self,
+        idempotency_key: &[u8; 16],
+        from: &[CommandState],
+        to: CommandState,
+        result: Option<&[u8]>,
+        error_code: Option<&str>,
+        proof: &[u8],
+        now: i64,
+    ) -> Result<CommandRecord, rusqlite::Error> {
+        if from.is_empty()
+            || !matches!(to, CommandState::Succeeded | CommandState::Failed)
+            || result.is_some_and(|value| value.len() > 1024 * 1024)
+            || error_code.is_some_and(|value| value.is_empty() || value.len() > 128)
+            || proof.is_empty()
+            || proof.len() > 65_536
+        {
+            return Err(rusqlite::Error::InvalidQuery);
+        }
+        let current = self
+            .command(idempotency_key)?
+            .ok_or(rusqlite::Error::QueryReturnedNoRows)?;
+        if !from.contains(&current.state) {
+            return Err(rusqlite::Error::InvalidQuery);
+        }
+        self.connection.execute(
+            "UPDATE command_journal SET state=?2,result=?3,error_code=?4,privileged_result_proof=?5,updated_at=?6 WHERE idempotency_key=?1 AND state=?7",
+            rusqlite::params![idempotency_key.as_slice(), to.as_str(), result, error_code, proof, now, current.state.as_str()],
+        )?;
+        self.command(idempotency_key)?
+            .ok_or(rusqlite::Error::QueryReturnedNoRows)
+    }
+
     /// Atomically records a successful external command and its applied resource revision.
     ///
     /// # Errors
@@ -362,6 +405,66 @@ impl Journal {
         let updated = transaction.execute(
             "UPDATE command_journal SET state='succeeded',result=?3,error_code=NULL,updated_at=?4 WHERE idempotency_key=?1 AND command_id=?2 AND state='running'",
             rusqlite::params![idempotency_key.as_slice(), command_id.as_slice(), result, now],
+        )?;
+        if updated != 1 {
+            return Err(rusqlite::Error::InvalidQuery);
+        }
+        let completed = query_command(&transaction, idempotency_key)?
+            .ok_or(rusqlite::Error::QueryReturnedNoRows)?;
+        transaction.commit()?;
+        Ok(completed)
+    }
+
+    /// Atomically stores an applied revision, terminal result, and privd proof.
+    ///
+    /// # Errors
+    ///
+    /// Rejects invalid identity, revision regression, or receipt persistence failure.
+    pub fn complete_external_with_revision_attested(
+        &mut self,
+        idempotency_key: &[u8; 16],
+        command_id: &[u8; 16],
+        resource: AppliedResourceRevision<'_>,
+        result: &[u8],
+        proof: &[u8],
+        now: i64,
+    ) -> Result<CommandRecord, rusqlite::Error> {
+        if !matches!(resource.resource_type, "user" | "group" | "config")
+            || resource.resource_key.is_empty()
+            || resource.resource_key.len() > 64
+            || resource.revision == 0
+            || resource.revision > i64::MAX as u64
+            || result.len() > 1024 * 1024
+            || proof.is_empty()
+            || proof.len() > 65_536
+        {
+            return Err(rusqlite::Error::InvalidQuery);
+        }
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let record = query_command(&transaction, idempotency_key)?
+            .ok_or(rusqlite::Error::QueryReturnedNoRows)?;
+        if record.command_id != *command_id || record.state != CommandState::Running {
+            return Err(rusqlite::Error::InvalidQuery);
+        }
+        let revision =
+            i64::try_from(resource.revision).map_err(|_| rusqlite::Error::InvalidQuery)?;
+        transaction.execute(
+            "INSERT INTO applied_resource_revisions(resource_type,resource_key,revision,updated_at) VALUES(?1,?2,?3,?4) ON CONFLICT(resource_type,resource_key) DO UPDATE SET revision=excluded.revision,updated_at=excluded.updated_at WHERE excluded.revision >= applied_resource_revisions.revision",
+            rusqlite::params![resource.resource_type, resource.resource_key, revision, now],
+        )?;
+        let stored: i64 = transaction.query_row(
+            "SELECT revision FROM applied_resource_revisions WHERE resource_type=?1 AND resource_key=?2",
+            rusqlite::params![resource.resource_type, resource.resource_key],
+            |row| row.get(0),
+        )?;
+        if stored != revision {
+            return Err(rusqlite::Error::InvalidQuery);
+        }
+        let updated = transaction.execute(
+            "UPDATE command_journal SET state='succeeded',result=?3,error_code=NULL,privileged_result_proof=?4,updated_at=?5 WHERE idempotency_key=?1 AND command_id=?2 AND state='running'",
+            rusqlite::params![idempotency_key.as_slice(), command_id.as_slice(), result, proof, now],
         )?;
         if updated != 1 {
             return Err(rusqlite::Error::InvalidQuery);
@@ -802,6 +905,12 @@ fn migrate_command_journal(connection: &Connection) -> Result<(), rusqlite::Erro
             [],
         )?;
     }
+    if !has_column(connection, "privileged_result_proof")? {
+        connection.execute(
+            "ALTER TABLE command_journal ADD COLUMN privileged_result_proof BLOB CHECK (privileged_result_proof IS NULL OR length(privileged_result_proof) BETWEEN 1 AND 65536)",
+            [],
+        )?;
+    }
     Ok(())
 }
 
@@ -846,7 +955,7 @@ fn query_command(
     idempotency_key: &[u8; 16],
 ) -> Result<Option<CommandRecord>, rusqlite::Error> {
     let mut statement = connection.prepare(
-        "SELECT idempotency_key,command_id,payload_sha256,payload_hash_version,state,result,error_code,accepted_at,updated_at FROM command_journal WHERE idempotency_key=?1",
+        "SELECT idempotency_key,command_id,payload_sha256,payload_hash_version,state,result,error_code,privileged_result_proof,accepted_at,updated_at FROM command_journal WHERE idempotency_key=?1",
     )?;
     let mut rows = statement.query([idempotency_key.as_slice()])?;
     let Some(row) = rows.next()? else {
@@ -863,8 +972,9 @@ fn query_command(
         state: CommandState::parse(&row.get::<_, String>(4)?)?,
         result: row.get(5)?,
         error_code: row.get(6)?,
-        accepted_at: row.get(7)?,
-        updated_at: row.get(8)?,
+        privileged_result_proof: row.get(7)?,
+        accepted_at: row.get(8)?,
+        updated_at: row.get(9)?,
     }))
 }
 
@@ -873,7 +983,7 @@ fn query_command_by_id(
     command_id: &[u8; 16],
 ) -> Result<Option<CommandRecord>, rusqlite::Error> {
     let mut statement = connection.prepare(
-        "SELECT idempotency_key,command_id,payload_sha256,payload_hash_version,state,result,error_code,accepted_at,updated_at FROM command_journal WHERE command_id=?1",
+        "SELECT idempotency_key,command_id,payload_sha256,payload_hash_version,state,result,error_code,privileged_result_proof,accepted_at,updated_at FROM command_journal WHERE command_id=?1",
     )?;
     let mut rows = statement.query([command_id.as_slice()])?;
     let Some(row) = rows.next()? else {
@@ -887,8 +997,9 @@ fn query_command_by_id(
         state: CommandState::parse(&row.get::<_, String>(4)?)?,
         result: row.get(5)?,
         error_code: row.get(6)?,
-        accepted_at: row.get(7)?,
-        updated_at: row.get(8)?,
+        privileged_result_proof: row.get(7)?,
+        accepted_at: row.get(8)?,
+        updated_at: row.get(9)?,
     }))
 }
 
@@ -997,6 +1108,64 @@ mod tests {
         for suffix in ["", "-wal", "-shm"] {
             let _ = std::fs::remove_file(format!("{}{}", path.display(), suffix));
         }
+    }
+
+    #[test]
+    fn terminal_result_and_privd_proof_commit_and_replay_together() {
+        let path = temporary_path("attested-result");
+        let mut journal = Journal::open(&path).expect("open");
+        let key = *uuid::Uuid::now_v7().as_bytes();
+        let command = *uuid::Uuid::now_v7().as_bytes();
+        assert!(matches!(
+            journal
+                .accept_command(&key, &command, &[7; 32], 2, 10)
+                .expect("accept"),
+            AcceptOutcome::Accepted(_)
+        ));
+        journal
+            .transition_command(
+                &key,
+                &[CommandState::Accepted],
+                CommandState::Running,
+                None,
+                None,
+                11,
+            )
+            .expect("run");
+        let completed = journal
+            .transition_command_attested(
+                &key,
+                &[CommandState::Running],
+                CommandState::Succeeded,
+                Some(b"exact-result"),
+                None,
+                b"opaque-root-receipt",
+                12,
+            )
+            .expect("persist result and proof");
+        assert_eq!(
+            completed.result.as_deref(),
+            Some(b"exact-result".as_slice())
+        );
+        assert_eq!(
+            completed.privileged_result_proof.as_deref(),
+            Some(b"opaque-root-receipt".as_slice())
+        );
+        drop(journal);
+        let mut journal = Journal::open(&path).expect("reopen");
+        let replay = journal
+            .accept_command(&key, &command, &[7; 32], 2, 13)
+            .expect("replay");
+        let AcceptOutcome::Replay(record) = replay else {
+            panic!("expected exact replay");
+        };
+        assert_eq!(record.result, completed.result);
+        assert_eq!(
+            record.privileged_result_proof,
+            completed.privileged_result_proof
+        );
+        drop(journal);
+        cleanup(&path);
     }
 
     #[test]

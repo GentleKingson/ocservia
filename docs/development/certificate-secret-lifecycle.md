@@ -4,6 +4,13 @@ Certificate requests generate their private key on the managed node. The
 controller receives a signed CSR and public-key digest, then sends the CSR to a
 configured external PKI signer only after an independent, content-bound
 approval. The controller does not store a CA private key or a node private key.
+CSR self-signature is not privilege evidence. A CSR enters `csr_ready` only
+after Controller verifies a root privd receipt binding certificate ID, CSR and
+public-key digests, requested-subject digest, node, command, operation,
+idempotency key, and root effect record. Immediately before calling the signer,
+Controller locks the certificate row and rechecks exact CSR digest,
+receipt-bound request/version, node, approval hash, and non-revoked key. P12 and
+certificate-key revocation use the same terminal-result attestation rule.
 
 Configure the external HTTPS service with
 `OCSERV_CERTIFICATE_SIGNER_URL`, `OCSERV_CERTIFICATE_SIGNER_TOKEN`, and

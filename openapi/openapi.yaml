@@ -341,6 +341,76 @@ paths:
           $ref: "#/components/responses/Problem"
         default:
           $ref: "#/components/responses/Problem"
+  /nodes/{node_id}/privd-attestation-credentials:
+    post:
+      operationId: createPrivdAttestationCredential
+      summary: Create a root-provisioning-only one-time privd key credential
+      tags: [nodes]
+      parameters:
+        - $ref: "#/components/parameters/NodeId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/PrivdAttestationCredentialRequest" }
+      responses:
+        "201":
+          description: One-time root provisioning material, returned once.
+          headers:
+            Cache-Control: { schema: { type: string, const: no-store } }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/PrivdAttestationCredential" }
+        "400": { $ref: "#/components/responses/Problem" }
+        "404": { $ref: "#/components/responses/Problem" }
+        "503": { $ref: "#/components/responses/Problem" }
+        default: { $ref: "#/components/responses/Problem" }
+  /nodes/{node_id}/privd-attestation-keys:register:
+    post:
+      operationId: registerPrivdAttestationKey
+      summary: Atomically consume root provisioning proof and bind a privd key
+      tags: [nodes]
+      security: []
+      parameters:
+        - $ref: "#/components/parameters/NodeId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/PrivdAttestationRegistration" }
+      responses:
+        "201":
+          description: The root-authenticated key is active.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/PrivdAttestationKeyState" }
+        "400": { $ref: "#/components/responses/Problem" }
+        "401": { $ref: "#/components/responses/Problem" }
+        "409": { $ref: "#/components/responses/Problem" }
+        "503": { $ref: "#/components/responses/Problem" }
+        default: { $ref: "#/components/responses/Problem" }
+  /nodes/{node_id}/privd-attestation-keys:revoke:
+    post:
+      operationId: revokePrivdAttestationKey
+      summary: Revoke a node privd result attestation key
+      tags: [nodes]
+      parameters:
+        - $ref: "#/components/parameters/NodeId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/PrivdAttestationRevokeRequest" }
+      responses:
+        "200":
+          description: The key is revoked.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/PrivdAttestationKeyState" }
+        "400": { $ref: "#/components/responses/Problem" }
+        "404": { $ref: "#/components/responses/Problem" }
+        "503": { $ref: "#/components/responses/Problem" }
+        default: { $ref: "#/components/responses/Problem" }
   /nodes:
     get:
       operationId: listNodes
@@ -2007,7 +2077,7 @@ components:
     DevelopmentRuntime:
       type: object
       additionalProperties: false
-      required: [goroutines, db_acquired, db_idle, db_total]
+      required: [goroutines, db_acquired, db_idle, db_total, sse_active_streams, sse_rejected_streams, sse_watchers, sse_unhealthy_watchers, sse_sql_queries, sse_slow_consumer_disconnects, sse_database_backoff_seconds, privd_receipt_verifications, privd_attestation_key_states]
       properties:
         goroutines:
           type: integer
@@ -2025,6 +2095,80 @@ components:
           type: integer
           format: int32
           minimum: 0
+        sse_active_streams: { type: integer, format: int32, minimum: 0 }
+        sse_rejected_streams: { type: integer, format: int64, minimum: 0 }
+        sse_watchers: { type: integer, format: int32, minimum: 0 }
+        sse_unhealthy_watchers: { type: integer, format: int32, minimum: 0 }
+        sse_sql_queries: { type: integer, format: int64, minimum: 0 }
+        sse_slow_consumer_disconnects: { type: integer, format: int64, minimum: 0 }
+        sse_database_backoff_seconds: { type: number, format: double, minimum: 0 }
+        privd_receipt_verifications:
+          type: array
+          maxItems: 11
+          items: { $ref: "#/components/schemas/PrivdReceiptVerificationMetric" }
+        privd_attestation_key_states:
+          type: array
+          maxItems: 3
+          items: { $ref: "#/components/schemas/PrivdAttestationKeyStateMetric" }
+    PrivdReceiptVerificationMetric:
+      type: object
+      additionalProperties: false
+      required: [outcome, reason, total]
+      properties:
+        outcome: { type: string, enum: [not_required, verified, missing, invalid, unknown_key, revoked_key] }
+        reason: { type: string, enum: [not_required, verified, receipt_missing, receipt_malformed, receipt_version_unsupported, receipt_claim_mismatch, receipt_key_lookup_failed, receipt_key_outside_validity, receipt_signature_invalid, receipt_key_unknown, receipt_key_revoked] }
+        total: { type: integer, format: int64, minimum: 0 }
+    PrivdAttestationKeyStateMetric:
+      type: object
+      additionalProperties: false
+      required: [state, total]
+      properties:
+        state: { type: string, enum: [pending, active, revoked] }
+        total: { type: integer, format: int64, minimum: 0 }
+    PrivdAttestationCredentialRequest:
+      type: object
+      additionalProperties: false
+      required: [ttl_seconds, reason]
+      properties:
+        ttl_seconds: { type: integer, format: int64, minimum: 300, maximum: 3600 }
+        reason: { type: string, minLength: 1, maxLength: 512 }
+    PrivdAttestationCredential:
+      type: object
+      additionalProperties: false
+      required: [id, node_id, credential, controller_nonce_hex, credential_context_sha256_hex, expires_at]
+      properties:
+        id: { $ref: "#/components/schemas/UuidV7" }
+        node_id: { $ref: "#/components/schemas/UuidV7" }
+        credential: { type: string, pattern: "^[A-Za-z0-9_-]{43}$", writeOnly: true }
+        controller_nonce_hex: { type: string, pattern: "^[0-9a-f]{64}$" }
+        credential_context_sha256_hex: { type: string, pattern: "^[0-9a-f]{64}$" }
+        expires_at: { $ref: "#/components/schemas/UtcDateTime" }
+    PrivdAttestationRegistration:
+      type: object
+      additionalProperties: false
+      required: [credential, version, key_id, public_key, controller_nonce, credential_context_sha256, signature]
+      properties:
+        credential: { type: string, pattern: "^[A-Za-z0-9_-]{43}$", writeOnly: true }
+        version: { type: integer, const: 1 }
+        key_id: { type: string, pattern: "^ed25519-sha256:[0-9a-f]{64}$" }
+        public_key: { type: string, pattern: "^[A-Za-z0-9_-]{43}$" }
+        controller_nonce: { type: string, pattern: "^[A-Za-z0-9_-]{43}$" }
+        credential_context_sha256: { type: string, pattern: "^[A-Za-z0-9_-]{43}$" }
+        signature: { type: string, pattern: "^[A-Za-z0-9_-]{86}$" }
+    PrivdAttestationRevokeRequest:
+      type: object
+      additionalProperties: false
+      required: [key_id, reason]
+      properties:
+        key_id: { type: string, pattern: "^ed25519-sha256:[0-9a-f]{64}$" }
+        reason: { type: string, minLength: 1, maxLength: 512 }
+    PrivdAttestationKeyState:
+      type: object
+      additionalProperties: false
+      required: [key_id, state]
+      properties:
+        key_id: { type: string, pattern: "^ed25519-sha256:[0-9a-f]{64}$" }
+        state: { type: string, enum: [active, revoked] }
     EnrollmentTokenRequest:
       type: object
       additionalProperties: false

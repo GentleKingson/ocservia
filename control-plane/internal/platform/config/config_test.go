@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestSensitiveConfigurationFiles(t *testing.T) {
@@ -339,6 +340,32 @@ func TestUserOperationConcurrency(t *testing.T) {
 		return value, ok
 	}); err == nil {
 		t.Fatal("accepted user operation concurrency above the batch bound")
+	}
+}
+
+func TestSSECapacityConfiguration(t *testing.T) {
+	values := map[string]string{
+		"OCSERV_DATABASE_URL":            "postgres://db/test",
+		"OCSERV_SSE_GLOBAL_LIMIT":        "64",
+		"OCSERV_SSE_IDENTITY_LIMIT":      "6",
+		"OCSERV_SSE_SESSION_LIMIT":       "3",
+		"OCSERV_SSE_WORKSPACE_LIMIT":     "16",
+		"OCSERV_SSE_RESOURCE_LIMIT":      "8",
+		"OCSERV_SSE_WATCHER_LIMIT":       "32",
+		"OCSERV_SSE_QUEUE_CAPACITY":      "64",
+		"OCSERV_SSE_MAX_LIFETIME":        "20m",
+		"OCSERV_SSE_REVALIDATE_INTERVAL": "15s",
+	}
+	cfg, err := Load(nil, func(key string) (string, bool) { value, ok := values[key]; return value, ok })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.EventStreams.GlobalStreams != 64 || cfg.EventStreams.SessionStreams != 3 || cfg.EventStreams.MaxLifetime != 20*time.Minute {
+		t.Fatalf("unexpected SSE config: %+v", cfg.EventStreams)
+	}
+	values["OCSERV_SSE_SESSION_LIMIT"] = "7"
+	if _, err := Load(nil, func(key string) (string, bool) { value, ok := values[key]; return value, ok }); err == nil {
+		t.Fatal("accepted a session limit above the identity limit")
 	}
 }
 

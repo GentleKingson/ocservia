@@ -152,6 +152,35 @@ func (s *Service) CreateToken(ctx context.Context, spec TokenSpec) (Token, error
 	return token, nil
 }
 
+// ValidateEnrollment authenticates the first application message without
+// consuming its one-time authority. Enroll repeats these checks while holding
+// the token row lock and atomically consumes it with the pending-node write.
+func (s *Service) ValidateEnrollment(ctx context.Context, request *agentv1.EnrollRequest) error {
+	if err := validateEnrollment(request); err != nil {
+		return fmt.Errorf("%w: %v", ErrInvalidRequest, err)
+	}
+	if err := verifyEnrollmentProof(request); err != nil {
+		return err
+	}
+	raw, err := base64.RawURLEncoding.DecodeString(request.GetToken())
+	if err != nil || len(raw) != 32 {
+		return ErrInvalidToken
+	}
+	digest := sha256.Sum256(raw)
+	var permitted bool
+	err = s.pool.QueryRow(ctx, `SELECT EXISTS(
+		SELECT 1 FROM enrollment_tokens
+		WHERE token_hash=$1 AND expected_environment=$2 AND expected_endpoint_id=$3
+		  AND consumed_at IS NULL AND expires_at>$4)`, digest[:], request.GetEnvironment(), request.GetEndpointId(), s.now()).Scan(&permitted)
+	if err != nil {
+		return fmt.Errorf("validate enrollment token: %w", err)
+	}
+	if !permitted {
+		return ErrInvalidToken
+	}
+	return nil
+}
+
 func (s *Service) Enroll(ctx context.Context, request *agentv1.EnrollRequest) (*agentv1.EnrollResponse, error) {
 	if err := validateEnrollment(request); err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrInvalidRequest, err)
@@ -175,10 +204,9 @@ func (s *Service) Enroll(ctx context.Context, request *agentv1.EnrollRequest) (*
 	var expectedEndpoint []byte
 	var expiresAt time.Time
 	var consumedAt *time.Time
-	var consumedNodeID *uuid.UUID
 	err = tx.QueryRow(ctx, `SELECT id, workspace_id, expected_environment, expected_node_name,
-	        expected_endpoint_id, expires_at, consumed_at, consumed_node_id FROM enrollment_tokens WHERE token_hash=$1 FOR UPDATE`, digest[:]).
-		Scan(&tokenID, &workspaceID, &environment, &expectedName, &expectedEndpoint, &expiresAt, &consumedAt, &consumedNodeID)
+	        expected_endpoint_id, expires_at, consumed_at FROM enrollment_tokens WHERE token_hash=$1 FOR UPDATE`, digest[:]).
+		Scan(&tokenID, &workspaceID, &environment, &expectedName, &expectedEndpoint, &expiresAt, &consumedAt)
 	if err := validateLockedToken(err, consumedAt != nil, expiresAt, s.now()); err != nil {
 		return nil, err
 	}
@@ -187,30 +215,6 @@ func (s *Service) Enroll(ctx context.Context, request *agentv1.EnrollRequest) (*
 	}
 	if len(expectedEndpoint) != 32 || subtle.ConstantTimeCompare(expectedEndpoint, request.GetEndpointId()) != 1 {
 		return nil, ErrEndpointMismatch
-	}
-	if consumedAt != nil {
-		if consumedNodeID == nil {
-			return nil, ErrInvalidToken
-		}
-		var nodeStatus, endpointState string
-		err := tx.QueryRow(ctx, `SELECT n.status,k.state FROM nodes n JOIN node_endpoint_keys k ON k.node_id=n.id WHERE n.id=$1 AND k.endpoint_id=$2`, *consumedNodeID, request.GetEndpointId()).Scan(&nodeStatus, &endpointState)
-		if err != nil {
-			if errors.Is(err, pgx.ErrNoRows) {
-				return nil, ErrInvalidToken
-			}
-			return nil, fmt.Errorf("check enrollment retry: %w", err)
-		}
-		matching, err := sealingKeysMatch(ctx, tx, *consumedNodeID, request.GetSealingKeys())
-		if err != nil || !matching {
-			return nil, ErrInvalidToken
-		}
-		result := agentv1.HandshakeResult_HANDSHAKE_RESULT_PENDING_APPROVAL
-		if (nodeStatus == "active" || nodeStatus == "offline") && endpointState == "active" {
-			result = agentv1.HandshakeResult_HANDSHAKE_RESULT_ACCEPTED
-		} else if nodeStatus != "pending" || endpointState != "pending" {
-			return nil, ErrInvalidToken
-		}
-		return &agentv1.EnrollResponse{Result: result, NodeId: (*consumedNodeID)[:], ControllerEndpointId: s.controllerEndpointID}, nil
 	}
 	if err := audit.LockChain(ctx, tx, workspaceID); err != nil {
 		return nil, err
@@ -532,6 +536,39 @@ func (s *Service) CheckEndpoint(ctx context.Context, request *transportv1.CheckE
 	return permitted, err
 }
 
+func (s *Service) ListNodeTrust(ctx context.Context) ([]*transportv1.NodeTrustBinding, error) {
+	rows, err := s.pool.Query(ctx, `SELECT n.id,k.endpoint_id,
+		CASE WHEN n.status='revoked' OR k.state='revoked' THEN 'revoked' ELSE 'active' END,
+		n.authorization_revision
+		FROM nodes n JOIN node_endpoint_keys k ON k.node_id=n.id
+		WHERE (n.status IN ('active','offline') AND k.state='active')
+		   OR k.state='revoked'
+		ORDER BY n.id`)
+	if err != nil {
+		return nil, fmt.Errorf("list node trust snapshot: %w", err)
+	}
+	defer rows.Close()
+	bindings := make([]*transportv1.NodeTrustBinding, 0)
+	for rows.Next() {
+		var nodeID uuid.UUID
+		var endpointID []byte
+		var state string
+		var revision uint64
+		if err := rows.Scan(&nodeID, &endpointID, &state, &revision); err != nil {
+			return nil, fmt.Errorf("scan node trust snapshot: %w", err)
+		}
+		trustState := transportv1.NodeTrustState_NODE_TRUST_STATE_ACTIVE
+		if state == "revoked" {
+			trustState = transportv1.NodeTrustState_NODE_TRUST_STATE_REVOKED
+		}
+		bindings = append(bindings, &transportv1.NodeTrustBinding{NodeId: nodeID[:], EndpointId: endpointID, State: trustState, Revision: revision})
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate node trust snapshot: %w", err)
+	}
+	return bindings, nil
+}
+
 func (s *Service) AuthorizeSession(ctx context.Context, request *transportv1.AuthorizeSessionRequest) (*agentv1.SessionHandshakeResponse, error) {
 	handshake := request.GetHandshake()
 	response := &agentv1.SessionHandshakeResponse{ProtocolMajor: ProtocolMajor, ProtocolMinor: ProtocolMinor, MaxMessageSize: MaxMessageSize, ControllerVersion: s.controllerVersion}
@@ -778,7 +815,7 @@ func validateLockedToken(queryErr error, consumed bool, expiresAt, now time.Time
 	if queryErr != nil {
 		return fmt.Errorf("lock enrollment token: %w", queryErr)
 	}
-	if !consumed && !now.Before(expiresAt) {
+	if consumed || !now.Before(expiresAt) {
 		return ErrInvalidToken
 	}
 	return nil

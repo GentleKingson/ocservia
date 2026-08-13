@@ -26,9 +26,12 @@ tower.workspace = true
 hyper-util.workspace = true
 
 [dev-dependencies]
+ed25519-dalek.workspace = true
 iroh = { workspace = true, features = ["test-utils"] }
 iroh-relay.workspace = true
 ocservia-agent-identity = { version = "=0.1.0", path = "../agent-identity" }
+ocservia-privd-attestation = { version = "=0.1.0", path = "../privd-attestation" }
+sha2.workspace = true
 
 [lints]
 workspace = true

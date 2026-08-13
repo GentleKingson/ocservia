@@ -11,6 +11,7 @@ HEARTBEAT_COUNT="${HEARTBEAT_COUNT:-2}"
 HEARTBEAT_INTERVAL_MS="${HEARTBEAT_INTERVAL_MS:-30000}"
 REQUEST_CONCURRENCY="${REQUEST_CONCURRENCY:-32}"
 QUEUE_CAPACITY="${QUEUE_CAPACITY:-2048}"
+SSE_VIEWERS="${SSE_VIEWERS:-$([[ "${P1_PROFILE}" == smoke ]] && printf 16 || printf 100)}"
 PREFIX="$(printf '%s' "${RUN_ID}" | tr '[:upper:]_' '[:lower:]-' | tr -cd 'a-z0-9-')"
 COMPOSE_PROJECT="${COMPOSE_PROJECT:-ocservia-i08-${PREFIX}}"
 TMP_BASE="${RUNNER_TEMP:-${TMPDIR:-/tmp}}"
@@ -25,6 +26,7 @@ ARTIFACT_DIR="${ARTIFACT_DIR:-}"
 AUTH_TOKEN="${OCSERV_DEV_AUTH_TOKEN:-local-development-token-32-characters}"
 API_PORT=$((22000 + $(printf '%s' "${RUN_ID}" | cksum | awk '{print $1}') % 20000))
 SAMPLE_PID=""
+SSE_PIDS=()
 SAMPLER_EXIT=0
 # These state variables are read and updated by the sourced sampler helpers.
 # shellcheck disable=SC2034
@@ -51,6 +53,10 @@ if [[ "$(cd "$(dirname "${TMP_ROOT}")" && pwd)/$(basename "${TMP_ROOT}")" == "${
 fi
 
 validate_capacity_settings "${AGENT_COUNT}" "${HEARTBEAT_COUNT}" "${HEARTBEAT_INTERVAL_MS}" "${REQUEST_CONCURRENCY}" "${QUEUE_CAPACITY}"
+if [[ ! "${SSE_VIEWERS}" =~ ^[1-9][0-9]*$ ]] || ((SSE_VIEWERS > 128)); then
+  echo "SSE_VIEWERS must be an integer in 1..128" >&2
+  exit 2
+fi
 if [[ ! "${MINIMUM_RESOURCE_SAMPLES}" =~ ^[1-9][0-9]*$ ]]; then
   echo "MINIMUM_RESOURCE_SAMPLES must be a positive integer" >&2
   exit 2
@@ -70,6 +76,11 @@ cleanup() {
   set +e
   if [[ -n "${SAMPLE_PID}" ]] && ! stop_sampler; then
     TEST_EXIT=1
+  fi
+  : >"${TMP_ROOT}/sse-stop" 2>/dev/null || true
+  if ((${#SSE_PIDS[@]} > 0)); then
+    for pid in "${SSE_PIDS[@]}"; do kill -TERM "${pid}" 2>/dev/null || true; done
+    for pid in "${SSE_PIDS[@]}"; do wait "${pid}" 2>/dev/null || true; done
   fi
   if [[ -n "${ARTIFACT_DIR}" && "${ARTIFACT_DIR}" != "${TMP_ROOT}"* ]] && ! mkdir -p "${ARTIFACT_DIR}"; then
     CLEANUP_EXIT=1
@@ -98,6 +109,7 @@ cleanup() {
     [[ -f "${TMP_ROOT}/metrics.txt" ]] && cp -f "${TMP_ROOT}/metrics.txt" "${ARTIFACT_DIR}/p1-metrics.txt"
     [[ -f "${TMP_ROOT}/summary.json" ]] && cp -f "${TMP_ROOT}/summary.json" "${ARTIFACT_DIR}/p1-summary.json"
     [[ -f "${TMP_ROOT}/slow.sse" ]] && cp -f "${TMP_ROOT}/slow.sse" "${ARTIFACT_DIR}/slow.sse"
+    [[ -f "${TMP_ROOT}/last-event-id-reconnect.sse" ]] && cp -f "${TMP_ROOT}/last-event-id-reconnect.sse" "${ARTIFACT_DIR}/last-event-id-reconnect.sse"
     [[ -f "${TMP_ROOT}/interrupted-operation-initial.json" ]] && cp -f "${TMP_ROOT}/interrupted-operation-initial.json" "${ARTIFACT_DIR}/interrupted-operation-initial.json"
     [[ -f "${TMP_ROOT}/interrupted-operation-final.json" ]] && cp -f "${TMP_ROOT}/interrupted-operation-final.json" "${ARTIFACT_DIR}/interrupted-operation-final.json"
     [[ -f "${TMP_ROOT}/interrupted-operation-summary.json" ]] && cp -f "${TMP_ROOT}/interrupted-operation-summary.json" "${ARTIFACT_DIR}/interrupted-operation-summary.json"
@@ -113,9 +125,9 @@ trap cleanup EXIT INT TERM
 
 mkdir -p "${TMP_ROOT}"
 df -h >"${TMP_ROOT}/disk-before.txt"
-printf 'profile=%s\nagent_count=%s\nheartbeat_count=%s\nheartbeat_interval_ms=%s\nrequest_concurrency=%s\nqueue_capacity=%s\nminimum_resource_samples=%s\n' \
+printf 'profile=%s\nagent_count=%s\nheartbeat_count=%s\nheartbeat_interval_ms=%s\nrequest_concurrency=%s\nqueue_capacity=%s\nsse_viewers=%s\nminimum_resource_samples=%s\n' \
   "${P1_PROFILE}" "${AGENT_COUNT}" "${HEARTBEAT_COUNT}" "${HEARTBEAT_INTERVAL_MS}" \
-  "${REQUEST_CONCURRENCY}" "${QUEUE_CAPACITY}" "${MINIMUM_RESOURCE_SAMPLES}" \
+  "${REQUEST_CONCURRENCY}" "${QUEUE_CAPACITY}" "${SSE_VIEWERS}" "${MINIMUM_RESOURCE_SAMPLES}" \
   >"${TMP_ROOT}/run-parameters.txt"
 if [[ -n "${ARTIFACT_DIR}" && "${ARTIFACT_DIR}" != "${TMP_ROOT}"* ]]; then
   mkdir -p "${ARTIFACT_DIR}"
@@ -138,7 +150,12 @@ printf '%s\n' \
   '      - /run/ocserv-platform/stats.json' \
   '  control-plane:' \
   '    environment:' \
-  "      OCSERV_TRANSPORT_QUEUE_CAPACITY: \"${QUEUE_CAPACITY}\"" >"${OVERRIDE}"
+  "      OCSERV_TRANSPORT_QUEUE_CAPACITY: \"${QUEUE_CAPACITY}\"" \
+  '      OCSERV_SSE_GLOBAL_LIMIT: "128"' \
+  '      OCSERV_SSE_IDENTITY_LIMIT: "128"' \
+  '      OCSERV_SSE_SESSION_LIMIT: "128"' \
+  '      OCSERV_SSE_WORKSPACE_LIMIT: "128"' \
+  '      OCSERV_SSE_RESOURCE_LIMIT: "128"' >"${OVERRIDE}"
 
 wait_ready() {
   for _ in $(seq 1 120); do
@@ -203,7 +220,7 @@ record_sample() {
   for value in "${control_rss}" "${control_fd}" "${stub_rss}" "${stub_fd}"; do
     [[ "${value}" =~ ^[0-9]+$ ]] || { echo "resource sample contains a non-numeric process value" >&2; return 1; }
   done
-  jq -e '(.goroutines|type)=="number" and (.db_acquired|type)=="number" and (.db_idle|type)=="number" and (.db_total|type)=="number"' <<<"${runtime}" >/dev/null
+  jq -e '(.goroutines|type)=="number" and (.db_acquired|type)=="number" and (.db_idle|type)=="number" and (.db_total|type)=="number" and (.sse_active_streams|type)=="number" and (.sse_watchers|type)=="number" and (.sse_unhealthy_watchers|type)=="number" and (.sse_sql_queries|type)=="number" and (.sse_slow_consumer_disconnects|type)=="number"' <<<"${runtime}" >/dev/null
   jq -e '(.active_tasks|type)=="number" and (.task_capacity|type)=="number"' <<<"${stub}" >/dev/null
   jq -e '(.active|type)=="number" and (.waiting|type)=="number" and (.available|type)=="boolean"' <<<"${postgres_io}" >/dev/null
   jq -cn --arg at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --arg phase "${phase}" \
@@ -270,7 +287,7 @@ sample_phase_now() {
   check_sampler
 }
 
-echo "starting ${P1_PROFILE} profile: ${AGENT_COUNT} agents, ${HEARTBEAT_COUNT} heartbeats, ${HEARTBEAT_INTERVAL_MS} ms cadence, concurrency ${REQUEST_CONCURRENCY}, queue ${QUEUE_CAPACITY}"
+echo "starting ${P1_PROFILE} profile: ${AGENT_COUNT} agents, ${SSE_VIEWERS} SSE viewers, ${HEARTBEAT_COUNT} heartbeats, ${HEARTBEAT_INTERVAL_MS} ms cadence, concurrency ${REQUEST_CONCURRENCY}, queue ${QUEUE_CAPACITY}"
 RUN_STARTED_EPOCH="$(date -u +%s)"
 "${COMPOSE[@]}" up --build -d postgres otel-collector transportd-stub migrate control-plane
 wait_ready
@@ -322,9 +339,56 @@ printf '%s\n' "request latency seconds: ${latency_percentiles}" \
 sample_phase_now slow-sse
 last_event="$(curl --fail --silent -H "Authorization: Bearer ${AUTH_TOKEN}" \
   "http://127.0.0.1:${API_PORT}/api/v1/events?page_size=200" | jq -r '.items[-1].id')"
-timeout 40s curl --silent --no-buffer --limit-rate 16 \
+workspace_id="$(psql_value 'SELECT workspace_id FROM operations ORDER BY created_at DESC LIMIT 1')"
+test -n "${workspace_id}"
+sse_url="http://127.0.0.1:${API_PORT}/api/v1/events/stream?workspace_id=${workspace_id}"
+stream_viewer() {
+  while [[ ! -e "${TMP_ROOT}/sse-stop" ]]; do
+    curl --fail --silent --no-buffer --max-time 20 \
+      -H "Authorization: Bearer ${AUTH_TOKEN}" -H "Last-Event-ID: ${last_event}" \
+      "${sse_url}" >/dev/null || true
+  done
+}
+queries_before="$(curl --fail --silent "http://127.0.0.1:${API_PORT}/api/v1/development/runtime" | jq -r .sse_sql_queries)"
+for _ in $(seq 1 "${SSE_VIEWERS}"); do stream_viewer & SSE_PIDS+=("$!"); done
+for _ in $(seq 1 100); do
+  active_streams="$(curl --fail --silent "http://127.0.0.1:${API_PORT}/api/v1/development/runtime" | jq -r .sse_active_streams)"
+  [[ "${active_streams}" -ge "${SSE_VIEWERS}" ]] && break
+  sleep 0.1
+done
+test "${active_streams}" -ge "${SSE_VIEWERS}"
+
+# A live reconnect from the durable cursor must receive the next committed
+# event, not replay the cursor or wait for a new watcher owned by that client.
+cursor_stream="${TMP_ROOT}/last-event-id-reconnect.sse"
+(curl --fail --silent --no-buffer --max-time 20 \
   -H "Authorization: Bearer ${AUTH_TOKEN}" -H "Last-Event-ID: ${last_event}" \
-  "http://127.0.0.1:${API_PORT}/api/v1/events/stream" >"${TMP_ROOT}/slow.sse" &
+  "${sse_url}" >"${cursor_stream}" || true) &
+cursor_pid=$!
+before="$(psql_value "SELECT count(*) FROM operations WHERE state = 'succeeded'")"
+create_probe 1 25 >/dev/null
+wait_succeeded "$((before + 1))"
+replayed_event=""
+for _ in $(seq 1 100); do
+  replayed_event="$(awk '/^id: / { sub(/\r$/, "", $2); if ($2 != "") { print $2; exit } }' "${cursor_stream}")"
+  [[ -n "${replayed_event}" ]] && break
+  sleep 0.1
+done
+test -n "${replayed_event}"
+test "${replayed_event}" != "${last_event}"
+kill -TERM "${cursor_pid}" 2>/dev/null || true
+wait "${cursor_pid}" 2>/dev/null || true
+echo "Last-Event-ID reconnect passed: ${last_event} -> ${replayed_event}"
+printf 'Last-Event-ID reconnect: %s -> %s\n' "${last_event}" "${replayed_event}" >>"${TMP_ROOT}/metrics.txt"
+
+sleep 3
+sse_runtime="$(curl --fail --silent "http://127.0.0.1:${API_PORT}/api/v1/development/runtime")"
+test "$(jq -r .sse_watchers <<<"${sse_runtime}")" -eq 1
+shared_queries="$(( $(jq -r .sse_sql_queries <<<"${sse_runtime}") - queries_before ))"
+test "${shared_queries}" -le 20
+timeout 40s curl --fail --silent --no-buffer --limit-rate 16 \
+  -H "Authorization: Bearer ${AUTH_TOKEN}" -H "Last-Event-ID: ${last_event}" \
+  "${sse_url}" >"${TMP_ROOT}/slow.sse" &
 slow_pid=$!
 before="$(psql_value "SELECT count(*) FROM operations WHERE state = 'succeeded'")"
 for _ in $(seq 1 8); do create_probe 1 25 >/dev/null; done
@@ -333,6 +397,7 @@ kill -TERM "${slow_pid}" 2>/dev/null || true
 wait "${slow_pid}" 2>/dev/null || true
 check_sampler
 echo "slow SSE consumer recovery passed"
+printf 'sse viewers: %s\nsse shared watcher queries over 3 seconds: %s\n' "${SSE_VIEWERS}" "${shared_queries}" >>"${TMP_ROOT}/metrics.txt"
 
 # Controller restart must reconnect to the retained stream and continue ingest.
 pause_periodic_sampler controller-restart
@@ -340,6 +405,12 @@ pause_periodic_sampler controller-restart
 wait_ready
 resume_periodic_sampler
 sample_phase_now controller-restart
+for _ in $(seq 1 100); do
+  active_streams="$(curl --fail --silent "http://127.0.0.1:${API_PORT}/api/v1/development/runtime" | jq -r .sse_active_streams)"
+  [[ "${active_streams}" -ge "${SSE_VIEWERS}" ]] && break
+  sleep 0.1
+done
+test "${active_streams}" -ge "${SSE_VIEWERS}"
 before="$(psql_value "SELECT count(*) FROM operations WHERE state = 'succeeded'")"
 create_probe 2 100 >/dev/null
 wait_succeeded "$((before + 1))"
@@ -401,11 +472,32 @@ pause_periodic_sampler postgres-recovered
 wait_ready
 resume_periodic_sampler
 sample_phase_now postgres-recovered
+recovered_sse_runtime="$(curl --fail --silent "http://127.0.0.1:${API_PORT}/api/v1/development/runtime")"
+test "$(jq -r .sse_unhealthy_watchers <<<"${recovered_sse_runtime}")" -eq 0
 before="$(psql_value "SELECT count(*) FROM operations WHERE state = 'succeeded'")"
 create_probe 1 25 >/dev/null
 wait_succeeded "$((before + 1))"
 check_sampler
 echo "database outage recovery passed"
+
+: >"${TMP_ROOT}/sse-stop"
+for pid in "${SSE_PIDS[@]}"; do kill -TERM "${pid}" 2>/dev/null || true; done
+for pid in "${SSE_PIDS[@]}"; do wait "${pid}" 2>/dev/null || true; done
+SSE_PIDS=()
+for _ in $(seq 1 100); do
+  released_runtime="$(curl --fail --silent "http://127.0.0.1:${API_PORT}/api/v1/development/runtime")"
+  if [[ "$(jq -r .sse_active_streams <<<"${released_runtime}")" -eq 0 ]] && \
+    [[ "$(jq -r .sse_watchers <<<"${released_runtime}")" -eq 0 ]]; then
+    break
+  fi
+  sleep 0.1
+done
+test "$(jq -r .sse_active_streams <<<"${released_runtime}")" -eq 0
+test "$(jq -r .sse_watchers <<<"${released_runtime}")" -eq 0
+sample_phase_now sse-released
+printf 'sse released active: %s\nsse released watchers: %s\n' \
+  "$(jq -r .sse_active_streams <<<"${released_runtime}")" \
+  "$(jq -r .sse_watchers <<<"${released_runtime}")" >>"${TMP_ROOT}/metrics.txt"
 
 stop_sampler
 TOTAL_RUN_SECONDS=$(($(date -u +%s) - RUN_STARTED_EPOCH))

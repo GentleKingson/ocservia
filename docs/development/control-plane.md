@@ -21,6 +21,33 @@ UDS. Events are idempotently stored, exposed by `GET /api/v1/events`, and
 streamed by `GET /api/v1/events/stream`. SSE resumes with `Last-Event-ID`; the
 REST collection remains the complete rebuild source.
 
+Both platform and operation streams use one shared admission manager. The safe
+production defaults are 128 global, 8 per identity, 4 per session, 32 per
+workspace, and 16 per resource, with at most 64 active database watchers and a
+128-event subscriber queue. Admission happens before SSE headers; scoped
+excess returns 429, global/watcher overload returns 503, and both include
+`Retry-After`. Empty scope counters are deleted, so the admission maps stay
+bounded by the global stream count.
+
+Subscribers do not own PostgreSQL tickers. One ref-counted watcher per active
+workspace or operation polls the durable event tables and fans out through
+bounded queues. A 1, 10, or 100 subscriber burst therefore produces one
+steady-state query stream for that scope. Database errors use jittered
+exponential backoff up to 10 seconds; a slow queue is disconnected and resumes
+with its cursor rather than blocking peers. Watchers stop after the final
+subscriber. Streams reauthenticate and reauthorize every 30 seconds, close no
+later than session expiry or the 30-minute maximum, and operation streams drain
+the terminal event before closing. Shutdown cancels every watcher. All limits
+and intervals use validated `OCSERV_SSE_*` settings; invalid values fail startup.
+Runtime metrics expose active and unhealthy watcher counts, query volume, and
+backoff. Readiness fails while any active watcher is recovering from a durable
+event-table query failure, then returns healthy after cursor catch-up succeeds.
+The bounded series are `sse_active_streams`,
+`sse_admission_rejections_total`, `sse_watchers`,
+`sse_slow_consumer_disconnects_total`, and
+`sse_database_backoff_seconds`; identity, session, workspace, and operation
+values never become metric labels.
+
 The simulator is disabled unless `OCSERV_LOCAL_SIMULATOR=true`, is rejected in
 production, and only accepts the typed `SimulationProbe` payload. Configure its
 absolute socket path with `OCSERV_TRANSPORT_SOCKET`, the RPC deadline with

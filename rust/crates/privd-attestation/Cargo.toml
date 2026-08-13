@@ -1,0 +1,19 @@
+[package]
+name = "ocservia-privd-attestation"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+ed25519-dalek.workspace = true
+hex.workspace = true
+ocservia-contracts = { version = "=0.1.0", path = "../contracts", default-features = false }
+prost-types.workspace = true
+rand.workspace = true
+rustix.workspace = true
+sha2.workspace = true
+
+[lints]
+workspace = true

@@ -4,6 +4,7 @@
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::pin::Pin;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock, Weak};
 use std::time::{Duration, Instant, SystemTime};
 
@@ -20,15 +21,16 @@ use ocservia_contracts::generated::ocserv::platform::agent::v1::{
     ArtifactConsumeRequest as AgentArtifactConsumeRequest,
     ArtifactConsumeResponse as AgentArtifactConsumeResponse, ArtifactFetchRequest, CommandEnvelope,
     CommandResult, CommandResultState, EnrollRequest, EnrollResponse, HandshakeResult,
-    SessionHandshake, SessionHandshakeResponse, TelemetryBatch,
+    SessionHandshake, SessionHandshakeResponse, TelemetryBatch, command_envelope,
 };
 use ocservia_contracts::generated::ocserv::platform::transport::v1::{
     AuthorizeSessionRequest, CheckEndpointRequest, CloseNodeRequest, CloseNodeResponse,
     ConnectionPath, ConsumeArtifactRequest, ConsumeArtifactResponse, FetchArtifactRequest,
     GetNodeConnectionRequest, HealthRequest, HealthResponse, HealthStatus, NodeConnection,
     NodeTrustState, SendCommandRequest, SendCommandResponse, TransportEvent, TransportEventType,
-    TrustUpdateDisposition, UpdateNodeTrustRequest, UpdateNodeTrustResponse, WatchEventsRequest,
-    transport_service_server::TransportService, trust_service_client::TrustServiceClient,
+    TrustUpdateDisposition, UpdateNodeTrustRequest, UpdateNodeTrustResponse,
+    ValidateEnrollmentRequest, WatchEventsRequest, transport_service_server::TransportService,
+    trust_service_client::TrustServiceClient,
 };
 use prost::Message;
 use tokio::sync::{Mutex, OwnedSemaphorePermit, Semaphore, mpsc, watch};
@@ -85,17 +87,252 @@ const MAX_CONNECTIONS: usize = 4096;
 const MAX_ENROLLMENT_CONNECTIONS: usize = 64;
 const MAX_AGENT_CONNECTIONS: usize = MAX_CONNECTIONS - MAX_ENROLLMENT_CONNECTIONS;
 const MAX_ATTEMPTS_PER_MINUTE: usize = 30;
-const MAX_TRUST_ATTEMPTS_PER_MINUTE: usize = 600;
-const MAX_TRUST_CHECKS: usize = 16;
+const MAX_TRUST_SNAPSHOT_BINDINGS: usize = 8192;
 const MAX_RESPONSE_FRAMES: usize = 128;
+
+/// One security domain with capacity that cannot be consumed by another domain.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum TrustClass {
+    /// Local admission for an `EndpointID` already present in the synchronized snapshot.
+    KnownAgentHandshake,
+    /// Live Controller authorization of a complete Agent session handshake.
+    AgentAuthorization,
+    /// High-priority live recheck immediately before connection registration.
+    AgentRegistrationRecheck,
+    /// Small local-only admission for an unknown enrollment `EndpointID`.
+    UnknownEnrollmentPreAuth,
+    /// Transactional completion after the bounded first frame's authority check.
+    EnrollmentCompletion,
+}
+
+impl TrustClass {
+    const COUNT: usize = 5;
+
+    fn index(self) -> usize {
+        match self {
+            Self::KnownAgentHandshake => 0,
+            Self::AgentAuthorization => 1,
+            Self::AgentRegistrationRecheck => 2,
+            Self::UnknownEnrollmentPreAuth => 3,
+            Self::EnrollmentCompletion => 4,
+        }
+    }
+
+    /// Stable bounded metric label.
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::KnownAgentHandshake => "known_agent_handshake",
+            Self::AgentAuthorization => "agent_authorization",
+            Self::AgentRegistrationRecheck => "agent_registration_recheck",
+            Self::UnknownEnrollmentPreAuth => "unknown_enrollment_pre_auth",
+            Self::EnrollmentCompletion => "enrollment_completion",
+        }
+    }
+}
+
+/// Per-class rolling-window and concurrency limits.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct TrustClassLimit {
+    /// Attempts accepted during one rolling minute.
+    pub attempts_per_minute: usize,
+    /// Checks that may be in flight in this class.
+    pub concurrency: usize,
+}
+
+/// Security defaults reserve substantially more capacity for approved Agents
+/// than for unauthenticated enrollment traffic.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TrustBudgetConfig {
+    limits: [TrustClassLimit; TrustClass::COUNT],
+}
+
+impl Default for TrustBudgetConfig {
+    fn default() -> Self {
+        Self {
+            limits: [
+                TrustClassLimit {
+                    attempts_per_minute: 2400,
+                    concurrency: 256,
+                },
+                TrustClassLimit {
+                    attempts_per_minute: 1200,
+                    concurrency: 48,
+                },
+                TrustClassLimit {
+                    attempts_per_minute: 1200,
+                    concurrency: 48,
+                },
+                TrustClassLimit {
+                    attempts_per_minute: 120,
+                    concurrency: 16,
+                },
+                TrustClassLimit {
+                    attempts_per_minute: 120,
+                    concurrency: 8,
+                },
+            ],
+        }
+    }
+}
+
+impl TrustBudgetConfig {
+    /// Replaces one class limit after validating the complete safe range.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when either limit is outside the enforced safe range.
+    pub fn with_limit(
+        mut self,
+        class: TrustClass,
+        limit: TrustClassLimit,
+    ) -> Result<Self, &'static str> {
+        if !(1..=10_000).contains(&limit.attempts_per_minute)
+            || !(1..=512).contains(&limit.concurrency)
+        {
+            return Err("trust class limits are outside the safe range");
+        }
+        self.limits[class.index()] = limit;
+        Ok(self)
+    }
+}
+
+#[derive(Debug)]
+struct TrustClassBudget {
+    attempts: Mutex<VecDeque<Instant>>,
+    checks: Arc<Semaphore>,
+    accepted: AtomicU64,
+    rate_rejected: AtomicU64,
+    capacity_rejected: AtomicU64,
+    in_flight: AtomicU64,
+    limit: TrustClassLimit,
+}
+
+#[derive(Debug)]
+struct TrustBudgetSet {
+    classes: [TrustClassBudget; TrustClass::COUNT],
+}
+
+impl TrustBudgetSet {
+    fn new(config: &TrustBudgetConfig) -> Self {
+        Self {
+            classes: std::array::from_fn(|index| {
+                let limit = config.limits[index];
+                TrustClassBudget {
+                    attempts: Mutex::new(VecDeque::with_capacity(limit.attempts_per_minute)),
+                    checks: Arc::new(Semaphore::new(limit.concurrency)),
+                    accepted: AtomicU64::new(0),
+                    rate_rejected: AtomicU64::new(0),
+                    capacity_rejected: AtomicU64::new(0),
+                    in_flight: AtomicU64::new(0),
+                    limit,
+                }
+            }),
+        }
+    }
+
+    async fn acquire(
+        self: &Arc<Self>,
+        class: TrustClass,
+    ) -> Result<TrustBudgetPermit, AttemptRejection> {
+        self.acquire_at(class, Instant::now()).await
+    }
+
+    async fn acquire_at(
+        self: &Arc<Self>,
+        class: TrustClass,
+        now: Instant,
+    ) -> Result<TrustBudgetPermit, AttemptRejection> {
+        let budget = &self.classes[class.index()];
+        let Ok(permit) = budget.checks.clone().try_acquire_owned() else {
+            budget.capacity_rejected.fetch_add(1, Ordering::Relaxed);
+            return Err(AttemptRejection::Capacity);
+        };
+        let mut attempts = budget.attempts.lock().await;
+        if let Err(rejection) =
+            record_global_attempt(&mut attempts, now, budget.limit.attempts_per_minute)
+        {
+            budget.rate_rejected.fetch_add(1, Ordering::Relaxed);
+            return Err(rejection);
+        }
+        drop(attempts);
+        budget.accepted.fetch_add(1, Ordering::Relaxed);
+        budget.in_flight.fetch_add(1, Ordering::Relaxed);
+        Ok(TrustBudgetPermit {
+            budgets: Arc::clone(self),
+            class,
+            _permit: permit,
+        })
+    }
+
+    fn acquire_capacity(
+        self: &Arc<Self>,
+        class: TrustClass,
+    ) -> Result<TrustBudgetPermit, AttemptRejection> {
+        let budget = &self.classes[class.index()];
+        let permit = budget.checks.clone().try_acquire_owned().map_err(|_| {
+            budget.capacity_rejected.fetch_add(1, Ordering::Relaxed);
+            AttemptRejection::Capacity
+        })?;
+        budget.in_flight.fetch_add(1, Ordering::Relaxed);
+        Ok(TrustBudgetPermit {
+            budgets: Arc::clone(self),
+            class,
+            _permit: permit,
+        })
+    }
+
+    fn snapshot(&self, class: TrustClass) -> TrustMetricsSnapshot {
+        let budget = &self.classes[class.index()];
+        TrustMetricsSnapshot {
+            accepted: budget.accepted.load(Ordering::Relaxed),
+            rate_rejected: budget.rate_rejected.load(Ordering::Relaxed),
+            capacity_rejected: budget.capacity_rejected.load(Ordering::Relaxed),
+            in_flight: budget.in_flight.load(Ordering::Relaxed),
+        }
+    }
+}
+
+struct TrustBudgetPermit {
+    budgets: Arc<TrustBudgetSet>,
+    class: TrustClass,
+    _permit: OwnedSemaphorePermit,
+}
+
+impl Drop for TrustBudgetPermit {
+    fn drop(&mut self) {
+        self.budgets.classes[self.class.index()]
+            .in_flight
+            .fetch_sub(1, Ordering::Relaxed);
+    }
+}
+
+/// Bounded counters backing trust metrics. No `EndpointID` is recorded.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct TrustMetricsSnapshot {
+    /// Accepted attempts.
+    pub accepted: u64,
+    /// Rolling-window refusals.
+    pub rate_rejected: u64,
+    /// Concurrency refusals.
+    pub capacity_rejected: u64,
+    /// Currently retained permits.
+    pub in_flight: u64,
+}
 
 type EventStream = Pin<Box<dyn Stream<Item = Result<TransportEvent, Status>> + Send>>;
 type ArtifactStream = Pin<Box<dyn Stream<Item = Result<ArtifactChunk, Status>> + Send>>;
 
 /// A bounded, transport-only identity policy supplied at process startup.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 pub struct IdentityPolicy {
     state: Arc<RwLock<IdentityState>>,
+}
+
+impl Default for IdentityPolicy {
+    fn default() -> Self {
+        Self::new(HashMap::new(), HashSet::new())
+    }
 }
 
 #[derive(Debug, Default)]
@@ -103,6 +340,7 @@ struct IdentityState {
     approved: HashMap<EndpointId, Vec<u8>>,
     revoked: HashMap<EndpointId, Vec<u8>>,
     revisions: HashMap<EndpointId, u64>,
+    synchronized: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -129,8 +367,50 @@ impl IdentityPolicy {
                     .map(|endpoint| (endpoint, Vec::new()))
                     .collect(),
                 revisions,
+                synchronized: true,
             })),
         }
+    }
+
+    fn replace_snapshot(
+        &self,
+        bindings: impl IntoIterator<Item = (EndpointId, Vec<u8>, NodeTrustState, u64)>,
+    ) -> Result<(), &'static str> {
+        let mut approved = HashMap::new();
+        let mut revoked = HashMap::new();
+        let mut revisions = HashMap::new();
+        for (endpoint, node_id, state, revision) in bindings {
+            if node_id.len() != 16
+                || revision == 0
+                || revisions.len() >= MAX_TRUST_SNAPSHOT_BINDINGS
+                || revisions.insert(endpoint, revision).is_some()
+            {
+                return Err("trust snapshot is invalid or exceeds capacity");
+            }
+            match state {
+                NodeTrustState::Active => {
+                    if approved.values().any(|bound| bound == &node_id) {
+                        return Err("trust snapshot contains a duplicate node binding");
+                    }
+                    approved.insert(endpoint, node_id);
+                }
+                NodeTrustState::Revoked => {
+                    revoked.insert(endpoint, node_id);
+                }
+                NodeTrustState::Unspecified => return Err("trust snapshot state is invalid"),
+            }
+        }
+        let mut state = self
+            .state
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        *state = IdentityState {
+            approved,
+            revoked,
+            revisions,
+            synchronized: true,
+        };
+        Ok(())
     }
 
     fn permits(&self, endpoint: EndpointId, alpn: &[u8]) -> bool {
@@ -138,7 +418,7 @@ impl IdentityPolicy {
             .state
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if state.revoked.contains_key(&endpoint) {
+        if !state.synchronized || state.revoked.contains_key(&endpoint) {
             return false;
         }
         alpn == ENROLL_ALPN || (alpn == AGENT_ALPN && state.approved.contains_key(&endpoint))
@@ -182,6 +462,11 @@ impl IdentityPolicy {
             .state
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if !identities.revisions.contains_key(&endpoint)
+            && identities.revisions.len() >= MAX_TRUST_SNAPSHOT_BINDINGS
+        {
+            return PolicyUpdateDisposition::Rejected;
+        }
         let current_revision = identities.revisions.get(&endpoint).copied().unwrap_or(0);
         if revision < current_revision {
             return PolicyUpdateDisposition::Stale;
@@ -263,43 +548,72 @@ impl IdentityPolicy {
 #[derive(Clone, Debug)]
 pub struct TrustAuthority {
     client: TrustServiceClient<tonic::transport::Channel>,
-    attempts: Arc<Mutex<VecDeque<Instant>>>,
-    checks: Arc<Semaphore>,
+    budgets: Arc<TrustBudgetSet>,
 }
 
 impl TrustAuthority {
     #[must_use]
     pub fn new(channel: tonic::transport::Channel) -> Self {
+        Self::new_with_config(channel, &TrustBudgetConfig::default())
+    }
+
+    /// Builds a trust client with independently validated class limits.
+    #[must_use]
+    pub fn new_with_config(channel: tonic::transport::Channel, config: &TrustBudgetConfig) -> Self {
         Self {
             client: TrustServiceClient::new(channel),
-            attempts: Arc::new(Mutex::new(VecDeque::new())),
-            checks: Arc::new(Semaphore::new(MAX_TRUST_CHECKS)),
+            budgets: Arc::new(TrustBudgetSet::new(config)),
         }
     }
 
-    async fn acquire_check(&self) -> Result<OwnedSemaphorePermit, AttemptRejection> {
-        let permit = self
-            .checks
-            .clone()
-            .try_acquire_owned()
-            .map_err(|_| AttemptRejection::Capacity)?;
-        let mut attempts = self.attempts.lock().await;
-        record_global_attempt(&mut attempts, Instant::now(), MAX_TRUST_ATTEMPTS_PER_MINUTE)?;
-        drop(attempts);
-        Ok(permit)
+    /// Returns a bounded metric snapshot for one fixed class label.
+    #[must_use]
+    pub fn metrics(&self, class: TrustClass) -> TrustMetricsSnapshot {
+        self.budgets.snapshot(class)
     }
 
-    async fn permits(&self, endpoint: EndpointId, alpn: &[u8]) -> Result<bool, AttemptRejection> {
-        let _permit = self.acquire_check().await?;
-        let Ok(alpn) = std::str::from_utf8(alpn) else {
-            return Ok(false);
-        };
+    async fn load_snapshot(&self, policy: &IdentityPolicy) -> Result<(), AcceptError> {
+        let mut client = self.client.clone();
+        let response = tokio::time::timeout(
+            HANDSHAKE_TIMEOUT,
+            client.list_node_trust(
+                ocservia_contracts::generated::ocserv::platform::transport::v1::ListNodeTrustRequest {},
+            ),
+        )
+        .await
+        .map_err(|_| protocol_error("initial trust snapshot timed out"))?
+        .map_err(|_| protocol_error("initial trust snapshot unavailable"))?
+        .into_inner();
+        let mut bindings = Vec::with_capacity(response.bindings.len());
+        for binding in response.bindings {
+            let endpoint = EndpointId::from_bytes(
+                binding
+                    .endpoint_id
+                    .as_slice()
+                    .try_into()
+                    .map_err(|_| protocol_error("initial trust snapshot invalid"))?,
+            )
+            .map_err(|_| protocol_error("initial trust snapshot invalid"))?;
+            let state = NodeTrustState::try_from(binding.state)
+                .map_err(|_| protocol_error("initial trust snapshot invalid"))?;
+            bindings.push((endpoint, binding.node_id, state, binding.revision));
+        }
+        policy
+            .replace_snapshot(bindings)
+            .map_err(|_| protocol_error("initial trust snapshot invalid"))
+    }
+
+    async fn recheck_agent(&self, endpoint: EndpointId) -> Result<bool, AttemptRejection> {
+        let _permit = self
+            .budgets
+            .acquire(TrustClass::AgentRegistrationRecheck)
+            .await?;
         let mut client = self.client.clone();
         Ok(tokio::time::timeout(
             HANDSHAKE_TIMEOUT,
             client.check_endpoint(CheckEndpointRequest {
                 endpoint_id: endpoint.as_bytes().to_vec(),
-                alpn: alpn.to_owned(),
+                alpn: String::from_utf8_lossy(AGENT_ALPN).into_owned(),
             }),
         )
         .await
@@ -309,7 +623,34 @@ impl TrustAuthority {
     }
 
     async fn enroll(&self, request: EnrollRequest) -> Result<EnrollResponse, AcceptError> {
-        let _permit = self.acquire_check().await.map_err(trust_rejection_error)?;
+        let validation_permit = self
+            .budgets
+            .acquire_capacity(TrustClass::UnknownEnrollmentPreAuth)
+            .map_err(trust_rejection_error)?;
+        let mut validation_client = self.client.clone();
+        let validated = tokio::time::timeout(
+            HANDSHAKE_TIMEOUT,
+            validation_client.validate_enrollment(ValidateEnrollmentRequest {
+                enrollment: Some(request.clone()),
+            }),
+        )
+        .await
+        .map_err(|_| protocol_error("enrollment credential validation timed out"))?
+        .map_err(|_| protocol_error("enrollment rejected"))?
+        .into_inner()
+        .permitted;
+        if !validated {
+            return Err(protocol_error("enrollment rejected"));
+        }
+        drop(validation_permit);
+        // Only a request carrying independently authenticated, currently
+        // unconsumed authority may enter completion capacity. Enroll locks and
+        // atomically consumes that same authority with the durable node write.
+        let _permit = self
+            .budgets
+            .acquire(TrustClass::EnrollmentCompletion)
+            .await
+            .map_err(trust_rejection_error)?;
         let mut client = self.client.clone();
         tokio::time::timeout(HANDSHAKE_TIMEOUT, client.enroll(request))
             .await
@@ -323,7 +664,11 @@ impl TrustAuthority {
         endpoint: EndpointId,
         handshake: SessionHandshake,
     ) -> Result<SessionHandshakeResponse, AcceptError> {
-        let _permit = self.acquire_check().await.map_err(trust_rejection_error)?;
+        let _permit = self
+            .budgets
+            .acquire(TrustClass::AgentAuthorization)
+            .await
+            .map_err(trust_rejection_error)?;
         let mut client = self.client.clone();
         tokio::time::timeout(
             HANDSHAKE_TIMEOUT,
@@ -342,18 +687,22 @@ impl TrustAuthority {
 #[derive(Debug)]
 struct SecurityHook {
     policy: IdentityPolicy,
-    trust: Option<TrustAuthority>,
     agent_attempts: Mutex<HashMap<EndpointId, VecDeque<Instant>>>,
     enrollment_attempts: Mutex<HashMap<EndpointId, VecDeque<Instant>>>,
+    budgets: Arc<TrustBudgetSet>,
 }
 
 impl SecurityHook {
-    fn new(policy: IdentityPolicy, trust: Option<TrustAuthority>) -> Self {
+    fn new(policy: IdentityPolicy, trust: Option<&TrustAuthority>) -> Self {
+        let budgets = trust.map_or_else(
+            || Arc::new(TrustBudgetSet::new(&TrustBudgetConfig::default())),
+            |authority| Arc::clone(&authority.budgets),
+        );
         Self {
             policy,
-            trust,
             agent_attempts: Mutex::new(HashMap::new()),
             enrollment_attempts: Mutex::new(HashMap::new()),
+            budgets,
         }
     }
 }
@@ -387,13 +736,7 @@ fn record_attempt(
         !endpoint_attempts.is_empty()
     });
     if !attempts.contains_key(&endpoint) && attempts.len() >= identity_capacity {
-        let oldest = attempts
-            .iter()
-            .min_by_key(|(_, endpoint_attempts)| endpoint_attempts.front().copied())
-            .map(|(endpoint, _)| *endpoint);
-        if let Some(oldest) = oldest {
-            attempts.remove(&oldest);
-        }
+        return Err(AttemptRejection::Capacity);
     }
     let endpoint_attempts = attempts.entry(endpoint).or_default();
     if endpoint_attempts.len() >= MAX_ATTEMPTS_PER_MINUTE {
@@ -428,6 +771,11 @@ impl EndpointHooks for SecurityHook {
         if alpn != ENROLL_ALPN && alpn != AGENT_ALPN {
             return reject(0x100, b"unsupported protocol");
         }
+        if self.policy.revoked(endpoint)
+            || (alpn == AGENT_ALPN && !self.policy.permits(endpoint, alpn))
+        {
+            return reject(0x101, b"endpoint not permitted");
+        }
         let (attempts, identity_capacity) = if alpn == ENROLL_ALPN {
             (&self.enrollment_attempts, MAX_ENROLLMENT_CONNECTIONS)
         } else {
@@ -438,27 +786,24 @@ impl EndpointHooks for SecurityHook {
             return reject(0x103, b"connection rate exceeded");
         }
         drop(attempts);
-        if self.policy.revoked(endpoint) {
-            return reject(0x101, b"endpoint not permitted");
-        }
-        let permitted = if let Some(trust) = &self.trust {
-            match trust.permits(endpoint, alpn).await {
-                Ok(permitted) => permitted,
-                Err(AttemptRejection::Capacity) => {
-                    return reject(0x102, b"trust authority capacity reached");
-                }
-                Err(AttemptRejection::Rate) => {
-                    return reject(0x103, b"trust authority rate exceeded");
-                }
-            }
+        let class = if alpn == ENROLL_ALPN {
+            TrustClass::UnknownEnrollmentPreAuth
         } else {
-            self.policy.permits(endpoint, alpn)
+            TrustClass::KnownAgentHandshake
         };
-        if permitted {
-            AfterHandshakeOutcome::Accept
-        } else {
-            reject(0x101, b"endpoint not permitted")
-        }
+        let _budget = match self.budgets.acquire(class).await {
+            Ok(permit) => permit,
+            Err(AttemptRejection::Capacity) => {
+                return reject(0x102, b"connection class capacity reached");
+            }
+            Err(AttemptRejection::Rate) => {
+                return reject(0x103, b"connection class rate exceeded");
+            }
+        };
+        // Enrollment has no token at this hook. It is admitted locally only;
+        // the first bounded application frame performs a pre-auth credential
+        // check, and only a valid credential reaches EnrollmentCompletion.
+        AfterHandshakeOutcome::Accept
     }
 }
 
@@ -1223,7 +1568,7 @@ impl ProtocolHandler for SessionHandler {
         let node_id = metadata.node_id.clone();
         let registration_token = self.shared.registration_token(&node_id).await;
         if let Some(trust) = &self.trust {
-            match trust.permits(connection.remote_id(), AGENT_ALPN).await {
+            match trust.recheck_agent(connection.remote_id()).await {
                 Ok(true) => {}
                 Ok(false) => {
                     connection.close(VarInt::from_u32(0x101), b"session trust changed");
@@ -1480,6 +1825,26 @@ async fn read_agent_events(
                 return;
             }
         };
+        if event_type == TransportEventType::CommandResult {
+            let Ok(result) = CommandResult::decode(agent_event.payload.as_slice()) else {
+                publish_command_unknown(
+                    event_context,
+                    &command,
+                    "Agent command result protobuf invalid",
+                )
+                .await;
+                return;
+            };
+            if !valid_privileged_result_proof(&command, &result) {
+                publish_command_unknown(
+                    event_context,
+                    &command,
+                    "privd result receipt missing or malformed",
+                )
+                .await;
+                return;
+            }
+        }
         let terminal = matches!(
             event_type,
             TransportEventType::CommandResult | TransportEventType::Error
@@ -1524,6 +1889,7 @@ async fn publish_command_unknown(
         completed_at: Some(now),
         replayed: false,
         semantic_payload_hash_version: command.semantic_payload_hash_version,
+        privileged_result_proof: None,
     };
     publish_agent_event(
         (shared, node_id, traceparent, connection),
@@ -1536,6 +1902,45 @@ async fn publish_command_unknown(
         ),
     )
     .await;
+}
+
+fn valid_privileged_result_proof(command: &CommandEnvelope, result: &CommandResult) -> bool {
+    let terminal = matches!(
+        CommandResultState::try_from(result.state),
+        Ok(CommandResultState::Succeeded | CommandResultState::Failed)
+    );
+    let privileged = !matches!(
+        command.payload,
+        Some(
+            command_envelope::Payload::SimulationProbe(_)
+                | command_envelope::Payload::SyntheticNoop(_)
+                | command_envelope::Payload::SyntheticEcho(_)
+        ) | None
+    );
+    if !terminal || !privileged {
+        return true;
+    }
+    let Some(proof) = result.privileged_result_proof.as_ref() else {
+        return false;
+    };
+    let Some(receipt) = proof.receipt_v1.as_ref() else {
+        return false;
+    };
+    proof.version == 1
+        && receipt.receipt_version == 1
+        && proof.signature.len() == 64
+        && proof.encoded_len() <= 65_536
+        && receipt.node_id.len() == 16
+        && receipt.command_id.len() == 16
+        && receipt.operation_id.len() == 16
+        && receipt.idempotency_key.len() == 16
+        && receipt.semantic_payload_sha256.len() == 32
+        && receipt.result_bytes_sha256.len() == 32
+        && receipt.error_code_sha256.len() == 32
+        && (16..=32).contains(&receipt.effect_record_id.len())
+        && receipt.effect_sequence > 0
+        && receipt.completed_at.is_some()
+        && receipt.accepted_at.is_some()
 }
 
 fn command_response_deadline(command: &CommandEnvelope) -> Result<tokio::time::Instant, Status> {
@@ -1932,7 +2337,8 @@ fn now_timestamp() -> prost_types::Timestamp {
 ///
 /// # Errors
 ///
-/// Returns an Iroh bind error when endpoint or transport initialization fails.
+/// Returns an error when the initial fail-closed trust snapshot is unavailable
+/// or Iroh endpoint initialization fails.
 pub async fn build_router(
     secret_key: SecretKey,
     relay_mode: RelayMode,
@@ -1953,8 +2359,11 @@ pub async fn build_router_with_trust(
     policy: IdentityPolicy,
     trust: TrustAuthority,
     service: &IrohTransportService,
-) -> Result<Router, iroh::endpoint::BindError> {
-    build_router_with_direct(secret_key, relay_mode, policy, Some(trust), service, true).await
+) -> Result<Router, AcceptError> {
+    trust.load_snapshot(&policy).await?;
+    build_router_with_direct(secret_key, relay_mode, policy, Some(trust), service, true)
+        .await
+        .map_err(|_| protocol_error("iroh transport bind failed"))
 }
 
 async fn build_router_with_direct(
@@ -1977,7 +2386,7 @@ async fn build_router_with_direct(
         .secret_key(secret_key)
         .relay_mode(relay_mode)
         .transport_config(transport)
-        .hooks(SecurityHook::new(policy.clone(), trust.clone()));
+        .hooks(SecurityHook::new(policy.clone(), trust.as_ref()));
     if !direct_enabled {
         endpoint_builder = endpoint_builder.clear_ip_transports();
     }
@@ -2019,12 +2428,16 @@ pub async fn shutdown(
 
 #[cfg(test)]
 mod tests {
+    use ed25519_dalek::SigningKey;
     use iroh::{TransportAddr, Watcher as _, tls::CaTlsConfig};
     use ocservia_contracts::generated::ocserv::platform::agent::v1::{
         CommandAuthorizationProof, CommandAuthorizationVersion, CommandDeliveryMode,
-        GroupObservation, SealedSecretPurpose, SealedSecretVersion, SealingKeyDescriptorV1,
-        SemanticPayloadHashVersion, UserObservation,
+        GroupObservation, PrivdReceiptVersion, PrivdResultReceiptV1, PrivilegedCommandKind,
+        PrivilegedResultKind, SealedSecretPurpose, SealedSecretVersion, SealingKeyDescriptorV1,
+        SemanticPayloadHashVersion, ServiceReload, UserObservation,
     };
+    use ocservia_privd_attestation::{key_id, sign_receipt, verify_receipt};
+    use sha2::{Digest as _, Sha256};
 
     use super::*;
 
@@ -2096,9 +2509,10 @@ mod tests {
                 signature: RELAYED_AUTHORIZATION_SIGNATURE.to_vec(),
             }),
             delivery_mode: CommandDeliveryMode::ExecuteOrReplay.into(),
-            payload: None,
-            semantic_payload_hash_version: SemanticPayloadHashVersion::Unspecified as i32,
-            semantic_payload_sha256: Vec::new(),
+            payload: Some(command_envelope::Payload::ServiceReload(ServiceReload {})),
+            semantic_payload_hash_version: SemanticPayloadHashVersion::V1 as i32,
+            semantic_payload_sha256: vec![0x11; 32],
+            operation_id: Uuid::now_v7().as_bytes().to_vec(),
             ..CommandEnvelope::default()
         }
         .encode_to_vec()
@@ -2125,7 +2539,56 @@ mod tests {
         SessionHandshakeResponse::decode(response.as_slice()).expect("decode response")
     }
 
-    async fn respond_to_command(connection: Connection) {
+    fn privileged_command_result(
+        command: &CommandEnvelope,
+        include_receipt: bool,
+    ) -> CommandResult {
+        let now = now_timestamp();
+        let result_bytes = b"completed".to_vec();
+        let signing_key = SigningKey::from_bytes(&[7; 32]);
+        let proof = include_receipt.then(|| {
+            sign_receipt(
+                PrivdResultReceiptV1 {
+                    receipt_version: PrivdReceiptVersion::V1.into(),
+                    node_id: command.node_id.clone(),
+                    privd_attestation_key_id: key_id(&signing_key.verifying_key()),
+                    command_id: command.command_id.clone(),
+                    operation_id: command.operation_id.clone(),
+                    idempotency_key: command.idempotency_key.clone(),
+                    semantic_payload_hash_version: command.semantic_payload_hash_version,
+                    semantic_payload_sha256: command.semantic_payload_sha256.clone(),
+                    command_kind: PrivilegedCommandKind::ServiceReload.into(),
+                    result_kind: PrivilegedResultKind::Mutation.into(),
+                    terminal_state: CommandResultState::Succeeded.into(),
+                    result_bytes_sha256: Sha256::digest(&result_bytes).to_vec(),
+                    error_code_sha256: Sha256::digest([]).to_vec(),
+                    effect_record_id: Uuid::now_v7().as_bytes().to_vec(),
+                    effect_sequence: 1,
+                    accepted_at: Some(now),
+                    completed_at: Some(now),
+                    replayed: false,
+                    certificate: None,
+                },
+                &signing_key,
+            )
+            .expect("sign root result receipt")
+        });
+        CommandResult {
+            command_id: command.command_id.clone(),
+            idempotency_key: command.idempotency_key.clone(),
+            payload_sha256: command.semantic_payload_sha256.clone(),
+            state: CommandResultState::Succeeded.into(),
+            result: result_bytes,
+            error_code: String::new(),
+            accepted_at: Some(now),
+            completed_at: Some(now),
+            replayed: false,
+            semantic_payload_hash_version: command.semantic_payload_hash_version,
+            privileged_result_proof: proof,
+        }
+    }
+
+    async fn respond_to_command(connection: Connection, include_receipt: bool) {
         let (mut send, mut recv) = connection.accept_bi().await.expect("accept command");
         let mut length = [0_u8; 4];
         recv.read_exact(&mut length)
@@ -2137,13 +2600,14 @@ mod tests {
         assert_eq!(
             decoded
                 .authorization
+                .as_ref()
                 .expect("relayed authorization")
                 .signature,
             RELAYED_AUTHORIZATION_SIGNATURE
         );
         let response = AgentEvent {
             r#type: AgentEventType::CommandResult.into(),
-            payload: b"completed".to_vec(),
+            payload: privileged_command_result(&decoded, include_receipt).encode_to_vec(),
         }
         .encode_to_vec();
         let response_len = u32::try_from(response.len()).expect("response length fits u32");
@@ -2152,6 +2616,28 @@ mod tests {
             .expect("write response length");
         send.write_all(&response).await.expect("write response");
         send.finish().expect("finish response");
+    }
+
+    #[test]
+    fn privileged_terminal_result_requires_a_well_formed_receipt() {
+        let node_id = Uuid::now_v7();
+        let command = CommandEnvelope::decode(
+            command_envelope(node_id.as_bytes(), &new_traceparent(), String::new()).as_slice(),
+        )
+        .expect("decode command");
+        let valid = privileged_command_result(&command, true);
+        assert!(valid_privileged_result_proof(&command, &valid));
+
+        let missing = privileged_command_result(&command, false);
+        assert!(!valid_privileged_result_proof(&command, &missing));
+
+        let mut malformed = valid;
+        malformed
+            .privileged_result_proof
+            .as_mut()
+            .expect("proof")
+            .version = PrivdReceiptVersion::Unspecified.into();
+        assert!(!valid_privileged_result_proof(&command, &malformed));
     }
 
     async fn end_command_without_response(connection: Connection) {
@@ -2382,7 +2868,7 @@ mod tests {
     }
 
     #[test]
-    fn enrollment_identity_churn_evicts_oldest_without_affecting_agents() {
+    fn enrollment_identity_churn_refuses_new_identity_without_evicting_oldest() {
         let now = Instant::now();
         let mut enrollment_attempts = HashMap::new();
         let oldest = SecretKey::generate().public();
@@ -2403,16 +2889,18 @@ mod tests {
             .expect("fill enrollment identity capacity");
         }
         let newcomer = SecretKey::generate().public();
-        record_attempt(
-            &mut enrollment_attempts,
-            newcomer,
-            now + Duration::from_millis(2),
-            MAX_ENROLLMENT_CONNECTIONS,
-        )
-        .expect("new enrollment identity evicts the oldest entry");
+        assert_eq!(
+            record_attempt(
+                &mut enrollment_attempts,
+                newcomer,
+                now + Duration::from_millis(2),
+                MAX_ENROLLMENT_CONNECTIONS,
+            ),
+            Err(AttemptRejection::Capacity)
+        );
         assert_eq!(enrollment_attempts.len(), MAX_ENROLLMENT_CONNECTIONS);
-        assert!(!enrollment_attempts.contains_key(&oldest));
-        assert!(enrollment_attempts.contains_key(&newcomer));
+        assert!(enrollment_attempts.contains_key(&oldest));
+        assert!(!enrollment_attempts.contains_key(&newcomer));
 
         let mut agent_attempts = HashMap::new();
         assert_eq!(
@@ -2450,9 +2938,198 @@ mod tests {
         let channel = tonic::transport::Endpoint::from_static("http://[::1]:50051").connect_lazy();
         let trust = TrustAuthority::new(channel);
         let clone = trust.clone();
-        assert!(Arc::ptr_eq(&trust.attempts, &clone.attempts));
-        assert!(Arc::ptr_eq(&trust.checks, &clone.checks));
-        assert_eq!(trust.checks.available_permits(), MAX_TRUST_CHECKS);
+        assert!(Arc::ptr_eq(&trust.budgets, &clone.budgets));
+        for class in [
+            TrustClass::KnownAgentHandshake,
+            TrustClass::AgentAuthorization,
+            TrustClass::AgentRegistrationRecheck,
+            TrustClass::UnknownEnrollmentPreAuth,
+            TrustClass::EnrollmentCompletion,
+        ] {
+            assert_eq!(trust.metrics(class), TrustMetricsSnapshot::default());
+            assert!(!class.label().contains("endpoint"));
+        }
+    }
+
+    #[tokio::test]
+    async fn unknown_enrollment_flood_cannot_consume_reserved_agent_budgets() {
+        let config = TrustBudgetConfig::default()
+            .with_limit(
+                TrustClass::UnknownEnrollmentPreAuth,
+                TrustClassLimit {
+                    attempts_per_minute: 20,
+                    concurrency: 20,
+                },
+            )
+            .expect("valid test limit")
+            .with_limit(
+                TrustClass::KnownAgentHandshake,
+                TrustClassLimit {
+                    attempts_per_minute: 3,
+                    concurrency: 3,
+                },
+            )
+            .expect("valid test limit")
+            .with_limit(
+                TrustClass::AgentAuthorization,
+                TrustClassLimit {
+                    attempts_per_minute: 3,
+                    concurrency: 3,
+                },
+            )
+            .expect("valid test limit")
+            .with_limit(
+                TrustClass::AgentRegistrationRecheck,
+                TrustClassLimit {
+                    attempts_per_minute: 3,
+                    concurrency: 3,
+                },
+            )
+            .expect("valid test limit")
+            .with_limit(
+                TrustClass::EnrollmentCompletion,
+                TrustClassLimit {
+                    attempts_per_minute: 3,
+                    concurrency: 3,
+                },
+            )
+            .expect("valid test limit");
+        let budgets = Arc::new(TrustBudgetSet::new(&config));
+        let now = Instant::now();
+        let mut enrollment = Vec::new();
+        for _ in 0..20 {
+            enrollment.push(
+                budgets
+                    .acquire_at(TrustClass::UnknownEnrollmentPreAuth, now)
+                    .await
+                    .expect("unknown enrollment receives only its own permits"),
+            );
+        }
+        assert_eq!(
+            budgets
+                .acquire_at(TrustClass::UnknownEnrollmentPreAuth, now)
+                .await
+                .err(),
+            Some(AttemptRejection::Capacity)
+        );
+        for class in [
+            TrustClass::KnownAgentHandshake,
+            TrustClass::AgentAuthorization,
+            TrustClass::AgentRegistrationRecheck,
+            TrustClass::EnrollmentCompletion,
+        ] {
+            let permit = budgets
+                .acquire_at(class, now)
+                .await
+                .expect("approved class retains independent capacity during enrollment flood");
+            assert_eq!(budgets.snapshot(class).accepted, 1);
+            drop(permit);
+        }
+        drop(enrollment);
+        assert_eq!(
+            budgets
+                .acquire_at(TrustClass::UnknownEnrollmentPreAuth, now)
+                .await
+                .err(),
+            Some(AttemptRejection::Rate)
+        );
+        let recovered = budgets
+            .acquire_at(
+                TrustClass::UnknownEnrollmentPreAuth,
+                now + Duration::from_mins(1),
+            )
+            .await
+            .expect("rolling window recovers deterministically");
+        drop(recovered);
+    }
+
+    #[tokio::test]
+    async fn baseline_budget_parameters_remain_partitioned() {
+        let shared_limit = TrustClassLimit {
+            attempts_per_minute: 600,
+            concurrency: 16,
+        };
+        let mut config = TrustBudgetConfig::default();
+        for class in [
+            TrustClass::KnownAgentHandshake,
+            TrustClass::AgentAuthorization,
+            TrustClass::AgentRegistrationRecheck,
+            TrustClass::UnknownEnrollmentPreAuth,
+            TrustClass::EnrollmentCompletion,
+        ] {
+            config = config
+                .with_limit(class, shared_limit)
+                .expect("baseline-compatible trust limit");
+        }
+        let budgets = Arc::new(TrustBudgetSet::new(&config));
+        let now = Instant::now();
+        for _ in 0..shared_limit.attempts_per_minute {
+            drop(
+                budgets
+                    .acquire_at(TrustClass::UnknownEnrollmentPreAuth, now)
+                    .await
+                    .expect("enrollment consumes only its own rolling window"),
+            );
+        }
+        assert_eq!(
+            budgets
+                .acquire_at(TrustClass::UnknownEnrollmentPreAuth, now)
+                .await
+                .err(),
+            Some(AttemptRejection::Rate)
+        );
+        for class in [
+            TrustClass::KnownAgentHandshake,
+            TrustClass::AgentAuthorization,
+            TrustClass::AgentRegistrationRecheck,
+        ] {
+            drop(
+                budgets
+                    .acquire_at(class, now)
+                    .await
+                    .expect("Agent reserve survives enrollment exhaustion"),
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn router_restart_retains_identity_and_direct_connectivity() {
+        let controller_key = SecretKey::generate();
+        let controller_id = controller_key.public();
+        let agent_key = SecretKey::generate();
+        let handshake = handshake(&agent_key);
+        let node_id = handshake.node_id.clone();
+
+        for _ in 0..2 {
+            let service = IrohTransportService::new(8);
+            let router = build_router(
+                controller_key.clone(),
+                RelayMode::Disabled,
+                identity_policy(&agent_key, &handshake),
+                &service,
+            )
+            .await
+            .expect("build direct router");
+            assert_eq!(router.endpoint().id(), controller_id);
+            let client = Endpoint::builder(presets::N0)
+                .secret_key(agent_key.clone())
+                .relay_mode(RelayMode::Disabled)
+                .bind()
+                .await
+                .expect("build direct client");
+            let connection = client
+                .connect(router.endpoint().addr(), AGENT_ALPN)
+                .await
+                .expect("connect after router start");
+            let response = send_handshake(&connection, &handshake).await;
+            assert_eq!(response.result, i32::from(HandshakeResult::Accepted));
+            wait_until_registered(&service, &node_id).await;
+            connection.close(VarInt::from_u32(0), b"restart fixture");
+            client.close().await;
+            shutdown(&service, router)
+                .await
+                .expect("shutdown direct router");
+        }
     }
 
     #[test]
@@ -2979,7 +3656,7 @@ mod tests {
         );
 
         tokio::time::sleep(Duration::from_millis(2)).await;
-        let agent = tokio::spawn(respond_to_command(connection.clone()));
+        let agent = tokio::spawn(respond_to_command(connection.clone(), true));
         let mut events = service
             .watch_events(Request::new(WatchEventsRequest {
                 after_event_id: Vec::new(),
@@ -2988,6 +3665,8 @@ mod tests {
             .expect("watch events")
             .into_inner();
         let command = command_envelope(&handshake.node_id, &traceparent, String::new());
+        let sent_command =
+            CommandEnvelope::decode(command.as_slice()).expect("decode sent command");
         service
             .send_command(Request::new(SendCommandRequest {
                 node_id: handshake.node_id.clone(),
@@ -2999,10 +3678,62 @@ mod tests {
         let event = next_event(&mut events, TransportEventType::CommandResult).await;
         assert_eq!(event.node_id, handshake.node_id);
         assert_eq!(event.traceparent, traceparent);
-        assert_eq!(event.payload, b"completed");
+        let result = CommandResult::decode(event.payload.as_slice()).expect("command result");
+        assert_eq!(
+            CommandResultState::try_from(result.state).expect("result state"),
+            CommandResultState::Succeeded
+        );
+        assert_eq!(result.result, b"completed");
+        let proof = result
+            .privileged_result_proof
+            .as_ref()
+            .expect("root result receipt");
+        let signing_key = SigningKey::from_bytes(&[7; 32]);
+        let receipt =
+            verify_receipt(proof, &signing_key.verifying_key()).expect("valid root receipt");
+        assert_eq!(receipt.node_id, sent_command.node_id);
+        assert_eq!(receipt.command_id, sent_command.command_id);
+        assert_eq!(receipt.operation_id, sent_command.operation_id);
+        assert_eq!(receipt.idempotency_key, sent_command.idempotency_key);
+        assert_eq!(
+            receipt.result_bytes_sha256,
+            Sha256::digest(b"completed").to_vec()
+        );
         assert_ne!(
             last_seen(&service, &handshake.node_id).await,
             baseline_last_seen
+        );
+
+        let missing_receipt_traceparent = new_traceparent();
+        let agent = tokio::spawn(respond_to_command(connection.clone(), false));
+        let missing_receipt_command_bytes = command_envelope(
+            &handshake.node_id,
+            &missing_receipt_traceparent,
+            String::new(),
+        );
+        let missing_receipt_command =
+            CommandEnvelope::decode(missing_receipt_command_bytes.as_slice())
+                .expect("decode missing-receipt command");
+        service
+            .send_command(Request::new(SendCommandRequest {
+                node_id: handshake.node_id.clone(),
+                command_envelope: missing_receipt_command_bytes,
+            }))
+            .await
+            .expect("send command with missing receipt");
+        agent.await.expect("missing-receipt response task");
+        let event = next_event(&mut events, TransportEventType::CommandResult).await;
+        assert_eq!(event.traceparent, missing_receipt_traceparent);
+        let result = CommandResult::decode(event.payload.as_slice()).expect("unknown result");
+        assert_eq!(
+            CommandResultState::try_from(result.state).expect("result state"),
+            CommandResultState::Unknown
+        );
+        assert_eq!(result.error_code, "outcome_requires_reconciliation");
+        assert_eq!(result.command_id, missing_receipt_command.command_id);
+        assert_eq!(
+            result.idempotency_key,
+            missing_receipt_command.idempotency_key
         );
 
         let eof_traceparent = new_traceparent();

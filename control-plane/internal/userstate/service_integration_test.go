@@ -14,6 +14,7 @@ import (
 
 	agentv1 "github.com/GentleKingson/ocservia/control-plane/gen/proto/ocserv/platform/agent/v1"
 	transportv1 "github.com/GentleKingson/ocservia/control-plane/gen/proto/ocserv/platform/transport/v1"
+	"github.com/GentleKingson/ocservia/control-plane/internal/attestationtest"
 	"github.com/GentleKingson/ocservia/control-plane/internal/audit"
 	"github.com/GentleKingson/ocservia/control-plane/internal/commandauth"
 	"github.com/GentleKingson/ocservia/control-plane/internal/commandlimit"
@@ -233,6 +234,10 @@ func TestI13IntentAndTerminalAuditIdentityMatchIntegration(t *testing.T) {
 		for _, terminal := range []string{"succeeded", "failed"} {
 			t.Run(test.action+"/"+terminal, func(t *testing.T) {
 				service, pool, workspaceID, nodeID := integrationService(t, "active")
+				attestationKey, err := attestationtest.InstallKey(context.Background(), pool, nodeID)
+				if err != nil {
+					t.Fatal(err)
+				}
 				ingest := localslice.NewWithSigner(pool, integrationCommandSigner())
 				if test.kind != UserCreate && test.kind != GroupApply {
 					enabled := test.kind != UserEnable
@@ -275,6 +280,9 @@ func TestI13IntentAndTerminalAuditIdentityMatchIntegration(t *testing.T) {
 					result.State = agentv1.CommandResultState_COMMAND_RESULT_STATE_FAILED
 					result.Result = nil
 					result.ErrorCode = "privd_rejected"
+				}
+				if err := attestationtest.AttachProof(&envelope, &result, attestationKey, uint64(max(test.version, 1))); err != nil {
+					t.Fatal(err)
 				}
 				payload, err := proto.Marshal(&result)
 				if err != nil {
@@ -1044,6 +1052,9 @@ func integrationService(t *testing.T, status string) (*Service, *pgxpool.Pool, u
 	_, err = pool.Exec(context.Background(), `INSERT INTO workspaces(id,name,slug,created_at,updated_at)VALUES($1,'I13 test',$2,now(),now())`, workspaceID, "i13-"+workspaceID.String())
 	if err == nil {
 		_, err = pool.Exec(context.Background(), `INSERT INTO nodes(id,workspace_id,name,status,version,created_at,updated_at)VALUES($1,$2,$3,$4,1,now(),now())`, nodeID, workspaceID, "node-"+nodeID.String(), status)
+	}
+	if err == nil {
+		_, err = attestationtest.InstallKey(context.Background(), pool, nodeID)
 	}
 	if err == nil {
 		_, err = pool.Exec(context.Background(), `INSERT INTO node_capabilities(node_id,capability,approved)VALUES($1,'ocserv.users.write',true),($1,'ocserv.groups.write',true)`, nodeID)

@@ -20,12 +20,24 @@ type roleBindingRequest struct {
 
 func (s *Server) listWorkspaces(w http.ResponseWriter, r *http.Request) {
 	actor := principal(r)
-	ids, err := s.rbac.AuthorizedWorkspaces(r.Context(), actor.IdentityID, "node.read", actor.BreakGlass)
-	if err != nil {
-		writeProblem(w, r, http.StatusServiceUnavailable, "https://ocservia.dev/problems/database-unavailable", "Workspaces unavailable", "authorized workspaces could not be read")
-		return
+	var ids []uuid.UUID
+	if actor.Issuer == "development" {
+		ids = nil
+	} else {
+		var err error
+		ids, err = s.rbac.AuthorizedWorkspaces(r.Context(), actor.IdentityID, "node.read", actor.BreakGlass)
+		if err != nil {
+			writeProblem(w, r, http.StatusServiceUnavailable, "https://ocservia.dev/problems/database-unavailable", "Workspaces unavailable", "authorized workspaces could not be read")
+			return
+		}
 	}
-	rows, err := s.pool.Query(r.Context(), `SELECT id,name,slug,version FROM workspaces WHERE id=ANY($1::uuid[]) ORDER BY name,id`, ids)
+	query := `SELECT id,name,slug,version FROM workspaces WHERE id=ANY($1::uuid[]) ORDER BY name,id`
+	args := []any{ids}
+	if actor.Issuer == "development" {
+		query = `SELECT id,name,slug,version FROM workspaces ORDER BY name,id`
+		args = nil
+	}
+	rows, err := s.pool.Query(r.Context(), query, args...)
 	if err != nil {
 		writeProblem(w, r, http.StatusServiceUnavailable, "https://ocservia.dev/problems/database-unavailable", "Workspaces unavailable", "authorized workspaces could not be read")
 		return

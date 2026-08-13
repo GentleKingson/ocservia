@@ -7,6 +7,7 @@ import (
 	"crypto/sha256"
 	"crypto/x509"
 	"encoding/base64"
+	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"encoding/pem"
@@ -23,6 +24,7 @@ import (
 	"github.com/GentleKingson/ocservia/control-plane/internal/audit"
 	"github.com/GentleKingson/ocservia/control-plane/internal/commandauth"
 	operationstore "github.com/GentleKingson/ocservia/control-plane/internal/operations"
+	"github.com/GentleKingson/ocservia/control-plane/internal/privdattestation"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -191,15 +193,15 @@ func (s *Service) Create(ctx context.Context, request CreateRequest) (Certificat
 }
 
 func (s *Service) ApprovalBinding(ctx context.Context, id uuid.UUID) (workspaceID, nodeID uuid.UUID, requestHash []byte, summary json.RawMessage, err error) {
-	var csrDER []byte
+	var csrDER, receiptDigest []byte
 	var commonName string
 	var dnsNames []string
-	err = s.pool.QueryRow(ctx, `SELECT workspace_id,node_id,csr_der,common_name,dns_names FROM certificates WHERE id=$1 AND state='csr_ready'`, id).Scan(&workspaceID, &nodeID, &csrDER, &commonName, &dnsNames)
+	var version int64
+	err = s.pool.QueryRow(ctx, `SELECT workspace_id,node_id,csr_der,common_name,dns_names,version,csr_receipt_sha256 FROM certificates WHERE id=$1 AND state='csr_ready' AND csr_receipt_verified_at IS NOT NULL AND NOT csr_receipt_legacy`, id).Scan(&workspaceID, &nodeID, &csrDER, &commonName, &dnsNames, &version, &receiptDigest)
 	if err != nil {
 		return
 	}
-	digest := sha256.Sum256(append(append([]byte(id.String()+"\x00"), csrDER...), []byte("\x00certificate.issue")...))
-	requestHash = digest[:]
+	requestHash = certificateIssueBinding(id, version, csrDER, receiptDigest)
 	summary, err = json.Marshal(map[string]any{"certificate_id": id, "node_id": nodeID, "common_name": commonName, "dns_names": dnsNames, "csr_sha256": hex.EncodeToString(sha256Bytes(csrDER))})
 	return
 }
@@ -268,6 +270,21 @@ func (s *Service) Issue(ctx context.Context, request IssueRequest) (Certificate,
 	if err != nil {
 		return Certificate{}, err
 	}
+	var approvedNodeID uuid.UUID
+	var approvedReceiptKey string
+	var approvedReceiptDigest, approvedCSRDigest, approvedSubjectDigest, approvedRequestHash []byte
+	var approvedReceiptCurrent, approvedKeyActive bool
+	err = s.pool.QueryRow(ctx, `SELECT node_id,csr_privd_attestation_key_id,csr_receipt_sha256,csr_der_sha256,
+		csr_requested_subject_sha256,issue_request_hash,(csr_receipt_verified_at IS NOT NULL AND NOT csr_receipt_legacy),
+		EXISTS(SELECT 1 FROM node_privd_attestation_keys k WHERE k.node_id=certificates.node_id
+		  AND k.key_id=certificates.csr_privd_attestation_key_id AND k.state='active'
+		  AND (k.valid_until IS NULL OR k.valid_until>now()))
+		FROM certificates WHERE id=$1 AND state='signing' AND issue_approval_id=$2`, request.CertificateID, request.ApprovalID).
+		Scan(&approvedNodeID, &approvedReceiptKey, &approvedReceiptDigest, &approvedCSRDigest, &approvedSubjectDigest, &approvedRequestHash, &approvedReceiptCurrent, &approvedKeyActive)
+	csrDigest := sha256.Sum256(csrDER)
+	if err != nil || approvedNodeID != nodeID || !approvedReceiptCurrent || !approvedKeyActive || !bytes.Equal(approvedRequestHash, requestHash) || !bytes.Equal(approvedCSRDigest, csrDigest[:]) {
+		return Certificate{}, ErrNotReady
+	}
 	result, err := s.signer.Sign(ctx, SignRequest{CertificateID: request.CertificateID, CSRDER: append([]byte(nil), csrDER...)})
 	if err != nil {
 		_, _ = s.pool.Exec(context.WithoutCancel(ctx), `UPDATE certificates SET state='signer_unavailable',version=version+1,updated_at=$2 WHERE id=$1 AND state='signing' AND issue_approval_id=$3 AND issue_request_hash=$4`, request.CertificateID, s.now(), request.ApprovalID, requestHash)
@@ -283,6 +300,24 @@ func (s *Service) Issue(ctx context.Context, request IssueRequest) (Certificate,
 	}
 	defer func() { _ = tx.Rollback(context.Background()) }()
 	now := s.now()
+	var currentNodeID uuid.UUID
+	var currentCSR, currentReceiptDigest, currentCSRDigest, currentSubjectDigest, currentRequestHash []byte
+	var currentReceiptKey string
+	var receiptCurrent bool
+	if err := tx.QueryRow(ctx, `SELECT node_id,csr_der,csr_privd_attestation_key_id,csr_receipt_sha256,csr_der_sha256,
+		csr_requested_subject_sha256,issue_request_hash,(csr_receipt_verified_at IS NOT NULL AND NOT csr_receipt_legacy)
+		FROM certificates WHERE id=$1 FOR UPDATE`, request.CertificateID).
+		Scan(&currentNodeID, &currentCSR, &currentReceiptKey, &currentReceiptDigest, &currentCSRDigest, &currentSubjectDigest, &currentRequestHash, &receiptCurrent); err != nil ||
+		currentNodeID != nodeID || !receiptCurrent || currentReceiptKey != approvedReceiptKey ||
+		!bytes.Equal(currentCSR, csrDER) || !bytes.Equal(currentReceiptDigest, approvedReceiptDigest) ||
+		!bytes.Equal(currentCSRDigest, approvedCSRDigest) || !bytes.Equal(currentSubjectDigest, approvedSubjectDigest) ||
+		!bytes.Equal(currentRequestHash, requestHash) {
+		return Certificate{}, ErrNotReady
+	}
+	var keyActive bool
+	if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM node_privd_attestation_keys WHERE node_id=$1 AND key_id=$2 AND state='active' AND (valid_until IS NULL OR valid_until>$3))`, nodeID, currentReceiptKey, now).Scan(&keyActive); err != nil || !keyActive {
+		return Certificate{}, ErrNotReady
+	}
 	resultTag, err := tx.Exec(ctx, `UPDATE certificates SET state='issued',version=version+1,certificate_chain_pem=$2,serial_number=$3,not_before=$4,not_after=$5,updated_at=$6 WHERE id=$1 AND state IN ('signing','signer_unavailable') AND issue_approval_id=$7 AND issue_request_hash=$8`, request.CertificateID, result.CertificateChainPEM, leaf.SerialNumber.String(), leaf.NotBefore.UTC(), leaf.NotAfter.UTC(), now, request.ApprovalID, requestHash)
 	if err != nil {
 		return Certificate{}, err
@@ -307,29 +342,48 @@ func (s *Service) prepareIssue(ctx context.Context, request IssueRequest) (works
 	defer func() { _ = tx.Rollback(context.Background()) }()
 	var state string
 	var storedApproval, storedActor *uuid.UUID
-	var storedHash []byte
-	err = tx.QueryRow(ctx, `SELECT workspace_id,node_id,csr_der,state,issue_approval_id,issue_request_hash,issue_actor_identity_id FROM certificates WHERE id=$1 FOR UPDATE`, request.CertificateID).Scan(&workspaceID, &nodeID, &csrDER, &state, &storedApproval, &storedHash, &storedActor)
+	var storedHash, receiptDigest, attestedCSRDigest, requestedSubjectDigest []byte
+	var receiptKeyID, commonName string
+	var dnsNames []string
+	var keyBits uint32
+	var certificateVersion int64
+	var issueCertificateVersion *int64
+	var receiptVerifiedAt *time.Time
+	var receiptLegacy bool
+	err = tx.QueryRow(ctx, `SELECT workspace_id,node_id,csr_der,state,issue_approval_id,issue_request_hash,issue_actor_identity_id,version,issue_certificate_version,csr_receipt_verified_at,csr_receipt_sha256,csr_privd_attestation_key_id,csr_der_sha256,csr_requested_subject_sha256,csr_receipt_legacy,common_name,dns_names,key_bits FROM certificates WHERE id=$1 FOR UPDATE`, request.CertificateID).Scan(&workspaceID, &nodeID, &csrDER, &state, &storedApproval, &storedHash, &storedActor, &certificateVersion, &issueCertificateVersion, &receiptVerifiedAt, &receiptDigest, &receiptKeyID, &attestedCSRDigest, &requestedSubjectDigest, &receiptLegacy, &commonName, &dnsNames, &keyBits)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return uuid.Nil, uuid.Nil, nil, nil, ErrNotReady
 	}
 	if err != nil {
 		return uuid.Nil, uuid.Nil, nil, nil, err
 	}
-	digest := sha256.Sum256(append(append([]byte(request.CertificateID.String()+"\x00"), csrDER...), []byte("\x00certificate.issue")...))
-	requestHash = digest[:]
+	csrDigest := sha256.Sum256(csrDER)
+	subjectDigest, subjectErr := privdattestation.RequestedSubjectDigest(&agentv1.CertificateCsr{CertificateId: request.CertificateID[:], CommonName: commonName, DnsNames: dnsNames, KeyBits: keyBits})
+	if receiptLegacy || receiptVerifiedAt == nil || len(receiptDigest) != sha256.Size || len(receiptKeyID) == 0 || !bytes.Equal(attestedCSRDigest, csrDigest[:]) || subjectErr != nil || !bytes.Equal(requestedSubjectDigest, subjectDigest) {
+		return uuid.Nil, uuid.Nil, nil, nil, ErrNotReady
+	}
+	var keyActive bool
+	if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM node_privd_attestation_keys WHERE node_id=$1 AND key_id=$2 AND state='active' AND (valid_until IS NULL OR valid_until>now()))`, nodeID, receiptKeyID).Scan(&keyActive); err != nil || !keyActive {
+		return uuid.Nil, uuid.Nil, nil, nil, ErrNotReady
+	}
 	switch state {
 	case "csr_ready":
+		requestHash = certificateIssueBinding(request.CertificateID, certificateVersion, csrDER, receiptDigest)
 		if err := approvals.ConsumeBound(ctx, tx, request.ApprovalID, workspaceID, request.ActorIdentityID, "certificate.issue", "certificate", request.CertificateID, requestHash); err != nil {
 			return uuid.Nil, uuid.Nil, nil, nil, err
 		}
 		now := s.now()
-		if _, err := tx.Exec(ctx, `UPDATE certificates SET state='signing',version=version+1,issue_approval_id=$2,issue_request_hash=$3,issue_actor_identity_id=$4,updated_at=$5 WHERE id=$1`, request.CertificateID, request.ApprovalID, requestHash, request.ActorIdentityID, now); err != nil {
+		if _, err := tx.Exec(ctx, `UPDATE certificates SET state='signing',version=version+1,issue_approval_id=$2,issue_request_hash=$3,issue_actor_identity_id=$4,issue_certificate_version=$5,updated_at=$6 WHERE id=$1`, request.CertificateID, request.ApprovalID, requestHash, request.ActorIdentityID, certificateVersion, now); err != nil {
 			return uuid.Nil, uuid.Nil, nil, nil, err
 		}
 		if err := audit.AppendChain(ctx, tx, audit.ChainRecord{WorkspaceID: workspaceID, ActorType: "user", ActorID: request.ActorIdentityID.String(), SessionID: &request.ActorSessionID, Action: "certificate.issue", ResourceType: "certificate", ResourceID: request.CertificateID, NodeID: &nodeID, ApprovalID: &request.ApprovalID, RequestID: request.RequestID, Result: "intent", Reason: request.Reason, AfterSummary: json.RawMessage(fmt.Sprintf(`{"csr_sha256":%q,"state":"signing"}`, hex.EncodeToString(sha256Bytes(csrDER)))), At: now}); err != nil {
 			return uuid.Nil, uuid.Nil, nil, nil, err
 		}
 	case "signing", "signer_unavailable":
+		if issueCertificateVersion == nil || *issueCertificateVersion < 1 {
+			return uuid.Nil, uuid.Nil, nil, nil, ErrNotReady
+		}
+		requestHash = certificateIssueBinding(request.CertificateID, *issueCertificateVersion, csrDER, receiptDigest)
 		if storedApproval == nil || storedActor == nil || *storedApproval != request.ApprovalID || *storedActor != request.ActorIdentityID || !bytes.Equal(storedHash, requestHash) {
 			return uuid.Nil, uuid.Nil, nil, nil, ErrNotReady
 		}
@@ -345,6 +399,16 @@ func (s *Service) prepareIssue(ctx context.Context, request IssueRequest) (works
 		return uuid.Nil, uuid.Nil, nil, nil, err
 	}
 	return workspaceID, nodeID, csrDER, requestHash, nil
+}
+
+func certificateIssueBinding(certificateID uuid.UUID, version int64, csrDER, receiptDigest []byte) []byte {
+	value := []byte("ocservia/certificate-issue-approval/v2\x00")
+	value = append(value, certificateID[:]...)
+	value = binary.BigEndian.AppendUint64(value, uint64(version))
+	value = append(value, sha256Bytes(csrDER)...)
+	value = append(value, receiptDigest...)
+	digest := sha256.Sum256(value)
+	return digest[:]
 }
 
 func (s *Service) Revoke(ctx context.Context, request RevokeRequest) (operationstore.Operation, bool, error) {
@@ -583,7 +647,7 @@ func (s *Service) OpenArtifact(ctx context.Context, id uuid.UUID, token string, 
 	var certificateVersion uint64
 	var artifactExpires, certificateExpires time.Time
 	var requesterID uuid.UUID
-	err = tx.QueryRow(ctx, `SELECT a.node_id,a.certificate_id,a.operation_id,a.certificate_version,a.content_sha256,a.content_size,a.expires_at,c.not_after,r.requester_id FROM artifact_operations a JOIN certificates c ON c.id=a.certificate_id JOIN approval_requests r ON r.id=a.approval_id WHERE a.id=$1 AND a.token_sha256=$2 AND a.expires_at>now() AND c.not_after>now() AND c.state IN ('issued','expiring') AND (a.state='ready' OR (a.state='leased' AND a.lease_until<now())) FOR UPDATE OF a`, id, tokenHash[:]).Scan(&nodeID, &certificateID, &operationID, &certificateVersion, &expected, &size, &artifactExpires, &certificateExpires, &requesterID)
+	err = tx.QueryRow(ctx, `SELECT a.node_id,a.certificate_id,a.operation_id,a.certificate_version,a.content_sha256,a.content_size,a.expires_at,c.not_after,r.requester_id FROM artifact_operations a JOIN certificates c ON c.id=a.certificate_id JOIN approval_requests r ON r.id=a.approval_id WHERE a.id=$1 AND a.token_sha256=$2 AND a.expires_at>now() AND a.certificate_version=c.version AND c.not_after>now() AND c.state IN ('issued','expiring') AND (a.state='ready' OR (a.state='leased' AND a.lease_until<now())) FOR UPDATE OF a`, id, tokenHash[:]).Scan(&nodeID, &certificateID, &operationID, &certificateVersion, &expected, &size, &artifactExpires, &certificateExpires, &requesterID)
 	if err != nil {
 		return ArtifactDownload{}, ErrArtifactDenied
 	}
@@ -618,7 +682,13 @@ func (s *Service) OpenArtifact(ctx context.Context, id uuid.UUID, token string, 
 }
 
 func (s *Service) CompleteArtifact(ctx context.Context, id, grantID uuid.UUID, grant *agentv1.ArtifactGrantV1, digest []byte, size int64, actorID, sessionID uuid.UUID, requestID string) error {
-	if grant == nil || actorID == uuid.Nil || sessionID == uuid.Nil || requestID == "" || len(requestID) > 128 || grant.GetAuthorizedSubject() != actorID.String() || !bytes.Equal(grant.GetArtifactId(), id[:]) || !bytes.Equal(grant.GetGrantId(), grantID[:]) || len(digest) != sha256.Size || size < 1 || uint64(size) != grant.GetMaxBytes() {
+	if grant == nil || actorID == uuid.Nil || sessionID == uuid.Nil || requestID == "" || len(requestID) > 128 || grant.GetVersion() != agentv1.ArtifactGrantVersion_ARTIFACT_GRANT_VERSION_V1 || grant.GetPurpose() != "certificate_p12" || grant.GetCertificateVersion() == 0 || grant.GetAuthorizedSubject() != actorID.String() || !bytes.Equal(grant.GetArtifactId(), id[:]) || !bytes.Equal(grant.GetGrantId(), grantID[:]) || len(digest) != sha256.Size || size < 1 || uint64(size) != grant.GetMaxBytes() {
+		return ErrArtifactDenied
+	}
+	nodeID, nodeErr := uuid.FromBytes(grant.GetNodeId())
+	certificateID, certificateErr := uuid.FromBytes(grant.GetCertificateId())
+	operationID, operationErr := uuid.FromBytes(grant.GetOperationId())
+	if nodeErr != nil || certificateErr != nil || operationErr != nil || nodeID.Version() != 7 || certificateID.Version() != 7 || operationID.Version() != 7 {
 		return ErrArtifactDenied
 	}
 	grantBytes, err := proto.MarshalOptions{Deterministic: true}.Marshal(grant)
@@ -630,11 +700,18 @@ func (s *Service) CompleteArtifact(ctx context.Context, id, grantID uuid.UUID, g
 		return err
 	}
 	defer func() { _ = tx.Rollback(context.Background()) }()
-	command, err := tx.Exec(ctx, `UPDATE artifact_operations SET state='consuming',consume_grant=$6,consume_sha256=$3,consume_size=$4,consume_actor_id=$7,consume_session_id=$8,consume_request_id=$9,updated_at=now() WHERE id=$1 AND active_grant_id=$2 AND active_grant_subject=$5 AND state='leased' AND content_sha256=$3 AND content_size=$4 AND expires_at>now()`, id, grantID, digest, size, actorID.String(), grantBytes, actorID, sessionID, requestID)
+	command, err := tx.Exec(ctx, `UPDATE artifact_operations a SET state='consuming',consume_grant=$6,consume_sha256=$3,consume_size=$4,consume_actor_id=$7,consume_session_id=$8,consume_request_id=$9,updated_at=now() FROM certificates c WHERE a.id=$1 AND a.active_grant_id=$2 AND a.active_grant_subject=$5 AND a.state='leased' AND a.content_sha256=$3 AND a.content_size=$4 AND a.expires_at>now() AND a.certificate_id=c.id AND a.node_id=$10 AND a.certificate_id=$11 AND a.certificate_version=$12 AND a.operation_id=$13 AND a.certificate_version=c.version AND c.state IN ('issued','expiring') AND c.not_after>now()`, id, grantID, digest, size, actorID.String(), grantBytes, actorID, sessionID, requestID, nodeID, certificateID, grant.GetCertificateVersion(), operationID)
 	if err != nil {
 		return err
 	}
 	if command.RowsAffected() != 1 {
+		var exactReplay bool
+		if queryErr := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM artifact_operations a JOIN certificates c ON c.id=a.certificate_id WHERE a.id=$1 AND a.active_grant_id=$2 AND a.state='consumed' AND a.consume_grant=$3 AND a.consume_sha256=$4 AND a.consume_size=$5 AND a.consume_actor_id=$6 AND a.consume_session_id=$7 AND a.consume_request_id=$8 AND a.node_id=$9 AND a.certificate_id=$10 AND a.certificate_version=$11 AND a.operation_id=$12 AND a.certificate_version=c.version AND c.state IN ('issued','expiring') AND c.not_after>now())`, id, grantID, grantBytes, digest, size, actorID, sessionID, requestID, nodeID, certificateID, grant.GetCertificateVersion(), operationID).Scan(&exactReplay); queryErr != nil {
+			return queryErr
+		}
+		if exactReplay {
+			return nil
+		}
 		return ErrArtifactDenied
 	}
 	if err := tx.Commit(ctx); err != nil {

@@ -18,6 +18,7 @@ import (
 	"github.com/GentleKingson/ocservia/control-plane/internal/audit"
 	"github.com/GentleKingson/ocservia/control-plane/internal/commandauth"
 	"github.com/GentleKingson/ocservia/control-plane/internal/postgresinput"
+	"github.com/GentleKingson/ocservia/control-plane/internal/privdattestation"
 	"github.com/GentleKingson/ocservia/control-plane/internal/semanticpayload"
 	telemetrystore "github.com/GentleKingson/ocservia/control-plane/internal/telemetry"
 	"github.com/google/uuid"
@@ -59,6 +60,7 @@ type Event struct {
 	Type        string    `json:"type"`
 	Traceparent string    `json:"traceparent"`
 	OccurredAt  time.Time `json:"occurred_at"`
+	Sequence    int64     `json:"-"`
 }
 
 type Job struct {
@@ -233,7 +235,7 @@ func (s *Service) ListEventsInWorkspace(ctx context.Context, workspaceID, after 
 		return nil, false, errors.New("event page size must be between 1 and 200")
 	}
 	rows, err := s.pool.Query(ctx, `
-		SELECT event.event_id::text, event.node_id::text, event.event_type, event.traceparent, event.occurred_at
+		SELECT event.event_id::text, event.node_id::text, event.event_type, event.traceparent, event.occurred_at, event.ingest_sequence
 		FROM transport_events event JOIN nodes node ON node.id=event.node_id
 		WHERE ($1::uuid IS NULL OR event.ingest_sequence > (
 			SELECT ingest_sequence FROM transport_events WHERE event_id = $1
@@ -247,7 +249,7 @@ func (s *Service) ListEventsInWorkspace(ctx context.Context, workspaceID, after 
 	events := make([]Event, 0, limit+1)
 	for rows.Next() {
 		var event Event
-		if err := rows.Scan(&event.ID, &event.NodeID, &event.Type, &event.Traceparent, &event.OccurredAt); err != nil {
+		if err := rows.Scan(&event.ID, &event.NodeID, &event.Type, &event.Traceparent, &event.OccurredAt, &event.Sequence); err != nil {
 			return nil, false, fmt.Errorf("scan transport event: %w", err)
 		}
 		events = append(events, event)
@@ -260,6 +262,24 @@ func (s *Service) ListEventsInWorkspace(ctx context.Context, workspaceID, after 
 		events = events[:limit]
 	}
 	return events, hasMore, nil
+}
+
+func (s *Service) EventSequenceInWorkspace(ctx context.Context, workspaceID, eventID uuid.UUID) (int64, bool, error) {
+	if workspaceID == uuid.Nil || eventID == uuid.Nil {
+		return 0, false, nil
+	}
+	var sequence int64
+	err := s.pool.QueryRow(ctx, `
+		SELECT event.ingest_sequence
+		FROM transport_events event JOIN nodes node ON node.id=event.node_id
+		WHERE event.event_id=$1 AND node.workspace_id=$2`, eventID, workspaceID).Scan(&sequence)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return 0, false, nil
+	}
+	if err != nil {
+		return 0, false, fmt.Errorf("resolve transport event cursor: %w", err)
+	}
+	return sequence, true, nil
 }
 
 func (s *Service) LastEventID(ctx context.Context) ([]byte, error) {
@@ -715,10 +735,15 @@ func ingestAgentCommandResult(ctx context.Context, tx pgx.Tx, eventID, nodeID uu
 	if resultBytes == nil {
 		resultBytes = []byte{}
 	}
-	effectiveState, applyResult, normalizationErr := normalizeConfigApplyResult(&envelope, state, resultBytes)
-	csrResult, csrErr := normalizeCertificateCSRResult(&envelope, state, resultBytes)
-	revokeResult, revokeErr := normalizeCertificateRevokeResult(&envelope, state, resultBytes)
-	artifactResult, artifactErr := normalizeCertificateArtifactResult(&envelope, state, resultBytes)
+	verification := privdattestation.VerifyResult(ctx, tx, nodeID, &envelope, &result)
+	normalizationState := state
+	if verification.Status != "not_required" && !verification.Verified() {
+		normalizationState = "unknown"
+	}
+	effectiveState, applyResult, normalizationErr := normalizeConfigApplyResult(&envelope, normalizationState, resultBytes)
+	csrResult, csrErr := normalizeCertificateCSRResult(&envelope, normalizationState, resultBytes)
+	revokeResult, revokeErr := normalizeCertificateRevokeResult(&envelope, normalizationState, resultBytes)
+	artifactResult, artifactErr := normalizeCertificateArtifactResult(&envelope, normalizationState, resultBytes)
 	if normalizationErr == nil && csrErr != nil {
 		normalizationErr = csrErr
 	}
@@ -729,22 +754,73 @@ func ingestAgentCommandResult(ctx context.Context, tx pgx.Tx, eventID, nodeID uu
 		normalizationErr = artifactErr
 	}
 	recoveryReason := result.GetErrorCode()
+	if verification.Status != "not_required" && !verification.Verified() {
+		normalizationErr = errors.New("privileged result receipt verification failed")
+		recoveryReason = verification.FailureReason
+	}
 	if normalizationErr != nil {
 		effectiveState = "unknown"
 		applyResult = nil
 		recoveryReason = "outcome_requires_reconciliation"
 	}
+	terminalEvidenceOnly := false
 	if (currentState == "succeeded" || currentState == "failed" || currentState == "rejected" || currentState == "rolled_back") && currentState != effectiveState {
 		if normalizationErr != nil {
-			return nil
+			// A forged duplicate cannot change an already terminal outcome, but its
+			// verification evidence still has to reach the durable alert and audit
+			// path below.
+			terminalEvidenceOnly = true
+		} else {
+			return invalidCommandResult("command result contradicts a terminal state")
 		}
-		return invalidCommandResult("command result contradicts a terminal state")
 	}
 	if currentState == "expired" || currentState == "superseded" {
 		return invalidCommandResult("command result contradicts a terminal state")
 	}
-	if _, err := tx.Exec(ctx, `INSERT INTO agent_command_results(event_id,command_id,idempotency_key,payload_sha256,semantic_payload_hash_version,state,result,error_code,accepted_at,completed_at,replayed,created_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`, eventID, commandID, idempotencyKey, payloadHash, hashVersion, state, resultBytes, errorCode, acceptedAtValue, completedTime, result.GetReplayed(), observedAt); err != nil {
+	if verification.Verified() {
+		var existingCommandID uuid.UUID
+		var existingReceipt []byte
+		err := tx.QueryRow(ctx, `SELECT command_id,receipt_sha256 FROM agent_command_results WHERE privd_attestation_key_id=$1 AND effect_record_id=$2 AND effect_sequence=$3 AND receipt_verification_status='verified'`, verification.KeyID, verification.EffectRecordID, verification.EffectSequence).Scan(&existingCommandID, &existingReceipt)
+		if err == nil {
+			if existingCommandID == commandID && bytes.Equal(existingReceipt, verification.ReceiptSHA256) {
+				return nil
+			}
+			return invalidCommandResult("privd effect receipt was replayed across command identities")
+		}
+		if !errors.Is(err, pgx.ErrNoRows) {
+			return fmt.Errorf("check privd effect receipt replay: %w", err)
+		}
+	}
+	var failureReason any
+	if verification.FailureReason != "" {
+		failureReason = verification.FailureReason
+	}
+	var keyID any
+	if verification.KeyID != "" {
+		keyID = verification.KeyID
+	}
+	if _, err := tx.Exec(ctx, `INSERT INTO agent_command_results(event_id,command_id,idempotency_key,payload_sha256,semantic_payload_hash_version,state,result,error_code,accepted_at,completed_at,replayed,created_at,receipt_verification_status,receipt_failure_reason,privd_attestation_key_id,effect_record_id,effect_sequence,receipt_sha256,privileged_result_proof) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19)`, eventID, commandID, idempotencyKey, payloadHash, hashVersion, state, resultBytes, errorCode, acceptedAtValue, completedTime, result.GetReplayed(), observedAt, verification.Status, failureReason, keyID, nullableBytes(verification.EffectRecordID), nullableUint64(verification.EffectSequence), nullableBytes(verification.ReceiptSHA256), nullableBytes(verification.EncodedProof)); err != nil {
 		return fmt.Errorf("persist Agent command result: %w", err)
+	}
+	if verification.Status != "not_required" && !verification.Verified() {
+		var alertWorkspaceID uuid.UUID
+		if err := tx.QueryRow(ctx, `SELECT workspace_id FROM nodes WHERE id=$1`, nodeID).Scan(&alertWorkspaceID); err != nil {
+			return fmt.Errorf("load privd receipt alert workspace: %w", err)
+		}
+		if _, err := tx.Exec(ctx, `INSERT INTO security_alerts(id,workspace_id,severity,kind,created_at) VALUES($1,$2,'critical','privd.receipt_verification_failed',$3)`, uuid.Must(uuid.NewV7()), alertWorkspaceID, observedAt); err != nil {
+			return fmt.Errorf("emit privd receipt verification alert: %w", err)
+		}
+		if err := audit.AppendChain(ctx, tx, audit.ChainRecord{
+			WorkspaceID: alertWorkspaceID, ActorType: "controller", ActorID: "privd-receipt-verifier",
+			Action: "privd.result.verify", ResourceType: "command", ResourceID: commandID,
+			NodeID: &nodeID, CommandID: &commandID, RequestID: eventID.String(), Result: "failed",
+			Reason: verification.FailureReason, ErrorType: verification.FailureReason, At: observedAt,
+		}); err != nil {
+			return fmt.Errorf("append privd receipt verification audit: %w", err)
+		}
+	}
+	if terminalEvidenceOnly {
+		return nil
 	}
 	operationEventID, err := uuid.NewV7()
 	if err != nil {
@@ -831,7 +907,12 @@ func ingestAgentCommandResult(ctx context.Context, tx pgx.Tx, eventID, nodeID uu
 		if csrResult != nil {
 			csrDER, publicHash = csrResult.GetCsrDer(), csrResult.GetPublicKeySha256()
 		}
-		if _, err := tx.Exec(ctx, `UPDATE certificates SET state=$2,version=version+1,csr_der=COALESCE($3,csr_der),public_key_sha256=COALESCE($4,public_key_sha256),updated_at=$5 WHERE id=$1 AND operation_id=$6`, certificateID, certificateState, csrDER, publicHash, observedAt, operationID); err != nil {
+		var receiptVerifiedAt, receiptDigest, receiptKeyID, effectRecordID, csrDigest, subjectDigest any
+		if certificateState == "csr_ready" && verification.Verified() && verification.Certificate != nil {
+			receiptVerifiedAt, receiptDigest, receiptKeyID = observedAt, verification.ReceiptSHA256, verification.KeyID
+			effectRecordID, csrDigest, subjectDigest = verification.EffectRecordID, verification.Certificate.GetCsrDerSha256(), verification.Certificate.GetRequestedSubjectSha256()
+		}
+		if _, err := tx.Exec(ctx, `UPDATE certificates SET state=$2,version=version+1,csr_der=COALESCE($3,csr_der),public_key_sha256=COALESCE($4,public_key_sha256),csr_receipt_verified_at=COALESCE($7,csr_receipt_verified_at),csr_receipt_sha256=COALESCE($8,csr_receipt_sha256),csr_privd_attestation_key_id=COALESCE($9,csr_privd_attestation_key_id),csr_effect_record_id=COALESCE($10,csr_effect_record_id),csr_der_sha256=COALESCE($11,csr_der_sha256),csr_requested_subject_sha256=COALESCE($12,csr_requested_subject_sha256),updated_at=$5 WHERE id=$1 AND operation_id=$6`, certificateID, certificateState, csrDER, publicHash, observedAt, operationID, receiptVerifiedAt, receiptDigest, receiptKeyID, effectRecordID, csrDigest, subjectDigest); err != nil {
 			return fmt.Errorf("update certificate CSR outcome: %w", err)
 		}
 	}
@@ -890,6 +971,20 @@ func ingestAgentCommandResult(ctx context.Context, tx pgx.Tx, eventID, nodeID uu
 
 func invalidCommandResult(detail string) error {
 	return invalidEvent("invalid_command_result", detail)
+}
+
+func nullableBytes(value []byte) any {
+	if len(value) == 0 {
+		return nil
+	}
+	return value
+}
+
+func nullableUint64(value uint64) any {
+	if value == 0 {
+		return nil
+	}
+	return int64(value)
 }
 
 func normalizeCertificateCSRResult(envelope *agentv1.CommandEnvelope, state string, resultBytes []byte) (*agentv1.CertificateCsrResult, error) {

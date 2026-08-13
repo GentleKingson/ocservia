@@ -2,6 +2,17 @@ name: P1 full validation
 
 on:
   workflow_dispatch:
+    inputs:
+      phase:
+        description: Validation phase to execute
+        required: true
+        default: p1-full
+        type: choice
+        options:
+          - p1-full
+          - f1-live-iroh
+          - f2-sse-live
+          - f3-systemd-privd-pki
 
 permissions:
   contents: read
@@ -12,6 +23,7 @@ concurrency:
 
 jobs:
   p1-full:
+    if: inputs.phase == 'p1-full'
     name: P1 Full Validation
     runs-on: ubuntu-24.04
     timeout-minutes: 45
@@ -63,4 +75,109 @@ jobs:
           name: p1-full-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/artifacts/p1-full
           if-no-files-found: warn
+          retention-days: 30
+
+  f1-live-iroh:
+    if: inputs.phase == 'f1-live-iroh'
+    name: F1 Live Iroh
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      RUN_ID: f1-${{ github.run_id }}-${{ github.run_attempt }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Runner preflight
+        run: scripts/ci-preflight.sh
+      - name: Restore verified tools
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: |
+            .cache/downloads
+            .tools
+          key: tooling-v3-f1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'scripts/checksums.txt', 'scripts/bootstrap.sh', 'scripts/env.sh') }}
+      - name: Bootstrap Rust validation tools
+        run: scripts/bootstrap.sh rust-validation
+      - name: Baseline positive control and Candidate live Iroh
+        env:
+          ARTIFACT_DIR: ${{ runner.temp }}/artifacts/f1
+        run: |
+          source scripts/env.sh
+          scripts/security-acceptance-f1.sh
+      - name: Upload F1 evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: f1-live-iroh-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/artifacts/f1
+          if-no-files-found: error
+          retention-days: 30
+
+  f2-sse-live:
+    if: inputs.phase == 'f2-sse-live'
+    name: F2 SSE Live Capacity
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      RUN_ID: f2-${{ github.run_id }}-${{ github.run_attempt }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - name: Runner preflight
+        run: scripts/ci-preflight.sh
+      - name: Run 1, 10, and 100 connection SSE validation
+        env:
+          ARTIFACT_DIR: ${{ runner.temp }}/artifacts/f2
+        run: scripts/security-acceptance-f2.sh
+      - name: Upload F2 evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: f2-sse-live-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/artifacts/f2
+          if-no-files-found: error
+          retention-days: 30
+
+  f3-systemd-privd-pki:
+    if: inputs.phase == 'f3-systemd-privd-pki'
+    name: F3 systemd, privd, and PKI
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      RUN_ID: f3-${{ github.run_id }}-${{ github.run_attempt }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - name: Runner preflight
+        run: scripts/ci-preflight.sh
+      - name: Restore verified tools
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: |
+            .cache/downloads
+            .tools
+          key: tooling-v3-f3-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'scripts/checksums.txt', 'scripts/bootstrap.sh', 'scripts/env.sh') }}
+      - name: Bootstrap Rust validation tools
+        run: scripts/bootstrap.sh rust-validation
+      - name: Install native Ocserv fixture
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes ocserv openconnect ssl-cert
+      - name: Run near-production systemd and PKI validation
+        env:
+          ARTIFACT_DIR: ${{ runner.temp }}/artifacts/f3
+        run: |
+          source scripts/env.sh
+          scripts/security-acceptance-f3.sh
+      - name: Upload F3 evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: f3-systemd-privd-pki-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/artifacts/f3
+          if-no-files-found: error
           retention-days: 30

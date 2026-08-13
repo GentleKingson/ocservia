@@ -28,9 +28,10 @@ use ocservia_contracts::generated::ocserv::platform::agent::v1::{
     ArtifactConsumeResponse as ArtifactConsumeFinalizeResponse, ArtifactFetchRequest,
     CommandDeliveryMode, CommandEnvelope, CommandResult, CommandResultState, EnrollRequest,
     EnrollResponse, GroupObservation, HandshakeResult, IpBanObservation, MetricSample,
-    ObservedSnapshot, SealedSecretPurpose, SealedSecretVersion, SealingKeyDescriptorV1,
-    SemanticPayloadHashVersion, SessionHandshake, SessionHandshakeResponse, SessionObservation,
-    TelemetryBatch, TelemetryDropCounters, TelemetryPriority, UserObservation, command_envelope,
+    ObservedSnapshot, PrivdReceiptVersion, PrivilegedResultProof, SealedSecretPurpose,
+    SealedSecretVersion, SealingKeyDescriptorV1, SemanticPayloadHashVersion, SessionHandshake,
+    SessionHandshakeResponse, SessionObservation, TelemetryBatch, TelemetryDropCounters,
+    TelemetryPriority, UserObservation, command_envelope,
 };
 use prost::Message;
 use sha2::Digest;
@@ -329,6 +330,7 @@ fn supported_capabilities() -> Vec<String> {
         "synthetic.echo",
         "command.semantic-hash.v1",
         "command.strict-wire.v1",
+        "privd_result_attestation_v1",
         "ocserv.session.disconnect",
         "ocserv.session.terminate",
         "ocserv.ip_ban.remove",
@@ -806,94 +808,167 @@ async fn execute_external_command(
 ) -> Result<ocservia_agent::CommandOutcome, CommandError> {
     let mode = CommandDeliveryMode::try_from(envelope.delivery_mode)
         .unwrap_or(CommandDeliveryMode::Unspecified);
-    let command = match mode {
+    let (command, reconciled_response) = match mode {
         CommandDeliveryMode::ExecuteOrReplay => {
             match session
                 .command_executor
                 .prepare_external(envelope, context)?
             {
-                ExternalPreparation::Execute(command) => command,
+                ExternalPreparation::Execute(command) => (command, None),
                 ExternalPreparation::Replay(outcome) => return Ok(outcome),
             }
         }
         CommandDeliveryMode::ReconcileOnly => {
-            let observed = observe_external_effect(session.privd, envelope).await;
-            return session
-                .command_executor
-                .reconcile_external(envelope, context, observed);
+            let response = session.privd.call_reconcile(envelope).await;
+            if response.as_ref().ok().and_then(response_proof).is_some() {
+                let command = session
+                    .command_executor
+                    .begin_attested_recovery(envelope, context)?;
+                (command, Some(response))
+            } else {
+                let observed = observe_external_effect(session.privd, envelope).await;
+                return session
+                    .command_executor
+                    .reconcile_external(envelope, context, observed);
+            }
         }
-        CommandDeliveryMode::RetryIfEffectAbsent => {
-            session.command_executor.retry_external(envelope, context)?
-        }
+        CommandDeliveryMode::RetryIfEffectAbsent => (
+            session.command_executor.retry_external(envelope, context)?,
+            None,
+        ),
         CommandDeliveryMode::Unspecified => {
             return Err(CommandError::Rejected("delivery_mode_invalid"));
         }
     };
-    let response = session.privd.call_command(envelope).await;
+    let response = match reconciled_response {
+        Some(response) => response,
+        None => {
+            session
+                .privd
+                .call_command(envelope, command.accepted_at())
+                .await
+        }
+    };
     match response {
-        Ok(response) => match response.result {
-            Some(privd_response::Result::Mutation(result)) if result.applied => {
-                if let Some((resource_type, resource_key, revision)) = desired_resource(envelope) {
+        Ok(response) => {
+            let Some((proof, completed_at)) = response_proof(&response) else {
+                return session.command_executor.mark_external_unknown(
+                    &command,
+                    "privd_receipt_missing_or_malformed",
+                    now,
+                );
+            };
+            match response.result {
+                Some(privd_response::Result::Mutation(result)) if result.applied => {
                     let result = result.encode_to_vec();
-                    session.command_executor.complete_external_applied(
+                    if let Some((resource_type, resource_key, revision)) =
+                        desired_resource(envelope)
+                    {
+                        session.command_executor.complete_external_applied_attested(
+                            &command,
+                            resource_type,
+                            &resource_key,
+                            revision,
+                            &result,
+                            &proof,
+                            completed_at,
+                        )
+                    } else {
+                        session.command_executor.complete_external_attested(
+                            &command,
+                            Ok(&result),
+                            &proof,
+                            completed_at,
+                        )
+                    }
+                }
+                Some(privd_response::Result::ConfigPlan(result)) => {
+                    session.command_executor.complete_external_attested(
+                        &command,
+                        Ok(&result.encode_to_vec()),
+                        &proof,
+                        completed_at,
+                    )
+                }
+                Some(privd_response::Result::ConfigApply(result)) => {
+                    let bytes = result.encode_to_vec();
+                    let Some((resource_type, resource_key, revision)) = desired_resource(envelope)
+                    else {
+                        return Err(CommandError::Rejected("config_apply_invalid"));
+                    };
+                    session.command_executor.complete_external_applied_attested(
                         &command,
                         resource_type,
                         &resource_key,
                         revision,
-                        &result,
-                        now,
+                        &bytes,
+                        &proof,
+                        completed_at,
                     )
-                } else {
-                    session
-                        .command_executor
-                        .complete_external(&command, Ok(b"applied"), now)
                 }
-            }
-            Some(privd_response::Result::ConfigPlan(result)) => session
-                .command_executor
-                .complete_external(&command, Ok(&result.encode_to_vec()), now),
-            Some(privd_response::Result::ConfigApply(result)) => {
-                let bytes = result.encode_to_vec();
-                let Some((resource_type, resource_key, revision)) = desired_resource(envelope)
-                else {
-                    return Err(CommandError::Rejected("config_apply_invalid"));
-                };
-                session.command_executor.complete_external_applied(
+                Some(privd_response::Result::CertificateCsr(result)) => {
+                    session.command_executor.complete_external_attested(
+                        &command,
+                        Ok(&result.encode_to_vec()),
+                        &proof,
+                        completed_at,
+                    )
+                }
+                Some(privd_response::Result::CertificateRevoke(result)) => {
+                    session.command_executor.complete_external_attested(
+                        &command,
+                        Ok(&result.encode_to_vec()),
+                        &proof,
+                        completed_at,
+                    )
+                }
+                Some(privd_response::Result::CertificateP12(result)) => {
+                    session.command_executor.complete_external_attested(
+                        &command,
+                        Ok(&result.encode_to_vec()),
+                        &proof,
+                        completed_at,
+                    )
+                }
+                Some(privd_response::Result::Error(error)) if terminal_privd_error(error.kind) => {
+                    let code = terminal_privd_error_code(error.kind).unwrap_or("privd_rejected");
+                    session.command_executor.complete_external_attested(
+                        &command,
+                        Err(code),
+                        &proof,
+                        completed_at,
+                    )
+                }
+                _ => session.command_executor.mark_external_unknown(
                     &command,
-                    resource_type,
-                    &resource_key,
-                    revision,
-                    &bytes,
+                    "privd_outcome_unknown",
                     now,
-                )
+                ),
             }
-            Some(privd_response::Result::CertificateCsr(result)) => session
-                .command_executor
-                .complete_external(&command, Ok(&result.encode_to_vec()), now),
-            Some(privd_response::Result::CertificateRevoke(result)) => session
-                .command_executor
-                .complete_external(&command, Ok(&result.encode_to_vec()), now),
-            Some(privd_response::Result::CertificateP12(result)) => session
-                .command_executor
-                .complete_external(&command, Ok(&result.encode_to_vec()), now),
-            Some(privd_response::Result::Error(error)) if terminal_privd_error(error.kind) => {
-                let code = terminal_privd_error_code(error.kind).unwrap_or("privd_rejected");
-                session
-                    .command_executor
-                    .complete_external(&command, Err(code), now)
-            }
-            _ => session.command_executor.mark_external_unknown(
-                &command,
-                "privd_outcome_unknown",
-                now,
-            ),
-        },
+        }
         Err(_) => {
             session
                 .command_executor
                 .mark_external_unknown(&command, "privd_transport_unknown", now)
         }
     }
+}
+
+fn response_proof(response: &PrivdResponse) -> Option<(Vec<u8>, i64)> {
+    let proof = response.privileged_result_proof.as_ref()?;
+    if PrivdReceiptVersion::try_from(proof.version).ok()? != PrivdReceiptVersion::V1
+        || proof.signature.len() != 64
+    {
+        return None;
+    }
+    let receipt = proof.receipt_v1.as_ref()?;
+    if PrivdReceiptVersion::try_from(receipt.receipt_version).ok()? != PrivdReceiptVersion::V1
+        || receipt.completed_at.as_ref()?.seconds < 0
+    {
+        return None;
+    }
+    let encoded = proof.encode_to_vec();
+    (encoded.len() <= 65_536).then_some((encoded, receipt.completed_at.as_ref()?.seconds))
 }
 
 fn terminal_privd_error(kind: i32) -> bool {
@@ -1139,6 +1214,11 @@ fn command_result(record: &CommandRecord, replayed: bool) -> CommandResult {
             CommandResultState::Unknown
         }
     };
+    let proof = record
+        .privileged_result_proof
+        .as_deref()
+        .and_then(|encoded| PrivilegedResultProof::decode(encoded).ok());
+    let receipt = proof.as_ref().and_then(|value| value.receipt_v1.as_ref());
     CommandResult {
         command_id: record.command_id.to_vec(),
         idempotency_key: record.idempotency_key.to_vec(),
@@ -1146,16 +1226,21 @@ fn command_result(record: &CommandRecord, replayed: bool) -> CommandResult {
         state: state.into(),
         result: record.result.clone().unwrap_or_default(),
         error_code: record.error_code.clone().unwrap_or_default(),
-        accepted_at: Some(prost_types::Timestamp {
-            seconds: record.accepted_at,
-            nanos: 0,
-        }),
-        completed_at: Some(prost_types::Timestamp {
-            seconds: record.updated_at,
-            nanos: 0,
-        }),
-        replayed,
+        accepted_at: receipt
+            .and_then(|value| value.accepted_at)
+            .or(Some(prost_types::Timestamp {
+                seconds: record.accepted_at,
+                nanos: 0,
+            })),
+        completed_at: receipt.and_then(|value| value.completed_at).or(Some(
+            prost_types::Timestamp {
+                seconds: record.updated_at,
+                nanos: 0,
+            },
+        )),
+        replayed: receipt.is_some_and(|value| value.replayed) || proof.is_none() && replayed,
         semantic_payload_hash_version: record.payload_hash_version,
+        privileged_result_proof: proof,
     }
 }
 
@@ -1174,6 +1259,7 @@ fn rejected_result(envelope: &CommandEnvelope, code: &str, now: i64) -> CommandR
         }),
         replayed: false,
         semantic_payload_hash_version: SemanticPayloadHashVersion::Unspecified as i32,
+        privileged_result_proof: None,
     }
 }
 
@@ -2052,6 +2138,18 @@ mod tests {
         );
     }
 
+    #[test]
+    fn privileged_success_without_root_receipt_is_never_terminal() {
+        let response = PrivdResponse {
+            request_id: Uuid::now_v7().as_bytes().to_vec(),
+            privileged_result_proof: None,
+            result: Some(privd_response::Result::Mutation(
+                ocservia_agent_protocol::MutationResult { applied: true },
+            )),
+        };
+        assert!(response_proof(&response).is_none());
+    }
+
     #[tokio::test]
     async fn password_reconcile_uses_non_secret_authoritative_effect_store() {
         let socket = PathBuf::from(format!("/tmp/ocsm-{}.sock", Uuid::now_v7().simple()));
@@ -2078,6 +2176,7 @@ mod tests {
                 &mut stream,
                 &PrivdResponse {
                     request_id: request.request_id,
+                    privileged_result_proof: None,
                     result: Some(privd_response::Result::DesiredEffectObservation(
                         DesiredEffectObservation {
                             state: DesiredEffectState::AppliedExact.into(),
@@ -2160,6 +2259,7 @@ mod tests {
                     &mut stream,
                     &PrivdResponse {
                         request_id: request.request_id,
+                        privileged_result_proof: None,
                         result: Some(privd_response::Result::DesiredEffectObservation(
                             DesiredEffectObservation {
                                 state: state.into(),

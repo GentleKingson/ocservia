@@ -49,6 +49,31 @@ import {
   NodeTrustStateToJSON,
 } from "../models/NodeTrustState";
 import {
+  type PrivdAttestationCredential,
+  PrivdAttestationCredentialFromJSON,
+  PrivdAttestationCredentialToJSON,
+} from "../models/PrivdAttestationCredential";
+import {
+  type PrivdAttestationCredentialRequest,
+  PrivdAttestationCredentialRequestFromJSON,
+  PrivdAttestationCredentialRequestToJSON,
+} from "../models/PrivdAttestationCredentialRequest";
+import {
+  type PrivdAttestationKeyState,
+  PrivdAttestationKeyStateFromJSON,
+  PrivdAttestationKeyStateToJSON,
+} from "../models/PrivdAttestationKeyState";
+import {
+  type PrivdAttestationRegistration,
+  PrivdAttestationRegistrationFromJSON,
+  PrivdAttestationRegistrationToJSON,
+} from "../models/PrivdAttestationRegistration";
+import {
+  type PrivdAttestationRevokeRequest,
+  PrivdAttestationRevokeRequestFromJSON,
+  PrivdAttestationRevokeRequestToJSON,
+} from "../models/PrivdAttestationRevokeRequest";
+import {
   type Problem,
   ProblemFromJSON,
   ProblemToJSON,
@@ -78,6 +103,11 @@ export interface ApproveNodeRequest {
   nodeId: string;
   nodeApproval: NodeApproval;
   xApprovalID?: string;
+}
+
+export interface CreatePrivdAttestationCredentialRequest {
+  nodeId: string;
+  privdAttestationCredentialRequest: PrivdAttestationCredentialRequest;
 }
 
 export interface GetNodeRequest {
@@ -116,10 +146,20 @@ export interface ListNodesRequest {
   pageSize?: number;
 }
 
+export interface RegisterPrivdAttestationKeyRequest {
+  nodeId: string;
+  privdAttestationRegistration: PrivdAttestationRegistration;
+}
+
 export interface RevokeNodeRequest {
   nodeId: string;
   nodeRevocation: NodeRevocation;
   xApprovalID?: string;
+}
+
+export interface RevokePrivdAttestationKeyRequest {
+  nodeId: string;
+  privdAttestationRevokeRequest: PrivdAttestationRevokeRequest;
 }
 
 /**
@@ -205,6 +245,88 @@ export class NodesApi extends runtime.BaseAPI {
     initOverrides?: RequestInit | runtime.InitOverrideFunction,
   ): Promise<NodeTrustState> {
     const response = await this.approveNodeRaw(
+      requestParameters,
+      initOverrides,
+    );
+    return await response.value();
+  }
+
+  /**
+   * Creates request options for createPrivdAttestationCredential without sending the request
+   */
+  async createPrivdAttestationCredentialRequestOpts(
+    requestParameters: CreatePrivdAttestationCredentialRequest,
+  ): Promise<runtime.RequestOpts> {
+    if (requestParameters["nodeId"] == null) {
+      throw new runtime.RequiredError(
+        "nodeId",
+        'Required parameter "nodeId" was null or undefined when calling createPrivdAttestationCredential().',
+      );
+    }
+
+    if (requestParameters["privdAttestationCredentialRequest"] == null) {
+      throw new runtime.RequiredError(
+        "privdAttestationCredentialRequest",
+        'Required parameter "privdAttestationCredentialRequest" was null or undefined when calling createPrivdAttestationCredential().',
+      );
+    }
+
+    const queryParameters: any = {};
+
+    const headerParameters: runtime.HTTPHeaders = {};
+
+    headerParameters["Content-Type"] = "application/json";
+
+    if (this.configuration && this.configuration.accessToken) {
+      const token = this.configuration.accessToken;
+      const tokenString = await token("bearerAuth", []);
+
+      if (tokenString) {
+        headerParameters["Authorization"] = `Bearer ${tokenString}`;
+      }
+    }
+
+    let urlPath = `/nodes/{node_id}/privd-attestation-credentials`;
+    urlPath = urlPath.replace(
+      "{node_id}",
+      encodeURIComponent(String(requestParameters["nodeId"])),
+    );
+
+    return {
+      path: urlPath,
+      method: "POST",
+      headers: headerParameters,
+      query: queryParameters,
+      body: PrivdAttestationCredentialRequestToJSON(
+        requestParameters["privdAttestationCredentialRequest"],
+      ),
+    };
+  }
+
+  /**
+   * Create a root-provisioning-only one-time privd key credential
+   */
+  async createPrivdAttestationCredentialRaw(
+    requestParameters: CreatePrivdAttestationCredentialRequest,
+    initOverrides?: RequestInit | runtime.InitOverrideFunction,
+  ): Promise<runtime.ApiResponse<PrivdAttestationCredential>> {
+    const requestOptions =
+      await this.createPrivdAttestationCredentialRequestOpts(requestParameters);
+    const response = await this.request(requestOptions, initOverrides);
+
+    return new runtime.JSONApiResponse(response, (jsonValue) =>
+      PrivdAttestationCredentialFromJSON(jsonValue),
+    );
+  }
+
+  /**
+   * Create a root-provisioning-only one-time privd key credential
+   */
+  async createPrivdAttestationCredential(
+    requestParameters: CreatePrivdAttestationCredentialRequest,
+    initOverrides?: RequestInit | runtime.InitOverrideFunction,
+  ): Promise<PrivdAttestationCredential> {
+    const response = await this.createPrivdAttestationCredentialRaw(
       requestParameters,
       initOverrides,
     );
@@ -737,6 +859,79 @@ export class NodesApi extends runtime.BaseAPI {
   }
 
   /**
+   * Creates request options for registerPrivdAttestationKey without sending the request
+   */
+  async registerPrivdAttestationKeyRequestOpts(
+    requestParameters: RegisterPrivdAttestationKeyRequest,
+  ): Promise<runtime.RequestOpts> {
+    if (requestParameters["nodeId"] == null) {
+      throw new runtime.RequiredError(
+        "nodeId",
+        'Required parameter "nodeId" was null or undefined when calling registerPrivdAttestationKey().',
+      );
+    }
+
+    if (requestParameters["privdAttestationRegistration"] == null) {
+      throw new runtime.RequiredError(
+        "privdAttestationRegistration",
+        'Required parameter "privdAttestationRegistration" was null or undefined when calling registerPrivdAttestationKey().',
+      );
+    }
+
+    const queryParameters: any = {};
+
+    const headerParameters: runtime.HTTPHeaders = {};
+
+    headerParameters["Content-Type"] = "application/json";
+
+    let urlPath = `/nodes/{node_id}/privd-attestation-keys:register`;
+    urlPath = urlPath.replace(
+      "{node_id}",
+      encodeURIComponent(String(requestParameters["nodeId"])),
+    );
+
+    return {
+      path: urlPath,
+      method: "POST",
+      headers: headerParameters,
+      query: queryParameters,
+      body: PrivdAttestationRegistrationToJSON(
+        requestParameters["privdAttestationRegistration"],
+      ),
+    };
+  }
+
+  /**
+   * Atomically consume root provisioning proof and bind a privd key
+   */
+  async registerPrivdAttestationKeyRaw(
+    requestParameters: RegisterPrivdAttestationKeyRequest,
+    initOverrides?: RequestInit | runtime.InitOverrideFunction,
+  ): Promise<runtime.ApiResponse<PrivdAttestationKeyState>> {
+    const requestOptions =
+      await this.registerPrivdAttestationKeyRequestOpts(requestParameters);
+    const response = await this.request(requestOptions, initOverrides);
+
+    return new runtime.JSONApiResponse(response, (jsonValue) =>
+      PrivdAttestationKeyStateFromJSON(jsonValue),
+    );
+  }
+
+  /**
+   * Atomically consume root provisioning proof and bind a privd key
+   */
+  async registerPrivdAttestationKey(
+    requestParameters: RegisterPrivdAttestationKeyRequest,
+    initOverrides?: RequestInit | runtime.InitOverrideFunction,
+  ): Promise<PrivdAttestationKeyState> {
+    const response = await this.registerPrivdAttestationKeyRaw(
+      requestParameters,
+      initOverrides,
+    );
+    return await response.value();
+  }
+
+  /**
    * Creates request options for revokeNode without sending the request
    */
   async revokeNodeRequestOpts(
@@ -815,6 +1010,88 @@ export class NodesApi extends runtime.BaseAPI {
     initOverrides?: RequestInit | runtime.InitOverrideFunction,
   ): Promise<NodeTrustState> {
     const response = await this.revokeNodeRaw(requestParameters, initOverrides);
+    return await response.value();
+  }
+
+  /**
+   * Creates request options for revokePrivdAttestationKey without sending the request
+   */
+  async revokePrivdAttestationKeyRequestOpts(
+    requestParameters: RevokePrivdAttestationKeyRequest,
+  ): Promise<runtime.RequestOpts> {
+    if (requestParameters["nodeId"] == null) {
+      throw new runtime.RequiredError(
+        "nodeId",
+        'Required parameter "nodeId" was null or undefined when calling revokePrivdAttestationKey().',
+      );
+    }
+
+    if (requestParameters["privdAttestationRevokeRequest"] == null) {
+      throw new runtime.RequiredError(
+        "privdAttestationRevokeRequest",
+        'Required parameter "privdAttestationRevokeRequest" was null or undefined when calling revokePrivdAttestationKey().',
+      );
+    }
+
+    const queryParameters: any = {};
+
+    const headerParameters: runtime.HTTPHeaders = {};
+
+    headerParameters["Content-Type"] = "application/json";
+
+    if (this.configuration && this.configuration.accessToken) {
+      const token = this.configuration.accessToken;
+      const tokenString = await token("bearerAuth", []);
+
+      if (tokenString) {
+        headerParameters["Authorization"] = `Bearer ${tokenString}`;
+      }
+    }
+
+    let urlPath = `/nodes/{node_id}/privd-attestation-keys:revoke`;
+    urlPath = urlPath.replace(
+      "{node_id}",
+      encodeURIComponent(String(requestParameters["nodeId"])),
+    );
+
+    return {
+      path: urlPath,
+      method: "POST",
+      headers: headerParameters,
+      query: queryParameters,
+      body: PrivdAttestationRevokeRequestToJSON(
+        requestParameters["privdAttestationRevokeRequest"],
+      ),
+    };
+  }
+
+  /**
+   * Revoke a node privd result attestation key
+   */
+  async revokePrivdAttestationKeyRaw(
+    requestParameters: RevokePrivdAttestationKeyRequest,
+    initOverrides?: RequestInit | runtime.InitOverrideFunction,
+  ): Promise<runtime.ApiResponse<PrivdAttestationKeyState>> {
+    const requestOptions =
+      await this.revokePrivdAttestationKeyRequestOpts(requestParameters);
+    const response = await this.request(requestOptions, initOverrides);
+
+    return new runtime.JSONApiResponse(response, (jsonValue) =>
+      PrivdAttestationKeyStateFromJSON(jsonValue),
+    );
+  }
+
+  /**
+   * Revoke a node privd result attestation key
+   */
+  async revokePrivdAttestationKey(
+    requestParameters: RevokePrivdAttestationKeyRequest,
+    initOverrides?: RequestInit | runtime.InitOverrideFunction,
+  ): Promise<PrivdAttestationKeyState> {
+    const response = await this.revokePrivdAttestationKeyRaw(
+      requestParameters,
+      initOverrides,
+    );
     return await response.value();
   }
 }

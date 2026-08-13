@@ -9,6 +9,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use ed25519_dalek::SigningKey;
 use ocservia_agent_protocol::{
     ErrorKind, PrivdError, PrivdRequest, PrivdResponse, PrivilegedRequestMode, privd_request,
     privd_response, read_frame, write_frame,
@@ -17,13 +18,15 @@ use ocservia_command_authorization::{
     ArtifactGrantClaimsV1, AuthorizationError, CommandAuthorizationV1, ControllerCommandKeyring,
 };
 use ocservia_contracts::generated::ocserv::platform::agent::v1::{
-    CommandDeliveryMode, CommandEnvelope, SealedSecretPurpose, SealedSecretVersion,
-    command_envelope,
+    CommandDeliveryMode, CommandEnvelope, CommandResultState, PrivdCertificateReceiptBindingV1,
+    PrivdReceiptVersion, PrivdResultReceiptV1, PrivilegedCommandKind, PrivilegedResultKind,
+    SealedSecretPurpose, SealedSecretVersion, command_envelope,
 };
 use ocservia_ocserv_adapter::{
     Adapter, ArtifactLeaseIdentity, AuthorizedEffectDecision, AuthorizedEffectIdentity,
     EffectIdentity,
 };
+use ocservia_privd_attestation::{key_id, requested_subject_digest, sign_receipt};
 use prost::Message as _;
 use sha2::{Digest as _, Sha256};
 use tokio::net::{UnixListener, UnixStream};
@@ -34,7 +37,7 @@ const MAX_CONCURRENT_CLIENTS: usize = 4;
 const MAX_REQUEST_LIFETIME: Duration = Duration::from_secs(30);
 
 /// Privd server configuration.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct ServerConfig {
     /// `AF_UNIX` socket path.
     pub socket: PathBuf,
@@ -44,6 +47,20 @@ pub struct ServerConfig {
     pub node_id: [u8; 16],
     /// Controller verification keys loaded by root at startup.
     pub command_keys: ControllerCommandKeyring,
+    /// Root-owned per-node terminal-result attestation key.
+    pub attestation_key: Arc<SigningKey>,
+}
+
+impl std::fmt::Debug for ServerConfig {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ServerConfig")
+            .field("socket", &self.socket)
+            .field("agent_uid", &self.agent_uid)
+            .field("node_id", &Uuid::from_bytes(self.node_id))
+            .field("attestation_key", &"[redacted]")
+            .finish_non_exhaustive()
+    }
 }
 
 /// Binds a root-controlled `AF_UNIX` socket with mode 0660.
@@ -114,10 +131,11 @@ pub async fn serve(
                 let agent_uid = config.agent_uid;
                 let node_id = config.node_id;
                 let command_keys = config.command_keys.clone();
+                let attestation_key = Arc::clone(&config.attestation_key);
                 tokio::spawn(async move {
                     let _permit = permit;
                     if let Err(error) =
-                        handle_client(stream, agent_uid, node_id, command_keys, adapter).await
+                        handle_client(stream, agent_uid, node_id, command_keys, attestation_key, adapter).await
                     {
                         tracing::warn!(error = %error, "privd client failed");
                     }
@@ -132,6 +150,7 @@ async fn handle_client(
     agent_uid: u32,
     node_id: [u8; 16],
     command_keys: ControllerCommandKeyring,
+    attestation_key: Arc<SigningKey>,
     adapter: Adapter,
 ) -> Result<(), io::Error> {
     let credentials = stream.peer_cred()?;
@@ -144,17 +163,19 @@ async fn handle_client(
     let request: PrivdRequest = tokio::time::timeout(MAX_REQUEST_LIFETIME, read_frame(&mut stream))
         .await
         .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "privd request read timed out"))??;
-    let response = dispatch(request, &node_id, &command_keys, &adapter).await;
+    let response =
+        dispatch_attested(request, &node_id, &command_keys, &attestation_key, &adapter).await;
     tokio::time::timeout(MAX_REQUEST_LIFETIME, write_frame(&mut stream, &response))
         .await
         .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "privd response write timed out"))??;
     Ok(())
 }
 
-async fn dispatch(
+async fn dispatch_attested(
     request: PrivdRequest,
     node_id: &[u8; 16],
     command_keys: &ControllerCommandKeyring,
+    attestation_key: &SigningKey,
     adapter: &Adapter,
 ) -> PrivdResponse {
     let request_id = request.request_id.clone();
@@ -165,13 +186,27 @@ async fn dispatch(
                 Err(_) => deadline_error(),
             }
         }
-        Ok((deadline, ValidatedRequest::Execute(claims))) => {
+        Ok((deadline, ValidatedRequest::Execute(claims, accepted_at))) => {
             let command = request
                 .authorization_command
                 .expect("validated command must be present");
-            match tokio::time::timeout(deadline, execute_command(&command, &claims, adapter)).await
+            match tokio::time::timeout(
+                deadline,
+                execute_command(
+                    &command,
+                    &claims,
+                    &accepted_at,
+                    node_id,
+                    attestation_key,
+                    adapter,
+                ),
+            )
+            .await
             {
-                Ok(result) => result,
+                Ok(mut response) => {
+                    response.request_id = request_id;
+                    return response;
+                }
                 Err(_) => deadline_error(),
             }
         }
@@ -182,7 +217,10 @@ async fn dispatch(
             match tokio::time::timeout(deadline, reconcile_command(&command, &claims, adapter))
                 .await
             {
-                Ok(result) => result,
+                Ok(mut response) => {
+                    response.request_id = request_id;
+                    return response;
+                }
                 Err(_) => deadline_error(),
             }
         }
@@ -225,13 +263,25 @@ async fn dispatch(
     };
     PrivdResponse {
         request_id,
+        privileged_result_proof: None,
         result: Some(result),
     }
 }
 
+#[cfg(test)]
+async fn dispatch(
+    request: PrivdRequest,
+    node_id: &[u8; 16],
+    command_keys: &ControllerCommandKeyring,
+    adapter: &Adapter,
+) -> PrivdResponse {
+    let key = SigningKey::from_bytes(&[41; 32]);
+    dispatch_attested(request, node_id, command_keys, &key, adapter).await
+}
+
 enum ValidatedRequest {
     Read,
-    Execute(CommandAuthorizationV1),
+    Execute(CommandAuthorizationV1, prost_types::Timestamp),
     Reconcile(CommandAuthorizationV1),
     ArtifactRead(ArtifactGrantClaimsV1, u64),
     ArtifactConsume(ArtifactGrantClaimsV1, Vec<u8>, u64, bool),
@@ -290,12 +340,29 @@ fn validate_request(
             (
                 PrivilegedRequestMode::Execute,
                 CommandDeliveryMode::ExecuteOrReplay | CommandDeliveryMode::RetryIfEffectAbsent,
-            ) => ValidatedRequest::Execute(claims),
-            (PrivilegedRequestMode::Reconcile, CommandDeliveryMode::ReconcileOnly) => {
-                if desired_effect_binding(command).is_none() {
+            ) => {
+                let accepted = request.accepted_at.ok_or_else(|| {
+                    error(
+                        ErrorKind::InvalidRequest,
+                        "journal acceptance timestamp required",
+                    )
+                })?;
+                if accepted.seconds < claims.issued_at_seconds
+                    || accepted.seconds > now_seconds.saturating_add(300)
+                    || !(0..1_000_000_000).contains(&accepted.nanos)
+                {
                     return Err(error(
                         ErrorKind::InvalidRequest,
-                        "command does not support privd reconciliation",
+                        "journal acceptance timestamp invalid",
+                    ));
+                }
+                ValidatedRequest::Execute(claims, accepted)
+            }
+            (PrivilegedRequestMode::Reconcile, CommandDeliveryMode::ReconcileOnly) => {
+                if effect_binding(command, &claims).is_none() {
+                    return Err(error(
+                        ErrorKind::InvalidRequest,
+                        "command does not support privileged reconciliation",
                     ));
                 }
                 ValidatedRequest::Reconcile(claims)
@@ -308,6 +375,12 @@ fn validate_request(
             }
         }
     } else {
+        if request.accepted_at.is_some() {
+            return Err(error(
+                ErrorKind::InvalidRequest,
+                "journal acceptance timestamp is only valid for execution",
+            ));
+        }
         if mode != PrivilegedRequestMode::Unspecified {
             return Err(error(
                 ErrorKind::PermissionDenied,
@@ -747,6 +820,11 @@ fn effect_binding(
             payload.group_name.clone(),
             payload.desired_revision,
         ),
+        command_envelope::Payload::ConfigPlan(payload) => (
+            "config_plan",
+            hex::encode(&payload.candidate_hash),
+            claims.expected_revision,
+        ),
         command_envelope::Payload::ConfigApply(payload) => (
             "config_apply",
             "ocserv.conf".to_owned(),
@@ -855,44 +933,73 @@ fn authorized_effect<'a>(
 async fn execute_command(
     command: &CommandEnvelope,
     claims: &CommandAuthorizationV1,
+    accepted_at: &prost_types::Timestamp,
+    node_id: &[u8; 16],
+    attestation_key: &SigningKey,
     adapter: &Adapter,
-) -> privd_response::Result {
+) -> PrivdResponse {
     let binding = effect_binding(command, claims);
     if let Some(binding) = binding.as_ref() {
         match adapter.prepare_authorized_effect(authorized_effect(command, claims, binding)) {
             Ok(AuthorizedEffectDecision::Execute) => {}
             Ok(AuthorizedEffectDecision::Replay(encoded)) => {
-                return decode_cached_result(&encoded);
+                return decode_cached_response(&encoded);
             }
             Ok(AuthorizedEffectDecision::Pending) => {
-                return privd_response::Result::Error(error(
+                return response_error(
                     ErrorKind::Unavailable,
                     "authorized effect outcome requires reconciliation",
-                ));
+                );
             }
             Err(failure) => {
-                return privd_response::Result::Error(PrivdError::from(failure));
+                return PrivdResponse {
+                    request_id: Vec::new(),
+                    privileged_result_proof: None,
+                    result: Some(privd_response::Result::Error(PrivdError::from(failure))),
+                };
             }
         }
     }
     let (operation_name, result) = execute_signed_payload(command, claims, adapter).await;
     let result = finish_operation(operation_name, result);
-    if matches!(result, privd_response::Result::Error(_)) {
-        return result;
-    }
-    if let Some(binding) = binding.as_ref() {
-        let cached = PrivdResponse {
+    if matches!(&result, privd_response::Result::Error(error) if terminal_result_error_code(error).is_none())
+    {
+        return PrivdResponse {
             request_id: Vec::new(),
-            result: Some(result.clone()),
-        }
-        .encode_to_vec();
-        if let Err(failure) =
-            adapter.complete_authorized_effect(authorized_effect(command, claims, binding), &cached)
-        {
-            return privd_response::Result::Error(PrivdError::from(failure));
-        }
+            privileged_result_proof: None,
+            result: Some(result),
+        };
     }
-    result
+    let Some(binding) = binding.as_ref() else {
+        return response_error(ErrorKind::Unavailable, "root effect identity unavailable");
+    };
+    let Ok(proof) = build_result_proof(
+        command,
+        claims,
+        accepted_at,
+        node_id,
+        binding,
+        &result,
+        attestation_key,
+    ) else {
+        return response_error(ErrorKind::Unavailable, "result attestation unavailable");
+    };
+    let response = PrivdResponse {
+        request_id: Vec::new(),
+        privileged_result_proof: Some(proof),
+        result: Some(result),
+    };
+    let cached = response.encode_to_vec();
+    if let Err(failure) =
+        adapter.complete_authorized_effect(authorized_effect(command, claims, binding), &cached)
+    {
+        return PrivdResponse {
+            request_id: Vec::new(),
+            privileged_result_proof: None,
+            result: Some(privd_response::Result::Error(PrivdError::from(failure))),
+        };
+    }
+    response
 }
 
 #[allow(clippy::too_many_lines)]
@@ -1074,12 +1181,26 @@ async fn reconcile_command(
     command: &CommandEnvelope,
     claims: &CommandAuthorizationV1,
     adapter: &Adapter,
-) -> privd_response::Result {
+) -> PrivdResponse {
+    let Some(root_binding) = effect_binding(command, claims) else {
+        return response_error(ErrorKind::InvalidRequest, "root effect binding unavailable");
+    };
+    match adapter.replay_authorized_effect(authorized_effect(command, claims, &root_binding)) {
+        Ok(Some(encoded)) => return decode_cached_response(&encoded),
+        Ok(None) => {}
+        Err(error) => {
+            return PrivdResponse {
+                request_id: Vec::new(),
+                privileged_result_proof: None,
+                result: Some(privd_response::Result::Error(PrivdError::from(error))),
+            };
+        }
+    }
     let Some(binding) = desired_effect_binding(command) else {
-        return privd_response::Result::Error(error(
+        return response_error(
             ErrorKind::InvalidRequest,
             "desired effect binding unavailable",
-        ));
+        );
     };
     let result = adapter
         .desired_effect_observe(
@@ -1090,21 +1211,218 @@ async fn reconcile_command(
         )
         .await
         .map(privd_response::Result::DesiredEffectObservation);
-    finish_operation("desired_effect_observe", result)
+    PrivdResponse {
+        request_id: Vec::new(),
+        privileged_result_proof: None,
+        result: Some(finish_operation("desired_effect_observe", result)),
+    }
 }
 
-fn decode_cached_result(encoded: &[u8]) -> privd_response::Result {
+fn decode_cached_response(encoded: &[u8]) -> PrivdResponse {
     match PrivdResponse::decode(encoded) {
-        Ok(response) if response.request_id.is_empty() => response.result.unwrap_or_else(|| {
-            privd_response::Result::Error(error(
-                ErrorKind::Unavailable,
-                "cached authorized effect result missing",
-            ))
-        }),
-        _ => privd_response::Result::Error(error(
+        Ok(response)
+            if response.request_id.is_empty()
+                && response.result.is_some()
+                && response.privileged_result_proof.is_some() =>
+        {
+            response
+        }
+        _ => response_error(
             ErrorKind::Unavailable,
             "cached authorized effect result invalid",
-        )),
+        ),
+    }
+}
+
+fn response_error(kind: ErrorKind, detail: &'static str) -> PrivdResponse {
+    PrivdResponse {
+        request_id: Vec::new(),
+        privileged_result_proof: None,
+        result: Some(privd_response::Result::Error(error(kind, detail))),
+    }
+}
+
+fn build_result_proof(
+    command: &CommandEnvelope,
+    claims: &CommandAuthorizationV1,
+    accepted_at: &prost_types::Timestamp,
+    node_id: &[u8; 16],
+    binding: &CommandEffectBinding,
+    result: &privd_response::Result,
+    key: &SigningKey,
+) -> Result<ocservia_contracts::generated::ocserv::platform::agent::v1::PrivilegedResultProof, ()> {
+    let completed = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|_| ())?;
+    let completed_at = prost_types::Timestamp {
+        seconds: i64::try_from(completed.as_secs()).map_err(|_| ())?,
+        nanos: i32::try_from(completed.subsec_nanos()).map_err(|_| ())?,
+    };
+    let result_bytes = exact_result_bytes(result).ok_or(())?;
+    let mut effect = Sha256::new();
+    effect.update(b"ocservia/privd-root-effect-record/v1\0");
+    effect.update(node_id);
+    effect.update(claims.command_id);
+    effect.update(claims.operation_id);
+    effect.update(claims.idempotency_key);
+    effect.update(binding.effect_kind.as_bytes());
+    effect.update((binding.resource_key.len() as u64).to_be_bytes());
+    effect.update(binding.resource_key.as_bytes());
+    effect.update(binding.effect_revision.to_be_bytes());
+    let effect_record_id = effect.finalize().to_vec();
+    let certificate = certificate_binding(command, result, &effect_record_id)?;
+    let receipt = PrivdResultReceiptV1 {
+        receipt_version: PrivdReceiptVersion::V1.into(),
+        node_id: node_id.to_vec(),
+        privd_attestation_key_id: key_id(&key.verifying_key()),
+        command_id: claims.command_id.to_vec(),
+        operation_id: claims.operation_id.to_vec(),
+        idempotency_key: claims.idempotency_key.to_vec(),
+        semantic_payload_hash_version: i32::try_from(claims.semantic_hash_version)
+            .map_err(|_| ())?,
+        semantic_payload_sha256: claims.semantic_payload_sha256.to_vec(),
+        command_kind: privileged_command_kind(command).ok_or(())?.into(),
+        result_kind: privileged_result_kind(result).ok_or(())?.into(),
+        terminal_state: match result {
+            privd_response::Result::Error(_) => CommandResultState::Failed.into(),
+            _ => CommandResultState::Succeeded.into(),
+        },
+        result_bytes_sha256: Sha256::digest(&result_bytes).to_vec(),
+        error_code_sha256: Sha256::digest(match result {
+            privd_response::Result::Error(error) => {
+                terminal_result_error_code(error).ok_or(())?.as_bytes()
+            }
+            _ => &[],
+        })
+        .to_vec(),
+        effect_record_id,
+        effect_sequence: binding.effect_revision.max(claims.expected_revision).max(1),
+        accepted_at: Some(*accepted_at),
+        completed_at: Some(completed_at),
+        replayed: false,
+        certificate,
+    };
+    sign_receipt(receipt, key).map_err(|_| ())
+}
+
+fn exact_result_bytes(result: &privd_response::Result) -> Option<Vec<u8>> {
+    match result {
+        privd_response::Result::Mutation(value) => Some(value.encode_to_vec()),
+        privd_response::Result::ConfigPlan(value) => Some(value.encode_to_vec()),
+        privd_response::Result::ConfigApply(value) => Some(value.encode_to_vec()),
+        privd_response::Result::CertificateCsr(value) => Some(value.encode_to_vec()),
+        privd_response::Result::CertificateP12(value) => Some(value.encode_to_vec()),
+        privd_response::Result::CertificateRevoke(value) => Some(value.encode_to_vec()),
+        privd_response::Result::Error(error) if terminal_result_error_code(error).is_some() => {
+            Some(Vec::new())
+        }
+        _ => None,
+    }
+}
+
+fn privileged_result_kind(result: &privd_response::Result) -> Option<PrivilegedResultKind> {
+    match result {
+        privd_response::Result::Mutation(_) => Some(PrivilegedResultKind::Mutation),
+        privd_response::Result::ConfigPlan(_) => Some(PrivilegedResultKind::ConfigPlan),
+        privd_response::Result::ConfigApply(_) => Some(PrivilegedResultKind::ConfigApply),
+        privd_response::Result::CertificateCsr(_) => Some(PrivilegedResultKind::CertificateCsr),
+        privd_response::Result::CertificateP12(_) => Some(PrivilegedResultKind::CertificateP12),
+        privd_response::Result::CertificateRevoke(_) => {
+            Some(PrivilegedResultKind::CertificateRevoke)
+        }
+        privd_response::Result::Error(error) if terminal_result_error_code(error).is_some() => {
+            Some(PrivilegedResultKind::Error)
+        }
+        _ => None,
+    }
+}
+
+fn privileged_command_kind(command: &CommandEnvelope) -> Option<PrivilegedCommandKind> {
+    match command.payload.as_ref()? {
+        command_envelope::Payload::SessionDisconnect(_) => {
+            Some(PrivilegedCommandKind::SessionDisconnect)
+        }
+        command_envelope::Payload::SessionTerminate(_) => {
+            Some(PrivilegedCommandKind::SessionTerminate)
+        }
+        command_envelope::Payload::IpBanRemove(_) => Some(PrivilegedCommandKind::IpBanRemove),
+        command_envelope::Payload::ServiceReload(_) => Some(PrivilegedCommandKind::ServiceReload),
+        command_envelope::Payload::UserCreate(_) => Some(PrivilegedCommandKind::UserCreate),
+        command_envelope::Payload::UserDisable(_) => Some(PrivilegedCommandKind::UserDisable),
+        command_envelope::Payload::UserEnable(_) => Some(PrivilegedCommandKind::UserEnable),
+        command_envelope::Payload::UserPasswordRotate(_) => {
+            Some(PrivilegedCommandKind::UserPasswordRotate)
+        }
+        command_envelope::Payload::GroupApply(_) => Some(PrivilegedCommandKind::GroupApply),
+        command_envelope::Payload::ConfigPlan(_) => Some(PrivilegedCommandKind::ConfigPlan),
+        command_envelope::Payload::ConfigApply(_) => Some(PrivilegedCommandKind::ConfigApply),
+        command_envelope::Payload::CertificateCsr(_) => Some(PrivilegedCommandKind::CertificateCsr),
+        command_envelope::Payload::CertificateP12(_) => Some(PrivilegedCommandKind::CertificateP12),
+        command_envelope::Payload::CertificateRevoke(_) => {
+            Some(PrivilegedCommandKind::CertificateRevoke)
+        }
+        _ => None,
+    }
+}
+
+fn certificate_binding(
+    command: &CommandEnvelope,
+    result: &privd_response::Result,
+    effect_record_id: &[u8],
+) -> Result<Option<PrivdCertificateReceiptBindingV1>, ()> {
+    match (command.payload.as_ref(), result) {
+        (
+            Some(command_envelope::Payload::CertificateCsr(request)),
+            privd_response::Result::CertificateCsr(response),
+        ) => Ok(Some(PrivdCertificateReceiptBindingV1 {
+            certificate_id: request.certificate_id.clone(),
+            csr_der_sha256: Sha256::digest(&response.csr_der).to_vec(),
+            public_key_sha256: response.public_key_sha256.clone(),
+            requested_subject_sha256: requested_subject_digest(request).map_err(|_| ())?.to_vec(),
+            root_effect_record_id: effect_record_id.to_vec(),
+        })),
+        (
+            Some(command_envelope::Payload::CertificateCsr(request)),
+            privd_response::Result::Error(error),
+        ) if terminal_result_error_code(error).is_some() => {
+            Ok(Some(PrivdCertificateReceiptBindingV1 {
+                certificate_id: request.certificate_id.clone(),
+                csr_der_sha256: Vec::new(),
+                public_key_sha256: Vec::new(),
+                requested_subject_sha256: Vec::new(),
+                root_effect_record_id: effect_record_id.to_vec(),
+            }))
+        }
+        (Some(command_envelope::Payload::CertificateP12(request)), _) => {
+            Ok(Some(PrivdCertificateReceiptBindingV1 {
+                certificate_id: request.certificate_id.clone(),
+                csr_der_sha256: Vec::new(),
+                public_key_sha256: Vec::new(),
+                requested_subject_sha256: Vec::new(),
+                root_effect_record_id: effect_record_id.to_vec(),
+            }))
+        }
+        (Some(command_envelope::Payload::CertificateRevoke(request)), _) => {
+            Ok(Some(PrivdCertificateReceiptBindingV1 {
+                certificate_id: request.certificate_id.clone(),
+                csr_der_sha256: Vec::new(),
+                public_key_sha256: Vec::new(),
+                requested_subject_sha256: Vec::new(),
+                root_effect_record_id: effect_record_id.to_vec(),
+            }))
+        }
+        (Some(command_envelope::Payload::CertificateCsr(_)), _) => Err(()),
+        _ => Ok(None),
+    }
+}
+
+fn terminal_result_error_code(error: &PrivdError) -> Option<&'static str> {
+    match ErrorKind::try_from(error.kind).unwrap_or(ErrorKind::Unspecified) {
+        ErrorKind::CapacityExceeded => Some("capacity_exceeded"),
+        ErrorKind::InvalidRequest | ErrorKind::PermissionDenied | ErrorKind::MalformedOutput => {
+            Some("privd_rejected")
+        }
+        _ => None,
     }
 }
 
@@ -1277,8 +1595,31 @@ mod tests {
         PrivdRequest {
             request_id: Uuid::now_v7().as_bytes().to_vec(),
             deadline_unix_ms: deadline(),
+            accepted_at: command.issued_at,
             authorization_command: Some(command),
             privileged_mode: PrivilegedRequestMode::Execute.into(),
+            operation: None,
+        }
+    }
+
+    fn reconcile_request(mut command: CommandEnvelope, key: &SigningKey) -> PrivdRequest {
+        command.delivery_mode = CommandDeliveryMode::ReconcileOnly.into();
+        command.message_id = Uuid::now_v7().as_bytes().to_vec();
+        let claims = claims_from_envelope_v1(&command).expect("reconciliation claims");
+        command
+            .authorization
+            .as_mut()
+            .expect("reconciliation authorization")
+            .signature = key
+            .sign(&canonical_v1(&claims).expect("reconciliation canonical bytes"))
+            .to_bytes()
+            .to_vec();
+        PrivdRequest {
+            request_id: Uuid::now_v7().as_bytes().to_vec(),
+            deadline_unix_ms: deadline(),
+            accepted_at: None,
+            authorization_command: Some(command),
+            privileged_mode: PrivilegedRequestMode::Reconcile.into(),
             operation: None,
         }
     }
@@ -1287,6 +1628,7 @@ mod tests {
         PrivdRequest {
             request_id: Uuid::now_v7().as_bytes().to_vec(),
             deadline_unix_ms: deadline(),
+            accepted_at: None,
             authorization_command: None,
             privileged_mode: PrivilegedRequestMode::Unspecified.into(),
             operation,
@@ -1351,6 +1693,7 @@ mod tests {
         let expired = PrivdRequest {
             request_id: Uuid::now_v7().as_bytes().to_vec(),
             deadline_unix_ms: 1,
+            accepted_at: None,
             authorization_command: None,
             privileged_mode: PrivilegedRequestMode::Unspecified.into(),
             operation: Some(privd_request::Operation::ServiceStatus(ReadRequest {})),
@@ -1364,6 +1707,7 @@ mod tests {
         let missing = PrivdRequest {
             request_id: Uuid::now_v7().as_bytes().to_vec(),
             deadline_unix_ms: deadline(),
+            accepted_at: None,
             authorization_command: None,
             privileged_mode: PrivilegedRequestMode::Unspecified.into(),
             operation: None,
@@ -1386,16 +1730,81 @@ mod tests {
             first.result,
             Some(privd_response::Result::Mutation(ref result)) if result.applied
         ));
+        let proof = first
+            .privileged_result_proof
+            .clone()
+            .expect("successful root effect must be attested");
+        ocservia_privd_attestation::verify_receipt(
+            &proof,
+            &SigningKey::from_bytes(&[41; 32]).verifying_key(),
+        )
+        .expect("valid root receipt");
         drop(adapter);
         let restarted = Adapter::new(resources, Limits::default());
-        let replay = dispatch(command_request(command), &node_id, &keys, &restarted).await;
+        let replay = dispatch(
+            reconcile_request(command.clone(), &signing),
+            &node_id,
+            &keys,
+            &restarted,
+        )
+        .await;
         assert!(matches!(
             replay.result,
             Some(privd_response::Result::Mutation(ref result)) if result.applied
         ));
+        assert_eq!(replay.privileged_result_proof, Some(proof));
+        assert_eq!(replay.result, first.result);
+        let duplicate = dispatch(command_request(command), &node_id, &keys, &restarted).await;
+        assert_eq!(
+            duplicate.privileged_result_proof,
+            replay.privileged_result_proof
+        );
+        assert_eq!(duplicate.result, replay.result);
         assert_eq!(
             std::fs::read_to_string(counter).expect("effect counter"),
             "x"
+        );
+        std::fs::remove_dir_all(directory).expect("cleanup test directory");
+    }
+
+    #[tokio::test]
+    async fn receipt_persistence_failure_cannot_return_privileged_success() {
+        let signing = SigningKey::from_bytes(&[42; 32]);
+        let keys = keyring(&signing);
+        let node_id = *Uuid::now_v7().as_bytes();
+        let now = unix_seconds();
+        let command = signed_service_reload(&signing, node_id, now, now + 60);
+        let initializer = signed_service_reload(&signing, node_id, now, now + 60);
+        let claims = claims_from_envelope_v1(&initializer).expect("initializer claims");
+        let binding = effect_binding(&initializer, &claims).expect("initializer effect binding");
+        let (adapter, _resources, counter, directory) = test_adapter();
+        assert_eq!(
+            adapter
+                .prepare_authorized_effect(authorized_effect(&initializer, &claims, &binding))
+                .expect("initialize root effect store"),
+            AuthorizedEffectDecision::Execute
+        );
+        {
+            let connection = rusqlite::Connection::open(directory.join("effects.sqlite3"))
+                .expect("open root effect store for fault injection");
+            connection
+                .execute_batch(
+                    "CREATE TRIGGER fail_attested_response BEFORE UPDATE OF response ON authorized_effects BEGIN SELECT RAISE(ABORT, 'injected receipt persistence failure'); END;",
+                )
+                .expect("install completion fault");
+        }
+
+        let response = dispatch(command_request(command), &node_id, &keys, &adapter).await;
+        assert!(response.privileged_result_proof.is_none());
+        assert!(matches!(
+            response.result,
+            Some(privd_response::Result::Error(ref error))
+                if ErrorKind::try_from(error.kind).ok() == Some(ErrorKind::Unavailable)
+        ));
+        assert_eq!(
+            std::fs::read_to_string(counter).expect("effect counter"),
+            "x",
+            "the completed side effect must remain Unknown rather than be repeated"
         );
         std::fs::remove_dir_all(directory).expect("cleanup test directory");
     }
@@ -1645,6 +2054,7 @@ mod tests {
             agent_uid: rustix_uid(),
             node_id,
             command_keys: keys,
+            attestation_key: Arc::new(SigningKey::from_bytes(&[41; 32])),
         };
         let listener = bind_socket(&config).expect("bind privd fixture");
         let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();

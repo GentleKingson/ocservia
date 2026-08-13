@@ -9,6 +9,7 @@ publish = false
 [dependencies]
 ocservia-contracts = { version = "=0.1.0", path = "../contracts", default-features = false }
 prost.workspace = true
+prost-types.workspace = true
 tokio = { workspace = true, features = ["io-util", "macros", "net", "rt"] }
 
 [lints]

@@ -1,6 +1,7 @@
 package localslice
 
 import (
+	"context"
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/sha256"
@@ -9,10 +10,14 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+	"time"
 
 	agentv1 "github.com/GentleKingson/ocservia/control-plane/gen/proto/ocserv/platform/agent/v1"
 	transportv1 "github.com/GentleKingson/ocservia/control-plane/gen/proto/ocserv/platform/transport/v1"
+	"github.com/GentleKingson/ocservia/control-plane/internal/privdattestation"
+	"github.com/google/uuid"
 	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
 func TestCertificateCSRResultRejectsSubjectSubstitution(t *testing.T) {
@@ -37,6 +42,54 @@ func TestCertificateCSRResultRejectsSubjectSubstitution(t *testing.T) {
 	}
 	if _, err := normalizeCertificateCSRResult(envelope, "succeeded", encoded); err == nil {
 		t.Fatal("substituted CSR subject was accepted")
+	}
+}
+
+func TestMatchingAttackerCSRWithoutPrivdReceiptCannotBecomeReady(t *testing.T) {
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatal(err)
+	}
+	certificateID, nodeID := uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7())
+	commandID, operationID, idempotencyID := uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7())
+	csrDER, err := x509.CreateCertificateRequest(rand.Reader, &x509.CertificateRequest{Subject: pkix.Name{CommonName: "node.example.test"}, DNSNames: []string{"node.example.test"}}, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	publicDER, err := x509.MarshalPKIXPublicKey(&key.PublicKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	publicDigest := sha256.Sum256(publicDER)
+	semantic := bytesOf(0x51)
+	envelope := &agentv1.CommandEnvelope{
+		CommandId: commandID[:], OperationId: operationID[:], IdempotencyKey: idempotencyID[:], NodeId: nodeID[:],
+		SemanticPayloadHashVersion: agentv1.SemanticPayloadHashVersion_SEMANTIC_PAYLOAD_HASH_VERSION_V2,
+		SemanticPayloadSha256:      semantic,
+		Payload: &agentv1.CommandEnvelope_CertificateCsr{CertificateCsr: &agentv1.CertificateCsr{
+			CertificateId: certificateID[:], CommonName: "node.example.test", DnsNames: []string{"node.example.test"}, KeyBits: 2048,
+		}},
+	}
+	encoded, err := proto.Marshal(&agentv1.CertificateCsrResult{CertificateId: certificateID[:], CsrDer: csrDER, PublicKeySha256: publicDigest[:]})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := normalizeCertificateCSRResult(envelope, "succeeded", encoded); err != nil {
+		t.Fatalf("matching attacker CSR should pass only the structural check: %v", err)
+	}
+	accepted := time.Unix(1_700_000_000, 0).UTC()
+	result := &agentv1.CommandResult{
+		CommandId: commandID[:], IdempotencyKey: idempotencyID[:], PayloadSha256: semantic,
+		SemanticPayloadHashVersion: agentv1.SemanticPayloadHashVersion_SEMANTIC_PAYLOAD_HASH_VERSION_V2,
+		State:                      agentv1.CommandResultState_COMMAND_RESULT_STATE_SUCCEEDED, Result: encoded,
+		AcceptedAt: timestamppb.New(accepted), CompletedAt: timestamppb.New(accepted.Add(time.Second)),
+	}
+	verification := privdattestation.VerifyResult(context.Background(), nil, nodeID, envelope, result)
+	if verification.Status != "missing" || verification.FailureReason != "receipt_missing" {
+		t.Fatalf("missing root receipt verification = %+v", verification)
+	}
+	if csr, err := normalizeCertificateCSRResult(envelope, "unknown", encoded); err != nil || csr != nil {
+		t.Fatalf("unattested CSR was eligible for csr_ready: csr=%v err=%v", csr != nil, err)
 	}
 }
 

@@ -83,7 +83,7 @@ fi
 make_sample() {
   local phase=$1 epoch=$2
   jq -cn --arg phase "${phase}" --arg at "2026-08-04T00:00:${epoch}Z" --argjson epoch "${epoch}" \
-    '{at:$at,epoch_seconds:$epoch,phase:$phase,runtime:{goroutines:2,db_acquired:1,db_idle:1,db_total:2},stub:{active_tasks:3,task_capacity:8},postgres:{active:1,waiting:0,available:true},control_rss_kib:10,control_fd:4,stub_rss_kib:8,stub_fd:3}'
+    '{at:$at,epoch_seconds:$epoch,phase:$phase,runtime:{goroutines:2,db_acquired:1,db_idle:1,db_total:2,sse_active_streams:4,sse_rejected_streams:0,sse_watchers:1,sse_unhealthy_watchers:0,sse_sql_queries:3,sse_slow_consumer_disconnects:0,sse_database_backoff_seconds:0},stub:{active_tasks:3,task_capacity:8},postgres:{active:1,waiting:0,available:true},control_rss_kib:10,control_fd:4,stub_rss_kib:8,stub_fd:3}'
 }
 samples="${temporary}/samples.jsonl"
 epoch=0

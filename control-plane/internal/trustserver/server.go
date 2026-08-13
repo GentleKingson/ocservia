@@ -34,6 +34,26 @@ func (h *Handler) CheckEndpoint(ctx context.Context, request *transportv1.CheckE
 	return &transportv1.CheckEndpointResponse{Permitted: permitted}, nil
 }
 
+func (h *Handler) ListNodeTrust(ctx context.Context, _ *transportv1.ListNodeTrustRequest) (*transportv1.ListNodeTrustResponse, error) {
+	bindings, err := h.service.ListNodeTrust(ctx)
+	if err != nil {
+		return nil, status.Error(codes.Unavailable, "trust snapshot unavailable")
+	}
+	return &transportv1.ListNodeTrustResponse{Bindings: bindings}, nil
+}
+
+func (h *Handler) ValidateEnrollment(ctx context.Context, request *transportv1.ValidateEnrollmentRequest) (*transportv1.ValidateEnrollmentResponse, error) {
+	err := h.service.ValidateEnrollment(ctx, request.GetEnrollment())
+	switch {
+	case errors.Is(err, enrollment.ErrInvalidToken), errors.Is(err, enrollment.ErrEndpointMismatch), errors.Is(err, enrollment.ErrEndpointProof), errors.Is(err, enrollment.ErrInvalidRequest):
+		return nil, status.Error(codes.PermissionDenied, "enrollment rejected")
+	case err != nil:
+		return nil, status.Error(codes.Unavailable, "trust authority unavailable")
+	default:
+		return &transportv1.ValidateEnrollmentResponse{Permitted: true}, nil
+	}
+}
+
 func (h *Handler) Enroll(ctx context.Context, request *agentv1.EnrollRequest) (*agentv1.EnrollResponse, error) {
 	response, err := h.service.Enroll(ctx, request)
 	switch {

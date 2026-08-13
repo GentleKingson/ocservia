@@ -20,8 +20,10 @@ import (
 	"github.com/GentleKingson/ocservia/control-plane/internal/certificates"
 	"github.com/GentleKingson/ocservia/control-plane/internal/configplan"
 	"github.com/GentleKingson/ocservia/control-plane/internal/enrollment"
+	"github.com/GentleKingson/ocservia/control-plane/internal/eventstream"
 	"github.com/GentleKingson/ocservia/control-plane/internal/localslice"
 	operationstore "github.com/GentleKingson/ocservia/control-plane/internal/operations"
+	"github.com/GentleKingson/ocservia/control-plane/internal/privdattestation"
 	"github.com/GentleKingson/ocservia/control-plane/internal/rbac"
 	telemetrystore "github.com/GentleKingson/ocservia/control-plane/internal/telemetry"
 	"github.com/GentleKingson/ocservia/control-plane/internal/transportclient"
@@ -40,34 +42,43 @@ type BuildInfo struct {
 }
 
 type Server struct {
-	http           *http.Server
-	pool           *pgxpool.Pool
-	build          BuildInfo
-	logger         *slog.Logger
-	bodyLimit      int64
-	requestTimeout time.Duration
-	devAuth        bool
-	devAuthToken   string
-	expectedSchema int64
-	localSlice     *localslice.Service
-	localSliceMu   sync.RWMutex
-	localSimulator bool
-	operations     *operationstore.Service
-	enrollment     *enrollment.Service
-	transport      *transportclient.Client
-	telemetry      *telemetrystore.Service
-	auth           *auth.Service
-	rbac           *rbac.Service
-	approvals      *approvals.Service
-	audit          *audit.Manager
-	userstate      *userstate.Service
-	useroperations *useroperations.Service
-	configplans    *configplan.Service
-	certificates   *certificates.Service
+	http             *http.Server
+	pool             *pgxpool.Pool
+	build            BuildInfo
+	logger           *slog.Logger
+	bodyLimit        int64
+	requestTimeout   time.Duration
+	devAuth          bool
+	devAuthToken     string
+	expectedSchema   int64
+	localSlice       *localslice.Service
+	localSliceMu     sync.RWMutex
+	localSimulator   bool
+	operations       *operationstore.Service
+	enrollment       *enrollment.Service
+	transport        *transportclient.Client
+	telemetry        *telemetrystore.Service
+	auth             *auth.Service
+	rbac             *rbac.Service
+	approvals        *approvals.Service
+	audit            *audit.Manager
+	userstate        *userstate.Service
+	useroperations   *useroperations.Service
+	configplans      *configplan.Service
+	certificates     *certificates.Service
+	privdAttestation *privdattestation.Service
+	eventStreamsMu   sync.Mutex
+	eventConfig      eventstream.Config
+	eventAdmission   *eventstream.Manager
+	platformEvents   *eventstream.Hub
+	operationEvents  *eventstream.Hub
 }
 
 func New(address string, pool *pgxpool.Pool, build BuildInfo, logger *slog.Logger, bodyLimit int64, requestTimeout time.Duration, devAuth bool, devAuthToken string, expectedSchema int64) *Server {
 	s := &Server{pool: pool, build: build, logger: logger, bodyLimit: bodyLimit, requestTimeout: requestTimeout, devAuth: devAuth, devAuthToken: devAuthToken, expectedSchema: expectedSchema}
+	if err := s.configureEventStreams(eventstream.DefaultConfig()); err != nil {
+		panic(err)
+	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /livez", s.live)
 	mux.HandleFunc("GET /readyz", s.ready)
@@ -94,6 +105,9 @@ func New(address string, pool *pgxpool.Pool, build BuildInfo, logger *slog.Logge
 	mux.HandleFunc("POST /api/v1/enrollment-tokens", s.requireOperationAuth(s.createEnrollmentToken))
 	mux.HandleFunc("POST /api/v1/nodes/{node_id}/approval", s.requireOperationAuth(s.approveNode))
 	mux.HandleFunc("POST /api/v1/nodes/{node_id}/revocation", s.requireOperationAuth(s.revokeNode))
+	mux.HandleFunc("POST /api/v1/nodes/{node_id}/privd-attestation-credentials", s.requireOperationAuth(s.createPrivdAttestationCredential))
+	mux.HandleFunc("POST /api/v1/nodes/{node_id}/privd-attestation-keys:register", s.registerPrivdAttestationKey)
+	mux.HandleFunc("POST /api/v1/nodes/{node_id}/privd-attestation-keys:revoke", s.requireOperationAuth(s.revokePrivdAttestationKey))
 	mux.HandleFunc("GET /api/v1/nodes", s.requireOperationAuth(s.listNodes))
 	mux.HandleFunc("GET /api/v1/nodes/{node_id}", s.requireOperationAuth(s.getNode))
 	mux.HandleFunc("GET /api/v1/nodes/{node_id}/sessions", s.requireOperationAuth(s.listNodeSessions))
@@ -143,6 +157,10 @@ func (s *Server) EnableConfigPlans(service *configplan.Service) { s.configplans 
 
 func (s *Server) EnableCertificates(service *certificates.Service) { s.certificates = service }
 
+func (s *Server) EnablePrivdAttestation(service *privdattestation.Service) {
+	s.privdAttestation = service
+}
+
 func (s *Server) certificateAction(w http.ResponseWriter, r *http.Request) {
 	switch {
 	case strings.HasSuffix(r.PathValue("certificate_action"), ":issue"):
@@ -173,7 +191,10 @@ func (s *Server) ListenAndServe() error {
 	return err
 }
 
-func (s *Server) Shutdown(ctx context.Context) error { return s.http.Shutdown(ctx) }
+func (s *Server) Shutdown(ctx context.Context) error {
+	s.closeEventStreams()
+	return s.http.Shutdown(ctx)
+}
 
 func (s *Server) EnableLocalSlice(service *localslice.Service) {
 	s.localSliceMu.Lock()
@@ -206,6 +227,11 @@ func (s *Server) ready(w http.ResponseWriter, r *http.Request) {
 		writeProblem(w, r, http.StatusServiceUnavailable, "https://ocservia.dev/problems/schema-unavailable", "Service is not ready", "database schema is unavailable")
 		return
 	}
+	_, platformHub, operationHub := s.eventStreamSnapshots()
+	if platformHub.UnhealthyWatchers+operationHub.UnhealthyWatchers > 0 {
+		writeProblem(w, r, http.StatusServiceUnavailable, "https://ocservia.dev/problems/event-stream-unavailable", "Service is not ready", "event stream watcher is recovering")
+		return
+	}
 	writeJSON(w, http.StatusOK, map[string]any{"status": "ok", "schema_version": version})
 }
 
@@ -219,11 +245,32 @@ func (s *Server) developmentRuntime(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	pool := s.pool.Stat()
+	admission, platformHub, operationHub := s.eventStreamSnapshots()
+	metricsContext, cancelMetrics := context.WithTimeout(r.Context(), time.Second)
+	defer cancelMetrics()
+	keyStates, err := privdattestation.KeyStateMetrics(metricsContext, s.pool)
+	keyStatesAvailable := err == nil
+	if err != nil {
+		// Keep process and SSE diagnostics available while PostgreSQL is down.
+		// The availability bit prevents the bounded zero-value series from being
+		// mistaken for a successful database observation.
+		keyStates, _ = privdattestation.KeyStateMetrics(r.Context(), nil)
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"goroutines":  runtime.NumGoroutine(),
-		"db_acquired": pool.AcquiredConns(),
-		"db_idle":     pool.IdleConns(),
-		"db_total":    pool.TotalConns(),
+		"goroutines":                             runtime.NumGoroutine(),
+		"db_acquired":                            pool.AcquiredConns(),
+		"db_idle":                                pool.IdleConns(),
+		"db_total":                               pool.TotalConns(),
+		"sse_active_streams":                     admission.Active,
+		"sse_rejected_streams":                   admission.RejectedGlobal + admission.RejectedIdentity + admission.RejectedSession + admission.RejectedWorkspace + admission.RejectedResource,
+		"sse_watchers":                           platformHub.Watchers + operationHub.Watchers,
+		"sse_unhealthy_watchers":                 platformHub.UnhealthyWatchers + operationHub.UnhealthyWatchers,
+		"sse_sql_queries":                        platformHub.Queries + operationHub.Queries,
+		"sse_slow_consumer_disconnects":          platformHub.SlowConsumerDisconnects + operationHub.SlowConsumerDisconnects,
+		"sse_database_backoff_seconds":           (platformHub.DatabaseBackoff + operationHub.DatabaseBackoff).Seconds(),
+		"privd_receipt_verifications":            privdattestation.VerificationMetrics(),
+		"privd_attestation_key_states":           keyStates,
+		"privd_attestation_key_states_available": keyStatesAvailable,
 	})
 }
 
@@ -281,6 +328,9 @@ func routeMethod(path string) (string, bool) {
 		return http.MethodGet, true
 	}
 	if len(parts) == 5 && parts[0] == "api" && parts[1] == "v1" && parts[2] == "nodes" && parts[3] != "" && (parts[4] == "approval" || parts[4] == "revocation") {
+		return http.MethodPost, true
+	}
+	if len(parts) == 5 && parts[0] == "api" && parts[1] == "v1" && parts[2] == "nodes" && parts[3] != "" && (parts[4] == "privd-attestation-credentials" || parts[4] == "privd-attestation-keys:register" || parts[4] == "privd-attestation-keys:revoke") {
 		return http.MethodPost, true
 	}
 	if len(parts) == 4 && parts[0] == "api" && parts[1] == "v1" && parts[2] == "nodes" && parts[3] != "" {

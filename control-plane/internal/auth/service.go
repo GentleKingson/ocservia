@@ -65,6 +65,7 @@ type Principal struct {
 	Subject    string
 	Issuer     string
 	BreakGlass bool
+	ExpiresAt  time.Time
 }
 
 type loginState struct {
@@ -188,9 +189,12 @@ func (s *Service) Authenticate(ctx context.Context, cookie *http.Cookie) (Princi
 		return Principal{}, ErrUnauthenticated
 	}
 	principal := Principal{SessionID: sessionID, IdentityID: identityID}
-	err = s.pool.QueryRow(ctx, `SELECT i.issuer,i.subject,s.break_glass FROM auth_sessions s JOIN identities i ON i.id=s.identity_id WHERE s.id=$1 AND s.identity_id=$2 AND s.revoked_at IS NULL AND s.expires_at>now() AND i.disabled_at IS NULL`, sessionID, identityID).Scan(&principal.Issuer, &principal.Subject, &principal.BreakGlass)
+	err = s.pool.QueryRow(ctx, `SELECT i.issuer,i.subject,s.break_glass,s.expires_at FROM auth_sessions s JOIN identities i ON i.id=s.identity_id WHERE s.id=$1 AND s.identity_id=$2 AND s.revoked_at IS NULL AND s.expires_at>now() AND i.disabled_at IS NULL`, sessionID, identityID).Scan(&principal.Issuer, &principal.Subject, &principal.BreakGlass, &principal.ExpiresAt)
 	if err != nil {
 		return Principal{}, ErrUnauthenticated
+	}
+	if envelope.ExpiresAt.Before(principal.ExpiresAt) {
+		principal.ExpiresAt = envelope.ExpiresAt
 	}
 	return principal, nil
 }
@@ -267,7 +271,7 @@ func (s *Service) BreakGlass(ctx context.Context, token string, requestID string
 	if err != nil {
 		return nil, Principal{}, err
 	}
-	return secureCookie(SessionCookieName, value, expires), Principal{IdentityID: identityID, SessionID: sessionID, Subject: "offline", Issuer: "break-glass", BreakGlass: true}, nil
+	return secureCookie(SessionCookieName, value, expires), Principal{IdentityID: identityID, SessionID: sessionID, Subject: "offline", Issuer: "break-glass", BreakGlass: true, ExpiresAt: expires}, nil
 }
 
 func (s *Service) createSession(ctx context.Context, issuer, subject, email, name string, breakGlass bool) (*http.Cookie, Principal, error) {
@@ -293,7 +297,7 @@ func (s *Service) createSession(ctx context.Context, issuer, subject, email, nam
 	if err != nil {
 		return nil, Principal{}, err
 	}
-	return secureCookie(SessionCookieName, value, expires), Principal{IdentityID: identityID, SessionID: sessionID, Subject: subject, Issuer: issuer, BreakGlass: breakGlass}, nil
+	return secureCookie(SessionCookieName, value, expires), Principal{IdentityID: identityID, SessionID: sessionID, Subject: subject, Issuer: issuer, BreakGlass: breakGlass, ExpiresAt: expires}, nil
 }
 
 func (s *Service) seal(value any) (string, error) {

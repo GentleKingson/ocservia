@@ -158,6 +158,18 @@ services:
       OCSERV_CONTROLLER_ENDPOINT_ID: ${OCSERV_CONTROLLER_ENDPOINT_ID:?set OCSERV_CONTROLLER_ENDPOINT_ID}
       OCSERV_CERTIFICATE_SIGNER_URL: ${OCSERV_CERTIFICATE_SIGNER_URL:?set OCSERV_CERTIFICATE_SIGNER_URL}
       OCSERV_CERTIFICATE_SIGNER_TOKEN_FILE: /run/secrets/certificate_signer_token
+      OCSERV_SSE_GLOBAL_LIMIT: "128"
+      OCSERV_SSE_IDENTITY_LIMIT: "8"
+      OCSERV_SSE_SESSION_LIMIT: "4"
+      OCSERV_SSE_WORKSPACE_LIMIT: "32"
+      OCSERV_SSE_RESOURCE_LIMIT: "16"
+      OCSERV_SSE_WATCHER_LIMIT: "64"
+      OCSERV_SSE_QUEUE_CAPACITY: "128"
+      OCSERV_SSE_POLL_INTERVAL: 250ms
+      OCSERV_SSE_DATABASE_MAX_BACKOFF: 10s
+      OCSERV_SSE_MAX_LIFETIME: 30m
+      OCSERV_SSE_REVALIDATE_INTERVAL: 30s
+      OCSERV_SSE_RETRY_AFTER: 5s
       OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
     secrets:
       - database_app_url
@@ -226,6 +238,26 @@ services:
       - ${OCSERV_RELAY_URL_B:?set the second dedicated HTTPS relay URL}
       - --relay-token-file
       - /run/secrets/relay_access_token
+      - --known-agent-handshake-rate
+      - "2400"
+      - --known-agent-handshake-concurrency
+      - "256"
+      - --agent-authorization-rate
+      - "1200"
+      - --agent-authorization-concurrency
+      - "48"
+      - --agent-registration-recheck-rate
+      - "1200"
+      - --agent-registration-recheck-concurrency
+      - "48"
+      - --unknown-enrollment-preauth-rate
+      - "120"
+      - --unknown-enrollment-preauth-concurrency
+      - "16"
+      - --enrollment-completion-rate
+      - "120"
+      - --enrollment-completion-concurrency
+      - "8"
     secrets:
       - source: relay_access_token
         target: relay_access_token

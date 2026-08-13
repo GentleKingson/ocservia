@@ -42,6 +42,24 @@ export OCSERV_RELAY_URL_B=https://relay-b.example.com
 
 The control plane runs `--role=all`. Terminate public TLS at the gateway. Configure the OIDC redirect URI as `https://$OCSERV_PUBLIC_HOST/api/v1/auth/callback` and use an HTTPS certificate signer.
 
+The reference Controller enables bounded shared SSE fan-out with 128 global,
+8 identity, 4 session, 32 workspace, 16 resource, and 64 watcher limits. These
+defaults reserve PostgreSQL and HTTP capacity for unrelated API work in the P1
+single-VM profile. Raising them requires rerunning `make p1-full`. The gateway
+is defense in depth only; do not remove application admission, session
+revalidation, bounded queues, or watcher backoff. `/readyz` reports unavailable
+while an active durable-event watcher is in database backoff; alert on
+`sse_unhealthy_watchers` and verify cursor catch-up rather than restarting a
+healthy fan-out loop repeatedly.
+
+Migration `000023` adds root-authenticated privd key enrollment, key rotation
+state, receipt evidence, and certificate receipt bindings. Deploy Controller
+support first, register each root-owned key with its one-time credential, then
+approve `privd_result_attestation_v1` and upgrade privd and Agent. Until this is
+complete, the node remains readable but privileged certificate, secret,
+configuration, service, user, and session mutations fail closed. Missing proof
+never enables a legacy success path.
+
 The production containers intentionally use separate service identities:
 Controller UID 65534, transportd UID 65532, and shared socket GID 65532. Keep
 the Compose `OCSERV_TRANSPORT_UID`/`OCSERV_TRANSPORT_GID` and transportd

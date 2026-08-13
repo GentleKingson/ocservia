@@ -16,6 +16,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/GentleKingson/ocservia/control-plane/internal/eventstream"
 	"golang.org/x/sys/unix"
 )
 
@@ -67,6 +68,7 @@ type Config struct {
 	CertificateSignerURL     string
 	CertificateSignerToken   string
 	CertificateSignerTimeout time.Duration
+	EventStreams             eventstream.Config
 }
 
 type LookupEnv func(string) (string, bool)
@@ -78,6 +80,7 @@ func Load(args []string, lookup LookupEnv) (Config, error) {
 		LogLevelName: "info", TransportSocket: "/run/ocserv-platform/transportd.sock",
 		TrustSocket:      "/run/ocserv-trust/control-plane.sock",
 		TransportTimeout: 3 * time.Second, TransportQueue: 256, UserOperationConcurrency: 50, SessionTTL: 8 * time.Hour, CertificateSignerTimeout: 10 * time.Second,
+		EventStreams: eventstream.DefaultConfig(),
 		TransportUID: uint32(os.Geteuid()), TransportGID: uint32(os.Getegid()),
 	}
 	setString(lookup, "OCSERV_ENVIRONMENT", &cfg.Environment)
@@ -172,6 +175,30 @@ func Load(args []string, lookup LookupEnv) (Config, error) {
 	}
 	if err := setInt(lookup, "OCSERV_USER_OPERATION_CONCURRENCY", &cfg.UserOperationConcurrency); err != nil {
 		return Config{}, err
+	}
+	for name, target := range map[string]*int{
+		"OCSERV_SSE_GLOBAL_LIMIT":    &cfg.EventStreams.GlobalStreams,
+		"OCSERV_SSE_IDENTITY_LIMIT":  &cfg.EventStreams.IdentityStreams,
+		"OCSERV_SSE_SESSION_LIMIT":   &cfg.EventStreams.SessionStreams,
+		"OCSERV_SSE_WORKSPACE_LIMIT": &cfg.EventStreams.WorkspaceStreams,
+		"OCSERV_SSE_RESOURCE_LIMIT":  &cfg.EventStreams.ResourceStreams,
+		"OCSERV_SSE_WATCHER_LIMIT":   &cfg.EventStreams.Watchers,
+		"OCSERV_SSE_QUEUE_CAPACITY":  &cfg.EventStreams.SubscriberQueue,
+	} {
+		if err := setInt(lookup, name, target); err != nil {
+			return Config{}, err
+		}
+	}
+	for name, target := range map[string]*time.Duration{
+		"OCSERV_SSE_POLL_INTERVAL":        &cfg.EventStreams.PollInterval,
+		"OCSERV_SSE_DATABASE_MAX_BACKOFF": &cfg.EventStreams.DatabaseMaxBackoff,
+		"OCSERV_SSE_MAX_LIFETIME":         &cfg.EventStreams.MaxLifetime,
+		"OCSERV_SSE_REVALIDATE_INTERVAL":  &cfg.EventStreams.RevalidateInterval,
+		"OCSERV_SSE_RETRY_AFTER":          &cfg.EventStreams.RetryAfter,
+	} {
+		if err := setDuration(lookup, name, target); err != nil {
+			return Config{}, err
+		}
 	}
 	if value, ok := lookup("OCSERV_DEV_AUTH"); ok {
 		parsed, err := strconv.ParseBool(value)
@@ -296,6 +323,9 @@ func (c Config) Validate() error {
 	}
 	if c.UserOperationConcurrency < 1 || c.UserOperationConcurrency > 500 {
 		return errors.New("user operation concurrency must be between 1 and 500")
+	}
+	if err := c.EventStreams.Validate(); err != nil {
+		return fmt.Errorf("invalid SSE capacity configuration: %w", err)
 	}
 	signerConfigured := c.CertificateSignerURL != "" || c.CertificateSignerToken != ""
 	if signerConfigured {

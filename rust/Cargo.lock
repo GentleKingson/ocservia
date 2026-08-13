@@ -2475,6 +2475,7 @@ version = "0.1.0"
 dependencies = [
  "ocservia-contracts",
  "prost",
+ "prost-types",
  "tokio",
 ]
 
@@ -2538,6 +2539,7 @@ dependencies = [
 name = "ocservia-privd"
 version = "0.1.0"
 dependencies = [
+ "base64",
  "ed25519-dalek",
  "hex",
  "ocservia-agent-protocol",
@@ -2545,9 +2547,13 @@ dependencies = [
  "ocservia-contracts",
  "ocservia-observability",
  "ocservia-ocserv-adapter",
+ "ocservia-privd-attestation",
  "prost",
  "prost-types",
+ "rand 0.9.5",
+ "rusqlite",
  "rustix",
+ "serde_json",
  "sha2 0.10.9",
  "tokio",
  "tracing",
@@ -2555,9 +2561,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "ocservia-privd-attestation"
+version = "0.1.0"
+dependencies = [
+ "ed25519-dalek",
+ "hex",
+ "ocservia-contracts",
+ "prost-types",
+ "rand 0.9.5",
+ "rustix",
+ "sha2 0.10.9",
+]
+
+[[package]]
 name = "ocservia-transportd"
 version = "0.1.0"
 dependencies = [
+ "ed25519-dalek",
  "futures-util",
  "hex",
  "hyper-util",
@@ -2565,9 +2585,11 @@ dependencies = [
  "iroh-relay",
  "ocservia-agent-identity",
  "ocservia-contracts",
+ "ocservia-privd-attestation",
  "prost",
  "prost-types",
  "rustix",
+ "sha2 0.10.9",
  "tokio",
  "tokio-stream",
  "tonic",

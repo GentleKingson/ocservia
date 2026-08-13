@@ -10,14 +10,14 @@ if grep -Eiq '^(iroh|reqwest|hyper|tonic|postgres|postgres-types|tokio-postgres|
   exit 1
 fi
 
-if grep -R -n -E --include='*.rs' \
+if grep -R -n -E --exclude-dir=.cache --exclude-dir=target --include='*.rs' \
   'shell\.exec|command\.run|occtl\.raw|systemctl\.raw|journalctl\.raw|Command::new\([^)]*(request|input|argument)' \
   "${ROOT}/rust/crates/agent" "${ROOT}/rust/crates/privd" "${ROOT}/rust/crates/ocserv-adapter"; then
   echo "generic execution capability found in Agent privilege boundary" >&2
   exit 1
 fi
 
-if grep -R -n -E --include='*.go' --include='*.rs' \
+if grep -R -n -E --exclude-dir=.cache --exclude-dir=target --include='*.go' --include='*.rs' \
   'Command::new\([^)]*(sh|bash)|exec\.Command\([^)]*(sh|bash)|docker\.sock' \
   "${ROOT}/control-plane" "${ROOT}/rust"; then
   echo "forbidden generic shell or Docker socket surface found" >&2
@@ -29,7 +29,7 @@ grep -Fxq 'CapabilityBoundingSet=' "${ROOT}/deploy/systemd/ocservia-agent.servic
 grep -Fxq 'CapabilityBoundingSet=CAP_DAC_OVERRIDE' "${ROOT}/deploy/systemd/ocservia-privd.service"
 grep -Fxq 'EnvironmentFile=/etc/ocservia-agent/agent.env' "${ROOT}/deploy/systemd/ocservia-privd.service"
 # shellcheck disable=SC2016
-grep -Fxq 'ExecStart=/usr/libexec/ocservia/ocservia-privd --agent-uid $AGENT_UID --node-id $NODE_ID --controller-command-key-file $CONTROLLER_COMMAND_VERIFICATION_KEY_FILE --user-password-seal-key-file $USER_PASSWORD_SEAL_PRIVATE_KEY_FILE --user-password-seal-key-id $USER_PASSWORD_SEAL_KEY_ID --user-password-seal-public-key-sha256 $USER_PASSWORD_SEAL_PUBLIC_KEY_SHA256 --p12-password-seal-key-file $P12_PASSWORD_SEAL_PRIVATE_KEY_FILE --p12-password-seal-key-id $P12_PASSWORD_SEAL_KEY_ID --p12-password-seal-public-key-sha256 $P12_PASSWORD_SEAL_PUBLIC_KEY_SHA256' "${ROOT}/deploy/systemd/ocservia-privd.service"
+grep -Fxq 'ExecStart=/usr/libexec/ocservia/ocservia-privd --agent-uid $AGENT_UID --node-id $NODE_ID --controller-command-key-file $CONTROLLER_COMMAND_VERIFICATION_KEY_FILE --attestation-key-file $PRIVD_ATTESTATION_KEY_FILE --user-password-seal-key-file $USER_PASSWORD_SEAL_PRIVATE_KEY_FILE --user-password-seal-key-id $USER_PASSWORD_SEAL_KEY_ID --user-password-seal-public-key-sha256 $USER_PASSWORD_SEAL_PUBLIC_KEY_SHA256 --p12-password-seal-key-file $P12_PASSWORD_SEAL_PRIVATE_KEY_FILE --p12-password-seal-key-id $P12_PASSWORD_SEAL_KEY_ID --p12-password-seal-public-key-sha256 $P12_PASSWORD_SEAL_PUBLIC_KEY_SHA256' "${ROOT}/deploy/systemd/ocservia-privd.service"
 grep -Fxq 'RestrictAddressFamilies=AF_UNIX AF_NETLINK' "${ROOT}/deploy/systemd/ocservia-privd.service"
 grep -Fxq 'IPAddressDeny=any' "${ROOT}/deploy/systemd/ocservia-privd.service"
 grep -Fxq 'StateDirectory=ocservia-privd' "${ROOT}/deploy/systemd/ocservia-privd.service"

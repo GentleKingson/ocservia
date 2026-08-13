@@ -10,6 +10,7 @@ import (
 
 	agentv1 "github.com/GentleKingson/ocservia/control-plane/gen/proto/ocserv/platform/agent/v1"
 	"github.com/GentleKingson/ocservia/control-plane/internal/approvals"
+	"github.com/GentleKingson/ocservia/control-plane/internal/attestationtest"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"google.golang.org/protobuf/proto"
@@ -87,6 +88,9 @@ func TestIdempotencyKeyCannotReplayAcrossNodesIntegration(t *testing.T) {
 	otherNodeID := uuid.Must(uuid.NewV7())
 	ctx := context.Background()
 	if _, err := pool.Exec(ctx, `INSERT INTO nodes(id,workspace_id,name,status,version,created_at,updated_at)VALUES($1,$2,$3,'active',1,now(),now())`, otherNodeID, workspaceID, "node-"+otherNodeID.String()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := attestationtest.InstallKey(ctx, pool, otherNodeID); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := pool.Exec(ctx, `INSERT INTO node_capabilities(node_id,capability,approved) VALUES($1,'ocserv.service.reload',true),($2,'ocserv.service.reload',true)`, nodeID, otherNodeID); err != nil {
@@ -321,6 +325,10 @@ func integrationService(t *testing.T) (*Service, *pgxpool.Pool, uuid.UUID, uuid.
 		t.Fatal(err)
 	}
 	if _, err := pool.Exec(ctx, `INSERT INTO nodes(id,workspace_id,name,status,version,created_at,updated_at)VALUES($1,$2,$3,'active',1,now(),now())`, nodeID, workspaceID, "node-"+nodeID.String()); err != nil {
+		pool.Close()
+		t.Fatal(err)
+	}
+	if _, err := attestationtest.InstallKey(ctx, pool, nodeID); err != nil {
 		pool.Close()
 		t.Fatal(err)
 	}
