@@ -19,6 +19,8 @@ jobs:
     name: Backend Integration
     runs-on: ubuntu-24.04
     timeout-minutes: 40
+    env:
+      CARGO_INCREMENTAL: "0"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
@@ -26,25 +28,35 @@ jobs:
       - name: Runner preflight
         run: scripts/ci-preflight.sh
       - name: Restore verified tools
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        id: backend-tools-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: |
             .cache/downloads
             .tools
           key: tooling-v3-go-integration-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'scripts/checksums.txt', 'scripts/bootstrap.sh', 'scripts/env.sh') }}
+          restore-keys: |
+            tooling-v3-go-integration-${{ runner.os }}-${{ runner.arch }}-
       - name: Restore Go build and module caches
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        id: backend-go-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: |
             .cache/go-build
             .cache/go-mod
             .cache/gopath
           key: go-v3-backend-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'go.work', 'go.work.sum', 'control-plane/go.mod', 'control-plane/go.sum') }}
+          restore-keys: |
+            go-v3-backend-${{ runner.os }}-${{ runner.arch }}-
       - name: Restore Quality-owned Rust target cache
+        id: backend-rust-cache
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: rust/target
-          key: rust-v3-quality-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'rust/Cargo.lock', 'rust/Cargo.toml', 'rust/rust-toolchain.toml', 'rust/crates/**/Cargo.toml') }}
+          key: rust-v4-quality-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'rust/Cargo.lock', 'rust/Cargo.toml', 'rust/rust-toolchain.toml', 'rust/crates/**/Cargo.toml') }}
+          restore-keys: |
+            rust-v4-quality-${{ runner.os }}-${{ runner.arch }}-
+            rust-v3-quality-${{ runner.os }}-${{ runner.arch }}-
       - name: Bootstrap and verify pinned tools
         run: scripts/bootstrap.sh go-integration
       - name: Go checks
@@ -106,6 +118,23 @@ jobs:
           ARTIFACT_DIR: ${{ runner.temp }}/artifacts/backend/local-slice
           RUN_ID: local-slice-${{ github.run_id }}-${{ github.run_attempt }}-be
         run: scripts/local-slice-integration.sh
+      - name: Save verified tools
+        if: success() && github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.backend-tools-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: |
+            .cache/downloads
+            .tools
+          key: ${{ steps.backend-tools-cache.outputs.cache-primary-key }}
+      - name: Save Go build and module caches
+        if: success() && github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.backend-go-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: |
+            .cache/go-build
+            .cache/go-mod
+            .cache/gopath
+          key: ${{ steps.backend-go-cache.outputs.cache-primary-key }}
       - name: Upload Backend Integration diagnostics
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
@@ -134,17 +163,23 @@ jobs:
       - name: Runner preflight
         run: scripts/ci-preflight.sh
       - name: Restore verified tools
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        id: web-tools-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: |
             .cache/downloads
             .tools
           key: tooling-v3-web-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'scripts/checksums.txt', 'scripts/bootstrap.sh', 'scripts/env.sh') }}
+          restore-keys: |
+            tooling-v3-web-${{ runner.os }}-${{ runner.arch }}-
       - name: Restore npm download cache
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        id: web-npm-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: .cache/npm
           key: npm-v3-web-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'web/package-lock.json') }}
+          restore-keys: |
+            npm-v3-web-${{ runner.os }}-${{ runner.arch }}-
       - name: Bootstrap and verify pinned tools
         run: scripts/bootstrap.sh web
       - name: Web checks
@@ -171,6 +206,20 @@ jobs:
           COMPOSE_PROJECT: ocservia-p1-smoke-${{ github.run_id }}-${{ github.run_attempt }}-web-smoke
           RUN_ID: p1-smoke-${{ github.run_id }}-${{ github.run_attempt }}-web-smoke
         run: scripts/p1-resilience-capacity.sh
+      - name: Save verified tools
+        if: success() && github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.web-tools-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: |
+            .cache/downloads
+            .tools
+          key: ${{ steps.web-tools-cache.outputs.cache-primary-key }}
+      - name: Save npm download cache
+        if: success() && github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.web-npm-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: .cache/npm
+          key: ${{ steps.web-npm-cache.outputs.cache-primary-key }}
       - name: Upload Web and Smoke diagnostics
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
@@ -184,6 +233,8 @@ jobs:
     name: Quality, Security & Native
     runs-on: ubuntu-24.04
     timeout-minutes: 30
+    env:
+      CARGO_INCREMENTAL: "0"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
@@ -192,27 +243,40 @@ jobs:
       - name: Runner preflight
         run: scripts/ci-preflight.sh
       - name: Restore verified tools
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        id: quality-tools-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: |
             .cache/downloads
             .tools
           key: tooling-v3-ci-quality-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'scripts/checksums.txt', 'scripts/bootstrap.sh', 'scripts/env.sh') }}
+          restore-keys: |
+            tooling-v3-ci-quality-${{ runner.os }}-${{ runner.arch }}-
       - name: Restore npm download cache
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        id: quality-npm-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: .cache/npm
           key: npm-v3-ci-quality-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'web/package-lock.json') }}
+          restore-keys: |
+            npm-v3-ci-quality-${{ runner.os }}-${{ runner.arch }}-
       - name: Restore Rust target cache
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        id: quality-rust-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: rust/target
-          key: rust-v3-quality-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'rust/Cargo.lock', 'rust/Cargo.toml', 'rust/rust-toolchain.toml', 'rust/crates/**/Cargo.toml') }}
+          key: rust-v4-quality-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'rust/Cargo.lock', 'rust/Cargo.toml', 'rust/rust-toolchain.toml', 'rust/crates/**/Cargo.toml') }}
+          restore-keys: |
+            rust-v4-quality-${{ runner.os }}-${{ runner.arch }}-
+            rust-v3-quality-${{ runner.os }}-${{ runner.arch }}-
       - name: Restore Go module cache
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        id: quality-go-mod-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: .cache/go-mod
           key: go-mod-v3-quality-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'go.work', 'go.work.sum', 'control-plane/go.mod', 'control-plane/go.sum', 'scripts/license-check.sh') }}
+          restore-keys: |
+            go-mod-v3-quality-${{ runner.os }}-${{ runner.arch }}-
       - name: Bootstrap and verify pinned tools
         run: scripts/bootstrap.sh ci-quality
       - name: Repository policy
@@ -270,6 +334,35 @@ jobs:
             scripts/i13-native-ocserv-integration.sh || native_status=$?
           sudo rm -rf "${native_target}" || native_status=1
           exit "${native_status}"
+      - name: Remove Rust incremental artifacts before caching
+        if: success() && github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.quality-rust-cache.outputs.cache-hit != 'true'
+        run: find rust/target -depth -type d -name incremental -exec rm -rf -- {} +
+      - name: Save verified tools
+        if: success() && github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.quality-tools-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: |
+            .cache/downloads
+            .tools
+          key: ${{ steps.quality-tools-cache.outputs.cache-primary-key }}
+      - name: Save npm download cache
+        if: success() && github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.quality-npm-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: .cache/npm
+          key: ${{ steps.quality-npm-cache.outputs.cache-primary-key }}
+      - name: Save Rust target cache
+        if: success() && github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.quality-rust-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: rust/target
+          key: ${{ steps.quality-rust-cache.outputs.cache-primary-key }}
+      - name: Save Go module cache
+        if: success() && github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.quality-go-mod-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: .cache/go-mod
+          key: ${{ steps.quality-go-mod-cache.outputs.cache-primary-key }}
       - name: Capture contract diagnostics
         if: always()
         env:
