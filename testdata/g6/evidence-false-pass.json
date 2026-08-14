@@ -1,0 +1,12 @@
+{
+  "base": "evidence-pass.json",
+  "mutations": [
+    {
+      "operation": "replace",
+      "path": "measurements.max_production_command_inflight.actual",
+      "value": 1
+    },
+    { "operation": "add", "path": "passed", "value": true }
+  ],
+  "expected_error": "unsupported fields: passed"
+}

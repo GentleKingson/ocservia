@@ -1,67 +1,314 @@
 schema_version: ocservia.g6-slo.v1
 
-stability:
-  window_seconds: 300
-  sample_interval_seconds: 5
+topology:
+  final_pass_failure_domain_classes: [multi_host, multi_zone, multi_region]
+  failure_domains_min: 2
 
-capacity:
-  authorized_real_agents_min: 50
-  production_command_inflight_min: 50
-  synthetic_command_completion_seconds_p99_max: 30
+metrics:
+  stability_sample_span_seconds:
+    limit: 300
+    comparison: gte
+    unit: seconds
+    scope: Continuous bounded G6 production-path sampling span.
+  stability_max_sample_gap_seconds:
+    limit: 5
+    comparison: lte
+    unit: seconds
+    scope: Largest observed gap between consecutive valid resource samples.
+  stability_valid_sample_count:
+    limit: 61
+    comparison: gte
+    unit: count
+    scope: Valid samples spanning the complete bounded G6 window.
+  authorized_real_agents:
+    limit: 50
+    comparison: gte
+    unit: count
+    scope: Independently stateful real Agent processes with authorized active sessions.
+  max_production_command_inflight:
+    limit: 50
+    comparison: gte
+    unit: count
+    scope: Concurrent commands on the PostgreSQL outbox through real transportd, Iroh, and Agent path.
+  synthetic_command_completion_seconds_p99:
+    limit: 30
+    comparison: lte
+    unit: seconds
+    scope: End-to-end completion latency for the bounded synthetic command profile.
+  stale_owner_accepts:
+    limit: 0
+    comparison: eq
+    unit: count
+    scope: Mutation, artifact, close, or state updates accepted from a stale connection owner.
+  concurrent_active_connection_owners:
+    limit: 1
+    comparison: lte
+    unit: count
+    scope: Maximum simultaneously valid connection owners observed for any one Node.
+  stale_scheduler_commits:
+    limit: 0
+    comparison: eq
+    unit: count
+    scope: Database commits accepted from an expired scheduler leadership epoch.
+  concurrent_active_scheduler_leaders:
+    limit: 1
+    comparison: lte
+    unit: count
+    scope: Maximum simultaneously valid leaders for the authoritative scheduler lease.
+  dual_primary_write_accepts:
+    limit: 0
+    comparison: eq
+    unit: count
+    scope: Writes accepted by the fenced former primary after promotion of its replacement.
+  duplicate_remote_effects:
+    limit: 0
+    comparison: eq
+    unit: count
+    scope: Duplicate node-side effects for one idempotency identity.
+  acknowledged_transaction_loss:
+    limit: 0
+    comparison: eq
+    unit: count
+    scope: Acknowledged database transactions absent after failover or recovery.
+  unreconciled_outbox_rows:
+    limit: 0
+    comparison: eq
+    unit: count
+    scope: Due outbox rows left without a terminal or explicitly scheduled reconciliation state.
+  unreconciled_unknown_commands:
+    limit: 0
+    comparison: eq
+    unit: count
+    scope: Unknown commands left without an active reconciliation decision at the final recovery boundary.
+  quarantined_unmatched_command_results:
+    limit: 0
+    comparison: eq
+    unit: count
+    scope: Command results that cannot be matched to an actual dispatch attempt.
+  database_rpo_seconds:
+    limit: 900
+    comparison: lte
+    unit: seconds
+    scope: Measured recovery point gap from transaction identity, LSN, and timestamps.
+  database_rto_seconds:
+    limit: 7200
+    comparison: lte
+    unit: seconds
+    scope: Measured time from declared database outage to restored authoritative service.
+  connection_owner_takeover_seconds:
+    limit: 30
+    comparison: lte
+    unit: seconds
+    scope: Lease expiry to first valid replacement-owner session.
+  scheduler_takeover_seconds:
+    limit: 30
+    comparison: lte
+    unit: seconds
+    scope: Leadership loss to first valid replacement-leader maintenance transaction.
+  relay_takeover_seconds:
+    limit: 30
+    comparison: lte
+    unit: seconds
+    scope: Relay A fault injection to authenticated traffic through Relay B.
+  reconnect_storm_recovery_seconds:
+    limit: 120
+    comparison: lte
+    unit: seconds
+    scope: Bulk disconnect injection to restoration of all expected authorized sessions.
+  read_api_success_ratio:
+    limit: 0.999
+    comparison: gte
+    unit: ratio
+    scope: Read API requests during the bounded G6 window, including instance and database faults.
+  enqueue_success_ratio:
+    limit: 0.999
+    comparison: gte
+    unit: ratio
+    scope: Valid write requests durably accepted into the production outbox during the bounded G6 window.
+  enqueue_latency_seconds_p95:
+    limit: 0.5
+    comparison: lte
+    unit: seconds
+    scope: Valid write-request durable enqueue latency during the bounded G6 window.
+  telemetry_fresh_ratio:
+    limit: 0.99
+    comparison: gte
+    unit: ratio
+    scope: Authorized connected Agents whose latest accepted telemetry satisfies the freshness age bound.
+  telemetry_fresh_age_seconds:
+    limit: 90
+    comparison: lte
+    unit: seconds
+    scope: Maximum age used to classify telemetry as fresh.
+  command_dispatch_ratio:
+    limit: 0.99
+    comparison: gte
+    unit: ratio
+    scope: Accepted online-node commands first dispatched within the dispatch time bound.
+  command_dispatch_seconds:
+    limit: 10
+    comparison: lte
+    unit: seconds
+    scope: Maximum latency used by the command-dispatch ratio.
+  audit_completeness_ratio:
+    limit: 1.0
+    comparison: eq
+    unit: ratio
+    scope: Accepted writes with their required intent and result audit records.
+  terminal_or_reconciled_operation_ratio:
+    limit: 1.0
+    comparison: eq
+    unit: ratio
+    scope: Operations terminal or held in an explicit, active Unknown reconciliation state.
+  controller_rss_growth_ratio:
+    limit: 0.20
+    comparison: lte
+    unit: ratio
+    scope: Controller RSS end-to-baseline growth over the bounded window.
+  transportd_rss_growth_ratio:
+    limit: 0.20
+    comparison: lte
+    unit: ratio
+    scope: transportd RSS end-to-baseline growth over the bounded window.
+  agent_rss_growth_ratio:
+    limit: 0.20
+    comparison: lte
+    unit: ratio
+    scope: Worst per-Agent RSS end-to-baseline growth over the bounded window.
+  controller_fd_growth:
+    limit: 32
+    comparison: lte
+    unit: count
+    scope: Controller open-file count growth from baseline to final recovery.
+  transportd_fd_growth:
+    limit: 32
+    comparison: lte
+    unit: count
+    scope: transportd open-file count growth from baseline to final recovery.
+  agent_fd_growth:
+    limit: 8
+    comparison: lte
+    unit: count
+    scope: Worst per-Agent open-file count growth from baseline to final recovery.
+  controller_goroutine_growth:
+    limit: 64
+    comparison: lte
+    unit: count
+    scope: Controller goroutine count growth from baseline to final recovery.
+  transportd_tokio_task_growth:
+    limit: 64
+    comparison: lte
+    unit: count
+    scope: transportd Tokio task count growth from baseline to final recovery.
+  agent_tokio_task_growth:
+    limit: 8
+    comparison: lte
+    unit: count
+    scope: Worst per-Agent Tokio task count growth from baseline to final recovery.
+  database_connection_growth:
+    limit: 16
+    comparison: lte
+    unit: count
+    scope: PostgreSQL connection count growth from baseline to final recovery.
+  queue_depth_end:
+    limit: 0
+    comparison: eq
+    unit: count
+    scope: Production command queue depth at the final recovery boundary.
+  outbox_oldest_age_seconds_end:
+    limit: 0
+    comparison: eq
+    unit: seconds
+    scope: Age of the oldest due unpublished outbox row at the final recovery boundary.
 
-correctness:
-  stale_owner_accepts_max: 0
-  stale_scheduler_commits_max: 0
-  concurrent_active_scheduler_leaders_max: 1
-  duplicate_remote_effects_max: 0
-  acknowledged_transaction_loss_max: 0
-  unreconciled_outbox_rows_max: 0
-  unreconciled_unknown_commands_max: 0
-  quarantined_unmatched_command_results_max: 0
-
-recovery:
-  database_rpo_seconds_max: 900
-  database_rto_seconds_max: 7200
-  connection_owner_takeover_seconds_max: 30
-  scheduler_takeover_seconds_max: 30
-  relay_takeover_seconds_max: 30
-  reconnect_storm_recovery_seconds_max: 120
-
-service:
-  read_api_success_ratio_min: 0.999
-  enqueue_success_ratio_min: 0.999
-  enqueue_latency_seconds_p95_max: 0.5
-  telemetry_fresh_ratio_min: 0.99
-  telemetry_fresh_age_seconds_max: 90
-  command_dispatch_ratio_min: 0.99
-  command_dispatch_seconds_max: 10
-  audit_completeness_ratio_min: 1.0
-  terminal_or_reconciled_operation_ratio_min: 1.0
-
-resources:
-  controller_rss_growth_ratio_max: 0.20
-  transportd_rss_growth_ratio_max: 0.20
-  agent_rss_growth_ratio_max: 0.20
-  controller_fd_growth_max: 32
-  transportd_fd_growth_max: 32
-  agent_fd_growth_max: 8
-  controller_goroutine_growth_max: 64
-  transportd_tokio_task_growth_max: 64
-  agent_tokio_task_growth_max: 8
-  database_connection_growth_max: 16
-  queue_depth_end_max: 0
-  outbox_oldest_age_seconds_end_max: 0
-
-required_observations:
-  database_failover: true
-  dual_primary_prevention: true
-  pitr_target_restore: true
-  connection_owner_failover: true
-  stale_owner_rejection: true
-  scheduler_leader_failover: true
-  stale_scheduler_rejection: true
-  relay_failover: true
-  direct_to_relay: true
-  relay_to_direct: true
-  reconnect_storm: true
-  outbox_crash_recovery: true
+observations:
+  database_failover_during_load:
+    required: true
+    scope: Primary failure while 50 real commands, telemetry, and outbox writes remain active.
+    required_timeline_events:
+      - load_started
+      - primary_failure_injected
+      - new_primary_writable
+      - api_recovered
+      - worker_recovered
+      - load_stopped
+  dual_primary_prevention:
+    required: true
+    scope: Former primary cannot write after isolation, replacement promotion, and rejoin.
+    required_timeline_events:
+      [old_primary_isolated, new_primary_promoted, old_primary_write_rejected]
+  pitr_target_restore:
+    required: true
+    scope: Restore to the declared restore point with before/after markers verified.
+    required_timeline_events:
+      [
+        marker_a_written,
+        restore_point_created,
+        marker_b_written,
+        restore_verified,
+      ]
+  connection_owner_failover:
+    required: true
+    scope: Owner B obtains a higher epoch after Owner A lease expiry.
+    required_timeline_events:
+      [owner_a_paused, owner_b_acquired, owner_a_resumed]
+  stale_owner_rejection:
+    required: true
+    scope: Resumed Owner A is rejected by transportd and Agent after takeover.
+    required_timeline_events: [stale_transport_rejected, stale_agent_rejected]
+  scheduler_leader_failover:
+    required: true
+    scope: Backup scheduler obtains a higher leadership epoch after leader loss.
+    required_timeline_events:
+      [scheduler_a_paused, scheduler_b_acquired, scheduler_a_resumed]
+  stale_scheduler_rejection:
+    required: true
+    scope: Resumed old leader cannot commit under its expired epoch.
+    required_timeline_events: [stale_scheduler_commit_rejected]
+  api_instance_failover:
+    required: true
+    scope: Gateway transfers read and enqueue traffic after an API instance loss.
+    required_timeline_events:
+      [api_instance_failed, gateway_traffic_transferred, api_slo_measured]
+  worker_instance_failover:
+    required: true
+    scope: Owner-affine production dispatch recovers after a worker instance loss.
+    required_timeline_events:
+      [worker_instance_failed, worker_replacement_active, dispatch_recovered]
+  relay_failover:
+    required: true
+    scope: Authenticated traffic moves from dedicated Relay A to independent Relay B.
+    required_timeline_events: [relay_a_failed, relay_b_active]
+  direct_to_relay:
+    required: true
+    scope: An authorized session moves from a direct path to a dedicated relay path.
+    required_timeline_events:
+      [direct_path_active, direct_path_failed, relay_path_active]
+  relay_to_direct:
+    required: true
+    scope: An authorized session recovers from relay to a direct path.
+    required_timeline_events: [relay_path_active, direct_path_recovered]
+  reconnect_storm:
+    required: true
+    scope: Bulk Agent disconnect and jittered reconnect converge within resource bounds.
+    required_timeline_events:
+      [bulk_disconnect_injected, reconnect_started, reconnect_completed]
+  outbox_claim_before_send_recovery:
+    required: true
+    scope: Worker crashes after claim commit and before transport send.
+    required_timeline_events:
+      [outbox_claim_committed, worker_crashed_before_send, command_recovered]
+  outbox_send_before_mark_sent_recovery:
+    required: true
+    scope: Worker crashes after transport acceptance and before MarkSent commit.
+    required_timeline_events:
+      [
+        transport_send_accepted,
+        worker_crashed_before_mark_sent,
+        command_reconciled,
+      ]
+  outbox_result_before_commit_recovery:
+    required: true
+    scope: Ingress crashes after result receipt and before database commit.
+    required_timeline_events:
+      [result_received, ingress_crashed_before_commit, result_reconciled]

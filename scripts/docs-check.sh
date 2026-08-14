@@ -18,3 +18,4 @@ while IFS= read -r file; do
 done < <(git -C "${ROOT}" ls-files '*.md')
 
 "${ROOT}/scripts/check-g6-contracts.mjs"
+"${ROOT}/scripts/test-g6-evidence-verifier.mjs"

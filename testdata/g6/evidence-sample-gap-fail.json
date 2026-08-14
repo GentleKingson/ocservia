@@ -1,0 +1,11 @@
+{
+  "base": "evidence-pass.json",
+  "mutations": [
+    {
+      "operation": "replace",
+      "path": "measurements.stability_max_sample_gap_seconds.actual",
+      "value": 205
+    }
+  ],
+  "expected_failure_reason": "metric failed: stability_max_sample_gap_seconds"
+}

@@ -1,0 +1,14 @@
+{
+  "schema_version": "ocservia.release-manifest.v1",
+  "candidate_sha": "1111111111111111111111111111111111111111",
+  "components": [
+    {
+      "name": "control-plane",
+      "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    },
+    {
+      "name": "transportd",
+      "digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    }
+  ]
+}

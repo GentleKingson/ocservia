@@ -1,0 +1,11 @@
+{
+  "base": "evidence-pass.json",
+  "mutations": [
+    {
+      "operation": "add",
+      "path": "measurements.database_rpo_seconds.limit",
+      "value": 999999
+    }
+  ],
+  "expected_error": "unsupported fields: limit"
+}

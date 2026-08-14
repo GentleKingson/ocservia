@@ -1,0 +1,25 @@
+{
+  "schema_version": "ocservia.g6-topology.v1",
+  "candidate_sha": "1111111111111111111111111111111111111111",
+  "release_manifest_digest": "sha256:68fcd61a12bad75f3a4b1242d4d949ff4282512ae5215367d56074c8c4ef7b23",
+  "environment_id": "g6-12345678",
+  "failure_domain_class": "multi_host",
+  "instances": [
+    {
+      "instance_id": "11111111-1111-4111-8111-111111111111",
+      "fault_domain": "fd-alpha",
+      "role": "api",
+      "component_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "candidate_sha": "1111111111111111111111111111111111111111",
+      "started_at": "2026-08-14T00:00:00Z"
+    },
+    {
+      "instance_id": "22222222-2222-4222-8222-222222222222",
+      "fault_domain": "fd-beta",
+      "role": "transportd",
+      "component_digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "candidate_sha": "1111111111111111111111111111111111111111",
+      "started_at": "2026-08-14T00:00:00Z"
+    }
+  ]
+}

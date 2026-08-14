@@ -1,0 +1,11 @@
+{
+  "base": "evidence-pass.json",
+  "mutations": [
+    {
+      "operation": "replace",
+      "path": "measurements.max_production_command_inflight.actual",
+      "value": 1
+    }
+  ],
+  "expected_failure_reason": "metric failed: max_production_command_inflight"
+}

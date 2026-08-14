@@ -1,0 +1,23 @@
+{
+  "base": "evidence-pass.json",
+  "topology_mutations": [
+    {
+      "operation": "replace",
+      "path": "failure_domain_class",
+      "value": "single_host"
+    },
+    {
+      "operation": "replace",
+      "path": "instances.1.fault_domain",
+      "value": "fd-alpha"
+    }
+  ],
+  "evidence_mutations": [
+    {
+      "operation": "replace",
+      "path": "environment.failure_domain_class",
+      "value": "single_host"
+    }
+  ],
+  "expected_error": "evidence failure-domain class does not match the verifier context"
+}

@@ -16,7 +16,7 @@
     "schema_version": { "const": "ocservia.g6-topology.v1" },
     "candidate_sha": { "$ref": "#/$defs/sha" },
     "release_manifest_digest": { "$ref": "#/$defs/digest" },
-    "environment_id": { "type": "string", "minLength": 1, "maxLength": 128 },
+    "environment_id": { "$ref": "#/$defs/environment_id" },
     "failure_domain_class": {
       "enum": ["single_host", "multi_host", "multi_zone", "multi_region"]
     },
@@ -30,6 +30,8 @@
     "sha": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
     "digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
     "timestamp": { "type": "string", "format": "date-time" },
+    "environment_id": { "type": "string", "pattern": "^g6-[a-z0-9]{8,32}$" },
+    "fault_domain": { "type": "string", "pattern": "^fd-[a-z0-9]{2,32}$" },
     "instance": {
       "type": "object",
       "additionalProperties": false,
@@ -43,7 +45,7 @@
       ],
       "properties": {
         "instance_id": { "type": "string", "format": "uuid" },
-        "fault_domain": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "fault_domain": { "$ref": "#/$defs/fault_domain" },
         "role": {
           "enum": [
             "api",
@@ -62,12 +64,7 @@
         "component_digest": { "$ref": "#/$defs/digest" },
         "candidate_sha": { "$ref": "#/$defs/sha" },
         "started_at": { "$ref": "#/$defs/timestamp" },
-        "stopped_at": { "$ref": "#/$defs/timestamp" },
-        "public_labels": {
-          "type": "object",
-          "propertyNames": { "pattern": "^[a-z][a-z0-9_.-]{0,62}$" },
-          "additionalProperties": { "type": "string", "maxLength": 128 }
-        }
+        "stopped_at": { "$ref": "#/$defs/timestamp" }
       }
     }
   }

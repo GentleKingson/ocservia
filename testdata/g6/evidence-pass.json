@@ -1,0 +1,380 @@
+{
+  "schema_version": "ocservia.g6-evidence.v1",
+  "candidate_sha": "1111111111111111111111111111111111111111",
+  "release_manifest_digest": "sha256:68fcd61a12bad75f3a4b1242d4d949ff4282512ae5215367d56074c8c4ef7b23",
+  "slo_contract_digest": "sha256:dd763b7637dd780648890cae7c35131f47845f0c501ec4f785828c135afd4c88",
+  "topology_digest": "sha256:f7c5cc0d57a71156a45e9d48d83cf6168579e28a5b74761a8ea5eaffa39fa4c5",
+  "started_at": "2026-08-14T00:00:00Z",
+  "finished_at": "2026-08-14T00:05:01Z",
+  "environment": {
+    "environment_id": "g6-12345678",
+    "failure_domain_class": "multi_host",
+    "authority": "production_readiness"
+  },
+  "measurements": {
+    "stability_sample_span_seconds": {
+      "actual": 300,
+      "sample_count": 61,
+      "source_artifact_digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+    },
+    "stability_max_sample_gap_seconds": {
+      "actual": 5,
+      "sample_count": 61,
+      "source_artifact_digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+    },
+    "stability_valid_sample_count": {
+      "actual": 61,
+      "sample_count": 61,
+      "source_artifact_digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+    },
+    "authorized_real_agents": {
+      "actual": 50,
+      "sample_count": 61,
+      "source_artifact_digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+    },
+    "max_production_command_inflight": {
+      "actual": 50,
+      "sample_count": 61,
+      "source_artifact_digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+    },
+    "synthetic_command_completion_seconds_p99": {
+      "actual": 30,
+      "sample_count": 100,
+      "source_artifact_digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+    },
+    "stale_owner_accepts": {
+      "actual": 0,
+      "sample_count": 1,
+      "source_artifact_digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+    },
+    "concurrent_active_connection_owners": {
+      "actual": 1,
+      "sample_count": 61,
+      "source_artifact_digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+    },
+    "stale_scheduler_commits": {
+      "actual": 0,
+      "sample_count": 1,
+      "source_artifact_digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+    },
+    "concurrent_active_scheduler_leaders": {
+      "actual": 1,
+      "sample_count": 61,
+      "source_artifact_digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+    },
+    "dual_primary_write_accepts": {
+      "actual": 0,
+      "sample_count": 1,
+      "source_artifact_digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+    },
+    "duplicate_remote_effects": {
+      "actual": 0,
+      "sample_count": 50,
+      "source_artifact_digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+    },
+    "acknowledged_transaction_loss": {
+      "actual": 0,
+      "sample_count": 1,
+      "source_artifact_digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+    },
+    "unreconciled_outbox_rows": {
+      "actual": 0,
+      "sample_count": 1,
+      "source_artifact_digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+    },
+    "unreconciled_unknown_commands": {
+      "actual": 0,
+      "sample_count": 1,
+      "source_artifact_digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+    },
+    "quarantined_unmatched_command_results": {
+      "actual": 0,
+      "sample_count": 1,
+      "source_artifact_digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+    },
+    "database_rpo_seconds": {
+      "actual": 0,
+      "sample_count": 1,
+      "source_artifact_digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+    },
+    "database_rto_seconds": {
+      "actual": 60,
+      "sample_count": 1,
+      "source_artifact_digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+    },
+    "connection_owner_takeover_seconds": {
+      "actual": 10,
+      "sample_count": 1,
+      "source_artifact_digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+    },
+    "scheduler_takeover_seconds": {
+      "actual": 10,
+      "sample_count": 1,
+      "source_artifact_digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+    },
+    "relay_takeover_seconds": {
+      "actual": 10,
+      "sample_count": 1,
+      "source_artifact_digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+    },
+    "reconnect_storm_recovery_seconds": {
+      "actual": 30,
+      "sample_count": 1,
+      "source_artifact_digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+    },
+    "read_api_success_ratio": {
+      "actual": 1,
+      "sample_count": 1000,
+      "source_artifact_digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+    },
+    "enqueue_success_ratio": {
+      "actual": 1,
+      "sample_count": 1000,
+      "source_artifact_digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+    },
+    "enqueue_latency_seconds_p95": {
+      "actual": 0.1,
+      "sample_count": 1000,
+      "source_artifact_digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+    },
+    "telemetry_fresh_ratio": {
+      "actual": 1,
+      "sample_count": 3050,
+      "source_artifact_digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+    },
+    "telemetry_fresh_age_seconds": {
+      "actual": 30,
+      "sample_count": 3050,
+      "source_artifact_digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+    },
+    "command_dispatch_ratio": {
+      "actual": 1,
+      "sample_count": 50,
+      "source_artifact_digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+    },
+    "command_dispatch_seconds": {
+      "actual": 1,
+      "sample_count": 50,
+      "source_artifact_digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+    },
+    "audit_completeness_ratio": {
+      "actual": 1,
+      "sample_count": 1000,
+      "source_artifact_digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+    },
+    "terminal_or_reconciled_operation_ratio": {
+      "actual": 1,
+      "sample_count": 50,
+      "source_artifact_digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+    },
+    "controller_rss_growth_ratio": {
+      "actual": 0.01,
+      "sample_count": 61,
+      "source_artifact_digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+    },
+    "transportd_rss_growth_ratio": {
+      "actual": 0.01,
+      "sample_count": 61,
+      "source_artifact_digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+    },
+    "agent_rss_growth_ratio": {
+      "actual": 0.01,
+      "sample_count": 3050,
+      "source_artifact_digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+    },
+    "controller_fd_growth": {
+      "actual": 0,
+      "sample_count": 61,
+      "source_artifact_digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+    },
+    "transportd_fd_growth": {
+      "actual": 0,
+      "sample_count": 61,
+      "source_artifact_digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+    },
+    "agent_fd_growth": {
+      "actual": 0,
+      "sample_count": 3050,
+      "source_artifact_digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+    },
+    "controller_goroutine_growth": {
+      "actual": 0,
+      "sample_count": 61,
+      "source_artifact_digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+    },
+    "transportd_tokio_task_growth": {
+      "actual": 0,
+      "sample_count": 61,
+      "source_artifact_digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+    },
+    "agent_tokio_task_growth": {
+      "actual": 0,
+      "sample_count": 3050,
+      "source_artifact_digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+    },
+    "database_connection_growth": {
+      "actual": 0,
+      "sample_count": 61,
+      "source_artifact_digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+    },
+    "queue_depth_end": {
+      "actual": 0,
+      "sample_count": 1,
+      "source_artifact_digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+    },
+    "outbox_oldest_age_seconds_end": {
+      "actual": 0,
+      "sample_count": 1,
+      "source_artifact_digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+    }
+  },
+  "observations": {
+    "database_failover_during_load": {
+      "observed": true,
+      "timeline_event_ids": [
+        "load_started",
+        "primary_failure_injected",
+        "new_primary_writable",
+        "api_recovered",
+        "worker_recovered",
+        "load_stopped"
+      ],
+      "source_artifact_digest": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+    },
+    "dual_primary_prevention": {
+      "observed": true,
+      "timeline_event_ids": [
+        "old_primary_isolated",
+        "new_primary_promoted",
+        "old_primary_write_rejected"
+      ],
+      "source_artifact_digest": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+    },
+    "pitr_target_restore": {
+      "observed": true,
+      "timeline_event_ids": [
+        "marker_a_written",
+        "restore_point_created",
+        "marker_b_written",
+        "restore_verified"
+      ],
+      "source_artifact_digest": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+    },
+    "connection_owner_failover": {
+      "observed": true,
+      "timeline_event_ids": [
+        "owner_a_paused",
+        "owner_b_acquired",
+        "owner_a_resumed"
+      ],
+      "source_artifact_digest": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+    },
+    "stale_owner_rejection": {
+      "observed": true,
+      "timeline_event_ids": [
+        "stale_transport_rejected",
+        "stale_agent_rejected"
+      ],
+      "source_artifact_digest": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+    },
+    "scheduler_leader_failover": {
+      "observed": true,
+      "timeline_event_ids": [
+        "scheduler_a_paused",
+        "scheduler_b_acquired",
+        "scheduler_a_resumed"
+      ],
+      "source_artifact_digest": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+    },
+    "stale_scheduler_rejection": {
+      "observed": true,
+      "timeline_event_ids": ["stale_scheduler_commit_rejected"],
+      "source_artifact_digest": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+    },
+    "api_instance_failover": {
+      "observed": true,
+      "timeline_event_ids": [
+        "api_instance_failed",
+        "gateway_traffic_transferred",
+        "api_slo_measured"
+      ],
+      "source_artifact_digest": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+    },
+    "worker_instance_failover": {
+      "observed": true,
+      "timeline_event_ids": [
+        "worker_instance_failed",
+        "worker_replacement_active",
+        "dispatch_recovered"
+      ],
+      "source_artifact_digest": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+    },
+    "relay_failover": {
+      "observed": true,
+      "timeline_event_ids": ["relay_a_failed", "relay_b_active"],
+      "source_artifact_digest": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+    },
+    "direct_to_relay": {
+      "observed": true,
+      "timeline_event_ids": [
+        "direct_path_active",
+        "direct_path_failed",
+        "relay_path_active"
+      ],
+      "source_artifact_digest": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+    },
+    "relay_to_direct": {
+      "observed": true,
+      "timeline_event_ids": ["relay_path_active", "direct_path_recovered"],
+      "source_artifact_digest": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+    },
+    "reconnect_storm": {
+      "observed": true,
+      "timeline_event_ids": [
+        "bulk_disconnect_injected",
+        "reconnect_started",
+        "reconnect_completed"
+      ],
+      "source_artifact_digest": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+    },
+    "outbox_claim_before_send_recovery": {
+      "observed": true,
+      "timeline_event_ids": [
+        "outbox_claim_committed",
+        "worker_crashed_before_send",
+        "command_recovered"
+      ],
+      "source_artifact_digest": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+    },
+    "outbox_send_before_mark_sent_recovery": {
+      "observed": true,
+      "timeline_event_ids": [
+        "transport_send_accepted",
+        "worker_crashed_before_mark_sent",
+        "command_reconciled"
+      ],
+      "source_artifact_digest": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+    },
+    "outbox_result_before_commit_recovery": {
+      "observed": true,
+      "timeline_event_ids": [
+        "result_received",
+        "ingress_crashed_before_commit",
+        "result_reconciled"
+      ],
+      "source_artifact_digest": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+    }
+  },
+  "artifacts": [
+    {
+      "name": "resource-samples.csv",
+      "digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "media_type": "text/csv"
+    },
+    {
+      "name": "timeline.jsonl",
+      "digest": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+      "media_type": "application/x-ndjson"
+    }
+  ]
+}
