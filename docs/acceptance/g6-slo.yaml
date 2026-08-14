@@ -31,7 +31,7 @@ topology:
       instances_min: 1
       component: postgres
     agent:
-      instances_min: 50
+      instances_min: 500
       component: agent
   distinct_failure_domain_role_pairs:
     - [postgres_primary, postgres_standby]
@@ -56,7 +56,7 @@ metrics:
     scope: Valid samples spanning the complete bounded G6 window.
     derivation: resource_samples.valid_sample_count
   authorized_real_agents:
-    limit: 50
+    limit: 500
     comparison: gte
     unit: count
     scope: Independently stateful real Agent processes with authorized active sessions.

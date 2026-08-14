@@ -206,12 +206,12 @@
       ]
     }
   ],
-  "expected_failure_reason": "topology role agent has too few instances",
   "evidence_mutations": [
     {
       "operation": "replace",
       "path": "measurements.authorized_real_agents.actual",
       "value": 10
     }
-  ]
+  ],
+  "expected_failure_reason": "topology role agent has too few instances"
 }

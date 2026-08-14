@@ -2,8 +2,8 @@
   "schema_version": "ocservia.g6-evidence.v1",
   "candidate_sha": "1111111111111111111111111111111111111111",
   "release_manifest_digest": "sha256:266ded2ea8cb2896fbace4b2b6ef7dcc083042d51047d1bc5cedcc00885c5dac",
-  "slo_contract_digest": "sha256:558a7cd4c7d455fabd5bd5b94df277b769d927b6fa9f08ccf552aee0ff7bf4db",
-  "topology_digest": "sha256:88793e954838cbc668cbcb224714712acaae7823b0170d3d8f493f5e25980fcb",
+  "slo_contract_digest": "sha256:c93fb59705fc6c0f30ab5d4e244b6c359f86be4449ccc378c289a45805f5170f",
+  "topology_digest": "sha256:9d43386cfd8d29ff83daaaccb4ed754608e0b3ab974de003b06cea2687600ec0",
   "started_at": "2026-08-14T00:00:00Z",
   "finished_at": "2026-08-14T00:05:01Z",
   "environment": {
@@ -28,7 +28,7 @@
       "source_artifact_digest": "sha256:5487e5129ea478d67459bdce9d7b4b49cb7abd689e6af8857513a99e63e60c3b"
     },
     "authorized_real_agents": {
-      "actual": 50,
+      "actual": 500,
       "sample_count": 61,
       "source_artifact_digest": "sha256:5487e5129ea478d67459bdce9d7b4b49cb7abd689e6af8857513a99e63e60c3b"
     },
