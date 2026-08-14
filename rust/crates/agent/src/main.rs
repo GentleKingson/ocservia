@@ -2327,11 +2327,24 @@ mod tests {
             .expect_err("read-only artifact consumption denied");
         assert_eq!(consume_error.code(), tonic::Code::PermissionDenied);
 
+        assert!(
+            !run.is_finished(),
+            "Agent session remains active until the test closes its endpoint"
+        );
         agent_endpoint.close().await;
-        let _session_result = tokio::time::timeout(Duration::from_secs(5), run)
+        let session_result = tokio::time::timeout(Duration::from_secs(5), run)
             .await
             .expect("Agent stops after endpoint shutdown")
             .expect("Agent task");
+        if let Err(error) = session_result {
+            assert!(
+                matches!(
+                    error.downcast_ref::<iroh::endpoint::ConnectionError>(),
+                    Some(iroh::endpoint::ConnectionError::LocallyClosed)
+                ),
+                "Agent endpoint shutdown returned an unexpected error: {error}"
+            );
+        }
         ocservia_transportd::shutdown(&service, router)
             .await
             .expect("shutdown static transportd");
