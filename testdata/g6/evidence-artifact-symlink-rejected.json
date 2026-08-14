@@ -1,0 +1,5 @@
+{
+  "base": "evidence-pass.json",
+  "artifact_root": "symlink",
+  "expected_error": "artifact must not be a symbolic link: resource-samples.csv"
+}

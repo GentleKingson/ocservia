@@ -1,0 +1,11 @@
+{
+  "base": "evidence-pass.json",
+  "evidence_mutations": [
+    {
+      "operation": "replace",
+      "path": "artifacts.0.name",
+      "value": "../../secrets.env"
+    }
+  ],
+  "expected_error": "must be a restricted relative path without separators or parent references"
+}

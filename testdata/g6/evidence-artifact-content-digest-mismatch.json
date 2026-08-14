@@ -1,0 +1,11 @@
+{
+  "base": "evidence-pass.json",
+  "evidence_mutations": [
+    {
+      "operation": "replace",
+      "path": "artifacts.0.digest",
+      "value": "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+    }
+  ],
+  "expected_error": "artifact content digest mismatch: resource-samples.csv"
+}

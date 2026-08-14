@@ -40,6 +40,29 @@ for (const [path, version] of schemas) {
 }
 
 const evidenceSchema = parsedSchemas.get("ocservia.g6-evidence.v1");
+const topologySchema = parsedSchemas.get("ocservia.g6-topology.v1");
+const instanceDef = topologySchema.$defs.instance;
+if (!instanceDef.required.includes("component")) {
+  fail("topology instances must bind a release component name");
+}
+const topologyRoles = instanceDef.properties.role.enum;
+const requiredRoles = Object.keys(slo.topology.role_requirements ?? {});
+if (requiredRoles.length === 0) {
+  fail("g6-slo.yaml must freeze per-role topology requirements");
+}
+for (const role of requiredRoles) {
+  if (!topologyRoles.includes(role)) {
+    fail(`SLO role requirement role is not a topology role: ${role}`);
+  }
+}
+for (const [first, second] of slo.topology.distinct_failure_domain_role_pairs ??
+  []) {
+  for (const role of [first, second]) {
+    if (!topologyRoles.includes(role)) {
+      fail(`distinct failure-domain pair role is not a topology role: ${role}`);
+    }
+  }
+}
 const metricNames = Object.keys(slo.metrics);
 if (
   !same(evidenceSchema.properties.measurements.required, metricNames) ||
@@ -77,6 +100,14 @@ if ("passed" in evidenceSchema.properties) {
 }
 if (read("docs/acceptance/g6-topology-schema.json").includes("public_labels")) {
   fail("topology schema must not accept arbitrary public labels");
+}
+
+const acceptanceReadme = read("docs/acceptance/README.md");
+if (!acceptanceReadme.includes("--artifact-root")) {
+  fail("acceptance README must document artifact-root content verification");
+}
+if (!acceptanceReadme.includes("role requirements")) {
+  fail("acceptance README must document topology role requirements");
 }
 
 const publicCapacity = read("docs/development/p1-resilience-capacity.md");

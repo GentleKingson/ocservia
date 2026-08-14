@@ -3,6 +3,35 @@ schema_version: ocservia.g6-slo.v1
 topology:
   final_pass_failure_domain_classes: [multi_host, multi_zone, multi_region]
   failure_domains_min: 2
+  role_requirements:
+    api:
+      instances_min: 2
+      failure_domains_min: 2
+      component: control-plane
+    worker:
+      instances_min: 2
+      failure_domains_min: 2
+      component: control-plane
+    scheduler:
+      instances_min: 2
+      failure_domains_min: 2
+      component: control-plane
+    transportd:
+      instances_min: 2
+      failure_domains_min: 2
+      component: transportd
+    relay:
+      instances_min: 2
+      failure_domains_min: 2
+      component: relay
+    postgres_primary:
+      instances_min: 1
+      component: postgres
+    postgres_standby:
+      instances_min: 1
+      component: postgres
+  distinct_failure_domain_role_pairs:
+    - [postgres_primary, postgres_standby]
 
 metrics:
   stability_sample_span_seconds:

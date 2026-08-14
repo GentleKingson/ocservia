@@ -1,4 +1,6 @@
 import { createHash } from "node:crypto";
+import { lstatSync, readFileSync } from "node:fs";
+import { isAbsolute, join, resolve, sep } from "node:path";
 import { createRequire } from "node:module";
 
 const require = createRequire(new URL("../web/package.json", import.meta.url));
@@ -31,6 +33,8 @@ const digestPattern = /^sha256:[0-9a-f]{64}$/;
 const environmentPattern = /^g6-[a-z0-9]{8,32}$/;
 const faultDomainPattern = /^fd-[a-z0-9]{2,32}$/;
 const eventPattern = /^[a-z][a-z0-9_]{0,127}$/;
+const componentPattern = /^[a-z][a-z0-9-]{0,63}$/;
+const artifactNamePattern = /^[a-z0-9][a-z0-9._-]{0,127}$/;
 
 function fail(message) {
   throw new Error(message);
@@ -74,6 +78,20 @@ function digest(value, context) {
   }
 }
 
+function artifactName(value, context) {
+  if (typeof value !== "string") {
+    fail(`${context} must be a string`);
+  }
+  if (value.includes("/") || value.includes("\\") || value.includes("..")) {
+    fail(
+      `${context} must be a restricted relative path without separators or parent references`,
+    );
+  }
+  if (!artifactNamePattern.test(value)) {
+    fail(`${context} has an invalid public name`);
+  }
+}
+
 function sha(value, context) {
   if (typeof value !== "string" || !shaPattern.test(value)) {
     fail(`${context} must be a lowercase 40-character commit SHA`);
@@ -114,7 +132,12 @@ export function parseSlo(text) {
 
   closed(
     slo.topology,
-    ["final_pass_failure_domain_classes", "failure_domains_min"],
+    [
+      "final_pass_failure_domain_classes",
+      "failure_domains_min",
+      "role_requirements",
+      "distinct_failure_domain_role_pairs",
+    ],
     "SLO topology",
   );
   if (
@@ -131,6 +154,63 @@ export function parseSlo(text) {
     slo.topology.failure_domains_min < 2
   ) {
     fail("SLO topology must require at least two failure domains");
+  }
+  object(slo.topology.role_requirements, "SLO role requirements");
+  if (Object.keys(slo.topology.role_requirements).length === 0) {
+    fail("SLO role requirements must not be empty");
+  }
+  for (const [role, requirement] of Object.entries(
+    slo.topology.role_requirements,
+  )) {
+    if (!roles.has(role)) fail(`invalid SLO role requirement role: ${role}`);
+    const allowed = [
+      "instances_min",
+      "component",
+      ...(requirement?.failure_domains_min === undefined
+        ? []
+        : ["failure_domains_min"]),
+    ];
+    closed(requirement, allowed, `SLO role requirement ${role}`);
+    if (
+      !Number.isInteger(requirement.instances_min) ||
+      requirement.instances_min < 1
+    ) {
+      fail(`SLO role requirement ${role} must set a positive instances_min`);
+    }
+    if (
+      requirement.failure_domains_min !== undefined &&
+      (!Number.isInteger(requirement.failure_domains_min) ||
+        requirement.failure_domains_min < 2)
+    ) {
+      fail(
+        `SLO role requirement ${role} must require at least two failure domains when set`,
+      );
+    }
+    if (
+      typeof requirement.component !== "string" ||
+      !componentPattern.test(requirement.component)
+    ) {
+      fail(`SLO role requirement ${role} must bind a release component`);
+    }
+  }
+  if (!Array.isArray(slo.topology.distinct_failure_domain_role_pairs)) {
+    fail("SLO must define distinct failure-domain role pairs");
+  }
+  const seenPairs = new Set();
+  for (const pair of slo.topology.distinct_failure_domain_role_pairs) {
+    if (
+      !Array.isArray(pair) ||
+      pair.length !== 2 ||
+      pair.some((role) => !roles.has(role)) ||
+      pair[0] === pair[1]
+    ) {
+      fail("invalid distinct failure-domain role pair");
+    }
+    const key = [...pair].sort().join("|");
+    if (seenPairs.has(key)) {
+      fail("duplicate distinct failure-domain role pair");
+    }
+    seenPairs.add(key);
   }
 
   object(slo.metrics, "SLO metrics");
@@ -184,7 +264,51 @@ export function parseSlo(text) {
   return slo;
 }
 
-function validateEvidence(evidence, slo) {
+function verifyArtifacts(evidence, artifactRoot) {
+  const rootDirectory = resolve(artifactRoot);
+  const verified = new Map();
+  for (const artifact of evidence.artifacts) {
+    if (verified.has(artifact.name)) {
+      fail(`duplicate evidence artifact name: ${artifact.name}`);
+    }
+    if (isAbsolute(artifact.name)) {
+      fail(`evidence artifact name must not be absolute: ${artifact.name}`);
+    }
+    const artifactPath = resolve(rootDirectory, artifact.name);
+    if (
+      artifactPath !== join(rootDirectory, artifact.name) ||
+      !artifactPath.startsWith(rootDirectory + sep)
+    ) {
+      fail(
+        `evidence artifact name must stay inside the artifact root: ${artifact.name}`,
+      );
+    }
+    let stats;
+    try {
+      stats = lstatSync(artifactPath);
+    } catch {
+      fail(
+        `artifact file is missing under the artifact root: ${artifact.name}`,
+      );
+    }
+    if (stats.isSymbolicLink()) {
+      fail(`artifact must not be a symbolic link: ${artifact.name}`);
+    }
+    if (!stats.isFile()) {
+      fail(`artifact must be a regular file: ${artifact.name}`);
+    }
+    const computed = `sha256:${createHash("sha256")
+      .update(readFileSync(artifactPath))
+      .digest("hex")}`;
+    if (computed !== artifact.digest) {
+      fail(`artifact content digest mismatch: ${artifact.name}`);
+    }
+    verified.set(artifact.name, artifact.digest);
+  }
+  return verified;
+}
+
+function validateEvidence(evidence, slo, artifactRoot) {
   closed(
     evidence,
     [
@@ -300,15 +424,9 @@ function validateEvidence(evidence, slo) {
   if (!Array.isArray(evidence.artifacts) || evidence.artifacts.length === 0) {
     fail("evidence artifacts must not be empty");
   }
-  const artifactDigests = new Set();
   for (const artifact of evidence.artifacts) {
     closed(artifact, ["name", "digest", "media_type"], "evidence artifact");
-    if (
-      typeof artifact.name !== "string" ||
-      !/^[a-z0-9][a-z0-9._-]{0,127}$/.test(artifact.name)
-    ) {
-      fail("evidence artifact has an invalid public name");
-    }
+    artifactName(artifact.name, `evidence artifact ${artifact.name} name`);
     digest(artifact.digest, `evidence artifact ${artifact.name} digest`);
     if (
       typeof artifact.media_type !== "string" ||
@@ -316,16 +434,17 @@ function validateEvidence(evidence, slo) {
     ) {
       fail(`evidence artifact ${artifact.name} has an invalid media type`);
     }
-    artifactDigests.add(artifact.digest);
   }
+  const verifiedArtifacts = verifyArtifacts(evidence, artifactRoot);
+  const verifiedDigests = new Set(verifiedArtifacts.values());
   for (const [name, measurement] of Object.entries(evidence.measurements)) {
-    if (!artifactDigests.has(measurement.source_artifact_digest)) {
-      fail(`evidence measurement ${name} references an undeclared artifact`);
+    if (!verifiedDigests.has(measurement.source_artifact_digest)) {
+      fail(`evidence measurement ${name} references an unverified artifact`);
     }
   }
   for (const [name, observation] of Object.entries(evidence.observations)) {
-    if (!artifactDigests.has(observation.source_artifact_digest)) {
-      fail(`evidence observation ${name} references an undeclared artifact`);
+    if (!verifiedDigests.has(observation.source_artifact_digest)) {
+      fail(`evidence observation ${name} references an unverified artifact`);
     }
   }
 }
@@ -362,6 +481,7 @@ function validateTopology(topology) {
       "instance_id",
       "fault_domain",
       "role",
+      "component",
       "component_digest",
       "candidate_sha",
       "started_at",
@@ -379,6 +499,14 @@ function validateTopology(topology) {
       fail("topology fault_domain is not opaque");
     if (!roles.has(instance.role))
       fail(`invalid topology role: ${instance.role}`);
+    if (
+      typeof instance.component !== "string" ||
+      !componentPattern.test(instance.component)
+    ) {
+      fail(
+        `topology instance ${instance.instance_id} has an invalid component`,
+      );
+    }
     digest(instance.component_digest, "topology component_digest");
     sha(instance.candidate_sha, "topology instance candidate_sha");
     timestamp(instance.started_at, "topology instance started_at");
@@ -393,16 +521,22 @@ function validateManifest(manifest) {
   if (!Array.isArray(manifest.components) || manifest.components.length === 0) {
     fail("release manifest components must not be empty");
   }
-  const digests = new Set();
+  const components = new Map();
   for (const component of manifest.components) {
     object(component, "release manifest component");
-    if (typeof component.name !== "string" || component.name.length === 0) {
+    if (
+      typeof component.name !== "string" ||
+      !componentPattern.test(component.name)
+    ) {
       fail("release manifest component name is invalid");
     }
+    if (components.has(component.name)) {
+      fail(`duplicate release manifest component name: ${component.name}`);
+    }
     digest(component.digest, `release manifest component ${component.name}`);
-    digests.add(component.digest);
+    components.set(component.name, component.digest);
   }
-  return digests;
+  return components;
 }
 
 function metricPass(actual, contract) {
@@ -416,17 +550,21 @@ export function verifyG6({
   evidenceText,
   topologyText,
   manifestText,
+  artifactRoot,
   expectedAuthority,
   expectedEnvironmentId,
   expectedFailureDomainClass,
 }) {
+  if (typeof artifactRoot !== "string" || artifactRoot.length === 0) {
+    fail("an artifact root directory is required for content verification");
+  }
   const slo = parseSlo(sloText);
   const evidence = parseJSON(evidenceText, "evidence");
   const topology = parseJSON(topologyText, "topology");
   const manifest = parseJSON(manifestText, "release manifest");
-  validateEvidence(evidence, slo);
+  validateEvidence(evidence, slo, artifactRoot);
   validateTopology(topology);
-  const manifestComponentDigests = validateManifest(manifest);
+  const manifestComponents = validateManifest(manifest);
 
   if (!authorities.has(expectedAuthority)) fail("invalid expected authority");
   if (!environmentPattern.test(expectedEnvironmentId)) {
@@ -478,9 +616,11 @@ export function verifyG6({
     fail("failure-domain class mismatch");
   }
   for (const instance of topology.instances) {
-    if (!manifestComponentDigests.has(instance.component_digest)) {
+    if (
+      manifestComponents.get(instance.component) !== instance.component_digest
+    ) {
       fail(
-        `topology component digest is absent from release manifest: ${instance.instance_id}`,
+        `topology instance ${instance.instance_id} does not match release manifest component ${instance.component}`,
       );
     }
   }
@@ -537,6 +677,56 @@ export function verifyG6({
     failureReasons.push(
       "topology has too few independent failure-domain aliases",
     );
+  }
+
+  for (const [role, requirement] of Object.entries(
+    slo.topology.role_requirements,
+  )) {
+    const roleInstances = topology.instances.filter(
+      (instance) => instance.role === role,
+    );
+    if (roleInstances.length < requirement.instances_min) {
+      failureReasons.push(`topology role ${role} has too few instances`);
+    }
+    if (requirement.failure_domains_min !== undefined) {
+      const roleDomains = new Set(
+        roleInstances.map((instance) => instance.fault_domain),
+      );
+      if (roleDomains.size < requirement.failure_domains_min) {
+        failureReasons.push(
+          `topology role ${role} spans too few failure domains`,
+        );
+      }
+    }
+    if (
+      roleInstances.some(
+        (instance) => instance.component !== requirement.component,
+      )
+    ) {
+      failureReasons.push(
+        `topology role ${role} does not use component ${requirement.component}`,
+      );
+    }
+  }
+
+  for (const [first, second] of slo.topology
+    .distinct_failure_domain_role_pairs) {
+    const firstDomains = new Set(
+      topology.instances
+        .filter((instance) => instance.role === first)
+        .map((instance) => instance.fault_domain),
+    );
+    const shared = topology.instances
+      .filter(
+        (instance) =>
+          instance.role === second && firstDomains.has(instance.fault_domain),
+      )
+      .map((instance) => instance.fault_domain);
+    if (shared.length > 0) {
+      failureReasons.push(
+        `topology roles ${first} and ${second} share fault domain ${shared[0]}`,
+      );
+    }
   }
 
   return {

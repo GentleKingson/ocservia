@@ -1,0 +1,11 @@
+{
+  "base": "evidence-pass.json",
+  "topology_mutations": [
+    {
+      "operation": "replace",
+      "path": "instances.9.fault_domain",
+      "value": "fd-alpha"
+    }
+  ],
+  "expected_failure_reason": "topology role relay spans too few failure domains"
+}

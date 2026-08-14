@@ -1,0 +1,27 @@
+{
+  "base": "evidence-pass.json",
+  "evidence_mutations": [
+    {
+      "operation": "replace",
+      "path": "artifacts",
+      "value": [
+        {
+          "name": "resource-samples.csv",
+          "digest": "sha256:39844456f4a92bc5e0e4af642436ebdf4c5e08a324e0f021c5707d0cb213a05e",
+          "media_type": "text/csv"
+        },
+        {
+          "name": "timeline.jsonl",
+          "digest": "sha256:846a9c06a8410cf787b049a0e814e0dedfce47490337b29208c79bd1f4f7cf07",
+          "media_type": "application/x-ndjson"
+        },
+        {
+          "name": "missing-samples.csv",
+          "digest": "sha256:39844456f4a92bc5e0e4af642436ebdf4c5e08a324e0f021c5707d0cb213a05e",
+          "media_type": "text/csv"
+        }
+      ]
+    }
+  ],
+  "expected_error": "artifact file is missing under the artifact root: missing-samples.csv"
+}

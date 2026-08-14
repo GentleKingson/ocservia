@@ -1,6 +1,16 @@
 #!/usr/bin/env node
 
-import { readdirSync, readFileSync } from "node:fs";
+import {
+  cpSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  symlinkSync,
+} from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { sha256Digest, verifyG6 } from "./g6-contract-lib.mjs";
 
 const root = new URL("../", import.meta.url);
@@ -23,6 +33,31 @@ function mutate(target, mutation) {
   parent[key] = mutation.value;
 }
 
+const allowedFixtureFields = new Set([
+  "base",
+  "topology_mutations",
+  "evidence_mutations",
+  "mutations",
+  "expected_error",
+  "expected_failure_reason",
+  "expected_authority",
+  "expected_failure_domain_class",
+  "artifact_root",
+]);
+
+function buildArtifactRoot(mode) {
+  const realRoot = fileURLToPath(new URL("testdata/g6/artifacts/", root));
+  if (mode !== "symlink") return realRoot;
+  const tempRoot = mkdtempSync(join(tmpdir(), "g6-artifacts-"));
+  cpSync(realRoot, tempRoot, { recursive: true });
+  rmSync(join(tempRoot, "resource-samples.csv"));
+  symlinkSync(
+    join(realRoot, "resource-samples.csv"),
+    join(tempRoot, "resource-samples.csv"),
+  );
+  return tempRoot;
+}
+
 const sloText = read("docs/acceptance/g6-slo.yaml");
 const manifestText = read("testdata/g6/release-manifest.json");
 const baseTopology = parse("testdata/g6/topology.json");
@@ -32,6 +67,7 @@ const baseVerdict = verifyG6({
   evidenceText: serialize(baseEvidence),
   topologyText: serialize(baseTopology),
   manifestText,
+  artifactRoot: buildArtifactRoot(),
   expectedAuthority: "production_readiness",
   expectedEnvironmentId: "g6-12345678",
   expectedFailureDomainClass: "multi_host",
@@ -47,6 +83,11 @@ const cases = readdirSync(fixtureDirectory)
 
 for (const name of cases) {
   const fixture = parse(`testdata/g6/${name}`);
+  for (const field of Object.keys(fixture)) {
+    if (!allowedFixtureFields.has(field)) {
+      throw new Error(`${name}: unsupported fixture field: ${field}`);
+    }
+  }
   const evidence = clone(baseEvidence);
   const topology = clone(baseTopology);
   for (const mutation of fixture.topology_mutations ?? [])
@@ -60,6 +101,7 @@ for (const name of cases) {
     evidence.topology_digest = sha256Digest(topologyText);
   }
 
+  const artifactRoot = buildArtifactRoot(fixture.artifact_root);
   let verdict;
   let rejected;
   try {
@@ -68,6 +110,7 @@ for (const name of cases) {
       evidenceText: serialize(evidence),
       topologyText,
       manifestText,
+      artifactRoot,
       expectedAuthority: fixture.expected_authority ?? "production_readiness",
       expectedEnvironmentId: "g6-12345678",
       expectedFailureDomainClass:
@@ -75,6 +118,10 @@ for (const name of cases) {
     });
   } catch (error) {
     rejected = error;
+  } finally {
+    if (artifactRoot.startsWith(join(tmpdir(), "g6-artifacts-"))) {
+      rmSync(artifactRoot, { recursive: true, force: true });
+    }
   }
 
   if (fixture.expected_error) {

@@ -4,7 +4,7 @@ import { readFileSync } from "node:fs";
 import { verifyG6 } from "./g6-contract-lib.mjs";
 
 const usage =
-  "usage: verify-g6-evidence.mjs --slo FILE --evidence FILE --topology FILE --release-manifest FILE --expected-authority AUTHORITY --expected-environment-id ID --expected-failure-domain-class CLASS";
+  "usage: verify-g6-evidence.mjs --slo FILE --evidence FILE --topology FILE --release-manifest FILE --artifact-root DIR --expected-authority AUTHORITY --expected-environment-id ID --expected-failure-domain-class CLASS";
 const values = {};
 for (let index = 2; index < process.argv.length; index += 2) {
   const option = process.argv[index];
@@ -17,6 +17,7 @@ for (const name of [
   "evidence",
   "topology",
   "release-manifest",
+  "artifact-root",
   "expected-authority",
   "expected-environment-id",
   "expected-failure-domain-class",
@@ -30,6 +31,7 @@ try {
     evidenceText: readFileSync(values.evidence, "utf8"),
     topologyText: readFileSync(values.topology, "utf8"),
     manifestText: readFileSync(values["release-manifest"], "utf8"),
+    artifactRoot: values["artifact-root"],
     expectedAuthority: values["expected-authority"],
     expectedEnvironmentId: values["expected-environment-id"],
     expectedFailureDomainClass: values["expected-failure-domain-class"],

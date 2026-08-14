@@ -1,0 +1,8 @@
+timestamp,component,instance,rss_bytes,fd_count,tasks,queue_depth
+2026-08-14T00:00:00Z,controller,api-1,104857600,48,120,0
+2026-08-14T00:00:05Z,controller,api-2,105906176,50,122,0
+2026-08-14T00:01:00Z,transportd,node-1,157286400,64,88,0
+2026-08-14T00:02:00Z,transportd,node-2,159383552,66,90,0
+2026-08-14T00:03:00Z,controller,api-1,106430464,52,124,0
+2026-08-14T00:04:00Z,agent,node-agent-7,104857600,24,16,0
+2026-08-14T00:05:00Z,controller,scheduler-1,104857600,49,121,0
