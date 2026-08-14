@@ -40,8 +40,18 @@ func forceExpire(t *testing.T, pool *pgxpool.Pool) {
 	}
 }
 
+// resetLeadership expires any lease left behind by an earlier test so each
+// test starts from an idle, takable lease.
+func resetLeadership(t *testing.T, pool *pgxpool.Pool) {
+	t.Helper()
+	if _, err := pool.Exec(context.Background(), `UPDATE scheduler_leadership SET lease_until=now()`); err != nil {
+		t.Fatalf("reset scheduler leadership: %v", err)
+	}
+}
+
 func TestLeadershipAcquireRenewAssertIntegration(t *testing.T) {
 	pool := testPool(t)
+	resetLeadership(t, pool)
 	ctx := context.Background()
 
 	first, err := Acquire(ctx, pool, mustIdentity(t), 10*time.Second)
@@ -107,6 +117,7 @@ func TestLeadershipAcquireRenewAssertIntegration(t *testing.T) {
 // transaction commits.
 func TestLeadershipAssertBlocksTakeoverIntegration(t *testing.T) {
 	pool := testPool(t)
+	resetLeadership(t, pool)
 	ctx := context.Background()
 
 	leader, err := Acquire(ctx, pool, mustIdentity(t), 10*time.Second)
@@ -148,6 +159,7 @@ func TestLeadershipAssertBlocksTakeoverIntegration(t *testing.T) {
 
 func TestRunnerRenewalLossCancelsSessionIntegration(t *testing.T) {
 	pool := testPool(t)
+	resetLeadership(t, pool)
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 
@@ -194,6 +206,7 @@ func TestRunnerRenewalLossCancelsSessionIntegration(t *testing.T) {
 
 func TestFencedExecRejectsStaleLeaderIntegration(t *testing.T) {
 	pool := testPool(t)
+	resetLeadership(t, pool)
 	ctx := context.Background()
 
 	leader, err := Acquire(ctx, pool, mustIdentity(t), 10*time.Second)
