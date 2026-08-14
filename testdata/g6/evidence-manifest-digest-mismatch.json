@@ -1,0 +1,11 @@
+{
+  "base": "evidence-pass.json",
+  "mutations": [
+    {
+      "operation": "replace",
+      "path": "release_manifest_digest",
+      "value": "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+    }
+  ],
+  "expected_error": "release manifest digest mismatch"
+}

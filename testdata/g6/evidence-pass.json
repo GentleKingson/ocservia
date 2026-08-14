@@ -1,0 +1,382 @@
+{
+  "schema_version": "ocservia.g6-evidence.v1",
+  "candidate_sha": "1111111111111111111111111111111111111111",
+  "release_manifest_digest": "sha256:266ded2ea8cb2896fbace4b2b6ef7dcc083042d51047d1bc5cedcc00885c5dac",
+  "slo_contract_digest": "sha256:c93fb59705fc6c0f30ab5d4e244b6c359f86be4449ccc378c289a45805f5170f",
+  "topology_digest": "sha256:9d43386cfd8d29ff83daaaccb4ed754608e0b3ab974de003b06cea2687600ec0",
+  "started_at": "2026-08-14T00:00:00Z",
+  "finished_at": "2026-08-14T00:05:01Z",
+  "environment": {
+    "environment_id": "g6-12345678",
+    "failure_domain_class": "multi_host",
+    "authority": "production_readiness"
+  },
+  "measurements": {
+    "stability_sample_span_seconds": {
+      "actual": 300,
+      "sample_count": 61,
+      "source_artifact_digest": "sha256:5487e5129ea478d67459bdce9d7b4b49cb7abd689e6af8857513a99e63e60c3b"
+    },
+    "stability_max_sample_gap_seconds": {
+      "actual": 5,
+      "sample_count": 61,
+      "source_artifact_digest": "sha256:5487e5129ea478d67459bdce9d7b4b49cb7abd689e6af8857513a99e63e60c3b"
+    },
+    "stability_valid_sample_count": {
+      "actual": 61,
+      "sample_count": 61,
+      "source_artifact_digest": "sha256:5487e5129ea478d67459bdce9d7b4b49cb7abd689e6af8857513a99e63e60c3b"
+    },
+    "authorized_real_agents": {
+      "actual": 500,
+      "sample_count": 61,
+      "source_artifact_digest": "sha256:5487e5129ea478d67459bdce9d7b4b49cb7abd689e6af8857513a99e63e60c3b"
+    },
+    "max_production_command_inflight": {
+      "actual": 50,
+      "sample_count": 61,
+      "source_artifact_digest": "sha256:5487e5129ea478d67459bdce9d7b4b49cb7abd689e6af8857513a99e63e60c3b"
+    },
+    "synthetic_command_completion_seconds_p99": {
+      "actual": 30,
+      "sample_count": 100,
+      "source_artifact_digest": "sha256:5487e5129ea478d67459bdce9d7b4b49cb7abd689e6af8857513a99e63e60c3b"
+    },
+    "stale_owner_accepts": {
+      "actual": 0,
+      "sample_count": 1,
+      "source_artifact_digest": "sha256:5487e5129ea478d67459bdce9d7b4b49cb7abd689e6af8857513a99e63e60c3b"
+    },
+    "concurrent_active_connection_owners": {
+      "actual": 1,
+      "sample_count": 61,
+      "source_artifact_digest": "sha256:5487e5129ea478d67459bdce9d7b4b49cb7abd689e6af8857513a99e63e60c3b"
+    },
+    "stale_scheduler_commits": {
+      "actual": 0,
+      "sample_count": 1,
+      "source_artifact_digest": "sha256:5487e5129ea478d67459bdce9d7b4b49cb7abd689e6af8857513a99e63e60c3b"
+    },
+    "concurrent_active_scheduler_leaders": {
+      "actual": 1,
+      "sample_count": 61,
+      "source_artifact_digest": "sha256:5487e5129ea478d67459bdce9d7b4b49cb7abd689e6af8857513a99e63e60c3b"
+    },
+    "dual_primary_write_accepts": {
+      "actual": 0,
+      "sample_count": 1,
+      "source_artifact_digest": "sha256:5487e5129ea478d67459bdce9d7b4b49cb7abd689e6af8857513a99e63e60c3b"
+    },
+    "duplicate_remote_effects": {
+      "actual": 0,
+      "sample_count": 50,
+      "source_artifact_digest": "sha256:5487e5129ea478d67459bdce9d7b4b49cb7abd689e6af8857513a99e63e60c3b"
+    },
+    "acknowledged_transaction_loss": {
+      "actual": 0,
+      "sample_count": 1,
+      "source_artifact_digest": "sha256:5487e5129ea478d67459bdce9d7b4b49cb7abd689e6af8857513a99e63e60c3b"
+    },
+    "unreconciled_outbox_rows": {
+      "actual": 0,
+      "sample_count": 1,
+      "source_artifact_digest": "sha256:5487e5129ea478d67459bdce9d7b4b49cb7abd689e6af8857513a99e63e60c3b"
+    },
+    "unreconciled_unknown_commands": {
+      "actual": 0,
+      "sample_count": 1,
+      "source_artifact_digest": "sha256:5487e5129ea478d67459bdce9d7b4b49cb7abd689e6af8857513a99e63e60c3b"
+    },
+    "quarantined_unmatched_command_results": {
+      "actual": 0,
+      "sample_count": 1,
+      "source_artifact_digest": "sha256:5487e5129ea478d67459bdce9d7b4b49cb7abd689e6af8857513a99e63e60c3b"
+    },
+    "database_rpo_seconds": {
+      "actual": 0,
+      "sample_count": 1,
+      "source_artifact_digest": "sha256:5487e5129ea478d67459bdce9d7b4b49cb7abd689e6af8857513a99e63e60c3b"
+    },
+    "database_rto_seconds": {
+      "actual": 60,
+      "sample_count": 1,
+      "source_artifact_digest": "sha256:5487e5129ea478d67459bdce9d7b4b49cb7abd689e6af8857513a99e63e60c3b"
+    },
+    "connection_owner_takeover_seconds": {
+      "actual": 10,
+      "sample_count": 1,
+      "source_artifact_digest": "sha256:5487e5129ea478d67459bdce9d7b4b49cb7abd689e6af8857513a99e63e60c3b"
+    },
+    "scheduler_takeover_seconds": {
+      "actual": 10,
+      "sample_count": 1,
+      "source_artifact_digest": "sha256:5487e5129ea478d67459bdce9d7b4b49cb7abd689e6af8857513a99e63e60c3b"
+    },
+    "relay_takeover_seconds": {
+      "actual": 10,
+      "sample_count": 1,
+      "source_artifact_digest": "sha256:5487e5129ea478d67459bdce9d7b4b49cb7abd689e6af8857513a99e63e60c3b"
+    },
+    "reconnect_storm_recovery_seconds": {
+      "actual": 30,
+      "sample_count": 1,
+      "source_artifact_digest": "sha256:5487e5129ea478d67459bdce9d7b4b49cb7abd689e6af8857513a99e63e60c3b"
+    },
+    "read_api_success_ratio": {
+      "actual": 1,
+      "sample_count": 1000,
+      "source_artifact_digest": "sha256:5487e5129ea478d67459bdce9d7b4b49cb7abd689e6af8857513a99e63e60c3b"
+    },
+    "enqueue_success_ratio": {
+      "actual": 1,
+      "sample_count": 1000,
+      "source_artifact_digest": "sha256:5487e5129ea478d67459bdce9d7b4b49cb7abd689e6af8857513a99e63e60c3b"
+    },
+    "enqueue_latency_seconds_p95": {
+      "actual": 0.1,
+      "sample_count": 1000,
+      "source_artifact_digest": "sha256:5487e5129ea478d67459bdce9d7b4b49cb7abd689e6af8857513a99e63e60c3b"
+    },
+    "telemetry_fresh_ratio": {
+      "actual": 1,
+      "sample_count": 3050,
+      "source_artifact_digest": "sha256:5487e5129ea478d67459bdce9d7b4b49cb7abd689e6af8857513a99e63e60c3b"
+    },
+    "telemetry_fresh_age_seconds": {
+      "actual": 30,
+      "sample_count": 3050,
+      "source_artifact_digest": "sha256:5487e5129ea478d67459bdce9d7b4b49cb7abd689e6af8857513a99e63e60c3b"
+    },
+    "command_dispatch_ratio": {
+      "actual": 1,
+      "sample_count": 50,
+      "source_artifact_digest": "sha256:5487e5129ea478d67459bdce9d7b4b49cb7abd689e6af8857513a99e63e60c3b"
+    },
+    "command_dispatch_seconds": {
+      "actual": 1,
+      "sample_count": 50,
+      "source_artifact_digest": "sha256:5487e5129ea478d67459bdce9d7b4b49cb7abd689e6af8857513a99e63e60c3b"
+    },
+    "audit_completeness_ratio": {
+      "actual": 1,
+      "sample_count": 1000,
+      "source_artifact_digest": "sha256:5487e5129ea478d67459bdce9d7b4b49cb7abd689e6af8857513a99e63e60c3b"
+    },
+    "terminal_or_reconciled_operation_ratio": {
+      "actual": 1,
+      "sample_count": 50,
+      "source_artifact_digest": "sha256:5487e5129ea478d67459bdce9d7b4b49cb7abd689e6af8857513a99e63e60c3b"
+    },
+    "controller_rss_growth_ratio": {
+      "actual": 0.01,
+      "sample_count": 61,
+      "source_artifact_digest": "sha256:5487e5129ea478d67459bdce9d7b4b49cb7abd689e6af8857513a99e63e60c3b"
+    },
+    "transportd_rss_growth_ratio": {
+      "actual": 0.01,
+      "sample_count": 61,
+      "source_artifact_digest": "sha256:5487e5129ea478d67459bdce9d7b4b49cb7abd689e6af8857513a99e63e60c3b"
+    },
+    "agent_rss_growth_ratio": {
+      "actual": 0.01,
+      "sample_count": 3050,
+      "source_artifact_digest": "sha256:5487e5129ea478d67459bdce9d7b4b49cb7abd689e6af8857513a99e63e60c3b"
+    },
+    "controller_fd_growth": {
+      "actual": 0,
+      "sample_count": 61,
+      "source_artifact_digest": "sha256:5487e5129ea478d67459bdce9d7b4b49cb7abd689e6af8857513a99e63e60c3b"
+    },
+    "transportd_fd_growth": {
+      "actual": 0,
+      "sample_count": 61,
+      "source_artifact_digest": "sha256:5487e5129ea478d67459bdce9d7b4b49cb7abd689e6af8857513a99e63e60c3b"
+    },
+    "agent_fd_growth": {
+      "actual": 0,
+      "sample_count": 3050,
+      "source_artifact_digest": "sha256:5487e5129ea478d67459bdce9d7b4b49cb7abd689e6af8857513a99e63e60c3b"
+    },
+    "controller_goroutine_growth": {
+      "actual": 0,
+      "sample_count": 61,
+      "source_artifact_digest": "sha256:5487e5129ea478d67459bdce9d7b4b49cb7abd689e6af8857513a99e63e60c3b"
+    },
+    "transportd_tokio_task_growth": {
+      "actual": 0,
+      "sample_count": 61,
+      "source_artifact_digest": "sha256:5487e5129ea478d67459bdce9d7b4b49cb7abd689e6af8857513a99e63e60c3b"
+    },
+    "agent_tokio_task_growth": {
+      "actual": 0,
+      "sample_count": 3050,
+      "source_artifact_digest": "sha256:5487e5129ea478d67459bdce9d7b4b49cb7abd689e6af8857513a99e63e60c3b"
+    },
+    "database_connection_growth": {
+      "actual": 0,
+      "sample_count": 61,
+      "source_artifact_digest": "sha256:5487e5129ea478d67459bdce9d7b4b49cb7abd689e6af8857513a99e63e60c3b"
+    },
+    "queue_depth_end": {
+      "actual": 0,
+      "sample_count": 1,
+      "source_artifact_digest": "sha256:5487e5129ea478d67459bdce9d7b4b49cb7abd689e6af8857513a99e63e60c3b"
+    },
+    "outbox_oldest_age_seconds_end": {
+      "actual": 0,
+      "sample_count": 1,
+      "source_artifact_digest": "sha256:5487e5129ea478d67459bdce9d7b4b49cb7abd689e6af8857513a99e63e60c3b"
+    }
+  },
+  "observations": {
+    "database_failover_during_load": {
+      "observed": true,
+      "timeline_event_ids": [
+        "load_started",
+        "primary_failure_injected",
+        "new_primary_writable",
+        "api_recovered",
+        "worker_recovered",
+        "load_stopped"
+      ],
+      "source_artifact_digest": "sha256:cf9fee66f43895dac1583495470e004ece309c91686d1522ba3c5703324ff883"
+    },
+    "dual_primary_prevention": {
+      "observed": true,
+      "timeline_event_ids": [
+        "old_primary_isolated",
+        "new_primary_promoted",
+        "old_primary_write_rejected"
+      ],
+      "source_artifact_digest": "sha256:cf9fee66f43895dac1583495470e004ece309c91686d1522ba3c5703324ff883"
+    },
+    "pitr_target_restore": {
+      "observed": true,
+      "timeline_event_ids": [
+        "marker_a_written",
+        "restore_point_created",
+        "marker_b_written",
+        "restore_verified"
+      ],
+      "source_artifact_digest": "sha256:cf9fee66f43895dac1583495470e004ece309c91686d1522ba3c5703324ff883"
+    },
+    "connection_owner_failover": {
+      "observed": true,
+      "timeline_event_ids": [
+        "owner_a_paused",
+        "owner_b_acquired",
+        "owner_a_resumed"
+      ],
+      "source_artifact_digest": "sha256:cf9fee66f43895dac1583495470e004ece309c91686d1522ba3c5703324ff883"
+    },
+    "stale_owner_rejection": {
+      "observed": true,
+      "timeline_event_ids": [
+        "stale_transport_rejected",
+        "stale_agent_rejected"
+      ],
+      "source_artifact_digest": "sha256:cf9fee66f43895dac1583495470e004ece309c91686d1522ba3c5703324ff883"
+    },
+    "scheduler_leader_failover": {
+      "observed": true,
+      "timeline_event_ids": [
+        "scheduler_a_paused",
+        "scheduler_b_acquired",
+        "scheduler_a_resumed"
+      ],
+      "source_artifact_digest": "sha256:cf9fee66f43895dac1583495470e004ece309c91686d1522ba3c5703324ff883"
+    },
+    "stale_scheduler_rejection": {
+      "observed": true,
+      "timeline_event_ids": ["stale_scheduler_commit_rejected"],
+      "source_artifact_digest": "sha256:cf9fee66f43895dac1583495470e004ece309c91686d1522ba3c5703324ff883"
+    },
+    "api_instance_failover": {
+      "observed": true,
+      "timeline_event_ids": [
+        "api_instance_failed",
+        "gateway_traffic_transferred",
+        "api_slo_measured"
+      ],
+      "source_artifact_digest": "sha256:cf9fee66f43895dac1583495470e004ece309c91686d1522ba3c5703324ff883"
+    },
+    "worker_instance_failover": {
+      "observed": true,
+      "timeline_event_ids": [
+        "worker_instance_failed",
+        "worker_replacement_active",
+        "dispatch_recovered"
+      ],
+      "source_artifact_digest": "sha256:cf9fee66f43895dac1583495470e004ece309c91686d1522ba3c5703324ff883"
+    },
+    "relay_failover": {
+      "observed": true,
+      "timeline_event_ids": ["relay_a_failed", "relay_b_active"],
+      "source_artifact_digest": "sha256:cf9fee66f43895dac1583495470e004ece309c91686d1522ba3c5703324ff883"
+    },
+    "direct_to_relay": {
+      "observed": true,
+      "timeline_event_ids": [
+        "direct_path_active",
+        "direct_path_failed",
+        "relay_path_active"
+      ],
+      "source_artifact_digest": "sha256:cf9fee66f43895dac1583495470e004ece309c91686d1522ba3c5703324ff883"
+    },
+    "relay_to_direct": {
+      "observed": true,
+      "timeline_event_ids": ["relay_path_active", "direct_path_recovered"],
+      "source_artifact_digest": "sha256:cf9fee66f43895dac1583495470e004ece309c91686d1522ba3c5703324ff883"
+    },
+    "reconnect_storm": {
+      "observed": true,
+      "timeline_event_ids": [
+        "bulk_disconnect_injected",
+        "reconnect_started",
+        "reconnect_completed"
+      ],
+      "source_artifact_digest": "sha256:cf9fee66f43895dac1583495470e004ece309c91686d1522ba3c5703324ff883"
+    },
+    "outbox_claim_before_send_recovery": {
+      "observed": true,
+      "timeline_event_ids": [
+        "outbox_claim_committed",
+        "worker_crashed_before_send",
+        "command_recovered"
+      ],
+      "source_artifact_digest": "sha256:cf9fee66f43895dac1583495470e004ece309c91686d1522ba3c5703324ff883"
+    },
+    "outbox_send_before_mark_sent_recovery": {
+      "observed": true,
+      "timeline_event_ids": [
+        "transport_send_accepted",
+        "worker_crashed_before_mark_sent",
+        "command_reconciled"
+      ],
+      "source_artifact_digest": "sha256:cf9fee66f43895dac1583495470e004ece309c91686d1522ba3c5703324ff883"
+    },
+    "outbox_result_before_commit_recovery": {
+      "observed": true,
+      "timeline_event_ids": [
+        "result_received",
+        "ingress_crashed_before_commit",
+        "result_reconciled"
+      ],
+      "source_artifact_digest": "sha256:cf9fee66f43895dac1583495470e004ece309c91686d1522ba3c5703324ff883"
+    }
+  },
+  "artifacts": [
+    {
+      "name": "resource-samples.csv",
+      "digest": "sha256:5487e5129ea478d67459bdce9d7b4b49cb7abd689e6af8857513a99e63e60c3b",
+      "media_type": "text/csv",
+      "kind": "resource_samples"
+    },
+    {
+      "name": "timeline.jsonl",
+      "digest": "sha256:cf9fee66f43895dac1583495470e004ece309c91686d1522ba3c5703324ff883",
+      "media_type": "application/x-ndjson",
+      "kind": "timeline"
+    }
+  ]
+}

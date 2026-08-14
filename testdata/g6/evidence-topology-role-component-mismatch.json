@@ -1,0 +1,16 @@
+{
+  "base": "evidence-pass.json",
+  "topology_mutations": [
+    {
+      "operation": "replace",
+      "path": "instances.0.component",
+      "value": "relay"
+    },
+    {
+      "operation": "replace",
+      "path": "instances.0.component_digest",
+      "value": "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+    }
+  ],
+  "expected_failure_reason": "topology role api does not use component control-plane"
+}

@@ -1,0 +1,16 @@
+{
+  "base": "evidence-pass.json",
+  "evidence_mutations": [
+    {
+      "operation": "replace",
+      "path": "artifacts.0.kind",
+      "value": "timeline"
+    },
+    {
+      "operation": "replace",
+      "path": "artifacts.1.kind",
+      "value": "resource_samples"
+    }
+  ],
+  "expected_error": "resource samples artifact timeline.jsonl has an invalid header"
+}

@@ -1,0 +1,236 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ocservia.dev/schemas/g6-evidence-v1.json",
+  "title": "ocservia G6 measured evidence",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "candidate_sha",
+    "release_manifest_digest",
+    "slo_contract_digest",
+    "topology_digest",
+    "started_at",
+    "finished_at",
+    "environment",
+    "measurements",
+    "observations",
+    "artifacts"
+  ],
+  "properties": {
+    "schema_version": { "const": "ocservia.g6-evidence.v1" },
+    "candidate_sha": { "$ref": "#/$defs/sha" },
+    "release_manifest_digest": { "$ref": "#/$defs/digest" },
+    "slo_contract_digest": { "$ref": "#/$defs/digest" },
+    "topology_digest": { "$ref": "#/$defs/digest" },
+    "started_at": { "$ref": "#/$defs/timestamp" },
+    "finished_at": { "$ref": "#/$defs/timestamp" },
+    "environment": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["environment_id", "failure_domain_class", "authority"],
+      "properties": {
+        "environment_id": { "$ref": "#/$defs/environment_id" },
+        "failure_domain_class": {
+          "enum": ["single_host", "multi_host", "multi_zone", "multi_region"]
+        },
+        "authority": { "enum": ["engineering", "production_readiness"] },
+        "limitations": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1, "maxLength": 512 },
+          "uniqueItems": true
+        }
+      }
+    },
+    "measurements": {
+      "type": "object",
+      "required": [
+        "stability_sample_span_seconds",
+        "stability_max_sample_gap_seconds",
+        "stability_valid_sample_count",
+        "authorized_real_agents",
+        "max_production_command_inflight",
+        "synthetic_command_completion_seconds_p99",
+        "stale_owner_accepts",
+        "concurrent_active_connection_owners",
+        "stale_scheduler_commits",
+        "concurrent_active_scheduler_leaders",
+        "dual_primary_write_accepts",
+        "duplicate_remote_effects",
+        "acknowledged_transaction_loss",
+        "unreconciled_outbox_rows",
+        "unreconciled_unknown_commands",
+        "quarantined_unmatched_command_results",
+        "database_rpo_seconds",
+        "database_rto_seconds",
+        "connection_owner_takeover_seconds",
+        "scheduler_takeover_seconds",
+        "relay_takeover_seconds",
+        "reconnect_storm_recovery_seconds",
+        "read_api_success_ratio",
+        "enqueue_success_ratio",
+        "enqueue_latency_seconds_p95",
+        "telemetry_fresh_ratio",
+        "telemetry_fresh_age_seconds",
+        "command_dispatch_ratio",
+        "command_dispatch_seconds",
+        "audit_completeness_ratio",
+        "terminal_or_reconciled_operation_ratio",
+        "controller_rss_growth_ratio",
+        "transportd_rss_growth_ratio",
+        "agent_rss_growth_ratio",
+        "controller_fd_growth",
+        "transportd_fd_growth",
+        "agent_fd_growth",
+        "controller_goroutine_growth",
+        "transportd_tokio_task_growth",
+        "agent_tokio_task_growth",
+        "database_connection_growth",
+        "queue_depth_end",
+        "outbox_oldest_age_seconds_end"
+      ],
+      "propertyNames": { "$ref": "#/$defs/metric_name" },
+      "additionalProperties": { "$ref": "#/$defs/measurement" }
+    },
+    "observations": {
+      "type": "object",
+      "required": [
+        "database_failover_during_load",
+        "dual_primary_prevention",
+        "pitr_target_restore",
+        "connection_owner_failover",
+        "stale_owner_rejection",
+        "scheduler_leader_failover",
+        "stale_scheduler_rejection",
+        "api_instance_failover",
+        "worker_instance_failover",
+        "relay_failover",
+        "direct_to_relay",
+        "relay_to_direct",
+        "reconnect_storm",
+        "outbox_claim_before_send_recovery",
+        "outbox_send_before_mark_sent_recovery",
+        "outbox_result_before_commit_recovery"
+      ],
+      "propertyNames": { "$ref": "#/$defs/observation_name" },
+      "additionalProperties": { "$ref": "#/$defs/observation" }
+    },
+    "artifacts": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/artifact" }
+    }
+  },
+  "$defs": {
+    "sha": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+    "digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+    "timestamp": { "type": "string", "format": "date-time" },
+    "environment_id": { "type": "string", "pattern": "^g6-[a-z0-9]{8,32}$" },
+    "metric_name": {
+      "enum": [
+        "stability_sample_span_seconds",
+        "stability_max_sample_gap_seconds",
+        "stability_valid_sample_count",
+        "authorized_real_agents",
+        "max_production_command_inflight",
+        "synthetic_command_completion_seconds_p99",
+        "stale_owner_accepts",
+        "concurrent_active_connection_owners",
+        "stale_scheduler_commits",
+        "concurrent_active_scheduler_leaders",
+        "dual_primary_write_accepts",
+        "duplicate_remote_effects",
+        "acknowledged_transaction_loss",
+        "unreconciled_outbox_rows",
+        "unreconciled_unknown_commands",
+        "quarantined_unmatched_command_results",
+        "database_rpo_seconds",
+        "database_rto_seconds",
+        "connection_owner_takeover_seconds",
+        "scheduler_takeover_seconds",
+        "relay_takeover_seconds",
+        "reconnect_storm_recovery_seconds",
+        "read_api_success_ratio",
+        "enqueue_success_ratio",
+        "enqueue_latency_seconds_p95",
+        "telemetry_fresh_ratio",
+        "telemetry_fresh_age_seconds",
+        "command_dispatch_ratio",
+        "command_dispatch_seconds",
+        "audit_completeness_ratio",
+        "terminal_or_reconciled_operation_ratio",
+        "controller_rss_growth_ratio",
+        "transportd_rss_growth_ratio",
+        "agent_rss_growth_ratio",
+        "controller_fd_growth",
+        "transportd_fd_growth",
+        "agent_fd_growth",
+        "controller_goroutine_growth",
+        "transportd_tokio_task_growth",
+        "agent_tokio_task_growth",
+        "database_connection_growth",
+        "queue_depth_end",
+        "outbox_oldest_age_seconds_end"
+      ]
+    },
+    "observation_name": {
+      "enum": [
+        "database_failover_during_load",
+        "dual_primary_prevention",
+        "pitr_target_restore",
+        "connection_owner_failover",
+        "stale_owner_rejection",
+        "scheduler_leader_failover",
+        "stale_scheduler_rejection",
+        "api_instance_failover",
+        "worker_instance_failover",
+        "relay_failover",
+        "direct_to_relay",
+        "relay_to_direct",
+        "reconnect_storm",
+        "outbox_claim_before_send_recovery",
+        "outbox_send_before_mark_sent_recovery",
+        "outbox_result_before_commit_recovery"
+      ]
+    },
+    "measurement": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["actual", "sample_count", "source_artifact_digest"],
+      "properties": {
+        "actual": { "type": "number" },
+        "sample_count": { "type": "integer", "minimum": 1 },
+        "source_artifact_digest": { "$ref": "#/$defs/digest" }
+      }
+    },
+    "observation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["observed", "timeline_event_ids", "source_artifact_digest"],
+      "properties": {
+        "observed": { "type": "boolean" },
+        "timeline_event_ids": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "type": "string", "pattern": "^[a-z][a-z0-9_]{0,127}$" },
+          "uniqueItems": true
+        },
+        "source_artifact_digest": { "$ref": "#/$defs/digest" },
+        "notes": { "type": "string", "maxLength": 1024 }
+      }
+    },
+    "artifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "digest", "media_type", "kind"],
+      "properties": {
+        "name": { "type": "string", "pattern": "^[a-z0-9][a-z0-9._-]{0,127}$" },
+        "digest": { "$ref": "#/$defs/digest" },
+        "media_type": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "kind": {
+          "enum": ["resource_samples", "timeline", "harness_log"]
+        }
+      }
+    }
+  }
+}

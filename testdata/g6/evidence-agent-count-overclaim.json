@@ -1,0 +1,11 @@
+{
+  "base": "evidence-pass.json",
+  "mutations": [
+    {
+      "operation": "replace",
+      "path": "measurements.authorized_real_agents.actual",
+      "value": 501
+    }
+  ],
+  "expected_error": "evidence claims more authorized real agents than topology agent instances"
+}

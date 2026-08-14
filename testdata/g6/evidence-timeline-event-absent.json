@@ -1,0 +1,11 @@
+{
+  "base": "evidence-pass.json",
+  "evidence_mutations": [
+    {
+      "operation": "replace",
+      "path": "observations.database_failover_during_load.timeline_event_ids",
+      "value": ["load_started", "primary_failure_injected", "not_in_timeline"]
+    }
+  ],
+  "expected_error": "evidence observation database_failover_during_load declares a timeline event absent from the artifact: not_in_timeline"
+}
