@@ -72,13 +72,48 @@ reject("workflow execution jobs must not use the all profile") if all_bootstrap_
 reject("unexpected workflow bootstrap caller") unless all_bootstrap_calls.map(&:first).sort == execution_profiles.keys.sort
 
 cache_steps = {}
+cache_restore_steps = {}
+cache_save_steps = {}
 jobs.each do |job_id, job|
   cache_steps[job_id] = Array(job.fetch("steps")).select do |step|
     step["uses"].to_s.start_with?("actions/cache")
   end
+  cache_restore_steps[job_id] = cache_steps[job_id].select do |step|
+    step.fetch("uses").start_with?("actions/cache/restore@")
+  end
+  cache_save_steps[job_id] = cache_steps[job_id].select do |step|
+    step.fetch("uses").start_with?("actions/cache/save@")
+  end
   cache_steps[job_id].each do |step|
-    reject("#{job_id} cache action must be pinned to a full commit SHA") unless step.fetch("uses").match?(/\Aactions\/cache(?:\/restore)?@[0-9a-f]{40}\z/)
-    reject("#{job_id} cache must not use restore-keys") if step.fetch("with", {}).key?("restore-keys")
+    reject("#{job_id} cache action must be pinned to a full commit SHA") unless step.fetch("uses").match?(/\Aactions\/cache\/(?:restore|save)@[0-9a-f]{40}\z/)
+  end
+  cache_restore_steps[job_id].each do |step|
+    key = step.fetch("with").fetch("key")
+    if key.start_with?("tooling-v3-")
+      reject("#{job_id} tooling cache must be exact-key-only") if step.fetch("with").key?("restore-keys")
+      next
+    end
+    restore_keys = step.fetch("with").fetch("restore-keys").lines.map(&:strip).reject(&:empty?)
+    expected_prefix = key.sub(/\$\{\{ hashFiles\(.+\) \}\}\z/, "")
+    reject("#{job_id} cache fallback must first remove only the content hash") unless restore_keys.first == expected_prefix
+    if key.start_with?("rust-v4-quality-")
+      expected_legacy = expected_prefix.sub("rust-v4-quality-", "rust-v3-quality-")
+      reject("#{job_id} Rust cache must fall back to the previous main cache generation") unless restore_keys == [expected_prefix, expected_legacy]
+    else
+      reject("#{job_id} cache restore must have exactly one fallback prefix") unless restore_keys == [expected_prefix]
+    end
+    reject("#{job_id} cache restore must have an id") if step["id"].to_s.empty?
+  end
+  cache_save_steps[job_id].each do |step|
+    condition = step.fetch("if")
+    reject("#{job_id} cache save must be limited to successful main pushes") unless
+      condition.include?("success()") &&
+      condition.include?("github.event_name == 'push'") &&
+      condition.include?("github.ref == 'refs/heads/main'") &&
+      condition.include?("outputs.cache-hit != 'true'")
+    reject("#{job_id} cache save must reuse the restore primary key") unless
+      step.fetch("with").fetch("key").match?(/\A\$\{\{ steps\.[a-z0-9-]+\.outputs\.cache-primary-key \}\}\z/)
+    reject("#{job_id} cache save must not define restore-keys") if step.fetch("with").key?("restore-keys")
   end
 end
 
@@ -88,7 +123,7 @@ end
 
 tooling_inputs = ["toolchains.lock", "scripts/checksums.txt", "scripts/bootstrap.sh", "scripts/env.sh"]
 execution_profiles.each do |job_id, profile|
-  tooling = cache_steps.fetch(job_id).select { |step| step.fetch("with").fetch("key").start_with?("tooling-v3-") }
+  tooling = cache_restore_steps.fetch(job_id).select { |step| step.fetch("with").fetch("key").start_with?("tooling-v3-") }
   reject("#{job_id} must have one v3 tooling cache") unless tooling.length == 1
   key = tooling.first.fetch("with").fetch("key")
   prefix = "tooling-v3-#{profile}-${{ runner.os }}-${{ runner.arch }}-"
@@ -99,7 +134,7 @@ end
 
 npm_jobs = ["web-smoke", "quality-security-native"]
 execution_profiles.each_key do |job_id|
-  npm = cache_steps.fetch(job_id).select { |step| step.fetch("with").fetch("key").start_with?("npm-v3-") }
+  npm = cache_restore_steps.fetch(job_id).select { |step| step.fetch("with").fetch("key").start_with?("npm-v3-") }
   if npm_jobs.include?(job_id)
     reject("#{job_id} must have one npm download cache") unless npm.length == 1
     key = npm.first.fetch("with").fetch("key")
@@ -111,7 +146,7 @@ execution_profiles.each_key do |job_id|
   end
 end
 
-backend_cache = cache_steps.fetch("backend-integration").find { |step| step.fetch("with").fetch("key").start_with?("go-v3-backend-") }
+backend_cache = cache_restore_steps.fetch("backend-integration").find { |step| step.fetch("with").fetch("key").start_with?("go-v3-backend-") }
 reject("Backend Integration must have one Go build/module cache") unless backend_cache
 backend_key = backend_cache.fetch("with").fetch("key")
 ["toolchains.lock", "go.work", "go.work.sum", "control-plane/go.mod", "control-plane/go.sum"].each do |input|
@@ -119,13 +154,13 @@ backend_key = backend_cache.fetch("with").fetch("key")
 end
 expected_backend_paths = [".cache/go-build", ".cache/go-mod", ".cache/gopath"]
 reject("Backend Integration cache paths changed unexpectedly") unless paths(backend_cache).sort == expected_backend_paths.sort
-backend_rust = cache_steps.fetch("backend-integration").find { |step| step.fetch("uses").start_with?("actions/cache/restore@") }
+backend_rust = cache_restore_steps.fetch("backend-integration").find { |step| step.fetch("with").fetch("key").start_with?("rust-v4-quality-") }
 reject("Backend Integration must restore the Quality Rust cache without saving it") unless backend_rust
 reject("Backend Integration Rust restore path must be rust/target") unless paths(backend_rust) == ["rust/target"]
-reject("Backend Integration must use the Quality Rust cache key") unless backend_rust.fetch("with").fetch("key").start_with?("rust-v3-quality-")
+reject("Backend Integration must use the Quality Rust cache key") unless backend_rust.fetch("with").fetch("key").start_with?("rust-v4-quality-")
 
-quality_caches = cache_steps.fetch("quality-security-native")
-rust_cache = quality_caches.find { |step| step.fetch("with").fetch("key").start_with?("rust-v3-quality-") }
+quality_caches = cache_restore_steps.fetch("quality-security-native")
+rust_cache = quality_caches.find { |step| step.fetch("with").fetch("key").start_with?("rust-v4-quality-") }
 reject("Quality must own one Rust target cache") unless rust_cache && paths(rust_cache) == ["rust/target"]
 rust_key = rust_cache.fetch("with").fetch("key")
 ["toolchains.lock", "rust/Cargo.lock", "rust/Cargo.toml", "rust/rust-toolchain.toml", "rust/crates/**/Cargo.toml"].each do |input|
@@ -155,6 +190,28 @@ execution_profiles.each_key do |job_id|
     end
   end
 end
+
+expected_save_counts = {
+  "backend-integration" => 2,
+  "web-smoke" => 2,
+  "quality-security-native" => 4
+}
+expected_save_counts.each do |job_id, count|
+  reject("#{job_id} must save each owned cache on main") unless cache_save_steps.fetch(job_id).length == count
+end
+reject("Backend Integration must not save the Quality-owned Rust target") if
+  cache_save_steps.fetch("backend-integration").any? { |step| paths(step).include?("rust/target") }
+quality_rust_save = cache_save_steps.fetch("quality-security-native").find { |step| paths(step) == ["rust/target"] }
+reject("Quality must save its Rust target cache") unless quality_rust_save
+
+jobs.fetch("backend-integration").fetch("env").tap do |env|
+  reject("Backend Integration must disable Cargo incremental compilation") unless env.fetch("CARGO_INCREMENTAL") == "0"
+end
+quality = jobs.fetch("quality-security-native")
+reject("Quality must disable Cargo incremental compilation") unless quality.fetch("env").fetch("CARGO_INCREMENTAL") == "0"
+incremental_cleanup = Array(quality.fetch("steps")).find { |step| step["name"] == "Remove Rust incremental artifacts before caching" }
+reject("Quality must remove restored Rust incremental artifacts before a new main cache save") unless
+  incremental_cleanup && incremental_cleanup.fetch("run").include?("-name incremental")
 
 execution_profiles.each_key do |job_id|
   uploads = Array(jobs.fetch(job_id).fetch("steps")).select { |step| step["uses"].to_s.start_with?("actions/upload-artifact@") }
