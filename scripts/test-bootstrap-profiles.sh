@@ -89,6 +89,10 @@ jobs.each do |job_id, job|
   end
   cache_restore_steps[job_id].each do |step|
     key = step.fetch("with").fetch("key")
+    if key.start_with?("tooling-v3-")
+      reject("#{job_id} tooling cache must be exact-key-only") if step.fetch("with").key?("restore-keys")
+      next
+    end
     restore_keys = step.fetch("with").fetch("restore-keys").lines.map(&:strip).reject(&:empty?)
     expected_prefix = key.sub(/\$\{\{ hashFiles\(.+\) \}\}\z/, "")
     reject("#{job_id} cache fallback must first remove only the content hash") unless restore_keys.first == expected_prefix

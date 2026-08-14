@@ -35,8 +35,6 @@ jobs:
             .cache/downloads
             .tools
           key: tooling-v3-go-integration-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'scripts/checksums.txt', 'scripts/bootstrap.sh', 'scripts/env.sh') }}
-          restore-keys: |
-            tooling-v3-go-integration-${{ runner.os }}-${{ runner.arch }}-
       - name: Restore Go build and module caches
         id: backend-go-cache
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
@@ -170,8 +168,6 @@ jobs:
             .cache/downloads
             .tools
           key: tooling-v3-web-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'scripts/checksums.txt', 'scripts/bootstrap.sh', 'scripts/env.sh') }}
-          restore-keys: |
-            tooling-v3-web-${{ runner.os }}-${{ runner.arch }}-
       - name: Restore npm download cache
         id: web-npm-cache
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
@@ -250,8 +246,6 @@ jobs:
             .cache/downloads
             .tools
           key: tooling-v3-ci-quality-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'scripts/checksums.txt', 'scripts/bootstrap.sh', 'scripts/env.sh') }}
-          restore-keys: |
-            tooling-v3-ci-quality-${{ runner.os }}-${{ runner.arch }}-
       - name: Restore npm download cache
         id: quality-npm-cache
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
