@@ -218,3 +218,5 @@ reject("P1 Full must use ubuntu-24.04") unless p1_job.fetch("runs-on") == "ubunt
 reject("P1 Full profile changed") unless p1_job.fetch("env").fetch("P1_PROFILE") == "full"
 reject("P1 Full timeout changed") unless p1_job.fetch("timeout-minutes") == 45
 RUBY
+
+"${ROOT}/scripts/test-real-e2e-workflow.sh"

@@ -2,7 +2,7 @@ SHELL := /usr/bin/env bash
 
 .DEFAULT_GOAL := verify
 
-.PHONY: bootstrap generate format lint test verify docs-check generated-clean generated-clean-test policy-check contracts-breaking go-check rust-check web-check security-check license-check database-integration integration e2e p1-smoke p1-full
+.PHONY: bootstrap generate format lint test verify docs-check generated-clean generated-clean-test policy-check contracts-breaking go-check rust-check web-check security-check license-check database-integration integration e2e p1-smoke p1-full real-e2e-check
 
 bootstrap:
 	./scripts/bootstrap.sh all
@@ -36,6 +36,9 @@ p1-smoke:
 
 p1-full:
 	P1_PROFILE=full ./scripts/p1-resilience-capacity.sh
+
+real-e2e-check:
+	./scripts/test-real-e2e-workflow.sh
 
 rust-check:
 	./scripts/rust-check.sh

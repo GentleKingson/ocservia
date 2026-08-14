@@ -1,5 +1,5 @@
 # Versions used by local generation, CI, and compatibility tests.
-go=1.26.5
+go=1.26.6
 rust=1.97.1
 node=24.18.1
 npm=11.19.0
