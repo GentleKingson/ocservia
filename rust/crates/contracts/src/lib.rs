@@ -9,6 +9,7 @@
 #[allow(clippy::all, clippy::pedantic)]
 pub mod generated;
 
+pub mod session;
 pub mod strict_wire;
 
 pub use strict_wire::{

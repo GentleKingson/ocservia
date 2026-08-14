@@ -2435,6 +2435,7 @@ name = "ocservia-agent"
 version = "0.1.0"
 dependencies = [
  "ed25519-dalek",
+ "futures-util",
  "hex",
  "iroh",
  "ocservia-agent-identity",
@@ -2443,6 +2444,7 @@ dependencies = [
  "ocservia-command-journal",
  "ocservia-contracts",
  "ocservia-observability",
+ "ocservia-transportd",
  "prost",
  "prost-types",
  "rand 0.9.5",
@@ -2451,6 +2453,7 @@ dependencies = [
  "serde_json",
  "sha2 0.10.9",
  "tokio",
+ "tonic",
  "tracing",
  "uuid",
  "zeroize",

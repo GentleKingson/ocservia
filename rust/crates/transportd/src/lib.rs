@@ -32,6 +32,9 @@ use ocservia_contracts::generated::ocserv::platform::transport::v1::{
     ValidateEnrollmentRequest, WatchEventsRequest, transport_service_server::TransportService,
     trust_service_client::TrustServiceClient,
 };
+use ocservia_contracts::session::{
+    READ_ONLY_SESSION_CAPABILITIES, is_read_only_session_capability,
+};
 use prost::Message;
 use tokio::sync::{Mutex, OwnedSemaphorePermit, Semaphore, mpsc, watch};
 use tokio_stream::{Stream, wrappers::ReceiverStream};
@@ -834,13 +837,21 @@ struct RegisteredConnection {
     connection: Connection,
     max_message_size: usize,
     negotiated_capabilities: HashSet<String>,
+    session_mode: TransportSessionMode,
     authorization_revision: u64,
     session_expires_at: Option<SystemTime>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum TransportSessionMode {
+    ReadOnly,
+    AuthorizedV11,
 }
 
 struct NegotiatedSession {
     handshake: SessionHandshake,
     negotiated_capabilities: HashSet<String>,
+    session_mode: TransportSessionMode,
     authorization_revision: u64,
     session_expires_at: Option<SystemTime>,
 }
@@ -1017,6 +1028,7 @@ impl TransportService for IrohTransportService {
             connection,
             max_message_size,
             negotiated_capabilities,
+            session_mode,
             authorization_revision,
             session_expires_at,
         ) = self
@@ -1031,11 +1043,17 @@ impl TransportService for IrohTransportService {
                     entry.connection.clone(),
                     entry.max_message_size,
                     entry.negotiated_capabilities.clone(),
+                    entry.session_mode,
                     entry.authorization_revision,
                     entry.session_expires_at,
                 )
             })
             .ok_or_else(|| Status::unavailable("node is not connected"))?;
+        if session_mode == TransportSessionMode::ReadOnly {
+            return Err(Status::permission_denied(
+                "read-only session does not permit command dispatch",
+            ));
+        }
         if !negotiated_capabilities.contains(&command.required_capability) {
             return Err(Status::permission_denied(
                 "command capability was not negotiated for this session",
@@ -1110,15 +1128,20 @@ impl TransportService for IrohTransportService {
         {
             return Err(Status::invalid_argument("artifact request is invalid"));
         }
-        let connection = self
+        let (connection, session_mode) = self
             .shared
             .inner
             .connections
             .lock()
             .await
             .get(&node_id)
-            .map(|entry| entry.connection.clone())
+            .map(|entry| (entry.connection.clone(), entry.session_mode))
             .ok_or_else(|| Status::unavailable("node is not connected"))?;
+        if session_mode == TransportSessionMode::ReadOnly {
+            return Err(Status::permission_denied(
+                "read-only session does not permit artifact fetch",
+            ));
+        }
         let payload = ArtifactFetchRequest {
             artifact_id,
             purpose: request.purpose,
@@ -1215,15 +1238,20 @@ impl TransportService for IrohTransportService {
         let expected_artifact_id = grant.artifact_id.clone();
         let expected_grant_id = grant.grant_id.clone();
         let confirm_only = request.confirm_only;
-        let connection = self
+        let (connection, session_mode) = self
             .shared
             .inner
             .connections
             .lock()
             .await
             .get(&node_id)
-            .map(|entry| entry.connection.clone())
+            .map(|entry| (entry.connection.clone(), entry.session_mode))
             .ok_or_else(|| Status::unavailable("node is not connected"))?;
+        if session_mode == TransportSessionMode::ReadOnly {
+            return Err(Status::permission_denied(
+                "read-only session does not permit artifact consumption",
+            ));
+        }
         let payload = AgentArtifactConsumeRequest {
             grant: request.grant,
             sha256: request.sha256,
@@ -1480,13 +1508,7 @@ impl SessionHandler {
                     .policy
                     .matches_node(connection.remote_id(), &handshake.node_id) =>
             {
-                let mut response =
-                    local_handshake_response(HandshakeResult::Accepted, handshake.max_message_size);
-                response
-                    .negotiated_capabilities
-                    .clone_from(&handshake.capabilities);
-                response.negotiated_capabilities.sort();
-                response
+                static_read_only_handshake_response(&handshake)
             }
             ProtocolKind::Agent => {
                 return Err(protocol_error("endpoint is not bound to the claimed node"));
@@ -1517,6 +1539,11 @@ impl SessionHandler {
             &response,
             self.trust.is_some(),
         )?;
+        let session_mode = if response.protocol_minor == 0 {
+            TransportSessionMode::ReadOnly
+        } else {
+            TransportSessionMode::AuthorizedV11
+        };
         let (authorization_revision, session_expires_at) = response
             .session_grant
             .as_ref()
@@ -1536,6 +1563,7 @@ impl SessionHandler {
         Ok(Some(NegotiatedSession {
             handshake,
             negotiated_capabilities,
+            session_mode,
             authorization_revision,
             session_expires_at,
         }))
@@ -1602,6 +1630,7 @@ impl ProtocolHandler for SessionHandler {
                 connection: connection.clone(),
                 max_message_size,
                 negotiated_capabilities: session.negotiated_capabilities,
+                session_mode: session.session_mode,
                 authorization_revision: session.authorization_revision,
                 session_expires_at: session.session_expires_at,
             },
@@ -2048,6 +2077,28 @@ fn local_handshake_response(
     }
 }
 
+fn static_read_only_handshake_response(handshake: &SessionHandshake) -> SessionHandshakeResponse {
+    let advertised = handshake
+        .capabilities
+        .iter()
+        .map(String::as_str)
+        .collect::<HashSet<_>>();
+    let negotiated_capabilities = READ_ONLY_SESSION_CAPABILITIES
+        .iter()
+        .filter(|capability| advertised.contains(**capability))
+        .map(|capability| (*capability).to_owned())
+        .collect();
+    SessionHandshakeResponse {
+        result: HandshakeResult::Accepted.into(),
+        protocol_major: PROTOCOL_MAJOR,
+        protocol_minor: 0,
+        max_message_size: handshake.max_message_size,
+        controller_version: env!("CARGO_PKG_VERSION").to_owned(),
+        negotiated_capabilities,
+        session_grant: None,
+    }
+}
+
 fn validate_negotiated_session(
     handshake: &SessionHandshake,
     endpoint: EndpointId,
@@ -2072,14 +2123,11 @@ fn validate_negotiated_session(
         }
         previous = Some(capability);
     }
-    if !controller_authoritative {
-        return Ok(response.negotiated_capabilities.iter().cloned().collect());
-    }
     if response.protocol_minor == 0 {
         if response
             .negotiated_capabilities
             .iter()
-            .any(|capability| !capability.as_bytes().ends_with(b".read"))
+            .any(|capability| !is_read_only_session_capability(capability))
         {
             return Err(protocol_error(
                 "legacy sessions may negotiate read-only capabilities only",
@@ -2089,6 +2137,11 @@ fn validate_negotiated_session(
             return Err(protocol_error("legacy session grant is invalid"));
         }
         return Ok(response.negotiated_capabilities.iter().cloned().collect());
+    }
+    if !controller_authoritative {
+        return Err(protocol_error(
+            "mutation-capable sessions require Controller authority",
+        ));
     }
     let grant = response
         .session_grant
@@ -3184,6 +3237,36 @@ mod tests {
     }
 
     #[test]
+    fn static_handshake_is_protocol_v1_0_with_explicit_read_only_capabilities() {
+        let key = SecretKey::generate();
+        let mut request = handshake(&key);
+        request.capabilities = vec![
+            "synthetic.noop".to_owned(),
+            "future.feature.read".to_owned(),
+            "ocserv.status.read".to_owned(),
+            "ocserv.sessions.read".to_owned(),
+        ];
+        let response = static_read_only_handshake_response(&request);
+        assert_eq!(response.protocol_major, 1);
+        assert_eq!(response.protocol_minor, 0);
+        assert!(response.session_grant.is_none());
+        assert_eq!(
+            response.negotiated_capabilities,
+            vec!["ocserv.sessions.read", "ocserv.status.read"]
+        );
+        assert!(validate_negotiated_session(&request, key.public(), &response, false).is_ok());
+
+        let mut grantless_v1_1 = response.clone();
+        grantless_v1_1.protocol_minor = 1;
+        assert!(
+            validate_negotiated_session(&request, key.public(), &grantless_v1_1, false).is_err()
+        );
+        let mut unknown_read = response;
+        unknown_read.negotiated_capabilities = vec!["future.feature.read".to_owned()];
+        assert!(validate_negotiated_session(&request, key.public(), &unknown_read, false).is_err());
+    }
+
+    #[test]
     fn queues_are_bounded() {
         let service = IrohTransportService::new(usize::MAX);
         assert_eq!(service.shared.inner.event_capacity, MAX_CONNECTIONS);
@@ -3575,6 +3658,15 @@ mod tests {
             .expect("query negotiated session")
             .into_inner();
         assert_eq!(metadata.negotiated_capabilities, handshake.capabilities);
+        service
+            .shared
+            .inner
+            .connections
+            .lock()
+            .await
+            .get_mut(&handshake.node_id)
+            .expect("registered session")
+            .session_mode = TransportSessionMode::AuthorizedV11;
 
         let mut unapproved = CommandEnvelope::decode(
             command_envelope(&handshake.node_id, &new_traceparent(), String::new()).as_slice(),
