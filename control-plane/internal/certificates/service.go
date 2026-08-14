@@ -23,6 +23,7 @@ import (
 	"github.com/GentleKingson/ocservia/control-plane/internal/approvals"
 	"github.com/GentleKingson/ocservia/control-plane/internal/audit"
 	"github.com/GentleKingson/ocservia/control-plane/internal/commandauth"
+	"github.com/GentleKingson/ocservia/control-plane/internal/coordination"
 	operationstore "github.com/GentleKingson/ocservia/control-plane/internal/operations"
 	"github.com/GentleKingson/ocservia/control-plane/internal/privdattestation"
 	"github.com/google/uuid"
@@ -778,7 +779,7 @@ func (s *Service) finalizeArtifactConsumption(ctx context.Context, id, grantID u
 	if err := audit.AppendChain(ctx, tx, audit.ChainRecord{WorkspaceID: workspaceID, ActorType: "user", ActorID: actorID.String(), SessionID: &sessionID, Action: "certificate.p12.download", ResourceType: "artifact", ResourceID: id, NodeID: &nodeID, RequestID: requestID, Result: "succeeded", AfterSummary: json.RawMessage(fmt.Sprintf(`{"certificate_id":%q,"sha256":%q,"size":%d}`, certificateID, hex.EncodeToString(digest), size)), At: now}); err != nil {
 		return 0, err
 	}
-	if err := tx.Commit(ctx); err != nil {
+	if err := coordination.CommitFenced(ctx, tx, coordination.FenceFromContext(ctx)); err != nil {
 		return 0, err
 	}
 	return artifactConsumptionFinalized, nil
@@ -844,10 +845,10 @@ func (s *Service) reconcileConsumingArtifacts(ctx context.Context) error {
 				return err
 			}
 		} else if !value.expiresAt.After(s.now()) {
-			if _, err := s.pool.Exec(ctx, `UPDATE artifact_operations SET state='expired',lease_until=NULL,active_grant_id=NULL,active_grant_subject=NULL,active_grant_expires_at=NULL,consume_grant=NULL,consume_sha256=NULL,consume_size=NULL,consume_actor_id=NULL,consume_session_id=NULL,consume_request_id=NULL,updated_at=now() WHERE id=$1 AND active_grant_id=$2 AND state='consuming'`, value.id, value.grantID); err != nil {
+			if err := coordination.FencedExec(ctx, s.pool, coordination.FenceFromContext(ctx), `UPDATE artifact_operations SET state='expired',lease_until=NULL,active_grant_id=NULL,active_grant_subject=NULL,active_grant_expires_at=NULL,consume_grant=NULL,consume_sha256=NULL,consume_size=NULL,consume_actor_id=NULL,consume_session_id=NULL,consume_request_id=NULL,updated_at=now() WHERE id=$1 AND active_grant_id=$2 AND state='consuming'`, value.id, value.grantID); err != nil {
 				return err
 			}
-		} else if _, err := s.pool.Exec(ctx, `UPDATE artifact_operations SET state='ready',lease_until=NULL,active_grant_id=NULL,active_grant_subject=NULL,active_grant_expires_at=NULL,consume_grant=NULL,consume_sha256=NULL,consume_size=NULL,consume_actor_id=NULL,consume_session_id=NULL,consume_request_id=NULL,updated_at=now() WHERE id=$1 AND active_grant_id=$2 AND state='consuming'`, value.id, value.grantID); err != nil {
+		} else if err := coordination.FencedExec(ctx, s.pool, coordination.FenceFromContext(ctx), `UPDATE artifact_operations SET state='ready',lease_until=NULL,active_grant_id=NULL,active_grant_subject=NULL,active_grant_expires_at=NULL,consume_grant=NULL,consume_sha256=NULL,consume_size=NULL,consume_actor_id=NULL,consume_session_id=NULL,consume_request_id=NULL,updated_at=now() WHERE id=$1 AND active_grant_id=$2 AND state='consuming'`, value.id, value.grantID); err != nil {
 			return err
 		}
 	}
@@ -931,7 +932,7 @@ func (s *Service) Maintain(ctx context.Context) error {
 	if _, err := tx.Exec(ctx, `UPDATE artifact_operations SET state='expired',lease_until=NULL,updated_at=now() WHERE state IN ('pending','ready','leased') AND expires_at<=now()`); err != nil {
 		return err
 	}
-	return tx.Commit(ctx)
+	return coordination.CommitFenced(ctx, tx, coordination.FenceFromContext(ctx))
 }
 
 func (s *Service) Get(ctx context.Context, id uuid.UUID) (Certificate, error) {

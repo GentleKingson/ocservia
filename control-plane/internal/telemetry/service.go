@@ -18,6 +18,7 @@ import (
 	"unicode/utf8"
 
 	agentv1 "github.com/GentleKingson/ocservia/control-plane/gen/proto/ocserv/platform/agent/v1"
+	"github.com/GentleKingson/ocservia/control-plane/internal/coordination"
 	"github.com/GentleKingson/ocservia/control-plane/internal/postgresinput"
 	"github.com/GentleKingson/ocservia/control-plane/internal/userusage"
 	"github.com/google/uuid"
@@ -776,26 +777,26 @@ func (s *Service) Maintain(ctx context.Context) error {
 			return err
 		}
 	}
-	if err := tx.Commit(ctx); err != nil {
-		return err
-	}
 	for _, table := range []struct{ name, interval string }{{"telemetry_rollups_5m", "5 minutes"}, {"telemetry_rollups_1h", "1 hour"}} {
-		_, err := s.pool.Exec(ctx, fmt.Sprintf(`INSERT INTO %s (node_id,metric,bucket_at,sample_count,min_value,max_value,avg_value) SELECT node_id,metric,date_bin($1::interval,sampled_at,'2000-01-01'::timestamptz),count(*),min(value),max(value),avg(value) FROM telemetry_samples WHERE sampled_at >= $2 GROUP BY 1,2,3 ON CONFLICT (node_id,metric,bucket_at) DO UPDATE SET sample_count=EXCLUDED.sample_count,min_value=EXCLUDED.min_value,max_value=EXCLUDED.max_value,avg_value=EXCLUDED.avg_value`, table.name), table.interval, now.Add(-48*time.Hour))
+		_, err := tx.Exec(ctx, fmt.Sprintf(`INSERT INTO %s (node_id,metric,bucket_at,sample_count,min_value,max_value,avg_value) SELECT node_id,metric,date_bin($1::interval,sampled_at,'2000-01-01'::timestamptz),count(*),min(value),max(value),avg(value) FROM telemetry_samples WHERE sampled_at >= $2 GROUP BY 1,2,3 ON CONFLICT (node_id,metric,bucket_at) DO UPDATE SET sample_count=EXCLUDED.sample_count,min_value=EXCLUDED.min_value,max_value=EXCLUDED.max_value,avg_value=EXCLUDED.avg_value`, table.name), table.interval, now.Add(-48*time.Hour))
 		if err != nil {
 			return err
 		}
 	}
-	if _, err = s.pool.Exec(ctx, `DELETE FROM telemetry_rollups_5m WHERE bucket_at < ($1::timestamptz - interval '90 days')`, now); err != nil {
+	if _, err = tx.Exec(ctx, `DELETE FROM telemetry_rollups_5m WHERE bucket_at < ($1::timestamptz - interval '90 days')`, now); err != nil {
 		return err
 	}
-	if _, err = s.pool.Exec(ctx, `DELETE FROM telemetry_rollups_1h WHERE bucket_at < ($1::timestamptz - interval '13 months')`, now); err != nil {
+	if _, err = tx.Exec(ctx, `DELETE FROM telemetry_rollups_1h WHERE bucket_at < ($1::timestamptz - interval '13 months')`, now); err != nil {
 		return err
 	}
-	return s.dropExpiredRawPartitions(ctx, now.Add(-14*24*time.Hour))
+	if err := s.dropExpiredRawPartitionsTx(ctx, tx, now.Add(-14*24*time.Hour)); err != nil {
+		return err
+	}
+	return coordination.CommitFenced(ctx, tx, coordination.FenceFromContext(ctx))
 }
 
-func (s *Service) dropExpiredRawPartitions(ctx context.Context, cutoff time.Time) error {
-	_, err := s.pool.Exec(ctx, `SELECT telemetry_drop_expired_partitions($1)`, cutoff)
+func (s *Service) dropExpiredRawPartitionsTx(ctx context.Context, tx pgx.Tx, cutoff time.Time) error {
+	_, err := tx.Exec(ctx, `SELECT telemetry_drop_expired_partitions($1)`, cutoff)
 	return err
 }
 

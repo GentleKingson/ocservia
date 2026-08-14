@@ -16,6 +16,7 @@ import (
 	"github.com/GentleKingson/ocservia/control-plane/internal/audit"
 	"github.com/GentleKingson/ocservia/control-plane/internal/commandauth"
 	"github.com/GentleKingson/ocservia/control-plane/internal/commandlimit"
+	"github.com/GentleKingson/ocservia/control-plane/internal/coordination"
 	operationstore "github.com/GentleKingson/ocservia/control-plane/internal/operations"
 	"github.com/GentleKingson/ocservia/control-plane/internal/semanticpayload"
 	"github.com/google/uuid"
@@ -145,7 +146,7 @@ func (s *Service) Mutate(ctx context.Context, request MutationRequest) (operatio
 		if !same {
 			return operationstore.Operation{}, false, ErrIdempotencyConflict
 		}
-		if err := tx.Commit(ctx); err != nil {
+		if err := coordination.CommitFenced(ctx, tx, coordination.FenceFromContext(ctx)); err != nil {
 			return operationstore.Operation{}, false, err
 		}
 		return existing, true, nil
@@ -225,7 +226,7 @@ func (s *Service) Mutate(ctx context.Context, request MutationRequest) (operatio
 	if _, err := tx.Exec(ctx, `SELECT pg_notify('ocservia_outbox',$1)`, outboxID.String()); err != nil {
 		return operationstore.Operation{}, false, err
 	}
-	if err := tx.Commit(ctx); err != nil {
+	if err := coordination.CommitFenced(ctx, tx, coordination.FenceFromContext(ctx)); err != nil {
 		return operationstore.Operation{}, false, err
 	}
 	nodeText, commandText := request.NodeID.String(), commandID.String()

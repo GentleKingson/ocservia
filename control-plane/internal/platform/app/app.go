@@ -14,6 +14,7 @@ import (
 	"github.com/GentleKingson/ocservia/control-plane/internal/certificates"
 	"github.com/GentleKingson/ocservia/control-plane/internal/commandauth"
 	"github.com/GentleKingson/ocservia/control-plane/internal/configplan"
+	"github.com/GentleKingson/ocservia/control-plane/internal/coordination"
 	"github.com/GentleKingson/ocservia/control-plane/internal/enrollment"
 	"github.com/GentleKingson/ocservia/control-plane/internal/localslice"
 	operationstore "github.com/GentleKingson/ocservia/control-plane/internal/operations"
@@ -162,39 +163,59 @@ func Run(ctx context.Context, cfg config.Config, build BuildInfo, logger *slog.L
 		certificateService = certificates.New(pool, operationService)
 	}
 	if cfg.RunsScheduler() {
+		identity, identityErr := coordination.NewIdentity()
+		if identityErr != nil {
+			return fmt.Errorf("mint scheduler identity: %w", identityErr)
+		}
+		// The leadership lease spans the whole maintenance session and is
+		// renewed in the background; losing renewal cancels the session
+		// context, which aborts fenced transactions before they can commit.
+		leader := coordination.NewRunner(pool, identity, 15*time.Second, 5*time.Second, logger)
 		go func() {
+			defer leader.Stop()
 			ticker := time.NewTicker(30 * time.Second)
 			defer ticker.Stop()
 			for {
 				started := time.Now()
-				runCtx, span := otel.Tracer("ocservia.useroperations").Start(componentCtx, "user_operations.scheduler.run")
-				if err := userOperationsService.RunOnce(runCtx); err != nil {
-					span.RecordError(err)
-					span.SetStatus(codes.Error, "scheduler run failed")
+				err := leader.WithSession(componentCtx, func(sessionCtx context.Context, session *coordination.Session) error {
+					runCtx, span := otel.Tracer("ocservia.useroperations").Start(sessionCtx, "user_operations.scheduler.run")
+					if err := userOperationsService.RunOnce(runCtx); err != nil {
+						span.RecordError(err)
+						span.SetStatus(codes.Error, "scheduler run failed")
+						span.End()
+						return err
+					}
 					span.End()
-					logger.ErrorContext(componentCtx, "user operations scheduler failed", "alert_kind", "user_operations.scheduler_failed", "error", err, "duration_ms", time.Since(started).Milliseconds())
-					maintenanceErr <- err
-					return
-				}
-				span.End()
-				logger.InfoContext(componentCtx, "user operations scheduler completed", "duration_ms", time.Since(started).Milliseconds(), "submission_limit", cfg.UserOperationConcurrency)
-				if err := telemetryService.Maintain(componentCtx); err != nil {
-					maintenanceErr <- err
-					return
-				}
-				certificateCtx, certificateSpan := otel.Tracer("ocservia.certificates").Start(componentCtx, "certificates.maintenance.run")
-				if err := certificateService.Maintain(certificateCtx); err != nil {
-					certificateSpan.RecordError(err)
-					certificateSpan.SetStatus(codes.Error, "certificate maintenance failed")
+					logger.InfoContext(sessionCtx, "user operations scheduler completed", "duration_ms", time.Since(started).Milliseconds(), "submission_limit", cfg.UserOperationConcurrency)
+					if err := telemetryService.Maintain(sessionCtx); err != nil {
+						return err
+					}
+					certificateCtx, certificateSpan := otel.Tracer("ocservia.certificates").Start(sessionCtx, "certificates.maintenance.run")
+					if err := certificateService.Maintain(certificateCtx); err != nil {
+						certificateSpan.RecordError(err)
+						certificateSpan.SetStatus(codes.Error, "certificate maintenance failed")
+						certificateSpan.End()
+						return err
+					}
 					certificateSpan.End()
-					logger.ErrorContext(componentCtx, "certificate maintenance failed", "alert_kind", "certificate.maintenance_failed", "error", err)
-					maintenanceErr <- err
-					return
-				}
-				certificateSpan.End()
-				if err := auditManager.CheckpointAll(componentCtx); err != nil {
-					maintenanceErr <- err
-					return
+					return auditManager.CheckpointAll(sessionCtx)
+				})
+				if err != nil {
+					// Leadership loss is expected during failover: stay
+					// alive, stop scheduling, and retry on the next tick. A
+					// cancellation while the component context is still live
+					// means the session context was cancelled by renewal
+					// loss, not a shutdown.
+					leadershipLost := errors.Is(err, coordination.ErrLeadershipLost) ||
+						errors.Is(err, coordination.ErrNotLeader) ||
+						(componentCtx.Err() == nil && errors.Is(err, context.Canceled))
+					if leadershipLost {
+						logger.WarnContext(componentCtx, "maintenance session lost leadership", "alert_kind", "scheduler.leadership_lost", "error", err)
+					} else {
+						logger.ErrorContext(componentCtx, "user operations scheduler failed", "alert_kind", "user_operations.scheduler_failed", "error", err, "duration_ms", time.Since(started).Milliseconds())
+						maintenanceErr <- err
+						return
+					}
 				}
 				select {
 				case <-componentCtx.Done():
