@@ -120,7 +120,10 @@ func TestLeadershipAssertBlocksTakeoverIntegration(t *testing.T) {
 	resetLeadership(t, pool)
 	ctx := context.Background()
 
-	leader, err := Acquire(ctx, pool, mustIdentity(t), 10*time.Second)
+	// A short lease lets the deadline lapse naturally while the fenced
+	// transaction stays open; forcing an expiry would itself block on the
+	// row lock the assert holds.
+	leader, err := Acquire(ctx, pool, mustIdentity(t), 1500*time.Millisecond)
 	if err != nil {
 		t.Fatalf("acquire: %v", err)
 	}
@@ -132,7 +135,7 @@ func TestLeadershipAssertBlocksTakeoverIntegration(t *testing.T) {
 	if err := leader.AssertLeader(ctx, tx); err != nil {
 		t.Fatalf("assert: %v", err)
 	}
-	forceExpire(t, pool)
+	time.Sleep(2 * time.Second)
 
 	takeoverDone := make(chan error, 1)
 	go func() {
