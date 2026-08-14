@@ -222,11 +222,14 @@
     "artifact": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["name", "digest", "media_type"],
+      "required": ["name", "digest", "media_type", "kind"],
       "properties": {
         "name": { "type": "string", "pattern": "^[a-z0-9][a-z0-9._-]{0,127}$" },
         "digest": { "$ref": "#/$defs/digest" },
-        "media_type": { "type": "string", "minLength": 1, "maxLength": 128 }
+        "media_type": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "kind": {
+          "enum": ["resource_samples", "timeline", "harness_log"]
+        }
       }
     }
   }

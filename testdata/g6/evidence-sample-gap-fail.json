@@ -7,5 +7,5 @@
       "value": 205
     }
   ],
-  "expected_failure_reason": "metric failed: stability_max_sample_gap_seconds"
+  "expected_error": "evidence measurement stability_max_sample_gap_seconds does not match the artifact-derived value"
 }

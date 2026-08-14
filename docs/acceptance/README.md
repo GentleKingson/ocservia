@@ -17,19 +17,33 @@ manifest, and evidence files plus the raw artifact files under `--artifact-root`
 checks their digests and candidate identity; re-hashes every declared artifact
 file itself and rejects missing files, content digest mismatches, path
 traversal, and symbolic links; and independently recomputes every result.
-Measurement and observation digests may only reference artifacts whose real
-content hash was verified. The protected workflow supplies the expected
-authority, opaque environment ID, and failure-domain class separately; the
-verifier rejects evidence that relabels them.
+
+Every artifact declares a kind the verifier recognizes: exactly one
+`resource_samples` CSV, exactly one `timeline` JSONL file, and any number of
+opaque `harness_log` files. Each SLO metric freezes an explicit trust boundary.
+Metrics with a `derivation` — the bounded-window sampling span, maximum gap,
+and valid sample count — are recomputed by the verifier directly from the
+verified `resource_samples` artifact, and evidence that declares a different
+value is rejected. The timeline artifact is parsed line by line with strict
+RFC 3339 timestamps, unique event identifiers, strictly increasing sequences,
+and non-decreasing timestamps; every observation must reference the timeline
+artifact, every declared event must exist in it, and the SLO-required events
+must occur there in their frozen order. All remaining metrics are marked
+`declared_by_harness: true`: their `actual` values stay untrusted harness
+inputs until the G6 harness ships verified extractors for them, and the
+protected workflow supplies the expected authority, opaque environment ID, and
+failure-domain class separately, so the verifier rejects relabeled evidence.
 
 A final pass also requires a `production_readiness` authority, a multi-host,
 multi-zone, or multi-region topology, and the topology role requirements
 frozen in `g6-slo.yaml`: minimum instance counts and failure-domain spread for
-API, worker, scheduler, transportd, and relay instances, single primary and
-standby PostgreSQL instances, a release-manifest component binding for every
-role, and a distinct failure domain for the PostgreSQL primary and standby.
-Every topology instance must name its release component, and the exact
-component name and digest pair must exist in the release manifest.
+API, worker, scheduler, transportd, and relay instances, at least fifty bound
+agent instances, single primary and standby PostgreSQL instances, a
+release-manifest component binding for every role, and a distinct failure
+domain for the PostgreSQL primary and standby. Every topology instance must
+name its release component, the exact component name and digest pair must
+exist in the release manifest, and evidence may not claim more authorized
+real agents than the topology binds.
 
 Topology identifiers are opaque aliases. They must not encode provider account
 names, real hostnames, IP addresses, internal domains, database URLs, relay

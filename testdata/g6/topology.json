@@ -1,7 +1,7 @@
 {
   "schema_version": "ocservia.g6-topology.v1",
   "candidate_sha": "1111111111111111111111111111111111111111",
-  "release_manifest_digest": "sha256:c493e21a67727883be5959d470d778bb12bc251e7ebcc8c10cd06b6166ecdc81",
+  "release_manifest_digest": "sha256:266ded2ea8cb2896fbace4b2b6ef7dcc083042d51047d1bc5cedcc00885c5dac",
   "environment_id": "g6-12345678",
   "failure_domain_class": "multi_host",
   "instances": [
@@ -110,6 +110,456 @@
       "role": "postgres_standby",
       "component": "postgres",
       "component_digest": "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+      "candidate_sha": "1111111111111111111111111111111111111111",
+      "started_at": "2026-08-14T00:00:00Z"
+    },
+    {
+      "instance_id": "8f1e0000-0000-4000-8000-000000000001",
+      "fault_domain": "fd-alpha",
+      "role": "agent",
+      "component": "agent",
+      "component_digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "candidate_sha": "1111111111111111111111111111111111111111",
+      "started_at": "2026-08-14T00:00:00Z"
+    },
+    {
+      "instance_id": "8f1e0000-0000-4000-8000-000000000002",
+      "fault_domain": "fd-beta",
+      "role": "agent",
+      "component": "agent",
+      "component_digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "candidate_sha": "1111111111111111111111111111111111111111",
+      "started_at": "2026-08-14T00:00:00Z"
+    },
+    {
+      "instance_id": "8f1e0000-0000-4000-8000-000000000003",
+      "fault_domain": "fd-alpha",
+      "role": "agent",
+      "component": "agent",
+      "component_digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "candidate_sha": "1111111111111111111111111111111111111111",
+      "started_at": "2026-08-14T00:00:00Z"
+    },
+    {
+      "instance_id": "8f1e0000-0000-4000-8000-000000000004",
+      "fault_domain": "fd-beta",
+      "role": "agent",
+      "component": "agent",
+      "component_digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "candidate_sha": "1111111111111111111111111111111111111111",
+      "started_at": "2026-08-14T00:00:00Z"
+    },
+    {
+      "instance_id": "8f1e0000-0000-4000-8000-000000000005",
+      "fault_domain": "fd-alpha",
+      "role": "agent",
+      "component": "agent",
+      "component_digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "candidate_sha": "1111111111111111111111111111111111111111",
+      "started_at": "2026-08-14T00:00:00Z"
+    },
+    {
+      "instance_id": "8f1e0000-0000-4000-8000-000000000006",
+      "fault_domain": "fd-beta",
+      "role": "agent",
+      "component": "agent",
+      "component_digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "candidate_sha": "1111111111111111111111111111111111111111",
+      "started_at": "2026-08-14T00:00:00Z"
+    },
+    {
+      "instance_id": "8f1e0000-0000-4000-8000-000000000007",
+      "fault_domain": "fd-alpha",
+      "role": "agent",
+      "component": "agent",
+      "component_digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "candidate_sha": "1111111111111111111111111111111111111111",
+      "started_at": "2026-08-14T00:00:00Z"
+    },
+    {
+      "instance_id": "8f1e0000-0000-4000-8000-000000000008",
+      "fault_domain": "fd-beta",
+      "role": "agent",
+      "component": "agent",
+      "component_digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "candidate_sha": "1111111111111111111111111111111111111111",
+      "started_at": "2026-08-14T00:00:00Z"
+    },
+    {
+      "instance_id": "8f1e0000-0000-4000-8000-000000000009",
+      "fault_domain": "fd-alpha",
+      "role": "agent",
+      "component": "agent",
+      "component_digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "candidate_sha": "1111111111111111111111111111111111111111",
+      "started_at": "2026-08-14T00:00:00Z"
+    },
+    {
+      "instance_id": "8f1e0000-0000-4000-8000-000000000010",
+      "fault_domain": "fd-beta",
+      "role": "agent",
+      "component": "agent",
+      "component_digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "candidate_sha": "1111111111111111111111111111111111111111",
+      "started_at": "2026-08-14T00:00:00Z"
+    },
+    {
+      "instance_id": "8f1e0000-0000-4000-8000-000000000011",
+      "fault_domain": "fd-alpha",
+      "role": "agent",
+      "component": "agent",
+      "component_digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "candidate_sha": "1111111111111111111111111111111111111111",
+      "started_at": "2026-08-14T00:00:00Z"
+    },
+    {
+      "instance_id": "8f1e0000-0000-4000-8000-000000000012",
+      "fault_domain": "fd-beta",
+      "role": "agent",
+      "component": "agent",
+      "component_digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "candidate_sha": "1111111111111111111111111111111111111111",
+      "started_at": "2026-08-14T00:00:00Z"
+    },
+    {
+      "instance_id": "8f1e0000-0000-4000-8000-000000000013",
+      "fault_domain": "fd-alpha",
+      "role": "agent",
+      "component": "agent",
+      "component_digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "candidate_sha": "1111111111111111111111111111111111111111",
+      "started_at": "2026-08-14T00:00:00Z"
+    },
+    {
+      "instance_id": "8f1e0000-0000-4000-8000-000000000014",
+      "fault_domain": "fd-beta",
+      "role": "agent",
+      "component": "agent",
+      "component_digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "candidate_sha": "1111111111111111111111111111111111111111",
+      "started_at": "2026-08-14T00:00:00Z"
+    },
+    {
+      "instance_id": "8f1e0000-0000-4000-8000-000000000015",
+      "fault_domain": "fd-alpha",
+      "role": "agent",
+      "component": "agent",
+      "component_digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "candidate_sha": "1111111111111111111111111111111111111111",
+      "started_at": "2026-08-14T00:00:00Z"
+    },
+    {
+      "instance_id": "8f1e0000-0000-4000-8000-000000000016",
+      "fault_domain": "fd-beta",
+      "role": "agent",
+      "component": "agent",
+      "component_digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "candidate_sha": "1111111111111111111111111111111111111111",
+      "started_at": "2026-08-14T00:00:00Z"
+    },
+    {
+      "instance_id": "8f1e0000-0000-4000-8000-000000000017",
+      "fault_domain": "fd-alpha",
+      "role": "agent",
+      "component": "agent",
+      "component_digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "candidate_sha": "1111111111111111111111111111111111111111",
+      "started_at": "2026-08-14T00:00:00Z"
+    },
+    {
+      "instance_id": "8f1e0000-0000-4000-8000-000000000018",
+      "fault_domain": "fd-beta",
+      "role": "agent",
+      "component": "agent",
+      "component_digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "candidate_sha": "1111111111111111111111111111111111111111",
+      "started_at": "2026-08-14T00:00:00Z"
+    },
+    {
+      "instance_id": "8f1e0000-0000-4000-8000-000000000019",
+      "fault_domain": "fd-alpha",
+      "role": "agent",
+      "component": "agent",
+      "component_digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "candidate_sha": "1111111111111111111111111111111111111111",
+      "started_at": "2026-08-14T00:00:00Z"
+    },
+    {
+      "instance_id": "8f1e0000-0000-4000-8000-000000000020",
+      "fault_domain": "fd-beta",
+      "role": "agent",
+      "component": "agent",
+      "component_digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "candidate_sha": "1111111111111111111111111111111111111111",
+      "started_at": "2026-08-14T00:00:00Z"
+    },
+    {
+      "instance_id": "8f1e0000-0000-4000-8000-000000000021",
+      "fault_domain": "fd-alpha",
+      "role": "agent",
+      "component": "agent",
+      "component_digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "candidate_sha": "1111111111111111111111111111111111111111",
+      "started_at": "2026-08-14T00:00:00Z"
+    },
+    {
+      "instance_id": "8f1e0000-0000-4000-8000-000000000022",
+      "fault_domain": "fd-beta",
+      "role": "agent",
+      "component": "agent",
+      "component_digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "candidate_sha": "1111111111111111111111111111111111111111",
+      "started_at": "2026-08-14T00:00:00Z"
+    },
+    {
+      "instance_id": "8f1e0000-0000-4000-8000-000000000023",
+      "fault_domain": "fd-alpha",
+      "role": "agent",
+      "component": "agent",
+      "component_digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "candidate_sha": "1111111111111111111111111111111111111111",
+      "started_at": "2026-08-14T00:00:00Z"
+    },
+    {
+      "instance_id": "8f1e0000-0000-4000-8000-000000000024",
+      "fault_domain": "fd-beta",
+      "role": "agent",
+      "component": "agent",
+      "component_digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "candidate_sha": "1111111111111111111111111111111111111111",
+      "started_at": "2026-08-14T00:00:00Z"
+    },
+    {
+      "instance_id": "8f1e0000-0000-4000-8000-000000000025",
+      "fault_domain": "fd-alpha",
+      "role": "agent",
+      "component": "agent",
+      "component_digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "candidate_sha": "1111111111111111111111111111111111111111",
+      "started_at": "2026-08-14T00:00:00Z"
+    },
+    {
+      "instance_id": "8f1e0000-0000-4000-8000-000000000026",
+      "fault_domain": "fd-beta",
+      "role": "agent",
+      "component": "agent",
+      "component_digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "candidate_sha": "1111111111111111111111111111111111111111",
+      "started_at": "2026-08-14T00:00:00Z"
+    },
+    {
+      "instance_id": "8f1e0000-0000-4000-8000-000000000027",
+      "fault_domain": "fd-alpha",
+      "role": "agent",
+      "component": "agent",
+      "component_digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "candidate_sha": "1111111111111111111111111111111111111111",
+      "started_at": "2026-08-14T00:00:00Z"
+    },
+    {
+      "instance_id": "8f1e0000-0000-4000-8000-000000000028",
+      "fault_domain": "fd-beta",
+      "role": "agent",
+      "component": "agent",
+      "component_digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "candidate_sha": "1111111111111111111111111111111111111111",
+      "started_at": "2026-08-14T00:00:00Z"
+    },
+    {
+      "instance_id": "8f1e0000-0000-4000-8000-000000000029",
+      "fault_domain": "fd-alpha",
+      "role": "agent",
+      "component": "agent",
+      "component_digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "candidate_sha": "1111111111111111111111111111111111111111",
+      "started_at": "2026-08-14T00:00:00Z"
+    },
+    {
+      "instance_id": "8f1e0000-0000-4000-8000-000000000030",
+      "fault_domain": "fd-beta",
+      "role": "agent",
+      "component": "agent",
+      "component_digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "candidate_sha": "1111111111111111111111111111111111111111",
+      "started_at": "2026-08-14T00:00:00Z"
+    },
+    {
+      "instance_id": "8f1e0000-0000-4000-8000-000000000031",
+      "fault_domain": "fd-alpha",
+      "role": "agent",
+      "component": "agent",
+      "component_digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "candidate_sha": "1111111111111111111111111111111111111111",
+      "started_at": "2026-08-14T00:00:00Z"
+    },
+    {
+      "instance_id": "8f1e0000-0000-4000-8000-000000000032",
+      "fault_domain": "fd-beta",
+      "role": "agent",
+      "component": "agent",
+      "component_digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "candidate_sha": "1111111111111111111111111111111111111111",
+      "started_at": "2026-08-14T00:00:00Z"
+    },
+    {
+      "instance_id": "8f1e0000-0000-4000-8000-000000000033",
+      "fault_domain": "fd-alpha",
+      "role": "agent",
+      "component": "agent",
+      "component_digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "candidate_sha": "1111111111111111111111111111111111111111",
+      "started_at": "2026-08-14T00:00:00Z"
+    },
+    {
+      "instance_id": "8f1e0000-0000-4000-8000-000000000034",
+      "fault_domain": "fd-beta",
+      "role": "agent",
+      "component": "agent",
+      "component_digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "candidate_sha": "1111111111111111111111111111111111111111",
+      "started_at": "2026-08-14T00:00:00Z"
+    },
+    {
+      "instance_id": "8f1e0000-0000-4000-8000-000000000035",
+      "fault_domain": "fd-alpha",
+      "role": "agent",
+      "component": "agent",
+      "component_digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "candidate_sha": "1111111111111111111111111111111111111111",
+      "started_at": "2026-08-14T00:00:00Z"
+    },
+    {
+      "instance_id": "8f1e0000-0000-4000-8000-000000000036",
+      "fault_domain": "fd-beta",
+      "role": "agent",
+      "component": "agent",
+      "component_digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "candidate_sha": "1111111111111111111111111111111111111111",
+      "started_at": "2026-08-14T00:00:00Z"
+    },
+    {
+      "instance_id": "8f1e0000-0000-4000-8000-000000000037",
+      "fault_domain": "fd-alpha",
+      "role": "agent",
+      "component": "agent",
+      "component_digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "candidate_sha": "1111111111111111111111111111111111111111",
+      "started_at": "2026-08-14T00:00:00Z"
+    },
+    {
+      "instance_id": "8f1e0000-0000-4000-8000-000000000038",
+      "fault_domain": "fd-beta",
+      "role": "agent",
+      "component": "agent",
+      "component_digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "candidate_sha": "1111111111111111111111111111111111111111",
+      "started_at": "2026-08-14T00:00:00Z"
+    },
+    {
+      "instance_id": "8f1e0000-0000-4000-8000-000000000039",
+      "fault_domain": "fd-alpha",
+      "role": "agent",
+      "component": "agent",
+      "component_digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "candidate_sha": "1111111111111111111111111111111111111111",
+      "started_at": "2026-08-14T00:00:00Z"
+    },
+    {
+      "instance_id": "8f1e0000-0000-4000-8000-000000000040",
+      "fault_domain": "fd-beta",
+      "role": "agent",
+      "component": "agent",
+      "component_digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "candidate_sha": "1111111111111111111111111111111111111111",
+      "started_at": "2026-08-14T00:00:00Z"
+    },
+    {
+      "instance_id": "8f1e0000-0000-4000-8000-000000000041",
+      "fault_domain": "fd-alpha",
+      "role": "agent",
+      "component": "agent",
+      "component_digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "candidate_sha": "1111111111111111111111111111111111111111",
+      "started_at": "2026-08-14T00:00:00Z"
+    },
+    {
+      "instance_id": "8f1e0000-0000-4000-8000-000000000042",
+      "fault_domain": "fd-beta",
+      "role": "agent",
+      "component": "agent",
+      "component_digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "candidate_sha": "1111111111111111111111111111111111111111",
+      "started_at": "2026-08-14T00:00:00Z"
+    },
+    {
+      "instance_id": "8f1e0000-0000-4000-8000-000000000043",
+      "fault_domain": "fd-alpha",
+      "role": "agent",
+      "component": "agent",
+      "component_digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "candidate_sha": "1111111111111111111111111111111111111111",
+      "started_at": "2026-08-14T00:00:00Z"
+    },
+    {
+      "instance_id": "8f1e0000-0000-4000-8000-000000000044",
+      "fault_domain": "fd-beta",
+      "role": "agent",
+      "component": "agent",
+      "component_digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "candidate_sha": "1111111111111111111111111111111111111111",
+      "started_at": "2026-08-14T00:00:00Z"
+    },
+    {
+      "instance_id": "8f1e0000-0000-4000-8000-000000000045",
+      "fault_domain": "fd-alpha",
+      "role": "agent",
+      "component": "agent",
+      "component_digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "candidate_sha": "1111111111111111111111111111111111111111",
+      "started_at": "2026-08-14T00:00:00Z"
+    },
+    {
+      "instance_id": "8f1e0000-0000-4000-8000-000000000046",
+      "fault_domain": "fd-beta",
+      "role": "agent",
+      "component": "agent",
+      "component_digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "candidate_sha": "1111111111111111111111111111111111111111",
+      "started_at": "2026-08-14T00:00:00Z"
+    },
+    {
+      "instance_id": "8f1e0000-0000-4000-8000-000000000047",
+      "fault_domain": "fd-alpha",
+      "role": "agent",
+      "component": "agent",
+      "component_digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "candidate_sha": "1111111111111111111111111111111111111111",
+      "started_at": "2026-08-14T00:00:00Z"
+    },
+    {
+      "instance_id": "8f1e0000-0000-4000-8000-000000000048",
+      "fault_domain": "fd-beta",
+      "role": "agent",
+      "component": "agent",
+      "component_digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "candidate_sha": "1111111111111111111111111111111111111111",
+      "started_at": "2026-08-14T00:00:00Z"
+    },
+    {
+      "instance_id": "8f1e0000-0000-4000-8000-000000000049",
+      "fault_domain": "fd-alpha",
+      "role": "agent",
+      "component": "agent",
+      "component_digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "candidate_sha": "1111111111111111111111111111111111111111",
+      "started_at": "2026-08-14T00:00:00Z"
+    },
+    {
+      "instance_id": "8f1e0000-0000-4000-8000-000000000050",
+      "fault_domain": "fd-beta",
+      "role": "agent",
+      "component": "agent",
+      "component_digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
       "candidate_sha": "1111111111111111111111111111111111111111",
       "started_at": "2026-08-14T00:00:00Z"
     }

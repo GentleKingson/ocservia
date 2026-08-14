@@ -64,6 +64,30 @@ for (const [first, second] of slo.topology.distinct_failure_domain_role_pairs ??
   }
 }
 const metricNames = Object.keys(slo.metrics);
+const derivedMetrics = Object.entries(slo.metrics)
+  .filter(([, metric]) => metric.derivation !== undefined)
+  .map(([name]) => name);
+if (derivedMetrics.length === 0) {
+  fail("g6-slo.yaml must derive at least one metric from verified artifacts");
+}
+for (const [, metric] of Object.entries(slo.metrics)) {
+  if (metric.derivation === undefined && metric.declared_by_harness !== true) {
+    fail("every SLO metric must freeze an explicit trust boundary");
+  }
+}
+const artifactDef = evidenceSchema.$defs.artifact;
+if (!artifactDef.required.includes("kind")) {
+  fail("evidence artifacts must declare a verifier-recognized kind");
+}
+if (
+  !same(artifactDef.properties.kind.enum, [
+    "resource_samples",
+    "timeline",
+    "harness_log",
+  ])
+) {
+  fail("evidence artifact kinds drifted from the verifier contract");
+}
 if (
   !same(evidenceSchema.properties.measurements.required, metricNames) ||
   !same(evidenceSchema.$defs.metric_name.enum, metricNames)
@@ -108,6 +132,9 @@ if (!acceptanceReadme.includes("--artifact-root")) {
 }
 if (!acceptanceReadme.includes("role requirements")) {
   fail("acceptance README must document topology role requirements");
+}
+if (!acceptanceReadme.includes("declared_by_harness")) {
+  fail("acceptance README must document the harness-declared trust boundary");
 }
 
 const publicCapacity = read("docs/development/p1-resilience-capacity.md");

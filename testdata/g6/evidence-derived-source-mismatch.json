@@ -1,0 +1,11 @@
+{
+  "base": "evidence-pass.json",
+  "evidence_mutations": [
+    {
+      "operation": "replace",
+      "path": "measurements.stability_sample_span_seconds.source_artifact_digest",
+      "value": "sha256:cf9fee66f43895dac1583495470e004ece309c91686d1522ba3c5703324ff883"
+    }
+  ],
+  "expected_error": "evidence measurement stability_sample_span_seconds must reference the resource_samples artifact"
+}

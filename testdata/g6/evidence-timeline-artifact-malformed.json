@@ -1,0 +1,94 @@
+{
+  "base": "evidence-pass.json",
+  "artifact_files": {
+    "timeline.jsonl": "{\"event_id\":\"load_started\",\"sequence\":1,\"timestamp\":\"2026-08-14T00:00:00:00Z\"}\n{\"event_id\":\"primary_failure_injected\",\"sequence\":1,\"timestamp\":\"2026-08-14T00:00:00Z\"}\n{\"event_id\":\"new_primary_writable\",\"sequence\":2,\"timestamp\":\"2026-08-14T00:00:01Z\"}\n{\"event_id\":\"old_primary_isolated\",\"sequence\":3,\"timestamp\":\"2026-08-14T00:00:02Z\"}\n{\"event_id\":\"new_primary_promoted\",\"sequence\":4,\"timestamp\":\"2026-08-14T00:00:03Z\"}\n{\"event_id\":\"old_primary_write_rejected\",\"sequence\":5,\"timestamp\":\"2026-08-14T00:00:04Z\"}\n{\"event_id\":\"marker_a_written\",\"sequence\":6,\"timestamp\":\"2026-08-14T00:00:05Z\"}\n{\"event_id\":\"restore_point_created\",\"sequence\":7,\"timestamp\":\"2026-08-14T00:00:06Z\"}\n{\"event_id\":\"marker_b_written\",\"sequence\":8,\"timestamp\":\"2026-08-14T00:00:07Z\"}\n{\"event_id\":\"restore_verified\",\"sequence\":9,\"timestamp\":\"2026-08-14T00:00:08Z\"}\n{\"event_id\":\"owner_a_paused\",\"sequence\":10,\"timestamp\":\"2026-08-14T00:00:09Z\"}\n{\"event_id\":\"owner_b_acquired\",\"sequence\":11,\"timestamp\":\"2026-08-14T00:00:10Z\"}\n{\"event_id\":\"owner_a_resumed\",\"sequence\":12,\"timestamp\":\"2026-08-14T00:00:11Z\"}\n{\"event_id\":\"stale_transport_rejected\",\"sequence\":13,\"timestamp\":\"2026-08-14T00:00:12Z\"}\n{\"event_id\":\"stale_agent_rejected\",\"sequence\":14,\"timestamp\":\"2026-08-14T00:00:13Z\"}\n{\"event_id\":\"scheduler_a_paused\",\"sequence\":15,\"timestamp\":\"2026-08-14T00:00:14Z\"}\n{\"event_id\":\"scheduler_b_acquired\",\"sequence\":16,\"timestamp\":\"2026-08-14T00:00:15Z\"}\n{\"event_id\":\"scheduler_a_resumed\",\"sequence\":17,\"timestamp\":\"2026-08-14T00:00:16Z\"}\n{\"event_id\":\"stale_scheduler_commit_rejected\",\"sequence\":18,\"timestamp\":\"2026-08-14T00:00:17Z\"}\n{\"event_id\":\"api_instance_failed\",\"sequence\":19,\"timestamp\":\"2026-08-14T00:00:18Z\"}\n{\"event_id\":\"gateway_traffic_transferred\",\"sequence\":20,\"timestamp\":\"2026-08-14T00:00:19Z\"}\n{\"event_id\":\"api_slo_measured\",\"sequence\":21,\"timestamp\":\"2026-08-14T00:00:20Z\"}\n{\"event_id\":\"worker_instance_failed\",\"sequence\":22,\"timestamp\":\"2026-08-14T00:00:21Z\"}\n{\"event_id\":\"worker_replacement_active\",\"sequence\":23,\"timestamp\":\"2026-08-14T00:00:22Z\"}\n{\"event_id\":\"dispatch_recovered\",\"sequence\":24,\"timestamp\":\"2026-08-14T00:00:23Z\"}\n{\"event_id\":\"relay_a_failed\",\"sequence\":25,\"timestamp\":\"2026-08-14T00:00:24Z\"}\n{\"event_id\":\"relay_b_active\",\"sequence\":26,\"timestamp\":\"2026-08-14T00:00:25Z\"}\n{\"event_id\":\"direct_path_active\",\"sequence\":27,\"timestamp\":\"2026-08-14T00:00:26Z\"}\n{\"event_id\":\"direct_path_failed\",\"sequence\":28,\"timestamp\":\"2026-08-14T00:00:27Z\"}\n{\"event_id\":\"relay_path_active\",\"sequence\":29,\"timestamp\":\"2026-08-14T00:00:28Z\"}\n{\"event_id\":\"direct_path_recovered\",\"sequence\":30,\"timestamp\":\"2026-08-14T00:00:29Z\"}\n{\"event_id\":\"bulk_disconnect_injected\",\"sequence\":31,\"timestamp\":\"2026-08-14T00:00:30Z\"}\n{\"event_id\":\"reconnect_started\",\"sequence\":32,\"timestamp\":\"2026-08-14T00:00:31Z\"}\n{\"event_id\":\"reconnect_completed\",\"sequence\":33,\"timestamp\":\"2026-08-14T00:00:32Z\"}\n{\"event_id\":\"outbox_claim_committed\",\"sequence\":34,\"timestamp\":\"2026-08-14T00:00:33Z\"}\n{\"event_id\":\"worker_crashed_before_send\",\"sequence\":35,\"timestamp\":\"2026-08-14T00:00:34Z\"}\n{\"event_id\":\"command_recovered\",\"sequence\":36,\"timestamp\":\"2026-08-14T00:00:35Z\"}\n{\"event_id\":\"transport_send_accepted\",\"sequence\":37,\"timestamp\":\"2026-08-14T00:00:36Z\"}\n{\"event_id\":\"worker_crashed_before_mark_sent\",\"sequence\":38,\"timestamp\":\"2026-08-14T00:00:37Z\"}\n{\"event_id\":\"command_reconciled\",\"sequence\":39,\"timestamp\":\"2026-08-14T00:00:38Z\"}\n{\"event_id\":\"result_received\",\"sequence\":40,\"timestamp\":\"2026-08-14T00:00:39Z\"}\n{\"event_id\":\"ingress_crashed_before_commit\",\"sequence\":41,\"timestamp\":\"2026-08-14T00:00:40Z\"}\n{\"event_id\":\"result_reconciled\",\"sequence\":42,\"timestamp\":\"2026-08-14T00:00:41Z\"}\n{\"event_id\":\"api_recovered\",\"sequence\":43,\"timestamp\":\"2026-08-14T00:00:42Z\"}\n{\"event_id\":\"worker_recovered\",\"sequence\":44,\"timestamp\":\"2026-08-14T00:00:43Z\"}\n{\"event_id\":\"load_stopped\",\"sequence\":45,\"timestamp\":\"2026-08-14T00:00:44Z\"}\n"
+  },
+  "evidence_mutations": [
+    {
+      "operation": "replace",
+      "path": "observations.database_failover_during_load.source_artifact_digest",
+      "value": "sha256:adacc469fd798124fd847b92adb97e6855e340def34f7307e8897c53455716f8"
+    },
+    {
+      "operation": "replace",
+      "path": "observations.dual_primary_prevention.source_artifact_digest",
+      "value": "sha256:adacc469fd798124fd847b92adb97e6855e340def34f7307e8897c53455716f8"
+    },
+    {
+      "operation": "replace",
+      "path": "observations.pitr_target_restore.source_artifact_digest",
+      "value": "sha256:adacc469fd798124fd847b92adb97e6855e340def34f7307e8897c53455716f8"
+    },
+    {
+      "operation": "replace",
+      "path": "observations.connection_owner_failover.source_artifact_digest",
+      "value": "sha256:adacc469fd798124fd847b92adb97e6855e340def34f7307e8897c53455716f8"
+    },
+    {
+      "operation": "replace",
+      "path": "observations.stale_owner_rejection.source_artifact_digest",
+      "value": "sha256:adacc469fd798124fd847b92adb97e6855e340def34f7307e8897c53455716f8"
+    },
+    {
+      "operation": "replace",
+      "path": "observations.scheduler_leader_failover.source_artifact_digest",
+      "value": "sha256:adacc469fd798124fd847b92adb97e6855e340def34f7307e8897c53455716f8"
+    },
+    {
+      "operation": "replace",
+      "path": "observations.stale_scheduler_rejection.source_artifact_digest",
+      "value": "sha256:adacc469fd798124fd847b92adb97e6855e340def34f7307e8897c53455716f8"
+    },
+    {
+      "operation": "replace",
+      "path": "observations.api_instance_failover.source_artifact_digest",
+      "value": "sha256:adacc469fd798124fd847b92adb97e6855e340def34f7307e8897c53455716f8"
+    },
+    {
+      "operation": "replace",
+      "path": "observations.worker_instance_failover.source_artifact_digest",
+      "value": "sha256:adacc469fd798124fd847b92adb97e6855e340def34f7307e8897c53455716f8"
+    },
+    {
+      "operation": "replace",
+      "path": "observations.relay_failover.source_artifact_digest",
+      "value": "sha256:adacc469fd798124fd847b92adb97e6855e340def34f7307e8897c53455716f8"
+    },
+    {
+      "operation": "replace",
+      "path": "observations.direct_to_relay.source_artifact_digest",
+      "value": "sha256:adacc469fd798124fd847b92adb97e6855e340def34f7307e8897c53455716f8"
+    },
+    {
+      "operation": "replace",
+      "path": "observations.relay_to_direct.source_artifact_digest",
+      "value": "sha256:adacc469fd798124fd847b92adb97e6855e340def34f7307e8897c53455716f8"
+    },
+    {
+      "operation": "replace",
+      "path": "observations.reconnect_storm.source_artifact_digest",
+      "value": "sha256:adacc469fd798124fd847b92adb97e6855e340def34f7307e8897c53455716f8"
+    },
+    {
+      "operation": "replace",
+      "path": "observations.outbox_claim_before_send_recovery.source_artifact_digest",
+      "value": "sha256:adacc469fd798124fd847b92adb97e6855e340def34f7307e8897c53455716f8"
+    },
+    {
+      "operation": "replace",
+      "path": "observations.outbox_send_before_mark_sent_recovery.source_artifact_digest",
+      "value": "sha256:adacc469fd798124fd847b92adb97e6855e340def34f7307e8897c53455716f8"
+    },
+    {
+      "operation": "replace",
+      "path": "observations.outbox_result_before_commit_recovery.source_artifact_digest",
+      "value": "sha256:adacc469fd798124fd847b92adb97e6855e340def34f7307e8897c53455716f8"
+    },
+    {
+      "operation": "replace",
+      "path": "artifacts.1.digest",
+      "value": "sha256:adacc469fd798124fd847b92adb97e6855e340def34f7307e8897c53455716f8"
+    }
+  ],
+  "expected_error": "timeline artifact timeline.jsonl timestamp must be a strict RFC 3339 timestamp"
+}

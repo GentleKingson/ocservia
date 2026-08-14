@@ -7,6 +7,7 @@ import {
   readFileSync,
   rmSync,
   symlinkSync,
+  writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -43,18 +44,25 @@ const allowedFixtureFields = new Set([
   "expected_authority",
   "expected_failure_domain_class",
   "artifact_root",
+  "artifact_files",
 ]);
 
-function buildArtifactRoot(mode) {
+function buildArtifactRoot(mode, overrides) {
   const realRoot = fileURLToPath(new URL("testdata/g6/artifacts/", root));
-  if (mode !== "symlink") return realRoot;
+  const overrideEntries = Object.entries(overrides ?? {});
+  if (mode !== "symlink" && overrideEntries.length === 0) return realRoot;
   const tempRoot = mkdtempSync(join(tmpdir(), "g6-artifacts-"));
   cpSync(realRoot, tempRoot, { recursive: true });
-  rmSync(join(tempRoot, "resource-samples.csv"));
-  symlinkSync(
-    join(realRoot, "resource-samples.csv"),
-    join(tempRoot, "resource-samples.csv"),
-  );
+  for (const [name, content] of overrideEntries) {
+    writeFileSync(join(tempRoot, name), content);
+  }
+  if (mode === "symlink") {
+    rmSync(join(tempRoot, "resource-samples.csv"));
+    symlinkSync(
+      join(realRoot, "resource-samples.csv"),
+      join(tempRoot, "resource-samples.csv"),
+    );
+  }
   return tempRoot;
 }
 
@@ -101,7 +109,10 @@ for (const name of cases) {
     evidence.topology_digest = sha256Digest(topologyText);
   }
 
-  const artifactRoot = buildArtifactRoot(fixture.artifact_root);
+  const artifactRoot = buildArtifactRoot(
+    fixture.artifact_root,
+    fixture.artifact_files,
+  );
   let verdict;
   let rejected;
   try {

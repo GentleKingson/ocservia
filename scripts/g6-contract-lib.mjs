@@ -35,6 +35,23 @@ const faultDomainPattern = /^fd-[a-z0-9]{2,32}$/;
 const eventPattern = /^[a-z][a-z0-9_]{0,127}$/;
 const componentPattern = /^[a-z][a-z0-9-]{0,63}$/;
 const artifactNamePattern = /^[a-z0-9][a-z0-9._-]{0,127}$/;
+const rfc3339Pattern =
+  /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/;
+const artifactKinds = new Set(["resource_samples", "timeline", "harness_log"]);
+const derivations = new Set([
+  "resource_samples.sample_span_seconds",
+  "resource_samples.max_sample_gap_seconds",
+  "resource_samples.valid_sample_count",
+]);
+
+function rfc3339(value, context) {
+  if (typeof value !== "string" || !rfc3339Pattern.test(value)) {
+    fail(`${context} must be a strict RFC 3339 timestamp`);
+  }
+  const parsed = Date.parse(value);
+  if (!Number.isFinite(parsed)) fail(`${context} must be a real timestamp`);
+  return parsed;
+}
 
 function fail(message) {
   throw new Error(message);
@@ -218,9 +235,22 @@ export function parseSlo(text) {
     fail("SLO metrics must not be empty");
   for (const [name, metric] of Object.entries(slo.metrics)) {
     if (!eventPattern.test(name)) fail(`invalid SLO metric name: ${name}`);
+    const derived = metric?.derivation !== undefined;
+    const declared = metric?.declared_by_harness !== undefined;
+    if (derived === declared) {
+      fail(
+        `SLO metric ${name} must freeze exactly one trust boundary: derivation or declared_by_harness`,
+      );
+    }
     closed(
       metric,
-      ["limit", "comparison", "unit", "scope"],
+      [
+        "limit",
+        "comparison",
+        "unit",
+        "scope",
+        ...(derived ? ["derivation"] : ["declared_by_harness"]),
+      ],
       `SLO metric ${name}`,
     );
     finiteNumber(metric.limit, `SLO metric ${name}.limit`);
@@ -229,6 +259,12 @@ export function parseSlo(text) {
     if (!units.has(metric.unit)) fail(`invalid unit for SLO metric ${name}`);
     if (typeof metric.scope !== "string" || metric.scope.length === 0) {
       fail(`SLO metric ${name} must define scope`);
+    }
+    if (derived && !derivations.has(metric.derivation)) {
+      fail(`SLO metric ${name} uses an unknown artifact derivation`);
+    }
+    if (!derived && metric.declared_by_harness !== true) {
+      fail(`SLO metric ${name} must declare declared_by_harness: true`);
     }
   }
 
@@ -297,15 +333,122 @@ function verifyArtifacts(evidence, artifactRoot) {
     if (!stats.isFile()) {
       fail(`artifact must be a regular file: ${artifact.name}`);
     }
-    const computed = `sha256:${createHash("sha256")
-      .update(readFileSync(artifactPath))
-      .digest("hex")}`;
+    const bytes = readFileSync(artifactPath);
+    const computed = `sha256:${createHash("sha256").update(bytes).digest("hex")}`;
     if (computed !== artifact.digest) {
       fail(`artifact content digest mismatch: ${artifact.name}`);
     }
-    verified.set(artifact.name, artifact.digest);
+    verified.set(artifact.name, {
+      digest: artifact.digest,
+      bytes,
+      name: artifact.name,
+    });
   }
   return verified;
+}
+
+function splitArtifactLines(text, name, kind) {
+  if (text.includes("\r")) {
+    fail(`${kind} artifact ${name} must use LF line endings`);
+  }
+  const lines = text.split("\n");
+  if (lines.at(-1) !== "") {
+    fail(`${kind} artifact ${name} must end with a newline`);
+  }
+  lines.pop();
+  if (lines.some((line) => line.length === 0)) {
+    fail(`${kind} artifact ${name} must not contain empty lines`);
+  }
+  return lines;
+}
+
+function parseResourceSamples(entry) {
+  const lines = splitArtifactLines(
+    entry.bytes.toString("utf8"),
+    entry.name,
+    "resource samples",
+  );
+  if (lines.length < 2) {
+    fail(`resource samples artifact ${entry.name} needs a header and samples`);
+  }
+  const header = lines[0].split(",");
+  if (
+    new Set(header).size !== header.length ||
+    header.some((column) => !/^[a-z][a-z0-9_]{0,63}$/.test(column)) ||
+    !header.includes("timestamp")
+  ) {
+    fail(`resource samples artifact ${entry.name} has an invalid header`);
+  }
+  const timestampColumn = header.indexOf("timestamp");
+  const timestamps = [];
+  for (const line of lines.slice(1)) {
+    const columns = line.split(",");
+    if (columns.length !== header.length) {
+      fail(`resource samples artifact ${entry.name} has a ragged row`);
+    }
+    timestamps.push(
+      rfc3339(
+        columns[timestampColumn],
+        `resource samples artifact ${entry.name} timestamp`,
+      ),
+    );
+  }
+  if (timestamps.length < 2) {
+    fail(`resource samples artifact ${entry.name} needs at least two samples`);
+  }
+  timestamps.sort((left, right) => left - right);
+  let maxGap = 0;
+  for (let index = 1; index < timestamps.length; index += 1) {
+    maxGap = Math.max(maxGap, timestamps[index] - timestamps[index - 1]);
+  }
+  return {
+    sampleSpanSeconds: (timestamps.at(-1) - timestamps[0]) / 1000,
+    maxSampleGapSeconds: maxGap / 1000,
+    validSampleCount: timestamps.length,
+  };
+}
+
+function parseTimeline(entry) {
+  const lines = splitArtifactLines(
+    entry.bytes.toString("utf8"),
+    entry.name,
+    "timeline",
+  );
+  const events = new Map();
+  let lastSequence;
+  let lastTimestamp;
+  for (const line of lines) {
+    const record = parseJSON(line, `timeline artifact ${entry.name} entry`);
+    exactKeys(record, ["event_id", "sequence", "timestamp"], "timeline entry");
+    if (!eventPattern.test(record.event_id)) {
+      fail(`timeline artifact ${entry.name} has an invalid event_id`);
+    }
+    if (events.has(record.event_id)) {
+      fail(
+        `timeline artifact ${entry.name} repeats event_id ${record.event_id}`,
+      );
+    }
+    if (!Number.isInteger(record.sequence)) {
+      fail(`timeline artifact ${entry.name} needs integer sequences`);
+    }
+    if (lastSequence !== undefined && record.sequence <= lastSequence) {
+      fail(`timeline artifact ${entry.name} sequences must strictly increase`);
+    }
+    const parsed = rfc3339(
+      record.timestamp,
+      `timeline artifact ${entry.name} timestamp`,
+    );
+    if (lastTimestamp !== undefined && parsed < lastTimestamp) {
+      fail(`timeline artifact ${entry.name} timestamps must not decrease`);
+    }
+    lastSequence = record.sequence;
+    lastTimestamp = parsed;
+    events.set(record.event_id, { sequence: record.sequence });
+  }
+  if (events.size === 0) {
+    fail(`timeline artifact ${entry.name} must not be empty`);
+  }
+  return events;
 }
 
 function validateEvidence(evidence, slo, artifactRoot) {
@@ -425,7 +568,11 @@ function validateEvidence(evidence, slo, artifactRoot) {
     fail("evidence artifacts must not be empty");
   }
   for (const artifact of evidence.artifacts) {
-    closed(artifact, ["name", "digest", "media_type"], "evidence artifact");
+    closed(
+      artifact,
+      ["name", "digest", "media_type", "kind"],
+      "evidence artifact",
+    );
     artifactName(artifact.name, `evidence artifact ${artifact.name} name`);
     digest(artifact.digest, `evidence artifact ${artifact.name} digest`);
     if (
@@ -434,9 +581,14 @@ function validateEvidence(evidence, slo, artifactRoot) {
     ) {
       fail(`evidence artifact ${artifact.name} has an invalid media type`);
     }
+    if (!artifactKinds.has(artifact.kind)) {
+      fail(`evidence artifact ${artifact.name} has an invalid kind`);
+    }
   }
   const verifiedArtifacts = verifyArtifacts(evidence, artifactRoot);
-  const verifiedDigests = new Set(verifiedArtifacts.values());
+  const verifiedDigests = new Set(
+    [...verifiedArtifacts.values()].map((entry) => entry.digest),
+  );
   for (const [name, measurement] of Object.entries(evidence.measurements)) {
     if (!verifiedDigests.has(measurement.source_artifact_digest)) {
       fail(`evidence measurement ${name} references an unverified artifact`);
@@ -447,6 +599,7 @@ function validateEvidence(evidence, slo, artifactRoot) {
       fail(`evidence observation ${name} references an unverified artifact`);
     }
   }
+  return verifiedArtifacts;
 }
 
 function validateTopology(topology) {
@@ -562,9 +715,36 @@ export function verifyG6({
   const evidence = parseJSON(evidenceText, "evidence");
   const topology = parseJSON(topologyText, "topology");
   const manifest = parseJSON(manifestText, "release manifest");
-  validateEvidence(evidence, slo, artifactRoot);
+  const verifiedArtifacts = validateEvidence(evidence, slo, artifactRoot);
   validateTopology(topology);
   const manifestComponents = validateManifest(manifest);
+
+  const standardArtifacts = new Map();
+  for (const artifact of evidence.artifacts) {
+    if (artifact.kind === "harness_log") continue;
+    if (standardArtifacts.has(artifact.kind)) {
+      fail(`evidence must declare exactly one ${artifact.kind} artifact`);
+    }
+    standardArtifacts.set(artifact.kind, artifact);
+  }
+  for (const kind of ["resource_samples", "timeline"]) {
+    if (!standardArtifacts.has(kind)) {
+      fail(`evidence must declare exactly one ${kind} artifact`);
+    }
+  }
+  const resourceSamples = verifiedArtifacts.get(
+    standardArtifacts.get("resource_samples").name,
+  );
+  const timelineArtifact = verifiedArtifacts.get(
+    standardArtifacts.get("timeline").name,
+  );
+  const samples = parseResourceSamples(resourceSamples);
+  const timelineEvents = parseTimeline(timelineArtifact);
+  const derivedValues = {
+    "resource_samples.sample_span_seconds": samples.sampleSpanSeconds,
+    "resource_samples.max_sample_gap_seconds": samples.maxSampleGapSeconds,
+    "resource_samples.valid_sample_count": samples.validSampleCount,
+  };
 
   if (!authorities.has(expectedAuthority)) fail("invalid expected authority");
   if (!environmentPattern.test(expectedEnvironmentId)) {
@@ -624,11 +804,35 @@ export function verifyG6({
       );
     }
   }
+  const topologyAgentInstances = topology.instances.filter(
+    (instance) => instance.role === "agent",
+  ).length;
+  if (
+    evidence.measurements.authorized_real_agents?.actual >
+    topologyAgentInstances
+  ) {
+    fail(
+      "evidence claims more authorized real agents than topology agent instances",
+    );
+  }
 
   const failureReasons = [];
   const measurementResults = {};
   for (const [name, contract] of Object.entries(slo.metrics)) {
     const measurement = evidence.measurements[name];
+    if (contract.derivation !== undefined) {
+      if (measurement.source_artifact_digest !== resourceSamples.digest) {
+        fail(
+          `evidence measurement ${name} must reference the resource_samples artifact`,
+        );
+      }
+      const computed = derivedValues[contract.derivation];
+      if (measurement.actual !== computed) {
+        fail(
+          `evidence measurement ${name} does not match the artifact-derived value`,
+        );
+      }
+    }
     const passed = metricPass(measurement.actual, contract);
     measurementResults[name] = {
       actual: measurement.actual,
@@ -645,10 +849,25 @@ export function verifyG6({
   const observationResults = {};
   for (const [name, contract] of Object.entries(slo.observations)) {
     const observation = evidence.observations[name];
-    const events = new Set(observation.timeline_event_ids);
-    const timelineComplete = contract.required_timeline_events.every((event) =>
-      events.has(event),
+    if (observation.source_artifact_digest !== timelineArtifact.digest) {
+      fail(`evidence observation ${name} must reference the timeline artifact`);
+    }
+    for (const event of observation.timeline_event_ids) {
+      if (!timelineEvents.has(event)) {
+        fail(
+          `evidence observation ${name} declares a timeline event absent from the artifact: ${event}`,
+        );
+      }
+    }
+    const requiredSequences = contract.required_timeline_events.map(
+      (event) => timelineEvents.get(event)?.sequence,
     );
+    const timelineComplete =
+      requiredSequences.every((sequence) => sequence !== undefined) &&
+      requiredSequences.every(
+        (sequence, index) =>
+          index === 0 || sequence > requiredSequences[index - 1],
+      );
     const passed = observation.observed && timelineComplete;
     observationResults[name] = {
       observed: observation.observed,
