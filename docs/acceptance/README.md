@@ -30,9 +30,14 @@ and non-decreasing timestamps; every observation must reference the timeline
 artifact, every declared event must exist in it, and the SLO-required events
 must occur there in their frozen order. All remaining metrics are marked
 `declared_by_harness: true`: their `actual` values stay untrusted harness
-inputs until the G6 harness ships verified extractors for them, and the
-protected workflow supplies the expected authority, opaque environment ID, and
-failure-domain class separately, so the verifier rejects relabeled evidence.
+inputs, and while any required metric keeps that marking the verifier cannot
+award a final G6 pass — it emits the failure reason
+`final pass requires verified metric producers`. Each such metric must
+graduate to an artifact `derivation` or an attested producer in a later
+contract revision before its evidence can become production G6 acceptance.
+The protected workflow supplies the expected authority, opaque environment
+ID, and failure-domain class separately, so the verifier rejects relabeled
+evidence.
 
 A final pass also requires a `production_readiness` authority, a multi-host,
 multi-zone, or multi-region topology, and the topology role requirements

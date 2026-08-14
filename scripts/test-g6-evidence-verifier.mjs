@@ -80,8 +80,29 @@ const baseVerdict = verifyG6({
   expectedEnvironmentId: "g6-12345678",
   expectedFailureDomainClass: "multi_host",
 });
-if (!baseVerdict.passed)
-  throw new Error("positive G6 evidence fixture did not pass");
+if (baseVerdict.passed) {
+  throw new Error(
+    "positive fixture must not produce a final G6 pass while declared metrics remain",
+  );
+}
+const unresolvedReasons = baseVerdict.failure_reasons.filter(
+  (reason) => reason !== "final pass requires verified metric producers",
+);
+if (unresolvedReasons.length > 0) {
+  throw new Error(
+    `positive fixture has unresolved failure reasons: ${unresolvedReasons.join("; ")}`,
+  );
+}
+for (const [name, result] of Object.entries(baseVerdict.measurement_results)) {
+  if (!result.passed) {
+    throw new Error(`positive fixture metric did not pass: ${name}`);
+  }
+}
+for (const [name, result] of Object.entries(baseVerdict.observation_results)) {
+  if (!result.passed) {
+    throw new Error(`positive fixture observation did not pass: ${name}`);
+  }
+}
 
 const fixtureDirectory = new URL("../testdata/g6/", import.meta.url);
 const cases = readdirSync(fixtureDirectory)
@@ -152,5 +173,5 @@ for (const name of cases) {
 }
 
 console.log(
-  `G6 verifier accepted the positive fixture and rejected ${cases.length} negative fixtures`,
+  `G6 verifier computed the positive fixture verdict (final pass blocked by declared metrics) and rejected ${cases.length} negative fixtures`,
 );

@@ -897,6 +897,12 @@ export function verifyG6({
       "topology has too few independent failure-domain aliases",
     );
   }
+  const declaredMetrics = Object.values(slo.metrics).filter(
+    (metric) => metric.declared_by_harness === true,
+  );
+  if (declaredMetrics.length > 0) {
+    failureReasons.push("final pass requires verified metric producers");
+  }
 
   for (const [role, requirement] of Object.entries(
     slo.topology.role_requirements,

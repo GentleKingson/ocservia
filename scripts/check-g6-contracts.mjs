@@ -136,6 +136,13 @@ if (!acceptanceReadme.includes("role requirements")) {
 if (!acceptanceReadme.includes("declared_by_harness")) {
   fail("acceptance README must document the harness-declared trust boundary");
 }
+if (
+  !acceptanceReadme.includes("final pass requires verified metric producers")
+) {
+  fail(
+    "acceptance README must document that declared metrics cannot award a final pass",
+  );
+}
 
 const publicCapacity = read("docs/development/p1-resilience-capacity.md");
 const conflictingLongGate =
