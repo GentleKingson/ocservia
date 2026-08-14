@@ -4,9 +4,11 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 WORKFLOW="${ROOT}/.github/workflows/real-e2e.yml"
 COMPOSE_FILE="${ROOT}/deploy/real-e2e/controller.compose.yaml"
+TOOLCHAINS="${ROOT}/toolchains.lock"
+CONTROL_DOCKERFILE="${ROOT}/control-plane/Dockerfile"
 
-ruby -r yaml - "${WORKFLOW}" "${COMPOSE_FILE}" <<'RUBY'
-workflow_path, compose_path = ARGV
+ruby -r yaml - "${WORKFLOW}" "${COMPOSE_FILE}" "${TOOLCHAINS}" "${CONTROL_DOCKERFILE}" <<'RUBY'
+workflow_path, compose_path, toolchains_path, control_dockerfile_path = ARGV
 workflow = YAML.safe_load(File.read(workflow_path), aliases: true)
 compose = YAML.safe_load(File.read(compose_path), aliases: true)
 
@@ -50,6 +52,13 @@ reject("transportd must use default Internet relay discovery") unless transport.
 control = compose.fetch("services").fetch("control-plane")
 reject("test-only development auth must remain loopback-only") unless control.fetch("environment").fetch("OCSERV_HTTP_ADDRESS") == "127.0.0.1:8080"
 reject("Control Plane HTTP must not be published from the Controller VM") if control.key?("ports")
+
+go_version = File.readlines(toolchains_path, chomp: true).grep(/^go=/).fetch(0).delete_prefix("go=")
+builder = File.foreach(control_dockerfile_path).find { |line| line.start_with?("FROM golang:") }
+reject("Control Plane Dockerfile must contain a Go builder image") unless builder
+match = builder.match(/\AFROM golang:([0-9]+\.[0-9]+\.[0-9]+)-bookworm@sha256:([0-9a-f]{64}) AS build\s*\z/)
+reject("Control Plane Go builder must use a digest-pinned bookworm image") unless match
+reject("Control Plane Go builder must match toolchains.lock") unless match[1] == go_version
 RUBY
 
 if grep -En -- 'transportd-stub|OCSERV_LOCAL_SIMULATOR' "${WORKFLOW}" "${COMPOSE_FILE}" \
