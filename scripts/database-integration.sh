@@ -231,8 +231,11 @@ for major in 17 18; do
 
   # Scheduler leadership tests need an idle lease, so they run before any
   # long-lived control-plane process acquires leadership on this database.
+  # -race is required here: these are the only tests that exercise the
+  # coordination package against a database, so this is where the race
+  # detector actually observes renewal, loss, and session snapshotting.
   (cd "${ROOT}/control-plane" && OCSERV_TEST_DATABASE_URL="${runtime_url}" \
-    go test -p 1 ./internal/coordination -run Integration -count=1)
+    go test -p 1 -race ./internal/coordination -run Integration -count=1)
 
   OCSERV_ENVIRONMENT=test OCSERV_HTTP_ADDRESS="127.0.0.1:${api_port}" \
     OCSERV_DATABASE_URL="${runtime_url}" "${BIN}" --role=all \

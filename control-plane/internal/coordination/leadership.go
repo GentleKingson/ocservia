@@ -61,15 +61,13 @@ type Fence interface {
 	AssertCurrent(ctx context.Context, pool *pgxpool.Pool) error
 }
 
-// Session is one acquired leadership term. It is safe for concurrent use.
+// Session is one acquired leadership term. It is immutable after Acquire, so
+// it can be shared across goroutines freely; the local lease deadline is
+// runner state, owned and updated by the Runner that acquired the session.
 type Session struct {
 	identity Identity
 	epoch    int64
 	leaseTTL time.Duration
-	// localExpiry is a monotonic local deadline derived from the last
-	// successful acquire or renew. Once passed, the process must stop
-	// starting new fenced work even before PostgreSQL confirms the loss.
-	localExpiry time.Time
 }
 
 // Acquire takes the scheduler leadership lease. A takeover succeeds only
@@ -90,7 +88,7 @@ func Acquire(ctx context.Context, pool *pgxpool.Pool, identity Identity, leaseTT
 	if err != nil {
 		return nil, fmt.Errorf("coordination: acquire scheduler leadership: %w", err)
 	}
-	return &Session{identity: identity, epoch: epoch, leaseTTL: leaseTTL, localExpiry: time.Now().Add(leaseTTL)}, nil
+	return &Session{identity: identity, epoch: epoch, leaseTTL: leaseTTL}, nil
 }
 
 // Epoch returns the fencing epoch of this term. Epochs increase monotonically
@@ -100,14 +98,10 @@ func (s *Session) Epoch() int64 { return s.epoch }
 // Identity returns the owner identity bound to this term.
 func (s *Session) Identity() Identity { return s.identity }
 
-// ExpiredLocally reports whether the local monotonic deadline has passed and
-// the process must stop starting new fenced work.
-func (s *Session) ExpiredLocally(now time.Time) bool {
-	return !now.Before(s.localExpiry)
-}
-
 // Renew extends the lease for the current term. It fails when leadership was
 // taken over or the lease expired; the caller must cancel its leader context.
+// Renew never mutates the immutable session; the local deadline is advanced
+// by the owning Runner, anchored before this call started.
 func (s *Session) Renew(ctx context.Context, pool *pgxpool.Pool) error {
 	tag, err := pool.Exec(ctx, `UPDATE scheduler_leadership
 		SET lease_until=now()+$4::interval, updated_at=now()
@@ -119,19 +113,22 @@ func (s *Session) Renew(ctx context.Context, pool *pgxpool.Pool) error {
 	if tag.RowsAffected() != 1 {
 		return ErrNotLeader
 	}
-	s.localExpiry = time.Now().Add(s.leaseTTL)
 	return nil
 }
 
 // AssertLeader verifies inside the caller's transaction, immediately before
 // commit, that this session still owns an unexpired lease with the exact
-// identity and fencing epoch. The row share lock serializes the commit
-// against a concurrent takeover update, so an assert that succeeds cannot be
-// superseded before the fenced transaction commits.
+// identity and fencing epoch. The expiry check must use clock_timestamp(),
+// the real wall clock: now() freezes at transaction start, so a lease that
+// expired while a long fenced transaction was open would still pass an
+// now()-based assert. The row share lock serializes the commit against a
+// concurrent takeover update, so an assert that succeeds cannot be
+// superseded before the fenced transaction commits. A rejected assert takes
+// no row lock, so it never blocks a legitimate takeover.
 func (s *Session) AssertLeader(ctx context.Context, tx pgx.Tx) error {
 	var one int
 	err := tx.QueryRow(ctx, `SELECT 1 FROM scheduler_leadership
-		WHERE id=1 AND instance_id=$1 AND incarnation=$2 AND epoch=$3 AND lease_until>now()
+		WHERE id=1 AND instance_id=$1 AND incarnation=$2 AND epoch=$3 AND lease_until>clock_timestamp()
 		FOR SHARE OF scheduler_leadership`,
 		s.identity.InstanceID, s.identity.Incarnation, s.epoch).Scan(&one)
 	if errors.Is(err, pgx.ErrNoRows) {

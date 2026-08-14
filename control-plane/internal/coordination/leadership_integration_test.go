@@ -233,3 +233,109 @@ func TestFencedExecRejectsStaleLeaderIntegration(t *testing.T) {
 		t.Fatalf("stale fenced exec must fail with ErrNotLeader, got %v", err)
 	}
 }
+
+// A fenced transaction that began while the lease was valid must still be
+// rejected when the lease expires naturally before the pre-commit assert
+// runs: the assert compares against the real wall clock, not the
+// transaction clock frozen at BEGIN.
+func TestLeadershipAssertRejectsMidTransactionExpiryIntegration(t *testing.T) {
+	pool := testPool(t)
+	resetLeadership(t, pool)
+	ctx := context.Background()
+
+	leader, err := Acquire(ctx, pool, mustIdentity(t), 1200*time.Millisecond)
+	if err != nil {
+		t.Fatalf("acquire: %v", err)
+	}
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	defer tx.Rollback(ctx)
+	// Pin the transaction start while the lease is still valid.
+	if _, err := tx.Exec(ctx, `SELECT 1`); err != nil {
+		t.Fatalf("pin transaction start: %v", err)
+	}
+	// Keep the transaction open until the lease lapses naturally; forcing an
+	// expiry would not reproduce the frozen-transaction-clock hazard.
+	time.Sleep(1600 * time.Millisecond)
+	if err := leader.AssertLeader(ctx, tx); !errors.Is(err, ErrNotLeader) {
+		t.Fatalf("assert after natural mid-transaction expiry must fail with ErrNotLeader, got %v", err)
+	}
+
+	// The rejected assert must not hold the leadership row: a legitimate
+	// takeover completes while the stale transaction is still open, instead
+	// of queueing behind an erroneous FOR SHARE until rollback.
+	takeoverDone := make(chan error, 1)
+	go func() {
+		_, err := Acquire(context.Background(), pool, mustIdentity(t), 10*time.Second)
+		takeoverDone <- err
+	}()
+	select {
+	case err := <-takeoverDone:
+		if err != nil {
+			t.Fatalf("takeover after rejected assert: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("rejected assert must not block takeover until the stale transaction rolls back")
+	}
+}
+
+// Session snapshots, background renewal, and leadership loss touch the same
+// runner state from different goroutines. Under go test -race this test
+// fails if any of those accesses is unsynchronized, and it verifies that the
+// runner reacquires with strictly higher epochs through continuous
+// leadership churn.
+func TestRunnerConcurrentWithSessionAndLossIntegration(t *testing.T) {
+	pool := testPool(t)
+	resetLeadership(t, pool)
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+
+	runner := NewRunner(pool, mustIdentity(t), 2*time.Second, 250*time.Millisecond, nil)
+	defer runner.Stop()
+
+	rivalIDs := []Identity{mustIdentity(t), mustIdentity(t), mustIdentity(t)}
+	rivalDone := make(chan struct{})
+	go func() {
+		defer close(rivalDone)
+		for _, rival := range rivalIDs {
+			if _, err := pool.Exec(context.Background(), `UPDATE scheduler_leadership SET lease_until=now()`); err != nil {
+				return
+			}
+			// Losing the race against the runner under test is fine; the
+			// point is to keep leadership changing underneath it.
+			if _, err := Acquire(context.Background(), pool, rival, 600*time.Millisecond); err == nil {
+				time.Sleep(700 * time.Millisecond)
+			}
+		}
+	}()
+
+	var lastEpoch int64
+	deadline := time.Now().Add(6 * time.Second)
+	for time.Now().Before(deadline) {
+		err := runner.WithSession(ctx, func(sessionCtx context.Context, session *Session) error {
+			if session.Epoch() < lastEpoch {
+				return errors.New("runner exposed an epoch lower than a previous session")
+			}
+			lastEpoch = session.Epoch()
+			select {
+			case <-sessionCtx.Done():
+				return nil
+			case <-time.After(40 * time.Millisecond):
+				return nil
+			}
+		})
+		if err != nil && !errors.Is(err, ErrLeadershipLost) && !errors.Is(err, ErrNotLeader) {
+			t.Fatalf("with session: %v", err)
+		}
+	}
+	<-rivalDone
+
+	err := runner.WithSession(ctx, func(sessionCtx context.Context, session *Session) error {
+		return session.AssertCurrent(sessionCtx, pool)
+	})
+	if err != nil {
+		t.Fatalf("reacquire after churn: %v", err)
+	}
+}
