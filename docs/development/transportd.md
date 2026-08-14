@@ -29,8 +29,15 @@ Each socket path must be a non-symlink Unix socket with exact UID/GID/mode under
 trusted, non-writable ancestry, and clients reject a pathname identity change
 during connection. The startup-only `--approved-binding NODE_UUID=ENDPOINT_ID`
 and `--revoked-endpoint ENDPOINT_ID` flags remain available for isolated tests
-and rollback. Endpoint IDs are 32-byte lowercase hexadecimal public
-identifiers and node IDs are UUIDv7 values.
+and observation-only rollback. Static bindings negotiate protocol 1.0 with no
+session grant and only the explicit status, version, sessions, IP-ban, and
+configuration-fingerprint read capabilities advertised by the Agent. Telemetry
+continues, but command dispatch, configuration and certificate operations, and
+artifact fetch or consumption are denied before transportd opens an Agent
+stream. Restoring management operations requires `--trust-socket` and a valid
+Controller-signed protocol 1.1 session grant; transportd cannot mint one.
+Endpoint IDs are 32-byte lowercase hexadecimal public identifiers and node IDs
+are UUIDv7 values.
 
 Before an I04-to-I05 cutover, inventory every startup `--approved-binding` and
 keep the I04 transport running while migration 000004 is applied. The old
@@ -83,12 +90,14 @@ classes. Relay credentials remain defense in depth and are not an Agent
 principal or a substitute for reserved Controller capacity.
 Connection queries report the agent instance, selected direct
 or relay path, path detail, RTT, connection time, and last-seen time.
-They also report the Controller-negotiated capability set, nonzero
-authorization revision, and signed-session expiry. In database-backed mode,
-transportd accepts those values only from the Controller handshake response;
-it cannot manufacture a grant. Command dispatch checks the retained capability,
-revision, and expiry before opening a stream. A higher authoritative trust
-revision closes a connection retaining an older session grant.
+They also report the negotiated capability set, authorization revision, and
+signed-session expiry. Static read-only sessions report revision zero and no
+expiry. In database-backed mode, transportd accepts a nonzero revision and
+expiry only from the Controller handshake response; it cannot manufacture a
+grant. Command dispatch checks the explicit session mode, retained capability,
+revision, and expiry before opening a stream. Artifact paths apply the same
+session-mode fence. A higher authoritative trust revision closes a connection
+retaining an older session grant.
 
 Trust updates report `applied`, `stale`, or `rejected` together with the exact
 retained state and revision. Revoked EndpointIDs remain tombstoned with their
@@ -108,6 +117,9 @@ path, and restart the Go worker so its watch reconnects. Active Iroh connections
 will close and agents must reconnect after the real transport is restored.
 Do not roll back migration `000004_enrollment_trust` while enrolled nodes must
 remain manageable. The database rollback removes enrollment tokens, endpoint
-bindings, and capability approvals. Restore the startup binding flags before
+bindings, and capability approvals. Static startup bindings preserve
+observation only; they cannot execute commands or move configuration,
+certificate, or artifact state. Restore the startup binding flags before
 stopping the trust service, then roll back the migration only after preserving
-the required public endpoint-to-node mapping.
+the required public endpoint-to-node mapping. Restore trusted Controller
+authority and a valid signed session before resuming management operations.

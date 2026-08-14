@@ -33,6 +33,9 @@ use ocservia_contracts::generated::ocserv::platform::agent::v1::{
     SessionHandshakeResponse, SessionObservation, TelemetryBatch, TelemetryDropCounters,
     TelemetryPriority, UserObservation, command_envelope,
 };
+use ocservia_contracts::session::{
+    READ_ONLY_SESSION_CAPABILITIES, is_read_only_session_capability,
+};
 use prost::Message;
 use sha2::Digest;
 use uuid::Uuid;
@@ -136,7 +139,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                 command_keys: &command_keys,
                 sealing_keys: &config.sealing_keys,
             };
-            match connect_once(&endpoint, controller, &mut session).await {
+            match connect_once(&endpoint, EndpointAddr::new(controller), &mut session).await {
                 Ok(()) => attempt = 0,
                 Err(error) => {
                     tracing::warn!(error = %error, attempt, "controller connection ended");
@@ -319,48 +322,87 @@ struct ActiveSessionAuthority {
     expires_at_unix_seconds: i64,
 }
 
+enum AgentSessionMode {
+    ReadOnly {
+        negotiated_capabilities: HashSet<String>,
+    },
+    AuthorizedV11(ActiveSessionAuthority),
+}
+
+impl AgentSessionMode {
+    fn name(&self) -> &'static str {
+        match self {
+            Self::ReadOnly { .. } => "read_only_v1_0",
+            Self::AuthorizedV11(_) => "authorized_v1_1",
+        }
+    }
+
+    fn capability_count(&self) -> usize {
+        match self {
+            Self::ReadOnly {
+                negotiated_capabilities,
+            } => negotiated_capabilities.len(),
+            Self::AuthorizedV11(authority) => authority.negotiated_capabilities.len(),
+        }
+    }
+
+    fn expires_at_unix_seconds(&self) -> Option<i64> {
+        match self {
+            Self::ReadOnly { .. } => None,
+            Self::AuthorizedV11(authority) => Some(authority.expires_at_unix_seconds),
+        }
+    }
+}
+
+async fn wait_for_session_expiry(
+    session_mode: &AgentSessionMode,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    if let Some(expires_at) = session_mode.expires_at_unix_seconds() {
+        let lifetime = u64::try_from(expires_at.saturating_sub(unix_seconds()?))?;
+        tokio::time::sleep(Duration::from_secs(lifetime)).await;
+    } else {
+        std::future::pending::<()>().await;
+    }
+    Ok(())
+}
+
 fn supported_capabilities() -> Vec<String> {
-    [
-        "ocserv.status.read",
-        "ocserv.version.read",
-        "ocserv.sessions.read",
-        "ocserv.ip_bans.read",
-        "ocserv.config_fingerprint.read",
-        "synthetic.noop",
-        "synthetic.echo",
-        "command.semantic-hash.v1",
-        "command.strict-wire.v1",
-        "privd_result_attestation_v1",
-        "ocserv.session.disconnect",
-        "ocserv.session.terminate",
-        "ocserv.ip_ban.remove",
-        "ocserv.service.reload",
-        "ocserv.users.write",
-        "ocserv.groups.write",
-        "ocserv.config.plan",
-        "ocserv.config.apply",
-        "config.auth",
-        "config.tls",
-        "config.sessions",
-        "config.network",
-        "config.limits",
-        "config.runtime",
-        "ocserv.certificate.issue",
-        "ocserv.certificate.revoke",
-    ]
-    .into_iter()
-    .map(str::to_owned)
-    .collect()
+    READ_ONLY_SESSION_CAPABILITIES
+        .iter()
+        .copied()
+        .chain([
+            "synthetic.noop",
+            "synthetic.echo",
+            "command.semantic-hash.v1",
+            "command.strict-wire.v1",
+            "privd_result_attestation_v1",
+            "ocserv.session.disconnect",
+            "ocserv.session.terminate",
+            "ocserv.ip_ban.remove",
+            "ocserv.service.reload",
+            "ocserv.users.write",
+            "ocserv.groups.write",
+            "ocserv.config.plan",
+            "ocserv.config.apply",
+            "config.auth",
+            "config.tls",
+            "config.sessions",
+            "config.network",
+            "config.limits",
+            "config.runtime",
+            "ocserv.certificate.issue",
+            "ocserv.certificate.revoke",
+        ])
+        .map(str::to_owned)
+        .collect()
 }
 
 async fn connect_once(
     endpoint: &Endpoint,
-    controller: EndpointId,
+    controller: EndpointAddr,
     session: &mut SessionContext<'_>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let connection = endpoint
-        .connect(EndpointAddr::new(controller), AGENT_ALPN)
-        .await?;
+    let connection = endpoint.connect(controller.clone(), AGENT_ALPN).await?;
     let supported_capabilities = supported_capabilities();
     let handshake = SessionHandshake {
         protocol_major: 1,
@@ -404,30 +446,37 @@ async fn connect_once(
     if response.result != i32::from(HandshakeResult::Accepted) {
         return Err(invalid("controller refused agent handshake").into());
     }
-    let authority = verify_session_authority(
+    let session_mode = negotiate_session_mode(
         &response,
         &supported_capabilities,
         session.node_id,
         session.endpoint_id,
         session.command_keys,
     )?;
-    tracing::info!(controller = %controller, "agent session accepted");
+    tracing::info!(
+        controller = %controller.id,
+        session_mode = session_mode.name(),
+        negotiated_capabilities = session_mode.capability_count(),
+        "agent session accepted"
+    );
     let mut heartbeat = tokio::time::interval(Duration::from_secs(30));
-    let session_lifetime = u64::try_from(
-        authority
-            .expires_at_unix_seconds
-            .saturating_sub(unix_seconds()?),
-    )?;
-    let session_expiry = tokio::time::sleep(Duration::from_secs(session_lifetime));
+    let session_expiry = wait_for_session_expiry(&session_mode);
     tokio::pin!(session_expiry);
     let mut sequence = 0_u64;
     loop {
         tokio::select! {
             _ = connection.closed() => return Ok(()),
-            () = &mut session_expiry => return Err(invalid("Controller session grant expired").into()),
+            expiry = &mut session_expiry => {
+                expiry?;
+                return Err(invalid("Controller session grant expired").into());
+            },
             stream = connection.accept_bi() => {
                 let (send,recv)=stream?;
-                handle_command_stream(send,recv,session,&authority).await?;
+                let AgentSessionMode::AuthorizedV11(authority) = &session_mode else {
+                    connection.close(VarInt::from_u32(0x107), b"read-only session stream denied");
+                    return Err(invalid("read-only session received a command or artifact stream").into());
+                };
+                handle_command_stream(send,recv,session,authority).await?;
             },
             _ = heartbeat.tick() => {
                 let observations=session.privd.snapshot().await?;
@@ -448,25 +497,15 @@ async fn connect_once(
     }
 }
 
-fn verify_session_authority(
+fn negotiate_session_mode(
     response: &SessionHandshakeResponse,
     supported_capabilities: &[String],
     node_id: Uuid,
     endpoint_id: EndpointId,
     command_keys: &ControllerCommandKeyring,
-) -> Result<ActiveSessionAuthority, Box<dyn std::error::Error + Send + Sync>> {
-    if response.protocol_major != 1 || response.protocol_minor != 1 {
-        return Err(invalid("Controller session protocol is not mutation-capable").into());
-    }
-    let grant = response
-        .session_grant
-        .as_ref()
-        .ok_or_else(|| invalid("Controller session grant is required"))?;
-    if grant.protocol_major != response.protocol_major
-        || grant.protocol_minor != response.protocol_minor
-        || grant.negotiated_capabilities != response.negotiated_capabilities
-    {
-        return Err(invalid("Controller session grant response mismatch").into());
+) -> Result<AgentSessionMode, Box<dyn std::error::Error + Send + Sync>> {
+    if response.protocol_major != 1 || response.protocol_minor > 1 {
+        return Err(invalid("Controller session protocol is unsupported").into());
     }
     let supported = supported_capabilities.iter().collect::<HashSet<_>>();
     let mut previous: Option<&str> = None;
@@ -477,6 +516,29 @@ fn verify_session_authority(
             return Err(invalid("Controller negotiated capability set is invalid").into());
         }
         previous = Some(capability);
+    }
+    if response.protocol_minor == 0 {
+        if response.session_grant.is_some()
+            || response
+                .negotiated_capabilities
+                .iter()
+                .any(|capability| !is_read_only_session_capability(capability))
+        {
+            return Err(invalid("Controller read-only session is invalid").into());
+        }
+        return Ok(AgentSessionMode::ReadOnly {
+            negotiated_capabilities: response.negotiated_capabilities.iter().cloned().collect(),
+        });
+    }
+    let grant = response
+        .session_grant
+        .as_ref()
+        .ok_or_else(|| invalid("Controller session grant is required"))?;
+    if grant.protocol_major != response.protocol_major
+        || grant.protocol_minor != response.protocol_minor
+        || grant.negotiated_capabilities != response.negotiated_capabilities
+    {
+        return Err(invalid("Controller session grant response mismatch").into());
     }
     let now = unix_seconds()?;
     let VerifiedSessionGrant {
@@ -492,11 +554,11 @@ fn verify_session_authority(
     if negotiated_capabilities != response.negotiated_capabilities {
         return Err(invalid("verified session capabilities do not match response").into());
     }
-    Ok(ActiveSessionAuthority {
+    Ok(AgentSessionMode::AuthorizedV11(ActiveSessionAuthority {
         negotiated_capabilities: negotiated_capabilities.into_iter().collect(),
         authorization_revision,
         expires_at_unix_seconds: expires_at_seconds,
-    })
+    }))
 }
 
 fn unix_seconds() -> Result<i64, Box<dyn std::error::Error + Send + Sync>> {
@@ -1868,12 +1930,22 @@ fn invalid(detail: &str) -> io::Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ed25519_dalek::{Signer as _, SigningKey};
+    use futures_util::StreamExt as _;
     use ocservia_agent_protocol::{
-        DesiredEffectObservation, PrivdRequest, read_frame, write_frame,
+        ConfigFingerprint, DesiredEffectObservation, GroupList, IpBanList, OcservVersion,
+        PrivdRequest, ServiceStatus, SessionList, UserList, read_frame, write_frame,
     };
     use ocservia_contracts::generated::ocserv::platform::agent::v1::{
-        ConfigApply, ConfigPlan, SealedSecretV1, UserPasswordRotate,
+        ArtifactGrantV1, ConfigApply, ConfigPlan, SealedSecretV1, SessionGrantV1,
+        SessionGrantVersion, UserPasswordRotate,
     };
+    use ocservia_contracts::generated::ocserv::platform::transport::v1::{
+        ConsumeArtifactRequest, FetchArtifactRequest, GetNodeConnectionRequest, SendCommandRequest,
+        TransportEventType, WatchEventsRequest, transport_service_server::TransportService,
+    };
+    use ocservia_transportd::{IdentityPolicy, IrohTransportService};
+    use std::collections::HashMap;
     use std::os::unix::fs::PermissionsExt as _;
 
     fn test_sealing_keys() -> Vec<SealingKeyDescriptorV1> {
@@ -1917,6 +1989,354 @@ mod tests {
             enrollment_environment: None,
             sealing_keys: test_sealing_keys(),
         }
+    }
+
+    fn test_command_keyring() -> ControllerCommandKeyring {
+        ControllerCommandKeyring::new([SigningKey::from_bytes(&[7; 32]).verifying_key()])
+            .expect("test command keyring")
+    }
+
+    #[test]
+    fn agent_accepts_only_explicit_grantless_read_only_sessions() {
+        let node_id = Uuid::now_v7();
+        let endpoint_id = iroh::SecretKey::generate().public();
+        let response = SessionHandshakeResponse {
+            result: HandshakeResult::Accepted.into(),
+            protocol_major: 1,
+            protocol_minor: 0,
+            max_message_size: 1024 * 1024,
+            controller_version: "test".to_owned(),
+            negotiated_capabilities: READ_ONLY_SESSION_CAPABILITIES
+                .iter()
+                .map(|capability| (*capability).to_owned())
+                .collect(),
+            session_grant: None,
+        };
+        let mode = negotiate_session_mode(
+            &response,
+            &supported_capabilities(),
+            node_id,
+            endpoint_id,
+            &test_command_keyring(),
+        )
+        .expect("grantless read-only mode accepted");
+        assert!(matches!(mode, AgentSessionMode::ReadOnly { .. }));
+
+        for capability in ["synthetic.noop", "future.feature.read"] {
+            let mut invalid = response.clone();
+            invalid.negotiated_capabilities = vec![capability.to_owned()];
+            assert!(
+                negotiate_session_mode(
+                    &invalid,
+                    &supported_capabilities(),
+                    node_id,
+                    endpoint_id,
+                    &test_command_keyring(),
+                )
+                .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn agent_rejects_grantless_protocol_v1_1() {
+        let response = SessionHandshakeResponse {
+            result: HandshakeResult::Accepted.into(),
+            protocol_major: 1,
+            protocol_minor: 1,
+            max_message_size: 1024 * 1024,
+            controller_version: "test".to_owned(),
+            negotiated_capabilities: vec!["ocserv.status.read".to_owned()],
+            session_grant: None,
+        };
+        assert!(
+            negotiate_session_mode(
+                &response,
+                &supported_capabilities(),
+                Uuid::now_v7(),
+                iroh::SecretKey::generate().public(),
+                &test_command_keyring(),
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn agent_rejects_invalid_and_accepts_valid_protocol_v1_1_grant_signatures() {
+        let node_id = Uuid::now_v7();
+        let endpoint_id = iroh::SecretKey::generate().public();
+        let signing_key = SigningKey::from_bytes(&[7; 32]);
+        let capabilities = vec!["ocserv.status.read".to_owned()];
+        let now = SystemTime::now();
+        let mut response = SessionHandshakeResponse {
+            result: HandshakeResult::Accepted.into(),
+            protocol_major: 1,
+            protocol_minor: 1,
+            max_message_size: 1024 * 1024,
+            controller_version: "test".to_owned(),
+            negotiated_capabilities: capabilities.clone(),
+            session_grant: Some(SessionGrantV1 {
+                version: SessionGrantVersion::V1.into(),
+                key_id: ocservia_command_authorization::verification_key_id(
+                    &signing_key.verifying_key(),
+                ),
+                protocol_major: 1,
+                protocol_minor: 1,
+                node_id: node_id.as_bytes().to_vec(),
+                endpoint_id: endpoint_id.as_bytes().to_vec(),
+                authorization_revision: 1,
+                negotiated_capabilities: capabilities,
+                issued_at: Some((now - Duration::from_secs(1)).into()),
+                expires_at: Some((now + Duration::from_secs(30)).into()),
+                signature: vec![0; 64],
+            }),
+        };
+        let keyring = ControllerCommandKeyring::new([signing_key.verifying_key()])
+            .expect("test command keyring");
+        assert!(
+            negotiate_session_mode(
+                &response,
+                &supported_capabilities(),
+                node_id,
+                endpoint_id,
+                &keyring,
+            )
+            .is_err()
+        );
+        let grant = response.session_grant.as_mut().expect("session grant");
+        let claims = ocservia_command_authorization::session_grant_claims_v1(grant)
+            .expect("session grant claims");
+        let canonical = ocservia_command_authorization::canonical_session_grant_v1(&claims)
+            .expect("canonical session grant");
+        grant.signature = signing_key.sign(&canonical).to_bytes().to_vec();
+        assert!(matches!(
+            negotiate_session_mode(
+                &response,
+                &supported_capabilities(),
+                node_id,
+                endpoint_id,
+                &keyring,
+            )
+            .expect("valid signed protocol 1.1 session"),
+            AgentSessionMode::AuthorizedV11(_)
+        ));
+    }
+
+    async fn serve_snapshot(listener: tokio::net::UnixListener) {
+        let mut handlers = tokio::task::JoinSet::new();
+        for _ in 0..7 {
+            let (mut stream, _) = listener.accept().await.expect("accept snapshot request");
+            handlers.spawn(async move {
+                let request: PrivdRequest =
+                    read_frame(&mut stream).await.expect("snapshot request");
+                let result = match request.operation {
+                    Some(privd_request::Operation::ServiceStatus(_)) => {
+                        privd_response::Result::ServiceStatus(ServiceStatus::default())
+                    }
+                    Some(privd_request::Operation::OcservVersion(_)) => {
+                        privd_response::Result::OcservVersion(OcservVersion::default())
+                    }
+                    Some(privd_request::Operation::SessionList(_)) => {
+                        privd_response::Result::SessionList(SessionList::default())
+                    }
+                    Some(privd_request::Operation::IpBanList(_)) => {
+                        privd_response::Result::IpBanList(IpBanList::default())
+                    }
+                    Some(privd_request::Operation::ConfigFingerprint(_)) => {
+                        privd_response::Result::ConfigFingerprint(ConfigFingerprint::default())
+                    }
+                    Some(privd_request::Operation::UserList(_)) => {
+                        privd_response::Result::UserList(UserList::default())
+                    }
+                    Some(privd_request::Operation::GroupList(_)) => {
+                        privd_response::Result::GroupList(GroupList::default())
+                    }
+                    _ => panic!("unexpected snapshot operation"),
+                };
+                write_frame(
+                    &mut stream,
+                    &PrivdResponse {
+                        request_id: request.request_id,
+                        privileged_result_proof: None,
+                        result: Some(result),
+                    },
+                )
+                .await
+                .expect("snapshot response");
+            });
+        }
+        while let Some(result) = handlers.join_next().await {
+            result.expect("snapshot handler");
+        }
+    }
+
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)]
+    async fn real_agent_static_session_delivers_telemetry_and_denies_control_streams() {
+        let temp_root = if cfg!(target_os = "macos") {
+            "/private/tmp"
+        } else {
+            "/tmp"
+        };
+        let directory = PathBuf::from(temp_root).join(format!("ocsa-{}", Uuid::now_v7().simple()));
+        std::fs::create_dir(&directory).expect("create static session fixture");
+        let privd_socket = PathBuf::from(format!("/tmp/ocsm-{}.sock", Uuid::now_v7().simple()));
+        let privd_listener =
+            tokio::net::UnixListener::bind(&privd_socket).expect("bind privd snapshot fixture");
+        let privd_server = tokio::spawn(serve_snapshot(privd_listener));
+        let node_id = Uuid::now_v7();
+        let agent_key = iroh::SecretKey::generate();
+        let controller_key = iroh::SecretKey::generate();
+        let policy = IdentityPolicy::new(
+            HashMap::from([(agent_key.public(), node_id.as_bytes().to_vec())]),
+            HashSet::new(),
+        );
+        let service = IrohTransportService::new_with_policy(16, policy.clone());
+        let router = ocservia_transportd::build_router(
+            controller_key,
+            RelayMode::Disabled,
+            policy,
+            &service,
+        )
+        .await
+        .expect("build static transportd");
+        let controller = router.endpoint().addr();
+        let mut events = service
+            .watch_events(tonic::Request::new(WatchEventsRequest {
+                after_event_id: Vec::new(),
+            }))
+            .await
+            .expect("watch transport events")
+            .into_inner();
+        let journal_path = directory.join("agent.db");
+        let endpoint = Endpoint::builder(presets::Minimal)
+            .secret_key(agent_key.clone())
+            .relay_mode(RelayMode::Disabled)
+            .bind()
+            .await
+            .expect("build real Agent endpoint");
+        let mut run = tokio::spawn({
+            let journal_path = journal_path.clone();
+            let agent_privd_socket = privd_socket.clone();
+            async move {
+                let privd = PrivdClient::new(agent_privd_socket, Duration::from_secs(2))
+                    .expect("privd client");
+                let mut journal = Journal::open(&journal_path).expect("Agent journal");
+                let mut command_executor =
+                    CommandExecutor::new(Journal::open(&journal_path).expect("executor journal"));
+                let command_keys = test_command_keyring();
+                let sealing_keys = test_sealing_keys();
+                let mut session = SessionContext {
+                    node_id,
+                    endpoint_id: agent_key.public(),
+                    privd: &privd,
+                    journal: &mut journal,
+                    command_executor: &mut command_executor,
+                    boot_id: "static-test-boot",
+                    os_release: "static-test-os",
+                    agent_instance_id: Uuid::now_v7(),
+                    command_keys: &command_keys,
+                    sealing_keys: &sealing_keys,
+                };
+                let result = connect_once(&endpoint, controller, &mut session).await;
+                endpoint.close().await;
+                result
+            }
+        });
+
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                tokio::select! {
+                    result = &mut run => panic!("Agent ended before telemetry: {result:?}"),
+                    event = events.next() => {
+                        let event = event.expect("event stream remains open").expect("valid event");
+                        if event.r#type == i32::from(TransportEventType::Telemetry) {
+                            return;
+                        }
+                    }
+                }
+            }
+        })
+        .await
+        .expect("real Agent registered and delivered telemetry");
+        let metadata = service
+            .get_node_connection(tonic::Request::new(GetNodeConnectionRequest {
+                node_id: node_id.as_bytes().to_vec(),
+            }))
+            .await
+            .expect("query static Agent session")
+            .into_inner();
+        assert_eq!(metadata.authorization_revision, 0);
+        assert!(metadata.session_expires_at.is_none());
+        assert_eq!(
+            metadata.negotiated_capabilities,
+            READ_ONLY_SESSION_CAPABILITIES
+                .iter()
+                .map(|capability| (*capability).to_owned())
+                .collect::<Vec<_>>()
+        );
+
+        let command = CommandEnvelope {
+            node_id: node_id.as_bytes().to_vec(),
+            traceparent: "00-11111111111111111111111111111111-2222222222222222-01".to_owned(),
+            required_capability: "ocserv.status.read".to_owned(),
+            expires_at: Some((SystemTime::now() + Duration::from_secs(30)).into()),
+            ..CommandEnvelope::default()
+        };
+        let command_error = service
+            .send_command(tonic::Request::new(SendCommandRequest {
+                node_id: node_id.as_bytes().to_vec(),
+                command_envelope: command.encode_to_vec(),
+            }))
+            .await
+            .expect_err("read-only command dispatch denied");
+        assert_eq!(command_error.code(), tonic::Code::PermissionDenied);
+
+        let artifact_id = Uuid::now_v7();
+        let grant = ArtifactGrantV1 {
+            node_id: node_id.as_bytes().to_vec(),
+            artifact_id: artifact_id.as_bytes().to_vec(),
+            purpose: "certificate_p12".to_owned(),
+            max_bytes: 32,
+            grant_id: Uuid::now_v7().as_bytes().to_vec(),
+            ..ArtifactGrantV1::default()
+        };
+        let Err(fetch_error) = service
+            .fetch_artifact(tonic::Request::new(FetchArtifactRequest {
+                node_id: node_id.as_bytes().to_vec(),
+                artifact_id: artifact_id.as_bytes().to_vec(),
+                purpose: "certificate_p12".to_owned(),
+                max_bytes: 32,
+                grant: Some(grant.clone()),
+            }))
+            .await
+        else {
+            panic!("read-only artifact fetch denied");
+        };
+        assert_eq!(fetch_error.code(), tonic::Code::PermissionDenied);
+        let consume_error = service
+            .consume_artifact(tonic::Request::new(ConsumeArtifactRequest {
+                node_id: node_id.as_bytes().to_vec(),
+                grant: Some(grant),
+                sha256: vec![0; 32],
+                size: 32,
+                confirm_only: false,
+            }))
+            .await
+            .expect_err("read-only artifact consumption denied");
+        assert_eq!(consume_error.code(), tonic::Code::PermissionDenied);
+
+        ocservia_transportd::shutdown(&service, router)
+            .await
+            .expect("shutdown static transportd");
+        tokio::time::timeout(Duration::from_secs(5), run)
+            .await
+            .expect("Agent stops after transport shutdown")
+            .expect("Agent task")
+            .expect("read-only Agent session ends cleanly");
+        privd_server.await.expect("privd server");
+        std::fs::remove_file(privd_socket).expect("remove privd snapshot socket");
+        std::fs::remove_dir_all(directory).expect("remove static session fixture");
     }
 
     #[test]

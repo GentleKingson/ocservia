@@ -29,6 +29,9 @@ zeroize.workspace = true
 
 [dev-dependencies]
 ed25519-dalek.workspace = true
+futures-util.workspace = true
+ocservia-transportd = { version = "=0.1.0", path = "../transportd" }
+tonic.workspace = true
 
 [lints]
 workspace = true
