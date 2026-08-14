@@ -1,0 +1,74 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ocservia.dev/schemas/g6-topology-v1.json",
+  "title": "ocservia G6 public-safe topology",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "candidate_sha",
+    "release_manifest_digest",
+    "environment_id",
+    "failure_domain_class",
+    "instances"
+  ],
+  "properties": {
+    "schema_version": { "const": "ocservia.g6-topology.v1" },
+    "candidate_sha": { "$ref": "#/$defs/sha" },
+    "release_manifest_digest": { "$ref": "#/$defs/digest" },
+    "environment_id": { "type": "string", "minLength": 1, "maxLength": 128 },
+    "failure_domain_class": {
+      "enum": ["single_host", "multi_host", "multi_zone", "multi_region"]
+    },
+    "instances": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/instance" }
+    }
+  },
+  "$defs": {
+    "sha": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+    "digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+    "timestamp": { "type": "string", "format": "date-time" },
+    "instance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "instance_id",
+        "fault_domain",
+        "role",
+        "component_digest",
+        "candidate_sha",
+        "started_at"
+      ],
+      "properties": {
+        "instance_id": { "type": "string", "format": "uuid" },
+        "fault_domain": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "role": {
+          "enum": [
+            "api",
+            "worker",
+            "scheduler",
+            "transportd",
+            "agent",
+            "privd",
+            "relay",
+            "postgres_primary",
+            "postgres_standby",
+            "postgres_dcs",
+            "wal_archive"
+          ]
+        },
+        "component_digest": { "$ref": "#/$defs/digest" },
+        "candidate_sha": { "$ref": "#/$defs/sha" },
+        "started_at": { "$ref": "#/$defs/timestamp" },
+        "stopped_at": { "$ref": "#/$defs/timestamp" },
+        "public_labels": {
+          "type": "object",
+          "propertyNames": { "pattern": "^[a-z][a-z0-9_.-]{0,62}$" },
+          "additionalProperties": { "type": "string", "maxLength": 128 }
+        }
+      }
+    }
+  }
+}

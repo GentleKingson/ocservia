@@ -2,6 +2,9 @@
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
+# shellcheck source=scripts/env.sh
+source "${ROOT}/scripts/env.sh"
+
 if git -C "${ROOT}" grep -I -n $'\r' -- '*.md' '*.yaml' '*.yml' '*.proto' '*.go' '*.rs' '*.ts'; then
   echo "CRLF line ending found" >&2
   exit 1
@@ -13,3 +16,5 @@ while IFS= read -r file; do
     exit 1
   }
 done < <(git -C "${ROOT}" ls-files '*.md')
+
+"${ROOT}/scripts/check-g6-contracts.mjs"
