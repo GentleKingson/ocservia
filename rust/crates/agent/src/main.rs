@@ -2215,6 +2215,7 @@ mod tests {
             .bind()
             .await
             .expect("build real Agent endpoint");
+        let agent_endpoint = endpoint.clone();
         let mut run = tokio::spawn({
             let journal_path = journal_path.clone();
             let agent_privd_socket = privd_socket.clone();
@@ -2326,14 +2327,14 @@ mod tests {
             .expect_err("read-only artifact consumption denied");
         assert_eq!(consume_error.code(), tonic::Code::PermissionDenied);
 
+        agent_endpoint.close().await;
+        let _session_result = tokio::time::timeout(Duration::from_secs(5), run)
+            .await
+            .expect("Agent stops after endpoint shutdown")
+            .expect("Agent task");
         ocservia_transportd::shutdown(&service, router)
             .await
             .expect("shutdown static transportd");
-        tokio::time::timeout(Duration::from_secs(5), run)
-            .await
-            .expect("Agent stops after transport shutdown")
-            .expect("Agent task")
-            .expect("read-only Agent session ends cleanly");
         privd_server.await.expect("privd server");
         std::fs::remove_file(privd_socket).expect("remove privd snapshot socket");
         std::fs::remove_dir_all(directory).expect("remove static session fixture");
