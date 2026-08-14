@@ -229,6 +229,11 @@ for major in 17 18; do
     OCSERV_RUNTIME_DATABASE_ROLE=ocservia_app "${BIN}" --migrate-only \
     >"${TMP_ROOT}/pg${major}-audit-preflight-retry.log" 2>&1
 
+  # Scheduler leadership tests need an idle lease, so they run before any
+  # long-lived control-plane process acquires leadership on this database.
+  (cd "${ROOT}/control-plane" && OCSERV_TEST_DATABASE_URL="${runtime_url}" \
+    go test -p 1 ./internal/coordination -run Integration -count=1)
+
   OCSERV_ENVIRONMENT=test OCSERV_HTTP_ADDRESS="127.0.0.1:${api_port}" \
     OCSERV_DATABASE_URL="${runtime_url}" "${BIN}" --role=all \
     >"${TMP_ROOT}/pg${major}-fresh.log" 2>&1 &
@@ -317,7 +322,7 @@ for major in 17 18; do
   stop_process "${pid}"
   rollback_database="ocservia_rollback_${major}"
   (cd "${ROOT}/control-plane" && OCSERV_TEST_DATABASE_URL="${runtime_url}" OCSERV_TEST_OWNER_DATABASE_URL="${owner_url}" \
-    go test -p 1 ./internal/coordination ./internal/operations ./internal/enrollment ./internal/localslice ./internal/telemetry ./internal/userstate ./internal/useroperations ./internal/configplan ./internal/certificates ./internal/approvals ./internal/audit ./internal/rbac ./internal/auth ./internal/privdattestation -run Integration -count=1)
+    go test -p 1 ./internal/operations ./internal/enrollment ./internal/localslice ./internal/telemetry ./internal/userstate ./internal/useroperations ./internal/configplan ./internal/certificates ./internal/approvals ./internal/audit ./internal/rbac ./internal/auth ./internal/privdattestation -run Integration -count=1)
   (cd "${ROOT}/control-plane" && OCSERV_TEST_DATABASE_URL="${runtime_url}" \
     go test -p 1 ./internal/api -run '^TestApprovalDetailRequiresEveryAuthorityScopeIntegration$' -count=1)
   OCSERV_DATABASE_URL="${runtime_url}" "${BIN}" --role=scheduler \
