@@ -81,8 +81,9 @@ Population semantics are part of the contract, not a harness choice:
   "active" record;
 - the accepted-write population is one identity chain: every enqueue sample
   carries a unique `request_id`, and the successful enqueue requests, outbox
-  rows, and audit writes must describe exactly the same command set, with
-  every traced command present in the outbox snapshot;
+  rows, audit writes, and command-trace enqueued commands must describe
+  exactly the same command set — a command accepted anywhere and missing
+  from the trace leaves the dispatch ratio denominator and is rejected;
 - PITR markers must use distinct transaction identifiers, so the
   present/absent restore pair cannot contradict itself;
 - evidence may not claim more authorized real agents than the topology

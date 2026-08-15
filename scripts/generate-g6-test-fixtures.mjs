@@ -148,9 +148,21 @@ function buildEpochEvents() {
 }
 
 function buildCommandTrace() {
-  const commands = Array.from({ length: 50 }, (_, index) =>
+  // The trace's enqueued population must equal the accepted-write
+  // population (cmd-001..cmd-600), so every accepted command appears here.
+  // Commands run in 60 waves of 10: wave w enqueues, dispatches, and takes
+  // effect at second w, with its results at w+4 (emitted inside second
+  // w+4's block so stream timestamps never decrease). Just before each
+  // second's results land, five waves are in flight, so the peak
+  // concurrent in-flight count is exactly 50 — the SLO floor — and every
+  // dispatch is inside the 10s bound.
+  const commands = Array.from({ length: 600 }, (_, index) =>
     String(index + 1).padStart(3, "0"),
   );
+  const record = (second, extra) => {
+    sequence += 1;
+    records.push({ sequence, ...bindingRecord(at(second)), ...extra });
+  };
   const records = [
     {
       sequence: 1,
@@ -160,33 +172,33 @@ function buildCommandTrace() {
     },
   ];
   let sequence = 1;
-  for (const suffix of commands) {
-    sequence += 1;
-    records.push({ sequence, ...bindingRecord(at(0)), record_type: "enqueued", command_id: `cmd-${suffix}` });
-  }
-  for (const suffix of commands) {
-    sequence += 1;
-    records.push({ sequence, ...bindingRecord(at(1)), record_type: "dispatched", command_id: `cmd-${suffix}` });
-  }
-  for (const suffix of commands) {
-    sequence += 1;
-    records.push({
-      sequence,
-      ...bindingRecord(at(2)),
-      record_type: "effect",
-      idempotency_key: `idem-${suffix}`,
-      effect_id: `fx-${suffix}`,
-    });
-  }
-  for (const [index, suffix] of commands.entries()) {
-    sequence += 1;
-    records.push({
-      sequence,
-      ...bindingRecord(at(4 + Math.floor(index / 10))),
-      record_type: "result",
-      command_id: `cmd-${suffix}`,
-      outcome: "success",
-    });
+  for (let second = 0; second <= 63; second += 1) {
+    if (second < 60) {
+      const wave = commands.slice(second * 10, second * 10 + 10);
+      for (const suffix of wave) {
+        record(second, { record_type: "enqueued", command_id: `cmd-${suffix}` });
+      }
+      for (const suffix of wave) {
+        record(second, { record_type: "dispatched", command_id: `cmd-${suffix}` });
+      }
+      for (const suffix of wave) {
+        record(second, {
+          record_type: "effect",
+          idempotency_key: `idem-${suffix}`,
+          effect_id: `fx-${suffix}`,
+        });
+      }
+    }
+    if (second >= 4) {
+      const wave = commands.slice((second - 4) * 10, (second - 4) * 10 + 10);
+      for (const suffix of wave) {
+        record(second, {
+          record_type: "result",
+          command_id: `cmd-${suffix}`,
+          outcome: "success",
+        });
+      }
+    }
   }
   return jsonl(records);
 }

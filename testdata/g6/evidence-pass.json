@@ -34,13 +34,13 @@
     },
     "max_production_command_inflight": {
       "actual": 50,
-      "sample_count": 50,
-      "source_artifact_digest": "sha256:32bb268785c5ab099fddb2a556a0b2f9fa705cb2fabd0965101a83ab91a55958"
+      "sample_count": 600,
+      "source_artifact_digest": "sha256:aa4cae6abc87801a45491100dfe06478b6ef81248656f069ca05f86bf26b1e6c"
     },
     "synthetic_command_completion_seconds_p99": {
-      "actual": 8,
-      "sample_count": 50,
-      "source_artifact_digest": "sha256:32bb268785c5ab099fddb2a556a0b2f9fa705cb2fabd0965101a83ab91a55958"
+      "actual": 4,
+      "sample_count": 600,
+      "source_artifact_digest": "sha256:aa4cae6abc87801a45491100dfe06478b6ef81248656f069ca05f86bf26b1e6c"
     },
     "stale_owner_accepts": {
       "actual": 0,
@@ -69,8 +69,8 @@
     },
     "duplicate_remote_effects": {
       "actual": 0,
-      "sample_count": 50,
-      "source_artifact_digest": "sha256:32bb268785c5ab099fddb2a556a0b2f9fa705cb2fabd0965101a83ab91a55958"
+      "sample_count": 600,
+      "source_artifact_digest": "sha256:aa4cae6abc87801a45491100dfe06478b6ef81248656f069ca05f86bf26b1e6c"
     },
     "acknowledged_transaction_loss": {
       "actual": 0,
@@ -89,8 +89,8 @@
     },
     "quarantined_unmatched_command_results": {
       "actual": 0,
-      "sample_count": 50,
-      "source_artifact_digest": "sha256:32bb268785c5ab099fddb2a556a0b2f9fa705cb2fabd0965101a83ab91a55958"
+      "sample_count": 600,
+      "source_artifact_digest": "sha256:aa4cae6abc87801a45491100dfe06478b6ef81248656f069ca05f86bf26b1e6c"
     },
     "database_rpo_seconds": {
       "actual": 5,
@@ -149,13 +149,13 @@
     },
     "command_dispatch_ratio": {
       "actual": 1,
-      "sample_count": 50,
-      "source_artifact_digest": "sha256:32bb268785c5ab099fddb2a556a0b2f9fa705cb2fabd0965101a83ab91a55958"
+      "sample_count": 600,
+      "source_artifact_digest": "sha256:aa4cae6abc87801a45491100dfe06478b6ef81248656f069ca05f86bf26b1e6c"
     },
     "command_dispatch_seconds": {
       "actual": 10,
-      "sample_count": 50,
-      "source_artifact_digest": "sha256:32bb268785c5ab099fddb2a556a0b2f9fa705cb2fabd0965101a83ab91a55958"
+      "sample_count": 600,
+      "source_artifact_digest": "sha256:aa4cae6abc87801a45491100dfe06478b6ef81248656f069ca05f86bf26b1e6c"
     },
     "audit_completeness_ratio": {
       "actual": 1,
@@ -394,7 +394,7 @@
     },
     {
       "name": "command-trace.jsonl",
-      "digest": "sha256:32bb268785c5ab099fddb2a556a0b2f9fa705cb2fabd0965101a83ab91a55958",
+      "digest": "sha256:aa4cae6abc87801a45491100dfe06478b6ef81248656f069ca05f86bf26b1e6c",
       "media_type": "application/x-ndjson",
       "kind": "command_trace"
     },

@@ -2229,12 +2229,19 @@ function parseAllStructuredArtifacts(standardArtifacts, verifiedArtifacts, evide
       fail(`audit correlation contains the unaccepted enqueue ${writeId}`);
     }
   }
+  // The command trace's enqueued population must be exactly the accepted
+  // write population: an accepted command that vanishes from the trace
+  // would silently leave the dispatch ratio denominator.
   const trace = parsed.get("command_trace");
-  for (const commandId of trace.commands.keys()) {
-    if (!outboxIds.has(commandId)) {
-      fail(
-        `command trace references command ${commandId} absent from the outbox snapshot`,
-      );
+  const traceIds = new Set(trace.commands.keys());
+  for (const commandId of acceptedIds) {
+    if (!traceIds.has(commandId)) {
+      fail(`command trace is missing the accepted enqueue ${commandId}`);
+    }
+  }
+  for (const commandId of traceIds) {
+    if (!acceptedIds.has(commandId)) {
+      fail(`command trace contains the unaccepted enqueue ${commandId}`);
     }
   }
   return parsed;

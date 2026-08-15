@@ -25,7 +25,7 @@
         },
         {
           "name": "command-trace.jsonl",
-          "digest": "sha256:32bb268785c5ab099fddb2a556a0b2f9fa705cb2fabd0965101a83ab91a55958",
+          "digest": "sha256:aa4cae6abc87801a45491100dfe06478b6ef81248656f069ca05f86bf26b1e6c",
           "media_type": "application/x-ndjson",
           "kind": "command_trace"
         },
