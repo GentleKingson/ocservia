@@ -411,6 +411,13 @@ func (s *Service) Approve(ctx context.Context, approval Approval) (NodeTrust, er
 		return NodeTrust{}, err
 	}
 	for _, capability := range capabilities {
+		// Protocol capabilities are negotiated, never business-approved: the
+		// fencing capability only records that the endpoint accepts fences,
+		// and an approval echoing every advertised capability must not turn
+		// it into an approved node capability.
+		if capability == ownersession.FencingCapability {
+			continue
+		}
 		if _, err := tx.Exec(ctx, `INSERT INTO node_capabilities (node_id,capability,approved) VALUES ($1,$2,true) ON CONFLICT (node_id,capability) DO UPDATE SET approved=true`, approval.NodeID, capability); err != nil {
 			return NodeTrust{}, fmt.Errorf("approve capability: %w", err)
 		}

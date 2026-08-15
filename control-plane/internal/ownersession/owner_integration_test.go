@@ -465,34 +465,84 @@ func TestManagerConcurrentLifecycleIsRaceFreeIntegration(t *testing.T) {
 	}
 }
 
-// TestManagerRegistrationHeartbeatEndsUnreachableTermsIntegration verifies
-// that a transportd registration channel unavailable for longer than a full
-// lease TTL stops the term's renewal and releases the lease, so another
-// controller can take over.
-func TestManagerRegistrationHeartbeatEndsUnreachableTermsIntegration(t *testing.T) {
+// TestManagerReopenRegistrationFailureRetiresTheOldTermIntegration pins the
+// reconnect failure branch: once a same-identity reopen advances the
+// PostgreSQL fencing epoch, the previous local term must never issue bindings
+// again — even though registering the new fence failed, the failed term was
+// released, and the old fence may still sit registered in transportd.
+func TestManagerReopenRegistrationFailureRetiresTheOldTermIntegration(t *testing.T) {
 	pool := testPool(t)
 	signer, _ := testSigner(t)
-	manager, err := NewManager(pool, signer, &recordingRegistrar{failtures: true}, 200*time.Millisecond, testLogger())
+	manager, err := NewManager(pool, signer, &recordingRegistrar{}, 30*time.Second, testLogger())
 	if err != nil {
 		t.Fatalf("new manager: %v", err)
 	}
-	// Registration succeeds once is required for the session to exist, so
-	// flip the registrar to failing after the open and accelerate the
-	// maintenance loop.
 	nodeID, endpointID := testNodeAndEndpoint(t)
-	manager.registrar = &recordingRegistrar{}
+	fence, err := manager.OpenSession(context.Background(), nodeID, endpointID, 21, []string{"ocserv.fencing.v2"})
+	if err != nil {
+		t.Fatalf("open session: %v", err)
+	}
+	manager.mu.Lock()
+	manager.registrar = &recordingRegistrar{failtures: true}
+	manager.mu.Unlock()
+	if _, err := manager.OpenSession(context.Background(), nodeID, endpointID, 22, []string{"ocserv.fencing.v2"}); err == nil {
+		t.Fatal("reopen through a failing registrar unexpectedly succeeded")
+	}
+	if _, _, err := manager.BindOperation(context.Background(), nodeID, agentv1.FenceOperationKind_FENCE_OPERATION_KIND_COMMAND, mustUUIDv7(t), "ocserv.fencing.v2"); !errors.Is(err, ErrFenceUnavailable) {
+		t.Fatalf("bind after a failed reopen = %v, want ErrFenceUnavailable", err)
+	}
+	// The failed reopen released its own term, so a successor takes the node
+	// over through a real Acquire with a strictly higher epoch.
+	successor, err := NewManager(pool, signer, &recordingRegistrar{}, 30*time.Second, testLogger())
+	if err != nil {
+		t.Fatalf("new successor manager: %v", err)
+	}
+	successorFence, err := successor.OpenSession(context.Background(), nodeID, endpointID, 23, []string{"ocserv.fencing.v2"})
+	if err != nil {
+		t.Fatalf("successor take over after a failed reopen: %v", err)
+	}
+	if successorFence.GetOwnerEpoch() <= fence.GetOwnerEpoch() {
+		t.Fatalf("successor epoch %d does not exceed the retired epoch %d", successorFence.GetOwnerEpoch(), fence.GetOwnerEpoch())
+	}
+}
+
+// TestManagerRegistrationHeartbeatEndsUnreachableTermsIntegration verifies
+// both sides of the registration heartbeat bound: an unreachable transportd
+// does not end a healthy owner before the lease TTL has actually elapsed,
+// and once it has, the term's renewal stops and the lease is released so
+// another controller can take over. The maintenance interval is deliberately
+// much shorter than the heartbeat period: the bound must measure real
+// elapsed time, not the number of retry attempts.
+func TestManagerRegistrationHeartbeatEndsUnreachableTermsIntegration(t *testing.T) {
+	pool := testPool(t)
+	signer, _ := testSigner(t)
+	manager, err := NewManager(pool, signer, &recordingRegistrar{}, time.Second, testLogger())
+	if err != nil {
+		t.Fatalf("new manager: %v", err)
+	}
+	// Registration must succeed once for the session to exist, so flip the
+	// registrar to failing after the open.
+	nodeID, endpointID := testNodeAndEndpoint(t)
 	fence, err := manager.OpenSession(context.Background(), nodeID, endpointID, 11, []string{"ocserv.fencing.v2"})
 	if err != nil {
 		t.Fatalf("open session: %v", err)
 	}
 	manager.mu.Lock()
 	manager.registrar = &recordingRegistrar{failtures: true}
-	manager.registrationEvery = 20 * time.Millisecond
+	manager.registrationEvery = 200 * time.Millisecond
 	manager.interval = 20 * time.Millisecond
 	manager.mu.Unlock()
 	runCtx, stopRun := context.WithCancel(context.Background())
 	defer stopRun()
 	go func() { _ = manager.Run(runCtx) }()
+
+	// The failure bound is lease TTL + heartbeat period = 1.2s. Well before
+	// it — at a point where attempt counting would already have ended the
+	// term several times over — the owner must still be issuing bindings.
+	time.Sleep(400 * time.Millisecond)
+	if _, _, err := manager.BindOperation(context.Background(), nodeID, agentv1.FenceOperationKind_FENCE_OPERATION_KIND_COMMAND, mustUUIDv7(t), "ocserv.fencing.v2"); err != nil {
+		t.Fatalf("bind 400ms into registration failures = %v, want the term alive", err)
+	}
 
 	deadline := time.Now().Add(5 * time.Second)
 	for {

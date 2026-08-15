@@ -111,6 +111,7 @@ type nodeSession struct {
 	fence                 *agentv1.ConnectionFenceV2
 	registrationPending   bool
 	registrationFailures  int
+	registrationFailedAt  time.Time
 	nextRegistration      time.Time
 	lost                  bool
 }
@@ -308,10 +309,14 @@ func (c *memoryCursor) set(eventID []byte) {
 // OpenSession takes the ownership lease for a newly accepted mutation-capable
 // agent session and returns the signed fence for the handshake response. A
 // different unexpired owner blocks the session: the caller must downgrade to
-// the read-only compatibility path instead of granting mutations. When the
-// initial fence registration fails, the lease is released and the node is
-// recorded as fence-unavailable, so later bindings fail closed instead of
-// degrading to unfenced carriers.
+// the read-only compatibility path instead of granting mutations.
+//
+// A reconnect of the same identity is a replacement, not a continuation:
+// Acquire irrevocably advances the PostgreSQL fencing epoch, so the previous
+// local session of this node stops issuing bindings the moment Acquire
+// returns — before the new term is even registered. Any post-Acquire failure
+// leaves the node fence-unavailable and fail-closed; it can never resurrect
+// the superseded session or its epoch.
 func (m *Manager) OpenSession(ctx context.Context, nodeID [16]byte, endpointID [32]byte, authorizationRevision uint64, capabilities []string) (*agentv1.ConnectionFenceV2, error) {
 	if authorizationRevision == 0 {
 		return nil, errors.New("ownersession: authorization revision must be nonzero")
@@ -328,11 +333,27 @@ func (m *Manager) OpenSession(ctx context.Context, nodeID [16]byte, endpointID [
 	defer unlock()
 	term, err := connectionowner.Acquire(ctx, m.pool, nodeID, m.identity, connectionID, m.leaseTTL)
 	if errors.Is(err, connectionowner.ErrLeaseHeld) {
+		// Another owner holds an unexpired lease, so any previous local
+		// session of this node is expired by definition. End it instead of
+		// letting bindings ride its locally recorded deadline.
+		m.mu.Lock()
+		previous, held := m.sessions[nodeID]
+		m.mu.Unlock()
+		if held {
+			m.endSession(ctx, nodeID, previous, endedOwnershipLost)
+		}
 		return nil, ErrNotOwner
 	}
 	if err != nil {
 		return nil, fmt.Errorf("ownersession: acquire node lease: %w", err)
 	}
+	// The old local session lost the database authority the instant Acquire
+	// returned; the ended marker keeps the node fail-closed until the new
+	// term registers successfully.
+	m.mu.Lock()
+	delete(m.sessions, nodeID)
+	m.ended[nodeID] = endedRegistrationUnavailable
+	m.mu.Unlock()
 	session := &nodeSession{
 		term:                  term,
 		fenceID:               fenceID,
@@ -353,18 +374,11 @@ func (m *Manager) OpenSession(ctx context.Context, nodeID [16]byte, endpointID [
 	// owner's live session without waiting for lease expiry.
 	if err := m.registrar.RegisterOwnerFence(ctx, fence); err != nil {
 		m.releaseAcquiredTerm(ctx, term)
-		m.mu.Lock()
-		m.ended[nodeID] = endedRegistrationUnavailable
-		m.mu.Unlock()
 		return nil, fmt.Errorf("ownersession: register owner fence: %w", err)
 	}
 	session.fence = fence
 	m.mu.Lock()
-	// Per-node serialization makes the write-back the only writer; the epoch
-	// guard keeps a stale lower epoch from replacing a higher one.
-	if current, ok := m.sessions[nodeID]; !ok || session.term.Epoch() >= current.term.Epoch() {
-		m.sessions[nodeID] = session
-	}
+	m.sessions[nodeID] = session
 	delete(m.ended, nodeID)
 	m.mu.Unlock()
 	return fence, nil
@@ -471,10 +485,16 @@ func (m *Manager) maintainNode(ctx context.Context, nodeID [16]byte, session *no
 	// registration lost to a transportd restart and bounds how long an
 	// unreachable transportd can keep a dead owner renewing its lease.
 	if err := m.registrar.RegisterOwnerFence(ctx, session.fence); err != nil {
+		if session.registrationFailures == 0 {
+			session.registrationFailedAt = now
+		}
 		session.registrationFailures++
 		session.nextRegistration = now.Add(m.registrationEvery)
 		m.logger.WarnContext(ctx, "retry owner fence registration", "node_id", fmt.Sprintf("%x", nodeID), "failures", session.registrationFailures, "error", err)
-		if time.Duration(session.registrationFailures)*m.registrationEvery >= m.leaseTTL+m.registrationEvery {
+		// The bound is real elapsed time: pending registrations retry on the
+		// maintenance interval, which is much shorter than the heartbeat
+		// period, so counting attempts would end a healthy owner early.
+		if now.Sub(session.registrationFailedAt) >= m.leaseTTL+m.registrationEvery {
 			m.logger.WarnContext(ctx, "owner fence registration unavailable beyond the lease TTL", "node_id", fmt.Sprintf("%x", nodeID), "epoch", session.term.Epoch(), "alert_kind", "connection_owner.registration_unavailable")
 			m.endSession(ctx, nodeID, session, endedRegistrationUnavailable)
 		}
@@ -482,6 +502,7 @@ func (m *Manager) maintainNode(ctx context.Context, nodeID [16]byte, session *no
 	}
 	session.registrationPending = false
 	session.registrationFailures = 0
+	session.registrationFailedAt = time.Time{}
 	session.nextRegistration = now.Add(m.registrationEvery)
 }
 

@@ -699,6 +699,13 @@ func TestAuthorizeSessionDeduplicatesFencingCapabilityIntegration(t *testing.T) 
 	if _, err := service.Approve(ctx, Approval{NodeID: nodeID, Labels: nil, Policy: "standard", Capabilities: []string{"ocserv.status.read", "ocserv.fencing.v2"}, ActorID: identityID.String(), ApprovalID: approvalID, IdentityID: identityID, SessionID: sessionID, Reason: "approve all advertised", RequestID: uuid.Must(uuid.NewV7()).String()}); err != nil {
 		t.Fatalf("approve all advertised capabilities: %v", err)
 	}
+	var fencingApproved bool
+	if err := pool.QueryRow(ctx, `SELECT approved FROM node_capabilities WHERE node_id=$1 AND capability='ocserv.fencing.v2'`, nodeID).Scan(&fencingApproved); err != nil {
+		t.Fatal(err)
+	}
+	if fencingApproved {
+		t.Fatal("the protocol fencing capability became a business-approved node capability")
+	}
 
 	handshake := &agentv1.SessionHandshake{ProtocolMajor: 1, ProtocolMinor: ProtocolMinor, AgentVersion: "test", NodeId: nodeID[:], EndpointId: endpoint, Capabilities: []string{"ocserv.fencing.v2", "ocserv.status.read"}, OsRelease: "test", BootId: "boot", AgentInstanceId: uuidBytes(), MaxMessageSize: 1024, Time: timestamppb.Now(), Nonce: make([]byte, 16), SealingKeys: enrollmentSealingKeys()}
 	response, err := service.AuthorizeSession(ctx, &transportv1.AuthorizeSessionRequest{RemoteEndpointId: endpoint, Handshake: handshake})
