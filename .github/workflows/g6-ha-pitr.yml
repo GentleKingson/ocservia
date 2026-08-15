@@ -1,0 +1,276 @@
+name: G6 HA PITR Cross-VM
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  g6-ha-fd-a:
+    name: G6 HA Failure Domain A
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      RUN_ID: ${{ github.run_id }}-${{ github.run_attempt }}-fd-a
+      FD_ID: fd-a
+      FD_ALIAS: fd-alpha
+      G6HA_CANDIDATE_SHA: ${{ github.sha }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - name: Runner preflight
+        run: scripts/ci-preflight.sh
+      - name: G6 HA policy tests
+        run: scripts/test-g6-ha-pitr-workflow.sh
+      - name: Restore verified Rust toolchain
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52c9 # v6
+        with:
+          path: |
+            .cache/downloads
+            .tools
+          key: tooling-v3-g6-ha-fd-a-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'scripts/checksums.txt', 'scripts/bootstrap.sh', 'scripts/env.sh') }}
+      - name: Bootstrap pinned Rust toolchain
+        run: scripts/bootstrap.sh native
+      - name: Prepare failure domain A
+        run: scripts/g6-ha-pitr-fd-a.sh prepare
+      - name: Publish failure domain A rendezvous
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: g6-ha-tunnel-fd-a-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/g6-ha-${{ env.RUN_ID }}/outbox/tunnel
+          if-no-files-found: error
+          retention-days: 1
+      - name: Wait for failure domain B rendezvous
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: scripts/real-e2e-artifact.sh wait-download "g6-ha-tunnel-fd-b-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" "${RUNNER_TEMP}/g6-ha-tunnel-fd-b" 600
+      - name: Build failure domain A images and tunnel
+        run: scripts/g6-ha-pitr-fd-a.sh images
+      - name: Start pinned tunnels
+        run: scripts/g6-ha-pitr-fd-a.sh tunnel-up "${RUNNER_TEMP}/g6-ha-tunnel-fd-b"
+      - name: Start primary, roles, and transportd
+        run: scripts/g6-ha-pitr-fd-a.sh primary-up
+      - name: Publish primary rendezvous
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: g6-ha-primary-up-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/g6-ha-${{ env.RUN_ID }}/outbox/primary-up
+          if-no-files-found: error
+          retention-days: 1
+      - name: Wait for streaming standby
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: scripts/real-e2e-artifact.sh wait-download "g6-ha-standby-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" "${RUNNER_TEMP}/g6-ha-standby" 900
+      - name: Run acknowledged load and base backup
+        run: scripts/g6-ha-pitr-fd-a.sh load
+      - name: Publish load markers
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: g6-ha-load-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/g6-ha-${{ env.RUN_ID }}/outbox/load
+          if-no-files-found: error
+          retention-days: 5
+      - name: Wait for peer failover readiness
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: scripts/real-e2e-artifact.sh wait-download "g6-ha-failover-ready-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" "${RUNNER_TEMP}/g6-ha-failover-ready" 600
+      - name: Verify PITR restore point
+        run: scripts/g6-ha-pitr-fd-a.sh pitr
+      - name: Publish PITR report
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: g6-ha-pitr-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/g6-ha-${{ env.RUN_ID }}/outbox/pitr
+          if-no-files-found: error
+          retention-days: 5
+      - name: Isolate the former primary
+        run: scripts/g6-ha-pitr-fd-a.sh isolate
+      - name: Publish isolation record
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: g6-ha-isolation-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/g6-ha-${{ env.RUN_ID }}/outbox/isolation
+          if-no-files-found: error
+          retention-days: 5
+      - name: Wait for the promoted primary
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: scripts/real-e2e-artifact.sh wait-download "g6-ha-new-primary-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" "${RUNNER_TEMP}/g6-ha-new-primary" 900
+      - name: Probe the fenced primary after promotion
+        run: scripts/g6-ha-pitr-fd-a.sh post-promotion-probes "${RUNNER_TEMP}/g6-ha-new-primary/promoted-at"
+      - name: Publish post-promotion probes
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: g6-ha-post-promotion-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/g6-ha-${{ env.RUN_ID }}/outbox/post-promotion
+          if-no-files-found: error
+          retention-days: 5
+      - name: Recover roles against the promoted primary
+        run: scripts/g6-ha-pitr-fd-a.sh recover-roles
+      - name: Publish recovery record
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: g6-ha-fd-a-recovered-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/g6-ha-${{ env.RUN_ID }}/outbox/recovered
+          if-no-files-found: error
+          retention-days: 5
+      - name: Rejoin the former primary as standby
+        run: scripts/g6-ha-pitr-fd-a.sh rejoin
+      - name: Publish rejoin record
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: g6-ha-fd-a-rejoin-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/g6-ha-${{ env.RUN_ID }}/outbox/rejoin
+          if-no-files-found: error
+          retention-days: 5
+      - name: Wait for merged evidence
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: scripts/real-e2e-artifact.sh wait-download "g6-ha-evidence-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" "${RUNNER_TEMP}/g6-ha-evidence" 900
+      - name: Collect redacted failure domain A diagnostics
+        if: always()
+        run: scripts/g6-ha-pitr-fd-a.sh diagnostics
+      - name: Clean failure domain A resources
+        if: always()
+        run: scripts/g6-ha-pitr-fd-a.sh cleanup
+      - name: Upload failure domain A diagnostics
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: g6-ha-fd-a-diagnostics-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/artifacts/g6-ha-pitr-fd-a
+          if-no-files-found: warn
+          retention-days: 5
+
+  g6-ha-fd-b:
+    name: G6 HA Failure Domain B
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      RUN_ID: ${{ github.run_id }}-${{ github.run_attempt }}-fd-b
+      FD_ID: fd-b
+      FD_ALIAS: fd-beta
+      G6HA_CANDIDATE_SHA: ${{ github.sha }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - name: Runner preflight
+        run: scripts/ci-preflight.sh
+      - name: G6 HA policy tests
+        run: scripts/test-g6-ha-pitr-workflow.sh
+      - name: Restore verified Rust toolchain
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52c9 # v6
+        with:
+          path: |
+            .cache/downloads
+            .tools
+          key: tooling-v3-g6-ha-fd-b-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'scripts/checksums.txt', 'scripts/bootstrap.sh', 'scripts/env.sh') }}
+      - name: Bootstrap pinned Rust toolchain
+        run: scripts/bootstrap.sh native
+      - name: Prepare failure domain B
+        run: scripts/g6-ha-pitr-fd-b.sh prepare
+      - name: Publish failure domain B rendezvous
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: g6-ha-tunnel-fd-b-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/g6-ha-${{ env.RUN_ID }}/outbox/tunnel
+          if-no-files-found: error
+          retention-days: 1
+      - name: Wait for failure domain A rendezvous
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: scripts/real-e2e-artifact.sh wait-download "g6-ha-tunnel-fd-a-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" "${RUNNER_TEMP}/g6-ha-tunnel-fd-a" 600
+      - name: Build failure domain B images and tunnel
+        run: scripts/g6-ha-pitr-fd-b.sh images
+      - name: Start pinned tunnels
+        run: scripts/g6-ha-pitr-fd-b.sh tunnel-up "${RUNNER_TEMP}/g6-ha-tunnel-fd-a"
+      - name: Wait for the peer primary
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: scripts/real-e2e-artifact.sh wait-download "g6-ha-primary-up-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" "${RUNNER_TEMP}/g6-ha-primary-up" 1200
+      - name: Bootstrap the streaming standby
+        run: scripts/g6-ha-pitr-fd-b.sh standby-bootstrap "${RUNNER_TEMP}/g6-ha-primary-up"
+      - name: Publish standby record
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: g6-ha-standby-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/g6-ha-${{ env.RUN_ID }}/outbox/standby
+          if-no-files-found: error
+          retention-days: 5
+      - name: Start roles and transportd against the primary
+        run: scripts/g6-ha-pitr-fd-b.sh roles-up
+      - name: Wait for the acknowledged load
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: scripts/real-e2e-artifact.sh wait-download "g6-ha-load-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" "${RUNNER_TEMP}/g6-ha-load" 900
+      - name: Confirm failover readiness
+        run: scripts/g6-ha-pitr-fd-b.sh failover-ready
+      - name: Publish failover readiness
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: g6-ha-failover-ready-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/g6-ha-${{ env.RUN_ID }}/outbox/failover-ready
+          if-no-files-found: error
+          retention-days: 5
+      - name: Wait for primary isolation
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: scripts/real-e2e-artifact.sh wait-download "g6-ha-isolation-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" "${RUNNER_TEMP}/g6-ha-isolation" 900
+      - name: Promote and recover
+        run: scripts/g6-ha-pitr-fd-b.sh promote "${RUNNER_TEMP}/g6-ha-isolation"
+      - name: Publish promotion record
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: g6-ha-new-primary-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/g6-ha-${{ env.RUN_ID }}/outbox/new-primary
+          if-no-files-found: error
+          retention-days: 5
+      - name: Wait for the PITR report
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: scripts/real-e2e-artifact.sh wait-download "g6-ha-pitr-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" "${RUNNER_TEMP}/g6-ha-pitr" 900
+      - name: Wait for peer role recovery
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: scripts/real-e2e-artifact.sh wait-download "g6-ha-fd-a-recovered-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" "${RUNNER_TEMP}/g6-ha-fd-a-recovered" 900
+      - name: Wait for the post-promotion probes
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: scripts/real-e2e-artifact.sh wait-download "g6-ha-post-promotion-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" "${RUNNER_TEMP}/g6-ha-post-promotion" 900
+      - name: Wait for the rejoined peer
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: scripts/real-e2e-artifact.sh wait-download "g6-ha-fd-a-rejoin-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" "${RUNNER_TEMP}/g6-ha-fd-a-rejoin" 900
+      - name: Confirm the rejoined peer is streaming
+        run: scripts/g6-ha-pitr-fd-b.sh rejoin-wait
+      - name: Merge evidence and verify RPO RTO
+        run: scripts/g6-ha-pitr-fd-b.sh finalize "${RUNNER_TEMP}/g6-ha-isolation" "${RUNNER_TEMP}/g6-ha-load" "${RUNNER_TEMP}/g6-ha-pitr" "${RUNNER_TEMP}/g6-ha-fd-a-recovered" "${RUNNER_TEMP}/g6-ha-post-promotion" "${RUNNER_TEMP}/g6-ha-fd-a-rejoin" "${RUNNER_TEMP}/g6-ha-tunnel-fd-a"
+      - name: Publish merged evidence
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: g6-ha-evidence-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/g6-ha-${{ env.RUN_ID }}/outbox/evidence
+          if-no-files-found: error
+          retention-days: 14
+      - name: Collect redacted failure domain B diagnostics
+        if: always()
+        run: scripts/g6-ha-pitr-fd-b.sh diagnostics
+      - name: Clean failure domain B resources
+        if: always()
+        run: scripts/g6-ha-pitr-fd-b.sh cleanup
+      - name: Upload failure domain B diagnostics
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: g6-ha-fd-b-diagnostics-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/artifacts/g6-ha-pitr-fd-b
+          if-no-files-found: warn
+          retention-days: 5
