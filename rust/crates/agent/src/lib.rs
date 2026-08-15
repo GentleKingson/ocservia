@@ -1888,6 +1888,8 @@ mod tests {
             required_capability: "synthetic.echo".to_owned(),
             approval_id: Vec::new(),
             approval_request_sha256: Vec::new(),
+            connection_fence: None,
+            fence_binding: None,
             authorization: None,
             delivery_mode: CommandDeliveryMode::ExecuteOrReplay.into(),
             payload: Some(command_envelope::Payload::SyntheticEcho(SyntheticEcho {

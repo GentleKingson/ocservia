@@ -26,6 +26,12 @@ var ErrNotOwner = errors.New("connectionowner: connection ownership lost")
 // node lease. Cross-instance takeover requires the previous lease to expire.
 var ErrLeaseHeld = errors.New("connectionowner: node lease held by another owner")
 
+// ErrNoOwnerRow reports that the node has no ownership row at all: it was
+// never fenced. A fence registered elsewhere without a backing row claims a
+// term the authority never granted or no longer knows, so readers must fail
+// closed on it.
+var ErrNoOwnerRow = errors.New("connectionowner: node has no ownership row")
+
 // Identity binds an ownership term to exactly one controller process
 // incarnation, mirroring the scheduler leadership identity.
 type Identity struct {
@@ -33,14 +39,17 @@ type Identity struct {
 	Incarnation int64
 }
 
-// Term is one acquired node ownership lease. It is immutable after Acquire;
-// the local lease deadline is runner state owned by the caller.
+// Term is one acquired node ownership lease. It is immutable after Acquire.
+// LeaseUntil is the exact deadline PostgreSQL recorded for the term; callers
+// must use it instead of reconstructing a local deadline from the TTL, and
+// must replace it with the exact deadline returned by Renew.
 type Term struct {
 	identity     Identity
 	nodeID       [16]byte
 	connectionID [16]byte
 	epoch        int64
 	leaseTTL     time.Duration
+	leaseUntil   time.Time
 }
 
 // Acquire takes the ownership lease for one node. A first term starts at
@@ -54,6 +63,7 @@ func Acquire(ctx context.Context, pool *pgxpool.Pool, nodeID [16]byte, identity 
 		return nil, errors.New("connectionowner: lease TTL must be positive")
 	}
 	var epoch int64
+	var leaseUntil time.Time
 	err := pool.QueryRow(ctx, `INSERT INTO connection_owner_fencing
 		(node_id, owner_instance_id, owner_incarnation, connection_id, owner_epoch, lease_until, updated_at)
 		VALUES ($1, $2, $3, $4, 1, now()+$5::interval, now())
@@ -67,15 +77,15 @@ func Acquire(ctx context.Context, pool *pgxpool.Pool, nodeID [16]byte, identity 
 		WHERE connection_owner_fencing.lease_until<=now()
 			OR (connection_owner_fencing.owner_instance_id=EXCLUDED.owner_instance_id
 				AND connection_owner_fencing.owner_incarnation=EXCLUDED.owner_incarnation)
-		RETURNING owner_epoch`,
-		nodeID[:], identity.InstanceID, identity.Incarnation, connectionID[:], leaseTTL.String()).Scan(&epoch)
+		RETURNING owner_epoch, lease_until`,
+		nodeID[:], identity.InstanceID, identity.Incarnation, connectionID[:], leaseTTL.String()).Scan(&epoch, &leaseUntil)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrLeaseHeld
 	}
 	if err != nil {
 		return nil, fmt.Errorf("connectionowner: acquire node ownership: %w", err)
 	}
-	return &Term{identity: identity, nodeID: nodeID, connectionID: connectionID, epoch: epoch, leaseTTL: leaseTTL}, nil
+	return &Term{identity: identity, nodeID: nodeID, connectionID: connectionID, epoch: epoch, leaseTTL: leaseTTL, leaseUntil: leaseUntil.UTC()}, nil
 }
 
 // Epoch returns the fencing epoch of this term. Per-node epochs increase
@@ -92,16 +102,49 @@ func (t *Term) ConnectionID() [16]byte { return t.connectionID }
 // Identity returns the owner identity bound to this term.
 func (t *Term) Identity() Identity { return t.identity }
 
+// LeaseUntil returns the exact lease deadline PostgreSQL recorded when this
+// term was acquired. The deadline is authoritative: reconstructing it locally
+// with the TTL and a local clock is forbidden because clock drift would let a
+// stale owner treat an expired lease as valid.
+func (t *Term) LeaseUntil() time.Time { return t.leaseUntil }
+
+// LeaseTTL returns the configured TTL of this term. It is configuration, not
+// an authority: deadlines come from LeaseUntil and Renew.
+func (t *Term) LeaseTTL() time.Duration { return t.leaseTTL }
+
 // Renew extends the lease for the current term only. It fails when ownership
 // was taken over or the lease expired; the caller must cancel its
-// owner-scoped work. Renew never mutates the immutable term.
-func (t *Term) Renew(ctx context.Context, pool *pgxpool.Pool) error {
-	tag, err := pool.Exec(ctx, `UPDATE connection_owner_fencing
+// owner-scoped work. Renew returns the exact new lease deadline PostgreSQL
+// recorded; the caller must replace any stored deadline with it.
+func (t *Term) Renew(ctx context.Context, pool *pgxpool.Pool) (time.Time, error) {
+	var leaseUntil time.Time
+	err := pool.QueryRow(ctx, `UPDATE connection_owner_fencing
 		SET lease_until=now()+$6::interval, updated_at=now()
-		WHERE node_id=$1 AND owner_instance_id=$2 AND owner_incarnation=$3 AND connection_id=$4 AND owner_epoch=$5 AND lease_until>now()`,
-		t.nodeID[:], t.identity.InstanceID, t.identity.Incarnation, t.connectionID[:], t.epoch, t.leaseTTL.String())
+		WHERE node_id=$1 AND owner_instance_id=$2 AND owner_incarnation=$3 AND connection_id=$4 AND owner_epoch=$5 AND lease_until>now()
+		RETURNING lease_until`,
+		t.nodeID[:], t.identity.InstanceID, t.identity.Incarnation, t.connectionID[:], t.epoch, t.leaseTTL.String()).Scan(&leaseUntil)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return time.Time{}, ErrNotOwner
+	}
 	if err != nil {
-		return fmt.Errorf("connectionowner: renew node ownership: %w", err)
+		return time.Time{}, fmt.Errorf("connectionowner: renew node ownership: %w", err)
+	}
+	return leaseUntil.UTC(), nil
+}
+
+// Release expires this exact term's lease at PostgreSQL time so a successor
+// can take over without waiting out the TTL. The exact-term predicate keeps a
+// late release from touching a successor's row: when the term was already
+// taken over, Release reports ErrNotOwner and changes nothing. The epoch is
+// never decremented or reset; only the deadline of the matching row moves to
+// now, preserving monotonic takeover.
+func (t *Term) Release(ctx context.Context, pool *pgxpool.Pool) error {
+	tag, err := pool.Exec(ctx, `UPDATE connection_owner_fencing
+		SET lease_until=now(), updated_at=now()
+		WHERE node_id=$1 AND owner_instance_id=$2 AND owner_incarnation=$3 AND connection_id=$4 AND owner_epoch=$5 AND lease_until>now()`,
+		t.nodeID[:], t.identity.InstanceID, t.identity.Incarnation, t.connectionID[:], t.epoch)
+	if err != nil {
+		return fmt.Errorf("connectionowner: release node ownership: %w", err)
 	}
 	if tag.RowsAffected() != 1 {
 		return ErrNotOwner
@@ -145,6 +188,45 @@ func (t *Term) AssertCurrent(ctx context.Context, pool *pgxpool.Pool) error {
 	return tx.Commit(ctx)
 }
 
+// GuardObservedTerm proves one observed term is still the node's current
+// ownership row and opens a fencing interval around it: the guard's
+// transaction holds a FOR SHARE lock on the row, so any Acquire that would
+// advance the epoch waits until the returned release function runs. Callers
+// that verify a term they do not own — a Controller role reading a fence
+// registered in transportd — must run the mutation carrying that term's
+// proofs before release, which makes PostgreSQL the mutation-time ownership
+// authority instead of a point-in-time check. The assert requires an
+// unexpired lease at clock_timestamp(); keeping the interval inside the
+// caller's bounded RPC deadline is the caller's responsibility.
+func GuardObservedTerm(ctx context.Context, pool *pgxpool.Pool, nodeID [16]byte, instanceID uuid.UUID, incarnation int64, connectionID [16]byte, epoch int64) (release func() error, err error) {
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("connectionowner: begin observed term guard: %w", err)
+	}
+	defer func() {
+		if err != nil {
+			_ = tx.Rollback(context.Background())
+		}
+	}()
+	var one int
+	err = tx.QueryRow(ctx, `SELECT 1 FROM connection_owner_fencing
+		WHERE node_id=$1 AND owner_instance_id=$2 AND owner_incarnation=$3 AND connection_id=$4 AND owner_epoch=$5 AND lease_until>clock_timestamp()
+		FOR SHARE OF connection_owner_fencing`,
+		nodeID[:], instanceID, incarnation, connectionID[:], epoch).Scan(&one)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, ErrNotOwner
+	}
+	if err != nil {
+		return nil, fmt.Errorf("connectionowner: guard observed term: %w", err)
+	}
+	return func() error {
+		if err := tx.Rollback(context.Background()); err != nil && !errors.Is(err, pgx.ErrTxClosed) {
+			return fmt.Errorf("connectionowner: release observed term guard: %w", err)
+		}
+		return nil
+	}, nil
+}
+
 // OwnerState is a point-in-time read of one node's ownership row.
 type OwnerState struct {
 	InstanceID      uuid.UUID
@@ -162,7 +244,7 @@ func ReadState(ctx context.Context, pool *pgxpool.Pool, nodeID [16]byte) (OwnerS
 		FROM connection_owner_fencing WHERE node_id=$1`, nodeID[:]).
 		Scan(&state.InstanceID, &state.Incarnation, &connectionID, &state.Epoch, &state.LeaseUntilValid)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return OwnerState{}, fmt.Errorf("connectionowner: node %x has no ownership row", nodeID)
+		return OwnerState{}, fmt.Errorf("%w: node %x", ErrNoOwnerRow, nodeID)
 	}
 	if err != nil {
 		return OwnerState{}, fmt.Errorf("connectionowner: read node ownership: %w", err)

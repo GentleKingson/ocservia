@@ -63,6 +63,7 @@ type Config struct {
 	ControllerEndpointID     string
 	TransportTimeout         time.Duration
 	TransportQueue           int
+	OwnerLeaseTTL            time.Duration
 	UserOperationConcurrency int
 	LocalSimulator           bool
 	CertificateSignerURL     string
@@ -79,7 +80,7 @@ func Load(args []string, lookup LookupEnv) (Config, error) {
 		BodyLimit: 1 << 20, RequestTimeout: 15 * time.Second, ShutdownTimeout: 10 * time.Second,
 		LogLevelName: "info", TransportSocket: "/run/ocserv-platform/transportd.sock",
 		TrustSocket:      "/run/ocserv-trust/control-plane.sock",
-		TransportTimeout: 3 * time.Second, TransportQueue: 256, UserOperationConcurrency: 50, SessionTTL: 8 * time.Hour, CertificateSignerTimeout: 10 * time.Second,
+		TransportTimeout: 3 * time.Second, TransportQueue: 256, OwnerLeaseTTL: 30 * time.Second, UserOperationConcurrency: 50, SessionTTL: 8 * time.Hour, CertificateSignerTimeout: 10 * time.Second,
 		EventStreams: eventstream.DefaultConfig(),
 		TransportUID: uint32(os.Geteuid()), TransportGID: uint32(os.Getegid()),
 	}
@@ -172,6 +173,12 @@ func Load(args []string, lookup LookupEnv) (Config, error) {
 	}
 	if err := setInt(lookup, "OCSERV_TRANSPORT_QUEUE_CAPACITY", &cfg.TransportQueue); err != nil {
 		return Config{}, err
+	}
+	if err := setDuration(lookup, "OCSERV_OWNER_LEASE_TTL", &cfg.OwnerLeaseTTL); err != nil {
+		return Config{}, err
+	}
+	if cfg.OwnerLeaseTTL <= 0 {
+		cfg.OwnerLeaseTTL = 30 * time.Second
 	}
 	if err := setInt(lookup, "OCSERV_USER_OPERATION_CONCURRENCY", &cfg.UserOperationConcurrency); err != nil {
 		return Config{}, err

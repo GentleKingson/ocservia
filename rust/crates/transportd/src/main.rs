@@ -4,6 +4,7 @@ use std::io;
 use std::os::unix::fs::{FileTypeExt, MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::os::unix::net::UnixStream as StdUnixStream;
 use std::path::{Component, Path, PathBuf};
+use std::sync::Arc;
 
 use iroh::endpoint::RelayMode;
 use iroh::{EndpointId, RelayMap, RelayUrl, SecretKey};
@@ -30,6 +31,8 @@ struct Config {
     control_plane_uid: u32,
     control_plane_gid: u32,
     trust_budgets: TrustBudgetConfig,
+    controller_verification_key_files: Vec<PathBuf>,
+    require_fencing: bool,
 }
 
 #[tokio::main]
@@ -49,8 +52,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     };
     let key = load_key(&config.key_file)?;
     let (listener, socket_identity) = bind_socket(&config.socket)?;
+    let keyring = load_controller_keyring(&config)?;
     let policy = IdentityPolicy::new(config.approved, config.revoked);
-    let service = IrohTransportService::new_with_policy(config.event_capacity, policy.clone());
+    let service = IrohTransportService::new_with_fence_policy(
+        config.event_capacity,
+        policy.clone(),
+        keyring,
+        config.require_fencing,
+    );
     let router = if let Some(trust_socket) = config.trust_socket.clone() {
         let control_plane_uid = config.control_plane_uid;
         let control_plane_gid = config.control_plane_gid;
@@ -133,6 +142,8 @@ fn parse_args() -> Result<Config, io::Error> {
     let mut trust_socket = None;
     let mut control_plane_uid = None;
     let mut control_plane_gid = None;
+    let mut controller_verification_key_files = Vec::new();
+    let mut require_fencing = false;
     let mut trust_limits = [
         (
             TrustClass::KnownAgentHandshake,
@@ -222,6 +233,13 @@ fn parse_args() -> Result<Config, io::Error> {
                     "control-plane GID",
                 )?);
             }
+            "--controller-verification-key-file" => {
+                controller_verification_key_files.push(PathBuf::from(required_value(
+                    &mut args,
+                    "--controller-verification-key-file",
+                )?));
+            }
+            "--require-fencing" => require_fencing = true,
             "--known-agent-handshake-rate" => {
                 trust_limits[0].1.attempts_per_minute = parse_usize(
                     &required_value(&mut args, "--known-agent-handshake-rate")?,
@@ -298,11 +316,24 @@ fn parse_args() -> Result<Config, io::Error> {
         || trust_socket
             .as_ref()
             .is_some_and(|path| !path.is_absolute())
+        || controller_verification_key_files
+            .iter()
+            .any(|path| !path.is_absolute())
     {
         return Err(invalid("socket and key file paths must be absolute"));
     }
     if event_capacity == 0 || event_capacity > 4096 {
         return Err(invalid("event capacity must be 1..4096"));
+    }
+    if controller_verification_key_files.len() > 8 {
+        return Err(invalid(
+            "at most eight controller verification keys are allowed",
+        ));
+    }
+    if require_fencing && controller_verification_key_files.is_empty() {
+        return Err(invalid(
+            "--require-fencing requires at least one --controller-verification-key-file",
+        ));
     }
     let relay_mode = build_relay_mode(&relay_mode, relay_urls, relay_token_file.as_deref())?;
     let mut trust_budgets = TrustBudgetConfig::default();
@@ -320,7 +351,38 @@ fn parse_args() -> Result<Config, io::Error> {
         control_plane_uid,
         control_plane_gid,
         trust_budgets,
+        controller_verification_key_files,
+        require_fencing,
     })
+}
+
+/// Loads the Controller command verification keys through the same safe path
+/// walk used for the transport key, pinned to the control-plane account that
+/// publishes them.
+fn load_controller_keyring(
+    config: &Config,
+) -> Result<Option<Arc<ocservia_command_authorization::ControllerCommandKeyring>>, io::Error> {
+    if config.controller_verification_key_files.is_empty() {
+        return Ok(None);
+    }
+    let keys = config
+        .controller_verification_key_files
+        .iter()
+        .map(|path| {
+            ocservia_command_authorization::load_verification_key(
+                path,
+                config.control_plane_uid,
+                config.control_plane_gid,
+            )
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let keyring =
+        ocservia_command_authorization::ControllerCommandKeyring::new(keys).map_err(|error| {
+            invalid(&format!(
+                "controller verification keys are invalid: {error}"
+            ))
+        })?;
+    Ok(Some(Arc::new(keyring)))
 }
 
 fn parse_usize(value: &str, name: &str) -> Result<usize, io::Error> {

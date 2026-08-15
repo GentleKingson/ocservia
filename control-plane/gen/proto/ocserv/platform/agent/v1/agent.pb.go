@@ -1466,8 +1466,14 @@ type SessionHandshakeResponse struct {
 	ControllerVersion      string                 `protobuf:"bytes,5,opt,name=controller_version,json=controllerVersion,proto3" json:"controller_version,omitempty"`
 	NegotiatedCapabilities []string               `protobuf:"bytes,6,rep,name=negotiated_capabilities,json=negotiatedCapabilities,proto3" json:"negotiated_capabilities,omitempty"`
 	SessionGrant           *SessionGrantV1        `protobuf:"bytes,7,opt,name=session_grant,json=sessionGrant,proto3" json:"session_grant,omitempty"`
-	unknownFields          protoimpl.UnknownFields
-	sizeCache              protoimpl.SizeCache
+	// Present only when the negotiating agent advertised the connection fencing
+	// capability and the Controller currently owns the node connection lease.
+	// transportd verifies it, records it as the node's active owner fence, and
+	// relays it to the agent; mutations on such a session must carry fence
+	// proofs. Its absence keeps the established compatibility paths unchanged.
+	ConnectionFence *ConnectionFenceV2 `protobuf:"bytes,8,opt,name=connection_fence,json=connectionFence,proto3" json:"connection_fence,omitempty"`
+	unknownFields   protoimpl.UnknownFields
+	sizeCache       protoimpl.SizeCache
 }
 
 func (x *SessionHandshakeResponse) Reset() {
@@ -1545,6 +1551,13 @@ func (x *SessionHandshakeResponse) GetNegotiatedCapabilities() []string {
 func (x *SessionHandshakeResponse) GetSessionGrant() *SessionGrantV1 {
 	if x != nil {
 		return x.SessionGrant
+	}
+	return nil
+}
+
+func (x *SessionHandshakeResponse) GetConnectionFence() *ConnectionFenceV2 {
+	if x != nil {
+		return x.ConnectionFence
 	}
 	return nil
 }
@@ -3426,8 +3439,16 @@ type CommandEnvelope struct {
 	ApprovalId                 []byte                     `protobuf:"bytes,123,opt,name=approval_id,json=approvalId,proto3" json:"approval_id,omitempty"`
 	ApprovalRequestSha256      []byte                     `protobuf:"bytes,124,opt,name=approval_request_sha256,json=approvalRequestSha256,proto3" json:"approval_request_sha256,omitempty"`
 	Authorization              *CommandAuthorizationProof `protobuf:"bytes,125,opt,name=authorization,proto3" json:"authorization,omitempty"`
-	unknownFields              protoimpl.UnknownFields
-	sizeCache                  protoimpl.SizeCache
+	// Owner fence proofs for fenced dispatch. Both travel with the command so
+	// transportd can enforce the fence before the agent stream is opened and so
+	// the agent can independently re-verify them. The V1 authorization signature
+	// does not cover these fields; they are separate signed proofs and a frame
+	// carrying them is only produced for sessions that negotiated connection
+	// fencing.
+	ConnectionFence *ConnectionFenceV2 `protobuf:"bytes,126,opt,name=connection_fence,json=connectionFence,proto3" json:"connection_fence,omitempty"`
+	FenceBinding    *FenceBindingV2    `protobuf:"bytes,127,opt,name=fence_binding,json=fenceBinding,proto3" json:"fence_binding,omitempty"`
+	unknownFields   protoimpl.UnknownFields
+	sizeCache       protoimpl.SizeCache
 }
 
 func (x *CommandEnvelope) Reset() {
@@ -3763,6 +3784,20 @@ func (x *CommandEnvelope) GetApprovalRequestSha256() []byte {
 func (x *CommandEnvelope) GetAuthorization() *CommandAuthorizationProof {
 	if x != nil {
 		return x.Authorization
+	}
+	return nil
+}
+
+func (x *CommandEnvelope) GetConnectionFence() *ConnectionFenceV2 {
+	if x != nil {
+		return x.ConnectionFence
+	}
+	return nil
+}
+
+func (x *CommandEnvelope) GetFenceBinding() *FenceBindingV2 {
+	if x != nil {
+		return x.FenceBinding
 	}
 	return nil
 }
@@ -5742,7 +5777,7 @@ const file_ocserv_platform_agent_v1_agent_proto_rawDesc = "" +
 	"\x06key_id\x18\x03 \x01(\tR\x05keyId\x12\x1e\n" +
 	"\n" +
 	"ciphertext\x18\x04 \x01(\fR\n" +
-	"ciphertext\"\x8c\x03\n" +
+	"ciphertext\"\xe4\x03\n" +
 	"\x18SessionHandshakeResponse\x12A\n" +
 	"\x06result\x18\x01 \x01(\x0e2).ocserv.platform.agent.v1.HandshakeResultR\x06result\x12%\n" +
 	"\x0eprotocol_major\x18\x02 \x01(\rR\rprotocolMajor\x12%\n" +
@@ -5750,7 +5785,8 @@ const file_ocserv_platform_agent_v1_agent_proto_rawDesc = "" +
 	"\x10max_message_size\x18\x04 \x01(\rR\x0emaxMessageSize\x12-\n" +
 	"\x12controller_version\x18\x05 \x01(\tR\x11controllerVersion\x127\n" +
 	"\x17negotiated_capabilities\x18\x06 \x03(\tR\x16negotiatedCapabilities\x12M\n" +
-	"\rsession_grant\x18\a \x01(\v2(.ocserv.platform.agent.v1.SessionGrantV1R\fsessionGrant\"\xfa\x03\n" +
+	"\rsession_grant\x18\a \x01(\v2(.ocserv.platform.agent.v1.SessionGrantV1R\fsessionGrant\x12V\n" +
+	"\x10connection_fence\x18\b \x01(\v2+.ocserv.platform.agent.v1.ConnectionFenceV2R\x0fconnectionFence\"\xfa\x03\n" +
 	"\x0eSessionGrantV1\x12G\n" +
 	"\aversion\x18\x01 \x01(\x0e2-.ocserv.platform.agent.v1.SessionGrantVersionR\aversion\x12\x15\n" +
 	"\x06key_id\x18\x02 \x01(\tR\x05keyId\x12%\n" +
@@ -5948,7 +5984,7 @@ const file_ocserv_platform_agent_v1_agent_proto_rawDesc = "" +
 	"group_name\x18\x01 \x01(\tR\tgroupName\x12\x18\n" +
 	"\amembers\x18\x02 \x03(\tR\amembers\x12\x1a\n" +
 	"\brevision\x18\x03 \x01(\x04R\brevision\x12-\n" +
-	"\x12fingerprint_sha256\x18\x04 \x01(\fR\x11fingerprintSha256\"\x8e\x13\n" +
+	"\x12fingerprint_sha256\x18\x04 \x01(\fR\x11fingerprintSha256\"\xb5\x14\n" +
 	"\x0fCommandEnvelope\x12)\n" +
 	"\x10protocol_version\x18\x01 \x01(\tR\x0fprotocolVersion\x12\x1d\n" +
 	"\n" +
@@ -5996,7 +6032,9 @@ const file_ocserv_platform_agent_v1_agent_proto_rawDesc = "" +
 	"\vapproval_id\x18{ \x01(\fR\n" +
 	"approvalId\x126\n" +
 	"\x17approval_request_sha256\x18| \x01(\fR\x15approvalRequestSha256\x12Y\n" +
-	"\rauthorization\x18} \x01(\v23.ocserv.platform.agent.v1.CommandAuthorizationProofR\rauthorizationB\t\n" +
+	"\rauthorization\x18} \x01(\v23.ocserv.platform.agent.v1.CommandAuthorizationProofR\rauthorization\x12V\n" +
+	"\x10connection_fence\x18~ \x01(\v2+.ocserv.platform.agent.v1.ConnectionFenceV2R\x0fconnectionFence\x12M\n" +
+	"\rfence_binding\x18\x7f \x01(\v2(.ocserv.platform.agent.v1.FenceBindingV2R\ffenceBindingB\t\n" +
 	"\apayloadJ\x04\b\r\x10dR\x0elegacy_payload\"K\n" +
 	"\x11SessionDisconnect\x12\x1d\n" +
 	"\n" +
@@ -6338,84 +6376,87 @@ var file_ocserv_platform_agent_v1_agent_proto_depIdxs = []int32{
 	2,  // 9: ocserv.platform.agent.v1.SealedSecretV1.purpose:type_name -> ocserv.platform.agent.v1.SealedSecretPurpose
 	0,  // 10: ocserv.platform.agent.v1.SessionHandshakeResponse.result:type_name -> ocserv.platform.agent.v1.HandshakeResult
 	23, // 11: ocserv.platform.agent.v1.SessionHandshakeResponse.session_grant:type_name -> ocserv.platform.agent.v1.SessionGrantV1
-	3,  // 12: ocserv.platform.agent.v1.SessionGrantV1.version:type_name -> ocserv.platform.agent.v1.SessionGrantVersion
-	70, // 13: ocserv.platform.agent.v1.SessionGrantV1.issued_at:type_name -> google.protobuf.Timestamp
-	70, // 14: ocserv.platform.agent.v1.SessionGrantV1.expires_at:type_name -> google.protobuf.Timestamp
-	4,  // 15: ocserv.platform.agent.v1.ConnectionFenceV2.signature_version:type_name -> ocserv.platform.agent.v1.FenceSignatureVersion
-	70, // 16: ocserv.platform.agent.v1.ConnectionFenceV2.lease_until:type_name -> google.protobuf.Timestamp
-	70, // 17: ocserv.platform.agent.v1.ConnectionFenceV2.issued_at:type_name -> google.protobuf.Timestamp
-	70, // 18: ocserv.platform.agent.v1.ConnectionFenceV2.expires_at:type_name -> google.protobuf.Timestamp
-	4,  // 19: ocserv.platform.agent.v1.FenceBindingV2.signature_version:type_name -> ocserv.platform.agent.v1.FenceSignatureVersion
-	5,  // 20: ocserv.platform.agent.v1.FenceBindingV2.operation_kind:type_name -> ocserv.platform.agent.v1.FenceOperationKind
-	70, // 21: ocserv.platform.agent.v1.FenceBindingV2.issued_at:type_name -> google.protobuf.Timestamp
-	70, // 22: ocserv.platform.agent.v1.FenceBindingV2.expires_at:type_name -> google.protobuf.Timestamp
-	6,  // 23: ocserv.platform.agent.v1.AgentEvent.type:type_name -> ocserv.platform.agent.v1.AgentEventType
-	10, // 24: ocserv.platform.agent.v1.CommandAuthorizationProof.version:type_name -> ocserv.platform.agent.v1.CommandAuthorizationVersion
-	7,  // 25: ocserv.platform.agent.v1.CommandResult.state:type_name -> ocserv.platform.agent.v1.CommandResultState
-	70, // 26: ocserv.platform.agent.v1.CommandResult.accepted_at:type_name -> google.protobuf.Timestamp
-	70, // 27: ocserv.platform.agent.v1.CommandResult.completed_at:type_name -> google.protobuf.Timestamp
-	9,  // 28: ocserv.platform.agent.v1.CommandResult.semantic_payload_hash_version:type_name -> ocserv.platform.agent.v1.SemanticPayloadHashVersion
-	29, // 29: ocserv.platform.agent.v1.CommandResult.privileged_result_proof:type_name -> ocserv.platform.agent.v1.PrivilegedResultProof
-	11, // 30: ocserv.platform.agent.v1.PrivilegedResultProof.version:type_name -> ocserv.platform.agent.v1.PrivdReceiptVersion
-	30, // 31: ocserv.platform.agent.v1.PrivilegedResultProof.receipt_v1:type_name -> ocserv.platform.agent.v1.PrivdResultReceiptV1
-	11, // 32: ocserv.platform.agent.v1.PrivdResultReceiptV1.receipt_version:type_name -> ocserv.platform.agent.v1.PrivdReceiptVersion
-	9,  // 33: ocserv.platform.agent.v1.PrivdResultReceiptV1.semantic_payload_hash_version:type_name -> ocserv.platform.agent.v1.SemanticPayloadHashVersion
-	12, // 34: ocserv.platform.agent.v1.PrivdResultReceiptV1.command_kind:type_name -> ocserv.platform.agent.v1.PrivilegedCommandKind
-	13, // 35: ocserv.platform.agent.v1.PrivdResultReceiptV1.result_kind:type_name -> ocserv.platform.agent.v1.PrivilegedResultKind
-	7,  // 36: ocserv.platform.agent.v1.PrivdResultReceiptV1.terminal_state:type_name -> ocserv.platform.agent.v1.CommandResultState
-	70, // 37: ocserv.platform.agent.v1.PrivdResultReceiptV1.accepted_at:type_name -> google.protobuf.Timestamp
-	70, // 38: ocserv.platform.agent.v1.PrivdResultReceiptV1.completed_at:type_name -> google.protobuf.Timestamp
-	31, // 39: ocserv.platform.agent.v1.PrivdResultReceiptV1.certificate:type_name -> ocserv.platform.agent.v1.PrivdCertificateReceiptBindingV1
-	11, // 40: ocserv.platform.agent.v1.PrivdAttestationRegistrationV1.version:type_name -> ocserv.platform.agent.v1.PrivdReceiptVersion
-	70, // 41: ocserv.platform.agent.v1.ObservedSnapshot.observed_at:type_name -> google.protobuf.Timestamp
-	33, // 42: ocserv.platform.agent.v1.ObservedSnapshot.dropped:type_name -> ocserv.platform.agent.v1.TelemetryDropCounters
-	70, // 43: ocserv.platform.agent.v1.SessionObservation.connected_at:type_name -> google.protobuf.Timestamp
-	70, // 44: ocserv.platform.agent.v1.MetricSample.sampled_at:type_name -> google.protobuf.Timestamp
-	70, // 45: ocserv.platform.agent.v1.SecurityObservation.observed_at:type_name -> google.protobuf.Timestamp
-	14, // 46: ocserv.platform.agent.v1.TelemetryBatch.priority:type_name -> ocserv.platform.agent.v1.TelemetryPriority
-	34, // 47: ocserv.platform.agent.v1.TelemetryBatch.snapshot:type_name -> ocserv.platform.agent.v1.ObservedSnapshot
-	35, // 48: ocserv.platform.agent.v1.TelemetryBatch.sessions:type_name -> ocserv.platform.agent.v1.SessionObservation
-	37, // 49: ocserv.platform.agent.v1.TelemetryBatch.samples:type_name -> ocserv.platform.agent.v1.MetricSample
-	38, // 50: ocserv.platform.agent.v1.TelemetryBatch.security_events:type_name -> ocserv.platform.agent.v1.SecurityObservation
-	36, // 51: ocserv.platform.agent.v1.TelemetryBatch.ip_bans:type_name -> ocserv.platform.agent.v1.IpBanObservation
-	40, // 52: ocserv.platform.agent.v1.TelemetryBatch.users:type_name -> ocserv.platform.agent.v1.UserObservation
-	41, // 53: ocserv.platform.agent.v1.TelemetryBatch.groups:type_name -> ocserv.platform.agent.v1.GroupObservation
-	70, // 54: ocserv.platform.agent.v1.CommandEnvelope.issued_at:type_name -> google.protobuf.Timestamp
-	70, // 55: ocserv.platform.agent.v1.CommandEnvelope.expires_at:type_name -> google.protobuf.Timestamp
-	43, // 56: ocserv.platform.agent.v1.CommandEnvelope.session_disconnect:type_name -> ocserv.platform.agent.v1.SessionDisconnect
-	46, // 57: ocserv.platform.agent.v1.CommandEnvelope.user_create:type_name -> ocserv.platform.agent.v1.UserCreate
-	47, // 58: ocserv.platform.agent.v1.CommandEnvelope.user_disable:type_name -> ocserv.platform.agent.v1.UserDisable
-	51, // 59: ocserv.platform.agent.v1.CommandEnvelope.config_plan:type_name -> ocserv.platform.agent.v1.ConfigPlan
-	53, // 60: ocserv.platform.agent.v1.CommandEnvelope.config_apply:type_name -> ocserv.platform.agent.v1.ConfigApply
-	66, // 61: ocserv.platform.agent.v1.CommandEnvelope.service_reload:type_name -> ocserv.platform.agent.v1.ServiceReload
-	69, // 62: ocserv.platform.agent.v1.CommandEnvelope.simulation_probe:type_name -> ocserv.platform.agent.v1.SimulationProbe
-	67, // 63: ocserv.platform.agent.v1.CommandEnvelope.synthetic_noop:type_name -> ocserv.platform.agent.v1.SyntheticNoop
-	68, // 64: ocserv.platform.agent.v1.CommandEnvelope.synthetic_echo:type_name -> ocserv.platform.agent.v1.SyntheticEcho
-	44, // 65: ocserv.platform.agent.v1.CommandEnvelope.session_terminate:type_name -> ocserv.platform.agent.v1.SessionTerminate
-	45, // 66: ocserv.platform.agent.v1.CommandEnvelope.ip_ban_remove:type_name -> ocserv.platform.agent.v1.IpBanRemove
-	49, // 67: ocserv.platform.agent.v1.CommandEnvelope.user_password_rotate:type_name -> ocserv.platform.agent.v1.UserPasswordRotate
-	50, // 68: ocserv.platform.agent.v1.CommandEnvelope.group_apply:type_name -> ocserv.platform.agent.v1.GroupApply
-	48, // 69: ocserv.platform.agent.v1.CommandEnvelope.user_enable:type_name -> ocserv.platform.agent.v1.UserEnable
-	55, // 70: ocserv.platform.agent.v1.CommandEnvelope.certificate_csr:type_name -> ocserv.platform.agent.v1.CertificateCsr
-	57, // 71: ocserv.platform.agent.v1.CommandEnvelope.certificate_p12:type_name -> ocserv.platform.agent.v1.CertificateP12
-	59, // 72: ocserv.platform.agent.v1.CommandEnvelope.certificate_revoke:type_name -> ocserv.platform.agent.v1.CertificateRevoke
-	8,  // 73: ocserv.platform.agent.v1.CommandEnvelope.delivery_mode:type_name -> ocserv.platform.agent.v1.CommandDeliveryMode
-	9,  // 74: ocserv.platform.agent.v1.CommandEnvelope.semantic_payload_hash_version:type_name -> ocserv.platform.agent.v1.SemanticPayloadHashVersion
-	27, // 75: ocserv.platform.agent.v1.CommandEnvelope.authorization:type_name -> ocserv.platform.agent.v1.CommandAuthorizationProof
-	21, // 76: ocserv.platform.agent.v1.UserCreate.sealed_password_v1:type_name -> ocserv.platform.agent.v1.SealedSecretV1
-	21, // 77: ocserv.platform.agent.v1.UserPasswordRotate.sealed_password_v1:type_name -> ocserv.platform.agent.v1.SealedSecretV1
-	21, // 78: ocserv.platform.agent.v1.CertificateP12.sealed_password_v1:type_name -> ocserv.platform.agent.v1.SealedSecretV1
-	70, // 79: ocserv.platform.agent.v1.CertificateP12.artifact_expires_at:type_name -> google.protobuf.Timestamp
-	64, // 80: ocserv.platform.agent.v1.ArtifactFetchRequest.grant:type_name -> ocserv.platform.agent.v1.ArtifactGrantV1
-	64, // 81: ocserv.platform.agent.v1.ArtifactConsumeRequest.grant:type_name -> ocserv.platform.agent.v1.ArtifactGrantV1
-	15, // 82: ocserv.platform.agent.v1.ArtifactGrantV1.version:type_name -> ocserv.platform.agent.v1.ArtifactGrantVersion
-	70, // 83: ocserv.platform.agent.v1.ArtifactGrantV1.issued_at:type_name -> google.protobuf.Timestamp
-	70, // 84: ocserv.platform.agent.v1.ArtifactGrantV1.expires_at:type_name -> google.protobuf.Timestamp
-	85, // [85:85] is the sub-list for method output_type
-	85, // [85:85] is the sub-list for method input_type
-	85, // [85:85] is the sub-list for extension type_name
-	85, // [85:85] is the sub-list for extension extendee
-	0,  // [0:85] is the sub-list for field type_name
+	24, // 12: ocserv.platform.agent.v1.SessionHandshakeResponse.connection_fence:type_name -> ocserv.platform.agent.v1.ConnectionFenceV2
+	3,  // 13: ocserv.platform.agent.v1.SessionGrantV1.version:type_name -> ocserv.platform.agent.v1.SessionGrantVersion
+	70, // 14: ocserv.platform.agent.v1.SessionGrantV1.issued_at:type_name -> google.protobuf.Timestamp
+	70, // 15: ocserv.platform.agent.v1.SessionGrantV1.expires_at:type_name -> google.protobuf.Timestamp
+	4,  // 16: ocserv.platform.agent.v1.ConnectionFenceV2.signature_version:type_name -> ocserv.platform.agent.v1.FenceSignatureVersion
+	70, // 17: ocserv.platform.agent.v1.ConnectionFenceV2.lease_until:type_name -> google.protobuf.Timestamp
+	70, // 18: ocserv.platform.agent.v1.ConnectionFenceV2.issued_at:type_name -> google.protobuf.Timestamp
+	70, // 19: ocserv.platform.agent.v1.ConnectionFenceV2.expires_at:type_name -> google.protobuf.Timestamp
+	4,  // 20: ocserv.platform.agent.v1.FenceBindingV2.signature_version:type_name -> ocserv.platform.agent.v1.FenceSignatureVersion
+	5,  // 21: ocserv.platform.agent.v1.FenceBindingV2.operation_kind:type_name -> ocserv.platform.agent.v1.FenceOperationKind
+	70, // 22: ocserv.platform.agent.v1.FenceBindingV2.issued_at:type_name -> google.protobuf.Timestamp
+	70, // 23: ocserv.platform.agent.v1.FenceBindingV2.expires_at:type_name -> google.protobuf.Timestamp
+	6,  // 24: ocserv.platform.agent.v1.AgentEvent.type:type_name -> ocserv.platform.agent.v1.AgentEventType
+	10, // 25: ocserv.platform.agent.v1.CommandAuthorizationProof.version:type_name -> ocserv.platform.agent.v1.CommandAuthorizationVersion
+	7,  // 26: ocserv.platform.agent.v1.CommandResult.state:type_name -> ocserv.platform.agent.v1.CommandResultState
+	70, // 27: ocserv.platform.agent.v1.CommandResult.accepted_at:type_name -> google.protobuf.Timestamp
+	70, // 28: ocserv.platform.agent.v1.CommandResult.completed_at:type_name -> google.protobuf.Timestamp
+	9,  // 29: ocserv.platform.agent.v1.CommandResult.semantic_payload_hash_version:type_name -> ocserv.platform.agent.v1.SemanticPayloadHashVersion
+	29, // 30: ocserv.platform.agent.v1.CommandResult.privileged_result_proof:type_name -> ocserv.platform.agent.v1.PrivilegedResultProof
+	11, // 31: ocserv.platform.agent.v1.PrivilegedResultProof.version:type_name -> ocserv.platform.agent.v1.PrivdReceiptVersion
+	30, // 32: ocserv.platform.agent.v1.PrivilegedResultProof.receipt_v1:type_name -> ocserv.platform.agent.v1.PrivdResultReceiptV1
+	11, // 33: ocserv.platform.agent.v1.PrivdResultReceiptV1.receipt_version:type_name -> ocserv.platform.agent.v1.PrivdReceiptVersion
+	9,  // 34: ocserv.platform.agent.v1.PrivdResultReceiptV1.semantic_payload_hash_version:type_name -> ocserv.platform.agent.v1.SemanticPayloadHashVersion
+	12, // 35: ocserv.platform.agent.v1.PrivdResultReceiptV1.command_kind:type_name -> ocserv.platform.agent.v1.PrivilegedCommandKind
+	13, // 36: ocserv.platform.agent.v1.PrivdResultReceiptV1.result_kind:type_name -> ocserv.platform.agent.v1.PrivilegedResultKind
+	7,  // 37: ocserv.platform.agent.v1.PrivdResultReceiptV1.terminal_state:type_name -> ocserv.platform.agent.v1.CommandResultState
+	70, // 38: ocserv.platform.agent.v1.PrivdResultReceiptV1.accepted_at:type_name -> google.protobuf.Timestamp
+	70, // 39: ocserv.platform.agent.v1.PrivdResultReceiptV1.completed_at:type_name -> google.protobuf.Timestamp
+	31, // 40: ocserv.platform.agent.v1.PrivdResultReceiptV1.certificate:type_name -> ocserv.platform.agent.v1.PrivdCertificateReceiptBindingV1
+	11, // 41: ocserv.platform.agent.v1.PrivdAttestationRegistrationV1.version:type_name -> ocserv.platform.agent.v1.PrivdReceiptVersion
+	70, // 42: ocserv.platform.agent.v1.ObservedSnapshot.observed_at:type_name -> google.protobuf.Timestamp
+	33, // 43: ocserv.platform.agent.v1.ObservedSnapshot.dropped:type_name -> ocserv.platform.agent.v1.TelemetryDropCounters
+	70, // 44: ocserv.platform.agent.v1.SessionObservation.connected_at:type_name -> google.protobuf.Timestamp
+	70, // 45: ocserv.platform.agent.v1.MetricSample.sampled_at:type_name -> google.protobuf.Timestamp
+	70, // 46: ocserv.platform.agent.v1.SecurityObservation.observed_at:type_name -> google.protobuf.Timestamp
+	14, // 47: ocserv.platform.agent.v1.TelemetryBatch.priority:type_name -> ocserv.platform.agent.v1.TelemetryPriority
+	34, // 48: ocserv.platform.agent.v1.TelemetryBatch.snapshot:type_name -> ocserv.platform.agent.v1.ObservedSnapshot
+	35, // 49: ocserv.platform.agent.v1.TelemetryBatch.sessions:type_name -> ocserv.platform.agent.v1.SessionObservation
+	37, // 50: ocserv.platform.agent.v1.TelemetryBatch.samples:type_name -> ocserv.platform.agent.v1.MetricSample
+	38, // 51: ocserv.platform.agent.v1.TelemetryBatch.security_events:type_name -> ocserv.platform.agent.v1.SecurityObservation
+	36, // 52: ocserv.platform.agent.v1.TelemetryBatch.ip_bans:type_name -> ocserv.platform.agent.v1.IpBanObservation
+	40, // 53: ocserv.platform.agent.v1.TelemetryBatch.users:type_name -> ocserv.platform.agent.v1.UserObservation
+	41, // 54: ocserv.platform.agent.v1.TelemetryBatch.groups:type_name -> ocserv.platform.agent.v1.GroupObservation
+	70, // 55: ocserv.platform.agent.v1.CommandEnvelope.issued_at:type_name -> google.protobuf.Timestamp
+	70, // 56: ocserv.platform.agent.v1.CommandEnvelope.expires_at:type_name -> google.protobuf.Timestamp
+	43, // 57: ocserv.platform.agent.v1.CommandEnvelope.session_disconnect:type_name -> ocserv.platform.agent.v1.SessionDisconnect
+	46, // 58: ocserv.platform.agent.v1.CommandEnvelope.user_create:type_name -> ocserv.platform.agent.v1.UserCreate
+	47, // 59: ocserv.platform.agent.v1.CommandEnvelope.user_disable:type_name -> ocserv.platform.agent.v1.UserDisable
+	51, // 60: ocserv.platform.agent.v1.CommandEnvelope.config_plan:type_name -> ocserv.platform.agent.v1.ConfigPlan
+	53, // 61: ocserv.platform.agent.v1.CommandEnvelope.config_apply:type_name -> ocserv.platform.agent.v1.ConfigApply
+	66, // 62: ocserv.platform.agent.v1.CommandEnvelope.service_reload:type_name -> ocserv.platform.agent.v1.ServiceReload
+	69, // 63: ocserv.platform.agent.v1.CommandEnvelope.simulation_probe:type_name -> ocserv.platform.agent.v1.SimulationProbe
+	67, // 64: ocserv.platform.agent.v1.CommandEnvelope.synthetic_noop:type_name -> ocserv.platform.agent.v1.SyntheticNoop
+	68, // 65: ocserv.platform.agent.v1.CommandEnvelope.synthetic_echo:type_name -> ocserv.platform.agent.v1.SyntheticEcho
+	44, // 66: ocserv.platform.agent.v1.CommandEnvelope.session_terminate:type_name -> ocserv.platform.agent.v1.SessionTerminate
+	45, // 67: ocserv.platform.agent.v1.CommandEnvelope.ip_ban_remove:type_name -> ocserv.platform.agent.v1.IpBanRemove
+	49, // 68: ocserv.platform.agent.v1.CommandEnvelope.user_password_rotate:type_name -> ocserv.platform.agent.v1.UserPasswordRotate
+	50, // 69: ocserv.platform.agent.v1.CommandEnvelope.group_apply:type_name -> ocserv.platform.agent.v1.GroupApply
+	48, // 70: ocserv.platform.agent.v1.CommandEnvelope.user_enable:type_name -> ocserv.platform.agent.v1.UserEnable
+	55, // 71: ocserv.platform.agent.v1.CommandEnvelope.certificate_csr:type_name -> ocserv.platform.agent.v1.CertificateCsr
+	57, // 72: ocserv.platform.agent.v1.CommandEnvelope.certificate_p12:type_name -> ocserv.platform.agent.v1.CertificateP12
+	59, // 73: ocserv.platform.agent.v1.CommandEnvelope.certificate_revoke:type_name -> ocserv.platform.agent.v1.CertificateRevoke
+	8,  // 74: ocserv.platform.agent.v1.CommandEnvelope.delivery_mode:type_name -> ocserv.platform.agent.v1.CommandDeliveryMode
+	9,  // 75: ocserv.platform.agent.v1.CommandEnvelope.semantic_payload_hash_version:type_name -> ocserv.platform.agent.v1.SemanticPayloadHashVersion
+	27, // 76: ocserv.platform.agent.v1.CommandEnvelope.authorization:type_name -> ocserv.platform.agent.v1.CommandAuthorizationProof
+	24, // 77: ocserv.platform.agent.v1.CommandEnvelope.connection_fence:type_name -> ocserv.platform.agent.v1.ConnectionFenceV2
+	25, // 78: ocserv.platform.agent.v1.CommandEnvelope.fence_binding:type_name -> ocserv.platform.agent.v1.FenceBindingV2
+	21, // 79: ocserv.platform.agent.v1.UserCreate.sealed_password_v1:type_name -> ocserv.platform.agent.v1.SealedSecretV1
+	21, // 80: ocserv.platform.agent.v1.UserPasswordRotate.sealed_password_v1:type_name -> ocserv.platform.agent.v1.SealedSecretV1
+	21, // 81: ocserv.platform.agent.v1.CertificateP12.sealed_password_v1:type_name -> ocserv.platform.agent.v1.SealedSecretV1
+	70, // 82: ocserv.platform.agent.v1.CertificateP12.artifact_expires_at:type_name -> google.protobuf.Timestamp
+	64, // 83: ocserv.platform.agent.v1.ArtifactFetchRequest.grant:type_name -> ocserv.platform.agent.v1.ArtifactGrantV1
+	64, // 84: ocserv.platform.agent.v1.ArtifactConsumeRequest.grant:type_name -> ocserv.platform.agent.v1.ArtifactGrantV1
+	15, // 85: ocserv.platform.agent.v1.ArtifactGrantV1.version:type_name -> ocserv.platform.agent.v1.ArtifactGrantVersion
+	70, // 86: ocserv.platform.agent.v1.ArtifactGrantV1.issued_at:type_name -> google.protobuf.Timestamp
+	70, // 87: ocserv.platform.agent.v1.ArtifactGrantV1.expires_at:type_name -> google.protobuf.Timestamp
+	88, // [88:88] is the sub-list for method output_type
+	88, // [88:88] is the sub-list for method input_type
+	88, // [88:88] is the sub-list for extension type_name
+	88, // [88:88] is the sub-list for extension extendee
+	0,  // [0:88] is the sub-list for field type_name
 }
 
 func init() { file_ocserv_platform_agent_v1_agent_proto_init() }

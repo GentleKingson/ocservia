@@ -103,6 +103,12 @@ message SessionHandshakeResponse {
   string controller_version = 5;
   repeated string negotiated_capabilities = 6;
   SessionGrantV1 session_grant = 7;
+  // Present only when the negotiating agent advertised the connection fencing
+  // capability and the Controller currently owns the node connection lease.
+  // transportd verifies it, records it as the node's active owner fence, and
+  // relays it to the agent; mutations on such a session must carry fence
+  // proofs. Its absence keeps the established compatibility paths unchanged.
+  ConnectionFenceV2 connection_fence = 8;
 }
 
 enum SessionGrantVersion {
@@ -466,6 +472,14 @@ message CommandEnvelope {
   bytes approval_id = 123;
   bytes approval_request_sha256 = 124;
   CommandAuthorizationProof authorization = 125;
+  // Owner fence proofs for fenced dispatch. Both travel with the command so
+  // transportd can enforce the fence before the agent stream is opened and so
+  // the agent can independently re-verify them. The V1 authorization signature
+  // does not cover these fields; they are separate signed proofs and a frame
+  // carrying them is only produced for sessions that negotiated connection
+  // fencing.
+  ConnectionFenceV2 connection_fence = 126;
+  FenceBindingV2 fence_binding = 127;
 }
 
 message SessionDisconnect {

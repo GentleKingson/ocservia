@@ -27,15 +27,15 @@ import (
 
 type certificateArtifactFixture struct{ data []byte }
 
-func (f certificateArtifactFixture) FetchArtifact(context.Context, *agentv1.ArtifactGrantV1) (io.ReadCloser, error) {
+func (f certificateArtifactFixture) FetchArtifact(context.Context, *agentv1.ArtifactGrantV1, *agentv1.FenceBindingV2) (io.ReadCloser, error) {
 	return io.NopCloser(bytes.NewReader(f.data)), nil
 }
 
-func (certificateArtifactFixture) ConsumeArtifact(context.Context, *agentv1.ArtifactGrantV1, []byte, int64) error {
+func (certificateArtifactFixture) ConsumeArtifact(context.Context, *agentv1.ArtifactGrantV1, []byte, int64, *agentv1.FenceBindingV2) error {
 	return nil
 }
 
-func (certificateArtifactFixture) ConfirmArtifactConsumed(context.Context, *agentv1.ArtifactGrantV1, []byte, int64) (bool, error) {
+func (certificateArtifactFixture) ConfirmArtifactConsumed(context.Context, *agentv1.ArtifactGrantV1, []byte, int64, *agentv1.FenceBindingV2) (bool, error) {
 	return true, nil
 }
 
@@ -45,18 +45,18 @@ type invalidatingArtifactFixture struct {
 	data       []byte
 }
 
-func (f invalidatingArtifactFixture) FetchArtifact(ctx context.Context, _ *agentv1.ArtifactGrantV1) (io.ReadCloser, error) {
+func (f invalidatingArtifactFixture) FetchArtifact(ctx context.Context, _ *agentv1.ArtifactGrantV1, _ *agentv1.FenceBindingV2) (io.ReadCloser, error) {
 	if _, err := f.pool.Exec(ctx, `UPDATE artifact_operations SET state='failed',lease_until=NULL WHERE id=$1`, f.artifactID); err != nil {
 		return nil, err
 	}
 	return io.NopCloser(bytes.NewReader(f.data)), nil
 }
 
-func (invalidatingArtifactFixture) ConsumeArtifact(context.Context, *agentv1.ArtifactGrantV1, []byte, int64) error {
+func (invalidatingArtifactFixture) ConsumeArtifact(context.Context, *agentv1.ArtifactGrantV1, []byte, int64, *agentv1.FenceBindingV2) error {
 	return nil
 }
 
-func (invalidatingArtifactFixture) ConfirmArtifactConsumed(context.Context, *agentv1.ArtifactGrantV1, []byte, int64) (bool, error) {
+func (invalidatingArtifactFixture) ConfirmArtifactConsumed(context.Context, *agentv1.ArtifactGrantV1, []byte, int64, *agentv1.FenceBindingV2) (bool, error) {
 	return true, nil
 }
 
@@ -67,11 +67,11 @@ type terminalArtifactFixture struct {
 	data       []byte
 }
 
-func (f terminalArtifactFixture) FetchArtifact(context.Context, *agentv1.ArtifactGrantV1) (io.ReadCloser, error) {
+func (f terminalArtifactFixture) FetchArtifact(context.Context, *agentv1.ArtifactGrantV1, *agentv1.FenceBindingV2) (io.ReadCloser, error) {
 	return io.NopCloser(bytes.NewReader(f.data)), nil
 }
 
-func (f terminalArtifactFixture) ConsumeArtifact(ctx context.Context, _ *agentv1.ArtifactGrantV1, _ []byte, _ int64) error {
+func (f terminalArtifactFixture) ConsumeArtifact(ctx context.Context, _ *agentv1.ArtifactGrantV1, _ []byte, _ int64, _ *agentv1.FenceBindingV2) error {
 	command, err := f.pool.Exec(ctx, `UPDATE artifact_operations SET state=$2,lease_until=NULL,active_grant_expires_at=now(),updated_at=now() WHERE id=$1 AND state='consuming'`, f.artifactID, f.state)
 	if err != nil {
 		return err
@@ -82,7 +82,7 @@ func (f terminalArtifactFixture) ConsumeArtifact(ctx context.Context, _ *agentv1
 	return nil
 }
 
-func (terminalArtifactFixture) ConfirmArtifactConsumed(context.Context, *agentv1.ArtifactGrantV1, []byte, int64) (bool, error) {
+func (terminalArtifactFixture) ConfirmArtifactConsumed(context.Context, *agentv1.ArtifactGrantV1, []byte, int64, *agentv1.FenceBindingV2) (bool, error) {
 	return true, nil
 }
 

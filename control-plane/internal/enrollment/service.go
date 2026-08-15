@@ -20,6 +20,7 @@ import (
 	approvalstore "github.com/GentleKingson/ocservia/control-plane/internal/approvals"
 	"github.com/GentleKingson/ocservia/control-plane/internal/audit"
 	"github.com/GentleKingson/ocservia/control-plane/internal/commandauth"
+	"github.com/GentleKingson/ocservia/control-plane/internal/ownersession"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -94,10 +95,20 @@ type Service struct {
 	controllerEndpointID string
 	controllerVersion    string
 	signer               *commandauth.Signer
+	ownerSessions        ownersession.SessionOpener
 }
 
 func New(pool *pgxpool.Pool, controllerEndpointID, controllerVersion string, signer *commandauth.Signer) *Service {
 	return &Service{pool: pool, now: time.Now, random: rand.Reader, controllerEndpointID: controllerEndpointID, controllerVersion: controllerVersion, signer: signer}
+}
+
+// NewWithOwnerSessions additionally binds the per-node connection owner
+// authority: mutation-capable sessions of fence-capable agents receive a
+// Controller-signed owner fence bound to the current ownership term.
+func NewWithOwnerSessions(pool *pgxpool.Pool, controllerEndpointID, controllerVersion string, signer *commandauth.Signer, ownerSessions ownersession.SessionOpener) *Service {
+	service := New(pool, controllerEndpointID, controllerVersion, signer)
+	service.ownerSessions = ownerSessions
+	return service
 }
 
 func (s *Service) CreateToken(ctx context.Context, spec TokenSpec) (Token, error) {
@@ -400,6 +411,13 @@ func (s *Service) Approve(ctx context.Context, approval Approval) (NodeTrust, er
 		return NodeTrust{}, err
 	}
 	for _, capability := range capabilities {
+		// Protocol capabilities are negotiated, never business-approved: the
+		// fencing capability only records that the endpoint accepts fences,
+		// and an approval echoing every advertised capability must not turn
+		// it into an approved node capability.
+		if capability == ownersession.FencingCapability {
+			continue
+		}
 		if _, err := tx.Exec(ctx, `INSERT INTO node_capabilities (node_id,capability,approved) VALUES ($1,$2,true) ON CONFLICT (node_id,capability) DO UPDATE SET approved=true`, approval.NodeID, capability); err != nil {
 			return NodeTrust{}, fmt.Errorf("approve capability: %w", err)
 		}
@@ -656,14 +674,29 @@ func (s *Service) AuthorizeSession(ctx context.Context, request *transportv1.Aut
 	}
 	negotiated := make([]string, 0, len(handshake.GetCapabilities()))
 	for _, capability := range normalizedCapabilities(handshake.GetCapabilities()) {
+		// The fencing capability is a protocol-level negotiation, never a
+		// per-node business capability: an approval that echoes every
+		// advertised capability must not introduce a second copy of it.
+		if capability == ownersession.FencingCapability {
+			continue
+		}
 		mutationCapable := handshake.GetProtocolMinor() >= ProtocolMinor && !legacyReadOnlySealingFallback
 		if _, ok := approved[capability]; ok && (mutationCapable || strings.HasSuffix(capability, ".read")) {
 			negotiated = append(negotiated, capability)
 		}
 	}
+	// The fencing capability records only that the endpoint accepts
+	// ConnectionFenceV2 proofs on mutation carriers.
+	fencingNegotiated := handshake.GetProtocolMinor() >= ProtocolMinor && !legacyReadOnlySealingFallback &&
+		slices.Contains(normalizedCapabilities(handshake.GetCapabilities()), ownersession.FencingCapability)
+	if fencingNegotiated {
+		negotiated = append(negotiated, ownersession.FencingCapability)
+	}
 	slices.Sort(negotiated)
+	negotiated = slices.Compact(negotiated)
 	response.ProtocolMinor = handshake.GetProtocolMinor()
 	response.NegotiatedCapabilities = negotiated
+	var openedFence *agentv1.ConnectionFenceV2
 	if handshake.GetProtocolMinor() >= ProtocolMinor {
 		if s.signer == nil {
 			return nil, errors.New("controller session signer is unavailable")
@@ -677,13 +710,74 @@ func (s *Service) AuthorizeSession(ctx context.Context, request *transportv1.Aut
 		if err != nil {
 			return nil, fmt.Errorf("issue session grant: %w", err)
 		}
+		if fencingNegotiated && s.ownerSessions != nil {
+			fence, fenceErr := s.ownerSessions.OpenSession(ctx, fixedNode, fixedEndpoint, authorizationRevision, negotiated)
+			if errors.Is(fenceErr, ownersession.ErrNotOwner) {
+				// Only the current connection owner may establish a
+				// mutation-capable session. Downgrade to the established
+				// read-only compatibility path instead of granting
+				// mutations without a fence.
+				response.SessionGrant = nil
+				response.ProtocolMinor = 0
+				readOnly := negotiated[:0]
+				for _, capability := range negotiated {
+					if capability != ownersession.FencingCapability && strings.HasSuffix(capability, ".read") {
+						readOnly = append(readOnly, capability)
+					}
+				}
+				response.NegotiatedCapabilities = readOnly
+				response.Result = agentv1.HandshakeResult_HANDSHAKE_RESULT_ACCEPTED
+				response.MaxMessageSize = min(handshake.GetMaxMessageSize(), MaxMessageSize)
+				if err := tx.Commit(ctx); err != nil {
+					return nil, fmt.Errorf("commit downgraded session authorization: %w", err)
+				}
+				return response, nil
+			}
+			if fenceErr != nil {
+				return nil, fmt.Errorf("open owner session: %w", fenceErr)
+			}
+			response.ConnectionFence = fence
+			openedFence = fence
+		}
 	}
 	response.Result = agentv1.HandshakeResult_HANDSHAKE_RESULT_ACCEPTED
 	response.MaxMessageSize = min(handshake.GetMaxMessageSize(), MaxMessageSize)
 	if err := tx.Commit(ctx); err != nil {
+		// The session was never granted: end the exact owner term so the
+		// lease does not keep renewing behind a failed authorization.
+		if openedFence != nil {
+			s.closeOpenedSession(ctx, nodeID, openedFence)
+		}
 		return nil, fmt.Errorf("commit session authorization: %w", err)
 	}
 	return response, nil
+}
+
+// closeOpenedSession ends the owner term a handshake opened when the
+// authorization it was opened for failed to commit. The cleanup runs on its
+// own deadline because the request context is typically the cancelled cause
+// of the failure.
+func (s *Service) closeOpenedSession(ctx context.Context, nodeID uuid.UUID, fence *agentv1.ConnectionFenceV2) {
+	closer, ok := s.ownerSessions.(ownersession.SessionCloser)
+	if !ok {
+		return
+	}
+	connectionID, err := fixed16(fence.GetConnectionId())
+	if err != nil {
+		return
+	}
+	cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	defer cancel()
+	_ = closer.CloseSession(cleanupCtx, nodeID, connectionID, int64(fence.GetOwnerEpoch()))
+}
+
+func fixed16(value []byte) ([16]byte, error) {
+	if len(value) != 16 {
+		return [16]byte{}, errors.New("enrollment: value must be 16 bytes")
+	}
+	var fixed [16]byte
+	copy(fixed[:], value)
+	return fixed, nil
 }
 
 func validateEnrollment(request *agentv1.EnrollRequest) error {

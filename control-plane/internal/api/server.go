@@ -23,6 +23,7 @@ import (
 	"github.com/GentleKingson/ocservia/control-plane/internal/eventstream"
 	"github.com/GentleKingson/ocservia/control-plane/internal/localslice"
 	operationstore "github.com/GentleKingson/ocservia/control-plane/internal/operations"
+	"github.com/GentleKingson/ocservia/control-plane/internal/ownersession"
 	"github.com/GentleKingson/ocservia/control-plane/internal/privdattestation"
 	"github.com/GentleKingson/ocservia/control-plane/internal/rbac"
 	telemetrystore "github.com/GentleKingson/ocservia/control-plane/internal/telemetry"
@@ -57,6 +58,7 @@ type Server struct {
 	operations       *operationstore.Service
 	enrollment       *enrollment.Service
 	transport        *transportclient.Client
+	fences           ownersession.FencedExecutor
 	telemetry        *telemetrystore.Service
 	auth             *auth.Service
 	rbac             *rbac.Service
@@ -181,6 +183,13 @@ func (s *Server) EnableAuthorization(authn *auth.Service, authz *rbac.Service, a
 func (s *Server) EnableEnrollment(service *enrollment.Service, transport *transportclient.Client) {
 	s.enrollment = service
 	s.transport = transport
+}
+
+// EnableOwnerFencing runs administrative trust updates and connection closes
+// issued by API handlers inside the connection owner's fencing interval, so
+// a stale owner cannot drive connection state through the API role.
+func (s *Server) EnableOwnerFencing(fences ownersession.FencedExecutor) {
+	s.fences = fences
 }
 
 func (s *Server) ListenAndServe() error {

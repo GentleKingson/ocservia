@@ -9,15 +9,17 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use ocservia_contracts::decode_strict_command_envelope;
 use ocservia_contracts::generated::ocserv::platform::agent::v1::{
-    ArtifactChunk, CommandDeliveryMode, MetricSample, ObservedSnapshot, SimulationProbe,
-    TelemetryBatch, TelemetryDropCounters, TelemetryPriority, command_envelope,
+    ArtifactChunk, CommandDeliveryMode, ConnectionFenceV2, MetricSample, ObservedSnapshot,
+    SimulationProbe, TelemetryBatch, TelemetryDropCounters, TelemetryPriority, command_envelope,
 };
 use ocservia_contracts::generated::ocserv::platform::transport::v1::{
     CloseNodeRequest, CloseNodeResponse, ConnectionPath, ConsumeArtifactRequest,
-    ConsumeArtifactResponse, FetchArtifactRequest, GetNodeConnectionRequest, HealthRequest,
-    HealthResponse, HealthStatus, NodeConnection, SendCommandRequest, SendCommandResponse,
-    TransportEvent, TransportEventType, TrustUpdateDisposition, UpdateNodeTrustRequest,
-    UpdateNodeTrustResponse, WatchEventsRequest, transport_service_server::TransportService,
+    ConsumeArtifactResponse, FetchArtifactRequest, GetNodeConnectionRequest, GetOwnerFenceRequest,
+    GetOwnerFenceResponse, HealthRequest, HealthResponse, HealthStatus, NodeConnection,
+    OwnerFenceDisposition, RegisterOwnerFenceRequest, RegisterOwnerFenceResponse,
+    SendCommandRequest, SendCommandResponse, TransportEvent, TransportEventType,
+    TrustUpdateDisposition, UpdateNodeTrustRequest, UpdateNodeTrustResponse, WatchEventsRequest,
+    transport_service_server::TransportService,
 };
 use prost::Message;
 use sha2::{Digest as _, Sha256};
@@ -41,10 +43,21 @@ pub struct StubService {
 struct State {
     delivery: Mutex<EventState>,
     nodes: Mutex<HashMap<Vec<u8>, ActiveNode>>,
+    fences: Mutex<HashMap<Vec<u8>, RecordedFence>>,
     accepted_commands: Mutex<AcceptedCommands>,
     retention: usize,
     tasks: Arc<Semaphore>,
     capacity_telemetry: bool,
+}
+
+/// The stub's owner-fence bookkeeping. This simulator performs no Controller
+/// signature verification and applies no lease clock; it records only the
+/// epoch watermark so development flows observe the same disposition
+/// semantics as transportd. Real enforcement lives in transportd.
+struct RecordedFence {
+    fence_id: Vec<u8>,
+    owner_epoch: u64,
+    fence: ConnectionFenceV2,
 }
 
 struct EventState {
@@ -85,6 +98,7 @@ impl StubService {
                     subscribers: Vec::new(),
                 }),
                 nodes: Mutex::new(HashMap::new()),
+                fences: Mutex::new(HashMap::new()),
                 accepted_commands: Mutex::new(AcceptedCommands {
                     keys: HashSet::with_capacity(capacity),
                 }),
@@ -113,7 +127,19 @@ impl StubService {
         }
     }
 
+    /// Stamps the node's recorded owner term onto an event so the simulator
+    /// keeps the same disconnect correlation the real transportd provides.
+    async fn with_registered_term(&self, mut event: TransportEvent) -> TransportEvent {
+        let fences = self.state.fences.lock().await;
+        if let Some(recorded) = fences.get(&event.node_id) {
+            event.connection_id = recorded.fence.connection_id.clone();
+            event.owner_epoch = recorded.fence.owner_epoch;
+        }
+        event
+    }
+
     async fn publish(&self, event: TransportEvent) {
+        let event = self.with_registered_term(event).await;
         let mut state = self.state.delivery.lock().await;
         if state.retained.len() == self.state.retention {
             state.retained.pop_front();
@@ -134,6 +160,7 @@ impl StubService {
     }
 
     async fn publish_control(&self, event: TransportEvent) {
+        let event = self.with_registered_term(event).await;
         let mut state = self.state.delivery.lock().await;
         if state.retained.len() == self.state.retention {
             state.retained.pop_front();
@@ -171,6 +198,7 @@ impl StubService {
         if *cancelled.borrow() {
             return false;
         }
+        let event = self.with_registered_term(event).await;
         let mut state = self.state.delivery.lock().await;
         if *cancelled.borrow() {
             return false;
@@ -228,6 +256,7 @@ impl StubService {
                     negotiated_capabilities: Vec::new(),
                     authorization_revision: 0,
                     session_expires_at: None,
+                    owner_epoch: 0,
                 },
                 generation,
                 cancellation,
@@ -611,6 +640,84 @@ impl TransportService for StubService {
         }))
     }
 
+    async fn register_owner_fence(
+        &self,
+        request: Request<RegisterOwnerFenceRequest>,
+    ) -> Result<Response<RegisterOwnerFenceResponse>, Status> {
+        let request = request.into_inner();
+        let fence = request
+            .fence
+            .ok_or_else(|| Status::invalid_argument("owner fence is required"))?;
+        let node_id = validate_id(&fence.node_id, "node_id")?;
+        if fence.fence_id.len() != 16 {
+            return Err(Status::invalid_argument("fence_id must be 16 bytes"));
+        }
+        let mut fences = self.state.fences.lock().await;
+        match fences.get(&node_id) {
+            Some(existing) if existing.owner_epoch > fence.owner_epoch => {
+                let retained_epoch = existing.owner_epoch;
+                Ok(Response::new(RegisterOwnerFenceResponse {
+                    disposition: OwnerFenceDisposition::Stale.into(),
+                    retained_epoch,
+                }))
+            }
+            Some(existing)
+                if existing.owner_epoch == fence.owner_epoch
+                    && existing.fence_id != fence.fence_id =>
+            {
+                Err(Status::invalid_argument(
+                    "owner epoch is already claimed by a different fence",
+                ))
+            }
+            Some(existing) if existing.fence_id == fence.fence_id => {
+                let retained_epoch = existing.owner_epoch;
+                fences.insert(
+                    node_id,
+                    RecordedFence {
+                        fence_id: fence.fence_id.clone(),
+                        owner_epoch: fence.owner_epoch,
+                        fence,
+                    },
+                );
+                Ok(Response::new(RegisterOwnerFenceResponse {
+                    disposition: OwnerFenceDisposition::Refreshed.into(),
+                    retained_epoch,
+                }))
+            }
+            _ => {
+                let retained_epoch = fence.owner_epoch;
+                fences.insert(
+                    node_id,
+                    RecordedFence {
+                        fence_id: fence.fence_id.clone(),
+                        owner_epoch: fence.owner_epoch,
+                        fence,
+                    },
+                );
+                Ok(Response::new(RegisterOwnerFenceResponse {
+                    disposition: OwnerFenceDisposition::Applied.into(),
+                    retained_epoch,
+                }))
+            }
+        }
+    }
+
+    async fn get_owner_fence(
+        &self,
+        request: Request<GetOwnerFenceRequest>,
+    ) -> Result<Response<GetOwnerFenceResponse>, Status> {
+        let node_id = validate_id(&request.into_inner().node_id, "node_id")?;
+        let fence = self
+            .state
+            .fences
+            .lock()
+            .await
+            .get(&node_id)
+            .map(|recorded| recorded.fence.clone())
+            .ok_or_else(|| Status::not_found("owner fence is not registered"))?;
+        Ok(Response::new(GetOwnerFenceResponse { fence: Some(fence) }))
+    }
+
     async fn watch_events(
         &self,
         request: Request<WatchEventsRequest>,
@@ -728,6 +835,8 @@ fn new_event(
         payload,
         traceparent: traceparent.to_owned(),
         endpoint_id: simulator_endpoint(node_id),
+        connection_id: Vec::new(),
+        owner_epoch: 0,
     }
 }
 
@@ -1003,6 +1112,7 @@ mod tests {
             .close_node(Request::new(CloseNodeRequest {
                 node_id: node_id.clone(),
                 reason: "operator close".to_owned(),
+                fence_binding: None,
             }))
             .await
             .expect("connected node closed");
@@ -1066,6 +1176,7 @@ mod tests {
             service.close_node(Request::new(CloseNodeRequest {
                 node_id,
                 reason: "operator close".to_owned(),
+                fence_binding: None,
             })),
         )
         .await
@@ -1094,6 +1205,7 @@ mod tests {
                     negotiated_capabilities: Vec::new(),
                     authorization_revision: 0,
                     session_expires_at: None,
+                    owner_epoch: 0,
                 },
                 generation,
                 cancellation: cancellation.clone(),
@@ -1184,6 +1296,7 @@ mod tests {
             .close_node(Request::new(CloseNodeRequest {
                 node_id: node_id.clone(),
                 reason: "x".repeat(MAX_COMMAND_BYTES + 1),
+                fence_binding: None,
             }))
             .await
             .expect_err("oversized close rejected");
@@ -1193,6 +1306,7 @@ mod tests {
             .close_node(Request::new(CloseNodeRequest {
                 node_id,
                 reason: "cleanup".to_owned(),
+                fence_binding: None,
             }))
             .await
             .expect("valid close accepted");
@@ -1205,6 +1319,7 @@ mod tests {
             .close_node(Request::new(CloseNodeRequest {
                 node_id: Uuid::now_v7().as_bytes().to_vec(),
                 reason: "test".to_owned(),
+                fence_binding: None,
             }))
             .await;
 
