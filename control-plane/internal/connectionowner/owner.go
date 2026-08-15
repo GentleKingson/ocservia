@@ -33,14 +33,17 @@ type Identity struct {
 	Incarnation int64
 }
 
-// Term is one acquired node ownership lease. It is immutable after Acquire;
-// the local lease deadline is runner state owned by the caller.
+// Term is one acquired node ownership lease. It is immutable after Acquire.
+// LeaseUntil is the exact deadline PostgreSQL recorded for the term; callers
+// must use it instead of reconstructing a local deadline from the TTL, and
+// must replace it with the exact deadline returned by Renew.
 type Term struct {
 	identity     Identity
 	nodeID       [16]byte
 	connectionID [16]byte
 	epoch        int64
 	leaseTTL     time.Duration
+	leaseUntil   time.Time
 }
 
 // Acquire takes the ownership lease for one node. A first term starts at
@@ -54,6 +57,7 @@ func Acquire(ctx context.Context, pool *pgxpool.Pool, nodeID [16]byte, identity 
 		return nil, errors.New("connectionowner: lease TTL must be positive")
 	}
 	var epoch int64
+	var leaseUntil time.Time
 	err := pool.QueryRow(ctx, `INSERT INTO connection_owner_fencing
 		(node_id, owner_instance_id, owner_incarnation, connection_id, owner_epoch, lease_until, updated_at)
 		VALUES ($1, $2, $3, $4, 1, now()+$5::interval, now())
@@ -67,15 +71,15 @@ func Acquire(ctx context.Context, pool *pgxpool.Pool, nodeID [16]byte, identity 
 		WHERE connection_owner_fencing.lease_until<=now()
 			OR (connection_owner_fencing.owner_instance_id=EXCLUDED.owner_instance_id
 				AND connection_owner_fencing.owner_incarnation=EXCLUDED.owner_incarnation)
-		RETURNING owner_epoch`,
-		nodeID[:], identity.InstanceID, identity.Incarnation, connectionID[:], leaseTTL.String()).Scan(&epoch)
+		RETURNING owner_epoch, lease_until`,
+		nodeID[:], identity.InstanceID, identity.Incarnation, connectionID[:], leaseTTL.String()).Scan(&epoch, &leaseUntil)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrLeaseHeld
 	}
 	if err != nil {
 		return nil, fmt.Errorf("connectionowner: acquire node ownership: %w", err)
 	}
-	return &Term{identity: identity, nodeID: nodeID, connectionID: connectionID, epoch: epoch, leaseTTL: leaseTTL}, nil
+	return &Term{identity: identity, nodeID: nodeID, connectionID: connectionID, epoch: epoch, leaseTTL: leaseTTL, leaseUntil: leaseUntil.UTC()}, nil
 }
 
 // Epoch returns the fencing epoch of this term. Per-node epochs increase
@@ -92,21 +96,34 @@ func (t *Term) ConnectionID() [16]byte { return t.connectionID }
 // Identity returns the owner identity bound to this term.
 func (t *Term) Identity() Identity { return t.identity }
 
+// LeaseUntil returns the exact lease deadline PostgreSQL recorded when this
+// term was acquired. The deadline is authoritative: reconstructing it locally
+// with the TTL and a local clock is forbidden because clock drift would let a
+// stale owner treat an expired lease as valid.
+func (t *Term) LeaseUntil() time.Time { return t.leaseUntil }
+
+// LeaseTTL returns the configured TTL of this term. It is configuration, not
+// an authority: deadlines come from LeaseUntil and Renew.
+func (t *Term) LeaseTTL() time.Duration { return t.leaseTTL }
+
 // Renew extends the lease for the current term only. It fails when ownership
 // was taken over or the lease expired; the caller must cancel its
-// owner-scoped work. Renew never mutates the immutable term.
-func (t *Term) Renew(ctx context.Context, pool *pgxpool.Pool) error {
-	tag, err := pool.Exec(ctx, `UPDATE connection_owner_fencing
+// owner-scoped work. Renew returns the exact new lease deadline PostgreSQL
+// recorded; the caller must replace any stored deadline with it.
+func (t *Term) Renew(ctx context.Context, pool *pgxpool.Pool) (time.Time, error) {
+	var leaseUntil time.Time
+	err := pool.QueryRow(ctx, `UPDATE connection_owner_fencing
 		SET lease_until=now()+$6::interval, updated_at=now()
-		WHERE node_id=$1 AND owner_instance_id=$2 AND owner_incarnation=$3 AND connection_id=$4 AND owner_epoch=$5 AND lease_until>now()`,
-		t.nodeID[:], t.identity.InstanceID, t.identity.Incarnation, t.connectionID[:], t.epoch, t.leaseTTL.String())
+		WHERE node_id=$1 AND owner_instance_id=$2 AND owner_incarnation=$3 AND connection_id=$4 AND owner_epoch=$5 AND lease_until>now()
+		RETURNING lease_until`,
+		t.nodeID[:], t.identity.InstanceID, t.identity.Incarnation, t.connectionID[:], t.epoch, t.leaseTTL.String()).Scan(&leaseUntil)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return time.Time{}, ErrNotOwner
+	}
 	if err != nil {
-		return fmt.Errorf("connectionowner: renew node ownership: %w", err)
+		return time.Time{}, fmt.Errorf("connectionowner: renew node ownership: %w", err)
 	}
-	if tag.RowsAffected() != 1 {
-		return ErrNotOwner
-	}
-	return nil
+	return leaseUntil.UTC(), nil
 }
 
 // AssertFenced verifies inside the caller's transaction, immediately before

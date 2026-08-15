@@ -84,7 +84,7 @@ func (c *Client) SendCommand(ctx context.Context, nodeID, envelope []byte) error
 	return nil
 }
 
-func (c *Client) FetchArtifact(ctx context.Context, grant *agentv1.ArtifactGrantV1) (io.ReadCloser, error) {
+func (c *Client) FetchArtifact(ctx context.Context, grant *agentv1.ArtifactGrantV1, fenceBinding *agentv1.FenceBindingV2) (io.ReadCloser, error) {
 	if grant == nil || len(grant.GetNodeId()) != 16 || len(grant.GetArtifactId()) != 16 || grant.GetMaxBytes() < 1 || grant.GetMaxBytes() > 64<<20 {
 		return nil, errors.New("artifact request is invalid")
 	}
@@ -101,7 +101,7 @@ func (c *Client) FetchArtifact(ctx context.Context, grant *agentv1.ArtifactGrant
 	if err != nil {
 		return nil, err
 	}
-	stream, err := transportv1.NewTransportServiceClient(connection).FetchArtifact(ctx, &transportv1.FetchArtifactRequest{NodeId: nodeID[:], ArtifactId: artifactID[:], Purpose: "certificate_p12", MaxBytes: uint64(maxBytes), Grant: grant})
+	stream, err := transportv1.NewTransportServiceClient(connection).FetchArtifact(ctx, &transportv1.FetchArtifactRequest{NodeId: nodeID[:], ArtifactId: artifactID[:], Purpose: "certificate_p12", MaxBytes: uint64(maxBytes), Grant: grant, FenceBinding: fenceBinding})
 	if err != nil {
 		connection.Close()
 		return nil, fmt.Errorf("fetch artifact: %w", err)
@@ -143,8 +143,8 @@ func (c *Client) FetchArtifact(ctx context.Context, grant *agentv1.ArtifactGrant
 	return reader, nil
 }
 
-func (c *Client) ConsumeArtifact(ctx context.Context, grant *agentv1.ArtifactGrantV1, digest []byte, size int64) error {
-	consumed, err := c.consumeArtifact(ctx, grant, digest, size, false)
+func (c *Client) ConsumeArtifact(ctx context.Context, grant *agentv1.ArtifactGrantV1, digest []byte, size int64, fenceBinding *agentv1.FenceBindingV2) error {
+	consumed, err := c.consumeArtifact(ctx, grant, digest, size, false, fenceBinding)
 	if err != nil {
 		return err
 	}
@@ -154,11 +154,11 @@ func (c *Client) ConsumeArtifact(ctx context.Context, grant *agentv1.ArtifactGra
 	return nil
 }
 
-func (c *Client) ConfirmArtifactConsumed(ctx context.Context, grant *agentv1.ArtifactGrantV1, digest []byte, size int64) (bool, error) {
-	return c.consumeArtifact(ctx, grant, digest, size, true)
+func (c *Client) ConfirmArtifactConsumed(ctx context.Context, grant *agentv1.ArtifactGrantV1, digest []byte, size int64, fenceBinding *agentv1.FenceBindingV2) (bool, error) {
+	return c.consumeArtifact(ctx, grant, digest, size, true, fenceBinding)
 }
 
-func (c *Client) consumeArtifact(ctx context.Context, grant *agentv1.ArtifactGrantV1, digest []byte, size int64, confirmOnly bool) (bool, error) {
+func (c *Client) consumeArtifact(ctx context.Context, grant *agentv1.ArtifactGrantV1, digest []byte, size int64, confirmOnly bool, fenceBinding *agentv1.FenceBindingV2) (bool, error) {
 	if grant == nil || len(grant.GetNodeId()) != 16 || len(grant.GetArtifactId()) != 16 || len(grant.GetGrantId()) != 16 || len(digest) != sha256.Size || size < 1 || uint64(size) != grant.GetMaxBytes() {
 		return false, errors.New("artifact consumption request is invalid")
 	}
@@ -170,11 +170,12 @@ func (c *Client) consumeArtifact(ctx context.Context, grant *agentv1.ArtifactGra
 	rpcCtx, cancel := context.WithTimeout(ctx, c.deadline)
 	defer cancel()
 	response, err := transportv1.NewTransportServiceClient(connection).ConsumeArtifact(rpcCtx, &transportv1.ConsumeArtifactRequest{
-		NodeId:      grant.GetNodeId(),
-		Grant:       grant,
-		Sha256:      bytes.Clone(digest),
-		Size:        uint64(size),
-		ConfirmOnly: confirmOnly,
+		NodeId:       grant.GetNodeId(),
+		Grant:        grant,
+		Sha256:       bytes.Clone(digest),
+		Size:         uint64(size),
+		ConfirmOnly:  confirmOnly,
+		FenceBinding: fenceBinding,
 	})
 	if err != nil {
 		return false, fmt.Errorf("consume artifact: %w", err)
@@ -249,7 +250,7 @@ func (c *Client) NodeConnected(ctx context.Context, nodeID []byte) (bool, error)
 	return true, nil
 }
 
-func (c *Client) UpdateNodeTrust(ctx context.Context, nodeID, endpointID []byte, state transportv1.NodeTrustState, reason string, revision uint64) error {
+func (c *Client) UpdateNodeTrust(ctx context.Context, nodeID, endpointID []byte, state transportv1.NodeTrustState, reason string, revision uint64, fenceBinding *agentv1.FenceBindingV2) error {
 	connection, err := c.dial()
 	if err != nil {
 		return err
@@ -257,7 +258,7 @@ func (c *Client) UpdateNodeTrust(ctx context.Context, nodeID, endpointID []byte,
 	defer connection.Close()
 	rpcCtx, cancel := context.WithTimeout(ctx, c.deadline)
 	defer cancel()
-	response, err := transportv1.NewTransportServiceClient(connection).UpdateNodeTrust(rpcCtx, &transportv1.UpdateNodeTrustRequest{NodeId: nodeID, EndpointId: endpointID, State: state, Reason: reason, Revision: revision})
+	response, err := transportv1.NewTransportServiceClient(connection).UpdateNodeTrust(rpcCtx, &transportv1.UpdateNodeTrustRequest{NodeId: nodeID, EndpointId: endpointID, State: state, Reason: reason, Revision: revision, FenceBinding: fenceBinding})
 	if err != nil {
 		return fmt.Errorf("update transport node trust: %w", err)
 	}
@@ -267,7 +268,7 @@ func (c *Client) UpdateNodeTrust(ctx context.Context, nodeID, endpointID []byte,
 	return nil
 }
 
-func (c *Client) CloseNode(ctx context.Context, nodeID []byte, reason string) error {
+func (c *Client) CloseNode(ctx context.Context, nodeID []byte, reason string, fenceBinding *agentv1.FenceBindingV2) error {
 	connection, err := c.dial()
 	if err != nil {
 		return err
@@ -275,7 +276,7 @@ func (c *Client) CloseNode(ctx context.Context, nodeID []byte, reason string) er
 	defer connection.Close()
 	rpcCtx, cancel := context.WithTimeout(ctx, c.deadline)
 	defer cancel()
-	_, err = transportv1.NewTransportServiceClient(connection).CloseNode(rpcCtx, &transportv1.CloseNodeRequest{NodeId: nodeID, Reason: reason})
+	_, err = transportv1.NewTransportServiceClient(connection).CloseNode(rpcCtx, &transportv1.CloseNodeRequest{NodeId: nodeID, Reason: reason, FenceBinding: fenceBinding})
 	if status.Code(err) == codes.NotFound {
 		return nil
 	}
@@ -283,6 +284,55 @@ func (c *Client) CloseNode(ctx context.Context, nodeID []byte, reason string) er
 		return fmt.Errorf("close transport node: %w", err)
 	}
 	return nil
+}
+
+// RegisterOwnerFence pushes a Controller-signed owner fence to transportd,
+// which verifies it, records the term, and retires a superseded owner's
+// mutation session when the epoch increases.
+func (c *Client) RegisterOwnerFence(ctx context.Context, fence *agentv1.ConnectionFenceV2) error {
+	if fence == nil || len(fence.GetNodeId()) != 16 || len(fence.GetFenceId()) != 16 || fence.GetOwnerEpoch() == 0 {
+		return errors.New("owner fence is invalid")
+	}
+	connection, err := c.dial()
+	if err != nil {
+		return err
+	}
+	defer connection.Close()
+	rpcCtx, cancel := context.WithTimeout(ctx, c.deadline)
+	defer cancel()
+	response, err := transportv1.NewTransportServiceClient(connection).RegisterOwnerFence(rpcCtx, &transportv1.RegisterOwnerFenceRequest{Fence: fence})
+	if err != nil {
+		return fmt.Errorf("register owner fence: %w", err)
+	}
+	if response.GetDisposition() != transportv1.OwnerFenceDisposition_OWNER_FENCE_DISPOSITION_APPLIED &&
+		response.GetDisposition() != transportv1.OwnerFenceDisposition_OWNER_FENCE_DISPOSITION_REFRESHED {
+		return fmt.Errorf("transport rejected owner fence with disposition %s at epoch %d", response.GetDisposition(), response.GetRetainedEpoch())
+	}
+	return nil
+}
+
+// GetOwnerFence returns the fence transportd registered for the node, or nil
+// when transportd has none. The returned fence was signature-verified by
+// transportd before registration.
+func (c *Client) GetOwnerFence(ctx context.Context, nodeID []byte) (*agentv1.ConnectionFenceV2, error) {
+	if len(nodeID) != 16 {
+		return nil, errors.New("owner fence node is invalid")
+	}
+	connection, err := c.dial()
+	if err != nil {
+		return nil, err
+	}
+	defer connection.Close()
+	rpcCtx, cancel := context.WithTimeout(ctx, c.deadline)
+	defer cancel()
+	response, err := transportv1.NewTransportServiceClient(connection).GetOwnerFence(rpcCtx, &transportv1.GetOwnerFenceRequest{NodeId: nodeID})
+	if status.Code(err) == codes.NotFound {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("get owner fence: %w", err)
+	}
+	return response.GetFence(), nil
 }
 
 func (c *Client) watchOnce(ctx context.Context, cursors CursorStore, handler EventHandler, reconcileCursor bool) error {

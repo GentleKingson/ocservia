@@ -20,14 +20,16 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
-	TransportService_Health_FullMethodName            = "/ocserv.platform.transport.v1.TransportService/Health"
-	TransportService_GetNodeConnection_FullMethodName = "/ocserv.platform.transport.v1.TransportService/GetNodeConnection"
-	TransportService_SendCommand_FullMethodName       = "/ocserv.platform.transport.v1.TransportService/SendCommand"
-	TransportService_CloseNode_FullMethodName         = "/ocserv.platform.transport.v1.TransportService/CloseNode"
-	TransportService_WatchEvents_FullMethodName       = "/ocserv.platform.transport.v1.TransportService/WatchEvents"
-	TransportService_UpdateNodeTrust_FullMethodName   = "/ocserv.platform.transport.v1.TransportService/UpdateNodeTrust"
-	TransportService_FetchArtifact_FullMethodName     = "/ocserv.platform.transport.v1.TransportService/FetchArtifact"
-	TransportService_ConsumeArtifact_FullMethodName   = "/ocserv.platform.transport.v1.TransportService/ConsumeArtifact"
+	TransportService_Health_FullMethodName             = "/ocserv.platform.transport.v1.TransportService/Health"
+	TransportService_GetNodeConnection_FullMethodName  = "/ocserv.platform.transport.v1.TransportService/GetNodeConnection"
+	TransportService_SendCommand_FullMethodName        = "/ocserv.platform.transport.v1.TransportService/SendCommand"
+	TransportService_CloseNode_FullMethodName          = "/ocserv.platform.transport.v1.TransportService/CloseNode"
+	TransportService_WatchEvents_FullMethodName        = "/ocserv.platform.transport.v1.TransportService/WatchEvents"
+	TransportService_UpdateNodeTrust_FullMethodName    = "/ocserv.platform.transport.v1.TransportService/UpdateNodeTrust"
+	TransportService_FetchArtifact_FullMethodName      = "/ocserv.platform.transport.v1.TransportService/FetchArtifact"
+	TransportService_ConsumeArtifact_FullMethodName    = "/ocserv.platform.transport.v1.TransportService/ConsumeArtifact"
+	TransportService_RegisterOwnerFence_FullMethodName = "/ocserv.platform.transport.v1.TransportService/RegisterOwnerFence"
+	TransportService_GetOwnerFence_FullMethodName      = "/ocserv.platform.transport.v1.TransportService/GetOwnerFence"
 )
 
 // TransportServiceClient is the client API for TransportService service.
@@ -44,6 +46,8 @@ type TransportServiceClient interface {
 	UpdateNodeTrust(ctx context.Context, in *UpdateNodeTrustRequest, opts ...grpc.CallOption) (*UpdateNodeTrustResponse, error)
 	FetchArtifact(ctx context.Context, in *FetchArtifactRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[v1.ArtifactChunk], error)
 	ConsumeArtifact(ctx context.Context, in *ConsumeArtifactRequest, opts ...grpc.CallOption) (*ConsumeArtifactResponse, error)
+	RegisterOwnerFence(ctx context.Context, in *RegisterOwnerFenceRequest, opts ...grpc.CallOption) (*RegisterOwnerFenceResponse, error)
+	GetOwnerFence(ctx context.Context, in *GetOwnerFenceRequest, opts ...grpc.CallOption) (*GetOwnerFenceResponse, error)
 }
 
 type transportServiceClient struct {
@@ -152,6 +156,26 @@ func (c *transportServiceClient) ConsumeArtifact(ctx context.Context, in *Consum
 	return out, nil
 }
 
+func (c *transportServiceClient) RegisterOwnerFence(ctx context.Context, in *RegisterOwnerFenceRequest, opts ...grpc.CallOption) (*RegisterOwnerFenceResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(RegisterOwnerFenceResponse)
+	err := c.cc.Invoke(ctx, TransportService_RegisterOwnerFence_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *transportServiceClient) GetOwnerFence(ctx context.Context, in *GetOwnerFenceRequest, opts ...grpc.CallOption) (*GetOwnerFenceResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(GetOwnerFenceResponse)
+	err := c.cc.Invoke(ctx, TransportService_GetOwnerFence_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // TransportServiceServer is the server API for TransportService service.
 // All implementations must embed UnimplementedTransportServiceServer
 // for forward compatibility.
@@ -166,6 +190,8 @@ type TransportServiceServer interface {
 	UpdateNodeTrust(context.Context, *UpdateNodeTrustRequest) (*UpdateNodeTrustResponse, error)
 	FetchArtifact(*FetchArtifactRequest, grpc.ServerStreamingServer[v1.ArtifactChunk]) error
 	ConsumeArtifact(context.Context, *ConsumeArtifactRequest) (*ConsumeArtifactResponse, error)
+	RegisterOwnerFence(context.Context, *RegisterOwnerFenceRequest) (*RegisterOwnerFenceResponse, error)
+	GetOwnerFence(context.Context, *GetOwnerFenceRequest) (*GetOwnerFenceResponse, error)
 	mustEmbedUnimplementedTransportServiceServer()
 }
 
@@ -199,6 +225,12 @@ func (UnimplementedTransportServiceServer) FetchArtifact(*FetchArtifactRequest, 
 }
 func (UnimplementedTransportServiceServer) ConsumeArtifact(context.Context, *ConsumeArtifactRequest) (*ConsumeArtifactResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method ConsumeArtifact not implemented")
+}
+func (UnimplementedTransportServiceServer) RegisterOwnerFence(context.Context, *RegisterOwnerFenceRequest) (*RegisterOwnerFenceResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method RegisterOwnerFence not implemented")
+}
+func (UnimplementedTransportServiceServer) GetOwnerFence(context.Context, *GetOwnerFenceRequest) (*GetOwnerFenceResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method GetOwnerFence not implemented")
 }
 func (UnimplementedTransportServiceServer) mustEmbedUnimplementedTransportServiceServer() {}
 func (UnimplementedTransportServiceServer) testEmbeddedByValue()                          {}
@@ -351,6 +383,42 @@ func _TransportService_ConsumeArtifact_Handler(srv interface{}, ctx context.Cont
 	return interceptor(ctx, in, info, handler)
 }
 
+func _TransportService_RegisterOwnerFence_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(RegisterOwnerFenceRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(TransportServiceServer).RegisterOwnerFence(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: TransportService_RegisterOwnerFence_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(TransportServiceServer).RegisterOwnerFence(ctx, req.(*RegisterOwnerFenceRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _TransportService_GetOwnerFence_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(GetOwnerFenceRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(TransportServiceServer).GetOwnerFence(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: TransportService_GetOwnerFence_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(TransportServiceServer).GetOwnerFence(ctx, req.(*GetOwnerFenceRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // TransportService_ServiceDesc is the grpc.ServiceDesc for TransportService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -381,6 +449,14 @@ var TransportService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "ConsumeArtifact",
 			Handler:    _TransportService_ConsumeArtifact_Handler,
+		},
+		{
+			MethodName: "RegisterOwnerFence",
+			Handler:    _TransportService_RegisterOwnerFence_Handler,
+		},
+		{
+			MethodName: "GetOwnerFence",
+			Handler:    _TransportService_GetOwnerFence_Handler,
 		},
 	},
 	Streams: []grpc.StreamDesc{

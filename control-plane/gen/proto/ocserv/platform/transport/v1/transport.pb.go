@@ -289,6 +289,61 @@ func (TrustUpdateDisposition) EnumDescriptor() ([]byte, []int) {
 	return file_ocserv_platform_transport_v1_transport_proto_rawDescGZIP(), []int{4}
 }
 
+type OwnerFenceDisposition int32
+
+const (
+	OwnerFenceDisposition_OWNER_FENCE_DISPOSITION_UNSPECIFIED OwnerFenceDisposition = 0
+	// The fence was recorded; a higher epoch retired the previous session.
+	OwnerFenceDisposition_OWNER_FENCE_DISPOSITION_APPLIED OwnerFenceDisposition = 1
+	// The fence was recorded; the same term's lease deadline was refreshed.
+	OwnerFenceDisposition_OWNER_FENCE_DISPOSITION_REFRESHED OwnerFenceDisposition = 2
+	// The fence predates the registered epoch and was rejected.
+	OwnerFenceDisposition_OWNER_FENCE_DISPOSITION_STALE OwnerFenceDisposition = 3
+)
+
+// Enum value maps for OwnerFenceDisposition.
+var (
+	OwnerFenceDisposition_name = map[int32]string{
+		0: "OWNER_FENCE_DISPOSITION_UNSPECIFIED",
+		1: "OWNER_FENCE_DISPOSITION_APPLIED",
+		2: "OWNER_FENCE_DISPOSITION_REFRESHED",
+		3: "OWNER_FENCE_DISPOSITION_STALE",
+	}
+	OwnerFenceDisposition_value = map[string]int32{
+		"OWNER_FENCE_DISPOSITION_UNSPECIFIED": 0,
+		"OWNER_FENCE_DISPOSITION_APPLIED":     1,
+		"OWNER_FENCE_DISPOSITION_REFRESHED":   2,
+		"OWNER_FENCE_DISPOSITION_STALE":       3,
+	}
+)
+
+func (x OwnerFenceDisposition) Enum() *OwnerFenceDisposition {
+	p := new(OwnerFenceDisposition)
+	*p = x
+	return p
+}
+
+func (x OwnerFenceDisposition) String() string {
+	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
+}
+
+func (OwnerFenceDisposition) Descriptor() protoreflect.EnumDescriptor {
+	return file_ocserv_platform_transport_v1_transport_proto_enumTypes[5].Descriptor()
+}
+
+func (OwnerFenceDisposition) Type() protoreflect.EnumType {
+	return &file_ocserv_platform_transport_v1_transport_proto_enumTypes[5]
+}
+
+func (x OwnerFenceDisposition) Number() protoreflect.EnumNumber {
+	return protoreflect.EnumNumber(x)
+}
+
+// Deprecated: Use OwnerFenceDisposition.Descriptor instead.
+func (OwnerFenceDisposition) EnumDescriptor() ([]byte, []int) {
+	return file_ocserv_platform_transport_v1_transport_proto_rawDescGZIP(), []int{5}
+}
+
 type ListNodeTrustRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	unknownFields protoimpl.UnknownFields
@@ -582,8 +637,11 @@ type NodeConnection struct {
 	NegotiatedCapabilities []string               `protobuf:"bytes,9,rep,name=negotiated_capabilities,json=negotiatedCapabilities,proto3" json:"negotiated_capabilities,omitempty"`
 	AuthorizationRevision  uint64                 `protobuf:"varint,10,opt,name=authorization_revision,json=authorizationRevision,proto3" json:"authorization_revision,omitempty"`
 	SessionExpiresAt       *timestamppb.Timestamp `protobuf:"bytes,11,opt,name=session_expires_at,json=sessionExpiresAt,proto3" json:"session_expires_at,omitempty"`
-	unknownFields          protoimpl.UnknownFields
-	sizeCache              protoimpl.SizeCache
+	// Fencing epoch of the owner fence registered for this node. Zero when no
+	// fence is registered for the node yet.
+	OwnerEpoch    uint64 `protobuf:"varint,12,opt,name=owner_epoch,json=ownerEpoch,proto3" json:"owner_epoch,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *NodeConnection) Reset() {
@@ -693,6 +751,13 @@ func (x *NodeConnection) GetSessionExpiresAt() *timestamppb.Timestamp {
 	return nil
 }
 
+func (x *NodeConnection) GetOwnerEpoch() uint64 {
+	if x != nil {
+		return x.OwnerEpoch
+	}
+	return 0
+}
+
 type SendCommandRequest struct {
 	state           protoimpl.MessageState `protogen:"open.v1"`
 	NodeId          []byte                 `protobuf:"bytes,1,opt,name=node_id,json=nodeId,proto3" json:"node_id,omitempty"`
@@ -790,9 +855,13 @@ func (x *SendCommandResponse) GetAccepted() bool {
 }
 
 type CloseNodeRequest struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	NodeId        []byte                 `protobuf:"bytes,1,opt,name=node_id,json=nodeId,proto3" json:"node_id,omitempty"`
-	Reason        string                 `protobuf:"bytes,2,opt,name=reason,proto3" json:"reason,omitempty"`
+	state  protoimpl.MessageState `protogen:"open.v1"`
+	NodeId []byte                 `protobuf:"bytes,1,opt,name=node_id,json=nodeId,proto3" json:"node_id,omitempty"`
+	Reason string                 `protobuf:"bytes,2,opt,name=reason,proto3" json:"reason,omitempty"`
+	// Required when the node has a registered owner fence: closing a
+	// connection is an owner-fenced operation and a stale owner must not close
+	// the current connection.
+	FenceBinding  *v1.FenceBindingV2 `protobuf:"bytes,3,opt,name=fence_binding,json=fenceBinding,proto3" json:"fence_binding,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -841,6 +910,13 @@ func (x *CloseNodeRequest) GetReason() string {
 	return ""
 }
 
+func (x *CloseNodeRequest) GetFenceBinding() *v1.FenceBindingV2 {
+	if x != nil {
+		return x.FenceBinding
+	}
+	return nil
+}
+
 type CloseNodeResponse struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	unknownFields protoimpl.UnknownFields
@@ -878,12 +954,15 @@ func (*CloseNodeResponse) Descriptor() ([]byte, []int) {
 }
 
 type UpdateNodeTrustRequest struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	NodeId        []byte                 `protobuf:"bytes,1,opt,name=node_id,json=nodeId,proto3" json:"node_id,omitempty"`
-	EndpointId    []byte                 `protobuf:"bytes,2,opt,name=endpoint_id,json=endpointId,proto3" json:"endpoint_id,omitempty"`
-	State         NodeTrustState         `protobuf:"varint,3,opt,name=state,proto3,enum=ocserv.platform.transport.v1.NodeTrustState" json:"state,omitempty"`
-	Reason        string                 `protobuf:"bytes,4,opt,name=reason,proto3" json:"reason,omitempty"`
-	Revision      uint64                 `protobuf:"varint,5,opt,name=revision,proto3" json:"revision,omitempty"`
+	state      protoimpl.MessageState `protogen:"open.v1"`
+	NodeId     []byte                 `protobuf:"bytes,1,opt,name=node_id,json=nodeId,proto3" json:"node_id,omitempty"`
+	EndpointId []byte                 `protobuf:"bytes,2,opt,name=endpoint_id,json=endpointId,proto3" json:"endpoint_id,omitempty"`
+	State      NodeTrustState         `protobuf:"varint,3,opt,name=state,proto3,enum=ocserv.platform.transport.v1.NodeTrustState" json:"state,omitempty"`
+	Reason     string                 `protobuf:"bytes,4,opt,name=reason,proto3" json:"reason,omitempty"`
+	Revision   uint64                 `protobuf:"varint,5,opt,name=revision,proto3" json:"revision,omitempty"`
+	// Required when the node has a registered owner fence: owner-driven state
+	// updates are fenced and a stale owner must not update connection state.
+	FenceBinding  *v1.FenceBindingV2 `protobuf:"bytes,6,opt,name=fence_binding,json=fenceBinding,proto3" json:"fence_binding,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -953,6 +1032,13 @@ func (x *UpdateNodeTrustRequest) GetRevision() uint64 {
 	return 0
 }
 
+func (x *UpdateNodeTrustRequest) GetFenceBinding() *v1.FenceBindingV2 {
+	if x != nil {
+		return x.FenceBinding
+	}
+	return nil
+}
+
 type UpdateNodeTrustResponse struct {
 	state            protoimpl.MessageState `protogen:"open.v1"`
 	Disposition      TrustUpdateDisposition `protobuf:"varint,1,opt,name=disposition,proto3,enum=ocserv.platform.transport.v1.TrustUpdateDisposition" json:"disposition,omitempty"`
@@ -1014,12 +1100,16 @@ func (x *UpdateNodeTrustResponse) GetRetainedState() NodeTrustState {
 }
 
 type FetchArtifactRequest struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	NodeId        []byte                 `protobuf:"bytes,1,opt,name=node_id,json=nodeId,proto3" json:"node_id,omitempty"`
-	ArtifactId    []byte                 `protobuf:"bytes,2,opt,name=artifact_id,json=artifactId,proto3" json:"artifact_id,omitempty"`
-	Purpose       string                 `protobuf:"bytes,3,opt,name=purpose,proto3" json:"purpose,omitempty"`
-	MaxBytes      uint64                 `protobuf:"varint,4,opt,name=max_bytes,json=maxBytes,proto3" json:"max_bytes,omitempty"`
-	Grant         *v1.ArtifactGrantV1    `protobuf:"bytes,5,opt,name=grant,proto3" json:"grant,omitempty"`
+	state      protoimpl.MessageState `protogen:"open.v1"`
+	NodeId     []byte                 `protobuf:"bytes,1,opt,name=node_id,json=nodeId,proto3" json:"node_id,omitempty"`
+	ArtifactId []byte                 `protobuf:"bytes,2,opt,name=artifact_id,json=artifactId,proto3" json:"artifact_id,omitempty"`
+	Purpose    string                 `protobuf:"bytes,3,opt,name=purpose,proto3" json:"purpose,omitempty"`
+	MaxBytes   uint64                 `protobuf:"varint,4,opt,name=max_bytes,json=maxBytes,proto3" json:"max_bytes,omitempty"`
+	Grant      *v1.ArtifactGrantV1    `protobuf:"bytes,5,opt,name=grant,proto3" json:"grant,omitempty"`
+	// Required when the node has a registered owner fence. The binding must be
+	// an artifact binding for this artifact identity issued under the current
+	// owner term.
+	FenceBinding  *v1.FenceBindingV2 `protobuf:"bytes,6,opt,name=fence_binding,json=fenceBinding,proto3" json:"fence_binding,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1089,6 +1179,13 @@ func (x *FetchArtifactRequest) GetGrant() *v1.ArtifactGrantV1 {
 	return nil
 }
 
+func (x *FetchArtifactRequest) GetFenceBinding() *v1.FenceBindingV2 {
+	if x != nil {
+		return x.FenceBinding
+	}
+	return nil
+}
+
 type ConsumeArtifactRequest struct {
 	state  protoimpl.MessageState `protogen:"open.v1"`
 	NodeId []byte                 `protobuf:"bytes,1,opt,name=node_id,json=nodeId,proto3" json:"node_id,omitempty"`
@@ -1097,7 +1194,12 @@ type ConsumeArtifactRequest struct {
 	Size   uint64                 `protobuf:"varint,4,opt,name=size,proto3" json:"size,omitempty"`
 	// Never consumes bytes. It only confirms an exact already-consumed root
 	// ledger record, including after the signed grant has expired.
-	ConfirmOnly   bool `protobuf:"varint,5,opt,name=confirm_only,json=confirmOnly,proto3" json:"confirm_only,omitempty"`
+	ConfirmOnly bool `protobuf:"varint,5,opt,name=confirm_only,json=confirmOnly,proto3" json:"confirm_only,omitempty"`
+	// Required when the node has a registered owner fence, including
+	// confirm-only requests: a stale owner must neither consume nor confirm
+	// artifacts. The fence binding carries its own expiry, so a current owner
+	// can still confirm a record whose artifact grant already expired.
+	FenceBinding  *v1.FenceBindingV2 `protobuf:"bytes,6,opt,name=fence_binding,json=fenceBinding,proto3" json:"fence_binding,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1165,6 +1267,13 @@ func (x *ConsumeArtifactRequest) GetConfirmOnly() bool {
 		return x.ConfirmOnly
 	}
 	return false
+}
+
+func (x *ConsumeArtifactRequest) GetFenceBinding() *v1.FenceBindingV2 {
+	if x != nil {
+		return x.FenceBinding
+	}
+	return nil
 }
 
 type ConsumeArtifactResponse struct {
@@ -1491,6 +1600,200 @@ func (x *WatchEventsRequest) GetAfterEventId() []byte {
 	return nil
 }
 
+// RegisterOwnerFence installs or refreshes the Controller-signed owner fence
+// for one node. transportd verifies the signature against its pinned
+// Controller verification keys, records the term, and immediately retires the
+// node's active mutation session when a strictly higher epoch arrives. A
+// fence whose epoch is lower than the registered one is rejected as stale, so
+// a resumed old owner cannot reclaim dispatch authority.
+type RegisterOwnerFenceRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Fence         *v1.ConnectionFenceV2  `protobuf:"bytes,1,opt,name=fence,proto3" json:"fence,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *RegisterOwnerFenceRequest) Reset() {
+	*x = RegisterOwnerFenceRequest{}
+	mi := &file_ocserv_platform_transport_v1_transport_proto_msgTypes[22]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *RegisterOwnerFenceRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*RegisterOwnerFenceRequest) ProtoMessage() {}
+
+func (x *RegisterOwnerFenceRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_ocserv_platform_transport_v1_transport_proto_msgTypes[22]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use RegisterOwnerFenceRequest.ProtoReflect.Descriptor instead.
+func (*RegisterOwnerFenceRequest) Descriptor() ([]byte, []int) {
+	return file_ocserv_platform_transport_v1_transport_proto_rawDescGZIP(), []int{22}
+}
+
+func (x *RegisterOwnerFenceRequest) GetFence() *v1.ConnectionFenceV2 {
+	if x != nil {
+		return x.Fence
+	}
+	return nil
+}
+
+type RegisterOwnerFenceResponse struct {
+	state       protoimpl.MessageState `protogen:"open.v1"`
+	Disposition OwnerFenceDisposition  `protobuf:"varint,1,opt,name=disposition,proto3,enum=ocserv.platform.transport.v1.OwnerFenceDisposition" json:"disposition,omitempty"`
+	// Epoch retained after the registration decision.
+	RetainedEpoch uint64 `protobuf:"varint,2,opt,name=retained_epoch,json=retainedEpoch,proto3" json:"retained_epoch,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *RegisterOwnerFenceResponse) Reset() {
+	*x = RegisterOwnerFenceResponse{}
+	mi := &file_ocserv_platform_transport_v1_transport_proto_msgTypes[23]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *RegisterOwnerFenceResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*RegisterOwnerFenceResponse) ProtoMessage() {}
+
+func (x *RegisterOwnerFenceResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_ocserv_platform_transport_v1_transport_proto_msgTypes[23]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use RegisterOwnerFenceResponse.ProtoReflect.Descriptor instead.
+func (*RegisterOwnerFenceResponse) Descriptor() ([]byte, []int) {
+	return file_ocserv_platform_transport_v1_transport_proto_rawDescGZIP(), []int{23}
+}
+
+func (x *RegisterOwnerFenceResponse) GetDisposition() OwnerFenceDisposition {
+	if x != nil {
+		return x.Disposition
+	}
+	return OwnerFenceDisposition_OWNER_FENCE_DISPOSITION_UNSPECIFIED
+}
+
+func (x *RegisterOwnerFenceResponse) GetRetainedEpoch() uint64 {
+	if x != nil {
+		return x.RetainedEpoch
+	}
+	return 0
+}
+
+type GetOwnerFenceRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	NodeId        []byte                 `protobuf:"bytes,1,opt,name=node_id,json=nodeId,proto3" json:"node_id,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *GetOwnerFenceRequest) Reset() {
+	*x = GetOwnerFenceRequest{}
+	mi := &file_ocserv_platform_transport_v1_transport_proto_msgTypes[24]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *GetOwnerFenceRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*GetOwnerFenceRequest) ProtoMessage() {}
+
+func (x *GetOwnerFenceRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_ocserv_platform_transport_v1_transport_proto_msgTypes[24]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use GetOwnerFenceRequest.ProtoReflect.Descriptor instead.
+func (*GetOwnerFenceRequest) Descriptor() ([]byte, []int) {
+	return file_ocserv_platform_transport_v1_transport_proto_rawDescGZIP(), []int{24}
+}
+
+func (x *GetOwnerFenceRequest) GetNodeId() []byte {
+	if x != nil {
+		return x.NodeId
+	}
+	return nil
+}
+
+// Returns the verified owner fence registered for the node so any Controller
+// role process can issue operation bindings for the current term without
+// holding the lease itself. transportd never returns an unverified fence.
+type GetOwnerFenceResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Fence         *v1.ConnectionFenceV2  `protobuf:"bytes,1,opt,name=fence,proto3" json:"fence,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *GetOwnerFenceResponse) Reset() {
+	*x = GetOwnerFenceResponse{}
+	mi := &file_ocserv_platform_transport_v1_transport_proto_msgTypes[25]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *GetOwnerFenceResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*GetOwnerFenceResponse) ProtoMessage() {}
+
+func (x *GetOwnerFenceResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_ocserv_platform_transport_v1_transport_proto_msgTypes[25]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use GetOwnerFenceResponse.ProtoReflect.Descriptor instead.
+func (*GetOwnerFenceResponse) Descriptor() ([]byte, []int) {
+	return file_ocserv_platform_transport_v1_transport_proto_rawDescGZIP(), []int{25}
+}
+
+func (x *GetOwnerFenceResponse) GetFence() *v1.ConnectionFenceV2 {
+	if x != nil {
+		return x.Fence
+	}
+	return nil
+}
+
 type TransportEvent struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	EventId       []byte                 `protobuf:"bytes,1,opt,name=event_id,json=eventId,proto3" json:"event_id,omitempty"`
@@ -1506,7 +1809,7 @@ type TransportEvent struct {
 
 func (x *TransportEvent) Reset() {
 	*x = TransportEvent{}
-	mi := &file_ocserv_platform_transport_v1_transport_proto_msgTypes[22]
+	mi := &file_ocserv_platform_transport_v1_transport_proto_msgTypes[26]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1518,7 +1821,7 @@ func (x *TransportEvent) String() string {
 func (*TransportEvent) ProtoMessage() {}
 
 func (x *TransportEvent) ProtoReflect() protoreflect.Message {
-	mi := &file_ocserv_platform_transport_v1_transport_proto_msgTypes[22]
+	mi := &file_ocserv_platform_transport_v1_transport_proto_msgTypes[26]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1531,7 +1834,7 @@ func (x *TransportEvent) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use TransportEvent.ProtoReflect.Descriptor instead.
 func (*TransportEvent) Descriptor() ([]byte, []int) {
-	return file_ocserv_platform_transport_v1_transport_proto_rawDescGZIP(), []int{22}
+	return file_ocserv_platform_transport_v1_transport_proto_rawDescGZIP(), []int{26}
 }
 
 func (x *TransportEvent) GetEventId() []byte {
@@ -1602,7 +1905,7 @@ const file_ocserv_platform_transport_v1_transport_proto_rawDesc = "" +
 	"\x06status\x18\x01 \x01(\x0e2*.ocserv.platform.transport.v1.HealthStatusR\x06status\x12\x18\n" +
 	"\aversion\x18\x02 \x01(\tR\aversion\"3\n" +
 	"\x18GetNodeConnectionRequest\x12\x17\n" +
-	"\anode_id\x18\x01 \x01(\fR\x06nodeId\"\xc0\x04\n" +
+	"\anode_id\x18\x01 \x01(\fR\x06nodeId\"\xe1\x04\n" +
 	"\x0eNodeConnection\x12\x17\n" +
 	"\anode_id\x18\x01 \x01(\fR\x06nodeId\x12\x1f\n" +
 	"\vendpoint_id\x18\x02 \x01(\fR\n" +
@@ -1617,40 +1920,46 @@ const file_ocserv_platform_transport_v1_transport_proto_rawDesc = "" +
 	"\x17negotiated_capabilities\x18\t \x03(\tR\x16negotiatedCapabilities\x125\n" +
 	"\x16authorization_revision\x18\n" +
 	" \x01(\x04R\x15authorizationRevision\x12H\n" +
-	"\x12session_expires_at\x18\v \x01(\v2\x1a.google.protobuf.TimestampR\x10sessionExpiresAt\"X\n" +
+	"\x12session_expires_at\x18\v \x01(\v2\x1a.google.protobuf.TimestampR\x10sessionExpiresAt\x12\x1f\n" +
+	"\vowner_epoch\x18\f \x01(\x04R\n" +
+	"ownerEpoch\"X\n" +
 	"\x12SendCommandRequest\x12\x17\n" +
 	"\anode_id\x18\x01 \x01(\fR\x06nodeId\x12)\n" +
 	"\x10command_envelope\x18\x02 \x01(\fR\x0fcommandEnvelope\"1\n" +
 	"\x13SendCommandResponse\x12\x1a\n" +
-	"\baccepted\x18\x01 \x01(\bR\baccepted\"C\n" +
+	"\baccepted\x18\x01 \x01(\bR\baccepted\"\x92\x01\n" +
 	"\x10CloseNodeRequest\x12\x17\n" +
 	"\anode_id\x18\x01 \x01(\fR\x06nodeId\x12\x16\n" +
-	"\x06reason\x18\x02 \x01(\tR\x06reason\"\x13\n" +
-	"\x11CloseNodeResponse\"\xca\x01\n" +
+	"\x06reason\x18\x02 \x01(\tR\x06reason\x12M\n" +
+	"\rfence_binding\x18\x03 \x01(\v2(.ocserv.platform.agent.v1.FenceBindingV2R\ffenceBinding\"\x13\n" +
+	"\x11CloseNodeResponse\"\x99\x02\n" +
 	"\x16UpdateNodeTrustRequest\x12\x17\n" +
 	"\anode_id\x18\x01 \x01(\fR\x06nodeId\x12\x1f\n" +
 	"\vendpoint_id\x18\x02 \x01(\fR\n" +
 	"endpointId\x12B\n" +
 	"\x05state\x18\x03 \x01(\x0e2,.ocserv.platform.transport.v1.NodeTrustStateR\x05state\x12\x16\n" +
 	"\x06reason\x18\x04 \x01(\tR\x06reason\x12\x1a\n" +
-	"\brevision\x18\x05 \x01(\x04R\brevision\"\xf3\x01\n" +
+	"\brevision\x18\x05 \x01(\x04R\brevision\x12M\n" +
+	"\rfence_binding\x18\x06 \x01(\v2(.ocserv.platform.agent.v1.FenceBindingV2R\ffenceBinding\"\xf3\x01\n" +
 	"\x17UpdateNodeTrustResponse\x12V\n" +
 	"\vdisposition\x18\x01 \x01(\x0e24.ocserv.platform.transport.v1.TrustUpdateDispositionR\vdisposition\x12+\n" +
 	"\x11retained_revision\x18\x02 \x01(\x04R\x10retainedRevision\x12S\n" +
-	"\x0eretained_state\x18\x03 \x01(\x0e2,.ocserv.platform.transport.v1.NodeTrustStateR\rretainedState\"\xc8\x01\n" +
+	"\x0eretained_state\x18\x03 \x01(\x0e2,.ocserv.platform.transport.v1.NodeTrustStateR\rretainedState\"\x97\x02\n" +
 	"\x14FetchArtifactRequest\x12\x17\n" +
 	"\anode_id\x18\x01 \x01(\fR\x06nodeId\x12\x1f\n" +
 	"\vartifact_id\x18\x02 \x01(\fR\n" +
 	"artifactId\x12\x18\n" +
 	"\apurpose\x18\x03 \x01(\tR\apurpose\x12\x1b\n" +
 	"\tmax_bytes\x18\x04 \x01(\x04R\bmaxBytes\x12?\n" +
-	"\x05grant\x18\x05 \x01(\v2).ocserv.platform.agent.v1.ArtifactGrantV1R\x05grant\"\xc1\x01\n" +
+	"\x05grant\x18\x05 \x01(\v2).ocserv.platform.agent.v1.ArtifactGrantV1R\x05grant\x12M\n" +
+	"\rfence_binding\x18\x06 \x01(\v2(.ocserv.platform.agent.v1.FenceBindingV2R\ffenceBinding\"\x90\x02\n" +
 	"\x16ConsumeArtifactRequest\x12\x17\n" +
 	"\anode_id\x18\x01 \x01(\fR\x06nodeId\x12?\n" +
 	"\x05grant\x18\x02 \x01(\v2).ocserv.platform.agent.v1.ArtifactGrantV1R\x05grant\x12\x16\n" +
 	"\x06sha256\x18\x03 \x01(\fR\x06sha256\x12\x12\n" +
 	"\x04size\x18\x04 \x01(\x04R\x04size\x12!\n" +
-	"\fconfirm_only\x18\x05 \x01(\bR\vconfirmOnly\"5\n" +
+	"\fconfirm_only\x18\x05 \x01(\bR\vconfirmOnly\x12M\n" +
+	"\rfence_binding\x18\x06 \x01(\v2(.ocserv.platform.agent.v1.FenceBindingV2R\ffenceBinding\"5\n" +
 	"\x17ConsumeArtifactResponse\x12\x1a\n" +
 	"\bconsumed\x18\x01 \x01(\bR\bconsumed\"K\n" +
 	"\x14CheckEndpointRequest\x12\x1f\n" +
@@ -1669,7 +1978,16 @@ const file_ocserv_platform_transport_v1_transport_proto_rawDesc = "" +
 	"\x12remote_endpoint_id\x18\x01 \x01(\fR\x10remoteEndpointId\x12H\n" +
 	"\thandshake\x18\x02 \x01(\v2*.ocserv.platform.agent.v1.SessionHandshakeR\thandshake\":\n" +
 	"\x12WatchEventsRequest\x12$\n" +
-	"\x0eafter_event_id\x18\x01 \x01(\fR\fafterEventId\"\xa4\x02\n" +
+	"\x0eafter_event_id\x18\x01 \x01(\fR\fafterEventId\"^\n" +
+	"\x19RegisterOwnerFenceRequest\x12A\n" +
+	"\x05fence\x18\x01 \x01(\v2+.ocserv.platform.agent.v1.ConnectionFenceV2R\x05fence\"\x9a\x01\n" +
+	"\x1aRegisterOwnerFenceResponse\x12U\n" +
+	"\vdisposition\x18\x01 \x01(\x0e23.ocserv.platform.transport.v1.OwnerFenceDispositionR\vdisposition\x12%\n" +
+	"\x0eretained_epoch\x18\x02 \x01(\x04R\rretainedEpoch\"/\n" +
+	"\x14GetOwnerFenceRequest\x12\x17\n" +
+	"\anode_id\x18\x01 \x01(\fR\x06nodeId\"Z\n" +
+	"\x15GetOwnerFenceResponse\x12A\n" +
+	"\x05fence\x18\x01 \x01(\v2+.ocserv.platform.agent.v1.ConnectionFenceV2R\x05fence\"\xa4\x02\n" +
 	"\x0eTransportEvent\x12\x19\n" +
 	"\bevent_id\x18\x01 \x01(\fR\aeventId\x12\x17\n" +
 	"\anode_id\x18\x02 \x01(\fR\x06nodeId\x12D\n" +
@@ -1706,7 +2024,12 @@ const file_ocserv_platform_transport_v1_transport_proto_rawDesc = "" +
 	"$TRUST_UPDATE_DISPOSITION_UNSPECIFIED\x10\x00\x12$\n" +
 	" TRUST_UPDATE_DISPOSITION_APPLIED\x10\x01\x12\"\n" +
 	"\x1eTRUST_UPDATE_DISPOSITION_STALE\x10\x02\x12%\n" +
-	"!TRUST_UPDATE_DISPOSITION_REJECTED\x10\x032\xb5\a\n" +
+	"!TRUST_UPDATE_DISPOSITION_REJECTED\x10\x03*\xaf\x01\n" +
+	"\x15OwnerFenceDisposition\x12'\n" +
+	"#OWNER_FENCE_DISPOSITION_UNSPECIFIED\x10\x00\x12#\n" +
+	"\x1fOWNER_FENCE_DISPOSITION_APPLIED\x10\x01\x12%\n" +
+	"!OWNER_FENCE_DISPOSITION_REFRESHED\x10\x02\x12!\n" +
+	"\x1dOWNER_FENCE_DISPOSITION_STALE\x10\x032\xb9\t\n" +
 	"\x10TransportService\x12c\n" +
 	"\x06Health\x12+.ocserv.platform.transport.v1.HealthRequest\x1a,.ocserv.platform.transport.v1.HealthResponse\x12y\n" +
 	"\x11GetNodeConnection\x126.ocserv.platform.transport.v1.GetNodeConnectionRequest\x1a,.ocserv.platform.transport.v1.NodeConnection\x12r\n" +
@@ -1715,7 +2038,9 @@ const file_ocserv_platform_transport_v1_transport_proto_rawDesc = "" +
 	"\vWatchEvents\x120.ocserv.platform.transport.v1.WatchEventsRequest\x1a,.ocserv.platform.transport.v1.TransportEvent0\x01\x12~\n" +
 	"\x0fUpdateNodeTrust\x124.ocserv.platform.transport.v1.UpdateNodeTrustRequest\x1a5.ocserv.platform.transport.v1.UpdateNodeTrustResponse\x12n\n" +
 	"\rFetchArtifact\x122.ocserv.platform.transport.v1.FetchArtifactRequest\x1a'.ocserv.platform.agent.v1.ArtifactChunk0\x01\x12~\n" +
-	"\x0fConsumeArtifact\x124.ocserv.platform.transport.v1.ConsumeArtifactRequest\x1a5.ocserv.platform.transport.v1.ConsumeArtifactResponse2\xe8\x04\n" +
+	"\x0fConsumeArtifact\x124.ocserv.platform.transport.v1.ConsumeArtifactRequest\x1a5.ocserv.platform.transport.v1.ConsumeArtifactResponse\x12\x87\x01\n" +
+	"\x12RegisterOwnerFence\x127.ocserv.platform.transport.v1.RegisterOwnerFenceRequest\x1a8.ocserv.platform.transport.v1.RegisterOwnerFenceResponse\x12x\n" +
+	"\rGetOwnerFence\x122.ocserv.platform.transport.v1.GetOwnerFenceRequest\x1a3.ocserv.platform.transport.v1.GetOwnerFenceResponse2\xe8\x04\n" +
 	"\fTrustService\x12x\n" +
 	"\rListNodeTrust\x122.ocserv.platform.transport.v1.ListNodeTrustRequest\x1a3.ocserv.platform.transport.v1.ListNodeTrustResponse\x12x\n" +
 	"\rCheckEndpoint\x122.ocserv.platform.transport.v1.CheckEndpointRequest\x1a3.ocserv.platform.transport.v1.CheckEndpointResponse\x12\x87\x01\n" +
@@ -1736,93 +2061,111 @@ func file_ocserv_platform_transport_v1_transport_proto_rawDescGZIP() []byte {
 	return file_ocserv_platform_transport_v1_transport_proto_rawDescData
 }
 
-var file_ocserv_platform_transport_v1_transport_proto_enumTypes = make([]protoimpl.EnumInfo, 5)
-var file_ocserv_platform_transport_v1_transport_proto_msgTypes = make([]protoimpl.MessageInfo, 23)
+var file_ocserv_platform_transport_v1_transport_proto_enumTypes = make([]protoimpl.EnumInfo, 6)
+var file_ocserv_platform_transport_v1_transport_proto_msgTypes = make([]protoimpl.MessageInfo, 27)
 var file_ocserv_platform_transport_v1_transport_proto_goTypes = []any{
 	(HealthStatus)(0),                   // 0: ocserv.platform.transport.v1.HealthStatus
 	(ConnectionPath)(0),                 // 1: ocserv.platform.transport.v1.ConnectionPath
 	(TransportEventType)(0),             // 2: ocserv.platform.transport.v1.TransportEventType
 	(NodeTrustState)(0),                 // 3: ocserv.platform.transport.v1.NodeTrustState
 	(TrustUpdateDisposition)(0),         // 4: ocserv.platform.transport.v1.TrustUpdateDisposition
-	(*ListNodeTrustRequest)(nil),        // 5: ocserv.platform.transport.v1.ListNodeTrustRequest
-	(*NodeTrustBinding)(nil),            // 6: ocserv.platform.transport.v1.NodeTrustBinding
-	(*ListNodeTrustResponse)(nil),       // 7: ocserv.platform.transport.v1.ListNodeTrustResponse
-	(*HealthRequest)(nil),               // 8: ocserv.platform.transport.v1.HealthRequest
-	(*HealthResponse)(nil),              // 9: ocserv.platform.transport.v1.HealthResponse
-	(*GetNodeConnectionRequest)(nil),    // 10: ocserv.platform.transport.v1.GetNodeConnectionRequest
-	(*NodeConnection)(nil),              // 11: ocserv.platform.transport.v1.NodeConnection
-	(*SendCommandRequest)(nil),          // 12: ocserv.platform.transport.v1.SendCommandRequest
-	(*SendCommandResponse)(nil),         // 13: ocserv.platform.transport.v1.SendCommandResponse
-	(*CloseNodeRequest)(nil),            // 14: ocserv.platform.transport.v1.CloseNodeRequest
-	(*CloseNodeResponse)(nil),           // 15: ocserv.platform.transport.v1.CloseNodeResponse
-	(*UpdateNodeTrustRequest)(nil),      // 16: ocserv.platform.transport.v1.UpdateNodeTrustRequest
-	(*UpdateNodeTrustResponse)(nil),     // 17: ocserv.platform.transport.v1.UpdateNodeTrustResponse
-	(*FetchArtifactRequest)(nil),        // 18: ocserv.platform.transport.v1.FetchArtifactRequest
-	(*ConsumeArtifactRequest)(nil),      // 19: ocserv.platform.transport.v1.ConsumeArtifactRequest
-	(*ConsumeArtifactResponse)(nil),     // 20: ocserv.platform.transport.v1.ConsumeArtifactResponse
-	(*CheckEndpointRequest)(nil),        // 21: ocserv.platform.transport.v1.CheckEndpointRequest
-	(*CheckEndpointResponse)(nil),       // 22: ocserv.platform.transport.v1.CheckEndpointResponse
-	(*ValidateEnrollmentRequest)(nil),   // 23: ocserv.platform.transport.v1.ValidateEnrollmentRequest
-	(*ValidateEnrollmentResponse)(nil),  // 24: ocserv.platform.transport.v1.ValidateEnrollmentResponse
-	(*AuthorizeSessionRequest)(nil),     // 25: ocserv.platform.transport.v1.AuthorizeSessionRequest
-	(*WatchEventsRequest)(nil),          // 26: ocserv.platform.transport.v1.WatchEventsRequest
-	(*TransportEvent)(nil),              // 27: ocserv.platform.transport.v1.TransportEvent
-	(*timestamppb.Timestamp)(nil),       // 28: google.protobuf.Timestamp
-	(*v1.ArtifactGrantV1)(nil),          // 29: ocserv.platform.agent.v1.ArtifactGrantV1
-	(*v1.EnrollRequest)(nil),            // 30: ocserv.platform.agent.v1.EnrollRequest
-	(*v1.SessionHandshake)(nil),         // 31: ocserv.platform.agent.v1.SessionHandshake
-	(*v1.ArtifactChunk)(nil),            // 32: ocserv.platform.agent.v1.ArtifactChunk
-	(*v1.EnrollResponse)(nil),           // 33: ocserv.platform.agent.v1.EnrollResponse
-	(*v1.SessionHandshakeResponse)(nil), // 34: ocserv.platform.agent.v1.SessionHandshakeResponse
+	(OwnerFenceDisposition)(0),          // 5: ocserv.platform.transport.v1.OwnerFenceDisposition
+	(*ListNodeTrustRequest)(nil),        // 6: ocserv.platform.transport.v1.ListNodeTrustRequest
+	(*NodeTrustBinding)(nil),            // 7: ocserv.platform.transport.v1.NodeTrustBinding
+	(*ListNodeTrustResponse)(nil),       // 8: ocserv.platform.transport.v1.ListNodeTrustResponse
+	(*HealthRequest)(nil),               // 9: ocserv.platform.transport.v1.HealthRequest
+	(*HealthResponse)(nil),              // 10: ocserv.platform.transport.v1.HealthResponse
+	(*GetNodeConnectionRequest)(nil),    // 11: ocserv.platform.transport.v1.GetNodeConnectionRequest
+	(*NodeConnection)(nil),              // 12: ocserv.platform.transport.v1.NodeConnection
+	(*SendCommandRequest)(nil),          // 13: ocserv.platform.transport.v1.SendCommandRequest
+	(*SendCommandResponse)(nil),         // 14: ocserv.platform.transport.v1.SendCommandResponse
+	(*CloseNodeRequest)(nil),            // 15: ocserv.platform.transport.v1.CloseNodeRequest
+	(*CloseNodeResponse)(nil),           // 16: ocserv.platform.transport.v1.CloseNodeResponse
+	(*UpdateNodeTrustRequest)(nil),      // 17: ocserv.platform.transport.v1.UpdateNodeTrustRequest
+	(*UpdateNodeTrustResponse)(nil),     // 18: ocserv.platform.transport.v1.UpdateNodeTrustResponse
+	(*FetchArtifactRequest)(nil),        // 19: ocserv.platform.transport.v1.FetchArtifactRequest
+	(*ConsumeArtifactRequest)(nil),      // 20: ocserv.platform.transport.v1.ConsumeArtifactRequest
+	(*ConsumeArtifactResponse)(nil),     // 21: ocserv.platform.transport.v1.ConsumeArtifactResponse
+	(*CheckEndpointRequest)(nil),        // 22: ocserv.platform.transport.v1.CheckEndpointRequest
+	(*CheckEndpointResponse)(nil),       // 23: ocserv.platform.transport.v1.CheckEndpointResponse
+	(*ValidateEnrollmentRequest)(nil),   // 24: ocserv.platform.transport.v1.ValidateEnrollmentRequest
+	(*ValidateEnrollmentResponse)(nil),  // 25: ocserv.platform.transport.v1.ValidateEnrollmentResponse
+	(*AuthorizeSessionRequest)(nil),     // 26: ocserv.platform.transport.v1.AuthorizeSessionRequest
+	(*WatchEventsRequest)(nil),          // 27: ocserv.platform.transport.v1.WatchEventsRequest
+	(*RegisterOwnerFenceRequest)(nil),   // 28: ocserv.platform.transport.v1.RegisterOwnerFenceRequest
+	(*RegisterOwnerFenceResponse)(nil),  // 29: ocserv.platform.transport.v1.RegisterOwnerFenceResponse
+	(*GetOwnerFenceRequest)(nil),        // 30: ocserv.platform.transport.v1.GetOwnerFenceRequest
+	(*GetOwnerFenceResponse)(nil),       // 31: ocserv.platform.transport.v1.GetOwnerFenceResponse
+	(*TransportEvent)(nil),              // 32: ocserv.platform.transport.v1.TransportEvent
+	(*timestamppb.Timestamp)(nil),       // 33: google.protobuf.Timestamp
+	(*v1.FenceBindingV2)(nil),           // 34: ocserv.platform.agent.v1.FenceBindingV2
+	(*v1.ArtifactGrantV1)(nil),          // 35: ocserv.platform.agent.v1.ArtifactGrantV1
+	(*v1.EnrollRequest)(nil),            // 36: ocserv.platform.agent.v1.EnrollRequest
+	(*v1.SessionHandshake)(nil),         // 37: ocserv.platform.agent.v1.SessionHandshake
+	(*v1.ConnectionFenceV2)(nil),        // 38: ocserv.platform.agent.v1.ConnectionFenceV2
+	(*v1.ArtifactChunk)(nil),            // 39: ocserv.platform.agent.v1.ArtifactChunk
+	(*v1.EnrollResponse)(nil),           // 40: ocserv.platform.agent.v1.EnrollResponse
+	(*v1.SessionHandshakeResponse)(nil), // 41: ocserv.platform.agent.v1.SessionHandshakeResponse
 }
 var file_ocserv_platform_transport_v1_transport_proto_depIdxs = []int32{
 	3,  // 0: ocserv.platform.transport.v1.NodeTrustBinding.state:type_name -> ocserv.platform.transport.v1.NodeTrustState
-	6,  // 1: ocserv.platform.transport.v1.ListNodeTrustResponse.bindings:type_name -> ocserv.platform.transport.v1.NodeTrustBinding
+	7,  // 1: ocserv.platform.transport.v1.ListNodeTrustResponse.bindings:type_name -> ocserv.platform.transport.v1.NodeTrustBinding
 	0,  // 2: ocserv.platform.transport.v1.HealthResponse.status:type_name -> ocserv.platform.transport.v1.HealthStatus
 	1,  // 3: ocserv.platform.transport.v1.NodeConnection.path:type_name -> ocserv.platform.transport.v1.ConnectionPath
-	28, // 4: ocserv.platform.transport.v1.NodeConnection.connected_at:type_name -> google.protobuf.Timestamp
-	28, // 5: ocserv.platform.transport.v1.NodeConnection.last_seen:type_name -> google.protobuf.Timestamp
-	28, // 6: ocserv.platform.transport.v1.NodeConnection.session_expires_at:type_name -> google.protobuf.Timestamp
-	3,  // 7: ocserv.platform.transport.v1.UpdateNodeTrustRequest.state:type_name -> ocserv.platform.transport.v1.NodeTrustState
-	4,  // 8: ocserv.platform.transport.v1.UpdateNodeTrustResponse.disposition:type_name -> ocserv.platform.transport.v1.TrustUpdateDisposition
-	3,  // 9: ocserv.platform.transport.v1.UpdateNodeTrustResponse.retained_state:type_name -> ocserv.platform.transport.v1.NodeTrustState
-	29, // 10: ocserv.platform.transport.v1.FetchArtifactRequest.grant:type_name -> ocserv.platform.agent.v1.ArtifactGrantV1
-	29, // 11: ocserv.platform.transport.v1.ConsumeArtifactRequest.grant:type_name -> ocserv.platform.agent.v1.ArtifactGrantV1
-	30, // 12: ocserv.platform.transport.v1.ValidateEnrollmentRequest.enrollment:type_name -> ocserv.platform.agent.v1.EnrollRequest
-	31, // 13: ocserv.platform.transport.v1.AuthorizeSessionRequest.handshake:type_name -> ocserv.platform.agent.v1.SessionHandshake
-	2,  // 14: ocserv.platform.transport.v1.TransportEvent.type:type_name -> ocserv.platform.transport.v1.TransportEventType
-	28, // 15: ocserv.platform.transport.v1.TransportEvent.occurred_at:type_name -> google.protobuf.Timestamp
-	8,  // 16: ocserv.platform.transport.v1.TransportService.Health:input_type -> ocserv.platform.transport.v1.HealthRequest
-	10, // 17: ocserv.platform.transport.v1.TransportService.GetNodeConnection:input_type -> ocserv.platform.transport.v1.GetNodeConnectionRequest
-	12, // 18: ocserv.platform.transport.v1.TransportService.SendCommand:input_type -> ocserv.platform.transport.v1.SendCommandRequest
-	14, // 19: ocserv.platform.transport.v1.TransportService.CloseNode:input_type -> ocserv.platform.transport.v1.CloseNodeRequest
-	26, // 20: ocserv.platform.transport.v1.TransportService.WatchEvents:input_type -> ocserv.platform.transport.v1.WatchEventsRequest
-	16, // 21: ocserv.platform.transport.v1.TransportService.UpdateNodeTrust:input_type -> ocserv.platform.transport.v1.UpdateNodeTrustRequest
-	18, // 22: ocserv.platform.transport.v1.TransportService.FetchArtifact:input_type -> ocserv.platform.transport.v1.FetchArtifactRequest
-	19, // 23: ocserv.platform.transport.v1.TransportService.ConsumeArtifact:input_type -> ocserv.platform.transport.v1.ConsumeArtifactRequest
-	5,  // 24: ocserv.platform.transport.v1.TrustService.ListNodeTrust:input_type -> ocserv.platform.transport.v1.ListNodeTrustRequest
-	21, // 25: ocserv.platform.transport.v1.TrustService.CheckEndpoint:input_type -> ocserv.platform.transport.v1.CheckEndpointRequest
-	23, // 26: ocserv.platform.transport.v1.TrustService.ValidateEnrollment:input_type -> ocserv.platform.transport.v1.ValidateEnrollmentRequest
-	30, // 27: ocserv.platform.transport.v1.TrustService.Enroll:input_type -> ocserv.platform.agent.v1.EnrollRequest
-	25, // 28: ocserv.platform.transport.v1.TrustService.AuthorizeSession:input_type -> ocserv.platform.transport.v1.AuthorizeSessionRequest
-	9,  // 29: ocserv.platform.transport.v1.TransportService.Health:output_type -> ocserv.platform.transport.v1.HealthResponse
-	11, // 30: ocserv.platform.transport.v1.TransportService.GetNodeConnection:output_type -> ocserv.platform.transport.v1.NodeConnection
-	13, // 31: ocserv.platform.transport.v1.TransportService.SendCommand:output_type -> ocserv.platform.transport.v1.SendCommandResponse
-	15, // 32: ocserv.platform.transport.v1.TransportService.CloseNode:output_type -> ocserv.platform.transport.v1.CloseNodeResponse
-	27, // 33: ocserv.platform.transport.v1.TransportService.WatchEvents:output_type -> ocserv.platform.transport.v1.TransportEvent
-	17, // 34: ocserv.platform.transport.v1.TransportService.UpdateNodeTrust:output_type -> ocserv.platform.transport.v1.UpdateNodeTrustResponse
-	32, // 35: ocserv.platform.transport.v1.TransportService.FetchArtifact:output_type -> ocserv.platform.agent.v1.ArtifactChunk
-	20, // 36: ocserv.platform.transport.v1.TransportService.ConsumeArtifact:output_type -> ocserv.platform.transport.v1.ConsumeArtifactResponse
-	7,  // 37: ocserv.platform.transport.v1.TrustService.ListNodeTrust:output_type -> ocserv.platform.transport.v1.ListNodeTrustResponse
-	22, // 38: ocserv.platform.transport.v1.TrustService.CheckEndpoint:output_type -> ocserv.platform.transport.v1.CheckEndpointResponse
-	24, // 39: ocserv.platform.transport.v1.TrustService.ValidateEnrollment:output_type -> ocserv.platform.transport.v1.ValidateEnrollmentResponse
-	33, // 40: ocserv.platform.transport.v1.TrustService.Enroll:output_type -> ocserv.platform.agent.v1.EnrollResponse
-	34, // 41: ocserv.platform.transport.v1.TrustService.AuthorizeSession:output_type -> ocserv.platform.agent.v1.SessionHandshakeResponse
-	29, // [29:42] is the sub-list for method output_type
-	16, // [16:29] is the sub-list for method input_type
-	16, // [16:16] is the sub-list for extension type_name
-	16, // [16:16] is the sub-list for extension extendee
-	0,  // [0:16] is the sub-list for field type_name
+	33, // 4: ocserv.platform.transport.v1.NodeConnection.connected_at:type_name -> google.protobuf.Timestamp
+	33, // 5: ocserv.platform.transport.v1.NodeConnection.last_seen:type_name -> google.protobuf.Timestamp
+	33, // 6: ocserv.platform.transport.v1.NodeConnection.session_expires_at:type_name -> google.protobuf.Timestamp
+	34, // 7: ocserv.platform.transport.v1.CloseNodeRequest.fence_binding:type_name -> ocserv.platform.agent.v1.FenceBindingV2
+	3,  // 8: ocserv.platform.transport.v1.UpdateNodeTrustRequest.state:type_name -> ocserv.platform.transport.v1.NodeTrustState
+	34, // 9: ocserv.platform.transport.v1.UpdateNodeTrustRequest.fence_binding:type_name -> ocserv.platform.agent.v1.FenceBindingV2
+	4,  // 10: ocserv.platform.transport.v1.UpdateNodeTrustResponse.disposition:type_name -> ocserv.platform.transport.v1.TrustUpdateDisposition
+	3,  // 11: ocserv.platform.transport.v1.UpdateNodeTrustResponse.retained_state:type_name -> ocserv.platform.transport.v1.NodeTrustState
+	35, // 12: ocserv.platform.transport.v1.FetchArtifactRequest.grant:type_name -> ocserv.platform.agent.v1.ArtifactGrantV1
+	34, // 13: ocserv.platform.transport.v1.FetchArtifactRequest.fence_binding:type_name -> ocserv.platform.agent.v1.FenceBindingV2
+	35, // 14: ocserv.platform.transport.v1.ConsumeArtifactRequest.grant:type_name -> ocserv.platform.agent.v1.ArtifactGrantV1
+	34, // 15: ocserv.platform.transport.v1.ConsumeArtifactRequest.fence_binding:type_name -> ocserv.platform.agent.v1.FenceBindingV2
+	36, // 16: ocserv.platform.transport.v1.ValidateEnrollmentRequest.enrollment:type_name -> ocserv.platform.agent.v1.EnrollRequest
+	37, // 17: ocserv.platform.transport.v1.AuthorizeSessionRequest.handshake:type_name -> ocserv.platform.agent.v1.SessionHandshake
+	38, // 18: ocserv.platform.transport.v1.RegisterOwnerFenceRequest.fence:type_name -> ocserv.platform.agent.v1.ConnectionFenceV2
+	5,  // 19: ocserv.platform.transport.v1.RegisterOwnerFenceResponse.disposition:type_name -> ocserv.platform.transport.v1.OwnerFenceDisposition
+	38, // 20: ocserv.platform.transport.v1.GetOwnerFenceResponse.fence:type_name -> ocserv.platform.agent.v1.ConnectionFenceV2
+	2,  // 21: ocserv.platform.transport.v1.TransportEvent.type:type_name -> ocserv.platform.transport.v1.TransportEventType
+	33, // 22: ocserv.platform.transport.v1.TransportEvent.occurred_at:type_name -> google.protobuf.Timestamp
+	9,  // 23: ocserv.platform.transport.v1.TransportService.Health:input_type -> ocserv.platform.transport.v1.HealthRequest
+	11, // 24: ocserv.platform.transport.v1.TransportService.GetNodeConnection:input_type -> ocserv.platform.transport.v1.GetNodeConnectionRequest
+	13, // 25: ocserv.platform.transport.v1.TransportService.SendCommand:input_type -> ocserv.platform.transport.v1.SendCommandRequest
+	15, // 26: ocserv.platform.transport.v1.TransportService.CloseNode:input_type -> ocserv.platform.transport.v1.CloseNodeRequest
+	27, // 27: ocserv.platform.transport.v1.TransportService.WatchEvents:input_type -> ocserv.platform.transport.v1.WatchEventsRequest
+	17, // 28: ocserv.platform.transport.v1.TransportService.UpdateNodeTrust:input_type -> ocserv.platform.transport.v1.UpdateNodeTrustRequest
+	19, // 29: ocserv.platform.transport.v1.TransportService.FetchArtifact:input_type -> ocserv.platform.transport.v1.FetchArtifactRequest
+	20, // 30: ocserv.platform.transport.v1.TransportService.ConsumeArtifact:input_type -> ocserv.platform.transport.v1.ConsumeArtifactRequest
+	28, // 31: ocserv.platform.transport.v1.TransportService.RegisterOwnerFence:input_type -> ocserv.platform.transport.v1.RegisterOwnerFenceRequest
+	30, // 32: ocserv.platform.transport.v1.TransportService.GetOwnerFence:input_type -> ocserv.platform.transport.v1.GetOwnerFenceRequest
+	6,  // 33: ocserv.platform.transport.v1.TrustService.ListNodeTrust:input_type -> ocserv.platform.transport.v1.ListNodeTrustRequest
+	22, // 34: ocserv.platform.transport.v1.TrustService.CheckEndpoint:input_type -> ocserv.platform.transport.v1.CheckEndpointRequest
+	24, // 35: ocserv.platform.transport.v1.TrustService.ValidateEnrollment:input_type -> ocserv.platform.transport.v1.ValidateEnrollmentRequest
+	36, // 36: ocserv.platform.transport.v1.TrustService.Enroll:input_type -> ocserv.platform.agent.v1.EnrollRequest
+	26, // 37: ocserv.platform.transport.v1.TrustService.AuthorizeSession:input_type -> ocserv.platform.transport.v1.AuthorizeSessionRequest
+	10, // 38: ocserv.platform.transport.v1.TransportService.Health:output_type -> ocserv.platform.transport.v1.HealthResponse
+	12, // 39: ocserv.platform.transport.v1.TransportService.GetNodeConnection:output_type -> ocserv.platform.transport.v1.NodeConnection
+	14, // 40: ocserv.platform.transport.v1.TransportService.SendCommand:output_type -> ocserv.platform.transport.v1.SendCommandResponse
+	16, // 41: ocserv.platform.transport.v1.TransportService.CloseNode:output_type -> ocserv.platform.transport.v1.CloseNodeResponse
+	32, // 42: ocserv.platform.transport.v1.TransportService.WatchEvents:output_type -> ocserv.platform.transport.v1.TransportEvent
+	18, // 43: ocserv.platform.transport.v1.TransportService.UpdateNodeTrust:output_type -> ocserv.platform.transport.v1.UpdateNodeTrustResponse
+	39, // 44: ocserv.platform.transport.v1.TransportService.FetchArtifact:output_type -> ocserv.platform.agent.v1.ArtifactChunk
+	21, // 45: ocserv.platform.transport.v1.TransportService.ConsumeArtifact:output_type -> ocserv.platform.transport.v1.ConsumeArtifactResponse
+	29, // 46: ocserv.platform.transport.v1.TransportService.RegisterOwnerFence:output_type -> ocserv.platform.transport.v1.RegisterOwnerFenceResponse
+	31, // 47: ocserv.platform.transport.v1.TransportService.GetOwnerFence:output_type -> ocserv.platform.transport.v1.GetOwnerFenceResponse
+	8,  // 48: ocserv.platform.transport.v1.TrustService.ListNodeTrust:output_type -> ocserv.platform.transport.v1.ListNodeTrustResponse
+	23, // 49: ocserv.platform.transport.v1.TrustService.CheckEndpoint:output_type -> ocserv.platform.transport.v1.CheckEndpointResponse
+	25, // 50: ocserv.platform.transport.v1.TrustService.ValidateEnrollment:output_type -> ocserv.platform.transport.v1.ValidateEnrollmentResponse
+	40, // 51: ocserv.platform.transport.v1.TrustService.Enroll:output_type -> ocserv.platform.agent.v1.EnrollResponse
+	41, // 52: ocserv.platform.transport.v1.TrustService.AuthorizeSession:output_type -> ocserv.platform.agent.v1.SessionHandshakeResponse
+	38, // [38:53] is the sub-list for method output_type
+	23, // [23:38] is the sub-list for method input_type
+	23, // [23:23] is the sub-list for extension type_name
+	23, // [23:23] is the sub-list for extension extendee
+	0,  // [0:23] is the sub-list for field type_name
 }
 
 func init() { file_ocserv_platform_transport_v1_transport_proto_init() }
@@ -1835,8 +2178,8 @@ func file_ocserv_platform_transport_v1_transport_proto_init() {
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_ocserv_platform_transport_v1_transport_proto_rawDesc), len(file_ocserv_platform_transport_v1_transport_proto_rawDesc)),
-			NumEnums:      5,
-			NumMessages:   23,
+			NumEnums:      6,
+			NumMessages:   27,
 			NumExtensions: 0,
 			NumServices:   2,
 		},

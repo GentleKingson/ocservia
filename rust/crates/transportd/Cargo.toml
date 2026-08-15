@@ -9,6 +9,7 @@ publish = false
 [dependencies]
 hex.workspace = true
 iroh.workspace = true
+ocservia-command-authorization = { version = "=0.1.0", path = "../command-authorization", default-features = false }
 ocservia-contracts = { version = "=0.1.0", path = "../contracts" }
 prost.workspace = true
 prost-types.workspace = true

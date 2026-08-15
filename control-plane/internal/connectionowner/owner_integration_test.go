@@ -61,6 +61,49 @@ func forceExpire(t *testing.T, pool *pgxpool.Pool, node [16]byte) {
 	}
 }
 
+// assertExactLeaseDeadline proves the deadline handed to the caller is the
+// exact value PostgreSQL stored, not a local reconstruction.
+func assertExactLeaseDeadline(t *testing.T, pool *pgxpool.Pool, node [16]byte, deadline time.Time) {
+	t.Helper()
+	var stored time.Time
+	if err := pool.QueryRow(context.Background(),
+		`SELECT lease_until FROM connection_owner_fencing WHERE node_id=$1`, node[:]).Scan(&stored); err != nil {
+		t.Fatalf("read stored lease deadline: %v", err)
+	}
+	stored = stored.UTC()
+	if !deadline.Equal(stored) {
+		t.Fatalf("handed deadline %v != stored deadline %v", deadline, stored)
+	}
+}
+
+// TestConnectionOwnerExactLeaseDeadlineHandoffIntegration locks the Stage 4
+// precondition that Acquire and Renew hand back the exact PostgreSQL deadline
+// with microsecond fidelity: any drift would let an owner sign a fence whose
+// lease outlives the authority's.
+func TestConnectionOwnerExactLeaseDeadlineHandoffIntegration(t *testing.T) {
+	pool := testPool(t)
+	ctx := context.Background()
+	node := testNode(t)
+
+	term, err := Acquire(ctx, pool, node, testIdentity(t), testConnection(t), 90*time.Second)
+	if err != nil {
+		t.Fatalf("acquire: %v", err)
+	}
+	assertExactLeaseDeadline(t, pool, node, term.LeaseUntil())
+	if remainder := time.Until(term.LeaseUntil()); remainder <= 0 || remainder > 90*time.Second {
+		t.Fatalf("acquire deadline remainder %v outside (0, ttl]", remainder)
+	}
+
+	renewedUntil, err := term.Renew(ctx, pool)
+	if err != nil {
+		t.Fatalf("renew: %v", err)
+	}
+	assertExactLeaseDeadline(t, pool, node, renewedUntil)
+	if !renewedUntil.After(term.LeaseUntil()) {
+		t.Fatalf("renew deadline %v must strictly extend %v", renewedUntil, term.LeaseUntil())
+	}
+}
+
 func TestConnectionOwnerAcquireRenewAssertIntegration(t *testing.T) {
 	pool := testPool(t)
 	ctx := context.Background()
@@ -71,8 +114,14 @@ func TestConnectionOwnerAcquireRenewAssertIntegration(t *testing.T) {
 	if err != nil || term.Epoch() != 1 {
 		t.Fatalf("first acquire = (%v, %v), want epoch 1", term, err)
 	}
-	if err := term.Renew(ctx, pool); err != nil {
+	assertExactLeaseDeadline(t, pool, nodeA, term.LeaseUntil())
+	renewedUntil, err := term.Renew(ctx, pool)
+	if err != nil {
 		t.Fatalf("renew current term: %v", err)
+	}
+	assertExactLeaseDeadline(t, pool, nodeA, renewedUntil)
+	if !renewedUntil.After(term.LeaseUntil()) {
+		t.Fatalf("renew deadline %v must extend acquire deadline %v", renewedUntil, term.LeaseUntil())
 	}
 	if err := term.AssertCurrent(ctx, pool); err != nil {
 		t.Fatalf("assert current term: %v", err)
@@ -118,7 +167,7 @@ func TestConnectionOwnerCrossInstanceTakeoverRequiresExpiryIntegration(t *testin
 	}
 
 	// The fenced-out owner must fail renew and assert.
-	if err := first.Renew(ctx, pool); !errors.Is(err, ErrNotOwner) {
+	if _, err := first.Renew(ctx, pool); !errors.Is(err, ErrNotOwner) {
 		t.Fatalf("stale renew = %v, want ErrNotOwner", err)
 	}
 	if err := first.AssertCurrent(ctx, pool); !errors.Is(err, ErrNotOwner) {
@@ -149,7 +198,7 @@ func TestConnectionOwnerSameOwnerNewConnectionIncrementsEpochIntegration(t *test
 		t.Fatalf("replacement epoch = %d, want > %d", second.Epoch(), first.Epoch())
 	}
 	// The replaced connection is fenced out immediately.
-	if err := first.Renew(ctx, pool); !errors.Is(err, ErrNotOwner) {
+	if _, err := first.Renew(ctx, pool); !errors.Is(err, ErrNotOwner) {
 		t.Fatalf("replaced connection renew = %v, want ErrNotOwner", err)
 	}
 	if err := first.AssertCurrent(ctx, pool); !errors.Is(err, ErrNotOwner) {
@@ -210,7 +259,7 @@ func TestConnectionOwnerAssertRejectsMidTransactionExpiryIntegration(t *testing.
 	case <-time.After(5 * time.Second):
 		t.Fatal("rejected assert must not block takeover until the stale transaction rolls back")
 	}
-	if err := term.Renew(ctx, pool); !errors.Is(err, ErrNotOwner) {
+	if _, err := term.Renew(ctx, pool); !errors.Is(err, ErrNotOwner) {
 		t.Fatalf("stale renew after takeover = %v, want ErrNotOwner", err)
 	}
 }

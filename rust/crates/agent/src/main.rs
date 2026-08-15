@@ -2011,6 +2011,7 @@ mod tests {
                 .map(|capability| (*capability).to_owned())
                 .collect(),
             session_grant: None,
+            connection_fence: None,
         };
         let mode = negotiate_session_mode(
             &response,
@@ -2048,6 +2049,7 @@ mod tests {
             controller_version: "test".to_owned(),
             negotiated_capabilities: vec!["ocserv.status.read".to_owned()],
             session_grant: None,
+            connection_fence: None,
         };
         assert!(
             negotiate_session_mode(
@@ -2090,6 +2092,7 @@ mod tests {
                 expires_at: Some((now + Duration::from_secs(30)).into()),
                 signature: vec![0; 64],
             }),
+            connection_fence: None,
         };
         let keyring = ControllerCommandKeyring::new([signing_key.verifying_key()])
             .expect("test command keyring");
@@ -2309,6 +2312,7 @@ mod tests {
                 purpose: "certificate_p12".to_owned(),
                 max_bytes: 32,
                 grant: Some(grant.clone()),
+                fence_binding: None,
             }))
             .await
         else {
@@ -2322,6 +2326,7 @@ mod tests {
                 sha256: vec![0; 32],
                 size: 32,
                 confirm_only: false,
+                fence_binding: None,
             }))
             .await
             .expect_err("read-only artifact consumption denied");

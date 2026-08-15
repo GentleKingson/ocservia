@@ -18,6 +18,7 @@ import (
 	"github.com/GentleKingson/ocservia/control-plane/internal/enrollment"
 	"github.com/GentleKingson/ocservia/control-plane/internal/localslice"
 	operationstore "github.com/GentleKingson/ocservia/control-plane/internal/operations"
+	"github.com/GentleKingson/ocservia/control-plane/internal/ownersession"
 	"github.com/GentleKingson/ocservia/control-plane/internal/platform/config"
 	"github.com/GentleKingson/ocservia/control-plane/internal/platform/telemetry"
 	"github.com/GentleKingson/ocservia/control-plane/internal/privdattestation"
@@ -109,12 +110,32 @@ func Run(ctx context.Context, cfg config.Config, build BuildInfo, logger *slog.L
 	maintenanceErr := make(chan error, 1)
 	var trust *trustserver.Server
 	trustErr := make(chan error, 1)
+	var workerTransport *transportclient.Client
+	var ownerSessions *ownersession.Manager
+	if cfg.RunsWorker() && (cfg.LocalSimulator || cfg.ControllerEndpointID != "") {
+		workerTransport, err = transportclient.New(cfg.TransportSocket, cfg.TransportTimeout, cfg.TransportQueue, cfg.TransportUID, cfg.TransportGID)
+		if err != nil {
+			return fmt.Errorf("configure transport client: %w", err)
+		}
+	}
 	if cfg.RunsWorker() && cfg.ControllerEndpointID != "" {
-		trust, err = trustserver.New(cfg.TrustSocket, trustserver.NewHandler(enrollment.New(pool, cfg.ControllerEndpointID, build.Version, commandSigner)), cfg.TransportUID)
+		// The worker-role process is the per-node connection owner: it serves
+		// session authorization and command dispatch, so its manager takes
+		// the leases, signs fences, and pushes them to transportd.
+		ownerSessions, err = ownersession.NewManager(pool, commandSigner, workerTransport, cfg.OwnerLeaseTTL, logger)
+		if err != nil {
+			return fmt.Errorf("configure connection owner sessions: %w", err)
+		}
+		go func() { workerErr <- ownerSessions.Run(componentCtx) }()
+		trust, err = trustserver.New(cfg.TrustSocket, trustserver.NewHandler(enrollment.NewWithOwnerSessions(pool, cfg.ControllerEndpointID, build.Version, commandSigner, ownerSessions)), cfg.TransportUID)
 		if err != nil {
 			return fmt.Errorf("configure trust server: %w", err)
 		}
 		go func() { trustErr <- trust.Serve() }()
+	}
+	var fenceBinder ownersession.OperationBinder
+	if ownerSessions != nil {
+		fenceBinder = ownerSessions
 	}
 	stopTrust := func() error {
 		if trust == nil {
@@ -124,21 +145,20 @@ func Run(ctx context.Context, cfg config.Config, build BuildInfo, logger *slog.L
 		defer shutdownCancel()
 		return trust.Shutdown(shutdownCtx)
 	}
-	if cfg.RunsWorker() && (cfg.LocalSimulator || cfg.ControllerEndpointID != "") {
-		transport, err := transportclient.New(cfg.TransportSocket, cfg.TransportTimeout, cfg.TransportQueue, cfg.TransportUID, cfg.TransportGID)
-		if err != nil {
-			return fmt.Errorf("configure transport client: %w", err)
-		}
+	if workerTransport != nil {
+		transport := workerTransport
 		worker := localslice.NewWorker(sliceService, transport, logger)
 		go func() { workerErr <- worker.Run(componentCtx) }()
-		operationWorker, workerConfigErr := operationstore.NewWorker(operationService, transport, logger)
-		if workerConfigErr != nil {
-			return fmt.Errorf("configure outbox worker: %w", workerConfigErr)
+		var operationWorker *operationstore.Worker
+		operationWorker, err = operationstore.NewFencedWorker(operationService, transport, fenceBinder, logger)
+		if err != nil {
+			return fmt.Errorf("configure outbox worker: %w", err)
 		}
 		go func() { workerErr <- operationWorker.Run(componentCtx) }()
-		trustWorker, workerConfigErr := enrollment.NewTrustConvergenceWorker(pool, transport, logger)
-		if workerConfigErr != nil {
-			return fmt.Errorf("configure trust convergence worker: %w", workerConfigErr)
+		var trustWorker *enrollment.TrustConvergenceWorker
+		trustWorker, err = enrollment.NewFencedTrustConvergenceWorker(pool, transport, fenceBinder, logger)
+		if err != nil {
+			return fmt.Errorf("configure trust convergence worker: %w", err)
 		}
 		go func() { workerErr <- trustWorker.Run(componentCtx) }()
 	}
@@ -152,6 +172,16 @@ func Run(ctx context.Context, cfg config.Config, build BuildInfo, logger *slog.L
 			return fmt.Errorf("configure API transport: %w", err)
 		}
 	}
+	// Roles without the lease issue bindings for the fence transportd
+	// registered, so administrative operations stay owner-fenced without a
+	// second lease holder.
+	if fenceBinder == nil && apiTransport != nil {
+		observer, observerErr := ownersession.NewObserver(apiTransport, commandSigner)
+		if observerErr != nil {
+			return fmt.Errorf("configure owner fence observer: %w", observerErr)
+		}
+		fenceBinder = observer
+	}
 	var certificateService *certificates.Service
 	if cfg.CertificateSignerURL != "" {
 		signer, signerErr := certificates.NewHTTPSigner(cfg.CertificateSignerURL, cfg.CertificateSignerToken, cfg.CertificateSignerTimeout)
@@ -162,6 +192,7 @@ func Run(ctx context.Context, cfg config.Config, build BuildInfo, logger *slog.L
 	} else {
 		certificateService = certificates.New(pool, operationService)
 	}
+	certificateService.EnableOwnerFencing(fenceBinder)
 	if cfg.RunsScheduler() {
 		identity, identityErr := coordination.NewIdentity()
 		if identityErr != nil {
@@ -266,6 +297,7 @@ func Run(ctx context.Context, cfg config.Config, build BuildInfo, logger *slog.L
 	server.EnableTelemetry(telemetryService)
 	if cfg.ControllerEndpointID != "" {
 		server.EnableEnrollment(enrollment.New(pool, cfg.ControllerEndpointID, build.Version, commandSigner), apiTransport)
+	server.EnableOwnerFencing(fenceBinder)
 	}
 	server.EnableLocalSlice(sliceService)
 	server.SetLocalSimulatorEnabled(cfg.LocalSimulator)

@@ -15,6 +15,8 @@ service TransportService {
   rpc UpdateNodeTrust(UpdateNodeTrustRequest) returns (UpdateNodeTrustResponse);
   rpc FetchArtifact(FetchArtifactRequest) returns (stream ocserv.platform.agent.v1.ArtifactChunk);
   rpc ConsumeArtifact(ConsumeArtifactRequest) returns (ConsumeArtifactResponse);
+  rpc RegisterOwnerFence(RegisterOwnerFenceRequest) returns (RegisterOwnerFenceResponse);
+  rpc GetOwnerFence(GetOwnerFenceRequest) returns (GetOwnerFenceResponse);
 }
 
 // TrustService is implemented by the Go control plane on a private UDS.
@@ -86,6 +88,9 @@ message NodeConnection {
   repeated string negotiated_capabilities = 9;
   uint64 authorization_revision = 10;
   google.protobuf.Timestamp session_expires_at = 11;
+  // Fencing epoch of the owner fence registered for this node. Zero when no
+  // fence is registered for the node yet.
+  uint64 owner_epoch = 12;
 }
 
 message SendCommandRequest {
@@ -100,6 +105,10 @@ message SendCommandResponse {
 message CloseNodeRequest {
   bytes node_id = 1;
   string reason = 2;
+  // Required when the node has a registered owner fence: closing a
+  // connection is an owner-fenced operation and a stale owner must not close
+  // the current connection.
+  ocserv.platform.agent.v1.FenceBindingV2 fence_binding = 3;
 }
 
 message CloseNodeResponse {}
@@ -116,6 +125,9 @@ message UpdateNodeTrustRequest {
   NodeTrustState state = 3;
   string reason = 4;
   uint64 revision = 5;
+  // Required when the node has a registered owner fence: owner-driven state
+  // updates are fenced and a stale owner must not update connection state.
+  ocserv.platform.agent.v1.FenceBindingV2 fence_binding = 6;
 }
 
 enum TrustUpdateDisposition {
@@ -137,6 +149,10 @@ message FetchArtifactRequest {
   string purpose = 3;
   uint64 max_bytes = 4;
   ocserv.platform.agent.v1.ArtifactGrantV1 grant = 5;
+  // Required when the node has a registered owner fence. The binding must be
+  // an artifact binding for this artifact identity issued under the current
+  // owner term.
+  ocserv.platform.agent.v1.FenceBindingV2 fence_binding = 6;
 }
 
 message ConsumeArtifactRequest {
@@ -147,6 +163,11 @@ message ConsumeArtifactRequest {
   // Never consumes bytes. It only confirms an exact already-consumed root
   // ledger record, including after the signed grant has expired.
   bool confirm_only = 5;
+  // Required when the node has a registered owner fence, including
+  // confirm-only requests: a stale owner must neither consume nor confirm
+  // artifacts. The fence binding carries its own expiry, so a current owner
+  // can still confirm a record whose artifact grant already expired.
+  ocserv.platform.agent.v1.FenceBindingV2 fence_binding = 6;
 }
 
 message ConsumeArtifactResponse {
@@ -177,6 +198,43 @@ message AuthorizeSessionRequest {
 
 message WatchEventsRequest {
   bytes after_event_id = 1;
+}
+
+// RegisterOwnerFence installs or refreshes the Controller-signed owner fence
+// for one node. transportd verifies the signature against its pinned
+// Controller verification keys, records the term, and immediately retires the
+// node's active mutation session when a strictly higher epoch arrives. A
+// fence whose epoch is lower than the registered one is rejected as stale, so
+// a resumed old owner cannot reclaim dispatch authority.
+message RegisterOwnerFenceRequest {
+  ocserv.platform.agent.v1.ConnectionFenceV2 fence = 1;
+}
+
+enum OwnerFenceDisposition {
+  OWNER_FENCE_DISPOSITION_UNSPECIFIED = 0;
+  // The fence was recorded; a higher epoch retired the previous session.
+  OWNER_FENCE_DISPOSITION_APPLIED = 1;
+  // The fence was recorded; the same term's lease deadline was refreshed.
+  OWNER_FENCE_DISPOSITION_REFRESHED = 2;
+  // The fence predates the registered epoch and was rejected.
+  OWNER_FENCE_DISPOSITION_STALE = 3;
+}
+
+message RegisterOwnerFenceResponse {
+  OwnerFenceDisposition disposition = 1;
+  // Epoch retained after the registration decision.
+  uint64 retained_epoch = 2;
+}
+
+message GetOwnerFenceRequest {
+  bytes node_id = 1;
+}
+
+// Returns the verified owner fence registered for the node so any Controller
+// role process can issue operation bindings for the current term without
+// holding the lease itself. transportd never returns an unverified fence.
+message GetOwnerFenceResponse {
+  ocserv.platform.agent.v1.ConnectionFenceV2 fence = 1;
 }
 
 message TransportEvent {

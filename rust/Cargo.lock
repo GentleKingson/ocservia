@@ -2587,6 +2587,7 @@ dependencies = [
  "iroh",
  "iroh-relay",
  "ocservia-agent-identity",
+ "ocservia-command-authorization",
  "ocservia-contracts",
  "ocservia-privd-attestation",
  "prost",

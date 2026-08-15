@@ -273,7 +273,7 @@ for major in 17 18; do
   # coordination package against a database, so this is where the race
   # detector actually observes renewal, loss, and session snapshotting.
   (cd "${ROOT}/control-plane" && OCSERV_TEST_DATABASE_URL="${runtime_url}" \
-    go test -p 1 -race ./internal/coordination ./internal/connectionowner -run Integration -count=1)
+    go test -p 1 -race ./internal/coordination ./internal/connectionowner ./internal/ownersession -run Integration -count=1)
 
   OCSERV_ENVIRONMENT=test OCSERV_HTTP_ADDRESS="127.0.0.1:${api_port}" \
     OCSERV_DATABASE_URL="${runtime_url}" "${BIN}" --role=all \

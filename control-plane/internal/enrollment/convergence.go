@@ -7,20 +7,23 @@ import (
 	"log/slog"
 	"time"
 
+	agentv1 "github.com/GentleKingson/ocservia/control-plane/gen/proto/ocserv/platform/agent/v1"
 	transportv1 "github.com/GentleKingson/ocservia/control-plane/gen/proto/ocserv/platform/transport/v1"
+	"github.com/GentleKingson/ocservia/control-plane/internal/ownersession"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 type TrustTransport interface {
-	UpdateNodeTrust(context.Context, []byte, []byte, transportv1.NodeTrustState, string, uint64) error
-	CloseNode(context.Context, []byte, string) error
+	UpdateNodeTrust(context.Context, []byte, []byte, transportv1.NodeTrustState, string, uint64, *agentv1.FenceBindingV2) error
+	CloseNode(context.Context, []byte, string, *agentv1.FenceBindingV2) error
 }
 
 type TrustConvergenceWorker struct {
 	pool      *pgxpool.Pool
 	transport TrustTransport
+	fences    ownersession.OperationBinder
 	logger    *slog.Logger
 	workerID  uuid.UUID
 }
@@ -43,6 +46,39 @@ func NewTrustConvergenceWorker(pool *pgxpool.Pool, transport TrustTransport, log
 		return nil, err
 	}
 	return &TrustConvergenceWorker{pool: pool, transport: transport, logger: logger, workerID: workerID}, nil
+}
+
+// NewFencedTrustConvergenceWorker signs owner-fence bindings for trust
+// updates and connection closes so a stale owner cannot drive connection
+// state. Nodes without a registered fence keep the unfenced compatibility
+// path.
+func NewFencedTrustConvergenceWorker(pool *pgxpool.Pool, transport TrustTransport, fences ownersession.OperationBinder, logger *slog.Logger) (*TrustConvergenceWorker, error) {
+	worker, err := NewTrustConvergenceWorker(pool, transport, logger)
+	if err != nil {
+		return nil, err
+	}
+	worker.fences = fences
+	return worker, nil
+}
+
+// operationBinding signs one administrative fence binding. Trust updates and
+// connection closes are Controller-side operations, so their binding
+// capability is the fencing capability itself, which every fence carries by
+// construction.
+func (w *TrustConvergenceWorker) operationBinding(ctx context.Context, nodeID uuid.UUID, kind agentv1.FenceOperationKind) (*agentv1.FenceBindingV2, error) {
+	if w.fences == nil {
+		return nil, nil
+	}
+	var fixed [16]byte
+	copy(fixed[:], nodeID[:])
+	_, binding, err := w.fences.BindOperation(ctx, fixed, kind, fixed, ownersession.FencingCapability)
+	if errors.Is(err, ownersession.ErrNoFence) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return binding, nil
 }
 
 func (w *TrustConvergenceWorker) Run(ctx context.Context) error {
@@ -76,7 +112,11 @@ func (w *TrustConvergenceWorker) RunOnce(ctx context.Context) (bool, error) {
 		return false, err
 	}
 	if !job.UpdateApplied {
-		if err := w.transport.UpdateNodeTrust(ctx, job.NodeID[:], job.EndpointID, job.State, job.Reason, job.Revision); err != nil {
+		updateBinding, err := w.operationBinding(ctx, job.NodeID, agentv1.FenceOperationKind_FENCE_OPERATION_KIND_STATE_UPDATE)
+		if err != nil {
+			return true, w.release(ctx, job, err)
+		}
+		if err := w.transport.UpdateNodeTrust(ctx, job.NodeID[:], job.EndpointID, job.State, job.Reason, job.Revision, updateBinding); err != nil {
 			return true, w.release(ctx, job, err)
 		}
 		if err := w.markUpdateApplied(ctx, job); err != nil {
@@ -85,7 +125,11 @@ func (w *TrustConvergenceWorker) RunOnce(ctx context.Context) (bool, error) {
 		job.UpdateApplied = true
 	}
 	if job.CloseRequired && !job.CloseApplied {
-		if err := w.transport.CloseNode(ctx, job.NodeID[:], "node revoked"); err != nil {
+		closeBinding, err := w.operationBinding(ctx, job.NodeID, agentv1.FenceOperationKind_FENCE_OPERATION_KIND_CONNECTION_CLOSE)
+		if err != nil {
+			return true, w.release(ctx, job, err)
+		}
+		if err := w.transport.CloseNode(ctx, job.NodeID[:], "node revoked", closeBinding); err != nil {
 			return true, w.release(ctx, job, err)
 		}
 		if err := w.markCloseApplied(ctx, job); err != nil {

@@ -102,6 +102,8 @@ pub fn validate_strict_command_envelope(bytes: &[u8]) -> Result<(), StrictWireEr
 enum MessageKind {
     CommandEnvelope,
     CommandAuthorizationProof,
+    ConnectionFenceV2,
+    FenceBindingV2,
     Timestamp,
     SessionDisconnect,
     SessionTerminate,
@@ -127,6 +129,8 @@ impl MessageKind {
         match self {
             Self::CommandEnvelope => "CommandEnvelope",
             Self::CommandAuthorizationProof => "CommandAuthorizationProof",
+            Self::ConnectionFenceV2 => "ConnectionFenceV2",
+            Self::FenceBindingV2 => "FenceBindingV2",
             Self::Timestamp => "Timestamp",
             Self::SessionDisconnect => "SessionDisconnect",
             Self::SessionTerminate => "SessionTerminate",
@@ -202,9 +206,10 @@ fn field_kind(message: MessageKind, tag: u32) -> Option<FieldKind> {
     use FieldKind::{Nested, Scalar};
     use MessageKind::{
         CertificateCsr, CertificateP12, CertificateRevoke, CommandAuthorizationProof,
-        CommandEnvelope, ConfigApply, ConfigPlan, GroupApply, IpBanRemove, ServiceReload,
-        SessionDisconnect, SessionTerminate, SimulationProbe, SyntheticEcho, SyntheticNoop,
-        Timestamp, UserCreate, UserDisable, UserEnable, UserPasswordRotate,
+        CommandEnvelope, ConfigApply, ConfigPlan, ConnectionFenceV2, FenceBindingV2, GroupApply,
+        IpBanRemove, ServiceReload, SessionDisconnect, SessionTerminate, SimulationProbe,
+        SyntheticEcho, SyntheticNoop, Timestamp, UserCreate, UserDisable, UserEnable,
+        UserPasswordRotate,
     };
     use WireType::{LengthDelimited, Varint};
 
@@ -214,6 +219,8 @@ fn field_kind(message: MessageKind, tag: u32) -> Option<FieldKind> {
             6 | 9 | 109 | 110 => Some(Scalar(Varint)),
             7 | 8 => Some(Nested(Timestamp)),
             125 => Some(Nested(CommandAuthorizationProof)),
+            126 => Some(Nested(ConnectionFenceV2)),
+            127 => Some(Nested(FenceBindingV2)),
             100 => Some(Nested(SessionDisconnect)),
             101 => Some(Nested(UserCreate)),
             102 => Some(Nested(UserDisable)),
@@ -240,6 +247,18 @@ fn field_kind(message: MessageKind, tag: u32) -> Option<FieldKind> {
         CommandAuthorizationProof => match tag {
             1 => Some(Scalar(Varint)),
             2 | 3 => Some(Scalar(LengthDelimited)),
+            _ => None,
+        },
+        ConnectionFenceV2 => match tag {
+            1 | 7 | 8 | 10 => Some(Scalar(Varint)),
+            2..=6 | 9 | 11 | 15 => Some(Scalar(LengthDelimited)),
+            12..=14 => Some(Nested(Timestamp)),
+            _ => None,
+        },
+        FenceBindingV2 => match tag {
+            1 | 3 | 9 | 10 | 12 => Some(Scalar(Varint)),
+            2 | 4 | 5 | 6 | 7 | 8 | 11 | 13 | 16 => Some(Scalar(LengthDelimited)),
+            14 | 15 => Some(Nested(Timestamp)),
             _ => None,
         },
         SessionDisconnect | SessionTerminate => match tag {
@@ -289,7 +308,8 @@ fn field_kind(message: MessageKind, tag: u32) -> Option<FieldKind> {
 mod tests {
     use super::*;
     use crate::generated::ocserv::platform::agent::v1::{
-        CommandAuthorizationProof, CommandEnvelope, SyntheticEcho, command_envelope,
+        CommandAuthorizationProof, CommandEnvelope, ConnectionFenceV2, FenceBindingV2,
+        FenceOperationKind, FenceSignatureVersion, SyntheticEcho, command_envelope,
     };
     use prost::Message;
     use prost_types::Timestamp;
@@ -340,14 +360,70 @@ mod tests {
     #[test]
     fn rejects_unknown_top_level_field() {
         let mut bytes = envelope().encode_to_vec();
-        bytes.extend([0xf0, 0x07, 0x01]);
+        bytes.extend([0x80, 0x7d, 0x01]);
         assert!(matches!(
             validate_strict_command_envelope(&bytes),
             Err(StrictWireError::UnknownField {
                 message: "CommandEnvelope",
-                tag: 126
+                tag: 2000
             })
         ));
+    }
+
+    #[test]
+    fn accepts_owner_fence_carriers_on_command_envelope() {
+        let mut command = envelope();
+        command.connection_fence = Some(ConnectionFenceV2 {
+            signature_version: FenceSignatureVersion::Ed25519V1 as i32,
+            key_id: "ed25519-sha256:test".to_owned(),
+            fence_id: vec![1; 16],
+            node_id: vec![2; 16],
+            endpoint_id: vec![3; 32],
+            owner_instance_id: vec![4; 16],
+            owner_incarnation: 1,
+            owner_epoch: 1,
+            connection_id: vec![5; 16],
+            authorization_revision: 1,
+            capabilities: vec!["ocserv.fencing.v2".to_owned()],
+            lease_until: Some(Timestamp {
+                seconds: 1_700_000_030,
+                nanos: 0,
+            }),
+            issued_at: Some(Timestamp {
+                seconds: 1_700_000_000,
+                nanos: 0,
+            }),
+            expires_at: Some(Timestamp {
+                seconds: 1_700_000_330,
+                nanos: 0,
+            }),
+            signature: vec![0xa5; 64],
+        });
+        command.fence_binding = Some(FenceBindingV2 {
+            signature_version: FenceSignatureVersion::Ed25519V1 as i32,
+            key_id: "ed25519-sha256:test".to_owned(),
+            operation_kind: FenceOperationKind::Command as i32,
+            operation_id: vec![6; 16],
+            fence_id: vec![1; 16],
+            node_id: vec![2; 16],
+            endpoint_id: vec![3; 32],
+            owner_instance_id: vec![4; 16],
+            owner_incarnation: 1,
+            owner_epoch: 1,
+            connection_id: vec![5; 16],
+            authorization_revision: 1,
+            capability: "ocserv.fencing.v2".to_owned(),
+            issued_at: Some(Timestamp {
+                seconds: 1_700_000_000,
+                nanos: 0,
+            }),
+            expires_at: Some(Timestamp {
+                seconds: 1_700_000_300,
+                nanos: 0,
+            }),
+            signature: vec![0xa5; 64],
+        });
+        assert!(decode_strict_command_envelope(&command.encode_to_vec()).is_ok());
     }
 
     #[test]

@@ -596,7 +596,7 @@ type failingTrustTransport struct {
 	closeCalls     int
 }
 
-func (transport *failingTrustTransport) UpdateNodeTrust(_ context.Context, _, _ []byte, _ transportv1.NodeTrustState, _ string, _ uint64) error {
+func (transport *failingTrustTransport) UpdateNodeTrust(_ context.Context, _, _ []byte, _ transportv1.NodeTrustState, _ string, _ uint64, _ *agentv1.FenceBindingV2) error {
 	transport.updateCalls++
 	if transport.updateFailures > 0 {
 		transport.updateFailures--
@@ -605,7 +605,7 @@ func (transport *failingTrustTransport) UpdateNodeTrust(_ context.Context, _, _ 
 	return nil
 }
 
-func (transport *failingTrustTransport) CloseNode(_ context.Context, _ []byte, _ string) error {
+func (transport *failingTrustTransport) CloseNode(_ context.Context, _ []byte, _ string, _ *agentv1.FenceBindingV2) error {
 	transport.closeCalls++
 	if transport.closeFailures > 0 {
 		transport.closeFailures--
