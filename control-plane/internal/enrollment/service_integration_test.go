@@ -680,7 +680,10 @@ func TestAuthorizeSessionDeduplicatesFencingCapabilityIntegration(t *testing.T) 
 	defer cleanupWorkspace(ctx, pool, workspaceID)
 
 	service := newTestService(t, pool, "", "test")
-	endpoint := endpointFixture(9)
+	// A dedicated endpoint seed keeps this test independent of endpoint rows
+	// other tests leave behind: the runtime test role cannot delete
+	// node_endpoint_keys, so every enrollment test leaks its endpoint.
+	endpoint := endpointFixture(20)
 	token := createToken(t, service, workspaceID, endpoint)
 	enrolled, err := service.Enroll(ctx, enrollmentRequestCapabilities(token.Value, endpoint, []string{"ocserv.status.read", "ocserv.fencing.v2"}))
 	if err != nil || enrolled.GetResult() != agentv1.HandshakeResult_HANDSHAKE_RESULT_PENDING_APPROVAL {
@@ -764,7 +767,8 @@ func TestAuthorizeSessionCommitFailureClosesOpenedSessionIntegration(t *testing.
 		t.Fatalf("new manager: %v", err)
 	}
 	service := NewWithOwnerSessions(pool, string(endpointFixture(3)), "test", signer, manager)
-	endpoint := endpointFixture(11)
+	// Dedicated endpoint seed, see TestAuthorizeSessionDeduplicatesFencingCapabilityIntegration.
+	endpoint := endpointFixture(21)
 	token := createToken(t, service, workspaceID, endpoint)
 	enrolled, err := service.Enroll(ctx, enrollmentRequestCapabilities(token.Value, endpoint, []string{"ocserv.fencing.v2"}))
 	if err != nil || enrolled.GetResult() != agentv1.HandshakeResult_HANDSHAKE_RESULT_PENDING_APPROVAL {
