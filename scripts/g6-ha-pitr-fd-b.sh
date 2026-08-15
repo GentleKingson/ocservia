@@ -282,6 +282,14 @@ phase_finalize() {
     return 1
   }
 
+  # fd-a echoes the promotion record it received before probing; it must be
+  # byte-identical to the locally recorded boundary, binding the probe
+  # rendezvous into the evidence chain.
+  [[ "$(<"${post_promotion}/promoted-at")" == "${promoted_at}" ]] || {
+    echo "the echoed promotion record does not match the recorded promotion boundary" >&2
+    return 1
+  }
+
   # Dual-primary evidence: write attempts against the fenced former primary
   # AFTER the replacement was promoted (the post-promotion probes), plus the
   # read-only rejections after it rejoined as a standby. The pre-promotion
@@ -291,6 +299,16 @@ phase_finalize() {
     --slurpfile promotion "${post_promotion}/probes.json" \
     --slurpfile rejoined "${rejoin}/post-rejoin-probes.jsonl" \
     '$promotion[0].promoted_at_probes + $rejoined')"
+  # Every dual-primary probe must sit at or after the recorded promotion
+  # boundary on fd-a's own clock; an earlier probe means cross-runner clock
+  # skew or a missed rendezvous and must fail loudly instead of silently
+  # entering the frozen record.
+  jq -e --arg promoted "${promoted_at}" \
+    'all(.[]; (.at | fromdateiso8601) >= ($promoted | fromdateiso8601))' \
+    <<<"${dual_primary_probes}" >/dev/null || {
+      echo "a dual-primary probe timestamp precedes the recorded promotion boundary" >&2
+      return 1
+    }
   jq -e 'length >= 3 and all(.accepted == false)' <<<"${dual_primary_probes}" >/dev/null || {
     echo "the former primary accepted a write after the replacement promotion" >&2
     return 1

@@ -249,10 +249,10 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ github.token }}
         run: scripts/real-e2e-artifact.sh wait-download "g6-ha-fd-a-rejoin-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" "${RUNNER_TEMP}/g6-ha-fd-a-rejoin" 900
-      - name: Merge evidence and verify RPO RTO
-        run: scripts/g6-ha-pitr-fd-b.sh finalize "${RUNNER_TEMP}/g6-ha-isolation" "${RUNNER_TEMP}/g6-ha-load" "${RUNNER_TEMP}/g6-ha-pitr" "${RUNNER_TEMP}/g6-ha-fd-a-recovered" "${RUNNER_TEMP}/g6-ha-post-promotion" "${RUNNER_TEMP}/g6-ha-fd-a-rejoin" "${RUNNER_TEMP}/g6-ha-tunnel-fd-a"
       - name: Confirm the rejoined peer is streaming
         run: scripts/g6-ha-pitr-fd-b.sh rejoin-wait
+      - name: Merge evidence and verify RPO RTO
+        run: scripts/g6-ha-pitr-fd-b.sh finalize "${RUNNER_TEMP}/g6-ha-isolation" "${RUNNER_TEMP}/g6-ha-load" "${RUNNER_TEMP}/g6-ha-pitr" "${RUNNER_TEMP}/g6-ha-fd-a-recovered" "${RUNNER_TEMP}/g6-ha-post-promotion" "${RUNNER_TEMP}/g6-ha-fd-a-rejoin" "${RUNNER_TEMP}/g6-ha-tunnel-fd-a"
       - name: Publish merged evidence
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:

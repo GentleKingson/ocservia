@@ -140,5 +140,49 @@ grep -q "g6-ha-fd-a-rejoin-\${GITHUB_RUN_ID}" "${WORKFLOW}" || {
   exit 1
 }
 
+# Write probes must stay valid against a writable primary: unique run-scoped
+# ids with upserts, so a duplicate-key error can never fake a read-only
+# rejection, and post-rejoin rejections must be the standby read-only
+# SQLSTATE itself rather than any SQL failure.
+grep -qF 'ON CONFLICT (id) DO UPDATE' "${FD_A}" || {
+  echo "write probes must upsert so only writability decides success" >&2
+  exit 1
+}
+grep -qF 'g6-probe-${RUN_ID}' "${FD_A}" || {
+  echo "write probes must carry run-unique probe ids" >&2
+  exit 1
+}
+grep -q "run_readonly_rejection_probes" "${FD_A}" || {
+  echo "fd-a must verify read-only rejection by SQLSTATE after rejoin" >&2
+  exit 1
+}
+grep -qF 'cannot execute INSERT in a read-only transaction' "${FD_A}" || {
+  echo "post-rejoin probes must accept only the standby read-only SQLSTATE as rejection" >&2
+  exit 1
+}
+
+# finalize must bind the probe rendezvous to the recorded promotion boundary:
+# the echoed promotion record must match byte for byte, and any dual-primary
+# probe timestamp that predates the boundary must fail loudly instead of
+# silently entering the frozen record.
+grep -qF '<"${post_promotion}/promoted-at"' "${FD_B}" || {
+  echo "finalize must verify the echoed promotion record matches the recorded boundary" >&2
+  exit 1
+}
+grep -qF 'fromdateiso8601) >= ($promoted | fromdateiso8601)' "${FD_B}" || {
+  echo "finalize must reject dual-primary probes that predate the promotion boundary" >&2
+  exit 1
+}
+
+# fd-b must confirm the rejoined standby is streaming before assembling the
+# merged evidence, so the published timeline includes old_primary_rejoined.
+rejoin_wait_line="$(grep -n "rejoin-wait" "${WORKFLOW}" | cut -d: -f1 | head -1 || true)"
+finalize_line="$(grep -n "fd-b.sh finalize" "${WORKFLOW}" | cut -d: -f1 | head -1 || true)"
+if [[ -z "${rejoin_wait_line}" || -z "${finalize_line}" ||
+  "${rejoin_wait_line}" -ge "${finalize_line}" ]]; then
+  echo "fd-b must run rejoin-wait before finalize so the evidence timeline includes old_primary_rejoined" >&2
+  exit 1
+fi
+
 shellcheck "${LIB}" "${FD_A}" "${FD_B}"
 echo "g6-ha-pitr policy checks passed"

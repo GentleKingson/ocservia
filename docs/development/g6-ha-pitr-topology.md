@@ -44,18 +44,24 @@ the raw identifiers never leave the runner.
 4. fd-a verifies PITR on a separate restored instance that pauses at a named
    restore point between a before/after marker pair.
 5. fd-a fences itself: outage marker, roles stopped, primary stopped, and
-   write probes against the isolated primary that must all fail.
+   write probes against the isolated primary that must all fail. Every probe
+   writes a run-unique id with an upsert, so a writable instance always
+   accepts the probe and only writability can decide the outcome.
 6. fd-b promotes, clears `synchronous_standby_names`, publishes the true
    promotion boundary, recovers every role against the new primary, and
    reconciles the acknowledged markers.
 7. fd-a receives the promotion record and probes its fenced former primary
    again — the dual-primary window starts at the promotion, so these
    post-promotion probes (not the isolation probes) feed the
-   `dual_primary_write_accepts` evidence.
+   `dual_primary_write_accepts` evidence. fd-b fails the run unless the echoed
+   promotion record matches its own byte for byte and every probe timestamp
+   sits at or after that boundary.
 8. fd-a recovers its roles through the tunnel to the new primary, rewinds
-   with `pg_rewind`, rejoins as a streaming standby, and re-verifies that
-   the rejoined instance rejects writes while read-only; fd-b merges the
-   evidence only after the rejoin record (including those probes) arrives.
+   with `pg_rewind`, rejoins as a streaming standby, and re-verifies that the
+   rejoined instance rejects writes while read-only — and only the standby's
+   own read-only SQLSTATE counts as rejection, never another SQL error. fd-b
+   confirms the rejoined standby is streaming before it assembles the merged
+   evidence, so the published timeline includes `old_primary_rejoined`.
 
 ## Evidence artifacts
 
@@ -90,8 +96,10 @@ lives in `scripts/test-g6-ha-pitr-workflow.sh`, which fails if a threshold is
 copied into shell code, a required timeline event stops being produced, the
 load bracket events are emitted by this stage, fd-b skips importing the peer
 cluster credentials, the environment id leaves the frozen
-`g6-[a-z0-9]{8,32}` pattern, or the post-promotion probes disappear from
-either failure domain's flow.
+`g6-[a-z0-9]{8,32}` pattern, a write probe stops upserting run-unique ids or
+accepts a non-read-only SQL error as post-rejoin rejection, finalize stops
+binding probe timestamps to the recorded promotion boundary, or the
+post-promotion probes disappear from either failure domain's flow.
 
 ## Verification boundary
 

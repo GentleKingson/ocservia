@@ -37,13 +37,21 @@ rejoined_in_recovery() {
 
 # Write probes use the host-local write path (published loopback port) from a
 # host-network container, so a success proves the probe itself is valid and a
-# failure after isolation proves the write path is fenced.
-attempt_primary_write() {
+# failure after isolation proves the write path is fenced. Each probe writes a
+# unique id with an upsert, so a stale row from an earlier probe can never
+# make a writable primary look fenced through a duplicate-key error: success
+# is decided by writability alone.
+attempt_primary_write_raw() {
+  local probe_id="${1:?probe id is required}"
   docker run --rm --network host --log-driver none postgres:17.10-bookworm \
     psql "host=127.0.0.1 port=5432 user=ocservia_owner dbname=ocservia sslmode=disable" \
     -v ON_ERROR_STOP=1 \
-    -c "INSERT INTO g6_ha_markers(id, txid, phase) VALUES ('rejected-after-isolation', txid_current()::text, 'probe')" \
-    >/dev/null 2>&1
+    -v probe_id="${probe_id}" \
+    -c "INSERT INTO g6_ha_markers(id, txid, phase) VALUES (:'probe_id', txid_current()::text, 'probe') ON CONFLICT (id) DO UPDATE SET written_at = now()"
+}
+
+attempt_primary_write() {
+  attempt_primary_write_raw "${1:?probe id is required}" >/dev/null 2>&1
 }
 
 write_outbox_file() {
@@ -55,17 +63,48 @@ write_outbox_file() {
 # Repeated client-side write attempts against the local former primary,
 # timestamped on this failure domain's clock. Every attempt must fail: while
 # fenced (postgres stopped) connections are refused, and after rejoin the
-# instance is a read-only standby that rejects the INSERT itself.
+# instance is a read-only standby that rejects the INSERT itself. The frozen
+# verifier enforces closed {at, accepted} keys per probe, so the unique probe
+# id is recorded only in the markers table, not in the evidence entries.
 run_primary_write_probes() {
   local count="${1:?probe count is required}"
   local out_file="${2:?output jsonl path is required}"
-  local at accepted
+  local phase_label="${3:?probe phase label is required}"
+  local attempt at accepted
   : >"${out_file}"
-  for _attempt in $(seq 1 "${count}"); do
+  for attempt in $(seq 1 "${count}"); do
     at="$(g6_ha_now)"
     accepted=false
-    if attempt_primary_write; then
+    if attempt_primary_write "g6-probe-${RUN_ID}-${phase_label}-${attempt}"; then
       accepted=true
+    fi
+    jq -cn --arg at "${at}" --argjson accepted "${accepted}" \
+      '{at:$at, accepted:$accepted}' >>"${out_file}"
+    sleep 1
+  done
+  jq -s --argjson expected "${count}" \
+    '(length) == $expected and all(.accepted == false)' "${out_file}"
+}
+
+# After rejoin the instance is up and the write path connects, so only the
+# standby's own read-only rejection may fail a probe. Any other SQL failure
+# (constraint, syntax, authentication) means the probe itself is broken, not
+# that fencing held, and fails the phase instead of counting as a rejection.
+run_readonly_rejection_probes() {
+  local count="${1:?probe count is required}"
+  local out_file="${2:?output jsonl path is required}"
+  local phase_label="${3:?probe phase label is required}"
+  local attempt at accepted output
+  : >"${out_file}"
+  for attempt in $(seq 1 "${count}"); do
+    at="$(g6_ha_now)"
+    accepted=false
+    if output="$(attempt_primary_write_raw "g6-probe-${RUN_ID}-${phase_label}-${attempt}" 2>&1)"; then
+      accepted=true
+    elif ! grep -q 'cannot execute INSERT in a read-only transaction' <<<"${output}"; then
+      echo "rejoin write probe g6-probe-${RUN_ID}-${phase_label}-${attempt} failed for a reason other than standby read-only rejection:" >&2
+      printf '%s\n' "${output}" >&2
+      return 1
     fi
     jq -cn --arg at "${at}" --argjson accepted "${accepted}" \
       '{at:$at, accepted:$accepted}' >>"${out_file}"
@@ -305,7 +344,7 @@ phase_isolate() {
   local outage_row isolated_at probes_file
   # Sanity probe: the same write path must succeed before isolation so the
   # later failures prove fencing rather than a broken probe.
-  attempt_primary_write || {
+  attempt_primary_write "g6-probe-${RUN_ID}-sanity" || {
     echo "write probe failed before isolation; probe path is invalid" >&2
     return 1
   }
@@ -318,7 +357,7 @@ phase_isolate() {
   # These probes establish the fence itself; the dual-primary evidence in the
   # merged postgres-recovery record comes from the post-promotion probes.
   probes_file="${G6HA_STATE}/isolated-probes.jsonl"
-  run_primary_write_probes 3 "${probes_file}" | grep -qx true || {
+  run_primary_write_probes 3 "${probes_file}" isolated | grep -qx true || {
     echo "the isolated former primary accepted a write" >&2
     return 1
   }
@@ -342,7 +381,7 @@ phase_post_promotion_probes() {
   local promoted_at="${1:?peer promotion timestamp file is required}"
   require_file "${promoted_at}"
   local probes_file="${G6HA_STATE}/post-promotion-probes.jsonl"
-  run_primary_write_probes 3 "${probes_file}" | grep -qx true || {
+  run_primary_write_probes 3 "${probes_file}" post-promotion | grep -qx true || {
     echo "the fenced former primary accepted a write after promotion" >&2
     return 1
   }
@@ -384,7 +423,7 @@ phase_rejoin() {
   # The rejoined instance must stay read-only: the write probe now connects
   # successfully, so only the standby's own read-only rejection can fail it.
   local rejoin_probes="${G6HA_STATE}/post-rejoin-probes.jsonl"
-  run_primary_write_probes 3 "${rejoin_probes}" | grep -qx true || {
+  run_readonly_rejection_probes 3 "${rejoin_probes}" post-rejoin | grep -qx true || {
     echo "the rejoined former primary accepted a write while a standby" >&2
     return 1
   }
