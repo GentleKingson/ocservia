@@ -1390,6 +1390,12 @@ impl TransportService for IrohTransportService {
                 "read-only session does not permit artifact fetch",
             ));
         }
+        // Acceptance boundary contract: no response headers and no artifact
+        // frames may leave this handler before verify_operation_binding has
+        // accepted the fence binding. The controller holds its ownership
+        // guard until the first validated frame of this stream, so deferring
+        // or front-loading any output past this point would reopen the
+        // stale-owner fetch window the guard exists to close.
         self.shared
             .verify_operation_binding(
                 &node_id,
@@ -4896,6 +4902,61 @@ mod tests {
             .await
             .expect_err("unsigned artifact consume must fail");
         assert_eq!(consume.code(), tonic::Code::PermissionDenied);
+    }
+
+    /// Pins the streaming acceptance boundary contract: `fetch_artifact` may
+    /// not resolve — and therefore may not emit response headers or frames,
+    /// which the controller's ownership guard waits on — before fence
+    /// verification has run. Holding the fence registry lock keeps
+    /// verification from completing, so the handler future must stay pending
+    /// and finish only once verification is allowed to proceed.
+    #[tokio::test]
+    async fn artifact_fetch_acceptance_waits_for_binding_verification() {
+        let (signing_key, keyring) = controller_keyring();
+        let node_id = *Uuid::now_v7().as_bytes();
+        let service = IrohTransportService::new_with_fence_policy(
+            8,
+            IdentityPolicy::default(),
+            Some(keyring),
+            false,
+        );
+        let (_term, fence, _router, _client, _connection) =
+            fenced_agent_session(&service, &signing_key, node_id, 57).await;
+        service
+            .register_owner_fence(Request::new(RegisterOwnerFenceRequest {
+                fence: Some(fence.clone()),
+            }))
+            .await
+            .expect("register owner fence");
+        let artifact_id = *Uuid::now_v7().as_bytes();
+        let binding = signed_fence_binding(
+            &signing_key,
+            &fence,
+            FenceOperationKind::Artifact,
+            artifact_id,
+            "ocserv.fencing.v2",
+        );
+        let mut pending_fetch = service.fetch_artifact(Request::new(FetchArtifactRequest {
+            node_id: node_id.to_vec(),
+            artifact_id: artifact_id.to_vec(),
+            purpose: "certificate_p12".to_owned(),
+            max_bytes: 32,
+            grant: Some(shape_valid_grant(node_id, artifact_id)),
+            fence_binding: Some(binding),
+        }));
+        let registry = service.shared.inner.fences.lock().await;
+        let blocked =
+            tokio::time::timeout(Duration::from_millis(250), &mut pending_fetch).await;
+        assert!(
+            blocked.is_err(),
+            "fetch_artifact resolved before the fence binding was verified"
+        );
+        drop(registry);
+        tokio::time::timeout(Duration::from_secs(5), pending_fetch)
+            .await
+            .expect("fetch_artifact completes once verification runs")
+            .expect("verified artifact fetch accepted");
+        service.begin_shutdown().await;
     }
 
     #[tokio::test]

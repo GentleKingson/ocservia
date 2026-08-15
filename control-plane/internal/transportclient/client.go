@@ -106,33 +106,57 @@ func (c *Client) FetchArtifact(ctx context.Context, grant *agentv1.ArtifactGrant
 		connection.Close()
 		return nil, fmt.Errorf("fetch artifact: %w", err)
 	}
+	// transportd accepts a fetch only after its handler verified the fence
+	// binding; a rejected fetch answers with a status error instead of
+	// frames. Waiting for the first validated artifact frame therefore keeps
+	// the caller's ownership guard engaged across fence verification and
+	// stream acceptance — and fails the call itself when transportd rejects —
+	// without holding the guard for the whole artifact transfer.
 	reader, writer := io.Pipe()
+	accepted := make(chan error, 1)
 	go func() {
 		defer connection.Close()
 		hash := sha256.New()
 		var offset int64
+		reportAcceptance := func(err error) {
+			select {
+			case accepted <- err:
+			default:
+			}
+		}
 		for {
 			chunk, receiveErr := stream.Recv()
 			if receiveErr != nil {
 				_ = writer.CloseWithError(receiveErr)
+				reportAcceptance(receiveErr)
 				return
 			}
 			if !bytes.Equal(chunk.GetArtifactId(), artifactID[:]) || chunk.GetOffset() != uint64(offset) || len(chunk.GetData()) > 256<<10 || offset+int64(len(chunk.GetData())) > maxBytes {
-				_ = writer.CloseWithError(errors.New("artifact stream is inconsistent"))
+				inconsistent := errors.New("artifact stream is inconsistent")
+				_ = writer.CloseWithError(inconsistent)
+				reportAcceptance(inconsistent)
 				return
 			}
 			if _, writeErr := hash.Write(chunk.GetData()); writeErr != nil {
 				_ = writer.CloseWithError(writeErr)
-				return
-			}
-			if _, writeErr := writer.Write(chunk.GetData()); writeErr != nil {
-				_ = writer.CloseWithError(writeErr)
+				reportAcceptance(writeErr)
 				return
 			}
 			offset += int64(len(chunk.GetData()))
+			// The first validated frame proves transportd accepted the fetch;
+			// signal before the pipe write, which blocks until the caller
+			// consumes the returned reader.
+			reportAcceptance(nil)
+			if _, writeErr := writer.Write(chunk.GetData()); writeErr != nil {
+				_ = writer.CloseWithError(writeErr)
+				reportAcceptance(writeErr)
+				return
+			}
 			if chunk.GetEof() {
 				if offset == 0 || len(chunk.GetSha256()) != sha256.Size || !bytes.Equal(hash.Sum(nil), chunk.GetSha256()) {
-					_ = writer.CloseWithError(errors.New("artifact digest mismatch"))
+					digestMismatch := errors.New("artifact digest mismatch")
+					_ = writer.CloseWithError(digestMismatch)
+					reportAcceptance(digestMismatch)
 					return
 				}
 				_ = writer.Close()
@@ -140,6 +164,10 @@ func (c *Client) FetchArtifact(ctx context.Context, grant *agentv1.ArtifactGrant
 			}
 		}
 	}()
+	if err := <-accepted; err != nil {
+		_ = reader.Close()
+		return nil, fmt.Errorf("fetch artifact acceptance: %w", err)
+	}
 	return reader, nil
 }
 
