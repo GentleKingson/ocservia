@@ -26,6 +26,12 @@ var ErrNotOwner = errors.New("connectionowner: connection ownership lost")
 // node lease. Cross-instance takeover requires the previous lease to expire.
 var ErrLeaseHeld = errors.New("connectionowner: node lease held by another owner")
 
+// ErrNoOwnerRow reports that the node has no ownership row at all: it was
+// never fenced. A fence registered elsewhere without a backing row claims a
+// term the authority never granted or no longer knows, so readers must fail
+// closed on it.
+var ErrNoOwnerRow = errors.New("connectionowner: node has no ownership row")
+
 // Identity binds an ownership term to exactly one controller process
 // incarnation, mirroring the scheduler leadership identity.
 type Identity struct {
@@ -199,7 +205,7 @@ func ReadState(ctx context.Context, pool *pgxpool.Pool, nodeID [16]byte) (OwnerS
 		FROM connection_owner_fencing WHERE node_id=$1`, nodeID[:]).
 		Scan(&state.InstanceID, &state.Incarnation, &connectionID, &state.Epoch, &state.LeaseUntilValid)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return OwnerState{}, fmt.Errorf("connectionowner: node %x has no ownership row", nodeID)
+		return OwnerState{}, fmt.Errorf("%w: node %x", ErrNoOwnerRow, nodeID)
 	}
 	if err != nil {
 		return OwnerState{}, fmt.Errorf("connectionowner: read node ownership: %w", err)

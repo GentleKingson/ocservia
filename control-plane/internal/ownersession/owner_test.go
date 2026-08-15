@@ -4,11 +4,13 @@ import (
 	"context"
 	"crypto/ed25519"
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 
 	agentv1 "github.com/GentleKingson/ocservia/control-plane/gen/proto/ocserv/platform/agent/v1"
 	"github.com/GentleKingson/ocservia/control-plane/internal/commandauth"
+	"github.com/GentleKingson/ocservia/control-plane/internal/connectionowner"
 )
 
 type recordingReader struct {
@@ -25,6 +27,24 @@ func (r *recordingReader) GetOwnerFence(_ context.Context, nodeID []byte) (*agen
 		return nil, r.err
 	}
 	return r.fence, nil
+}
+
+// ownerStateForFence builds the PostgreSQL row that exactly backs a fence's
+// term, so tests can mutate one dimension at a time.
+func ownerStateForFence(fence *agentv1.ConnectionFenceV2) connectionowner.OwnerState {
+	instance, _ := fixed16(fence.GetOwnerInstanceId())
+	connection, _ := fixed16(fence.GetConnectionId())
+	return connectionowner.OwnerState{
+		InstanceID:      instance,
+		Incarnation:     int64(fence.GetOwnerIncarnation()),
+		ConnectionID:    connection,
+		Epoch:           int64(fence.GetOwnerEpoch()),
+		LeaseUntilValid: true,
+	}
+}
+
+func authorityReturning(state connectionowner.OwnerState, err error) ownerStateReader {
+	return func(context.Context, [16]byte) (connectionowner.OwnerState, error) { return state, err }
 }
 
 func testSigner(t *testing.T) (*commandauth.Signer, ed25519.PublicKey) {
@@ -120,7 +140,7 @@ func TestFenceCapabilitiesNormalization(t *testing.T) {
 func TestObserverBindOperationSignsTheRegisteredTerm(t *testing.T) {
 	signer, publicKey := testSigner(t)
 	fence, nodeID, ownerInstanceID, endpointID := testFence(t, signer)
-	observer, err := NewObserver(&recordingReader{fence: fence}, signer)
+	observer, err := newObserver(authorityReturning(ownerStateForFence(fence), nil), &recordingReader{fence: fence}, signer)
 	if err != nil {
 		t.Fatalf("new observer: %v", err)
 	}
@@ -179,7 +199,7 @@ func TestObserverBindOperationSignsTheRegisteredTerm(t *testing.T) {
 func TestObserverBindOperationRejectsUnheldCapability(t *testing.T) {
 	signer, _ := testSigner(t)
 	fence, nodeID, _, _ := testFence(t, signer)
-	observer, err := NewObserver(&recordingReader{fence: fence}, signer)
+	observer, err := newObserver(authorityReturning(ownerStateForFence(fence), nil), &recordingReader{fence: fence}, signer)
 	if err != nil {
 		t.Fatalf("new observer: %v", err)
 	}
@@ -191,7 +211,7 @@ func TestObserverBindOperationRejectsUnheldCapability(t *testing.T) {
 
 func TestObserverBindOperationWithoutRegisteredFence(t *testing.T) {
 	signer, _ := testSigner(t)
-	observer, err := NewObserver(&recordingReader{}, signer)
+	observer, err := newObserver(authorityReturning(connectionowner.OwnerState{}, errors.New("authority must not be consulted")), &recordingReader{}, signer)
 	if err != nil {
 		t.Fatalf("new observer: %v", err)
 	}
@@ -204,7 +224,7 @@ func TestObserverBindOperationWithoutRegisteredFence(t *testing.T) {
 func TestObserverBindOperationPropagatesReaderErrors(t *testing.T) {
 	signer, _ := testSigner(t)
 	readerFailure := errors.New("transport unavailable")
-	observer, err := NewObserver(&recordingReader{err: readerFailure}, signer)
+	observer, err := newObserver(authorityReturning(connectionowner.OwnerState{}, errors.New("authority must not be consulted")), &recordingReader{err: readerFailure}, signer)
 	if err != nil {
 		t.Fatalf("new observer: %v", err)
 	}
@@ -218,13 +238,115 @@ func TestObserverRejectsMalformedRegisteredFence(t *testing.T) {
 	signer, _ := testSigner(t)
 	fence, _, _, _ := testFence(t, signer)
 	fence.FenceId = []byte{1, 2, 3}
-	observer, err := NewObserver(&recordingReader{fence: fence}, signer)
+	observer, err := newObserver(authorityReturning(connectionowner.OwnerState{}, errors.New("authority must not be consulted")), &recordingReader{fence: fence}, signer)
 	if err != nil {
 		t.Fatalf("new observer: %v", err)
 	}
 	_, _, err = observer.BindOperation(context.Background(), mustUUIDv7(t), agentv1.FenceOperationKind_FENCE_OPERATION_KIND_COMMAND, mustUUIDv7(t), "ocserv.service.reload")
 	if err == nil {
 		t.Fatal("malformed fence accepted")
+	}
+}
+
+// TestObserverBindOperationFailsClosedWhenTheAuthorityDisagrees pins the
+// authority gate: a fence that transportd still serves may only be signed
+// while the PostgreSQL ownership row names its exact owner instance,
+// incarnation, connection, and epoch under an unexpired lease. Any
+// disagreement — including a successor's higher epoch with a live lease —
+// fails closed as ErrNotOwner and never degrades to the unfenced
+// compatibility path.
+func TestObserverBindOperationFailsClosedWhenTheAuthorityDisagrees(t *testing.T) {
+	signer, _ := testSigner(t)
+	fence, nodeID, _, _ := testFence(t, signer)
+	backing := ownerStateForFence(fence)
+	otherConnection := backing.ConnectionID
+	otherConnection[0] ^= 1
+	otherInstance := backing.InstanceID
+	otherInstance[0] ^= 1
+	successorEpoch := backing
+	successorEpoch.Epoch++
+	expiredLease := backing
+	expiredLease.LeaseUntilValid = false
+	otherConnectionState := backing
+	otherConnectionState.ConnectionID = otherConnection
+	otherInstanceState := backing
+	otherInstanceState.InstanceID = otherInstance
+	otherIncarnation := backing
+	otherIncarnation.Incarnation++
+	authorityBehind := backing
+	authorityBehind.Epoch--
+	disagreements := []struct {
+		name  string
+		state connectionowner.OwnerState
+	}{
+		{"successor epoch with a live lease", successorEpoch},
+		{"expired lease", expiredLease},
+		{"different connection", otherConnectionState},
+		{"different owner instance", otherInstanceState},
+		{"different incarnation", otherIncarnation},
+		{"fence ahead of the authority row", authorityBehind},
+	}
+	for _, disagreement := range disagreements {
+		t.Run(disagreement.name, func(t *testing.T) {
+			observer, err := newObserver(authorityReturning(disagreement.state, nil), &recordingReader{fence: fence}, signer)
+			if err != nil {
+				t.Fatalf("new observer: %v", err)
+			}
+			returnedFence, binding, err := observer.BindOperation(context.Background(), nodeID, agentv1.FenceOperationKind_FENCE_OPERATION_KIND_COMMAND, mustUUIDv7(t), "ocserv.service.reload")
+			if !errors.Is(err, ErrNotOwner) {
+				t.Fatalf("error = %v, want ErrNotOwner", err)
+			}
+			if binding != nil || returnedFence != nil {
+				t.Fatal("observer produced fence material for a term the authority does not back")
+			}
+		})
+	}
+}
+
+// TestObserverBindOperationFailsClosedWithoutAnOwnershipRow covers a
+// registered fence whose node has no PostgreSQL ownership row at all, and an
+// authority that cannot be read: both must fail closed and neither may select
+// the unfenced compatibility path.
+func TestObserverBindOperationFailsClosedWithoutAnOwnershipRow(t *testing.T) {
+	signer, _ := testSigner(t)
+	fence, nodeID, _, _ := testFence(t, signer)
+	observer, err := newObserver(authorityReturning(connectionowner.OwnerState{}, fmt.Errorf("gone: %w", connectionowner.ErrNoOwnerRow)), &recordingReader{fence: fence}, signer)
+	if err != nil {
+		t.Fatalf("new observer: %v", err)
+	}
+	_, binding, err := observer.BindOperation(context.Background(), nodeID, agentv1.FenceOperationKind_FENCE_OPERATION_KIND_COMMAND, mustUUIDv7(t), "ocserv.service.reload")
+	if !errors.Is(err, ErrNotOwner) {
+		t.Fatalf("error = %v, want ErrNotOwner", err)
+	}
+	if binding != nil {
+		t.Fatal("observer signed a binding without an ownership row")
+	}
+}
+
+func TestObserverBindOperationFailsClosedWhenTheAuthorityIsUnreadable(t *testing.T) {
+	signer, _ := testSigner(t)
+	fence, nodeID, _, _ := testFence(t, signer)
+	authorityFailure := errors.New("database unavailable")
+	observer, err := newObserver(authorityReturning(connectionowner.OwnerState{}, authorityFailure), &recordingReader{fence: fence}, signer)
+	if err != nil {
+		t.Fatalf("new observer: %v", err)
+	}
+	_, binding, err := observer.BindOperation(context.Background(), nodeID, agentv1.FenceOperationKind_FENCE_OPERATION_KIND_COMMAND, mustUUIDv7(t), "ocserv.service.reload")
+	if !errors.Is(err, authorityFailure) {
+		t.Fatalf("error = %v, want the authority failure", err)
+	}
+	if errors.Is(err, ErrNoFence) || errors.Is(err, ErrNotOwner) {
+		t.Fatalf("authority failure = %v must stay a distinct fail-closed error", err)
+	}
+	if binding != nil {
+		t.Fatal("observer signed a binding while the authority was unreadable")
+	}
+}
+
+func TestObserverRequiresTheOwnershipAuthority(t *testing.T) {
+	signer, _ := testSigner(t)
+	if _, err := NewObserver(nil, &recordingReader{}, signer); err == nil {
+		t.Fatal("observer accepted a nil authority pool")
 	}
 }
 

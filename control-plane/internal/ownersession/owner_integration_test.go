@@ -1,6 +1,7 @@
 package ownersession
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"io"
@@ -570,4 +571,121 @@ func TestManagerRegistrationHeartbeatEndsUnreachableTermsIntegration(t *testing.
 
 func testLogger() *slog.Logger {
 	return slog.New(slog.NewTextHandler(io.Discard, nil))
+}
+
+// registryFence mimics transportd's fence registry closely enough for the
+// observer boundary: it keeps the last fence whose registration succeeded and
+// serves it to GetOwnerFence readers, exactly like a transportd that has not
+// yet seen a higher epoch.
+type registryFence struct {
+	failures bool
+	fence    *agentv1.ConnectionFenceV2
+}
+
+func (r *registryFence) RegisterOwnerFence(_ context.Context, fence *agentv1.ConnectionFenceV2) error {
+	if r.failures {
+		return errors.New("transport unavailable")
+	}
+	r.fence = fence
+	return nil
+}
+
+func (r *registryFence) GetOwnerFence(_ context.Context, nodeID []byte) (*agentv1.ConnectionFenceV2, error) {
+	if r.fence == nil || !bytes.Equal(r.fence.GetNodeId(), nodeID) {
+		return nil, nil
+	}
+	return r.fence, nil
+}
+
+// TestObserverFailsClosedOnAStaleRegisteredFenceIntegration pins the reopen
+// failure lifecycle across roles: epoch N is registered in transportd, a
+// same-manager reconnect advances the PostgreSQL epoch but its registration
+// fails, so transportd keeps serving N while the database authority already
+// moved on. The manager fails closed with ErrFenceUnavailable — and so must
+// the observer, which may not re-sign the stale registered fence even though
+// its lease deadline has not passed. Only a successor's real Acquire with a
+// successfully registered higher epoch reopens the observer path.
+func TestObserverFailsClosedOnAStaleRegisteredFenceIntegration(t *testing.T) {
+	pool := testPool(t)
+	signer, _ := testSigner(t)
+	registry := &registryFence{}
+	manager, err := NewManager(pool, signer, registry, 30*time.Second, testLogger())
+	if err != nil {
+		t.Fatalf("new manager: %v", err)
+	}
+	nodeID, endpointID := testNodeAndEndpoint(t)
+	firstFence, err := manager.OpenSession(context.Background(), nodeID, endpointID, 41, []string{"ocserv.fencing.v2"})
+	if err != nil {
+		t.Fatalf("open session: %v", err)
+	}
+
+	observer, err := NewObserver(pool, registry, signer)
+	if err != nil {
+		t.Fatalf("new observer: %v", err)
+	}
+	// While the authority still backs the registered term, the observer
+	// serves exactly that term.
+	liveFence, liveBinding, err := observer.BindOperation(context.Background(), nodeID, agentv1.FenceOperationKind_FENCE_OPERATION_KIND_COMMAND, mustUUIDv7(t), "ocserv.fencing.v2")
+	if err != nil {
+		t.Fatalf("observer bind on the live term: %v", err)
+	}
+	if liveFence.GetOwnerEpoch() != firstFence.GetOwnerEpoch() || liveBinding == nil {
+		t.Fatalf("observer bind on the live term = epoch %d, binding %v", liveFence.GetOwnerEpoch(), liveBinding)
+	}
+
+	// The same manager reconnects: Acquire advances the PostgreSQL epoch, but
+	// the new fence cannot reach transportd, whose registry keeps serving N.
+	registry.failures = true
+	if _, err := manager.OpenSession(context.Background(), nodeID, endpointID, 42, []string{"ocserv.fencing.v2"}); err == nil {
+		t.Fatal("reopen through a failing registrar unexpectedly succeeded")
+	}
+	if _, _, err := manager.BindOperation(context.Background(), nodeID, agentv1.FenceOperationKind_FENCE_OPERATION_KIND_COMMAND, mustUUIDv7(t), "ocserv.fencing.v2"); !errors.Is(err, ErrFenceUnavailable) {
+		t.Fatalf("manager bind after the failed reopen = %v, want ErrFenceUnavailable", err)
+	}
+	registered, err := registry.GetOwnerFence(context.Background(), nodeID[:])
+	if err != nil || registered == nil {
+		t.Fatalf("registry still serves the old fence: %v %v", registered, err)
+	}
+	if registered.GetOwnerEpoch() != firstFence.GetOwnerEpoch() {
+		t.Fatalf("registry kept epoch %d, want the old epoch %d", registered.GetOwnerEpoch(), firstFence.GetOwnerEpoch())
+	}
+	// Precondition of the vulnerability: the stale fence still carries an
+	// unexpired lease deadline, so a freshly signed N binding would be
+	// accepted by the registry.
+	if !registered.GetLeaseUntil().AsTime().After(time.Now().UTC()) {
+		t.Fatalf("stale fence lease %v already expired; the dangerous window is gone", registered.GetLeaseUntil().AsTime())
+	}
+
+	// The split-role observer must fail closed instead of signing a binding
+	// the stale registry would accept.
+	returnedFence, binding, err := observer.BindOperation(context.Background(), nodeID, agentv1.FenceOperationKind_FENCE_OPERATION_KIND_COMMAND, mustUUIDv7(t), "ocserv.fencing.v2")
+	if !errors.Is(err, ErrNotOwner) {
+		t.Fatalf("observer bind on the stale registered fence = %v, want ErrNotOwner", err)
+	}
+	if binding != nil || returnedFence != nil {
+		t.Fatal("observer signed fence material for the stale registered term")
+	}
+
+	// A successor takes the node over through a real Acquire strictly above
+	// the failed reopen's epoch and registers again, which reopens the
+	// observer path on exactly the successor's term.
+	registry.failures = false
+	successor, err := NewManager(pool, signer, registry, 30*time.Second, testLogger())
+	if err != nil {
+		t.Fatalf("new successor manager: %v", err)
+	}
+	successorFence, err := successor.OpenSession(context.Background(), nodeID, endpointID, 43, []string{"ocserv.fencing.v2"})
+	if err != nil {
+		t.Fatalf("successor take over after the failed reopen: %v", err)
+	}
+	if successorFence.GetOwnerEpoch() <= firstFence.GetOwnerEpoch()+1 {
+		t.Fatalf("successor epoch %d does not exceed the failed reopen epoch %d", successorFence.GetOwnerEpoch(), firstFence.GetOwnerEpoch()+1)
+	}
+	observedFence, observedBinding, err := observer.BindOperation(context.Background(), nodeID, agentv1.FenceOperationKind_FENCE_OPERATION_KIND_COMMAND, mustUUIDv7(t), "ocserv.fencing.v2")
+	if err != nil {
+		t.Fatalf("observer bind on the successor term: %v", err)
+	}
+	if observedFence.GetOwnerEpoch() != successorFence.GetOwnerEpoch() || observedBinding == nil {
+		t.Fatalf("observer bind on the successor term = epoch %d, binding %v", observedFence.GetOwnerEpoch(), observedBinding)
+	}
 }

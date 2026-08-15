@@ -177,10 +177,11 @@ func Run(ctx context.Context, cfg config.Config, build BuildInfo, logger *slog.L
 		}
 	}
 	// Roles without the lease issue bindings for the fence transportd
-	// registered, so administrative operations stay owner-fenced without a
-	// second lease holder.
+	// registered, validated against the PostgreSQL ownership authority, so
+	// administrative operations stay owner-fenced without a second lease
+	// holder and a stale registered fence can never be re-signed.
 	if fenceBinder == nil && apiTransport != nil {
-		observer, observerErr := ownersession.NewObserver(apiTransport, commandSigner)
+		observer, observerErr := ownersession.NewObserver(pool, apiTransport, commandSigner)
 		if observerErr != nil {
 			return fmt.Errorf("configure owner fence observer: %w", observerErr)
 		}

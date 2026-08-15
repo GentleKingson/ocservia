@@ -646,30 +646,61 @@ func fenceCapabilities(capabilities []string) []string {
 	return normalized
 }
 
+// ownerStateReader reads the current PostgreSQL ownership row for one node.
+// The observer treats it as the ownership authority: no binding may be signed
+// for a fence the current row does not back.
+type ownerStateReader func(ctx context.Context, nodeID [16]byte) (connectionowner.OwnerState, error)
+
+// poolOwnerStateReader adapts the process pool to the observer's authority
+// reader.
+func poolOwnerStateReader(pool *pgxpool.Pool) ownerStateReader {
+	return func(ctx context.Context, nodeID [16]byte) (connectionowner.OwnerState, error) {
+		return connectionowner.ReadState(ctx, pool, nodeID)
+	}
+}
+
 // Observer issues operation bindings for Controller processes that do not
 // hold the node lease. It reads the fence transportd registered for the node
 // — already signature-verified by transportd — and signs bindings for exactly
 // that term, so a stale owner's term can never be reintroduced by an
 // observer.
+//
+// The registered fence alone is not authority: transportd keeps serving a
+// fence until a strictly higher epoch registers, which never happens when a
+// takeover's registration failed. Every binding is therefore gated by the
+// PostgreSQL ownership row, which must still name the fence's exact owner
+// instance, incarnation, connection, and epoch under an unexpired lease.
 type Observer struct {
 	reader     FenceReader
+	authority  ownerStateReader
 	signer     *commandauth.Signer
 	bindingTTL time.Duration
 	now        func() time.Time
 }
 
 // NewObserver prepares the observer binder used by API and scheduler role
-// processes for artifact, close, and state-update fencing.
-func NewObserver(reader FenceReader, signer *commandauth.Signer) (*Observer, error) {
-	if reader == nil || signer == nil {
+// processes for artifact, close, and state-update fencing. The pool is the
+// PostgreSQL ownership authority the registered fence must still match.
+func NewObserver(pool *pgxpool.Pool, reader FenceReader, signer *commandauth.Signer) (*Observer, error) {
+	if pool == nil {
+		return nil, errors.New("ownersession: observer requires the ownership authority pool")
+	}
+	return newObserver(poolOwnerStateReader(pool), reader, signer)
+}
+
+func newObserver(authority ownerStateReader, reader FenceReader, signer *commandauth.Signer) (*Observer, error) {
+	if reader == nil || signer == nil || authority == nil {
 		return nil, errors.New("ownersession: observer requires a fence reader and signer")
 	}
-	return &Observer{reader: reader, signer: signer, bindingTTL: 5 * time.Minute, now: time.Now}, nil
+	return &Observer{reader: reader, authority: authority, signer: signer, bindingTTL: 5 * time.Minute, now: time.Now}, nil
 }
 
 // BindOperation signs one binding for the fence transportd registered for
-// the node. It returns ErrNoFence when transportd has none registered, which
-// callers treat as the unfenced compatibility path.
+// the node, provided the PostgreSQL ownership authority still backs that
+// exact term with an unexpired lease. It returns ErrNoFence when transportd
+// has none registered, which callers treat as the unfenced compatibility
+// path; every other outcome — including a registered fence that no longer
+// matches the authority row — fails closed.
 func (o *Observer) BindOperation(ctx context.Context, nodeID [16]byte, kind agentv1.FenceOperationKind, operationID [16]byte, capability string) (*agentv1.ConnectionFenceV2, *agentv1.FenceBindingV2, error) {
 	fence, err := o.reader.GetOwnerFence(ctx, nodeID[:])
 	if err != nil {
@@ -696,6 +727,25 @@ func (o *Observer) BindOperation(ctx context.Context, nodeID [16]byte, kind agen
 	}
 	if !slices.Contains(fence.GetCapabilities(), capability) {
 		return nil, nil, ErrCapabilityNotFenced
+	}
+	// The authority check runs as the last step before signing. A takeover
+	// can still advance the PostgreSQL epoch between this read and the
+	// caller presenting the binding, but that residual race is bounded by
+	// the same boundary that retires every owner proof: transportd rejects
+	// the term as soon as the successor's higher epoch registers.
+	state, err := o.authority(ctx, nodeID)
+	if errors.Is(err, connectionowner.ErrNoOwnerRow) {
+		return nil, nil, ErrNotOwner
+	}
+	if err != nil {
+		return nil, nil, fmt.Errorf("ownersession: verify observed fence against the ownership authority: %w", err)
+	}
+	if state.InstanceID != ownerInstanceID ||
+		state.Incarnation != int64(fence.GetOwnerIncarnation()) ||
+		state.ConnectionID != connectionID ||
+		state.Epoch != int64(fence.GetOwnerEpoch()) ||
+		!state.LeaseUntilValid {
+		return nil, nil, ErrNotOwner
 	}
 	now := o.now().UTC()
 	binding, err := o.signer.IssueFenceBindingV2(kind, operationID, fenceID, nodeID, endpointID,
