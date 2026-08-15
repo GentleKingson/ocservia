@@ -64,6 +64,15 @@ for (const [first, second] of slo.topology.distinct_failure_domain_role_pairs ??
   }
 }
 const metricNames = Object.keys(slo.metrics);
+const agentInstancesMin = slo.topology.role_requirements?.agent?.instances_min;
+if (
+  !Number.isInteger(agentInstancesMin) ||
+  agentInstancesMin !== slo.metrics.authorized_real_agents?.limit
+) {
+  fail(
+    "agent role requirement instances_min and authorized_real_agents limit must agree",
+  );
+}
 const derivedMetrics = Object.entries(slo.metrics)
   .filter(([, metric]) => metric.derivation !== undefined)
   .map(([name]) => name);
