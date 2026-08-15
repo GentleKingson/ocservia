@@ -4945,8 +4945,7 @@ mod tests {
             fence_binding: Some(binding),
         }));
         let registry = service.shared.inner.fences.lock().await;
-        let blocked =
-            tokio::time::timeout(Duration::from_millis(250), &mut pending_fetch).await;
+        let blocked = tokio::time::timeout(Duration::from_millis(250), &mut pending_fetch).await;
         assert!(
             blocked.is_err(),
             "fetch_artifact resolved before the fence binding was verified"
