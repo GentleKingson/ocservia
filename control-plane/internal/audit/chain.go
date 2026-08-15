@@ -15,6 +15,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/GentleKingson/ocservia/control-plane/internal/coordination"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -399,7 +400,7 @@ func (m *Manager) Checkpoint(ctx context.Context, workspaceID uuid.UUID) error {
 	if err != nil {
 		return err
 	}
-	return tx.Commit(ctx)
+	return coordination.CommitFenced(ctx, tx, coordination.FenceFromContext(ctx))
 }
 
 func (m *Manager) CheckpointAll(ctx context.Context) error {

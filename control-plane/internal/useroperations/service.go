@@ -15,6 +15,7 @@ import (
 
 	"github.com/GentleKingson/ocservia/control-plane/internal/approvals"
 	"github.com/GentleKingson/ocservia/control-plane/internal/audit"
+	"github.com/GentleKingson/ocservia/control-plane/internal/coordination"
 	"github.com/GentleKingson/ocservia/control-plane/internal/userstate"
 	"github.com/GentleKingson/ocservia/control-plane/internal/userusage"
 	"github.com/google/uuid"
@@ -389,9 +390,17 @@ func (s *Service) Metrics(ctx context.Context, workspaceID uuid.UUID) (Metrics, 
 // submits at most the configured global command limit, and refreshes children.
 func (s *Service) RunOnce(ctx context.Context) error {
 	owner := s.newID()
-	acquired, err := s.acquireLease(ctx, owner, 25*time.Second)
-	if err != nil || !acquired {
-		return err
+	if fence := coordination.FenceFromContext(ctx); fence != nil {
+		// Under fenced scheduling the leadership session replaces the
+		// per-tick lease; every write below is fenced transactionally.
+		if err := fence.AssertCurrent(ctx, s.pool); err != nil {
+			return err
+		}
+	} else {
+		acquired, err := s.acquireLease(ctx, owner, 25*time.Second)
+		if err != nil || !acquired {
+			return err
+		}
 	}
 	if err := s.refreshBatches(ctx); err != nil {
 		return err
@@ -463,7 +472,7 @@ func (s *Service) resetMonthlyPolicies(ctx context.Context, limit int) (int, err
 	processed := 0
 	for _, item := range candidates {
 		key := stableKey("policy-reset", item.nodeID.String(), item.username, fmt.Sprint(item.policyVersion), month.Format(time.RFC3339))
-		if _, err := s.pool.Exec(ctx, `INSERT INTO user_policy_enforcements(node_id,username,policy_version,cause,period_start,source_user_version,created_at) VALUES($1,$2,$3,'quota_reset',$4,$5,$6) ON CONFLICT DO NOTHING`, item.nodeID, item.username, item.policyVersion, month, item.userVersion, now); err != nil {
+		if err := s.exec(ctx, `INSERT INTO user_policy_enforcements(node_id,username,policy_version,cause,period_start,source_user_version,created_at) VALUES($1,$2,$3,'quota_reset',$4,$5,$6) ON CONFLICT DO NOTHING`, item.nodeID, item.username, item.policyVersion, month, item.userVersion, now); err != nil {
 			return 0, err
 		}
 		if item.enabled {
@@ -472,10 +481,10 @@ func (s *Service) resetMonthlyPolicies(ctx context.Context, limit int) (int, err
 				return 0, findErr
 			}
 			if !found {
-				_, _ = s.pool.Exec(ctx, `DELETE FROM user_policy_enforcements WHERE node_id=$1 AND username=$2 AND policy_version=$3 AND cause='quota_reset' AND period_start=$4 AND operation_id IS NULL`, item.nodeID, item.username, item.policyVersion, month)
+				_ = s.exec(ctx, `DELETE FROM user_policy_enforcements WHERE node_id=$1 AND username=$2 AND policy_version=$3 AND cause='quota_reset' AND period_start=$4 AND operation_id IS NULL`, item.nodeID, item.username, item.policyVersion, month)
 				continue
 			}
-			if _, err := s.pool.Exec(ctx, `UPDATE user_policy_enforcements SET operation_id=$5,resulting_user_version=$6 WHERE node_id=$1 AND username=$2 AND policy_version=$3 AND cause='quota_reset' AND period_start=$4 AND operation_id IS NULL`, item.nodeID, item.username, item.policyVersion, month, operationID, item.userVersion); err != nil {
+			if err := s.exec(ctx, `UPDATE user_policy_enforcements SET operation_id=$5,resulting_user_version=$6 WHERE node_id=$1 AND username=$2 AND policy_version=$3 AND cause='quota_reset' AND period_start=$4 AND operation_id IS NULL`, item.nodeID, item.username, item.policyVersion, month, operationID, item.userVersion); err != nil {
 				return 0, err
 			}
 			processed++
@@ -487,7 +496,7 @@ func (s *Service) resetMonthlyPolicies(ctx context.Context, limit int) (int, err
 				return processed, nil
 			}
 			if errors.Is(mutateErr, userstate.ErrVersionConflict) || errors.Is(mutateErr, userstate.ErrRevisionPending) || errors.Is(mutateErr, userstate.ErrRevisionRecovery) {
-				_, _ = s.pool.Exec(ctx, `DELETE FROM user_policy_enforcements WHERE node_id=$1 AND username=$2 AND policy_version=$3 AND cause='quota_reset' AND period_start=$4 AND source_user_version=$5 AND operation_id IS NULL`, item.nodeID, item.username, item.policyVersion, month, item.userVersion)
+				_ = s.exec(ctx, `DELETE FROM user_policy_enforcements WHERE node_id=$1 AND username=$2 AND policy_version=$3 AND cause='quota_reset' AND period_start=$4 AND source_user_version=$5 AND operation_id IS NULL`, item.nodeID, item.username, item.policyVersion, month, item.userVersion)
 				continue
 			}
 			return 0, mutateErr
@@ -496,12 +505,18 @@ func (s *Service) resetMonthlyPolicies(ctx context.Context, limit int) (int, err
 		if parseErr != nil {
 			return 0, parseErr
 		}
-		if _, err := s.pool.Exec(ctx, `UPDATE user_policy_enforcements SET operation_id=$5,resulting_user_version=$6 WHERE node_id=$1 AND username=$2 AND policy_version=$3 AND cause='quota_reset' AND period_start=$4 AND operation_id IS NULL`, item.nodeID, item.username, item.policyVersion, month, operationID, item.userVersion+1); err != nil {
+		if err := s.exec(ctx, `UPDATE user_policy_enforcements SET operation_id=$5,resulting_user_version=$6 WHERE node_id=$1 AND username=$2 AND policy_version=$3 AND cause='quota_reset' AND period_start=$4 AND operation_id IS NULL`, item.nodeID, item.username, item.policyVersion, month, operationID, item.userVersion+1); err != nil {
 			return 0, err
 		}
 		processed++
 	}
 	return processed, rows.Err()
+}
+
+// exec runs one scheduler write. Under a leadership session the statement
+// commits only after the fencing assert succeeds.
+func (s *Service) exec(ctx context.Context, sql string, args ...any) error {
+	return coordination.FencedExec(ctx, s.pool, coordination.FenceFromContext(ctx), sql, args...)
 }
 
 func (s *Service) acquireLease(ctx context.Context, owner uuid.UUID, duration time.Duration) (bool, error) {
@@ -550,7 +565,7 @@ func (s *Service) enforcePolicies(ctx context.Context, limit int) (int, error) {
 	for _, item := range candidates {
 		key := stableKey("policy", item.nodeID.String(), item.username, fmt.Sprint(item.version), item.cause, item.periodStart.Format(time.RFC3339))
 		trace := stableTraceparent(key)
-		if _, err := s.pool.Exec(ctx, `INSERT INTO user_policy_enforcements(node_id,username,policy_version,cause,period_start,source_user_version,created_at) VALUES($1,$2,$3,$4,$5,$6,$7) ON CONFLICT DO NOTHING`, item.nodeID, item.username, item.version, item.cause, item.periodStart, item.userVersion, now); err != nil {
+		if err := s.exec(ctx, `INSERT INTO user_policy_enforcements(node_id,username,policy_version,cause,period_start,source_user_version,created_at) VALUES($1,$2,$3,$4,$5,$6,$7) ON CONFLICT DO NOTHING`, item.nodeID, item.username, item.version, item.cause, item.periodStart, item.userVersion, now); err != nil {
 			return 0, err
 		}
 		if !item.enabled {
@@ -559,10 +574,10 @@ func (s *Service) enforcePolicies(ctx context.Context, limit int) (int, error) {
 				return 0, findErr
 			}
 			if !found {
-				_, _ = s.pool.Exec(ctx, `DELETE FROM user_policy_enforcements WHERE node_id=$1 AND username=$2 AND policy_version=$3 AND cause=$4 AND period_start=$5 AND operation_id IS NULL`, item.nodeID, item.username, item.version, item.cause, item.periodStart)
+				_ = s.exec(ctx, `DELETE FROM user_policy_enforcements WHERE node_id=$1 AND username=$2 AND policy_version=$3 AND cause=$4 AND period_start=$5 AND operation_id IS NULL`, item.nodeID, item.username, item.version, item.cause, item.periodStart)
 				continue
 			}
-			if _, err := s.pool.Exec(ctx, `UPDATE user_policy_enforcements SET operation_id=$6,resulting_user_version=$7 WHERE node_id=$1 AND username=$2 AND policy_version=$3 AND cause=$4 AND period_start=$5 AND operation_id IS NULL`, item.nodeID, item.username, item.version, item.cause, item.periodStart, operationID, item.userVersion); err != nil {
+			if err := s.exec(ctx, `UPDATE user_policy_enforcements SET operation_id=$6,resulting_user_version=$7 WHERE node_id=$1 AND username=$2 AND policy_version=$3 AND cause=$4 AND period_start=$5 AND operation_id IS NULL`, item.nodeID, item.username, item.version, item.cause, item.periodStart, operationID, item.userVersion); err != nil {
 				return 0, err
 			}
 			processed++
@@ -574,7 +589,7 @@ func (s *Service) enforcePolicies(ctx context.Context, limit int) (int, error) {
 				return processed, nil
 			}
 			if errors.Is(mutateErr, userstate.ErrVersionConflict) || errors.Is(mutateErr, userstate.ErrRevisionPending) || errors.Is(mutateErr, userstate.ErrRevisionRecovery) {
-				_, _ = s.pool.Exec(ctx, `DELETE FROM user_policy_enforcements WHERE node_id=$1 AND username=$2 AND policy_version=$3 AND cause=$4 AND period_start=$5 AND source_user_version=$6 AND operation_id IS NULL`, item.nodeID, item.username, item.version, item.cause, item.periodStart, item.userVersion)
+				_ = s.exec(ctx, `DELETE FROM user_policy_enforcements WHERE node_id=$1 AND username=$2 AND policy_version=$3 AND cause=$4 AND period_start=$5 AND source_user_version=$6 AND operation_id IS NULL`, item.nodeID, item.username, item.version, item.cause, item.periodStart, item.userVersion)
 				continue
 			}
 			return 0, mutateErr
@@ -583,7 +598,7 @@ func (s *Service) enforcePolicies(ctx context.Context, limit int) (int, error) {
 		if parseErr != nil {
 			return 0, parseErr
 		}
-		if _, err := s.pool.Exec(ctx, `UPDATE user_policy_enforcements SET operation_id=$6,resulting_user_version=$7 WHERE node_id=$1 AND username=$2 AND policy_version=$3 AND cause=$4 AND period_start=$5 AND operation_id IS NULL`, item.nodeID, item.username, item.version, item.cause, item.periodStart, operationID, item.userVersion+1); err != nil {
+		if err := s.exec(ctx, `UPDATE user_policy_enforcements SET operation_id=$6,resulting_user_version=$7 WHERE node_id=$1 AND username=$2 AND policy_version=$3 AND cause=$4 AND period_start=$5 AND operation_id IS NULL`, item.nodeID, item.username, item.version, item.cause, item.periodStart, operationID, item.userVersion+1); err != nil {
 			return 0, err
 		}
 		processed++
@@ -600,29 +615,48 @@ func (s *Service) findUserOperation(ctx context.Context, nodeID uuid.UUID, usern
 	return operationID, err == nil, err
 }
 
-func (s *Service) submitBatchItems(ctx context.Context, owner uuid.UUID, limit int) error {
-	rows, err := s.pool.Query(ctx, `WITH claim AS (SELECT batch_id,item_index FROM batch_operation_items WHERE (state='queued' AND lease_until IS NULL) OR (state='submitting' AND lease_until<=now()) ORDER BY updated_at,batch_id,item_index FOR UPDATE SKIP LOCKED LIMIT $1) UPDATE batch_operation_items item SET state='submitting',lease_owner=$2,lease_until=now()+interval '20 seconds',updated_at=now() FROM claim WHERE item.batch_id=claim.batch_id AND item.item_index=claim.item_index RETURNING item.batch_id,item.item_index,item.node_id,item.username,item.action,item.expected_version`, limit, owner)
+type claimedBatchItem struct {
+	batchID         uuid.UUID
+	index           int
+	nodeID          uuid.UUID
+	username        string
+	action          string
+	expectedVersion int64
+}
+
+// claimBatchItems claims queued batch items for submission. The claim is a
+// write, so it commits only after the scheduler fencing assert succeeds.
+func (s *Service) claimBatchItems(ctx context.Context, owner uuid.UUID, limit int) ([]claimedBatchItem, error) {
+	tx, err := s.pool.Begin(ctx)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	type claimed struct {
-		batchID         uuid.UUID
-		index           int
-		nodeID          uuid.UUID
-		username        string
-		action          string
-		expectedVersion int64
+	defer func() { _ = tx.Rollback(context.Background()) }()
+	rows, err := tx.Query(ctx, `WITH claim AS (SELECT batch_id,item_index FROM batch_operation_items WHERE (state='queued' AND lease_until IS NULL) OR (state='submitting' AND lease_until<=now()) ORDER BY updated_at,batch_id,item_index FOR UPDATE SKIP LOCKED LIMIT $1) UPDATE batch_operation_items item SET state='submitting',lease_owner=$2,lease_until=now()+interval '20 seconds',updated_at=now() FROM claim WHERE item.batch_id=claim.batch_id AND item.item_index=claim.item_index RETURNING item.batch_id,item.item_index,item.node_id,item.username,item.action,item.expected_version`, limit, owner)
+	if err != nil {
+		return nil, err
 	}
-	var items []claimed
+	var items []claimedBatchItem
 	for rows.Next() {
-		var item claimed
+		var item claimedBatchItem
 		if err := rows.Scan(&item.batchID, &item.index, &item.nodeID, &item.username, &item.action, &item.expectedVersion); err != nil {
 			rows.Close()
-			return err
+			return nil, err
 		}
 		items = append(items, item)
 	}
 	rows.Close()
+	if err := coordination.CommitFenced(ctx, tx, coordination.FenceFromContext(ctx)); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+func (s *Service) submitBatchItems(ctx context.Context, owner uuid.UUID, limit int) error {
+	items, err := s.claimBatchItems(ctx, owner, limit)
+	if err != nil {
+		return err
+	}
 	for _, item := range items {
 		var actorIdentity, actorSession *uuid.UUID
 		var actorID, reason, requestID, traceparent string
@@ -637,10 +671,10 @@ func (s *Service) submitBatchItems(ctx context.Context, owner uuid.UUID, limit i
 		op, _, mutateErr := s.users.Mutate(ctx, userstate.MutationRequest{NodeID: item.nodeID, Kind: kind, Name: item.username, ExpectedVersion: item.expectedVersion, IdempotencyKey: key, TTL: 24 * time.Hour, ActorID: actorID, ActorIdentityID: derefUUID(actorIdentity), ActorSessionID: derefUUID(actorSession), Reason: reason, RequestID: requestID + ":" + fmt.Sprint(item.index), Traceparent: traceparent})
 		if mutateErr != nil {
 			if errors.Is(mutateErr, userstate.ErrBacklogExceeded) {
-				_, err = s.pool.Exec(ctx, `UPDATE batch_operation_items SET state='queued',lease_owner=NULL,lease_until=NULL,updated_at=now() WHERE lease_owner=$1 AND state='submitting'`, owner)
+				err = s.exec(ctx, `UPDATE batch_operation_items SET state='queued',lease_owner=NULL,lease_until=NULL,updated_at=now() WHERE lease_owner=$1 AND state='submitting'`, owner)
 				return err
 			}
-			_, err = s.pool.Exec(ctx, `UPDATE batch_operation_items SET state='failed',error_type=$4,lease_owner=NULL,lease_until=NULL,updated_at=now() WHERE batch_id=$1 AND item_index=$2 AND lease_owner=$3`, item.batchID, item.index, owner, userstateErrorType(mutateErr))
+			err = s.exec(ctx, `UPDATE batch_operation_items SET state='failed',error_type=$4,lease_owner=NULL,lease_until=NULL,updated_at=now() WHERE batch_id=$1 AND item_index=$2 AND lease_owner=$3`, item.batchID, item.index, owner, userstateErrorType(mutateErr))
 			if err != nil {
 				return err
 			}
@@ -650,7 +684,7 @@ func (s *Service) submitBatchItems(ctx context.Context, owner uuid.UUID, limit i
 		if parseErr != nil {
 			return parseErr
 		}
-		if _, err := s.pool.Exec(ctx, `UPDATE batch_operation_items SET state='submitted',child_operation_id=$4,lease_owner=NULL,lease_until=NULL,updated_at=now() WHERE batch_id=$1 AND item_index=$2 AND lease_owner=$3`, item.batchID, item.index, owner, operationID); err != nil {
+		if err := s.exec(ctx, `UPDATE batch_operation_items SET state='submitted',child_operation_id=$4,lease_owner=NULL,lease_until=NULL,updated_at=now() WHERE batch_id=$1 AND item_index=$2 AND lease_owner=$3`, item.batchID, item.index, owner, operationID); err != nil {
 			return err
 		}
 	}
@@ -658,10 +692,10 @@ func (s *Service) submitBatchItems(ctx context.Context, owner uuid.UUID, limit i
 }
 
 func (s *Service) refreshBatches(ctx context.Context) error {
-	if _, err := s.pool.Exec(ctx, `WITH active AS (SELECT id FROM batch_operations WHERE state IN('queued','running','partial_failed') ORDER BY updated_at,id LIMIT $1) UPDATE batch_operation_items item SET state=CASE WHEN op.state='queued' AND node.status='offline' THEN 'offline_pending' WHEN op.state='succeeded' THEN 'succeeded' WHEN op.state IN('failed','expired','rolled_back') THEN 'failed' WHEN op.state='unknown' THEN 'unknown' WHEN op.state='offline_pending' THEN 'offline_pending' ELSE item.state END,error_type=CASE WHEN op.state IN('failed','expired','rolled_back') THEN op.state ELSE item.error_type END,updated_at=now() FROM operations op JOIN nodes node ON node.id=op.node_id,active WHERE item.batch_id=active.id AND item.child_operation_id=op.id AND item.state IN('submitted','unknown','offline_pending')`, MaxBatchRefresh); err != nil {
+	if err := s.exec(ctx, `WITH active AS (SELECT id FROM batch_operations WHERE state IN('queued','running','partial_failed') ORDER BY updated_at,id LIMIT $1) UPDATE batch_operation_items item SET state=CASE WHEN op.state='queued' AND node.status='offline' THEN 'offline_pending' WHEN op.state='succeeded' THEN 'succeeded' WHEN op.state IN('failed','expired','rolled_back') THEN 'failed' WHEN op.state='unknown' THEN 'unknown' WHEN op.state='offline_pending' THEN 'offline_pending' ELSE item.state END,error_type=CASE WHEN op.state IN('failed','expired','rolled_back') THEN op.state ELSE item.error_type END,updated_at=now() FROM operations op JOIN nodes node ON node.id=op.node_id,active WHERE item.batch_id=active.id AND item.child_operation_id=op.id AND item.state IN('submitted','unknown','offline_pending')`, MaxBatchRefresh); err != nil {
 		return err
 	}
-	_, err := s.pool.Exec(ctx, `WITH active AS (SELECT id FROM batch_operations WHERE state IN('queued','running','partial_failed') ORDER BY updated_at,id LIMIT $1),summary AS (SELECT item.batch_id,CASE WHEN bool_or(item.state IN('queued','submitting','submitted','unknown','offline_pending')) THEN CASE WHEN bool_or(item.state IN('failed','forbidden')) THEN 'partial_failed' ELSE 'running' END WHEN bool_and(item.state='succeeded') THEN 'succeeded' WHEN bool_or(item.state='succeeded') THEN 'partial_failed' ELSE 'failed' END state FROM batch_operation_items item JOIN active ON active.id=item.batch_id GROUP BY item.batch_id) UPDATE batch_operations batch SET state=summary.state,updated_at=now() FROM summary WHERE batch.id=summary.batch_id`, MaxBatchRefresh)
+	err := s.exec(ctx, `WITH active AS (SELECT id FROM batch_operations WHERE state IN('queued','running','partial_failed') ORDER BY updated_at,id LIMIT $1),summary AS (SELECT item.batch_id,CASE WHEN bool_or(item.state IN('queued','submitting','submitted','unknown','offline_pending')) THEN CASE WHEN bool_or(item.state IN('failed','forbidden')) THEN 'partial_failed' ELSE 'running' END WHEN bool_and(item.state='succeeded') THEN 'succeeded' WHEN bool_or(item.state='succeeded') THEN 'partial_failed' ELSE 'failed' END state FROM batch_operation_items item JOIN active ON active.id=item.batch_id GROUP BY item.batch_id) UPDATE batch_operations batch SET state=summary.state,updated_at=now() FROM summary WHERE batch.id=summary.batch_id`, MaxBatchRefresh)
 	return err
 }
 

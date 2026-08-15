@@ -163,20 +163,41 @@ for major in 17 18; do
 
   clean_database="ocservia_clean23_${major}"
   clone_database "${container}" ocservia "${clean_database}"
+  # Simulate leaders that already took over: the fencing epoch must survive
+  # the version 24 rollback and re-upgrade below without being re-seeded.
+  docker exec "${container}" psql -v ON_ERROR_STOP=1 -U ocservia_owner -d "${clean_database}" -c \
+    "UPDATE scheduler_leadership SET epoch = epoch + 3" >/dev/null
+  docker exec -i "${container}" psql -v ON_ERROR_STOP=1 -U ocservia_owner -d "${clean_database}" \
+    <"${ROOT}/control-plane/migrations/000024_scheduler_leadership_fencing.down.sql" >/dev/null
+  docker exec "${container}" psql -v ON_ERROR_STOP=1 -U ocservia_owner -d "${clean_database}" -c \
+    "DELETE FROM schema_migrations WHERE version=24" >/dev/null
   docker exec -i "${container}" psql -v ON_ERROR_STOP=1 -U ocservia_owner -d "${clean_database}" \
     <"${ROOT}/control-plane/migrations/000023_privd_result_attestation.down.sql" >/dev/null
   docker exec "${container}" psql -v ON_ERROR_STOP=1 -U ocservia_owner -d "${clean_database}" -c \
     "DELETE FROM schema_migrations WHERE version=23" >/dev/null
   test "$(docker exec "${container}" psql -U ocservia_owner -d "${clean_database}" -Atc "SELECT COALESCE(MAX(version),0) FROM schema_migrations")" = "22"
   test "$(docker exec "${container}" psql -U ocservia_owner -d "${clean_database}" -Atc "SELECT count(*) FROM information_schema.tables WHERE table_schema='public' AND table_name IN ('privd_attestation_enrollment_credentials','node_privd_attestation_keys')")" = "0"
+  # The version 24 rollback is expand-only: the fencing table survives the
+  # downgrade with its epoch state intact instead of being dropped.
+  test "$(docker exec "${container}" psql -U ocservia_owner -d "${clean_database}" -Atc "SELECT count(*) FROM information_schema.tables WHERE table_schema='public' AND table_name='scheduler_leadership'")" = "1"
+  test "$(docker exec "${container}" psql -U ocservia_owner -d "${clean_database}" -Atc "SELECT epoch FROM scheduler_leadership WHERE id=1")" = "3"
   clean_url="postgres://ocservia_owner:test-owner-only@127.0.0.1:${port}/${clean_database}?sslmode=disable"
   OCSERV_ENVIRONMENT=test OCSERV_DATABASE_URL="${clean_url}" \
     OCSERV_RUNTIME_DATABASE_ROLE=ocservia_app "${BIN}" --migrate-only \
     >"${TMP_ROOT}/pg${major}-privd-clean-forward.log" 2>&1
   assert_privd_attestation_schema "${container}" "${clean_database}"
+  # The re-upgrade re-registered version 24 over the retained table without
+  # re-seeding the epoch.
+  test "$(docker exec "${container}" psql -U ocservia_owner -d "${clean_database}" -Atc "SELECT epoch FROM scheduler_leadership WHERE id=1")" = "3"
   docker exec "${container}" psql -v ON_ERROR_STOP=1 -U ocservia_owner -d postgres -c \
     "DROP DATABASE ${clean_database}" >/dev/null
 
+  # The version 24 down script retains the fencing table by contract; the
+  # epoch-survival assertions live in the rollback section below.
+  docker exec -i "${container}" psql -v ON_ERROR_STOP=1 -U ocservia_owner -d ocservia \
+    <"${ROOT}/control-plane/migrations/000024_scheduler_leadership_fencing.down.sql" >/dev/null
+  docker exec "${container}" psql -v ON_ERROR_STOP=1 -U ocservia_owner -d ocservia -c \
+    "DELETE FROM schema_migrations WHERE version=24" >/dev/null
   docker exec -i "${container}" psql -v ON_ERROR_STOP=1 -U ocservia_owner -d ocservia \
     <"${ROOT}/control-plane/migrations/000023_privd_result_attestation.down.sql" >/dev/null
   docker exec "${container}" psql -v ON_ERROR_STOP=1 -U ocservia_owner -d ocservia -c \
@@ -221,6 +242,14 @@ for major in 17 18; do
     OCSERV_RUNTIME_DATABASE_ROLE=ocservia_app "${BIN}" --migrate-only \
     >"${TMP_ROOT}/pg${major}-audit-preflight-retry.log" 2>&1
 
+  # Scheduler leadership tests need an idle lease, so they run before any
+  # long-lived control-plane process acquires leadership on this database.
+  # -race is required here: these are the only tests that exercise the
+  # coordination package against a database, so this is where the race
+  # detector actually observes renewal, loss, and session snapshotting.
+  (cd "${ROOT}/control-plane" && OCSERV_TEST_DATABASE_URL="${runtime_url}" \
+    go test -p 1 -race ./internal/coordination -run Integration -count=1)
+
   OCSERV_ENVIRONMENT=test OCSERV_HTTP_ADDRESS="127.0.0.1:${api_port}" \
     OCSERV_DATABASE_URL="${runtime_url}" "${BIN}" --role=all \
     >"${TMP_ROOT}/pg${major}-fresh.log" 2>&1 &
@@ -250,6 +279,8 @@ for major in 17 18; do
   test "$(docker exec "${container}" psql -U ocservia_owner -d ocservia -Atc "SELECT count(*) FROM schema_migrations WHERE version = 21")" = "1"
   test "$(docker exec "${container}" psql -U ocservia_owner -d ocservia -Atc "SELECT count(*) FROM schema_migrations WHERE version = 22")" = "1"
   test "$(docker exec "${container}" psql -U ocservia_owner -d ocservia -Atc "SELECT count(*) FROM schema_migrations WHERE version = 23")" = "1"
+  test "$(docker exec "${container}" psql -U ocservia_owner -d ocservia -Atc "SELECT count(*) FROM schema_migrations WHERE version = 24")" = "1"
+  test "$(docker exec "${container}" psql -U ocservia_owner -d ocservia -Atc "SELECT count(*) FROM information_schema.tables WHERE table_schema='public' AND table_name='scheduler_leadership'")" = "1"
   test "$(docker exec "${container}" psql -U ocservia_owner -d ocservia -Atc "SELECT count(*) FROM information_schema.tables WHERE table_schema='public' AND table_name IN ('privd_attestation_enrollment_credentials','node_privd_attestation_keys')")" = "2"
   test "$(docker exec "${container}" psql -U ocservia_owner -d ocservia -Atc "SELECT count(*) FROM information_schema.columns WHERE table_schema='public' AND ((table_name='agent_command_results' AND column_name IN ('receipt_verification_status','receipt_failure_reason','privd_attestation_key_id','effect_record_id','effect_sequence','receipt_sha256','privileged_result_proof')) OR (table_name='certificates' AND column_name IN ('csr_receipt_verified_at','csr_receipt_sha256','csr_privd_attestation_key_id','csr_effect_record_id','csr_der_sha256','csr_requested_subject_sha256','issue_certificate_version')))")" = "14"
   test "$(docker exec "${container}" psql -U ocservia_owner -d ocservia -Atc "SELECT count(*) FROM information_schema.tables WHERE table_schema='public' AND table_name IN ('transport_event_cursor','transport_event_quarantine')")" = "2"
@@ -438,6 +469,17 @@ for major in 17 18; do
   " >/dev/null
   test "$(docker exec "${container}" psql -U ocservia_owner -d ocservia -Atc "SELECT event_id FROM transport_event_cursor WHERE singleton AND valid")" = "${rollback_event_three}"
   test "$(docker exec "${container}" psql -U ocservia_owner -d ocservia -Atc "SELECT event_id FROM transport_events WHERE transport_cursor_valid ORDER BY ingest_sequence DESC LIMIT 1")" = "${rollback_event_three}"
+  # Epoch lifecycle: capture the fencing epoch the live scheduler reached,
+  # then prove the version 24 rollback and re-upgrade never re-seed or reuse
+  # it. The rollback must retain the table and row; the re-upgrade must
+  # re-register version 24 without resetting the epoch; and the next live
+  # leader must take over with a strictly higher epoch.
+  fencing_epoch_before="$(docker exec "${container}" psql -U ocservia_owner -d ocservia -Atc "SELECT epoch FROM scheduler_leadership WHERE id=1")"
+  test -n "${fencing_epoch_before}"
+  docker exec -i "${container}" psql -v ON_ERROR_STOP=1 -U ocservia_owner -d ocservia <"${ROOT}/control-plane/migrations/000024_scheduler_leadership_fencing.down.sql" >/dev/null
+  docker exec "${container}" psql -v ON_ERROR_STOP=1 -U ocservia_owner -d ocservia -c "DELETE FROM schema_migrations WHERE version=24" >/dev/null
+  test "$(docker exec "${container}" psql -U ocservia_owner -d ocservia -Atc "SELECT count(*) FROM information_schema.tables WHERE table_schema='public' AND table_name='scheduler_leadership'")" = "1"
+  test "$(docker exec "${container}" psql -U ocservia_owner -d ocservia -Atc "SELECT epoch FROM scheduler_leadership WHERE id=1")" = "${fencing_epoch_before}"
   docker exec -i "${container}" psql -v ON_ERROR_STOP=1 -U ocservia_owner -d ocservia <"${ROOT}/control-plane/migrations/000023_privd_result_attestation.down.sql" >/dev/null
   docker exec "${container}" psql -v ON_ERROR_STOP=1 -U ocservia_owner -d ocservia -c "DELETE FROM schema_migrations WHERE version=23" >/dev/null
   docker exec -i "${container}" psql -v ON_ERROR_STOP=1 -U ocservia_owner -d ocservia <"${ROOT}/control-plane/migrations/000022_transport_event_quarantine.down.sql" >/dev/null
@@ -572,6 +614,10 @@ for major in 17 18; do
   test "$(docker exec "${container}" psql -U ocservia_owner -d ocservia -Atc "SELECT count(*) FROM schema_migrations WHERE version = 21")" = "1"
   test "$(docker exec "${container}" psql -U ocservia_owner -d ocservia -Atc "SELECT count(*) FROM schema_migrations WHERE version = 22")" = "1"
   test "$(docker exec "${container}" psql -U ocservia_owner -d ocservia -Atc "SELECT count(*) FROM schema_migrations WHERE version = 23")" = "1"
+  test "$(docker exec "${container}" psql -U ocservia_owner -d ocservia -Atc "SELECT count(*) FROM schema_migrations WHERE version = 24")" = "1"
+  # The full downgrade/re-upgrade cycle re-registered version 24 over the
+  # retained fencing row: the epoch must equal the pre-rollback value.
+  test "$(docker exec "${container}" psql -U ocservia_owner -d ocservia -Atc "SELECT epoch FROM scheduler_leadership WHERE id=1")" = "${fencing_epoch_before}"
   test "$(docker exec "${container}" psql -U ocservia_owner -d ocservia -Atc "SELECT count(*) FROM pg_indexes WHERE schemaname='public' AND tablename='agent_command_results' AND indexname IN ('agent_command_results_pkey','agent_command_results_command_created_idx')")" = "2"
   test "$(docker exec "${container}" psql -U ocservia_owner -d ocservia -Atc "SELECT count(*) FROM information_schema.columns WHERE table_schema='public' AND table_name='agent_command_results' AND column_name='semantic_payload_hash_version'")" = "1"
   test "$(docker exec "${container}" psql -U ocservia_owner -d ocservia -Atc "SELECT count(*) FROM pg_constraint WHERE conrelid = 'agent_command_results'::regclass AND conname = 'agent_command_results_semantic_payload_hash_version_supported'")" = "1"
@@ -586,12 +632,28 @@ for major in 17 18; do
   pid=$!
   PIDS+=("${pid}")
   wait_for_http "http://127.0.0.1:${api_port}/readyz"
-  test "$(docker exec "${container}" psql -U ocservia_owner -d ocservia -Atc "SELECT count(*) FROM schema_migrations")" = "23"
+  test "$(docker exec "${container}" psql -U ocservia_owner -d ocservia -Atc "SELECT count(*) FROM schema_migrations")" = "24"
+  # The re-upgraded leader acquires leadership on its first maintenance tick:
+  # the retained epoch must advance strictly beyond the pre-rollback value,
+  # proving the next real Acquire works off the retained state.
+  epoch_advanced=false
+  for _ in $(seq 1 60); do
+    current_epoch="$(docker exec "${container}" psql -U ocservia_owner -d ocservia -Atc "SELECT epoch FROM scheduler_leadership WHERE id=1")"
+    if [[ "${current_epoch}" -gt "${fencing_epoch_before}" ]]; then
+      epoch_advanced=true
+      break
+    fi
+    sleep 1
+  done
+  if [[ "${epoch_advanced}" != true ]]; then
+    echo "scheduler did not advance the retained fencing epoch after re-upgrade" >&2
+    exit 1
+  fi
   docker exec "${container}" psql -v ON_ERROR_STOP=1 -U ocservia_owner -d ocservia -c \
-    "INSERT INTO schema_migrations (version, name, checksum) VALUES (24, '000024_future.up.sql', decode(repeat('00', 32), 'hex'))" >/dev/null
+    "INSERT INTO schema_migrations (version, name, checksum) VALUES (25, '000025_future.up.sql', decode(repeat('00', 32), 'hex'))" >/dev/null
   test "$(curl --silent --output /dev/null --write-out '%{http_code}' "http://127.0.0.1:${api_port}/readyz")" = "503"
   docker exec "${container}" psql -v ON_ERROR_STOP=1 -U ocservia_owner -d ocservia -c \
-    "DELETE FROM schema_migrations WHERE version = 24" >/dev/null
+    "DELETE FROM schema_migrations WHERE version = 25" >/dev/null
   wait_for_http "http://127.0.0.1:${api_port}/readyz"
 
   docker stop "${container}" >/dev/null
@@ -605,20 +667,20 @@ for major in 17 18; do
   runtime_url="postgres://ocservia_app:test-runtime-only@127.0.0.1:${port}/ocservia?sslmode=disable"
   wait_for_tcp 127.0.0.1 "${port}"
   docker exec "${container}" psql -v ON_ERROR_STOP=1 -U ocservia_owner -d ocservia -c \
-    "INSERT INTO schema_migrations (version, name, checksum) VALUES (24, '000024_future.up.sql', decode(repeat('00', 32), 'hex'))" >/dev/null
+    "INSERT INTO schema_migrations (version, name, checksum) VALUES (25, '000025_future.up.sql', decode(repeat('00', 32), 'hex'))" >/dev/null
   if OCSERV_ENVIRONMENT=test OCSERV_HTTP_ADDRESS="127.0.0.1:${api_port}" \
     OCSERV_DATABASE_URL="${runtime_url}" "${BIN}" --role=all \
     >"${TMP_ROOT}/pg${major}-unknown-version.log" 2>&1; then
     echo "binary accepted an unknown schema version" >&2
     exit 1
   fi
-  if ! grep -Fq 'database schema version 24 is unknown to this binary' "${TMP_ROOT}/pg${major}-unknown-version.log"; then
+  if ! grep -Fq 'database schema version 25 is unknown to this binary' "${TMP_ROOT}/pg${major}-unknown-version.log"; then
     cat "${TMP_ROOT}/pg${major}-unknown-version.log" >&2
     echo "binary failed for an unexpected reason with an unknown schema version" >&2
     exit 1
   fi
   docker exec "${container}" psql -v ON_ERROR_STOP=1 -U ocservia_owner -d ocservia -c \
-    "DELETE FROM schema_migrations WHERE version = 24" >/dev/null
+    "DELETE FROM schema_migrations WHERE version = 25" >/dev/null
   echo "PostgreSQL ${major} database integration complete"
 done
 
@@ -699,6 +761,17 @@ for role in scheduler api; do
   stop_process "${pid}"
 done
 
+# The fencing table outlives even a full downgrade by contract: bump the
+# epoch first so retention is observable through the teardown below.
+docker exec "${container}" psql -v ON_ERROR_STOP=1 -U ocservia_owner -d ocservia -c \
+  "UPDATE scheduler_leadership SET epoch = epoch + 2" >/dev/null
+upgrade_epoch_before="$(docker exec "${container}" psql -U ocservia_owner -d ocservia -Atc "SELECT epoch FROM scheduler_leadership WHERE id=1")"
+test -n "${upgrade_epoch_before}"
+
+docker exec -i "${container}" psql -v ON_ERROR_STOP=1 -U ocservia_owner -d ocservia \
+  <"${ROOT}/control-plane/migrations/000024_scheduler_leadership_fencing.down.sql" >/dev/null
+docker exec "${container}" psql -v ON_ERROR_STOP=1 -U ocservia_owner -d ocservia -c \
+  "DELETE FROM schema_migrations WHERE version = 24" >/dev/null
 docker exec -i "${container}" psql -v ON_ERROR_STOP=1 -U ocservia_owner -d ocservia \
   <"${ROOT}/control-plane/migrations/000023_privd_result_attestation.down.sql" >/dev/null
 docker exec "${container}" psql -v ON_ERROR_STOP=1 -U ocservia_owner -d ocservia -c \
@@ -788,6 +861,11 @@ docker exec -i "${container}" psql -v ON_ERROR_STOP=1 -U ocservia_owner -d ocser
 docker exec "${container}" psql -v ON_ERROR_STOP=1 -U ocservia_owner -d ocservia -c \
   "DELETE FROM schema_migrations WHERE version = 2" >/dev/null
 test "$(docker exec "${container}" psql -U ocservia_owner -d ocservia -Atc "SELECT count(*) FROM information_schema.tables WHERE table_schema = 'public' AND table_name IN ('local_slice_jobs','transport_events','transport_event_cursor','transport_event_quarantine','enrollment_tokens','node_endpoint_keys','node_capabilities','telemetry_ingest_batches','node_observed_snapshots','node_sessions','telemetry_security_events','telemetry_samples','telemetry_rollups_5m','telemetry_rollups_1h','commands','command_attempts','outbox_events','node_command_leases','operation_events','agent_command_results','desired_users','desired_groups','observed_users','observed_groups','desired_user_policies','user_policy_mutations','observed_user_usage','user_usage_cursors','scheduler_leases','user_policy_enforcements','batch_operations','batch_operation_items','upstream_sync_records','node_config_state','config_plans','config_apply_operations','certificates','artifact_operations','secret_provider_refs')")" = "0"
+# scheduler_leadership is excluded from the teardown list above by design:
+# fencing epochs must survive any rollback, so the table and its epoch row
+# persist even after a full downgrade to version 1.
+test "$(docker exec "${container}" psql -U ocservia_owner -d ocservia -Atc "SELECT count(*) FROM information_schema.tables WHERE table_schema = 'public' AND table_name = 'scheduler_leadership'")" = "1"
+test "$(docker exec "${container}" psql -U ocservia_owner -d ocservia -Atc "SELECT epoch FROM scheduler_leadership WHERE id=1")" = "${upgrade_epoch_before}"
 OCSERV_ENVIRONMENT=test OCSERV_DATABASE_URL="${owner_url}" \
   OCSERV_RUNTIME_DATABASE_ROLE=ocservia_app "${BIN}" --migrate-only \
   >"${TMP_ROOT}/rollback-forward.log" 2>&1
@@ -813,4 +891,8 @@ test "$(docker exec "${container}" psql -U ocservia_owner -d ocservia -Atc "SELE
 test "$(docker exec "${container}" psql -U ocservia_owner -d ocservia -Atc "SELECT count(*) FROM schema_migrations WHERE version = 21")" = "1"
 test "$(docker exec "${container}" psql -U ocservia_owner -d ocservia -Atc "SELECT count(*) FROM schema_migrations WHERE version = 22")" = "1"
 test "$(docker exec "${container}" psql -U ocservia_owner -d ocservia -Atc "SELECT count(*) FROM schema_migrations WHERE version = 23")" = "1"
+test "$(docker exec "${container}" psql -U ocservia_owner -d ocservia -Atc "SELECT count(*) FROM schema_migrations WHERE version = 24")" = "1"
+# The re-upgrade re-registered version 24 over the retained fencing row
+# without re-seeding the epoch that survived the full downgrade.
+test "$(docker exec "${container}" psql -U ocservia_owner -d ocservia -Atc "SELECT epoch FROM scheduler_leadership WHERE id=1")" = "${upgrade_epoch_before}"
 test "$(docker exec "${container}" psql -U ocservia_owner -d ocservia -Atc "SELECT count(*) FROM pg_constraint WHERE conrelid = 'agent_command_results'::regclass AND conname = 'agent_command_results_semantic_payload_hash_version_supported'")" = "1"
