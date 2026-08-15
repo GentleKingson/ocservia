@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 import { readFileSync } from "node:fs";
-import { parseSlo } from "./g6-contract-lib.mjs";
+import { parseSlo, structuredArtifactKinds } from "./g6-contract-lib.mjs";
 
 const root = new URL("../", import.meta.url);
 const read = (path) => readFileSync(new URL(path, root), "utf8");
@@ -14,9 +14,9 @@ const same = (left, right) =>
 
 const slo = parseSlo(read("docs/acceptance/g6-slo.yaml"));
 const schemas = [
-  ["docs/acceptance/g6-evidence-schema.json", "ocservia.g6-evidence.v1"],
+  ["docs/acceptance/g6-evidence-schema.json", "ocservia.g6-evidence.v2"],
   ["docs/acceptance/g6-topology-schema.json", "ocservia.g6-topology.v1"],
-  ["docs/acceptance/g6-verdict-schema.json", "ocservia.g6-verdict.v1"],
+  ["docs/acceptance/g6-verdict-schema.json", "ocservia.g6-verdict.v2"],
 ];
 const parsedSchemas = new Map();
 for (const [path, version] of schemas) {
@@ -39,7 +39,7 @@ for (const [path, version] of schemas) {
   }
 }
 
-const evidenceSchema = parsedSchemas.get("ocservia.g6-evidence.v1");
+const evidenceSchema = parsedSchemas.get("ocservia.g6-evidence.v2");
 const topologySchema = parsedSchemas.get("ocservia.g6-topology.v1");
 const instanceDef = topologySchema.$defs.instance;
 if (!instanceDef.required.includes("component")) {
@@ -76,25 +76,24 @@ if (
 const derivedMetrics = Object.entries(slo.metrics)
   .filter(([, metric]) => metric.derivation !== undefined)
   .map(([name]) => name);
-if (derivedMetrics.length === 0) {
-  fail("g6-slo.yaml must derive at least one metric from verified artifacts");
+const declaredMetrics = Object.entries(slo.metrics)
+  .filter(([, metric]) => metric.declared_by_harness === true)
+  .map(([name]) => name);
+if (derivedMetrics.length !== metricNames.length) {
+  fail(
+    "g6-slo.yaml must graduate every required metric from declared_by_harness to a verified producer",
+  );
 }
-for (const [, metric] of Object.entries(slo.metrics)) {
-  if (metric.derivation === undefined && metric.declared_by_harness !== true) {
-    fail("every SLO metric must freeze an explicit trust boundary");
-  }
+if (declaredMetrics.length > 0) {
+  fail(
+    `g6-slo.yaml still declares harness-trusted metrics: ${declaredMetrics.join(", ")}`,
+  );
 }
 const artifactDef = evidenceSchema.$defs.artifact;
 if (!artifactDef.required.includes("kind")) {
   fail("evidence artifacts must declare a verifier-recognized kind");
 }
-if (
-  !same(artifactDef.properties.kind.enum, [
-    "resource_samples",
-    "timeline",
-    "harness_log",
-  ])
-) {
+if (!same(artifactDef.properties.kind.enum, [...structuredArtifactKinds, "harness_log"])) {
   fail("evidence artifact kinds drifted from the verifier contract");
 }
 if (
@@ -110,7 +109,7 @@ if (
 ) {
   fail("evidence observation fields drifted from g6-slo.yaml");
 }
-const verdictSchema = parsedSchemas.get("ocservia.g6-verdict.v1");
+const verdictSchema = parsedSchemas.get("ocservia.g6-verdict.v2");
 if (
   verdictSchema.properties.measurement_results.minProperties !==
   metricNames.length
@@ -122,6 +121,10 @@ if (
   observationNames.length
 ) {
   fail("verdict observation cardinality drifted from g6-slo.yaml");
+}
+const verdictMeasurement = verdictSchema.$defs.measurement_result;
+if (!verdictMeasurement.required.includes("derivation")) {
+  fail("verdict measurement results must expose the producing derivation");
 }
 for (const forbidden of ["limit", "comparison", "unit", "passed"]) {
   if (forbidden in evidenceSchema.$defs.measurement.properties) {
@@ -151,6 +154,14 @@ if (
   fail(
     "acceptance README must document that declared metrics cannot award a final pass",
   );
+}
+for (const kind of structuredArtifactKinds) {
+  if (!acceptanceReadme.includes(kind)) {
+    fail(`acceptance README must document the ${kind} artifact category`);
+  }
+}
+if (!acceptanceReadme.includes("environment_id")) {
+  fail("acceptance README must document the per-record artifact binding");
 }
 
 const publicCapacity = read("docs/development/p1-resilience-capacity.md");

@@ -1,0 +1,8 @@
+{
+  "base": "evidence-pass.json",
+  "artifact_files": {
+    "postgres-recovery.json": "{\n  \"environment_id\": \"g6-12345678\",\n  \"candidate_sha\": \"1111111111111111111111111111111111111111\",\n  \"outage_declared_at\": \"2026-08-14T00:01:00Z\",\n  \"service_restored_at\": \"2026-08-14T00:02:00Z\",\n  \"acknowledged\": [\n    {\n      \"txid\": \"tx-m1\",\n      \"acknowledged_at\": \"2026-08-14T00:00:40Z\"\n    },\n    {\n      \"txid\": \"tx-m2\",\n      \"acknowledged_at\": \"2026-08-14T00:00:50Z\"\n    },\n    {\n      \"txid\": \"tx-m3\",\n      \"acknowledged_at\": \"2026-08-14T00:00:55Z\"\n    }\n  ],\n  \"failover\": {\n    \"old_primary\": \"pg-primary\",\n    \"new_primary\": \"pg-standby-1\",\n    \"isolated_at\": \"2026-08-14T00:01:05Z\",\n    \"promoted_at\": \"2026-08-14T00:01:30Z\",\n    \"isolated_primary_writes\": [\n      {\n        \"at\": \"2026-08-14T00:01:45Z\",\n        \"accepted\": false\n      },\n      {\n        \"at\": \"2026-08-14T00:01:50Z\",\n        \"accepted\": false\n      }\n    ]\n  },\n  \"recovery\": {\n    \"restored_at\": \"2026-08-14T00:02:30Z\",\n    \"present_txids\": [\n      \"tx-m1\",\n      \"tx-m2\"\n    ]\n  }\n}\n"
+  },
+  "rebind_overridden_artifacts": true,
+  "expected_error": "evidence measurement acknowledged_transaction_loss does not match the artifact-derived value"
+}

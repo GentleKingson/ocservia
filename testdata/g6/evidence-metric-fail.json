@@ -1,10 +1,9 @@
 {
   "base": "evidence-pass.json",
-  "mutations": [
+  "slo_replacements": [
     {
-      "operation": "replace",
-      "path": "measurements.max_production_command_inflight.actual",
-      "value": 1
+      "from": "max_production_command_inflight:\n    limit: 50",
+      "to": "max_production_command_inflight:\n    limit: 51"
     }
   ],
   "expected_failure_reason": "metric failed: max_production_command_inflight"

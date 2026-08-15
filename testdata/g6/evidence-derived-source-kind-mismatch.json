@@ -1,0 +1,11 @@
+{
+  "base": "evidence-pass.json",
+  "evidence_mutations": [
+    {
+      "operation": "replace",
+      "path": "measurements.database_rpo_seconds.source_artifact_digest",
+      "value": "sha256:1ff4b29c99aaec5360460ea473d295ca9e9e515d8f8d6ed0ae3170a74ba962ca"
+    }
+  ],
+  "expected_error": "evidence measurement database_rpo_seconds must reference the postgres_recovery artifact"
+}

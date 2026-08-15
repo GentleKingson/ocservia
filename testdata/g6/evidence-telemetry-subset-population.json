@@ -1,0 +1,20 @@
+{
+  "base": "evidence-pass.json",
+  "artifact_files": {
+    "telemetry-snapshot.json": "{\n  \"environment_id\": \"g6-12345678\",\n  \"candidate_sha\": \"1111111111111111111111111111111111111111\",\n  \"snapshot_taken_at\": \"2026-08-14T00:04:30Z\",\n  \"freshness_bound_seconds\": 60,\n  \"agents\": [\n    {\n      \"agent_id\": \"agent-01\",\n      \"last_telemetry_at\": \"2026-08-14T00:04:20Z\"\n    }\n  ]\n}\n"
+  },
+  "rebind_overridden_artifacts": true,
+  "evidence_mutations": [
+    {
+      "operation": "replace",
+      "path": "measurements.telemetry_fresh_ratio.sample_count",
+      "value": 1
+    },
+    {
+      "operation": "replace",
+      "path": "measurements.telemetry_fresh_age_seconds.sample_count",
+      "value": 1
+    }
+  ],
+  "expected_error": "telemetry snapshot omits the authorized connected agent agent-02"
+}

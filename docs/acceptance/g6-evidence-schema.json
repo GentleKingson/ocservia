@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://ocservia.dev/schemas/g6-evidence-v1.json",
+  "$id": "https://ocservia.dev/schemas/g6-evidence-v2.json",
   "title": "ocservia G6 measured evidence",
   "type": "object",
   "additionalProperties": false,
@@ -18,26 +18,60 @@
     "artifacts"
   ],
   "properties": {
-    "schema_version": { "const": "ocservia.g6-evidence.v1" },
-    "candidate_sha": { "$ref": "#/$defs/sha" },
-    "release_manifest_digest": { "$ref": "#/$defs/digest" },
-    "slo_contract_digest": { "$ref": "#/$defs/digest" },
-    "topology_digest": { "$ref": "#/$defs/digest" },
-    "started_at": { "$ref": "#/$defs/timestamp" },
-    "finished_at": { "$ref": "#/$defs/timestamp" },
+    "schema_version": {
+      "const": "ocservia.g6-evidence.v2"
+    },
+    "candidate_sha": {
+      "$ref": "#/$defs/sha"
+    },
+    "release_manifest_digest": {
+      "$ref": "#/$defs/digest"
+    },
+    "slo_contract_digest": {
+      "$ref": "#/$defs/digest"
+    },
+    "topology_digest": {
+      "$ref": "#/$defs/digest"
+    },
+    "started_at": {
+      "$ref": "#/$defs/timestamp"
+    },
+    "finished_at": {
+      "$ref": "#/$defs/timestamp"
+    },
     "environment": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["environment_id", "failure_domain_class", "authority"],
+      "required": [
+        "environment_id",
+        "failure_domain_class",
+        "authority"
+      ],
       "properties": {
-        "environment_id": { "$ref": "#/$defs/environment_id" },
-        "failure_domain_class": {
-          "enum": ["single_host", "multi_host", "multi_zone", "multi_region"]
+        "environment_id": {
+          "$ref": "#/$defs/environment_id"
         },
-        "authority": { "enum": ["engineering", "production_readiness"] },
+        "failure_domain_class": {
+          "enum": [
+            "single_host",
+            "multi_host",
+            "multi_zone",
+            "multi_region"
+          ]
+        },
+        "authority": {
+          "enum": [
+            "engineering",
+            "production_readiness"
+          ]
+        },
         "limitations": {
           "type": "array",
-          "items": { "type": "string", "minLength": 1, "maxLength": 512 },
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512
+          },
           "uniqueItems": true
         }
       }
@@ -89,8 +123,12 @@
         "queue_depth_end",
         "outbox_oldest_age_seconds_end"
       ],
-      "propertyNames": { "$ref": "#/$defs/metric_name" },
-      "additionalProperties": { "$ref": "#/$defs/measurement" }
+      "propertyNames": {
+        "$ref": "#/$defs/metric_name"
+      },
+      "additionalProperties": {
+        "$ref": "#/$defs/measurement"
+      }
     },
     "observations": {
       "type": "object",
@@ -112,20 +150,38 @@
         "outbox_send_before_mark_sent_recovery",
         "outbox_result_before_commit_recovery"
       ],
-      "propertyNames": { "$ref": "#/$defs/observation_name" },
-      "additionalProperties": { "$ref": "#/$defs/observation" }
+      "propertyNames": {
+        "$ref": "#/$defs/observation_name"
+      },
+      "additionalProperties": {
+        "$ref": "#/$defs/observation"
+      }
     },
     "artifacts": {
       "type": "array",
       "minItems": 1,
-      "items": { "$ref": "#/$defs/artifact" }
+      "items": {
+        "$ref": "#/$defs/artifact"
+      }
     }
   },
   "$defs": {
-    "sha": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
-    "digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
-    "timestamp": { "type": "string", "format": "date-time" },
-    "environment_id": { "type": "string", "pattern": "^g6-[a-z0-9]{8,32}$" },
+    "sha": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{40}$"
+    },
+    "digest": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "timestamp": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "environment_id": {
+      "type": "string",
+      "pattern": "^g6-[a-z0-9]{8,32}$"
+    },
     "metric_name": {
       "enum": [
         "stability_sample_span_seconds",
@@ -196,39 +252,92 @@
     "measurement": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["actual", "sample_count", "source_artifact_digest"],
+      "required": [
+        "actual",
+        "sample_count",
+        "source_artifact_digest"
+      ],
       "properties": {
-        "actual": { "type": "number" },
-        "sample_count": { "type": "integer", "minimum": 1 },
-        "source_artifact_digest": { "$ref": "#/$defs/digest" }
+        "actual": {
+          "type": "number"
+        },
+        "sample_count": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "source_artifact_digest": {
+          "$ref": "#/$defs/digest"
+        }
       }
     },
     "observation": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["observed", "timeline_event_ids", "source_artifact_digest"],
+      "required": [
+        "observed",
+        "timeline_event_ids",
+        "source_artifact_digest"
+      ],
       "properties": {
-        "observed": { "type": "boolean" },
+        "observed": {
+          "type": "boolean"
+        },
         "timeline_event_ids": {
           "type": "array",
           "minItems": 1,
-          "items": { "type": "string", "pattern": "^[a-z][a-z0-9_]{0,127}$" },
+          "items": {
+            "type": "string",
+            "pattern": "^[a-z][a-z0-9_]{0,127}$"
+          },
           "uniqueItems": true
         },
-        "source_artifact_digest": { "$ref": "#/$defs/digest" },
-        "notes": { "type": "string", "maxLength": 1024 }
+        "source_artifact_digest": {
+          "$ref": "#/$defs/digest"
+        },
+        "notes": {
+          "type": "string",
+          "maxLength": 1024
+        }
       }
     },
     "artifact": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["name", "digest", "media_type", "kind"],
+      "required": [
+        "name",
+        "digest",
+        "media_type",
+        "kind"
+      ],
       "properties": {
-        "name": { "type": "string", "pattern": "^[a-z0-9][a-z0-9._-]{0,127}$" },
-        "digest": { "$ref": "#/$defs/digest" },
-        "media_type": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "name": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9._-]{0,127}$"
+        },
+        "digest": {
+          "$ref": "#/$defs/digest"
+        },
+        "media_type": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
         "kind": {
-          "enum": ["resource_samples", "timeline", "harness_log"]
+          "enum": [
+            "resource_samples",
+            "timeline",
+            "epoch_events",
+            "command_trace",
+            "outbox_snapshot",
+            "http_samples",
+            "telemetry_snapshot",
+            "audit_correlation",
+            "postgres_recovery",
+            "pitr_report",
+            "agent_sessions",
+            "relay_transitions",
+            "harness_log"
+          ]
         }
       }
     }

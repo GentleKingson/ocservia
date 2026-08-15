@@ -1,0 +1,13 @@
+{
+  "base": "evidence-pass.json",
+  "expected_authority": "engineering",
+  "evidence_mutations": [
+    {
+      "operation": "replace",
+      "path": "environment.authority",
+      "value": "engineering"
+    }
+  ],
+  "expected_failure_reason": "final pass requires production_readiness authority",
+  "expected_all_measurements_pass": true
+}

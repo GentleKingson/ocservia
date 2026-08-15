@@ -4,7 +4,7 @@
     {
       "operation": "replace",
       "path": "measurements.stability_sample_span_seconds.source_artifact_digest",
-      "value": "sha256:cf9fee66f43895dac1583495470e004ece309c91686d1522ba3c5703324ff883"
+      "value": "sha256:1ff4b29c99aaec5360460ea473d295ca9e9e515d8f8d6ed0ae3170a74ba962ca"
     }
   ],
   "expected_error": "evidence measurement stability_sample_span_seconds must reference the resource_samples artifact"
