@@ -2514,6 +2514,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "ocservia-g6-tunnel"
+version = "0.1.0"
+dependencies = [
+ "hex",
+ "iroh",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "zeroize",
+]
+
+[[package]]
 name = "ocservia-observability"
 version = "0.1.0"
 dependencies = [

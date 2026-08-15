@@ -1,0 +1,88 @@
+# G6 HA/PITR cross-VM harness
+
+The G6 production-readiness environment requires the PostgreSQL primary and
+standby, and every control-plane role, to span at least two real failure
+domains — single-host container topologies cannot substitute. GitHub-hosted
+runners cannot accept inbound connections, so the harness ships a
+harness-only tunnel, `rust/crates/g6-tunnel` (`ocservia-g6-tunnel`), that
+forwards PostgreSQL TCP traffic over an authenticated Iroh connection whose
+peer node ID is pinned in both directions. The tunnel never runs in
+production.
+
+Topology (one compose project per failure domain from
+`deploy/g6-ha-pitr/compose.yaml`):
+
+```text
+failure domain fd-alpha (VM A): postgres primary, api, worker, scheduler,
+                                transportd, g6-tunnel serve/forward
+failure domain fd-beta  (VM B): postgres standby, api, worker, scheduler,
+                                transportd, g6-tunnel serve/forward
+```
+
+The two VMs prove they are distinct hosts by comparing SHA-256 hashes of
+their kernel boot IDs; the hashes are recorded in the topology evidence and
+the raw identifiers never leave the runner.
+
+## Scenario
+
+`gh workflow run g6-ha-pitr.yml --ref <ref>` runs on manual dispatch only:
+
+1. Both failure domains exchange tunnel node IDs through run-scoped workflow
+   artifacts and start pinned tunnels.
+2. fd-a brings up the primary (streaming WAL, WAL archiving, data checksums),
+   migrates, and starts its role split; fd-b clones the primary with
+   `pg_basebackup` through the tunnel and joins as the streaming standby, then
+   starts its own role split against the remote primary through the tunnel.
+   Once both sides are ready for the failover exercise, fd-b raises the
+   standby to the confirmed synchronous standby before the load phase is
+   declared observed (never at cluster init, which would block every commit
+   before a standby exists).
+3. fd-a writes acknowledged marker transactions and takes a verified base
+   backup (`pg_basebackup` + `pg_verifybackup`).
+4. fd-a verifies PITR on a separate restored instance that pauses at a named
+   restore point between a before/after marker pair.
+5. fd-a fences itself: outage marker, roles stopped, primary stopped, and
+   repeated write probes against the isolated primary that must all fail.
+6. fd-b promotes, clears `synchronous_standby_names`, recovers every role
+   against the new primary, and reconciles the acknowledged markers.
+7. fd-a recovers its roles through the tunnel to the new primary, then
+   rewinds with `pg_rewind` and rejoins as a streaming standby.
+
+## Evidence artifacts
+
+The `g6-ha-evidence-*` workflow artifact carries public-safe structured
+evidence whose shapes match the frozen G6 artifact contracts:
+
+- `postgres-recovery.json` — `postgres_recovery` kind: outage declaration,
+  service restoration, acknowledged markers, failover isolation/promotion
+  with dual-primary write probes, and present transaction IDs on the promoted
+  primary.
+- `pitr-report.json` — `pitr_report` kind: before/after markers, restore
+  point, and paused-at-target verification.
+- `timeline.jsonl` — `timeline` kind: the frozen observation events for
+  `database_failover_during_load`, `dual_primary_prevention`, and
+  `pitr_target_restore`. Timestamps are stamped by the fd-b evidence owner
+  when it observes each event, so the merged timeline stays monotonic across
+  two runner clocks; RPO uses primary-database timestamps for the same
+  reason.
+- `topology.json` — stage topology snapshot with opaque failure-domain
+  aliases and distinct-host attestations.
+- `verification-summary.json` — measured RPO/RTO against the limits read at
+  runtime from `docs/acceptance/g6-slo.yaml` (never hardcoded in the
+  harness), acknowledged-transaction loss, dual-primary accepts, and PITR
+  marker outcomes.
+
+Harness thresholds are always read from `g6-slo.yaml`; regression protection
+lives in `scripts/test-g6-ha-pitr-workflow.sh`, which fails if a threshold is
+copied into shell code or a required timeline event stops being produced.
+
+## Verification boundary
+
+This stage deploys api, worker, scheduler, transportd, and PostgreSQL across
+two real hosts and proves the PostgreSQL HA/PITR contract end to end. It does
+not yet deploy the dedicated relay pair or the real-agent fleet, and it does
+not emit the full twelve-artifact G6 evidence bundle; those land with the
+real-agent harness stage that produces the final G6 verdict evidence. The
+tunnel exists because hosted runners have no inbound connectivity; multi-zone
+and multi-region failure domains remain unproven on this infrastructure and
+stay subject to the frozen G6 topology contract.

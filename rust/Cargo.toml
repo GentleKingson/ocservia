@@ -6,6 +6,7 @@ members = [
   "crates/command-journal",
   "crates/command-authorization",
   "crates/contracts",
+  "crates/g6-tunnel",
   "crates/observability",
   "crates/ocserv-adapter",
   "crates/privd",

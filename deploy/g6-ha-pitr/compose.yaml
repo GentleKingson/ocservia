@@ -1,0 +1,237 @@
+# G6 HA/PITR harness topology, one compose project per failure domain.
+#
+# Both failure domains instantiate this file with distinct project names and
+# G6_FD_ID values (fd-a hosts the first primary, fd-b bootstraps as its
+# streaming standby over the pinned Iroh tunnel). Role-split control-plane
+# instances, transportd, and PostgreSQL run per failure domain exactly as the
+# frozen G6 topology requires. The tunnel itself is a native harness process,
+# not a service. All credentials are test-only and generated per run.
+
+x-service-defaults: &service-defaults
+  restart: "no"
+  read_only: true
+  cap_drop: [ALL]
+  security_opt:
+    - no-new-privileges:true
+  init: true
+
+x-role-defaults: &role-defaults
+  <<: *service-defaults
+  build:
+    context: ../..
+    dockerfile: control-plane/Dockerfile
+  environment: &role-environment
+    OCSERV_ENVIRONMENT: development
+    OCSERV_DEV_AUTH: "true"
+    OCSERV_DATABASE_URL: postgres://ocservia_app:${G6_APP_PASSWORD:?}@${G6_DB_HOST:?}:5432/ocservia?sslmode=disable&application_name=${G6_FD_ID:?}-${G6_ROLE_NAME:?}
+    OCSERV_RUNTIME_DATABASE_ROLE: ocservia_app
+    OCSERV_AUDIT_EVENT_KEY_ID: g6-ha-pitr-v1
+    OCSERV_TEST_AUDIT_EVENT_KEY_HEX: "4536474747474747474747474747474747474747474747474747474747474747"
+    OCSERV_CONTROLLER_ENDPOINT_ID: ${OCSERV_CONTROLLER_ENDPOINT_ID:-}
+    OCSERV_TRANSPORT_SOCKET: /run/ocserv-platform/transportd.sock
+    OCSERV_TRANSPORT_UID: "65532"
+    OCSERV_TRANSPORT_GID: "65532"
+  extra_hosts:
+    - "host.docker.internal:host-gateway"
+  volumes:
+    - type: volume
+      source: transport-runtime
+      target: /run/ocserv-platform
+      volume:
+        nocopy: true
+  tmpfs:
+    - /tmp:size=16m,mode=0700
+
+services:
+  postgres:
+    <<: *service-defaults
+    image: postgres:17.10-bookworm
+    environment:
+      POSTGRES_DB: ocservia
+      POSTGRES_USER: ocservia_owner
+      POSTGRES_PASSWORD: ${G6_OWNER_PASSWORD:?}
+      POSTGRES_INITDB_ARGS: --data-checksums
+      G6_REPLICATION_PASSWORD: ${G6_REPLICATION_PASSWORD:?}
+      G6_APP_PASSWORD: ${G6_APP_PASSWORD:?}
+    ports:
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ${G6_ARCHIVE_DIR:?}:/var/lib/postgresql/archive
+      - ${G6_BASEBACKUP_DIR:?}:/var/lib/postgresql/basebackup
+      - ./postgres-init:/docker-entrypoint-initdb.d:ro
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    tmpfs:
+      - /tmp:size=16m,mode=0700
+      - /run/postgresql:size=16m,uid=999,gid=999,mode=0770
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ocservia_owner -d ocservia"]
+      interval: 2s
+      timeout: 3s
+      retries: 60
+
+  migrate:
+    <<: *service-defaults
+    build:
+      context: ../..
+      dockerfile: control-plane/Dockerfile
+    command: ["--migrate-only"]
+    environment:
+      OCSERV_ENVIRONMENT: development
+      OCSERV_DATABASE_URL: postgres://ocservia_owner:${G6_OWNER_PASSWORD:?}@postgres:5432/ocservia?sslmode=disable
+      OCSERV_RUNTIME_DATABASE_ROLE: ocservia_app
+      OCSERV_AUDIT_EVENT_KEY_ID: g6-ha-pitr-v1
+      OCSERV_TEST_AUDIT_EVENT_KEY_HEX: "4536474747474747474747474747474747474747474747474747474747474747"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  controller-key-init:
+    <<: *service-defaults
+    build:
+      context: ../..
+      dockerfile: rust/transportd.Dockerfile
+    user: "0:0"
+    entrypoint: ["/bin/sh", "-eu", "-c"]
+    command:
+      - |
+        if [ ! -s /run/ocservia-secrets/controller.key ]; then
+          umask 077
+          dd if=/dev/urandom of=/run/ocservia-secrets/controller.key bs=32 count=1 status=none
+          chown 65532:65532 /run/ocservia-secrets/controller.key
+        fi
+        test "$$(stat -c '%u:%g:%a:%s' /run/ocservia-secrets/controller.key)" = "65532:65532:600:32"
+    network_mode: none
+    cap_add: [CHOWN, DAC_OVERRIDE]
+    volumes:
+      - type: volume
+        source: controller-secrets
+        target: /run/ocservia-secrets
+        volume:
+          nocopy: true
+
+  transport-runtime-init:
+    <<: *service-defaults
+    build:
+      context: ../..
+      dockerfile: rust/transportd.Dockerfile
+    user: "0:0"
+    entrypoint: ["/usr/local/libexec/ocservia-prepare-transport-runtime"]
+    command: ["/run/ocserv-platform", "65532", "65532", "65534"]
+    network_mode: none
+    cap_add: [CHOWN, FOWNER, DAC_OVERRIDE]
+    volumes:
+      - type: volume
+        source: transport-runtime
+        target: /run/ocserv-platform
+        volume:
+          nocopy: true
+
+  transport-endpoint-bootstrap:
+    <<: *service-defaults
+    profiles: [bootstrap]
+    build:
+      context: ../..
+      dockerfile: rust/transportd.Dockerfile
+    command:
+      - --socket
+      - /run/ocserv-platform/bootstrap.sock
+      - --key-file
+      - /run/ocservia-secrets/controller.key
+      - --control-plane-uid
+      - "65534"
+      - --control-plane-gid
+      - "65532"
+      - --relay-mode
+      - default
+    volumes:
+      - type: volume
+        source: transport-runtime
+        target: /run/ocserv-platform
+        volume:
+          nocopy: true
+      - type: volume
+        source: controller-secrets
+        target: /run/ocservia-secrets
+        read_only: true
+        volume:
+          nocopy: true
+    depends_on:
+      controller-key-init:
+        condition: service_completed_successfully
+      transport-runtime-init:
+        condition: service_completed_successfully
+
+  api:
+    <<: *role-defaults
+    command: ["--role=api"]
+    environment:
+      <<: *role-environment
+      OCSERV_HTTP_ADDRESS: 0.0.0.0:8080
+      G6_ROLE_NAME: api
+
+  worker:
+    <<: *role-defaults
+    command: ["--role=worker"]
+    environment:
+      <<: *role-environment
+      G6_ROLE_NAME: worker
+      OCSERV_TRUST_SOCKET: /run/ocserv-trust/control-plane.sock
+    volumes:
+      - type: volume
+        source: transport-runtime
+        target: /run/ocserv-platform
+        volume:
+          nocopy: true
+      - trust-runtime:/run/ocserv-trust
+
+  scheduler:
+    <<: *role-defaults
+    command: ["--role=scheduler"]
+    environment:
+      <<: *role-environment
+      G6_ROLE_NAME: scheduler
+
+  transportd:
+    <<: *service-defaults
+    build:
+      context: ../..
+      dockerfile: rust/transportd.Dockerfile
+    command:
+      - --socket
+      - /run/ocserv-platform/transportd.sock
+      - --trust-socket
+      - /run/ocserv-trust/control-plane.sock
+      - --key-file
+      - /run/ocservia-secrets/controller.key
+      - --control-plane-uid
+      - "65534"
+      - --control-plane-gid
+      - "65532"
+      - --relay-mode
+      - default
+    volumes:
+      - type: volume
+        source: transport-runtime
+        target: /run/ocserv-platform
+        volume:
+          nocopy: true
+      - trust-runtime:/run/ocserv-trust
+      - type: volume
+        source: controller-secrets
+        target: /run/ocservia-secrets
+        read_only: true
+        volume:
+          nocopy: true
+    healthcheck:
+      test: ["CMD-SHELL", "test -S /run/ocserv-platform/transportd.sock"]
+      interval: 2s
+      timeout: 3s
+      retries: 60
+
+volumes:
+  postgres-data:
+  controller-secrets:
+  transport-runtime:
+  trust-runtime:
