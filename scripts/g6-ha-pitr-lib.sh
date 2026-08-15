@@ -5,6 +5,11 @@
 
 g6_ha_init_environment() {
   G6HA_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+  # Phases run as separate processes; the pinned toolchain (cargo for the
+  # tunnel build) must be on PATH in every one of them, not only in steps
+  # that sourced env.sh explicitly.
+  # shellcheck source=scripts/env.sh disable=SC1091
+  source "${G6HA_ROOT}/scripts/env.sh"
   RUN_ID="${RUN_ID:?RUN_ID is required}"
   FD_ID="${FD_ID:?FD_ID is required (fd-a or fd-b)}"
   FD_ALIAS="${FD_ALIAS:?FD_ALIAS is required (fd-alpha or fd-beta)}"
@@ -145,6 +150,17 @@ g6_ha_primary_psql() {
   else
     g6_ha_psql_tunneled "postgres://ocservia_owner:$(g6_ha_secret owner-password)@host.docker.internal:15432/ocservia?sslmode=disable" "$@"
   fi
+}
+
+# The tunnel binary must exist before the prepare phase derives the node id
+# for the rendezvous artifact, so prepare builds it (cargo is incremental;
+# the later images phase rebuilds nothing).
+g6_ha_build_tunnel() {
+  (cd "${G6HA_ROOT}/rust" && cargo build --release --package ocservia-g6-tunnel)
+  [[ -x "${G6HA_TUNNEL_BIN}" ]] || {
+    echo "tunnel binary was not produced at ${G6HA_TUNNEL_BIN}" >&2
+    return 1
+  }
 }
 
 g6_ha_tunnel_key() {

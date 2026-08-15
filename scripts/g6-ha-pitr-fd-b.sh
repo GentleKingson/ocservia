@@ -38,6 +38,7 @@ peer_boot_hash() {
 }
 
 phase_prepare() {
+  g6_ha_build_tunnel
   g6_ha_generate_secrets
   local tunnel_node
   tunnel_node="$(g6_ha_tunnel_key)"
@@ -49,8 +50,7 @@ phase_prepare() {
 phase_images() {
   g6_ha_compose build migrate api worker scheduler transportd \
     controller-key-init transport-runtime-init transport-endpoint-bootstrap
-  (cd "${G6HA_ROOT}/rust" && cargo build --release --package ocservia-g6-tunnel)
-  [[ -x "${G6HA_TUNNEL_BIN}" ]]
+  g6_ha_build_tunnel
 }
 
 phase_tunnel_up() {
