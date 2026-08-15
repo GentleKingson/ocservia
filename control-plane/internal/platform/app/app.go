@@ -297,7 +297,7 @@ func Run(ctx context.Context, cfg config.Config, build BuildInfo, logger *slog.L
 	server.EnableTelemetry(telemetryService)
 	if cfg.ControllerEndpointID != "" {
 		server.EnableEnrollment(enrollment.New(pool, cfg.ControllerEndpointID, build.Version, commandSigner), apiTransport)
-	server.EnableOwnerFencing(fenceBinder)
+		server.EnableOwnerFencing(fenceBinder)
 	}
 	server.EnableLocalSlice(sliceService)
 	server.SetLocalSimulatorEnabled(cfg.LocalSimulator)
