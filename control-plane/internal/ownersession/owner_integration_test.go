@@ -6,10 +6,12 @@ import (
 	"io"
 	"log/slog"
 	"os"
+	"sync"
 	"testing"
 	"time"
 
 	agentv1 "github.com/GentleKingson/ocservia/control-plane/gen/proto/ocserv/platform/agent/v1"
+	transportv1 "github.com/GentleKingson/ocservia/control-plane/gen/proto/ocserv/platform/transport/v1"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -165,13 +167,14 @@ func TestManagerTakeoverFailsClosedIntegration(t *testing.T) {
 	}
 
 	// The stale owner fails closed on its next binding attempt and stays
-	// closed afterwards.
+	// closed afterwards: a lost session never degrades to the unfenced
+	// compatibility path.
 	operationID := mustUUIDv7(t)
 	if _, _, err := owner.BindOperation(context.Background(), nodeID, agentv1.FenceOperationKind_FENCE_OPERATION_KIND_COMMAND, operationID, "ocserv.fencing.v2"); !errors.Is(err, ErrNotOwner) {
 		t.Fatalf("stale owner bind error = %v, want ErrNotOwner", err)
 	}
-	if _, _, err := owner.BindOperation(context.Background(), nodeID, agentv1.FenceOperationKind_FENCE_OPERATION_KIND_COMMAND, operationID, "ocserv.fencing.v2"); !errors.Is(err, ErrNoFence) {
-		t.Fatalf("lost session bind error = %v, want ErrNoFence", err)
+	if _, _, err := owner.BindOperation(context.Background(), nodeID, agentv1.FenceOperationKind_FENCE_OPERATION_KIND_COMMAND, operationID, "ocserv.fencing.v2"); !errors.Is(err, ErrNotOwner) {
+		t.Fatalf("lost session bind error = %v, want ErrNotOwner", err)
 	}
 
 	// The successor keeps operating on the node.
@@ -181,7 +184,9 @@ func TestManagerTakeoverFailsClosedIntegration(t *testing.T) {
 }
 
 // TestManagerRegistrationFailureFailsClosedIntegration verifies that a
-// session is never granted when transportd did not accept the fence.
+// session is never granted when transportd did not accept the fence, that the
+// acquired lease is released instead of blocking takeover for a full TTL, and
+// that later bindings fail closed instead of degrading to the unfenced path.
 func TestManagerRegistrationFailureFailsClosedIntegration(t *testing.T) {
 	pool := testPool(t)
 	signer, _ := testSigner(t)
@@ -193,8 +198,25 @@ func TestManagerRegistrationFailureFailsClosedIntegration(t *testing.T) {
 	if _, err := manager.OpenSession(context.Background(), nodeID, endpointID, 2, []string{"ocserv.fencing.v2"}); err == nil {
 		t.Fatal("session granted despite fence registration failure")
 	}
-	if _, _, err := manager.BindOperation(context.Background(), nodeID, agentv1.FenceOperationKind_FENCE_OPERATION_KIND_COMMAND, mustUUIDv7(t), "ocserv.fencing.v2"); !errors.Is(err, ErrNoFence) {
-		t.Fatalf("bind error = %v, want ErrNoFence", err)
+	if _, _, err := manager.BindOperation(context.Background(), nodeID, agentv1.FenceOperationKind_FENCE_OPERATION_KIND_COMMAND, mustUUIDv7(t), "ocserv.fencing.v2"); !errors.Is(err, ErrFenceUnavailable) {
+		t.Fatalf("bind error = %v, want ErrFenceUnavailable", err)
+	}
+	// The failed open released its lease, so a healthy owner takes over
+	// immediately without waiting out the TTL.
+	successor, err := NewManager(pool, signer, &recordingRegistrar{}, 30*time.Second, testLogger())
+	if err != nil {
+		t.Fatalf("new successor manager: %v", err)
+	}
+	started := time.Now()
+	successorFence, err := successor.OpenSession(context.Background(), nodeID, endpointID, 3, []string{"ocserv.fencing.v2"})
+	if err != nil {
+		t.Fatalf("successor take over after released lease: %v", err)
+	}
+	if elapsed := time.Since(started); elapsed > 5*time.Second {
+		t.Fatalf("takeover after release took %v, want immediate", elapsed)
+	}
+	if successorFence.GetOwnerEpoch() < 2 {
+		t.Fatalf("successor epoch %d does not advance the epoch line", successorFence.GetOwnerEpoch())
 	}
 }
 
@@ -250,6 +272,250 @@ func fenceClaimsMatchCapabilities(fence *agentv1.ConnectionFenceV2, want []strin
 		}
 	}
 	return true
+}
+
+// TestManagerDisconnectEndsTermWhileRunIsActiveIntegration reproduces the HA
+// takeover scenario: the old owner process keeps renewing (Run is active),
+// then the exact connection behind its term disconnects. The term ends, the
+// lease is released at PostgreSQL time, and a second manager takes over with
+// a strictly higher epoch well inside the lease TTL.
+func TestManagerDisconnectEndsTermWhileRunIsActiveIntegration(t *testing.T) {
+	pool := testPool(t)
+	signer, _ := testSigner(t)
+	owner, err := NewManager(pool, signer, &recordingRegistrar{}, 30*time.Second, testLogger())
+	if err != nil {
+		t.Fatalf("new owner manager: %v", err)
+	}
+	nodeID, endpointID := testNodeAndEndpoint(t)
+	fence, err := owner.OpenSession(context.Background(), nodeID, endpointID, 4, []string{"ocserv.fencing.v2"})
+	if err != nil {
+		t.Fatalf("open session: %v", err)
+	}
+	runCtx, stopRun := context.WithCancel(context.Background())
+	defer stopRun()
+	go func() { _ = owner.Run(runCtx) }()
+
+	// The transport reports the disconnect of exactly this term's connection.
+	connectionID, err := fixed16(fence.GetConnectionId())
+	if err != nil {
+		t.Fatalf("fence connection id: %v", err)
+	}
+	disconnect := &transportv1.TransportEvent{
+		NodeId:       nodeID[:],
+		ConnectionId: connectionID[:],
+		OwnerEpoch:   fence.GetOwnerEpoch(),
+		Type:         transportv1.TransportEventType_TRANSPORT_EVENT_TYPE_DISCONNECTED,
+	}
+	if err := owner.handleTransportEvent(context.Background(), disconnect); err != nil {
+		t.Fatalf("handle disconnect: %v", err)
+	}
+
+	// The ended owner never falls back to the unfenced compatibility path.
+	if _, _, err := owner.BindOperation(context.Background(), nodeID, agentv1.FenceOperationKind_FENCE_OPERATION_KIND_COMMAND, mustUUIDv7(t), "ocserv.fencing.v2"); !errors.Is(err, ErrNotOwner) {
+		t.Fatalf("ended owner bind error = %v, want ErrNotOwner", err)
+	}
+
+	successor, err := NewManager(pool, signer, &recordingRegistrar{}, 30*time.Second, testLogger())
+	if err != nil {
+		t.Fatalf("new successor manager: %v", err)
+	}
+	started := time.Now()
+	successorFence, err := successor.OpenSession(context.Background(), nodeID, endpointID, 5, []string{"ocserv.fencing.v2"})
+	if err != nil {
+		t.Fatalf("successor take over while the old process still runs: %v", err)
+	}
+	if elapsed := time.Since(started); elapsed > 5*time.Second {
+		t.Fatalf("takeover after disconnect took %v, want immediate release", elapsed)
+	}
+	if successorFence.GetOwnerEpoch() <= fence.GetOwnerEpoch() {
+		t.Fatalf("successor epoch %d does not exceed owner epoch %d", successorFence.GetOwnerEpoch(), fence.GetOwnerEpoch())
+	}
+
+	// A late replay of the old disconnect cannot end the successor's term.
+	late := &transportv1.TransportEvent{
+		NodeId:       nodeID[:],
+		ConnectionId: connectionID[:],
+		OwnerEpoch:   fence.GetOwnerEpoch(),
+		Type:         transportv1.TransportEventType_TRANSPORT_EVENT_TYPE_DISCONNECTED,
+	}
+	if err := owner.handleTransportEvent(context.Background(), late); err != nil {
+		t.Fatalf("late disconnect handling: %v", err)
+	}
+	if _, _, err := successor.BindOperation(context.Background(), nodeID, agentv1.FenceOperationKind_FENCE_OPERATION_KIND_COMMAND, mustUUIDv7(t), "ocserv.fencing.v2"); err != nil {
+		t.Fatalf("successor binding after late disconnect: %v", err)
+	}
+}
+
+// TestManagerCloseSessionMatchesTheExactTermIntegration verifies the exact
+// term guard: closing with a different connection identity or epoch ends
+// nothing, and a second open on the same node supersedes cleanly.
+func TestManagerCloseSessionMatchesTheExactTermIntegration(t *testing.T) {
+	pool := testPool(t)
+	signer, _ := testSigner(t)
+	manager, err := NewManager(pool, signer, &recordingRegistrar{}, 30*time.Second, testLogger())
+	if err != nil {
+		t.Fatalf("new manager: %v", err)
+	}
+	nodeID, endpointID := testNodeAndEndpoint(t)
+	fence, err := manager.OpenSession(context.Background(), nodeID, endpointID, 6, []string{"ocserv.fencing.v2"})
+	if err != nil {
+		t.Fatalf("open session: %v", err)
+	}
+	connectionID, err := fixed16(fence.GetConnectionId())
+	if err != nil {
+		t.Fatalf("fence connection id: %v", err)
+	}
+	wrongConnection := mustUUIDv7(t)
+	var wrongFixed [16]byte
+	copy(wrongFixed[:], wrongConnection[:])
+	if err := manager.CloseSession(context.Background(), nodeID, wrongFixed, int64(fence.GetOwnerEpoch())); err != nil {
+		t.Fatalf("wrong-connection close: %v", err)
+	}
+	if err := manager.CloseSession(context.Background(), nodeID, connectionID, int64(fence.GetOwnerEpoch())+1); err != nil {
+		t.Fatalf("wrong-epoch close: %v", err)
+	}
+	if _, _, err := manager.BindOperation(context.Background(), nodeID, agentv1.FenceOperationKind_FENCE_OPERATION_KIND_COMMAND, mustUUIDv7(t), "ocserv.fencing.v2"); err != nil {
+		t.Fatalf("binding after mismatched closes: %v", err)
+	}
+
+	// The exact term closes on demand, expires the lease immediately, and
+	// lets a rival take over through a real Acquire. The closed manager
+	// itself must fail closed forever after, never legacy.
+	rival, err := NewManager(pool, signer, &recordingRegistrar{}, 30*time.Second, testLogger())
+	if err != nil {
+		t.Fatalf("new rival manager: %v", err)
+	}
+	if err := manager.CloseSession(context.Background(), nodeID, connectionID, int64(fence.GetOwnerEpoch())); err != nil {
+		t.Fatalf("exact-term close: %v", err)
+	}
+	rivalFence, err := rival.OpenSession(context.Background(), nodeID, endpointID, 7, []string{"ocserv.fencing.v2"})
+	if err != nil {
+		t.Fatalf("rival takeover after exact close: %v", err)
+	}
+	if rivalFence.GetOwnerEpoch() <= fence.GetOwnerEpoch() {
+		t.Fatalf("rival epoch = %d, want above %d", rivalFence.GetOwnerEpoch(), fence.GetOwnerEpoch())
+	}
+	if _, _, err := manager.BindOperation(context.Background(), nodeID, agentv1.FenceOperationKind_FENCE_OPERATION_KIND_COMMAND, mustUUIDv7(t), "ocserv.fencing.v2"); !errors.Is(err, ErrNotOwner) {
+		t.Fatalf("closed manager bind = %v, want ErrNotOwner", err)
+	}
+}
+
+// TestManagerConcurrentLifecycleIsRaceFreeIntegration runs the renewal loop,
+// concurrent same-node session opens, and concurrent binding issuance at
+// once. Under -race it proves the per-node serialization and the lock-scoped
+// binding snapshot keep the manager data-race free, and that the highest
+// epoch survives concurrent write-backs.
+func TestManagerConcurrentLifecycleIsRaceFreeIntegration(t *testing.T) {
+	pool := testPool(t)
+	signer, _ := testSigner(t)
+	manager, err := NewManager(pool, signer, &recordingRegistrar{}, 2*time.Second, testLogger())
+	if err != nil {
+		t.Fatalf("new manager: %v", err)
+	}
+	nodeID, endpointID := testNodeAndEndpoint(t)
+	if _, err := manager.OpenSession(context.Background(), nodeID, endpointID, 9, []string{"ocserv.fencing.v2"}); err != nil {
+		t.Fatalf("open session: %v", err)
+	}
+	runCtx, stopRun := context.WithCancel(context.Background())
+	defer stopRun()
+	go func() { _ = manager.Run(runCtx) }()
+
+	const concurrency = 8
+	var wg sync.WaitGroup
+	start := make(chan struct{})
+	maxEpoch := make(chan uint64, concurrency)
+	for index := 0; index < concurrency; index++ {
+		wg.Add(1)
+		go func(index int) {
+			defer wg.Done()
+			<-start
+			if index%2 == 0 {
+				fence, err := manager.OpenSession(context.Background(), nodeID, endpointID, 9, []string{"ocserv.fencing.v2"})
+				if err != nil {
+					t.Errorf("concurrent open %d: %v", index, err)
+					return
+				}
+				maxEpoch <- fence.GetOwnerEpoch()
+				return
+			}
+			for attempt := 0; attempt < 8; attempt++ {
+				if _, _, err := manager.BindOperation(context.Background(), nodeID, agentv1.FenceOperationKind_FENCE_OPERATION_KIND_COMMAND, mustUUIDv7(t), "ocserv.fencing.v2"); err != nil {
+					t.Errorf("concurrent bind %d/%d: %v", index, attempt, err)
+					return
+				}
+			}
+			maxEpoch <- 0
+		}(index)
+	}
+	close(start)
+	wg.Wait()
+	close(maxEpoch)
+	highest := uint64(1)
+	for epoch := range maxEpoch {
+		if epoch > highest {
+			highest = epoch
+		}
+	}
+	fence, _, err := manager.BindOperation(context.Background(), nodeID, agentv1.FenceOperationKind_FENCE_OPERATION_KIND_COMMAND, mustUUIDv7(t), "ocserv.fencing.v2")
+	if err != nil {
+		t.Fatalf("post-race bind: %v", err)
+	}
+	if fence.GetOwnerEpoch() < highest {
+		t.Fatalf("retained epoch %d is lower than the observed maximum %d", fence.GetOwnerEpoch(), highest)
+	}
+}
+
+// TestManagerRegistrationHeartbeatEndsUnreachableTermsIntegration verifies
+// that a transportd registration channel unavailable for longer than a full
+// lease TTL stops the term's renewal and releases the lease, so another
+// controller can take over.
+func TestManagerRegistrationHeartbeatEndsUnreachableTermsIntegration(t *testing.T) {
+	pool := testPool(t)
+	signer, _ := testSigner(t)
+	manager, err := NewManager(pool, signer, &recordingRegistrar{failtures: true}, 200*time.Millisecond, testLogger())
+	if err != nil {
+		t.Fatalf("new manager: %v", err)
+	}
+	// Registration succeeds once is required for the session to exist, so
+	// flip the registrar to failing after the open and accelerate the
+	// maintenance loop.
+	nodeID, endpointID := testNodeAndEndpoint(t)
+	manager.registrar = &recordingRegistrar{}
+	fence, err := manager.OpenSession(context.Background(), nodeID, endpointID, 11, []string{"ocserv.fencing.v2"})
+	if err != nil {
+		t.Fatalf("open session: %v", err)
+	}
+	manager.mu.Lock()
+	manager.registrar = &recordingRegistrar{failtures: true}
+	manager.registrationEvery = 20 * time.Millisecond
+	manager.interval = 20 * time.Millisecond
+	manager.mu.Unlock()
+	runCtx, stopRun := context.WithCancel(context.Background())
+	defer stopRun()
+	go func() { _ = manager.Run(runCtx) }()
+
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if _, _, err := manager.BindOperation(context.Background(), nodeID, agentv1.FenceOperationKind_FENCE_OPERATION_KIND_COMMAND, mustUUIDv7(t), "ocserv.fencing.v2"); errors.Is(err, ErrFenceUnavailable) {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("term outlived an unreachable registration channel for a full lease TTL")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	successor, err := NewManager(pool, signer, &recordingRegistrar{}, 30*time.Second, testLogger())
+	if err != nil {
+		t.Fatalf("new successor manager: %v", err)
+	}
+	successorFence, err := successor.OpenSession(context.Background(), nodeID, endpointID, 12, []string{"ocserv.fencing.v2"})
+	if err != nil {
+		t.Fatalf("successor take over after heartbeat bound: %v", err)
+	}
+	if successorFence.GetOwnerEpoch() <= fence.GetOwnerEpoch() {
+		t.Fatalf("successor epoch %d does not exceed owner epoch %d", successorFence.GetOwnerEpoch(), fence.GetOwnerEpoch())
+	}
 }
 
 func testLogger() *slog.Logger {

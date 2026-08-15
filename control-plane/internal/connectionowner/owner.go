@@ -126,6 +126,26 @@ func (t *Term) Renew(ctx context.Context, pool *pgxpool.Pool) (time.Time, error)
 	return leaseUntil.UTC(), nil
 }
 
+// Release expires this exact term's lease at PostgreSQL time so a successor
+// can take over without waiting out the TTL. The exact-term predicate keeps a
+// late release from touching a successor's row: when the term was already
+// taken over, Release reports ErrNotOwner and changes nothing. The epoch is
+// never decremented or reset; only the deadline of the matching row moves to
+// now, preserving monotonic takeover.
+func (t *Term) Release(ctx context.Context, pool *pgxpool.Pool) error {
+	tag, err := pool.Exec(ctx, `UPDATE connection_owner_fencing
+		SET lease_until=now(), updated_at=now()
+		WHERE node_id=$1 AND owner_instance_id=$2 AND owner_incarnation=$3 AND connection_id=$4 AND owner_epoch=$5 AND lease_until>now()`,
+		t.nodeID[:], t.identity.InstanceID, t.identity.Incarnation, t.connectionID[:], t.epoch)
+	if err != nil {
+		return fmt.Errorf("connectionowner: release node ownership: %w", err)
+	}
+	if tag.RowsAffected() != 1 {
+		return ErrNotOwner
+	}
+	return nil
+}
+
 // AssertFenced verifies inside the caller's transaction, immediately before
 // commit, that this term still owns the node with the exact identity,
 // connection, and fencing epoch. The expiry check uses clock_timestamp(),

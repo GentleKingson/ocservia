@@ -245,3 +245,37 @@ func mustFixed16(t *testing.T, value []byte) [16]byte {
 	}
 	return fixed
 }
+
+// TestStateUpdateOperationIDMatchesSharedVector pins the domain-separated
+// derivation against the same vector the Rust command-authorization crate
+// asserts, so Controller and transportd always derive one identity for one
+// update carrier.
+func TestStateUpdateOperationIDMatchesSharedVector(t *testing.T) {
+	var nodeID [16]byte
+	for index := range nodeID {
+		nodeID[index] = byte(index + 1)
+	}
+	var endpointID [32]byte
+	for index := range endpointID {
+		endpointID[index] = byte(index)
+	}
+	operationID := StateUpdateOperationID(nodeID, endpointID[:], 2, 7, "review fixture")
+	want := [16]byte{0xf0, 0x22, 0x9e, 0xca, 0xcf, 0x9b, 0xb6, 0x55, 0x89, 0xe1, 0x89, 0x7c, 0x66, 0x8a, 0x48, 0xf7}
+	if operationID != want {
+		t.Fatalf("operation id = %x, want %x", operationID, want)
+	}
+	if StateUpdateOperationID(nodeID, endpointID[:], 1, 7, "review fixture") == operationID {
+		t.Fatal("state change kept the operation identity")
+	}
+	if StateUpdateOperationID(nodeID, endpointID[:], 2, 8, "review fixture") == operationID {
+		t.Fatal("revision change kept the operation identity")
+	}
+	if StateUpdateOperationID(nodeID, endpointID[:], 2, 7, "review fixture ") == operationID {
+		t.Fatal("reason change kept the operation identity")
+	}
+	otherEndpoint := endpointID
+	otherEndpoint[0] ^= 1
+	if StateUpdateOperationID(nodeID, otherEndpoint[:], 2, 7, "review fixture") == operationID {
+		t.Fatal("endpoint change kept the operation identity")
+	}
+}

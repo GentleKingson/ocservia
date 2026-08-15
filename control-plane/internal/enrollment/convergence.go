@@ -16,7 +16,7 @@ import (
 )
 
 type TrustTransport interface {
-	UpdateNodeTrust(context.Context, []byte, []byte, transportv1.NodeTrustState, string, uint64, *agentv1.FenceBindingV2) error
+	UpdateNodeTrust(context.Context, []byte, []byte, transportv1.NodeTrustState, string, uint64, []byte, *agentv1.FenceBindingV2) error
 	CloseNode(context.Context, []byte, string, *agentv1.FenceBindingV2) error
 }
 
@@ -61,17 +61,17 @@ func NewFencedTrustConvergenceWorker(pool *pgxpool.Pool, transport TrustTranspor
 	return worker, nil
 }
 
-// operationBinding signs one administrative fence binding. Trust updates and
-// connection closes are Controller-side operations, so their binding
-// capability is the fencing capability itself, which every fence carries by
-// construction.
-func (w *TrustConvergenceWorker) operationBinding(ctx context.Context, nodeID uuid.UUID, kind agentv1.FenceOperationKind) (*agentv1.FenceBindingV2, error) {
+// operationBinding signs one administrative fence binding for the given
+// operation identity. Trust updates and connection closes are Controller-side
+// operations, so their binding capability is the fencing capability itself,
+// which every fence carries by construction.
+func (w *TrustConvergenceWorker) operationBinding(ctx context.Context, nodeID uuid.UUID, kind agentv1.FenceOperationKind, operationID [16]byte) (*agentv1.FenceBindingV2, error) {
 	if w.fences == nil {
 		return nil, nil
 	}
 	var fixed [16]byte
 	copy(fixed[:], nodeID[:])
-	_, binding, err := w.fences.BindOperation(ctx, fixed, kind, fixed, ownersession.FencingCapability)
+	_, binding, err := w.fences.BindOperation(ctx, fixed, kind, operationID, ownersession.FencingCapability)
 	if errors.Is(err, ownersession.ErrNoFence) {
 		return nil, nil
 	}
@@ -112,11 +112,12 @@ func (w *TrustConvergenceWorker) RunOnce(ctx context.Context) (bool, error) {
 		return false, err
 	}
 	if !job.UpdateApplied {
-		updateBinding, err := w.operationBinding(ctx, job.NodeID, agentv1.FenceOperationKind_FENCE_OPERATION_KIND_STATE_UPDATE)
+		operationID := ownersession.StateUpdateOperationID([16]byte(job.NodeID), job.EndpointID, int32(job.State), job.Revision, job.Reason)
+		updateBinding, err := w.operationBinding(ctx, job.NodeID, agentv1.FenceOperationKind_FENCE_OPERATION_KIND_STATE_UPDATE, operationID)
 		if err != nil {
 			return true, w.release(ctx, job, err)
 		}
-		if err := w.transport.UpdateNodeTrust(ctx, job.NodeID[:], job.EndpointID, job.State, job.Reason, job.Revision, updateBinding); err != nil {
+		if err := w.transport.UpdateNodeTrust(ctx, job.NodeID[:], job.EndpointID, job.State, job.Reason, job.Revision, operationID[:], updateBinding); err != nil {
 			return true, w.release(ctx, job, err)
 		}
 		if err := w.markUpdateApplied(ctx, job); err != nil {
@@ -125,7 +126,7 @@ func (w *TrustConvergenceWorker) RunOnce(ctx context.Context) (bool, error) {
 		job.UpdateApplied = true
 	}
 	if job.CloseRequired && !job.CloseApplied {
-		closeBinding, err := w.operationBinding(ctx, job.NodeID, agentv1.FenceOperationKind_FENCE_OPERATION_KIND_CONNECTION_CLOSE)
+		closeBinding, err := w.operationBinding(ctx, job.NodeID, agentv1.FenceOperationKind_FENCE_OPERATION_KIND_CONNECTION_CLOSE, [16]byte(job.NodeID))
 		if err != nil {
 			return true, w.release(ctx, job, err)
 		}

@@ -106,7 +106,7 @@ func Run(ctx context.Context, cfg config.Config, build BuildInfo, logger *slog.L
 	defer stopComponents()
 	sliceService := localslice.NewWithSigner(pool, commandSigner)
 	operationService := operationstore.NewWithSigner(pool, cfg.UserOperationConcurrency, commandSigner)
-	workerErr := make(chan error, 3)
+	workerErr := make(chan error, 5)
 	maintenanceErr := make(chan error, 1)
 	var trust *trustserver.Server
 	trustErr := make(chan error, 1)
@@ -127,6 +127,10 @@ func Run(ctx context.Context, cfg config.Config, build BuildInfo, logger *slog.L
 			return fmt.Errorf("configure connection owner sessions: %w", err)
 		}
 		go func() { workerErr <- ownerSessions.Run(componentCtx) }()
+		// Transport disconnects, replacements, and revoke-driven closes end
+		// the exact owner term behind the connection instead of letting a
+		// live process keep renewing a session whose connection is gone.
+		go func() { workerErr <- ownerSessions.WatchTransport(componentCtx, workerTransport) }()
 		trust, err = trustserver.New(cfg.TrustSocket, trustserver.NewHandler(enrollment.NewWithOwnerSessions(pool, cfg.ControllerEndpointID, build.Version, commandSigner, ownerSessions)), cfg.TransportUID)
 		if err != nil {
 			return fmt.Errorf("configure trust server: %w", err)

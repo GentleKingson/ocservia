@@ -127,7 +127,19 @@ impl StubService {
         }
     }
 
+    /// Stamps the node's recorded owner term onto an event so the simulator
+    /// keeps the same disconnect correlation the real transportd provides.
+    async fn with_registered_term(&self, mut event: TransportEvent) -> TransportEvent {
+        let fences = self.state.fences.lock().await;
+        if let Some(recorded) = fences.get(&event.node_id) {
+            event.connection_id = recorded.fence.connection_id.clone();
+            event.owner_epoch = recorded.fence.owner_epoch;
+        }
+        event
+    }
+
     async fn publish(&self, event: TransportEvent) {
+        let event = self.with_registered_term(event).await;
         let mut state = self.state.delivery.lock().await;
         if state.retained.len() == self.state.retention {
             state.retained.pop_front();
@@ -148,6 +160,7 @@ impl StubService {
     }
 
     async fn publish_control(&self, event: TransportEvent) {
+        let event = self.with_registered_term(event).await;
         let mut state = self.state.delivery.lock().await;
         if state.retained.len() == self.state.retention {
             state.retained.pop_front();
@@ -185,6 +198,7 @@ impl StubService {
         if *cancelled.borrow() {
             return false;
         }
+        let event = self.with_registered_term(event).await;
         let mut state = self.state.delivery.lock().await;
         if *cancelled.borrow() {
             return false;
@@ -821,6 +835,8 @@ fn new_event(
         payload,
         traceparent: traceparent.to_owned(),
         endpoint_id: simulator_endpoint(node_id),
+        connection_id: Vec::new(),
+        owner_epoch: 0,
     }
 }
 

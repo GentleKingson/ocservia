@@ -962,7 +962,13 @@ type UpdateNodeTrustRequest struct {
 	Revision   uint64                 `protobuf:"varint,5,opt,name=revision,proto3" json:"revision,omitempty"`
 	// Required when the node has a registered owner fence: owner-driven state
 	// updates are fenced and a stale owner must not update connection state.
-	FenceBinding  *v1.FenceBindingV2 `protobuf:"bytes,6,opt,name=fence_binding,json=fenceBinding,proto3" json:"fence_binding,omitempty"`
+	FenceBinding *v1.FenceBindingV2 `protobuf:"bytes,6,opt,name=fence_binding,json=fenceBinding,proto3" json:"fence_binding,omitempty"`
+	// Canonical operation identity of this exact update: the first 16 bytes of
+	// SHA-256 over the domain-separated encoding of node_id, endpoint_id,
+	// state, revision, and reason. Controller and transportd derive it
+	// independently from the carrier, and a fence binding must cover exactly
+	// this identity, so one binding cannot authorize a different update.
+	OperationId   []byte `protobuf:"bytes,7,opt,name=operation_id,json=operationId,proto3" json:"operation_id,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1035,6 +1041,13 @@ func (x *UpdateNodeTrustRequest) GetRevision() uint64 {
 func (x *UpdateNodeTrustRequest) GetFenceBinding() *v1.FenceBindingV2 {
 	if x != nil {
 		return x.FenceBinding
+	}
+	return nil
+}
+
+func (x *UpdateNodeTrustRequest) GetOperationId() []byte {
+	if x != nil {
+		return x.OperationId
 	}
 	return nil
 }
@@ -1795,14 +1808,20 @@ func (x *GetOwnerFenceResponse) GetFence() *v1.ConnectionFenceV2 {
 }
 
 type TransportEvent struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	EventId       []byte                 `protobuf:"bytes,1,opt,name=event_id,json=eventId,proto3" json:"event_id,omitempty"`
-	NodeId        []byte                 `protobuf:"bytes,2,opt,name=node_id,json=nodeId,proto3" json:"node_id,omitempty"`
-	Type          TransportEventType     `protobuf:"varint,3,opt,name=type,proto3,enum=ocserv.platform.transport.v1.TransportEventType" json:"type,omitempty"`
-	OccurredAt    *timestamppb.Timestamp `protobuf:"bytes,4,opt,name=occurred_at,json=occurredAt,proto3" json:"occurred_at,omitempty"`
-	Payload       []byte                 `protobuf:"bytes,5,opt,name=payload,proto3" json:"payload,omitempty"`
-	Traceparent   string                 `protobuf:"bytes,6,opt,name=traceparent,proto3" json:"traceparent,omitempty"`
-	EndpointId    []byte                 `protobuf:"bytes,7,opt,name=endpoint_id,json=endpointId,proto3" json:"endpoint_id,omitempty"`
+	state       protoimpl.MessageState `protogen:"open.v1"`
+	EventId     []byte                 `protobuf:"bytes,1,opt,name=event_id,json=eventId,proto3" json:"event_id,omitempty"`
+	NodeId      []byte                 `protobuf:"bytes,2,opt,name=node_id,json=nodeId,proto3" json:"node_id,omitempty"`
+	Type        TransportEventType     `protobuf:"varint,3,opt,name=type,proto3,enum=ocserv.platform.transport.v1.TransportEventType" json:"type,omitempty"`
+	OccurredAt  *timestamppb.Timestamp `protobuf:"bytes,4,opt,name=occurred_at,json=occurredAt,proto3" json:"occurred_at,omitempty"`
+	Payload     []byte                 `protobuf:"bytes,5,opt,name=payload,proto3" json:"payload,omitempty"`
+	Traceparent string                 `protobuf:"bytes,6,opt,name=traceparent,proto3" json:"traceparent,omitempty"`
+	EndpointId  []byte                 `protobuf:"bytes,7,opt,name=endpoint_id,json=endpointId,proto3" json:"endpoint_id,omitempty"`
+	// Connection-owner term of the connection this event is about: the
+	// connection_id and owner_epoch recorded by its fence. Empty for
+	// connections without a fence. The connection owner uses them to end
+	// exactly its own term when the connection goes away.
+	ConnectionId  []byte `protobuf:"bytes,8,opt,name=connection_id,json=connectionId,proto3" json:"connection_id,omitempty"`
+	OwnerEpoch    uint64 `protobuf:"varint,9,opt,name=owner_epoch,json=ownerEpoch,proto3" json:"owner_epoch,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1886,6 +1905,20 @@ func (x *TransportEvent) GetEndpointId() []byte {
 	return nil
 }
 
+func (x *TransportEvent) GetConnectionId() []byte {
+	if x != nil {
+		return x.ConnectionId
+	}
+	return nil
+}
+
+func (x *TransportEvent) GetOwnerEpoch() uint64 {
+	if x != nil {
+		return x.OwnerEpoch
+	}
+	return 0
+}
+
 var File_ocserv_platform_transport_v1_transport_proto protoreflect.FileDescriptor
 
 const file_ocserv_platform_transport_v1_transport_proto_rawDesc = "" +
@@ -1932,7 +1965,7 @@ const file_ocserv_platform_transport_v1_transport_proto_rawDesc = "" +
 	"\anode_id\x18\x01 \x01(\fR\x06nodeId\x12\x16\n" +
 	"\x06reason\x18\x02 \x01(\tR\x06reason\x12M\n" +
 	"\rfence_binding\x18\x03 \x01(\v2(.ocserv.platform.agent.v1.FenceBindingV2R\ffenceBinding\"\x13\n" +
-	"\x11CloseNodeResponse\"\x99\x02\n" +
+	"\x11CloseNodeResponse\"\xbc\x02\n" +
 	"\x16UpdateNodeTrustRequest\x12\x17\n" +
 	"\anode_id\x18\x01 \x01(\fR\x06nodeId\x12\x1f\n" +
 	"\vendpoint_id\x18\x02 \x01(\fR\n" +
@@ -1940,7 +1973,8 @@ const file_ocserv_platform_transport_v1_transport_proto_rawDesc = "" +
 	"\x05state\x18\x03 \x01(\x0e2,.ocserv.platform.transport.v1.NodeTrustStateR\x05state\x12\x16\n" +
 	"\x06reason\x18\x04 \x01(\tR\x06reason\x12\x1a\n" +
 	"\brevision\x18\x05 \x01(\x04R\brevision\x12M\n" +
-	"\rfence_binding\x18\x06 \x01(\v2(.ocserv.platform.agent.v1.FenceBindingV2R\ffenceBinding\"\xf3\x01\n" +
+	"\rfence_binding\x18\x06 \x01(\v2(.ocserv.platform.agent.v1.FenceBindingV2R\ffenceBinding\x12!\n" +
+	"\foperation_id\x18\a \x01(\fR\voperationId\"\xf3\x01\n" +
 	"\x17UpdateNodeTrustResponse\x12V\n" +
 	"\vdisposition\x18\x01 \x01(\x0e24.ocserv.platform.transport.v1.TrustUpdateDispositionR\vdisposition\x12+\n" +
 	"\x11retained_revision\x18\x02 \x01(\x04R\x10retainedRevision\x12S\n" +
@@ -1987,7 +2021,7 @@ const file_ocserv_platform_transport_v1_transport_proto_rawDesc = "" +
 	"\x14GetOwnerFenceRequest\x12\x17\n" +
 	"\anode_id\x18\x01 \x01(\fR\x06nodeId\"Z\n" +
 	"\x15GetOwnerFenceResponse\x12A\n" +
-	"\x05fence\x18\x01 \x01(\v2+.ocserv.platform.agent.v1.ConnectionFenceV2R\x05fence\"\xa4\x02\n" +
+	"\x05fence\x18\x01 \x01(\v2+.ocserv.platform.agent.v1.ConnectionFenceV2R\x05fence\"\xea\x02\n" +
 	"\x0eTransportEvent\x12\x19\n" +
 	"\bevent_id\x18\x01 \x01(\fR\aeventId\x12\x17\n" +
 	"\anode_id\x18\x02 \x01(\fR\x06nodeId\x12D\n" +
@@ -1997,7 +2031,10 @@ const file_ocserv_platform_transport_v1_transport_proto_rawDesc = "" +
 	"\apayload\x18\x05 \x01(\fR\apayload\x12 \n" +
 	"\vtraceparent\x18\x06 \x01(\tR\vtraceparent\x12\x1f\n" +
 	"\vendpoint_id\x18\a \x01(\fR\n" +
-	"endpointId*g\n" +
+	"endpointId\x12#\n" +
+	"\rconnection_id\x18\b \x01(\fR\fconnectionId\x12\x1f\n" +
+	"\vowner_epoch\x18\t \x01(\x04R\n" +
+	"ownerEpoch*g\n" +
 	"\fHealthStatus\x12\x1d\n" +
 	"\x19HEALTH_STATUS_UNSPECIFIED\x10\x00\x12\x19\n" +
 	"\x15HEALTH_STATUS_SERVING\x10\x01\x12\x1d\n" +

@@ -19,6 +19,7 @@ import (
 	transportv1 "github.com/GentleKingson/ocservia/control-plane/gen/proto/ocserv/platform/transport/v1"
 	approvalstore "github.com/GentleKingson/ocservia/control-plane/internal/approvals"
 	"github.com/GentleKingson/ocservia/control-plane/internal/commandauth"
+	"github.com/GentleKingson/ocservia/control-plane/internal/ownersession"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"google.golang.org/protobuf/types/known/timestamppb"
@@ -567,7 +568,11 @@ func newTestService(t *testing.T, pool *pgxpool.Pool, controllerEndpointID, cont
 }
 
 func enrollmentRequest(token string, endpoint []byte) *agentv1.EnrollRequest {
-	request := &agentv1.EnrollRequest{Token: token, EndpointId: endpoint, AgentVersion: "test", OsRelease: "test", OcservVersion: "test", BootId: "boot", AgentInstanceId: uuidBytes(), Capabilities: []string{"ocserv.status.read"}, Environment: "test", Nonce: make([]byte, 16), Time: timestamppb.Now(), EnrollmentProtocolMajor: EnrollmentProtocolMajor, EnrollmentProtocolMinor: EnrollmentProtocolMinor, SealingKeys: enrollmentSealingKeys()}
+	return enrollmentRequestCapabilities(token, endpoint, []string{"ocserv.status.read"})
+}
+
+func enrollmentRequestCapabilities(token string, endpoint []byte, capabilities []string) *agentv1.EnrollRequest {
+	request := &agentv1.EnrollRequest{Token: token, EndpointId: endpoint, AgentVersion: "test", OsRelease: "test", OcservVersion: "test", BootId: "boot", AgentInstanceId: uuidBytes(), Capabilities: capabilities, Environment: "test", Nonce: make([]byte, 16), Time: timestamppb.Now(), EnrollmentProtocolMajor: EnrollmentProtocolMajor, EnrollmentProtocolMinor: EnrollmentProtocolMinor, SealingKeys: enrollmentSealingKeys()}
 	privateKey, ok := endpointPrivateKeys.Load(string(endpoint))
 	if !ok {
 		panic("missing enrollment endpoint private key fixture")
@@ -596,7 +601,7 @@ type failingTrustTransport struct {
 	closeCalls     int
 }
 
-func (transport *failingTrustTransport) UpdateNodeTrust(_ context.Context, _, _ []byte, _ transportv1.NodeTrustState, _ string, _ uint64, _ *agentv1.FenceBindingV2) error {
+func (transport *failingTrustTransport) UpdateNodeTrust(_ context.Context, _, _ []byte, _ transportv1.NodeTrustState, _ string, _ uint64, _ []byte, _ *agentv1.FenceBindingV2) error {
 	transport.updateCalls++
 	if transport.updateFailures > 0 {
 		transport.updateFailures--
@@ -649,4 +654,160 @@ func approvedMetadata(t *testing.T, pool *pgxpool.Pool, workspaceID, resourceID 
 		t.Fatal(err)
 	}
 	return approvalID, requesterID, sessionID
+}
+
+// TestAuthorizeSessionDeduplicatesFencingCapabilityIntegration approves an
+// agent that advertised the fencing capability together with its business
+// capabilities — the natural "approve everything" flow. The negotiated set
+// must contain the protocol fencing capability exactly once and the session
+// grant must be issuable, which the canonical grant contract refuses for
+// duplicated capabilities.
+func TestAuthorizeSessionDeduplicatesFencingCapabilityIntegration(t *testing.T) {
+	databaseURL := os.Getenv("OCSERV_TEST_DATABASE_URL")
+	if databaseURL == "" {
+		t.Skip("OCSERV_TEST_DATABASE_URL is not set")
+	}
+	ctx := context.Background()
+	pool, err := pgxpool.New(ctx, databaseURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pool.Close()
+	workspaceID := uuid.Must(uuid.NewV7())
+	if _, err := pool.Exec(ctx, `INSERT INTO workspaces (id,name,slug,created_at,updated_at) VALUES ($1,'Fencing dedup',$2,now(),now())`, workspaceID, "fencing-dedup-"+workspaceID.String()); err != nil {
+		t.Fatal(err)
+	}
+	defer cleanupWorkspace(ctx, pool, workspaceID)
+
+	service := newTestService(t, pool, "", "test")
+	endpoint := endpointFixture(9)
+	token := createToken(t, service, workspaceID, endpoint)
+	enrolled, err := service.Enroll(ctx, enrollmentRequestCapabilities(token.Value, endpoint, []string{"ocserv.status.read", "ocserv.fencing.v2"}))
+	if err != nil || enrolled.GetResult() != agentv1.HandshakeResult_HANDSHAKE_RESULT_PENDING_APPROVAL {
+		t.Fatalf("enroll = %v, %v", enrolled, err)
+	}
+	var nodeID uuid.UUID
+	copy(nodeID[:], enrolled.GetNodeId())
+	_, approvalHash, approvalSummary, err := service.ApprovalBinding(ctx, nodeID, nil, "standard", []string{"ocserv.status.read", "ocserv.fencing.v2"})
+	if err != nil {
+		t.Fatalf("approval binding including the advertised fencing capability: %v", err)
+	}
+	approvalID, identityID, sessionID := approvedMetadata(t, pool, workspaceID, nodeID, "node.approve", approvalHash, approvalSummary)
+	if _, err := service.Approve(ctx, Approval{NodeID: nodeID, Labels: nil, Policy: "standard", Capabilities: []string{"ocserv.status.read", "ocserv.fencing.v2"}, ActorID: identityID.String(), ApprovalID: approvalID, IdentityID: identityID, SessionID: sessionID, Reason: "approve all advertised", RequestID: uuid.Must(uuid.NewV7()).String()}); err != nil {
+		t.Fatalf("approve all advertised capabilities: %v", err)
+	}
+
+	handshake := &agentv1.SessionHandshake{ProtocolMajor: 1, ProtocolMinor: ProtocolMinor, AgentVersion: "test", NodeId: nodeID[:], EndpointId: endpoint, Capabilities: []string{"ocserv.fencing.v2", "ocserv.status.read"}, OsRelease: "test", BootId: "boot", AgentInstanceId: uuidBytes(), MaxMessageSize: 1024, Time: timestamppb.Now(), Nonce: make([]byte, 16), SealingKeys: enrollmentSealingKeys()}
+	response, err := service.AuthorizeSession(ctx, &transportv1.AuthorizeSessionRequest{RemoteEndpointId: endpoint, Handshake: handshake})
+	if err != nil || response.GetResult() != agentv1.HandshakeResult_HANDSHAKE_RESULT_ACCEPTED {
+		t.Fatalf("fenced authorization with fencing approved as a business capability = %v, %v", response, err)
+	}
+	if response.GetSessionGrant() == nil {
+		t.Fatal("session grant was not issued for the deduplicated capability set")
+	}
+	count := 0
+	for _, capability := range response.GetNegotiatedCapabilities() {
+		if capability == "ocserv.fencing.v2" {
+			count++
+		}
+	}
+	if count != 1 {
+		t.Fatalf("negotiated fencing capability appears %d times in %v", count, response.GetNegotiatedCapabilities())
+	}
+}
+
+// cancellingRegistrar accepts the first fence registration and then cancels
+// the request context, so the authorization transaction commit that follows
+// fails after the owner session was already opened.
+type cancellingRegistrar struct {
+	cancelled context.CancelFunc
+	fired     atomic.Bool
+}
+
+func (r *cancellingRegistrar) RegisterOwnerFence(_ context.Context, _ *agentv1.ConnectionFenceV2) error {
+	if r.fired.CompareAndSwap(false, true) {
+		r.cancelled()
+	}
+	return nil
+}
+
+// TestAuthorizeSessionCommitFailureClosesOpenedSessionIntegration proves the
+// cleanup path for a fenced handshake whose authorization transaction failed
+// to commit after the owner session was opened: the exact term is ended, its
+// lease is released, and the manager fails closed instead of degrading to
+// the unfenced compatibility path.
+func TestAuthorizeSessionCommitFailureClosesOpenedSessionIntegration(t *testing.T) {
+	databaseURL := os.Getenv("OCSERV_TEST_DATABASE_URL")
+	if databaseURL == "" {
+		t.Skip("OCSERV_TEST_DATABASE_URL is not set")
+	}
+	ctx := context.Background()
+	pool, err := pgxpool.New(ctx, databaseURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pool.Close()
+	workspaceID := uuid.Must(uuid.NewV7())
+	if _, err := pool.Exec(ctx, `INSERT INTO workspaces (id,name,slug,created_at,updated_at) VALUES ($1,'Commit cleanup',$2,now(),now())`, workspaceID, "commit-cleanup-"+workspaceID.String()); err != nil {
+		t.Fatal(err)
+	}
+	defer cleanupWorkspace(ctx, pool, workspaceID)
+
+	signer, err := commandauth.NewRandomSigner()
+	if err != nil {
+		t.Fatal(err)
+	}
+	requestCtx, cancelRequest := context.WithCancel(ctx)
+	registrar := &cancellingRegistrar{cancelled: cancelRequest}
+	manager, err := ownersession.NewManager(pool, signer, registrar, 30*time.Second, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatalf("new manager: %v", err)
+	}
+	service := NewWithOwnerSessions(pool, string(endpointFixture(3)), "test", signer, manager)
+	endpoint := endpointFixture(11)
+	token := createToken(t, service, workspaceID, endpoint)
+	enrolled, err := service.Enroll(ctx, enrollmentRequestCapabilities(token.Value, endpoint, []string{"ocserv.fencing.v2"}))
+	if err != nil || enrolled.GetResult() != agentv1.HandshakeResult_HANDSHAKE_RESULT_PENDING_APPROVAL {
+		t.Fatalf("enroll = %v, %v", enrolled, err)
+	}
+	var nodeID uuid.UUID
+	copy(nodeID[:], enrolled.GetNodeId())
+	_, approvalHash, approvalSummary, err := service.ApprovalBinding(ctx, nodeID, nil, "standard", []string{"ocserv.fencing.v2"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	approvalID, identityID, sessionID := approvedMetadata(t, pool, workspaceID, nodeID, "node.approve", approvalHash, approvalSummary)
+	if _, err := service.Approve(ctx, Approval{NodeID: nodeID, Labels: nil, Policy: "standard", Capabilities: []string{"ocserv.fencing.v2"}, ActorID: identityID.String(), ApprovalID: approvalID, IdentityID: identityID, SessionID: sessionID, Reason: "commit cleanup fixture", RequestID: uuid.Must(uuid.NewV7()).String()}); err != nil {
+		t.Fatalf("approve: %v", err)
+	}
+
+	handshake := &agentv1.SessionHandshake{ProtocolMajor: 1, ProtocolMinor: ProtocolMinor, AgentVersion: "test", NodeId: nodeID[:], EndpointId: endpoint, Capabilities: []string{"ocserv.fencing.v2"}, OsRelease: "test", BootId: "boot", AgentInstanceId: uuidBytes(), MaxMessageSize: 1024, Time: timestamppb.Now(), Nonce: make([]byte, 16), SealingKeys: enrollmentSealingKeys()}
+	if _, err := service.AuthorizeSession(requestCtx, &transportv1.AuthorizeSessionRequest{RemoteEndpointId: endpoint, Handshake: handshake}); err == nil {
+		t.Fatal("authorization with a cancelled commit unexpectedly succeeded")
+	}
+
+	var fenceNode [16]byte
+	copy(fenceNode[:], nodeID[:])
+	operationID := uuid.Must(uuid.NewV7())
+	if _, _, err := manager.BindOperation(ctx, fenceNode, agentv1.FenceOperationKind_FENCE_OPERATION_KIND_COMMAND, operationID, "ocserv.fencing.v2"); !errors.Is(err, ownersession.ErrNotOwner) {
+		t.Fatalf("manager after commit-failure cleanup = %v, want ErrNotOwner", err)
+	}
+
+	// The lease was released with the term, so a healthy owner takes over
+	// immediately instead of waiting out the TTL.
+	successor, err := ownersession.NewManager(pool, signer, &recordingRegistrar{}, 30*time.Second, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatalf("new successor manager: %v", err)
+	}
+	var fenceEndpoint [32]byte
+	copy(fenceEndpoint[:], endpoint)
+	if _, err := successor.OpenSession(ctx, fenceNode, fenceEndpoint, 4, []string{"ocserv.fencing.v2"}); err != nil {
+		t.Fatalf("successor take over after commit-failure cleanup: %v", err)
+	}
+}
+
+type recordingRegistrar struct{}
+
+func (r *recordingRegistrar) RegisterOwnerFence(_ context.Context, _ *agentv1.ConnectionFenceV2) error {
+	return nil
 }

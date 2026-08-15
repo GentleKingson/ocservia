@@ -250,7 +250,13 @@ func (c *Client) NodeConnected(ctx context.Context, nodeID []byte) (bool, error)
 	return true, nil
 }
 
-func (c *Client) UpdateNodeTrust(ctx context.Context, nodeID, endpointID []byte, state transportv1.NodeTrustState, reason string, revision uint64, fenceBinding *agentv1.FenceBindingV2) error {
+// UpdateNodeTrust applies one trust update. operationID is the canonical
+// identity of the exact update carrier; it must be the identity the fence
+// binding was signed over.
+func (c *Client) UpdateNodeTrust(ctx context.Context, nodeID, endpointID []byte, state transportv1.NodeTrustState, reason string, revision uint64, operationID []byte, fenceBinding *agentv1.FenceBindingV2) error {
+	if len(operationID) != 0 && len(operationID) != 16 {
+		return errors.New("trust update operation identity is invalid")
+	}
 	connection, err := c.dial()
 	if err != nil {
 		return err
@@ -258,7 +264,7 @@ func (c *Client) UpdateNodeTrust(ctx context.Context, nodeID, endpointID []byte,
 	defer connection.Close()
 	rpcCtx, cancel := context.WithTimeout(ctx, c.deadline)
 	defer cancel()
-	response, err := transportv1.NewTransportServiceClient(connection).UpdateNodeTrust(rpcCtx, &transportv1.UpdateNodeTrustRequest{NodeId: nodeID, EndpointId: endpointID, State: state, Reason: reason, Revision: revision, FenceBinding: fenceBinding})
+	response, err := transportv1.NewTransportServiceClient(connection).UpdateNodeTrust(rpcCtx, &transportv1.UpdateNodeTrustRequest{NodeId: nodeID, EndpointId: endpointID, State: state, Reason: reason, Revision: revision, OperationId: operationID, FenceBinding: fenceBinding})
 	if err != nil {
 		return fmt.Errorf("update transport node trust: %w", err)
 	}

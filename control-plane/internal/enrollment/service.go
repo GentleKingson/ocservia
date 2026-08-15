@@ -667,13 +667,18 @@ func (s *Service) AuthorizeSession(ctx context.Context, request *transportv1.Aut
 	}
 	negotiated := make([]string, 0, len(handshake.GetCapabilities()))
 	for _, capability := range normalizedCapabilities(handshake.GetCapabilities()) {
+		// The fencing capability is a protocol-level negotiation, never a
+		// per-node business capability: an approval that echoes every
+		// advertised capability must not introduce a second copy of it.
+		if capability == ownersession.FencingCapability {
+			continue
+		}
 		mutationCapable := handshake.GetProtocolMinor() >= ProtocolMinor && !legacyReadOnlySealingFallback
 		if _, ok := approved[capability]; ok && (mutationCapable || strings.HasSuffix(capability, ".read")) {
 			negotiated = append(negotiated, capability)
 		}
 	}
-	// The fencing capability is a protocol-level negotiation, not a per-node
-	// business capability: it only records that the endpoint accepts
+	// The fencing capability records only that the endpoint accepts
 	// ConnectionFenceV2 proofs on mutation carriers.
 	fencingNegotiated := handshake.GetProtocolMinor() >= ProtocolMinor && !legacyReadOnlySealingFallback &&
 		slices.Contains(normalizedCapabilities(handshake.GetCapabilities()), ownersession.FencingCapability)
@@ -681,8 +686,10 @@ func (s *Service) AuthorizeSession(ctx context.Context, request *transportv1.Aut
 		negotiated = append(negotiated, ownersession.FencingCapability)
 	}
 	slices.Sort(negotiated)
+	negotiated = slices.Compact(negotiated)
 	response.ProtocolMinor = handshake.GetProtocolMinor()
 	response.NegotiatedCapabilities = negotiated
+	var openedFence *agentv1.ConnectionFenceV2
 	if handshake.GetProtocolMinor() >= ProtocolMinor {
 		if s.signer == nil {
 			return nil, errors.New("controller session signer is unavailable")
@@ -723,14 +730,47 @@ func (s *Service) AuthorizeSession(ctx context.Context, request *transportv1.Aut
 				return nil, fmt.Errorf("open owner session: %w", fenceErr)
 			}
 			response.ConnectionFence = fence
+			openedFence = fence
 		}
 	}
 	response.Result = agentv1.HandshakeResult_HANDSHAKE_RESULT_ACCEPTED
 	response.MaxMessageSize = min(handshake.GetMaxMessageSize(), MaxMessageSize)
 	if err := tx.Commit(ctx); err != nil {
+		// The session was never granted: end the exact owner term so the
+		// lease does not keep renewing behind a failed authorization.
+		if openedFence != nil {
+			s.closeOpenedSession(ctx, nodeID, openedFence)
+		}
 		return nil, fmt.Errorf("commit session authorization: %w", err)
 	}
 	return response, nil
+}
+
+// closeOpenedSession ends the owner term a handshake opened when the
+// authorization it was opened for failed to commit. The cleanup runs on its
+// own deadline because the request context is typically the cancelled cause
+// of the failure.
+func (s *Service) closeOpenedSession(ctx context.Context, nodeID uuid.UUID, fence *agentv1.ConnectionFenceV2) {
+	closer, ok := s.ownerSessions.(ownersession.SessionCloser)
+	if !ok {
+		return
+	}
+	connectionID, err := fixed16(fence.GetConnectionId())
+	if err != nil {
+		return
+	}
+	cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	defer cancel()
+	_ = closer.CloseSession(cleanupCtx, nodeID, connectionID, int64(fence.GetOwnerEpoch()))
+}
+
+func fixed16(value []byte) ([16]byte, error) {
+	if len(value) != 16 {
+		return [16]byte{}, errors.New("enrollment: value must be 16 bytes")
+	}
+	var fixed [16]byte
+	copy(fixed[:], value)
+	return fixed, nil
 }
 
 func validateEnrollment(request *agentv1.EnrollRequest) error {

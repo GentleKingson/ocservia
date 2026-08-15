@@ -128,6 +128,12 @@ message UpdateNodeTrustRequest {
   // Required when the node has a registered owner fence: owner-driven state
   // updates are fenced and a stale owner must not update connection state.
   ocserv.platform.agent.v1.FenceBindingV2 fence_binding = 6;
+  // Canonical operation identity of this exact update: the first 16 bytes of
+  // SHA-256 over the domain-separated encoding of node_id, endpoint_id,
+  // state, revision, and reason. Controller and transportd derive it
+  // independently from the carrier, and a fence binding must cover exactly
+  // this identity, so one binding cannot authorize a different update.
+  bytes operation_id = 7;
 }
 
 enum TrustUpdateDisposition {
@@ -245,4 +251,10 @@ message TransportEvent {
   bytes payload = 5;
   string traceparent = 6;
   bytes endpoint_id = 7;
+  // Connection-owner term of the connection this event is about: the
+  // connection_id and owner_epoch recorded by its fence. Empty for
+  // connections without a fence. The connection owner uses them to end
+  // exactly its own term when the connection goes away.
+  bytes connection_id = 8;
+  uint64 owner_epoch = 9;
 }

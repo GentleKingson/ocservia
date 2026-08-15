@@ -933,11 +933,12 @@ impl Shared {
         let registered = registry.remove(node_id);
         if let Some(registered) = &registered {
             registered.connection.close(VarInt::from_u32(0x104), reason);
-            self.publish(event(
+            self.publish(event_with_term(
                 node_id,
                 &registered.metadata.endpoint_id,
                 TransportEventType::Disconnected,
                 reason.to_vec(),
+                registered.fence.as_ref(),
             ))
             .await;
         }
@@ -985,10 +986,11 @@ impl Shared {
                 "no owner fence is registered for this node",
             ));
         };
+        // A registered fence means the node is inside the fencing state
+        // machine: its operations are bound unconditionally, regardless of
+        // the global require-fencing policy, which only governs nodes that
+        // never registered a fence.
         let Some(binding) = binding else {
-            if !self.inner.require_fencing {
-                return Ok(());
-            }
             return Err(Status::permission_denied(
                 "an owner fence binding is required for this operation",
             ));
@@ -1013,7 +1015,10 @@ impl Shared {
                 "fence binding capability is not held by the registered owner",
             ));
         }
-        if registered.verified.lease_until_seconds <= unix_now() {
+        if lease_expired_at(
+            registered.verified.lease_until_seconds,
+            registered.verified.lease_until_nanos,
+        ) {
             return Err(Status::failed_precondition(
                 "the registered owner lease has expired",
             ));
@@ -1032,17 +1037,20 @@ impl Shared {
         })
     }
 
-    /// Closes any live session registered under a different fence term after
-    /// a higher-epoch fence was recorded, so a superseded owner cannot keep a
-    /// mutation-capable session open.
+    /// Closes any live mutation-capable session that is not grounded in the
+    /// newly recorded fence term after an Apply: a session of a different
+    /// fence, and equally a fence-less session opened before the node first
+    /// registered an owner fence. Only explicitly read-only legacy sessions
+    /// survive a first registration.
     async fn retire_superseded_owner(&self, node_id: &[u8], registered: &RegisteredFence) {
         let retired = {
             let connections = self.inner.connections.lock().await;
             connections.get(node_id).is_some_and(|entry| {
-                entry
-                    .fence
-                    .as_ref()
-                    .is_some_and(|fence| fence.verified.fence_id != registered.verified.fence_id)
+                entry.session_mode == TransportSessionMode::AuthorizedV11
+                    && entry
+                        .fence
+                        .as_ref()
+                        .is_none_or(|fence| fence.verified.fence_id != registered.verified.fence_id)
             })
         };
         if retired {
@@ -1197,6 +1205,24 @@ impl IrohTransportService {
             if self.shared.inner.require_fencing {
                 return Err(Status::permission_denied(
                     "command dispatch requires a fenced session",
+                ));
+            }
+            // The session carries no fence, but the node may already have a
+            // registered owner fence from a current or superseded term: a
+            // fence-less session predating the first registration must not
+            // keep dispatching bare commands.
+            let node_key = fixed16(node_id)?;
+            let registered = self
+                .shared
+                .inner
+                .fences
+                .lock()
+                .await
+                .get(node_key.as_slice())
+                .cloned();
+            if registered.is_some() {
+                return Err(Status::permission_denied(
+                    "command dispatch requires the registered owner fence",
                 ));
             }
             return Ok(());
@@ -1568,13 +1594,38 @@ impl TransportService for IrohTransportService {
         if state == NodeTrustState::Unspecified {
             return Err(Status::invalid_argument("trust state is unspecified"));
         }
+        // The operation identity is derived from the exact carrier, so the
+        // binding must be replayed with the identical endpoint, state,
+        // revision, and reason to pass; the declared identity must also match
+        // the derivation, which makes the carrier explicit.
+        let node_key = fixed16(&node_id)?;
+        let endpoint_key: [u8; 32] = request
+            .endpoint_id
+            .clone()
+            .try_into()
+            .map_err(|_| Status::invalid_argument("endpoint_id is invalid"))?;
+        let derived_operation_id = ocservia_command_authorization::state_update_operation_id(
+            &node_key,
+            &endpoint_key,
+            u32::try_from(request.state)
+                .map_err(|_| Status::invalid_argument("trust state is invalid"))?,
+            request.revision,
+            &request.reason,
+        );
+        if !request.operation_id.is_empty()
+            && request.operation_id.as_slice() != derived_operation_id.as_slice()
+        {
+            return Err(Status::invalid_argument(
+                "trust update operation identity does not match its carrier",
+            ));
+        }
         self.shared
             .verify_operation_binding(
                 &node_id,
-                None,
+                Some(&endpoint_key),
                 request.fence_binding.as_ref(),
                 FenceOperationKind::StateUpdate,
-                &node_id,
+                &request.operation_id,
             )
             .await?;
         let previous_revision = self.policy.revision(endpoint);
@@ -1631,7 +1682,7 @@ impl TransportService for IrohTransportService {
         let verified = keyring
             .verify_connection_fence_v2(&fence, &fixed16(&node_id)?, &endpoint_id, unix_now())
             .map_err(|_| Status::permission_denied("owner fence is invalid"))?;
-        if verified.lease_until_seconds <= unix_now() {
+        if lease_expired_at(verified.lease_until_seconds, verified.lease_until_nanos) {
             return Err(Status::failed_precondition("owner fence lease has expired"));
         }
         // A live registered session pins the endpoint this fence must claim,
@@ -1878,7 +1929,7 @@ impl SessionHandler {
         let verified = keyring
             .verify_connection_fence_v2(fence, &node_id, &endpoint_id, unix_now())
             .map_err(|_| protocol_error("controller connection fence is invalid"))?;
-        if verified.lease_until_seconds <= unix_now() {
+        if lease_expired_at(verified.lease_until_seconds, verified.lease_until_nanos) {
             return Err(protocol_error("connection owner lease has expired"));
         }
         Ok(Some(RegisteredFence {
@@ -1977,7 +2028,7 @@ impl ProtocolHandler for SessionHandler {
                 session_mode: session.session_mode,
                 authorization_revision: session.authorization_revision,
                 session_expires_at: session.session_expires_at,
-                fence: session.fence,
+                fence: session.fence.clone(),
             },
         );
         if let Some(previous) = replaced {
@@ -1985,20 +2036,22 @@ impl ProtocolHandler for SessionHandler {
                 .connection
                 .close(VarInt::from_u32(0x106), b"superseded connection");
             self.shared
-                .publish(event(
+                .publish(event_with_term(
                     &node_id,
                     &previous.metadata.endpoint_id,
                     TransportEventType::Disconnected,
                     b"connection superseded".to_vec(),
+                    previous.fence.as_ref(),
                 ))
                 .await;
         }
         self.shared
-            .publish(event(
+            .publish(event_with_term(
                 &node_id,
                 &metadata.endpoint_id,
                 TransportEventType::Connected,
                 metadata.path_detail.as_bytes().to_vec(),
+                session.fence.as_ref(),
             ))
             .await;
         drop(registry);
@@ -2028,17 +2081,19 @@ async fn finish_session(
     monitors.0.abort();
     monitors.1.abort();
     let mut registry = shared.inner.connections.lock().await;
-    if registry
+    let finishing = registry
         .get(node_id)
-        .is_some_and(|entry| entry.connection.stable_id() == connection.stable_id())
-    {
+        .filter(|entry| entry.connection.stable_id() == connection.stable_id())
+        .map(|entry| entry.fence.clone());
+    if let Some(fence) = finishing {
         registry.remove(node_id);
         shared
-            .publish(event(
+            .publish(event_with_term(
                 node_id,
                 connection.remote_id().as_bytes(),
                 TransportEventType::Disconnected,
                 b"connection closed".to_vec(),
+                fence.as_ref(),
             ))
             .await;
     }
@@ -2676,6 +2731,27 @@ fn unix_now() -> i64 {
         })
 }
 
+/// Returns the current instant with its nanosecond part. Lease deadlines are
+/// compared at this precision: truncating them to whole seconds would reject
+/// leases that remain valid for up to one second.
+fn unix_now_parts() -> (i64, u32) {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or((i64::MAX, 0), |elapsed| {
+            (
+                i64::try_from(elapsed.as_secs()).unwrap_or(i64::MAX),
+                elapsed.subsec_nanos(),
+            )
+        })
+}
+
+/// Reports whether an ownership lease deadline has passed at the current
+/// nanosecond-precise instant.
+fn lease_expired_at(lease_until_seconds: i64, lease_until_nanos: u32) -> bool {
+    let (now_seconds, now_nanos) = unix_now_parts();
+    (lease_until_seconds, lease_until_nanos) <= (now_seconds, now_nanos)
+}
+
 fn fixed16(value: &[u8]) -> Result<[u8; 16], Status> {
     value
         .try_into()
@@ -2890,7 +2966,7 @@ fn verify_command_carriers(
             "fence binding does not match the dispatched command",
         ));
     }
-    if verified.lease_until_seconds <= now {
+    if lease_expired_at(verified.lease_until_seconds, verified.lease_until_nanos) {
         return Err(Status::failed_precondition(
             "command owner lease has expired",
         ));
@@ -2931,6 +3007,24 @@ fn event(
     event_with_traceparent(node_id, endpoint_id, kind, payload, &new_traceparent())
 }
 
+/// Builds an event that also names the connection-owner term of the
+/// connection it is about, so the owner can end exactly its own term when
+/// the connection goes away.
+fn event_with_term(
+    node_id: &[u8],
+    endpoint_id: &[u8],
+    kind: TransportEventType,
+    payload: Vec<u8>,
+    fence: Option<&RegisteredFence>,
+) -> TransportEvent {
+    let mut transport_event = event(node_id, endpoint_id, kind, payload);
+    if let Some(fence) = fence {
+        transport_event.connection_id = fence.verified.connection_id.to_vec();
+        transport_event.owner_epoch = fence.verified.owner_epoch;
+    }
+    transport_event
+}
+
 fn event_with_traceparent(
     node_id: &[u8],
     endpoint_id: &[u8],
@@ -2946,6 +3040,8 @@ fn event_with_traceparent(
         payload,
         traceparent: traceparent.to_owned(),
         endpoint_id: endpoint_id.to_vec(),
+        connection_id: Vec::new(),
+        owner_epoch: 0,
     }
 }
 
@@ -3080,10 +3176,11 @@ mod tests {
     use ed25519_dalek::SigningKey;
     use iroh::{TransportAddr, Watcher as _, tls::CaTlsConfig};
     use ocservia_contracts::generated::ocserv::platform::agent::v1::{
-        CommandAuthorizationProof, CommandAuthorizationVersion, CommandDeliveryMode,
-        GroupObservation, PrivdReceiptVersion, PrivdResultReceiptV1, PrivilegedCommandKind,
-        PrivilegedResultKind, SealedSecretPurpose, SealedSecretVersion, SealingKeyDescriptorV1,
-        SemanticPayloadHashVersion, ServiceReload, UserObservation,
+        ArtifactGrantV1, ArtifactGrantVersion, CommandAuthorizationProof,
+        CommandAuthorizationVersion, CommandDeliveryMode, GroupObservation, PrivdReceiptVersion,
+        PrivdResultReceiptV1, PrivilegedCommandKind, PrivilegedResultKind, SealedSecretPurpose,
+        SealedSecretVersion, SealingKeyDescriptorV1, SemanticPayloadHashVersion, ServiceReload,
+        UserObservation,
     };
     use ocservia_privd_attestation::{key_id, sign_receipt, verify_receipt};
     use sha2::{Digest as _, Sha256};
@@ -3424,6 +3521,14 @@ mod tests {
             reason: "trust transition fixture".into(),
             revision,
             fence_binding: None,
+            operation_id: ocservia_command_authorization::state_update_operation_id(
+                node_id.as_slice().try_into().expect("node id"),
+                endpoint.as_bytes(),
+                state as u32,
+                revision,
+                "trust transition fixture",
+            )
+            .to_vec(),
         };
         let active = service
             .update_node_trust(Request::new(update(NodeTrustState::Active, 2)))
@@ -4044,12 +4149,20 @@ mod tests {
 
         service
             .update_node_trust(Request::new(UpdateNodeTrustRequest {
-                node_id: metadata.node_id,
+                node_id: metadata.node_id.clone(),
                 endpoint_id: agent_key.public().as_bytes().to_vec(),
                 state: NodeTrustState::Active.into(),
                 reason: "capability authority changed".to_owned(),
                 revision: 2,
                 fence_binding: None,
+                operation_id: ocservia_command_authorization::state_update_operation_id(
+                    metadata.node_id.as_slice().try_into().expect("node id"),
+                    agent_key.public().as_bytes(),
+                    NodeTrustState::Active as u32,
+                    2,
+                    "capability authority changed",
+                )
+                .to_vec(),
             }))
             .await
             .expect("advance connected node authority");
@@ -5449,11 +5562,18 @@ mod tests {
             .await
             .expect("owner-bound close accepted");
 
+        let state_operation_id = ocservia_command_authorization::state_update_operation_id(
+            &node_id,
+            &term.endpoint_id,
+            NodeTrustState::Active as u32,
+            2,
+            "owner bound state update",
+        );
         let state_binding = signed_fence_binding(
             &signing_key,
             &fence,
             FenceOperationKind::StateUpdate,
-            node_id,
+            state_operation_id,
             "ocserv.fencing.v2",
         );
         let response = service
@@ -5464,6 +5584,7 @@ mod tests {
                 reason: "owner bound state update".to_owned(),
                 revision: 2,
                 fence_binding: Some(state_binding),
+                operation_id: state_operation_id.to_vec(),
             }))
             .await
             .expect("owner-bound trust update accepted")
@@ -5472,15 +5593,43 @@ mod tests {
             response.disposition,
             i32::from(TrustUpdateDisposition::Applied)
         );
+    }
 
-        // A binding signed for a different fence term cannot drive state.
+    #[tokio::test]
+    async fn foreign_fence_terms_cannot_drive_state_updates() {
+        let (signing_key, keyring) = controller_keyring();
+        let node_id = *Uuid::now_v7().as_bytes();
+        let service = IrohTransportService::new_with_fence_policy(
+            8,
+            IdentityPolicy::default(),
+            Some(keyring),
+            false,
+        );
+        let (term, fence, _router, _client, _connection) =
+            fenced_agent_session(&service, &signing_key, node_id, 12).await;
+        service
+            .register_owner_fence(Request::new(RegisterOwnerFenceRequest {
+                fence: Some(fence.clone()),
+            }))
+            .await
+            .expect("register owner fence");
+
+        // A binding signed for a different fence term cannot drive state,
+        // even when it names the exact operation identity of the request.
+        let stranger_operation_id = ocservia_command_authorization::state_update_operation_id(
+            &node_id,
+            &term.endpoint_id,
+            NodeTrustState::Revoked as u32,
+            3,
+            "stale owner",
+        );
         let stranger_term = FenceTerm::new(node_id, term.endpoint_id, 99);
         let stranger_fence = signed_controller_fence(&signing_key, &stranger_term, 30);
         let stranger_binding = signed_fence_binding(
             &signing_key,
             &stranger_fence,
             FenceOperationKind::StateUpdate,
-            node_id,
+            stranger_operation_id,
             "ocserv.fencing.v2",
         );
         let error = service
@@ -5491,6 +5640,7 @@ mod tests {
                 reason: "stale owner".to_owned(),
                 revision: 3,
                 fence_binding: Some(stranger_binding),
+                operation_id: stranger_operation_id.to_vec(),
             }))
             .await
             .expect_err("foreign-term binding rejected");
@@ -5539,10 +5689,498 @@ mod tests {
                 reason: "fenceless trust update".to_owned(),
                 revision: 2,
                 fence_binding: None,
+                operation_id: Vec::new(),
             }))
             .await
             .expect_err("fenceless trust update rejected under require-fencing");
         assert_eq!(error.code(), tonic::Code::PermissionDenied);
+    }
+
+    #[tokio::test]
+    async fn registered_fence_rejects_bindingless_operations_without_a_global_flag() {
+        let (signing_key, keyring) = controller_keyring();
+        let node_id = *Uuid::now_v7().as_bytes();
+        let service = IrohTransportService::new_with_fence_policy(
+            8,
+            IdentityPolicy::default(),
+            Some(keyring),
+            false,
+        );
+        let (term, fence, _router, _client, _connection) =
+            fenced_agent_session(&service, &signing_key, node_id, 15).await;
+        service
+            .register_owner_fence(Request::new(RegisterOwnerFenceRequest {
+                fence: Some(fence.clone()),
+            }))
+            .await
+            .expect("register owner fence");
+
+        // A registered fence binds the node's operations regardless of the
+        // global require-fencing flag: fetch, consume, confirm, close, and
+        // state updates without a binding are all rejected.
+        let artifact_id = *Uuid::now_v7().as_bytes();
+        let grant = shape_valid_grant(node_id, artifact_id);
+        let Err(fetch) = service
+            .fetch_artifact(Request::new(FetchArtifactRequest {
+                node_id: node_id.to_vec(),
+                artifact_id: artifact_id.to_vec(),
+                purpose: "certificate_p12".to_owned(),
+                max_bytes: 32,
+                grant: Some(grant.clone()),
+                fence_binding: None,
+            }))
+            .await
+        else {
+            panic!("bindingless fetch must fail with a registered fence");
+        };
+        assert_eq!(fetch.code(), tonic::Code::PermissionDenied);
+        let error = service
+            .consume_artifact(Request::new(ConsumeArtifactRequest {
+                node_id: node_id.to_vec(),
+                grant: Some(grant.clone()),
+                sha256: vec![0x11; 32],
+                size: 32,
+                confirm_only: false,
+                fence_binding: None,
+            }))
+            .await
+            .expect_err("bindingless consume rejected with a registered fence");
+        assert_eq!(error.code(), tonic::Code::PermissionDenied);
+        let error = service
+            .consume_artifact(Request::new(ConsumeArtifactRequest {
+                node_id: node_id.to_vec(),
+                grant: Some(grant),
+                sha256: vec![0x11; 32],
+                size: 32,
+                confirm_only: true,
+                fence_binding: None,
+            }))
+            .await
+            .expect_err("bindingless confirm rejected with a registered fence");
+        assert_eq!(error.code(), tonic::Code::PermissionDenied);
+        let error = service
+            .close_node(Request::new(CloseNodeRequest {
+                node_id: node_id.to_vec(),
+                reason: "operator close".to_owned(),
+                fence_binding: None,
+            }))
+            .await
+            .expect_err("bindingless close rejected with a registered fence");
+        assert_eq!(error.code(), tonic::Code::PermissionDenied);
+        let operation_id = ocservia_command_authorization::state_update_operation_id(
+            &node_id,
+            &term.endpoint_id,
+            NodeTrustState::Active as u32,
+            2,
+            "bindingless state update",
+        );
+        let error = service
+            .update_node_trust(Request::new(UpdateNodeTrustRequest {
+                node_id: node_id.to_vec(),
+                endpoint_id: term.endpoint_id.to_vec(),
+                state: NodeTrustState::Active.into(),
+                reason: "bindingless state update".to_owned(),
+                revision: 2,
+                fence_binding: None,
+                operation_id: operation_id.to_vec(),
+            }))
+            .await
+            .expect_err("bindingless state update rejected with a registered fence");
+        assert_eq!(error.code(), tonic::Code::PermissionDenied);
+
+        service.begin_shutdown().await;
+    }
+
+    /// Registers a real agent session promoted to mutation mode without any
+    /// fence, the state an N-1 connection is in before the first owner fence
+    /// is registered. The returned handles must stay alive.
+    #[allow(clippy::type_complexity)]
+    async fn fenceless_mutation_session(
+        service: &IrohTransportService,
+        node_id: [u8; 16],
+    ) -> ([u8; 32], iroh::protocol::Router, Endpoint, Connection) {
+        let agent_key = SecretKey::generate();
+        let mut handshake = handshake(&agent_key);
+        handshake.node_id = node_id.to_vec();
+        let endpoint_id = *agent_key.public().as_bytes();
+        let router = build_router(
+            SecretKey::generate(),
+            RelayMode::Disabled,
+            identity_policy(&agent_key, &handshake),
+            service,
+        )
+        .await
+        .expect("build router");
+        let client = Endpoint::builder(presets::Minimal)
+            .secret_key(agent_key)
+            .relay_mode(RelayMode::Disabled)
+            .bind()
+            .await
+            .expect("build client");
+        let connection = client
+            .connect(router.endpoint().addr(), AGENT_ALPN)
+            .await
+            .expect("connect agent");
+        let response = send_handshake(&connection, &handshake).await;
+        assert_eq!(response.result, i32::from(HandshakeResult::Accepted));
+        wait_until_registered(service, &handshake.node_id).await;
+        {
+            let mut connections = service.shared.inner.connections.lock().await;
+            let registered = connections
+                .get_mut(&handshake.node_id)
+                .expect("registered session");
+            registered.session_mode = TransportSessionMode::AuthorizedV11;
+            registered.fence = None;
+        }
+        (endpoint_id, router, client, connection)
+    }
+
+    #[tokio::test]
+    async fn first_fence_registration_retires_a_fenceless_mutation_session() {
+        let (signing_key, keyring) = controller_keyring();
+        let node_id = *Uuid::now_v7().as_bytes();
+        let service = IrohTransportService::new_with_fence_policy(
+            8,
+            IdentityPolicy::default(),
+            Some(keyring),
+            false,
+        );
+        let (endpoint_id, _router, _client, connection) =
+            fenceless_mutation_session(&service, node_id).await;
+        assert!(
+            service
+                .shared
+                .inner
+                .connections
+                .lock()
+                .await
+                .get(&node_id.to_vec())
+                .is_some_and(|entry| entry.fence.is_none())
+        );
+
+        // The first fence registration must close the fence-less mutation
+        // session instead of leaving it beside the fenced term.
+        let fence =
+            signed_controller_fence(&signing_key, &FenceTerm::new(node_id, endpoint_id, 3), 30);
+        let response = service
+            .register_owner_fence(Request::new(RegisterOwnerFenceRequest {
+                fence: Some(fence),
+            }))
+            .await
+            .expect("register first owner fence")
+            .into_inner();
+        assert_eq!(
+            response.disposition,
+            i32::from(OwnerFenceDisposition::Applied)
+        );
+        assert!(
+            service
+                .shared
+                .inner
+                .connections
+                .lock()
+                .await
+                .get(&node_id.to_vec())
+                .is_none(),
+            "the fence-less mutation session must be retired"
+        );
+        tokio::time::timeout(Duration::from_secs(2), connection.closed())
+            .await
+            .expect("retired connection was closed");
+
+        service.begin_shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn registered_fence_rejects_bare_commands_on_fenceless_sessions() {
+        let (signing_key, keyring) = controller_keyring();
+        let node_id = *Uuid::now_v7().as_bytes();
+        let service = IrohTransportService::new_with_fence_policy(
+            8,
+            IdentityPolicy::default(),
+            Some(keyring),
+            false,
+        );
+        // Register the fence before the session exists, then open a
+        // fence-less mutation session: its bare commands must be rejected
+        // because the node is inside the fencing state machine.
+        let endpoint_id = [4_u8; 32];
+        let fence =
+            signed_controller_fence(&signing_key, &FenceTerm::new(node_id, endpoint_id, 2), 30);
+        service
+            .register_owner_fence(Request::new(RegisterOwnerFenceRequest {
+                fence: Some(fence),
+            }))
+            .await
+            .expect("register owner fence");
+        let (_endpoint, _router, _client, _connection) =
+            fenceless_mutation_session(&service, node_id).await;
+
+        let error = service
+            .send_command(Request::new(SendCommandRequest {
+                node_id: node_id.to_vec(),
+                command_envelope: command_envelope(&node_id, &new_traceparent(), String::new()),
+            }))
+            .await
+            .expect_err("bare command rejected because a fence is registered");
+        assert_eq!(error.code(), tonic::Code::PermissionDenied);
+
+        service.begin_shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn state_update_binding_binds_the_exact_update_carrier() {
+        let (signing_key, keyring) = controller_keyring();
+        let node_id = *Uuid::now_v7().as_bytes();
+        let service = IrohTransportService::new_with_fence_policy(
+            8,
+            IdentityPolicy::default(),
+            Some(keyring),
+            false,
+        );
+        let (term, fence, _router, _client, _connection) =
+            fenced_agent_session(&service, &signing_key, node_id, 21).await;
+        service
+            .register_owner_fence(Request::new(RegisterOwnerFenceRequest {
+                fence: Some(fence.clone()),
+            }))
+            .await
+            .expect("register owner fence");
+
+        let reason = "carrier binding fixture";
+        let operation_id = ocservia_command_authorization::state_update_operation_id(
+            &node_id,
+            &term.endpoint_id,
+            NodeTrustState::Active as u32,
+            4,
+            reason,
+        );
+        let binding = signed_fence_binding(
+            &signing_key,
+            &fence,
+            FenceOperationKind::StateUpdate,
+            operation_id,
+            "ocserv.fencing.v2",
+        );
+        let tamper = |endpoint: [u8; 32], state: NodeTrustState, revision: u64, reason: &str| {
+            UpdateNodeTrustRequest {
+                node_id: node_id.to_vec(),
+                endpoint_id: endpoint.to_vec(),
+                state: state.into(),
+                reason: reason.to_owned(),
+                revision,
+                fence_binding: Some(binding.clone()),
+                operation_id: ocservia_command_authorization::state_update_operation_id(
+                    &node_id,
+                    &endpoint,
+                    state as u32,
+                    revision,
+                    reason,
+                )
+                .to_vec(),
+            }
+        };
+        let mut other_endpoint = term.endpoint_id;
+        other_endpoint[0] ^= 1;
+        for request in [
+            tamper(other_endpoint, NodeTrustState::Active, 4, reason),
+            tamper(term.endpoint_id, NodeTrustState::Revoked, 4, reason),
+            tamper(term.endpoint_id, NodeTrustState::Active, 5, reason),
+            tamper(
+                term.endpoint_id,
+                NodeTrustState::Active,
+                4,
+                "different reason",
+            ),
+        ] {
+            let error = service
+                .update_node_trust(Request::new(request))
+                .await
+                .expect_err("tampered state update carrier rejected");
+            assert!(
+                matches!(
+                    error.code(),
+                    tonic::Code::PermissionDenied | tonic::Code::InvalidArgument
+                ),
+                "unexpected rejection code {}",
+                error.code()
+            );
+        }
+
+        service.begin_shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn lease_deadlines_keep_nanosecond_precision() {
+        let (signing_key, keyring) = controller_keyring();
+        let node_id = *Uuid::now_v7().as_bytes();
+        let endpoint_id = [6_u8; 32];
+        let service = IrohTransportService::new_with_fence_policy(
+            8,
+            IdentityPolicy::default(),
+            Some(keyring),
+            false,
+        );
+
+        // A lease valid for another fraction of a second inside the current
+        // second must be accepted; whole-second truncation would reject it.
+        let fractional = signed_controller_fence_until(
+            &signing_key,
+            &FenceTerm::new(node_id, endpoint_id, 9),
+            SystemTime::now() + Duration::from_millis(400),
+        );
+        let response = service
+            .register_owner_fence(Request::new(RegisterOwnerFenceRequest {
+                fence: Some(fractional),
+            }))
+            .await
+            .expect("sub-second remaining lease accepted")
+            .into_inner();
+        assert_eq!(
+            response.disposition,
+            i32::from(OwnerFenceDisposition::Applied)
+        );
+
+        // A lease that expired a fraction of a second ago inside the current
+        // second must be rejected.
+        let expired = signed_controller_fence_until(
+            &signing_key,
+            &FenceTerm::new(node_id, endpoint_id, 10),
+            SystemTime::now() - Duration::from_millis(150),
+        );
+        let error = service
+            .register_owner_fence(Request::new(RegisterOwnerFenceRequest {
+                fence: Some(expired),
+            }))
+            .await
+            .expect_err("sub-second expired lease rejected");
+        assert_eq!(error.code(), tonic::Code::FailedPrecondition);
+    }
+
+    #[tokio::test]
+    async fn transport_events_carry_the_owner_term() {
+        let (signing_key, keyring) = controller_keyring();
+        let node_id = *Uuid::now_v7().as_bytes();
+        let service = IrohTransportService::new_with_fence_policy(
+            8,
+            IdentityPolicy::default(),
+            Some(keyring),
+            false,
+        );
+        let (term, fence, _router, _client, _connection) =
+            fenced_agent_session(&service, &signing_key, node_id, 33).await;
+        service
+            .register_owner_fence(Request::new(RegisterOwnerFenceRequest {
+                fence: Some(fence.clone()),
+            }))
+            .await
+            .expect("register owner fence");
+        let mut events = service
+            .watch_events(Request::new(WatchEventsRequest {
+                after_event_id: Vec::new(),
+            }))
+            .await
+            .expect("watch events")
+            .into_inner();
+
+        let close_binding = signed_fence_binding(
+            &signing_key,
+            &fence,
+            FenceOperationKind::ConnectionClose,
+            node_id,
+            "ocserv.fencing.v2",
+        );
+        service
+            .close_node(Request::new(CloseNodeRequest {
+                node_id: node_id.to_vec(),
+                reason: "operator close".to_owned(),
+                fence_binding: Some(close_binding),
+            }))
+            .await
+            .expect("owner-bound close accepted");
+
+        let event = next_event(&mut events, TransportEventType::Disconnected).await;
+        assert_eq!(event.node_id, node_id.to_vec());
+        assert_eq!(event.connection_id, term.connection_id.to_vec());
+        assert_eq!(event.owner_epoch, term.owner_epoch);
+
+        service.begin_shutdown().await;
+    }
+
+    fn shape_valid_grant(node_id: [u8; 16], artifact_id: [u8; 16]) -> ArtifactGrantV1 {
+        let now = now_timestamp();
+        ArtifactGrantV1 {
+            version: ArtifactGrantVersion::V1.into(),
+            key_id: "ed25519-sha256:test-relay-only".to_owned(),
+            node_id: node_id.to_vec(),
+            artifact_id: artifact_id.to_vec(),
+            certificate_id: vec![0_u8; 16],
+            certificate_version: 1,
+            operation_id: vec![0_u8; 16],
+            authorized_subject: "review".to_owned(),
+            purpose: "certificate_p12".to_owned(),
+            max_bytes: 32,
+            issued_at: Some(now),
+            expires_at: Some(prost_types::Timestamp {
+                seconds: now.seconds + 60,
+                nanos: now.nanos,
+            }),
+            grant_id: Uuid::now_v7().as_bytes().to_vec(),
+            signature: vec![0_u8; 64],
+        }
+    }
+
+    /// Signs a fence whose lease deadline carries sub-second precision, so
+    /// nanosecond boundary behavior is observable.
+    fn signed_controller_fence_until(
+        signing_key: &SigningKey,
+        term: &FenceTerm,
+        lease_until: SystemTime,
+    ) -> ConnectionFenceV2 {
+        let lease_until = prost_types::Timestamp::from(lease_until);
+        // The canonical contract requires issued_at < lease_until, even for a
+        // lease that already expired a fraction of a second ago.
+        let issued = prost_types::Timestamp::from(SystemTime::now() - Duration::from_mins(1));
+        let claims = ConnectionFenceClaimsV2 {
+            signature_version: ocservia_command_authorization::FENCE_SIGNATURE_VERSION_ED25519_V1,
+            key_id: verification_key_id(&signing_key.verifying_key()),
+            fence_id: term.fence_id,
+            node_id: term.node_id,
+            endpoint_id: term.endpoint_id,
+            owner_instance_id: term.owner_instance_id,
+            owner_incarnation: term.owner_incarnation,
+            owner_epoch: term.owner_epoch,
+            connection_id: term.connection_id,
+            authorization_revision: term.authorization_revision,
+            capabilities: term.capabilities.clone(),
+            lease_until_seconds: lease_until.seconds,
+            lease_until_nanos: u32::try_from(lease_until.nanos.max(0)).expect("lease nanos"),
+            issued_at_seconds: issued.seconds,
+            issued_at_nanos: u32::try_from(issued.nanos.max(0)).expect("issued nanos"),
+            expires_at_seconds: lease_until.seconds.max(issued.seconds) + 300,
+            expires_at_nanos: 0,
+        };
+        let canonical = canonical_connection_fence_v2(&claims).expect("canonical fence");
+        ConnectionFenceV2 {
+            signature_version: FenceSignatureVersion::Ed25519V1.into(),
+            key_id: claims.key_id,
+            fence_id: term.fence_id.to_vec(),
+            node_id: term.node_id.to_vec(),
+            endpoint_id: term.endpoint_id.to_vec(),
+            owner_instance_id: term.owner_instance_id.to_vec(),
+            owner_incarnation: term.owner_incarnation,
+            owner_epoch: term.owner_epoch,
+            connection_id: term.connection_id.to_vec(),
+            authorization_revision: term.authorization_revision,
+            capabilities: term.capabilities.clone(),
+            lease_until: Some(lease_until),
+            issued_at: Some(issued),
+            expires_at: Some(prost_types::Timestamp {
+                seconds: claims.expires_at_seconds,
+                nanos: 0,
+            }),
+            signature: signing_key.sign(&canonical).to_bytes().to_vec(),
+        }
     }
 
     #[test]
@@ -5560,7 +6198,9 @@ mod tests {
                 authorization_revision: term.authorization_revision,
                 capabilities: term.capabilities.clone(),
                 lease_until_seconds: unix_now() + 30,
+                lease_until_nanos: 0,
                 expires_at_seconds: unix_now() + 300,
+                expires_at_nanos: 0,
             },
             fence: ConnectionFenceV2::default(),
             endpoint_id: endpoint,
@@ -5584,7 +6224,9 @@ mod tests {
                 authorization_revision: term.authorization_revision,
                 capabilities: term.capabilities.clone(),
                 lease_until_seconds: unix_now() + 30,
+                lease_until_nanos: 0,
                 expires_at_seconds: unix_now() + 300,
+                expires_at_nanos: 0,
             },
             fence: ConnectionFenceV2::default(),
             endpoint_id: endpoint,

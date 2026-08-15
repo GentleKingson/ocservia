@@ -357,7 +357,9 @@ impl ControllerCommandKeyring {
             authorization_revision: claims.authorization_revision,
             capabilities: claims.capabilities,
             lease_until_seconds: claims.lease_until_seconds,
+            lease_until_nanos: claims.lease_until_nanos,
             expires_at_seconds: claims.expires_at_seconds,
+            expires_at_nanos: claims.expires_at_nanos,
         })
     }
 
@@ -757,7 +759,9 @@ pub struct FenceBindingClaimsV2 {
 
 /// A verified connection-owner fence term. transportd and the Agent use the
 /// recorded owner tuple to match operation bindings against the fence of the
-/// actual dispatch attempt.
+/// actual dispatch attempt. The lease deadline keeps its nanosecond part:
+/// truncating it to whole seconds would reject leases that are still valid
+/// for up to one second.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct VerifiedConnectionFenceV2 {
     pub fence_id: [u8; 16],
@@ -768,7 +772,55 @@ pub struct VerifiedConnectionFenceV2 {
     pub authorization_revision: u64,
     pub capabilities: Vec<String>,
     pub lease_until_seconds: i64,
+    pub lease_until_nanos: u32,
     pub expires_at_seconds: i64,
+    pub expires_at_nanos: u32,
+}
+
+impl VerifiedConnectionFenceV2 {
+    /// Reports whether the ownership lease deadline has passed at the given
+    /// nanosecond-precise instant.
+    #[must_use]
+    pub fn lease_expired(&self, now_seconds: i64, now_nanos: u32) -> bool {
+        (self.lease_until_seconds, self.lease_until_nanos) <= (now_seconds, now_nanos)
+    }
+}
+
+/// The domain separator of the canonical state-update operation identity.
+/// One node-trust update is one operation: the Controller derives the
+/// identity from the exact carrier and signs a fence binding over it, while
+/// transportd derives it again independently, so a binding for one update
+/// can never authorize a different endpoint, state, revision, or reason.
+pub const STATE_UPDATE_OPERATION_DOMAIN: &[u8] = b"ocservia/state-update-operation/v1\0";
+
+/// Derives the canonical operation identity of one node trust update: the
+/// first 16 bytes of SHA-256 over the domain separator, node id, endpoint
+/// id, state code, revision, byte length of the reason, and the reason.
+#[must_use]
+pub fn state_update_operation_id(
+    node_id: &[u8; 16],
+    endpoint_id: &[u8; 32],
+    state: u32,
+    revision: u64,
+    reason: &str,
+) -> [u8; 16] {
+    let mut digest = Sha256::new();
+    digest.update(STATE_UPDATE_OPERATION_DOMAIN);
+    digest.update(node_id);
+    digest.update(endpoint_id);
+    digest.update(state.to_be_bytes());
+    digest.update(revision.to_be_bytes());
+    let reason_bytes = reason.as_bytes();
+    digest.update(
+        u32::try_from(reason_bytes.len())
+            .unwrap_or(u32::MAX)
+            .to_be_bytes(),
+    );
+    digest.update(reason_bytes);
+    let digest = digest.finalize();
+    let mut operation_id = [0_u8; 16];
+    operation_id.copy_from_slice(&digest[..16]);
+    operation_id
 }
 
 impl FenceBindingClaimsV2 {
@@ -1844,6 +1896,41 @@ mod tests {
     use serde_json::Value;
 
     use super::*;
+
+    #[test]
+    fn state_update_operation_identity_matches_the_shared_vector() {
+        // The same vector is asserted by the Go ownersession package; it pins
+        // the domain-separated derivation both sides compute independently.
+        let node_id: [u8; 16] =
+            core::array::from_fn(|index| u8::try_from(index + 1).expect("byte"));
+        let endpoint_id: [u8; 32] =
+            core::array::from_fn(|index| u8::try_from(index).expect("byte"));
+        let operation_id =
+            state_update_operation_id(&node_id, &endpoint_id, 2, 7, "review fixture");
+        assert_eq!(
+            hex::encode(operation_id),
+            "f0229ecacf9bb65589e1897c668a48f7"
+        );
+        // Any carrier change must change the identity.
+        assert_ne!(
+            state_update_operation_id(&node_id, &endpoint_id, 1, 7, "review fixture"),
+            operation_id
+        );
+        assert_ne!(
+            state_update_operation_id(&node_id, &endpoint_id, 2, 8, "review fixture"),
+            operation_id
+        );
+        assert_ne!(
+            state_update_operation_id(&node_id, &endpoint_id, 2, 7, "review fixture "),
+            operation_id
+        );
+        let mut other_endpoint = endpoint_id;
+        other_endpoint[0] ^= 1;
+        assert_ne!(
+            state_update_operation_id(&node_id, &other_endpoint, 2, 7, "review fixture"),
+            operation_id
+        );
+    }
 
     #[test]
     fn rust_verifies_go_signatures_and_shared_canonical_vectors() {
