@@ -13,6 +13,7 @@ use ed25519_dalek::pkcs8::DecodePublicKey as _;
 use ed25519_dalek::{Signature, VerifyingKey};
 use ocservia_contracts::generated::ocserv::platform::agent::v1::{
     ArtifactGrantV1, ArtifactGrantVersion, CommandAuthorizationVersion, CommandEnvelope,
+    ConnectionFenceV2, FenceBindingV2, FenceOperationKind, FenceSignatureVersion,
     SealedSecretPurpose, SealedSecretV1, SealedSecretVersion, SemanticPayloadHashVersion,
     SessionGrantV1, SessionGrantVersion, command_envelope,
 };
@@ -24,8 +25,14 @@ pub const COMMAND_PROTOCOL_VERSION: &str = "1.1";
 const DOMAIN_SEPARATOR: &[u8] = b"ocservia/controller-command/v1\0";
 const SESSION_GRANT_DOMAIN_SEPARATOR: &[u8] = b"ocservia/controller-session-grant/v1\0";
 const ARTIFACT_GRANT_DOMAIN_SEPARATOR: &[u8] = b"ocservia/artifact-grant/v1\0";
+const CONNECTION_FENCE_V2_DOMAIN_SEPARATOR: &[u8] = b"ocservia/connection-fence/v2\0";
+const FENCE_BINDING_V2_DOMAIN_SEPARATOR: &[u8] = b"ocservia/fence-binding/v2\0";
 const KEY_ID_PREFIX: &str = "ed25519-sha256:";
 const MAX_FUTURE_SKEW_SECONDS: i64 = 300;
+
+/// The only signature version of the frozen V2 fence contract: Ed25519 with
+/// the sha256 key identifier scheme.
+pub const FENCE_SIGNATURE_VERSION_ED25519_V1: u32 = 1;
 
 /// Independent, non-Protobuf `CommandAuthorizationV1` claims.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -292,6 +299,116 @@ impl ControllerCommandKeyring {
             negotiated_capabilities: claims.negotiated_capabilities,
             expires_at_seconds: claims.expires_at_seconds,
         })
+    }
+
+    /// Verifies a Controller-signed per-node connection-owner fence for the
+    /// local node and endpoint. transportd relays fences but cannot mint or
+    /// alter them; the lease deadline bound here is the PostgreSQL-time
+    /// deadline recorded by the database ownership authority.
+    ///
+    /// # Errors
+    ///
+    /// Returns an authorization error when the fence is malformed, expired,
+    /// signed by an unknown key, has an invalid signature, or does not match
+    /// the expected node and endpoint.
+    pub fn verify_connection_fence_v2(
+        &self,
+        fence: &ConnectionFenceV2,
+        expected_node_id: &[u8; 16],
+        expected_endpoint_id: &[u8; 32],
+        now_unix_seconds: i64,
+    ) -> Result<VerifiedConnectionFenceV2, AuthorizationError> {
+        let claims = connection_fence_claims_v2(fence)?;
+        let key = self
+            .keys
+            .get(&claims.key_id)
+            .ok_or(AuthorizationError::UnknownKey)?;
+        if &claims.node_id != expected_node_id {
+            return Err(AuthorizationError::ClaimsInvalid(
+                "connection_fence_node_mismatch",
+            ));
+        }
+        if &claims.endpoint_id != expected_endpoint_id {
+            return Err(AuthorizationError::ClaimsInvalid(
+                "connection_fence_endpoint_mismatch",
+            ));
+        }
+        if claims.expires_at_seconds <= now_unix_seconds {
+            return Err(AuthorizationError::ClaimsInvalid(
+                "connection_fence_expired",
+            ));
+        }
+        if claims.issued_at_seconds > now_unix_seconds.saturating_add(MAX_FUTURE_SKEW_SECONDS) {
+            return Err(AuthorizationError::ClaimsInvalid(
+                "connection_fence_clock_skew",
+            ));
+        }
+        let canonical = canonical_connection_fence_v2(&claims)?;
+        let signature = Signature::from_slice(&fence.signature)
+            .map_err(|_| AuthorizationError::SignatureMalformed)?;
+        key.verify_strict(&canonical, &signature)
+            .map_err(|_| AuthorizationError::SignatureInvalid)?;
+        Ok(VerifiedConnectionFenceV2 {
+            fence_id: claims.fence_id,
+            owner_instance_id: claims.owner_instance_id,
+            owner_incarnation: claims.owner_incarnation,
+            owner_epoch: claims.owner_epoch,
+            connection_id: claims.connection_id,
+            authorization_revision: claims.authorization_revision,
+            capabilities: claims.capabilities,
+            lease_until_seconds: claims.lease_until_seconds,
+            expires_at_seconds: claims.expires_at_seconds,
+        })
+    }
+
+    /// Verifies a Controller-signed operation binding for the local node and
+    /// endpoint. The caller matches the returned claims against the fence
+    /// recorded on the actual dispatch attempt with
+    /// [`FenceBindingClaimsV2::matches_fence`], so late legitimate results
+    /// are accepted while results recorded under any other term are
+    /// rejected.
+    ///
+    /// # Errors
+    ///
+    /// Returns an authorization error when the binding is malformed, expired,
+    /// signed by an unknown key, has an invalid signature, or does not match
+    /// the expected node and endpoint.
+    pub fn verify_fence_binding_v2(
+        &self,
+        binding: &FenceBindingV2,
+        expected_node_id: &[u8; 16],
+        expected_endpoint_id: &[u8; 32],
+        now_unix_seconds: i64,
+    ) -> Result<FenceBindingClaimsV2, AuthorizationError> {
+        let claims = fence_binding_claims_v2(binding)?;
+        let key = self
+            .keys
+            .get(&claims.key_id)
+            .ok_or(AuthorizationError::UnknownKey)?;
+        if &claims.node_id != expected_node_id {
+            return Err(AuthorizationError::ClaimsInvalid(
+                "fence_binding_node_mismatch",
+            ));
+        }
+        if &claims.endpoint_id != expected_endpoint_id {
+            return Err(AuthorizationError::ClaimsInvalid(
+                "fence_binding_endpoint_mismatch",
+            ));
+        }
+        if claims.expires_at_seconds <= now_unix_seconds {
+            return Err(AuthorizationError::ClaimsInvalid("fence_binding_expired"));
+        }
+        if claims.issued_at_seconds > now_unix_seconds.saturating_add(MAX_FUTURE_SKEW_SECONDS) {
+            return Err(AuthorizationError::ClaimsInvalid(
+                "fence_binding_clock_skew",
+            ));
+        }
+        let canonical = canonical_fence_binding_v2(&claims)?;
+        let signature = Signature::from_slice(&binding.signature)
+            .map_err(|_| AuthorizationError::SignatureMalformed)?;
+        key.verify_strict(&canonical, &signature)
+            .map_err(|_| AuthorizationError::SignatureInvalid)?;
+        Ok(claims)
     }
 
     /// Verifies a Controller-signed artifact grant for the local node and the
@@ -590,6 +707,360 @@ pub fn canonical_session_grant_v1(
 pub fn verification_key_id(key: &VerifyingKey) -> String {
     let digest = Sha256::digest(key.as_bytes());
     format!("{KEY_ID_PREFIX}{}", hex::encode(digest))
+}
+
+/// Independent, non-Protobuf canonical claims for one per-node
+/// connection-owner fence term.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ConnectionFenceClaimsV2 {
+    pub signature_version: u32,
+    pub key_id: String,
+    pub fence_id: [u8; 16],
+    pub node_id: [u8; 16],
+    pub endpoint_id: [u8; 32],
+    pub owner_instance_id: [u8; 16],
+    pub owner_incarnation: u64,
+    pub owner_epoch: u64,
+    pub connection_id: [u8; 16],
+    pub authorization_revision: u64,
+    pub capabilities: Vec<String>,
+    pub lease_until_seconds: i64,
+    pub lease_until_nanos: u32,
+    pub issued_at_seconds: i64,
+    pub issued_at_nanos: u32,
+    pub expires_at_seconds: i64,
+    pub expires_at_nanos: u32,
+}
+
+/// Independent, non-Protobuf canonical claims binding one operation identity
+/// to the exact fence term of its dispatch attempt.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FenceBindingClaimsV2 {
+    pub signature_version: u32,
+    pub key_id: String,
+    pub operation_kind: u32,
+    pub operation_id: [u8; 16],
+    pub fence_id: [u8; 16],
+    pub node_id: [u8; 16],
+    pub endpoint_id: [u8; 32],
+    pub owner_instance_id: [u8; 16],
+    pub owner_incarnation: u64,
+    pub owner_epoch: u64,
+    pub connection_id: [u8; 16],
+    pub authorization_revision: u64,
+    pub capability: String,
+    pub issued_at_seconds: i64,
+    pub issued_at_nanos: u32,
+    pub expires_at_seconds: i64,
+    pub expires_at_nanos: u32,
+}
+
+/// A verified connection-owner fence term. transportd and the Agent use the
+/// recorded owner tuple to match operation bindings against the fence of the
+/// actual dispatch attempt.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct VerifiedConnectionFenceV2 {
+    pub fence_id: [u8; 16],
+    pub owner_instance_id: [u8; 16],
+    pub owner_incarnation: u64,
+    pub owner_epoch: u64,
+    pub connection_id: [u8; 16],
+    pub authorization_revision: u64,
+    pub capabilities: Vec<String>,
+    pub lease_until_seconds: i64,
+    pub expires_at_seconds: i64,
+}
+
+impl FenceBindingClaimsV2 {
+    /// Reports whether this binding was signed for exactly the fence term of
+    /// the recorded dispatch attempt. A late legitimate result still matches
+    /// its own attempt's fence; a result recorded under any other epoch,
+    /// connection, or owner does not.
+    #[must_use]
+    pub fn matches_fence(&self, fence: &VerifiedConnectionFenceV2) -> bool {
+        self.fence_id == fence.fence_id
+            && self.owner_instance_id == fence.owner_instance_id
+            && self.owner_incarnation == fence.owner_incarnation
+            && self.owner_epoch == fence.owner_epoch
+            && self.connection_id == fence.connection_id
+            && self.authorization_revision == fence.authorization_revision
+    }
+}
+
+/// Projects a Controller-signed `ConnectionFenceV2` into the independent
+/// claims model.
+///
+/// # Errors
+///
+/// Rejects unsupported signature versions and malformed fixed-width fields.
+pub fn connection_fence_claims_v2(
+    fence: &ConnectionFenceV2,
+) -> Result<ConnectionFenceClaimsV2, AuthorizationError> {
+    if signature_version_value(fence.signature_version) != Some(FENCE_SIGNATURE_VERSION_ED25519_V1)
+    {
+        return Err(AuthorizationError::UnsupportedVersion);
+    }
+    let lease_until = fence
+        .lease_until
+        .as_ref()
+        .ok_or(AuthorizationError::ClaimsInvalid(
+            "connection_fence_lease_until_missing",
+        ))?;
+    let issued_at = fence
+        .issued_at
+        .as_ref()
+        .ok_or(AuthorizationError::ClaimsInvalid(
+            "connection_fence_issued_at_missing",
+        ))?;
+    let expires_at = fence
+        .expires_at
+        .as_ref()
+        .ok_or(AuthorizationError::ClaimsInvalid(
+            "connection_fence_expires_at_missing",
+        ))?;
+    Ok(ConnectionFenceClaimsV2 {
+        signature_version: FENCE_SIGNATURE_VERSION_ED25519_V1,
+        key_id: fence.key_id.clone(),
+        fence_id: fixed::<16>(&fence.fence_id, "connection_fence_fence_id_invalid")?,
+        node_id: fixed::<16>(&fence.node_id, "connection_fence_node_invalid")?,
+        endpoint_id: fixed::<32>(&fence.endpoint_id, "connection_fence_endpoint_invalid")?,
+        owner_instance_id: fixed::<16>(
+            &fence.owner_instance_id,
+            "connection_fence_owner_instance_invalid",
+        )?,
+        owner_incarnation: fence.owner_incarnation,
+        owner_epoch: fence.owner_epoch,
+        connection_id: fixed::<16>(&fence.connection_id, "connection_fence_connection_invalid")?,
+        authorization_revision: fence.authorization_revision,
+        capabilities: fence.capabilities.clone(),
+        lease_until_seconds: lease_until.seconds,
+        lease_until_nanos: timestamp_nanos(lease_until.nanos)?,
+        issued_at_seconds: issued_at.seconds,
+        issued_at_nanos: timestamp_nanos(issued_at.nanos)?,
+        expires_at_seconds: expires_at.seconds,
+        expires_at_nanos: timestamp_nanos(expires_at.nanos)?,
+    })
+}
+
+/// Produces the exact bytes signed for `ConnectionFenceV2` without
+/// serializing Protobuf. The domain separator is disjoint from every V1
+/// contract, so V1 and V2 proofs can never cross-validate.
+///
+/// # Errors
+///
+/// Rejects invalid signature versions, key IDs, epochs, revisions,
+/// timestamps, lease bounds, and unsorted or duplicate capabilities.
+pub fn canonical_connection_fence_v2(
+    claims: &ConnectionFenceClaimsV2,
+) -> Result<Vec<u8>, AuthorizationError> {
+    if claims.signature_version != FENCE_SIGNATURE_VERSION_ED25519_V1
+        || claims.key_id.is_empty()
+        || claims.key_id.len() > 128
+        || claims.owner_epoch == 0
+        || claims.authorization_revision == 0
+        || claims.capabilities.len() > 128
+        || claims.lease_until_nanos >= 1_000_000_000
+        || claims.issued_at_nanos >= 1_000_000_000
+        || claims.expires_at_nanos >= 1_000_000_000
+        || !deadline_strictly_after(
+            claims.lease_until_seconds,
+            claims.lease_until_nanos,
+            claims.issued_at_seconds,
+            claims.issued_at_nanos,
+        )
+        || !deadline_not_after(
+            claims.lease_until_seconds,
+            claims.lease_until_nanos,
+            claims.expires_at_seconds,
+            claims.expires_at_nanos,
+        )
+        || claims.expires_at_seconds < claims.issued_at_seconds
+        || (claims.expires_at_seconds == claims.issued_at_seconds
+            && claims.expires_at_nanos <= claims.issued_at_nanos)
+    {
+        return Err(AuthorizationError::ClaimsInvalid(
+            "connection_fence_claims_invalid",
+        ));
+    }
+    let mut previous: Option<&str> = None;
+    for capability in &claims.capabilities {
+        if capability.is_empty()
+            || capability.len() > 128
+            || previous.is_some_and(|value| value >= capability.as_str())
+        {
+            return Err(AuthorizationError::ClaimsInvalid(
+                "connection_fence_capabilities_invalid",
+            ));
+        }
+        previous = Some(capability);
+    }
+    let mut encoded = Vec::with_capacity(640);
+    encoded.extend_from_slice(CONNECTION_FENCE_V2_DOMAIN_SEPARATOR);
+    encoded.extend_from_slice(&claims.signature_version.to_be_bytes());
+    append_string(&mut encoded, &claims.key_id)?;
+    encoded.extend_from_slice(&claims.fence_id);
+    encoded.extend_from_slice(&claims.node_id);
+    encoded.extend_from_slice(&claims.endpoint_id);
+    encoded.extend_from_slice(&claims.owner_instance_id);
+    encoded.extend_from_slice(&claims.owner_incarnation.to_be_bytes());
+    encoded.extend_from_slice(&claims.owner_epoch.to_be_bytes());
+    encoded.extend_from_slice(&claims.connection_id);
+    encoded.extend_from_slice(&claims.authorization_revision.to_be_bytes());
+    encoded.extend_from_slice(
+        &u32::try_from(claims.capabilities.len())
+            .map_err(|_| {
+                AuthorizationError::ClaimsInvalid("connection_fence_capabilities_invalid")
+            })?
+            .to_be_bytes(),
+    );
+    for capability in &claims.capabilities {
+        append_string(&mut encoded, capability)?;
+    }
+    encoded.extend_from_slice(&claims.lease_until_seconds.to_be_bytes());
+    encoded.extend_from_slice(&claims.lease_until_nanos.to_be_bytes());
+    encoded.extend_from_slice(&claims.issued_at_seconds.to_be_bytes());
+    encoded.extend_from_slice(&claims.issued_at_nanos.to_be_bytes());
+    encoded.extend_from_slice(&claims.expires_at_seconds.to_be_bytes());
+    encoded.extend_from_slice(&claims.expires_at_nanos.to_be_bytes());
+    Ok(encoded)
+}
+
+/// Projects a Controller-signed `FenceBindingV2` into the independent claims
+/// model.
+///
+/// # Errors
+///
+/// Rejects unsupported signature versions and malformed fixed-width fields.
+pub fn fence_binding_claims_v2(
+    binding: &FenceBindingV2,
+) -> Result<FenceBindingClaimsV2, AuthorizationError> {
+    if signature_version_value(binding.signature_version)
+        != Some(FENCE_SIGNATURE_VERSION_ED25519_V1)
+    {
+        return Err(AuthorizationError::UnsupportedVersion);
+    }
+    let issued_at = binding
+        .issued_at
+        .as_ref()
+        .ok_or(AuthorizationError::ClaimsInvalid(
+            "fence_binding_issued_at_missing",
+        ))?;
+    let expires_at = binding
+        .expires_at
+        .as_ref()
+        .ok_or(AuthorizationError::ClaimsInvalid(
+            "fence_binding_expires_at_missing",
+        ))?;
+    Ok(FenceBindingClaimsV2 {
+        signature_version: FENCE_SIGNATURE_VERSION_ED25519_V1,
+        key_id: binding.key_id.clone(),
+        operation_kind: fence_operation_kind_value(binding.operation_kind)?,
+        operation_id: fixed::<16>(&binding.operation_id, "fence_binding_operation_invalid")?,
+        fence_id: fixed::<16>(&binding.fence_id, "fence_binding_fence_id_invalid")?,
+        node_id: fixed::<16>(&binding.node_id, "fence_binding_node_invalid")?,
+        endpoint_id: fixed::<32>(&binding.endpoint_id, "fence_binding_endpoint_invalid")?,
+        owner_instance_id: fixed::<16>(
+            &binding.owner_instance_id,
+            "fence_binding_owner_instance_invalid",
+        )?,
+        owner_incarnation: binding.owner_incarnation,
+        owner_epoch: binding.owner_epoch,
+        connection_id: fixed::<16>(&binding.connection_id, "fence_binding_connection_invalid")?,
+        authorization_revision: binding.authorization_revision,
+        capability: binding.capability.clone(),
+        issued_at_seconds: issued_at.seconds,
+        issued_at_nanos: timestamp_nanos(issued_at.nanos)?,
+        expires_at_seconds: expires_at.seconds,
+        expires_at_nanos: timestamp_nanos(expires_at.nanos)?,
+    })
+}
+
+/// Produces the exact bytes signed for `FenceBindingV2` without serializing
+/// Protobuf.
+///
+/// # Errors
+///
+/// Rejects invalid signature versions, key IDs, operation kinds, epochs,
+/// revisions, capabilities, and timestamps.
+pub fn canonical_fence_binding_v2(
+    claims: &FenceBindingClaimsV2,
+) -> Result<Vec<u8>, AuthorizationError> {
+    if claims.signature_version != FENCE_SIGNATURE_VERSION_ED25519_V1
+        || claims.key_id.is_empty()
+        || claims.key_id.len() > 128
+        || claims.operation_kind == 0
+        || claims.operation_kind > 4
+        || claims.owner_epoch == 0
+        || claims.authorization_revision == 0
+        || claims.capability.is_empty()
+        || claims.capability.len() > 128
+        || claims.issued_at_nanos >= 1_000_000_000
+        || claims.expires_at_nanos >= 1_000_000_000
+        || claims.expires_at_seconds < claims.issued_at_seconds
+        || (claims.expires_at_seconds == claims.issued_at_seconds
+            && claims.expires_at_nanos <= claims.issued_at_nanos)
+    {
+        return Err(AuthorizationError::ClaimsInvalid(
+            "fence_binding_claims_invalid",
+        ));
+    }
+    let mut encoded = Vec::with_capacity(512);
+    encoded.extend_from_slice(FENCE_BINDING_V2_DOMAIN_SEPARATOR);
+    encoded.extend_from_slice(&claims.signature_version.to_be_bytes());
+    append_string(&mut encoded, &claims.key_id)?;
+    encoded.extend_from_slice(&claims.operation_kind.to_be_bytes());
+    encoded.extend_from_slice(&claims.operation_id);
+    encoded.extend_from_slice(&claims.fence_id);
+    encoded.extend_from_slice(&claims.node_id);
+    encoded.extend_from_slice(&claims.endpoint_id);
+    encoded.extend_from_slice(&claims.owner_instance_id);
+    encoded.extend_from_slice(&claims.owner_incarnation.to_be_bytes());
+    encoded.extend_from_slice(&claims.owner_epoch.to_be_bytes());
+    encoded.extend_from_slice(&claims.connection_id);
+    encoded.extend_from_slice(&claims.authorization_revision.to_be_bytes());
+    append_string(&mut encoded, &claims.capability)?;
+    encoded.extend_from_slice(&claims.issued_at_seconds.to_be_bytes());
+    encoded.extend_from_slice(&claims.issued_at_nanos.to_be_bytes());
+    encoded.extend_from_slice(&claims.expires_at_seconds.to_be_bytes());
+    encoded.extend_from_slice(&claims.expires_at_nanos.to_be_bytes());
+    Ok(encoded)
+}
+
+fn signature_version_value(value: i32) -> Option<u32> {
+    match FenceSignatureVersion::try_from(value) {
+        Ok(FenceSignatureVersion::Ed25519V1) => Some(FENCE_SIGNATURE_VERSION_ED25519_V1),
+        _ => None,
+    }
+}
+
+fn fence_operation_kind_value(value: i32) -> Result<u32, AuthorizationError> {
+    match FenceOperationKind::try_from(value) {
+        Ok(FenceOperationKind::Command) => Ok(1),
+        Ok(FenceOperationKind::Artifact) => Ok(2),
+        Ok(FenceOperationKind::ConnectionClose) => Ok(3),
+        Ok(FenceOperationKind::StateUpdate) => Ok(4),
+        _ => Err(AuthorizationError::ClaimsInvalid(
+            "fence_binding_operation_kind_invalid",
+        )),
+    }
+}
+
+fn deadline_strictly_after(
+    until_seconds: i64,
+    until_nanos: u32,
+    from_seconds: i64,
+    from_nanos: u32,
+) -> bool {
+    until_seconds > from_seconds || (until_seconds == from_seconds && until_nanos > from_nanos)
+}
+
+fn deadline_not_after(
+    until_seconds: i64,
+    until_nanos: u32,
+    limit_seconds: i64,
+    limit_nanos: u32,
+) -> bool {
+    until_seconds < limit_seconds || (until_seconds == limit_seconds && until_nanos <= limit_nanos)
 }
 
 /// Projects a command envelope into the independent v1 claims model.
@@ -1363,6 +1834,7 @@ mod tests {
     use std::os::unix::fs::{PermissionsExt as _, symlink};
     use std::time::{SystemTime, UNIX_EPOCH};
 
+    use ed25519_dalek::Signer as _;
     use ed25519_dalek::SigningKey;
     use ed25519_dalek::pkcs8::{EncodePublicKey as _, spki::der::pem::LineEnding};
     use ocservia_contracts::generated::ocserv::platform::agent::v1::{
@@ -1850,5 +2322,316 @@ mod tests {
 
     fn optional_fixed_hex<const N: usize>(value: &str) -> Option<[u8; N]> {
         (!value.is_empty()).then(|| fixed(value))
+    }
+
+    fn load_v2_fixture(name: &str) -> Value {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../../testdata")
+            .join(name);
+        let raw = fs::read_to_string(&path)
+            .unwrap_or_else(|error| panic!("read {}: {error}", path.display()));
+        serde_json::from_str(&raw).expect("V2 fixture")
+    }
+
+    fn v2_keyring(fixture: &Value) -> ControllerCommandKeyring {
+        let public_key = VerifyingKey::from_bytes(&fixed::<32>(string(fixture, "public_key_hex")))
+            .expect("fixture public key");
+        ControllerCommandKeyring::new([public_key]).expect("fixture keyring")
+    }
+
+    fn fence_claims_from_fixture(fixture: &Value) -> ConnectionFenceClaimsV2 {
+        let capabilities = fixture["capabilities"]
+            .as_array()
+            .expect("capability array")
+            .iter()
+            .map(|value| value.as_str().expect("capability string").to_owned())
+            .collect::<Vec<_>>();
+        ConnectionFenceClaimsV2 {
+            signature_version: u32::try_from(number(fixture, "signature_version"))
+                .expect("signature version"),
+            key_id: string(fixture, "key_id").to_owned(),
+            fence_id: fixed::<16>(string(fixture, "fence_id_hex")),
+            node_id: fixed::<16>(string(fixture, "node_id_hex")),
+            endpoint_id: fixed::<32>(string(fixture, "endpoint_id_hex")),
+            owner_instance_id: fixed::<16>(string(fixture, "owner_instance_id_hex")),
+            owner_incarnation: number(fixture, "owner_incarnation"),
+            owner_epoch: number(fixture, "owner_epoch"),
+            connection_id: fixed::<16>(string(fixture, "connection_id_hex")),
+            authorization_revision: number(fixture, "authorization_revision"),
+            capabilities,
+            lease_until_seconds: signed_number(fixture, "lease_until_seconds"),
+            lease_until_nanos: u32::try_from(number(fixture, "lease_until_nanos"))
+                .expect("lease nanos"),
+            issued_at_seconds: signed_number(fixture, "issued_at_seconds"),
+            issued_at_nanos: u32::try_from(number(fixture, "issued_at_nanos"))
+                .expect("issued nanos"),
+            expires_at_seconds: signed_number(fixture, "expires_at_seconds"),
+            expires_at_nanos: u32::try_from(number(fixture, "expires_at_nanos"))
+                .expect("expiry nanos"),
+        }
+    }
+
+    fn fence_message_from_fixture(
+        fixture: &Value,
+        claims: &ConnectionFenceClaimsV2,
+    ) -> ConnectionFenceV2 {
+        ConnectionFenceV2 {
+            signature_version: FenceSignatureVersion::Ed25519V1.into(),
+            key_id: claims.key_id.clone(),
+            fence_id: claims.fence_id.to_vec(),
+            node_id: claims.node_id.to_vec(),
+            endpoint_id: claims.endpoint_id.to_vec(),
+            owner_instance_id: claims.owner_instance_id.to_vec(),
+            owner_incarnation: claims.owner_incarnation,
+            owner_epoch: claims.owner_epoch,
+            connection_id: claims.connection_id.to_vec(),
+            authorization_revision: claims.authorization_revision,
+            capabilities: claims.capabilities.clone(),
+            lease_until: Some(Timestamp {
+                seconds: claims.lease_until_seconds,
+                nanos: i32::try_from(claims.lease_until_nanos).expect("lease nanos"),
+            }),
+            issued_at: Some(Timestamp {
+                seconds: claims.issued_at_seconds,
+                nanos: i32::try_from(claims.issued_at_nanos).expect("issued nanos"),
+            }),
+            expires_at: Some(Timestamp {
+                seconds: claims.expires_at_seconds,
+                nanos: i32::try_from(claims.expires_at_nanos).expect("expiry nanos"),
+            }),
+            signature: hex::decode(string(fixture, "signature_hex")).expect("signature hex"),
+        }
+    }
+
+    fn binding_claims_from_fixture(fixture: &Value) -> FenceBindingClaimsV2 {
+        FenceBindingClaimsV2 {
+            signature_version: u32::try_from(number(fixture, "signature_version"))
+                .expect("signature version"),
+            key_id: string(fixture, "key_id").to_owned(),
+            operation_kind: u32::try_from(number(fixture, "operation_kind"))
+                .expect("operation kind"),
+            operation_id: fixed::<16>(string(fixture, "operation_id_hex")),
+            fence_id: fixed::<16>(string(fixture, "fence_id_hex")),
+            node_id: fixed::<16>(string(fixture, "node_id_hex")),
+            endpoint_id: fixed::<32>(string(fixture, "endpoint_id_hex")),
+            owner_instance_id: fixed::<16>(string(fixture, "owner_instance_id_hex")),
+            owner_incarnation: number(fixture, "owner_incarnation"),
+            owner_epoch: number(fixture, "owner_epoch"),
+            connection_id: fixed::<16>(string(fixture, "connection_id_hex")),
+            authorization_revision: number(fixture, "authorization_revision"),
+            capability: string(fixture, "capability").to_owned(),
+            issued_at_seconds: signed_number(fixture, "issued_at_seconds"),
+            issued_at_nanos: u32::try_from(number(fixture, "issued_at_nanos"))
+                .expect("issued nanos"),
+            expires_at_seconds: signed_number(fixture, "expires_at_seconds"),
+            expires_at_nanos: u32::try_from(number(fixture, "expires_at_nanos"))
+                .expect("expiry nanos"),
+        }
+    }
+
+    fn binding_message_from_fixture(
+        fixture: &Value,
+        claims: &FenceBindingClaimsV2,
+    ) -> FenceBindingV2 {
+        FenceBindingV2 {
+            signature_version: FenceSignatureVersion::Ed25519V1.into(),
+            key_id: claims.key_id.clone(),
+            operation_kind: FenceOperationKind::try_from(
+                i32::try_from(claims.operation_kind).expect("operation kind"),
+            )
+            .expect("operation kind")
+            .into(),
+            operation_id: claims.operation_id.to_vec(),
+            fence_id: claims.fence_id.to_vec(),
+            node_id: claims.node_id.to_vec(),
+            endpoint_id: claims.endpoint_id.to_vec(),
+            owner_instance_id: claims.owner_instance_id.to_vec(),
+            owner_incarnation: claims.owner_incarnation,
+            owner_epoch: claims.owner_epoch,
+            connection_id: claims.connection_id.to_vec(),
+            authorization_revision: claims.authorization_revision,
+            capability: claims.capability.clone(),
+            issued_at: Some(Timestamp {
+                seconds: claims.issued_at_seconds,
+                nanos: i32::try_from(claims.issued_at_nanos).expect("issued nanos"),
+            }),
+            expires_at: Some(Timestamp {
+                seconds: claims.expires_at_seconds,
+                nanos: i32::try_from(claims.expires_at_nanos).expect("expiry nanos"),
+            }),
+            signature: hex::decode(string(fixture, "signature_hex")).expect("signature hex"),
+        }
+    }
+
+    #[test]
+    fn rust_verifies_go_connection_fence_v2_and_shared_canonical_vector() {
+        let fixture = load_v2_fixture("connection-fence-v2.json");
+        let keyring = v2_keyring(&fixture);
+        let claims = fence_claims_from_fixture(&fixture);
+        let canonical = canonical_connection_fence_v2(&claims).expect("canonical fence");
+        assert_eq!(
+            hex::encode(&canonical),
+            string(&fixture, "canonical_preimage_hex")
+        );
+        let fence = fence_message_from_fixture(&fixture, &claims);
+        let verified = keyring
+            .verify_connection_fence_v2(&fence, &claims.node_id, &claims.endpoint_id, 1_700_000_100)
+            .expect("verified fence");
+        assert_eq!(verified.fence_id, claims.fence_id);
+        assert_eq!(verified.owner_instance_id, claims.owner_instance_id);
+        assert_eq!(verified.owner_incarnation, claims.owner_incarnation);
+        assert_eq!(verified.owner_epoch, claims.owner_epoch);
+        assert_eq!(verified.connection_id, claims.connection_id);
+        assert_eq!(
+            verified.authorization_revision,
+            claims.authorization_revision
+        );
+        assert_eq!(verified.capabilities, claims.capabilities);
+        assert_eq!(verified.lease_until_seconds, claims.lease_until_seconds);
+
+        // Wrong node or endpoint never verifies, even with a valid signature.
+        let err = keyring
+            .verify_connection_fence_v2(&fence, &[9; 16], &claims.endpoint_id, 1_700_000_100)
+            .expect_err("wrong node");
+        assert_eq!(
+            err,
+            AuthorizationError::ClaimsInvalid("connection_fence_node_mismatch")
+        );
+        let err = keyring
+            .verify_connection_fence_v2(&fence, &claims.node_id, &[9; 32], 1_700_000_100)
+            .expect_err("wrong endpoint");
+        assert_eq!(
+            err,
+            AuthorizationError::ClaimsInvalid("connection_fence_endpoint_mismatch")
+        );
+
+        // A tampered epoch invalidates the signature, and an expired fence is
+        // rejected before signature evaluation.
+        let mut tampered = fence.clone();
+        tampered.owner_epoch += 1;
+        let err = keyring
+            .verify_connection_fence_v2(
+                &tampered,
+                &claims.node_id,
+                &claims.endpoint_id,
+                1_700_000_100,
+            )
+            .expect_err("tampered epoch");
+        assert_eq!(err, AuthorizationError::SignatureInvalid);
+        let err = keyring
+            .verify_connection_fence_v2(&fence, &claims.node_id, &claims.endpoint_id, 1_700_000_300)
+            .expect_err("expired fence");
+        assert_eq!(
+            err,
+            AuthorizationError::ClaimsInvalid("connection_fence_expired")
+        );
+    }
+
+    #[test]
+    fn rust_verifies_go_fence_binding_v2_and_shared_canonical_vector() {
+        let fixture = load_v2_fixture("fence-binding-v2.json");
+        let keyring = v2_keyring(&fixture);
+        let claims = binding_claims_from_fixture(&fixture);
+        let canonical = canonical_fence_binding_v2(&claims).expect("canonical binding");
+        assert_eq!(
+            hex::encode(&canonical),
+            string(&fixture, "canonical_preimage_hex")
+        );
+        let binding = binding_message_from_fixture(&fixture, &claims);
+        let verified = keyring
+            .verify_fence_binding_v2(
+                &binding,
+                &claims.node_id,
+                &claims.endpoint_id,
+                1_700_000_100,
+            )
+            .expect("verified binding");
+
+        // The binding matches the fence of its own dispatch attempt...
+        let fence_fixture = load_v2_fixture("connection-fence-v2.json");
+        let fence_claims = fence_claims_from_fixture(&fence_fixture);
+        let fence = fence_message_from_fixture(&fence_fixture, &fence_claims);
+        let verified_fence = keyring
+            .verify_connection_fence_v2(
+                &fence,
+                &fence_claims.node_id,
+                &fence_claims.endpoint_id,
+                1_700_000_100,
+            )
+            .expect("verified fence");
+        assert!(verified.matches_fence(&verified_fence));
+
+        // ...and never a fence recorded under any other term.
+        let mut drifted = verified_fence.clone();
+        drifted.owner_epoch += 1;
+        assert!(!verified.matches_fence(&drifted));
+        let mut drifted = verified_fence.clone();
+        drifted.connection_id = [9; 16];
+        assert!(!verified.matches_fence(&drifted));
+        let mut drifted = verified_fence;
+        drifted.fence_id = [9; 16];
+        assert!(!verified.matches_fence(&drifted));
+
+        // A tampered operation identity invalidates the signature.
+        let mut tampered = binding.clone();
+        tampered.operation_id = vec![9; 16];
+        let err = keyring
+            .verify_fence_binding_v2(
+                &tampered,
+                &claims.node_id,
+                &claims.endpoint_id,
+                1_700_000_100,
+            )
+            .expect_err("tampered operation");
+        assert_eq!(err, AuthorizationError::SignatureInvalid);
+
+        // An unsupported signature version fails closed.
+        let mut downgraded = binding;
+        downgraded.signature_version = FenceSignatureVersion::Unspecified.into();
+        let err = keyring
+            .verify_fence_binding_v2(
+                &downgraded,
+                &claims.node_id,
+                &claims.endpoint_id,
+                1_700_000_100,
+            )
+            .expect_err("downgraded version");
+        assert_eq!(err, AuthorizationError::UnsupportedVersion);
+    }
+
+    #[test]
+    fn rust_fence_v2_never_cross_validates_v1_domains() {
+        let fixture = load_v2_fixture("connection-fence-v2.json");
+        let claims = fence_claims_from_fixture(&fixture);
+        let canonical = canonical_connection_fence_v2(&claims).expect("canonical fence");
+        let signing = SigningKey::from_bytes(&fixed::<32>(string(&fixture, "test_seed_hex")));
+        let signature = signing.sign(&canonical).to_bytes();
+
+        // Signing any V1 domain prefix over the V2 body never verifies as a
+        // V2 fence, and the V2 domain separators are disjoint from V1.
+        for v1_domain in [
+            DOMAIN_SEPARATOR,
+            SESSION_GRANT_DOMAIN_SEPARATOR,
+            ARTIFACT_GRANT_DOMAIN_SEPARATOR,
+        ] {
+            let mut forged = Vec::with_capacity(canonical.len());
+            forged.extend_from_slice(v1_domain);
+            forged.extend_from_slice(&canonical[CONNECTION_FENCE_V2_DOMAIN_SEPARATOR.len()..]);
+            let forged_signature = signing.sign(&forged).to_bytes();
+            assert_ne!(hex::encode(forged), hex::encode(&canonical));
+            assert_ne!(hex::encode(forged_signature), hex::encode(signature));
+        }
+
+        let keyring = v2_keyring(&fixture);
+        let mut fence = fence_message_from_fixture(&fixture, &claims);
+        // A correct signature over a V1-prefixed preimage must not verify.
+        let mut v1_style = Vec::new();
+        v1_style.extend_from_slice(SESSION_GRANT_DOMAIN_SEPARATOR);
+        v1_style.extend_from_slice(&canonical[CONNECTION_FENCE_V2_DOMAIN_SEPARATOR.len()..]);
+        fence.signature = signing.sign(&v1_style).to_bytes().to_vec();
+        let err = keyring
+            .verify_connection_fence_v2(&fence, &claims.node_id, &claims.endpoint_id, 1_700_000_100)
+            .expect_err("V1-domain signature on V2 message");
+        assert_eq!(err, AuthorizationError::SignatureInvalid);
     }
 }
