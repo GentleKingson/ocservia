@@ -779,7 +779,8 @@ function parseCommandTrace(entry, binding) {
     commands: new Map(),
     effects: new Map(),
     effectIdSeen: new Set(),
-    dispatchedCount: 0,
+    resultCommandSeen: new Set(),
+    dispatchedCommands: 0,
     resultCount: 0,
     unmatchedResultCount: 0,
     duplicateEffectCount: 0,
@@ -839,9 +840,11 @@ function parseCommandTrace(entry, binding) {
             `${label} dispatch references unknown command ${record.command_id}`,
           );
         }
-        state.dispatchedCount += 1;
+        // Repeated dispatches model at-least-once retries; only each
+        // command's first dispatch counts for inflight and sample counts.
         if (command.dispatchedAtMs === null) {
           command.dispatchedAtMs = parsed;
+          state.dispatchedCommands += 1;
           state.inflight += 1;
           state.maxInflight = Math.max(state.maxInflight, state.inflight);
         }
@@ -860,16 +863,22 @@ function parseCommandTrace(entry, binding) {
         if (!commandOutcomes.has(record.outcome)) {
           fail(`${label} result has an invalid outcome`);
         }
+        // A command carries exactly one terminal result; a second result
+        // for the same command cannot be attributed to an attempt.
+        if (state.resultCommandSeen.has(record.command_id)) {
+          fail(
+            `${label} repeats a terminal result for command ${record.command_id}`,
+          );
+        }
+        state.resultCommandSeen.add(record.command_id);
         state.resultCount += 1;
         const command = state.commands.get(record.command_id);
         if (!command || command.dispatchedAtMs === null) {
           state.unmatchedResultCount += 1;
           return;
         }
-        if (command.firstResultAtMs === null) {
-          command.firstResultAtMs = parsed;
-          state.inflight -= 1;
-        }
+        command.firstResultAtMs = parsed;
+        state.inflight -= 1;
       }
     },
   );
@@ -929,6 +938,7 @@ const httpSampleHeader = [
   "kind",
   "status",
   "latency_seconds",
+  "request_id",
   "environment_id",
   "candidate_sha",
 ];
@@ -954,6 +964,8 @@ function parseHttpSamples(entry, binding) {
     enqueues: [],
     enqueueSuccesses: 0,
     okEnqueueLatencies: [],
+    enqueueRequestIds: new Set(),
+    okEnqueueRequestIds: new Set(),
   };
   for (const [index, line] of lines.slice(1).entries()) {
     const columns = line.split(",");
@@ -964,7 +976,7 @@ function parseHttpSamples(entry, binding) {
     const label = `http samples artifact ${entry.name} row ${rowNumber}`;
     const parsedTimestamp = rfc3339(columns[0], `${label} timestamp`);
     requireWindow(parsedTimestamp, label, binding);
-    requireBinding(columns[4], columns[5], label, binding);
+    requireBinding(columns[5], columns[6], label, binding);
     if (!httpKinds.has(columns[1])) {
       fail(`${label} has an invalid kind`);
     }
@@ -973,13 +985,25 @@ function parseHttpSamples(entry, binding) {
     }
     const latency = csvFiniteNumber(columns[3], `${label} latency_seconds`);
     if (columns[1] === "read") {
+      if (columns[4] !== "") {
+        fail(`${label} read sample must not carry a request_id`);
+      }
       state.reads.push(latency);
       if (columns[2] === "ok") state.readSuccesses += 1;
     } else {
+      // Every enqueue request carries a unique request_id; accepted ones
+      // form the authoritative write population shared with the outbox
+      // snapshot and the audit correlation report.
+      identifier(columns[4], `${label} request_id`);
+      if (state.enqueueRequestIds.has(columns[4])) {
+        fail(`${label} repeats enqueue request_id ${columns[4]}`);
+      }
+      state.enqueueRequestIds.add(columns[4]);
       state.enqueues.push(latency);
       if (columns[2] === "ok") {
         state.enqueueSuccesses += 1;
         state.okEnqueueLatencies.push(latency);
+        state.okEnqueueRequestIds.add(columns[4]);
       }
     }
   }
@@ -1205,6 +1229,9 @@ function parsePitrReport(entry, binding) {
     return writtenMs;
   };
   const markerAMs = markerFields(doc.marker_a, `${label} marker_a`);
+  if (doc.marker_a.txid === doc.marker_b.txid) {
+    fail(`${label} markers must use distinct transaction identifiers`);
+  }
   const restorePointMs = rfc3339(
     doc.restore_point_created_at,
     `${label} restore_point_created_at`,
@@ -1259,11 +1286,19 @@ function parseAgentSessions(entry, binding) {
     fail(`${label} must contain at least one session`);
   }
   const ids = new Set();
+  const sessions = [];
   for (const [index, session] of doc.sessions.entries()) {
     const sessionLabel = `${label} session ${index + 1}`;
     closed(
       session,
-      ["agent_id", "node", "authorized", "connected", "session_started_at"],
+      [
+        "agent_id",
+        "node",
+        "authorized",
+        "connected",
+        "session_started_at",
+        "reconnected_at",
+      ],
       sessionLabel,
     );
     identifier(session.agent_id, `${sessionLabel} agent_id`);
@@ -1282,30 +1317,62 @@ function parseAgentSessions(entry, binding) {
     if (startedMs > snapshotMs) {
       fail(`${sessionLabel} must start before the snapshot`);
     }
+    const reconnectedMs = rfc3339(
+      session.reconnected_at,
+      `${sessionLabel} reconnected_at`,
+    );
+    requireWindow(reconnectedMs, sessionLabel, binding);
+    if (reconnectedMs > snapshotMs) {
+      fail(`${sessionLabel} must reconnect before the snapshot`);
+    }
+    sessions.push({
+      agentId: session.agent_id,
+      authorized: session.authorized,
+      connected: session.connected,
+      startedMs,
+      reconnectedMs,
+    });
   }
   object(doc.reconnect_storm, `${label} reconnect storm`);
-  closed(
-    doc.reconnect_storm,
-    ["bulk_disconnect_at", "reconnect_completed_at"],
-    `${label} reconnect storm`,
-  );
+  closed(doc.reconnect_storm, ["bulk_disconnect_at"], `${label} reconnect storm`);
   const disconnectMs = rfc3339(
     doc.reconnect_storm.bulk_disconnect_at,
     `${label} reconnect storm bulk_disconnect_at`,
   );
   requireWindow(disconnectMs, label, binding);
-  const completedMs = rfc3339(
-    doc.reconnect_storm.reconnect_completed_at,
-    `${label} reconnect storm reconnect_completed_at`,
-  );
-  requireWindow(completedMs, label, binding);
-  if (completedMs < disconnectMs) {
-    fail(`${label} reconnect storm must complete after the bulk disconnect`);
+  const authorizedConnected = [];
+  for (const session of sessions) {
+    // The pre-storm expected population: every inventoried session
+    // existed before the bulk disconnect and recovered on its own
+    // afterwards; recovery cannot be claimed on behalf of an agent.
+    if (session.startedMs > disconnectMs) {
+      fail(
+        `${label} session for agent ${session.agentId} must predate the bulk disconnect`,
+      );
+    }
+    if (session.reconnectedMs < disconnectMs) {
+      fail(
+        `${label} session for agent ${session.agentId} must reconnect at or after the bulk disconnect`,
+      );
+    }
+    if (session.authorized && session.connected) {
+      authorizedConnected.push(session);
+    }
   }
+  if (authorizedConnected.length === 0) {
+    fail(`${label} must contain at least one authorized connected session`);
+  }
+  const lastReconnectMs = Math.max(
+    ...authorizedConnected.map((session) => session.reconnectedMs),
+  );
   return {
     agentIds: ids,
+    authorizedConnectedIds: new Set(
+      authorizedConnected.map((session) => session.agentId),
+    ),
+    authorizedConnectedCount: authorizedConnected.length,
     sessions: doc.sessions,
-    stormRecoverySeconds: (completedMs - disconnectMs) / 1000,
+    stormRecoverySeconds: (lastReconnectMs - disconnectMs) / 1000,
   };
 }
 
@@ -1313,7 +1380,12 @@ const relayNames = new Set(["relay-a", "relay-b"]);
 const pathNames = new Set(["direct", "relay"]);
 
 function parseRelayTransitions(entry, binding) {
-  const state = { failures: [], activations: [], pairCount: 0 };
+  const state = {
+    failures: [],
+    activations: [],
+    relayTraffic: [],
+    pairCount: 0,
+  };
   streamEventLines(
     entry,
     "relay transition log",
@@ -1323,6 +1395,9 @@ function parseRelayTransitions(entry, binding) {
         case "relay_active":
           return ["event_type", "relay"];
         case "path_active":
+          return record.path === "relay"
+            ? ["event_type", "session_id", "path", "relay", "authenticated"]
+            : ["event_type", "session_id", "path", "authenticated"];
         case "path_failed":
           return ["event_type", "session_id", "path"];
         default:
@@ -1332,28 +1407,50 @@ function parseRelayTransitions(entry, binding) {
     binding,
     (record, parsed) => {
       const label = `relay transition artifact ${entry.name}`;
-      if (record.event_type === "relay_failed" || record.event_type === "relay_active") {
+      if (
+        record.event_type === "relay_failed" ||
+        record.event_type === "relay_active"
+      ) {
         if (!relayNames.has(record.relay)) {
           fail(`${label} has an invalid relay name`);
         }
-        (record.event_type === "relay_failed" ? state.failures : state.activations).push({
+        (
+          record.event_type === "relay_failed" ? state.failures : state.activations
+        ).push({
           relay: record.relay,
           timestampMs: parsed,
         });
-      } else {
-        identifier(record.session_id, `${label} session_id`);
-        if (!pathNames.has(record.path)) {
-          fail(`${label} has an invalid path name`);
+        return;
+      }
+      identifier(record.session_id, `${label} session_id`);
+      if (!pathNames.has(record.path)) {
+        fail(`${label} has an invalid path name`);
+      }
+      if (record.event_type === "path_active") {
+        boolean(record.authenticated, `${label} authenticated`);
+        if (record.path === "relay") {
+          if (!relayNames.has(record.relay)) {
+            fail(`${label} has an invalid relay name`);
+          }
+          state.relayTraffic.push({
+            relay: record.relay,
+            authenticated: record.authenticated,
+            timestampMs: parsed,
+          });
         }
       }
     },
   );
+  // A takeover is only proven by authenticated session traffic flowing
+  // through a replacement relay after the failed relay went down; a
+  // control-plane "active" record alone proves nothing about traffic.
   let worstTakeoverMs = null;
   for (const failure of state.failures) {
-    const successor = state.activations.find(
-      (activation) =>
-        activation.relay !== failure.relay &&
-        activation.timestampMs >= failure.timestampMs,
+    const successor = state.relayTraffic.find(
+      (traffic) =>
+        traffic.relay !== failure.relay &&
+        traffic.authenticated &&
+        traffic.timestampMs >= failure.timestampMs,
     );
     if (!successor) continue;
     state.pairCount += 1;
@@ -1364,7 +1461,7 @@ function parseRelayTransitions(entry, binding) {
   }
   if (worstTakeoverMs === null) {
     fail(
-      `relay transition artifact ${entry.name} must record a completed relay takeover`,
+      `relay transition artifact ${entry.name} must record authenticated traffic through a replacement relay`,
     );
   }
   return { takeoverSeconds: worstTakeoverMs / 1000, pairCount: state.pairCount };
@@ -1492,9 +1589,12 @@ function commandCompletionP99(state) {
   };
 }
 
+// The dispatch ratio classifies every accepted (enqueued) command: an
+// undispatched command is a miss, and only each command's first dispatch
+// attempt can satisfy the bound.
 function dispatchRatio(state) {
-  if (state.dispatchedCount === 0) {
-    fail("command trace must record at least one dispatched command");
+  if (state.commands.size === 0) {
+    fail("command trace must record at least one accepted command");
   }
   let withinBound = 0;
   for (const command of state.commands.values()) {
@@ -1507,8 +1607,8 @@ function dispatchRatio(state) {
     }
   }
   return {
-    value: withinBound / state.dispatchedCount,
-    sampleCount: state.dispatchedCount,
+    value: withinBound / state.commands.size,
+    sampleCount: state.commands.size,
   };
 }
 
@@ -1684,10 +1784,12 @@ export const derivationRegistry = new Map([
   }],
   ["command_trace.max_inflight", {
     kind: "command_trace",
-    compute: (parsed) => ({
-      value: parsed.maxInflight,
-      sampleCount: parsed.dispatchedCount,
-    }),
+    compute: (parsed) => {
+      if (parsed.dispatchedCommands === 0) {
+        fail("command trace must record at least one dispatched command");
+      }
+      return { value: parsed.maxInflight, sampleCount: parsed.dispatchedCommands };
+    },
   }],
   ["command_trace.completion_seconds_p99", {
     kind: "command_trace",
@@ -1715,7 +1817,7 @@ export const derivationRegistry = new Map([
     kind: "command_trace",
     compute: (parsed) => ({
       value: parsed.dispatchBoundSeconds,
-      sampleCount: parsed.dispatchedCount,
+      sampleCount: parsed.commands.size,
     }),
   }],
   ["outbox_snapshot.unreconciled_due_row_count", {
@@ -1805,7 +1907,7 @@ export const derivationRegistry = new Map([
     kind: "agent_sessions",
     compute: (parsed) => ({
       value: parsed.stormRecoverySeconds,
-      sampleCount: 1,
+      sampleCount: parsed.authorizedConnectedCount,
     }),
   }],
   ["relay_transitions.relay_takeover_seconds", {
@@ -2078,12 +2180,60 @@ function parseAllStructuredArtifacts(standardArtifacts, verifiedArtifacts, evide
     const entry = verifiedArtifacts.get(artifact.name);
     parsed.set(kind, parseStructuredArtifact(kind, entry, binding));
   }
+
+  // Telemetry must cover exactly the authorized connected session
+  // population; submitting a fresh-looking subset cannot stand in for
+  // the full fleet.
   const telemetry = parsed.get("telemetry_snapshot");
   const sessions = parsed.get("agent_sessions");
-  for (const agent of telemetry.agents) {
-    if (!sessions.agentIds.has(agent.agent_id)) {
+  const telemetryIds = new Set(telemetry.agents.map((agent) => agent.agent_id));
+  for (const agentId of telemetryIds) {
+    if (!sessions.authorizedConnectedIds.has(agentId)) {
       fail(
-        `telemetry snapshot references agent ${agent.agent_id} absent from the session inventory`,
+        `telemetry snapshot reports agent ${agentId} absent from the authorized connected session population`,
+      );
+    }
+  }
+  for (const agentId of sessions.authorizedConnectedIds) {
+    if (!telemetryIds.has(agentId)) {
+      fail(`telemetry snapshot omits the authorized connected agent ${agentId}`);
+    }
+  }
+
+  // The accepted-write population is one identity chain: the successful
+  // enqueue requests, outbox rows, and audit writes must describe the
+  // exact same command set.
+  const http = parsed.get("http_samples");
+  const outbox = parsed.get("outbox_snapshot");
+  const audit = parsed.get("audit_correlation");
+  const acceptedIds = http.okEnqueueRequestIds;
+  const outboxIds = new Set(outbox.rows.map((row) => row.command_id));
+  for (const commandId of acceptedIds) {
+    if (!outboxIds.has(commandId)) {
+      fail(`outbox snapshot is missing the accepted enqueue ${commandId}`);
+    }
+  }
+  for (const commandId of outboxIds) {
+    if (!acceptedIds.has(commandId)) {
+      fail(`outbox snapshot contains the unaccepted enqueue ${commandId}`);
+    }
+  }
+  const auditIds = new Set(audit.writes.map((write) => write.write_id));
+  for (const commandId of acceptedIds) {
+    if (!auditIds.has(commandId)) {
+      fail(`audit correlation is missing the accepted enqueue ${commandId}`);
+    }
+  }
+  for (const writeId of auditIds) {
+    if (!acceptedIds.has(writeId)) {
+      fail(`audit correlation contains the unaccepted enqueue ${writeId}`);
+    }
+  }
+  const trace = parsed.get("command_trace");
+  for (const commandId of trace.commands.keys()) {
+    if (!outboxIds.has(commandId)) {
+      fail(
+        `command trace references command ${commandId} absent from the outbox snapshot`,
       );
     }
   }

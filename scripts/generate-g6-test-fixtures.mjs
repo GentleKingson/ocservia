@@ -192,10 +192,17 @@ function buildCommandTrace() {
 }
 
 function buildOutboxSnapshot() {
-  const rows = Array.from({ length: 50 }, (_, index) => {
+  // One outbox row per accepted enqueue request: the row set must equal
+  // the ok-enqueue population in http-samples.csv and the audit write
+  // population (same cmd-XXX identity chain).
+  const rows = Array.from({ length: 600 }, (_, index) => {
     const suffix = String(index + 1).padStart(3, "0");
     const state =
-      index >= 49 ? "unknown_reconciling" : index >= 47 ? "reconciliation_active" : "terminal";
+      index >= 599
+        ? "unknown_reconciling"
+        : index >= 597
+          ? "reconciliation_active"
+          : "terminal";
     return {
       command_id: `cmd-${suffix}`,
       created_at: at(0),
@@ -212,16 +219,19 @@ function buildOutboxSnapshot() {
 }
 
 function buildHttpSamples() {
-  const header = "timestamp,kind,status,latency_seconds,environment_id,candidate_sha";
+  const header =
+    "timestamp,kind,status,latency_seconds,request_id,environment_id,candidate_sha";
   const lines = [header];
   const latency = (millis) => String(millis / 1000);
   let enqueueCounter = 0;
   for (let second = 0; second < 300; second += 1) {
     const timestamp = at(second);
     for (let sub = 0; sub < 2; sub += 1) {
-      lines.push(`${timestamp},read,ok,${latency(10 + ((second * 2 + sub) % 7))},${bindingFields}`);
       lines.push(
-        `${timestamp},enqueue,ok,${latency(50 + (enqueueCounter % 10) * 10)},${bindingFields}`,
+        `${timestamp},read,ok,${latency(10 + ((second * 2 + sub) % 7))},,${bindingFields}`,
+      );
+      lines.push(
+        `${timestamp},enqueue,ok,${latency(50 + (enqueueCounter % 10) * 10)},cmd-${String(enqueueCounter + 1).padStart(3, "0")},${bindingFields}`,
       );
       enqueueCounter += 1;
     }
@@ -243,11 +253,13 @@ function buildTelemetrySnapshot() {
 }
 
 function buildAuditCorrelation() {
+  // One audit write per accepted enqueue request, sharing the cmd-XXX
+  // identity chain with http-samples.csv and the outbox snapshot.
   return canonicalJson({
     environment_id: environmentId,
     candidate_sha: candidateSha,
-    writes: Array.from({ length: 200 }, (_, index) => ({
-      write_id: `wr-${String(index + 1).padStart(3, "0")}`,
+    writes: Array.from({ length: 600 }, (_, index) => ({
+      write_id: `cmd-${String(index + 1).padStart(3, "0")}`,
       intent_recorded: true,
       result_recorded: true,
     })),
@@ -308,23 +320,25 @@ function buildAgentSessions() {
       authorized: true,
       connected: true,
       session_started_at: at(0),
+      // Per-agent recovery timestamps: the verifier derives the storm
+      // recovery as max(reconnected_at) - bulk_disconnect_at.
+      reconnected_at: at(200 + index),
     })),
     reconnect_storm: {
       bulk_disconnect_at: at(180),
-      reconnect_completed_at: at(210),
     },
   });
 }
 
 function buildRelayTransitions() {
   const records = [
-    { sequence: 1, ...bindingRecord(at(150)), event_type: "path_active", session_id: "s-001", path: "direct" },
+    { sequence: 1, ...bindingRecord(at(150)), event_type: "path_active", session_id: "s-001", path: "direct", authenticated: true },
     { sequence: 2, ...bindingRecord(at(155)), event_type: "path_failed", session_id: "s-001", path: "direct" },
     { sequence: 3, ...bindingRecord(at(160)), event_type: "relay_failed", relay: "relay-a" },
-    { sequence: 4, ...bindingRecord(at(165)), event_type: "path_active", session_id: "s-001", path: "relay" },
+    { sequence: 4, ...bindingRecord(at(165)), event_type: "path_active", session_id: "s-001", path: "relay", relay: "relay-b", authenticated: true },
     { sequence: 5, ...bindingRecord(at(170)), event_type: "relay_active", relay: "relay-b" },
     { sequence: 6, ...bindingRecord(at(190)), event_type: "path_failed", session_id: "s-001", path: "relay" },
-    { sequence: 7, ...bindingRecord(at(195)), event_type: "path_active", session_id: "s-001", path: "direct" },
+    { sequence: 7, ...bindingRecord(at(195)), event_type: "path_active", session_id: "s-001", path: "direct", authenticated: true },
   ];
   return jsonl(records);
 }

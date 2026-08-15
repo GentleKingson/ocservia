@@ -60,10 +60,33 @@ counts alike — and evidence that declares a different value or an inflated
 sample count is rejected. Evidence cannot lower a classification bound to
 game a ratio: the telemetry freshness bound and command dispatch bound are
 themselves derived metrics limited by the SLO, and the verifier applies the
-recorded bound when recomputing the paired ratio. Cross-artifact consistency
-is enforced as well: the telemetry snapshot may only report agents present in
-the session inventory, and evidence may not claim more authorized real agents
-than the topology binds.
+recorded bound when recomputing the paired ratio.
+
+Population semantics are part of the contract, not a harness choice:
+
+- the telemetry snapshot must cover exactly the authorized connected agents
+  derived from the session inventory — a fresh-looking subset cannot stand
+  in for the fleet, and the freshness ratio is classified over that whole
+  population;
+- the command dispatch ratio classifies every accepted (enqueued) command:
+  an undispatched command is a miss, only each command's first dispatch
+  attempt can satisfy the bound, repeated dispatch retries never inflate
+  sample counts, and a command carries exactly one terminal result;
+- reconnect storm recovery is derived per agent as
+  `max(reconnected_at) - bulk_disconnect_at` over the authorized connected
+  sessions, each of which must predate the bulk disconnect and reconnect on
+  its own afterwards — a harness-declared completion time is not trusted;
+- a relay takeover is proven only by authenticated session traffic through a
+  replacement relay after the failed relay went down, not by a control-plane
+  "active" record;
+- the accepted-write population is one identity chain: every enqueue sample
+  carries a unique `request_id`, and the successful enqueue requests, outbox
+  rows, and audit writes must describe exactly the same command set, with
+  every traced command present in the outbox snapshot;
+- PITR markers must use distinct transaction identifiers, so the
+  present/absent restore pair cannot contradict itself;
+- evidence may not claim more authorized real agents than the topology
+  binds.
 
 The timeline artifact is parsed line by line with strict RFC 3339 timestamps,
 unique event identifiers, strictly increasing sequences, and non-decreasing
