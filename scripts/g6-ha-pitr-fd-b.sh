@@ -84,7 +84,9 @@ phase_standby_bootstrap() {
   require_file "${peer}/owner-password"
   require_file "${peer}/replication-password"
   require_file "${peer}/app-password"
-  g6_ha_secret owner-password >/dev/null # ensure local secrets exist
+  # The cloned cluster keeps fd-a's roles and passwords: fd-b's own random
+  # credentials must be replaced by the peer's before any local client runs.
+  g6_ha_import_peer_cluster_credentials "${peer}"
   # The clone runs inside the postgres image against the peer primary through
   # the pinned tunnel, as the postgres user (the capability-dropped service
   # context cannot write volume contents as uid 0). The slot keeps WAL
@@ -123,9 +125,11 @@ sync_standby_confirmed() {
 }
 
 # Declares readiness for failover: fd-b roles run against the primary through
-# the tunnel, the streaming standby is promoted to the confirmed synchronous
-# standby from this point on (never at initdb, where it would block every
-# commit before the standby exists), and the load phase has been observed.
+# the tunnel, and the streaming standby is raised to the confirmed
+# synchronous standby from this point on (never at initdb, where it would
+# block every commit before the standby exists). The load phase has already
+# completed by the time this runs; its bracketing timeline events belong to
+# the later real-agent run and are deliberately not emitted here.
 phase_failover_ready() {
   g6_ha_primary_psql -Atc \
     "ALTER SYSTEM SET synchronous_standby_names = 'FIRST 1 (g6_standby)'" >/dev/null
@@ -134,7 +138,6 @@ phase_failover_ready() {
   g6_ha_wait_until 30 2 "worker connected through the tunnel" peer_role_connected worker
   g6_ha_wait_until 30 2 "scheduler connected through the tunnel" peer_role_connected scheduler
   g6_ha_timeline_init
-  g6_ha_timeline_event load_started
   mkdir -p "${G6HA_OUTBOX}/failover-ready"
   g6_ha_now >"${G6HA_OUTBOX}/failover-ready/ready-at"
 }
@@ -170,6 +173,12 @@ phase_promote() {
   g6_ha_psql -Atc "ALTER SYSTEM SET synchronous_standby_names = ''" >/dev/null
   g6_ha_psql -Atc 'SELECT pg_reload_conf()' >/dev/null
   g6_ha_wait_until 30 2 "promoted primary writable" promoted_and_writable
+  # The true promotion boundary, recorded immediately after the promoted
+  # primary was confirmed writable and before any recovered role touches it;
+  # fd-a's post-promotion probes start only after receiving this record.
+  local promoted_at
+  promoted_at="$(g6_ha_now)"
+  printf '%s\n' "${promoted_at}" >"${G6HA_STATE}/promoted-at"
   g6_ha_psql -At -c "INSERT INTO g6_ha_markers(id, txid, phase) VALUES ('new-primary-writable', txid_current()::text, 'promotion')" >/dev/null
   g6_ha_timeline_event new_primary_writable
   g6_ha_timeline_event new_primary_promoted
@@ -186,8 +195,8 @@ phase_promote() {
   g6_ha_wait_until 30 2 "scheduler connected after promotion" scheduler_connected_local
   g6_ha_timeline_event api_recovered
   g6_ha_timeline_event worker_recovered
-  g6_ha_timeline_event old_primary_write_rejected
   mkdir -p "${G6HA_OUTBOX}/new-primary"
+  cp -f "${G6HA_STATE}/promoted-at" "${G6HA_OUTBOX}/new-primary/promoted-at"
   g6_ha_now >"${G6HA_OUTBOX}/new-primary/writable-at"
 }
 
@@ -196,11 +205,15 @@ phase_finalize() {
   local load="${2:?load directory is required}"
   local pitr="${3:?pitr directory is required}"
   local recovered="${4:?peer recovered directory is required}"
-  local peer_tunnel="${5:?peer tunnel directory is required}"
+  local post_promotion="${5:?peer post-promotion directory is required}"
+  local rejoin="${6:?peer rejoin directory is required}"
+  local peer_tunnel="${7:?peer tunnel directory is required}"
   require_file "${isolation}/isolation.json"
   require_file "${load}/load-markers.json"
   require_file "${pitr}/pitr-report.json"
   require_file "${recovered}/recovered-at"
+  require_file "${post_promotion}/probes.json"
+  require_file "${rejoin}/post-rejoin-probes.jsonl"
   require_file "${peer_tunnel}/boot-id-sha256"
 
   local peer_boot own_boot
@@ -212,8 +225,9 @@ phase_finalize() {
   }
 
   # Acknowledged-transaction reconciliation reads the marker table on the
-  # promoted primary; every acknowledged marker must have survived.
-  local acknowledged present loss
+  # promoted primary; every acknowledged marker must have survived, and the
+  # promoted primary must hold exactly the markers fd-a acknowledged.
+  local acknowledged present loss declared_count
   acknowledged="$(g6_ha_psql -Atc \
     "SELECT json_agg(json_build_object('txid', txid, 'acknowledged_at', to_char(written_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"')) ORDER BY written_at) FROM g6_ha_markers WHERE phase = 'failover-load'")"
   present="$(g6_ha_psql -Atc \
@@ -228,19 +242,24 @@ phase_finalize() {
     echo "reconciliation lost ${loss} acknowledged transactions" >&2
     return 1
   }
+  declared_count="$(jq 'length' "${load}/load-markers.json")"
+  jq -e --argjson declared "${declared_count}" \
+    'length == $declared' <<<"${acknowledged}" >/dev/null || {
+    echo "the promoted primary holds $(jq 'length' <<<"${acknowledged}") failover-load markers but fd-a acknowledged ${declared_count}" >&2
+    return 1
+  }
 
-  local outage_declared_at isolated_at service_restored_at
+  local outage_declared_at isolated_at service_restored_at promoted_at
   outage_declared_at="$(jq -r '.outage_declared_at' "${isolation}/isolation.json")"
   isolated_at="$(jq -r '.isolated_at' "${isolation}/isolation.json")"
   service_restored_at="$(<"${recovered}/recovered-at")"
+  promoted_at="$(<"${G6HA_STATE}/promoted-at")"
   g6_ha_timeline_event marker_a_written
   g6_ha_timeline_event restore_point_created
   g6_ha_timeline_event marker_b_written
   g6_ha_timeline_event restore_verified
-  g6_ha_timeline_event load_stopped
 
-  local promoted_at rto rpo rto_limit rpo_limit
-  promoted_at="$(g6_ha_now)"
+  local rto rpo rto_limit rpo_limit
   rto="$(g6_ha_seconds_between "${outage_declared_at}" "${service_restored_at}")"
   rpo="$(jq -nr --argjson acknowledged "${acknowledged}" --arg outage "${outage_declared_at}" \
     '($outage | fromdateiso8601) - ($acknowledged | map(.acknowledged_at | fromdateiso8601) | max)')"
@@ -258,9 +277,26 @@ phase_finalize() {
     echo "RTO measured negative; cross-runner clock skew is too large" >&2
     return 1
   }
+  (( $(g6_ha_seconds_between "${isolated_at}" "${promoted_at}") >= 0 )) || {
+    echo "promotion recorded before isolation; cross-runner clock skew is too large" >&2
+    return 1
+  }
 
-  local probes
-  probes="$(jq -c '.isolated_primary_writes' "${isolation}/isolation.json")"
+  # Dual-primary evidence: write attempts against the fenced former primary
+  # AFTER the replacement was promoted (the post-promotion probes), plus the
+  # read-only rejections after it rejoined as a standby. The pre-promotion
+  # probes that established the fence stay in fd-a's isolation artifact.
+  local dual_primary_probes dual_primary_accepts
+  dual_primary_probes="$(jq -n \
+    --slurpfile promotion "${post_promotion}/probes.json" \
+    --slurpfile rejoined "${rejoin}/post-rejoin-probes.jsonl" \
+    '$promotion[0].promoted_at_probes + $rejoined')"
+  jq -e 'length >= 3 and all(.accepted == false)' <<<"${dual_primary_probes}" >/dev/null || {
+    echo "the former primary accepted a write after the replacement promotion" >&2
+    return 1
+  }
+  dual_primary_accepts="$(jq 'map(select(.accepted == true)) | length' <<<"${dual_primary_probes}")"
+  g6_ha_timeline_event old_primary_write_rejected
 
   mkdir -p "${G6HA_OUTBOX}/evidence"
   jq -n \
@@ -271,7 +307,7 @@ phase_finalize() {
     --argjson acknowledged "${acknowledged}" \
     --arg isolated_at "${isolated_at}" \
     --arg promoted_at "${promoted_at}" \
-    --argjson isolated_primary_writes "${probes}" \
+    --argjson isolated_primary_writes "${dual_primary_probes}" \
     --argjson present_txids "${present}" \
     '{environment_id:$environment_id, candidate_sha:$candidate_sha,
       outage_declared_at:$outage, service_restored_at:$restored,
@@ -319,7 +355,7 @@ phase_finalize() {
     --argjson rto "${rto}" --argjson rto_limit "${rto_limit}" \
     --argjson rpo "${rpo}" --argjson rpo_limit "${rpo_limit}" \
     --argjson acknowledged_loss "${loss}" \
-    --argjson dual_primary_accepts "$(jq '.isolated_primary_writes | map(select(.accepted)) | length' "${isolation}/isolation.json")" \
+    --argjson dual_primary_accepts "${dual_primary_accepts}" \
     --argjson pitr_marker_a_present true --argjson pitr_marker_b_present false \
     '{environment_id:$environment_id, candidate_sha:$candidate_sha,
       rto_seconds:$rto, rto_limit_seconds:$rto_limit, rto_within_limit:($rto <= $rto_limit),
@@ -363,13 +399,15 @@ case "${1:-}" in
       "${3:?load directory is required}" \
       "${4:?pitr directory is required}" \
       "${5:?peer recovered directory is required}" \
-      "${6:?peer tunnel directory is required}"
+      "${6:?peer post-promotion directory is required}" \
+      "${7:?peer rejoin directory is required}" \
+      "${8:?peer tunnel directory is required}"
     ;;
   rejoin-wait) phase_rejoin_wait ;;
   diagnostics) g6_ha_diagnostics ;;
   cleanup) g6_ha_cleanup ;;
   *)
-    echo "usage: $0 {prepare|images|tunnel-up DIR|standby-bootstrap DIR|roles-up|failover-ready|promote DIR|finalize DIR DIR DIR DIR DIR|rejoin-wait|diagnostics|cleanup}" >&2
+    echo "usage: $0 {prepare|images|tunnel-up DIR|standby-bootstrap DIR|roles-up|failover-ready|promote DIR|finalize DIR DIR DIR DIR DIR DIR DIR|rejoin-wait|diagnostics|cleanup}" >&2
     exit 2
     ;;
 esac

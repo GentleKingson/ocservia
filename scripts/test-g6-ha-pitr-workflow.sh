@@ -67,17 +67,78 @@ for metric in database_rpo_seconds database_rto_seconds; do
   }
 done
 
-# Required observation events from g6-slo.yaml must all be produced by the
-# harness timeline or its phase scripts.
-for event in load_started primary_failure_injected new_primary_writable \
-  api_recovered worker_recovered load_stopped old_primary_isolated \
+# Required observation events from g6-slo.yaml that this stage genuinely
+# observes must all be produced by the harness timeline or its phase
+# scripts. The load bracket (load_started/load_stopped) belongs to the
+# later real-agent run: this stage's failover happens after the marker load
+# completed, so emitting those events would misrepresent the final
+# database_failover_during_load observation.
+for event in primary_failure_injected new_primary_writable \
+  api_recovered worker_recovered old_primary_isolated \
   new_primary_promoted old_primary_write_rejected marker_a_written \
-  restore_point_created marker_b_written restore_verified; do
+  restore_point_created marker_b_written restore_verified \
+  old_primary_rejoined; do
   grep -q "${event}" "${FD_B}" || {
     echo "timeline event ${event} is not produced by the harness" >&2
     exit 1
   }
 done
+for forbidden in load_started load_stopped; do
+  if grep -q "timeline_event ${forbidden}" "${FD_B}"; then
+    echo "stage 6 must not emit ${forbidden}: the failover does not overlap a live load" >&2
+    exit 1
+  fi
+done
+
+# fd-b talks to a clone of fd-a's cluster, so it must import the peer's
+# cluster credentials before any local client runs; its own random
+# passwords would deterministically fail authentication.
+grep -q "g6_ha_import_peer_cluster_credentials \"\${peer}\"" "${FD_B}" || {
+  echo "fd-b must import the peer cluster credentials during standby bootstrap" >&2
+  exit 1
+}
+grep -q "g6_ha_import_peer_cluster_credentials()" "${LIB}" || {
+  echo "the shared lib must define the peer credential import helper" >&2
+  exit 1
+}
+
+# The environment binding must satisfy the frozen verifier pattern and be
+# derived from the shared run identity, not a per-job constant.
+grep -q 'g6-\[a-z0-9\]{8,32}' "${LIB}" || {
+  echo "the shared lib must validate the frozen environment id pattern" >&2
+  exit 1
+}
+
+# Dual-primary evidence must come from probes after the replacement
+# promotion, with the true promotion boundary published to the peer.
+grep -q "phase_post_promotion_probes" "${FD_A}" || {
+  echo "fd-a must probe the fenced former primary after the peer promotion" >&2
+  exit 1
+}
+grep -q "post-rejoin-probes" "${FD_A}" || {
+  echo "fd-a must re-verify write rejection after rejoining as a standby" >&2
+  exit 1
+}
+grep -q "G6HA_STATE}/promoted-at" "${FD_B}" || {
+  echo "fd-b must record the true promotion boundary" >&2
+  exit 1
+}
+grep -q "g6-ha-post-promotion-\${{ github.run_id }}" "${WORKFLOW}" || {
+  echo "the workflow must publish the post-promotion probes artifact" >&2
+  exit 1
+}
+grep -q "post-promotion-probes" "${WORKFLOW}" || {
+  echo "fd-a must run the post-promotion probes phase" >&2
+  exit 1
+}
+grep -q "g6-ha-post-promotion-\${GITHUB_RUN_ID}" "${WORKFLOW}" || {
+  echo "fd-b must wait for the post-promotion probes before finalizing" >&2
+  exit 1
+}
+grep -q "g6-ha-fd-a-rejoin-\${GITHUB_RUN_ID}" "${WORKFLOW}" || {
+  echo "fd-b must consume the rejoin record before finalizing evidence" >&2
+  exit 1
+}
 
 shellcheck "${LIB}" "${FD_A}" "${FD_B}"
 echo "g6-ha-pitr policy checks passed"

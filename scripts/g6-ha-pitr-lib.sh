@@ -9,7 +9,16 @@ g6_ha_init_environment() {
   FD_ID="${FD_ID:?FD_ID is required (fd-a or fd-b)}"
   FD_ALIAS="${FD_ALIAS:?FD_ALIAS is required (fd-alpha or fd-beta)}"
   ARTIFACT_DIR="${ARTIFACT_DIR:-${RUNNER_TEMP:?RUNNER_TEMP is required}/artifacts/g6-ha-pitr-${FD_ID}}"
-  G6HA_ENVIRONMENT_ID="${G6HA_ENVIRONMENT_ID:-g6-ha-pitr}"
+  # The environment binding must satisfy the frozen verifier pattern
+  # ^g6-[a-z0-9]{8,32}$ and be identical on both failure domains, so it is
+  # derived from the shared run identity (RUN_ID minus the fd suffix) instead
+  # of being a per-job constant.
+  local shared_run="${RUN_ID%-fd-[a-b]}"
+  G6HA_ENVIRONMENT_ID="${G6HA_ENVIRONMENT_ID:-g6-$(printf '%s' "${shared_run}" | openssl dgst -sha256 -r | cut -c1-16)}"
+  if [[ ! "${G6HA_ENVIRONMENT_ID}" =~ ^g6-[a-z0-9]{8,32}$ ]]; then
+    echo "environment id ${G6HA_ENVIRONMENT_ID} violates the frozen g6-[a-z0-9]{8,32} pattern" >&2
+    return 1
+  fi
   G6HA_CANDIDATE_SHA="${G6HA_CANDIDATE_SHA:?G6HA_CANDIDATE_SHA is required}"
   case "${RUN_ID}${FD_ID}${FD_ALIAS}" in
     *[!a-zA-Z0-9._-]*)
@@ -91,6 +100,25 @@ g6_ha_generate_secrets() {
     openssl rand -hex 24 >"${G6HA_SECRETS}/${name}"
     chmod 0600 "${G6HA_SECRETS}/${name}"
   done
+}
+
+# fd-b's own randomly generated cluster credentials are useless: the standby
+# clone carries fd-a's roles and passwords, so every later client on fd-b
+# (roles, promotion, reconciliation) must use the peer's cluster credentials.
+# Only the three password files are replaced; the local tunnel key stays.
+g6_ha_import_peer_cluster_credentials() {
+  local peer_dir="${1:?peer primary-up directory is required}"
+  local name source
+  for name in owner-password app-password replication-password; do
+    source="${peer_dir}/${name}"
+    [[ -s "${source}" ]] || {
+      echo "peer cluster credential ${name} is missing" >&2
+      return 1
+    }
+    install -m 0600 "${source}" "${G6HA_SECRETS}/${name}.imported"
+    mv -f "${G6HA_SECRETS}/${name}.imported" "${G6HA_SECRETS}/${name}"
+  done
+  chmod 0600 "${G6HA_SECRETS}"/{owner,app,replication}-password
 }
 
 g6_ha_owner_dsn_local() {

@@ -52,6 +52,29 @@ write_outbox_file() {
   cp -f "${source}" "${G6HA_OUTBOX}/${name}/"
 }
 
+# Repeated client-side write attempts against the local former primary,
+# timestamped on this failure domain's clock. Every attempt must fail: while
+# fenced (postgres stopped) connections are refused, and after rejoin the
+# instance is a read-only standby that rejects the INSERT itself.
+run_primary_write_probes() {
+  local count="${1:?probe count is required}"
+  local out_file="${2:?output jsonl path is required}"
+  local at accepted
+  : >"${out_file}"
+  for _attempt in $(seq 1 "${count}"); do
+    at="$(g6_ha_now)"
+    accepted=false
+    if attempt_primary_write; then
+      accepted=true
+    fi
+    jq -cn --arg at "${at}" --argjson accepted "${accepted}" \
+      '{at:$at, accepted:$accepted}' >>"${out_file}"
+    sleep 1
+  done
+  jq -s --argjson expected "${count}" \
+    '(length) == $expected and all(.accepted == false)' "${out_file}"
+}
+
 phase_prepare() {
   g6_ha_generate_secrets
   local tunnel_node
@@ -279,7 +302,7 @@ phase_pitr() {
 }
 
 phase_isolate() {
-  local outage_row isolated_at at accepted probes_file
+  local outage_row isolated_at probes_file
   # Sanity probe: the same write path must succeed before isolation so the
   # later failures prove fencing rather than a broken probe.
   attempt_primary_write || {
@@ -292,17 +315,13 @@ phase_isolate() {
   g6_ha_compose stop postgres
   isolated_at="$(g6_ha_now)"
 
+  # These probes establish the fence itself; the dual-primary evidence in the
+  # merged postgres-recovery record comes from the post-promotion probes.
   probes_file="${G6HA_STATE}/isolated-probes.jsonl"
-  : >"${probes_file}"
-  for _attempt in 1 2 3; do
-    at="$(g6_ha_now)"
-    accepted=no
-    if attempt_primary_write; then
-      accepted=yes
-    fi
-    jq -cn --arg at "${at}" --argjson accepted "${accepted}" \
-      '{at:$at, accepted:$accepted}' >>"${probes_file}"
-  done
+  run_primary_write_probes 3 "${probes_file}" | grep -qx true || {
+    echo "the isolated former primary accepted a write" >&2
+    return 1
+  }
 
   mkdir -p "${G6HA_OUTBOX}/isolation"
   jq -s \
@@ -314,12 +333,23 @@ phase_isolate() {
       old_primary:$old_primary, new_primary:$new_primary,
       isolated_primary_writes:.}' \
     "${probes_file}" >"${G6HA_OUTBOX}/isolation/isolation.json"
-  if jq -e '(.isolated_primary_writes | length) >= 3 and (.isolated_primary_writes | all(.accepted == false))' \
-    "${G6HA_OUTBOX}/isolation/isolation.json" >/dev/null; then
-    return 0
-  fi
-  echo "the isolated former primary accepted a write" >&2
-  return 1
+}
+
+# The dual-primary window starts at the peer's promotion: fd-a keeps its
+# former primary fenced and proves, after receiving the promotion record,
+# that it still refuses every write.
+phase_post_promotion_probes() {
+  local promoted_at="${1:?peer promotion timestamp file is required}"
+  require_file "${promoted_at}"
+  local probes_file="${G6HA_STATE}/post-promotion-probes.jsonl"
+  run_primary_write_probes 3 "${probes_file}" | grep -qx true || {
+    echo "the fenced former primary accepted a write after promotion" >&2
+    return 1
+  }
+  mkdir -p "${G6HA_OUTBOX}/post-promotion"
+  cp -f "${promoted_at}" "${G6HA_OUTBOX}/post-promotion/promoted-at"
+  jq -s '{promoted_at_probes:.}' "${probes_file}" \
+    >"${G6HA_OUTBOX}/post-promotion/probes.json"
 }
 
 phase_recover_roles() {
@@ -351,8 +381,16 @@ phase_rejoin() {
     -c "printf '%s\n' \"primary_conninfo = 'host=host.docker.internal port=15432 user=ocservia_replication password=$(g6_ha_secret replication-password) application_name=g6_rejoined'\" >> /data/postgresql.auto.conf && touch /data/standby.signal"
   g6_ha_compose up --detach postgres
   g6_ha_wait_until 60 2 "rejoined standby in recovery" rejoined_in_recovery
+  # The rejoined instance must stay read-only: the write probe now connects
+  # successfully, so only the standby's own read-only rejection can fail it.
+  local rejoin_probes="${G6HA_STATE}/post-rejoin-probes.jsonl"
+  run_primary_write_probes 3 "${rejoin_probes}" | grep -qx true || {
+    echo "the rejoined former primary accepted a write while a standby" >&2
+    return 1
+  }
   mkdir -p "${G6HA_OUTBOX}/rejoin"
   g6_ha_now >"${G6HA_OUTBOX}/rejoin/rejoined-at"
+  cp -f "${rejoin_probes}" "${G6HA_OUTBOX}/rejoin/post-rejoin-probes.jsonl"
 }
 
 case "${1:-}" in
@@ -367,6 +405,7 @@ case "${1:-}" in
   load) phase_load ;;
   pitr) phase_pitr ;;
   isolate) phase_isolate ;;
+  post-promotion-probes) phase_post_promotion_probes "${2:?peer promoted-at file is required}" ;;
   recover-roles) phase_recover_roles ;;
   rejoin) phase_rejoin ;;
   diagnostics) g6_ha_diagnostics ;;
@@ -378,7 +417,7 @@ case "${1:-}" in
     }
     ;;
   *)
-    echo "usage: $0 {prepare|images|tunnel-up DIR|primary-up|load|pitr|isolate|recover-roles|rejoin|diagnostics|cleanup}" >&2
+    echo "usage: $0 {prepare|images|tunnel-up DIR|primary-up|load|pitr|isolate|post-promotion-probes FILE|recover-roles|rejoin|diagnostics|cleanup}" >&2
     exit 2
     ;;
 esac
