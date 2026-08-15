@@ -126,6 +126,68 @@ message SessionGrantV1 {
   bytes signature = 11;
 }
 
+enum FenceSignatureVersion {
+  FENCE_SIGNATURE_VERSION_UNSPECIFIED = 0;
+  FENCE_SIGNATURE_VERSION_ED25519_V1 = 1;
+}
+
+enum FenceOperationKind {
+  FENCE_OPERATION_KIND_UNSPECIFIED = 0;
+  FENCE_OPERATION_KIND_COMMAND = 1;
+  FENCE_OPERATION_KIND_ARTIFACT = 2;
+  FENCE_OPERATION_KIND_CONNECTION_CLOSE = 3;
+  FENCE_OPERATION_KIND_STATE_UPDATE = 4;
+}
+
+// ConnectionFenceV2 is the Controller-signed per-node connection-owner fence.
+// It binds the exact owner instance, process incarnation, connection identity,
+// and the monotonically increasing fencing epoch recorded by the database
+// ownership authority. V1 session grants never carry these fields and are
+// never reinterpreted as fences: a V1 grant stays a bounded compatibility
+// proof and cannot authorize a fenced mutation.
+message ConnectionFenceV2 {
+  FenceSignatureVersion signature_version = 1;
+  string key_id = 2;
+  bytes fence_id = 3;
+  bytes node_id = 4;
+  bytes endpoint_id = 5;
+  bytes owner_instance_id = 6;
+  uint64 owner_incarnation = 7;
+  uint64 owner_epoch = 8;
+  bytes connection_id = 9;
+  uint64 authorization_revision = 10;
+  repeated string capabilities = 11;
+  google.protobuf.Timestamp lease_until = 12;
+  google.protobuf.Timestamp issued_at = 13;
+  google.protobuf.Timestamp expires_at = 14;
+  bytes signature = 15;
+}
+
+// FenceBindingV2 binds one operation identity (command dispatch, artifact
+// acknowledgement, connection close, or state update) to the exact fence
+// identity tuple: owner instance, incarnation, connection, and epoch. A
+// binding signed for one epoch never authorizes work recorded under a
+// different epoch, so late legitimate results are matched against the fence
+// of the actual dispatch attempt.
+message FenceBindingV2 {
+  FenceSignatureVersion signature_version = 1;
+  string key_id = 2;
+  FenceOperationKind operation_kind = 3;
+  bytes operation_id = 4;
+  bytes fence_id = 5;
+  bytes node_id = 6;
+  bytes endpoint_id = 7;
+  bytes owner_instance_id = 8;
+  uint64 owner_incarnation = 9;
+  uint64 owner_epoch = 10;
+  bytes connection_id = 11;
+  uint64 authorization_revision = 12;
+  string capability = 13;
+  google.protobuf.Timestamp issued_at = 14;
+  google.protobuf.Timestamp expires_at = 15;
+  bytes signature = 16;
+}
+
 enum AgentEventType {
   AGENT_EVENT_TYPE_UNSPECIFIED = 0;
   AGENT_EVENT_TYPE_COMMAND_RESULT = 1;
