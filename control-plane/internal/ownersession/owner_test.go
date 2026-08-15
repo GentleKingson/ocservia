@@ -29,22 +29,48 @@ func (r *recordingReader) GetOwnerFence(_ context.Context, nodeID []byte) (*agen
 	return r.fence, nil
 }
 
-// ownerStateForFence builds the PostgreSQL row that exactly backs a fence's
-// term, so tests can mutate one dimension at a time.
-func ownerStateForFence(fence *agentv1.ConnectionFenceV2) connectionowner.OwnerState {
-	instance, _ := fixed16(fence.GetOwnerInstanceId())
-	connection, _ := fixed16(fence.GetConnectionId())
-	return connectionowner.OwnerState{
-		InstanceID:      instance,
-		Incarnation:     int64(fence.GetOwnerIncarnation()),
-		ConnectionID:    connection,
-		Epoch:           int64(fence.GetOwnerEpoch()),
-		LeaseUntilValid: true,
-	}
+// guardedTerm records what the observer asked the ownership authority to
+// guard, so tests can pin the exact-term request.
+type guardedTerm struct {
+	nodeID       [16]byte
+	instanceID   [16]byte
+	incarnation  int64
+	connectionID [16]byte
+	epoch        int64
 }
 
-func authorityReturning(state connectionowner.OwnerState, err error) ownerStateReader {
-	return func(context.Context, [16]byte) (connectionowner.OwnerState, error) { return state, err }
+// recordingGuard simulates the PostgreSQL ownership guard. It records the
+// guarded terms, counts releases, and can fail like the real guard with
+// ErrNotOwner (term not backed) or an infrastructure error.
+type recordingGuard struct {
+	err      error
+	terms    []guardedTerm
+	released int
+}
+
+func (g *recordingGuard) Guard(_ context.Context, nodeID, instanceID [16]byte, incarnation int64, connectionID [16]byte, epoch int64) (func() error, error) {
+	if g.err != nil {
+		return nil, g.err
+	}
+	g.terms = append(g.terms, guardedTerm{nodeID: nodeID, instanceID: instanceID, incarnation: incarnation, connectionID: connectionID, epoch: epoch})
+	return func() error {
+		g.released++
+		return nil
+	}, nil
+}
+
+// termGuardedBy derives the exact term a fence claims, for assertions.
+func termGuardedBy(t *testing.T, fence *agentv1.ConnectionFenceV2, nodeID [16]byte) guardedTerm {
+	t.Helper()
+	instanceID, err := fixed16(fence.GetOwnerInstanceId())
+	if err != nil {
+		t.Fatalf("fence owner instance: %v", err)
+	}
+	connectionID, err := fixed16(fence.GetConnectionId())
+	if err != nil {
+		t.Fatalf("fence connection: %v", err)
+	}
+	return guardedTerm{nodeID: nodeID, instanceID: instanceID, incarnation: int64(fence.GetOwnerIncarnation()), connectionID: connectionID, epoch: int64(fence.GetOwnerEpoch())}
 }
 
 func testSigner(t *testing.T) (*commandauth.Signer, ed25519.PublicKey) {
@@ -137,17 +163,35 @@ func TestFenceCapabilitiesNormalization(t *testing.T) {
 	}
 }
 
-func TestObserverBindOperationSignsTheRegisteredTerm(t *testing.T) {
+func TestObserverExecuteFencedSignsAndRunsTheRegisteredTerm(t *testing.T) {
 	signer, publicKey := testSigner(t)
 	fence, nodeID, ownerInstanceID, endpointID := testFence(t, signer)
-	observer, err := newObserver(authorityReturning(ownerStateForFence(fence), nil), &recordingReader{fence: fence}, signer)
+	guard := &recordingGuard{}
+	observer, err := newObserver(guard, &recordingReader{fence: fence}, signer)
 	if err != nil {
 		t.Fatalf("new observer: %v", err)
 	}
 	operationID := mustUUIDv7(t)
-	_, binding, err := observer.BindOperation(context.Background(), nodeID, agentv1.FenceOperationKind_FENCE_OPERATION_KIND_COMMAND, operationID, "ocserv.service.reload")
+	var runFence *agentv1.ConnectionFenceV2
+	var binding *agentv1.FenceBindingV2
+	err = observer.ExecuteFenced(context.Background(), nodeID, agentv1.FenceOperationKind_FENCE_OPERATION_KIND_COMMAND, operationID, "ocserv.service.reload",
+		func(_ context.Context, fenceParam *agentv1.ConnectionFenceV2, bindingParam *agentv1.FenceBindingV2) error {
+			runFence, binding = fenceParam, bindingParam
+			return nil
+		})
 	if err != nil {
-		t.Fatalf("bind operation: %v", err)
+		t.Fatalf("execute fenced: %v", err)
+	}
+	if runFence != fence {
+		t.Fatal("action did not receive the registered fence")
+	}
+	// The authority was asked to guard exactly the fence's term, and the
+	// guard was released once the action returned.
+	if len(guard.terms) != 1 || guard.terms[0] != termGuardedBy(t, fence, nodeID) {
+		t.Fatalf("guarded terms = %+v, want the fence's exact term", guard.terms)
+	}
+	if guard.released != 1 {
+		t.Fatalf("guard releases = %d, want 1", guard.released)
 	}
 	if binding.GetOperationKind() != agentv1.FenceOperationKind_FENCE_OPERATION_KIND_COMMAND {
 		t.Fatalf("binding kind = %v", binding.GetOperationKind())
@@ -196,41 +240,123 @@ func TestObserverBindOperationSignsTheRegisteredTerm(t *testing.T) {
 	}
 }
 
-func TestObserverBindOperationRejectsUnheldCapability(t *testing.T) {
+// TestObserverExecuteFencedHoldsTheGuardAcrossTheAction proves the fencing
+// interval's ordering: the guard is still held while the action runs and is
+// released only after it returned.
+func TestObserverExecuteFencedHoldsTheGuardAcrossTheAction(t *testing.T) {
 	signer, _ := testSigner(t)
 	fence, nodeID, _, _ := testFence(t, signer)
-	observer, err := newObserver(authorityReturning(ownerStateForFence(fence), nil), &recordingReader{fence: fence}, signer)
+	guard := &recordingGuard{}
+	observer, err := newObserver(guard, &recordingReader{fence: fence}, signer)
 	if err != nil {
 		t.Fatalf("new observer: %v", err)
 	}
-	_, _, err = observer.BindOperation(context.Background(), nodeID, agentv1.FenceOperationKind_FENCE_OPERATION_KIND_STATE_UPDATE, mustUUIDv7(t), "ocserv.tenant.admin")
+	err = observer.ExecuteFenced(context.Background(), nodeID, agentv1.FenceOperationKind_FENCE_OPERATION_KIND_COMMAND, mustUUIDv7(t), "ocserv.service.reload",
+		func(context.Context, *agentv1.ConnectionFenceV2, *agentv1.FenceBindingV2) error {
+			if guard.released != 0 {
+				t.Fatal("guard was released before the mutation completed")
+			}
+			return nil
+		})
+	if err != nil {
+		t.Fatalf("execute fenced: %v", err)
+	}
+	if guard.released != 1 {
+		t.Fatalf("guard releases = %d, want 1", guard.released)
+	}
+}
+
+// TestObserverExecuteFencedPropagatesActionErrorsAndReleases proves a failed
+// mutation still frees the authority guard instead of pinning the node's
+// ownership row.
+func TestObserverExecuteFencedPropagatesActionErrorsAndReleases(t *testing.T) {
+	signer, _ := testSigner(t)
+	fence, nodeID, _, _ := testFence(t, signer)
+	guard := &recordingGuard{}
+	observer, err := newObserver(guard, &recordingReader{fence: fence}, signer)
+	if err != nil {
+		t.Fatalf("new observer: %v", err)
+	}
+	actionFailure := errors.New("transport rejected the mutation")
+	err = observer.ExecuteFenced(context.Background(), nodeID, agentv1.FenceOperationKind_FENCE_OPERATION_KIND_COMMAND, mustUUIDv7(t), "ocserv.service.reload",
+		func(context.Context, *agentv1.ConnectionFenceV2, *agentv1.FenceBindingV2) error {
+			return actionFailure
+		})
+	if !errors.Is(err, actionFailure) {
+		t.Fatalf("error = %v, want the action failure", err)
+	}
+	if guard.released != 1 {
+		t.Fatalf("guard releases = %d, want 1 after a failed action", guard.released)
+	}
+}
+
+func TestObserverExecuteFencedRejectsUnheldCapability(t *testing.T) {
+	signer, _ := testSigner(t)
+	fence, nodeID, _, _ := testFence(t, signer)
+	guard := &recordingGuard{}
+	observer, err := newObserver(guard, &recordingReader{fence: fence}, signer)
+	if err != nil {
+		t.Fatalf("new observer: %v", err)
+	}
+	ran := false
+	err = observer.ExecuteFenced(context.Background(), nodeID, agentv1.FenceOperationKind_FENCE_OPERATION_KIND_STATE_UPDATE, mustUUIDv7(t), "ocserv.tenant.admin",
+		func(context.Context, *agentv1.ConnectionFenceV2, *agentv1.FenceBindingV2) error {
+			ran = true
+			return nil
+		})
 	if !errors.Is(err, ErrCapabilityNotFenced) {
 		t.Fatalf("error = %v, want ErrCapabilityNotFenced", err)
 	}
+	if ran {
+		t.Fatal("action ran for an unfenced capability")
+	}
+	if len(guard.terms) != 0 {
+		t.Fatal("guard was acquired for an unfenced capability")
+	}
 }
 
-func TestObserverBindOperationWithoutRegisteredFence(t *testing.T) {
+func TestObserverExecuteFencedWithoutRegisteredFence(t *testing.T) {
 	signer, _ := testSigner(t)
-	observer, err := newObserver(authorityReturning(connectionowner.OwnerState{}, errors.New("authority must not be consulted")), &recordingReader{}, signer)
+	guard := &recordingGuard{}
+	observer, err := newObserver(guard, &recordingReader{}, signer)
 	if err != nil {
 		t.Fatalf("new observer: %v", err)
 	}
-	_, _, err = observer.BindOperation(context.Background(), mustUUIDv7(t), agentv1.FenceOperationKind_FENCE_OPERATION_KIND_COMMAND, mustUUIDv7(t), "ocserv.service.reload")
-	if !errors.Is(err, ErrNoFence) {
-		t.Fatalf("error = %v, want ErrNoFence", err)
+	var runFence *agentv1.ConnectionFenceV2
+	var runBinding *agentv1.FenceBindingV2
+	if err := observer.ExecuteFenced(context.Background(), mustUUIDv7(t), agentv1.FenceOperationKind_FENCE_OPERATION_KIND_COMMAND, mustUUIDv7(t), "ocserv.service.reload",
+		func(_ context.Context, fence *agentv1.ConnectionFenceV2, binding *agentv1.FenceBindingV2) error {
+			runFence, runBinding = fence, binding
+			return nil
+		}); err != nil {
+		t.Fatalf("execute fenced without a registered fence: %v", err)
+	}
+	if runFence != nil || runBinding != nil {
+		t.Fatal("unfenced compatibility path carried fence material")
+	}
+	if len(guard.terms) != 0 {
+		t.Fatal("guard was acquired without a registered fence")
 	}
 }
 
-func TestObserverBindOperationPropagatesReaderErrors(t *testing.T) {
+func TestObserverExecuteFencedPropagatesReaderErrors(t *testing.T) {
 	signer, _ := testSigner(t)
 	readerFailure := errors.New("transport unavailable")
-	observer, err := newObserver(authorityReturning(connectionowner.OwnerState{}, errors.New("authority must not be consulted")), &recordingReader{err: readerFailure}, signer)
+	observer, err := newObserver(&recordingGuard{}, &recordingReader{err: readerFailure}, signer)
 	if err != nil {
 		t.Fatalf("new observer: %v", err)
 	}
-	_, _, err = observer.BindOperation(context.Background(), mustUUIDv7(t), agentv1.FenceOperationKind_FENCE_OPERATION_KIND_COMMAND, mustUUIDv7(t), "ocserv.service.reload")
+	ran := false
+	err = observer.ExecuteFenced(context.Background(), mustUUIDv7(t), agentv1.FenceOperationKind_FENCE_OPERATION_KIND_COMMAND, mustUUIDv7(t), "ocserv.service.reload",
+		func(context.Context, *agentv1.ConnectionFenceV2, *agentv1.FenceBindingV2) error {
+			ran = true
+			return nil
+		})
 	if !errors.Is(err, readerFailure) {
 		t.Fatalf("error = %v, want reader failure", err)
+	}
+	if ran {
+		t.Fatal("action ran despite a reader failure")
 	}
 }
 
@@ -238,108 +364,74 @@ func TestObserverRejectsMalformedRegisteredFence(t *testing.T) {
 	signer, _ := testSigner(t)
 	fence, _, _, _ := testFence(t, signer)
 	fence.FenceId = []byte{1, 2, 3}
-	observer, err := newObserver(authorityReturning(connectionowner.OwnerState{}, errors.New("authority must not be consulted")), &recordingReader{fence: fence}, signer)
+	observer, err := newObserver(&recordingGuard{}, &recordingReader{fence: fence}, signer)
 	if err != nil {
 		t.Fatalf("new observer: %v", err)
 	}
-	_, _, err = observer.BindOperation(context.Background(), mustUUIDv7(t), agentv1.FenceOperationKind_FENCE_OPERATION_KIND_COMMAND, mustUUIDv7(t), "ocserv.service.reload")
+	ran := false
+	err = observer.ExecuteFenced(context.Background(), mustUUIDv7(t), agentv1.FenceOperationKind_FENCE_OPERATION_KIND_COMMAND, mustUUIDv7(t), "ocserv.service.reload",
+		func(context.Context, *agentv1.ConnectionFenceV2, *agentv1.FenceBindingV2) error {
+			ran = true
+			return nil
+		})
 	if err == nil {
 		t.Fatal("malformed fence accepted")
 	}
-}
-
-// TestObserverBindOperationFailsClosedWhenTheAuthorityDisagrees pins the
-// authority gate: a fence that transportd still serves may only be signed
-// while the PostgreSQL ownership row names its exact owner instance,
-// incarnation, connection, and epoch under an unexpired lease. Any
-// disagreement — including a successor's higher epoch with a live lease —
-// fails closed as ErrNotOwner and never degrades to the unfenced
-// compatibility path.
-func TestObserverBindOperationFailsClosedWhenTheAuthorityDisagrees(t *testing.T) {
-	signer, _ := testSigner(t)
-	fence, nodeID, _, _ := testFence(t, signer)
-	backing := ownerStateForFence(fence)
-	otherConnection := backing.ConnectionID
-	otherConnection[0] ^= 1
-	otherInstance := backing.InstanceID
-	otherInstance[0] ^= 1
-	successorEpoch := backing
-	successorEpoch.Epoch++
-	expiredLease := backing
-	expiredLease.LeaseUntilValid = false
-	otherConnectionState := backing
-	otherConnectionState.ConnectionID = otherConnection
-	otherInstanceState := backing
-	otherInstanceState.InstanceID = otherInstance
-	otherIncarnation := backing
-	otherIncarnation.Incarnation++
-	authorityBehind := backing
-	authorityBehind.Epoch--
-	disagreements := []struct {
-		name  string
-		state connectionowner.OwnerState
-	}{
-		{"successor epoch with a live lease", successorEpoch},
-		{"expired lease", expiredLease},
-		{"different connection", otherConnectionState},
-		{"different owner instance", otherInstanceState},
-		{"different incarnation", otherIncarnation},
-		{"fence ahead of the authority row", authorityBehind},
-	}
-	for _, disagreement := range disagreements {
-		t.Run(disagreement.name, func(t *testing.T) {
-			observer, err := newObserver(authorityReturning(disagreement.state, nil), &recordingReader{fence: fence}, signer)
-			if err != nil {
-				t.Fatalf("new observer: %v", err)
-			}
-			returnedFence, binding, err := observer.BindOperation(context.Background(), nodeID, agentv1.FenceOperationKind_FENCE_OPERATION_KIND_COMMAND, mustUUIDv7(t), "ocserv.service.reload")
-			if !errors.Is(err, ErrNotOwner) {
-				t.Fatalf("error = %v, want ErrNotOwner", err)
-			}
-			if binding != nil || returnedFence != nil {
-				t.Fatal("observer produced fence material for a term the authority does not back")
-			}
-		})
+	if ran {
+		t.Fatal("action ran for a malformed fence")
 	}
 }
 
-// TestObserverBindOperationFailsClosedWithoutAnOwnershipRow covers a
-// registered fence whose node has no PostgreSQL ownership row at all, and an
-// authority that cannot be read: both must fail closed and neither may select
-// the unfenced compatibility path.
-func TestObserverBindOperationFailsClosedWithoutAnOwnershipRow(t *testing.T) {
+// TestObserverExecuteFencedFailsClosedWhenTheAuthorityRejectsTheTerm pins the
+// authority gate: a fence that transportd still serves may only mutate while
+// the PostgreSQL ownership guard accepts its exact term. The guard rejects
+// the term — successor epoch, expired lease, foreign connection, instance,
+// incarnation, or no row at all — with connectionowner.ErrNotOwner, which the
+// observer surfaces as its own ErrNotOwner without running the action and
+// without ever selecting the unfenced compatibility path.
+func TestObserverExecuteFencedFailsClosedWhenTheAuthorityRejectsTheTerm(t *testing.T) {
 	signer, _ := testSigner(t)
 	fence, nodeID, _, _ := testFence(t, signer)
-	observer, err := newObserver(authorityReturning(connectionowner.OwnerState{}, fmt.Errorf("gone: %w", connectionowner.ErrNoOwnerRow)), &recordingReader{fence: fence}, signer)
+	observer, err := newObserver(&recordingGuard{err: fmt.Errorf("stale term: %w", connectionowner.ErrNotOwner)}, &recordingReader{fence: fence}, signer)
 	if err != nil {
 		t.Fatalf("new observer: %v", err)
 	}
-	_, binding, err := observer.BindOperation(context.Background(), nodeID, agentv1.FenceOperationKind_FENCE_OPERATION_KIND_COMMAND, mustUUIDv7(t), "ocserv.service.reload")
+	ran := false
+	err = observer.ExecuteFenced(context.Background(), nodeID, agentv1.FenceOperationKind_FENCE_OPERATION_KIND_COMMAND, mustUUIDv7(t), "ocserv.service.reload",
+		func(context.Context, *agentv1.ConnectionFenceV2, *agentv1.FenceBindingV2) error {
+			ran = true
+			return nil
+		})
 	if !errors.Is(err, ErrNotOwner) {
 		t.Fatalf("error = %v, want ErrNotOwner", err)
 	}
-	if binding != nil {
-		t.Fatal("observer signed a binding without an ownership row")
+	if ran {
+		t.Fatal("action ran for a term the authority does not back")
 	}
 }
 
-func TestObserverBindOperationFailsClosedWhenTheAuthorityIsUnreadable(t *testing.T) {
+func TestObserverExecuteFencedFailsClosedWhenTheAuthorityIsUnreadable(t *testing.T) {
 	signer, _ := testSigner(t)
 	fence, nodeID, _, _ := testFence(t, signer)
 	authorityFailure := errors.New("database unavailable")
-	observer, err := newObserver(authorityReturning(connectionowner.OwnerState{}, authorityFailure), &recordingReader{fence: fence}, signer)
+	observer, err := newObserver(&recordingGuard{err: authorityFailure}, &recordingReader{fence: fence}, signer)
 	if err != nil {
 		t.Fatalf("new observer: %v", err)
 	}
-	_, binding, err := observer.BindOperation(context.Background(), nodeID, agentv1.FenceOperationKind_FENCE_OPERATION_KIND_COMMAND, mustUUIDv7(t), "ocserv.service.reload")
+	ran := false
+	err = observer.ExecuteFenced(context.Background(), nodeID, agentv1.FenceOperationKind_FENCE_OPERATION_KIND_COMMAND, mustUUIDv7(t), "ocserv.service.reload",
+		func(context.Context, *agentv1.ConnectionFenceV2, *agentv1.FenceBindingV2) error {
+			ran = true
+			return nil
+		})
 	if !errors.Is(err, authorityFailure) {
 		t.Fatalf("error = %v, want the authority failure", err)
 	}
 	if errors.Is(err, ErrNoFence) || errors.Is(err, ErrNotOwner) {
 		t.Fatalf("authority failure = %v must stay a distinct fail-closed error", err)
 	}
-	if binding != nil {
-		t.Fatal("observer signed a binding while the authority was unreadable")
+	if ran {
+		t.Fatal("action ran while the authority was unreadable")
 	}
 }
 

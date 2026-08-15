@@ -625,12 +625,17 @@ func TestObserverFailsClosedOnAStaleRegisteredFenceIntegration(t *testing.T) {
 	}
 	// While the authority still backs the registered term, the observer
 	// serves exactly that term.
-	liveFence, liveBinding, err := observer.BindOperation(context.Background(), nodeID, agentv1.FenceOperationKind_FENCE_OPERATION_KIND_COMMAND, mustUUIDv7(t), "ocserv.fencing.v2")
-	if err != nil {
-		t.Fatalf("observer bind on the live term: %v", err)
-	}
-	if liveFence.GetOwnerEpoch() != firstFence.GetOwnerEpoch() || liveBinding == nil {
-		t.Fatalf("observer bind on the live term = epoch %d, binding %v", liveFence.GetOwnerEpoch(), liveBinding)
+	var liveBinding *agentv1.FenceBindingV2
+	liveErr := observer.ExecuteFenced(context.Background(), nodeID, agentv1.FenceOperationKind_FENCE_OPERATION_KIND_COMMAND, mustUUIDv7(t), "ocserv.fencing.v2",
+		func(_ context.Context, fence *agentv1.ConnectionFenceV2, binding *agentv1.FenceBindingV2) error {
+			if fence.GetOwnerEpoch() != firstFence.GetOwnerEpoch() {
+				t.Fatalf("observer bind on the live term = epoch %d, want %d", fence.GetOwnerEpoch(), firstFence.GetOwnerEpoch())
+			}
+			liveBinding = binding
+			return nil
+		})
+	if liveErr != nil || liveBinding == nil {
+		t.Fatalf("observer bind on the live term = (%v, %v)", liveErr, liveBinding)
 	}
 
 	// The same manager reconnects: Acquire advances the PostgreSQL epoch, but
@@ -656,14 +661,18 @@ func TestObserverFailsClosedOnAStaleRegisteredFenceIntegration(t *testing.T) {
 		t.Fatalf("stale fence lease %v already expired; the dangerous window is gone", registered.GetLeaseUntil().AsTime())
 	}
 
-	// The split-role observer must fail closed instead of signing a binding
+	// The split-role observer must fail closed instead of running a mutation
 	// the stale registry would accept.
-	returnedFence, binding, err := observer.BindOperation(context.Background(), nodeID, agentv1.FenceOperationKind_FENCE_OPERATION_KIND_COMMAND, mustUUIDv7(t), "ocserv.fencing.v2")
-	if !errors.Is(err, ErrNotOwner) {
+	ran := false
+	if err := observer.ExecuteFenced(context.Background(), nodeID, agentv1.FenceOperationKind_FENCE_OPERATION_KIND_COMMAND, mustUUIDv7(t), "ocserv.fencing.v2",
+		func(context.Context, *agentv1.ConnectionFenceV2, *agentv1.FenceBindingV2) error {
+			ran = true
+			return nil
+		}); !errors.Is(err, ErrNotOwner) {
 		t.Fatalf("observer bind on the stale registered fence = %v, want ErrNotOwner", err)
 	}
-	if binding != nil || returnedFence != nil {
-		t.Fatal("observer signed fence material for the stale registered term")
+	if ran {
+		t.Fatal("observer ran a mutation for the stale registered term")
 	}
 
 	// A successor takes the node over through a real Acquire strictly above
@@ -681,11 +690,158 @@ func TestObserverFailsClosedOnAStaleRegisteredFenceIntegration(t *testing.T) {
 	if successorFence.GetOwnerEpoch() <= firstFence.GetOwnerEpoch()+1 {
 		t.Fatalf("successor epoch %d does not exceed the failed reopen epoch %d", successorFence.GetOwnerEpoch(), firstFence.GetOwnerEpoch()+1)
 	}
-	observedFence, observedBinding, err := observer.BindOperation(context.Background(), nodeID, agentv1.FenceOperationKind_FENCE_OPERATION_KIND_COMMAND, mustUUIDv7(t), "ocserv.fencing.v2")
-	if err != nil {
+	observedEpoch := int64(0)
+	if err := observer.ExecuteFenced(context.Background(), nodeID, agentv1.FenceOperationKind_FENCE_OPERATION_KIND_COMMAND, mustUUIDv7(t), "ocserv.fencing.v2",
+		func(_ context.Context, fence *agentv1.ConnectionFenceV2, binding *agentv1.FenceBindingV2) error {
+			if binding == nil {
+				t.Fatal("observer served the successor term without a binding")
+			}
+			observedEpoch = int64(fence.GetOwnerEpoch())
+			return nil
+		}); err != nil {
 		t.Fatalf("observer bind on the successor term: %v", err)
 	}
-	if observedFence.GetOwnerEpoch() != successorFence.GetOwnerEpoch() || observedBinding == nil {
-		t.Fatalf("observer bind on the successor term = epoch %d, binding %v", observedFence.GetOwnerEpoch(), observedBinding)
+	if observedEpoch != int64(successorFence.GetOwnerEpoch()) {
+		t.Fatalf("observer bind on the successor term = epoch %d, want %d", observedEpoch, successorFence.GetOwnerEpoch())
+	}
+}
+
+// TestObserverGuardSpansTheMutationAgainstTheReopenAdvanceIntegration pins
+// the fencing interval with a deterministic barrier, in the exact order the
+// TOCTOU review described: the observer has already verified and is holding
+// epoch N when a same-manager reconnect Acquires N+1 whose registration then
+// fails. The ownership guard — not a point-in-time read — must keep the
+// epoch at N until the observer's mutation RPC completed: the reopen's
+// Acquire blocks on the guard, so no N binding can be signed after the
+// authority moved on, and the N mutation that ran is provably
+// authority-backed at mutation time.
+func TestObserverGuardSpansTheMutationAgainstTheReopenAdvanceIntegration(t *testing.T) {
+	pool := testPool(t)
+	signer, _ := testSigner(t)
+	registry := &registryFence{}
+	manager, err := NewManager(pool, signer, registry, 30*time.Second, testLogger())
+	if err != nil {
+		t.Fatalf("new manager: %v", err)
+	}
+	nodeID, endpointID := testNodeAndEndpoint(t)
+	firstFence, err := manager.OpenSession(context.Background(), nodeID, endpointID, 51, []string{"ocserv.fencing.v2"})
+	if err != nil {
+		t.Fatalf("open session: %v", err)
+	}
+	observer, err := NewObserver(pool, registry, signer)
+	if err != nil {
+		t.Fatalf("new observer: %v", err)
+	}
+
+	// The observer verifies N, acquires the authority guard, and starts a
+	// mutation that blocks mid-RPC.
+	mutationStarted := make(chan struct{})
+	mutationProceed := make(chan struct{})
+	mutationDone := make(chan error, 1)
+	go func() {
+		mutationDone <- observer.ExecuteFenced(context.Background(), nodeID, agentv1.FenceOperationKind_FENCE_OPERATION_KIND_COMMAND, mustUUIDv7(t), "ocserv.fencing.v2",
+			func(_ context.Context, fence *agentv1.ConnectionFenceV2, binding *agentv1.FenceBindingV2) error {
+				if binding.GetOwnerEpoch() != firstFence.GetOwnerEpoch() {
+					t.Errorf("in-flight mutation epoch = %d, want the verified epoch %d", binding.GetOwnerEpoch(), firstFence.GetOwnerEpoch())
+				}
+				close(mutationStarted)
+				<-mutationProceed
+				return nil
+			})
+	}()
+	<-mutationStarted
+
+	// After the observer's verification, the same manager reconnects: the
+	// real PostgreSQL Acquire must wait behind the guard instead of
+	// advancing the epoch under the in-flight N mutation.
+	registry.failures = true
+	reopenDone := make(chan error, 1)
+	go func() {
+		_, err := manager.OpenSession(context.Background(), nodeID, endpointID, 52, []string{"ocserv.fencing.v2"})
+		reopenDone <- err
+	}()
+	select {
+	case err := <-reopenDone:
+		t.Fatalf("the reopen advanced the epoch while the guarded mutation was in flight: %v", err)
+	case <-time.After(1500 * time.Millisecond):
+	}
+
+	// The mutation completes inside the fencing interval; only then may the
+	// epoch advance — the reopen's Acquire proceeds and its registration
+	// fails, leaving transportd serving N.
+	close(mutationProceed)
+	if err := <-mutationDone; err != nil {
+		t.Fatalf("guarded mutation: %v", err)
+	}
+	if err := <-reopenDone; err == nil {
+		t.Fatal("reopen through a failing registrar unexpectedly succeeded")
+	}
+	if _, _, err := manager.BindOperation(context.Background(), nodeID, agentv1.FenceOperationKind_FENCE_OPERATION_KIND_COMMAND, mustUUIDv7(t), "ocserv.fencing.v2"); !errors.Is(err, ErrFenceUnavailable) {
+		t.Fatalf("manager bind after the failed reopen = %v, want ErrFenceUnavailable", err)
+	}
+	// The epoch already advanced past N, so the stale registered fence can
+	// no longer mint mutations even though its lease deadline has not passed.
+	ran := false
+	if err := observer.ExecuteFenced(context.Background(), nodeID, agentv1.FenceOperationKind_FENCE_OPERATION_KIND_COMMAND, mustUUIDv7(t), "ocserv.fencing.v2",
+		func(context.Context, *agentv1.ConnectionFenceV2, *agentv1.FenceBindingV2) error {
+			ran = true
+			return nil
+		}); !errors.Is(err, ErrNotOwner) {
+		t.Fatalf("observer bind after the guarded mutation and failed reopen = %v, want ErrNotOwner", err)
+	}
+	if ran {
+		t.Fatal("observer ran a mutation after the epoch advanced past the registered fence")
+	}
+}
+
+// TestManagerExecuteFencedRunsTheActionUnderTheNodeLock covers the
+// worker-role executor: a live session's mutation runs with the fence and
+// binding, an unknown node keeps the unfenced compatibility path, and an
+// ended session fails closed without running the mutation.
+func TestManagerExecuteFencedRunsTheActionUnderTheNodeLockIntegration(t *testing.T) {
+	pool := testPool(t)
+	signer, _ := testSigner(t)
+	manager, err := NewManager(pool, signer, &recordingRegistrar{}, 30*time.Second, testLogger())
+	if err != nil {
+		t.Fatalf("new manager: %v", err)
+	}
+	nodeID, endpointID := testNodeAndEndpoint(t)
+	fence, err := manager.OpenSession(context.Background(), nodeID, endpointID, 61, []string{"ocserv.fencing.v2"})
+	if err != nil {
+		t.Fatalf("open session: %v", err)
+	}
+	sawFence, sawBinding := false, false
+	if err := manager.ExecuteFenced(context.Background(), nodeID, agentv1.FenceOperationKind_FENCE_OPERATION_KIND_COMMAND, mustUUIDv7(t), "ocserv.fencing.v2",
+		func(_ context.Context, actionFence *agentv1.ConnectionFenceV2, binding *agentv1.FenceBindingV2) error {
+			sawFence, sawBinding = actionFence.GetOwnerEpoch() == fence.GetOwnerEpoch(), binding != nil
+			return nil
+		}); err != nil || !sawFence || !sawBinding {
+		t.Fatalf("live session execute = (%v, fence %v, binding %v)", err, sawFence, sawBinding)
+	}
+
+	unknown := mustUUIDv7(t)
+	ran := false
+	if err := manager.ExecuteFenced(context.Background(), unknown, agentv1.FenceOperationKind_FENCE_OPERATION_KIND_COMMAND, mustUUIDv7(t), "ocserv.fencing.v2",
+		func(_ context.Context, actionFence *agentv1.ConnectionFenceV2, binding *agentv1.FenceBindingV2) error {
+			ran = actionFence == nil && binding == nil
+			return nil
+		}); err != nil || !ran {
+		t.Fatalf("unknown node execute = (%v, ran %v), want the unfenced compatibility path", err, ran)
+	}
+
+	connectionID, err := fixed16(fence.GetConnectionId())
+	if err != nil {
+		t.Fatalf("fence connection id: %v", err)
+	}
+	if err := manager.CloseSession(context.Background(), nodeID, connectionID, int64(fence.GetOwnerEpoch())); err != nil {
+		t.Fatalf("close session: %v", err)
+	}
+	ran = false
+	if err := manager.ExecuteFenced(context.Background(), nodeID, agentv1.FenceOperationKind_FENCE_OPERATION_KIND_COMMAND, mustUUIDv7(t), "ocserv.fencing.v2",
+		func(context.Context, *agentv1.ConnectionFenceV2, *agentv1.FenceBindingV2) error {
+			ran = true
+			return nil
+		}); !errors.Is(err, ErrNotOwner) || ran {
+		t.Fatalf("ended session execute = (%v, ran %v), want ErrNotOwner without a mutation", err, ran)
 	}
 }

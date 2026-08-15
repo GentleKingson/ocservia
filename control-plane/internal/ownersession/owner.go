@@ -100,6 +100,20 @@ type OperationBinder interface {
 	BindOperation(ctx context.Context, nodeID [16]byte, kind agentv1.FenceOperationKind, operationID [16]byte, capability string) (*agentv1.ConnectionFenceV2, *agentv1.FenceBindingV2, error)
 }
 
+// FencedAction performs the mutation that consumes one fence binding. It
+// runs inside the issuer's fencing interval: the ownership authority guards
+// the verified term until the action returns, so the fencing epoch cannot
+// advance between verification and mutation.
+type FencedAction func(ctx context.Context, fence *agentv1.ConnectionFenceV2, binding *agentv1.FenceBindingV2) error
+
+// FencedExecutor issues one fenced mutation. The action receives the fence
+// and binding to carry on the wire — nil, nil keeps the unfenced
+// compatibility path — and must run the transport RPC that presents them
+// before returning, because the ownership guard is held only until then.
+type FencedExecutor interface {
+	ExecuteFenced(ctx context.Context, nodeID [16]byte, kind agentv1.FenceOperationKind, operationID [16]byte, capability string, action FencedAction) error
+}
+
 type nodeSession struct {
 	term                  *connectionowner.Term
 	fenceID               [16]byte
@@ -400,6 +414,38 @@ func (m *Manager) releaseAcquiredTerm(ctx context.Context, term *connectionowner
 func (m *Manager) BindOperation(ctx context.Context, nodeID [16]byte, kind agentv1.FenceOperationKind, operationID [16]byte, capability string) (*agentv1.ConnectionFenceV2, *agentv1.FenceBindingV2, error) {
 	unlock := m.lockNode(nodeID)
 	defer unlock()
+	term, err := m.termForBinding(ctx, nodeID)
+	if err != nil {
+		return nil, nil, err
+	}
+	return m.issueBinding(term, kind, operationID, capability)
+}
+
+// ExecuteFenced issues one fenced mutation for the node's live session. The
+// per-node mutex stays held across the action, so a same-process reopen
+// cannot advance the fencing epoch between the lease check, the signature,
+// and the mutation the action performs.
+func (m *Manager) ExecuteFenced(ctx context.Context, nodeID [16]byte, kind agentv1.FenceOperationKind, operationID [16]byte, capability string, action FencedAction) error {
+	unlock := m.lockNode(nodeID)
+	defer unlock()
+	term, err := m.termForBinding(ctx, nodeID)
+	if errors.Is(err, ErrNoFence) {
+		return action(ctx, nil, nil)
+	}
+	if err != nil {
+		return err
+	}
+	fence, binding, err := m.issueBinding(term, kind, operationID, capability)
+	if err != nil {
+		return err
+	}
+	return action(ctx, fence, binding)
+}
+
+// termForBinding returns the binding snapshot of the node's live session, or
+// the fail-closed reason there is none. Callers hold the node mutex; the
+// snapshot is taken under it so renewal cannot race binding issuance.
+func (m *Manager) termForBinding(ctx context.Context, nodeID [16]byte) (*bindingTerm, error) {
 	m.mu.Lock()
 	session, ok := m.sessions[nodeID]
 	if ok && session.lost {
@@ -411,15 +457,15 @@ func (m *Manager) BindOperation(ctx context.Context, nodeID [16]byte, kind agent
 	if !ok {
 		switch {
 		case ended && reason == endedRegistrationUnavailable:
-			return nil, nil, ErrFenceUnavailable
+			return nil, ErrFenceUnavailable
 		case ended:
-			return nil, nil, ErrNotOwner
+			return nil, ErrNotOwner
 		default:
-			return nil, nil, ErrNoFence
+			return nil, ErrNoFence
 		}
 	}
 	if err := m.refresh(ctx, session); err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 	// A renewal re-signed the fence; push it to transportd eagerly so
 	// its recorded lease stays current. A failure only leaves the
@@ -429,7 +475,7 @@ func (m *Manager) BindOperation(ctx context.Context, nodeID [16]byte, kind agent
 	if session.registrationPending && m.registrar.RegisterOwnerFence(ctx, session.fence) == nil {
 		session.registrationPending = false
 	}
-	term := bindingTerm{
+	snapshot := bindingTerm{
 		fence:                 session.fence,
 		fenceID:               session.fenceID,
 		nodeID:                session.nodeID,
@@ -440,7 +486,7 @@ func (m *Manager) BindOperation(ctx context.Context, nodeID [16]byte, kind agent
 		authorizationRevision: session.authorizationRevision,
 		capabilities:          session.capabilities,
 	}
-	return m.issueBinding(&term, kind, operationID, capability)
+	return &snapshot, nil
 }
 
 // maintain renews sessions approaching their deadline and retries pending
@@ -646,115 +692,112 @@ func fenceCapabilities(capabilities []string) []string {
 	return normalized
 }
 
-// ownerStateReader reads the current PostgreSQL ownership row for one node.
-// The observer treats it as the ownership authority: no binding may be signed
-// for a fence the current row does not back.
-type ownerStateReader func(ctx context.Context, nodeID [16]byte) (connectionowner.OwnerState, error)
-
-// poolOwnerStateReader adapts the process pool to the observer's authority
-// reader.
-func poolOwnerStateReader(pool *pgxpool.Pool) ownerStateReader {
-	return func(ctx context.Context, nodeID [16]byte) (connectionowner.OwnerState, error) {
-		return connectionowner.ReadState(ctx, pool, nodeID)
-	}
+// fenceGuard acquires the PostgreSQL ownership guard for one observed term.
+// It returns a release function; the term's fencing epoch cannot advance
+// between the guard call and that release.
+type fenceGuard interface {
+	Guard(ctx context.Context, nodeID [16]byte, instanceID [16]byte, incarnation int64, connectionID [16]byte, epoch int64) (release func() error, err error)
 }
 
-// Observer issues operation bindings for Controller processes that do not
-// hold the node lease. It reads the fence transportd registered for the node
-// — already signature-verified by transportd — and signs bindings for exactly
-// that term, so a stale owner's term can never be reintroduced by an
-// observer.
-//
-// The registered fence alone is not authority: transportd keeps serving a
-// fence until a strictly higher epoch registers, which never happens when a
-// takeover's registration failed. Every binding is therefore gated by the
-// PostgreSQL ownership row, which must still name the fence's exact owner
-// instance, incarnation, connection, and epoch under an unexpired lease.
+// poolFenceGuard adapts the process pool to the observer's ownership guard.
+type poolFenceGuard struct{ pool *pgxpool.Pool }
+
+func (g poolFenceGuard) Guard(ctx context.Context, nodeID [16]byte, instanceID [16]byte, incarnation int64, connectionID [16]byte, epoch int64) (func() error, error) {
+	return connectionowner.GuardObservedTerm(ctx, g.pool, nodeID, uuid.UUID(instanceID), incarnation, connectionID, epoch)
+}
+
+// Observer runs fenced mutations for Controller processes that do not hold
+// the node lease. It reads the fence transportd registered for the node —
+// already signature-verified by transportd — and never trusts the registry
+// alone: transportd keeps serving a fence until a strictly higher epoch
+// registers, which never happens when a takeover's registration failed.
+// Every mutation therefore runs inside a fencing interval backed by the
+// PostgreSQL ownership row: the guard asserts the row still names the
+// fence's exact owner instance, incarnation, connection, and epoch under an
+// unexpired lease, holds a share lock on the row, and is released only after
+// the action's mutation RPC returned. A concurrent Acquire that would
+// advance the epoch waits on that lock, so no binding signed here can
+// outlive the term the authority backed at mutation time.
 type Observer struct {
 	reader     FenceReader
-	authority  ownerStateReader
+	guard      fenceGuard
 	signer     *commandauth.Signer
 	bindingTTL time.Duration
 	now        func() time.Time
 }
 
-// NewObserver prepares the observer binder used by API and scheduler role
-// processes for artifact, close, and state-update fencing. The pool is the
-// PostgreSQL ownership authority the registered fence must still match.
+// NewObserver prepares the executor used by API and scheduler role processes
+// for artifact, close, and state-update fencing. The pool is the PostgreSQL
+// ownership authority that guards every mutation.
 func NewObserver(pool *pgxpool.Pool, reader FenceReader, signer *commandauth.Signer) (*Observer, error) {
 	if pool == nil {
 		return nil, errors.New("ownersession: observer requires the ownership authority pool")
 	}
-	return newObserver(poolOwnerStateReader(pool), reader, signer)
+	return newObserver(poolFenceGuard{pool: pool}, reader, signer)
 }
 
-func newObserver(authority ownerStateReader, reader FenceReader, signer *commandauth.Signer) (*Observer, error) {
-	if reader == nil || signer == nil || authority == nil {
+func newObserver(guard fenceGuard, reader FenceReader, signer *commandauth.Signer) (*Observer, error) {
+	if reader == nil || signer == nil || guard == nil {
 		return nil, errors.New("ownersession: observer requires a fence reader and signer")
 	}
-	return &Observer{reader: reader, authority: authority, signer: signer, bindingTTL: 5 * time.Minute, now: time.Now}, nil
+	return &Observer{reader: reader, guard: guard, signer: signer, bindingTTL: 5 * time.Minute, now: time.Now}, nil
 }
 
-// BindOperation signs one binding for the fence transportd registered for
-// the node, provided the PostgreSQL ownership authority still backs that
-// exact term with an unexpired lease. It returns ErrNoFence when transportd
-// has none registered, which callers treat as the unfenced compatibility
-// path; every other outcome — including a registered fence that no longer
-// matches the authority row — fails closed.
-func (o *Observer) BindOperation(ctx context.Context, nodeID [16]byte, kind agentv1.FenceOperationKind, operationID [16]byte, capability string) (*agentv1.ConnectionFenceV2, *agentv1.FenceBindingV2, error) {
+// ExecuteFenced runs one mutation for the fence transportd registered for
+// the node, inside a fencing interval on the PostgreSQL ownership authority.
+// The action receives the fence and binding to carry on the wire and must
+// complete the transport RPC that presents them before returning, because
+// the ownership guard is released when it does. A node without a registered
+// fence keeps the unfenced compatibility path (nil fence and binding); every
+// other failure — a term the authority no longer backs, an unreadable
+// authority, an unheld capability — fails closed without running the action.
+func (o *Observer) ExecuteFenced(ctx context.Context, nodeID [16]byte, kind agentv1.FenceOperationKind, operationID [16]byte, capability string, action FencedAction) error {
 	fence, err := o.reader.GetOwnerFence(ctx, nodeID[:])
 	if err != nil {
-		return nil, nil, fmt.Errorf("ownersession: read registered fence: %w", err)
+		return fmt.Errorf("ownersession: read registered fence: %w", err)
 	}
 	if fence == nil {
-		return nil, nil, ErrNoFence
+		return action(ctx, nil, nil)
 	}
 	fenceID, err := fixed16(fence.GetFenceId())
 	if err != nil {
-		return nil, nil, err
+		return err
 	}
 	endpointID, err := fixed32(fence.GetEndpointId())
 	if err != nil {
-		return nil, nil, err
+		return err
 	}
 	ownerInstanceID, err := fixed16(fence.GetOwnerInstanceId())
 	if err != nil {
-		return nil, nil, err
+		return err
 	}
 	connectionID, err := fixed16(fence.GetConnectionId())
 	if err != nil {
-		return nil, nil, err
+		return err
 	}
 	if !slices.Contains(fence.GetCapabilities(), capability) {
-		return nil, nil, ErrCapabilityNotFenced
+		return ErrCapabilityNotFenced
 	}
-	// The authority check runs as the last step before signing. A takeover
-	// can still advance the PostgreSQL epoch between this read and the
-	// caller presenting the binding, but that residual race is bounded by
-	// the same boundary that retires every owner proof: transportd rejects
-	// the term as soon as the successor's higher epoch registers.
-	state, err := o.authority(ctx, nodeID)
-	if errors.Is(err, connectionowner.ErrNoOwnerRow) {
-		return nil, nil, ErrNotOwner
-	}
+	release, err := o.guard.Guard(ctx, nodeID, ownerInstanceID, int64(fence.GetOwnerIncarnation()), connectionID, int64(fence.GetOwnerEpoch()))
 	if err != nil {
-		return nil, nil, fmt.Errorf("ownersession: verify observed fence against the ownership authority: %w", err)
+		if errors.Is(err, connectionowner.ErrNotOwner) {
+			return ErrNotOwner
+		}
+		return fmt.Errorf("ownersession: guard observed fence with the ownership authority: %w", err)
 	}
-	if state.InstanceID != ownerInstanceID ||
-		state.Incarnation != int64(fence.GetOwnerIncarnation()) ||
-		state.ConnectionID != connectionID ||
-		state.Epoch != int64(fence.GetOwnerEpoch()) ||
-		!state.LeaseUntilValid {
-		return nil, nil, ErrNotOwner
-	}
-	now := o.now().UTC()
-	binding, err := o.signer.IssueFenceBindingV2(kind, operationID, fenceID, nodeID, endpointID,
-		ownerInstanceID, fence.GetOwnerIncarnation(), fence.GetOwnerEpoch(), connectionID,
-		fence.GetAuthorizationRevision(), capability, now, now.Add(o.bindingTTL))
-	if err != nil {
-		return nil, nil, fmt.Errorf("ownersession: sign observed fence binding: %w", err)
-	}
-	return fence, binding, nil
+	var releaseErr error
+	actionErr := func() error {
+		defer func() { releaseErr = release() }()
+		now := o.now().UTC()
+		binding, err := o.signer.IssueFenceBindingV2(kind, operationID, fenceID, nodeID, endpointID,
+			ownerInstanceID, fence.GetOwnerIncarnation(), fence.GetOwnerEpoch(), connectionID,
+			fence.GetAuthorizationRevision(), capability, now, now.Add(o.bindingTTL))
+		if err != nil {
+			return fmt.Errorf("ownersession: sign observed fence binding: %w", err)
+		}
+		return action(ctx, fence, binding)
+	}()
+	return errors.Join(actionErr, releaseErr)
 }
 
 func fixed16(value []byte) ([16]byte, error) {

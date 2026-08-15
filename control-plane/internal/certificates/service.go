@@ -81,7 +81,7 @@ type Service struct {
 	sealer      SecretSealer
 	artifacts   ArtifactFetcher
 	grantSigner *commandauth.Signer
-	fences      ownersession.OperationBinder
+	fences      ownersession.FencedExecutor
 	now         func() time.Time
 }
 
@@ -165,31 +165,26 @@ func NewWithDependencies(pool *pgxpool.Pool, operations *operationstore.Service,
 	return service
 }
 
-// EnableOwnerFencing signs artifact fence bindings for the current owner
-// term. Artifact transfers are owner-fenced operations: a stale owner must
-// neither fetch nor confirm artifacts.
-func (s *Service) EnableOwnerFencing(fences ownersession.OperationBinder) {
+// EnableOwnerFencing runs artifact mutations inside the connection owner's
+// fencing interval. Artifact transfers are owner-fenced operations: a stale
+// owner must neither fetch nor confirm artifacts, and no binding may outlive
+// the term the ownership authority backed at mutation time.
+func (s *Service) EnableOwnerFencing(fences ownersession.FencedExecutor) {
 	s.fences = fences
 }
 
-// artifactBinding signs one artifact operation binding. Fetches bind the
-// artifact identity; consumes and confirmations bind the grant identity.
-func (s *Service) artifactBinding(ctx context.Context, nodeID, operationID uuid.UUID) (*agentv1.FenceBindingV2, error) {
+// executeArtifactFenced runs one artifact transfer mutation inside the owner
+// fencing interval. Fetches bind the artifact identity; consumes and
+// confirmations bind the grant identity.
+func (s *Service) executeArtifactFenced(ctx context.Context, nodeID, operationID uuid.UUID, action ownersession.FencedAction) error {
 	if s.fences == nil {
-		return nil, nil
+		return action(ctx, nil, nil)
 	}
 	var fixedNode [16]byte
 	copy(fixedNode[:], nodeID[:])
 	var fixedOperation [16]byte
 	copy(fixedOperation[:], operationID[:])
-	_, binding, err := s.fences.BindOperation(ctx, fixedNode, agentv1.FenceOperationKind_FENCE_OPERATION_KIND_ARTIFACT, fixedOperation, ownersession.FencingCapability)
-	if errors.Is(err, ownersession.ErrNoFence) {
-		return nil, nil
-	}
-	if err != nil {
-		return nil, err
-	}
-	return binding, nil
+	return s.fences.ExecuteFenced(ctx, fixedNode, agentv1.FenceOperationKind_FENCE_OPERATION_KIND_ARTIFACT, fixedOperation, ownersession.FencingCapability, action)
 }
 
 func (s *Service) Create(ctx context.Context, request CreateRequest) (Certificate, bool, error) {
@@ -703,13 +698,16 @@ func (s *Service) OpenArtifact(ctx context.Context, id uuid.UUID, token string, 
 	if err := tx.Commit(ctx); err != nil {
 		return ArtifactDownload{}, err
 	}
-	fetchBinding, err := s.artifactBinding(ctx, nodeID, id)
-	if err != nil {
-		_ = s.AbortArtifact(context.WithoutCancel(ctx), id, grantID)
-		return ArtifactDownload{}, err
-	}
-	reader, err := s.artifacts.FetchArtifact(ctx, grant, fetchBinding)
-	if err != nil {
+	var reader io.ReadCloser
+	if err := s.executeArtifactFenced(ctx, nodeID, id,
+		func(ctx context.Context, _ *agentv1.ConnectionFenceV2, binding *agentv1.FenceBindingV2) error {
+			fetched, err := s.artifacts.FetchArtifact(ctx, grant, binding)
+			if err != nil {
+				return err
+			}
+			reader = fetched
+			return nil
+		}); err != nil {
 		_ = s.AbortArtifact(context.WithoutCancel(ctx), id, grantID)
 		return ArtifactDownload{}, err
 	}
@@ -752,14 +750,14 @@ func (s *Service) CompleteArtifact(ctx context.Context, id, grantID uuid.UUID, g
 	if err := tx.Commit(ctx); err != nil {
 		return err
 	}
-	// Persist the exact signed evidence before root consumes and deletes bytes.
-	// Recovery can later confirm this same root record without authorizing a new
-	// mutation after the grant expires.
-	consumeBinding, err := s.artifactBinding(ctx, nodeID, grantID)
-	if err != nil {
-		return err
-	}
-	if err := s.artifacts.ConsumeArtifact(ctx, grant, digest, size, consumeBinding); err != nil {
+	// Run the root consume inside the owner fencing interval: the binding is
+	// signed and the mutation RPC completes before the ownership guard is
+	// released. Recovery can later confirm this same root record without
+	// authorizing a new mutation after the grant expires.
+	if err := s.executeArtifactFenced(ctx, nodeID, grantID,
+		func(ctx context.Context, _ *agentv1.ConnectionFenceV2, binding *agentv1.FenceBindingV2) error {
+			return s.artifacts.ConsumeArtifact(ctx, grant, digest, size, binding)
+		}); err != nil {
 		return err
 	}
 	result, err := s.finalizeArtifactConsumption(ctx, id, grantID)
@@ -858,11 +856,16 @@ func (s *Service) reconcileConsumingArtifacts(ctx context.Context) error {
 	rows.Close()
 	for _, value := range values {
 		recoveryNode, nodeErr := uuid.FromBytes(value.grant.GetNodeId())
-		confirmBinding, bindErr := s.artifactBinding(ctx, recoveryNode, value.grantID)
-		if nodeErr != nil || bindErr != nil {
+		if nodeErr != nil {
 			continue
 		}
-		consumed, confirmErr := s.artifacts.ConfirmArtifactConsumed(ctx, value.grant, value.digest, value.size, confirmBinding)
+		var consumed bool
+		confirmErr := s.executeArtifactFenced(ctx, recoveryNode, value.grantID,
+			func(ctx context.Context, _ *agentv1.ConnectionFenceV2, binding *agentv1.FenceBindingV2) error {
+				confirmed, err := s.artifacts.ConfirmArtifactConsumed(ctx, value.grant, value.digest, value.size, binding)
+				consumed = confirmed
+				return err
+			})
 		if confirmErr != nil {
 			// Reconciliation is item-scoped. A disconnected node or restarting
 			// Agent must not turn one durable artifact into a global scheduler
@@ -874,11 +877,10 @@ func (s *Service) reconcileConsumingArtifacts(ctx context.Context) error {
 			return ErrArtifactDenied
 		}
 		if !consumed && grantExpires.AsTime().After(s.now()) {
-			retryBinding, retryBindErr := s.artifactBinding(ctx, recoveryNode, value.grantID)
-			if retryBindErr != nil {
-				continue
-			}
-			if err := s.artifacts.ConsumeArtifact(ctx, value.grant, value.digest, value.size, retryBinding); err != nil {
+			if err := s.executeArtifactFenced(ctx, recoveryNode, value.grantID,
+				func(ctx context.Context, _ *agentv1.ConnectionFenceV2, binding *agentv1.FenceBindingV2) error {
+					return s.artifacts.ConsumeArtifact(ctx, value.grant, value.digest, value.size, binding)
+				}); err != nil {
 				continue
 			}
 			consumed = true

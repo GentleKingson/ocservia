@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -98,12 +99,10 @@ func (s *Server) approveNode(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	operationID := ownersession.StateUpdateOperationID([16]byte(nodeID), trust.EndpointID, int32(transportv1.NodeTrustState_NODE_TRUST_STATE_ACTIVE), trust.Revision, body.Reason)
-	updateBinding, bindErr := s.adminFenceBinding(r, nodeID, agentv1.FenceOperationKind_FENCE_OPERATION_KIND_STATE_UPDATE, operationID)
-	if bindErr != nil {
-		writeProblem(w, r, http.StatusServiceUnavailable, "https://ocservia.dev/problems/transport-unavailable", "Trust update pending", "the database is authoritative but transport synchronization is pending")
-		return
-	}
-	if err := s.transport.UpdateNodeTrust(r.Context(), trust.NodeID[:], trust.EndpointID, transportv1.NodeTrustState_NODE_TRUST_STATE_ACTIVE, body.Reason, trust.Revision, operationID[:], updateBinding); err != nil {
+	if err := s.adminExecuteFenced(r.Context(), nodeID, agentv1.FenceOperationKind_FENCE_OPERATION_KIND_STATE_UPDATE, operationID,
+		func(ctx context.Context, _ *agentv1.ConnectionFenceV2, binding *agentv1.FenceBindingV2) error {
+			return s.transport.UpdateNodeTrust(ctx, trust.NodeID[:], trust.EndpointID, transportv1.NodeTrustState_NODE_TRUST_STATE_ACTIVE, body.Reason, trust.Revision, operationID[:], binding)
+		}); err != nil {
 		writeProblem(w, r, http.StatusServiceUnavailable, "https://ocservia.dev/problems/transport-unavailable", "Trust update pending", "the database is authoritative but transport synchronization is pending")
 		return
 	}
@@ -131,22 +130,18 @@ func (s *Server) revokeNode(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	operationID := ownersession.StateUpdateOperationID([16]byte(nodeID), trust.EndpointID, int32(transportv1.NodeTrustState_NODE_TRUST_STATE_REVOKED), trust.Revision, body.Reason)
-	updateBinding, bindErr := s.adminFenceBinding(r, nodeID, agentv1.FenceOperationKind_FENCE_OPERATION_KIND_STATE_UPDATE, operationID)
-	if bindErr != nil {
-		writeProblem(w, r, http.StatusServiceUnavailable, "https://ocservia.dev/problems/transport-unavailable", "Revocation committed", "the node is revoked but transport disconnect synchronization is pending")
-		return
-	}
-	// A fenced close must carry its binding: swallowing the failure would
-	// send a binding-less close that transportd rejects anyway.
-	closeBinding, closeBindErr := s.adminFenceBinding(r, nodeID, agentv1.FenceOperationKind_FENCE_OPERATION_KIND_CONNECTION_CLOSE, [16]byte(nodeID))
-	if closeBindErr != nil {
-		writeProblem(w, r, http.StatusServiceUnavailable, "https://ocservia.dev/problems/transport-unavailable", "Revocation committed", "the node is revoked but transport disconnect synchronization is pending")
-		return
-	}
-	syncErr := s.transport.UpdateNodeTrust(r.Context(), trust.NodeID[:], trust.EndpointID, transportv1.NodeTrustState_NODE_TRUST_STATE_REVOKED, body.Reason, trust.Revision, operationID[:], updateBinding)
+	syncErr := s.adminExecuteFenced(r.Context(), nodeID, agentv1.FenceOperationKind_FENCE_OPERATION_KIND_STATE_UPDATE, operationID,
+		func(ctx context.Context, _ *agentv1.ConnectionFenceV2, binding *agentv1.FenceBindingV2) error {
+			return s.transport.UpdateNodeTrust(ctx, trust.NodeID[:], trust.EndpointID, transportv1.NodeTrustState_NODE_TRUST_STATE_REVOKED, body.Reason, trust.Revision, operationID[:], binding)
+		})
 	var closeErr error
 	if syncErr == nil {
-		closeErr = s.transport.CloseNode(r.Context(), trust.NodeID[:], "node revoked", closeBinding)
+		// A fenced close must carry its binding: swallowing the failure would
+		// send a binding-less close that transportd rejects anyway.
+		closeErr = s.adminExecuteFenced(r.Context(), nodeID, agentv1.FenceOperationKind_FENCE_OPERATION_KIND_CONNECTION_CLOSE, [16]byte(nodeID),
+			func(ctx context.Context, _ *agentv1.ConnectionFenceV2, binding *agentv1.FenceBindingV2) error {
+				return s.transport.CloseNode(ctx, trust.NodeID[:], "node revoked", binding)
+			})
 	}
 	if syncErr != nil || closeErr != nil {
 		writeProblem(w, r, http.StatusServiceUnavailable, "https://ocservia.dev/problems/transport-unavailable", "Revocation committed", "the node is revoked but transport disconnect synchronization is pending")
@@ -155,23 +150,17 @@ func (s *Server) revokeNode(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"id": nodeID, "status": "revoked"})
 }
 
-// adminFenceBinding signs one administrative fence binding for trust updates
-// and connection closes. The binding capability is the fencing capability
-// itself; nodes without a registered fence keep the unfenced path.
-func (s *Server) adminFenceBinding(r *http.Request, nodeID uuid.UUID, kind agentv1.FenceOperationKind, operationID [16]byte) (*agentv1.FenceBindingV2, error) {
+// adminExecuteFenced runs one administrative transport mutation inside the
+// connection owner's fencing interval. The binding capability is the fencing
+// capability itself; nodes without a registered fence keep the unfenced
+// path.
+func (s *Server) adminExecuteFenced(ctx context.Context, nodeID uuid.UUID, kind agentv1.FenceOperationKind, operationID [16]byte, action ownersession.FencedAction) error {
 	if s.fences == nil {
-		return nil, nil
+		return action(ctx, nil, nil)
 	}
 	var fixed [16]byte
 	copy(fixed[:], nodeID[:])
-	_, binding, err := s.fences.BindOperation(r.Context(), fixed, kind, operationID, ownersession.FencingCapability)
-	if errors.Is(err, ownersession.ErrNoFence) {
-		return nil, nil
-	}
-	if err != nil {
-		return nil, err
-	}
-	return binding, nil
+	return s.fences.ExecuteFenced(ctx, fixed, kind, operationID, ownersession.FencingCapability, action)
 }
 
 func decodeStrict(w http.ResponseWriter, r *http.Request, target any) bool {

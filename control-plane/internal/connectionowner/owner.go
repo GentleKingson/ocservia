@@ -188,6 +188,45 @@ func (t *Term) AssertCurrent(ctx context.Context, pool *pgxpool.Pool) error {
 	return tx.Commit(ctx)
 }
 
+// GuardObservedTerm proves one observed term is still the node's current
+// ownership row and opens a fencing interval around it: the guard's
+// transaction holds a FOR SHARE lock on the row, so any Acquire that would
+// advance the epoch waits until the returned release function runs. Callers
+// that verify a term they do not own — a Controller role reading a fence
+// registered in transportd — must run the mutation carrying that term's
+// proofs before release, which makes PostgreSQL the mutation-time ownership
+// authority instead of a point-in-time check. The assert requires an
+// unexpired lease at clock_timestamp(); keeping the interval inside the
+// caller's bounded RPC deadline is the caller's responsibility.
+func GuardObservedTerm(ctx context.Context, pool *pgxpool.Pool, nodeID [16]byte, instanceID uuid.UUID, incarnation int64, connectionID [16]byte, epoch int64) (release func() error, err error) {
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("connectionowner: begin observed term guard: %w", err)
+	}
+	defer func() {
+		if err != nil {
+			_ = tx.Rollback(context.Background())
+		}
+	}()
+	var one int
+	err = tx.QueryRow(ctx, `SELECT 1 FROM connection_owner_fencing
+		WHERE node_id=$1 AND owner_instance_id=$2 AND owner_incarnation=$3 AND connection_id=$4 AND owner_epoch=$5 AND lease_until>clock_timestamp()
+		FOR SHARE OF connection_owner_fencing`,
+		nodeID[:], instanceID, incarnation, connectionID[:], epoch).Scan(&one)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, ErrNotOwner
+	}
+	if err != nil {
+		return nil, fmt.Errorf("connectionowner: guard observed term: %w", err)
+	}
+	return func() error {
+		if err := tx.Rollback(context.Background()); err != nil && !errors.Is(err, pgx.ErrTxClosed) {
+			return fmt.Errorf("connectionowner: release observed term guard: %w", err)
+		}
+		return nil
+	}, nil
+}
+
 // OwnerState is a point-in-time read of one node's ownership row.
 type OwnerState struct {
 	InstanceID      uuid.UUID

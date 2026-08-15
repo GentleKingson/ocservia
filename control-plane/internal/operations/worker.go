@@ -2,7 +2,6 @@ package operations
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"log/slog"
 	"time"
@@ -20,17 +19,17 @@ type Sender interface {
 	SendCommand(context.Context, []byte, []byte) error
 }
 
-// FenceBinder signs owner fence proofs for command dispatch. A nil binder
-// keeps the unfenced compatibility path for deployments whose agent sessions
-// never negotiated connection fencing.
-type FenceBinder interface {
-	BindOperation(ctx context.Context, nodeID [16]byte, kind agentv1.FenceOperationKind, operationID [16]byte, capability string) (*agentv1.ConnectionFenceV2, *agentv1.FenceBindingV2, error)
+// FenceExecutor runs dispatch mutations inside the connection owner's
+// fencing interval. A nil executor keeps the unfenced compatibility path for
+// deployments whose agent sessions never negotiated connection fencing.
+type FenceExecutor interface {
+	ExecuteFenced(ctx context.Context, nodeID [16]byte, kind agentv1.FenceOperationKind, operationID [16]byte, capability string, action ownersession.FencedAction) error
 }
 
 type Worker struct {
 	service *Service
 	sender  Sender
-	fences  FenceBinder
+	fences  FenceExecutor
 	logger  *slog.Logger
 	id      uuid.UUID
 }
@@ -43,9 +42,10 @@ func NewWorker(service *Service, sender Sender, logger *slog.Logger) (*Worker, e
 	return &Worker{service: service, sender: sender, logger: logger, id: id}, nil
 }
 
-// NewFencedWorker attaches the per-node connection owner binder so every
-// dispatch to a fenced session carries the fence and the attempt binding.
-func NewFencedWorker(service *Service, sender Sender, fences FenceBinder, logger *slog.Logger) (*Worker, error) {
+// NewFencedWorker runs every dispatch to a fenced session inside the
+// connection owner's fencing interval, so the fence and attempt binding on
+// the wire were backed by the ownership authority at mutation time.
+func NewFencedWorker(service *Service, sender Sender, fences FenceExecutor, logger *slog.Logger) (*Worker, error) {
 	worker, err := NewWorker(service, sender, logger)
 	if err != nil {
 		return nil, err
@@ -86,16 +86,7 @@ func (w *Worker) dispatch(ctx context.Context) error {
 	for _, job := range jobs {
 		jobCtx := propagation.TraceContext{}.Extract(ctx, propagation.MapCarrier{"traceparent": job.Traceparent})
 		jobCtx, span := otel.Tracer("ocservia.operations").Start(jobCtx, "outbox.dispatch", trace.WithSpanKind(trace.SpanKindProducer))
-		envelope, fenceErr := w.fenceEnvelope(jobCtx, job)
-		if fenceErr != nil {
-			span.RecordError(fenceErr)
-			span.End()
-			if markErr := w.service.MarkFailed(ctx, job, fenceErr); markErr != nil {
-				w.logger.ErrorContext(ctx, "record command dispatch failure", "command_id", job.CommandID, "error", markErr)
-			}
-			continue
-		}
-		err := w.sender.SendCommand(jobCtx, job.NodeID[:], envelope)
+		err := w.dispatchFenced(jobCtx, job)
 		if err != nil {
 			span.RecordError(err)
 			span.End()
@@ -113,35 +104,30 @@ func (w *Worker) dispatch(ctx context.Context) error {
 	return nil
 }
 
-// fenceEnvelope attaches the owner fence and the attempt binding to the
-// dispatch envelope when the node session is fenced. Nodes without an owner
-// fence keep the established unfenced wire form; ownership loss fails the
-// dispatch so the command returns to the queue instead of being attributed to
-// a stale owner.
-func (w *Worker) fenceEnvelope(ctx context.Context, job Dispatch) ([]byte, error) {
+// dispatchFenced sends one dispatch envelope inside the owner's fencing
+// interval. Nodes without an owner fence keep the established unfenced wire
+// form; ownership loss fails the dispatch so the command returns to the
+// queue instead of being attributed to a stale owner.
+func (w *Worker) dispatchFenced(ctx context.Context, job Dispatch) error {
 	if w.fences == nil {
-		return job.Envelope, nil
+		return w.sender.SendCommand(ctx, job.NodeID[:], job.Envelope)
 	}
 	envelope := &agentv1.CommandEnvelope{}
 	if err := proto.Unmarshal(job.Envelope, envelope); err != nil {
-		return nil, fmt.Errorf("decode command envelope for fencing: %w", err)
+		return fmt.Errorf("decode command envelope for fencing: %w", err)
 	}
 	var nodeID [16]byte
 	copy(nodeID[:], job.NodeID[:])
 	var commandID [16]byte
 	copy(commandID[:], job.CommandID[:])
-	fence, binding, err := w.fences.BindOperation(ctx, nodeID, agentv1.FenceOperationKind_FENCE_OPERATION_KIND_COMMAND, commandID, envelope.GetRequiredCapability())
-	if errors.Is(err, ownersession.ErrNoFence) {
-		return job.Envelope, nil
-	}
-	if err != nil {
-		return nil, err
-	}
-	envelope.ConnectionFence = fence
-	envelope.FenceBinding = binding
-	fenced, err := proto.Marshal(envelope)
-	if err != nil {
-		return nil, fmt.Errorf("encode fenced command envelope: %w", err)
-	}
-	return fenced, nil
+	return w.fences.ExecuteFenced(ctx, nodeID, agentv1.FenceOperationKind_FENCE_OPERATION_KIND_COMMAND, commandID, envelope.GetRequiredCapability(),
+		func(ctx context.Context, fence *agentv1.ConnectionFenceV2, binding *agentv1.FenceBindingV2) error {
+			envelope.ConnectionFence = fence
+			envelope.FenceBinding = binding
+			fenced, err := proto.Marshal(envelope)
+			if err != nil {
+				return fmt.Errorf("encode fenced command envelope: %w", err)
+			}
+			return w.sender.SendCommand(ctx, job.NodeID[:], fenced)
+		})
 }

@@ -58,7 +58,7 @@ type Server struct {
 	operations       *operationstore.Service
 	enrollment       *enrollment.Service
 	transport        *transportclient.Client
-	fences           ownersession.OperationBinder
+	fences           ownersession.FencedExecutor
 	telemetry        *telemetrystore.Service
 	auth             *auth.Service
 	rbac             *rbac.Service
@@ -185,10 +185,10 @@ func (s *Server) EnableEnrollment(service *enrollment.Service, transport *transp
 	s.transport = transport
 }
 
-// EnableOwnerFencing signs administrative fence bindings for trust updates
-// and connection closes issued by API handlers, so a stale owner cannot
-// drive connection state through the API role.
-func (s *Server) EnableOwnerFencing(fences ownersession.OperationBinder) {
+// EnableOwnerFencing runs administrative trust updates and connection closes
+// issued by API handlers inside the connection owner's fencing interval, so
+// a stale owner cannot drive connection state through the API role.
+func (s *Server) EnableOwnerFencing(fences ownersession.FencedExecutor) {
 	s.fences = fences
 }
 

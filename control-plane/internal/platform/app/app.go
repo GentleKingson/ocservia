@@ -137,9 +137,9 @@ func Run(ctx context.Context, cfg config.Config, build BuildInfo, logger *slog.L
 		}
 		go func() { trustErr <- trust.Serve() }()
 	}
-	var fenceBinder ownersession.OperationBinder
+	var fenceExecutor ownersession.FencedExecutor
 	if ownerSessions != nil {
-		fenceBinder = ownerSessions
+		fenceExecutor = ownerSessions
 	}
 	stopTrust := func() error {
 		if trust == nil {
@@ -154,13 +154,13 @@ func Run(ctx context.Context, cfg config.Config, build BuildInfo, logger *slog.L
 		worker := localslice.NewWorker(sliceService, transport, logger)
 		go func() { workerErr <- worker.Run(componentCtx) }()
 		var operationWorker *operationstore.Worker
-		operationWorker, err = operationstore.NewFencedWorker(operationService, transport, fenceBinder, logger)
+		operationWorker, err = operationstore.NewFencedWorker(operationService, transport, fenceExecutor, logger)
 		if err != nil {
 			return fmt.Errorf("configure outbox worker: %w", err)
 		}
 		go func() { workerErr <- operationWorker.Run(componentCtx) }()
 		var trustWorker *enrollment.TrustConvergenceWorker
-		trustWorker, err = enrollment.NewFencedTrustConvergenceWorker(pool, transport, fenceBinder, logger)
+		trustWorker, err = enrollment.NewFencedTrustConvergenceWorker(pool, transport, fenceExecutor, logger)
 		if err != nil {
 			return fmt.Errorf("configure trust convergence worker: %w", err)
 		}
@@ -180,12 +180,12 @@ func Run(ctx context.Context, cfg config.Config, build BuildInfo, logger *slog.L
 	// registered, validated against the PostgreSQL ownership authority, so
 	// administrative operations stay owner-fenced without a second lease
 	// holder and a stale registered fence can never be re-signed.
-	if fenceBinder == nil && apiTransport != nil {
+	if fenceExecutor == nil && apiTransport != nil {
 		observer, observerErr := ownersession.NewObserver(pool, apiTransport, commandSigner)
 		if observerErr != nil {
 			return fmt.Errorf("configure owner fence observer: %w", observerErr)
 		}
-		fenceBinder = observer
+		fenceExecutor = observer
 	}
 	var certificateService *certificates.Service
 	if cfg.CertificateSignerURL != "" {
@@ -197,7 +197,7 @@ func Run(ctx context.Context, cfg config.Config, build BuildInfo, logger *slog.L
 	} else {
 		certificateService = certificates.New(pool, operationService)
 	}
-	certificateService.EnableOwnerFencing(fenceBinder)
+	certificateService.EnableOwnerFencing(fenceExecutor)
 	if cfg.RunsScheduler() {
 		identity, identityErr := coordination.NewIdentity()
 		if identityErr != nil {
@@ -302,7 +302,7 @@ func Run(ctx context.Context, cfg config.Config, build BuildInfo, logger *slog.L
 	server.EnableTelemetry(telemetryService)
 	if cfg.ControllerEndpointID != "" {
 		server.EnableEnrollment(enrollment.New(pool, cfg.ControllerEndpointID, build.Version, commandSigner), apiTransport)
-		server.EnableOwnerFencing(fenceBinder)
+		server.EnableOwnerFencing(fenceExecutor)
 	}
 	server.EnableLocalSlice(sliceService)
 	server.SetLocalSimulatorEnabled(cfg.LocalSimulator)
