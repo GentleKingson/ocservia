@@ -184,5 +184,20 @@ if [[ -z "${rejoin_wait_line}" || -z "${finalize_line}" ||
   exit 1
 fi
 
+# Every pinned action must reuse an exact `uses: action@sha` line already
+# proven by a merged workflow with hosted execution. A well-formed but
+# nonexistent SHA passes the format check yet fails the dispatch-only run at
+# "Set up job" (unresolvable ref), where required PR CI can never catch it.
+proven_pins="$(grep -hoE 'uses: [^@]+@[0-9a-f]{40}' \
+  "${ROOT}/.github/workflows/ci.yml" \
+  "${ROOT}/.github/workflows/p1-capacity.yml" \
+  "${ROOT}/.github/workflows/real-e2e.yml" | sort -u)"
+while IFS= read -r pin; do
+  grep -qxF "${pin}" <<<"${proven_pins}" || {
+    echo "pinned action ${pin} is not proven by any existing hosted workflow" >&2
+    exit 1
+  }
+done < <(grep -hoE 'uses: [^@]+@[0-9a-f]{40}' "${WORKFLOW}" | sort -u)
+
 shellcheck "${LIB}" "${FD_A}" "${FD_B}"
 echo "g6-ha-pitr policy checks passed"
