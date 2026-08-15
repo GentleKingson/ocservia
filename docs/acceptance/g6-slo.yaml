@@ -60,241 +60,241 @@ metrics:
     comparison: gte
     unit: count
     scope: Independently stateful real Agent processes with authorized active sessions.
-    declared_by_harness: true
+    derivation: agent_sessions.authorized_agent_count
   max_production_command_inflight:
     limit: 50
     comparison: gte
     unit: count
     scope: Concurrent commands on the PostgreSQL outbox through real transportd, Iroh, and Agent path.
-    declared_by_harness: true
+    derivation: command_trace.max_inflight
   synthetic_command_completion_seconds_p99:
     limit: 30
     comparison: lte
     unit: seconds
     scope: End-to-end completion latency for the bounded synthetic command profile.
-    declared_by_harness: true
+    derivation: command_trace.completion_seconds_p99
   stale_owner_accepts:
     limit: 0
     comparison: eq
     unit: count
     scope: Mutation, artifact, close, or state updates accepted from a stale connection owner.
-    declared_by_harness: true
+    derivation: epoch_events.stale_owner_accept_count
   concurrent_active_connection_owners:
     limit: 1
     comparison: lte
     unit: count
     scope: Maximum simultaneously valid connection owners observed for any one Node.
-    declared_by_harness: true
+    derivation: epoch_events.max_concurrent_owners
   stale_scheduler_commits:
     limit: 0
     comparison: eq
     unit: count
     scope: Database commits accepted from an expired scheduler leadership epoch.
-    declared_by_harness: true
+    derivation: epoch_events.stale_scheduler_commit_count
   concurrent_active_scheduler_leaders:
     limit: 1
     comparison: lte
     unit: count
     scope: Maximum simultaneously valid leaders for the authoritative scheduler lease.
-    declared_by_harness: true
+    derivation: epoch_events.max_concurrent_leaders
   dual_primary_write_accepts:
     limit: 0
     comparison: eq
     unit: count
     scope: Writes accepted by the fenced former primary after promotion of its replacement.
-    declared_by_harness: true
+    derivation: postgres_recovery.dual_primary_write_accept_count
   duplicate_remote_effects:
     limit: 0
     comparison: eq
     unit: count
     scope: Duplicate node-side effects for one idempotency identity.
-    declared_by_harness: true
+    derivation: command_trace.duplicate_effect_count
   acknowledged_transaction_loss:
     limit: 0
     comparison: eq
     unit: count
     scope: Acknowledged database transactions absent after failover or recovery.
-    declared_by_harness: true
+    derivation: postgres_recovery.acknowledged_transaction_loss_count
   unreconciled_outbox_rows:
     limit: 0
     comparison: eq
     unit: count
     scope: Due outbox rows left without a terminal or explicitly scheduled reconciliation state.
-    declared_by_harness: true
+    derivation: outbox_snapshot.unreconciled_due_row_count
   unreconciled_unknown_commands:
     limit: 0
     comparison: eq
     unit: count
     scope: Unknown commands left without an active reconciliation decision at the final recovery boundary.
-    declared_by_harness: true
+    derivation: outbox_snapshot.unreconciled_unknown_command_count
   quarantined_unmatched_command_results:
     limit: 0
     comparison: eq
     unit: count
     scope: Command results that cannot be matched to an actual dispatch attempt.
-    declared_by_harness: true
+    derivation: command_trace.unmatched_result_count
   database_rpo_seconds:
     limit: 900
     comparison: lte
     unit: seconds
     scope: Measured recovery point gap from transaction identity, LSN, and timestamps.
-    declared_by_harness: true
+    derivation: postgres_recovery.rpo_seconds
   database_rto_seconds:
     limit: 7200
     comparison: lte
     unit: seconds
     scope: Measured time from declared database outage to restored authoritative service.
-    declared_by_harness: true
+    derivation: postgres_recovery.rto_seconds
   connection_owner_takeover_seconds:
     limit: 30
     comparison: lte
     unit: seconds
     scope: Lease expiry to first valid replacement-owner session.
-    declared_by_harness: true
+    derivation: epoch_events.owner_takeover_seconds
   scheduler_takeover_seconds:
     limit: 30
     comparison: lte
     unit: seconds
     scope: Leadership loss to first valid replacement-leader maintenance transaction.
-    declared_by_harness: true
+    derivation: epoch_events.scheduler_takeover_seconds
   relay_takeover_seconds:
     limit: 30
     comparison: lte
     unit: seconds
     scope: Relay A fault injection to authenticated traffic through Relay B.
-    declared_by_harness: true
+    derivation: relay_transitions.relay_takeover_seconds
   reconnect_storm_recovery_seconds:
     limit: 120
     comparison: lte
     unit: seconds
     scope: Bulk disconnect injection to restoration of all expected authorized sessions.
-    declared_by_harness: true
+    derivation: agent_sessions.reconnect_storm_recovery_seconds
   read_api_success_ratio:
     limit: 0.999
     comparison: gte
     unit: ratio
     scope: Read API requests during the bounded G6 window, including instance and database faults.
-    declared_by_harness: true
+    derivation: http_samples.read_success_ratio
   enqueue_success_ratio:
     limit: 0.999
     comparison: gte
     unit: ratio
     scope: Valid write requests durably accepted into the production outbox during the bounded G6 window.
-    declared_by_harness: true
+    derivation: http_samples.enqueue_success_ratio
   enqueue_latency_seconds_p95:
     limit: 0.5
     comparison: lte
     unit: seconds
     scope: Valid write-request durable enqueue latency during the bounded G6 window.
-    declared_by_harness: true
+    derivation: http_samples.enqueue_latency_p95_seconds
   telemetry_fresh_ratio:
     limit: 0.99
     comparison: gte
     unit: ratio
     scope: Authorized connected Agents whose latest accepted telemetry satisfies the freshness age bound.
-    declared_by_harness: true
+    derivation: telemetry_snapshot.fresh_ratio
   telemetry_fresh_age_seconds:
     limit: 90
     comparison: lte
     unit: seconds
     scope: Maximum age used to classify telemetry as fresh.
-    declared_by_harness: true
+    derivation: telemetry_snapshot.freshness_bound_seconds
   command_dispatch_ratio:
     limit: 0.99
     comparison: gte
     unit: ratio
     scope: Accepted online-node commands first dispatched within the dispatch time bound.
-    declared_by_harness: true
+    derivation: command_trace.dispatch_within_bound_ratio
   command_dispatch_seconds:
     limit: 10
     comparison: lte
     unit: seconds
     scope: Maximum latency used by the command-dispatch ratio.
-    declared_by_harness: true
+    derivation: command_trace.dispatch_bound_seconds
   audit_completeness_ratio:
     limit: 1.0
     comparison: eq
     unit: ratio
     scope: Accepted writes with their required intent and result audit records.
-    declared_by_harness: true
+    derivation: audit_correlation.completeness_ratio
   terminal_or_reconciled_operation_ratio:
     limit: 1.0
     comparison: eq
     unit: ratio
     scope: Operations terminal or held in an explicit, active Unknown reconciliation state.
-    declared_by_harness: true
+    derivation: outbox_snapshot.terminal_or_reconciled_ratio
   controller_rss_growth_ratio:
     limit: 0.20
     comparison: lte
     unit: ratio
     scope: Controller RSS end-to-baseline growth over the bounded window.
-    declared_by_harness: true
+    derivation: resource_samples.controller_rss_growth_ratio
   transportd_rss_growth_ratio:
     limit: 0.20
     comparison: lte
     unit: ratio
     scope: transportd RSS end-to-baseline growth over the bounded window.
-    declared_by_harness: true
+    derivation: resource_samples.transportd_rss_growth_ratio
   agent_rss_growth_ratio:
     limit: 0.20
     comparison: lte
     unit: ratio
     scope: Worst per-Agent RSS end-to-baseline growth over the bounded window.
-    declared_by_harness: true
+    derivation: resource_samples.agent_rss_growth_ratio
   controller_fd_growth:
     limit: 32
     comparison: lte
     unit: count
     scope: Controller open-file count growth from baseline to final recovery.
-    declared_by_harness: true
+    derivation: resource_samples.controller_fd_growth
   transportd_fd_growth:
     limit: 32
     comparison: lte
     unit: count
     scope: transportd open-file count growth from baseline to final recovery.
-    declared_by_harness: true
+    derivation: resource_samples.transportd_fd_growth
   agent_fd_growth:
     limit: 8
     comparison: lte
     unit: count
     scope: Worst per-Agent open-file count growth from baseline to final recovery.
-    declared_by_harness: true
+    derivation: resource_samples.agent_fd_growth
   controller_goroutine_growth:
     limit: 64
     comparison: lte
     unit: count
     scope: Controller goroutine count growth from baseline to final recovery.
-    declared_by_harness: true
+    derivation: resource_samples.controller_goroutine_growth
   transportd_tokio_task_growth:
     limit: 64
     comparison: lte
     unit: count
     scope: transportd Tokio task count growth from baseline to final recovery.
-    declared_by_harness: true
+    derivation: resource_samples.transportd_tokio_task_growth
   agent_tokio_task_growth:
     limit: 8
     comparison: lte
     unit: count
     scope: Worst per-Agent Tokio task count growth from baseline to final recovery.
-    declared_by_harness: true
+    derivation: resource_samples.agent_tokio_task_growth
   database_connection_growth:
     limit: 16
     comparison: lte
     unit: count
     scope: PostgreSQL connection count growth from baseline to final recovery.
-    declared_by_harness: true
+    derivation: resource_samples.database_connection_growth
   queue_depth_end:
     limit: 0
     comparison: eq
     unit: count
     scope: Production command queue depth at the final recovery boundary.
-    declared_by_harness: true
+    derivation: resource_samples.queue_depth_end
   outbox_oldest_age_seconds_end:
     limit: 0
     comparison: eq
     unit: seconds
     scope: Age of the oldest due unpublished outbox row at the final recovery boundary.
-    declared_by_harness: true
+    derivation: outbox_snapshot.oldest_due_age_seconds
 
 observations:
   database_failover_during_load:

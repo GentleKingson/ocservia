@@ -1,0 +1,88 @@
+{
+  "base": "evidence-pass.json",
+  "evidence_mutations": [
+    {
+      "operation": "replace",
+      "path": "artifacts",
+      "value": [
+        {
+          "name": "resource-samples.csv",
+          "digest": "sha256:125b6bf53f30ad86d9b61ff388d93c9308821fc26f05be662b3bd16c86acbdf0",
+          "media_type": "text/csv",
+          "kind": "resource_samples"
+        },
+        {
+          "name": "timeline.jsonl",
+          "digest": "sha256:1ff4b29c99aaec5360460ea473d295ca9e9e515d8f8d6ed0ae3170a74ba962ca",
+          "media_type": "application/x-ndjson",
+          "kind": "timeline"
+        },
+        {
+          "name": "epoch-events.jsonl",
+          "digest": "sha256:1341ce6d9f554b1b5172f71e9a79be0b0f4d304316e572be1bc8fcde770224ab",
+          "media_type": "application/x-ndjson",
+          "kind": "epoch_events"
+        },
+        {
+          "name": "command-trace.jsonl",
+          "digest": "sha256:32bb268785c5ab099fddb2a556a0b2f9fa705cb2fabd0965101a83ab91a55958",
+          "media_type": "application/x-ndjson",
+          "kind": "command_trace"
+        },
+        {
+          "name": "outbox-snapshot.json",
+          "digest": "sha256:490541d239d98167284a936742c58ae8190abc6f52bd34451d154aec83b5ac24",
+          "media_type": "application/json",
+          "kind": "outbox_snapshot"
+        },
+        {
+          "name": "http-samples.csv",
+          "digest": "sha256:99586f00531158bbe354499bc8f25a3dc8b08c6bd4e3974ba1f2b5dc20e47798",
+          "media_type": "text/csv",
+          "kind": "http_samples"
+        },
+        {
+          "name": "telemetry-snapshot.json",
+          "digest": "sha256:b4c4d6a655902e0a5eaa4b4f55f05ec2b76afdb5cb4ab39c6e922d0f154dad3f",
+          "media_type": "application/json",
+          "kind": "telemetry_snapshot"
+        },
+        {
+          "name": "audit-correlation.json",
+          "digest": "sha256:7ac292bb4f8e329bc09d6e59f21e9e7ef12d3a44b1ea8782579e13e9e5732248",
+          "media_type": "application/json",
+          "kind": "audit_correlation"
+        },
+        {
+          "name": "postgres-recovery.json",
+          "digest": "sha256:95cfc2fdaf6c3ee952b1424cfbd7654523bdcee455c678a7714d331d0ddd352a",
+          "media_type": "application/json",
+          "kind": "postgres_recovery"
+        },
+        {
+          "name": "pitr-report.json",
+          "digest": "sha256:cc5a80a92132455e6a825c3bb459dcc417ea98473368640ef34ef17ce8bd6c33",
+          "media_type": "application/json",
+          "kind": "pitr_report"
+        },
+        {
+          "name": "relay-transitions.jsonl",
+          "digest": "sha256:82b987962924327f4c25271c56c6064300de6ec5ca41ce536bbf5066b6908c0c",
+          "media_type": "application/x-ndjson",
+          "kind": "relay_transitions"
+        }
+      ]
+    },
+    {
+      "operation": "replace",
+      "path": "measurements.authorized_real_agents.source_artifact_digest",
+      "value": "sha256:1ff4b29c99aaec5360460ea473d295ca9e9e515d8f8d6ed0ae3170a74ba962ca"
+    },
+    {
+      "operation": "replace",
+      "path": "measurements.reconnect_storm_recovery_seconds.source_artifact_digest",
+      "value": "sha256:1ff4b29c99aaec5360460ea473d295ca9e9e515d8f8d6ed0ae3170a74ba962ca"
+    }
+  ],
+  "expected_error": "evidence must declare exactly one agent_sessions artifact"
+}

@@ -1,0 +1,18 @@
+{
+  "environment_id": "g6-12345678",
+  "candidate_sha": "1111111111111111111111111111111111111111",
+  "marker_a": {
+    "txid": "pitr-marker-a",
+    "written_at": "2026-08-14T00:00:10Z"
+  },
+  "restore_point_created_at": "2026-08-14T00:00:20Z",
+  "marker_b": {
+    "txid": "pitr-marker-b",
+    "written_at": "2026-08-14T00:00:30Z"
+  },
+  "restore": {
+    "restored_at": "2026-08-14T00:03:00Z",
+    "marker_a_present": true,
+    "marker_b_present": false
+  }
+}

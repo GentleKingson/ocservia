@@ -1,0 +1,44 @@
+{
+  "environment_id": "g6-12345678",
+  "candidate_sha": "1111111111111111111111111111111111111111",
+  "outage_declared_at": "2026-08-14T00:01:00Z",
+  "service_restored_at": "2026-08-14T00:02:00Z",
+  "acknowledged": [
+    {
+      "txid": "tx-m1",
+      "acknowledged_at": "2026-08-14T00:00:40Z"
+    },
+    {
+      "txid": "tx-m2",
+      "acknowledged_at": "2026-08-14T00:00:50Z"
+    },
+    {
+      "txid": "tx-m3",
+      "acknowledged_at": "2026-08-14T00:00:55Z"
+    }
+  ],
+  "failover": {
+    "old_primary": "pg-primary",
+    "new_primary": "pg-standby-1",
+    "isolated_at": "2026-08-14T00:01:05Z",
+    "promoted_at": "2026-08-14T00:01:30Z",
+    "isolated_primary_writes": [
+      {
+        "at": "2026-08-14T00:01:45Z",
+        "accepted": false
+      },
+      {
+        "at": "2026-08-14T00:01:50Z",
+        "accepted": false
+      }
+    ]
+  },
+  "recovery": {
+    "restored_at": "2026-08-14T00:02:30Z",
+    "present_txids": [
+      "tx-m1",
+      "tx-m2",
+      "tx-m3"
+    ]
+  }
+}

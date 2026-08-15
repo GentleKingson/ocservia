@@ -39,12 +39,15 @@ const allowedFixtureFields = new Set([
   "topology_mutations",
   "evidence_mutations",
   "mutations",
+  "slo_replacements",
   "expected_error",
   "expected_failure_reason",
   "expected_authority",
   "expected_failure_domain_class",
   "artifact_root",
   "artifact_files",
+  "rebind_overridden_artifacts",
+  "expected_all_measurements_pass",
 ]);
 
 function buildArtifactRoot(mode, overrides) {
@@ -66,12 +69,36 @@ function buildArtifactRoot(mode, overrides) {
   return tempRoot;
 }
 
-const sloText = read("docs/acceptance/g6-slo.yaml");
+// Re-binds evidence digests to tampered artifact bytes: the attack modeled
+// here swaps artifact content AND updates the evidence digest, so only the
+// per-record environment/candidate binding or artifact recomputation can
+// catch it.
+function rebindOverriddenArtifacts(evidence, overrides) {
+  for (const [name, content] of Object.entries(overrides)) {
+    const nextDigest = sha256Digest(content);
+    const entry = evidence.artifacts.find((artifact) => artifact.name === name);
+    if (!entry) throw new Error(`override for undeclared artifact: ${name}`);
+    const previousDigest = entry.digest;
+    entry.digest = nextDigest;
+    for (const measurement of Object.values(evidence.measurements)) {
+      if (measurement.source_artifact_digest === previousDigest) {
+        measurement.source_artifact_digest = nextDigest;
+      }
+    }
+    for (const observation of Object.values(evidence.observations)) {
+      if (observation.source_artifact_digest === previousDigest) {
+        observation.source_artifact_digest = nextDigest;
+      }
+    }
+  }
+}
+
+const baseSloText = read("docs/acceptance/g6-slo.yaml");
 const manifestText = read("testdata/g6/release-manifest.json");
 const baseTopology = parse("testdata/g6/topology.json");
 const baseEvidence = parse("testdata/g6/evidence-pass.json");
 const baseVerdict = verifyG6({
-  sloText,
+  sloText: baseSloText,
   evidenceText: serialize(baseEvidence),
   topologyText: serialize(baseTopology),
   manifestText,
@@ -80,20 +107,18 @@ const baseVerdict = verifyG6({
   expectedEnvironmentId: "g6-12345678",
   expectedFailureDomainClass: "multi_host",
 });
-if (baseVerdict.passed) {
+if (!baseVerdict.passed) {
   throw new Error(
-    "positive fixture must not produce a final G6 pass while declared metrics remain",
+    `positive fixture must produce a final G6 pass once every metric has a verified producer: ${baseVerdict.failure_reasons.join("; ")}`,
   );
 }
-const unresolvedReasons = baseVerdict.failure_reasons.filter(
-  (reason) => reason !== "final pass requires verified metric producers",
-);
-if (unresolvedReasons.length > 0) {
-  throw new Error(
-    `positive fixture has unresolved failure reasons: ${unresolvedReasons.join("; ")}`,
-  );
+if (baseVerdict.schema_version !== "ocservia.g6-verdict.v2") {
+  throw new Error("positive fixture verdict must use the v2 contract");
 }
 for (const [name, result] of Object.entries(baseVerdict.measurement_results)) {
+  if (!result.derivation) {
+    throw new Error(`positive fixture metric lacks a producer: ${name}`);
+  }
   if (!result.passed) {
     throw new Error(`positive fixture metric did not pass: ${name}`);
   }
@@ -119,21 +144,34 @@ for (const name of cases) {
   }
   const evidence = clone(baseEvidence);
   const topology = clone(baseTopology);
+  let sloText = baseSloText;
   for (const mutation of fixture.topology_mutations ?? [])
     mutate(topology, mutation);
   for (const mutation of fixture.evidence_mutations ?? [])
     mutate(evidence, mutation);
   for (const mutation of fixture.mutations ?? []) mutate(evidence, mutation);
+  for (const replacement of fixture.slo_replacements ?? []) {
+    if (!sloText.includes(replacement.from)) {
+      throw new Error(`${name}: SLO replacement source is absent`);
+    }
+    sloText = sloText.replace(replacement.from, replacement.to);
+  }
 
   const topologyText = serialize(topology);
   if ((fixture.topology_mutations ?? []).length > 0) {
     evidence.topology_digest = sha256Digest(topologyText);
+  }
+  if ((fixture.slo_replacements ?? []).length > 0) {
+    evidence.slo_contract_digest = sha256Digest(sloText);
   }
 
   const artifactRoot = buildArtifactRoot(
     fixture.artifact_root,
     fixture.artifact_files,
   );
+  if (fixture.rebind_overridden_artifacts) {
+    rebindOverriddenArtifacts(evidence, fixture.artifact_files ?? {});
+  }
   let verdict;
   let rejected;
   try {
@@ -170,8 +208,18 @@ for (const name of cases) {
   if (!verdict.failure_reasons.includes(fixture.expected_failure_reason)) {
     throw new Error(`${name}: missing expected failure reason`);
   }
+  if (fixture.expected_all_measurements_pass) {
+    const failed = Object.entries(verdict.measurement_results).filter(
+      ([, result]) => !result.passed,
+    );
+    if (failed.length > 0) {
+      throw new Error(
+        `${name}: expected every metric verdict to pass, failed: ${failed.map(([metric]) => metric).join(", ")}`,
+      );
+    }
+  }
 }
 
 console.log(
-  `G6 verifier computed the positive fixture verdict (final pass blocked by declared metrics) and rejected ${cases.length} negative fixtures`,
+  `G6 verifier awarded the positive fixture a final pass from verified producers and rejected ${cases.length} negative fixtures`,
 );

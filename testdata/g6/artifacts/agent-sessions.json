@@ -1,0 +1,361 @@
+{
+  "environment_id": "g6-12345678",
+  "candidate_sha": "1111111111111111111111111111111111111111",
+  "snapshot_taken_at": "2026-08-14T00:04:30Z",
+  "sessions": [
+    {
+      "agent_id": "agent-01",
+      "node": "node-1",
+      "authorized": true,
+      "connected": true,
+      "session_started_at": "2026-08-14T00:00:00Z"
+    },
+    {
+      "agent_id": "agent-02",
+      "node": "node-2",
+      "authorized": true,
+      "connected": true,
+      "session_started_at": "2026-08-14T00:00:00Z"
+    },
+    {
+      "agent_id": "agent-03",
+      "node": "node-3",
+      "authorized": true,
+      "connected": true,
+      "session_started_at": "2026-08-14T00:00:00Z"
+    },
+    {
+      "agent_id": "agent-04",
+      "node": "node-4",
+      "authorized": true,
+      "connected": true,
+      "session_started_at": "2026-08-14T00:00:00Z"
+    },
+    {
+      "agent_id": "agent-05",
+      "node": "node-5",
+      "authorized": true,
+      "connected": true,
+      "session_started_at": "2026-08-14T00:00:00Z"
+    },
+    {
+      "agent_id": "agent-06",
+      "node": "node-1",
+      "authorized": true,
+      "connected": true,
+      "session_started_at": "2026-08-14T00:00:00Z"
+    },
+    {
+      "agent_id": "agent-07",
+      "node": "node-2",
+      "authorized": true,
+      "connected": true,
+      "session_started_at": "2026-08-14T00:00:00Z"
+    },
+    {
+      "agent_id": "agent-08",
+      "node": "node-3",
+      "authorized": true,
+      "connected": true,
+      "session_started_at": "2026-08-14T00:00:00Z"
+    },
+    {
+      "agent_id": "agent-09",
+      "node": "node-4",
+      "authorized": true,
+      "connected": true,
+      "session_started_at": "2026-08-14T00:00:00Z"
+    },
+    {
+      "agent_id": "agent-10",
+      "node": "node-5",
+      "authorized": true,
+      "connected": true,
+      "session_started_at": "2026-08-14T00:00:00Z"
+    },
+    {
+      "agent_id": "agent-11",
+      "node": "node-1",
+      "authorized": true,
+      "connected": true,
+      "session_started_at": "2026-08-14T00:00:00Z"
+    },
+    {
+      "agent_id": "agent-12",
+      "node": "node-2",
+      "authorized": true,
+      "connected": true,
+      "session_started_at": "2026-08-14T00:00:00Z"
+    },
+    {
+      "agent_id": "agent-13",
+      "node": "node-3",
+      "authorized": true,
+      "connected": true,
+      "session_started_at": "2026-08-14T00:00:00Z"
+    },
+    {
+      "agent_id": "agent-14",
+      "node": "node-4",
+      "authorized": true,
+      "connected": true,
+      "session_started_at": "2026-08-14T00:00:00Z"
+    },
+    {
+      "agent_id": "agent-15",
+      "node": "node-5",
+      "authorized": true,
+      "connected": true,
+      "session_started_at": "2026-08-14T00:00:00Z"
+    },
+    {
+      "agent_id": "agent-16",
+      "node": "node-1",
+      "authorized": true,
+      "connected": true,
+      "session_started_at": "2026-08-14T00:00:00Z"
+    },
+    {
+      "agent_id": "agent-17",
+      "node": "node-2",
+      "authorized": true,
+      "connected": true,
+      "session_started_at": "2026-08-14T00:00:00Z"
+    },
+    {
+      "agent_id": "agent-18",
+      "node": "node-3",
+      "authorized": true,
+      "connected": true,
+      "session_started_at": "2026-08-14T00:00:00Z"
+    },
+    {
+      "agent_id": "agent-19",
+      "node": "node-4",
+      "authorized": true,
+      "connected": true,
+      "session_started_at": "2026-08-14T00:00:00Z"
+    },
+    {
+      "agent_id": "agent-20",
+      "node": "node-5",
+      "authorized": true,
+      "connected": true,
+      "session_started_at": "2026-08-14T00:00:00Z"
+    },
+    {
+      "agent_id": "agent-21",
+      "node": "node-1",
+      "authorized": true,
+      "connected": true,
+      "session_started_at": "2026-08-14T00:00:00Z"
+    },
+    {
+      "agent_id": "agent-22",
+      "node": "node-2",
+      "authorized": true,
+      "connected": true,
+      "session_started_at": "2026-08-14T00:00:00Z"
+    },
+    {
+      "agent_id": "agent-23",
+      "node": "node-3",
+      "authorized": true,
+      "connected": true,
+      "session_started_at": "2026-08-14T00:00:00Z"
+    },
+    {
+      "agent_id": "agent-24",
+      "node": "node-4",
+      "authorized": true,
+      "connected": true,
+      "session_started_at": "2026-08-14T00:00:00Z"
+    },
+    {
+      "agent_id": "agent-25",
+      "node": "node-5",
+      "authorized": true,
+      "connected": true,
+      "session_started_at": "2026-08-14T00:00:00Z"
+    },
+    {
+      "agent_id": "agent-26",
+      "node": "node-1",
+      "authorized": true,
+      "connected": true,
+      "session_started_at": "2026-08-14T00:00:00Z"
+    },
+    {
+      "agent_id": "agent-27",
+      "node": "node-2",
+      "authorized": true,
+      "connected": true,
+      "session_started_at": "2026-08-14T00:00:00Z"
+    },
+    {
+      "agent_id": "agent-28",
+      "node": "node-3",
+      "authorized": true,
+      "connected": true,
+      "session_started_at": "2026-08-14T00:00:00Z"
+    },
+    {
+      "agent_id": "agent-29",
+      "node": "node-4",
+      "authorized": true,
+      "connected": true,
+      "session_started_at": "2026-08-14T00:00:00Z"
+    },
+    {
+      "agent_id": "agent-30",
+      "node": "node-5",
+      "authorized": true,
+      "connected": true,
+      "session_started_at": "2026-08-14T00:00:00Z"
+    },
+    {
+      "agent_id": "agent-31",
+      "node": "node-1",
+      "authorized": true,
+      "connected": true,
+      "session_started_at": "2026-08-14T00:00:00Z"
+    },
+    {
+      "agent_id": "agent-32",
+      "node": "node-2",
+      "authorized": true,
+      "connected": true,
+      "session_started_at": "2026-08-14T00:00:00Z"
+    },
+    {
+      "agent_id": "agent-33",
+      "node": "node-3",
+      "authorized": true,
+      "connected": true,
+      "session_started_at": "2026-08-14T00:00:00Z"
+    },
+    {
+      "agent_id": "agent-34",
+      "node": "node-4",
+      "authorized": true,
+      "connected": true,
+      "session_started_at": "2026-08-14T00:00:00Z"
+    },
+    {
+      "agent_id": "agent-35",
+      "node": "node-5",
+      "authorized": true,
+      "connected": true,
+      "session_started_at": "2026-08-14T00:00:00Z"
+    },
+    {
+      "agent_id": "agent-36",
+      "node": "node-1",
+      "authorized": true,
+      "connected": true,
+      "session_started_at": "2026-08-14T00:00:00Z"
+    },
+    {
+      "agent_id": "agent-37",
+      "node": "node-2",
+      "authorized": true,
+      "connected": true,
+      "session_started_at": "2026-08-14T00:00:00Z"
+    },
+    {
+      "agent_id": "agent-38",
+      "node": "node-3",
+      "authorized": true,
+      "connected": true,
+      "session_started_at": "2026-08-14T00:00:00Z"
+    },
+    {
+      "agent_id": "agent-39",
+      "node": "node-4",
+      "authorized": true,
+      "connected": true,
+      "session_started_at": "2026-08-14T00:00:00Z"
+    },
+    {
+      "agent_id": "agent-40",
+      "node": "node-5",
+      "authorized": true,
+      "connected": true,
+      "session_started_at": "2026-08-14T00:00:00Z"
+    },
+    {
+      "agent_id": "agent-41",
+      "node": "node-1",
+      "authorized": true,
+      "connected": true,
+      "session_started_at": "2026-08-14T00:00:00Z"
+    },
+    {
+      "agent_id": "agent-42",
+      "node": "node-2",
+      "authorized": true,
+      "connected": true,
+      "session_started_at": "2026-08-14T00:00:00Z"
+    },
+    {
+      "agent_id": "agent-43",
+      "node": "node-3",
+      "authorized": true,
+      "connected": true,
+      "session_started_at": "2026-08-14T00:00:00Z"
+    },
+    {
+      "agent_id": "agent-44",
+      "node": "node-4",
+      "authorized": true,
+      "connected": true,
+      "session_started_at": "2026-08-14T00:00:00Z"
+    },
+    {
+      "agent_id": "agent-45",
+      "node": "node-5",
+      "authorized": true,
+      "connected": true,
+      "session_started_at": "2026-08-14T00:00:00Z"
+    },
+    {
+      "agent_id": "agent-46",
+      "node": "node-1",
+      "authorized": true,
+      "connected": true,
+      "session_started_at": "2026-08-14T00:00:00Z"
+    },
+    {
+      "agent_id": "agent-47",
+      "node": "node-2",
+      "authorized": true,
+      "connected": true,
+      "session_started_at": "2026-08-14T00:00:00Z"
+    },
+    {
+      "agent_id": "agent-48",
+      "node": "node-3",
+      "authorized": true,
+      "connected": true,
+      "session_started_at": "2026-08-14T00:00:00Z"
+    },
+    {
+      "agent_id": "agent-49",
+      "node": "node-4",
+      "authorized": true,
+      "connected": true,
+      "session_started_at": "2026-08-14T00:00:00Z"
+    },
+    {
+      "agent_id": "agent-50",
+      "node": "node-5",
+      "authorized": true,
+      "connected": true,
+      "session_started_at": "2026-08-14T00:00:00Z"
+    }
+  ],
+  "reconnect_storm": {
+    "bulk_disconnect_at": "2026-08-14T00:03:00Z",
+    "reconnect_completed_at": "2026-08-14T00:03:30Z"
+  }
+}

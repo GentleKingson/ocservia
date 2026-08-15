@@ -1,0 +1,307 @@
+{
+  "environment_id": "g6-12345678",
+  "candidate_sha": "1111111111111111111111111111111111111111",
+  "snapshot_taken_at": "2026-08-14T00:05:00Z",
+  "rows": [
+    {
+      "command_id": "cmd-001",
+      "created_at": "2026-08-14T00:00:00Z",
+      "due_at": "2026-08-14T00:00:10Z",
+      "state": "terminal"
+    },
+    {
+      "command_id": "cmd-002",
+      "created_at": "2026-08-14T00:00:00Z",
+      "due_at": "2026-08-14T00:00:10Z",
+      "state": "terminal"
+    },
+    {
+      "command_id": "cmd-003",
+      "created_at": "2026-08-14T00:00:00Z",
+      "due_at": "2026-08-14T00:00:10Z",
+      "state": "terminal"
+    },
+    {
+      "command_id": "cmd-004",
+      "created_at": "2026-08-14T00:00:00Z",
+      "due_at": "2026-08-14T00:00:10Z",
+      "state": "terminal"
+    },
+    {
+      "command_id": "cmd-005",
+      "created_at": "2026-08-14T00:00:00Z",
+      "due_at": "2026-08-14T00:00:10Z",
+      "state": "terminal"
+    },
+    {
+      "command_id": "cmd-006",
+      "created_at": "2026-08-14T00:00:00Z",
+      "due_at": "2026-08-14T00:00:10Z",
+      "state": "terminal"
+    },
+    {
+      "command_id": "cmd-007",
+      "created_at": "2026-08-14T00:00:00Z",
+      "due_at": "2026-08-14T00:00:10Z",
+      "state": "terminal"
+    },
+    {
+      "command_id": "cmd-008",
+      "created_at": "2026-08-14T00:00:00Z",
+      "due_at": "2026-08-14T00:00:10Z",
+      "state": "terminal"
+    },
+    {
+      "command_id": "cmd-009",
+      "created_at": "2026-08-14T00:00:00Z",
+      "due_at": "2026-08-14T00:00:10Z",
+      "state": "terminal"
+    },
+    {
+      "command_id": "cmd-010",
+      "created_at": "2026-08-14T00:00:00Z",
+      "due_at": "2026-08-14T00:00:10Z",
+      "state": "terminal"
+    },
+    {
+      "command_id": "cmd-011",
+      "created_at": "2026-08-14T00:00:00Z",
+      "due_at": "2026-08-14T00:00:10Z",
+      "state": "terminal"
+    },
+    {
+      "command_id": "cmd-012",
+      "created_at": "2026-08-14T00:00:00Z",
+      "due_at": "2026-08-14T00:00:10Z",
+      "state": "terminal"
+    },
+    {
+      "command_id": "cmd-013",
+      "created_at": "2026-08-14T00:00:00Z",
+      "due_at": "2026-08-14T00:00:10Z",
+      "state": "terminal"
+    },
+    {
+      "command_id": "cmd-014",
+      "created_at": "2026-08-14T00:00:00Z",
+      "due_at": "2026-08-14T00:00:10Z",
+      "state": "terminal"
+    },
+    {
+      "command_id": "cmd-015",
+      "created_at": "2026-08-14T00:00:00Z",
+      "due_at": "2026-08-14T00:00:10Z",
+      "state": "terminal"
+    },
+    {
+      "command_id": "cmd-016",
+      "created_at": "2026-08-14T00:00:00Z",
+      "due_at": "2026-08-14T00:00:10Z",
+      "state": "terminal"
+    },
+    {
+      "command_id": "cmd-017",
+      "created_at": "2026-08-14T00:00:00Z",
+      "due_at": "2026-08-14T00:00:10Z",
+      "state": "terminal"
+    },
+    {
+      "command_id": "cmd-018",
+      "created_at": "2026-08-14T00:00:00Z",
+      "due_at": "2026-08-14T00:00:10Z",
+      "state": "terminal"
+    },
+    {
+      "command_id": "cmd-019",
+      "created_at": "2026-08-14T00:00:00Z",
+      "due_at": "2026-08-14T00:00:10Z",
+      "state": "terminal"
+    },
+    {
+      "command_id": "cmd-020",
+      "created_at": "2026-08-14T00:00:00Z",
+      "due_at": "2026-08-14T00:00:10Z",
+      "state": "terminal"
+    },
+    {
+      "command_id": "cmd-021",
+      "created_at": "2026-08-14T00:00:00Z",
+      "due_at": "2026-08-14T00:00:10Z",
+      "state": "terminal"
+    },
+    {
+      "command_id": "cmd-022",
+      "created_at": "2026-08-14T00:00:00Z",
+      "due_at": "2026-08-14T00:00:10Z",
+      "state": "terminal"
+    },
+    {
+      "command_id": "cmd-023",
+      "created_at": "2026-08-14T00:00:00Z",
+      "due_at": "2026-08-14T00:00:10Z",
+      "state": "terminal"
+    },
+    {
+      "command_id": "cmd-024",
+      "created_at": "2026-08-14T00:00:00Z",
+      "due_at": "2026-08-14T00:00:10Z",
+      "state": "terminal"
+    },
+    {
+      "command_id": "cmd-025",
+      "created_at": "2026-08-14T00:00:00Z",
+      "due_at": "2026-08-14T00:00:10Z",
+      "state": "terminal"
+    },
+    {
+      "command_id": "cmd-026",
+      "created_at": "2026-08-14T00:00:00Z",
+      "due_at": "2026-08-14T00:00:10Z",
+      "state": "terminal"
+    },
+    {
+      "command_id": "cmd-027",
+      "created_at": "2026-08-14T00:00:00Z",
+      "due_at": "2026-08-14T00:00:10Z",
+      "state": "terminal"
+    },
+    {
+      "command_id": "cmd-028",
+      "created_at": "2026-08-14T00:00:00Z",
+      "due_at": "2026-08-14T00:00:10Z",
+      "state": "terminal"
+    },
+    {
+      "command_id": "cmd-029",
+      "created_at": "2026-08-14T00:00:00Z",
+      "due_at": "2026-08-14T00:00:10Z",
+      "state": "terminal"
+    },
+    {
+      "command_id": "cmd-030",
+      "created_at": "2026-08-14T00:00:00Z",
+      "due_at": "2026-08-14T00:00:10Z",
+      "state": "terminal"
+    },
+    {
+      "command_id": "cmd-031",
+      "created_at": "2026-08-14T00:00:00Z",
+      "due_at": "2026-08-14T00:00:10Z",
+      "state": "terminal"
+    },
+    {
+      "command_id": "cmd-032",
+      "created_at": "2026-08-14T00:00:00Z",
+      "due_at": "2026-08-14T00:00:10Z",
+      "state": "terminal"
+    },
+    {
+      "command_id": "cmd-033",
+      "created_at": "2026-08-14T00:00:00Z",
+      "due_at": "2026-08-14T00:00:10Z",
+      "state": "terminal"
+    },
+    {
+      "command_id": "cmd-034",
+      "created_at": "2026-08-14T00:00:00Z",
+      "due_at": "2026-08-14T00:00:10Z",
+      "state": "terminal"
+    },
+    {
+      "command_id": "cmd-035",
+      "created_at": "2026-08-14T00:00:00Z",
+      "due_at": "2026-08-14T00:00:10Z",
+      "state": "terminal"
+    },
+    {
+      "command_id": "cmd-036",
+      "created_at": "2026-08-14T00:00:00Z",
+      "due_at": "2026-08-14T00:00:10Z",
+      "state": "terminal"
+    },
+    {
+      "command_id": "cmd-037",
+      "created_at": "2026-08-14T00:00:00Z",
+      "due_at": "2026-08-14T00:00:10Z",
+      "state": "terminal"
+    },
+    {
+      "command_id": "cmd-038",
+      "created_at": "2026-08-14T00:00:00Z",
+      "due_at": "2026-08-14T00:00:10Z",
+      "state": "terminal"
+    },
+    {
+      "command_id": "cmd-039",
+      "created_at": "2026-08-14T00:00:00Z",
+      "due_at": "2026-08-14T00:00:10Z",
+      "state": "terminal"
+    },
+    {
+      "command_id": "cmd-040",
+      "created_at": "2026-08-14T00:00:00Z",
+      "due_at": "2026-08-14T00:00:10Z",
+      "state": "terminal"
+    },
+    {
+      "command_id": "cmd-041",
+      "created_at": "2026-08-14T00:00:00Z",
+      "due_at": "2026-08-14T00:00:10Z",
+      "state": "terminal"
+    },
+    {
+      "command_id": "cmd-042",
+      "created_at": "2026-08-14T00:00:00Z",
+      "due_at": "2026-08-14T00:00:10Z",
+      "state": "terminal"
+    },
+    {
+      "command_id": "cmd-043",
+      "created_at": "2026-08-14T00:00:00Z",
+      "due_at": "2026-08-14T00:00:10Z",
+      "state": "terminal"
+    },
+    {
+      "command_id": "cmd-044",
+      "created_at": "2026-08-14T00:00:00Z",
+      "due_at": "2026-08-14T00:00:10Z",
+      "state": "terminal"
+    },
+    {
+      "command_id": "cmd-045",
+      "created_at": "2026-08-14T00:00:00Z",
+      "due_at": "2026-08-14T00:00:10Z",
+      "state": "terminal"
+    },
+    {
+      "command_id": "cmd-046",
+      "created_at": "2026-08-14T00:00:00Z",
+      "due_at": "2026-08-14T00:00:10Z",
+      "state": "terminal"
+    },
+    {
+      "command_id": "cmd-047",
+      "created_at": "2026-08-14T00:00:00Z",
+      "due_at": "2026-08-14T00:00:10Z",
+      "state": "terminal"
+    },
+    {
+      "command_id": "cmd-048",
+      "created_at": "2026-08-14T00:00:00Z",
+      "due_at": "2026-08-14T00:00:10Z",
+      "state": "reconciliation_active"
+    },
+    {
+      "command_id": "cmd-049",
+      "created_at": "2026-08-14T00:00:00Z",
+      "due_at": "2026-08-14T00:00:10Z",
+      "state": "reconciliation_active"
+    },
+    {
+      "command_id": "cmd-050",
+      "created_at": "2026-08-14T00:00:00Z",
+      "due_at": "2026-08-14T00:00:10Z",
+      "state": "unknown_reconciling"
+    }
+  ]
+}

@@ -12,5 +12,5 @@
       "value": "resource_samples"
     }
   ],
-  "expected_error": "resource samples artifact timeline.jsonl has an invalid header"
+  "expected_error": "timeline artifact resource-samples.csv entry is not valid JSON"
 }

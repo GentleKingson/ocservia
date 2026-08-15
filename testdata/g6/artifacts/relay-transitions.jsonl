@@ -1,0 +1,7 @@
+{"sequence":1,"timestamp":"2026-08-14T00:02:30Z","environment_id":"g6-12345678","candidate_sha":"1111111111111111111111111111111111111111","event_type":"path_active","session_id":"s-001","path":"direct"}
+{"sequence":2,"timestamp":"2026-08-14T00:02:35Z","environment_id":"g6-12345678","candidate_sha":"1111111111111111111111111111111111111111","event_type":"path_failed","session_id":"s-001","path":"direct"}
+{"sequence":3,"timestamp":"2026-08-14T00:02:40Z","environment_id":"g6-12345678","candidate_sha":"1111111111111111111111111111111111111111","event_type":"relay_failed","relay":"relay-a"}
+{"sequence":4,"timestamp":"2026-08-14T00:02:45Z","environment_id":"g6-12345678","candidate_sha":"1111111111111111111111111111111111111111","event_type":"path_active","session_id":"s-001","path":"relay"}
+{"sequence":5,"timestamp":"2026-08-14T00:02:50Z","environment_id":"g6-12345678","candidate_sha":"1111111111111111111111111111111111111111","event_type":"relay_active","relay":"relay-b"}
+{"sequence":6,"timestamp":"2026-08-14T00:03:10Z","environment_id":"g6-12345678","candidate_sha":"1111111111111111111111111111111111111111","event_type":"path_failed","session_id":"s-001","path":"relay"}
+{"sequence":7,"timestamp":"2026-08-14T00:03:15Z","environment_id":"g6-12345678","candidate_sha":"1111111111111111111111111111111111111111","event_type":"path_active","session_id":"s-001","path":"direct"}

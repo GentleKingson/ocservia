@@ -1,0 +1,11 @@
+{
+  "base": "evidence-pass.json",
+  "slo_replacements": [
+    {
+      "from": "derivation: agent_sessions.authorized_agent_count",
+      "to": "declared_by_harness: true"
+    }
+  ],
+  "expected_failure_reason": "final pass requires verified metric producers",
+  "expected_all_measurements_pass": true
+}

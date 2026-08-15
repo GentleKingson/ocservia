@@ -1,0 +1,208 @@
+{
+  "environment_id": "g6-12345678",
+  "candidate_sha": "1111111111111111111111111111111111111111",
+  "snapshot_taken_at": "2026-08-14T00:04:30Z",
+  "freshness_bound_seconds": 60,
+  "agents": [
+    {
+      "agent_id": "agent-01",
+      "last_telemetry_at": "2026-08-14T00:04:20Z"
+    },
+    {
+      "agent_id": "agent-02",
+      "last_telemetry_at": "2026-08-14T00:04:19Z"
+    },
+    {
+      "agent_id": "agent-03",
+      "last_telemetry_at": "2026-08-14T00:04:18Z"
+    },
+    {
+      "agent_id": "agent-04",
+      "last_telemetry_at": "2026-08-14T00:04:17Z"
+    },
+    {
+      "agent_id": "agent-05",
+      "last_telemetry_at": "2026-08-14T00:04:16Z"
+    },
+    {
+      "agent_id": "agent-06",
+      "last_telemetry_at": "2026-08-14T00:04:15Z"
+    },
+    {
+      "agent_id": "agent-07",
+      "last_telemetry_at": "2026-08-14T00:04:14Z"
+    },
+    {
+      "agent_id": "agent-08",
+      "last_telemetry_at": "2026-08-14T00:04:13Z"
+    },
+    {
+      "agent_id": "agent-09",
+      "last_telemetry_at": "2026-08-14T00:04:12Z"
+    },
+    {
+      "agent_id": "agent-10",
+      "last_telemetry_at": "2026-08-14T00:04:11Z"
+    },
+    {
+      "agent_id": "agent-11",
+      "last_telemetry_at": "2026-08-14T00:04:10Z"
+    },
+    {
+      "agent_id": "agent-12",
+      "last_telemetry_at": "2026-08-14T00:04:09Z"
+    },
+    {
+      "agent_id": "agent-13",
+      "last_telemetry_at": "2026-08-14T00:04:08Z"
+    },
+    {
+      "agent_id": "agent-14",
+      "last_telemetry_at": "2026-08-14T00:04:07Z"
+    },
+    {
+      "agent_id": "agent-15",
+      "last_telemetry_at": "2026-08-14T00:04:06Z"
+    },
+    {
+      "agent_id": "agent-16",
+      "last_telemetry_at": "2026-08-14T00:04:05Z"
+    },
+    {
+      "agent_id": "agent-17",
+      "last_telemetry_at": "2026-08-14T00:04:04Z"
+    },
+    {
+      "agent_id": "agent-18",
+      "last_telemetry_at": "2026-08-14T00:04:03Z"
+    },
+    {
+      "agent_id": "agent-19",
+      "last_telemetry_at": "2026-08-14T00:04:02Z"
+    },
+    {
+      "agent_id": "agent-20",
+      "last_telemetry_at": "2026-08-14T00:04:01Z"
+    },
+    {
+      "agent_id": "agent-21",
+      "last_telemetry_at": "2026-08-14T00:04:00Z"
+    },
+    {
+      "agent_id": "agent-22",
+      "last_telemetry_at": "2026-08-14T00:03:59Z"
+    },
+    {
+      "agent_id": "agent-23",
+      "last_telemetry_at": "2026-08-14T00:03:58Z"
+    },
+    {
+      "agent_id": "agent-24",
+      "last_telemetry_at": "2026-08-14T00:03:57Z"
+    },
+    {
+      "agent_id": "agent-25",
+      "last_telemetry_at": "2026-08-14T00:03:56Z"
+    },
+    {
+      "agent_id": "agent-26",
+      "last_telemetry_at": "2026-08-14T00:03:55Z"
+    },
+    {
+      "agent_id": "agent-27",
+      "last_telemetry_at": "2026-08-14T00:03:54Z"
+    },
+    {
+      "agent_id": "agent-28",
+      "last_telemetry_at": "2026-08-14T00:03:53Z"
+    },
+    {
+      "agent_id": "agent-29",
+      "last_telemetry_at": "2026-08-14T00:03:52Z"
+    },
+    {
+      "agent_id": "agent-30",
+      "last_telemetry_at": "2026-08-14T00:03:51Z"
+    },
+    {
+      "agent_id": "agent-31",
+      "last_telemetry_at": "2026-08-14T00:03:50Z"
+    },
+    {
+      "agent_id": "agent-32",
+      "last_telemetry_at": "2026-08-14T00:03:49Z"
+    },
+    {
+      "agent_id": "agent-33",
+      "last_telemetry_at": "2026-08-14T00:03:48Z"
+    },
+    {
+      "agent_id": "agent-34",
+      "last_telemetry_at": "2026-08-14T00:03:47Z"
+    },
+    {
+      "agent_id": "agent-35",
+      "last_telemetry_at": "2026-08-14T00:03:46Z"
+    },
+    {
+      "agent_id": "agent-36",
+      "last_telemetry_at": "2026-08-14T00:03:45Z"
+    },
+    {
+      "agent_id": "agent-37",
+      "last_telemetry_at": "2026-08-14T00:03:44Z"
+    },
+    {
+      "agent_id": "agent-38",
+      "last_telemetry_at": "2026-08-14T00:03:43Z"
+    },
+    {
+      "agent_id": "agent-39",
+      "last_telemetry_at": "2026-08-14T00:03:42Z"
+    },
+    {
+      "agent_id": "agent-40",
+      "last_telemetry_at": "2026-08-14T00:03:41Z"
+    },
+    {
+      "agent_id": "agent-41",
+      "last_telemetry_at": "2026-08-14T00:03:40Z"
+    },
+    {
+      "agent_id": "agent-42",
+      "last_telemetry_at": "2026-08-14T00:03:39Z"
+    },
+    {
+      "agent_id": "agent-43",
+      "last_telemetry_at": "2026-08-14T00:03:38Z"
+    },
+    {
+      "agent_id": "agent-44",
+      "last_telemetry_at": "2026-08-14T00:03:37Z"
+    },
+    {
+      "agent_id": "agent-45",
+      "last_telemetry_at": "2026-08-14T00:03:36Z"
+    },
+    {
+      "agent_id": "agent-46",
+      "last_telemetry_at": "2026-08-14T00:03:35Z"
+    },
+    {
+      "agent_id": "agent-47",
+      "last_telemetry_at": "2026-08-14T00:03:34Z"
+    },
+    {
+      "agent_id": "agent-48",
+      "last_telemetry_at": "2026-08-14T00:03:33Z"
+    },
+    {
+      "agent_id": "agent-49",
+      "last_telemetry_at": "2026-08-14T00:03:32Z"
+    },
+    {
+      "agent_id": "agent-50",
+      "last_telemetry_at": "2026-08-14T00:03:31Z"
+    }
+  ]
+}

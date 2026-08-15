@@ -1,0 +1,8 @@
+{
+  "base": "evidence-pass.json",
+  "artifact_files": {
+    "pitr-report.json": "{\n  \"environment_id\": \"g6-12345678\",\n  \"candidate_sha\": \"1111111111111111111111111111111111111111\",\n  \"marker_a\": {\n    \"txid\": \"pitr-marker-a\",\n    \"written_at\": \"2025-01-01T00:00:00Z\"\n  },\n  \"restore_point_created_at\": \"2026-08-14T00:00:20Z\",\n  \"marker_b\": {\n    \"txid\": \"pitr-marker-b\",\n    \"written_at\": \"2026-08-14T00:00:30Z\"\n  },\n  \"restore\": {\n    \"restored_at\": \"2026-08-14T00:03:00Z\",\n    \"marker_a_present\": true,\n    \"marker_b_present\": false\n  }\n}\n"
+  },
+  "rebind_overridden_artifacts": true,
+  "expected_error": "precedes the evidence window"
+}
