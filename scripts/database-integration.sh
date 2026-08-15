@@ -203,9 +203,12 @@ for major in 17 18; do
   # row, and the next takeover of that node must continue past the retained
   # per-node epoch instead of restarting it.
   test "$(docker exec "${container}" psql -U ocservia_owner -d "${clean_database}" -Atc "SELECT owner_epoch FROM connection_owner_fencing WHERE node_id=decode(repeat('25',16),'hex')")" = "4"
-  docker exec "${container}" psql -v ON_ERROR_STOP=1 -U ocservia_owner -d "${clean_database}" -c \
-    "UPDATE connection_owner_fencing SET lease_until=clock_timestamp() WHERE node_id=decode(repeat('25',16),'hex')" >/dev/null
-  test "$(docker exec "${container}" psql -q -At -U ocservia_owner -d "${clean_database}" -c "UPDATE connection_owner_fencing SET owner_epoch=owner_epoch+1,owner_instance_id='00000000-0000-7000-8000-000000000026',owner_incarnation=6,connection_id=decode(repeat('27',16),'hex'),lease_until=now()+interval '1 hour',updated_at=now() WHERE node_id=decode(repeat('25',16),'hex') AND lease_until<=clock_timestamp() RETURNING owner_epoch")" = "5"
+  # The next takeover runs through the real connectionowner.Acquire path on
+  # the re-upgraded schema, not a hand-written SQL update, so the evidence
+  # matches the production code path.
+  (cd "${ROOT}/control-plane" && OCSERV_TEST_DATABASE_URL="${clean_url}" \
+    OCSERV_TEST_RETAINED_NODE_HEX="25252525252525252525252525252525" \
+    go test -p 1 -race ./internal/connectionowner -run TestConnectionOwnerTakeoverContinuesPastRetainedEpochIntegration -count=1)
   docker exec "${container}" psql -v ON_ERROR_STOP=1 -U ocservia_owner -d postgres -c \
     "DROP DATABASE ${clean_database}" >/dev/null
 
@@ -657,9 +660,12 @@ for major in 17 18; do
   # The per-node ownership row survived the same cycle with its epoch, and
   # the next takeover of that node must continue past the retained value.
   test "$(docker exec "${container}" psql -U ocservia_owner -d ocservia -Atc "SELECT owner_epoch FROM connection_owner_fencing WHERE node_id=decode(repeat('ee',16),'hex')")" = "${owner_epoch_before}"
-  docker exec "${container}" psql -v ON_ERROR_STOP=1 -U ocservia_owner -d ocservia -c \
-    "UPDATE connection_owner_fencing SET lease_until=clock_timestamp() WHERE node_id=decode(repeat('ee',16),'hex')" >/dev/null
-  test "$(docker exec "${container}" psql -q -At -U ocservia_owner -d ocservia -c "UPDATE connection_owner_fencing SET owner_epoch=owner_epoch+1,owner_instance_id='00000000-0000-7000-8000-0000000000ef',owner_incarnation=10,connection_id=decode(repeat('dc',16),'hex'),lease_until=now()+interval '1 hour',updated_at=now() WHERE node_id=decode(repeat('ee',16),'hex') AND lease_until<=clock_timestamp() RETURNING owner_epoch")" = "78"
+  # The next takeover runs through the real connectionowner.Acquire path on
+  # the re-upgraded schema, not a hand-written SQL update, so the evidence
+  # matches the production code path.
+  (cd "${ROOT}/control-plane" && OCSERV_TEST_DATABASE_URL="${owner_url}" \
+    OCSERV_TEST_RETAINED_NODE_HEX="eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee" \
+    go test -p 1 -race ./internal/connectionowner -run TestConnectionOwnerTakeoverContinuesPastRetainedEpochIntegration -count=1)
   test "$(docker exec "${container}" psql -U ocservia_owner -d ocservia -Atc "SELECT count(*) FROM pg_indexes WHERE schemaname='public' AND tablename='agent_command_results' AND indexname IN ('agent_command_results_pkey','agent_command_results_command_created_idx')")" = "2"
   test "$(docker exec "${container}" psql -U ocservia_owner -d ocservia -Atc "SELECT count(*) FROM information_schema.columns WHERE table_schema='public' AND table_name='agent_command_results' AND column_name='semantic_payload_hash_version'")" = "1"
   test "$(docker exec "${container}" psql -U ocservia_owner -d ocservia -Atc "SELECT count(*) FROM pg_constraint WHERE conrelid = 'agent_command_results'::regclass AND conname = 'agent_command_results_semantic_payload_hash_version_supported'")" = "1"

@@ -2,6 +2,7 @@ package connectionowner
 
 import (
 	"context"
+	"encoding/hex"
 	"errors"
 	"os"
 	"testing"
@@ -173,15 +174,18 @@ func TestConnectionOwnerAssertRejectsMidTransactionExpiryIntegration(t *testing.
 		t.Fatalf("acquire: %v", err)
 	}
 
-	// Pin the ownership row with a stale fencing transaction whose snapshot
-	// saw a valid lease, then hold it open past natural expiry.
+	// Pin the transaction start while the lease is still valid, without
+	// taking any row lock the rejected assert could be blamed for.
 	tx, err := pool.Begin(ctx)
 	if err != nil {
 		t.Fatalf("begin: %v", err)
 	}
-	if _, err := tx.Exec(ctx, `SELECT 1 FROM connection_owner_fencing WHERE node_id=$1 FOR SHARE`, node[:]); err != nil {
-		t.Fatalf("pin row: %v", err)
+	defer tx.Rollback(ctx)
+	if _, err := tx.Exec(ctx, `SELECT 1`); err != nil {
+		t.Fatalf("pin transaction start: %v", err)
 	}
+	// Keep the transaction open until the lease lapses naturally; forcing an
+	// expiry would not reproduce the frozen-transaction-clock hazard.
 	time.Sleep(1600 * time.Millisecond)
 
 	// clock_timestamp() must reject the assert even though now() froze at a
@@ -189,23 +193,111 @@ func TestConnectionOwnerAssertRejectsMidTransactionExpiryIntegration(t *testing.
 	if err := term.AssertFenced(ctx, tx); !errors.Is(err, ErrNotOwner) {
 		t.Fatalf("mid-transaction assert = %v, want ErrNotOwner", err)
 	}
-	if err := tx.Rollback(ctx); err != nil {
-		t.Fatalf("rollback stale transaction: %v", err)
-	}
 
-	// The rejected assert must not block a legitimate takeover.
-	done := make(chan error, 1)
+	// The rejected assert must not hold the ownership row: a legitimate
+	// takeover completes while the stale transaction is still open, instead
+	// of queueing behind an erroneous FOR SHARE until rollback.
+	takeoverDone := make(chan error, 1)
 	go func() {
-		_, err := Acquire(context.Background(), pool, node, testIdentity(t), testConnection(t), 5*time.Second)
-		done <- err
+		_, err := Acquire(context.Background(), pool, node, testIdentity(t), testConnection(t), 10*time.Second)
+		takeoverDone <- err
 	}()
 	select {
-	case err := <-done:
+	case err := <-takeoverDone:
 		if err != nil {
 			t.Fatalf("takeover after rejected assert: %v", err)
 		}
 	case <-time.After(5 * time.Second):
-		t.Fatal("takeover blocked after rejected assert")
+		t.Fatal("rejected assert must not block takeover until the stale transaction rolls back")
+	}
+	if err := term.Renew(ctx, pool); !errors.Is(err, ErrNotOwner) {
+		t.Fatalf("stale renew after takeover = %v, want ErrNotOwner", err)
+	}
+}
+
+// A fencing assert holds a row share lock until commit, so a takeover that
+// became eligible mid-transaction cannot bump the epoch before the fenced
+// transaction commits.
+func TestConnectionOwnerAssertBlocksTakeoverIntegration(t *testing.T) {
+	pool := testPool(t)
+	ctx := context.Background()
+	node := testNode(t)
+
+	// A short lease lets the deadline lapse naturally while the fenced
+	// transaction stays open; forcing an expiry would itself block on the
+	// row lock the assert holds.
+	term, err := Acquire(ctx, pool, node, testIdentity(t), testConnection(t), 1500*time.Millisecond)
+	if err != nil {
+		t.Fatalf("acquire: %v", err)
+	}
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	defer tx.Rollback(ctx)
+	if err := term.AssertFenced(ctx, tx); err != nil {
+		t.Fatalf("assert: %v", err)
+	}
+	time.Sleep(2 * time.Second)
+
+	takeoverDone := make(chan error, 1)
+	go func() {
+		_, err := Acquire(context.Background(), pool, node, testIdentity(t), testConnection(t), 10*time.Second)
+		takeoverDone <- err
+	}()
+	select {
+	case err := <-takeoverDone:
+		t.Fatalf("takeover must block while the fenced transaction is open, got %v", err)
+	case <-time.After(500 * time.Millisecond):
+	}
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatalf("commit fenced tx: %v", err)
+	}
+	select {
+	case err := <-takeoverDone:
+		if err != nil {
+			t.Fatalf("takeover after commit: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("takeover did not finish after the fenced transaction committed")
+	}
+}
+
+// TestConnectionOwnerTakeoverContinuesPastRetainedEpochIntegration proves the
+// real Acquire path continues past a retained per-node epoch on a re-upgraded
+// schema. It is environment-gated so the migration lifecycle harness can
+// point it at the exact node whose epoch survived a rollback cycle.
+func TestConnectionOwnerTakeoverContinuesPastRetainedEpochIntegration(t *testing.T) {
+	nodeHex := os.Getenv("OCSERV_TEST_RETAINED_NODE_HEX")
+	if nodeHex == "" {
+		t.Skip("OCSERV_TEST_RETAINED_NODE_HEX not set")
+	}
+	raw, err := hex.DecodeString(nodeHex)
+	if err != nil || len(raw) != 16 {
+		t.Fatalf("invalid OCSERV_TEST_RETAINED_NODE_HEX: %q", nodeHex)
+	}
+	pool := testPool(t)
+	ctx := context.Background()
+	var node [16]byte
+	copy(node[:], raw)
+
+	retained, err := ReadState(ctx, pool, node)
+	if err != nil {
+		t.Fatalf("read retained ownership state: %v", err)
+	}
+	if retained.Epoch < 1 {
+		t.Fatalf("retained epoch must be at least one, got %d", retained.Epoch)
+	}
+	forceExpire(t, pool, node)
+	term, err := Acquire(ctx, pool, node, testIdentity(t), testConnection(t), 30*time.Second)
+	if err != nil {
+		t.Fatalf("real takeover over retained state: %v", err)
+	}
+	if term.Epoch() <= retained.Epoch {
+		t.Fatalf("takeover epoch = %d, want > retained epoch %d", term.Epoch(), retained.Epoch)
+	}
+	if err := term.AssertCurrent(ctx, pool); err != nil {
+		t.Fatalf("new owner assert after takeover: %v", err)
 	}
 }
 
