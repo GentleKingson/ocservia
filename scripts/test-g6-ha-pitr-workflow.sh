@@ -326,7 +326,7 @@ fi
 # with no pg_hba entry before any byte is copied.
 for fd_script in "${FD_A}" "${FD_B}"; do
   grep -qF 'pg_basebackup' "${fd_script}" || continue
-  if grep -qF 'pg_basebackup' "${fd_script}" && ! grep -qF '-U ocservia_replication' "${fd_script}"; then
+  if ! grep -qF -- '-U ocservia_replication' "${fd_script}"; then
     echo "pg_basebackup in ${fd_script} must authenticate as ocservia_replication" >&2
     exit 1
   fi
