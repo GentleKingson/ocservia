@@ -208,14 +208,22 @@ reject("Rust target archives must be replaced by sccache") if all_cached_paths.i
 reject("workflow must not cache node_modules") if all_cached_paths.any? { |path| path.include?("node_modules") }
 
 sccache_jobs = %w[runtime-artifacts production-relays rust-validation security-license native-ocserv]
+sccache_action = "mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba"
 sccache_jobs.each do |job_id|
-  env = jobs.fetch(job_id).fetch("env")
+  job = jobs.fetch(job_id)
+  env = job.fetch("env")
   reject("#{job_id} must disable Cargo incremental compilation") unless env.fetch("CARGO_INCREMENTAL") == "0"
   reject("#{job_id} must use sccache as the Rust compiler wrapper") unless env.fetch("RUSTC_WRAPPER") == "sccache"
   reject("#{job_id} must use the GitHub Actions sccache backend") unless env.fetch("SCCACHE_GHA_ENABLED") == "true"
   reject("#{job_id} must normalize the sccache workspace base") unless env.fetch("SCCACHE_BASEDIRS") == "${{ github.workspace }}"
   reject("#{job_id} must select a usable sccache backend before bootstrap") unless
-    Array(jobs.fetch(job_id).fetch("steps")).any? { |step| step["run"] == "scripts/configure-sccache.sh" }
+    Array(job.fetch("steps")).any? { |step| step["run"] == "scripts/configure-sccache.sh" }
+  setup = Array(job.fetch("steps")).find { |step| step["uses"] == sccache_action }
+  reject("#{job_id} must expose the GitHub Actions cache credentials through the pinned sccache action") unless setup
+  reject("#{job_id} must request the repository-pinned sccache release") unless
+    setup.fetch("with").fetch("version") == "v0.17.0"
+  reject("#{job_id} must use the explicit sccache statistics step") unless
+    setup.fetch("with").fetch("disable_annotations") == true
 end
 reject("sccache version is not pinned") unless toolchains.match?(/^sccache=0\.17\.0$/)
 %w[aarch64-apple-darwin x86_64-unknown-linux-musl].each do |platform|
@@ -238,6 +246,12 @@ end
 reject("runtime artifact upload must be SHA-pinned") unless
   runtime_upload && runtime_upload.fetch("uses").match?(/\Aactions\/upload-artifact@[0-9a-f]{40}\z/)
 reject("runtime artifact must have one-day retention") unless runtime_upload.fetch("with").fetch("retention-days") == 1
+jobs.each do |job_id, job|
+  Array(job.fetch("steps")).select { |step| step["uses"].to_s.start_with?("actions/upload-artifact@") }.each do |step|
+    reject("#{job_id} artifact retention exceeds the repository limit") unless
+      step.fetch("with").fetch("retention-days") == 1
+  end
+end
 
 database = jobs.fetch("database")
 matrix = database.fetch("strategy").fetch("matrix").fetch("pg-major")

@@ -48,6 +48,11 @@ jobs:
           restore-keys: |
             go-v4-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'go.work', 'go.work.sum', 'control-plane/go.mod', 'control-plane/go.sum') }}-
             go-v4-${{ runner.os }}-${{ runner.arch }}-
+      - name: Enable sccache GitHub Actions backend
+        uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
+        with:
+          version: "v0.17.0"
+          disable_annotations: true
       - name: Configure sccache backend
         run: scripts/configure-sccache.sh
       - name: Bootstrap pinned Go and Rust tools
@@ -60,7 +65,6 @@ jobs:
           source scripts/env.sh
           if command -v sccache >/dev/null 2>&1; then
             sccache --show-stats || true
-            sccache --stop-server || true
           fi
       - name: Upload runtime artifacts
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
@@ -133,7 +137,7 @@ jobs:
           name: go-standard-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/artifacts/go-standard
           if-no-files-found: warn
-          retention-days: 14
+          retention-days: 1
 
   go-race:
     name: Go Race
@@ -179,7 +183,7 @@ jobs:
           name: go-race-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/artifacts/go-race
           if-no-files-found: warn
-          retention-days: 14
+          retention-days: 1
 
   database:
     name: PostgreSQL ${{ matrix.pg-major }} Integration
@@ -237,7 +241,7 @@ jobs:
           name: database-pg${{ matrix.pg-major }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/artifacts/database/pg${{ matrix.pg-major }}
           if-no-files-found: warn
-          retention-days: 14
+          retention-days: 1
 
   stage-contracts:
     name: I14-I19 Contracts
@@ -267,7 +271,7 @@ jobs:
           name: stage-contracts-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/artifacts/stage-contracts
           if-no-files-found: warn
-          retention-days: 14
+          retention-days: 1
 
   production-relays:
     name: I18 Production Relays
@@ -302,6 +306,11 @@ jobs:
           restore-keys: |
             go-v4-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'go.work', 'go.work.sum', 'control-plane/go.mod', 'control-plane/go.sum') }}-
             go-v4-${{ runner.os }}-${{ runner.arch }}-
+      - name: Enable sccache GitHub Actions backend
+        uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
+        with:
+          version: "v0.17.0"
+          disable_annotations: true
       - name: Configure sccache backend
         run: scripts/configure-sccache.sh
       - name: Bootstrap pinned Go and Rust tools
@@ -317,7 +326,6 @@ jobs:
           source scripts/env.sh
           if command -v sccache >/dev/null 2>&1; then
             sccache --show-stats || true
-            sccache --stop-server || true
           fi
       - name: Upload production relay diagnostics
         if: always()
@@ -326,7 +334,7 @@ jobs:
           name: production-relays-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/artifacts/production-relays
           if-no-files-found: warn
-          retention-days: 14
+          retention-days: 1
 
   credential-rotation:
     name: PostgreSQL Credential Rotation
@@ -350,7 +358,7 @@ jobs:
           name: credential-rotation-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/artifacts/credential-rotation
           if-no-files-found: warn
-          retention-days: 14
+          retention-days: 1
 
   local-slice:
     name: Local Slice
@@ -384,7 +392,7 @@ jobs:
           name: local-slice-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/artifacts/local-slice
           if-no-files-found: warn
-          retention-days: 14
+          retention-days: 1
 
   web-validation:
     name: Web Static and Unit
@@ -442,7 +450,7 @@ jobs:
           name: web-validation-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/artifacts/web-validation
           if-no-files-found: warn
-          retention-days: 14
+          retention-days: 1
 
   browser-e2e:
     name: Browser E2E
@@ -467,7 +475,7 @@ jobs:
           name: browser-e2e-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/artifacts/browser-e2e
           if-no-files-found: warn
-          retention-days: 14
+          retention-days: 1
 
   p1-smoke:
     name: P1 Smoke
@@ -505,7 +513,7 @@ jobs:
           name: p1-smoke-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/artifacts/p1-smoke
           if-no-files-found: warn
-          retention-days: 14
+          retention-days: 1
 
   contracts-policy:
     name: Contracts and Policy
@@ -581,7 +589,7 @@ jobs:
           name: contracts-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/artifacts/contracts
           if-no-files-found: error
-          retention-days: 14
+          retention-days: 1
 
   rust-validation:
     name: Rust Validation
@@ -606,6 +614,11 @@ jobs:
             .cache/downloads
             .tools
           key: tooling-v4-rust-validation-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'scripts/checksums.txt', 'scripts/bootstrap.sh', 'scripts/env.sh') }}
+      - name: Enable sccache GitHub Actions backend
+        uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
+        with:
+          version: "v0.17.0"
+          disable_annotations: true
       - name: Configure sccache backend
         run: scripts/configure-sccache.sh
       - name: Bootstrap pinned Rust tools
@@ -635,7 +648,6 @@ jobs:
           source scripts/env.sh
           if command -v sccache >/dev/null 2>&1; then
             sccache --show-stats || true
-            sccache --stop-server || true
           fi
       - name: Upload Rust diagnostics
         if: always()
@@ -644,7 +656,7 @@ jobs:
           name: rust-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/artifacts/rust
           if-no-files-found: warn
-          retention-days: 14
+          retention-days: 1
 
   security-license:
     name: Security and Licenses
@@ -688,6 +700,11 @@ jobs:
           restore-keys: |
             go-v4-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'go.work', 'go.work.sum', 'control-plane/go.mod', 'control-plane/go.sum') }}-
             go-v4-${{ runner.os }}-${{ runner.arch }}-
+      - name: Enable sccache GitHub Actions backend
+        uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
+        with:
+          version: "v0.17.0"
+          disable_annotations: true
       - name: Configure sccache backend
         run: scripts/configure-sccache.sh
       - name: Bootstrap pinned security tools
@@ -710,7 +727,6 @@ jobs:
           source scripts/env.sh
           if command -v sccache >/dev/null 2>&1; then
             sccache --show-stats || true
-            sccache --stop-server || true
           fi
 
   native-ocserv:
@@ -736,6 +752,11 @@ jobs:
             .cache/downloads
             .tools
           key: tooling-v4-native-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'scripts/checksums.txt', 'scripts/bootstrap.sh', 'scripts/env.sh') }}
+      - name: Enable sccache GitHub Actions backend
+        uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
+        with:
+          version: "v0.17.0"
+          disable_annotations: true
       - name: Configure sccache backend
         run: scripts/configure-sccache.sh
       - name: Bootstrap pinned native tools
@@ -752,7 +773,7 @@ jobs:
           port=$((40000 + GITHUB_RUN_ID % 10000))
           native_target="${RUNNER_TEMP}/ocservia-native-target-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           native_status=0
-          sudo --preserve-env=RUNNER_TEMP,ARTIFACT_DIR,RUSTC_WRAPPER,SCCACHE_GHA_ENABLED,SCCACHE_BASEDIRS,ACTIONS_CACHE_URL,ACTIONS_RESULTS_URL,ACTIONS_RUNTIME_TOKEN env \
+          sudo --preserve-env=RUNNER_TEMP,ARTIFACT_DIR,RUSTC_WRAPPER,SCCACHE_GHA_ENABLED,SCCACHE_BASEDIRS,ACTIONS_CACHE_SERVICE_V2,ACTIONS_CACHE_URL,ACTIONS_RESULTS_URL,ACTIONS_RUNTIME_TOKEN env \
             CARGO_TARGET_DIR="${native_target}" \
             RUN_ID="I13-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-native" \
             OCSERVIA_I13_OCSERV_PORT="${port}" \
@@ -773,7 +794,6 @@ jobs:
           source scripts/env.sh
           if command -v sccache >/dev/null 2>&1; then
             sccache --show-stats || true
-            sccache --stop-server || true
           fi
       - name: Upload native diagnostics
         if: always()
@@ -782,7 +802,7 @@ jobs:
           name: native-ocserv-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/artifacts/native-ocserv
           if-no-files-found: warn
-          retention-days: 14
+          retention-days: 1
 
   backend-integration:
     name: Backend Integration
