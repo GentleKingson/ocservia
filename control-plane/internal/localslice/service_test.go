@@ -8,6 +8,8 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -19,6 +21,58 @@ import (
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
+
+func TestResultCommitBarrierSignalsBeforeRelease(t *testing.T) {
+	directory := t.TempDir()
+	commandID, err := uuid.NewV7()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(directory, "arm"), []byte(commandID.String()+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	payload, err := proto.Marshal(&agentv1.CommandResult{CommandId: commandID[:]})
+	if err != nil {
+		t.Fatal(err)
+	}
+	service := &Service{resultCommitBarrierDir: directory}
+	done := make(chan error, 1)
+	go func() {
+		done <- service.waitAtResultCommitBarrier(context.Background(), &transportv1.TransportEvent{
+			Type:    transportv1.TransportEventType_TRANSPORT_EVENT_TYPE_COMMAND_RESULT,
+			Payload: payload,
+		}, time.Unix(123, 0))
+	}()
+	deadline := time.Now().Add(time.Second)
+	for {
+		if received, readErr := os.ReadFile(filepath.Join(directory, "received")); readErr == nil {
+			if !strings.HasPrefix(string(received), commandID.String()+"\n1970-01-01T00:02:03Z") {
+				t.Fatalf("unexpected barrier signal %q", received)
+			}
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("result barrier did not signal receipt")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	select {
+	case err := <-done:
+		t.Fatalf("barrier returned before release: %v", err)
+	default:
+	}
+	if err := os.WriteFile(filepath.Join(directory, "release"), []byte(commandID.String()+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("result barrier did not release")
+	}
+}
 
 func TestCertificateCSRResultRejectsSubjectSubstitution(t *testing.T) {
 	key, err := rsa.GenerateKey(rand.Reader, 2048)

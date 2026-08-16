@@ -124,6 +124,7 @@ run)
         --user-password-seal-public-key-sha256 "$USER_SEAL_SHA256" \
         --p12-password-seal-key-id "$P12_SEAL_ID" \
         --p12-password-seal-public-key-sha256 "$P12_SEAL_SHA256" \
+        --synthetic-barrier-file "$STATE/synthetic-barrier" \
         --stats-file "$JOURNAL/tasks.json" &
     agent_pid=$!
     echo "$agent_pid" >"$STATE/agent.pid"

@@ -135,6 +135,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                 command_keys: &command_keys,
                 sealing_keys: &config.sealing_keys,
                 fence_epoch_floor: &mut fence_epoch_floor,
+                synthetic_barrier_file: config.synthetic_barrier_file.as_deref(),
             };
             match connect_once(&endpoint, EndpointAddr::new(controller), &mut session).await {
                 Ok(()) => attempt = 0,
@@ -342,6 +343,7 @@ struct SessionContext<'a> {
     command_keys: &'a ControllerCommandKeyring,
     sealing_keys: &'a [SealingKeyDescriptorV1],
     fence_epoch_floor: &'a mut u64,
+    synthetic_barrier_file: Option<&'a Path>,
 }
 
 struct ActiveSessionAuthority {
@@ -738,6 +740,15 @@ async fn handle_command_stream(
         now_unix_seconds,
         cancelled: false,
     };
+    if matches!(
+        envelope.payload,
+        Some(
+            command_envelope::Payload::SyntheticNoop(_)
+                | command_envelope::Payload::SyntheticEcho(_)
+        )
+    ) {
+        wait_for_synthetic_barrier(session.synthetic_barrier_file).await;
+    }
     let external = matches!(
         envelope.payload,
         Some(
@@ -795,6 +806,15 @@ async fn handle_command_stream(
     send.write_all(&encoded).await?;
     send.finish()?;
     Ok(())
+}
+
+async fn wait_for_synthetic_barrier(path: Option<&Path>) {
+    let Some(path) = path else {
+        return;
+    };
+    while tokio::fs::try_exists(path).await.unwrap_or(true) {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
 }
 
 async fn handle_artifact_stream(
@@ -1669,6 +1689,7 @@ struct Config {
     sealing_keys: Vec<SealingKeyDescriptorV1>,
     stats_file: Option<PathBuf>,
     relay_ca_file: Option<PathBuf>,
+    synthetic_barrier_file: Option<PathBuf>,
 }
 
 /// Loads the PEM relay certificate authority as additional relay TLS roots.
@@ -1737,6 +1758,7 @@ fn parse_args() -> Result<Config, io::Error> {
         sealing_keys: Vec::new(),
         stats_file: None,
         relay_ca_file: None,
+        synthetic_barrier_file: None,
     };
     let mut relay_mode = String::from("default");
     let mut relay_urls = Vec::new();
@@ -1826,6 +1848,12 @@ fn parse_args() -> Result<Config, io::Error> {
                     return Err(invalid("--relay-ca-file must be an absolute path"));
                 }
                 config.relay_ca_file = Some(path);
+            }
+            "--synthetic-barrier-file" => {
+                config.synthetic_barrier_file = Some(PathBuf::from(required(
+                    &mut args,
+                    "--synthetic-barrier-file",
+                )?));
             }
             _ => return Err(invalid("unknown agent argument")),
         }
@@ -1920,9 +1948,13 @@ fn validate_absolute_paths(config: &Config, relay_token_file: Option<&Path>) -> 
             .enrollment_token_file
             .as_ref()
             .is_some_and(|path| !path.is_absolute())
+        || config
+            .synthetic_barrier_file
+            .as_ref()
+            .is_some_and(|path| !path.is_absolute())
     {
         return Err(invalid(
-            "identity, Controller command key, and token paths must be absolute",
+            "identity, Controller command key, token, and synthetic barrier paths must be absolute",
         ));
     }
     Ok(())
@@ -2151,12 +2183,37 @@ mod tests {
             sealing_keys: test_sealing_keys(),
             stats_file: None,
             relay_ca_file: None,
+            synthetic_barrier_file: None,
         }
     }
 
     fn test_command_keyring() -> ControllerCommandKeyring {
         ControllerCommandKeyring::new([SigningKey::from_bytes(&[7; 32]).verifying_key()])
             .expect("test command keyring")
+    }
+
+    #[tokio::test]
+    async fn synthetic_barrier_blocks_until_removed() {
+        let path = PathBuf::from(format!(
+            "/tmp/ocservia-agent-barrier-{}",
+            Uuid::now_v7().simple()
+        ));
+        tokio::fs::write(&path, b"armed")
+            .await
+            .expect("arm synthetic barrier");
+        let waiting_path = path.clone();
+        let waiter = tokio::spawn(async move {
+            wait_for_synthetic_barrier(Some(&waiting_path)).await;
+        });
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        assert!(!waiter.is_finished());
+        tokio::fs::remove_file(&path)
+            .await
+            .expect("release synthetic barrier");
+        tokio::time::timeout(Duration::from_secs(1), waiter)
+            .await
+            .expect("synthetic barrier release timed out")
+            .expect("synthetic barrier task");
     }
 
     fn signed_fence(
@@ -2567,6 +2624,7 @@ mod tests {
                     command_keys: &command_keys,
                     sealing_keys: &sealing_keys,
                     fence_epoch_floor: &mut fence_epoch_floor,
+                    synthetic_barrier_file: None,
                 };
                 let result = connect_once(&endpoint, controller, &mut session).await;
                 endpoint.close().await;

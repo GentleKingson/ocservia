@@ -223,6 +223,123 @@ grep -q 'require_file "${peer}/evidence/instances.tsv"' "${FD_B}" || {
   echo "the evidence build must require the peer container inventory" >&2
   exit 1
 }
+grep -q -- '--run-dir "${G6RD_WORK}"' "${FD_B}" || {
+  echo "the shell producer must pass the harness run root to the evidence builder" >&2
+  exit 1
+}
+if grep -q -- '--state-dir' "${FD_B}"; then
+  echo "the evidence builder does not accept --state-dir" >&2
+  exit 1
+fi
+
+# Deterministic producer wiring and causality guards found during the first
+# independent harness review.
+basebackup_line="$(grep -n 'pg_basebackup -h 127.0.0.1' "${FD_A}" | head -1 | cut -d: -f1)"
+marker_a_line="$(grep -n "pitr-marker-a',txid_current" "${FD_A}" | head -1 | cut -d: -f1)"
+if [[ -z "${basebackup_line}" || -z "${marker_a_line}" || "${basebackup_line}" -ge "${marker_a_line}" ]]; then
+  echo "the PITR base backup must predate marker A and the restore target" >&2
+  exit 1
+fi
+grep -q 'RETURNING txid.*written_at' "${FD_A}" || {
+  echo "PITR markers must return their own transaction id and timestamp" >&2
+  exit 1
+}
+grep -qF "sh -c 'pg_rewind -D /data --source-server=\"host=host.docker.internal port=15432 user=ocservia_replication dbname=ocservia password=\$PGPASSWORD\"" "${FD_A}" || {
+  echo "the rejoin password must remain single-quoted for container expansion" >&2
+  exit 1
+}
+promoted_wait="$(order_of 'wait-download "g6-rd-new-primary')"
+post_promotion_probe="$(order_of 'dual-primary-probes "${RUNNER_TEMP}/g6-rd-new-primary')"
+if [[ -z "${promoted_wait}" || -z "${post_promotion_probe}" || "${promoted_wait}" -ge "${post_promotion_probe}" ]]; then
+  echo "former-primary probes must run after the replacement promotion" >&2
+  exit 1
+fi
+grep -q 'post-rejoin-probes.jsonl' "${FD_A}" || {
+  echo "the rejoined former primary needs explicit read-only probes" >&2
+  exit 1
+}
+grep -q 'OCSERV_TEST_RESULT_COMMIT_BARRIER_DIR' "${COMPOSE_FILE}" || {
+  echo "the worker must expose the result-before-commit ingress barrier" >&2
+  exit 1
+}
+grep -q 'agent_command_results.*== 0' "${FD_B}" || {
+  echo "the result-before-commit scenario must prove the transaction stayed uncommitted" >&2
+  exit 1
+}
+grep -q 'queued_outbox_count' "${FD_A}" || {
+  echo "failure injection must freeze the due outbox population" >&2
+  exit 1
+}
+grep -q 'psql_primary -Atc "SELECT pg_advisory_lock' "${FD_B}" || {
+  echo "the outbox dispatch barrier must lock the writable primary" >&2
+  exit 1
+}
+grep -q 'synthetic-barrier-file' "${SUPERVISOR}" || {
+  echo "real Agent execution must hold the active failure-boundary population" >&2
+  exit 1
+}
+if grep -qE 'pg_stat_activity.*\|\| echo 0|outbox_events.*\|\| echo 0|g6rd_sampler_tick .*\|\| true' "${LIB}"; then
+  echo "resource sampling must fail closed instead of substituting zero" >&2
+  exit 1
+fi
+grep -q 'peer}/evidence/effects/' "${FD_B}" || {
+  echo "fd-b must merge fd-a durable effects into the full command population" >&2
+  exit 1
+}
+grep -q 'successful synthetic command.*has no durable effect' "${BUILDER}" || {
+  echo "the builder must reject successful commands without one durable effect" >&2
+  exit 1
+}
+
+# Execute the real shell evidence-build phase with a recording Node shim. This
+# pins the producer-to-builder CLI boundary rather than only unit-testing the
+# builder with a hand-written invocation.
+producer_test="$(mktemp -d)"
+trap 'rm -rf "${producer_test}"' EXIT
+run_id=producer-contract-fd-b
+run_dir="${producer_test}/g6-readiness-${run_id}"
+peer_dir="${producer_test}/peer"
+mkdir -p "${run_dir}/state/evidence" "${peer_dir}/evidence"
+printf '{}\n' >"${run_dir}/state/evidence/commands.jsonl"
+printf 'peer\n' >"${peer_dir}/evidence/instances.tsv"
+node_shim="${producer_test}/node-shim"
+cat >"${node_shim}" <<'SHIM'
+#!/usr/bin/env bash
+set -Eeuo pipefail
+script="$1"
+shift
+if [[ "${script}" == */build-g6-evidence.mjs ]]; then
+  printf '%s\n' "$@" >"${G6RD_PRODUCER_ARGS}"
+  while (($#)); do
+    if [[ "$1" == --out-dir ]]; then
+      out="$2"
+      mkdir -p "${out}"
+      : >"${out}/evidence.json"
+      : >"${out}/topology.json"
+      : >"${out}/release-manifest.json"
+      break
+    fi
+    shift
+  done
+  exit 0
+fi
+printf '{"schema_version":"ocservia.g6-verdict.v2"}\n'
+SHIM
+chmod +x "${node_shim}"
+RUNNER_TEMP="${producer_test}" RUN_ID="${run_id}" FD_ID=fd-b FD_ALIAS=fd-beta \
+  G6_AUTHORITY=production_readiness G6RD_CANDIDATE_SHA="$(printf 'a%.0s' {1..40})" \
+  G6RD_NODE_BIN="${node_shim}" G6RD_PRODUCER_ARGS="${producer_test}/builder-args" \
+  "${FD_B}" evidence-build "${peer_dir}"
+previous=""
+producer_run_dir=""
+while IFS= read -r argument; do
+  [[ "${previous}" == --run-dir ]] && producer_run_dir="${argument}"
+  previous="${argument}"
+done <"${producer_test}/builder-args"
+if [[ "${producer_run_dir}" != "${run_dir}" ]]; then
+  echo "the executed shell producer did not pass --run-dir <work-root>" >&2
+  exit 1
+fi
 grep -q 'scenario-relay "${RUNNER_TEMP}/g6-rd-fd-a-evidence/relay-a-failed-at"' "${WORKFLOW}" || {
   echo "the relay scenario must consume the peer relay-a failure stamp" >&2
   exit 1

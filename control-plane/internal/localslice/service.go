@@ -9,6 +9,8 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"slices"
 	"sort"
 	"time"
@@ -71,9 +73,10 @@ type Job struct {
 }
 
 type Service struct {
-	pool   *pgxpool.Pool
-	now    func() time.Time
-	signer *commandauth.Signer
+	pool                   *pgxpool.Pool
+	now                    func() time.Time
+	signer                 *commandauth.Signer
+	resultCommitBarrierDir string
 }
 
 const (
@@ -104,6 +107,21 @@ func NewWithSigner(pool *pgxpool.Pool, signer *commandauth.Signer) *Service {
 	service := New(pool)
 	service.signer = signer
 	return service
+}
+
+// EnableResultCommitBarrier configures the development-harness barrier used
+// to stop a validated command result inside its still-open database
+// transaction. Production configuration rejects this hook before startup.
+func (s *Service) EnableResultCommitBarrier(directory string) error {
+	info, err := os.Stat(directory)
+	if err != nil {
+		return err
+	}
+	if !info.IsDir() {
+		return errors.New("result commit barrier path is not a directory")
+	}
+	s.resultCommitBarrierDir = directory
+	return nil
 }
 
 func (s *Service) Create(ctx context.Context, scenario Scenario, requestID, traceparent string) (Operation, error) {
@@ -447,6 +465,47 @@ func (s *Service) Ingest(ctx context.Context, event *transportv1.TransportEvent)
 	return nil
 }
 
+func (s *Service) waitAtResultCommitBarrier(ctx context.Context, event *transportv1.TransportEvent, observedAt time.Time) error {
+	if s.resultCommitBarrierDir == "" || event.GetType() != transportv1.TransportEventType_TRANSPORT_EVENT_TYPE_COMMAND_RESULT {
+		return nil
+	}
+	armed, err := os.ReadFile(filepath.Join(s.resultCommitBarrierDir, "arm"))
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("read result commit barrier: %w", err)
+	}
+	var result agentv1.CommandResult
+	if err := proto.Unmarshal(event.GetPayload(), &result); err != nil {
+		return nil
+	}
+	commandID, err := uuid.FromBytes(result.GetCommandId())
+	if err != nil || string(bytes.TrimSpace(armed)) != commandID.String() {
+		return nil
+	}
+	received := []byte(commandID.String() + "\n" + observedAt.UTC().Format(time.RFC3339) + "\n")
+	if err := os.WriteFile(filepath.Join(s.resultCommitBarrierDir, "received"), received, 0o600); err != nil {
+		return fmt.Errorf("signal result commit barrier: %w", err)
+	}
+	ticker := time.NewTicker(25 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-ticker.C:
+			release, readErr := os.ReadFile(filepath.Join(s.resultCommitBarrierDir, "release"))
+			if readErr == nil && string(bytes.TrimSpace(release)) == commandID.String() {
+				return nil
+			}
+			if readErr != nil && !errors.Is(readErr, os.ErrNotExist) {
+				return fmt.Errorf("read result commit barrier release: %w", readErr)
+			}
+		}
+	}
+}
+
 func (s *Service) ingestTransportEventTx(ctx context.Context, tx pgx.Tx, eventID, nodeID uuid.UUID, event *transportv1.TransportEvent, observedAt time.Time) (uuid.UUID, error) {
 	var workspaceID uuid.UUID
 	var nodeStatus, endpointState string
@@ -507,6 +566,9 @@ func (s *Service) ingestTransportEventTx(ctx context.Context, tx pgx.Tx, eventID
 	structuredCommandResult := eventType == "command_result"
 	if structuredCommandResult {
 		if err := ingestAgentCommandResult(ctx, tx, eventID, nodeID, event.GetPayload(), occurredTime, observedAt, s.signer); err != nil {
+			return workspaceID, err
+		}
+		if err := s.waitAtResultCommitBarrier(ctx, event, observedAt); err != nil {
 			return workspaceID, err
 		}
 	}

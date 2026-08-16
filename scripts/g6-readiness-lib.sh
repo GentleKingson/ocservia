@@ -56,6 +56,7 @@ g6rd_init_environment() {
   G6RD_RESTORE="${G6RD_WORK}/restore"
   G6RD_LOGS="${G6RD_WORK}/logs"
   G6RD_AGENTS="${G6RD_WORK}/agents"
+  G6RD_RESULT_BARRIER="${G6RD_WORK}/result-barrier"
   G6RD_TUNNEL_BIN="${G6RD_ROOT}/rust/target/release/ocservia-g6-tunnel"
   COMPOSE_PROJECT="ocservia-g6-rd-${RUN_ID}"
   COMPOSE_FILE="${G6RD_ROOT}/deploy/g6-readiness/compose.yaml"
@@ -64,8 +65,9 @@ g6rd_init_environment() {
   umask 077
   mkdir -p "${G6RD_STATE}" "${G6RD_SECRETS}" "${G6RD_OUTBOX}" \
     "${G6RD_ARCHIVE}" "${G6RD_BASEBACKUP}" "${G6RD_RESTORE}" \
-    "${G6RD_LOGS}" "${G6RD_AGENTS}" "${ARTIFACT_DIR}"
+    "${G6RD_LOGS}" "${G6RD_AGENTS}" "${G6RD_RESULT_BARRIER}" "${ARTIFACT_DIR}"
   chmod 0700 "${G6RD_WORK}" "${G6RD_SECRETS}"
+  chmod 0777 "${G6RD_RESULT_BARRIER}"
 }
 
 g6rd_now() {
@@ -220,6 +222,7 @@ g6rd_export_common_env() {
   export G6_DEV_AUTH_TOKEN="${G6_DEV_AUTH_TOKEN:-$(g6rd_secret dev-auth-token)}"
   export G6_ARCHIVE_DIR="${G6_ARCHIVE_DIR:-${G6RD_ARCHIVE}}"
   export G6_BASEBACKUP_DIR="${G6_BASEBACKUP_DIR:-${G6RD_BASEBACKUP}}"
+  export G6_RESULT_BARRIER_DIR="${G6_RESULT_BARRIER_DIR:-${G6RD_RESULT_BARRIER}}"
   export G6_DB_HOST="${G6_DB_HOST:-postgres}"
   export G6_DB_PORT="${G6_DB_PORT:-5432}"
   export G6_SIGNING_DIR="${G6_SIGNING_DIR:-$(g6rd_materialize_signing_dir)}"
@@ -249,6 +252,7 @@ g6rd_placeholder_env() {
   export G6_DEV_AUTH_TOKEN="${G6_DEV_AUTH_TOKEN:-harness-placeholder}"
   export G6_ARCHIVE_DIR="${G6_ARCHIVE_DIR:-${G6RD_ARCHIVE}}"
   export G6_BASEBACKUP_DIR="${G6_BASEBACKUP_DIR:-${G6RD_BASEBACKUP}}"
+  export G6_RESULT_BARRIER_DIR="${G6_RESULT_BARRIER_DIR:-${G6RD_RESULT_BARRIER}}"
   export G6_DB_HOST="${G6_DB_HOST:-postgres}"
   export G6_DB_PORT="${G6_DB_PORT:-5432}"
   export G6_SIGNING_DIR="${G6_SIGNING_DIR:-${G6RD_WORK}/signing}"
@@ -394,6 +398,7 @@ g6rd_timeline_event() {
   else
     stamp="$(g6rd_now)"
   fi
+  stamp="$(sed -E 's/\.[0-9]+Z$/Z/' <<<"${stamp}")"
   stamp="$(jq -nr --arg l "${last}" --arg s "${stamp}" \
     'if ($s | fromdateiso8601) <= ($l | fromdateiso8601)
      then (($l | fromdateiso8601) + 1 | todateiso8601)
@@ -577,6 +582,7 @@ g6rd_prepare_agent_material() {
   local dir
   dir="$(g6rd_agent_dir "${index}")"
   mkdir -p "${dir}/identity" "${dir}/journal" "${dir}/secrets" "${dir}/state"
+  : >"${dir}/state/synthetic-barrier"
   chmod 0700 "${dir}/identity" "${dir}/secrets"
   cp -f "${G6RD_SECRETS}/command-verification-agent.pem" "${dir}/secrets/"
   cp -f "${G6RD_SECRETS}/command-verification-privd.pem" "${dir}/secrets/"
@@ -653,6 +659,13 @@ g6rd_chown_agent_dirs() {
   done
 }
 
+g6rd_release_synthetic_barriers() {
+  local index
+  for index in $(seq 1 "$(g6rd_agent_count)"); do
+    rm -f "$(g6rd_agent_dir "${index}")/state/synthetic-barrier"
+  done
+}
+
 # ---------------------------------------------------------------------------
 # Resource sampler. One process on fd-b samples the era-2 control plane
 # (api, worker, scheduler), transportd #2, one local agent, and the promoted
@@ -668,9 +681,11 @@ g6rd_sampler_row() {
   fd="$(g6rd_compose exec -T "${container}" sh -c \
     "pid=\$(${pid_expr}); ls /proc/\$pid/fd 2>/dev/null | wc -l" 2>/dev/null | tr -d '[:space:]')"
   tasks="$(g6rd_compose exec -T "${container}" sh -c "${tasks_expr}" 2>/dev/null | tr -d '[:space:]')"
-  [[ "${rss}" =~ ^[0-9]+$ ]] || rss=0
-  [[ "${fd}" =~ ^[0-9]+$ ]] || fd=0
-  [[ "${tasks}" =~ ^[0-9]+$ ]] || tasks=0
+  [[ "${rss}" =~ ^[0-9]+$ ]] || return 1
+  [[ "${fd}" =~ ^[0-9]+$ ]] || return 1
+  [[ "${tasks}" =~ ^[0-9]+$ ]] || return 1
+  [[ "${queue}" =~ ^[0-9]*$ ]] || return 1
+  [[ "${db}" =~ ^[0-9]*$ ]] || return 1
   rss="$((rss * 1024))"
   printf '%s,%s,%s,%s,%s,%s,%s,%s,%s,%s\n' \
     "${stamp}" "${component}" "${instance}" "${rss}" "${fd}" "${tasks}" "${queue}" "${db}" \
@@ -683,9 +698,10 @@ g6rd_sampler_tick() {
   # one clock reading per tick: per-row stamps would let sequential docker
   # execs stretch a tick past the five-second sample-gap bound
   stamp="$(g6rd_now)"
-  db="$(g6rd_psql -Atc 'SELECT count(*) FROM pg_stat_activity' 2>/dev/null || echo 0)"
+  db="$(g6rd_psql -Atc 'SELECT count(*) FROM pg_stat_activity' 2>/dev/null)" || return 1
   queue="$(g6rd_psql -Atc \
-    'SELECT count(*) FROM outbox_events WHERE published_at IS NULL' 2>/dev/null || echo 0)"
+    'SELECT count(*) FROM outbox_events WHERE published_at IS NULL' 2>/dev/null)" || return 1
+  [[ "${db}" =~ ^[0-9]+$ && "${queue}" =~ ^[0-9]+$ ]] || return 1
   {
     g6rd_sampler_row controller "api-${FD_ID}" api 'echo 1' \
       'curl -s 127.0.0.1:6060/debug/pprof/goroutine?debug=1 | sed -n "1s/.*total \([0-9]*\).*/\1/p"' \
@@ -716,7 +732,10 @@ g6rd_sampler_tick() {
 # loop body itself is ordinary sourced shell with ordinary quoting.
 g6rd_sampler_loop() {
   while [[ ! -e "${G6RD_STATE}/sampler-stop" ]]; do
-    g6rd_sampler_tick "${G6RD_SAMPLER_OUT}" || true
+    if ! g6rd_sampler_tick "${G6RD_SAMPLER_OUT}"; then
+      g6rd_now >"${G6RD_STATE}/sampler-failed-at"
+      return 1
+    fi
     sleep 3
   done
 }
@@ -786,7 +805,7 @@ g6rd_start_sampler() {
   local out_file="${1:?output csv is required}"
   local header='timestamp,component,instance,rss_bytes,fd_count,tasks,queue_depth,db_connections,environment_id,candidate_sha'
   [[ -s "${out_file}" ]] || printf '%s\n' "${header}" >"${out_file}"
-  rm -f "${G6RD_STATE}/sampler-stop"
+  rm -f "${G6RD_STATE}/sampler-stop" "${G6RD_STATE}/sampler-failed-at"
   G6RD_SAMPLER_OUT="${out_file}" g6rd_spawn_harness_loop \
     "${G6RD_LOGS}/sampler.log" g6rd_sampler_loop \
     >"${G6RD_STATE}/sampler.pid"
@@ -805,6 +824,10 @@ g6rd_stop_sampler() {
   done
   kill -9 "${pid}" 2>/dev/null || true
   rm -f "${G6RD_STATE}/sampler.pid"
+  [[ ! -e "${G6RD_STATE}/sampler-failed-at" ]] || {
+    echo "resource sampler failed closed at $(<"${G6RD_STATE}/sampler-failed-at")" >&2
+    return 1
+  }
 }
 
 # ---------------------------------------------------------------------------
@@ -866,8 +889,16 @@ g6rd_diagnostics() {
 }
 
 g6rd_cleanup() {
-  local status=0 volume image
+  local status=0 volume image pid
   g6rd_stop_sampler || status=1
+  if [[ -s "${G6RD_STATE}/load-dispatch-barrier.pid" ]]; then
+    pid="$(<"${G6RD_STATE}/load-dispatch-barrier.pid")"
+    if kill -0 "${pid}" 2>/dev/null; then
+      kill "${pid}" 2>/dev/null || status=1
+      wait "${pid}" 2>/dev/null || true
+    fi
+    rm -f -- "${G6RD_STATE}/load-dispatch-barrier.pid"
+  fi
   g6rd_tunnel_stop || {
     echo "cleanup: tunnel stop failed" >&2
     status=1

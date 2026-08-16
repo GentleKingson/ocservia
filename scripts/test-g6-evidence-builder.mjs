@@ -11,6 +11,7 @@ import { spawnSync } from "node:child_process";
 import {
   mkdirSync,
   mkdtempSync,
+  readdirSync,
   readFileSync,
   rmSync,
   writeFileSync,
@@ -36,8 +37,7 @@ function fakeUuid(seed, version = 7) {
   return `${hex.slice(0, 8)}-0000-${version}00-8000-${hex.slice(16, 28)}`;
 }
 
-const digestOf = (byte) =>
-  `sha256:${byte.repeat(64)}`;
+const digestOf = (byte) => `sha256:${byte.repeat(64)}`;
 
 function jsonl(records) {
   return records.length === 0
@@ -164,9 +164,18 @@ for (let tick = 0; tick <= 100; tick += 1) {
     ["postgres", "postgres-fd-b", 209715200, 80, 40, 0, 12],
   ]) {
     samplerLines.push(
-      [stamp, component, instance, rss, fdCount, tasks, queue, db, environmentId, candidateSha].join(
-        ",",
-      ),
+      [
+        stamp,
+        component,
+        instance,
+        rss,
+        fdCount,
+        tasks,
+        queue,
+        db,
+        environmentId,
+        candidateSha,
+      ].join(","),
     );
   }
   readLog.push(
@@ -181,7 +190,10 @@ for (let tick = 0; tick <= 100; tick += 1) {
   enqueueCommand(tick % nodes.length, 5 + tick * 3);
   enqueueCommand((tick + 1) % nodes.length, 5 + tick * 3);
 }
-write(join(runDir, "state", "resource-samples.csv"), `${samplerLines.join("\n")}\n`);
+write(
+  join(runDir, "state", "resource-samples.csv"),
+  `${samplerLines.join("\n")}\n`,
+);
 write(join(runDir, "state", "read-log.jsonl"), jsonl(readLog));
 write(join(runDir, "state", "enqueue-log.jsonl"), jsonl(enqueueLog));
 write(join(runDir, "state", "evidence", "commands.jsonl"), jsonl(commands));
@@ -189,7 +201,10 @@ write(join(runDir, "state", "evidence", "attempts.jsonl"), jsonl(attempts));
 write(join(runDir, "state", "evidence", "outbox.jsonl"), jsonl(outboxRows));
 write(join(runDir, "state", "evidence", "audit.jsonl"), jsonl(auditRows));
 for (const [name, lines] of effectsByAgent) {
-  write(join(runDir, "state", "evidence", "effects", name), `${lines.join("\n")}\n`);
+  write(
+    join(runDir, "state", "evidence", "effects", name),
+    `${lines.join("\n")}\n`,
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -239,8 +254,14 @@ write(
 );
 write(join(runDir, "state", "evidence", "snapshot-taken-at"), `${at(320)}\n`);
 write(join(runDir, "state", "promoted-at"), `${at(120)}\n`);
-write(join(runDir, "state", "stale-transport-probe.json"), JSON.stringify({ status: "rejected" }));
-write(join(runDir, "state", "stale-agent-probe.json"), JSON.stringify({ status: "rejected" }));
+write(
+  join(runDir, "state", "stale-transport-probe.json"),
+  JSON.stringify({ status: "rejected" }),
+);
+write(
+  join(runDir, "state", "stale-agent-probe.json"),
+  JSON.stringify({ status: "rejected" }),
+);
 write(
   join(runDir, "state", "owner-a-terms.tsv"),
   `${fakeUuid(1).replaceAll("-", "")}:worker-a:1:${fakeUuid(9).replaceAll("-", "")}:1\n`,
@@ -271,6 +292,20 @@ write(
   ),
 );
 write(
+  join(peerDir, "isolation", "active-load.json"),
+  `${JSON.stringify({
+    captured_at: at(49),
+    queued_outbox_count: 55,
+    commands: commands.slice(0, 55).map((command) => ({
+      command_id: command.id,
+      command_state: "dispatched",
+      attempt_state: "sent",
+      attempt_finished: true,
+      last_telemetry_at: at(40),
+    })),
+  })}\n`,
+);
+write(
   join(peerDir, "pitr", "pitr-report.json"),
   `${JSON.stringify(
     {
@@ -297,11 +332,20 @@ write(
 );
 write(join(peerDir, "relay-a-failed-at"), `${at(180)}\n`);
 write(join(peerDir, "rejoin-at"), `${at(205)}\n`);
-write(join(peerDir, "evidence", "failure-domain.txt"), "failure_domain=fd-a\nalias=fd-alpha\n");
+write(
+  join(peerDir, "post-rejoin-probes.jsonl"),
+  jsonl([206, 207, 208].map((second) => ({ at: at(second), accepted: false }))),
+);
+write(
+  join(peerDir, "evidence", "failure-domain.txt"),
+  "failure_domain=fd-a\nalias=fd-alpha\n",
+);
 
 function instanceLine(service, startedSeconds, finishedSeconds, digestByte) {
   const finished =
-    finishedSeconds === undefined ? "0001-01-01T00:00:00Z" : at(finishedSeconds);
+    finishedSeconds === undefined
+      ? "0001-01-01T00:00:00Z"
+      : at(finishedSeconds);
   return `/${service}\t${digestOf(digestByte)}\t${at(startedSeconds)}\t${finished}\t${service}`;
 }
 const peerInstances = [
@@ -314,10 +358,18 @@ const peerInstances = [
 ];
 for (let index = 1; index <= 28; index += 1) {
   peerInstances.push(
-    instanceLine(`agent-fd-a-${String(index).padStart(2, "0")}`, 30, undefined, "e"),
+    instanceLine(
+      `agent-fd-a-${String(index).padStart(2, "0")}`,
+      30,
+      undefined,
+      "e",
+    ),
   );
 }
-write(join(peerDir, "evidence", "instances.tsv"), `${peerInstances.join("\n")}\n`);
+write(
+  join(peerDir, "evidence", "instances.tsv"),
+  `${peerInstances.join("\n")}\n`,
+);
 const localInstances = [
   instanceLine("postgres", 60, undefined, "d"),
   instanceLine("api", 121, undefined, "a"),
@@ -328,7 +380,12 @@ const localInstances = [
 ];
 for (let index = 1; index <= 27; index += 1) {
   localInstances.push(
-    instanceLine(`agent-fd-b-${String(index).padStart(2, "0")}`, 125, undefined, "e"),
+    instanceLine(
+      `agent-fd-b-${String(index).padStart(2, "0")}`,
+      125,
+      undefined,
+      "e",
+    ),
   );
 }
 write(
@@ -433,15 +490,24 @@ function runBuilder(outDir, authority) {
     process.execPath,
     [
       join(root, "scripts", "build-g6-evidence.mjs"),
-      "--run-dir", runDir,
-      "--peer-dir", peerDir,
-      "--out-dir", outDir,
-      "--slo", join(root, "docs", "acceptance", "g6-slo.yaml"),
-      "--environment-id", environmentId,
-      "--candidate-sha", candidateSha,
-      "--authority", authority,
-      "--failure-domain-class", "multi_host",
-      "--run-id", "test-run",
+      "--run-dir",
+      runDir,
+      "--peer-dir",
+      peerDir,
+      "--out-dir",
+      outDir,
+      "--slo",
+      join(root, "docs", "acceptance", "g6-slo.yaml"),
+      "--environment-id",
+      environmentId,
+      "--candidate-sha",
+      candidateSha,
+      "--authority",
+      authority,
+      "--failure-domain-class",
+      "multi_host",
+      "--run-id",
+      "test-run",
     ],
     { encoding: "utf8" },
   );
@@ -452,9 +518,46 @@ function runBuilder(outDir, authority) {
   }
 }
 
+function expectBuilderFailure(outDir, expectedMessage) {
+  const result = spawnSync(
+    process.execPath,
+    [
+      join(root, "scripts", "build-g6-evidence.mjs"),
+      "--run-dir",
+      runDir,
+      "--peer-dir",
+      peerDir,
+      "--out-dir",
+      outDir,
+      "--slo",
+      join(root, "docs", "acceptance", "g6-slo.yaml"),
+      "--environment-id",
+      environmentId,
+      "--candidate-sha",
+      candidateSha,
+      "--authority",
+      "production_readiness",
+      "--failure-domain-class",
+      "multi_host",
+      "--run-id",
+      "test-run",
+    ],
+    { encoding: "utf8" },
+  );
+  const output = `${result.stderr}${result.stdout}`;
+  if (result.status === 0 || !output.includes(expectedMessage)) {
+    throw new Error(
+      `builder did not reject the incomplete effect population: ${output}`,
+    );
+  }
+}
+
 function verifyBundle(outDir, authority) {
   return verifyG6({
-    sloText: readFileSync(join(root, "docs", "acceptance", "g6-slo.yaml"), "utf8"),
+    sloText: readFileSync(
+      join(root, "docs", "acceptance", "g6-slo.yaml"),
+      "utf8",
+    ),
     evidenceText: readFileSync(join(outDir, "evidence.json"), "utf8"),
     topologyText: readFileSync(join(outDir, "topology.json"), "utf8"),
     manifestText: readFileSync(join(outDir, "release-manifest.json"), "utf8"),
@@ -514,6 +617,18 @@ try {
       `engineering bundle metrics failed beyond the fence: ${failedRehearsal.map(([name]) => name).join(", ")}`,
     );
   }
+
+  const effectDir = join(runDir, "state", "evidence", "effects");
+  const effectPath = join(effectDir, readdirSync(effectDir).sort()[0]);
+  const originalEffects = readFileSync(effectPath, "utf8");
+  const [, ...remainingEffects] = originalEffects.trimEnd().split("\n");
+  write(effectPath, `${remainingEffects.join("\n")}\n`);
+  expectBuilderFailure(
+    join(work, "missing-effect-bundle"),
+    "has no durable effect",
+  );
+  write(effectPath, originalEffects);
+
   console.log(
     "G6 readiness evidence builder produced a verifier-passing bundle from synthetic producer state",
   );

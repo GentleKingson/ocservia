@@ -172,24 +172,33 @@ phase_primary_up() {
 # the primary is still authoritative.
 phase_pitr_prepare() {
   mkdir -p "${G6RD_OUTBOX}/pitr-prep"
-  g6rd_psql -Atc "INSERT INTO ${MARKER_TABLE}(id,txid,phase) VALUES ('pitr-marker-a',txid_current()::text,'pitr_a')" >/dev/null
-  g6rd_psql -Atc "SELECT txid_current()::text || ':' || to_char(now() AT TIME ZONE 'UTC','YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"')" \
-    >"${G6RD_STATE}/pitr-marker-a"
-  sed -n 's/^[^:]*://p' "${G6RD_STATE}/pitr-marker-a" >"${G6RD_OUTBOX}/pitr-prep/pitr-marker-a-at"
-  g6rd_psql -Atc "SELECT pg_create_restore_point('g6_pitr_target')" >/dev/null
-  g6rd_now >"${G6RD_STATE}/pitr-restore-point-at"
-  cp -f "${G6RD_STATE}/pitr-restore-point-at" "${G6RD_OUTBOX}/pitr-prep/restore-point-at"
-  g6rd_psql -Atc "INSERT INTO ${MARKER_TABLE}(id,txid,phase) VALUES ('pitr-marker-b',txid_current()::text,'pitr_b')" >/dev/null
-  g6rd_psql -Atc "SELECT txid_current()::text || ':' || to_char(now() AT TIME ZONE 'UTC','YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"')" \
-    >"${G6RD_STATE}/pitr-marker-b"
-  sed -n 's/^[^:]*://p' "${G6RD_STATE}/pitr-marker-b" >"${G6RD_OUTBOX}/pitr-prep/pitr-marker-b-at"
-  # base backup through the pinned image, as the postgres user
+  # A physical restore can only replay forward from its base backup. Take and
+  # verify the backup before the target markers, then bind each marker's txid
+  # and timestamp to the INSERT transaction that acknowledged it.
   docker run --rm --network host --log-driver none \
     -e PGPASSWORD="$(g6rd_secret replication-password)" \
     -v "${G6RD_BASEBACKUP}:/backup" postgres:17.10-bookworm \
     sh -c 'pg_basebackup -h 127.0.0.1 -p 5432 -U ocservia_replication -D /backup -X stream --checkpoint=fast' \
     >"${G6RD_LOGS}/basebackup.log" 2>&1
+  docker run --rm -v "${G6RD_BASEBACKUP}:/backup:ro" postgres:17.10-bookworm \
+    pg_verifybackup /backup >>"${G6RD_LOGS}/basebackup.log" 2>&1
   g6rd_reclaim_directory "${G6RD_BASEBACKUP}" || true
+  g6rd_psql -Atc "INSERT INTO ${MARKER_TABLE}(id,txid,phase) \
+    VALUES ('pitr-marker-a',txid_current()::text,'pitr_a') \
+    RETURNING txid || ':' || to_char(written_at AT TIME ZONE 'UTC','YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"')" \
+    >"${G6RD_STATE}/pitr-marker-a"
+  sed -n 's/^[^:]*://p' "${G6RD_STATE}/pitr-marker-a" >"${G6RD_OUTBOX}/pitr-prep/pitr-marker-a-at"
+  sleep 1
+  g6rd_psql -Atc "SELECT pg_create_restore_point('g6_pitr_target')" >/dev/null
+  g6rd_psql -Atc "SELECT to_char(clock_timestamp() AT TIME ZONE 'UTC','YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"')" \
+    >"${G6RD_STATE}/pitr-restore-point-at"
+  cp -f "${G6RD_STATE}/pitr-restore-point-at" "${G6RD_OUTBOX}/pitr-prep/restore-point-at"
+  sleep 1
+  g6rd_psql -Atc "INSERT INTO ${MARKER_TABLE}(id,txid,phase) \
+    VALUES ('pitr-marker-b',txid_current()::text,'pitr_b') \
+    RETURNING txid || ':' || to_char(written_at AT TIME ZONE 'UTC','YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"')" \
+    >"${G6RD_STATE}/pitr-marker-b"
+  sed -n 's/^[^:]*://p' "${G6RD_STATE}/pitr-marker-b" >"${G6RD_OUTBOX}/pitr-prep/pitr-marker-b-at"
 }
 
 # Bring the managed nodes up: prepare identities, mint one token per node,
@@ -248,13 +257,45 @@ phase_agents_up() {
 # same clock stay comparable.
 phase_isolate() {
   local outage isolated
+  mkdir -p "${G6RD_OUTBOX}/isolation"
+  g6rd_psql -Atc "WITH active AS (
+    SELECT c.id::text AS command_id,c.state AS command_state,a.state AS attempt_state,
+      a.finished_at,s.last_heartbeat_at
+    FROM commands c
+    JOIN LATERAL (
+      SELECT state,finished_at FROM command_attempts
+      WHERE command_id=c.id ORDER BY attempt_number LIMIT 1
+    ) a ON true
+    LEFT JOIN node_observed_snapshots s ON s.node_id=c.node_id
+    WHERE c.idempotency_key LIKE 'g6-load-${RUN_ID%-fd-a}-fd-b-%'
+      AND c.idempotency_key NOT LIKE '%-backlog-%'
+      AND c.state IN ('dispatched','accepted','running')
+      AND NOT EXISTS (SELECT 1 FROM agent_command_results r WHERE r.command_id=c.id)
+  ) SELECT jsonb_build_object(
+    'captured_at',to_char(clock_timestamp() AT TIME ZONE 'UTC','YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"'),
+    'commands',coalesce(jsonb_agg(jsonb_build_object(
+      'command_id',command_id,'command_state',command_state,
+      'attempt_state',attempt_state,'attempt_finished',finished_at IS NOT NULL,
+      'last_telemetry_at',to_char(last_heartbeat_at AT TIME ZONE 'UTC','YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"')) ORDER BY command_id),'[]'::jsonb)
+    ,'queued_outbox_count',(SELECT count(*) FROM outbox_events o JOIN commands c ON c.id=o.command_id
+      WHERE c.idempotency_key LIKE 'g6-load-${RUN_ID%-fd-a}-fd-b-backlog-%'
+        AND o.published_at IS NULL AND o.available_at<=now())
+  ) FROM active" >"${G6RD_OUTBOX}/isolation/active-load.json"
+  jq -e '.queued_outbox_count >= 50 and (.commands | length >= 50 and all(
+    (.command_state | IN("dispatched","accepted","running")) and
+    .attempt_state == "sent" and .attempt_finished and
+    (.last_telemetry_at | type == "string" and length > 0)))' \
+    "${G6RD_OUTBOX}/isolation/active-load.json" >/dev/null || {
+    echo "fewer than fifty real commands, outbox rows, and live telemetry producers are active at failure injection" >&2
+    return 1
+  }
   g6rd_now >"${G6RD_STATE}/outage-declared-at"
   g6rd_compose stop scheduler api worker transportd >/dev/null 2>&1
+  g6rd_release_synthetic_barriers
   g6rd_compose stop postgres
   g6rd_now >"${G6RD_STATE}/isolated-at"
   outage="$(<"${G6RD_STATE}/outage-declared-at")"
   isolated="$(<"${G6RD_STATE}/isolated-at")"
-  mkdir -p "${G6RD_OUTBOX}/isolation"
   jq -cn --arg outage_declared_at "${outage}" --arg isolated_at "${isolated}" \
     --arg fd "${FD_ID}" \
     '{outage_declared_at:$outage_declared_at,isolated_at:$isolated_at,failure_domain:$fd}' \
@@ -266,7 +307,10 @@ phase_isolate() {
 # Repeated write attempts against the stopped former primary, on fd-a's
 # clock. Every attempt must fail while the instance is down.
 phase_dual_primary_probes() {
-  local attempt at accepted
+  local promoted_dir="${1:?promoted primary directory is required}"
+  require_file "${promoted_dir}/promoted-at"
+  local promoted_at attempt at accepted
+  promoted_at="$(<"${promoted_dir}/promoted-at")"
   : >"${G6RD_OUTBOX}/isolation/isolated-primary-writes.jsonl"
   for attempt in 1 2 3 4 5 6; do
     at="$(g6rd_now)"
@@ -286,6 +330,12 @@ phase_dual_primary_probes() {
   done
   jq -s 'length == 6 and all(.accepted == false)' \
     "${G6RD_OUTBOX}/isolation/isolated-primary-writes.jsonl"
+  jq -e --arg promoted "${promoted_at}" \
+    'all((.at | fromdateiso8601) >= ($promoted | fromdateiso8601))' \
+    "${G6RD_OUTBOX}/isolation/isolated-primary-writes.jsonl" >/dev/null || {
+    echo "a dual-primary probe predates the replacement promotion" >&2
+    return 1
+  }
 }
 
 # PITR restore of fd-a's own base backup plus archived WAL up to the named
@@ -303,7 +353,7 @@ phase_pitr_restore() {
     sh -c "printf '%s\n' \"restore_command = 'cp /var/lib/postgresql/archive/%f %p'\" \
       \"recovery_target_name = 'g6_pitr_target'\" \
       \"recovery_target_action = 'promote'\" >> /data/postgresql.auto.conf && \
-      touch /data/standby.signal && chmod 700 /data" \
+      touch /data/recovery.signal && chmod 700 /data" \
     >"${G6RD_LOGS}/pitr-prepare.log" 2>&1
   docker run -d --name "${pitr_container}" \
     -p "127.0.0.1:${PITR_RESTORE_PORT}:5432" \
@@ -353,6 +403,29 @@ rejoined_in_recovery() {
   [[ "$(g6rd_psql -Atc 'SELECT pg_is_in_recovery()' 2>/dev/null)" == t ]]
 }
 
+phase_rejoin_readonly_probes() {
+  local attempt at accepted output file="${G6RD_OUTBOX}/post-rejoin-probes.jsonl"
+  : >"${file}"
+  for attempt in 1 2 3; do
+    at="$(g6rd_now)"
+    accepted=false
+    if output="$(PGPASSWORD="$(g6rd_secret owner-password)" docker run --rm \
+      --network host --log-driver none -e PGPASSWORD postgres:17.10-bookworm \
+      psql "host=127.0.0.1 port=5432 user=ocservia_owner dbname=ocservia sslmode=disable" \
+      -v ON_ERROR_STOP=1 -c "INSERT INTO ${MARKER_TABLE}(id,txid,phase) VALUES ('post-rejoin-${attempt}',txid_current()::text,'probe')" 2>&1)"; then
+      accepted=true
+    elif ! grep -q 'cannot execute INSERT in a read-only transaction' <<<"${output}"; then
+      echo "post-rejoin probe failed for a reason other than read-only rejection" >&2
+      printf '%s\n' "${output}" >&2
+      return 1
+    fi
+    jq -cn --arg at "${at}" --argjson accepted "${accepted}" \
+      '{at:$at,accepted:$accepted}' >>"${file}"
+    sleep 1
+  done
+  jq -s -e 'length == 3 and all(.accepted == false)' "${file}" >/dev/null
+}
+
 # Rejoin the former primary as a streaming standby of the promoted peer
 # through the reversed tunnel forward, completing the distinct-failure-
 # domain standby the G6 topology requires.
@@ -362,7 +435,7 @@ phase_rejoin() {
   local data_volume="${COMPOSE_PROJECT}_postgres-data"
   docker run --rm -v "${data_volume}:/data" \
     -e PGPASSWORD="$(g6rd_secret replication-password)" postgres:17.10-bookworm \
-    sh -c "pg_rewind -D /data --source-server='host=host.docker.internal port=15432 user=ocservia_replication dbname=ocservia password=$PGPASSWORD' || (rm -rf /data/* && PGSSLMODE=disable pg_basebackup -h host.docker.internal -p 15432 -U ocservia_replication -D /data -R -X stream -C -S g6_rejoin_slot --checkpoint=fast)" \
+    sh -c 'pg_rewind -D /data --source-server="host=host.docker.internal port=15432 user=ocservia_replication dbname=ocservia password=$PGPASSWORD" || (rm -rf /data/* && PGSSLMODE=disable pg_basebackup -h host.docker.internal -p 15432 -U ocservia_replication -D /data -R -X stream -C -S g6_rejoin_slot --checkpoint=fast)' \
     >"${G6RD_LOGS}/rejoin.log" 2>&1
   docker run --rm -v "${data_volume}:/data" postgres:17.10-bookworm \
     sh -c "printf '%s\n' \"primary_conninfo = 'host=host.docker.internal port=15432 user=ocservia_replication password=$(g6rd_secret replication-password) application_name=g6_rejoin_standby'\" >> /data/postgresql.auto.conf && touch /data/standby.signal" \
@@ -371,6 +444,7 @@ phase_rejoin() {
   g6rd_compose up --detach postgres
   g6rd_wait_until 60 2 "rejoined standby in recovery" rejoined_in_recovery
   g6rd_now >"${G6RD_OUTBOX}/rejoin-at"
+  phase_rejoin_readonly_probes
 }
 
 phase_relay_a_stop() {
@@ -385,14 +459,24 @@ phase_relay_a_stop() {
 # containers are still inspectable. No credentials enter this bundle.
 phase_evidence() {
   local out="${G6RD_OUTBOX}/fd-a-final" name
-  mkdir -p "${out}/isolation" "${out}/pitr-prep" "${out}/pitr" "${out}/evidence"
+  mkdir -p "${out}/isolation" "${out}/pitr-prep" "${out}/pitr" "${out}/evidence/effects"
   cp -f "${G6RD_OUTBOX}/isolation/isolation.json" "${out}/isolation/"
+  cp -f "${G6RD_OUTBOX}/isolation/active-load.json" "${out}/isolation/"
   cp -f "${G6RD_OUTBOX}/isolation"/*.at "${out}/isolation/"
   cp -f "${G6RD_OUTBOX}/isolation/isolated-primary-writes.jsonl" "${out}/isolation/"
   cp -f "${G6RD_OUTBOX}/pitr-prep"/*.at "${out}/pitr-prep/"
   cp -f "${G6RD_OUTBOX}/pitr/pitr-report.json" "${out}/pitr/"
   cp -f "${G6RD_OUTBOX}/rejoin-at" "${out}/"
+  cp -f "${G6RD_OUTBOX}/post-rejoin-probes.jsonl" "${out}/"
   cp -f "${G6RD_OUTBOX}/relay-a-failed-at" "${out}/"
+  local index service
+  for index in $(seq 1 "$(g6rd_agent_count)"); do
+    service="agent-${FD_ID}-$(printf '%02d' "${index}")"
+    g6rd_agent_compose exec -T "${service}" \
+      sqlite3 -readonly /run/ocservia-agent/journal/agent.db \
+      "SELECT hex(e.idempotency_key)||' '||hex(j.command_id)||' '||e.executed_at FROM synthetic_effects e JOIN command_journal j ON j.idempotency_key=e.idempotency_key" \
+      >"${out}/evidence/effects/${service}.tsv"
+  done
   : >"${out}/evidence/instances.tsv"
   docker ps -a --filter "label=com.docker.compose.project=${COMPOSE_PROJECT}" \
     --format '{{.Names}}' | sort -u | while read -r name; do
@@ -415,7 +499,7 @@ primary-up) phase_primary_up ;;
 pitr-prepare) phase_pitr_prepare ;;
 agents-up) phase_agents_up ;;
 isolate) phase_isolate ;;
-dual-primary-probes) phase_dual_primary_probes ;;
+dual-primary-probes) phase_dual_primary_probes "${2:?promoted primary directory is required}" ;;
 pitr-restore) phase_pitr_restore ;;
 rejoin) phase_rejoin ;;
 relay-a-stop) phase_relay_a_stop ;;

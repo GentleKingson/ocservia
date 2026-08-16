@@ -209,6 +209,25 @@ func TestRoleValidation(t *testing.T) {
 	}
 }
 
+func TestResultCommitBarrierGuard(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		env  map[string]string
+		ok   bool
+	}{
+		{"development absolute", map[string]string{"OCSERV_DATABASE_URL": "postgres://db/test", "OCSERV_TEST_RESULT_COMMIT_BARRIER_DIR": "/run/g6-result-barrier"}, true},
+		{"relative", map[string]string{"OCSERV_DATABASE_URL": "postgres://db/test", "OCSERV_TEST_RESULT_COMMIT_BARRIER_DIR": "barrier"}, false},
+		{"production", map[string]string{"OCSERV_DATABASE_URL": "postgres://db/test", "OCSERV_ENVIRONMENT": "production", "OCSERV_TEST_RESULT_COMMIT_BARRIER_DIR": "/run/g6-result-barrier"}, false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			_, err := Load(nil, func(key string) (string, bool) { value, ok := test.env[key]; return value, ok })
+			if (err == nil) != test.ok {
+				t.Fatalf("Load() error = %v, want success %v", err, test.ok)
+			}
+		})
+	}
+}
+
 func TestMigrateOnlyRequiresRuntimeRole(t *testing.T) {
 	lookup := func(key string) (string, bool) {
 		values := map[string]string{"OCSERV_DATABASE_URL": "postgres://owner@db/test"}

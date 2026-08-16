@@ -242,6 +242,7 @@ services:
       # One in-flight command per node and a raised global cap keep fifty
       # nodes dispatching concurrently during the peak-inflight probe.
       OCSERV_USER_OPERATION_CONCURRENCY: "200"
+      OCSERV_TEST_RESULT_COMMIT_BARRIER_DIR: /run/g6-result-barrier
     volumes:
       - type: volume
         source: transport-runtime
@@ -254,6 +255,9 @@ services:
         target: /run/ocservia-signing
         read_only: true
       - transport-stats:/run/transport-stats
+      - type: bind
+        source: ${G6_RESULT_BARRIER_DIR:?}
+        target: /run/g6-result-barrier
 
   scheduler:
     <<: *role-defaults

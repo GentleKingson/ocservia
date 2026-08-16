@@ -67,6 +67,7 @@ type Config struct {
 	UserOperationConcurrency int
 	LocalSimulator           bool
 	PprofAddress             string
+	TestResultCommitBarrier  string
 	CertificateSignerURL     string
 	CertificateSignerToken   string
 	CertificateSignerTimeout time.Duration
@@ -152,6 +153,7 @@ func Load(args []string, lookup LookupEnv) (Config, error) {
 	}
 	setString(lookup, "OCSERV_COMMAND_SIGNING_KEY_FILE", &cfg.CommandSigningKeyFile)
 	setString(lookup, "OCSERV_PPROF_ADDRESS", &cfg.PprofAddress)
+	setString(lookup, "OCSERV_TEST_RESULT_COMMIT_BARRIER_DIR", &cfg.TestResultCommitBarrier)
 	if err := setHexOrFile(lookup, "OCSERV_BREAK_GLASS_TOKEN_SHA256", &cfg.BreakGlassTokenHash); err != nil {
 		return Config{}, err
 	}
@@ -364,6 +366,11 @@ func (c Config) Validate() error {
 		ip := net.ParseIP(host)
 		if c.Environment == "production" || ip == nil || !ip.IsLoopback() {
 			return errors.New("pprof requires environment=development or test and a loopback address")
+		}
+	}
+	if c.TestResultCommitBarrier != "" {
+		if c.Environment == "production" || !filepath.IsAbs(c.TestResultCommitBarrier) {
+			return errors.New("result commit barrier is test-only and requires an absolute directory")
 		}
 	}
 	if c.LocalSimulator && c.Environment == "production" {

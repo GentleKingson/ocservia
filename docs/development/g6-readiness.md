@@ -59,25 +59,29 @@ before the run is accepted.
    approves the 55-node Agent fleet (28 on VM A, 27 on VM B).
 2. VM B clones the primary through the tunnel, joins as the streaming
    standby, starts relay-b, and enrolls its Agents.
-3. VM B opens one production command per node and confirms at least fifty
-   dispatched; with the load active, VM A records the PITR markers and
-   restore point and takes the base backup.
+3. VM B opens one production command per node behind an Agent execution
+   barrier and confirms at least fifty are non-terminal, then holds dispatch
+   admission while a second fleet-wide wave remains due in the outbox. VM A
+   takes and verifies the PITR base backup, then records marker A, the restore
+   point, and marker B with their originating transaction identities.
 4. VM A is isolated under load (primary failure, API instance loss). VM B
-   promotes the standby, proves the isolated former primary cannot write,
+   promotes the standby, then proves the isolated former primary cannot write,
    and re-points the era-2 control plane at the promoted primary while the
    load commands are still open.
-5. VM A verifies the PITR restore target, rejoins as the standby, recovers
+5. VM A verifies the PITR restore target, rejoins as the standby, proves the
+   rejoined instance rejects writes as read-only, recovers
    its roles, and stops relay-a; VM B proves authenticated traffic moves to
    relay-b and exercises the direct↔relay path transitions.
 6. VM B runs the scheduler-leadership and connection-owner failover
    scenarios with stale-term rejection proofs, the three outbox crash
-   windows (claim-before-send, send-before-mark, result-before-commit), the
+   windows (claim-before-send, send-before-mark, and an ingress barrier after
+   result receipt but before database commit), the
    bulk-disconnect reconnect storm, and then the bounded 300-second
    fault-free window with ≥50 concurrent commands and continuous resource
    sampling.
 7. `scripts/build-g6-evidence.mjs` assembles the evidence bundle purely
    from trusted producers — the authoritative database tables, the
-   per-Agent durable journals, the live transportd session inventory, the
+   per-Agent durable journals from both failure domains, the live transportd session inventory, the
    fenced-probe outputs, and the runner clocks — and the frozen verifier
    evaluates it. An independent verifier job recomputes the environment
    identity from the run identity, re-evaluates the published bundle, and

@@ -123,6 +123,11 @@ func Run(ctx context.Context, cfg config.Config, build BuildInfo, logger *slog.L
 	componentCtx, stopComponents := context.WithCancel(ctx)
 	defer stopComponents()
 	sliceService := localslice.NewWithSigner(pool, commandSigner)
+	if cfg.TestResultCommitBarrier != "" {
+		if err := sliceService.EnableResultCommitBarrier(cfg.TestResultCommitBarrier); err != nil {
+			return fmt.Errorf("configure result commit barrier: %w", err)
+		}
+	}
 	operationService := operationstore.NewWithSigner(pool, cfg.UserOperationConcurrency, commandSigner)
 	workerErr := make(chan error, 5)
 	maintenanceErr := make(chan error, 1)

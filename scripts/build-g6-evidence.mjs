@@ -149,6 +149,7 @@ requireFile(runDir, "outbox", "timeline.jsonl");
 requireFile(runDir, "outbox", "fencing-history.jsonl");
 requireFile(runDir, "outbox", "leadership-history.jsonl");
 requireFile(peerDir, "isolation", "isolation.json");
+requireFile(peerDir, "isolation", "active-load.json");
 requireFile(peerDir, "isolation", "outage-declared-at");
 requireFile(peerDir, "isolation", "isolated-at");
 requireFile(peerDir, "isolation", "isolated-primary-writes.jsonl");
@@ -156,6 +157,7 @@ requireFile(peerDir, "pitr", "pitr-report.json");
 requireFile(peerDir, "evidence", "instances.tsv");
 requireFile(peerDir, "relay-a-failed-at");
 requireFile(peerDir, "rejoin-at");
+requireFile(peerDir, "post-rejoin-probes.jsonl");
 
 const readLog = readJSONL(runDir, "state", "read-log.jsonl");
 const enqueueLog = readJSONL(runDir, "state", "enqueue-log.jsonl");
@@ -191,20 +193,61 @@ const promotedAt = normalizeStamp(
   "promoted-at",
 );
 const pitrReport = JSON.parse(readText(peerDir, "pitr", "pitr-report.json"));
-const isolation = JSON.parse(
-  readText(peerDir, "isolation", "isolation.json"),
-);
+const isolation = JSON.parse(readText(peerDir, "isolation", "isolation.json"));
 const isolatedWrites = readJSONL(
   peerDir,
   "isolation",
   "isolated-primary-writes.jsonl",
 );
+const activeLoad = JSON.parse(
+  readText(peerDir, "isolation", "active-load.json"),
+);
+if (
+  !Array.isArray(activeLoad.commands) ||
+  activeLoad.commands.length < 50 ||
+  !Number.isInteger(activeLoad.queued_outbox_count) ||
+  activeLoad.queued_outbox_count < 50
+) {
+  fail("the database failure boundary has fewer than fifty active commands");
+}
+const rejoinBoundaryAt = normalizeStamp(
+  readText(peerDir, "rejoin-at").trim(),
+  "rejoin-at",
+);
+const rejoinProbes = readJSONL(peerDir, "post-rejoin-probes.jsonl");
+if (
+  rejoinProbes.length < 3 ||
+  rejoinProbes.some(
+    (probe) =>
+      probe.accepted !== false ||
+      parseStamp(probe.at, "post-rejoin probe") <
+        parseStamp(rejoinBoundaryAt, "rejoin"),
+  )
+) {
+  fail("the rejoined former primary was not proven read-only after rejoin");
+}
+const activeLoadIds = new Set();
+for (const command of activeLoad.commands) {
+  if (
+    typeof command.command_id !== "string" ||
+    activeLoadIds.has(command.command_id) ||
+    !["dispatched", "accepted", "running"].includes(command.command_state) ||
+    command.attempt_state !== "sent" ||
+    command.attempt_finished !== true ||
+    typeof command.last_telemetry_at !== "string"
+  ) {
+    fail("the database failure active-load snapshot is invalid");
+  }
+  activeLoadIds.add(command.command_id);
+}
 const relayAFailedAt = normalizeStamp(
   readText(peerDir, "relay-a-failed-at").trim(),
   "relay-a-failed-at",
 );
 const timelineRecords = readJSONL(runDir, "outbox", "timeline.jsonl");
-const timeline = new Map(timelineRecords.map((event) => [event.event_id, event]));
+const timeline = new Map(
+  timelineRecords.map((event) => [event.event_id, event]),
+);
 const staleTransportProbe = JSON.parse(
   readText(runDir, "state", "stale-transport-probe.json"),
 );
@@ -277,6 +320,13 @@ const httpSamplesText = `${httpLines.join("\n")}\n`;
 // ---------------------------------------------------------------------------
 
 const commandById = new Map(commands.map((command) => [command.id, command]));
+for (const commandId of activeLoadIds) {
+  if (!commandById.has(commandId)) {
+    fail(
+      `active-load command ${commandId} is absent from the final command dump`,
+    );
+  }
+}
 const population = [];
 for (const commandId of okCommandIds) {
   const command = commandById.get(commandId);
@@ -358,6 +408,9 @@ for (const command of population) {
     });
   }
   const effect = effectsByCommandHex.get(commandHex);
+  if (command.state === "succeeded" && !effect) {
+    fail(`successful synthetic command ${command.id} has no durable effect`);
+  }
   if (effect) {
     const effectMs = parseStamp(effect.executedAt, "effect executed_at");
     if (effectMs < enqueuedMs) {
@@ -383,9 +436,19 @@ for (const command of population) {
     },
   });
 }
+for (const commandHex of effectsByCommandHex.keys()) {
+  if (
+    !population.some((command) => command.id.replaceAll("-", "") === commandHex)
+  ) {
+    fail(
+      `durable effect ${commandHex} does not match an accepted synthetic command`,
+    );
+  }
+}
 traceRecords.sort(
   (left, right) =>
-    left.stampMs - right.stampMs || left.rank - right.rank ||
+    left.stampMs - right.stampMs ||
+    left.rank - right.rank ||
     JSON.stringify(left.record).localeCompare(JSON.stringify(right.record)),
 );
 const commandTraceText = jsonl(
@@ -398,9 +461,7 @@ const commandTraceText = jsonl(
   })),
 );
 
-const outboxByCommand = new Map(
-  outboxRows.map((row) => [row.command_id, row]),
-);
+const outboxByCommand = new Map(outboxRows.map((row) => [row.command_id, row]));
 const outboxSnapshotRows = [];
 for (const command of population) {
   const row = outboxByCommand.get(command.id);
@@ -494,10 +555,16 @@ for (const node of nodes) {
     final.connected_at,
     "final session connected_at",
   );
-  if (parseStamp(startedAt, "session start") >= parseStamp(bulkDisconnectAt, "storm")) {
+  if (
+    parseStamp(startedAt, "session start") >=
+    parseStamp(bulkDisconnectAt, "storm")
+  ) {
     fail(`session for ${node.name} does not predate the reconnect storm`);
   }
-  if (parseStamp(reconnectedAt, "reconnect") < parseStamp(bulkDisconnectAt, "storm")) {
+  if (
+    parseStamp(reconnectedAt, "reconnect") <
+    parseStamp(bulkDisconnectAt, "storm")
+  ) {
     fail(`session for ${node.name} reconnects before the storm`);
   }
   sessions.push({
@@ -530,6 +597,38 @@ const isolatedAt = normalizeStamp(
   "isolated-at",
 );
 const outageMs = parseStamp(outageDeclaredAt, "outage");
+const activeLoadCapturedMs = parseStamp(
+  activeLoad.captured_at,
+  "active-load capture",
+);
+if (activeLoadCapturedMs > outageMs) {
+  fail("the active-load snapshot was captured after the database outage");
+}
+for (const command of activeLoad.commands) {
+  const telemetryMs = parseStamp(
+    command.last_telemetry_at,
+    "active-load telemetry",
+  );
+  if (
+    telemetryMs > activeLoadCapturedMs ||
+    activeLoadCapturedMs - telemetryMs > 90_000
+  ) {
+    fail(
+      `active-load telemetry for ${command.command_id} is not live at failure injection`,
+    );
+  }
+}
+const promotedMs = parseStamp(promotedAt, "promotion");
+if (
+  isolatedWrites.length < 3 ||
+  isolatedWrites.some(
+    (write) =>
+      write.accepted !== false ||
+      parseStamp(write.at, "dual-primary probe") < promotedMs,
+  )
+) {
+  fail("former-primary write probes do not prove fencing after promotion");
+}
 const acknowledged = [];
 const presentTxids = [];
 for (const marker of markerRows) {
@@ -781,7 +880,10 @@ if (leaderCurrent) {
 const staleTerm = readText(runDir, "state", "stale-scheduler-term").trim();
 const [staleLeaderInstance, , staleLeaderEpochText] = staleTerm.split(":");
 epochEvents.push({
-  stampMs: parseStamp(timelineStamp("stale_scheduler_commit_rejected"), "timeline"),
+  stampMs: parseStamp(
+    timelineStamp("stale_scheduler_commit_rejected"),
+    "timeline",
+  ),
   rank: rankOf.accept,
   record: {
     subject: "scheduler",
@@ -794,7 +896,8 @@ epochEvents.push({
 
 epochEvents.sort(
   (left, right) =>
-    left.stampMs - right.stampMs || left.rank - right.rank ||
+    left.stampMs - right.stampMs ||
+    left.rank - right.rank ||
     JSON.stringify(left.record).localeCompare(JSON.stringify(right.record)),
 );
 const epochEventsText = jsonl(
@@ -852,8 +955,9 @@ function readInstances(path, failureDomain) {
         ? normalizeStamp(finishedAt, `${service} FinishedAt`)
         : undefined;
     instances.push({
-      instance_id:
-        service.startsWith("agent-") ? service : `${service}-${failureDomain}`,
+      instance_id: service.startsWith("agent-")
+        ? service
+        : `${service}-${failureDomain}`,
       fault_domain: failureDomain === "fd-a" ? "fd-alpha" : "fd-beta",
       role: roleOfService(service, failureDomain),
       component: componentOfService(service),
@@ -874,10 +978,7 @@ if (localFailureDomain !== "fd-b" || peerFailureDomain !== "fd-a") {
 }
 const instances = [
   ...readInstances(join(peerDir, "evidence", "instances.tsv"), "fd-a"),
-  ...readInstances(
-    join(runDir, "state", "evidence", "instances.tsv"),
-    "fd-b",
-  ),
+  ...readInstances(join(runDir, "state", "evidence", "instances.tsv"), "fd-b"),
 ];
 const instanceIds = new Set(instances.map((instance) => instance.instance_id));
 if (instanceIds.size !== instances.length) {
@@ -945,16 +1046,56 @@ const pitrReportText = readText(peerDir, "pitr", "pitr-report.json");
 const artifactFiles = [
   ["resource-samples.csv", "text/csv", "resource_samples", resourceSamplesText],
   ["timeline.jsonl", "application/x-ndjson", "timeline", timelineText],
-  ["epoch-events.jsonl", "application/x-ndjson", "epoch_events", epochEventsText],
-  ["command-trace.jsonl", "application/x-ndjson", "command_trace", commandTraceText],
-  ["outbox-snapshot.json", "application/json", "outbox_snapshot", outboxSnapshotText],
+  [
+    "epoch-events.jsonl",
+    "application/x-ndjson",
+    "epoch_events",
+    epochEventsText,
+  ],
+  [
+    "command-trace.jsonl",
+    "application/x-ndjson",
+    "command_trace",
+    commandTraceText,
+  ],
+  [
+    "outbox-snapshot.json",
+    "application/json",
+    "outbox_snapshot",
+    outboxSnapshotText,
+  ],
   ["http-samples.csv", "text/csv", "http_samples", httpSamplesText],
-  ["telemetry-snapshot.json", "application/json", "telemetry_snapshot", telemetrySnapshotText],
-  ["audit-correlation.json", "application/json", "audit_correlation", auditCorrelationText],
-  ["postgres-recovery.json", "application/json", "postgres_recovery", postgresRecoveryText],
+  [
+    "telemetry-snapshot.json",
+    "application/json",
+    "telemetry_snapshot",
+    telemetrySnapshotText,
+  ],
+  [
+    "audit-correlation.json",
+    "application/json",
+    "audit_correlation",
+    auditCorrelationText,
+  ],
+  [
+    "postgres-recovery.json",
+    "application/json",
+    "postgres_recovery",
+    postgresRecoveryText,
+  ],
   ["pitr-report.json", "application/json", "pitr_report", pitrReportText],
-  ["agent-sessions.json", "application/json", "agent_sessions", agentSessionsText],
-  ["relay-transitions.jsonl", "application/x-ndjson", "relay_transitions", relayTransitionsText],
+  [
+    "agent-sessions.json",
+    "application/json",
+    "agent_sessions",
+    agentSessionsText,
+  ],
+  [
+    "relay-transitions.jsonl",
+    "application/x-ndjson",
+    "relay_transitions",
+    relayTransitionsText,
+  ],
 ];
 
 const timestampedStamps = [
@@ -1027,7 +1168,9 @@ artifacts.push({
   media_type: "text/plain",
   kind: "harness_log",
 });
-const digestByKind = new Map(artifacts.map((artifact) => [artifact.kind, artifact.digest]));
+const digestByKind = new Map(
+  artifacts.map((artifact) => [artifact.kind, artifact.digest]),
+);
 
 const sloText = readFileSync(values.slo, "utf8");
 const slo = parseSlo(sloText);
@@ -1062,7 +1205,9 @@ for (const [name, contract] of Object.entries(slo.observations)) {
     (eventId) => !timeline.has(eventId),
   );
   if (missing.length > 0) {
-    fail(`observation ${name} is missing timeline events: ${missing.join(", ")}`);
+    fail(
+      `observation ${name} is missing timeline events: ${missing.join(", ")}`,
+    );
   }
   observations[name] = {
     observed: true,

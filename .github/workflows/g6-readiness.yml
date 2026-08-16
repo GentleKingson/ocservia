@@ -116,8 +116,6 @@ jobs:
         run: scripts/g6-readiness-fd-a.sh pitr-prepare
       - name: Isolate the primary failure domain
         run: scripts/g6-readiness-fd-a.sh isolate
-      - name: Probe the isolated former primary
-        run: scripts/g6-readiness-fd-a.sh dual-primary-probes
       - name: Publish the isolation record
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
@@ -129,12 +127,16 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ github.token }}
         run: scripts/real-e2e-artifact.sh wait-download "g6-rd-new-primary-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" "${RUNNER_TEMP}/g6-rd-new-primary" 1200
+      - name: Probe the fenced former primary after promotion
+        run: scripts/g6-readiness-fd-a.sh dual-primary-probes "${RUNNER_TEMP}/g6-rd-new-primary"
       - name: Verify the PITR restore point
         run: scripts/g6-readiness-fd-a.sh pitr-restore
       - name: Rejoin the former primary as standby
         run: scripts/g6-readiness-fd-a.sh rejoin
       - name: Stop relay-a
         run: scripts/g6-readiness-fd-a.sh relay-a-stop
+      - name: Collect failure domain A evidence
+        run: scripts/g6-readiness-fd-a.sh evidence
       - name: Publish failure domain A evidence
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:

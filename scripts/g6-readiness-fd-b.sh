@@ -252,7 +252,8 @@ phase_load_start() {
   g6rd_export_common_env
   g6rd_timeline_init
   g6rd_timeline_event load_started
-  # one command per node; each stays in flight until its result returns
+  # First wave: one command per node is transport-accepted but held at each
+  # Agent's synthetic execution barrier, so the commands remain non-terminal.
   local node count=0
   : >"${G6RD_STATE}/load-keys.txt"
   for node in $(node_ids); do
@@ -268,7 +269,24 @@ phase_load_start() {
     echo "only ${count} nodes are available for the load phase" >&2
     return 1
   }
-  g6rd_wait_until 60 2 "fifty load commands dispatched" load_dispatched
+  g6rd_wait_until 60 2 "fifty load commands active without results" load_commands_active
+  # Hold the same advisory lock Claim uses, then enqueue a second wave. This
+  # freezes at least fifty genuine, due outbox writes at the outage boundary
+  # without pausing API admission or fabricating command-attempt history.
+  psql_primary -Atc "SELECT pg_advisory_lock(5711500382397350988); SELECT pg_sleep(600)" \
+    >"${G6RD_LOGS}/load-dispatch-barrier.log" 2>&1 &
+  echo $! >"${G6RD_STATE}/load-dispatch-barrier.pid"
+  g6rd_wait_until 30 1 "dispatch advisory lock" dispatch_barrier_held
+  for node in $(node_ids); do
+    local key="g6-load-${RUN_ID}-backlog-${count}"
+    g6rd_enqueue_command "${node}" "${key}" || {
+      echo "backlog enqueue failed for node ${node}" >&2
+      return 1
+    }
+    printf '%s\n' "${key}" >>"${G6RD_STATE}/load-keys.txt"
+    count=$((count + 1))
+  done
+  g6rd_wait_until 30 1 "fifty due outbox writes" load_outbox_pending
   mkdir -p "${G6RD_OUTBOX}/load-active"
   g6rd_now >"${G6RD_OUTBOX}/load-active/load-active-at"
 }
@@ -316,6 +334,7 @@ phase_promote() {
   g6rd_timeline_event worker_recovered "${G6RD_STATE}/worker-recovered-at"
   # agents redial the handed-over controller endpoint through relay-b
   g6rd_wait_until 120 5 "agents reconnected to era-2 transportd" all_nodes_connected
+  g6rd_release_synthetic_barriers
   # the era-2 session start of every agent, from the live transportd; this
   # is the session_started_at population of the agent-session inventory
   local args=()
@@ -351,9 +370,23 @@ all_nodes_connected() {
   g6rd_probe_node_connection any "${args[@]}" >/dev/null 2>&1
 }
 
-load_dispatched() {
+load_commands_active() {
   [[ "$(psql_primary -Atc \
-    "SELECT count(DISTINCT command_id) FROM command_attempts WHERE state IN ('sending','sent','unknown')")" -ge 50 ]]
+    "SELECT count(*) FROM commands c WHERE c.idempotency_key LIKE 'g6-load-${RUN_ID}-%' \
+      AND c.state IN ('dispatched','accepted','running') \
+      AND NOT EXISTS (SELECT 1 FROM agent_command_results r WHERE r.command_id=c.id)")" -ge 50 ]]
+}
+
+dispatch_barrier_held() {
+  [[ "$(psql_primary -Atc \
+    "SELECT count(*) FROM pg_locks WHERE locktype='advisory' AND classid=1329812310 AND objid=1129137228 AND granted")" -ge 1 ]]
+}
+
+load_outbox_pending() {
+  [[ "$(psql_primary -Atc \
+    "SELECT count(*) FROM outbox_events o JOIN commands c ON c.id=o.command_id \
+      WHERE c.idempotency_key LIKE 'g6-load-${RUN_ID}-backlog-%' \
+        AND o.published_at IS NULL AND o.available_at<=now()")" -ge 50 ]]
 }
 
 promoted_and_writable() {
@@ -386,6 +419,8 @@ phase_merge_peer_evidence() {
   cp -f "${isolation}"/*.at "${G6RD_OUTBOX}/peer/" 2>/dev/null || true
   cp -f "${pitr_prep}"/*.at "${G6RD_OUTBOX}/peer/" 2>/dev/null || true
   cp -f "${peer}/pitr/pitr-report.json" "${G6RD_OUTBOX}/peer/"
+  mkdir -p "${G6RD_STATE}/evidence/effects"
+  cp -f "${peer}/evidence/effects/"*.tsv "${G6RD_STATE}/evidence/effects/"
 }
 
 # Scheduler leadership failover: stop the era-2 leader, let the lease lapse,
@@ -410,12 +445,12 @@ phase_scenario_scheduler() {
   g6rd_timeline_event scheduler_b_acquired
   g6rd_timeline_event scheduler_a_resumed
   # The old term's fence predicate, verbatim from coordination.AssertLeader:
-  # zero rows means the superseded epoch can never commit again.
+  # no returned row means the superseded epoch can never commit again.
   local fenced
-  fenced="$(psql_primary -Atc "SELECT count(*) FROM scheduler_leadership \
+  fenced="$(psql_primary -Atc "SELECT 1 FROM scheduler_leadership \
     WHERE id=1 AND instance_id='${old_instance}' AND incarnation=${old_incarnation} \
     AND epoch=${old_epoch} AND lease_until>clock_timestamp() FOR SHARE OF scheduler_leadership")"
-  [[ "${fenced}" == 0 ]] || {
+  [[ -z "${fenced}" ]] || {
     echo "the expired scheduler term still passes its own fence predicate" >&2
     return 1
   }
@@ -565,7 +600,7 @@ phase_scenario_relay() {
 
 relay_probe_relay_b() {
   local node="${1:?node id is required}" observation
-  observation="$(g6rd_probe_node_connection "${node}" relay 2>/dev/null)" || return 1
+  observation="$(g6rd_probe_node_connection relay "${node}" 2>/dev/null)" || return 1
   jq -e '.path == "relay" and (.path_detail | contains("relay-b"))' \
     <<<"${observation}" >/dev/null
 }
@@ -575,23 +610,27 @@ relay_probe_relay_b() {
 # re-establish through the relay, then restore the network and let iroh
 # converge back to the direct path.
 phase_scenario_path() {
-  local service="agent-${FD_ID}-01" node isolated_network
-  node="$(awk -F'\t' -v n="${service#g6-fd-b-}" '$1 == "g6-fd-b-" n {print $2}' "${NODES_FILE}")"
+  local service="agent-${FD_ID}-01" agent_name="g6-${FD_ID}-01" node isolated_network
+  node="$(awk -F'\t' -v name="${agent_name}" '$1 == name {print $2; exit}' "${NODES_FILE}")"
+  [[ -n "${node}" ]] || {
+    echo "node id for ${agent_name} is missing" >&2
+    return 1
+  }
   isolated_network="${COMPOSE_PROJECT}_agent-isolated"
   docker network create "${isolated_network}" >/dev/null 2>&1 || true
   g6rd_wait_until 60 5 "agent-01 session on the direct path" \
-    g6rd_probe_node_connection "${node}" direct
+    g6rd_probe_node_connection direct "${node}"
   g6rd_timeline_event direct_path_active
   docker network connect "${isolated_network}" "${COMPOSE_PROJECT}-${service}-1" >/dev/null
   docker network disconnect "${COMPOSE_PROJECT}_default" "${COMPOSE_PROJECT}-${service}-1"
   g6rd_timeline_event direct_path_failed
   g6rd_wait_until 120 5 "agent-01 session moved to the relay path" \
-    g6rd_probe_node_connection "${node}" relay
+    g6rd_probe_node_connection relay "${node}"
   g6rd_timeline_event relay_path_active
   docker network connect "${COMPOSE_PROJECT}_default" "${COMPOSE_PROJECT}-${service}-1" >/dev/null
   docker network disconnect "${isolated_network}" "${COMPOSE_PROJECT}-${service}-1"
   g6rd_wait_until 180 5 "agent-01 session recovered the direct path" \
-    g6rd_probe_node_connection "${node}" direct
+    g6rd_probe_node_connection direct "${node}"
   g6rd_timeline_event direct_path_recovered
 }
 
@@ -698,42 +737,60 @@ phase_outbox_send_before_mark() {
   }
 }
 
-# Window 3: the agent produced a durable result, the ingesting worker dies
-# before committing it; the restarted worker reconciles the result.
+# Window 3: the ingress transaction validates and applies the Agent result,
+# signals the harness while the transaction is still open, and blocks before
+# commit. Killing the worker at that barrier proves the database saw no
+# terminal result until the replacement reconciled the retained Agent result.
 phase_outbox_result_before_commit() {
-  local node key command_id caught=0 attempt service kill_file="${G6RD_STATE}/crash3-kill-at"
+  local node key command_id service kill_file="${G6RD_STATE}/crash3-kill-at"
+  local barrier="${G6RD_RESULT_BARRIER}"
   node="$(node_ids | head -3 | tail -1)"
   service="$(node_service "${node}")"
-  for attempt in 1 2 3 4 5; do
-    key="g6-crash3-${RUN_ID}-${attempt}"
-    g6rd_enqueue_command "${node}" "${key}" || continue
-    command_id="$(command_id_of_key "${key}")"
-    [[ -n "${command_id}" ]] || continue
-    # wait for the agent journal to hold the terminal result
-    g6rd_wait_until 30 1 "crash3 journal result" \
-      journal_result_ready "${service}" "${command_id}" || continue
-    docker kill "${COMPOSE_PROJECT}-worker-1" >/dev/null
-    g6rd_now >"${kill_file}"
-    g6rd_compose up --detach worker
-    g6rd_wait_until 120 5 "crash3 attempt settled" \
-      wait_commands_settled "g6-crash3-${RUN_ID}-${attempt}" || continue
-    local terminal_at
-    terminal_at="$(psql_primary -Atc \
-      "SELECT to_char(updated_at AT TIME ZONE 'UTC','YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"') FROM commands WHERE id='${command_id}'")"
-    if [[ -n "${terminal_at:-}" ]] \
-      && [[ "$(date -u -d "${terminal_at}" +%s)" -ge "$(date -u -d "$(<"${kill_file}")" +%s)" ]]; then
-      printf '%s\n' "${command_id}" >"${G6RD_STATE}/crash3-command-id"
-      g6rd_timeline_event result_received
-      g6rd_timeline_event ingress_crashed_before_commit "${kill_file}"
-      g6rd_timeline_event result_reconciled
-      caught=1
-      break
-    fi
-  done
-  [[ "${caught}" == 1 ]] || {
-    echo "the result-before-commit window was not observed in five attempts" >&2
+  key="g6-crash3-${RUN_ID}"
+  rm -f "${barrier}/arm" "${barrier}/received" "${barrier}/release"
+  # Pause dispatch until the API has returned the exact command id that arms
+  # the ingress barrier; otherwise a fast synthetic result could beat setup.
+  docker pause "${COMPOSE_PROJECT}-worker-1" >/dev/null
+  g6rd_enqueue_command "${node}" "${key}"
+  command_id="$(command_id_of_key "${key}")"
+  [[ -n "${command_id}" ]] || {
+    echo "result-before-commit command id is missing" >&2
     return 1
   }
+  printf '%s\n' "${command_id}" >"${barrier}/arm"
+  chmod 0666 "${barrier}/arm"
+  docker unpause "${COMPOSE_PROJECT}-worker-1" >/dev/null
+  g6rd_wait_until 60 1 "ingress result commit barrier" test -s "${barrier}/received"
+  [[ "$(sed -n '1p' "${barrier}/received")" == "${command_id}" ]] || {
+    echo "result commit barrier signaled for the wrong command" >&2
+    return 1
+  }
+  sed -n '2p' "${barrier}/received" >"${G6RD_STATE}/crash3-result-received-at"
+  require_file "${G6RD_STATE}/crash3-result-received-at"
+  # The signal is emitted only after result validation/mutation inside the
+  # open transaction. A separate connection must still see no terminal row.
+  [[ "$(psql_primary -Atc "SELECT count(*) FROM agent_command_results WHERE command_id='${command_id}'")" == 0 ]] || {
+    echo "the command result committed before the ingress crash" >&2
+    return 1
+  }
+  sleep 1
+  docker kill "${COMPOSE_PROJECT}-worker-1" >/dev/null
+  g6rd_now >"${kill_file}"
+  [[ "$(psql_primary -Atc "SELECT count(*) FROM agent_command_results WHERE command_id='${command_id}'")" == 0 ]] || {
+    echo "the killed ingress transaction committed a command result" >&2
+    return 1
+  }
+  rm -f "${barrier}/arm" "${barrier}/received"
+  g6rd_compose up --detach worker
+  g6rd_wait_until 120 5 "crash3 result reconciled" wait_commands_settled "${key}"
+  [[ "$(psql_primary -Atc "SELECT count(*) FROM agent_command_results WHERE command_id='${command_id}'")" == 1 ]] || {
+    echo "the replacement ingress did not reconcile exactly one command result" >&2
+    return 1
+  }
+  printf '%s\n' "${command_id}" >"${G6RD_STATE}/crash3-command-id"
+  g6rd_timeline_event result_received "${G6RD_STATE}/crash3-result-received-at"
+  g6rd_timeline_event ingress_crashed_before_commit "${kill_file}"
+  g6rd_timeline_event result_reconciled
 }
 
 journal_result_ready() {
@@ -831,7 +888,7 @@ phase_evidence_collect() {
     >"${dir}/audit.jsonl"
   psql_primary -Atc "SELECT jsonb_build_object('agent_id',n.name,'last_telemetry_at',to_char(s.last_heartbeat_at AT TIME ZONE 'UTC','YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"')) FROM node_observed_snapshots s JOIN nodes n ON n.id=s.node_id WHERE n.name LIKE 'g6-fd-%' ORDER BY n.name" \
     >"${dir}/telemetry.jsonl"
-  psql_primary -Atc "SELECT jsonb_build_object('id',m.id,'txid',m.txid,'written_at',to_char(m.written_at AT TIME ZONE 'UTC','YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"')) FROM g6_readiness_markers m ORDER BY m.written_at" \
+  psql_primary -Atc "SELECT jsonb_build_object('id',m.id,'txid',m.txid,'written_at',to_char(m.written_at AT TIME ZONE 'UTC','YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"')) FROM g6_readiness_markers m ORDER BY m.written_at" \
     >"${dir}/markers.jsonl"
   # per-agent durable journals: the effect population keyed by the binary
   # command id, joined through the journal's own idempotency identity
@@ -839,7 +896,7 @@ phase_evidence_collect() {
     service="agent-${FD_ID}-$(printf '%02d' "${index}")"
     journal_query "${service}" \
       "SELECT hex(e.idempotency_key)||' '||hex(j.command_id)||' '||e.executed_at FROM synthetic_effects e JOIN command_journal j ON j.idempotency_key=e.idempotency_key" \
-      >"${dir}/effects/${service}.tsv" 2>/dev/null || : >"${dir}/effects/${service}.tsv"
+      >"${dir}/effects/${service}.tsv"
   done
   # this failure domain's container inventory
   : >"${dir}/instances.tsv"
@@ -858,8 +915,8 @@ phase_evidence_build() {
   require_file "${peer}/evidence/instances.tsv"
   require_file "${G6RD_STATE}/evidence/commands.jsonl"
   mkdir -p "${out}"
-  node "${ROOT}/scripts/build-g6-evidence.mjs" \
-    --state-dir "${G6RD_STATE}" \
+  "${G6RD_NODE_BIN:-node}" "${ROOT}/scripts/build-g6-evidence.mjs" \
+    --run-dir "${G6RD_WORK}" \
     --peer-dir "${peer}" \
     --out-dir "${out}" \
     --slo "${ROOT}/docs/acceptance/g6-slo.yaml" \
@@ -873,7 +930,7 @@ phase_evidence_build() {
   # verdict (the authority fence alone keeps it non-final), but any parse
   # or integrity rejection fails the run.
   local verify_status=0
-  node "${ROOT}/scripts/verify-g6-evidence.mjs" \
+  "${G6RD_NODE_BIN:-node}" "${ROOT}/scripts/verify-g6-evidence.mjs" \
     --slo "${ROOT}/docs/acceptance/g6-slo.yaml" \
     --evidence "${out}/evidence.json" \
     --topology "${out}/topology.json" \
