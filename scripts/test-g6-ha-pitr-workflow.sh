@@ -184,6 +184,36 @@ if [[ -z "${rejoin_wait_line}" || -z "${finalize_line}" ||
   exit 1
 fi
 
+# The prepare phase derives the tunnel node id for the rendezvous artifact,
+# so the tunnel binary must be built there (via the shared helper, with the
+# pinned toolchain on PATH from env.sh); the compose interpolation may only
+# reference variables the harness env actually exports, and per-role
+# application names arrive through PGAPPNAME (pgx libpq fallback), never a
+# shell G6_ROLE_NAME.
+if grep -q 'G6_ROLE_NAME' "${COMPOSE_FILE}"; then
+  echo "compose must not reference G6_ROLE_NAME; role names arrive via PGAPPNAME" >&2
+  exit 1
+fi
+pgappname_count="$(grep -c 'PGAPPNAME: ${G6_FD_ID:?}-' "${COMPOSE_FILE}")"
+if [[ "${pgappname_count}" -ne 3 ]]; then
+  echo "each role service must set its PGAPPNAME from G6_FD_ID (found ${pgappname_count})" >&2
+  exit 1
+fi
+grep -q 'source "${G6HA_ROOT}/scripts/env.sh"' "${LIB}" || {
+  echo "the shared lib must source env.sh so cargo is on PATH in every phase" >&2
+  exit 1
+}
+grep -q "g6_ha_build_tunnel()" "${LIB}" || {
+  echo "the shared lib must define the tunnel build helper" >&2
+  exit 1
+}
+for fd_script in "${FD_A}" "${FD_B}"; do
+  grep -q "g6_ha_build_tunnel" "${fd_script}" || {
+    echo "${fd_script} must build the tunnel binary in its prepare phase" >&2
+    exit 1
+  }
+done
+
 # Every pinned action must reuse an exact `uses: action@sha` line already
 # proven by a merged workflow with hosted execution. A well-formed but
 # nonexistent SHA passes the format check yet fails the dispatch-only run at

@@ -50,7 +50,7 @@ jobs:
       - name: Wait for failure domain B rendezvous
         env:
           GITHUB_TOKEN: ${{ github.token }}
-        run: scripts/real-e2e-artifact.sh wait-download "g6-ha-tunnel-fd-b-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" "${RUNNER_TEMP}/g6-ha-tunnel-fd-b" 600
+        run: scripts/real-e2e-artifact.sh wait-download "g6-ha-tunnel-fd-b-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" "${RUNNER_TEMP}/g6-ha-tunnel-fd-b" 1200
       - name: Build failure domain A images and tunnel
         run: scripts/g6-ha-pitr-fd-a.sh images
       - name: Start pinned tunnels
@@ -187,7 +187,7 @@ jobs:
       - name: Wait for failure domain A rendezvous
         env:
           GITHUB_TOKEN: ${{ github.token }}
-        run: scripts/real-e2e-artifact.sh wait-download "g6-ha-tunnel-fd-a-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" "${RUNNER_TEMP}/g6-ha-tunnel-fd-a" 600
+        run: scripts/real-e2e-artifact.sh wait-download "g6-ha-tunnel-fd-a-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" "${RUNNER_TEMP}/g6-ha-tunnel-fd-a" 1200
       - name: Build failure domain B images and tunnel
         run: scripts/g6-ha-pitr-fd-b.sh images
       - name: Start pinned tunnels

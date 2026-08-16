@@ -23,7 +23,11 @@ x-role-defaults: &role-defaults
   environment: &role-environment
     OCSERV_ENVIRONMENT: development
     OCSERV_DEV_AUTH: "true"
-    OCSERV_DATABASE_URL: postgres://ocservia_app:${G6_APP_PASSWORD:?}@${G6_DB_HOST:?}:5432/ocservia?sslmode=disable&application_name=${G6_FD_ID:?}-${G6_ROLE_NAME:?}
+    # application_name comes from each role service's PGAPPNAME (pgx honors
+    # the libpq environment fallback for parameters absent from the URL);
+    # baking a per-role suffix into this URL would require a shell variable
+    # during every compose command that the harness never exports.
+    OCSERV_DATABASE_URL: postgres://ocservia_app:${G6_APP_PASSWORD:?}@${G6_DB_HOST:?}:5432/ocservia?sslmode=disable
     OCSERV_RUNTIME_DATABASE_ROLE: ocservia_app
     OCSERV_AUDIT_EVENT_KEY_ID: g6-ha-pitr-v1
     OCSERV_TEST_AUDIT_EVENT_KEY_HEX: "4536474747474747474747474747474747474747474747474747474747474747"
@@ -169,14 +173,14 @@ services:
     environment:
       <<: *role-environment
       OCSERV_HTTP_ADDRESS: 0.0.0.0:8080
-      G6_ROLE_NAME: api
+      PGAPPNAME: ${G6_FD_ID:?}-api
 
   worker:
     <<: *role-defaults
     command: ["--role=worker"]
     environment:
       <<: *role-environment
-      G6_ROLE_NAME: worker
+      PGAPPNAME: ${G6_FD_ID:?}-worker
       OCSERV_TRUST_SOCKET: /run/ocserv-trust/control-plane.sock
     volumes:
       - type: volume
@@ -191,7 +195,7 @@ services:
     command: ["--role=scheduler"]
     environment:
       <<: *role-environment
-      G6_ROLE_NAME: scheduler
+      PGAPPNAME: ${G6_FD_ID:?}-scheduler
 
   transportd:
     <<: *service-defaults
