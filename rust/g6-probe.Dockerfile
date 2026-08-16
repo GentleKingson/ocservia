@@ -11,7 +11,7 @@ RUN cargo build --locked --release --package ocservia-g6-probe
 
 FROM debian:bookworm-slim@sha256:abd67ffcfa541b485a3dff59865ab629aa048a6c613e639d36e7456b0b229241
 RUN groupadd --system --gid 65532 ocservia \
-    && useradd --system --uid 65534 --gid ocservia --home-dir /nonexistent --shell /usr/sbin/nologin g6-probe
+    && usermod --gid ocservia nobody
 COPY --from=build /src/target/release/ocservia-g6-probe /usr/local/bin/ocservia-g6-probe
-USER g6-probe:ocservia
+USER nobody:ocservia
 ENTRYPOINT ["/usr/local/bin/ocservia-g6-probe"]
