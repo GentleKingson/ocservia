@@ -249,6 +249,43 @@ grep -qF 'for log in "${G6HA_LOGS}"/*.log' "${LIB}" || {
   exit 1
 }
 
+# psql -v variables do not survive `docker compose exec` argument passing on
+# every hosted compose version; an undefined reference reaches the server raw
+# and fails with a syntax error at the colon. SQL literals must be inlined
+# behind charset guards instead.
+for fd_script in "${FD_A}" "${FD_B}"; do
+  if grep -qF ":'" "${fd_script}"; then
+    echo "psql variable interpolation is forbidden in ${fd_script}; inline guarded literals" >&2
+    exit 1
+  fi
+done
+
+# The role DSN must take its port from G6_DB_PORT: fd-b roles before promotion
+# and fd-a roles after recovery dial the forwarded tunnel on 15432, while a
+# locally served primary answers on 5432. A hardcoded port makes the first
+# cross-domain role dial refuse connections.
+grep -qF ':${G6_DB_PORT:?}/ocservia' "${COMPOSE_FILE}" || {
+  echo "role DSN must interpolate G6_DB_PORT" >&2
+  exit 1
+}
+grep -qF 'export G6_DB_PORT=15432' "${FD_B}" || {
+  echo "fd-b must dial the forwarded tunnel port for its pre-promotion roles" >&2
+  exit 1
+}
+grep -qF 'export G6_DB_PORT=5432' "${FD_B}" || {
+  echo "fd-b must reset the direct port when it becomes the primary" >&2
+  exit 1
+}
+grep -qF 'export G6_DB_PORT=15432' "${FD_A}" || {
+  echo "fd-a must dial the forwarded tunnel port after losing the primary role" >&2
+  exit 1
+}
+db_port_defaults="$(grep -cF 'export G6_DB_PORT="${G6_DB_PORT:-5432}"' "${LIB}")"
+if [[ "${db_port_defaults}" -ne 2 ]]; then
+  echo "both compose env helpers must default G6_DB_PORT (found ${db_port_defaults})" >&2
+  exit 1
+fi
+
 # Every artifact name the workflow waits on must pass the shared artifact
 # helper's allowlist; the validator once rejected the whole g6-ha family and
 # both jobs died at their first rendezvous.

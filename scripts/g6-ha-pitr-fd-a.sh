@@ -43,11 +43,18 @@ rejoined_in_recovery() {
 # is decided by writability alone.
 attempt_primary_write_raw() {
   local probe_id="${1:?probe id is required}"
+  # The id is inlined as a literal (after a strict charset guard) instead of a
+  # psql variable: -v argument passing through `docker compose exec` differs
+  # across compose versions on the hosted runners, and psql passes an
+  # undefined variable reference through raw to the server.
+  [[ "${probe_id}" =~ ^[A-Za-z0-9._-]+$ ]] || {
+    echo "probe id contains unexpected characters: ${probe_id}" >&2
+    return 1
+  }
   docker run --rm --network host --log-driver none postgres:17.10-bookworm \
     psql "host=127.0.0.1 port=5432 user=ocservia_owner dbname=ocservia sslmode=disable" \
     -v ON_ERROR_STOP=1 \
-    -v probe_id="${probe_id}" \
-    -c "INSERT INTO g6_ha_markers(id, txid, phase) VALUES (:'probe_id', txid_current()::text, 'probe') ON CONFLICT (id) DO UPDATE SET written_at = now()"
+    -c "INSERT INTO g6_ha_markers(id, txid, phase) VALUES ('${probe_id}', txid_current()::text, 'probe') ON CONFLICT (id) DO UPDATE SET written_at = now()"
 }
 
 attempt_primary_write() {
@@ -193,8 +200,15 @@ write_failover_markers() {
   printf '[' >>"${G6HA_OUTBOX}/load-markers.json"
   for index in $(seq 1 "${MARKER_COUNT}"); do
     payload="g6-ha-failover-marker-${RUN_ID}-${index}"
-    row="$(g6_ha_psql -At -v payload="${payload}" -v phase=failover-load \
-      -c "INSERT INTO g6_ha_markers(id, txid, phase) VALUES (:'payload', txid_current()::text, :'phase') RETURNING id || ' ' || txid || ' ' || to_char(written_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"')")"
+    # Inlined literal, never a psql variable: compose exec mangles -v passing
+    # on some runner compose versions (an undefined variable reference reaches
+    # the server raw and fails with a syntax error at the colon).
+    [[ "${payload}" =~ ^[A-Za-z0-9._-]+$ ]] || {
+      echo "marker payload contains unexpected characters: ${payload}" >&2
+      return 1
+    }
+    row="$(g6_ha_psql -At \
+      -c "INSERT INTO g6_ha_markers(id, txid, phase) VALUES ('${payload}', txid_current()::text, 'failover-load') RETURNING id || ' ' || txid || ' ' || to_char(written_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"')")"
     [[ "${row}" == "${payload} "* ]] || {
       echo "marker insert failed at index ${index}" >&2
       return 1
@@ -231,8 +245,12 @@ phase_load() {
 
 pitr_marker_row() {
   local label="${1:?marker label is required}"
-  g6_ha_psql -At -v label="${label}" -v phase=pitr \
-    -c "INSERT INTO g6_ha_markers(id, txid, phase) VALUES ('pitr-' || :'label', txid_current()::text, :'phase') RETURNING id || ' ' || txid || ' ' || to_char(written_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"')"
+  [[ "${label}" =~ ^[a-z]+$ ]] || {
+    echo "pitr marker label contains unexpected characters: ${label}" >&2
+    return 1
+  }
+  g6_ha_psql -At \
+    -c "INSERT INTO g6_ha_markers(id, txid, phase) VALUES ('pitr-${label}', txid_current()::text, 'pitr') RETURNING id || ' ' || txid || ' ' || to_char(written_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"')"
 }
 
 phase_pitr() {
@@ -395,6 +413,7 @@ phase_recover_roles() {
   # fd-b now serves the promoted primary; this side becomes the forwarder.
   g6_ha_tunnel_forward "$(peer_node_id)"
   export G6_DB_HOST=host.docker.internal
+  export G6_DB_PORT=15432
   g6_ha_export_common_env
   g6_ha_compose up --detach worker
   g6_ha_wait_until 60 1 "worker trust socket after failover" \

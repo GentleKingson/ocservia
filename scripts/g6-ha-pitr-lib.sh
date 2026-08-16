@@ -73,6 +73,7 @@ g6_ha_placeholder_env() {
   export G6_ARCHIVE_DIR="${G6_ARCHIVE_DIR:-${G6HA_ARCHIVE}}"
   export G6_BASEBACKUP_DIR="${G6_BASEBACKUP_DIR:-${G6HA_BASEBACKUP}}"
   export G6_DB_HOST="${G6_DB_HOST:-postgres}"
+  export G6_DB_PORT="${G6_DB_PORT:-5432}"
 }
 
 g6_ha_export_common_env() {
@@ -87,6 +88,7 @@ g6_ha_export_common_env() {
   export G6_ARCHIVE_DIR="${G6HA_ARCHIVE}"
   export G6_BASEBACKUP_DIR="${G6HA_BASEBACKUP}"
   export G6_DB_HOST="${G6_DB_HOST:-postgres}"
+  export G6_DB_PORT="${G6_DB_PORT:-5432}"
   if [[ -s "${G6HA_STATE}/controller-endpoint-id" ]]; then
     OCSERV_CONTROLLER_ENDPOINT_ID="$(<"${G6HA_STATE}/controller-endpoint-id")"
     export OCSERV_CONTROLLER_ENDPOINT_ID
@@ -387,11 +389,25 @@ g6_ha_strip_secrets_from_artifacts() {
 g6_ha_cleanup() {
   local status=0 pitr_container="${COMPOSE_PROJECT}-pitr"
   if docker container inspect "${pitr_container}" >/dev/null 2>&1; then
-    docker rm -f "${pitr_container}" >/dev/null 2>&1 || status=1
+    docker rm -f "${pitr_container}" >/dev/null 2>&1 || {
+      echo "cleanup: pitr container removal failed" >&2
+      status=1
+    }
   fi
-  g6_ha_tunnel_stop || status=1
-  g6_ha_compose down --volumes --remove-orphans --rmi local >/dev/null 2>&1 || status=1
-  rm -rf -- "${G6HA_WORK}" "${RUNNER_TEMP}"/g6-ha-* || status=1
+  g6_ha_tunnel_stop || {
+    echo "cleanup: tunnel stop failed" >&2
+    status=1
+  }
+  if ! g6_ha_compose down --volumes --remove-orphans --rmi local \
+    >"${G6HA_LOGS:-${RUNNER_TEMP}}/compose-down.log" 2>&1; then
+    echo "cleanup: compose down failed; output follows:" >&2
+    sed -n '1,40p' "${G6HA_LOGS:-${RUNNER_TEMP}}/compose-down.log" >&2 || true
+    status=1
+  fi
+  rm -rf -- "${G6HA_WORK}" "${RUNNER_TEMP}"/g6-ha-* || {
+    echo "cleanup: work directory removal failed" >&2
+    status=1
+  }
   local volume image
   for volume in postgres-data controller-secrets transport-runtime trust-runtime; do
     if docker volume inspect "${COMPOSE_PROJECT}_${volume}" >/dev/null 2>&1; then

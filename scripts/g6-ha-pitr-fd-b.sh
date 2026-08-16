@@ -107,6 +107,7 @@ phase_standby_bootstrap() {
 
 phase_roles_up() {
   export G6_DB_HOST=host.docker.internal
+  export G6_DB_PORT=15432
   bootstrap_controller_endpoint
   g6_ha_export_common_env
   g6_ha_compose up --detach worker
@@ -189,6 +190,7 @@ phase_promote() {
 
   # Re-point every role at the now-authoritative local primary and recover.
   export G6_DB_HOST=postgres
+  export G6_DB_PORT=5432
   g6_ha_export_common_env
   g6_ha_compose up --detach worker
   g6_ha_wait_until 60 1 "worker trust socket after promotion" \
