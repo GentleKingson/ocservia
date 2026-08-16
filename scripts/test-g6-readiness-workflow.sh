@@ -500,5 +500,46 @@ while IFS= read -r pin; do
   }
 done < <(grep -hoE 'uses: [^@]+@[0-9a-f]{40}' "${WORKFLOW}" | sort -u)
 
+# A policy failure can invoke cleanup before prepare has created any secrets.
+# Exercise that path with a recording Docker shim: cleanup must use inert
+# placeholders, remain scoped, and remove its run directory successfully.
+cleanup_test="$(mktemp -d)"
+mkdir -p "${cleanup_test}/bin" "${cleanup_test}/runner-temp"
+cat >"${cleanup_test}/bin/docker" <<'SHIM'
+#!/usr/bin/env bash
+set -euo pipefail
+case "${1:-} ${2:-}" in
+  "compose "*)
+    for name in G6_FD_ID G6_OWNER_PASSWORD G6_APP_PASSWORD \
+      G6_REPLICATION_PASSWORD G6_DEV_AUTH_TOKEN G6_SIGNING_DIR G6_RELAY_DIR; do
+      [[ -n "${!name:-}" ]] || {
+        echo "cleanup compose environment is missing ${name}" >&2
+        exit 1
+      }
+    done
+    ;;
+  "volume inspect" | "network inspect") exit 1 ;;
+  "images --format") exit 0 ;;
+  "run --rm") exit 0 ;;
+esac
+exit 0
+SHIM
+chmod +x "${cleanup_test}/bin/docker"
+(
+  export PATH="${cleanup_test}/bin:${PATH}"
+  export RUNNER_TEMP="${cleanup_test}/runner-temp"
+  export RUN_ID=cleanup-before-prepare-fd-a
+  export FD_ID=fd-a
+  export FD_ALIAS=fd-alpha
+  export G6_AUTHORITY=engineering
+  export G6RD_CANDIDATE_SHA=5f9a2a943d7aa38224bc3266b7176f0a061a6b6c
+  source "${LIB}"
+  g6rd_init_environment
+  work="${G6RD_WORK}"
+  g6rd_cleanup
+  [[ ! -e "${work}" ]]
+)
+rm -rf "${cleanup_test}"
+
 shellcheck "${LIB}" "${FD_A}" "${FD_B}" "${SUPERVISOR}" "${ROOT}/scripts/real-e2e-artifact.sh"
 echo "g6-readiness policy checks passed"

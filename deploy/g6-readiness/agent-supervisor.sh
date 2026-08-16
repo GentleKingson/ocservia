@@ -107,7 +107,7 @@ run)
         kill "$privd_pid" 2>/dev/null || true
         exit 1
     }
-    # shellcheck disable=SC2329  # invoked by the signal trap below
+    # shellcheck disable=SC2317,SC2329  # invoked by the signal trap below
     shutdown() {
         kill "$agent_pid" "$privd_pid" 2>/dev/null || true
         wait "$agent_pid" 2>/dev/null || true

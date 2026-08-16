@@ -226,6 +226,12 @@ g6rd_relay_url_b() {
 }
 
 g6rd_export_common_env() {
+  local required
+  for required in owner-password app-password replication-password dev-auth-token \
+    command-signing.pem command-verification.pem relay-chain.crt relay-leaf.key \
+    relay-ca.pem relay-token; do
+    [[ -s "${G6RD_SECRETS}/${required}" ]] || return 1
+  done
   export G6_FD_ID="${FD_ID}"
   export G6_OWNER_PASSWORD="${G6_OWNER_PASSWORD:-$(g6rd_secret owner-password)}"
   export G6_APP_PASSWORD="${G6_APP_PASSWORD:-$(g6rd_secret app-password)}"
@@ -277,7 +283,9 @@ g6rd_placeholder_env() {
 
 g6rd_compose() {
   if [[ -z "${G6_OWNER_PASSWORD:-}" || -z "${G6_DEV_AUTH_TOKEN:-}" || -z "${G6_FD_ID:-}" ]]; then
-    g6rd_export_common_env || g6rd_placeholder_env
+    if ! g6rd_export_common_env; then
+      g6rd_placeholder_env
+    fi
   fi
   docker compose --project-name "${COMPOSE_PROJECT}" --file "${COMPOSE_FILE}" "$@"
 }
