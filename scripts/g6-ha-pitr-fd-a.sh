@@ -391,6 +391,14 @@ phase_isolate() {
   }
   outage_row="$(g6_ha_psql -At -c \
     "INSERT INTO g6_ha_markers(id, txid, phase) VALUES ('outage-declared', txid_current()::text, 'outage') RETURNING to_char(written_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"')")"
+  # Keep only the RETURNING tuple; psql appends its INSERT command tag on a
+  # second line, which would make the recovery artifact fail strict RFC 3339
+  # verification even though jq's date parser accepts the prefix.
+  outage_row="${outage_row%%$'\n'*}"
+  [[ "${outage_row}" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$ ]] || {
+    echo "outage declaration does not match the RFC 3339 timestamp shape" >&2
+    return 1
+  }
   g6_ha_compose stop api scheduler worker transportd
   g6_ha_compose stop postgres
   isolated_at="$(g6_ha_now)"

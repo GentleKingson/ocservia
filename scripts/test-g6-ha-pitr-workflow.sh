@@ -314,11 +314,12 @@ grep -qF 'for pg_dir in "${G6HA_ARCHIVE}" "${G6HA_BASEBACKUP}" "${G6HA_RESTORE}"
 }
 
 # psql -At still prints the INSERT command tag on its own line after a
-# RETURNING tuple; both marker row readers must keep only the tuple before
-# the shape guard, or the tag reaches the evidence JSON as a raw newline.
+# RETURNING tuple; the load marker, PITR marker, and outage declaration row
+# readers must keep only the tuple before the shape guard, or the tag reaches
+# the evidence JSON as a raw newline.
 tag_truncations="$(grep -cF "\$'\n'*" "${FD_A}")"
-if [[ "${tag_truncations}" -ne 2 ]]; then
-  echo "both marker row readers must truncate at the first newline (found ${tag_truncations})" >&2
+if [[ "${tag_truncations}" -ne 3 ]]; then
+  echo "all RETURNING row readers must truncate at the first newline (found ${tag_truncations})" >&2
   exit 1
 fi
 
