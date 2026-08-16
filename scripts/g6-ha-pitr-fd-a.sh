@@ -51,7 +51,8 @@ attempt_primary_write_raw() {
     echo "probe id contains unexpected characters: ${probe_id}" >&2
     return 1
   }
-  docker run --rm --network host --log-driver none postgres:17.10-bookworm \
+  docker run --rm --network host --log-driver none \
+    -e PGPASSWORD="$(g6_ha_secret owner-password)" postgres:17.10-bookworm \
     psql "host=127.0.0.1 port=5432 user=ocservia_owner dbname=ocservia sslmode=disable" \
     -v ON_ERROR_STOP=1 \
     -c "INSERT INTO g6_ha_markers(id, txid, phase) VALUES ('${probe_id}', txid_current()::text, 'probe') ON CONFLICT (id) DO UPDATE SET written_at = now()"

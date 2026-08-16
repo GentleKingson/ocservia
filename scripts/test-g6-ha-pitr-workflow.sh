@@ -356,6 +356,14 @@ grep -qF '[0-9]{2}\.[0-9]{6}Z$' "${FD_A}" || {
   exit 1
 }
 
+# The former-primary sanity probe must authenticate through the exact path
+# later used for fencing. Without the owner password every probe is rejected
+# by pg_hba, making a healthy writable primary look fenced.
+grep -qF -- '-e PGPASSWORD="$(g6_ha_secret owner-password)"' "${FD_A}" || {
+  echo "former-primary write probes must authenticate as ocservia_owner" >&2
+  exit 1
+}
+
 # Every artifact name the workflow waits on must pass the shared artifact
 # helper's allowlist; the validator once rejected the whole g6-ha family and
 # both jobs died at their first rendezvous.
