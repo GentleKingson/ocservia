@@ -673,6 +673,17 @@ EOF
   } >"${G6RD_AGENT_COMPOSE}"
 }
 
+# Compose validates overlay bind sources even when `down` is cleaning a
+# partially prepared run. Create only the empty directory skeleton here; live
+# phases still require g6rd_prepare_agent_material to install every key.
+g6rd_prepare_agent_cleanup_dirs() {
+  local index dir
+  for index in $(seq 1 "$(g6rd_agent_count)"); do
+    dir="$(g6rd_agent_dir "${index}")"
+    mkdir -p "${dir}/identity" "${dir}/journal" "${dir}/secrets" "${dir}/state"
+  done
+}
+
 # The agent process (uid 65532) owns its identity, journal, and state binds;
 # hand the directories over through a short-lived root container the way the
 # stage-6 harness reclaims PostgreSQL directories.
@@ -931,6 +942,7 @@ g6rd_cleanup() {
     status=1
   }
   if [[ -s "${G6RD_AGENT_COMPOSE}" ]]; then
+    g6rd_prepare_agent_cleanup_dirs
     if ! g6rd_agent_compose down --volumes --remove-orphans --rmi local \
       >"${G6RD_LOGS}/compose-down-agents.log" 2>&1; then
       echo "cleanup: agent compose down failed" >&2

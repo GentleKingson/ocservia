@@ -10,6 +10,7 @@ FD_A="${ROOT}/scripts/g6-readiness-fd-a.sh"
 FD_B="${ROOT}/scripts/g6-readiness-fd-b.sh"
 BUILDER="${ROOT}/scripts/build-g6-evidence.mjs"
 SLO="${ROOT}/docs/acceptance/g6-slo.yaml"
+PROBE_DOCKERFILE="${ROOT}/rust/g6-probe.Dockerfile"
 
 ruby -r yaml - "${WORKFLOW}" "${COMPOSE_FILE}" <<'RUBY'
 workflow_path, compose_path = ARGV
@@ -70,6 +71,21 @@ reject("transportd must enforce owner fencing for the stale-rejection scenarios"
 pgappname_count = compose.fetch("services").values.count { |service| service.dig("environment", "PGAPPNAME").to_s.start_with?("${G6_FD_ID:?}-") }
 reject("each role service must set its PGAPPNAME from G6_FD_ID (found #{pgappname_count})") unless pgappname_count == 3
 RUBY
+
+# Debian already assigns UID 65534 to nobody. The probe must reuse that
+# account rather than attempting to create a duplicate numeric identity.
+if grep -Eq 'useradd.*--uid 65534' "${PROBE_DOCKERFILE}"; then
+  echo "the G6 probe image must not create Debian's existing UID 65534" >&2
+  exit 1
+fi
+grep -qF 'usermod --gid ocservia nobody' "${PROBE_DOCKERFILE}" || {
+  echo "the G6 probe image must join nobody to the transport peer group" >&2
+  exit 1
+}
+grep -q '^USER nobody:ocservia$' "${PROBE_DOCKERFILE}" || {
+  echo "the G6 probe image must run as the transport-authorized nobody account" >&2
+  exit 1
+}
 
 # Every required observation event from g6-slo.yaml must be produced by the
 # harness timeline: this stage runs the real fault scenarios, so all sixteen
@@ -517,6 +533,16 @@ case "${1:-} ${2:-}" in
         exit 1
       }
     done
+    if [[ " $* " == *" agents-fd-a.yaml "* ]]; then
+      for index in 01 02; do
+        for dir in identity journal secrets state; do
+          [[ -d "${G6RD_TEST_AGENT_ROOT}/agent-fd-a-${index}/${dir}" ]] || {
+            echo "agent cleanup bind directory is missing: agent-fd-a-${index}/${dir}" >&2
+            exit 1
+          }
+        done
+      done
+    fi
     ;;
   "volume inspect" | "network inspect") exit 1 ;;
   "images --format") exit 0 ;;
@@ -533,9 +559,14 @@ chmod +x "${cleanup_test}/bin/docker"
   export FD_ALIAS=fd-alpha
   export G6_AUTHORITY=engineering
   export G6RD_CANDIDATE_SHA=5f9a2a943d7aa38224bc3266b7176f0a061a6b6c
+  export G6_AGENTS_A=2
   source "${LIB}"
   g6rd_init_environment
   work="${G6RD_WORK}"
+  g6rd_placeholder_env
+  g6rd_write_agent_overlay "$(g6rd_agent_count)"
+  rm -rf "${G6RD_AGENTS}"
+  export G6RD_TEST_AGENT_ROOT="${G6RD_AGENTS}"
   g6rd_cleanup
   [[ ! -e "${work}" ]]
 )
