@@ -43,6 +43,7 @@ services = compose.fetch("services")
 required = %w[postgres migrate api worker scheduler transportd
               controller-key-init transport-runtime-init transport-endpoint-bootstrap]
 reject("G6 HA compose service set is incomplete") unless (required - services.keys).empty?
+reject("postgres must receive stop signals directly so fencing leaves a clean data directory") unless services.fetch("postgres").fetch("init") == false
 roles = %w[api worker scheduler].to_h { |role| [role, services.fetch(role).fetch("command").fetch(0)] }
 reject("control-plane roles must be split") unless roles == {"api" => "--role=api", "worker" => "--role=worker", "scheduler" => "--role=scheduler"}
 reject("worker must own the trust socket") unless services.fetch("worker").fetch("environment").key?("OCSERV_TRUST_SOCKET")

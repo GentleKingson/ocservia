@@ -52,6 +52,10 @@ x-role-defaults: &role-defaults
 services:
   postgres:
     <<: *service-defaults
+    # PostgreSQL is the service init process. A separate init shim cannot
+    # forward the image's stop signal to the postgres uid under cap_drop ALL,
+    # leaving an unclean data directory that pg_rewind refuses to reuse.
+    init: false
     # The official entrypoint starts as root: it chmod/chowns the data volume
     # and re-execs as the postgres user. With every capability dropped that
     # root phase dies with EPERM before initdb, so postgres keeps exactly the
