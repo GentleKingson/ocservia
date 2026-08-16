@@ -1,128 +1,214 @@
 # GitHub Actions validation
 
 GitHub Actions is the authoritative merge-time validation environment. The
-primary workflow runs three independent execution jobs in parallel on fresh
-GitHub-hosted `ubuntu-24.04` VMs with read-only repository permissions. Pull
-requests and pushes to `main` run the workflow, and maintainers can also start
-it manually. Local commands reproduce behavior but never replace required
-checks.
+primary workflow runs on pull requests, pushes to `main`, and manual dispatch.
+It uses GitHub-hosted `ubuntu-24.04` runners, read-only repository permissions,
+and no production secrets. Local commands reproduce behavior but never replace
+the required checks for the exact pull-request commit.
 
-## Coverage
+## Execution graph
 
-| Job | Commands and level | Bootstrap profile | Trigger | Hard timeout |
+The primary workflow has 15 worker job definitions. The PostgreSQL matrix
+expands one definition into separate PostgreSQL 17 and 18 executions, so a full
+run has 16 worker executions. Three lightweight result aggregators preserve the
+stable required-check names. Workers start independently except that the two
+PostgreSQL workers and Local Slice wait for the commit-bound runtime artifact.
+
+| Worker execution | Coverage | Bootstrap profile | Timeout | Required-check aggregator |
 | --- | --- | --- | --- | --- |
-| Backend Integration | Go checks, PostgreSQL 17/18, I14-I19 boundaries, production topology and relay recovery, and the Go/PostgreSQL/UDS/Rust-stub local slice | `go-integration` | PR, `main`, manual | 40 minutes |
-| Web & Smoke | Web static/unit/build/audit checks, isolated Compose Playwright desktop/mobile E2E, P1 harness tests, and the unchanged 24-Agent smoke profile | `web` | PR, `main`, manual | 35 minutes |
-| Quality, Security & Native | repository policy, docs, workflow policy, contracts, Rust, privilege and transport boundaries, secret and license checks, then native Ocserv | `ci-quality` | PR, `main`, manual | 30 minutes |
-| P1 Full Validation | default 500-Agent single-VM profile and all fault phases | none | manual only | 45 minutes |
+| Build Runtime Artifacts | Builds `ocserv-control` and `ocservia-transportd-stub` once | `go-rust-integration` | 15 minutes | Backend Integration |
+| Go Static and Unit | Format, vet, staticcheck, unit tests, and govulncheck | `go-quality` | 20 minutes | Backend Integration |
+| Go Race | Full Go race suite | `go-test` | 20 minutes | Backend Integration |
+| PostgreSQL 17 Integration | PostgreSQL 17 migrations, rollback, runtime, and failure behavior | `go-test` | 25 minutes | Backend Integration |
+| PostgreSQL 18 Integration | PostgreSQL 18 coverage plus the legacy full upgrade fixture | `go-test` | 25 minutes | Backend Integration |
+| I14-I19 Contracts | Focused I14-I17 and I19 contract assertions | none | 10 minutes | Backend Integration |
+| I18 Production Relays | Production topology, controlled relay failover, backup restore, and Agent package lifecycle | `go-rust-integration` | 25 minutes | Backend Integration |
+| PostgreSQL Credential Rotation | Application and backup credential rotation | none | 15 minutes | Backend Integration |
+| Local Slice | Go, PostgreSQL, UDS, and Rust-stub integration | none | 15 minutes | Backend Integration |
+| Web Static and Unit | Web format, type, unit, build, and audit checks | `web` | 20 minutes | Web & Smoke |
+| Browser E2E | Isolated Compose Playwright desktop and mobile E2E | none | 25 minutes | Web & Smoke |
+| P1 Smoke | P1 harness tests and the unchanged 24-Agent smoke profile | none | 20 minutes | Web & Smoke |
+| Contracts and Policy | Repository policy, docs, workflow policy, generation, lint, and breaking-change checks | `contracts` | 20 minutes | Quality, Security & Native |
+| Rust Validation | Rust format, clippy, workspace tests, audit, and agent/transport boundaries | `rust-validation` | 25 minutes | Backend Integration and Quality, Security & Native |
+| Security and Licenses | Secret and license policy checks | `security` | 20 minutes | Quality, Security & Native |
+| Native Ocserv | Ephemeral native package, `ocpasswd`, OpenSSL, and loopback login fixture | `native` | 20 minutes | Quality, Security & Native |
 
-The focused I10 journal tests are included in the Rust workspace run. The I11
-Go/Rust tests are included in the language checks and its boundary assertions
-run in the quality job. Separate focused jobs would repeat the same expensive
-workspace tests, so their scripts remain local reproduction commands.
+Rust Validation executes once and feeds two aggregators. Each aggregator has a
+five-minute timeout, uses `always()`, accepts only successful or intentionally
+skipped dependencies, and fails for cancelled, failed, or timed-out workers.
+The workflow currently has no path-based worker skipping.
 
-Backend Integration also validates the hardened production Compose topology, a
-controlled two-relay failover, PostgreSQL base-backup restore, and the signed
-Agent package install, upgrade, uninstall, and state-retention lifecycle.
+The focused I10 journal tests remain in the Rust workspace run. The I11
+Go/Rust tests remain in the dedicated language workers, while its boundary
+assertions run with the applicable contract and Rust workers. The I14-I19
+`--contract-only` modes omit only repeated Go or Rust language-suite
+invocations; they retain the stage-specific contract, topology, relay,
+recovery, backup, packaging, and policy assertions owned by those scripts.
 
-Native Ocserv is deliberately last in Quality, Security & Native. Its ephemeral
-package installation and root fixture cannot affect policy, contract, Rust,
-security, or license validation earlier on the VM. The fixture still captures
-diagnostics before performing scoped cleanup and fails if cleanup or artifact
-secret scanning fails. Its root-side Cargo build uses a unique target below
-`RUNNER_TEMP`, which is removed after the fixture, so it cannot change the
-user-owned `rust/target` cache.
+P1 Full Validation remains a separate manual `p1-capacity.yml` workflow. It
+runs the default 500-Agent single-VM profile and all fault phases with a
+45-minute timeout. Capacity evidence is not part of ordinary pull-request
+feedback, and the primary workflow keeps the smoke parameters unchanged.
 
-P1 Full Validation remains a separate `workflow_dispatch` workflow because the
-500-Agent profile is capacity evidence, not ordinary pull-request feedback. The
-primary workflow runs the unchanged smoke parameters only.
+## Bootstrap profiles
 
-## Reproducibility and caches
+`toolchains.lock` is the only version source, and `scripts/checksums.txt`
+authenticates downloaded binaries. Every worker that bootstraps tools invokes
+exactly one explicit profile:
 
-`toolchains.lock` is the only version source and `scripts/checksums.txt`
-authenticates downloaded binaries. Each execution job invokes exactly one
-explicit bootstrap profile. The combined `ci-quality` profile installs Go,
-Node/npm, Rust, Buf, OpenAPI Generator, oasdiff, gitleaks, rustfmt, clippy,
-`cargo-audit`, and `cargo-deny`, then installs Web dependencies once. It relies
-on the runner's Java runtime for OpenAPI Generator and does not install protoc
-because contract generation uses pinned Buf remote plugins.
+| Profile | Installed or verified tools | Workers |
+| --- | --- | --- |
+| `go-test` | Go and host `jq` | Go Race; PostgreSQL 17/18 Integration |
+| `go-quality` | Go, staticcheck, govulncheck, and host `jq` | Go Static and Unit |
+| `go-rust-integration` | Go, Rust, staticcheck, govulncheck, sccache, and host `jq` | Build Runtime Artifacts; I18 Production Relays |
+| `web` | Node, pinned npm, and `npm ci` dependencies | Web Static and Unit |
+| `contracts` | Node/npm, Buf, OpenAPI Generator, oasdiff, host Java, and Web dependencies | Contracts and Policy |
+| `rust-validation` | Rust, rustfmt, clippy, cargo-audit, cargo-deny, and sccache | Rust Validation |
+| `security` | Go, Node/npm, Rust, gitleaks, cargo-deny, sccache, and Web dependencies | Security and Licenses |
+| `native` | Rust and sccache | Native Ocserv |
 
-Cache ownership is intentionally narrow:
+Stage contracts, credential rotation, Local Slice, Browser E2E, and P1 Smoke
+use runner-provided tools or artifacts and do not call bootstrap. Outside
+GitHub Actions, `make bootstrap` explicitly selects the complete `all` profile.
 
-| Job | Cached paths |
-| --- | --- |
-| Backend Integration | `.cache/downloads`, `.tools`, `.cache/go-build`, `.cache/go-mod`, `.cache/gopath`; restore-only access to Quality's `rust/target` cache |
-| Web & Smoke | `.cache/downloads`, `.tools`, `.cache/npm` |
-| Quality, Security & Native | `.cache/downloads`, `.tools`, `.cache/npm`, `.cache/go-mod`, `rust/target` |
+## Caches
 
-Keys include the lockfiles and scripts that determine their contents. There are
-no broad restore keys. A cache miss is fully supported, and bootstrap still
-checks versions and checksums after restore. CI never caches `node_modules`,
-credentials, environment files, logs, or test artifacts. Quality is the only
-writer for `rust/target`; Backend uses `actions/cache/restore` with the same key
-as a read-only consumer so its focused Rust boundary tests do not lengthen the
-critical path. Locally, `make bootstrap` explicitly selects the complete `all`
-profile.
+Tool caches contain only `.cache/downloads` and `.tools`. Their exact keys
+include the profile, runner OS and architecture, `toolchains.lock`, checksums,
+bootstrap code, and environment setup. They have no broad restore prefix. A
+cache miss is supported because bootstrap revalidates versions and checksums.
 
-All external Actions are pinned to full commits. Checkout does not persist its
-credential. The workflows do not use secrets, `pull_request_target`, production
-services, self-hosted runners, or application access to the Docker socket.
+| Tool-cache profile | Main-branch writer | Restore consumers |
+| --- | --- | --- |
+| `go-rust-integration` | Build Runtime Artifacts | Build Runtime Artifacts; I18 Production Relays |
+| `go-quality` | Go Static and Unit | Go Static and Unit |
+| `go-test` | Go Race | Go Race; PostgreSQL 17/18 Integration |
+| `web` | Web Static and Unit | Web Static and Unit |
+| `contracts` | Contracts and Policy | Contracts and Policy |
+| `rust-validation` | Rust Validation | Rust Validation |
+| `security` | Security and Licenses | Security and Licenses |
+| `native` | Native Ocserv | Native Ocserv |
 
-## Artifacts and debugging
+The shared Go cache contains `.cache/go-build`, `.cache/go-mod`, and
+`.cache/gopath`. Build Runtime Artifacts, Go Static and Unit, Go Race,
+PostgreSQL 17/18, I18 Production Relays, and Security and Licenses restore it.
+Its primary key includes the exact commit and Go dependency inputs, with
+dependency and platform prefix fallbacks. Go Static and Unit is its only
+writer.
 
-Each execution job uploads one top-level artifact named with the workflow run
+The shared npm cache contains `.cache/npm`. Web Static and Unit, Contracts and
+Policy, and Security and Licenses restore it; Web Static and Unit is its only
+writer. All explicit tool, Go, and npm cache writes require a successful push
+to `main` and a primary-key miss. Pull-request workers are restore-only. CI
+does not cache `node_modules`, credentials, environment files, logs, test
+artifacts, or `rust/target`.
+
+Rust compiler outputs use sccache instead of archiving `rust/target`. Build
+Runtime Artifacts, I18 Production Relays, Rust Validation, Security and
+Licenses, and Native Ocserv:
+
+- request repository-pinned sccache `0.17.0` through the SHA-pinned sccache
+  Action;
+- set `RUSTC_WRAPPER=sccache`, disable Cargo incremental compilation, and
+  normalize the workspace base path;
+- select the GitHub Actions backend only when its runtime credentials and
+  cache endpoint are present;
+- fall back to the local `.cache/sccache` directory outside that environment.
+
+The downloaded sccache binary and platform checksums are pinned in the same
+toolchain files as other bootstrap tools. Native Ocserv preserves the required
+sccache environment across its root fixture while keeping its Cargo target in
+a unique directory below `RUNNER_TEMP`.
+
+## Runtime artifact
+
+Build Runtime Artifacts compiles `ocserv-control` and
+`ocservia-transportd-stub`, then creates
+`runtime-<run>-<attempt>/runtime-artifacts.tar.gz`. Its manifest records the
+full candidate commit and a SHA-256 digest for each executable. Extraction
+allows exactly the manifest and two expected binaries, rejects unsafe or
+unexpected entries, validates both digests, and verifies that the manifest
+commit equals `GITHUB_SHA`.
+
+PostgreSQL 17, PostgreSQL 18, and Local Slice download and validate that
+artifact instead of rebuilding the same binaries. The PostgreSQL matrix uses
+`fail-fast: false`, so a failure in one major does not cancel evidence from the
+other. The PostgreSQL 18-only legacy upgrade fixture runs for `PG_MAJOR=18` or
+the local `PG_MAJOR=all` mode; it is not repeated in the PostgreSQL 17 worker.
+
+## Diagnostics
+
+Uploads use SHA-pinned Actions, one-day retention, and names bound to the run
 and attempt:
 
-| Artifact | Suite directories and contents |
+| Worker | Artifact name |
 | --- | --- |
-| `backend-<run>-<attempt>` | Go check, database integration, I14-I19, and local-slice logs and diagnostics |
-| `web-smoke-<run>-<attempt>` | Web check log, Playwright report/results/traces/screenshots/videos, P1 metrics, fault outputs, and Compose diagnostics |
-| `quality-<run>-<attempt>` | generated-output diff and status, Rust check log, and native Ocserv/OpenConnect diagnostics without keys or passwords |
-| `p1-full-<run>-<attempt>` | manual full-profile parameters, metrics, resource samples, fault outputs, disk snapshots, Compose logs, and exit status |
+| Build Runtime Artifacts | `runtime-<run>-<attempt>` |
+| Go Static and Unit | `go-standard-<run>-<attempt>` |
+| Go Race | `go-race-<run>-<attempt>` |
+| PostgreSQL 17/18 | `database-pg<major>-<run>-<attempt>` |
+| I14-I19 Contracts | `stage-contracts-<run>-<attempt>` |
+| I18 Production Relays | `production-relays-<run>-<attempt>` |
+| PostgreSQL Credential Rotation | `credential-rotation-<run>-<attempt>` |
+| Local Slice | `local-slice-<run>-<attempt>` |
+| Web Static and Unit | `web-validation-<run>-<attempt>` |
+| Browser E2E | `browser-e2e-<run>-<attempt>` |
+| P1 Smoke | `p1-smoke-<run>-<attempt>` |
+| Contracts and Policy | `contracts-<run>-<attempt>` |
+| Rust Validation | `rust-<run>-<attempt>` |
+| Native Ocserv | `native-ocserv-<run>-<attempt>` |
+| P1 Full Validation | `p1-full-<run>-<attempt>` |
 
-E2E and P1 Smoke have different `RUN_ID`, `COMPOSE_PROJECT`, and artifact
-directories. Their scripts capture diagnostics before cleanup, run Compose
-`down --volumes --remove-orphans`, remove only their scoped resources, preserve
-the original test result, and turn cleanup leftovers into job failures.
+Security and Licenses has no separate diagnostic artifact; its secret and
+license results remain in the job log. Browser E2E and P1 Smoke use distinct
+`RUN_ID`, Compose project, and artifact paths. Docker and native scripts capture
+diagnostics before scoped cleanup, preserve the original test result, and turn
+their own leftovers into failures.
 
-Open the failed workflow run, select the named step, then download its job
-artifact and inspect the suite log or exit status. Reproduce from the same
-commit with `make bootstrap` and the script named by the step. Use unique
-`RUN_ID` and `COMPOSE_PROJECT` values for Docker tests. `make verify` covers the
-local language, contract, security, generated, and policy baseline; `make e2e`
-reproduces the browser stack.
+Download one artifact with:
+
+```bash
+gh run download <run-id> --name <artifact-name>
+```
+
+Reproduce from the same commit with the worker's bootstrap profile and script.
+`make verify` covers the local language, contract, security, generated-output,
+and policy baseline; `make e2e` reproduces the browser stack. Docker tests must
+use unique `RUN_ID` and `COMPOSE_PROJECT` values.
 
 ## Required checks
 
-The final branch ruleset requires all three execution check names with strict
-up-to-date checking:
+Branch protection requires only the three stable result aggregators:
 
 - `Backend Integration`
 - `Web & Smoke`
 - `Quality, Security & Native`
 
-GitHub's required-check AND semantics replace the old single-runner gate. Never
-replace these check names in the workflow before the branch ruleset is safely
-migrated to the new successful checks.
+The worker names are visible checks but are not configured individually as
+required checks. Backend Integration waits for its nine worker job definitions,
+including both PostgreSQL matrix executions. Web & Smoke waits for its three
+workers. Quality, Security & Native waits for Contracts and Policy, the shared
+Rust Validation execution, Security and Licenses, and Native Ocserv.
+
+Do not rename an aggregator until the branch ruleset has first been migrated to
+a successful check with the replacement name. A change is fully validated only
+when all three aggregators pass for its exact commit, diagnostic uploads and
+scoped cleanup complete, and any independent gate remains satisfied or is
+explicitly recorded as pending.
 
 ## Deferred native validation
 
 The `native_user_and_group_operations` ignored test and the real I13 loopback
-login are automated in Quality, Security & Native. Pure adapter logic remains
-in ordinary Rust tests. These tests are not reported as hosted validation:
+login run in Native Ocserv. Pure adapter logic remains in ordinary Rust tests.
+These tests are not reported as hosted validation:
 
 - `native_controlled_operations` needs prepared live sessions, an IP ban, and a
-  real `ocserv.service` lifecycle. A future isolated fixture must create those
-  states without touching a runner service outside the test.
+  real `ocserv.service` lifecycle.
 - `native_reload_failure_is_bounded` depends on a deliberately stopped native
-  service. It should move with the same ephemeral systemd fixture.
+  service and belongs with the same isolated systemd fixture.
 - `relay_only_connection_and_disabled_relay_failure` and
-  `relay_and_direct_paths_converge_to_direct` depend on a public Iroh relay and
-  remain deferred. The required Backend Integration check instead uses two
-  controlled local relays and deliberately removes the first relay before
-  proving reconnection through the second.
+  `relay_and_direct_paths_converge_to_direct` depend on a public Iroh relay.
 
-A change is fully validated only when required checks for its exact commit pass,
-diagnostic artifacts are available, cleanup succeeded, and any deferred native
-or independent gate requirement is completed in its defined environment or
-explicitly remains `IN_REVIEW`.
+Backend Integration instead uses two controlled local relays, removes the first
+relay, and proves reconnection through the second. A hosted single-VM workflow
+does not claim multi-host, multi-region, or production failure-domain evidence.

@@ -31,12 +31,13 @@ jobs:
       - name: Runner preflight
         run: scripts/ci-preflight.sh
       - name: Restore verified tools
+        id: runtime-tools-cache
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: |
             .cache/downloads
             .tools
-          key: tooling-v4-go-integration-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'scripts/checksums.txt', 'scripts/bootstrap.sh', 'scripts/env.sh') }}
+          key: tooling-v4-go-rust-integration-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'scripts/checksums.txt', 'scripts/bootstrap.sh', 'scripts/env.sh') }}
       - name: Restore shared Go cache
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
@@ -56,9 +57,17 @@ jobs:
       - name: Configure sccache backend
         run: scripts/configure-sccache.sh
       - name: Bootstrap pinned Go and Rust tools
-        run: scripts/bootstrap.sh go-integration
+        run: scripts/bootstrap.sh go-rust-integration
       - name: Build commit-bound runtime artifacts
         run: scripts/ci-runtime-artifact.sh build "${RUNNER_TEMP}/runtime-upload" "${GITHUB_SHA}"
+      - name: Save verified tools
+        if: success() && github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.runtime-tools-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: |
+            .cache/downloads
+            .tools
+          key: ${{ steps.runtime-tools-cache.outputs.cache-primary-key }}
       - name: Show sccache statistics
         if: always()
         run: |
@@ -91,7 +100,7 @@ jobs:
           path: |
             .cache/downloads
             .tools
-          key: tooling-v4-go-integration-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'scripts/checksums.txt', 'scripts/bootstrap.sh', 'scripts/env.sh') }}
+          key: tooling-v4-go-quality-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'scripts/checksums.txt', 'scripts/bootstrap.sh', 'scripts/env.sh') }}
       - name: Restore shared Go cache
         id: go-standard-cache
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
@@ -105,7 +114,7 @@ jobs:
             go-v4-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'go.work', 'go.work.sum', 'control-plane/go.mod', 'control-plane/go.sum') }}-
             go-v4-${{ runner.os }}-${{ runner.arch }}-
       - name: Bootstrap pinned Go tools
-        run: scripts/bootstrap.sh go-integration
+        run: scripts/bootstrap.sh go-quality
       - name: Go format, static analysis, unit, and vulnerability checks
         env:
           ARTIFACT_DIR: ${{ runner.temp }}/artifacts/go-standard
@@ -150,12 +159,13 @@ jobs:
       - name: Runner preflight
         run: scripts/ci-preflight.sh
       - name: Restore verified tools
+        id: go-race-tools-cache
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: |
             .cache/downloads
             .tools
-          key: tooling-v4-go-integration-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'scripts/checksums.txt', 'scripts/bootstrap.sh', 'scripts/env.sh') }}
+          key: tooling-v4-go-test-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'scripts/checksums.txt', 'scripts/bootstrap.sh', 'scripts/env.sh') }}
       - name: Restore shared Go cache
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
@@ -168,7 +178,7 @@ jobs:
             go-v4-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'go.work', 'go.work.sum', 'control-plane/go.mod', 'control-plane/go.sum') }}-
             go-v4-${{ runner.os }}-${{ runner.arch }}-
       - name: Bootstrap pinned Go tools
-        run: scripts/bootstrap.sh go-integration
+        run: scripts/bootstrap.sh go-test
       - name: Go race suite
         env:
           ARTIFACT_DIR: ${{ runner.temp }}/artifacts/go-race
@@ -176,6 +186,14 @@ jobs:
           mkdir -p "${ARTIFACT_DIR}"
           set -o pipefail
           scripts/go-check.sh race 2>&1 | tee "${ARTIFACT_DIR}/go-race.log"
+      - name: Save verified tools
+        if: success() && github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.go-race-tools-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: |
+            .cache/downloads
+            .tools
+          key: ${{ steps.go-race-tools-cache.outputs.cache-primary-key }}
       - name: Upload Go race diagnostics
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
@@ -206,7 +224,7 @@ jobs:
           path: |
             .cache/downloads
             .tools
-          key: tooling-v4-go-integration-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'scripts/checksums.txt', 'scripts/bootstrap.sh', 'scripts/env.sh') }}
+          key: tooling-v4-go-test-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'scripts/checksums.txt', 'scripts/bootstrap.sh', 'scripts/env.sh') }}
       - name: Restore shared Go cache
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
@@ -219,7 +237,7 @@ jobs:
             go-v4-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'go.work', 'go.work.sum', 'control-plane/go.mod', 'control-plane/go.sum') }}-
             go-v4-${{ runner.os }}-${{ runner.arch }}-
       - name: Bootstrap pinned Go tools
-        run: scripts/bootstrap.sh go-integration
+        run: scripts/bootstrap.sh go-test
       - name: Download runtime artifacts
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
@@ -294,7 +312,7 @@ jobs:
           path: |
             .cache/downloads
             .tools
-          key: tooling-v4-go-integration-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'scripts/checksums.txt', 'scripts/bootstrap.sh', 'scripts/env.sh') }}
+          key: tooling-v4-go-rust-integration-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'scripts/checksums.txt', 'scripts/bootstrap.sh', 'scripts/env.sh') }}
       - name: Restore shared Go cache
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
@@ -314,7 +332,7 @@ jobs:
       - name: Configure sccache backend
         run: scripts/configure-sccache.sh
       - name: Bootstrap pinned Go and Rust tools
-        run: scripts/bootstrap.sh go-integration
+        run: scripts/bootstrap.sh go-rust-integration
       - name: Production topology, relays, backup, and package checks
         env:
           ARTIFACT_DIR: ${{ runner.temp }}/artifacts/production-relays

@@ -19,6 +19,7 @@ export OCSERV_ENVIRONMENT=test
 export OCSERV_AUDIT_EVENT_KEY_ID=test-audit-event-v1
 export OCSERV_TEST_AUDIT_EVENT_KEY_HEX=1111111111111111111111111111111111111111111111111111111111111111
 export OCSERV_AUDIT_CHECKPOINT_KEY=2222222222222222222222222222222222222222222222222222222222222222
+PG_MAJOR="${PG_MAJOR:-all}"
 API_PORT_BASE=$((18000 + $(printf '%s' "${RUN_ID}" | cksum | awk '{print $1}') % 10000))
 PIDS=()
 CONTAINERS=()
@@ -67,11 +68,11 @@ else
   (cd "${ROOT}/control-plane" && go build -trimpath -o "${BIN}" ./cmd/ocserv-control)
 fi
 
-case "${PG_MAJOR:-all}" in
+case "${PG_MAJOR}" in
   all) POSTGRES_MAJORS=(17 18) ;;
   17 | 18) POSTGRES_MAJORS=("${PG_MAJOR}") ;;
   *)
-    echo "PG_MAJOR must be 17 or 18" >&2
+    echo "PG_MAJOR must be all, 17, or 18" >&2
     exit 2
     ;;
 esac
@@ -747,6 +748,10 @@ for major in "${POSTGRES_MAJORS[@]}"; do
     "DELETE FROM schema_migrations WHERE version = 25" >/dev/null
   echo "PostgreSQL ${major} database integration complete"
 done
+
+if [[ "${PG_MAJOR}" == "17" ]]; then
+  exit 0
+fi
 
 container="${PREFIX}-upgrade"
 CONTAINERS+=("${container}")

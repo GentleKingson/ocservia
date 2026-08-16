@@ -24,6 +24,8 @@ bootstrap = File.read(File.join(root, "scripts/bootstrap.sh"))
 makefile = File.read(File.join(root, "Makefile"))
 checksums = File.read(File.join(root, "scripts/checksums.txt"))
 toolchains = File.read(File.join(root, "toolchains.lock"))
+database_script = File.read(File.join(root, "scripts/database-integration.sh"))
+actions_doc = File.read(File.join(root, "docs/development/github-actions.md"))
 
 def reject(message)
   warn message
@@ -69,6 +71,15 @@ expected_gate_names = {
   "web-smoke" => "Web & Smoke",
   "quality-security-native" => "Quality, Security & Native"
 }
+reject("GitHub Actions guide must describe all 16 worker executions") unless
+  actions_doc.include?("15 worker job definitions") && actions_doc.include?("16 worker executions")
+expected_gate_names.each_value do |name|
+  reject("GitHub Actions guide is missing required-check aggregator #{name}") unless
+    actions_doc.include?("- `#{name}`")
+end
+%w[go-integration backend-\<run\> web-smoke-\<run\> quality-\<run\>].each do |stale_term|
+  reject("GitHub Actions guide contains stale term #{stale_term}") if actions_doc.include?(stale_term.delete("\\"))
+end
 gate_needs.each do |job_id, expected_needs|
   job = jobs.fetch(job_id)
   reject("#{job_id} changed its required-check name") unless job.fetch("name") == expected_gate_names.fetch(job_id)
@@ -90,11 +101,11 @@ reject("CI must run on main pushes") unless trigger.fetch("push").fetch("branche
 reject("CI must support manual dispatch") unless trigger.key?("workflow_dispatch")
 
 execution_profiles = {
-  "runtime-artifacts" => "go-integration",
-  "go-standard" => "go-integration",
-  "go-race" => "go-integration",
-  "database" => "go-integration",
-  "production-relays" => "go-integration",
+  "runtime-artifacts" => "go-rust-integration",
+  "go-standard" => "go-quality",
+  "go-race" => "go-test",
+  "database" => "go-test",
+  "production-relays" => "go-rust-integration",
   "web-validation" => "web",
   "contracts-policy" => "contracts",
   "rust-validation" => "rust-validation",
@@ -104,6 +115,19 @@ execution_profiles = {
 (["all"] + execution_profiles.values).uniq.each do |profile|
   reject("bootstrap profile is missing: #{profile}") unless bootstrap.match?(/^  #{Regexp.escape(profile)}\)$/)
 end
+{
+  "go-test" => ["install_go", "verify_host_command jq"],
+  "go-quality" => ["install_go", "install_go_quality_tools", "verify_host_command jq"],
+  "go-rust-integration" => [
+    "install_go", "install_rust", "install_go_quality_tools", "install_sccache",
+    "verify_host_command jq"
+  ]
+}.each do |profile, expected_commands|
+  body = bootstrap[/^  #{Regexp.escape(profile)}\)\n(.*?)^    ;;/m, 1]
+  commands = body.to_s.lines.map(&:strip).reject(&:empty?)
+  reject("bootstrap profile #{profile} installs the wrong tools") unless commands == expected_commands
+end
+reject("legacy go-integration bootstrap profile must remain split") if bootstrap.match?(/^  go-integration\)$/)
 reject("make bootstrap must request the complete profile explicitly") unless makefile.match?(/^\t\.\/scripts\/bootstrap\.sh all$/)
 
 bootstrap_calls = Hash.new { |hash, key| hash[key] = [] }
@@ -121,6 +145,7 @@ execution_profiles.each do |job_id, profile|
   expected = "scripts/bootstrap.sh #{profile}"
   reject("#{job_id} must run exactly #{expected}") unless bootstrap_calls.fetch(job_id) == [expected]
 end
+
 unexpected_bootstrap = bootstrap_calls.keys - execution_profiles.keys
 reject("unexpected workflow bootstrap caller: #{unexpected_bootstrap.join(', ')}") unless unexpected_bootstrap.empty?
 reject("workflow contains a bare bootstrap invocation") if
@@ -167,6 +192,28 @@ execution_profiles.each do |job_id, profile|
   tooling_inputs.each { |input| reject("#{job_id} tooling key is missing #{input}") unless key.include?(input) }
   reject("#{job_id} tooling cache must be exact-key-only") if tooling.first.fetch("with").key?("restore-keys")
   reject("#{job_id} tooling paths changed") unless paths(tooling.first).sort == [".cache/downloads", ".tools"].sort
+end
+
+tooling_writers = {
+  "go-rust-integration" => "runtime-artifacts",
+  "go-quality" => "go-standard",
+  "go-test" => "go-race",
+  "web" => "web-validation",
+  "contracts" => "contracts-policy",
+  "rust-validation" => "rust-validation",
+  "security" => "security-license",
+  "native" => "native-ocserv"
+}
+tooling_writers.each do |profile, job_id|
+  saves = cache_save.fetch(job_id).select do |step|
+    paths(step).sort == [".cache/downloads", ".tools"].sort
+  end
+  reject("#{profile} must have exactly one main-only tooling cache writer") unless saves.length == 1
+  restore = cache_restore.fetch(job_id).find do |step|
+    step.fetch("with").fetch("key").start_with?("tooling-v4-#{profile}-")
+  end
+  reject("#{profile} tooling writer must save its restore primary key") unless
+    restore && saves.first.fetch("with").fetch("key").include?("cache-primary-key")
 end
 
 go_jobs = %w[runtime-artifacts go-standard go-race database production-relays security-license]
@@ -250,6 +297,12 @@ jobs.each do |job_id, job|
   Array(job.fetch("steps")).select { |step| step["uses"].to_s.start_with?("actions/upload-artifact@") }.each do |step|
     reject("#{job_id} artifact retention exceeds the repository limit") unless
       step.fetch("with").fetch("retention-days") == 1
+    documented_name = step.fetch("with").fetch("name")
+      .gsub("${{ github.run_id }}", "<run>")
+      .gsub("${{ github.run_attempt }}", "<attempt>")
+      .gsub("${{ matrix.pg-major }}", "<major>")
+    reject("GitHub Actions guide is missing artifact #{documented_name}") unless
+      actions_doc.include?("`#{documented_name}`")
   end
 end
 
@@ -260,6 +313,10 @@ reject("PostgreSQL matrix must not fail fast") unless database.fetch("strategy")
 database_step = Array(database.fetch("steps")).find { |step| step["run"] == "scripts/database-integration.sh" }
 reject("database job must pass one PG_MAJOR to the script") unless
   database_step && database_step.fetch("env").fetch("PG_MAJOR") == "${{ matrix.pg-major }}"
+pg17_exit = database_script.index('if [[ "${PG_MAJOR}" == "17" ]]; then')
+legacy_fixture = database_script.index('container="${PREFIX}-upgrade"')
+reject("PostgreSQL 18 legacy upgrade fixture must not repeat in the PostgreSQL 17 worker") unless
+  pg17_exit && legacy_fixture && pg17_exit < legacy_fixture
 
 stage_run = Array(jobs.fetch("stage-contracts").fetch("steps")).map { |step| step["run"].to_s }.join("\n")
 %w[
