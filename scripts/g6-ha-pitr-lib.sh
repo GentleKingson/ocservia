@@ -78,6 +78,10 @@ g6_ha_placeholder_env() {
 
 g6_ha_export_common_env() {
   local owner_password app_password replication_password
+  # Called from an || fallback, so set -e is suppressed inside: fail the
+  # guard explicitly or an aborted-before-prepare cleanup silently exports
+  # empty passwords that compose variable substitution rejects.
+  [[ -f "${G6HA_SECRETS}/owner-password" ]] || return 1
   owner_password="$(g6_ha_secret owner-password)"
   app_password="$(g6_ha_secret app-password)"
   replication_password="$(g6_ha_secret replication-password)"
