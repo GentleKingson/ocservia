@@ -1,0 +1,21 @@
+# G6 readiness harness relay: the same iroh-relay 1.0.3 configuration shape
+# as the production deployment, with per-run Manual TLS material and access
+# token injected through the bind-mounted secret directory.
+enable_relay = true
+http_bind_addr = "0.0.0.0:8080"
+enable_quic_addr_discovery = true
+enable_metrics = false
+key_cache_capacity = 8192
+
+[tls]
+https_bind_addr = "0.0.0.0:8443"
+quic_bind_addr = "0.0.0.0:7842"
+cert_mode = "Manual"
+manual_cert_path = "/run/relay-secrets/relay.crt"
+manual_key_path = "/run/relay-secrets/relay.key"
+
+[limits.client.rx]
+max_burst_bytes = 4194304
+bytes_per_second = 2097152
+
+access.shared_token = ["replaced-by-entrypoint"]

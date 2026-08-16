@@ -6,9 +6,10 @@ use std::path::Path;
 use std::time::Duration;
 use std::{fs, os::unix::fs::PermissionsExt as _};
 
-use rusqlite::{Connection, OpenFlags, TransactionBehavior};
+use rusqlite::{Connection, OpenFlags, OptionalExtension, TransactionBehavior};
 
 const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
+const OWNER_FENCE_EPOCH_FLOOR_KEY: &str = "owner_fence_epoch_floor";
 
 /// Maximum time that telemetry remains buffered while an Agent is offline.
 pub const OFFLINE_RECOVERY_RETENTION_SECONDS: u64 = 300;
@@ -885,6 +886,48 @@ impl Journal {
         }
         Ok(counters)
     }
+
+    /// Reads the durable connection-owner fencing epoch floor, or zero when
+    /// no fence has been accepted yet.
+    ///
+    /// # Errors
+    ///
+    /// Returns a query or decoding error.
+    pub fn owner_fence_epoch_floor(&self) -> Result<u64, rusqlite::Error> {
+        let value: Option<Vec<u8>> = self
+            .connection
+            .query_row(
+                "SELECT value FROM agent_metadata WHERE key=?1",
+                [OWNER_FENCE_EPOCH_FLOOR_KEY],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let Some(bytes) = value else {
+            return Ok(0);
+        };
+        bytes
+            .try_into()
+            .map(u64::from_be_bytes)
+            .map_err(|_| rusqlite::Error::InvalidQuery)
+    }
+
+    /// Raises the durable fencing epoch floor. The stored value only ever
+    /// increases, including across crashes, so a restarted Agent cannot be
+    /// reset to accept an already-superseded owner epoch.
+    ///
+    /// # Errors
+    ///
+    /// Returns a write error.
+    pub fn raise_owner_fence_epoch_floor(&self, epoch: u64) -> Result<(), rusqlite::Error> {
+        let value = epoch.to_be_bytes();
+        self.connection.execute(
+            "INSERT INTO agent_metadata(key,value) VALUES(?1,?2)
+             ON CONFLICT(key) DO UPDATE SET value=excluded.value
+             WHERE excluded.value>agent_metadata.value",
+            rusqlite::params![OWNER_FENCE_EPOCH_FLOOR_KEY, value.as_slice()],
+        )?;
+        Ok(())
+    }
 }
 
 /// Applies idempotent column migrations to `command_journal`.
@@ -1689,6 +1732,34 @@ mod tests {
         assert!(journal.synthetic_effect(&key).expect("query").is_none());
         assert_eq!(journal.synthetic_execution_count().expect("count"), 0);
         drop(journal);
+        cleanup(&path);
+    }
+
+    #[test]
+    fn owner_fence_epoch_floor_is_monotonic_and_durable() {
+        let path = temporary_path("fence-floor");
+        {
+            let journal = Journal::open(&path).expect("open");
+            assert_eq!(journal.owner_fence_epoch_floor().expect("floor"), 0);
+            journal
+                .raise_owner_fence_epoch_floor(4)
+                .expect("raise first");
+            journal
+                .raise_owner_fence_epoch_floor(2)
+                .expect("raise lower ignored");
+            assert_eq!(journal.owner_fence_epoch_floor().expect("floor"), 4);
+            journal
+                .raise_owner_fence_epoch_floor(9)
+                .expect("raise higher");
+            assert_eq!(journal.owner_fence_epoch_floor().expect("floor"), 9);
+        }
+        let reopened = Journal::open(&path).expect("reopen");
+        assert_eq!(reopened.owner_fence_epoch_floor().expect("floor"), 9);
+        reopened
+            .raise_owner_fence_epoch_floor(3)
+            .expect("raise lower ignored after reopen");
+        assert_eq!(reopened.owner_fence_epoch_floor().expect("floor"), 9);
+        drop(reopened);
         cleanup(&path);
     }
 }

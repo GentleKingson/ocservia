@@ -1,0 +1,9 @@
+#!/bin/sh
+# Read-only ocserv fixture for the G6 readiness managed nodes. The adapter
+# invokes exactly `ocserv --version`; only that invocation answers.
+if [ "${1:-}" = "--version" ] && [ "$#" -eq 1 ]; then
+    printf 'ocserv 1.2.3-g6-fixture\n'
+    exit 0
+fi
+echo "g6 shim: unsupported ocserv invocation: $*" >&2
+exit 1

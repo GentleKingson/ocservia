@@ -253,6 +253,42 @@ func TestLocalSimulatorIsRejectedInProduction(t *testing.T) {
 	}
 }
 
+func TestPprofAddressRequiresNonProductionLoopback(t *testing.T) {
+	base := func(environment, address string) func(string) (string, bool) {
+		values := map[string]string{
+			"OCSERV_DATABASE_URL":  "postgres://db/test",
+			"OCSERV_ENVIRONMENT":   environment,
+			"OCSERV_PPROF_ADDRESS": address,
+		}
+		return func(key string) (string, bool) {
+			value, ok := values[key]
+			return value, ok
+		}
+	}
+	for name, lookup := range map[string]func(string) (string, bool){
+		"production":       base("production", "127.0.0.1:6060"),
+		"non-loopback":     base("development", "0.0.0.0:6060"),
+		"missing port":     base("development", "127.0.0.1"),
+		"unparseable host": base("development", "127.0.0.1:x"),
+	} {
+		if _, err := Load(nil, lookup); err == nil {
+			t.Fatalf("Load() accepted pprof address case %q", name)
+		}
+	}
+	for name, lookup := range map[string]func(string) (string, bool){
+		"loopback ipv4": base("development", "127.0.0.1:6060"),
+		"loopback ipv6": base("test", "[::1]:6060"),
+	} {
+		cfg, err := Load(nil, lookup)
+		if err != nil {
+			t.Fatalf("Load() rejected pprof address case %q: %v", name, err)
+		}
+		if cfg.PprofAddress == "" {
+			t.Fatalf("Load() dropped the pprof address in case %q", name)
+		}
+	}
+}
+
 func TestProductionRequiresAbsoluteControllerCommandSigningKey(t *testing.T) {
 	cfg, err := Load(nil, func(key string) (string, bool) {
 		if key == "OCSERV_DATABASE_URL" {

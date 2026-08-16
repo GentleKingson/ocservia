@@ -2450,6 +2450,7 @@ dependencies = [
  "rand 0.9.5",
  "rusqlite",
  "rustix",
+ "rustls-pki-types",
  "serde_json",
  "sha2 0.10.9",
  "tokio",
@@ -2514,6 +2515,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "ocservia-g6-probe"
+version = "0.1.0"
+dependencies = [
+ "ed25519-dalek",
+ "hex",
+ "hyper-util",
+ "iroh",
+ "ocservia-command-authorization",
+ "ocservia-contracts",
+ "prost",
+ "prost-types",
+ "rustls-pki-types",
+ "serde_json",
+ "tokio",
+ "tonic",
+ "tower",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
+]
+
+[[package]]
 name = "ocservia-g6-tunnel"
 version = "0.1.0"
 dependencies = [
@@ -2529,6 +2552,8 @@ dependencies = [
 name = "ocservia-observability"
 version = "0.1.0"
 dependencies = [
+ "serde_json",
+ "tokio",
  "tracing",
  "tracing-subscriber",
 ]
@@ -2601,10 +2626,12 @@ dependencies = [
  "ocservia-agent-identity",
  "ocservia-command-authorization",
  "ocservia-contracts",
+ "ocservia-observability",
  "ocservia-privd-attestation",
  "prost",
  "prost-types",
  "rustix",
+ "rustls-pki-types",
  "sha2 0.10.9",
  "tokio",
  "tokio-stream",
