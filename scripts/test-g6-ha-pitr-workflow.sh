@@ -52,6 +52,8 @@ pg_caps = services.fetch("postgres").fetch("cap_add")
 %w[CHOWN FOWNER DAC_OVERRIDE SETUID SETGID].each do |cap|
   reject("postgres must keep #{cap} for its root entrypoint phase under cap_drop ALL") unless pg_caps.include?(cap)
 end
+api_env = services.fetch("api").fetch("environment")
+reject("api must bind loopback: dev auth rejects non-loopback HTTP addresses") unless api_env.fetch("OCSERV_HTTP_ADDRESS").start_with?("127.0.0.1:")
 RUBY
 
 # Harness scripts must read the frozen limits from g6-slo.yaml instead of
