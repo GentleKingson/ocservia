@@ -136,6 +136,7 @@ requireFile(runDir, "state", "resource-samples.csv");
 requireFile(runDir, "state", "era2-sessions.tsv");
 requireFile(runDir, "state", "all-nodes.tsv");
 requireFile(runDir, "state", "promoted-at");
+requireFile(runDir, "state", "window-ended-at");
 requireFile(runDir, "state", "evidence", "final-sessions.json");
 requireFile(runDir, "state", "evidence", "snapshot-taken-at");
 requireFile(runDir, "state", "evidence", "commands.jsonl");
@@ -158,6 +159,9 @@ requireFile(peerDir, "evidence", "instances.tsv");
 requireFile(peerDir, "relay-a-failed-at");
 requireFile(peerDir, "rejoin-at");
 requireFile(peerDir, "post-rejoin-probes.jsonl");
+requireFile(peerDir, "final-freeze-at");
+requireFile(peerDir, "freeze-received-at");
+requireFile(peerDir, "evidence", "snapshot-taken-at");
 
 const readLog = readJSONL(runDir, "state", "read-log.jsonl");
 const enqueueLog = readJSONL(runDir, "state", "enqueue-log.jsonl");
@@ -192,6 +196,30 @@ const promotedAt = normalizeStamp(
   readText(runDir, "state", "promoted-at").trim(),
   "promoted-at",
 );
+const windowEndedAt = normalizeStamp(
+  readText(runDir, "state", "window-ended-at").trim(),
+  "window-ended-at",
+);
+const finalFreezeAt = normalizeStamp(
+  readText(peerDir, "final-freeze-at").trim(),
+  "final-freeze-at",
+);
+const freezeReceivedAt = normalizeStamp(
+  readText(peerDir, "freeze-received-at").trim(),
+  "freeze-received-at",
+);
+const peerSnapshotTakenAt = normalizeStamp(
+  readText(peerDir, "evidence", "snapshot-taken-at").trim(),
+  "fd-a snapshot-taken-at",
+);
+if (
+  parseStamp(finalFreezeAt, "final freeze") <
+    parseStamp(windowEndedAt, "window end") ||
+  parseStamp(peerSnapshotTakenAt, "fd-a snapshot") <
+    parseStamp(freezeReceivedAt, "fd-a freeze receipt")
+) {
+  fail("fd-a final evidence was not frozen after the bounded window");
+}
 const pitrReport = JSON.parse(readText(peerDir, "pitr", "pitr-report.json"));
 const isolation = JSON.parse(readText(peerDir, "isolation", "isolation.json"));
 const isolatedWrites = readJSONL(
@@ -320,6 +348,9 @@ const httpSamplesText = `${httpLines.join("\n")}\n`;
 // ---------------------------------------------------------------------------
 
 const commandById = new Map(commands.map((command) => [command.id, command]));
+if (commandById.size !== commands.length) {
+  fail("the run-wide command dump contains duplicate command ids");
+}
 for (const commandId of activeLoadIds) {
   if (!commandById.has(commandId)) {
     fail(
@@ -352,15 +383,32 @@ for (const attempt of attempts) {
 // journal effects keyed by the binary command id (hex, dashes stripped)
 const effectsByCommandHex = new Map();
 const effectsDirectory = join(runDir, "state", "evidence", "effects");
-for (const entry of readdirSync(effectsDirectory)) {
-  if (!entry.endsWith(".tsv")) continue;
+const effectEntries = readdirSync(effectsDirectory)
+  .filter((entry) => entry.endsWith(".tsv"))
+  .sort();
+const expectedEffectEntries = nodes
+  .map((node) => `${node.name.replace(/^g6-/, "agent-")}.tsv`)
+  .sort();
+if (
+  effectEntries.length !== expectedEffectEntries.length ||
+  effectEntries.some((entry, index) => entry !== expectedEffectEntries[index])
+) {
+  fail("the final effect snapshot does not cover exactly all managed Agents");
+}
+for (const entry of effectEntries) {
   const service = entry.replace(/\.tsv$/, "");
   for (const line of readText(effectsDirectory, entry).split("\n")) {
     if (line.length === 0) continue;
-    const [keyHex, commandHex, executedAt] = line.trim().split(/\s+/);
-    if (!keyHex || !commandHex || !executedAt) {
+    const [rawKeyHex, rawCommandHex, executedAt] = line.trim().split(/\s+/);
+    if (
+      !/^[0-9a-f]+$/i.test(rawKeyHex ?? "") ||
+      !/^[0-9a-f]{32}$/i.test(rawCommandHex ?? "") ||
+      !/^[0-9]+$/.test(executedAt ?? "")
+    ) {
       fail(`malformed effect record in ${entry}: ${line}`);
     }
+    const keyHex = rawKeyHex.toLowerCase();
+    const commandHex = rawCommandHex.toLowerCase();
     if (effectsByCommandHex.has(commandHex)) {
       fail(`two agents hold an effect for command hex ${commandHex}`);
     }
@@ -371,6 +419,33 @@ for (const entry of readdirSync(effectsDirectory)) {
         .toISOString()
         .slice(0, 19)}Z`,
     });
+  }
+}
+
+const runCommandByHex = new Map(
+  commands.map((command) => [
+    command.id.replaceAll("-", "").toLowerCase(),
+    command,
+  ]),
+);
+for (const [commandHex, effect] of effectsByCommandHex) {
+  const command = runCommandByHex.get(commandHex);
+  if (!command) {
+    fail(
+      `durable effect ${commandHex} does not match a run-wide synthetic command`,
+    );
+  }
+  if (
+    parseStamp(effect.executedAt, "effect executed_at") <
+    parseStamp(command.created_at, "command created_at")
+  ) {
+    fail(`effect for ${command.id} predates its enqueue`);
+  }
+}
+for (const command of commands) {
+  const commandHex = command.id.replaceAll("-", "").toLowerCase();
+  if (command.state === "succeeded" && !effectsByCommandHex.has(commandHex)) {
+    fail(`successful synthetic command ${command.id} has no durable effect`);
   }
 }
 
@@ -392,7 +467,7 @@ traceRecords.push({
   },
 });
 for (const command of population) {
-  const commandHex = command.id.replaceAll("-", "");
+  const commandHex = command.id.replaceAll("-", "").toLowerCase();
   const enqueuedMs = parseStamp(command.created_at, "command created_at");
   traceRecords.push({
     stampMs: enqueuedMs,
@@ -408,14 +483,8 @@ for (const command of population) {
     });
   }
   const effect = effectsByCommandHex.get(commandHex);
-  if (command.state === "succeeded" && !effect) {
-    fail(`successful synthetic command ${command.id} has no durable effect`);
-  }
   if (effect) {
     const effectMs = parseStamp(effect.executedAt, "effect executed_at");
-    if (effectMs < enqueuedMs) {
-      fail(`effect for ${command.id} predates its enqueue`);
-    }
     traceRecords.push({
       stampMs: effectMs,
       rank: 3,
@@ -435,15 +504,6 @@ for (const command of population) {
       outcome: outcomeOf(command.state),
     },
   });
-}
-for (const commandHex of effectsByCommandHex.keys()) {
-  if (
-    !population.some((command) => command.id.replaceAll("-", "") === commandHex)
-  ) {
-    fail(
-      `durable effect ${commandHex} does not match an accepted synthetic command`,
-    );
-  }
 }
 traceRecords.sort(
   (left, right) =>
@@ -1124,6 +1184,10 @@ const timestampedStamps = [
   pitrReport.restore.restored_at,
   bulkDisconnectAt,
   snapshotTakenAt,
+  windowEndedAt,
+  finalFreezeAt,
+  freezeReceivedAt,
+  peerSnapshotTakenAt,
 ];
 const windowStartMs = Math.min(
   ...timestampedStamps.map((stamp) => parseStamp(stamp, "window stamp")),
@@ -1144,6 +1208,8 @@ const harnessSummary = [
   `evidence-window: ${startedAt} .. ${finishedAt}`,
   `managed-nodes: ${nodes.length}`,
   `accepted-window-enqueues: ${okCommandIds.size}`,
+  `run-wide-synthetic-commands: ${commands.length}`,
+  `durable-agent-effects: ${effectsByCommandHex.size}`,
   `timeline-events: ${timelineRecords.length}`,
   `epoch-events: ${epochEvents.length}`,
   `topology-instances: ${instances.length}`,

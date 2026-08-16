@@ -419,8 +419,6 @@ phase_merge_peer_evidence() {
   cp -f "${isolation}"/*.at "${G6RD_OUTBOX}/peer/" 2>/dev/null || true
   cp -f "${pitr_prep}"/*.at "${G6RD_OUTBOX}/peer/" 2>/dev/null || true
   cp -f "${peer}/pitr/pitr-report.json" "${G6RD_OUTBOX}/peer/"
-  mkdir -p "${G6RD_STATE}/evidence/effects"
-  cp -f "${peer}/evidence/effects/"*.tsv "${G6RD_STATE}/evidence/effects/"
 }
 
 # Scheduler leadership failover: stop the era-2 leader, let the lease lapse,
@@ -910,6 +908,33 @@ phase_evidence_collect() {
   printf 'failure_domain=%s\nalias=%s\n' "${FD_ID}" "${FD_ALIAS}" >"${dir}/failure-domain.txt"
 }
 
+phase_final_freeze() {
+  require_file "${G6RD_STATE}/window-ended-at"
+  require_file "${G6RD_STATE}/evidence/final-sessions.json"
+  mkdir -p "${G6RD_OUTBOX}/final-freeze"
+  g6rd_now >"${G6RD_OUTBOX}/final-freeze/final-freeze-at"
+}
+
+phase_merge_peer_final_evidence() {
+  local peer="${1:?peer final evidence root is required}"
+  require_file "${peer}/final-freeze-at"
+  require_file "${peer}/freeze-received-at"
+  require_file "${peer}/evidence/snapshot-taken-at"
+  mkdir -p "${G6RD_STATE}/evidence/effects"
+  local node_name service count=0
+  while IFS= read -r node_name; do
+    service="agent-${node_name#g6-}"
+    require_file "${peer}/evidence/effects/${service}.tsv"
+    cp -f "${peer}/evidence/effects/${service}.tsv" \
+      "${G6RD_STATE}/evidence/effects/"
+    count=$((count + 1))
+  done < <(awk -F'\t' '$1 ~ /^g6-fd-a-/ {print $1}' "${NODES_FILE}")
+  [[ "${count}" -gt 0 ]] || {
+    echo "peer final evidence contains no fd-a Agent journals" >&2
+    return 1
+  }
+}
+
 phase_evidence_build() {
   local peer="${1:?peer evidence root is required}" out="${G6RD_OUTBOX}/evidence-bundle"
   require_file "${peer}/evidence/instances.tsv"
@@ -972,11 +997,13 @@ outbox-send-before-mark) phase_outbox_send_before_mark ;;
   outbox-result-before-commit) phase_outbox_result_before_commit ;;
   window) phase_window ;;
   evidence-collect) phase_evidence_collect ;;
+  final-freeze) phase_final_freeze ;;
+  merge-peer-final-evidence) phase_merge_peer_final_evidence "${2:?peer final evidence root}" ;;
   evidence-build) phase_evidence_build "${2:?peer evidence root}" ;;
   diagnostics) g6rd_diagnostics ;;
   cleanup) g6rd_cleanup ;;
 *)
-  echo "usage: $0 <prepare|import-peer-secrets|import-peer-tunnel-nodes|images|tunnel-up|standby-bootstrap|relay-up|agents-up|load-start|promote|merge-peer-evidence|scenario-scheduler|scenario-owner|scenario-relay|scenario-path|outbox-claim-before-send|outbox-send-before-mark|outbox-result-before-commit|window|evidence-collect|evidence-build|diagnostics|cleanup>" >&2
+  echo "usage: $0 <prepare|import-peer-secrets|import-peer-tunnel-nodes|images|tunnel-up|standby-bootstrap|relay-up|agents-up|load-start|promote|merge-peer-evidence|scenario-scheduler|scenario-owner|scenario-relay|scenario-path|outbox-claim-before-send|outbox-send-before-mark|outbox-result-before-commit|window|evidence-collect|final-freeze|merge-peer-final-evidence|evidence-build|diagnostics|cleanup>" >&2
   exit 2
   ;;
 esac

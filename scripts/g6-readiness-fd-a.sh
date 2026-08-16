@@ -183,10 +183,12 @@ phase_pitr_prepare() {
   docker run --rm -v "${G6RD_BASEBACKUP}:/backup:ro" postgres:17.10-bookworm \
     pg_verifybackup /backup >>"${G6RD_LOGS}/basebackup.log" 2>&1
   g6rd_reclaim_directory "${G6RD_BASEBACKUP}" || true
-  g6rd_psql -Atc "INSERT INTO ${MARKER_TABLE}(id,txid,phase) \
+  local marker_output marker_row switch_target
+  marker_output="$(g6rd_psql -Atc "INSERT INTO ${MARKER_TABLE}(id,txid,phase) \
     VALUES ('pitr-marker-a',txid_current()::text,'pitr_a') \
-    RETURNING txid || ':' || to_char(written_at AT TIME ZONE 'UTC','YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"')" \
-    >"${G6RD_STATE}/pitr-marker-a"
+    RETURNING txid || ':' || to_char(written_at AT TIME ZONE 'UTC','YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"')")"
+  marker_row="$(g6rd_extract_pitr_marker_row "${marker_output}")"
+  printf '%s\n' "${marker_row}" >"${G6RD_STATE}/pitr-marker-a"
   sed -n 's/^[^:]*://p' "${G6RD_STATE}/pitr-marker-a" >"${G6RD_OUTBOX}/pitr-prep/pitr-marker-a-at"
   sleep 1
   g6rd_psql -Atc "SELECT pg_create_restore_point('g6_pitr_target')" >/dev/null
@@ -194,11 +196,20 @@ phase_pitr_prepare() {
     >"${G6RD_STATE}/pitr-restore-point-at"
   cp -f "${G6RD_STATE}/pitr-restore-point-at" "${G6RD_OUTBOX}/pitr-prep/restore-point-at"
   sleep 1
-  g6rd_psql -Atc "INSERT INTO ${MARKER_TABLE}(id,txid,phase) \
+  marker_output="$(g6rd_psql -Atc "INSERT INTO ${MARKER_TABLE}(id,txid,phase) \
     VALUES ('pitr-marker-b',txid_current()::text,'pitr_b') \
-    RETURNING txid || ':' || to_char(written_at AT TIME ZONE 'UTC','YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"')" \
-    >"${G6RD_STATE}/pitr-marker-b"
+    RETURNING txid || ':' || to_char(written_at AT TIME ZONE 'UTC','YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"')")"
+  marker_row="$(g6rd_extract_pitr_marker_row "${marker_output}")"
+  printf '%s\n' "${marker_row}" >"${G6RD_STATE}/pitr-marker-b"
   sed -n 's/^[^:]*://p' "${G6RD_STATE}/pitr-marker-b" >"${G6RD_OUTBOX}/pitr-prep/pitr-marker-b-at"
+  switch_target="$(g6rd_psql -Atc 'SELECT pg_walfile_name(pg_switch_wal())')"
+  [[ "${switch_target}" =~ ^[0-9A-F]{24}$ ]] || {
+    echo "pg_switch_wal returned an invalid segment name: ${switch_target}" >&2
+    return 1
+  }
+  g6rd_wait_until 60 1 "PITR target WAL archived" \
+    g6rd_archive_has_segment "${switch_target}"
+  printf '%s\n' "${switch_target}" >"${G6RD_OUTBOX}/pitr-prep/archived-wal-segment"
 }
 
 # Bring the managed nodes up: prepare identities, mint one token per node,
@@ -452,23 +463,39 @@ phase_relay_a_stop() {
   g6rd_now >"${G6RD_OUTBOX}/relay-a-failed-at"
 }
 
-# Final failure-domain rendezvous for the evidence assembly on fd-b: the
-# isolation record, the PITR marker times and verified report, the rejoin
-# and relay-failure stamps, and this domain's container inventory (image
-# digest, service role, observed lifetime) captured while the stopped era-1
-# containers are still inspectable. No credentials enter this bundle.
-phase_evidence() {
-  local out="${G6RD_OUTBOX}/fd-a-final" name
-  mkdir -p "${out}/isolation" "${out}/pitr-prep" "${out}/pitr" "${out}/evidence/effects"
+copy_control_evidence() {
+  local out="${1:?control evidence destination is required}"
+  mkdir -p "${out}/isolation" "${out}/pitr-prep" "${out}/pitr"
   cp -f "${G6RD_OUTBOX}/isolation/isolation.json" "${out}/isolation/"
   cp -f "${G6RD_OUTBOX}/isolation/active-load.json" "${out}/isolation/"
   cp -f "${G6RD_OUTBOX}/isolation"/*.at "${out}/isolation/"
   cp -f "${G6RD_OUTBOX}/isolation/isolated-primary-writes.jsonl" "${out}/isolation/"
-  cp -f "${G6RD_OUTBOX}/pitr-prep"/*.at "${out}/pitr-prep/"
+  cp -f "${G6RD_OUTBOX}/pitr-prep"/* "${out}/pitr-prep/"
   cp -f "${G6RD_OUTBOX}/pitr/pitr-report.json" "${out}/pitr/"
   cp -f "${G6RD_OUTBOX}/rejoin-at" "${out}/"
   cp -f "${G6RD_OUTBOX}/post-rejoin-probes.jsonl" "${out}/"
   cp -f "${G6RD_OUTBOX}/relay-a-failed-at" "${out}/"
+}
+
+# Publish the causal control-plane evidence needed by fd-b's scenarios while
+# keeping all 28 Agents alive. Journals and container inventory are deliberately
+# excluded until fd-b closes the bounded window and requests the final freeze.
+phase_ready() {
+  copy_control_evidence "${G6RD_OUTBOX}/fd-a-ready"
+}
+
+# Final failure-domain rendezvous for evidence assembly on fd-b. The freeze
+# request is published only after fd-b has completed every scenario, closed the
+# bounded window, and captured the 55-node final session inventory.
+# No credentials enter this bundle.
+phase_evidence() {
+  local freeze="${1:?final-freeze directory is required}"
+  require_file "${freeze}/final-freeze-at"
+  local out="${G6RD_OUTBOX}/fd-a-final" name
+  copy_control_evidence "${out}"
+  mkdir -p "${out}/evidence/effects"
+  cp -f "${freeze}/final-freeze-at" "${out}/"
+  g6rd_now >"${out}/freeze-received-at"
   local index service
   for index in $(seq 1 "$(g6rd_agent_count)"); do
     service="agent-${FD_ID}-$(printf '%02d' "${index}")"
@@ -485,6 +512,7 @@ phase_evidence() {
       '{{.Name}}	{{.Image}}	{{.State.StartedAt}}	{{.State.FinishedAt}}	{{index .Config.Labels "com.docker.compose.service"}}' \
       "${name}" 2>/dev/null || true
   done >>"${out}/evidence/instances.tsv"
+  g6rd_now >"${out}/evidence/snapshot-taken-at"
   printf 'failure_domain=%s\nalias=%s\n' "${FD_ID}" "${FD_ALIAS}" >"${out}/evidence/failure-domain.txt"
 }
 
@@ -503,11 +531,12 @@ dual-primary-probes) phase_dual_primary_probes "${2:?promoted primary directory 
 pitr-restore) phase_pitr_restore ;;
 rejoin) phase_rejoin ;;
 relay-a-stop) phase_relay_a_stop ;;
-evidence) phase_evidence ;;
+ready) phase_ready ;;
+evidence) phase_evidence "${2:?final-freeze directory is required}" ;;
 diagnostics) g6rd_diagnostics ;;
 cleanup) g6rd_cleanup ;;
 *)
-  echo "usage: $0 <prepare|publish-shared-secrets|import-peer-secrets|import-peer-tunnel-nodes|images|tunnel-up|primary-up|pitr-prepare|agents-up|isolate|dual-primary-probes|pitr-restore|rejoin|relay-a-stop|evidence|diagnostics|cleanup>" >&2
+  echo "usage: $0 <prepare|publish-shared-secrets|import-peer-secrets|import-peer-tunnel-nodes|images|tunnel-up|primary-up|pitr-prepare|agents-up|isolate|dual-primary-probes|pitr-restore|rejoin|relay-a-stop|ready|evidence|diagnostics|cleanup>" >&2
   exit 2
   ;;
 esac

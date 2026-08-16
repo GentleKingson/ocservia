@@ -203,6 +203,29 @@ if [[ -z "${fd_b_collect}" || -z "${fd_b_build}" || "${fd_b_collect}" -ge "${fd_
   echo "the frozen state must be collected before the bundle is built" >&2
   exit 1
 fi
+fd_a_ready="$(order_of 'fd-a.sh ready')"
+fd_a_freeze_wait="$(order_of 'wait-download "g6-rd-final-freeze')"
+fd_a_collect="$(order_of 'fd-a.sh evidence "${RUNNER_TEMP}/g6-rd-final-freeze')"
+fd_b_ready_wait="$(order_of 'wait-download "g6-rd-fd-a-ready')"
+fd_b_scenario="$(order_of 'fd-b.sh scenario-scheduler')"
+fd_b_freeze="$(order_of 'fd-b.sh final-freeze')"
+fd_b_final_wait="$(order_of 'wait-download "g6-rd-fd-a-evidence')"
+fd_b_final_merge="$(order_of 'fd-b.sh merge-peer-final-evidence')"
+if [[ -z "${fd_a_ready}" || -z "${fd_a_freeze_wait}" || -z "${fd_a_collect}" \
+  || "${fd_a_ready}" -ge "${fd_a_freeze_wait}" || "${fd_a_freeze_wait}" -ge "${fd_a_collect}" ]]; then
+  echo "fd-a must stay live until fd-b requests the final freeze" >&2
+  exit 1
+fi
+if [[ -z "${fd_b_ready_wait}" || -z "${fd_b_scenario}" || "${fd_b_ready_wait}" -ge "${fd_b_scenario}" ]]; then
+  echo "fd-b scenarios must wait for fd-a readiness" >&2
+  exit 1
+fi
+if [[ -z "${fd_b_freeze}" || -z "${fd_b_final_wait}" || -z "${fd_b_final_merge}" \
+  || "${fd_b_collect}" -ge "${fd_b_freeze}" || "${fd_b_freeze}" -ge "${fd_b_final_wait}" \
+  || "${fd_b_final_wait}" -ge "${fd_b_final_merge}" || "${fd_b_final_merge}" -ge "${fd_b_build}" ]]; then
+  echo "fd-b must collect final sessions, request freeze, then merge fd-a final journals before building" >&2
+  exit 1
+fi
 
 # fd-b assembles the bundle from both failure domains: the builder and the
 # verifier must both run there, the peer evidence must gate the build, and
@@ -244,6 +267,24 @@ grep -q 'RETURNING txid.*written_at' "${FD_A}" || {
   echo "PITR markers must return their own transaction id and timestamp" >&2
   exit 1
 }
+source "${LIB}"
+marker_with_tag=$'781:2026-08-17T01:02:03.123456Z\nINSERT 0 1'
+if [[ "$(g6rd_extract_pitr_marker_row "${marker_with_tag}")" != "781:2026-08-17T01:02:03.123456Z" ]]; then
+  echo "PITR marker parsing must discard the psql command tag" >&2
+  exit 1
+fi
+if g6rd_extract_pitr_marker_row $'781:2026-08-17T01:02:03Z\nINSERT 0 1' >/dev/null 2>&1; then
+  echo "PITR marker parsing must require exact microsecond RFC3339 shape" >&2
+  exit 1
+fi
+marker_b_line="$(grep -n "pitr-marker-b',txid_current" "${FD_A}" | head -1 | cut -d: -f1)"
+wal_switch_line="$(grep -n 'pg_walfile_name(pg_switch_wal())' "${FD_A}" | head -1 | cut -d: -f1)"
+archive_wait_line="$(grep -n 'PITR target WAL archived' "${FD_A}" | head -1 | cut -d: -f1)"
+if [[ -z "${marker_b_line}" || -z "${wal_switch_line}" || -z "${archive_wait_line}" \
+  || "${marker_b_line}" -ge "${wal_switch_line}" || "${wal_switch_line}" -ge "${archive_wait_line}" ]]; then
+  echo "PITR must switch WAL after marker B and wait for that segment in the archive" >&2
+  exit 1
+fi
 grep -qF "sh -c 'pg_rewind -D /data --source-server=\"host=host.docker.internal port=15432 user=ocservia_replication dbname=ocservia password=\$PGPASSWORD\"" "${FD_A}" || {
   echo "the rejoin password must remain single-quoted for container expansion" >&2
   exit 1
@@ -288,6 +329,18 @@ grep -q 'peer}/evidence/effects/' "${FD_B}" || {
 }
 grep -q 'successful synthetic command.*has no durable effect' "${BUILDER}" || {
   echo "the builder must reject successful commands without one durable effect" >&2
+  exit 1
+}
+grep -q 'runCommandByHex' "${BUILDER}" || {
+  echo "durable effects must be checked against the run-wide synthetic population" >&2
+  exit 1
+}
+grep -q 'does not cover exactly all managed Agents' "${BUILDER}" || {
+  echo "the final effect freeze must cover all 55 managed Agents" >&2
+  exit 1
+}
+grep -q 'fd-a final evidence was not frozen after the bounded window' "${BUILDER}" || {
+  echo "the builder must enforce final-freeze causality" >&2
   exit 1
 }
 
@@ -340,7 +393,7 @@ if [[ "${producer_run_dir}" != "${run_dir}" ]]; then
   echo "the executed shell producer did not pass --run-dir <work-root>" >&2
   exit 1
 fi
-grep -q 'scenario-relay "${RUNNER_TEMP}/g6-rd-fd-a-evidence/relay-a-failed-at"' "${WORKFLOW}" || {
+grep -q 'scenario-relay "${RUNNER_TEMP}/g6-rd-fd-a-ready/relay-a-failed-at"' "${WORKFLOW}" || {
   echo "the relay scenario must consume the peer relay-a failure stamp" >&2
   exit 1
 }

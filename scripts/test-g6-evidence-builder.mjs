@@ -32,9 +32,9 @@ const epochSeconds = (seconds) => Math.floor((base + seconds * 1000) / 1000);
 function fakeUuid(seed, version = 7) {
   // the seed appears in both kept groups so every distinct seed yields a
   // distinct uuid (and a distinct dash-stripped 32-hex identity)
-  const group = seed.toString(16).padStart(4, "0");
-  const hex = `${group}0000${group}00000000`;
-  return `${hex.slice(0, 8)}-0000-${version}00-8000-${hex.slice(16, 28)}`;
+  const head = seed.toString(16).padStart(8, "0").slice(-8);
+  const tail = seed.toString(16).padStart(12, "0").slice(-12);
+  return `${head}-0000-${version}000-8000-${tail}`;
 }
 
 const digestOf = (byte) => `sha256:${byte.repeat(64)}`;
@@ -190,6 +190,46 @@ for (let tick = 0; tick <= 100; tick += 1) {
   enqueueCommand(tick % nodes.length, 5 + tick * 3);
   enqueueCommand((tick + 1) % nodes.length, 5 + tick * 3);
 }
+
+// A successful command from before the bounded HTTP/SLO window proves that
+// durable-effect completeness is checked against the run-wide synthetic
+// population without widening the window-only HTTP/dispatch denominator.
+const historicalCommandId = fakeUuid(9000, 7);
+commands.push({
+  id: historicalCommandId,
+  idempotency_key: "g6-load-test-run-history",
+  node_id: nodes[0].nodeId,
+  state: "succeeded",
+  created_at: at(1),
+  updated_at: at(4),
+});
+attempts.push({
+  command_id: historicalCommandId,
+  attempt_number: 1,
+  state: "sent",
+  started_at: at(2),
+  finished_at: at(4),
+});
+outboxRows.push({
+  command_id: historicalCommandId,
+  created_at: at(1),
+  available_at: at(2),
+  published_at: at(4),
+  locked: false,
+});
+auditRows.push(
+  { command_id: historicalCommandId, result: "intent", occurred_at: at(1) },
+  {
+    command_id: historicalCommandId,
+    result: "succeeded",
+    occurred_at: at(4),
+  },
+);
+const historicalEffectFile = "agent-fd-a-01.tsv";
+effectsByAgent.set(historicalEffectFile, [
+  `${fakeUuid(9001, 3).replaceAll("-", "")} ${historicalCommandId.replaceAll("-", "")} ${epochSeconds(3)}`,
+  ...(effectsByAgent.get(historicalEffectFile) ?? []),
+]);
 write(
   join(runDir, "state", "resource-samples.csv"),
   `${samplerLines.join("\n")}\n`,
@@ -254,6 +294,7 @@ write(
 );
 write(join(runDir, "state", "evidence", "snapshot-taken-at"), `${at(320)}\n`);
 write(join(runDir, "state", "promoted-at"), `${at(120)}\n`);
+write(join(runDir, "state", "window-ended-at"), `${at(310)}\n`);
 write(
   join(runDir, "state", "stale-transport-probe.json"),
   JSON.stringify({ status: "rejected" }),
@@ -332,6 +373,9 @@ write(
 );
 write(join(peerDir, "relay-a-failed-at"), `${at(180)}\n`);
 write(join(peerDir, "rejoin-at"), `${at(205)}\n`);
+write(join(peerDir, "final-freeze-at"), `${at(321)}\n`);
+write(join(peerDir, "freeze-received-at"), `${at(322)}\n`);
+write(join(peerDir, "evidence", "snapshot-taken-at"), `${at(323)}\n`);
 write(
   join(peerDir, "post-rejoin-probes.jsonl"),
   jsonl([206, 207, 208].map((second) => ({ at: at(second), accepted: false }))),
@@ -547,7 +591,7 @@ function expectBuilderFailure(outDir, expectedMessage) {
   const output = `${result.stderr}${result.stdout}`;
   if (result.status === 0 || !output.includes(expectedMessage)) {
     throw new Error(
-      `builder did not reject the incomplete effect population: ${output}`,
+      `builder did not reject the invalid producer state: ${output}`,
     );
   }
 }
@@ -619,15 +663,87 @@ try {
   }
 
   const effectDir = join(runDir, "state", "evidence", "effects");
-  const effectPath = join(effectDir, readdirSync(effectDir).sort()[0]);
+  const effectPath = join(effectDir, historicalEffectFile);
   const originalEffects = readFileSync(effectPath, "utf8");
-  const [, ...remainingEffects] = originalEffects.trimEnd().split("\n");
-  write(effectPath, `${remainingEffects.join("\n")}\n`);
+  const historicalHex = historicalCommandId.replaceAll("-", "");
+  const withoutHistorical = originalEffects
+    .trimEnd()
+    .split("\n")
+    .filter((line) => !line.includes(historicalHex));
+  if (
+    withoutHistorical.length === originalEffects.trimEnd().split("\n").length
+  ) {
+    throw new Error("historical effect fixture is missing");
+  }
+  write(effectPath, `${withoutHistorical.join("\n")}\n`);
   expectBuilderFailure(
-    join(work, "missing-effect-bundle"),
+    join(work, "missing-historical-effect-bundle"),
     "has no durable effect",
   );
   write(effectPath, originalEffects);
+
+  const windowHex = commands[0].id.replaceAll("-", "");
+  let windowEffectPath;
+  let windowEffectText;
+  for (const entry of readdirSync(effectDir).sort()) {
+    const path = join(effectDir, entry);
+    const content = readFileSync(path, "utf8");
+    if (content.includes(windowHex)) {
+      windowEffectPath = path;
+      windowEffectText = content;
+      break;
+    }
+  }
+  if (!windowEffectPath || !windowEffectText) {
+    throw new Error("window effect fixture is missing");
+  }
+  write(
+    windowEffectPath,
+    `${windowEffectText
+      .trimEnd()
+      .split("\n")
+      .filter((line) => !line.includes(windowHex))
+      .join("\n")}\n`,
+  );
+  expectBuilderFailure(
+    join(work, "missing-window-effect-bundle"),
+    "has no durable effect",
+  );
+  write(windowEffectPath, windowEffectText);
+
+  const duplicateTargetPath = join(effectDir, "agent-fd-b-27.tsv");
+  const duplicateTargetEffects = readFileSync(duplicateTargetPath, "utf8");
+  const duplicateLine = windowEffectText
+    .trimEnd()
+    .split("\n")
+    .find((line) => line.includes(windowHex));
+  if (!duplicateLine) {
+    throw new Error("duplicate-effect source fixture is missing");
+  }
+  write(duplicateTargetPath, `${duplicateTargetEffects}${duplicateLine}\n`);
+  expectBuilderFailure(
+    join(work, "duplicate-run-effect-bundle"),
+    "two agents hold an effect",
+  );
+  write(duplicateTargetPath, duplicateTargetEffects);
+
+  const missingAgentPath = join(effectDir, "agent-fd-a-28.tsv");
+  const missingAgentEffects = readFileSync(missingAgentPath, "utf8");
+  rmSync(missingAgentPath);
+  expectBuilderFailure(
+    join(work, "missing-agent-freeze-bundle"),
+    "does not cover exactly all managed Agents",
+  );
+  write(missingAgentPath, missingAgentEffects);
+
+  const freezePath = join(peerDir, "final-freeze-at");
+  const originalFreeze = readFileSync(freezePath, "utf8");
+  write(freezePath, `${at(309)}\n`);
+  expectBuilderFailure(
+    join(work, "premature-final-freeze-bundle"),
+    "was not frozen after the bounded window",
+  );
+  write(freezePath, originalFreeze);
 
   console.log(
     "G6 readiness evidence builder produced a verifier-passing bundle from synthetic producer state",

@@ -63,29 +63,39 @@ before the run is accepted.
    barrier and confirms at least fifty are non-terminal, then holds dispatch
    admission while a second fleet-wide wave remains due in the outbox. VM A
    takes and verifies the PITR base backup, then records marker A, the restore
-   point, and marker B with their originating transaction identities.
+   point, and marker B with their originating transaction identities. It
+   switches WAL after marker B and waits for that completed segment to reach
+   the archive before failure injection can continue.
 4. VM A is isolated under load (primary failure, API instance loss). VM B
    promotes the standby, then proves the isolated former primary cannot write,
    and re-points the era-2 control plane at the promoted primary while the
    load commands are still open.
 5. VM A verifies the PITR restore target, rejoins as the standby, proves the
-   rejoined instance rejects writes as read-only, recovers
-   its roles, and stops relay-a; VM B proves authenticated traffic moves to
-   relay-b and exercises the direct↔relay path transitions.
+   rejoined instance rejects writes as read-only, recovers its roles, and
+   stops relay-a. VM A publishes only the control evidence needed for the
+   remaining scenarios and keeps all 28 Agents alive; VM B proves
+   authenticated traffic moves to relay-b and exercises the direct↔relay path
+   transitions.
 6. VM B runs the scheduler-leadership and connection-owner failover
    scenarios with stale-term rejection proofs, the three outbox crash
    windows (claim-before-send, send-before-mark, and an ingress barrier after
    result receipt but before database commit), the
    bulk-disconnect reconnect storm, and then the bounded 300-second
    fault-free window with ≥50 concurrent commands and continuous resource
-   sampling.
+   sampling. VM B then captures the 55-node final session inventory and
+   requests a final freeze. Only then does VM A snapshot all 28 durable Agent
+   journals and its final container inventory; VM B waits for that snapshot
+   before assembly, so cleanup cannot race the final probes.
 7. `scripts/build-g6-evidence.mjs` assembles the evidence bundle purely
    from trusted producers — the authoritative database tables, the
-   per-Agent durable journals from both failure domains, the live transportd session inventory, the
-   fenced-probe outputs, and the runner clocks — and the frozen verifier
-   evaluates it. An independent verifier job recomputes the environment
-   identity from the run identity, re-evaluates the published bundle, and
-   requires its verdict to match byte for byte.
+   per-Agent durable journals from both failure domains, the live transportd
+   session inventory, the fenced-probe outputs, and the runner clocks. Durable
+   effect completeness is checked over every synthetic command in the run,
+   while HTTP latency, availability, and dispatch SLOs retain the bounded
+   window's accepted-request population. The frozen verifier evaluates that
+   bundle; an independent verifier job recomputes the environment identity
+   from the run identity, re-evaluates the published bundle, and requires its
+   verdict to match byte for byte.
 
 ## Artifacts
 

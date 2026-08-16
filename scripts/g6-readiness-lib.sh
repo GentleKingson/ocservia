@@ -74,6 +74,17 @@ g6rd_now() {
   date -u +%Y-%m-%dT%H:%M:%SZ
 }
 
+g6rd_extract_pitr_marker_row() {
+  local raw="${1:?psql marker output is required}" row
+  row="${raw%%$'\n'*}"
+  if [[ ! "${row}" =~ ^[0-9]+:[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{6}Z$ ]]; then
+    echo "PITR marker output does not match txid:RFC3339-microseconds" >&2
+    printf '%s\n' "${row}" | od -c | head -5 >&2
+    return 1
+  fi
+  printf '%s\n' "${row}"
+}
+
 g6rd_secret() {
   local name="${1:?secret name is required}"
   local path="${G6RD_SECRETS}/${name}"
@@ -375,6 +386,14 @@ g6rd_psql() {
 
 g6rd_psql_json() {
   g6rd_psql -Atc "$1"
+}
+
+g6rd_archive_has_segment() {
+  local segment="${1:?WAL segment is required}"
+  [[ "${segment}" =~ ^[0-9A-F]{24}$ ]] || return 1
+  docker run --rm --entrypoint /bin/sh \
+    -v "${G6RD_ARCHIVE}:/archive:ro" postgres:17.10-bookworm \
+    -c "test -f /archive/${segment}"
 }
 
 # ---------------------------------------------------------------------------

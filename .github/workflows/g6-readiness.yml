@@ -135,8 +135,21 @@ jobs:
         run: scripts/g6-readiness-fd-a.sh rejoin
       - name: Stop relay-a
         run: scripts/g6-readiness-fd-a.sh relay-a-stop
+      - name: Publish failure domain A scenario readiness
+        run: scripts/g6-readiness-fd-a.sh ready
+      - name: Upload failure domain A scenario readiness
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: g6-rd-fd-a-ready-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/g6-readiness-${{ env.RUN_ID }}/outbox/fd-a-ready
+          if-no-files-found: error
+          retention-days: 5
+      - name: Wait for the final freeze request
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: scripts/real-e2e-artifact.sh wait-download "g6-rd-final-freeze-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" "${RUNNER_TEMP}/g6-rd-final-freeze" 2400
       - name: Collect failure domain A evidence
-        run: scripts/g6-readiness-fd-a.sh evidence
+        run: scripts/g6-readiness-fd-a.sh evidence "${RUNNER_TEMP}/g6-rd-final-freeze"
       - name: Publish failure domain A evidence
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
@@ -258,18 +271,18 @@ jobs:
           path: ${{ runner.temp }}/g6-readiness-${{ env.RUN_ID }}/outbox/new-primary
           if-no-files-found: error
           retention-days: 5
-      - name: Wait for failure domain A evidence
+      - name: Wait for failure domain A scenario readiness
         env:
           GITHUB_TOKEN: ${{ github.token }}
-        run: scripts/real-e2e-artifact.sh wait-download "g6-rd-fd-a-evidence-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" "${RUNNER_TEMP}/g6-rd-fd-a-evidence" 2400
-      - name: Merge the peer evidence timeline
-        run: scripts/g6-readiness-fd-b.sh merge-peer-evidence "${RUNNER_TEMP}/g6-rd-fd-a-evidence"
+        run: scripts/real-e2e-artifact.sh wait-download "g6-rd-fd-a-ready-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" "${RUNNER_TEMP}/g6-rd-fd-a-ready" 2400
+      - name: Merge the peer control evidence timeline
+        run: scripts/g6-readiness-fd-b.sh merge-peer-evidence "${RUNNER_TEMP}/g6-rd-fd-a-ready"
       - name: Scheduler leadership failover scenario
         run: scripts/g6-readiness-fd-b.sh scenario-scheduler
       - name: Connection owner fencing scenario
         run: scripts/g6-readiness-fd-b.sh scenario-owner
       - name: Relay failover scenario
-        run: scripts/g6-readiness-fd-b.sh scenario-relay "${RUNNER_TEMP}/g6-rd-fd-a-evidence/relay-a-failed-at"
+        run: scripts/g6-readiness-fd-b.sh scenario-relay "${RUNNER_TEMP}/g6-rd-fd-a-ready/relay-a-failed-at"
       - name: Direct and relay path scenario
         run: scripts/g6-readiness-fd-b.sh scenario-path
       - name: Outbox crash window after claim
@@ -282,6 +295,21 @@ jobs:
         run: scripts/g6-readiness-fd-b.sh window
       - name: Collect the frozen evidence state
         run: scripts/g6-readiness-fd-b.sh evidence-collect
+      - name: Request the final failure-domain freeze
+        run: scripts/g6-readiness-fd-b.sh final-freeze
+      - name: Publish the final freeze request
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: g6-rd-final-freeze-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/g6-readiness-${{ env.RUN_ID }}/outbox/final-freeze
+          if-no-files-found: error
+          retention-days: 1
+      - name: Wait for failure domain A final evidence
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: scripts/real-e2e-artifact.sh wait-download "g6-rd-fd-a-evidence-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" "${RUNNER_TEMP}/g6-rd-fd-a-evidence" 2400
+      - name: Merge failure domain A final journals
+        run: scripts/g6-readiness-fd-b.sh merge-peer-final-evidence "${RUNNER_TEMP}/g6-rd-fd-a-evidence"
       - name: Build and verify the evidence bundle
         run: scripts/g6-readiness-fd-b.sh evidence-build "${RUNNER_TEMP}/g6-rd-fd-a-evidence"
       - name: Publish the evidence bundle
