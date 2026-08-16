@@ -5,8 +5,15 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # shellcheck source=scripts/env.sh
 source "${ROOT}/scripts/env.sh"
 
-(cd "${ROOT}/control-plane" && go test ./internal/configplan ./internal/operations ./internal/localslice ./internal/api -count=1)
-(cd "${ROOT}/rust" && cargo test -p ocservia-agent-protocol -p ocservia-ocserv-adapter -p ocservia-privd -p ocservia-agent)
+MODE="${1:-full}"
+if (($# > 1)) || [[ "${MODE}" != "full" && "${MODE}" != "--contract-only" ]]; then
+  echo "usage: $0 [--contract-only]" >&2
+  exit 2
+fi
+if [[ "${MODE}" == "full" ]]; then
+  (cd "${ROOT}/control-plane" && go test ./internal/configplan ./internal/operations ./internal/localslice ./internal/api -count=1)
+  (cd "${ROOT}/rust" && cargo test -p ocservia-agent-protocol -p ocservia-ocserv-adapter -p ocservia-privd -p ocservia-agent)
+fi
 
 grep -Fq '/config-plans/{plan_id}/apply' "${ROOT}/openapi/openapi.yaml"
 grep -Fq 'ConfigApplyResult' "${ROOT}/proto/ocserv/platform/agent/v1/agent.proto"

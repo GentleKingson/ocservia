@@ -5,7 +5,14 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # shellcheck source=scripts/env.sh
 source "${ROOT}/scripts/env.sh"
 
-(cd "${ROOT}/control-plane" && go test ./internal/useroperations ./internal/api ./internal/telemetry -count=1)
+MODE="${1:-full}"
+if (($# > 1)) || [[ "${MODE}" != "full" && "${MODE}" != "--contract-only" ]]; then
+  echo "usage: $0 [--contract-only]" >&2
+  exit 2
+fi
+if [[ "${MODE}" == "full" ]]; then
+  (cd "${ROOT}/control-plane" && go test ./internal/useroperations ./internal/api ./internal/telemetry -count=1)
+fi
 
 grep -Fq 'b8f59026c4d879f40c1da43dc00d97e34f9790bc' "${ROOT}/docs/upstream/v4.9-post1.md"
 grep -Fq '4d25478580d899b77460bdf0cf0a590cfdd26030' "${ROOT}/docs/upstream/v4.9-post1.md"

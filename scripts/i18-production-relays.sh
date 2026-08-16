@@ -2,6 +2,11 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+MODE="${1:-full}"
+if (($# > 1)) || [[ "${MODE}" != "full" && "${MODE}" != "--contract-only" ]]; then
+  echo "usage: $0 [--contract-only]" >&2
+  exit 2
+fi
 RUN_ID="${RUN_ID:?RUN_ID is required}"
 ARTIFACT_DIR="${ARTIFACT_DIR:?ARTIFACT_DIR is required}"
 if [[ "${RUN_ID}" == *[^a-zA-Z0-9._-]* ]]; then
@@ -274,12 +279,17 @@ docker run --rm --user 10001:10001 -v "${work}/secrets/otel-client.key:/run/secr
 docker volume rm "${trust_volume}" "${transport_volume}" "${development_transport_volume}" >/dev/null
 docker image rm "${runtime_transport_image}" "${runtime_control_image}" >/dev/null
 
-(cd "${ROOT}/rust" && cargo test --locked -p ocservia-transportd \
-  tests::dedicated_relay_failure_moves_traffic_to_second_relay -- --exact) \
-  >"${ARTIFACT_DIR}/relay-failover.log" 2>&1
-(cd "${ROOT}/control-plane" && go test ./internal/auth \
-  -run TestOIDCTLSAndIssuerOutagesFailClosed -count=1) \
-  >"${ARTIFACT_DIR}/oidc-tls-outage.log" 2>&1
+if [[ "${MODE}" == "full" ]]; then
+  (cd "${ROOT}/rust" && cargo test --locked -p ocservia-transportd \
+    tests::dedicated_relay_failure_moves_traffic_to_second_relay -- --exact) \
+    >"${ARTIFACT_DIR}/relay-failover.log" 2>&1
+  (cd "${ROOT}/control-plane" && go test ./internal/auth \
+    -run TestOIDCTLSAndIssuerOutagesFailClosed -count=1) \
+    >"${ARTIFACT_DIR}/oidc-tls-outage.log" 2>&1
+else
+  printf 'covered by full Go and Rust validation jobs\n' >"${ARTIFACT_DIR}/relay-failover.log"
+  printf 'covered by full Go and Rust validation jobs\n' >"${ARTIFACT_DIR}/oidc-tls-outage.log"
+fi
 RUN_ID="${RUN_ID}-backup" ARTIFACT_DIR="${ARTIFACT_DIR}/backup-restore" \
   "${ROOT}/scripts/i18-backup-restore-smoke.sh"
 RUN_ID="${RUN_ID}-package" ARTIFACT_DIR="${ARTIFACT_DIR}/agent-package" \

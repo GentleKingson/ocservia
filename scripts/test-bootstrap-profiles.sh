@@ -22,98 +22,157 @@ p1_workflow = YAML.safe_load(File.read(p1_workflow_path), aliases: true)
 jobs = workflow.fetch("jobs")
 bootstrap = File.read(File.join(root, "scripts/bootstrap.sh"))
 makefile = File.read(File.join(root, "Makefile"))
+checksums = File.read(File.join(root, "scripts/checksums.txt"))
+toolchains = File.read(File.join(root, "toolchains.lock"))
+database_script = File.read(File.join(root, "scripts/database-integration.sh"))
+actions_doc = File.read(File.join(root, "docs/development/github-actions.md"))
 
 def reject(message)
   warn message
   exit 1
 end
 
-execution_profiles = {
-  "backend-integration" => "go-integration",
-  "web-smoke" => "web",
-  "quality-security-native" => "ci-quality"
+worker_jobs = %w[
+  runtime-artifacts go-standard go-race database stage-contracts
+  production-relays credential-rotation local-slice web-validation browser-e2e
+  p1-smoke contracts-policy rust-validation security-license native-ocserv
+]
+gate_needs = {
+  "backend-integration" => %w[
+    runtime-artifacts go-standard go-race database stage-contracts
+    production-relays credential-rotation local-slice rust-validation
+  ],
+  "web-smoke" => %w[web-validation browser-e2e p1-smoke],
+  "quality-security-native" => %w[
+    contracts-policy rust-validation security-license native-ocserv
+  ]
 }
-reject("primary workflow must contain exactly three execution jobs") unless jobs.keys.sort == execution_profiles.keys.sort
+expected_jobs = worker_jobs + gate_needs.keys
+reject("primary workflow execution graph changed unexpectedly") unless jobs.keys.sort == expected_jobs.sort
 
-legacy_job_ids = %w[public-policy contracts go rust web native-ocserv p1-smoke security-licenses]
-reject("legacy execution job ID remains") unless (jobs.keys & legacy_job_ids).empty?
-
-execution_profiles.each_key do |job_id|
+worker_jobs.each do |job_id|
   job = jobs.fetch(job_id)
   reject("#{job_id} must use ubuntu-24.04") unless job.fetch("runs-on") == "ubuntu-24.04"
-  reject("#{job_id} must not depend on another job") if job.key?("needs")
+  reject("#{job_id} must not be silently path-skipped before a change classifier is defined") if job.key?("if")
 end
 
-(["all"] + execution_profiles.values).each do |profile|
-  branch = /^  #{Regexp.escape(profile)}\)$/
-  reject("bootstrap profile is missing: #{profile}") unless bootstrap.match?(branch)
+allowed_worker_dependencies = {
+  "database" => ["runtime-artifacts"],
+  "local-slice" => ["runtime-artifacts"]
+}
+worker_jobs.each do |job_id|
+  actual = Array(jobs.fetch(job_id)["needs"])
+  expected = allowed_worker_dependencies.fetch(job_id, [])
+  reject("#{job_id} has an unexpected dependency") unless actual == expected
 end
+
+expected_gate_names = {
+  "backend-integration" => "Backend Integration",
+  "web-smoke" => "Web & Smoke",
+  "quality-security-native" => "Quality, Security & Native"
+}
+reject("GitHub Actions guide must describe all 16 worker executions") unless
+  actions_doc.include?("15 worker job definitions") && actions_doc.include?("16 worker executions")
+expected_gate_names.each_value do |name|
+  reject("GitHub Actions guide is missing required-check aggregator #{name}") unless
+    actions_doc.include?("- `#{name}`")
+end
+%w[go-integration backend-\<run\> web-smoke-\<run\> quality-\<run\>].each do |stale_term|
+  reject("GitHub Actions guide contains stale term #{stale_term}") if actions_doc.include?(stale_term.delete("\\"))
+end
+gate_needs.each do |job_id, expected_needs|
+  job = jobs.fetch(job_id)
+  reject("#{job_id} changed its required-check name") unless job.fetch("name") == expected_gate_names.fetch(job_id)
+  reject("#{job_id} must run after failed dependencies") unless job.fetch("if") == "${{ always() }}"
+  reject("#{job_id} must use ubuntu-24.04") unless job.fetch("runs-on") == "ubuntu-24.04"
+  reject("#{job_id} has the wrong aggregate dependencies") unless Array(job.fetch("needs")).sort == expected_needs.sort
+  serialized = job.to_s
+  reject("#{job_id} must accept successful or intentionally skipped workers") unless
+    serialized.include?("success | skipped")
+  reject("#{job_id} must fail for every other worker result") unless serialized.include?("*) exit 1")
+  reject("#{job_id} must remain a lightweight result aggregator") if
+    Array(job.fetch("steps")).any? { |step| step.key?("uses") }
+end
+
+trigger = workflow.fetch(true)
+reject("CI must always trigger for pull requests") unless trigger.key?("pull_request")
+reject("CI must not use workflow-level path filters") if trigger.fetch("pull_request").is_a?(Hash)
+reject("CI must run on main pushes") unless trigger.fetch("push").fetch("branches") == ["main"]
+reject("CI must support manual dispatch") unless trigger.key?("workflow_dispatch")
+
+execution_profiles = {
+  "runtime-artifacts" => "go-rust-integration",
+  "go-standard" => "go-quality",
+  "go-race" => "go-test",
+  "database" => "go-test",
+  "production-relays" => "go-rust-integration",
+  "web-validation" => "web",
+  "contracts-policy" => "contracts",
+  "rust-validation" => "rust-validation",
+  "security-license" => "security",
+  "native-ocserv" => "native"
+}
+(["all"] + execution_profiles.values).uniq.each do |profile|
+  reject("bootstrap profile is missing: #{profile}") unless bootstrap.match?(/^  #{Regexp.escape(profile)}\)$/)
+end
+{
+  "go-test" => ["install_go", "verify_host_command jq"],
+  "go-quality" => ["install_go", "install_go_quality_tools", "verify_host_command jq"],
+  "go-rust-integration" => [
+    "install_go", "install_rust", "install_go_quality_tools", "install_sccache",
+    "verify_host_command jq"
+  ]
+}.each do |profile, expected_commands|
+  body = bootstrap[/^  #{Regexp.escape(profile)}\)\n(.*?)^    ;;/m, 1]
+  commands = body.to_s.lines.map(&:strip).reject(&:empty?)
+  reject("bootstrap profile #{profile} installs the wrong tools") unless commands == expected_commands
+end
+reject("legacy go-integration bootstrap profile must remain split") if bootstrap.match?(/^  go-integration\)$/)
 reject("make bootstrap must request the complete profile explicitly") unless makefile.match?(/^\t\.\/scripts\/bootstrap\.sh all$/)
 
-all_bootstrap_calls = []
+bootstrap_calls = Hash.new { |hash, key| hash[key] = [] }
 jobs.each do |job_id, job|
   Array(job["steps"]).each do |step|
     next unless step["run"].is_a?(String)
 
     step["run"].lines.each do |line|
       command = line.strip
-      all_bootstrap_calls << [job_id, command] if command.include?("scripts/bootstrap.sh")
+      bootstrap_calls[job_id] << command if command.include?("scripts/bootstrap.sh")
     end
   end
 end
-
 execution_profiles.each do |job_id, profile|
   expected = "scripts/bootstrap.sh #{profile}"
-  calls = all_bootstrap_calls.select { |candidate_job, _| candidate_job == job_id }.map(&:last)
-  reject("#{job_id} must run exactly #{expected}") unless calls == [expected]
+  reject("#{job_id} must run exactly #{expected}") unless bootstrap_calls.fetch(job_id) == [expected]
 end
-reject("workflow contains a bare bootstrap invocation") if all_bootstrap_calls.any? { |_, command| command.match?(/\A(?:\.\/)?scripts\/bootstrap\.sh\z/) }
-reject("workflow execution jobs must not use the all profile") if all_bootstrap_calls.any? { |_, command| command.end_with?(" all") }
-reject("unexpected workflow bootstrap caller") unless all_bootstrap_calls.map(&:first).sort == execution_profiles.keys.sort
 
-cache_steps = {}
-cache_restore_steps = {}
-cache_save_steps = {}
+unexpected_bootstrap = bootstrap_calls.keys - execution_profiles.keys
+reject("unexpected workflow bootstrap caller: #{unexpected_bootstrap.join(', ')}") unless unexpected_bootstrap.empty?
+reject("workflow contains a bare bootstrap invocation") if
+  bootstrap_calls.values.flatten.any? { |command| command.match?(/\A(?:\.\/)?scripts\/bootstrap\.sh\z/) }
+
+cache_restore = Hash.new { |hash, key| hash[key] = [] }
+cache_save = Hash.new { |hash, key| hash[key] = [] }
 jobs.each do |job_id, job|
-  cache_steps[job_id] = Array(job.fetch("steps")).select do |step|
-    step["uses"].to_s.start_with?("actions/cache")
-  end
-  cache_restore_steps[job_id] = cache_steps[job_id].select do |step|
-    step.fetch("uses").start_with?("actions/cache/restore@")
-  end
-  cache_save_steps[job_id] = cache_steps[job_id].select do |step|
-    step.fetch("uses").start_with?("actions/cache/save@")
-  end
-  cache_steps[job_id].each do |step|
-    reject("#{job_id} cache action must be pinned to a full commit SHA") unless step.fetch("uses").match?(/\Aactions\/cache\/(?:restore|save)@[0-9a-f]{40}\z/)
-  end
-  cache_restore_steps[job_id].each do |step|
-    key = step.fetch("with").fetch("key")
-    if key.start_with?("tooling-v3-")
-      reject("#{job_id} tooling cache must be exact-key-only") if step.fetch("with").key?("restore-keys")
-      next
+  Array(job.fetch("steps")).each do |step|
+    use = step["uses"].to_s
+    if use.start_with?("actions/cache/restore@")
+      reject("#{job_id} cache restore must be SHA-pinned") unless use.match?(/\Aactions\/cache\/restore@[0-9a-f]{40}\z/)
+      cache_restore[job_id] << step
+    elsif use.start_with?("actions/cache/save@")
+      reject("#{job_id} cache save must be SHA-pinned") unless use.match?(/\Aactions\/cache\/save@[0-9a-f]{40}\z/)
+      condition = step.fetch("if")
+      reject("#{job_id} cache publication must be limited to successful main pushes") unless
+        condition.include?("success()") &&
+        condition.include?("github.event_name == 'push'") &&
+        condition.include?("github.ref == 'refs/heads/main'") &&
+        condition.include?("outputs.cache-hit != 'true'")
+      reject("#{job_id} cache save must reuse its restore primary key") unless
+        step.fetch("with").fetch("key").match?(/\A\$\{\{ steps\.[a-z0-9-]+\.outputs\.cache-primary-key \}\}\z/)
+      cache_save[job_id] << step
+    elsif use.start_with?("actions/cache")
+      reject("#{job_id} must use explicit cache restore/save actions")
     end
-    restore_keys = step.fetch("with").fetch("restore-keys").lines.map(&:strip).reject(&:empty?)
-    expected_prefix = key.sub(/\$\{\{ hashFiles\(.+\) \}\}\z/, "")
-    reject("#{job_id} cache fallback must first remove only the content hash") unless restore_keys.first == expected_prefix
-    if key.start_with?("rust-v4-quality-")
-      expected_legacy = expected_prefix.sub("rust-v4-quality-", "rust-v3-quality-")
-      reject("#{job_id} Rust cache must fall back to the previous main cache generation") unless restore_keys == [expected_prefix, expected_legacy]
-    else
-      reject("#{job_id} cache restore must have exactly one fallback prefix") unless restore_keys == [expected_prefix]
-    end
-    reject("#{job_id} cache restore must have an id") if step["id"].to_s.empty?
-  end
-  cache_save_steps[job_id].each do |step|
-    condition = step.fetch("if")
-    reject("#{job_id} cache save must be limited to successful main pushes") unless
-      condition.include?("success()") &&
-      condition.include?("github.event_name == 'push'") &&
-      condition.include?("github.ref == 'refs/heads/main'") &&
-      condition.include?("outputs.cache-hit != 'true'")
-    reject("#{job_id} cache save must reuse the restore primary key") unless
-      step.fetch("with").fetch("key").match?(/\A\$\{\{ steps\.[a-z0-9-]+\.outputs\.cache-primary-key \}\}\z/)
-    reject("#{job_id} cache save must not define restore-keys") if step.fetch("with").key?("restore-keys")
   end
 end
 
@@ -123,106 +182,158 @@ end
 
 tooling_inputs = ["toolchains.lock", "scripts/checksums.txt", "scripts/bootstrap.sh", "scripts/env.sh"]
 execution_profiles.each do |job_id, profile|
-  tooling = cache_restore_steps.fetch(job_id).select { |step| step.fetch("with").fetch("key").start_with?("tooling-v3-") }
-  reject("#{job_id} must have one v3 tooling cache") unless tooling.length == 1
+  tooling = cache_restore.fetch(job_id).select do |step|
+    step.fetch("with").fetch("key").start_with?("tooling-v4-")
+  end
+  reject("#{job_id} must restore one verified tooling cache") unless tooling.length == 1
   key = tooling.first.fetch("with").fetch("key")
-  prefix = "tooling-v3-#{profile}-${{ runner.os }}-${{ runner.arch }}-"
-  reject("#{job_id} tooling cache must include its profile") unless key.start_with?(prefix)
+  reject("#{job_id} tooling cache has the wrong profile") unless
+    key.start_with?("tooling-v4-#{profile}-${{ runner.os }}-${{ runner.arch }}-")
   tooling_inputs.each { |input| reject("#{job_id} tooling key is missing #{input}") unless key.include?(input) }
-  reject("#{job_id} tooling cache paths are not minimal") unless paths(tooling.first).sort == [".cache/downloads", ".tools"].sort
+  reject("#{job_id} tooling cache must be exact-key-only") if tooling.first.fetch("with").key?("restore-keys")
+  reject("#{job_id} tooling paths changed") unless paths(tooling.first).sort == [".cache/downloads", ".tools"].sort
 end
 
-npm_jobs = ["web-smoke", "quality-security-native"]
-execution_profiles.each_key do |job_id|
-  npm = cache_restore_steps.fetch(job_id).select { |step| step.fetch("with").fetch("key").start_with?("npm-v3-") }
-  if npm_jobs.include?(job_id)
-    reject("#{job_id} must have one npm download cache") unless npm.length == 1
-    key = npm.first.fetch("with").fetch("key")
-    reject("#{job_id} npm cache must include toolchains.lock") unless key.include?("toolchains.lock")
-    reject("#{job_id} npm cache must include web/package-lock.json") unless key.include?("web/package-lock.json")
-    reject("#{job_id} npm cache path must be .cache/npm") unless paths(npm.first) == [".cache/npm"]
-  else
-    reject("#{job_id} must not have an npm cache") unless npm.empty?
-  end
-end
-
-backend_cache = cache_restore_steps.fetch("backend-integration").find { |step| step.fetch("with").fetch("key").start_with?("go-v3-backend-") }
-reject("Backend Integration must have one Go build/module cache") unless backend_cache
-backend_key = backend_cache.fetch("with").fetch("key")
-["toolchains.lock", "go.work", "go.work.sum", "control-plane/go.mod", "control-plane/go.sum"].each do |input|
-  reject("Backend Integration cache key is missing #{input}") unless backend_key.include?(input)
-end
-expected_backend_paths = [".cache/go-build", ".cache/go-mod", ".cache/gopath"]
-reject("Backend Integration cache paths changed unexpectedly") unless paths(backend_cache).sort == expected_backend_paths.sort
-backend_rust = cache_restore_steps.fetch("backend-integration").find { |step| step.fetch("with").fetch("key").start_with?("rust-v4-quality-") }
-reject("Backend Integration must restore the Quality Rust cache without saving it") unless backend_rust
-reject("Backend Integration Rust restore path must be rust/target") unless paths(backend_rust) == ["rust/target"]
-reject("Backend Integration must use the Quality Rust cache key") unless backend_rust.fetch("with").fetch("key").start_with?("rust-v4-quality-")
-
-quality_caches = cache_restore_steps.fetch("quality-security-native")
-rust_cache = quality_caches.find { |step| step.fetch("with").fetch("key").start_with?("rust-v4-quality-") }
-reject("Quality must own one Rust target cache") unless rust_cache && paths(rust_cache) == ["rust/target"]
-rust_key = rust_cache.fetch("with").fetch("key")
-["toolchains.lock", "rust/Cargo.lock", "rust/Cargo.toml", "rust/rust-toolchain.toml", "rust/crates/**/Cargo.toml"].each do |input|
-  reject("Quality Rust cache key is missing #{input}") unless rust_key.include?(input)
-end
-go_mod_cache = quality_caches.find { |step| step.fetch("with").fetch("key").start_with?("go-mod-v3-quality-") }
-reject("Quality must have one Go module download cache") unless go_mod_cache && paths(go_mod_cache) == [".cache/go-mod"]
-["toolchains.lock", "go.work", "go.work.sum", "control-plane/go.mod", "control-plane/go.sum", "scripts/license-check.sh"].each do |input|
-  reject("Quality Go module cache key is missing #{input}") unless go_mod_cache.fetch("with").fetch("key").include?(input)
-end
-
-allowed_cache_paths = [
-  ".cache/downloads",
-  ".cache/npm",
-  ".tools",
-  ".cache/go-build",
-  ".cache/go-mod",
-  ".cache/gopath",
-  "rust/target"
-]
-execution_profiles.each_key do |job_id|
-  cache_steps.fetch(job_id).each do |step|
-    paths(step).each do |path|
-      reject("#{job_id} must not cache node_modules") if path.include?("node_modules")
-      reject("#{job_id} cache path escapes repository caches") if path.start_with?("/tmp", "${{ runner.temp }}")
-      reject("#{job_id} has an unapproved cache path: #{path}") unless allowed_cache_paths.include?(path)
-    end
-  end
-end
-
-expected_save_counts = {
-  "backend-integration" => 2,
-  "web-smoke" => 2,
-  "quality-security-native" => 4
+tooling_writers = {
+  "go-rust-integration" => "runtime-artifacts",
+  "go-quality" => "go-standard",
+  "go-test" => "go-race",
+  "web" => "web-validation",
+  "contracts" => "contracts-policy",
+  "rust-validation" => "rust-validation",
+  "security" => "security-license",
+  "native" => "native-ocserv"
 }
-expected_save_counts.each do |job_id, count|
-  reject("#{job_id} must save each owned cache on main") unless cache_save_steps.fetch(job_id).length == count
-end
-reject("Backend Integration must not save the Quality-owned Rust target") if
-  cache_save_steps.fetch("backend-integration").any? { |step| paths(step).include?("rust/target") }
-quality_rust_save = cache_save_steps.fetch("quality-security-native").find { |step| paths(step) == ["rust/target"] }
-reject("Quality must save its Rust target cache") unless quality_rust_save
-
-jobs.fetch("backend-integration").fetch("env").tap do |env|
-  reject("Backend Integration must disable Cargo incremental compilation") unless env.fetch("CARGO_INCREMENTAL") == "0"
-end
-quality = jobs.fetch("quality-security-native")
-reject("Quality must disable Cargo incremental compilation") unless quality.fetch("env").fetch("CARGO_INCREMENTAL") == "0"
-incremental_cleanup = Array(quality.fetch("steps")).find { |step| step["name"] == "Remove Rust incremental artifacts before caching" }
-reject("Quality must remove restored Rust incremental artifacts before a new main cache save") unless
-  incremental_cleanup && incremental_cleanup.fetch("run").include?("-name incremental")
-
-execution_profiles.each_key do |job_id|
-  uploads = Array(jobs.fetch(job_id).fetch("steps")).select { |step| step["uses"].to_s.start_with?("actions/upload-artifact@") }
-  reject("#{job_id} must upload exactly one diagnostic artifact") unless uploads.length == 1
-  reject("#{job_id} upload action must be pinned") unless uploads.first.fetch("uses").match?(/\Aactions\/upload-artifact@[0-9a-f]{40}\z/)
+tooling_writers.each do |profile, job_id|
+  saves = cache_save.fetch(job_id).select do |step|
+    paths(step).sort == [".cache/downloads", ".tools"].sort
+  end
+  reject("#{profile} must have exactly one main-only tooling cache writer") unless saves.length == 1
+  restore = cache_restore.fetch(job_id).find do |step|
+    step.fetch("with").fetch("key").start_with?("tooling-v4-#{profile}-")
+  end
+  reject("#{profile} tooling writer must save its restore primary key") unless
+    restore && saves.first.fetch("with").fetch("key").include?("cache-primary-key")
 end
 
-reject("primary workflow must not contain a CI Gate job") if jobs.key?("ci-gate")
+go_jobs = %w[runtime-artifacts go-standard go-race database production-relays security-license]
+go_keys = go_jobs.map do |job_id|
+  candidates = cache_restore.fetch(job_id).select { |step| step.fetch("with").fetch("key").start_with?("go-v4-") }
+  reject("#{job_id} must restore one shared Go cache") unless candidates.length == 1
+  cache = candidates.first
+  reject("#{job_id} Go cache paths changed") unless
+    paths(cache).sort == [".cache/go-build", ".cache/go-mod", ".cache/gopath"].sort
+  key = cache.fetch("with").fetch("key")
+  ["toolchains.lock", "go.work", "go.work.sum", "control-plane/go.mod", "control-plane/go.sum", "${{ github.sha }}"].each do |input|
+    reject("#{job_id} Go cache key is missing #{input}") unless key.include?(input)
+  end
+  restore_keys = cache.fetch("with").fetch("restore-keys").lines.map(&:strip).reject(&:empty?)
+  reject("#{job_id} Go cache must fall back by commit and dependency prefix") unless restore_keys.length == 2
+  key
+end
+reject("Go jobs do not share one cache namespace") unless go_keys.uniq.length == 1
+reject("only go-standard may publish the shared Go cache") unless
+  cache_save.keys.select { |job_id| cache_save[job_id].any? { |step| paths(step).include?(".cache/go-build") } } == ["go-standard"]
 
-web = jobs.fetch("web-smoke")
-web_env = web.fetch("env")
+npm_jobs = %w[web-validation contracts-policy security-license]
+npm_keys = npm_jobs.map do |job_id|
+  candidates = cache_restore.fetch(job_id).select { |step| step.fetch("with").fetch("key").start_with?("npm-v4-") }
+  reject("#{job_id} must restore one shared npm cache") unless candidates.length == 1
+  cache = candidates.first
+  reject("#{job_id} npm cache path changed") unless paths(cache) == [".cache/npm"]
+  key = cache.fetch("with").fetch("key")
+  reject("#{job_id} npm cache key is incomplete") unless
+    key.include?("toolchains.lock") && key.include?("web/package-lock.json")
+  key
+end
+reject("npm jobs do not share one cache namespace") unless npm_keys.uniq.length == 1
+reject("only web-validation may publish the shared npm cache") unless
+  cache_save.keys.select { |job_id| cache_save[job_id].any? { |step| paths(step) == [".cache/npm"] } } == ["web-validation"]
+
+all_cached_paths = cache_restore.values.flatten.flat_map { |step| paths(step) }
+reject("Rust target archives must be replaced by sccache") if all_cached_paths.include?("rust/target")
+reject("workflow must not cache node_modules") if all_cached_paths.any? { |path| path.include?("node_modules") }
+
+sccache_jobs = %w[runtime-artifacts production-relays rust-validation security-license native-ocserv]
+sccache_action = "mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba"
+sccache_jobs.each do |job_id|
+  job = jobs.fetch(job_id)
+  env = job.fetch("env")
+  reject("#{job_id} must disable Cargo incremental compilation") unless env.fetch("CARGO_INCREMENTAL") == "0"
+  reject("#{job_id} must use sccache as the Rust compiler wrapper") unless env.fetch("RUSTC_WRAPPER") == "sccache"
+  reject("#{job_id} must use the GitHub Actions sccache backend") unless env.fetch("SCCACHE_GHA_ENABLED") == "true"
+  reject("#{job_id} must normalize the sccache workspace base") unless env.fetch("SCCACHE_BASEDIRS") == "${{ github.workspace }}"
+  reject("#{job_id} must select a usable sccache backend before bootstrap") unless
+    Array(job.fetch("steps")).any? { |step| step["run"] == "scripts/configure-sccache.sh" }
+  setup = Array(job.fetch("steps")).find { |step| step["uses"] == sccache_action }
+  reject("#{job_id} must expose the GitHub Actions cache credentials through the pinned sccache action") unless setup
+  reject("#{job_id} must request the repository-pinned sccache release") unless
+    setup.fetch("with").fetch("version") == "v0.17.0"
+  reject("#{job_id} must use the explicit sccache statistics step") unless
+    setup.fetch("with").fetch("disable_annotations") == true
+end
+reject("sccache version is not pinned") unless toolchains.match?(/^sccache=0\.17\.0$/)
+%w[aarch64-apple-darwin x86_64-unknown-linux-musl].each do |platform|
+  reject("sccache checksum is missing for #{platform}") unless
+    checksums.include?("sccache-v0.17.0-#{platform}.tar.gz")
+end
+reject("bootstrap must install sccache from verified downloads") unless bootstrap.include?("install_sccache()")
+
+download_pin = "actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c"
+%w[database local-slice].each do |job_id|
+  steps = Array(jobs.fetch(job_id).fetch("steps"))
+  reject("#{job_id} must download the commit-bound runtime artifact") unless
+    steps.any? { |step| step["uses"] == download_pin }
+  reject("#{job_id} must verify the runtime artifact against GITHUB_SHA") unless
+    steps.any? { |step| step["run"].to_s.include?("ci-runtime-artifact.sh extract") && step["run"].include?("GITHUB_SHA") }
+end
+runtime_upload = Array(jobs.fetch("runtime-artifacts").fetch("steps")).find do |step|
+  step["uses"].to_s.start_with?("actions/upload-artifact@")
+end
+reject("runtime artifact upload must be SHA-pinned") unless
+  runtime_upload && runtime_upload.fetch("uses").match?(/\Aactions\/upload-artifact@[0-9a-f]{40}\z/)
+reject("runtime artifact must have one-day retention") unless runtime_upload.fetch("with").fetch("retention-days") == 1
+jobs.each do |job_id, job|
+  Array(job.fetch("steps")).select { |step| step["uses"].to_s.start_with?("actions/upload-artifact@") }.each do |step|
+    reject("#{job_id} artifact retention exceeds the repository limit") unless
+      step.fetch("with").fetch("retention-days") == 1
+    documented_name = step.fetch("with").fetch("name")
+      .gsub("${{ github.run_id }}", "<run>")
+      .gsub("${{ github.run_attempt }}", "<attempt>")
+      .gsub("${{ matrix.pg-major }}", "<major>")
+    reject("GitHub Actions guide is missing artifact #{documented_name}") unless
+      actions_doc.include?("`#{documented_name}`")
+  end
+end
+
+database = jobs.fetch("database")
+matrix = database.fetch("strategy").fetch("matrix").fetch("pg-major")
+reject("PostgreSQL 17 and 18 must run as a matrix") unless matrix == [17, 18]
+reject("PostgreSQL matrix must not fail fast") unless database.fetch("strategy").fetch("fail-fast") == false
+database_step = Array(database.fetch("steps")).find { |step| step["run"] == "scripts/database-integration.sh" }
+reject("database job must pass one PG_MAJOR to the script") unless
+  database_step && database_step.fetch("env").fetch("PG_MAJOR") == "${{ matrix.pg-major }}"
+pg17_exit = database_script.index('if [[ "${PG_MAJOR}" == "17" ]]; then')
+legacy_fixture = database_script.index('container="${PREFIX}-upgrade"')
+reject("PostgreSQL 18 legacy upgrade fixture must not repeat in the PostgreSQL 17 worker") unless
+  pg17_exit && legacy_fixture && pg17_exit < legacy_fixture
+
+stage_run = Array(jobs.fetch("stage-contracts").fetch("steps")).map { |step| step["run"].to_s }.join("\n")
+%w[
+  i14-quota-expiry-backport.sh i15-config-plan.sh i16-config-apply.sh
+  i17-certificate-secret.sh i19-five-minute-offline-recovery.sh
+].each do |script|
+  reject("#{script} must run contract-only in CI") unless stage_run.include?("#{script} --contract-only")
+end
+production_run = Array(jobs.fetch("production-relays").fetch("steps")).map { |step| step["run"].to_s }.join("\n")
+reject("I18 must not repeat language suites") unless production_run.include?("i18-production-relays.sh --contract-only")
+reject("Go standard job must retain ordinary tests") unless
+  Array(jobs.fetch("go-standard").fetch("steps")).any? { |step| step["run"].to_s.include?("go-check.sh standard") }
+reject("Go race job must retain the full race suite") unless
+  Array(jobs.fetch("go-race").fetch("steps")).any? { |step| step["run"].to_s.include?("go-check.sh race") }
+reject("Rust validation must retain the full Rust suite") unless
+  Array(jobs.fetch("rust-validation").fetch("steps")).any? { |step| step["run"].to_s.include?("scripts/rust-check.sh") }
+
 expected_p1 = {
   "AGENT_COUNT" => 24,
   "HEARTBEAT_COUNT" => 2,
@@ -232,48 +343,37 @@ expected_p1 = {
   "QUEUE_CAPACITY" => 256,
   "REQUEST_CONCURRENCY" => 8
 }
-reject("Web & Smoke changed the P1 smoke profile") unless web_env == expected_p1
-web_steps = Array(web.fetch("steps"))
-e2e = web_steps.find { |step| step["run"] == "scripts/e2e.sh" }
-p1 = web_steps.find { |step| step["run"] == "scripts/p1-resilience-capacity.sh" }
-reject("Web & Smoke must run E2E and P1 Smoke separately") unless e2e && p1
-reject("E2E and P1 Smoke must use different Compose projects") if e2e.fetch("env").fetch("COMPOSE_PROJECT") == p1.fetch("env").fetch("COMPOSE_PROJECT")
-reject("E2E and P1 Smoke must use different RUN_ID values") if e2e.fetch("env").fetch("RUN_ID") == p1.fetch("env").fetch("RUN_ID")
+reject("P1 smoke profile changed") unless jobs.fetch("p1-smoke").fetch("env") == expected_p1
 
-quality_steps = Array(jobs.fetch("quality-security-native").fetch("steps"))
-step_names = quality_steps.map { |step| step["name"] }
-native_index = step_names.index("Install ephemeral native fixtures")
-upload_index = step_names.index("Upload Quality, Security, and Native diagnostics")
-native_run = quality_steps.find { |step| step["name"] == "Native ocpasswd, OpenSSL, and Ocserv login" }.fetch("run")
-required_before_native = [
-  "Repository policy",
-  "Documentation",
-  "CI workflow policy tests",
-  "Generate contract outputs",
-  "Lint contract sources",
-  "Check contract breaking changes",
-  "Check generated output",
-  "Rust checks",
-  "Agent privilege boundary",
-  "Transport boundary",
-  "Secret scan",
-  "License checks"
-]
-reject("Quality native fixture steps are missing") unless native_index && upload_index
-required_before_native.each do |name|
-  index = step_names.index(name)
-  reject("#{name} must execute before Native Ocserv") unless index && index < native_index
-end
-reject("Native Ocserv must execute before artifact upload") unless native_index < upload_index
+native_steps = Array(jobs.fetch("native-ocserv").fetch("steps"))
+native_run = native_steps.find { |step| step["name"] == "Native ocpasswd, OpenSSL, and Ocserv login" }.fetch("run")
 reject("Native Ocserv must use an isolated Cargo target") unless native_run.include?("CARGO_TARGET_DIR=\"${native_target}\"")
 reject("Native Ocserv must remove its isolated Cargo target") unless native_run.include?("sudo rm -rf \"${native_target}\"")
 
-trigger = p1_workflow.fetch(true)
-reject("P1 Full must remain workflow_dispatch-only") unless trigger.keys == ["workflow_dispatch"]
+p1_trigger = p1_workflow.fetch(true)
+reject("P1 Full must remain workflow_dispatch-only") unless p1_trigger.keys == ["workflow_dispatch"]
 p1_job = p1_workflow.fetch("jobs").fetch("p1-full")
 reject("P1 Full must use ubuntu-24.04") unless p1_job.fetch("runs-on") == "ubuntu-24.04"
 reject("P1 Full profile changed") unless p1_job.fetch("env").fetch("P1_PROFILE") == "full"
 reject("P1 Full timeout changed") unless p1_job.fetch("timeout-minutes") == 45
 RUBY
+
+for script in \
+  i14-quota-expiry-backport.sh \
+  i15-config-plan.sh \
+  i16-config-apply.sh \
+  i17-certificate-secret.sh \
+  i18-production-relays.sh \
+  i19-five-minute-offline-recovery.sh; do
+  if "${ROOT}/scripts/${script}" --unsupported >/dev/null 2>&1; then
+    echo "${script} accepted an unsupported execution mode" >&2
+    exit 1
+  fi
+done
+
+if "${ROOT}/scripts/go-check.sh" unsupported >/dev/null 2>&1; then
+  echo "go-check.sh accepted an unsupported execution mode" >&2
+  exit 1
+fi
 
 "${ROOT}/scripts/test-real-e2e-workflow.sh"

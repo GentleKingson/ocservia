@@ -16,10 +16,11 @@ source_container="${network}-source"
 restore_container="${network}-restore"
 backup_container="${network}-backup"
 backup_image="${network}-image"
+source_alias="postgres-source"
 password="$(openssl rand -hex 24)"
 mkdir -p "${work}/backup" "${work}/production-backup" "${work}/restore" "${ARTIFACT_DIR}"
 chmod 0700 "${work}" "${work}/backup" "${work}/production-backup" "${work}/restore"
-printf '%s:5432:replication:postgres:%s\n' "${source_container}" "${password}" >"${work}/postgres.pgpass"
+printf '%s:5432:replication:postgres:%s\n' "${source_alias}" "${password}" >"${work}/postgres.pgpass"
 chmod 0644 "${work}/postgres.pgpass"
 
 cleanup() {
@@ -58,7 +59,7 @@ docker build -f "${ROOT}/deploy/production/backup.Dockerfile" -t "${backup_image
   >"${ARTIFACT_DIR}/backup-image-build.log"
 docker run --rm -v "${work}:/work" --entrypoint chown "${POSTGRES_IMAGE}" \
   -R 999:999 /work/production-backup
-docker run -d --name "${source_container}" --network "${network}" \
+docker run -d --name "${source_container}" --network "${network}" --network-alias "${source_alias}" \
   -e POSTGRES_PASSWORD="${password}" -e POSTGRES_DB=ocservia \
   "${POSTGRES_IMAGE}" >/dev/null
 source_ready=false
@@ -84,7 +85,7 @@ docker exec -e PGPASSWORD="${password}" "${source_container}" \
 
 docker run --name "${backup_container}" --network "${network}" \
   --tmpfs /tmp:rw,noexec,nosuid,size=32m,mode=0700,uid=999,gid=999 \
-  -e PGHOST="${source_container}" -e PGDATABASE=ocservia -e PGUSER=postgres \
+  -e PGHOST="${source_alias}" -e PGDATABASE=ocservia -e PGUSER=postgres \
   -e PGPASS_SOURCE=/run/secrets/postgres_pgpass -e BACKUP_ROOT=/var/lib/ocservia-backup \
   -e RUN_ID="${RUN_ID}-production-user" \
   -v "${work}/postgres.pgpass:/run/secrets/postgres_pgpass:ro" \
@@ -96,7 +97,7 @@ docker run --rm -v "${work}/production-backup:/backup:ro" --entrypoint test \
 
 docker run --name "${backup_container}" --network "${network}" \
   --user "$(id -u):$(id -g)" \
-  -e PGHOST="${source_container}" -e PGDATABASE=ocservia -e PGUSER=postgres \
+  -e PGHOST="${source_alias}" -e PGDATABASE=ocservia -e PGUSER=postgres \
   -e PGPASS_SOURCE=/run/secrets/postgres_pgpass -e BACKUP_ROOT=/backup -e RUN_ID="${RUN_ID}" \
   -v "${work}/postgres.pgpass:/run/secrets/postgres_pgpass:ro" \
   -v "${work}/backup:/backup" \
@@ -110,7 +111,7 @@ mkdir "${work}/backup/.backup.lock"
 sleep 1
 docker run --name "${backup_container}" --network "${network}" \
   --user "$(id -u):$(id -g)" \
-  -e PGHOST="${source_container}" -e PGDATABASE=ocservia -e PGUSER=postgres \
+  -e PGHOST="${source_alias}" -e PGDATABASE=ocservia -e PGUSER=postgres \
   -e PGPASS_SOURCE=/run/secrets/postgres_pgpass -e BACKUP_ROOT=/backup -e RUN_ID="${RUN_ID}-restart" \
   -v "${work}/postgres.pgpass:/run/secrets/postgres_pgpass:ro" \
   -v "${work}/backup:/backup" \
@@ -128,7 +129,7 @@ docker rm "${backup_container}" >/dev/null
 sleep 1
 docker run --name "${backup_container}" --network "${network}" \
   --user "$(id -u):$(id -g)" \
-  -e PGHOST="${source_container}" -e PGDATABASE=ocservia -e PGUSER=postgres \
+  -e PGHOST="${source_alias}" -e PGDATABASE=ocservia -e PGUSER=postgres \
   -e PGPASS_SOURCE=/run/secrets/postgres_pgpass -e BACKUP_ROOT=/backup -e RUN_ID="${RUN_ID}-after-kill" \
   -v "${work}/postgres.pgpass:/run/secrets/postgres_pgpass:ro" \
   -v "${work}/backup:/backup" \

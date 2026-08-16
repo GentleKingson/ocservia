@@ -15,12 +15,15 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  backend-integration:
-    name: Backend Integration
+  runtime-artifacts:
+    name: Build Runtime Artifacts
     runs-on: ubuntu-24.04
-    timeout-minutes: 40
+    timeout-minutes: 15
     env:
       CARGO_INCREMENTAL: "0"
+      RUSTC_WRAPPER: sccache
+      SCCACHE_BASEDIRS: ${{ github.workspace }}
+      SCCACHE_GHA_ENABLED: "true"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
@@ -28,124 +31,474 @@ jobs:
       - name: Runner preflight
         run: scripts/ci-preflight.sh
       - name: Restore verified tools
-        id: backend-tools-cache
+        id: runtime-tools-cache
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: |
             .cache/downloads
             .tools
-          key: tooling-v3-go-integration-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'scripts/checksums.txt', 'scripts/bootstrap.sh', 'scripts/env.sh') }}
-      - name: Restore Go build and module caches
-        id: backend-go-cache
+          key: tooling-v4-go-rust-integration-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'scripts/checksums.txt', 'scripts/bootstrap.sh', 'scripts/env.sh') }}
+      - name: Restore shared Go cache
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: |
             .cache/go-build
             .cache/go-mod
             .cache/gopath
-          key: go-v3-backend-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'go.work', 'go.work.sum', 'control-plane/go.mod', 'control-plane/go.sum') }}
+          key: go-v4-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'go.work', 'go.work.sum', 'control-plane/go.mod', 'control-plane/go.sum') }}-${{ github.sha }}
           restore-keys: |
-            go-v3-backend-${{ runner.os }}-${{ runner.arch }}-
-      - name: Restore Quality-owned Rust target cache
-        id: backend-rust-cache
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+            go-v4-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'go.work', 'go.work.sum', 'control-plane/go.mod', 'control-plane/go.sum') }}-
+            go-v4-${{ runner.os }}-${{ runner.arch }}-
+      - name: Enable sccache GitHub Actions backend
+        uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
         with:
-          path: rust/target
-          key: rust-v4-quality-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'rust/Cargo.lock', 'rust/Cargo.toml', 'rust/rust-toolchain.toml', 'rust/crates/**/Cargo.toml') }}
-          restore-keys: |
-            rust-v4-quality-${{ runner.os }}-${{ runner.arch }}-
-            rust-v3-quality-${{ runner.os }}-${{ runner.arch }}-
-      - name: Bootstrap and verify pinned tools
-        run: scripts/bootstrap.sh go-integration
-      - name: Go checks
-        env:
-          ARTIFACT_DIR: ${{ runner.temp }}/artifacts/backend/go-check
-        run: |
-          mkdir -p "${ARTIFACT_DIR}"
-          set -o pipefail
-          scripts/go-check.sh 2>&1 | tee "${ARTIFACT_DIR}/go-check.log"
-      - name: PostgreSQL 17 and 18 integration
-        env:
-          ARTIFACT_DIR: ${{ runner.temp }}/artifacts/backend/database-integration
-          RUN_ID: database-${{ github.run_id }}-${{ github.run_attempt }}-be
-        run: scripts/database-integration.sh
-      - name: I14 quota, expiry, batch, and backport contracts
-        env:
-          ARTIFACT_DIR: ${{ runner.temp }}/artifacts/backend/i14
-        run: |
-          mkdir -p "${ARTIFACT_DIR}"
-          set -o pipefail
-          scripts/i14-quota-expiry-backport.sh 2>&1 | tee "${ARTIFACT_DIR}/i14.log"
-      - name: I15 deterministic config-plan boundary
-        env:
-          ARTIFACT_DIR: ${{ runner.temp }}/artifacts/backend/i15
-        run: |
-          mkdir -p "${ARTIFACT_DIR}"
-          set -o pipefail
-          scripts/i15-config-plan.sh 2>&1 | tee "${ARTIFACT_DIR}/i15.log"
-      - name: I16 atomic config-apply and rollback boundary
-        env:
-          ARTIFACT_DIR: ${{ runner.temp }}/artifacts/backend/i16
-        run: |
-          mkdir -p "${ARTIFACT_DIR}"
-          set -o pipefail
-          scripts/i16-config-apply.sh 2>&1 | tee "${ARTIFACT_DIR}/i16.log"
-      - name: I17 certificate and secret lifecycle boundary
-        env:
-          ARTIFACT_DIR: ${{ runner.temp }}/artifacts/backend/i17
-        run: |
-          mkdir -p "${ARTIFACT_DIR}"
-          set -o pipefail
-          scripts/i17-certificate-secret.sh 2>&1 | tee "${ARTIFACT_DIR}/i17.log"
-      - name: I18 production topology and dedicated relay recovery
-        env:
-          ARTIFACT_DIR: ${{ runner.temp }}/artifacts/backend/i18
-          RUN_ID: production-${{ github.run_id }}-${{ github.run_attempt }}-be
-        run: scripts/i18-production-relays.sh
-      - name: PostgreSQL application and backup credential rotation
-        env:
-          ARTIFACT_DIR: ${{ runner.temp }}/artifacts/backend/postgres-credential-rotation
-          RUN_ID: postgres-rotation-${{ github.run_id }}-${{ github.run_attempt }}-be
-        run: scripts/i18-postgres-credential-rotation.sh
-      - name: I19 five-minute Agent offline recovery
-        env:
-          ARTIFACT_DIR: ${{ runner.temp }}/artifacts/backend/i19
-        run: timeout 300s scripts/i19-five-minute-offline-recovery.sh
-      - name: Go, PostgreSQL, UDS, and Rust stub local slice
-        env:
-          ARTIFACT_DIR: ${{ runner.temp }}/artifacts/backend/local-slice
-          RUN_ID: local-slice-${{ github.run_id }}-${{ github.run_attempt }}-be
-        run: scripts/local-slice-integration.sh
+          version: "v0.17.0"
+          disable_annotations: true
+      - name: Configure sccache backend
+        run: scripts/configure-sccache.sh
+      - name: Bootstrap pinned Go and Rust tools
+        run: scripts/bootstrap.sh go-rust-integration
+      - name: Build commit-bound runtime artifacts
+        run: scripts/ci-runtime-artifact.sh build "${RUNNER_TEMP}/runtime-upload" "${GITHUB_SHA}"
       - name: Save verified tools
-        if: success() && github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.backend-tools-cache.outputs.cache-hit != 'true'
+        if: success() && github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.runtime-tools-cache.outputs.cache-hit != 'true'
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: |
             .cache/downloads
             .tools
-          key: ${{ steps.backend-tools-cache.outputs.cache-primary-key }}
-      - name: Save Go build and module caches
-        if: success() && github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.backend-go-cache.outputs.cache-hit != 'true'
+          key: ${{ steps.runtime-tools-cache.outputs.cache-primary-key }}
+      - name: Show sccache statistics
+        if: always()
+        run: |
+          source scripts/env.sh
+          if command -v sccache >/dev/null 2>&1; then
+            sccache --show-stats || true
+          fi
+      - name: Upload runtime artifacts
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: runtime-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/runtime-upload/runtime-artifacts.tar.gz
+          if-no-files-found: error
+          retention-days: 1
+
+  go-standard:
+    name: Go Static and Unit
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - name: Runner preflight
+        run: scripts/ci-preflight.sh
+      - name: Restore verified tools
+        id: go-standard-tools-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: |
+            .cache/downloads
+            .tools
+          key: tooling-v4-go-quality-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'scripts/checksums.txt', 'scripts/bootstrap.sh', 'scripts/env.sh') }}
+      - name: Restore shared Go cache
+        id: go-standard-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: |
+            .cache/go-build
+            .cache/go-mod
+            .cache/gopath
+          key: go-v4-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'go.work', 'go.work.sum', 'control-plane/go.mod', 'control-plane/go.sum') }}-${{ github.sha }}
+          restore-keys: |
+            go-v4-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'go.work', 'go.work.sum', 'control-plane/go.mod', 'control-plane/go.sum') }}-
+            go-v4-${{ runner.os }}-${{ runner.arch }}-
+      - name: Bootstrap pinned Go tools
+        run: scripts/bootstrap.sh go-quality
+      - name: Go format, static analysis, unit, and vulnerability checks
+        env:
+          ARTIFACT_DIR: ${{ runner.temp }}/artifacts/go-standard
+        run: |
+          mkdir -p "${ARTIFACT_DIR}"
+          set -o pipefail
+          scripts/go-check.sh standard 2>&1 | tee "${ARTIFACT_DIR}/go-standard.log"
+      - name: Save verified tools
+        if: success() && github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.go-standard-tools-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: |
+            .cache/downloads
+            .tools
+          key: ${{ steps.go-standard-tools-cache.outputs.cache-primary-key }}
+      - name: Save shared Go cache
+        if: success() && github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.go-standard-cache.outputs.cache-hit != 'true'
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: |
             .cache/go-build
             .cache/go-mod
             .cache/gopath
-          key: ${{ steps.backend-go-cache.outputs.cache-primary-key }}
-      - name: Upload Backend Integration diagnostics
+          key: ${{ steps.go-standard-cache.outputs.cache-primary-key }}
+      - name: Upload Go diagnostics
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
-          name: backend-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/artifacts/backend
+          name: go-standard-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/artifacts/go-standard
           if-no-files-found: warn
-          retention-days: 14
+          retention-days: 1
 
-  web-smoke:
-    name: Web & Smoke
+  go-race:
+    name: Go Race
     runs-on: ubuntu-24.04
-    timeout-minutes: 35
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - name: Runner preflight
+        run: scripts/ci-preflight.sh
+      - name: Restore verified tools
+        id: go-race-tools-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: |
+            .cache/downloads
+            .tools
+          key: tooling-v4-go-test-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'scripts/checksums.txt', 'scripts/bootstrap.sh', 'scripts/env.sh') }}
+      - name: Restore shared Go cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: |
+            .cache/go-build
+            .cache/go-mod
+            .cache/gopath
+          key: go-v4-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'go.work', 'go.work.sum', 'control-plane/go.mod', 'control-plane/go.sum') }}-${{ github.sha }}
+          restore-keys: |
+            go-v4-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'go.work', 'go.work.sum', 'control-plane/go.mod', 'control-plane/go.sum') }}-
+            go-v4-${{ runner.os }}-${{ runner.arch }}-
+      - name: Bootstrap pinned Go tools
+        run: scripts/bootstrap.sh go-test
+      - name: Go race suite
+        env:
+          ARTIFACT_DIR: ${{ runner.temp }}/artifacts/go-race
+        run: |
+          mkdir -p "${ARTIFACT_DIR}"
+          set -o pipefail
+          scripts/go-check.sh race 2>&1 | tee "${ARTIFACT_DIR}/go-race.log"
+      - name: Save verified tools
+        if: success() && github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.go-race-tools-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: |
+            .cache/downloads
+            .tools
+          key: ${{ steps.go-race-tools-cache.outputs.cache-primary-key }}
+      - name: Upload Go race diagnostics
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: go-race-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/artifacts/go-race
+          if-no-files-found: warn
+          retention-days: 1
+
+  database:
+    name: PostgreSQL ${{ matrix.pg-major }} Integration
+    needs: runtime-artifacts
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        pg-major: [17, 18]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - name: Runner preflight
+        run: scripts/ci-preflight.sh
+      - name: Restore verified tools
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: |
+            .cache/downloads
+            .tools
+          key: tooling-v4-go-test-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'scripts/checksums.txt', 'scripts/bootstrap.sh', 'scripts/env.sh') }}
+      - name: Restore shared Go cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: |
+            .cache/go-build
+            .cache/go-mod
+            .cache/gopath
+          key: go-v4-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'go.work', 'go.work.sum', 'control-plane/go.mod', 'control-plane/go.sum') }}-${{ github.sha }}
+          restore-keys: |
+            go-v4-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'go.work', 'go.work.sum', 'control-plane/go.mod', 'control-plane/go.sum') }}-
+            go-v4-${{ runner.os }}-${{ runner.arch }}-
+      - name: Bootstrap pinned Go tools
+        run: scripts/bootstrap.sh go-test
+      - name: Download runtime artifacts
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: runtime-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/runtime-download
+      - name: Verify runtime artifacts
+        run: scripts/ci-runtime-artifact.sh extract "${RUNNER_TEMP}/runtime-download/runtime-artifacts.tar.gz" "${RUNNER_TEMP}/runtime" "${GITHUB_SHA}"
+      - name: PostgreSQL integration
+        env:
+          ARTIFACT_DIR: ${{ runner.temp }}/artifacts/database/pg${{ matrix.pg-major }}
+          OCSERVIA_CONTROL_BIN: ${{ runner.temp }}/runtime/ocserv-control
+          PG_MAJOR: ${{ matrix.pg-major }}
+          RUN_ID: database-${{ github.run_id }}-${{ github.run_attempt }}-pg${{ matrix.pg-major }}
+        run: scripts/database-integration.sh
+      - name: Upload PostgreSQL diagnostics
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: database-pg${{ matrix.pg-major }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/artifacts/database/pg${{ matrix.pg-major }}
+          if-no-files-found: warn
+          retention-days: 1
+
+  stage-contracts:
+    name: I14-I19 Contracts
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - name: Runner preflight
+        run: scripts/ci-preflight.sh
+      - name: Stage-specific contract assertions
+        env:
+          ARTIFACT_DIR: ${{ runner.temp }}/artifacts/stage-contracts
+        run: |
+          mkdir -p "${ARTIFACT_DIR}"
+          set -o pipefail
+          scripts/i14-quota-expiry-backport.sh --contract-only 2>&1 | tee "${ARTIFACT_DIR}/i14.log"
+          scripts/i15-config-plan.sh --contract-only 2>&1 | tee "${ARTIFACT_DIR}/i15.log"
+          scripts/i16-config-apply.sh --contract-only 2>&1 | tee "${ARTIFACT_DIR}/i16.log"
+          scripts/i17-certificate-secret.sh --contract-only 2>&1 | tee "${ARTIFACT_DIR}/i17.log"
+          scripts/i19-five-minute-offline-recovery.sh --contract-only 2>&1 | tee "${ARTIFACT_DIR}/i19.log"
+      - name: Upload stage contract diagnostics
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: stage-contracts-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/artifacts/stage-contracts
+          if-no-files-found: warn
+          retention-days: 1
+
+  production-relays:
+    name: I18 Production Relays
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    env:
+      CARGO_INCREMENTAL: "0"
+      RUSTC_WRAPPER: sccache
+      SCCACHE_BASEDIRS: ${{ github.workspace }}
+      SCCACHE_GHA_ENABLED: "true"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - name: Runner preflight
+        run: scripts/ci-preflight.sh
+      - name: Restore verified tools
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: |
+            .cache/downloads
+            .tools
+          key: tooling-v4-go-rust-integration-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'scripts/checksums.txt', 'scripts/bootstrap.sh', 'scripts/env.sh') }}
+      - name: Restore shared Go cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: |
+            .cache/go-build
+            .cache/go-mod
+            .cache/gopath
+          key: go-v4-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'go.work', 'go.work.sum', 'control-plane/go.mod', 'control-plane/go.sum') }}-${{ github.sha }}
+          restore-keys: |
+            go-v4-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'go.work', 'go.work.sum', 'control-plane/go.mod', 'control-plane/go.sum') }}-
+            go-v4-${{ runner.os }}-${{ runner.arch }}-
+      - name: Enable sccache GitHub Actions backend
+        uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
+        with:
+          version: "v0.17.0"
+          disable_annotations: true
+      - name: Configure sccache backend
+        run: scripts/configure-sccache.sh
+      - name: Bootstrap pinned Go and Rust tools
+        run: scripts/bootstrap.sh go-rust-integration
+      - name: Production topology, relays, backup, and package checks
+        env:
+          ARTIFACT_DIR: ${{ runner.temp }}/artifacts/production-relays
+          RUN_ID: production-${{ github.run_id }}-${{ github.run_attempt }}-relays
+        run: scripts/i18-production-relays.sh --contract-only
+      - name: Show sccache statistics
+        if: always()
+        run: |
+          source scripts/env.sh
+          if command -v sccache >/dev/null 2>&1; then
+            sccache --show-stats || true
+          fi
+      - name: Upload production relay diagnostics
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: production-relays-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/artifacts/production-relays
+          if-no-files-found: warn
+          retention-days: 1
+
+  credential-rotation:
+    name: PostgreSQL Credential Rotation
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - name: Runner preflight
+        run: scripts/ci-preflight.sh
+      - name: Application and backup credential rotation
+        env:
+          ARTIFACT_DIR: ${{ runner.temp }}/artifacts/credential-rotation
+          RUN_ID: postgres-rotation-${{ github.run_id }}-${{ github.run_attempt }}
+        run: scripts/i18-postgres-credential-rotation.sh
+      - name: Upload credential rotation diagnostics
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: credential-rotation-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/artifacts/credential-rotation
+          if-no-files-found: warn
+          retention-days: 1
+
+  local-slice:
+    name: Local Slice
+    needs: runtime-artifacts
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - name: Runner preflight
+        run: scripts/ci-preflight.sh
+      - name: Download runtime artifacts
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: runtime-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/runtime-download
+      - name: Verify runtime artifacts
+        run: scripts/ci-runtime-artifact.sh extract "${RUNNER_TEMP}/runtime-download/runtime-artifacts.tar.gz" "${RUNNER_TEMP}/runtime" "${GITHUB_SHA}"
+      - name: Go, PostgreSQL, UDS, and Rust stub local slice
+        env:
+          ARTIFACT_DIR: ${{ runner.temp }}/artifacts/local-slice
+          OCSERVIA_CONTROL_BIN: ${{ runner.temp }}/runtime/ocserv-control
+          OCSERVIA_TRANSPORTD_STUB_BIN: ${{ runner.temp }}/runtime/ocservia-transportd-stub
+          RUN_ID: local-slice-${{ github.run_id }}-${{ github.run_attempt }}
+        run: scripts/local-slice-integration.sh
+      - name: Upload local slice diagnostics
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: local-slice-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/artifacts/local-slice
+          if-no-files-found: warn
+          retention-days: 1
+
+  web-validation:
+    name: Web Static and Unit
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - name: Runner preflight
+        run: scripts/ci-preflight.sh
+      - name: Restore verified tools
+        id: web-tools-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: |
+            .cache/downloads
+            .tools
+          key: tooling-v4-web-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'scripts/checksums.txt', 'scripts/bootstrap.sh', 'scripts/env.sh') }}
+      - name: Restore shared npm cache
+        id: web-npm-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: .cache/npm
+          key: npm-v4-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'web/package-lock.json') }}
+          restore-keys: |
+            npm-v4-${{ runner.os }}-${{ runner.arch }}-
+      - name: Bootstrap pinned Web tools
+        run: scripts/bootstrap.sh web
+      - name: Web checks
+        env:
+          ARTIFACT_DIR: ${{ runner.temp }}/artifacts/web-validation
+        run: |
+          mkdir -p "${ARTIFACT_DIR}"
+          set -o pipefail
+          scripts/web-check.sh 2>&1 | tee "${ARTIFACT_DIR}/web-check.log"
+      - name: Save verified tools
+        if: success() && github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.web-tools-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: |
+            .cache/downloads
+            .tools
+          key: ${{ steps.web-tools-cache.outputs.cache-primary-key }}
+      - name: Save shared npm cache
+        if: success() && github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.web-npm-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: .cache/npm
+          key: ${{ steps.web-npm-cache.outputs.cache-primary-key }}
+      - name: Upload Web diagnostics
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: web-validation-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/artifacts/web-validation
+          if-no-files-found: warn
+          retention-days: 1
+
+  browser-e2e:
+    name: Browser E2E
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - name: Runner preflight
+        run: scripts/ci-preflight.sh
+      - name: Docker Compose Playwright E2E
+        env:
+          ARTIFACT_DIR: ${{ runner.temp }}/artifacts/browser-e2e
+          COMPOSE_PROJECT: ocservia-e2e-${{ github.run_id }}-${{ github.run_attempt }}
+          RUN_ID: e2e-${{ github.run_id }}-${{ github.run_attempt }}
+        run: scripts/e2e.sh
+      - name: Upload browser diagnostics
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: browser-e2e-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/artifacts/browser-e2e
+          if-no-files-found: warn
+          retention-days: 1
+
+  p1-smoke:
+    name: P1 Smoke
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
     env:
       AGENT_COUNT: 24
       HEARTBEAT_COUNT: 2
@@ -160,77 +513,30 @@ jobs:
           persist-credentials: false
       - name: Runner preflight
         run: scripts/ci-preflight.sh
-      - name: Restore verified tools
-        id: web-tools-cache
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
-        with:
-          path: |
-            .cache/downloads
-            .tools
-          key: tooling-v3-web-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'scripts/checksums.txt', 'scripts/bootstrap.sh', 'scripts/env.sh') }}
-      - name: Restore npm download cache
-        id: web-npm-cache
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
-        with:
-          path: .cache/npm
-          key: npm-v3-web-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'web/package-lock.json') }}
-          restore-keys: |
-            npm-v3-web-${{ runner.os }}-${{ runner.arch }}-
-      - name: Bootstrap and verify pinned tools
-        run: scripts/bootstrap.sh web
-      - name: Web checks
-        env:
-          ARTIFACT_DIR: ${{ runner.temp }}/artifacts/web-smoke/web-check
-        run: |
-          mkdir -p "${ARTIFACT_DIR}"
-          set -o pipefail
-          scripts/web-check.sh 2>&1 | tee "${ARTIFACT_DIR}/web-check.log"
-      - name: Docker Compose Playwright E2E
-        env:
-          ARTIFACT_DIR: ${{ runner.temp }}/artifacts/web-smoke/browser-e2e
-          COMPOSE_PROJECT: ocservia-e2e-${{ github.run_id }}-${{ github.run_attempt }}-web-smoke
-          RUN_ID: e2e-${{ github.run_id }}-${{ github.run_attempt }}-web-smoke
-        run: scripts/e2e.sh
       - name: P1 harness boundary tests
         env:
-          COMPOSE_PROJECT: ocservia-p1-smoke-${{ github.run_id }}-${{ github.run_attempt }}-web-smoke
-          RUN_ID: p1-smoke-${{ github.run_id }}-${{ github.run_attempt }}-web-smoke
+          COMPOSE_PROJECT: ocservia-p1-smoke-${{ github.run_id }}-${{ github.run_attempt }}
+          RUN_ID: p1-smoke-${{ github.run_id }}-${{ github.run_attempt }}
         run: scripts/test-p1-resilience-capacity.sh
       - name: P1 hosted-runner smoke profile
         env:
-          ARTIFACT_DIR: ${{ runner.temp }}/artifacts/web-smoke/p1-smoke
-          COMPOSE_PROJECT: ocservia-p1-smoke-${{ github.run_id }}-${{ github.run_attempt }}-web-smoke
-          RUN_ID: p1-smoke-${{ github.run_id }}-${{ github.run_attempt }}-web-smoke
+          ARTIFACT_DIR: ${{ runner.temp }}/artifacts/p1-smoke
+          COMPOSE_PROJECT: ocservia-p1-smoke-${{ github.run_id }}-${{ github.run_attempt }}
+          RUN_ID: p1-smoke-${{ github.run_id }}-${{ github.run_attempt }}
         run: scripts/p1-resilience-capacity.sh
-      - name: Save verified tools
-        if: success() && github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.web-tools-cache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
-        with:
-          path: |
-            .cache/downloads
-            .tools
-          key: ${{ steps.web-tools-cache.outputs.cache-primary-key }}
-      - name: Save npm download cache
-        if: success() && github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.web-npm-cache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
-        with:
-          path: .cache/npm
-          key: ${{ steps.web-npm-cache.outputs.cache-primary-key }}
-      - name: Upload Web and Smoke diagnostics
+      - name: Upload P1 smoke diagnostics
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
-          name: web-smoke-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/artifacts/web-smoke
+          name: p1-smoke-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/artifacts/p1-smoke
           if-no-files-found: warn
-          retention-days: 14
+          retention-days: 1
 
-  quality-security-native:
-    name: Quality, Security & Native
+  contracts-policy:
+    name: Contracts and Policy
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
-    env:
-      CARGO_INCREMENTAL: "0"
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
@@ -239,40 +545,22 @@ jobs:
       - name: Runner preflight
         run: scripts/ci-preflight.sh
       - name: Restore verified tools
-        id: quality-tools-cache
+        id: contracts-tools-cache
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: |
             .cache/downloads
             .tools
-          key: tooling-v3-ci-quality-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'scripts/checksums.txt', 'scripts/bootstrap.sh', 'scripts/env.sh') }}
-      - name: Restore npm download cache
-        id: quality-npm-cache
+          key: tooling-v4-contracts-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'scripts/checksums.txt', 'scripts/bootstrap.sh', 'scripts/env.sh') }}
+      - name: Restore shared npm cache
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: .cache/npm
-          key: npm-v3-ci-quality-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'web/package-lock.json') }}
+          key: npm-v4-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'web/package-lock.json') }}
           restore-keys: |
-            npm-v3-ci-quality-${{ runner.os }}-${{ runner.arch }}-
-      - name: Restore Rust target cache
-        id: quality-rust-cache
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
-        with:
-          path: rust/target
-          key: rust-v4-quality-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'rust/Cargo.lock', 'rust/Cargo.toml', 'rust/rust-toolchain.toml', 'rust/crates/**/Cargo.toml') }}
-          restore-keys: |
-            rust-v4-quality-${{ runner.os }}-${{ runner.arch }}-
-            rust-v3-quality-${{ runner.os }}-${{ runner.arch }}-
-      - name: Restore Go module cache
-        id: quality-go-mod-cache
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
-        with:
-          path: .cache/go-mod
-          key: go-mod-v3-quality-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'go.work', 'go.work.sum', 'control-plane/go.mod', 'control-plane/go.sum', 'scripts/license-check.sh') }}
-          restore-keys: |
-            go-mod-v3-quality-${{ runner.os }}-${{ runner.arch }}-
-      - name: Bootstrap and verify pinned tools
-        run: scripts/bootstrap.sh ci-quality
+            npm-v4-${{ runner.os }}-${{ runner.arch }}-
+      - name: Bootstrap pinned contract tools
+        run: scripts/bootstrap.sh contracts
       - name: Repository policy
         run: |
           scripts/check-public-repository.sh
@@ -280,7 +568,9 @@ jobs:
       - name: Documentation
         run: scripts/docs-check.sh
       - name: CI workflow policy tests
-        run: scripts/test-bootstrap-profiles.sh
+        run: |
+          scripts/test-bootstrap-profiles.sh
+          scripts/test-ci-runtime-artifact.sh
       - name: Generate contract outputs
         run: scripts/generate.sh
       - name: Lint contract sources
@@ -294,9 +584,66 @@ jobs:
         run: |
           scripts/generated-clean.sh --skip-generate
           scripts/test-generated-clean.sh
+      - name: Save verified tools
+        if: success() && github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.contracts-tools-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: |
+            .cache/downloads
+            .tools
+          key: ${{ steps.contracts-tools-cache.outputs.cache-primary-key }}
+      - name: Capture contract diagnostics
+        if: always()
+        env:
+          ARTIFACT_DIR: ${{ runner.temp }}/artifacts/contracts
+        run: |
+          mkdir -p "${ARTIFACT_DIR}"
+          git status --short >"${ARTIFACT_DIR}/git-status.txt"
+          git diff --binary >"${ARTIFACT_DIR}/generated-output.diff"
+      - name: Upload contract diagnostics
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: contracts-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/artifacts/contracts
+          if-no-files-found: error
+          retention-days: 1
+
+  rust-validation:
+    name: Rust Validation
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    env:
+      CARGO_INCREMENTAL: "0"
+      RUSTC_WRAPPER: sccache
+      SCCACHE_BASEDIRS: ${{ github.workspace }}
+      SCCACHE_GHA_ENABLED: "true"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - name: Runner preflight
+        run: scripts/ci-preflight.sh
+      - name: Restore verified tools
+        id: rust-tools-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: |
+            .cache/downloads
+            .tools
+          key: tooling-v4-rust-validation-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'scripts/checksums.txt', 'scripts/bootstrap.sh', 'scripts/env.sh') }}
+      - name: Enable sccache GitHub Actions backend
+        uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
+        with:
+          version: "v0.17.0"
+          disable_annotations: true
+      - name: Configure sccache backend
+        run: scripts/configure-sccache.sh
+      - name: Bootstrap pinned Rust tools
+        run: scripts/bootstrap.sh rust-validation
       - name: Rust checks
         env:
-          ARTIFACT_DIR: ${{ runner.temp }}/artifacts/quality/rust
+          ARTIFACT_DIR: ${{ runner.temp }}/artifacts/rust
         run: |
           mkdir -p "${ARTIFACT_DIR}"
           set -o pipefail
@@ -305,71 +652,263 @@ jobs:
         run: scripts/agent-boundary-check.sh
       - name: Transport boundary
         run: scripts/transport-boundary-check.sh
+      - name: Save verified tools
+        if: success() && github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.rust-tools-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: |
+            .cache/downloads
+            .tools
+          key: ${{ steps.rust-tools-cache.outputs.cache-primary-key }}
+      - name: Show sccache statistics
+        if: always()
+        run: |
+          source scripts/env.sh
+          if command -v sccache >/dev/null 2>&1; then
+            sccache --show-stats || true
+          fi
+      - name: Upload Rust diagnostics
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: rust-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/artifacts/rust
+          if-no-files-found: warn
+          retention-days: 1
+
+  security-license:
+    name: Security and Licenses
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      CARGO_INCREMENTAL: "0"
+      RUSTC_WRAPPER: sccache
+      SCCACHE_BASEDIRS: ${{ github.workspace }}
+      SCCACHE_GHA_ENABLED: "true"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Runner preflight
+        run: scripts/ci-preflight.sh
+      - name: Restore verified tools
+        id: security-tools-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: |
+            .cache/downloads
+            .tools
+          key: tooling-v4-security-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'scripts/checksums.txt', 'scripts/bootstrap.sh', 'scripts/env.sh') }}
+      - name: Restore shared npm cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: .cache/npm
+          key: npm-v4-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'web/package-lock.json') }}
+          restore-keys: |
+            npm-v4-${{ runner.os }}-${{ runner.arch }}-
+      - name: Restore shared Go cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: |
+            .cache/go-build
+            .cache/go-mod
+            .cache/gopath
+          key: go-v4-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'go.work', 'go.work.sum', 'control-plane/go.mod', 'control-plane/go.sum') }}-${{ github.sha }}
+          restore-keys: |
+            go-v4-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'go.work', 'go.work.sum', 'control-plane/go.mod', 'control-plane/go.sum') }}-
+            go-v4-${{ runner.os }}-${{ runner.arch }}-
+      - name: Enable sccache GitHub Actions backend
+        uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
+        with:
+          version: "v0.17.0"
+          disable_annotations: true
+      - name: Configure sccache backend
+        run: scripts/configure-sccache.sh
+      - name: Bootstrap pinned security tools
+        run: scripts/bootstrap.sh security
       - name: Secret scan
         run: scripts/security-check.sh
       - name: License checks
         run: scripts/license-check.sh
+      - name: Save verified tools
+        if: success() && github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.security-tools-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: |
+            .cache/downloads
+            .tools
+          key: ${{ steps.security-tools-cache.outputs.cache-primary-key }}
+      - name: Show sccache statistics
+        if: always()
+        run: |
+          source scripts/env.sh
+          if command -v sccache >/dev/null 2>&1; then
+            sccache --show-stats || true
+          fi
+
+  native-ocserv:
+    name: Native Ocserv
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      CARGO_INCREMENTAL: "0"
+      RUSTC_WRAPPER: sccache
+      SCCACHE_BASEDIRS: ${{ github.workspace }}
+      SCCACHE_GHA_ENABLED: "true"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - name: Runner preflight
+        run: scripts/ci-preflight.sh
+      - name: Restore verified tools
+        id: native-tools-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: |
+            .cache/downloads
+            .tools
+          key: tooling-v4-native-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'scripts/checksums.txt', 'scripts/bootstrap.sh', 'scripts/env.sh') }}
+      - name: Enable sccache GitHub Actions backend
+        uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
+        with:
+          version: "v0.17.0"
+          disable_annotations: true
+      - name: Configure sccache backend
+        run: scripts/configure-sccache.sh
+      - name: Bootstrap pinned native tools
+        run: scripts/bootstrap.sh native
       - name: Install ephemeral native fixtures
         run: |
           sudo apt-get update
           sudo apt-get install --yes ocserv openconnect ssl-cert
       - name: Native ocpasswd, OpenSSL, and Ocserv login
         env:
-          ARTIFACT_DIR: ${{ runner.temp }}/artifacts/quality/native-ocserv
+          ARTIFACT_DIR: ${{ runner.temp }}/artifacts/native-ocserv
         run: |
           mkdir -p "${ARTIFACT_DIR}"
           port=$((40000 + GITHUB_RUN_ID % 10000))
           native_target="${RUNNER_TEMP}/ocservia-native-target-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           native_status=0
-          sudo --preserve-env=RUNNER_TEMP,ARTIFACT_DIR env \
+          sudo --preserve-env=RUNNER_TEMP,ARTIFACT_DIR,RUSTC_WRAPPER,SCCACHE_GHA_ENABLED,SCCACHE_BASEDIRS,ACTIONS_CACHE_SERVICE_V2,ACTIONS_CACHE_URL,ACTIONS_RESULTS_URL,ACTIONS_RUNTIME_TOKEN env \
             CARGO_TARGET_DIR="${native_target}" \
-            RUN_ID="I13-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-quality-native" \
+            RUN_ID="I13-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-native" \
             OCSERVIA_I13_OCSERV_PORT="${port}" \
             scripts/i13-native-ocserv-integration.sh || native_status=$?
           sudo rm -rf "${native_target}" || native_status=1
           exit "${native_status}"
-      - name: Remove Rust incremental artifacts before caching
-        if: success() && github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.quality-rust-cache.outputs.cache-hit != 'true'
-        run: find rust/target -depth -type d -name incremental -exec rm -rf -- {} +
       - name: Save verified tools
-        if: success() && github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.quality-tools-cache.outputs.cache-hit != 'true'
+        if: success() && github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.native-tools-cache.outputs.cache-hit != 'true'
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: |
             .cache/downloads
             .tools
-          key: ${{ steps.quality-tools-cache.outputs.cache-primary-key }}
-      - name: Save npm download cache
-        if: success() && github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.quality-npm-cache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
-        with:
-          path: .cache/npm
-          key: ${{ steps.quality-npm-cache.outputs.cache-primary-key }}
-      - name: Save Rust target cache
-        if: success() && github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.quality-rust-cache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
-        with:
-          path: rust/target
-          key: ${{ steps.quality-rust-cache.outputs.cache-primary-key }}
-      - name: Save Go module cache
-        if: success() && github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.quality-go-mod-cache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
-        with:
-          path: .cache/go-mod
-          key: ${{ steps.quality-go-mod-cache.outputs.cache-primary-key }}
-      - name: Capture contract diagnostics
+          key: ${{ steps.native-tools-cache.outputs.cache-primary-key }}
+      - name: Show sccache statistics
         if: always()
-        env:
-          ARTIFACT_DIR: ${{ runner.temp }}/artifacts/quality/contracts
         run: |
-          mkdir -p "${ARTIFACT_DIR}"
-          git status --short >"${ARTIFACT_DIR}/git-status.txt"
-          git diff --binary >"${ARTIFACT_DIR}/generated-output.diff"
-      - name: Upload Quality, Security, and Native diagnostics
+          source scripts/env.sh
+          if command -v sccache >/dev/null 2>&1; then
+            sccache --show-stats || true
+          fi
+      - name: Upload native diagnostics
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
-          name: quality-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/artifacts/quality
-          if-no-files-found: error
-          retention-days: 14
+          name: native-ocserv-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/artifacts/native-ocserv
+          if-no-files-found: warn
+          retention-days: 1
+
+  backend-integration:
+    name: Backend Integration
+    if: ${{ always() }}
+    needs:
+      - runtime-artifacts
+      - go-standard
+      - go-race
+      - database
+      - stage-contracts
+      - production-relays
+      - credential-rotation
+      - local-slice
+      - rust-validation
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    env:
+      RUNTIME_ARTIFACTS: ${{ needs.runtime-artifacts.result }}
+      GO_STANDARD: ${{ needs.go-standard.result }}
+      GO_RACE: ${{ needs.go-race.result }}
+      DATABASE: ${{ needs.database.result }}
+      STAGE_CONTRACTS: ${{ needs.stage-contracts.result }}
+      PRODUCTION_RELAYS: ${{ needs.production-relays.result }}
+      CREDENTIAL_ROTATION: ${{ needs.credential-rotation.result }}
+      LOCAL_SLICE: ${{ needs.local-slice.result }}
+      RUST_VALIDATION: ${{ needs.rust-validation.result }}
+    steps:
+      - name: Aggregate backend results
+        run: |
+          for result in \
+            "${RUNTIME_ARTIFACTS}" "${GO_STANDARD}" "${GO_RACE}" \
+            "${DATABASE}" "${STAGE_CONTRACTS}" "${PRODUCTION_RELAYS}" \
+            "${CREDENTIAL_ROTATION}" "${LOCAL_SLICE}" "${RUST_VALIDATION}"
+          do
+            case "${result}" in
+              success | skipped) ;;
+              *) exit 1 ;;
+            esac
+          done
+
+  web-smoke:
+    name: Web & Smoke
+    if: ${{ always() }}
+    needs:
+      - web-validation
+      - browser-e2e
+      - p1-smoke
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    env:
+      WEB_VALIDATION: ${{ needs.web-validation.result }}
+      BROWSER_E2E: ${{ needs.browser-e2e.result }}
+      P1_SMOKE: ${{ needs.p1-smoke.result }}
+    steps:
+      - name: Aggregate Web and smoke results
+        run: |
+          for result in "${WEB_VALIDATION}" "${BROWSER_E2E}" "${P1_SMOKE}"
+          do
+            case "${result}" in
+              success | skipped) ;;
+              *) exit 1 ;;
+            esac
+          done
+
+  quality-security-native:
+    name: Quality, Security & Native
+    if: ${{ always() }}
+    needs:
+      - contracts-policy
+      - rust-validation
+      - security-license
+      - native-ocserv
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    env:
+      CONTRACTS_POLICY: ${{ needs.contracts-policy.result }}
+      RUST_VALIDATION: ${{ needs.rust-validation.result }}
+      SECURITY_LICENSE: ${{ needs.security-license.result }}
+      NATIVE_OCSERV: ${{ needs.native-ocserv.result }}
+    steps:
+      - name: Aggregate quality, security, and native results
+        run: |
+          for result in \
+            "${CONTRACTS_POLICY}" "${RUST_VALIDATION}" \
+            "${SECURITY_LICENSE}" "${NATIVE_OCSERV}"
+          do
+            case "${result}" in
+              success | skipped) ;;
+              *) exit 1 ;;
+            esac
+          done

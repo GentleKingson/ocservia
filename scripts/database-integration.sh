@@ -13,12 +13,13 @@ RUN_ID="${RUN_ID:-database-${GITHUB_RUN_ID:-local}-${GITHUB_RUN_ATTEMPT:-1}-${GI
 PREFIX="$(printf '%s' "${RUN_ID}" | tr '[:upper:]_' '[:lower:]-' | tr -cd 'a-z0-9-')"
 TMP_BASE="${RUNNER_TEMP:-${TMPDIR:-/tmp}}"
 TMP_ROOT="$(mktemp -d "${TMP_BASE%/}/ocservia-${PREFIX}-XXXXXX")"
-BIN="${TMP_ROOT}/ocserv-control"
+BIN="${OCSERVIA_CONTROL_BIN:-${TMP_ROOT}/ocserv-control}"
 ARTIFACT_DIR="${ARTIFACT_DIR:-}"
 export OCSERV_ENVIRONMENT=test
 export OCSERV_AUDIT_EVENT_KEY_ID=test-audit-event-v1
 export OCSERV_TEST_AUDIT_EVENT_KEY_HEX=1111111111111111111111111111111111111111111111111111111111111111
 export OCSERV_AUDIT_CHECKPOINT_KEY=2222222222222222222222222222222222222222222222222222222222222222
+PG_MAJOR="${PG_MAJOR:-all}"
 API_PORT_BASE=$((18000 + $(printf '%s' "${RUN_ID}" | cksum | awk '{print $1}') % 10000))
 PIDS=()
 CONTAINERS=()
@@ -58,7 +59,23 @@ cleanup() {
 trap cleanup EXIT INT TERM
 
 mkdir -p "${TMP_ROOT}"
-(cd "${ROOT}/control-plane" && go build -trimpath -o "${BIN}" ./cmd/ocserv-control)
+if [[ -n "${OCSERVIA_CONTROL_BIN:-}" ]]; then
+  [[ -x "${BIN}" ]] || {
+    echo "OCSERVIA_CONTROL_BIN must name an executable file" >&2
+    exit 2
+  }
+else
+  (cd "${ROOT}/control-plane" && go build -trimpath -o "${BIN}" ./cmd/ocserv-control)
+fi
+
+case "${PG_MAJOR}" in
+  all) POSTGRES_MAJORS=(17 18) ;;
+  17 | 18) POSTGRES_MAJORS=("${PG_MAJOR}") ;;
+  *)
+    echo "PG_MAJOR must be all, 17, or 18" >&2
+    exit 2
+    ;;
+esac
 
 wait_for_postgres() {
   local container=$1
@@ -143,7 +160,7 @@ seed_verified_receipt() {
   " >/dev/null
 }
 
-for major in 17 18; do
+for major in "${POSTGRES_MAJORS[@]}"; do
   container="${PREFIX}-pg${major}"
   CONTAINERS+=("${container}")
   docker run -d --name "${container}" \
@@ -731,6 +748,10 @@ for major in 17 18; do
     "DELETE FROM schema_migrations WHERE version = 25" >/dev/null
   echo "PostgreSQL ${major} database integration complete"
 done
+
+if [[ "${PG_MAJOR}" == "17" ]]; then
+  exit 0
+fi
 
 container="${PREFIX}-upgrade"
 CONTAINERS+=("${container}")
