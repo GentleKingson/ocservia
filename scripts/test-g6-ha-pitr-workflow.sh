@@ -220,6 +220,35 @@ for fd_script in "${FD_A}" "${FD_B}"; do
   }
 done
 
+# Exactly one tunnel process runs per failure domain per era: fd-a serves
+# and fd-b forwards before the failover, and the promote/recover phases flip
+# the roles. One key must never back two live endpoints — the relay drops
+# the second with the same endpoint id.
+grep -qF 'g6_ha_tunnel_serve "$(peer_node_id)"' "${FD_A}" || {
+  echo "fd-a must serve its primary through the pinned tunnel" >&2
+  exit 1
+}
+grep -qF 'g6_ha_tunnel_forward "$(peer_node_id)"' "${FD_A}" || {
+  echo "fd-a must flip to forwarding when it recovers against the promoted primary" >&2
+  exit 1
+}
+grep -qF 'g6_ha_tunnel_forward "$(peer_node_id)"' "${FD_B}" || {
+  echo "fd-b must forward to the peer primary through the pinned tunnel" >&2
+  exit 1
+}
+grep -qF 'g6_ha_tunnel_serve "$(peer_node_id)"' "${FD_B}" || {
+  echo "fd-b must flip to serving when it promotes" >&2
+  exit 1
+}
+if grep -qF "g6_ha_tunnel_start" "${LIB}" "${FD_A}" "${FD_B}"; then
+  echo "the harness must not start serve and forward from one key simultaneously" >&2
+  exit 1
+fi
+grep -qF 'for log in "${G6HA_LOGS}"/*.log' "${LIB}" || {
+  echo "diagnostics must include the harness phase logs so redirected failures stay visible" >&2
+  exit 1
+}
+
 # Every artifact name the workflow waits on must pass the shared artifact
 # helper's allowlist; the validator once rejected the whole g6-ha family and
 # both jobs died at their first rendezvous.

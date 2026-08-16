@@ -54,9 +54,9 @@ phase_images() {
 }
 
 phase_tunnel_up() {
-  g6_ha_tunnel_start "$(peer_node_id)"
+  # fd-b reaches the peer primary through the pinned tunnel as the client.
+  g6_ha_tunnel_forward "$(peer_node_id)"
   sleep 2
-  kill -0 "$(<"${G6HA_STATE}/tunnel-serve.pid")"
   kill -0 "$(<"${G6HA_STATE}/tunnel-forward.pid")"
 }
 
@@ -168,6 +168,10 @@ phase_promote() {
   require_file "${isolation}/isolation.json"
   g6_ha_timeline_event primary_failure_injected
   g6_ha_timeline_event old_primary_isolated
+
+  # The promoted side becomes the tunnel server; fd-a's recovery phase
+  # flips to forwarding against this serve endpoint.
+  g6_ha_tunnel_serve "$(peer_node_id)"
 
   g6_ha_psql -Atc 'SELECT pg_promote(wait := true)' >/dev/null
   g6_ha_psql -Atc "ALTER SYSTEM SET synchronous_standby_names = ''" >/dev/null

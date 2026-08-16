@@ -131,10 +131,10 @@ phase_images() {
 }
 
 phase_tunnel_up() {
-  g6_ha_tunnel_start "$(peer_node_id)"
+  # fd-a owns the first primary, so it serves it to the pinned peer.
+  g6_ha_tunnel_serve "$(peer_node_id)"
   sleep 2
   kill -0 "$(<"${G6HA_STATE}/tunnel-serve.pid")"
-  kill -0 "$(<"${G6HA_STATE}/tunnel-forward.pid")"
 }
 
 bootstrap_controller_endpoint() {
@@ -392,6 +392,8 @@ phase_post_promotion_probes() {
 }
 
 phase_recover_roles() {
+  # fd-b now serves the promoted primary; this side becomes the forwarder.
+  g6_ha_tunnel_forward "$(peer_node_id)"
   export G6_DB_HOST=host.docker.internal
   g6_ha_export_common_env
   g6_ha_compose up --detach worker

@@ -216,20 +216,29 @@ g6_ha_archive_has_segment() {
     -c "test -f /archive/${segment}"
 }
 
-g6_ha_tunnel_start() {
+# Exactly one tunnel process runs per failure domain per era, both sides
+# pinned to each other's node id: before the failover fd-a serves its local
+# primary and fd-b forwards a gateway listener to it; after the promotion the
+# roles flip (fd-b serves, fd-a forwards). Running serve and forward from one
+# key simultaneously registers two endpoints with the same id and the relay
+# drops the second ("Another endpoint connected with the same endpoint id").
+g6_ha_tunnel_serve() {
   local peer_node="${1:?peer node ID is required}"
-  [[ -x "${G6HA_TUNNEL_BIN}" ]] || {
-    echo "tunnel binary is missing; build rust target first" >&2
-    return 1
-  }
+  g6_ha_tunnel_stop
   g6_ha_export_common_env
-  local gateway
-  gateway="$(g6_ha_gateway_address)"
   nohup "${G6HA_TUNNEL_BIN}" serve \
     --key-file "${G6HA_SECRETS}/tunnel.key" \
     --peer-node "${peer_node}" \
     --forward 127.0.0.1:5432 >"${G6HA_LOGS}/tunnel-serve.log" 2>&1 &
   echo $! >"${G6HA_STATE}/tunnel-serve.pid"
+}
+
+g6_ha_tunnel_forward() {
+  local peer_node="${1:?peer node ID is required}"
+  g6_ha_tunnel_stop
+  g6_ha_export_common_env
+  local gateway
+  gateway="$(g6_ha_gateway_address)"
   nohup "${G6HA_TUNNEL_BIN}" forward \
     --key-file "${G6HA_SECRETS}/tunnel.key" \
     --peer-node "${peer_node}" \
@@ -338,6 +347,14 @@ g6_ha_diagnostics() {
     >"${ARTIFACT_DIR}/services-${FD_ID}.log" 2>&1 || true
   docker system df >"${ARTIFACT_DIR}/docker-storage-${FD_ID}.txt" 2>&1 || true
   cp -f "${G6HA_LOGS}"/tunnel-*.log "${ARTIFACT_DIR}/" 2>/dev/null || true
+  # The harness's own phase logs (basebackup, verifybackup, rewind, pitr)
+  # explain silent redirected failures; credentials inside connection
+  # strings are redacted before anything leaves the runner.
+  for log in "${G6HA_LOGS}"/*.log; do
+    [[ -f "${log}" ]] || continue
+    sed -E 's#(postgres(ql)?://[^:/]+:)[^@]+@#\1[redacted]@#g' \
+      "${log}" >"${ARTIFACT_DIR}/$(basename "${log}")" || true
+  done
   printf 'fd=%s alias=%s boot_id_sha256=%s\n' \
     "${FD_ID}" "${FD_ALIAS}" "$(g6_ha_boot_id_hash)" \
     >"${ARTIFACT_DIR}/failure-domain-${FD_ID}.txt"
