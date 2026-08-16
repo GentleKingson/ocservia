@@ -27,7 +27,10 @@ x-role-defaults: &role-defaults
     # the libpq environment fallback for parameters absent from the URL);
     # baking a per-role suffix into this URL would require a shell variable
     # during every compose command that the harness never exports.
-    OCSERV_DATABASE_URL: postgres://ocservia_app:${G6_APP_PASSWORD:?}@${G6_DB_HOST:?}:5432/ocservia?sslmode=disable
+    # G6_DB_PORT selects the direct postgres port (5432) or the forwarded
+    # tunnel port (15432) depending on which failure domain serves the
+    # primary in the current era.
+    OCSERV_DATABASE_URL: postgres://ocservia_app:${G6_APP_PASSWORD:?}@${G6_DB_HOST:?}:${G6_DB_PORT:?}/ocservia?sslmode=disable
     OCSERV_RUNTIME_DATABASE_ROLE: ocservia_app
     OCSERV_AUDIT_EVENT_KEY_ID: g6-ha-pitr-v1
     OCSERV_TEST_AUDIT_EVENT_KEY_HEX: "4536474747474747474747474747474747474747474747474747474747474747"
@@ -49,6 +52,16 @@ x-role-defaults: &role-defaults
 services:
   postgres:
     <<: *service-defaults
+    # PostgreSQL is the service init process. A separate init shim cannot
+    # forward the image's stop signal to the postgres uid under cap_drop ALL,
+    # leaving an unclean data directory that pg_rewind refuses to reuse.
+    init: false
+    # The official entrypoint starts as root: it chmod/chowns the data volume
+    # and re-execs as the postgres user. With every capability dropped that
+    # root phase dies with EPERM before initdb, so postgres keeps exactly the
+    # capabilities that phase needs (no-new-privileges still forbids gaining
+    # anything; the gosu re-exec only drops privileges).
+    cap_add: [CHOWN, FOWNER, DAC_OVERRIDE, SETUID, SETGID]
     image: postgres:17.10-bookworm
     environment:
       POSTGRES_DB: ocservia
@@ -172,7 +185,9 @@ services:
     command: ["--role=api"]
     environment:
       <<: *role-environment
-      OCSERV_HTTP_ADDRESS: 0.0.0.0:8080
+      # Dev auth rejects non-loopback HTTP addresses; readiness is probed
+      # from inside the container, so loopback is all this harness needs.
+      OCSERV_HTTP_ADDRESS: 127.0.0.1:8080
       PGAPPNAME: ${G6_FD_ID:?}-api
 
   worker:

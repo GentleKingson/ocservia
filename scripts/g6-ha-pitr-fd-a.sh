@@ -43,11 +43,19 @@ rejoined_in_recovery() {
 # is decided by writability alone.
 attempt_primary_write_raw() {
   local probe_id="${1:?probe id is required}"
-  docker run --rm --network host --log-driver none postgres:17.10-bookworm \
+  # The id is inlined as a literal (after a strict charset guard) instead of a
+  # psql variable: -v argument passing through `docker compose exec` differs
+  # across compose versions on the hosted runners, and psql passes an
+  # undefined variable reference through raw to the server.
+  [[ "${probe_id}" =~ ^[A-Za-z0-9._-]+$ ]] || {
+    echo "probe id contains unexpected characters: ${probe_id}" >&2
+    return 1
+  }
+  docker run --rm --network host --log-driver none \
+    -e PGPASSWORD="$(g6_ha_secret owner-password)" postgres:17.10-bookworm \
     psql "host=127.0.0.1 port=5432 user=ocservia_owner dbname=ocservia sslmode=disable" \
     -v ON_ERROR_STOP=1 \
-    -v probe_id="${probe_id}" \
-    -c "INSERT INTO g6_ha_markers(id, txid, phase) VALUES (:'probe_id', txid_current()::text, 'probe') ON CONFLICT (id) DO UPDATE SET written_at = now()"
+    -c "INSERT INTO g6_ha_markers(id, txid, phase) VALUES ('${probe_id}', txid_current()::text, 'probe') ON CONFLICT (id) DO UPDATE SET written_at = now()"
 }
 
 attempt_primary_write() {
@@ -131,10 +139,10 @@ phase_images() {
 }
 
 phase_tunnel_up() {
-  g6_ha_tunnel_start "$(peer_node_id)"
+  # fd-a owns the first primary, so it serves it to the pinned peer.
+  g6_ha_tunnel_serve "$(peer_node_id)"
   sleep 2
   kill -0 "$(<"${G6HA_STATE}/tunnel-serve.pid")"
-  kill -0 "$(<"${G6HA_STATE}/tunnel-forward.pid")"
 }
 
 bootstrap_controller_endpoint() {
@@ -189,23 +197,41 @@ phase_primary_up() {
 
 write_failover_markers() {
   local index payload row
-  : >"${G6HA_OUTBOX}/load-markers.json"
-  printf '[' >>"${G6HA_OUTBOX}/load-markers.json"
+  : >"${G6HA_WORK}/load-markers.ndjson"
   for index in $(seq 1 "${MARKER_COUNT}"); do
     payload="g6-ha-failover-marker-${RUN_ID}-${index}"
-    row="$(g6_ha_psql -At -v payload="${payload}" -v phase=failover-load \
-      -c "INSERT INTO g6_ha_markers(id, txid, phase) VALUES (:'payload', txid_current()::text, :'phase') RETURNING id || ' ' || txid || ' ' || to_char(written_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"')")"
+    # Inlined literal, never a psql variable: compose exec mangles -v passing
+    # on some runner compose versions (an undefined variable reference reaches
+    # the server raw and fails with a syntax error at the colon).
+    [[ "${payload}" =~ ^[A-Za-z0-9._-]+$ ]] || {
+      echo "marker payload contains unexpected characters: ${payload}" >&2
+      return 1
+    }
+    row="$(g6_ha_psql -At \
+      -c "INSERT INTO g6_ha_markers(id, txid, phase) VALUES ('${payload}', txid_current()::text, 'failover-load') RETURNING id || ' ' || txid || ' ' || to_char(written_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"')")"
+    # psql -At still prints the INSERT command tag on its own line after the
+    # RETURNING tuple; keep only the tuple.
+    row="${row%%$'\n'*}"
+    # Bound the row to the exact shape the three fields can carry: a stray
+    # control character from the exec transport must die here with its bytes
+    # visible, never inside the evidence JSON.
+    [[ "${row}" =~ ^[A-Za-z0-9._-]+[[:space:]][0-9]+[[:space:]][0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$ ]] || {
+      echo "marker row ${index} does not match id-txid-timestamp shape:" >&2
+      printf '%s\n' "${row}" | od -c | head -5 >&2
+      return 1
+    }
     [[ "${row}" == "${payload} "* ]] || {
       echo "marker insert failed at index ${index}" >&2
       return 1
     }
-    ((index > 1)) && printf ',' >>"${G6HA_OUTBOX}/load-markers.json"
-    printf '\n  {"marker_id": "%s", "txid": "%s", "acknowledged_at": "%s"}' \
-      "${row%% *}" "$(printf '%s\n' "${row}" | awk '{print $2}')" \
-      "$(printf '%s\n' "${row}" | awk '{print $3}')" >>"${G6HA_OUTBOX}/load-markers.json"
+    jq -cn --arg marker_id "${row%% *}" \
+      --arg txid "$(printf '%s\n' "${row}" | awk '{print $2}')" \
+      --arg acknowledged_at "$(printf '%s\n' "${row}" | awk '{print $3}')" \
+      '{marker_id: $marker_id, txid: $txid, acknowledged_at: $acknowledged_at}' \
+      >>"${G6HA_WORK}/load-markers.ndjson"
     sleep 1
   done
-  printf '\n]\n' >>"${G6HA_OUTBOX}/load-markers.json"
+  jq -s '.' "${G6HA_WORK}/load-markers.ndjson" >"${G6HA_OUTBOX}/load-markers.json"
   jq -e 'length == 12' "${G6HA_OUTBOX}/load-markers.json" >/dev/null
 }
 
@@ -215,8 +241,8 @@ phase_load() {
   # The service drops all capabilities, so uid 0 cannot write into the
   # postgres-owned directory; the clone must run as the postgres user.
   g6_ha_compose run --rm --no-deps -T --user 999:999 \
-    -e PGPASSWORD="$(g6_ha_secret owner-password)" postgres \
-    pg_basebackup -h postgres -p 5432 -U ocservia_owner \
+    -e PGPASSWORD="$(g6_ha_secret replication-password)" postgres \
+    pg_basebackup -h postgres -p 5432 -U ocservia_replication \
     -D /var/lib/postgresql/basebackup -X stream --checkpoint=fast \
     < /dev/null >>"${G6HA_LOGS}/basebackup.log" 2>&1
   docker run --rm --entrypoint /bin/sh \
@@ -230,16 +256,28 @@ phase_load() {
 }
 
 pitr_marker_row() {
-  local label="${1:?marker label is required}"
-  g6_ha_psql -At -v label="${label}" -v phase=pitr \
-    -c "INSERT INTO g6_ha_markers(id, txid, phase) VALUES ('pitr-' || :'label', txid_current()::text, :'phase') RETURNING id || ' ' || txid || ' ' || to_char(written_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"')"
+  local label="${1:?marker label is required}" row
+  [[ "${label}" =~ ^[a-z]+$ ]] || {
+    echo "pitr marker label contains unexpected characters: ${label}" >&2
+    return 1
+  }
+  row="$(g6_ha_psql -At \
+    -c "INSERT INTO g6_ha_markers(id, txid, phase) VALUES ('pitr-${label}', txid_current()::text, 'pitr') RETURNING id || ' ' || txid || ' ' || to_char(written_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"')")"
+  # Drop the psql INSERT command tag line; keep the RETURNING tuple.
+  row="${row%%$'\n'*}"
+  [[ "${row}" =~ ^pitr-[a-z]+[[:space:]][0-9]+[[:space:]][0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{6}Z$ ]] || {
+    echo "pitr marker row ${label} does not match id-txid-timestamp shape:" >&2
+    printf '%s\n' "${row}" | od -c | head -5 >&2
+    return 1
+  }
+  printf '%s\n' "${row}"
 }
 
 phase_pitr() {
   local marker_a marker_b restore_point_created switch_target
   marker_a="$(pitr_marker_row a)"
   restore_point_created="$(g6_ha_psql -At -c \
-    "SELECT pg_create_restore_point('${PITR_TARGET_NAME}')::text || ' ' || to_char(now() AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"')")"
+    "SELECT pg_create_restore_point('${PITR_TARGET_NAME}')::text || ' ' || to_char(now() AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"')")"
   marker_b="$(pitr_marker_row b)"
 
   switch_target="$(g6_ha_psql -At -c 'SELECT pg_walfile_name(pg_switch_wal())')"
@@ -276,7 +314,8 @@ phase_pitr() {
 
   local paused=no
   for _ in {1..90}; do
-    if docker exec "${pitr_container}" psql -U ocservia_owner -d ocservia -Atc \
+    if docker exec "${pitr_container}" psql -U ocservia_owner -d ocservia \
+      -p "${PITR_RESTORE_PORT}" -Atc \
       'SELECT pg_is_in_recovery() AND pg_is_wal_replay_paused()' 2>/dev/null \
       | grep -q t; then
       paused=yes
@@ -291,9 +330,11 @@ phase_pitr() {
   }
 
   local marker_a_present marker_b_present
-  marker_a_present="$(docker exec "${pitr_container}" psql -U ocservia_owner -d ocservia -Atc \
+  marker_a_present="$(docker exec "${pitr_container}" psql -U ocservia_owner -d ocservia \
+    -p "${PITR_RESTORE_PORT}" -Atc \
     "SELECT count(*) FROM g6_ha_markers WHERE id = 'pitr-a' AND phase = 'pitr'")"
-  marker_b_present="$(docker exec "${pitr_container}" psql -U ocservia_owner -d ocservia -Atc \
+  marker_b_present="$(docker exec "${pitr_container}" psql -U ocservia_owner -d ocservia \
+    -p "${PITR_RESTORE_PORT}" -Atc \
     "SELECT count(*) FROM g6_ha_markers WHERE id = 'pitr-b' AND phase = 'pitr'")"
   [[ "${marker_a_present}" == 1 ]] || {
     echo "PITR restore lost marker_a" >&2
@@ -350,6 +391,14 @@ phase_isolate() {
   }
   outage_row="$(g6_ha_psql -At -c \
     "INSERT INTO g6_ha_markers(id, txid, phase) VALUES ('outage-declared', txid_current()::text, 'outage') RETURNING to_char(written_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"')")"
+  # Keep only the RETURNING tuple; psql appends its INSERT command tag on a
+  # second line, which would make the recovery artifact fail strict RFC 3339
+  # verification even though jq's date parser accepts the prefix.
+  outage_row="${outage_row%%$'\n'*}"
+  [[ "${outage_row}" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$ ]] || {
+    echo "outage declaration does not match the RFC 3339 timestamp shape" >&2
+    return 1
+  }
   g6_ha_compose stop api scheduler worker transportd
   g6_ha_compose stop postgres
   isolated_at="$(g6_ha_now)"
@@ -392,7 +441,10 @@ phase_post_promotion_probes() {
 }
 
 phase_recover_roles() {
+  # fd-b now serves the promoted primary; this side becomes the forwarder.
+  g6_ha_tunnel_forward "$(peer_node_id)"
   export G6_DB_HOST=host.docker.internal
+  export G6_DB_PORT=15432
   g6_ha_export_common_env
   g6_ha_compose up --detach worker
   g6_ha_wait_until 60 1 "worker trust socket after failover" \

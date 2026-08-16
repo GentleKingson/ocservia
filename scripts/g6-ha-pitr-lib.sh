@@ -59,7 +59,8 @@ g6_ha_compose() {
   # substitutes must be present even for diagnostics and cleanup steps that
   # never sourced them explicitly. Secrets survive across steps in the runner
   # temp state.
-  if [[ -z "${G6_APP_PASSWORD:-}" || -z "${G6_FD_ID:-}" ]]; then
+  if [[ -z "${G6_OWNER_PASSWORD:-}" || -z "${G6_APP_PASSWORD:-}" ||
+    -z "${G6_REPLICATION_PASSWORD:-}" || -z "${G6_FD_ID:-}" ]]; then
     g6_ha_export_common_env || g6_ha_placeholder_env
   fi
   docker compose --project-name "${COMPOSE_PROJECT}" --file "${COMPOSE_FILE}" "$@"
@@ -73,13 +74,20 @@ g6_ha_placeholder_env() {
   export G6_ARCHIVE_DIR="${G6_ARCHIVE_DIR:-${G6HA_ARCHIVE}}"
   export G6_BASEBACKUP_DIR="${G6_BASEBACKUP_DIR:-${G6HA_BASEBACKUP}}"
   export G6_DB_HOST="${G6_DB_HOST:-postgres}"
+  export G6_DB_PORT="${G6_DB_PORT:-5432}"
 }
 
 g6_ha_export_common_env() {
-  local owner_password app_password replication_password
-  owner_password="$(g6_ha_secret owner-password)"
-  app_password="$(g6_ha_secret app-password)"
-  replication_password="$(g6_ha_secret replication-password)"
+  local owner_password app_password replication_password secret
+  # Called from an || fallback, so set -e is suppressed inside: fail the
+  # guard explicitly or an aborted-before-prepare cleanup silently exports
+  # empty passwords that compose variable substitution rejects.
+  for secret in owner-password app-password replication-password; do
+    [[ -s "${G6HA_SECRETS}/${secret}" ]] || return 1
+  done
+  owner_password="$(g6_ha_secret owner-password)" || return 1
+  app_password="$(g6_ha_secret app-password)" || return 1
+  replication_password="$(g6_ha_secret replication-password)" || return 1
   export G6_FD_ID="${FD_ID}"
   export G6_OWNER_PASSWORD="${owner_password}"
   export G6_APP_PASSWORD="${app_password}"
@@ -87,6 +95,7 @@ g6_ha_export_common_env() {
   export G6_ARCHIVE_DIR="${G6HA_ARCHIVE}"
   export G6_BASEBACKUP_DIR="${G6HA_BASEBACKUP}"
   export G6_DB_HOST="${G6_DB_HOST:-postgres}"
+  export G6_DB_PORT="${G6_DB_PORT:-5432}"
   if [[ -s "${G6HA_STATE}/controller-endpoint-id" ]]; then
     OCSERV_CONTROLLER_ENDPOINT_ID="$(<"${G6HA_STATE}/controller-endpoint-id")"
     export OCSERV_CONTROLLER_ENDPOINT_ID
@@ -95,7 +104,9 @@ g6_ha_export_common_env() {
 
 g6_ha_secret() {
   local name="${1:?secret name is required}"
-  printf '%s\n' "$(<"${G6HA_SECRETS}/${name}")"
+  local path="${G6HA_SECRETS}/${name}"
+  [[ -s "${path}" ]] || return 1
+  cat -- "${path}"
 }
 
 g6_ha_generate_secrets() {
@@ -133,7 +144,11 @@ g6_ha_owner_dsn_local() {
 
 # Runs psql inside the local postgres service container.
 g6_ha_psql() {
-  g6_ha_compose exec -T postgres psql -v ON_ERROR_STOP=1 -U ocservia_owner -d ocservia "$@"
+  # The exec transport appends carriage returns to query output on some
+  # hosted compose versions; grep-based checks tolerate them but strict JSON
+  # assembly and timestamp math do not, so every row leaves CR-free.
+  g6_ha_compose exec -T postgres psql -v ON_ERROR_STOP=1 -U ocservia_owner -d ocservia "$@" \
+    | tr -d '\r'
 }
 
 # Runs psql through the local postgres image against an arbitrary reachable
@@ -173,15 +188,15 @@ g6_ha_boot_id_hash() {
   printf '%s' "${boot_id}" | openssl dgst -sha256 -r | cut -d' ' -f1
 }
 
-g6_ha_gateway_address() {
-  local network="${COMPOSE_PROJECT}_default" gateway
-  # `compose create` materializes the labeled network (and pulls images)
-  # without starting anything, so the tunnel can bind the gateway before any
-  # service runs.
-  g6_ha_compose create postgres >/dev/null
-  gateway="$(docker network inspect "${network}" --format '{{(index .IPAM.Config 0).Gateway}}')"
+# Containers reach the host through host.docker.internal, which the compose
+# files map via extra_hosts host-gateway to the DEFAULT bridge (docker0)
+# gateway — not the compose network's own gateway. The forwarded listener
+# must bind the address clients actually dial.
+g6_ha_host_gateway_address() {
+  local gateway
+  gateway="$(docker network inspect bridge --format '{{(index .IPAM.Config 0).Gateway}}')"
   [[ "${gateway}" =~ ^[0-9.]+$ ]] || {
-    echo "compose network gateway unavailable" >&2
+    echo "default bridge gateway unavailable" >&2
     return 1
   }
   printf '%s\n' "${gateway}"
@@ -216,20 +231,29 @@ g6_ha_archive_has_segment() {
     -c "test -f /archive/${segment}"
 }
 
-g6_ha_tunnel_start() {
+# Exactly one tunnel process runs per failure domain per era, both sides
+# pinned to each other's node id: before the failover fd-a serves its local
+# primary and fd-b forwards a gateway listener to it; after the promotion the
+# roles flip (fd-b serves, fd-a forwards). Running serve and forward from one
+# key simultaneously registers two endpoints with the same id and the relay
+# drops the second ("Another endpoint connected with the same endpoint id").
+g6_ha_tunnel_serve() {
   local peer_node="${1:?peer node ID is required}"
-  [[ -x "${G6HA_TUNNEL_BIN}" ]] || {
-    echo "tunnel binary is missing; build rust target first" >&2
-    return 1
-  }
+  g6_ha_tunnel_stop
   g6_ha_export_common_env
-  local gateway
-  gateway="$(g6_ha_gateway_address)"
   nohup "${G6HA_TUNNEL_BIN}" serve \
     --key-file "${G6HA_SECRETS}/tunnel.key" \
     --peer-node "${peer_node}" \
     --forward 127.0.0.1:5432 >"${G6HA_LOGS}/tunnel-serve.log" 2>&1 &
   echo $! >"${G6HA_STATE}/tunnel-serve.pid"
+}
+
+g6_ha_tunnel_forward() {
+  local peer_node="${1:?peer node ID is required}"
+  g6_ha_tunnel_stop
+  g6_ha_export_common_env
+  local gateway
+  gateway="$(g6_ha_host_gateway_address)"
   nohup "${G6HA_TUNNEL_BIN}" forward \
     --key-file "${G6HA_SECRETS}/tunnel.key" \
     --peer-node "${peer_node}" \
@@ -338,6 +362,14 @@ g6_ha_diagnostics() {
     >"${ARTIFACT_DIR}/services-${FD_ID}.log" 2>&1 || true
   docker system df >"${ARTIFACT_DIR}/docker-storage-${FD_ID}.txt" 2>&1 || true
   cp -f "${G6HA_LOGS}"/tunnel-*.log "${ARTIFACT_DIR}/" 2>/dev/null || true
+  # The harness's own phase logs (basebackup, verifybackup, rewind, pitr)
+  # explain silent redirected failures; credentials inside connection
+  # strings are redacted before anything leaves the runner.
+  for log in "${G6HA_LOGS}"/*.log; do
+    [[ -f "${log}" ]] || continue
+    sed -E 's#(postgres(ql)?://[^:/]+:)[^@]+@#\1[redacted]@#g' \
+      "${log}" >"${ARTIFACT_DIR}/$(basename "${log}")" || true
+  done
   printf 'fd=%s alias=%s boot_id_sha256=%s\n' \
     "${FD_ID}" "${FD_ALIAS}" "$(g6_ha_boot_id_hash)" \
     >"${ARTIFACT_DIR}/failure-domain-${FD_ID}.txt"
@@ -367,14 +399,44 @@ g6_ha_strip_secrets_from_artifacts() {
   }
 }
 
+# Postgres writes into the archive, basebackup, and restore bind mounts as
+# uid 999, so the runner user cannot remove them. Hand the directory back
+# through a short-lived root container before the rm.
+g6_ha_reclaim_directory() {
+  local dir="${1:?directory is required}"
+  [[ -d "${dir}" ]] || return 0
+  docker run --rm -v "${dir}:/reclaim" postgres:17.10-bookworm \
+    chown -R "$(id -u):$(id -g)" /reclaim >/dev/null 2>&1 || {
+      echo "cleanup: ownership reclaim failed for ${dir}" >&2
+      return 1
+    }
+}
+
 g6_ha_cleanup() {
   local status=0 pitr_container="${COMPOSE_PROJECT}-pitr"
   if docker container inspect "${pitr_container}" >/dev/null 2>&1; then
-    docker rm -f "${pitr_container}" >/dev/null 2>&1 || status=1
+    docker rm -f "${pitr_container}" >/dev/null 2>&1 || {
+      echo "cleanup: pitr container removal failed" >&2
+      status=1
+    }
   fi
-  g6_ha_tunnel_stop || status=1
-  g6_ha_compose down --volumes --remove-orphans --rmi local >/dev/null 2>&1 || status=1
-  rm -rf -- "${G6HA_WORK}" "${RUNNER_TEMP}"/g6-ha-* || status=1
+  g6_ha_tunnel_stop || {
+    echo "cleanup: tunnel stop failed" >&2
+    status=1
+  }
+  if ! g6_ha_compose down --volumes --remove-orphans --rmi local \
+    >"${G6HA_LOGS:-${RUNNER_TEMP}}/compose-down.log" 2>&1; then
+    echo "cleanup: compose down failed; output follows:" >&2
+    sed -n '1,40p' "${G6HA_LOGS:-${RUNNER_TEMP}}/compose-down.log" >&2 || true
+    status=1
+  fi
+  for pg_dir in "${G6HA_ARCHIVE}" "${G6HA_BASEBACKUP}" "${G6HA_RESTORE}"; do
+    g6_ha_reclaim_directory "${pg_dir}" || status=1
+  done
+  rm -rf -- "${G6HA_WORK}" "${RUNNER_TEMP}"/g6-ha-* || {
+    echo "cleanup: work directory removal failed" >&2
+    status=1
+  }
   local volume image
   for volume in postgres-data controller-secrets transport-runtime trust-runtime; do
     if docker volume inspect "${COMPOSE_PROJECT}_${volume}" >/dev/null 2>&1; then

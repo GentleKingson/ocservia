@@ -54,9 +54,9 @@ phase_images() {
 }
 
 phase_tunnel_up() {
-  g6_ha_tunnel_start "$(peer_node_id)"
+  # fd-b reaches the peer primary through the pinned tunnel as the client.
+  g6_ha_tunnel_forward "$(peer_node_id)"
   sleep 2
-  kill -0 "$(<"${G6HA_STATE}/tunnel-serve.pid")"
   kill -0 "$(<"${G6HA_STATE}/tunnel-forward.pid")"
 }
 
@@ -107,6 +107,7 @@ phase_standby_bootstrap() {
 
 phase_roles_up() {
   export G6_DB_HOST=host.docker.internal
+  export G6_DB_PORT=15432
   bootstrap_controller_endpoint
   g6_ha_export_common_env
   g6_ha_compose up --detach worker
@@ -169,6 +170,10 @@ phase_promote() {
   g6_ha_timeline_event primary_failure_injected
   g6_ha_timeline_event old_primary_isolated
 
+  # The promoted side becomes the tunnel server; fd-a's recovery phase
+  # flips to forwarding against this serve endpoint.
+  g6_ha_tunnel_serve "$(peer_node_id)"
+
   g6_ha_psql -Atc 'SELECT pg_promote(wait := true)' >/dev/null
   g6_ha_psql -Atc "ALTER SYSTEM SET synchronous_standby_names = ''" >/dev/null
   g6_ha_psql -Atc 'SELECT pg_reload_conf()' >/dev/null
@@ -185,6 +190,7 @@ phase_promote() {
 
   # Re-point every role at the now-authoritative local primary and recover.
   export G6_DB_HOST=postgres
+  export G6_DB_PORT=5432
   g6_ha_export_common_env
   g6_ha_compose up --detach worker
   g6_ha_wait_until 60 1 "worker trust socket after promotion" \
