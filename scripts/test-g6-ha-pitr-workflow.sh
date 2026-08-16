@@ -321,6 +321,17 @@ if [[ "${tag_truncations}" -ne 2 ]]; then
   exit 1
 fi
 
+# pg_hba admits replication connections for ocservia_replication only, so
+# every pg_basebackup must run as that role; the owner login is rejected
+# with no pg_hba entry before any byte is copied.
+for fd_script in "${FD_A}" "${FD_B}"; do
+  grep -qF 'pg_basebackup' "${fd_script}" || continue
+  if grep -qF 'pg_basebackup' "${fd_script}" && ! grep -qF '-U ocservia_replication' "${fd_script}"; then
+    echo "pg_basebackup in ${fd_script} must authenticate as ocservia_replication" >&2
+    exit 1
+  fi
+done
+
 # Every artifact name the workflow waits on must pass the shared artifact
 # helper's allowlist; the validator once rejected the whole g6-ha family and
 # both jobs died at their first rendezvous.

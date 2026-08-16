@@ -240,8 +240,8 @@ phase_load() {
   # The service drops all capabilities, so uid 0 cannot write into the
   # postgres-owned directory; the clone must run as the postgres user.
   g6_ha_compose run --rm --no-deps -T --user 999:999 \
-    -e PGPASSWORD="$(g6_ha_secret owner-password)" postgres \
-    pg_basebackup -h postgres -p 5432 -U ocservia_owner \
+    -e PGPASSWORD="$(g6_ha_secret replication-password)" postgres \
+    pg_basebackup -h postgres -p 5432 -U ocservia_replication \
     -D /var/lib/postgresql/basebackup -X stream --checkpoint=fast \
     < /dev/null >>"${G6HA_LOGS}/basebackup.log" 2>&1
   docker run --rm --entrypoint /bin/sh \
