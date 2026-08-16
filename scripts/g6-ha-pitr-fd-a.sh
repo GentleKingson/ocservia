@@ -208,6 +208,9 @@ write_failover_markers() {
     }
     row="$(g6_ha_psql -At \
       -c "INSERT INTO g6_ha_markers(id, txid, phase) VALUES ('${payload}', txid_current()::text, 'failover-load') RETURNING id || ' ' || txid || ' ' || to_char(written_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"')")"
+    # psql -At still prints the INSERT command tag on its own line after the
+    # RETURNING tuple; keep only the tuple.
+    row="${row%%$'\n'*}"
     # Bound the row to the exact shape the three fields can carry: a stray
     # control character from the exec transport must die here with its bytes
     # visible, never inside the evidence JSON.
@@ -259,6 +262,8 @@ pitr_marker_row() {
   }
   row="$(g6_ha_psql -At \
     -c "INSERT INTO g6_ha_markers(id, txid, phase) VALUES ('pitr-${label}', txid_current()::text, 'pitr') RETURNING id || ' ' || txid || ' ' || to_char(written_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"')")"
+  # Drop the psql INSERT command tag line; keep the RETURNING tuple.
+  row="${row%%$'\n'*}"
   [[ "${row}" =~ ^pitr-[a-z]+[[:space:]][0-9]+[[:space:]][0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$ ]] || {
     echo "pitr marker row ${label} does not match id-txid-timestamp shape:" >&2
     printf '%s\n' "${row}" | od -c | head -5 >&2

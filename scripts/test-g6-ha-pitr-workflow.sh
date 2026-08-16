@@ -312,6 +312,15 @@ grep -qF 'for pg_dir in "${G6HA_ARCHIVE}" "${G6HA_BASEBACKUP}" "${G6HA_RESTORE}"
   exit 1
 }
 
+# psql -At still prints the INSERT command tag on its own line after a
+# RETURNING tuple; both marker row readers must keep only the tuple before
+# the shape guard, or the tag reaches the evidence JSON as a raw newline.
+tag_truncations="$(grep -cF "\$'\n'*" "${FD_A}")"
+if [[ "${tag_truncations}" -ne 2 ]]; then
+  echo "both marker row readers must truncate at the first newline (found ${tag_truncations})" >&2
+  exit 1
+fi
+
 # Every artifact name the workflow waits on must pass the shared artifact
 # helper's allowlist; the validator once rejected the whole g6-ha family and
 # both jobs died at their first rendezvous.
