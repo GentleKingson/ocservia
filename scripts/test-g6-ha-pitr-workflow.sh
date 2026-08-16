@@ -57,6 +57,94 @@ api_env = services.fetch("api").fetch("environment")
 reject("api must bind loopback: dev auth rejects non-loopback HTTP addresses") unless api_env.fetch("OCSERV_HTTP_ADDRESS").start_with?("127.0.0.1:")
 RUBY
 
+# Secret export is exercised, not just grepped: every missing or zero-byte
+# cluster credential must fail both the reader and the aggregate export. A
+# compose call from a fresh diagnostics/cleanup process must then use the
+# complete placeholder environment rather than carrying an empty value into
+# Compose interpolation.
+test_secret_export_fail_closed() (
+  local temporary capture scenario mode secret actual
+  temporary="$(mktemp -d)"
+  trap 'rm -rf "${temporary}"' EXIT INT TERM
+
+  # shellcheck source=scripts/g6-ha-pitr-lib.sh
+  source "${LIB}"
+  G6HA_SECRETS="${temporary}/secrets"
+  G6HA_STATE="${temporary}/state"
+  G6HA_ARCHIVE="${temporary}/archive"
+  G6HA_BASEBACKUP="${temporary}/basebackup"
+  FD_ID=fd-a
+  COMPOSE_PROJECT=g6-secret-policy-test
+  COMPOSE_FILE="${temporary}/compose.yaml"
+  capture="${temporary}/compose-env"
+  mkdir -p "${G6HA_SECRETS}" "${G6HA_STATE}"
+
+  docker() {
+    [[ "${1:-}" == compose ]] || return 2
+    printf '%s\n' "${G6_FD_ID}|${G6_OWNER_PASSWORD}|${G6_APP_PASSWORD}|${G6_REPLICATION_PASSWORD}" \
+      >"${capture}"
+  }
+
+  write_valid_secrets() {
+    printf '%s\n' owner-value >"${G6HA_SECRETS}/owner-password"
+    printf '%s\n' app-value >"${G6HA_SECRETS}/app-password"
+    printf '%s\n' replication-value >"${G6HA_SECRETS}/replication-password"
+  }
+
+  for scenario in \
+    missing:owner-password missing:app-password missing:replication-password \
+    empty:owner-password empty:app-password empty:replication-password; do
+    write_valid_secrets
+    mode="${scenario%%:*}"
+    secret="${scenario#*:}"
+    if [[ "${mode}" == missing ]]; then
+      rm -f "${G6HA_SECRETS}/${secret}"
+    else
+      : >"${G6HA_SECRETS}/${secret}"
+    fi
+
+    if g6_ha_secret "${secret}" >/dev/null 2>&1; then
+      echo "g6_ha_secret accepted ${scenario}" >&2
+      return 1
+    fi
+    if g6_ha_export_common_env; then
+      echo "g6_ha_export_common_env accepted ${scenario}" >&2
+      return 1
+    fi
+
+    unset G6_FD_ID G6_OWNER_PASSWORD G6_APP_PASSWORD G6_REPLICATION_PASSWORD
+    g6_ha_compose config
+    actual="$(<"${capture}")"
+    [[ "${actual}" == 'fd-a|harness-placeholder|harness-placeholder|harness-placeholder' ]] || {
+      echo "g6_ha_compose did not use the complete placeholder environment for ${scenario}: ${actual}" >&2
+      return 1
+    }
+  done
+
+  write_valid_secrets
+  unset G6_FD_ID G6_OWNER_PASSWORD G6_APP_PASSWORD G6_REPLICATION_PASSWORD
+  g6_ha_export_common_env
+  [[ "${G6_FD_ID}|${G6_OWNER_PASSWORD}|${G6_APP_PASSWORD}|${G6_REPLICATION_PASSWORD}" == \
+    'fd-a|owner-value|app-value|replication-value' ]] || {
+    echo "g6_ha_export_common_env rejected a complete secret set" >&2
+    return 1
+  }
+
+  # A partially inherited process environment must be refreshed as one
+  # credential set; checking only G6_APP_PASSWORD would leave owner or
+  # replication empty and defer the failure to Compose parsing.
+  G6_FD_ID=fd-a
+  G6_APP_PASSWORD=stale-app-value
+  unset G6_OWNER_PASSWORD G6_REPLICATION_PASSWORD
+  g6_ha_compose config
+  actual="$(<"${capture}")"
+  [[ "${actual}" == 'fd-a|owner-value|app-value|replication-value' ]] || {
+    echo "g6_ha_compose did not refresh a partial credential environment: ${actual}" >&2
+    return 1
+  }
+)
+test_secret_export_fail_closed
+
 # Harness scripts must read the frozen limits from g6-slo.yaml instead of
 # copying thresholds into shell code.
 if grep -nE 'rpo|rtol|rto' "${LIB}" | grep -vE 'g6_ha_slo_limit|database_r(to|po)_seconds'; then

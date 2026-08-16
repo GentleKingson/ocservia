@@ -59,7 +59,8 @@ g6_ha_compose() {
   # substitutes must be present even for diagnostics and cleanup steps that
   # never sourced them explicitly. Secrets survive across steps in the runner
   # temp state.
-  if [[ -z "${G6_APP_PASSWORD:-}" || -z "${G6_FD_ID:-}" ]]; then
+  if [[ -z "${G6_OWNER_PASSWORD:-}" || -z "${G6_APP_PASSWORD:-}" ||
+    -z "${G6_REPLICATION_PASSWORD:-}" || -z "${G6_FD_ID:-}" ]]; then
     g6_ha_export_common_env || g6_ha_placeholder_env
   fi
   docker compose --project-name "${COMPOSE_PROJECT}" --file "${COMPOSE_FILE}" "$@"
@@ -77,14 +78,16 @@ g6_ha_placeholder_env() {
 }
 
 g6_ha_export_common_env() {
-  local owner_password app_password replication_password
+  local owner_password app_password replication_password secret
   # Called from an || fallback, so set -e is suppressed inside: fail the
   # guard explicitly or an aborted-before-prepare cleanup silently exports
   # empty passwords that compose variable substitution rejects.
-  [[ -f "${G6HA_SECRETS}/owner-password" ]] || return 1
-  owner_password="$(g6_ha_secret owner-password)"
-  app_password="$(g6_ha_secret app-password)"
-  replication_password="$(g6_ha_secret replication-password)"
+  for secret in owner-password app-password replication-password; do
+    [[ -s "${G6HA_SECRETS}/${secret}" ]] || return 1
+  done
+  owner_password="$(g6_ha_secret owner-password)" || return 1
+  app_password="$(g6_ha_secret app-password)" || return 1
+  replication_password="$(g6_ha_secret replication-password)" || return 1
   export G6_FD_ID="${FD_ID}"
   export G6_OWNER_PASSWORD="${owner_password}"
   export G6_APP_PASSWORD="${app_password}"
@@ -101,7 +104,9 @@ g6_ha_export_common_env() {
 
 g6_ha_secret() {
   local name="${1:?secret name is required}"
-  printf '%s\n' "$(<"${G6HA_SECRETS}/${name}")"
+  local path="${G6HA_SECRETS}/${name}"
+  [[ -s "${path}" ]] || return 1
+  cat -- "${path}"
 }
 
 g6_ha_generate_secrets() {
