@@ -286,6 +286,32 @@ if [[ "${db_port_defaults}" -ne 2 ]]; then
   exit 1
 fi
 
+# Query output crosses the compose exec transport before it reaches evidence
+# JSON: CR stripping lives in the shared psql wrapper, marker rows are shape-
+# guarded with their bytes dumped on mismatch, and the load JSON is assembled
+# by jq itself. Hand-built printf JSON once smuggled a control character past
+# every grep-based check and died only at strict jq validation.
+if ! grep -qF 'tr -d ' "${LIB}" || ! grep -qF "'\r'" "${LIB}"; then
+  echo "g6_ha_psql must strip carriage returns from query output" >&2
+  exit 1
+fi
+grep -qF 'load-markers.ndjson' "${FD_A}" || {
+  echo "load markers must be assembled through jq from ndjson rows" >&2
+  exit 1
+}
+if grep -qF '"marker_id": "' "${FD_A}"; then
+  echo "hand-built marker JSON is forbidden; jq must assemble the load evidence" >&2
+  exit 1
+fi
+grep -qF 'g6_ha_reclaim_directory "${pg_dir}"' "${LIB}" || {
+  echo "cleanup must reclaim postgres-owned bind mounts before rm" >&2
+  exit 1
+}
+grep -qF 'for pg_dir in "${G6HA_ARCHIVE}" "${G6HA_BASEBACKUP}" "${G6HA_RESTORE}"' "${LIB}" || {
+  echo "cleanup must reclaim every postgres-owned bind mount" >&2
+  exit 1
+}
+
 # Every artifact name the workflow waits on must pass the shared artifact
 # helper's allowlist; the validator once rejected the whole g6-ha family and
 # both jobs died at their first rendezvous.

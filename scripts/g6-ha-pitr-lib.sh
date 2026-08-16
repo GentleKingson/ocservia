@@ -135,7 +135,11 @@ g6_ha_owner_dsn_local() {
 
 # Runs psql inside the local postgres service container.
 g6_ha_psql() {
-  g6_ha_compose exec -T postgres psql -v ON_ERROR_STOP=1 -U ocservia_owner -d ocservia "$@"
+  # The exec transport appends carriage returns to query output on some
+  # hosted compose versions; grep-based checks tolerate them but strict JSON
+  # assembly and timestamp math do not, so every row leaves CR-free.
+  g6_ha_compose exec -T postgres psql -v ON_ERROR_STOP=1 -U ocservia_owner -d ocservia "$@" \
+    | tr -d '\r'
 }
 
 # Runs psql through the local postgres image against an arbitrary reachable
@@ -386,6 +390,19 @@ g6_ha_strip_secrets_from_artifacts() {
   }
 }
 
+# Postgres writes into the archive, basebackup, and restore bind mounts as
+# uid 999, so the runner user cannot remove them. Hand the directory back
+# through a short-lived root container before the rm.
+g6_ha_reclaim_directory() {
+  local dir="${1:?directory is required}"
+  [[ -d "${dir}" ]] || return 0
+  docker run --rm -v "${dir}:/reclaim" postgres:17.10-bookworm \
+    chown -R "$(id -u):$(id -g)" /reclaim >/dev/null 2>&1 || {
+      echo "cleanup: ownership reclaim failed for ${dir}" >&2
+      return 1
+    }
+}
+
 g6_ha_cleanup() {
   local status=0 pitr_container="${COMPOSE_PROJECT}-pitr"
   if docker container inspect "${pitr_container}" >/dev/null 2>&1; then
@@ -404,6 +421,9 @@ g6_ha_cleanup() {
     sed -n '1,40p' "${G6HA_LOGS:-${RUNNER_TEMP}}/compose-down.log" >&2 || true
     status=1
   fi
+  for pg_dir in "${G6HA_ARCHIVE}" "${G6HA_BASEBACKUP}" "${G6HA_RESTORE}"; do
+    g6_ha_reclaim_directory "${pg_dir}" || status=1
+  done
   rm -rf -- "${G6HA_WORK}" "${RUNNER_TEMP}"/g6-ha-* || {
     echo "cleanup: work directory removal failed" >&2
     status=1

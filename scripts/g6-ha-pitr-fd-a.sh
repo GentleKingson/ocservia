@@ -196,8 +196,7 @@ phase_primary_up() {
 
 write_failover_markers() {
   local index payload row
-  : >"${G6HA_OUTBOX}/load-markers.json"
-  printf '[' >>"${G6HA_OUTBOX}/load-markers.json"
+  : >"${G6HA_WORK}/load-markers.ndjson"
   for index in $(seq 1 "${MARKER_COUNT}"); do
     payload="g6-ha-failover-marker-${RUN_ID}-${index}"
     # Inlined literal, never a psql variable: compose exec mangles -v passing
@@ -209,17 +208,26 @@ write_failover_markers() {
     }
     row="$(g6_ha_psql -At \
       -c "INSERT INTO g6_ha_markers(id, txid, phase) VALUES ('${payload}', txid_current()::text, 'failover-load') RETURNING id || ' ' || txid || ' ' || to_char(written_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"')")"
+    # Bound the row to the exact shape the three fields can carry: a stray
+    # control character from the exec transport must die here with its bytes
+    # visible, never inside the evidence JSON.
+    [[ "${row}" =~ ^[A-Za-z0-9._-]+[[:space:]][0-9]+[[:space:]][0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$ ]] || {
+      echo "marker row ${index} does not match id-txid-timestamp shape:" >&2
+      printf '%s\n' "${row}" | od -c | head -5 >&2
+      return 1
+    }
     [[ "${row}" == "${payload} "* ]] || {
       echo "marker insert failed at index ${index}" >&2
       return 1
     }
-    ((index > 1)) && printf ',' >>"${G6HA_OUTBOX}/load-markers.json"
-    printf '\n  {"marker_id": "%s", "txid": "%s", "acknowledged_at": "%s"}' \
-      "${row%% *}" "$(printf '%s\n' "${row}" | awk '{print $2}')" \
-      "$(printf '%s\n' "${row}" | awk '{print $3}')" >>"${G6HA_OUTBOX}/load-markers.json"
+    jq -cn --arg marker_id "${row%% *}" \
+      --arg txid "$(printf '%s\n' "${row}" | awk '{print $2}')" \
+      --arg acknowledged_at "$(printf '%s\n' "${row}" | awk '{print $3}')" \
+      '{marker_id: $marker_id, txid: $txid, acknowledged_at: $acknowledged_at}' \
+      >>"${G6HA_WORK}/load-markers.ndjson"
     sleep 1
   done
-  printf '\n]\n' >>"${G6HA_OUTBOX}/load-markers.json"
+  jq -s '.' "${G6HA_WORK}/load-markers.ndjson" >"${G6HA_OUTBOX}/load-markers.json"
   jq -e 'length == 12' "${G6HA_OUTBOX}/load-markers.json" >/dev/null
 }
 
@@ -244,13 +252,19 @@ phase_load() {
 }
 
 pitr_marker_row() {
-  local label="${1:?marker label is required}"
+  local label="${1:?marker label is required}" row
   [[ "${label}" =~ ^[a-z]+$ ]] || {
     echo "pitr marker label contains unexpected characters: ${label}" >&2
     return 1
   }
-  g6_ha_psql -At \
-    -c "INSERT INTO g6_ha_markers(id, txid, phase) VALUES ('pitr-${label}', txid_current()::text, 'pitr') RETURNING id || ' ' || txid || ' ' || to_char(written_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"')"
+  row="$(g6_ha_psql -At \
+    -c "INSERT INTO g6_ha_markers(id, txid, phase) VALUES ('pitr-${label}', txid_current()::text, 'pitr') RETURNING id || ' ' || txid || ' ' || to_char(written_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"')")"
+  [[ "${row}" =~ ^pitr-[a-z]+[[:space:]][0-9]+[[:space:]][0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$ ]] || {
+    echo "pitr marker row ${label} does not match id-txid-timestamp shape:" >&2
+    printf '%s\n' "${row}" | od -c | head -5 >&2
+    return 1
+  }
+  printf '%s\n' "${row}"
 }
 
 phase_pitr() {
