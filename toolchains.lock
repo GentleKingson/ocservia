@@ -15,3 +15,4 @@ staticcheck=2026.1
 govulncheck=1.6.0
 cargo_audit=0.22.2
 cargo_deny=0.20.2
+sccache=0.17.0

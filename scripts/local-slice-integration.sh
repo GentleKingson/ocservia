@@ -64,8 +64,24 @@ trap cleanup EXIT INT TERM
 
 mkdir -p "${TMP_ROOT}/run" "${TMP_ROOT}/trust"
 chmod 0700 "${TMP_ROOT}/trust"
-(cd "${ROOT}/control-plane" && go build -trimpath -o "${TMP_ROOT}/ocserv-control" ./cmd/ocserv-control)
-(cd "${ROOT}/rust" && cargo build --locked --package ocservia-transportd-stub)
+CONTROL_BIN="${OCSERVIA_CONTROL_BIN:-${TMP_ROOT}/ocserv-control}"
+STUB_BIN="${OCSERVIA_TRANSPORTD_STUB_BIN:-${ROOT}/rust/target/debug/ocservia-transportd-stub}"
+if [[ -n "${OCSERVIA_CONTROL_BIN:-}" ]]; then
+  [[ -x "${CONTROL_BIN}" ]] || {
+    echo "OCSERVIA_CONTROL_BIN must name an executable file" >&2
+    exit 2
+  }
+else
+  (cd "${ROOT}/control-plane" && go build -trimpath -o "${CONTROL_BIN}" ./cmd/ocserv-control)
+fi
+if [[ -n "${OCSERVIA_TRANSPORTD_STUB_BIN:-}" ]]; then
+  [[ -x "${STUB_BIN}" ]] || {
+    echo "OCSERVIA_TRANSPORTD_STUB_BIN must name an executable file" >&2
+    exit 2
+  }
+else
+  (cd "${ROOT}/rust" && cargo build --locked --package ocservia-transportd-stub)
+fi
 
 docker run -d --name "${POSTGRES}" \
   -e POSTGRES_DB=ocservia -e POSTGRES_USER=ocservia_owner -e POSTGRES_PASSWORD=test-owner-only \
@@ -82,10 +98,10 @@ docker exec "${POSTGRES}" psql -v ON_ERROR_STOP=1 -U ocservia_owner -d ocservia 
 OCSERV_ENVIRONMENT=test OCSERV_DATABASE_URL="${owner_url}" OCSERV_RUNTIME_DATABASE_ROLE=ocservia_app \
   OCSERV_AUDIT_EVENT_KEY_ID="${AUDIT_EVENT_KEY_ID}" \
   OCSERV_TEST_AUDIT_EVENT_KEY_HEX="${AUDIT_EVENT_KEY_HEX}" \
-  "${TMP_ROOT}/ocserv-control" --migrate-only
+  "${CONTROL_BIN}" --migrate-only
 
 start_stub() {
-  "${ROOT}/rust/target/debug/ocservia-transportd-stub" --socket "${SOCKET}" --queue-capacity 8 \
+  "${STUB_BIN}" --socket "${SOCKET}" --queue-capacity 8 \
     --control-plane-uid "$(id -u)" --control-plane-gid "$(id -g)" \
     >"${TMP_ROOT}/transportd.log" 2>&1 &
   STUB_PID=$!
@@ -107,7 +123,7 @@ start_control() {
     OCSERV_TRUST_SOCKET="${TRUST_SOCKET}" \
     OCSERV_AUDIT_EVENT_KEY_ID="${AUDIT_EVENT_KEY_ID}" \
     OCSERV_TEST_AUDIT_EVENT_KEY_HEX="${AUDIT_EVENT_KEY_HEX}" \
-    "${TMP_ROOT}/ocserv-control" --role=all >"${TMP_ROOT}/control.log" 2>&1 &
+    "${CONTROL_BIN}" --role=all >"${TMP_ROOT}/control.log" 2>&1 &
   CONTROL_PID=$!
   PIDS+=("${CONTROL_PID}")
   for _ in $(seq 1 60); do

@@ -20,3 +20,5 @@ ec7ca4263769593df4d909be85b94a6b79efa2897be5d2bb8ebd516e823175af  cargo-audit-aa
 ab28a1bdb54db4d5d8ad5981cf1f959410370b3d28250dbd35f6a44248620e39  cargo-audit-x86_64-unknown-linux-gnu-v0.22.2.tgz
 fe67d82a10d8597a3549364cb733a3f9cc1bfff9031b7ae46384a9f2a72090c3  cargo-deny-0.20.2-aarch64-apple-darwin.tar.gz
 9f12ed4c49936e09b48bf862b595cde2fe64fcbd9d74dfacac6131ca824c8d5f  cargo-deny-0.20.2-x86_64-unknown-linux-musl.tar.gz
+0c560bfba31aef5bdfb4fb3d2677f6e61d71c5c00952f2a83344f47aa31f00f1  sccache-v0.17.0-aarch64-apple-darwin.tar.gz
+67c4a96dd237c1f518f6b36083f270f9976d516f1e57fce891755ea782e50006  sccache-v0.17.0-x86_64-unknown-linux-musl.tar.gz

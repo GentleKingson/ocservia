@@ -3,6 +3,11 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 ARTIFACT_DIR="${ARTIFACT_DIR:-}"
+MODE="${1:-full}"
+if (($# > 1)) || [[ "${MODE}" != "full" && "${MODE}" != "--contract-only" ]]; then
+  echo "usage: $0 [--contract-only]" >&2
+  exit 2
+fi
 if [[ -n "${ARTIFACT_DIR}" ]]; then
   mkdir -p "${ARTIFACT_DIR}"
 fi
@@ -20,10 +25,12 @@ if grep -R -n -i -E --include='*.md' --include='*.go' --include='*.rs' --include
   exit 1
 fi
 
-(cd "${ROOT}/rust" && cargo test --locked -p ocservia-command-journal \
-  five_minute_offline_recovery_caps_legacy_telemetry_at_boundary)
-(cd "${ROOT}/rust" && cargo test --locked -p ocservia-agent \
-  five_minute_offline_recovery_rejects_expired_command_before_effect)
+if [[ "${MODE}" == "full" ]]; then
+  (cd "${ROOT}/rust" && cargo test --locked -p ocservia-command-journal \
+    five_minute_offline_recovery_caps_legacy_telemetry_at_boundary)
+  (cd "${ROOT}/rust" && cargo test --locked -p ocservia-agent \
+    five_minute_offline_recovery_rejects_expired_command_before_effect)
+fi
 
 summary=$'boundary_seconds=300\nlegacy_day_expiry=bounded_by_observed_age\nbefore_boundary=offline_buffer_retained\nat_boundary=fresh_reconnect_telemetry_only\nexpired_command=effect_rejected\nreal_time_wait=false'
 if [[ -n "${ARTIFACT_DIR}" ]]; then

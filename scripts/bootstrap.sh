@@ -93,6 +93,7 @@ case "$(uname -s)-$(uname -m)" in
     staticcheck_platform="darwin_arm64"
     cargo_audit_platform="aarch64-apple-darwin"
     cargo_deny_platform="aarch64-apple-darwin"
+    sccache_platform="aarch64-apple-darwin"
     ;;
   Linux-x86_64)
     go_platform="linux-amd64"
@@ -105,6 +106,7 @@ case "$(uname -s)-$(uname -m)" in
     staticcheck_platform="linux_amd64"
     cargo_audit_platform="x86_64-unknown-linux-gnu"
     cargo_deny_platform="x86_64-unknown-linux-musl"
+    sccache_platform="x86_64-unknown-linux-musl"
     ;;
   *)
     echo "unsupported bootstrap platform: $(uname -s)-$(uname -m)" >&2
@@ -277,6 +279,19 @@ install_cargo_deny() {
   [[ "$(cargo deny --version)" == *"$(version cargo_deny)"* ]]
 }
 
+install_sccache() {
+  local artifact archive directory
+  artifact="sccache-v$(version sccache)-${sccache_platform}.tar.gz"
+  directory="${artifact%.tar.gz}"
+  if ! version_output_contains "$(version sccache)" "${TOOLS}/bin/sccache" \
+    "${TOOLS}/bin/sccache" --version; then
+    archive="$(download "https://github.com/mozilla/sccache/releases/download/v$(version sccache)/${artifact}" "${artifact}")"
+    tar -xzf "${archive}" --strip-components=1 -C "${TOOLS}/bin" "${directory}/sccache"
+    chmod 0755 "${TOOLS}/bin/sccache"
+  fi
+  [[ "$(sccache --version)" == *"$(version sccache)"* ]]
+}
+
 install_contract_tools() {
   install_buf
   install_openapi_generator
@@ -328,6 +343,7 @@ case "${PROFILE}" in
     install_gitleaks
     install_go_quality_tools
     install_rust_quality_tools
+    install_sccache
     verify_java
     verify_host_command jq
     verify_host_command shellcheck
@@ -341,6 +357,7 @@ case "${PROFILE}" in
     install_contract_tools
     install_gitleaks
     install_rust_quality_tools
+    install_sccache
     verify_java
     verify_host_command jq
     verify_host_command shellcheck
@@ -357,14 +374,17 @@ case "${PROFILE}" in
     install_go
     install_rust
     install_go_quality_tools
+    install_sccache
     verify_host_command jq
     ;;
   rust-validation)
     install_rust
     install_rust_quality_tools
+    install_sccache
     ;;
   native)
     install_rust
+    install_sccache
     ;;
   web)
     install_node
@@ -378,6 +398,7 @@ case "${PROFILE}" in
     install_rust
     install_gitleaks
     install_cargo_deny
+    install_sccache
     install_web_dependencies
     ;;
 esac
