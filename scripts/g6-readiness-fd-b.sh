@@ -96,7 +96,7 @@ phase_prepare() {
   for name in relay-b pg-b pg-a-forward api-a-forward relay-a-forward; do
     g6rd_tunnel_key "${name}" >"${G6RD_OUTBOX}/tunnel/${name}.node-id"
   done
-  cat /proc/sys/kernel/random/boot_id | openssl dgst -sha256 -r | cut -c1-16 \
+  openssl dgst -sha256 -r </proc/sys/kernel/random/boot_id | cut -c1-16 \
     >"${G6RD_OUTBOX}/tunnel/boot-id-sha256"
 }
 
@@ -833,8 +833,8 @@ phase_window() {
     wait
   done
   while ((elapsed < WINDOW_SECONDS)); do
-    g6rd_read_nodes || true
-    g6rd_read_nodes || true
+    g6rd_read_nodes "${G6RD_STATE}/read-log.jsonl" || true
+    g6rd_read_nodes "${G6RD_STATE}/read-log.jsonl" || true
     node="${node_list[$((count % total))]}"
     if [[ -n "${node}" ]]; then
       g6rd_enqueue_command "${node}" "g6-window-${RUN_ID}-${count}" || true

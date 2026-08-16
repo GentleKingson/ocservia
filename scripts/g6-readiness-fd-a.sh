@@ -47,7 +47,7 @@ phase_prepare() {
   for name in pg-a api-a relay-a relay-b-forward pg-b-forward; do
     g6rd_tunnel_key "${name}" >"${G6RD_OUTBOX}/tunnel/${name}.node-id"
   done
-  cat /proc/sys/kernel/random/boot_id | openssl dgst -sha256 -r | cut -c1-16 \
+  openssl dgst -sha256 -r </proc/sys/kernel/random/boot_id | cut -c1-16 \
     >"${G6RD_OUTBOX}/tunnel/boot-id-sha256"
 }
 
