@@ -48,6 +48,10 @@ reject("control-plane roles must be split") unless roles == {"api" => "--role=ap
 reject("worker must own the trust socket") unless services.fetch("worker").fetch("environment").key?("OCSERV_TRUST_SOCKET")
 reject("postgres must publish only loopback") unless services.fetch("postgres").fetch("ports") == ["127.0.0.1:5432:5432"]
 reject("postgres must run data checksums") unless services.fetch("postgres").fetch("environment").fetch("POSTGRES_INITDB_ARGS").include?("data-checksums")
+pg_caps = services.fetch("postgres").fetch("cap_add")
+%w[CHOWN FOWNER DAC_OVERRIDE SETUID SETGID].each do |cap|
+  reject("postgres must keep #{cap} for its root entrypoint phase under cap_drop ALL") unless pg_caps.include?(cap)
+end
 RUBY
 
 # Harness scripts must read the frozen limits from g6-slo.yaml instead of

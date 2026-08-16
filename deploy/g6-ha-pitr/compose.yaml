@@ -49,6 +49,12 @@ x-role-defaults: &role-defaults
 services:
   postgres:
     <<: *service-defaults
+    # The official entrypoint starts as root: it chmod/chowns the data volume
+    # and re-execs as the postgres user. With every capability dropped that
+    # root phase dies with EPERM before initdb, so postgres keeps exactly the
+    # capabilities that phase needs (no-new-privileges still forbids gaining
+    # anything; the gosu re-exec only drops privileges).
+    cap_add: [CHOWN, FOWNER, DAC_OVERRIDE, SETUID, SETGID]
     image: postgres:17.10-bookworm
     environment:
       POSTGRES_DB: ocservia
