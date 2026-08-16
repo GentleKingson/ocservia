@@ -173,15 +173,15 @@ g6_ha_boot_id_hash() {
   printf '%s' "${boot_id}" | openssl dgst -sha256 -r | cut -d' ' -f1
 }
 
-g6_ha_gateway_address() {
-  local network="${COMPOSE_PROJECT}_default" gateway
-  # `compose create` materializes the labeled network (and pulls images)
-  # without starting anything, so the tunnel can bind the gateway before any
-  # service runs.
-  g6_ha_compose create postgres >/dev/null
-  gateway="$(docker network inspect "${network}" --format '{{(index .IPAM.Config 0).Gateway}}')"
+# Containers reach the host through host.docker.internal, which the compose
+# files map via extra_hosts host-gateway to the DEFAULT bridge (docker0)
+# gateway — not the compose network's own gateway. The forwarded listener
+# must bind the address clients actually dial.
+g6_ha_host_gateway_address() {
+  local gateway
+  gateway="$(docker network inspect bridge --format '{{(index .IPAM.Config 0).Gateway}}')"
   [[ "${gateway}" =~ ^[0-9.]+$ ]] || {
-    echo "compose network gateway unavailable" >&2
+    echo "default bridge gateway unavailable" >&2
     return 1
   }
   printf '%s\n' "${gateway}"
@@ -238,7 +238,7 @@ g6_ha_tunnel_forward() {
   g6_ha_tunnel_stop
   g6_ha_export_common_env
   local gateway
-  gateway="$(g6_ha_gateway_address)"
+  gateway="$(g6_ha_host_gateway_address)"
   nohup "${G6HA_TUNNEL_BIN}" forward \
     --key-file "${G6HA_SECRETS}/tunnel.key" \
     --peer-node "${peer_node}" \
