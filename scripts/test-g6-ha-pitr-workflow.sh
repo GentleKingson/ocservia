@@ -332,6 +332,16 @@ for fd_script in "${FD_A}" "${FD_B}"; do
   fi
 done
 
+# The PITR restore listens on PITR_RESTORE_PORT, not the libpq default 5432;
+# every psql into the pitr container must set that port or it probes a
+# nonexistent socket while the restore sits paused at the restore point.
+pitr_psql_calls="$(grep -cF 'docker exec "${pitr_container}" psql' "${FD_A}")"
+pitr_port_args="$(grep -cF -- '-p "${PITR_RESTORE_PORT}" -Atc' "${FD_A}")"
+if [[ "${pitr_psql_calls}" -ne "${pitr_port_args}" ]]; then
+  echo "every psql into the pitr container must set PITR_RESTORE_PORT (calls ${pitr_psql_calls}, port args ${pitr_port_args})" >&2
+  exit 1
+fi
+
 # Every artifact name the workflow waits on must pass the shared artifact
 # helper's allowlist; the validator once rejected the whole g6-ha family and
 # both jobs died at their first rendezvous.

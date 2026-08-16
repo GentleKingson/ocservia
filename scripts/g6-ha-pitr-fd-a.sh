@@ -313,7 +313,8 @@ phase_pitr() {
 
   local paused=no
   for _ in {1..90}; do
-    if docker exec "${pitr_container}" psql -U ocservia_owner -d ocservia -Atc \
+    if docker exec "${pitr_container}" psql -U ocservia_owner -d ocservia \
+      -p "${PITR_RESTORE_PORT}" -Atc \
       'SELECT pg_is_in_recovery() AND pg_is_wal_replay_paused()' 2>/dev/null \
       | grep -q t; then
       paused=yes
@@ -328,9 +329,11 @@ phase_pitr() {
   }
 
   local marker_a_present marker_b_present
-  marker_a_present="$(docker exec "${pitr_container}" psql -U ocservia_owner -d ocservia -Atc \
+  marker_a_present="$(docker exec "${pitr_container}" psql -U ocservia_owner -d ocservia \
+    -p "${PITR_RESTORE_PORT}" -Atc \
     "SELECT count(*) FROM g6_ha_markers WHERE id = 'pitr-a' AND phase = 'pitr'")"
-  marker_b_present="$(docker exec "${pitr_container}" psql -U ocservia_owner -d ocservia -Atc \
+  marker_b_present="$(docker exec "${pitr_container}" psql -U ocservia_owner -d ocservia \
+    -p "${PITR_RESTORE_PORT}" -Atc \
     "SELECT count(*) FROM g6_ha_markers WHERE id = 'pitr-b' AND phase = 'pitr'")"
   [[ "${marker_a_present}" == 1 ]] || {
     echo "PITR restore lost marker_a" >&2
