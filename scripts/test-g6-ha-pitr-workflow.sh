@@ -214,6 +214,19 @@ for fd_script in "${FD_A}" "${FD_B}"; do
   }
 done
 
+# Every artifact name the workflow waits on must pass the shared artifact
+# helper's allowlist; the validator once rejected the whole g6-ha family and
+# both jobs died at their first rendezvous.
+while IFS= read -r wait_name; do
+  concrete="${wait_name//\$\{GITHUB_RUN_ID\}/424242}"
+  concrete="${concrete//\$\{GITHUB_RUN_ATTEMPT\}/1}"
+  GITHUB_RUN_ID=424242 GITHUB_RUN_ATTEMPT=1 \
+    "${ROOT}/scripts/real-e2e-artifact.sh" validate-name "${concrete}" || {
+      echo "workflow artifact name is rejected by the shared validator: ${concrete}" >&2
+      exit 1
+    }
+done < <(grep -oE 'wait-download "[^"]+"' "${WORKFLOW}" | sed 's/^wait-download "//; s/"$//' | sort -u)
+
 # Every pinned action must reuse an exact `uses: action@sha` line already
 # proven by a merged workflow with hosted execution. A well-formed but
 # nonexistent SHA passes the format check yet fails the dispatch-only run at
