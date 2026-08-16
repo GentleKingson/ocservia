@@ -261,10 +261,10 @@ pitr_marker_row() {
     return 1
   }
   row="$(g6_ha_psql -At \
-    -c "INSERT INTO g6_ha_markers(id, txid, phase) VALUES ('pitr-${label}', txid_current()::text, 'pitr') RETURNING id || ' ' || txid || ' ' || to_char(written_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"')")"
+    -c "INSERT INTO g6_ha_markers(id, txid, phase) VALUES ('pitr-${label}', txid_current()::text, 'pitr') RETURNING id || ' ' || txid || ' ' || to_char(written_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"')")"
   # Drop the psql INSERT command tag line; keep the RETURNING tuple.
   row="${row%%$'\n'*}"
-  [[ "${row}" =~ ^pitr-[a-z]+[[:space:]][0-9]+[[:space:]][0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$ ]] || {
+  [[ "${row}" =~ ^pitr-[a-z]+[[:space:]][0-9]+[[:space:]][0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{6}Z$ ]] || {
     echo "pitr marker row ${label} does not match id-txid-timestamp shape:" >&2
     printf '%s\n' "${row}" | od -c | head -5 >&2
     return 1
@@ -276,7 +276,7 @@ phase_pitr() {
   local marker_a marker_b restore_point_created switch_target
   marker_a="$(pitr_marker_row a)"
   restore_point_created="$(g6_ha_psql -At -c \
-    "SELECT pg_create_restore_point('${PITR_TARGET_NAME}')::text || ' ' || to_char(now() AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"')")"
+    "SELECT pg_create_restore_point('${PITR_TARGET_NAME}')::text || ' ' || to_char(now() AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"')")"
   marker_b="$(pitr_marker_row b)"
 
   switch_target="$(g6_ha_psql -At -c 'SELECT pg_walfile_name(pg_switch_wal())')"

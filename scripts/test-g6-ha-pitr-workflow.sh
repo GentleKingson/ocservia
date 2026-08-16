@@ -342,6 +342,20 @@ if [[ "${pitr_psql_calls}" -ne "${pitr_port_args}" ]]; then
   exit 1
 fi
 
+# Marker A, the restore point, and marker B are created back-to-back. Whole-
+# second timestamps collapse their order and make a valid restore fail the
+# frozen strict A < restore point < B contract, so both SQL producers and the
+# marker shape guard must retain fixed-width microseconds.
+pitr_microsecond_formats="$(grep -cF 'HH24:MI:SS.US\"Z\"' "${FD_A}")"
+if [[ "${pitr_microsecond_formats}" -ne 2 ]]; then
+  echo "PITR marker and restore-point timestamps must retain microseconds (found ${pitr_microsecond_formats})" >&2
+  exit 1
+fi
+grep -qF '[0-9]{2}\.[0-9]{6}Z$' "${FD_A}" || {
+  echo "PITR marker row guard must require six fractional digits" >&2
+  exit 1
+}
+
 # Every artifact name the workflow waits on must pass the shared artifact
 # helper's allowlist; the validator once rejected the whole g6-ha family and
 # both jobs died at their first rendezvous.
