@@ -8,6 +8,7 @@ publish = false
 
 [dependencies]
 iroh.workspace = true
+rustls-pki-types.workspace = true
 hex.workspace = true
 ocservia-agent-identity = { version = "=0.1.0", path = "../agent-identity" }
 ocservia-agent-protocol = { version = "=0.1.0", path = "../agent-protocol" }

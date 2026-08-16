@@ -66,6 +66,8 @@ type Config struct {
 	OwnerLeaseTTL            time.Duration
 	UserOperationConcurrency int
 	LocalSimulator           bool
+	PprofAddress             string
+	TestResultCommitBarrier  string
 	CertificateSignerURL     string
 	CertificateSignerToken   string
 	CertificateSignerTimeout time.Duration
@@ -150,6 +152,8 @@ func Load(args []string, lookup LookupEnv) (Config, error) {
 		}
 	}
 	setString(lookup, "OCSERV_COMMAND_SIGNING_KEY_FILE", &cfg.CommandSigningKeyFile)
+	setString(lookup, "OCSERV_PPROF_ADDRESS", &cfg.PprofAddress)
+	setString(lookup, "OCSERV_TEST_RESULT_COMMIT_BARRIER_DIR", &cfg.TestResultCommitBarrier)
 	if err := setHexOrFile(lookup, "OCSERV_BREAK_GLASS_TOKEN_SHA256", &cfg.BreakGlassTokenHash); err != nil {
 		return Config{}, err
 	}
@@ -348,6 +352,25 @@ func (c Config) Validate() error {
 		decoded, err := hex.DecodeString(c.ControllerEndpointID)
 		if err != nil || len(decoded) != 32 || strings.ToLower(c.ControllerEndpointID) != c.ControllerEndpointID {
 			return errors.New("controller endpoint ID must be 32-byte lowercase hex")
+		}
+	}
+	if c.PprofAddress != "" {
+		host, port, err := net.SplitHostPort(c.PprofAddress)
+		if err != nil {
+			return fmt.Errorf("invalid pprof address: %w", err)
+		}
+		portNumber, err := strconv.ParseUint(port, 10, 16)
+		if err != nil || portNumber == 0 {
+			return errors.New("pprof address requires a numeric port between 1 and 65535")
+		}
+		ip := net.ParseIP(host)
+		if c.Environment == "production" || ip == nil || !ip.IsLoopback() {
+			return errors.New("pprof requires environment=development or test and a loopback address")
+		}
+	}
+	if c.TestResultCommitBarrier != "" {
+		if c.Environment == "production" || !filepath.IsAbs(c.TestResultCommitBarrier) {
+			return errors.New("result commit barrier is test-only and requires an absolute directory")
 		}
 	}
 	if c.LocalSimulator && c.Environment == "production" {

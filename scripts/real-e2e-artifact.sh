@@ -1,16 +1,17 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# The allowlist covers both harnesses that rendezvous through this helper:
-# the real-E2E controller/node pair and the G6 HA/PITR failure-domain pair.
-# Names stay closed — a new artifact name is a deliberate contract change.
+# The allowlist covers every harness that rendezvous through this helper:
+# the real-E2E controller/node pair, the G6 HA/PITR failure-domain pair, and
+# the G6 readiness failure-domain pair. Names stay closed — a new artifact
+# name is a deliberate contract change.
 validate_name() {
   local name="${1:-}"
   [[ -n "${GITHUB_RUN_ID:-}" && -n "${GITHUB_RUN_ATTEMPT:-}" ]] || {
     echo "GITHUB_RUN_ID and GITHUB_RUN_ATTEMPT are required" >&2
     return 2
   }
-  [[ "${name}" =~ ^(real-e2e-(controller-ready|agent-endpoint|enrollment-token|enrollment-result)|g6-ha-(tunnel-fd-a|tunnel-fd-b|primary-up|standby|load|failover-ready|isolation|new-primary|pitr|post-promotion|fd-a-recovered|fd-a-rejoin|evidence))-[0-9]+-[0-9]+$ ]] || {
+  [[ "${name}" =~ ^(real-e2e-(controller-ready|agent-endpoint|enrollment-token|enrollment-result)|g6-ha-(tunnel-fd-a|tunnel-fd-b|primary-up|standby|load|failover-ready|isolation|new-primary|pitr|post-promotion|fd-a-recovered|fd-a-rejoin|evidence)|g6-rd-(tunnel-fd-a|tunnel-fd-b|shared|primary-up|agents|load-active|isolation|new-primary|fd-a-ready|final-freeze|fd-a-evidence|evidence-bundle|fd-a-diagnostics|fd-b-diagnostics|verdict))-[0-9]+-[0-9]+$ ]] || {
     echo "invalid real E2E artifact name" >&2
     return 2
   }
@@ -26,8 +27,8 @@ wait_download() {
   local timeout_seconds="${3:-600}"
   local deadline response download_url archive staging entry
   validate_name "${name}"
-  [[ "${timeout_seconds}" =~ ^[0-9]+$ && "${timeout_seconds}" -ge 1 && "${timeout_seconds}" -le 1200 ]] || {
-    echo "artifact wait timeout must be 1..1200 seconds" >&2
+  [[ "${timeout_seconds}" =~ ^[0-9]+$ && "${timeout_seconds}" -ge 1 && "${timeout_seconds}" -le 3600 ]] || {
+    echo "artifact wait timeout must be 1..3600 seconds" >&2
     return 2
   }
   [[ -n "${GITHUB_TOKEN:-}" && -n "${GITHUB_REPOSITORY:-}" && -n "${GITHUB_API_URL:-}" ]] || {

@@ -3096,7 +3096,41 @@ pub async fn build_router(
     policy: IdentityPolicy,
     service: &IrohTransportService,
 ) -> Result<Router, iroh::endpoint::BindError> {
-    build_router_with_direct(secret_key, relay_mode, policy, None, service, true).await
+    build_router_with_direct(
+        secret_key,
+        relay_mode,
+        policy,
+        None,
+        service,
+        true,
+        Vec::new(),
+    )
+    .await
+}
+
+/// Builds the controller endpoint with additional relay TLS roots for
+/// deployments whose relays chain to a private certificate authority.
+///
+/// # Errors
+///
+/// Returns an Iroh bind error when endpoint or transport initialization fails.
+pub async fn build_router_with_tls_roots(
+    secret_key: SecretKey,
+    relay_mode: RelayMode,
+    policy: IdentityPolicy,
+    relay_tls_roots: Vec<rustls_pki_types::CertificateDer<'static>>,
+    service: &IrohTransportService,
+) -> Result<Router, iroh::endpoint::BindError> {
+    build_router_with_direct(
+        secret_key,
+        relay_mode,
+        policy,
+        None,
+        service,
+        true,
+        relay_tls_roots,
+    )
+    .await
 }
 
 /// Builds the controller endpoint with a live Go trust authority.
@@ -3111,10 +3145,36 @@ pub async fn build_router_with_trust(
     trust: TrustAuthority,
     service: &IrohTransportService,
 ) -> Result<Router, AcceptError> {
-    trust.load_snapshot(&policy).await?;
-    build_router_with_direct(secret_key, relay_mode, policy, Some(trust), service, true)
+    build_router_with_trust_tls_roots(secret_key, relay_mode, policy, trust, Vec::new(), service)
         .await
-        .map_err(|_| protocol_error("iroh transport bind failed"))
+}
+
+/// Builds the controller endpoint with a live Go trust authority and
+/// additional relay TLS roots for privately certificated relays.
+///
+/// # Errors
+///
+/// Returns an Iroh bind error when endpoint or transport initialization fails.
+pub async fn build_router_with_trust_tls_roots(
+    secret_key: SecretKey,
+    relay_mode: RelayMode,
+    policy: IdentityPolicy,
+    trust: TrustAuthority,
+    relay_tls_roots: Vec<rustls_pki_types::CertificateDer<'static>>,
+    service: &IrohTransportService,
+) -> Result<Router, AcceptError> {
+    trust.load_snapshot(&policy).await?;
+    build_router_with_direct(
+        secret_key,
+        relay_mode,
+        policy,
+        Some(trust),
+        service,
+        true,
+        relay_tls_roots,
+    )
+    .await
+    .map_err(|_| protocol_error("iroh transport bind failed"))
 }
 
 async fn build_router_with_direct(
@@ -3124,6 +3184,7 @@ async fn build_router_with_direct(
     trust: Option<TrustAuthority>,
     service: &IrohTransportService,
     direct_enabled: bool,
+    relay_tls_roots: Vec<rustls_pki_types::CertificateDer<'static>>,
 ) -> Result<Router, iroh::endpoint::BindError> {
     let transport = QuicTransportConfig::builder()
         .max_concurrent_bidi_streams(VarInt::from_u32(MAX_STREAMS))
@@ -3138,6 +3199,10 @@ async fn build_router_with_direct(
         .relay_mode(relay_mode)
         .transport_config(transport)
         .hooks(SecurityHook::new(policy.clone(), trust.as_ref()));
+    if !relay_tls_roots.is_empty() {
+        endpoint_builder = endpoint_builder
+            .ca_tls_config(iroh::tls::CaTlsConfig::default().with_extra_roots(relay_tls_roots));
+    }
     if !direct_enabled {
         endpoint_builder = endpoint_builder.clear_ip_transports();
     }
@@ -4592,6 +4657,7 @@ mod tests {
             None,
             &service,
             false,
+            Vec::new(),
         )
         .await
         .expect("build router");

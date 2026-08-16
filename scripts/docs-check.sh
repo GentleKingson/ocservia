@@ -20,3 +20,4 @@ done < <(git -C "${ROOT}" ls-files '*.md')
 "${ROOT}/scripts/check-g6-contracts.mjs"
 "${ROOT}/scripts/generate-g6-test-fixtures.mjs" --check
 "${ROOT}/scripts/test-g6-evidence-verifier.mjs"
+"${ROOT}/scripts/test-g6-evidence-builder.mjs"

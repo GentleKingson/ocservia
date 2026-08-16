@@ -11,8 +11,10 @@ use iroh::{EndpointId, RelayMap, RelayUrl, SecretKey};
 use ocservia_contracts::generated::ocserv::platform::transport::v1::transport_service_server::TransportServiceServer;
 use ocservia_transportd::{
     IdentityPolicy, IrohTransportService, TrustAuthority, TrustBudgetConfig, TrustClass,
-    TrustClassLimit, build_router, build_router_with_trust, spawn_dedicated_relay_failover,
+    TrustClassLimit, build_router_with_tls_roots, build_router_with_trust_tls_roots,
+    spawn_dedicated_relay_failover,
 };
+use rustls_pki_types::pem::PemObject;
 use tokio::net::UnixListener;
 use tokio_stream::StreamExt;
 use tokio_stream::wrappers::UnixListenerStream;
@@ -33,6 +35,8 @@ struct Config {
     trust_budgets: TrustBudgetConfig,
     controller_verification_key_files: Vec<PathBuf>,
     require_fencing: bool,
+    stats_file: Option<PathBuf>,
+    relay_ca_file: Option<PathBuf>,
 }
 
 #[tokio::main]
@@ -46,6 +50,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         )
         .init();
     let config = parse_args()?;
+    if let Some(stats_file) = config.stats_file.clone() {
+        ocservia_observability::spawn_runtime_stats_writer(stats_file)?;
+    }
     let relay_failover = match &config.relay_mode {
         RelayMode::Custom(relays) => Some(relays.clone()),
         _ => None,
@@ -53,6 +60,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let key = load_key(&config.key_file)?;
     let (listener, socket_identity) = bind_socket(&config.socket)?;
     let keyring = load_controller_keyring(&config)?;
+    let relay_tls_roots = load_relay_tls_roots(&config)?;
     let policy = IdentityPolicy::new(config.approved, config.revoked);
     let service = IrohTransportService::new_with_fence_policy(
         config.event_capacity,
@@ -73,16 +81,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                 }
             }))
             .await?;
-        build_router_with_trust(
+        build_router_with_trust_tls_roots(
             key,
             config.relay_mode,
             policy,
             TrustAuthority::new_with_config(channel, &config.trust_budgets),
+            relay_tls_roots,
             &service,
         )
         .await?
     } else {
-        build_router(key, config.relay_mode, policy, &service).await?
+        build_router_with_tls_roots(key, config.relay_mode, policy, relay_tls_roots, &service)
+            .await?
     };
     tracing::info!(
         endpoint_id = %router.endpoint().id(),
@@ -144,6 +154,8 @@ fn parse_args() -> Result<Config, io::Error> {
     let mut control_plane_gid = None;
     let mut controller_verification_key_files = Vec::new();
     let mut require_fencing = false;
+    let mut stats_file = None;
+    let mut relay_ca_file = None;
     let mut trust_limits = [
         (
             TrustClass::KnownAgentHandshake,
@@ -300,6 +312,16 @@ fn parse_args() -> Result<Config, io::Error> {
                     "enrollment completion concurrency",
                 )?;
             }
+            "--stats-file" => {
+                stats_file = Some(PathBuf::from(required_value(&mut args, "--stats-file")?));
+            }
+            "--relay-ca-file" => {
+                let path = PathBuf::from(required_value(&mut args, "--relay-ca-file")?);
+                if !path.is_absolute() {
+                    return Err(invalid("--relay-ca-file must be an absolute path"));
+                }
+                relay_ca_file = Some(path);
+            }
             _ => return Err(invalid(&format!("unknown argument: {argument}"))),
         }
     }
@@ -335,6 +357,9 @@ fn parse_args() -> Result<Config, io::Error> {
             "--require-fencing requires at least one --controller-verification-key-file",
         ));
     }
+    if stats_file.as_ref().is_some_and(|path| !path.is_absolute()) {
+        return Err(invalid("stats file path must be absolute"));
+    }
     let relay_mode = build_relay_mode(&relay_mode, relay_urls, relay_token_file.as_deref())?;
     let mut trust_budgets = TrustBudgetConfig::default();
     for (class, limit) in trust_limits {
@@ -353,7 +378,28 @@ fn parse_args() -> Result<Config, io::Error> {
         trust_budgets,
         controller_verification_key_files,
         require_fencing,
+        stats_file,
+        relay_ca_file,
     })
+}
+
+/// Loads the PEM relay certificate authority as additional TLS roots for the
+/// relay client. Deployments with publicly certificated relays leave this
+/// unset and keep the built-in root store unchanged.
+fn load_relay_tls_roots(
+    config: &Config,
+) -> Result<Vec<rustls_pki_types::CertificateDer<'static>>, io::Error> {
+    let Some(path) = config.relay_ca_file.as_ref() else {
+        return Ok(Vec::new());
+    };
+    let roots: Vec<_> = rustls_pki_types::CertificateDer::pem_file_iter(path)
+        .map_err(|error| invalid(&format!("relay CA file is unreadable: {error}")))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| invalid(&format!("relay CA PEM is invalid: {error}")))?;
+    if roots.is_empty() {
+        return Err(invalid("relay CA file contains no certificates"));
+    }
+    Ok(roots)
 }
 
 /// Loads the Controller command verification keys through the same safe path

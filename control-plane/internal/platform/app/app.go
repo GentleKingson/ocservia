@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/http"
+	_ "net/http/pprof" // registers handlers on the internal pprof listener only
 	"time"
 
 	"github.com/GentleKingson/ocservia/control-plane/internal/api"
@@ -89,6 +91,22 @@ func Run(ctx context.Context, cfg config.Config, build BuildInfo, logger *slog.L
 	}
 
 	logger.Info("control plane starting", "role", cfg.Role)
+	if cfg.PprofAddress != "" {
+		pprofServer := &http.Server{Addr: cfg.PprofAddress, Handler: http.DefaultServeMux, ReadHeaderTimeout: 5 * time.Second}
+		go func() {
+			if err := pprofServer.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+				logger.Error("pprof listener failed", "error", err)
+			}
+		}()
+		defer func() {
+			shutdownCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			defer cancel()
+			if err := pprofServer.Shutdown(shutdownCtx); err != nil {
+				logger.Error("pprof shutdown failed", "error", err)
+			}
+		}()
+		logger.Info("loopback pprof listener serving", "address", cfg.PprofAddress)
+	}
 	var commandSigner *commandauth.Signer
 	if cfg.CommandSigningKeyFile != "" {
 		commandSigner, err = commandauth.LoadSigner(cfg.CommandSigningKeyFile)
@@ -105,6 +123,11 @@ func Run(ctx context.Context, cfg config.Config, build BuildInfo, logger *slog.L
 	componentCtx, stopComponents := context.WithCancel(ctx)
 	defer stopComponents()
 	sliceService := localslice.NewWithSigner(pool, commandSigner)
+	if cfg.TestResultCommitBarrier != "" {
+		if err := sliceService.EnableResultCommitBarrier(cfg.TestResultCommitBarrier); err != nil {
+			return fmt.Errorf("configure result commit barrier: %w", err)
+		}
+	}
 	operationService := operationstore.NewWithSigner(pool, cfg.UserOperationConcurrency, commandSigner)
 	workerErr := make(chan error, 5)
 	maintenanceErr := make(chan error, 1)

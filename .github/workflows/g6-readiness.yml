@@ -1,0 +1,451 @@
+name: G6 Readiness Harness
+
+on:
+  workflow_dispatch:
+    inputs:
+      authority:
+        description: Evidence authority carried by this dispatch
+        type: choice
+        options:
+          - engineering
+          - production_readiness
+        default: engineering
+        required: true
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+# The two failure-domain jobs run concurrently and rendezvous through
+# run-scoped workflow artifacts; each job is bound to the GitHub
+# environment matching the dispatched authority, so a protected
+# production-readiness dispatch requires the environment's reviewers
+# before any evidence is produced.
+jobs:
+  g6-rd-fd-a:
+    name: G6 Readiness Failure Domain A
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    environment:
+      name: ${{ inputs.authority == 'production_readiness' && 'g6-production-readiness' || 'g6-engineering-rehearsal' }}
+    env:
+      RUN_ID: ${{ github.run_id }}-${{ github.run_attempt }}-fd-a
+      FD_ID: fd-a
+      FD_ALIAS: fd-alpha
+      G6_AUTHORITY: ${{ inputs.authority }}
+      G6RD_CANDIDATE_SHA: ${{ github.sha }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - name: Runner preflight
+        run: scripts/ci-preflight.sh
+      - name: G6 readiness policy tests
+        run: scripts/test-g6-readiness-workflow.sh
+      - name: Restore verified Rust toolchain
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: |
+            .cache/downloads
+            .tools
+          key: tooling-v3-g6-rd-fd-a-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'scripts/checksums.txt', 'scripts/bootstrap.sh', 'scripts/env.sh') }}
+      - name: Restore shared npm cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: .cache/npm
+          key: npm-v4-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'web/package-lock.json') }}
+          restore-keys: |
+            npm-v4-${{ runner.os }}-${{ runner.arch }}-
+      - name: Bootstrap pinned Rust toolchain
+        run: scripts/bootstrap.sh native
+      - name: Bootstrap pinned Node and web dependencies
+        run: scripts/bootstrap.sh web
+      - name: Prepare failure domain A
+        run: scripts/g6-readiness-fd-a.sh prepare
+      - name: Publish failure domain A rendezvous
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: g6-rd-tunnel-fd-a-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/g6-readiness-${{ env.RUN_ID }}/outbox/tunnel
+          if-no-files-found: error
+          retention-days: 1
+      - name: Wait for failure domain B rendezvous
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: scripts/real-e2e-artifact.sh wait-download "g6-rd-tunnel-fd-b-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" "${RUNNER_TEMP}/g6-rd-tunnel-fd-b" 1800
+      - name: Import the peer tunnel identities
+        run: scripts/g6-readiness-fd-a.sh import-peer-tunnel-nodes "${RUNNER_TEMP}/g6-rd-tunnel-fd-b"
+      - name: Build failure domain A images and tunnel
+        run: scripts/g6-readiness-fd-a.sh images
+      - name: Start pinned tunnels
+        run: scripts/g6-readiness-fd-a.sh tunnel-up
+      - name: Publish the shared trust rendezvous
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: g6-rd-shared-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/g6-readiness-${{ env.RUN_ID }}/outbox/shared
+          if-no-files-found: error
+          retention-days: 1
+      - name: Start primary, roles, and transportd
+        run: scripts/g6-readiness-fd-a.sh primary-up
+      - name: Publish the primary rendezvous
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: g6-rd-primary-up-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/g6-readiness-${{ env.RUN_ID }}/outbox/primary-up
+          if-no-files-found: error
+          retention-days: 1
+      - name: Bring the managed node fleet up
+        run: scripts/g6-readiness-fd-a.sh agents-up
+      - name: Publish the agent fleet rendezvous
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: g6-rd-agents-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/g6-readiness-${{ env.RUN_ID }}/outbox/agents
+          if-no-files-found: error
+          retention-days: 1
+      - name: Wait for the active load rendezvous
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: scripts/real-e2e-artifact.sh wait-download "g6-rd-load-active-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" "${RUNNER_TEMP}/g6-rd-load-active" 1800
+      - name: Record PITR markers and the base backup
+        run: scripts/g6-readiness-fd-a.sh pitr-prepare
+      - name: Isolate the primary failure domain
+        run: scripts/g6-readiness-fd-a.sh isolate
+      - name: Publish the isolation record
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: g6-rd-isolation-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/g6-readiness-${{ env.RUN_ID }}/outbox/isolation
+          if-no-files-found: error
+          retention-days: 5
+      - name: Wait for the promoted primary
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: scripts/real-e2e-artifact.sh wait-download "g6-rd-new-primary-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" "${RUNNER_TEMP}/g6-rd-new-primary" 1200
+      - name: Probe the fenced former primary after promotion
+        run: scripts/g6-readiness-fd-a.sh dual-primary-probes "${RUNNER_TEMP}/g6-rd-new-primary"
+      - name: Verify the PITR restore point
+        run: scripts/g6-readiness-fd-a.sh pitr-restore
+      - name: Rejoin the former primary as standby
+        run: scripts/g6-readiness-fd-a.sh rejoin
+      - name: Stop relay-a
+        run: scripts/g6-readiness-fd-a.sh relay-a-stop
+      - name: Publish failure domain A scenario readiness
+        run: scripts/g6-readiness-fd-a.sh ready
+      - name: Upload failure domain A scenario readiness
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: g6-rd-fd-a-ready-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/g6-readiness-${{ env.RUN_ID }}/outbox/fd-a-ready
+          if-no-files-found: error
+          retention-days: 5
+      - name: Wait for the final freeze request
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: scripts/real-e2e-artifact.sh wait-download "g6-rd-final-freeze-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" "${RUNNER_TEMP}/g6-rd-final-freeze" 2400
+      - name: Collect failure domain A evidence
+        run: scripts/g6-readiness-fd-a.sh evidence "${RUNNER_TEMP}/g6-rd-final-freeze"
+      - name: Publish failure domain A evidence
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: g6-rd-fd-a-evidence-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/g6-readiness-${{ env.RUN_ID }}/outbox/fd-a-final
+          if-no-files-found: error
+          retention-days: 14
+      - name: Collect redacted failure domain A diagnostics
+        if: always()
+        run: scripts/g6-readiness-fd-a.sh diagnostics
+      - name: Clean failure domain A resources
+        if: always()
+        run: scripts/g6-readiness-fd-a.sh cleanup
+      - name: Upload failure domain A diagnostics
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: g6-rd-fd-a-diagnostics-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/artifacts/g6-readiness-fd-a
+          if-no-files-found: warn
+          retention-days: 5
+
+  g6-rd-fd-b:
+    name: G6 Readiness Failure Domain B
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    environment:
+      name: ${{ inputs.authority == 'production_readiness' && 'g6-production-readiness' || 'g6-engineering-rehearsal' }}
+    env:
+      RUN_ID: ${{ github.run_id }}-${{ github.run_attempt }}-fd-b
+      FD_ID: fd-b
+      FD_ALIAS: fd-beta
+      G6_AUTHORITY: ${{ inputs.authority }}
+      G6RD_CANDIDATE_SHA: ${{ github.sha }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - name: Runner preflight
+        run: scripts/ci-preflight.sh
+      - name: G6 readiness policy tests
+        run: scripts/test-g6-readiness-workflow.sh
+      - name: Restore verified Rust toolchain
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: |
+            .cache/downloads
+            .tools
+          key: tooling-v3-g6-rd-fd-b-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'scripts/checksums.txt', 'scripts/bootstrap.sh', 'scripts/env.sh') }}
+      - name: Restore shared npm cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: .cache/npm
+          key: npm-v4-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'web/package-lock.json') }}
+          restore-keys: |
+            npm-v4-${{ runner.os }}-${{ runner.arch }}-
+      - name: Bootstrap pinned Rust toolchain
+        run: scripts/bootstrap.sh native
+      - name: Bootstrap pinned Node and web dependencies
+        run: scripts/bootstrap.sh web
+      - name: Prepare failure domain B
+        run: scripts/g6-readiness-fd-b.sh prepare
+      - name: Publish failure domain B rendezvous
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: g6-rd-tunnel-fd-b-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/g6-readiness-${{ env.RUN_ID }}/outbox/tunnel
+          if-no-files-found: error
+          retention-days: 1
+      - name: Wait for failure domain A rendezvous
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: scripts/real-e2e-artifact.sh wait-download "g6-rd-tunnel-fd-a-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" "${RUNNER_TEMP}/g6-rd-tunnel-fd-a" 1800
+      - name: Wait for the shared trust rendezvous
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: scripts/real-e2e-artifact.sh wait-download "g6-rd-shared-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" "${RUNNER_TEMP}/g6-rd-shared" 1800
+      - name: Import the peer trust material
+        run: scripts/g6-readiness-fd-b.sh import-peer-secrets "${RUNNER_TEMP}/g6-rd-shared"
+      - name: Import the peer tunnel identities
+        run: scripts/g6-readiness-fd-b.sh import-peer-tunnel-nodes "${RUNNER_TEMP}/g6-rd-tunnel-fd-a"
+      - name: Build failure domain B images and tunnel
+        run: scripts/g6-readiness-fd-b.sh images
+      - name: Start pinned tunnels
+        run: scripts/g6-readiness-fd-b.sh tunnel-up
+      - name: Wait for the peer primary
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: scripts/real-e2e-artifact.sh wait-download "g6-rd-primary-up-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" "${RUNNER_TEMP}/g6-rd-primary-up" 1800
+      - name: Bootstrap the streaming standby
+        run: scripts/g6-readiness-fd-b.sh standby-bootstrap "${RUNNER_TEMP}/g6-rd-primary-up"
+      - name: Start relay-b
+        run: scripts/g6-readiness-fd-b.sh relay-up
+      - name: Wait for the agent fleet rendezvous
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: scripts/real-e2e-artifact.sh wait-download "g6-rd-agents-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" "${RUNNER_TEMP}/g6-rd-agents" 2400
+      - name: Bring the failure domain B agents up
+        run: scripts/g6-readiness-fd-b.sh agents-up "${RUNNER_TEMP}/g6-rd-agents/nodes.tsv"
+      - name: Start the production load
+        run: scripts/g6-readiness-fd-b.sh load-start
+      - name: Publish the active load rendezvous
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: g6-rd-load-active-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/g6-readiness-${{ env.RUN_ID }}/outbox/load-active
+          if-no-files-found: error
+          retention-days: 1
+      - name: Wait for the isolation record
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: scripts/real-e2e-artifact.sh wait-download "g6-rd-isolation-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" "${RUNNER_TEMP}/g6-rd-isolation" 1800
+      - name: Promote the standby under load
+        run: scripts/g6-readiness-fd-b.sh promote "${RUNNER_TEMP}/g6-rd-isolation"
+      - name: Publish the promoted primary
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: g6-rd-new-primary-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/g6-readiness-${{ env.RUN_ID }}/outbox/new-primary
+          if-no-files-found: error
+          retention-days: 5
+      - name: Wait for failure domain A scenario readiness
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: scripts/real-e2e-artifact.sh wait-download "g6-rd-fd-a-ready-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" "${RUNNER_TEMP}/g6-rd-fd-a-ready" 2400
+      - name: Merge the peer control evidence timeline
+        run: scripts/g6-readiness-fd-b.sh merge-peer-evidence "${RUNNER_TEMP}/g6-rd-fd-a-ready"
+      - name: Scheduler leadership failover scenario
+        run: scripts/g6-readiness-fd-b.sh scenario-scheduler
+      - name: Connection owner fencing scenario
+        run: scripts/g6-readiness-fd-b.sh scenario-owner
+      - name: Relay failover scenario
+        run: scripts/g6-readiness-fd-b.sh scenario-relay "${RUNNER_TEMP}/g6-rd-fd-a-ready/relay-a-failed-at"
+      - name: Direct and relay path scenario
+        run: scripts/g6-readiness-fd-b.sh scenario-path
+      - name: Outbox crash window after claim
+        run: scripts/g6-readiness-fd-b.sh outbox-claim-before-send
+      - name: Outbox crash window after transport send
+        run: scripts/g6-readiness-fd-b.sh outbox-send-before-mark
+      - name: Outbox crash window before result commit
+        run: scripts/g6-readiness-fd-b.sh outbox-result-before-commit
+      - name: Run the bounded observation window
+        run: scripts/g6-readiness-fd-b.sh window
+      - name: Collect the frozen evidence state
+        run: scripts/g6-readiness-fd-b.sh evidence-collect
+      - name: Request the final failure-domain freeze
+        run: scripts/g6-readiness-fd-b.sh final-freeze
+      - name: Publish the final freeze request
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: g6-rd-final-freeze-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/g6-readiness-${{ env.RUN_ID }}/outbox/final-freeze
+          if-no-files-found: error
+          retention-days: 1
+      - name: Wait for failure domain A final evidence
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: scripts/real-e2e-artifact.sh wait-download "g6-rd-fd-a-evidence-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" "${RUNNER_TEMP}/g6-rd-fd-a-evidence" 2400
+      - name: Merge failure domain A final journals
+        run: scripts/g6-readiness-fd-b.sh merge-peer-final-evidence "${RUNNER_TEMP}/g6-rd-fd-a-evidence"
+      - name: Build and verify the evidence bundle
+        run: scripts/g6-readiness-fd-b.sh evidence-build "${RUNNER_TEMP}/g6-rd-fd-a-evidence"
+      - name: Publish the evidence bundle
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: g6-rd-evidence-bundle-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/g6-readiness-${{ env.RUN_ID }}/outbox/evidence-bundle
+          if-no-files-found: error
+          retention-days: 14
+      - name: Collect redacted failure domain B diagnostics
+        if: always()
+        run: scripts/g6-readiness-fd-b.sh diagnostics
+      - name: Clean failure domain B resources
+        if: always()
+        run: scripts/g6-readiness-fd-b.sh cleanup
+      - name: Upload failure domain B diagnostics
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: g6-rd-fd-b-diagnostics-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/artifacts/g6-readiness-fd-b
+          if-no-files-found: warn
+          retention-days: 5
+
+  g6-rd-secret-scan:
+    name: G6 Readiness Secret Scan
+    needs: [g6-rd-fd-b]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    environment:
+      name: ${{ inputs.authority == 'production_readiness' && 'g6-production-readiness' || 'g6-engineering-rehearsal' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - name: Runner preflight
+        run: scripts/ci-preflight.sh
+      - name: Restore verified tools
+        id: readiness-security-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: |
+            .cache/downloads
+            .tools
+          key: tooling-v4-security-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'scripts/checksums.txt', 'scripts/bootstrap.sh', 'scripts/env.sh') }}
+      - name: Bootstrap pinned security tools
+        run: scripts/bootstrap.sh security
+      - name: Wait for the evidence bundle
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: scripts/real-e2e-artifact.sh wait-download "g6-rd-evidence-bundle-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" "${RUNNER_TEMP}/g6-rd-evidence-bundle" 900
+      - name: Wait for the failure domain A evidence
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: scripts/real-e2e-artifact.sh wait-download "g6-rd-fd-a-evidence-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" "${RUNNER_TEMP}/g6-rd-fd-a-evidence" 900
+      - name: Scan the published evidence for secrets
+        run: |
+          gitleaks dir --no-banner --redact --no-color "${RUNNER_TEMP}/g6-rd-evidence-bundle"
+          gitleaks dir --no-banner --redact --no-color "${RUNNER_TEMP}/g6-rd-fd-a-evidence"
+
+  g6-rd-verifier:
+    name: G6 Readiness Independent Verifier
+    needs: [g6-rd-fd-b]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    environment:
+      name: ${{ inputs.authority == 'production_readiness' && 'g6-production-readiness' || 'g6-engineering-rehearsal' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - name: Runner preflight
+        run: scripts/ci-preflight.sh
+      - name: Restore verified tools
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: |
+            .cache/downloads
+            .tools
+          key: tooling-v4-contracts-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'scripts/checksums.txt', 'scripts/bootstrap.sh', 'scripts/env.sh') }}
+      - name: Restore shared npm cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: .cache/npm
+          key: npm-v4-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'web/package-lock.json') }}
+          restore-keys: |
+            npm-v4-${{ runner.os }}-${{ runner.arch }}-
+      - name: Bootstrap pinned Node and web dependencies
+        run: scripts/bootstrap.sh contracts
+      - name: Wait for the evidence bundle
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: scripts/real-e2e-artifact.sh wait-download "g6-rd-evidence-bundle-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" "${RUNNER_TEMP}/g6-rd-evidence-bundle" 900
+      - name: Recompute the run-bound environment identity
+        run: |
+          echo "G6RD_EXPECTED_ENVIRONMENT_ID=g6-$(printf '%s' "${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" | openssl dgst -sha256 -r | cut -c1-16)" >>"${GITHUB_ENV}"
+      - name: Independently verify the evidence bundle
+        env:
+          G6_AUTHORITY: ${{ inputs.authority }}
+        run: |
+          set -euo pipefail
+          bundle="${RUNNER_TEMP}/g6-rd-evidence-bundle"
+          output="${RUNNER_TEMP}/g6-rd-verdict"
+          mkdir -p "${output}"
+          status=0
+          node scripts/verify-g6-evidence.mjs \
+            --slo docs/acceptance/g6-slo.yaml \
+            --evidence "${bundle}/evidence.json" \
+            --topology "${bundle}/topology.json" \
+            --release-manifest "${bundle}/release-manifest.json" \
+            --artifact-root "${bundle}" \
+            --expected-authority "${G6_AUTHORITY}" \
+            --expected-environment-id "${G6RD_EXPECTED_ENVIRONMENT_ID}" \
+            --expected-failure-domain-class multi_host \
+            >"${output}/verdict.json" || status=$?
+          jq -e '.schema_version == "ocservia.g6-verdict.v2"' "${output}/verdict.json" >/dev/null
+          # A production-readiness dispatch must earn exit 0; an engineering
+          # rehearsal may stay non-final on the authority fence alone, and
+          # the preserved verdict records exactly that.
+          if [[ "${G6_AUTHORITY}" == production_readiness ]]; then
+            if [[ "${status}" != 0 ]]; then
+              echo "the independent verifier rejected the production-readiness bundle" >&2
+              exit 1
+            fi
+          else
+            echo "engineering rehearsal verifier exit status: ${status}"
+          fi
+          if ! diff -u <(jq -S . "${bundle}/verdict.json") <(jq -S . "${output}/verdict.json"); then
+            echo "the independent verdict differs from the bundle verdict" >&2
+            exit 1
+          fi
+      - name: Publish the independent verdict
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: g6-rd-verdict-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/g6-rd-verdict
+          if-no-files-found: warn
+          retention-days: 14

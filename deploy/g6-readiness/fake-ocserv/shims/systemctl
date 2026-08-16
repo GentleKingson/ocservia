@@ -1,0 +1,10 @@
+#!/bin/sh
+# Read-only systemctl fixture for the G6 readiness managed nodes. The
+# adapter invokes exactly `systemctl show ocserv.service --property=...`;
+# this shim reports the same properties a healthy packaged unit produces.
+if [ "${1:-}" = "show" ] && [ "${2:-}" = "ocserv.service" ]; then
+    printf 'LoadState=loaded\nActiveState=active\nSubState=running\n'
+    exit 0
+fi
+echo "g6 shim: unsupported systemctl invocation: $*" >&2
+exit 1

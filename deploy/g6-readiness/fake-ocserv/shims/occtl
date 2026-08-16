@@ -1,0 +1,16 @@
+#!/bin/sh
+# Read-only occtl fixture for the G6 readiness managed nodes. The adapter
+# invokes exactly the two `--json show` read commands; both answer with an
+# empty list the production parser accepts.
+if [ "${1:-}" = "--json" ] && [ "${2:-}" = "show" ]; then
+    if [ "${3:-}" = "users" ] && [ "$#" -eq 3 ]; then
+        printf '[]'
+        exit 0
+    fi
+    if [ "${3:-}" = "ip" ] && [ "${4:-}" = "bans" ] && [ "$#" -eq 4 ]; then
+        printf '[]'
+        exit 0
+    fi
+fi
+echo "g6 shim: unsupported occtl invocation: $*" >&2
+exit 1

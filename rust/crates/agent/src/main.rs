@@ -26,17 +26,18 @@ use ocservia_contracts::generated::ocserv::platform::agent::v1::{
     AgentEvent, AgentEventType, ArtifactChunk,
     ArtifactConsumeRequest as ArtifactConsumeFinalizeRequest,
     ArtifactConsumeResponse as ArtifactConsumeFinalizeResponse, ArtifactFetchRequest,
-    CommandDeliveryMode, CommandEnvelope, CommandResult, CommandResultState, EnrollRequest,
-    EnrollResponse, GroupObservation, HandshakeResult, IpBanObservation, MetricSample,
-    ObservedSnapshot, PrivdReceiptVersion, PrivilegedResultProof, SealedSecretPurpose,
-    SealedSecretVersion, SealingKeyDescriptorV1, SemanticPayloadHashVersion, SessionHandshake,
-    SessionHandshakeResponse, SessionObservation, TelemetryBatch, TelemetryDropCounters,
-    TelemetryPriority, UserObservation, command_envelope,
+    CommandDeliveryMode, CommandEnvelope, CommandResult, CommandResultState, ConnectionFenceV2,
+    EnrollRequest, EnrollResponse, GroupObservation, HandshakeResult, IpBanObservation,
+    MetricSample, ObservedSnapshot, PrivdReceiptVersion, PrivilegedResultProof,
+    SealedSecretPurpose, SealedSecretVersion, SealingKeyDescriptorV1, SemanticPayloadHashVersion,
+    SessionHandshake, SessionHandshakeResponse, SessionObservation, TelemetryBatch,
+    TelemetryDropCounters, TelemetryPriority, UserObservation, command_envelope,
 };
 use ocservia_contracts::session::{
     READ_ONLY_SESSION_CAPABILITIES, is_read_only_session_capability,
 };
 use prost::Message;
+use rustls_pki_types::pem::PemObject as _;
 use sha2::Digest;
 use uuid::Uuid;
 
@@ -61,34 +62,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         return Ok(());
     }
     let command_keys = load_controller_command_keys(&config)?;
+    let relay_tls_roots = std::sync::Arc::new(load_relay_tls_roots(&config)?);
     let mut journal = Journal::open(&config.journal)?;
     let mut command_executor = CommandExecutor::new(Journal::open(&config.journal)?);
     let privd = PrivdClient::new(config.privd_socket, Duration::from_secs(5))?;
-    let observations = privd.snapshot().await?;
-    let failures = observations
-        .iter()
-        .filter_map(|response| match &response.result {
-            Some(privd_response::Result::Error(error)) => Some(error.detail.as_str()),
-            None => Some("missing privd response result"),
-            _ => None,
-        })
-        .collect::<Vec<_>>();
-    if !failures.is_empty() {
-        return Err(invalid(&format!(
-            "privd read-only snapshot failed: {}",
-            failures.join("; ")
-        ))
-        .into());
-    }
-    tracing::info!(
-        observations = observations.len(),
-        "initial read-only snapshot collected"
-    );
+    // The startup snapshot is a health gate: it fails fast when privd or the
+    // fixed-path fixtures are unhealthy, before any command dispatch begins.
+    require_healthy_snapshot(privd.snapshot().await?)?;
     if config.probe_only {
         return Ok(());
     }
 
     let command_keys = command_keys.expect("non-probe Agent requires command keys");
+    let mut fence_epoch_floor = journal.owner_fence_epoch_floor()?;
+    tracing::info!(
+        fence_epoch_floor,
+        "loaded connection-owner fencing epoch floor"
+    );
+    if let Some(stats_file) = config.stats_file.clone() {
+        ocservia_observability::spawn_runtime_stats_writer(stats_file)?;
+    }
 
     let controller = config
         .controller
@@ -110,12 +103,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let mut attempt = 0_u32;
         let backoff = ocservia_agent::Backoff::default();
         loop {
-            let endpoint = match Endpoint::builder(presets::N0)
-                .secret_key(identity.secret_key().clone())
-                .relay_mode(config.relay_mode.clone())
-                .transport_config(transport.clone())
-                .bind()
-                .await
+            let endpoint = match with_relay_tls_roots(
+                Endpoint::builder(presets::N0),
+                relay_tls_roots.as_ref().clone(),
+            )
+            .secret_key(identity.secret_key().clone())
+            .relay_mode(config.relay_mode.clone())
+            .transport_config(transport.clone())
+            .bind()
+            .await
             {
                 Ok(endpoint) => endpoint,
                 Err(error) => {
@@ -138,6 +134,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                 agent_instance_id,
                 command_keys: &command_keys,
                 sealing_keys: &config.sealing_keys,
+                fence_epoch_floor: &mut fence_epoch_floor,
+                synthetic_barrier_file: config.synthetic_barrier_file.as_deref(),
             };
             match connect_once(&endpoint, EndpointAddr::new(controller), &mut session).await {
                 Ok(()) => attempt = 0,
@@ -156,6 +154,33 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         () = shutdown_signal() => tracing::info!("agent shutdown requested"),
     }
     Ok(())
+}
+
+/// Fails closed unless every read-only privd snapshot probe succeeded, so an
+/// Agent never reports a healthy session against a broken supervisor.
+fn require_healthy_snapshot(
+    observations: Vec<PrivdResponse>,
+) -> Result<Vec<PrivdResponse>, Box<dyn std::error::Error + Send + Sync>> {
+    let failures = observations
+        .iter()
+        .filter_map(|response| match &response.result {
+            Some(privd_response::Result::Error(error)) => Some(error.detail.as_str()),
+            None => Some("missing privd response result"),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    if !failures.is_empty() {
+        return Err(invalid(&format!(
+            "privd read-only snapshot failed: {}",
+            failures.join("; ")
+        ))
+        .into());
+    }
+    tracing::info!(
+        observations = observations.len(),
+        "initial read-only snapshot collected"
+    );
+    Ok(observations)
 }
 
 fn prepare_enrollment_if_requested(config: &Config) -> Result<bool, io::Error> {
@@ -197,11 +222,14 @@ async fn enroll_agent(
         .ok_or_else(|| invalid("--enrollment-environment is required"))?;
     let token = read_enrollment_token(token_file)?;
     let identity = ocservia_agent_identity::Identity::provision(&config.identity_dir, controller)?;
-    let endpoint = Endpoint::builder(presets::N0)
-        .secret_key(identity.secret_key().clone())
-        .relay_mode(config.relay_mode.clone())
-        .bind()
-        .await?;
+    let endpoint = with_relay_tls_roots(
+        Endpoint::builder(presets::N0),
+        load_relay_tls_roots(config)?,
+    )
+    .secret_key(identity.secret_key().clone())
+    .relay_mode(config.relay_mode.clone())
+    .bind()
+    .await?;
     spawn_dedicated_relay_failover(&endpoint, &config.relay_mode);
     let connection = endpoint
         .connect(EndpointAddr::new(controller), ENROLL_ALPN)
@@ -314,6 +342,8 @@ struct SessionContext<'a> {
     agent_instance_id: Uuid,
     command_keys: &'a ControllerCommandKeyring,
     sealing_keys: &'a [SealingKeyDescriptorV1],
+    fence_epoch_floor: &'a mut u64,
+    synthetic_barrier_file: Option<&'a Path>,
 }
 
 struct ActiveSessionAuthority {
@@ -569,6 +599,61 @@ fn unix_seconds() -> Result<i64, Box<dyn std::error::Error + Send + Sync>> {
     )?)
 }
 
+enum FenceDecision {
+    Accepted,
+    RejectedStaleOwnerEpoch,
+}
+
+/// Verifies a fenced command's connection-owner fence against the durable
+/// per-Agent epoch floor. A fence carrying an epoch below the highest epoch
+/// this Agent already accepted belongs to a superseded owner term: the
+/// command is rejected without side effects, and the floor is never lowered.
+#[allow(clippy::too_many_arguments)]
+fn gate_connection_fence(
+    command_keys: &ControllerCommandKeyring,
+    journal: &mut Journal,
+    fence_epoch_floor: &mut u64,
+    node_id: &Uuid,
+    endpoint_id: &EndpointId,
+    fence: &ConnectionFenceV2,
+    command_id: &[u8],
+    now_unix_seconds: i64,
+) -> Result<FenceDecision, Box<dyn std::error::Error + Send + Sync>> {
+    let verified = command_keys
+        .verify_connection_fence_v2(
+            fence,
+            node_id.as_bytes(),
+            endpoint_id.as_bytes(),
+            now_unix_seconds,
+        )
+        .map_err(|error| {
+            tracing::warn!(
+                command_id = %hex::encode(command_id),
+                error = %error,
+                "command connection fence is invalid"
+            );
+            invalid("command connection fence is invalid")
+        })?;
+    if verified.owner_epoch < *fence_epoch_floor {
+        tracing::warn!(
+            command_id = %hex::encode(command_id),
+            owner_epoch = verified.owner_epoch,
+            floor = *fence_epoch_floor,
+            "command from a stale connection-owner epoch rejected"
+        );
+        return Ok(FenceDecision::RejectedStaleOwnerEpoch);
+    }
+    if verified.owner_epoch > *fence_epoch_floor {
+        journal.raise_owner_fence_epoch_floor(verified.owner_epoch)?;
+        *fence_epoch_floor = verified.owner_epoch;
+        tracing::info!(
+            owner_epoch = verified.owner_epoch,
+            "connection-owner fencing epoch floor raised"
+        );
+    }
+    Ok(FenceDecision::Accepted)
+}
+
 #[allow(clippy::too_many_lines)]
 async fn handle_command_stream(
     mut send: iroh::endpoint::SendStream,
@@ -617,6 +702,35 @@ async fn handle_command_stream(
     let envelope = decode_strict_command_envelope(bytes.as_slice())?;
     let now = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH)?;
     let now_unix_seconds = i64::try_from(now.as_secs())?;
+    let stale_owner = match envelope.connection_fence.as_ref() {
+        Some(fence) => matches!(
+            gate_connection_fence(
+                session.command_keys,
+                session.journal,
+                session.fence_epoch_floor,
+                &session.node_id,
+                &session.endpoint_id,
+                fence,
+                &envelope.command_id,
+                now_unix_seconds,
+            )?,
+            FenceDecision::RejectedStaleOwnerEpoch
+        ),
+        None => false,
+    };
+    if stale_owner {
+        let result = rejected_result(&envelope, "stale_owner_epoch", now_unix_seconds);
+        let event = AgentEvent {
+            r#type: AgentEventType::CommandResult.into(),
+            payload: result.encode_to_vec(),
+        };
+        let encoded = event.encode_to_vec();
+        send.write_all(&u32::try_from(encoded.len())?.to_be_bytes())
+            .await?;
+        send.write_all(&encoded).await?;
+        send.finish()?;
+        return Ok(());
+    }
     let context = CommandContext {
         node_id: *session.node_id.as_bytes(),
         authorization_revision: authority.authorization_revision,
@@ -626,6 +740,15 @@ async fn handle_command_stream(
         now_unix_seconds,
         cancelled: false,
     };
+    if matches!(
+        envelope.payload,
+        Some(
+            command_envelope::Payload::SyntheticNoop(_)
+                | command_envelope::Payload::SyntheticEcho(_)
+        )
+    ) {
+        wait_for_synthetic_barrier(session.synthetic_barrier_file).await;
+    }
     let external = matches!(
         envelope.payload,
         Some(
@@ -683,6 +806,15 @@ async fn handle_command_stream(
     send.write_all(&encoded).await?;
     send.finish()?;
     Ok(())
+}
+
+async fn wait_for_synthetic_barrier(path: Option<&Path>) {
+    let Some(path) = path else {
+        return;
+    };
+    while tokio::fs::try_exists(path).await.unwrap_or(true) {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
 }
 
 async fn handle_artifact_stream(
@@ -1555,6 +1687,39 @@ struct Config {
     enrollment_token_file: Option<PathBuf>,
     enrollment_environment: Option<String>,
     sealing_keys: Vec<SealingKeyDescriptorV1>,
+    stats_file: Option<PathBuf>,
+    relay_ca_file: Option<PathBuf>,
+    synthetic_barrier_file: Option<PathBuf>,
+}
+
+/// Loads the PEM relay certificate authority as additional relay TLS roots.
+/// Deployments whose relays chain to public roots leave this unset.
+fn load_relay_tls_roots(
+    config: &Config,
+) -> Result<Vec<rustls_pki_types::CertificateDer<'static>>, io::Error> {
+    let Some(path) = config.relay_ca_file.as_ref() else {
+        return Ok(Vec::new());
+    };
+    let roots: Vec<_> = rustls_pki_types::CertificateDer::pem_file_iter(path)
+        .map_err(|error| invalid(&format!("relay CA file is unreadable: {error}")))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| invalid(&format!("relay CA PEM is invalid: {error}")))?;
+    if roots.is_empty() {
+        return Err(invalid("relay CA file contains no certificates"));
+    }
+    Ok(roots)
+}
+
+/// Applies the optional private relay CA to one endpoint builder.
+fn with_relay_tls_roots(
+    builder: iroh::endpoint::Builder,
+    roots: Vec<rustls_pki_types::CertificateDer<'static>>,
+) -> iroh::endpoint::Builder {
+    if roots.is_empty() {
+        builder
+    } else {
+        builder.ca_tls_config(iroh::tls::CaTlsConfig::default().with_extra_roots(roots))
+    }
 }
 
 fn load_controller_command_keys(
@@ -1591,6 +1756,9 @@ fn parse_args() -> Result<Config, io::Error> {
         enrollment_token_file: None,
         enrollment_environment: None,
         sealing_keys: Vec::new(),
+        stats_file: None,
+        relay_ca_file: None,
+        synthetic_barrier_file: None,
     };
     let mut relay_mode = String::from("default");
     let mut relay_urls = Vec::new();
@@ -1670,6 +1838,22 @@ fn parse_args() -> Result<Config, io::Error> {
             "--relay-url" => relay_urls.push(required(&mut args, "--relay-url")?),
             "--relay-token-file" => {
                 relay_token_file = Some(PathBuf::from(required(&mut args, "--relay-token-file")?));
+            }
+            "--stats-file" => {
+                config.stats_file = Some(PathBuf::from(required(&mut args, "--stats-file")?));
+            }
+            "--relay-ca-file" => {
+                let path = PathBuf::from(required(&mut args, "--relay-ca-file")?);
+                if !path.is_absolute() {
+                    return Err(invalid("--relay-ca-file must be an absolute path"));
+                }
+                config.relay_ca_file = Some(path);
+            }
+            "--synthetic-barrier-file" => {
+                config.synthetic_barrier_file = Some(PathBuf::from(required(
+                    &mut args,
+                    "--synthetic-barrier-file",
+                )?));
             }
             _ => return Err(invalid("unknown agent argument")),
         }
@@ -1764,9 +1948,13 @@ fn validate_absolute_paths(config: &Config, relay_token_file: Option<&Path>) -> 
             .enrollment_token_file
             .as_ref()
             .is_some_and(|path| !path.is_absolute())
+        || config
+            .synthetic_barrier_file
+            .as_ref()
+            .is_some_and(|path| !path.is_absolute())
     {
         return Err(invalid(
-            "identity, Controller command key, and token paths must be absolute",
+            "identity, Controller command key, token, and synthetic barrier paths must be absolute",
         ));
     }
     Ok(())
@@ -1936,15 +2124,20 @@ mod tests {
         ConfigFingerprint, DesiredEffectObservation, GroupList, IpBanList, OcservVersion,
         PrivdRequest, ServiceStatus, SessionList, UserList, read_frame, write_frame,
     };
+    use ocservia_command_authorization::{
+        ConnectionFenceClaimsV2, FENCE_SIGNATURE_VERSION_ED25519_V1, canonical_connection_fence_v2,
+        verification_key_id,
+    };
     use ocservia_contracts::generated::ocserv::platform::agent::v1::{
-        ArtifactGrantV1, ConfigApply, ConfigPlan, SealedSecretV1, SessionGrantV1,
-        SessionGrantVersion, UserPasswordRotate,
+        ArtifactGrantV1, ConfigApply, ConfigPlan, FenceSignatureVersion, SealedSecretV1,
+        SessionGrantV1, SessionGrantVersion, UserPasswordRotate,
     };
     use ocservia_contracts::generated::ocserv::platform::transport::v1::{
         ConsumeArtifactRequest, FetchArtifactRequest, GetNodeConnectionRequest, SendCommandRequest,
         TransportEventType, WatchEventsRequest, transport_service_server::TransportService,
     };
     use ocservia_transportd::{IdentityPolicy, IrohTransportService};
+    use prost_types::Timestamp;
     use std::collections::HashMap;
     use std::os::unix::fs::PermissionsExt as _;
 
@@ -1988,12 +2181,200 @@ mod tests {
             enrollment_token_file: None,
             enrollment_environment: None,
             sealing_keys: test_sealing_keys(),
+            stats_file: None,
+            relay_ca_file: None,
+            synthetic_barrier_file: None,
         }
     }
 
     fn test_command_keyring() -> ControllerCommandKeyring {
         ControllerCommandKeyring::new([SigningKey::from_bytes(&[7; 32]).verifying_key()])
             .expect("test command keyring")
+    }
+
+    #[tokio::test]
+    async fn synthetic_barrier_blocks_until_removed() {
+        let path = PathBuf::from(format!(
+            "/tmp/ocservia-agent-barrier-{}",
+            Uuid::now_v7().simple()
+        ));
+        tokio::fs::write(&path, b"armed")
+            .await
+            .expect("arm synthetic barrier");
+        let waiting_path = path.clone();
+        let waiter = tokio::spawn(async move {
+            wait_for_synthetic_barrier(Some(&waiting_path)).await;
+        });
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        assert!(!waiter.is_finished());
+        tokio::fs::remove_file(&path)
+            .await
+            .expect("release synthetic barrier");
+        tokio::time::timeout(Duration::from_secs(1), waiter)
+            .await
+            .expect("synthetic barrier release timed out")
+            .expect("synthetic barrier task");
+    }
+
+    fn signed_fence(
+        signing: &SigningKey,
+        node_id: &Uuid,
+        endpoint_id: &EndpointId,
+        owner_epoch: u64,
+    ) -> ConnectionFenceV2 {
+        let claims = ConnectionFenceClaimsV2 {
+            signature_version: FENCE_SIGNATURE_VERSION_ED25519_V1,
+            key_id: verification_key_id(&signing.verifying_key()),
+            fence_id: [1; 16],
+            node_id: *node_id.as_bytes(),
+            endpoint_id: *endpoint_id.as_bytes(),
+            owner_instance_id: [2; 16],
+            owner_incarnation: 1,
+            owner_epoch,
+            connection_id: [3; 16],
+            authorization_revision: 1,
+            capabilities: vec!["synthetic.noop".to_owned()],
+            lease_until_seconds: 1_700_000_200,
+            lease_until_nanos: 0,
+            issued_at_seconds: 1_700_000_000,
+            issued_at_nanos: 0,
+            expires_at_seconds: 1_700_000_300,
+            expires_at_nanos: 0,
+        };
+        let canonical = canonical_connection_fence_v2(&claims).expect("canonical connection fence");
+        let signature = signing.sign(&canonical).to_bytes();
+        ConnectionFenceV2 {
+            signature_version: FenceSignatureVersion::Ed25519V1.into(),
+            key_id: claims.key_id,
+            fence_id: claims.fence_id.to_vec(),
+            node_id: claims.node_id.to_vec(),
+            endpoint_id: claims.endpoint_id.to_vec(),
+            owner_instance_id: claims.owner_instance_id.to_vec(),
+            owner_incarnation: claims.owner_incarnation,
+            owner_epoch: claims.owner_epoch,
+            connection_id: claims.connection_id.to_vec(),
+            authorization_revision: claims.authorization_revision,
+            capabilities: claims.capabilities,
+            lease_until: Some(Timestamp {
+                seconds: claims.lease_until_seconds,
+                nanos: 0,
+            }),
+            issued_at: Some(Timestamp {
+                seconds: claims.issued_at_seconds,
+                nanos: 0,
+            }),
+            expires_at: Some(Timestamp {
+                seconds: claims.expires_at_seconds,
+                nanos: 0,
+            }),
+            signature: signature.to_vec(),
+        }
+    }
+
+    #[test]
+    fn gate_rejects_stale_owner_epoch_and_persists_the_floor() {
+        let signing = SigningKey::from_bytes(&[7; 32]);
+        let keyring =
+            ControllerCommandKeyring::new([signing.verifying_key()]).expect("test command keyring");
+        let node_id = Uuid::now_v7();
+        let endpoint_id: EndpointId = iroh::SecretKey::from_bytes(&[9; 32]).public();
+        let other_node = Uuid::now_v7();
+        let directory = std::env::temp_dir()
+            .canonicalize()
+            .expect("tmp")
+            .join(format!("agent-fence-gate-{}", Uuid::now_v7().simple()));
+        std::fs::create_dir_all(&directory).expect("test directory");
+        let journal_path = directory.join("journal.db");
+        let mut journal = Journal::open(&journal_path).expect("journal");
+        let mut floor = 0_u64;
+        let command_id = [5_u8; 16];
+        let now = 1_700_000_050_i64;
+
+        let first = signed_fence(&signing, &node_id, &endpoint_id, 1);
+        let stale_first = signed_fence(&signing, &node_id, &endpoint_id, 1);
+        let second = signed_fence(&signing, &node_id, &endpoint_id, 2);
+        let foreign_node = signed_fence(&signing, &other_node, &endpoint_id, 3);
+
+        assert!(matches!(
+            gate_connection_fence(
+                &keyring,
+                &mut journal,
+                &mut floor,
+                &node_id,
+                &endpoint_id,
+                &first,
+                &command_id,
+                now
+            )
+            .expect("first epoch accepted"),
+            FenceDecision::Accepted
+        ));
+        assert_eq!(floor, 1);
+        // The same epoch remains the current owner's term: legitimate
+        // re-dispatches under the standing fence stay acceptable.
+        assert!(matches!(
+            gate_connection_fence(
+                &keyring,
+                &mut journal,
+                &mut floor,
+                &node_id,
+                &endpoint_id,
+                &stale_first,
+                &command_id,
+                now
+            )
+            .expect("current epoch re-dispatch accepted"),
+            FenceDecision::Accepted
+        ));
+        assert!(matches!(
+            gate_connection_fence(
+                &keyring,
+                &mut journal,
+                &mut floor,
+                &node_id,
+                &endpoint_id,
+                &second,
+                &command_id,
+                now
+            )
+            .expect("successor epoch accepted"),
+            FenceDecision::Accepted
+        ));
+        assert_eq!(floor, 2);
+        assert!(matches!(
+            gate_connection_fence(
+                &keyring,
+                &mut journal,
+                &mut floor,
+                &node_id,
+                &endpoint_id,
+                &stale_first,
+                &command_id,
+                now
+            )
+            .expect("superseded epoch classified"),
+            FenceDecision::RejectedStaleOwnerEpoch
+        ));
+        assert!(
+            gate_connection_fence(
+                &keyring,
+                &mut journal,
+                &mut floor,
+                &node_id,
+                &endpoint_id,
+                &foreign_node,
+                &command_id,
+                now
+            )
+            .is_err()
+        );
+        drop(journal);
+        let reopened = Journal::open(&journal_path).expect("reopen journal");
+        assert_eq!(
+            reopened.owner_fence_epoch_floor().expect("durable floor"),
+            2
+        );
+        std::fs::remove_dir_all(&directory).ok();
     }
 
     #[test]
@@ -2230,6 +2611,7 @@ mod tests {
                     CommandExecutor::new(Journal::open(&journal_path).expect("executor journal"));
                 let command_keys = test_command_keyring();
                 let sealing_keys = test_sealing_keys();
+                let mut fence_epoch_floor = 0_u64;
                 let mut session = SessionContext {
                     node_id,
                     endpoint_id: agent_key.public(),
@@ -2241,6 +2623,8 @@ mod tests {
                     agent_instance_id: Uuid::now_v7(),
                     command_keys: &command_keys,
                     sealing_keys: &sealing_keys,
+                    fence_epoch_floor: &mut fence_epoch_floor,
+                    synthetic_barrier_file: None,
                 };
                 let result = connect_once(&endpoint, controller, &mut session).await;
                 endpoint.close().await;

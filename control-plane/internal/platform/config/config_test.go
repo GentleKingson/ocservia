@@ -209,6 +209,25 @@ func TestRoleValidation(t *testing.T) {
 	}
 }
 
+func TestResultCommitBarrierGuard(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		env  map[string]string
+		ok   bool
+	}{
+		{"development absolute", map[string]string{"OCSERV_DATABASE_URL": "postgres://db/test", "OCSERV_TEST_RESULT_COMMIT_BARRIER_DIR": "/run/g6-result-barrier"}, true},
+		{"relative", map[string]string{"OCSERV_DATABASE_URL": "postgres://db/test", "OCSERV_TEST_RESULT_COMMIT_BARRIER_DIR": "barrier"}, false},
+		{"production", map[string]string{"OCSERV_DATABASE_URL": "postgres://db/test", "OCSERV_ENVIRONMENT": "production", "OCSERV_TEST_RESULT_COMMIT_BARRIER_DIR": "/run/g6-result-barrier"}, false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			_, err := Load(nil, func(key string) (string, bool) { value, ok := test.env[key]; return value, ok })
+			if (err == nil) != test.ok {
+				t.Fatalf("Load() error = %v, want success %v", err, test.ok)
+			}
+		})
+	}
+}
+
 func TestMigrateOnlyRequiresRuntimeRole(t *testing.T) {
 	lookup := func(key string) (string, bool) {
 		values := map[string]string{"OCSERV_DATABASE_URL": "postgres://owner@db/test"}
@@ -250,6 +269,42 @@ func TestLocalSimulatorIsRejectedInProduction(t *testing.T) {
 	}
 	if _, err := Load(nil, lookup); err == nil {
 		t.Fatal("Load() accepted the local simulator in production")
+	}
+}
+
+func TestPprofAddressRequiresNonProductionLoopback(t *testing.T) {
+	base := func(environment, address string) func(string) (string, bool) {
+		values := map[string]string{
+			"OCSERV_DATABASE_URL":  "postgres://db/test",
+			"OCSERV_ENVIRONMENT":   environment,
+			"OCSERV_PPROF_ADDRESS": address,
+		}
+		return func(key string) (string, bool) {
+			value, ok := values[key]
+			return value, ok
+		}
+	}
+	for name, lookup := range map[string]func(string) (string, bool){
+		"production":       base("production", "127.0.0.1:6060"),
+		"non-loopback":     base("development", "0.0.0.0:6060"),
+		"missing port":     base("development", "127.0.0.1"),
+		"unparseable host": base("development", "127.0.0.1:x"),
+	} {
+		if _, err := Load(nil, lookup); err == nil {
+			t.Fatalf("Load() accepted pprof address case %q", name)
+		}
+	}
+	for name, lookup := range map[string]func(string) (string, bool){
+		"loopback ipv4": base("development", "127.0.0.1:6060"),
+		"loopback ipv6": base("test", "[::1]:6060"),
+	} {
+		cfg, err := Load(nil, lookup)
+		if err != nil {
+			t.Fatalf("Load() rejected pprof address case %q: %v", name, err)
+		}
+		if cfg.PprofAddress == "" {
+			t.Fatalf("Load() dropped the pprof address in case %q", name)
+		}
 	}
 }
 
