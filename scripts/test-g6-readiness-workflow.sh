@@ -485,6 +485,10 @@ enqueue_test="$(mktemp -d)"
     echo "synthetic enqueue did not send the API's quoted revision ETag" >&2
     exit 1
   }
+  grep -Fxq '{"kind":"noop"}' "${enqueue_test}/curl.args" || {
+    echo "synthetic enqueue did not send the operations API's noop kind" >&2
+    exit 1
+  }
   jq -e '.status == 202 and .command_id != ""' \
     "${enqueue_test}/enqueue-log.jsonl" >/dev/null
 

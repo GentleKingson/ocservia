@@ -856,7 +856,7 @@ g6rd_enqueue_command() {
     --header 'Content-Type: application/json' \
     --header "Idempotency-Key: ${key}" \
     --header "If-Match: \"revision-${revision}\"" \
-    --data '{"kind":"synthetic_noop"}' \
+    --data '{"kind":"noop"}' \
     --output "${body}" \
     -w '%{http_code} %{time_total}' \
     "http://127.0.0.1:$(g6rd_api_port)/api/v1/nodes/${node_id}/synthetic-commands")"; then
