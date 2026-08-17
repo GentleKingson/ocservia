@@ -367,6 +367,11 @@ phase_promote() {
   g6rd_compose up --detach transportd api scheduler
   g6rd_wait_until 60 1 "era-2 transportd socket" \
     g6rd_compose exec -T transportd test -S /run/ocserv-platform/transportd.sock
+  if ! g6rd_wait_until 15 1 "era-2 transportd controller endpoint" \
+    transport_endpoint_matches; then
+    echo "era-2 transportd controller endpoint mismatch: expected $(<"${G6RD_STATE}/controller-endpoint-id"), observed $(cat "${G6RD_STATE}/era2-controller-endpoint-observed" 2>/dev/null || printf 'not reported')" >&2
+    return 1
+  fi
   g6rd_wait_until 60 2 "era-2 api ready" g6rd_api_ready
   g6rd_now >"${G6RD_STATE}/gateway-transferred-at"
   g6rd_timeline_event gateway_traffic_transferred "${G6RD_STATE}/gateway-transferred-at"
@@ -401,13 +406,28 @@ phase_promote() {
 
 inject_controller_key() {
   local volume="${COMPOSE_PROJECT}_controller-secrets"
-  docker volume inspect "${volume}" >/dev/null 2>&1 || \
-    g6rd_compose up --detach controller-key-init >/dev/null 2>&1 || true
+  if ! docker volume inspect "${volume}" >/dev/null 2>&1; then
+    # Complete initialization before replacing the generated key. A detached
+    # initializer can otherwise race this copy and overwrite the handed-over
+    # controller identity after it has been installed.
+    g6rd_compose run --rm --no-deps controller-key-init >/dev/null
+  fi
   docker run --rm --pull=never \
     -v "${volume}:/secrets" \
     -v "${G6RD_SECRETS}/controller.key:/key:ro" \
     postgres:17.10-bookworm \
     sh -c 'umask 077; cp /key /secrets/controller.key; chown 65532:65532 /secrets/controller.key; chmod 600 /secrets/controller.key; test "$(stat -c "%u:%g:%a:%s" /secrets/controller.key)" = "65532:65532:600:32"'
+}
+
+transport_endpoint_matches() {
+  local expected observed
+  expected="$(<"${G6RD_STATE}/controller-endpoint-id")"
+  observed="$(g6rd_compose logs --no-color transportd 2>/dev/null \
+    | sed -n 's/.*"endpoint_id":"\([0-9a-f]\{64\}\)".*/\1/p' \
+    | tail -1)"
+  [[ "${observed}" =~ ^[0-9a-f]{64}$ ]] || return 1
+  printf '%s\n' "${observed}" >"${G6RD_STATE}/era2-controller-endpoint-observed"
+  [[ "${observed}" == "${expected}" ]]
 }
 
 all_nodes_connected() {

@@ -912,12 +912,28 @@ g6rd_probe_node_connection() {
   local expect_path="${1:?expected path is required}"
   shift
   local node_ids=("${@:?at least one node id is required}")
-  local args=()
+  local args=() timeout_seconds="${G6RD_NODE_CONNECTION_TIMEOUT_SECONDS:-15}"
   local node
+  [[ "${timeout_seconds}" =~ ^[0-9]+$ \
+    && "${timeout_seconds}" -ge 1 && "${timeout_seconds}" -le 30 ]] || {
+    echo "G6RD_NODE_CONNECTION_TIMEOUT_SECONDS must be between 1 and 30" >&2
+    return 1
+  }
   for node in "${node_ids[@]}"; do
     args+=(--node-id "${node}")
   done
-  g6rd_probe node-connection \
+  if [[ -z "${G6_OWNER_PASSWORD:-}" || -z "${G6_DEV_AUTH_TOKEN:-}" \
+    || -z "${G6_FD_ID:-}" ]]; then
+    if ! g6rd_export_common_env; then
+      g6rd_placeholder_env
+    fi
+  fi
+  # A transport socket can accept the probe while an unhealthy transportd
+  # never answers its RPC. Bound the whole Compose invocation so one attempt
+  # cannot consume the caller's complete readiness window.
+  timeout --foreground --signal=TERM --kill-after=5s "${timeout_seconds}s" \
+    docker compose --project-name "${COMPOSE_PROJECT}" --file "${COMPOSE_FILE}" \
+    --profile probe run --rm --no-deps g6-probe node-connection \
     --socket /run/ocserv-platform/transportd.sock \
     --expect-path "${expect_path}" \
     "${args[@]}"

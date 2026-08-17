@@ -230,11 +230,39 @@ grep -q 'g6rd_export_common_env' <<<"${materialize_phase}" || {
 promote_phase="$(sed -n '/^phase_promote() {/,/^}/p' "${FD_B}")"
 transport_init_line="$(grep -n 'g6rd_compose run --rm --no-deps transport-runtime-init' \
   <<<"${promote_phase}" | cut -d: -f1)"
+transport_socket_line="$(grep -n 'era-2 transportd socket' \
+  <<<"${promote_phase}" | cut -d: -f1)"
+endpoint_barrier_line="$(grep -n 'g6rd_wait_until 15 1 "era-2 transportd controller endpoint"' \
+  <<<"${promote_phase}" | cut -d: -f1)"
+reconnect_line="$(grep -n 'agents reconnected to era-2 transportd' \
+  <<<"${promote_phase}" | cut -d: -f1)"
 worker_start_line="$(grep -n 'g6rd_compose up --detach worker' \
   <<<"${promote_phase}" | cut -d: -f1)"
 [[ -n "${transport_init_line}" && -n "${worker_start_line}" \
   && "${transport_init_line}" -lt "${worker_start_line}" ]] || {
   echo "fd-b must initialize transport volumes synchronously before era-2 roles" >&2
+  exit 1
+}
+[[ -n "${transport_socket_line}" && -n "${endpoint_barrier_line}" \
+  && -n "${reconnect_line}" && "${transport_socket_line}" -lt "${endpoint_barrier_line}" \
+  && "${endpoint_barrier_line}" -lt "${reconnect_line}" ]] || {
+  echo "fd-b must verify the live era-2 controller identity before waiting for reconnects" >&2
+  exit 1
+}
+controller_key_phase="$(sed -n '/^inject_controller_key() {/,/^}/p' "${FD_B}")"
+grep -q 'g6rd_compose run --rm --no-deps controller-key-init' \
+  <<<"${controller_key_phase}" || {
+  echo "fd-b must initialize its controller key volume synchronously" >&2
+  exit 1
+}
+if grep -qE 'up --detach controller-key-init|\|\| true' <<<"${controller_key_phase}"; then
+  echo "fd-b controller key initialization must not race or mask its initializer" >&2
+  exit 1
+fi
+node_connection_probe="$(sed -n '/^g6rd_probe_node_connection() {/,/^}/p' "${LIB}")"
+grep -q 'timeout --foreground --signal=TERM --kill-after=5s' \
+  <<<"${node_connection_probe}" || {
+  echo "node connection probes must have a per-attempt hard timeout" >&2
   exit 1
 }
 
