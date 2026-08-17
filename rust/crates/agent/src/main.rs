@@ -401,6 +401,7 @@ fn supported_capabilities() -> Vec<String> {
         .iter()
         .copied()
         .chain([
+            "ocserv.fencing.v2",
             "synthetic.noop",
             "synthetic.echo",
             "command.semantic-hash.v1",
@@ -2156,6 +2157,17 @@ mod tests {
                 public_key_sha256: vec![0x22; 32],
             },
         ]
+    }
+
+    #[test]
+    fn agent_advertises_connection_owner_fencing_once() {
+        assert_eq!(
+            supported_capabilities()
+                .iter()
+                .filter(|capability| capability.as_str() == "ocserv.fencing.v2")
+                .count(),
+            1
+        );
     }
 
     fn test_user_password(ciphertext: Vec<u8>) -> SealedSecretV1 {
