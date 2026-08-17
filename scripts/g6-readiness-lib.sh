@@ -550,12 +550,31 @@ g6rd_node_revision() {
 
 g6rd_mint_enrollment_token() {
   local node_name="${1:?node name is required}" endpoint="${2:?endpoint id is required}"
-  g6rd_api_curl /api/v1/enrollment-tokens -X POST \
+  local response="${G6RD_STATE}/enrollment-token-response-${BASHPID}.json" status token detail
+  if ! status="$(g6rd_api_curl /api/v1/enrollment-tokens -X POST \
     --header 'Content-Type: application/json' \
     --data "$(jq -cn --arg workspace "${G6RD_WORKSPACE_ID:?workspace id is required}" \
       --arg name "${node_name}" --arg endpoint "${endpoint}" \
       '{workspace_id:$workspace,environment:"development",expected_node_name:$name,expected_endpoint_id:$endpoint,reason:"g6 readiness harness"}')" \
-    | jq -er '.token | select(type == "string" and length == 43)'
+    -o "${response}" -w '%{http_code}')"; then
+    rm -f -- "${response}"
+    echo "enrollment token API request failed before an HTTP response" >&2
+    return 1
+  fi
+  if [[ "${status}" != 201 ]]; then
+    detail="$(jq -r 'if type == "object" then (.detail // .title // "unspecified API error") else "invalid JSON response" end' \
+      "${response}" 2>/dev/null || printf 'invalid JSON response')"
+    rm -f -- "${response}"
+    echo "enrollment token API returned HTTP ${status}: ${detail}" >&2
+    return 1
+  fi
+  if ! token="$(jq -er '.token | select(type == "string" and length == 43)' "${response}")"; then
+    rm -f -- "${response}"
+    echo "enrollment token API returned an invalid success document" >&2
+    return 1
+  fi
+  rm -f -- "${response}"
+  printf '%s\n' "${token}"
 }
 
 g6rd_approve_node() {
