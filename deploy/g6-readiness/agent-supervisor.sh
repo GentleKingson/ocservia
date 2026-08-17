@@ -51,20 +51,20 @@ agent_base_args() {
 }
 
 as_agent() {
-    setpriv --reuid 65532 --regid 65532 --clear-groups "$@"
+    exec setpriv --reuid 65532 --regid 65532 --clear-groups "$@"
 }
 
 case "$G6_MODE" in
 prepare)
     require_env G6_CONTROLLER_ENDPOINT_ID G6_RELAY_URL_A G6_RELAY_URL_B
     # shellcheck disable=SC2046  # one flag per line, values contain no spaces
-    exec as_agent /usr/local/bin/ocservia-agent $(agent_base_args) --prepare-enrollment
+    as_agent /usr/local/bin/ocservia-agent $(agent_base_args) --prepare-enrollment
     ;;
 enroll)
     require_env G6_CONTROLLER_ENDPOINT_ID G6_RELAY_URL_A G6_RELAY_URL_B \
         G6_ENROLLMENT_TOKEN_FILE G6_ENROLLMENT_ENVIRONMENT
     # shellcheck disable=SC2046  # one flag per line, values contain no spaces
-    exec as_agent /usr/local/bin/ocservia-agent $(agent_base_args) \
+    as_agent /usr/local/bin/ocservia-agent $(agent_base_args) \
         --enrollment-token-file "$G6_ENROLLMENT_TOKEN_FILE" \
         --enrollment-environment "$G6_ENROLLMENT_ENVIRONMENT"
     ;;
