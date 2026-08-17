@@ -55,6 +55,11 @@ required = %w[postgres migrate api worker scheduler transportd
               controller-key-init transport-runtime-init transport-endpoint-bootstrap
               relay g6-probe]
 reject("G6 readiness compose service set is incomplete") unless (required - services.keys).empty?
+runtime_init = services.fetch("transport-runtime-init")
+runtime_init_command = Array(runtime_init.fetch("command")).join("\n")
+reject("transport runtime init must assign the stats volume to transportd") unless runtime_init_command.include?("chown 65532:65532 /run/transport-stats")
+runtime_init_volumes = Array(runtime_init.fetch("volumes"))
+reject("transport runtime init must mount the transport stats volume") unless runtime_init_volumes.any? { |volume| volume.is_a?(Hash) && volume["source"] == "transport-stats" && volume["target"] == "/run/transport-stats" }
 reject("postgres must receive stop signals directly so fencing leaves a clean data directory") unless services.fetch("postgres").fetch("init") == false
 roles = %w[api worker scheduler].to_h { |role| [role, services.fetch(role).fetch("command").fetch(0)] }
 reject("control-plane roles must be split") unless roles == {"api" => "--role=api", "worker" => "--role=worker", "scheduler" => "--role=scheduler"}
