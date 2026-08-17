@@ -13,7 +13,7 @@
 #   /run/ocservia-agent/identity  persistent endpoint identity (0700)
 #   /run/ocservia-agent/journal   durable command journal and task stats
 #   /run/ocservia-agent/secrets   verification and seal keys (read-only)
-#   /run/ocservia-agent/state     node id, synthetic barrier, and pid files
+#   /run/ocservia-agent/state     harness-owned node id and synthetic barrier
 #   /run/ocservia-privd            root-only persistent attestation state
 set -eu
 

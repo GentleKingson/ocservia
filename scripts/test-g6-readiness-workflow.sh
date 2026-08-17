@@ -268,6 +268,24 @@ for fd_script in "${FD_A}" "${FD_B}"; do
     exit 1
   }
 done
+agent_chown="$(sed -n '/^g6rd_chown_agent_dirs() {/,/^}/p' "${LIB}")"
+grep -q '/chown/identity /chown/journal' <<<"${agent_chown}" || {
+  echo "the Agent uid handoff must retain identity and journal ownership" >&2
+  exit 1
+}
+if grep -q '/chown/state' <<<"${agent_chown}"; then
+  echo "the runner must retain state ownership so it can release synthetic barriers" >&2
+  exit 1
+fi
+prepare_agent_material="$(sed -n '/^g6rd_prepare_agent_material() {/,/^}/p' "${LIB}")"
+grep -q 'chmod 0755 "${dir}/state"' <<<"${prepare_agent_material}" || {
+  echo "the harness-owned Agent state directory must remain traversable by the Agent" >&2
+  exit 1
+}
+grep -q 'chmod 0644 "${dir}/state/synthetic-barrier"' <<<"${prepare_agent_material}" || {
+  echo "the harness-owned synthetic barrier must remain readable by the Agent" >&2
+  exit 1
+}
 start_fleet="$(sed -n '/^g6rd_start_agent_fleet() {/,/^}/p' "${LIB}")"
 grep -q 'controller API endpoint before Agent startup' <<<"${start_fleet}" || {
   echo "Agent startup must verify the controller API before launching a canary" >&2

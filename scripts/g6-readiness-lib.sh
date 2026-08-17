@@ -949,6 +949,8 @@ g6rd_prepare_agent_material() {
   mkdir -p "${dir}/identity" "${dir}/journal" "${dir}/privd" \
     "${dir}/secrets" "${dir}/state"
   : >"${dir}/state/synthetic-barrier"
+  chmod 0755 "${dir}/state"
+  chmod 0644 "${dir}/state/synthetic-barrier"
   chmod 0700 "${dir}/identity" "${dir}/privd" "${dir}/secrets"
   cp -f "${G6RD_SECRETS}/command-verification.pem" \
     "${dir}/secrets/command-verification-agent.pem"
@@ -1095,16 +1097,16 @@ g6rd_prepare_agent_cleanup_dirs() {
   done
 }
 
-# The agent process (uid 65532) owns its identity, journal, and state binds;
-# hand the directories over through a short-lived root container the way the
-# stage-6 harness reclaims PostgreSQL directories.
+# The Agent process (uid 65532) owns the identity and journal binds. Keep the
+# state bind owned by the runner: the Agent only reads its node id and synthetic
+# barrier there, while the harness must remove that barrier during failover.
 g6rd_chown_agent_dirs() {
   local index dir
   for index in $(seq 1 "$(g6rd_agent_count)"); do
     dir="$(g6rd_agent_dir "${index}")"
     [[ -d "${dir}" ]] || continue
     docker run --rm --pull=never -v "${dir}:/chown" postgres:17.10-bookworm \
-      chown -R 65532:65532 /chown/identity /chown/journal /chown/state >/dev/null 2>&1
+      chown -R 65532:65532 /chown/identity /chown/journal >/dev/null 2>&1
   done
 }
 
