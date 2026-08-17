@@ -355,6 +355,15 @@ grep -q 'g6rd_agent_services_needing_restart' <<<"${start_fleet}" || {
   echo "Agent startup recovery must target only observed-unready local services" >&2
   exit 1
 }
+stopped_restart_line="$(grep -n 'g6rd_agent_services_not_running' \
+  <<<"${start_fleet}" | cut -d: -f1)"
+unready_restart_line="$(grep -n 'g6rd_agent_services_needing_restart' \
+  <<<"${start_fleet}" | cut -d: -f1)"
+[[ -n "${stopped_restart_line}" && -n "${unready_restart_line}" \
+  && "${stopped_restart_line}" -lt "${unready_restart_line}" ]] || {
+  echo "Agent recovery must restart exited services before considering controller-unready services" >&2
+  exit 1
+}
 if grep -q 'g6rd_agent_compose restart "${services\[@\]}"' <<<"${start_fleet}"; then
   echo "one unhealthy Agent must not restart the complete local fleet" >&2
   exit 1
@@ -499,8 +508,8 @@ readiness_test="$(mktemp -d)"
 rm -rf "${readiness_test}"
 
 # A global readiness failure may name peer nodes, but this runner owns only
-# the services listed in its local node file. Select a stopped or
-# controller-unready local service without disturbing a healthy peer fleet.
+# the services listed in its local node file. Prefer exited local services;
+# controller lag must not churn healthy late-arriving batch members.
 restart_scope_test="$(mktemp -d)"
 (
   export FD_ID=fd-a
@@ -516,6 +525,17 @@ EOF
   selected="$(g6rd_agent_services_needing_restart "${restart_scope_test}/nodes.tsv")"
   [[ "${selected}" == agent-fd-a-02 ]] || {
     echo "Agent recovery selected the wrong local services: ${selected}" >&2
+    exit 1
+  }
+  g6rd_agent_service_running() { [[ "${1}" != agent-fd-a-01 ]]; }
+  stopped="$(g6rd_agent_services_not_running "${restart_scope_test}/nodes.tsv")"
+  [[ "${stopped}" == agent-fd-a-01 ]] || {
+    echo "Agent recovery did not isolate the exited local service: ${stopped}" >&2
+    exit 1
+  }
+  selected="$(g6rd_agent_services_needing_restart "${restart_scope_test}/nodes.tsv")"
+  [[ "${selected}" == agent-fd-a-02 ]] || {
+    echo "Agent recovery mixed an exited service into controller-unready selection: ${selected}" >&2
     exit 1
   }
 )

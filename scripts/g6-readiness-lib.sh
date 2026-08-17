@@ -1242,9 +1242,22 @@ g6rd_agent_service_running() {
     | grep -Fxq "${service}"
 }
 
-# Select only local services that are stopped or that the last valid
-# controller snapshot did not report ready. A peer's unhealthy node must not
-# make this failure domain restart an otherwise healthy local fleet.
+# Select stopped local services without treating controller propagation delay
+# as a restart signal for newly started, otherwise healthy Agents.
+g6rd_agent_services_not_running() {
+  local nodes_file="${1:?local nodes file is required}"
+  local name _ service
+  while IFS=$'\t' read -r name _; do
+    service="$(g6rd_agent_service_for_name "${name}")" || return 1
+    if ! g6rd_agent_service_running "${service}"; then
+      printf '%s\n' "${service}"
+    fi
+  done <"${nodes_file}"
+}
+
+# Select only running local services that the last valid controller snapshot
+# did not report ready. The caller handles stopped services first, so one
+# transient exit cannot restart healthy late-arriving members of the batch.
 g6rd_agent_services_needing_restart() {
   local nodes_file="${1:?local nodes file is required}"
   local response="${G6RD_STATE}/agent-readiness-last.json"
@@ -1255,7 +1268,6 @@ g6rd_agent_services_needing_restart() {
   while IFS=$'\t' read -r name node_id _; do
     service="$(g6rd_agent_service_for_name "${name}")" || return 1
     if ! g6rd_agent_service_running "${service}"; then
-      printf '%s\n' "${service}"
       continue
     fi
     if ((response_valid)) && ! jq -e --arg id "${node_id}" '
@@ -1333,7 +1345,10 @@ g6rd_start_agent_fleet() {
   if ! g6rd_wait_for_agent_readiness "${local_nodes}" 90 2 \
     "the controller to report the local Agent fleet active" "${services[@]}"; then
     g6rd_capture_agent_logs fleet-before-restart
-    readarray -t restart_services < <(g6rd_agent_services_needing_restart "${local_nodes}")
+    readarray -t restart_services < <(g6rd_agent_services_not_running "${local_nodes}")
+    if ((${#restart_services[@]} == 0)); then
+      readarray -t restart_services < <(g6rd_agent_services_needing_restart "${local_nodes}")
+    fi
     if ((${#restart_services[@]} == 0)); then
       echo "no local Agent restart candidate was identified" >&2
       return 1
