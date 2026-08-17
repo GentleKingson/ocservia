@@ -188,6 +188,10 @@ grep -q '"${node_status}" == active.*"${approval_status}" == consumed' <<<"${app
   echo "pending transport outcomes must reconcile active node and consumed approval state" >&2
   exit 1
 }
+grep -q "jq -er '.trust_status'" <<<"${approve_node}" || {
+  echo "node activation reconciliation must use the node read model trust_status field" >&2
+  exit 1
+}
 grep -qF 'cap_add: [SETUID, SETGID]' "${LIB}" || {
   echo "the root supervisor must retain only the capabilities required to drop to the agent uid" >&2
   exit 1
