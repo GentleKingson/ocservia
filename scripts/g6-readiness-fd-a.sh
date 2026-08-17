@@ -278,15 +278,15 @@ phase_agents_enroll() {
     chmod 0600 "${dir}/secrets/enrollment-token"
     docker run --rm -v "${dir}/secrets:/fix" postgres:17.10-bookworm \
       chown 65532:65532 /fix/enrollment-token >/dev/null 2>&1
-    node_id="$(g6rd_agent_compose run --rm --no-deps \
+    if ! node_id="$(g6rd_agent_compose run --rm --no-deps \
       -e G6_MODE=enroll \
       -e G6_ENROLLMENT_TOKEN_FILE=/run/ocservia-agent/secrets/enrollment-token \
       -e G6_ENROLLMENT_ENVIRONMENT=development \
-      "agent-${FD_ID}-$(printf '%02d' "${index}")" | tail -1)"
-    [[ "${node_id:-}" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$ ]] || {
+      "agent-${FD_ID}-$(printf '%02d' "${index}")" \
+      | g6rd_extract_enrollment_node_id)"; then
       echo "agent ${name} enrollment did not return a UUIDv7 node id" >&2
       return 1
-    }
+    fi
     g6rd_approve_node "${node_id}" || {
       echo "approval failed for node ${node_id}" >&2
       return 1

@@ -752,6 +752,20 @@ g6rd_approve_node() {
   rm -f -- "${response}"
 }
 
+# The agent prints its UUID before closing the Iroh endpoint. Relay shutdown
+# logs may follow on stdout, so select the exact protocol value instead of
+# assuming the final output line is the enrollment result.
+g6rd_extract_enrollment_node_id() {
+  local line node_id=""
+  while IFS= read -r line; do
+    if [[ "${line}" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$ ]]; then
+      node_id="${line}"
+    fi
+  done
+  [[ -n "${node_id}" ]] || return 1
+  printf '%s\n' "${node_id}"
+}
+
 # Issues one synthetic.noop enqueue and appends the raw observation to the
 # harness request log: timestamp, latency, command id, node, and the http
 # outcome. The evidence builder turns this log into http-samples.csv rows
