@@ -83,6 +83,8 @@ jobs:
         run: scripts/g6-readiness-fd-a.sh images
       - name: Start pinned tunnels
         run: scripts/g6-readiness-fd-a.sh tunnel-up
+      - name: Stage the shared trust material
+        run: scripts/g6-readiness-fd-a.sh publish-shared-secrets
       - name: Publish the shared trust rendezvous
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
