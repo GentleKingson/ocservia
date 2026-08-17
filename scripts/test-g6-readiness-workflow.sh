@@ -168,6 +168,10 @@ for fd_script in "${FD_A}" "${FD_B}"; do
     echo "agent enrollment must parse the exact UUIDv7 protocol value" >&2
     exit 1
   }
+  grep -q 'g6rd_wait_for_controller_relay' <<<"${enroll_phase}" || {
+    echo "agent enrollment must verify the controller relay path first" >&2
+    exit 1
+  }
   if grep -q 'G6_MODE=enroll.*tail -1' <<<"${enroll_phase}"; then
     echo "agent enrollment must not assume the UUID is the final log line" >&2
     exit 1
@@ -205,6 +209,42 @@ grep -q 'g6rd_report_agent_readiness' "${LIB}" || {
 # controller response is authoritative only when every expected node is
 # active, online, fresh, and carries a heartbeat.
 source "${LIB}"
+relay_topology_test="$(mktemp -d)"
+export G6RD_AGENTS="${relay_topology_test}/agents"
+export G6RD_AGENT_COMPOSE="${relay_topology_test}/agents.yaml"
+export G6RD_SECRETS="${relay_topology_test}/secrets"
+mkdir -p "${G6RD_SECRETS}"
+: >"${G6RD_SECRETS}/relay-ca.pem"
+
+export FD_ID=fd-a
+export G6_RELAY_URL_A=https://relay-a:3443
+export G6_RELAY_URL_B=https://relay-b:3443
+g6rd_export_relay_urls
+[[ "${G6_RELAY_URL_A}" == https://relay-a:3443 ]]
+[[ "${G6_RELAY_URL_B}" == https://relay-b:3445 ]]
+
+export FD_ID=fd-b
+export G6_RELAY_URL_A=https://relay-a:3443
+export G6_RELAY_URL_B=https://relay-b:3443
+g6rd_write_agent_overlay 1
+[[ "${G6_RELAY_URL_A}" == https://relay-a:3444 ]]
+[[ "${G6_RELAY_URL_B}" == https://relay-b:3443 ]]
+grep -q 'G6_RELAY_URL_A: "https://relay-a:3444"' "${G6RD_AGENT_COMPOSE}"
+grep -q 'G6_RELAY_URL_B: "https://relay-b:3443"' "${G6RD_AGENT_COMPOSE}"
+
+curl() {
+  printf '%s\n' "$@" >"${relay_topology_test}/curl.args"
+}
+g6rd_relay_endpoint_ready "${G6_RELAY_URL_A}"
+grep -qx -- 'relay-a:3444:127.0.0.1' "${relay_topology_test}/curl.args"
+grep -qx -- 'https://relay-a:3444/ping' "${relay_topology_test}/curl.args"
+if g6rd_relay_endpoint_ready https://example.invalid:3444 2>/dev/null; then
+  echo "relay readiness must reject a URL outside the fixed G6 topology" >&2
+  exit 1
+fi
+rm -rf "${relay_topology_test}"
+unset -f curl
+unset FD_ID G6_RELAY_URL_A G6_RELAY_URL_B G6RD_AGENTS G6RD_AGENT_COMPOSE G6RD_SECRETS
 readiness_test="$(mktemp -d)"
 (
   export G6RD_STATE="${readiness_test}"

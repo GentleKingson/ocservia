@@ -260,6 +260,7 @@ phase_agents_enroll() {
   export G6RD_WORKSPACE_ID
   g6rd_export_common_env
   g6rd_write_agent_overlay "${count}"
+  g6rd_wait_for_controller_relay
   mkdir -p "${G6RD_OUTBOX}/agents"
   : >"${G6RD_OUTBOX}/agents/nodes.tsv"
   for index in $(seq 1 "${count}"); do

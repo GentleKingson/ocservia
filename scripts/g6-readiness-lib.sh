@@ -342,6 +342,41 @@ g6rd_relay_url_b() {
   fi
 }
 
+# Relay URLs are topology, not operator input. Recompute them for every phase
+# so a stale shell value cannot collapse both logical relays onto the same
+# local listener after the workflow crosses failure domains.
+g6rd_export_relay_urls() {
+  G6_RELAY_URL_A="$(g6rd_relay_url_a)"
+  G6_RELAY_URL_B="$(g6rd_relay_url_b)"
+  [[ "${G6_RELAY_URL_A}" != "${G6_RELAY_URL_B}" ]] || {
+    echo "G6 relay URLs must remain distinct" >&2
+    return 1
+  }
+  export G6_RELAY_URL_A G6_RELAY_URL_B
+}
+
+g6rd_relay_endpoint_ready() {
+  local url="${1:?relay URL is required}" host port
+  if [[ "${url}" =~ ^https://(relay-[ab]):([0-9]{1,5})/?$ ]]; then
+    host="${BASH_REMATCH[1]}"
+    port="${BASH_REMATCH[2]}"
+  else
+    echo "unexpected G6 relay URL: ${url}" >&2
+    return 2
+  fi
+  ((port >= 1 && port <= 65535)) || return 2
+  curl --fail --silent --show-error --connect-timeout 2 --max-time 4 \
+    --noproxy '*' \
+    --cacert "${G6RD_SECRETS}/relay-ca.pem" \
+    --resolve "${host}:${port}:127.0.0.1" "${url%/}/ping" >/dev/null
+}
+
+g6rd_wait_for_controller_relay() {
+  g6rd_export_relay_urls
+  g6rd_wait_until 30 2 "controller relay path ${G6_RELAY_URL_A}" \
+    g6rd_relay_endpoint_ready "${G6_RELAY_URL_A}"
+}
+
 g6rd_export_common_env() {
   local required
   for required in owner-password app-password replication-password dev-auth-token \
@@ -364,8 +399,7 @@ g6rd_export_common_env() {
   export G6_DB_PORT="${G6_DB_PORT:-5432}"
   export G6_SIGNING_DIR="${G6_SIGNING_DIR:-$(g6rd_materialize_signing_dir)}"
   export G6_RELAY_DIR="${G6_RELAY_DIR:-$(g6rd_materialize_relay_dir)}"
-  export G6_RELAY_URL_A="${G6_RELAY_URL_A:-$(g6rd_relay_url_a)}"
-  export G6_RELAY_URL_B="${G6_RELAY_URL_B:-$(g6rd_relay_url_b)}"
+  g6rd_export_relay_urls
   export G6_API_BIND_PORT="${G6_API_BIND_PORT:-18080}"
   export G6_RELAY_BIND_PORT="${G6_RELAY_BIND_PORT:-3443}"
   local probe_key_dir="${G6RD_WORK}/probe-controller-key"
@@ -394,8 +428,7 @@ g6rd_placeholder_env() {
   export G6_DB_PORT="${G6_DB_PORT:-5432}"
   export G6_SIGNING_DIR="${G6_SIGNING_DIR:-${G6RD_WORK}/signing}"
   export G6_RELAY_DIR="${G6_RELAY_DIR:-${G6RD_WORK}/relay-secrets}"
-  export G6_RELAY_URL_A="${G6_RELAY_URL_A:-https://relay-a:3443}"
-  export G6_RELAY_URL_B="${G6_RELAY_URL_B:-https://relay-b:3443}"
+  g6rd_export_relay_urls
   export G6_API_BIND_PORT="${G6_API_BIND_PORT:-18080}"
   export G6_RELAY_BIND_PORT="${G6_RELAY_BIND_PORT:-3443}"
   export G6_PROBE_CONTROLLER_KEY_DIR="${G6_PROBE_CONTROLLER_KEY_DIR:-${G6RD_WORK}/probe-controller-key}"
@@ -907,6 +940,7 @@ g6rd_prepare_agent_material() {
 
 g6rd_write_agent_overlay() {
   local count="${1:?agent count is required}" index dir name
+  g6rd_export_relay_urls
   {
     echo "services:"
     for index in $(seq 1 "${count}"); do
@@ -1349,6 +1383,8 @@ g6rd_diagnostics() {
   if [[ -s "${G6RD_AGENT_COMPOSE}" ]]; then
     g6rd_agent_compose ps --all >"${ARTIFACT_DIR}/compose-ps-agents-${FD_ID}.txt" 2>&1 || true
     g6rd_agent_compose logs --no-color --tail 200 >"${ARTIFACT_DIR}/agents-${FD_ID}.log" 2>&1 || true
+    grep -E '^[[:space:]]+G6_RELAY_URL_[AB]:' "${G6RD_AGENT_COMPOSE}" \
+      >"${ARTIFACT_DIR}/agent-relay-topology-${FD_ID}.txt" 2>&1 || true
   fi
   g6rd_compose logs --no-color postgres api worker scheduler transportd relay \
     >"${ARTIFACT_DIR}/services-${FD_ID}.log" 2>&1 || true
