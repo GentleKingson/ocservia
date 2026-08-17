@@ -987,7 +987,7 @@ import-peer-secrets) phase_import_peer_secrets "${2:?peer directory}" ;;
 import-peer-tunnel-nodes) import_peer_tunnel_nodes "${2:?peer directory}" ;;
 images) phase_images ;;
 tunnel-up) phase_tunnel_up ;;
-standby-bootstrap) phase_standby_bootstrap ;;
+standby-bootstrap) phase_standby_bootstrap "${2:?primary rendezvous directory}" ;;
 relay-up) phase_relay_up ;;
   agents-up) phase_agents_up "${2:?peer nodes tsv}" ;;
   load-start) phase_load_start ;;

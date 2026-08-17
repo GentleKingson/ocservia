@@ -146,6 +146,10 @@ grep -q 'export OCSERV_CONTROLLER_ENDPOINT_ID="${endpoint}"' "${FD_A}" || {
   exit 1
 }
 standby_bootstrap="$(sed -n '/^phase_standby_bootstrap() {/,/^}/p' "${FD_B}")"
+grep -q 'standby-bootstrap) phase_standby_bootstrap "${2:?primary rendezvous directory}"' "${FD_B}" || {
+  echo "the standby dispatcher must pass the primary rendezvous argument" >&2
+  exit 1
+}
 grep -q 'controller-endpoint-id.*G6RD_STATE.*controller-endpoint-id' <<<"${standby_bootstrap}" || {
   echo "fd-b must import the controller endpoint from the primary rendezvous" >&2
   exit 1
