@@ -116,6 +116,18 @@ if grep -q 'ttl_seconds' <<<"${mint_enrollment_token}"; then
   echo "the harness must use the enrollment API default TTL instead of duplicating its limit" >&2
   exit 1
 fi
+grep -q '"${status}" != 201' <<<"${mint_enrollment_token}" || {
+  echo "enrollment token minting must require the API 201 response contract" >&2
+  exit 1
+}
+grep -q 'enrollment token API returned HTTP.*detail' <<<"${mint_enrollment_token}" || {
+  echo "enrollment token failures must expose safe HTTP problem details" >&2
+  exit 1
+}
+grep -q 'rm -f -- "${response}"' <<<"${mint_enrollment_token}" || {
+  echo "the one-time enrollment response must be removed after parsing" >&2
+  exit 1
+}
 grep -qF 'cap_add: [SETUID, SETGID]' "${LIB}" || {
   echo "the root supervisor must retain only the capabilities required to drop to the agent uid" >&2
   exit 1
