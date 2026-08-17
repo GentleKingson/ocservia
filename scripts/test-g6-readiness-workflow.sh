@@ -156,6 +156,14 @@ grep -q 'X-Approval-ID: ${approval_id}' <<<"${approve_node}" || {
   echo "node activation must consume the independently approved request" >&2
   exit 1
 }
+grep -q 'ocservia.dev/problems/transport-unavailable' <<<"${approve_node}" || {
+  echo "node activation must recognize only the defined pending transport outcome" >&2
+  exit 1
+}
+grep -q '"${node_status}" == active.*"${approval_status}" == consumed' <<<"${approve_node}" || {
+  echo "pending transport outcomes must reconcile active node and consumed approval state" >&2
+  exit 1
+}
 grep -qF 'cap_add: [SETUID, SETGID]' "${LIB}" || {
   echo "the root supervisor must retain only the capabilities required to drop to the agent uid" >&2
   exit 1
@@ -368,6 +376,26 @@ if [[ -z "${fd_a_tunnel_up}" || -z "${fd_a_shared_stage}" || -z "${fd_a_shared_u
   || "${fd_a_tunnel_up}" -ge "${fd_a_shared_stage}" \
   || "${fd_a_shared_stage}" -ge "${fd_a_shared_upload}" ]]; then
   echo "fd-a must stage the shared trust material before publishing its rendezvous" >&2
+  exit 1
+fi
+fd_a_enroll="$(order_of 'fd-a.sh agents-enroll')"
+fd_a_peer_enrolled="$(order_of 'wait-download "g6-rd-agents-enrolled-fd-b')"
+fd_a_trust_reload="$(order_of 'fd-a.sh transport-trust-reload')"
+fd_a_agents_start="$(order_of 'fd-a.sh agents-start')"
+fd_b_enroll="$(order_of 'fd-b.sh agents-enroll')"
+fd_b_peer_trust="$(order_of 'wait-download "g6-rd-trust-ready')"
+fd_b_agents_start="$(order_of 'fd-b.sh agents-start')"
+if [[ -z "${fd_a_enroll}" || -z "${fd_a_peer_enrolled}" || -z "${fd_a_trust_reload}" \
+  || -z "${fd_a_agents_start}" || "${fd_a_enroll}" -ge "${fd_a_peer_enrolled}" \
+  || "${fd_a_peer_enrolled}" -ge "${fd_a_trust_reload}" \
+  || "${fd_a_trust_reload}" -ge "${fd_a_agents_start}" ]]; then
+  echo "fd-a must reload the complete cross-domain trust snapshot before starting agents" >&2
+  exit 1
+fi
+if [[ -z "${fd_b_enroll}" || -z "${fd_b_peer_trust}" || -z "${fd_b_agents_start}" \
+  || "${fd_b_enroll}" -ge "${fd_b_peer_trust}" \
+  || "${fd_b_peer_trust}" -ge "${fd_b_agents_start}" ]]; then
+  echo "fd-b must wait for the complete transport trust snapshot before starting agents" >&2
   exit 1
 fi
 fd_b_load="$(order_of 'fd-b.sh load-start')"

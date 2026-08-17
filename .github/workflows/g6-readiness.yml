@@ -100,8 +100,8 @@ jobs:
           path: ${{ runner.temp }}/g6-readiness-${{ env.RUN_ID }}/outbox/primary-up
           if-no-files-found: error
           retention-days: 1
-      - name: Bring the managed node fleet up
-        run: scripts/g6-readiness-fd-a.sh agents-up
+      - name: Enroll the failure domain A fleet
+        run: scripts/g6-readiness-fd-a.sh agents-enroll
       - name: Publish the agent fleet rendezvous
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
@@ -109,6 +109,21 @@ jobs:
           path: ${{ runner.temp }}/g6-readiness-${{ env.RUN_ID }}/outbox/agents
           if-no-files-found: error
           retention-days: 1
+      - name: Wait for failure domain B enrollment
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: scripts/real-e2e-artifact.sh wait-download "g6-rd-agents-enrolled-fd-b-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" "${RUNNER_TEMP}/g6-rd-agents-enrolled-fd-b" 2400
+      - name: Reload the complete transport trust snapshot
+        run: scripts/g6-readiness-fd-a.sh transport-trust-reload "${RUNNER_TEMP}/g6-rd-agents-enrolled-fd-b"
+      - name: Publish transport trust readiness
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: g6-rd-trust-ready-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/g6-readiness-${{ env.RUN_ID }}/outbox/trust-ready
+          if-no-files-found: error
+          retention-days: 1
+      - name: Start the failure domain A agents
+        run: scripts/g6-readiness-fd-a.sh agents-start
       - name: Wait for the active load rendezvous
         env:
           GITHUB_TOKEN: ${{ github.token }}
@@ -248,8 +263,21 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ github.token }}
         run: scripts/real-e2e-artifact.sh wait-download "g6-rd-agents-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" "${RUNNER_TEMP}/g6-rd-agents" 2400
-      - name: Bring the failure domain B agents up
-        run: scripts/g6-readiness-fd-b.sh agents-up "${RUNNER_TEMP}/g6-rd-agents/nodes.tsv"
+      - name: Enroll the failure domain B fleet
+        run: scripts/g6-readiness-fd-b.sh agents-enroll "${RUNNER_TEMP}/g6-rd-agents/nodes.tsv"
+      - name: Publish failure domain B enrollment
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: g6-rd-agents-enrolled-fd-b-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/g6-readiness-${{ env.RUN_ID }}/outbox/agents-enrolled
+          if-no-files-found: error
+          retention-days: 1
+      - name: Wait for the complete transport trust snapshot
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: scripts/real-e2e-artifact.sh wait-download "g6-rd-trust-ready-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" "${RUNNER_TEMP}/g6-rd-trust-ready" 2400
+      - name: Start the failure domain B agents
+        run: scripts/g6-readiness-fd-b.sh agents-start "${RUNNER_TEMP}/g6-rd-trust-ready"
       - name: Start the production load
         run: scripts/g6-readiness-fd-b.sh load-start
       - name: Publish the active load rendezvous
