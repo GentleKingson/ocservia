@@ -355,7 +355,7 @@ phase_promote() {
 
   # era-2 roles against the local promoted primary; the controller key
   # handover keeps every agent dialing the same controller NodeId
-  inject_controller_key
+  g6rd_install_controller_key
   # FD-B did not run the era-1 controller bootstrap. Initialize its transport
   # socket and statistics volumes synchronously before the first era-2 role
   # can create either volume with root-only default ownership.
@@ -402,21 +402,6 @@ phase_promote() {
   g6rd_timeline_event load_stopped "${G6RD_STATE}/load-stopped-at"
   mkdir -p "${G6RD_OUTBOX}/new-primary"
   cp -f "${G6RD_STATE}/promoted-at" "${G6RD_OUTBOX}/new-primary/promoted-at"
-}
-
-inject_controller_key() {
-  local volume="${COMPOSE_PROJECT}_controller-secrets"
-  if ! docker volume inspect "${volume}" >/dev/null 2>&1; then
-    # Complete initialization before replacing the generated key. A detached
-    # initializer can otherwise race this copy and overwrite the handed-over
-    # controller identity after it has been installed.
-    g6rd_compose run --rm --no-deps controller-key-init >/dev/null
-  fi
-  docker run --rm --pull=never \
-    -v "${volume}:/secrets" \
-    -v "${G6RD_SECRETS}/controller.key:/key:ro" \
-    postgres:17.10-bookworm \
-    sh -c 'umask 077; cp /key /secrets/controller.key; chown 65532:65532 /secrets/controller.key; chmod 600 /secrets/controller.key; test "$(stat -c "%u:%g:%a:%s" /secrets/controller.key)" = "65532:65532:600:32"'
 }
 
 transport_endpoint_matches() {

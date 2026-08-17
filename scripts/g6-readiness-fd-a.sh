@@ -147,7 +147,11 @@ phase_tunnel_up() {
 }
 
 bootstrap_controller_endpoint() {
-  g6rd_compose up --detach controller-key-init transport-runtime-init
+  # The generated host-side key is the single controller identity handed to
+  # fd-b and every Agent. Install it before endpoint bootstrap instead of
+  # allowing the local Compose volume to retain an unrelated generated key.
+  g6rd_install_controller_key
+  g6rd_compose up --detach transport-runtime-init
   g6rd_compose --profile bootstrap up --detach transport-endpoint-bootstrap
   local endpoint
   for _ in {1..60}; do

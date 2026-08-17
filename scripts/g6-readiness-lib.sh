@@ -460,6 +460,25 @@ g6rd_compose() {
   docker compose --project-name "${COMPOSE_PROJECT}" --file "${COMPOSE_FILE}" "$@"
 }
 
+g6rd_install_controller_key() {
+  local volume="${COMPOSE_PROJECT}_controller-secrets"
+  [[ -s "${G6RD_SECRETS}/controller.key" ]] || {
+    echo "controller key source is missing" >&2
+    return 1
+  }
+  if ! docker volume inspect "${volume}" >/dev/null 2>&1; then
+    # Complete initialization before replacing the generated key. A detached
+    # initializer can otherwise race this copy and overwrite the authoritative
+    # controller identity after it has been installed.
+    g6rd_compose run --rm --no-deps controller-key-init >/dev/null
+  fi
+  docker run --rm --pull=never \
+    -v "${volume}:/secrets" \
+    -v "${G6RD_SECRETS}/controller.key:/key:ro" \
+    postgres:17.10-bookworm \
+    sh -c 'umask 077; cp /key /secrets/controller.key; chown 65532:65532 /secrets/controller.key; chmod 600 /secrets/controller.key; test "$(stat -c "%u:%g:%a:%s" /secrets/controller.key)" = "65532:65532:600:32"'
+}
+
 g6rd_agent_compose() {
   [[ -s "${G6RD_AGENT_COMPOSE}" ]] || {
     echo "agent overlay ${G6RD_AGENT_COMPOSE} has not been generated" >&2

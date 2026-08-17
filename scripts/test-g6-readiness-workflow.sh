@@ -249,16 +249,28 @@ worker_start_line="$(grep -n 'g6rd_compose up --detach worker' \
   echo "fd-b must verify the live era-2 controller identity before waiting for reconnects" >&2
   exit 1
 }
-controller_key_phase="$(sed -n '/^inject_controller_key() {/,/^}/p' "${FD_B}")"
+controller_key_phase="$(sed -n '/^g6rd_install_controller_key() {/,/^}/p' "${LIB}")"
 grep -q 'g6rd_compose run --rm --no-deps controller-key-init' \
   <<<"${controller_key_phase}" || {
-  echo "fd-b must initialize its controller key volume synchronously" >&2
+  echo "both failure domains must initialize their controller key volume synchronously" >&2
   exit 1
 }
 if grep -qE 'up --detach controller-key-init|\|\| true' <<<"${controller_key_phase}"; then
-  echo "fd-b controller key initialization must not race or mask its initializer" >&2
+  echo "controller key installation must not race or mask its initializer" >&2
   exit 1
 fi
+fd_a_bootstrap="$(sed -n '/^bootstrap_controller_endpoint() {/,/^}/p' "${FD_A}")"
+fd_a_install_line="$(grep -n 'g6rd_install_controller_key' <<<"${fd_a_bootstrap}" | cut -d: -f1)"
+fd_a_endpoint_line="$(grep -n 'transport-endpoint-bootstrap' <<<"${fd_a_bootstrap}" | head -1 | cut -d: -f1)"
+[[ -n "${fd_a_install_line}" && -n "${fd_a_endpoint_line}" \
+  && "${fd_a_install_line}" -lt "${fd_a_endpoint_line}" ]] || {
+  echo "fd-a must install the shared controller key before endpoint bootstrap" >&2
+  exit 1
+}
+grep -q 'g6rd_install_controller_key' <<<"${promote_phase}" || {
+  echo "fd-b must install the handed-over controller key before promotion" >&2
+  exit 1
+}
 node_connection_probe="$(sed -n '/^g6rd_probe_node_connection() {/,/^}/p' "${LIB}")"
 grep -q 'timeout --foreground --signal=TERM --kill-after=5s' \
   <<<"${node_connection_probe}" || {
