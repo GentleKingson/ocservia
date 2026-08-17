@@ -163,7 +163,12 @@ standby_in_recovery() {
 }
 
 phase_standby_bootstrap() {
+  local peer="${1:?primary rendezvous directory is required}"
   require_file "${G6RD_STATE}/peer-pg-a-node-id"
+  require_file "${peer}/controller-endpoint-id"
+  require_file "${peer}/workspace-id"
+  cp -f "${peer}/controller-endpoint-id" "${G6RD_STATE}/controller-endpoint-id"
+  cp -f "${peer}/workspace-id" "${G6RD_STATE}/workspace-id"
   g6rd_export_common_env
   # The clone runs inside the pinned image against the peer primary through
   # the tunnel, as the postgres user, with the replication slot retained.

@@ -130,6 +130,7 @@ bootstrap_controller_endpoint() {
   g6rd_compose --profile bootstrap stop transport-endpoint-bootstrap
   g6rd_compose --profile bootstrap rm --force transport-endpoint-bootstrap
   printf '%s\n' "${endpoint}" >"${G6RD_STATE}/controller-endpoint-id"
+  export OCSERV_CONTROLLER_ENDPOINT_ID="${endpoint}"
 }
 
 phase_primary_up() {
