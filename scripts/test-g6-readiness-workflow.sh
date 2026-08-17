@@ -227,6 +227,16 @@ grep -q 'g6rd_export_common_env' <<<"${materialize_phase}" || {
   echo "fd-b runtime materialization must validate the complete live environment" >&2
   exit 1
 }
+promote_phase="$(sed -n '/^phase_promote() {/,/^}/p' "${FD_B}")"
+transport_init_line="$(grep -n 'g6rd_compose run --rm --no-deps transport-runtime-init' \
+  <<<"${promote_phase}" | cut -d: -f1)"
+worker_start_line="$(grep -n 'g6rd_compose up --detach worker' \
+  <<<"${promote_phase}" | cut -d: -f1)"
+[[ -n "${transport_init_line}" && -n "${worker_start_line}" \
+  && "${transport_init_line}" -lt "${worker_start_line}" ]] || {
+  echo "fd-b must initialize transport volumes synchronously before era-2 roles" >&2
+  exit 1
+}
 
 # Enrollment and privd must pin the identical SPKI DER fingerprint. Hashing
 # the PEM envelope instead passes enrollment but makes every Agent fail closed

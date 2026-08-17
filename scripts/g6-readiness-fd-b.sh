@@ -356,6 +356,10 @@ phase_promote() {
   # era-2 roles against the local promoted primary; the controller key
   # handover keeps every agent dialing the same controller NodeId
   inject_controller_key
+  # FD-B did not run the era-1 controller bootstrap. Initialize its transport
+  # socket and statistics volumes synchronously before the first era-2 role
+  # can create either volume with root-only default ownership.
+  g6rd_compose run --rm --no-deps transport-runtime-init >/dev/null
   export G6_DB_HOST=postgres G6_DB_PORT=5432
   g6rd_compose up --detach worker
   g6rd_wait_until 60 1 "era-2 worker trust socket" \
