@@ -111,6 +111,11 @@ if grep -Eq 'agent_base_args|G6_RELAY|relay-(mode|url|token|ca)' <<<"${prepare_m
   echo "enrollment preparation must not receive runtime relay configuration" >&2
   exit 1
 fi
+mint_enrollment_token="$(sed -n '/^g6rd_mint_enrollment_token() {/,/^}/p' "${LIB}")"
+if grep -q 'ttl_seconds' <<<"${mint_enrollment_token}"; then
+  echo "the harness must use the enrollment API default TTL instead of duplicating its limit" >&2
+  exit 1
+fi
 grep -qF 'cap_add: [SETUID, SETGID]' "${LIB}" || {
   echo "the root supervisor must retain only the capabilities required to drop to the agent uid" >&2
   exit 1

@@ -545,7 +545,7 @@ g6rd_mint_enrollment_token() {
     --header 'Content-Type: application/json' \
     --data "$(jq -cn --arg workspace "${G6RD_WORKSPACE_ID:?workspace id is required}" \
       --arg name "${node_name}" --arg endpoint "${endpoint}" \
-      '{workspace_id:$workspace,environment:"development",expected_node_name:$name,expected_endpoint_id:$endpoint,ttl_seconds:3600,reason:"g6 readiness harness"}')" \
+      '{workspace_id:$workspace,environment:"development",expected_node_name:$name,expected_endpoint_id:$endpoint,reason:"g6 readiness harness"}')" \
     | jq -er '.token | select(type == "string" and length == 43)'
 }
 
