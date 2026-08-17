@@ -198,6 +198,16 @@ grep -qF 'chown 0:65532 /fix/*; chmod 0755 /fix; chmod 0640 /fix/*' "${LIB}" || 
   echo "agent secret files must be group-readable without locking out enrollment" >&2
   exit 1
 }
+for script in "${FD_A}" "${FD_B}"; do
+  grep -q 'chmod 0600 "${dir}/secrets/enrollment-token"' "${script}" || {
+    echo "one-time enrollment tokens must be process-owned mode 0600" >&2
+    exit 1
+  }
+  if grep -q 'chmod 0644 "${dir}/secrets/enrollment-token"' "${script}"; then
+    echo "one-time enrollment tokens must not be world-readable" >&2
+    exit 1
+  fi
+done
 grep -q '"${dir}/secrets/command-verification-agent.pem"' "${LIB}" || {
   echo "agent material must derive its verification copies from the shared key" >&2
   exit 1

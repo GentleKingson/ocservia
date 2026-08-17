@@ -274,7 +274,7 @@ phase_agents_up() {
     }
     token="$(g6rd_mint_enrollment_token "${name}" "${endpoint}")"
     printf '%s\n' "${token}" >"${dir}/secrets/enrollment-token"
-    chmod 0644 "${dir}/secrets/enrollment-token"
+    chmod 0600 "${dir}/secrets/enrollment-token"
     docker run --rm -v "${dir}/secrets:/fix" postgres:17.10-bookworm \
       chown 65532:65532 /fix/enrollment-token >/dev/null 2>&1
     node_id="$(g6rd_agent_compose run --rm --no-deps \
