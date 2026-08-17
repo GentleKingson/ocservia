@@ -74,6 +74,15 @@ g6rd_now() {
   date -u +%Y-%m-%dT%H:%M:%SZ
 }
 
+g6rd_uuidv7() {
+  local timestamp random
+  timestamp="$(node -p 'Date.now().toString(16).padStart(12,"0")')"
+  random="$(openssl rand -hex 9)"
+  printf '%s-%s-7%s-8%s-%s\n' \
+    "${timestamp:0:8}" "${timestamp:8:4}" \
+    "${random:0:3}" "${random:3:3}" "${random:6:12}"
+}
+
 g6rd_extract_pitr_marker_row() {
   local raw="${1:?psql marker output is required}" row
   row="${raw%%$'\n'*}"

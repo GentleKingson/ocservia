@@ -140,7 +140,7 @@ phase_primary_up() {
   g6rd_wait_until 60 2 "postgres healthy" postgres_healthy
   g6rd_compose run --rm migrate
   local workspace_id
-  workspace_id="$(uuidgen 2>/dev/null || cat /proc/sys/kernel/random/uuid)"
+  workspace_id="$(g6rd_uuidv7)"
   g6rd_psql -c "INSERT INTO workspaces(id,name,slug,created_at,updated_at) \
     VALUES('${workspace_id}','G6 Readiness','g6-readiness',now(),now()) \
     ON CONFLICT (id) DO NOTHING" >/dev/null
