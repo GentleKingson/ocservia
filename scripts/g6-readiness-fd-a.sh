@@ -70,6 +70,7 @@ phase_publish_shared_secrets() {
   cp -f "${G6RD_SECRETS}/seal-user-password-sha256" "${G6RD_OUTBOX}/shared/"
   cp -f "${G6RD_SECRETS}/seal-p12.key" "${G6RD_OUTBOX}/shared/"
   cp -f "${G6RD_SECRETS}/seal-p12-sha256" "${G6RD_OUTBOX}/shared/"
+  cp -f "${G6RD_SECRETS}/controller.key" "${G6RD_OUTBOX}/shared/"
   # tunnel keys so fd-b can serve its own forwards with stable NodeIds
   cp -f "${G6RD_SECRETS}"/tunnel-*.key "${G6RD_OUTBOX}/shared/"
   chmod 0600 "${G6RD_OUTBOX}/shared/"*

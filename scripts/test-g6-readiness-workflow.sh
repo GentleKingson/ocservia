@@ -488,14 +488,15 @@ grep -q 'from "./g6-contract-lib.mjs"' "${BUILDER}" || {
 }
 
 # The era model keeps one controller identity across the promotion: fd-b
-# must import the peer controller key, never generate its own, and fd-a
-# hands it over only through the 1-day primary rendezvous artifact.
+# must import the peer controller key, never generate its own, and fd-a must
+# include it in the short-lived shared-trust handoff consumed before startup.
 grep -q 'fd-b never generates its own controller key' "${FD_B}" || {
   echo "fd-b must document the controller key handover" >&2
   exit 1
 }
-grep -q 'cp -f "${G6RD_SECRETS}/controller.key" "${G6RD_OUTBOX}/primary-up/controller.key"' "${FD_A}" || {
-  echo "fd-a must hand the controller key through the primary rendezvous" >&2
+sed -n '/^phase_publish_shared_secrets() {/,/^}/p' "${FD_A}" \
+  | grep -q 'cp -f "${G6RD_SECRETS}/controller.key" "${G6RD_OUTBOX}/shared/"' || {
+  echo "fd-a must hand the controller key through the shared-trust rendezvous" >&2
   exit 1
 }
 
