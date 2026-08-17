@@ -38,11 +38,16 @@ seal_sha256() {
     cat "$SECRETS/seal-$1-sha256"
 }
 
-agent_base_args() {
+agent_identity_args() {
     printf '%s\n' \
         --identity-dir "$IDENTITY" \
         --journal "$JOURNAL/agent.db" \
-        --controller "$G6_CONTROLLER_ENDPOINT_ID" \
+        --controller "$G6_CONTROLLER_ENDPOINT_ID"
+}
+
+agent_base_args() {
+    agent_identity_args
+    printf '%s\n' \
         --relay-mode custom \
         --relay-url "$G6_RELAY_URL_A" \
         --relay-url "$G6_RELAY_URL_B" \
@@ -56,9 +61,9 @@ as_agent() {
 
 case "$G6_MODE" in
 prepare)
-    require_env G6_CONTROLLER_ENDPOINT_ID G6_RELAY_URL_A G6_RELAY_URL_B
+    require_env G6_CONTROLLER_ENDPOINT_ID
     # shellcheck disable=SC2046  # one flag per line, values contain no spaces
-    as_agent /usr/local/bin/ocservia-agent $(agent_base_args) --prepare-enrollment
+    as_agent /usr/local/bin/ocservia-agent $(agent_identity_args) --prepare-enrollment
     ;;
 enroll)
     require_env G6_CONTROLLER_ENDPOINT_ID G6_RELAY_URL_A G6_RELAY_URL_B \
