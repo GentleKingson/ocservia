@@ -499,6 +499,10 @@ grep -q '\$PRIVD_STATE/attestation.key' "${SUPERVISOR}" || {
   echo "privd must keep its attestation key outside Agent-owned state" >&2
   exit 1
 }
+grep -q 'setpriv --reuid 0 --regid 65532 --clear-groups' "${SUPERVISOR}" || {
+  echo "privd must match the production root:ocserv-agent service principal" >&2
+  exit 1
+}
 grep -q '\$SOCKET_DIR/agent.pid' "${SUPERVISOR}" || {
   echo "the root supervisor must write process metadata to its runtime directory" >&2
   exit 1

@@ -95,7 +95,10 @@ run)
         echo "agent supervisor: node id is missing (enroll first)" >&2
         exit 2
     }
-    /usr/local/bin/ocservia-privd \
+    # Match the production systemd principal split (root:ocserv-agent), so
+    # privd's 0660 AF_UNIX socket is reachable by the unprivileged Agent.
+    setpriv --reuid 0 --regid 65532 --clear-groups \
+      /usr/local/bin/ocservia-privd \
         --socket "$SOCKET_DIR/privd.sock" \
         --agent-uid 65532 \
         --node-id "$NODE_ID" \
