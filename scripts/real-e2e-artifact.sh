@@ -56,12 +56,14 @@ validate_http_budget() {
 github_get() {
   local url="${1:?GitHub API URL is required}"
   local max_time="${2:?request maximum time is required}"
+  local retry_max_time="${REAL_E2E_ARTIFACT_RETRY_TOTAL_SECONDS:-30}"
+  ((retry_max_time <= max_time)) || retry_max_time="${max_time}"
   curl --fail --silent --show-error --location \
     --connect-timeout "${REAL_E2E_ARTIFACT_CONNECT_TIMEOUT_SECONDS:-5}" \
     --max-time "${max_time}" \
     --retry "${REAL_E2E_ARTIFACT_RETRIES:-2}" \
     --retry-delay 1 \
-    --retry-max-time "${REAL_E2E_ARTIFACT_RETRY_TOTAL_SECONDS:-30}" \
+    --retry-max-time "${retry_max_time}" \
     --retry-all-errors \
     --header "Authorization: Bearer ${GITHUB_TOKEN}" \
     --header "Accept: application/vnd.github+json" \
@@ -74,11 +76,15 @@ download_artifact() {
   local archive="${2:?artifact archive path is required}"
   local deadline remaining request_timeout
   local failures=0
-  local max_failures="${REAL_E2E_ARTIFACT_MAX_CONSECUTIVE_ERRORS:-3}"
+  local retry_total="${REAL_E2E_ARTIFACT_DOWNLOAD_RETRY_TOTAL_SECONDS:-90}"
   local poll_interval="${REAL_E2E_ARTIFACT_POLL_INTERVAL_SECONDS:-5}"
-  deadline=$((SECONDS + ${REAL_E2E_ARTIFACT_DOWNLOAD_RETRY_TOTAL_SECONDS:-90}))
+  deadline=$((SECONDS + retry_total))
 
-  while ((failures < max_failures && SECONDS < deadline)); do
+  # The redirect/download service can return a longer 5xx burst than the
+  # metadata APIs. Retry for its dedicated wall-clock budget rather than
+  # reusing the polling error count; the deadline and each curl invocation
+  # remain independently bounded.
+  while ((SECONDS < deadline)); do
     remaining=$((deadline - SECONDS))
     request_timeout="${REAL_E2E_ARTIFACT_DOWNLOAD_TIMEOUT_SECONDS:-120}"
     ((request_timeout <= remaining)) || request_timeout="${remaining}"
@@ -87,14 +93,14 @@ download_artifact() {
       return 0
     fi
     failures=$((failures + 1))
-    if ((failures < max_failures && SECONDS < deadline)); then
+    if ((SECONDS < deadline)); then
       remaining=$((deadline - SECONDS))
       ((poll_interval <= remaining)) || poll_interval="${remaining}"
       ((poll_interval > 0)) && sleep "${poll_interval}"
     fi
   done
 
-  echo "artifact download failed ${failures} consecutive bounded requests" >&2
+  echo "artifact download failed after ${failures} bounded requests within its ${retry_total}-second retry window" >&2
   return 1
 }
 

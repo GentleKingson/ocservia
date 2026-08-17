@@ -135,7 +135,7 @@ case "${url}" in
     [[ ! -s "${RUNNER_TEMP}/download-calls" ]] || calls="$(cat "${RUNNER_TEMP}/download-calls")"
     calls=$((calls + 1))
     printf "%s\\n" "${calls}" >"${RUNNER_TEMP}/download-calls"
-    ((calls > 1)) || exit 22
+    ((calls > 3)) || exit 22
     cat "${RUNNER_TEMP}/artifact.zip"
     ;;
   *) exit 64 ;;
@@ -144,12 +144,40 @@ mkdir -p "${download_transient}/payload"
 printf '%s\n' expected-after-retry >"${download_transient}/payload/candidate-sha"
 (cd "${download_transient}/payload" && zip -q "${download_transient}/artifact.zip" candidate-sha)
 run_wait "${download_transient}"
-[[ "$(<"${download_transient}/download-calls")" == 2 ]] || {
-  echo "artifact download did not use the bounded retry path" >&2
+[[ "$(<"${download_transient}/download-calls")" == 4 ]] || {
+  echo "artifact download did not outlive a transient multi-request 5xx burst" >&2
   exit 1
 }
 [[ "$(<"${download_transient}/destination/candidate-sha")" == expected-after-retry ]] || {
   echo "artifact download did not recover after a transient failure" >&2
+  exit 1
+}
+
+# A persistent redirect/download outage remains bounded by its independent
+# retry-total deadline even though it is allowed to outlive the metadata API
+# consecutive-error budget.
+# shellcheck disable=SC2016  # the generated shim expands these at execution
+download_failure="$(install_curl_shim '
+url="${!#}"
+case "${url}" in
+  *"/artifacts?"*) printf "%s\n" '\''{"artifacts":[{"id":99,"name":"g6-rd-agents-enrolled-fd-b-424242-3","expired":false}]}'\'' ;;
+  *"/jobs?"*) printf "%s\n" '\''{"jobs":[{"name":"G6 Readiness Failure Domain B","status":"in_progress","conclusion":null,"steps":[]}]}'\'' ;;
+  *"/actions/artifacts/99/zip") printf "call\n" >>"${RUNNER_TEMP}/download-calls"; exit 22 ;;
+  *) exit 64 ;;
+esac' download-failure)"
+started="${SECONDS}"
+if REAL_E2E_ARTIFACT_DOWNLOAD_RETRY_TOTAL_SECONDS=2 \
+  run_wait "${download_failure}" >"${download_failure}/stdout" 2>"${download_failure}/stderr"; then
+  echo "artifact wait accepted a persistent download outage" >&2
+  exit 1
+fi
+grep -q 'artifact download failed after .* within its 2-second retry window' \
+  "${download_failure}/stderr" || {
+  echo "artifact download did not report its bounded retry-total deadline" >&2
+  exit 1
+}
+((SECONDS - started < 5)) || {
+  echo "artifact download failure exceeded its retry-total deadline" >&2
   exit 1
 }
 
