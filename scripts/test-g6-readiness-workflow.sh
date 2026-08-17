@@ -64,6 +64,9 @@ reject("postgres must receive stop signals directly so fencing leaves a clean da
 roles = %w[api worker scheduler].to_h { |role| [role, services.fetch(role).fetch("command").fetch(0)] }
 reject("control-plane roles must be split") unless roles == {"api" => "--role=api", "worker" => "--role=worker", "scheduler" => "--role=scheduler"}
 reject("worker must own the trust socket") unless services.fetch("worker").fetch("environment").key?("OCSERV_TRUST_SOCKET")
+role_environment = services.fetch("api").fetch("environment")
+reject("G6 API must enable session authentication") unless role_environment.fetch("OCSERV_SESSION_KEY_FILE") == "/run/ocservia-signing/session-key"
+reject("G6 API must use the test OIDC fixture") unless role_environment.fetch("OCSERV_OIDC_ISSUER") == "https://oidc.g6.invalid"
 reject("postgres must publish only loopback") unless services.fetch("postgres").fetch("ports") == ["127.0.0.1:5432:5432"]
 reject("the API host port must stay on loopback for the tunnel to serve") unless services.fetch("api").fetch("ports").fetch(0).start_with?("127.0.0.1:")
 reject("postgres must run data checksums") unless services.fetch("postgres").fetch("environment").fetch("POSTGRES_INITDB_ARGS").include?("data-checksums")
@@ -112,6 +115,10 @@ if grep -Eq 'agent_base_args|G6_RELAY|relay-(mode|url|token|ca)' <<<"${prepare_m
   exit 1
 fi
 mint_enrollment_token="$(sed -n '/^g6rd_mint_enrollment_token() {/,/^}/p' "${LIB}")"
+grep -q 'g6rd_api_session_curl requester' <<<"${mint_enrollment_token}" || {
+  echo "enrollment token minting must use the authenticated requester session" >&2
+  exit 1
+}
 if grep -q 'ttl_seconds' <<<"${mint_enrollment_token}"; then
   echo "the harness must use the enrollment API default TTL instead of duplicating its limit" >&2
   exit 1
@@ -126,6 +133,19 @@ grep -q 'enrollment token API returned HTTP.*detail' <<<"${mint_enrollment_token
 }
 grep -q 'rm -f -- "${response}"' <<<"${mint_enrollment_token}" || {
   echo "the one-time enrollment response must be removed after parsing" >&2
+  exit 1
+}
+approve_node="$(sed -n '/^g6rd_approve_node() {/,/^}/p' "${LIB}")"
+grep -q 'g6rd_api_session_curl requester /api/v1/approval-requests' <<<"${approve_node}" || {
+  echo "node activation must create a content-bound request as the requester" >&2
+  exit 1
+}
+grep -q 'g6rd_api_session_curl approver' <<<"${approve_node}" || {
+  echo "node activation must use a distinct authenticated approver" >&2
+  exit 1
+}
+grep -q 'X-Approval-ID: ${approval_id}' <<<"${approve_node}" || {
+  echo "node activation must consume the independently approved request" >&2
   exit 1
 }
 grep -qF 'cap_add: [SETUID, SETGID]' "${LIB}" || {
@@ -181,6 +201,15 @@ grep -q 'g6rd_reclaim_directory "${G6RD_WORK}"' "${LIB}" || {
 sed -n '/^phase_publish_shared_secrets() {/,/^}/p' "${FD_A}" \
   | grep -q 'relay-chain.crt' || {
   echo "the shared-trust handoff must include the relay certificate chain" >&2
+  exit 1
+}
+sed -n '/^phase_publish_shared_secrets() {/,/^}/p' "${FD_A}" \
+  | grep -q 'requester-session-cookie approver-identity-id' || {
+  echo "the peer must receive the short-lived authenticated session fixtures" >&2
+  exit 1
+}
+grep -q '^seed_authenticated_approval_fixtures()' "${FD_A}" || {
+  echo "fd-a must seed independent authenticated approval principals" >&2
   exit 1
 }
 grep -q 'relay-ca.pem relay-chain.crt relay-leaf.crt' "${FD_B}" || {

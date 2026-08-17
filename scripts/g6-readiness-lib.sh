@@ -108,10 +108,60 @@ g6rd_secret() {
 
 g6rd_generate_passwords() {
   local name
-  for name in owner-password app-password replication-password dev-auth-token relay-token; do
+  for name in owner-password app-password replication-password dev-auth-token relay-token \
+    oidc-client-secret; do
     [[ -s "${G6RD_SECRETS}/${name}" ]] && continue
     openssl rand -hex 24 >"${G6RD_SECRETS}/${name}"
     chmod 0600 "${G6RD_SECRETS}/${name}"
+  done
+}
+
+g6rd_seal_session_cookie() {
+  local session_id="${1:?session id is required}"
+  local identity_id="${2:?identity id is required}"
+  node --input-type=module - "${G6RD_SECRETS}/session-key" \
+    "${session_id}" "${identity_id}" <<'NODE'
+import { createCipheriv, randomBytes } from "node:crypto";
+import { readFileSync } from "node:fs";
+
+const [, , keyPath, sessionID, identityID] = process.argv;
+const key = Buffer.from(readFileSync(keyPath, "utf8").trim(), "hex");
+const nonce = randomBytes(12);
+const cipher = createCipheriv("aes-256-gcm", key, nonce);
+const plaintext = Buffer.from(JSON.stringify({
+  SessionID: sessionID,
+  IdentityID: identityID,
+  ExpiresAt: new Date(Date.now() + 7 * 60 * 60 * 1000).toISOString(),
+}));
+const ciphertext = Buffer.concat([cipher.update(plaintext), cipher.final()]);
+process.stdout.write(Buffer.concat([
+  nonce,
+  ciphertext,
+  cipher.getAuthTag(),
+]).toString("base64url"));
+NODE
+}
+
+g6rd_generate_auth_fixtures() {
+  [[ -s "${G6RD_SECRETS}/session-key" ]] || {
+    openssl rand -hex 32 >"${G6RD_SECRETS}/session-key"
+    chmod 0600 "${G6RD_SECRETS}/session-key"
+  }
+  local role identity_id session_id
+  for role in requester approver; do
+    if [[ ! -s "${G6RD_SECRETS}/${role}-identity-id" ]]; then
+      g6rd_uuidv7 >"${G6RD_SECRETS}/${role}-identity-id"
+      g6rd_uuidv7 >"${G6RD_SECRETS}/${role}-session-id"
+    fi
+    identity_id="$(g6rd_secret "${role}-identity-id")"
+    session_id="$(g6rd_secret "${role}-session-id")"
+    if [[ ! -s "${G6RD_SECRETS}/${role}-session-cookie" ]]; then
+      g6rd_seal_session_cookie "${session_id}" "${identity_id}" \
+        >"${G6RD_SECRETS}/${role}-session-cookie"
+    fi
+    chmod 0600 "${G6RD_SECRETS}/${role}-identity-id" \
+      "${G6RD_SECRETS}/${role}-session-id" \
+      "${G6RD_SECRETS}/${role}-session-cookie"
   done
 }
 
@@ -177,6 +227,7 @@ g6rd_generate_controller_key() {
 
 g6rd_generate_secrets() {
   g6rd_generate_passwords
+  g6rd_generate_auth_fixtures
   g6rd_generate_relay_tls
   g6rd_generate_command_signing_key
   g6rd_generate_seal_keys
@@ -214,7 +265,9 @@ g6rd_materialize_signing_dir() {
   if [[ -s "${dir}/command-signing.pem" \
     && -s "${dir}/command-verification.pem" \
     && -s "${dir}/command-verification-agent.pem" \
-    && -s "${dir}/command-verification-privd.pem" ]]; then
+    && -s "${dir}/command-verification-privd.pem" \
+    && -s "${dir}/session-key" \
+    && -s "${dir}/oidc-client-secret" ]]; then
     printf '%s\n' "${dir}"
     return 0
   fi
@@ -224,12 +277,15 @@ g6rd_materialize_signing_dir() {
   cp -f "${G6RD_SECRETS}/command-verification.pem" "${dir}/command-verification.pem"
   cp -f "${G6RD_SECRETS}/command-verification.pem" "${dir}/command-verification-agent.pem"
   cp -f "${G6RD_SECRETS}/command-verification.pem" "${dir}/command-verification-privd.pem"
-  chmod 0400 "${dir}/command-signing.pem"
+  cp -f "${G6RD_SECRETS}/session-key" "${dir}/session-key"
+  cp -f "${G6RD_SECRETS}/oidc-client-secret" "${dir}/oidc-client-secret"
+  chmod 0400 "${dir}/command-signing.pem" "${dir}/session-key" \
+    "${dir}/oidc-client-secret"
   chmod 0640 "${dir}/command-verification.pem" \
     "${dir}/command-verification-agent.pem" "${dir}/command-verification-privd.pem"
   docker run --rm --network none --log-driver none \
     -v "${dir}:/fix" postgres:17.10-bookworm sh -c \
-    'chown 0:65532 /fix; chmod 0755 /fix; chown 65534:65532 /fix/command-signing.pem; chown 0:65532 /fix/command-verification.pem /fix/command-verification-agent.pem /fix/command-verification-privd.pem' \
+    'chown 0:65532 /fix; chmod 0755 /fix; chown 65534:65532 /fix/command-signing.pem /fix/session-key /fix/oidc-client-secret; chown 0:65532 /fix/command-verification.pem /fix/command-verification-agent.pem /fix/command-verification-privd.pem' \
     >/dev/null
   printf '%s\n' "${dir}"
 }
@@ -275,6 +331,9 @@ g6rd_relay_url_b() {
 g6rd_export_common_env() {
   local required
   for required in owner-password app-password replication-password dev-auth-token \
+    oidc-client-secret session-key requester-identity-id requester-session-id \
+    requester-session-cookie approver-identity-id approver-session-id \
+    approver-session-cookie \
     command-signing.pem command-verification.pem relay-chain.crt relay-leaf.key \
     relay-ca.pem relay-token; do
     [[ -s "${G6RD_SECRETS}/${required}" ]] || return 1
@@ -539,6 +598,24 @@ g6rd_api_curl() {
     "http://127.0.0.1:${port}${path}"
 }
 
+g6rd_api_session_curl() {
+  local role="${1:?session role is required}"
+  local path="${2:?api path is required}"
+  shift 2
+  local port
+  case "${role}" in
+    requester | approver) ;;
+    *)
+      echo "unknown G6 session role ${role}" >&2
+      return 2
+      ;;
+  esac
+  port="$(g6rd_api_port)"
+  curl --silent --show-error --max-time 10 \
+    --header "Cookie: __Host-ocservia_session=$(g6rd_secret "${role}-session-cookie")" \
+    "$@" "http://127.0.0.1:${port}${path}"
+}
+
 g6rd_api_ready() {
   g6rd_api_curl /readyz -o /dev/null -w '%{http_code}' | grep -q '^200$'
 }
@@ -551,8 +628,9 @@ g6rd_node_revision() {
 g6rd_mint_enrollment_token() {
   local node_name="${1:?node name is required}" endpoint="${2:?endpoint id is required}"
   local response="${G6RD_STATE}/enrollment-token-response-${BASHPID}.json" status token detail
-  if ! status="$(g6rd_api_curl /api/v1/enrollment-tokens -X POST \
+  if ! status="$(g6rd_api_session_curl requester /api/v1/enrollment-tokens -X POST \
     --header 'Content-Type: application/json' \
+    --header "X-Workspace-ID: ${G6RD_WORKSPACE_ID}" \
     --data "$(jq -cn --arg workspace "${G6RD_WORKSPACE_ID:?workspace id is required}" \
       --arg name "${node_name}" --arg endpoint "${endpoint}" \
       '{workspace_id:$workspace,environment:"development",expected_node_name:$name,expected_endpoint_id:$endpoint,reason:"g6 readiness harness"}')" \
@@ -579,9 +657,82 @@ g6rd_mint_enrollment_token() {
 
 g6rd_approve_node() {
   local node_id="${1:?node id is required}"
-  g6rd_api_curl "/api/v1/nodes/${node_id}/approval" -X POST -o /dev/null -w '%{http_code}' \
-    --header 'Content-Type: application/json' --data '{"reason":"g6 readiness harness"}' \
-    | grep -q '^20[0248]$'
+  local capabilities request response status detail approval_id request_hash
+  capabilities="$(G6_DB_PORT="${G6_APPROVAL_DB_PORT:-5432}" g6rd_psql -Atc \
+    "SELECT COALESCE(json_agg(capability ORDER BY capability),'[]'::json)::text \
+     FROM node_capabilities WHERE node_id='${node_id}'")"
+  jq -e 'type == "array" and length > 0 and all(.[]; type == "string" and length > 0)' \
+    <<<"${capabilities}" >/dev/null || {
+    echo "node ${node_id} did not advertise approvable capabilities" >&2
+    return 1
+  }
+  request="$(jq -cn --arg node_id "${node_id}" --argjson capabilities "${capabilities}" \
+    '{action:"node.approve",resource_type:"node",resource_id:$node_id,
+      reason:"approve a G6 readiness managed node",ttl_seconds:600,
+      node_approval:{labels:{},policy:"standard",capabilities:$capabilities}}')"
+  response="${G6RD_STATE}/node-approval-response-${BASHPID}.json"
+  if ! status="$(g6rd_api_session_curl requester /api/v1/approval-requests -X POST \
+    --header 'Content-Type: application/json' \
+    --header "X-Workspace-ID: ${G6RD_WORKSPACE_ID}" \
+    --data "${request}" --output "${response}" --write-out '%{http_code}')"; then
+    rm -f -- "${response}"
+    echo "node approval request failed before an HTTP response" >&2
+    return 1
+  fi
+  if [[ "${status}" != 201 ]]; then
+    detail="$(jq -r 'if type == "object" then (.detail // .title // "unspecified API error") else "invalid JSON response" end' \
+      "${response}" 2>/dev/null || printf 'invalid JSON response')"
+    rm -f -- "${response}"
+    echo "node approval request returned HTTP ${status}: ${detail}" >&2
+    return 1
+  fi
+  if ! approval_id="$(jq -er '.id | select(type == "string")' "${response}")" || \
+    ! request_hash="$(jq -er '.request_hash | select(type == "string" and length == 64)' "${response}")"; then
+    rm -f -- "${response}"
+    echo "node approval request returned an invalid success document" >&2
+    return 1
+  fi
+  rm -f -- "${response}"
+
+  response="${G6RD_STATE}/node-approval-decision-${BASHPID}.json"
+  if ! status="$(g6rd_api_session_curl approver \
+    "/api/v1/approval-requests/${approval_id}:approve" -X POST \
+    --header 'Content-Type: application/json' \
+    --data "$(jq -cn --arg hash "${request_hash}" \
+      '{reason:"independent G6 readiness review",expected_request_hash:$hash}')" \
+    --output "${response}" --write-out '%{http_code}')"; then
+    rm -f -- "${response}"
+    echo "node approval decision failed before an HTTP response" >&2
+    return 1
+  fi
+  if [[ "${status}" != 200 ]]; then
+    detail="$(jq -r 'if type == "object" then (.detail // .title // "unspecified API error") else "invalid JSON response" end' \
+      "${response}" 2>/dev/null || printf 'invalid JSON response')"
+    rm -f -- "${response}"
+    echo "node approval decision returned HTTP ${status}: ${detail}" >&2
+    return 1
+  fi
+  rm -f -- "${response}"
+
+  response="${G6RD_STATE}/node-approval-apply-${BASHPID}.json"
+  if ! status="$(g6rd_api_session_curl requester "/api/v1/nodes/${node_id}/approval" -X POST \
+    --header 'Content-Type: application/json' \
+    --header "X-Approval-ID: ${approval_id}" \
+    --data "$(jq -cn --argjson capabilities "${capabilities}" \
+      '{labels:{},policy:"standard",capabilities:$capabilities,reason:"g6 readiness harness"}')" \
+    --output "${response}" --write-out '%{http_code}')"; then
+    rm -f -- "${response}"
+    echo "node approval apply failed before an HTTP response" >&2
+    return 1
+  fi
+  if [[ "${status}" != 200 ]]; then
+    detail="$(jq -r 'if type == "object" then (.detail // .title // "unspecified API error") else "invalid JSON response" end' \
+      "${response}" 2>/dev/null || printf 'invalid JSON response')"
+    rm -f -- "${response}"
+    echo "node approval apply returned HTTP ${status}: ${detail}" >&2
+    return 1
+  fi
+  rm -f -- "${response}"
 }
 
 # Issues one synthetic.noop enqueue and appends the raw observation to the
@@ -951,7 +1102,8 @@ g6rd_stop_sampler() {
 
 g6rd_strip_secrets_from_artifacts() {
   local leaked=0 secret hit
-  for secret in owner-password app-password replication-password dev-auth-token relay-token; do
+  for secret in owner-password app-password replication-password dev-auth-token relay-token \
+    oidc-client-secret session-key requester-session-cookie approver-session-cookie; do
     [[ -s "${G6RD_SECRETS}/${secret}" ]] || continue
     while IFS= read -r hit; do
       [[ -z "${hit}" ]] && continue
