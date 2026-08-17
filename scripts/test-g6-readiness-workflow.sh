@@ -114,6 +114,14 @@ if grep -Eq 'agent_base_args|G6_RELAY|relay-(mode|url|token|ca)' <<<"${prepare_m
   echo "enrollment preparation must not receive runtime relay configuration" >&2
   exit 1
 fi
+enroll_mode="$(sed -n '/^enroll)/,/^    ;;/p' "${SUPERVISOR}")"
+for argument in user-password-seal-key-id user-password-seal-public-key-sha256 \
+  p12-password-seal-key-id p12-password-seal-public-key-sha256; do
+  grep -q -- "--${argument}" <<<"${enroll_mode}" || {
+    echo "agent enrollment must advertise ${argument}" >&2
+    exit 1
+  }
+done
 mint_enrollment_token="$(sed -n '/^g6rd_mint_enrollment_token() {/,/^}/p' "${LIB}")"
 grep -q 'g6rd_api_session_curl requester' <<<"${mint_enrollment_token}" || {
   echo "enrollment token minting must use the authenticated requester session" >&2

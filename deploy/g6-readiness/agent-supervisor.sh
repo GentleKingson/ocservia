@@ -59,6 +59,13 @@ as_agent() {
     exec setpriv --reuid 65532 --regid 65532 --clear-groups "$@"
 }
 
+load_seal_descriptors() {
+    USER_SEAL_ID=g6-user-seal-v1
+    P12_SEAL_ID=g6-p12-seal-v1
+    USER_SEAL_SHA256="$(seal_sha256 user-password)"
+    P12_SEAL_SHA256="$(seal_sha256 p12)"
+}
+
 case "$G6_MODE" in
 prepare)
     require_env G6_CONTROLLER_ENDPOINT_ID
@@ -68,22 +75,24 @@ prepare)
 enroll)
     require_env G6_CONTROLLER_ENDPOINT_ID G6_RELAY_URL_A G6_RELAY_URL_B \
         G6_ENROLLMENT_TOKEN_FILE G6_ENROLLMENT_ENVIRONMENT
+    load_seal_descriptors
     # shellcheck disable=SC2046  # one flag per line, values contain no spaces
     as_agent /usr/local/bin/ocservia-agent $(agent_base_args) \
         --enrollment-token-file "$G6_ENROLLMENT_TOKEN_FILE" \
-        --enrollment-environment "$G6_ENROLLMENT_ENVIRONMENT"
+        --enrollment-environment "$G6_ENROLLMENT_ENVIRONMENT" \
+        --user-password-seal-key-id "$USER_SEAL_ID" \
+        --user-password-seal-public-key-sha256 "$USER_SEAL_SHA256" \
+        --p12-password-seal-key-id "$P12_SEAL_ID" \
+        --p12-password-seal-public-key-sha256 "$P12_SEAL_SHA256"
     ;;
 run)
     require_env G6_CONTROLLER_ENDPOINT_ID G6_RELAY_URL_A G6_RELAY_URL_B
+    load_seal_descriptors
     NODE_ID="${G6_NODE_ID:-$(cat "$STATE/node-id" 2>/dev/null || true)}"
     [ -n "$NODE_ID" ] || {
         echo "agent supervisor: node id is missing (enroll first)" >&2
         exit 2
     }
-    USER_SEAL_ID=g6-user-seal-v1
-    P12_SEAL_ID=g6-p12-seal-v1
-    USER_SEAL_SHA256="$(seal_sha256 user-password)"
-    P12_SEAL_SHA256="$(seal_sha256 p12)"
     /usr/local/bin/ocservia-privd \
         --socket "$SOCKET_DIR/privd.sock" \
         --agent-uid 65532 \
