@@ -17,8 +17,8 @@ permissions:
   actions: read
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: false
+  group: ${{ github.workflow }}-${{ github.ref }}-${{ inputs.authority }}
+  cancel-in-progress: true
 
 # The two failure-domain jobs run concurrently and rendezvous through
 # run-scoped workflow artifacts. Each job is bound to the GitHub environment
@@ -45,6 +45,8 @@ jobs:
         run: scripts/ci-preflight.sh
       - name: G6 readiness policy tests
         run: scripts/test-g6-readiness-workflow.sh
+      - name: G6 readiness hang-guard tests
+        run: scripts/test-g6-readiness-hang-guards.sh
       - name: Restore verified Rust toolchain
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
@@ -64,6 +66,7 @@ jobs:
       - name: Bootstrap pinned Node and web dependencies
         run: scripts/bootstrap.sh web
       - name: Prepare failure domain A
+        timeout-minutes: 10
         run: scripts/g6-readiness-fd-a.sh prepare
       - name: Publish failure domain A rendezvous
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
@@ -79,8 +82,10 @@ jobs:
       - name: Import the peer tunnel identities
         run: scripts/g6-readiness-fd-a.sh import-peer-tunnel-nodes "${RUNNER_TEMP}/g6-rd-tunnel-fd-b"
       - name: Build failure domain A images and tunnel
+        timeout-minutes: 35
         run: scripts/g6-readiness-fd-a.sh images
       - name: Start pinned tunnels
+        timeout-minutes: 5
         run: scripts/g6-readiness-fd-a.sh tunnel-up
       - name: Stage the shared trust material
         run: scripts/g6-readiness-fd-a.sh publish-shared-secrets
@@ -92,6 +97,7 @@ jobs:
           if-no-files-found: error
           retention-days: 1
       - name: Start primary, roles, and transportd
+        timeout-minutes: 15
         run: scripts/g6-readiness-fd-a.sh primary-up
       - name: Publish the primary rendezvous
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
@@ -101,6 +107,7 @@ jobs:
           if-no-files-found: error
           retention-days: 1
       - name: Enroll the failure domain A fleet
+        timeout-minutes: 25
         run: scripts/g6-readiness-fd-a.sh agents-enroll
       - name: Publish the agent fleet rendezvous
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
@@ -114,6 +121,7 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
         run: scripts/real-e2e-artifact.sh wait-download "g6-rd-agents-enrolled-fd-b-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" "${RUNNER_TEMP}/g6-rd-agents-enrolled-fd-b" 2400
       - name: Reload the complete transport trust snapshot
+        timeout-minutes: 10
         run: scripts/g6-readiness-fd-a.sh transport-trust-reload "${RUNNER_TEMP}/g6-rd-agents-enrolled-fd-b"
       - name: Publish transport trust readiness
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
@@ -123,14 +131,17 @@ jobs:
           if-no-files-found: error
           retention-days: 1
       - name: Start the failure domain A agents
+        timeout-minutes: 10
         run: scripts/g6-readiness-fd-a.sh agents-start
       - name: Wait for the active load rendezvous
         env:
           GITHUB_TOKEN: ${{ github.token }}
         run: scripts/real-e2e-artifact.sh wait-download "g6-rd-load-active-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" "${RUNNER_TEMP}/g6-rd-load-active" 1800
       - name: Record PITR markers and the base backup
+        timeout-minutes: 15
         run: scripts/g6-readiness-fd-a.sh pitr-prepare
       - name: Isolate the primary failure domain
+        timeout-minutes: 10
         run: scripts/g6-readiness-fd-a.sh isolate
       - name: Publish the isolation record
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
@@ -144,12 +155,16 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
         run: scripts/real-e2e-artifact.sh wait-download "g6-rd-new-primary-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" "${RUNNER_TEMP}/g6-rd-new-primary" 1200
       - name: Probe the fenced former primary after promotion
+        timeout-minutes: 10
         run: scripts/g6-readiness-fd-a.sh dual-primary-probes "${RUNNER_TEMP}/g6-rd-new-primary"
       - name: Verify the PITR restore point
+        timeout-minutes: 15
         run: scripts/g6-readiness-fd-a.sh pitr-restore
       - name: Rejoin the former primary as standby
+        timeout-minutes: 15
         run: scripts/g6-readiness-fd-a.sh rejoin
       - name: Stop relay-a
+        timeout-minutes: 5
         run: scripts/g6-readiness-fd-a.sh relay-a-stop
       - name: Publish failure domain A scenario readiness
         run: scripts/g6-readiness-fd-a.sh ready
@@ -165,6 +180,7 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
         run: scripts/real-e2e-artifact.sh wait-download "g6-rd-final-freeze-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" "${RUNNER_TEMP}/g6-rd-final-freeze" 2400
       - name: Collect failure domain A evidence
+        timeout-minutes: 15
         run: scripts/g6-readiness-fd-a.sh evidence "${RUNNER_TEMP}/g6-rd-final-freeze"
       - name: Publish failure domain A evidence
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
@@ -175,12 +191,18 @@ jobs:
           retention-days: 14
       - name: Collect redacted failure domain A diagnostics
         if: always()
+        timeout-minutes: 5
+        continue-on-error: true
         run: scripts/g6-readiness-fd-a.sh diagnostics
       - name: Clean failure domain A resources
         if: always()
+        timeout-minutes: 7
+        continue-on-error: true
         run: scripts/g6-readiness-fd-a.sh cleanup
       - name: Upload failure domain A diagnostics
         if: always()
+        timeout-minutes: 5
+        continue-on-error: true
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: g6-rd-fd-a-diagnostics-${{ github.run_id }}-${{ github.run_attempt }}
@@ -208,6 +230,8 @@ jobs:
         run: scripts/ci-preflight.sh
       - name: G6 readiness policy tests
         run: scripts/test-g6-readiness-workflow.sh
+      - name: G6 readiness hang-guard tests
+        run: scripts/test-g6-readiness-hang-guards.sh
       - name: Restore verified Rust toolchain
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
@@ -227,6 +251,7 @@ jobs:
       - name: Bootstrap pinned Node and web dependencies
         run: scripts/bootstrap.sh web
       - name: Prepare failure domain B
+        timeout-minutes: 10
         run: scripts/g6-readiness-fd-b.sh prepare
       - name: Publish failure domain B rendezvous
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
@@ -248,22 +273,27 @@ jobs:
       - name: Import the peer tunnel identities
         run: scripts/g6-readiness-fd-b.sh import-peer-tunnel-nodes "${RUNNER_TEMP}/g6-rd-tunnel-fd-a"
       - name: Build failure domain B images and tunnel
+        timeout-minutes: 35
         run: scripts/g6-readiness-fd-b.sh images
+      - name: Start relay-b
+        timeout-minutes: 5
+        run: scripts/g6-readiness-fd-b.sh relay-up
       - name: Start pinned tunnels
+        timeout-minutes: 5
         run: scripts/g6-readiness-fd-b.sh tunnel-up
       - name: Wait for the peer primary
         env:
           GITHUB_TOKEN: ${{ github.token }}
         run: scripts/real-e2e-artifact.sh wait-download "g6-rd-primary-up-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" "${RUNNER_TEMP}/g6-rd-primary-up" 1800
       - name: Bootstrap the streaming standby
+        timeout-minutes: 15
         run: scripts/g6-readiness-fd-b.sh standby-bootstrap "${RUNNER_TEMP}/g6-rd-primary-up"
-      - name: Start relay-b
-        run: scripts/g6-readiness-fd-b.sh relay-up
       - name: Wait for the agent fleet rendezvous
         env:
           GITHUB_TOKEN: ${{ github.token }}
         run: scripts/real-e2e-artifact.sh wait-download "g6-rd-agents-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" "${RUNNER_TEMP}/g6-rd-agents" 2400
       - name: Enroll the failure domain B fleet
+        timeout-minutes: 25
         run: scripts/g6-readiness-fd-b.sh agents-enroll "${RUNNER_TEMP}/g6-rd-agents/nodes.tsv"
       - name: Publish failure domain B enrollment
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
@@ -277,8 +307,10 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
         run: scripts/real-e2e-artifact.sh wait-download "g6-rd-trust-ready-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" "${RUNNER_TEMP}/g6-rd-trust-ready" 2400
       - name: Start the failure domain B agents
+        timeout-minutes: 10
         run: scripts/g6-readiness-fd-b.sh agents-start "${RUNNER_TEMP}/g6-rd-trust-ready"
       - name: Start the production load
+        timeout-minutes: 10
         run: scripts/g6-readiness-fd-b.sh load-start
       - name: Publish the active load rendezvous
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
@@ -292,6 +324,7 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
         run: scripts/real-e2e-artifact.sh wait-download "g6-rd-isolation-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" "${RUNNER_TEMP}/g6-rd-isolation" 1800
       - name: Promote the standby under load
+        timeout-minutes: 15
         run: scripts/g6-readiness-fd-b.sh promote "${RUNNER_TEMP}/g6-rd-isolation"
       - name: Publish the promoted primary
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
@@ -305,26 +338,37 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
         run: scripts/real-e2e-artifact.sh wait-download "g6-rd-fd-a-ready-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" "${RUNNER_TEMP}/g6-rd-fd-a-ready" 2400
       - name: Merge the peer control evidence timeline
+        timeout-minutes: 5
         run: scripts/g6-readiness-fd-b.sh merge-peer-evidence "${RUNNER_TEMP}/g6-rd-fd-a-ready"
       - name: Scheduler leadership failover scenario
+        timeout-minutes: 10
         run: scripts/g6-readiness-fd-b.sh scenario-scheduler
       - name: Connection owner fencing scenario
+        timeout-minutes: 10
         run: scripts/g6-readiness-fd-b.sh scenario-owner
       - name: Relay failover scenario
+        timeout-minutes: 10
         run: scripts/g6-readiness-fd-b.sh scenario-relay "${RUNNER_TEMP}/g6-rd-fd-a-ready/relay-a-failed-at"
       - name: Direct and relay path scenario
+        timeout-minutes: 10
         run: scripts/g6-readiness-fd-b.sh scenario-path
       - name: Outbox crash window after claim
+        timeout-minutes: 10
         run: scripts/g6-readiness-fd-b.sh outbox-claim-before-send
       - name: Outbox crash window after transport send
+        timeout-minutes: 10
         run: scripts/g6-readiness-fd-b.sh outbox-send-before-mark
       - name: Outbox crash window before result commit
+        timeout-minutes: 10
         run: scripts/g6-readiness-fd-b.sh outbox-result-before-commit
       - name: Run the bounded observation window
+        timeout-minutes: 10
         run: scripts/g6-readiness-fd-b.sh window
       - name: Collect the frozen evidence state
+        timeout-minutes: 10
         run: scripts/g6-readiness-fd-b.sh evidence-collect
       - name: Request the final failure-domain freeze
+        timeout-minutes: 5
         run: scripts/g6-readiness-fd-b.sh final-freeze
       - name: Publish the final freeze request
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
@@ -338,8 +382,10 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
         run: scripts/real-e2e-artifact.sh wait-download "g6-rd-fd-a-evidence-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" "${RUNNER_TEMP}/g6-rd-fd-a-evidence" 2400
       - name: Merge failure domain A final journals
+        timeout-minutes: 10
         run: scripts/g6-readiness-fd-b.sh merge-peer-final-evidence "${RUNNER_TEMP}/g6-rd-fd-a-evidence"
       - name: Build and verify the evidence bundle
+        timeout-minutes: 15
         run: scripts/g6-readiness-fd-b.sh evidence-build "${RUNNER_TEMP}/g6-rd-fd-a-evidence"
       - name: Publish the evidence bundle
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
@@ -350,12 +396,18 @@ jobs:
           retention-days: 14
       - name: Collect redacted failure domain B diagnostics
         if: always()
+        timeout-minutes: 5
+        continue-on-error: true
         run: scripts/g6-readiness-fd-b.sh diagnostics
       - name: Clean failure domain B resources
         if: always()
+        timeout-minutes: 7
+        continue-on-error: true
         run: scripts/g6-readiness-fd-b.sh cleanup
       - name: Upload failure domain B diagnostics
         if: always()
+        timeout-minutes: 5
+        continue-on-error: true
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: g6-rd-fd-b-diagnostics-${{ github.run_id }}-${{ github.run_attempt }}

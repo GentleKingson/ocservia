@@ -28,7 +28,7 @@ cat >>"${PGDATA}/postgresql.conf" <<'CONF'
 # ocservia G6 HA/PITR harness: streaming replication and WAL archiving.
 wal_level = replica
 archive_mode = on
-archive_command = 'test ! -f /var/lib/postgresql/archive/%f && cp %p /var/lib/postgresql/archive/%f'
+archive_command = 'test -f /var/lib/postgresql/archive/%f || cp %p /var/lib/postgresql/archive/%f'
 archive_timeout = '30s'
 max_wal_senders = 5
 max_replication_slots = 4

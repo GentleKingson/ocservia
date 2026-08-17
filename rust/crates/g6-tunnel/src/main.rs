@@ -2,11 +2,16 @@
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
+use std::time::Duration;
 
 use ocservia_g6_tunnel::{
     TUNNEL_ALPN, load_or_create_key, node_id_hex, parse_node_id_hex, run_forward, serve,
     shutdown_signal,
 };
+use tokio::net::TcpStream;
+
+const TARGET_READY_TIMEOUT: Duration = Duration::from_secs(300);
+const TARGET_READY_POLL_INTERVAL: Duration = Duration::from_millis(250);
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -77,6 +82,35 @@ fn run_node_id(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+async fn wait_for_target(target: SocketAddr) -> Result<(), std::io::Error> {
+    wait_for_target_with_timeout(target, TARGET_READY_TIMEOUT).await
+}
+
+async fn wait_for_target_with_timeout(
+    target: SocketAddr,
+    timeout: Duration,
+) -> Result<(), std::io::Error> {
+    let wait = async {
+        loop {
+            if let Ok(stream) = TcpStream::connect(target).await {
+                drop(stream);
+                return;
+            }
+            tokio::time::sleep(TARGET_READY_POLL_INTERVAL).await;
+        }
+    };
+    tokio::time::timeout(timeout, wait).await.map_err(|_| {
+        std::io::Error::new(
+            std::io::ErrorKind::TimedOut,
+            format!(
+                "local tunnel target {target} was not reachable within {} seconds",
+                timeout.as_secs()
+            ),
+        )
+    })?;
+    Ok(())
+}
+
 async fn run_serve(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     reject_unknown(args, &["--key-file", "--peer-node", "--forward"])?;
     let key = key_from(args)?;
@@ -84,6 +118,16 @@ async fn run_serve(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     let target: SocketAddr = require_value(args, "--forward")?
         .parse()
         .map_err(|_| invalid_usage("--forward must be an ip:port address".to_owned()))?;
+    // A server endpoint must not become discoverable before its local target
+    // exists. Publishing early creates a cross-VM race where a one-shot
+    // enrollment reaches the Iroh tunnel but is rejected by the not-yet-live
+    // PostgreSQL, API, or relay socket behind it.
+    tracing::info!(
+        %target,
+        timeout_seconds = TARGET_READY_TIMEOUT.as_secs(),
+        "waiting for local tunnel target"
+    );
+    wait_for_target(target).await?;
     let router = serve(key, iroh::endpoint::RelayMode::Default, peer, target).await?;
     tracing::info!(alpn = %String::from_utf8_lossy(TUNNEL_ALPN), %target, "g6 tunnel serving");
     shutdown_signal().await;
@@ -131,5 +175,25 @@ mod tests {
         assert!(reject_unknown(&args, &["--forward"]).is_err());
         let positional = vec!["serve".to_string()];
         assert!(reject_unknown(&positional, &["--key-file"]).is_err());
+    }
+
+    #[tokio::test]
+    async fn serve_wait_accepts_a_live_local_target() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let target = listener.local_addr().unwrap();
+        wait_for_target_with_timeout(target, Duration::from_secs(1))
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn serve_wait_fails_closed_when_the_target_never_starts() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let target = listener.local_addr().unwrap();
+        drop(listener);
+        let error = wait_for_target_with_timeout(target, Duration::from_millis(50))
+            .await
+            .unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::TimedOut);
     }
 }
