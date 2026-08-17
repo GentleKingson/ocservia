@@ -847,29 +847,40 @@ g6rd_extract_enrollment_node_id() {
 g6rd_enqueue_command() {
   local node_id="${1:?node id is required}" key="${2:?idempotency key is required}"
   local log="${3:-${G6RD_STATE}/enqueue-log.jsonl}" revision stamp latency body command_id
+  local status detail
   revision="$(g6rd_node_revision "${node_id}")" || return 1
   stamp="$(g6rd_now)"
   body="$(mktemp "${RUNNER_TEMP}/enqueue.XXXXXX")"
-  if ! latency="$(curl --silent --show-error --max-time 10 \
+  if ! latency="$(curl --silent --show-error --connect-timeout 3 --max-time 10 \
     --header "Authorization: Bearer $(g6rd_secret dev-auth-token)" \
     --header 'Content-Type: application/json' \
     --header "Idempotency-Key: ${key}" \
-    --header "If-Match: revision-${revision}" \
+    --header "If-Match: \"revision-${revision}\"" \
     --data '{"kind":"synthetic_noop"}' \
     --output "${body}" \
     -w '%{http_code} %{time_total}' \
     "http://127.0.0.1:$(g6rd_api_port)/api/v1/nodes/${node_id}/synthetic-commands")"; then
     latency="000 0.000"
   fi
+  status="${latency% *}"
   command_id="$(jq -er '.command_id // empty' "${body}" 2>/dev/null || true)"
+  if [[ "${status}" != 20* || -z "${command_id}" ]]; then
+    if [[ "${status}" == 000 ]]; then
+      echo "synthetic enqueue for node ${node_id} failed before an HTTP response" >&2
+    else
+      detail="$(jq -r 'if type == "object" then (.detail // .title // "unspecified API error") else "invalid JSON response" end' \
+        "${body}" 2>/dev/null || printf 'invalid JSON response')"
+      echo "synthetic enqueue for node ${node_id} returned HTTP ${status}: ${detail}" >&2
+    fi
+  fi
   rm -f "${body}"
   jq -cn --arg at "${stamp}" \
     --arg node "${node_id}" --arg key "${key}" \
-    --arg outcome "${latency% *}" --argjson latency_seconds "${latency#* }" \
+    --arg outcome "${status}" --argjson latency_seconds "${latency#* }" \
     --arg command_id "${command_id:-}" \
     '{at:$at,node:$node,idempotency_key:$key,status:($outcome|tonumber),latency_seconds:$latency_seconds,command_id:$command_id}' \
     >>"${log}"
-  [[ "${latency% *}" == 20* && -n "${command_id}" ]]
+  [[ "${status}" == 20* && -n "${command_id}" ]]
 }
 
 # Reads through the same gateway path; the SLO population records one row
@@ -1163,16 +1174,23 @@ g6rd_wait_for_agent_readiness() {
   local timeout_seconds="${2:?timeout seconds is required}"
   local interval="${3:?interval seconds is required}"
   local description="${4:?description is required}"
-  local service="${5:-}"
+  shift 4
+  local service ready services=("$@")
   local deadline=$((SECONDS + timeout_seconds))
   while ((SECONDS < deadline)); do
+    ready=0
     if g6rd_capture_agent_readiness "${nodes_file}"; then
-      return 0
+      ready=1
     fi
-    if [[ -n "${service}" ]] && ! g6rd_agent_service_running "${service}"; then
-      echo "${service} exited while waiting for ${description}" >&2
-      g6rd_report_agent_readiness
-      return 1
+    for service in "${services[@]}"; do
+      if ! g6rd_agent_service_running "${service}"; then
+        echo "${service} exited while waiting for ${description}" >&2
+        g6rd_report_agent_readiness
+        return 1
+      fi
+    done
+    if ((ready)); then
+      return 0
     fi
     sleep "${interval}"
   done
@@ -1185,6 +1203,34 @@ g6rd_agent_service_running() {
   local service="${1:?agent service is required}"
   g6rd_agent_compose ps --status running --services "${service}" 2>/dev/null \
     | grep -Fxq "${service}"
+}
+
+# Select only local services that are stopped or that the last valid
+# controller snapshot did not report ready. A peer's unhealthy node must not
+# make this failure domain restart an otherwise healthy local fleet.
+g6rd_agent_services_needing_restart() {
+  local nodes_file="${1:?local nodes file is required}"
+  local response="${G6RD_STATE}/agent-readiness-last.json"
+  local response_valid=0 name node_id _ service
+  if [[ -s "${response}" ]] && jq -e '.items | type == "array"' "${response}" >/dev/null 2>&1; then
+    response_valid=1
+  fi
+  while IFS=$'\t' read -r name node_id _; do
+    service="$(g6rd_agent_service_for_name "${name}")" || return 1
+    if ! g6rd_agent_service_running "${service}"; then
+      printf '%s\n' "${service}"
+      continue
+    fi
+    if ((response_valid)) && ! jq -e --arg id "${node_id}" '
+      .items | any(.id == $id
+        and .trust_status == "active"
+        and .connection_state == "online"
+        and .freshness == "fresh"
+        and (.last_heartbeat_at | type == "string" and length > 0))
+    ' "${response}" >/dev/null; then
+      printf '%s\n' "${service}"
+    fi
+  done <"${nodes_file}"
 }
 
 g6rd_capture_agent_logs() {
@@ -1203,7 +1249,7 @@ g6rd_start_agent_fleet() {
   local expected_nodes="${2:-${local_nodes}}"
   local canary_nodes="${G6RD_STATE}/agent-readiness-canary.tsv"
   local name service index=0
-  local services=() batch=()
+  local services=() restart_services=() batch=()
   [[ -s "${local_nodes}" && -s "${expected_nodes}" ]] || {
     echo "agent readiness requires non-empty local and expected node lists" >&2
     return 2
@@ -1217,6 +1263,7 @@ g6rd_start_agent_fleet() {
   head -n 1 "${local_nodes}" >"${canary_nodes}"
   name="$(cut -f1 "${canary_nodes}")"
   service="$(g6rd_agent_service_for_name "${name}")"
+  services+=("${service}")
   g6rd_agent_compose up --detach --no-deps "${service}"
   if ! g6rd_wait_for_agent_readiness "${canary_nodes}" 45 2 \
     "${FD_ID} Agent canary to become active" "${service}"; then
@@ -1233,33 +1280,41 @@ g6rd_start_agent_fleet() {
   while IFS=$'\t' read -r name _; do
     index=$((index + 1))
     ((index == 1)) && continue
-    services+=("$(g6rd_agent_service_for_name "${name}")")
-  done <"${local_nodes}"
-  for service in "${services[@]}"; do
+    service="$(g6rd_agent_service_for_name "${name}")"
+    services+=("${service}")
     batch+=("${service}")
     if ((${#batch[@]} == 6)); then
       g6rd_agent_compose up --detach --no-deps "${batch[@]}"
       batch=()
       sleep 1
     fi
-  done
+  done <"${local_nodes}"
   if ((${#batch[@]} > 0)); then
     g6rd_agent_compose up --detach --no-deps "${batch[@]}"
   fi
 
-  if g6rd_wait_for_agent_readiness "${expected_nodes}" 90 2 \
-    "the controller to report the Agent fleet active"; then
-    return 0
+  if ! g6rd_wait_for_agent_readiness "${local_nodes}" 90 2 \
+    "the controller to report the local Agent fleet active" "${services[@]}"; then
+    g6rd_capture_agent_logs fleet-before-restart
+    readarray -t restart_services < <(g6rd_agent_services_needing_restart "${local_nodes}")
+    if ((${#restart_services[@]} == 0)); then
+      echo "no local Agent restart candidate was identified" >&2
+      return 1
+    fi
+    echo "restarting only the unready local Agent services: ${restart_services[*]}" >&2
+    g6rd_agent_compose restart "${restart_services[@]}"
+    g6rd_wait_for_agent_readiness "${local_nodes}" 60 2 \
+      "the local Agent fleet after one targeted restart" "${services[@]}" || {
+      g6rd_capture_agent_logs fleet-after-restart
+      return 1
+    }
   fi
-  g6rd_capture_agent_logs fleet-before-restart
-  echo "restarting the local Agent fleet after the bounded readiness failure" >&2
-  readarray -t services < <(cut -f1 "${local_nodes}" | while read -r name; do
-    g6rd_agent_service_for_name "${name}"
-  done)
-  g6rd_agent_compose restart "${services[@]}"
+
+  # Each runner owns recovery only for its local services. The global barrier
+  # still requires both failure domains before either scenario can proceed.
   g6rd_wait_for_agent_readiness "${expected_nodes}" 60 2 \
-    "the controller to report the Agent fleet active after one restart" || {
-    g6rd_capture_agent_logs fleet-after-restart
+    "the controller to report both Agent fleets active" || {
+    g6rd_capture_agent_logs global-readiness-timeout
     return 1
   }
 }

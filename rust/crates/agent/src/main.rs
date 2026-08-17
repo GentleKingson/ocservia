@@ -68,7 +68,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let privd = PrivdClient::new(config.privd_socket, Duration::from_secs(5))?;
     // The startup snapshot is a health gate: it fails fast when privd or the
     // fixed-path fixtures are unhealthy, before any command dispatch begins.
-    require_healthy_snapshot(privd.snapshot().await?)?;
+    let mut startup_observations = Some(require_healthy_snapshot(privd.snapshot().await?)?);
     if config.probe_only {
         return Ok(());
     }
@@ -136,6 +136,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                 sealing_keys: &config.sealing_keys,
                 fence_epoch_floor: &mut fence_epoch_floor,
                 synthetic_barrier_file: config.synthetic_barrier_file.as_deref(),
+                startup_observations: &mut startup_observations,
             };
             match connect_once(&endpoint, EndpointAddr::new(controller), &mut session).await {
                 Ok(()) => attempt = 0,
@@ -344,6 +345,7 @@ struct SessionContext<'a> {
     sealing_keys: &'a [SealingKeyDescriptorV1],
     fence_epoch_floor: &'a mut u64,
     synthetic_barrier_file: Option<&'a Path>,
+    startup_observations: &'a mut Option<Vec<PrivdResponse>>,
 }
 
 struct ActiveSessionAuthority {
@@ -510,7 +512,14 @@ async fn connect_once(
                 handle_command_stream(send,recv,session,authority).await?;
             },
             _ = heartbeat.tick() => {
-                let observations=session.privd.snapshot().await?;
+                // The first interval tick is immediate. Reuse the snapshot
+                // that already passed the startup health gate instead of
+                // opening a second four-request burst while privd is still
+                // releasing the first burst's concurrency permits.
+                let observations=match session.startup_observations.take() {
+                    Some(observations) => observations,
+                    None => session.privd.snapshot().await?,
+                };
                 sequence=sequence.saturating_add(1);
                 let drops=session.journal.telemetry_drop_counters()?;
                 let batch=build_telemetry(session,sequence,&observations,&connection,drops)?;
@@ -2580,6 +2589,14 @@ mod tests {
         let privd_listener =
             tokio::net::UnixListener::bind(&privd_socket).expect("bind privd snapshot fixture");
         let privd_server = tokio::spawn(serve_snapshot(privd_listener));
+        let privd =
+            PrivdClient::new(privd_socket.clone(), Duration::from_secs(2)).expect("privd client");
+        let mut startup_observations = Some(
+            require_healthy_snapshot(privd.snapshot().await.expect("startup snapshot"))
+                .expect("healthy startup snapshot"),
+        );
+        privd_server.await.expect("privd server");
+        std::fs::remove_file(&privd_socket).expect("remove startup-only privd socket");
         let node_id = Uuid::now_v7();
         let agent_key = iroh::SecretKey::generate();
         let controller_key = iroh::SecretKey::generate();
@@ -2614,10 +2631,7 @@ mod tests {
         let agent_endpoint = endpoint.clone();
         let mut run = tokio::spawn({
             let journal_path = journal_path.clone();
-            let agent_privd_socket = privd_socket.clone();
             async move {
-                let privd = PrivdClient::new(agent_privd_socket, Duration::from_secs(2))
-                    .expect("privd client");
                 let mut journal = Journal::open(&journal_path).expect("Agent journal");
                 let mut command_executor =
                     CommandExecutor::new(Journal::open(&journal_path).expect("executor journal"));
@@ -2637,6 +2651,7 @@ mod tests {
                     sealing_keys: &sealing_keys,
                     fence_epoch_floor: &mut fence_epoch_floor,
                     synthetic_barrier_file: None,
+                    startup_observations: &mut startup_observations,
                 };
                 let result = connect_once(&endpoint, controller, &mut session).await;
                 endpoint.close().await;
@@ -2749,8 +2764,6 @@ mod tests {
         ocservia_transportd::shutdown(&service, router)
             .await
             .expect("shutdown static transportd");
-        privd_server.await.expect("privd server");
-        std::fs::remove_file(privd_socket).expect("remove privd snapshot socket");
         std::fs::remove_dir_all(directory).expect("remove static session fixture");
     }
 

@@ -277,6 +277,14 @@ grep -q 'g6rd_agent_compose restart' <<<"${start_fleet}" || {
   echo "Agent startup must perform one bounded reconnect restart" >&2
   exit 1
 }
+grep -q 'g6rd_agent_services_needing_restart' <<<"${start_fleet}" || {
+  echo "Agent startup recovery must target only observed-unready local services" >&2
+  exit 1
+}
+if grep -q 'g6rd_agent_compose restart "${services\[@\]}"' <<<"${start_fleet}"; then
+  echo "one unhealthy Agent must not restart the complete local fleet" >&2
+  exit 1
+fi
 grep -q 'g6rd_report_agent_readiness' "${LIB}" || {
   echo "Agent readiness timeout must print the last controller response" >&2
   exit 1
@@ -415,6 +423,87 @@ readiness_test="$(mktemp -d)"
     "${readiness_test}/agent-readiness-last.json" >/dev/null
 )
 rm -rf "${readiness_test}"
+
+# A global readiness failure may name peer nodes, but this runner owns only
+# the services listed in its local node file. Select a stopped or
+# controller-unready local service without disturbing a healthy peer fleet.
+restart_scope_test="$(mktemp -d)"
+(
+  export FD_ID=fd-a
+  export G6RD_STATE="${restart_scope_test}"
+  cat >"${restart_scope_test}/nodes.tsv" <<'EOF'
+g6-fd-a-01	018f2f10-7abc-7def-8abc-0123456789ab	endpoint-a
+g6-fd-a-02	018f2f10-7abc-7def-8abc-1123456789ab	endpoint-b
+EOF
+  cat >"${restart_scope_test}/agent-readiness-last.json" <<'EOF'
+{"items":[{"id":"018f2f10-7abc-7def-8abc-0123456789ab","trust_status":"active","connection_state":"online","freshness":"fresh","last_heartbeat_at":"2026-08-17T00:00:00Z"},{"id":"018f2f10-7abc-7def-8abc-1123456789ab","trust_status":"active","connection_state":"offline","freshness":"never","last_heartbeat_at":null},{"id":"018f2f10-7abc-7def-8abc-2123456789ab","trust_status":"active","connection_state":"offline","freshness":"never","last_heartbeat_at":null}]}
+EOF
+  g6rd_agent_service_running() { return 0; }
+  selected="$(g6rd_agent_services_needing_restart "${restart_scope_test}/nodes.tsv")"
+  [[ "${selected}" == agent-fd-a-02 ]] || {
+    echo "Agent recovery selected the wrong local services: ${selected}" >&2
+    exit 1
+  }
+)
+rm -rf "${restart_scope_test}"
+
+# The operations API requires a quoted strong ETag. Exercise the actual curl
+# argument and ensure a rejected response emits only its safe problem detail.
+enqueue_test="$(mktemp -d)"
+(
+  export RUNNER_TEMP="${enqueue_test}"
+  export G6RD_STATE="${enqueue_test}"
+  g6rd_node_revision() { printf '7\n'; }
+  g6rd_now() { printf '2026-08-17T00:00:00Z\n'; }
+  g6rd_secret() { printf 'test-development-token\n'; }
+  g6rd_api_port() { printf '18080\n'; }
+  curl() {
+    local output="" arguments=("$@")
+    printf '%s\n' "${arguments[@]}" >"${enqueue_test}/curl.args"
+    while (($#)); do
+      case "$1" in
+        --output)
+          output="$2"
+          shift 2
+          ;;
+        *) shift ;;
+      esac
+    done
+    [[ -n "${output}" ]] || return 2
+    if [[ "${G6RD_TEST_CURL_MODE}" == accepted ]]; then
+      printf '%s\n' '{"command_id":"018f2f10-7abc-7def-8abc-3123456789ab"}' >"${output}"
+      printf '202 0.125'
+    else
+      printf '%s\n' '{"type":"https://ocservia.dev/problems/expected-version-required","detail":"provide a quoted revision"}' >"${output}"
+      printf '400 0.050'
+    fi
+  }
+
+  G6RD_TEST_CURL_MODE=accepted
+  g6rd_enqueue_command 018f2f10-7abc-7def-8abc-0123456789ab test-key
+  grep -Fxq 'If-Match: "revision-7"' "${enqueue_test}/curl.args" || {
+    echo "synthetic enqueue did not send the API's quoted revision ETag" >&2
+    exit 1
+  }
+  jq -e '.status == 202 and .command_id != ""' \
+    "${enqueue_test}/enqueue-log.jsonl" >/dev/null
+
+  G6RD_TEST_CURL_MODE=rejected
+  set +e
+  rejection="$(g6rd_enqueue_command 018f2f10-7abc-7def-8abc-0123456789ab rejected-key 2>&1)"
+  status=$?
+  set -e
+  [[ "${status}" -eq 1 ]] || {
+    echo "synthetic enqueue accepted a rejected API response" >&2
+    exit 1
+  }
+  grep -qF 'returned HTTP 400: provide a quoted revision' <<<"${rejection}" || {
+    echo "synthetic enqueue did not expose the safe API problem detail" >&2
+    exit 1
+  }
+)
+rm -rf "${enqueue_test}"
+
 approve_node="$(sed -n '/^g6rd_approve_node() {/,/^}/p' "${LIB}")"
 grep -q 'g6rd_api_session_curl requester /api/v1/approval-requests' <<<"${approve_node}" || {
   echo "node activation must create a content-bound request as the requester" >&2
