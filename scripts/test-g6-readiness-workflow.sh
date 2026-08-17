@@ -15,6 +15,7 @@ BUILDER="${ROOT}/scripts/build-g6-evidence.mjs"
 SLO="${ROOT}/docs/acceptance/g6-slo.yaml"
 PROBE_DOCKERFILE="${ROOT}/rust/g6-probe.Dockerfile"
 POSTGRES_INIT="${ROOT}/deploy/g6-readiness/postgres-init/001-g6-readiness.sh"
+OCSERV_FIXTURE="${ROOT}/deploy/g6-readiness/fake-ocserv/shims/ocserv"
 
 ruby -r yaml - "${WORKFLOW}" "${COMPOSE_FILE}" <<'RUBY'
 workflow_path, compose_path = ARGV
@@ -131,6 +132,15 @@ grep -qF 'usermod --gid ocservia nobody' "${PROBE_DOCKERFILE}" || {
 }
 grep -q '^USER nobody:ocservia$' "${PROBE_DOCKERFILE}" || {
   echo "the G6 probe image must run as the transport-authorized nobody account" >&2
+  exit 1
+}
+
+# The production adapter accepts only supported numeric Ocserv versions. Run
+# the exact shim copied into every managed-node image so a decorative suffix
+# cannot make the initial privd snapshot fail before Agent enrollment sync.
+fixture_version="$("${OCSERV_FIXTURE}" --version)"
+[[ "${fixture_version}" == "ocserv 1.2.3" ]] || {
+  echo "the G6 ocserv fixture must emit a production-parseable version banner" >&2
   exit 1
 }
 
