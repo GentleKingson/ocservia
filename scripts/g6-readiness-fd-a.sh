@@ -61,6 +61,7 @@ phase_publish_shared_secrets() {
   cp -f "${G6RD_SECRETS}/replication-password" "${G6RD_OUTBOX}/shared/"
   cp -f "${G6RD_SECRETS}/dev-auth-token" "${G6RD_OUTBOX}/shared/"
   cp -f "${G6RD_SECRETS}/relay-ca.pem" "${G6RD_OUTBOX}/shared/"
+  cp -f "${G6RD_SECRETS}/relay-chain.crt" "${G6RD_OUTBOX}/shared/"
   cp -f "${G6RD_SECRETS}/relay-leaf.crt" "${G6RD_OUTBOX}/shared/"
   cp -f "${G6RD_SECRETS}/relay-leaf.key" "${G6RD_OUTBOX}/shared/"
   cp -f "${G6RD_SECRETS}/relay-token" "${G6RD_OUTBOX}/shared/"

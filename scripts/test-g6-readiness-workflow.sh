@@ -98,6 +98,38 @@ if grep -A12 '^g6rd_tunnel_forward()' "${LIB}" | grep -q -- '--forward'; then
   exit 1
 fi
 
+# Bind-mounted runtime material must be readable by the exact container
+# principals that consume it, while remaining non-world-readable.
+grep -q 'chown 65534:65532 /fix/command-signing.pem' "${LIB}" || {
+  echo "the control-plane signing key must be owned by its container uid" >&2
+  exit 1
+}
+grep -q 'chown 65534:65532 /fix/controller.key' "${LIB}" || {
+  echo "the probe controller key must be owned by its container uid" >&2
+  exit 1
+}
+grep -q 'chown -R 65532:65532 /fix; chmod 0750 /fix' "${LIB}" || {
+  echo "the relay material must be owned by the relay uid" >&2
+  exit 1
+}
+grep -q '"${dir}/secrets/command-verification-agent.pem"' "${LIB}" || {
+  echo "agent material must derive its verification copies from the shared key" >&2
+  exit 1
+}
+grep -q 'g6rd_reclaim_directory "${G6RD_WORK}"' "${LIB}" || {
+  echo "cleanup must reclaim uid-mapped runtime material before removal" >&2
+  exit 1
+}
+sed -n '/^phase_publish_shared_secrets() {/,/^}/p' "${FD_A}" \
+  | grep -q 'relay-chain.crt' || {
+  echo "the shared-trust handoff must include the relay certificate chain" >&2
+  exit 1
+}
+grep -q 'relay-ca.pem relay-chain.crt relay-leaf.crt' "${FD_B}" || {
+  echo "fd-b must import the shared relay certificate chain" >&2
+  exit 1
+}
+
 # Every required observation event from g6-slo.yaml must be produced by the
 # harness timeline: this stage runs the real fault scenarios, so all sixteen
 # observations are in scope, including the load bracket around the failover.
