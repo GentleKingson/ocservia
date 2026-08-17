@@ -102,6 +102,10 @@ if grep -q 'exec as_agent' "${SUPERVISOR}"; then
   echo "the agent supervisor must not ask exec to resolve a shell function" >&2
   exit 1
 fi
+grep -qF 'cap_add: [SETUID, SETGID]' "${LIB}" || {
+  echo "the root supervisor must retain only the capabilities required to drop to the agent uid" >&2
+  exit 1
+}
 
 # Keep the shell wrapper aligned with the tunnel binary's asymmetric CLI:
 # serve forwards to a target, while forward binds a local listener.

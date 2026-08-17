@@ -683,6 +683,7 @@ g6rd_write_agent_overlay() {
     restart: "no"
     read_only: true
     cap_drop: [ALL]
+    cap_add: [SETUID, SETGID]
     security_opt:
       - no-new-privileges:true
     init: true
