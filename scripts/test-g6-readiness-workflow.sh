@@ -143,6 +143,24 @@ grep -q 'rm -f -- "${response}"' <<<"${mint_enrollment_token}" || {
   echo "the one-time enrollment response must be removed after parsing" >&2
   exit 1
 }
+for fd_script in "${FD_A}" "${FD_B}"; do
+  enroll_phase="$(sed -n '/^phase_agents_enroll() {/,/^}/p' "${fd_script}")"
+  grep -q 'g6rd_extract_enrollment_node_id' <<<"${enroll_phase}" || {
+    echo "agent enrollment must parse the exact UUIDv7 protocol value" >&2
+    exit 1
+  }
+  if grep -q 'G6_MODE=enroll.*tail -1' <<<"${enroll_phase}"; then
+    echo "agent enrollment must not assume the UUID is the final log line" >&2
+    exit 1
+  fi
+done
+parsed_node_id="$(printf '%s\n' \
+  'relay startup' '018f2f10-7abc-7def-8abc-0123456789ab' 'relay shutdown' \
+  | (source "${LIB}"; g6rd_extract_enrollment_node_id))"
+[[ "${parsed_node_id}" == 018f2f10-7abc-7def-8abc-0123456789ab ]] || {
+  echo "the enrollment result parser must tolerate trailing runtime logs" >&2
+  exit 1
+}
 approve_node="$(sed -n '/^g6rd_approve_node() {/,/^}/p' "${LIB}")"
 grep -q 'g6rd_api_session_curl requester /api/v1/approval-requests' <<<"${approve_node}" || {
   echo "node activation must create a content-bound request as the requester" >&2
