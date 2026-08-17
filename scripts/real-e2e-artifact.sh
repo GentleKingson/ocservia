@@ -36,6 +36,8 @@ validate_http_budget() {
     "artifact API total timeout" 60
   validate_positive_integer "${REAL_E2E_ARTIFACT_DOWNLOAD_TIMEOUT_SECONDS:-120}" \
     "artifact download total timeout" 600
+  validate_positive_integer "${REAL_E2E_ARTIFACT_DOWNLOAD_RETRY_TOTAL_SECONDS:-90}" \
+    "artifact download retry total" 300
   [[ "${REAL_E2E_ARTIFACT_RETRIES:-2}" =~ ^[0-9]+$ \
     && "${REAL_E2E_ARTIFACT_RETRIES:-2}" -le 5 ]] || {
     echo "artifact API retries must be 0..5" >&2
@@ -65,6 +67,35 @@ github_get() {
     --header "Accept: application/vnd.github+json" \
     --header "X-GitHub-Api-Version: 2022-11-28" \
     "${url}"
+}
+
+download_artifact() {
+  local url="${1:?artifact download URL is required}"
+  local archive="${2:?artifact archive path is required}"
+  local deadline remaining request_timeout
+  local failures=0
+  local max_failures="${REAL_E2E_ARTIFACT_MAX_CONSECUTIVE_ERRORS:-3}"
+  local poll_interval="${REAL_E2E_ARTIFACT_POLL_INTERVAL_SECONDS:-5}"
+  deadline=$((SECONDS + ${REAL_E2E_ARTIFACT_DOWNLOAD_RETRY_TOTAL_SECONDS:-90}))
+
+  while ((failures < max_failures && SECONDS < deadline)); do
+    remaining=$((deadline - SECONDS))
+    request_timeout="${REAL_E2E_ARTIFACT_DOWNLOAD_TIMEOUT_SECONDS:-120}"
+    ((request_timeout <= remaining)) || request_timeout="${remaining}"
+    : >"${archive}"
+    if github_get "${url}" "${request_timeout}" >"${archive}"; then
+      return 0
+    fi
+    failures=$((failures + 1))
+    if ((failures < max_failures && SECONDS < deadline)); then
+      remaining=$((deadline - SECONDS))
+      ((poll_interval <= remaining)) || poll_interval="${remaining}"
+      ((poll_interval > 0)) && sleep "${poll_interval}"
+    fi
+  done
+
+  echo "artifact download failed ${failures} consecutive bounded requests" >&2
+  return 1
 }
 
 default_peer_job_name() {
@@ -224,8 +255,7 @@ wait_download() {
   staging="$(mktemp -d "${RUNNER_TEMP:-/tmp}/real-e2e-artifact.XXXXXX")"
   cleanup_download() { rm -f -- "${archive}"; rm -rf -- "${staging}"; }
   trap cleanup_download RETURN
-  github_get "${download_url}" "${REAL_E2E_ARTIFACT_DOWNLOAD_TIMEOUT_SECONDS:-120}" \
-    >"${archive}"
+  download_artifact "${download_url}" "${archive}"
   if ! listing="$(unzip -Z1 "${archive}")"; then
     echo "artifact download is not a valid ZIP archive" >&2
     return 1

@@ -940,7 +940,7 @@ g6rd_prepare_agent_material() {
 }
 
 g6rd_write_agent_overlay() {
-  local count="${1:?agent count is required}" index dir name remote_relay
+  local count="${1:?agent count is required}" index dir name node_id remote_relay
   g6rd_export_relay_urls
   remote_relay="$([[ "${FD_ID}" == fd-a ]] && printf relay-b || printf relay-a)"
   {
@@ -948,6 +948,14 @@ g6rd_write_agent_overlay() {
     for index in $(seq 1 "${count}"); do
       dir="$(g6rd_agent_dir "${index}")"
       name="g6-${FD_ID}-$(printf '%02d' "${index}")"
+      node_id=""
+      if [[ -s "${dir}/state/node-id" ]]; then
+        node_id="$(<"${dir}/state/node-id")"
+        [[ "${node_id}" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$ ]] || {
+          echo "agent ${name} has an invalid persisted node id" >&2
+          return 1
+        }
+      fi
       cat <<EOF
   agent-${FD_ID}-$(printf '%02d' "${index}"):
     restart: "no"
@@ -963,6 +971,7 @@ g6rd_write_agent_overlay() {
     environment:
       G6_MODE: run
       G6_AGENT_NAME: "${name}"
+      G6_NODE_ID: "${node_id}"
       G6_CONTROLLER_ENDPOINT_ID: "${OCSERV_CONTROLLER_ENDPOINT_ID:-}"
       G6_RELAY_URL_A: "${G6_RELAY_URL_A:?}"
       G6_RELAY_URL_B: "${G6_RELAY_URL_B:?}"
@@ -989,6 +998,38 @@ g6rd_write_agent_overlay() {
 EOF
     done
   } >"${G6RD_AGENT_COMPOSE}"
+}
+
+g6rd_require_agent_node_state() {
+  local nodes_file="${1:?local nodes file is required}"
+  local index=0 name node_id endpoint extra expected_name persisted
+  [[ -s "${nodes_file}" ]] || {
+    echo "agent node-state input is empty: ${nodes_file}" >&2
+    return 2
+  }
+  while IFS=$'\t' read -r name node_id endpoint extra; do
+    index=$((index + 1))
+    expected_name="g6-${FD_ID}-$(printf '%02d' "${index}")"
+    [[ "${name}" == "${expected_name}" && -z "${extra}" \
+      && "${node_id}" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$ \
+      && "${endpoint}" =~ ^[0-9a-f]{64}$ ]] || {
+      echo "agent node-state row ${index} is invalid for ${FD_ID}" >&2
+      return 1
+    }
+    [[ -s "$(g6rd_agent_dir "${index}")/state/node-id" ]] || {
+      echo "agent ${name} has no persisted node id" >&2
+      return 1
+    }
+    persisted="$(<"$(g6rd_agent_dir "${index}")/state/node-id")"
+    [[ "${persisted}" == "${node_id}" ]] || {
+      echo "agent ${name} persisted node id does not match enrollment" >&2
+      return 1
+    }
+  done <"${nodes_file}"
+  [[ "${index}" -eq "$(g6rd_agent_count)" ]] || {
+    echo "agent node-state count ${index} does not match ${FD_ID} fleet size" >&2
+    return 1
+  }
 }
 
 # Compose validates overlay bind sources even when `down` is cleaning a

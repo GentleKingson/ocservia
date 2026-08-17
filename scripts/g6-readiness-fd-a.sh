@@ -338,6 +338,7 @@ phase_agents_start() {
   G6RD_WORKSPACE_ID="$(<"${G6RD_STATE}/workspace-id")"
   export G6RD_WORKSPACE_ID
   g6rd_export_common_env
+  g6rd_require_agent_node_state "${G6RD_OUTBOX}/agents/nodes.tsv"
   g6rd_write_agent_overlay "${count}"
   g6rd_chown_agent_dirs
   g6rd_start_agent_fleet "${G6RD_OUTBOX}/agents/nodes.tsv"

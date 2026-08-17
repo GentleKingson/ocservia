@@ -265,11 +265,12 @@ phase_agents_start() {
   G6RD_WORKSPACE_ID="$(<"${G6RD_STATE}/workspace-id")"
   export G6RD_WORKSPACE_ID
   g6rd_export_common_env
-  g6rd_write_agent_overlay "${count}"
-  g6rd_chown_agent_dirs
   local_nodes="${G6RD_STATE}/local-nodes.tsv"
   awk -F'\t' -v prefix="g6-${FD_ID}-" 'index($1, prefix) == 1' \
     "${NODES_FILE}" >"${local_nodes}"
+  g6rd_require_agent_node_state "${local_nodes}"
+  g6rd_write_agent_overlay "${count}"
+  g6rd_chown_agent_dirs
   g6rd_start_agent_fleet "${local_nodes}" "${NODES_FILE}"
   # The controller's observed-state API is the era-1 readiness authority;
   # the watchers start only after all 55 Agents are online and fresh.

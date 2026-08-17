@@ -122,6 +122,37 @@ run_wait "${download_success}"
   exit 1
 }
 
+# A temporary redirect/download outage gets a separate bounded retry budget;
+# the artifact and peer metadata do not need to be polled again.
+# shellcheck disable=SC2016  # the generated shim expands these at execution
+download_transient="$(install_curl_shim '
+url="${!#}"
+case "${url}" in
+  *"/artifacts?"*) printf "%s\\n" '\''{"artifacts":[{"id":99,"name":"g6-rd-agents-enrolled-fd-b-424242-3","expired":false}]}'\'' ;;
+  *"/jobs?"*) printf "%s\\n" '\''{"jobs":[{"name":"G6 Readiness Failure Domain B","status":"in_progress","conclusion":null,"steps":[]}]}'\'' ;;
+  *"/actions/artifacts/99/zip")
+    calls=0
+    [[ ! -s "${RUNNER_TEMP}/download-calls" ]] || calls="$(cat "${RUNNER_TEMP}/download-calls")"
+    calls=$((calls + 1))
+    printf "%s\\n" "${calls}" >"${RUNNER_TEMP}/download-calls"
+    ((calls > 1)) || exit 22
+    cat "${RUNNER_TEMP}/artifact.zip"
+    ;;
+  *) exit 64 ;;
+esac' download-transient)"
+mkdir -p "${download_transient}/payload"
+printf '%s\n' expected-after-retry >"${download_transient}/payload/candidate-sha"
+(cd "${download_transient}/payload" && zip -q "${download_transient}/artifact.zip" candidate-sha)
+run_wait "${download_transient}"
+[[ "$(<"${download_transient}/download-calls")" == 2 ]] || {
+  echo "artifact download did not use the bounded retry path" >&2
+  exit 1
+}
+[[ "$(<"${download_transient}/destination/candidate-sha")" == expected-after-retry ]] || {
+  echo "artifact download did not recover after a transient failure" >&2
+  exit 1
+}
+
 # Reject symlinks from ZIP metadata before extraction, rather than discovering
 # them only after a later member may already have traversed the link.
 # shellcheck disable=SC2016  # the generated shim expands these at execution
