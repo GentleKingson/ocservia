@@ -650,7 +650,9 @@ phase_scenario_relay() {
 relay_probe_relay_b() {
   local node="${1:?node id is required}" observation
   observation="$(g6rd_probe_node_connection relay "${node}" 2>/dev/null)" || return 1
-  jq -e '.path == "relay" and (.path_detail | contains("relay-b"))' \
+  jq -e '.all_matched == true and (.observations | length == 1) and
+    .observations[0].path == "relay" and
+    (.observations[0].path_detail | contains("relay-b"))' \
     <<<"${observation}" >/dev/null
 }
 

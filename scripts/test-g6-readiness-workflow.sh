@@ -277,6 +277,12 @@ grep -q 'timeout --foreground --signal=TERM --kill-after=5s' \
   echo "node connection probes must have a per-attempt hard timeout" >&2
   exit 1
 }
+relay_connection_probe="$(sed -n '/^relay_probe_relay_b() {/,/^}/p' "${FD_B}")"
+grep -q '\.observations\[0\]\.path == "relay"' \
+  <<<"${relay_connection_probe}" || {
+  echo "relay failover must read the node-connection observations contract" >&2
+  exit 1
+}
 
 # Enrollment and privd must pin the identical SPKI DER fingerprint. Hashing
 # the PEM envelope instead passes enrollment but makes every Agent fail closed
