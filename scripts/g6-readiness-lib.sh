@@ -660,6 +660,39 @@ g6rd_wait_until() {
   return 1
 }
 
+# Unlike the attempt-count helper, this stops starting new attempts at a wall
+# clock deadline. Callers must also bound any predicate that can block.
+g6rd_wait_until_deadline() {
+  local timeout_seconds="${1:?timeout seconds is required}"
+  local interval="${2:?interval seconds is required}"
+  local description="${3:?description is required}"
+  shift 3
+  local deadline remaining
+  [[ "${timeout_seconds}" =~ ^[0-9]+$ && "${timeout_seconds}" -ge 1 ]] || {
+    echo "wait timeout must be a positive integer" >&2
+    return 2
+  }
+  [[ "${interval}" =~ ^[0-9]+$ && "${interval}" -ge 1 ]] || {
+    echo "wait interval must be a positive integer" >&2
+    return 2
+  }
+  deadline=$((SECONDS + timeout_seconds))
+  while ((SECONDS < deadline)); do
+    if "$@" >/dev/null 2>&1; then
+      return 0
+    fi
+    remaining=$((deadline - SECONDS))
+    ((remaining > 0)) || break
+    if ((remaining < interval)); then
+      sleep "${remaining}"
+    else
+      sleep "${interval}"
+    fi
+  done
+  echo "timed out waiting for ${description}" >&2
+  return 1
+}
+
 # ---------------------------------------------------------------------------
 # API driver. All commands in the evidence window are issued through these
 # helpers so the accepted-write identity chain (http request id = command id

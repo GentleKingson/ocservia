@@ -5,6 +5,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 WORKFLOW="${ROOT}/.github/workflows/g6-readiness.yml"
 ARTIFACT_HELPER="${ROOT}/scripts/real-e2e-artifact.sh"
 POSTGRES_INIT="${ROOT}/deploy/g6-readiness/postgres-init/001-g6-readiness.sh"
+LIB="${ROOT}/scripts/g6-readiness-lib.sh"
 
 ruby -r yaml - "${WORKFLOW}" <<'RUBY'
 workflow = YAML.safe_load(File.read(ARGV.fetch(0)), aliases: true)
@@ -55,7 +56,7 @@ critical_timeouts = {
     "Build failure domain B images and tunnel" => 35,
     "Bootstrap the streaming standby" => 15,
     "Enroll the failure domain B fleet" => 25,
-    "Promote the standby under load" => 15,
+    "Promote the standby under load" => 8,
     "Run the bounded observation window" => 10,
     "Build and verify the evidence bundle" => 15
   }
@@ -68,6 +69,13 @@ critical_timeouts.each do |job_id, expected|
     reject("#{name} must have timeout #{timeout}") unless step.fetch("timeout-minutes") == timeout
   end
 end
+
+fd_a_steps = jobs.fetch("g6-rd-fd-a").fetch("steps")
+promoted_wait = fd_a_steps.find { |step| step["name"] == "Wait for the promoted primary" }
+reject("fd-a must wait for the promoted-primary artifact") unless promoted_wait
+wait_seconds = promoted_wait.fetch("run")[/g6-rd-new-primary[^\n]*\s(\d+)\s+"G6 Readiness Failure Domain B"/, 1]&.to_i
+producer_minutes = critical_timeouts.fetch("g6-rd-fd-b").fetch("Promote the standby under load")
+reject("the promoted-primary artifact wait must outlive its producer timeout") unless wait_seconds && wait_seconds > producer_minutes * 60
 RUBY
 
 grep -qF 'REAL_E2E_ARTIFACT_CONNECT_TIMEOUT_SECONDS:-5' "${ARTIFACT_HELPER}" || {
@@ -98,6 +106,26 @@ grep -qF "archive_command = 'test -f /var/lib/postgresql/archive/%f || cp %p /va
 tmp="$(mktemp -d)"
 cleanup() { rm -rf -- "${tmp}"; }
 trap cleanup EXIT
+
+# shellcheck source=scripts/g6-readiness-lib.sh
+source "${LIB}"
+never_ready() { return 1; }
+started="${SECONDS}"
+if g6rd_wait_until_deadline 1 5 "deadline regression fixture" never_ready \
+  >"${tmp}/deadline-stdout" 2>"${tmp}/deadline-stderr"; then
+  echo "the deadline wait accepted a predicate that never became ready" >&2
+  exit 1
+fi
+((SECONDS - started < 3)) || {
+  echo "the deadline wait slept past its wall-clock budget" >&2
+  exit 1
+}
+grep -qF 'timed out waiting for deadline regression fixture' \
+  "${tmp}/deadline-stderr" || {
+  echo "the deadline wait did not identify the timed-out condition" >&2
+  exit 1
+}
+
 mkdir -p "${tmp}/bin"
 cat >"${tmp}/bin/curl" <<'FAKE_CURL'
 #!/usr/bin/env bash

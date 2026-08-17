@@ -321,7 +321,7 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
         run: scripts/real-e2e-artifact.sh wait-download "g6-rd-isolation-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" "${RUNNER_TEMP}/g6-rd-isolation" 600 "G6 Readiness Failure Domain A"
       - name: Promote the standby under load
-        timeout-minutes: 15
+        timeout-minutes: 8
         run: scripts/g6-readiness-fd-b.sh promote "${RUNNER_TEMP}/g6-rd-isolation"
       - name: Publish the promoted primary
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7

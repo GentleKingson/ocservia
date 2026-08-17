@@ -236,6 +236,8 @@ endpoint_barrier_line="$(grep -n 'g6rd_wait_until 15 1 "era-2 transportd control
   <<<"${promote_phase}" | cut -d: -f1)"
 reconnect_line="$(grep -n 'agents reconnected to era-2 transportd' \
   <<<"${promote_phase}" | cut -d: -f1)"
+release_barrier_line="$(grep -n 'g6rd_release_synthetic_barriers' \
+  <<<"${promote_phase}" | cut -d: -f1)"
 worker_start_line="$(grep -n 'g6rd_compose up --detach worker' \
   <<<"${promote_phase}" | cut -d: -f1)"
 [[ -n "${transport_init_line}" && -n "${worker_start_line}" \
@@ -244,9 +246,19 @@ worker_start_line="$(grep -n 'g6rd_compose up --detach worker' \
   exit 1
 }
 [[ -n "${transport_socket_line}" && -n "${endpoint_barrier_line}" \
-  && -n "${reconnect_line}" && "${transport_socket_line}" -lt "${endpoint_barrier_line}" \
-  && "${endpoint_barrier_line}" -lt "${reconnect_line}" ]] || {
-  echo "fd-b must verify the live era-2 controller identity before waiting for reconnects" >&2
+  && -n "${release_barrier_line}" && -n "${reconnect_line}" \
+  && "${transport_socket_line}" -lt "${endpoint_barrier_line}" \
+  && "${endpoint_barrier_line}" -lt "${release_barrier_line}" \
+  && "${release_barrier_line}" -lt "${reconnect_line}" ]] || {
+  echo "fd-b must verify the era-2 controller and unblock active command streams before reconnecting" >&2
+  exit 1
+}
+grep -q 'g6rd_wait_until_deadline 180 5' <<<"${promote_phase}" || {
+  echo "fd-b promotion recovery waits must use a wall-clock deadline" >&2
+  exit 1
+}
+grep -q 'report_node_connection_timeout' <<<"${promote_phase}" || {
+  echo "fd-b reconnect timeout must report the final transport probe and API inventory" >&2
   exit 1
 }
 controller_key_phase="$(sed -n '/^g6rd_install_controller_key() {/,/^}/p' "${LIB}")"

@@ -383,9 +383,19 @@ phase_promote() {
   g6rd_timeline_event worker_replacement_active "${G6RD_STATE}/worker-replacement-at"
   g6rd_now >"${G6RD_STATE}/worker-recovered-at"
   g6rd_timeline_event worker_recovered "${G6RD_STATE}/worker-recovered-at"
-  # agents redial the handed-over controller endpoint through relay-b
-  g6rd_wait_until 120 5 "agents reconnected to era-2 transportd" all_nodes_connected
+  # The load fixture holds one command stream open inside each local Agent.
+  # Release those streams only after promotion, but before waiting for
+  # reconnects: an Agent handles a command stream synchronously and cannot
+  # observe the old connection closing while the fixture blocks that stream.
   g6rd_release_synthetic_barriers
+  # Agents redial the handed-over controller endpoint through relay-b. Keep
+  # each inventory probe and the complete recovery wait independently bounded.
+  if ! G6RD_NODE_CONNECTION_TIMEOUT_SECONDS=5 \
+    g6rd_wait_until_deadline 180 5 \
+      "agents reconnected to era-2 transportd" all_nodes_connected; then
+    report_node_connection_timeout
+    return 1
+  fi
   # the era-2 session start of every agent, from the live transportd; this
   # is the session_started_at population of the agent-session inventory
   local args=()
@@ -394,7 +404,7 @@ phase_promote() {
     | jq -r '.observations[] | [.node_id, .connected_at, .last_seen] | @tsv' \
     >"${G6RD_STATE}/era2-sessions.tsv"
   # every in-flight load command must reach a terminal or reconciled state
-  g6rd_wait_until 180 5 "load commands reconciled" load_commands_settled
+  g6rd_wait_until_deadline 180 5 "load commands reconciled" load_commands_settled
   g6rd_now >"${G6RD_STATE}/dispatch-recovered-at"
   g6rd_timeline_event dispatch_recovered "${G6RD_STATE}/dispatch-recovered-at"
   g6rd_timeline_event new_primary_promoted "${G6RD_STATE}/promoted-at"
@@ -419,6 +429,27 @@ all_nodes_connected() {
   local args=()
   readarray -t args < <(node_ids)
   g6rd_probe_node_connection any "${args[@]}" >/dev/null 2>&1
+}
+
+report_node_connection_timeout() {
+  local args=() response="${G6RD_STATE}/node-connections-timeout.json"
+  local error="${G6RD_STATE}/node-connections-timeout-error.txt"
+  readarray -t args < <(node_ids)
+  echo "last era-2 transport connection probe:" >&2
+  if G6RD_NODE_CONNECTION_TIMEOUT_SECONDS=5 \
+    g6rd_probe_node_connection any "${args[@]}" >"${response}" 2>"${error}"; then
+    jq -c '{all_matched, observations: [.observations[] | {
+      node_id, path, owner_epoch, last_seen
+    }]}' "${response}" >&2
+  elif [[ -s "${error}" ]]; then
+    sed -n '1,20p' "${error}" >&2
+  else
+    echo "the transport probe produced no response" >&2
+  fi
+  if ! g6rd_capture_agent_readiness "${NODES_FILE}"; then
+    :
+  fi
+  g6rd_report_agent_readiness
 }
 
 load_commands_active() {
