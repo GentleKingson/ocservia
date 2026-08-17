@@ -21,10 +21,9 @@ concurrency:
   cancel-in-progress: false
 
 # The two failure-domain jobs run concurrently and rendezvous through
-# run-scoped workflow artifacts; each job is bound to the GitHub
-# environment matching the dispatched authority, so a protected
-# production-readiness dispatch requires the environment's reviewers
-# before any evidence is produced.
+# run-scoped workflow artifacts. Each job is bound to the GitHub environment
+# matching the dispatched authority so environment-scoped policy remains
+# visible while both authorities execute as fully automated technical gates.
 jobs:
   g6-rd-fd-a:
     name: G6 Readiness Failure Domain A

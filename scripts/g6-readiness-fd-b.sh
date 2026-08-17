@@ -114,6 +114,9 @@ phase_import_peer_secrets() {
   require_file "${peer}/controller.key"
   local name
   for name in owner-password app-password replication-password dev-auth-token \
+    oidc-client-secret session-key requester-identity-id requester-session-id \
+    requester-session-cookie approver-identity-id approver-session-id \
+    approver-session-cookie \
     relay-ca.pem relay-chain.crt relay-leaf.crt relay-leaf.key relay-token \
     command-signing.pem command-verification.pem \
     seal-user-password.key seal-user-password-sha256 \
@@ -198,6 +201,8 @@ phase_agents_up() {
   count="$(g6rd_agent_count)"
   G6RD_WORKSPACE_ID="$(<"${G6RD_STATE}/workspace-id")"
   export G6RD_WORKSPACE_ID
+  G6_APPROVAL_DB_PORT="$(db_primary_port)"
+  export G6_APPROVAL_DB_PORT
   g6rd_export_common_env
   g6rd_write_agent_overlay "${count}"
   : >"${NODES_FILE}"

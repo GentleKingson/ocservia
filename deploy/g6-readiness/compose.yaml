@@ -27,6 +27,15 @@ x-role-defaults: &role-defaults
     # Remote load drivers authenticate with this bearer token instead of the
     # loopback-only dev subject; the token is a per-run random value.
     OCSERV_DEV_AUTH_TOKEN: ${G6_DEV_AUTH_TOKEN:?}
+    # A test-only OIDC-shaped session fixture drives enrollment and the
+    # independent node-approval flow. No discovery request is made because
+    # the harness injects short-lived authenticated sessions before startup.
+    OCSERV_OIDC_ISSUER: https://oidc.g6.invalid
+    OCSERV_OIDC_CLIENT_ID: g6-readiness
+    OCSERV_OIDC_CLIENT_SECRET_FILE: /run/ocservia-signing/oidc-client-secret
+    OCSERV_OIDC_REDIRECT_URL: https://g6.invalid/api/v1/auth/callback
+    OCSERV_SESSION_KEY_FILE: /run/ocservia-signing/session-key
+    OCSERV_SESSION_TTL: 8h
     # G6_DB_PORT selects the direct postgres port (5432) or the forwarded
     # tunnel port (15432) depending on which failure domain serves the
     # primary in the current era.

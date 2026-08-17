@@ -56,10 +56,13 @@ phase_prepare() {
 phase_publish_shared_secrets() {
   g6rd_export_common_env
   mkdir -p "${G6RD_OUTBOX}/shared"
-  cp -f "${G6RD_SECRETS}/owner-password" "${G6RD_OUTBOX}/shared/"
-  cp -f "${G6RD_SECRETS}/app-password" "${G6RD_OUTBOX}/shared/"
-  cp -f "${G6RD_SECRETS}/replication-password" "${G6RD_OUTBOX}/shared/"
-  cp -f "${G6RD_SECRETS}/dev-auth-token" "${G6RD_OUTBOX}/shared/"
+  local name
+  for name in owner-password app-password replication-password dev-auth-token \
+    oidc-client-secret session-key requester-identity-id requester-session-id \
+    requester-session-cookie approver-identity-id approver-session-id \
+    approver-session-cookie; do
+    cp -f "${G6RD_SECRETS}/${name}" "${G6RD_OUTBOX}/shared/"
+  done
   cp -f "${G6RD_SECRETS}/relay-ca.pem" "${G6RD_OUTBOX}/shared/"
   cp -f "${G6RD_SECRETS}/relay-chain.crt" "${G6RD_OUTBOX}/shared/"
   cp -f "${G6RD_SECRETS}/relay-leaf.crt" "${G6RD_OUTBOX}/shared/"
@@ -81,6 +84,9 @@ phase_import_peer_secrets() {
   local peer="${1:?peer shared secrets directory is required}"
   require_file "${peer}/dev-auth-token"
   for name in owner-password app-password replication-password dev-auth-token \
+    oidc-client-secret session-key requester-identity-id requester-session-id \
+    requester-session-cookie approver-identity-id approver-session-id \
+    approver-session-cookie \
     relay-ca.pem relay-leaf.crt relay-leaf.key relay-token \
     command-signing.pem command-verification.pem \
     seal-user-password.key seal-user-password-sha256 \
@@ -90,6 +96,32 @@ phase_import_peer_secrets() {
     chmod 0600 "${G6RD_SECRETS}/${name}"
   done
   require_file "${G6RD_STATE}/controller.key"
+}
+
+seed_authenticated_approval_fixtures() {
+  local workspace_id="${1:?workspace id is required}"
+  local requester_identity requester_session approver_identity approver_session
+  local requester_binding approver_binding
+  requester_identity="$(g6rd_secret requester-identity-id)"
+  requester_session="$(g6rd_secret requester-session-id)"
+  approver_identity="$(g6rd_secret approver-identity-id)"
+  approver_session="$(g6rd_secret approver-session-id)"
+  requester_binding="$(g6rd_uuidv7)"
+  approver_binding="$(g6rd_uuidv7)"
+  # The test IdP fixture bootstraps two independent SecurityAdmin subjects;
+  # every high-risk mutation still traverses real authentication, RBAC,
+  # content-bound approval, audit, and approval consumption paths.
+  g6rd_psql -c "
+    INSERT INTO identities(id,issuer,subject,display_name,created_at,updated_at)
+      VALUES('${requester_identity}','https://oidc.g6.invalid','g6-requester','G6 requester',now(),now()),
+            ('${approver_identity}','https://oidc.g6.invalid','g6-approver','G6 approver',now(),now());
+    INSERT INTO auth_sessions(id,identity_id,expires_at,created_at)
+      VALUES('${requester_session}','${requester_identity}',now()+interval '7 hours',now()),
+            ('${approver_session}','${approver_identity}',now()+interval '7 hours',now());
+    INSERT INTO role_bindings(id,identity_id,workspace_id,role_name,resource_type,resource_id,created_by,created_at)
+      VALUES('${requester_binding}','${requester_identity}','${workspace_id}','SecurityAdmin','workspace',NULL,'${requester_identity}',now()),
+            ('${approver_binding}','${approver_identity}','${workspace_id}','SecurityAdmin','workspace',NULL,'${requester_identity}',now());" \
+    >/dev/null
 }
 
 phase_images() {
@@ -144,6 +176,7 @@ phase_primary_up() {
   g6rd_psql -c "INSERT INTO workspaces(id,name,slug,created_at,updated_at) \
     VALUES('${workspace_id}','G6 Readiness','g6-readiness',now(),now()) \
     ON CONFLICT (id) DO NOTHING" >/dev/null
+  seed_authenticated_approval_fixtures "${workspace_id}"
   printf '%s\n' "${workspace_id}" >"${G6RD_STATE}/workspace-id"
   g6rd_psql -c "CREATE TABLE IF NOT EXISTS ${MARKER_TABLE} (
     id text PRIMARY KEY,
