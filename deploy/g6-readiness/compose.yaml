@@ -147,14 +147,23 @@ services:
       context: ../..
       dockerfile: rust/transportd.Dockerfile
     user: "0:0"
-    entrypoint: ["/usr/local/libexec/ocservia-prepare-transport-runtime"]
-    command: ["/run/ocserv-platform", "65532", "65532", "65534"]
+    entrypoint: ["/bin/sh", "-eu", "-c"]
+    command:
+      - |
+        /usr/local/libexec/ocservia-prepare-transport-runtime /run/ocserv-platform 65532 65532 65534
+        chown 65532:65532 /run/transport-stats
+        chmod 0755 /run/transport-stats
     network_mode: none
     cap_add: [CHOWN, FOWNER, DAC_OVERRIDE]
     volumes:
       - type: volume
         source: transport-runtime
         target: /run/ocserv-platform
+        volume:
+          nocopy: true
+      - type: volume
+        source: transport-stats
+        target: /run/transport-stats
         volume:
           nocopy: true
 
