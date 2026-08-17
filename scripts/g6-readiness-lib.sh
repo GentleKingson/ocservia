@@ -192,7 +192,7 @@ g6rd_materialize_relay_dir() {
   chmod 0600 "${dir}/relay.key" "${dir}/relay-token"
   docker run --rm --network none --log-driver none \
     -v "${dir}:/fix" postgres:17.10-bookworm \
-    sh -c 'chown -R 65532:65532 /fix; chmod 0750 /fix' >/dev/null
+    sh -c 'chown 65532:65532 /fix/*; chmod 0755 /fix' >/dev/null
   printf '%s\n' "${dir}"
 }
 
@@ -220,7 +220,7 @@ g6rd_materialize_signing_dir() {
     "${dir}/command-verification-agent.pem" "${dir}/command-verification-privd.pem"
   docker run --rm --network none --log-driver none \
     -v "${dir}:/fix" postgres:17.10-bookworm sh -c \
-    'chown 0:65532 /fix; chmod 0750 /fix; chown 65534:65532 /fix/command-signing.pem; chown 0:65532 /fix/command-verification.pem /fix/command-verification-agent.pem /fix/command-verification-privd.pem' \
+    'chmod 0755 /fix; chown 65534:65532 /fix/command-signing.pem; chown 0:65532 /fix/command-verification.pem /fix/command-verification-agent.pem /fix/command-verification-privd.pem' \
     >/dev/null
   printf '%s\n' "${dir}"
 }
@@ -234,7 +234,7 @@ g6rd_materialize_probe_controller_key_dir() {
     chmod 0400 "${dir}/controller.key"
     docker run --rm --network none --log-driver none \
       -v "${dir}:/fix" postgres:17.10-bookworm sh -c \
-      'chown 0:65532 /fix; chmod 0750 /fix; chown 65534:65532 /fix/controller.key' \
+      'chmod 0755 /fix; chown 65534:65532 /fix/controller.key' \
       >/dev/null
   fi
   printf '%s\n' "${dir}"
@@ -668,7 +668,7 @@ g6rd_prepare_agent_material() {
   chmod 0600 "${dir}/secrets/"*.key "${dir}/secrets/relay-token"
   docker run --rm --network none --log-driver none \
     -v "${dir}/secrets:/fix" postgres:17.10-bookworm \
-    sh -c 'chown -R 0:65532 /fix; chmod 0750 /fix; chmod 0640 /fix/*' >/dev/null
+    sh -c 'chown 0:65532 /fix/*; chmod 0755 /fix; chmod 0640 /fix/*' >/dev/null
 }
 
 g6rd_write_agent_overlay() {

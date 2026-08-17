@@ -108,8 +108,16 @@ grep -q 'chown 65534:65532 /fix/controller.key' "${LIB}" || {
   echo "the probe controller key must be owned by its container uid" >&2
   exit 1
 }
-grep -q 'chown -R 65532:65532 /fix; chmod 0750 /fix' "${LIB}" || {
+grep -qF 'chown 65532:65532 /fix/*; chmod 0755 /fix' "${LIB}" || {
   echo "the relay material must be owned by the relay uid" >&2
+  exit 1
+}
+if grep -qF 'chown 0:65532 /fix; chmod 0750 /fix' "${LIB}"; then
+  echo "runtime material directories must remain reachable by later runner phases" >&2
+  exit 1
+fi
+grep -qF 'chown 0:65532 /fix/*; chmod 0755 /fix; chmod 0640 /fix/*' "${LIB}" || {
+  echo "agent secret files must be group-readable without locking out enrollment" >&2
   exit 1
 }
 grep -q '"${dir}/secrets/command-verification-agent.pem"' "${LIB}" || {
@@ -127,6 +135,23 @@ sed -n '/^phase_publish_shared_secrets() {/,/^}/p' "${FD_A}" \
 }
 grep -q 'relay-ca.pem relay-chain.crt relay-leaf.crt' "${FD_B}" || {
   echo "fd-b must import the shared relay certificate chain" >&2
+  exit 1
+}
+
+# Each workflow step starts a fresh shell. State created after the initial
+# environment export must be exported immediately or copied from rendezvous
+# before the next phase derives its Compose environment.
+grep -q 'export OCSERV_CONTROLLER_ENDPOINT_ID="${endpoint}"' "${FD_A}" || {
+  echo "fd-a must export the controller endpoint after bootstrapping it" >&2
+  exit 1
+}
+standby_bootstrap="$(sed -n '/^phase_standby_bootstrap() {/,/^}/p' "${FD_B}")"
+grep -q 'controller-endpoint-id.*G6RD_STATE.*controller-endpoint-id' <<<"${standby_bootstrap}" || {
+  echo "fd-b must import the controller endpoint from the primary rendezvous" >&2
+  exit 1
+}
+grep -q 'workspace-id.*G6RD_STATE.*workspace-id' <<<"${standby_bootstrap}" || {
+  echo "fd-b must import the workspace id from the primary rendezvous" >&2
   exit 1
 }
 
