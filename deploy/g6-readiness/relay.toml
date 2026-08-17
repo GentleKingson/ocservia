@@ -8,7 +8,7 @@ enable_metrics = false
 key_cache_capacity = 8192
 
 [tls]
-https_bind_addr = "0.0.0.0:8443"
+https_bind_addr = "0.0.0.0:3443"
 quic_bind_addr = "0.0.0.0:7842"
 cert_mode = "Manual"
 manual_cert_path = "/run/relay-secrets/relay.crt"

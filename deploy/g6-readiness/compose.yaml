@@ -221,10 +221,9 @@ services:
     environment:
       IROH_RELAY_ACCESS_TOKEN_FILE: /run/relay-secrets/relay-token
     ports:
-      # Containers on this host and the pinned tunnel forward both reach the
-      # relay through the bridge gateway, so it publishes on all interfaces
-      # of the ephemeral CI VM; the token still gates access.
-      - "${G6_RELAY_BIND_ADDRESS:-0.0.0.0}:${G6_RELAY_BIND_PORT:-3443}:8443"
+      # Local containers use the canonical Docker DNS alias on port 3443.
+      # The loopback publication exists only as the tunnel server's target.
+      - "127.0.0.1:${G6_RELAY_BIND_PORT:-13443}:3443"
     volumes:
       - ./relay.toml:/etc/iroh-relay/relay.toml:ro
       - type: bind
@@ -233,6 +232,10 @@ services:
         read_only: true
     extra_hosts:
       - "host.docker.internal:host-gateway"
+    networks:
+      default:
+        aliases:
+          - ${G6_LOCAL_RELAY_HOST:?}
     tmpfs:
       - /tmp:size=16m,mode=0700
     healthcheck:
@@ -336,8 +339,7 @@ services:
       - transport-stats:/run/transport-stats
     extra_hosts:
       - "host.docker.internal:host-gateway"
-      - "relay-a:host-gateway"
-      - "relay-b:host-gateway"
+      - "${G6_REMOTE_RELAY_HOST:?}:host-gateway"
     healthcheck:
       test: ["CMD-SHELL", "test -S /run/ocserv-platform/transportd.sock"]
       interval: 2s
@@ -370,8 +372,7 @@ services:
         read_only: true
     extra_hosts:
       - "host.docker.internal:host-gateway"
-      - "relay-a:host-gateway"
-      - "relay-b:host-gateway"
+      - "${G6_REMOTE_RELAY_HOST:?}:host-gateway"
     tmpfs:
       - /tmp:size=16m,mode=0700
 

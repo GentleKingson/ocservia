@@ -221,23 +221,28 @@ export G6_RELAY_URL_A=https://relay-a:3443
 export G6_RELAY_URL_B=https://relay-b:3443
 g6rd_export_relay_urls
 [[ "${G6_RELAY_URL_A}" == https://relay-a:3443 ]]
-[[ "${G6_RELAY_URL_B}" == https://relay-b:3445 ]]
+[[ "${G6_RELAY_URL_B}" == https://relay-b:3443 ]]
 
 export FD_ID=fd-b
 export G6_RELAY_URL_A=https://relay-a:3443
 export G6_RELAY_URL_B=https://relay-b:3443
 g6rd_write_agent_overlay 1
-[[ "${G6_RELAY_URL_A}" == https://relay-a:3444 ]]
+[[ "${G6_RELAY_URL_A}" == https://relay-a:3443 ]]
 [[ "${G6_RELAY_URL_B}" == https://relay-b:3443 ]]
-grep -q 'G6_RELAY_URL_A: "https://relay-a:3444"' "${G6RD_AGENT_COMPOSE}"
+grep -q 'G6_RELAY_URL_A: "https://relay-a:3443"' "${G6RD_AGENT_COMPOSE}"
 grep -q 'G6_RELAY_URL_B: "https://relay-b:3443"' "${G6RD_AGENT_COMPOSE}"
+grep -q 'relay-a:host-gateway' "${G6RD_AGENT_COMPOSE}"
+if grep -q 'relay-b:host-gateway' "${G6RD_AGENT_COMPOSE}"; then
+  echo "the local fd-b relay must remain on Docker DNS" >&2
+  exit 1
+fi
 
 curl() {
   printf '%s\n' "$@" >"${relay_topology_test}/curl.args"
 }
-g6rd_relay_endpoint_ready "${G6_RELAY_URL_A}"
-grep -qx -- 'relay-a:3444:127.0.0.1' "${relay_topology_test}/curl.args"
-grep -qx -- 'https://relay-a:3444/ping' "${relay_topology_test}/curl.args"
+g6rd_relay_endpoint_ready "${G6_RELAY_URL_A}" 13443
+grep -qx -- 'relay-a:3443:127.0.0.1:13443' "${relay_topology_test}/curl.args"
+grep -qx -- 'https://relay-a:3443/ping' "${relay_topology_test}/curl.args"
 if g6rd_relay_endpoint_ready https://example.invalid:3444 2>/dev/null; then
   echo "relay readiness must reject a URL outside the fixed G6 topology" >&2
   exit 1

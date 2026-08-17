@@ -141,9 +141,9 @@ phase_tunnel_up() {
   g6rd_tunnel_serve pg-a "$(<"${G6RD_STATE}/peer-pg-a-forward-node-id")" 5432
   g6rd_tunnel_serve api-a "$(<"${G6RD_STATE}/peer-api-a-forward-node-id")" 18080
   g6rd_tunnel_serve relay-a "$(<"${G6RD_STATE}/peer-relay-a-forward-node-id")" \
-    "${G6_RELAY_BIND_PORT:-3443}"
+    "${G6_RELAY_BIND_PORT:-13443}"
   g6rd_tunnel_forward relay-b-forward "$(<"${G6RD_STATE}/peer-relay-b-node-id")" \
-    "${G6_RELAY_B_FORWARD_PORT:-3445}"
+    3443
 }
 
 bootstrap_controller_endpoint() {

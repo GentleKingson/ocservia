@@ -325,21 +325,11 @@ g6rd_materialize_probe_controller_key_dir() {
 # ---------------------------------------------------------------------------
 
 g6rd_relay_url_a() {
-  # relay-a is local on fd-a and reached through a tunnel forward on fd-b.
-  if [[ "${FD_ID}" == "fd-a" ]]; then
-    printf 'https://relay-a:%s\n' "${G6_RELAY_A_PORT:-3443}"
-  else
-    printf 'https://relay-a:%s\n' "${G6_RELAY_A_FORWARD_PORT:-3444}"
-  fi
+  printf 'https://relay-a:3443\n'
 }
 
 g6rd_relay_url_b() {
-  # relay-b is local on fd-b and reached through a tunnel forward on fd-a.
-  if [[ "${FD_ID}" == "fd-b" ]]; then
-    printf 'https://relay-b:%s\n' "${G6_RELAY_B_PORT:-3443}"
-  else
-    printf 'https://relay-b:%s\n' "${G6_RELAY_B_FORWARD_PORT:-3445}"
-  fi
+  printf 'https://relay-b:3443\n'
 }
 
 # Relay URLs are topology, not operator input. Recompute them for every phase
@@ -356,7 +346,7 @@ g6rd_export_relay_urls() {
 }
 
 g6rd_relay_endpoint_ready() {
-  local url="${1:?relay URL is required}" host port
+  local url="${1:?relay URL is required}" connect_port="${2:-}" host port
   if [[ "${url}" =~ ^https://(relay-[ab]):([0-9]{1,5})/?$ ]]; then
     host="${BASH_REMATCH[1]}"
     port="${BASH_REMATCH[2]}"
@@ -365,16 +355,23 @@ g6rd_relay_endpoint_ready() {
     return 2
   fi
   ((port >= 1 && port <= 65535)) || return 2
+  connect_port="${connect_port:-${port}}"
+  ((connect_port >= 1 && connect_port <= 65535)) || return 2
   curl --fail --silent --show-error --connect-timeout 2 --max-time 4 \
     --noproxy '*' \
     --cacert "${G6RD_SECRETS}/relay-ca.pem" \
-    --resolve "${host}:${port}:127.0.0.1" "${url%/}/ping" >/dev/null
+    --connect-to "${host}:${port}:127.0.0.1:${connect_port}" \
+    "${url%/}/ping" >/dev/null
 }
 
 g6rd_wait_for_controller_relay() {
+  local connect_port=3443
   g6rd_export_relay_urls
+  if [[ "${FD_ID}" == fd-a ]]; then
+    connect_port="${G6_RELAY_BIND_PORT:-13443}"
+  fi
   g6rd_wait_until 30 2 "controller relay path ${G6_RELAY_URL_A}" \
-    g6rd_relay_endpoint_ready "${G6_RELAY_URL_A}"
+    g6rd_relay_endpoint_ready "${G6_RELAY_URL_A}" "${connect_port}"
 }
 
 g6rd_export_common_env() {
@@ -400,8 +397,10 @@ g6rd_export_common_env() {
   export G6_SIGNING_DIR="${G6_SIGNING_DIR:-$(g6rd_materialize_signing_dir)}"
   export G6_RELAY_DIR="${G6_RELAY_DIR:-$(g6rd_materialize_relay_dir)}"
   g6rd_export_relay_urls
+  export G6_LOCAL_RELAY_HOST="${G6_LOCAL_RELAY_HOST:-relay-${FD_ID#fd-}}"
+  export G6_REMOTE_RELAY_HOST="${G6_REMOTE_RELAY_HOST:-$([[ "${FD_ID}" == fd-a ]] && printf relay-b || printf relay-a)}"
   export G6_API_BIND_PORT="${G6_API_BIND_PORT:-18080}"
-  export G6_RELAY_BIND_PORT="${G6_RELAY_BIND_PORT:-3443}"
+  export G6_RELAY_BIND_PORT="${G6_RELAY_BIND_PORT:-13443}"
   local probe_key_dir="${G6RD_WORK}/probe-controller-key"
   if [[ -s "${G6RD_SECRETS}/controller.key" ]]; then
     probe_key_dir="$(g6rd_materialize_probe_controller_key_dir)"
@@ -429,8 +428,10 @@ g6rd_placeholder_env() {
   export G6_SIGNING_DIR="${G6_SIGNING_DIR:-${G6RD_WORK}/signing}"
   export G6_RELAY_DIR="${G6_RELAY_DIR:-${G6RD_WORK}/relay-secrets}"
   g6rd_export_relay_urls
+  export G6_LOCAL_RELAY_HOST="${G6_LOCAL_RELAY_HOST:-relay-${FD_ID#fd-}}"
+  export G6_REMOTE_RELAY_HOST="${G6_REMOTE_RELAY_HOST:-$([[ "${FD_ID}" == fd-a ]] && printf relay-b || printf relay-a)}"
   export G6_API_BIND_PORT="${G6_API_BIND_PORT:-18080}"
-  export G6_RELAY_BIND_PORT="${G6_RELAY_BIND_PORT:-3443}"
+  export G6_RELAY_BIND_PORT="${G6_RELAY_BIND_PORT:-13443}"
   export G6_PROBE_CONTROLLER_KEY_DIR="${G6_PROBE_CONTROLLER_KEY_DIR:-${G6RD_WORK}/probe-controller-key}"
 }
 
@@ -939,8 +940,9 @@ g6rd_prepare_agent_material() {
 }
 
 g6rd_write_agent_overlay() {
-  local count="${1:?agent count is required}" index dir name
+  local count="${1:?agent count is required}" index dir name remote_relay
   g6rd_export_relay_urls
+  remote_relay="$([[ "${FD_ID}" == fd-a ]] && printf relay-b || printf relay-a)"
   {
     echo "services:"
     for index in $(seq 1 "${count}"); do
@@ -966,8 +968,7 @@ g6rd_write_agent_overlay() {
       G6_RELAY_URL_B: "${G6_RELAY_URL_B:?}"
     extra_hosts:
       - "host.docker.internal:host-gateway"
-      - "relay-a:host-gateway"
-      - "relay-b:host-gateway"
+      - "${remote_relay}:host-gateway"
     volumes:
       - type: bind
         source: ${dir}/identity

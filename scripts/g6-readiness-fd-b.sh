@@ -156,10 +156,10 @@ phase_tunnel_up() {
   # relay-a arrives through the peer's serve so fd-b's agents keep the
   # same two-relay map fd-a's agents use.
   g6rd_tunnel_forward relay-a-forward "$(<"${G6RD_STATE}/peer-relay-a-node-id")" \
-    "${G6_RELAY_A_FORWARD_PORT:-3444}"
+    3443
   # relay-b serves the peer's forward key so fd-a's agents reach it.
   g6rd_tunnel_serve relay-b "$(<"${G6RD_STATE}/peer-relay-b-forward-node-id")" \
-    "${G6_RELAY_BIND_PORT:-3443}"
+    "${G6_RELAY_BIND_PORT:-13443}"
 }
 
 standby_in_recovery() {
