@@ -295,6 +295,11 @@ g6rd_agent_compose() {
     echo "agent overlay ${G6RD_AGENT_COMPOSE} has not been generated" >&2
     return 1
   }
+  if [[ -z "${G6_OWNER_PASSWORD:-}" || -z "${G6_DEV_AUTH_TOKEN:-}" || -z "${G6_FD_ID:-}" ]]; then
+    if ! g6rd_export_common_env; then
+      g6rd_placeholder_env
+    fi
+  fi
   docker compose --project-name "${COMPOSE_PROJECT}" \
     --file "${COMPOSE_FILE}" --file "${G6RD_AGENT_COMPOSE}" "$@"
 }

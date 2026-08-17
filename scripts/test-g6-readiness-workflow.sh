@@ -203,6 +203,15 @@ if [[ -z "${fd_a_load_wait}" || -z "${fd_a_pitr}" || "${fd_a_load_wait}" -ge "${
   echo "fd-a must wait for the active load before recording PITR markers" >&2
   exit 1
 fi
+fd_a_tunnel_up="$(order_of 'fd-a.sh tunnel-up')"
+fd_a_shared_stage="$(order_of 'fd-a.sh publish-shared-secrets')"
+fd_a_shared_upload="$(order_of 'name: g6-rd-shared-')"
+if [[ -z "${fd_a_tunnel_up}" || -z "${fd_a_shared_stage}" || -z "${fd_a_shared_upload}" \
+  || "${fd_a_tunnel_up}" -ge "${fd_a_shared_stage}" \
+  || "${fd_a_shared_stage}" -ge "${fd_a_shared_upload}" ]]; then
+  echo "fd-a must stage the shared trust material before publishing its rendezvous" >&2
+  exit 1
+fi
 fd_b_load="$(order_of 'fd-b.sh load-start')"
 fd_b_isolation_wait="$(order_of 'wait-download "g6-rd-isolation')"
 fd_b_promote="$(order_of 'fd-b.sh promote ')"
@@ -576,6 +585,8 @@ chmod +x "${cleanup_test}/bin/docker"
   work="${G6RD_WORK}"
   g6rd_placeholder_env
   g6rd_write_agent_overlay "$(g6rd_agent_count)"
+  unset G6_FD_ID G6_OWNER_PASSWORD G6_APP_PASSWORD G6_REPLICATION_PASSWORD \
+    G6_DEV_AUTH_TOKEN G6_SIGNING_DIR G6_RELAY_DIR
   rm -rf "${G6RD_AGENTS}"
   export G6RD_TEST_AGENT_ROOT="${G6RD_AGENTS}"
   g6rd_cleanup
