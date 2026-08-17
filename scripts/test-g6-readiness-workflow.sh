@@ -403,6 +403,15 @@ grep -q 'RETURNING txid.*written_at' "${FD_A}" || {
   exit 1
 }
 source "${LIB}"
+workspace_id="$(g6rd_uuidv7)"
+if [[ ! "${workspace_id}" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-8[0-9a-f]{3}-[0-9a-f]{12}$ ]]; then
+  echo "the G6 workspace generator did not produce a canonical UUIDv7" >&2
+  exit 1
+fi
+if grep -q 'uuidgen' "${FD_A}"; then
+  echo "the G6 workspace must not use the UUIDv4-oriented system generator" >&2
+  exit 1
+fi
 marker_with_tag=$'781:2026-08-17T01:02:03.123456Z\nINSERT 0 1'
 if [[ "$(g6rd_extract_pitr_marker_row "${marker_with_tag}")" != "781:2026-08-17T01:02:03.123456Z" ]]; then
   echo "PITR marker parsing must discard the psql command tag" >&2
