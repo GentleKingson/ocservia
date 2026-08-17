@@ -177,6 +177,12 @@ g6rd_generate_secrets() {
 # The per-FD relay secret bundle mounted into the relay container.
 g6rd_materialize_relay_dir() {
   local dir="${G6RD_WORK}/relay-secrets"
+  if [[ -s "${dir}/relay.crt" && -s "${dir}/relay.key" \
+    && -s "${dir}/relay-ca.pem" && -s "${dir}/relay-token" ]]; then
+    printf '%s\n' "${dir}"
+    return 0
+  fi
+  rm -rf -- "${dir}"
   mkdir -p "${dir}"
   cp -f "${G6RD_SECRETS}/relay-chain.crt" "${dir}/relay.crt"
   cp -f "${G6RD_SECRETS}/relay-leaf.key" "${dir}/relay.key"
@@ -184,6 +190,9 @@ g6rd_materialize_relay_dir() {
   cp -f "${G6RD_SECRETS}/relay-token" "${dir}/relay-token"
   chmod 0644 "${dir}/relay.crt" "${dir}/relay-ca.pem"
   chmod 0600 "${dir}/relay.key" "${dir}/relay-token"
+  docker run --rm --network none --log-driver none \
+    -v "${dir}:/fix" postgres:17.10-bookworm \
+    sh -c 'chown -R 65532:65532 /fix; chmod 0750 /fix' >/dev/null
   printf '%s\n' "${dir}"
 }
 
@@ -193,12 +202,41 @@ g6rd_materialize_relay_dir() {
 # (65532:65532 0640) require.
 g6rd_materialize_signing_dir() {
   local dir="${G6RD_WORK}/signing"
+  if [[ -s "${dir}/command-signing.pem" \
+    && -s "${dir}/command-verification.pem" \
+    && -s "${dir}/command-verification-agent.pem" \
+    && -s "${dir}/command-verification-privd.pem" ]]; then
+    printf '%s\n' "${dir}"
+    return 0
+  fi
+  rm -rf -- "${dir}"
   mkdir -p "${dir}"
   cp -f "${G6RD_SECRETS}/command-signing.pem" "${dir}/command-signing.pem"
+  cp -f "${G6RD_SECRETS}/command-verification.pem" "${dir}/command-verification.pem"
   cp -f "${G6RD_SECRETS}/command-verification.pem" "${dir}/command-verification-agent.pem"
   cp -f "${G6RD_SECRETS}/command-verification.pem" "${dir}/command-verification-privd.pem"
   chmod 0400 "${dir}/command-signing.pem"
-  chmod 0640 "${dir}/command-verification-agent.pem" "${dir}/command-verification-privd.pem"
+  chmod 0640 "${dir}/command-verification.pem" \
+    "${dir}/command-verification-agent.pem" "${dir}/command-verification-privd.pem"
+  docker run --rm --network none --log-driver none \
+    -v "${dir}:/fix" postgres:17.10-bookworm sh -c \
+    'chown 0:65532 /fix; chmod 0750 /fix; chown 65534:65532 /fix/command-signing.pem; chown 0:65532 /fix/command-verification.pem /fix/command-verification-agent.pem /fix/command-verification-privd.pem' \
+    >/dev/null
+  printf '%s\n' "${dir}"
+}
+
+g6rd_materialize_probe_controller_key_dir() {
+  local dir="${G6RD_WORK}/probe-controller-key"
+  if [[ ! -s "${dir}/controller.key" ]]; then
+    rm -rf -- "${dir}"
+    mkdir -p "${dir}"
+    cp -f "${G6RD_SECRETS}/controller.key" "${dir}/controller.key"
+    chmod 0400 "${dir}/controller.key"
+    docker run --rm --network none --log-driver none \
+      -v "${dir}:/fix" postgres:17.10-bookworm sh -c \
+      'chown 0:65532 /fix; chmod 0750 /fix; chown 65534:65532 /fix/controller.key' \
+      >/dev/null
+  fi
   printf '%s\n' "${dir}"
 }
 
@@ -249,10 +287,10 @@ g6rd_export_common_env() {
   export G6_API_BIND_PORT="${G6_API_BIND_PORT:-18080}"
   export G6_RELAY_BIND_PORT="${G6_RELAY_BIND_PORT:-3443}"
   local probe_key_dir="${G6RD_WORK}/probe-controller-key"
-  mkdir -p "${probe_key_dir}"
   if [[ -s "${G6RD_SECRETS}/controller.key" ]]; then
-    cp -f "${G6RD_SECRETS}/controller.key" "${probe_key_dir}/controller.key"
-    chmod 0400 "${probe_key_dir}/controller.key"
+    probe_key_dir="$(g6rd_materialize_probe_controller_key_dir)"
+  else
+    mkdir -p "${probe_key_dir}"
   fi
   export G6_PROBE_CONTROLLER_KEY_DIR="${probe_key_dir}"
   if [[ -s "${G6RD_STATE}/controller-endpoint-id" ]]; then
@@ -616,8 +654,10 @@ g6rd_prepare_agent_material() {
   mkdir -p "${dir}/identity" "${dir}/journal" "${dir}/secrets" "${dir}/state"
   : >"${dir}/state/synthetic-barrier"
   chmod 0700 "${dir}/identity" "${dir}/secrets"
-  cp -f "${G6RD_SECRETS}/command-verification-agent.pem" "${dir}/secrets/"
-  cp -f "${G6RD_SECRETS}/command-verification-privd.pem" "${dir}/secrets/"
+  cp -f "${G6RD_SECRETS}/command-verification.pem" \
+    "${dir}/secrets/command-verification-agent.pem"
+  cp -f "${G6RD_SECRETS}/command-verification.pem" \
+    "${dir}/secrets/command-verification-privd.pem"
   cp -f "${G6RD_SECRETS}/seal-user-password.key" "${dir}/secrets/"
   cp -f "${G6RD_SECRETS}/seal-user-password-sha256" "${dir}/secrets/"
   cp -f "${G6RD_SECRETS}/seal-p12.key" "${dir}/secrets/"
@@ -626,6 +666,9 @@ g6rd_prepare_agent_material() {
   cp -f "${G6RD_SECRETS}/relay-token" "${dir}/secrets/relay-token"
   chmod 0640 "${dir}/secrets/"*.pem
   chmod 0600 "${dir}/secrets/"*.key "${dir}/secrets/relay-token"
+  docker run --rm --network none --log-driver none \
+    -v "${dir}/secrets:/fix" postgres:17.10-bookworm \
+    sh -c 'chown -R 0:65532 /fix; chmod 0750 /fix; chmod 0640 /fix/*' >/dev/null
 }
 
 g6rd_write_agent_overlay() {
@@ -976,6 +1019,7 @@ g6rd_cleanup() {
   g6rd_reclaim_directory "${G6RD_ARCHIVE}" || status=1
   g6rd_reclaim_directory "${G6RD_BASEBACKUP}" || status=1
   g6rd_reclaim_directory "${G6RD_RESTORE}" || status=1
+  g6rd_reclaim_directory "${G6RD_WORK}" || status=1
   rm -rf -- "${G6RD_WORK}" "${RUNNER_TEMP}"/g6-readiness-* || {
     echo "cleanup: work directory removal failed" >&2
     status=1

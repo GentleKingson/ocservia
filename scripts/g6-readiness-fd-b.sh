@@ -114,7 +114,7 @@ phase_import_peer_secrets() {
   require_file "${peer}/controller.key"
   local name
   for name in owner-password app-password replication-password dev-auth-token \
-    relay-ca.pem relay-leaf.crt relay-leaf.key relay-token \
+    relay-ca.pem relay-chain.crt relay-leaf.crt relay-leaf.key relay-token \
     command-signing.pem command-verification.pem \
     seal-user-password.key seal-user-password-sha256 \
     seal-p12.key seal-p12-sha256; do
