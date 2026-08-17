@@ -90,6 +90,7 @@ stop_watchers() {
 # ---------------------------------------------------------------------------
 
 phase_prepare() {
+  g6rd_prepare_support_image
   g6rd_build_tunnel
   mkdir -p "${G6RD_OUTBOX}/tunnel"
   local name
@@ -173,6 +174,7 @@ phase_standby_bootstrap() {
   cp -f "${peer}/controller-endpoint-id" "${G6RD_STATE}/controller-endpoint-id"
   cp -f "${peer}/workspace-id" "${G6RD_STATE}/workspace-id"
   g6rd_export_common_env
+  g6rd_prepare_postgres_bind_dirs
   # The clone runs inside the pinned image against the peer primary through
   # the tunnel, as the postgres user, with the replication slot retained.
   g6rd_compose run --rm --no-deps -T --user 999:999 \
@@ -180,7 +182,7 @@ phase_standby_bootstrap() {
     pg_basebackup -h host.docker.internal -p 15432 -U ocservia_replication \
     -D /var/lib/postgresql/data -R -X stream -C -S g6_slot --checkpoint=fast \
     < /dev/null >"${G6RD_LOGS}/basebackup.log" 2>&1
-  docker run --rm --entrypoint /bin/sh \
+  docker run --rm --pull=never --entrypoint /bin/sh \
     -v "${COMPOSE_PROJECT}_postgres-data:/data" postgres:17.10-bookworm \
     -c "printf '%s\n' \"primary_conninfo = 'host=host.docker.internal port=15432 user=ocservia_replication password=$(g6rd_secret replication-password) application_name=g6_standby'\" >> /data/postgresql.auto.conf"
   g6rd_compose up --detach postgres
@@ -200,7 +202,7 @@ phase_relay_up() {
 # snapshot once, with the complete fleet present.
 phase_agents_enroll() {
   local peer_nodes="${1:?peer nodes tsv}"
-  local index count dir name endpoint token node_id
+  local index count dir name endpoint token node_id enrollment_log
   count="$(g6rd_agent_count)"
   G6RD_WORKSPACE_ID="$(<"${G6RD_STATE}/workspace-id")"
   export G6RD_WORKSPACE_ID
@@ -214,7 +216,7 @@ phase_agents_enroll() {
     dir="$(g6rd_agent_dir "${index}")"
     name="g6-fd-b-$(printf '%02d' "${index}")"
     g6rd_prepare_agent_material "${index}"
-    docker run --rm -v "${dir}/identity:/chown" postgres:17.10-bookworm \
+    docker run --rm --pull=never -v "${dir}/identity:/chown" postgres:17.10-bookworm \
       chown -R 65532:65532 /chown >/dev/null 2>&1
     endpoint="$(g6rd_agent_compose run --rm --no-deps \
       -e G6_MODE=prepare "agent-${FD_ID}-$(printf '%02d' "${index}")" \
@@ -226,15 +228,17 @@ phase_agents_enroll() {
     token="$(g6rd_mint_enrollment_token "${name}" "${endpoint}")"
     printf '%s\n' "${token}" >"${dir}/secrets/enrollment-token"
     chmod 0600 "${dir}/secrets/enrollment-token"
-    docker run --rm -v "${dir}/secrets:/fix" postgres:17.10-bookworm \
+    docker run --rm --pull=never -v "${dir}/secrets:/fix" postgres:17.10-bookworm \
       chown 65532:65532 /fix/enrollment-token >/dev/null 2>&1
+    enrollment_log="${G6RD_LOGS}/enrollment-${name}.log"
     if ! node_id="$(g6rd_agent_compose run --rm --no-deps \
       -e G6_MODE=enroll \
       -e G6_ENROLLMENT_TOKEN_FILE=/run/ocservia-agent/secrets/enrollment-token \
       -e G6_ENROLLMENT_ENVIRONMENT=development \
       "agent-${FD_ID}-$(printf '%02d' "${index}")" \
-      | g6rd_extract_enrollment_node_id)"; then
+      2>&1 | tee "${enrollment_log}" | g6rd_extract_enrollment_node_id)"; then
       echo "agent ${name} enrollment did not return a UUIDv7 node id" >&2
+      sed "s/${token}/[redacted]/g" "${enrollment_log}" | tail -40 >&2 || true
       return 1
     fi
     g6rd_approve_node "${node_id}" || {
@@ -250,7 +254,7 @@ phase_agents_enroll() {
 
 phase_agents_start() {
   local trust_ready="${1:?transport trust rendezvous is required}"
-  local count
+  local count local_nodes
   require_file "${trust_ready}/candidate-sha"
   [[ "$(<"${trust_ready}/candidate-sha")" == "${G6RD_CANDIDATE_SHA}" ]] || {
     echo "transport trust rendezvous belongs to a different candidate" >&2
@@ -262,11 +266,12 @@ phase_agents_start() {
   g6rd_export_common_env
   g6rd_write_agent_overlay "${count}"
   g6rd_chown_agent_dirs
-  g6rd_agent_compose up --detach
-  # The era-1 controller transportd runs on the peer, so fd-b cannot probe
-  # sessions locally yet; the load phase proves fleet connectivity after
-  # promotion through fd-b's own transportd. The watchers start now so the
-  # epoch history covers both eras from the primary's own tables.
+  local_nodes="${G6RD_STATE}/local-nodes.tsv"
+  awk -F'\t' -v prefix="g6-${FD_ID}-" 'index($1, prefix) == 1' \
+    "${NODES_FILE}" >"${local_nodes}"
+  g6rd_start_agent_fleet "${local_nodes}" "${NODES_FILE}"
+  # The controller's observed-state API is the era-1 readiness authority;
+  # the watchers start only after all 55 Agents are online and fresh.
   start_watchers
 }
 
@@ -387,7 +392,7 @@ inject_controller_key() {
   local volume="${COMPOSE_PROJECT}_controller-secrets"
   docker volume inspect "${volume}" >/dev/null 2>&1 || \
     g6rd_compose up --detach controller-key-init >/dev/null 2>&1 || true
-  docker run --rm \
+  docker run --rm --pull=never \
     -v "${volume}:/secrets" \
     -v "${G6RD_SECRETS}/controller.key:/key:ro" \
     postgres:17.10-bookworm \
@@ -1032,7 +1037,7 @@ outbox-send-before-mark) phase_outbox_send_before_mark ;;
   merge-peer-final-evidence) phase_merge_peer_final_evidence "${2:?peer final evidence root}" ;;
   evidence-build) phase_evidence_build "${2:?peer evidence root}" ;;
   diagnostics) g6rd_diagnostics ;;
-  cleanup) g6rd_cleanup ;;
+  cleanup) g6rd_cleanup_bounded ;;
 *)
   echo "usage: $0 <prepare|import-peer-secrets|import-peer-tunnel-nodes|images|tunnel-up|standby-bootstrap|relay-up|agents-enroll|agents-start|load-start|promote|merge-peer-evidence|scenario-scheduler|scenario-owner|scenario-relay|scenario-path|outbox-claim-before-send|outbox-send-before-mark|outbox-result-before-commit|window|evidence-collect|final-freeze|merge-peer-final-evidence|evidence-build|diagnostics|cleanup>" >&2
   exit 2

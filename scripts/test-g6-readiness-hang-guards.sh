@@ -33,7 +33,7 @@ jobs = workflow.fetch("jobs")
     reject("#{job_id} post-failure step is missing") unless step
     reject("#{job_id} post-failure step must run under always()") unless step.fetch("if") == "always()"
     reject("#{job_id} post-failure step must have timeout #{timeout}") unless step.fetch("timeout-minutes") == timeout
-    reject("#{job_id} post-failure step must not mask the scenario result") unless step.fetch("continue-on-error") == true
+    reject("#{job_id} post-failure step must not mask the scenario result") if step["continue-on-error"] == true
   end
 end
 
@@ -70,14 +70,19 @@ critical_timeouts.each do |job_id, expected|
 end
 RUBY
 
-grep -q -- '--connect-timeout 5' "${ARTIFACT_HELPER}" || {
+grep -qF 'REAL_E2E_ARTIFACT_CONNECT_TIMEOUT_SECONDS:-5' "${ARTIFACT_HELPER}" || {
   echo "artifact API calls must have a connect timeout" >&2
   exit 1
 }
-grep -q -- '--max-time 20' "${ARTIFACT_HELPER}" || {
+grep -qF 'REAL_E2E_ARTIFACT_API_TIMEOUT_SECONDS:-20' "${ARTIFACT_HELPER}" || {
   echo "artifact API calls must have a hard request timeout" >&2
   exit 1
 }
+grep -q -- '--retry-max-time' "${ARTIFACT_HELPER}" || {
+  echo "artifact API retries must have a cumulative hard timeout" >&2
+  exit 1
+}
+# shellcheck disable=SC2016  # assert the literal run-attempt expression
 grep -qF '/attempts/${GITHUB_RUN_ATTEMPT}/jobs?per_page=100' "${ARTIFACT_HELPER}" || {
   echo "artifact waits must inspect the peer job in the exact run attempt" >&2
   exit 1

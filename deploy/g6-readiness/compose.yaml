@@ -76,6 +76,7 @@ services:
     init: false
     cap_add: [CHOWN, FOWNER, DAC_OVERRIDE, SETUID, SETGID]
     image: postgres:17.10-bookworm
+    pull_policy: never
     environment:
       POSTGRES_DB: ocservia
       POSTGRES_USER: ocservia_owner

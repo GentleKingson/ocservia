@@ -10,7 +10,7 @@ use ocservia_g6_tunnel::{
 };
 use tokio::net::TcpStream;
 
-const TARGET_READY_TIMEOUT: Duration = Duration::from_secs(300);
+const TARGET_READY_TIMEOUT: Duration = Duration::from_mins(5);
 const TARGET_READY_POLL_INTERVAL: Duration = Duration::from_millis(250);
 
 #[tokio::main]

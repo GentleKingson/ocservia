@@ -40,6 +40,7 @@ postgres_healthy() {
 }
 
 phase_prepare() {
+  g6rd_prepare_support_image
   g6rd_build_tunnel
   g6rd_generate_secrets
   mkdir -p "${G6RD_OUTBOX}/tunnel"
@@ -167,6 +168,7 @@ bootstrap_controller_endpoint() {
 
 phase_primary_up() {
   g6rd_export_common_env
+  g6rd_prepare_postgres_bind_dirs
   export G6_DB_HOST=postgres G6_DB_PORT=5432
   g6rd_compose up --detach postgres
   g6rd_wait_until 60 2 "postgres healthy" postgres_healthy
@@ -211,12 +213,12 @@ phase_pitr_prepare() {
   # A physical restore can only replay forward from its base backup. Take and
   # verify the backup before the target markers, then bind each marker's txid
   # and timestamp to the INSERT transaction that acknowledged it.
-  docker run --rm --network host --log-driver none \
+  docker run --rm --pull=never --network host --log-driver none \
     -e PGPASSWORD="$(g6rd_secret replication-password)" \
     -v "${G6RD_BASEBACKUP}:/backup" postgres:17.10-bookworm \
     sh -c 'pg_basebackup -h 127.0.0.1 -p 5432 -U ocservia_replication -D /backup -X stream --checkpoint=fast' \
     >"${G6RD_LOGS}/basebackup.log" 2>&1
-  docker run --rm -v "${G6RD_BASEBACKUP}:/backup:ro" postgres:17.10-bookworm \
+  docker run --rm --pull=never -v "${G6RD_BASEBACKUP}:/backup:ro" postgres:17.10-bookworm \
     pg_verifybackup /backup >>"${G6RD_LOGS}/basebackup.log" 2>&1
   g6rd_reclaim_directory "${G6RD_BASEBACKUP}" || true
   local marker_output marker_row switch_target
@@ -252,7 +254,7 @@ phase_pitr_prepare() {
 # is reloaded only after fd-b has activated its nodes too, so its fail-closed
 # startup snapshot contains the complete cross-domain fleet.
 phase_agents_enroll() {
-  local index count dir name endpoint token node_id
+  local index count dir name endpoint token node_id enrollment_log
   count="$(g6rd_agent_count)"
   G6RD_WORKSPACE_ID="$(<"${G6RD_STATE}/workspace-id")"
   export G6RD_WORKSPACE_ID
@@ -264,7 +266,7 @@ phase_agents_enroll() {
     dir="$(g6rd_agent_dir "${index}")"
     name="g6-fd-a-$(printf '%02d' "${index}")"
     g6rd_prepare_agent_material "${index}"
-    docker run --rm -v "${dir}/identity:/chown" postgres:17.10-bookworm \
+    docker run --rm --pull=never -v "${dir}/identity:/chown" postgres:17.10-bookworm \
       chown -R 65532:65532 /chown >/dev/null 2>&1
     endpoint="$(g6rd_agent_compose run --rm --no-deps \
       -e G6_MODE=prepare "agent-${FD_ID}-$(printf '%02d' "${index}")" \
@@ -276,15 +278,17 @@ phase_agents_enroll() {
     token="$(g6rd_mint_enrollment_token "${name}" "${endpoint}")"
     printf '%s\n' "${token}" >"${dir}/secrets/enrollment-token"
     chmod 0600 "${dir}/secrets/enrollment-token"
-    docker run --rm -v "${dir}/secrets:/fix" postgres:17.10-bookworm \
+    docker run --rm --pull=never -v "${dir}/secrets:/fix" postgres:17.10-bookworm \
       chown 65532:65532 /fix/enrollment-token >/dev/null 2>&1
+    enrollment_log="${G6RD_LOGS}/enrollment-${name}.log"
     if ! node_id="$(g6rd_agent_compose run --rm --no-deps \
       -e G6_MODE=enroll \
       -e G6_ENROLLMENT_TOKEN_FILE=/run/ocservia-agent/secrets/enrollment-token \
       -e G6_ENROLLMENT_ENVIRONMENT=development \
       "agent-${FD_ID}-$(printf '%02d' "${index}")" \
-      | g6rd_extract_enrollment_node_id)"; then
+      2>&1 | tee "${enrollment_log}" | g6rd_extract_enrollment_node_id)"; then
       echo "agent ${name} enrollment did not return a UUIDv7 node id" >&2
+      sed "s/${token}/[redacted]/g" "${enrollment_log}" | tail -40 >&2 || true
       return 1
     fi
     g6rd_approve_node "${node_id}" || {
@@ -335,7 +339,7 @@ phase_agents_start() {
   g6rd_export_common_env
   g6rd_write_agent_overlay "${count}"
   g6rd_chown_agent_dirs
-  g6rd_agent_compose up --detach
+  g6rd_start_agent_fleet "${G6RD_OUTBOX}/agents/nodes.tsv"
 }
 
 # The database failure: fd-a's primary is stopped under active load, and
@@ -344,6 +348,7 @@ phase_agents_start() {
 # same clock stay comparable.
 phase_isolate() {
   local outage isolated
+  g6rd_require_support_image
   mkdir -p "${G6RD_OUTBOX}/isolation"
   g6rd_psql -Atc "WITH active AS (
     SELECT c.id::text AS command_id,c.state AS command_state,a.state AS attempt_state,
@@ -403,7 +408,7 @@ phase_dual_primary_probes() {
     at="$(g6rd_now)"
     accepted=false
     if PGPASSWORD="$(g6rd_secret owner-password)" \
-      docker run --rm --network host --log-driver none \
+      docker run --rm --pull=never --network host --log-driver none \
       -e PGPASSWORD postgres:17.10-bookworm \
       psql "host=127.0.0.1 port=5432 user=ocservia_owner dbname=ocservia sslmode=disable" \
       -v ON_ERROR_STOP=1 -c "INSERT INTO ${MARKER_TABLE}(id,txid,phase) \
@@ -436,13 +441,13 @@ phase_pitr_restore() {
   rm -rf -- "${restore_dir}"
   mkdir -p "${restore_dir}"
   cp -a "${G6RD_BASEBACKUP}/." "${restore_dir}/"
-  docker run --rm -v "${restore_dir}:/data" postgres:17.10-bookworm \
+  docker run --rm --pull=never -v "${restore_dir}:/data" postgres:17.10-bookworm \
     sh -c "printf '%s\n' \"restore_command = 'cp /var/lib/postgresql/archive/%f %p'\" \
       \"recovery_target_name = 'g6_pitr_target'\" \
       \"recovery_target_action = 'promote'\" >> /data/postgresql.auto.conf && \
       touch /data/recovery.signal && chmod 700 /data" \
     >"${G6RD_LOGS}/pitr-prepare.log" 2>&1
-  docker run -d --name "${pitr_container}" \
+  docker run -d --pull=never --name "${pitr_container}" \
     -p "127.0.0.1:${PITR_RESTORE_PORT}:5432" \
     -e POSTGRES_DB=ocservia -e POSTGRES_USER=ocservia_owner \
     -e POSTGRES_PASSWORD="$(g6rd_secret owner-password)" \
@@ -452,7 +457,7 @@ phase_pitr_restore() {
   local marker_counts="" restored_at pitr_query
   pitr_query="host=127.0.0.1 port=${PITR_RESTORE_PORT} user=ocservia_owner dbname=ocservia sslmode=disable"
   for _ in {1..60}; do
-    if marker_counts="$(PGPASSWORD="$(g6rd_secret owner-password)" docker run --rm \
+    if marker_counts="$(PGPASSWORD="$(g6rd_secret owner-password)" docker run --rm --pull=never \
       --network host --log-driver none -e PGPASSWORD postgres:17.10-bookworm \
       psql "${pitr_query}" -Atc \
       "SELECT count(*) FILTER (WHERE id='pitr-marker-a') || ':' || count(*) FILTER (WHERE id='pitr-marker-b') FROM ${MARKER_TABLE}" \
@@ -496,7 +501,7 @@ phase_rejoin_readonly_probes() {
   for attempt in 1 2 3; do
     at="$(g6rd_now)"
     accepted=false
-    if output="$(PGPASSWORD="$(g6rd_secret owner-password)" docker run --rm \
+    if output="$(PGPASSWORD="$(g6rd_secret owner-password)" docker run --rm --pull=never \
       --network host --log-driver none -e PGPASSWORD postgres:17.10-bookworm \
       psql "host=127.0.0.1 port=5432 user=ocservia_owner dbname=ocservia sslmode=disable" \
       -v ON_ERROR_STOP=1 -c "INSERT INTO ${MARKER_TABLE}(id,txid,phase) VALUES ('post-rejoin-${attempt}',txid_current()::text,'probe')" 2>&1)"; then
@@ -520,11 +525,11 @@ phase_rejoin() {
   require_file "${G6RD_STATE}/peer-pg-b-node-id"
   g6rd_tunnel_forward pg-b-forward "$(<"${G6RD_STATE}/peer-pg-b-node-id")" 15432
   local data_volume="${COMPOSE_PROJECT}_postgres-data"
-  docker run --rm -v "${data_volume}:/data" \
+  docker run --rm --pull=never -v "${data_volume}:/data" \
     -e PGPASSWORD="$(g6rd_secret replication-password)" postgres:17.10-bookworm \
     sh -c 'pg_rewind -D /data --source-server="host=host.docker.internal port=15432 user=ocservia_replication dbname=ocservia password=$PGPASSWORD" || (rm -rf /data/* && PGSSLMODE=disable pg_basebackup -h host.docker.internal -p 15432 -U ocservia_replication -D /data -R -X stream -C -S g6_rejoin_slot --checkpoint=fast)' \
     >"${G6RD_LOGS}/rejoin.log" 2>&1
-  docker run --rm -v "${data_volume}:/data" postgres:17.10-bookworm \
+  docker run --rm --pull=never -v "${data_volume}:/data" postgres:17.10-bookworm \
     sh -c "printf '%s\n' \"primary_conninfo = 'host=host.docker.internal port=15432 user=ocservia_replication password=$(g6rd_secret replication-password) application_name=g6_rejoin_standby'\" >> /data/postgresql.auto.conf && touch /data/standby.signal" \
     >>"${G6RD_LOGS}/rejoin.log" 2>&1
   export G6_DB_HOST=postgres G6_DB_PORT=5432
@@ -612,7 +617,7 @@ relay-a-stop) phase_relay_a_stop ;;
 ready) phase_ready ;;
 evidence) phase_evidence "${2:?final-freeze directory is required}" ;;
 diagnostics) g6rd_diagnostics ;;
-cleanup) g6rd_cleanup ;;
+cleanup) g6rd_cleanup_bounded ;;
 *)
   echo "usage: $0 <prepare|publish-shared-secrets|import-peer-secrets|import-peer-tunnel-nodes|images|tunnel-up|primary-up|pitr-prepare|agents-enroll|transport-trust-reload|agents-start|isolate|dual-primary-probes|pitr-restore|rejoin|relay-a-stop|ready|evidence|diagnostics|cleanup>" >&2
   exit 2

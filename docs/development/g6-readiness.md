@@ -56,7 +56,12 @@ before the run is accepted.
 
 1. Both failure domains exchange tunnel identities; VM A brings up the
    primary, migrates, starts its role split and relay-a, then enrolls and
-   approves the 55-node Agent fleet (28 on VM A, 27 on VM B).
+   approves the 55-node Agent fleet (28 on VM A, 27 on VM B). After the
+   complete trust snapshot is loaded, each domain starts one Agent canary,
+   requires the controller read model to report it active, online, and fresh,
+   and only then starts the remaining local Agents in bounded batches. A
+   failed readiness cycle captures the controller response and Agent logs and
+   permits one bounded fleet restart before failing closed.
 2. VM B clones the primary through the tunnel, joins as the streaming
    standby, starts relay-b, and enrolls its Agents.
 3. VM B opens one production command per node behind an Agent execution
@@ -106,3 +111,10 @@ for five days. The bundle records the topology, the release manifest with
 every component image digest, the raw structured artifacts, and every
 artifact digest, all bound to the run's environment id and candidate
 commit SHA.
+
+Every rendezvous wait also reads the producer Job from the exact workflow
+attempt. A failed producer step ends the peer wait immediately, while a
+successful producer gets only a short artifact-propagation grace period.
+GitHub API calls and downloads have bounded connection, transfer, and retry
+budgets. Diagnostics and cleanup have separate hard limits; cleanup uses a
+support image cached before isolation and is forbidden from pulling images.

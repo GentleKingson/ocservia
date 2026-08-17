@@ -3,7 +3,7 @@ set -euo pipefail
 
 # The allowlist covers every harness that rendezvous through this helper:
 # the real-E2E controller/node pair, the G6 HA/PITR failure-domain pair, and
-# the G6 readiness failure-domain pair. Names stay closed — a new artifact
+# the G6 readiness failure-domain pair. Names stay closed - a new artifact
 # name is a deliberate contract change.
 validate_name() {
   local name="${1:-}"
@@ -21,41 +21,53 @@ validate_name() {
   }
 }
 
-github_json() {
+validate_positive_integer() {
+  local value="${1:-}" description="${2:?description is required}" maximum="${3:?maximum is required}"
+  [[ "${value}" =~ ^[0-9]+$ && "${value}" -ge 1 && "${value}" -le "${maximum}" ]] || {
+    echo "${description} must be 1..${maximum}" >&2
+    return 2
+  }
+}
+
+validate_http_budget() {
+  validate_positive_integer "${REAL_E2E_ARTIFACT_CONNECT_TIMEOUT_SECONDS:-5}" \
+    "artifact API connect timeout" 30
+  validate_positive_integer "${REAL_E2E_ARTIFACT_API_TIMEOUT_SECONDS:-20}" \
+    "artifact API total timeout" 60
+  validate_positive_integer "${REAL_E2E_ARTIFACT_DOWNLOAD_TIMEOUT_SECONDS:-120}" \
+    "artifact download total timeout" 600
+  [[ "${REAL_E2E_ARTIFACT_RETRIES:-2}" =~ ^[0-9]+$ \
+    && "${REAL_E2E_ARTIFACT_RETRIES:-2}" -le 5 ]] || {
+    echo "artifact API retries must be 0..5" >&2
+    return 2
+  }
+  validate_positive_integer "${REAL_E2E_ARTIFACT_RETRY_TOTAL_SECONDS:-30}" \
+    "artifact API retry total" 180
+  validate_positive_integer "${REAL_E2E_ARTIFACT_MAX_CONSECUTIVE_ERRORS:-3}" \
+    "artifact API consecutive error limit" 10
+  validate_positive_integer "${REAL_E2E_ARTIFACT_POLL_INTERVAL_SECONDS:-5}" \
+    "artifact poll interval" 30
+  validate_positive_integer "${REAL_E2E_ARTIFACT_PROPAGATION_GRACE_SECONDS:-30}" \
+    "artifact propagation grace" 300
+}
+
+github_get() {
   local url="${1:?GitHub API URL is required}"
-  curl --fail --silent --show-error \
-    --connect-timeout 5 \
-    --max-time 20 \
-    --retry 2 \
-    --retry-all-errors \
+  local max_time="${2:?request maximum time is required}"
+  curl --fail --silent --show-error --location \
+    --connect-timeout "${REAL_E2E_ARTIFACT_CONNECT_TIMEOUT_SECONDS:-5}" \
+    --max-time "${max_time}" \
+    --retry "${REAL_E2E_ARTIFACT_RETRIES:-2}" \
     --retry-delay 1 \
-    --retry-max-time 30 \
+    --retry-max-time "${REAL_E2E_ARTIFACT_RETRY_TOTAL_SECONDS:-30}" \
+    --retry-all-errors \
     --header "Authorization: Bearer ${GITHUB_TOKEN}" \
     --header "Accept: application/vnd.github+json" \
     --header "X-GitHub-Api-Version: 2022-11-28" \
     "${url}"
 }
 
-download_artifact() {
-  local url="${1:?artifact download URL is required}"
-  local output="${2:?artifact output path is required}"
-  curl --fail --silent --show-error --location \
-    --connect-timeout 5 \
-    --max-time 120 \
-    --retry 3 \
-    --retry-all-errors \
-    --retry-delay 2 \
-    --retry-max-time 180 \
-    --header "Authorization: Bearer ${GITHUB_TOKEN}" \
-    --header "Accept: application/vnd.github+json" \
-    --header "X-GitHub-Api-Version: 2022-11-28" \
-    --output "${output}" "${url}"
-}
-
-# G6 readiness is the only artifact rendezvous where both sides execute as
-# independent concurrent jobs. Map the current job to its peer so a failed
-# side cannot leave the other side polling for a never-to-be-created artifact.
-peer_job_name() {
+default_peer_job_name() {
   if [[ -n "${REAL_E2E_ARTIFACT_PEER_JOB_NAME:-}" ]]; then
     printf '%s\n' "${REAL_E2E_ARTIFACT_PEER_JOB_NAME}"
     return 0
@@ -68,52 +80,56 @@ peer_job_name() {
 }
 
 peer_job_state() {
-  local peer response state
-  peer="$(peer_job_name)" || return 0
-  if ! response="$(github_json \
-    "${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/attempts/${GITHUB_RUN_ATTEMPT}/jobs?per_page=100")"; then
-    echo "warning: unable to inspect peer job ${peer}; artifact polling will continue" >&2
-    return 0
+  local response="${1:?jobs API response is required}"
+  local peer_job="${2:?peer job name is required}"
+  local count failed_step failed_conclusion failed_step_json status conclusion
+  count="$(jq -er --arg peer "${peer_job}" \
+    '[.jobs[] | select(.name == $peer)] | length' <<<"${response}")" || return 2
+  if [[ "${count}" != 1 ]]; then
+    echo "expected exactly one peer job named ${peer_job}, found ${count}" >&2
+    return 2
   fi
-  if ! jq -e '.jobs | type == "array"' >/dev/null 2>&1 <<<"${response}"; then
-    echo "warning: GitHub returned an invalid peer-job response; artifact polling will continue" >&2
-    return 0
+  failed_step_json="$(jq -c --arg peer "${peer_job}" '
+    [.jobs[] | select(.name == $peer) | .steps[]? |
+      select(.status == "completed" and
+        (.conclusion | IN(
+          "failure", "cancelled", "timed_out", "action_required",
+          "startup_failure", "stale"
+        ))) |
+      {name, conclusion}] | first // {}
+  ' <<<"${response}")" || return 2
+  failed_step="$(jq -r '.name // empty' <<<"${failed_step_json}")" || return 2
+  failed_conclusion="$(jq -r '.conclusion // empty' <<<"${failed_step_json}")" || return 2
+  if [[ -n "${failed_step}" ]]; then
+    echo "peer job ${peer_job} failed at step ${failed_step} (${failed_conclusion}); refusing to wait" >&2
+    return 1
   fi
-  state="$(jq -c --arg name "${peer}" '
-    [.jobs[] | select(.name == $name)] | sort_by(.id) | last |
-    if . == null then empty else {
-      status: (.status // ""),
-      conclusion: (.conclusion // ""),
-      failed_step: (
-        [.steps[]? |
-          select(
-            (.conclusion // "") == "failure" or
-            (.conclusion // "") == "cancelled" or
-            (.conclusion // "") == "timed_out" or
-            (.conclusion // "") == "action_required" or
-            (.conclusion // "") == "startup_failure" or
-            (.conclusion // "") == "stale"
-          ) |
-          {name: (.name // "unknown"), conclusion: (.conclusion // "unknown")}
-        ] | first // null
-      )
-    } end
-  ' <<<"${response}")"
-  [[ -n "${state}" ]] && printf '%s\n' "${state}"
+  read -r status conclusion < <(jq -r --arg peer "${peer_job}" \
+    '.jobs[] | select(.name == $peer) | [.status, (.conclusion // "")] | @tsv' \
+    <<<"${response}")
+  if [[ "${status}" == completed && "${conclusion}" != success ]]; then
+    echo "peer job ${peer_job} completed with conclusion ${conclusion:-unknown}; refusing to wait" >&2
+    return 1
+  fi
+  if [[ "${status}" == completed ]]; then
+    printf '%s\n' success
+  else
+    printf '%s\n' running
+  fi
 }
 
 wait_download() {
   local name="${1:?artifact name is required}"
   local destination="${2:?destination is required}"
   local timeout_seconds="${3:-600}"
-  local deadline response download_url archive staging entry
-  local next_peer_check peer_state peer_status peer_conclusion
-  local failed_step failed_step_conclusion peer_success_seen_at=-1
+  local peer_job="${4:-}"
+  local deadline response jobs_response artifact_id download_url archive staging entry listing
+  local artifact_api_errors=0 jobs_api_errors=0 peer_success_at=0
+  local peer_state peer_state_status poll_interval max_consecutive_errors propagation_grace
+  local peer_checked
   validate_name "${name}"
-  [[ "${timeout_seconds}" =~ ^[0-9]+$ && "${timeout_seconds}" -ge 1 && "${timeout_seconds}" -le 3600 ]] || {
-    echo "artifact wait timeout must be 1..3600 seconds" >&2
-    return 2
-  }
+  validate_positive_integer "${timeout_seconds}" "artifact wait timeout" 3600
+  validate_http_budget
   [[ -n "${GITHUB_TOKEN:-}" && -n "${GITHUB_REPOSITORY:-}" && -n "${GITHUB_API_URL:-}" ]] || {
     echo "GitHub artifact API environment is incomplete" >&2
     return 2
@@ -126,67 +142,94 @@ wait_download() {
     echo "artifact destination must be empty" >&2
     return 2
   fi
+  if [[ -z "${peer_job}" ]]; then
+    peer_job="$(default_peer_job_name || true)"
+  fi
+  if [[ -n "${peer_job}" && ("${peer_job}" == *$'\n'* || ${#peer_job} -gt 128) ]]; then
+    echo "peer job name is invalid" >&2
+    return 2
+  fi
 
   deadline=$((SECONDS + timeout_seconds))
-  next_peer_check="${SECONDS}"
-  download_url=""
+  poll_interval="${REAL_E2E_ARTIFACT_POLL_INTERVAL_SECONDS:-5}"
+  max_consecutive_errors="${REAL_E2E_ARTIFACT_MAX_CONSECUTIVE_ERRORS:-3}"
+  propagation_grace="${REAL_E2E_ARTIFACT_PROPAGATION_GRACE_SECONDS:-30}"
+  artifact_id=""
   while ((SECONDS < deadline)); do
-    if response="$(github_json \
-      "${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/artifacts?per_page=100&name=${name}")"; then
-      if jq -e '.artifacts | type == "array"' >/dev/null 2>&1 <<<"${response}"; then
-        download_url="$(jq -r --arg name "${name}" \
-          '[.artifacts[] | select(.name == $name and .expired == false)] | sort_by(.id) | last | .archive_download_url // empty' \
-          <<<"${response}")"
-      else
-        echo "warning: GitHub returned an invalid artifact response; retrying" >&2
+    peer_checked=0
+    if response="$(github_get \
+      "${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/artifacts?per_page=100&name=${name}" \
+      "${REAL_E2E_ARTIFACT_API_TIMEOUT_SECONDS:-20}")"; then
+      if ! jq -e '.artifacts | type == "array"' <<<"${response}" >/dev/null 2>&1; then
+        echo "artifact API returned an invalid JSON document" >&2
+        return 1
       fi
+      artifact_id="$(jq -r --arg name "${name}" '
+        [.artifacts[] |
+          select(.name == $name and .expired == false and (.id | type == "number"))]
+        | sort_by(.id) | last | .id // empty
+      ' <<<"${response}")"
+      artifact_api_errors=0
     else
-      echo "warning: GitHub artifact query failed; retrying within the bounded wait" >&2
-    fi
-    if [[ -n "${download_url}" ]]; then
-      break
+      artifact_api_errors=$((artifact_api_errors + 1))
+      if ((artifact_api_errors >= max_consecutive_errors)); then
+        echo "artifact API failed ${artifact_api_errors} consecutive bounded requests" >&2
+        return 1
+      fi
     fi
 
-    if ((SECONDS >= next_peer_check)); then
-      next_peer_check=$((SECONDS + 10))
-      peer_state="$(peer_job_state || true)"
-      if [[ -n "${peer_state}" ]]; then
-        peer_status="$(jq -r '.status' <<<"${peer_state}")"
-        peer_conclusion="$(jq -r '.conclusion' <<<"${peer_state}")"
-        failed_step="$(jq -r '.failed_step.name // empty' <<<"${peer_state}")"
-        failed_step_conclusion="$(jq -r '.failed_step.conclusion // empty' <<<"${peer_state}")"
-        if [[ -n "${failed_step}" ]]; then
-          echo "peer job $(peer_job_name) failed at step ${failed_step} (${failed_step_conclusion}); refusing to wait for ${name}" >&2
+    if [[ -n "${peer_job}" ]]; then
+      if jobs_response="$(github_get \
+        "${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/attempts/${GITHUB_RUN_ATTEMPT}/jobs?per_page=100" \
+        "${REAL_E2E_ARTIFACT_API_TIMEOUT_SECONDS:-20}")"; then
+        if ! jq -e '.jobs | type == "array"' <<<"${jobs_response}" >/dev/null 2>&1; then
+          echo "jobs API returned an invalid JSON document" >&2
           return 1
         fi
-        if [[ "${peer_status}" == completed ]]; then
-          if [[ "${peer_conclusion}" != success ]]; then
-            echo "peer job $(peer_job_name) completed with ${peer_conclusion:-unknown}; refusing to wait for ${name}" >&2
-            return 1
-          fi
-          if ((peer_success_seen_at < 0)); then
-            peer_success_seen_at="${SECONDS}"
-          elif ((SECONDS - peer_success_seen_at >= 60)); then
-            echo "peer job $(peer_job_name) succeeded without publishing required artifact ${name}" >&2
-            return 1
-          fi
+        if peer_state="$(peer_job_state "${jobs_response}" "${peer_job}")"; then
+          :
         else
-          peer_success_seen_at=-1
+          peer_state_status=$?
+          return "${peer_state_status}"
+        fi
+        jobs_api_errors=0
+        peer_checked=1
+        if [[ "${peer_state}" == success && -z "${artifact_id}" ]]; then
+          ((peer_success_at > 0)) || peer_success_at=${SECONDS}
+          if ((SECONDS - peer_success_at >= propagation_grace)); then
+            echo "peer job ${peer_job} succeeded but did not publish artifact ${name} within the propagation grace period" >&2
+            return 1
+          fi
+        fi
+      else
+        jobs_api_errors=$((jobs_api_errors + 1))
+        if ((jobs_api_errors >= max_consecutive_errors)); then
+          echo "jobs API failed ${jobs_api_errors} consecutive bounded requests" >&2
+          return 1
         fi
       fi
     fi
-    sleep 5
+    if [[ -n "${artifact_id}" && (-z "${peer_job}" || "${peer_checked}" -eq 1) ]]; then
+      break
+    fi
+    sleep "${poll_interval}"
   done
-  [[ -n "${download_url}" ]] || {
+  [[ -n "${artifact_id}" ]] || {
     echo "timed out waiting for artifact ${name}" >&2
     return 1
   }
+  download_url="${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}/actions/artifacts/${artifact_id}/zip"
 
   archive="$(mktemp "${RUNNER_TEMP:-/tmp}/real-e2e-artifact.XXXXXX.zip")"
   staging="$(mktemp -d "${RUNNER_TEMP:-/tmp}/real-e2e-artifact.XXXXXX")"
   cleanup_download() { rm -f -- "${archive}"; rm -rf -- "${staging}"; }
   trap cleanup_download RETURN
-  download_artifact "${download_url}" "${archive}"
+  github_get "${download_url}" "${REAL_E2E_ARTIFACT_DOWNLOAD_TIMEOUT_SECONDS:-120}" \
+    >"${archive}"
+  if ! listing="$(unzip -Z1 "${archive}")"; then
+    echo "artifact download is not a valid ZIP archive" >&2
+    return 1
+  fi
   while IFS= read -r entry; do
     [[ -n "${entry}" && "${entry}" != /* && "${entry}" != *\\* ]] || {
       echo "artifact contains an unsafe member name" >&2
@@ -199,7 +242,14 @@ wait_download() {
         return 1
       }
     done
-  done < <(unzip -Z1 "${archive}")
+  done <<<"${listing}"
+  if unzip -Z -l "${archive}" | awk '
+    substr($1, 1, 1) == "l" { found = 1 }
+    END { exit(found ? 0 : 1) }
+  '; then
+    echo "artifact contains a symbolic link" >&2
+    return 1
+  fi
   unzip -q "${archive}" -d "${staging}"
   if find "${staging}" -type l -print -quit | grep -q .; then
     echo "artifact contains a symbolic link" >&2
@@ -216,10 +266,10 @@ case "${1:-}" in
     validate_name "${2:-}"
     ;;
   wait-download)
-    wait_download "${2:-}" "${3:-}" "${4:-600}"
+    wait_download "${2:-}" "${3:-}" "${4:-600}" "${5:-}"
     ;;
   *)
-    echo "usage: $0 {validate-name NAME|wait-download NAME ABSOLUTE_DESTINATION [TIMEOUT_SECONDS]}" >&2
+    echo "usage: $0 {validate-name NAME|wait-download NAME ABSOLUTE_DESTINATION [TIMEOUT_SECONDS [PEER_JOB_NAME]]}" >&2
     exit 2
     ;;
 esac

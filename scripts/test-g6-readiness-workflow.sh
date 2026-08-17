@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# shellcheck disable=SC1090,SC2016,SC2329
+# This policy test sources a path variable and matches literal shell/YAML expansions.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -11,6 +13,7 @@ FD_B="${ROOT}/scripts/g6-readiness-fd-b.sh"
 BUILDER="${ROOT}/scripts/build-g6-evidence.mjs"
 SLO="${ROOT}/docs/acceptance/g6-slo.yaml"
 PROBE_DOCKERFILE="${ROOT}/rust/g6-probe.Dockerfile"
+POSTGRES_INIT="${ROOT}/deploy/g6-readiness/postgres-init/001-g6-readiness.sh"
 
 ruby -r yaml - "${WORKFLOW}" "${COMPOSE_FILE}" <<'RUBY'
 workflow_path, compose_path = ARGV
@@ -29,6 +32,9 @@ reject("the authority input must be a required choice") unless authority.fetch("
 reject("the authority enum is frozen") unless authority.fetch("options") == %w[engineering production_readiness]
 reject("engineering must stay the default authority") unless authority.fetch("default") == "engineering"
 reject("G6 readiness permissions must be read-only") unless workflow.fetch("permissions") == {"contents" => "read", "actions" => "read"}
+concurrency = workflow.fetch("concurrency")
+reject("G6 readiness concurrency must bind ref and authority") unless concurrency.fetch("group").include?("github.ref") && concurrency.fetch("group").include?("inputs.authority")
+reject("a replacement dispatch must cancel the same ref and authority") unless concurrency.fetch("cancel-in-progress") == true
 
 jobs = workflow.fetch("jobs")
 expected = %w[g6-rd-fd-a g6-rd-fd-b g6-rd-secret-scan g6-rd-verifier]
@@ -38,16 +44,28 @@ jobs.each do |job_id, job|
   reject("#{job_id} must stay within the bounded window") unless job.fetch("timeout-minutes") <= (job_id.start_with?("g6-rd-fd-") ? 90 : 20)
   reject("#{job_id} Action is not pinned to a full SHA") if Array(job.fetch("steps")).any? { |step| step.key?("uses") && !step.fetch("uses").match?(/@[0-9a-f]{40}\z/) }
   reject("#{job_id} must not force a failing check green") if Array(job.fetch("steps")).any? { |step| step.key?("run") && step.fetch("run").include?("continue-on-error") }
+  reject("#{job_id} must not mask a failed step") if Array(job.fetch("steps")).any? { |step| step["continue-on-error"] == true }
   environment = job.fetch("environment").fetch("name")
   reject("#{job_id} must gate both authorities through GitHub environments") unless environment.include?("g6-production-readiness") && environment.include?("g6-engineering-rehearsal") && environment.include?("inputs.authority")
 end
 %w[g6-rd-fd-a g6-rd-fd-b].each do |job_id|
   reject("#{job_id} must run concurrently with its peer") if jobs.fetch(job_id).key?("needs")
-  names = Array(jobs.fetch(job_id).fetch("steps")).map { |step| step["name"] }.compact
+  steps = Array(jobs.fetch(job_id).fetch("steps"))
+  names = steps.map { |step| step["name"] }.compact
   reject("#{job_id} must collect diagnostics before cleanup") unless names.index { |n| n.include?("diagnostics") }.to_i < names.index { |n| n.include?("Clean") }.to_i
+  diagnostics = steps.find { |step| step["name"]&.include?("diagnostics") }.fetch("run")
+  cleanup = steps.find { |step| step["name"]&.include?("Clean") }.fetch("run")
+  reject("#{job_id} diagnostics must have a hard timeout") unless diagnostics.start_with?("timeout --signal=TERM --kill-after=15s 120s ")
+  reject("#{job_id} cleanup must have a hard timeout") unless cleanup.start_with?("timeout --signal=TERM --kill-after=15s 180s ")
+  peer = job_id.end_with?("a") ? "G6 Readiness Failure Domain B" : "G6 Readiness Failure Domain A"
+  waits = steps.select { |step| step["run"]&.include?("real-e2e-artifact.sh wait-download") }
+  reject("#{job_id} artifact waits must name their producer job") unless waits.all? { |step| step.fetch("run").end_with?(%Q{"#{peer}"}) }
 end
 %w[g6-rd-secret-scan g6-rd-verifier].each do |job_id|
-  reject("#{job_id} must depend on the bundle publisher") unless jobs.fetch(job_id).fetch("needs") == ["g6-rd-fd-b"]
+  job = jobs.fetch(job_id)
+  reject("#{job_id} must depend on both failure domains") unless job.fetch("needs").sort == %w[g6-rd-fd-a g6-rd-fd-b]
+  condition = job.fetch("if")
+  reject("#{job_id} must require both failure-domain conclusions") unless condition.include?("needs.g6-rd-fd-a.result == 'success'") && condition.include?("needs.g6-rd-fd-b.result == 'success'")
 end
 
 services = compose.fetch("services")
@@ -61,6 +79,7 @@ reject("transport runtime init must assign the stats volume to transportd") unle
 runtime_init_volumes = Array(runtime_init.fetch("volumes"))
 reject("transport runtime init must mount the transport stats volume") unless runtime_init_volumes.any? { |volume| volume.is_a?(Hash) && volume["source"] == "transport-stats" && volume["target"] == "/run/transport-stats" }
 reject("postgres must receive stop signals directly so fencing leaves a clean data directory") unless services.fetch("postgres").fetch("init") == false
+reject("postgres must never pull after the support image preflight") unless services.fetch("postgres").fetch("pull_policy") == "never"
 roles = %w[api worker scheduler].to_h { |role| [role, services.fetch(role).fetch("command").fetch(0)] }
 reject("control-plane roles must be split") unless roles == {"api" => "--role=api", "worker" => "--role=worker", "scheduler" => "--role=scheduler"}
 reject("worker must own the trust socket") unless services.fetch("worker").fetch("environment").key?("OCSERV_TRUST_SOCKET")
@@ -161,6 +180,53 @@ parsed_node_id="$(printf '%s\n' \
   echo "the enrollment result parser must tolerate trailing runtime logs" >&2
   exit 1
 }
+for fd_script in "${FD_A}" "${FD_B}"; do
+  start_phase="$(sed -n '/^phase_agents_start() {/,/^}/p' "${fd_script}")"
+  grep -q 'g6rd_start_agent_fleet' <<<"${start_phase}" || {
+    echo "each failure domain must cross the controller-observed Agent readiness barrier" >&2
+    exit 1
+  }
+done
+start_fleet="$(sed -n '/^g6rd_start_agent_fleet() {/,/^}/p' "${LIB}")"
+grep -q 'controller API endpoint before Agent startup' <<<"${start_fleet}" || {
+  echo "Agent startup must verify the controller API before launching a canary" >&2
+  exit 1
+}
+grep -q 'g6rd_agent_compose restart' <<<"${start_fleet}" || {
+  echo "Agent startup must perform one bounded reconnect restart" >&2
+  exit 1
+}
+grep -q 'g6rd_report_agent_readiness' "${LIB}" || {
+  echo "Agent readiness timeout must print the last controller response" >&2
+  exit 1
+}
+
+# Exercise the observed-state predicate without starting containers. The
+# controller response is authoritative only when every expected node is
+# active, online, fresh, and carries a heartbeat.
+source "${LIB}"
+readiness_test="$(mktemp -d)"
+(
+  export G6RD_STATE="${readiness_test}"
+  export G6RD_WORKSPACE_ID=018f2f10-7abc-7def-8abc-0123456789ab
+  printf '%s\t%s\t%s\n' \
+    g6-fd-a-01 018f2f10-7abc-7def-8abc-0123456789ab endpoint \
+    >"${readiness_test}/nodes.tsv"
+  g6rd_api_session_curl() {
+    printf '%s\n' '{"items":[{"id":"018f2f10-7abc-7def-8abc-0123456789ab","name":"g6-fd-a-01","trust_status":"active","connection_state":"online","freshness":"fresh","last_heartbeat_at":"2026-08-17T00:00:00Z"}],"page":{"has_more":false}}'
+  }
+  g6rd_capture_agent_readiness "${readiness_test}/nodes.tsv"
+  g6rd_api_session_curl() {
+    printf '%s\n' '{"items":[{"id":"018f2f10-7abc-7def-8abc-0123456789ab","name":"g6-fd-a-01","trust_status":"active","connection_state":"offline","freshness":"stale","last_heartbeat_at":"2026-08-17T00:00:00Z"}],"page":{"has_more":false}}'
+  }
+  if g6rd_capture_agent_readiness "${readiness_test}/nodes.tsv"; then
+    echo "Agent readiness accepted an offline controller observation" >&2
+    exit 1
+  fi
+  jq -e '.items[0].connection_state == "offline"' \
+    "${readiness_test}/agent-readiness-last.json" >/dev/null
+)
+rm -rf "${readiness_test}"
 approve_node="$(sed -n '/^g6rd_approve_node() {/,/^}/p' "${LIB}")"
 grep -q 'g6rd_api_session_curl requester /api/v1/approval-requests' <<<"${approve_node}" || {
   echo "node activation must create a content-bound request as the requester" >&2
@@ -252,6 +318,47 @@ grep -q 'g6rd_reclaim_directory "${G6RD_WORK}"' "${LIB}" || {
   echo "cleanup must reclaim uid-mapped runtime material before removal" >&2
   exit 1
 }
+for fd_script in "${FD_A}" "${FD_B}"; do
+  sed -n '/^phase_prepare() {/,/^}/p' "${fd_script}" \
+    | grep -q 'g6rd_prepare_support_image' || {
+    echo "each failure domain must cache the cleanup support image before isolation" >&2
+    exit 1
+  }
+done
+if grep -nE 'docker run (--rm|-d)( |$)' "${LIB}" "${FD_A}" "${FD_B}" \
+  | grep -v -- '--pull=never'; then
+  echo "G6 readiness docker run commands must never pull from the network" >&2
+  exit 1
+fi
+grep -A5 '^g6rd_reclaim_directory()' "${LIB}" | grep -q -- '--pull=never' || {
+  echo "cleanup ownership reclaim must not pull an image" >&2
+  exit 1
+}
+grep -q '^g6rd_cleanup_bounded()' "${LIB}" || {
+  echo "the shared cleanup path must enforce an overall hard timeout" >&2
+  exit 1
+}
+for fd_script in "${FD_A}" "${FD_B}"; do
+  grep -q 'cleanup) g6rd_cleanup_bounded' "${fd_script}" || {
+    echo "each failure domain must use the bounded cleanup entry point" >&2
+    exit 1
+  }
+done
+grep -qF "archive_command = 'test -f /var/lib/postgresql/archive/%f || cp %p /var/lib/postgresql/archive/%f'" \
+  "${POSTGRES_INIT}" || {
+  echo "PostgreSQL archive_command must succeed when the WAL segment already exists" >&2
+  exit 1
+}
+archive_test="$(mktemp -d)"
+touch "${archive_test}/already-archived"
+(
+  test -f "${archive_test}/already-archived" || cp "${archive_test}/missing-source" \
+    "${archive_test}/already-archived"
+) || {
+  echo "the configured archive existence guard is not idempotent" >&2
+  exit 1
+}
+rm -rf "${archive_test}"
 sed -n '/^phase_publish_shared_secrets() {/,/^}/p' "${FD_A}" \
   | grep -q 'relay-chain.crt' || {
   echo "the shared-trust handoff must include the relay certificate chain" >&2
@@ -790,7 +897,13 @@ case "${1:-} ${2:-}" in
     ;;
   "volume inspect" | "network inspect") exit 1 ;;
   "images --format") exit 0 ;;
-  "run --rm") exit 0 ;;
+  "run --rm")
+    [[ " $* " == *" --pull=never "* ]] || {
+      echo "cleanup attempted a network-capable docker run" >&2
+      exit 1
+    }
+    exit 0
+    ;;
 esac
 exit 0
 SHIM
@@ -818,5 +931,8 @@ chmod +x "${cleanup_test}/bin/docker"
 )
 rm -rf "${cleanup_test}"
 
-shellcheck "${LIB}" "${FD_A}" "${FD_B}" "${SUPERVISOR}" "${ROOT}/scripts/real-e2e-artifact.sh"
+"${ROOT}/scripts/test-real-e2e-artifact.sh"
+shellcheck "${LIB}" "${FD_A}" "${FD_B}" "${SUPERVISOR}" \
+  "${ROOT}/scripts/real-e2e-artifact.sh" \
+  "${ROOT}/scripts/test-real-e2e-artifact.sh" "${POSTGRES_INIT}"
 echo "g6-readiness policy checks passed"

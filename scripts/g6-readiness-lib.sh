@@ -74,6 +74,20 @@ g6rd_now() {
   date -u +%Y-%m-%dT%H:%M:%SZ
 }
 
+g6rd_prepare_support_image() {
+  if ! docker image inspect postgres:17.10-bookworm >/dev/null 2>&1; then
+    docker pull postgres:17.10-bookworm
+  fi
+  docker image inspect postgres:17.10-bookworm >/dev/null
+}
+
+g6rd_require_support_image() {
+  docker image inspect postgres:17.10-bookworm >/dev/null 2>&1 || {
+    echo "required local support image postgres:17.10-bookworm is missing" >&2
+    return 1
+  }
+}
+
 g6rd_uuidv7() {
   local timestamp random
   timestamp="$(node -p 'Date.now().toString(16).padStart(12,"0")')"
@@ -250,7 +264,7 @@ g6rd_materialize_relay_dir() {
   cp -f "${G6RD_SECRETS}/relay-token" "${dir}/relay-token"
   chmod 0644 "${dir}/relay.crt" "${dir}/relay-ca.pem"
   chmod 0600 "${dir}/relay.key" "${dir}/relay-token"
-  docker run --rm --network none --log-driver none \
+  docker run --rm --pull=never --network none --log-driver none \
     -v "${dir}:/fix" postgres:17.10-bookworm \
     sh -c 'chown 65532:65532 /fix/*; chmod 0755 /fix' >/dev/null
   printf '%s\n' "${dir}"
@@ -283,7 +297,7 @@ g6rd_materialize_signing_dir() {
     "${dir}/oidc-client-secret"
   chmod 0640 "${dir}/command-verification.pem" \
     "${dir}/command-verification-agent.pem" "${dir}/command-verification-privd.pem"
-  docker run --rm --network none --log-driver none \
+  docker run --rm --pull=never --network none --log-driver none \
     -v "${dir}:/fix" postgres:17.10-bookworm sh -c \
     'chown 0:65532 /fix; chmod 0755 /fix; chown 65534:65532 /fix/command-signing.pem /fix/session-key /fix/oidc-client-secret; chown 0:65532 /fix/command-verification.pem /fix/command-verification-agent.pem /fix/command-verification-privd.pem' \
     >/dev/null
@@ -297,7 +311,7 @@ g6rd_materialize_probe_controller_key_dir() {
     mkdir -p "${dir}"
     cp -f "${G6RD_SECRETS}/controller.key" "${dir}/controller.key"
     chmod 0400 "${dir}/controller.key"
-    docker run --rm --network none --log-driver none \
+    docker run --rm --pull=never --network none --log-driver none \
       -v "${dir}:/fix" postgres:17.10-bookworm sh -c \
       'chmod 0755 /fix; chown 65534:65532 /fix/controller.key' \
       >/dev/null
@@ -496,7 +510,7 @@ g6rd_host_gateway_address() {
 # ---------------------------------------------------------------------------
 
 g6rd_psql() {
-  PGPASSWORD="$(g6rd_secret owner-password)" docker run --rm --network host \
+  PGPASSWORD="$(g6rd_secret owner-password)" docker run --rm --pull=never --network host \
     --log-driver none -e PGPASSWORD \
     postgres:17.10-bookworm psql \
     "host=127.0.0.1 port=${G6_DB_PORT:-5432} user=ocservia_owner dbname=ocservia sslmode=disable" \
@@ -510,9 +524,19 @@ g6rd_psql_json() {
 g6rd_archive_has_segment() {
   local segment="${1:?WAL segment is required}"
   [[ "${segment}" =~ ^[0-9A-F]{24}$ ]] || return 1
-  docker run --rm --entrypoint /bin/sh \
+  docker run --rm --pull=never --entrypoint /bin/sh \
     -v "${G6RD_ARCHIVE}:/archive:ro" postgres:17.10-bookworm \
     -c "test -f /archive/${segment}"
+}
+
+g6rd_prepare_postgres_bind_dirs() {
+  g6rd_require_support_image
+  docker run --rm --pull=never --network none --log-driver none \
+    -v "${G6RD_ARCHIVE}:/archive" \
+    -v "${G6RD_BASEBACKUP}:/basebackup" \
+    postgres:17.10-bookworm \
+    sh -c 'chown -R 999:999 /archive /basebackup; chmod 0700 /archive /basebackup' \
+    >/dev/null
 }
 
 # ---------------------------------------------------------------------------
@@ -593,7 +617,7 @@ g6rd_api_curl() {
   shift
   local port
   port="$(g6rd_api_port)"
-  curl --silent --show-error --max-time 10 \
+  curl --silent --show-error --connect-timeout 3 --max-time 10 \
     --header "Authorization: Bearer $(g6rd_secret dev-auth-token)" "$@" \
     "http://127.0.0.1:${port}${path}"
 }
@@ -611,7 +635,7 @@ g6rd_api_session_curl() {
       ;;
   esac
   port="$(g6rd_api_port)"
-  curl --silent --show-error --max-time 10 \
+  curl --silent --show-error --connect-timeout 3 --max-time 10 \
     --header "Cookie: __Host-ocservia_session=$(g6rd_secret "${role}-session-cookie")" \
     "$@" "http://127.0.0.1:${port}${path}"
 }
@@ -876,7 +900,7 @@ g6rd_prepare_agent_material() {
   cp -f "${G6RD_SECRETS}/relay-token" "${dir}/secrets/relay-token"
   chmod 0640 "${dir}/secrets/"*.pem
   chmod 0600 "${dir}/secrets/"*.key "${dir}/secrets/relay-token"
-  docker run --rm --network none --log-driver none \
+  docker run --rm --pull=never --network none --log-driver none \
     -v "${dir}/secrets:/fix" postgres:17.10-bookworm \
     sh -c 'chown 0:65532 /fix/*; chmod 0755 /fix; chmod 0640 /fix/*' >/dev/null
 }
@@ -951,9 +975,164 @@ g6rd_chown_agent_dirs() {
   for index in $(seq 1 "$(g6rd_agent_count)"); do
     dir="$(g6rd_agent_dir "${index}")"
     [[ -d "${dir}" ]] || continue
-    docker run --rm -v "${dir}:/chown" postgres:17.10-bookworm \
+    docker run --rm --pull=never -v "${dir}:/chown" postgres:17.10-bookworm \
       chown -R 65532:65532 /chown/identity /chown/journal /chown/state >/dev/null 2>&1
   done
+}
+
+g6rd_agent_service_for_name() {
+  local name="${1:?agent name is required}"
+  [[ "${name}" =~ ^g6-${FD_ID}-[0-9]{2}$ ]] || {
+    echo "agent ${name} does not belong to ${FD_ID}" >&2
+    return 2
+  }
+  printf 'agent-%s\n' "${name#g6-}"
+}
+
+g6rd_capture_agent_readiness() {
+  local nodes_file="${1:?expected nodes file is required}"
+  local response="${G6RD_STATE}/agent-readiness-last.json"
+  local temporary="${response}.tmp"
+  [[ -s "${nodes_file}" ]] || {
+    echo "agent readiness node list is empty: ${nodes_file}" >&2
+    return 2
+  }
+  if ! g6rd_api_session_curl requester '/api/v1/nodes?page_size=100' \
+    --header "X-Workspace-ID: ${G6RD_WORKSPACE_ID:?workspace id is required}" \
+    >"${temporary}" 2>"${G6RD_STATE}/agent-readiness-api-error.txt"; then
+    rm -f -- "${temporary}"
+    return 1
+  fi
+  if ! jq -e '.items | type == "array"' "${temporary}" >/dev/null 2>&1; then
+    mv -f -- "${temporary}" "${response}"
+    return 1
+  fi
+  mv -f -- "${temporary}" "${response}"
+  local expected
+  expected="$(cut -f2 "${nodes_file}" | jq -Rsc \
+    'split("\n") | map(select(length > 0))')"
+  jq -e --argjson expected "${expected}" '
+    .items as $items
+    | [$expected[] as $id | $items[] | select(.id == $id)] | unique_by(.id) as $nodes
+    | ($expected | length) > 0
+      and (($expected | unique | length) == ($expected | length))
+      and (($nodes | length) == ($expected | length))
+      and all($nodes[];
+        .trust_status == "active"
+        and .connection_state == "online"
+        and .freshness == "fresh"
+        and (.last_heartbeat_at | type == "string" and length > 0))
+  ' "${response}" >/dev/null
+}
+
+g6rd_report_agent_readiness() {
+  local response="${G6RD_STATE}/agent-readiness-last.json"
+  if [[ -s "${G6RD_STATE}/agent-readiness-api-error.txt" ]]; then
+    echo "last controller Agent readiness request error:" >&2
+    sed -n '1,20p' "${G6RD_STATE}/agent-readiness-api-error.txt" >&2
+  fi
+  echo "last controller Agent readiness response:" >&2
+  if [[ -s "${response}" ]] && jq -e . "${response}" >/dev/null 2>&1; then
+    jq -c '{items: [.items[]? | {
+      id, name, trust_status, connection_state, freshness, last_heartbeat_at
+    }], page}' "${response}" >&2
+  else
+    echo "no valid controller response was received" >&2
+  fi
+}
+
+g6rd_wait_for_agent_readiness() {
+  local nodes_file="${1:?expected nodes file is required}"
+  local timeout_seconds="${2:?timeout seconds is required}"
+  local interval="${3:?interval seconds is required}"
+  local description="${4:?description is required}"
+  local deadline=$((SECONDS + timeout_seconds))
+  while ((SECONDS < deadline)); do
+    if g6rd_capture_agent_readiness "${nodes_file}"; then
+      return 0
+    fi
+    sleep "${interval}"
+  done
+  echo "timed out waiting for ${description}" >&2
+  g6rd_report_agent_readiness
+  return 1
+}
+
+g6rd_capture_agent_logs() {
+  local label="${1:?diagnostic label is required}"
+  local log="${G6RD_LOGS}/agents-${FD_ID}-${label}.log"
+  g6rd_agent_compose ps --all \
+    >"${G6RD_LOGS}/agents-${FD_ID}-${label}-ps.log" 2>&1 || true
+  g6rd_agent_compose logs --no-color --tail 120 \
+    >"${log}" 2>&1 || true
+  grep -E 'agent endpoint creation failed|controller connection|session accepted|handshake|Resource temporarily unavailable' \
+    "${log}" | tail -40 >&2 || true
+}
+
+g6rd_start_agent_fleet() {
+  local local_nodes="${1:?local nodes file is required}"
+  local expected_nodes="${2:-${local_nodes}}"
+  local canary_nodes="${G6RD_STATE}/agent-readiness-canary.tsv"
+  local name service index=0
+  local services=() batch=()
+  [[ -s "${local_nodes}" && -s "${expected_nodes}" ]] || {
+    echo "agent readiness requires non-empty local and expected node lists" >&2
+    return 2
+  }
+  if ! g6rd_wait_until 15 2 "controller API endpoint before Agent startup" g6rd_api_ready; then
+    echo "last controller readiness probe:" >&2
+    g6rd_api_curl /readyz 2>&1 | tail -20 >&2 || true
+    return 1
+  fi
+
+  head -n 1 "${local_nodes}" >"${canary_nodes}"
+  name="$(cut -f1 "${canary_nodes}")"
+  service="$(g6rd_agent_service_for_name "${name}")"
+  g6rd_agent_compose up --detach --no-deps "${service}"
+  if ! g6rd_wait_for_agent_readiness "${canary_nodes}" 45 2 \
+    "${FD_ID} Agent canary to become active"; then
+    g6rd_capture_agent_logs canary-before-restart
+    echo "restarting ${service} after the bounded readiness failure" >&2
+    g6rd_agent_compose restart "${service}"
+    g6rd_wait_for_agent_readiness "${canary_nodes}" 30 2 \
+      "${FD_ID} Agent canary after one restart" || {
+      g6rd_capture_agent_logs canary-after-restart
+      return 1
+    }
+  fi
+
+  while IFS=$'\t' read -r name _; do
+    index=$((index + 1))
+    ((index == 1)) && continue
+    services+=("$(g6rd_agent_service_for_name "${name}")")
+  done <"${local_nodes}"
+  for service in "${services[@]}"; do
+    batch+=("${service}")
+    if ((${#batch[@]} == 6)); then
+      g6rd_agent_compose up --detach --no-deps "${batch[@]}"
+      batch=()
+      sleep 1
+    fi
+  done
+  if ((${#batch[@]} > 0)); then
+    g6rd_agent_compose up --detach --no-deps "${batch[@]}"
+  fi
+
+  if g6rd_wait_for_agent_readiness "${expected_nodes}" 90 2 \
+    "the controller to report the Agent fleet active"; then
+    return 0
+  fi
+  g6rd_capture_agent_logs fleet-before-restart
+  echo "restarting the local Agent fleet after the bounded readiness failure" >&2
+  readarray -t services < <(cut -f1 "${local_nodes}" | while read -r name; do
+    g6rd_agent_service_for_name "${name}"
+  done)
+  g6rd_agent_compose restart "${services[@]}"
+  g6rd_wait_for_agent_readiness "${expected_nodes}" 60 2 \
+    "the controller to report the Agent fleet active after one restart" || {
+    g6rd_capture_agent_logs fleet-after-restart
+    return 1
+  }
 }
 
 g6rd_release_synthetic_barriers() {
@@ -1157,7 +1336,7 @@ g6rd_strip_secrets_from_artifacts() {
 g6rd_reclaim_directory() {
   local dir="${1:?directory is required}"
   [[ -d "${dir}" ]] || return 0
-  docker run --rm -v "${dir}:/reclaim" postgres:17.10-bookworm \
+  docker run --rm --pull=never -v "${dir}:/reclaim" postgres:17.10-bookworm \
     chown -R "$(id -u):$(id -g)" /reclaim >/dev/null 2>&1 || {
       echo "cleanup: ownership reclaim failed for ${dir}" >&2
       return 1
@@ -1241,5 +1420,26 @@ g6rd_cleanup() {
     echo "scoped image cleanup failed: ${image}" >&2
     status=1
   done
+  return "${status}"
+}
+
+g6rd_cleanup_bounded() {
+  local timeout_seconds="${G6RD_CLEANUP_TIMEOUT_SECONDS:-150}"
+  [[ "${timeout_seconds}" =~ ^[0-9]+$ \
+    && "${timeout_seconds}" -ge 30 && "${timeout_seconds}" -le 300 ]] || {
+    echo "G6 cleanup timeout must be 30..300 seconds" >&2
+    return 2
+  }
+  local status=0
+  # shellcheck disable=SC2016  # the child shell owns its positional argument
+  timeout --foreground --signal=TERM --kill-after=15s "${timeout_seconds}s" \
+    bash -Eeuo pipefail -c '
+      source "$1"
+      g6rd_init_environment
+      g6rd_cleanup
+    ' bash "${G6RD_ROOT}/scripts/g6-readiness-lib.sh" || status=$?
+  if [[ "${status}" == 124 || "${status}" == 137 ]]; then
+    echo "G6 cleanup exceeded its ${timeout_seconds}-second hard limit" >&2
+  fi
   return "${status}"
 }
