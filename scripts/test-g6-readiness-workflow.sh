@@ -190,7 +190,7 @@ for fd_script in "${FD_A}" "${FD_B}"; do
     echo "each failure domain must cross the controller-observed Agent readiness barrier" >&2
     exit 1
   }
-  require_line="$(grep -n 'g6rd_require_agent_node_state' <<<"${start_phase}" | cut -d: -f1)"
+  require_line="$(grep -n 'g6rd_stage_agent_node_state' <<<"${start_phase}" | cut -d: -f1)"
   chown_line="$(grep -n 'g6rd_chown_agent_dirs' <<<"${start_phase}" | cut -d: -f1)"
   [[ -n "${require_line}" && -n "${chown_line}" && "${require_line}" -lt "${chown_line}" ]] || {
     echo "each Agent fleet must validate persisted node ids before uid handoff" >&2
@@ -232,9 +232,18 @@ g6rd_export_relay_urls
 export FD_ID=fd-b
 export G6_RELAY_URL_A=https://relay-a:3443
 export G6_RELAY_URL_B=https://relay-b:3443
+export G6_AGENTS_B=1
 mkdir -p "${G6RD_AGENTS}/agent-fd-b-01/state"
-printf '%s\n' 018f2f10-7abc-7def-8abc-0123456789ab \
-  >"${G6RD_AGENTS}/agent-fd-b-01/state/node-id"
+printf '%s\t%s\t%s\n' \
+  g6-fd-b-01 018f2f10-7abc-7def-8abc-0123456789ab \
+  aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
+  >"${relay_topology_test}/nodes.tsv"
+g6rd_stage_agent_node_state "${relay_topology_test}/nodes.tsv"
+[[ "$(<"${G6RD_AGENTS}/agent-fd-b-01/state/node-id")" == \
+  018f2f10-7abc-7def-8abc-0123456789ab ]] || {
+  echo "Agent startup must restore a missing node-id bind from enrollment state" >&2
+  exit 1
+}
 g6rd_write_agent_overlay 1
 [[ "${G6_RELAY_URL_A}" == https://relay-a:3443 ]]
 [[ "${G6_RELAY_URL_B}" == https://relay-b:3443 ]]
@@ -245,12 +254,6 @@ grep -q 'G6_NODE_ID: "018f2f10-7abc-7def-8abc-0123456789ab"' \
   echo "the runtime overlay must pass the enrolled node id explicitly" >&2
   exit 1
 }
-export G6_AGENTS_B=1
-printf '%s\t%s\t%s\n' \
-  g6-fd-b-01 018f2f10-7abc-7def-8abc-0123456789ab \
-  aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
-  >"${relay_topology_test}/nodes.tsv"
-g6rd_require_agent_node_state "${relay_topology_test}/nodes.tsv"
 grep -q 'relay-a:host-gateway' "${G6RD_AGENT_COMPOSE}"
 if grep -q 'relay-b:host-gateway' "${G6RD_AGENT_COMPOSE}"; then
   echo "the local fd-b relay must remain on Docker DNS" >&2

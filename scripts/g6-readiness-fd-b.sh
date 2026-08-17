@@ -268,7 +268,7 @@ phase_agents_start() {
   local_nodes="${G6RD_STATE}/local-nodes.tsv"
   awk -F'\t' -v prefix="g6-${FD_ID}-" 'index($1, prefix) == 1' \
     "${NODES_FILE}" >"${local_nodes}"
-  g6rd_require_agent_node_state "${local_nodes}"
+  g6rd_stage_agent_node_state "${local_nodes}"
   g6rd_write_agent_overlay "${count}"
   g6rd_chown_agent_dirs
   g6rd_start_agent_fleet "${local_nodes}" "${NODES_FILE}"

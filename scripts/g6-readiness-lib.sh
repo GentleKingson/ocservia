@@ -1000,9 +1000,9 @@ EOF
   } >"${G6RD_AGENT_COMPOSE}"
 }
 
-g6rd_require_agent_node_state() {
+g6rd_stage_agent_node_state() {
   local nodes_file="${1:?local nodes file is required}"
-  local index=0 name node_id endpoint extra expected_name persisted
+  local index=0 name node_id endpoint extra expected_name persisted state_file temporary
   [[ -s "${nodes_file}" ]] || {
     echo "agent node-state input is empty: ${nodes_file}" >&2
     return 2
@@ -1016,15 +1016,24 @@ g6rd_require_agent_node_state() {
       echo "agent node-state row ${index} is invalid for ${FD_ID}" >&2
       return 1
     }
-    [[ -s "$(g6rd_agent_dir "${index}")/state/node-id" ]] || {
-      echo "agent ${name} has no persisted node id" >&2
+    state_file="$(g6rd_agent_dir "${index}")/state/node-id"
+    if [[ -e "${state_file}" && (! -f "${state_file}" || -L "${state_file}") ]]; then
+      echo "agent ${name} node-state path is not a regular file" >&2
       return 1
-    }
-    persisted="$(<"$(g6rd_agent_dir "${index}")/state/node-id")"
-    [[ "${persisted}" == "${node_id}" ]] || {
-      echo "agent ${name} persisted node id does not match enrollment" >&2
-      return 1
-    }
+    fi
+    if [[ -s "${state_file}" ]]; then
+      persisted="$(<"${state_file}")"
+      [[ "${persisted}" == "${node_id}" ]] || {
+        echo "agent ${name} persisted node id does not match enrollment" >&2
+        return 1
+      }
+    else
+      mkdir -p "$(dirname "${state_file}")"
+      temporary="${state_file}.tmp"
+      printf '%s\n' "${node_id}" >"${temporary}"
+      chmod 0600 "${temporary}"
+      mv -f -- "${temporary}" "${state_file}"
+    fi
   done <"${nodes_file}"
   [[ "${index}" -eq "$(g6rd_agent_count)" ]] || {
     echo "agent node-state count ${index} does not match ${FD_ID} fleet size" >&2
