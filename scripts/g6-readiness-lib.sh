@@ -218,16 +218,18 @@ g6rd_generate_command_signing_key() {
 
 g6rd_generate_seal_keys() {
   # Two distinct RSA pairs: privd startup requires a user-password seal key
-  # and a p12 sealing pair, each with the public-key SHA-256 declared.
-  local pair name
+  # and a p12 sealing pair. Hash the same SPKI DER representation that privd
+  # derives from each private key when it validates the pinned fingerprint.
+  local pair
   for pair in user-password p12; do
     [[ -s "${G6RD_SECRETS}/seal-${pair}.key" ]] && continue
     openssl genpkey -algorithm rsa -pkeyopt rsa_keygen_bits:2048 \
       -out "${G6RD_SECRETS}/seal-${pair}.key" >/dev/null 2>&1
     openssl pkey -in "${G6RD_SECRETS}/seal-${pair}.key" -pubout \
       -out "${G6RD_SECRETS}/seal-${pair}-public.pem" >/dev/null 2>&1
-    openssl dgst -sha256 -binary "${G6RD_SECRETS}/seal-${pair}-public.pem" \
-      | xxd -p -c 64 >"${G6RD_SECRETS}/seal-${pair}-sha256"
+    openssl rsa -in "${G6RD_SECRETS}/seal-${pair}.key" -pubout -outform DER \
+      2>/dev/null | openssl dgst -sha256 -r \
+      | cut -d ' ' -f1 >"${G6RD_SECRETS}/seal-${pair}-sha256"
     chmod 0600 "${G6RD_SECRETS}/seal-${pair}.key"
   done
 }

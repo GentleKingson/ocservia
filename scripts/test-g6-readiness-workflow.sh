@@ -217,6 +217,27 @@ grep -q 'g6rd_export_common_env' <<<"${materialize_phase}" || {
   echo "fd-b runtime materialization must validate the complete live environment" >&2
   exit 1
 }
+
+# Enrollment and privd must pin the identical SPKI DER fingerprint. Hashing
+# the PEM envelope instead passes enrollment but makes every Agent fail closed
+# as soon as privd derives the key's canonical DER representation.
+seal_test="$(mktemp -d)"
+(
+  export G6RD_SECRETS="${seal_test}"
+  source "${LIB}"
+  g6rd_generate_seal_keys
+  for pair in user-password p12; do
+    expected="$(openssl rsa -in "${seal_test}/seal-${pair}.key" \
+      -pubout -outform DER 2>/dev/null | openssl dgst -sha256 -r | cut -d ' ' -f1)"
+    actual="$(<"${seal_test}/seal-${pair}-sha256")"
+    [[ "${actual}" == "${expected}" && "${actual}" =~ ^[0-9a-f]{64}$ ]] || {
+      echo "${pair} sealing-key fingerprint must use canonical SPKI DER" >&2
+      exit 1
+    }
+  done
+)
+rm -rf "${seal_test}"
+
 parsed_node_id="$(printf '%s\n' \
   'relay startup' '018f2f10-7abc-7def-8abc-0123456789ab' 'relay shutdown' \
   | (source "${LIB}"; g6rd_extract_enrollment_node_id))"
