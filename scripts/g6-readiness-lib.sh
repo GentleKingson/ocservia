@@ -706,22 +706,6 @@ g6rd_approve_node() {
     echo "node approval decision failed before an HTTP response" >&2
     return 1
   fi
-  if [[ "${status}" == 503 ]] && jq -e \
-    '.type == "https://ocservia.dev/problems/transport-unavailable"' \
-    "${response}" >/dev/null 2>&1; then
-    # Node activation commits before the immediate transport synchronization.
-    # Reconcile both durable records before accepting that defined pending
-    # outcome. The caller must synchronize transport trust before starting the
-    # fleet; treating any other 503 or durable state as success is forbidden.
-    if node_status="$(g6rd_api_session_curl requester "/api/v1/nodes/${node_id}" \
-      | jq -er '.status')" && \
-      approval_status="$(g6rd_api_session_curl approver \
-        "/api/v1/approval-requests/${approval_id}" | jq -er '.status')" && \
-      [[ "${node_status}" == active && "${approval_status}" == consumed ]]; then
-      rm -f -- "${response}"
-      return 0
-    fi
-  fi
   if [[ "${status}" != 200 ]]; then
     detail="$(jq -r 'if type == "object" then (.detail // .title // "unspecified API error") else "invalid JSON response" end' \
       "${response}" 2>/dev/null || printf 'invalid JSON response')"
@@ -741,6 +725,22 @@ g6rd_approve_node() {
     rm -f -- "${response}"
     echo "node approval apply failed before an HTTP response" >&2
     return 1
+  fi
+  if [[ "${status}" == 503 ]] && jq -e \
+    '.type == "https://ocservia.dev/problems/transport-unavailable"' \
+    "${response}" >/dev/null 2>&1; then
+    # Node activation commits before the immediate transport synchronization.
+    # Reconcile both durable records before accepting that defined pending
+    # outcome. The caller must synchronize transport trust before starting the
+    # fleet; treating any other 503 or durable state as success is forbidden.
+    if node_status="$(g6rd_api_session_curl requester "/api/v1/nodes/${node_id}" \
+      | jq -er '.status')" && \
+      approval_status="$(g6rd_api_session_curl approver \
+        "/api/v1/approval-requests/${approval_id}" | jq -er '.status')" && \
+      [[ "${node_status}" == active && "${approval_status}" == consumed ]]; then
+      rm -f -- "${response}"
+      return 0
+    fi
   fi
   if [[ "${status}" != 200 ]]; then
     detail="$(jq -r 'if type == "object" then (.detail // .title // "unspecified API error") else "invalid JSON response" end' \
