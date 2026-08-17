@@ -178,6 +178,12 @@ grep -q 'ocservia.dev/problems/transport-unavailable' <<<"${approve_node}" || {
   echo "node activation must recognize only the defined pending transport outcome" >&2
   exit 1
 }
+apply_line="$(grep -n '/nodes/${node_id}/approval' <<<"${approve_node}" | cut -d: -f1)"
+reconcile_line="$(grep -n 'ocservia.dev/problems/transport-unavailable' <<<"${approve_node}" | cut -d: -f1)"
+if [[ -z "${apply_line}" || -z "${reconcile_line}" || "${apply_line}" -ge "${reconcile_line}" ]]; then
+  echo "pending transport reconciliation must inspect the final activation response" >&2
+  exit 1
+fi
 grep -q '"${node_status}" == active.*"${approval_status}" == consumed' <<<"${approve_node}" || {
   echo "pending transport outcomes must reconcile active node and consumed approval state" >&2
   exit 1
