@@ -734,7 +734,7 @@ g6rd_approve_node() {
     # outcome. The caller must synchronize transport trust before starting the
     # fleet; treating any other 503 or durable state as success is forbidden.
     if node_status="$(g6rd_api_session_curl requester "/api/v1/nodes/${node_id}" \
-      | jq -er '.status')" && \
+      | jq -er '.trust_status')" && \
       approval_status="$(g6rd_api_session_curl approver \
         "/api/v1/approval-requests/${approval_id}" | jq -er '.status')" && \
       [[ "${node_status}" == active && "${approval_status}" == consumed ]]; then
