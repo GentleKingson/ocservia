@@ -528,7 +528,10 @@ phase_rejoin() {
   require_file "${G6RD_STATE}/peer-pg-b-node-id"
   g6rd_tunnel_forward pg-b-forward "$(<"${G6RD_STATE}/peer-pg-b-node-id")" 15432
   local data_volume="${COMPOSE_PROJECT}_postgres-data"
-  docker run --rm --pull=never -v "${data_volume}:/data" \
+  docker run --rm --pull=never \
+    --add-host host.docker.internal:host-gateway \
+    --user 999:999 \
+    -v "${data_volume}:/data" \
     -e PGPASSWORD="$(g6rd_secret replication-password)" postgres:17.10-bookworm \
     sh -c 'pg_rewind -D /data --source-server="host=host.docker.internal port=15432 user=ocservia_replication dbname=ocservia password=$PGPASSWORD" || (rm -rf /data/* && PGSSLMODE=disable pg_basebackup -h host.docker.internal -p 15432 -U ocservia_replication -D /data -R -X stream -C -S g6_rejoin_slot --checkpoint=fast)' \
     >"${G6RD_LOGS}/rejoin.log" 2>&1

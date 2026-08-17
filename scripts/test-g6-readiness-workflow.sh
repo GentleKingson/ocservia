@@ -1088,6 +1088,15 @@ grep -qF "sh -c 'pg_rewind -D /data --source-server=\"host=host.docker.internal 
   echo "the rejoin password must remain single-quoted for container expansion" >&2
   exit 1
 }
+rejoin_phase="$(sed -n '/^phase_rejoin() {/,/^}/p' "${FD_A}")"
+grep -q -- '--add-host host.docker.internal:host-gateway' <<<"${rejoin_phase}" || {
+  echo "the raw rejoin container must resolve the runner-hosted tunnel on Linux" >&2
+  exit 1
+}
+grep -q -- '--user 999:999' <<<"${rejoin_phase}" || {
+  echo "pg_rewind and pg_basebackup must run as the PostgreSQL service user" >&2
+  exit 1
+}
 promoted_wait="$(order_of 'wait-download "g6-rd-new-primary')"
 post_promotion_probe="$(order_of 'dual-primary-probes "${RUNNER_TEMP}/g6-rd-new-primary')"
 if [[ -z "${promoted_wait}" || -z "${post_promotion_probe}" || "${promoted_wait}" -ge "${post_promotion_probe}" ]]; then
@@ -1096,6 +1105,18 @@ if [[ -z "${promoted_wait}" || -z "${post_promotion_probe}" || "${promoted_wait}
 fi
 grep -q 'post-rejoin-probes.jsonl' "${FD_A}" || {
   echo "the rejoined former primary needs explicit read-only probes" >&2
+  exit 1
+}
+relay_isolation_line="$(grep -n 'docker network connect --alias relay-b' \
+  "${FD_B}" | cut -d: -f1)"
+direct_cut_line="$(grep -n 'network disconnect "${COMPOSE_PROJECT}_default"' \
+  "${FD_B}" | cut -d: -f1)"
+relay_restore_line="$(grep -n 'network disconnect "${isolated_network}" "${COMPOSE_PROJECT}-relay-1"' \
+  "${FD_B}" | cut -d: -f1)"
+[[ -n "${relay_isolation_line}" && -n "${direct_cut_line}" \
+  && -n "${relay_restore_line}" && "${relay_isolation_line}" -lt "${direct_cut_line}" \
+  && "${direct_cut_line}" -lt "${relay_restore_line}" ]] || {
+  echo "the path scenario must preserve relay-b while isolating only the direct bridge" >&2
   exit 1
 }
 grep -q 'OCSERV_TEST_RESULT_COMMIT_BARRIER_DIR' "${COMPOSE_FILE}" || {

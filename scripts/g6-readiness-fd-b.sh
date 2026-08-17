@@ -700,6 +700,11 @@ phase_scenario_path() {
   }
   isolated_network="${COMPOSE_PROJECT}_agent-isolated"
   docker network create "${isolated_network}" >/dev/null 2>&1 || true
+  # Keep the local relay reachable on the isolated bridge while removing the
+  # Agent's shared bridge path to transportd. Otherwise the fault injection
+  # would sever both the direct and relay paths and could not prove fallback.
+  docker network connect --alias relay-b "${isolated_network}" \
+    "${COMPOSE_PROJECT}-relay-1" >/dev/null
   g6rd_wait_until 60 5 "agent-01 session on the direct path" \
     g6rd_probe_node_connection direct "${node}"
   g6rd_timeline_event direct_path_active
@@ -711,6 +716,8 @@ phase_scenario_path() {
   g6rd_timeline_event relay_path_active
   docker network connect "${COMPOSE_PROJECT}_default" "${COMPOSE_PROJECT}-${service}-1" >/dev/null
   docker network disconnect "${isolated_network}" "${COMPOSE_PROJECT}-${service}-1"
+  docker network disconnect "${isolated_network}" "${COMPOSE_PROJECT}-relay-1"
+  docker network rm "${isolated_network}" >/dev/null
   g6rd_wait_until 180 5 "agent-01 session recovered the direct path" \
     g6rd_probe_node_connection direct "${node}"
   g6rd_timeline_event direct_path_recovered
