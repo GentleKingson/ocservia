@@ -83,7 +83,7 @@ jobs:
         run: scripts/g6-readiness-fd-a.sh import-peer-tunnel-nodes "${RUNNER_TEMP}/g6-rd-tunnel-fd-b"
       - name: Build failure domain A images and tunnel
         timeout-minutes: 35
-        run: scripts/g6-readiness-fd-a.sh images
+        run: scripts/g6-readiness-fd-a.sh build-images
       - name: Start pinned tunnels
         timeout-minutes: 5
         run: scripts/g6-readiness-fd-a.sh tunnel-up
@@ -261,17 +261,17 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ github.token }}
         run: scripts/real-e2e-artifact.sh wait-download "g6-rd-tunnel-fd-a-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" "${RUNNER_TEMP}/g6-rd-tunnel-fd-a" 1200 "G6 Readiness Failure Domain A"
-      - name: Wait for the shared trust rendezvous
-        env:
-          GITHUB_TOKEN: ${{ github.token }}
-        run: scripts/real-e2e-artifact.sh wait-download "g6-rd-shared-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" "${RUNNER_TEMP}/g6-rd-shared" 1200 "G6 Readiness Failure Domain A"
-      - name: Import the peer trust material
-        run: scripts/g6-readiness-fd-b.sh import-peer-secrets "${RUNNER_TEMP}/g6-rd-shared"
       - name: Import the peer tunnel identities
         run: scripts/g6-readiness-fd-b.sh import-peer-tunnel-nodes "${RUNNER_TEMP}/g6-rd-tunnel-fd-a"
       - name: Build failure domain B images and tunnel
         timeout-minutes: 35
-        run: scripts/g6-readiness-fd-b.sh images
+        run: scripts/g6-readiness-fd-b.sh build-images
+      - name: Wait for the shared trust rendezvous
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: scripts/real-e2e-artifact.sh wait-download "g6-rd-shared-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" "${RUNNER_TEMP}/g6-rd-shared" 1200 "G6 Readiness Failure Domain A"
+      - name: Materialize the peer runtime trust
+        run: scripts/g6-readiness-fd-b.sh materialize-runtime "${RUNNER_TEMP}/g6-rd-shared"
       - name: Start relay-b
         timeout-minutes: 5
         run: scripts/g6-readiness-fd-b.sh relay-up

@@ -435,6 +435,20 @@ g6rd_placeholder_env() {
   export G6_PROBE_CONTROLLER_KEY_DIR="${G6_PROBE_CONTROLLER_KEY_DIR:-${G6RD_WORK}/probe-controller-key}"
 }
 
+# Image construction must not wait for or consume the per-run trust bundle.
+# Force inert Compose substitutions even when a caller has live material in
+# its environment, and create only the bind-directory skeleton Compose parses.
+g6rd_prepare_build_environment() {
+  unset G6_FD_ID G6_OWNER_PASSWORD G6_APP_PASSWORD G6_REPLICATION_PASSWORD \
+    G6_DEV_AUTH_TOKEN G6_ARCHIVE_DIR G6_BASEBACKUP_DIR G6_RESULT_BARRIER_DIR \
+    G6_DB_HOST G6_DB_PORT G6_SIGNING_DIR G6_RELAY_DIR G6_RELAY_URL_A \
+    G6_RELAY_URL_B G6_LOCAL_RELAY_HOST G6_REMOTE_RELAY_HOST G6_API_BIND_PORT \
+    G6_RELAY_BIND_PORT G6_PROBE_CONTROLLER_KEY_DIR OCSERV_CONTROLLER_ENDPOINT_ID
+  g6rd_placeholder_env
+  mkdir -p "${G6_SIGNING_DIR}" "${G6_RELAY_DIR}" "${G6_PROBE_CONTROLLER_KEY_DIR}"
+  g6rd_prepare_agent_cleanup_dirs
+}
+
 g6rd_compose() {
   if [[ -z "${G6_OWNER_PASSWORD:-}" || -z "${G6_DEV_AUTH_TOKEN:-}" || -z "${G6_FD_ID:-}" ]]; then
     if ! g6rd_export_common_env; then
@@ -919,9 +933,10 @@ g6rd_prepare_agent_material() {
   local index="${1:?agent index is required}"
   local dir
   dir="$(g6rd_agent_dir "${index}")"
-  mkdir -p "${dir}/identity" "${dir}/journal" "${dir}/secrets" "${dir}/state"
+  mkdir -p "${dir}/identity" "${dir}/journal" "${dir}/privd" \
+    "${dir}/secrets" "${dir}/state"
   : >"${dir}/state/synthetic-barrier"
-  chmod 0700 "${dir}/identity" "${dir}/secrets"
+  chmod 0700 "${dir}/identity" "${dir}/privd" "${dir}/secrets"
   cp -f "${G6RD_SECRETS}/command-verification.pem" \
     "${dir}/secrets/command-verification-agent.pem"
   cp -f "${G6RD_SECRETS}/command-verification.pem" \
@@ -932,11 +947,22 @@ g6rd_prepare_agent_material() {
   cp -f "${G6RD_SECRETS}/seal-p12-sha256" "${dir}/secrets/"
   cp -f "${G6RD_SECRETS}/relay-ca.pem" "${dir}/secrets/relay-ca.pem"
   cp -f "${G6RD_SECRETS}/relay-token" "${dir}/secrets/relay-token"
-  chmod 0640 "${dir}/secrets/"*.pem
-  chmod 0600 "${dir}/secrets/"*.key "${dir}/secrets/relay-token"
   docker run --rm --pull=never --network none --log-driver none \
-    -v "${dir}/secrets:/fix" postgres:17.10-bookworm \
-    sh -c 'chown 0:65532 /fix/*; chmod 0755 /fix; chmod 0640 /fix/*' >/dev/null
+    -v "${dir}/secrets:/fix-secrets" -v "${dir}/privd:/fix-privd" \
+    postgres:17.10-bookworm sh -c \
+    'chown 0:65532 /fix-secrets; chmod 0750 /fix-secrets; chown 0:65532 /fix-secrets/command-verification-agent.pem /fix-secrets/relay-ca.pem /fix-secrets/relay-token /fix-secrets/seal-user-password-sha256 /fix-secrets/seal-p12-sha256; chmod 0440 /fix-secrets/command-verification-agent.pem /fix-secrets/relay-ca.pem /fix-secrets/relay-token /fix-secrets/seal-user-password-sha256 /fix-secrets/seal-p12-sha256; chown 0:0 /fix-secrets/command-verification-privd.pem /fix-secrets/seal-user-password.key /fix-secrets/seal-p12.key; chmod 0400 /fix-secrets/command-verification-privd.pem /fix-secrets/seal-user-password.key /fix-secrets/seal-p12.key; chown 0:0 /fix-privd; chmod 0700 /fix-privd; test "$(stat -c "%u:%g:%a" /fix-secrets)" = 0:65532:750; test "$(stat -c "%u:%g:%a" /fix-privd)" = 0:0:700' \
+    >/dev/null
+}
+
+g6rd_install_agent_enrollment_token() {
+  local index="${1:?agent index is required}"
+  local token="${2:?enrollment token is required}"
+  local dir
+  dir="$(g6rd_agent_dir "${index}")"
+  printf '%s\n' "${token}" | docker run --rm --interactive --pull=never \
+    --network none --log-driver none -v "${dir}/secrets:/fix" \
+    postgres:17.10-bookworm sh -c \
+    'umask 077; cat > /fix/enrollment-token; chown 65532:65532 /fix/enrollment-token; chmod 0600 /fix/enrollment-token'
 }
 
 g6rd_write_agent_overlay() {
@@ -985,6 +1011,9 @@ g6rd_write_agent_overlay() {
       - type: bind
         source: ${dir}/journal
         target: /run/ocservia-agent/journal
+      - type: bind
+        source: ${dir}/privd
+        target: /run/ocservia-privd
       - type: bind
         source: ${dir}/secrets
         target: /run/ocservia-agent/secrets
@@ -1048,7 +1077,8 @@ g6rd_prepare_agent_cleanup_dirs() {
   local index dir
   for index in $(seq 1 "$(g6rd_agent_count)"); do
     dir="$(g6rd_agent_dir "${index}")"
-    mkdir -p "${dir}/identity" "${dir}/journal" "${dir}/secrets" "${dir}/state"
+    mkdir -p "${dir}/identity" "${dir}/journal" "${dir}/privd" \
+      "${dir}/secrets" "${dir}/state"
   done
 }
 
@@ -1131,16 +1161,28 @@ g6rd_wait_for_agent_readiness() {
   local timeout_seconds="${2:?timeout seconds is required}"
   local interval="${3:?interval seconds is required}"
   local description="${4:?description is required}"
+  local service="${5:-}"
   local deadline=$((SECONDS + timeout_seconds))
   while ((SECONDS < deadline)); do
     if g6rd_capture_agent_readiness "${nodes_file}"; then
       return 0
+    fi
+    if [[ -n "${service}" ]] && ! g6rd_agent_service_running "${service}"; then
+      echo "${service} exited while waiting for ${description}" >&2
+      g6rd_report_agent_readiness
+      return 1
     fi
     sleep "${interval}"
   done
   echo "timed out waiting for ${description}" >&2
   g6rd_report_agent_readiness
   return 1
+}
+
+g6rd_agent_service_running() {
+  local service="${1:?agent service is required}"
+  g6rd_agent_compose ps --status running --services "${service}" 2>/dev/null \
+    | grep -Fxq "${service}"
 }
 
 g6rd_capture_agent_logs() {
@@ -1150,7 +1192,7 @@ g6rd_capture_agent_logs() {
     >"${G6RD_LOGS}/agents-${FD_ID}-${label}-ps.log" 2>&1 || true
   g6rd_agent_compose logs --no-color --tail 120 \
     >"${log}" 2>&1 || true
-  grep -E 'agent endpoint creation failed|controller connection|session accepted|handshake|Resource temporarily unavailable' \
+  grep -E 'agent endpoint creation failed|controller connection|session accepted|handshake|PermissionDenied|ancestry|metadata invalid|attestation|Resource temporarily unavailable' \
     "${log}" | tail -40 >&2 || true
 }
 
@@ -1175,12 +1217,12 @@ g6rd_start_agent_fleet() {
   service="$(g6rd_agent_service_for_name "${name}")"
   g6rd_agent_compose up --detach --no-deps "${service}"
   if ! g6rd_wait_for_agent_readiness "${canary_nodes}" 45 2 \
-    "${FD_ID} Agent canary to become active"; then
+    "${FD_ID} Agent canary to become active" "${service}"; then
     g6rd_capture_agent_logs canary-before-restart
     echo "restarting ${service} after the bounded readiness failure" >&2
     g6rd_agent_compose restart "${service}"
     g6rd_wait_for_agent_readiness "${canary_nodes}" 30 2 \
-      "${FD_ID} Agent canary after one restart" || {
+      "${FD_ID} Agent canary after one restart" "${service}" || {
       g6rd_capture_agent_logs canary-after-restart
       return 1
     }

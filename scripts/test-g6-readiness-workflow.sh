@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# shellcheck disable=SC1090,SC2016,SC2329
-# This policy test sources a path variable and matches literal shell/YAML expansions.
+# shellcheck disable=SC1090,SC2016,SC2030,SC2031,SC2329
+# This test sources a path variable, matches literal expansions, and isolates
+# environment mutations in subshell fixtures.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -61,6 +62,25 @@ end
   waits = steps.select { |step| step["run"]&.include?("real-e2e-artifact.sh wait-download") }
   reject("#{job_id} artifact waits must name their producer job") unless waits.all? { |step| step.fetch("run").end_with?(%Q{"#{peer}"}) }
 end
+fd_a_steps = Array(jobs.fetch("g6-rd-fd-a").fetch("steps"))
+fd_b_steps = Array(jobs.fetch("g6-rd-fd-b").fetch("steps"))
+reject("fd-a must use the trust-independent image build phase") unless fd_a_steps.any? { |step| step["run"] == "scripts/g6-readiness-fd-a.sh build-images" }
+build_order = [
+  "Wait for failure domain A rendezvous",
+  "Import the peer tunnel identities",
+  "Build failure domain B images and tunnel",
+  "Wait for the shared trust rendezvous",
+  "Materialize the peer runtime trust",
+  "Start relay-b",
+  "Start pinned tunnels"
+]
+positions = build_order.map { |name| fd_b_steps.index { |step| step["name"] == name } }
+reject("fd-b build/runtime steps are incomplete") if positions.any?(&:nil?)
+reject("fd-b must build before waiting for shared trust, then materialize runtime state") unless positions == positions.sort
+fd_b_build = fd_b_steps.fetch(positions.fetch(2))
+reject("fd-b must use the trust-independent image build phase") unless fd_b_build.fetch("run") == "scripts/g6-readiness-fd-b.sh build-images"
+fd_b_materialize = fd_b_steps.fetch(positions.fetch(4))
+reject("fd-b must materialize real trust only after the rendezvous") unless fd_b_materialize.fetch("run").start_with?("scripts/g6-readiness-fd-b.sh materialize-runtime ")
 %w[g6-rd-secret-scan g6-rd-verifier].each do |job_id|
   job = jobs.fetch(job_id)
   reject("#{job_id} must depend on both failure domains") unless job.fetch("needs").sort == %w[g6-rd-fd-a g6-rd-fd-b]
@@ -177,6 +197,26 @@ for fd_script in "${FD_A}" "${FD_B}"; do
     exit 1
   fi
 done
+for fd_script in "${FD_A}" "${FD_B}"; do
+  build_phase="$(sed -n '/^phase_build_images() {/,/^}/p' "${fd_script}")"
+  grep -q 'g6rd_prepare_build_environment' <<<"${build_phase}" || {
+    echo "each failure domain must build with inert Compose substitutions" >&2
+    exit 1
+  }
+  if grep -q 'g6rd_export_common_env' <<<"${build_phase}"; then
+    echo "image construction must not consume live runtime trust" >&2
+    exit 1
+  fi
+done
+materialize_phase="$(sed -n '/^phase_materialize_runtime() {/,/^}/p' "${FD_B}")"
+grep -q 'phase_import_peer_secrets' <<<"${materialize_phase}" || {
+  echo "fd-b runtime materialization must import the peer trust bundle" >&2
+  exit 1
+}
+grep -q 'g6rd_export_common_env' <<<"${materialize_phase}" || {
+  echo "fd-b runtime materialization must validate the complete live environment" >&2
+  exit 1
+}
 parsed_node_id="$(printf '%s\n' \
   'relay startup' '018f2f10-7abc-7def-8abc-0123456789ab' 'relay shutdown' \
   | (source "${LIB}"; g6rd_extract_enrollment_node_id))"
@@ -210,11 +250,59 @@ grep -q 'g6rd_report_agent_readiness' "${LIB}" || {
   echo "Agent readiness timeout must print the last controller response" >&2
   exit 1
 }
+wait_for_readiness="$(sed -n '/^g6rd_wait_for_agent_readiness() {/,/^}/p' "${LIB}")"
+grep -q 'g6rd_agent_service_running' <<<"${wait_for_readiness}" || {
+  echo "Agent canary readiness must fail immediately when the container exits" >&2
+  exit 1
+}
+grep -q 'PermissionDenied.*ancestry.*metadata invalid.*attestation' "${LIB}" || {
+  echo "Agent startup diagnostics must surface local key and attestation failures" >&2
+  exit 1
+}
 
 # Exercise the observed-state predicate without starting containers. The
 # controller response is authoritative only when every expected node is
 # active, online, fresh, and carries a heartbeat.
 source "${LIB}"
+build_environment_test="$(mktemp -d)"
+(
+  export RUNNER_TEMP="${build_environment_test}/runner-temp"
+  export RUN_ID=build-environment-fd-b
+  export FD_ID=fd-b
+  export FD_ALIAS=fd-beta
+  export G6_AUTHORITY=engineering
+  export G6RD_CANDIDATE_SHA=5f9a2a943d7aa38224bc3266b7176f0a061a6b6c
+  export G6_AGENTS_B=1
+  g6rd_init_environment
+  export G6_OWNER_PASSWORD=live-owner G6_APP_PASSWORD=live-app
+  export G6_REPLICATION_PASSWORD=live-replication G6_DEV_AUTH_TOKEN=live-token
+  export G6_SIGNING_DIR=/live/signing G6_RELAY_DIR=/live/relay
+  export G6_PROBE_CONTROLLER_KEY_DIR=/live/controller
+  export OCSERV_CONTROLLER_ENDPOINT_ID=live-controller-id
+  g6rd_prepare_build_environment
+  for name in G6_OWNER_PASSWORD G6_APP_PASSWORD G6_REPLICATION_PASSWORD G6_DEV_AUTH_TOKEN; do
+    [[ "${!name}" == harness-placeholder ]] || {
+      echo "image build environment retained live ${name}" >&2
+      exit 1
+    }
+  done
+  [[ "${G6_SIGNING_DIR}" == "${G6RD_WORK}/signing" ]]
+  [[ "${G6_RELAY_DIR}" == "${G6RD_WORK}/relay-secrets" ]]
+  [[ "${G6_PROBE_CONTROLLER_KEY_DIR}" == "${G6RD_WORK}/probe-controller-key" ]]
+  [[ -z "${OCSERV_CONTROLLER_ENDPOINT_ID:-}" ]]
+  for dir in "${G6_SIGNING_DIR}" "${G6_RELAY_DIR}" "${G6_PROBE_CONTROLLER_KEY_DIR}" \
+    "${G6RD_AGENTS}/agent-fd-b-01/identity" \
+    "${G6RD_AGENTS}/agent-fd-b-01/journal" \
+    "${G6RD_AGENTS}/agent-fd-b-01/privd" \
+    "${G6RD_AGENTS}/agent-fd-b-01/secrets" \
+    "${G6RD_AGENTS}/agent-fd-b-01/state"; do
+    [[ -d "${dir}" ]] || {
+      echo "image build placeholder directory is missing: ${dir}" >&2
+      exit 1
+    }
+  done
+)
+rm -rf "${build_environment_test}"
 relay_topology_test="$(mktemp -d)"
 export G6RD_AGENTS="${relay_topology_test}/agents"
 export G6RD_AGENT_COMPOSE="${relay_topology_test}/agents.yaml"
@@ -365,16 +453,46 @@ if grep -qF 'chown 0:65532 /fix; chmod 0750 /fix' "${LIB}"; then
   echo "runtime material directories must remain reachable by later runner phases" >&2
   exit 1
 fi
-grep -qF 'chown 0:65532 /fix/*; chmod 0755 /fix; chmod 0640 /fix/*' "${LIB}" || {
-  echo "agent secret files must be group-readable without locking out enrollment" >&2
+agent_material="$(sed -n '/^g6rd_prepare_agent_material() {/,/^}/p' "${LIB}")"
+grep -q 'chown 0:65532 /fix-secrets' <<<"${agent_material}" || {
+  echo "Agent secret ancestry must be root-owned before startup" >&2
+  exit 1
+}
+grep -q 'chmod 0440 /fix-secrets/command-verification-agent.pem' <<<"${agent_material}" || {
+  echo "the unprivileged Agent must receive only its group-readable verification key" >&2
+  exit 1
+}
+grep -q 'chmod 0400 /fix-secrets/command-verification-privd.pem' <<<"${agent_material}" || {
+  echo "privd command and sealing keys must remain root-only" >&2
+  exit 1
+}
+grep -q 'chown 0:0 /fix-privd' <<<"${agent_material}" || {
+  echo "privd attestation state must use a separate root-only bind" >&2
+  exit 1
+}
+grep -q 'target: /run/ocservia-privd' "${LIB}" || {
+  echo "the Agent overlay must mount persistent root-only privd state" >&2
+  exit 1
+}
+grep -q '\$PRIVD_STATE/attestation.key' "${SUPERVISOR}" || {
+  echo "privd must keep its attestation key outside Agent-owned state" >&2
+  exit 1
+}
+enrollment_installer="$(sed -n '/^g6rd_install_agent_enrollment_token() {/,/^}/p' "${LIB}")"
+grep -q -- '--network none' <<<"${enrollment_installer}" || {
+  echo "enrollment-token materialization must not have network access" >&2
+  exit 1
+}
+grep -q 'chmod 0600 /fix/enrollment-token' <<<"${enrollment_installer}" || {
+  echo "one-time enrollment tokens must be process-owned mode 0600" >&2
   exit 1
 }
 for script in "${FD_A}" "${FD_B}"; do
-  grep -q 'chmod 0600 "${dir}/secrets/enrollment-token"' "${script}" || {
-    echo "one-time enrollment tokens must be process-owned mode 0600" >&2
+  grep -q 'g6rd_install_agent_enrollment_token' "${script}" || {
+    echo "each failure domain must install enrollment tokens through the root-owned bind" >&2
     exit 1
   }
-  if grep -q 'chmod 0644 "${dir}/secrets/enrollment-token"' "${script}"; then
+  if grep -q 'chmod 0644 .*enrollment-token' "${script}"; then
     echo "one-time enrollment tokens must not be world-readable" >&2
     exit 1
   fi
@@ -955,7 +1073,7 @@ case "${1:-} ${2:-}" in
     done
     if [[ " $* " == *" agents-fd-a.yaml "* ]]; then
       for index in 01 02; do
-        for dir in identity journal secrets state; do
+        for dir in identity journal privd secrets state; do
           [[ -d "${G6RD_TEST_AGENT_ROOT}/agent-fd-a-${index}/${dir}" ]] || {
             echo "agent cleanup bind directory is missing: agent-fd-a-${index}/${dir}" >&2
             exit 1

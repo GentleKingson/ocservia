@@ -140,9 +140,17 @@ phase_import_peer_secrets() {
   done
 }
 
-phase_images() {
+phase_materialize_runtime() {
+  phase_import_peer_secrets "${1:?peer shared secrets directory is required}"
+  g6rd_export_common_env || {
+    echo "peer trust material did not produce a complete runtime environment" >&2
+    return 1
+  }
+}
+
+phase_build_images() {
   g6rd_build_tunnel
-  g6rd_export_common_env
+  g6rd_prepare_build_environment
   g6rd_write_agent_overlay "$(g6rd_agent_count)"
   g6rd_compose build postgres migrate api worker scheduler transportd \
     controller-key-init transport-runtime-init transport-endpoint-bootstrap relay g6-probe
@@ -227,10 +235,7 @@ phase_agents_enroll() {
       return 1
     }
     token="$(g6rd_mint_enrollment_token "${name}" "${endpoint}")"
-    printf '%s\n' "${token}" >"${dir}/secrets/enrollment-token"
-    chmod 0600 "${dir}/secrets/enrollment-token"
-    docker run --rm --pull=never -v "${dir}/secrets:/fix" postgres:17.10-bookworm \
-      chown 65532:65532 /fix/enrollment-token >/dev/null 2>&1
+    g6rd_install_agent_enrollment_token "${index}" "${token}"
     enrollment_log="${G6RD_LOGS}/enrollment-${name}.log"
     if ! node_id="$(g6rd_agent_compose run --rm --no-deps \
       -e G6_MODE=enroll \
@@ -1015,9 +1020,9 @@ phase_evidence_build() {
 
 case "${1:-}" in
 prepare) phase_prepare ;;
-import-peer-secrets) phase_import_peer_secrets "${2:?peer directory}" ;;
+materialize-runtime | import-peer-secrets) phase_materialize_runtime "${2:?peer directory}" ;;
 import-peer-tunnel-nodes) import_peer_tunnel_nodes "${2:?peer directory}" ;;
-images) phase_images ;;
+build-images | images) phase_build_images ;;
 tunnel-up) phase_tunnel_up ;;
 standby-bootstrap) phase_standby_bootstrap "${2:?primary rendezvous directory}" ;;
 relay-up) phase_relay_up ;;
@@ -1041,7 +1046,7 @@ outbox-send-before-mark) phase_outbox_send_before_mark ;;
   diagnostics) g6rd_diagnostics ;;
   cleanup) g6rd_cleanup_bounded ;;
 *)
-  echo "usage: $0 <prepare|import-peer-secrets|import-peer-tunnel-nodes|images|tunnel-up|standby-bootstrap|relay-up|agents-enroll|agents-start|load-start|promote|merge-peer-evidence|scenario-scheduler|scenario-owner|scenario-relay|scenario-path|outbox-claim-before-send|outbox-send-before-mark|outbox-result-before-commit|window|evidence-collect|final-freeze|merge-peer-final-evidence|evidence-build|diagnostics|cleanup>" >&2
+  echo "usage: $0 <prepare|materialize-runtime|import-peer-tunnel-nodes|build-images|tunnel-up|standby-bootstrap|relay-up|agents-enroll|agents-start|load-start|promote|merge-peer-evidence|scenario-scheduler|scenario-owner|scenario-relay|scenario-path|outbox-claim-before-send|outbox-send-before-mark|outbox-result-before-commit|window|evidence-collect|final-freeze|merge-peer-final-evidence|evidence-build|diagnostics|cleanup>" >&2
   exit 2
   ;;
 esac

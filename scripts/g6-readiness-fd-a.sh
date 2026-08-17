@@ -125,9 +125,9 @@ seed_authenticated_approval_fixtures() {
     >/dev/null
 }
 
-phase_images() {
+phase_build_images() {
   g6rd_build_tunnel
-  g6rd_export_common_env
+  g6rd_prepare_build_environment
   g6rd_write_agent_overlay "$(g6rd_agent_count)"
   g6rd_compose build postgres migrate api worker scheduler transportd \
     controller-key-init transport-runtime-init transport-endpoint-bootstrap relay g6-probe
@@ -277,10 +277,7 @@ phase_agents_enroll() {
       return 1
     }
     token="$(g6rd_mint_enrollment_token "${name}" "${endpoint}")"
-    printf '%s\n' "${token}" >"${dir}/secrets/enrollment-token"
-    chmod 0600 "${dir}/secrets/enrollment-token"
-    docker run --rm --pull=never -v "${dir}/secrets:/fix" postgres:17.10-bookworm \
-      chown 65532:65532 /fix/enrollment-token >/dev/null 2>&1
+    g6rd_install_agent_enrollment_token "${index}" "${token}"
     enrollment_log="${G6RD_LOGS}/enrollment-${name}.log"
     if ! node_id="$(g6rd_agent_compose run --rm --no-deps \
       -e G6_MODE=enroll \
@@ -604,7 +601,7 @@ prepare) phase_prepare ;;
 publish-shared-secrets) phase_publish_shared_secrets ;;
 import-peer-secrets) phase_import_peer_secrets "${2:?peer directory}" ;;
 import-peer-tunnel-nodes) import_peer_tunnel_nodes "${2:?peer directory}" ;;
-images) phase_images ;;
+build-images | images) phase_build_images ;;
 tunnel-up) phase_tunnel_up ;;
 primary-up) phase_primary_up ;;
 pitr-prepare) phase_pitr_prepare ;;
@@ -621,7 +618,7 @@ evidence) phase_evidence "${2:?final-freeze directory is required}" ;;
 diagnostics) g6rd_diagnostics ;;
 cleanup) g6rd_cleanup_bounded ;;
 *)
-  echo "usage: $0 <prepare|publish-shared-secrets|import-peer-secrets|import-peer-tunnel-nodes|images|tunnel-up|primary-up|pitr-prepare|agents-enroll|transport-trust-reload|agents-start|isolate|dual-primary-probes|pitr-restore|rejoin|relay-a-stop|ready|evidence|diagnostics|cleanup>" >&2
+  echo "usage: $0 <prepare|publish-shared-secrets|import-peer-secrets|import-peer-tunnel-nodes|build-images|tunnel-up|primary-up|pitr-prepare|agents-enroll|transport-trust-reload|agents-start|isolate|dual-primary-probes|pitr-restore|rejoin|relay-a-stop|ready|evidence|diagnostics|cleanup>" >&2
   exit 2
   ;;
 esac
