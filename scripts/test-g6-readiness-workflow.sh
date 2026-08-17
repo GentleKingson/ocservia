@@ -87,6 +87,17 @@ grep -q '^USER nobody:ocservia$' "${PROBE_DOCKERFILE}" || {
   exit 1
 }
 
+# Keep the shell wrapper aligned with the tunnel binary's asymmetric CLI:
+# serve forwards to a target, while forward binds a local listener.
+grep -A12 '^g6rd_tunnel_forward()' "${LIB}" | grep -q -- '--listen "0.0.0.0:${listen_port}"' || {
+  echo "the G6 tunnel forward wrapper must pass the local listener with --listen" >&2
+  exit 1
+}
+if grep -A12 '^g6rd_tunnel_forward()' "${LIB}" | grep -q -- '--forward'; then
+  echo "the G6 tunnel forward wrapper must not pass the serve-only --forward flag" >&2
+  exit 1
+fi
+
 # Every required observation event from g6-slo.yaml must be produced by the
 # harness timeline: this stage runs the real fault scenarios, so all sixteen
 # observations are in scope, including the load bracket around the failover.

@@ -348,7 +348,7 @@ g6rd_tunnel_forward() {
   nohup "${G6RD_TUNNEL_BIN}" forward \
     --key-file "${G6RD_SECRETS}/tunnel-${name}.key" \
     --peer-node "${peer}" \
-    --forward "0.0.0.0:${listen_port}" \
+    --listen "0.0.0.0:${listen_port}" \
     >"${G6RD_LOGS}/tunnel-forward-${name}.log" 2>&1 &
   echo $! >"${pid_file}"
   sleep 2
