@@ -11,7 +11,7 @@ validate_name() {
     echo "GITHUB_RUN_ID and GITHUB_RUN_ATTEMPT are required" >&2
     return 2
   }
-  [[ "${name}" =~ ^(real-e2e-(controller-ready|agent-endpoint|enrollment-token|enrollment-result)|g6-ha-(tunnel-fd-a|tunnel-fd-b|primary-up|standby|load|failover-ready|isolation|new-primary|pitr|post-promotion|fd-a-recovered|fd-a-rejoin|evidence)|g6-rd-(tunnel-fd-a|tunnel-fd-b|shared|primary-up|agents|load-active|isolation|new-primary|fd-a-ready|final-freeze|fd-a-evidence|evidence-bundle|fd-a-diagnostics|fd-b-diagnostics|verdict))-[0-9]+-[0-9]+$ ]] || {
+  [[ "${name}" =~ ^(real-e2e-(controller-ready|agent-endpoint|enrollment-token|enrollment-result)|g6-ha-(tunnel-fd-a|tunnel-fd-b|primary-up|standby|load|failover-ready|isolation|new-primary|pitr|post-promotion|fd-a-recovered|fd-a-rejoin|evidence)|g6-rd-(tunnel-fd-a|tunnel-fd-b|shared|primary-up|agents|agents-enrolled-fd-b|trust-ready|load-active|isolation|new-primary|fd-a-ready|final-freeze|fd-a-evidence|evidence-bundle|fd-a-diagnostics|fd-b-diagnostics|verdict))-[0-9]+-[0-9]+$ ]] || {
     echo "invalid real E2E artifact name" >&2
     return 2
   }

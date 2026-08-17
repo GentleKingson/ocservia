@@ -248,9 +248,10 @@ phase_pitr_prepare() {
   printf '%s\n' "${switch_target}" >"${G6RD_OUTBOX}/pitr-prep/archived-wal-segment"
 }
 
-# Bring the managed nodes up: prepare identities, mint one token per node,
-# enroll, approve, then hand the persistent node ids back for the run phase.
-phase_agents_up() {
+# Prepare and durably activate the local managed nodes. The transport runtime
+# is reloaded only after fd-b has activated its nodes too, so its fail-closed
+# startup snapshot contains the complete cross-domain fleet.
+phase_agents_enroll() {
   local index count dir name endpoint token node_id
   count="$(g6rd_agent_count)"
   G6RD_WORKSPACE_ID="$(<"${G6RD_STATE}/workspace-id")"
@@ -294,6 +295,45 @@ phase_agents_up() {
       >>"${G6RD_OUTBOX}/agents/nodes.tsv"
     printf '%s\n' "${node_id}" >"${dir}/state/node-id"
   done
+}
+
+phase_transport_trust_reload() {
+  local peer="${1:?fd-b enrollment rendezvous is required}"
+  local container started_at
+  require_file "${peer}/candidate-sha"
+  [[ "$(<"${peer}/candidate-sha")" == "${G6RD_CANDIDATE_SHA}" ]] || {
+    echo "fd-b enrollment rendezvous belongs to a different candidate" >&2
+    return 1
+  }
+  g6rd_export_common_env
+  g6rd_compose restart transportd
+  container="$(g6rd_compose ps -q transportd)"
+  [[ -n "${container}" ]] || {
+    echo "transportd container is absent after trust snapshot reload" >&2
+    return 1
+  }
+  started_at="$(docker inspect --format '{{.State.StartedAt}}' "${container}")"
+  g6rd_wait_until 60 1 "transportd serving after trust snapshot reload" \
+    transportd_serving_since "${container}" "${started_at}"
+  g6rd_wait_until 60 2 "api ready after trust snapshot reload" g6rd_api_ready
+  mkdir -p "${G6RD_OUTBOX}/trust-ready"
+  printf '%s\n' "${G6RD_CANDIDATE_SHA}" >"${G6RD_OUTBOX}/trust-ready/candidate-sha"
+}
+
+transportd_serving_since() {
+  local container="${1:?transportd container is required}"
+  local started_at="${2:?transportd start time is required}"
+  docker logs --since "${started_at}" "${container}" 2>&1 \
+    | grep -q 'transportd serving'
+}
+
+phase_agents_start() {
+  local count
+  count="$(g6rd_agent_count)"
+  G6RD_WORKSPACE_ID="$(<"${G6RD_STATE}/workspace-id")"
+  export G6RD_WORKSPACE_ID
+  g6rd_export_common_env
+  g6rd_write_agent_overlay "${count}"
   g6rd_chown_agent_dirs
   g6rd_agent_compose up --detach
 }
@@ -561,7 +601,9 @@ images) phase_images ;;
 tunnel-up) phase_tunnel_up ;;
 primary-up) phase_primary_up ;;
 pitr-prepare) phase_pitr_prepare ;;
-agents-up) phase_agents_up ;;
+agents-enroll) phase_agents_enroll ;;
+transport-trust-reload) phase_transport_trust_reload "${2:?fd-b enrollment rendezvous is required}" ;;
+agents-start) phase_agents_start ;;
 isolate) phase_isolate ;;
 dual-primary-probes) phase_dual_primary_probes "${2:?promoted primary directory is required}" ;;
 pitr-restore) phase_pitr_restore ;;
@@ -572,7 +614,7 @@ evidence) phase_evidence "${2:?final-freeze directory is required}" ;;
 diagnostics) g6rd_diagnostics ;;
 cleanup) g6rd_cleanup ;;
 *)
-  echo "usage: $0 <prepare|publish-shared-secrets|import-peer-secrets|import-peer-tunnel-nodes|images|tunnel-up|primary-up|pitr-prepare|agents-up|isolate|dual-primary-probes|pitr-restore|rejoin|relay-a-stop|ready|evidence|diagnostics|cleanup>" >&2
+  echo "usage: $0 <prepare|publish-shared-secrets|import-peer-secrets|import-peer-tunnel-nodes|images|tunnel-up|primary-up|pitr-prepare|agents-enroll|transport-trust-reload|agents-start|isolate|dual-primary-probes|pitr-restore|rejoin|relay-a-stop|ready|evidence|diagnostics|cleanup>" >&2
   exit 2
   ;;
 esac

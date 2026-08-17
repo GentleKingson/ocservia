@@ -195,7 +195,10 @@ phase_relay_up() {
     g6rd_compose exec -T relay relay-healthcheck
 }
 
-phase_agents_up() {
+# Activate this domain's nodes in the authoritative database before either
+# domain starts an agent. fd-a then reloads transportd's fail-closed trust
+# snapshot once, with the complete fleet present.
+phase_agents_enroll() {
   local peer_nodes="${1:?peer nodes tsv}"
   local index count dir name endpoint token node_id
   count="$(g6rd_agent_count)"
@@ -241,6 +244,23 @@ phase_agents_up() {
     printf '%s\t%s\t%s\n' "${name}" "${node_id}" "${endpoint}" >>"${NODES_FILE}"
     printf '%s\n' "${node_id}" >"${dir}/state/node-id"
   done
+  mkdir -p "${G6RD_OUTBOX}/agents-enrolled"
+  printf '%s\n' "${G6RD_CANDIDATE_SHA}" >"${G6RD_OUTBOX}/agents-enrolled/candidate-sha"
+}
+
+phase_agents_start() {
+  local trust_ready="${1:?transport trust rendezvous is required}"
+  local count
+  require_file "${trust_ready}/candidate-sha"
+  [[ "$(<"${trust_ready}/candidate-sha")" == "${G6RD_CANDIDATE_SHA}" ]] || {
+    echo "transport trust rendezvous belongs to a different candidate" >&2
+    return 1
+  }
+  count="$(g6rd_agent_count)"
+  G6RD_WORKSPACE_ID="$(<"${G6RD_STATE}/workspace-id")"
+  export G6RD_WORKSPACE_ID
+  g6rd_export_common_env
+  g6rd_write_agent_overlay "${count}"
   g6rd_chown_agent_dirs
   g6rd_agent_compose up --detach
   # The era-1 controller transportd runs on the peer, so fd-b cannot probe
@@ -994,7 +1014,8 @@ images) phase_images ;;
 tunnel-up) phase_tunnel_up ;;
 standby-bootstrap) phase_standby_bootstrap "${2:?primary rendezvous directory}" ;;
 relay-up) phase_relay_up ;;
-  agents-up) phase_agents_up "${2:?peer nodes tsv}" ;;
+  agents-enroll) phase_agents_enroll "${2:?peer nodes tsv}" ;;
+  agents-start) phase_agents_start "${2:?transport trust rendezvous is required}" ;;
   load-start) phase_load_start ;;
   promote) phase_promote "${2:?peer isolation directory}" ;;
   merge-peer-evidence) phase_merge_peer_evidence "${2:?peer evidence root}" ;;
@@ -1013,7 +1034,7 @@ outbox-send-before-mark) phase_outbox_send_before_mark ;;
   diagnostics) g6rd_diagnostics ;;
   cleanup) g6rd_cleanup ;;
 *)
-  echo "usage: $0 <prepare|import-peer-secrets|import-peer-tunnel-nodes|images|tunnel-up|standby-bootstrap|relay-up|agents-up|load-start|promote|merge-peer-evidence|scenario-scheduler|scenario-owner|scenario-relay|scenario-path|outbox-claim-before-send|outbox-send-before-mark|outbox-result-before-commit|window|evidence-collect|final-freeze|merge-peer-final-evidence|evidence-build|diagnostics|cleanup>" >&2
+  echo "usage: $0 <prepare|import-peer-secrets|import-peer-tunnel-nodes|images|tunnel-up|standby-bootstrap|relay-up|agents-enroll|agents-start|load-start|promote|merge-peer-evidence|scenario-scheduler|scenario-owner|scenario-relay|scenario-path|outbox-claim-before-send|outbox-send-before-mark|outbox-result-before-commit|window|evidence-collect|final-freeze|merge-peer-final-evidence|evidence-build|diagnostics|cleanup>" >&2
   exit 2
   ;;
 esac
