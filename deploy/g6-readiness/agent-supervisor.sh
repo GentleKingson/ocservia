@@ -143,8 +143,11 @@ run)
         --synthetic-barrier-file "$STATE/synthetic-barrier" \
         --stats-file "$JOURNAL/tasks.json" &
     agent_pid=$!
-    echo "$agent_pid" >"$STATE/agent.pid"
-    echo "$privd_pid" >"$STATE/privd.pid"
+    # The supervisor intentionally has no DAC override capability. Keep its
+    # process metadata in the root-owned runtime directory, not Agent-owned
+    # persistent state.
+    echo "$agent_pid" >"$SOCKET_DIR/agent.pid"
+    echo "$privd_pid" >"$SOCKET_DIR/privd.pid"
     wait "$agent_pid"
     status=$?
     kill "$privd_pid" 2>/dev/null || true

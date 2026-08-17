@@ -1194,7 +1194,7 @@ g6rd_capture_agent_logs() {
     >"${G6RD_LOGS}/agents-${FD_ID}-${label}-ps.log" 2>&1 || true
   g6rd_agent_compose logs --no-color --tail 120 \
     >"${log}" 2>&1 || true
-  grep -E 'agent endpoint creation failed|controller connection|session accepted|handshake|PermissionDenied|ancestry|metadata invalid|attestation|Resource temporarily unavailable' \
+  grep -E 'agent endpoint creation failed|controller connection|session accepted|handshake|PermissionDenied|Permission denied|cannot create|ancestry|metadata invalid|attestation|Resource temporarily unavailable' \
     "${log}" | tail -40 >&2 || true
 }
 
@@ -1322,7 +1322,7 @@ g6rd_sampler_tick() {
       'sed -n "\$s/.*\"tasks_alive\":\([0-9]*\).*/\1/p" /run/transport-stats/tasks.json' \
       0 "" "${stamp}"
     # shellcheck disable=SC2016  # the sed program must reach the container verbatim
-    g6rd_sampler_row agent "agent-${FD_ID}-01" "agent-${FD_ID}-01" 'cat /run/ocservia-agent/state/agent.pid' \
+    g6rd_sampler_row agent "agent-${FD_ID}-01" "agent-${FD_ID}-01" 'cat /run/ocserv-platform/agent.pid' \
       'sed -n "\$s/.*\"tasks_alive\":\([0-9]*\).*/\1/p" /run/ocservia-agent/journal/tasks.json' \
       0 "" "${stamp}"
     g6rd_sampler_row postgres "postgres-${FD_ID}" postgres 'echo 1' \

@@ -499,6 +499,18 @@ grep -q '\$PRIVD_STATE/attestation.key' "${SUPERVISOR}" || {
   echo "privd must keep its attestation key outside Agent-owned state" >&2
   exit 1
 }
+grep -q '\$SOCKET_DIR/agent.pid' "${SUPERVISOR}" || {
+  echo "the root supervisor must write process metadata to its runtime directory" >&2
+  exit 1
+}
+if grep -q '\$STATE/agent.pid' "${SUPERVISOR}"; then
+  echo "the capability-restricted root supervisor cannot write Agent-owned state" >&2
+  exit 1
+fi
+grep -qF "'cat /run/ocserv-platform/agent.pid'" "${LIB}" || {
+  echo "the resource sampler must read the root-owned Agent PID" >&2
+  exit 1
+}
 enrollment_installer="$(sed -n '/^g6rd_install_agent_enrollment_token() {/,/^}/p' "${LIB}")"
 grep -q -- '--network none' <<<"${enrollment_installer}" || {
   echo "enrollment-token materialization must not have network access" >&2
