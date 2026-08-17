@@ -92,6 +92,17 @@ grep -q '^USER nobody:ocservia$' "${PROBE_DOCKERFILE}" || {
   exit 1
 }
 
+# The supervisor helper must perform the process replacement itself. Shell
+# functions cannot be passed as the command operand to exec.
+grep -A2 '^as_agent()' "${SUPERVISOR}" | grep -q 'exec setpriv' || {
+  echo "the agent identity helper must exec setpriv" >&2
+  exit 1
+}
+if grep -q 'exec as_agent' "${SUPERVISOR}"; then
+  echo "the agent supervisor must not ask exec to resolve a shell function" >&2
+  exit 1
+fi
+
 # Keep the shell wrapper aligned with the tunnel binary's asymmetric CLI:
 # serve forwards to a target, while forward binds a local listener.
 grep -A12 '^g6rd_tunnel_forward()' "${LIB}" | grep -q -- '--listen "0.0.0.0:${listen_port}"' || {
