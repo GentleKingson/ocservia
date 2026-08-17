@@ -197,9 +197,9 @@ g6rd_materialize_relay_dir() {
 }
 
 # The per-FD signing dir bind-mounted read-only into every role container.
-# command-signing.pem is process-owned (0400) for the Go roles; the two
-# verification copies carry the ownership privd (root) and the agent
-# (65532:65532 0640) require.
+# Its root-owned ancestry is accepted by every consumer; command-signing.pem
+# is process-owned (0400) for the Go roles, while the verification copies
+# carry the ownership privd (root) and the agent (65532:65532 0640) require.
 g6rd_materialize_signing_dir() {
   local dir="${G6RD_WORK}/signing"
   if [[ -s "${dir}/command-signing.pem" \
@@ -220,7 +220,7 @@ g6rd_materialize_signing_dir() {
     "${dir}/command-verification-agent.pem" "${dir}/command-verification-privd.pem"
   docker run --rm --network none --log-driver none \
     -v "${dir}:/fix" postgres:17.10-bookworm sh -c \
-    'chmod 0755 /fix; chown 65534:65532 /fix/command-signing.pem; chown 0:65532 /fix/command-verification.pem /fix/command-verification-agent.pem /fix/command-verification-privd.pem' \
+    'chown 0:65532 /fix; chmod 0755 /fix; chown 65534:65532 /fix/command-signing.pem; chown 0:65532 /fix/command-verification.pem /fix/command-verification-agent.pem /fix/command-verification-privd.pem' \
     >/dev/null
   printf '%s\n' "${dir}"
 }

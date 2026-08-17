@@ -104,6 +104,10 @@ grep -q 'chown 65534:65532 /fix/command-signing.pem' "${LIB}" || {
   echo "the control-plane signing key must be owned by its container uid" >&2
   exit 1
 }
+grep -qF 'chown 0:65532 /fix; chmod 0755 /fix; chown 65534:65532 /fix/command-signing.pem' "${LIB}" || {
+  echo "the signing directory must have root-owned ancestry accepted by every consumer" >&2
+  exit 1
+}
 grep -q 'chown 65534:65532 /fix/controller.key' "${LIB}" || {
   echo "the probe controller key must be owned by its container uid" >&2
   exit 1
