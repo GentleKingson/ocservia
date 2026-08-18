@@ -252,7 +252,7 @@ g6rd_generate_secrets() {
   [[ "${FD_ID}" == "fd-a" ]] && g6rd_generate_controller_key
 }
 
-# The per-FD relay secret bundle mounted into the relay container.
+# The per-FD relay material mounted read-only into the relay and its clients.
 g6rd_materialize_relay_dir() {
   local dir="${G6RD_WORK}/relay-secrets"
   if [[ -s "${dir}/relay.crt" && -s "${dir}/relay.key" \
@@ -267,7 +267,11 @@ g6rd_materialize_relay_dir() {
   cp -f "${G6RD_SECRETS}/relay-ca.pem" "${dir}/relay-ca.pem"
   cp -f "${G6RD_SECRETS}/relay-token" "${dir}/relay-token"
   chmod 0644 "${dir}/relay.crt" "${dir}/relay-ca.pem"
-  chmod 0600 "${dir}/relay.key" "${dir}/relay-token"
+  chmod 0600 "${dir}/relay.key"
+  # The relay runs as 65532 while the transport-authorized probe runs as
+  # 65534:65532. Both must read the client token; keep it group-readable but
+  # never world-readable. The relay private key remains owner-only.
+  chmod 0640 "${dir}/relay-token"
   docker run --rm --pull=never --network none --log-driver none \
     -v "${dir}:/fix" postgres:17.10-bookworm \
     sh -c 'chown 65532:65532 /fix/*; chmod 0755 /fix' >/dev/null

@@ -99,6 +99,8 @@ runtime_init_command = Array(runtime_init.fetch("command")).join("\n")
 reject("transport runtime init must assign the stats volume to transportd") unless runtime_init_command.include?("chown 65532:65532 /run/transport-stats")
 runtime_init_volumes = Array(runtime_init.fetch("volumes"))
 reject("transport runtime init must mount the transport stats volume") unless runtime_init_volumes.any? { |volume| volume.is_a?(Hash) && volume["source"] == "transport-stats" && volume["target"] == "/run/transport-stats" }
+probe_volumes = Array(services.fetch("g6-probe").fetch("volumes"))
+reject("the G6 probe must read the scoped relay material through a read-only bind") unless probe_volumes.any? { |volume| volume.is_a?(Hash) && volume["target"] == "/run/relay-secrets" && volume["read_only"] == true }
 reject("postgres must receive stop signals directly so fencing leaves a clean data directory") unless services.fetch("postgres").fetch("init") == false
 reject("postgres must never pull after the support image preflight") unless services.fetch("postgres").fetch("pull_policy") == "never"
 roles = %w[api worker scheduler].to_h { |role| [role, services.fetch(role).fetch("command").fetch(0)] }
@@ -711,6 +713,19 @@ grep -qF 'chown 65532:65532 /fix/*; chmod 0755 /fix' "${LIB}" || {
   echo "the relay material must be owned by the relay uid" >&2
   exit 1
 }
+relay_material="$(sed -n '/^g6rd_materialize_relay_dir() {/,/^}/p' "${LIB}")"
+grep -qF 'chmod 0600 "${dir}/relay.key"' <<<"${relay_material}" || {
+  echo "the relay private key must remain owner-readable only" >&2
+  exit 1
+}
+grep -qF 'chmod 0640 "${dir}/relay-token"' <<<"${relay_material}" || {
+  echo "the relay token must be readable by the transport-authorized probe group only" >&2
+  exit 1
+}
+if grep -Eq 'chmod[[:space:]]+0?[0-7]{2}[1-7][[:space:]].*relay-token' <<<"${relay_material}"; then
+  echo "the relay token must never become world-readable" >&2
+  exit 1
+fi
 if grep -qF 'chown 0:65532 /fix; chmod 0750 /fix' "${LIB}"; then
   echo "runtime material directories must remain reachable by later runner phases" >&2
   exit 1
