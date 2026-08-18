@@ -675,6 +675,18 @@ g6rd_agent_compose() {
     --file "${COMPOSE_FILE}" --file "${G6RD_AGENT_COMPOSE}" "$@"
 }
 
+g6rd_agent_journal_query() {
+  local service="${1:?agent service is required}" sql="${2:?sql is required}"
+  local timeout_seconds="${G6RD_JOURNAL_QUERY_TIMEOUT_SECONDS:-10}"
+  [[ "${timeout_seconds}" =~ ^[0-9]+$ && "${timeout_seconds}" -ge 1 ]] || {
+    echo "Agent journal query timeout must be a positive integer" >&2
+    return 2
+  }
+  G6RD_COMPOSE_TIMEOUT_SECONDS="${timeout_seconds}" \
+    g6rd_agent_compose exec -T --user 65532:65532 "${service}" \
+      sqlite3 -readonly /run/ocservia-agent/journal/agent.db "${sql}"
+}
+
 # ---------------------------------------------------------------------------
 # Pinned g6-tunnel: one keypair and one serve/forward process per forwarded
 # service, because a relay would drop two endpoints presenting the same
@@ -1607,6 +1619,41 @@ g6rd_start_agent_fleet() {
     g6rd_capture_agent_logs global-readiness-timeout
     return 1
   }
+}
+
+# Validate journal observation with the same DAC boundary used by the live
+# harness. The Agent owner must be able to read its database, while uid 0 in
+# this cap-drop=ALL service must not gain implicit access to the owner-only
+# journal tree.
+g6rd_verify_agent_journal_observer_principals() {
+  local service="${1:?agent service is required}" count
+  if ! count="$(g6rd_agent_journal_query "${service}" \
+    'SELECT count(*) FROM command_journal')"; then
+    echo "the Agent journal owner probe failed for ${service}" >&2
+    return 1
+  fi
+  [[ "${count}" =~ ^[0-9]+$ ]] || {
+    echo "the Agent journal owner probe returned invalid output for ${service}" >&2
+    return 1
+  }
+  # shellcheck disable=SC2016  # evaluated by the capless container principal
+  if ! G6RD_COMPOSE_TIMEOUT_SECONDS=10 \
+    g6rd_agent_compose exec -T --user 0:0 "${service}" \
+      sh -eu -c '
+        test "$(stat -c "%u:%g:%a" /run/ocservia-agent/journal)" = "65532:65532:700"
+        test ! -x /run/ocservia-agent/journal
+        test ! -r /run/ocservia-agent/journal/agent.db
+        ! sqlite3 -readonly /run/ocservia-agent/journal/agent.db \
+          "SELECT count(*) FROM command_journal" >/dev/null 2>&1
+      '; then
+    echo "the capless uid 0 Agent journal DAC probe failed for ${service}" >&2
+    return 1
+  fi
+  if ! count="$(g6rd_agent_journal_query "${service}" \
+    'SELECT count(*) FROM command_journal')" || [[ ! "${count}" =~ ^[0-9]+$ ]]; then
+    echo "the Agent journal owner recheck failed for ${service}" >&2
+    return 1
+  fi
 }
 
 g6rd_release_synthetic_barriers() {

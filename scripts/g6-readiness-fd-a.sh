@@ -343,6 +343,7 @@ phase_agents_start() {
   g6rd_write_agent_overlay "${count}"
   g6rd_chown_agent_dirs
   g6rd_start_agent_fleet "${G6RD_OUTBOX}/agents/nodes.tsv"
+  g6rd_verify_agent_journal_observer_principals "agent-${FD_ID}-01"
 }
 
 # The database failure: fd-a's primary is stopped under active load, and
@@ -590,8 +591,7 @@ phase_evidence() {
   local index service
   for index in $(seq 1 "$(g6rd_agent_count)"); do
     service="agent-${FD_ID}-$(printf '%02d' "${index}")"
-    g6rd_agent_compose exec -T "${service}" \
-      sqlite3 -readonly /run/ocservia-agent/journal/agent.db \
+    g6rd_agent_journal_query "${service}" \
       "SELECT hex(e.idempotency_key)||' '||hex(j.command_id)||' '||e.executed_at FROM synthetic_effects e JOIN command_journal j ON j.idempotency_key=e.idempotency_key" \
       >"${out}/evidence/effects/${service}.tsv"
   done

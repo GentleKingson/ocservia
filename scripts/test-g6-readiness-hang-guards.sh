@@ -148,13 +148,17 @@ grep -qF 'g6rd_stop_harness_loop "${G6RD_STATE}/${name}-watcher.pid"' "${FD_B}" 
 # controls when another attempt may start.
 for token in \
   'G6RD_PSQL_TIMEOUT_SECONDS=10 psql_primary' \
-  'G6RD_COMPOSE_TIMEOUT_SECONDS=10 g6rd_agent_compose' \
   'G6RD_COMPOSE_TIMEOUT_SECONDS=10 g6rd_compose'; do
   grep -qF "${token}" "${FD_B}" || {
     echo "crash-window external predicate is not per-attempt bounded: ${token}" >&2
     exit 1
   }
 done
+# shellcheck disable=SC2016  # assert the literal per-attempt timeout handoff
+grep -qF 'G6RD_COMPOSE_TIMEOUT_SECONDS="${timeout_seconds}"' "${LIB}" || {
+  echo "Agent journal observation is not per-attempt bounded" >&2
+  exit 1
+}
 
 # Each crash-window wait stops starting attempts at its declared deadline, and
 # its aggregate declared budget leaves at least one minute for bounded
@@ -162,7 +166,7 @@ done
 replacement_helper="$(sed -n '/^restart_worker_transport_unit() {/,/^}/p' "${FD_B}")"
 deadline_budget() {
   local body="${1:?function body is required}"
-  grep -oE 'g6rd_wait_until_deadline[[:space:]]+[0-9]+' <<<"${body}" \
+  grep -oE '(g6rd_wait_until_deadline|wait_for_journal_command)[[:space:]]+[0-9]+' <<<"${body}" \
     | awk '{ total += $2 } END { print total + 0 }'
 }
 replacement_budget="$(deadline_budget "${replacement_helper}")"

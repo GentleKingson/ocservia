@@ -438,6 +438,76 @@ grep -q 'g6rd_agent_services_needing_restart' <<<"${start_fleet}" || {
   echo "Agent startup recovery must target only observed-unready local services" >&2
   exit 1
 }
+journal_query_runtime="$(sed -n '/^g6rd_agent_journal_query() {/,/^}/p' "${LIB}")"
+journal_principal_smoke="$(sed -n '/^g6rd_verify_agent_journal_observer_principals() {/,/^}/p' "${LIB}")"
+grep -qF 'g6rd_agent_compose exec -T --user 65532:65532 "${service}"' \
+  <<<"${journal_query_runtime}" || {
+  echo "the shared Agent journal observer must read as the journal owner" >&2
+  exit 1
+}
+grep -qF 'g6rd_agent_compose exec -T --user 0:0 "${service}"' \
+  <<<"${journal_principal_smoke}" || {
+  echo "the Agent journal smoke must exercise the capless supervisor principal" >&2
+  exit 1
+}
+[[ "$(grep -cF 'g6rd_agent_journal_query "${service}"' \
+  <<<"${journal_principal_smoke}")" -eq 2 ]] || {
+  echo "the Agent journal smoke must prove owner access before and after its DAC probe" >&2
+  exit 1
+}
+grep -qF '65532:65532:700' <<<"${journal_principal_smoke}" || {
+  echo "the Agent journal smoke must assert the owner-only journal tree" >&2
+  exit 1
+}
+grep -qF 'the capless uid 0 Agent journal DAC probe failed' \
+  <<<"${journal_principal_smoke}" || {
+  echo "the Agent journal smoke must fail closed on an invalid DAC result" >&2
+  exit 1
+}
+for fd_script in "${FD_A}" "${FD_B}"; do
+  start_phase="$(sed -n '/^phase_agents_start() {/,/^}/p' "${fd_script}")"
+  grep -qF 'g6rd_verify_agent_journal_observer_principals "agent-${FD_ID}-01"' \
+    <<<"${start_phase}" || {
+    echo "each failure domain must run the live Agent journal principal smoke" >&2
+    exit 1
+  }
+done
+(
+  eval "${journal_query_runtime}"
+  eval "${journal_principal_smoke}"
+  expect_status() {
+    local expected="${1:?expected status}" status=0
+    shift
+    "$@" >/dev/null 2>&1 || status=$?
+    [[ "${status}" == "${expected}" ]] || {
+      echo "expected status ${expected}, got ${status}: $*" >&2
+      exit 1
+    }
+  }
+  g6rd_agent_compose() {
+    local user=""
+    while (($#)); do
+      if [[ "${1}" == --user ]]; then
+        user="${2:-}"
+        break
+      fi
+      shift
+    done
+    case "${user}" in
+      65532:65532)
+        [[ "${SMOKE_OWNER:-ok}" == ok ]] || return 1
+        printf '0\n'
+        ;;
+      0:0) [[ "${SMOKE_ROOT:-denied}" != allowed ]] ;;
+      *) return 2 ;;
+    esac
+  }
+  expect_status 0 g6rd_verify_agent_journal_observer_principals agent-fd-b-01
+  SMOKE_OWNER=failed expect_status 1 \
+    g6rd_verify_agent_journal_observer_principals agent-fd-b-01
+  SMOKE_ROOT=allowed expect_status 1 \
+    g6rd_verify_agent_journal_observer_principals agent-fd-b-01
+)
 stopped_restart_line="$(grep -n 'g6rd_agent_services_not_running' \
   <<<"${start_fleet}" | cut -d: -f1)"
 unready_restart_line="$(grep -n 'g6rd_agent_services_needing_restart' \
@@ -1293,9 +1363,91 @@ grep -qF 'envelope.command_id.as_slice()' <<<"${agent_command_handler}" || {
   exit 1
 }
 claim_helper="$(sed -n '/^outbox_row_claimed() {/,/^}/p' "${FD_B}")"
+journal_query_helper="$(sed -n '/^journal_query() {/,/^}/p' "${FD_B}")"
 journal_has_helper="$(sed -n '/^journal_has_command() {/,/^}/p' "${FD_B}")"
+journal_ready_helper="$(sed -n '/^journal_command_ready() {/,/^}/p' "${FD_B}")"
+journal_wait_helper="$(sed -n '/^wait_for_journal_command() {/,/^}/p' "${FD_B}")"
 journal_state_helper="$(sed -n '/^journal_result_state() {/,/^}/p' "${FD_B}")"
 agent_receipt_helper="$(sed -n '/^agent_synthetic_receipt_reached() {/,/^}/p' "${FD_B}")"
+grep -qF 'g6rd_agent_journal_query "${service}" "${sql}"' \
+  <<<"${journal_query_helper}" || {
+  echo "fd-b Agent journal queries must use the bounded owner observer" >&2
+  exit 1
+}
+if grep -qF 'sqlite3 -readonly /run/ocservia-agent/journal/agent.db' \
+  "${FD_A}" "${FD_B}"; then
+  echo "failure-domain scripts must not bypass the bounded owner journal observer" >&2
+  exit 1
+fi
+if grep -qF '2>/dev/null' <<<"${journal_has_helper}${journal_state_helper}"; then
+  echo "Agent journal probes must not hide sqlite or Compose failures" >&2
+  exit 1
+fi
+for helper in "${journal_has_helper}" "${journal_state_helper}"; do
+  grep -qF 'return 2' <<<"${helper}" || {
+    echo "Agent journal probe errors must remain distinct from not-ready state" >&2
+    exit 1
+  }
+done
+grep -qF '0) return 1' <<<"${journal_ready_helper}" || {
+  echo "a missing Agent journal row must remain a retryable not-ready result" >&2
+  exit 1
+}
+grep -qF 'if ((status != 1))' <<<"${journal_wait_helper}" || {
+  echo "the strict Agent journal wait must abort on operational probe errors" >&2
+  exit 1
+}
+grep -qF 'G6RD_JOURNAL_QUERY_TIMEOUT_SECONDS="${query_timeout}"' \
+  <<<"${journal_wait_helper}" || {
+  echo "the strict Agent journal wait must bound each observer call by its remaining deadline" >&2
+  exit 1
+}
+grep -qF 'return "${status}"' <<<"${journal_wait_helper}" || {
+  echo "the strict Agent journal wait must preserve operational probe errors" >&2
+  exit 1
+}
+(
+  eval "${journal_has_helper}"
+  eval "${journal_ready_helper}"
+  eval "${journal_wait_helper}"
+  expect_status() {
+    local expected="${1:?expected status}" status=0
+    shift
+    "$@" >/dev/null 2>&1 || status=$?
+    [[ "${status}" == "${expected}" ]] || {
+      echo "expected status ${expected}, got ${status}: $*" >&2
+      exit 1
+    }
+  }
+  journal_query() {
+    case "${JOURNAL_STUB:-one}" in
+      error) return 9 ;;
+      zero) printf '0\n' ;;
+      one) printf '1\n' ;;
+      duplicate) printf '2\n' ;;
+      garbage) printf 'not-a-count\n' ;;
+      *) return 8 ;;
+    esac
+  }
+  JOURNAL_STUB=error expect_status 2 journal_command_ready service command
+  JOURNAL_STUB=zero expect_status 1 journal_command_ready service command
+  JOURNAL_STUB=one expect_status 0 journal_command_ready service command
+  JOURNAL_STUB=duplicate expect_status 2 journal_command_ready service command
+  JOURNAL_STUB=garbage expect_status 2 journal_command_ready service command
+  journal_command_ready() { return 2; }
+  started_at="${SECONDS}"
+  expect_status 2 wait_for_journal_command 5 1 journal-probe service command
+  ((SECONDS - started_at < 2)) || {
+    echo "the strict Agent journal wait retried an operational probe failure" >&2
+    exit 1
+  }
+)
+fd_a_evidence="$(sed -n '/^phase_evidence() {/,/^}/p' "${FD_A}")"
+grep -qF 'g6rd_agent_journal_query "${service}"' \
+  <<<"${fd_a_evidence}" || {
+  echo "fd-a final evidence must use the bounded owner journal observer" >&2
+  exit 1
+}
 grep -qF '[[ -f "${receipt}" && ! -L "${receipt}" && -s "${receipt}" ]]' \
   <<<"${agent_receipt_helper}" || {
   echo "the Agent receipt predicate must reject missing, symlinked, or empty signals" >&2
@@ -1371,7 +1523,7 @@ for token in \
   'docker kill "${COMPOSE_PROJECT}-transportd-1"' \
   'rm -f -- "${synthetic_barrier}"' \
   'exact Agent journal receipt after worker crash' \
-  'journal_command_ready "${service}" "${command_id}"' \
+  'wait_for_journal_command 15 1 "exact Agent journal receipt after worker crash"' \
   'pre_send_barrier_disarm'; do
   grep -qF "${token}" <<<"${crash2_phase}" || {
     echo "the deterministic send-before-MarkSent sequence is missing: ${token}" >&2
@@ -1403,7 +1555,7 @@ crash2_accepted_line="$(grep -nF 'g6rd_timeline_event transport_send_accepted' <
 crash2_agent_receipt_line="$(grep -nF 'agent_synthetic_receipt_reached "${synthetic_receipt}" "${command_id}"' <<<"${crash2_phase}" | cut -d: -f1)"
 crash2_worker_kill_line="$(grep -nF 'docker kill "${COMPOSE_PROJECT}-worker-1"' <<<"${crash2_phase}" | cut -d: -f1)"
 crash2_release_agent_line="$(grep -nF 'rm -f -- "${synthetic_barrier}"' <<<"${crash2_phase}" | tail -1 | cut -d: -f1)"
-crash2_journal_line="$(grep -nF 'journal_command_ready "${service}" "${command_id}"' <<<"${crash2_phase}" | cut -d: -f1)"
+crash2_journal_line="$(grep -nF 'wait_for_journal_command 15 1 "exact Agent journal receipt after worker crash"' <<<"${crash2_phase}" | cut -d: -f1)"
 crash2_transport_kill_line="$(grep -nF 'docker kill "${COMPOSE_PROJECT}-transportd-1"' <<<"${crash2_phase}" | cut -d: -f1)"
 crash2_disarm_line="$(grep -nF 'pre_send_barrier_disarm' <<<"${crash2_phase}" | tail -1 | cut -d: -f1)"
 crash2_restart_line="$(grep -nF 'restart_worker_transport_unit send-before-MarkSent' <<<"${crash2_phase}" | cut -d: -f1)"

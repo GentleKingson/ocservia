@@ -74,8 +74,7 @@ node_service() {
 
 journal_query() {
   local service="${1:?agent service is required}" sql="${2:?sql is required}"
-  G6RD_COMPOSE_TIMEOUT_SECONDS=10 g6rd_agent_compose exec -T "${service}" \
-    sqlite3 -readonly /run/ocservia-agent/journal/agent.db "${sql}"
+  g6rd_agent_journal_query "${service}" "${sql}"
 }
 
 # ---------------------------------------------------------------------------
@@ -294,6 +293,7 @@ phase_agents_start() {
   g6rd_write_agent_overlay "${count}"
   g6rd_chown_agent_dirs
   g6rd_start_agent_fleet "${local_nodes}" "${NODES_FILE}"
+  g6rd_verify_agent_journal_observer_principals "agent-${FD_ID}-01"
   # The controller's observed-state API is the era-1 readiness authority;
   # the watchers start only after all 55 Agents are online and fresh.
   start_watchers
@@ -960,15 +960,68 @@ restart_worker_transport_unit() {
 # The agent journal stores the envelope's binary command id, so lookups key
 # on the database command uuid (hex, dashes stripped).
 journal_has_command() {
-  local service="${1:?service}" command_id="${2:?command id}"
-  journal_query "${service}" \
-    "SELECT count(*) FROM command_journal WHERE lower(hex(command_id))='${command_id//-/}'" \
-    2>/dev/null | tr -d '[:space:]'
+  local service="${1:?service}" command_id="${2:?command id}" count
+  if ! count="$(journal_query "${service}" \
+    "SELECT count(*) FROM command_journal WHERE lower(hex(command_id))='${command_id//-/}'")"; then
+    echo "Agent journal query failed for ${service}" >&2
+    return 2
+  fi
+  count="$(tr -d '[:space:]' <<<"${count}")"
+  [[ "${count}" =~ ^[0-9]+$ ]] || {
+    echo "Agent journal query returned an invalid count for ${service}: ${count}" >&2
+    return 2
+  }
+  printf '%s\n' "${count}"
 }
 
 journal_command_ready() {
-  local service="${1:?service}" command_id="${2:?command id}"
-  [[ "$(journal_has_command "${service}" "${command_id}")" == 1 ]]
+  local service="${1:?service}" command_id="${2:?command id}" count
+  if ! count="$(journal_has_command "${service}" "${command_id}")"; then
+    return 2
+  fi
+  case "${count}" in
+    1) return 0 ;;
+    0) return 1 ;;
+    *)
+      echo "Agent journal contains duplicate command rows for ${service}: ${count}" >&2
+      return 2
+      ;;
+  esac
+}
+
+wait_for_journal_command() {
+  local timeout_seconds="${1:?timeout seconds is required}"
+  local interval="${2:?interval seconds is required}"
+  local description="${3:?description is required}"
+  local service="${4:?service is required}" command_id="${5:?command id}"
+  local deadline remaining query_timeout status
+  [[ "${timeout_seconds}" =~ ^[0-9]+$ && "${timeout_seconds}" -ge 1 ]] || return 2
+  [[ "${interval}" =~ ^[0-9]+$ && "${interval}" -ge 1 ]] || return 2
+  deadline=$((SECONDS + timeout_seconds))
+  while ((SECONDS < deadline)); do
+    remaining=$((deadline - SECONDS))
+    query_timeout="${remaining}"
+    ((query_timeout > 10)) && query_timeout=10
+    if G6RD_JOURNAL_QUERY_TIMEOUT_SECONDS="${query_timeout}" \
+      journal_command_ready "${service}" "${command_id}"; then
+      return 0
+    else
+      status=$?
+    fi
+    if ((status != 1)); then
+      echo "failed while waiting for ${description}" >&2
+      return "${status}"
+    fi
+    remaining=$((deadline - SECONDS))
+    ((remaining > 0)) || break
+    if ((remaining < interval)); then
+      sleep "${remaining}"
+    else
+      sleep "${interval}"
+    fi
+  done
+  echo "timed out waiting for ${description}" >&2
+  return 1
 }
 
 agent_synthetic_receipt_reached() {
@@ -978,10 +1031,14 @@ agent_synthetic_receipt_reached() {
 }
 
 journal_result_state() {
-  local service="${1:?service}" command_id="${2:?command id}"
-  journal_query "${service}" \
-    "SELECT state FROM command_journal WHERE lower(hex(command_id))='${command_id//-/}'" \
-    2>/dev/null | tr -d '[:space:]'
+  local service="${1:?service}" command_id="${2:?command id}" state
+  if ! state="$(journal_query "${service}" \
+    "SELECT state FROM command_journal WHERE lower(hex(command_id))='${command_id//-/}'")"; then
+    echo "Agent journal state query failed for ${service}" >&2
+    return 2
+  fi
+  state="$(tr -d '[:space:]' <<<"${state}")"
+  printf '%s\n' "${state}"
 }
 
 command_id_of_key() {
@@ -1096,8 +1153,8 @@ phase_outbox_send_before_mark() {
     # prevents a terminal response from racing the pre-MarkSent database proof.
     docker kill "${COMPOSE_PROJECT}-transportd-1" >/dev/null
     rm -f -- "${synthetic_barrier}"
-    g6rd_wait_until_deadline 15 1 "exact Agent journal receipt after worker crash" \
-      journal_command_ready "${service}" "${command_id}"
+    wait_for_journal_command 15 1 "exact Agent journal receipt after worker crash" \
+      "${service}" "${command_id}"
     pre_send_barrier_disarm
     first_attempt="$(psql_primary_probe -Atc \
       "SELECT state FROM command_attempts WHERE command_id='${command_id}' ORDER BY attempt_number LIMIT 1")"
@@ -1195,8 +1252,11 @@ phase_outbox_result_before_commit() {
 }
 
 journal_result_ready() {
-  local service="${1:?service}" command_id="${2:?command id}"
-  [[ -n "$(journal_result_state "${service}" "${command_id}")" ]]
+  local service="${1:?service}" command_id="${2:?command id}" state
+  if ! state="$(journal_result_state "${service}" "${command_id}")"; then
+    return 2
+  fi
+  [[ -n "${state}" ]]
 }
 
 # ---------------------------------------------------------------------------
