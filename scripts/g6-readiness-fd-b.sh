@@ -629,19 +629,26 @@ owner_replaced() {
 }
 
 phase_scenario_owner() {
-  local sample_nodes="" node row sample_count=0
+  local sample_nodes="" node node_hex row sample_count=0
   while IFS= read -r node; do
+    [[ "${node}" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$ ]] || {
+      echo "invalid local node id in owner scenario: ${node}" >&2
+      return 1
+    }
+    node_hex="${node//-/}"
     row="$(psql_primary -Atc \
-      "SELECT encode(node_id,'hex')||':'||owner_instance_id||':'||owner_incarnation||':'||encode(connection_id,'hex')||':'||owner_epoch FROM connection_owner_fencing WHERE node_id='${node}'")"
+      "SELECT encode(node_id,'hex')||':'||owner_instance_id||':'||owner_incarnation||':'||encode(connection_id,'hex')||':'||owner_epoch FROM connection_owner_fencing WHERE node_id=decode('${node_hex}','hex') AND lease_until>clock_timestamp()")"
     [[ -n "${row}" ]] || continue
     sample_nodes+="${row}"$'\n'
     sample_count=$((sample_count + 1))
+    if ((sample_count == 5)); then
+      break
+    fi
   done < <(awk -F'\t' -v prefix="g6-${FD_ID}-" \
-    'index($1, prefix) == 1 {print $2; selected++; if (selected == 5) exit}' \
-    "${NODES_FILE}")
+    'index($1, prefix) == 1 {print $2}' "${NODES_FILE}")
   sample_nodes="${sample_nodes%$'\n'}"
-  [[ "${sample_count}" == 5 ]] || {
-    echo "fewer than five local connection owners exist before the owner scenario" >&2
+  ((sample_count == 5)) || {
+    echo "fewer than five local authoritative connection owners exist before the owner scenario" >&2
     return 1
   }
   printf '%s\n' "${sample_nodes}" >"${G6RD_STATE}/owner-a-terms.tsv"

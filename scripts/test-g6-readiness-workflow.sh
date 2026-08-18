@@ -894,6 +894,27 @@ grep -qF 'prefix="g6-${FD_ID}-"' <<<"${owner_phase}" || {
   echo "the owner scenario must select Agents local to the failure-domain runner" >&2
   exit 1
 }
+grep -qF 'node_hex="${node//-/}"' <<<"${owner_phase}" || {
+  echo "the owner scenario must convert UUID text to the bytea fencing identity" >&2
+  exit 1
+}
+grep -qF "WHERE node_id=decode('\${node_hex}','hex') AND lease_until>clock_timestamp()" \
+  <<<"${owner_phase}" || {
+  echo "the owner scenario must select only current authoritative bytea owner rows" >&2
+  exit 1
+}
+if grep -qF "WHERE node_id='\${node}'" <<<"${owner_phase}"; then
+  echo "the owner scenario must not compare a bytea node id with UUID text" >&2
+  exit 1
+fi
+if grep -qF 'selected == 5' <<<"${owner_phase}"; then
+  echo "the owner scenario must not truncate local candidates before owner matching" >&2
+  exit 1
+fi
+grep -qF 'if ((sample_count == 5)); then' <<<"${owner_phase}" || {
+  echo "the owner scenario must stop only after five current owner rows match" >&2
+  exit 1
+}
 grep -qF 'g6rd_agent_compose restart "${reconnect_services[@]}"' <<<"${owner_phase}" || {
   echo "the replacement owner must be driven by explicit Agent reconnects" >&2
   exit 1
