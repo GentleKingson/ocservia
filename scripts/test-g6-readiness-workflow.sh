@@ -261,13 +261,24 @@ grep -q 'report_node_connection_timeout' <<<"${promote_phase}" || {
   echo "fd-b reconnect timeout must report the final transport probe and API inventory" >&2
   exit 1
 }
-connected_probe="$(sed -n '/^all_nodes_connected() {/,/^}/p' "${FD_B}")"
-grep -q '\.owner_epoch > 0' <<<"${connected_probe}" \
-  && grep -q 'index("ocserv.fencing.v2")' <<<"${connected_probe}" \
-  && grep -q '\.session_expires_at' <<<"${connected_probe}" || {
-  echo "fd-b reconnect barrier must require a live fenced mutation session" >&2
+grep -q 'report_load_command_timeout' <<<"${promote_phase}" || {
+  echo "fd-b reconciliation timeout must report the final command state" >&2
   exit 1
 }
+load_timeout_report="$(sed -n '/^report_load_command_timeout() {/,/^}/p' "${FD_B}")"
+if ! grep -q 'node_command_leases' <<<"${load_timeout_report}" \
+  || ! grep -q 'agent_command_results' <<<"${load_timeout_report}" \
+  || ! grep -q 'outbox.attempts' <<<"${load_timeout_report}"; then
+  echo "fd-b reconciliation timeout report must expose bounded state, lease, outbox, and result evidence" >&2
+  exit 1
+fi
+connected_probe="$(sed -n '/^all_nodes_connected() {/,/^}/p' "${FD_B}")"
+if ! grep -q '\.owner_epoch > 0' <<<"${connected_probe}" \
+  || ! grep -q 'index("ocserv.fencing.v2")' <<<"${connected_probe}" \
+  || ! grep -q '\.session_expires_at' <<<"${connected_probe}"; then
+  echo "fd-b reconnect barrier must require a live fenced mutation session" >&2
+  exit 1
+fi
 controller_key_phase="$(sed -n '/^g6rd_install_controller_key() {/,/^}/p' "${LIB}")"
 grep -q 'g6rd_compose run --rm --no-deps controller-key-init' \
   <<<"${controller_key_phase}" || {

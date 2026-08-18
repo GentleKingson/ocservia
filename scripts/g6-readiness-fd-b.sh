@@ -404,7 +404,10 @@ phase_promote() {
     | jq -r '.observations[] | [.node_id, .connected_at, .last_seen] | @tsv' \
     >"${G6RD_STATE}/era2-sessions.tsv"
   # every in-flight load command must reach a terminal or reconciled state
-  g6rd_wait_until_deadline 180 5 "load commands reconciled" load_commands_settled
+  if ! g6rd_wait_until_deadline 180 5 "load commands reconciled" load_commands_settled; then
+    report_load_command_timeout
+    return 1
+  fi
   g6rd_now >"${G6RD_STATE}/dispatch-recovered-at"
   g6rd_timeline_event dispatch_recovered "${G6RD_STATE}/dispatch-recovered-at"
   g6rd_timeline_event new_primary_promoted "${G6RD_STATE}/promoted-at"
@@ -478,6 +481,44 @@ load_outbox_pending() {
     "SELECT count(*) FROM outbox_events o JOIN commands c ON c.id=o.command_id \
       WHERE c.idempotency_key LIKE 'g6-load-${RUN_ID}-backlog-%' \
         AND o.published_at IS NULL AND o.available_at<=now()")" -ge 50 ]]
+}
+
+report_load_command_timeout() {
+  echo "load command state matrix at reconciliation timeout:" >&2
+  psql_primary -F $'\t' -Atc \
+    "SELECT command.state,operation.state,
+       outbox.published_at IS NOT NULL AS published,
+       outbox.locked_by IS NOT NULL AS locked,
+       lease.command_id IS NOT NULL AS leased,
+       count(*)
+     FROM commands AS command
+     JOIN operations AS operation ON operation.id=command.operation_id
+     JOIN outbox_events AS outbox ON outbox.command_id=command.id
+     LEFT JOIN node_command_leases AS lease ON lease.command_id=command.id
+     WHERE command.idempotency_key LIKE 'g6-load-${RUN_ID}-%'
+     GROUP BY 1,2,3,4,5
+     ORDER BY 1,2,3,4,5" >&2 || {
+    echo "load command state matrix unavailable" >&2
+  }
+  echo "unsettled load command sample (node, command, operation, published, locked, leased, attempts, results, updated):" >&2
+  psql_primary -F $'\t' -Atc \
+    "SELECT command.node_id,command.state,operation.state,
+       outbox.published_at IS NOT NULL,
+       outbox.locked_by IS NOT NULL,
+       lease.command_id IS NOT NULL,
+       outbox.attempts,
+       (SELECT count(*) FROM agent_command_results AS result WHERE result.command_id=command.id),
+       command.updated_at
+     FROM commands AS command
+     JOIN operations AS operation ON operation.id=command.operation_id
+     JOIN outbox_events AS outbox ON outbox.command_id=command.id
+     LEFT JOIN node_command_leases AS lease ON lease.command_id=command.id
+     WHERE command.idempotency_key LIKE 'g6-load-${RUN_ID}-%'
+       AND command.state NOT IN ('succeeded','failed','unknown','expired','superseded')
+     ORDER BY command.updated_at,command.id
+     LIMIT 20" >&2 || {
+    echo "unsettled load command sample unavailable" >&2
+  }
 }
 
 promoted_and_writable() {
