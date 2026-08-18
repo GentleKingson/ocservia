@@ -142,15 +142,86 @@ func TestCommandResultBeforeMarkSentIntegration(t *testing.T) {
 	}
 	assertEarlyResultDispatchClosed(t, pool, commandID, operationID, dispatch, "succeeded", true)
 
-	commandID, operationID, dispatch, sent = createClaimed(t, "early-unknown")
-	original := decodeRecoveryEnvelope(t, dispatch.Envelope)
-	if err := service.Ingest(ctx, recoveryResultEvent(t, nodeID, endpointID, sent, agentv1.CommandResultState_COMMAND_RESULT_STATE_UNKNOWN)); err != nil {
-		t.Fatalf("ingest early unknown: %v", err)
+	// Hold a fully applied result before its transaction releases the outbox
+	// row, then start MarkSent. This pins the real READ COMMITTED wait ordering
+	// rather than merely invoking the two operations sequentially.
+	runConcurrentResult := func(key string, state agentv1.CommandResultState) (uuid.UUID, uuid.UUID, operationstore.Dispatch, []byte) {
+		commandID, operationID, dispatch, sent := createClaimed(t, key)
+		barrierDir := t.TempDir()
+		if err := service.EnableResultCommitBarrier(barrierDir); err != nil {
+			t.Fatalf("enable result commit barrier: %v", err)
+		}
+		if err := os.WriteFile(fmt.Sprintf("%s/arm", barrierDir), []byte(commandID.String()+"\n"), 0o600); err != nil {
+			t.Fatalf("arm result commit barrier: %v", err)
+		}
+		concurrentResult := recoveryResultEvent(t, nodeID, endpointID, sent, state)
+		ingestResult := make(chan error, 1)
+		go func() { ingestResult <- service.Ingest(ctx, concurrentResult) }()
+		barrierDeadline := time.Now().Add(5 * time.Second)
+		for {
+			if _, err := os.Stat(fmt.Sprintf("%s/received", barrierDir)); err == nil {
+				break
+			} else if !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("read result commit barrier: %v", err)
+			}
+			if time.Now().After(barrierDeadline) {
+				t.Fatal("result ingestion did not reach the commit barrier")
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+		markSent := make(chan error, 1)
+		markStarted := make(chan struct{})
+		go func() {
+			close(markStarted)
+			markSent <- operations.MarkSentWithEnvelope(ctx, dispatch, sent)
+		}()
+		<-markStarted
+		markWaitDeadline := time.Now().Add(5 * time.Second)
+		for {
+			select {
+			case err := <-markSent:
+				t.Fatalf("MarkSent returned before the result row lock was released: %v", err)
+			default:
+			}
+			var waiting bool
+			if err := pool.QueryRow(ctx, `SELECT EXISTS(
+				SELECT 1 FROM pg_stat_activity
+				WHERE pid<>pg_backend_pid() AND state='active' AND wait_event_type='Lock'
+				  AND query LIKE '%mark_sent_outbox_lock%')`).Scan(&waiting); err != nil {
+				t.Fatalf("observe MarkSent row-lock wait: %v", err)
+			}
+			if waiting {
+				break
+			}
+			if time.Now().After(markWaitDeadline) {
+				t.Fatal("MarkSent did not wait on the result transaction's outbox lock")
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+		if err := os.WriteFile(fmt.Sprintf("%s/release", barrierDir), []byte(commandID.String()+"\n"), 0o600); err != nil {
+			t.Fatalf("release result commit barrier: %v", err)
+		}
+		if err := <-ingestResult; err != nil {
+			t.Fatalf("commit concurrent early result: %v", err)
+		}
+		if err := <-markSent; err != nil {
+			t.Fatalf("finish dispatch after concurrent early result: %v", err)
+		}
+		return commandID, operationID, dispatch, sent
 	}
-	assertRecoveryState(t, pool, commandID, "unknown", "unknown", false)
-	if err := operations.MarkSentWithEnvelope(ctx, dispatch, sent); err != nil {
-		t.Fatalf("finish dispatch after early unknown: %v", err)
+
+	commandID, operationID, dispatch, sent = runConcurrentResult("concurrent-early-success", agentv1.CommandResultState_COMMAND_RESULT_STATE_SUCCEEDED)
+	assertEarlyResultDispatchClosed(t, pool, commandID, operationID, dispatch, "succeeded", true)
+	var storedSent []byte
+	if err := pool.QueryRow(ctx, `SELECT envelope FROM commands WHERE id=$1`, commandID).Scan(&storedSent); err != nil {
+		t.Fatal(err)
 	}
+	if !bytes.Equal(storedSent, sent) {
+		t.Fatal("concurrent result did not retain the exact sent envelope")
+	}
+
+	commandID, operationID, dispatch, sent = runConcurrentResult("concurrent-early-unknown", agentv1.CommandResultState_COMMAND_RESULT_STATE_UNKNOWN)
+	original := decodeRecoveryEnvelope(t, sent)
 	assertEarlyResultDispatchClosed(t, pool, commandID, operationID, dispatch, "unknown", false)
 	recovery := claimRecoveryDispatch(t, ctx, operations, commandID)
 	assertReconcileOnlyIdentity(t, original, decodeRecoveryEnvelope(t, recovery.Envelope))
@@ -276,21 +347,79 @@ func TestAuthoritativeReconnectRecoversLostCommandResultIntegration(t *testing.T
 	if err := operations.MarkSentWithEnvelope(ctx, recovery, successorSent); err != nil {
 		t.Fatalf("mark successor reconciliation sent: %v", err)
 	}
-	assertRecoveryState(t, pool, commandID, "dispatched", "unknown", true)
+	assertRecoveryState(t, pool, commandID, "unknown", "unknown", true)
+	assertSentAttemptClosed(t, pool, recovery)
+	if dispatchedEvents := recoveryStateEventCount(t, pool, operationID, "dispatched"); dispatchedEvents != 1 {
+		t.Fatalf("dispatched events after reconcile-only send = %d, want original dispatch only", dispatchedEvents)
+	}
+	// A result row records raw Agent evidence, not necessarily the accepted
+	// projection. Simulate a terminal-looking receipt that failed verification;
+	// it must not suppress continuation or a later owner-term recovery while the
+	// authoritative command and operation remain Unknown.
+	rawResultEventID := uuid.Must(uuid.NewV7())
+	rawResultIdempotencyKey, err := uuid.FromBytes(original.GetIdempotencyKey())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `INSERT INTO transport_events
+		(event_id,node_id,event_type,occurred_at,traceparent,payload)
+		VALUES($1,$2,'command_result',now(),$3,$4)`, rawResultEventID, nodeID, reconnectRecoveryTraceparent, []byte("unaccepted terminal evidence")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `INSERT INTO agent_command_results
+		(event_id,command_id,idempotency_key,payload_sha256,state,result,accepted_at,completed_at,replayed,created_at,receipt_verification_status,receipt_failure_reason)
+		SELECT $1,id,$3,decode(repeat('71',32),'hex'),'succeeded',''::bytea,now(),now(),false,now(),'missing','missing_receipt'
+		FROM commands WHERE id=$2`, rawResultEventID, commandID, rawResultIdempotencyKey); err != nil {
+		t.Fatal(err)
+	}
 
 	// A second fresh event for the same owner term sees that exact term on the
-	// persisted sent frame and does not enqueue the command again.
+	// persisted sent frame and does not immediately enqueue the command again.
 	if err := service.Ingest(ctx, recoveryConnectedEvent(t, nodeID, endpointID, successor)); err != nil {
 		t.Fatalf("ingest same-term fresh event: %v", err)
 	}
-	assertRecoveryState(t, pool, commandID, "dispatched", "unknown", true)
+	assertRecoveryState(t, pool, commandID, "unknown", "unknown", true)
 	if unknownEvents := recoveryEventCount(t, pool, operationID); unknownEvents != 1 {
 		t.Fatalf("unknown events after same-term reconnect = %d, want 1", unknownEvents)
 	}
 
+	// Reap leaves a fresh observation attempt alone. Once its bounded response
+	// deadline is exceeded, it creates a new RECONCILE_ONLY message without
+	// changing the logical Unknown state or extending the command deadline.
+	if err := operations.Reap(ctx, 3); err != nil {
+		t.Fatalf("reap fresh reconciliation: %v", err)
+	}
+	assertRecoveryState(t, pool, commandID, "unknown", "unknown", true)
+	if _, err := pool.Exec(ctx, `UPDATE command_attempts SET finished_at=now()-interval '1 minute'
+		WHERE id=$1`, recovery.AttemptID); err != nil {
+		t.Fatal(err)
+	}
+	if err := operations.Reap(ctx, 3); err != nil {
+		t.Fatalf("continue stale reconciliation: %v", err)
+	}
+	assertRecoveryState(t, pool, commandID, "unknown", "unknown", false)
+	continued := claimRecoveryDispatch(t, ctx, operations, commandID)
+	continuedEnvelope := decodeRecoveryEnvelope(t, continued.Envelope)
+	assertReconcileOnlyIdentity(t, original, continuedEnvelope)
+	if bytes.Equal(decodeRecoveryEnvelope(t, recovery.Envelope).GetMessageId(), continuedEnvelope.GetMessageId()) {
+		t.Fatal("reconciliation continuation reused the prior message identity")
+	}
+	if !decodeRecoveryEnvelope(t, recovery.Envelope).GetExpiresAt().AsTime().Equal(continuedEnvelope.GetExpiresAt().AsTime()) {
+		t.Fatal("reconciliation continuation extended the logical command deadline")
+	}
+	continuedSent := fenceRecoveryDispatch(t, signer, endpointID, successor, continued)
+	if err := operations.MarkSentWithEnvelope(ctx, continued, continuedSent); err != nil {
+		t.Fatalf("mark continued reconciliation sent: %v", err)
+	}
+	assertRecoveryState(t, pool, commandID, "unknown", "unknown", true)
+	assertSentAttemptClosed(t, pool, continued)
+	if dispatchedEvents := recoveryStateEventCount(t, pool, operationID, "dispatched"); dispatchedEvents != 1 {
+		t.Fatalf("dispatched events after continuation = %d, want original dispatch only", dispatchedEvents)
+	}
+
 	// Persist one nonterminal Agent result, dispatch its reconcile-only followup,
 	// and fail over again. The prior unknown evidence must not suppress recovery.
-	if err := service.Ingest(ctx, recoveryResultEvent(t, nodeID, endpointID, recovery.Envelope, agentv1.CommandResultState_COMMAND_RESULT_STATE_UNKNOWN)); err != nil {
+	if err := service.Ingest(ctx, recoveryResultEvent(t, nodeID, endpointID, continued.Envelope, agentv1.CommandResultState_COMMAND_RESULT_STATE_UNKNOWN)); err != nil {
 		t.Fatalf("ingest unknown journal result: %v", err)
 	}
 	recovery = claimRecoveryDispatch(t, ctx, operations, commandID)
@@ -298,6 +427,7 @@ func TestAuthoritativeReconnectRecoversLostCommandResultIntegration(t *testing.T
 	if err := operations.MarkSentWithEnvelope(ctx, recovery, successorSent); err != nil {
 		t.Fatalf("mark second successor reconciliation sent: %v", err)
 	}
+	assertRecoveryState(t, pool, commandID, "unknown", "unknown", true)
 	if err := successor.Release(ctx, pool); err != nil {
 		t.Fatalf("release successor owner: %v", err)
 	}
@@ -318,8 +448,8 @@ func TestAuthoritativeReconnectRecoversLostCommandResultIntegration(t *testing.T
 	}
 	assertRecoveryState(t, pool, commandID, "succeeded", "succeeded", true)
 	var resultCount int
-	if err := pool.QueryRow(ctx, `SELECT count(*) FROM agent_command_results WHERE command_id=$1`, commandID).Scan(&resultCount); err != nil || resultCount != 2 {
-		t.Fatalf("journal result count = %d, err=%v, want unknown plus replayed success", resultCount, err)
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM agent_command_results WHERE command_id=$1`, commandID).Scan(&resultCount); err != nil || resultCount != 3 {
+		t.Fatalf("journal result count = %d, err=%v, want raw evidence plus unknown and replayed success", resultCount, err)
 	}
 
 	// Terminal commands remain terminal across later takeovers.
@@ -516,6 +646,21 @@ func assertEarlyResultDispatchClosed(t *testing.T, pool *pgxpool.Pool, commandID
 	}
 }
 
+func assertSentAttemptClosed(t *testing.T, pool *pgxpool.Pool, dispatch operationstore.Dispatch) {
+	t.Helper()
+	var attemptState string
+	var leaseCount int
+	if err := pool.QueryRow(context.Background(), `SELECT
+		(SELECT state FROM command_attempts WHERE id=$1),
+		(SELECT count(*) FROM node_command_leases WHERE lease_token=$2)`,
+		dispatch.AttemptID, dispatch.LeaseToken).Scan(&attemptState, &leaseCount); err != nil {
+		t.Fatal(err)
+	}
+	if attemptState != "sent" || leaseCount != 0 {
+		t.Fatalf("attempt/lease = %s/%d, want sent/0", attemptState, leaseCount)
+	}
+}
+
 func storedRecoveryEnvelope(t *testing.T, pool *pgxpool.Pool, commandID uuid.UUID) *agentv1.CommandEnvelope {
 	t.Helper()
 	var commandPayload, outboxPayload []byte
@@ -555,9 +700,13 @@ func assertReconcileOnlyIdentity(t *testing.T, original, recovered *agentv1.Comm
 }
 
 func recoveryEventCount(t *testing.T, pool *pgxpool.Pool, operationID uuid.UUID) int {
+	return recoveryStateEventCount(t, pool, operationID, "unknown")
+}
+
+func recoveryStateEventCount(t *testing.T, pool *pgxpool.Pool, operationID uuid.UUID, state string) int {
 	t.Helper()
 	var count int
-	if err := pool.QueryRow(context.Background(), `SELECT count(*) FROM operation_events WHERE operation_id=$1 AND state='unknown'`, operationID).Scan(&count); err != nil {
+	if err := pool.QueryRow(context.Background(), `SELECT count(*) FROM operation_events WHERE operation_id=$1 AND state=$2`, operationID, state).Scan(&count); err != nil {
 		t.Fatal(fmt.Errorf("count recovery events: %w", err))
 	}
 	return count

@@ -10,6 +10,7 @@ import (
 
 	agentv1 "github.com/GentleKingson/ocservia/control-plane/gen/proto/ocserv/platform/agent/v1"
 	"github.com/GentleKingson/ocservia/control-plane/internal/commandauth"
+	"github.com/GentleKingson/ocservia/control-plane/internal/commandlimit"
 	"github.com/GentleKingson/ocservia/control-plane/internal/connectionowner"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -23,8 +24,11 @@ const (
 	// one reconnect never scans an unbounded command history.
 	DefaultReconnectRecoveryLimit = 16
 	maxReconnectRecoveryLimit     = 64
-	recoveryCandidateMultiplier   = 4
-	recoveryCommandTTL            = 5 * time.Minute
+	// Admission caps active commands at 500. Scanning that full bounded set
+	// prevents current-term Unknown rows from hiding an older ambiguous term
+	// before the recovery limit is applied in Go.
+	maxReconnectRecoveryCandidates = 500
+	recoveryCommandTTL             = 5 * time.Minute
 )
 
 // OwnerReconnect identifies the fenced connection that has become usable for
@@ -46,8 +50,7 @@ type recoveryAuthority struct {
 }
 
 type recoveryCandidate struct {
-	commandID, operationID uuid.UUID
-	envelope               []byte
+	commandID uuid.UUID
 }
 
 // RecoverAmbiguousDispatchedTx converts previously published commands whose
@@ -66,6 +69,12 @@ func (s *Service) RecoverAmbiguousDispatchedTx(ctx context.Context, tx pgx.Tx, r
 	if err != nil || connectionID.Version() != 7 {
 		return 0, ErrInvalidRequest
 	}
+	// Match dispatch completion and lease reaping before taking authority or
+	// row locks. Result ingestion does not take this advisory lock, but it uses
+	// the same outbox-before-command row-lock order below.
+	if err := commandlimit.Lock(ctx, tx); err != nil {
+		return 0, fmt.Errorf("serialize reconnect recovery: %w", err)
+	}
 
 	authority := recoveryAuthority{connection: reconnect.ConnectionID, epoch: reconnect.OwnerEpoch}
 	err = tx.QueryRow(ctx, `SELECT owner_instance_id,owner_incarnation
@@ -80,31 +89,27 @@ func (s *Service) RecoverAmbiguousDispatchedTx(ctx context.Context, tx pgx.Tx, r
 		return 0, fmt.Errorf("guard reconnect recovery authority: %w", err)
 	}
 
-	scanLimit := reconnect.Limit * recoveryCandidateMultiplier
-	rows, err := tx.Query(ctx, `SELECT command.id,command.operation_id,command.envelope
+	scanLimit := maxReconnectRecoveryCandidates
+	rows, err := tx.Query(ctx, `SELECT command.id
 		FROM commands AS command
 		JOIN operations AS operation ON operation.id=command.operation_id
 		JOIN outbox_events AS outbox ON outbox.command_id=command.id
 		WHERE command.node_id=$1
-		  AND command.state IN ('dispatched','accepted','running')
+		  AND command.state IN ('dispatched','accepted','running','unknown')
 		  AND operation.state IN ('dispatched','accepted','running','unknown')
 		  AND outbox.published_at IS NOT NULL
 		  AND outbox.locked_by IS NULL
 		  AND NOT EXISTS(SELECT 1 FROM node_command_leases AS lease WHERE lease.command_id=command.id)
-		  AND NOT EXISTS(
-		    SELECT 1 FROM agent_command_results AS result
-		    WHERE result.command_id=command.id AND result.state IN ('succeeded','failed','rejected')
-		  )
-		ORDER BY command.updated_at,command.id
+		ORDER BY command.created_at,command.id
 		LIMIT $2
-		FOR UPDATE OF command,operation,outbox SKIP LOCKED`, reconnect.NodeID, scanLimit)
+		FOR UPDATE OF outbox SKIP LOCKED`, reconnect.NodeID, scanLimit)
 	if err != nil {
 		return 0, fmt.Errorf("select ambiguous dispatched commands: %w", err)
 	}
-	candidates := make([]recoveryCandidate, 0, min(scanLimit, reconnect.Limit))
+	candidates := make([]recoveryCandidate, 0, scanLimit)
 	for rows.Next() {
 		var candidate recoveryCandidate
-		if err := rows.Scan(&candidate.commandID, &candidate.operationID, &candidate.envelope); err != nil {
+		if err := rows.Scan(&candidate.commandID); err != nil {
 			rows.Close()
 			return 0, fmt.Errorf("scan ambiguous dispatched command: %w", err)
 		}
@@ -121,11 +126,33 @@ func (s *Service) RecoverAmbiguousDispatchedTx(ctx context.Context, tx pgx.Tx, r
 		if recovered == reconnect.Limit {
 			break
 		}
+		// The outbox row is already locked. Re-read command and operation in a
+		// fresh READ COMMITTED statement after any result transaction we waited
+		// for, then lock both projections in outbox-to-command order.
+		var operationID uuid.UUID
+		var encoded []byte
+		err := tx.QueryRow(ctx, `SELECT command.operation_id,command.envelope
+			FROM commands AS command
+			JOIN operations AS operation ON operation.id=command.operation_id
+			JOIN outbox_events AS outbox ON outbox.command_id=command.id
+			WHERE command.id=$1 AND command.node_id=$2
+			  AND command.state IN ('dispatched','accepted','running','unknown')
+			  AND operation.state IN ('dispatched','accepted','running','unknown')
+			  AND outbox.published_at IS NOT NULL AND outbox.locked_by IS NULL
+			  AND NOT EXISTS(SELECT 1 FROM node_command_leases AS lease WHERE lease.command_id=command.id)
+			FOR UPDATE OF command,operation`, candidate.commandID, reconnect.NodeID).
+			Scan(&operationID, &encoded)
+		if errors.Is(err, pgx.ErrNoRows) {
+			continue
+		}
+		if err != nil {
+			return 0, fmt.Errorf("recheck ambiguous dispatched command %s: %w", candidate.commandID, err)
+		}
 		var envelope agentv1.CommandEnvelope
-		if err := proto.Unmarshal(candidate.envelope, &envelope); err != nil {
+		if err := proto.Unmarshal(encoded, &envelope); err != nil {
 			return 0, fmt.Errorf("decode ambiguous dispatched command %s: %w", candidate.commandID, err)
 		}
-		if !bytes.Equal(envelope.GetCommandId(), candidate.commandID[:]) || !bytes.Equal(envelope.GetOperationId(), candidate.operationID[:]) || !bytes.Equal(envelope.GetNodeId(), reconnect.NodeID[:]) {
+		if !bytes.Equal(envelope.GetCommandId(), candidate.commandID[:]) || !bytes.Equal(envelope.GetOperationId(), operationID[:]) || !bytes.Equal(envelope.GetNodeId(), reconnect.NodeID[:]) {
 			return 0, fmt.Errorf("ambiguous dispatched command %s has inconsistent identity", candidate.commandID)
 		}
 		// MarkSentWithEnvelope persists the exact fence actually carried by a
@@ -141,7 +168,7 @@ func (s *Service) RecoverAmbiguousDispatchedTx(ctx context.Context, tx pgx.Tx, r
 		}
 		commandTag, err := tx.Exec(ctx, `UPDATE commands
 			SET state='unknown',envelope=$2,expires_at=$3,updated_at=$4
-			WHERE id=$1 AND state IN ('dispatched','accepted','running')`, candidate.commandID, payload, expiresAt, reconnect.ObservedAt)
+			WHERE id=$1 AND state IN ('dispatched','accepted','running','unknown')`, candidate.commandID, payload, expiresAt, reconnect.ObservedAt)
 		if err != nil {
 			return 0, fmt.Errorf("mark reconnect command unknown: %w", err)
 		}
@@ -150,14 +177,14 @@ func (s *Service) RecoverAmbiguousDispatchedTx(ctx context.Context, tx pgx.Tx, r
 		}
 		operationTag, err := tx.Exec(ctx, `UPDATE operations
 			SET state='unknown',version=version+1,expires_at=$2,updated_at=$3,completed_at=NULL
-			WHERE id=$1 AND state IN ('dispatched','accepted','running','unknown')`, candidate.operationID, expiresAt, reconnect.ObservedAt)
+			WHERE id=$1 AND state IN ('dispatched','accepted','running','unknown')`, operationID, expiresAt, reconnect.ObservedAt)
 		if err != nil {
 			return 0, fmt.Errorf("mark reconnect operation unknown: %w", err)
 		}
 		if operationTag.RowsAffected() != 1 {
 			return 0, fmt.Errorf("reconnect command %s has no mutable operation", candidate.commandID)
 		}
-		if err := markRecoveryProjectionUnknown(ctx, tx, candidate.operationID, &envelope, reconnect.ObservedAt); err != nil {
+		if err := markRecoveryProjectionUnknown(ctx, tx, operationID, &envelope, reconnect.ObservedAt); err != nil {
 			return 0, err
 		}
 		outboxTag, err := tx.Exec(ctx, `UPDATE outbox_events
@@ -175,7 +202,7 @@ func (s *Service) RecoverAmbiguousDispatchedTx(ctx context.Context, tx pgx.Tx, r
 			return 0, fmt.Errorf("generate reconnect reconciliation event: %w", err)
 		}
 		if _, err := tx.Exec(ctx, `INSERT INTO operation_events(id,operation_id,state,occurred_at)
-			VALUES($1,$2,'unknown',$3)`, eventID, candidate.operationID, reconnect.ObservedAt); err != nil {
+			VALUES($1,$2,'unknown',$3)`, eventID, operationID, reconnect.ObservedAt); err != nil {
 			return 0, fmt.Errorf("record reconnect reconciliation event: %w", err)
 		}
 		recovered++
@@ -187,6 +214,20 @@ func (s *Service) RecoverAmbiguousDispatchedTx(ctx context.Context, tx pgx.Tx, r
 // changes only attempt metadata, and strips the previous connection proofs so
 // the outbox worker must bind the next dispatch to its then-current owner term.
 func PrepareRecoveryEnvelope(envelope *agentv1.CommandEnvelope, mode agentv1.CommandDeliveryMode, observedAt time.Time, signer *commandauth.Signer) ([]byte, time.Time, error) {
+	return prepareRecoveryEnvelope(envelope, mode, observedAt, signer, true)
+}
+
+// prepareRecoveryContinuationEnvelope creates a distinct reconcile-only
+// transport attempt without extending the logical command deadline. It is
+// used only after a sent observation attempt produced no durable result.
+func prepareRecoveryContinuationEnvelope(envelope *agentv1.CommandEnvelope, observedAt time.Time, signer *commandauth.Signer) ([]byte, time.Time, error) {
+	if envelope == nil || envelope.GetDeliveryMode() != agentv1.CommandDeliveryMode_COMMAND_DELIVERY_MODE_RECONCILE_ONLY {
+		return nil, time.Time{}, ErrInvalidRequest
+	}
+	return prepareRecoveryEnvelope(envelope, agentv1.CommandDeliveryMode_COMMAND_DELIVERY_MODE_RECONCILE_ONLY, observedAt, signer, false)
+}
+
+func prepareRecoveryEnvelope(envelope *agentv1.CommandEnvelope, mode agentv1.CommandDeliveryMode, observedAt time.Time, signer *commandauth.Signer, extendReconcileTTL bool) ([]byte, time.Time, error) {
 	if envelope == nil || signer == nil || observedAt.IsZero() || (mode != agentv1.CommandDeliveryMode_COMMAND_DELIVERY_MODE_RECONCILE_ONLY && mode != agentv1.CommandDeliveryMode_COMMAND_DELIVERY_MODE_RETRY_IF_EFFECT_ABSENT) {
 		return nil, time.Time{}, ErrInvalidRequest
 	}
@@ -195,7 +236,7 @@ func PrepareRecoveryEnvelope(envelope *agentv1.CommandEnvelope, mode agentv1.Com
 		return nil, time.Time{}, errors.New("operations: reconciliation command expiry is invalid")
 	}
 	expiresAt := expires.AsTime()
-	if mode == agentv1.CommandDeliveryMode_COMMAND_DELIVERY_MODE_RECONCILE_ONLY && expiresAt.Before(observedAt.Add(recoveryCommandTTL)) {
+	if extendReconcileTTL && mode == agentv1.CommandDeliveryMode_COMMAND_DELIVERY_MODE_RECONCILE_ONLY && expiresAt.Before(observedAt.Add(recoveryCommandTTL)) {
 		expiresAt = observedAt.Add(recoveryCommandTTL)
 		envelope.ExpiresAt = timestamppb.New(expiresAt)
 	}
