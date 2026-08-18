@@ -261,6 +261,13 @@ services:
       <<: *role-environment
       PGAPPNAME: ${G6_FD_ID:?}-worker
       OCSERV_TRUST_SOCKET: /run/ocserv-trust/control-plane.sock
+      # Bound the exact SendCommand call once the deterministic pre-send hook
+      # releases it. Keep this below the owner lease.
+      OCSERV_TRANSPORT_TIMEOUT: 15s
+      # Test-only Worker hook: only the exact armed Claim is extended to this
+      # ceiling; every unarmed G6 dispatch keeps the production 10s lease.
+      OCSERV_TEST_PRE_SEND_BARRIER_DIR: /run/g6-result-barrier/pre-send
+      OCSERV_TEST_COMMAND_LEASE: 60s
       # One in-flight command per node and a raised global cap keep fifty
       # nodes dispatching concurrently during the peak-inflight probe.
       OCSERV_USER_OPERATION_CONCURRENCY: "200"

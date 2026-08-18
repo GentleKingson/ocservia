@@ -103,7 +103,13 @@ reject("postgres must receive stop signals directly so fencing leaves a clean da
 reject("postgres must never pull after the support image preflight") unless services.fetch("postgres").fetch("pull_policy") == "never"
 roles = %w[api worker scheduler].to_h { |role| [role, services.fetch(role).fetch("command").fetch(0)] }
 reject("control-plane roles must be split") unless roles == {"api" => "--role=api", "worker" => "--role=worker", "scheduler" => "--role=scheduler"}
-reject("worker must own the trust socket") unless services.fetch("worker").fetch("environment").key?("OCSERV_TRUST_SOCKET")
+worker_environment = services.fetch("worker").fetch("environment")
+reject("worker must own the trust socket") unless worker_environment.key?("OCSERV_TRUST_SOCKET")
+reject("the G6 worker transport timeout must be 15s for the deterministic crash barrier") unless worker_environment.fetch("OCSERV_TRANSPORT_TIMEOUT") == "15s"
+reject("the G6 Worker pre-send barrier must use an absolute in-container path") unless worker_environment.fetch("OCSERV_TEST_PRE_SEND_BARRIER_DIR") == "/run/g6-result-barrier/pre-send"
+reject("the exact armed G6 command lease must stay at its hard 60s ceiling") unless worker_environment.fetch("OCSERV_TEST_COMMAND_LEASE") == "60s"
+worker_volumes = Array(services.fetch("worker").fetch("volumes"))
+reject("the Worker pre-send barrier must share only the scoped result-barrier bind") unless worker_volumes.any? { |volume| volume.is_a?(Hash) && volume["target"] == "/run/g6-result-barrier" }
 role_environment = services.fetch("api").fetch("environment")
 reject("G6 API must enable session authentication") unless role_environment.fetch("OCSERV_SESSION_KEY_FILE") == "/run/ocservia-signing/session-key"
 reject("G6 API must use the test OIDC fixture") unless role_environment.fetch("OCSERV_OIDC_ISSUER") == "https://oidc.g6.invalid"
@@ -797,12 +803,43 @@ grep -q '^g6rd_cleanup_bounded()' "${LIB}" || {
   echo "the shared cleanup path must enforce an overall hard timeout" >&2
   exit 1
 }
-for fd_script in "${FD_A}" "${FD_B}"; do
-  grep -q 'cleanup) g6rd_cleanup_bounded' "${fd_script}" || {
-    echo "each failure domain must use the bounded cleanup entry point" >&2
+grep -q 'cleanup) g6rd_cleanup_bounded' "${FD_A}" || {
+  echo "failure domain A must use the bounded cleanup entry point" >&2
+  exit 1
+}
+fd_b_cleanup="$(sed -n '/^phase_cleanup() {/,/^}/p' "${FD_B}")"
+fd_b_cleanup_prelude="$(sed -n '/^phase_cleanup_prelude() {/,/^}/p' "${FD_B}")"
+if ! grep -qF 'cleanup) phase_cleanup' "${FD_B}" \
+  || ! grep -qF 'cleanup-prelude) phase_cleanup_prelude' "${FD_B}" \
+  || ! grep -qF 'g6rd_cleanup_bounded' <<<"${fd_b_cleanup}"; then
+  echo "failure domain B must extend rather than replace bounded cleanup" >&2
+  exit 1
+fi
+grep -qF 'timeout --foreground --signal=TERM --kill-after=5s 45s' \
+  <<<"${fd_b_cleanup}" || {
+  echo "failure domain B cleanup prelude must have an overall hard bound" >&2
+  exit 1
+}
+for cleanup_token in \
+  'stop_watchers' \
+  'release_armed_pre_send_barrier' \
+  'release_armed_post_send_barrier' \
+  'release_armed_result_commit_barrier' \
+  'g6rd_release_synthetic_barriers' \
+  'for service in transportd api scheduler worker' \
+  'unpause_scoped_container "${COMPOSE_PROJECT}-${service}-1"'; do
+  grep -qF "${cleanup_token}" <<<"${fd_b_cleanup_prelude}" || {
+    echo "failure domain B cleanup is missing scoped recovery: ${cleanup_token}" >&2
     exit 1
   }
 done
+cleanup_stop_line="$(grep -nF 'stop_watchers' <<<"${fd_b_cleanup_prelude}" | cut -d: -f1)"
+cleanup_release_line="$(grep -nF 'release_armed_pre_send_barrier' <<<"${fd_b_cleanup_prelude}" | cut -d: -f1)"
+[[ -n "${cleanup_stop_line}" && -n "${cleanup_release_line}" \
+  && "${cleanup_stop_line}" -lt "${cleanup_release_line}" ]] || {
+  echo "cleanup must stop detached watchers before removing barrier/run state" >&2
+  exit 1
+}
 grep -qF "archive_command = 'test -f /var/lib/postgresql/archive/%f || cp %p /var/lib/postgresql/archive/%f'" \
   "${POSTGRES_INIT}" || {
   echo "PostgreSQL archive_command must succeed when the WAL segment already exists" >&2
@@ -959,6 +996,457 @@ grep -qF '[[ "${target_endpoint}" =~ ^[0-9a-f]{64}$ ]]' <<<"${owner_phase}" || {
   echo "the owner scenario must validate the selected Agent endpoint" >&2
   exit 1
 }
+
+# Every outbox crash point runs on an Agent owned by fd-b. The peer rows are
+# deliberately first in the real inventory, so ordinal selection must filter
+# by failure domain before choosing a target.
+local_node_helper="$(sed -n '/^local_node_id() {/,/^}/p' "${FD_B}")"
+crash1_phase="$(sed -n '/^phase_outbox_claim_before_send() {/,/^}/p' "${FD_B}")"
+crash2_phase="$(sed -n '/^phase_outbox_send_before_mark() {/,/^}/p' "${FD_B}")"
+# shellcheck disable=SC2034  # referenced through phase_variable below
+crash3_phase="$(sed -n '/^phase_outbox_result_before_commit() {/,/^}/p' "${FD_B}")"
+for ordinal in 1 2 3; do
+  phase_variable="crash${ordinal}_phase"
+  grep -qF "node=\"\$(local_node_id ${ordinal})\"" <<<"${!phase_variable}" || {
+    echo "outbox crash window ${ordinal} must select local FD-B node ${ordinal}" >&2
+    exit 1
+  }
+  if grep -qE 'node_ids[[:space:]]*\|[[:space:]]*head' <<<"${!phase_variable}"; then
+    echo "outbox crash window ${ordinal} must not select from the peer-first global inventory" >&2
+    exit 1
+  fi
+done
+crash_scope_test="$(mktemp -d)"
+cat >"${crash_scope_test}/nodes.tsv" <<'EOF'
+g6-fd-a-01	018f2f10-7abc-7def-8abc-0123456789a1	endpoint-a1
+g6-fd-b-01	018f2f10-7abc-7def-8abc-0123456789b1	endpoint-b1
+g6-fd-a-02	018f2f10-7abc-7def-8abc-0123456789a2	endpoint-a2
+g6-fd-b-02	018f2f10-7abc-7def-8abc-0123456789b2	endpoint-b2
+g6-fd-b-03	018f2f10-7abc-7def-8abc-0123456789b3	endpoint-b3
+EOF
+printf '%s\n' "${local_node_helper}" >"${crash_scope_test}/local-node-helper.sh"
+(
+  export FD_ID=fd-b NODES_FILE="${crash_scope_test}/nodes.tsv"
+  # shellcheck source=/dev/null
+  source "${crash_scope_test}/local-node-helper.sh"
+  selected=()
+  for ordinal in 1 2 3; do
+    selected+=("$(local_node_id "${ordinal}")")
+  done
+  [[ "${selected[*]}" == \
+    '018f2f10-7abc-7def-8abc-0123456789b1 018f2f10-7abc-7def-8abc-0123456789b2 018f2f10-7abc-7def-8abc-0123456789b3' ]] || {
+    echo "local crash-node selection crossed the failure-domain boundary" >&2
+    exit 1
+  }
+  if local_node_id 4 >/dev/null 2>&1; then
+    echo "local crash-node selection accepted a missing ordinal" >&2
+    exit 1
+  fi
+)
+rm -rf -- "${crash_scope_test}"
+
+# Worker and transportd form one replacement unit. Each exact worker kill must
+# be followed by a transportd kill, ordered startup, and a full fenced-session
+# inventory before reconciliation continues.
+replacement_helper="$(sed -n '/^restart_worker_transport_unit() {/,/^}/p' "${FD_B}")"
+replacement_worker_line="$(grep -nF 'g6rd_compose up --detach worker' <<<"${replacement_helper}" | cut -d: -f1)"
+replacement_trust_line="$(grep -nF 'replacement worker trust socket' <<<"${replacement_helper}" | cut -d: -f1)"
+replacement_transport_line="$(grep -nF 'g6rd_compose up --detach transportd' <<<"${replacement_helper}" | cut -d: -f1)"
+replacement_socket_line="$(grep -nF 'replacement transportd socket' <<<"${replacement_helper}" | cut -d: -f1)"
+replacement_sessions_line="$(grep -nF 'all_nodes_connected' <<<"${replacement_helper}" | cut -d: -f1)"
+[[ -n "${replacement_worker_line}" && -n "${replacement_trust_line}" \
+  && -n "${replacement_transport_line}" && -n "${replacement_socket_line}" \
+  && -n "${replacement_sessions_line}" \
+  && "${replacement_worker_line}" -lt "${replacement_trust_line}" \
+  && "${replacement_trust_line}" -lt "${replacement_transport_line}" \
+  && "${replacement_transport_line}" -lt "${replacement_socket_line}" \
+  && "${replacement_socket_line}" -lt "${replacement_sessions_line}" ]] || {
+  echo "the worker+transportd replacement unit startup or fenced-session barrier is misordered" >&2
+  exit 1
+}
+grep -qF 'g6rd_wait_until_deadline 180 5' <<<"${replacement_helper}" || {
+  echo "replacement recovery must retain the complete 180-second reconnect window" >&2
+  exit 1
+}
+for phase_variable in crash1_phase crash2_phase crash3_phase; do
+  phase="${!phase_variable}"
+  worker_kill="$(grep -nF 'docker kill "${COMPOSE_PROJECT}-worker-1"' <<<"${phase}" | cut -d: -f1)"
+  transport_kill="$(grep -nF 'docker kill "${COMPOSE_PROJECT}-transportd-1"' <<<"${phase}" | cut -d: -f1)"
+  replacement="$(grep -nF 'restart_worker_transport_unit' <<<"${phase}" | cut -d: -f1)"
+  [[ -n "${worker_kill}" && -n "${transport_kill}" && -n "${replacement}" \
+    && "${worker_kill}" -lt "${transport_kill}" \
+    && "${transport_kill}" -lt "${replacement}" ]] || {
+    echo "${phase_variable} must kill the worker then transportd before replacing the unit" >&2
+    exit 1
+  }
+  if grep -qF 'g6rd_compose up --detach worker' <<<"${phase}"; then
+    echo "${phase_variable} must not restart a worker outside its transportd replacement unit" >&2
+    exit 1
+  fi
+done
+
+# Both pre-Send and post-Send fault points are exact Worker hooks. The first
+# signals only after the committed Claim has been extended for this command;
+# the second signals only after SendCommand returns and before MarkSent starts.
+claim_helper="$(sed -n '/^outbox_row_claimed() {/,/^}/p' "${FD_B}")"
+journal_has_helper="$(sed -n '/^journal_has_command() {/,/^}/p' "${FD_B}")"
+journal_state_helper="$(sed -n '/^journal_result_state() {/,/^}/p' "${FD_B}")"
+for journal_helper in "${journal_has_helper}" "${journal_state_helper}"; do
+  grep -qF 'lower(hex(command_id))' <<<"${journal_helper}" || {
+    echo "Agent journal UUID lookup must normalize SQLite hex output to PostgreSQL UUID case" >&2
+    exit 1
+  }
+done
+for predicate in \
+  'outbox.published_at IS NULL' \
+  'outbox.locked_by=lease.worker_id' \
+  'outbox.locked_until>clock_timestamp()' \
+  'lease.leased_until>clock_timestamp()' \
+  "attempt.state='sending' AND attempt.finished_at IS NULL"; do
+  grep -qF "${predicate}" <<<"${claim_helper}" || {
+    echo "the outbox claim barrier is missing strict predicate: ${predicate}" >&2
+    exit 1
+  }
+done
+if grep -qE '^send_before_mark_|^SEND_BEFORE_MARK|start_send_before_mark|stop_send_before_mark|pg_advisory.*MarkSent' "${FD_B}"; then
+  echo "the send-before-MarkSent phase must not use a process-wide advisory inference" >&2
+  exit 1
+fi
+pre_send_arm_helper="$(sed -n '/^pre_send_barrier_arm() {/,/^}/p' "${FD_B}")"
+pre_send_reached_helper="$(sed -n '/^pre_send_barrier_reached() {/,/^}/p' "${FD_B}")"
+pre_send_release_helper="$(sed -n '/^pre_send_barrier_release() {/,/^}/p' "${FD_B}")"
+post_send_arm_helper="$(sed -n '/^post_send_barrier_arm() {/,/^}/p' "${FD_B}")"
+post_send_reached_helper="$(sed -n '/^post_send_barrier_reached() {/,/^}/p' "${FD_B}")"
+post_send_release_helper="$(sed -n '/^post_send_barrier_release() {/,/^}/p' "${FD_B}")"
+grep -qF 'G6RD_PRE_SEND_BARRIER="${G6RD_RESULT_BARRIER}/pre-send"' "${LIB}" || {
+  echo "the Worker pre-send barrier must remain inside the scoped result-barrier bind" >&2
+  exit 1
+}
+grep -qF 'chmod 0777 "${G6RD_RESULT_BARRIER}" "${G6RD_PRE_SEND_BARRIER}"' "${LIB}" || {
+  echo "the unprivileged Worker must be able to atomically signal its scoped barrier" >&2
+  exit 1
+}
+for helper in "${pre_send_arm_helper}" "${pre_send_reached_helper}" \
+  "${pre_send_release_helper}" "${post_send_arm_helper}" \
+  "${post_send_reached_helper}" "${post_send_release_helper}"; do
+  grep -qF '"${command_id}"' <<<"${helper}" || {
+    echo "each Worker crash barrier must bind file operations to the exact command id" >&2
+    exit 1
+  }
+done
+for name in post-send-arm post-send-received post-send-release; do
+  grep -qF "${name}" "${FD_B}" || {
+    echo "the exact post-Send Worker hook is missing ${name}" >&2
+    exit 1
+  }
+done
+
+for token in \
+  'docker pause "${COMPOSE_PROJECT}-worker-1"' \
+  'pre_send_barrier_arm "${command_id}"' \
+  'post_send_barrier_arm "${command_id}"' \
+  'docker unpause "${COMPOSE_PROJECT}-worker-1"' \
+  'pre_send_barrier_reached "${command_id}"' \
+  'send-before-MarkSent strict outbox claim' \
+  'pre_send_barrier_release "${command_id}"' \
+  'exact post-send Worker barrier' \
+  'post_send_barrier_reached "${command_id}"' \
+  'docker kill "${COMPOSE_PROJECT}-worker-1"' \
+  'rm -f -- "${synthetic_barrier}"' \
+  'exact Agent journal receipt after worker crash' \
+  'journal_command_ready "${service}" "${command_id}"' \
+  'docker kill "${COMPOSE_PROJECT}-transportd-1"' \
+  'pre_send_barrier_disarm'; do
+  grep -qF "${token}" <<<"${crash2_phase}" || {
+    echo "the deterministic send-before-MarkSent sequence is missing: ${token}" >&2
+    exit 1
+  }
+done
+if grep -qF 'docker pause "${COMPOSE_PROJECT}-transportd-1"' <<<"${crash2_phase}"; then
+  echo "send-before-MarkSent must not use transportd process suspension as a send barrier" >&2
+  exit 1
+fi
+if ! grep -qF ': >"${synthetic_barrier}"' <<<"${crash2_phase}" \
+  || ! grep -qF 'rm -f -- "${synthetic_barrier}"' <<<"${crash2_phase}"; then
+  echo "the send-before-MarkSent phase must bound result production with the target Agent barrier" >&2
+  exit 1
+fi
+crash2_pause_line="$(grep -nF 'docker pause "${COMPOSE_PROJECT}-worker-1"' <<<"${crash2_phase}" | cut -d: -f1)"
+crash2_agent_hold_line="$(grep -nF ': >"${synthetic_barrier}"' <<<"${crash2_phase}" | cut -d: -f1)"
+crash2_enqueue_line="$(grep -nF 'g6rd_enqueue_command "${node}" "${key}"' <<<"${crash2_phase}" | cut -d: -f1)"
+crash2_arm_line="$(grep -nF 'pre_send_barrier_arm "${command_id}"' <<<"${crash2_phase}" | cut -d: -f1)"
+crash2_post_arm_line="$(grep -nF 'post_send_barrier_arm "${command_id}"' <<<"${crash2_phase}" | cut -d: -f1)"
+crash2_worker_unpause_line="$(grep -nF 'docker unpause "${COMPOSE_PROJECT}-worker-1"' <<<"${crash2_phase}" | tail -1 | cut -d: -f1)"
+crash2_reached_line="$(grep -nF 'pre_send_barrier_reached "${command_id}"' <<<"${crash2_phase}" | cut -d: -f1)"
+crash2_claim_line="$(grep -nF 'send-before-MarkSent strict outbox claim' <<<"${crash2_phase}" | cut -d: -f1)"
+crash2_release_line="$(grep -nF 'pre_send_barrier_release "${command_id}"' <<<"${crash2_phase}" | tail -1 | cut -d: -f1)"
+crash2_post_reached_line="$(grep -nF 'post_send_barrier_reached "${command_id}"' <<<"${crash2_phase}" | cut -d: -f1)"
+crash2_accepted_line="$(grep -nF 'g6rd_timeline_event transport_send_accepted' <<<"${crash2_phase}" | cut -d: -f1)"
+crash2_worker_kill_line="$(grep -nF 'docker kill "${COMPOSE_PROJECT}-worker-1"' <<<"${crash2_phase}" | cut -d: -f1)"
+crash2_release_agent_line="$(grep -nF 'rm -f -- "${synthetic_barrier}"' <<<"${crash2_phase}" | tail -1 | cut -d: -f1)"
+crash2_journal_line="$(grep -nF 'journal_command_ready "${service}" "${command_id}"' <<<"${crash2_phase}" | cut -d: -f1)"
+crash2_transport_kill_line="$(grep -nF 'docker kill "${COMPOSE_PROJECT}-transportd-1"' <<<"${crash2_phase}" | cut -d: -f1)"
+crash2_disarm_line="$(grep -nF 'pre_send_barrier_disarm' <<<"${crash2_phase}" | tail -1 | cut -d: -f1)"
+crash2_restart_line="$(grep -nF 'restart_worker_transport_unit send-before-MarkSent' <<<"${crash2_phase}" | cut -d: -f1)"
+[[ -n "${crash2_pause_line}" && -n "${crash2_agent_hold_line}" \
+  && -n "${crash2_enqueue_line}" && -n "${crash2_arm_line}" \
+  && -n "${crash2_post_arm_line}" \
+  && -n "${crash2_worker_unpause_line}" && -n "${crash2_reached_line}" \
+  && -n "${crash2_claim_line}" \
+  && -n "${crash2_release_line}" && -n "${crash2_post_reached_line}" \
+  && -n "${crash2_accepted_line}" \
+  && -n "${crash2_worker_kill_line}" && -n "${crash2_release_agent_line}" \
+  && -n "${crash2_journal_line}" && -n "${crash2_transport_kill_line}" \
+  && -n "${crash2_disarm_line}" && -n "${crash2_restart_line}" \
+  && "${crash2_pause_line}" -lt "${crash2_agent_hold_line}" \
+  && "${crash2_agent_hold_line}" -lt "${crash2_enqueue_line}" \
+  && "${crash2_enqueue_line}" -lt "${crash2_arm_line}" \
+  && "${crash2_arm_line}" -lt "${crash2_post_arm_line}" \
+  && "${crash2_post_arm_line}" -lt "${crash2_worker_unpause_line}" \
+  && "${crash2_worker_unpause_line}" -lt "${crash2_reached_line}" \
+  && "${crash2_reached_line}" -lt "${crash2_claim_line}" \
+  && "${crash2_claim_line}" -lt "${crash2_release_line}" \
+  && "${crash2_release_line}" -lt "${crash2_post_reached_line}" \
+  && "${crash2_post_reached_line}" -lt "${crash2_accepted_line}" \
+  && "${crash2_accepted_line}" -lt "${crash2_worker_kill_line}" \
+  && "${crash2_worker_kill_line}" -lt "${crash2_release_agent_line}" \
+  && "${crash2_release_agent_line}" -lt "${crash2_journal_line}" \
+  && "${crash2_journal_line}" -lt "${crash2_transport_kill_line}" \
+  && "${crash2_transport_kill_line}" -lt "${crash2_disarm_line}" \
+  && "${crash2_disarm_line}" -lt "${crash2_restart_line}" ]] || {
+  echo "the exact send-before-MarkSent fault sequence is misordered" >&2
+  exit 1
+}
+for cleanup_token in \
+  'if [[ "${completed}" != 1 ]]' \
+  'pre_send_barrier_release "${command_id:-}"' \
+  'post_send_barrier_release "${command_id:-}"' \
+  'docker unpause "${COMPOSE_PROJECT}-worker-1"' \
+  'rm -f -- "${synthetic_barrier}"' \
+  'docker unpause "${COMPOSE_PROJECT}-transportd-1"'; do
+  grep -qF "${cleanup_token}" <<<"${crash2_phase}" || {
+    echo "the send-before-MarkSent failure trap is missing: ${cleanup_token}" >&2
+    exit 1
+  }
+done
+if grep -qF 'docker pause "${COMPOSE_PROJECT}-transportd-1"' <<<"${crash1_phase}"; then
+  echo "claim-before-send must not use transportd process suspension as a send barrier" >&2
+  exit 1
+fi
+crash1_pause_line="$(grep -nF 'docker pause "${COMPOSE_PROJECT}-worker-1"' <<<"${crash1_phase}" | cut -d: -f1)"
+crash1_enqueue_line="$(grep -nF 'g6rd_enqueue_command "${node}" "${key}"' <<<"${crash1_phase}" | cut -d: -f1)"
+crash1_arm_line="$(grep -nF 'pre_send_barrier_arm "${command_id}"' <<<"${crash1_phase}" | cut -d: -f1)"
+crash1_unpause_line="$(grep -nF 'docker unpause "${COMPOSE_PROJECT}-worker-1"' <<<"${crash1_phase}" | tail -1 | cut -d: -f1)"
+crash1_reached_line="$(grep -nF 'pre_send_barrier_reached "${command_id}"' <<<"${crash1_phase}" | cut -d: -f1)"
+crash1_transport_kill_line="$(grep -nF 'docker kill "${COMPOSE_PROJECT}-transportd-1"' <<<"${crash1_phase}" | cut -d: -f1)"
+crash1_claim_line="$(grep -nF '"exact committed outbox claim" outbox_row_claimed' <<<"${crash1_phase}" | cut -d: -f1)"
+crash1_worker_kill_line="$(grep -nF 'docker kill "${COMPOSE_PROJECT}-worker-1"' <<<"${crash1_phase}" | cut -d: -f1)"
+[[ -n "${crash1_pause_line}" && -n "${crash1_enqueue_line}" \
+  && -n "${crash1_arm_line}" && -n "${crash1_unpause_line}" \
+  && -n "${crash1_reached_line}" && -n "${crash1_claim_line}" \
+  && -n "${crash1_worker_kill_line}" && -n "${crash1_transport_kill_line}" \
+  && "${crash1_pause_line}" -lt "${crash1_enqueue_line}" \
+  && "${crash1_enqueue_line}" -lt "${crash1_arm_line}" \
+  && "${crash1_arm_line}" -lt "${crash1_unpause_line}" \
+  && "${crash1_unpause_line}" -lt "${crash1_reached_line}" \
+  && "${crash1_reached_line}" -lt "${crash1_claim_line}" \
+  && "${crash1_claim_line}" -lt "${crash1_worker_kill_line}" \
+  && "${crash1_worker_kill_line}" -lt "${crash1_transport_kill_line}" ]] || {
+  echo "the exact claim-before-send Worker barrier sequence is misordered" >&2
+  exit 1
+}
+for cleanup_token in \
+  'if [[ "${completed}" != 1 ]]' \
+  'pre_send_barrier_release "${command_id:-}"' \
+  'docker unpause "${COMPOSE_PROJECT}-worker-1"'; do
+  grep -qF "${cleanup_token}" <<<"${crash1_phase}" || {
+    echo "the claim-before-send failure trap is missing: ${cleanup_token}" >&2
+    exit 1
+  }
+done
+
+# The result-ingress barrier signal is created by uid 65532. The harness must
+# pre-create a writable/readable inode before resuming the worker, and its
+# failure trap must release the exact command instead of stranding a DB tx.
+crash3_pause_line="$(grep -nF 'docker pause "${COMPOSE_PROJECT}-worker-1"' <<<"${crash3_phase}" | cut -d: -f1)"
+crash3_enqueue_line="$(grep -nF 'g6rd_enqueue_command "${node}" "${key}"' <<<"${crash3_phase}" | cut -d: -f1)"
+crash3_arm_line="$(grep -nF 'printf '\''%s\n'\'' "${command_id}" >"${barrier}/arm"' <<<"${crash3_phase}" | cut -d: -f1)"
+crash3_received_line="$(grep -nF ': >"${barrier}/received"' <<<"${crash3_phase}" | cut -d: -f1)"
+crash3_mode_line="$(grep -nF 'chmod 0666 "${barrier}/arm" "${barrier}/received"' <<<"${crash3_phase}" | cut -d: -f1)"
+crash3_unpause_line="$(grep -nF 'docker unpause "${COMPOSE_PROJECT}-worker-1"' <<<"${crash3_phase}" | tail -1 | cut -d: -f1)"
+crash3_wait_line="$(grep -nF '"ingress result commit barrier" test -s' <<<"${crash3_phase}" | cut -d: -f1)"
+crash3_precommit_line="$(grep -nF 'agent_command_results WHERE command_id=' <<<"${crash3_phase}" | head -1 | cut -d: -f1)"
+crash3_worker_kill_line="$(grep -nF 'docker kill "${COMPOSE_PROJECT}-worker-1"' <<<"${crash3_phase}" | cut -d: -f1)"
+crash3_transport_kill_line="$(grep -nF 'docker kill "${COMPOSE_PROJECT}-transportd-1"' <<<"${crash3_phase}" | cut -d: -f1)"
+crash3_postkill_line="$(grep -nF 'agent_command_results WHERE command_id=' <<<"${crash3_phase}" | sed -n '2p' | cut -d: -f1)"
+crash3_restart_line="$(grep -nF 'restart_worker_transport_unit result-before-commit' <<<"${crash3_phase}" | cut -d: -f1)"
+crash3_result_line="$(grep -nF 'agent_command_results WHERE command_id=' <<<"${crash3_phase}" | tail -1 | cut -d: -f1)"
+[[ -n "${crash3_pause_line}" && -n "${crash3_enqueue_line}" \
+  && -n "${crash3_arm_line}" && -n "${crash3_received_line}" \
+  && -n "${crash3_mode_line}" \
+  && -n "${crash3_unpause_line}" && -n "${crash3_wait_line}" \
+  && -n "${crash3_precommit_line}" && -n "${crash3_worker_kill_line}" \
+  && -n "${crash3_transport_kill_line}" && -n "${crash3_postkill_line}" \
+  && -n "${crash3_restart_line}" && -n "${crash3_result_line}" \
+  && "${crash3_pause_line}" -lt "${crash3_enqueue_line}" \
+  && "${crash3_enqueue_line}" -lt "${crash3_arm_line}" \
+  && "${crash3_arm_line}" -lt "${crash3_received_line}" \
+  && "${crash3_received_line}" -lt "${crash3_mode_line}" \
+  && "${crash3_mode_line}" -lt "${crash3_unpause_line}" \
+  && "${crash3_unpause_line}" -lt "${crash3_wait_line}" \
+  && "${crash3_wait_line}" -lt "${crash3_precommit_line}" \
+  && "${crash3_precommit_line}" -lt "${crash3_worker_kill_line}" \
+  && "${crash3_worker_kill_line}" -lt "${crash3_transport_kill_line}" \
+  && "${crash3_transport_kill_line}" -lt "${crash3_postkill_line}" \
+  && "${crash3_postkill_line}" -lt "${crash3_restart_line}" \
+  && "${crash3_restart_line}" -lt "${crash3_result_line}" ]] || {
+  echo "the exact result-before-commit fault and recovery sequence is misordered" >&2
+  exit 1
+}
+for cleanup_token in \
+  'if [[ "${completed}" != 1 ]]' \
+  'printf "%s\n" "${command_id}" >"${barrier}/release"' \
+  'chmod 0666 "${barrier}/release"' \
+  'docker unpause "${COMPOSE_PROJECT}-worker-1"'; do
+  grep -qF "${cleanup_token}" <<<"${crash3_phase}" || {
+    echo "the result-before-commit failure release is missing: ${cleanup_token}" >&2
+    exit 1
+  }
+done
+
+# Watchers remain live through slow collection. The API is frozen before the
+# final observations, and two independently verified transport inventories
+# bracket one DB-clock authority cut. Watchers stop at the cut, before the
+# second inventory, so post-cut renewals cannot redefine the evidence state.
+collect_phase="$(sed -n '/^phase_evidence_collect() {/,/^}/p' "${FD_B}")"
+writer_quiesce="$(sed -n '/^quiesce_control_plane_writers() {/,/^}/p' "${FD_B}")"
+ingress_quiesce="$(sed -n '/^quiesce_transport_ingress() {/,/^}/p' "${FD_B}")"
+renewer_quiesce="$(sed -n '/^quiesce_authority_renewers() {/,/^}/p' "${FD_B}")"
+authority_cut="$(sed -n '/^capture_final_authority_cut() {/,/^}/p' "${FD_B}")"
+session_assert="$(sed -n '/^assert_final_session_authority() {/,/^}/p' "${FD_B}")"
+collect_instances_line="$(grep -nF 'done >>"${dir}/instances.tsv"' <<<"${collect_phase}" | cut -d: -f1)"
+collect_api_freeze_line="$(grep -nF 'quiesce_control_plane_writers' <<<"${collect_phase}" | cut -d: -f1)"
+collect_telemetry_line="$(grep -nF '>"${dir}/telemetry.jsonl"' <<<"${collect_phase}" | cut -d: -f1)"
+collect_sessions_before_line="$(grep -nF '>"${dir}/final-sessions-before.json"' <<<"${collect_phase}" | cut -d: -f1)"
+collect_before_complete_line="$(grep -nF '>"${dir}/final-sessions-before-complete-at"' <<<"${collect_phase}" | cut -d: -f1)"
+collect_sessions_after_line="$(grep -nF '>"${dir}/final-sessions-after.json"' <<<"${collect_phase}" | cut -d: -f1)"
+collect_after_start_line="$(grep -nF '>"${dir}/final-sessions-after-start-at"' <<<"${collect_phase}" | cut -d: -f1)"
+collect_observed_line="$(grep -nF '>"${dir}/final-session-observed-at"' <<<"${collect_phase}" | cut -d: -f1)"
+collect_ingress_freeze_line="$(grep -nF 'quiesce_transport_ingress' <<<"${collect_phase}" | cut -d: -f1)"
+collect_cut_line="$(grep -nF 'capture_final_authority_cut' <<<"${collect_phase}" | cut -d: -f1)"
+collect_assert_line="$(grep -nF 'assert_final_session_authority' <<<"${collect_phase}" | cut -d: -f1)"
+collect_renewers_line="$(grep -nF 'quiesce_authority_renewers' <<<"${collect_phase}" | cut -d: -f1)"
+collect_stop_line="$(grep -nF 'stop_watchers' <<<"${collect_phase}" | cut -d: -f1)"
+collect_final_history_line="$(grep -nF 'append_final_history_snapshot' <<<"${collect_phase}" | cut -d: -f1)"
+collect_copy_line="$(grep -nF 'cp -f "${G6RD_STATE}/${history}-history.jsonl"' <<<"${collect_phase}" | cut -d: -f1)"
+collect_stamp_line="$(grep -nF '>"${dir}/snapshot-taken-at"' <<<"${collect_phase}" | cut -d: -f1)"
+[[ -n "${collect_instances_line}" && -n "${collect_api_freeze_line}" \
+  && -n "${collect_telemetry_line}" && -n "${collect_sessions_before_line}" \
+  && -n "${collect_before_complete_line}" \
+  && -n "${collect_sessions_after_line}" && -n "${collect_after_start_line}" \
+  && -n "${collect_observed_line}" && -n "${collect_ingress_freeze_line}" \
+  && -n "${collect_cut_line}" && -n "${collect_assert_line}" \
+  && -n "${collect_renewers_line}" \
+  && -n "${collect_stop_line}" && -n "${collect_final_history_line}" \
+  && -n "${collect_copy_line}" && -n "${collect_stamp_line}" \
+  && "${collect_instances_line}" -lt "${collect_api_freeze_line}" \
+  && "${collect_api_freeze_line}" -lt "${collect_telemetry_line}" \
+  && "${collect_telemetry_line}" -lt "${collect_sessions_before_line}" \
+  && "${collect_sessions_before_line}" -lt "${collect_before_complete_line}" \
+  && "${collect_before_complete_line}" -lt "${collect_cut_line}" \
+  && "${collect_cut_line}" -lt "${collect_stop_line}" \
+  && "${collect_stop_line}" -lt "${collect_final_history_line}" \
+  && "${collect_final_history_line}" -lt "${collect_after_start_line}" \
+  && "${collect_after_start_line}" -lt "${collect_sessions_after_line}" \
+  && "${collect_sessions_after_line}" -lt "${collect_assert_line}" \
+  && "${collect_assert_line}" -lt "${collect_observed_line}" \
+  && "${collect_observed_line}" -lt "${collect_ingress_freeze_line}" \
+  && "${collect_ingress_freeze_line}" -lt "${collect_renewers_line}" \
+  && "${collect_renewers_line}" -lt "${collect_copy_line}" \
+  && "${collect_copy_line}" -lt "${collect_stamp_line}" ]] || {
+  echo "evidence collection does not form a bracketed final authority cut" >&2
+  exit 1
+}
+grep -qF 'docker pause "${COMPOSE_PROJECT}-api-1"' <<<"${writer_quiesce}" || {
+  echo "evidence collection must stop public writes before final observations" >&2
+  exit 1
+}
+if grep -qE 'worker-1|scheduler-1|transportd-1' <<<"${writer_quiesce}"; then
+  echo "short authority leases must remain renewable during the final live probe" >&2
+  exit 1
+fi
+grep -qF 'docker pause "${COMPOSE_PROJECT}-transportd-1"' <<<"${ingress_quiesce}" || {
+  echo "evidence collection must freeze transport ingress after the proven bracket" >&2
+  exit 1
+}
+for service in worker scheduler; do
+  grep -qF "docker pause \"\${COMPOSE_PROJECT}-${service}-1\"" <<<"${renewer_quiesce}" || {
+    echo "evidence collection must stop ${service} only after the authority cut" >&2
+    exit 1
+  }
+done
+for token in \
+  'WITH cut AS MATERIALIZED' \
+  'HH24:MI:SS.US\"Z\"' \
+  'fencing.lease_until>cut.at' \
+  'leadership.lease_until>cut.at' \
+  "'lease_until',to_char(owner.lease_until" \
+  "'owner_instance_id',owner.owner_instance_id::text" \
+  "'owner_incarnation',owner.owner_incarnation::text" \
+  "'connection_id',encode(owner.connection_id,'hex')" \
+  "'instance_id',entry.instance_id::text" \
+  "'incarnation',entry.incarnation::text" \
+  "'epoch',entry.epoch" \
+  "'lease_until',to_char(entry.lease_until"; do
+  grep -qF "${token}" <<<"${authority_cut}" || {
+    echo "the single DB authority cut is missing: ${token}" >&2
+    exit 1
+  }
+done
+clock_capture="$(sed -n '/^capture_database_clock() {/,/^}/p' "${FD_B}")"
+for token in 'clock_timestamp()' 'HH24:MI:SS.US\"Z\"'; do
+  grep -qF "${token}" <<<"${clock_capture}" || {
+    echo "the transport bracket DB clock capture is missing: ${token}" >&2
+    exit 1
+  }
+done
+for token in \
+  'final-sessions-before.json' \
+  'final-sessions-after.json' \
+  '.owner_lease_until | epoch_seconds' \
+  'cmp -s "${before_terms}" "${after_terms}"' \
+  'cmp -s "${session_authority}" "${authority_terms}"'; do
+  grep -qF "${token}" <<<"${session_assert}" || {
+    echo "final session authority validation is missing: ${token}" >&2
+    exit 1
+  }
+done
+for token in \
+  '--signing-key-file /run/ocservia-signing/command-signing.pem' \
+  'get_owner_fence' \
+  'verify_connection_fence_v2_at' \
+  'fence_capabilities != session_capabilities'; do
+  if [[ "${token}" == --signing-key-file* ]]; then
+    grep -qF -- "${token}" "${LIB}" || {
+      echo "node connection probe is not pinned to the Controller verification key" >&2
+      exit 1
+    }
+  else
+    grep -qF -- "${token}" "${ROOT}/rust/crates/g6-probe/src/main.rs" || {
+      echo "node connection probe lacks independent fence verification: ${token}" >&2
+      exit 1
+    }
+  fi
+done
+grep -qF "jq -er '.cut_at'" <<<"${collect_phase}" || {
+  echo "the public snapshot stamp must come from the DB authority cut" >&2
+  exit 1
+}
+if ! grep -qF 'require_file "${G6RD_STATE}/${history}-history.jsonl"' <<<"${collect_phase}" \
+  || ! grep -qF '"${G6RD_OUTBOX}/${history}-history.jsonl"' <<<"${collect_phase}"; then
+  echo "evidence collection must fail closed and publish both required history files" >&2
+  exit 1
+fi
 
 # The fault-free observation window and the sampler cadence are harness
 # margins over the frozen SLO limits, so they must demonstrably clear them.

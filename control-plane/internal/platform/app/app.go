@@ -184,6 +184,11 @@ func Run(ctx context.Context, cfg config.Config, build BuildInfo, logger *slog.L
 		if err != nil {
 			return fmt.Errorf("configure outbox worker: %w", err)
 		}
+		if cfg.TestPreSendBarrier != "" {
+			if err := operationWorker.EnablePreSendBarrier(cfg.TestPreSendBarrier, cfg.TestCommandLease); err != nil {
+				return fmt.Errorf("configure command pre-send barrier: %w", err)
+			}
+		}
 		go func() { workerErr <- operationWorker.Run(componentCtx) }()
 		var trustWorker *enrollment.TrustConvergenceWorker
 		trustWorker, err = enrollment.NewFencedTrustConvergenceWorker(pool, transport, fenceExecutor, logger)

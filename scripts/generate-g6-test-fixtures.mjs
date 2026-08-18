@@ -34,12 +34,25 @@ function at(seconds) {
   return `2026-08-14T${hh}:${mm}:${ss}Z`;
 }
 
+function atMicros(seconds, micros) {
+  return at(seconds).replace("Z", `.${String(micros).padStart(6, "0")}Z`);
+}
+
+const finalBeforeCompleteAt = atMicros(270, 100000);
+const finalAuthorityCutAt = atMicros(270, 200000);
+const finalAfterStartAt = atMicros(270, 300000);
+
 const bindingFields = `${environmentId},${candidateSha}`;
 const bindingRecord = (timestamp) => ({
   timestamp,
   environment_id: environmentId,
   candidate_sha: candidateSha,
 });
+const fixtureNodeId = (index) => index.toString(16).padStart(32, "0");
+const workerAIncarnation = "1700000000000000001";
+const workerBIncarnation = "1700000000000000002";
+const schedulerAIncarnation = "1800000000000000001";
+const schedulerBIncarnation = "1800000000000000002";
 
 function jsonl(records) {
   return `${records.map((r) => JSON.stringify(r)).join("\n")}\n`;
@@ -130,20 +143,31 @@ function buildTimeline() {
 }
 
 function buildEpochEvents() {
-  const records = [
-    { sequence: 1, ...bindingRecord(at(0)), subject: "connection_owner", event_type: "owner_registered", node: "node-1", instance: "worker-a", epoch: 1 },
-    { sequence: 2, ...bindingRecord(at(5)), subject: "connection_owner", event_type: "owner_accept", node: "node-1", instance: "worker-a", epoch: 1, accepted: true },
-    { sequence: 3, ...bindingRecord(at(10)), subject: "connection_owner", event_type: "owner_lease_expired", node: "node-1", epoch: 1 },
-    { sequence: 4, ...bindingRecord(at(20)), subject: "connection_owner", event_type: "owner_registered", node: "node-1", instance: "worker-b", epoch: 2 },
-    { sequence: 5, ...bindingRecord(at(25)), subject: "connection_owner", event_type: "owner_accept", node: "node-1", instance: "worker-b", epoch: 2, accepted: true },
-    { sequence: 6, ...bindingRecord(at(30)), subject: "connection_owner", event_type: "owner_accept", node: "node-1", instance: "worker-a", epoch: 1, accepted: false },
-    { sequence: 7, ...bindingRecord(at(60)), subject: "scheduler", event_type: "leader_acquired", instance: "sched-a", epoch: 1 },
-    { sequence: 8, ...bindingRecord(at(65)), subject: "scheduler", event_type: "leader_commit", instance: "sched-a", epoch: 1, accepted: true },
-    { sequence: 9, ...bindingRecord(at(75)), subject: "scheduler", event_type: "leader_lease_expired", epoch: 1 },
-    { sequence: 10, ...bindingRecord(at(76)), subject: "scheduler", event_type: "leader_acquired", instance: "sched-b", epoch: 2 },
-    { sequence: 11, ...bindingRecord(at(85)), subject: "scheduler", event_type: "leader_commit", instance: "sched-b", epoch: 2, accepted: true },
-    { sequence: 12, ...bindingRecord(at(86)), subject: "scheduler", event_type: "leader_commit", instance: "sched-a", epoch: 1, accepted: false },
-  ];
+  const records = Array.from({ length: 50 }, (_, index) => ({
+    sequence: index + 1,
+    ...bindingRecord(at(index === 0 ? 0 : 1)),
+    subject: "connection_owner",
+    event_type: "owner_registered",
+    node: fixtureNodeId(index + 1),
+    instance: "worker-a",
+    incarnation: workerAIncarnation,
+    connection_id: String(index + 1).padStart(32, "0"),
+    epoch: 1,
+    lease_until: at(index === 0 ? 10 : 300),
+  }));
+  records.push(
+    { sequence: 51, ...bindingRecord(at(5)), subject: "connection_owner", event_type: "owner_accept", node: fixtureNodeId(1), instance: "worker-a", epoch: 1, accepted: true },
+    { sequence: 52, ...bindingRecord(at(10)), subject: "connection_owner", event_type: "owner_lease_expired", node: fixtureNodeId(1), epoch: 1 },
+    { sequence: 53, ...bindingRecord(at(20)), subject: "connection_owner", event_type: "owner_registered", node: fixtureNodeId(1), instance: "worker-b", incarnation: workerBIncarnation, connection_id: String(1).padStart(32, "0"), epoch: 2, lease_until: at(300) },
+    { sequence: 54, ...bindingRecord(at(25)), subject: "connection_owner", event_type: "owner_accept", node: fixtureNodeId(1), instance: "worker-b", epoch: 2, accepted: true },
+    { sequence: 55, ...bindingRecord(at(30)), subject: "connection_owner", event_type: "owner_accept", node: fixtureNodeId(1), instance: "worker-a", epoch: 1, accepted: false },
+    { sequence: 56, ...bindingRecord(at(60)), subject: "scheduler", event_type: "leader_acquired", instance: "sched-a", incarnation: schedulerAIncarnation, epoch: 1, lease_until: at(75) },
+    { sequence: 57, ...bindingRecord(at(65)), subject: "scheduler", event_type: "leader_commit", instance: "sched-a", epoch: 1, accepted: true },
+    { sequence: 58, ...bindingRecord(at(75)), subject: "scheduler", event_type: "leader_lease_expired", epoch: 1 },
+    { sequence: 59, ...bindingRecord(at(76)), subject: "scheduler", event_type: "leader_acquired", instance: "sched-b", incarnation: schedulerBIncarnation, epoch: 2, lease_until: at(300) },
+    { sequence: 60, ...bindingRecord(at(85)), subject: "scheduler", event_type: "leader_commit", instance: "sched-b", epoch: 2, accepted: true },
+    { sequence: 61, ...bindingRecord(at(86)), subject: "scheduler", event_type: "leader_commit", instance: "sched-a", epoch: 1, accepted: false },
+  );
   return jsonl(records);
 }
 
@@ -325,19 +349,86 @@ function buildAgentSessions() {
   return canonicalJson({
     environment_id: environmentId,
     candidate_sha: candidateSha,
-    snapshot_taken_at: at(270),
+    snapshot_taken_at: finalAuthorityCutAt,
     sessions: Array.from({ length: 50 }, (_, index) => ({
       agent_id: `agent-${String(index + 1).padStart(2, "0")}`,
-      node: `node-${(index % 5) + 1}`,
+      node: fixtureNodeId(index + 1),
+      endpoint_id: (index + 1).toString(16).padStart(64, "0"),
+      agent_instance_id: (index + 1001).toString(16).padStart(32, "0"),
       authorized: true,
       connected: true,
+      owner_instance: index === 0 ? "worker-b" : "worker-a",
+      owner_incarnation:
+        index === 0 ? workerBIncarnation : workerAIncarnation,
+      connection_id: String(index + 1).padStart(32, "0"),
+      owner_epoch: index === 0 ? 2 : 1,
+      owner_lease_until: at(300),
       session_started_at: at(0),
+      connected_at: at(200 + index),
+      session_expires_at: at(300),
       // Per-agent recovery timestamps: the verifier derives the storm
       // recovery as max(reconnected_at) - bulk_disconnect_at.
       reconnected_at: at(200 + index),
     })),
+    scheduler_authority: {
+      instance: "sched-b",
+      incarnation: schedulerBIncarnation,
+      epoch: 2,
+      lease_until: at(300),
+    },
     reconnect_storm: {
       bulk_disconnect_at: at(180),
+    },
+  });
+}
+
+function buildTransportObservation(index) {
+  return {
+    node: fixtureNodeId(index + 1),
+    endpoint_id: (index + 1).toString(16).padStart(64, "0"),
+    agent_instance_id: (index + 1001).toString(16).padStart(32, "0"),
+    connected_at: at(200 + index),
+    session_expires_at: at(300),
+    owner_fence_id: (index + 2001).toString(16).padStart(32, "0"),
+    owner_instance: index === 0 ? "worker-b" : "worker-a",
+    owner_incarnation:
+      index === 0 ? workerBIncarnation : workerAIncarnation,
+    connection_id: String(index + 1).padStart(32, "0"),
+    owner_epoch: index === 0 ? 2 : 1,
+    owner_lease_until: at(300),
+    authorization_revision: 11,
+    negotiated_capabilities: ["ocserv.status.read"],
+  };
+}
+
+function buildAuthorityCut() {
+  return canonicalJson({
+    environment_id: environmentId,
+    candidate_sha: candidateSha,
+    cut_at: finalAuthorityCutAt,
+    transport_bracket: {
+      before_complete_at: finalBeforeCompleteAt,
+      after_start_at: finalAfterStartAt,
+      before: Array.from({ length: 50 }, (_, index) =>
+        buildTransportObservation(index),
+      ),
+      after: Array.from({ length: 50 }, (_, index) =>
+        buildTransportObservation(index),
+      ),
+    },
+    owners: Array.from({ length: 50 }, (_, index) => ({
+      node: fixtureNodeId(index + 1),
+      instance: index === 0 ? "worker-b" : "worker-a",
+      incarnation: index === 0 ? workerBIncarnation : workerAIncarnation,
+      connection_id: String(index + 1).padStart(32, "0"),
+      epoch: index === 0 ? 2 : 1,
+      lease_until: at(300),
+    })),
+    scheduler: {
+      instance: "sched-b",
+      incarnation: schedulerBIncarnation,
+      epoch: 2,
+      lease_until: at(300),
     },
   });
 }
@@ -359,6 +450,7 @@ const artifactFiles = [
   ["resource-samples.csv", "text/csv", "resource_samples", buildResourceSamples()],
   ["timeline.jsonl", "application/x-ndjson", "timeline", buildTimeline()],
   ["epoch-events.jsonl", "application/x-ndjson", "epoch_events", buildEpochEvents()],
+  ["authority-cut.json", "application/json", "authority_cut", buildAuthorityCut()],
   ["command-trace.jsonl", "application/x-ndjson", "command_trace", buildCommandTrace()],
   ["outbox-snapshot.json", "application/json", "outbox_snapshot", buildOutboxSnapshot()],
   ["http-samples.csv", "text/csv", "http_samples", buildHttpSamples()],

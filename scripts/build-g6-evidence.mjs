@@ -118,6 +118,51 @@ function normalizeStamp(value, label) {
   return `${match[1]}Z`;
 }
 
+function normalizePreciseStamp(value, label) {
+  const match =
+    /^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})(\.\d+)?Z$/.exec(value);
+  if (!match) fail(`${label} is not an RFC 3339 UTC timestamp: ${value}`);
+  return `${match[1]}${match[2] ?? ""}Z`;
+}
+
+function utcStampMicros(value, label) {
+  const match =
+    /^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})(?:\.(\d{1,6}))?Z$/.exec(
+      value,
+    );
+  if (!match) fail(`${label} is not a microsecond RFC 3339 UTC timestamp`);
+  const seconds = Date.parse(`${match[1]}Z`);
+  if (!Number.isFinite(seconds)) fail(`${label} is not a timestamp`);
+  return (
+    BigInt(seconds) * 1000n +
+    BigInt((match[2] ?? "").padEnd(6, "0"))
+  );
+}
+
+function normalizeUUIDIdentity(value, label) {
+  if (/^[0-9a-f]{32}$/.test(value ?? "")) return value;
+  if (
+    /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(
+      value ?? "",
+    )
+  ) {
+    return value.replaceAll("-", "");
+  }
+  return fail(`${label} is not a UUID identity`);
+}
+
+function normalizeEndpointIdentity(value, label) {
+  if (/^[0-9a-f]{64}$/.test(value ?? "")) return value;
+  return fail(
+    `${label} is not a 64-character lowercase hexadecimal endpoint id`,
+  );
+}
+
+function positiveDecimalString(value, label) {
+  if (/^[1-9][0-9]*$/.test(value ?? "")) return value;
+  return fail(`${label} is not a canonical positive decimal string`);
+}
+
 function canonicalJson(value) {
   return `${JSON.stringify(value, null, 2)}\n`;
 }
@@ -138,6 +183,11 @@ requireFile(runDir, "state", "all-nodes.tsv");
 requireFile(runDir, "state", "promoted-at");
 requireFile(runDir, "state", "window-ended-at");
 requireFile(runDir, "state", "evidence", "final-sessions.json");
+requireFile(runDir, "state", "evidence", "final-sessions-before.json");
+requireFile(runDir, "state", "evidence", "final-sessions-after.json");
+requireFile(runDir, "state", "evidence", "final-sessions-before-complete-at");
+requireFile(runDir, "state", "evidence", "final-sessions-after-start-at");
+requireFile(runDir, "state", "final-authority-cut.json");
 requireFile(runDir, "state", "evidence", "snapshot-taken-at");
 requireFile(runDir, "state", "evidence", "commands.jsonl");
 requireFile(runDir, "state", "evidence", "attempts.jsonl");
@@ -185,13 +235,45 @@ const era2Sessions = new Map(
       return [nodeId, connectedAt];
     }),
 );
-const finalSessions = JSON.parse(
-  readText(runDir, "state", "evidence", "final-sessions.json"),
+const beforeFinalSessions = JSON.parse(
+  readText(runDir, "state", "evidence", "final-sessions-before.json"),
 );
-const snapshotTakenAt = normalizeStamp(
+const afterFinalSessions = JSON.parse(
+  readText(runDir, "state", "evidence", "final-sessions-after.json"),
+);
+const finalSessions = afterFinalSessions;
+const finalAuthorityCut = JSON.parse(
+  readText(runDir, "state", "final-authority-cut.json"),
+);
+const beforeFinalSessionsCompleteAt = normalizePreciseStamp(
+  readText(
+    runDir,
+    "state",
+    "evidence",
+    "final-sessions-before-complete-at",
+  ).trim(),
+  "final-sessions-before-complete-at",
+);
+const afterFinalSessionsStartAt = normalizePreciseStamp(
+  readText(
+    runDir,
+    "state",
+    "evidence",
+    "final-sessions-after-start-at",
+  ).trim(),
+  "final-sessions-after-start-at",
+);
+const snapshotTakenAt = normalizePreciseStamp(
   readText(runDir, "state", "evidence", "snapshot-taken-at").trim(),
   "snapshot-taken-at",
 );
+const authorityCutAt = normalizePreciseStamp(
+  finalAuthorityCut.cut_at,
+  "final authority cut_at",
+);
+if (authorityCutAt !== snapshotTakenAt) {
+  fail("the final authority cut does not match snapshot-taken-at");
+}
 const promotedAt = normalizeStamp(
   readText(runDir, "state", "promoted-at").trim(),
   "promoted-at",
@@ -597,23 +679,269 @@ const telemetrySnapshotText = canonicalJson({
   agents: telemetryAgents,
 });
 
-const finalByNode = new Map(
-  finalSessions.observations.map((observation) => [
-    observation.node_id,
-    observation,
-  ]),
+function publicTransportObservation(observation, label) {
+  if (!observation || observation.found !== true) {
+    fail(`${label} did not find a live session`);
+  }
+  const node = normalizeUUIDIdentity(observation.node_id, `${label} node_id`);
+  const endpointId = normalizeEndpointIdentity(
+    observation.endpoint_id,
+    `${label} endpoint_id`,
+  );
+  const agentInstanceId = normalizeUUIDIdentity(
+    observation.agent_instance_id,
+    `${label} agent_instance_id`,
+  );
+  const ownerFenceId = normalizeUUIDIdentity(
+    observation.owner_fence_id,
+    `${label} owner_fence_id`,
+  );
+  if (
+    !/^[a-z0-9][a-z0-9._-]{0,127}$/.test(
+      observation.owner_instance_id ?? "",
+    )
+  ) {
+    fail(`${label} owner_instance_id is invalid`);
+  }
+  const ownerIncarnation = positiveDecimalString(
+    observation.owner_incarnation,
+    `${label} owner_incarnation`,
+  );
+  const connectionId = normalizeUUIDIdentity(
+    observation.connection_id,
+    `${label} connection_id`,
+  );
+  if (!Number.isInteger(observation.owner_epoch) || observation.owner_epoch < 1) {
+    fail(`${label} owner_epoch is invalid`);
+  }
+  if (
+    !Number.isSafeInteger(observation.authorization_revision) ||
+    observation.authorization_revision < 0
+  ) {
+    fail(`${label} authorization_revision is invalid`);
+  }
+  if (
+    !Array.isArray(observation.negotiated_capabilities) ||
+    observation.negotiated_capabilities.length === 0 ||
+    observation.negotiated_capabilities.some(
+      (capability) =>
+        typeof capability !== "string" ||
+        !/^[a-z0-9][a-z0-9._-]{0,127}$/.test(capability),
+    ) ||
+    new Set(observation.negotiated_capabilities).size !==
+      observation.negotiated_capabilities.length
+  ) {
+    fail(`${label} negotiated_capabilities are invalid`);
+  }
+  return {
+    node,
+    endpoint_id: endpointId,
+    agent_instance_id: agentInstanceId,
+    connected_at: normalizeStamp(observation.connected_at, `${label} connected_at`),
+    session_expires_at: normalizeStamp(
+      observation.session_expires_at,
+      `${label} session_expires_at`,
+    ),
+    owner_fence_id: ownerFenceId,
+    owner_instance: observation.owner_instance_id,
+    owner_incarnation: ownerIncarnation,
+    connection_id: connectionId,
+    owner_epoch: observation.owner_epoch,
+    owner_lease_until: normalizeStamp(
+      observation.owner_lease_until,
+      `${label} owner_lease_until`,
+    ),
+    authorization_revision: observation.authorization_revision,
+    negotiated_capabilities: [...observation.negotiated_capabilities].sort(),
+  };
+}
+
+function publicTransportInventory(inventory, label) {
+  if (inventory?.all_matched !== true || !Array.isArray(inventory.observations)) {
+    fail(`${label} is not a complete matched transport inventory`);
+  }
+  const byNode = new Map();
+  for (const [index, observation] of inventory.observations.entries()) {
+    const publicObservation = publicTransportObservation(
+      observation,
+      `${label} observation ${index + 1}`,
+    );
+    if (byNode.has(publicObservation.node)) {
+      fail(`${label} repeats node ${publicObservation.node}`);
+    }
+    byNode.set(publicObservation.node, publicObservation);
+  }
+  return [...byNode.values()].sort((left, right) =>
+    left.node.localeCompare(right.node),
+  );
+}
+
+const beforeTransportObservations = publicTransportInventory(
+  beforeFinalSessions,
+  "before-cut final session inventory",
 );
+const afterTransportObservations = publicTransportInventory(
+  afterFinalSessions,
+  "after-cut final session inventory",
+);
+if (
+  !(
+    utcStampMicros(beforeFinalSessionsCompleteAt, "before inventory boundary") <
+      utcStampMicros(authorityCutAt, "authority cut") &&
+    utcStampMicros(authorityCutAt, "authority cut") <
+      utcStampMicros(afterFinalSessionsStartAt, "after inventory boundary")
+  )
+) {
+  fail("the transport inventory boundaries do not strictly bracket the authority cut");
+}
+
+const finalByNode = new Map(
+  finalSessions.observations.map((observation) => [observation.node_id, observation]),
+);
+if (!Array.isArray(finalAuthorityCut.owners)) {
+  fail("the final authority cut owners must be an array");
+}
+const authorityOwnerByNode = new Map();
+const authorityCutOwners = [];
+for (const owner of finalAuthorityCut.owners) {
+  if (
+    !/^[0-9a-f]{32}$/.test(owner.node_hex ?? "") ||
+    !/^[a-z0-9][a-z0-9._-]{0,127}$/.test(owner.owner_instance_id ?? "") ||
+    typeof owner.owner_incarnation !== "string" ||
+    typeof owner.connection_id !== "string" ||
+    !Number.isInteger(owner.owner_epoch) ||
+    owner.owner_epoch < 1 ||
+    typeof owner.history !== "string" ||
+    owner.history.length === 0
+  ) {
+    fail("the final authority cut contains an invalid owner");
+  }
+  if (authorityOwnerByNode.has(owner.node_hex)) {
+    fail(`the final authority cut repeats owner node ${owner.node_hex}`);
+  }
+  const authorityOwner = {
+    instance: owner.owner_instance_id,
+    incarnation: positiveDecimalString(
+      owner.owner_incarnation,
+      `final authority owner ${owner.node_hex} incarnation`,
+    ),
+    connectionId: normalizeUUIDIdentity(
+      owner.connection_id,
+      `final authority owner ${owner.node_hex} connection_id`,
+    ),
+    epoch: owner.owner_epoch,
+    leaseUntil: normalizeStamp(
+      owner.lease_until,
+      `final authority owner ${owner.node_hex} lease_until`,
+    ),
+  };
+  authorityOwnerByNode.set(owner.node_hex, authorityOwner);
+  authorityCutOwners.push({
+    node: owner.node_hex,
+    instance: authorityOwner.instance,
+    incarnation: authorityOwner.incarnation,
+    connection_id: authorityOwner.connectionId,
+    epoch: authorityOwner.epoch,
+    lease_until: authorityOwner.leaseUntil,
+  });
+}
+if (
+  !finalAuthorityCut.leader ||
+  !/^[a-z0-9][a-z0-9._-]{0,127}$/.test(
+    finalAuthorityCut.leader.instance_id ?? "",
+  ) ||
+  typeof finalAuthorityCut.leader.incarnation !== "string" ||
+  !Number.isInteger(finalAuthorityCut.leader.epoch) ||
+  finalAuthorityCut.leader.epoch < 1 ||
+  typeof finalAuthorityCut.leader.history !== "string" ||
+  finalAuthorityCut.leader.history.length === 0
+) {
+  fail("the final authority cut contains an invalid scheduler leader");
+}
+const schedulerAuthority = {
+  instance: finalAuthorityCut.leader.instance_id,
+  incarnation: positiveDecimalString(
+    finalAuthorityCut.leader.incarnation,
+    "final authority scheduler incarnation",
+  ),
+  epoch: finalAuthorityCut.leader.epoch,
+  lease_until: normalizeStamp(
+    finalAuthorityCut.leader.lease_until,
+    "final authority scheduler lease_until",
+  ),
+};
+const authorityCutText = canonicalJson({
+  environment_id: environmentId,
+  candidate_sha: candidateSha,
+  cut_at: authorityCutAt,
+  transport_bracket: {
+    before_complete_at: beforeFinalSessionsCompleteAt,
+    after_start_at: afterFinalSessionsStartAt,
+    before: beforeTransportObservations,
+    after: afterTransportObservations,
+  },
+  owners: authorityCutOwners.sort((left, right) =>
+    left.node.localeCompare(right.node),
+  ),
+  scheduler: {
+    instance: schedulerAuthority.instance,
+    incarnation: schedulerAuthority.incarnation,
+    epoch: schedulerAuthority.epoch,
+    lease_until: schedulerAuthority.lease_until,
+  },
+});
 const bulkDisconnectAt = timelineStamp("bulk_disconnect_injected");
 const sessions = [];
 for (const node of nodes) {
   const started = era2Sessions.get(node.nodeId);
   const final = finalByNode.get(node.nodeId);
+  const authority = authorityOwnerByNode.get(
+    node.nodeId.replaceAll("-", "").toLowerCase(),
+  );
   if (!started) fail(`no era-2 session start for node ${node.nodeId}`);
   if (!final?.found) fail(`no final session for node ${node.nodeId}`);
+  if (!authority) fail(`no final owner authority for node ${node.nodeId}`);
+  const finalEndpointId = normalizeEndpointIdentity(
+    final.endpoint_id,
+    `final session ${node.nodeId} endpoint_id`,
+  );
+  const expectedEndpointId = normalizeEndpointIdentity(
+    node.endpoint,
+    `managed node ${node.nodeId} endpoint_id`,
+  );
+  if (finalEndpointId !== expectedEndpointId) {
+    fail(`final session endpoint disagrees with managed node ${node.nodeId}`);
+  }
+  const finalAgentInstanceId = normalizeUUIDIdentity(
+    final.agent_instance_id,
+    `final session ${node.nodeId} agent_instance_id`,
+  );
+  const finalConnectionId = normalizeUUIDIdentity(
+    final.connection_id,
+    `final session ${node.nodeId} connection_id`,
+  );
+  if (final.owner_epoch !== authority.epoch) {
+    fail(`final session owner epoch disagrees with authority for ${node.nodeId}`);
+  }
+  if (
+    final.owner_instance_id !== authority.instance ||
+    final.owner_incarnation !== authority.incarnation ||
+    finalConnectionId !== authority.connectionId
+  ) {
+    fail(`final session owner tuple disagrees with authority for ${node.nodeId}`);
+  }
   const startedAt = normalizeStamp(started, "era-2 session start");
   const reconnectedAt = normalizeStamp(
     final.connected_at,
     "final session connected_at",
+  );
+  const sessionExpiresAt = normalizeStamp(
+    final.session_expires_at,
+    "final session session_expires_at",
+  );
+  const observedOwnerLeaseUntil = normalizeStamp(
+    final.owner_lease_until,
+    "final session owner_lease_until",
   );
   if (
     parseStamp(startedAt, "session start") >=
@@ -627,20 +955,51 @@ for (const node of nodes) {
   ) {
     fail(`session for ${node.name} reconnects before the storm`);
   }
+  if (
+    parseStamp(reconnectedAt, "final session connected_at") >
+    parseStamp(authorityCutAt, "authority cut")
+  ) {
+    fail(`final session for ${node.name} connects after the authority cut`);
+  }
+  if (
+    parseStamp(sessionExpiresAt, "final session expiry") <=
+    parseStamp(authorityCutAt, "authority cut")
+  ) {
+    fail(`final session for ${node.name} expires at the authority cut`);
+  }
+  if (
+    parseStamp(observedOwnerLeaseUntil, "observed owner lease") <=
+    parseStamp(authorityCutAt, "authority cut")
+  ) {
+    fail(`final owner lease for ${node.name} expires at the authority cut`);
+  }
   sessions.push({
     agent_id: node.name,
     node: node.nodeId,
+    endpoint_id: finalEndpointId,
+    agent_instance_id: finalAgentInstanceId,
     authorized: true,
     connected: true,
+    owner_instance: final.owner_instance_id,
+    owner_incarnation: final.owner_incarnation,
+    connection_id: finalConnectionId,
+    owner_epoch: final.owner_epoch,
+    owner_lease_until: authority.leaseUntil,
     session_started_at: startedAt,
+    connected_at: reconnectedAt,
+    session_expires_at: sessionExpiresAt,
     reconnected_at: reconnectedAt,
   });
+}
+if (authorityOwnerByNode.size !== sessions.length) {
+  fail("the final authority cut owner population differs from managed nodes");
 }
 const agentSessionsText = canonicalJson({
   environment_id: environmentId,
   candidate_sha: candidateSha,
   snapshot_taken_at: snapshotTakenAt,
   sessions,
+  scheduler_authority: schedulerAuthority,
   reconnect_storm: { bulk_disconnect_at: bulkDisconnectAt },
 });
 
@@ -776,27 +1135,46 @@ for (const line of ownerLines) {
   if (!match || head.length !== 5) {
     fail(`malformed fencing history line: ${line}`);
   }
-  const [nodeHex, instance, , , epochText] = head;
+  const [nodeHex, instance, incarnationText, connectionIdText, epochText] = head;
   const leaseUntil = match[2];
   const updatedAt = match[3];
+  const incarnation = positiveDecimalString(
+    incarnationText,
+    "fencing history incarnation",
+  );
+  const connectionId = normalizeUUIDIdentity(
+    connectionIdText,
+    "fencing history connection_id",
+  );
   const epoch = Number(epochText);
   if (!Number.isInteger(epoch) || epoch < 1) {
     fail(`fencing history carries an invalid epoch: ${line}`);
   }
   const current = ownerState.get(nodeHex);
   if (!current) {
+    const registrationRecord = {
+      subject: "connection_owner",
+      event_type: "owner_registered",
+      node: nodeHex,
+      instance,
+      incarnation,
+      connection_id: connectionId,
+      epoch,
+      lease_until: leaseUntil,
+    };
     epochEvents.push({
       stampMs: parseStamp(updatedAt, "fencing updated_at"),
       rank: rankOf.registered,
-      record: {
-        subject: "connection_owner",
-        event_type: "owner_registered",
-        node: nodeHex,
-        instance,
-        epoch,
-      },
+      record: registrationRecord,
     });
-    ownerState.set(nodeHex, { epoch, leaseUntil, instance });
+    ownerState.set(nodeHex, {
+      epoch,
+      leaseUntil,
+      instance,
+      incarnation,
+      connectionId,
+      registrationRecord,
+    });
   } else if (current.epoch !== epoch) {
     epochEvents.push({
       stampMs: parseStamp(current.leaseUntil, "fencing lease_until"),
@@ -808,21 +1186,39 @@ for (const line of ownerLines) {
         epoch: current.epoch,
       },
     });
+    const registrationRecord = {
+      subject: "connection_owner",
+      event_type: "owner_registered",
+      node: nodeHex,
+      instance,
+      incarnation,
+      connection_id: connectionId,
+      epoch,
+      lease_until: leaseUntil,
+    };
     epochEvents.push({
       stampMs: parseStamp(updatedAt, "fencing updated_at"),
       rank: rankOf.registered,
-      record: {
-        subject: "connection_owner",
-        event_type: "owner_registered",
-        node: nodeHex,
-        instance,
-        epoch,
-      },
+      record: registrationRecord,
     });
-    ownerState.set(nodeHex, { epoch, leaseUntil, instance });
+    ownerState.set(nodeHex, {
+      epoch,
+      leaseUntil,
+      instance,
+      incarnation,
+      connectionId,
+      registrationRecord,
+    });
   } else {
+    if (
+      current.instance !== instance ||
+      current.incarnation !== incarnation ||
+      current.connectionId !== connectionId
+    ) {
+      fail(`fencing history changes an owner tuple without a new epoch: ${line}`);
+    }
     current.leaseUntil = leaseUntil;
-    current.instance = instance;
+    current.registrationRecord.lease_until = leaseUntil;
   }
 }
 
@@ -868,24 +1264,38 @@ for (const line of leaderLines) {
   if (!match || head.length !== 3) {
     fail(`malformed leadership history line: ${line}`);
   }
-  const [instance, , epochText] = head;
+  const [instance, incarnationText, epochText] = head;
   const leaseUntil = match[2];
   const updatedAt = match[3];
+  const incarnation = positiveDecimalString(
+    incarnationText,
+    "leadership history incarnation",
+  );
   const epoch = Number(epochText);
   if (!Number.isInteger(epoch) || epoch < 1) {
     fail(`leadership history carries an invalid epoch: ${line}`);
   }
   if (!leaderCurrent) {
-    leaderCurrent = { instance, epoch, leaseUntil, lastCommitAt: updatedAt };
+    const acquisitionRecord = {
+      subject: "scheduler",
+      event_type: "leader_acquired",
+      instance,
+      incarnation,
+      epoch,
+      lease_until: leaseUntil,
+    };
+    leaderCurrent = {
+      instance,
+      incarnation,
+      epoch,
+      leaseUntil,
+      lastCommitAt: updatedAt,
+      acquisitionRecord,
+    };
     epochEvents.push({
       stampMs: parseStamp(updatedAt, "leadership updated_at"),
       rank: rankOf.acquired,
-      record: {
-        subject: "scheduler",
-        event_type: "leader_acquired",
-        instance,
-        epoch,
-      },
+      record: acquisitionRecord,
     });
   } else if (leaderCurrent.epoch !== epoch) {
     epochEvents.push({
@@ -908,20 +1318,37 @@ for (const line of leaderLines) {
         accepted: true,
       },
     });
-    leaderCurrent = { instance, epoch, leaseUntil, lastCommitAt: updatedAt };
+    const acquisitionRecord = {
+      subject: "scheduler",
+      event_type: "leader_acquired",
+      instance,
+      incarnation,
+      epoch,
+      lease_until: leaseUntil,
+    };
+    leaderCurrent = {
+      instance,
+      incarnation,
+      epoch,
+      leaseUntil,
+      lastCommitAt: updatedAt,
+      acquisitionRecord,
+    };
     epochEvents.push({
       stampMs: parseStamp(updatedAt, "leadership updated_at"),
       rank: rankOf.acquired,
-      record: {
-        subject: "scheduler",
-        event_type: "leader_acquired",
-        instance,
-        epoch,
-      },
+      record: acquisitionRecord,
     });
   } else {
+    if (
+      leaderCurrent.instance !== instance ||
+      leaderCurrent.incarnation !== incarnation
+    ) {
+      fail(`leadership history changes a leader tuple without a new epoch: ${line}`);
+    }
     leaderCurrent.leaseUntil = leaseUntil;
     leaderCurrent.lastCommitAt = updatedAt;
+    leaderCurrent.acquisitionRecord.lease_until = leaseUntil;
   }
 }
 if (leaderCurrent) {
@@ -1111,6 +1538,12 @@ const artifactFiles = [
     "application/x-ndjson",
     "epoch_events",
     epochEventsText,
+  ],
+  [
+    "authority-cut.json",
+    "application/json",
+    "authority_cut",
+    authorityCutText,
   ],
   [
     "command-trace.jsonl",

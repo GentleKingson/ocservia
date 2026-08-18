@@ -9,6 +9,7 @@
 
 import { spawnSync } from "node:child_process";
 import {
+  cpSync,
   mkdirSync,
   mkdtempSync,
   readdirSync,
@@ -19,7 +20,11 @@ import {
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { verifyG6 } from "./g6-contract-lib.mjs";
+import {
+  sha256Digest,
+  structuredArtifactKinds,
+  verifyG6,
+} from "./g6-contract-lib.mjs";
 
 const root = fileURLToPath(new URL("../", import.meta.url));
 const environmentId = "g6-abcd1234";
@@ -27,6 +32,8 @@ const candidateSha = "2234567890123456789012345678901234567890";
 const base = Date.parse("2026-08-14T10:00:00Z");
 const at = (seconds) =>
   `${new Date(base + seconds * 1000).toISOString().slice(0, 19)}Z`;
+const atMicros = (seconds, micros) =>
+  at(seconds).replace("Z", `.${String(micros).padStart(6, "0")}Z`);
 const epochSeconds = (seconds) => Math.floor((base + seconds * 1000) / 1000);
 
 function fakeUuid(seed, version = 7) {
@@ -38,6 +45,10 @@ function fakeUuid(seed, version = 7) {
 }
 
 const digestOf = (byte) => `sha256:${byte.repeat(64)}`;
+const workerAIncarnation = "1700000000000000001";
+const workerBIncarnation = "1700000000000000002";
+const schedulerAIncarnation = "1800000000000000001";
+const schedulerBIncarnation = "1800000000000000002";
 
 function jsonl(records) {
   return records.length === 0
@@ -68,17 +79,19 @@ for (let index = 1; index <= 28; index += 1) {
   nodes.push({
     name: `g6-fd-a-${String(index).padStart(2, "0")}`,
     nodeId: fakeUuid(index),
+    endpointId: index.toString(16).padStart(64, "0"),
   });
 }
 for (let index = 1; index <= 27; index += 1) {
   nodes.push({
     name: `g6-fd-b-${String(index).padStart(2, "0")}`,
     nodeId: fakeUuid(index + 100),
+    endpointId: (index + 100).toString(16).padStart(64, "0"),
   });
 }
 write(
   join(runDir, "state", "all-nodes.tsv"),
-  `${nodes.map((node) => `${node.name}\t${node.nodeId}\t${fakeUuid(1, 5)}`).join("\n")}\n`,
+  `${nodes.map((node) => `${node.name}\t${node.nodeId}\t${node.endpointId}`).join("\n")}\n`,
 );
 
 // ---------------------------------------------------------------------------
@@ -255,18 +268,58 @@ write(
   join(runDir, "state", "era2-sessions.tsv"),
   `${nodes.map((node, index) => `${node.nodeId}\t${at(130 + (index % 5))}`).join("\n")}\n`,
 );
+const finalSessionsPath = join(
+  runDir,
+  "state",
+  "evidence",
+  "final-sessions.json",
+);
+const beforeFinalSessionsPath = join(
+  runDir,
+  "state",
+  "evidence",
+  "final-sessions-before.json",
+);
+const afterFinalSessionsPath = join(
+  runDir,
+  "state",
+  "evidence",
+  "final-sessions-after.json",
+);
+const finalSessionInventory = {
+  mode: "node_connection",
+  all_matched: true,
+  observations: nodes.map((node, index) => ({
+    node_id: node.nodeId,
+    endpoint_id: node.endpointId,
+    agent_instance_id: fakeUuid(index + 3000),
+    found: true,
+    path: "direct",
+    owner_instance_id: index < 2 ? "worker-b" : "worker-a",
+    owner_incarnation:
+      index < 2 ? workerBIncarnation : workerAIncarnation,
+    connection_id: fakeUuid(
+      index === 0 ? 2001 : index === 1 ? 2002 : index + 1000,
+    ).replaceAll("-", ""),
+    owner_epoch: index < 2 ? 3 : 1,
+    owner_lease_until: at(350),
+    owner_fence_id: fakeUuid(index + 4000).replaceAll("-", ""),
+    authorization_revision: 11,
+    negotiated_capabilities: ["ocserv.status.read"],
+    connected_at: at(160 + (index % 10)),
+    session_expires_at: at(350),
+  })),
+};
+write(beforeFinalSessionsPath, JSON.stringify(finalSessionInventory));
+write(afterFinalSessionsPath, JSON.stringify(finalSessionInventory));
+write(finalSessionsPath, JSON.stringify(finalSessionInventory));
 write(
-  join(runDir, "state", "evidence", "final-sessions.json"),
-  JSON.stringify({
-    mode: "node_connection",
-    all_matched: true,
-    observations: nodes.map((node, index) => ({
-      node_id: node.nodeId,
-      found: true,
-      path: "direct",
-      connected_at: at(160 + (index % 10)),
-    })),
-  }),
+  join(runDir, "state", "evidence", "final-sessions-before-complete-at"),
+  `${atMicros(320, 100000)}\n`,
+);
+write(
+  join(runDir, "state", "evidence", "final-sessions-after-start-at"),
+  `${atMicros(320, 300000)}\n`,
 );
 write(
   join(runDir, "state", "evidence", "telemetry.jsonl"),
@@ -292,7 +345,10 @@ write(
     },
   ]),
 );
-write(join(runDir, "state", "evidence", "snapshot-taken-at"), `${at(320)}\n`);
+write(
+  join(runDir, "state", "evidence", "snapshot-taken-at"),
+  `${atMicros(320, 200000)}\n`,
+);
 write(join(runDir, "state", "promoted-at"), `${at(120)}\n`);
 write(join(runDir, "state", "window-ended-at"), `${at(310)}\n`);
 write(
@@ -305,9 +361,12 @@ write(
 );
 write(
   join(runDir, "state", "owner-a-terms.tsv"),
-  `${fakeUuid(1).replaceAll("-", "")}:worker-a:1:${fakeUuid(9).replaceAll("-", "")}:1\n`,
+  `${fakeUuid(1).replaceAll("-", "")}:worker-a:${workerAIncarnation}:${fakeUuid(9).replaceAll("-", "")}:1\n`,
 );
-write(join(runDir, "state", "stale-scheduler-term"), "sched-a:1:1\n");
+write(
+  join(runDir, "state", "stale-scheduler-term"),
+  `sched-a:${schedulerAIncarnation}:1\n`,
+);
 write(
   join(runDir, "state", "evidence", "failure-domain.txt"),
   "failure_domain=fd-b\nalias=fd-beta\n",
@@ -502,27 +561,75 @@ write(
   ),
 );
 
-const node1Hex = fakeUuid(1).replaceAll("-", "");
-const node2Hex = fakeUuid(2).replaceAll("-", "");
+const node1Hex = nodes[0].nodeId.replaceAll("-", "");
+const node2Hex = nodes[1].nodeId.replaceAll("-", "");
+const node1ConnectionHex = fakeUuid(2001).replaceAll("-", "");
+const node2ConnectionHex = fakeUuid(2002).replaceAll("-", "");
+const initialOwnerConnections = nodes.map((_, index) =>
+  fakeUuid(index + 1000).replaceAll("-", ""),
+);
+const initialOwnerHistory = nodes.map(
+  (node, index) =>
+    `${node.nodeId.replaceAll("-", "")}:worker-a:${workerAIncarnation}:${initialOwnerConnections[index]}:1:${index < 2 ? at(31) : at(350)}:${at(1)}`,
+);
+const takeoverOwnerHistory = [
+  `${node1Hex}:worker-b:${workerBIncarnation}:${node1ConnectionHex}:2:${at(66)}:${at(36)}`,
+  `${node2Hex}:worker-b:${workerBIncarnation}:${node2ConnectionHex}:2:${at(66)}:${at(36)}`,
+  `${node1Hex}:worker-b:${workerBIncarnation}:${node1ConnectionHex}:3:${at(350)}:${at(66)}`,
+  `${node2Hex}:worker-b:${workerBIncarnation}:${node2ConnectionHex}:3:${at(350)}:${at(66)}`,
+];
 write(
   join(runDir, "outbox", "fencing-history.jsonl"),
-  [
-    `${node1Hex}:worker-a:1:aa:1:${at(31)}:${at(1)}`,
-    `${node2Hex}:worker-a:1:bb:1:${at(31)}:${at(1)}`,
-    `${node1Hex}:worker-b:2:cc:2:${at(66)}:${at(36)}`,
-    `${node2Hex}:worker-b:2:dd:2:${at(66)}:${at(36)}`,
-    `${node1Hex}:worker-b:2:cc:3:${at(96)}:${at(66)}`,
-    `${node2Hex}:worker-b:2:dd:3:${at(96)}:${at(66)}`,
-  ].join("\n") + "\n",
+  [...initialOwnerHistory, ...takeoverOwnerHistory].join("\n") + "\n",
 );
+const finalOwnerHistory = new Map(
+  nodes.map((node, index) => [
+    node.nodeId.replaceAll("-", ""),
+    index < 2
+      ? takeoverOwnerHistory[index + 2]
+      : initialOwnerHistory[index],
+  ]),
+);
+const finalLeaderHistory = `sched-b:${schedulerBIncarnation}:2:${at(350)}:${at(62)}`;
 write(
   join(runDir, "outbox", "leadership-history.jsonl"),
   [
-    `sched-a:1:1:${at(21)}:${at(1)}`,
-    `sched-a:1:1:${at(41)}:${at(21)}`,
-    `sched-b:2:2:${at(62)}:${at(42)}`,
-    `sched-b:2:2:${at(92)}:${at(62)}`,
+    `sched-a:${schedulerAIncarnation}:1:${at(21)}:${at(1)}`,
+    `sched-a:${schedulerAIncarnation}:1:${at(41)}:${at(21)}`,
+    `sched-b:${schedulerBIncarnation}:2:${at(62)}:${at(42)}`,
+    finalLeaderHistory,
   ].join("\n") + "\n",
+);
+write(
+  join(runDir, "state", "final-authority-cut.json"),
+  JSON.stringify({
+    cut_at: atMicros(320, 200000),
+    owners: nodes.map((node, index) => {
+      const nodeHex = node.nodeId.replaceAll("-", "");
+      return {
+        node_hex: nodeHex,
+        owner_instance_id: index < 2 ? "worker-b" : "worker-a",
+        owner_incarnation:
+          index < 2 ? workerBIncarnation : workerAIncarnation,
+        connection_id:
+          index === 0
+            ? node1ConnectionHex
+            : index === 1
+              ? node2ConnectionHex
+              : initialOwnerConnections[index],
+        owner_epoch: index < 2 ? 3 : 1,
+        lease_until: at(350),
+        history: finalOwnerHistory.get(nodeHex),
+      };
+    }),
+    leader: {
+      instance_id: "sched-b",
+      incarnation: schedulerBIncarnation,
+      epoch: 2,
+      lease_until: at(350),
+      history: finalLeaderHistory,
+    },
+  }),
 );
 
 // ---------------------------------------------------------------------------
@@ -612,6 +719,50 @@ function verifyBundle(outDir, authority) {
   });
 }
 
+function expectTamperedBundleFailure(
+  sourceDir,
+  name,
+  artifactName,
+  mutate,
+  expectedMessage,
+) {
+  const outDir = join(work, name);
+  cpSync(sourceDir, outDir, { recursive: true });
+  const artifactPath = join(outDir, artifactName);
+  const mutated = mutate(readFileSync(artifactPath, "utf8"));
+  write(artifactPath, mutated);
+
+  const evidencePath = join(outDir, "evidence.json");
+  const evidence = JSON.parse(readFileSync(evidencePath, "utf8"));
+  const artifact = evidence.artifacts.find(
+    (entry) => entry.name === artifactName,
+  );
+  if (!artifact) throw new Error(`missing artifact ${artifactName}`);
+  const previousDigest = artifact.digest;
+  artifact.digest = sha256Digest(mutated);
+  for (const result of [
+    ...Object.values(evidence.measurements),
+    ...Object.values(evidence.observations),
+  ]) {
+    if (result.source_artifact_digest === previousDigest) {
+      result.source_artifact_digest = artifact.digest;
+    }
+  }
+  write(evidencePath, `${JSON.stringify(evidence, null, 2)}\n`);
+
+  let rejected;
+  try {
+    verifyBundle(outDir, "production_readiness");
+  } catch (error) {
+    rejected = error;
+  }
+  if (!rejected?.message.includes(expectedMessage)) {
+    throw new Error(
+      `${name} was not rejected for ${expectedMessage}: ${rejected?.message ?? "PASS"}`,
+    );
+  }
+}
+
 try {
   const productionDir = join(work, "production-bundle");
   runBuilder(productionDir, "production_readiness");
@@ -637,6 +788,407 @@ try {
       `production bundle must pass: ${verdict.failure_reasons.join("; ")}`,
     );
   }
+  const builtSessionInventory = JSON.parse(
+    readFileSync(join(productionDir, "agent-sessions.json"), "utf8"),
+  );
+  const expectedSessionByNode = new Map(
+    finalSessionInventory.observations.map((observation) => [
+      observation.node_id,
+      observation,
+    ]),
+  );
+  const sourceAuthorityCut = JSON.parse(
+    readFileSync(join(runDir, "state", "final-authority-cut.json"), "utf8"),
+  );
+  const builtAuthorityCut = JSON.parse(
+    readFileSync(join(productionDir, "authority-cut.json"), "utf8"),
+  );
+  const builtEvidence = JSON.parse(
+    readFileSync(join(productionDir, "evidence.json"), "utf8"),
+  );
+  if (
+    structuredArtifactKinds.length !== 13 ||
+    builtEvidence.artifacts.filter((artifact) =>
+      structuredArtifactKinds.includes(artifact.kind),
+    ).length !== 13
+  ) {
+    throw new Error("builder must emit exactly thirteen structured artifacts");
+  }
+  const builtAuthorityOwnerByNode = new Map(
+    builtAuthorityCut.owners.map((owner) => [owner.node, owner]),
+  );
+  for (const owner of sourceAuthorityCut.owners) {
+    const built = builtAuthorityOwnerByNode.get(owner.node_hex);
+    if (
+      built?.instance !== owner.owner_instance_id ||
+      built?.incarnation !== owner.owner_incarnation ||
+      built?.connection_id !== owner.connection_id ||
+      built?.epoch !== owner.owner_epoch ||
+      built?.lease_until !== owner.lease_until
+    ) {
+      throw new Error(`builder did not preserve owner tuple ${owner.node_hex}`);
+    }
+  }
+  if (
+    builtAuthorityCut.cut_at !== sourceAuthorityCut.cut_at ||
+    builtAuthorityCut.scheduler.instance !==
+      sourceAuthorityCut.leader.instance_id ||
+    builtAuthorityCut.scheduler.incarnation !==
+      sourceAuthorityCut.leader.incarnation ||
+    builtAuthorityCut.scheduler.epoch !== sourceAuthorityCut.leader.epoch ||
+    builtAuthorityCut.scheduler.lease_until !==
+      sourceAuthorityCut.leader.lease_until
+  ) {
+    throw new Error("builder did not preserve the scheduler authority tuple");
+  }
+  const expectedLeaseByNode = new Map(
+    sourceAuthorityCut.owners.map((owner) => [
+      owner.node_hex,
+      owner.lease_until,
+    ]),
+  );
+  for (const session of builtSessionInventory.sessions) {
+    const expectedSession = expectedSessionByNode.get(session.node);
+    if (
+      session.owner_instance !== expectedSession?.owner_instance_id ||
+      session.owner_incarnation !== expectedSession?.owner_incarnation ||
+      session.endpoint_id !== expectedSession?.endpoint_id ||
+      session.agent_instance_id !==
+        expectedSession?.agent_instance_id.replaceAll("-", "") ||
+      session.connection_id !== expectedSession?.connection_id ||
+      session.owner_epoch !== expectedSession?.owner_epoch ||
+      session.connected_at !== expectedSession?.connected_at ||
+      session.session_expires_at !== expectedSession?.session_expires_at ||
+      session.owner_lease_until !==
+        expectedLeaseByNode.get(session.node.replaceAll("-", ""))
+    ) {
+      throw new Error(
+        `builder did not preserve final owner authority for ${session.node}`,
+      );
+    }
+  }
+  if (
+    builtSessionInventory.snapshot_taken_at !== sourceAuthorityCut.cut_at ||
+    builtSessionInventory.scheduler_authority.instance !==
+      sourceAuthorityCut.leader.instance_id ||
+    builtSessionInventory.scheduler_authority.incarnation !==
+      sourceAuthorityCut.leader.incarnation ||
+    builtSessionInventory.scheduler_authority.epoch !==
+      sourceAuthorityCut.leader.epoch ||
+    builtSessionInventory.scheduler_authority.lease_until !==
+      sourceAuthorityCut.leader.lease_until
+  ) {
+    throw new Error("builder did not preserve the final scheduler authority");
+  }
+  const appendEpochExpiry = (content, record) => {
+    const records = content.trimEnd().split("\n").map(JSON.parse);
+    records.push({
+      sequence: records.at(-1).sequence + 1,
+      timestamp: builtSessionInventory.snapshot_taken_at,
+      environment_id: environmentId,
+      candidate_sha: candidateSha,
+      ...record,
+    });
+    return jsonl(records);
+  };
+  expectTamperedBundleFailure(
+    productionDir,
+    "stale-session-owner-epoch-artifact",
+    "agent-sessions.json",
+    (content) => {
+      const inventory = JSON.parse(content);
+      inventory.sessions[0].owner_epoch = 2;
+      return `${JSON.stringify(inventory, null, 2)}\n`;
+    },
+    "owner_epoch 2 does not match latest connection-owner epoch 3",
+  );
+  expectTamperedBundleFailure(
+    productionDir,
+    "invalid-session-owner-epoch-artifact",
+    "agent-sessions.json",
+    (content) => {
+      const inventory = JSON.parse(content);
+      inventory.sessions[0].owner_epoch = 0;
+      return `${JSON.stringify(inventory, null, 2)}\n`;
+    },
+    "owner_epoch must be positive",
+  );
+  expectTamperedBundleFailure(
+    productionDir,
+    "mismatched-authority-owner-tuple",
+    "authority-cut.json",
+    (content) => {
+      const cut = JSON.parse(content);
+      cut.owners[0].instance = "worker-tampered";
+      return `${JSON.stringify(cut, null, 2)}\n`;
+    },
+    "transport owner term does not match the database cut",
+  );
+  expectTamperedBundleFailure(
+    productionDir,
+    "mismatched-authority-owner-lease",
+    "authority-cut.json",
+    (content) => {
+      const cut = JSON.parse(content);
+      cut.owners[0].lease_until = at(349);
+      return `${JSON.stringify(cut, null, 2)}\n`;
+    },
+    "authority cut owner tuple does not match latest epoch",
+  );
+  expectTamperedBundleFailure(
+    productionDir,
+    "mismatched-authority-owner-incarnation",
+    "authority-cut.json",
+    (content) => {
+      const cut = JSON.parse(content);
+      cut.owners[0].incarnation = (
+        BigInt(cut.owners[0].incarnation) + 1n
+      ).toString();
+      return `${JSON.stringify(cut, null, 2)}\n`;
+    },
+    "transport owner term does not match the database cut",
+  );
+  expectTamperedBundleFailure(
+    productionDir,
+    "mismatched-authority-owner-connection",
+    "authority-cut.json",
+    (content) => {
+      const cut = JSON.parse(content);
+      cut.owners[0].connection_id = "f".repeat(32);
+      return `${JSON.stringify(cut, null, 2)}\n`;
+    },
+    "transport owner term does not match the database cut",
+  );
+  expectTamperedBundleFailure(
+    productionDir,
+    "mismatched-authority-scheduler-tuple",
+    "authority-cut.json",
+    (content) => {
+      const cut = JSON.parse(content);
+      cut.scheduler.instance = "scheduler-tampered";
+      return `${JSON.stringify(cut, null, 2)}\n`;
+    },
+    "authority cut scheduler tuple does not match latest epoch",
+  );
+  expectTamperedBundleFailure(
+    productionDir,
+    "mismatched-authority-scheduler-lease",
+    "authority-cut.json",
+    (content) => {
+      const cut = JSON.parse(content);
+      cut.scheduler.lease_until = at(349);
+      return `${JSON.stringify(cut, null, 2)}\n`;
+    },
+    "authority cut scheduler tuple does not match latest epoch",
+  );
+  expectTamperedBundleFailure(
+    productionDir,
+    "mismatched-authority-scheduler-incarnation",
+    "authority-cut.json",
+    (content) => {
+      const cut = JSON.parse(content);
+      cut.scheduler.incarnation = (
+        BigInt(cut.scheduler.incarnation) + 1n
+      ).toString();
+      return `${JSON.stringify(cut, null, 2)}\n`;
+    },
+    "authority cut scheduler tuple does not match latest epoch",
+  );
+  expectTamperedBundleFailure(
+    productionDir,
+    "collapsed-before-transport-boundary",
+    "authority-cut.json",
+    (content) => {
+      const cut = JSON.parse(content);
+      cut.transport_bracket.before_complete_at = cut.cut_at;
+      return `${JSON.stringify(cut, null, 2)}\n`;
+    },
+    "transport inventories must strictly bracket cut_at",
+  );
+  expectTamperedBundleFailure(
+    productionDir,
+    "collapsed-after-transport-boundary",
+    "authority-cut.json",
+    (content) => {
+      const cut = JSON.parse(content);
+      cut.transport_bracket.after_start_at = cut.cut_at;
+      return `${JSON.stringify(cut, null, 2)}\n`;
+    },
+    "transport inventories must strictly bracket cut_at",
+  );
+  expectTamperedBundleFailure(
+    productionDir,
+    "transport-tuple-changes-across-cut",
+    "authority-cut.json",
+    (content) => {
+      const cut = JSON.parse(content);
+      cut.transport_bracket.before[0].endpoint_id = "f".repeat(64);
+      return `${JSON.stringify(cut, null, 2)}\n`;
+    },
+    "immutable transport tuple changes across cut_at",
+  );
+  expectTamperedBundleFailure(
+    productionDir,
+    "transport-owner-lease-does-not-cross-cut",
+    "authority-cut.json",
+    (content) => {
+      const cut = JSON.parse(content);
+      cut.transport_bracket.before[0].owner_lease_until = cut.cut_at;
+      return `${JSON.stringify(cut, null, 2)}\n`;
+    },
+    "owner lease does not remain live across the cut",
+  );
+  expectTamperedBundleFailure(
+    productionDir,
+    "transport-session-does-not-cross-cut",
+    "authority-cut.json",
+    (content) => {
+      const cut = JSON.parse(content);
+      cut.transport_bracket.after[0].session_expires_at = cut.cut_at;
+      return `${JSON.stringify(cut, null, 2)}\n`;
+    },
+    "session does not remain live across the cut",
+  );
+  expectTamperedBundleFailure(
+    productionDir,
+    "transport-term-mismatches-database-cut",
+    "authority-cut.json",
+    (content) => {
+      const cut = JSON.parse(content);
+      for (const side of ["before", "after"]) {
+        cut.transport_bracket[side][0].connection_id = "f".repeat(32);
+      }
+      return `${JSON.stringify(cut, null, 2)}\n`;
+    },
+    "transport owner term does not match the database cut",
+  );
+  expectTamperedBundleFailure(
+    productionDir,
+    "transport-physical-session-mismatches-inventory",
+    "authority-cut.json",
+    (content) => {
+      const cut = JSON.parse(content);
+      for (const side of ["before", "after"]) {
+        cut.transport_bracket[side][0].endpoint_id = "f".repeat(64);
+      }
+      return `${JSON.stringify(cut, null, 2)}\n`;
+    },
+    "transport tuple does not match agent session node",
+  );
+  expectTamperedBundleFailure(
+    productionDir,
+    "expired-authority-owner-lease",
+    "authority-cut.json",
+    (content) => {
+      const cut = JSON.parse(content);
+      cut.owners[0].lease_until = cut.cut_at;
+      return `${JSON.stringify(cut, null, 2)}\n`;
+    },
+    "owner 1 lease must remain live after the cut",
+  );
+  expectTamperedBundleFailure(
+    productionDir,
+    "expired-authority-scheduler-lease",
+    "authority-cut.json",
+    (content) => {
+      const cut = JSON.parse(content);
+      cut.scheduler.lease_until = cut.cut_at;
+      return `${JSON.stringify(cut, null, 2)}\n`;
+    },
+    "scheduler lease must remain live after the cut",
+  );
+  expectTamperedBundleFailure(
+    productionDir,
+    "inactive-session-owner-epoch-bundle",
+    "epoch-events.jsonl",
+    (content) =>
+      appendEpochExpiry(content, {
+        subject: "connection_owner",
+        event_type: "owner_lease_expired",
+        node: builtSessionInventory.sessions[0].node,
+        epoch: builtSessionInventory.sessions[0].owner_epoch,
+      }),
+    `owner_epoch 3 is not active for node ${node1Hex}`,
+  );
+  expectTamperedBundleFailure(
+    productionDir,
+    "inactive-scheduler-epoch-bundle",
+    "epoch-events.jsonl",
+    (content) =>
+      appendEpochExpiry(content, {
+        subject: "scheduler",
+        event_type: "leader_lease_expired",
+        epoch: builtSessionInventory.scheduler_authority.epoch,
+      }),
+    "scheduler epoch 2 is not active",
+  );
+  expectTamperedBundleFailure(
+    productionDir,
+    "expired-session-owner-lease-bundle",
+    "agent-sessions.json",
+    (content) => {
+      const inventory = JSON.parse(content);
+      inventory.sessions[0].owner_lease_until = inventory.snapshot_taken_at;
+      return `${JSON.stringify(inventory, null, 2)}\n`;
+    },
+    "owner lease must remain live after the snapshot",
+  );
+  expectTamperedBundleFailure(
+    productionDir,
+    "expired-scheduler-lease-bundle",
+    "agent-sessions.json",
+    (content) => {
+      const inventory = JSON.parse(content);
+      inventory.scheduler_authority.lease_until = inventory.snapshot_taken_at;
+      return `${JSON.stringify(inventory, null, 2)}\n`;
+    },
+    "scheduler lease must remain live after the snapshot",
+  );
+  expectTamperedBundleFailure(
+    productionDir,
+    "duplicate-physical-session-node-bundle",
+    "agent-sessions.json",
+    (content) => {
+      const inventory = JSON.parse(content);
+      inventory.sessions[1].node = inventory.sessions[0].node;
+      return `${JSON.stringify(inventory, null, 2)}\n`;
+    },
+    "repeats node",
+  );
+  expectTamperedBundleFailure(
+    productionDir,
+    "invalid-physical-session-endpoint-bundle",
+    "agent-sessions.json",
+    (content) => {
+      const inventory = JSON.parse(content);
+      inventory.sessions[0].endpoint_id = "f".repeat(32);
+      return `${JSON.stringify(inventory, null, 2)}\n`;
+    },
+    "must be a 64-character lowercase hexadecimal endpoint id",
+  );
+  expectTamperedBundleFailure(
+    productionDir,
+    "expired-physical-session-bundle",
+    "agent-sessions.json",
+    (content) => {
+      const inventory = JSON.parse(content);
+      inventory.sessions[0].session_expires_at = inventory.snapshot_taken_at;
+      return `${JSON.stringify(inventory, null, 2)}\n`;
+    },
+    "session must remain live after the snapshot",
+  );
+  expectTamperedBundleFailure(
+    productionDir,
+    "post-snapshot-physical-session-bundle",
+    "agent-sessions.json",
+    (content) => {
+      const inventory = JSON.parse(content);
+      inventory.sessions[0].connected_at = at(321);
+      inventory.sessions[0].reconnected_at = at(321);
+      return `${JSON.stringify(inventory, null, 2)}\n`;
+    },
+    "must connect before the snapshot",
+  );
 
   const engineeringDir = join(work, "engineering-bundle");
   runBuilder(engineeringDir, "engineering");
@@ -661,6 +1213,15 @@ try {
       `engineering bundle metrics failed beyond the fence: ${failedRehearsal.map(([name]) => name).join(", ")}`,
     );
   }
+
+  const staleFinalSessions = structuredClone(finalSessionInventory);
+  staleFinalSessions.observations[0].owner_epoch = 2;
+  write(afterFinalSessionsPath, JSON.stringify(staleFinalSessions));
+  expectBuilderFailure(
+    join(work, "stale-session-owner-epoch-bundle"),
+    "final session owner epoch disagrees with authority",
+  );
+  write(afterFinalSessionsPath, JSON.stringify(finalSessionInventory));
 
   const effectDir = join(runDir, "state", "evidence", "effects");
   const effectPath = join(effectDir, historicalEffectFile);

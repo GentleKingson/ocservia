@@ -27,7 +27,11 @@ number of opaque `harness_log` files:
 - `resource_samples` — bounded-window process sampling CSV for RSS, file
   descriptors, tasks, queue depth, and PostgreSQL connections;
 - `timeline` — the ordered observation timeline;
-- `epoch_events` — the connection-owner and scheduler epoch event log;
+- `epoch_events` — the connection-owner and scheduler epoch event log,
+  including each registered authority's immutable tuple and lease deadline;
+- `authority_cut` — the DB-clock owner and scheduler lease tuples plus the
+  complete transport authority/session term projections immediately before
+  and after that cut;
 - `command_trace` — the command dispatch/accept/effect/result trace;
 - `outbox_snapshot` — the final transactional-outbox and reconciliation
   snapshot;
@@ -37,20 +41,36 @@ number of opaque `harness_log` files:
 - `postgres_recovery` — LSN, acknowledged-transaction markers, failover, and
   dual-primary probes;
 - `pitr_report` — the PITR marker and restore-point report;
-- `agent_sessions` — the authorized agent session inventory and reconnect
-  storm record;
+- `agent_sessions` — the unique authorized physical-session inventory,
+  authority leases, session expiries, and reconnect storm record;
 - `relay_transitions` — the relay and path transition report.
 
 Every record and row of every structured artifact repeats the run's
 `environment_id` and `candidate_sha`, so an artifact swapped in from another
 run, environment, or build is rejected even when the evidence digest is
 updated to match the swapped bytes. All artifact timestamps must stay inside
-the evidence window. Line-oriented artifacts must use LF endings, strictly
-increasing sequences, non-decreasing timestamps, and unique event, command,
-agent, transaction, and effect identifiers. Epochs must strictly increase per
-node and per leadership domain, and completed owner, scheduler, and relay
-takeovers must actually be recorded, so an empty or reordered log cannot
-produce a vacuous pass.
+the evidence window, except lease deadlines, which must extend beyond their
+DB-clock cut and may outlive the window. Line-oriented artifacts must use LF
+endings, strictly increasing sequences, non-decreasing timestamps, and unique
+event, command, agent, transaction, and effect identifiers. Epochs must
+strictly increase per node and per leadership domain. The final active epoch
+tuples and live lease deadlines must exactly match the DB-clock authority cut
+and session inventory, and completed owner, scheduler, and relay takeovers
+must actually be recorded, so an empty or reordered log cannot produce a
+vacuous pass.
+
+The authority cut's `before_complete_at` is sampled from PostgreSQL immediately
+after the entire before-cut transport inventory completes. Its
+`after_start_at` is sampled from the same database clock immediately before the
+after-cut inventory starts. Both boundaries and `cut_at` retain microsecond
+precision. The verifier requires `before_complete_at < cut_at < after_start_at`,
+identical immutable physical-session and signed-owner tuples across the two
+inventories, live session and owner-lease deadlines across the cut, and exact
+agreement between each bracketed owner term and the database cut.
+The projection intentionally excludes transient path, round-trip-time, and
+last-seen diagnostics; it retains every identity, signed owner-fence,
+authorization, connection, lease, and session-lifetime field used by the
+independent proof.
 
 Each SLO metric freezes an explicit trust boundary. Every metric in the frozen
 contract now carries a `derivation`: the verifier recomputes both the value

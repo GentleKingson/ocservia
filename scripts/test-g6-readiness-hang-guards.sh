@@ -6,6 +6,7 @@ WORKFLOW="${ROOT}/.github/workflows/g6-readiness.yml"
 ARTIFACT_HELPER="${ROOT}/scripts/real-e2e-artifact.sh"
 POSTGRES_INIT="${ROOT}/deploy/g6-readiness/postgres-init/001-g6-readiness.sh"
 LIB="${ROOT}/scripts/g6-readiness-lib.sh"
+FD_B="${ROOT}/scripts/g6-readiness-fd-b.sh"
 
 ruby -r yaml - "${WORKFLOW}" <<'RUBY'
 workflow = YAML.safe_load(File.read(ARGV.fetch(0)), aliases: true)
@@ -57,6 +58,9 @@ critical_timeouts = {
     "Bootstrap the streaming standby" => 15,
     "Enroll the failure domain B fleet" => 25,
     "Promote the standby under load" => 8,
+    "Outbox crash window after claim" => 10,
+    "Outbox crash window after transport send" => 10,
+    "Outbox crash window before result commit" => 10,
     "Run the bounded observation window" => 10,
     "Build and verify the evidence bundle" => 15
   }
@@ -77,6 +81,104 @@ wait_seconds = promoted_wait.fetch("run")[/g6-rd-new-primary[^\n]*\s(\d+)\s+"G6 
 producer_minutes = critical_timeouts.fetch("g6-rd-fd-b").fetch("Promote the standby under load")
 reject("the promoted-primary artifact wait must outlive its producer timeout") unless wait_seconds && wait_seconds > producer_minutes * 60
 RUBY
+
+# The deterministic send-before-MarkSent point uses exact pre/post Worker
+# hooks. It must not depend on an advisory-lock holder or backend inference.
+post_arm="$(sed -n '/^post_send_barrier_arm() {/,/^}/p' "${FD_B}")"
+post_reached="$(sed -n '/^post_send_barrier_reached() {/,/^}/p' "${FD_B}")"
+post_release="$(sed -n '/^post_send_barrier_release() {/,/^}/p' "${FD_B}")"
+cleanup_phase="$(sed -n '/^phase_cleanup() {/,/^}/p' "${FD_B}")"
+cleanup_prelude="$(sed -n '/^phase_cleanup_prelude() {/,/^}/p' "${FD_B}")"
+for helper in "${post_arm}" "${post_reached}" "${post_release}"; do
+  # shellcheck disable=SC2016  # assert literal helper source
+  grep -qF '"${command_id}"' <<<"${helper}" || {
+    echo "the post-Send barrier is not bound to the exact command id" >&2
+    exit 1
+  }
+done
+if grep -qE '^send_before_mark_|^SEND_BEFORE_MARK|start_send_before_mark|stop_send_before_mark' "${FD_B}"; then
+  echo "the obsolete generic send-before-MarkSent holder is still present" >&2
+  exit 1
+fi
+grep -qF 'timeout --foreground --signal=TERM --kill-after=5s 45s' \
+  <<<"${cleanup_phase}" || {
+  echo "the failure-domain cleanup prelude lacks an overall hard timeout" >&2
+  exit 1
+}
+# shellcheck disable=SC2016  # assert literal cleanup expressions
+for cleanup_token in \
+  'stop_watchers' \
+  'release_armed_pre_send_barrier' \
+  'release_armed_post_send_barrier' \
+  'release_armed_result_commit_barrier' \
+  'g6rd_release_synthetic_barriers' \
+  'for service in transportd api scheduler worker' \
+  'unpause_scoped_container "${COMPOSE_PROJECT}-${service}-1"'; do
+  grep -qF "${cleanup_token}" <<<"${cleanup_prelude}" || {
+    echo "failure-domain cleanup is missing timeout recovery: ${cleanup_token}" >&2
+    exit 1
+  }
+done
+
+# Detached watchers and the sampler own process groups, so stopping the wrapper
+# also terminates an in-flight Docker/psql descendant. Each watcher query has
+# its own hard attempt timeout before the bounded cleanup removes run state.
+# shellcheck disable=SC2016  # assert literal process-group source expressions
+for token in \
+  'nohup setsid env' \
+  'kill -TERM -- "-${pid}"' \
+  'kill -KILL -- "-${pid}"' \
+  'G6RD_PSQL_TIMEOUT_SECONDS=10 g6rd_psql' \
+  '--label "ocservia.g6.run-id=${RUN_ID:?}"' \
+  'PGOPTIONS="-c statement_timeout=$((timeout_seconds * 1000))"' \
+  'docker ps --all --quiet --filter "label=ocservia.g6.run-id=${RUN_ID}"'; do
+  grep -qF -- "${token}" "${LIB}" || {
+    echo "background harness loop cleanup is not process-group bounded: ${token}" >&2
+    exit 1
+  }
+done
+# shellcheck disable=SC2016  # assert the literal watcher pid-file expression
+grep -qF 'g6rd_stop_harness_loop "${G6RD_STATE}/${name}-watcher.pid"' "${FD_B}" || {
+  echo "watcher cleanup does not terminate each scoped process group" >&2
+  exit 1
+}
+
+# Every external predicate used by the new crash-window deadline loops has a
+# per-attempt process timeout; the deadline helper itself intentionally only
+# controls when another attempt may start.
+for token in \
+  'G6RD_PSQL_TIMEOUT_SECONDS=10 psql_primary' \
+  'G6RD_COMPOSE_TIMEOUT_SECONDS=10 g6rd_agent_compose' \
+  'G6RD_COMPOSE_TIMEOUT_SECONDS=10 g6rd_compose'; do
+  grep -qF "${token}" "${FD_B}" || {
+    echo "crash-window external predicate is not per-attempt bounded: ${token}" >&2
+    exit 1
+  }
+done
+
+# Each crash-window wait stops starting attempts at its declared deadline, and
+# its aggregate declared budget leaves at least one minute for bounded
+# Docker/SQL overhead inside the ten-minute workflow step.
+replacement_helper="$(sed -n '/^restart_worker_transport_unit() {/,/^}/p' "${FD_B}")"
+deadline_budget() {
+  local body="${1:?function body is required}"
+  grep -oE 'g6rd_wait_until_deadline[[:space:]]+[0-9]+' <<<"${body}" \
+    | awk '{ total += $2 } END { print total + 0 }'
+}
+replacement_budget="$(deadline_budget "${replacement_helper}")"
+for phase_name in phase_outbox_claim_before_send phase_outbox_send_before_mark \
+  phase_outbox_result_before_commit; do
+  phase_body="$(sed -n "/^${phase_name}() {/,/^}/p" "${FD_B}")"
+  if grep -qE 'g6rd_wait_until[[:space:]]' <<<"${phase_body}"; then
+    echo "${phase_name} uses an attempt-count wait instead of a wall-clock deadline" >&2
+    exit 1
+  fi
+  phase_budget="$(deadline_budget "${phase_body}")"
+  if ((phase_budget + replacement_budget > 540)); then
+    echo "${phase_name} declares more than nine minutes of nested waits" >&2
+    exit 1
+  fi
+done
 
 grep -qF 'REAL_E2E_ARTIFACT_CONNECT_TIMEOUT_SECONDS:-5' "${ARTIFACT_HELPER}" || {
   echo "artifact API calls must have a connect timeout" >&2
@@ -107,7 +209,7 @@ tmp="$(mktemp -d)"
 cleanup() { rm -rf -- "${tmp}"; }
 trap cleanup EXIT
 
-# shellcheck source=scripts/g6-readiness-lib.sh
+# shellcheck source=scripts/g6-readiness-lib.sh disable=SC1091
 source "${LIB}"
 never_ready() { return 1; }
 started="${SECONDS}"

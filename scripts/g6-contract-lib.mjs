@@ -36,6 +36,7 @@ const eventPattern = /^[a-z][a-z0-9_]{0,127}$/;
 const componentPattern = /^[a-z][a-z0-9-]{0,63}$/;
 const artifactNamePattern = /^[a-z0-9][a-z0-9._-]{0,127}$/;
 const identifierPattern = /^[a-z0-9][a-z0-9._-]{0,127}$/;
+const endpointIdentityPattern = /^[0-9a-f]{64}$/;
 const rfc3339Pattern =
   /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/;
 
@@ -46,6 +47,7 @@ export const structuredArtifactKinds = [
   "resource_samples",
   "timeline",
   "epoch_events",
+  "authority_cut",
   "command_trace",
   "outbox_snapshot",
   "http_samples",
@@ -65,6 +67,21 @@ function rfc3339(value, context) {
   const parsed = Date.parse(value);
   if (!Number.isFinite(parsed)) fail(`${context} must be a real timestamp`);
   return parsed;
+}
+
+function utcStampMicros(value, context) {
+  const match =
+    /^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})(?:\.(\d{1,6}))?Z$/.exec(
+      value,
+    );
+  if (!match) {
+    fail(`${context} must be a microsecond RFC 3339 UTC timestamp`);
+  }
+  rfc3339(value, context);
+  return (
+    BigInt(Date.parse(`${match[1]}Z`)) * 1000n +
+    BigInt((match[2] ?? "").padEnd(6, "0"))
+  );
 }
 
 function fail(message) {
@@ -115,6 +132,13 @@ function nonNegativeInteger(value, context) {
   }
 }
 
+function positiveDecimalString(value, context) {
+  if (typeof value !== "string" || !/^[1-9][0-9]*$/.test(value)) {
+    fail(`${context} must be a canonical positive decimal string`);
+  }
+  return value;
+}
+
 function boolean(value, context) {
   if (typeof value !== "boolean") fail(`${context} must be a boolean`);
 }
@@ -123,6 +147,27 @@ function identifier(value, context) {
   if (typeof value !== "string" || !identifierPattern.test(value)) {
     fail(`${context} has an invalid identifier`);
   }
+}
+
+// Live probes render UUIDs with dashes while PostgreSQL snapshots may render
+// the same binary identity as 32 hexadecimal digits.
+function normalizedUUIDIdentity(value, context) {
+  if (/^[0-9a-f]{32}$/.test(value ?? "")) return value;
+  if (
+    /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(
+      value ?? "",
+    )
+  ) {
+    return value.replaceAll("-", "");
+  }
+  return fail(`${context} must be a UUID identity`);
+}
+
+function endpointIdentity(value, context) {
+  if (typeof value !== "string" || !endpointIdentityPattern.test(value)) {
+    fail(`${context} must be a 64-character lowercase hexadecimal endpoint id`);
+  }
+  return value;
 }
 
 function digest(value, context) {
@@ -624,9 +669,11 @@ const epochSubjects = new Set(["connection_owner", "scheduler"]);
 function parseEpochEvents(entry, binding) {
   const state = {
     ownerMaxEpoch: new Map(),
+    ownerLatest: new Map(),
     ownerActive: new Map(),
     ownerExpired: new Set(),
     leaderMaxEpoch: 0,
+    leaderLatest: null,
     leaderActive: new Set(),
     leaderExpired: new Set(),
     staleOwnerAccepts: 0,
@@ -649,14 +696,30 @@ function parseEpochEvents(entry, binding) {
       if (!epochSubjects.has(record.subject)) return null;
       switch (record.event_type) {
         case "owner_registered":
-          return ["subject", "event_type", "node", "instance", "epoch"];
+          return [
+            "subject",
+            "event_type",
+            "node",
+            "instance",
+            "incarnation",
+            "connection_id",
+            "epoch",
+            "lease_until",
+          ];
         case "owner_lease_expired":
         case "owner_retired":
           return ["subject", "event_type", "node", "epoch"];
         case "owner_accept":
           return ["subject", "event_type", "node", "instance", "epoch", "accepted"];
         case "leader_acquired":
-          return ["subject", "event_type", "instance", "epoch"];
+          return [
+            "subject",
+            "event_type",
+            "instance",
+            "incarnation",
+            "epoch",
+            "lease_until",
+          ];
         case "leader_lease_expired":
           return ["subject", "event_type", "epoch"];
         case "leader_commit":
@@ -668,15 +731,29 @@ function parseEpochEvents(entry, binding) {
     binding,
     (record, parsed) => {
       if (record.subject === "connection_owner") {
-        identifier(record.node, "epoch event node");
+        const node = normalizedUUIDIdentity(record.node, "epoch event node");
         nonNegativeInteger(record.epoch, "epoch event epoch");
         if (record.epoch < 1) fail("epoch event epoch must be positive");
-        const node = record.node;
         if (!state.ownerActive.has(node)) state.ownerActive.set(node, new Set());
         const active = state.ownerActive.get(node);
         const maxEpoch = state.ownerMaxEpoch.get(node) ?? 0;
         if (record.event_type === "owner_registered") {
           identifier(record.instance, "epoch event instance");
+          positiveDecimalString(
+            record.incarnation,
+            "epoch event owner incarnation",
+          );
+          const connectionId = normalizedUUIDIdentity(
+            record.connection_id,
+            "epoch event owner connection_id",
+          );
+          const leaseUntilMs = rfc3339(
+            record.lease_until,
+            "epoch event owner lease_until",
+          );
+          if (leaseUntilMs <= parsed) {
+            fail("epoch event owner lease must extend past registration");
+          }
           state.ownerRegisteredCount += 1;
           if (record.epoch <= maxEpoch) {
             fail(
@@ -684,6 +761,14 @@ function parseEpochEvents(entry, binding) {
             );
           }
           state.ownerMaxEpoch.set(node, record.epoch);
+          state.ownerLatest.set(node, {
+            epoch: record.epoch,
+            instance: record.instance,
+            incarnation: record.incarnation,
+            connectionId,
+            leaseUntil: record.lease_until,
+            leaseUntilMs,
+          });
           active.add(record.epoch);
           state.ownerRegistrations.push({ node, epoch: record.epoch, timestampMs: parsed });
         } else if (record.event_type === "owner_lease_expired") {
@@ -727,6 +812,17 @@ function parseEpochEvents(entry, binding) {
         if (record.epoch < 1) fail("epoch event epoch must be positive");
         if (record.event_type === "leader_acquired") {
           identifier(record.instance, "epoch event instance");
+          positiveDecimalString(
+            record.incarnation,
+            "epoch event scheduler incarnation",
+          );
+          const leaseUntilMs = rfc3339(
+            record.lease_until,
+            "epoch event scheduler lease_until",
+          );
+          if (leaseUntilMs <= parsed) {
+            fail("epoch event scheduler lease must extend past acquisition");
+          }
           state.leaderAcquiredCount += 1;
           if (record.epoch <= state.leaderMaxEpoch) {
             fail(
@@ -734,6 +830,13 @@ function parseEpochEvents(entry, binding) {
             );
           }
           state.leaderMaxEpoch = record.epoch;
+          state.leaderLatest = {
+            epoch: record.epoch,
+            instance: record.instance,
+            incarnation: record.incarnation,
+            leaseUntil: record.lease_until,
+            leaseUntilMs,
+          };
           state.leaderActive.add(record.epoch);
         } else if (record.event_type === "leader_lease_expired") {
           if (!state.leaderActive.has(record.epoch)) {
@@ -769,6 +872,331 @@ function parseEpochEvents(entry, binding) {
     },
   );
   return state;
+}
+
+function parseTransportBracketInventory(
+  records,
+  label,
+  boundaryMs,
+  cutMs,
+) {
+  if (!Array.isArray(records) || records.length === 0) {
+    fail(`${label} must contain at least one transport observation`);
+  }
+  const observations = new Map();
+  for (const [index, observation] of records.entries()) {
+    const observationLabel = `${label} observation ${index + 1}`;
+    closed(
+      observation,
+      [
+        "node",
+        "endpoint_id",
+        "agent_instance_id",
+        "connected_at",
+        "session_expires_at",
+        "owner_fence_id",
+        "owner_instance",
+        "owner_incarnation",
+        "connection_id",
+        "owner_epoch",
+        "owner_lease_until",
+        "authorization_revision",
+        "negotiated_capabilities",
+      ],
+      observationLabel,
+    );
+    const node = normalizedUUIDIdentity(
+      observation.node,
+      `${observationLabel} node`,
+    );
+    const endpointId = endpointIdentity(
+      observation.endpoint_id,
+      `${observationLabel} endpoint_id`,
+    );
+    const agentInstanceId = normalizedUUIDIdentity(
+      observation.agent_instance_id,
+      `${observationLabel} agent_instance_id`,
+    );
+    const connectedAtMs = rfc3339(
+      observation.connected_at,
+      `${observationLabel} connected_at`,
+    );
+    if (connectedAtMs > boundaryMs) {
+      fail(`${observationLabel} connects after its inventory boundary`);
+    }
+    const sessionExpiresAtMs = rfc3339(
+      observation.session_expires_at,
+      `${observationLabel} session_expires_at`,
+    );
+    if (sessionExpiresAtMs <= cutMs) {
+      fail(`${observationLabel} session does not remain live across the cut`);
+    }
+    const ownerFenceId = normalizedUUIDIdentity(
+      observation.owner_fence_id,
+      `${observationLabel} owner_fence_id`,
+    );
+    identifier(observation.owner_instance, `${observationLabel} owner_instance`);
+    positiveDecimalString(
+      observation.owner_incarnation,
+      `${observationLabel} owner_incarnation`,
+    );
+    const connectionId = normalizedUUIDIdentity(
+      observation.connection_id,
+      `${observationLabel} connection_id`,
+    );
+    nonNegativeInteger(
+      observation.owner_epoch,
+      `${observationLabel} owner_epoch`,
+    );
+    if (observation.owner_epoch < 1) {
+      fail(`${observationLabel} owner_epoch must be positive`);
+    }
+    const ownerLeaseUntilMs = rfc3339(
+      observation.owner_lease_until,
+      `${observationLabel} owner_lease_until`,
+    );
+    if (ownerLeaseUntilMs <= cutMs) {
+      fail(`${observationLabel} owner lease does not remain live across the cut`);
+    }
+    nonNegativeInteger(
+      observation.authorization_revision,
+      `${observationLabel} authorization_revision`,
+    );
+    if (!Number.isSafeInteger(observation.authorization_revision)) {
+      fail(`${observationLabel} authorization_revision must be a safe integer`);
+    }
+    if (
+      !Array.isArray(observation.negotiated_capabilities) ||
+      observation.negotiated_capabilities.length === 0
+    ) {
+      fail(`${observationLabel} negotiated_capabilities must not be empty`);
+    }
+    const capabilities = observation.negotiated_capabilities.map(
+      (capability, capabilityIndex) => {
+        identifier(
+          capability,
+          `${observationLabel} negotiated_capabilities ${capabilityIndex + 1}`,
+        );
+        return capability;
+      },
+    );
+    if (new Set(capabilities).size !== capabilities.length) {
+      fail(`${observationLabel} repeats a negotiated capability`);
+    }
+    if (observations.has(node)) {
+      fail(`${label} repeats node ${node}`);
+    }
+    observations.set(node, {
+      node,
+      endpointId,
+      agentInstanceId,
+      connectedAt: observation.connected_at,
+      connectedAtMs,
+      sessionExpiresAt: observation.session_expires_at,
+      sessionExpiresAtMs,
+      ownerFenceId,
+      ownerInstance: observation.owner_instance,
+      ownerIncarnation: observation.owner_incarnation,
+      connectionId,
+      ownerEpoch: observation.owner_epoch,
+      ownerLeaseUntil: observation.owner_lease_until,
+      ownerLeaseUntilMs,
+      authorizationRevision: observation.authorization_revision,
+      capabilities: [...capabilities].sort(),
+    });
+  }
+  return observations;
+}
+
+function parseAuthorityCut(entry, binding) {
+  const label = `authority cut artifact ${entry.name}`;
+  const doc = parseArtifactJSON(entry, "authority cut");
+  closed(
+    doc,
+    [
+      "environment_id",
+      "candidate_sha",
+      "cut_at",
+      "transport_bracket",
+      "owners",
+      "scheduler",
+    ],
+    label,
+  );
+  requireBinding(doc.environment_id, doc.candidate_sha, label, binding);
+  const cutMs = rfc3339(doc.cut_at, `${label} cut_at`);
+  const cutMicros = utcStampMicros(doc.cut_at, `${label} cut_at`);
+  requireWindow(cutMs, label, binding);
+  closed(
+    doc.transport_bracket,
+    ["before_complete_at", "after_start_at", "before", "after"],
+    `${label} transport bracket`,
+  );
+  const beforeCompleteMs = rfc3339(
+    doc.transport_bracket.before_complete_at,
+    `${label} transport bracket before_complete_at`,
+  );
+  const beforeCompleteMicros = utcStampMicros(
+    doc.transport_bracket.before_complete_at,
+    `${label} transport bracket before_complete_at`,
+  );
+  const afterStartMs = rfc3339(
+    doc.transport_bracket.after_start_at,
+    `${label} transport bracket after_start_at`,
+  );
+  const afterStartMicros = utcStampMicros(
+    doc.transport_bracket.after_start_at,
+    `${label} transport bracket after_start_at`,
+  );
+  requireWindow(beforeCompleteMs, `${label} before inventory boundary`, binding);
+  requireWindow(afterStartMs, `${label} after inventory boundary`, binding);
+  if (!(beforeCompleteMicros < cutMicros && cutMicros < afterStartMicros)) {
+    fail(`${label} transport inventories must strictly bracket cut_at`);
+  }
+  const beforeObservations = parseTransportBracketInventory(
+    doc.transport_bracket.before,
+    `${label} before-cut transport inventory`,
+    beforeCompleteMs,
+    cutMs,
+  );
+  const afterObservations = parseTransportBracketInventory(
+    doc.transport_bracket.after,
+    `${label} after-cut transport inventory`,
+    afterStartMs,
+    cutMs,
+  );
+  if (!Array.isArray(doc.owners) || doc.owners.length === 0) {
+    fail(`${label} must contain at least one owner`);
+  }
+  const owners = new Map();
+  for (const [index, owner] of doc.owners.entries()) {
+    const ownerLabel = `${label} owner ${index + 1}`;
+    closed(
+      owner,
+      [
+        "node",
+        "instance",
+        "incarnation",
+        "connection_id",
+        "epoch",
+        "lease_until",
+      ],
+      ownerLabel,
+    );
+    const node = normalizedUUIDIdentity(owner.node, `${ownerLabel} node`);
+    identifier(owner.instance, `${ownerLabel} instance`);
+    positiveDecimalString(owner.incarnation, `${ownerLabel} incarnation`);
+    const connectionId = normalizedUUIDIdentity(
+      owner.connection_id,
+      `${ownerLabel} connection_id`,
+    );
+    nonNegativeInteger(owner.epoch, `${ownerLabel} epoch`);
+    if (owner.epoch < 1) fail(`${ownerLabel} epoch must be positive`);
+    const leaseUntilMs = rfc3339(
+      owner.lease_until,
+      `${ownerLabel} lease_until`,
+    );
+    if (leaseUntilMs <= cutMs) {
+      fail(`${ownerLabel} lease must remain live after the cut`);
+    }
+    if (owners.has(node)) {
+      fail(`${label} repeats owner node ${node}`);
+    }
+    owners.set(node, {
+      instance: owner.instance,
+      incarnation: owner.incarnation,
+      connectionId,
+      epoch: owner.epoch,
+      leaseUntil: owner.lease_until,
+      leaseUntilMs,
+    });
+  }
+
+  if (
+    beforeObservations.size !== afterObservations.size ||
+    beforeObservations.size !== owners.size
+  ) {
+    fail(`${label} transport and database owner populations must match`);
+  }
+  for (const [node, before] of beforeObservations) {
+    const after = afterObservations.get(node);
+    if (!after) {
+      fail(`${label} after-cut transport inventory omits node ${node}`);
+    }
+    if (
+      before.endpointId !== after.endpointId ||
+      before.agentInstanceId !== after.agentInstanceId ||
+      before.connectedAt !== after.connectedAt ||
+      before.sessionExpiresAt !== after.sessionExpiresAt ||
+      before.ownerFenceId !== after.ownerFenceId ||
+      before.ownerInstance !== after.ownerInstance ||
+      before.ownerIncarnation !== after.ownerIncarnation ||
+      before.connectionId !== after.connectionId ||
+      before.ownerEpoch !== after.ownerEpoch ||
+      before.authorizationRevision !== after.authorizationRevision ||
+      JSON.stringify(before.capabilities) !== JSON.stringify(after.capabilities)
+    ) {
+      fail(`${label} immutable transport tuple changes across cut_at for node ${node}`);
+    }
+    const owner = owners.get(node);
+    if (!owner) {
+      fail(`${label} database authority cut omits transport node ${node}`);
+    }
+    if (
+      owner.instance !== after.ownerInstance ||
+      owner.incarnation !== after.ownerIncarnation ||
+      owner.connectionId !== after.connectionId ||
+      owner.epoch !== after.ownerEpoch
+    ) {
+      fail(`${label} transport owner term does not match the database cut for node ${node}`);
+    }
+  }
+  for (const node of owners.keys()) {
+    if (!beforeObservations.has(node)) {
+      fail(`${label} database authority owner ${node} is absent from the bracket`);
+    }
+  }
+
+  object(doc.scheduler, `${label} scheduler`);
+  closed(
+    doc.scheduler,
+    ["instance", "incarnation", "epoch", "lease_until"],
+    `${label} scheduler`,
+  );
+  identifier(doc.scheduler.instance, `${label} scheduler instance`);
+  positiveDecimalString(
+    doc.scheduler.incarnation,
+    `${label} scheduler incarnation`,
+  );
+  nonNegativeInteger(doc.scheduler.epoch, `${label} scheduler epoch`);
+  if (doc.scheduler.epoch < 1) {
+    fail(`${label} scheduler epoch must be positive`);
+  }
+  const schedulerLeaseUntilMs = rfc3339(
+    doc.scheduler.lease_until,
+    `${label} scheduler lease_until`,
+  );
+  if (schedulerLeaseUntilMs <= cutMs) {
+    fail(`${label} scheduler lease must remain live after the cut`);
+  }
+  return {
+    cutAt: doc.cut_at,
+    cutMs,
+    beforeCompleteAt: doc.transport_bracket.before_complete_at,
+    beforeCompleteMs,
+    afterStartAt: doc.transport_bracket.after_start_at,
+    afterStartMs,
+    beforeObservations,
+    afterObservations,
+    owners,
+    scheduler: {
+      instance: doc.scheduler.instance,
+      incarnation: doc.scheduler.incarnation,
+      epoch: doc.scheduler.epoch,
+      leaseUntil: doc.scheduler.lease_until,
+      leaseUntilMs: schedulerLeaseUntilMs,
+    },
+  };
 }
 
 const commandOutcomes = new Set(["success", "failed", "unknown"]);
@@ -1275,6 +1703,7 @@ function parseAgentSessions(entry, binding) {
       "candidate_sha",
       "snapshot_taken_at",
       "sessions",
+      "scheduler_authority",
       "reconnect_storm",
     ],
     label,
@@ -1286,6 +1715,7 @@ function parseAgentSessions(entry, binding) {
     fail(`${label} must contain at least one session`);
   }
   const ids = new Set();
+  const nodes = new Set();
   const sessions = [];
   for (const [index, session] of doc.sessions.entries()) {
     const sessionLabel = `${label} session ${index + 1}`;
@@ -1294,21 +1724,62 @@ function parseAgentSessions(entry, binding) {
       [
         "agent_id",
         "node",
+        "endpoint_id",
+        "agent_instance_id",
         "authorized",
         "connected",
+        "owner_instance",
+        "owner_incarnation",
+        "connection_id",
+        "owner_epoch",
+        "owner_lease_until",
         "session_started_at",
+        "connected_at",
+        "session_expires_at",
         "reconnected_at",
       ],
       sessionLabel,
     );
     identifier(session.agent_id, `${sessionLabel} agent_id`);
-    identifier(session.node, `${sessionLabel} node`);
+    const node = normalizedUUIDIdentity(session.node, `${sessionLabel} node`);
     if (ids.has(session.agent_id)) {
       fail(`${label} repeats agent_id ${session.agent_id}`);
     }
     ids.add(session.agent_id);
+    if (nodes.has(node)) {
+      fail(`${label} repeats node ${node}`);
+    }
+    nodes.add(node);
+    const endpointId = endpointIdentity(
+      session.endpoint_id,
+      `${sessionLabel} endpoint_id`,
+    );
+    const agentInstanceId = normalizedUUIDIdentity(
+      session.agent_instance_id,
+      `${sessionLabel} agent_instance_id`,
+    );
     boolean(session.authorized, `${sessionLabel} authorized`);
     boolean(session.connected, `${sessionLabel} connected`);
+    identifier(session.owner_instance, `${sessionLabel} owner_instance`);
+    positiveDecimalString(
+      session.owner_incarnation,
+      `${sessionLabel} owner_incarnation`,
+    );
+    const connectionId = normalizedUUIDIdentity(
+      session.connection_id,
+      `${sessionLabel} connection_id`,
+    );
+    nonNegativeInteger(session.owner_epoch, `${sessionLabel} owner_epoch`);
+    if (session.owner_epoch < 1) {
+      fail(`${sessionLabel} owner_epoch must be positive`);
+    }
+    const ownerLeaseUntilMs = rfc3339(
+      session.owner_lease_until,
+      `${sessionLabel} owner_lease_until`,
+    );
+    if (ownerLeaseUntilMs <= snapshotMs) {
+      fail(`${sessionLabel} owner lease must remain live after the snapshot`);
+    }
     const startedMs = rfc3339(
       session.session_started_at,
       `${sessionLabel} session_started_at`,
@@ -1316,6 +1787,21 @@ function parseAgentSessions(entry, binding) {
     requireWindow(startedMs, sessionLabel, binding);
     if (startedMs > snapshotMs) {
       fail(`${sessionLabel} must start before the snapshot`);
+    }
+    const connectedAtMs = rfc3339(
+      session.connected_at,
+      `${sessionLabel} connected_at`,
+    );
+    requireWindow(connectedAtMs, sessionLabel, binding);
+    if (connectedAtMs > snapshotMs) {
+      fail(`${sessionLabel} must connect before the snapshot`);
+    }
+    const sessionExpiresAtMs = rfc3339(
+      session.session_expires_at,
+      `${sessionLabel} session_expires_at`,
+    );
+    if (sessionExpiresAtMs <= snapshotMs) {
+      fail(`${sessionLabel} session must remain live after the snapshot`);
     }
     const reconnectedMs = rfc3339(
       session.reconnected_at,
@@ -1325,13 +1811,57 @@ function parseAgentSessions(entry, binding) {
     if (reconnectedMs > snapshotMs) {
       fail(`${sessionLabel} must reconnect before the snapshot`);
     }
+    if (reconnectedMs !== connectedAtMs) {
+      fail(`${sessionLabel} reconnected_at must match connected_at`);
+    }
     sessions.push({
       agentId: session.agent_id,
+      node,
+      endpointId,
+      agentInstanceId,
+      ownerInstance: session.owner_instance,
+      ownerIncarnation: session.owner_incarnation,
+      connectionId,
+      ownerEpoch: session.owner_epoch,
+      ownerLeaseUntil: session.owner_lease_until,
+      ownerLeaseUntilMs,
       authorized: session.authorized,
       connected: session.connected,
       startedMs,
+      connectedAt: session.connected_at,
+      connectedAtMs,
+      sessionExpiresAt: session.session_expires_at,
+      sessionExpiresAtMs,
       reconnectedMs,
     });
+  }
+  object(doc.scheduler_authority, `${label} scheduler authority`);
+  closed(
+    doc.scheduler_authority,
+    ["instance", "incarnation", "epoch", "lease_until"],
+    `${label} scheduler authority`,
+  );
+  identifier(
+    doc.scheduler_authority.instance,
+    `${label} scheduler authority instance`,
+  );
+  positiveDecimalString(
+    doc.scheduler_authority.incarnation,
+    `${label} scheduler authority incarnation`,
+  );
+  nonNegativeInteger(
+    doc.scheduler_authority.epoch,
+    `${label} scheduler authority epoch`,
+  );
+  if (doc.scheduler_authority.epoch < 1) {
+    fail(`${label} scheduler authority epoch must be positive`);
+  }
+  const schedulerLeaseUntilMs = rfc3339(
+    doc.scheduler_authority.lease_until,
+    `${label} scheduler authority lease_until`,
+  );
+  if (schedulerLeaseUntilMs <= snapshotMs) {
+    fail(`${label} scheduler lease must remain live after the snapshot`);
   }
   object(doc.reconnect_storm, `${label} reconnect storm`);
   closed(doc.reconnect_storm, ["bulk_disconnect_at"], `${label} reconnect storm`);
@@ -1371,7 +1901,14 @@ function parseAgentSessions(entry, binding) {
       authorizedConnected.map((session) => session.agentId),
     ),
     authorizedConnectedCount: authorizedConnected.length,
-    sessions: doc.sessions,
+    sessions,
+    snapshotAt: doc.snapshot_taken_at,
+    snapshotMs,
+    schedulerInstance: doc.scheduler_authority.instance,
+    schedulerIncarnation: doc.scheduler_authority.incarnation,
+    schedulerEpoch: doc.scheduler_authority.epoch,
+    schedulerLeaseUntil: doc.scheduler_authority.lease_until,
+    schedulerLeaseUntilMs,
     stormRecoverySeconds: (lastReconnectMs - disconnectMs) / 1000,
   };
 }
@@ -1505,6 +2042,8 @@ function parseStructuredArtifact(kind, entry, binding) {
       return parseTimeline(entry, binding);
     case "epoch_events":
       return parseEpochEvents(entry, binding);
+    case "authority_cut":
+      return parseAuthorityCut(entry, binding);
     case "command_trace":
       return parseCommandTrace(entry, binding);
     case "outbox_snapshot":
@@ -2181,11 +2720,114 @@ function parseAllStructuredArtifacts(standardArtifacts, verifiedArtifacts, evide
     parsed.set(kind, parseStructuredArtifact(kind, entry, binding));
   }
 
+  // The DB-clock authority cut is the durable source for live lease tuples.
+  // Cross-check it against both the independently parsed epoch history and
+  // the final session inventory so rebinding any one artifact and its digest
+  // cannot manufacture a coherent authority boundary.
+  const epochs = parsed.get("epoch_events");
+  const authority = parsed.get("authority_cut");
+  const sessions = parsed.get("agent_sessions");
+  if (authority.cutAt !== sessions.snapshotAt) {
+    fail("authority cut_at does not exactly match the agent session snapshot");
+  }
+  const sessionNodes = new Set();
+  for (const session of sessions.sessions) {
+    sessionNodes.add(session.node);
+    const latestOwner = epochs.ownerLatest.get(session.node);
+    if (!latestOwner) {
+      fail(
+        `agent session inventory node ${session.node} has no registered connection-owner epoch`,
+      );
+    }
+    if (session.ownerEpoch !== latestOwner.epoch) {
+      fail(
+        `agent session inventory owner_epoch ${session.ownerEpoch} does not match latest connection-owner epoch ${latestOwner.epoch} for node ${session.node}`,
+      );
+    }
+    if (!epochs.ownerActive.get(session.node)?.has(session.ownerEpoch)) {
+      fail(
+        `agent session inventory owner_epoch ${session.ownerEpoch} is not active for node ${session.node}`,
+      );
+    }
+    const cutOwner = authority.owners.get(session.node);
+    if (!cutOwner) {
+      fail(`authority cut omits session owner node ${session.node}`);
+    }
+    const transport = authority.afterObservations.get(session.node);
+    if (!transport) {
+      fail(`authority cut transport bracket omits session node ${session.node}`);
+    }
+    if (
+      transport.endpointId !== session.endpointId ||
+      transport.agentInstanceId !== session.agentInstanceId ||
+      transport.connectedAt !== session.connectedAt ||
+      transport.sessionExpiresAt !== session.sessionExpiresAt ||
+      transport.ownerInstance !== session.ownerInstance ||
+      transport.ownerIncarnation !== session.ownerIncarnation ||
+      transport.connectionId !== session.connectionId ||
+      transport.ownerEpoch !== session.ownerEpoch
+    ) {
+      fail(
+        `authority cut transport tuple does not match agent session node ${session.node}`,
+      );
+    }
+    if (
+      cutOwner.instance !== latestOwner.instance ||
+      cutOwner.incarnation !== latestOwner.incarnation ||
+      cutOwner.connectionId !== latestOwner.connectionId ||
+      cutOwner.epoch !== latestOwner.epoch ||
+      cutOwner.leaseUntil !== latestOwner.leaseUntil
+    ) {
+      fail(
+        `authority cut owner tuple does not match latest epoch for node ${session.node}`,
+      );
+    }
+    if (
+      cutOwner.instance !== session.ownerInstance ||
+      cutOwner.incarnation !== session.ownerIncarnation ||
+      cutOwner.connectionId !== session.connectionId ||
+      cutOwner.epoch !== session.ownerEpoch ||
+      cutOwner.leaseUntil !== session.ownerLeaseUntil
+    ) {
+      fail(`authority cut owner tuple does not match session node ${session.node}`);
+    }
+  }
+  for (const node of authority.owners.keys()) {
+    if (!sessionNodes.has(node)) {
+      fail(`authority cut contains owner node ${node} absent from sessions`);
+    }
+  }
+  if (sessions.schedulerEpoch !== epochs.leaderMaxEpoch) {
+    fail(
+      `agent session inventory scheduler epoch ${sessions.schedulerEpoch} does not match latest scheduler epoch ${epochs.leaderMaxEpoch}`,
+    );
+  }
+  if (!epochs.leaderActive.has(sessions.schedulerEpoch)) {
+    fail(
+      `agent session inventory scheduler epoch ${sessions.schedulerEpoch} is not active`,
+    );
+  }
+  if (
+    authority.scheduler.instance !== epochs.leaderLatest?.instance ||
+    authority.scheduler.incarnation !== epochs.leaderLatest?.incarnation ||
+    authority.scheduler.epoch !== epochs.leaderLatest?.epoch ||
+    authority.scheduler.leaseUntil !== epochs.leaderLatest?.leaseUntil
+  ) {
+    fail("authority cut scheduler tuple does not match latest epoch");
+  }
+  if (
+    authority.scheduler.instance !== sessions.schedulerInstance ||
+    authority.scheduler.incarnation !== sessions.schedulerIncarnation ||
+    authority.scheduler.epoch !== sessions.schedulerEpoch ||
+    authority.scheduler.leaseUntil !== sessions.schedulerLeaseUntil
+  ) {
+    fail("authority cut scheduler tuple does not match agent sessions");
+  }
+
   // Telemetry must cover exactly the authorized connected session
   // population; submitting a fresh-looking subset cannot stand in for
   // the full fleet.
   const telemetry = parsed.get("telemetry_snapshot");
-  const sessions = parsed.get("agent_sessions");
   const telemetryIds = new Set(telemetry.agents.map((agent) => agent.agent_id));
   for (const agentId of telemetryIds) {
     if (!sessions.authorizedConnectedIds.has(agentId)) {

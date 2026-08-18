@@ -57,6 +57,7 @@ g6rd_init_environment() {
   G6RD_LOGS="${G6RD_WORK}/logs"
   G6RD_AGENTS="${G6RD_WORK}/agents"
   G6RD_RESULT_BARRIER="${G6RD_WORK}/result-barrier"
+  G6RD_PRE_SEND_BARRIER="${G6RD_RESULT_BARRIER}/pre-send"
   G6RD_TUNNEL_BIN="${G6RD_ROOT}/rust/target/release/ocservia-g6-tunnel"
   COMPOSE_PROJECT="ocservia-g6-rd-${RUN_ID}"
   COMPOSE_FILE="${G6RD_ROOT}/deploy/g6-readiness/compose.yaml"
@@ -65,9 +66,10 @@ g6rd_init_environment() {
   umask 077
   mkdir -p "${G6RD_STATE}" "${G6RD_SECRETS}" "${G6RD_OUTBOX}" \
     "${G6RD_ARCHIVE}" "${G6RD_BASEBACKUP}" "${G6RD_RESTORE}" \
-    "${G6RD_LOGS}" "${G6RD_AGENTS}" "${G6RD_RESULT_BARRIER}" "${ARTIFACT_DIR}"
+    "${G6RD_LOGS}" "${G6RD_AGENTS}" "${G6RD_RESULT_BARRIER}" \
+    "${G6RD_PRE_SEND_BARRIER}" "${ARTIFACT_DIR}"
   chmod 0700 "${G6RD_WORK}" "${G6RD_SECRETS}"
-  chmod 0777 "${G6RD_RESULT_BARRIER}"
+  chmod 0777 "${G6RD_RESULT_BARRIER}" "${G6RD_PRE_SEND_BARRIER}"
 }
 
 g6rd_now() {
@@ -457,6 +459,16 @@ g6rd_compose() {
       g6rd_placeholder_env
     fi
   fi
+  local timeout_seconds="${G6RD_COMPOSE_TIMEOUT_SECONDS:-}"
+  if [[ -n "${timeout_seconds}" ]]; then
+    [[ "${timeout_seconds}" =~ ^[0-9]+$ && "${timeout_seconds}" -ge 1 ]] || {
+      echo "G6RD_COMPOSE_TIMEOUT_SECONDS must be a positive integer" >&2
+      return 2
+    }
+    timeout --foreground --signal=TERM --kill-after=5s "${timeout_seconds}s" \
+      docker compose --project-name "${COMPOSE_PROJECT}" --file "${COMPOSE_FILE}" "$@"
+    return
+  fi
   docker compose --project-name "${COMPOSE_PROJECT}" --file "${COMPOSE_FILE}" "$@"
 }
 
@@ -488,6 +500,17 @@ g6rd_agent_compose() {
     if ! g6rd_export_common_env; then
       g6rd_placeholder_env
     fi
+  fi
+  local timeout_seconds="${G6RD_COMPOSE_TIMEOUT_SECONDS:-}"
+  if [[ -n "${timeout_seconds}" ]]; then
+    [[ "${timeout_seconds}" =~ ^[0-9]+$ && "${timeout_seconds}" -ge 1 ]] || {
+      echo "G6RD_COMPOSE_TIMEOUT_SECONDS must be a positive integer" >&2
+      return 2
+    }
+    timeout --foreground --signal=TERM --kill-after=5s "${timeout_seconds}s" \
+      docker compose --project-name "${COMPOSE_PROJECT}" \
+      --file "${COMPOSE_FILE}" --file "${G6RD_AGENT_COMPOSE}" "$@"
+    return
   fi
   docker compose --project-name "${COMPOSE_PROJECT}" \
     --file "${COMPOSE_FILE}" --file "${G6RD_AGENT_COMPOSE}" "$@"
@@ -579,11 +602,29 @@ g6rd_host_gateway_address() {
 # ---------------------------------------------------------------------------
 
 g6rd_psql() {
-  PGPASSWORD="$(g6rd_secret owner-password)" docker run --rm --pull=never --network host \
-    --log-driver none -e PGPASSWORD \
-    postgres:17.10-bookworm psql \
-    "host=127.0.0.1 port=${G6_DB_PORT:-5432} user=ocservia_owner dbname=ocservia sslmode=disable" \
-    -v ON_ERROR_STOP=1 "$@"
+  local password timeout_seconds="${G6RD_PSQL_TIMEOUT_SECONDS:-}" database_options=()
+  password="$(g6rd_secret owner-password)"
+  if [[ -n "${timeout_seconds}" ]]; then
+    [[ "${timeout_seconds}" =~ ^[0-9]+$ && "${timeout_seconds}" -ge 1 ]] || {
+      echo "G6RD_PSQL_TIMEOUT_SECONDS must be a positive integer" >&2
+      return 2
+    }
+    database_options=(-e PGCONNECT_TIMEOUT -e PGOPTIONS)
+  fi
+  local command=(docker run --rm --pull=never --network host
+    --log-driver none --label "ocservia.g6.run-id=${RUN_ID:?}"
+    -e PGPASSWORD "${database_options[@]}"
+    postgres:17.10-bookworm psql
+    "host=127.0.0.1 port=${G6_DB_PORT:-5432} user=ocservia_owner dbname=ocservia sslmode=disable"
+    -v ON_ERROR_STOP=1 "$@")
+  if [[ -n "${timeout_seconds}" ]]; then
+    PGPASSWORD="${password}" PGCONNECT_TIMEOUT="${timeout_seconds}" \
+      PGOPTIONS="-c statement_timeout=$((timeout_seconds * 1000))" \
+      timeout --foreground --signal=TERM --kill-after=5s \
+        "${timeout_seconds}s" "${command[@]}"
+    return
+  fi
+  PGPASSWORD="${password}" "${command[@]}"
 }
 
 g6rd_psql_json() {
@@ -987,6 +1028,7 @@ g6rd_probe_node_connection() {
     docker compose --project-name "${COMPOSE_PROJECT}" --file "${COMPOSE_FILE}" \
     --profile probe run --rm --no-deps g6-probe node-connection \
     --socket /run/ocserv-platform/transportd.sock \
+    --signing-key-file /run/ocservia-signing/command-signing.pem \
     --expect-path "${expect_path}" \
     "${args[@]}"
 }
@@ -1488,8 +1530,15 @@ g6rd_sampler_loop() {
 g6rd_spawn_harness_loop() {
   local log_file="${1:?loop log file is required}"
   shift
+  command -v setsid >/dev/null 2>&1 || {
+    echo "setsid is required for scoped harness background loops" >&2
+    return 1
+  }
   # shellcheck disable=SC2016  # the loop body is a separately quoted script
-  nohup env \
+  # Each loop owns a process group. Cleanup can therefore terminate a blocked
+  # Docker/psql descendant as well as the wrapper shell instead of orphaning a
+  # run-scoped client after its stop sentinel is removed.
+  nohup setsid env \
     G6RD_ROOT="${G6RD_ROOT}" \
     RUNNER_TEMP="${RUNNER_TEMP}" \
     RUN_ID="${RUN_ID}" \
@@ -1509,6 +1558,36 @@ g6rd_spawn_harness_loop() {
   echo $!
 }
 
+g6rd_stop_harness_loop() {
+  local pid_file="${1:?loop pid file is required}" pid status=0 _
+  [[ -s "${pid_file}" ]] || return 0
+  pid="$(<"${pid_file}")"
+  [[ "${pid}" =~ ^[1-9][0-9]*$ ]] || {
+    echo "invalid harness loop process-group id in ${pid_file}" >&2
+    return 1
+  }
+  kill -TERM -- "-${pid}" 2>/dev/null || true
+  for _ in 1 2 3 4 5; do
+    kill -0 -- "-${pid}" 2>/dev/null || break
+    sleep 1
+  done
+  if kill -0 -- "-${pid}" 2>/dev/null; then
+    kill -KILL -- "-${pid}" 2>/dev/null || true
+  fi
+  for _ in 1 2 3; do
+    kill -0 -- "-${pid}" 2>/dev/null || break
+    sleep 1
+  done
+  if kill -0 -- "-${pid}" 2>/dev/null; then
+    echo "harness loop process group ${pid} did not terminate" >&2
+    status=1
+  fi
+  if [[ "${status}" == 0 ]]; then
+    rm -f "${pid_file}"
+  fi
+  return "${status}"
+}
+
 # Append-only history of the authoritative fencing and leadership tables:
 # each loop records only changed result sets, so the epoch-events artifact
 # can derive every owner and scheduler transition with its observation time
@@ -1519,7 +1598,7 @@ g6rd_watch_fencing_history() {
   while [[ ! -e "${G6RD_STATE}/watchers-stop" ]]; do
     port=15432
     [[ -e "${G6RD_STATE}/promoted" ]] && port=5432
-    rows="$(G6_DB_PORT="${port}" g6rd_psql -Atc \
+    rows="$(G6_DB_PORT="${port}" G6RD_PSQL_TIMEOUT_SECONDS=10 g6rd_psql -Atc \
       "SELECT encode(node_id,'hex')||':'||owner_instance_id||':'||owner_incarnation||':'||encode(connection_id,'hex')||':'||owner_epoch||':'||to_char(lease_until AT TIME ZONE 'UTC','YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"')||':'||to_char(updated_at AT TIME ZONE 'UTC','YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"') FROM connection_owner_fencing ORDER BY node_id" \
       2>/dev/null || true)"
     if [[ -n "${rows}" && "${rows}" != "${last}" ]]; then
@@ -1535,7 +1614,7 @@ g6rd_watch_leadership_history() {
   while [[ ! -e "${G6RD_STATE}/watchers-stop" ]]; do
     port=15432
     [[ -e "${G6RD_STATE}/promoted" ]] && port=5432
-    rows="$(G6_DB_PORT="${port}" g6rd_psql -Atc \
+    rows="$(G6_DB_PORT="${port}" G6RD_PSQL_TIMEOUT_SECONDS=10 g6rd_psql -Atc \
       "SELECT instance_id||':'||incarnation||':'||epoch||':'||to_char(lease_until AT TIME ZONE 'UTC','YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"')||':'||to_char(updated_at AT TIME ZONE 'UTC','YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"') FROM scheduler_leadership WHERE id=1" \
       2>/dev/null || true)"
     if [[ -n "${rows}" && "${rows}" != "${last}" ]]; then
@@ -1557,22 +1636,14 @@ g6rd_start_sampler() {
 }
 
 g6rd_stop_sampler() {
-  local pid
+  local status=0
   touch "${G6RD_STATE}/sampler-stop"
-  [[ -s "${G6RD_STATE}/sampler.pid" ]] || return 0
-  pid="$(<"${G6RD_STATE}/sampler.pid")"
-  kill "${pid}" 2>/dev/null || true
-  local _
-  for _ in 1 2 3 4 5; do
-    kill -0 "${pid}" 2>/dev/null || break
-    sleep 1
-  done
-  kill -9 "${pid}" 2>/dev/null || true
-  rm -f "${G6RD_STATE}/sampler.pid"
+  g6rd_stop_harness_loop "${G6RD_STATE}/sampler.pid" || status=1
   [[ ! -e "${G6RD_STATE}/sampler-failed-at" ]] || {
     echo "resource sampler failed closed at $(<"${G6RD_STATE}/sampler-failed-at")" >&2
     return 1
   }
+  return "${status}"
 }
 
 # ---------------------------------------------------------------------------
@@ -1637,7 +1708,7 @@ g6rd_diagnostics() {
 }
 
 g6rd_cleanup() {
-  local status=0 volume image pid
+  local status=0 volume image pid helper_container
   g6rd_stop_sampler || status=1
   if [[ -s "${G6RD_STATE}/load-dispatch-barrier.pid" ]]; then
     pid="$(<"${G6RD_STATE}/load-dispatch-barrier.pid")"
@@ -1659,6 +1730,10 @@ g6rd_cleanup() {
       status=1
     fi
   fi
+  while IFS= read -r helper_container; do
+    [[ -n "${helper_container}" ]] || continue
+    docker rm --force "${helper_container}" >/dev/null 2>&1 || status=1
+  done < <(docker ps --all --quiet --filter "label=ocservia.g6.run-id=${RUN_ID}")
   if ! g6rd_compose --profile bootstrap --profile probe down --volumes --remove-orphans --rmi local \
     >"${G6RD_LOGS}/compose-down.log" 2>&1; then
     echo "cleanup: compose down failed; output follows:" >&2
@@ -1691,6 +1766,10 @@ g6rd_cleanup() {
     echo "scoped image cleanup failed: ${image}" >&2
     status=1
   done
+  if [[ -n "$(docker ps --all --quiet --filter "label=ocservia.g6.run-id=${RUN_ID}")" ]]; then
+    echo "scoped PostgreSQL helper container cleanup failed for ${RUN_ID}" >&2
+    status=1
+  fi
   return "${status}"
 }
 

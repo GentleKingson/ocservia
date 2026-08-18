@@ -11,6 +11,7 @@ import (
 	"math/big"
 	"net"
 	"path/filepath"
+	"sync"
 	"time"
 
 	agentv1 "github.com/GentleKingson/ocservia/control-plane/gen/proto/ocserv/platform/agent/v1"
@@ -24,12 +25,17 @@ import (
 	"google.golang.org/grpc/credentials/insecure"
 	healthv1 "google.golang.org/grpc/health/grpc_health_v1"
 	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/proto"
 )
 
 const (
-	maxPayloadBytes = 1 << 20
-	maxMessageBytes = maxPayloadBytes + (4 << 10)
+	maxPayloadBytes          = 1 << 20
+	maxMessageBytes          = maxPayloadBytes + (4 << 10)
+	maxGapBufferedEvents     = 4096
+	maxGapBufferedEventBytes = 64 << 20
 )
+
+var errEventGapBufferExceeded = errors.New("transport event gap buffer exceeded")
 
 type CursorStore interface {
 	LastEventID(context.Context) ([]byte, error)
@@ -41,6 +47,17 @@ type EventHandler interface {
 
 type GapReconciler interface {
 	ReconcileEventGap(context.Context, func(context.Context, []byte) (bool, error)) error
+}
+
+// NodeConnectionReader reads transportd's current connection metadata for one
+// node. A nil connection reports that the node is not connected.
+type NodeConnectionReader func(context.Context, []byte) (*transportv1.NodeConnection, error)
+
+// OwnerGapReconciler is the term-aware event-gap recovery contract used by
+// connection ownership. GapReconciler remains the compatibility contract for
+// consumers that only need connection presence.
+type OwnerGapReconciler interface {
+	ReconcileOwnerEventGap(context.Context, NodeConnectionReader) error
 }
 
 type Client struct {
@@ -212,12 +229,11 @@ func (c *Client) consumeArtifact(ctx context.Context, grant *agentv1.ArtifactGra
 }
 
 func (c *Client) RunWatch(ctx context.Context, cursors CursorStore, handler EventHandler) error {
-	reconcileCursor := false
 	for attempt := uint(0); ; attempt++ {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		err := c.watchOnce(ctx, cursors, handler, reconcileCursor)
+		err := c.watchOnce(ctx, cursors, handler)
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
@@ -225,26 +241,147 @@ func (c *Client) RunWatch(ctx context.Context, cursors CursorStore, handler Even
 			return err
 		}
 		if status.Code(err) == codes.OutOfRange {
-			reconciler, ok := handler.(GapReconciler)
-			if !ok {
+			switch handler.(type) {
+			case OwnerGapReconciler, GapReconciler:
+				// Once retention is lost, every replacement stream is protected by
+				// a fresh inventory pass. Returning to cursor-only recovery would
+				// recreate a blind interval when no post-reconciliation event exists.
+				return c.runProtectedEventGapWatch(ctx, handler)
+			default:
 				return errors.New("transport event gap cannot be reconciled")
 			}
-			reconcileCtx, cancel := context.WithTimeout(ctx, c.deadline)
-			reconcileErr := reconciler.ReconcileEventGap(reconcileCtx, c.NodeConnected)
-			cancel()
-			if reconcileErr != nil {
-				if err := waitBackoff(ctx, attempt); err != nil {
-					return err
-				}
-				continue
-			}
-			reconcileCursor = true
-			continue
 		}
-		reconcileCursor = false
 		if err := waitBackoff(ctx, attempt); err != nil {
 			return err
 		}
+	}
+}
+
+// runProtectedEventGapWatch closes the scan-to-subscribe race after retention
+// loss. Each attempt first establishes a cursorless subscriber and drains its
+// ordered stream into a bounded buffer. Only then does it reconcile inventory,
+// clear the stale cursor, and ingest the buffered events in order. A stream or
+// buffer failure discards the attempt and repeats the protected snapshot; it
+// never falls back to an unprotected cursorless watch.
+func (c *Client) runProtectedEventGapWatch(ctx context.Context, handler EventHandler) error {
+	for attempt := uint(0); ; attempt++ {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		err := c.watchProtectedEventGapOnce(ctx, handler)
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		if status.Code(err) == codes.PermissionDenied || status.Code(err) == codes.Unauthenticated {
+			return err
+		}
+		if err := waitBackoff(ctx, attempt); err != nil {
+			return err
+		}
+	}
+}
+
+func (c *Client) watchProtectedEventGapOnce(ctx context.Context, handler EventHandler) error {
+	attemptCtx, attemptCancel := context.WithCancel(ctx)
+	defer attemptCancel()
+	connection, stream, streamCancel, err := c.openEventStream(attemptCtx, nil)
+	if err != nil {
+		return err
+	}
+	defer connection.Close()
+	defer streamCancel()
+
+	// Header acknowledgement proves the server has handled WatchEvents. The
+	// server installs the retained backlog and subscriber atomically before it
+	// returns the stream, so inventory starts only after that boundary exists.
+	headerTimer := time.AfterFunc(c.deadline, streamCancel)
+	_, err = stream.Header()
+	headerTimer.Stop()
+	if err != nil {
+		return fmt.Errorf("establish protected transport event watch: %w", err)
+	}
+
+	events := make(chan *transportv1.TransportEvent, maxGapBufferedEvents)
+	receiverResult := make(chan error, 1)
+	var bufferedBytes int64
+	var bufferedMu sync.Mutex
+	go func() {
+		defer close(events)
+		for {
+			event, receiveErr := stream.Recv()
+			if receiveErr != nil {
+				receiverResult <- fmt.Errorf("receive protected transport event: %w", receiveErr)
+				attemptCancel()
+				return
+			}
+			eventBytes := int64(proto.Size(event))
+			bufferedMu.Lock()
+			if bufferedBytes+eventBytes > maxGapBufferedEventBytes {
+				bufferedMu.Unlock()
+				receiverResult <- errEventGapBufferExceeded
+				attemptCancel()
+				return
+			}
+			bufferedBytes += eventBytes
+			bufferedMu.Unlock()
+			select {
+			case events <- event:
+			case <-ctx.Done():
+				receiverResult <- ctx.Err()
+				attemptCancel()
+				return
+			default:
+				bufferedMu.Lock()
+				bufferedBytes -= eventBytes
+				bufferedMu.Unlock()
+				receiverResult <- errEventGapBufferExceeded
+				attemptCancel()
+				return
+			}
+		}
+	}()
+
+	reconcileCtx, reconcileCancel := context.WithTimeout(attemptCtx, c.deadline)
+	reconcileErr := c.reconcileEventGap(reconcileCtx, handler)
+	reconcileCancel()
+	if reconcileErr != nil {
+		attemptCancel()
+		receiveErr := <-receiverResult
+		if errors.Is(receiveErr, errEventGapBufferExceeded) {
+			return receiveErr
+		}
+		return reconcileErr
+	}
+	select {
+	case receiveErr := <-receiverResult:
+		return receiveErr
+	default:
+	}
+
+	for event := range events {
+		bufferedMu.Lock()
+		bufferedBytes -= int64(proto.Size(event))
+		bufferedMu.Unlock()
+		eventCtx, eventCancel := context.WithTimeout(attemptCtx, c.deadline)
+		ingestErr := handler.Ingest(eventCtx, event)
+		eventCancel()
+		if ingestErr != nil {
+			attemptCancel()
+			<-receiverResult
+			return fmt.Errorf("ingest protected transport event: %w", ingestErr)
+		}
+	}
+	return <-receiverResult
+}
+
+func (c *Client) reconcileEventGap(ctx context.Context, handler EventHandler) error {
+	switch reconciler := handler.(type) {
+	case OwnerGapReconciler:
+		return reconciler.ReconcileOwnerEventGap(ctx, c.NodeConnection)
+	case GapReconciler:
+		return reconciler.ReconcileEventGap(ctx, c.NodeConnected)
+	default:
+		return errors.New("transport event gap cannot be reconciled")
 	}
 }
 
@@ -261,21 +398,37 @@ func waitBackoff(ctx context.Context, attempt uint) error {
 }
 
 func (c *Client) NodeConnected(ctx context.Context, nodeID []byte) (bool, error) {
-	connection, err := c.dial()
+	connection, err := c.NodeConnection(ctx, nodeID)
 	if err != nil {
 		return false, err
+	}
+	return connection != nil, nil
+}
+
+// NodeConnection returns transportd's current connection metadata for one
+// node, or nil when that node is not connected.
+func (c *Client) NodeConnection(ctx context.Context, nodeID []byte) (*transportv1.NodeConnection, error) {
+	if len(nodeID) != 16 {
+		return nil, errors.New("transport node is invalid")
+	}
+	connection, err := c.dial()
+	if err != nil {
+		return nil, err
 	}
 	defer connection.Close()
 	rpcCtx, cancel := context.WithTimeout(ctx, c.deadline)
 	defer cancel()
-	_, err = transportv1.NewTransportServiceClient(connection).GetNodeConnection(rpcCtx, &transportv1.GetNodeConnectionRequest{NodeId: nodeID})
+	metadata, err := transportv1.NewTransportServiceClient(connection).GetNodeConnection(rpcCtx, &transportv1.GetNodeConnectionRequest{NodeId: nodeID})
 	if status.Code(err) == codes.NotFound {
-		return false, nil
+		return nil, nil
 	}
 	if err != nil {
-		return false, fmt.Errorf("get transport node connection: %w", err)
+		return nil, fmt.Errorf("get transport node connection: %w", err)
 	}
-	return true, nil
+	if metadata == nil || !bytes.Equal(metadata.GetNodeId(), nodeID) {
+		return nil, errors.New("transport returned inconsistent node connection")
+	}
+	return metadata, nil
 }
 
 // UpdateNodeTrust applies one trust update. operationID is the canonical
@@ -369,41 +522,26 @@ func (c *Client) GetOwnerFence(ctx context.Context, nodeID []byte) (*agentv1.Con
 	return response.GetFence(), nil
 }
 
-func (c *Client) watchOnce(ctx context.Context, cursors CursorStore, handler EventHandler, reconcileCursor bool) error {
-	connection, err := c.dial()
+func (c *Client) watchOnce(ctx context.Context, cursors CursorStore, handler EventHandler) error {
+	cursorCtx, cursorCancel := context.WithTimeout(ctx, c.deadline)
+	cursor, err := cursors.LastEventID(cursorCtx)
+	cursorCancel()
+	if err != nil {
+		return fmt.Errorf("restore transport cursor: %w", err)
+	}
+	watchCtx, watchCancel := context.WithCancel(ctx)
+	defer watchCancel()
+	connection, stream, streamCancel, err := c.openEventStream(watchCtx, cursor)
 	if err != nil {
 		return err
 	}
 	defer connection.Close()
-	healthCtx, healthCancel := context.WithTimeout(ctx, c.deadline)
-	health, err := healthv1.NewHealthClient(connection).Check(healthCtx, &healthv1.HealthCheckRequest{Service: "ocserv.platform.transport.v1.TransportService"})
-	healthCancel()
-	if err != nil {
-		return fmt.Errorf("check transport health: %w", err)
-	}
-	if health.GetStatus() != healthv1.HealthCheckResponse_SERVING {
-		return errors.New("transport health is not serving")
-	}
-	var cursor []byte
-	if !reconcileCursor {
-		cursorCtx, cancel := context.WithTimeout(ctx, c.deadline)
-		cursor, err = cursors.LastEventID(cursorCtx)
-		cancel()
-		if err != nil {
-			return fmt.Errorf("restore transport cursor: %w", err)
-		}
-	}
-	streamCtx, streamCancel := context.WithCancel(ctx)
 	defer streamCancel()
-	stream, err := transportv1.NewTransportServiceClient(connection).WatchEvents(streamCtx, &transportv1.WatchEventsRequest{AfterEventId: cursor}, grpc.MaxCallRecvMsgSize(maxMessageBytes))
-	if err != nil {
-		return fmt.Errorf("watch transport events: %w", err)
-	}
 	events := make(chan *transportv1.TransportEvent, c.queueCapacity)
 	consumerErr := make(chan error, 1)
 	go func() {
 		for event := range events {
-			eventCtx, eventCancel := context.WithTimeout(streamCtx, c.deadline)
+			eventCtx, eventCancel := context.WithTimeout(watchCtx, c.deadline)
 			err := handler.Ingest(eventCtx, event)
 			eventCancel()
 			if err != nil {
@@ -435,6 +573,32 @@ func (c *Client) watchOnce(ctx context.Context, cursors CursorStore, handler Eve
 			return ctx.Err()
 		}
 	}
+}
+
+func (c *Client) openEventStream(ctx context.Context, cursor []byte) (*grpc.ClientConn, grpc.ServerStreamingClient[transportv1.TransportEvent], context.CancelFunc, error) {
+	connection, err := c.dial()
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	healthCtx, healthCancel := context.WithTimeout(ctx, c.deadline)
+	health, err := healthv1.NewHealthClient(connection).Check(healthCtx, &healthv1.HealthCheckRequest{Service: "ocserv.platform.transport.v1.TransportService"})
+	healthCancel()
+	if err != nil {
+		connection.Close()
+		return nil, nil, nil, fmt.Errorf("check transport health: %w", err)
+	}
+	if health.GetStatus() != healthv1.HealthCheckResponse_SERVING {
+		connection.Close()
+		return nil, nil, nil, errors.New("transport health is not serving")
+	}
+	streamCtx, streamCancel := context.WithCancel(ctx)
+	stream, err := transportv1.NewTransportServiceClient(connection).WatchEvents(streamCtx, &transportv1.WatchEventsRequest{AfterEventId: cursor}, grpc.MaxCallRecvMsgSize(maxMessageBytes))
+	if err != nil {
+		streamCancel()
+		connection.Close()
+		return nil, nil, nil, fmt.Errorf("watch transport events: %w", err)
+	}
+	return connection, stream, streamCancel, nil
 }
 
 func (c *Client) dial() (*grpc.ClientConn, error) {

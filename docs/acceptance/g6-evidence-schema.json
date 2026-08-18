@@ -327,6 +327,7 @@
             "resource_samples",
             "timeline",
             "epoch_events",
+            "authority_cut",
             "command_trace",
             "outbox_snapshot",
             "http_samples",

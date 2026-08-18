@@ -36,8 +36,27 @@ psql_primary() {
   G6_DB_PORT="$(db_primary_port)" g6rd_psql "$@"
 }
 
+psql_primary_probe() {
+  G6RD_PSQL_TIMEOUT_SECONDS=10 psql_primary "$@"
+}
+
 node_ids() {
   cut -f2 "${NODES_FILE}"
+}
+
+local_node_id() {
+  local ordinal="${1:?local node ordinal is required}"
+  [[ "${ordinal}" =~ ^[1-9][0-9]*$ ]] || return 2
+  awk -F'\t' -v prefix="g6-${FD_ID}-" -v wanted="${ordinal}" '
+    index($1, prefix) == 1 {
+      seen++
+      if (seen == wanted) {
+        print $2
+        exit
+      }
+    }
+    END { if (seen < wanted) exit 1 }
+  ' "${NODES_FILE}"
 }
 
 node_service() {
@@ -55,7 +74,7 @@ node_service() {
 
 journal_query() {
   local service="${1:?agent service is required}" sql="${2:?sql is required}"
-  g6rd_agent_compose exec -T "${service}" \
+  G6RD_COMPOSE_TIMEOUT_SECONDS=10 g6rd_agent_compose exec -T "${service}" \
     sqlite3 -readonly /run/ocservia-agent/journal/agent.db "${sql}"
 }
 
@@ -65,6 +84,7 @@ journal_query() {
 # ---------------------------------------------------------------------------
 
 start_watchers() {
+  rm -f "${G6RD_STATE}/watchers-stop"
   : >"${G6RD_STATE}/fencing-history.jsonl"
   : >"${G6RD_STATE}/leadership-history.jsonl"
   g6rd_spawn_harness_loop "${G6RD_LOGS}/fencing-watcher.log" \
@@ -75,14 +95,11 @@ start_watchers() {
 
 stop_watchers() {
   touch "${G6RD_STATE}/watchers-stop"
-  local name pid
+  local name status=0
   for name in fencing leadership; do
-    [[ -s "${G6RD_STATE}/${name}-watcher.pid" ]] || continue
-    pid="$(<"${G6RD_STATE}/${name}-watcher.pid")"
-    kill "${pid}" 2>/dev/null || true
-    sleep 1
-    kill -9 "${pid}" 2>/dev/null || true
+    g6rd_stop_harness_loop "${G6RD_STATE}/${name}-watcher.pid" || status=1
   done
+  return "${status}"
 }
 
 # ---------------------------------------------------------------------------
@@ -815,16 +832,129 @@ phase_scenario_path() {
 wait_commands_settled() {
   local keys_prefix="${1:?key prefix}"
   local unsettled
-  unsettled="$(psql_primary -Atc \
+  unsettled="$(psql_primary_probe -Atc \
     "SELECT count(*) FROM commands WHERE idempotency_key LIKE '${keys_prefix}%' AND state NOT IN ('succeeded','failed','rejected','unknown','expired','rolled_back','superseded')")"
   [[ "${unsettled}" == 0 ]]
 }
 
 outbox_row_claimed() {
   local claimed
-  claimed="$(psql_primary -Atc \
-    "SELECT count(*) FROM outbox_events o JOIN commands c ON c.id=o.command_id WHERE c.idempotency_key='${CLAIM_KEY:?}' AND (o.locked_by IS NOT NULL OR o.published_at IS NOT NULL)")"
+  claimed="$(psql_primary_probe -Atc \
+    "SELECT count(*)
+     FROM outbox_events AS outbox
+     JOIN commands AS command ON command.id=outbox.command_id
+     JOIN node_command_leases AS lease
+       ON lease.command_id=command.id AND lease.node_id=command.node_id
+     JOIN command_attempts AS attempt
+       ON attempt.command_id=command.id AND attempt.outbox_event_id=outbox.id
+      AND attempt.worker_id=lease.worker_id
+     WHERE command.idempotency_key='${CLAIM_KEY:?}'
+       AND outbox.published_at IS NULL
+       AND outbox.locked_by=lease.worker_id
+       AND outbox.locked_until>clock_timestamp()
+       AND lease.leased_until>clock_timestamp()
+       AND attempt.attempt_number=outbox.attempts
+       AND attempt.state='sending' AND attempt.finished_at IS NULL")"
   [[ "${claimed}" =~ ^[0-9]+$ ]] && ((claimed >= 1))
+}
+
+pre_send_barrier_disarm() {
+  rm -f -- "${G6RD_PRE_SEND_BARRIER}/arm" \
+    "${G6RD_PRE_SEND_BARRIER}/received" \
+    "${G6RD_PRE_SEND_BARRIER}/release" \
+    "${G6RD_PRE_SEND_BARRIER}/post-send-arm" \
+    "${G6RD_PRE_SEND_BARRIER}/post-send-received" \
+    "${G6RD_PRE_SEND_BARRIER}/post-send-release"
+}
+
+pre_send_barrier_arm() {
+  local command_id="${1:?command id is required}"
+  pre_send_barrier_disarm
+  printf '%s\n' "${command_id}" >"${G6RD_PRE_SEND_BARRIER}/arm"
+  chmod 0644 "${G6RD_PRE_SEND_BARRIER}/arm"
+}
+
+pre_send_barrier_reached() {
+  local command_id="${1:?command id is required}"
+  [[ -s "${G6RD_PRE_SEND_BARRIER}/received" ]] || return 1
+  [[ "$(sed -n '1p' "${G6RD_PRE_SEND_BARRIER}/received")" == "${command_id}" ]]
+}
+
+pre_send_barrier_release() {
+  local command_id="${1:-}"
+  [[ -n "${command_id}" ]] || return 0
+  printf '%s\n' "${command_id}" >"${G6RD_PRE_SEND_BARRIER}/release"
+  chmod 0644 "${G6RD_PRE_SEND_BARRIER}/release"
+}
+
+post_send_barrier_arm() {
+  local command_id="${1:?command id is required}"
+  rm -f -- "${G6RD_PRE_SEND_BARRIER}/post-send-arm" \
+    "${G6RD_PRE_SEND_BARRIER}/post-send-received" \
+    "${G6RD_PRE_SEND_BARRIER}/post-send-release"
+  printf '%s\n' "${command_id}" >"${G6RD_PRE_SEND_BARRIER}/post-send-arm"
+  chmod 0644 "${G6RD_PRE_SEND_BARRIER}/post-send-arm"
+}
+
+post_send_barrier_reached() {
+  local command_id="${1:?command id is required}"
+  [[ -s "${G6RD_PRE_SEND_BARRIER}/post-send-received" ]] || return 1
+  [[ "$(sed -n '1p' "${G6RD_PRE_SEND_BARRIER}/post-send-received")" == "${command_id}" ]]
+}
+
+post_send_barrier_release() {
+  local command_id="${1:-}"
+  [[ -n "${command_id}" ]] || return 0
+  printf '%s\n' "${command_id}" >"${G6RD_PRE_SEND_BARRIER}/post-send-release"
+  chmod 0644 "${G6RD_PRE_SEND_BARRIER}/post-send-release"
+}
+
+release_armed_pre_send_barrier() {
+  local command_id=""
+  if [[ -s "${G6RD_PRE_SEND_BARRIER}/arm" ]]; then
+    command_id="$(sed -n '1p' "${G6RD_PRE_SEND_BARRIER}/arm")"
+  fi
+  pre_send_barrier_release "${command_id}"
+}
+
+release_armed_post_send_barrier() {
+  local command_id=""
+  if [[ -s "${G6RD_PRE_SEND_BARRIER}/post-send-arm" ]]; then
+    command_id="$(sed -n '1p' "${G6RD_PRE_SEND_BARRIER}/post-send-arm")"
+  fi
+  post_send_barrier_release "${command_id}"
+}
+
+release_armed_result_commit_barrier() {
+  local command_id=""
+  if [[ -s "${G6RD_RESULT_BARRIER}/arm" ]]; then
+    command_id="$(sed -n '1p' "${G6RD_RESULT_BARRIER}/arm")"
+  fi
+  [[ -n "${command_id}" ]] || return 0
+  printf '%s\n' "${command_id}" >"${G6RD_RESULT_BARRIER}/release"
+  chmod 0666 "${G6RD_RESULT_BARRIER}/release"
+}
+
+scoped_socket_ready() {
+  local service="${1:?service is required}" path="${2:?socket path is required}"
+  G6RD_COMPOSE_TIMEOUT_SECONDS=10 g6rd_compose exec -T "${service}" test -S "${path}"
+}
+
+restart_worker_transport_unit() {
+  local reason="${1:?restart reason is required}"
+  g6rd_export_common_env
+  g6rd_compose up --detach worker
+  g6rd_wait_until_deadline 30 1 "${reason} replacement worker trust socket" \
+    scoped_socket_ready worker /run/ocserv-trust/control-plane.sock
+  g6rd_compose up --detach transportd
+  g6rd_wait_until_deadline 30 1 "${reason} replacement transportd socket" \
+    scoped_socket_ready transportd /run/ocserv-platform/transportd.sock
+  if ! G6RD_NODE_CONNECTION_TIMEOUT_SECONDS=5 \
+    g6rd_wait_until_deadline 180 5 \
+      "all Agents to establish fenced sessions after ${reason}" all_nodes_connected; then
+    report_node_connection_timeout
+    return 1
+  fi
 }
 
 # The agent journal stores the envelope's binary command id, so lookups key
@@ -832,79 +962,142 @@ outbox_row_claimed() {
 journal_has_command() {
   local service="${1:?service}" command_id="${2:?command id}"
   journal_query "${service}" \
-    "SELECT count(*) FROM command_journal WHERE hex(command_id)='${command_id//-/}'" \
+    "SELECT count(*) FROM command_journal WHERE lower(hex(command_id))='${command_id//-/}'" \
     2>/dev/null | tr -d '[:space:]'
+}
+
+journal_command_ready() {
+  local service="${1:?service}" command_id="${2:?command id}"
+  [[ "$(journal_has_command "${service}" "${command_id}")" == 1 ]]
 }
 
 journal_result_state() {
   local service="${1:?service}" command_id="${2:?command id}"
   journal_query "${service}" \
-    "SELECT state FROM command_journal WHERE hex(command_id)='${command_id//-/}'" \
+    "SELECT state FROM command_journal WHERE lower(hex(command_id))='${command_id//-/}'" \
     2>/dev/null | tr -d '[:space:]'
 }
 
 command_id_of_key() {
-  psql_primary -Atc "SELECT id FROM commands WHERE idempotency_key='${1:?key}'"
+  psql_primary_probe -Atc "SELECT id FROM commands WHERE idempotency_key='${1:?key}'"
 }
 
-# Window 1: claim committed, transport send blocked (transportd frozen),
-# worker killed before any send can be accepted.
+# Window 1: the exact command has returned from the committed Claim and is
+# blocked by the test-only Worker hook immediately before SendCommand. Killing
+# both replacement-unit processes at that signal proves no transport write can
+# have been queued in the UDS kernel buffers.
 phase_outbox_claim_before_send() {
-  local node key command_id
-  node="$(node_ids | head -1)"
-  key="g6-crash1-${RUN_ID}"
-  CLAIM_KEY="${key}"
-  export CLAIM_KEY
-  docker pause "${COMPOSE_PROJECT}-transportd-1" >/dev/null
-  g6rd_enqueue_command "${node}" "${key}"
-  g6rd_wait_until 30 1 "outbox row claimed" outbox_row_claimed
-  g6rd_timeline_event outbox_claim_committed
-  docker kill "${COMPOSE_PROJECT}-worker-1" >/dev/null
-  g6rd_timeline_event worker_crashed_before_send
-  docker unpause "${COMPOSE_PROJECT}-transportd-1" >/dev/null
-  g6rd_compose up --detach worker
-  g6rd_wait_until 120 5 "claim-before-send command recovered" \
-    wait_commands_settled "g6-crash1-${RUN_ID}"
-  printf '%s\n' "$(command_id_of_key "${key}")" >"${G6RD_STATE}/crash1-command-id"
-  g6rd_timeline_event command_recovered
-}
-
-# Window 2: transport accepted the send, the worker dies before MarkSent
-# commits. Detected from the journal receipt plus a first attempt that never
-# left 'sending'; retried with fresh commands until the window is caught.
-phase_outbox_send_before_mark() {
-  local node key command_id first_attempt caught=0 attempt service
-  node="$(node_ids | head -2 | tail -1)"
-  service="$(node_service "${node}")"
-  for attempt in 1 2 3 4 5; do
-    key="g6-crash2-${RUN_ID}-${attempt}"
+  (
+    local node key command_id completed=0
+    trap 'if [[ "${completed}" != 1 ]]; then
+      pre_send_barrier_release "${command_id:-}" || true
+      docker unpause "${COMPOSE_PROJECT}-worker-1" >/dev/null 2>&1 || true
+    fi' EXIT
+    node="$(local_node_id 1)"
+    [[ -n "${node}" ]] || {
+      echo "the first local FD-B crash-window node is missing" >&2
+      return 1
+    }
+    key="g6-crash1-${RUN_ID}"
     CLAIM_KEY="${key}"
     export CLAIM_KEY
-    g6rd_enqueue_command "${node}" "${key}" || continue
-    g6rd_wait_until 30 1 "crash2 attempt claimed" outbox_row_claimed || continue
-    docker kill "${COMPOSE_PROJECT}-worker-1" >/dev/null
-    g6rd_compose up --detach worker
-    g6rd_wait_until 120 5 "crash2 attempt settled" \
-      wait_commands_settled "g6-crash2-${RUN_ID}-${attempt}" || continue
+    g6rd_wait_until_deadline 60 5 "outbox drained before claim-before-send" outbox_drained
+    docker pause "${COMPOSE_PROJECT}-worker-1" >/dev/null
+    g6rd_enqueue_command "${node}" "${key}"
+    # shellcheck disable=SC2030  # phase state is intentionally subshell-local
     command_id="$(command_id_of_key "${key}")"
-    first_attempt="$(psql_primary -Atc \
-      "SELECT state FROM command_attempts WHERE command_id='${command_id}' ORDER BY attempt_number LIMIT 1")"
-    if [[ "${first_attempt}" == "sending" ]] \
-      && [[ "$(journal_has_command "${service}" "${command_id}")" == 1 ]]; then
-      # journal receipt proves transport acceptance; the first attempt never
-      # committed MarkSent before the crash
-      printf '%s\n' "${command_id}" >"${G6RD_STATE}/crash2-command-id"
-      g6rd_timeline_event transport_send_accepted
-      g6rd_timeline_event worker_crashed_before_mark_sent
-      g6rd_timeline_event command_reconciled
-      caught=1
-      break
+    [[ -n "${command_id}" ]] || {
+      echo "claim-before-send command id is missing" >&2
+      return 1
+    }
+    pre_send_barrier_arm "${command_id}"
+    docker unpause "${COMPOSE_PROJECT}-worker-1" >/dev/null
+    g6rd_wait_until_deadline 10 1 "exact pre-send Worker barrier" \
+      pre_send_barrier_reached "${command_id}"
+    g6rd_wait_until_deadline 5 1 "exact committed outbox claim" outbox_row_claimed
+    g6rd_timeline_event outbox_claim_committed
+    docker kill "${COMPOSE_PROJECT}-worker-1" >/dev/null
+    g6rd_timeline_event worker_crashed_before_send
+    docker kill "${COMPOSE_PROJECT}-transportd-1" >/dev/null
+    pre_send_barrier_disarm
+    restart_worker_transport_unit claim-before-send
+    g6rd_wait_until_deadline 120 5 "claim-before-send command recovered" \
+      wait_commands_settled "g6-crash1-${RUN_ID}"
+    printf '%s\n' "${command_id}" >"${G6RD_STATE}/crash1-command-id"
+    g6rd_timeline_event command_recovered
+    completed=1
+  )
+}
+
+# Window 2: the exact command stops at the post-Claim/pre-Send Worker hook while
+# the harness arms a second exact hook immediately after SendCommand returns.
+# Releasing the first hook and observing the second proves transport acceptance
+# without relying on a process-wide database waiter; the worker then dies before
+# MarkSent can begin.
+phase_outbox_send_before_mark() {
+  (
+    local node key command_id first_attempt published service synthetic_barrier completed=0
+    node="$(local_node_id 2)"
+    [[ -n "${node}" ]] || {
+      echo "the second local FD-B crash-window node is missing" >&2
+      return 1
+    }
+    service="$(node_service "${node}")"
+    synthetic_barrier="${G6RD_AGENTS}/${service}/state/synthetic-barrier"
+    # shellcheck disable=SC2031  # trap reads this phase's subshell-local id
+    trap 'if [[ "${completed}" != 1 ]]; then
+      pre_send_barrier_release "${command_id:-}" || true
+      post_send_barrier_release "${command_id:-}" || true
+      docker unpause "${COMPOSE_PROJECT}-worker-1" >/dev/null 2>&1 || true
     fi
-  done
-  [[ "${caught}" == 1 ]] || {
-    echo "the send-before-mark window was not observed in five attempts" >&2
-    return 1
-  }
+    rm -f -- "${synthetic_barrier}"
+    docker unpause "${COMPOSE_PROJECT}-transportd-1" >/dev/null 2>&1 || true' EXIT
+    key="g6-crash2-${RUN_ID}"
+    CLAIM_KEY="${key}"
+    export CLAIM_KEY
+    g6rd_wait_until_deadline 60 5 "outbox drained before send-before-MarkSent" outbox_drained
+    docker pause "${COMPOSE_PROJECT}-worker-1" >/dev/null
+    : >"${synthetic_barrier}"
+    chmod 0644 "${synthetic_barrier}"
+    g6rd_enqueue_command "${node}" "${key}"
+    # shellcheck disable=SC2030  # phase state is intentionally subshell-local
+    command_id="$(command_id_of_key "${key}")"
+    [[ -n "${command_id}" ]] || {
+      echo "send-before-MarkSent command id is missing" >&2
+      return 1
+    }
+    pre_send_barrier_arm "${command_id}"
+    post_send_barrier_arm "${command_id}"
+    docker unpause "${COMPOSE_PROJECT}-worker-1" >/dev/null
+    g6rd_wait_until_deadline 10 1 "exact pre-send Worker barrier" \
+      pre_send_barrier_reached "${command_id}"
+    g6rd_wait_until_deadline 5 1 "send-before-MarkSent strict outbox claim" outbox_row_claimed
+    pre_send_barrier_release "${command_id}"
+    g6rd_wait_until_deadline 15 1 "exact post-send Worker barrier" \
+      post_send_barrier_reached "${command_id}"
+    g6rd_timeline_event transport_send_accepted
+    docker kill "${COMPOSE_PROJECT}-worker-1" >/dev/null
+    g6rd_timeline_event worker_crashed_before_mark_sent
+    rm -f -- "${synthetic_barrier}"
+    g6rd_wait_until_deadline 15 1 "exact Agent journal receipt after worker crash" \
+      journal_command_ready "${service}" "${command_id}"
+    docker kill "${COMPOSE_PROJECT}-transportd-1" >/dev/null
+    pre_send_barrier_disarm
+    first_attempt="$(psql_primary_probe -Atc \
+      "SELECT state FROM command_attempts WHERE command_id='${command_id}' ORDER BY attempt_number LIMIT 1")"
+    published="$(psql_primary_probe -Atc \
+      "SELECT count(*) FROM outbox_events WHERE command_id='${command_id}' AND published_at IS NOT NULL")"
+    [[ "${first_attempt}" == "sending" && "${published}" == 0 ]] || {
+      echo "the exact send-before-MarkSent attempt changed before the crash" >&2
+      return 1
+    }
+    printf '%s\n' "${command_id}" >"${G6RD_STATE}/crash2-command-id"
+    restart_worker_transport_unit send-before-MarkSent
+    g6rd_wait_until_deadline 120 5 "send-before-MarkSent command reconciled" \
+      wait_commands_settled "${key}"
+    g6rd_timeline_event command_reconciled
+    completed=1
+  )
 }
 
 # Window 3: the ingress transaction validates and applies the Agent result,
@@ -912,55 +1105,77 @@ phase_outbox_send_before_mark() {
 # commit. Killing the worker at that barrier proves the database saw no
 # terminal result until the replacement reconciled the retained Agent result.
 phase_outbox_result_before_commit() {
-  local node key command_id service kill_file="${G6RD_STATE}/crash3-kill-at"
-  local barrier="${G6RD_RESULT_BARRIER}"
-  node="$(node_ids | head -3 | tail -1)"
-  service="$(node_service "${node}")"
-  key="g6-crash3-${RUN_ID}"
-  rm -f "${barrier}/arm" "${barrier}/received" "${barrier}/release"
-  # Pause dispatch until the API has returned the exact command id that arms
-  # the ingress barrier; otherwise a fast synthetic result could beat setup.
-  docker pause "${COMPOSE_PROJECT}-worker-1" >/dev/null
-  g6rd_enqueue_command "${node}" "${key}"
-  command_id="$(command_id_of_key "${key}")"
-  [[ -n "${command_id}" ]] || {
-    echo "result-before-commit command id is missing" >&2
-    return 1
-  }
-  printf '%s\n' "${command_id}" >"${barrier}/arm"
-  chmod 0666 "${barrier}/arm"
-  docker unpause "${COMPOSE_PROJECT}-worker-1" >/dev/null
-  g6rd_wait_until 60 1 "ingress result commit barrier" test -s "${barrier}/received"
-  [[ "$(sed -n '1p' "${barrier}/received")" == "${command_id}" ]] || {
-    echo "result commit barrier signaled for the wrong command" >&2
-    return 1
-  }
-  sed -n '2p' "${barrier}/received" >"${G6RD_STATE}/crash3-result-received-at"
-  require_file "${G6RD_STATE}/crash3-result-received-at"
-  # The signal is emitted only after result validation/mutation inside the
-  # open transaction. A separate connection must still see no terminal row.
-  [[ "$(psql_primary -Atc "SELECT count(*) FROM agent_command_results WHERE command_id='${command_id}'")" == 0 ]] || {
-    echo "the command result committed before the ingress crash" >&2
-    return 1
-  }
-  sleep 1
-  docker kill "${COMPOSE_PROJECT}-worker-1" >/dev/null
-  g6rd_now >"${kill_file}"
-  [[ "$(psql_primary -Atc "SELECT count(*) FROM agent_command_results WHERE command_id='${command_id}'")" == 0 ]] || {
-    echo "the killed ingress transaction committed a command result" >&2
-    return 1
-  }
-  rm -f "${barrier}/arm" "${barrier}/received"
-  g6rd_compose up --detach worker
-  g6rd_wait_until 120 5 "crash3 result reconciled" wait_commands_settled "${key}"
-  [[ "$(psql_primary -Atc "SELECT count(*) FROM agent_command_results WHERE command_id='${command_id}'")" == 1 ]] || {
-    echo "the replacement ingress did not reconcile exactly one command result" >&2
-    return 1
-  }
-  printf '%s\n' "${command_id}" >"${G6RD_STATE}/crash3-command-id"
-  g6rd_timeline_event result_received "${G6RD_STATE}/crash3-result-received-at"
-  g6rd_timeline_event ingress_crashed_before_commit "${kill_file}"
-  g6rd_timeline_event result_reconciled
+  (
+    local node key command_id kill_file="${G6RD_STATE}/crash3-kill-at"
+    local barrier="${G6RD_RESULT_BARRIER}" completed=0
+    # A failed setup must not leave a frozen worker or an ingress transaction
+    # waiting forever. The exact release is ignored unless this command armed
+    # the barrier and reached it.
+    # shellcheck disable=SC2031  # trap reads this phase's subshell-local id
+    trap 'if [[ "${completed}" != 1 ]]; then
+      if [[ -n "${command_id:-}" ]]; then
+        printf "%s\n" "${command_id}" >"${barrier}/release" 2>/dev/null || true
+        chmod 0666 "${barrier}/release" 2>/dev/null || true
+      fi
+      docker unpause "${COMPOSE_PROJECT}-worker-1" >/dev/null 2>&1 || true
+    fi' EXIT
+    node="$(local_node_id 3)"
+    [[ -n "${node}" ]] || {
+      echo "the third local FD-B crash-window node is missing" >&2
+      return 1
+    }
+    key="g6-crash3-${RUN_ID}"
+    g6rd_wait_until_deadline 60 5 "outbox drained before result-before-commit" outbox_drained
+    rm -f "${barrier}/arm" "${barrier}/received" "${barrier}/release"
+    # Pause dispatch until the API has returned the exact command id that arms
+    # the ingress barrier; otherwise a fast synthetic result could beat setup.
+    docker pause "${COMPOSE_PROJECT}-worker-1" >/dev/null
+    g6rd_enqueue_command "${node}" "${key}"
+    command_id="$(command_id_of_key "${key}")"
+    [[ -n "${command_id}" ]] || {
+      echo "result-before-commit command id is missing" >&2
+      return 1
+    }
+    printf '%s\n' "${command_id}" >"${barrier}/arm"
+    # The worker creates received as uid 65532 with mode 0600. Pre-creating it
+    # keeps the exact signal readable by the runner without widening the bind.
+    : >"${barrier}/received"
+    chmod 0666 "${barrier}/arm" "${barrier}/received"
+    docker unpause "${COMPOSE_PROJECT}-worker-1" >/dev/null
+    g6rd_wait_until_deadline 60 1 "ingress result commit barrier" test -s "${barrier}/received"
+    [[ "$(sed -n '1p' "${barrier}/received")" == "${command_id}" ]] || {
+      echo "result commit barrier signaled for the wrong command" >&2
+      return 1
+    }
+    sed -n '2p' "${barrier}/received" >"${G6RD_STATE}/crash3-result-received-at"
+    require_file "${G6RD_STATE}/crash3-result-received-at"
+    # The signal is emitted only after result validation/mutation inside the
+    # open transaction. A separate connection must still see no terminal row.
+    [[ "$(psql_primary -Atc "SELECT count(*) FROM agent_command_results WHERE command_id='${command_id}'")" == 0 ]] || {
+      echo "the command result committed before the ingress crash" >&2
+      return 1
+    }
+    sleep 1
+    docker kill "${COMPOSE_PROJECT}-worker-1" >/dev/null
+    g6rd_now >"${kill_file}"
+    docker kill "${COMPOSE_PROJECT}-transportd-1" >/dev/null
+    [[ "$(psql_primary -Atc "SELECT count(*) FROM agent_command_results WHERE command_id='${command_id}'")" == 0 ]] || {
+      echo "the killed ingress transaction committed a command result" >&2
+      return 1
+    }
+    rm -f "${barrier}/arm" "${barrier}/received"
+    restart_worker_transport_unit result-before-commit
+    g6rd_wait_until_deadline 120 5 "crash3 result reconciled" wait_commands_settled "${key}"
+    [[ "$(psql_primary -Atc "SELECT count(*) FROM agent_command_results WHERE command_id='${command_id}'")" == 1 ]] || {
+      echo "the replacement ingress did not reconcile exactly one command result" >&2
+      return 1
+    }
+    printf '%s\n' "${command_id}" >"${G6RD_STATE}/crash3-command-id"
+    g6rd_timeline_event result_received "${G6RD_STATE}/crash3-result-received-at"
+    g6rd_timeline_event ingress_crashed_before_commit "${kill_file}"
+    g6rd_timeline_event result_reconciled
+    completed=1
+  )
 }
 
 journal_result_ready() {
@@ -975,7 +1190,7 @@ journal_result_ready() {
 # ---------------------------------------------------------------------------
 
 outbox_drained() {
-  [[ "$(psql_primary -Atc \
+  [[ "$(psql_primary_probe -Atc \
     'SELECT count(*) FROM outbox_events WHERE published_at IS NULL')" == 0 ]]
 }
 
@@ -1034,18 +1249,171 @@ phase_window() {
 # verifier against them.
 # ---------------------------------------------------------------------------
 
+quiesce_control_plane_writers() {
+  # Stop new public mutations. Worker and scheduler renewal must remain live
+  # until the atomic authority cut; pausing either before the session probe can
+  # consume its 30s/15s lease TTL and manufacture an expired final snapshot.
+  docker pause "${COMPOSE_PROJECT}-api-1" >/dev/null
+}
+
+quiesce_transport_ingress() {
+  docker pause "${COMPOSE_PROJECT}-transportd-1" >/dev/null
+}
+
+quiesce_authority_renewers() {
+  # Once transport ingress is frozen and the DB-clock cut is captured, no
+  # later owner or scheduler renewal may leak past the watcher/evidence cut.
+  docker pause "${COMPOSE_PROJECT}-worker-1" >/dev/null
+  docker pause "${COMPOSE_PROJECT}-scheduler-1" >/dev/null
+}
+
+capture_database_clock() {
+  psql_primary_probe -qAtc \
+    "SELECT to_char(clock_timestamp() AT TIME ZONE 'UTC','YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"')"
+}
+
+capture_final_authority_cut() {
+  local out="${G6RD_STATE}/final-authority-cut.json" expected
+  expected="$(node_ids | wc -l | tr -d '[:space:]')"
+  psql_primary_probe -qAtc \
+    "WITH cut AS MATERIALIZED (
+       SELECT clock_timestamp() AS at
+     ), owners AS (
+       SELECT fencing.*
+       FROM connection_owner_fencing AS fencing CROSS JOIN cut
+       WHERE fencing.lease_until>cut.at
+     ), leader AS (
+       SELECT leadership.*
+       FROM scheduler_leadership AS leadership CROSS JOIN cut
+       WHERE leadership.id=1 AND leadership.lease_until>cut.at
+     )
+     SELECT jsonb_build_object(
+       'cut_at',to_char(cut.at AT TIME ZONE 'UTC','YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"'),
+       'owners',COALESCE((
+         SELECT jsonb_agg(jsonb_build_object(
+           'node_hex',encode(owner.node_id,'hex'),
+           'owner_instance_id',owner.owner_instance_id::text,
+           'owner_incarnation',owner.owner_incarnation::text,
+           'connection_id',encode(owner.connection_id,'hex'),
+           'owner_epoch',owner.owner_epoch,
+           'lease_until',to_char(owner.lease_until AT TIME ZONE 'UTC','YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"'),
+           'history',encode(owner.node_id,'hex')||':'||owner.owner_instance_id||':'||owner.owner_incarnation||':'||encode(owner.connection_id,'hex')||':'||owner.owner_epoch||':'||to_char(owner.lease_until AT TIME ZONE 'UTC','YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"')||':'||to_char(owner.updated_at AT TIME ZONE 'UTC','YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"')
+         ) ORDER BY owner.node_id) FROM owners AS owner
+       ),'[]'::jsonb),
+       'leader',(
+         SELECT jsonb_build_object(
+           'instance_id',entry.instance_id::text,
+           'incarnation',entry.incarnation::text,
+           'epoch',entry.epoch,
+           'lease_until',to_char(entry.lease_until AT TIME ZONE 'UTC','YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"'),
+           'history',entry.instance_id||':'||entry.incarnation||':'||entry.epoch||':'||to_char(entry.lease_until AT TIME ZONE 'UTC','YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"')||':'||to_char(entry.updated_at AT TIME ZONE 'UTC','YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"')
+         ) FROM leader AS entry
+       )
+     ) FROM cut" >"${out}"
+  jq -e --argjson expected "${expected}" \
+    '.cut_at | type == "string"' "${out}" >/dev/null
+  jq -e --argjson expected "${expected}" \
+    '(.owners | length) == $expected
+     and ([.owners[].node_hex] | unique | length) == $expected
+     and all(.owners[];
+       (.node_hex | type == "string" and test("^[0-9a-f]{32}$"))
+       and (.owner_instance_id | type == "string" and length == 36)
+       and (.owner_incarnation | type == "string" and test("^[1-9][0-9]*$"))
+       and (.connection_id | type == "string" and test("^[0-9a-f]{32}$"))
+       and (.owner_epoch | type == "number" and . > 0)
+       and (.lease_until | type == "string"))
+     and (.leader.instance_id | type == "string" and length > 0)
+     and (.leader.incarnation | type == "string" and test("^[1-9][0-9]*$"))
+     and (.leader.epoch | type == "number" and . > 0)
+     and (.leader.lease_until | type == "string")' "${out}" >/dev/null || {
+    echo "the final authority cut does not contain every live owner and leader lease" >&2
+    return 1
+  }
+}
+
+assert_final_session_authority() {
+  local before="${G6RD_STATE}/evidence/final-sessions-before.json"
+  local after="${G6RD_STATE}/evidence/final-sessions-after.json"
+  local final="${G6RD_STATE}/evidence/final-sessions.json"
+  local cut="${G6RD_STATE}/final-authority-cut.json" expected sessions
+  local before_terms after_terms session_authority authority_terms
+  expected="$(node_ids | wc -l | tr -d '[:space:]')"
+  before_terms="${G6RD_STATE}/final-session-terms-before.tsv"
+  after_terms="${G6RD_STATE}/final-session-terms-after.tsv"
+  session_authority="${G6RD_STATE}/final-session-authority.tsv"
+  authority_terms="${G6RD_STATE}/final-authority-terms.tsv"
+  for sessions in "${before}" "${after}"; do
+    jq -e --argjson expected "${expected}" --arg cut_at "$(jq -r '.cut_at' "${cut}")" '
+      def epoch_seconds: sub("\\.[0-9]+Z$"; "Z") | fromdateiso8601;
+      .all_matched == true
+      and (.observations | length) == $expected
+      and ([.observations[].node_id] | unique | length) == $expected
+      and all(.observations[];
+        .found == true
+        and (.endpoint_id | type == "string" and test("^[0-9a-f]{64}$"))
+        and (.agent_instance_id | type == "string" and test("^[0-9a-f]{32}$"))
+        and (.owner_fence_id | type == "string" and test("^[0-9a-f]{32}$"))
+        and (.owner_instance_id | type == "string" and length == 36)
+        and (.owner_incarnation | type == "string" and test("^[1-9][0-9]*$"))
+        and (.connection_id | type == "string" and test("^[0-9a-f]{32}$"))
+        and (.owner_epoch | type == "number" and . > 0)
+        and (.connected_at | epoch_seconds) <= ($cut_at | epoch_seconds)
+        and (.owner_lease_until | epoch_seconds) > ($cut_at | epoch_seconds)
+        and (.session_expires_at | epoch_seconds) > ($cut_at | epoch_seconds))' \
+      "${sessions}" >/dev/null || {
+      echo "a bracketed final session inventory is incomplete or not live at the authority cut" >&2
+      return 1
+    }
+  done
+  jq -r '.observations[] | [
+      (.node_id | gsub("-"; "") | ascii_downcase),
+      .endpoint_id,.agent_instance_id,.connected_at,.session_expires_at,
+      .owner_fence_id,(.owner_instance_id | ascii_downcase),
+      .owner_incarnation,.connection_id,(.owner_epoch | tostring),
+      (.authorization_revision | tostring),(.negotiated_capabilities | tojson)
+    ] | @tsv' "${before}" | sort >"${before_terms}"
+  jq -r '.observations[] | [
+      (.node_id | gsub("-"; "") | ascii_downcase),
+      .endpoint_id,.agent_instance_id,.connected_at,.session_expires_at,
+      .owner_fence_id,(.owner_instance_id | ascii_downcase),
+      .owner_incarnation,.connection_id,(.owner_epoch | tostring),
+      (.authorization_revision | tostring),(.negotiated_capabilities | tojson)
+    ] | @tsv' "${after}" | sort >"${after_terms}"
+  if ! cmp -s "${before_terms}" "${after_terms}"; then
+    echo "a transport connection term changed across the DB authority cut" >&2
+    diff -u "${before_terms}" "${after_terms}" >&2 || true
+    return 1
+  fi
+  jq -r '.observations[] | [
+      (.node_id | gsub("-"; "") | ascii_downcase),
+      (.owner_instance_id | ascii_downcase),.owner_incarnation,
+      .connection_id,(.owner_epoch | tostring)
+    ] | @tsv' "${after}" | sort >"${session_authority}"
+  jq -r '.owners[] | [
+      .node_hex,(.owner_instance_id | ascii_downcase),.owner_incarnation,
+      .connection_id,(.owner_epoch | tostring)
+    ] | @tsv' "${cut}" | sort >"${authority_terms}"
+  if ! cmp -s "${session_authority}" "${authority_terms}"; then
+    echo "the final transport sessions do not match the authoritative owner terms" >&2
+    diff -u "${authority_terms}" "${session_authority}" >&2 || true
+    return 1
+  fi
+  cp -f "${after}" "${final}"
+}
+
+append_final_history_snapshot() {
+  local cut="${G6RD_STATE}/final-authority-cut.json"
+  require_file "${cut}"
+  jq -er '.owners[].history' "${cut}" >>"${G6RD_STATE}/fencing-history.jsonl"
+  jq -er '.leader.history' "${cut}" >>"${G6RD_STATE}/leadership-history.jsonl"
+}
+
 phase_evidence_collect() {
-  stop_watchers
   G6RD_WORKSPACE_ID="$(<"${G6RD_STATE}/workspace-id")"
   export G6RD_WORKSPACE_ID
   g6rd_export_common_env
   local dir="${G6RD_STATE}/evidence" index service
   mkdir -p "${dir}/effects"
-  # the authorized+connected population as the live transportd sees it
-  local args=()
-  readarray -t args < <(node_ids)
-  g6rd_probe_node_connection any "${args[@]}" >"${dir}/final-sessions.json"
-  g6rd_now >"${dir}/snapshot-taken-at"
   # frozen database views, one JSON object per line; to_char pins every
   # timestamp to strict RFC 3339 with an explicit UTC offset
   psql_primary -Atc "SELECT jsonb_build_object('id',c.id::text,'idempotency_key',c.idempotency_key,'node_id',c.node_id::text,'state',c.state,'created_at',to_char(c.created_at AT TIME ZONE 'UTC','YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"'),'updated_at',to_char(c.updated_at AT TIME ZONE 'UTC','YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"')) FROM commands c WHERE c.idempotency_key LIKE 'g6-%' ORDER BY c.created_at, c.id" \
@@ -1056,8 +1424,6 @@ phase_evidence_collect() {
     >"${dir}/outbox.jsonl"
   psql_primary -Atc "SELECT jsonb_build_object('command_id',e.command_id::text,'result',e.result,'occurred_at',to_char(e.occurred_at AT TIME ZONE 'UTC','YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"')) FROM audit_events e WHERE e.command_id IS NOT NULL AND EXISTS(SELECT 1 FROM commands c WHERE c.id=e.command_id AND c.idempotency_key LIKE 'g6-%') ORDER BY e.occurred_at, e.id" \
     >"${dir}/audit.jsonl"
-  psql_primary -Atc "SELECT jsonb_build_object('agent_id',n.name,'last_telemetry_at',to_char(s.last_heartbeat_at AT TIME ZONE 'UTC','YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"')) FROM node_observed_snapshots s JOIN nodes n ON n.id=s.node_id WHERE n.name LIKE 'g6-fd-%' ORDER BY n.name" \
-    >"${dir}/telemetry.jsonl"
   psql_primary -Atc "SELECT jsonb_build_object('id',m.id,'txid',m.txid,'written_at',to_char(m.written_at AT TIME ZONE 'UTC','YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"')) FROM g6_readiness_markers m ORDER BY m.written_at" \
     >"${dir}/markers.jsonl"
   # per-agent durable journals: the effect population keyed by the binary
@@ -1078,6 +1444,38 @@ phase_evidence_collect() {
       "${name}" 2>/dev/null || true
   done >>"${dir}/instances.tsv"
   printf 'failure_domain=%s\nalias=%s\n' "${FD_ID}" "${FD_ALIAS}" >"${dir}/failure-domain.txt"
+
+  # All slow collection reads above run while the watchers remain live. Stop
+  # public writes, then bracket one DB-clock authority cut with two complete
+  # transport inventories. The immutable signed owner tuple and connection
+  # identity must match on both sides, so a disconnect or replacement cannot
+  # hide in the probe-to-cut interval. Authority renewers stay live throughout
+  # the bracket; their lease timestamp may advance without changing the term.
+  quiesce_control_plane_writers
+  psql_primary -Atc "SELECT jsonb_build_object('agent_id',n.name,'last_telemetry_at',to_char(s.last_heartbeat_at AT TIME ZONE 'UTC','YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"')) FROM node_observed_snapshots s JOIN nodes n ON n.id=s.node_id WHERE n.name LIKE 'g6-fd-%' ORDER BY n.name" \
+    >"${dir}/telemetry.jsonl"
+  local args=()
+  readarray -t args < <(node_ids)
+  g6rd_probe_node_connection any "${args[@]}" >"${dir}/final-sessions-before.json"
+  capture_database_clock >"${dir}/final-sessions-before-complete-at"
+  capture_final_authority_cut
+  stop_watchers
+  append_final_history_snapshot
+  capture_database_clock >"${dir}/final-sessions-after-start-at"
+  g6rd_probe_node_connection any "${args[@]}" >"${dir}/final-sessions-after.json"
+  assert_final_session_authority
+  jq -er '.cut_at' "${G6RD_STATE}/final-authority-cut.json" \
+    >"${dir}/final-session-observed-at"
+  quiesce_transport_ingress
+  quiesce_authority_renewers
+  local history
+  for history in fencing leadership; do
+    require_file "${G6RD_STATE}/${history}-history.jsonl"
+    cp -f "${G6RD_STATE}/${history}-history.jsonl" \
+      "${G6RD_OUTBOX}/${history}-history.jsonl"
+  done
+  jq -er '.cut_at' "${G6RD_STATE}/final-authority-cut.json" \
+    >"${dir}/snapshot-taken-at"
 }
 
 phase_final_freeze() {
@@ -1148,6 +1546,44 @@ phase_evidence_build() {
   cp -f "${out}/verdict.json" "${G6RD_OUTBOX}/verdict.json"
 }
 
+unpause_scoped_container() {
+  local container="${1:?container is required}" paused
+  paused="$(timeout --foreground --signal=TERM --kill-after=2s 8s \
+    docker container inspect --format '{{.State.Paused}}' "${container}" 2>/dev/null || true)"
+  [[ "${paused}" == true ]] || return 0
+  timeout --foreground --signal=TERM --kill-after=2s 8s \
+    docker unpause "${container}" >/dev/null
+}
+
+phase_cleanup_prelude() {
+  local status=0
+  # Stop detached watchers while their sentinel still exists. Removing the run
+  # directory first would let an orphaned loop recreate failed Docker clients
+  # forever because its stop path disappeared.
+  stop_watchers || status=1
+  release_armed_pre_send_barrier || status=1
+  release_armed_post_send_barrier || status=1
+  release_armed_result_commit_barrier || status=1
+  g6rd_release_synthetic_barriers || status=1
+  local service
+  for service in transportd api scheduler worker; do
+    unpause_scoped_container "${COMPOSE_PROJECT}-${service}-1" || status=1
+  done
+  return "${status}"
+}
+
+phase_cleanup() {
+  local status=0 prelude_status=0
+  timeout --foreground --signal=TERM --kill-after=5s 45s \
+    "${BASH_SOURCE[0]}" cleanup-prelude || prelude_status=$?
+  if [[ "${prelude_status}" != 0 ]]; then
+    echo "G6 cleanup prelude failed or exceeded its 45-second hard limit" >&2
+    status="${prelude_status}"
+  fi
+  g6rd_cleanup_bounded || status=$?
+  return "${status}"
+}
+
 case "${1:-}" in
 prepare) phase_prepare ;;
 materialize-runtime | import-peer-secrets) phase_materialize_runtime "${2:?peer directory}" ;;
@@ -1174,9 +1610,10 @@ outbox-send-before-mark) phase_outbox_send_before_mark ;;
   merge-peer-final-evidence) phase_merge_peer_final_evidence "${2:?peer final evidence root}" ;;
   evidence-build) phase_evidence_build "${2:?peer evidence root}" ;;
   diagnostics) g6rd_diagnostics ;;
-  cleanup) g6rd_cleanup_bounded ;;
+  cleanup-prelude) phase_cleanup_prelude ;;
+  cleanup) phase_cleanup ;;
 *)
-  echo "usage: $0 <prepare|materialize-runtime|import-peer-tunnel-nodes|build-images|tunnel-up|standby-bootstrap|relay-up|agents-enroll|agents-start|load-start|promote|merge-peer-evidence|scenario-scheduler|scenario-owner|scenario-relay|scenario-path|outbox-claim-before-send|outbox-send-before-mark|outbox-result-before-commit|window|evidence-collect|final-freeze|merge-peer-final-evidence|evidence-build|diagnostics|cleanup>" >&2
+  echo "usage: $0 <prepare|materialize-runtime|import-peer-tunnel-nodes|build-images|tunnel-up|standby-bootstrap|relay-up|agents-enroll|agents-start|load-start|promote|merge-peer-evidence|scenario-scheduler|scenario-owner|scenario-relay|scenario-path|outbox-claim-before-send|outbox-send-before-mark|outbox-result-before-commit|window|evidence-collect|final-freeze|merge-peer-final-evidence|evidence-build|diagnostics|cleanup-prelude|cleanup>" >&2
   exit 2
   ;;
 esac

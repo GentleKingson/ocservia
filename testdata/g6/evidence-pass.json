@@ -30,7 +30,7 @@
     "authorized_real_agents": {
       "actual": 50,
       "sample_count": 50,
-      "source_artifact_digest": "sha256:25b73bced29657b75a29aba815ca52dbc1a8abc169a9a0d14e196891290e569b"
+      "source_artifact_digest": "sha256:258d2f9b465ce78955844f5e06539a42f7fc4b06c2cc4a1a7c1008bb1f93461a"
     },
     "max_production_command_inflight": {
       "actual": 50,
@@ -45,22 +45,22 @@
     "stale_owner_accepts": {
       "actual": 0,
       "sample_count": 3,
-      "source_artifact_digest": "sha256:1341ce6d9f554b1b5172f71e9a79be0b0f4d304316e572be1bc8fcde770224ab"
+      "source_artifact_digest": "sha256:27f572589bcab84594581e342f516ef26c13d7e72f40d3a4dbd30d6b1188e674"
     },
     "concurrent_active_connection_owners": {
       "actual": 1,
-      "sample_count": 2,
-      "source_artifact_digest": "sha256:1341ce6d9f554b1b5172f71e9a79be0b0f4d304316e572be1bc8fcde770224ab"
+      "sample_count": 51,
+      "source_artifact_digest": "sha256:27f572589bcab84594581e342f516ef26c13d7e72f40d3a4dbd30d6b1188e674"
     },
     "stale_scheduler_commits": {
       "actual": 0,
       "sample_count": 3,
-      "source_artifact_digest": "sha256:1341ce6d9f554b1b5172f71e9a79be0b0f4d304316e572be1bc8fcde770224ab"
+      "source_artifact_digest": "sha256:27f572589bcab84594581e342f516ef26c13d7e72f40d3a4dbd30d6b1188e674"
     },
     "concurrent_active_scheduler_leaders": {
       "actual": 1,
       "sample_count": 2,
-      "source_artifact_digest": "sha256:1341ce6d9f554b1b5172f71e9a79be0b0f4d304316e572be1bc8fcde770224ab"
+      "source_artifact_digest": "sha256:27f572589bcab84594581e342f516ef26c13d7e72f40d3a4dbd30d6b1188e674"
     },
     "dual_primary_write_accepts": {
       "actual": 0,
@@ -105,12 +105,12 @@
     "connection_owner_takeover_seconds": {
       "actual": 10,
       "sample_count": 1,
-      "source_artifact_digest": "sha256:1341ce6d9f554b1b5172f71e9a79be0b0f4d304316e572be1bc8fcde770224ab"
+      "source_artifact_digest": "sha256:27f572589bcab84594581e342f516ef26c13d7e72f40d3a4dbd30d6b1188e674"
     },
     "scheduler_takeover_seconds": {
       "actual": 10,
       "sample_count": 1,
-      "source_artifact_digest": "sha256:1341ce6d9f554b1b5172f71e9a79be0b0f4d304316e572be1bc8fcde770224ab"
+      "source_artifact_digest": "sha256:27f572589bcab84594581e342f516ef26c13d7e72f40d3a4dbd30d6b1188e674"
     },
     "relay_takeover_seconds": {
       "actual": 5,
@@ -120,7 +120,7 @@
     "reconnect_storm_recovery_seconds": {
       "actual": 69,
       "sample_count": 50,
-      "source_artifact_digest": "sha256:25b73bced29657b75a29aba815ca52dbc1a8abc169a9a0d14e196891290e569b"
+      "source_artifact_digest": "sha256:258d2f9b465ce78955844f5e06539a42f7fc4b06c2cc4a1a7c1008bb1f93461a"
     },
     "read_api_success_ratio": {
       "actual": 1,
@@ -388,9 +388,15 @@
     },
     {
       "name": "epoch-events.jsonl",
-      "digest": "sha256:1341ce6d9f554b1b5172f71e9a79be0b0f4d304316e572be1bc8fcde770224ab",
+      "digest": "sha256:27f572589bcab84594581e342f516ef26c13d7e72f40d3a4dbd30d6b1188e674",
       "media_type": "application/x-ndjson",
       "kind": "epoch_events"
+    },
+    {
+      "name": "authority-cut.json",
+      "digest": "sha256:cb401b1620092cf94991c0b900405f3943a353b283ad732316b9fbabeb4059e7",
+      "media_type": "application/json",
+      "kind": "authority_cut"
     },
     {
       "name": "command-trace.jsonl",
@@ -436,7 +442,7 @@
     },
     {
       "name": "agent-sessions.json",
-      "digest": "sha256:25b73bced29657b75a29aba815ca52dbc1a8abc169a9a0d14e196891290e569b",
+      "digest": "sha256:258d2f9b465ce78955844f5e06539a42f7fc4b06c2cc4a1a7c1008bb1f93461a",
       "media_type": "application/json",
       "kind": "agent_sessions"
     },
