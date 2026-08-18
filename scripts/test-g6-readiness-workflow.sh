@@ -889,6 +889,32 @@ done
 # endpoint, not to the controller endpoint the Agent dials. Both stale-owner
 # probes must therefore derive the endpoint from the selected node inventory.
 owner_phase="$(sed -n '/^phase_scenario_owner() {/,/^}/p' "${FD_B}")"
+owner_replaced="$(sed -n '/^owner_replaced() {/,/^}/p' "${FD_B}")"
+grep -qF 'prefix="g6-${FD_ID}-"' <<<"${owner_phase}" || {
+  echo "the owner scenario must select Agents local to the failure-domain runner" >&2
+  exit 1
+}
+grep -qF 'g6rd_agent_compose restart "${reconnect_services[@]}"' <<<"${owner_phase}" || {
+  echo "the replacement owner must be driven by explicit Agent reconnects" >&2
+  exit 1
+}
+owner_worker_line="$(grep -n 'replacement worker trust socket' <<<"${owner_phase}" | cut -d: -f1)"
+owner_reconnect_line="$(grep -n 'g6rd_agent_compose restart' <<<"${owner_phase}" | cut -d: -f1)"
+owner_epoch_wait_line="$(grep -n 'replacement owner registered higher epochs' <<<"${owner_phase}" | cut -d: -f1)"
+[[ -n "${owner_worker_line}" && -n "${owner_reconnect_line}" \
+  && -n "${owner_epoch_wait_line}" && "${owner_worker_line}" -lt "${owner_reconnect_line}" \
+  && "${owner_reconnect_line}" -lt "${owner_epoch_wait_line}" ]] || {
+  echo "Agent reconnects must follow replacement-worker readiness and precede the epoch barrier" >&2
+  exit 1
+}
+if grep -qF 'g6rd_enqueue_command' <<<"${owner_phase}"; then
+  echo "enqueueing work must not stand in for an owner-session reconnect" >&2
+  exit 1
+fi
+grep -qF '((current_epoch > old_epoch))' <<<"${owner_replaced}" || {
+  echo "owner replacement must advance every sampled node beyond its prior epoch" >&2
+  exit 1
+}
 grep -qF 'target_endpoint="$(awk -F' <<<"${owner_phase}" || {
   echo "the owner scenario must resolve its target Agent endpoint from inventory" >&2
   exit 1

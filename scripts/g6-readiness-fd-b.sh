@@ -616,23 +616,35 @@ owner_leases_lapsed() {
 }
 
 owner_replaced() {
-  local higher
-  higher="$(psql_primary -Atc \
-    "SELECT count(*) FROM connection_owner_fencing WHERE owner_epoch > ${OWNER_A_MAX_EPOCH}")"
-  [[ "${higher}" =~ ^[0-9]+$ ]] && ((higher > 0))
+  local row node_hex old_epoch current_epoch
+  [[ -s "${G6RD_STATE}/owner-a-terms.tsv" ]] || return 1
+  while IFS= read -r row; do
+    node_hex="${row%%:*}"
+    old_epoch="${row##*:}"
+    [[ "${node_hex}" =~ ^[0-9a-f]{32}$ && "${old_epoch}" =~ ^[0-9]+$ ]] || return 1
+    current_epoch="$(psql_primary -Atc \
+      "SELECT owner_epoch FROM connection_owner_fencing WHERE node_id=decode('${node_hex}','hex')")"
+    [[ "${current_epoch}" =~ ^[0-9]+$ ]] && ((current_epoch > old_epoch)) || return 1
+  done <"${G6RD_STATE}/owner-a-terms.tsv"
 }
 
 phase_scenario_owner() {
-  local sample_nodes
-  sample_nodes="$(psql_primary -Atc \
-    "SELECT encode(node_id,'hex')||':'||owner_instance_id||':'||owner_incarnation||':'||encode(connection_id,'hex')||':'||owner_epoch FROM connection_owner_fencing ORDER BY node_id LIMIT 5")"
-  [[ -n "${sample_nodes}" ]] || {
-    echo "no registered connection owners before the owner scenario" >&2
+  local sample_nodes="" node row sample_count=0
+  while IFS= read -r node; do
+    row="$(psql_primary -Atc \
+      "SELECT encode(node_id,'hex')||':'||owner_instance_id||':'||owner_incarnation||':'||encode(connection_id,'hex')||':'||owner_epoch FROM connection_owner_fencing WHERE node_id='${node}'")"
+    [[ -n "${row}" ]] || continue
+    sample_nodes+="${row}"$'\n'
+    sample_count=$((sample_count + 1))
+  done < <(awk -F'\t' -v prefix="g6-${FD_ID}-" \
+    'index($1, prefix) == 1 {print $2; selected++; if (selected == 5) exit}' \
+    "${NODES_FILE}")
+  sample_nodes="${sample_nodes%$'\n'}"
+  [[ "${sample_count}" == 5 ]] || {
+    echo "fewer than five local connection owners exist before the owner scenario" >&2
     return 1
   }
   printf '%s\n' "${sample_nodes}" >"${G6RD_STATE}/owner-a-terms.tsv"
-  OWNER_A_MAX_EPOCH="$(printf '%s' "${sample_nodes}" | cut -d: -f5 | sort -n | tail -1)"
-  export OWNER_A_MAX_EPOCH
   g6rd_export_common_env
   g6rd_compose stop worker
   g6rd_timeline_event owner_a_paused
@@ -640,12 +652,20 @@ phase_scenario_owner() {
   g6rd_compose up --detach worker
   g6rd_wait_until 60 1 "replacement worker trust socket" \
     g6rd_compose exec -T worker test -S /run/ocserv-trust/control-plane.sock
-  # drive dispatch so the replacement registers higher epochs on the nodes
-  local node index=0
-  for node in $(node_ids | head -5); do
-    g6rd_enqueue_command "${node}" "g6-owner-${RUN_ID}-${index}" || true
-    index=$((index + 1))
-  done
+  # A worker restart does not sever transportd's existing sessions. Restart
+  # the selected local Agents so each performs a new authoritative handshake
+  # with the replacement worker; enqueueing work alone cannot open a session.
+  local node_hex
+  local reconnect_services=()
+  while IFS=: read -r node_hex _; do
+    node="$(node_from_fencing_hex "${node_hex}")"
+    reconnect_services+=("$(node_service "${node}")")
+  done <"${G6RD_STATE}/owner-a-terms.tsv"
+  [[ "${#reconnect_services[@]}" == 5 ]] || {
+    echo "owner replacement did not select five local Agent services" >&2
+    return 1
+  }
+  g6rd_agent_compose restart "${reconnect_services[@]}"
   g6rd_wait_until 90 2 "replacement owner registered higher epochs" owner_replaced
   g6rd_timeline_event owner_b_acquired
   g6rd_timeline_event owner_a_resumed
