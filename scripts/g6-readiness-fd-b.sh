@@ -514,7 +514,7 @@ report_load_command_timeout() {
      JOIN outbox_events AS outbox ON outbox.command_id=command.id
      LEFT JOIN node_command_leases AS lease ON lease.command_id=command.id
      WHERE command.idempotency_key LIKE 'g6-load-${RUN_ID}-%'
-       AND command.state NOT IN ('succeeded','failed','unknown','expired','superseded')
+       AND command.state NOT IN ('succeeded','failed','rejected','unknown','expired','rolled_back','superseded')
      ORDER BY command.updated_at,command.id
      LIMIT 20" >&2 || {
     echo "unsettled load command sample unavailable" >&2
@@ -528,7 +528,7 @@ promoted_and_writable() {
 load_commands_settled() {
   local unsettled
   unsettled="$(psql_primary -Atc \
-    "SELECT count(*) FROM commands WHERE idempotency_key LIKE 'g6-load-${RUN_ID}-%' AND state NOT IN ('succeeded','failed','unknown','expired','superseded')")"
+    "SELECT count(*) FROM commands WHERE idempotency_key LIKE 'g6-load-${RUN_ID}-%' AND state NOT IN ('succeeded','failed','rejected','unknown','expired','rolled_back','superseded')")"
   [[ "${unsettled}" == 0 ]]
 }
 
@@ -785,7 +785,7 @@ wait_commands_settled() {
   local keys_prefix="${1:?key prefix}"
   local unsettled
   unsettled="$(psql_primary -Atc \
-    "SELECT count(*) FROM commands WHERE idempotency_key LIKE '${keys_prefix}%' AND state NOT IN ('succeeded','failed','unknown','expired','superseded')")"
+    "SELECT count(*) FROM commands WHERE idempotency_key LIKE '${keys_prefix}%' AND state NOT IN ('succeeded','failed','rejected','unknown','expired','rolled_back','superseded')")"
   [[ "${unsettled}" == 0 ]]
 }
 

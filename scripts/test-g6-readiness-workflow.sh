@@ -272,6 +272,14 @@ if ! grep -q 'node_command_leases' <<<"${load_timeout_report}" \
   echo "fd-b reconciliation timeout report must expose bounded state, lease, outbox, and result evidence" >&2
   exit 1
 fi
+for settled_function in load_commands_settled wait_commands_settled; do
+  settled_body="$(sed -n "/^${settled_function}() {/,/^}/p" "${FD_B}")"
+  if ! grep -q "'rejected'" <<<"${settled_body}" \
+    || ! grep -q "'rolled_back'" <<<"${settled_body}"; then
+    echo "${settled_function} must recognize every terminal command result" >&2
+    exit 1
+  fi
+done
 connected_probe="$(sed -n '/^all_nodes_connected() {/,/^}/p' "${FD_B}")"
 if ! grep -q '\.owner_epoch > 0' <<<"${connected_probe}" \
   || ! grep -q 'index("ocserv.fencing.v2")' <<<"${connected_probe}" \
