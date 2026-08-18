@@ -1129,6 +1129,13 @@ if [[ -z "${promoted_wait}" || -z "${post_promotion_probe}" || "${promoted_wait}
   echo "former-primary probes must run after the replacement promotion" >&2
   exit 1
 fi
+dual_primary_phase="$(sed -n '/^phase_dual_primary_probes() {/,/^}/p' "${FD_A}")"
+if [[ "$(grep -c 'jq -s -e' <<<"${dual_primary_phase}")" != 2 ]] \
+  || ! grep -qF 'all(.[]; .accepted == false)' <<<"${dual_primary_phase}" \
+  || ! grep -qF 'all(.[]; (.at | fromdateiso8601)' <<<"${dual_primary_phase}"; then
+  echo "former-primary JSONL probes must be slurped and fail closed" >&2
+  exit 1
+fi
 grep -q 'post-rejoin-probes.jsonl' "${FD_A}" || {
   echo "the rejoined former primary needs explicit read-only probes" >&2
   exit 1

@@ -423,10 +423,13 @@ phase_dual_primary_probes() {
       '{at:$at,accepted:$accepted}' >>"${G6RD_OUTBOX}/isolation/isolated-primary-writes.jsonl"
     sleep 1
   done
-  jq -s 'length == 6 and all(.accepted == false)' \
-    "${G6RD_OUTBOX}/isolation/isolated-primary-writes.jsonl"
-  jq -e --arg promoted "${promoted_at}" \
-    'all((.at | fromdateiso8601) >= ($promoted | fromdateiso8601))' \
+  jq -s -e 'length == 6 and all(.[]; .accepted == false)' \
+    "${G6RD_OUTBOX}/isolation/isolated-primary-writes.jsonl" >/dev/null || {
+    echo "the former primary accepted a write after replacement promotion" >&2
+    return 1
+  }
+  jq -s -e --arg promoted "${promoted_at}" \
+    'all(.[]; (.at | fromdateiso8601) >= ($promoted | fromdateiso8601))' \
     "${G6RD_OUTBOX}/isolation/isolated-primary-writes.jsonl" >/dev/null || {
     echo "a dual-primary probe predates the replacement promotion" >&2
     return 1
