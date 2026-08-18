@@ -885,6 +885,29 @@ for event in \
   }
 done
 
+# A connection fence is bound to the target Agent's authenticated Iroh
+# endpoint, not to the controller endpoint the Agent dials. Both stale-owner
+# probes must therefore derive the endpoint from the selected node inventory.
+owner_phase="$(sed -n '/^phase_scenario_owner() {/,/^}/p' "${FD_B}")"
+grep -qF 'target_endpoint="$(awk -F' <<<"${owner_phase}" || {
+  echo "the owner scenario must resolve its target Agent endpoint from inventory" >&2
+  exit 1
+}
+grep -qF "'\$2 == id {print \$3; exit}'" <<<"${owner_phase}" || {
+  echo "the owner scenario endpoint lookup must bind the selected node id" >&2
+  exit 1
+}
+if [[ "$(grep -cF -- '--endpoint-id "${target_endpoint}"' <<<"${owner_phase}")" != 2 ]] \
+  || grep -qF -- '--endpoint-id "$(<"${G6RD_STATE}/controller-endpoint-id")"' \
+    <<<"${owner_phase}"; then
+  echo "both stale-owner probes must use the target Agent endpoint" >&2
+  exit 1
+fi
+grep -qF '[[ "${target_endpoint}" =~ ^[0-9a-f]{64}$ ]]' <<<"${owner_phase}" || {
+  echo "the owner scenario must validate the selected Agent endpoint" >&2
+  exit 1
+}
+
 # The fault-free observation window and the sampler cadence are harness
 # margins over the frozen SLO limits, so they must demonstrably clear them.
 slo_limit() {

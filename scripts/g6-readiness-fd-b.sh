@@ -650,17 +650,23 @@ phase_scenario_owner() {
   g6rd_timeline_event owner_b_acquired
   g6rd_timeline_event owner_a_resumed
   # enforcement point 1: transportd returns Stale with the retained epoch
-  local first epoch
+  local first epoch target_node target_endpoint
   first="$(head -1 "${G6RD_STATE}/owner-a-terms.tsv")"
   epoch="$(printf '%s' "${first}" | cut -d: -f5)"
+  target_node="$(node_from_fencing_hex "$(printf '%s' "${first}" | cut -d: -f1)")"
+  target_endpoint="$(awk -F'\t' -v id="${target_node}" '$2 == id {print $3; exit}' "${NODES_FILE}")"
+  [[ "${target_endpoint}" =~ ^[0-9a-f]{64}$ ]] || {
+    echo "agent endpoint for owner-fencing target ${target_node} is invalid" >&2
+    return 1
+  }
   local retained
   retained="$(psql_primary -Atc \
     "SELECT owner_epoch FROM connection_owner_fencing WHERE node_id=decode('$(printf '%s' "${first}" | cut -d: -f1)','hex')")"
   g6rd_compose --profile probe run --rm --no-deps g6-probe uds-stale-fence \
     --socket /run/ocserv-platform/transportd.sock \
     --signing-key-file /run/ocservia-signing/command-signing.pem \
-    --node-id "$(node_from_fencing_hex "$(printf '%s' "${first}" | cut -d: -f1)")" \
-    --endpoint-id "$(<"${G6RD_STATE}/controller-endpoint-id")" \
+    --node-id "${target_node}" \
+    --endpoint-id "${target_endpoint}" \
     --owner-instance-id "$(printf '%s' "${first}" | cut -d: -f2)" \
     --owner-incarnation "$(printf '%s' "${first}" | cut -d: -f3)" \
     --stale-epoch "${epoch}" \
@@ -672,14 +678,12 @@ phase_scenario_owner() {
   # probe hold the controller endpoint for one bounded window, restart
   g6rd_compose stop transportd
   g6rd_timeline_event bulk_disconnect_injected
-  local target_node
-  target_node="$(node_from_fencing_hex "$(printf '%s' "${first}" | cut -d: -f1)")"
   g6rd_compose --profile probe run --rm --no-deps \
     -e RUST_LOG=info g6-probe agent-stale-command \
     --signing-key-file /run/ocservia-signing/command-signing.pem \
     --controller-key-file /run/ocservia-controller/controller.key \
     --node-id "${target_node}" \
-    --endpoint-id "$(<"${G6RD_STATE}/controller-endpoint-id")" \
+    --endpoint-id "${target_endpoint}" \
     --owner-instance-id "$(printf '%s' "${first}" | cut -d: -f2)" \
     --owner-incarnation "$(printf '%s' "${first}" | cut -d: -f3)" \
     --stale-epoch "${epoch}" \
