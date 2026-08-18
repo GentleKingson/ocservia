@@ -227,7 +227,7 @@ services:
     volumes:
       - ./relay.toml:/etc/iroh-relay/relay.toml:ro
       - type: bind
-        source: ${G6_RELAY_DIR:?}
+        source: ${G6_RELAY_DIR:?}/relay
         target: /run/relay-secrets
         read_only: true
     extra_hosts:
@@ -340,7 +340,7 @@ services:
         volume:
           nocopy: true
       - type: bind
-        source: ${G6_RELAY_DIR:?}
+        source: ${G6_RELAY_DIR:?}/transportd
         target: /run/relay-secrets
         read_only: true
       - transport-stats:/run/transport-stats
@@ -370,7 +370,7 @@ services:
         target: /run/ocservia-signing
         read_only: true
       - type: bind
-        source: ${G6_RELAY_DIR:?}
+        source: ${G6_RELAY_DIR:?}/probe
         target: /run/relay-secrets
         read_only: true
       - type: bind

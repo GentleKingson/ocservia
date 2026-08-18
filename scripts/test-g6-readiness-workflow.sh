@@ -14,6 +14,8 @@ FD_B="${ROOT}/scripts/g6-readiness-fd-b.sh"
 BUILDER="${ROOT}/scripts/build-g6-evidence.mjs"
 SLO="${ROOT}/docs/acceptance/g6-slo.yaml"
 PROBE_DOCKERFILE="${ROOT}/rust/g6-probe.Dockerfile"
+TRANSPORT_DOCKERFILE="${ROOT}/rust/transportd.Dockerfile"
+RELAY_DOCKERFILE="${ROOT}/deploy/production/relay.Dockerfile"
 POSTGRES_INIT="${ROOT}/deploy/g6-readiness/postgres-init/001-g6-readiness.sh"
 OCSERV_FIXTURE="${ROOT}/deploy/g6-readiness/fake-ocserv/shims/ocserv"
 
@@ -99,8 +101,21 @@ runtime_init_command = Array(runtime_init.fetch("command")).join("\n")
 reject("transport runtime init must assign the stats volume to transportd") unless runtime_init_command.include?("chown 65532:65532 /run/transport-stats")
 runtime_init_volumes = Array(runtime_init.fetch("volumes"))
 reject("transport runtime init must mount the transport stats volume") unless runtime_init_volumes.any? { |volume| volume.is_a?(Hash) && volume["source"] == "transport-stats" && volume["target"] == "/run/transport-stats" }
-probe_volumes = Array(services.fetch("g6-probe").fetch("volumes"))
-reject("the G6 probe must read the scoped relay material through a read-only bind") unless probe_volumes.any? { |volume| volume.is_a?(Hash) && volume["target"] == "/run/relay-secrets" && volume["read_only"] == true }
+relay_mount_sources = {
+  "relay" => "${G6_RELAY_DIR:?}/relay",
+  "transportd" => "${G6_RELAY_DIR:?}/transportd",
+  "g6-probe" => "${G6_RELAY_DIR:?}/probe"
+}
+relay_mount_sources.each do |service_name, expected_source|
+  reject("#{service_name} must use its image's fixed runtime principal") if services.fetch(service_name).key?("user")
+  mount = Array(services.fetch(service_name).fetch("volumes")).find do |volume|
+    volume.is_a?(Hash) && volume["target"] == "/run/relay-secrets"
+  end
+  reject("#{service_name} must receive a scoped relay-material bind") unless mount
+  reject("#{service_name} relay material must be mounted read-only") unless mount["read_only"] == true
+  reject("#{service_name} must receive only its own relay material") unless mount["source"] == expected_source
+end
+reject("relay consumers must not share one bind source") unless relay_mount_sources.values.uniq.length == relay_mount_sources.length
 reject("postgres must receive stop signals directly so fencing leaves a clean data directory") unless services.fetch("postgres").fetch("init") == false
 reject("postgres must never pull after the support image preflight") unless services.fetch("postgres").fetch("pull_policy") == "never"
 roles = %w[api worker scheduler].to_h { |role| [role, services.fetch(role).fetch("command").fetch(0)] }
@@ -140,6 +155,23 @@ grep -qF 'usermod --gid ocservia nobody' "${PROBE_DOCKERFILE}" || {
 }
 grep -q '^USER nobody:ocservia$' "${PROBE_DOCKERFILE}" || {
   echo "the G6 probe image must run as the transport-authorized nobody account" >&2
+  exit 1
+}
+grep -qF 'useradd --system --uid 65532 --gid ocservia transportd' \
+  "${TRANSPORT_DOCKERFILE}" || {
+  echo "the transportd image principal must stay bound to uid:gid 65532:65532" >&2
+  exit 1
+}
+grep -q '^USER transportd:ocservia$' "${TRANSPORT_DOCKERFILE}" || {
+  echo "the transportd image must run as its fixed unprivileged principal" >&2
+  exit 1
+}
+grep -qF 'useradd --system --uid 65532 --gid relay' "${RELAY_DOCKERFILE}" || {
+  echo "the relay image principal must stay bound to uid:gid 65532:65532" >&2
+  exit 1
+}
+grep -q '^USER relay:relay$' "${RELAY_DOCKERFILE}" || {
+  echo "the relay image must run as its fixed unprivileged principal" >&2
   exit 1
 }
 
@@ -432,6 +464,44 @@ grep -q 'PermissionDenied.*ancestry.*metadata invalid.*attestation' "${LIB}" || 
 # controller response is authoritative only when every expected node is
 # active, online, fresh, and carries a heartbeat.
 source "${LIB}"
+relay_failure_test="$(mktemp -d)"
+for relay_failure_stage in validator principal-smoke; do
+  (
+    export G6RD_SECRETS="${relay_failure_test}/${relay_failure_stage}/secrets"
+    export G6RD_WORK="${relay_failure_test}/${relay_failure_stage}/work"
+    export G6RD_ARCHIVE="${G6RD_WORK}/archive"
+    export G6RD_BASEBACKUP="${G6RD_WORK}/basebackup"
+    export G6RD_RESULT_BARRIER="${G6RD_WORK}/result-barrier"
+    export RUN_ID="relay-${relay_failure_stage}-failure" FD_ID=fd-a
+    export G6_SIGNING_DIR="${relay_failure_test}/signing"
+    mkdir -p "${G6RD_SECRETS}" "${G6RD_WORK}"
+    for required in owner-password app-password replication-password dev-auth-token \
+      oidc-client-secret session-key requester-identity-id requester-session-id \
+      requester-session-cookie approver-identity-id approver-session-id \
+      approver-session-cookie command-signing.pem command-verification.pem \
+      relay-chain.crt relay-leaf.key relay-ca.pem relay-token; do
+      printf 'fixture-%s\n' "${required}" >"${G6RD_SECRETS}/${required}"
+    done
+    docker() { return 0; }
+    if [[ "${relay_failure_stage}" == validator ]]; then
+      g6rd_relay_material_cache_valid() { return 1; }
+      g6rd_verify_relay_material_principals() { return 0; }
+    else
+      g6rd_relay_material_cache_valid() { return 0; }
+      g6rd_verify_relay_material_principals() { return 1; }
+    fi
+    unset G6_RELAY_DIR
+    if g6rd_export_common_env 2>/dev/null; then
+      echo "a relay ${relay_failure_stage} failure was hidden by common environment setup" >&2
+      exit 1
+    fi
+    [[ -z "${G6_RELAY_DIR+x}" ]] || {
+      echo "a relay ${relay_failure_stage} failure exported an empty or stale relay path" >&2
+      exit 1
+    }
+  )
+done
+rm -rf "${relay_failure_test}"
 build_environment_test="$(mktemp -d)"
 (
   export RUNNER_TEMP="${build_environment_test}/runner-temp"
@@ -458,7 +528,9 @@ build_environment_test="$(mktemp -d)"
   [[ "${G6_RELAY_DIR}" == "${G6RD_WORK}/relay-secrets" ]]
   [[ "${G6_PROBE_CONTROLLER_KEY_DIR}" == "${G6RD_WORK}/probe-controller-key" ]]
   [[ -z "${OCSERV_CONTROLLER_ENDPOINT_ID:-}" ]]
-  for dir in "${G6_SIGNING_DIR}" "${G6_RELAY_DIR}" "${G6_PROBE_CONTROLLER_KEY_DIR}" \
+  for dir in "${G6_SIGNING_DIR}" "${G6_RELAY_DIR}" "${G6_RELAY_DIR}/relay" \
+    "${G6_RELAY_DIR}/transportd" "${G6_RELAY_DIR}/probe" \
+    "${G6_PROBE_CONTROLLER_KEY_DIR}" \
     "${G6RD_AGENTS}/agent-fd-b-01/identity" \
     "${G6RD_AGENTS}/agent-fd-b-01/journal" \
     "${G6RD_AGENTS}/agent-fd-b-01/privd" \
@@ -709,23 +781,118 @@ grep -q 'chown 65534:65532 /fix/controller.key' "${LIB}" || {
   echo "the probe controller key must be owned by its container uid" >&2
   exit 1
 }
-grep -qF 'chown 65532:65532 /fix/*; chmod 0755 /fix' "${LIB}" || {
-  echo "the relay material must be owned by the relay uid" >&2
-  exit 1
-}
 relay_material="$(sed -n '/^g6rd_materialize_relay_dir() {/,/^}/p' "${LIB}")"
-grep -qF 'chmod 0600 "${dir}/relay.key"' <<<"${relay_material}" || {
-  echo "the relay private key must remain owner-readable only" >&2
+for scoped_path in relay/relay-token transportd/relay-token probe/relay-token; do
+  grep -qF "\${dir}/${scoped_path}" <<<"${relay_material}" || {
+    echo "relay token copy is missing for ${scoped_path}" >&2
+    exit 1
+  }
+done
+grep -qF 'chown 65532:65532 /fix/relay/* /fix/transportd/*' \
+  <<<"${relay_material}" || {
+  echo "relay and transportd files must be owned by their runtime uid" >&2
   exit 1
 }
-grep -qF 'chmod 0640 "${dir}/relay-token"' <<<"${relay_material}" || {
-  echo "the relay token must be readable by the transport-authorized probe group only" >&2
+grep -qF 'chown 65534:65532 /fix/probe/*' <<<"${relay_material}" || {
+  echo "the probe files must be owned by its exact UDS peer uid" >&2
   exit 1
 }
-if grep -Eq 'chmod[[:space:]]+0?[0-7]{2}[1-7][[:space:]].*relay-token' <<<"${relay_material}"; then
-  echo "the relay token must never become world-readable" >&2
+if grep -Eq 'chown[[:space:]]+[^[:space:]]+[[:space:]]+/fix/(relay|transportd|probe)([[:space:]]|$)' \
+  <<<"${relay_material}"; then
+  echo "relay material directories must remain runner-owned for bounded rebuild and cleanup" >&2
   exit 1
 fi
+grep -qF 'chmod 0755 /fix/relay /fix/transportd /fix/probe' \
+  <<<"${relay_material}" || {
+  echo "scoped relay material directories must remain runner-owned and traversable" >&2
+  exit 1
+}
+grep -qF 'chmod 0600 /fix/relay/relay.key /fix/relay/relay-token' \
+  <<<"${relay_material}" || {
+  echo "relay private material must remain process-only" >&2
+  exit 1
+}
+grep -qF '/fix/transportd/relay-token /fix/probe/relay-token' \
+  <<<"${relay_material}" || {
+  echo "transportd and probe token copies must remain process-only" >&2
+  exit 1
+}
+if grep -Eq 'chmod[[:space:]]+0?[0-7]{2}[1-7][[:space:]].*relay-token' \
+  <<<"${relay_material}"; then
+  echo "a relay token copy must never become group- or world-readable" >&2
+  exit 1
+fi
+relay_principal_smoke="$(sed -n '/^g6rd_verify_relay_material_principals() {/,/^}/p' "${LIB}")"
+[[ "$(grep -c -- '--user 65532:65532' <<<"${relay_principal_smoke}")" -eq 2 ]] || {
+  echo "relay and transportd token smoke checks must run as uid 65532" >&2
+  exit 1
+}
+[[ "$(grep -c -- '--user 65534:65532' <<<"${relay_principal_smoke}")" -eq 1 ]] || {
+  echo "the probe token smoke check must run as the UDS peer uid 65534" >&2
+  exit 1
+}
+for scoped_path in relay transportd probe; do
+  grep -qF "\${dir}/${scoped_path}:/run/relay-secrets:ro" \
+    <<<"${relay_principal_smoke}" || {
+    echo "the ${scoped_path} principal smoke must use only its scoped read-only bind" >&2
+    exit 1
+  }
+done
+[[ "$(grep -Ec 'relay-token\).*6553[24]:65532:600' <<<"${relay_principal_smoke}")" -eq 3 ]] || {
+  echo "every runtime principal must assert an owner-only relay token" >&2
+  exit 1
+}
+[[ "$(grep -c 'stat -c.*%a.*relay-secrets).*755' <<<"${relay_principal_smoke}")" -eq 3 ]] || {
+  echo "every runtime principal must see a runner-owned mode-0755 mount root" >&2
+  exit 1
+}
+relay_cache_validator="$(sed -n '/^g6rd_relay_material_cache_valid() {/,/^}/p' "${LIB}")"
+grep -qF 'const directory = fs.opendirSync(target);' <<<"${relay_cache_validator}" || {
+  echo "relay material cache validation must inspect the host tree without a phase-local container" >&2
+  exit 1
+}
+grep -qF 'while (names.length <= expectedNames.length)' <<<"${relay_cache_validator}" || {
+  echo "relay material cache traversal must stop after the first unexpected entry" >&2
+  exit 1
+}
+if grep -q 'docker run' <<<"${relay_cache_validator}"; then
+  echo "relay material cache validation must not start a support container in every phase" >&2
+  exit 1
+fi
+grep -qF 'assertDirectory(root, runnerUid, runnerGid, 0o700);' \
+  <<<"${relay_cache_validator}" || {
+  echo "relay material cache root must remain runner-owned mode 0700" >&2
+  exit 1
+}
+grep -qF 'assertDirectory(scoped, runnerUid, runnerGid, 0o755);' \
+  <<<"${relay_cache_validator}" || {
+  echo "relay material cache directories must remain runner-owned mode 0755" >&2
+  exit 1
+}
+for exact_stat in \
+  '"relay.crt": [65532, 65532, 0o644]' \
+  '"relay.key": [65532, 65532, 0o600]' \
+  '"relay-ca.pem": [65532, 65532, 0o644]' \
+  '"relay-ca.pem": [65534, 65532, 0o644]' \
+  '"relay-token": [65534, 65532, 0o600]'; do
+  grep -qF "${exact_stat}" <<<"${relay_cache_validator}" || {
+    echo "relay cache validator is missing exact file metadata: ${exact_stat}" >&2
+    exit 1
+  }
+done
+[[ "$(grep -Fc '"relay-token": [65532, 65532, 0o600]' \
+  <<<"${relay_cache_validator}")" -eq 2 ]] || {
+  echo "relay cache validator must require both uid-65532 token copies" >&2
+  exit 1
+}
+grep -qF 'g6rd_relay_material_cache_valid "${dir}"' <<<"${relay_material}" || {
+  echo "relay material cache hits and rebuilds must pass the closed validator" >&2
+  exit 1
+}
+grep -qF 'relay_dir="$(g6rd_materialize_relay_dir)" || return 1' "${LIB}" || {
+  echo "relay material validation failure must propagate out of common environment setup" >&2
+  exit 1
+}
 if grep -qF 'chown 0:65532 /fix; chmod 0750 /fix' "${LIB}"; then
   echo "runtime material directories must remain reachable by later runner phases" >&2
   exit 1

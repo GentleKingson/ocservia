@@ -67,8 +67,13 @@ g6rd_init_environment() {
   mkdir -p "${G6RD_STATE}" "${G6RD_SECRETS}" "${G6RD_OUTBOX}" \
     "${G6RD_ARCHIVE}" "${G6RD_BASEBACKUP}" "${G6RD_RESTORE}" \
     "${G6RD_LOGS}" "${G6RD_AGENTS}" "${G6RD_RESULT_BARRIER}" \
-    "${G6RD_PRE_SEND_BARRIER}" "${ARTIFACT_DIR}"
+    "${G6RD_PRE_SEND_BARRIER}" "${G6RD_WORK}/relay-secrets/relay" \
+    "${G6RD_WORK}/relay-secrets/transportd" \
+    "${G6RD_WORK}/relay-secrets/probe" "${ARTIFACT_DIR}"
   chmod 0700 "${G6RD_WORK}" "${G6RD_SECRETS}"
+  chmod 0755 "${G6RD_WORK}/relay-secrets/relay" \
+    "${G6RD_WORK}/relay-secrets/transportd" \
+    "${G6RD_WORK}/relay-secrets/probe"
   chmod 0777 "${G6RD_RESULT_BARRIER}" "${G6RD_PRE_SEND_BARRIER}"
 }
 
@@ -252,29 +257,171 @@ g6rd_generate_secrets() {
   [[ "${FD_ID}" == "fd-a" ]] && g6rd_generate_controller_key
 }
 
-# The per-FD relay material mounted read-only into the relay and its clients.
+# Validate the complete cached tree without reading secret contents or starting
+# another container for every phase. Runner-owned directories keep retries and
+# cleanup possible after files are reassigned to their container principals.
+g6rd_relay_material_cache_valid() {
+  local dir="${1:?relay material directory is required}"
+  [[ -d "${dir}" && ! -L "${dir}" ]] || return 1
+  node - "${dir}" >/dev/null 2>&1 <<'NODE'
+  const fs = require("node:fs");
+  const path = require("node:path");
+
+  const root = process.argv[2];
+  const runnerUid = process.getuid();
+  const runnerGid = process.getgid();
+  const expected = {
+    relay: {
+      "relay.crt": [65532, 65532, 0o644],
+      "relay.key": [65532, 65532, 0o600],
+      "relay-token": [65532, 65532, 0o600],
+    },
+    transportd: {
+      "relay-ca.pem": [65532, 65532, 0o644],
+      "relay-token": [65532, 65532, 0o600],
+    },
+    probe: {
+      "relay-ca.pem": [65534, 65532, 0o644],
+      "relay-token": [65534, 65532, 0o600],
+    },
+  };
+
+  function metadata(target) {
+    const stat = fs.lstatSync(target);
+    return [stat, stat.mode & 0o7777];
+  }
+
+  function assertDirectory(target, uid, gid, mode) {
+    const [stat, actualMode] = metadata(target);
+    if (!stat.isDirectory() || stat.isSymbolicLink()
+        || stat.uid !== uid || stat.gid !== gid || actualMode !== mode) {
+      throw new Error(`invalid directory metadata: ${target}`);
+    }
+  }
+
+  function assertFile(target, uid, gid, mode) {
+    const [stat, actualMode] = metadata(target);
+    if (!stat.isFile() || stat.isSymbolicLink()
+        || stat.uid !== uid || stat.gid !== gid || actualMode !== mode) {
+      throw new Error(`invalid file metadata: ${target}`);
+    }
+  }
+
+  function assertExactNames(target, expectedNames) {
+    const directory = fs.opendirSync(target);
+    const names = [];
+    try {
+      while (names.length <= expectedNames.length) {
+        const entry = directory.readSync();
+        if (entry === null) break;
+        names.push(entry.name);
+      }
+    } finally {
+      directory.closeSync();
+    }
+    names.sort();
+    expectedNames.sort();
+    if (names.length !== expectedNames.length
+        || names.some((name, index) => name !== expectedNames[index])) {
+      throw new Error(`unexpected relay material tree: ${target}`);
+    }
+  }
+
+  assertDirectory(root, runnerUid, runnerGid, 0o700);
+  assertExactNames(root, Object.keys(expected));
+  for (const [directory, files] of Object.entries(expected)) {
+    const scoped = path.join(root, directory);
+    assertDirectory(scoped, runnerUid, runnerGid, 0o755);
+    assertExactNames(scoped, Object.keys(files));
+    for (const [name, [uid, gid, mode]] of Object.entries(files)) {
+      assertFile(path.join(scoped, name), uid, gid, mode);
+    }
+  }
+NODE
+}
+
+# Verify each relay client through the numeric principal used by its image.
+# The three read-only mounts intentionally expose disjoint directories even
+# where two containers currently share a numeric uid.
+g6rd_verify_relay_material_principals() {
+  local dir="${1:?relay material directory is required}"
+  g6rd_require_support_image || return 1
+  docker run --rm --pull=never --network none --log-driver none \
+    --read-only --cap-drop ALL --security-opt no-new-privileges:true \
+    --label "ocservia.g6.run-id=${RUN_ID}" --user 65532:65532 \
+    -v "${dir}/relay:/run/relay-secrets:ro" \
+    --entrypoint /bin/sh postgres:17.10-bookworm -eu -c \
+    'test "$(stat -c "%a" /run/relay-secrets)" = 755
+     test "$(stat -c "%u:%g:%a" /run/relay-secrets/relay-token)" = 65532:65532:600
+     test -r /run/relay-secrets/relay-token
+     test -r /run/relay-secrets/relay.crt
+     test -r /run/relay-secrets/relay.key
+     test ! -e /run/relay-secrets/relay-ca.pem' >/dev/null || return 1
+  docker run --rm --pull=never --network none --log-driver none \
+    --read-only --cap-drop ALL --security-opt no-new-privileges:true \
+    --label "ocservia.g6.run-id=${RUN_ID}" --user 65532:65532 \
+    -v "${dir}/transportd:/run/relay-secrets:ro" \
+    --entrypoint /bin/sh postgres:17.10-bookworm -eu -c \
+    'test "$(stat -c "%a" /run/relay-secrets)" = 755
+     test "$(stat -c "%u:%g:%a" /run/relay-secrets/relay-token)" = 65532:65532:600
+     test -r /run/relay-secrets/relay-token
+     test -r /run/relay-secrets/relay-ca.pem
+     test ! -e /run/relay-secrets/relay.key' >/dev/null || return 1
+  docker run --rm --pull=never --network none --log-driver none \
+    --read-only --cap-drop ALL --security-opt no-new-privileges:true \
+    --label "ocservia.g6.run-id=${RUN_ID}" --user 65534:65532 \
+    -v "${dir}/probe:/run/relay-secrets:ro" \
+    --entrypoint /bin/sh postgres:17.10-bookworm -eu -c \
+    'test "$(stat -c "%a" /run/relay-secrets)" = 755
+     test "$(stat -c "%u:%g:%a" /run/relay-secrets/relay-token)" = 65534:65532:600
+     test -r /run/relay-secrets/relay-token
+     test -r /run/relay-secrets/relay-ca.pem
+     test ! -e /run/relay-secrets/relay.key' >/dev/null || return 1
+}
+
+# Materialize one private relay-token copy per consuming service principal.
+# Sharing one group-readable copy would violate transportd's fail-closed token
+# invariant and would expose the relay's private material to the UDS probe.
 g6rd_materialize_relay_dir() {
   local dir="${G6RD_WORK}/relay-secrets"
-  if [[ -s "${dir}/relay.crt" && -s "${dir}/relay.key" \
-    && -s "${dir}/relay-ca.pem" && -s "${dir}/relay-token" ]]; then
+  if [[ -d "${dir}" ]] && g6rd_relay_material_cache_valid "${dir}"; then
     printf '%s\n' "${dir}"
     return 0
   fi
-  rm -rf -- "${dir}"
-  mkdir -p "${dir}"
-  cp -f "${G6RD_SECRETS}/relay-chain.crt" "${dir}/relay.crt"
-  cp -f "${G6RD_SECRETS}/relay-leaf.key" "${dir}/relay.key"
-  cp -f "${G6RD_SECRETS}/relay-ca.pem" "${dir}/relay-ca.pem"
-  cp -f "${G6RD_SECRETS}/relay-token" "${dir}/relay-token"
-  chmod 0644 "${dir}/relay.crt" "${dir}/relay-ca.pem"
-  chmod 0600 "${dir}/relay.key"
-  # The relay runs as 65532 while the transport-authorized probe runs as
-  # 65534:65532. Both must read the client token; keep it group-readable but
-  # never world-readable. The relay private key remains owner-only.
-  chmod 0640 "${dir}/relay-token"
-  docker run --rm --pull=never --network none --log-driver none \
+  if ! rm -rf -- "${dir}" \
+    || ! mkdir -p "${dir}/relay" "${dir}/transportd" "${dir}/probe" \
+    || ! cp -f "${G6RD_SECRETS}/relay-chain.crt" "${dir}/relay/relay.crt" \
+    || ! cp -f "${G6RD_SECRETS}/relay-leaf.key" "${dir}/relay/relay.key" \
+    || ! cp -f "${G6RD_SECRETS}/relay-token" "${dir}/relay/relay-token" \
+    || ! cp -f "${G6RD_SECRETS}/relay-ca.pem" "${dir}/transportd/relay-ca.pem" \
+    || ! cp -f "${G6RD_SECRETS}/relay-token" "${dir}/transportd/relay-token" \
+    || ! cp -f "${G6RD_SECRETS}/relay-ca.pem" "${dir}/probe/relay-ca.pem" \
+    || ! cp -f "${G6RD_SECRETS}/relay-token" "${dir}/probe/relay-token" \
+    || ! cmp -s "${G6RD_SECRETS}/relay-token" "${dir}/relay/relay-token" \
+    || ! cmp -s "${G6RD_SECRETS}/relay-token" "${dir}/transportd/relay-token" \
+    || ! cmp -s "${G6RD_SECRETS}/relay-token" "${dir}/probe/relay-token"; then
+    echo "failed to build scoped relay material" >&2
+    return 1
+  fi
+  if ! docker run --rm --pull=never --network none --log-driver none \
+    --label "ocservia.g6.run-id=${RUN_ID}" \
     -v "${dir}:/fix" postgres:17.10-bookworm \
-    sh -c 'chown 65532:65532 /fix/*; chmod 0755 /fix' >/dev/null
+    sh -eu -c '
+      chown 65532:65532 /fix/relay/* /fix/transportd/*
+      chown 65534:65532 /fix/probe/*
+      chmod 0755 /fix/relay /fix/transportd /fix/probe
+      chmod 0644 /fix/relay/relay.crt /fix/transportd/relay-ca.pem /fix/probe/relay-ca.pem
+      chmod 0600 /fix/relay/relay.key /fix/relay/relay-token \
+        /fix/transportd/relay-token /fix/probe/relay-token
+    ' >/dev/null; then
+    echo "failed to assign scoped relay material principals" >&2
+    return 1
+  fi
+  if ! g6rd_relay_material_cache_valid "${dir}" \
+    || ! g6rd_verify_relay_material_principals "${dir}"; then
+    echo "scoped relay material failed closed validation" >&2
+    return 1
+  fi
   printf '%s\n' "${dir}"
 }
 
@@ -383,7 +530,7 @@ g6rd_wait_for_controller_relay() {
 }
 
 g6rd_export_common_env() {
-  local required
+  local required relay_dir
   for required in owner-password app-password replication-password dev-auth-token \
     oidc-client-secret session-key requester-identity-id requester-session-id \
     requester-session-cookie approver-identity-id approver-session-id \
@@ -403,7 +550,11 @@ g6rd_export_common_env() {
   export G6_DB_HOST="${G6_DB_HOST:-postgres}"
   export G6_DB_PORT="${G6_DB_PORT:-5432}"
   export G6_SIGNING_DIR="${G6_SIGNING_DIR:-$(g6rd_materialize_signing_dir)}"
-  export G6_RELAY_DIR="${G6_RELAY_DIR:-$(g6rd_materialize_relay_dir)}"
+  relay_dir="${G6_RELAY_DIR:-}"
+  if [[ -z "${relay_dir}" ]]; then
+    relay_dir="$(g6rd_materialize_relay_dir)" || return 1
+  fi
+  export G6_RELAY_DIR="${relay_dir}"
   g6rd_export_relay_urls
   export G6_LOCAL_RELAY_HOST="${G6_LOCAL_RELAY_HOST:-relay-${FD_ID#fd-}}"
   export G6_REMOTE_RELAY_HOST="${G6_REMOTE_RELAY_HOST:-$([[ "${FD_ID}" == fd-a ]] && printf relay-b || printf relay-a)}"
@@ -453,7 +604,11 @@ g6rd_prepare_build_environment() {
     G6_RELAY_URL_B G6_LOCAL_RELAY_HOST G6_REMOTE_RELAY_HOST G6_API_BIND_PORT \
     G6_RELAY_BIND_PORT G6_PROBE_CONTROLLER_KEY_DIR OCSERV_CONTROLLER_ENDPOINT_ID
   g6rd_placeholder_env
-  mkdir -p "${G6_SIGNING_DIR}" "${G6_RELAY_DIR}" "${G6_PROBE_CONTROLLER_KEY_DIR}"
+  mkdir -p "${G6_SIGNING_DIR}" "${G6_RELAY_DIR}/relay" \
+    "${G6_RELAY_DIR}/transportd" "${G6_RELAY_DIR}/probe" \
+    "${G6_PROBE_CONTROLLER_KEY_DIR}"
+  chmod 0755 "${G6_RELAY_DIR}/relay" "${G6_RELAY_DIR}/transportd" \
+    "${G6_RELAY_DIR}/probe"
   g6rd_prepare_agent_cleanup_dirs
 }
 
