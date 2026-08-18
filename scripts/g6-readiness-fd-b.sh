@@ -428,7 +428,15 @@ transport_endpoint_matches() {
 all_nodes_connected() {
   local args=()
   readarray -t args < <(node_ids)
-  g6rd_probe_node_connection any "${args[@]}" >/dev/null 2>&1
+  g6rd_probe_node_connection any "${args[@]}" 2>/dev/null \
+    | jq -e '
+      .all_matched == true
+      and (.observations | length > 0)
+      and all(.observations[];
+        .owner_epoch > 0
+        and (.session_expires_at | type == "string" and length > 0)
+        and (.negotiated_capabilities | index("ocserv.fencing.v2") != null))
+    ' >/dev/null
 }
 
 report_node_connection_timeout() {
@@ -439,7 +447,8 @@ report_node_connection_timeout() {
   if G6RD_NODE_CONNECTION_TIMEOUT_SECONDS=5 \
     g6rd_probe_node_connection any "${args[@]}" >"${response}" 2>"${error}"; then
     jq -c '{all_matched, observations: [.observations[] | {
-      node_id, path, owner_epoch, last_seen
+      node_id, path, owner_epoch, authorization_revision,
+      negotiated_capabilities, session_expires_at, last_seen
     }]}' "${response}" >&2
   elif [[ -s "${error}" ]]; then
     sed -n '1,20p' "${error}" >&2

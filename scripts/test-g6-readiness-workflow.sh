@@ -261,6 +261,13 @@ grep -q 'report_node_connection_timeout' <<<"${promote_phase}" || {
   echo "fd-b reconnect timeout must report the final transport probe and API inventory" >&2
   exit 1
 }
+connected_probe="$(sed -n '/^all_nodes_connected() {/,/^}/p' "${FD_B}")"
+grep -q '\.owner_epoch > 0' <<<"${connected_probe}" \
+  && grep -q 'index("ocserv.fencing.v2")' <<<"${connected_probe}" \
+  && grep -q '\.session_expires_at' <<<"${connected_probe}" || {
+  echo "fd-b reconnect barrier must require a live fenced mutation session" >&2
+  exit 1
+}
 controller_key_phase="$(sed -n '/^g6rd_install_controller_key() {/,/^}/p' "${LIB}")"
 grep -q 'g6rd_compose run --rm --no-deps controller-key-init' \
   <<<"${controller_key_phase}" || {

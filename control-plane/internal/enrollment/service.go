@@ -713,25 +713,12 @@ func (s *Service) AuthorizeSession(ctx context.Context, request *transportv1.Aut
 		if fencingNegotiated && s.ownerSessions != nil {
 			fence, fenceErr := s.ownerSessions.OpenSession(ctx, fixedNode, fixedEndpoint, authorizationRevision, negotiated)
 			if errors.Is(fenceErr, ownersession.ErrNotOwner) {
-				// Only the current connection owner may establish a
-				// mutation-capable session. Downgrade to the established
-				// read-only compatibility path instead of granting
-				// mutations without a fence.
-				response.SessionGrant = nil
-				response.ProtocolMinor = 0
-				readOnly := negotiated[:0]
-				for _, capability := range negotiated {
-					if capability != ownersession.FencingCapability && strings.HasSuffix(capability, ".read") {
-						readOnly = append(readOnly, capability)
-					}
-				}
-				response.NegotiatedCapabilities = readOnly
-				response.Result = agentv1.HandshakeResult_HANDSHAKE_RESULT_ACCEPTED
-				response.MaxMessageSize = min(handshake.GetMaxMessageSize(), MaxMessageSize)
-				if err := tx.Commit(ctx); err != nil {
-					return nil, fmt.Errorf("commit downgraded session authorization: %w", err)
-				}
-				return response, nil
+				// A fencing-capable Agent must retry while another term still
+				// owns the lease. Accepting an unbounded read-only downgrade here
+				// would leave it connected forever after that lease expires, so a
+				// replacement Controller could never establish the higher epoch
+				// required to recover ambiguous commands.
+				return nil, fmt.Errorf("owner lease is not yet available: %w", fenceErr)
 			}
 			if fenceErr != nil {
 				return nil, fmt.Errorf("open owner session: %w", fenceErr)

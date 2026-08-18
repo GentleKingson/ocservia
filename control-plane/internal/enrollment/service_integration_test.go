@@ -726,6 +726,109 @@ func TestAuthorizeSessionDeduplicatesFencingCapabilityIntegration(t *testing.T) 
 	}
 }
 
+// TestAuthorizeSessionOwnerContentionForcesRetryIntegration proves that a
+// fencing-capable Agent is not parked indefinitely on an accepted read-only
+// session while the previous Controller's owner lease expires. The failed
+// authorization makes transportd close the handshake so the Agent retries and
+// can establish a higher owner epoch after takeover. Protocol v1.0 read-only
+// compatibility remains available because it never requests an owner fence.
+func TestAuthorizeSessionOwnerContentionForcesRetryIntegration(t *testing.T) {
+	databaseURL := os.Getenv("OCSERV_TEST_DATABASE_URL")
+	if databaseURL == "" {
+		t.Skip("OCSERV_TEST_DATABASE_URL is not set")
+	}
+	ctx := context.Background()
+	pool, err := pgxpool.New(ctx, databaseURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pool.Close()
+	workspaceID := uuid.Must(uuid.NewV7())
+	if _, err := pool.Exec(ctx, `INSERT INTO workspaces (id,name,slug,created_at,updated_at)
+		VALUES ($1,'Owner contention',$2,now(),now())`, workspaceID, "owner-contention-"+workspaceID.String()); err != nil {
+		t.Fatal(err)
+	}
+	defer cleanupWorkspace(ctx, pool, workspaceID)
+
+	service := newTestService(t, pool, "", "test")
+	endpoint := endpointFixture(22)
+	token := createToken(t, service, workspaceID, endpoint)
+	enrolled, err := service.Enroll(ctx, enrollmentRequestCapabilities(token.Value, endpoint, []string{"ocserv.fencing.v2", "ocserv.status.read"}))
+	if err != nil || enrolled.GetResult() != agentv1.HandshakeResult_HANDSHAKE_RESULT_PENDING_APPROVAL {
+		t.Fatalf("enroll = %v, %v", enrolled, err)
+	}
+	var nodeID uuid.UUID
+	copy(nodeID[:], enrolled.GetNodeId())
+	_, approvalHash, approvalSummary, err := service.ApprovalBinding(ctx, nodeID, nil, "standard", []string{"ocserv.fencing.v2", "ocserv.status.read"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	approvalID, identityID, sessionID := approvedMetadata(t, pool, workspaceID, nodeID, "node.approve", approvalHash, approvalSummary)
+	if _, err := service.Approve(ctx, Approval{NodeID: nodeID, Labels: nil, Policy: "standard", Capabilities: []string{"ocserv.fencing.v2", "ocserv.status.read"}, ActorID: identityID.String(), ApprovalID: approvalID, IdentityID: identityID, SessionID: sessionID, Reason: "owner contention fixture", RequestID: uuid.Must(uuid.NewV7()).String()}); err != nil {
+		t.Fatalf("approve: %v", err)
+	}
+
+	var authorizationRevision uint64
+	if err := pool.QueryRow(ctx, `SELECT authorization_revision FROM nodes WHERE id=$1`, nodeID).Scan(&authorizationRevision); err != nil {
+		t.Fatal(err)
+	}
+	var fixedNode [16]byte
+	var fixedEndpoint [32]byte
+	copy(fixedNode[:], nodeID[:])
+	copy(fixedEndpoint[:], endpoint)
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	oldOwner, err := ownersession.NewManager(pool, service.signer, &recordingRegistrar{}, 2*time.Second, logger)
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldFence, err := oldOwner.OpenSession(ctx, fixedNode, fixedEndpoint, authorizationRevision, []string{"ocserv.fencing.v2", "ocserv.status.read"})
+	if err != nil {
+		t.Fatalf("open old owner session: %v", err)
+	}
+	successor, err := ownersession.NewManager(pool, service.signer, &recordingRegistrar{}, 30*time.Second, logger)
+	if err != nil {
+		t.Fatal(err)
+	}
+	service.ownerSessions = successor
+	handshake := &agentv1.SessionHandshake{ProtocolMajor: 1, ProtocolMinor: ProtocolMinor, AgentVersion: "test", NodeId: nodeID[:], EndpointId: endpoint, Capabilities: []string{"ocserv.fencing.v2", "ocserv.status.read"}, OsRelease: "test", BootId: "boot", AgentInstanceId: uuidBytes(), MaxMessageSize: 1024, Time: timestamppb.Now(), Nonce: make([]byte, 16), SealingKeys: enrollmentSealingKeys()}
+	response, err := service.AuthorizeSession(ctx, &transportv1.AuthorizeSessionRequest{RemoteEndpointId: endpoint, Handshake: handshake})
+	if response != nil || !errors.Is(err, ownersession.ErrNotOwner) {
+		t.Fatalf("contended fenced authorization = response %v, err %v", response, err)
+	}
+
+	handshake.ProtocolMinor = 0
+	handshake.Capabilities = []string{"ocserv.status.read"}
+	response, err = service.AuthorizeSession(ctx, &transportv1.AuthorizeSessionRequest{RemoteEndpointId: endpoint, Handshake: handshake})
+	if err != nil || response.GetResult() != agentv1.HandshakeResult_HANDSHAKE_RESULT_ACCEPTED || response.GetProtocolMinor() != 0 || response.GetSessionGrant() != nil || response.GetConnectionFence() != nil {
+		t.Fatalf("legacy read-only authorization = %v, %v", response, err)
+	}
+
+	handshake.ProtocolMinor = ProtocolMinor
+	handshake.Capabilities = []string{"ocserv.fencing.v2", "ocserv.status.read"}
+	takeoverDeadline := time.Now().Add(5 * time.Second)
+	for {
+		response, err = service.AuthorizeSession(ctx, &transportv1.AuthorizeSessionRequest{RemoteEndpointId: endpoint, Handshake: handshake})
+		if err == nil || !errors.Is(err, ownersession.ErrNotOwner) || time.Now().After(takeoverDeadline) {
+			break
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	if err != nil || response.GetResult() != agentv1.HandshakeResult_HANDSHAKE_RESULT_ACCEPTED || response.GetConnectionFence() == nil || response.GetConnectionFence().GetOwnerEpoch() <= oldFence.GetOwnerEpoch() {
+		t.Fatalf("successor fenced authorization = %v, %v", response, err)
+	}
+	operationID := [16]byte(uuid.Must(uuid.NewV7()))
+	if _, _, err := oldOwner.BindOperation(ctx, fixedNode, agentv1.FenceOperationKind_FENCE_OPERATION_KIND_COMMAND, operationID, "ocserv.status.read"); !errors.Is(err, ownersession.ErrNotOwner) {
+		t.Fatalf("old owner after takeover = %v, want ErrNotOwner", err)
+	}
+	successorConnection, err := fixed16(response.GetConnectionFence().GetConnectionId())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = successor.CloseSession(context.Background(), fixedNode, successorConnection, int64(response.GetConnectionFence().GetOwnerEpoch()))
+	})
+}
+
 // cancellingRegistrar accepts the first fence registration and then cancels
 // the request context, so the authorization transaction commit that follows
 // fails after the owner session was already opened.

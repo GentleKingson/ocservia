@@ -86,7 +86,7 @@ func (s *Service) RecoverAmbiguousDispatchedTx(ctx context.Context, tx pgx.Tx, r
 		JOIN operations AS operation ON operation.id=command.operation_id
 		JOIN outbox_events AS outbox ON outbox.command_id=command.id
 		WHERE command.node_id=$1
-		  AND command.state='dispatched'
+		  AND command.state IN ('dispatched','accepted','running')
 		  AND operation.state IN ('dispatched','accepted','running','unknown')
 		  AND outbox.published_at IS NOT NULL
 		  AND outbox.locked_by IS NULL
@@ -141,7 +141,7 @@ func (s *Service) RecoverAmbiguousDispatchedTx(ctx context.Context, tx pgx.Tx, r
 		}
 		commandTag, err := tx.Exec(ctx, `UPDATE commands
 			SET state='unknown',envelope=$2,expires_at=$3,updated_at=$4
-			WHERE id=$1 AND state='dispatched'`, candidate.commandID, payload, expiresAt, reconnect.ObservedAt)
+			WHERE id=$1 AND state IN ('dispatched','accepted','running')`, candidate.commandID, payload, expiresAt, reconnect.ObservedAt)
 		if err != nil {
 			return 0, fmt.Errorf("mark reconnect command unknown: %w", err)
 		}

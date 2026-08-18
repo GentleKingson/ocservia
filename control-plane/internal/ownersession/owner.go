@@ -337,8 +337,9 @@ func (c *memoryCursor) set(eventID []byte) {
 
 // OpenSession takes the ownership lease for a newly accepted mutation-capable
 // agent session and returns the signed fence for the handshake response. A
-// different unexpired owner blocks the session: the caller must downgrade to
-// the read-only compatibility path instead of granting mutations.
+// different unexpired owner blocks the session: the caller must fail the
+// fencing-capable handshake so the Agent retries after the lease can be taken
+// over instead of granting mutations or parking it on an unfenced session.
 //
 // A reconnect of the same identity is a replacement, not a continuation:
 // Acquire irrevocably advances the PostgreSQL fencing epoch, so the previous
