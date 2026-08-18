@@ -12,6 +12,17 @@ g6rd_init_environment
 export FD_ALIAS
 
 WINDOW_SECONDS="${G6RD_WINDOW_SECONDS:-305}"
+WINDOW_API_READY_TIMEOUT_SECONDS=15
+WINDOW_PRE_DRAIN_TIMEOUT_SECONDS=15
+WINDOW_COMMAND_SETTLE_TIMEOUT_SECONDS=110
+WINDOW_POST_DRAIN_TIMEOUT_SECONDS=15
+WINDOW_API_PREDICATE_OVERRUN_SECONDS=10
+WINDOW_SQL_PREDICATE_OVERRUN_SECONDS=10
+WINDOW_DRIVER_OVERRUN_SECONDS=21
+WINDOW_DIAGNOSTIC_MAX_SECONDS=10
+WINDOW_SAMPLER_STOP_MAX_SECONDS=8
+WINDOW_WORKFLOW_TIMEOUT_SECONDS=600
+WINDOW_MINIMUM_OUTER_MARGIN_SECONDS=60
 NODES_FILE="${G6RD_STATE}/all-nodes.tsv"
 
 require_file() {
@@ -1270,18 +1281,142 @@ outbox_drained() {
     'SELECT count(*) FROM outbox_events WHERE published_at IS NULL')" == 0 ]]
 }
 
+psql_window_probe() {
+  # Five seconds plus g6rd_psql's five-second TERM-to-KILL grace gives each
+  # observation-window SQL predicate a ten-second hard process bound.
+  G6RD_PSQL_TIMEOUT_SECONDS=5 psql_primary "$@"
+}
+
+window_outbox_drained() {
+  [[ "$(psql_window_probe -Atc \
+    'SELECT count(*) FROM outbox_events WHERE published_at IS NULL')" == 0 ]]
+}
+
+window_commands_settled() {
+  local keys_prefix="${1:?key prefix}" unsettled
+  unsettled="$(psql_window_probe -Atc \
+    "SELECT count(*) FROM commands WHERE idempotency_key LIKE '${keys_prefix}%' AND state NOT IN ('succeeded','failed','rejected','unknown','expired','rolled_back','superseded')")"
+  [[ "${unsettled}" == 0 ]]
+}
+
+window_inner_budget_seconds() {
+  printf '%s\n' "$((
+    WINDOW_SECONDS
+    + WINDOW_API_READY_TIMEOUT_SECONDS
+    + WINDOW_PRE_DRAIN_TIMEOUT_SECONDS
+    + WINDOW_COMMAND_SETTLE_TIMEOUT_SECONDS
+    + WINDOW_POST_DRAIN_TIMEOUT_SECONDS
+    + WINDOW_API_PREDICATE_OVERRUN_SECONDS
+    + (3 * WINDOW_SQL_PREDICATE_OVERRUN_SECONDS)
+    + WINDOW_DRIVER_OVERRUN_SECONDS
+    + WINDOW_DIAGNOSTIC_MAX_SECONDS
+    + WINDOW_SAMPLER_STOP_MAX_SECONDS
+  ))"
+}
+
+validate_window_timeout_budget() {
+  local value budget
+  for value in "${WINDOW_SECONDS}" "${WINDOW_API_READY_TIMEOUT_SECONDS}" \
+    "${WINDOW_PRE_DRAIN_TIMEOUT_SECONDS}" "${WINDOW_COMMAND_SETTLE_TIMEOUT_SECONDS}" \
+    "${WINDOW_POST_DRAIN_TIMEOUT_SECONDS}" "${WINDOW_API_PREDICATE_OVERRUN_SECONDS}" \
+    "${WINDOW_SQL_PREDICATE_OVERRUN_SECONDS}" "${WINDOW_DRIVER_OVERRUN_SECONDS}" \
+    "${WINDOW_DIAGNOSTIC_MAX_SECONDS}" "${WINDOW_SAMPLER_STOP_MAX_SECONDS}" \
+    "${WINDOW_WORKFLOW_TIMEOUT_SECONDS}" "${WINDOW_MINIMUM_OUTER_MARGIN_SECONDS}"; do
+    [[ "${value}" =~ ^[1-9][0-9]*$ ]] || {
+      echo "observation-window timeout budgets must be positive integers" >&2
+      return 2
+    }
+  done
+  budget="$(window_inner_budget_seconds)"
+  ((budget + WINDOW_MINIMUM_OUTER_MARGIN_SECONDS < WINDOW_WORKFLOW_TIMEOUT_SECONDS)) || {
+    echo "observation-window inner budget ${budget}s leaves less than the required outer margin" >&2
+    return 2
+  }
+}
+
+report_window_command_timeout() {
+  local keys_prefix="${1:?key prefix}"
+  echo "observation-window command state matrix at settlement timeout:" >&2
+  psql_window_probe -F $'\t' -Atc \
+    "SELECT 'matrix',command.state,operation.state,
+       outbox.published_at IS NOT NULL,outbox.locked_by IS NOT NULL,
+       lease.command_id IS NOT NULL,
+       COALESCE(lease.leased_until>clock_timestamp(),false),count(*)
+     FROM commands AS command
+     JOIN operations AS operation ON operation.id=command.operation_id
+     JOIN outbox_events AS outbox ON outbox.command_id=command.id
+     LEFT JOIN node_command_leases AS lease ON lease.command_id=command.id
+     WHERE command.idempotency_key LIKE '${keys_prefix}%'
+     GROUP BY 2,3,4,5,6,7 ORDER BY 2,3,4,5,6,7;
+     SELECT 'unsettled',command.id::text,command.node_id::text,command.state,
+       operation.state,outbox.published_at IS NOT NULL,
+       outbox.locked_by IS NOT NULL,lease.command_id IS NOT NULL,
+       COALESCE(lease.leased_until>clock_timestamp(),false),lease.leased_until,
+       outbox.attempts,
+       COALESCE((SELECT string_agg(attempt.attempt_number::text||':'||attempt.state,',' ORDER BY attempt.attempt_number)
+         FROM command_attempts AS attempt WHERE attempt.command_id=command.id),'none'),
+       COALESCE((SELECT string_agg(result.state,',' ORDER BY result.created_at)
+         FROM agent_command_results AS result WHERE result.command_id=command.id),'none'),
+       command.updated_at
+     FROM commands AS command
+     JOIN operations AS operation ON operation.id=command.operation_id
+     JOIN outbox_events AS outbox ON outbox.command_id=command.id
+     LEFT JOIN node_command_leases AS lease ON lease.command_id=command.id
+     WHERE command.idempotency_key LIKE '${keys_prefix}%'
+       AND command.state NOT IN ('succeeded','failed','rejected','unknown','expired','rolled_back','superseded')
+     ORDER BY command.updated_at,command.id LIMIT 20" >&2 ||
+    echo "observation-window command state matrix unavailable" >&2
+}
+
+report_window_outbox_timeout() {
+  echo "observation-window unpublished outbox state at drain timeout:" >&2
+  psql_window_probe -F $'\t' -Atc \
+    "SELECT 'summary',count(*),count(*) FILTER (WHERE locked_by IS NOT NULL),
+       min(available_at),max(attempts)
+     FROM outbox_events WHERE published_at IS NULL;
+     SELECT 'pending',outbox.id::text,COALESCE(command.idempotency_key,''),
+       outbox.attempts,outbox.locked_by,outbox.locked_until,outbox.available_at
+     FROM outbox_events AS outbox
+     LEFT JOIN commands AS command ON command.id=outbox.command_id
+     WHERE outbox.published_at IS NULL
+     ORDER BY outbox.available_at,outbox.id LIMIT 20" >&2 ||
+    echo "observation-window unpublished outbox state unavailable" >&2
+}
+
+wait_for_window_enqueue_wave() {
+  local pid status=0
+  (($# > 0)) || {
+    echo "the observation-window enqueue wave has no child processes" >&2
+    return 2
+  }
+  for pid in "$@"; do
+    if ! wait "${pid}"; then
+      echo "observation-window enqueue child ${pid} failed" >&2
+      status=1
+    fi
+  done
+  return "${status}"
+}
+
 phase_window() {
   G6RD_WORKSPACE_ID="$(<"${G6RD_STATE}/workspace-id")"
   export G6RD_WORKSPACE_ID
   g6rd_export_common_env
-  g6rd_wait_until 60 2 "api ready before the window" g6rd_api_ready
-  g6rd_wait_until 120 5 "outbox drained before the window" outbox_drained
+  validate_window_timeout_budget
+  g6rd_wait_until_deadline "${WINDOW_API_READY_TIMEOUT_SECONDS}" 2 \
+    "api ready before the window" g6rd_api_ready
+  if ! g6rd_wait_until_deadline "${WINDOW_PRE_DRAIN_TIMEOUT_SECONDS}" 5 \
+    "outbox drained before the window" window_outbox_drained; then
+    report_window_outbox_timeout
+    return 1
+  fi
   g6rd_start_sampler "${G6RD_STATE}/resource-samples.csv"
   g6rd_now >"${G6RD_STATE}/window-started-at"
-  local node total count=0 elapsed=0 start _
+  local node total count=0 window_deadline _
+  local -a enqueue_pids=()
   mapfile -t node_list < <(node_ids)
   total="${#node_list[@]}"
-  start="$(date +%s)"
+  window_deadline=$((SECONDS + WINDOW_SECONDS))
   : >"${G6RD_STATE}/read-log.jsonl"
   : >"${G6RD_STATE}/enqueue-log.jsonl"
   # Two opening waves of one-command-per-node, enqueued in parallel: the
@@ -1289,28 +1424,46 @@ phase_window() {
   # which drives the concurrent production-command floor above fifty
   # inside the bounded window itself.
   for _ in 1 2; do
+    enqueue_pids=()
     for node in "${node_list[@]}"; do
       g6rd_enqueue_command "${node}" "g6-window-${RUN_ID}-${count}" &
+      enqueue_pids+=("$!")
       count=$((count + 1))
     done
-    wait
+    if ! wait_for_window_enqueue_wave "${enqueue_pids[@]}"; then
+      g6rd_stop_sampler || true
+      return 1
+    fi
   done
-  while ((elapsed < WINDOW_SECONDS)); do
+  while ((SECONDS < window_deadline)); do
     g6rd_read_nodes "${G6RD_STATE}/read-log.jsonl" || true
+    ((SECONDS < window_deadline)) || break
     g6rd_read_nodes "${G6RD_STATE}/read-log.jsonl" || true
+    ((SECONDS < window_deadline)) || break
     node="${node_list[$((count % total))]}"
     if [[ -n "${node}" ]]; then
       g6rd_enqueue_command "${node}" "g6-window-${RUN_ID}-${count}" || true
+      ((SECONDS < window_deadline)) || break
       g6rd_enqueue_command "${node}" "g6-window-${RUN_ID}-b${count}" || true
+      ((SECONDS < window_deadline)) || break
     fi
     count=$((count + 1))
     sleep 0.5
-    elapsed="$(( $(date +%s) - start ))"
   done
   CLAIM_KEY="g6-window-${RUN_ID}-"
   export CLAIM_KEY
-  g6rd_wait_until 240 5 "window commands settled" wait_commands_settled "g6-window-${RUN_ID}"
-  g6rd_wait_until 60 5 "outbox drained after the window" outbox_drained
+  if ! g6rd_wait_until_deadline "${WINDOW_COMMAND_SETTLE_TIMEOUT_SECONDS}" 5 \
+    "window commands settled" window_commands_settled "${CLAIM_KEY}"; then
+    report_window_command_timeout "${CLAIM_KEY}"
+    g6rd_stop_sampler || true
+    return 1
+  fi
+  if ! g6rd_wait_until_deadline "${WINDOW_POST_DRAIN_TIMEOUT_SECONDS}" 5 \
+    "outbox drained after the window" window_outbox_drained; then
+    report_window_outbox_timeout
+    g6rd_stop_sampler || true
+    return 1
+  fi
   g6rd_stop_sampler
   g6rd_now >"${G6RD_STATE}/window-ended-at"
   g6rd_timeline_event api_slo_measured "${G6RD_STATE}/window-ended-at"

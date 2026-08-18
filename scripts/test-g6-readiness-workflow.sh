@@ -1825,6 +1825,56 @@ fi
 
 # The fault-free observation window and the sampler cadence are harness
 # margins over the frozen SLO limits, so they must demonstrably clear them.
+window_phase="$(sed -n '/^phase_window() {/,/^}/p' "${FD_B}")"
+window_wait_helper="$(sed -n '/^wait_for_window_enqueue_wave() {/,/^}/p' "${FD_B}")"
+if grep -qE '^[[:space:]]*wait[[:space:]]*$' <<<"${window_phase}"; then
+  echo "the observation window must not wait for the long-lived sampler" >&2
+  exit 1
+fi
+grep -qF 'enqueue_pids+=("$!")' <<<"${window_phase}" || {
+  echo "the observation window must capture every opening-wave enqueue PID" >&2
+  exit 1
+}
+grep -qF 'wait_for_window_enqueue_wave "${enqueue_pids[@]}"' \
+  <<<"${window_phase}" || {
+  echo "the observation window must wait only for its opening-wave enqueues" >&2
+  exit 1
+}
+(
+  eval "${window_wait_helper}"
+  sleep 30 &
+  sampler_pid=$!
+  trap 'kill "${sampler_pid}" 2>/dev/null || true; wait "${sampler_pid}" 2>/dev/null || true' EXIT
+  true &
+  enqueue_pid=$!
+  started_at="${SECONDS}"
+  wait_for_window_enqueue_wave "${enqueue_pid}"
+  ((SECONDS - started_at < 2)) || {
+    echo "the enqueue-wave wait blocked on an unrelated background sampler" >&2
+    exit 1
+  }
+  kill -0 "${sampler_pid}" || {
+    echo "the enqueue-wave wait terminated the unrelated background sampler" >&2
+    exit 1
+  }
+  false &
+  failed_pid=$!
+  marker="$(mktemp)"
+  rm -f -- "${marker}"
+  (sleep 1; touch "${marker}") &
+  succeeding_pid=$!
+  if wait_for_window_enqueue_wave "${failed_pid}" "${succeeding_pid}" \
+    >/dev/null 2>&1; then
+    echo "the enqueue-wave wait hid a failed enqueue child" >&2
+    exit 1
+  fi
+  [[ -e "${marker}" ]] || {
+    echo "the enqueue-wave wait did not reap children after an earlier failure" >&2
+    exit 1
+  }
+  rm -f -- "${marker}"
+)
+
 slo_limit() {
   awk -v metric="$1" '$0 == "  " metric ":" { in_metric = 1 } in_metric && $1 == "limit:" { print $2; exit }' "${SLO}"
 }

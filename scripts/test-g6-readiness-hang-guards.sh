@@ -123,6 +123,106 @@ done
 # Detached watchers and the sampler own process groups, so stopping the wrapper
 # also terminates an in-flight Docker/psql descendant. Each watcher query has
 # its own hard attempt timeout before the bounded cleanup removes run state.
+window_phase="$(sed -n '/^phase_window() {/,/^}/p' "${FD_B}")"
+if grep -qE '^[[:space:]]*wait[[:space:]]*$' <<<"${window_phase}"; then
+  echo "the observation window uses a bare wait that can deadlock on the sampler" >&2
+  exit 1
+fi
+# shellcheck disable=SC2016  # assert literal PID-scoped wait expressions
+for token in 'enqueue_pids+=("$!")' \
+  'wait_for_window_enqueue_wave "${enqueue_pids[@]}"'; do
+  grep -qF "${token}" <<<"${window_phase}" || {
+    echo "the observation window is missing PID-scoped enqueue waiting: ${token}" >&2
+    exit 1
+  }
+done
+
+# The 305-second load window, every wall-clock wait, the maximum predicate and
+# driver overruns, one bounded diagnostic probe, and sampler shutdown must all
+# finish before Actions' ten-minute hard kill with a full minute of margin.
+if grep -qE 'g6rd_wait_until[[:space:]]' <<<"${window_phase}"; then
+  echo "the observation window uses an attempt-count wait" >&2
+  exit 1
+fi
+# shellcheck disable=SC2016  # assert literal deadline and diagnostic expressions
+for token in \
+  'g6rd_wait_until_deadline "${WINDOW_API_READY_TIMEOUT_SECONDS}"' \
+  'g6rd_wait_until_deadline "${WINDOW_PRE_DRAIN_TIMEOUT_SECONDS}"' \
+  'g6rd_wait_until_deadline "${WINDOW_COMMAND_SETTLE_TIMEOUT_SECONDS}"' \
+  'g6rd_wait_until_deadline "${WINDOW_POST_DRAIN_TIMEOUT_SECONDS}"' \
+  'report_window_command_timeout "${CLAIM_KEY}"' \
+  'report_window_outbox_timeout' \
+  'validate_window_timeout_budget'; do
+  grep -qF "${token}" <<<"${window_phase}" || {
+    echo "the observation window is missing bounded timeout behavior: ${token}" >&2
+    exit 1
+  }
+done
+grep -qF 'G6RD_PSQL_TIMEOUT_SECONDS=5 psql_primary' "${FD_B}" || {
+  echo "observation-window SQL predicates lack their ten-second hard bound" >&2
+  exit 1
+}
+[[ "$(grep -cF '((SECONDS < window_deadline)) || break' <<<"${window_phase}")" == 4 ]] || {
+  echo "the observation-window driver does not bound every request boundary" >&2
+  exit 1
+}
+
+window_constant() {
+  local name="${1:?constant name is required}" value
+  value="$(sed -nE "s/^${name}=([0-9]+)$/\\1/p" "${FD_B}")"
+  [[ "${value}" =~ ^[1-9][0-9]*$ ]] || {
+    echo "invalid observation-window budget constant ${name}" >&2
+    return 1
+  }
+  printf '%s\n' "${value}"
+}
+window_default="$(grep -oE 'G6RD_WINDOW_SECONDS:-[0-9]+' "${FD_B}" | head -1 | cut -d: -f2- | tr -d ':-')"
+api_ready_budget="$(window_constant WINDOW_API_READY_TIMEOUT_SECONDS)"
+pre_drain_budget="$(window_constant WINDOW_PRE_DRAIN_TIMEOUT_SECONDS)"
+settle_budget="$(window_constant WINDOW_COMMAND_SETTLE_TIMEOUT_SECONDS)"
+post_drain_budget="$(window_constant WINDOW_POST_DRAIN_TIMEOUT_SECONDS)"
+api_overrun="$(window_constant WINDOW_API_PREDICATE_OVERRUN_SECONDS)"
+sql_overrun="$(window_constant WINDOW_SQL_PREDICATE_OVERRUN_SECONDS)"
+driver_overrun="$(window_constant WINDOW_DRIVER_OVERRUN_SECONDS)"
+diagnostic_budget="$(window_constant WINDOW_DIAGNOSTIC_MAX_SECONDS)"
+sampler_stop_budget="$(window_constant WINDOW_SAMPLER_STOP_MAX_SECONDS)"
+declared_outer="$(window_constant WINDOW_WORKFLOW_TIMEOUT_SECONDS)"
+minimum_margin="$(window_constant WINDOW_MINIMUM_OUTER_MARGIN_SECONDS)"
+((minimum_margin >= 60)) || {
+  echo "the observation window must retain at least one minute below its outer timeout" >&2
+  exit 1
+}
+for helper_name in g6rd_api_curl g6rd_enqueue_command g6rd_read_nodes; do
+  helper_body="$(sed -n "/^${helper_name}() {/,/^}/p" "${LIB}")"
+  grep -qF -- '--max-time 10' <<<"${helper_body}" || {
+    echo "${helper_name} no longer matches the declared observation-window HTTP bound" >&2
+    exit 1
+  }
+done
+((api_overrun >= 10 && sql_overrun >= 10 && driver_overrun >= 21 \
+  && diagnostic_budget >= 10 && sampler_stop_budget >= 8)) || {
+  echo "the observation-window overrun constants understate their process bounds" >&2
+  exit 1
+}
+workflow_window_minutes="$(ruby -r yaml -e '
+  workflow = YAML.safe_load(File.read(ARGV.fetch(0)), aliases: true)
+  step = workflow.fetch("jobs").fetch("g6-rd-fd-b").fetch("steps")
+    .find { |candidate| candidate["name"] == "Run the bounded observation window" }
+  puts step.fetch("timeout-minutes")
+' "${WORKFLOW}")"
+workflow_outer=$((workflow_window_minutes * 60))
+[[ "${declared_outer}" == "${workflow_outer}" ]] || {
+  echo "the observation-window script and workflow disagree on the outer timeout" >&2
+  exit 1
+}
+inner_budget=$((window_default + api_ready_budget + pre_drain_budget + settle_budget
+  + post_drain_budget + api_overrun + (3 * sql_overrun) + driver_overrun
+  + diagnostic_budget + sampler_stop_budget))
+if ((inner_budget + minimum_margin >= workflow_outer)); then
+  echo "observation-window inner budget ${inner_budget}s does not leave the required ${minimum_margin}s margin inside ${workflow_outer}s" >&2
+  exit 1
+fi
+
 # shellcheck disable=SC2016  # assert literal process-group source expressions
 for token in \
   'nohup setsid env' \
