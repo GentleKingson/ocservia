@@ -90,8 +90,7 @@ fn main() {
         eprintln!("{usage}");
         std::process::exit(2);
     };
-    let known_mode_names: &[&[&str]] = &[UDS_OPTION_NAMES, AGENT_OPTION_NAMES, NODE_OPTION_NAMES];
-    let parsed = parse_probe_arguments(&args[1..], FENCE_OPTION_NAMES, known_mode_names);
+    let parsed = parse_mode_arguments(mode, &args[1..]);
     let result = match (mode.as_str(), parsed) {
         ("uds-stale-fence", Ok(options)) => {
             init_tracing();
@@ -145,12 +144,21 @@ struct ProbeArguments {
     mode: HashMap<String, Vec<String>>,
 }
 
+fn parse_mode_arguments(mode: &str, args: &[String]) -> Result<ProbeArguments, String> {
+    let (fence_names, mode_names): (&[&str], &[&str]) = match mode {
+        "uds-stale-fence" => (FENCE_OPTION_NAMES, UDS_OPTION_NAMES),
+        "agent-stale-command" => (FENCE_OPTION_NAMES, AGENT_OPTION_NAMES),
+        "node-connection" => (&[], NODE_OPTION_NAMES),
+        _ => return Err(format!("unknown probe mode: {mode}")),
+    };
+    parse_probe_arguments(args, fence_names, mode_names)
+}
+
 fn parse_probe_arguments(
     args: &[String],
     fence_names: &[&str],
-    mode_name_groups: &[&[&str]],
+    mode_names: &[&str],
 ) -> Result<ProbeArguments, String> {
-    let mode_names: Vec<&str> = mode_name_groups.concat();
     let mut probe = ProbeArguments {
         fence: HashMap::new(),
         mode: HashMap::new(),
@@ -161,14 +169,17 @@ fn parse_probe_arguments(
         let value = args
             .get(index + 1)
             .ok_or_else(|| format!("{argument} requires a value"))?;
-        if fence_names.contains(&argument) {
-            probe.fence.insert(argument.to_owned(), value.clone());
-        } else if mode_names.contains(&argument) {
+        // Mode-specific options take precedence when a spelling is shared.
+        // In particular, node-connection accepts repeated --node-id values,
+        // while the two stale-fence modes keep their one fence node id.
+        if mode_names.contains(&argument) {
             probe
                 .mode
                 .entry(argument.to_owned())
                 .or_default()
                 .push(value.clone());
+        } else if fence_names.contains(&argument) {
+            probe.fence.insert(argument.to_owned(), value.clone());
         } else {
             return Err(format!("unknown option: {argument}"));
         }
@@ -1159,7 +1170,7 @@ mod tests {
             "--stale-epoch",
             "1",
         ]);
-        let probe = parse_probe_arguments(&args, FENCE_OPTION_NAMES, &[UDS_OPTION_NAMES])
+        let probe = parse_probe_arguments(&args, FENCE_OPTION_NAMES, UDS_OPTION_NAMES)
             .expect("arguments parse");
         assert_eq!(
             probe.mode.get("--socket").and_then(|v| v.first()),
@@ -1176,11 +1187,9 @@ mod tests {
     #[test]
     fn probe_arguments_reject_unknown_options_and_missing_values() {
         let args = argument_list(&["--socket", "/run/x", "--nonsense", "1"]);
-        assert!(parse_probe_arguments(&args, FENCE_OPTION_NAMES, &[UDS_OPTION_NAMES]).is_err());
+        assert!(parse_probe_arguments(&args, FENCE_OPTION_NAMES, UDS_OPTION_NAMES).is_err());
         let truncated = argument_list(&["--socket"]);
-        assert!(
-            parse_probe_arguments(&truncated, FENCE_OPTION_NAMES, &[UDS_OPTION_NAMES]).is_err()
-        );
+        assert!(parse_probe_arguments(&truncated, FENCE_OPTION_NAMES, UDS_OPTION_NAMES).is_err());
     }
 
     #[test]
@@ -1192,8 +1201,31 @@ mod tests {
             "01894a5c-6c1e-7b8f-9a2c-3d4e5f607182",
         ]);
         let probe =
-            parse_probe_arguments(&args, FENCE_OPTION_NAMES, &[UDS_OPTION_NAMES]).expect("parse");
+            parse_probe_arguments(&args, FENCE_OPTION_NAMES, UDS_OPTION_NAMES).expect("parse");
         let error = parse_fence_options(&probe.fence).expect_err("zero epoch must be rejected");
         assert!(error.contains("stale-epoch"));
+    }
+
+    #[test]
+    fn node_connection_preserves_every_repeated_node_id() {
+        let first = "01894a5c-6c1e-7b8f-9a2c-3d4e5f607182";
+        let second = "01894a5c-6c1e-7b8f-9a2c-3d4e5f607183";
+        let args = argument_list(&[
+            "--socket",
+            "/run/transportd.sock",
+            "--expect-path",
+            "any",
+            "--node-id",
+            first,
+            "--node-id",
+            second,
+        ]);
+        let probe = parse_mode_arguments("node-connection", &args).expect("arguments parse");
+
+        assert_eq!(
+            probe.mode.get("--node-id"),
+            Some(&vec![first.to_owned(), second.to_owned()])
+        );
+        assert!(!probe.fence.contains_key("--node-id"));
     }
 }
