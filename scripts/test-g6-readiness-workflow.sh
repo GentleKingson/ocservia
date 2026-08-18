@@ -8,6 +8,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 WORKFLOW="${ROOT}/.github/workflows/g6-readiness.yml"
 COMPOSE_FILE="${ROOT}/deploy/g6-readiness/compose.yaml"
 SUPERVISOR="${ROOT}/deploy/g6-readiness/agent-supervisor.sh"
+AGENT_MAIN="${ROOT}/rust/crates/agent/src/main.rs"
 LIB="${ROOT}/scripts/g6-readiness-lib.sh"
 FD_A="${ROOT}/scripts/g6-readiness-fd-a.sh"
 FD_B="${ROOT}/scripts/g6-readiness-fd-b.sh"
@@ -418,6 +419,10 @@ grep -q 'chmod 0755 "${dir}/state"' <<<"${prepare_agent_material}" || {
 }
 grep -q 'chmod 0644 "${dir}/state/synthetic-barrier"' <<<"${prepare_agent_material}" || {
   echo "the harness-owned synthetic barrier must remain readable by the Agent" >&2
+  exit 1
+}
+grep -q 'chmod 0666 "${dir}/state/synthetic-barrier.received"' <<<"${prepare_agent_material}" || {
+  echo "the exact Agent receipt inode must be writable by both runtime principals" >&2
   exit 1
 }
 start_fleet="$(sed -n '/^g6rd_start_agent_fleet() {/,/^}/p' "${LIB}")"
@@ -1270,9 +1275,36 @@ done
 # Both pre-Send and post-Send fault points are exact Worker hooks. The first
 # signals only after the committed Claim has been extended for this command;
 # the second signals only after SendCommand returns and before MarkSent starts.
+# A separate exact Agent signal closes the gap between transport write and the
+# Agent's decode/fence-verification boundary before the Worker is killed.
+agent_command_handler="$(sed -n '/^async fn handle_command_stream(/,/^fn synthetic_barrier_target(/p' "${AGENT_MAIN}")"
+agent_fence_line="$(grep -nF 'verify_fenced_operation(' <<<"${agent_command_handler}" | tail -1 | cut -d: -f1)"
+agent_receipt_line="$(grep -nF 'wait_for_synthetic_barrier(' <<<"${agent_command_handler}" | cut -d: -f1)"
+agent_journal_line="$(grep -nF 'session.command_executor.deliver' <<<"${agent_command_handler}" | cut -d: -f1)"
+[[ -n "${agent_fence_line}" && -n "${agent_receipt_line}" \
+  && -n "${agent_journal_line}" \
+  && "${agent_fence_line}" -lt "${agent_receipt_line}" \
+  && "${agent_receipt_line}" -lt "${agent_journal_line}" ]] || {
+  echo "the exact Agent receipt must follow fence verification and precede journal delivery" >&2
+  exit 1
+}
+grep -qF 'envelope.command_id.as_slice()' <<<"${agent_command_handler}" || {
+  echo "the Agent receipt barrier must bind the decoded command UUID" >&2
+  exit 1
+}
 claim_helper="$(sed -n '/^outbox_row_claimed() {/,/^}/p' "${FD_B}")"
 journal_has_helper="$(sed -n '/^journal_has_command() {/,/^}/p' "${FD_B}")"
 journal_state_helper="$(sed -n '/^journal_result_state() {/,/^}/p' "${FD_B}")"
+agent_receipt_helper="$(sed -n '/^agent_synthetic_receipt_reached() {/,/^}/p' "${FD_B}")"
+grep -qF '[[ -f "${receipt}" && ! -L "${receipt}" && -s "${receipt}" ]]' \
+  <<<"${agent_receipt_helper}" || {
+  echo "the Agent receipt predicate must reject missing, symlinked, or empty signals" >&2
+  exit 1
+}
+grep -qF '== "${command_id}"' <<<"${agent_receipt_helper}" || {
+  echo "the Agent receipt predicate must bind the exact command UUID" >&2
+  exit 1
+}
 for journal_helper in "${journal_has_helper}" "${journal_state_helper}"; do
   grep -qF 'lower(hex(command_id))' <<<"${journal_helper}" || {
     echo "Agent journal UUID lookup must normalize SQLite hex output to PostgreSQL UUID case" >&2
@@ -1333,11 +1365,13 @@ for token in \
   'pre_send_barrier_release "${command_id}"' \
   'exact post-send Worker barrier' \
   'post_send_barrier_reached "${command_id}"' \
+  'exact Agent receipt before worker crash' \
+  'agent_synthetic_receipt_reached "${synthetic_receipt}" "${command_id}"' \
   'docker kill "${COMPOSE_PROJECT}-worker-1"' \
+  'docker kill "${COMPOSE_PROJECT}-transportd-1"' \
   'rm -f -- "${synthetic_barrier}"' \
   'exact Agent journal receipt after worker crash' \
   'journal_command_ready "${service}" "${command_id}"' \
-  'docker kill "${COMPOSE_PROJECT}-transportd-1"' \
   'pre_send_barrier_disarm'; do
   grep -qF "${token}" <<<"${crash2_phase}" || {
     echo "the deterministic send-before-MarkSent sequence is missing: ${token}" >&2
@@ -1348,14 +1382,16 @@ if grep -qF 'docker pause "${COMPOSE_PROJECT}-transportd-1"' <<<"${crash2_phase}
   echo "send-before-MarkSent must not use transportd process suspension as a send barrier" >&2
   exit 1
 fi
-if ! grep -qF ': >"${synthetic_barrier}"' <<<"${crash2_phase}" \
+if ! grep -qF 'printf '\''%s\n'\'' "${command_id}" >"${synthetic_barrier}"' <<<"${crash2_phase}" \
+  || ! grep -qF ': >"${synthetic_receipt}"' <<<"${crash2_phase}" \
   || ! grep -qF 'rm -f -- "${synthetic_barrier}"' <<<"${crash2_phase}"; then
-  echo "the send-before-MarkSent phase must bound result production with the target Agent barrier" >&2
+  echo "the send-before-MarkSent phase must arm an exact Agent barrier and receipt" >&2
   exit 1
 fi
 crash2_pause_line="$(grep -nF 'docker pause "${COMPOSE_PROJECT}-worker-1"' <<<"${crash2_phase}" | cut -d: -f1)"
-crash2_agent_hold_line="$(grep -nF ': >"${synthetic_barrier}"' <<<"${crash2_phase}" | cut -d: -f1)"
+crash2_receipt_reset_line="$(grep -nF ': >"${synthetic_receipt}"' <<<"${crash2_phase}" | tail -1 | cut -d: -f1)"
 crash2_enqueue_line="$(grep -nF 'g6rd_enqueue_command "${node}" "${key}"' <<<"${crash2_phase}" | cut -d: -f1)"
+crash2_agent_hold_line="$(grep -nF 'printf '\''%s\n'\'' "${command_id}" >"${synthetic_barrier}"' <<<"${crash2_phase}" | cut -d: -f1)"
 crash2_arm_line="$(grep -nF 'pre_send_barrier_arm "${command_id}"' <<<"${crash2_phase}" | cut -d: -f1)"
 crash2_post_arm_line="$(grep -nF 'post_send_barrier_arm "${command_id}"' <<<"${crash2_phase}" | cut -d: -f1)"
 crash2_worker_unpause_line="$(grep -nF 'docker unpause "${COMPOSE_PROJECT}-worker-1"' <<<"${crash2_phase}" | tail -1 | cut -d: -f1)"
@@ -1364,25 +1400,29 @@ crash2_claim_line="$(grep -nF 'send-before-MarkSent strict outbox claim' <<<"${c
 crash2_release_line="$(grep -nF 'pre_send_barrier_release "${command_id}"' <<<"${crash2_phase}" | tail -1 | cut -d: -f1)"
 crash2_post_reached_line="$(grep -nF 'post_send_barrier_reached "${command_id}"' <<<"${crash2_phase}" | cut -d: -f1)"
 crash2_accepted_line="$(grep -nF 'g6rd_timeline_event transport_send_accepted' <<<"${crash2_phase}" | cut -d: -f1)"
+crash2_agent_receipt_line="$(grep -nF 'agent_synthetic_receipt_reached "${synthetic_receipt}" "${command_id}"' <<<"${crash2_phase}" | cut -d: -f1)"
 crash2_worker_kill_line="$(grep -nF 'docker kill "${COMPOSE_PROJECT}-worker-1"' <<<"${crash2_phase}" | cut -d: -f1)"
 crash2_release_agent_line="$(grep -nF 'rm -f -- "${synthetic_barrier}"' <<<"${crash2_phase}" | tail -1 | cut -d: -f1)"
 crash2_journal_line="$(grep -nF 'journal_command_ready "${service}" "${command_id}"' <<<"${crash2_phase}" | cut -d: -f1)"
 crash2_transport_kill_line="$(grep -nF 'docker kill "${COMPOSE_PROJECT}-transportd-1"' <<<"${crash2_phase}" | cut -d: -f1)"
 crash2_disarm_line="$(grep -nF 'pre_send_barrier_disarm' <<<"${crash2_phase}" | tail -1 | cut -d: -f1)"
 crash2_restart_line="$(grep -nF 'restart_worker_transport_unit send-before-MarkSent' <<<"${crash2_phase}" | cut -d: -f1)"
-[[ -n "${crash2_pause_line}" && -n "${crash2_agent_hold_line}" \
-  && -n "${crash2_enqueue_line}" && -n "${crash2_arm_line}" \
+[[ -n "${crash2_pause_line}" && -n "${crash2_receipt_reset_line}" \
+  && -n "${crash2_enqueue_line}" && -n "${crash2_agent_hold_line}" \
+  && -n "${crash2_arm_line}" \
   && -n "${crash2_post_arm_line}" \
   && -n "${crash2_worker_unpause_line}" && -n "${crash2_reached_line}" \
   && -n "${crash2_claim_line}" \
   && -n "${crash2_release_line}" && -n "${crash2_post_reached_line}" \
   && -n "${crash2_accepted_line}" \
+  && -n "${crash2_agent_receipt_line}" \
   && -n "${crash2_worker_kill_line}" && -n "${crash2_release_agent_line}" \
   && -n "${crash2_journal_line}" && -n "${crash2_transport_kill_line}" \
   && -n "${crash2_disarm_line}" && -n "${crash2_restart_line}" \
-  && "${crash2_pause_line}" -lt "${crash2_agent_hold_line}" \
-  && "${crash2_agent_hold_line}" -lt "${crash2_enqueue_line}" \
-  && "${crash2_enqueue_line}" -lt "${crash2_arm_line}" \
+  && "${crash2_pause_line}" -lt "${crash2_receipt_reset_line}" \
+  && "${crash2_receipt_reset_line}" -lt "${crash2_enqueue_line}" \
+  && "${crash2_enqueue_line}" -lt "${crash2_agent_hold_line}" \
+  && "${crash2_agent_hold_line}" -lt "${crash2_arm_line}" \
   && "${crash2_arm_line}" -lt "${crash2_post_arm_line}" \
   && "${crash2_post_arm_line}" -lt "${crash2_worker_unpause_line}" \
   && "${crash2_worker_unpause_line}" -lt "${crash2_reached_line}" \
@@ -1390,11 +1430,12 @@ crash2_restart_line="$(grep -nF 'restart_worker_transport_unit send-before-MarkS
   && "${crash2_claim_line}" -lt "${crash2_release_line}" \
   && "${crash2_release_line}" -lt "${crash2_post_reached_line}" \
   && "${crash2_post_reached_line}" -lt "${crash2_accepted_line}" \
-  && "${crash2_accepted_line}" -lt "${crash2_worker_kill_line}" \
-  && "${crash2_worker_kill_line}" -lt "${crash2_release_agent_line}" \
+  && "${crash2_accepted_line}" -lt "${crash2_agent_receipt_line}" \
+  && "${crash2_agent_receipt_line}" -lt "${crash2_worker_kill_line}" \
+  && "${crash2_worker_kill_line}" -lt "${crash2_transport_kill_line}" \
+  && "${crash2_transport_kill_line}" -lt "${crash2_release_agent_line}" \
   && "${crash2_release_agent_line}" -lt "${crash2_journal_line}" \
-  && "${crash2_journal_line}" -lt "${crash2_transport_kill_line}" \
-  && "${crash2_transport_kill_line}" -lt "${crash2_disarm_line}" \
+  && "${crash2_journal_line}" -lt "${crash2_disarm_line}" \
   && "${crash2_disarm_line}" -lt "${crash2_restart_line}" ]] || {
   echo "the exact send-before-MarkSent fault sequence is misordered" >&2
   exit 1

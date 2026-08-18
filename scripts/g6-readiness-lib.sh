@@ -1218,8 +1218,12 @@ g6rd_prepare_agent_material() {
   mkdir -p "${dir}/identity" "${dir}/journal" "${dir}/privd" \
     "${dir}/secrets" "${dir}/state"
   : >"${dir}/state/synthetic-barrier"
+  : >"${dir}/state/synthetic-barrier.received"
   chmod 0755 "${dir}/state"
   chmod 0644 "${dir}/state/synthetic-barrier"
+  # This contains only a test command UUID. Both the runner and non-root Agent
+  # need write access so the harness can reset it between exact crash windows.
+  chmod 0666 "${dir}/state/synthetic-barrier.received"
   chmod 0700 "${dir}/identity" "${dir}/privd" "${dir}/secrets"
   cp -f "${G6RD_SECRETS}/command-verification.pem" \
     "${dir}/secrets/command-verification-agent.pem"

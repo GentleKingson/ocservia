@@ -1070,7 +1070,11 @@ async fn handle_command_stream(
                 | command_envelope::Payload::SyntheticEcho(_)
         )
     ) {
-        wait_for_synthetic_barrier(session.synthetic_barrier_file).await;
+        wait_for_synthetic_barrier(
+            session.synthetic_barrier_file,
+            envelope.command_id.as_slice(),
+        )
+        .await?;
     }
     let external = matches!(
         envelope.payload,
@@ -1131,13 +1135,65 @@ async fn handle_command_stream(
     Ok(())
 }
 
-async fn wait_for_synthetic_barrier(path: Option<&Path>) {
+fn synthetic_barrier_target(raw: &str) -> Result<Option<Uuid>, io::Error> {
+    if raw.is_empty() {
+        return Ok(None);
+    }
+    let value = raw.strip_suffix('\n').unwrap_or(raw);
+    if value.is_empty() || value.contains(['\n', '\r']) {
+        return Err(invalid("synthetic barrier target is invalid"));
+    }
+    let target =
+        Uuid::parse_str(value).map_err(|_| invalid("synthetic barrier target is not a UUID"))?;
+    if target.to_string() != value {
+        return Err(invalid("synthetic barrier target is not canonical"));
+    }
+    Ok(Some(target))
+}
+
+fn synthetic_receipt_path(barrier_path: &Path) -> PathBuf {
+    let mut path = barrier_path.as_os_str().to_owned();
+    path.push(".received");
+    PathBuf::from(path)
+}
+
+async fn read_synthetic_barrier(path: &Path) -> Result<Option<Option<Uuid>>, io::Error> {
+    match tokio::fs::read_to_string(path).await {
+        Ok(raw) => Ok(Some(synthetic_barrier_target(&raw)?)),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
+async fn wait_for_synthetic_barrier(
+    path: Option<&Path>,
+    command_id: &[u8],
+) -> Result<(), io::Error> {
     let Some(path) = path else {
-        return;
+        return Ok(());
     };
-    while tokio::fs::try_exists(path).await.unwrap_or(true) {
+    let command_id = Uuid::from_slice(command_id)
+        .map_err(|_| invalid("synthetic barrier command ID is invalid"))?;
+    let Some(target) = read_synthetic_barrier(path).await? else {
+        return Ok(());
+    };
+    if let Some(target) = target {
+        if target != command_id {
+            return Ok(());
+        }
+        tokio::fs::write(
+            synthetic_receipt_path(path),
+            format!("{command_id}\n").as_bytes(),
+        )
+        .await?;
+    }
+    while let Some(target) = read_synthetic_barrier(path).await? {
+        if target.is_some_and(|target| target != command_id) {
+            return Ok(());
+        }
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
+    Ok(())
 }
 
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
@@ -2594,16 +2650,17 @@ mod tests {
 
     #[tokio::test]
     async fn synthetic_barrier_blocks_until_removed() {
+        let command_id = Uuid::now_v7();
         let path = PathBuf::from(format!(
             "/tmp/ocservia-agent-barrier-{}",
             Uuid::now_v7().simple()
         ));
-        tokio::fs::write(&path, b"armed")
+        tokio::fs::write(&path, b"")
             .await
             .expect("arm synthetic barrier");
         let waiting_path = path.clone();
         let waiter = tokio::spawn(async move {
-            wait_for_synthetic_barrier(Some(&waiting_path)).await;
+            wait_for_synthetic_barrier(Some(&waiting_path), command_id.as_bytes()).await
         });
         tokio::time::sleep(Duration::from_millis(150)).await;
         assert!(!waiter.is_finished());
@@ -2613,7 +2670,88 @@ mod tests {
         tokio::time::timeout(Duration::from_secs(1), waiter)
             .await
             .expect("synthetic barrier release timed out")
-            .expect("synthetic barrier task");
+            .expect("synthetic barrier task")
+            .expect("synthetic barrier wait");
+    }
+
+    #[tokio::test]
+    async fn exact_synthetic_barrier_signals_agent_receipt_before_release() {
+        let command_id = Uuid::now_v7();
+        let path = PathBuf::from(format!(
+            "/tmp/ocservia-agent-exact-barrier-{}",
+            Uuid::now_v7().simple()
+        ));
+        let receipt = synthetic_receipt_path(&path);
+        tokio::fs::write(&path, format!("{command_id}\n"))
+            .await
+            .expect("arm exact synthetic barrier");
+        tokio::fs::write(&receipt, b"")
+            .await
+            .expect("pre-create synthetic receipt");
+        let waiting_path = path.clone();
+        let waiter = tokio::spawn(async move {
+            wait_for_synthetic_barrier(Some(&waiting_path), command_id.as_bytes()).await
+        });
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                if tokio::fs::read_to_string(&receipt)
+                    .await
+                    .is_ok_and(|value| value == format!("{command_id}\n"))
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("exact synthetic receipt timed out");
+        assert!(
+            !waiter.is_finished(),
+            "receipt must precede barrier release"
+        );
+        tokio::fs::remove_file(&path)
+            .await
+            .expect("release exact synthetic barrier");
+        tokio::time::timeout(Duration::from_secs(1), waiter)
+            .await
+            .expect("exact synthetic barrier release timed out")
+            .expect("exact synthetic barrier task")
+            .expect("exact synthetic barrier wait");
+        tokio::fs::remove_file(receipt)
+            .await
+            .expect("remove synthetic receipt");
+    }
+
+    #[tokio::test]
+    async fn exact_synthetic_barrier_does_not_hold_or_signal_another_command() {
+        let command_id = Uuid::now_v7();
+        let other_command_id = Uuid::now_v7();
+        let path = PathBuf::from(format!(
+            "/tmp/ocservia-agent-mismatched-barrier-{}",
+            Uuid::now_v7().simple()
+        ));
+        let receipt = synthetic_receipt_path(&path);
+        tokio::fs::write(&path, format!("{other_command_id}\n"))
+            .await
+            .expect("arm another command's synthetic barrier");
+        tokio::fs::write(&receipt, b"")
+            .await
+            .expect("pre-create synthetic receipt");
+        wait_for_synthetic_barrier(Some(&path), command_id.as_bytes())
+            .await
+            .expect("mismatched synthetic barrier must be ignored");
+        assert_eq!(
+            tokio::fs::read(&receipt)
+                .await
+                .expect("read mismatched synthetic receipt"),
+            b""
+        );
+        tokio::fs::remove_file(path)
+            .await
+            .expect("remove mismatched synthetic barrier");
+        tokio::fs::remove_file(receipt)
+            .await
+            .expect("remove mismatched synthetic receipt");
     }
 
     fn signed_fence(

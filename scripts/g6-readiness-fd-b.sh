@@ -971,6 +971,12 @@ journal_command_ready() {
   [[ "$(journal_has_command "${service}" "${command_id}")" == 1 ]]
 }
 
+agent_synthetic_receipt_reached() {
+  local receipt="${1:?receipt file}" command_id="${2:?command id}"
+  [[ -f "${receipt}" && ! -L "${receipt}" && -s "${receipt}" ]] || return 1
+  [[ "$(sed -n '1p' "${receipt}")" == "${command_id}" ]]
+}
+
 journal_result_state() {
   local service="${1:?service}" command_id="${2:?command id}"
   journal_query "${service}" \
@@ -1031,12 +1037,13 @@ phase_outbox_claim_before_send() {
 
 # Window 2: the exact command stops at the post-Claim/pre-Send Worker hook while
 # the harness arms a second exact hook immediately after SendCommand returns.
-# Releasing the first hook and observing the second proves transport acceptance
-# without relying on a process-wide database waiter; the worker then dies before
-# MarkSent can begin.
+# That return proves the local transport write, not Agent receipt, so the Agent
+# independently signals after decoding and fence verification. Only after both
+# exact signals does the worker die before MarkSent can begin.
 phase_outbox_send_before_mark() {
   (
-    local node key command_id first_attempt published service synthetic_barrier completed=0
+    local node key command_id first_attempt published service synthetic_barrier
+    local synthetic_receipt completed=0
     node="$(local_node_id 2)"
     [[ -n "${node}" ]] || {
       echo "the second local FD-B crash-window node is missing" >&2
@@ -1044,6 +1051,7 @@ phase_outbox_send_before_mark() {
     }
     service="$(node_service "${node}")"
     synthetic_barrier="${G6RD_AGENTS}/${service}/state/synthetic-barrier"
+    synthetic_receipt="${synthetic_barrier}.received"
     # shellcheck disable=SC2031  # trap reads this phase's subshell-local id
     trap 'if [[ "${completed}" != 1 ]]; then
       pre_send_barrier_release "${command_id:-}" || true
@@ -1051,14 +1059,16 @@ phase_outbox_send_before_mark() {
       docker unpause "${COMPOSE_PROJECT}-worker-1" >/dev/null 2>&1 || true
     fi
     rm -f -- "${synthetic_barrier}"
+    : >"${synthetic_receipt}" 2>/dev/null || true
     docker unpause "${COMPOSE_PROJECT}-transportd-1" >/dev/null 2>&1 || true' EXIT
     key="g6-crash2-${RUN_ID}"
     CLAIM_KEY="${key}"
     export CLAIM_KEY
     g6rd_wait_until_deadline 60 5 "outbox drained before send-before-MarkSent" outbox_drained
     docker pause "${COMPOSE_PROJECT}-worker-1" >/dev/null
-    : >"${synthetic_barrier}"
-    chmod 0644 "${synthetic_barrier}"
+    rm -f -- "${synthetic_barrier}"
+    : >"${synthetic_receipt}"
+    chmod 0666 "${synthetic_receipt}"
     g6rd_enqueue_command "${node}" "${key}"
     # shellcheck disable=SC2030  # phase state is intentionally subshell-local
     command_id="$(command_id_of_key "${key}")"
@@ -1066,6 +1076,8 @@ phase_outbox_send_before_mark() {
       echo "send-before-MarkSent command id is missing" >&2
       return 1
     }
+    printf '%s\n' "${command_id}" >"${synthetic_barrier}"
+    chmod 0644 "${synthetic_barrier}"
     pre_send_barrier_arm "${command_id}"
     post_send_barrier_arm "${command_id}"
     docker unpause "${COMPOSE_PROJECT}-worker-1" >/dev/null
@@ -1076,12 +1088,16 @@ phase_outbox_send_before_mark() {
     g6rd_wait_until_deadline 15 1 "exact post-send Worker barrier" \
       post_send_barrier_reached "${command_id}"
     g6rd_timeline_event transport_send_accepted
+    g6rd_wait_until_deadline 15 1 "exact Agent receipt before worker crash" \
+      agent_synthetic_receipt_reached "${synthetic_receipt}" "${command_id}"
     docker kill "${COMPOSE_PROJECT}-worker-1" >/dev/null
     g6rd_timeline_event worker_crashed_before_mark_sent
+    # Keep the Agent before Journal acceptance until transportd is gone. This
+    # prevents a terminal response from racing the pre-MarkSent database proof.
+    docker kill "${COMPOSE_PROJECT}-transportd-1" >/dev/null
     rm -f -- "${synthetic_barrier}"
     g6rd_wait_until_deadline 15 1 "exact Agent journal receipt after worker crash" \
       journal_command_ready "${service}" "${command_id}"
-    docker kill "${COMPOSE_PROJECT}-transportd-1" >/dev/null
     pre_send_barrier_disarm
     first_attempt="$(psql_primary_probe -Atc \
       "SELECT state FROM command_attempts WHERE command_id='${command_id}' ORDER BY attempt_number LIMIT 1")"
