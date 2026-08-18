@@ -558,7 +558,8 @@ copy_control_evidence() {
   mkdir -p "${out}/isolation" "${out}/pitr-prep" "${out}/pitr"
   cp -f "${G6RD_OUTBOX}/isolation/isolation.json" "${out}/isolation/"
   cp -f "${G6RD_OUTBOX}/isolation/active-load.json" "${out}/isolation/"
-  cp -f "${G6RD_OUTBOX}/isolation"/*.at "${out}/isolation/"
+  cp -f "${G6RD_OUTBOX}/isolation/outage-declared-at" \
+    "${G6RD_OUTBOX}/isolation/isolated-at" "${out}/isolation/"
   cp -f "${G6RD_OUTBOX}/isolation/isolated-primary-writes.jsonl" "${out}/isolation/"
   cp -f "${G6RD_OUTBOX}/pitr-prep"/* "${out}/pitr-prep/"
   cp -f "${G6RD_OUTBOX}/pitr/pitr-report.json" "${out}/pitr/"

@@ -1136,6 +1136,13 @@ if [[ "$(grep -c 'jq -s -e' <<<"${dual_primary_phase}")" != 2 ]] \
   echo "former-primary JSONL probes must be slurped and fail closed" >&2
   exit 1
 fi
+control_evidence_copy="$(sed -n '/^copy_control_evidence() {/,/^}/p' "${FD_A}")"
+if ! grep -q 'isolation/outage-declared-at' <<<"${control_evidence_copy}" \
+  || ! grep -q 'isolation/isolated-at' <<<"${control_evidence_copy}" \
+  || grep -q '\*\.at' <<<"${control_evidence_copy}"; then
+  echo "fd-a control evidence must copy the exact isolation boundary files" >&2
+  exit 1
+fi
 grep -q 'post-rejoin-probes.jsonl' "${FD_A}" || {
   echo "the rejoined former primary needs explicit read-only probes" >&2
   exit 1
