@@ -42,7 +42,7 @@ node_ids() {
 
 node_service() {
   local node_id="${1:?node id is required}" name
-  name="$(awk -F'\t' -v id "${node_id}" '$2 == id {print $1}' "${NODES_FILE}")"
+  name="$(awk -F'\t' -v id="${node_id}" '$2 == id {print $1}' "${NODES_FILE}")"
   case "${name}" in
     g6-fd-a-*) printf 'agent-fd-a-%s\n' "${name#g6-fd-a-}" ;;
     g6-fd-b-*) printf 'agent-fd-b-%s\n' "${name#g6-fd-b-}" ;;

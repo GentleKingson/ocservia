@@ -890,6 +890,11 @@ done
 # probes must therefore derive the endpoint from the selected node inventory.
 owner_phase="$(sed -n '/^phase_scenario_owner() {/,/^}/p' "${FD_B}")"
 owner_replaced="$(sed -n '/^owner_replaced() {/,/^}/p' "${FD_B}")"
+node_service_helper="$(sed -n '/^node_service() {/,/^}/p' "${FD_B}")"
+grep -qF -- '-v id="${node_id}"' <<<"${node_service_helper}" || {
+  echo "the owner scenario node-to-service lookup must bind its awk id value" >&2
+  exit 1
+}
 grep -qF 'prefix="g6-${FD_ID}-"' <<<"${owner_phase}" || {
   echo "the owner scenario must select Agents local to the failure-domain runner" >&2
   exit 1
