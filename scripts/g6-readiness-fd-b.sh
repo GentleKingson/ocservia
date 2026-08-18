@@ -869,6 +869,88 @@ outbox_row_claimed() {
   [[ "${claimed}" =~ ^[0-9]+$ ]] && ((claimed >= 1))
 }
 
+exact_post_send_attempt_id() {
+  local command_id="${1:?command id is required}"
+  psql_primary_probe -Atc \
+    "SELECT attempt.id::text
+     FROM commands AS command
+     JOIN outbox_events AS outbox ON outbox.command_id=command.id
+     JOIN node_command_leases AS lease
+       ON lease.command_id=command.id AND lease.node_id=command.node_id
+     JOIN command_attempts AS attempt
+       ON attempt.command_id=command.id AND attempt.outbox_event_id=outbox.id
+      AND attempt.worker_id=lease.worker_id
+     WHERE command.id='${command_id}'
+       AND outbox.published_at IS NULL
+       AND outbox.locked_by=lease.worker_id
+       AND outbox.locked_until>clock_timestamp()
+       AND lease.leased_until>clock_timestamp()
+       AND attempt.attempt_number=outbox.attempts
+       AND attempt.state='sending' AND attempt.finished_at IS NULL"
+}
+
+exact_post_send_attempt_proof() {
+  local command_id="${1:?command id is required}"
+  local attempt_id="${2:?attempt id is required}"
+  psql_primary_probe -F $'\t' -Atc \
+    "SELECT attempt.state,attempt.finished_at IS NULL,
+       command.state,operation.state,outbox.published_at IS NULL,
+       outbox.locked_by=attempt.worker_id,
+       COALESCE(outbox.locked_until>clock_timestamp(),false),
+       attempt.attempt_number=outbox.attempts,
+       lease.command_id IS NOT NULL,
+       COALESCE(lease.leased_until>clock_timestamp(),false),
+       NOT EXISTS (
+         SELECT 1 FROM agent_command_results AS result
+         WHERE result.command_id=command.id
+       )
+     FROM command_attempts AS attempt
+     JOIN commands AS command ON command.id=attempt.command_id
+     JOIN operations AS operation ON operation.id=command.operation_id
+     JOIN outbox_events AS outbox
+       ON outbox.id=attempt.outbox_event_id AND outbox.command_id=command.id
+     LEFT JOIN node_command_leases AS lease
+       ON lease.command_id=command.id AND lease.node_id=command.node_id
+      AND lease.worker_id=attempt.worker_id
+     WHERE command.id='${command_id}' AND attempt.id='${attempt_id}'"
+}
+
+report_exact_post_send_attempt_failure() {
+  local command_id="${1:?command id is required}"
+  local attempt_id="${2:?attempt id is required}"
+  echo "send-before-MarkSent database state (target, attempts, results):" >&2
+  psql_primary_probe -F $'\t' -Atc \
+    "SELECT 'target',command.id::text,attempt.id::text,command.state,
+       operation.state,outbox.published_at,outbox.locked_by,
+       outbox.locked_until,outbox.attempts,attempt.attempt_number,
+       attempt.state,attempt.started_at,attempt.finished_at,attempt.error_code,
+       lease.worker_id,lease.leased_until,
+       (SELECT count(*) FROM agent_command_results AS result
+        WHERE result.command_id=command.id),clock_timestamp()
+     FROM command_attempts AS attempt
+     JOIN commands AS command ON command.id=attempt.command_id
+     JOIN operations AS operation ON operation.id=command.operation_id
+     JOIN outbox_events AS outbox
+       ON outbox.id=attempt.outbox_event_id AND outbox.command_id=command.id
+     LEFT JOIN node_command_leases AS lease
+       ON lease.command_id=command.id AND lease.node_id=command.node_id
+     WHERE command.id='${command_id}' AND attempt.id='${attempt_id}';
+     SELECT 'attempt',attempt.id::text,attempt.attempt_number,attempt.state,
+       attempt.worker_id::text,attempt.started_at,attempt.finished_at,
+       attempt.error_code
+     FROM command_attempts AS attempt
+     WHERE attempt.command_id='${command_id}'
+     ORDER BY attempt.attempt_number;
+     SELECT 'result',result.event_id::text,result.state,result.error_code,
+       result.accepted_at,result.completed_at,result.created_at
+     FROM agent_command_results AS result
+     WHERE result.command_id='${command_id}'
+     ORDER BY result.created_at,result.event_id" >&2 || {
+    echo "send-before-MarkSent database state unavailable" >&2
+    return 1
+  }
+}
+
 pre_send_barrier_disarm() {
   rm -f -- "${G6RD_PRE_SEND_BARRIER}/arm" \
     "${G6RD_PRE_SEND_BARRIER}/received" \
@@ -1110,8 +1192,8 @@ phase_outbox_claim_before_send() {
 # exact signals does the worker die before MarkSent can begin.
 phase_outbox_send_before_mark() {
   (
-    local node key command_id first_attempt published service synthetic_barrier
-    local synthetic_receipt completed=0
+    local node key command_id attempt_id attempt_proof
+    local service synthetic_barrier synthetic_receipt completed=0
     node="$(local_node_id 2)"
     [[ -n "${node}" ]] || {
       echo "the second local FD-B crash-window node is missing" >&2
@@ -1155,6 +1237,13 @@ phase_outbox_send_before_mark() {
     pre_send_barrier_release "${command_id}"
     g6rd_wait_until_deadline 15 1 "exact post-send Worker barrier" \
       post_send_barrier_reached "${command_id}"
+    # A transient pre-Send failure may leave an older failed attempt. Bind the
+    # crash proof to the live attempt that reached this exact post-Send hook.
+    attempt_id="$(exact_post_send_attempt_id "${command_id}")"
+    [[ "${attempt_id}" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$ ]] || {
+      echo "the exact post-send Worker barrier did not identify one live attempt" >&2
+      return 1
+    }
     g6rd_timeline_event transport_send_accepted
     g6rd_wait_until_deadline 15 1 "exact Agent receipt before worker crash" \
       agent_synthetic_receipt_reached "${synthetic_receipt}" "${command_id}"
@@ -1167,12 +1256,10 @@ phase_outbox_send_before_mark() {
     wait_for_journal_command 15 1 "exact Agent journal receipt after worker crash" \
       "${service}" "${command_id}"
     pre_send_barrier_disarm
-    first_attempt="$(psql_primary_probe -Atc \
-      "SELECT state FROM command_attempts WHERE command_id='${command_id}' ORDER BY attempt_number LIMIT 1")"
-    published="$(psql_primary_probe -Atc \
-      "SELECT count(*) FROM outbox_events WHERE command_id='${command_id}' AND published_at IS NOT NULL")"
-    [[ "${first_attempt}" == "sending" && "${published}" == 0 ]] || {
-      echo "the exact send-before-MarkSent attempt changed before the crash" >&2
+    attempt_proof="$(exact_post_send_attempt_proof "${command_id}" "${attempt_id}")"
+    [[ "${attempt_proof}" == $'sending\tt\tqueued\tqueued\tt\tt\tt\tt\tt\tt\tt' ]] || {
+      echo "the exact send-before-MarkSent attempt changed before the crash: command=${command_id} attempt=${attempt_id} proof=${attempt_proof:-missing}" >&2
+      report_exact_post_send_attempt_failure "${command_id}" "${attempt_id}" || true
       return 1
     }
     printf '%s\n' "${command_id}" >"${G6RD_STATE}/crash2-command-id"

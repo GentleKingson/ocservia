@@ -1484,6 +1484,9 @@ pre_send_release_helper="$(sed -n '/^pre_send_barrier_release() {/,/^}/p' "${FD_
 post_send_arm_helper="$(sed -n '/^post_send_barrier_arm() {/,/^}/p' "${FD_B}")"
 post_send_reached_helper="$(sed -n '/^post_send_barrier_reached() {/,/^}/p' "${FD_B}")"
 post_send_release_helper="$(sed -n '/^post_send_barrier_release() {/,/^}/p' "${FD_B}")"
+post_send_attempt_helper="$(sed -n '/^exact_post_send_attempt_id() {/,/^}/p' "${FD_B}")"
+post_send_proof_helper="$(sed -n '/^exact_post_send_attempt_proof() {/,/^}/p' "${FD_B}")"
+post_send_report_helper="$(sed -n '/^report_exact_post_send_attempt_failure() {/,/^}/p' "${FD_B}")"
 grep -qF 'G6RD_PRE_SEND_BARRIER="${G6RD_RESULT_BARRIER}/pre-send"' "${LIB}" || {
   echo "the Worker pre-send barrier must remain inside the scoped result-barrier bind" >&2
   exit 1
@@ -1500,6 +1503,35 @@ for helper in "${pre_send_arm_helper}" "${pre_send_reached_helper}" \
     exit 1
   }
 done
+for predicate in \
+  'attempt.attempt_number=outbox.attempts' \
+  "attempt.state='sending' AND attempt.finished_at IS NULL" \
+  'command.state,operation.state,outbox.published_at IS NULL' \
+  'outbox.locked_by=attempt.worker_id' \
+  'COALESCE(outbox.locked_until>clock_timestamp(),false)' \
+  'COALESCE(lease.leased_until>clock_timestamp(),false)' \
+  "WHERE command.id='\${command_id}' AND attempt.id='\${attempt_id}'" \
+  'NOT EXISTS (' \
+  'FROM agent_command_results AS result'; do
+  grep -qF "${predicate}" <<<"${post_send_attempt_helper}${post_send_proof_helper}" || {
+    echo "the post-Send proof is missing exact attempt predicate: ${predicate}" >&2
+    exit 1
+  }
+done
+for diagnostic in \
+  'outbox.locked_until,outbox.attempts,attempt.attempt_number' \
+  'lease.worker_id,lease.leased_until' \
+  "SELECT 'attempt'" \
+  "SELECT 'result'"; do
+  grep -qF "${diagnostic}" <<<"${post_send_report_helper}" || {
+    echo "the exact post-Send failure matrix is missing: ${diagnostic}" >&2
+    exit 1
+  }
+done
+if grep -qF 'ORDER BY attempt_number LIMIT 1' <<<"${crash2_phase}"; then
+  echo "send-before-MarkSent must not infer the exact dispatch from the first attempt" >&2
+  exit 1
+fi
 for name in post-send-arm post-send-received post-send-release; do
   grep -qF "${name}" "${FD_B}" || {
     echo "the exact post-Send Worker hook is missing ${name}" >&2
@@ -1517,6 +1549,7 @@ for token in \
   'pre_send_barrier_release "${command_id}"' \
   'exact post-send Worker barrier' \
   'post_send_barrier_reached "${command_id}"' \
+  'attempt_id="$(exact_post_send_attempt_id "${command_id}")"' \
   'exact Agent receipt before worker crash' \
   'agent_synthetic_receipt_reached "${synthetic_receipt}" "${command_id}"' \
   'docker kill "${COMPOSE_PROJECT}-worker-1"' \
@@ -1524,6 +1557,8 @@ for token in \
   'rm -f -- "${synthetic_barrier}"' \
   'exact Agent journal receipt after worker crash' \
   'wait_for_journal_command 15 1 "exact Agent journal receipt after worker crash"' \
+  'attempt_proof="$(exact_post_send_attempt_proof "${command_id}" "${attempt_id}")"' \
+  'report_exact_post_send_attempt_failure "${command_id}" "${attempt_id}"' \
   'pre_send_barrier_disarm'; do
   grep -qF "${token}" <<<"${crash2_phase}" || {
     echo "the deterministic send-before-MarkSent sequence is missing: ${token}" >&2
@@ -1551,6 +1586,7 @@ crash2_reached_line="$(grep -nF 'pre_send_barrier_reached "${command_id}"' <<<"$
 crash2_claim_line="$(grep -nF 'send-before-MarkSent strict outbox claim' <<<"${crash2_phase}" | cut -d: -f1)"
 crash2_release_line="$(grep -nF 'pre_send_barrier_release "${command_id}"' <<<"${crash2_phase}" | tail -1 | cut -d: -f1)"
 crash2_post_reached_line="$(grep -nF 'post_send_barrier_reached "${command_id}"' <<<"${crash2_phase}" | cut -d: -f1)"
+crash2_attempt_capture_line="$(grep -nF 'attempt_id="$(exact_post_send_attempt_id "${command_id}")"' <<<"${crash2_phase}" | cut -d: -f1)"
 crash2_accepted_line="$(grep -nF 'g6rd_timeline_event transport_send_accepted' <<<"${crash2_phase}" | cut -d: -f1)"
 crash2_agent_receipt_line="$(grep -nF 'agent_synthetic_receipt_reached "${synthetic_receipt}" "${command_id}"' <<<"${crash2_phase}" | cut -d: -f1)"
 crash2_worker_kill_line="$(grep -nF 'docker kill "${COMPOSE_PROJECT}-worker-1"' <<<"${crash2_phase}" | cut -d: -f1)"
@@ -1558,6 +1594,7 @@ crash2_release_agent_line="$(grep -nF 'rm -f -- "${synthetic_barrier}"' <<<"${cr
 crash2_journal_line="$(grep -nF 'wait_for_journal_command 15 1 "exact Agent journal receipt after worker crash"' <<<"${crash2_phase}" | cut -d: -f1)"
 crash2_transport_kill_line="$(grep -nF 'docker kill "${COMPOSE_PROJECT}-transportd-1"' <<<"${crash2_phase}" | cut -d: -f1)"
 crash2_disarm_line="$(grep -nF 'pre_send_barrier_disarm' <<<"${crash2_phase}" | tail -1 | cut -d: -f1)"
+crash2_attempt_proof_line="$(grep -nF 'attempt_proof="$(exact_post_send_attempt_proof "${command_id}" "${attempt_id}")"' <<<"${crash2_phase}" | cut -d: -f1)"
 crash2_restart_line="$(grep -nF 'restart_worker_transport_unit send-before-MarkSent' <<<"${crash2_phase}" | cut -d: -f1)"
 [[ -n "${crash2_pause_line}" && -n "${crash2_receipt_reset_line}" \
   && -n "${crash2_enqueue_line}" && -n "${crash2_agent_hold_line}" \
@@ -1566,11 +1603,13 @@ crash2_restart_line="$(grep -nF 'restart_worker_transport_unit send-before-MarkS
   && -n "${crash2_worker_unpause_line}" && -n "${crash2_reached_line}" \
   && -n "${crash2_claim_line}" \
   && -n "${crash2_release_line}" && -n "${crash2_post_reached_line}" \
+  && -n "${crash2_attempt_capture_line}" \
   && -n "${crash2_accepted_line}" \
   && -n "${crash2_agent_receipt_line}" \
   && -n "${crash2_worker_kill_line}" && -n "${crash2_release_agent_line}" \
   && -n "${crash2_journal_line}" && -n "${crash2_transport_kill_line}" \
-  && -n "${crash2_disarm_line}" && -n "${crash2_restart_line}" \
+  && -n "${crash2_disarm_line}" && -n "${crash2_attempt_proof_line}" \
+  && -n "${crash2_restart_line}" \
   && "${crash2_pause_line}" -lt "${crash2_receipt_reset_line}" \
   && "${crash2_receipt_reset_line}" -lt "${crash2_enqueue_line}" \
   && "${crash2_enqueue_line}" -lt "${crash2_agent_hold_line}" \
@@ -1581,14 +1620,16 @@ crash2_restart_line="$(grep -nF 'restart_worker_transport_unit send-before-MarkS
   && "${crash2_reached_line}" -lt "${crash2_claim_line}" \
   && "${crash2_claim_line}" -lt "${crash2_release_line}" \
   && "${crash2_release_line}" -lt "${crash2_post_reached_line}" \
-  && "${crash2_post_reached_line}" -lt "${crash2_accepted_line}" \
+  && "${crash2_post_reached_line}" -lt "${crash2_attempt_capture_line}" \
+  && "${crash2_attempt_capture_line}" -lt "${crash2_accepted_line}" \
   && "${crash2_accepted_line}" -lt "${crash2_agent_receipt_line}" \
   && "${crash2_agent_receipt_line}" -lt "${crash2_worker_kill_line}" \
   && "${crash2_worker_kill_line}" -lt "${crash2_transport_kill_line}" \
   && "${crash2_transport_kill_line}" -lt "${crash2_release_agent_line}" \
   && "${crash2_release_agent_line}" -lt "${crash2_journal_line}" \
   && "${crash2_journal_line}" -lt "${crash2_disarm_line}" \
-  && "${crash2_disarm_line}" -lt "${crash2_restart_line}" ]] || {
+  && "${crash2_disarm_line}" -lt "${crash2_attempt_proof_line}" \
+  && "${crash2_attempt_proof_line}" -lt "${crash2_restart_line}" ]] || {
   echo "the exact send-before-MarkSent fault sequence is misordered" >&2
   exit 1
 }

@@ -87,6 +87,10 @@ RUBY
 post_arm="$(sed -n '/^post_send_barrier_arm() {/,/^}/p' "${FD_B}")"
 post_reached="$(sed -n '/^post_send_barrier_reached() {/,/^}/p' "${FD_B}")"
 post_release="$(sed -n '/^post_send_barrier_release() {/,/^}/p' "${FD_B}")"
+post_attempt="$(sed -n '/^exact_post_send_attempt_id() {/,/^}/p' "${FD_B}")"
+post_proof="$(sed -n '/^exact_post_send_attempt_proof() {/,/^}/p' "${FD_B}")"
+post_report="$(sed -n '/^report_exact_post_send_attempt_failure() {/,/^}/p' "${FD_B}")"
+crash2_phase="$(sed -n '/^phase_outbox_send_before_mark() {/,/^}/p' "${FD_B}")"
 cleanup_phase="$(sed -n '/^phase_cleanup() {/,/^}/p' "${FD_B}")"
 cleanup_prelude="$(sed -n '/^phase_cleanup_prelude() {/,/^}/p' "${FD_B}")"
 for helper in "${post_arm}" "${post_reached}" "${post_release}"; do
@@ -96,6 +100,43 @@ for helper in "${post_arm}" "${post_reached}" "${post_release}"; do
     exit 1
   }
 done
+for token in \
+  'attempt.attempt_number=outbox.attempts' \
+  "attempt.state='sending' AND attempt.finished_at IS NULL" \
+  'command.state,operation.state,outbox.published_at IS NULL' \
+  'COALESCE(outbox.locked_until>clock_timestamp(),false)' \
+  'COALESCE(lease.leased_until>clock_timestamp(),false)' \
+  "attempt.id='\${attempt_id}'" \
+  'FROM agent_command_results AS result'; do
+  grep -qF "${token}" <<<"${post_attempt}${post_proof}" || {
+    echo "the post-Send barrier lacks exact attempt proof: ${token}" >&2
+    exit 1
+  }
+done
+for token in \
+  "SELECT 'target'" \
+  "SELECT 'attempt'" \
+  "SELECT 'result'" \
+  'lease.worker_id,lease.leased_until'; do
+  grep -qF "${token}" <<<"${post_report}" || {
+    echo "the post-Send failure matrix lacks diagnostic field: ${token}" >&2
+    exit 1
+  }
+done
+# shellcheck disable=SC2016  # assert literal exact-attempt shell expressions
+for token in \
+  'attempt_id="$(exact_post_send_attempt_id "${command_id}")"' \
+  'attempt_proof="$(exact_post_send_attempt_proof "${command_id}" "${attempt_id}")"' \
+  'report_exact_post_send_attempt_failure "${command_id}" "${attempt_id}"'; do
+  grep -qF "${token}" <<<"${crash2_phase}" || {
+    echo "the send-before-MarkSent phase does not retain its exact attempt: ${token}" >&2
+    exit 1
+  }
+done
+if grep -qF 'ORDER BY attempt_number LIMIT 1' <<<"${crash2_phase}"; then
+  echo "the send-before-MarkSent phase still infers the dispatch from attempt one" >&2
+  exit 1
+fi
 if grep -qE '^send_before_mark_|^SEND_BEFORE_MARK|start_send_before_mark|stop_send_before_mark' "${FD_B}"; then
   echo "the obsolete generic send-before-MarkSent holder is still present" >&2
   exit 1
