@@ -571,7 +571,18 @@ func (s *Service) Claim(ctx context.Context, workerID uuid.UUID, limit int, leas
 }
 
 func (s *Service) MarkSent(ctx context.Context, dispatch Dispatch) error {
-	return s.finishDispatch(ctx, dispatch, true, "")
+	return s.MarkSentWithEnvelope(ctx, dispatch, dispatch.Envelope)
+}
+
+// MarkSentWithEnvelope records the exact command frame accepted by transport.
+// Fenced workers add per-attempt owner proofs after Claim, so persisting the
+// transmitted frame lets reconnect recovery distinguish old-term ambiguity
+// from a command that was already dispatched on the current connection.
+func (s *Service) MarkSentWithEnvelope(ctx context.Context, dispatch Dispatch, sentEnvelope []byte) error {
+	if err := validateSentEnvelope(dispatch, sentEnvelope); err != nil {
+		return err
+	}
+	return s.finishDispatch(ctx, dispatch, true, "", sentEnvelope)
 }
 
 func (s *Service) MarkFailed(ctx context.Context, dispatch Dispatch, cause error) error {
@@ -582,10 +593,10 @@ func (s *Service) MarkFailed(ctx context.Context, dispatch Dispatch, cause error
 	if len(message) > 512 {
 		message = message[:512]
 	}
-	return s.finishDispatch(ctx, dispatch, false, message)
+	return s.finishDispatch(ctx, dispatch, false, message, nil)
 }
 
-func (s *Service) finishDispatch(ctx context.Context, d Dispatch, sent bool, message string) error {
+func (s *Service) finishDispatch(ctx context.Context, d Dispatch, sent bool, message string, sentEnvelope []byte) error {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return err
@@ -593,6 +604,15 @@ func (s *Service) finishDispatch(ctx context.Context, d Dispatch, sent bool, mes
 	defer rollback(tx)
 	if err := commandlimit.Lock(ctx, tx); err != nil {
 		return fmt.Errorf("serialize dispatch completion: %w", err)
+	}
+	if sent {
+		// A successful transport write can race a takeover in another
+		// Controller. Hold the exact sent term through this commit so the old
+		// owner cannot publish a dispatched state after the successor's
+		// connected-event recovery sweep has already passed the command.
+		if err := guardSentEnvelopeAuthority(ctx, tx, d, sentEnvelope); err != nil {
+			return err
+		}
 	}
 	var valid bool
 	if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM node_command_leases WHERE node_id=$1 AND command_id=$2 AND lease_token=$3 AND leased_until>now())`, d.NodeID, d.CommandID, d.LeaseToken).Scan(&valid); err != nil {
@@ -609,7 +629,7 @@ func (s *Service) finishDispatch(ctx context.Context, d Dispatch, sent bool, mes
 		if _, err = tx.Exec(ctx, `UPDATE outbox_events SET published_at=now(),locked_by=NULL,locked_until=NULL,last_error=NULL WHERE id=$1 AND locked_by IS NOT NULL`, d.OutboxID); err != nil {
 			return err
 		}
-		if _, err = tx.Exec(ctx, `UPDATE commands SET state='dispatched',updated_at=now() WHERE id=$1 AND state IN ('queued','unknown')`, d.CommandID); err != nil {
+		if _, err = tx.Exec(ctx, `UPDATE commands SET state='dispatched',envelope=$2,updated_at=now() WHERE id=$1 AND state IN ('queued','unknown')`, d.CommandID, sentEnvelope); err != nil {
 			return err
 		}
 		if _, err = tx.Exec(ctx, `UPDATE operations SET state='dispatched',version=version+1,updated_at=now() WHERE id=$1 AND state='queued'`, d.OperationID); err != nil {

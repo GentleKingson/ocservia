@@ -269,6 +269,21 @@ func (m *Manager) CloseSession(ctx context.Context, nodeID [16]byte, connectionI
 	return nil
 }
 
+// OwnsTerm reports whether this process still recognizes the exact local
+// connection-owner term. It is a process-authority check only: callers that
+// mutate durable state must additionally fence the write against PostgreSQL.
+func (m *Manager) OwnsTerm(nodeID, connectionID [16]byte, epoch int64) bool {
+	if m == nil || epoch <= 0 {
+		return false
+	}
+	unlock := m.lockNode(nodeID)
+	defer unlock()
+	m.mu.Lock()
+	session, ok := m.sessions[nodeID]
+	m.mu.Unlock()
+	return ok && !session.lost && session.term.ConnectionID() == connectionID && session.term.Epoch() == epoch
+}
+
 // handleTransportEvent ends the owner term named by a disconnect event.
 // Events for unfenced connections carry no term identity and match no
 // session.
