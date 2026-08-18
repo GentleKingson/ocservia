@@ -750,11 +750,41 @@ func ingestAgentCommandResult(ctx context.Context, tx pgx.Tx, eventID, nodeID uu
 	var envelopeBytes []byte
 	var currentState string
 	var commandCreatedAt time.Time
-	if err := tx.QueryRow(ctx, `SELECT command.envelope,command.state,command.created_at FROM commands command JOIN operations operation ON operation.command_id=command.id WHERE command.id=$1 AND command.node_id=$2`, commandID, nodeID).Scan(&envelopeBytes, &currentState, &commandCreatedAt); err != nil {
+	var dispatchInFlight bool
+	if err := tx.QueryRow(ctx, `WITH locked_outbox AS MATERIALIZED (
+		SELECT id,locked_by,locked_until,attempts
+		FROM outbox_events
+		WHERE command_id=$1
+		FOR UPDATE
+	)
+		SELECT command.envelope,command.state,command.created_at,
+		EXISTS(
+			SELECT 1
+			FROM locked_outbox AS outbox
+			JOIN node_command_leases AS lease ON lease.command_id=command.id
+			JOIN command_attempts AS attempt
+			  ON attempt.command_id=lease.command_id
+			 AND attempt.outbox_event_id=outbox.id
+			 AND attempt.worker_id=lease.worker_id
+			WHERE lease.command_id=command.id
+			  AND lease.node_id=command.node_id
+			  AND lease.leased_until>clock_timestamp()
+			  AND outbox.locked_by=lease.worker_id
+			  AND outbox.locked_until>clock_timestamp()
+			  AND attempt.attempt_number=outbox.attempts
+			  AND attempt.state='sending'
+			  AND attempt.finished_at IS NULL
+		)
+		FROM commands AS command
+		JOIN operations AS operation ON operation.command_id=command.id
+		WHERE command.id=$1 AND command.node_id=$2`, commandID, nodeID).Scan(&envelopeBytes, &currentState, &commandCreatedAt, &dispatchInFlight); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return invalidCommandResult("command result does not match a dispatched command")
 		}
 		return fmt.Errorf("load command envelope for result: %w", err)
+	}
+	if currentState == "queued" && !dispatchInFlight {
+		return invalidCommandResult("queued command result has no current sending attempt")
 	}
 	var envelope agentv1.CommandEnvelope
 	if err := proto.Unmarshal(envelopeBytes, &envelope); err != nil {
@@ -911,7 +941,9 @@ func ingestAgentCommandResult(ctx context.Context, tx pgx.Tx, eventID, nodeID uu
 	if verification.KeyID != "" {
 		keyID = verification.KeyID
 	}
-	if _, err := tx.Exec(ctx, `INSERT INTO agent_command_results(event_id,command_id,idempotency_key,payload_sha256,semantic_payload_hash_version,state,result,error_code,accepted_at,completed_at,replayed,created_at,receipt_verification_status,receipt_failure_reason,privd_attestation_key_id,effect_record_id,effect_sequence,receipt_sha256,privileged_result_proof) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19)`, eventID, commandID, idempotencyKey, payloadHash, hashVersion, state, resultBytes, errorCode, acceptedAtValue, completedTime, result.GetReplayed(), observedAt, verification.Status, failureReason, keyID, nullableBytes(verification.EffectRecordID), nullableUint64(verification.EffectSequence), nullableBytes(verification.ReceiptSHA256), nullableBytes(verification.EncodedProof)); err != nil {
+	// Timestamp results and attempts in PostgreSQL so MarkSent can compare
+	// them without process clock skew.
+	if _, err := tx.Exec(ctx, `INSERT INTO agent_command_results(event_id,command_id,idempotency_key,payload_sha256,semantic_payload_hash_version,state,result,error_code,accepted_at,completed_at,replayed,created_at,receipt_verification_status,receipt_failure_reason,privd_attestation_key_id,effect_record_id,effect_sequence,receipt_sha256,privileged_result_proof) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,clock_timestamp(),$12,$13,$14,$15,$16,$17,$18)`, eventID, commandID, idempotencyKey, payloadHash, hashVersion, state, resultBytes, errorCode, acceptedAtValue, completedTime, result.GetReplayed(), verification.Status, failureReason, keyID, nullableBytes(verification.EffectRecordID), nullableUint64(verification.EffectSequence), nullableBytes(verification.ReceiptSHA256), nullableBytes(verification.EncodedProof)); err != nil {
 		return fmt.Errorf("persist Agent command result: %w", err)
 	}
 	if verification.Status != "not_required" && !verification.Verified() {
@@ -939,7 +971,7 @@ func ingestAgentCommandResult(ctx context.Context, tx pgx.Tx, eventID, nodeID uu
 		return fmt.Errorf("generate operation result event ID: %w", err)
 	}
 	terminal := effectiveState == "succeeded" || effectiveState == "failed" || effectiveState == "rejected" || effectiveState == "rolled_back"
-	commandTag, err := tx.Exec(ctx, `UPDATE commands SET state=$2,updated_at=GREATEST(updated_at,$3) WHERE id=$1 AND state IN ('dispatched','accepted','running','unknown')`, commandID, effectiveState, observedAt)
+	commandTag, err := tx.Exec(ctx, `UPDATE commands SET state=$2,updated_at=GREATEST(updated_at,$3) WHERE id=$1 AND state IN ('queued','dispatched','accepted','running','unknown')`, commandID, effectiveState, observedAt)
 	if err != nil {
 		return fmt.Errorf("apply Agent command result: %w", err)
 	}
@@ -952,7 +984,7 @@ func ingestAgentCommandResult(ctx context.Context, tx pgx.Tx, eventID, nodeID uu
 	}
 	var operationID, workspaceID uuid.UUID
 	var operationRequestID, operationTraceID string
-	err = tx.QueryRow(ctx, `UPDATE operations SET state=$2,version=version+1,updated_at=GREATEST(updated_at,$3),completed_at=CASE WHEN $4::boolean THEN GREATEST(COALESCE(completed_at,$3),$3) ELSE NULL END WHERE command_id=$1 AND state IN ('dispatched','accepted','running','unknown') RETURNING id,workspace_id,request_id,COALESCE(trace_id,'')`, commandID, operationState, observedAt, terminal).Scan(&operationID, &workspaceID, &operationRequestID, &operationTraceID)
+	err = tx.QueryRow(ctx, `UPDATE operations SET state=$2,version=version+1,updated_at=GREATEST(updated_at,$3),completed_at=CASE WHEN $4::boolean THEN GREATEST(COALESCE(completed_at,$3),$3) ELSE NULL END WHERE command_id=$1 AND state IN ('queued','dispatched','accepted','running','unknown') RETURNING id,workspace_id,request_id,COALESCE(trace_id,'')`, commandID, operationState, observedAt, terminal).Scan(&operationID, &workspaceID, &operationRequestID, &operationTraceID)
 	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
 		return fmt.Errorf("apply Agent operation result: %w", err)
 	}

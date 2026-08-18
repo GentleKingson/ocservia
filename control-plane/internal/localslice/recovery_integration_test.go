@@ -24,6 +24,138 @@ import (
 
 const reconnectRecoveryTraceparent = "00-7123456789abcdef0123456789abcdef-7123456789abcdef-01"
 
+// TestCommandResultBeforeMarkSentIntegration reproduces the transport race
+// where the Agent result reaches Controller before the worker persists its
+// successful send. The result remains authoritative and MarkSent only closes
+// the matching attempt and lease; it cannot regress the operation afterward.
+func TestCommandResultBeforeMarkSentIntegration(t *testing.T) {
+	databaseURL := os.Getenv("OCSERV_TEST_DATABASE_URL")
+	if databaseURL == "" {
+		t.Skip("OCSERV_TEST_DATABASE_URL is not set")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	pool, err := pgxpool.New(ctx, databaseURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	workspaceID, nodeID := uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7())
+	endpointID := integrationEndpoint(nodeID)
+	if _, err := pool.Exec(ctx, `INSERT INTO workspaces(id,name,slug,created_at,updated_at)
+		VALUES($1,'Early command result',$2,now(),now())`, workspaceID, "early-command-result-"+workspaceID.String()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `INSERT INTO nodes(id,workspace_id,name,status,version,created_at,updated_at)
+		VALUES($1,$2,$3,'active',1,now(),now())`, nodeID, workspaceID, "node-"+nodeID.String()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `INSERT INTO node_endpoint_keys(node_id,endpoint_id,state,bound_at)
+		VALUES($1,$2,'active',now())`, nodeID, endpointID[:]); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		cleanup := context.Background()
+		for _, statement := range []string{
+			`DELETE FROM agent_command_results WHERE command_id IN(SELECT id FROM commands WHERE workspace_id=$1)`,
+			`DELETE FROM transport_event_quarantine WHERE node_id=$2`,
+			`DELETE FROM transport_events WHERE node_id=$2`,
+			`DELETE FROM node_command_leases WHERE command_id IN(SELECT id FROM commands WHERE workspace_id=$1)`,
+			`DELETE FROM command_attempts WHERE command_id IN(SELECT id FROM commands WHERE workspace_id=$1)`,
+			`DELETE FROM outbox_events WHERE command_id IN(SELECT id FROM commands WHERE workspace_id=$1)`,
+			`DELETE FROM commands WHERE workspace_id=$1`,
+			`DELETE FROM operations WHERE workspace_id=$1`,
+			`DELETE FROM audit_events WHERE workspace_id=$1`,
+			`DELETE FROM security_alerts WHERE workspace_id=$1`,
+			`DELETE FROM node_endpoint_keys WHERE node_id=$2`,
+			`DELETE FROM nodes WHERE id=$2`,
+			`DELETE FROM workspaces WHERE id=$1`,
+		} {
+			_, _ = pool.Exec(cleanup, statement, workspaceID, nodeID)
+		}
+		pool.Close()
+	})
+
+	signer := integrationCommandSigner()
+	operations := operationstore.NewWithSigner(pool, 200, signer)
+	term := acquireRecoveryTerm(t, ctx, pool, nodeID, 606)
+	t.Cleanup(func() { _ = term.Release(context.Background(), pool) })
+	authority := &recoveryTestAuthority{nodeID: nodeID, connectionID: term.ConnectionID(), epoch: term.Epoch()}
+	service := NewWithCommandRecovery(pool, signer, operations, authority)
+	held, replayed, err := operations.CreateSynthetic(ctx, operationstore.CreateRequest{
+		NodeID: nodeID, IdempotencyKey: "unclaimed-result", ExpectedVersion: 1,
+		Kind: operationstore.SyntheticNoop, TTL: 10 * time.Minute,
+		RequestID: "unclaimed-result", Traceparent: reconnectRecoveryTraceparent,
+	})
+	if err != nil || replayed || held.CommandID == nil {
+		t.Fatalf("create held command = %+v, replayed=%v, err=%v", held, replayed, err)
+	}
+	heldCommandID := uuid.MustParse(*held.CommandID)
+	if _, err := pool.Exec(ctx, `UPDATE outbox_events SET available_at=(SELECT expires_at FROM commands WHERE id=$1) WHERE command_id=$1`, heldCommandID); err != nil {
+		t.Fatal(err)
+	}
+	var heldEnvelope []byte
+	if err := pool.QueryRow(ctx, `SELECT envelope FROM commands WHERE id=$1`, heldCommandID).Scan(&heldEnvelope); err != nil {
+		t.Fatal(err)
+	}
+	unclaimedResult := recoveryResultEvent(t, nodeID, endpointID, heldEnvelope, agentv1.CommandResultState_COMMAND_RESULT_STATE_SUCCEEDED)
+	unclaimedEventID := uuid.Must(uuid.FromBytes(unclaimedResult.GetEventId()))
+	if err := service.Ingest(ctx, unclaimedResult); err != nil {
+		t.Fatalf("quarantine unclaimed queued result: %v", err)
+	}
+	assertEventQuarantined(t, pool, unclaimedEventID, nodeID, "invalid_command_result")
+	assertRecoveryState(t, pool, heldCommandID, "queued", "queued", false)
+	var heldResultCount int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM agent_command_results WHERE command_id=$1`, heldCommandID).Scan(&heldResultCount); err != nil || heldResultCount != 0 {
+		t.Fatalf("unclaimed queued result count = %d, err=%v, want 0", heldResultCount, err)
+	}
+
+	createClaimed := func(t *testing.T, key string) (uuid.UUID, uuid.UUID, operationstore.Dispatch, []byte) {
+		t.Helper()
+		var nodeVersion int64
+		if err := pool.QueryRow(ctx, `SELECT version FROM nodes WHERE id=$1`, nodeID).Scan(&nodeVersion); err != nil {
+			t.Fatal(err)
+		}
+		operation, replayed, err := operations.CreateSynthetic(ctx, operationstore.CreateRequest{
+			NodeID: nodeID, IdempotencyKey: key, ExpectedVersion: nodeVersion,
+			Kind: operationstore.SyntheticNoop, TTL: 10 * time.Minute,
+			RequestID: key, Traceparent: reconnectRecoveryTraceparent,
+		})
+		if err != nil || replayed || operation.CommandID == nil {
+			t.Fatalf("create synthetic command = %+v, replayed=%v, err=%v", operation, replayed, err)
+		}
+		commandID := uuid.MustParse(*operation.CommandID)
+		jobs, err := operations.Claim(ctx, uuid.Must(uuid.NewV7()), 1, time.Minute)
+		if err != nil || len(jobs) != 1 || jobs[0].CommandID != commandID {
+			t.Fatalf("claim command = %d jobs, err=%v", len(jobs), err)
+		}
+		return commandID, uuid.MustParse(operation.ID), jobs[0], fenceRecoveryDispatch(t, signer, endpointID, term, jobs[0])
+	}
+
+	commandID, operationID, dispatch, sent := createClaimed(t, "early-success")
+	if err := service.Ingest(ctx, recoveryResultEvent(t, nodeID, endpointID, sent, agentv1.CommandResultState_COMMAND_RESULT_STATE_SUCCEEDED)); err != nil {
+		t.Fatalf("ingest early success: %v", err)
+	}
+	assertRecoveryState(t, pool, commandID, "succeeded", "succeeded", true)
+	if err := operations.MarkSentWithEnvelope(ctx, dispatch, sent); err != nil {
+		t.Fatalf("finish dispatch after early success: %v", err)
+	}
+	assertEarlyResultDispatchClosed(t, pool, commandID, operationID, dispatch, "succeeded", true)
+
+	commandID, operationID, dispatch, sent = createClaimed(t, "early-unknown")
+	original := decodeRecoveryEnvelope(t, dispatch.Envelope)
+	if err := service.Ingest(ctx, recoveryResultEvent(t, nodeID, endpointID, sent, agentv1.CommandResultState_COMMAND_RESULT_STATE_UNKNOWN)); err != nil {
+		t.Fatalf("ingest early unknown: %v", err)
+	}
+	assertRecoveryState(t, pool, commandID, "unknown", "unknown", false)
+	if err := operations.MarkSentWithEnvelope(ctx, dispatch, sent); err != nil {
+		t.Fatalf("finish dispatch after early unknown: %v", err)
+	}
+	assertEarlyResultDispatchClosed(t, pool, commandID, operationID, dispatch, "unknown", false)
+	recovery := claimRecoveryDispatch(t, ctx, operations, commandID)
+	assertReconcileOnlyIdentity(t, original, decodeRecoveryEnvelope(t, recovery.Envelope))
+}
+
 // TestAuthoritativeReconnectRecoversLostCommandResultIntegration reproduces
 // the failover window where transport accepted a command, the old event stream
 // lost its result, and a higher owner epoch became fresh. Every retry remains
@@ -364,6 +496,23 @@ func assertRecoveryState(t *testing.T, pool *pgxpool.Pool, commandID uuid.UUID, 
 	}
 	if gotCommand != commandState || gotOperation != operationState || gotPublished != published {
 		t.Fatalf("command/operation/published = %s/%s/%v, want %s/%s/%v", gotCommand, gotOperation, gotPublished, commandState, operationState, published)
+	}
+}
+
+func assertEarlyResultDispatchClosed(t *testing.T, pool *pgxpool.Pool, commandID, operationID uuid.UUID, dispatch operationstore.Dispatch, state string, published bool) {
+	t.Helper()
+	assertRecoveryState(t, pool, commandID, state, state, published)
+	var attemptState string
+	var leaseCount, dispatchedEvents int
+	if err := pool.QueryRow(context.Background(), `SELECT
+		(SELECT state FROM command_attempts WHERE id=$1),
+		(SELECT count(*) FROM node_command_leases WHERE lease_token=$2),
+		(SELECT count(*) FROM operation_events WHERE operation_id=$3 AND state='dispatched')`,
+		dispatch.AttemptID, dispatch.LeaseToken, operationID).Scan(&attemptState, &leaseCount, &dispatchedEvents); err != nil {
+		t.Fatal(err)
+	}
+	if attemptState != "sent" || leaseCount != 0 || dispatchedEvents != 0 {
+		t.Fatalf("attempt/lease/dispatched events = %s/%d/%d, want sent/0/0", attemptState, leaseCount, dispatchedEvents)
 	}
 }
 

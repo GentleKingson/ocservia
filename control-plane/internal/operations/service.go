@@ -613,20 +613,78 @@ func (s *Service) finishDispatch(ctx context.Context, d Dispatch, sent bool, mes
 		if err := guardSentEnvelopeAuthority(ctx, tx, d, sentEnvelope); err != nil {
 			return err
 		}
-	}
-	var valid bool
-	if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM node_command_leases WHERE node_id=$1 AND command_id=$2 AND lease_token=$3 AND leased_until>now())`, d.NodeID, d.CommandID, d.LeaseToken).Scan(&valid); err != nil {
-		return err
-	}
-	if !valid {
-		return errors.New("dispatch lease is no longer valid")
-	}
-	if sent {
+
+		// Result ingestion locks this outbox row before advancing the command.
+		// Taking the same lock here makes the two possible commit orders
+		// deterministic and lets a fast Agent result win without being overwritten.
+		var leaseValid, attemptValid, ownsOutboxLock, resultAfterAttempt bool
+		var commandState string
+		err := tx.QueryRow(ctx, `SELECT
+			lease.leased_until>clock_timestamp(),
+			attempt.state='sending' AND attempt.finished_at IS NULL
+			  AND attempt.worker_id=lease.worker_id
+			  AND attempt.attempt_number=outbox.attempts,
+			COALESCE(outbox.locked_by=lease.worker_id AND outbox.locked_until>clock_timestamp(),false),
+			EXISTS(SELECT 1 FROM agent_command_results AS result
+			       WHERE result.command_id=command.id AND result.created_at>=attempt.started_at),
+			command.state
+		FROM outbox_events AS outbox
+		JOIN commands AS command ON command.id=outbox.command_id
+		JOIN operations AS operation ON operation.id=command.operation_id
+		JOIN node_command_leases AS lease
+		  ON lease.command_id=command.id AND lease.node_id=command.node_id
+		JOIN command_attempts AS attempt
+		  ON attempt.id=$5 AND attempt.command_id=command.id AND attempt.outbox_event_id=outbox.id
+		WHERE outbox.id=$1 AND command.id=$2 AND operation.id=$3 AND command.node_id=$4
+		  AND lease.lease_token=$6
+		FOR UPDATE OF outbox`, d.OutboxID, d.CommandID, d.OperationID, d.NodeID, d.AttemptID, d.LeaseToken).
+			Scan(&leaseValid, &attemptValid, &ownsOutboxLock, &resultAfterAttempt, &commandState)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return errors.New("dispatch lease is no longer valid")
+		}
+		if err != nil {
+			return fmt.Errorf("lock dispatch completion: %w", err)
+		}
+		if !leaseValid || !attemptValid {
+			return errors.New("dispatch lease is no longer valid")
+		}
+		if !ownsOutboxLock && !resultAfterAttempt {
+			return errors.New("dispatch outbox lock is no longer valid")
+		}
+		if resultAfterAttempt {
+			switch commandState {
+			case "succeeded", "failed", "rejected", "rolled_back":
+				if _, err = tx.Exec(ctx, `UPDATE commands SET envelope=$2 WHERE id=$1`, d.CommandID, sentEnvelope); err != nil {
+					return err
+				}
+			case "unknown":
+				// Unknown result ingestion may already have replaced the payload
+				// with a reconcile-only envelope. Preserve that recovery work.
+			default:
+				return fmt.Errorf("agent result did not advance command from %s", commandState)
+			}
+		}
+		if ownsOutboxLock {
+			outboxTag, err := tx.Exec(ctx, `UPDATE outbox_events SET published_at=now(),locked_by=NULL,locked_until=NULL,last_error=NULL WHERE id=$1 AND locked_by=(SELECT worker_id FROM node_command_leases WHERE lease_token=$2)`, d.OutboxID, d.LeaseToken)
+			if err != nil {
+				return err
+			}
+			if outboxTag.RowsAffected() != 1 {
+				return errors.New("dispatch outbox lock is no longer valid")
+			}
+		}
+		if resultAfterAttempt {
+			if err := closeDispatchAttempt(ctx, tx, d); err != nil {
+				return err
+			}
+			return tx.Commit(ctx)
+		}
+		if commandState != "queued" && commandState != "unknown" {
+			return fmt.Errorf("dispatch command is no longer mutable from %s", commandState)
+		}
+
 		eventID, err := uuid.NewV7()
 		if err != nil {
-			return err
-		}
-		if _, err = tx.Exec(ctx, `UPDATE outbox_events SET published_at=now(),locked_by=NULL,locked_until=NULL,last_error=NULL WHERE id=$1 AND locked_by IS NOT NULL`, d.OutboxID); err != nil {
 			return err
 		}
 		if _, err = tx.Exec(ctx, `UPDATE commands SET state='dispatched',envelope=$2,updated_at=now() WHERE id=$1 AND state IN ('queued','unknown')`, d.CommandID, sentEnvelope); err != nil {
@@ -638,24 +696,49 @@ func (s *Service) finishDispatch(ctx context.Context, d Dispatch, sent bool, mes
 		if _, err = tx.Exec(ctx, `UPDATE config_apply_operations SET state='dispatched',updated_at=now() WHERE operation_id=$1 AND state IN('queued','unknown')`, d.OperationID); err != nil {
 			return err
 		}
-		if _, err = tx.Exec(ctx, `UPDATE command_attempts SET state='sent',finished_at=now() WHERE id=$1 AND state='sending'`, d.AttemptID); err != nil {
-			return err
-		}
 		if _, err = tx.Exec(ctx, `INSERT INTO operation_events (id,operation_id,state,occurred_at) VALUES ($1,$2,'dispatched',now())`, eventID, d.OperationID); err != nil {
 			return err
 		}
+		if err := closeDispatchAttempt(ctx, tx, d); err != nil {
+			return err
+		}
 	} else {
+		var valid bool
+		if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM node_command_leases WHERE node_id=$1 AND command_id=$2 AND lease_token=$3 AND leased_until>now())`, d.NodeID, d.CommandID, d.LeaseToken).Scan(&valid); err != nil {
+			return err
+		}
+		if !valid {
+			return errors.New("dispatch lease is no longer valid")
+		}
 		if _, err = tx.Exec(ctx, `UPDATE outbox_events SET locked_by=NULL,locked_until=NULL,available_at=now()+interval '1 second',last_error=$2 WHERE id=$1 AND locked_by IS NOT NULL`, d.OutboxID, message); err != nil {
 			return err
 		}
 		if _, err = tx.Exec(ctx, `UPDATE command_attempts SET state='failed',finished_at=now(),error_code='transport_unavailable' WHERE id=$1 AND state='sending'`, d.AttemptID); err != nil {
 			return err
 		}
-	}
-	if _, err = tx.Exec(ctx, `DELETE FROM node_command_leases WHERE lease_token=$1`, d.LeaseToken); err != nil {
-		return err
+		if _, err = tx.Exec(ctx, `DELETE FROM node_command_leases WHERE lease_token=$1`, d.LeaseToken); err != nil {
+			return err
+		}
 	}
 	return tx.Commit(ctx)
+}
+
+func closeDispatchAttempt(ctx context.Context, tx pgx.Tx, d Dispatch) error {
+	attemptTag, err := tx.Exec(ctx, `UPDATE command_attempts SET state='sent',finished_at=now() WHERE id=$1 AND command_id=$2 AND outbox_event_id=$3 AND state='sending'`, d.AttemptID, d.CommandID, d.OutboxID)
+	if err != nil {
+		return err
+	}
+	if attemptTag.RowsAffected() != 1 {
+		return errors.New("dispatch attempt is no longer sending")
+	}
+	leaseTag, err := tx.Exec(ctx, `DELETE FROM node_command_leases WHERE node_id=$1 AND command_id=$2 AND lease_token=$3`, d.NodeID, d.CommandID, d.LeaseToken)
+	if err != nil {
+		return err
+	}
+	if leaseTag.RowsAffected() != 1 {
+		return errors.New("dispatch lease is no longer valid")
+	}
+	return nil
 }
 
 func (s *Service) Reap(ctx context.Context, maxAttempts int) error {
