@@ -595,11 +595,16 @@ for (const command of commands) {
   }
 }
 
-const outcomeOf = (state) => {
+const outcomeOf = (command) => {
+  const { state } = command;
   if (state === "succeeded") return "success";
-  if (state === "failed") return "failed";
+  if (state === "failed" || state === "rejected") return "failed";
   if (state === "unknown") return "unknown";
-  return fail(`command state ${state} has no trace outcome mapping`);
+  return fail(`command state ${state} has no trace outcome mapping`, {
+    path: `run/state/evidence/commands.jsonl#command_id=${command.id}/state`,
+    expected: "succeeded, failed, rejected, or unknown",
+    actual: state,
+  });
 };
 
 const traceRecords = [];
@@ -647,7 +652,7 @@ for (const command of population) {
     record: {
       record_type: "result",
       command_id: command.id,
-      outcome: outcomeOf(command.state),
+      outcome: outcomeOf(command),
     },
   });
 }

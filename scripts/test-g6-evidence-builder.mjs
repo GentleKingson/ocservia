@@ -110,11 +110,13 @@ const outboxRows = [];
 const auditRows = [];
 const effectsByAgent = new Map();
 let commandSeed = 1;
+let rejectedCommandId = "";
 
-function enqueueCommand(nodeIndex, stampSeconds) {
+function enqueueCommand(nodeIndex, stampSeconds, commandState = "succeeded") {
   const commandId = fakeUuid(commandSeed + 500, 7);
   const key = `g6-window-run-${commandSeed}`;
   commandSeed += 1;
+  if (commandState === "rejected") rejectedCommandId = commandId;
   enqueueLog.push({
     at: at(stampSeconds),
     node: nodes[nodeIndex].nodeId,
@@ -128,7 +130,7 @@ function enqueueCommand(nodeIndex, stampSeconds) {
     id: commandId,
     idempotency_key: key,
     node_id: nodes[nodeIndex].nodeId,
-    state: "succeeded",
+    state: commandState,
     created_at: at(stampSeconds),
     updated_at: at(completion),
   });
@@ -154,16 +156,18 @@ function enqueueCommand(nodeIndex, stampSeconds) {
     },
     {
       command_id: commandId,
-      result: "succeeded",
+      result: commandState === "succeeded" ? "succeeded" : "failed",
       occurred_at: at(completion),
     },
   );
-  const agentFile = `${nodes[nodeIndex].name.replace("g6-", "agent-")}.tsv`;
-  const lines = effectsByAgent.get(agentFile) ?? [];
-  lines.push(
-    `${fakeUuid(commandSeed, 3).replaceAll("-", "")} ${commandId.replaceAll("-", "")} ${epochSeconds(stampSeconds + 2)}`,
-  );
-  effectsByAgent.set(agentFile, lines);
+  if (commandState === "succeeded") {
+    const agentFile = `${nodes[nodeIndex].name.replace("g6-", "agent-")}.tsv`;
+    const lines = effectsByAgent.get(agentFile) ?? [];
+    lines.push(
+      `${fakeUuid(commandSeed, 3).replaceAll("-", "")} ${commandId.replaceAll("-", "")} ${epochSeconds(stampSeconds + 2)}`,
+    );
+    effectsByAgent.set(agentFile, lines);
+  }
 }
 
 for (let tick = 0; tick <= 100; tick += 1) {
@@ -200,7 +204,11 @@ for (let tick = 0; tick <= 100; tick += 1) {
       enqueueCommand(nodeIndex, 5);
     }
   }
-  enqueueCommand(tick % nodes.length, 5 + tick * 3);
+  enqueueCommand(
+    tick % nodes.length,
+    5 + tick * 3,
+    tick === 0 ? "rejected" : "succeeded",
+  );
   enqueueCommand((tick + 1) % nodes.length, 5 + tick * 3);
 }
 
@@ -804,6 +812,23 @@ try {
       `production bundle must pass: ${verdict.failure_reasons.join("; ")}`,
     );
   }
+  const rejectedTraceResult = readFileSync(
+    join(productionDir, "command-trace.jsonl"),
+    "utf8",
+  )
+    .trimEnd()
+    .split("\n")
+    .map((line) => JSON.parse(line))
+    .find(
+      (record) =>
+        record.record_type === "result" &&
+        record.command_id === rejectedCommandId,
+    );
+  if (rejectedTraceResult?.outcome !== "failed") {
+    throw new Error(
+      "builder must map an accepted command's rejected terminal result to failed",
+    );
+  }
   const builtSessionInventory = JSON.parse(
     readFileSync(join(productionDir, "agent-sessions.json"), "utf8"),
   );
@@ -1329,6 +1354,31 @@ try {
     "does not cover exactly all managed Agents",
   );
   write(missingAgentPath, missingAgentEffects);
+
+  const commandsPath = join(runDir, "state", "evidence", "commands.jsonl");
+  const originalCommands = readFileSync(commandsPath, "utf8");
+  const nonterminalCommands = originalCommands
+    .trimEnd()
+    .split("\n")
+    .map((line) => JSON.parse(line));
+  const nonterminalCommand = nonterminalCommands.find(
+    (command) => command.id === rejectedCommandId,
+  );
+  if (!nonterminalCommand) {
+    throw new Error("rejected command source fixture is missing");
+  }
+  nonterminalCommand.state = "running";
+  write(commandsPath, jsonl(nonterminalCommands));
+  expectBuilderFailure(
+    join(work, "nonterminal-command-bundle"),
+    "command state running has no trace outcome mapping",
+    {
+      path: `run/state/evidence/commands.jsonl#command_id=${rejectedCommandId}/state`,
+      expected: "succeeded, failed, rejected, or unknown",
+      actual: "running",
+    },
+  );
+  write(commandsPath, originalCommands);
 
   const freezePath = join(peerDir, "final-freeze-at");
   const originalFreeze = readFileSync(freezePath, "utf8");
