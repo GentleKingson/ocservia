@@ -35,12 +35,12 @@
     "max_production_command_inflight": {
       "actual": 50,
       "sample_count": 600,
-      "source_artifact_digest": "sha256:57300ef3f86b641ce5edc0ebdbe16aeecb823d834cf17adbc501aeb990fa8e4c"
+      "source_artifact_digest": "sha256:dde131d676d61d270c3c08e9f1d91f712b72f0787818f5e028ff69451b58d66e"
     },
     "synthetic_command_completion_seconds_p99": {
       "actual": 4.001,
       "sample_count": 600,
-      "source_artifact_digest": "sha256:57300ef3f86b641ce5edc0ebdbe16aeecb823d834cf17adbc501aeb990fa8e4c"
+      "source_artifact_digest": "sha256:dde131d676d61d270c3c08e9f1d91f712b72f0787818f5e028ff69451b58d66e"
     },
     "stale_owner_accepts": {
       "actual": 0,
@@ -70,7 +70,7 @@
     "duplicate_remote_effects": {
       "actual": 0,
       "sample_count": 602,
-      "source_artifact_digest": "sha256:57300ef3f86b641ce5edc0ebdbe16aeecb823d834cf17adbc501aeb990fa8e4c"
+      "source_artifact_digest": "sha256:dde131d676d61d270c3c08e9f1d91f712b72f0787818f5e028ff69451b58d66e"
     },
     "acknowledged_transaction_loss": {
       "actual": 0,
@@ -90,7 +90,7 @@
     "quarantined_unmatched_command_results": {
       "actual": 0,
       "sample_count": 602,
-      "source_artifact_digest": "sha256:57300ef3f86b641ce5edc0ebdbe16aeecb823d834cf17adbc501aeb990fa8e4c"
+      "source_artifact_digest": "sha256:dde131d676d61d270c3c08e9f1d91f712b72f0787818f5e028ff69451b58d66e"
     },
     "database_rpo_seconds": {
       "actual": 5,
@@ -115,7 +115,7 @@
     "relay_takeover_seconds": {
       "actual": 5,
       "sample_count": 1,
-      "source_artifact_digest": "sha256:a7610bf527be735b8e8a14eaf68053fa7dc8c325072e4a1297c530dcb7312de0"
+      "source_artifact_digest": "sha256:e77e5196f55357e1b0a3e1c42498eab2148ee59401bb06f459cf816340319466"
     },
     "reconnect_storm_recovery_seconds": {
       "actual": 69.1,
@@ -150,12 +150,12 @@
     "command_dispatch_ratio": {
       "actual": 1,
       "sample_count": 600,
-      "source_artifact_digest": "sha256:57300ef3f86b641ce5edc0ebdbe16aeecb823d834cf17adbc501aeb990fa8e4c"
+      "source_artifact_digest": "sha256:dde131d676d61d270c3c08e9f1d91f712b72f0787818f5e028ff69451b58d66e"
     },
     "command_dispatch_seconds": {
       "actual": 10,
       "sample_count": 600,
-      "source_artifact_digest": "sha256:57300ef3f86b641ce5edc0ebdbe16aeecb823d834cf17adbc501aeb990fa8e4c"
+      "source_artifact_digest": "sha256:dde131d676d61d270c3c08e9f1d91f712b72f0787818f5e028ff69451b58d66e"
     },
     "audit_completeness_ratio": {
       "actual": 1,
@@ -400,7 +400,7 @@
     },
     {
       "name": "command-trace.jsonl",
-      "digest": "sha256:57300ef3f86b641ce5edc0ebdbe16aeecb823d834cf17adbc501aeb990fa8e4c",
+      "digest": "sha256:dde131d676d61d270c3c08e9f1d91f712b72f0787818f5e028ff69451b58d66e",
       "media_type": "application/x-ndjson",
       "kind": "command_trace"
     },
@@ -448,7 +448,7 @@
     },
     {
       "name": "relay-transitions.jsonl",
-      "digest": "sha256:a7610bf527be735b8e8a14eaf68053fa7dc8c325072e4a1297c530dcb7312de0",
+      "digest": "sha256:e77e5196f55357e1b0a3e1c42498eab2148ee59401bb06f459cf816340319466",
       "media_type": "application/x-ndjson",
       "kind": "relay_transitions"
     }

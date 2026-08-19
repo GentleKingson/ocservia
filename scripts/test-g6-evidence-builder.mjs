@@ -297,7 +297,8 @@ effectsByAgent.set(relayEffectFile, [
   `${relayEffectKey} ${relayCommandId.replaceAll("-", "")} ${epochSeconds(183)}`,
 ]);
 const relayPreFaultCommandId = fakeUuid(8790, 7);
-const relayPreFaultCommandKey = "g6-relay-pre-fault-test-run";
+const relayPreFaultRunId = "test-run";
+const relayPreFaultCommandKey = `g6-relay-pre-fault-${relayPreFaultRunId}`;
 const relayPreFaultEffectKey = fakeUuid(8791, 3).replaceAll("-", "");
 const relayPreFaultEffectId =
   `fx-agent-fd-a-01-${relayPreFaultEffectKey}`;

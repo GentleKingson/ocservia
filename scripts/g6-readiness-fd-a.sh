@@ -706,7 +706,7 @@ phase_rejoin() {
 phase_relay_a_stop() {
   (
   set -Eeuo pipefail
-  # shellcheck disable=SC2329  # invoked by the EXIT trap below
+  # shellcheck disable=SC2317,SC2329  # invoked by the EXIT trap below
   relay_a_stop_restore() {
     local status=$?
     trap - EXIT
@@ -847,7 +847,7 @@ phase_relay_a_stop() {
 phase_relay_rejoin_ready() {
   (
     set -Eeuo pipefail
-    # shellcheck disable=SC2329  # invoked by the EXIT trap below
+    # shellcheck disable=SC2317,SC2329  # invoked by the EXIT trap below
     relay_a_ready_restore_on_failure() {
       local status=$?
       trap - EXIT

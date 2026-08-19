@@ -49,6 +49,7 @@ const reconnectCompletedAt = at(250);
 const resourceSamplingStoppedAt = atMicros(300, 100000);
 const apiSloMeasuredAt = atMicros(300, 200000);
 const finalLeaseUntil = at(329);
+const relayPreFaultCommandKey = "g6-relay-pre-fault-00000000";
 
 const bindingFields = `${environmentId},${candidateSha}`;
 const bindingRecord = (timestamp) => ({
@@ -379,7 +380,7 @@ function buildCommandTrace() {
   record(at(155), {
     record_type: "enqueued",
     command_id: "cmd-relay-pre-proof",
-    idempotency_key: "g6-relay-pre-fault-fixture",
+    idempotency_key: relayPreFaultCommandKey,
   });
   record(at(156), {
     record_type: "dispatched",
@@ -716,7 +717,7 @@ function buildRelayTransitions() {
       topology_ready_at: at(153),
       relay_b_disabled_at: at(154),
       command_id: "cmd-relay-pre-proof",
-      command_idempotency_key: "g6-relay-pre-fault-fixture",
+      command_idempotency_key: relayPreFaultCommandKey,
       effect_idempotency_key: "idem-relay-pre-proof",
       effect_id: "fx-relay-pre-proof",
       result_observed_at: at(158),
