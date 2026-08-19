@@ -627,7 +627,8 @@ func (s *Service) ingestTransportEventTx(ctx context.Context, tx pgx.Tx, eventID
 		status = "offline"
 	}
 	if eventType != "telemetry" {
-		if _, err := tx.Exec(ctx, "UPDATE nodes SET status = $2, updated_at = $3, version = version + 1 WHERE id = $1 AND status IN ('active','offline')", nodeID, status, occurredTime); err != nil {
+		// Routine same-state signals must not invalidate node mutation preconditions.
+		if _, err := tx.Exec(ctx, "UPDATE nodes SET status = $2, updated_at = $3, version = version + 1 WHERE id = $1 AND status IN ('active','offline') AND status IS DISTINCT FROM $2", nodeID, status, occurredTime); err != nil {
 			return workspaceID, false, fmt.Errorf("update node from transport event: %w", err)
 		}
 	}
