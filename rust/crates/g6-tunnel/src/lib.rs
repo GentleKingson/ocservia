@@ -24,7 +24,7 @@ use iroh::{Endpoint, EndpointAddr, EndpointId, SecretKey};
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::{OwnedSemaphorePermit, Semaphore};
+use tokio::sync::{Mutex, OwnedSemaphorePermit, Semaphore};
 use zeroize::Zeroizing;
 
 /// ALPN of the G6 harness tunnel.
@@ -54,12 +54,18 @@ const MAX_TUNNEL_CONNECTIONS: usize = 256;
 const MAX_TUNNEL_QUEUED_CONNECTIONS: usize = 64;
 const _: () = assert!(MAX_TUNNEL_CONNECTIONS >= REQUIRED_G6_RELAY_TUNNEL_CONNECTIONS);
 const _: () = assert!(MAX_TUNNEL_QUEUED_CONNECTIONS <= MAX_TUNNEL_CONNECTIONS);
-const MAX_TUNNEL_STREAMS: u32 = 8;
+// A persistent outer QUIC connection carries every admitted local TCP flow as
+// an independent bidirectional stream. Keep the negotiated stream budget
+// large enough for both the active set and its explicitly bounded queue.
+const MAX_TUNNEL_STREAMS: u32 = 320;
+const _: () =
+    assert!(MAX_TUNNEL_STREAMS as usize >= MAX_TUNNEL_CONNECTIONS + MAX_TUNNEL_QUEUED_CONNECTIONS);
 // Surface capacity pressure independently of the longer Iroh connection and
 // stream deadlines below.
 const PERMIT_ACQUIRE_TIMEOUT: Duration = Duration::from_secs(5);
 const STREAM_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(30);
 const IROH_CONNECT_TIMEOUT: Duration = Duration::from_secs(90);
+const IROH_RECONNECT_FAILURE_BACKOFF: Duration = Duration::from_secs(1);
 const TCP_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const COPY_BUFFER_BYTES: usize = 64 * 1024;
 
@@ -205,11 +211,31 @@ pub async fn serve(
     peer: EndpointId,
     target: SocketAddr,
 ) -> Result<Router, std::io::Error> {
+    serve_with_components(
+        secret_key,
+        relay_mode,
+        peer,
+        target,
+        ConnectionLimiter::formal(),
+        OuterConnectionMetrics::default(),
+    )
+    .await
+}
+
+async fn serve_with_components(
+    secret_key: SecretKey,
+    relay_mode: RelayMode,
+    peer: EndpointId,
+    target: SocketAddr,
+    limiter: ConnectionLimiter,
+    metrics: OuterConnectionMetrics,
+) -> Result<Router, std::io::Error> {
     let endpoint = bind_endpoint(secret_key, relay_mode).await?;
     let handler = ForwardHandler {
         peer,
         target,
-        limiter: ConnectionLimiter::formal(),
+        limiter,
+        metrics,
     };
     let router = Router::builder(endpoint)
         .accept(TUNNEL_ALPN, handler)
@@ -222,6 +248,12 @@ struct ForwardHandler {
     peer: EndpointId,
     target: SocketAddr,
     limiter: ConnectionLimiter,
+    metrics: OuterConnectionMetrics,
+}
+
+#[derive(Clone, Debug, Default)]
+struct OuterConnectionMetrics {
+    accepted: Arc<AtomicUsize>,
 }
 
 impl ProtocolHandler for ForwardHandler {
@@ -230,47 +262,113 @@ impl ProtocolHandler for ForwardHandler {
             connection.close(VarInt::from_u32(0x201), b"unpinned tunnel peer");
             return Err(protocol_error("tunnel connection from unpinned peer"));
         }
-        let _permit = match self.limiter.acquire("serve").await {
-            Ok(permit) => permit,
-            Err(error) => {
-                connection.close(VarInt::from_u32(0x205), b"tunnel capacity unavailable");
-                return Err(AcceptError::from_err(error));
+
+        let outer_connection_generation = self.metrics.accepted.fetch_add(1, Ordering::AcqRel) + 1;
+        tracing::info!(
+            direction = "serve",
+            outer_connection_generation,
+            outer_connection_id = connection.stable_id(),
+            "tunnel outer connection accepted"
+        );
+
+        let mut streams = tokio::task::JoinSet::new();
+        loop {
+            tokio::select! {
+                reason = connection.closed() => {
+                    tracing::info!(
+                        direction = "serve",
+                        outer_connection_generation,
+                        outer_connection_id = connection.stable_id(),
+                        reason = %reason,
+                        "tunnel outer connection closed"
+                    );
+                    break;
+                }
+                finished = streams.join_next(), if !streams.is_empty() => {
+                    if let Some(Err(error)) = finished {
+                        tracing::warn!(error = %error, "tunnel stream task failed");
+                    }
+                }
+                stream = connection.accept_bi() => {
+                    let (send, recv) = match stream {
+                        Ok(stream) => stream,
+                        Err(error) => {
+                            tracing::debug!(
+                                error = %error,
+                                outer_connection_generation,
+                                outer_connection_id = connection.stable_id(),
+                                "tunnel outer connection stopped accepting streams"
+                            );
+                            break;
+                        }
+                    };
+                    let admission = match self.limiter.admit("serve") {
+                        Ok(admission) => admission,
+                        Err(error) => {
+                            tracing::warn!(error = %error, "tunnel stream rejected");
+                            reject_stream(send, recv, 0x205);
+                            continue;
+                        }
+                    };
+                    let limiter = self.limiter.clone();
+                    let target = self.target;
+                    streams.spawn(async move {
+                        serve_stream(send, recv, target, limiter, admission).await;
+                    });
+                }
             }
-        };
-        let stream = tokio::time::timeout(STREAM_HANDSHAKE_TIMEOUT, connection.accept_bi()).await;
-        let (send, recv) = match stream {
-            Ok(Ok(stream)) => stream,
-            Ok(Err(_)) => {
-                connection.close(VarInt::from_u32(0x203), b"tunnel stream failed");
-                return Err(protocol_error("tunnel stream handshake failed"));
-            }
-            Err(_) => {
-                connection.close(VarInt::from_u32(0x202), b"tunnel stream timeout");
-                return Err(protocol_error("tunnel stream handshake timed out"));
-            }
-        };
-        let tcp = match tokio::time::timeout(TCP_CONNECT_TIMEOUT, TcpStream::connect(self.target))
-            .await
-        {
-            Ok(Ok(stream)) => stream,
-            Ok(Err(error)) => {
-                tracing::warn!(error = %error, target = %self.target, "tunnel target unreachable");
-                connection.close(VarInt::from_u32(0x204), b"tunnel target unreachable");
-                return Err(protocol_error("tunnel target unreachable"));
-            }
-            Err(_) => {
-                connection.close(VarInt::from_u32(0x204), b"tunnel target unreachable");
-                return Err(protocol_error("tunnel target connect timed out"));
-            }
-        };
-        copy_tunnel(send, recv, tcp).await;
+        }
+        streams.shutdown().await;
         Ok(())
     }
 }
 
-/// Runs the dialing side: a local TCP listener whose connections are each
-/// carried over a fresh Iroh connection to the pinned peer. The relay mode
-/// must match the serving side.
+async fn serve_stream(
+    send: iroh::endpoint::SendStream,
+    recv: iroh::endpoint::RecvStream,
+    target: SocketAddr,
+    limiter: ConnectionLimiter,
+    admission: ConnectionAdmission,
+) {
+    let _permit = match limiter.acquire_admitted("serve", admission).await {
+        Ok(permit) => permit,
+        Err(error) => {
+            tracing::warn!(error = %error, "tunnel stream rejected");
+            reject_stream(send, recv, 0x205);
+            return;
+        }
+    };
+    let tcp = match tokio::time::timeout(TCP_CONNECT_TIMEOUT, TcpStream::connect(target)).await {
+        Ok(Ok(stream)) => stream,
+        Ok(Err(error)) => {
+            tracing::warn!(error = %error, target = %target, "tunnel target unreachable");
+            reject_stream(send, recv, 0x204);
+            return;
+        }
+        Err(_) => {
+            tracing::warn!(target = %target, "tunnel target connect timed out");
+            reject_stream(send, recv, 0x204);
+            return;
+        }
+    };
+    if let Err(error) = copy_tunnel(send, recv, tcp).await {
+        tracing::debug!(error = %error, "tunnel stream copy ended");
+    }
+}
+
+fn reject_stream(
+    mut send: iroh::endpoint::SendStream,
+    mut recv: iroh::endpoint::RecvStream,
+    code: u32,
+) {
+    let code = VarInt::from_u32(code);
+    let _ = send.reset(code);
+    let _ = recv.stop(code);
+}
+
+/// Runs the dialing side: a local TCP listener whose connections are carried
+/// as independent streams over one persistent authenticated Iroh connection
+/// to the pinned peer. The relay mode must match the serving side.
 ///
 /// # Errors
 ///
@@ -285,6 +383,15 @@ pub async fn run_forward(
     let endpoint = bind_endpoint(secret_key, relay_mode).await?;
     let listener = TcpListener::bind(listen).await?;
     let limiter = ConnectionLimiter::formal();
+    let outer = SharedPeerConnection::new(endpoint, peer);
+    run_forward_listener(listener, limiter, outer).await
+}
+
+async fn run_forward_listener(
+    listener: TcpListener,
+    limiter: ConnectionLimiter,
+    outer: SharedPeerConnection,
+) -> Result<(), std::io::Error> {
     loop {
         let (tcp, peer_addr) = listener.accept().await?;
         let admission = match limiter.admit("forward") {
@@ -298,8 +405,7 @@ pub async fn run_forward(
                 continue;
             }
         };
-        let endpoint = endpoint.clone();
-        let peer = peer.clone();
+        let outer = outer.clone();
         let limiter = limiter.clone();
         tokio::spawn(async move {
             let _permit = match limiter.acquire_admitted("forward", admission).await {
@@ -313,11 +419,228 @@ pub async fn run_forward(
                     return;
                 }
             };
-            if let Err(error) = forward_one(&endpoint, peer, tcp).await {
+            if let Err(error) = forward_one(&outer, tcp).await {
                 tracing::warn!(error = %error, peer = %peer_addr, "tunnel forward connection failed");
             }
         });
     }
+}
+
+#[derive(Clone, Debug)]
+struct SharedPeerConnection {
+    endpoint: Endpoint,
+    peer: EndpointAddr,
+    state: Arc<Mutex<OuterConnectionState>>,
+    connect_gate: Arc<Mutex<()>>,
+}
+
+#[derive(Clone, Debug)]
+struct OuterConnection {
+    generation: usize,
+    connection: Connection,
+}
+
+#[derive(Debug, Default)]
+struct OuterConnectionState {
+    connection: Option<OuterConnection>,
+    attempts: usize,
+    last_generation: usize,
+    last_failure: Option<OuterConnectionFailure>,
+}
+
+#[derive(Debug)]
+struct OuterConnectionFailure {
+    observed_at: tokio::time::Instant,
+    kind: std::io::ErrorKind,
+    message: String,
+}
+
+impl SharedPeerConnection {
+    fn new(endpoint: Endpoint, peer: EndpointAddr) -> Self {
+        Self {
+            endpoint,
+            peer,
+            state: Arc::new(Mutex::new(OuterConnectionState::default())),
+            connect_gate: Arc::new(Mutex::new(())),
+        }
+    }
+
+    async fn get(&self) -> Result<OuterConnection, std::io::Error> {
+        let deadline = tokio::time::Instant::now() + IROH_CONNECT_TIMEOUT;
+        {
+            let mut state = tokio::time::timeout_at(deadline, self.state.lock())
+                .await
+                .map_err(|_| timed_out("tunnel outer connection state check timed out"))?;
+            if let Some(existing) = Self::existing(&mut state) {
+                return existing;
+            }
+        }
+
+        // Only this dedicated gate spans the network operation. State and
+        // generation invalidation remain immediately available to copy tasks.
+        let _singleflight = tokio::time::timeout_at(deadline, self.connect_gate.lock())
+            .await
+            .map_err(|_| timed_out("tunnel outer connection single-flight timed out"))?;
+        let (attempt, reconnect) = {
+            let mut state = tokio::time::timeout_at(deadline, self.state.lock())
+                .await
+                .map_err(|_| timed_out("tunnel outer connection state check timed out"))?;
+            if let Some(existing) = Self::existing(&mut state) {
+                return existing;
+            }
+            state.attempts = state.attempts.saturating_add(1);
+            (state.attempts, state.attempts > 1)
+        };
+        tracing::info!(
+            direction = "forward",
+            outer_connection_attempt = attempt,
+            reconnect,
+            "tunnel outer connection attempt started"
+        );
+        let connected = tokio::time::timeout_at(
+            deadline,
+            self.endpoint.connect(self.peer.clone(), TUNNEL_ALPN),
+        )
+        .await;
+        let connection = match connected {
+            Ok(Ok(connection)) => connection,
+            Ok(Err(error)) => {
+                let message = format!("tunnel outer connection attempt failed: {error}");
+                self.record_failure(std::io::ErrorKind::Other, message.clone())
+                    .await;
+                tracing::warn!(
+                    direction = "forward",
+                    outer_connection_attempt = attempt,
+                    reconnect,
+                    error = %error,
+                    "tunnel outer connection attempt failed"
+                );
+                return Err(std::io::Error::other(message));
+            }
+            Err(_) => {
+                let message = "tunnel outer connection attempt timed out";
+                self.record_failure(std::io::ErrorKind::TimedOut, message.to_owned())
+                    .await;
+                tracing::warn!(
+                    direction = "forward",
+                    outer_connection_attempt = attempt,
+                    reconnect,
+                    "tunnel outer connection attempt timed out"
+                );
+                return Err(timed_out(message));
+            }
+        };
+        if connection.remote_id() != self.peer.id {
+            connection.close(VarInt::from_u32(0x201), b"tunnel peer identity mismatch");
+            self.record_failure(
+                std::io::ErrorKind::InvalidInput,
+                "tunnel peer identity mismatch".to_owned(),
+            )
+            .await;
+            return Err(invalid("tunnel peer identity mismatch"));
+        }
+
+        let mut state = self.state.lock().await;
+        state.last_failure = None;
+        state.last_generation = state.last_generation.saturating_add(1);
+        let established = OuterConnection {
+            generation: state.last_generation,
+            connection,
+        };
+        tracing::info!(
+            direction = "forward",
+            outer_connection_attempt = attempt,
+            outer_connection_generation = established.generation,
+            outer_connection_id = established.connection.stable_id(),
+            reconnect,
+            "tunnel outer connection established"
+        );
+        state.connection = Some(established.clone());
+        Ok(established)
+    }
+
+    fn existing(
+        state: &mut OuterConnectionState,
+    ) -> Option<Result<OuterConnection, std::io::Error>> {
+        if let Some(cached) = state.connection.as_ref()
+            && cached.connection.close_reason().is_none()
+        {
+            tracing::debug!(
+                direction = "forward",
+                outer_connection_generation = cached.generation,
+                outer_connection_id = cached.connection.stable_id(),
+                "tunnel outer connection reused"
+            );
+            return Some(Ok(cached.clone()));
+        }
+        if let Some(stale) = state.connection.take() {
+            tracing::info!(
+                direction = "forward",
+                outer_connection_generation = stale.generation,
+                outer_connection_id = stale.connection.stable_id(),
+                reason = ?stale.connection.close_reason(),
+                "tunnel outer connection invalidated"
+            );
+        }
+        let failure = state.last_failure.as_ref()?;
+        let age = tokio::time::Instant::now().saturating_duration_since(failure.observed_at);
+        if age >= IROH_RECONNECT_FAILURE_BACKOFF {
+            return None;
+        }
+        tracing::warn!(
+            direction = "forward",
+            outer_connection_attempt = state.attempts,
+            retry_after_ms = u64::try_from(
+                IROH_RECONNECT_FAILURE_BACKOFF
+                    .saturating_sub(age)
+                    .as_millis()
+            )
+            .unwrap_or(u64::MAX),
+            "tunnel outer connection retry coalesced"
+        );
+        Some(Err(std::io::Error::new(
+            failure.kind,
+            failure.message.clone(),
+        )))
+    }
+
+    async fn record_failure(&self, kind: std::io::ErrorKind, message: String) {
+        self.state.lock().await.last_failure = Some(OuterConnectionFailure {
+            observed_at: tokio::time::Instant::now(),
+            kind,
+            message,
+        });
+    }
+
+    async fn invalidate(&self, candidate: &OuterConnection, reason: &'static str) {
+        let mut guard = self.state.lock().await;
+        let is_current = guard.connection.as_ref().is_some_and(|current| {
+            current.generation == candidate.generation
+                && current.connection.stable_id() == candidate.connection.stable_id()
+        });
+        if is_current {
+            guard.connection = None;
+            tracing::info!(
+                direction = "forward",
+                outer_connection_generation = candidate.generation,
+                outer_connection_id = candidate.connection.stable_id(),
+                reason,
+                "tunnel outer connection invalidated"
+            );
+        } else {
+            tracing::debug!(
+                direction = "forward",
+                outer_connection_generation = candidate.generation,
+                outer_connection_id = candidate.connection.stable_id(),
+                reason,
+                "stale tunnel outer connection invalidation ignored"
+            );
+        }
+    }
+}
+
+fn timed_out(message: &str) -> std::io::Error {
+    std::io::Error::new(std::io::ErrorKind::TimedOut, message.to_owned())
 }
 
 #[derive(Clone, Debug)]
@@ -519,6 +842,7 @@ impl ConnectionLimiter {
         }
     }
 
+    #[cfg(test)]
     async fn acquire(
         &self,
         direction: &'static str,
@@ -528,50 +852,58 @@ impl ConnectionLimiter {
     }
 }
 
-async fn forward_one(
-    endpoint: &Endpoint,
-    peer: EndpointAddr,
-    tcp: TcpStream,
-) -> Result<(), std::io::Error> {
-    let connect = tokio::time::timeout(
-        IROH_CONNECT_TIMEOUT,
-        endpoint.connect(peer.clone(), TUNNEL_ALPN),
-    );
-    let connection = connect
-        .await
-        .map_err(|_| invalid("tunnel peer connect timed out"))?
-        .map_err(|error| std::io::Error::other(format!("tunnel peer connect failed: {error}")))?;
-    if connection.remote_id() != peer.id {
-        return Err(invalid("tunnel peer identity mismatch"));
-    }
-    let stream = tokio::time::timeout(STREAM_HANDSHAKE_TIMEOUT, connection.open_bi()).await;
+async fn forward_one(outer: &SharedPeerConnection, tcp: TcpStream) -> Result<(), std::io::Error> {
+    let established = outer.get().await?;
+    let stream =
+        tokio::time::timeout(STREAM_HANDSHAKE_TIMEOUT, established.connection.open_bi()).await;
     let (send, recv) = match stream {
         Ok(Ok(stream)) => stream,
         Ok(Err(error)) => {
+            outer
+                .invalidate(&established, "tunnel stream open failed")
+                .await;
             return Err(std::io::Error::other(format!(
                 "tunnel stream open failed: {error}"
             )));
         }
-        Err(_) => return Err(invalid("tunnel stream open timed out")),
+        Err(_) => {
+            return Err(timed_out("tunnel stream open timed out"));
+        }
     };
-    copy_tunnel(send, recv, tcp).await;
-    Ok(())
+    let copied = copy_tunnel(send, recv, tcp).await;
+    if established.connection.close_reason().is_some() {
+        outer
+            .invalidate(&established, "tunnel outer connection closed during copy")
+            .await;
+    }
+    copied
 }
 
 async fn copy_tunnel(
     mut send: iroh::endpoint::SendStream,
     mut recv: iroh::endpoint::RecvStream,
     tcp: TcpStream,
-) {
+) -> Result<(), std::io::Error> {
     let (mut tcp_read, mut tcp_write) = tcp.into_split();
     let upstream = pump_tcp_to_stream(&mut tcp_read, &mut send);
     let downstream = pump_stream_to_tcp(&mut recv, &mut tcp_write);
-    let (upstream, downstream) = tokio::join!(upstream, downstream);
-    if let Err(error) = upstream {
-        tracing::debug!(error = %error, "tunnel upstream copy ended");
-    }
-    if let Err(error) = downstream {
-        tracing::debug!(error = %error, "tunnel downstream copy ended");
+    tokio::pin!(upstream);
+    tokio::pin!(downstream);
+    tokio::select! {
+        result = &mut upstream => match result {
+            Ok(()) => downstream.await,
+            Err(error) => {
+                tracing::debug!(error = %error, "tunnel upstream copy failed");
+                Err(error)
+            }
+        },
+        result = &mut downstream => match result {
+            Ok(()) => upstream.await,
+            Err(error) => {
+                tracing::debug!(error = %error, "tunnel downstream copy failed");
+                Err(error)
+            }
+        },
     }
 }
 
@@ -849,6 +1181,24 @@ mod tests {
         assert_eq!(received, ping);
         drop(tunnel_tcp);
 
+        // A clean local half-close must still allow the reverse pump to
+        // deliver the echo before the tunnel stream reaches EOF.
+        let mut half_closed = tokio::time::timeout(STAGE_TIMEOUT, TcpStream::connect(forward_addr))
+            .await
+            .expect("half-close tunnel listener stage timed out")
+            .unwrap();
+        half_closed.write_all(ping).await.unwrap();
+        half_closed.shutdown().await.unwrap();
+        let mut half_close_response = Vec::new();
+        tokio::time::timeout(
+            STAGE_TIMEOUT,
+            half_closed.read_to_end(&mut half_close_response),
+        )
+        .await
+        .expect("clean tunnel half-close did not finish")
+        .unwrap();
+        assert_eq!(half_close_response, ping);
+
         // The pinned server side must refuse a different peer: either the
         // connection is rejected outright or the first stream read fails.
         assert!(
@@ -884,7 +1234,22 @@ mod tests {
         clients
     }
 
+    async fn wait_for_no_flows(limiter: &ConnectionLimiter) {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let snapshot = limiter.snapshot();
+                if snapshot.in_use == 0 && snapshot.queued == 0 {
+                    return;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("tunnel flow permits did not release");
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[allow(clippy::too_many_lines)]
     async fn carries_the_formal_transition_connection_budget() {
         const STAGE_TIMEOUT: Duration = Duration::from_secs(45);
         const ENROLLMENT_CONNECTIONS: usize =
@@ -912,13 +1277,17 @@ mod tests {
         });
 
         let (server_key, client_key) = (SecretKey::generate(), SecretKey::generate());
+        let server_limiter = ConnectionLimiter::formal();
+        let metrics = OuterConnectionMetrics::default();
         let router = tokio::time::timeout(
             STAGE_TIMEOUT,
-            serve(
+            serve_with_components(
                 server_key,
                 RelayMode::Disabled,
                 client_key.public(),
                 echo_addr,
+                server_limiter,
+                metrics.clone(),
             ),
         )
         .await
@@ -926,16 +1295,21 @@ mod tests {
         .unwrap();
         let server_addr = router.endpoint().addr();
 
-        let reserved = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let forward_addr = reserved.local_addr().unwrap();
-        drop(reserved);
-        let forward = tokio::spawn(run_forward(
-            client_key,
-            RelayMode::Disabled,
-            server_addr,
-            forward_addr,
+        let endpoint = tokio::time::timeout(
+            STAGE_TIMEOUT,
+            bind_endpoint(client_key, RelayMode::Disabled),
+        )
+        .await
+        .expect("tunnel forward endpoint stage timed out")
+        .unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let forward_addr = listener.local_addr().unwrap();
+        let outer = SharedPeerConnection::new(endpoint, server_addr);
+        let forward = tokio::spawn(run_forward_listener(
+            listener,
+            ConnectionLimiter::formal(),
+            outer.clone(),
         ));
-        tokio::time::sleep(Duration::from_millis(300)).await;
 
         // Hold the entire enrollment generation first, then prove the later
         // runtime/transportd/control generation can still enter and echo. This
@@ -958,6 +1332,19 @@ mod tests {
         .await
         .expect("runtime-generation connections timed out");
         assert_eq!(runtime_clients.len(), RUNTIME_CONNECTIONS);
+        {
+            let state = outer.state.lock().await;
+            assert_eq!(
+                state.attempts, 1,
+                "205 flows must dial one outer QUIC connection"
+            );
+            assert_eq!(state.last_generation, 1);
+        }
+        assert_eq!(
+            metrics.accepted.load(Ordering::Acquire),
+            1,
+            "the server must accept one outer QUIC connection for 205 flows"
+        );
 
         // A fully closed enrollment generation must drain while the runtime
         // generation stays live. Opening an immediate replacement generation
@@ -976,9 +1363,217 @@ mod tests {
         .await
         .expect("closed enrollment generation did not drain before replacement");
         assert_eq!(replacement_clients.len(), ENROLLMENT_CONNECTIONS);
+        {
+            let state = outer.state.lock().await;
+            assert_eq!(
+                state.attempts, 1,
+                "replacement flows must reuse the outer connection"
+            );
+            assert_eq!(state.last_generation, 1);
+        }
+        assert_eq!(metrics.accepted.load(Ordering::Acquire), 1);
 
         drop(replacement_clients);
         drop(runtime_clients);
+        forward.abort();
+        let _ = tokio::time::timeout(STAGE_TIMEOUT, router.shutdown()).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[allow(clippy::too_many_lines)]
+    async fn outer_failure_reconnects_once_and_copy_error_releases() {
+        const STAGE_TIMEOUT: Duration = Duration::from_secs(20);
+
+        let echo = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let echo_addr = echo.local_addr().unwrap();
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut stream, _)) = echo.accept().await else {
+                    return;
+                };
+                tokio::spawn(async move {
+                    let (mut read, mut write) = stream.split();
+                    let _ = tokio::io::copy(&mut read, &mut write).await;
+                });
+            }
+        });
+
+        let (server_key, client_key) = (SecretKey::generate(), SecretKey::generate());
+        let server_limiter = ConnectionLimiter::with_limits(32, 8, Duration::from_secs(1));
+        let metrics = OuterConnectionMetrics::default();
+        let router = tokio::time::timeout(
+            STAGE_TIMEOUT,
+            serve_with_components(
+                server_key,
+                RelayMode::Disabled,
+                client_key.public(),
+                echo_addr,
+                server_limiter.clone(),
+                metrics.clone(),
+            ),
+        )
+        .await
+        .expect("tunnel serve stage timed out")
+        .unwrap();
+
+        let endpoint = tokio::time::timeout(
+            STAGE_TIMEOUT,
+            bind_endpoint(client_key, RelayMode::Disabled),
+        )
+        .await
+        .expect("tunnel forward endpoint stage timed out")
+        .unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let forward_addr = listener.local_addr().unwrap();
+        let outer = SharedPeerConnection::new(endpoint, router.endpoint().addr());
+        let forward_limiter = ConnectionLimiter::with_limits(32, 8, Duration::from_secs(1));
+        let forward = tokio::spawn(run_forward_listener(
+            listener,
+            forward_limiter.clone(),
+            outer.clone(),
+        ));
+
+        let mut original =
+            tokio::time::timeout(STAGE_TIMEOUT, open_tunnel_clients(forward_addr, 0..1))
+                .await
+                .expect("initial tunnel flow timed out")
+                .pop()
+                .unwrap();
+        let first_generation = {
+            let state = outer.state.lock().await;
+            assert_eq!(state.attempts, 1);
+            assert_eq!(state.last_generation, 1);
+            state.connection.clone().unwrap()
+        };
+        assert_eq!(metrics.accepted.load(Ordering::Acquire), 1);
+
+        first_generation
+            .connection
+            .close(VarInt::from_u32(0x2ff), b"test outer failure");
+        let mut byte = [0_u8; 1];
+        let closed = tokio::time::timeout(STAGE_TIMEOUT, original.read(&mut byte))
+            .await
+            .expect("local flow did not close after the outer connection failed");
+        assert!(
+            matches!(closed, Ok(0) | Err(_)),
+            "closed outer connection unexpectedly delivered application data"
+        );
+        drop(original);
+        wait_for_no_flows(&forward_limiter).await;
+        wait_for_no_flows(&server_limiter).await;
+
+        // A concurrent replacement burst must share one reconnect attempt and
+        // establish exactly one new generation.
+        let replacements =
+            tokio::time::timeout(STAGE_TIMEOUT, open_tunnel_clients(forward_addr, 1..17))
+                .await
+                .expect("replacement flows did not reconnect");
+        {
+            let state = outer.state.lock().await;
+            assert_eq!(state.attempts, 2, "reconnect must be single-flight");
+            assert_eq!(state.last_generation, 2);
+            assert_eq!(state.connection.as_ref().unwrap().generation, 2);
+        }
+        assert_eq!(metrics.accepted.load(Ordering::Acquire), 2);
+
+        // A late failure from generation one must not evict generation two.
+        outer
+            .invalidate(&first_generation, "test stale generation")
+            .await;
+        let extra = tokio::time::timeout(STAGE_TIMEOUT, open_tunnel_clients(forward_addr, 17..18))
+            .await
+            .expect("post-invalidation tunnel flow timed out");
+        {
+            let state = outer.state.lock().await;
+            assert_eq!(state.attempts, 2);
+            assert_eq!(state.connection.as_ref().unwrap().generation, 2);
+        }
+        assert_eq!(metrics.accepted.load(Ordering::Acquire), 2);
+
+        drop(extra);
+        drop(replacements);
+        forward.abort();
+        let _ = tokio::time::timeout(STAGE_TIMEOUT, router.shutdown()).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn target_failure_rejects_only_its_stream() {
+        const STAGE_TIMEOUT: Duration = Duration::from_secs(20);
+
+        let reservation = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let target = reservation.local_addr().unwrap();
+        drop(reservation);
+        let (server_key, client_key) = (SecretKey::generate(), SecretKey::generate());
+        let server_limiter = ConnectionLimiter::with_limits(4, 2, Duration::from_secs(1));
+        let metrics = OuterConnectionMetrics::default();
+        let router = tokio::time::timeout(
+            STAGE_TIMEOUT,
+            serve_with_components(
+                server_key,
+                RelayMode::Disabled,
+                client_key.public(),
+                target,
+                server_limiter.clone(),
+                metrics.clone(),
+            ),
+        )
+        .await
+        .expect("tunnel serve stage timed out")
+        .unwrap();
+
+        let endpoint = tokio::time::timeout(
+            STAGE_TIMEOUT,
+            bind_endpoint(client_key, RelayMode::Disabled),
+        )
+        .await
+        .expect("tunnel forward endpoint stage timed out")
+        .unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let forward_addr = listener.local_addr().unwrap();
+        let outer = SharedPeerConnection::new(endpoint, router.endpoint().addr());
+        let forward = tokio::spawn(run_forward_listener(
+            listener,
+            ConnectionLimiter::with_limits(4, 2, Duration::from_secs(1)),
+            outer.clone(),
+        ));
+
+        let mut rejected = TcpStream::connect(forward_addr).await.unwrap();
+        rejected.write_all(b"activate stream").await.unwrap();
+        let mut byte = [0_u8; 1];
+        let rejected_read = tokio::time::timeout(STAGE_TIMEOUT, rejected.read(&mut byte))
+            .await
+            .expect("target failure did not terminate its tunnel stream");
+        assert!(matches!(rejected_read, Ok(0) | Err(_)));
+        drop(rejected);
+        wait_for_no_flows(&server_limiter).await;
+
+        let echo = TcpListener::bind(target).await.unwrap();
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut stream, _)) = echo.accept().await else {
+                    return;
+                };
+                tokio::spawn(async move {
+                    let (mut read, mut write) = stream.split();
+                    let _ = tokio::io::copy(&mut read, &mut write).await;
+                });
+            }
+        });
+        let healthy = tokio::time::timeout(STAGE_TIMEOUT, open_tunnel_clients(forward_addr, 0..1))
+            .await
+            .expect("healthy replacement tunnel flow timed out");
+        {
+            let state = outer.state.lock().await;
+            assert_eq!(state.attempts, 1);
+            assert_eq!(state.last_generation, 1);
+        }
+        assert_eq!(
+            metrics.accepted.load(Ordering::Acquire),
+            1,
+            "a target failure must not close the healthy outer connection"
+        );
+
+        drop(healthy);
         forward.abort();
         let _ = tokio::time::timeout(STAGE_TIMEOUT, router.shutdown()).await;
     }

@@ -3780,6 +3780,7 @@ slo_limit() {
   tunnel_control_connections="$(awk '$2 == "G6_RELAY_TUNNEL_CONTROL_CONNECTIONS:" {gsub(/;/, "", $5); print $5}' "${G6_TUNNEL_LIB}")"
   tunnel_capacity="$(awk '$2 == "MAX_TUNNEL_CONNECTIONS:" {gsub(/;/, "", $5); print $5}' "${G6_TUNNEL_LIB}")"
   tunnel_queue_capacity="$(awk '$2 == "MAX_TUNNEL_QUEUED_CONNECTIONS:" {gsub(/;/, "", $5); print $5}' "${G6_TUNNEL_LIB}")"
+  tunnel_stream_capacity="$(awk '$2 == "MAX_TUNNEL_STREAMS:" {gsub(/;/, "", $5); print $5}' "${G6_TUNNEL_LIB}")"
   [[ "${tunnel_agents_per_fd}" == "${default_a}" \
     && "${tunnel_agents_per_fd}" == "${default_b}" \
     && "${tunnel_enrollment_endpoints}" == "${tunnel_agents_per_fd}" ]] || {
@@ -3791,7 +3792,9 @@ slo_limit() {
     && tunnel_capacity >= required_tunnel_capacity \
     && tunnel_capacity == 256 \
     && tunnel_queue_capacity > 0 \
-    && tunnel_queue_capacity <= tunnel_capacity)) || {
+    && tunnel_queue_capacity <= tunnel_capacity \
+    && tunnel_stream_capacity == 320 \
+    && tunnel_stream_capacity >= tunnel_capacity + tunnel_queue_capacity)) || {
     echo "the bounded G6 tunnel cannot carry the formal relay failover burst" >&2
     exit 1
   }
@@ -3806,6 +3809,16 @@ slo_limit() {
       && grep -Fq 'high_water = snapshot.high_water' "${G6_TUNNEL_LIB}"
   }; then
     echo "the G6 tunnel no longer emits structured saturation diagnostics" >&2
+    exit 1
+  fi
+  tunnel_handler="$(sed -n '/^impl ProtocolHandler for ForwardHandler {/,/^async fn serve_stream(/p' "${G6_TUNNEL_LIB}")"
+  if [[ "$(grep -Fc 'self.endpoint.connect(self.peer.clone(), TUNNEL_ALPN)' "${G6_TUNNEL_LIB}")" != 1 \
+    || "$(grep -Ec 'endpoint\.connect\(' "${G6_TUNNEL_LIB}")" != 1 \
+    || "$(grep -Fc '.max_concurrent_bidi_streams(VarInt::from_u32(MAX_TUNNEL_STREAMS))' "${G6_TUNNEL_LIB}")" != 1 \
+    || "$(grep -Fc 'stream = connection.accept_bi() =>' <<<"${tunnel_handler}")" != 1 \
+    || "$(grep -Fc 'self.limiter.admit("serve")' <<<"${tunnel_handler}")" != 1 \
+    || "$(grep -Fc 'connection.close(' <<<"${tunnel_handler}")" != 1 ]]; then
+    echo "the G6 tunnel must multiplex local TCP flows over one authenticated outer connection" >&2
     exit 1
   fi
   [[ "${default_total}" == "$(slo_limit authorized_real_agents)" ]] || {
