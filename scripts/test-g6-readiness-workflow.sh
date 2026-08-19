@@ -23,6 +23,7 @@ SLO="${ROOT}/docs/acceptance/g6-slo.yaml"
 PROBE_DOCKERFILE="${ROOT}/rust/g6-probe.Dockerfile"
 TRANSPORT_DOCKERFILE="${ROOT}/rust/transportd.Dockerfile"
 TRANSPORT_LIB="${ROOT}/rust/crates/transportd/src/lib.rs"
+G6_TUNNEL_LIB="${ROOT}/rust/crates/g6-tunnel/src/lib.rs"
 RELAY_DOCKERFILE="${ROOT}/deploy/production/relay.Dockerfile"
 POSTGRES_INIT="${ROOT}/deploy/g6-readiness/postgres-init/001-g6-readiness.sh"
 OCSERV_FIXTURE="${ROOT}/deploy/g6-readiness/fake-ocserv/shims/ocserv"
@@ -385,6 +386,26 @@ if grep -q 'exec as_agent' "${SUPERVISOR}"; then
   echo "the agent supervisor must not ask exec to resolve a shell function" >&2
   exit 1
 fi
+controller_address_helper="$(sed -n '/^fn controller_address(/,/^}/p' "${AGENT_MAIN}")"
+for token in \
+  'EndpointAddr::new(controller)' \
+  'if let RelayMode::Custom(relays) = relay_mode' \
+  'address.with_relay_url(relay)'; do
+  grep -qF "${token}" <<<"${controller_address_helper}" || {
+    echo "dedicated relay addressing no longer supplies the controller hint: ${token}" >&2
+    exit 1
+  }
+done
+grep -qF 'let controller = controller_address(controller, &config.relay_mode);' \
+  "${AGENT_MAIN}" || {
+  echo "the Agent runtime must bind controller redial to its dedicated relay hints" >&2
+  exit 1
+}
+grep -A8 'let connection = endpoint' "${AGENT_MAIN}" \
+  | grep -qF 'controller_address(controller, &config.relay_mode)' || {
+  echo "Agent enrollment must bind controller dialing to its dedicated relay hints" >&2
+  exit 1
+}
 prepare_mode="$(sed -n '/^prepare)/,/^    ;;/p' "${SUPERVISOR}")"
 grep -q 'agent_identity_args.*--prepare-enrollment' <<<"${prepare_mode}" || {
   echo "enrollment preparation must use only identity and controller arguments" >&2
@@ -3750,6 +3771,21 @@ slo_limit() {
   default_total="$(g6rd_total_agent_count)"
   [[ "${default_a}" == 25 && "${default_b}" == 25 && "${default_total}" == 50 ]] || {
     echo "the formal G6 fleet must default to exactly 25+25=50 Agents" >&2
+    exit 1
+  }
+  tunnel_agents_per_fd="$(awk '$2 == "G6_FORMAL_AGENTS_PER_FAILURE_DOMAIN:" {gsub(/;/, "", $5); print $5}' "${G6_TUNNEL_LIB}")"
+  tunnel_support_endpoints="$(awk '$2 == "G6_RELAY_SUPPORT_ENDPOINTS_PER_FAILURE_DOMAIN:" {gsub(/;/, "", $5); print $5}' "${G6_TUNNEL_LIB}")"
+  tunnel_burst_per_endpoint="$(awk '$2 == "G6_RELAY_TCP_BURST_PER_ENDPOINT:" {gsub(/;/, "", $5); print $5}' "${G6_TUNNEL_LIB}")"
+  tunnel_control_connections="$(awk '$2 == "G6_RELAY_TUNNEL_CONTROL_CONNECTIONS:" {gsub(/;/, "", $5); print $5}' "${G6_TUNNEL_LIB}")"
+  tunnel_capacity="$(awk '$2 == "MAX_TUNNEL_CONNECTIONS:" {gsub(/;/, "", $5); print $5}' "${G6_TUNNEL_LIB}")"
+  [[ "${tunnel_agents_per_fd}" == "${default_a}" \
+    && "${tunnel_agents_per_fd}" == "${default_b}" ]] || {
+    echo "the G6 tunnel capacity budget no longer matches the formal per-domain fleet" >&2
+    exit 1
+  }
+  required_tunnel_capacity="$(((tunnel_agents_per_fd + tunnel_support_endpoints) * tunnel_burst_per_endpoint + tunnel_control_connections))"
+  ((tunnel_capacity >= required_tunnel_capacity && tunnel_capacity <= 128)) || {
+    echo "the bounded G6 tunnel cannot carry the formal relay failover burst" >&2
     exit 1
   }
   [[ "${default_total}" == "$(slo_limit authorized_real_agents)" ]] || {

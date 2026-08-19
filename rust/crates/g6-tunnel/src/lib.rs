@@ -29,7 +29,20 @@ use zeroize::Zeroizing;
 /// ALPN of the G6 harness tunnel.
 pub const TUNNEL_ALPN: &[u8] = b"ocserv-platform/g6-tunnel/1";
 
-const MAX_TUNNEL_CONNECTIONS: usize = 32;
+// One surviving cross-domain relay carries the remote failure domain's 25
+// Agents plus transportd. The pinned Iroh net-report schedule can overlap
+// three staggered HTTPS probes with each endpoint's persistent relay socket;
+// one extra connection keeps the harness readiness/control path available.
+const G6_FORMAL_AGENTS_PER_FAILURE_DOMAIN: usize = 25;
+const G6_RELAY_SUPPORT_ENDPOINTS_PER_FAILURE_DOMAIN: usize = 1;
+const G6_RELAY_TCP_BURST_PER_ENDPOINT: usize = 4;
+const G6_RELAY_TUNNEL_CONTROL_CONNECTIONS: usize = 1;
+const REQUIRED_G6_RELAY_TUNNEL_CONNECTIONS: usize = (G6_FORMAL_AGENTS_PER_FAILURE_DOMAIN
+    + G6_RELAY_SUPPORT_ENDPOINTS_PER_FAILURE_DOMAIN)
+    * G6_RELAY_TCP_BURST_PER_ENDPOINT
+    + G6_RELAY_TUNNEL_CONTROL_CONNECTIONS;
+const MAX_TUNNEL_CONNECTIONS: usize = 128;
+const _: () = assert!(MAX_TUNNEL_CONNECTIONS >= REQUIRED_G6_RELAY_TUNNEL_CONNECTIONS);
 const MAX_TUNNEL_STREAMS: u32 = 8;
 const STREAM_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(30);
 const IROH_CONNECT_TIMEOUT: Duration = Duration::from_secs(90);
@@ -438,6 +451,12 @@ mod tests {
         assert!(parse_node_id_hex(&format!("{encoded}00")).is_err());
     }
 
+    #[test]
+    fn formal_relay_burst_fits_bounded_tunnel_capacity() {
+        assert_eq!(REQUIRED_G6_RELAY_TUNNEL_CONNECTIONS, 105);
+        assert_eq!(MAX_TUNNEL_CONNECTIONS, 128);
+    }
+
     /// Dials the pinned server with a stranger key and reports whether any
     /// tunnel application data could be received: a stranger that cannot even
     /// connect never receives tunnel data.
@@ -550,6 +569,83 @@ mod tests {
             "unpinned peer must not receive tunnel data"
         );
 
+        forward.abort();
+        let _ = tokio::time::timeout(STAGE_TIMEOUT, router.shutdown()).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn carries_more_than_legacy_connection_limit() {
+        const STAGE_TIMEOUT: Duration = Duration::from_secs(30);
+        // Forty held-open connections exercise the real forwarding path past
+        // the former limit of 32. The compile-time budget above locks the
+        // complete 105-connection formal burst without making this hermetic
+        // behavior test perform 105 simultaneous QUIC handshakes.
+        const CAPACITY_REGRESSION_CONNECTIONS: usize = 40;
+
+        let echo = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let echo_addr = echo.local_addr().unwrap();
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut stream, _)) = echo.accept().await else {
+                    return;
+                };
+                tokio::spawn(async move {
+                    let (mut read, mut write) = stream.split();
+                    let _ = tokio::io::copy(&mut read, &mut write).await;
+                });
+            }
+        });
+
+        let (server_key, client_key) = (SecretKey::generate(), SecretKey::generate());
+        let router = tokio::time::timeout(
+            STAGE_TIMEOUT,
+            serve(
+                server_key,
+                RelayMode::Disabled,
+                client_key.public(),
+                echo_addr,
+            ),
+        )
+        .await
+        .expect("tunnel serve stage timed out")
+        .unwrap();
+        let server_addr = router.endpoint().addr();
+
+        let reserved = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let forward_addr = reserved.local_addr().unwrap();
+        drop(reserved);
+        let forward = tokio::spawn(run_forward(
+            client_key,
+            RelayMode::Disabled,
+            server_addr,
+            forward_addr,
+        ));
+        tokio::time::sleep(Duration::from_millis(300)).await;
+
+        let clients = tokio::time::timeout(STAGE_TIMEOUT, async move {
+            let mut connects = tokio::task::JoinSet::new();
+            for index in 0..CAPACITY_REGRESSION_CONNECTIONS {
+                connects.spawn(async move {
+                    let mut stream = TcpStream::connect(forward_addr).await.unwrap();
+                    let ping = u64::try_from(index).unwrap().to_be_bytes();
+                    stream.write_all(&ping).await.unwrap();
+                    let mut received = [0_u8; 8];
+                    stream.read_exact(&mut received).await.unwrap();
+                    assert_eq!(received, ping);
+                    stream
+                });
+            }
+            let mut clients = Vec::with_capacity(CAPACITY_REGRESSION_CONNECTIONS);
+            while let Some(client) = connects.join_next().await {
+                clients.push(client.expect("tunnel client task failed"));
+            }
+            clients
+        })
+        .await
+        .expect("connection-limit regression timed out");
+        assert_eq!(clients.len(), CAPACITY_REGRESSION_CONNECTIONS);
+
+        drop(clients);
         forward.abort();
         let _ = tokio::time::timeout(STAGE_TIMEOUT, router.shutdown()).await;
     }

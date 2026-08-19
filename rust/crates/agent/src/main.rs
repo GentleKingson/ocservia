@@ -95,9 +95,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let transport = QuicTransportConfig::builder()
         .max_concurrent_bidi_streams(VarInt::from_u32(u32::try_from(MAX_WRITE_QUEUE)?))
         .build();
-    // The CLI receives the controller's stable endpoint ID, so the production
-    // endpoint must retain N0 address discovery instead of requiring an
-    // out-of-band direct or relay address.
+    // The EndpointID remains the authenticated controller identity. Dedicated
+    // relay URLs are also safe addressing hints and keep redial independent of
+    // public address discovery during a relay or network-domain transition.
+    let controller = controller_address(controller, &config.relay_mode);
     let boot_id = ocservia_agent::read_boot_id().await?;
     let os_release = ocservia_agent::read_os_release().await?;
     let agent_instance_id = Uuid::now_v7();
@@ -140,7 +141,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                 synthetic_barrier_file: config.synthetic_barrier_file.as_deref(),
                 startup_observations: &mut startup_observations,
             };
-            match connect_once(&endpoint, EndpointAddr::new(controller), &mut session).await {
+            match connect_once(&endpoint, controller.clone(), &mut session).await {
                 Ok(()) => attempt = 0,
                 Err(error) => {
                     tracing::warn!(error = %error, attempt, "controller connection ended");
@@ -235,7 +236,10 @@ async fn enroll_agent(
     .await?;
     spawn_dedicated_relay_failover(&endpoint, &config.relay_mode);
     let connection = endpoint
-        .connect(EndpointAddr::new(controller), ENROLL_ALPN)
+        .connect(
+            controller_address(controller, &config.relay_mode),
+            ENROLL_ALPN,
+        )
         .await?;
     let mut request = EnrollRequest {
         token,
@@ -2122,6 +2126,16 @@ struct Config {
     synthetic_barrier_file: Option<PathBuf>,
 }
 
+fn controller_address(controller: EndpointId, relay_mode: &RelayMode) -> EndpointAddr {
+    let mut address = EndpointAddr::new(controller);
+    if let RelayMode::Custom(relays) = relay_mode {
+        for relay in relays.urls::<Vec<_>>() {
+            address = address.with_relay_url(relay);
+        }
+    }
+    address
+}
+
 /// Loads the PEM relay certificate authority as additional relay TLS roots.
 /// Deployments whose relays chain to public roots leave this unset.
 fn load_relay_tls_roots(
@@ -2641,6 +2655,41 @@ mod tests {
             relay_ca_file: None,
             synthetic_barrier_file: None,
         }
+    }
+
+    #[test]
+    fn custom_relays_are_controller_address_hints() {
+        let controller = iroh::SecretKey::from_bytes(&[7; 32]).public();
+        let relays = RelayMap::try_from_iter([
+            "https://relay-b.example.test",
+            "https://relay-a.example.test",
+        ])
+        .expect("relay map");
+        let address = controller_address(controller, &RelayMode::Custom(relays));
+        assert_eq!(address.id, controller);
+        assert_eq!(
+            address
+                .relay_urls()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>(),
+            vec![
+                "https://relay-a.example.test/",
+                "https://relay-b.example.test/"
+            ]
+        );
+        assert!(
+            address.ip_addrs().next().is_none(),
+            "dedicated relay hints must not invent a direct controller path"
+        );
+
+        assert!(
+            controller_address(controller, &RelayMode::Default).is_empty(),
+            "default relay mode must retain normal address discovery"
+        );
+        assert!(
+            controller_address(controller, &RelayMode::Disabled).is_empty(),
+            "relay-disabled mode must not gain an implicit controller path"
+        );
     }
 
     fn test_command_keyring() -> ControllerCommandKeyring {
