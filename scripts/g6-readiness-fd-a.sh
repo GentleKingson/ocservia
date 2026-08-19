@@ -859,13 +859,14 @@ phase_relay_rejoin_ready() {
     }
     trap relay_a_ready_restore_on_failure EXIT
     local out="${G6RD_OUTBOX}/relay-rejoin-ready"
+    local nodes_file="${G6RD_OUTBOX}/agents/nodes.tsv"
     local network default_network agent relay node ready_at temporary
     network="$(relay_a_only_network)"
     default_network="${COMPOSE_PROJECT}_default"
     agent="$(relay_a_only_agent_container)"
     relay="$(relay_a_only_relay_container)"
-    # shellcheck disable=SC2153  # NODES_FILE is initialized by the sourced library
-    node="$(awk -F'\t' '$1 == "g6-fd-a-01" {print $2; exit}' "${NODES_FILE}")"
+    require_file "${nodes_file}" || return 1
+    node="$(awk -F'\t' '$1 == "g6-fd-a-01" {print $2; exit}' "${nodes_file}")"
     [[ "${node}" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$ ]] || {
       echo "the selected relay Agent is missing from the managed inventory" >&2
       return 1

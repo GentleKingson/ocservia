@@ -2257,14 +2257,15 @@ relay_topology_failure_fixture="$(mktemp -d)"
   export G6RD_ENVIRONMENT_ID=g6-relayfixture
   export G6RD_CANDIDATE_SHA=1234567890123456789012345678901234567890
   export G6RD_OUTBOX="${relay_topology_failure_fixture}/outbox"
-  export NODES_FILE="${relay_topology_failure_fixture}/nodes.tsv"
-  mkdir -p "${G6RD_OUTBOX}"
+  nodes_file="${G6RD_OUTBOX}/agents/nodes.tsv"
+  mkdir -p "${G6RD_OUTBOX}/agents"
   printf 'g6-fd-a-01\t018fc001-0000-7000-8000-000000000001\t%s\n' \
-    "$(printf 'a%.0s' {1..64})" >"${NODES_FILE}"
+    "$(printf 'a%.0s' {1..64})" >"${nodes_file}"
   eval "$(sed -n '/^relay_a_only_network() {/,/^}/p' "${FD_A}")"
   eval "$(sed -n '/^relay_a_only_agent_service() {/,/^}/p' "${FD_A}")"
   eval "$(sed -n '/^relay_a_only_agent_container() {/,/^}/p' "${FD_A}")"
   eval "$(sed -n '/^relay_a_only_relay_container() {/,/^}/p' "${FD_A}")"
+  eval "$(sed -n '/^require_file() {/,/^}/p' "${FD_A}")"
   eval "${relay_ready_phase}"
   restore_log="${relay_topology_failure_fixture}/restore.log"
   relay_a_only_topology_restore() {
@@ -2292,6 +2293,65 @@ relay_topology_failure_fixture="$(mktemp -d)"
   }
 )
 rm -rf -- "${relay_topology_failure_fixture}"
+
+# Every workflow phase is a fresh process. Exercise the real dispatcher with
+# only its persisted Agent rendezvous, so a phase-local inventory assumption
+# cannot be hidden by variables exported from an earlier policy fixture.
+relay_dispatch_fixture="$(mktemp -d)"
+mkdir -p "${relay_dispatch_fixture}/bin" \
+  "${relay_dispatch_fixture}/runner-temp/g6-readiness-relay-dispatch-fd-a/outbox/agents"
+cat >"${relay_dispatch_fixture}/bin/timeout" <<'SHIM'
+#!/usr/bin/env bash
+set -euo pipefail
+[[ "${1:-}" == "--signal=TERM" ]] && shift
+[[ "${1:-}" == "--kill-after=5s" ]] && shift
+[[ "${1:-}" == "20s" ]] && shift
+exec "$@"
+SHIM
+cat >"${relay_dispatch_fixture}/bin/docker" <<'SHIM'
+#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' "$*" >>"${G6RD_TEST_DOCKER_LOG:?}"
+exit 42
+SHIM
+chmod +x "${relay_dispatch_fixture}/bin/timeout" \
+  "${relay_dispatch_fixture}/bin/docker"
+printf 'g6-fd-a-01\t018fc001-0000-7000-8000-000000000001\t%s\n' \
+  "$(printf 'a%.0s' {1..64})" \
+  >"${relay_dispatch_fixture}/runner-temp/g6-readiness-relay-dispatch-fd-a/outbox/agents/nodes.tsv"
+(
+  unset NODES_FILE
+  export PATH="${relay_dispatch_fixture}/bin:${PATH}"
+  export RUNNER_TEMP="${relay_dispatch_fixture}/runner-temp"
+  export RUN_ID=relay-dispatch-fd-a
+  export FD_ID=fd-a
+  export FD_ALIAS=fd-alpha
+  export G6_AUTHORITY=engineering
+  export G6RD_ENVIRONMENT_ID=g6-relaydispatch
+  export G6RD_CANDIDATE_SHA=1234567890123456789012345678901234567890
+  export G6RD_TEST_DOCKER_LOG="${relay_dispatch_fixture}/docker.log"
+  status=0
+  "${FD_A}" relay-rejoin-ready \
+    >"${relay_dispatch_fixture}/stdout.log" \
+    2>"${relay_dispatch_fixture}/stderr.log" || status=$?
+  [[ "${status}" != 0 ]] || {
+    echo "the relay readiness dispatcher hid a Docker topology failure" >&2
+    exit 1
+  }
+  if grep -qF 'NODES_FILE: unbound variable' "${relay_dispatch_fixture}/stderr.log"; then
+    echo "the relay readiness dispatcher depended on a non-persisted inventory variable" >&2
+    exit 1
+  fi
+  grep -qF 'network create --internal' "${G6RD_TEST_DOCKER_LOG}" || {
+    echo "the relay readiness dispatcher did not load its persisted Agent inventory" >&2
+    exit 1
+  }
+  [[ ! -e "${RUNNER_TEMP}/g6-readiness-${RUN_ID}/outbox/relay-rejoin-ready/candidate-sha" ]] || {
+    echo "the relay readiness dispatcher published readiness after topology failure" >&2
+    exit 1
+  }
+)
+rm -rf -- "${relay_dispatch_fixture}"
 
 relay_stop_failure_fixture="$(mktemp -d)"
 (
