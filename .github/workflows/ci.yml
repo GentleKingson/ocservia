@@ -569,6 +569,8 @@ jobs:
         run: scripts/docs-check.sh
       - name: CI workflow policy tests
         run: |
+          shellcheck scripts/ci-install-native-fixtures.sh scripts/test-ci-install-native-fixtures.sh
+          scripts/test-ci-install-native-fixtures.sh
           scripts/test-bootstrap-profiles.sh
           scripts/test-ci-runtime-artifact.sh
       - name: Generate contract outputs
@@ -780,9 +782,7 @@ jobs:
       - name: Bootstrap pinned native tools
         run: scripts/bootstrap.sh native
       - name: Install ephemeral native fixtures
-        run: |
-          sudo apt-get update
-          sudo apt-get install --yes ocserv openconnect ssl-cert
+        run: sudo --preserve-env=RUNNER_TEMP scripts/ci-install-native-fixtures.sh
       - name: Native ocpasswd, OpenSSL, and Ocserv login
         env:
           ARTIFACT_DIR: ${{ runner.temp }}/artifacts/native-ocserv

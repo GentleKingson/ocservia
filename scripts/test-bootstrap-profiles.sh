@@ -99,6 +99,7 @@ reject("CI must always trigger for pull requests") unless trigger.key?("pull_req
 reject("CI must not use workflow-level path filters") if trigger.fetch("pull_request").is_a?(Hash)
 reject("CI must run on main pushes") unless trigger.fetch("push").fetch("branches") == ["main"]
 reject("CI must support manual dispatch") unless trigger.key?("workflow_dispatch")
+reject("CI permissions must remain read-only") unless workflow.fetch("permissions") == { "contents" => "read" }
 
 execution_profiles = {
   "runtime-artifacts" => "go-rust-integration",
@@ -346,9 +347,19 @@ expected_p1 = {
 reject("P1 smoke profile changed") unless jobs.fetch("p1-smoke").fetch("env") == expected_p1
 
 native_steps = Array(jobs.fetch("native-ocserv").fetch("steps"))
+native_install = native_steps.find { |step| step["name"] == "Install ephemeral native fixtures" }
+reject("Native Ocserv must use the bounded fixture installer") unless
+  native_install && native_install.fetch("run") ==
+    "sudo --preserve-env=RUNNER_TEMP scripts/ci-install-native-fixtures.sh"
+reject("Native Ocserv fixture installation must fail closed") if native_install["continue-on-error"] == true
 native_run = native_steps.find { |step| step["name"] == "Native ocpasswd, OpenSSL, and Ocserv login" }.fetch("run")
 reject("Native Ocserv must use an isolated Cargo target") unless native_run.include?("CARGO_TARGET_DIR=\"${native_target}\"")
 reject("Native Ocserv must remove its isolated Cargo target") unless native_run.include?("sudo rm -rf \"${native_target}\"")
+
+policy_run = Array(jobs.fetch("contracts-policy").fetch("steps"))
+  .find { |step| step["name"] == "CI workflow policy tests" }.fetch("run")
+reject("CI policy must execute the Native fixture regressions") unless
+  policy_run.include?("scripts/test-ci-install-native-fixtures.sh")
 
 p1_trigger = p1_workflow.fetch(true)
 reject("P1 Full must remain workflow_dispatch-only") unless p1_trigger.keys == ["workflow_dispatch"]
