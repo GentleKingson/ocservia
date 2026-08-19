@@ -15,6 +15,7 @@
 use std::net::SocketAddr;
 use std::path::Path;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use iroh::endpoint::{Connection, RelayMode, VarInt, presets};
@@ -23,27 +24,40 @@ use iroh::{Endpoint, EndpointAddr, EndpointId, SecretKey};
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::Semaphore;
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use zeroize::Zeroizing;
 
 /// ALPN of the G6 harness tunnel.
 pub const TUNNEL_ALPN: &[u8] = b"ocserv-platform/g6-tunnel/1";
 
-// One surviving cross-domain relay carries the remote failure domain's 25
-// Agents plus transportd. The pinned Iroh net-report schedule can overlap
-// three staggered HTTPS probes with each endpoint's persistent relay socket;
-// one extra connection keeps the harness readiness/control path available.
+// The cross-domain relay can still be draining every one-shot enrollment
+// endpoint when the 25 runtime Agents and transportd synchronously establish
+// relay-a paths. Each Iroh endpoint can overlap its persistent relay socket
+// with three staggered HTTPS probes. One extra connection accounts for the
+// harness readiness/control path. The resulting 205-connection minimum
+// transition budget is rounded up to a fixed 256, leaving 51 connections for
+// bounded retry churn. Excess work enters a 64-connection queue for at most
+// five seconds; this is intentionally not an open-ended substitute for a
+// production network.
 const G6_FORMAL_AGENTS_PER_FAILURE_DOMAIN: usize = 25;
+const G6_TRANSIENT_ENROLLMENT_ENDPOINTS_PER_FAILURE_DOMAIN: usize = 25;
 const G6_RELAY_SUPPORT_ENDPOINTS_PER_FAILURE_DOMAIN: usize = 1;
 const G6_RELAY_TCP_BURST_PER_ENDPOINT: usize = 4;
 const G6_RELAY_TUNNEL_CONTROL_CONNECTIONS: usize = 1;
-const REQUIRED_G6_RELAY_TUNNEL_CONNECTIONS: usize = (G6_FORMAL_AGENTS_PER_FAILURE_DOMAIN
-    + G6_RELAY_SUPPORT_ENDPOINTS_PER_FAILURE_DOMAIN)
-    * G6_RELAY_TCP_BURST_PER_ENDPOINT
-    + G6_RELAY_TUNNEL_CONTROL_CONNECTIONS;
-const MAX_TUNNEL_CONNECTIONS: usize = 128;
+const REQUIRED_G6_RELAY_TUNNEL_CONNECTIONS: usize =
+    (G6_TRANSIENT_ENROLLMENT_ENDPOINTS_PER_FAILURE_DOMAIN
+        + G6_FORMAL_AGENTS_PER_FAILURE_DOMAIN
+        + G6_RELAY_SUPPORT_ENDPOINTS_PER_FAILURE_DOMAIN)
+        * G6_RELAY_TCP_BURST_PER_ENDPOINT
+        + G6_RELAY_TUNNEL_CONTROL_CONNECTIONS;
+const MAX_TUNNEL_CONNECTIONS: usize = 256;
+const MAX_TUNNEL_QUEUED_CONNECTIONS: usize = 64;
 const _: () = assert!(MAX_TUNNEL_CONNECTIONS >= REQUIRED_G6_RELAY_TUNNEL_CONNECTIONS);
+const _: () = assert!(MAX_TUNNEL_QUEUED_CONNECTIONS <= MAX_TUNNEL_CONNECTIONS);
 const MAX_TUNNEL_STREAMS: u32 = 8;
+// Surface capacity pressure independently of the longer Iroh connection and
+// stream deadlines below.
+const PERMIT_ACQUIRE_TIMEOUT: Duration = Duration::from_secs(5);
 const STREAM_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(30);
 const IROH_CONNECT_TIMEOUT: Duration = Duration::from_secs(90);
 const TCP_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
@@ -195,7 +209,7 @@ pub async fn serve(
     let handler = ForwardHandler {
         peer,
         target,
-        permits: Arc::new(Semaphore::new(MAX_TUNNEL_CONNECTIONS)),
+        limiter: ConnectionLimiter::formal(),
     };
     let router = Router::builder(endpoint)
         .accept(TUNNEL_ALPN, handler)
@@ -207,7 +221,7 @@ pub async fn serve(
 struct ForwardHandler {
     peer: EndpointId,
     target: SocketAddr,
-    permits: Arc<Semaphore>,
+    limiter: ConnectionLimiter,
 }
 
 impl ProtocolHandler for ForwardHandler {
@@ -216,10 +230,13 @@ impl ProtocolHandler for ForwardHandler {
             connection.close(VarInt::from_u32(0x201), b"unpinned tunnel peer");
             return Err(protocol_error("tunnel connection from unpinned peer"));
         }
-        let _permit = Arc::clone(&self.permits)
-            .acquire_owned()
-            .await
-            .map_err(|_| protocol_error("tunnel capacity closed"))?;
+        let _permit = match self.limiter.acquire("serve").await {
+            Ok(permit) => permit,
+            Err(error) => {
+                connection.close(VarInt::from_u32(0x205), b"tunnel capacity unavailable");
+                return Err(AcceptError::from_err(error));
+            }
+        };
         let stream = tokio::time::timeout(STREAM_HANDSHAKE_TIMEOUT, connection.accept_bi()).await;
         let (send, recv) = match stream {
             Ok(Ok(stream)) => stream,
@@ -267,21 +284,247 @@ pub async fn run_forward(
 ) -> Result<(), std::io::Error> {
     let endpoint = bind_endpoint(secret_key, relay_mode).await?;
     let listener = TcpListener::bind(listen).await?;
-    let permits = Arc::new(Semaphore::new(MAX_TUNNEL_CONNECTIONS));
+    let limiter = ConnectionLimiter::formal();
     loop {
         let (tcp, peer_addr) = listener.accept().await?;
-        let permit = Arc::clone(&permits)
-            .acquire_owned()
-            .await
-            .map_err(|_| invalid("tunnel capacity closed"))?;
+        let admission = match limiter.admit("forward") {
+            Ok(admission) => admission,
+            Err(error) => {
+                tracing::warn!(
+                    error = %error,
+                    peer = %peer_addr,
+                    "tunnel forward connection rejected"
+                );
+                continue;
+            }
+        };
         let endpoint = endpoint.clone();
         let peer = peer.clone();
+        let limiter = limiter.clone();
         tokio::spawn(async move {
-            let _permit = permit;
+            let _permit = match limiter.acquire_admitted("forward", admission).await {
+                Ok(permit) => permit,
+                Err(error) => {
+                    tracing::warn!(
+                        error = %error,
+                        peer = %peer_addr,
+                        "tunnel forward connection rejected"
+                    );
+                    return;
+                }
+            };
             if let Err(error) = forward_one(&endpoint, peer, tcp).await {
                 tracing::warn!(error = %error, peer = %peer_addr, "tunnel forward connection failed");
             }
         });
+    }
+}
+
+#[derive(Clone, Debug)]
+struct ConnectionLimiter {
+    permits: Arc<Semaphore>,
+    waiters: Arc<Semaphore>,
+    high_water: Arc<AtomicUsize>,
+    capacity: usize,
+    max_queued: usize,
+    permit_timeout: Duration,
+}
+
+#[derive(Debug)]
+enum ConnectionAdmission {
+    Acquired(OwnedSemaphorePermit),
+    Queued(OwnedSemaphorePermit),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct CapacitySnapshot {
+    capacity: usize,
+    in_use: usize,
+    available: usize,
+    queued: usize,
+    max_queued: usize,
+    high_water: usize,
+}
+
+impl ConnectionLimiter {
+    fn formal() -> Self {
+        let limiter = Self::with_limits(
+            MAX_TUNNEL_CONNECTIONS,
+            MAX_TUNNEL_QUEUED_CONNECTIONS,
+            PERMIT_ACQUIRE_TIMEOUT,
+        );
+        tracing::info!(
+            capacity = MAX_TUNNEL_CONNECTIONS,
+            required_transition_capacity = REQUIRED_G6_RELAY_TUNNEL_CONNECTIONS,
+            max_queued = MAX_TUNNEL_QUEUED_CONNECTIONS,
+            permit_timeout_ms =
+                u64::try_from(PERMIT_ACQUIRE_TIMEOUT.as_millis()).unwrap_or(u64::MAX),
+            "tunnel connection capacity initialized"
+        );
+        limiter
+    }
+
+    fn with_limits(capacity: usize, max_queued: usize, permit_timeout: Duration) -> Self {
+        Self {
+            permits: Arc::new(Semaphore::new(capacity)),
+            waiters: Arc::new(Semaphore::new(max_queued)),
+            high_water: Arc::new(AtomicUsize::new(0)),
+            capacity,
+            max_queued,
+            permit_timeout,
+        }
+    }
+
+    fn snapshot(&self) -> CapacitySnapshot {
+        let available = self.permits.available_permits();
+        CapacitySnapshot {
+            capacity: self.capacity,
+            in_use: self.capacity.saturating_sub(available),
+            available,
+            queued: self
+                .max_queued
+                .saturating_sub(self.waiters.available_permits()),
+            max_queued: self.max_queued,
+            high_water: self.high_water.load(Ordering::Acquire),
+        }
+    }
+
+    fn record_acquired(&self, direction: &'static str) {
+        let snapshot = self.snapshot();
+        let mut previous = snapshot.high_water;
+        while snapshot.in_use > previous {
+            match self.high_water.compare_exchange_weak(
+                previous,
+                snapshot.in_use,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => {
+                    tracing::info!(
+                        direction,
+                        capacity = snapshot.capacity,
+                        in_use = snapshot.in_use,
+                        available = snapshot.available,
+                        queued = snapshot.queued,
+                        max_queued = snapshot.max_queued,
+                        high_water = snapshot.in_use,
+                        "tunnel connection capacity high-water mark advanced"
+                    );
+                    return;
+                }
+                Err(current) => previous = current,
+            }
+        }
+    }
+
+    fn admit(&self, direction: &'static str) -> Result<ConnectionAdmission, std::io::Error> {
+        if let Ok(permit) = Arc::clone(&self.permits).try_acquire_owned() {
+            self.record_acquired(direction);
+            return Ok(ConnectionAdmission::Acquired(permit));
+        }
+
+        let Ok(waiter) = Arc::clone(&self.waiters).try_acquire_owned() else {
+            let snapshot = self.snapshot();
+            tracing::warn!(
+                direction,
+                reason = "queue_full",
+                capacity = snapshot.capacity,
+                in_use = snapshot.in_use,
+                available = snapshot.available,
+                queued = snapshot.queued,
+                max_queued = snapshot.max_queued,
+                high_water = snapshot.high_water,
+                "tunnel connection capacity queue is full"
+            );
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::WouldBlock,
+                "tunnel connection capacity queue is full",
+            ));
+        };
+        let snapshot = self.snapshot();
+        tracing::warn!(
+            direction,
+            reason = "capacity_wait",
+            capacity = snapshot.capacity,
+            in_use = snapshot.in_use,
+            available = snapshot.available,
+            queued = snapshot.queued,
+            max_queued = snapshot.max_queued,
+            high_water = snapshot.high_water,
+            permit_timeout_ms = u64::try_from(self.permit_timeout.as_millis()).unwrap_or(u64::MAX),
+            "tunnel connection waiting for capacity"
+        );
+        Ok(ConnectionAdmission::Queued(waiter))
+    }
+
+    async fn acquire_admitted(
+        &self,
+        direction: &'static str,
+        admission: ConnectionAdmission,
+    ) -> Result<OwnedSemaphorePermit, std::io::Error> {
+        let waiter = match admission {
+            ConnectionAdmission::Acquired(permit) => return Ok(permit),
+            ConnectionAdmission::Queued(waiter) => waiter,
+        };
+
+        let acquired = tokio::time::timeout(
+            self.permit_timeout,
+            Arc::clone(&self.permits).acquire_owned(),
+        )
+        .await;
+        drop(waiter);
+        match acquired {
+            Ok(Ok(permit)) => {
+                self.record_acquired(direction);
+                Ok(permit)
+            }
+            Ok(Err(_)) => {
+                let snapshot = self.snapshot();
+                tracing::warn!(
+                    direction,
+                    reason = "capacity_closed",
+                    capacity = snapshot.capacity,
+                    in_use = snapshot.in_use,
+                    available = snapshot.available,
+                    queued = snapshot.queued,
+                    max_queued = snapshot.max_queued,
+                    high_water = snapshot.high_water,
+                    "tunnel connection capacity closed"
+                );
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::BrokenPipe,
+                    "tunnel connection capacity closed",
+                ))
+            }
+            Err(_) => {
+                let snapshot = self.snapshot();
+                tracing::warn!(
+                    direction,
+                    reason = "permit_timeout",
+                    capacity = snapshot.capacity,
+                    in_use = snapshot.in_use,
+                    available = snapshot.available,
+                    queued = snapshot.queued,
+                    max_queued = snapshot.max_queued,
+                    high_water = snapshot.high_water,
+                    permit_timeout_ms =
+                        u64::try_from(self.permit_timeout.as_millis()).unwrap_or(u64::MAX),
+                    "tunnel connection capacity wait timed out"
+                );
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "tunnel connection capacity wait timed out",
+                ))
+            }
+        }
+    }
+
+    async fn acquire(
+        &self,
+        direction: &'static str,
+    ) -> Result<OwnedSemaphorePermit, std::io::Error> {
+        let admission = self.admit(direction)?;
+        self.acquire_admitted(direction, admission).await
     }
 }
 
@@ -453,8 +696,52 @@ mod tests {
 
     #[test]
     fn formal_relay_burst_fits_bounded_tunnel_capacity() {
-        assert_eq!(REQUIRED_G6_RELAY_TUNNEL_CONNECTIONS, 105);
-        assert_eq!(MAX_TUNNEL_CONNECTIONS, 128);
+        assert_eq!(G6_TRANSIENT_ENROLLMENT_ENDPOINTS_PER_FAILURE_DOMAIN, 25);
+        assert_eq!(REQUIRED_G6_RELAY_TUNNEL_CONNECTIONS, 205);
+        assert_eq!(MAX_TUNNEL_CONNECTIONS, 256);
+        assert_eq!(MAX_TUNNEL_QUEUED_CONNECTIONS, 64);
+    }
+
+    #[tokio::test]
+    async fn capacity_wait_is_bounded_and_queue_is_capped() {
+        const TEST_TIMEOUT: Duration = Duration::from_millis(500);
+        let limiter = ConnectionLimiter::with_limits(2, 1, TEST_TIMEOUT);
+        let first = limiter.acquire("test").await.unwrap();
+        let second = limiter.acquire("test").await.unwrap();
+        assert_eq!(
+            limiter.snapshot(),
+            CapacitySnapshot {
+                capacity: 2,
+                in_use: 2,
+                available: 0,
+                queued: 0,
+                max_queued: 1,
+                high_water: 2,
+            }
+        );
+
+        let waiting_limiter = limiter.clone();
+        let waiting = tokio::spawn(async move { waiting_limiter.acquire("test").await });
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while limiter.snapshot().queued != 1 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("capacity waiter did not enter the bounded queue");
+
+        let queue_full = limiter.acquire("test").await.unwrap_err();
+        assert_eq!(queue_full.kind(), std::io::ErrorKind::WouldBlock);
+        let timed_out = waiting.await.unwrap().unwrap_err();
+        assert_eq!(timed_out.kind(), std::io::ErrorKind::TimedOut);
+        assert_eq!(limiter.snapshot().queued, 0);
+
+        drop(first);
+        let replacement = limiter.acquire("test").await.unwrap();
+        assert_eq!(limiter.snapshot().in_use, 2);
+        drop(replacement);
+        drop(second);
+        assert_eq!(limiter.snapshot().in_use, 0);
     }
 
     /// Dials the pinned server with a stranger key and reports whether any
@@ -573,14 +860,42 @@ mod tests {
         let _ = tokio::time::timeout(STAGE_TIMEOUT, router.shutdown()).await;
     }
 
+    async fn open_tunnel_clients(
+        forward_addr: SocketAddr,
+        indexes: std::ops::Range<usize>,
+    ) -> Vec<TcpStream> {
+        let expected = indexes.len();
+        let mut connects = tokio::task::JoinSet::new();
+        for index in indexes {
+            connects.spawn(async move {
+                let mut stream = TcpStream::connect(forward_addr).await.unwrap();
+                let ping = u64::try_from(index).unwrap().to_be_bytes();
+                stream.write_all(&ping).await.unwrap();
+                let mut received = [0_u8; 8];
+                stream.read_exact(&mut received).await.unwrap();
+                assert_eq!(received, ping);
+                stream
+            });
+        }
+        let mut clients = Vec::with_capacity(expected);
+        while let Some(client) = connects.join_next().await {
+            clients.push(client.expect("tunnel client task failed"));
+        }
+        clients
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    async fn carries_more_than_legacy_connection_limit() {
-        const STAGE_TIMEOUT: Duration = Duration::from_secs(30);
-        // Forty held-open connections exercise the real forwarding path past
-        // the former limit of 32. The compile-time budget above locks the
-        // complete 105-connection formal burst without making this hermetic
-        // behavior test perform 105 simultaneous QUIC handshakes.
-        const CAPACITY_REGRESSION_CONNECTIONS: usize = 40;
+    async fn carries_the_formal_transition_connection_budget() {
+        const STAGE_TIMEOUT: Duration = Duration::from_secs(45);
+        const ENROLLMENT_CONNECTIONS: usize =
+            G6_TRANSIENT_ENROLLMENT_ENDPOINTS_PER_FAILURE_DOMAIN * G6_RELAY_TCP_BURST_PER_ENDPOINT;
+        const RUNTIME_CONNECTIONS: usize = (G6_FORMAL_AGENTS_PER_FAILURE_DOMAIN
+            + G6_RELAY_SUPPORT_ENDPOINTS_PER_FAILURE_DOMAIN)
+            * G6_RELAY_TCP_BURST_PER_ENDPOINT
+            + G6_RELAY_TUNNEL_CONTROL_CONNECTIONS;
+        const _: () = assert!(
+            ENROLLMENT_CONNECTIONS + RUNTIME_CONNECTIONS == REQUIRED_G6_RELAY_TUNNEL_CONNECTIONS
+        );
 
         let echo = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let echo_addr = echo.local_addr().unwrap();
@@ -622,30 +937,48 @@ mod tests {
         ));
         tokio::time::sleep(Duration::from_millis(300)).await;
 
-        let clients = tokio::time::timeout(STAGE_TIMEOUT, async move {
-            let mut connects = tokio::task::JoinSet::new();
-            for index in 0..CAPACITY_REGRESSION_CONNECTIONS {
-                connects.spawn(async move {
-                    let mut stream = TcpStream::connect(forward_addr).await.unwrap();
-                    let ping = u64::try_from(index).unwrap().to_be_bytes();
-                    stream.write_all(&ping).await.unwrap();
-                    let mut received = [0_u8; 8];
-                    stream.read_exact(&mut received).await.unwrap();
-                    assert_eq!(received, ping);
-                    stream
-                });
-            }
-            let mut clients = Vec::with_capacity(CAPACITY_REGRESSION_CONNECTIONS);
-            while let Some(client) = connects.join_next().await {
-                clients.push(client.expect("tunnel client task failed"));
-            }
-            clients
-        })
+        // Hold the entire enrollment generation first, then prove the later
+        // runtime/transportd/control generation can still enter and echo. This
+        // stages the starvation boundary rather than letting all 205 clients
+        // race; the second generation also pushes the live total past 128.
+        let enrollment_clients = tokio::time::timeout(
+            STAGE_TIMEOUT,
+            open_tunnel_clients(forward_addr, 0..ENROLLMENT_CONNECTIONS),
+        )
         .await
-        .expect("connection-limit regression timed out");
-        assert_eq!(clients.len(), CAPACITY_REGRESSION_CONNECTIONS);
+        .expect("enrollment-generation connections timed out");
+        assert_eq!(enrollment_clients.len(), ENROLLMENT_CONNECTIONS);
+        let runtime_clients = tokio::time::timeout(
+            STAGE_TIMEOUT,
+            open_tunnel_clients(
+                forward_addr,
+                ENROLLMENT_CONNECTIONS..REQUIRED_G6_RELAY_TUNNEL_CONNECTIONS,
+            ),
+        )
+        .await
+        .expect("runtime-generation connections timed out");
+        assert_eq!(runtime_clients.len(), RUNTIME_CONNECTIONS);
 
-        drop(clients);
+        // A fully closed enrollment generation must drain while the runtime
+        // generation stays live. Opening an immediate replacement generation
+        // consumes all 51 spare permits and therefore fails unless the old
+        // forwarding tasks release at least 49 permits inside the five-second
+        // admission bound.
+        drop(enrollment_clients);
+        let replacement_clients = tokio::time::timeout(
+            STAGE_TIMEOUT,
+            open_tunnel_clients(
+                forward_addr,
+                REQUIRED_G6_RELAY_TUNNEL_CONNECTIONS
+                    ..REQUIRED_G6_RELAY_TUNNEL_CONNECTIONS + ENROLLMENT_CONNECTIONS,
+            ),
+        )
+        .await
+        .expect("closed enrollment generation did not drain before replacement");
+        assert_eq!(replacement_clients.len(), ENROLLMENT_CONNECTIONS);
+
+        drop(replacement_clients);
+        drop(runtime_clients);
         forward.abort();
         let _ = tokio::time::timeout(STAGE_TIMEOUT, router.shutdown()).await;
     }

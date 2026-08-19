@@ -3774,20 +3774,40 @@ slo_limit() {
     exit 1
   }
   tunnel_agents_per_fd="$(awk '$2 == "G6_FORMAL_AGENTS_PER_FAILURE_DOMAIN:" {gsub(/;/, "", $5); print $5}' "${G6_TUNNEL_LIB}")"
+  tunnel_enrollment_endpoints="$(awk '$2 == "G6_TRANSIENT_ENROLLMENT_ENDPOINTS_PER_FAILURE_DOMAIN:" {gsub(/;/, "", $5); print $5}' "${G6_TUNNEL_LIB}")"
   tunnel_support_endpoints="$(awk '$2 == "G6_RELAY_SUPPORT_ENDPOINTS_PER_FAILURE_DOMAIN:" {gsub(/;/, "", $5); print $5}' "${G6_TUNNEL_LIB}")"
   tunnel_burst_per_endpoint="$(awk '$2 == "G6_RELAY_TCP_BURST_PER_ENDPOINT:" {gsub(/;/, "", $5); print $5}' "${G6_TUNNEL_LIB}")"
   tunnel_control_connections="$(awk '$2 == "G6_RELAY_TUNNEL_CONTROL_CONNECTIONS:" {gsub(/;/, "", $5); print $5}' "${G6_TUNNEL_LIB}")"
   tunnel_capacity="$(awk '$2 == "MAX_TUNNEL_CONNECTIONS:" {gsub(/;/, "", $5); print $5}' "${G6_TUNNEL_LIB}")"
+  tunnel_queue_capacity="$(awk '$2 == "MAX_TUNNEL_QUEUED_CONNECTIONS:" {gsub(/;/, "", $5); print $5}' "${G6_TUNNEL_LIB}")"
   [[ "${tunnel_agents_per_fd}" == "${default_a}" \
-    && "${tunnel_agents_per_fd}" == "${default_b}" ]] || {
-    echo "the G6 tunnel capacity budget no longer matches the formal per-domain fleet" >&2
+    && "${tunnel_agents_per_fd}" == "${default_b}" \
+    && "${tunnel_enrollment_endpoints}" == "${tunnel_agents_per_fd}" ]] || {
+    echo "the G6 tunnel capacity budget no longer covers both formal Agent endpoint generations" >&2
     exit 1
   }
-  required_tunnel_capacity="$(((tunnel_agents_per_fd + tunnel_support_endpoints) * tunnel_burst_per_endpoint + tunnel_control_connections))"
-  ((tunnel_capacity >= required_tunnel_capacity && tunnel_capacity <= 128)) || {
+  required_tunnel_capacity="$(((tunnel_enrollment_endpoints + tunnel_agents_per_fd + tunnel_support_endpoints) * tunnel_burst_per_endpoint + tunnel_control_connections))"
+  ((required_tunnel_capacity == 205 \
+    && tunnel_capacity >= required_tunnel_capacity \
+    && tunnel_capacity == 256 \
+    && tunnel_queue_capacity > 0 \
+    && tunnel_queue_capacity <= tunnel_capacity)) || {
     echo "the bounded G6 tunnel cannot carry the formal relay failover burst" >&2
     exit 1
   }
+  grep -Fq 'const PERMIT_ACQUIRE_TIMEOUT: Duration = Duration::from_secs(5);' \
+    "${G6_TUNNEL_LIB}" || {
+    echo "the G6 tunnel connection-capacity wait is not bounded to five seconds" >&2
+    exit 1
+  }
+  if ! {
+    grep -Fq 'reason = "permit_timeout"' "${G6_TUNNEL_LIB}" \
+      && grep -Fq 'reason = "queue_full"' "${G6_TUNNEL_LIB}" \
+      && grep -Fq 'high_water = snapshot.high_water' "${G6_TUNNEL_LIB}"
+  }; then
+    echo "the G6 tunnel no longer emits structured saturation diagnostics" >&2
+    exit 1
+  fi
   [[ "${default_total}" == "$(slo_limit authorized_real_agents)" ]] || {
     echo "the default fleet no longer exactly meets the authorized-real-Agent contract" >&2
     exit 1
