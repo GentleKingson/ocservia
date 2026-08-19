@@ -1904,7 +1904,14 @@ g6rd_strip_secrets_from_artifacts() {
 
 g6rd_reclaim_directory() {
   local dir="${1:?directory is required}"
+  local ownership_mismatch
   [[ -d "${dir}" ]] || return 0
+  ownership_mismatch="$(
+    find "${dir}" -xdev \
+      \( ! -user "$(id -u)" -o ! -group "$(id -g)" \) \
+      -print -quit 2>/dev/null
+  )" || ownership_mismatch="${dir}"
+  [[ -n "${ownership_mismatch}" ]] || return 0
   docker run --rm --pull=never -v "${dir}:/reclaim" postgres:17.10-bookworm \
     chown -R "$(id -u):$(id -g)" /reclaim >/dev/null 2>&1 || {
       echo "cleanup: ownership reclaim failed for ${dir}" >&2

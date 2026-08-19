@@ -556,6 +556,19 @@ grep -q 'PermissionDenied.*ancestry.*metadata invalid.*attestation' "${LIB}" || 
 # controller response is authoritative only when every expected node is
 # active, online, fresh, and carries a heartbeat.
 source "${LIB}"
+# Runtime workflow variables must not select a branch in this hermetic policy
+# test before that branch is exercised explicitly below.
+unset G6RD_AGENT_IMAGE
+reclaim_owned_test="$(mktemp -d)"
+mkdir -p "${reclaim_owned_test}/nested"
+: >"${reclaim_owned_test}/nested/runner-owned"
+docker() {
+  echo "ownership reclaim started a helper for runner-owned paths" >&2
+  return 1
+}
+g6rd_reclaim_directory "${reclaim_owned_test}"
+unset -f docker
+rm -rf "${reclaim_owned_test}"
 relay_failure_test="$(mktemp -d)"
 for relay_failure_stage in validator principal-smoke; do
   (
@@ -1078,8 +1091,13 @@ if grep -nE 'docker run (--rm|-d)( |$)' "${LIB}" "${FD_A}" "${FD_B}" \
   echo "G6 readiness docker run commands must never pull from the network" >&2
   exit 1
 fi
-grep -A5 '^g6rd_reclaim_directory()' "${LIB}" | grep -q -- '--pull=never' || {
+reclaim_directory="$(sed -n '/^g6rd_reclaim_directory() {/,/^}/p' "${LIB}")"
+grep -q -- '--pull=never' <<<"${reclaim_directory}" || {
   echo "cleanup ownership reclaim must not pull an image" >&2
+  exit 1
+}
+grep -q 'ownership_mismatch' <<<"${reclaim_directory}" || {
+  echo "cleanup must skip its helper when all scoped paths are already runner-owned" >&2
   exit 1
 }
 grep -q '^g6rd_cleanup_bounded()' "${LIB}" || {
