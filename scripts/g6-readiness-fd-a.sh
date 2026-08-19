@@ -170,13 +170,41 @@ bootstrap_controller_endpoint() {
 }
 
 phase_primary_up() {
+  local workspace_id journal_ready
   g6rd_export_common_env
   g6rd_prepare_postgres_bind_dirs
   export G6_DB_HOST=postgres G6_DB_PORT=5432
   g6rd_compose up --detach postgres
   g6rd_wait_until 60 2 "postgres healthy" postgres_healthy
   g6rd_compose run --rm migrate
-  local workspace_id
+  g6rd_psql -c "$(<"${ROOT}/scripts/g6-authority-history.sql")" >/dev/null
+  journal_ready="$(g6rd_psql -Atc "
+    SELECT
+      (SELECT count(*)=2
+       FROM pg_class
+       WHERE oid IN ('public.g6_connection_owner_history'::regclass,
+                     'public.g6_scheduler_leadership_history'::regclass)
+         AND relpersistence='p')
+      AND
+      (SELECT count(*)=2
+       FROM pg_trigger
+       WHERE tgname IN ('g6_journal_connection_owner',
+                        'g6_journal_scheduler_leadership')
+         AND tgenabled='O' AND NOT tgisinternal)
+      AND
+      (SELECT count(*)=2
+       FROM pg_proc
+       WHERE proname IN ('g6_capture_connection_owner_history',
+                         'g6_capture_scheduler_leadership_history')
+         AND prosecdef)
+      AND (SELECT count(*)=0 FROM g6_connection_owner_history)
+      AND (SELECT count(*)=0 FROM g6_scheduler_leadership_history)
+      AND (SELECT count(*)=0 FROM connection_owner_fencing)
+      AND (SELECT epoch=0 FROM scheduler_leadership WHERE id=1)")"
+  [[ "${journal_ready}" == t ]] || {
+    echo "durable G6 authority journals were not installed fail-closed" >&2
+    return 1
+  }
   workspace_id="$(g6rd_uuidv7)"
   g6rd_psql -c "INSERT INTO workspaces(id,name,slug,created_at,updated_at) \
     VALUES('${workspace_id}','G6 Readiness','g6-readiness',now(),now()) \

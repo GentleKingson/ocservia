@@ -673,7 +673,7 @@ function parseEpochEvents(entry, binding) {
     ownerMaxEpoch: new Map(),
     ownerLatest: new Map(),
     ownerActive: new Map(),
-    ownerExpired: new Set(),
+    ownerInactive: new Set(),
     leaderMaxEpoch: 0,
     leaderLatest: null,
     leaderActive: new Set(),
@@ -780,15 +780,16 @@ function parseEpochEvents(entry, binding) {
             );
           }
           active.delete(record.epoch);
-          state.ownerExpired.add(`${node}:${record.epoch}`);
+          state.ownerInactive.add(`${node}:${record.epoch}`);
           state.ownerExpiries.push({ node, epoch: record.epoch, timestampMs: parsed });
         } else if (record.event_type === "owner_retired") {
-          if (record.epoch > maxEpoch) {
+          if (!active.has(record.epoch)) {
             fail(
-              `epoch event log ${entry.name} owner retirement must reference a registered epoch`,
+              `epoch event log ${entry.name} owner retirement must reference the active owner epoch`,
             );
           }
           active.delete(record.epoch);
+          state.ownerInactive.add(`${node}:${record.epoch}`);
         } else if (record.event_type === "owner_accept") {
           identifier(record.instance, "epoch event instance");
           boolean(record.accepted, "epoch event accepted");
@@ -800,7 +801,7 @@ function parseEpochEvents(entry, binding) {
           }
           if (
             record.accepted &&
-            (record.epoch < maxEpoch || state.ownerExpired.has(`${node}:${record.epoch}`))
+            (record.epoch < maxEpoch || state.ownerInactive.has(`${node}:${record.epoch}`))
           ) {
             state.staleOwnerAccepts += 1;
           }

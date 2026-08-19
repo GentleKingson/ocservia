@@ -1927,41 +1927,120 @@ g6rd_stop_harness_loop() {
   return "${status}"
 }
 
-# Append-only history of the authoritative fencing and leadership tables:
-# each loop records only changed result sets, so the epoch-events artifact
-# can derive every owner and scheduler transition with its observation time
-# on one clock. The fd-b watchers dial the forwarded primary before the
-# promotion and the local promoted primary after it.
+# Live mirrors of the durable fencing and leadership journals. Each poll reads
+# the complete committed journal in history-id order and atomically replaces
+# its diagnostic mirror. Re-reading the complete journal matters because
+# concurrent transactions for different nodes can allocate identity values
+# and commit in the opposite order; a high-water cursor could skip that late
+# lower ID. The final evidence files are replaced from the frozen DB cut.
+g6rd_fail_authority_watcher() {
+  local name="${1:?watcher name is required}" message="${2:?failure message is required}"
+  if ! date -u +%Y-%m-%dT%H:%M:%S.%6NZ \
+    >"${G6RD_STATE}/${name}-watcher-failed-at"; then
+    echo "${name} watcher could not persist its failure timestamp" >&2
+  fi
+  echo "${message}" >&2
+  return 1
+}
+
 g6rd_watch_fencing_history() {
-  local port rows last=""
+  local port rows last="" line history_id previous temp
+  temp="${G6RD_STATE}/fencing-history.live.$$"
   while [[ ! -e "${G6RD_STATE}/watchers-stop" ]]; do
     port=15432
     [[ -e "${G6RD_STATE}/promoted" ]] && port=5432
-    rows="$(G6_DB_PORT="${port}" G6RD_PSQL_TIMEOUT_SECONDS=10 g6rd_psql -Atc \
-      "SELECT encode(node_id,'hex')||':'||owner_instance_id||':'||owner_incarnation||':'||encode(connection_id,'hex')||':'||owner_epoch||':'||to_char(lease_until AT TIME ZONE 'UTC','YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"')||':'||to_char(updated_at AT TIME ZONE 'UTC','YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"') FROM connection_owner_fencing ORDER BY node_id" \
-      2>/dev/null || true)"
-    if [[ -n "${rows}" && "${rows}" != "${last}" ]]; then
-      printf '%s\n' "${rows}" >>"${G6RD_STATE}/fencing-history.jsonl"
+    if rows="$(G6_DB_PORT="${port}" G6RD_PSQL_TIMEOUT_SECONDS=10 g6rd_psql -Atc \
+      "SELECT history_id||':'||encode(node_id,'hex')||':'||owner_instance_id||':'||owner_incarnation||':'||encode(connection_id,'hex')||':'||owner_epoch||':'||to_char(lease_until AT TIME ZONE 'UTC','YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"')||':'||to_char(updated_at AT TIME ZONE 'UTC','YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') FROM g6_connection_owner_history ORDER BY history_id" \
+      )"; then
+      if [[ "${rows}" == "${last}" ]]; then
+        sleep 1
+        continue
+      fi
+      if ! : >"${temp}"; then
+        g6rd_fail_authority_watcher fencing \
+          "fencing watcher could not create its ordered journal mirror"
+        return 1
+      fi
+      previous=0
+      while IFS= read -r line; do
+        [[ -n "${line}" ]] || continue
+        history_id="${line%%:*}"
+        if [[ ! "${history_id}" =~ ^[1-9][0-9]*$ ]] \
+          || (( history_id <= previous )); then
+          rm -f "${temp}"
+          g6rd_fail_authority_watcher fencing \
+            "fencing journal is not in strict history-id order at ${history_id}"
+          return 1
+        fi
+        if ! printf '%s\n' "${line}" >>"${temp}"; then
+          rm -f "${temp}"
+          g6rd_fail_authority_watcher fencing \
+            "fencing watcher could not write its ordered journal mirror"
+          return 1
+        fi
+        previous="${history_id}"
+      done <<<"${rows}"
+      if ! mv -f "${temp}" "${G6RD_STATE}/fencing-history.jsonl"; then
+        rm -f "${temp}"
+        g6rd_fail_authority_watcher fencing \
+          "fencing watcher could not publish its ordered journal mirror"
+        return 1
+      fi
       last="${rows}"
     fi
     sleep 1
   done
+  rm -f "${temp}"
 }
 
 g6rd_watch_leadership_history() {
-  local port rows last=""
+  local port rows last="" line history_id previous temp
+  temp="${G6RD_STATE}/leadership-history.live.$$"
   while [[ ! -e "${G6RD_STATE}/watchers-stop" ]]; do
     port=15432
     [[ -e "${G6RD_STATE}/promoted" ]] && port=5432
-    rows="$(G6_DB_PORT="${port}" G6RD_PSQL_TIMEOUT_SECONDS=10 g6rd_psql -Atc \
-      "SELECT instance_id||':'||incarnation||':'||epoch||':'||to_char(lease_until AT TIME ZONE 'UTC','YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"')||':'||to_char(updated_at AT TIME ZONE 'UTC','YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"') FROM scheduler_leadership WHERE id=1" \
-      2>/dev/null || true)"
-    if [[ -n "${rows}" && "${rows}" != "${last}" ]]; then
-      printf '%s\n' "${rows}" >>"${G6RD_STATE}/leadership-history.jsonl"
+    if rows="$(G6_DB_PORT="${port}" G6RD_PSQL_TIMEOUT_SECONDS=10 g6rd_psql -Atc \
+      "SELECT history_id||':'||instance_id||':'||incarnation||':'||epoch||':'||to_char(lease_until AT TIME ZONE 'UTC','YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"')||':'||to_char(updated_at AT TIME ZONE 'UTC','YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') FROM g6_scheduler_leadership_history ORDER BY history_id" \
+      )"; then
+      if [[ "${rows}" == "${last}" ]]; then
+        sleep 1
+        continue
+      fi
+      if ! : >"${temp}"; then
+        g6rd_fail_authority_watcher leadership \
+          "leadership watcher could not create its ordered journal mirror"
+        return 1
+      fi
+      previous=0
+      while IFS= read -r line; do
+        [[ -n "${line}" ]] || continue
+        history_id="${line%%:*}"
+        if [[ ! "${history_id}" =~ ^[1-9][0-9]*$ ]] \
+          || (( history_id <= previous )); then
+          rm -f "${temp}"
+          g6rd_fail_authority_watcher leadership \
+            "leadership journal is not in strict history-id order at ${history_id}"
+          return 1
+        fi
+        if ! printf '%s\n' "${line}" >>"${temp}"; then
+          rm -f "${temp}"
+          g6rd_fail_authority_watcher leadership \
+            "leadership watcher could not write its ordered journal mirror"
+          return 1
+        fi
+        previous="${history_id}"
+      done <<<"${rows}"
+      if ! mv -f "${temp}" "${G6RD_STATE}/leadership-history.jsonl"; then
+        rm -f "${temp}"
+        g6rd_fail_authority_watcher leadership \
+          "leadership watcher could not publish its ordered journal mirror"
+        return 1
+      fi
       last="${rows}"
     fi
     sleep 1
   done
+  rm -f "${temp}"
 }
 
 g6rd_start_sampler() {

@@ -309,7 +309,7 @@ const finalSessionInventory = {
     connection_id: fakeUuid(
       index === 0 ? 2001 : index === 1 ? 2002 : index + 1000,
     ).replaceAll("-", ""),
-    owner_epoch: index < 2 ? 3 : 1,
+    owner_epoch: index === 0 ? 4 : index === 1 ? 3 : 1,
     owner_lease_until: at(350),
     owner_fence_id: fakeUuid(index + 4000).replaceAll("-", ""),
     authorization_revision: 11,
@@ -576,45 +576,75 @@ const node1Hex = nodes[0].nodeId.replaceAll("-", "");
 const node2Hex = nodes[1].nodeId.replaceAll("-", "");
 const node1ConnectionHex = fakeUuid(2001).replaceAll("-", "");
 const node2ConnectionHex = fakeUuid(2002).replaceAll("-", "");
+const node1ShortConnectionHex = fakeUuid(2003).replaceAll("-", "");
 const initialOwnerConnections = nodes.map((_, index) =>
   fakeUuid(index + 1000).replaceAll("-", ""),
 );
 const initialOwnerHistory = nodes.map(
   (node, index) =>
-    `${node.nodeId.replaceAll("-", "")}:worker-a:${workerAIncarnation}:${initialOwnerConnections[index]}:1:${index < 2 ? at(31) : at(350)}:${at(1)}`,
+    `${index + 1}:${node.nodeId.replaceAll("-", "")}:worker-a:${workerAIncarnation}:${initialOwnerConnections[index]}:1:${index < 2 ? atMicros(31, 0) : atMicros(350, 0)}:${atMicros(1, 0)}`,
 );
+const firstTakeoverHistoryId = nodes.length + 1;
+const node1Epoch2History = `${firstTakeoverHistoryId}:${node1Hex}:worker-b:${workerBIncarnation}:${node1ShortConnectionHex}:2:${atMicros(66, 0)}:${atMicros(36, 0)}`;
+const node2Epoch2History = `${firstTakeoverHistoryId + 1}:${node2Hex}:worker-b:${workerBIncarnation}:${node2ConnectionHex}:2:${atMicros(66, 0)}:${atMicros(36, 0)}`;
+const node2FinalOwnerHistory = `${firstTakeoverHistoryId + 2}:${node2Hex}:worker-b:${workerBIncarnation}:${node2ConnectionHex}:3:${atMicros(350, 0)}:${atMicros(66, 0)}`;
+const node1ShortAcquireHistory = `${firstTakeoverHistoryId + 3}:${node1Hex}:worker-b:${workerBIncarnation}:${node1ShortConnectionHex}:3:${atMicros(96, 100000)}:${atMicros(66, 100000)}`;
+const node1ShortReleaseHistory = `${firstTakeoverHistoryId + 4}:${node1Hex}:worker-b:${workerBIncarnation}:${node1ShortConnectionHex}:3:${atMicros(66, 103000)}:${atMicros(66, 103000)}`;
+const node1FinalOwnerHistory = `${firstTakeoverHistoryId + 5}:${node1Hex}:worker-b:${workerBIncarnation}:${node1ConnectionHex}:4:${atMicros(350, 0)}:${atMicros(67, 0)}`;
 const takeoverOwnerHistory = [
-  `${node1Hex}:worker-b:${workerBIncarnation}:${node1ConnectionHex}:2:${at(66)}:${at(36)}`,
-  `${node2Hex}:worker-b:${workerBIncarnation}:${node2ConnectionHex}:2:${at(66)}:${at(36)}`,
-  `${node1Hex}:worker-b:${workerBIncarnation}:${node1ConnectionHex}:3:${at(350)}:${at(66)}`,
-  `${node2Hex}:worker-b:${workerBIncarnation}:${node2ConnectionHex}:3:${at(350)}:${at(66)}`,
+  node1Epoch2History,
+  node2Epoch2History,
+  node2FinalOwnerHistory,
+  node1ShortAcquireHistory,
+  node1ShortReleaseHistory,
+  node1FinalOwnerHistory,
 ];
+const completeOwnerHistory = [...initialOwnerHistory, ...takeoverOwnerHistory];
+const fencingHistoryPath = join(runDir, "outbox", "fencing-history.jsonl");
 write(
-  join(runDir, "outbox", "fencing-history.jsonl"),
-  [...initialOwnerHistory, ...takeoverOwnerHistory].join("\n") + "\n",
+  fencingHistoryPath,
+  completeOwnerHistory.join("\n") + "\n",
 );
 const finalOwnerHistory = new Map(
   nodes.map((node, index) => [
     node.nodeId.replaceAll("-", ""),
-    index < 2
-      ? takeoverOwnerHistory[index + 2]
-      : initialOwnerHistory[index],
+    index === 0
+      ? node1FinalOwnerHistory
+      : index === 1
+        ? node2FinalOwnerHistory
+        : initialOwnerHistory[index],
   ]),
 );
-const finalLeaderHistory = `sched-b:${schedulerBIncarnation}:2:${at(350)}:${at(62)}`;
+const finalLeaderHistory = `1004:sched-b:${schedulerBIncarnation}:2:${atMicros(350, 0)}:${atMicros(62, 0)}`;
+const initialLeaderHistory = `1001:sched-a:${schedulerAIncarnation}:1:${atMicros(21, 0)}:${atMicros(1, 0)}`;
+const renewedLeaderHistory = `1002:sched-a:${schedulerAIncarnation}:1:${atMicros(41, 0)}:${atMicros(21, 0)}`;
+const successorLeaderHistory = `1003:sched-b:${schedulerBIncarnation}:2:${atMicros(62, 0)}:${atMicros(42, 0)}`;
+const leadershipHistoryPath = join(
+  runDir,
+  "outbox",
+  "leadership-history.jsonl",
+);
+const completeSchedulerHistory = [
+  initialLeaderHistory,
+  renewedLeaderHistory,
+  successorLeaderHistory,
+  finalLeaderHistory,
+];
 write(
-  join(runDir, "outbox", "leadership-history.jsonl"),
-  [
-    `sched-a:${schedulerAIncarnation}:1:${at(21)}:${at(1)}`,
-    `sched-a:${schedulerAIncarnation}:1:${at(41)}:${at(21)}`,
-    `sched-b:${schedulerBIncarnation}:2:${at(62)}:${at(42)}`,
-    finalLeaderHistory,
-  ].join("\n") + "\n",
+  leadershipHistoryPath,
+  completeSchedulerHistory.join("\n") + "\n",
+);
+const finalAuthorityCutPath = join(
+  runDir,
+  "state",
+  "final-authority-cut.json",
 );
 write(
-  join(runDir, "state", "final-authority-cut.json"),
+  finalAuthorityCutPath,
   JSON.stringify({
     cut_at: atMicros(320, 200000),
+    owner_history: completeOwnerHistory,
+    scheduler_history: completeSchedulerHistory,
     owners: nodes.map((node, index) => {
       const nodeHex = node.nodeId.replaceAll("-", "");
       return {
@@ -628,7 +658,7 @@ write(
             : index === 1
               ? node2ConnectionHex
               : initialOwnerConnections[index],
-        owner_epoch: index < 2 ? 3 : 1,
+        owner_epoch: index === 0 ? 4 : index === 1 ? 3 : 1,
         lease_until: at(350),
         history: finalOwnerHistory.get(nodeHex),
       };
@@ -790,6 +820,86 @@ function expectTamperedBundleFailure(
 try {
   const productionDir = join(work, "production-bundle");
   runBuilder(productionDir, "production_readiness");
+  const builtEpochEvents = readFileSync(
+    join(productionDir, "epoch-events.jsonl"),
+    "utf8",
+  )
+    .trimEnd()
+    .split("\n")
+    .map((line) => JSON.parse(line));
+  if (
+    builtEpochEvents.some(
+      (event, index) =>
+        !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{6}Z$/.test(
+          event.timestamp,
+        ) ||
+        (index > 0 &&
+          event.timestamp < builtEpochEvents[index - 1].timestamp),
+    )
+  ) {
+    throw new Error(
+      "epoch event timestamps must retain microseconds and be nondecreasing",
+    );
+  }
+  const shortOwnerLifecycle = builtEpochEvents.filter(
+    (event) =>
+      event.node === node1Hex &&
+      ((event.epoch === 2 && event.event_type === "owner_lease_expired") ||
+        (event.epoch === 3 &&
+          ["owner_registered", "owner_retired"].includes(event.event_type)) ||
+        (event.epoch === 4 && event.event_type === "owner_registered")),
+  );
+  const shortOwnerTransitions = shortOwnerLifecycle.map(
+    (event) => `${event.event_type}:${event.epoch}`,
+  );
+  if (
+    shortOwnerTransitions.join(",") !==
+    "owner_lease_expired:2,owner_registered:3,owner_retired:3,owner_registered:4"
+  ) {
+    throw new Error(
+      `short owner lifecycle lost journal causality: ${shortOwnerTransitions.join(",")}`,
+    );
+  }
+  if (
+    shortOwnerLifecycle.some(
+      (event, index) =>
+        index > 0 &&
+        (event.sequence <= shortOwnerLifecycle[index - 1].sequence ||
+          Date.parse(event.timestamp) <
+            Date.parse(shortOwnerLifecycle[index - 1].timestamp)),
+    )
+  ) {
+    throw new Error("short owner lifecycle is not causally ordered");
+  }
+  const shortRegistration = shortOwnerLifecycle[1];
+  const shortRetirement = shortOwnerLifecycle[2];
+  if (
+    shortRegistration.timestamp !== atMicros(66, 100000) ||
+    shortRetirement.timestamp !== atMicros(66, 103000)
+  ) {
+    throw new Error(
+      "the short-lived owner lifecycle lost its acquisition or release timestamp",
+    );
+  }
+  if (
+    shortRegistration.lease_until !== at(96) ||
+    Date.parse(shortRegistration.lease_until) <=
+      Date.parse(shortRegistration.timestamp)
+  ) {
+    throw new Error(
+      "the immediate Release overwrote the short-lived owner's acquisition lease",
+    );
+  }
+  if (
+    builtEpochEvents.some(
+      (event) =>
+        event.node === node1Hex &&
+        event.epoch === 4 &&
+        ["owner_lease_expired", "owner_retired"].includes(event.event_type),
+    )
+  ) {
+    throw new Error("the final owner epoch must remain active");
+  }
   const verdict = verifyBundle(productionDir, "production_readiness");
   const failedMetrics = Object.entries(verdict.measurement_results).filter(
     ([, result]) => !result.passed,
@@ -839,7 +949,7 @@ try {
     ]),
   );
   const sourceAuthorityCut = JSON.parse(
-    readFileSync(join(runDir, "state", "final-authority-cut.json"), "utf8"),
+    readFileSync(finalAuthorityCutPath, "utf8"),
   );
   const builtAuthorityCut = JSON.parse(
     readFileSync(join(productionDir, "authority-cut.json"), "utf8"),
@@ -958,7 +1068,7 @@ try {
       inventory.sessions[0].owner_epoch = 2;
       return `${JSON.stringify(inventory, null, 2)}\n`;
     },
-    "owner_epoch 2 does not match latest connection-owner epoch 3",
+    "owner_epoch 2 does not match latest connection-owner epoch 4",
   );
   expectTamperedBundleFailure(
     productionDir,
@@ -1166,7 +1276,7 @@ try {
         node: builtSessionInventory.sessions[0].node,
         epoch: builtSessionInventory.sessions[0].owner_epoch,
       }),
-    `owner_epoch 3 is not active for node ${node1Hex}`,
+    `owner_epoch 4 is not active for node ${node1Hex}`,
   );
   expectTamperedBundleFailure(
     productionDir,
@@ -1433,6 +1543,92 @@ try {
     },
   );
   write(activeLoadPath, originalActiveLoad);
+
+  const originalAuthorityCut = readFileSync(finalAuthorityCutPath, "utf8");
+  const originalFencingHistory = readFileSync(fencingHistoryPath, "utf8");
+  const originalLeadershipHistory = readFileSync(leadershipHistoryPath, "utf8");
+  const writePublishedAndFrozenHistory = (path, field, lines) => {
+    write(path, `${lines.join("\n")}\n`);
+    const cut = JSON.parse(originalAuthorityCut);
+    cut[field] = lines;
+    write(finalAuthorityCutPath, JSON.stringify(cut));
+  };
+  const restoreFrozenHistories = () => {
+    write(fencingHistoryPath, originalFencingHistory);
+    write(leadershipHistoryPath, originalLeadershipHistory);
+    write(finalAuthorityCutPath, originalAuthorityCut);
+  };
+
+  const mismatchedPublishedOwnerHistory = completeOwnerHistory.filter(
+    (line) => line !== node1ShortAcquireHistory,
+  );
+  write(fencingHistoryPath, `${mismatchedPublishedOwnerHistory.join("\n")}\n`);
+  expectBuilderFailure(
+    join(work, "mismatched-published-owner-history-bundle"),
+    "published fencing history does not match the frozen final authority cut",
+  );
+  restoreFrozenHistories();
+
+  const missingShortAcquire = completeOwnerHistory.filter(
+    (line) => line !== node1ShortAcquireHistory,
+  );
+  if (missingShortAcquire.length === completeOwnerHistory.length) {
+    throw new Error("short-lived owner acquisition fixture is missing");
+  }
+  writePublishedAndFrozenHistory(
+    fencingHistoryPath,
+    "owner_history",
+    missingShortAcquire,
+  );
+  expectBuilderFailure(
+    join(work, "missing-short-owner-acquisition-bundle"),
+    "expired epoch 3 without a recorded acquisition",
+  );
+  restoreFrozenHistories();
+
+  const crossInstanceFinalOwnerHistory = node1FinalOwnerHistory.replace(
+    `:worker-b:${workerBIncarnation}:`,
+    `:worker-a:${workerAIncarnation}:`,
+  );
+  const crossInstanceEarlyTakeover = completeOwnerHistory
+    .filter((line) => line !== node1ShortReleaseHistory)
+    .map((line) =>
+      line === node1FinalOwnerHistory ? crossInstanceFinalOwnerHistory : line,
+    );
+  if (
+    crossInstanceFinalOwnerHistory === node1FinalOwnerHistory ||
+    crossInstanceEarlyTakeover.includes(node1ShortReleaseHistory)
+  ) {
+    throw new Error("cross-instance early takeover fixture is invalid");
+  }
+  writePublishedAndFrozenHistory(
+    fencingHistoryPath,
+    "owner_history",
+    crossInstanceEarlyTakeover,
+  );
+  expectBuilderFailure(
+    join(work, "cross-instance-early-owner-takeover-bundle"),
+    "replaces live owner epoch 3 across instances",
+  );
+  restoreFrozenHistories();
+
+  const liveRenewedLeaderHistory = `1002:sched-a:${schedulerAIncarnation}:1:${atMicros(43, 0)}:${atMicros(21, 0)}`;
+  const earlyLeaderTakeover = completeSchedulerHistory.map((line) =>
+    line === renewedLeaderHistory ? liveRenewedLeaderHistory : line,
+  );
+  if (!earlyLeaderTakeover.includes(liveRenewedLeaderHistory)) {
+    throw new Error("early scheduler takeover fixture is invalid");
+  }
+  writePublishedAndFrozenHistory(
+    leadershipHistoryPath,
+    "scheduler_history",
+    earlyLeaderTakeover,
+  );
+  expectBuilderFailure(
+    join(work, "early-scheduler-takeover-bundle"),
+    "replaces live epoch 1 before lease expiry",
+  );
+  restoreFrozenHistories();
 
   console.log(
     "G6 readiness evidence builder produced a verifier-passing bundle from synthetic producer state",

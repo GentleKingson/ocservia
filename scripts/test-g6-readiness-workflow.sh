@@ -12,6 +12,7 @@ AGENT_MAIN="${ROOT}/rust/crates/agent/src/main.rs"
 LIB="${ROOT}/scripts/g6-readiness-lib.sh"
 FD_A="${ROOT}/scripts/g6-readiness-fd-a.sh"
 FD_B="${ROOT}/scripts/g6-readiness-fd-b.sh"
+AUTHORITY_HISTORY_SQL="${ROOT}/scripts/g6-authority-history.sql"
 BUILDER="${ROOT}/scripts/build-g6-evidence.mjs"
 SLO="${ROOT}/docs/acceptance/g6-slo.yaml"
 PROBE_DOCKERFILE="${ROOT}/rust/g6-probe.Dockerfile"
@@ -375,6 +376,67 @@ fd_a_endpoint_line="$(grep -n 'transport-endpoint-bootstrap' <<<"${fd_a_bootstra
   echo "fd-a must install the shared controller key before endpoint bootstrap" >&2
   exit 1
 }
+primary_up_phase="$(sed -n '/^phase_primary_up() {/,/^}/p' "${FD_A}")"
+primary_migrate_line="$(grep -nF 'g6rd_compose run --rm migrate' <<<"${primary_up_phase}" | cut -d: -f1)"
+primary_journal_line="$(grep -nF 'g6rd_psql -c "$(<"${ROOT}/scripts/g6-authority-history.sql")"' <<<"${primary_up_phase}" | cut -d: -f1)"
+primary_service_line="$(grep -nF 'bootstrap_controller_endpoint' <<<"${primary_up_phase}" | cut -d: -f1)"
+[[ -n "${primary_migrate_line}" && -n "${primary_journal_line}" \
+  && -n "${primary_service_line}" \
+  && "${primary_migrate_line}" -lt "${primary_journal_line}" \
+  && "${primary_journal_line}" -lt "${primary_service_line}" ]] || {
+  echo "fd-a must install durable authority history after migrations and before services" >&2
+  exit 1
+}
+for token in \
+  "relpersistence='p'" \
+  "tgname IN ('g6_journal_connection_owner'," \
+  'AND prosecdef' \
+  'count(*)=0 FROM g6_connection_owner_history' \
+  'count(*)=0 FROM g6_scheduler_leadership_history' \
+  'count(*)=0 FROM connection_owner_fencing' \
+  'epoch=0 FROM scheduler_leadership'; do
+  grep -qF "${token}" <<<"${primary_up_phase}" || {
+    echo "fd-a authority-journal installation is not verified: ${token}" >&2
+    exit 1
+  }
+done
+if grep -qE '\|\| true|continue-on-error' <<<"${primary_up_phase}"; then
+  echo "fd-a authority-journal installation must fail closed" >&2
+  exit 1
+fi
+psql_helper="$(sed -n '/^g6rd_psql() {/,/^}/p' "${LIB}")"
+if grep -qE -- '--interactive|(^|[[:space:]])-i([[:space:]]|$)' <<<"${psql_helper}"; then
+  echo "the shared psql helper must not consume caller stdin" >&2
+  exit 1
+fi
+
+for token in \
+  'BEGIN;' \
+  'LOCK TABLE public.connection_owner_fencing, public.scheduler_leadership' \
+  'IN SHARE ROW EXCLUSIVE MODE;' \
+  'CREATE TABLE IF NOT EXISTS public.g6_connection_owner_history' \
+  'CREATE TABLE IF NOT EXISTS public.g6_scheduler_leadership_history' \
+  'history_id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY' \
+  'ALTER TABLE public.g6_connection_owner_history SET LOGGED' \
+  'ALTER TABLE public.g6_scheduler_leadership_history SET LOGGED' \
+  'SECURITY DEFINER' \
+  'SET search_path = pg_catalog' \
+  'AFTER INSERT OR UPDATE ON public.connection_owner_fencing' \
+  'AFTER INSERT OR UPDATE ON public.scheduler_leadership' \
+  'BEFORE UPDATE OR DELETE OR TRUNCATE ON public.g6_connection_owner_history' \
+  'BEFORE UPDATE OR DELETE OR TRUNCATE ON public.g6_scheduler_leadership_history' \
+  'FROM public.connection_owner_fencing AS current' \
+  'FROM public.scheduler_leadership AS current' \
+  'COMMIT;'; do
+  grep -qF "${token}" "${AUTHORITY_HISTORY_SQL}" || {
+    echo "the durable authority journal is missing: ${token}" >&2
+    exit 1
+  }
+done
+if grep -qE 'UNLOGGED|SET search_path = .*public' "${AUTHORITY_HISTORY_SQL}"; then
+  echo "the durable authority journal must be WAL-logged with a hardened function search path" >&2
+  exit 1
+fi
 grep -q 'g6rd_install_controller_key' <<<"${promote_phase}" || {
   echo "fd-b must install the handed-over controller key before promotion" >&2
   exit 1
@@ -1976,16 +2038,21 @@ for cleanup_token in \
   }
 done
 
-# Watchers remain live through slow collection. The API is frozen before the
-# final observations, and two independently verified transport inventories
-# bracket one DB-clock authority cut. Watchers stop at the cut, before the
-# second inventory, so post-cut renewals cannot redefine the evidence state.
+# Durable journal mirrors remain live through slow collection. The API is
+# frozen before the final observations, and two independently verified
+# transport inventories bracket one DB-clock authority cut. The cut freezes
+# both current authority and complete journal arrays in one MVCC snapshot.
 collect_phase="$(sed -n '/^phase_evidence_collect() {/,/^}/p' "${FD_B}")"
 writer_quiesce="$(sed -n '/^quiesce_control_plane_writers() {/,/^}/p' "${FD_B}")"
 ingress_quiesce="$(sed -n '/^quiesce_transport_ingress() {/,/^}/p' "${FD_B}")"
 renewer_quiesce="$(sed -n '/^quiesce_authority_renewers() {/,/^}/p' "${FD_B}")"
 authority_cut="$(sed -n '/^capture_final_authority_cut() {/,/^}/p' "${FD_B}")"
 session_assert="$(sed -n '/^assert_final_session_authority() {/,/^}/p' "${FD_B}")"
+fencing_watcher="$(sed -n '/^g6rd_watch_fencing_history() {/,/^}/p' "${LIB}")"
+leadership_watcher="$(sed -n '/^g6rd_watch_leadership_history() {/,/^}/p' "${LIB}")"
+watcher_start="$(sed -n '/^start_watchers() {/,/^}/p' "${FD_B}")"
+watcher_stop="$(sed -n '/^stop_watchers() {/,/^}/p' "${FD_B}")"
+final_history_snapshot="$(sed -n '/^append_final_history_snapshot() {/,/^}/p' "${FD_B}")"
 collect_instances_line="$(grep -nF 'done >>"${dir}/instances.tsv"' <<<"${collect_phase}" | cut -d: -f1)"
 collect_api_freeze_line="$(grep -nF 'quiesce_control_plane_writers' <<<"${collect_phase}" | cut -d: -f1)"
 collect_telemetry_line="$(grep -nF '>"${dir}/telemetry.jsonl"' <<<"${collect_phase}" | cut -d: -f1)"
@@ -2049,9 +2116,16 @@ for service in worker scheduler; do
 done
 for token in \
   'WITH cut AS MATERIALIZED' \
+  'owner_journal AS MATERIALIZED' \
+  'scheduler_journal AS MATERIALIZED' \
   'HH24:MI:SS.US\"Z\"' \
   'fencing.lease_until>cut.at' \
   'leadership.lease_until>cut.at' \
+  'FROM g6_connection_owner_history AS history' \
+  'FROM g6_scheduler_leadership_history AS history' \
+  'ORDER BY history.history_id' \
+  "'owner_history',owner_journal.entries" \
+  "'scheduler_history',scheduler_journal.entries" \
   "'lease_until',to_char(owner.lease_until" \
   "'owner_instance_id',owner.owner_instance_id::text" \
   "'owner_incarnation',owner.owner_incarnation::text" \
@@ -2065,6 +2139,56 @@ for token in \
     exit 1
   }
 done
+assert_journal_watcher() {
+  local watcher_body=$1 watcher_query=$2 watcher_file=$3
+  if ! grep -qF "${watcher_query}" <<<"${watcher_body}" \
+    || ! grep -qF 'mv -f "${temp}"' <<<"${watcher_body}" \
+    || ! grep -qF "${watcher_file}" <<<"${watcher_body}"; then
+    echo "authority watcher is not an ordered atomic journal mirror: ${watcher_file}" >&2
+    exit 1
+  fi
+}
+assert_journal_watcher "${fencing_watcher}" \
+  'FROM g6_connection_owner_history ORDER BY history_id' \
+  'fencing-history.jsonl'
+assert_journal_watcher "${leadership_watcher}" \
+  'FROM g6_scheduler_leadership_history ORDER BY history_id' \
+  'leadership-history.jsonl'
+if grep -qF 'FROM connection_owner_fencing ORDER BY node_id' <<<"${fencing_watcher}" \
+  || grep -qF 'FROM scheduler_leadership WHERE id=1' <<<"${leadership_watcher}"; then
+  echo "authority evidence must not poll mutable current-state rows" >&2
+  exit 1
+fi
+for token in 'fencing-watcher-failed-at' 'leadership-watcher-failed-at'; do
+  grep -qF "${token}" <<<"${watcher_start}" || {
+    echo "authority watcher failure markers are not reset: ${token}" >&2
+    exit 1
+  }
+done
+for token in \
+  'failure="${G6RD_STATE}/${name}-watcher-failed-at"' \
+  'if [[ -e "${failure}" ]]' \
+  'status=1'; do
+  grep -qF "${token}" <<<"${watcher_stop}" || {
+    echo "authority watcher failures are not propagated: ${token}" >&2
+    exit 1
+  }
+done
+for token in \
+  "jq -er '.owner_history[]'" \
+  "jq -er '.scheduler_history[]'" \
+  'history_id <= previous' \
+  'mv -f "${owner_tmp}" "${G6RD_STATE}/fencing-history.jsonl"' \
+  'mv -f "${scheduler_tmp}" "${G6RD_STATE}/leadership-history.jsonl"'; do
+  grep -qF "${token}" <<<"${final_history_snapshot}" || {
+    echo "the final authority cut does not atomically publish frozen journals: ${token}" >&2
+    exit 1
+  }
+done
+if grep -qE '>>.*(fencing|leadership)-history' <<<"${final_history_snapshot}"; then
+  echo "post-cut authority history must replace, not append to, live mirrors" >&2
+  exit 1
+fi
 clock_capture="$(sed -n '/^capture_database_clock() {/,/^}/p' "${FD_B}")"
 for token in 'clock_timestamp()' 'HH24:MI:SS.US\"Z\"'; do
   grep -qF "${token}" <<<"${clock_capture}" || {

@@ -165,6 +165,18 @@ function isoOf(value) {
   return `${new Date(value).toISOString().slice(0, 19)}Z`;
 }
 
+function secondIsoOfMicros(value) {
+  return isoOf(Number(value / 1000n));
+}
+
+function preciseIsoOfMicros(value) {
+  const micros = value % 1000000n;
+  const secondsMs = Number((value - micros) / 1000n);
+  return `${new Date(secondsMs).toISOString().slice(0, 19)}.${micros
+    .toString()
+    .padStart(6, "0")}Z`;
+}
+
 function parseStamp(value, label) {
   const parsed = Date.parse(value);
   if (!Number.isFinite(parsed)) fail(`${label} is not a timestamp: ${value}`);
@@ -224,6 +236,38 @@ function normalizeEndpointIdentity(value, label) {
 function positiveDecimalString(value, label) {
   if (/^[1-9][0-9]*$/.test(value ?? "")) return value;
   return fail(`${label} is not a canonical positive decimal string`);
+}
+
+function frozenHistoryLines(value, label) {
+  if (
+    !Array.isArray(value) ||
+    value.length === 0 ||
+    value.some(
+      (line) =>
+        typeof line !== "string" || line.length === 0 || /[\r\n]/.test(line),
+    )
+  ) {
+    fail(`${label} must be a non-empty array of non-empty single-line strings`);
+  }
+  return value;
+}
+
+function publishedHistoryLines(content, label) {
+  const body = content.endsWith("\n") ? content.slice(0, -1) : content;
+  const lines = body.split("\n");
+  if (lines.length === 0 || lines.some((line) => line.length === 0)) {
+    fail(`${label} must contain non-empty lines`);
+  }
+  return lines;
+}
+
+function requireFrozenHistoryMatch(frozen, published, label) {
+  if (
+    frozen.length !== published.length ||
+    frozen.some((line, index) => line !== published[index])
+  ) {
+    fail(`${label} does not match the frozen final authority cut`);
+  }
 }
 
 function canonicalJson(value) {
@@ -308,6 +352,14 @@ const afterFinalSessions = JSON.parse(
 const finalSessions = afterFinalSessions;
 const finalAuthorityCut = JSON.parse(
   readText(runDir, "state", "final-authority-cut.json"),
+);
+const frozenOwnerHistory = frozenHistoryLines(
+  finalAuthorityCut?.owner_history,
+  "final authority cut owner_history",
+);
+const frozenSchedulerHistory = frozenHistoryLines(
+  finalAuthorityCut?.scheduler_history,
+  "final authority cut scheduler_history",
 );
 const beforeFinalSessionsCompleteAt = normalizePreciseStamp(
   readText(
@@ -1187,34 +1239,82 @@ const relayTransitionsText = jsonl([
 ]);
 
 // ---------------------------------------------------------------------------
-// Epoch events from the authoritative fencing and leadership history.
-// Each watcher line is one full-table snapshot row; a per-node epoch change
-// between consecutive sightings records the predecessor's lease expiry and
-// the successor's registration. Renewal sightings carry the lease-bound
-// evidence for scheduler commits.
+// Epoch events from the authoritative fencing and leadership journals. Each
+// row carries the durable history id assigned in the same transaction as the
+// authority mutation. Timestamps are still the public event clock, while the
+// history id preserves causality when several transitions land in one second.
 // ---------------------------------------------------------------------------
 
 const epochEvents = [];
-const rankOf = { expired: 0, registered: 1, acquired: 1, commit: 2, accept: 3 };
+const rankOf = {
+  expired: 0,
+  retired: 0,
+  registered: 1,
+  acquired: 1,
+  commit: 2,
+  accept: 3,
+};
 
-// Watcher lines end in two RFC 3339 stamps whose colons forbid a naive
-// split; anchor on the trailing timestamps and split the leading fields.
+// Journal lines end in two microsecond RFC 3339 stamps whose colons forbid a
+// naive split; anchor on the trailing timestamps and split the leading fields.
 const trailingStamps =
-  /^(.*):(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z):(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z)$/;
+  /^(.*):(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{6}Z):(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{6}Z)$/;
 
-const ownerLines = readText(runDir, "outbox", "fencing-history.jsonl")
-  .split("\n")
-  .filter((line) => line.length > 0);
+function historyIdOf(value, label) {
+  return BigInt(positiveDecimalString(value, label));
+}
+
+function pushEpochEvent({
+  stampMicros,
+  sourceKind = null,
+  historyId = null,
+  causeOrder = 0,
+  rank,
+  record,
+}) {
+  epochEvents.push({
+    stampMicros,
+    sourceKind,
+    historyId,
+    causeOrder,
+    rank,
+    record,
+  });
+}
+
+const ownerLines = publishedHistoryLines(
+  readText(runDir, "outbox", "fencing-history.jsonl"),
+  "published fencing history",
+);
+requireFrozenHistoryMatch(
+  frozenOwnerHistory,
+  ownerLines,
+  "published fencing history",
+);
 const ownerState = new Map();
+let previousOwnerHistoryId = 0n;
 for (const line of ownerLines) {
   const match = trailingStamps.exec(line);
   const head = match?.[1]?.split(":") ?? [];
-  if (!match || head.length !== 5) {
+  if (!match || head.length !== 6) {
     fail(`malformed fencing history line: ${line}`);
   }
-  const [nodeHex, instance, incarnationText, connectionIdText, epochText] = head;
+  const [
+    historyIdText,
+    nodeText,
+    instance,
+    incarnationText,
+    connectionIdText,
+    epochText,
+  ] = head;
   const leaseUntil = match[2];
   const updatedAt = match[3];
+  const historyId = historyIdOf(historyIdText, "fencing history transition id");
+  if (historyId <= previousOwnerHistoryId) {
+    fail("fencing history transition ids must strictly increase");
+  }
+  previousOwnerHistoryId = historyId;
+  const nodeHex = normalizeUUIDIdentity(nodeText, "fencing history node");
   const incarnation = positiveDecimalString(
     incarnationText,
     "fencing history incarnation",
@@ -1227,8 +1327,18 @@ for (const line of ownerLines) {
   if (!Number.isInteger(epoch) || epoch < 1) {
     fail(`fencing history carries an invalid epoch: ${line}`);
   }
+  const leaseUntilMicros = utcStampMicros(leaseUntil, "fencing lease_until");
+  const updatedAtMicros = utcStampMicros(updatedAt, "fencing updated_at");
   const current = ownerState.get(nodeHex);
   if (!current) {
+    if (epoch !== 1) {
+      fail(`fencing history for node ${nodeHex} must begin at epoch 1`);
+    }
+    if (leaseUntilMicros <= updatedAtMicros) {
+      fail(
+        `fencing history observes expired epoch ${epoch} without a recorded acquisition for node ${nodeHex}`,
+      );
+    }
     const registrationRecord = {
       subject: "connection_owner",
       event_type: "owner_registered",
@@ -1237,32 +1347,70 @@ for (const line of ownerLines) {
       incarnation,
       connection_id: connectionId,
       epoch,
-      lease_until: leaseUntil,
+      lease_until: secondIsoOfMicros(leaseUntilMicros),
     };
-    epochEvents.push({
-      stampMs: parseStamp(updatedAt, "fencing updated_at"),
+    pushEpochEvent({
+      stampMicros: updatedAtMicros,
+      sourceKind: "owner",
+      historyId,
       rank: rankOf.registered,
       record: registrationRecord,
     });
     ownerState.set(nodeHex, {
       epoch,
       leaseUntil,
+      leaseUntilMicros,
       instance,
       incarnation,
       connectionId,
       registrationRecord,
+      lastUpdatedAtMicros: updatedAtMicros,
+      active: true,
     });
   } else if (current.epoch !== epoch) {
-    epochEvents.push({
-      stampMs: parseStamp(current.leaseUntil, "fencing lease_until"),
-      rank: rankOf.expired,
-      record: {
-        subject: "connection_owner",
-        event_type: "owner_lease_expired",
-        node: nodeHex,
-        epoch: current.epoch,
-      },
-    });
+    if (epoch !== current.epoch + 1) {
+      fail(
+        `fencing history for node ${nodeHex} must advance exactly from epoch ${current.epoch} to ${current.epoch + 1}`,
+      );
+    }
+    if (updatedAtMicros < current.lastUpdatedAtMicros) {
+      fail(`fencing history moves backwards for node ${nodeHex}`);
+    }
+    if (leaseUntilMicros <= updatedAtMicros) {
+      fail(
+        `fencing history observes expired epoch ${epoch} without a recorded acquisition for node ${nodeHex}`,
+      );
+    }
+    let registrationCauseOrder = 0;
+    if (current.active) {
+      const naturallyExpired = current.leaseUntilMicros <= updatedAtMicros;
+      if (
+        !naturallyExpired &&
+        (current.instance !== instance || current.incarnation !== incarnation)
+      ) {
+        fail(
+          `fencing history replaces live owner epoch ${current.epoch} across instances for node ${nodeHex}`,
+        );
+      }
+      pushEpochEvent({
+        stampMicros: naturallyExpired
+          ? current.leaseUntilMicros
+          : updatedAtMicros,
+        sourceKind: "owner",
+        historyId,
+        causeOrder: 0,
+        rank: naturallyExpired ? rankOf.expired : rankOf.retired,
+        record: {
+          subject: "connection_owner",
+          event_type: naturallyExpired
+            ? "owner_lease_expired"
+            : "owner_retired",
+          node: nodeHex,
+          epoch: current.epoch,
+        },
+      });
+      registrationCauseOrder = 1;
+    }
     const registrationRecord = {
       subject: "connection_owner",
       event_type: "owner_registered",
@@ -1271,20 +1419,26 @@ for (const line of ownerLines) {
       incarnation,
       connection_id: connectionId,
       epoch,
-      lease_until: leaseUntil,
+      lease_until: secondIsoOfMicros(leaseUntilMicros),
     };
-    epochEvents.push({
-      stampMs: parseStamp(updatedAt, "fencing updated_at"),
+    pushEpochEvent({
+      stampMicros: updatedAtMicros,
+      sourceKind: "owner",
+      historyId,
+      causeOrder: registrationCauseOrder,
       rank: rankOf.registered,
       record: registrationRecord,
     });
     ownerState.set(nodeHex, {
       epoch,
       leaseUntil,
+      leaseUntilMicros,
       instance,
       incarnation,
       connectionId,
       registrationRecord,
+      lastUpdatedAtMicros: updatedAtMicros,
+      active: true,
     });
   } else {
     if (
@@ -1292,10 +1446,44 @@ for (const line of ownerLines) {
       current.incarnation !== incarnation ||
       current.connectionId !== connectionId
     ) {
-      fail(`fencing history changes an owner tuple without a new epoch: ${line}`);
+      fail(
+        `fencing history changes an owner tuple without a new epoch: ${line}`,
+      );
     }
-    current.leaseUntil = leaseUntil;
-    current.registrationRecord.lease_until = leaseUntil;
+    if (updatedAtMicros < current.lastUpdatedAtMicros) {
+      fail(`fencing history moves backwards for node ${nodeHex}`);
+    }
+    if (!current.active) {
+      fail(
+        `fencing history updates retired owner epoch ${epoch} for node ${nodeHex}`,
+      );
+    }
+    if (leaseUntilMicros <= updatedAtMicros) {
+      pushEpochEvent({
+        stampMicros: updatedAtMicros,
+        sourceKind: "owner",
+        historyId,
+        rank: rankOf.retired,
+        record: {
+          subject: "connection_owner",
+          event_type: "owner_retired",
+          node: nodeHex,
+          epoch,
+        },
+      });
+      current.active = false;
+    } else {
+      if (leaseUntilMicros < current.leaseUntilMicros) {
+        fail(
+          `fencing history shortens live owner epoch ${epoch} for node ${nodeHex}`,
+        );
+      }
+      current.leaseUntil = leaseUntil;
+      current.leaseUntilMicros = leaseUntilMicros;
+      current.registrationRecord.lease_until =
+        secondIsoOfMicros(leaseUntilMicros);
+    }
+    current.lastUpdatedAtMicros = updatedAtMicros;
   }
 }
 
@@ -1306,8 +1494,11 @@ if (staleTransportProbe.status !== "rejected") {
 if (staleAgentProbe.status !== "rejected") {
   fail("the stale-agent probe did not record a rejection");
 }
-epochEvents.push({
-  stampMs: parseStamp(timelineStamp("stale_transport_rejected"), "timeline"),
+pushEpochEvent({
+  stampMicros: utcStampMicros(
+    timelineStamp("stale_transport_rejected"),
+    "timeline",
+  ),
   rank: rankOf.accept,
   record: {
     subject: "connection_owner",
@@ -1318,8 +1509,11 @@ epochEvents.push({
     accepted: false,
   },
 });
-epochEvents.push({
-  stampMs: parseStamp(timelineStamp("stale_agent_rejected"), "timeline"),
+pushEpochEvent({
+  stampMicros: utcStampMicros(
+    timelineStamp("stale_agent_rejected"),
+    "timeline",
+  ),
   rank: rankOf.accept,
   record: {
     subject: "connection_owner",
@@ -1331,19 +1525,52 @@ epochEvents.push({
   },
 });
 
-const leaderLines = readText(runDir, "outbox", "leadership-history.jsonl")
-  .split("\n")
-  .filter((line) => line.length > 0);
+const leaderLines = publishedHistoryLines(
+  readText(runDir, "outbox", "leadership-history.jsonl"),
+  "published leadership history",
+);
+requireFrozenHistoryMatch(
+  frozenSchedulerHistory,
+  leaderLines,
+  "published leadership history",
+);
 let leaderCurrent = null;
+let previousLeaderHistoryId = 0n;
+
+function pushLeaderCommit(leader) {
+  pushEpochEvent({
+    stampMicros: leader.lastCommitAtMicros,
+    sourceKind: "scheduler",
+    historyId: leader.lastCommitHistoryId,
+    causeOrder: 1,
+    rank: rankOf.commit,
+    record: {
+      subject: "scheduler",
+      event_type: "leader_commit",
+      instance: leader.instance,
+      epoch: leader.epoch,
+      accepted: true,
+    },
+  });
+}
+
 for (const line of leaderLines) {
   const match = trailingStamps.exec(line);
   const head = match?.[1]?.split(":") ?? [];
-  if (!match || head.length !== 3) {
+  if (!match || head.length !== 4) {
     fail(`malformed leadership history line: ${line}`);
   }
-  const [instance, incarnationText, epochText] = head;
+  const [historyIdText, instance, incarnationText, epochText] = head;
   const leaseUntil = match[2];
   const updatedAt = match[3];
+  const historyId = historyIdOf(
+    historyIdText,
+    "leadership history transition id",
+  );
+  if (historyId <= previousLeaderHistoryId) {
+    fail("leadership history transition ids must strictly increase");
+  }
+  previousLeaderHistoryId = historyId;
   const incarnation = positiveDecimalString(
     incarnationText,
     "leadership history incarnation",
@@ -1352,67 +1579,108 @@ for (const line of leaderLines) {
   if (!Number.isInteger(epoch) || epoch < 1) {
     fail(`leadership history carries an invalid epoch: ${line}`);
   }
+  const leaseUntilMicros = utcStampMicros(leaseUntil, "leadership lease_until");
+  const updatedAtMicros = utcStampMicros(updatedAt, "leadership updated_at");
   if (!leaderCurrent) {
+    if (epoch !== 1) {
+      fail("leadership history must begin at epoch 1");
+    }
+    if (leaseUntilMicros <= updatedAtMicros) {
+      fail(
+        `leadership history observes expired epoch ${epoch} without a recorded acquisition`,
+      );
+    }
     const acquisitionRecord = {
       subject: "scheduler",
       event_type: "leader_acquired",
       instance,
       incarnation,
       epoch,
-      lease_until: leaseUntil,
+      lease_until: secondIsoOfMicros(leaseUntilMicros),
     };
     leaderCurrent = {
       instance,
       incarnation,
       epoch,
       leaseUntil,
-      lastCommitAt: updatedAt,
+      leaseUntilMicros,
+      lastCommitAtMicros: updatedAtMicros,
+      lastCommitHistoryId: historyId,
+      lastUpdatedAtMicros: updatedAtMicros,
       acquisitionRecord,
+      active: true,
     };
-    epochEvents.push({
-      stampMs: parseStamp(updatedAt, "leadership updated_at"),
+    pushEpochEvent({
+      stampMicros: updatedAtMicros,
+      sourceKind: "scheduler",
+      historyId,
       rank: rankOf.acquired,
       record: acquisitionRecord,
     });
   } else if (leaderCurrent.epoch !== epoch) {
-    epochEvents.push({
-      stampMs: parseStamp(leaderCurrent.leaseUntil, "leadership lease_until"),
-      rank: rankOf.expired,
-      record: {
-        subject: "scheduler",
-        event_type: "leader_lease_expired",
-        epoch: leaderCurrent.epoch,
-      },
-    });
-    epochEvents.push({
-      stampMs: parseStamp(leaderCurrent.lastCommitAt, "leadership renewal"),
-      rank: rankOf.commit,
-      record: {
-        subject: "scheduler",
-        event_type: "leader_commit",
-        instance: leaderCurrent.instance,
-        epoch: leaderCurrent.epoch,
-        accepted: true,
-      },
-    });
+    if (epoch !== leaderCurrent.epoch + 1) {
+      fail(
+        `leadership history must advance exactly from epoch ${leaderCurrent.epoch} to ${leaderCurrent.epoch + 1}`,
+      );
+    }
+    if (updatedAtMicros < leaderCurrent.lastUpdatedAtMicros) {
+      fail("leadership history moves backwards");
+    }
+    if (leaseUntilMicros <= updatedAtMicros) {
+      fail(
+        `leadership history observes expired epoch ${epoch} without a recorded acquisition`,
+      );
+    }
+    if (
+      leaderCurrent.active &&
+      leaderCurrent.leaseUntilMicros > updatedAtMicros
+    ) {
+      fail(
+        `leadership history replaces live epoch ${leaderCurrent.epoch} before lease expiry`,
+      );
+    }
+    pushLeaderCommit(leaderCurrent);
+    let acquisitionCauseOrder = 0;
+    if (leaderCurrent.active) {
+      pushEpochEvent({
+        stampMicros: leaderCurrent.leaseUntilMicros,
+        sourceKind: "scheduler",
+        historyId,
+        causeOrder: 0,
+        rank: rankOf.expired,
+        record: {
+          subject: "scheduler",
+          event_type: "leader_lease_expired",
+          epoch: leaderCurrent.epoch,
+        },
+      });
+      acquisitionCauseOrder = 1;
+    }
     const acquisitionRecord = {
       subject: "scheduler",
       event_type: "leader_acquired",
       instance,
       incarnation,
       epoch,
-      lease_until: leaseUntil,
+      lease_until: secondIsoOfMicros(leaseUntilMicros),
     };
     leaderCurrent = {
       instance,
       incarnation,
       epoch,
       leaseUntil,
-      lastCommitAt: updatedAt,
+      leaseUntilMicros,
+      lastCommitAtMicros: updatedAtMicros,
+      lastCommitHistoryId: historyId,
+      lastUpdatedAtMicros: updatedAtMicros,
       acquisitionRecord,
+      active: true,
     };
-    epochEvents.push({
-      stampMs: parseStamp(updatedAt, "leadership updated_at"),
+    pushEpochEvent({
+      stampMicros: updatedAtMicros,
+      sourceKind: "scheduler",
+      historyId,
+      causeOrder: acquisitionCauseOrder,
       rank: rankOf.acquired,
       record: acquisitionRecord,
     });
@@ -1421,30 +1689,50 @@ for (const line of leaderLines) {
       leaderCurrent.instance !== instance ||
       leaderCurrent.incarnation !== incarnation
     ) {
-      fail(`leadership history changes a leader tuple without a new epoch: ${line}`);
+      fail(
+        `leadership history changes a leader tuple without a new epoch: ${line}`,
+      );
     }
-    leaderCurrent.leaseUntil = leaseUntil;
-    leaderCurrent.lastCommitAt = updatedAt;
-    leaderCurrent.acquisitionRecord.lease_until = leaseUntil;
+    if (updatedAtMicros < leaderCurrent.lastUpdatedAtMicros) {
+      fail("leadership history moves backwards");
+    }
+    if (!leaderCurrent.active) {
+      fail(`leadership history updates expired epoch ${epoch}`);
+    }
+    if (leaseUntilMicros <= updatedAtMicros) {
+      pushEpochEvent({
+        stampMicros: updatedAtMicros,
+        sourceKind: "scheduler",
+        historyId,
+        rank: rankOf.expired,
+        record: {
+          subject: "scheduler",
+          event_type: "leader_lease_expired",
+          epoch,
+        },
+      });
+      leaderCurrent.active = false;
+    } else {
+      if (leaseUntilMicros < leaderCurrent.leaseUntilMicros) {
+        fail(`leadership history shortens live epoch ${epoch}`);
+      }
+      leaderCurrent.leaseUntil = leaseUntil;
+      leaderCurrent.leaseUntilMicros = leaseUntilMicros;
+      leaderCurrent.lastCommitAtMicros = updatedAtMicros;
+      leaderCurrent.lastCommitHistoryId = historyId;
+      leaderCurrent.acquisitionRecord.lease_until =
+        secondIsoOfMicros(leaseUntilMicros);
+    }
+    leaderCurrent.lastUpdatedAtMicros = updatedAtMicros;
   }
 }
 if (leaderCurrent) {
-  epochEvents.push({
-    stampMs: parseStamp(leaderCurrent.lastCommitAt, "leadership renewal"),
-    rank: rankOf.commit,
-    record: {
-      subject: "scheduler",
-      event_type: "leader_commit",
-      instance: leaderCurrent.instance,
-      epoch: leaderCurrent.epoch,
-      accepted: true,
-    },
-  });
+  pushLeaderCommit(leaderCurrent);
 }
 const staleTerm = readText(runDir, "state", "stale-scheduler-term").trim();
 const [staleLeaderInstance, , staleLeaderEpochText] = staleTerm.split(":");
-epochEvents.push({
-  stampMs: parseStamp(
+pushEpochEvent({
+  stampMicros: utcStampMicros(
     timelineStamp("stale_scheduler_commit_rejected"),
     "timeline",
   ),
@@ -1458,16 +1746,30 @@ epochEvents.push({
   },
 });
 
-epochEvents.sort(
-  (left, right) =>
-    left.stampMs - right.stampMs ||
+epochEvents.sort((left, right) => {
+  if (left.stampMicros < right.stampMicros) return -1;
+  if (left.stampMicros > right.stampMicros) return 1;
+  if (
+    left.sourceKind !== null &&
+    left.sourceKind === right.sourceKind &&
+    left.historyId !== null &&
+    right.historyId !== null
+  ) {
+    if (left.historyId < right.historyId) return -1;
+    if (left.historyId > right.historyId) return 1;
+    if (left.causeOrder !== right.causeOrder) {
+      return left.causeOrder - right.causeOrder;
+    }
+  }
+  return (
     left.rank - right.rank ||
-    JSON.stringify(left.record).localeCompare(JSON.stringify(right.record)),
-);
+    JSON.stringify(left.record).localeCompare(JSON.stringify(right.record))
+  );
+});
 const epochEventsText = jsonl(
   epochEvents.map((entry, index) => ({
     sequence: index + 1,
-    timestamp: isoOf(entry.stampMs),
+    timestamp: preciseIsoOfMicros(entry.stampMicros),
     environment_id: environmentId,
     candidate_sha: candidateSha,
     ...entry.record,
@@ -1689,7 +1991,7 @@ const timestampedStamps = [
   ]),
   ...acknowledged.map((marker) => marker.acknowledged_at),
   ...isolatedWrites.map((write) => write.at),
-  ...epochEvents.map((entry) => isoOf(entry.stampMs)),
+  ...epochEvents.map((entry) => preciseIsoOfMicros(entry.stampMicros)),
   ...traceRecords.map((entry) => isoOf(entry.stampMs)),
   outageDeclaredAt,
   isolatedAt,

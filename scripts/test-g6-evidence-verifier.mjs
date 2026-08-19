@@ -129,6 +129,80 @@ for (const [name, result] of Object.entries(baseVerdict.observation_results)) {
   }
 }
 
+// Retirement is just as final as lease expiry for an authority term. Exercise
+// a non-topology owner so this regression isolates the stale-accept metric
+// instead of failing later through the final session cross-check.
+const retiredNode = "f".repeat(32);
+const retiredEvents = read("testdata/g6/artifacts/epoch-events.jsonl")
+  .trimEnd()
+  .split("\n")
+  .map((line) => JSON.parse(line));
+for (const record of [
+  {
+    timestamp: "2026-08-14T00:01:30Z",
+    subject: "connection_owner",
+    event_type: "owner_registered",
+    node: retiredNode,
+    instance: "worker-retired",
+    incarnation: "1700000000000000099",
+    connection_id: "e".repeat(32),
+    epoch: 1,
+    lease_until: "2026-08-14T00:05:00Z",
+  },
+  {
+    timestamp: "2026-08-14T00:01:31Z",
+    subject: "connection_owner",
+    event_type: "owner_retired",
+    node: retiredNode,
+    epoch: 1,
+  },
+  {
+    timestamp: "2026-08-14T00:01:32Z",
+    subject: "connection_owner",
+    event_type: "owner_accept",
+    node: retiredNode,
+    instance: "worker-retired",
+    epoch: 1,
+    accepted: true,
+  },
+]) {
+  retiredEvents.push({
+    sequence: retiredEvents.length + 1,
+    environment_id: "g6-12345678",
+    candidate_sha: "1".repeat(40),
+    ...record,
+  });
+}
+const retiredOverride = `${retiredEvents
+  .map((record) => JSON.stringify(record))
+  .join("\n")}\n`;
+const retiredEvidence = clone(baseEvidence);
+rebindOverriddenArtifacts(retiredEvidence, {
+  "epoch-events.jsonl": retiredOverride,
+});
+let retiredRejected = false;
+try {
+  verifyG6({
+    sloText: baseSloText,
+    evidenceText: serialize(retiredEvidence),
+    topologyText: serialize(baseTopology),
+    manifestText,
+    artifactRoot: buildArtifactRoot(null, {
+      "epoch-events.jsonl": retiredOverride,
+    }),
+    expectedAuthority: "production_readiness",
+    expectedEnvironmentId: "g6-12345678",
+    expectedFailureDomainClass: "multi_host",
+  });
+} catch (error) {
+  retiredRejected = String(error?.message ?? error).includes(
+    "evidence measurement stale_owner_accepts does not match the artifact-derived value",
+  );
+}
+if (!retiredRejected) {
+  throw new Error("a retired owner accepted work without failing the stale-authority metric");
+}
+
 const fixtureDirectory = new URL("../testdata/g6/", import.meta.url);
 const cases = readdirSync(fixtureDirectory)
   .filter((name) => name.startsWith("evidence-") && name.endsWith(".json"))
@@ -221,5 +295,5 @@ for (const name of cases) {
 }
 
 console.log(
-  `G6 verifier awarded the positive fixture a final pass from verified producers and rejected ${cases.length} negative fixtures`,
+  `G6 verifier awarded the positive fixture a final pass and rejected ${cases.length} file fixtures plus the retired-owner regression`,
 );

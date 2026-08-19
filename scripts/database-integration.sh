@@ -146,6 +146,77 @@ clone_database() {
     "CREATE DATABASE ${destination} TEMPLATE ${source}" >/dev/null
 }
 
+assert_g6_authority_history() {
+  local container=$1 database=$2 app_log owner_log
+  app_log="${TMP_ROOT}/${database}-authority-history-app.log"
+  owner_log="${TMP_ROOT}/${database}-authority-history-owner.log"
+
+  docker exec -i "${container}" psql -v ON_ERROR_STOP=1 \
+    -U ocservia_owner -d "${database}" \
+    <"${ROOT}/scripts/g6-authority-history.sql" >/dev/null
+
+  # Exercise the trigger path through the restricted runtime role. The first
+  # owner is acquired, released inside the same short transaction, and then
+  # replaced by epoch two; polling the mutable row cannot recover that chain.
+  docker exec -e PGPASSWORD=test-runtime-only "${container}" \
+    psql -v ON_ERROR_STOP=1 -U ocservia_app -d "${database}" -c "
+      INSERT INTO connection_owner_fencing(
+        node_id,owner_instance_id,owner_incarnation,connection_id,
+        owner_epoch,lease_until,updated_at
+      ) VALUES (
+        decode(repeat('31',16),'hex'),
+        '00000000-0000-7000-8000-000000000031',31,
+        decode(repeat('32',16),'hex'),1,now()+interval '30 seconds',now()
+      );
+      UPDATE connection_owner_fencing
+      SET lease_until=now(),updated_at=now()
+      WHERE node_id=decode(repeat('31',16),'hex');
+      UPDATE connection_owner_fencing
+      SET connection_id=decode(repeat('33',16),'hex'),
+          owner_epoch=owner_epoch+1,
+          lease_until=now()+interval '30 seconds',updated_at=now()
+      WHERE node_id=decode(repeat('31',16),'hex');
+      UPDATE scheduler_leadership
+      SET instance_id='00000000-0000-7000-8000-000000000034',
+          incarnation=34,epoch=1,
+          lease_until=now()+interval '30 seconds',updated_at=now()
+      WHERE id=1;
+      UPDATE scheduler_leadership
+      SET lease_until=now()+interval '60 seconds',updated_at=now()
+      WHERE id=1;
+    " >/dev/null
+
+  test "$(docker exec "${container}" psql -U ocservia_owner -d "${database}" -Atc \
+    "SELECT string_agg(owner_epoch||':'||(lease_until>updated_at),',' ORDER BY history_id) FROM g6_connection_owner_history")" \
+    = "1:true,1:false,2:true"
+  test "$(docker exec "${container}" psql -U ocservia_owner -d "${database}" -Atc \
+    "SELECT string_agg(epoch||':'||(lease_until>updated_at),',' ORDER BY history_id) FROM g6_scheduler_leadership_history")" \
+    = "1:true,1:true"
+  test "$(docker exec "${container}" psql -U ocservia_owner -d "${database}" -Atc \
+    "SELECT count(*) FROM pg_class WHERE oid IN ('g6_connection_owner_history'::regclass,'g6_scheduler_leadership_history'::regclass) AND relpersistence='p'")" = "2"
+  test "$(docker exec "${container}" psql -U ocservia_owner -d "${database}" -Atc \
+    "SELECT count(*) FROM pg_trigger WHERE tgname IN ('g6_journal_connection_owner','g6_journal_scheduler_leadership') AND tgenabled='O' AND NOT tgisinternal")" = "2"
+  test "$(docker exec "${container}" psql -U ocservia_owner -d "${database}" -Atc \
+    "SELECT count(*) FROM pg_proc WHERE proname IN ('g6_capture_connection_owner_history','g6_capture_scheduler_leadership_history') AND prosecdef AND proconfig @> ARRAY['search_path=pg_catalog']::text[]")" = "2"
+
+  if docker exec -e PGPASSWORD=test-runtime-only "${container}" \
+    psql -v ON_ERROR_STOP=1 -U ocservia_app -d "${database}" \
+    -c "SELECT * FROM g6_connection_owner_history" >"${app_log}" 2>&1; then
+    echo "the runtime role can read the private G6 authority journal" >&2
+    exit 1
+  fi
+  grep -Fq 'permission denied for table g6_connection_owner_history' "${app_log}"
+
+  if docker exec "${container}" psql -v ON_ERROR_STOP=1 \
+    -U ocservia_owner -d "${database}" \
+    -c "UPDATE g6_connection_owner_history SET owner_epoch=owner_epoch+1" \
+    >"${owner_log}" 2>&1; then
+    echo "the G6 authority journal accepted a destructive mutation" >&2
+    exit 1
+  fi
+  grep -Fq 'append-only G6 evidence journal' "${owner_log}"
+}
+
 seed_verified_receipt() {
   local container=$1 database=$2
   docker exec "${container}" psql -v ON_ERROR_STOP=1 -U ocservia_owner -d "${database}" -c "
@@ -177,6 +248,12 @@ for major in "${POSTGRES_MAJORS[@]}"; do
   OCSERV_ENVIRONMENT=test OCSERV_DATABASE_URL="${owner_url}" \
     OCSERV_RUNTIME_DATABASE_ROLE=ocservia_app "${BIN}" --migrate-only \
     >"${TMP_ROOT}/pg${major}-migrate.log" 2>&1
+
+  g6_history_database="ocservia_g6_history_${major}"
+  clone_database "${container}" ocservia "${g6_history_database}"
+  assert_g6_authority_history "${container}" "${g6_history_database}"
+  docker exec "${container}" psql -v ON_ERROR_STOP=1 -U ocservia_owner -d postgres -c \
+    "DROP DATABASE ${g6_history_database}" >/dev/null
 
   clean_database="ocservia_clean23_${major}"
   clone_database "${container}" ocservia "${clean_database}"

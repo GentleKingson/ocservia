@@ -94,7 +94,9 @@ journal_query() {
 # ---------------------------------------------------------------------------
 
 start_watchers() {
-  rm -f "${G6RD_STATE}/watchers-stop"
+  rm -f "${G6RD_STATE}/watchers-stop" \
+    "${G6RD_STATE}/fencing-watcher-failed-at" \
+    "${G6RD_STATE}/leadership-watcher-failed-at"
   : >"${G6RD_STATE}/fencing-history.jsonl"
   : >"${G6RD_STATE}/leadership-history.jsonl"
   g6rd_spawn_harness_loop "${G6RD_LOGS}/fencing-watcher.log" \
@@ -105,9 +107,14 @@ start_watchers() {
 
 stop_watchers() {
   touch "${G6RD_STATE}/watchers-stop"
-  local name status=0
+  local name failure status=0
   for name in fencing leadership; do
     g6rd_stop_harness_loop "${G6RD_STATE}/${name}-watcher.pid" || status=1
+    failure="${G6RD_STATE}/${name}-watcher-failed-at"
+    if [[ -e "${failure}" ]]; then
+      echo "${name} authority watcher failed closed at $(<"${failure}")" >&2
+      status=1
+    fi
   done
   return "${status}"
 }
@@ -1601,6 +1608,18 @@ capture_final_authority_cut() {
        SELECT leadership.*
        FROM scheduler_leadership AS leadership CROSS JOIN cut
        WHERE leadership.id=1 AND leadership.lease_until>cut.at
+     ), owner_journal AS MATERIALIZED (
+       SELECT COALESCE(jsonb_agg(
+         history.history_id::text||':'||encode(history.node_id,'hex')||':'||history.owner_instance_id||':'||history.owner_incarnation||':'||encode(history.connection_id,'hex')||':'||history.owner_epoch||':'||to_char(history.lease_until AT TIME ZONE 'UTC','YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"')||':'||to_char(history.updated_at AT TIME ZONE 'UTC','YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"')
+         ORDER BY history.history_id
+       ),'[]'::jsonb) AS entries
+       FROM g6_connection_owner_history AS history
+     ), scheduler_journal AS MATERIALIZED (
+       SELECT COALESCE(jsonb_agg(
+         history.history_id::text||':'||history.instance_id||':'||history.incarnation||':'||history.epoch||':'||to_char(history.lease_until AT TIME ZONE 'UTC','YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"')||':'||to_char(history.updated_at AT TIME ZONE 'UTC','YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"')
+         ORDER BY history.history_id
+       ),'[]'::jsonb) AS entries
+       FROM g6_scheduler_leadership_history AS history
      )
      SELECT jsonb_build_object(
        'cut_at',to_char(cut.at AT TIME ZONE 'UTC','YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"'),
@@ -1611,8 +1630,8 @@ capture_final_authority_cut() {
            'owner_incarnation',owner.owner_incarnation::text,
            'connection_id',encode(owner.connection_id,'hex'),
            'owner_epoch',owner.owner_epoch,
-           'lease_until',to_char(owner.lease_until AT TIME ZONE 'UTC','YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"'),
-           'history',encode(owner.node_id,'hex')||':'||owner.owner_instance_id||':'||owner.owner_incarnation||':'||encode(owner.connection_id,'hex')||':'||owner.owner_epoch||':'||to_char(owner.lease_until AT TIME ZONE 'UTC','YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"')||':'||to_char(owner.updated_at AT TIME ZONE 'UTC','YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"')
+           'lease_until',to_char(owner.lease_until AT TIME ZONE 'UTC','YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"'),
+           'history',encode(owner.node_id,'hex')||':'||owner.owner_instance_id||':'||owner.owner_incarnation||':'||encode(owner.connection_id,'hex')||':'||owner.owner_epoch||':'||to_char(owner.lease_until AT TIME ZONE 'UTC','YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"')||':'||to_char(owner.updated_at AT TIME ZONE 'UTC','YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"')
          ) ORDER BY owner.node_id) FROM owners AS owner
        ),'[]'::jsonb),
        'leader',(
@@ -1620,13 +1639,17 @@ capture_final_authority_cut() {
            'instance_id',entry.instance_id::text,
            'incarnation',entry.incarnation::text,
            'epoch',entry.epoch,
-           'lease_until',to_char(entry.lease_until AT TIME ZONE 'UTC','YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"'),
-           'history',entry.instance_id||':'||entry.incarnation||':'||entry.epoch||':'||to_char(entry.lease_until AT TIME ZONE 'UTC','YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"')||':'||to_char(entry.updated_at AT TIME ZONE 'UTC','YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"')
+           'lease_until',to_char(entry.lease_until AT TIME ZONE 'UTC','YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"'),
+           'history',entry.instance_id||':'||entry.incarnation||':'||entry.epoch||':'||to_char(entry.lease_until AT TIME ZONE 'UTC','YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"')||':'||to_char(entry.updated_at AT TIME ZONE 'UTC','YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"')
          ) FROM leader AS entry
-       )
-     ) FROM cut" >"${out}"
+       ),
+       'owner_history',owner_journal.entries,
+       'scheduler_history',scheduler_journal.entries
+     ) FROM cut CROSS JOIN owner_journal CROSS JOIN scheduler_journal" >"${out}"
   jq -e --argjson expected "${expected}" \
-    '.cut_at | type == "string"' "${out}" >/dev/null
+    '.cut_at | type == "string"
+     and test("^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\\.[0-9]{6}Z$")' \
+    "${out}" >/dev/null
   jq -e --argjson expected "${expected}" \
     '(.owners | length) == $expected
      and ([.owners[].node_hex] | unique | length) == $expected
@@ -1640,7 +1663,18 @@ capture_final_authority_cut() {
      and (.leader.instance_id | type == "string" and length > 0)
      and (.leader.incarnation | type == "string" and test("^[1-9][0-9]*$"))
      and (.leader.epoch | type == "number" and . > 0)
-     and (.leader.lease_until | type == "string")' "${out}" >/dev/null || {
+     and (.leader.lease_until | type == "string")
+     and (.owner_history | type == "array")
+     and (.owner_history | length > 0)
+     and all(.owner_history[];
+       type == "string"
+       and test("^[1-9][0-9]*:[0-9a-f]{32}:[0-9a-f-]{36}:[0-9]+:[0-9a-f]{32}:[1-9][0-9]*:[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\\.[0-9]{6}Z:[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\\.[0-9]{6}Z$"))
+     and (.scheduler_history | type == "array")
+     and (.scheduler_history | length > 0)
+     and all(.scheduler_history[];
+       type == "string"
+       and test("^[1-9][0-9]*:[0-9a-f-]{36}:[0-9]+:[1-9][0-9]*:[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\\.[0-9]{6}Z:[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\\.[0-9]{6}Z$"))' \
+    "${out}" >/dev/null || {
     echo "the final authority cut does not contain every live owner and leader lease" >&2
     return 1
   }
@@ -1718,9 +1752,43 @@ assert_final_session_authority() {
 
 append_final_history_snapshot() {
   local cut="${G6RD_STATE}/final-authority-cut.json"
+  local owner_tmp="${G6RD_STATE}/fencing-history.final.$$"
+  local scheduler_tmp="${G6RD_STATE}/leadership-history.final.$$"
+  local file label line history_id previous count
   require_file "${cut}"
-  jq -er '.owners[].history' "${cut}" >>"${G6RD_STATE}/fencing-history.jsonl"
-  jq -er '.leader.history' "${cut}" >>"${G6RD_STATE}/leadership-history.jsonl"
+  if ! jq -er '.owner_history[]' "${cut}" >"${owner_tmp}" \
+    || ! jq -er '.scheduler_history[]' "${cut}" >"${scheduler_tmp}"; then
+    rm -f "${owner_tmp}" "${scheduler_tmp}"
+    echo "the final authority cut is missing its frozen journal arrays" >&2
+    return 1
+  fi
+  for file in "${owner_tmp}" "${scheduler_tmp}"; do
+    label=fencing
+    [[ "${file}" == "${scheduler_tmp}" ]] && label=leadership
+    previous=0
+    count=0
+    while IFS= read -r line; do
+      history_id="${line%%:*}"
+      if [[ ! "${history_id}" =~ ^[1-9][0-9]*$ ]] \
+        || (( history_id <= previous )); then
+        rm -f "${owner_tmp}" "${scheduler_tmp}"
+        echo "frozen ${label} journal is not in strict history-id order" >&2
+        return 1
+      fi
+      previous="${history_id}"
+      count=$((count + 1))
+    done <"${file}"
+    if (( count == 0 )); then
+      rm -f "${owner_tmp}" "${scheduler_tmp}"
+      echo "frozen ${label} journal is empty" >&2
+      return 1
+    fi
+  done
+  # These arrays and the live authority rows came from one SQL statement and
+  # one MVCC snapshot. Replacing, rather than appending to, the live mirrors
+  # prevents any renewal committed after cut_at from entering the evidence.
+  mv -f "${owner_tmp}" "${G6RD_STATE}/fencing-history.jsonl"
+  mv -f "${scheduler_tmp}" "${G6RD_STATE}/leadership-history.jsonl"
 }
 
 phase_evidence_collect() {
