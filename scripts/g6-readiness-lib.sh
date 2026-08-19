@@ -1119,40 +1119,58 @@ g6rd_extract_enrollment_node_id() {
 g6rd_enqueue_command() {
   local node_id="${1:?node id is required}" key="${2:?idempotency key is required}"
   local log="${3:-${G6RD_STATE}/enqueue-log.jsonl}" revision stamp latency body command_id
-  local status detail
-  revision="$(g6rd_node_revision "${node_id}")" || return 1
-  stamp="$(g6rd_now)"
-  body="$(mktemp "${RUNNER_TEMP}/enqueue.XXXXXX")"
-  if ! latency="$(curl --silent --show-error --connect-timeout 3 --max-time 10 \
-    --header "Authorization: Bearer $(g6rd_secret dev-auth-token)" \
-    --header 'Content-Type: application/json' \
-    --header "Idempotency-Key: ${key}" \
-    --header "If-Match: \"revision-${revision}\"" \
-    --data '{"kind":"noop"}' \
-    --output "${body}" \
-    -w '%{http_code} %{time_total}' \
-    "http://127.0.0.1:$(g6rd_api_port)/api/v1/nodes/${node_id}/synthetic-commands")"; then
-    latency="000 0.000"
-  fi
-  status="${latency% *}"
-  command_id="$(jq -er '.command_id // empty' "${body}" 2>/dev/null || true)"
-  if [[ "${status}" != 20* || -z "${command_id}" ]]; then
+  local status detail attempt=0 max_retries="${G6RD_ENQUEUE_STALE_RETRIES:-2}"
+  [[ "${max_retries}" =~ ^[0-9]+$ && "${max_retries}" -le 5 ]] || {
+    echo "G6RD_ENQUEUE_STALE_RETRIES must be between 0 and 5" >&2
+    return 2
+  }
+  while true; do
+    revision="$(g6rd_node_revision "${node_id}")" || return 1
+    stamp="$(g6rd_now)"
+    body="$(mktemp "${RUNNER_TEMP}/enqueue.XXXXXX")"
+    if ! latency="$(curl --silent --show-error --connect-timeout 3 --max-time 10 \
+      --header "Authorization: Bearer $(g6rd_secret dev-auth-token)" \
+      --header 'Content-Type: application/json' \
+      --header "Idempotency-Key: ${key}" \
+      --header "If-Match: \"revision-${revision}\"" \
+      --data '{"kind":"noop"}' \
+      --output "${body}" \
+      -w '%{http_code} %{time_total}' \
+      "http://127.0.0.1:$(g6rd_api_port)/api/v1/nodes/${node_id}/synthetic-commands")"; then
+      latency="000 0.000"
+    fi
+    status="${latency% *}"
+    command_id="$(jq -er '.command_id // empty' "${body}" 2>/dev/null || true)"
+    detail=""
+    if [[ "${status}" != 20* || -z "${command_id}" ]]; then
+      detail="$(jq -r 'if type == "object" then (.detail // .title // "unspecified API error") else "invalid JSON response" end' \
+        "${body}" 2>/dev/null || printf 'invalid JSON response')"
+    fi
+    rm -f "${body}"
+    jq -cn --arg at "${stamp}" \
+      --arg node "${node_id}" --arg key "${key}" \
+      --arg outcome "${status}" --argjson latency_seconds "${latency#* }" \
+      --arg command_id "${command_id:-}" \
+      '{at:$at,node:$node,idempotency_key:$key,status:($outcome|tonumber),latency_seconds:$latency_seconds,command_id:$command_id}' \
+      >>"${log}"
+    if [[ "${status}" == 20* && -n "${command_id}" ]]; then
+      return 0
+    fi
+    # This 409 is a known pre-mutation rejection. Refresh the ETag while
+    # retaining the idempotency key, and keep every attempt in the SLO log.
+    if [[ "${status}" == 409 \
+      && "${detail}" == "the node changed after this operation was prepared" \
+      && "${attempt}" -lt "${max_retries}" ]]; then
+      attempt=$((attempt + 1))
+      continue
+    fi
     if [[ "${status}" == 000 ]]; then
       echo "synthetic enqueue for node ${node_id} failed before an HTTP response" >&2
     else
-      detail="$(jq -r 'if type == "object" then (.detail // .title // "unspecified API error") else "invalid JSON response" end' \
-        "${body}" 2>/dev/null || printf 'invalid JSON response')"
       echo "synthetic enqueue for node ${node_id} returned HTTP ${status}: ${detail}" >&2
     fi
-  fi
-  rm -f "${body}"
-  jq -cn --arg at "${stamp}" \
-    --arg node "${node_id}" --arg key "${key}" \
-    --arg outcome "${status}" --argjson latency_seconds "${latency#* }" \
-    --arg command_id "${command_id:-}" \
-    '{at:$at,node:$node,idempotency_key:$key,status:($outcome|tonumber),latency_seconds:$latency_seconds,command_id:$command_id}' \
-    >>"${log}"
-  [[ "${status}" == 20* && -n "${command_id}" ]]
+    return 1
+  done
 }
 
 # Reads through the same gateway path; the SLO population records one row
@@ -1755,19 +1773,45 @@ g6rd_release_synthetic_barriers() {
 g6rd_sampler_row() {
   local component="$1" instance="$2" container="$3" pid_expr="$4" tasks_expr="$5" queue="$6" db="$7" stamp="$8"
   local compose_command=g6rd_compose rss fd tasks
+  local -a compose_args=()
   if [[ "${component}" == agent ]]; then
     compose_command=g6rd_agent_compose
+    compose_args=(--user 65532:65532)
   fi
-  rss="$("${compose_command}" exec -T "${container}" sh -c \
-    "pid=\$(${pid_expr}); awk '/VmRSS/{print \$2}' /proc/\$pid/status" 2>/dev/null | tr -d '[:space:]')"
-  fd="$("${compose_command}" exec -T "${container}" sh -c \
-    "pid=\$(${pid_expr}); ls /proc/\$pid/fd 2>/dev/null | wc -l" 2>/dev/null | tr -d '[:space:]')"
-  tasks="$("${compose_command}" exec -T "${container}" sh -c "${tasks_expr}" 2>/dev/null | tr -d '[:space:]')"
-  [[ "${rss}" =~ ^[0-9]+$ ]] || return 1
-  [[ "${fd}" =~ ^[0-9]+$ ]] || return 1
-  [[ "${tasks}" =~ ^[0-9]+$ ]] || return 1
-  [[ "${queue}" =~ ^[0-9]*$ ]] || return 1
-  [[ "${db}" =~ ^[0-9]*$ ]] || return 1
+  if ! rss="$("${compose_command}" exec -T "${compose_args[@]}" "${container}" sh -c \
+    "pid=\$(${pid_expr}); awk '/VmRSS/{print \$2}' /proc/\$pid/status" 2>/dev/null | tr -d '[:space:]')"; then
+    echo "resource sampler ${instance} RSS probe failed" >&2
+    return 1
+  fi
+  if ! fd="$("${compose_command}" exec -T "${compose_args[@]}" "${container}" sh -c \
+    "pid=\$(${pid_expr}); ls /proc/\$pid/fd 2>/dev/null | wc -l" 2>/dev/null | tr -d '[:space:]')"; then
+    echo "resource sampler ${instance} file-descriptor probe failed" >&2
+    return 1
+  fi
+  if ! tasks="$("${compose_command}" exec -T "${compose_args[@]}" "${container}" sh -c "${tasks_expr}" 2>/dev/null | tr -d '[:space:]')"; then
+    echo "resource sampler ${instance} task probe failed" >&2
+    return 1
+  fi
+  [[ "${rss}" =~ ^[0-9]+$ ]] || {
+    echo "resource sampler ${instance} returned invalid RSS" >&2
+    return 1
+  }
+  [[ "${fd}" =~ ^[0-9]+$ ]] || {
+    echo "resource sampler ${instance} returned an invalid file-descriptor count" >&2
+    return 1
+  }
+  [[ "${tasks}" =~ ^[0-9]+$ ]] || {
+    echo "resource sampler ${instance} returned an invalid task count" >&2
+    return 1
+  }
+  [[ "${queue}" =~ ^[0-9]*$ ]] || {
+    echo "resource sampler ${instance} received an invalid queue depth" >&2
+    return 1
+  }
+  [[ "${db}" =~ ^[0-9]*$ ]] || {
+    echo "resource sampler ${instance} received an invalid database connection count" >&2
+    return 1
+  }
   rss="$((rss * 1024))"
   printf '%s,%s,%s,%s,%s,%s,%s,%s,%s,%s\n' \
     "${stamp}" "${component}" "${instance}" "${rss}" "${fd}" "${tasks}" "${queue}" "${db}" \

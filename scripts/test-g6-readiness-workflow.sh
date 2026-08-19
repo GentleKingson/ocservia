@@ -617,6 +617,12 @@ sampler_trace="$(mktemp)"
     sampler_fixture_value "$@"
   }
   g6rd_agent_compose() {
+    [[ "$#" == 8 && "$1" == exec && "$2" == -T \
+      && "$3" == --user && "$4" == 65532:65532 \
+      && "$5" == agent-fd-b-01 && "$6" == sh && "$7" == -c ]] || {
+      echo "Agent resource sampling did not use its process owner" >&2
+      return 1
+    }
     printf 'agent\n' >>"${sampler_trace}"
     sampler_fixture_value "$@"
   }
@@ -634,6 +640,19 @@ sampler_trace="$(mktemp)"
     echo "Agent resource samples must use the Agent Compose overlay" >&2
     exit 1
   fi
+  g6rd_agent_compose() { return 1; }
+  if sampler_error="$(g6rd_sampler_row agent agent-fd-b-01 agent-fd-b-01 \
+    'cat /run/ocserv-platform/agent.pid' \
+    'cat /run/ocservia-agent/journal/tasks.json' 0 '' \
+    2026-08-19T00:00:00Z 2>&1)"; then
+    echo "a failed Agent sample was accepted" >&2
+    exit 1
+  fi
+  grep -qF 'resource sampler agent-fd-b-01 RSS probe failed' \
+    <<<"${sampler_error}" || {
+    echo "a resource probe failure did not identify its instance and field" >&2
+    exit 1
+  }
 )
 rm -f "${sampler_trace}"
 sampler_failure_output="$(mktemp)"
@@ -905,7 +924,13 @@ enqueue_test="$(mktemp -d)"
 (
   export RUNNER_TEMP="${enqueue_test}"
   export G6RD_STATE="${enqueue_test}"
-  g6rd_node_revision() { printf '7\n'; }
+  g6rd_node_revision() {
+    if [[ -e "${enqueue_test}/retry-seen" ]]; then
+      printf '8\n'
+    else
+      printf '7\n'
+    fi
+  }
   g6rd_now() { printf '2026-08-17T00:00:00Z\n'; }
   g6rd_secret() { printf 'test-development-token\n'; }
   g6rd_api_port() { printf '18080\n'; }
@@ -922,13 +947,30 @@ enqueue_test="$(mktemp -d)"
       esac
     done
     [[ -n "${output}" ]] || return 2
-    if [[ "${G6RD_TEST_CURL_MODE}" == accepted ]]; then
-      printf '%s\n' '{"command_id":"018f2f10-7abc-7def-8abc-3123456789ab"}' >"${output}"
-      printf '202 0.125'
-    else
-      printf '%s\n' '{"type":"https://ocservia.dev/problems/expected-version-required","detail":"provide a quoted revision"}' >"${output}"
-      printf '400 0.050'
-    fi
+    case "${G6RD_TEST_CURL_MODE}" in
+      accepted)
+        printf '%s\n' '{"command_id":"018f2f10-7abc-7def-8abc-3123456789ab"}' >"${output}"
+        printf '202 0.125'
+        ;;
+      retry)
+        if [[ ! -e "${enqueue_test}/retry-seen" ]]; then
+          touch "${enqueue_test}/retry-seen"
+          printf '%s\n' '{"detail":"the node changed after this operation was prepared"}' >"${output}"
+          printf '409 0.050'
+        else
+          printf '%s\n' '{"command_id":"018f2f10-7abc-7def-8abc-4123456789ab"}' >"${output}"
+          printf '202 0.075'
+        fi
+        ;;
+      stale)
+        printf '%s\n' '{"detail":"the node changed after this operation was prepared"}' >"${output}"
+        printf '409 0.050'
+        ;;
+      *)
+        printf '%s\n' '{"type":"https://ocservia.dev/problems/expected-version-required","detail":"provide a quoted revision"}' >"${output}"
+        printf '400 0.050'
+        ;;
+    esac
   }
 
   G6RD_TEST_CURL_MODE=accepted
@@ -943,6 +985,40 @@ enqueue_test="$(mktemp -d)"
   }
   jq -e '.status == 202 and .command_id != ""' \
     "${enqueue_test}/enqueue-log.jsonl" >/dev/null
+
+  G6RD_TEST_CURL_MODE=retry
+  retry_log="${enqueue_test}/retry-log.jsonl"
+  g6rd_enqueue_command 018f2f10-7abc-7def-8abc-0123456789ab retry-key \
+    "${retry_log}"
+  jq -se '
+    length == 2
+    and .[0].status == 409 and .[0].command_id == ""
+    and .[1].status == 202 and .[1].command_id != ""
+    and all(.[]; .idempotency_key == "retry-key")
+  ' "${retry_log}" >/dev/null || {
+    echo "synthetic enqueue did not preserve both stale-revision attempts" >&2
+    exit 1
+  }
+  grep -Fxq 'If-Match: "revision-8"' "${enqueue_test}/curl.args" || {
+    echo "synthetic enqueue did not refresh the revision before retry" >&2
+    exit 1
+  }
+
+  rm -f "${enqueue_test}/retry-seen"
+  G6RD_TEST_CURL_MODE=stale
+  G6RD_ENQUEUE_STALE_RETRIES=1
+  export G6RD_ENQUEUE_STALE_RETRIES
+  if g6rd_enqueue_command 018f2f10-7abc-7def-8abc-0123456789ab stale-key \
+    "${enqueue_test}/stale-log.jsonl" 2>/dev/null; then
+    echo "synthetic enqueue exceeded its stale-revision retry bound" >&2
+    exit 1
+  fi
+  jq -se 'length == 2 and all(.[]; .status == 409)' \
+    "${enqueue_test}/stale-log.jsonl" >/dev/null || {
+    echo "synthetic enqueue did not retain every bounded stale-revision attempt" >&2
+    exit 1
+  }
+  unset G6RD_ENQUEUE_STALE_RETRIES
 
   G6RD_TEST_CURL_MODE=rejected
   set +e
