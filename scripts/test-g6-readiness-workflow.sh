@@ -601,6 +601,53 @@ unset G6RD_AGENT_IMAGE G6RD_CONTROL_PLANE_IMAGE G6RD_TRANSPORTD_IMAGE \
     exit 1
   }
 )
+sampler_trace="$(mktemp)"
+(
+  export G6RD_ENVIRONMENT_ID=fixture-environment
+  export G6RD_CANDIDATE_SHA=0123456789abcdef0123456789abcdef01234567
+  sampler_fixture_value() {
+    case "$*" in
+      *VmRSS*) printf '1\n' ;;
+      */fd*) printf '2\n' ;;
+      *) printf '3\n' ;;
+    esac
+  }
+  g6rd_compose() {
+    printf 'base\n' >>"${sampler_trace}"
+    sampler_fixture_value "$@"
+  }
+  g6rd_agent_compose() {
+    printf 'agent\n' >>"${sampler_trace}"
+    sampler_fixture_value "$@"
+  }
+  sample="$(g6rd_sampler_row agent agent-fd-b-01 agent-fd-b-01 \
+    'cat /run/ocserv-platform/agent.pid' \
+    'cat /run/ocservia-agent/journal/tasks.json' 0 '' \
+    2026-08-19T00:00:00Z)"
+  [[ "${sample}" == \
+    '2026-08-19T00:00:00Z,agent,agent-fd-b-01,1024,2,3,0,,fixture-environment,0123456789abcdef0123456789abcdef01234567' ]] || {
+    echo "the resource sampler did not emit the expected Agent sample" >&2
+    exit 1
+  }
+  if [[ "$(grep -c '^agent$' "${sampler_trace}")" != 3 ]] \
+    || grep -q '^base$' "${sampler_trace}"; then
+    echo "Agent resource samples must use the Agent Compose overlay" >&2
+    exit 1
+  fi
+)
+rm -f "${sampler_trace}"
+sampler_failure_output="$(mktemp)"
+(
+  export FD_ID=fd-b
+  g6rd_now() { printf '2026-08-19T00:00:00Z\n'; }
+  g6rd_psql() { printf '1\n'; }
+  g6rd_sampler_row() { [[ "$1" != agent ]]; }
+  if g6rd_sampler_tick "${sampler_failure_output}"; then
+    echo "the resource sampler hid a missing required component sample" >&2
+    exit 1
+  fi
+)
+rm -f "${sampler_failure_output}"
 reclaim_owned_test="$(mktemp -d)"
 mkdir -p "${reclaim_owned_test}/nested"
 : >"${reclaim_owned_test}/nested/runner-owned"

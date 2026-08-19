@@ -1754,12 +1754,15 @@ g6rd_release_synthetic_barriers() {
 
 g6rd_sampler_row() {
   local component="$1" instance="$2" container="$3" pid_expr="$4" tasks_expr="$5" queue="$6" db="$7" stamp="$8"
-  local rss fd tasks
-  rss="$(g6rd_compose exec -T "${container}" sh -c \
+  local compose_command=g6rd_compose rss fd tasks
+  if [[ "${component}" == agent ]]; then
+    compose_command=g6rd_agent_compose
+  fi
+  rss="$("${compose_command}" exec -T "${container}" sh -c \
     "pid=\$(${pid_expr}); awk '/VmRSS/{print \$2}' /proc/\$pid/status" 2>/dev/null | tr -d '[:space:]')"
-  fd="$(g6rd_compose exec -T "${container}" sh -c \
+  fd="$("${compose_command}" exec -T "${container}" sh -c \
     "pid=\$(${pid_expr}); ls /proc/\$pid/fd 2>/dev/null | wc -l" 2>/dev/null | tr -d '[:space:]')"
-  tasks="$(g6rd_compose exec -T "${container}" sh -c "${tasks_expr}" 2>/dev/null | tr -d '[:space:]')"
+  tasks="$("${compose_command}" exec -T "${container}" sh -c "${tasks_expr}" 2>/dev/null | tr -d '[:space:]')"
   [[ "${rss}" =~ ^[0-9]+$ ]] || return 1
   [[ "${fd}" =~ ^[0-9]+$ ]] || return 1
   [[ "${tasks}" =~ ^[0-9]+$ ]] || return 1
@@ -1784,24 +1787,24 @@ g6rd_sampler_tick() {
   {
     g6rd_sampler_row controller "api-${FD_ID}" api 'echo 1' \
       'curl -s 127.0.0.1:6060/debug/pprof/goroutine?debug=1 | sed -n "1s/.*total \([0-9]*\).*/\1/p"' \
-      0 "" "${stamp}"
+      0 "" "${stamp}" || return 1
     g6rd_sampler_row controller "worker-${FD_ID}" worker 'echo 1' \
       'curl -s 127.0.0.1:6060/debug/pprof/goroutine?debug=1 | sed -n "1s/.*total \([0-9]*\).*/\1/p"' \
-      0 "" "${stamp}"
+      0 "" "${stamp}" || return 1
     g6rd_sampler_row controller "scheduler-${FD_ID}" scheduler 'echo 1' \
       'curl -s 127.0.0.1:6060/debug/pprof/goroutine?debug=1 | sed -n "1s/.*total \([0-9]*\).*/\1/p"' \
-      0 "" "${stamp}"
+      0 "" "${stamp}" || return 1
     # shellcheck disable=SC2016  # the sed program must reach the container verbatim
     g6rd_sampler_row transportd "transportd-${FD_ID}" transportd 'echo 1' \
       'sed -n "\$s/.*\"tasks_alive\":\([0-9]*\).*/\1/p" /run/transport-stats/tasks.json' \
-      0 "" "${stamp}"
+      0 "" "${stamp}" || return 1
     # shellcheck disable=SC2016  # the sed program must reach the container verbatim
     g6rd_sampler_row agent "agent-${FD_ID}-01" "agent-${FD_ID}-01" 'cat /run/ocserv-platform/agent.pid' \
       'sed -n "\$s/.*\"tasks_alive\":\([0-9]*\).*/\1/p" /run/ocservia-agent/journal/tasks.json' \
-      0 "" "${stamp}"
+      0 "" "${stamp}" || return 1
     g6rd_sampler_row postgres "postgres-${FD_ID}" postgres 'echo 1' \
       'ls /proc | grep -c "^[0-9]"' \
-      "${queue}" "${db}" "${stamp}"
+      "${queue}" "${db}" "${stamp}" || return 1
   } >>"${out_file}"
 }
 
