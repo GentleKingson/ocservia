@@ -294,6 +294,10 @@ services:
     environment:
       <<: *role-environment
       PGAPPNAME: ${G6_FD_ID:?}-scheduler
+      # Explicitly enable the G6-only, exact-term fenced completion journal.
+      # The production binary defaults this evidence hook off and rejects it
+      # when OCSERV_ENVIRONMENT=production.
+      OCSERV_TEST_SCHEDULER_MAINTENANCE_EVIDENCE: "true"
 
   transportd:
     <<: *service-defaults

@@ -8,7 +8,7 @@ CHECKSUMS="${ROOT}/scripts/checksums.txt"
 PROFILE="${1:-}"
 
 if (($# > 1)); then
-  echo "usage: $0 [all|ci-quality|contracts|go-test|go-quality|go-rust-integration|rust-validation|native|web|security]" >&2
+  echo "usage: $0 [all|ci-quality|contracts|g6-runtime|go-test|go-quality|go-rust-integration|rust-validation|native|web|security]" >&2
   exit 2
 fi
 
@@ -21,7 +21,7 @@ if [[ -z "${PROFILE}" ]]; then
 fi
 
 case "${PROFILE}" in
-  all | ci-quality | contracts | go-test | go-quality | go-rust-integration | rust-validation | native | web | security) ;;
+  all | ci-quality | contracts | g6-runtime | go-test | go-quality | go-rust-integration | rust-validation | native | web | security) ;;
   *)
     echo "unsupported bootstrap profile: ${PROFILE}" >&2
     exit 2
@@ -313,6 +313,11 @@ install_web_dependencies() {
   (cd "${ROOT}/web" && npm ci)
 }
 
+install_g6_runtime_dependencies() {
+  (cd "${ROOT}/scripts/g6-runtime" && \
+    npm ci --ignore-scripts --no-audit --no-fund)
+}
+
 verify_host_command() {
   command -v "$1" >/dev/null 2>&1 || {
     echo "required host command is missing: $1" >&2
@@ -348,6 +353,7 @@ case "${PROFILE}" in
     verify_host_command jq
     verify_host_command shellcheck
     install_web_dependencies
+    install_g6_runtime_dependencies
     ;;
   ci-quality)
     install_go
@@ -362,6 +368,7 @@ case "${PROFILE}" in
     verify_host_command jq
     verify_host_command shellcheck
     install_web_dependencies
+    install_g6_runtime_dependencies
     ;;
   contracts)
     install_node
@@ -369,6 +376,12 @@ case "${PROFILE}" in
     install_contract_tools
     verify_java
     install_web_dependencies
+    install_g6_runtime_dependencies
+    ;;
+  g6-runtime)
+    install_node
+    install_npm
+    install_g6_runtime_dependencies
     ;;
   go-test)
     install_go

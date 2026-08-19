@@ -44,7 +44,7 @@ cleanup() {
   done
   for container in "${CONTAINERS[@]:-}"; do
     [[ -n "${container}" ]] || continue
-    docker rm -f "${container}" >/dev/null 2>&1 || cleanup_exit=1
+    docker rm -fv "${container}" >/dev/null 2>&1 || cleanup_exit=1
     if docker inspect "${container}" >/dev/null 2>&1; then
       echo "database integration left container ${container}" >&2
       cleanup_exit=1
@@ -147,7 +147,7 @@ clone_database() {
 }
 
 assert_g6_authority_history() {
-  local container=$1 database=$2 app_log owner_log
+  local container=$1 database=$2 app_log owner_log mismatch_log stale_log
   app_log="${TMP_ROOT}/${database}-authority-history-app.log"
   owner_log="${TMP_ROOT}/${database}-authority-history-owner.log"
 
@@ -181,23 +181,69 @@ assert_g6_authority_history() {
           incarnation=34,epoch=1,
           lease_until=now()+interval '30 seconds',updated_at=now()
       WHERE id=1;
+      SELECT public.g6_record_scheduler_maintenance(
+        '00000000-0000-7000-8000-000000000034',34,1
+      );
       UPDATE scheduler_leadership
       SET lease_until=now()+interval '60 seconds',updated_at=now()
       WHERE id=1;
     " >/dev/null
+
+  mismatch_log="${TMP_ROOT}/${database}-scheduler-maintenance-mismatch.log"
+  if docker exec -e PGPASSWORD=test-runtime-only "${container}" \
+    psql -v ON_ERROR_STOP=1 -U ocservia_app -d "${database}" \
+    -c "SELECT public.g6_record_scheduler_maintenance(\
+      '00000000-0000-7000-8000-000000000034',34,2)" \
+    >"${mismatch_log}" 2>&1; then
+    echo "the G6 scheduler recorder accepted a mismatched epoch" >&2
+    exit 1
+  fi
+  grep -Fq 'scheduler maintenance term is not the exact live leader' "${mismatch_log}"
+
+  docker exec -e PGPASSWORD=test-runtime-only "${container}" \
+    psql -v ON_ERROR_STOP=1 -U ocservia_app -d "${database}" -c "
+      UPDATE scheduler_leadership
+      SET lease_until=now(),updated_at=now()
+      WHERE id=1;
+      UPDATE scheduler_leadership
+      SET instance_id='00000000-0000-7000-8000-000000000035',
+          incarnation=35,epoch=epoch+1,
+          lease_until=now()+interval '60 seconds',updated_at=now()
+      WHERE id=1;
+    " >/dev/null
+
+  stale_log="${TMP_ROOT}/${database}-scheduler-maintenance-stale.log"
+  if docker exec -e PGPASSWORD=test-runtime-only "${container}" \
+    psql -v ON_ERROR_STOP=1 -U ocservia_app -d "${database}" \
+    -c "SELECT public.g6_record_scheduler_maintenance(\
+      '00000000-0000-7000-8000-000000000034',34,1)" \
+    >"${stale_log}" 2>&1; then
+    echo "the G6 scheduler recorder accepted a stale exact term" >&2
+    exit 1
+  fi
+  grep -Fq 'scheduler maintenance term is not the exact live leader' "${stale_log}"
+  docker exec -e PGPASSWORD=test-runtime-only "${container}" \
+    psql -v ON_ERROR_STOP=1 -U ocservia_app -d "${database}" \
+    -c "SELECT public.g6_record_scheduler_maintenance(\
+      '00000000-0000-7000-8000-000000000035',35,2)" >/dev/null
 
   test "$(docker exec "${container}" psql -U ocservia_owner -d "${database}" -Atc \
     "SELECT string_agg(owner_epoch||':'||(lease_until>updated_at),',' ORDER BY history_id) FROM g6_connection_owner_history")" \
     = "1:true,1:false,2:true"
   test "$(docker exec "${container}" psql -U ocservia_owner -d "${database}" -Atc \
     "SELECT string_agg(epoch||':'||(lease_until>updated_at),',' ORDER BY history_id) FROM g6_scheduler_leadership_history")" \
-    = "1:true,1:true"
+    = "1:true,1:true,1:false,2:true"
   test "$(docker exec "${container}" psql -U ocservia_owner -d "${database}" -Atc \
-    "SELECT count(*) FROM pg_class WHERE oid IN ('g6_connection_owner_history'::regclass,'g6_scheduler_leadership_history'::regclass) AND relpersistence='p'")" = "2"
+    "SELECT string_agg(maintenance_id||':'||incarnation||':'||epoch||':'||instance_id,',' ORDER BY maintenance_id) FROM g6_scheduler_maintenance_history")" \
+    = "1:34:1:00000000-0000-7000-8000-000000000034,2:35:2:00000000-0000-7000-8000-000000000035"
   test "$(docker exec "${container}" psql -U ocservia_owner -d "${database}" -Atc \
-    "SELECT count(*) FROM pg_trigger WHERE tgname IN ('g6_journal_connection_owner','g6_journal_scheduler_leadership') AND tgenabled='O' AND NOT tgisinternal")" = "2"
+    "SELECT count(*) FROM pg_class WHERE oid IN ('g6_connection_owner_history'::regclass,'g6_scheduler_leadership_history'::regclass,'g6_scheduler_maintenance_history'::regclass) AND relpersistence='p'")" = "3"
   test "$(docker exec "${container}" psql -U ocservia_owner -d "${database}" -Atc \
-    "SELECT count(*) FROM pg_proc WHERE proname IN ('g6_capture_connection_owner_history','g6_capture_scheduler_leadership_history') AND prosecdef AND proconfig @> ARRAY['search_path=pg_catalog']::text[]")" = "2"
+    "SELECT count(*) FROM pg_trigger WHERE tgname IN ('g6_journal_connection_owner','g6_journal_scheduler_leadership','g6_scheduler_maintenance_history_append_only') AND tgenabled='O' AND NOT tgisinternal")" = "3"
+  test "$(docker exec "${container}" psql -U ocservia_owner -d "${database}" -Atc \
+    "SELECT count(*) FROM pg_proc WHERE proname IN ('g6_capture_connection_owner_history','g6_capture_scheduler_leadership_history','g6_record_scheduler_maintenance') AND prosecdef AND proconfig @> ARRAY['search_path=pg_catalog']::text[]")" = "3"
+  test "$(docker exec "${container}" psql -U ocservia_owner -d "${database}" -Atc \
+    "SELECT has_function_privilege('ocservia_app','g6_record_scheduler_maintenance(uuid,bigint,bigint)','EXECUTE') AND NOT EXISTS (SELECT 1 FROM pg_proc p CROSS JOIN LATERAL aclexplode(COALESCE(p.proacl,acldefault('f',p.proowner))) acl WHERE p.oid='g6_record_scheduler_maintenance(uuid,bigint,bigint)'::regprocedure AND acl.grantee=0 AND acl.privilege_type='EXECUTE')")" = "t"
 
   if docker exec -e PGPASSWORD=test-runtime-only "${container}" \
     psql -v ON_ERROR_STOP=1 -U ocservia_app -d "${database}" \
@@ -207,11 +253,28 @@ assert_g6_authority_history() {
   fi
   grep -Fq 'permission denied for table g6_connection_owner_history' "${app_log}"
 
+  if docker exec -e PGPASSWORD=test-runtime-only "${container}" \
+    psql -v ON_ERROR_STOP=1 -U ocservia_app -d "${database}" \
+    -c "SELECT * FROM g6_scheduler_maintenance_history" >"${app_log}" 2>&1; then
+    echo "the runtime role can read the private G6 maintenance journal" >&2
+    exit 1
+  fi
+  grep -Fq 'permission denied for table g6_scheduler_maintenance_history' "${app_log}"
+
   if docker exec "${container}" psql -v ON_ERROR_STOP=1 \
     -U ocservia_owner -d "${database}" \
     -c "UPDATE g6_connection_owner_history SET owner_epoch=owner_epoch+1" \
     >"${owner_log}" 2>&1; then
     echo "the G6 authority journal accepted a destructive mutation" >&2
+    exit 1
+  fi
+  grep -Fq 'append-only G6 evidence journal' "${owner_log}"
+
+  if docker exec "${container}" psql -v ON_ERROR_STOP=1 \
+    -U ocservia_owner -d "${database}" \
+    -c "DELETE FROM g6_scheduler_maintenance_history" \
+    >"${owner_log}" 2>&1; then
+    echo "the G6 scheduler maintenance journal accepted a destructive mutation" >&2
     exit 1
   fi
   grep -Fq 'append-only G6 evidence journal' "${owner_log}"

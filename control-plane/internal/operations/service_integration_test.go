@@ -282,7 +282,18 @@ func TestSentCommandWithoutResultEntersAndContinuesReconciliationIntegration(t *
 	assertSentCommandProjection(t, pool, commandID, operationID, jobs[0], "dispatched", "dispatched", true)
 
 	// Move only PostgreSQL's dispatch-attempt clock. The production scan uses
-	// the same clock, so this exercises the full timeout path without sleeping.
+	// the same clock, so this exercises both sides of the exact timeout boundary
+	// without sleeping.
+	if _, err := pool.Exec(ctx, `UPDATE command_attempts
+		SET finished_at=clock_timestamp()-$2::interval
+		WHERE id=$1 AND state='sent'`, jobs[0].AttemptID, (commandResultResponseTimeout - time.Second).String()); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.Reap(ctx, 3); err != nil {
+		t.Fatalf("reap sent command before response timeout: %v", err)
+	}
+	assertSentCommandProjection(t, pool, commandID, operationID, jobs[0], "dispatched", "dispatched", true)
+
 	if _, err := pool.Exec(ctx, `UPDATE command_attempts
 		SET finished_at=clock_timestamp()-$2::interval
 		WHERE id=$1 AND state='sent'`, jobs[0].AttemptID, (commandResultResponseTimeout + time.Second).String()); err != nil {

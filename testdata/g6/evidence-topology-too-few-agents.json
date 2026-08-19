@@ -581,7 +581,7 @@
     {
       "operation": "replace",
       "path": "measurements.reconnect_storm_recovery_seconds.actual",
-      "value": 68
+      "value": 68.1
     },
     {
       "operation": "replace",

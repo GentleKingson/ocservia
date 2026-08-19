@@ -25,7 +25,7 @@ const artifactDirectory = join(root, "testdata/g6/artifacts");
 const environmentId = "g6-12345678";
 const candidateSha = "1111111111111111111111111111111111111111";
 const startedAt = "2026-08-14T00:00:00Z";
-const finishedAt = "2026-08-14T00:05:01Z";
+const finishedAt = "2026-08-14T00:05:30Z";
 
 function at(seconds) {
   const hh = String(Math.floor(seconds / 3600)).padStart(2, "0");
@@ -38,9 +38,17 @@ function atMicros(seconds, micros) {
   return at(seconds).replace("Z", `.${String(micros).padStart(6, "0")}Z`);
 }
 
-const finalBeforeCompleteAt = atMicros(270, 100000);
-const finalAuthorityCutAt = atMicros(270, 200000);
-const finalAfterStartAt = atMicros(270, 300000);
+const finalBeforeCompleteAt = atMicros(310, 100000);
+const finalAuthorityCutAt = atMicros(310, 200000);
+const finalAfterStartAt = atMicros(310, 300000);
+const ownerLeaseExpiryAt = atMicros(10, 100000);
+const ownerTakeoverAt = atMicros(10, 200000);
+const bulkDisconnectAt = at(180);
+const reconnectStartedAt = at(181);
+const reconnectCompletedAt = at(250);
+const resourceSamplingStoppedAt = atMicros(300, 100000);
+const apiSloMeasuredAt = atMicros(300, 200000);
+const finalLeaseUntil = at(329);
 
 const bindingFields = `${environmentId},${candidateSha}`;
 const bindingRecord = (timestamp) => ({
@@ -53,6 +61,34 @@ const workerAIncarnation = "1700000000000000001";
 const workerBIncarnation = "1700000000000000002";
 const schedulerAIncarnation = "1800000000000000001";
 const schedulerBIncarnation = "1800000000000000002";
+
+function reconnectAt(index) {
+  return atMicros(200 + index, 100000);
+}
+
+function reconnectRetiredAt(index) {
+  return atMicros(200 + index, 0);
+}
+
+function takeoverConnectionId(index) {
+  return (0x8000n + BigInt(index + 1)).toString(16).padStart(32, "0");
+}
+
+function finalOwnerInstance() {
+  return "worker-b";
+}
+
+function finalOwnerIncarnation() {
+  return workerBIncarnation;
+}
+
+function finalConnectionId(index) {
+  return (0x9000n + BigInt(index + 1)).toString(16).padStart(32, "0");
+}
+
+function finalOwnerEpoch() {
+  return 3;
+}
 
 function jsonl(records) {
   return `${records.map((r) => JSON.stringify(r)).join("\n")}\n`;
@@ -68,16 +104,22 @@ function buildResourceSamples() {
   for (let tick = 0; tick <= 60; tick += 1) {
     const timestamp = at(tick * 5);
     lines.push(
-      `${timestamp},controller,api-1,${104857600 + tick * 1024},${48 + Math.floor(tick / 15)},${120 + Math.floor(tick / 5)},0,,${bindingFields}`,
+      `${timestamp},controller,api-fd-b,${104857600 + tick * 1024},${48 + Math.floor(tick / 15)},${120 + Math.floor(tick / 5)},0,,${bindingFields}`,
     );
     lines.push(
-      `${timestamp},transportd,node-1,${104857600 + tick * 2048},${40 + Math.floor(tick / 20)},${200 + Math.floor(tick / 8)},0,,${bindingFields}`,
+      `${timestamp},controller,worker-fd-b,${94371840 + tick * 768},${44 + Math.floor(tick / 20)},${110 + Math.floor(tick / 6)},0,,${bindingFields}`,
     );
     lines.push(
-      `${timestamp},agent,node-agent-03,${52428800 + tick * 512},${24 + Math.floor(tick / 30)},${60 + Math.floor(tick / 15)},0,,${bindingFields}`,
+      `${timestamp},controller,scheduler-fd-b,${83886080 + tick * 512},${40 + Math.floor(tick / 30)},${100 + Math.floor(tick / 10)},0,,${bindingFields}`,
     );
     lines.push(
-      `${timestamp},postgres,pg-primary,${209715200 + tick * 4096},80,40,0,${40 + Math.floor(tick / 30)},${bindingFields}`,
+      `${timestamp},transportd,transportd-fd-b,${104857600 + tick * 2048},${40 + Math.floor(tick / 20)},${200 + Math.floor(tick / 8)},0,,${bindingFields}`,
+    );
+    lines.push(
+      `${timestamp},agent,agent-fd-b-01,${52428800 + tick * 512},${24 + Math.floor(tick / 30)},${60 + Math.floor(tick / 15)},0,,${bindingFields}`,
+    );
+    lines.push(
+      `${timestamp},postgres,postgres-fd-b,${209715200 + tick * 4096},80,40,0,${40 + Math.floor(tick / 30)},${bindingFields}`,
     );
   }
   return `${lines.join("\n")}\n`;
@@ -105,7 +147,6 @@ const timelineEventIds = [
   "stale_scheduler_commit_rejected",
   "api_instance_failed",
   "gateway_traffic_transferred",
-  "api_slo_measured",
   "worker_instance_failed",
   "worker_replacement_active",
   "dispatch_recovered",
@@ -130,14 +171,29 @@ const timelineEventIds = [
   "api_recovered",
   "worker_recovered",
   "load_stopped",
+  "resource_sampling_stopped",
+  "api_slo_measured",
 ];
+
+function timelineAt(eventId, index) {
+  if (eventId === "bulk_disconnect_injected") return bulkDisconnectAt;
+  if (eventId === "reconnect_started") return reconnectStartedAt;
+  if (eventId === "reconnect_completed") return reconnectCompletedAt;
+  if (eventId === "resource_sampling_stopped") return resourceSamplingStoppedAt;
+  if (eventId === "api_slo_measured") return apiSloMeasuredAt;
+  const reconnectCompletedIndex = timelineEventIds.indexOf("reconnect_completed");
+  if (index > reconnectCompletedIndex) {
+    return at(251 + index - reconnectCompletedIndex - 1);
+  }
+  return at(index);
+}
 
 function buildTimeline() {
   return jsonl(
     timelineEventIds.map((event_id, index) => ({
       event_id,
       sequence: index + 1,
-      ...bindingRecord(at(index)),
+      ...bindingRecord(timelineAt(event_id, index)),
     })),
   );
 }
@@ -153,21 +209,100 @@ function buildEpochEvents() {
     incarnation: workerAIncarnation,
     connection_id: String(index + 1).padStart(32, "0"),
     epoch: 1,
-    lease_until: at(index === 0 ? 10 : 300),
+    lease_until: ownerLeaseExpiryAt,
   }));
+  records.push({
+    sequence: 51,
+    ...bindingRecord(at(5)),
+    subject: "connection_owner",
+    event_type: "owner_accept",
+    node: fixtureNodeId(1),
+    instance: "worker-a",
+    epoch: 1,
+    accepted: true,
+  });
+  let sequence = records.at(-1).sequence;
+  // Every managed epoch-one term expires and advances inside the formal owner
+  // failover timeline. The later reconnect storm retires epoch two and creates
+  // a distinct durable epoch-three registration; it cannot masquerade as the
+  // lease-expiry scenario.
+  for (let index = 0; index < 50; index += 1) {
+    records.push({
+      sequence: (sequence += 1),
+      ...bindingRecord(ownerLeaseExpiryAt),
+      subject: "connection_owner",
+      event_type: "owner_lease_expired",
+      node: fixtureNodeId(index + 1),
+      epoch: 1,
+    });
+  }
+  for (let index = 0; index < 50; index += 1) {
+    records.push({
+      sequence: (sequence += 1),
+      ...bindingRecord(ownerTakeoverAt),
+      subject: "connection_owner",
+      event_type: "owner_registered",
+      node: fixtureNodeId(index + 1),
+      instance: "worker-b",
+      incarnation: workerBIncarnation,
+      connection_id: takeoverConnectionId(index),
+      epoch: 2,
+      lease_until: reconnectRetiredAt(index),
+      session_connected_at: atMicros(10, 300000 + index * 1000),
+    });
+  }
   records.push(
-    { sequence: 51, ...bindingRecord(at(5)), subject: "connection_owner", event_type: "owner_accept", node: fixtureNodeId(1), instance: "worker-a", epoch: 1, accepted: true },
-    { sequence: 52, ...bindingRecord(at(10)), subject: "connection_owner", event_type: "owner_lease_expired", node: fixtureNodeId(1), epoch: 1 },
-    { sequence: 53, ...bindingRecord(at(20)), subject: "connection_owner", event_type: "owner_registered", node: fixtureNodeId(1), instance: "worker-b", incarnation: workerBIncarnation, connection_id: String(1).padStart(32, "0"), epoch: 2, lease_until: at(300) },
-    { sequence: 54, ...bindingRecord(at(25)), subject: "connection_owner", event_type: "owner_accept", node: fixtureNodeId(1), instance: "worker-b", epoch: 2, accepted: true },
-    { sequence: 55, ...bindingRecord(at(30)), subject: "connection_owner", event_type: "owner_accept", node: fixtureNodeId(1), instance: "worker-a", epoch: 1, accepted: false },
-    { sequence: 56, ...bindingRecord(at(60)), subject: "scheduler", event_type: "leader_acquired", instance: "sched-a", incarnation: schedulerAIncarnation, epoch: 1, lease_until: at(75) },
-    { sequence: 57, ...bindingRecord(at(65)), subject: "scheduler", event_type: "leader_commit", instance: "sched-a", epoch: 1, accepted: true },
-    { sequence: 58, ...bindingRecord(at(75)), subject: "scheduler", event_type: "leader_lease_expired", epoch: 1 },
-    { sequence: 59, ...bindingRecord(at(76)), subject: "scheduler", event_type: "leader_acquired", instance: "sched-b", incarnation: schedulerBIncarnation, epoch: 2, lease_until: at(300) },
-    { sequence: 60, ...bindingRecord(at(85)), subject: "scheduler", event_type: "leader_commit", instance: "sched-b", epoch: 2, accepted: true },
-    { sequence: 61, ...bindingRecord(at(86)), subject: "scheduler", event_type: "leader_commit", instance: "sched-a", epoch: 1, accepted: false },
+    {
+      sequence: (sequence += 1),
+      ...bindingRecord(at(12)),
+      subject: "connection_owner",
+      event_type: "owner_accept",
+      node: fixtureNodeId(1),
+      instance: "worker-b",
+      epoch: 2,
+      accepted: true,
+    },
+    {
+      sequence: (sequence += 1),
+      ...bindingRecord(at(13)),
+      subject: "connection_owner",
+      event_type: "owner_accept",
+      node: fixtureNodeId(1),
+      instance: "worker-a",
+      epoch: 1,
+      accepted: false,
+    },
+    { sequence: (sequence += 1), ...bindingRecord(at(60)), subject: "scheduler", event_type: "leader_acquired", instance: "sched-a", incarnation: schedulerAIncarnation, epoch: 1, lease_until: at(75) },
+    { sequence: (sequence += 1), ...bindingRecord(at(65)), subject: "scheduler", event_type: "leader_commit", instance: "sched-a", incarnation: schedulerAIncarnation, epoch: 1, maintenance_id: "1", marker_completed_at: at(65), accepted: true },
+    { sequence: (sequence += 1), ...bindingRecord(at(75)), subject: "scheduler", event_type: "leader_lease_expired", epoch: 1 },
+    { sequence: (sequence += 1), ...bindingRecord(at(76)), subject: "scheduler", event_type: "leader_acquired", instance: "sched-b", incarnation: schedulerBIncarnation, epoch: 2, lease_until: finalLeaseUntil },
+    { sequence: (sequence += 1), ...bindingRecord(atMicros(85, 1)), subject: "scheduler", event_type: "leader_commit", instance: "sched-b", incarnation: schedulerBIncarnation, epoch: 2, maintenance_id: "2", marker_completed_at: at(85), accepted: true },
+    { sequence: (sequence += 1), ...bindingRecord(at(86)), subject: "scheduler", event_type: "leader_commit", instance: "sched-a", incarnation: schedulerAIncarnation, epoch: 1, accepted: false },
   );
+  for (let index = 0; index < 50; index += 1) {
+    records.push(
+      {
+        sequence: (sequence += 1),
+        ...bindingRecord(reconnectRetiredAt(index)),
+        subject: "connection_owner",
+        event_type: "owner_retired",
+        node: fixtureNodeId(index + 1),
+        epoch: 2,
+      },
+      {
+        sequence: (sequence += 1),
+        ...bindingRecord(reconnectAt(index)),
+        subject: "connection_owner",
+        event_type: "owner_registered",
+        node: fixtureNodeId(index + 1),
+        instance: finalOwnerInstance(index),
+        incarnation: finalOwnerIncarnation(index),
+        connection_id: finalConnectionId(index),
+        epoch: finalOwnerEpoch(index),
+        lease_until: finalLeaseUntil,
+      },
+    );
+  }
   return jsonl(records);
 }
 
@@ -183,9 +318,9 @@ function buildCommandTrace() {
   const commands = Array.from({ length: 600 }, (_, index) =>
     String(index + 1).padStart(3, "0"),
   );
-  const record = (second, extra) => {
+  const record = (timestamp, extra) => {
     sequence += 1;
-    records.push({ sequence, ...bindingRecord(at(second)), ...extra });
+    records.push({ sequence, ...bindingRecord(timestamp), ...extra });
   };
   const records = [
     {
@@ -200,23 +335,40 @@ function buildCommandTrace() {
     if (second < 60) {
       const wave = commands.slice(second * 10, second * 10 + 10);
       for (const suffix of wave) {
-        record(second, { record_type: "enqueued", command_id: `cmd-${suffix}` });
+        record(at(second), {
+          record_type: "enqueued",
+          command_id: `cmd-${suffix}`,
+          idempotency_key: `idem-http-${suffix}`,
+        });
       }
       for (const suffix of wave) {
-        record(second, { record_type: "dispatched", command_id: `cmd-${suffix}` });
+        record(at(second), { record_type: "dispatched", command_id: `cmd-${suffix}` });
       }
       for (const suffix of wave) {
-        record(second, {
+        record(at(second), {
           record_type: "effect",
+          command_id: `cmd-${suffix}`,
           idempotency_key: `idem-${suffix}`,
           effect_id: `fx-${suffix}`,
         });
       }
     }
+    if (second === 4) {
+      record(atMicros(4, 0), {
+        record_type: "inflight_snapshot",
+        expected_count: 50,
+        result_count: 0,
+        commands: commands.slice(0, 50).map((suffix, index) => ({
+          command_id: `cmd-${suffix}`,
+          node_id: fixtureNodeId(index + 1),
+          state: "running",
+        })),
+      });
+    }
     if (second >= 4) {
       const wave = commands.slice((second - 4) * 10, (second - 4) * 10 + 10);
       for (const suffix of wave) {
-        record(second, {
+        record(atMicros(second, 1000), {
           record_type: "result",
           command_id: `cmd-${suffix}`,
           outcome: "success",
@@ -224,6 +376,46 @@ function buildCommandTrace() {
       }
     }
   }
+  record(at(155), {
+    record_type: "enqueued",
+    command_id: "cmd-relay-pre-proof",
+    idempotency_key: "g6-relay-pre-fault-fixture",
+  });
+  record(at(156), {
+    record_type: "dispatched",
+    command_id: "cmd-relay-pre-proof",
+  });
+  record(at(157), {
+    record_type: "effect",
+    command_id: "cmd-relay-pre-proof",
+    idempotency_key: "idem-relay-pre-proof",
+    effect_id: "fx-relay-pre-proof",
+  });
+  record(at(158), {
+    record_type: "result",
+    command_id: "cmd-relay-pre-proof",
+    outcome: "success",
+  });
+  record(at(161), {
+    record_type: "enqueued",
+    command_id: "cmd-relay-proof",
+    idempotency_key: "g6-relay-failover-fixture",
+  });
+  record(at(162), {
+    record_type: "dispatched",
+    command_id: "cmd-relay-proof",
+  });
+  record(at(163), {
+    record_type: "effect",
+    command_id: "cmd-relay-proof",
+    idempotency_key: "idem-relay-proof",
+    effect_id: "fx-relay-proof",
+  });
+  record(at(164), {
+    record_type: "result",
+    command_id: "cmd-relay-proof",
+    outcome: "success",
+  });
   return jsonl(records);
 }
 
@@ -256,19 +448,61 @@ function buildOutboxSnapshot() {
 
 function buildHttpSamples() {
   const header =
-    "timestamp,kind,status,latency_seconds,request_id,environment_id,candidate_sha";
+    "timestamp,kind,status,latency_seconds,request_id,idempotency_key,attempt_ordinal,attempt_limit,requested_revision,http_status,problem_type,problem_detail,command_id,environment_id,candidate_sha";
   const lines = [header];
   const latency = (millis) => String(millis / 1000);
+  const row = (values) => values.join(",");
   let enqueueCounter = 0;
   for (let second = 0; second < 300; second += 1) {
     const timestamp = at(second);
     for (let sub = 0; sub < 2; sub += 1) {
-      lines.push(
-        `${timestamp},read,ok,${latency(10 + ((second * 2 + sub) % 7))},,${bindingFields}`,
-      );
-      lines.push(
-        `${timestamp},enqueue,ok,${latency(50 + (enqueueCounter % 10) * 10)},cmd-${String(enqueueCounter + 1).padStart(3, "0")},${bindingFields}`,
-      );
+      lines.push(row([
+        timestamp,
+        "read",
+        "ok",
+        latency(10 + ((second * 2 + sub) % 7)),
+        "", "", "", "", "", 200, "", "", "",
+        environmentId,
+        candidateSha,
+      ]));
+      const suffix = String(enqueueCounter + 1).padStart(3, "0");
+      const key = `idem-http-${suffix}`;
+      if (enqueueCounter === 0) {
+        lines.push(row([
+          timestamp,
+          "enqueue",
+          "error",
+          latency(20),
+          `${key}.attempt-1`,
+          key,
+          1,
+          3,
+          10,
+          409,
+          "https://ocservia.dev/problems/stale-revision",
+          "the node changed after this operation was prepared",
+          "",
+          environmentId,
+          candidateSha,
+        ]));
+      }
+      lines.push(row([
+        enqueueCounter === 0 ? atMicros(second, 30000) : timestamp,
+        "enqueue",
+        "ok",
+        latency(50 + (enqueueCounter % 10) * 10),
+        `${key}.attempt-${enqueueCounter === 0 ? 2 : 1}`,
+        key,
+        enqueueCounter === 0 ? 2 : 1,
+        3,
+        enqueueCounter === 0 ? 11 : 10 + enqueueCounter,
+        202,
+        "",
+        "",
+        `cmd-${suffix}`,
+        environmentId,
+        candidateSha,
+      ]));
       enqueueCounter += 1;
     }
   }
@@ -294,11 +528,17 @@ function buildAuditCorrelation() {
   return canonicalJson({
     environment_id: environmentId,
     candidate_sha: candidateSha,
-    writes: Array.from({ length: 600 }, (_, index) => ({
-      write_id: `cmd-${String(index + 1).padStart(3, "0")}`,
-      intent_recorded: true,
-      result_recorded: true,
-    })),
+    writes: Array.from({ length: 600 }, (_, index) => {
+      const suffix = String(index + 1).padStart(3, "0");
+      const requestId = `idem-http-${suffix}.attempt-${index === 0 ? 2 : 1}`;
+      return {
+        write_id: `cmd-${suffix}`,
+        intent_recorded: true,
+        intent_request_id: requestId,
+        result_recorded: true,
+        result_request_id: requestId,
+      };
+    }),
   });
 }
 
@@ -307,6 +547,7 @@ function buildPostgresRecovery() {
     environment_id: environmentId,
     candidate_sha: candidateSha,
     outage_declared_at: at(60),
+    rto_started_at: at(58),
     service_restored_at: at(120),
     acknowledged: [
       { txid: "tx-m1", acknowledged_at: at(40) },
@@ -317,10 +558,10 @@ function buildPostgresRecovery() {
       old_primary: "pg-primary",
       new_primary: "pg-standby-1",
       isolated_at: at(65),
-      promoted_at: at(90),
+      promoted_at: at(120),
       isolated_primary_writes: [
-        { at: at(105), accepted: false },
-        { at: at(110), accepted: false },
+        { at: at(125), accepted: false },
+        { at: at(130), accepted: false },
       ],
     },
     recovery: {
@@ -357,27 +598,28 @@ function buildAgentSessions() {
       agent_instance_id: (index + 1001).toString(16).padStart(32, "0"),
       authorized: true,
       connected: true,
-      owner_instance: index === 0 ? "worker-b" : "worker-a",
-      owner_incarnation:
-        index === 0 ? workerBIncarnation : workerAIncarnation,
-      connection_id: String(index + 1).padStart(32, "0"),
-      owner_epoch: index === 0 ? 2 : 1,
-      owner_lease_until: at(300),
+      owner_instance: finalOwnerInstance(index),
+      owner_incarnation: finalOwnerIncarnation(index),
+      connection_id: finalConnectionId(index),
+      owner_epoch: finalOwnerEpoch(index),
+      owner_lease_until: finalLeaseUntil,
       session_started_at: at(0),
-      connected_at: at(200 + index),
-      session_expires_at: at(300),
-      // Per-agent recovery timestamps: the verifier derives the storm
-      // recovery as max(reconnected_at) - bulk_disconnect_at.
-      reconnected_at: at(200 + index),
+      connected_at: reconnectAt(index),
+      session_expires_at: finalLeaseUntil,
+      reconnected_at: reconnectAt(index),
+      reconnect_owner_instance: finalOwnerInstance(index),
+      reconnect_owner_incarnation: finalOwnerIncarnation(index),
+      reconnect_connection_id: finalConnectionId(index),
+      reconnect_owner_epoch: finalOwnerEpoch(index),
     })),
     scheduler_authority: {
       instance: "sched-b",
       incarnation: schedulerBIncarnation,
       epoch: 2,
-      lease_until: at(300),
+      lease_until: finalLeaseUntil,
     },
     reconnect_storm: {
-      bulk_disconnect_at: at(180),
+      bulk_disconnect_at: bulkDisconnectAt,
     },
   });
 }
@@ -387,17 +629,16 @@ function buildTransportObservation(index) {
     node: fixtureNodeId(index + 1),
     endpoint_id: (index + 1).toString(16).padStart(64, "0"),
     agent_instance_id: (index + 1001).toString(16).padStart(32, "0"),
-    connected_at: at(200 + index),
-    session_expires_at: at(300),
+    connected_at: reconnectAt(index),
+    session_expires_at: finalLeaseUntil,
     owner_fence_id: (index + 2001).toString(16).padStart(32, "0"),
-    owner_instance: index === 0 ? "worker-b" : "worker-a",
-    owner_incarnation:
-      index === 0 ? workerBIncarnation : workerAIncarnation,
-    connection_id: String(index + 1).padStart(32, "0"),
-    owner_epoch: index === 0 ? 2 : 1,
-    owner_lease_until: at(300),
+    owner_instance: finalOwnerInstance(index),
+    owner_incarnation: finalOwnerIncarnation(index),
+    connection_id: finalConnectionId(index),
+    owner_epoch: finalOwnerEpoch(index),
+    owner_lease_until: finalLeaseUntil,
     authorization_revision: 11,
-    negotiated_capabilities: ["ocserv.status.read"],
+    negotiated_capabilities: ["ocserv.fencing.v2", "ocserv.status.read"],
   };
 }
 
@@ -418,30 +659,112 @@ function buildAuthorityCut() {
     },
     owners: Array.from({ length: 50 }, (_, index) => ({
       node: fixtureNodeId(index + 1),
-      instance: index === 0 ? "worker-b" : "worker-a",
-      incarnation: index === 0 ? workerBIncarnation : workerAIncarnation,
-      connection_id: String(index + 1).padStart(32, "0"),
-      epoch: index === 0 ? 2 : 1,
-      lease_until: at(300),
+      instance: finalOwnerInstance(index),
+      incarnation: finalOwnerIncarnation(index),
+      connection_id: finalConnectionId(index),
+      epoch: finalOwnerEpoch(index),
+      lease_until: finalLeaseUntil,
     })),
     scheduler: {
       instance: "sched-b",
       incarnation: schedulerBIncarnation,
       epoch: 2,
-      lease_until: at(300),
+      lease_until: finalLeaseUntil,
+      maintenance_id: "2",
+      maintenance_completed_at: at(85),
     },
   });
 }
 
 function buildRelayTransitions() {
+  const relayProbe = buildTransportObservation(0);
+  relayProbe.connected_at = atMicros(10, 300000);
+  relayProbe.session_expires_at = reconnectRetiredAt(0);
+  relayProbe.owner_instance = "worker-b";
+  relayProbe.owner_incarnation = workerBIncarnation;
+  relayProbe.connection_id = takeoverConnectionId(0);
+  relayProbe.owner_epoch = 2;
+  relayProbe.owner_lease_until = reconnectRetiredAt(0);
   const records = [
     { sequence: 1, ...bindingRecord(at(150)), event_type: "path_active", session_id: "s-001", path: "direct", authenticated: true },
     { sequence: 2, ...bindingRecord(at(155)), event_type: "path_failed", session_id: "s-001", path: "direct" },
-    { sequence: 3, ...bindingRecord(at(160)), event_type: "relay_failed", relay: "relay-a" },
-    { sequence: 4, ...bindingRecord(at(165)), event_type: "path_active", session_id: "s-001", path: "relay", relay: "relay-b", authenticated: true },
-    { sequence: 5, ...bindingRecord(at(170)), event_type: "relay_active", relay: "relay-b" },
-    { sequence: 6, ...bindingRecord(at(190)), event_type: "path_failed", session_id: "s-001", path: "relay" },
-    { sequence: 7, ...bindingRecord(at(195)), event_type: "path_active", session_id: "s-001", path: "direct", authenticated: true },
+    {
+      sequence: 3,
+      ...bindingRecord(at(159)),
+      event_type: "path_active",
+      session_id: relayProbe.node,
+      path: "relay",
+      relay: "relay-a",
+      authenticated: true,
+      endpoint_id: relayProbe.endpoint_id,
+      path_detail: "iroh/relay-a",
+      owner_fence_id: relayProbe.owner_fence_id,
+      owner_instance: relayProbe.owner_instance,
+      owner_incarnation: relayProbe.owner_incarnation,
+      connection_id: relayProbe.connection_id,
+      owner_epoch: relayProbe.owner_epoch,
+      authorization_revision: relayProbe.authorization_revision,
+      negotiated_capabilities: relayProbe.negotiated_capabilities,
+      session_connected_at: relayProbe.connected_at,
+      owner_lease_until: relayProbe.owner_lease_until,
+      session_expires_at: relayProbe.session_expires_at,
+      topology_mode: "relay-a-only",
+      topology_network_name: "g6-rd-fixture_relay-a-only",
+      topology_agent_service: "agent-fd-a-01",
+      topology_network_internal: true,
+      topology_agent_default_network_connected: false,
+      topology_ready_at: at(153),
+      relay_b_disabled_at: at(154),
+      command_id: "cmd-relay-pre-proof",
+      command_idempotency_key: "g6-relay-pre-fault-fixture",
+      effect_idempotency_key: "idem-relay-pre-proof",
+      effect_id: "fx-relay-pre-proof",
+      result_observed_at: at(158),
+    },
+    {
+      sequence: 4,
+      ...bindingRecord(at(160)),
+      event_type: "relay_failed",
+      relay: "relay-a",
+      session_id: relayProbe.node,
+      owner_instance: relayProbe.owner_instance,
+      owner_incarnation: relayProbe.owner_incarnation,
+      connection_id: relayProbe.connection_id,
+      owner_epoch: relayProbe.owner_epoch,
+      owner_lease_until: relayProbe.owner_lease_until,
+      authority_lease_until: relayProbe.owner_lease_until,
+      fault_cut_at: at(160),
+    },
+    {
+      sequence: 5,
+      ...bindingRecord(at(165)),
+      event_type: "path_active",
+      session_id: relayProbe.node,
+      path: "relay",
+      relay: "relay-b",
+      authenticated: true,
+      endpoint_id: relayProbe.endpoint_id,
+      path_detail: "iroh/relay-b",
+      owner_fence_id: relayProbe.owner_fence_id,
+      owner_instance: relayProbe.owner_instance,
+      owner_incarnation: relayProbe.owner_incarnation,
+      connection_id: relayProbe.connection_id,
+      owner_epoch: relayProbe.owner_epoch,
+      authorization_revision: relayProbe.authorization_revision,
+      negotiated_capabilities: relayProbe.negotiated_capabilities,
+      session_connected_at: relayProbe.connected_at,
+      owner_lease_until: relayProbe.owner_lease_until,
+      session_expires_at: relayProbe.session_expires_at,
+      relay_b_started_at: atMicros(160, 500000),
+      command_id: "cmd-relay-proof",
+      command_idempotency_key: "g6-relay-failover-fixture",
+      effect_idempotency_key: "idem-relay-proof",
+      effect_id: "fx-relay-proof",
+      result_observed_at: at(164),
+    },
+    { sequence: 6, ...bindingRecord(at(170)), event_type: "relay_active", relay: "relay-b" },
+    { sequence: 7, ...bindingRecord(at(190)), event_type: "path_failed", session_id: "s-001", path: "relay" },
+    { sequence: 8, ...bindingRecord(at(195)), event_type: "path_active", session_id: "s-001", path: "direct", authenticated: true },
   ];
   return jsonl(records);
 }

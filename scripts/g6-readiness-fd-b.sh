@@ -20,8 +20,8 @@ WINDOW_API_PREDICATE_OVERRUN_SECONDS=10
 WINDOW_SQL_PREDICATE_OVERRUN_SECONDS=10
 WINDOW_DRIVER_OVERRUN_SECONDS=21
 WINDOW_DIAGNOSTIC_MAX_SECONDS=10
-WINDOW_SAMPLER_STOP_MAX_SECONDS=8
-WINDOW_WORKFLOW_TIMEOUT_SECONDS=600
+WINDOW_SAMPLER_STOP_MAX_SECONDS=10
+WINDOW_WORKFLOW_TIMEOUT_SECONDS=660
 WINDOW_MINIMUM_OUTER_MARGIN_SECONDS=60
 NODES_FILE="${G6RD_STATE}/all-nodes.tsv"
 
@@ -51,8 +51,32 @@ psql_primary_probe() {
   G6RD_PSQL_TIMEOUT_SECONDS=10 psql_primary "$@"
 }
 
+capture_local_database_clock() {
+  G6_DB_PORT=5432 G6RD_PSQL_TIMEOUT_SECONDS=10 g6rd_psql -qAtc \
+    "SELECT to_char(clock_timestamp() AT TIME ZONE 'UTC','YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"')"
+}
+
 node_ids() {
   cut -f2 "${NODES_FILE}"
+}
+
+managed_node_count() {
+  local configured actual
+  require_file "${NODES_FILE}" || return 1
+  configured="$(g6rd_total_agent_count)" || return 1
+  if ! actual="$(awk -F'\t' '
+    NF != 3 || $1 == "" || $2 == "" || $3 == "" { exit 2 }
+    { count++ }
+    END { if (count > 0) print count; else exit 2 }
+  ' "${NODES_FILE}")"; then
+    echo "the managed-node inventory is malformed or empty" >&2
+    return 1
+  fi
+  [[ "${actual}" == "${configured}" ]] || {
+    echo "the managed-node inventory has ${actual} rows; expected the configured full population ${configured}" >&2
+    return 1
+  }
+  printf '%s\n' "${actual}"
 }
 
 local_node_id() {
@@ -125,7 +149,7 @@ stop_watchers() {
 
 phase_prepare() {
   g6rd_prepare_support_image
-  g6rd_build_tunnel
+  g6rd_verify_tunnel
   mkdir -p "${G6RD_OUTBOX}/tunnel"
   local name
   for name in relay-b pg-b pg-a-forward api-a-forward relay-a-forward; do
@@ -183,7 +207,7 @@ phase_materialize_runtime() {
 }
 
 phase_build_images() {
-  g6rd_build_tunnel
+  g6rd_verify_tunnel
   g6rd_prepare_build_environment
   g6rd_write_agent_overlay "$(g6rd_agent_count)"
   g6rd_prepare_release_images
@@ -228,14 +252,51 @@ phase_standby_bootstrap() {
     -c "printf '%s\n' \"primary_conninfo = 'host=host.docker.internal port=15432 user=ocservia_replication password=$(g6rd_secret replication-password) application_name=g6_standby'\" >> /data/postgresql.auto.conf"
   g6rd_compose up --detach postgres
   g6rd_wait_until 60 2 "standby in recovery" standby_in_recovery
+  g6rd_tunnel_serve pg-b "$(<"${G6RD_STATE}/peer-pg-b-forward-node-id")" 5432
   g6rd_now >"${G6RD_STATE}/standby-streaming-at"
+}
+
+relay_b_healthy() {
+  G6RD_COMPOSE_TIMEOUT_SECONDS=5 g6rd_compose exec -T relay relay-healthcheck
 }
 
 phase_relay_up() {
   g6rd_export_common_env
   g6rd_compose up --detach relay
-  g6rd_wait_until 60 2 "relay-b healthy" \
-    g6rd_compose exec -T relay relay-healthcheck
+  g6rd_wait_until_deadline 120 2 "relay-b healthy" relay_b_healthy
+}
+
+relay_b_stopped() {
+  local running
+  running="$(timeout --signal=TERM --kill-after=5s 15s docker container inspect \
+    --format '{{.State.Running}}' "${COMPOSE_PROJECT}-relay-1" 2>/dev/null)" || return 1
+  [[ "${running}" == false ]]
+}
+
+validate_relay_a_only_readiness() {
+  local readiness="${1:?relay topology readiness is required}"
+  require_file "${readiness}/candidate-sha"
+  require_file "${readiness}/node-id"
+  require_file "${readiness}/relay-a-only-readiness.json"
+  [[ "$(<"${readiness}/candidate-sha")" == "${G6RD_CANDIDATE_SHA}" ]] || {
+    echo "relay observation readiness belongs to a different candidate" >&2
+    return 1
+  }
+  jq -e --arg environment "${G6RD_ENVIRONMENT_ID}" \
+    --arg candidate "${G6RD_CANDIDATE_SHA}" \
+    --arg node "$(<"${readiness}/node-id")" '
+      keys == ["agent_default_network_connected","agent_service","candidate_sha",
+        "environment_id","network_internal","network_name","node_id",
+        "relay_alias","schema_version","topology_ready_at"]
+      and .schema_version == "ocservia.g6-relay-topology.v1"
+      and .environment_id == $environment and .candidate_sha == $candidate
+      and .node_id == $node and .agent_service == "agent-fd-a-01"
+      and (.network_name | endswith("_relay-a-only"))
+      and .network_internal == true
+      and .agent_default_network_connected == false
+      and .relay_alias == "relay-a"
+      and (.topology_ready_at | test("^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]{1,9})?Z$"))
+    ' "${readiness}/relay-a-only-readiness.json" >/dev/null
 }
 
 # Activate this domain's nodes in the authoritative database before either
@@ -312,12 +373,12 @@ phase_agents_start() {
   g6rd_start_agent_fleet "${local_nodes}" "${NODES_FILE}"
   g6rd_verify_agent_journal_observer_principals "agent-${FD_ID}-01"
   # The controller's observed-state API is the era-1 readiness authority;
-  # the watchers start only after all 55 Agents are online and fresh.
+  # the watchers start only after the complete 50-Agent fleet is online and fresh.
   start_watchers
 }
 
 # The database-failure-under-load sequence, split at the rendezvous the
-# peer observes: load-start drives fifty-five concurrent commands through
+# peer observes: load-start drives fifty concurrent commands through
 # the era-1 path and publishes the load-active marker; promote consumes the
 # peer's isolation record, promotes the standby, brings up the era-2
 # control plane, and reconciles every command that was in flight.
@@ -385,7 +446,7 @@ phase_promote() {
   G6_DB_PORT=5432 g6rd_psql -Atc "ALTER SYSTEM SET synchronous_standby_names = ''" >/dev/null
   G6_DB_PORT=5432 g6rd_psql -Atc 'SELECT pg_reload_conf()' >/dev/null
   g6rd_wait_until 30 2 "promoted primary writable" promoted_and_writable
-  g6rd_now >"${G6RD_STATE}/promoted-at"
+  capture_local_database_clock >"${G6RD_STATE}/promoted-at"
 
   # era-2 roles against the local promoted primary; the controller key
   # handover keeps every agent dialing the same controller NodeId
@@ -588,11 +649,11 @@ phase_merge_peer_evidence() {
 }
 
 # Scheduler leadership failover: stop the era-2 leader, let the lease lapse,
-# prove the replacement's higher epoch, and prove the old term cannot commit
-# through the platform's own fence predicate.
+# prove the replacement's higher epoch and a real fenced maintenance commit,
+# then prove the old exact term cannot write the same durable marker.
 phase_scenario_scheduler() {
   local leader
-  leader="$(psql_primary -Atc \
+  leader="$(G6RD_PSQL_TIMEOUT_SECONDS=5 psql_primary -Atc \
     "SELECT instance_id||':'||incarnation||':'||epoch FROM scheduler_leadership WHERE id=1")"
   local old_instance old_incarnation old_epoch
   IFS=: read -r old_instance old_incarnation old_epoch <<<"${leader}"
@@ -600,22 +661,48 @@ phase_scenario_scheduler() {
   export SCHEDULER_OLD_EPOCH
   g6rd_compose stop scheduler
   g6rd_timeline_event scheduler_a_paused
-  local lease_until
-  lease_until="$(psql_primary -Atc \
-    "SELECT to_char(lease_until AT TIME ZONE 'UTC','YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"') FROM scheduler_leadership WHERE id=1")"
-  g6rd_wait_until 60 2 "old scheduler lease lapsed" scheduler_lease_lapsed
+  g6rd_wait_until_deadline 120 2 "old scheduler lease lapsed" \
+    scheduler_lease_lapsed
   g6rd_compose up --detach scheduler
-  g6rd_wait_until 60 2 "replacement scheduler acquired leadership" scheduler_replaced
+  g6rd_wait_until_deadline 120 2 \
+    "replacement scheduler acquired leadership" scheduler_replaced
   g6rd_timeline_event scheduler_b_acquired
+  local replacement_term
+  replacement_term="$(G6RD_PSQL_TIMEOUT_SECONDS=5 psql_primary -Atc \
+    "SELECT instance_id||':'||incarnation||':'||epoch FROM scheduler_leadership WHERE id=1")"
+  IFS=: read -r SCHEDULER_REPLACEMENT_INSTANCE \
+    SCHEDULER_REPLACEMENT_INCARNATION SCHEDULER_REPLACEMENT_EPOCH \
+    <<<"${replacement_term}"
+  export SCHEDULER_REPLACEMENT_INSTANCE SCHEDULER_REPLACEMENT_INCARNATION \
+    SCHEDULER_REPLACEMENT_EPOCH
+  [[ -n "${SCHEDULER_REPLACEMENT_INSTANCE}" \
+    && "${SCHEDULER_REPLACEMENT_INCARNATION}" =~ ^[1-9][0-9]*$ \
+    && "${SCHEDULER_REPLACEMENT_EPOCH}" =~ ^[1-9][0-9]*$ \
+    && "${SCHEDULER_REPLACEMENT_EPOCH}" -gt "${old_epoch}" ]] || {
+    echo "replacement scheduler term is malformed" >&2
+    return 1
+  }
+  printf '%s\n' "${replacement_term}" >"${G6RD_STATE}/scheduler-replacement-term"
+  rm -f -- "${G6RD_STATE}/scheduler-maintenance-observation.json"
+  g6rd_wait_until_deadline 60 1 \
+    "replacement scheduler completed exact-term fenced maintenance" \
+    scheduler_maintenance_completed
   g6rd_timeline_event scheduler_a_resumed
-  # The old term's fence predicate, verbatim from coordination.AssertLeader:
-  # no returned row means the superseded epoch can never commit again.
-  local fenced
-  fenced="$(psql_primary -Atc "SELECT 1 FROM scheduler_leadership \
-    WHERE id=1 AND instance_id='${old_instance}' AND incarnation=${old_incarnation} \
-    AND epoch=${old_epoch} AND lease_until>clock_timestamp() FOR SHARE OF scheduler_leadership")"
-  [[ -z "${fenced}" ]] || {
-    echo "the expired scheduler term still passes its own fence predicate" >&2
+
+  # Exercise the durable recorder through the restricted runtime role. A
+  # predicate-only check cannot prove that the stale transaction itself is
+  # rejected.
+  local stale_log="${G6RD_LOGS}/stale-scheduler-maintenance.log"
+  if G6RD_PSQL_TIMEOUT_SECONDS=10 psql_primary -v ON_ERROR_STOP=1 -c \
+    "SET ROLE ocservia_app; SELECT public.g6_record_scheduler_maintenance(\
+      '${old_instance}'::uuid,${old_incarnation},${old_epoch});" \
+    >"${stale_log}" 2>&1; then
+    echo "the expired scheduler term committed a maintenance marker" >&2
+    return 1
+  fi
+  grep -qF 'scheduler maintenance term is not the exact live leader' \
+    "${stale_log}" || {
+    echo "the stale scheduler maintenance transaction failed for an unexpected reason" >&2
     return 1
   }
   printf '%s\n' "${old_instance}:${old_incarnation}:${old_epoch}" >"${G6RD_STATE}/stale-scheduler-term"
@@ -628,87 +715,454 @@ phase_scenario_scheduler() {
 # disposition and the Agent's stale_owner_epoch gate). The transportd stop
 # for the agent-side probe is also the reconnect-storm injection.
 scheduler_lease_lapsed() {
-  local lease_until
-  lease_until="$(psql_primary -Atc \
-    "SELECT to_char(lease_until AT TIME ZONE 'UTC','YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"') FROM scheduler_leadership WHERE id=1")"
-  [[ -n "${lease_until}" ]] || return 1
-  [[ "$(date -u +%s)" -gt "$(date -u -d "${lease_until}" +%s)" ]]
+  [[ "$(G6RD_PSQL_TIMEOUT_SECONDS=5 psql_primary -Atc \
+    'SELECT (lease_until <= clock_timestamp())::text FROM scheduler_leadership WHERE id=1')" == "t" ]]
 }
 
 scheduler_replaced() {
   local epoch
-  epoch="$(psql_primary -Atc 'SELECT epoch FROM scheduler_leadership WHERE id=1')"
+  epoch="$(G6RD_PSQL_TIMEOUT_SECONDS=5 psql_primary -Atc \
+    'SELECT epoch FROM scheduler_leadership WHERE id=1')"
   [[ "${epoch}" =~ ^[0-9]+$ ]] && ((epoch > SCHEDULER_OLD_EPOCH))
 }
 
-owner_leases_lapsed() {
-  local latest_lease
-  latest_lease="$(psql_primary -Atc \
-    "SELECT to_char(max(lease_until) AT TIME ZONE 'UTC','YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"') FROM connection_owner_fencing")"
-  [[ -n "${latest_lease}" ]] || return 1
-  [[ "$(date -u +%s)" -ge "$(date -u -d "${latest_lease}" +%s)" ]]
+scheduler_maintenance_completed() {
+  local output="${G6RD_STATE}/scheduler-maintenance-observation.json"
+  local temporary="${output}.tmp.$$"
+  [[ ! -e "${output}" ]] || return 0
+  rm -f -- "${temporary}"
+  if ! G6RD_PSQL_TIMEOUT_SECONDS=5 psql_primary_probe -qAtc \
+    "WITH marker AS MATERIALIZED (
+       SELECT maintenance_id,instance_id,incarnation,epoch,completed_at
+       FROM g6_scheduler_maintenance_history
+       WHERE instance_id='${SCHEDULER_REPLACEMENT_INSTANCE}'
+         AND incarnation=${SCHEDULER_REPLACEMENT_INCARNATION}
+         AND epoch=${SCHEDULER_REPLACEMENT_EPOCH}
+       ORDER BY maintenance_id
+       LIMIT 1
+     ), observed AS MATERIALIZED (
+       SELECT clock_timestamp() AS at
+     )
+     SELECT jsonb_build_object(
+       'maintenance_id',marker.maintenance_id::text,
+       'instance_id',marker.instance_id::text,
+       'incarnation',marker.incarnation::text,
+       'epoch',marker.epoch,
+       'marker_completed_at',to_char(marker.completed_at AT TIME ZONE 'UTC','YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"'),
+       'committed_observed_at',to_char(observed.at AT TIME ZONE 'UTC','YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"')
+     )
+     FROM marker CROSS JOIN observed
+     WHERE marker.completed_at<=observed.at" >"${temporary}"; then
+    rm -f -- "${temporary}"
+    return 1
+  fi
+  if ! jq -e \
+    --arg instance "${SCHEDULER_REPLACEMENT_INSTANCE}" \
+    --arg incarnation "${SCHEDULER_REPLACEMENT_INCARNATION}" \
+    --argjson epoch "${SCHEDULER_REPLACEMENT_EPOCH}" \
+    'keys == ["committed_observed_at","epoch","incarnation","instance_id","maintenance_id","marker_completed_at"]
+     and (.maintenance_id | type == "string" and test("^[1-9][0-9]*$"))
+     and .instance_id == $instance
+     and .incarnation == $incarnation
+     and .epoch == $epoch
+     and (.marker_completed_at | type == "string" and test("^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\\.[0-9]{6}Z$"))
+     and (.committed_observed_at | type == "string" and test("^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\\.[0-9]{6}Z$"))
+     and .marker_completed_at <= .committed_observed_at' \
+    "${temporary}" >/dev/null; then
+    rm -f -- "${temporary}"
+    return 1
+  fi
+  mv -f -- "${temporary}" "${output}"
 }
 
-owner_replaced() {
-  local row node_hex old_epoch current_epoch
-  [[ -s "${G6RD_STATE}/owner-a-terms.tsv" ]] || return 1
-  while IFS= read -r row; do
-    node_hex="${row%%:*}"
-    old_epoch="${row##*:}"
-    [[ "${node_hex}" =~ ^[0-9a-f]{32}$ && "${old_epoch}" =~ ^[0-9]+$ ]] || return 1
-    current_epoch="$(psql_primary -Atc \
-      "SELECT owner_epoch FROM connection_owner_fencing WHERE node_id=decode('${node_hex}','hex')")"
-    [[ "${current_epoch}" =~ ^[0-9]+$ ]] && ((current_epoch > old_epoch)) || return 1
-  done <"${G6RD_STATE}/owner-a-terms.tsv"
-}
-
-phase_scenario_owner() {
-  local sample_nodes="" node node_hex row sample_count=0
-  while IFS= read -r node; do
+capture_live_owner_terms() {
+  local all_file="${G6RD_STATE}/owner-all-terms.tsv"
+  local selected_file="${G6RD_STATE}/owner-a-terms.tsv"
+  local all_tmp selected_tmp node node_hex sql_nodes="" separator=""
+  local instance incarnation connection epoch lease_us extra sample_count=0 expected_count
+  local snapshot_valid=1
+  local -a managed_nodes=()
+  local -A expected_nodes=() seen_nodes=() owner_rows=()
+  expected_count="$(managed_node_count)" || return 1
+  mapfile -t managed_nodes < <(node_ids)
+  [[ "${#managed_nodes[@]}" == "${expected_count}" ]] || {
+    echo "the owner scenario must cover exactly ${expected_count} managed nodes, found ${#managed_nodes[@]}" >&2
+    return 1
+  }
+  for node in "${managed_nodes[@]}"; do
     [[ "${node}" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$ ]] || {
-      echo "invalid local node id in owner scenario: ${node}" >&2
+      echo "invalid managed node id in owner scenario: ${node}" >&2
       return 1
     }
     node_hex="${node//-/}"
-    row="$(psql_primary -Atc \
-      "SELECT encode(node_id,'hex')||':'||owner_instance_id||':'||owner_incarnation||':'||encode(connection_id,'hex')||':'||owner_epoch FROM connection_owner_fencing WHERE node_id=decode('${node_hex}','hex') AND lease_until>clock_timestamp()")"
-    [[ -n "${row}" ]] || continue
-    sample_nodes+="${row}"$'\n'
-    sample_count=$((sample_count + 1))
-    if ((sample_count == 5)); then
+    [[ -z "${expected_nodes[${node_hex}]:-}" ]] || {
+      echo "duplicate managed node id in owner scenario: ${node}" >&2
+      return 1
+    }
+    expected_nodes["${node_hex}"]=1
+    sql_nodes+="${separator}'${node_hex}'"
+    separator=,
+  done
+  all_tmp="$(mktemp "${G6RD_STATE}/owner-all-terms.XXXXXX")"
+  selected_tmp="$(mktemp "${G6RD_STATE}/owner-a-terms.XXXXXX")"
+  if ! psql_primary_probe -F $'\t' -Atc \
+    "WITH cut AS MATERIALIZED (SELECT clock_timestamp() AS at)
+     SELECT encode(node_id,'hex'),owner_instance_id,owner_incarnation,
+       encode(connection_id,'hex'),owner_epoch,
+       floor(extract(epoch FROM lease_until)*1000000)::bigint
+     FROM connection_owner_fencing CROSS JOIN cut
+     WHERE lease_until>cut.at
+       AND encode(node_id,'hex') IN (${sql_nodes})
+     ORDER BY encode(node_id,'hex')" >"${all_tmp}"; then
+    rm -f -- "${all_tmp}" "${selected_tmp}"
+    echo "failed to freeze the live managed owner population" >&2
+    return 1
+  fi
+  while IFS=$'\t' read -r node_hex instance incarnation connection epoch lease_us extra; do
+    [[ "${node_hex}" =~ ^[0-9a-f]{32}$ \
+      && "${instance}" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$ \
+      && "${incarnation}" =~ ^[1-9][0-9]*$ \
+      && "${connection}" =~ ^[0-9a-f]{32}$ \
+      && "${epoch}" =~ ^[1-9][0-9]*$ \
+      && "${lease_us}" =~ ^[1-9][0-9]*$ && -z "${extra}" \
+      && -n "${expected_nodes[${node_hex}]:-}" \
+      && -z "${seen_nodes[${node_hex}]:-}" ]] || {
+      snapshot_valid=0
       break
-    fi
+    }
+    seen_nodes["${node_hex}"]=1
+    owner_rows["${node_hex}"]="${node_hex}:${instance}:${incarnation}:${connection}:${epoch}"
+  done <"${all_tmp}"
+  ((snapshot_valid == 1)) || {
+    rm -f -- "${all_tmp}" "${selected_tmp}"
+    echo "the live owner snapshot is malformed, duplicated, or outside the managed population" >&2
+    return 1
+  }
+  [[ "${#seen_nodes[@]}" == "${#managed_nodes[@]}" ]] || {
+    rm -f -- "${all_tmp}" "${selected_tmp}"
+    echo "the live owner snapshot does not cover every managed node" >&2
+    return 1
+  }
+  while IFS= read -r node; do
+    node_hex="${node//-/}"
+    [[ -n "${owner_rows[${node_hex}]:-}" ]] || {
+      rm -f -- "${all_tmp}" "${selected_tmp}"
+      echo "local stale-probe node has no frozen owner term: ${node}" >&2
+      return 1
+    }
+    printf '%s\n' "${owner_rows[${node_hex}]}" >>"${selected_tmp}"
+    sample_count=$((sample_count + 1))
+    ((sample_count == 5)) && break
   done < <(awk -F'\t' -v prefix="g6-${FD_ID}-" \
     'index($1, prefix) == 1 {print $2}' "${NODES_FILE}")
-  sample_nodes="${sample_nodes%$'\n'}"
   ((sample_count == 5)) || {
-    echo "fewer than five local authoritative connection owners exist before the owner scenario" >&2
+    rm -f -- "${all_tmp}" "${selected_tmp}"
+    echo "fewer than five local authoritative owners are available for stale probes" >&2
     return 1
   }
-  printf '%s\n' "${sample_nodes}" >"${G6RD_STATE}/owner-a-terms.tsv"
+  mv -f -- "${all_tmp}" "${all_file}"
+  mv -f -- "${selected_tmp}" "${selected_file}"
+}
+
+owner_replacement_values() {
+  local node_hex _instance _incarnation connection old_epoch lease_us extra
+  local values="" separator=""
+  [[ -s "${G6RD_STATE}/owner-all-terms.tsv" ]] || return 1
+  while IFS=$'\t' read -r node_hex _instance _incarnation connection old_epoch lease_us extra; do
+    [[ "${node_hex}" =~ ^[0-9a-f]{32}$ \
+      && "${connection}" =~ ^[0-9a-f]{32}$ \
+      && "${old_epoch}" =~ ^[1-9][0-9]*$ \
+      && "${lease_us}" =~ ^[1-9][0-9]*$ && -z "${extra}" ]] || return 1
+    values+="${separator}(decode('${node_hex}','hex'),${old_epoch}::bigint,decode('${connection}','hex'))"
+    separator=,
+  done <"${G6RD_STATE}/owner-all-terms.tsv"
+  [[ -n "${values}" ]] || return 1
+  printf '%s\n' "${values}"
+}
+
+owner_expiry_values() {
+  local node_hex _instance _incarnation connection old_epoch lease_us extra
+  local values="" separator=""
+  [[ -s "${G6RD_STATE}/owner-all-terms.tsv" ]] || return 1
+  while IFS=$'\t' read -r node_hex _instance _incarnation connection old_epoch lease_us extra; do
+    [[ "${node_hex}" =~ ^[0-9a-f]{32}$ \
+      && "${connection}" =~ ^[0-9a-f]{32}$ \
+      && "${old_epoch}" =~ ^[1-9][0-9]*$ \
+      && "${lease_us}" =~ ^[1-9][0-9]*$ && -z "${extra}" ]] || return 1
+    values+="${separator}(decode('${node_hex}','hex'),${old_epoch}::bigint,decode('${connection}','hex'),${lease_us}::bigint)"
+    separator=,
+  done <"${G6RD_STATE}/owner-all-terms.tsv"
+  [[ -n "${values}" ]] || return 1
+  printf '%s\n' "${values}"
+}
+
+owner_leases_lapsed() {
+  local values expired expected_count
+  values="$(owner_expiry_values)" || return 1
+  expected_count="$(managed_node_count)" || return 1
+  [[ "$(wc -l <"${G6RD_STATE}/owner-all-terms.tsv" | tr -d '[:space:]')" == "${expected_count}" ]] || return 1
+  expired="$(psql_primary_probe -Atc \
+    "WITH expected(node_id,old_epoch,old_connection_id,frozen_lease_us) AS (VALUES ${values})
+     SELECT count(*)
+     FROM expected
+     JOIN connection_owner_fencing AS current USING (node_id)
+     WHERE current.owner_epoch=expected.old_epoch
+       AND current.connection_id=expected.old_connection_id
+       AND floor(extract(epoch FROM current.lease_until)*1000000)::bigint>=expected.frozen_lease_us
+       AND current.lease_until<=clock_timestamp()")" || return 1
+  [[ "${expired}" == "${expected_count}" ]]
+}
+
+owner_replaced() {
+  local values advanced expected_count
+  values="$(owner_replacement_values)" || return 1
+  expected_count="$(managed_node_count)" || return 1
+  [[ "$(wc -l <"${G6RD_STATE}/owner-all-terms.tsv" | tr -d '[:space:]')" == "${expected_count}" ]] || return 1
+  advanced="$(psql_primary_probe -Atc \
+    "WITH expected(node_id,old_epoch,old_connection_id) AS (VALUES ${values})
+     SELECT count(*)
+     FROM expected
+     JOIN connection_owner_fencing AS current USING (node_id)
+     WHERE current.owner_epoch>expected.old_epoch
+       AND current.connection_id<>expected.old_connection_id
+       AND current.lease_until>clock_timestamp()")" || return 1
+  [[ "${advanced}" == "${expected_count}" ]]
+}
+
+capture_owner_replacement_sessions() {
+  local values expected_count terms_output terms_tmp sessions_output sessions_tmp
+  local boundary_file="${G6RD_STATE}/owner-b-acquired-at"
+  local -a args=()
+  values="$(owner_replacement_values)" || return 1
+  expected_count="$(managed_node_count)" || return 1
+  terms_output="${G6RD_STATE}/owner-b-terms.tsv"
+  sessions_output="${G6RD_STATE}/owner-replacement-sessions.json"
+  terms_tmp="$(mktemp "${G6RD_STATE}/owner-b-terms.XXXXXX")"
+  sessions_tmp="$(mktemp "${G6RD_STATE}/owner-replacement-sessions.XXXXXX")"
+  if ! psql_primary_probe -F $'\t' -Atc \
+    "WITH expected(node_id,old_epoch,old_connection_id) AS (VALUES ${values})
+     SELECT encode(current.node_id,'hex'),current.owner_instance_id,
+       current.owner_incarnation,encode(current.connection_id,'hex'),
+       current.owner_epoch,
+       to_char(acquired.updated_at AT TIME ZONE 'UTC','YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"')
+     FROM expected
+     JOIN connection_owner_fencing AS current USING (node_id)
+     JOIN LATERAL (
+       SELECT history.updated_at
+       FROM g6_connection_owner_history AS history
+       WHERE history.node_id=current.node_id
+         AND history.owner_instance_id=current.owner_instance_id
+         AND history.owner_incarnation=current.owner_incarnation
+         AND history.connection_id=current.connection_id
+         AND history.owner_epoch=current.owner_epoch
+       ORDER BY history.history_id
+       LIMIT 1
+     ) AS acquired ON true
+     WHERE current.owner_epoch>expected.old_epoch
+       AND current.connection_id<>expected.old_connection_id
+       AND current.lease_until>clock_timestamp()
+     ORDER BY encode(current.node_id,'hex')" >"${terms_tmp}"; then
+    rm -f -- "${terms_tmp}" "${sessions_tmp}"
+    echo "could not freeze replacement owner acquisition terms" >&2
+    return 1
+  fi
+  [[ "$(wc -l <"${terms_tmp}" | tr -d '[:space:]')" == "${expected_count}" ]] || {
+    rm -f -- "${terms_tmp}" "${sessions_tmp}"
+    echo "replacement owner terms do not cover the exact managed population" >&2
+    return 1
+  }
+  mapfile -t args < <(node_ids)
+  [[ "${#args[@]}" == "${expected_count}" ]] || {
+    rm -f -- "${terms_tmp}" "${sessions_tmp}"
+    return 1
+  }
+  if ! G6RD_NODE_CONNECTION_TIMEOUT_SECONDS=30 \
+    g6rd_probe_node_connection any "${args[@]}" >"${sessions_tmp}"; then
+    rm -f -- "${terms_tmp}" "${sessions_tmp}"
+    echo "could not freeze replacement-owner transport sessions" >&2
+    return 1
+  fi
+  g6rd_atomic_now "${boundary_file}"
+  if ! jq -e --arg boundary "$(<"${boundary_file}")" \
+    --argjson expected_count "${expected_count}" \
+    --rawfile managed_tsv "${NODES_FILE}" --rawfile terms_tsv "${terms_tmp}" '
+      def stamp_key:
+        capture("^(?<whole>[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2})(?:\\.(?<fraction>[0-9]{1,9}))?Z$") as $stamp
+        | $stamp.whole + "." + ((($stamp.fraction // "") + "000000000")[0:9]);
+      ($managed_tsv | split("\n") | map(select(length > 0) | split("\t"))
+        | map(select(length == 3) | {key: .[1], value: .[2]}) | from_entries) as $managed
+      | ($terms_tsv | split("\n") | map(select(length > 0) | split("\t"))
+        | map(select(length == 6) | {key: .[0], value: {
+          instance: .[1], incarnation: .[2], connection: .[3],
+          epoch: (.[4] | tonumber), registered_at: .[5]}}) | from_entries) as $terms
+      | ($managed | keys | sort) as $managed_nodes
+      | .mode == "node_connection" and .expected_path == "any"
+        and .all_matched == true
+        and ($managed_nodes | length) == $expected_count
+        and ($terms | length) == $expected_count
+        and (.observations | type == "array" and length == $expected_count)
+        and ([.observations[].node_id] | sort) == $managed_nodes
+        and ([.observations[].node_id] | unique | length) == $expected_count
+        and all(.observations[];
+          (.node_id | gsub("-"; "")) as $node_hex
+          | .found == true and .matched == true
+          and .endpoint_id == $managed[.node_id]
+          and (.owner_fence_id | type == "string" and test("^[0-9a-f]{32}$"))
+          and .owner_instance_id == $terms[$node_hex].instance
+          and .owner_incarnation == $terms[$node_hex].incarnation
+          and .connection_id == $terms[$node_hex].connection
+          and .owner_epoch == $terms[$node_hex].epoch
+          and (.negotiated_capabilities | type == "array"
+            and index("ocserv.fencing.v2") != null)
+          and ((.connected_at | stamp_key) >= ($terms[$node_hex].registered_at | stamp_key))
+          and ((.connected_at | stamp_key) <= ($boundary | stamp_key)))
+    ' "${sessions_tmp}" >/dev/null; then
+    rm -f -- "${terms_tmp}" "${sessions_tmp}" "${boundary_file}"
+    echo "replacement-owner sessions are incomplete or not bound to durable acquisition terms" >&2
+    return 1
+  fi
+  mv -f -- "${terms_tmp}" "${terms_output}"
+  mv -f -- "${sessions_tmp}" "${sessions_output}"
+}
+
+report_owner_replacement_timeout() {
+  local values
+  values="$(owner_replacement_values)" || {
+    echo "the frozen owner population is unavailable for timeout diagnostics" >&2
+    return 1
+  }
+  echo "managed owner terms that did not advance after the transport bounce:" >&2
+  if ! psql_primary_probe -F $'\t' -Atc \
+    "WITH expected(node_id,old_epoch,old_connection_id) AS (VALUES ${values})
+     SELECT encode(expected.node_id,'hex'),expected.old_epoch,
+       COALESCE(current.owner_epoch,0),
+       COALESCE(encode(current.connection_id,'hex'),'missing'),
+       COALESCE(to_char(current.lease_until AT TIME ZONE 'UTC','YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"'),'missing'),
+       to_char(clock_timestamp() AT TIME ZONE 'UTC','YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"')
+     FROM expected
+     LEFT JOIN connection_owner_fencing AS current USING (node_id)
+     WHERE current.node_id IS NULL OR current.owner_epoch<=expected.old_epoch
+       OR current.connection_id=expected.old_connection_id
+       OR current.lease_until<=clock_timestamp()
+     ORDER BY expected.node_id" >&2; then
+    echo "owner replacement timeout diagnostics were unavailable" >&2
+    return 1
+  fi
+}
+
+validate_reconnect_sessions() {
+  local sessions_file="${1:?session inventory is required}"
+  local bulk_disconnect_file="${2:?bulk disconnect stamp is required}"
+  local bulk_disconnect expected_count
+  [[ -s "${sessions_file}" && -s "${bulk_disconnect_file}" ]] || return 1
+  bulk_disconnect="$(<"${bulk_disconnect_file}")"
+  expected_count="$(managed_node_count)" || return 1
+  jq -e --arg bulk_disconnect "${bulk_disconnect}" \
+    --argjson expected_count "${expected_count}" --rawfile managed_tsv "${NODES_FILE}" '
+      def stamp_key:
+        capture("^(?<whole>[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2})(?:\\.(?<fraction>[0-9]{1,9}))?Z$") as $stamp
+        | $stamp.whole + "." + ((($stamp.fraction // "") + "000000000")[0:9]);
+      ($managed_tsv | split("\n") | map(select(length > 0) | split("\t"))
+        | map(select(length == 3) | {key: .[1], value: .[2]}) | from_entries) as $managed
+      | ($managed | keys | sort) as $managed_nodes
+      | .all_matched == true
+        and .expected_path == "any"
+        and ($managed_nodes | length) == $expected_count
+        and (.observations | type == "array" and length == $expected_count)
+        and ([.observations[].node_id] | sort) == $managed_nodes
+        and ([.observations[].node_id] | unique | length) == $expected_count
+        and all(.observations[];
+          .found == true and .matched == true
+          and (.node_id | type == "string")
+          and (.endpoint_id == $managed[.node_id])
+          and (.agent_instance_id | type == "string" and test("^[0-9a-f]{32}$"))
+          and (.owner_fence_id | type == "string" and test("^[0-9a-f]{32}$"))
+          and (.owner_instance_id | type == "string"
+            and test("^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"))
+          and (.owner_incarnation | type == "string" and test("^[1-9][0-9]*$"))
+          and (.connection_id | type == "string" and test("^[0-9a-f]{32}$"))
+          and (.owner_epoch | type == "number" and floor == . and . > 0)
+          and (.authorization_revision | type == "number" and floor == . and . >= 0)
+          and (.negotiated_capabilities | type == "array"
+            and index("ocserv.fencing.v2") != null)
+          and (.path == "direct" or .path == "relay")
+          and ((.connected_at | stamp_key) > ($bulk_disconnect | stamp_key))
+          and ((.owner_lease_until | stamp_key) > (.last_seen | stamp_key))
+          and ((.session_expires_at | stamp_key) > (.last_seen | stamp_key)))
+    ' "${sessions_file}" >/dev/null
+}
+
+capture_reconnect_sessions() {
+  local bulk_disconnect_file="${1:?bulk disconnect stamp is required}"
+  local output="${G6RD_STATE}/reconnect-sessions.json" temporary expected_count
+  local -a args=()
+  expected_count="$(managed_node_count)" || return 1
+  mapfile -t args < <(node_ids)
+  [[ "${#args[@]}" == "${expected_count}" ]] || {
+    echo "the reconnect inventory must cover exactly ${expected_count} managed nodes" >&2
+    return 1
+  }
+  temporary="$(mktemp "${G6RD_STATE}/reconnect-sessions.XXXXXX")"
+  if ! G6RD_NODE_CONNECTION_TIMEOUT_SECONDS=30 \
+    g6rd_probe_node_connection any "${args[@]}" >"${temporary}"; then
+    rm -f -- "${temporary}"
+    echo "the post-storm transport inventory could not be captured" >&2
+    if ! report_node_connection_timeout; then
+      echo "post-storm connection diagnostics were unavailable" >&2
+    fi
+    return 1
+  fi
+  if ! validate_reconnect_sessions "${temporary}" "${bulk_disconnect_file}"; then
+    echo "the post-storm transport inventory is incomplete or not causally after the disconnect" >&2
+    jq -c '{all_matched, observations: [.observations[]? | {
+      node_id, endpoint_id, connected_at, last_seen, owner_epoch,
+      owner_instance_id, owner_incarnation, connection_id,
+      owner_lease_until, session_expires_at
+    }]}' "${temporary}" >&2 || echo "the invalid reconnect inventory is not JSON" >&2
+    rm -f -- "${temporary}"
+    return 1
+  fi
+  mv -f -- "${temporary}" "${output}"
+  g6rd_now >"${G6RD_STATE}/reconnect-sessions-captured-at"
+}
+
+phase_scenario_owner() {
+  capture_live_owner_terms
   g6rd_export_common_env
-  g6rd_compose stop worker
+  # Crash the owner process without running its graceful shutdown path. The
+  # frozen terms must remain in PostgreSQL until their leases expire naturally
+  # so the replacement proves lease-expiry takeover for every managed Agent.
+  G6RD_COMPOSE_TIMEOUT_SECONDS=15 g6rd_compose kill --signal KILL worker
   g6rd_timeline_event owner_a_paused
-  g6rd_wait_until 90 2 "owner leases lapsed" owner_leases_lapsed
+  g6rd_wait_until_deadline 60 1 "all frozen owner leases expired" \
+    owner_leases_lapsed
   g6rd_compose up --detach worker
-  g6rd_wait_until 60 1 "replacement worker trust socket" \
+  g6rd_wait_until_deadline 30 1 "replacement worker trust socket" \
     g6rd_compose exec -T worker test -S /run/ocserv-trust/control-plane.sock
-  # A worker restart does not sever transportd's existing sessions. Restart
-  # the selected local Agents so each performs a new authoritative handshake
-  # with the replacement worker; enqueueing work alone cannot open a session.
-  local node_hex
-  local reconnect_services=()
-  while IFS=: read -r node_hex _; do
-    node="$(node_from_fencing_hex "${node_hex}")"
-    reconnect_services+=("$(node_service "${node}")")
-  done <"${G6RD_STATE}/owner-a-terms.tsv"
-  [[ "${#reconnect_services[@]}" == 5 ]] || {
-    echo "owner replacement did not select five local Agent services" >&2
+  # A worker restart alone does not sever existing Iroh sessions. Bounce the
+  # one active controller endpoint after every frozen lease expires so every
+  # local and peer Agent must register a higher owner epoch. This bounce is
+  # separate from the later measured reconnect storm and stale-Agent probe.
+  g6rd_compose stop transportd
+  g6rd_compose up --detach transportd
+  g6rd_wait_until_deadline 30 1 "transportd ready for owner replacement" \
+    g6rd_compose exec -T transportd test -S /run/ocserv-platform/transportd.sock
+  if ! g6rd_wait_until_deadline 60 1 \
+    "all managed owners registered higher epochs" owner_replaced; then
+    if ! report_owner_replacement_timeout; then
+      echo "owner replacement timeout diagnostics were unavailable" >&2
+    fi
     return 1
-  }
-  g6rd_agent_compose restart "${reconnect_services[@]}"
-  g6rd_wait_until 90 2 "replacement owner registered higher epochs" owner_replaced
-  g6rd_timeline_event owner_b_acquired
+  fi
+  if ! g6rd_wait_until_deadline 60 2 \
+    "all Agents connected through replacement owners" all_nodes_connected; then
+    if ! report_node_connection_timeout; then
+      echo "replacement-owner connection diagnostics were unavailable" >&2
+    fi
+    return 1
+  fi
+  capture_owner_replacement_sessions
+  g6rd_timeline_event owner_b_acquired "${G6RD_STATE}/owner-b-acquired-at"
   g6rd_timeline_event owner_a_resumed
   # enforcement point 1: transportd returns Stale with the retained epoch
   local first epoch target_node target_endpoint
@@ -737,8 +1191,10 @@ phase_scenario_owner() {
   g6rd_timeline_event stale_transport_rejected
   # enforcement point 2 + the reconnect storm: stop transportd, let the
   # probe hold the controller endpoint for one bounded window, restart
+  local bulk_disconnect_file="${G6RD_STATE}/bulk-disconnect-at"
+  g6rd_atomic_now "${bulk_disconnect_file}"
   g6rd_compose stop transportd
-  g6rd_timeline_event bulk_disconnect_injected
+  g6rd_timeline_event bulk_disconnect_injected "${bulk_disconnect_file}"
   g6rd_compose --profile probe run --rm --no-deps \
     -e RUST_LOG=info g6-probe agent-stale-command \
     --signing-key-file /run/ocservia-signing/command-signing.pem \
@@ -759,8 +1215,15 @@ phase_scenario_owner() {
   g6rd_compose up --detach transportd
   g6rd_wait_until 60 1 "transportd back after the storm" \
     g6rd_compose exec -T transportd test -S /run/ocserv-platform/transportd.sock
-  g6rd_wait_until 180 5 "all agents reconnected after the storm" all_nodes_connected
-  g6rd_now >"${G6RD_STATE}/reconnect-completed-at"
+  if ! g6rd_wait_until_deadline 180 5 \
+    "all agents reconnected after the storm" all_nodes_connected; then
+    if ! report_node_connection_timeout; then
+      echo "post-storm connection diagnostics were unavailable" >&2
+    fi
+    return 1
+  fi
+  capture_reconnect_sessions "${bulk_disconnect_file}"
+  capture_database_clock >"${G6RD_STATE}/reconnect-completed-at"
   g6rd_timeline_event reconnect_completed "${G6RD_STATE}/reconnect-completed-at"
 }
 
@@ -777,29 +1240,294 @@ node_from_fencing_hex() {
 
 # Relay failover: after fd-a stops relay-a, authenticated cross-VM session
 # traffic must flow through relay-b.
+phase_relay_pre_fault() {
+  local readiness="${1:?relay observation readiness is required}"
+  local cross_vm_node out observation before key command_id disabled_at temporary
+  validate_relay_a_only_readiness "${readiness}" || {
+    echo "relay-a-only readiness is invalid or substituted" >&2
+    return 1
+  }
+  cross_vm_node="$(<"${readiness}/node-id")"
+  [[ "$(awk -F'\t' -v node="${cross_vm_node}" \
+    '$1 == "g6-fd-a-01" && $2 == node {print $2; exit}' "${NODES_FILE}")" == "${cross_vm_node}" ]] || {
+    echo "the controlled relay node is not the selected managed fd-a Agent" >&2
+    return 1
+  }
+  out="${G6RD_OUTBOX}/relay-pre-fault"
+  observation="${out}/relay-a-observation.json"
+  before="${out}/relay-a-before-command.json"
+  mkdir -p "${out}"
+  rm -f -- "${observation}" "${before}"
+  G6RD_COMPOSE_TIMEOUT_SECONDS=30 g6rd_compose stop relay
+  g6rd_wait_until_deadline 30 1 "relay-b stopped before relay-a proof" relay_b_stopped
+  disabled_at="$(capture_database_clock)"
+  temporary="${out}/relay-b-disabled.json.$$"
+  jq -cn --arg environment "${G6RD_ENVIRONMENT_ID}" \
+    --arg candidate "${G6RD_CANDIDATE_SHA}" --arg node "${cross_vm_node}" \
+    --arg disabled_at "${disabled_at}" '{
+      schema_version:"ocservia.g6-relay-state.v1",
+      environment_id:$environment,candidate_sha:$candidate,node_id:$node,
+      relay:"relay-b",state:"stopped",disabled_at:$disabled_at
+    }' >"${temporary}"
+  mv -f -- "${temporary}" "${out}/relay-b-disabled.json"
+  cp -f "${readiness}/relay-a-only-readiness.json" \
+    "${out}/relay-a-only-readiness.json"
+  G6RD_NODE_CONNECTION_TIMEOUT_SECONDS=5 \
+    g6rd_wait_until_deadline 90 5 "cross-VM session through relay-a before fault" \
+    relay_probe_named relay-a "${cross_vm_node}" "${before}"
+  key="g6-relay-pre-fault-${RUN_ID}"
+  g6rd_enqueue_command "${cross_vm_node}" "${key}" \
+    "${out}/relay-a-command-enqueue.jsonl"
+  command_id="$(command_id_of_key "${key}")"
+  [[ "${command_id}" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$ ]] || {
+    echo "pre-fault relay command id is missing" >&2
+    return 1
+  }
+  g6rd_wait_until_deadline 120 2 "pre-fault relay command result" \
+    wait_commands_settled "${key}"
+  capture_relay_dispatch_proof "${command_id}" "${cross_vm_node}" "${before}" \
+    "${out}/relay-a-dispatch-proof.json" relay-a
+  capture_relay_command_proof "${key}" "${cross_vm_node}" \
+    "${out}/relay-a-command-proof.json"
+  G6RD_NODE_CONNECTION_TIMEOUT_SECONDS=5 \
+    g6rd_wait_until_deadline 30 2 \
+    "same relay-a session after authenticated command" \
+    relay_probe_named relay-a "${cross_vm_node}" "${observation}"
+  require_file "${observation}"
+  relay_observations_same_session "${before}" "${observation}"
+  capture_database_clock >"${out}/observed-at"
+  printf '%s\n' "${cross_vm_node}" >"${out}/node-id"
+  printf '%s\n' "${G6RD_CANDIDATE_SHA}" >"${out}/candidate-sha"
+}
+
 phase_scenario_relay() {
-  local relay_failed_at="${1:?relay-a failure stamp file}"
+  local peer_ready="${1:?failure-domain A readiness directory is required}"
+  local relay_failed_at="${peer_ready}/relay-a-failed-at"
   require_file "${relay_failed_at}"
-  local cross_vm_node
-  cross_vm_node="$(awk -F'\t' '$1 ~ /^g6-fd-a-/ {print $2; exit}' "${NODES_FILE}")"
+  require_file "${peer_ready}/relay-fault-cut.json"
+  local cross_vm_node observation_file before_file node_file temporary
+  local key command_id proof_file dispatch_file active_at_file started_at started_file
+  require_file "${G6RD_OUTBOX}/relay-pre-fault/relay-a-observation.json"
+  require_file "${G6RD_OUTBOX}/relay-pre-fault/observed-at"
+  require_file "${G6RD_OUTBOX}/relay-pre-fault/relay-a-only-readiness.json"
+  require_file "${G6RD_OUTBOX}/relay-pre-fault/relay-b-disabled.json"
+  cross_vm_node="$(<"${G6RD_OUTBOX}/relay-pre-fault/node-id")"
   [[ -n "${cross_vm_node}" ]] || {
     echo "no cross-failure-domain agent is available for the relay scenario" >&2
     return 1
   }
+  observation_file="${G6RD_STATE}/relay-b-observation.json"
+  before_file="${G6RD_STATE}/relay-b-before-command.json"
+  node_file="${G6RD_STATE}/relay-b-node-id"
+  temporary="${node_file}.$$"
+  printf '%s\n' "${cross_vm_node}" >"${temporary}"
+  mv -f -- "${temporary}" "${node_file}"
+  rm -f -- "${observation_file}" "${before_file}"
+  jq -e --arg environment "${G6RD_ENVIRONMENT_ID}" \
+    --arg candidate "${G6RD_CANDIDATE_SHA}" --arg node "${cross_vm_node}" \
+    --slurpfile topology "${G6RD_OUTBOX}/relay-pre-fault/relay-a-only-readiness.json" \
+    --slurpfile cut "${peer_ready}/relay-fault-cut.json" '
+      def stamp_key:
+        capture("^(?<whole>[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2})(?:\\.(?<fraction>[0-9]{1,9}))?Z$") as $stamp
+        | $stamp.whole + "." + ((($stamp.fraction // "") + "000000000")[0:9]);
+      keys == ["candidate_sha","disabled_at","environment_id","node_id",
+        "relay","schema_version","state"]
+      and .schema_version == "ocservia.g6-relay-state.v1"
+      and .environment_id == $environment and .candidate_sha == $candidate
+      and .node_id == $node and .relay == "relay-b" and .state == "stopped"
+      and ($topology | length) == 1 and ($cut | length) == 1
+      and $topology[0].candidate_sha == $candidate
+      and $topology[0].node_id == $node
+      and (($topology[0].topology_ready_at | stamp_key) <= (.disabled_at | stamp_key))
+      and ((.disabled_at | stamp_key) < ($cut[0].cut_at | stamp_key))
+    ' "${G6RD_OUTBOX}/relay-pre-fault/relay-b-disabled.json" >/dev/null || {
+    echo "relay-b was not durably disabled for the controlled pre-fault proof" >&2
+    return 1
+  }
+  relay_b_stopped || {
+    echo "relay-b restarted before the fault artifact rendezvous completed" >&2
+    return 1
+  }
   g6rd_timeline_event relay_a_failed "${relay_failed_at}"
-  g6rd_wait_until 90 5 "cross-VM session through relay-b" \
-    relay_probe_relay_b "${cross_vm_node}"
-  relay_probe_relay_b "${cross_vm_node}" >"${G6RD_STATE}/relay-b-observation.json"
-  g6rd_timeline_event relay_b_active
+  phase_relay_up
+  started_at="$(capture_database_clock)"
+  jq -en --arg started_at "${started_at}" \
+    --slurpfile cut "${peer_ready}/relay-fault-cut.json" '
+      def stamp_key:
+        capture("^(?<whole>[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2})(?:\\.(?<fraction>[0-9]{1,9}))?Z$") as $stamp
+        | $stamp.whole + "." + ((($stamp.fraction // "") + "000000000")[0:9]);
+      ($cut | length) == 1 and (($started_at | stamp_key) > ($cut[0].cut_at | stamp_key))
+    ' >/dev/null || {
+    echo "relay-b did not start strictly after the promoted-database fault cut" >&2
+    return 1
+  }
+  started_file="${G6RD_STATE}/relay-b-started.json"
+  temporary="${started_file}.$$"
+  jq -cn --arg environment "${G6RD_ENVIRONMENT_ID}" \
+    --arg candidate "${G6RD_CANDIDATE_SHA}" --arg node "${cross_vm_node}" \
+    --arg started_at "${started_at}" '{
+      schema_version:"ocservia.g6-relay-state.v1",
+      environment_id:$environment,candidate_sha:$candidate,node_id:$node,
+      relay:"relay-b",state:"healthy",started_at:$started_at
+    }' >"${temporary}"
+  mv -f -- "${temporary}" "${started_file}"
+  G6RD_NODE_CONNECTION_TIMEOUT_SECONDS=5 \
+    g6rd_wait_until_deadline 90 5 "cross-VM session through relay-b" \
+    relay_probe_relay_b "${cross_vm_node}" "${before_file}"
+  key="g6-relay-failover-${RUN_ID}"
+  g6rd_enqueue_command "${cross_vm_node}" "${key}" \
+    "${G6RD_STATE}/relay-command-enqueue.jsonl"
+  command_id="$(command_id_of_key "${key}")"
+  [[ "${command_id}" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$ ]] || {
+    echo "relay failover command id is missing" >&2
+    return 1
+  }
+  g6rd_wait_until_deadline 120 2 "relay failover command result" \
+    wait_commands_settled "${key}"
+  dispatch_file="${G6RD_STATE}/relay-dispatch-proof.json"
+  capture_relay_dispatch_proof \
+    "${command_id}" "${cross_vm_node}" "${before_file}" "${dispatch_file}" relay-b
+  proof_file="${G6RD_STATE}/relay-command-proof.json"
+  capture_relay_command_proof "${key}" "${cross_vm_node}" "${proof_file}"
+  G6RD_NODE_CONNECTION_TIMEOUT_SECONDS=5 \
+    g6rd_wait_until_deadline 30 2 "same relay-b session after authenticated command" \
+    relay_probe_relay_b "${cross_vm_node}" "${observation_file}"
+  require_file "${observation_file}"
+  relay_observations_same_session "${before_file}" "${observation_file}"
+  active_at_file="${G6RD_STATE}/relay-b-active-at"
+  capture_database_clock >"${active_at_file}"
+  g6rd_timeline_event relay_b_active "${active_at_file}"
+}
+
+capture_relay_dispatch_proof() {
+  local command_id="${1:?command id is required}" node="${2:?node id is required}"
+  local observation="${3:?relay observation is required}"
+  local output="${4:?dispatch proof destination is required}"
+  local relay="${5:?relay name is required}"
+  local logs="${output}.logs.$$" temporary="${output}.$$"
+  local command_hex="${command_id//-/}" node_hex="${node//-/}"
+  if ! G6RD_COMPOSE_TIMEOUT_SECONDS=15 g6rd_compose logs --no-color \
+    --no-log-prefix transportd >"${logs}"; then
+    rm -f -- "${logs}" "${temporary}"
+    return 1
+  fi
+  if ! jq -eRsc --arg command "${command_hex}" --arg node "${node_hex}" '
+    [split("\n")[] | fromjson? |
+      select(.fields.event_type == "command_frame_written"
+        and .fields.command_id == $command
+        and .fields.node_id == $node) | .fields] as $matches
+    | if ($matches | length) == 1 then $matches[0] else false end
+  ' "${logs}" >"${temporary}"; then
+    rm -f -- "${logs}" "${temporary}"
+    return 1
+  fi
+  rm -f -- "${logs}"
+  if ! jq -e --slurpfile observation "${observation}" --arg relay "${relay}" '
+    .path == "relay"
+    and (.path_detail | contains($relay))
+    and (.owner_fence_id | test("^[0-9a-f]{32}$"))
+    and (.connection_id | test("^[0-9a-f]{32}$"))
+    and (.owner_epoch | type == "number" and floor == . and . > 0)
+    and .owner_fence_id == ($observation[0].observations[0].owner_fence_id | gsub("-"; ""))
+    and .connection_id == ($observation[0].observations[0].connection_id | gsub("-"; ""))
+    and .owner_epoch == $observation[0].observations[0].owner_epoch
+  ' "${temporary}" >/dev/null; then
+    rm -f -- "${temporary}"
+    echo "transportd did not log one exact relay frame write for the command" >&2
+    return 1
+  fi
+  mv -f -- "${temporary}" "${output}"
+}
+
+relay_probe_named() {
+  local relay="${1:?relay name is required}"
+  local node="${2:?node id is required}"
+  local output="${3:?relay observation destination is required}"
+  local expected_endpoint temporary
+  expected_endpoint="$(awk -F'\t' -v node="${node}" '$2 == node {print $3; exit}' "${NODES_FILE}")"
+  [[ "${expected_endpoint}" =~ ^[0-9a-f]{64}$ ]] || return 1
+  temporary="${output}.$$"
+  if ! g6rd_probe_node_connection relay "${node}" >"${temporary}" 2>/dev/null; then
+    rm -f -- "${temporary}"
+    return 1
+  fi
+  if ! jq -e --arg node "${node}" --arg endpoint "${expected_endpoint}" \
+    --arg relay "${relay}" '
+    .mode == "node_connection"
+    and .expected_path == "relay"
+    and .all_matched == true
+    and (.observations | length == 1)
+    and (.observations[0] |
+      .node_id == $node
+      and .endpoint_id == $endpoint
+      and .found == true and .matched == true
+      and .path == "relay"
+      and (.path_detail | type == "string" and contains($relay))
+      and (.owner_fence_id | type == "string" and test("^[0-9a-f]{32}$"))
+      and (.owner_instance_id | type == "string" and length == 36)
+      and (.owner_incarnation | type == "string" and test("^[1-9][0-9]*$"))
+      and (.connection_id | type == "string" and test("^[0-9a-f]{32}$"))
+      and (.owner_epoch | type == "number" and floor == . and . > 0)
+      and (.negotiated_capabilities | type == "array"
+        and index("ocserv.fencing.v2") != null))
+  ' "${temporary}" >/dev/null; then
+    rm -f -- "${temporary}"
+    return 1
+  fi
+  mv -f -- "${temporary}" "${output}"
 }
 
 relay_probe_relay_b() {
-  local node="${1:?node id is required}" observation
-  observation="$(g6rd_probe_node_connection relay "${node}" 2>/dev/null)" || return 1
-  jq -e '.all_matched == true and (.observations | length == 1) and
-    .observations[0].path == "relay" and
-    (.observations[0].path_detail | contains("relay-b"))' \
-    <<<"${observation}" >/dev/null
+  relay_probe_named relay-b "$@"
+}
+
+relay_observations_same_session() {
+  local before="${1:?before observation is required}"
+  local after="${2:?after observation is required}"
+  jq -e --slurpfile before "${before}" '
+    def tuple: {
+      node_id,endpoint_id,owner_fence_id,owner_instance_id,
+      owner_incarnation,connection_id,owner_epoch,path,path_detail
+    };
+    (.observations | length) == 1
+    and ($before[0].observations | length) == 1
+    and (.observations[0] | tuple) == ($before[0].observations[0] | tuple)
+  ' "${after}" >/dev/null
+}
+
+capture_relay_command_proof() {
+  local key="${1:?idempotency key is required}"
+  local node="${2:?node id is required}"
+  local output="${3:?proof destination is required}"
+  local temporary="${output}.$$"
+  psql_primary_probe -Atc \
+    "SELECT jsonb_build_object(
+       'observed_at',to_char(clock_timestamp() AT TIME ZONE 'UTC','YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"'),
+       'command_id',command.id::text,'idempotency_key',command.idempotency_key,
+       'node_id',command.node_id::text,'command_state',command.state,
+       'result_count',count(result.event_id),
+       'result_state',min(result.state::text),
+       'agent_result_completed_at',to_char(max(coalesce(result.completed_at,result.created_at)) AT TIME ZONE 'UTC','YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"'),
+       'result_observed_at',to_char(command.updated_at AT TIME ZONE 'UTC','YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"'))
+     FROM commands AS command
+     JOIN agent_command_results AS result ON result.command_id=command.id
+     WHERE command.idempotency_key='${key}' AND command.node_id='${node}'
+     GROUP BY command.id,command.idempotency_key,command.node_id,command.state,command.updated_at" \
+    >"${temporary}"
+  jq -e --arg key "${key}" --arg node "${node}" '
+    .idempotency_key == $key and .node_id == $node
+    and .command_state == "succeeded" and .result_count == 1
+    and .result_state == "succeeded"
+    and (.command_id | test("^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"))
+    and (.observed_at | test("^[0-9]{4}-.*Z$"))
+    and (.agent_result_completed_at | test("^[0-9]{4}-.*Z$"))
+    and (.result_observed_at | test("^[0-9]{4}-.*Z$"))
+  ' "${temporary}" >/dev/null || {
+    rm -f -- "${temporary}"
+    echo "relay failover command lacks one successful durable result" >&2
+    return 1
+  }
+  mv -f -- "${temporary}" "${output}"
 }
 
 # Direct-relay path transitions on one same-host agent: sever the shared
@@ -820,20 +1548,23 @@ phase_scenario_path() {
   # would sever both the direct and relay paths and could not prove fallback.
   docker network connect --alias relay-b "${isolated_network}" \
     "${COMPOSE_PROJECT}-relay-1" >/dev/null
-  g6rd_wait_until 60 5 "agent-01 session on the direct path" \
+  G6RD_NODE_CONNECTION_TIMEOUT_SECONDS=5 \
+    g6rd_wait_until_deadline 60 5 "agent-01 session on the direct path" \
     g6rd_probe_node_connection direct "${node}"
   g6rd_timeline_event direct_path_active
   docker network connect "${isolated_network}" "${COMPOSE_PROJECT}-${service}-1" >/dev/null
   docker network disconnect "${COMPOSE_PROJECT}_default" "${COMPOSE_PROJECT}-${service}-1"
   g6rd_timeline_event direct_path_failed
-  g6rd_wait_until 120 5 "agent-01 session moved to the relay path" \
+  G6RD_NODE_CONNECTION_TIMEOUT_SECONDS=5 \
+    g6rd_wait_until_deadline 120 5 "agent-01 session moved to the relay path" \
     g6rd_probe_node_connection relay "${node}"
   g6rd_timeline_event relay_path_active
   docker network connect "${COMPOSE_PROJECT}_default" "${COMPOSE_PROJECT}-${service}-1" >/dev/null
   docker network disconnect "${isolated_network}" "${COMPOSE_PROJECT}-${service}-1"
   docker network disconnect "${isolated_network}" "${COMPOSE_PROJECT}-relay-1"
   docker network rm "${isolated_network}" >/dev/null
-  g6rd_wait_until 180 5 "agent-01 session recovered the direct path" \
+  G6RD_NODE_CONNECTION_TIMEOUT_SECONDS=5 \
+    g6rd_wait_until_deadline 180 5 "agent-01 session recovered the direct path" \
     g6rd_probe_node_connection direct "${node}"
   g6rd_timeline_event direct_path_recovered
 }
@@ -1369,6 +2100,40 @@ journal_result_ready() {
 # enqueue observations against the recovered control plane.
 # ---------------------------------------------------------------------------
 
+phase_window_barrier_arm() {
+  g6rd_arm_synthetic_barriers
+  g6rd_synthetic_barriers_armed || {
+    echo "failure domain B did not arm its complete local Agent population" >&2
+    return 1
+  }
+  mkdir -p "${G6RD_OUTBOX}/window-barrier-arm-request"
+  printf '%s\n' "${G6RD_CANDIDATE_SHA}" \
+    >"${G6RD_OUTBOX}/window-barrier-arm-request/candidate-sha"
+}
+
+phase_resource_preflight() {
+  G6RD_WORKSPACE_ID="$(<"${G6RD_STATE}/workspace-id")"
+  export G6RD_WORKSPACE_ID
+  g6rd_export_common_env
+  local output="${G6RD_STATE}/resource-preflight.csv" temporary
+  local header='timestamp,component,instance,rss_bytes,fd_count,tasks,queue_depth,db_connections,environment_id,candidate_sha'
+  temporary="$(mktemp "${G6RD_STATE}/resource-preflight.XXXXXX")"
+  printf '%s\n' "${header}" >"${temporary}"
+  if ! G6RD_SAMPLER_COMPOSE_TIMEOUT_SECONDS=8 \
+    G6RD_SAMPLER_PSQL_TIMEOUT_SECONDS=8 \
+    g6rd_sampler_tick "${temporary}"; then
+    rm -f -- "${temporary}"
+    echo "bounded resource preflight could not collect a complete real sampler tick" >&2
+    return 1
+  fi
+  if ! g6rd_validate_sampler_batch "${temporary}"; then
+    sed -n '1,12p' "${temporary}" >&2
+    rm -f -- "${temporary}"
+    return 1
+  fi
+  mv -f -- "${temporary}" "${output}"
+}
+
 outbox_drained() {
   [[ "$(psql_primary_probe -Atc \
     'SELECT count(*) FROM outbox_events WHERE published_at IS NULL')" == 0 ]]
@@ -1491,7 +2256,86 @@ wait_for_window_enqueue_wave() {
   return "${status}"
 }
 
-phase_window() {
+window_opening_commands_active() {
+  local expected prefix observed
+  expected="$(managed_node_count)" || return 1
+  prefix="g6-window-${RUN_ID}-opening-"
+  observed="$(psql_window_probe -F $'\t' -Atc \
+    "WITH opening AS (
+       SELECT command.id,command.node_id,command.state
+       FROM commands AS command
+       WHERE command.idempotency_key LIKE '${prefix}%'
+     )
+     SELECT count(*),count(DISTINCT opening.node_id),
+       count(*) FILTER (WHERE opening.state IN ('dispatched','accepted','running')),
+       count(result.command_id)
+     FROM opening
+     LEFT JOIN agent_command_results AS result ON result.command_id=opening.id")" || return 1
+  [[ "${observed}" == "${expected}"$'\t'"${expected}"$'\t'"${expected}"$'\t0' ]]
+}
+
+capture_window_opening_active() {
+  local expected prefix output temporary
+  expected="$(managed_node_count)" || return 1
+  prefix="g6-window-${RUN_ID}-opening-"
+  output="${G6RD_STATE}/window-opening-active.json"
+  temporary="${output}.$$"
+  if ! psql_window_probe -Atc \
+    "WITH opening AS (
+       SELECT command.id,command.node_id,command.state
+       FROM commands AS command
+       WHERE command.idempotency_key LIKE '${prefix}%'
+     )
+     SELECT jsonb_build_object(
+       'captured_at',to_char(clock_timestamp() AT TIME ZONE 'UTC','YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"'),
+       'expected_count',${expected},
+       'commands',coalesce(jsonb_agg(jsonb_build_object(
+         'command_id',opening.id::text,'node_id',opening.node_id::text,
+         'state',opening.state) ORDER BY opening.node_id),'[]'::jsonb),
+       'result_count',count(result.command_id))
+     FROM opening
+     LEFT JOIN agent_command_results AS result ON result.command_id=opening.id" \
+    >"${temporary}"; then
+    rm -f -- "${temporary}"
+    return 1
+  fi
+  if ! jq -e --argjson expected "${expected}" '
+    .expected_count == $expected
+    and .result_count == 0
+    and (.commands | length) == $expected
+    and ([.commands[].node_id] | unique | length) == $expected
+    and all(.commands[]; (.state | IN("dispatched","accepted","running")))
+  ' "${temporary}" >/dev/null; then
+    rm -f -- "${temporary}"
+    echo "the frozen opening-wave proof is not the exact active managed population" >&2
+    return 1
+  fi
+  mv -f -- "${temporary}" "${output}"
+}
+
+record_window_opening_proof() {
+  local marker="window-opening-proof-${RUN_ID}"
+  psql_window_probe -v marker_id="${marker}" -Atc \
+    "INSERT INTO g6_readiness_markers(id,txid,phase)
+     VALUES (:'marker_id',txid_current()::text,'window_opening_proof')
+     RETURNING id" \
+    | grep -Fx -- "${marker}" >/dev/null
+}
+
+phase_window() (
+  local peer_armed="${1:?peer window-barrier acknowledgement is required}"
+  local completed=0
+  trap 'g6rd_release_synthetic_barriers || :
+    if ((completed == 0)); then g6rd_stop_sampler || :; fi' EXIT
+  require_file "${peer_armed}/candidate-sha"
+  [[ "$(<"${peer_armed}/candidate-sha")" == "${G6RD_CANDIDATE_SHA}" ]] || {
+    echo "peer window-barrier acknowledgement belongs to a different candidate" >&2
+    return 1
+  }
+  g6rd_synthetic_barriers_armed || {
+    echo "failure domain B lost an Agent barrier before the observation window" >&2
+    return 1
+  }
   G6RD_WORKSPACE_ID="$(<"${G6RD_STATE}/workspace-id")"
   export G6RD_WORKSPACE_ID
   g6rd_export_common_env
@@ -1503,8 +2347,8 @@ phase_window() {
     report_window_outbox_timeout
     return 1
   fi
-  g6rd_start_sampler "${G6RD_STATE}/resource-samples.csv"
   g6rd_now >"${G6RD_STATE}/window-started-at"
+  g6rd_start_sampler "${G6RD_STATE}/resource-samples.csv"
   local node total count=0 window_deadline _
   local -a enqueue_pids=()
   mapfile -t node_list < <(node_ids)
@@ -1512,23 +2356,48 @@ phase_window() {
   window_deadline=$((SECONDS + WINDOW_SECONDS))
   : >"${G6RD_STATE}/read-log.jsonl"
   : >"${G6RD_STATE}/enqueue-log.jsonl"
-  # Two opening waves of one-command-per-node, enqueued in parallel: the
-  # whole fleet holds a command in flight before any result can return,
-  # which drives the concurrent production-command floor above fifty
-  # inside the bounded window itself.
-  for _ in 1 2; do
-    enqueue_pids=()
-    for node in "${node_list[@]}"; do
-      g6rd_enqueue_command "${node}" "g6-window-${RUN_ID}-${count}" &
-      enqueue_pids+=("$!")
-      count=$((count + 1))
-    done
-    if ! wait_for_window_enqueue_wave "${enqueue_pids[@]}"; then
-      g6rd_stop_sampler || true
+  [[ "${total}" == "$(managed_node_count)" ]] || {
+    echo "the observation window did not load the exact managed population" >&2
+    return 1
+  }
+  # Arm both failure domains before admission, then prove exactly one active,
+  # result-free production command for every managed Agent before releasing
+  # either half of the fleet. This is the raw max-inflight witness.
+  for node in "${node_list[@]}"; do
+    g6rd_enqueue_command "${node}" "g6-window-${RUN_ID}-opening-${count}" &
+    enqueue_pids+=("$!")
+    count=$((count + 1))
+  done
+  if ! wait_for_window_enqueue_wave "${enqueue_pids[@]}"; then
+    return 1
+  fi
+  if [[ -e "${G6RD_STATE}/sampler-failed-at" ]]; then
+    echo "resource sampler failed during the all-fleet opening command wave" >&2
+    return 1
+  fi
+  g6rd_wait_until_deadline 60 1 \
+    "exact fifty-command production inflight proof" \
+    window_opening_commands_active
+  capture_window_opening_active
+  record_window_opening_proof
+  g6rd_release_synthetic_barriers
+
+  # Retain the second production-path wave after the held population is
+  # released so the remainder of the bounded workload continues at full
+  # fleet breadth without weakening the exact opening proof.
+  enqueue_pids=()
+  for node in "${node_list[@]}"; do
+    g6rd_enqueue_command "${node}" "g6-window-${RUN_ID}-continuation-${count}" &
+    enqueue_pids+=("$!")
+    count=$((count + 1))
+  done
+  wait_for_window_enqueue_wave "${enqueue_pids[@]}"
+  while ((SECONDS < window_deadline)); do
+    if [[ -e "${G6RD_STATE}/sampler-failed-at" ]]; then
+      echo "resource sampler failed during the bounded observation window" >&2
+      g6rd_stop_sampler || :
       return 1
     fi
-  done
-  while ((SECONDS < window_deadline)); do
     g6rd_read_nodes "${G6RD_STATE}/read-log.jsonl" || true
     ((SECONDS < window_deadline)) || break
     g6rd_read_nodes "${G6RD_STATE}/read-log.jsonl" || true
@@ -1558,9 +2427,12 @@ phase_window() {
     return 1
   fi
   g6rd_stop_sampler
+  g6rd_timeline_event resource_sampling_stopped \
+    "${G6RD_STATE}/sampler-complete-at"
   g6rd_now >"${G6RD_STATE}/window-ended-at"
   g6rd_timeline_event api_slo_measured "${G6RD_STATE}/window-ended-at"
-}
+  completed=1
+)
 
 # ---------------------------------------------------------------------------
 # Evidence collection and assembly. Collection runs while the recovered
@@ -1620,6 +2492,12 @@ capture_final_authority_cut() {
          ORDER BY history.history_id
        ),'[]'::jsonb) AS entries
        FROM g6_scheduler_leadership_history AS history
+     ), maintenance_journal AS MATERIALIZED (
+       SELECT COALESCE(jsonb_agg(
+         history.maintenance_id::text||':'||history.instance_id||':'||history.incarnation||':'||history.epoch||':'||to_char(history.completed_at AT TIME ZONE 'UTC','YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"')
+         ORDER BY history.maintenance_id
+       ),'[]'::jsonb) AS entries
+       FROM g6_scheduler_maintenance_history AS history
      )
      SELECT jsonb_build_object(
        'cut_at',to_char(cut.at AT TIME ZONE 'UTC','YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"'),
@@ -1644,8 +2522,10 @@ capture_final_authority_cut() {
          ) FROM leader AS entry
        ),
        'owner_history',owner_journal.entries,
-       'scheduler_history',scheduler_journal.entries
-     ) FROM cut CROSS JOIN owner_journal CROSS JOIN scheduler_journal" >"${out}"
+       'scheduler_history',scheduler_journal.entries,
+       'scheduler_maintenance_history',maintenance_journal.entries
+     ) FROM cut CROSS JOIN owner_journal CROSS JOIN scheduler_journal
+       CROSS JOIN maintenance_journal" >"${out}"
   jq -e --argjson expected "${expected}" \
     '.cut_at | type == "string"
      and test("^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\\.[0-9]{6}Z$")' \
@@ -1673,7 +2553,12 @@ capture_final_authority_cut() {
      and (.scheduler_history | length > 0)
      and all(.scheduler_history[];
        type == "string"
-       and test("^[1-9][0-9]*:[0-9a-f-]{36}:[0-9]+:[1-9][0-9]*:[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\\.[0-9]{6}Z:[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\\.[0-9]{6}Z$"))' \
+       and test("^[1-9][0-9]*:[0-9a-f-]{36}:[0-9]+:[1-9][0-9]*:[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\\.[0-9]{6}Z:[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\\.[0-9]{6}Z$"))
+     and (.scheduler_maintenance_history | type == "array")
+     and (.scheduler_maintenance_history | length > 0)
+     and all(.scheduler_maintenance_history[];
+       type == "string"
+       and test("^[1-9][0-9]*:[0-9a-f-]{36}:[0-9]+:[1-9][0-9]*:[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\\.[0-9]{6}Z$"))' \
     "${out}" >/dev/null || {
     echo "the final authority cut does not contain every live owner and leader lease" >&2
     return 1
@@ -1693,7 +2578,9 @@ assert_final_session_authority() {
   authority_terms="${G6RD_STATE}/final-authority-terms.tsv"
   for sessions in "${before}" "${after}"; do
     jq -e --argjson expected "${expected}" --arg cut_at "$(jq -r '.cut_at' "${cut}")" '
-      def epoch_seconds: sub("\\.[0-9]+Z$"; "Z") | fromdateiso8601;
+      def stamp_key:
+        capture("^(?<whole>[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2})(?:\\.(?<fraction>[0-9]{1,9}))?Z$") as $stamp
+        | $stamp.whole + "." + ((($stamp.fraction // "") + "000000000")[0:9]);
       .all_matched == true
       and (.observations | length) == $expected
       and ([.observations[].node_id] | unique | length) == $expected
@@ -1706,9 +2593,9 @@ assert_final_session_authority() {
         and (.owner_incarnation | type == "string" and test("^[1-9][0-9]*$"))
         and (.connection_id | type == "string" and test("^[0-9a-f]{32}$"))
         and (.owner_epoch | type == "number" and . > 0)
-        and (.connected_at | epoch_seconds) <= ($cut_at | epoch_seconds)
-        and (.owner_lease_until | epoch_seconds) > ($cut_at | epoch_seconds)
-        and (.session_expires_at | epoch_seconds) > ($cut_at | epoch_seconds))' \
+        and (.connected_at | stamp_key) <= ($cut_at | stamp_key)
+        and (.owner_lease_until | stamp_key) > ($cut_at | stamp_key)
+        and (.session_expires_at | stamp_key) > ($cut_at | stamp_key))' \
       "${sessions}" >/dev/null || {
       echo "a bracketed final session inventory is incomplete or not live at the authority cut" >&2
       return 1
@@ -1754,24 +2641,27 @@ append_final_history_snapshot() {
   local cut="${G6RD_STATE}/final-authority-cut.json"
   local owner_tmp="${G6RD_STATE}/fencing-history.final.$$"
   local scheduler_tmp="${G6RD_STATE}/leadership-history.final.$$"
+  local maintenance_tmp="${G6RD_STATE}/scheduler-maintenance-history.final.$$"
   local file label line history_id previous count
   require_file "${cut}"
   if ! jq -er '.owner_history[]' "${cut}" >"${owner_tmp}" \
-    || ! jq -er '.scheduler_history[]' "${cut}" >"${scheduler_tmp}"; then
-    rm -f "${owner_tmp}" "${scheduler_tmp}"
+    || ! jq -er '.scheduler_history[]' "${cut}" >"${scheduler_tmp}" \
+    || ! jq -er '.scheduler_maintenance_history[]' "${cut}" >"${maintenance_tmp}"; then
+    rm -f "${owner_tmp}" "${scheduler_tmp}" "${maintenance_tmp}"
     echo "the final authority cut is missing its frozen journal arrays" >&2
     return 1
   fi
-  for file in "${owner_tmp}" "${scheduler_tmp}"; do
+  for file in "${owner_tmp}" "${scheduler_tmp}" "${maintenance_tmp}"; do
     label=fencing
     [[ "${file}" == "${scheduler_tmp}" ]] && label=leadership
+    [[ "${file}" == "${maintenance_tmp}" ]] && label=scheduler-maintenance
     previous=0
     count=0
     while IFS= read -r line; do
       history_id="${line%%:*}"
       if [[ ! "${history_id}" =~ ^[1-9][0-9]*$ ]] \
         || (( history_id <= previous )); then
-        rm -f "${owner_tmp}" "${scheduler_tmp}"
+        rm -f "${owner_tmp}" "${scheduler_tmp}" "${maintenance_tmp}"
         echo "frozen ${label} journal is not in strict history-id order" >&2
         return 1
       fi
@@ -1779,7 +2669,7 @@ append_final_history_snapshot() {
       count=$((count + 1))
     done <"${file}"
     if (( count == 0 )); then
-      rm -f "${owner_tmp}" "${scheduler_tmp}"
+      rm -f "${owner_tmp}" "${scheduler_tmp}" "${maintenance_tmp}"
       echo "frozen ${label} journal is empty" >&2
       return 1
     fi
@@ -1789,6 +2679,7 @@ append_final_history_snapshot() {
   # prevents any renewal committed after cut_at from entering the evidence.
   mv -f "${owner_tmp}" "${G6RD_STATE}/fencing-history.jsonl"
   mv -f "${scheduler_tmp}" "${G6RD_STATE}/leadership-history.jsonl"
+  mv -f "${maintenance_tmp}" "${G6RD_STATE}/scheduler-maintenance-history.jsonl"
 }
 
 phase_evidence_collect() {
@@ -1799,13 +2690,13 @@ phase_evidence_collect() {
   mkdir -p "${dir}/effects"
   # frozen database views, one JSON object per line; to_char pins every
   # timestamp to strict RFC 3339 with an explicit UTC offset
-  psql_primary -Atc "SELECT jsonb_build_object('id',c.id::text,'idempotency_key',c.idempotency_key,'node_id',c.node_id::text,'state',c.state,'created_at',to_char(c.created_at AT TIME ZONE 'UTC','YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"'),'updated_at',to_char(c.updated_at AT TIME ZONE 'UTC','YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"')) FROM commands c WHERE c.idempotency_key LIKE 'g6-%' ORDER BY c.created_at, c.id" \
+  psql_primary -Atc "SELECT jsonb_build_object('id',c.id::text,'idempotency_key',c.idempotency_key,'node_id',c.node_id::text,'state',c.state,'created_at',to_char(c.created_at AT TIME ZONE 'UTC','YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"'),'updated_at',to_char(c.updated_at AT TIME ZONE 'UTC','YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"')) FROM commands c WHERE c.idempotency_key LIKE 'g6-%' ORDER BY c.created_at, c.id" \
     >"${dir}/commands.jsonl"
-  psql_primary -Atc "SELECT jsonb_build_object('command_id',a.command_id::text,'attempt_number',a.attempt_number,'state',a.state,'started_at',to_char(a.started_at AT TIME ZONE 'UTC','YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"'),'finished_at',CASE WHEN a.finished_at IS NULL THEN '' ELSE to_char(a.finished_at AT TIME ZONE 'UTC','YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"') END) FROM command_attempts a JOIN commands c ON c.id=a.command_id WHERE c.idempotency_key LIKE 'g6-%' ORDER BY a.started_at, a.id" \
+  psql_primary -Atc "SELECT jsonb_build_object('command_id',a.command_id::text,'attempt_number',a.attempt_number,'state',a.state,'started_at',to_char(a.started_at AT TIME ZONE 'UTC','YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"'),'finished_at',CASE WHEN a.finished_at IS NULL THEN '' ELSE to_char(a.finished_at AT TIME ZONE 'UTC','YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') END) FROM command_attempts a JOIN commands c ON c.id=a.command_id WHERE c.idempotency_key LIKE 'g6-%' ORDER BY a.started_at, a.id" \
     >"${dir}/attempts.jsonl"
-  psql_primary -Atc "SELECT jsonb_build_object('command_id',o.command_id::text,'created_at',to_char(o.created_at AT TIME ZONE 'UTC','YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"'),'available_at',to_char(o.available_at AT TIME ZONE 'UTC','YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"'),'published_at',CASE WHEN o.published_at IS NULL THEN '' ELSE to_char(o.published_at AT TIME ZONE 'UTC','YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"') END,'locked',CASE WHEN o.locked_by IS NULL THEN false ELSE true END) FROM outbox_events o JOIN commands c ON c.id=o.command_id WHERE c.idempotency_key LIKE 'g6-%' ORDER BY o.created_at, o.id" \
+  psql_primary -Atc "SELECT jsonb_build_object('command_id',o.command_id::text,'created_at',to_char(o.created_at AT TIME ZONE 'UTC','YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"'),'available_at',to_char(o.available_at AT TIME ZONE 'UTC','YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"'),'published_at',CASE WHEN o.published_at IS NULL THEN '' ELSE to_char(o.published_at AT TIME ZONE 'UTC','YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') END,'locked',CASE WHEN o.locked_by IS NULL THEN false ELSE true END) FROM outbox_events o JOIN commands c ON c.id=o.command_id WHERE c.idempotency_key LIKE 'g6-%' ORDER BY o.created_at, o.id" \
     >"${dir}/outbox.jsonl"
-  psql_primary -Atc "SELECT jsonb_build_object('command_id',e.command_id::text,'result',e.result,'occurred_at',to_char(e.occurred_at AT TIME ZONE 'UTC','YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"')) FROM audit_events e WHERE e.command_id IS NOT NULL AND EXISTS(SELECT 1 FROM commands c WHERE c.id=e.command_id AND c.idempotency_key LIKE 'g6-%') ORDER BY e.occurred_at, e.id" \
+  psql_primary -Atc "SELECT jsonb_build_object('command_id',e.command_id::text,'request_id',e.request_id,'result',e.result,'occurred_at',to_char(e.occurred_at AT TIME ZONE 'UTC','YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"')) FROM audit_events e WHERE e.command_id IS NOT NULL AND EXISTS(SELECT 1 FROM commands c WHERE c.id=e.command_id AND c.idempotency_key LIKE 'g6-%') ORDER BY e.occurred_at, e.id" \
     >"${dir}/audit.jsonl"
   psql_primary -Atc "SELECT jsonb_build_object('id',m.id,'txid',m.txid,'written_at',to_char(m.written_at AT TIME ZONE 'UTC','YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"')) FROM g6_readiness_markers m ORDER BY m.written_at" \
     >"${dir}/markers.jsonl"
@@ -1835,7 +2726,7 @@ phase_evidence_collect() {
   # hide in the probe-to-cut interval. Authority renewers stay live throughout
   # the bracket; their lease timestamp may advance without changing the term.
   quiesce_control_plane_writers
-  psql_primary -Atc "SELECT jsonb_build_object('agent_id',n.name,'last_telemetry_at',to_char(s.last_heartbeat_at AT TIME ZONE 'UTC','YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"')) FROM node_observed_snapshots s JOIN nodes n ON n.id=s.node_id WHERE n.name LIKE 'g6-fd-%' ORDER BY n.name" \
+  psql_primary -Atc "SELECT jsonb_build_object('agent_id',n.name,'last_telemetry_at',to_char(s.last_heartbeat_at AT TIME ZONE 'UTC','YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"')) FROM node_observed_snapshots s JOIN nodes n ON n.id=s.node_id WHERE n.name LIKE 'g6-fd-%' ORDER BY n.name" \
     >"${dir}/telemetry.jsonl"
   local args=()
   readarray -t args < <(node_ids)
@@ -1852,7 +2743,7 @@ phase_evidence_collect() {
   quiesce_transport_ingress
   quiesce_authority_renewers
   local history
-  for history in fencing leadership; do
+  for history in fencing leadership scheduler-maintenance; do
     require_file "${G6RD_STATE}/${history}-history.jsonl"
     cp -f "${G6RD_STATE}/${history}-history.jsonl" \
       "${G6RD_OUTBOX}/${history}-history.jsonl"
@@ -2029,12 +2920,15 @@ relay-up) phase_relay_up ;;
   merge-peer-evidence) phase_merge_peer_evidence "${2:?peer evidence root}" ;;
 scenario-scheduler) phase_scenario_scheduler ;;
 scenario-owner) phase_scenario_owner ;;
-scenario-relay) phase_scenario_relay "${2:?relay-a failure stamp}" ;;
+relay-pre-fault) phase_relay_pre_fault "${2:?relay observation readiness directory}" ;;
+scenario-relay) phase_scenario_relay "${2:?failure-domain A readiness directory}" ;;
 scenario-path) phase_scenario_path ;;
 outbox-claim-before-send) phase_outbox_claim_before_send ;;
 outbox-send-before-mark) phase_outbox_send_before_mark ;;
   outbox-result-before-commit) phase_outbox_result_before_commit ;;
-  window) phase_window ;;
+  window-barrier-arm) phase_window_barrier_arm ;;
+  resource-preflight) phase_resource_preflight ;;
+  window) phase_window "${2:?peer window-barrier acknowledgement is required}" ;;
   evidence-collect) phase_evidence_collect ;;
   final-freeze) phase_final_freeze ;;
   merge-peer-final-evidence) phase_merge_peer_final_evidence "${2:?peer final evidence root}" ;;
@@ -2044,7 +2938,7 @@ outbox-send-before-mark) phase_outbox_send_before_mark ;;
   cleanup-prelude) phase_cleanup_prelude ;;
   cleanup) phase_cleanup ;;
 *)
-  echo "usage: $0 <prepare|materialize-runtime|import-peer-tunnel-nodes|build-images|tunnel-up|standby-bootstrap|relay-up|agents-enroll|agents-start|load-start|promote|merge-peer-evidence|scenario-scheduler|scenario-owner|scenario-relay|scenario-path|outbox-claim-before-send|outbox-send-before-mark|outbox-result-before-commit|window|evidence-collect|final-freeze|merge-peer-final-evidence|evidence-build|evidence-verify|diagnostics|cleanup-prelude|cleanup>" >&2
+  echo "usage: $0 <prepare|materialize-runtime|import-peer-tunnel-nodes|build-images|tunnel-up|standby-bootstrap|relay-up|agents-enroll|agents-start|load-start|promote|merge-peer-evidence|scenario-scheduler|scenario-owner|relay-pre-fault|scenario-relay|scenario-path|outbox-claim-before-send|outbox-send-before-mark|outbox-result-before-commit|window-barrier-arm|resource-preflight|window|evidence-collect|final-freeze|merge-peer-final-evidence|evidence-build|evidence-verify|diagnostics|cleanup-prelude|cleanup>" >&2
   exit 2
   ;;
 esac

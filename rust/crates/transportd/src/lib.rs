@@ -1361,6 +1361,24 @@ impl TransportService for IrohTransportService {
         })
         .await
         .map_err(|_| Status::deadline_exceeded("command stream timed out"))??;
+        let (dispatch_path, dispatch_path_detail, _) = metadata_path(&response_connection);
+        let dispatch_path = match dispatch_path {
+            ConnectionPath::Direct => "direct",
+            ConnectionPath::Relay => "relay",
+            ConnectionPath::Unspecified => "unspecified",
+        };
+        let fence = command.connection_fence.as_ref();
+        tracing::info!(
+            event_type = "command_frame_written",
+            command_id = %hex::encode(&command.command_id),
+            node_id = %hex::encode(&node_id),
+            owner_fence_id = %fence.map_or_else(String::new, |value| hex::encode(&value.fence_id)),
+            connection_id = %fence.map_or_else(String::new, |value| hex::encode(&value.connection_id)),
+            owner_epoch = fence.map_or(0, |value| value.owner_epoch),
+            path = dispatch_path,
+            path_detail = %dispatch_path_detail,
+            "command frame written to authenticated Agent session"
+        );
         tokio::spawn(read_agent_events(
             recv,
             self.shared.clone(),

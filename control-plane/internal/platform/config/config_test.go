@@ -258,6 +258,31 @@ func TestPreSendBarrierGuard(t *testing.T) {
 	}
 }
 
+func TestSchedulerMaintenanceEvidenceGuard(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		env     map[string]string
+		ok      bool
+		enabled bool
+	}{
+		{"default disabled", map[string]string{"OCSERV_DATABASE_URL": "postgres://db/test"}, true, false},
+		{"development enabled", map[string]string{"OCSERV_DATABASE_URL": "postgres://db/test", "OCSERV_TEST_SCHEDULER_MAINTENANCE_EVIDENCE": "true"}, true, true},
+		{"test enabled", map[string]string{"OCSERV_DATABASE_URL": "postgres://db/test", "OCSERV_ENVIRONMENT": "test", "OCSERV_TEST_SCHEDULER_MAINTENANCE_EVIDENCE": "true"}, true, true},
+		{"invalid boolean", map[string]string{"OCSERV_DATABASE_URL": "postgres://db/test", "OCSERV_TEST_SCHEDULER_MAINTENANCE_EVIDENCE": "yes-please"}, false, false},
+		{"production enabled", map[string]string{"OCSERV_DATABASE_URL": "postgres://db/test", "OCSERV_ENVIRONMENT": "production", "OCSERV_TEST_SCHEDULER_MAINTENANCE_EVIDENCE": "true"}, false, false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			cfg, err := Load(nil, func(key string) (string, bool) { value, ok := test.env[key]; return value, ok })
+			if (err == nil) != test.ok {
+				t.Fatalf("Load() error = %v, want success %v", err, test.ok)
+			}
+			if err == nil && cfg.TestSchedulerEvidence != test.enabled {
+				t.Fatalf("scheduler maintenance evidence = %v, want %v", cfg.TestSchedulerEvidence, test.enabled)
+			}
+		})
+	}
+}
+
 func TestMigrateOnlyRequiresRuntimeRole(t *testing.T) {
 	lookup := func(key string) (string, bool) {
 		values := map[string]string{"OCSERV_DATABASE_URL": "postgres://owner@db/test"}

@@ -70,6 +70,7 @@ type Config struct {
 	TestResultCommitBarrier  string
 	TestPreSendBarrier       string
 	TestCommandLease         time.Duration
+	TestSchedulerEvidence    bool
 	CertificateSignerURL     string
 	CertificateSignerToken   string
 	CertificateSignerTimeout time.Duration
@@ -243,6 +244,13 @@ func Load(args []string, lookup LookupEnv) (Config, error) {
 		}
 		cfg.LocalSimulator = parsed
 	}
+	if value, ok := lookup("OCSERV_TEST_SCHEDULER_MAINTENANCE_EVIDENCE"); ok {
+		parsed, err := strconv.ParseBool(value)
+		if err != nil {
+			return Config{}, fmt.Errorf("OCSERV_TEST_SCHEDULER_MAINTENANCE_EVIDENCE: %w", err)
+		}
+		cfg.TestSchedulerEvidence = parsed
+	}
 	if value, ok := lookup("OCSERV_BREAK_GLASS_ENABLED"); ok {
 		parsed, err := strconv.ParseBool(value)
 		if err != nil {
@@ -408,6 +416,9 @@ func (c Config) Validate() error {
 	}
 	if c.LocalSimulator && c.Environment == "production" {
 		return errors.New("local simulator is forbidden in production")
+	}
+	if c.TestSchedulerEvidence && c.Environment == "production" {
+		return errors.New("scheduler maintenance evidence is test-only")
 	}
 	if _, ok := map[string]bool{"debug": true, "info": true, "warn": true, "error": true}[c.LogLevelName]; !ok {
 		return fmt.Errorf("invalid log level %q", c.LogLevelName)

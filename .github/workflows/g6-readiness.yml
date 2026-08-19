@@ -20,9 +20,10 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}-${{ inputs.authority }}
   cancel-in-progress: true
 
-# One release-image producer freezes the Agent image used by both failure
-# domains. The failure-domain jobs then run concurrently and rendezvous through
-# run-scoped workflow artifacts. Each job is bound to the GitHub environment
+# One release-image producer freezes every runtime image and the host-side
+# tunnel binary used by both failure domains. The failure-domain jobs then run
+# concurrently and rendezvous through run-scoped workflow artifacts. Each job
+# is bound to the GitHub environment
 # matching the dispatched authority so environment-scoped policy remains
 # visible while both authorities execute as fully automated technical gates.
 jobs:
@@ -33,6 +34,7 @@ jobs:
     environment:
       name: ${{ inputs.authority == 'production_readiness' && 'g6-production-readiness' || 'g6-engineering-rehearsal' }}
     env:
+      DOCKER_BUILDKIT: "1"
       G6RD_AGENT_IMAGE: ocservia-g6-agent:${{ github.run_id }}-${{ github.run_attempt }}
       G6RD_CONTROL_PLANE_IMAGE: ocservia-g6-control-plane:${{ github.run_id }}-${{ github.run_attempt }}
       G6RD_TRANSPORTD_IMAGE: ocservia-g6-transportd:${{ github.run_id }}-${{ github.run_attempt }}
@@ -84,6 +86,21 @@ jobs:
             fi
           done
           test "${build_status}" -eq 0
+          tunnel_output="${archive_dir}/tunnel-output"
+          # Export the tunnel from the completed probe build's content-addressed
+          # BuildKit stage; this does not rebuild it on either failure domain.
+          docker build --pull=false \
+            --file rust/g6-probe.Dockerfile \
+            --target g6-tunnel-artifact \
+            --output "type=local,dest=${tunnel_output}" .
+          install -m 0755 "${tunnel_output}/ocservia-g6-tunnel" \
+            "${archive_dir}/ocservia-g6-tunnel"
+          rm -rf -- "${tunnel_output}"
+          printf 'candidate_sha\t%s\n' "${GITHUB_SHA}" \
+            >"${archive_dir}/tunnel-manifest.tsv"
+          printf 'ocservia-g6-tunnel\t%s\n' \
+            "$(sha256sum "${archive_dir}/ocservia-g6-tunnel" | awk '{print $1}')" \
+            >>"${archive_dir}/tunnel-manifest.tsv"
           release_images=(
             postgres:17.10-bookworm
             "${G6RD_CONTROL_PLANE_IMAGE}"
@@ -102,7 +119,8 @@ jobs:
             | gzip -1 >"${archive_dir}/runtime-images.tar.gz"
           (
             cd "${archive_dir}"
-            sha256sum runtime-images.tar.gz image-ids.tsv >release-images.sha256
+            sha256sum runtime-images.tar.gz image-ids.tsv \
+              ocservia-g6-tunnel tunnel-manifest.tsv >release-artifacts.sha256
           )
       - name: Publish the frozen release images
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
@@ -165,8 +183,17 @@ jobs:
           archive_dir="${RUNNER_TEMP}/g6-rd-runtime-images"
           (
             cd "${archive_dir}"
-            sha256sum --check release-images.sha256
+            sha256sum --check release-artifacts.sha256
           )
+          test "$(wc -l <"${archive_dir}/tunnel-manifest.tsv" | tr -d '[:space:]')" -eq 2
+          test "$(awk -F '\t' '$1 == "candidate_sha" { print $2 }' "${archive_dir}/tunnel-manifest.tsv")" = "${GITHUB_SHA}"
+          expected_tunnel_sha="$(awk -F '\t' '$1 == "ocservia-g6-tunnel" { print $2 }' "${archive_dir}/tunnel-manifest.tsv")"
+          [[ "${expected_tunnel_sha}" =~ ^[0-9a-f]{64}$ ]]
+          test "$(sha256sum "${archive_dir}/ocservia-g6-tunnel" | awk '{print $1}')" = "${expected_tunnel_sha}"
+          tunnel_bin="${RUNNER_TEMP}/g6-readiness-${RUN_ID}/bin/ocservia-g6-tunnel"
+          install -D -m 0755 "${archive_dir}/ocservia-g6-tunnel" "${tunnel_bin}"
+          install -m 0444 "${archive_dir}/tunnel-manifest.tsv" "$(dirname "${tunnel_bin}")/tunnel-manifest.tsv"
+          test -x "${tunnel_bin}"
           gzip -dc "${archive_dir}/runtime-images.tar.gz" | docker load
           release_images=(
             postgres:17.10-bookworm
@@ -185,28 +212,22 @@ jobs:
               test "$(docker image inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' "${image}")" = "${GITHUB_SHA}"
             fi
           done
-      - name: G6 readiness policy tests
-        run: scripts/test-g6-readiness-workflow.sh
-      - name: G6 readiness hang-guard tests
-        run: scripts/test-g6-readiness-hang-guards.sh
-      - name: Restore verified Rust toolchain
+      - name: Restore verified G6 Node runtime
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: |
             .cache/downloads
             .tools
-          key: tooling-v3-g6-rd-fd-a-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'scripts/checksums.txt', 'scripts/bootstrap.sh', 'scripts/env.sh') }}
+          key: tooling-v4-g6-runtime-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'scripts/checksums.txt', 'scripts/bootstrap.sh', 'scripts/env.sh', 'scripts/g6-runtime/package-lock.json') }}
       - name: Restore shared npm cache
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: .cache/npm
-          key: npm-v4-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'web/package-lock.json') }}
+          key: npm-v4-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'web/package-lock.json', 'scripts/g6-runtime/package-lock.json') }}
           restore-keys: |
             npm-v4-${{ runner.os }}-${{ runner.arch }}-
-      - name: Bootstrap pinned Rust toolchain
-        run: scripts/bootstrap.sh native
-      - name: Bootstrap pinned Node and web dependencies
-        run: scripts/bootstrap.sh web
+      - name: Bootstrap pinned G6 Node runtime
+        run: scripts/bootstrap.sh g6-runtime
       - name: Prepare failure domain A
         timeout-minutes: 10
         run: scripts/g6-readiness-fd-a.sh prepare
@@ -223,7 +244,7 @@ jobs:
         run: scripts/real-e2e-artifact.sh wait-download "g6-rd-tunnel-fd-b-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" "${RUNNER_TEMP}/g6-rd-tunnel-fd-b" 1200 "G6 Readiness Failure Domain B"
       - name: Import the peer tunnel identities
         run: scripts/g6-readiness-fd-a.sh import-peer-tunnel-nodes "${RUNNER_TEMP}/g6-rd-tunnel-fd-b"
-      - name: Build failure domain A images and tunnel
+      - name: Prepare failure domain A images
         timeout-minutes: 35
         run: scripts/g6-readiness-fd-a.sh build-images
       - name: Start pinned tunnels
@@ -305,9 +326,22 @@ jobs:
       - name: Rejoin the former primary as standby
         timeout-minutes: 15
         run: scripts/g6-readiness-fd-a.sh rejoin
+      - name: Publish relay observation readiness
+        run: scripts/g6-readiness-fd-a.sh relay-rejoin-ready
+      - name: Upload relay observation readiness
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: g6-rd-relay-rejoin-ready-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/g6-readiness-${{ env.RUN_ID }}/outbox/relay-rejoin-ready
+          if-no-files-found: error
+          retention-days: 1
+      - name: Wait for the pre-fault relay-a observation
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: scripts/real-e2e-artifact.sh wait-download "g6-rd-relay-pre-fault-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" "${RUNNER_TEMP}/g6-rd-relay-pre-fault" 600 "G6 Readiness Failure Domain B"
       - name: Stop relay-a
         timeout-minutes: 5
-        run: scripts/g6-readiness-fd-a.sh relay-a-stop
+        run: scripts/g6-readiness-fd-a.sh relay-a-stop "${RUNNER_TEMP}/g6-rd-relay-pre-fault"
       - name: Publish failure domain A scenario readiness
         run: scripts/g6-readiness-fd-a.sh ready
       - name: Upload failure domain A scenario readiness
@@ -317,6 +351,23 @@ jobs:
           path: ${{ runner.temp }}/g6-readiness-${{ env.RUN_ID }}/outbox/fd-a-ready
           if-no-files-found: error
           retention-days: 5
+      - name: Wait for the observation-window barrier request
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: scripts/real-e2e-artifact.sh wait-download "g6-rd-window-barrier-arm-request-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" "${RUNNER_TEMP}/g6-rd-window-barrier-arm-request" 600 "G6 Readiness Failure Domain B"
+      - name: Arm failure domain A observation barriers
+        timeout-minutes: 3
+        run: scripts/g6-readiness-fd-a.sh window-barrier-arm "${RUNNER_TEMP}/g6-rd-window-barrier-arm-request"
+      - name: Publish failure domain A barrier acknowledgement
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: g6-rd-window-barrier-armed-fd-a-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/g6-readiness-${{ env.RUN_ID }}/outbox/window-barrier-armed
+          if-no-files-found: error
+          retention-days: 1
+      - name: Release failure domain A barriers after the all-fleet proof
+        timeout-minutes: 3
+        run: scripts/g6-readiness-fd-a.sh window-barrier-release-after-proof
       - name: Wait for the final freeze request
         env:
           GITHUB_TOKEN: ${{ github.token }}
@@ -384,8 +435,17 @@ jobs:
           archive_dir="${RUNNER_TEMP}/g6-rd-runtime-images"
           (
             cd "${archive_dir}"
-            sha256sum --check release-images.sha256
+            sha256sum --check release-artifacts.sha256
           )
+          test "$(wc -l <"${archive_dir}/tunnel-manifest.tsv" | tr -d '[:space:]')" -eq 2
+          test "$(awk -F '\t' '$1 == "candidate_sha" { print $2 }' "${archive_dir}/tunnel-manifest.tsv")" = "${GITHUB_SHA}"
+          expected_tunnel_sha="$(awk -F '\t' '$1 == "ocservia-g6-tunnel" { print $2 }' "${archive_dir}/tunnel-manifest.tsv")"
+          [[ "${expected_tunnel_sha}" =~ ^[0-9a-f]{64}$ ]]
+          test "$(sha256sum "${archive_dir}/ocservia-g6-tunnel" | awk '{print $1}')" = "${expected_tunnel_sha}"
+          tunnel_bin="${RUNNER_TEMP}/g6-readiness-${RUN_ID}/bin/ocservia-g6-tunnel"
+          install -D -m 0755 "${archive_dir}/ocservia-g6-tunnel" "${tunnel_bin}"
+          install -m 0444 "${archive_dir}/tunnel-manifest.tsv" "$(dirname "${tunnel_bin}")/tunnel-manifest.tsv"
+          test -x "${tunnel_bin}"
           gzip -dc "${archive_dir}/runtime-images.tar.gz" | docker load
           release_images=(
             postgres:17.10-bookworm
@@ -404,28 +464,22 @@ jobs:
               test "$(docker image inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' "${image}")" = "${GITHUB_SHA}"
             fi
           done
-      - name: G6 readiness policy tests
-        run: scripts/test-g6-readiness-workflow.sh
-      - name: G6 readiness hang-guard tests
-        run: scripts/test-g6-readiness-hang-guards.sh
-      - name: Restore verified Rust toolchain
+      - name: Restore verified G6 Node runtime
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: |
             .cache/downloads
             .tools
-          key: tooling-v3-g6-rd-fd-b-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'scripts/checksums.txt', 'scripts/bootstrap.sh', 'scripts/env.sh') }}
+          key: tooling-v4-g6-runtime-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'scripts/checksums.txt', 'scripts/bootstrap.sh', 'scripts/env.sh', 'scripts/g6-runtime/package-lock.json') }}
       - name: Restore shared npm cache
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: .cache/npm
-          key: npm-v4-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'web/package-lock.json') }}
+          key: npm-v4-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'web/package-lock.json', 'scripts/g6-runtime/package-lock.json') }}
           restore-keys: |
             npm-v4-${{ runner.os }}-${{ runner.arch }}-
-      - name: Bootstrap pinned Rust toolchain
-        run: scripts/bootstrap.sh native
-      - name: Bootstrap pinned Node and web dependencies
-        run: scripts/bootstrap.sh web
+      - name: Bootstrap pinned G6 Node runtime
+        run: scripts/bootstrap.sh g6-runtime
       - name: Prepare failure domain B
         timeout-minutes: 10
         run: scripts/g6-readiness-fd-b.sh prepare
@@ -442,7 +496,7 @@ jobs:
         run: scripts/real-e2e-artifact.sh wait-download "g6-rd-tunnel-fd-a-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" "${RUNNER_TEMP}/g6-rd-tunnel-fd-a" 1200 "G6 Readiness Failure Domain A"
       - name: Import the peer tunnel identities
         run: scripts/g6-readiness-fd-b.sh import-peer-tunnel-nodes "${RUNNER_TEMP}/g6-rd-tunnel-fd-a"
-      - name: Build failure domain B images and tunnel
+      - name: Prepare failure domain B images
         timeout-minutes: 35
         run: scripts/g6-readiness-fd-b.sh build-images
       - name: Wait for the shared trust rendezvous
@@ -509,6 +563,20 @@ jobs:
           path: ${{ runner.temp }}/g6-readiness-${{ env.RUN_ID }}/outbox/new-primary
           if-no-files-found: error
           retention-days: 5
+      - name: Wait for relay observation readiness
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: scripts/real-e2e-artifact.sh wait-download "g6-rd-relay-rejoin-ready-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" "${RUNNER_TEMP}/g6-rd-relay-rejoin-ready" 1800 "G6 Readiness Failure Domain A"
+      - name: Capture the pre-fault relay-a session
+        timeout-minutes: 5
+        run: scripts/g6-readiness-fd-b.sh relay-pre-fault "${RUNNER_TEMP}/g6-rd-relay-rejoin-ready"
+      - name: Publish the pre-fault relay-a observation
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: g6-rd-relay-pre-fault-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/g6-readiness-${{ env.RUN_ID }}/outbox/relay-pre-fault
+          if-no-files-found: error
+          retention-days: 1
       - name: Wait for failure domain A scenario readiness
         env:
           GITHUB_TOKEN: ${{ github.token }}
@@ -516,15 +584,15 @@ jobs:
       - name: Merge the peer control evidence timeline
         timeout-minutes: 5
         run: scripts/g6-readiness-fd-b.sh merge-peer-evidence "${RUNNER_TEMP}/g6-rd-fd-a-ready"
+      - name: Relay failover scenario
+        timeout-minutes: 10
+        run: scripts/g6-readiness-fd-b.sh scenario-relay "${RUNNER_TEMP}/g6-rd-fd-a-ready"
       - name: Scheduler leadership failover scenario
         timeout-minutes: 10
         run: scripts/g6-readiness-fd-b.sh scenario-scheduler
       - name: Connection owner fencing scenario
         timeout-minutes: 10
         run: scripts/g6-readiness-fd-b.sh scenario-owner
-      - name: Relay failover scenario
-        timeout-minutes: 10
-        run: scripts/g6-readiness-fd-b.sh scenario-relay "${RUNNER_TEMP}/g6-rd-fd-a-ready/relay-a-failed-at"
       - name: Direct and relay path scenario
         timeout-minutes: 10
         run: scripts/g6-readiness-fd-b.sh scenario-path
@@ -537,9 +605,26 @@ jobs:
       - name: Outbox crash window before result commit
         timeout-minutes: 10
         run: scripts/g6-readiness-fd-b.sh outbox-result-before-commit
+      - name: Arm failure domain B observation barriers
+        timeout-minutes: 3
+        run: scripts/g6-readiness-fd-b.sh window-barrier-arm
+      - name: Publish the observation-window barrier request
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: g6-rd-window-barrier-arm-request-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/g6-readiness-${{ env.RUN_ID }}/outbox/window-barrier-arm-request
+          if-no-files-found: error
+          retention-days: 1
+      - name: Preflight bounded resource evidence
+        timeout-minutes: 3
+        run: timeout --signal=TERM --kill-after=15s 120s scripts/g6-readiness-fd-b.sh resource-preflight
+      - name: Wait for failure domain A observation barriers
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: scripts/real-e2e-artifact.sh wait-download "g6-rd-window-barrier-armed-fd-a-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" "${RUNNER_TEMP}/g6-rd-window-barrier-armed-fd-a" 600 "G6 Readiness Failure Domain A"
       - name: Run the bounded observation window
-        timeout-minutes: 10
-        run: scripts/g6-readiness-fd-b.sh window
+        timeout-minutes: 11
+        run: scripts/g6-readiness-fd-b.sh window "${RUNNER_TEMP}/g6-rd-window-barrier-armed-fd-a"
       - name: Collect the frozen evidence state
         timeout-minutes: 10
         run: scripts/g6-readiness-fd-b.sh evidence-collect
@@ -606,7 +691,7 @@ jobs:
           persist-credentials: false
       - name: Runner preflight
         run: scripts/ci-preflight.sh
-      - name: Restore verified tools
+      - name: Restore verified G6 Node runtime
         id: readiness-security-cache
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
@@ -649,16 +734,16 @@ jobs:
           path: |
             .cache/downloads
             .tools
-          key: tooling-v4-contracts-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'scripts/checksums.txt', 'scripts/bootstrap.sh', 'scripts/env.sh') }}
+          key: tooling-v4-g6-runtime-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'scripts/checksums.txt', 'scripts/bootstrap.sh', 'scripts/env.sh', 'scripts/g6-runtime/package-lock.json') }}
       - name: Restore shared npm cache
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: .cache/npm
-          key: npm-v4-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'web/package-lock.json') }}
+          key: npm-v4-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'web/package-lock.json', 'scripts/g6-runtime/package-lock.json') }}
           restore-keys: |
             npm-v4-${{ runner.os }}-${{ runner.arch }}-
-      - name: Bootstrap pinned Node and web dependencies
-        run: scripts/bootstrap.sh contracts
+      - name: Bootstrap pinned G6 Node runtime
+        run: scripts/bootstrap.sh g6-runtime
       - name: Wait for the evidence bundle
         env:
           GITHUB_TOKEN: ${{ github.token }}

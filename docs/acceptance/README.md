@@ -28,10 +28,13 @@ number of opaque `harness_log` files:
   descriptors, tasks, queue depth, and PostgreSQL connections;
 - `timeline` — the ordered observation timeline;
 - `epoch_events` — the connection-owner and scheduler epoch event log,
-  including each registered authority's immutable tuple and lease deadline;
+  including each registered authority's immutable tuple and lease deadline,
+  plus exact-term fenced scheduler maintenance identifiers, their durable
+  marker timestamps, and the independently observed commit boundary used for
+  scheduler-takeover timing;
 - `authority_cut` — the DB-clock owner and scheduler lease tuples plus the
   complete transport authority/session term projections immediately before
-  and after that cut;
+  and after that cut and the live scheduler term's durable maintenance marker;
 - `command_trace` — the command dispatch/accept/effect/result trace;
 - `outbox_snapshot` — the final transactional-outbox and reconciliation
   snapshot;
@@ -99,11 +102,17 @@ Population semantics are part of the contract, not a harness choice:
 - a relay takeover is proven only by authenticated session traffic through a
   replacement relay after the failed relay went down, not by a control-plane
   "active" record;
-- the accepted-write population is one identity chain: every enqueue sample
-  carries a unique `request_id`, and the successful enqueue requests, outbox
-  rows, audit writes, and command-trace enqueued commands must describe
-  exactly the same command set — a command accepted anywhere and missing
-  from the trace leaves the dispatch ratio denominator and is rejected;
+- the accepted-write population is one identity chain: every enqueue HTTP
+  attempt carries a unique `request_id`, attempts for one logical enqueue
+  retain one idempotency key, and only the exact known pre-mutation
+  stale-revision 409
+  may continue with a higher requested revision inside the frozen three-
+  attempt bound after the prior response completes. Success is derived once
+  per logical enqueue, while durable-enqueue latency is the terminal accepted
+  POST's wire latency rather than client-side revision lookup time. The final
+  successful command, outbox row, audit write, and command-trace enqueue must
+  retain that identity chain. A command accepted anywhere and missing from
+  the trace leaves the dispatch ratio denominator and is rejected;
 - PITR markers must use distinct transaction identifiers, so the
   present/absent restore pair cannot contradict itself;
 - evidence may not claim more authorized real agents than the topology

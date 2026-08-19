@@ -2,6 +2,7 @@
   "environment_id": "g6-12345678",
   "candidate_sha": "1111111111111111111111111111111111111111",
   "outage_declared_at": "2026-08-14T00:01:00Z",
+  "rto_started_at": "2026-08-14T00:00:58Z",
   "service_restored_at": "2026-08-14T00:02:00Z",
   "acknowledged": [
     {
@@ -21,14 +22,14 @@
     "old_primary": "pg-primary",
     "new_primary": "pg-standby-1",
     "isolated_at": "2026-08-14T00:01:05Z",
-    "promoted_at": "2026-08-14T00:01:30Z",
+    "promoted_at": "2026-08-14T00:02:00Z",
     "isolated_primary_writes": [
       {
-        "at": "2026-08-14T00:01:45Z",
+        "at": "2026-08-14T00:02:05Z",
         "accepted": false
       },
       {
-        "at": "2026-08-14T00:01:50Z",
+        "at": "2026-08-14T00:02:10Z",
         "accepted": false
       }
     ]

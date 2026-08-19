@@ -383,13 +383,18 @@ fn emit_json(value: &serde_json::Value) {
 fn timestamp_to_rfc3339(value: Option<&prost_types::Timestamp>) -> Option<String> {
     let stamp = value?;
     let seconds = stamp.seconds;
+    if !(-62_135_596_800..=253_402_300_799).contains(&seconds) {
+        return None;
+    }
     let nanos = u32::try_from(stamp.nanos).ok()?;
-    let millis = nanos / 1_000_000;
+    if nanos >= 1_000_000_000 {
+        return None;
+    }
     let days = seconds.div_euclid(86_400);
     let seconds_of_day = seconds.rem_euclid(86_400);
     let (year, month, day) = civil_from_days(days);
     Some(format!(
-        "{year:04}-{month:02}-{day:02}T{:02}:{:02}:{:02}.{millis:03}Z",
+        "{year:04}-{month:02}-{day:02}T{:02}:{:02}:{:02}.{nanos:09}Z",
         seconds_of_day / 3_600,
         (seconds_of_day % 3_600) / 60,
         seconds_of_day % 60
@@ -1133,6 +1138,38 @@ mod tests {
         let path = directory.join(format!("g6-probe-{}", Uuid::now_v7()));
         std::fs::write(&path, bytes).expect("write temporary file");
         path
+    }
+
+    #[test]
+    fn timestamp_json_preserves_nanoseconds_and_rejects_invalid_ranges() {
+        assert_eq!(
+            timestamp_to_rfc3339(Some(&prost_types::Timestamp {
+                seconds: 0,
+                nanos: 123_456_789,
+            }))
+            .as_deref(),
+            Some("1970-01-01T00:00:00.123456789Z")
+        );
+        for stamp in [
+            prost_types::Timestamp {
+                seconds: 0,
+                nanos: -1,
+            },
+            prost_types::Timestamp {
+                seconds: 0,
+                nanos: 1_000_000_000,
+            },
+            prost_types::Timestamp {
+                seconds: -62_135_596_801,
+                nanos: 0,
+            },
+            prost_types::Timestamp {
+                seconds: 253_402_300_800,
+                nanos: 0,
+            },
+        ] {
+            assert!(timestamp_to_rfc3339(Some(&stamp)).is_none());
+        }
     }
 
     #[test]

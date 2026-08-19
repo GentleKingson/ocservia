@@ -58,7 +58,7 @@ g6rd_init_environment() {
   G6RD_AGENTS="${G6RD_WORK}/agents"
   G6RD_RESULT_BARRIER="${G6RD_WORK}/result-barrier"
   G6RD_PRE_SEND_BARRIER="${G6RD_RESULT_BARRIER}/pre-send"
-  G6RD_TUNNEL_BIN="${G6RD_ROOT}/rust/target/release/ocservia-g6-tunnel"
+  G6RD_TUNNEL_BIN="${G6RD_WORK}/bin/ocservia-g6-tunnel"
   COMPOSE_PROJECT="ocservia-g6-rd-${RUN_ID}"
   COMPOSE_FILE="${G6RD_ROOT}/deploy/g6-readiness/compose.yaml"
   G6RD_RELEASE_COMPOSE="${G6RD_WORK}/release-images.yaml"
@@ -79,7 +79,27 @@ g6rd_init_environment() {
 }
 
 g6rd_now() {
-  date -u +%Y-%m-%dT%H:%M:%SZ
+  local stamp
+  stamp="$(date -u +%Y-%m-%dT%H:%M:%S.%6NZ)"
+  if [[ "${stamp}" =~ \.[0-9]{6}Z$ ]]; then
+    printf '%s\n' "${stamp}"
+    return 0
+  fi
+  # BSD date has no %N. Node is part of the pinned G6 runtime and preserves
+  # a real fractional wall clock for local policy fixtures.
+  stamp="$(node -p 'new Date().toISOString()')" || return 1
+  [[ "${stamp}" =~ \.[0-9]{3}Z$ ]] || return 1
+  printf '%s\n' "${stamp}"
+}
+
+g6rd_atomic_now() {
+  local destination="${1:?timestamp destination is required}" temporary
+  temporary="${destination}.$$"
+  if ! g6rd_now >"${temporary}" || ! mv -f -- "${temporary}" "${destination}"; then
+    rm -f -- "${temporary}"
+    echo "could not persist timestamp ${destination}" >&2
+    return 1
+  fi
 }
 
 g6rd_prepare_support_image() {
@@ -629,8 +649,13 @@ g6rd_compose() {
       echo "G6RD_COMPOSE_TIMEOUT_SECONDS must be a positive integer" >&2
       return 2
     }
-    timeout --foreground --signal=TERM --kill-after=5s "${timeout_seconds}s" \
-      docker compose --project-name "${COMPOSE_PROJECT}" "${compose_files[@]}" "$@"
+    local -a timeout_scope=(--foreground)
+    if [[ "${G6RD_TIMEOUT_PROCESS_GROUP:-0}" == 1 ]]; then
+      timeout_scope=()
+    fi
+    timeout "${timeout_scope[@]}" --signal=TERM --kill-after=5s \
+      "${timeout_seconds}s" docker compose --project-name "${COMPOSE_PROJECT}" \
+      "${compose_files[@]}" "$@"
     return
   fi
   docker compose --project-name "${COMPOSE_PROJECT}" "${compose_files[@]}" "$@"
@@ -676,8 +701,13 @@ g6rd_agent_compose() {
       echo "G6RD_COMPOSE_TIMEOUT_SECONDS must be a positive integer" >&2
       return 2
     }
-    timeout --foreground --signal=TERM --kill-after=5s "${timeout_seconds}s" \
-      docker compose --project-name "${COMPOSE_PROJECT}" "${compose_files[@]}" "$@"
+    local -a timeout_scope=(--foreground)
+    if [[ "${G6RD_TIMEOUT_PROCESS_GROUP:-0}" == 1 ]]; then
+      timeout_scope=()
+    fi
+    timeout "${timeout_scope[@]}" --signal=TERM --kill-after=5s \
+      "${timeout_seconds}s" docker compose --project-name "${COMPOSE_PROJECT}" \
+      "${compose_files[@]}" "$@"
     return
   fi
   docker compose --project-name "${COMPOSE_PROJECT}" "${compose_files[@]}" "$@"
@@ -696,15 +726,36 @@ g6rd_agent_journal_query() {
 }
 
 # ---------------------------------------------------------------------------
-# Pinned g6-tunnel: one keypair and one serve/forward process per forwarded
-# service, because a relay would drop two endpoints presenting the same
-# NodeId (the same constraint that orders the transportd handover).
+# Frozen candidate g6-tunnel: one keypair and one serve/forward process per
+# forwarded service, because a relay would drop two endpoints presenting the
+# same NodeId (the same constraint that orders the transportd handover).
 # ---------------------------------------------------------------------------
 
-g6rd_build_tunnel() {
-  [[ -x "${G6RD_TUNNEL_BIN}" ]] && return 0
-  "${G6RD_ROOT}/.tools/cargo/bin/cargo" build --release \
-    --manifest-path "${G6RD_ROOT}/rust/Cargo.toml" -p ocservia-g6-tunnel
+g6rd_verify_tunnel() {
+  local manifest="${G6RD_TUNNEL_BIN%/*}/tunnel-manifest.tsv" candidate expected actual
+  [[ -f "${G6RD_TUNNEL_BIN}" && ! -L "${G6RD_TUNNEL_BIN}" && -x "${G6RD_TUNNEL_BIN}" ]] || {
+    echo "frozen candidate tunnel is missing or unsafe: ${G6RD_TUNNEL_BIN}" >&2
+    return 1
+  }
+  [[ -f "${manifest}" && ! -L "${manifest}" ]] || {
+    echo "frozen candidate tunnel manifest is missing or unsafe: ${manifest}" >&2
+    return 1
+  }
+  [[ "$(wc -l <"${manifest}" | tr -d '[:space:]')" == 2 ]] || {
+    echo "frozen candidate tunnel manifest must contain exactly two rows" >&2
+    return 1
+  }
+  candidate="$(awk -F '\t' '$1 == "candidate_sha" { print $2 }' "${manifest}")"
+  [[ "${candidate}" == "${G6RD_CANDIDATE_SHA}" ]] || {
+    echo "frozen tunnel manifest does not match candidate ${G6RD_CANDIDATE_SHA}" >&2
+    return 1
+  }
+  expected="$(awk -F '\t' '$1 == "ocservia-g6-tunnel" { print $2 }' "${manifest}")"
+  actual="$(sha256sum "${G6RD_TUNNEL_BIN}" | awk '{print $1}')"
+  [[ "${expected}" =~ ^[0-9a-f]{64}$ && "${actual}" == "${expected}" ]] || {
+    echo "frozen candidate tunnel checksum mismatch" >&2
+    return 1
+  }
 }
 
 g6rd_tunnel_key() {
@@ -797,9 +848,13 @@ g6rd_psql() {
     "host=127.0.0.1 port=${G6_DB_PORT:-5432} user=ocservia_owner dbname=ocservia sslmode=disable"
     -v ON_ERROR_STOP=1 "$@")
   if [[ -n "${timeout_seconds}" ]]; then
+    local -a timeout_scope=(--foreground)
+    if [[ "${G6RD_TIMEOUT_PROCESS_GROUP:-0}" == 1 ]]; then
+      timeout_scope=()
+    fi
     PGPASSWORD="${password}" PGCONNECT_TIMEOUT="${timeout_seconds}" \
       PGOPTIONS="-c statement_timeout=$((timeout_seconds * 1000))" \
-      timeout --foreground --signal=TERM --kill-after=5s \
+      timeout "${timeout_scope[@]}" --signal=TERM --kill-after=5s \
         "${timeout_seconds}s" "${command[@]}"
     return
   fi
@@ -840,6 +895,39 @@ g6rd_timeline_init() {
   g6rd_now >"${G6RD_STATE}/timeline-last"
 }
 
+g6rd_monotonic_timeline_stamp() {
+  local last="${1:?last timeline timestamp is required}"
+  local candidate="${2:?candidate timeline timestamp is required}"
+  node --input-type=module - "${last}" "${candidate}" <<'NODE'
+const [last, candidate] = process.argv.slice(2);
+const pattern = /^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})(?:\.(\d{1,9}))?Z$/;
+
+function nanoseconds(value, label) {
+  const match = pattern.exec(value);
+  if (!match) {
+    throw new Error(`${label} must be an RFC 3339 UTC timestamp with at most nanosecond precision`);
+  }
+  const milliseconds = Date.parse(`${match[1]}Z`);
+  if (!Number.isFinite(milliseconds)) {
+    throw new Error(`${label} must be a real timestamp`);
+  }
+  return BigInt(milliseconds) * 1000000n +
+    BigInt((match[2] ?? "").padEnd(9, "0"));
+}
+
+function format(value) {
+  const second = value / 1000000000n;
+  const fraction = value % 1000000000n;
+  const whole = new Date(Number(second) * 1000).toISOString().slice(0, 19);
+  return `${whole}.${fraction.toString().padStart(9, "0")}Z`;
+}
+
+const previous = nanoseconds(last, "last timeline timestamp");
+const proposed = nanoseconds(candidate, "candidate timeline timestamp");
+process.stdout.write(`${format(proposed > previous ? proposed : previous + 1n)}\n`);
+NODE
+}
+
 g6rd_timeline_event() {
   local event_id="${1:?event id is required}" stamp_file="${2:-}" sequence last stamp
   sequence="$(( $(<"${G6RD_STATE}/timeline-sequence") + 1 ))"
@@ -849,11 +937,7 @@ g6rd_timeline_event() {
   else
     stamp="$(g6rd_now)"
   fi
-  stamp="$(sed -E 's/\.[0-9]+Z$/Z/' <<<"${stamp}")"
-  stamp="$(jq -nr --arg l "${last}" --arg s "${stamp}" \
-    'if ($s | fromdateiso8601) <= ($l | fromdateiso8601)
-     then (($l | fromdateiso8601) + 1 | todateiso8601)
-     else $s end')"
+  stamp="$(g6rd_monotonic_timeline_stamp "${last}" "${stamp}")"
   jq -cn --argjson sequence "${sequence}" --arg timestamp "${stamp}" \
     --arg environment_id "${G6RD_ENVIRONMENT_ID}" \
     --arg candidate_sha "${G6RD_CANDIDATE_SHA}" \
@@ -1112,25 +1196,37 @@ g6rd_extract_enrollment_node_id() {
   printf '%s\n' "${node_id}"
 }
 
-# Issues one synthetic.noop enqueue and appends the raw observation to the
-# harness request log: timestamp, latency, command id, node, and the http
-# outcome. The evidence builder turns this log into http-samples.csv rows
-# whose request_id is the accepted command id.
+# Issues one synthetic.noop enqueue and appends every wire attempt to the raw
+# harness request log. A known pre-mutation stale-revision conflict may retry
+# twice with the same idempotency key, a fresh revision, and a distinct
+# attempt request id; every other failure is terminal.
 g6rd_enqueue_command() {
   local node_id="${1:?node id is required}" key="${2:?idempotency key is required}"
   local log="${3:-${G6RD_STATE}/enqueue-log.jsonl}" revision stamp latency body command_id
-  local status detail attempt=0 max_retries="${G6RD_ENQUEUE_STALE_RETRIES:-2}"
-  [[ "${max_retries}" =~ ^[0-9]+$ && "${max_retries}" -le 5 ]] || {
-    echo "G6RD_ENQUEUE_STALE_RETRIES must be between 0 and 5" >&2
+  local status detail diagnostic problem_type previous_revision="" attempt=1
+  local max_retries="${G6RD_ENQUEUE_STALE_RETRIES:-2}" attempt_limit attempt_request_id
+  [[ "${max_retries}" =~ ^[0-9]+$ && "${max_retries}" -le 2 ]] || {
+    echo "G6RD_ENQUEUE_STALE_RETRIES must be between 0 and 2" >&2
     return 2
   }
+  attempt_limit=$((max_retries + 1))
   while true; do
     revision="$(g6rd_node_revision "${node_id}")" || return 1
+    [[ "${revision}" =~ ^[0-9]+$ ]] || {
+      echo "synthetic enqueue for node ${node_id} received an invalid revision" >&2
+      return 1
+    }
+    if [[ -n "${previous_revision}" && "${revision}" -le "${previous_revision}" ]]; then
+      echo "synthetic enqueue for node ${node_id} did not advance its stale revision" >&2
+      return 1
+    fi
+    attempt_request_id="${key}.attempt-${attempt}"
     stamp="$(g6rd_now)"
     body="$(mktemp "${RUNNER_TEMP}/enqueue.XXXXXX")"
     if ! latency="$(curl --silent --show-error --connect-timeout 3 --max-time 10 \
       --header "Authorization: Bearer $(g6rd_secret dev-auth-token)" \
       --header 'Content-Type: application/json' \
+      --header "X-Request-ID: ${attempt_request_id}" \
       --header "Idempotency-Key: ${key}" \
       --header "If-Match: \"revision-${revision}\"" \
       --data '{"kind":"noop"}' \
@@ -1142,16 +1238,27 @@ g6rd_enqueue_command() {
     status="${latency% *}"
     command_id="$(jq -er '.command_id // empty' "${body}" 2>/dev/null || true)"
     detail=""
+    diagnostic=""
+    problem_type=""
     if [[ "${status}" != 20* || -z "${command_id}" ]]; then
-      detail="$(jq -r 'if type == "object" then (.detail // .title // "unspecified API error") else "invalid JSON response" end' \
+      detail="$(jq -r 'if type == "object" then (.detail // "") else "" end' \
+        "${body}" 2>/dev/null || true)"
+      problem_type="$(jq -r 'if type == "object" then (.type // "") else "" end' \
+        "${body}" 2>/dev/null || true)"
+      diagnostic="$(jq -r 'if type == "object" then (.detail // .title // "unspecified API error") else "invalid JSON response" end' \
         "${body}" 2>/dev/null || printf 'invalid JSON response')"
     fi
     rm -f "${body}"
     jq -cn --arg at "${stamp}" \
       --arg node "${node_id}" --arg key "${key}" \
+      --arg attempt_request_id "${attempt_request_id}" \
+      --argjson attempt_ordinal "${attempt}" \
+      --argjson attempt_limit "${attempt_limit}" \
+      --argjson requested_revision "${revision}" \
       --arg outcome "${status}" --argjson latency_seconds "${latency#* }" \
+      --arg problem_type "${problem_type}" --arg problem_detail "${detail}" \
       --arg command_id "${command_id:-}" \
-      '{at:$at,node:$node,idempotency_key:$key,status:($outcome|tonumber),latency_seconds:$latency_seconds,command_id:$command_id}' \
+      '{at:$at,node:$node,idempotency_key:$key,attempt_request_id:$attempt_request_id,attempt_ordinal:$attempt_ordinal,attempt_limit:$attempt_limit,requested_revision:$requested_revision,status:($outcome|tonumber),latency_seconds:$latency_seconds,problem_type:$problem_type,problem_detail:$problem_detail,command_id:$command_id}' \
       >>"${log}"
     if [[ "${status}" == 20* && -n "${command_id}" ]]; then
       return 0
@@ -1159,15 +1266,17 @@ g6rd_enqueue_command() {
     # This 409 is a known pre-mutation rejection. Refresh the ETag while
     # retaining the idempotency key, and keep every attempt in the SLO log.
     if [[ "${status}" == 409 \
+      && "${problem_type}" == "https://ocservia.dev/problems/stale-revision" \
       && "${detail}" == "the node changed after this operation was prepared" \
-      && "${attempt}" -lt "${max_retries}" ]]; then
+      && "${attempt}" -lt "${attempt_limit}" ]]; then
+      previous_revision="${revision}"
       attempt=$((attempt + 1))
       continue
     fi
     if [[ "${status}" == 000 ]]; then
       echo "synthetic enqueue for node ${node_id} failed before an HTTP response" >&2
     else
-      echo "synthetic enqueue for node ${node_id} returned HTTP ${status}: ${detail}" >&2
+      echo "synthetic enqueue for node ${node_id} returned HTTP ${status}: ${diagnostic}" >&2
     fi
     return 1
   done
@@ -1236,11 +1345,26 @@ g6rd_probe_node_connection() {
 # ---------------------------------------------------------------------------
 
 g6rd_agent_count() {
+  local count
   if [[ "${FD_ID}" == "fd-a" ]]; then
-    printf '%s\n' "${G6_AGENTS_A:-28}"
+    count="${G6_AGENTS_A:-25}"
   else
-    printf '%s\n' "${G6_AGENTS_B:-27}"
+    count="${G6_AGENTS_B:-25}"
   fi
+  [[ "${count}" =~ ^[1-9][0-9]*$ ]] || {
+    echo "the ${FD_ID} Agent count must be a positive integer" >&2
+    return 2
+  }
+  printf '%s\n' "${count}"
+}
+
+g6rd_total_agent_count() {
+  local count_a="${G6_AGENTS_A:-25}" count_b="${G6_AGENTS_B:-25}"
+  [[ "${count_a}" =~ ^[1-9][0-9]*$ && "${count_b}" =~ ^[1-9][0-9]*$ ]] || {
+    echo "both failure-domain Agent counts must be positive integers" >&2
+    return 2
+  }
+  printf '%s\n' "$((count_a + count_b))"
 }
 
 g6rd_agent_dir() {
@@ -1763,6 +1887,31 @@ g6rd_release_synthetic_barriers() {
   done
 }
 
+g6rd_arm_synthetic_barriers() {
+  local index dir barrier temporary
+  for index in $(seq 1 "$(g6rd_agent_count)"); do
+    dir="$(g6rd_agent_dir "${index}")/state"
+    [[ -d "${dir}" && ! -L "${dir}" ]] || {
+      echo "Agent synthetic barrier state directory is invalid: ${dir}" >&2
+      return 1
+    }
+    barrier="${dir}/synthetic-barrier"
+    temporary="${barrier}.$$"
+    rm -f -- "${temporary}" "${barrier}.received"
+    : >"${temporary}"
+    chmod 0644 "${temporary}"
+    mv -f -- "${temporary}" "${barrier}"
+  done
+}
+
+g6rd_synthetic_barriers_armed() {
+  local index barrier
+  for index in $(seq 1 "$(g6rd_agent_count)"); do
+    barrier="$(g6rd_agent_dir "${index}")/state/synthetic-barrier"
+    [[ -f "${barrier}" && ! -L "${barrier}" && ! -s "${barrier}" ]] || return 1
+  done
+}
+
 # ---------------------------------------------------------------------------
 # Resource sampler. One process on fd-b samples the era-2 control plane
 # (api, worker, scheduler), transportd #2, one local agent, and the promoted
@@ -1821,6 +1970,14 @@ g6rd_sampler_row() {
 g6rd_sampler_tick() {
   local out_file="${1:?output csv is required}"
   local queue db stamp
+  local G6RD_COMPOSE_TIMEOUT_SECONDS="${G6RD_SAMPLER_COMPOSE_TIMEOUT_SECONDS:-3}"
+  local G6RD_PSQL_TIMEOUT_SECONDS="${G6RD_SAMPLER_PSQL_TIMEOUT_SECONDS:-3}"
+  local G6RD_TIMEOUT_PROCESS_GROUP=1
+  [[ "${G6RD_COMPOSE_TIMEOUT_SECONDS}" =~ ^[1-9][0-9]*$ \
+    && "${G6RD_PSQL_TIMEOUT_SECONDS}" =~ ^[1-9][0-9]*$ ]] || {
+    echo "resource sampler probe timeouts must be positive integers" >&2
+    return 2
+  }
   # one clock reading per tick: per-row stamps would let sequential docker
   # execs stretch a tick past the five-second sample-gap bound
   stamp="$(g6rd_now)"
@@ -1852,18 +2009,82 @@ g6rd_sampler_tick() {
   } >>"${out_file}"
 }
 
+g6rd_validate_sampler_batch() {
+  local sample_file="${1:?sample csv is required}"
+  [[ -s "${sample_file}" ]] || {
+    echo "resource preflight produced no sampler rows" >&2
+    return 1
+  }
+  awk -F',' -v fd="${FD_ID}" -v environment="${G6RD_ENVIRONMENT_ID}" \
+    -v candidate="${G6RD_CANDIDATE_SHA}" '
+    BEGIN {
+      header = "timestamp,component,instance,rss_bytes,fd_count,tasks,queue_depth,db_connections,environment_id,candidate_sha"
+      expected["controller:api-" fd] = 1
+      expected["controller:worker-" fd] = 1
+      expected["controller:scheduler-" fd] = 1
+      expected["transportd:transportd-" fd] = 1
+      expected["agent:agent-" fd "-01"] = 1
+      expected["postgres:postgres-" fd] = 1
+    }
+    NR == 1 {
+      if ($0 != header) exit 10
+      next
+    }
+    {
+      if (NF != 10) exit 11
+      if ($1 !~ /^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{1,9}Z$/) exit 12
+      if (stamp == "") stamp = $1
+      if ($1 != stamp) exit 13
+      key = $2 ":" $3
+      if (!(key in expected) || seen[key]++) exit 14
+      if ($4 !~ /^[0-9]+$/ || $5 !~ /^[0-9]+$/ || $6 !~ /^[0-9]+$/) exit 15
+      if ($7 !~ /^[0-9]+$/) exit 16
+      if ($2 == "postgres") {
+        if ($8 !~ /^[0-9]+$/) exit 17
+      } else if ($8 != "") {
+        exit 18
+      }
+      if ($9 != environment || $10 != candidate) exit 19
+      rows++
+    }
+    END {
+      if (rows != 6) exit 20
+      for (key in expected) if (!(key in seen)) exit 21
+    }
+  ' "${sample_file}" || {
+    echo "resource preflight sampler rows are incomplete, malformed, or contain invalid raw counters" >&2
+    return 1
+  }
+}
+
 # The sampler and the fencing/leadership watchers run as detached loops in
 # their own processes: the phase script launches each through
 # g6rd_spawn_harness_loop with the identity variables re-exported, so the
 # loop body itself is ordinary sourced shell with ordinary quoting.
 g6rd_sampler_loop() {
+  local next_tick="${SECONDS}" completed_tmp
   while [[ ! -e "${G6RD_STATE}/sampler-stop" ]]; do
     if ! g6rd_sampler_tick "${G6RD_SAMPLER_OUT}"; then
       g6rd_now >"${G6RD_STATE}/sampler-failed-at"
       return 1
     fi
-    sleep 3
+    # Anchor starts to a three-second monotonic cadence. Sleeping for three
+    # seconds after the sequential probes made probe cost part of the sample
+    # gap and could exceed the five-second evidence bound under load.
+    next_tick=$((next_tick + 3))
+    if ((SECONDS < next_tick)); then
+      sleep "$((next_tick - SECONDS))"
+    else
+      next_tick="${SECONDS}"
+    fi
   done
+  completed_tmp="${G6RD_STATE}/sampler-complete-at.$$"
+  if ! g6rd_now >"${completed_tmp}" \
+    || ! mv -f -- "${completed_tmp}" "${G6RD_STATE}/sampler-complete-at"; then
+    rm -f -- "${completed_tmp}"
+    echo "resource sampler could not persist its graceful-completion sentinel" >&2
+    return 1
+  fi
 }
 
 g6rd_spawn_harness_loop() {
@@ -2047,20 +2268,120 @@ g6rd_start_sampler() {
   local out_file="${1:?output csv is required}"
   local header='timestamp,component,instance,rss_bytes,fd_count,tasks,queue_depth,db_connections,environment_id,candidate_sha'
   [[ -s "${out_file}" ]] || printf '%s\n' "${header}" >"${out_file}"
-  rm -f "${G6RD_STATE}/sampler-stop" "${G6RD_STATE}/sampler-failed-at"
-  G6RD_SAMPLER_OUT="${out_file}" g6rd_spawn_harness_loop \
+  rm -f "${G6RD_STATE}/sampler-stop" "${G6RD_STATE}/sampler-failed-at" \
+    "${G6RD_STATE}/sampler-complete-at" "${G6RD_STATE}/sampler-forced-at"
+  g6rd_atomic_now "${G6RD_STATE}/sampler-started-at"
+  if ! G6RD_SAMPLER_OUT="${out_file}" g6rd_spawn_harness_loop \
     "${G6RD_LOGS}/sampler.log" g6rd_sampler_loop \
-    >"${G6RD_STATE}/sampler.pid"
+    >"${G6RD_STATE}/sampler.pid"; then
+    rm -f -- "${G6RD_STATE}/sampler-started-at" \
+      "${G6RD_STATE}/sampler.pid"
+    return 1
+  fi
+}
+
+g6rd_stop_sampler_process() {
+  local pid_file="${1:?sampler pid file is required}" pid status=0 forced=0
+  local child_status=0 reaped=0 _
+  [[ -s "${pid_file}" ]] || {
+    echo "resource sampler pid file is missing" >&2
+    return 1
+  }
+  pid="$(<"${pid_file}")"
+  [[ "${pid}" =~ ^[1-9][0-9]*$ ]] || {
+    echo "invalid resource sampler process-group id in ${pid_file}" >&2
+    return 1
+  }
+
+  # A legal tick may start immediately before sampler-stop; its three-second
+  # probe timeout retains a five-second descendant kill allowance. Prefer its
+  # completion sentinel, then reap the wrapper so a zombie is not mistaken
+  # for a live process group.
+  for _ in 1 2 3 4 5 6 7 8; do
+    if [[ -s "${G6RD_STATE}/sampler-complete-at" ]]; then
+      if wait "${pid}" 2>/dev/null; then
+        child_status=0
+      else
+        child_status=$?
+      fi
+      reaped=1
+      break
+    fi
+    if ! kill -0 -- "-${pid}" 2>/dev/null; then
+      if wait "${pid}" 2>/dev/null; then
+        child_status=0
+      else
+        child_status=$?
+      fi
+      reaped=1
+      break
+    fi
+    sleep 1
+  done
+  if ((reaped == 0)) && [[ -s "${G6RD_STATE}/sampler-complete-at" ]]; then
+    if wait "${pid}" 2>/dev/null; then
+      child_status=0
+    else
+      child_status=$?
+    fi
+    reaped=1
+  fi
+  if ((reaped == 0)) && kill -0 -- "-${pid}" 2>/dev/null; then
+    forced=1
+    if ! g6rd_now >"${G6RD_STATE}/sampler-forced-at"; then
+      echo "resource sampler could not persist its forced-stop timestamp" >&2
+    fi
+    kill -TERM -- "-${pid}" 2>/dev/null || :
+    sleep 1
+  fi
+  if kill -0 -- "-${pid}" 2>/dev/null; then
+    kill -KILL -- "-${pid}" 2>/dev/null || :
+    sleep 1
+  fi
+  if ((reaped == 0)); then
+    if wait "${pid}" 2>/dev/null; then
+      child_status=0
+    else
+      child_status=$?
+    fi
+    reaped=1
+  fi
+  if kill -0 -- "-${pid}" 2>/dev/null; then
+    echo "resource sampler process group ${pid} did not terminate" >&2
+    status=1
+  else
+    rm -f -- "${pid_file}"
+  fi
+  if ((child_status != 0)); then
+    echo "resource sampler exited with status ${child_status}" >&2
+    status=1
+  fi
+  if ((forced != 0)); then
+    echo "resource sampler required a forced process-group stop" >&2
+    status=1
+  fi
+  return "${status}"
 }
 
 g6rd_stop_sampler() {
   local status=0
+  if [[ ! -e "${G6RD_STATE}/sampler-started-at" \
+    && ! -e "${G6RD_STATE}/sampler.pid" ]]; then
+    return 0
+  fi
   touch "${G6RD_STATE}/sampler-stop"
-  g6rd_stop_harness_loop "${G6RD_STATE}/sampler.pid" || status=1
+  g6rd_stop_sampler_process "${G6RD_STATE}/sampler.pid" || status=1
   [[ ! -e "${G6RD_STATE}/sampler-failed-at" ]] || {
     echo "resource sampler failed closed at $(<"${G6RD_STATE}/sampler-failed-at")" >&2
-    return 1
+    status=1
   }
+  [[ -s "${G6RD_STATE}/sampler-complete-at" ]] || {
+    echo "resource sampler exited without a graceful-completion sentinel" >&2
+    status=1
+  }
+  if ((status == 0)); then
+    rm -f -- "${G6RD_STATE}/sampler-started-at"
+  fi
   return "${status}"
 }
 
@@ -2140,6 +2461,7 @@ g6rd_diagnostics() {
 g6rd_cleanup() {
   local status=0 volume image variable pid helper_container
   g6rd_stop_sampler || status=1
+  g6rd_release_synthetic_barriers || status=1
   if [[ -s "${G6RD_STATE}/load-dispatch-barrier.pid" ]]; then
     pid="$(<"${G6RD_STATE}/load-dispatch-barrier.pid")"
     if kill -0 "${pid}" 2>/dev/null; then
@@ -2170,6 +2492,22 @@ g6rd_cleanup() {
     sed -n '1,40p' "${G6RD_LOGS}/compose-down.log" >&2 || true
     status=1
   fi
+  local relay_topology_network="${COMPOSE_PROJECT}_relay-a-only"
+  if docker network inspect "${relay_topology_network}" >/dev/null 2>&1; then
+    if docker network inspect "${relay_topology_network}" \
+      | jq -e --arg run_id "${RUN_ID}" '
+        length == 1 and .[0].Labels["ocservia.g6.run-id"] == $run_id
+          and .[0].Labels["ocservia.g6.role"] == "relay-a-only"
+      ' >/dev/null; then
+      docker network rm "${relay_topology_network}" >/dev/null 2>&1 || {
+        echo "cleanup: relay topology network removal failed" >&2
+        status=1
+      }
+    else
+      echo "cleanup: refusing to remove an unowned relay topology network" >&2
+      status=1
+    fi
+  fi
   for variable in G6RD_AGENT_IMAGE G6RD_CONTROL_PLANE_IMAGE \
     G6RD_TRANSPORTD_IMAGE G6RD_RELAY_IMAGE G6RD_PROBE_IMAGE; do
     image="${!variable:-}"
@@ -2185,7 +2523,7 @@ g6rd_cleanup() {
     fi
   done
   local network
-  for network in agent-shared agent-isolated; do
+  for network in agent-shared agent-isolated relay-a-only; do
     if docker network inspect "${COMPOSE_PROJECT}_${network}" >/dev/null 2>&1; then
       echo "scoped network cleanup failed: ${COMPOSE_PROJECT}_${network}" >&2
       status=1

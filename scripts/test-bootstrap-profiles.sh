@@ -15,7 +15,7 @@ if [[ ${status} -ne 2 ]] || [[ "${output}" != *"bootstrap profile must be explic
   exit 1
 fi
 
-ruby -r yaml - "${ROOT}" "${WORKFLOW}" "${P1_WORKFLOW}" <<'RUBY'
+ruby -r json -r yaml - "${ROOT}" "${WORKFLOW}" "${P1_WORKFLOW}" <<'RUBY'
 root, workflow_path, p1_workflow_path = ARGV
 workflow = YAML.safe_load(File.read(workflow_path), aliases: true)
 p1_workflow = YAML.safe_load(File.read(p1_workflow_path), aliases: true)
@@ -26,6 +26,9 @@ checksums = File.read(File.join(root, "scripts/checksums.txt"))
 toolchains = File.read(File.join(root, "toolchains.lock"))
 database_script = File.read(File.join(root, "scripts/database-integration.sh"))
 actions_doc = File.read(File.join(root, "docs/development/github-actions.md"))
+g6_runtime_manifest = JSON.parse(File.read(File.join(root, "scripts/g6-runtime/package.json")))
+g6_runtime_lock = JSON.parse(File.read(File.join(root, "scripts/g6-runtime/package-lock.json")))
+web_lock = JSON.parse(File.read(File.join(root, "web/package-lock.json")))
 
 def reject(message)
   warn message
@@ -113,7 +116,7 @@ execution_profiles = {
   "security-license" => "security",
   "native-ocserv" => "native"
 }
-(["all"] + execution_profiles.values).uniq.each do |profile|
+(%w[all g6-runtime] + execution_profiles.values).uniq.each do |profile|
   reject("bootstrap profile is missing: #{profile}") unless bootstrap.match?(/^  #{Regexp.escape(profile)}\)$/)
 end
 {
@@ -122,11 +125,33 @@ end
   "go-rust-integration" => [
     "install_go", "install_rust", "install_go_quality_tools", "install_sccache",
     "verify_host_command jq"
-  ]
+  ],
+  "g6-runtime" => ["install_node", "install_npm", "install_g6_runtime_dependencies"]
 }.each do |profile, expected_commands|
   body = bootstrap[/^  #{Regexp.escape(profile)}\)\n(.*?)^    ;;/m, 1]
   commands = body.to_s.lines.map(&:strip).reject(&:empty?)
   reject("bootstrap profile #{profile} installs the wrong tools") unless commands == expected_commands
+end
+reject("G6 runtime must install only its evidence parser dependency") unless
+  g6_runtime_manifest.fetch("dependencies") == { "yaml" => "2.9.0" }
+locked_versions = toolchains.lines.each_with_object({}) do |line, selected|
+  key, value = line.strip.split("=", 2)
+  selected[key] = value if %w[node npm].include?(key)
+end
+reject("G6 runtime engines must match the repository-pinned Node and npm") unless
+  g6_runtime_manifest.fetch("engines") == locked_versions
+g6_installer = bootstrap[/^install_g6_runtime_dependencies\(\) \{\n(.*?)^\}/m, 1]
+reject("G6 runtime dependencies must use the dedicated lock with scripts disabled") unless
+  g6_installer&.include?('cd "${ROOT}/scripts/g6-runtime"') &&
+    g6_installer.include?("npm ci --ignore-scripts --no-audit --no-fund")
+runtime_yaml = g6_runtime_lock.fetch("packages").fetch("node_modules/yaml")
+web_yaml = web_lock.fetch("packages").fetch("node_modules/yaml")
+reject("G6 runtime YAML must reuse the exact web lock version and integrity") unless
+  runtime_yaml.values_at("version", "integrity") == web_yaml.values_at("version", "integrity")
+%w[all ci-quality contracts].each do |profile|
+  body = bootstrap[/^  #{Regexp.escape(profile)}\)\n(.*?)^    ;;/m, 1]
+  reject("bootstrap profile #{profile} must provision the G6 parser") unless
+    body.to_s.lines.map(&:strip).include?("install_g6_runtime_dependencies")
 end
 reject("legacy go-integration bootstrap profile must remain split") if bootstrap.match?(/^  go-integration\)$/)
 reject("make bootstrap must request the complete profile explicitly") unless makefile.match?(/^\t\.\/scripts\/bootstrap\.sh all$/)
@@ -244,7 +269,8 @@ npm_keys = npm_jobs.map do |job_id|
   reject("#{job_id} npm cache path changed") unless paths(cache) == [".cache/npm"]
   key = cache.fetch("with").fetch("key")
   reject("#{job_id} npm cache key is incomplete") unless
-    key.include?("toolchains.lock") && key.include?("web/package-lock.json")
+    key.include?("toolchains.lock") && key.include?("web/package-lock.json") &&
+      key.include?("scripts/g6-runtime/package-lock.json")
   key
 end
 reject("npm jobs do not share one cache namespace") unless npm_keys.uniq.length == 1
@@ -318,6 +344,10 @@ pg17_exit = database_script.index('if [[ "${PG_MAJOR}" == "17" ]]; then')
 legacy_fixture = database_script.index('container="${PREFIX}-upgrade"')
 reject("PostgreSQL 18 legacy upgrade fixture must not repeat in the PostgreSQL 17 worker") unless
   pg17_exit && legacy_fixture && pg17_exit < legacy_fixture
+reject("database integration cleanup must remove its anonymous container volumes") unless
+  database_script.scan('docker rm -fv "${container}"').length == 1
+reject("database integration cleanup must not prune global Docker resources") if
+  database_script.match?(/docker\s+(?:system|volume)\s+prune/)
 
 stage_run = Array(jobs.fetch("stage-contracts").fetch("steps")).map { |step| step["run"].to_s }.join("\n")
 %w[

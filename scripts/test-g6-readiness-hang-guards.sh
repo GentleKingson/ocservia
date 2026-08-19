@@ -3,13 +3,16 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 WORKFLOW="${ROOT}/.github/workflows/g6-readiness.yml"
+CI_WORKFLOW="${ROOT}/.github/workflows/ci.yml"
 ARTIFACT_HELPER="${ROOT}/scripts/real-e2e-artifact.sh"
 POSTGRES_INIT="${ROOT}/deploy/g6-readiness/postgres-init/001-g6-readiness.sh"
 LIB="${ROOT}/scripts/g6-readiness-lib.sh"
+FD_A="${ROOT}/scripts/g6-readiness-fd-a.sh"
 FD_B="${ROOT}/scripts/g6-readiness-fd-b.sh"
 
-ruby -r yaml - "${WORKFLOW}" <<'RUBY'
+ruby -r yaml - "${WORKFLOW}" "${CI_WORKFLOW}" <<'RUBY'
 workflow = YAML.safe_load(File.read(ARGV.fetch(0)), aliases: true)
+ci_workflow = YAML.safe_load(File.read(ARGV.fetch(1)), aliases: true)
 
 def reject(message)
   warn message
@@ -23,10 +26,25 @@ for token in ["github.workflow", "github.ref", "inputs.authority"]
 end
 
 jobs = workflow.fetch("jobs")
+hang_guard_command = "scripts/test-g6-readiness-hang-guards.sh"
+ci_jobs = ci_workflow.fetch("jobs")
+ci_count = ci_jobs.values.sum do |job|
+  Array(job.fetch("steps", [])).sum do |step|
+    step.fetch("run", "").lines.count { |line| line.strip == hang_guard_command }
+  end
+end
+reject("the hang-guard regression test must run exactly once in ordinary required CI") unless ci_count == 1
+contracts_steps = Array(ci_jobs.fetch("contracts-policy").fetch("steps"))
+reject("Contracts and Policy CI must own the hang-guard regression test") unless contracts_steps.any? do |step|
+  step.fetch("run", "").lines.any? { |line| line.strip == hang_guard_command }
+end
+reject("Contracts and Policy must remain in the required quality aggregate") unless
+  Array(ci_jobs.fetch("quality-security-native").fetch("needs")).include?("contracts-policy")
 %w[g6-rd-fd-a g6-rd-fd-b].each do |job_id|
   steps = jobs.fetch(job_id).fetch("steps")
-  hang_guard = steps.find { |step| step["name"] == "G6 readiness hang-guard tests" }
-  reject("#{job_id} must run the hang-guard regression test") unless hang_guard&.fetch("run") == "scripts/test-g6-readiness-hang-guards.sh"
+  reject("#{job_id} must not repeat the ordinary-CI hang-guard regression test") if steps.any? do |step|
+    step.fetch("run", "").lines.any? { |line| line.strip == hang_guard_command }
+  end
 
   diagnostics = steps.find { |step| step["name"]&.include?("Collect redacted") }
   cleanup = steps.find { |step| step["name"]&.start_with?("Clean failure domain") }
@@ -52,20 +70,21 @@ critical_timeouts = {
     "Clean release-image resources" => 5
   },
   "g6-rd-fd-a" => {
-    "Build failure domain A images and tunnel" => 35,
+    "Prepare failure domain A images" => 35,
     "Enroll the failure domain A fleet" => 25,
     "Verify the PITR restore point" => 15,
     "Rejoin the former primary as standby" => 15
   },
   "g6-rd-fd-b" => {
-    "Build failure domain B images and tunnel" => 35,
+    "Prepare failure domain B images" => 35,
     "Bootstrap the streaming standby" => 15,
     "Enroll the failure domain B fleet" => 25,
     "Promote the standby under load" => 8,
     "Outbox crash window after claim" => 10,
     "Outbox crash window after transport send" => 10,
     "Outbox crash window before result commit" => 10,
-    "Run the bounded observation window" => 10,
+    "Preflight bounded resource evidence" => 3,
+    "Run the bounded observation window" => 11,
     "Build G6 evidence bundle" => 15,
     "Verify G6 evidence bundle" => 5
   }
@@ -78,6 +97,14 @@ critical_timeouts.each do |job_id, expected|
     reject("#{name} must have timeout #{timeout}") unless step.fetch("timeout-minutes") == timeout
   end
 end
+
+fd_b_steps = jobs.fetch("g6-rd-fd-b").fetch("steps")
+preflight = fd_b_steps.find { |step| step["name"] == "Preflight bounded resource evidence" }
+window = fd_b_steps.find { |step| step["name"] == "Run the bounded observation window" }
+reject("resource preflight must use its 120-second hard process limit") unless
+  preflight&.fetch("run") == "timeout --signal=TERM --kill-after=15s 120s scripts/g6-readiness-fd-b.sh resource-preflight"
+reject("resource preflight must precede the full observation window") unless
+  preflight && window && fd_b_steps.index(preflight) < fd_b_steps.index(window)
 
 bundle_upload = jobs.fetch("g6-rd-fd-b").fetch("steps").find do |step|
   step["name"] == "Publish the evidence bundle on every outcome"
@@ -93,6 +120,50 @@ wait_seconds = promoted_wait.fetch("run")[/g6-rd-new-primary[^\n]*\s(\d+)\s+"G6 
 producer_minutes = critical_timeouts.fetch("g6-rd-fd-b").fetch("Promote the standby under load")
 reject("the promoted-primary artifact wait must outlive its producer timeout") unless wait_seconds && wait_seconds > producer_minutes * 60
 RUBY
+
+relay_topology_docker="$(sed -n '/^relay_topology_docker() {/,/^}/p' "${FD_A}")"
+grep -qF 'timeout --signal=TERM --kill-after=5s 20s docker "$@"' \
+  <<<"${relay_topology_docker}" || {
+  echo "relay topology Docker operations lack a hard process-group timeout" >&2
+  exit 1
+}
+relay_ready_phase="$(sed -n '/^phase_relay_rejoin_ready() {/,/^}/p' "${FD_A}")"
+relay_stop_phase="$(sed -n '/^phase_relay_a_stop() {/,/^}/p' "${FD_A}")"
+for phase in "${relay_ready_phase}" "${relay_stop_phase}"; do
+  grep -qF 'relay_a_only_topology_restore' <<<"${phase}" || {
+    echo "relay controlled-topology phase lacks bounded failure restoration" >&2
+    exit 1
+  }
+done
+cleanup_lib="$(sed -n '/^g6rd_cleanup() {/,/^}/p' "${LIB}")"
+# shellcheck disable=SC2016  # assert literal cleanup source
+if ! grep -qF 'docker network rm "${relay_topology_network}"' <<<"${cleanup_lib}" \
+  || ! grep -qF 'for network in agent-shared agent-isolated relay-a-only' \
+    <<<"${cleanup_lib}"; then
+  echo "bounded cleanup does not remove and gate the run-scoped relay topology" >&2
+  exit 1
+fi
+relay_up_phase="$(sed -n '/^phase_relay_up() {/,/^}/p' "${FD_B}")"
+relay_health_probe="$(sed -n '/^relay_b_healthy() {/,/^}/p' "${FD_B}")"
+if ! grep -qF 'g6rd_wait_until_deadline 120 2' <<<"${relay_up_phase}" \
+  || ! grep -qF 'G6RD_COMPOSE_TIMEOUT_SECONDS=5' <<<"${relay_health_probe}"; then
+  echo "relay-b startup is not deadline/per-probe bounded" >&2
+  exit 1
+fi
+
+# The owner failover must leave the frozen database leases untouched until
+# their natural deadline. A graceful worker stop could run authority-release
+# cleanup, so use a scoped hard-kill and then wait on the database-clock proof.
+owner_phase="$(sed -n '/^phase_scenario_owner() {/,/^}/p' "${FD_B}")"
+grep -qF 'G6RD_COMPOSE_TIMEOUT_SECONDS=15 g6rd_compose kill --signal KILL worker' \
+  <<<"${owner_phase}" || {
+  echo "the connection-owner injection lacks a scoped worker crash" >&2
+  exit 1
+}
+if grep -qF 'g6rd_compose stop worker' <<<"${owner_phase}"; then
+  echo "the connection-owner injection must not gracefully release frozen leases" >&2
+  exit 1
+fi
 
 # The deterministic send-before-MarkSent point uses exact pre/post Worker
 # hooks. It must not depend on an advisory-lock holder or backend inference.
@@ -176,7 +247,7 @@ done
 # Detached watchers and the sampler own process groups, so stopping the wrapper
 # also terminates an in-flight Docker/psql descendant. Each watcher query has
 # its own hard attempt timeout before the bounded cleanup removes run state.
-window_phase="$(sed -n '/^phase_window() {/,/^}/p' "${FD_B}")"
+window_phase="$(sed -n '/^phase_window() (/,/^)/p' "${FD_B}")"
 if grep -qE '^[[:space:]]*wait[[:space:]]*$' <<<"${window_phase}"; then
   echo "the observation window uses a bare wait that can deadlock on the sampler" >&2
   exit 1
@@ -324,16 +395,27 @@ deadline_budget() {
 }
 replacement_budget="$(deadline_budget "${replacement_helper}")"
 for phase_name in phase_outbox_claim_before_send phase_outbox_send_before_mark \
-  phase_outbox_result_before_commit; do
+  phase_outbox_result_before_commit phase_relay_pre_fault phase_scenario_relay \
+  phase_scenario_path; do
   phase_body="$(sed -n "/^${phase_name}() {/,/^}/p" "${FD_B}")"
   if grep -qE 'g6rd_wait_until[[:space:]]' <<<"${phase_body}"; then
     echo "${phase_name} uses an attempt-count wait instead of a wall-clock deadline" >&2
     exit 1
   fi
   phase_budget="$(deadline_budget "${phase_body}")"
-  if ((phase_budget + replacement_budget > 540)); then
+  nested_budget=0
+  [[ "${phase_name}" == phase_outbox_* ]] && nested_budget="${replacement_budget}"
+  if ((phase_budget + nested_budget > 540)); then
     echo "${phase_name} declares more than nine minutes of nested waits" >&2
     exit 1
+  fi
+  if [[ "${phase_name}" == phase_relay_pre_fault \
+    || "${phase_name}" == phase_scenario_relay \
+    || "${phase_name}" == phase_scenario_path ]]; then
+    grep -qF 'G6RD_NODE_CONNECTION_TIMEOUT_SECONDS=5' <<<"${phase_body}" || {
+      echo "${phase_name} lacks a short per-probe transport timeout" >&2
+      exit 1
+    }
   fi
 done
 
