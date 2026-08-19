@@ -1203,9 +1203,8 @@ g6rd_probe_node_connection() {
   # A transport socket can accept the probe while an unhealthy transportd
   # never answers its RPC. Bound the whole Compose invocation so one attempt
   # cannot consume the caller's complete readiness window.
-  timeout --foreground --signal=TERM --kill-after=5s "${timeout_seconds}s" \
-    docker compose --project-name "${COMPOSE_PROJECT}" --file "${COMPOSE_FILE}" \
-    --profile probe run --rm --no-deps g6-probe node-connection \
+  G6RD_COMPOSE_TIMEOUT_SECONDS="${timeout_seconds}" \
+    g6rd_compose --profile probe run --rm --no-deps g6-probe node-connection \
     --socket /run/ocserv-platform/transportd.sock \
     --signing-key-file /run/ocservia-signing/command-signing.pem \
     --expect-path "${expect_path}" \

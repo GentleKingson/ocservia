@@ -380,11 +380,17 @@ grep -q 'g6rd_install_controller_key' <<<"${promote_phase}" || {
   exit 1
 }
 node_connection_probe="$(sed -n '/^g6rd_probe_node_connection() {/,/^}/p' "${LIB}")"
-grep -q 'timeout --foreground --signal=TERM --kill-after=5s' \
-  <<<"${node_connection_probe}" || {
-  echo "node connection probes must have a per-attempt hard timeout" >&2
+if ! grep -q 'G6RD_COMPOSE_TIMEOUT_SECONDS="${timeout_seconds}"' \
+  <<<"${node_connection_probe}" \
+  || ! grep -q 'g6rd_compose --profile probe run' \
+    <<<"${node_connection_probe}"; then
+  echo "node connection probes must use the bounded release-image-aware Compose path" >&2
   exit 1
-}
+fi
+if grep -q 'docker compose.*COMPOSE_FILE' <<<"${node_connection_probe}"; then
+  echo "node connection probes must not bypass the frozen release-image overlay" >&2
+  exit 1
+fi
 relay_connection_probe="$(sed -n '/^relay_probe_relay_b() {/,/^}/p' "${FD_B}")"
 grep -q '\.observations\[0\]\.path == "relay"' \
   <<<"${relay_connection_probe}" || {
@@ -572,6 +578,29 @@ source "${LIB}"
 # test before that branch is exercised explicitly below.
 unset G6RD_AGENT_IMAGE G6RD_CONTROL_PLANE_IMAGE G6RD_TRANSPORTD_IMAGE \
   G6RD_RELAY_IMAGE G6RD_PROBE_IMAGE
+(
+  export G6_OWNER_PASSWORD=fixture-owner
+  export G6_DEV_AUTH_TOKEN=fixture-token
+  export G6_FD_ID=fd-b
+  export G6RD_NODE_CONNECTION_TIMEOUT_SECONDS=7
+  g6rd_compose() {
+    [[ "${G6RD_COMPOSE_TIMEOUT_SECONDS:-}" == 7 ]] || {
+      echo "node connection probe did not preserve its per-attempt timeout" >&2
+      return 1
+    }
+    printf '%s\n' "$@"
+  }
+  probe_invocation="$(g6rd_probe_node_connection relay node-a node-b)"
+  expected_invocation="$(printf '%s\n' \
+    --profile probe run --rm --no-deps g6-probe node-connection \
+    --socket /run/ocserv-platform/transportd.sock \
+    --signing-key-file /run/ocservia-signing/command-signing.pem \
+    --expect-path relay --node-id node-a --node-id node-b)"
+  [[ "${probe_invocation}" == "${expected_invocation}" ]] || {
+    echo "node connection probe did not delegate through the shared Compose wrapper" >&2
+    exit 1
+  }
+)
 reclaim_owned_test="$(mktemp -d)"
 mkdir -p "${reclaim_owned_test}/nested"
 : >"${reclaim_owned_test}/nested/runner-owned"
