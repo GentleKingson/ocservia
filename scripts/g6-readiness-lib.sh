@@ -1911,6 +1911,11 @@ g6rd_diagnostics() {
     sed -E 's#(postgres(ql)?://[^:/]+:)[^@]+@#\1[redacted]@#g' \
       "${log}" >"${ARTIFACT_DIR}/$(basename "${log}")" || true
   done
+  if [[ -d "${G6RD_OUTBOX}/evidence-bundle" ]]; then
+    mkdir -p "${ARTIFACT_DIR}/evidence-bundle"
+    cp -R "${G6RD_OUTBOX}/evidence-bundle/." \
+      "${ARTIFACT_DIR}/evidence-bundle/" || true
+  fi
   printf 'fd=%s alias=%s environment_id=%s authority=%s\n' \
     "${FD_ID}" "${FD_ALIAS}" "${G6RD_ENVIRONMENT_ID}" "${G6_AUTHORITY}" \
     >"${ARTIFACT_DIR}/failure-domain-${FD_ID}.txt"

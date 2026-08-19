@@ -375,12 +375,15 @@ write(
 write(
   join(peerDir, "isolation", "isolation.json"),
   JSON.stringify({
-    outage_declared_at: at(50),
+    outage_declared_at: atMicros(50, 300000),
     isolated_at: at(51),
     failure_domain: "fd-a",
   }),
 );
-write(join(peerDir, "isolation", "outage-declared-at"), `${at(50)}\n`);
+write(
+  join(peerDir, "isolation", "outage-declared-at"),
+  `${atMicros(50, 300000)}\n`,
+);
 write(join(peerDir, "isolation", "isolated-at"), `${at(51)}\n`);
 write(
   join(peerDir, "isolation", "isolated-primary-writes.jsonl"),
@@ -394,7 +397,7 @@ write(
 write(
   join(peerDir, "isolation", "active-load.json"),
   `${JSON.stringify({
-    captured_at: at(49),
+    captured_at: atMicros(50, 234000),
     queued_outbox_count: 55,
     commands: commands.slice(0, 55).map((command) => ({
       command_id: command.id,
@@ -669,7 +672,7 @@ function runBuilder(outDir, authority) {
   }
 }
 
-function expectBuilderFailure(outDir, expectedMessage) {
+function expectBuilderFailure(outDir, expectedMessage, expectedDetails = {}) {
   const result = spawnSync(
     process.execPath,
     [
@@ -699,6 +702,19 @@ function expectBuilderFailure(outDir, expectedMessage) {
   if (result.status === 0 || !output.includes(expectedMessage)) {
     throw new Error(
       `builder did not reject the invalid producer state: ${output}`,
+    );
+  }
+  const errorResult = JSON.parse(
+    readFileSync(join(outDir, "builder-error.json"), "utf8"),
+  );
+  if (
+    !errorResult.reason.includes(expectedMessage) ||
+    Object.entries(expectedDetails).some(
+      ([key, value]) => errorResult[key] !== value,
+    )
+  ) {
+    throw new Error(
+      `builder did not preserve structured failure details: ${JSON.stringify(errorResult)}`,
     );
   }
 }
@@ -806,6 +822,23 @@ try {
   const builtEvidence = JSON.parse(
     readFileSync(join(productionDir, "evidence.json"), "utf8"),
   );
+  const sourceInventory = JSON.parse(
+    readFileSync(join(productionDir, "source-inventory.json"), "utf8"),
+  );
+  if (
+    sourceInventory.schema_version !== "ocservia.g6-source-inventory.v1" ||
+    !sourceInventory.sources.some(
+      (source) => source.path === "peer/isolation/active-load.json",
+    ) ||
+    !sourceInventory.sources.some(
+      (source) => source.path === "contract/g6-slo.yaml",
+    ) ||
+    sourceInventory.sources.some((source) => source.path.startsWith("/"))
+  ) {
+    throw new Error(
+      "builder source inventory must preserve safe relative input identities",
+    );
+  }
   if (
     structuredArtifactKinds.length !== 13 ||
     builtEvidence.artifacts.filter((artifact) =>
@@ -1305,6 +1338,22 @@ try {
     "was not frozen after the bounded window",
   );
   write(freezePath, originalFreeze);
+
+  const activeLoadPath = join(peerDir, "isolation", "active-load.json");
+  const originalActiveLoad = readFileSync(activeLoadPath, "utf8");
+  const lateActiveLoad = JSON.parse(originalActiveLoad);
+  lateActiveLoad.captured_at = atMicros(50, 301000);
+  write(activeLoadPath, JSON.stringify(lateActiveLoad));
+  expectBuilderFailure(
+    join(work, "late-active-load-bundle"),
+    "active-load snapshot was captured after the database outage",
+    {
+      path: "peer/isolation/active-load.json#/captured_at",
+      expected: `<= ${atMicros(50, 300000)}`,
+      actual: atMicros(50, 301000),
+    },
+  );
+  write(activeLoadPath, originalActiveLoad);
 
   console.log(
     "G6 readiness evidence builder produced a verifier-passing bundle from synthetic producer state",

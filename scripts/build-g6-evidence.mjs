@@ -23,7 +23,7 @@ import {
   readFileSync,
   writeFileSync,
 } from "node:fs";
-import { join } from "node:path";
+import { join, relative, resolve, sep } from "node:path";
 import {
   computeG6Derivations,
   parseSlo,
@@ -63,22 +63,85 @@ const authority = values["authority"];
 const failureDomainClass = values["failure-domain-class"];
 const runId = values["run-id"];
 
+mkdirSync(outDir, { recursive: true });
+
+const sourceInventory = new Map();
+const sourceRoots = [
+  ["run", resolve(runDir)],
+  ["peer", resolve(peerDir)],
+];
+
+function sourceInventoryName(path) {
+  const resolvedPath = resolve(path);
+  if (resolvedPath === resolve(values.slo)) return "contract/g6-slo.yaml";
+  for (const [label, root] of sourceRoots) {
+    if (resolvedPath === root || resolvedPath.startsWith(`${root}${sep}`)) {
+      return `${label}/${relative(root, resolvedPath).split(sep).join("/")}`;
+    }
+  }
+  return undefined;
+}
+
+function recordSource(path, content) {
+  const name = sourceInventoryName(path);
+  if (!name) return;
+  sourceInventory.set(name, {
+    path: name,
+    bytes: Buffer.byteLength(content),
+    digest: sha256Digest(content),
+  });
+  writeFileSync(
+    join(outDir, "source-inventory.json"),
+    `${JSON.stringify(
+      {
+        schema_version: "ocservia.g6-source-inventory.v1",
+        sources: [...sourceInventory.values()].sort((left, right) =>
+          left.path < right.path ? -1 : left.path > right.path ? 1 : 0,
+        ),
+      },
+      null,
+      2,
+    )}\n`,
+  );
+}
+
 if (authority !== "engineering" && authority !== "production_readiness") {
   throw new Error("authority must be engineering or production_readiness");
 }
 
-function fail(message) {
+function fail(message, details = {}) {
+  writeFileSync(
+    join(outDir, "builder-error.json"),
+    `${JSON.stringify(
+      {
+        schema_version: "ocservia.g6-evidence-build-error.v1",
+        phase: "build",
+        status: "failed",
+        reason: message,
+        ...details,
+      },
+      null,
+      2,
+    )}\n`,
+  );
   throw new Error(message);
 }
 
 function readText(...parts) {
-  return readFileSync(join(...parts), "utf8");
+  const path = join(...parts);
+  const content = readFileSync(path, "utf8");
+  recordSource(path, content);
+  return content;
 }
 
 function requireFile(...parts) {
   const path = join(...parts);
   try {
-    if (readFileSync(path, "utf8").length > 0) return path;
+    const content = readFileSync(path, "utf8");
+    if (content.length > 0) {
+      recordSource(path, content);
+      return path;
+    }
   } catch {
     // fall through to the shared failure below
   }
@@ -175,6 +238,7 @@ function jsonl(records) {
 // Inputs.
 // ---------------------------------------------------------------------------
 
+requireFile(values.slo);
 requireFile(runDir, "state", "read-log.jsonl");
 requireFile(runDir, "state", "enqueue-log.jsonl");
 requireFile(runDir, "state", "resource-samples.csv");
@@ -1007,7 +1071,7 @@ const agentSessionsText = canonicalJson({
 // PostgreSQL recovery and relay transitions.
 // ---------------------------------------------------------------------------
 
-const outageDeclaredAt = normalizeStamp(
+const outageDeclaredAt = normalizePreciseStamp(
   readText(peerDir, "isolation", "outage-declared-at").trim(),
   "outage-declared-at",
 );
@@ -1016,12 +1080,20 @@ const isolatedAt = normalizeStamp(
   "isolated-at",
 );
 const outageMs = parseStamp(outageDeclaredAt, "outage");
-const activeLoadCapturedMs = parseStamp(
+const activeLoadCapturedAt = normalizePreciseStamp(
   activeLoad.captured_at,
   "active-load capture",
 );
+const activeLoadCapturedMs = parseStamp(
+  activeLoadCapturedAt,
+  "active-load capture",
+);
 if (activeLoadCapturedMs > outageMs) {
-  fail("the active-load snapshot was captured after the database outage");
+  fail("the active-load snapshot was captured after the database outage", {
+    path: "peer/isolation/active-load.json#/captured_at",
+    expected: `<= ${outageDeclaredAt}`,
+    actual: activeLoadCapturedAt,
+  });
 }
 for (const command of activeLoad.commands) {
   const telemetryMs = parseStamp(
@@ -1649,7 +1721,6 @@ const harnessSummary = [
   "",
 ].join("\n");
 
-mkdirSync(outDir, { recursive: true });
 for (const [name, , , content] of artifactFiles) {
   writeFileSync(join(outDir, name), content);
 }
@@ -1671,7 +1742,7 @@ const digestByKind = new Map(
   artifacts.map((artifact) => [artifact.kind, artifact.digest]),
 );
 
-const sloText = readFileSync(values.slo, "utf8");
+const sloText = readText(values.slo);
 const slo = parseSlo(sloText);
 
 const derivations = computeG6Derivations({

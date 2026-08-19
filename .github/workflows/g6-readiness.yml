@@ -381,15 +381,19 @@ jobs:
       - name: Merge failure domain A final journals
         timeout-minutes: 10
         run: scripts/g6-readiness-fd-b.sh merge-peer-final-evidence "${RUNNER_TEMP}/g6-rd-fd-a-evidence"
-      - name: Build and verify the evidence bundle
+      - name: Build G6 evidence bundle
         timeout-minutes: 15
         run: scripts/g6-readiness-fd-b.sh evidence-build "${RUNNER_TEMP}/g6-rd-fd-a-evidence"
-      - name: Publish the evidence bundle
+      - name: Verify G6 evidence bundle
+        timeout-minutes: 5
+        run: scripts/g6-readiness-fd-b.sh evidence-verify
+      - name: Publish the evidence bundle on every outcome
+        if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: g6-rd-evidence-bundle-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/g6-readiness-${{ env.RUN_ID }}/outbox/evidence-bundle
-          if-no-files-found: error
+          if-no-files-found: warn
           retention-days: 14
       - name: Collect redacted failure domain B diagnostics
         if: always()
@@ -501,6 +505,7 @@ jobs:
             --expected-authority "${G6_AUTHORITY}" \
             --expected-environment-id "${G6RD_EXPECTED_ENVIRONMENT_ID}" \
             --expected-failure-domain-class multi_host \
+            --result "${output}/verification-result.json" \
             >"${output}/verdict.json" || status=$?
           jq -e '.schema_version == "ocservia.g6-verdict.v2"' "${output}/verdict.json" >/dev/null
           # A production-readiness dispatch must earn exit 0; an engineering
@@ -512,6 +517,12 @@ jobs:
               exit 1
             fi
           else
+            jq -e '
+              .passed == false and
+              .failure_reasons == ["final pass requires production_readiness authority"] and
+              all(.measurement_results[]; .passed == true) and
+              all(.observation_results[]; .passed == true)
+            ' "${output}/verdict.json" >/dev/null
             echo "engineering rehearsal verifier exit status: ${status}"
           fi
           if ! diff -u <(jq -S . "${bundle}/verdict.json") <(jq -S . "${output}/verdict.json"); then

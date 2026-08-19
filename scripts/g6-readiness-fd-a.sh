@@ -385,7 +385,11 @@ phase_isolate() {
     echo "fewer than fifty real commands, outbox rows, and live telemetry producers are active at failure injection" >&2
     return 1
   }
-  g6rd_now >"${G6RD_STATE}/outage-declared-at"
+  # Capture both sides of the failure boundary from PostgreSQL at full
+  # precision. Runner-second timestamps can invert this causal order.
+  g6rd_psql -Atc \
+    "SELECT to_char(clock_timestamp() AT TIME ZONE 'UTC','YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"')" \
+    >"${G6RD_STATE}/outage-declared-at"
   g6rd_compose stop scheduler api worker transportd >/dev/null 2>&1
   g6rd_release_synthetic_barriers
   g6rd_compose stop postgres

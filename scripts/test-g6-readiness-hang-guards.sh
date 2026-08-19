@@ -62,7 +62,8 @@ critical_timeouts = {
     "Outbox crash window after transport send" => 10,
     "Outbox crash window before result commit" => 10,
     "Run the bounded observation window" => 10,
-    "Build and verify the evidence bundle" => 15
+    "Build G6 evidence bundle" => 15,
+    "Verify G6 evidence bundle" => 5
   }
 }
 critical_timeouts.each do |job_id, expected|
@@ -73,6 +74,13 @@ critical_timeouts.each do |job_id, expected|
     reject("#{name} must have timeout #{timeout}") unless step.fetch("timeout-minutes") == timeout
   end
 end
+
+bundle_upload = jobs.fetch("g6-rd-fd-b").fetch("steps").find do |step|
+  step["name"] == "Publish the evidence bundle on every outcome"
+end
+reject("the evidence bundle diagnostics upload is missing") unless bundle_upload
+reject("the evidence bundle diagnostics must upload after failure") unless bundle_upload.fetch("if") == "always()"
+reject("an absent pre-build bundle must not mask the original failure") unless bundle_upload.fetch("with").fetch("if-no-files-found") == "warn"
 
 fd_a_steps = jobs.fetch("g6-rd-fd-a").fetch("steps")
 promoted_wait = fd_a_steps.find { |step| step["name"] == "Wait for the promoted primary" }

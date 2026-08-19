@@ -447,7 +447,9 @@ function verifyArtifacts(evidence, artifactRoot) {
     const bytes = readFileSync(artifactPath);
     const computed = `sha256:${createHash("sha256").update(bytes).digest("hex")}`;
     if (computed !== artifact.digest) {
-      fail(`artifact content digest mismatch: ${artifact.name}`);
+      fail(
+        `artifact content digest mismatch: ${artifact.name} (expected ${artifact.digest}, actual ${computed})`,
+      );
     }
     verified.set(artifact.name, {
       digest: artifact.digest,

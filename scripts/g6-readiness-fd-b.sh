@@ -1826,6 +1826,7 @@ phase_evidence_build() {
   require_file "${peer}/evidence/instances.tsv"
   require_file "${G6RD_STATE}/evidence/commands.jsonl"
   mkdir -p "${out}"
+  local build_status=0 reason
   "${G6RD_NODE_BIN:-node}" "${ROOT}/scripts/build-g6-evidence.mjs" \
     --run-dir "${G6RD_WORK}" \
     --peer-dir "${peer}" \
@@ -1835,12 +1836,41 @@ phase_evidence_build() {
     --candidate-sha "${G6RD_CANDIDATE_SHA}" \
     --authority "${G6_AUTHORITY}" \
     --failure-domain-class "${G6RD_FAILURE_DOMAIN_CLASS:-multi_host}" \
-    --run-id "${RUN_ID}"
+    --run-id "${RUN_ID}" \
+    >"${out}/build.stdout.log" 2>"${out}/build.stderr.log" || build_status=$?
+  printf '%s\n' "${build_status}" >"${out}/evidence-build-exit-code.txt"
+  if [[ "${build_status}" != 0 ]]; then
+    reason="$(awk '/^Error: / {sub(/^Error: /, ""); print; exit}' \
+      "${out}/build.stderr.log")"
+    [[ -n "${reason}" ]] || reason="$(tail -n 1 "${out}/build.stderr.log")"
+    if [[ -s "${out}/builder-error.json" ]]; then
+      jq --argjson exit_code "${build_status}" \
+        '. + {schema_version:"ocservia.g6-evidence-phase-result.v1",exit_code:$exit_code}' \
+        "${out}/builder-error.json" >"${out}/build-result.json"
+    else
+      jq -n --arg reason "${reason}" --argjson exit_code "${build_status}" \
+        '{schema_version:"ocservia.g6-evidence-phase-result.v1",phase:"build",status:"failed",exit_code:$exit_code,reason:$reason}' \
+        >"${out}/build-result.json"
+    fi
+    cp -f "${out}/build-result.json" "${out}/verification-result.json"
+    cat "${out}/build.stderr.log" >&2
+    return "${build_status}"
+  fi
+  jq -n \
+    '{schema_version:"ocservia.g6-evidence-phase-result.v1",phase:"build",status:"passed",exit_code:0}' \
+    >"${out}/build-result.json"
+  cat "${out}/build.stdout.log"
+}
+
+phase_evidence_verify() {
+  local out="${G6RD_OUTBOX}/evidence-bundle" verify_status=0
+  require_file "${out}/evidence.json"
+  require_file "${out}/topology.json"
+  require_file "${out}/release-manifest.json"
   # The independent verifier recomputes every derivation from the artifact
   # bytes. An engineering-rehearsal bundle is allowed to carry a non-final
   # verdict (the authority fence alone keeps it non-final), but any parse
   # or integrity rejection fails the run.
-  local verify_status=0
   "${G6RD_NODE_BIN:-node}" "${ROOT}/scripts/verify-g6-evidence.mjs" \
     --slo "${ROOT}/docs/acceptance/g6-slo.yaml" \
     --evidence "${out}/evidence.json" \
@@ -1850,14 +1880,31 @@ phase_evidence_build() {
     --expected-authority "${G6_AUTHORITY}" \
     --expected-environment-id "${G6RD_ENVIRONMENT_ID}" \
     --expected-failure-domain-class "${G6RD_FAILURE_DOMAIN_CLASS:-multi_host}" \
-    >"${out}/verdict.json" || verify_status=$?
+    --result "${out}/verification-result.json" \
+    >"${out}/verify.stdout.log" 2>"${out}/verify.stderr.log" || verify_status=$?
+  printf '%s\n' "${verify_status}" >"${out}/evidence-verify-exit-code.txt"
+  if [[ -s "${out}/verify.stdout.log" ]]; then
+    cp -f "${out}/verify.stdout.log" "${out}/verdict.json"
+  fi
+  [[ ! -s "${out}/verify.stderr.log" ]] || cat "${out}/verify.stderr.log" >&2
   if [[ "${G6_AUTHORITY}" == production_readiness ]]; then
-    if [[ "${verify_status}" != 0 ]]; then
+    if [[ "${verify_status}" != 0 ]] \
+      || ! jq -e '.schema_version == "ocservia.g6-verdict.v2" and .passed == true' \
+        "${out}/verdict.json" >/dev/null; then
       echo "the independent verifier rejected the production-readiness bundle" >&2
       return 1
     fi
   else
-    jq -e '.schema_version == "ocservia.g6-verdict.v2"' "${out}/verdict.json" >/dev/null
+    jq -e '
+      .schema_version == "ocservia.g6-verdict.v2" and
+      .passed == false and
+      .failure_reasons == ["final pass requires production_readiness authority"] and
+      all(.measurement_results[]; .passed == true) and
+      all(.observation_results[]; .passed == true)
+    ' "${out}/verdict.json" >/dev/null || {
+      echo "the engineering verifier found a failure beyond the authority fence" >&2
+      return 1
+    }
   fi
   cp -f "${out}/verdict.json" "${G6RD_OUTBOX}/verdict.json"
 }
@@ -1925,11 +1972,12 @@ outbox-send-before-mark) phase_outbox_send_before_mark ;;
   final-freeze) phase_final_freeze ;;
   merge-peer-final-evidence) phase_merge_peer_final_evidence "${2:?peer final evidence root}" ;;
   evidence-build) phase_evidence_build "${2:?peer evidence root}" ;;
+  evidence-verify) phase_evidence_verify ;;
   diagnostics) g6rd_diagnostics ;;
   cleanup-prelude) phase_cleanup_prelude ;;
   cleanup) phase_cleanup ;;
 *)
-  echo "usage: $0 <prepare|materialize-runtime|import-peer-tunnel-nodes|build-images|tunnel-up|standby-bootstrap|relay-up|agents-enroll|agents-start|load-start|promote|merge-peer-evidence|scenario-scheduler|scenario-owner|scenario-relay|scenario-path|outbox-claim-before-send|outbox-send-before-mark|outbox-result-before-commit|window|evidence-collect|final-freeze|merge-peer-final-evidence|evidence-build|diagnostics|cleanup-prelude|cleanup>" >&2
+  echo "usage: $0 <prepare|materialize-runtime|import-peer-tunnel-nodes|build-images|tunnel-up|standby-bootstrap|relay-up|agents-enroll|agents-start|load-start|promote|merge-peer-evidence|scenario-scheduler|scenario-owner|scenario-relay|scenario-path|outbox-claim-before-send|outbox-send-before-mark|outbox-result-before-commit|window|evidence-collect|final-freeze|merge-peer-final-evidence|evidence-build|evidence-verify|diagnostics|cleanup-prelude|cleanup>" >&2
   exit 2
   ;;
 esac

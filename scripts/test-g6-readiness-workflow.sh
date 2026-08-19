@@ -2036,6 +2036,7 @@ fd_b_window="$(order_of 'fd-b.sh window')"
 fd_b_crash="$(order_of 'outbox-result-before-commit')"
 fd_b_collect="$(order_of 'fd-b.sh evidence-collect')"
 fd_b_build="$(order_of 'fd-b.sh evidence-build')"
+fd_b_verify="$(order_of 'fd-b.sh evidence-verify')"
 if [[ -z "${fd_b_crash}" || -z "${fd_b_window}" || "${fd_b_crash}" -ge "${fd_b_window}" ]]; then
   echo "every fault scenario must precede the bounded observation window" >&2
   exit 1
@@ -2046,6 +2047,10 @@ if [[ -z "${fd_b_window}" || -z "${fd_b_collect}" || "${fd_b_window}" -ge "${fd_
 fi
 if [[ -z "${fd_b_collect}" || -z "${fd_b_build}" || "${fd_b_collect}" -ge "${fd_b_build}" ]]; then
   echo "the frozen state must be collected before the bundle is built" >&2
+  exit 1
+fi
+if [[ -z "${fd_b_verify}" || "${fd_b_build}" -ge "${fd_b_verify}" ]]; then
+  echo "the frozen bundle must be built before its producer verification" >&2
   exit 1
 fi
 fd_a_ready="$(order_of 'fd-a.sh ready')"
@@ -2067,7 +2072,8 @@ if [[ -z "${fd_b_ready_wait}" || -z "${fd_b_scenario}" || "${fd_b_ready_wait}" -
 fi
 if [[ -z "${fd_b_freeze}" || -z "${fd_b_final_wait}" || -z "${fd_b_final_merge}" \
   || "${fd_b_collect}" -ge "${fd_b_freeze}" || "${fd_b_freeze}" -ge "${fd_b_final_wait}" \
-  || "${fd_b_final_wait}" -ge "${fd_b_final_merge}" || "${fd_b_final_merge}" -ge "${fd_b_build}" ]]; then
+  || "${fd_b_final_wait}" -ge "${fd_b_final_merge}" || "${fd_b_final_merge}" -ge "${fd_b_build}" \
+  || "${fd_b_build}" -ge "${fd_b_verify}" ]]; then
   echo "fd-b must collect final sessions, request freeze, then merge fd-a final journals before building" >&2
   exit 1
 fi
@@ -2085,6 +2091,10 @@ grep -q 'verify-g6-evidence.mjs' "${FD_B}" || {
 }
 grep -q 'phase_evidence_build() {' "${FD_B}" || {
   echo "fd-b must define the evidence build phase" >&2
+  exit 1
+}
+grep -q 'phase_evidence_verify() {' "${FD_B}" || {
+  echo "fd-b must define a separate evidence verification phase" >&2
   exit 1
 }
 grep -q 'require_file "${peer}/evidence/instances.tsv"' "${FD_B}" || {
@@ -2200,6 +2210,16 @@ grep -q 'queued_outbox_count' "${FD_A}" || {
   echo "failure injection must freeze the due outbox population" >&2
   exit 1
 }
+isolate_phase="$(sed -n '/^phase_isolate() {/,/^}/p' "${FD_A}")"
+if [[ "$(grep -c 'clock_timestamp()' <<<"${isolate_phase}")" != 2 ]] \
+  || ! grep -q 'outage-declared-at' <<<"${isolate_phase}"; then
+  echo "the active-load and outage boundary must use the same precise PostgreSQL clock" >&2
+  exit 1
+fi
+grep -q 'normalizePreciseStamp' "${BUILDER}" || {
+  echo "the evidence builder must preserve precise causal boundary timestamps" >&2
+  exit 1
+}
 grep -q 'psql_primary -Atc "SELECT pg_advisory_lock' "${FD_B}" || {
   echo "the outbox dispatch barrier must lock the writable primary" >&2
   exit 1
@@ -2251,27 +2271,65 @@ set -Eeuo pipefail
 script="$1"
 shift
 if [[ "${script}" == */build-g6-evidence.mjs ]]; then
+  if [[ "${G6RD_SHIM_BUILD_FAIL:-0}" == 1 ]]; then
+    echo 'Error: fixture evidence build failed' >&2
+    exit 17
+  fi
   printf '%s\n' "$@" >"${G6RD_PRODUCER_ARGS}"
   while (($#)); do
     if [[ "$1" == --out-dir ]]; then
       out="$2"
       mkdir -p "${out}"
-      : >"${out}/evidence.json"
-      : >"${out}/topology.json"
-      : >"${out}/release-manifest.json"
+      printf '{}\n' >"${out}/evidence.json"
+      printf '{}\n' >"${out}/topology.json"
+      printf '{}\n' >"${out}/release-manifest.json"
       break
     fi
     shift
   done
   exit 0
 fi
-printf '{"schema_version":"ocservia.g6-verdict.v2"}\n'
+result=""
+while (($#)); do
+  if [[ "$1" == --result ]]; then
+    result="$2"
+    break
+  fi
+  shift
+done
+[[ -z "${result}" ]] || printf '{"schema_version":"ocservia.g6-evidence-phase-result.v1","phase":"verify","status":"passed","verdict_passed":true,"exit_code":0,"failure_reasons":[]}\n' >"${result}"
+printf '{"schema_version":"ocservia.g6-verdict.v2","passed":true,"failure_reasons":[],"measurement_results":{},"observation_results":{}}\n'
 SHIM
 chmod +x "${node_shim}"
 RUNNER_TEMP="${producer_test}" RUN_ID="${run_id}" FD_ID=fd-b FD_ALIAS=fd-beta \
   G6_AUTHORITY=production_readiness G6RD_CANDIDATE_SHA="$(printf 'a%.0s' {1..40})" \
   G6RD_NODE_BIN="${node_shim}" G6RD_PRODUCER_ARGS="${producer_test}/builder-args" \
   "${FD_B}" evidence-build "${peer_dir}"
+RUNNER_TEMP="${producer_test}" RUN_ID="${run_id}" FD_ID=fd-b FD_ALIAS=fd-beta \
+  G6_AUTHORITY=production_readiness G6RD_CANDIDATE_SHA="$(printf 'a%.0s' {1..40})" \
+  G6RD_NODE_BIN="${node_shim}" G6RD_PRODUCER_ARGS="${producer_test}/builder-args" \
+  "${FD_B}" evidence-verify
+if [[ "$(<"${run_dir}/outbox/evidence-bundle/evidence-build-exit-code.txt")" != 0 \
+  || "$(<"${run_dir}/outbox/evidence-bundle/evidence-verify-exit-code.txt")" != 0 ]]; then
+  echo "the evidence producer must preserve separate successful phase exit codes" >&2
+  exit 1
+fi
+rm -rf "${run_dir}/outbox/evidence-bundle"
+if RUNNER_TEMP="${producer_test}" RUN_ID="${run_id}" FD_ID=fd-b FD_ALIAS=fd-beta \
+  G6_AUTHORITY=production_readiness G6RD_CANDIDATE_SHA="$(printf 'a%.0s' {1..40})" \
+  G6RD_NODE_BIN="${node_shim}" G6RD_PRODUCER_ARGS="${producer_test}/builder-args" \
+  G6RD_SHIM_BUILD_FAIL=1 "${FD_B}" evidence-build "${peer_dir}" \
+  >/dev/null 2>&1; then
+  echo "the evidence build failure fixture unexpectedly passed" >&2
+  exit 1
+fi
+if [[ "$(<"${run_dir}/outbox/evidence-bundle/evidence-build-exit-code.txt")" != 17 ]] \
+  || ! jq -e '.phase == "build" and .status == "failed" and .exit_code == 17 and .reason == "fixture evidence build failed"' \
+    "${run_dir}/outbox/evidence-bundle/verification-result.json" >/dev/null \
+  || [[ ! -s "${run_dir}/outbox/evidence-bundle/build.stderr.log" ]]; then
+  echo "the failed evidence build did not preserve its exact structured diagnostics" >&2
+  exit 1
+fi
 previous=""
 producer_run_dir=""
 while IFS= read -r argument; do
