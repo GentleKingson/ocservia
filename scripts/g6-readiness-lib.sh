@@ -61,8 +61,9 @@ g6rd_init_environment() {
   G6RD_TUNNEL_BIN="${G6RD_ROOT}/rust/target/release/ocservia-g6-tunnel"
   COMPOSE_PROJECT="ocservia-g6-rd-${RUN_ID}"
   COMPOSE_FILE="${G6RD_ROOT}/deploy/g6-readiness/compose.yaml"
+  G6RD_RELEASE_COMPOSE="${G6RD_WORK}/release-images.yaml"
   G6RD_AGENT_COMPOSE="${G6RD_WORK}/agents-${FD_ID}.yaml"
-  export COMPOSE_PROJECT COMPOSE_FILE RUN_ID FD_ID FD_ALIAS G6_AUTHORITY
+  export COMPOSE_PROJECT COMPOSE_FILE G6RD_RELEASE_COMPOSE RUN_ID FD_ID FD_ALIAS G6_AUTHORITY
   umask 077
   mkdir -p "${G6RD_STATE}" "${G6RD_SECRETS}" "${G6RD_OUTBOX}" \
     "${G6RD_ARCHIVE}" "${G6RD_BASEBACKUP}" "${G6RD_RESTORE}" \
@@ -618,6 +619,10 @@ g6rd_compose() {
       g6rd_placeholder_env
     fi
   fi
+  local compose_files=(--file "${COMPOSE_FILE}")
+  if [[ -s "${G6RD_RELEASE_COMPOSE}" ]]; then
+    compose_files+=(--file "${G6RD_RELEASE_COMPOSE}")
+  fi
   local timeout_seconds="${G6RD_COMPOSE_TIMEOUT_SECONDS:-}"
   if [[ -n "${timeout_seconds}" ]]; then
     [[ "${timeout_seconds}" =~ ^[0-9]+$ && "${timeout_seconds}" -ge 1 ]] || {
@@ -625,10 +630,10 @@ g6rd_compose() {
       return 2
     }
     timeout --foreground --signal=TERM --kill-after=5s "${timeout_seconds}s" \
-      docker compose --project-name "${COMPOSE_PROJECT}" --file "${COMPOSE_FILE}" "$@"
+      docker compose --project-name "${COMPOSE_PROJECT}" "${compose_files[@]}" "$@"
     return
   fi
-  docker compose --project-name "${COMPOSE_PROJECT}" --file "${COMPOSE_FILE}" "$@"
+  docker compose --project-name "${COMPOSE_PROJECT}" "${compose_files[@]}" "$@"
 }
 
 g6rd_install_controller_key() {
@@ -660,6 +665,11 @@ g6rd_agent_compose() {
       g6rd_placeholder_env
     fi
   fi
+  local compose_files=(--file "${COMPOSE_FILE}")
+  if [[ -s "${G6RD_RELEASE_COMPOSE}" ]]; then
+    compose_files+=(--file "${G6RD_RELEASE_COMPOSE}")
+  fi
+  compose_files+=(--file "${G6RD_AGENT_COMPOSE}")
   local timeout_seconds="${G6RD_COMPOSE_TIMEOUT_SECONDS:-}"
   if [[ -n "${timeout_seconds}" ]]; then
     [[ "${timeout_seconds}" =~ ^[0-9]+$ && "${timeout_seconds}" -ge 1 ]] || {
@@ -667,12 +677,10 @@ g6rd_agent_compose() {
       return 2
     }
     timeout --foreground --signal=TERM --kill-after=5s "${timeout_seconds}s" \
-      docker compose --project-name "${COMPOSE_PROJECT}" \
-      --file "${COMPOSE_FILE}" --file "${G6RD_AGENT_COMPOSE}" "$@"
+      docker compose --project-name "${COMPOSE_PROJECT}" "${compose_files[@]}" "$@"
     return
   fi
-  docker compose --project-name "${COMPOSE_PROJECT}" \
-    --file "${COMPOSE_FILE}" --file "${G6RD_AGENT_COMPOSE}" "$@"
+  docker compose --project-name "${COMPOSE_PROJECT}" "${compose_files[@]}" "$@"
 }
 
 g6rd_agent_journal_query() {
@@ -1263,6 +1271,62 @@ g6rd_install_agent_enrollment_token() {
     --network none --log-driver none -v "${dir}/secrets:/fix" \
     postgres:17.10-bookworm sh -c \
     'umask 077; cat > /fix/enrollment-token; chown 65532:65532 /fix/enrollment-token; chmod 0600 /fix/enrollment-token'
+}
+
+g6rd_prepare_release_images() {
+  local variables=(
+    G6RD_CONTROL_PLANE_IMAGE
+    G6RD_TRANSPORTD_IMAGE
+    G6RD_RELAY_IMAGE
+    G6RD_PROBE_IMAGE
+  )
+  local variable image configured=0 temporary
+  for variable in "${variables[@]}"; do
+    image="${!variable:-}"
+    [[ -n "${image}" ]] || continue
+    configured=$((configured + 1))
+    case "${image}" in
+      *[!a-zA-Z0-9._/@:-]*)
+        echo "${variable} contains an unsafe image reference" >&2
+        return 2
+        ;;
+    esac
+  done
+  if [[ "${configured}" -eq 0 ]]; then
+    rm -f -- "${G6RD_RELEASE_COMPOSE}"
+    g6rd_compose build postgres migrate api worker scheduler transportd \
+      controller-key-init transport-runtime-init transport-endpoint-bootstrap \
+      relay g6-probe
+    return
+  fi
+  if [[ "${configured}" -ne "${#variables[@]}" ]]; then
+    echo "the frozen release image set must be configured completely" >&2
+    return 2
+  fi
+  for variable in "${variables[@]}"; do
+    image="${!variable}"
+    docker image inspect "${image}" >/dev/null 2>&1 || {
+      echo "frozen release image is not loaded: ${image}" >&2
+      return 1
+    }
+  done
+
+  temporary="${G6RD_RELEASE_COMPOSE}.tmp"
+  {
+    echo "services:"
+    for service in migrate api worker scheduler; do
+      printf '  %s:\n    image: %s\n' \
+        "${service}" "${G6RD_CONTROL_PLANE_IMAGE}"
+    done
+    for service in controller-key-init transport-runtime-init \
+      transport-endpoint-bootstrap transportd; do
+      printf '  %s:\n    image: %s\n' \
+        "${service}" "${G6RD_TRANSPORTD_IMAGE}"
+    done
+    printf '  relay:\n    image: %s\n' "${G6RD_RELAY_IMAGE}"
+    printf '  g6-probe:\n    image: %s\n' "${G6RD_PROBE_IMAGE}"
+  } >"${temporary}"
+  mv -f -- "${temporary}" "${G6RD_RELEASE_COMPOSE}"
 }
 
 g6rd_write_agent_overlay() {
@@ -1949,7 +2013,7 @@ g6rd_diagnostics() {
 }
 
 g6rd_cleanup() {
-  local status=0 volume image pid helper_container
+  local status=0 volume image variable pid helper_container
   g6rd_stop_sampler || status=1
   if [[ -s "${G6RD_STATE}/load-dispatch-barrier.pid" ]]; then
     pid="$(<"${G6RD_STATE}/load-dispatch-barrier.pid")"
@@ -1981,10 +2045,14 @@ g6rd_cleanup() {
     sed -n '1,40p' "${G6RD_LOGS}/compose-down.log" >&2 || true
     status=1
   fi
-  if [[ -n "${G6RD_AGENT_IMAGE:-}" ]] \
-    && docker image inspect "${G6RD_AGENT_IMAGE}" >/dev/null 2>&1; then
-    docker image rm --force "${G6RD_AGENT_IMAGE}" >/dev/null 2>&1 || status=1
-  fi
+  for variable in G6RD_AGENT_IMAGE G6RD_CONTROL_PLANE_IMAGE \
+    G6RD_TRANSPORTD_IMAGE G6RD_RELAY_IMAGE G6RD_PROBE_IMAGE; do
+    image="${!variable:-}"
+    [[ -n "${image}" ]] || continue
+    if docker image inspect "${image}" >/dev/null 2>&1; then
+      docker image rm --force "${image}" >/dev/null 2>&1 || status=1
+    fi
+  done
   for volume in postgres-data controller-secrets transport-runtime trust-runtime transport-stats; do
     if docker volume inspect "${COMPOSE_PROJECT}_${volume}" >/dev/null 2>&1; then
       echo "scoped volume cleanup failed: ${COMPOSE_PROJECT}_${volume}" >&2
@@ -2011,11 +2079,15 @@ g6rd_cleanup() {
     echo "scoped image cleanup failed: ${image}" >&2
     status=1
   done
-  if [[ -n "${G6RD_AGENT_IMAGE:-}" ]] \
-    && docker image inspect "${G6RD_AGENT_IMAGE}" >/dev/null 2>&1; then
-    echo "scoped frozen Agent image cleanup failed: ${G6RD_AGENT_IMAGE}" >&2
-    status=1
-  fi
+  for variable in G6RD_AGENT_IMAGE G6RD_CONTROL_PLANE_IMAGE \
+    G6RD_TRANSPORTD_IMAGE G6RD_RELAY_IMAGE G6RD_PROBE_IMAGE; do
+    image="${!variable:-}"
+    [[ -n "${image}" ]] || continue
+    if docker image inspect "${image}" >/dev/null 2>&1; then
+      echo "scoped frozen release image cleanup failed: ${image}" >&2
+      status=1
+    fi
+  done
   if [[ -n "$(docker ps --all --quiet --filter "label=ocservia.g6.run-id=${RUN_ID}")" ]]; then
     echo "scoped PostgreSQL helper container cleanup failed for ${RUN_ID}" >&2
     status=1

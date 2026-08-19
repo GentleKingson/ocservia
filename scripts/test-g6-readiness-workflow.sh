@@ -57,23 +57,27 @@ jobs.each do |job_id, job|
 end
 release_job = jobs.fetch("g6-rd-release-image")
 release_steps = Array(release_job.fetch("steps"))
-release_build = release_steps.find { |step| step["name"] == "Build and freeze the release Agent image" }
-release_upload = release_steps.find { |step| step["name"] == "Publish the frozen release Agent image" }
+release_build = release_steps.find { |step| step["name"] == "Build and freeze the release images" }
+release_upload = release_steps.find { |step| step["name"] == "Publish the frozen release images" }
 release_cleanup = release_steps.find { |step| step["name"] == "Clean release-image resources" }
-reject("the release Agent image must be candidate-labeled and exported once") unless release_build&.fetch("run")&.include?("org.opencontainers.image.revision=${GITHUB_SHA}") && release_build.fetch("run").include?("docker save") && release_build.fetch("run").include?("sha256sum agent-image.tar.gz")
-reject("the release Agent image artifact must be run scoped") unless release_upload&.fetch("with")&.fetch("name")&.include?("github.run_id") && release_upload.fetch("with").fetch("name").include?("github.run_attempt")
-reject("the release Agent image archive must use the step-scoped runner temp directory") unless release_upload.fetch("with").fetch("path").include?("runner.temp") && release_build.fetch("run").include?("RUNNER_TEMP")
-reject("the release Agent image producer must clean its scoped image") unless release_cleanup&.fetch("if") == "always()" && release_cleanup.fetch("timeout-minutes") == 5
-release_image = release_job.fetch("env").fetch("G6RD_AGENT_IMAGE")
+release_run = release_build&.fetch("run")
+release_variables = %w[G6RD_CONTROL_PLANE_IMAGE G6RD_TRANSPORTD_IMAGE G6RD_RELAY_IMAGE G6RD_PROBE_IMAGE G6RD_AGENT_IMAGE]
+required_dockerfiles = %w[control-plane/Dockerfile rust/transportd.Dockerfile deploy/production/relay.Dockerfile rust/g6-probe.Dockerfile rust/g6-agent.Dockerfile]
+reject("the complete release image set must be candidate-labeled and exported once") unless release_run&.include?("org.opencontainers.image.revision=${GITHUB_SHA}") && required_dockerfiles.all? { |path| release_run.include?(path) } && release_run.include?("postgres:17.10-bookworm") && release_run.include?("docker save") && release_run.include?("sha256sum runtime-images.tar.gz image-ids.tsv")
+reject("parallel release builds must be PID-scoped and propagate every failure") unless release_run.include?('build_pids+=("$!")') && release_run.include?('for pid in "${build_pids[@]}"') && release_run.include?('if ! wait "${pid}"') && release_run.include?('test "${build_status}" -eq 0')
+reject("the release image artifact must be run scoped") unless release_upload&.fetch("with")&.fetch("name")&.include?("github.run_id") && release_upload.fetch("with").fetch("name").include?("github.run_attempt")
+reject("the release image archive must use the step-scoped runner temp directory") unless release_upload.fetch("with").fetch("path").include?("runner.temp") && release_run.include?("RUNNER_TEMP")
+reject("the release image producer must clean its scoped images") unless release_cleanup&.fetch("if") == "always()" && release_cleanup.fetch("timeout-minutes") == 5 && release_variables.all? { |variable| release_cleanup.fetch("run").include?(variable) }
+release_images = release_variables.to_h { |variable| [variable, release_job.fetch("env").fetch(variable)] }
 %w[g6-rd-fd-a g6-rd-fd-b].each do |job_id|
   reject("#{job_id} must depend only on the shared release image") unless jobs.fetch(job_id).fetch("needs") == "g6-rd-release-image"
-  reject("#{job_id} must use the producer's exact release image tag") unless jobs.fetch(job_id).fetch("env").fetch("G6RD_AGENT_IMAGE") == release_image
+  reject("#{job_id} must use the producer's complete release image set") unless release_variables.all? { |variable| jobs.fetch(job_id).fetch("env").fetch(variable) == release_images.fetch(variable) }
   steps = Array(jobs.fetch(job_id).fetch("steps"))
   names = steps.map { |step| step["name"] }.compact
-  download = steps.find { |step| step["name"] == "Download the frozen release Agent image" }
-  load = steps.find { |step| step["name"] == "Verify and load the release Agent image" }
-  reject("#{job_id} must download the exact run-scoped release image") unless download&.fetch("with")&.fetch("name") == release_upload.fetch("with").fetch("name")
-  reject("#{job_id} must verify, load, and candidate-bind the release image") unless load&.fetch("run")&.include?("sha256sum --check") && load.fetch("run").include?("docker load") && load.fetch("run").include?("org.opencontainers.image.revision") && load.fetch("run").include?("GITHUB_SHA")
+  download = steps.find { |step| step["name"] == "Download the frozen release images" }
+  load = steps.find { |step| step["name"] == "Verify and load the release images" }
+  reject("#{job_id} must download the exact run-scoped release images") unless download&.fetch("with")&.fetch("name") == release_upload.fetch("with").fetch("name")
+  reject("#{job_id} must verify, load, and candidate-bind every release image") unless load&.fetch("run")&.include?("sha256sum --check") && load.fetch("run").include?("docker load") && load.fetch("run").include?("image-ids.tsv") && load.fetch("run").include?("org.opencontainers.image.revision") && load.fetch("run").include?("GITHUB_SHA") && release_variables.all? { |variable| load.fetch("run").include?(variable) }
   reject("#{job_id} must collect diagnostics before cleanup") unless names.index { |n| n.include?("diagnostics") }.to_i < names.index { |n| n.include?("Clean") }.to_i
   diagnostics = steps.find { |step| step["name"]&.include?("diagnostics") }.fetch("run")
   cleanup = steps.find { |step| step["name"]&.include?("Clean") }.fetch("run")
@@ -271,6 +275,14 @@ for fd_script in "${FD_A}" "${FD_B}"; do
     echo "each failure domain must build with inert Compose substitutions" >&2
     exit 1
   }
+  grep -q 'g6rd_prepare_release_images' <<<"${build_phase}" || {
+    echo "each failure domain must consume the complete frozen release image set" >&2
+    exit 1
+  }
+  if grep -q 'g6rd_compose build' <<<"${build_phase}"; then
+    echo "failure domains must not rebuild release images outside the shared producer" >&2
+    exit 1
+  fi
   if grep -q 'g6rd_export_common_env' <<<"${build_phase}"; then
     echo "image construction must not consume live runtime trust" >&2
     exit 1
@@ -558,7 +570,8 @@ grep -q 'PermissionDenied.*ancestry.*metadata invalid.*attestation' "${LIB}" || 
 source "${LIB}"
 # Runtime workflow variables must not select a branch in this hermetic policy
 # test before that branch is exercised explicitly below.
-unset G6RD_AGENT_IMAGE
+unset G6RD_AGENT_IMAGE G6RD_CONTROL_PLANE_IMAGE G6RD_TRANSPORTD_IMAGE \
+  G6RD_RELAY_IMAGE G6RD_PROBE_IMAGE
 reclaim_owned_test="$(mktemp -d)"
 mkdir -p "${reclaim_owned_test}/nested"
 : >"${reclaim_owned_test}/nested/runner-owned"
@@ -569,6 +582,43 @@ docker() {
 g6rd_reclaim_directory "${reclaim_owned_test}"
 unset -f docker
 rm -rf "${reclaim_owned_test}"
+release_overlay_test="$(mktemp -d)"
+export G6RD_RELEASE_COMPOSE="${release_overlay_test}/release-images.yaml"
+export G6RD_CONTROL_PLANE_IMAGE=ocservia-g6-control-plane:test-release
+export G6RD_TRANSPORTD_IMAGE=ocservia-g6-transportd:test-release
+export G6RD_RELAY_IMAGE=ocservia-g6-relay:test-release
+export G6RD_PROBE_IMAGE=ocservia-g6-probe:test-release
+docker() {
+  [[ "$1" == image && "$2" == inspect ]] || {
+    echo "release image fixture invoked an unexpected docker command" >&2
+    return 1
+  }
+}
+g6rd_prepare_release_images
+for mapping in \
+  'api:ocservia-g6-control-plane:test-release' \
+  'worker:ocservia-g6-control-plane:test-release' \
+  'scheduler:ocservia-g6-control-plane:test-release' \
+  'transportd:ocservia-g6-transportd:test-release' \
+  'relay:ocservia-g6-relay:test-release' \
+  'g6-probe:ocservia-g6-probe:test-release'; do
+  service="${mapping%%:*}"
+  image="${mapping#*:}"
+  grep -A1 "^  ${service}:$" "${G6RD_RELEASE_COMPOSE}" \
+    | grep -qF "image: ${image}" || {
+    echo "the frozen release overlay is missing ${service}:${image}" >&2
+    exit 1
+  }
+done
+unset G6RD_PROBE_IMAGE
+if g6rd_prepare_release_images 2>/dev/null; then
+  echo "a partial frozen release image set was accepted" >&2
+  exit 1
+fi
+unset -f docker
+unset G6RD_RELEASE_COMPOSE G6RD_CONTROL_PLANE_IMAGE G6RD_TRANSPORTD_IMAGE \
+  G6RD_RELAY_IMAGE
+rm -rf "${release_overlay_test}"
 relay_failure_test="$(mktemp -d)"
 for relay_failure_stage in validator principal-smoke; do
   (

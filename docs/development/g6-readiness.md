@@ -11,12 +11,12 @@ rendezvous through run-scoped workflow artifacts, the same two-VM pattern
 as `docs/development/g6-ha-pitr-topology.md`, and evaluates the frozen
 contract in `docs/acceptance/g6-slo.yaml` end to end.
 
-A bounded producer job builds the candidate-labeled Agent image once, records
-its image ID and archive digest, and publishes that immutable release image to
-both failure-domain runners. Each runner verifies and loads the same bytes
-before the concurrent topology starts. This prevents independent package or
-compiler builds from creating different runtime image identities for one
-release component while preserving independent runtime state on the two VMs.
+A bounded producer job builds the candidate-labeled control-plane, transportd,
+relay, probe, and Agent images once and includes the exact PostgreSQL support
+image in one checksummed archive. It records every image ID and publishes that
+immutable release set to both failure-domain runners. Each runner verifies and
+loads the same bytes before the concurrent topology starts, then overlays those
+images onto its independent runtime state instead of rebuilding them locally.
 
 ## Authorities
 

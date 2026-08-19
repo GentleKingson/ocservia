@@ -27,42 +27,88 @@ concurrency:
 # visible while both authorities execute as fully automated technical gates.
 jobs:
   g6-rd-release-image:
-    name: G6 Readiness Release Image
+    name: G6 Readiness Release Images
     runs-on: ubuntu-24.04
     timeout-minutes: 35
     environment:
       name: ${{ inputs.authority == 'production_readiness' && 'g6-production-readiness' || 'g6-engineering-rehearsal' }}
     env:
       G6RD_AGENT_IMAGE: ocservia-g6-agent:${{ github.run_id }}-${{ github.run_attempt }}
+      G6RD_CONTROL_PLANE_IMAGE: ocservia-g6-control-plane:${{ github.run_id }}-${{ github.run_attempt }}
+      G6RD_TRANSPORTD_IMAGE: ocservia-g6-transportd:${{ github.run_id }}-${{ github.run_attempt }}
+      G6RD_RELAY_IMAGE: ocservia-g6-relay:${{ github.run_id }}-${{ github.run_attempt }}
+      G6RD_PROBE_IMAGE: ocservia-g6-probe:${{ github.run_id }}-${{ github.run_attempt }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
       - name: Runner preflight
         run: scripts/ci-preflight.sh
-      - name: Build and freeze the release Agent image
+      - name: Build and freeze the release images
         timeout-minutes: 30
         run: |
           set -euo pipefail
-          archive_dir="${RUNNER_TEMP}/g6-rd-agent-image-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          archive_dir="${RUNNER_TEMP}/g6-rd-runtime-images-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           mkdir -p "${archive_dir}"
+          docker pull postgres:17.10-bookworm
+          build_pids=()
+          docker build --pull=false \
+            --label "org.opencontainers.image.revision=${GITHUB_SHA}" \
+            --file control-plane/Dockerfile \
+            --tag "${G6RD_CONTROL_PLANE_IMAGE}" . &
+          build_pids+=("$!")
+          docker build --pull=false \
+            --label "org.opencontainers.image.revision=${GITHUB_SHA}" \
+            --file rust/transportd.Dockerfile \
+            --tag "${G6RD_TRANSPORTD_IMAGE}" . &
+          build_pids+=("$!")
+          docker build --pull=false \
+            --label "org.opencontainers.image.revision=${GITHUB_SHA}" \
+            --file deploy/production/relay.Dockerfile \
+            --tag "${G6RD_RELAY_IMAGE}" . &
+          build_pids+=("$!")
+          docker build --pull=false \
+            --label "org.opencontainers.image.revision=${GITHUB_SHA}" \
+            --file rust/g6-probe.Dockerfile \
+            --tag "${G6RD_PROBE_IMAGE}" . &
+          build_pids+=("$!")
           docker build --pull=false \
             --label "org.opencontainers.image.revision=${GITHUB_SHA}" \
             --file rust/g6-agent.Dockerfile \
-            --tag "${G6RD_AGENT_IMAGE}" .
-          docker image inspect --format '{{.Id}}' "${G6RD_AGENT_IMAGE}" \
-            >"${archive_dir}/image-id.txt"
-          docker save "${G6RD_AGENT_IMAGE}" \
-            | gzip -1 >"${archive_dir}/agent-image.tar.gz"
+            --tag "${G6RD_AGENT_IMAGE}" . &
+          build_pids+=("$!")
+          build_status=0
+          for pid in "${build_pids[@]}"; do
+            if ! wait "${pid}"; then
+              build_status=1
+            fi
+          done
+          test "${build_status}" -eq 0
+          release_images=(
+            postgres:17.10-bookworm
+            "${G6RD_CONTROL_PLANE_IMAGE}"
+            "${G6RD_TRANSPORTD_IMAGE}"
+            "${G6RD_RELAY_IMAGE}"
+            "${G6RD_PROBE_IMAGE}"
+            "${G6RD_AGENT_IMAGE}"
+          )
+          : >"${archive_dir}/image-ids.tsv"
+          for image in "${release_images[@]}"; do
+            printf '%s\t%s\n' "${image}" \
+              "$(docker image inspect --format '{{.Id}}' "${image}")" \
+              >>"${archive_dir}/image-ids.tsv"
+          done
+          docker save "${release_images[@]}" \
+            | gzip -1 >"${archive_dir}/runtime-images.tar.gz"
           (
             cd "${archive_dir}"
-            sha256sum agent-image.tar.gz >agent-image.tar.gz.sha256
+            sha256sum runtime-images.tar.gz image-ids.tsv >release-images.sha256
           )
-      - name: Publish the frozen release Agent image
+      - name: Publish the frozen release images
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
-          name: g6-rd-agent-image-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/g6-rd-agent-image-${{ github.run_id }}-${{ github.run_attempt }}
+          name: g6-rd-runtime-images-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/g6-rd-runtime-images-${{ github.run_id }}-${{ github.run_attempt }}
           if-no-files-found: error
           compression-level: 0
           retention-days: 1
@@ -72,10 +118,15 @@ jobs:
         run: |
           set -euo pipefail
           status=0
-          archive_dir="${RUNNER_TEMP}/g6-rd-agent-image-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
-          if docker image inspect "${G6RD_AGENT_IMAGE}" >/dev/null 2>&1; then
-            docker image rm --force "${G6RD_AGENT_IMAGE}" >/dev/null || status=1
-          fi
+          archive_dir="${RUNNER_TEMP}/g6-rd-runtime-images-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          for image in \
+            "${G6RD_AGENT_IMAGE}" "${G6RD_CONTROL_PLANE_IMAGE}" \
+            "${G6RD_TRANSPORTD_IMAGE}" "${G6RD_RELAY_IMAGE}" \
+            "${G6RD_PROBE_IMAGE}" postgres:17.10-bookworm; do
+            if docker image inspect "${image}" >/dev/null 2>&1; then
+              docker image rm --force "${image}" >/dev/null || status=1
+            fi
+          done
           rm -rf -- "${archive_dir}" || status=1
           exit "${status}"
 
@@ -93,30 +144,47 @@ jobs:
       G6_AUTHORITY: ${{ inputs.authority }}
       G6RD_CANDIDATE_SHA: ${{ github.sha }}
       G6RD_AGENT_IMAGE: ocservia-g6-agent:${{ github.run_id }}-${{ github.run_attempt }}
+      G6RD_CONTROL_PLANE_IMAGE: ocservia-g6-control-plane:${{ github.run_id }}-${{ github.run_attempt }}
+      G6RD_TRANSPORTD_IMAGE: ocservia-g6-transportd:${{ github.run_id }}-${{ github.run_attempt }}
+      G6RD_RELAY_IMAGE: ocservia-g6-relay:${{ github.run_id }}-${{ github.run_attempt }}
+      G6RD_PROBE_IMAGE: ocservia-g6-probe:${{ github.run_id }}-${{ github.run_attempt }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
       - name: Runner preflight
         run: scripts/ci-preflight.sh
-      - name: Download the frozen release Agent image
+      - name: Download the frozen release images
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          name: g6-rd-agent-image-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/g6-rd-agent-image
-      - name: Verify and load the release Agent image
+          name: g6-rd-runtime-images-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/g6-rd-runtime-images
+      - name: Verify and load the release images
         run: |
           set -euo pipefail
-          archive_dir="${RUNNER_TEMP}/g6-rd-agent-image"
+          archive_dir="${RUNNER_TEMP}/g6-rd-runtime-images"
           (
             cd "${archive_dir}"
-            sha256sum --check agent-image.tar.gz.sha256
+            sha256sum --check release-images.sha256
           )
-          gzip -dc "${archive_dir}/agent-image.tar.gz" | docker load
-          expected_id="$(<"${archive_dir}/image-id.txt")"
-          actual_id="$(docker image inspect --format '{{.Id}}' "${G6RD_AGENT_IMAGE}")"
-          test "${actual_id}" = "${expected_id}"
-          test "$(docker image inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' "${G6RD_AGENT_IMAGE}")" = "${GITHUB_SHA}"
+          gzip -dc "${archive_dir}/runtime-images.tar.gz" | docker load
+          release_images=(
+            postgres:17.10-bookworm
+            "${G6RD_CONTROL_PLANE_IMAGE}"
+            "${G6RD_TRANSPORTD_IMAGE}"
+            "${G6RD_RELAY_IMAGE}"
+            "${G6RD_PROBE_IMAGE}"
+            "${G6RD_AGENT_IMAGE}"
+          )
+          test "$(wc -l <"${archive_dir}/image-ids.tsv")" -eq "${#release_images[@]}"
+          for image in "${release_images[@]}"; do
+            expected_id="$(awk -F '\t' -v image="${image}" '$1 == image { print $2 }' "${archive_dir}/image-ids.tsv")"
+            test -n "${expected_id}"
+            test "$(docker image inspect --format '{{.Id}}' "${image}")" = "${expected_id}"
+            if [[ "${image}" != postgres:17.10-bookworm ]]; then
+              test "$(docker image inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' "${image}")" = "${GITHUB_SHA}"
+            fi
+          done
       - name: G6 readiness policy tests
         run: scripts/test-g6-readiness-workflow.sh
       - name: G6 readiness hang-guard tests
@@ -295,30 +363,47 @@ jobs:
       G6_AUTHORITY: ${{ inputs.authority }}
       G6RD_CANDIDATE_SHA: ${{ github.sha }}
       G6RD_AGENT_IMAGE: ocservia-g6-agent:${{ github.run_id }}-${{ github.run_attempt }}
+      G6RD_CONTROL_PLANE_IMAGE: ocservia-g6-control-plane:${{ github.run_id }}-${{ github.run_attempt }}
+      G6RD_TRANSPORTD_IMAGE: ocservia-g6-transportd:${{ github.run_id }}-${{ github.run_attempt }}
+      G6RD_RELAY_IMAGE: ocservia-g6-relay:${{ github.run_id }}-${{ github.run_attempt }}
+      G6RD_PROBE_IMAGE: ocservia-g6-probe:${{ github.run_id }}-${{ github.run_attempt }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
       - name: Runner preflight
         run: scripts/ci-preflight.sh
-      - name: Download the frozen release Agent image
+      - name: Download the frozen release images
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          name: g6-rd-agent-image-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/g6-rd-agent-image
-      - name: Verify and load the release Agent image
+          name: g6-rd-runtime-images-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/g6-rd-runtime-images
+      - name: Verify and load the release images
         run: |
           set -euo pipefail
-          archive_dir="${RUNNER_TEMP}/g6-rd-agent-image"
+          archive_dir="${RUNNER_TEMP}/g6-rd-runtime-images"
           (
             cd "${archive_dir}"
-            sha256sum --check agent-image.tar.gz.sha256
+            sha256sum --check release-images.sha256
           )
-          gzip -dc "${archive_dir}/agent-image.tar.gz" | docker load
-          expected_id="$(<"${archive_dir}/image-id.txt")"
-          actual_id="$(docker image inspect --format '{{.Id}}' "${G6RD_AGENT_IMAGE}")"
-          test "${actual_id}" = "${expected_id}"
-          test "$(docker image inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' "${G6RD_AGENT_IMAGE}")" = "${GITHUB_SHA}"
+          gzip -dc "${archive_dir}/runtime-images.tar.gz" | docker load
+          release_images=(
+            postgres:17.10-bookworm
+            "${G6RD_CONTROL_PLANE_IMAGE}"
+            "${G6RD_TRANSPORTD_IMAGE}"
+            "${G6RD_RELAY_IMAGE}"
+            "${G6RD_PROBE_IMAGE}"
+            "${G6RD_AGENT_IMAGE}"
+          )
+          test "$(wc -l <"${archive_dir}/image-ids.tsv")" -eq "${#release_images[@]}"
+          for image in "${release_images[@]}"; do
+            expected_id="$(awk -F '\t' -v image="${image}" '$1 == image { print $2 }' "${archive_dir}/image-ids.tsv")"
+            test -n "${expected_id}"
+            test "$(docker image inspect --format '{{.Id}}' "${image}")" = "${expected_id}"
+            if [[ "${image}" != postgres:17.10-bookworm ]]; then
+              test "$(docker image inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' "${image}")" = "${GITHUB_SHA}"
+            fi
+          done
       - name: G6 readiness policy tests
         run: scripts/test-g6-readiness-workflow.sh
       - name: G6 readiness hang-guard tests

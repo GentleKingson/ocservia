@@ -48,7 +48,7 @@ reject("the standby must still bootstrap through the established pinned tunnel")
 
 critical_timeouts = {
   "g6-rd-release-image" => {
-    "Build and freeze the release Agent image" => 30,
+    "Build and freeze the release images" => 30,
     "Clean release-image resources" => 5
   },
   "g6-rd-fd-a" => {
