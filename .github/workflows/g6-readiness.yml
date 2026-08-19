@@ -34,7 +34,6 @@ jobs:
       name: ${{ inputs.authority == 'production_readiness' && 'g6-production-readiness' || 'g6-engineering-rehearsal' }}
     env:
       G6RD_AGENT_IMAGE: ocservia-g6-agent:${{ github.run_id }}-${{ github.run_attempt }}
-      G6RD_AGENT_ARCHIVE: ${{ runner.temp }}/g6-rd-agent-image-${{ github.run_id }}-${{ github.run_attempt }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
@@ -45,24 +44,25 @@ jobs:
         timeout-minutes: 30
         run: |
           set -euo pipefail
-          mkdir -p "${G6RD_AGENT_ARCHIVE}"
+          archive_dir="${RUNNER_TEMP}/g6-rd-agent-image-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          mkdir -p "${archive_dir}"
           docker build --pull=false \
             --label "org.opencontainers.image.revision=${GITHUB_SHA}" \
             --file rust/g6-agent.Dockerfile \
             --tag "${G6RD_AGENT_IMAGE}" .
           docker image inspect --format '{{.Id}}' "${G6RD_AGENT_IMAGE}" \
-            >"${G6RD_AGENT_ARCHIVE}/image-id.txt"
+            >"${archive_dir}/image-id.txt"
           docker save "${G6RD_AGENT_IMAGE}" \
-            | gzip -1 >"${G6RD_AGENT_ARCHIVE}/agent-image.tar.gz"
+            | gzip -1 >"${archive_dir}/agent-image.tar.gz"
           (
-            cd "${G6RD_AGENT_ARCHIVE}"
+            cd "${archive_dir}"
             sha256sum agent-image.tar.gz >agent-image.tar.gz.sha256
           )
       - name: Publish the frozen release Agent image
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: g6-rd-agent-image-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ env.G6RD_AGENT_ARCHIVE }}
+          path: ${{ runner.temp }}/g6-rd-agent-image-${{ github.run_id }}-${{ github.run_attempt }}
           if-no-files-found: error
           compression-level: 0
           retention-days: 1
@@ -72,10 +72,11 @@ jobs:
         run: |
           set -euo pipefail
           status=0
+          archive_dir="${RUNNER_TEMP}/g6-rd-agent-image-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           if docker image inspect "${G6RD_AGENT_IMAGE}" >/dev/null 2>&1; then
             docker image rm --force "${G6RD_AGENT_IMAGE}" >/dev/null || status=1
           fi
-          rm -rf -- "${G6RD_AGENT_ARCHIVE}" || status=1
+          rm -rf -- "${archive_dir}" || status=1
           exit "${status}"
 
   g6-rd-fd-a:

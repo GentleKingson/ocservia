@@ -46,6 +46,7 @@ expected = %w[g6-rd-release-image g6-rd-fd-a g6-rd-fd-b g6-rd-secret-scan g6-rd-
 reject("G6 readiness must contain exactly the five harness jobs") unless jobs.keys.sort == expected.sort
 jobs.each do |job_id, job|
   reject("#{job_id} must use ubuntu-24.04") unless job.fetch("runs-on") == "ubuntu-24.04"
+  reject("#{job_id} job env must not reference the step-only runner context") if job.fetch("env", {}).values.any? { |value| value.to_s.include?("runner.") }
   timeout_bound = job_id.start_with?("g6-rd-fd-") ? 90 : (job_id == "g6-rd-release-image" ? 35 : 20)
   reject("#{job_id} must stay within the bounded window") unless job.fetch("timeout-minutes") <= timeout_bound
   reject("#{job_id} Action is not pinned to a full SHA") if Array(job.fetch("steps")).any? { |step| step.key?("uses") && !step.fetch("uses").match?(/@[0-9a-f]{40}\z/) }
@@ -61,6 +62,7 @@ release_upload = release_steps.find { |step| step["name"] == "Publish the frozen
 release_cleanup = release_steps.find { |step| step["name"] == "Clean release-image resources" }
 reject("the release Agent image must be candidate-labeled and exported once") unless release_build&.fetch("run")&.include?("org.opencontainers.image.revision=${GITHUB_SHA}") && release_build.fetch("run").include?("docker save") && release_build.fetch("run").include?("sha256sum agent-image.tar.gz")
 reject("the release Agent image artifact must be run scoped") unless release_upload&.fetch("with")&.fetch("name")&.include?("github.run_id") && release_upload.fetch("with").fetch("name").include?("github.run_attempt")
+reject("the release Agent image archive must use the step-scoped runner temp directory") unless release_upload.fetch("with").fetch("path").include?("runner.temp") && release_build.fetch("run").include?("RUNNER_TEMP")
 reject("the release Agent image producer must clean its scoped image") unless release_cleanup&.fetch("if") == "always()" && release_cleanup.fetch("timeout-minutes") == 5
 release_image = release_job.fetch("env").fetch("G6RD_AGENT_IMAGE")
 %w[g6-rd-fd-a g6-rd-fd-b].each do |job_id|
