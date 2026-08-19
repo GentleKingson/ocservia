@@ -1380,6 +1380,35 @@ try {
   );
   write(commandsPath, originalCommands);
 
+  const localInstancesPath = join(
+    runDir,
+    "state",
+    "evidence",
+    "instances.tsv",
+  );
+  const originalLocalInstances = readFileSync(localInstancesPath, "utf8");
+  const mismatchedLocalInstances = originalLocalInstances
+    .trimEnd()
+    .split("\n")
+    .map((line) => {
+      const fields = line.split("\t");
+      if (fields[4] === "agent-fd-b-01") fields[1] = digestOf("f");
+      return fields.join("\t");
+    })
+    .join("\n");
+  write(localInstancesPath, `${mismatchedLocalInstances}\n`);
+  expectBuilderFailure(
+    join(work, "cross-domain-agent-digest-bundle"),
+    "component agent has different digests across failure domains",
+    {
+      path: "topology.instances#instance_id=agent-fd-b-01/component_digest",
+      expected: digestOf("e"),
+      actual: digestOf("f"),
+      expected_instance_id: "agent-fd-a-01",
+    },
+  );
+  write(localInstancesPath, originalLocalInstances);
+
   const freezePath = join(peerDir, "final-freeze-at");
   const originalFreeze = readFileSync(freezePath, "utf8");
   write(freezePath, `${at(309)}\n`);

@@ -131,7 +131,7 @@ phase_build_images() {
   g6rd_write_agent_overlay "$(g6rd_agent_count)"
   g6rd_compose build postgres migrate api worker scheduler transportd \
     controller-key-init transport-runtime-init transport-endpoint-bootstrap relay g6-probe
-  g6rd_agent_compose build
+  g6rd_prepare_agent_image
 }
 
 # fd-a serves its primary, API, and relay-a to the pinned peer (the peer's

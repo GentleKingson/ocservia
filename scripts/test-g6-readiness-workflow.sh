@@ -42,21 +42,36 @@ reject("G6 readiness concurrency must bind ref and authority") unless concurrenc
 reject("a replacement dispatch must cancel the same ref and authority") unless concurrency.fetch("cancel-in-progress") == true
 
 jobs = workflow.fetch("jobs")
-expected = %w[g6-rd-fd-a g6-rd-fd-b g6-rd-secret-scan g6-rd-verifier]
-reject("G6 readiness must contain exactly the four harness jobs") unless jobs.keys.sort == expected.sort
+expected = %w[g6-rd-release-image g6-rd-fd-a g6-rd-fd-b g6-rd-secret-scan g6-rd-verifier]
+reject("G6 readiness must contain exactly the five harness jobs") unless jobs.keys.sort == expected.sort
 jobs.each do |job_id, job|
   reject("#{job_id} must use ubuntu-24.04") unless job.fetch("runs-on") == "ubuntu-24.04"
-  reject("#{job_id} must stay within the bounded window") unless job.fetch("timeout-minutes") <= (job_id.start_with?("g6-rd-fd-") ? 90 : 20)
+  timeout_bound = job_id.start_with?("g6-rd-fd-") ? 90 : (job_id == "g6-rd-release-image" ? 35 : 20)
+  reject("#{job_id} must stay within the bounded window") unless job.fetch("timeout-minutes") <= timeout_bound
   reject("#{job_id} Action is not pinned to a full SHA") if Array(job.fetch("steps")).any? { |step| step.key?("uses") && !step.fetch("uses").match?(/@[0-9a-f]{40}\z/) }
   reject("#{job_id} must not force a failing check green") if Array(job.fetch("steps")).any? { |step| step.key?("run") && step.fetch("run").include?("continue-on-error") }
   reject("#{job_id} must not mask a failed step") if Array(job.fetch("steps")).any? { |step| step["continue-on-error"] == true }
   environment = job.fetch("environment").fetch("name")
   reject("#{job_id} must gate both authorities through GitHub environments") unless environment.include?("g6-production-readiness") && environment.include?("g6-engineering-rehearsal") && environment.include?("inputs.authority")
 end
+release_job = jobs.fetch("g6-rd-release-image")
+release_steps = Array(release_job.fetch("steps"))
+release_build = release_steps.find { |step| step["name"] == "Build and freeze the release Agent image" }
+release_upload = release_steps.find { |step| step["name"] == "Publish the frozen release Agent image" }
+release_cleanup = release_steps.find { |step| step["name"] == "Clean release-image resources" }
+reject("the release Agent image must be candidate-labeled and exported once") unless release_build&.fetch("run")&.include?("org.opencontainers.image.revision=${GITHUB_SHA}") && release_build.fetch("run").include?("docker save") && release_build.fetch("run").include?("sha256sum agent-image.tar.gz")
+reject("the release Agent image artifact must be run scoped") unless release_upload&.fetch("with")&.fetch("name")&.include?("github.run_id") && release_upload.fetch("with").fetch("name").include?("github.run_attempt")
+reject("the release Agent image producer must clean its scoped image") unless release_cleanup&.fetch("if") == "always()" && release_cleanup.fetch("timeout-minutes") == 5
+release_image = release_job.fetch("env").fetch("G6RD_AGENT_IMAGE")
 %w[g6-rd-fd-a g6-rd-fd-b].each do |job_id|
-  reject("#{job_id} must run concurrently with its peer") if jobs.fetch(job_id).key?("needs")
+  reject("#{job_id} must depend only on the shared release image") unless jobs.fetch(job_id).fetch("needs") == "g6-rd-release-image"
+  reject("#{job_id} must use the producer's exact release image tag") unless jobs.fetch(job_id).fetch("env").fetch("G6RD_AGENT_IMAGE") == release_image
   steps = Array(jobs.fetch(job_id).fetch("steps"))
   names = steps.map { |step| step["name"] }.compact
+  download = steps.find { |step| step["name"] == "Download the frozen release Agent image" }
+  load = steps.find { |step| step["name"] == "Verify and load the release Agent image" }
+  reject("#{job_id} must download the exact run-scoped release image") unless download&.fetch("with")&.fetch("name") == release_upload.fetch("with").fetch("name")
+  reject("#{job_id} must verify, load, and candidate-bind the release image") unless load&.fetch("run")&.include?("sha256sum --check") && load.fetch("run").include?("docker load") && load.fetch("run").include?("org.opencontainers.image.revision") && load.fetch("run").include?("GITHUB_SHA")
   reject("#{job_id} must collect diagnostics before cleanup") unless names.index { |n| n.include?("diagnostics") }.to_i < names.index { |n| n.include?("Clean") }.to_i
   diagnostics = steps.find { |step| step["name"]&.include?("diagnostics") }.fetch("run")
   cleanup = steps.find { |step| step["name"]&.include?("Clean") }.fetch("run")
@@ -648,6 +663,7 @@ g6rd_stage_agent_node_state "${relay_topology_test}/nodes.tsv"
   exit 1
 }
 g6rd_write_agent_overlay 1
+grep -q 'dockerfile: rust/g6-agent.Dockerfile' "${G6RD_AGENT_COMPOSE}"
 [[ "${G6_RELAY_URL_A}" == https://relay-a:3443 ]]
 [[ "${G6_RELAY_URL_B}" == https://relay-b:3443 ]]
 grep -q 'G6_RELAY_URL_A: "https://relay-a:3443"' "${G6RD_AGENT_COMPOSE}"
@@ -662,6 +678,14 @@ if grep -q 'relay-b:host-gateway' "${G6RD_AGENT_COMPOSE}"; then
   echo "the local fd-b relay must remain on Docker DNS" >&2
   exit 1
 fi
+export G6RD_AGENT_IMAGE=ocservia-g6-agent:test-release
+g6rd_write_agent_overlay 1
+grep -q 'image: ocservia-g6-agent:test-release' "${G6RD_AGENT_COMPOSE}"
+if grep -q 'dockerfile: rust/g6-agent.Dockerfile' "${G6RD_AGENT_COMPOSE}"; then
+  echo "the frozen Agent overlay must not rebuild the release image" >&2
+  exit 1
+fi
+unset G6RD_AGENT_IMAGE
 
 curl() {
   printf '%s\n' "$@" >"${relay_topology_test}/curl.args"

@@ -1550,6 +1550,7 @@ if (instanceIds.size !== instances.length) {
 }
 
 const componentDigests = new Map();
+const componentDigestSources = new Map();
 for (const instance of instances) {
   if (!/^sha256:[0-9a-f]{64}$/.test(instance.component_digest)) {
     fail(`instance ${instance.instance_id} has no image digest`);
@@ -1557,9 +1558,16 @@ for (const instance of instances) {
   const existing = componentDigests.get(instance.component);
   if (existing === undefined) {
     componentDigests.set(instance.component, instance.component_digest);
+    componentDigestSources.set(instance.component, instance.instance_id);
   } else if (existing !== instance.component_digest) {
     fail(
       `component ${instance.component} has different digests across failure domains`,
+      {
+        path: `topology.instances#instance_id=${instance.instance_id}/component_digest`,
+        expected: existing,
+        actual: instance.component_digest,
+        expected_instance_id: componentDigestSources.get(instance.component),
+      },
     );
   }
 }

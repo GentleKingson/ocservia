@@ -1291,9 +1291,17 @@ g6rd_write_agent_overlay() {
     security_opt:
       - no-new-privileges:true
     init: true
+EOF
+      if [[ -n "${G6RD_AGENT_IMAGE:-}" ]]; then
+        printf '    image: %s\n' "${G6RD_AGENT_IMAGE}"
+      else
+        cat <<EOF
     build:
       context: ../..
       dockerfile: rust/g6-agent.Dockerfile
+EOF
+      fi
+      cat <<EOF
     environment:
       G6_MODE: run
       G6_AGENT_NAME: "${name}"
@@ -1327,6 +1335,17 @@ g6rd_write_agent_overlay() {
 EOF
     done
   } >"${G6RD_AGENT_COMPOSE}"
+}
+
+g6rd_prepare_agent_image() {
+  if [[ -z "${G6RD_AGENT_IMAGE:-}" ]]; then
+    g6rd_agent_compose build
+    return
+  fi
+  docker image inspect "${G6RD_AGENT_IMAGE}" >/dev/null 2>&1 || {
+    echo "frozen Agent image is not loaded: ${G6RD_AGENT_IMAGE}" >&2
+    return 1
+  }
 }
 
 g6rd_stage_agent_node_state() {
@@ -1955,6 +1974,10 @@ g6rd_cleanup() {
     sed -n '1,40p' "${G6RD_LOGS}/compose-down.log" >&2 || true
     status=1
   fi
+  if [[ -n "${G6RD_AGENT_IMAGE:-}" ]] \
+    && docker image inspect "${G6RD_AGENT_IMAGE}" >/dev/null 2>&1; then
+    docker image rm --force "${G6RD_AGENT_IMAGE}" >/dev/null 2>&1 || status=1
+  fi
   for volume in postgres-data controller-secrets transport-runtime trust-runtime transport-stats; do
     if docker volume inspect "${COMPOSE_PROJECT}_${volume}" >/dev/null 2>&1; then
       echo "scoped volume cleanup failed: ${COMPOSE_PROJECT}_${volume}" >&2
@@ -1981,6 +2004,11 @@ g6rd_cleanup() {
     echo "scoped image cleanup failed: ${image}" >&2
     status=1
   done
+  if [[ -n "${G6RD_AGENT_IMAGE:-}" ]] \
+    && docker image inspect "${G6RD_AGENT_IMAGE}" >/dev/null 2>&1; then
+    echo "scoped frozen Agent image cleanup failed: ${G6RD_AGENT_IMAGE}" >&2
+    status=1
+  fi
   if [[ -n "$(docker ps --all --quiet --filter "label=ocservia.g6.run-id=${RUN_ID}")" ]]; then
     echo "scoped PostgreSQL helper container cleanup failed for ${RUN_ID}" >&2
     status=1

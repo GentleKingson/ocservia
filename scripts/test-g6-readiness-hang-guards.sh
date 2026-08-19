@@ -47,6 +47,10 @@ reject("relay-b must be healthy before its pinned tunnel is advertised") unless 
 reject("the standby must still bootstrap through the established pinned tunnel") unless tunnel && standby && tunnel < standby
 
 critical_timeouts = {
+  "g6-rd-release-image" => {
+    "Build and freeze the release Agent image" => 30,
+    "Clean release-image resources" => 5
+  },
   "g6-rd-fd-a" => {
     "Build failure domain A images and tunnel" => 35,
     "Enroll the failure domain A fleet" => 25,

@@ -20,13 +20,67 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}-${{ inputs.authority }}
   cancel-in-progress: true
 
-# The two failure-domain jobs run concurrently and rendezvous through
+# One release-image producer freezes the Agent image used by both failure
+# domains. The failure-domain jobs then run concurrently and rendezvous through
 # run-scoped workflow artifacts. Each job is bound to the GitHub environment
 # matching the dispatched authority so environment-scoped policy remains
 # visible while both authorities execute as fully automated technical gates.
 jobs:
+  g6-rd-release-image:
+    name: G6 Readiness Release Image
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    environment:
+      name: ${{ inputs.authority == 'production_readiness' && 'g6-production-readiness' || 'g6-engineering-rehearsal' }}
+    env:
+      G6RD_AGENT_IMAGE: ocservia-g6-agent:${{ github.run_id }}-${{ github.run_attempt }}
+      G6RD_AGENT_ARCHIVE: ${{ runner.temp }}/g6-rd-agent-image-${{ github.run_id }}-${{ github.run_attempt }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - name: Runner preflight
+        run: scripts/ci-preflight.sh
+      - name: Build and freeze the release Agent image
+        timeout-minutes: 30
+        run: |
+          set -euo pipefail
+          mkdir -p "${G6RD_AGENT_ARCHIVE}"
+          docker build --pull=false \
+            --label "org.opencontainers.image.revision=${GITHUB_SHA}" \
+            --file rust/g6-agent.Dockerfile \
+            --tag "${G6RD_AGENT_IMAGE}" .
+          docker image inspect --format '{{.Id}}' "${G6RD_AGENT_IMAGE}" \
+            >"${G6RD_AGENT_ARCHIVE}/image-id.txt"
+          docker save "${G6RD_AGENT_IMAGE}" \
+            | gzip -1 >"${G6RD_AGENT_ARCHIVE}/agent-image.tar.gz"
+          (
+            cd "${G6RD_AGENT_ARCHIVE}"
+            sha256sum agent-image.tar.gz >agent-image.tar.gz.sha256
+          )
+      - name: Publish the frozen release Agent image
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: g6-rd-agent-image-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ env.G6RD_AGENT_ARCHIVE }}
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 1
+      - name: Clean release-image resources
+        if: always()
+        timeout-minutes: 5
+        run: |
+          set -euo pipefail
+          status=0
+          if docker image inspect "${G6RD_AGENT_IMAGE}" >/dev/null 2>&1; then
+            docker image rm --force "${G6RD_AGENT_IMAGE}" >/dev/null || status=1
+          fi
+          rm -rf -- "${G6RD_AGENT_ARCHIVE}" || status=1
+          exit "${status}"
+
   g6-rd-fd-a:
     name: G6 Readiness Failure Domain A
+    needs: g6-rd-release-image
     runs-on: ubuntu-24.04
     timeout-minutes: 90
     environment:
@@ -37,12 +91,31 @@ jobs:
       FD_ALIAS: fd-alpha
       G6_AUTHORITY: ${{ inputs.authority }}
       G6RD_CANDIDATE_SHA: ${{ github.sha }}
+      G6RD_AGENT_IMAGE: ocservia-g6-agent:${{ github.run_id }}-${{ github.run_attempt }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
       - name: Runner preflight
         run: scripts/ci-preflight.sh
+      - name: Download the frozen release Agent image
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: g6-rd-agent-image-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/g6-rd-agent-image
+      - name: Verify and load the release Agent image
+        run: |
+          set -euo pipefail
+          archive_dir="${RUNNER_TEMP}/g6-rd-agent-image"
+          (
+            cd "${archive_dir}"
+            sha256sum --check agent-image.tar.gz.sha256
+          )
+          gzip -dc "${archive_dir}/agent-image.tar.gz" | docker load
+          expected_id="$(<"${archive_dir}/image-id.txt")"
+          actual_id="$(docker image inspect --format '{{.Id}}' "${G6RD_AGENT_IMAGE}")"
+          test "${actual_id}" = "${expected_id}"
+          test "$(docker image inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' "${G6RD_AGENT_IMAGE}")" = "${GITHUB_SHA}"
       - name: G6 readiness policy tests
         run: scripts/test-g6-readiness-workflow.sh
       - name: G6 readiness hang-guard tests
@@ -209,6 +282,7 @@ jobs:
 
   g6-rd-fd-b:
     name: G6 Readiness Failure Domain B
+    needs: g6-rd-release-image
     runs-on: ubuntu-24.04
     timeout-minutes: 90
     environment:
@@ -219,12 +293,31 @@ jobs:
       FD_ALIAS: fd-beta
       G6_AUTHORITY: ${{ inputs.authority }}
       G6RD_CANDIDATE_SHA: ${{ github.sha }}
+      G6RD_AGENT_IMAGE: ocservia-g6-agent:${{ github.run_id }}-${{ github.run_attempt }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
       - name: Runner preflight
         run: scripts/ci-preflight.sh
+      - name: Download the frozen release Agent image
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: g6-rd-agent-image-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/g6-rd-agent-image
+      - name: Verify and load the release Agent image
+        run: |
+          set -euo pipefail
+          archive_dir="${RUNNER_TEMP}/g6-rd-agent-image"
+          (
+            cd "${archive_dir}"
+            sha256sum --check agent-image.tar.gz.sha256
+          )
+          gzip -dc "${archive_dir}/agent-image.tar.gz" | docker load
+          expected_id="$(<"${archive_dir}/image-id.txt")"
+          actual_id="$(docker image inspect --format '{{.Id}}' "${G6RD_AGENT_IMAGE}")"
+          test "${actual_id}" = "${expected_id}"
+          test "$(docker image inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' "${G6RD_AGENT_IMAGE}")" = "${GITHUB_SHA}"
       - name: G6 readiness policy tests
         run: scripts/test-g6-readiness-workflow.sh
       - name: G6 readiness hang-guard tests
