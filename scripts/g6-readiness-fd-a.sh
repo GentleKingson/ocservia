@@ -105,6 +105,7 @@ relay_a_only_topology_matches() {
         length == 1
         and .[0].Config.Labels["com.docker.compose.project"] == $project
         and .[0].Config.Labels["com.docker.compose.service"] == "agent-fd-a-01"
+        and .[0].State.Running == true
         and (.[0].NetworkSettings.Networks | keys) == [$network]
       ' >/dev/null \
     && relay_topology_docker container inspect "${relay}" \
@@ -113,10 +114,35 @@ relay_a_only_topology_matches() {
         length == 1
         and .[0].Config.Labels["com.docker.compose.project"] == $project
         and .[0].Config.Labels["com.docker.compose.service"] == "relay"
+        and .[0].State.Running == true
         and (.[0].NetworkSettings.Networks | has($network))
         and (.[0].NetworkSettings.Networks | has($default))
         and (.[0].NetworkSettings.Networks[$network].Aliases | index("relay-a")) != null
       ' >/dev/null
+}
+
+relay_prior_connection_retired() {
+  local node="${1:?node id is required}"
+  local prior_connection_id="${2:?prior connection id is required}"
+  local prior_owner_epoch="${3:?prior owner epoch is required}"
+  local state
+  [[ "${node}" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$ \
+    && "${prior_connection_id}" =~ ^[0-9a-f]{32}$ \
+    && "${prior_owner_epoch}" =~ ^[1-9][0-9]*$ ]] || return 1
+  if ! state="$(G6_DB_PORT=15432 G6RD_PSQL_TIMEOUT_SECONDS=5 g6rd_psql -qAtc \
+    "SELECT CASE
+       WHEN connection_id=decode('${prior_connection_id}','hex')
+         AND owner_epoch=${prior_owner_epoch}
+         AND lease_until<=clock_timestamp() THEN 'expired'
+       WHEN connection_id<>decode('${prior_connection_id}','hex')
+         AND owner_epoch>${prior_owner_epoch} THEN 'changed'
+       ELSE 'live-or-invalid'
+     END
+     FROM connection_owner_fencing
+     WHERE node_id=decode('${node//-/}','hex')")"; then
+    return 1
+  fi
+  [[ "${state}" == expired ]]
 }
 
 peer_node_id() {
@@ -860,7 +886,8 @@ phase_relay_rejoin_ready() {
     trap relay_a_ready_restore_on_failure EXIT
     local out="${G6RD_OUTBOX}/relay-rejoin-ready"
     local nodes_file="${G6RD_OUTBOX}/agents/nodes.tsv"
-    local network default_network agent relay node ready_at temporary
+    local network default_network agent relay node ready_at baseline
+    local prior_connection_id prior_owner_epoch extra temporary
     network="$(relay_a_only_network)"
     default_network="${COMPOSE_PROJECT}_default"
     agent="$(relay_a_only_agent_container)"
@@ -872,6 +899,17 @@ phase_relay_rejoin_ready() {
       return 1
     }
     relay_a_only_topology_restore || return 1
+    baseline="$(G6_DB_PORT=15432 G6RD_PSQL_TIMEOUT_SECONDS=10 \
+      g6rd_psql -qAtc "SELECT encode(connection_id,'hex') || E'\\t' || owner_epoch::text
+        FROM connection_owner_fencing
+        WHERE node_id=decode('${node//-/}','hex')
+          AND lease_until>clock_timestamp()")"
+    IFS=$'\t' read -r prior_connection_id prior_owner_epoch extra <<<"${baseline}"
+    [[ "${prior_connection_id}" =~ ^[0-9a-f]{32}$ \
+      && "${prior_owner_epoch}" =~ ^[1-9][0-9]*$ && -z "${extra}" ]] || {
+      echo "the selected relay Agent has no exact live pre-rewire connection" >&2
+      return 1
+    }
     relay_topology_docker network create --internal \
       --label "ocservia.g6.run-id=${RUN_ID}" \
       --label "ocservia.g6.role=relay-a-only" "${network}" >/dev/null || return 1
@@ -882,6 +920,23 @@ phase_relay_rejoin_ready() {
       >/dev/null || return 1
     relay_a_only_topology_matches || {
       echo "failed to establish the exact relay-a-only Agent topology" >&2
+      return 1
+    }
+    G6RD_COMPOSE_TIMEOUT_SECONDS=30 \
+      g6rd_agent_compose stop "$(relay_a_only_agent_service)" || {
+      echo "failed to stop the selected relay Agent after the topology rewire" >&2
+      return 1
+    }
+    g6rd_wait_until_deadline 45 1 "selected relay Agent prior connection retired" \
+      relay_prior_connection_retired "${node}" "${prior_connection_id}" \
+        "${prior_owner_epoch}" || return 1
+    G6RD_COMPOSE_TIMEOUT_SECONDS=30 \
+      g6rd_agent_compose start "$(relay_a_only_agent_service)" || {
+      echo "failed to start the selected relay Agent after retiring its prior connection" >&2
+      return 1
+    }
+    relay_a_only_topology_matches || {
+      echo "the selected relay Agent topology changed during its bounded stop/start" >&2
       return 1
     }
     ready_at="$(G6_DB_PORT=15432 G6RD_PSQL_TIMEOUT_SECONDS=10 g6rd_psql -qAtc \
@@ -904,6 +959,8 @@ phase_relay_rejoin_ready() {
       }' >"${temporary}" || return 1
     mv -f -- "${temporary}" "${out}/relay-a-only-readiness.json" || return 1
     printf '%s\n' "${node}" >"${out}/node-id" || return 1
+    printf '%s\n' "${prior_connection_id}" >"${out}/prior-connection-id" || return 1
+    printf '%s\n' "${prior_owner_epoch}" >"${out}/prior-owner-epoch" || return 1
     printf '%s\n' "${G6RD_CANDIDATE_SHA}" >"${out}/candidate-sha" || return 1
   )
 }

@@ -277,9 +277,19 @@ validate_relay_a_only_readiness() {
   local readiness="${1:?relay topology readiness is required}"
   require_file "${readiness}/candidate-sha"
   require_file "${readiness}/node-id"
+  require_file "${readiness}/prior-connection-id"
+  require_file "${readiness}/prior-owner-epoch"
   require_file "${readiness}/relay-a-only-readiness.json"
   [[ "$(<"${readiness}/candidate-sha")" == "${G6RD_CANDIDATE_SHA}" ]] || {
     echo "relay observation readiness belongs to a different candidate" >&2
+    return 1
+  }
+  [[ "$(<"${readiness}/prior-connection-id")" =~ ^[0-9a-f]{32}$ ]] || {
+    echo "relay observation readiness has an invalid prior connection" >&2
+    return 1
+  }
+  [[ "$(<"${readiness}/prior-owner-epoch")" =~ ^[1-9][0-9]*$ ]] || {
+    echo "relay observation readiness has an invalid prior owner epoch" >&2
     return 1
   }
   jq -e --arg environment "${G6RD_ENVIRONMENT_ID}" \

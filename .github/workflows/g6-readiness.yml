@@ -568,7 +568,7 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
         run: scripts/real-e2e-artifact.sh wait-download "g6-rd-relay-rejoin-ready-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" "${RUNNER_TEMP}/g6-rd-relay-rejoin-ready" 1800 "G6 Readiness Failure Domain A"
       - name: Capture the pre-fault relay-a session
-        timeout-minutes: 5
+        timeout-minutes: 8
         run: scripts/g6-readiness-fd-b.sh relay-pre-fault "${RUNNER_TEMP}/g6-rd-relay-rejoin-ready"
       - name: Publish the pre-fault relay-a observation
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7

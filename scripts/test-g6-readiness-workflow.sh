@@ -161,6 +161,9 @@ release_images = release_variables.to_h { |variable| [variable, release_job.fetc
 end
 fd_a_steps = Array(jobs.fetch("g6-rd-fd-a").fetch("steps"))
 fd_b_steps = Array(jobs.fetch("g6-rd-fd-b").fetch("steps"))
+relay_pre_fault = fd_b_steps.find { |step| step["name"] == "Capture the pre-fault relay-a session" }
+reject("the pre-fault relay phase must outlive its existing bounded inner operations") unless
+  relay_pre_fault&.fetch("timeout-minutes") == 8
 resource_preflight = fd_b_steps.find { |step| step["name"] == "Preflight bounded resource evidence" }
 window_step = fd_b_steps.find { |step| step["name"] == "Run the bounded observation window" }
 reject("fd-b must run a hard-bounded real resource preflight") unless
@@ -830,6 +833,15 @@ relay_a_preproof_line="$(grep -nF 'relay_probe_named relay-a "${cross_vm_node}" 
   echo "relay-b must be stopped before the controlled relay-a command proof" >&2
   exit 1
 }
+if grep -Eq 'relay_probe_named|g6rd_wait_until.*relay-a' \
+  <<<"$(sed -n "1,$((relay_b_stop_line - 1))p" <<<"${relay_pre_fault_phase}")"; then
+  echo "fd-b must not add a relay-a behavioral dependency before stopping relay-b" >&2
+  exit 1
+fi
+if grep -qF 'restart transportd' <<<"${relay_pre_fault_phase}"; then
+  echo "the relay-a proof must exercise live transportd failover without a cold restart" >&2
+  exit 1
+fi
 for token in \
   'phase_relay_up' \
   'relay-b-started.json' \
@@ -850,6 +862,7 @@ relay_b_postproof_line="$(grep -nF 'relay_probe_relay_b "${cross_vm_node}" "${be
   exit 1
 }
 relay_ready_phase="$(sed -n '/^phase_relay_rejoin_ready() {/,/^}/p' "${FD_A}")"
+relay_retirement_probe="$(sed -n '/^relay_prior_connection_retired() {/,/^}/p' "${FD_A}")"
 relay_topology_match="$(sed -n '/^relay_a_only_topology_matches() {/,/^}/p' "${FD_A}")"
 relay_topology_restore="$(sed -n '/^relay_a_only_topology_restore() {/,/^}/p' "${FD_A}")"
 for token in \
@@ -858,12 +871,83 @@ for token in \
   'network connect --alias relay-a' \
   'network disconnect "${default_network}" "${agent}"' \
   'relay_a_only_topology_matches' \
+  'prior-connection-id' \
+  'prior-owner-epoch' \
+  'FROM connection_owner_fencing' \
+  'G6RD_COMPOSE_TIMEOUT_SECONDS=30' \
+  'g6rd_agent_compose stop "$(relay_a_only_agent_service)"' \
+  'g6rd_wait_until_deadline 45 1 "selected relay Agent prior connection retired"' \
+  'g6rd_agent_compose start "$(relay_a_only_agent_service)"' \
   'relay-a-only-readiness.json'; do
   grep -qF "${token}" <<<"${relay_ready_phase}" || {
     echo "relay-a controlled topology setup is incomplete: ${token}" >&2
     exit 1
   }
 done
+[[ "$(grep -Fc 'G6RD_COMPOSE_TIMEOUT_SECONDS=30' <<<"${relay_ready_phase}")" -eq 2 ]] || {
+  echo "relay-a readiness must bound both selected-Agent stop and start" >&2
+  exit 1
+}
+if grep -Eq 'g6rd_agent_compose (restart|up)' <<<"${relay_ready_phase}"; then
+  echo "relay-a readiness must preserve the external topology with exact stop/start" >&2
+  exit 1
+fi
+for token in \
+  'G6_DB_PORT=15432 G6RD_PSQL_TIMEOUT_SECONDS=5 g6rd_psql' \
+  'SELECT CASE' \
+  "connection_id=decode('\${prior_connection_id}','hex')" \
+  'owner_epoch=${prior_owner_epoch}' \
+  "connection_id<>decode('\${prior_connection_id}','hex')" \
+  'owner_epoch>${prior_owner_epoch}' \
+  "THEN 'expired'" \
+  "THEN 'changed'" \
+  "ELSE 'live-or-invalid'" \
+  '[[ "${state}" == expired ]]'; do
+  grep -qF "${token}" <<<"${relay_retirement_probe}" || {
+    echo "the selected relay Agent retirement gate is incomplete: ${token}" >&2
+    exit 1
+  }
+done
+relay_ready_topology_positions="$(grep -nF 'relay_a_only_topology_matches' \
+  <<<"${relay_ready_phase}" | cut -d: -f1)"
+relay_ready_topology_count="$(printf '%s\n' "${relay_ready_topology_positions}" \
+  | awk 'NF { count++ } END { print count + 0 }')"
+relay_ready_topology_first="$(printf '%s\n' "${relay_ready_topology_positions}" | sed -n '1p')"
+relay_ready_topology_second="$(printf '%s\n' "${relay_ready_topology_positions}" | sed -n '2p')"
+relay_ready_restore_line="$(grep -nF 'relay_a_only_topology_restore || return 1' \
+  <<<"${relay_ready_phase}" | cut -d: -f1)"
+relay_ready_clock_line="$(grep -nF 'ready_at="$(G6_DB_PORT=15432' \
+  <<<"${relay_ready_phase}" | cut -d: -f1)"
+relay_ready_prior_line="$(grep -nF 'baseline="$(G6_DB_PORT=15432' \
+  <<<"${relay_ready_phase}" | cut -d: -f1)"
+relay_ready_rewire_line="$(grep -nF 'relay_topology_docker network create --internal' \
+  <<<"${relay_ready_phase}" | cut -d: -f1)"
+relay_ready_stop_line="$(grep -nF 'g6rd_agent_compose stop' \
+  <<<"${relay_ready_phase}" | cut -d: -f1)"
+relay_ready_retirement_line="$(grep -nF 'g6rd_wait_until_deadline 45 1 "selected relay Agent prior connection retired"' \
+  <<<"${relay_ready_phase}" | cut -d: -f1)"
+relay_ready_start_line="$(grep -nF 'g6rd_agent_compose start' \
+  <<<"${relay_ready_phase}" | cut -d: -f1)"
+relay_ready_publish_line="$(grep -nF 'mv -f -- "${temporary}" "${out}/relay-a-only-readiness.json"' \
+  <<<"${relay_ready_phase}" | cut -d: -f1)"
+[[ "${relay_ready_topology_count}" -eq 2 \
+  && -n "${relay_ready_restore_line}" && -n "${relay_ready_clock_line}" \
+  && -n "${relay_ready_prior_line}" && -n "${relay_ready_rewire_line}" \
+  && -n "${relay_ready_stop_line}" && -n "${relay_ready_retirement_line}" \
+  && -n "${relay_ready_start_line}" \
+  && -n "${relay_ready_publish_line}" \
+  && "${relay_ready_restore_line}" -lt "${relay_ready_prior_line}" \
+  && "${relay_ready_prior_line}" -lt "${relay_ready_rewire_line}" \
+  && "${relay_ready_rewire_line}" -lt "${relay_ready_topology_first}" \
+  && "${relay_ready_topology_first}" -lt "${relay_ready_stop_line}" \
+  && "${relay_ready_stop_line}" -lt "${relay_ready_retirement_line}" \
+  && "${relay_ready_retirement_line}" -lt "${relay_ready_start_line}" \
+  && "${relay_ready_start_line}" -lt "${relay_ready_topology_second}" \
+  && "${relay_ready_topology_second}" -lt "${relay_ready_clock_line}" \
+  && "${relay_ready_clock_line}" -lt "${relay_ready_publish_line}" ]] || {
+  echo "relay-a readiness must freeze the live term before rewire, then stop/retire/start before publishing" >&2
+  exit 1
+}
 for token in \
   '.[0].Internal == true' \
   '([.[0].Containers[]?.Name] | sort) == ([$agent,$relay] | sort)' \
@@ -876,6 +960,10 @@ for token in \
     exit 1
   }
 done
+[[ "$(grep -Fc '.[0].State.Running == true' <<<"${relay_topology_match}")" -eq 2 ]] || {
+  echo "relay-a exact topology must require both the selected Agent and relay to be running" >&2
+  exit 1
+}
 for token in \
   'network connect "${default_network}" "${agent}"' \
   'network disconnect "${network}" "${agent}"' \
@@ -2299,7 +2387,13 @@ relay_topology_failure_fixture="$(mktemp -d)"
     fi
     return 0
   }
-  g6rd_psql() { printf '%s\n' '2026-08-19T00:00:00.000001Z'; }
+  g6rd_psql() {
+    if [[ "$*" == *'SELECT encode(connection_id'* ]]; then
+      printf '%s\t%s\n' aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa 7
+    else
+      printf '%s\n' '2026-08-19T00:00:00.000001Z'
+    fi
+  }
   if phase_relay_rejoin_ready >/dev/null 2>&1; then
     echo "relay topology setup hid an intermediate Docker failure" >&2
     exit 1
@@ -2320,19 +2414,25 @@ rm -rf -- "${relay_topology_failure_fixture}"
 # cannot be hidden by variables exported from an earlier policy fixture.
 relay_dispatch_fixture="$(mktemp -d)"
 mkdir -p "${relay_dispatch_fixture}/bin" \
-  "${relay_dispatch_fixture}/runner-temp/g6-readiness-relay-dispatch-fd-a/outbox/agents"
+  "${relay_dispatch_fixture}/runner-temp/g6-readiness-relay-dispatch-fd-a/outbox/agents" \
+  "${relay_dispatch_fixture}/runner-temp/g6-readiness-relay-dispatch-fd-a/secrets"
 cat >"${relay_dispatch_fixture}/bin/timeout" <<'SHIM'
 #!/usr/bin/env bash
 set -euo pipefail
+[[ "${1:-}" == "--foreground" ]] && shift
 [[ "${1:-}" == "--signal=TERM" ]] && shift
 [[ "${1:-}" == "--kill-after=5s" ]] && shift
-[[ "${1:-}" == "20s" ]] && shift
+[[ "${1:-}" =~ ^[0-9]+s$ ]] && shift
 exec "$@"
 SHIM
 cat >"${relay_dispatch_fixture}/bin/docker" <<'SHIM'
 #!/usr/bin/env bash
 set -euo pipefail
 printf '%s\n' "$*" >>"${G6RD_TEST_DOCKER_LOG:?}"
+if [[ " $* " == *' SELECT encode(connection_id'* ]]; then
+  printf '%s\t%s\n' aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa 7
+  exit 0
+fi
 exit 42
 SHIM
 chmod +x "${relay_dispatch_fixture}/bin/timeout" \
@@ -2340,6 +2440,8 @@ chmod +x "${relay_dispatch_fixture}/bin/timeout" \
 printf 'g6-fd-a-01\t018fc001-0000-7000-8000-000000000001\t%s\n' \
   "$(printf 'a%.0s' {1..64})" \
   >"${relay_dispatch_fixture}/runner-temp/g6-readiness-relay-dispatch-fd-a/outbox/agents/nodes.tsv"
+printf '%s\n' fixture-owner-password \
+  >"${relay_dispatch_fixture}/runner-temp/g6-readiness-relay-dispatch-fd-a/secrets/owner-password"
 (
   unset NODES_FILE
   export PATH="${relay_dispatch_fixture}/bin:${PATH}"
@@ -2373,6 +2475,150 @@ printf 'g6-fd-a-01\t018fc001-0000-7000-8000-000000000001\t%s\n' \
   }
 )
 rm -rf -- "${relay_dispatch_fixture}"
+
+relay_readiness_gate_fixture="$(mktemp -d)"
+for relay_readiness_stage in baseline stop retirement missing changed start topology success; do
+  (
+    export COMPOSE_PROJECT=g6-rd-relay-readiness
+    export RUN_ID="relay-readiness-${relay_readiness_stage}-fd-a"
+    export G6RD_ENVIRONMENT_ID=g6-relayreadiness
+    export G6RD_CANDIDATE_SHA=1234567890123456789012345678901234567890
+    export G6RD_OUTBOX="${relay_readiness_gate_fixture}/${relay_readiness_stage}/outbox"
+    export G6RD_STATE="${relay_readiness_gate_fixture}/${relay_readiness_stage}/state"
+    mkdir -p "${G6RD_OUTBOX}/agents" "${G6RD_STATE}"
+    node=018fc001-0000-7000-8000-000000000001
+    prior=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+    printf 'g6-fd-a-01\t%s\t%s\n' "${node}" "$(printf 'b%.0s' {1..64})" \
+      >"${G6RD_OUTBOX}/agents/nodes.tsv"
+    eval "$(sed -n '/^require_file() {/,/^}/p' "${FD_A}")"
+    eval "$(sed -n '/^relay_prior_connection_retired() {/,/^}/p' "${FD_A}")"
+    eval "${relay_ready_phase}"
+    relay_a_only_network() { printf '%s_relay-a-only\n' "${COMPOSE_PROJECT}"; }
+    relay_a_only_agent_service() { printf '%s\n' agent-fd-a-01; }
+    relay_a_only_agent_container() { printf '%s\n' "${COMPOSE_PROJECT}-agent-fd-a-01-1"; }
+    relay_a_only_relay_container() { printf '%s\n' "${COMPOSE_PROJECT}-relay-1"; }
+    relay_a_only_topology_restore() {
+      printf '%s\n' restore >>"${G6RD_STATE}/events"
+      return 0
+    }
+    relay_topology_docker() {
+      printf 'docker %s\n' "$*" >>"${G6RD_STATE}/events"
+      return 0
+    }
+    relay_a_only_topology_matches() {
+      printf '%s\n' topology >>"${G6RD_STATE}/events"
+      if [[ "${relay_readiness_stage}" == topology \
+        && "$(grep -c '^topology$' "${G6RD_STATE}/events")" -eq 2 ]]; then
+        return 1
+      fi
+      return 0
+    }
+    g6rd_psql() {
+      case "$*" in
+      *'SELECT to_char(clock_timestamp()'*)
+        printf '%s\n' '2026-08-19T00:00:00.000001Z'
+        ;;
+      *'SELECT encode(connection_id'*)
+        printf '%s\n' baseline >>"${G6RD_STATE}/events"
+        if [[ "${relay_readiness_stage}" == baseline ]]; then
+          printf ''
+        else
+          printf '%s\t%s\n' "${prior}" 7
+        fi
+        ;;
+      *'SELECT CASE'*)
+        if [[ "${relay_readiness_stage}" == retirement ]]; then
+          printf '%s\n' live-or-invalid
+        elif [[ "${relay_readiness_stage}" == missing ]]; then
+          printf ''
+        elif [[ "${relay_readiness_stage}" == changed ]]; then
+          printf '%s\n' changed
+        else
+          printf '%s\n' expired
+        fi
+        ;;
+      *) return 1 ;;
+      esac
+    }
+    g6rd_agent_compose() {
+      printf 'agent-compose %s\n' "$*" >>"${G6RD_STATE}/events"
+      if [[ "$*" == 'stop agent-fd-a-01' && "${relay_readiness_stage}" == stop ]]; then
+        return 41
+      fi
+      if [[ "$*" == 'start agent-fd-a-01' && "${relay_readiness_stage}" == start ]]; then
+        return 42
+      fi
+      return 0
+    }
+    g6rd_wait_until_deadline() {
+      printf 'retirement-wait %s %s %s\n' "$1" "$2" "$3" >>"${G6RD_STATE}/events"
+      shift 3
+      "$@"
+    }
+    status=0
+    phase_relay_rejoin_ready >"${G6RD_STATE}/stdout" \
+      2>"${G6RD_STATE}/stderr" || status=$?
+    if [[ "${relay_readiness_stage}" == baseline ]]; then
+      if grep -q '^docker network create' "${G6RD_STATE}/events"; then
+        echo "relay readiness rewired before freezing a live baseline term" >&2
+        exit 1
+      fi
+    else
+      grep -qxF 'agent-compose stop agent-fd-a-01' "${G6RD_STATE}/events" || {
+        echo "relay readiness did not stop only the selected Agent" >&2
+        exit 1
+      }
+    fi
+    if [[ "${relay_readiness_stage}" == start \
+      || "${relay_readiness_stage}" == topology \
+      || "${relay_readiness_stage}" == success ]]; then
+      grep -qxF 'agent-compose start agent-fd-a-01' "${G6RD_STATE}/events" || {
+        echo "relay readiness did not start only the selected Agent after retirement" >&2
+        exit 1
+      }
+    elif grep -qxF 'agent-compose start agent-fd-a-01' "${G6RD_STATE}/events"; then
+      echo "relay readiness started the selected Agent before proving retirement" >&2
+      exit 1
+    fi
+    if [[ "${relay_readiness_stage}" == success ]]; then
+      [[ "${status}" == 0 ]] || {
+        echo "relay readiness rejected a retired prior connection" >&2
+        exit 1
+      }
+      [[ "$(<"${G6RD_OUTBOX}/relay-rejoin-ready/prior-connection-id")" == "${prior}" \
+        && "$(<"${G6RD_OUTBOX}/relay-rejoin-ready/prior-owner-epoch")" == 7 \
+        && "$(<"${G6RD_OUTBOX}/relay-rejoin-ready/candidate-sha")" == "${G6RD_CANDIDATE_SHA}" ]] || {
+        echo "relay readiness did not publish its successful causal boundary" >&2
+        exit 1
+      }
+      [[ "$(grep -c '^topology$' "${G6RD_STATE}/events")" -eq 2 ]] || {
+        echo "relay readiness did not revalidate topology after the stop/start" >&2
+        exit 1
+      }
+      restore_line="$(grep -nF restore "${G6RD_STATE}/events" | head -1 | cut -d: -f1)"
+      baseline_line="$(grep -nF baseline "${G6RD_STATE}/events" | head -1 | cut -d: -f1)"
+      rewire_line="$(grep -nF 'docker network create --internal' \
+        "${G6RD_STATE}/events" | head -1 | cut -d: -f1)"
+      topology_line="$(grep -nF topology "${G6RD_STATE}/events" | head -1 | cut -d: -f1)"
+      [[ "${restore_line}" -lt "${baseline_line}" \
+        && "${baseline_line}" -lt "${rewire_line}" \
+        && "${rewire_line}" -lt "${topology_line}" ]] || {
+        echo "relay readiness did not freeze its baseline before the network rewire" >&2
+        exit 1
+      }
+    else
+      [[ "${status}" != 0 ]] || {
+        echo "relay ${relay_readiness_stage} failure was hidden" >&2
+        exit 1
+      }
+      [[ ! -e "${G6RD_OUTBOX}/relay-rejoin-ready/candidate-sha" ]] || {
+        echo "relay ${relay_readiness_stage} failure published false readiness" >&2
+        exit 1
+      }
+    fi
+  )
+done
+rm -rf -- "${relay_readiness_gate_fixture}"
 
 relay_stop_failure_fixture="$(mktemp -d)"
 (

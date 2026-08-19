@@ -80,6 +80,7 @@ critical_timeouts = {
     "Bootstrap the streaming standby" => 15,
     "Enroll the failure domain B fleet" => 25,
     "Promote the standby under load" => 8,
+    "Capture the pre-fault relay-a session" => 8,
     "Outbox crash window after claim" => 10,
     "Outbox crash window after transport send" => 10,
     "Outbox crash window before result commit" => 10,
