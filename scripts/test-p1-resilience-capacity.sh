@@ -20,6 +20,24 @@ rejects 1 33 1 1 1
 rejects 1 1 30001 1 1
 rejects 1 1 1 1 4097
 
+initial_telemetry_ready 48 48 $'direct\t24\nrelay\t24'
+initial_telemetry_ready 49 48 $'direct\t25\nrelay\t24'
+for incomplete in \
+  $'direct\t24' \
+  $'relay\t24' \
+  $'direct\t24\nrelay\t24'; do
+  batches=48
+  [[ "${incomplete}" == *$'\n'* ]] && batches=47
+  if initial_telemetry_ready "${batches}" 48 "${incomplete}"; then
+    echo "incomplete initial telemetry was accepted" >&2
+    exit 1
+  fi
+done
+if initial_telemetry_ready invalid 48 $'direct\t24\nrelay\t24'; then
+  echo "non-numeric telemetry count was accepted" >&2
+  exit 1
+fi
+
 invalid_run_id="I08-invalid-concurrency-$$"
 invalid_prefix="$(printf '%s' "${invalid_run_id}" | tr '[:upper:]_' '[:lower:]-' | tr -cd 'a-z0-9-')"
 if RUN_ID="${invalid_run_id}" RUNNER_TEMP="${temporary}" REQUEST_CONCURRENCY=33 \

@@ -45,6 +45,14 @@ validate_capacity_settings() {
   fi
 }
 
+initial_telemetry_ready() {
+  local batches=$1 expected_batches=$2 path_mix=$3
+  [[ "${batches}" =~ ^[0-9]+$ ]] || return 1
+  ((batches >= expected_batches)) || return 1
+  grep -q $'^direct\t' <<<"${path_mix}" || return 1
+  grep -q $'^relay\t' <<<"${path_mix}"
+}
+
 interrupted_operation_is_final() {
   [[ $1 == "unknown" ]]
 }
