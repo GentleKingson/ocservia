@@ -338,7 +338,11 @@ impl ActiveRelayActor {
         let mut backoff = Self::build_backoff();
 
         while let Err(err) = self.run_once().await {
-            warn!("{err:#}");
+            warn!(
+                url = %self.url,
+                persistent = self.keep_connected,
+                "{err:#}"
+            );
             let was_established = matches!(err, RelayConnectionError::Established { .. });
             let last_error = Some(Arc::new(AnyError::from(err)));
             self.my_relay
@@ -387,6 +391,13 @@ impl ActiveRelayActor {
         };
         self.my_relay
             .set_status(&self.url, RelayConnectionState::Connected);
+        if self.keep_connected {
+            info!(
+                url = %self.url,
+                home_relay = self.is_home_relay,
+                "persistent relay connection established"
+            );
+        }
         self.run_connected(client)
             .instrument(info_span!("connected"))
             .await
