@@ -220,6 +220,10 @@ services:
     command: ["--config-path", "/etc/iroh-relay/relay.toml"]
     environment:
       IROH_RELAY_ACCESS_TOKEN_FILE: /run/relay-secrets/relay-token
+      # Relay-failover diagnosis: log per-client connection state and every
+      # dropped forward (destination client not connected) so a restarted
+      # relay's forwarding table can be audited against endpoint reconnects.
+      RUST_LOG: info,iroh_relay::server::clients=debug
     ports:
       # Local containers use the canonical Docker DNS alias on port 3443.
       # The loopback publication exists only as the tunnel server's target.
@@ -304,6 +308,13 @@ services:
     build:
       context: ../..
       dockerfile: rust/transportd.Dockerfile
+    environment:
+      # The binary default ("info,iroh=warn") hides the relay-transport and
+      # path-selection internals that relay-failover diagnosis needs: relay
+      # connection transitions, selected-path changes, and connection
+      # close events.
+      RUST_LOG: >-
+        info,iroh=warn,iroh::socket::transports::relay::actor=info,iroh::socket::remote_map::remote_state=debug,iroh::_events=debug
     command:
       - --socket
       - /run/ocserv-platform/transportd.sock

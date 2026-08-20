@@ -1514,6 +1514,10 @@ EOF
       G6_CONTROLLER_ENDPOINT_ID: "${OCSERV_CONTROLLER_ENDPOINT_ID:-}"
       G6_RELAY_URL_A: "${G6_RELAY_URL_A:?}"
       G6_RELAY_URL_B: "${G6_RELAY_URL_B:?}"
+      # Relay-failover diagnosis: surface path-selection and connection
+      # events from the vendored transport stack (the agent binary defaults
+      # to plain "info").
+      RUST_LOG: info,iroh::_events=debug,iroh::socket::transports::relay::actor=info
     extra_hosts:
       - "host.docker.internal:host-gateway"
       - "${remote_relay}:host-gateway"
