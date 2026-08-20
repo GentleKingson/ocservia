@@ -20,12 +20,12 @@ rejects 1 33 1 1 1
 rejects 1 1 30001 1 1
 rejects 1 1 1 1 4097
 
-initial_telemetry_ready 48 48 $'direct\t24\nrelay\t24'
-initial_telemetry_ready 49 48 $'direct\t25\nrelay\t24'
+initial_telemetry_ready 48 48 $'direct|24\nrelay|24'
+initial_telemetry_ready 49 48 $'direct|25\nrelay|24'
 for incomplete in \
-  $'direct\t24' \
-  $'relay\t24' \
-  $'direct\t24\nrelay\t24'; do
+  $'direct|24' \
+  $'relay|24' \
+  $'direct|24\nrelay|24'; do
   batches=48
   [[ "${incomplete}" == *$'\n'* ]] && batches=47
   if initial_telemetry_ready "${batches}" 48 "${incomplete}"; then
@@ -33,7 +33,7 @@ for incomplete in \
     exit 1
   fi
 done
-if initial_telemetry_ready invalid 48 $'direct\t24\nrelay\t24'; then
+if initial_telemetry_ready invalid 48 $'direct|24\nrelay|24'; then
   echo "non-numeric telemetry count was accepted" >&2
   exit 1
 fi
