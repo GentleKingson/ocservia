@@ -5178,12 +5178,19 @@ mod tests {
         let batches_at_fault = telemetry_batches.load(Ordering::SeqCst);
 
         let settled = loop {
-            let response = service
+            // The supervisor can momentarily retire and re-establish the
+            // session while the endpoint settles its relays, so a transient
+            // NotFound is polled through like any other not-yet-settled
+            // observation; only a settled relay path breaks the loop.
+            let Ok(response) = service
                 .get_node_connection(tonic::Request::new(GetNodeConnectionRequest {
                     node_id: node_id.as_bytes().to_vec(),
                 }))
                 .await
-                .expect("settled node connection");
+            else {
+                tokio::time::sleep(Duration::from_millis(200)).await;
+                continue;
+            };
             let metadata = response.into_inner();
             if metadata.path_detail.contains(&relay_a_detail) {
                 break metadata;

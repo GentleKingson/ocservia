@@ -50,7 +50,7 @@ use n0_future::{
     task::{AbortHandle, JoinSet},
     time::{self, Duration, Instant, MissedTickBehavior},
 };
-use n0_watcher::Watchable;
+use n0_watcher::{Watchable, Watcher as _};
 use netwatch::interfaces;
 use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
@@ -1132,6 +1132,12 @@ impl RelayActor {
         // When this future is present, it is sending pending datagrams to an
         // ActiveRelayActor.  We can not process further datagrams during this time.
         let mut datagram_send_fut = std::pin::pin!(MaybeFuture::None);
+        // The relay whose queue the pending datagram future is waiting on, and a
+        // watcher for per-relay connection states so a parked future behind a
+        // relay that lost its connection is dropped instead of blocking
+        // datagram routing for every healthy relay indefinitely.
+        let mut parked_datagram_relay: Option<RelayUrl> = None;
+        let mut relay_statuses_watch = self.config.relay_statuses.watch();
         let mut home_failover_check = time::interval(HOME_RELAY_FAILOVER_CHECK_INTERVAL);
         home_failover_check.set_missed_tick_behavior(MissedTickBehavior::Skip);
 
@@ -1170,15 +1176,36 @@ impl RelayActor {
                         break;
                     };
                     let token = self.cancel_token.child_token();
-                    if let Some(Some(fut)) = token.run_until_cancelled(
+                    if let Some(Some((parked_url, fut))) = token.run_until_cancelled(
                         self.try_send_datagram(item)
                     ).await {
+                        parked_datagram_relay = Some(parked_url);
                         datagram_send_fut.as_mut().set_future(fut);
                     }
                 }
                 // Only poll this future if it is in use.
                 _ = &mut datagram_send_fut, if datagram_send_fut.is_some() => {
                     datagram_send_fut.as_mut().set_none();
+                    parked_datagram_relay = None;
+                }
+                // A relay that lost its connection cannot drain its queue, so a
+                // datagram parked on queue space behind it would never proceed.
+                // Drop the parked datagram (the remote retransmits what it
+                // still needs) to keep routing datagrams for healthy relays.
+                _ = relay_statuses_watch.updated(), if datagram_send_fut.is_some() => {
+                    let _ = relay_statuses_watch.update();
+                    if let Some(url) = parked_datagram_relay.as_ref()
+                        && !self
+                            .config
+                            .relay_statuses
+                            .get()
+                            .get(url)
+                            .is_some_and(RelayConnectionState::is_connected)
+                    {
+                        debug!(url = %url, "Dropping parked relay datagram: relay is no longer connected.");
+                        datagram_send_fut.as_mut().set_none();
+                        parked_datagram_relay = None;
+                    }
                 }
                 _ = home_failover_check.tick() => {
                     self.fail_over_home_relay_to_connected_standby().await;
@@ -1213,30 +1240,52 @@ impl RelayActor {
     /// Sends datagrams to the correct [`ActiveRelayActor`], or returns a future.
     ///
     /// If the datagram can not be sent immediately, because the destination channel is
-    /// full, a future is returned that will complete once the datagrams have been sent to
-    /// the [`ActiveRelayActor`].
+    /// full, a future is returned together with its relay URL: the future completes
+    /// once the datagrams have been sent to the [`ActiveRelayActor`].
+    ///
+    /// Back-pressure (the returned future) is only applied for a *connected* relay,
+    /// whose send loop is guaranteed to drain the queue. A relay that is connecting
+    /// still accepts datagrams into its queue so packets sent while the connection is
+    /// being established are delivered once it completes, but a full queue for a relay
+    /// that is not connected drops the overflow instead: such an actor only drains
+    /// its queue while connected, so waiting for space behind a dead (and
+    /// persistently retrying) relay would park this future indefinitely and stop the
+    /// run loop from routing datagrams for every *other*, healthy relay.
     async fn try_send_datagram(
         &mut self,
         item: RelaySendItem,
-    ) -> Option<impl Future<Output = ()> + use<>> {
-        let url = item.url.clone();
-        let handle = self
+    ) -> Option<(RelayUrl, impl Future<Output = ()> + use<>)> {
+        let (url, handle) = self
             .active_relay_handle_for_endpoint(&item.url, &item.remote_endpoint)
             .await;
+        let relay_connected = self
+            .config
+            .relay_statuses
+            .get()
+            .get(&url)
+            .is_some_and(RelayConnectionState::is_connected);
         match handle.datagrams_send_queue.try_send(item) {
             Ok(()) => None,
             Err(mpsc::error::TrySendError::Closed(_)) => {
                 warn!(?url, "Dropped datagram(s): ActiveRelayActor closed.");
                 None
             }
+            Err(mpsc::error::TrySendError::Full(_)) if !relay_connected => {
+                debug!(
+                    ?url,
+                    "Dropped datagram(s): relay is not connected and its queue is full."
+                );
+                None
+            }
             Err(mpsc::error::TrySendError::Full(item)) => {
                 let sender = handle.datagrams_send_queue.clone();
+                let parked_url = url.clone();
                 let fut = async move {
                     if sender.send(item).await.is_err() {
                         warn!(?url, "Dropped datagram(s): ActiveRelayActor closed.");
                     }
                 };
-                Some(fut)
+                Some((parked_url, fut))
             }
         }
     }
@@ -1330,7 +1379,8 @@ impl RelayActor {
         self.set_home_relay(standby).await;
     }
 
-    /// Returns the handle for the [`ActiveRelayActor`] to reach `remote_endpoint`.
+    /// Returns the relay URL and handle for the [`ActiveRelayActor`] to reach
+    /// `remote_endpoint`.
     ///
     /// The endpoint is expected to be reachable on `url`, but if no [`ActiveRelayActor`] for
     /// `url` exists but another existing [`ActiveRelayActor`] already knows about the endpoint,
@@ -1339,9 +1389,9 @@ impl RelayActor {
         &mut self,
         url: &RelayUrl,
         remote_endpoint: &EndpointId,
-    ) -> ActiveRelayHandle {
+    ) -> (RelayUrl, ActiveRelayHandle) {
         if let Some(handle) = self.active_relays.get(url) {
-            return handle.clone();
+            return (url.clone(), handle.clone());
         }
 
         let mut found_relay: Option<RelayUrl> = None;
@@ -1374,7 +1424,8 @@ impl RelayActor {
             }
         }
         let url = found_relay.unwrap_or(url.clone());
-        self.active_relay_handle(url)
+        let handle = self.active_relay_handle(url.clone());
+        (url, handle)
     }
 
     /// Returns the handle of the [`ActiveRelayActor`].
@@ -1700,9 +1751,10 @@ mod tests {
     use tracing::{Instrument, info, info_span};
 
     use super::{
-        ActiveRelayActor, ActiveRelayActorOptions, ActiveRelayMessage, ActiveRelayPrioMessage,
-        PERSISTENT_RELAY_MAX_RETRY_DELAY, RELAY_INACTIVE_CLEANUP_TIME, RelayConnectionOptions,
-        RelayConnectionState, RelayRecvDatagram, RelaySendItem, UNDELIVERABLE_DATAGRAM_TIMEOUT,
+        ActiveRelayActor, ActiveRelayActorOptions, ActiveRelayHandle, ActiveRelayMessage,
+        ActiveRelayPrioMessage, Config, PERSISTENT_RELAY_MAX_RETRY_DELAY,
+        RELAY_INACTIVE_CLEANUP_TIME, RelayActor, RelayConnectionOptions, RelayConnectionState,
+        RelayRecvDatagram, RelaySendItem, RelayStatusesWatch, UNDELIVERABLE_DATAGRAM_TIMEOUT,
         connected_standby,
     };
     use crate::{dns::DnsResolver, test_utils};
@@ -2128,5 +2180,140 @@ mod tests {
             connected_standby(&statuses, &relay_map, &home),
             Some(standby)
         );
+    }
+
+    /// Routing must never park the global relay actor behind a queue that an
+    /// unconnected relay cannot drain: a full queue for such a relay drops its
+    /// overflow instead of engaging back-pressure, so datagram routing for
+    /// healthy relays keeps flowing while a dead relay retries. A relay that
+    /// is merely connecting still stages datagrams while its queue has room.
+    #[tokio::test]
+    async fn datagrams_for_disconnected_relays_are_dropped_not_queued() {
+        let dead_url: RelayUrl = "https://dead.relay.example".parse().expect("valid url");
+        let live_url: RelayUrl = "https://live.relay.example".parse().expect("valid url");
+        let endpoint = SecretKey::generate().public();
+        let datagrams = Datagrams::from(&[0u8][..]);
+        let send_item = |url: &RelayUrl| RelaySendItem {
+            remote_endpoint: endpoint,
+            url: url.clone(),
+            datagrams: datagrams.clone(),
+        };
+
+        let relay_statuses = RelayStatusesWatch::default();
+        relay_statuses.update(
+            &dead_url,
+            RelayConnectionState::Disconnected { last_error: None },
+        );
+        relay_statuses.update(&live_url, RelayConnectionState::Connected);
+        let config = Config {
+            my_relay: Default::default(),
+            relay_statuses: relay_statuses.clone(),
+            secret_key: SecretKey::generate(),
+            dns_resolver: DnsResolver::new(),
+            proxy_url: None,
+            ipv6_reported: Arc::new(AtomicBool::new(false)),
+            tls_config: CaTlsConfig::insecure_skip_verify()
+                .client_config(default_provider())
+                .expect("infallible"),
+            metrics: Default::default(),
+            relay_map: RelayMap::from_iter([
+                RelayConfig::from(dead_url.clone()),
+                RelayConfig::from(live_url.clone()),
+            ]),
+            keep_relays_connected: true,
+            relay_inactive_cleanup_time: RELAY_INACTIVE_CLEANUP_TIME,
+        };
+        let (recv_tx, _recv_rx) = mpsc::channel(16);
+        let cancel_token = CancellationToken::new();
+        let mut actor = RelayActor::new(config, recv_tx, cancel_token);
+
+        let dummy_handle = || {
+            let (prio_tx, _prio_rx) = mpsc::channel(1);
+            let (inbox_tx, _inbox_rx) = mpsc::channel(1);
+            let (send_tx, _send_rx) = mpsc::channel(1);
+            ActiveRelayHandle {
+                prio_inbox_addr: prio_tx,
+                inbox_addr: inbox_tx,
+                datagrams_send_queue: send_tx,
+                stop_token: CancellationToken::new(),
+                abort_handle: tokio::spawn(async {}).abort_handle(),
+                persistent: true,
+                relay_config: None,
+            }
+        };
+        // The dead relay's queue is already full; the live relay's has room.
+        let (dead_send_tx, mut dead_rx) = mpsc::channel(1);
+        dead_send_tx
+            .send(send_item(&dead_url))
+            .await
+            .expect("pre-fill dead queue");
+        let mut dead_handle = dummy_handle();
+        dead_handle.datagrams_send_queue = dead_send_tx.clone();
+        let (live_send_tx, mut live_rx) = mpsc::channel(8);
+        let mut live_handle = dummy_handle();
+        live_handle.datagrams_send_queue = live_send_tx;
+        actor.active_relays.insert(dead_url.clone(), dead_handle);
+        actor.active_relays.insert(live_url.clone(), live_handle);
+
+        // The disconnected relay's full queue cannot accept the datagram, and
+        // it is dropped without a pending future that would block routing for
+        // other relays.
+        let pending = actor.try_send_datagram(send_item(&dead_url)).await;
+        assert!(pending.is_none());
+        assert!(dead_rx.try_recv().is_ok(), "pre-filled item still queued");
+        assert!(
+            matches!(dead_rx.try_recv(), Err(mpsc::error::TryRecvError::Empty)),
+            "dropped datagram was not queued"
+        );
+
+        // A relay that is still connecting stages datagrams while its queue
+        // has room, so packets sent during connection establishment are
+        // delivered once the relay connects.
+        relay_statuses.update(&dead_url, RelayConnectionState::Connecting);
+        let (connecting_send_tx, mut connecting_rx) = mpsc::channel(1);
+        let mut connecting_handle = dummy_handle();
+        connecting_handle.datagrams_send_queue = connecting_send_tx.clone();
+        actor
+            .active_relays
+            .insert(dead_url.clone(), connecting_handle);
+        let pending = actor.try_send_datagram(send_item(&dead_url)).await;
+        assert!(pending.is_none());
+
+        // A connecting relay with a full queue drops the overflow instead of
+        // parking the routing loop: only a connected relay's queue is
+        // guaranteed to drain.
+        let pending = actor.try_send_datagram(send_item(&dead_url)).await;
+        assert!(pending.is_none());
+        let staged = connecting_rx
+            .try_recv()
+            .expect("connecting relay datagram staged");
+        assert_eq!(staged.url, dead_url);
+        assert!(
+            matches!(
+                connecting_rx.try_recv(),
+                Err(mpsc::error::TryRecvError::Empty)
+            ),
+            "overflow datagram for the connecting relay was not queued"
+        );
+
+        // The connected relay's datagram is routed.
+        let pending = actor.try_send_datagram(send_item(&live_url)).await;
+        assert!(pending.is_none());
+        let routed = live_rx.try_recv().expect("live relay datagram routed");
+        assert_eq!(routed.url, live_url);
+        assert_eq!(routed.remote_endpoint, endpoint);
+
+        // Control: with the relay reported connected and its queue full, the
+        // bounded back-pressure future engages again. The connection-state
+        // guard above is what keeps that future from being parked forever
+        // behind a relay that can never drain its queue.
+        connecting_send_tx
+            .send(send_item(&dead_url))
+            .await
+            .expect("re-fill queue");
+        relay_statuses.update(&dead_url, RelayConnectionState::Connected);
+        let pending = actor.try_send_datagram(send_item(&dead_url)).await;
+        let (parked_url, _fut) = pending.expect("connected relay engages back-pressure");
+        assert_eq!(parked_url, dead_url);
     }
 }
