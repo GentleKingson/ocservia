@@ -3292,7 +3292,7 @@ pub async fn shutdown(
 #[cfg(test)]
 mod tests {
     use ed25519_dalek::SigningKey;
-    use iroh::{RelayMap, tls::CaTlsConfig};
+    use iroh::{RelayMap, Watcher as _, tls::CaTlsConfig};
     use ocservia_contracts::generated::ocserv::platform::agent::v1::{
         ArtifactGrantV1, ArtifactGrantVersion, CommandAuthorizationProof,
         CommandAuthorizationVersion, CommandDeliveryMode, GroupObservation, PrivdReceiptVersion,
@@ -4946,6 +4946,20 @@ mod tests {
         const TEST_ALPN: &[u8] = b"ocservia/relay-failover-test/1";
         const RELAY_TOKEN: &str = "i18-dedicated-relay-token";
 
+        async fn relay_auth_error(endpoint: &Endpoint) -> String {
+            let mut statuses = endpoint.home_relay_status().stream();
+            tokio::time::timeout(Duration::from_secs(5), async {
+                while let Some(statuses) = statuses.next().await {
+                    if let Some(error) = statuses.iter().find_map(|status| status.last_error()) {
+                        return format!("{error:#}");
+                    }
+                }
+                panic!("home relay status stream ended before reporting auth denial");
+            })
+            .await
+            .expect("relay auth denial was not reported")
+        }
+
         #[derive(Debug)]
         struct TokenAccess;
 
@@ -4973,6 +4987,9 @@ mod tests {
                 .expect("start second dedicated relay");
         relay_map.extend(&second_map);
         assert_eq!(relay_map.len(), 2);
+        let unauthenticated_relay_map = RelayMap::from_iter([relay_map
+            .get(&relay_url)
+            .expect("unauthenticated relay configuration")]);
         let relay_map = relay_map.with_auth_token(RELAY_TOKEN);
         let server = Endpoint::builder(presets::Minimal)
             .relay_mode(RelayMode::Custom(relay_map.clone()))
@@ -5029,9 +5046,7 @@ mod tests {
         );
 
         let unauthenticated = Endpoint::builder(presets::Minimal)
-            .relay_mode(RelayMode::Custom(RelayMap::from_iter(
-                relay_map.relays::<Vec<_>>(),
-            )))
+            .relay_mode(RelayMode::Custom(unauthenticated_relay_map.clone()))
             .ca_tls_config(CaTlsConfig::insecure_skip_verify())
             .clear_address_lookup()
             .clear_ip_transports()
@@ -5039,16 +5054,16 @@ mod tests {
             .await
             .expect("build unauthenticated relay endpoint");
         assert!(
-            tokio::time::timeout(Duration::from_secs(2), unauthenticated.online())
+            relay_auth_error(&unauthenticated)
                 .await
-                .is_err(),
-            "dedicated relays accepted a client without the configured token"
+                .contains("not authorized"),
+            "dedicated relays did not reject a client without the configured token"
         );
         unauthenticated.close().await;
 
         let wrong_token = Endpoint::builder(presets::Minimal)
             .relay_mode(RelayMode::Custom(
-                RelayMap::from_iter(relay_map.relays::<Vec<_>>()).with_auth_token("wrong-token"),
+                unauthenticated_relay_map.with_auth_token("wrong-token"),
             ))
             .ca_tls_config(CaTlsConfig::insecure_skip_verify())
             .clear_address_lookup()
@@ -5057,10 +5072,10 @@ mod tests {
             .await
             .expect("build wrong-token relay endpoint");
         assert!(
-            tokio::time::timeout(Duration::from_secs(2), wrong_token.online())
+            relay_auth_error(&wrong_token)
                 .await
-                .is_err(),
-            "dedicated relays accepted a client with the wrong token"
+                .contains("not authorized"),
+            "dedicated relays did not reject a client with the wrong token"
         );
         wrong_token.close().await;
 
