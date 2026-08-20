@@ -794,11 +794,12 @@ phase_relay_a_stop() {
     return 1
   }
   tuple="$(jq -er '
-    .mode == "node_connection" and .expected_path == "relay"
+    select(
+      .mode == "node_connection" and .expected_path == "relay"
       and .all_matched == true and (.observations | length) == 1
       and (.observations[0].path == "relay")
       and (.observations[0].path_detail | contains("relay-a"))
-    | select(.)
+    )
     | .observations[0]
     | [.node_id,.owner_instance_id,.owner_incarnation,.connection_id,
        (.owner_epoch | tostring),.owner_lease_until] | @tsv

@@ -2663,6 +2663,7 @@ relay_stop_failure_fixture="$(mktemp -d)"
   eval "$(sed -n '/^relay_a_only_agent_service() {/,/^}/p' "${FD_A}")"
   eval "${relay_a_stop_phase}"
   restore_log="${relay_stop_failure_fixture}/restore.log"
+  compose_log="${relay_stop_failure_fixture}/compose.log"
   relay_a_only_topology_matches() { return 0; }
   relay_a_only_topology_restore() {
     printf '%s\n' restore >>"${restore_log}"
@@ -2676,6 +2677,7 @@ relay_stop_failure_fixture="$(mktemp -d)"
       }'
   }
   g6rd_compose() {
+    printf '%s\n' "$*" >>"${compose_log}"
     [[ "${1:-} ${2:-}" != 'stop relay' ]] || return 17
   }
   if phase_relay_a_stop "${pre_fault}" >/dev/null 2>&1; then
@@ -2684,6 +2686,10 @@ relay_stop_failure_fixture="$(mktemp -d)"
   fi
   [[ "$(wc -l <"${restore_log}" | tr -d ' ')" == 1 ]] || {
     echo "relay-a stop failure did not restore the selected Agent topology" >&2
+    exit 1
+  }
+  [[ "$(grep -c '^stop relay$' "${compose_log}")" == 1 ]] || {
+    echo "relay-a stop fixture failed before exercising the Compose shutdown" >&2
     exit 1
   }
 )
