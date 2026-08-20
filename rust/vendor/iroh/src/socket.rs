@@ -932,6 +932,7 @@ impl EndpointInner {
 
         let relay_actor_config = RelayActorConfig {
             my_relay: HomeRelayWatch::default(),
+            relay_statuses: Default::default(),
             secret_key: secret_key.clone(),
             #[cfg(not(wasm_browser))]
             dns_resolver: dns_resolver.clone(),

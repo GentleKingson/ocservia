@@ -101,6 +101,14 @@ const UNDELIVERABLE_DATAGRAM_TIMEOUT: Duration = Duration::from_secs(3);
 /// Maximum time spent waiting for a relay client to close gracefully.
 const RELAY_CLOSE_TIMEOUT: Duration = Duration::from_secs(1);
 
+/// Interval in which the [`RelayActor`] checks whether a disconnected home relay
+/// should be failed over to a connected standby.
+///
+/// Without this check the home relay only changes when the next net-report cycle
+/// picks a new preferred relay, which pins path selection and redial hints of
+/// live sessions to a dead relay for tens of seconds.
+const HOME_RELAY_FAILOVER_CHECK_INTERVAL: Duration = Duration::from_secs(1);
+
 /// An actor which handles the connection to a single relay server.
 ///
 /// It is responsible for maintaining the connection to the relay server and handling all
@@ -165,6 +173,7 @@ struct ActiveRelayActor {
     stop_token: CancellationToken,
     metrics: Arc<SocketMetrics>,
     my_relay: HomeRelayWatch,
+    relay_statuses: RelayStatusesWatch,
 }
 
 #[derive(Debug)]
@@ -209,6 +218,7 @@ struct ActiveRelayActorOptions {
     stop_token: CancellationToken,
     metrics: Arc<SocketMetrics>,
     my_relay: HomeRelayWatch,
+    relay_statuses: RelayStatusesWatch,
     keep_connected: bool,
     inactive_cleanup_time: Duration,
 }
@@ -283,6 +293,7 @@ impl ActiveRelayActor {
             stop_token,
             metrics,
             my_relay,
+            relay_statuses,
             keep_connected,
             inactive_cleanup_time,
         } = opts;
@@ -301,6 +312,7 @@ impl ActiveRelayActor {
             stop_token,
             metrics,
             my_relay,
+            relay_statuses,
         }
     }
 
@@ -350,8 +362,7 @@ impl ActiveRelayActor {
             );
             let was_established = matches!(err, RelayConnectionError::Established { .. });
             let last_error = Some(Arc::new(AnyError::from(err)));
-            self.my_relay
-                .set_status(&self.url, RelayConnectionState::Disconnected { last_error });
+            self.publish_status(RelayConnectionState::Disconnected { last_error });
             if !was_established {
                 // If dialing failed, or if the relay connection failed before we received a pong,
                 // we wait an exponentially increasing time until we attempt to reconnect again.
@@ -393,14 +404,12 @@ impl ActiveRelayActor {
     /// or if the relay connection failed while connected. In both cases, the connection should
     /// be retried with a backoff.
     async fn run_once(&mut self) -> Result<(), RelayConnectionError> {
-        self.my_relay
-            .set_status(&self.url, RelayConnectionState::Connecting);
+        self.publish_status(RelayConnectionState::Connecting);
         let client = match self.run_dialing().instrument(info_span!("dialing")).await {
             Some(client_res) => client_res.map_err(|err| e!(RelayConnectionError::Dial, err))?,
             None => return Ok(()),
         };
-        self.my_relay
-            .set_status(&self.url, RelayConnectionState::Connected);
+        self.publish_status(RelayConnectionState::Connected);
         if self.keep_connected {
             info!(
                 url = %self.url,
@@ -429,6 +438,14 @@ impl ActiveRelayActor {
                 home_relay = self.is_home_relay,
             );
         }
+    }
+
+    /// Publishes a connection transition both to the home-relay watch (when this
+    /// actor manages the home relay) and to the per-relay status map used for
+    /// standby-aware home relay failover.
+    fn publish_status(&self, state: RelayConnectionState) {
+        self.my_relay.set_status(&self.url, state.clone());
+        self.relay_statuses.update(&self.url, state);
     }
 
     /// Actor loop when connecting to the relay server.
@@ -617,8 +634,7 @@ impl ActiveRelayActor {
                             // `Connecting` on the URL change since it cannot know our
                             // actual state).
                             if is_home {
-                                self.my_relay
-                                    .set_status(&self.url, RelayConnectionState::Connected);
+                                self.publish_status(RelayConnectionState::Connected);
                             }
                         }
                         ActiveRelayMessage::CheckConnection { local_ips } => {
@@ -913,6 +929,7 @@ pub(super) struct RelayActor {
 #[derive(Debug, Clone)]
 pub(crate) struct Config {
     pub my_relay: HomeRelayWatch,
+    pub relay_statuses: RelayStatusesWatch,
     pub secret_key: SecretKey,
     #[cfg(not(wasm_browser))]
     pub dns_resolver: DnsResolver,
@@ -1045,6 +1062,42 @@ impl HomeRelayWatch {
     }
 }
 
+/// Per-relay connection states of all [`ActiveRelayActor`]s.
+///
+/// Owned by the [`RelayActor`] and cloned into each [`ActiveRelayActor`], which
+/// publish every connection transition.  The [`RelayActor`] uses these states to
+/// fail the home relay over to a connected standby as soon as the current home
+/// relay is disconnected, instead of waiting for the next net-report cycle.
+///
+/// Unlike [`HomeRelayWatch`] this tracks every configured relay, not only the
+/// home relay, because dedicated standby relays carry failover traffic while the
+/// home relay is down.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct RelayStatusesWatch {
+    inner: Watchable<BTreeMap<RelayUrl, RelayConnectionState>>,
+}
+
+impl RelayStatusesWatch {
+    /// Records the latest connection state of `url`.
+    fn update(&self, url: &RelayUrl, state: RelayConnectionState) {
+        let mut statuses = self.inner.get();
+        statuses.insert(url.clone(), state);
+        let _ = self.inner.set(statuses);
+    }
+
+    /// Forgets `url`, e.g. because its [`ActiveRelayActor`] was stopped.
+    fn remove(&self, url: &RelayUrl) {
+        let mut statuses = self.inner.get();
+        if statuses.remove(url).is_some() {
+            let _ = self.inner.set(statuses);
+        }
+    }
+
+    fn get(&self) -> BTreeMap<RelayUrl, RelayConnectionState> {
+        self.inner.get()
+    }
+}
+
 impl RelayActor {
     pub(super) fn new(
         config: Config,
@@ -1070,6 +1123,8 @@ impl RelayActor {
         // When this future is present, it is sending pending datagrams to an
         // ActiveRelayActor.  We can not process further datagrams during this time.
         let mut datagram_send_fut = std::pin::pin!(MaybeFuture::None);
+        let mut home_failover_check = time::interval(HOME_RELAY_FAILOVER_CHECK_INTERVAL);
+        home_failover_check.set_missed_tick_behavior(MissedTickBehavior::Skip);
 
         loop {
             tokio::select! {
@@ -1115,6 +1170,9 @@ impl RelayActor {
                 // Only poll this future if it is in use.
                 _ = &mut datagram_send_fut, if datagram_send_fut.is_some() => {
                     datagram_send_fut.as_mut().set_none();
+                }
+                _ = home_failover_check.tick() => {
+                    self.fail_over_home_relay_to_connected_standby().await;
                 }
             }
         }
@@ -1227,6 +1285,40 @@ impl RelayActor {
         .await;
         // Ensure we have an ActiveRelayActor for the current home relay.
         self.active_relay_handle(home_url);
+    }
+
+    /// Fails the home relay over to a connected standby when the home relay is
+    /// disconnected.
+    ///
+    /// The net-report cycle needs tens of seconds to pick a new preferred relay.
+    /// Until then a dead home relay pins path selection and redial hints of live
+    /// sessions, and endpoint users observing [`HomeRelayWatch`] cannot see that
+    /// a healthy standby is already carrying traffic.
+    async fn fail_over_home_relay_to_connected_standby(&mut self) {
+        let Some(home) = self.config.my_relay.get() else {
+            return;
+        };
+        if home.is_connected() {
+            return;
+        }
+        let candidate = connected_standby(
+            &self.config.relay_statuses.get(),
+            &self.config.relay_map,
+            home.url(),
+        );
+        let Some(standby) = candidate else {
+            return;
+        };
+        self.config.metrics.relay_home_change.inc();
+        info!(
+            home_relay = %home.url(),
+            standby = %standby,
+            "home relay is disconnected; failing over to the connected standby"
+        );
+        self.config
+            .my_relay
+            .set(standby.clone(), RelayConnectionState::Connecting);
+        self.set_home_relay(standby).await;
     }
 
     /// Returns the handle for the [`ActiveRelayActor`] to reach `remote_endpoint`.
@@ -1344,6 +1436,7 @@ impl RelayActor {
             stop_token: stop_token.clone(),
             metrics: self.config.metrics.clone(),
             my_relay: self.config.my_relay.clone(),
+            relay_statuses: self.config.relay_statuses.clone(),
             keep_connected: persistent,
             inactive_cleanup_time: self.config.relay_inactive_cleanup_time,
         };
@@ -1413,8 +1506,13 @@ impl RelayActor {
 
     /// Cleans up [`ActiveRelayActor`]s which have stopped running.
     async fn reap_active_relays(&mut self) {
-        self.active_relays
-            .retain(|_url, handle| !handle.inbox_addr.is_closed());
+        self.active_relays.retain(|url, handle| {
+            let alive = !handle.inbox_addr.is_closed();
+            if !alive {
+                self.config.relay_statuses.remove(url);
+            }
+            alive
+        });
 
         // Make sure home relay exists
         if let Some(status) = self.config.my_relay.get() {
@@ -1479,6 +1577,7 @@ impl RelayActor {
         let Some(handle) = self.active_relays.remove(url) else {
             return true;
         };
+        self.config.relay_statuses.remove(url);
         handle.stop_token.cancel();
         if time::timeout(RELAY_CLOSE_TIMEOUT * 2, handle.inbox_addr.closed())
             .await
@@ -1552,6 +1651,25 @@ pub(crate) struct RelayRecvDatagram {
     pub(crate) datagrams: Datagrams,
 }
 
+/// Picks the standby relay to fail the home relay over to.
+///
+/// Returns the first relay of the configured relay map, in map order, that is
+/// not the failed home relay and currently connected.  Only relays that are
+/// part of the configured map are eligible: transient relays learned from peers
+/// must not become the home relay.
+fn connected_standby(
+    statuses: &BTreeMap<RelayUrl, RelayConnectionState>,
+    relay_map: &RelayMap,
+    failed_home: &RelayUrl,
+) -> Option<RelayUrl> {
+    relay_map.urls::<BTreeSet<_>>().into_iter().find(|url| {
+        url != failed_home
+            && statuses
+                .get(url)
+                .is_some_and(RelayConnectionState::is_connected)
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use std::{
@@ -1609,6 +1727,7 @@ mod tests {
             stop_token,
             metrics: Default::default(),
             my_relay: Default::default(),
+            relay_statuses: Default::default(),
             keep_connected: false,
             inactive_cleanup_time: RELAY_INACTIVE_CLEANUP_TIME,
         };
@@ -1965,5 +2084,37 @@ mod tests {
                 "full-jitter persistent retry exceeded its four-second bound: {delay:?}"
             );
         }
+    }
+
+    #[test]
+    fn home_relay_failover_only_picks_connected_configured_standbys() {
+        let home: RelayUrl = "https://relay-a.test/".parse().unwrap();
+        let standby: RelayUrl = "https://relay-b.test/".parse().unwrap();
+        let foreign: RelayUrl = "https://relay-c.test/".parse().unwrap();
+        let relay_map = RelayMap::from_iter([
+            RelayConfig::new(home.clone(), None),
+            RelayConfig::new(standby.clone(), None),
+        ]);
+
+        // A connecting standby is not a failover target.
+        let mut statuses = BTreeMap::new();
+        statuses.insert(standby.clone(), RelayConnectionState::Connecting);
+        assert_eq!(connected_standby(&statuses, &relay_map, &home), None);
+
+        // A connected standby is, and the dead home relay itself never is.
+        statuses.insert(standby.clone(), RelayConnectionState::Connected);
+        statuses.insert(home.clone(), RelayConnectionState::Connected);
+        assert_eq!(
+            connected_standby(&statuses, &relay_map, &home),
+            Some(standby.clone())
+        );
+
+        // Relays outside the configured map stay ineligible even when
+        // connected.
+        statuses.insert(foreign, RelayConnectionState::Connected);
+        assert_eq!(
+            connected_standby(&statuses, &relay_map, &home),
+            Some(standby)
+        );
     }
 }

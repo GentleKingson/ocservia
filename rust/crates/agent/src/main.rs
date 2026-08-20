@@ -4898,6 +4898,15 @@ mod tests {
         relay_b.shutdown().await.expect("stop relay B");
     }
 
+    /// Reserves an ephemeral localhost port for a relay proxy that must be
+    /// restartable on the same address after a controlled stop.
+    fn reserve_local_port() -> u16 {
+        std::net::TcpListener::bind("127.0.0.1:0")
+            .and_then(|listener| listener.local_addr())
+            .expect("reserve relay proxy port")
+            .port()
+    }
+
     /// Starts a relay whose self-signed certificate is returned so controllers
     /// can pin it as an extra relay TLS root.
     async fn start_private_relay() -> (
@@ -4952,21 +4961,29 @@ mod tests {
         );
 
         let (relay_a, relay_a_addr, relay_a_cert) = start_private_relay().await;
-        let relay_a_url: RelayUrl = format!("https://{relay_a_addr}")
+        let (relay_b, relay_b_addr, relay_b_cert) = start_private_relay().await;
+        // Both dedicated relays are reachable through controllable proxies so
+        // the fixture can replay the G6 sequence: the session relay dies
+        // permanently while the standby is stopped pre-fault and restarted
+        // only after the fault.
+        let relay_a_proxy = RestartableTcpProxy::start(
+            format!("127.0.0.1:{}", reserve_local_port())
+                .parse()
+                .unwrap(),
+            relay_a_addr,
+        )
+        .await;
+        let relay_b_proxy = RestartableTcpProxy::start(
+            format!("127.0.0.1:{}", reserve_local_port())
+                .parse()
+                .unwrap(),
+            relay_b_addr,
+        )
+        .await;
+        let relay_a_url: RelayUrl = format!("https://{}", relay_a_proxy.addr)
             .parse()
             .expect("relay A URL");
-        let (relay_b, relay_b_addr, relay_b_cert) = start_private_relay().await;
-        // Relay B stays disabled behind a stopped proxy until the fault phase,
-        // matching the G6 pre-fault topology where only relay A carries the
-        // controller session.
-        let disabled_proxy =
-            RestartableTcpProxy::start("127.0.0.1:0".parse().unwrap(), relay_b_addr).await;
-        let relay_b_proxy_addr = disabled_proxy.stop().await;
-        let refused = TcpStream::connect(relay_b_proxy_addr)
-            .await
-            .expect_err("disabled relay B accepted a connection");
-        assert_eq!(refused.kind(), io::ErrorKind::ConnectionRefused);
-        let relay_b_url: RelayUrl = format!("https://{relay_b_proxy_addr}")
+        let relay_b_url: RelayUrl = format!("https://{}", relay_b_proxy.addr)
             .parse()
             .expect("relay B URL");
         let relay_map = RelayMap::from_iter([
@@ -5105,11 +5122,33 @@ mod tests {
             }
         };
 
+        let relay_a_detail = relay_a_url.to_string();
+        let relay_b_detail = relay_b_url.to_string();
         let before = tokio::time::timeout(Duration::from_secs(30), {
             let telemetry_batches = telemetry_batches.clone();
+            let service = service.clone();
+            let relay_a_detail = relay_a_detail.clone();
+            let relay_b_detail = relay_b_detail.clone();
             async move {
-                let metadata = node_connection(relay_a_url.to_string()).await;
-                // The relay-A session must be functional, not merely present.
+                // The session lands on either dedicated relay; the G6 sequence
+                // only requires that the other one acts as the standby.
+                let metadata = loop {
+                    if let Ok(response) = service
+                        .get_node_connection(tonic::Request::new(GetNodeConnectionRequest {
+                            node_id: node_id.as_bytes().to_vec(),
+                        }))
+                        .await
+                    {
+                        let metadata = response.into_inner();
+                        if metadata.path_detail.contains(&relay_a_detail)
+                            || metadata.path_detail.contains(&relay_b_detail)
+                        {
+                            break metadata;
+                        }
+                    }
+                    tokio::time::sleep(Duration::from_millis(200)).await;
+                };
+                // The initial session must be functional, not merely present.
                 while telemetry_batches.load(Ordering::SeqCst) == 0 {
                     tokio::time::sleep(Duration::from_millis(200)).await;
                 }
@@ -5117,28 +5156,65 @@ mod tests {
             }
         })
         .await
-        .expect("Agent session through relay A did not become healthy");
+        .expect("Agent session through a dedicated relay did not become healthy");
         assert_eq!(before.endpoint_id, agent_key.public().as_bytes());
-        let before_connected_at = before.connected_at.expect("relay A connected_at");
+        let before_connected_at = before.connected_at.expect("initial connected_at");
+        let session_on_relay_a = before.path_detail.contains(&relay_a_detail);
         // Captured before the fault: session 1's next heartbeat is 30s away,
         // so any additional batch inside the failover window can only come
         // from the replacement session.
         let batches_at_fault = telemetry_batches.load(Ordering::SeqCst);
 
-        relay_a.shutdown().await.expect("stop relay A");
-        let relay_b_proxy = RestartableTcpProxy::start(relay_b_proxy_addr, relay_b_addr).await;
+        let mut relay_a = Some(relay_a);
+        let mut relay_b = Some(relay_b);
+        let mut relay_a_proxy = Some(relay_a_proxy);
+        let mut relay_b_proxy = Some(relay_b_proxy);
+        // Controlled pre-fault and fault, in the G6 order: the standby relay
+        // is stopped first (severing the persistent standby connections of
+        // both endpoints while the session keeps running on the other relay),
+        // then the session relay dies permanently, then the standby is
+        // restarted to carry the replacement session.
+        let (standby_proxy_addr, standby_server_addr, standby_url) = if session_on_relay_a {
+            let addr = relay_b_proxy.as_ref().expect("relay B proxy").addr;
+            relay_b_proxy.take().expect("relay B proxy").stop().await;
+            // The session must keep riding relay A across the standby stop.
+            tokio::time::sleep(Duration::from_millis(500)).await;
+            relay_a_proxy.take().expect("relay A proxy").stop().await;
+            relay_a
+                .take()
+                .expect("relay A")
+                .shutdown()
+                .await
+                .expect("stop relay A");
+            (addr, relay_b_addr, relay_b_url.clone())
+        } else {
+            let addr = relay_a_proxy.as_ref().expect("relay A proxy").addr;
+            relay_a_proxy.take().expect("relay A proxy").stop().await;
+            // The session must keep riding relay B across the standby stop.
+            tokio::time::sleep(Duration::from_millis(500)).await;
+            relay_b_proxy.take().expect("relay B proxy").stop().await;
+            relay_b
+                .take()
+                .expect("relay B")
+                .shutdown()
+                .await
+                .expect("stop relay B");
+            (addr, relay_a_addr, relay_a_url.clone())
+        };
+        let restarted_proxy =
+            RestartableTcpProxy::start(standby_proxy_addr, standby_server_addr).await;
 
         let after = tokio::time::timeout(
             Duration::from_secs(15),
-            node_connection(relay_b_url.to_string()),
+            node_connection(standby_url.to_string()),
         )
         .await
-        .expect("Agent did not fail over to relay B within fifteen seconds");
-        let after_connected_at = after.connected_at.expect("relay B connected_at");
+        .expect("Agent did not fail over to the restarted standby within fifteen seconds");
+        let after_connected_at = after.connected_at.expect("standby connected_at");
         assert!(
             (after_connected_at.seconds, after_connected_at.nanos)
                 > (before_connected_at.seconds, before_connected_at.nanos),
-            "relay B must carry a replacement session, not a path migration"
+            "the restarted standby must carry a replacement session, not a path migration"
         );
         assert_eq!(after.endpoint_id, agent_key.public().as_bytes());
         assert_eq!(
@@ -5164,8 +5240,13 @@ mod tests {
         ocservia_transportd::shutdown(&service, router)
             .await
             .expect("shutdown relay failover transportd");
-        relay_b_proxy.stop().await;
-        relay_b.shutdown().await.expect("stop relay B");
+        restarted_proxy.stop().await;
+        if let Some(relay) = relay_b.take() {
+            relay.shutdown().await.expect("stop relay B");
+        }
+        if let Some(relay) = relay_a.take() {
+            relay.shutdown().await.expect("stop relay A");
+        }
         std::fs::remove_file(&privd_socket).expect("remove privd snapshot socket");
         std::fs::remove_dir_all(directory).expect("remove relay failover fixture");
     }
