@@ -1453,11 +1453,15 @@ relay_probe_named() {
   local relay="${1:?relay name is required}"
   local node="${2:?node id is required}"
   local output="${3:?relay observation destination is required}"
-  local expected_endpoint temporary
+  local expected_endpoint temporary error_file error_temporary
   expected_endpoint="$(awk -F'\t' -v node="${node}" '$2 == node {print $3; exit}' "${NODES_FILE}")"
   [[ "${expected_endpoint}" =~ ^[0-9a-f]{64}$ ]] || return 1
   temporary="${output}.$$"
-  if ! g6rd_probe_node_connection relay "${node}" >"${temporary}" 2>/dev/null; then
+  error_file="${output}.last-error.log"
+  error_temporary="${error_file}.$$"
+  if ! g6rd_probe_node_connection relay "${node}" \
+    >"${temporary}" 2>"${error_temporary}"; then
+    mv -f -- "${error_temporary}" "${error_file}"
     rm -f -- "${temporary}"
     return 1
   fi
@@ -1481,9 +1485,15 @@ relay_probe_named() {
       and (.negotiated_capabilities | type == "array"
         and index("ocserv.fencing.v2") != null))
   ' "${temporary}" >/dev/null; then
-    rm -f -- "${temporary}"
+    {
+      printf '%s\n' "node connection probe returned a non-matching observation"
+      cat "${error_temporary}"
+    } >"${error_file}"
+    mv -f -- "${temporary}" "${output}.last-invalid.json"
+    rm -f -- "${error_temporary}"
     return 1
   fi
+  rm -f -- "${error_temporary}" "${error_file}" "${output}.last-invalid.json"
   mv -f -- "${temporary}" "${output}"
 }
 

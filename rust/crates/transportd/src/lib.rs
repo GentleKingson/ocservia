@@ -5263,22 +5263,31 @@ mod tests {
 
     #[tokio::test]
     #[allow(clippy::too_many_lines)]
-    async fn persistent_relay_reconnects_after_same_url_restart() {
+    async fn persistent_replacement_reconnects_after_post_fault_refusal() {
         const TEST_ALPN: &[u8] = b"ocservia/relay-restart-test/1";
 
-        let (_relay_map, _relay_url, relay) = iroh::test_utils::run_relay_server_with(false)
+        let (relay_a_map, relay_a_url, relay_a) = iroh::test_utils::run_relay_server_with(false)
             .await
-            .expect("start backing relay");
-        let relay_addr = relay.https_addr().expect("relay HTTPS address");
-        let proxy = RestartableTcpProxy::start("127.0.0.1:0".parse().unwrap(), relay_addr).await;
+            .expect("start active relay");
+        let (_relay_b_map, _relay_b_url, relay_b) = iroh::test_utils::run_relay_server_with(false)
+            .await
+            .expect("start replacement relay");
+        let relay_b_addr = relay_b.https_addr().expect("relay B HTTPS address");
+        let proxy = RestartableTcpProxy::start("127.0.0.1:0".parse().unwrap(), relay_b_addr).await;
         let proxy_url: iroh::RelayUrl = format!("https://{}", proxy.addr)
             .parse()
             .expect("proxy relay URL");
-        let relay_map =
-            RelayMap::from_iter([iroh_relay::RelayConfig::new(proxy_url.clone(), None)]);
+        let proxy_addr = proxy.stop().await;
+        let relay_b_config = Arc::new(iroh_relay::RelayConfig::new(proxy_url.clone(), None));
+        let relay_map = RelayMap::from_iter([
+            relay_a_map
+                .get(&relay_a_url)
+                .expect("active relay configuration"),
+            relay_b_config.clone(),
+        ]);
 
         let server = Endpoint::builder(presets::Minimal)
-            .relay_mode(RelayMode::Custom(relay_map.clone()))
+            .relay_mode(RelayMode::Custom(relay_map))
             .keep_relays_connected(true)
             .ca_tls_config(CaTlsConfig::insecure_skip_verify())
             .clear_address_lookup()
@@ -5286,10 +5295,10 @@ mod tests {
             .alpns(vec![TEST_ALPN.to_vec()])
             .bind()
             .await
-            .expect("build persistent relay server");
+            .expect("build dual-relay persistent server");
         tokio::time::timeout(Duration::from_secs(10), server.online())
             .await
-            .expect("persistent server relay online");
+            .expect("persistent server active relay online");
 
         let echo = tokio::spawn({
             let server = server.clone();
@@ -5315,14 +5324,14 @@ mod tests {
         let peer_key = SecretKey::generate();
         let first_peer = Endpoint::builder(presets::Minimal)
             .secret_key(peer_key.clone())
-            .relay_mode(RelayMode::Custom(relay_map.clone()))
+            .relay_mode(RelayMode::Custom(relay_a_map))
             .ca_tls_config(CaTlsConfig::insecure_skip_verify())
             .clear_address_lookup()
             .clear_ip_transports()
             .bind()
             .await
             .expect("build first relay peer");
-        let target = iroh::EndpointAddr::new(server.id()).with_relay_url(proxy_url.clone());
+        let target = iroh::EndpointAddr::new(server.id()).with_relay_url(relay_a_url);
         let first = first_peer
             .connect(target, TEST_ALPN)
             .await
@@ -5334,13 +5343,19 @@ mod tests {
         send.finish().expect("finish first payload");
         assert_eq!(recv.read_to_end(1024).await.unwrap(), b"before-restart");
 
-        let proxy_addr = proxy.stop().await;
+        relay_a.shutdown().await.expect("stop active relay");
         first.close(0_u32.into(), b"relay restarting");
         first_peer.close().await;
-        let replacement_proxy = RestartableTcpProxy::start(proxy_addr, relay_addr).await;
+        let refused = TcpStream::connect(proxy_addr)
+            .await
+            .expect_err("stopped relay URL unexpectedly accepted a connection");
+        assert_eq!(refused.kind(), std::io::ErrorKind::ConnectionRefused);
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let replacement_proxy = RestartableTcpProxy::start(proxy_addr, relay_b_addr).await;
+        let replacement_map = RelayMap::from_iter([relay_b_config]);
         let replacement = Endpoint::builder(presets::Minimal)
             .secret_key(peer_key)
-            .relay_mode(RelayMode::Custom(relay_map))
+            .relay_mode(RelayMode::Custom(replacement_map))
             .ca_tls_config(CaTlsConfig::insecure_skip_verify())
             .clear_address_lookup()
             .clear_ip_transports()
@@ -5371,7 +5386,7 @@ mod tests {
         server.close().await;
         drop(connections);
         replacement_proxy.stop().await;
-        relay.shutdown().await.expect("stop backing relay");
+        relay_b.shutdown().await.expect("stop replacement relay");
     }
 
     #[tokio::test]

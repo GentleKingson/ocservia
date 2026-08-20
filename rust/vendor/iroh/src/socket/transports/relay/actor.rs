@@ -83,6 +83,11 @@ const SEND_DATAGRAM_BATCH_SIZE: usize = 20;
 /// This includes DNS, dialing the server, upgrading the connection, and completing the
 /// handshake.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+// Persistent custom relays are recovery paths, not opportunistic paths. Keep
+// their retry sleep bounded so one failed dial plus backoff remains well below
+// a 30-second failover budget, including the backoff crate's full jitter.
+const PERSISTENT_RELAY_MAX_RETRY_DELAY: Duration = Duration::from_secs(2);
+const DEFAULT_RELAY_MAX_RETRY_DELAY: Duration = Duration::from_secs(16);
 
 /// Time after which the [`ActiveRelayActor`] will drop undeliverable datagrams.
 ///
@@ -335,7 +340,7 @@ impl ActiveRelayActor {
     ///
     /// Primarily switches between the dialing and connected states.
     async fn run(mut self) {
-        let mut backoff = Self::build_backoff();
+        let mut backoff = Self::build_backoff(self.keep_connected);
 
         while let Err(err) = self.run_once().await {
             warn!(
@@ -362,16 +367,21 @@ impl ActiveRelayActor {
             } else {
                 // If the relay connection remained established long enough so that we received a pong
                 // from the relay server, we reset the backoff and attempt to reconnect immediately.
-                backoff = Self::build_backoff();
+                backoff = Self::build_backoff(self.keep_connected);
             }
         }
         debug!("exiting");
     }
 
-    fn build_backoff() -> impl Backoff {
+    fn build_backoff(keep_connected: bool) -> impl Backoff {
+        let max_delay = if keep_connected {
+            PERSISTENT_RELAY_MAX_RETRY_DELAY
+        } else {
+            DEFAULT_RELAY_MAX_RETRY_DELAY
+        };
         ExponentialBuilder::new()
             .with_min_delay(Duration::from_millis(10))
-            .with_max_delay(Duration::from_secs(16))
+            .with_max_delay(max_delay)
             .with_jitter()
             .without_max_times()
             .build()
@@ -1943,5 +1953,17 @@ mod tests {
             watch.get(),
             Some(RelayStatus::new(b, RelayConnectionState::Connected)),
         );
+    }
+
+    #[test]
+    fn persistent_relay_retry_sleep_stays_inside_recovery_budget() {
+        let mut backoff = ActiveRelayActor::build_backoff(true);
+        for _ in 0..128 {
+            let delay = backoff.next().expect("persistent retries are unbounded");
+            assert!(
+                delay <= PERSISTENT_RELAY_MAX_RETRY_DELAY * 2,
+                "full-jitter persistent retry exceeded its four-second bound: {delay:?}"
+            );
+        }
     }
 }
