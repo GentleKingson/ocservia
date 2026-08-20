@@ -1432,9 +1432,17 @@ SHIM
       }
       pid="$(<"${pid_file}")"
       if kill -0 "${pid}" 2>/dev/null; then
-        echo "sampler process-group timeout left process ${pid} alive" >&2
-        kill -KILL "${pid}" 2>/dev/null || :
-        exit 1
+        # kill -0 also answers for a killed-but-unreaped zombie. The KILLed
+        # subshell is reparented once its parent dies, so reaping latency
+        # must not turn a successfully killed process into a false alarm.
+        stat_line="$(<"/proc/${pid}/stat")" || stat_line=""
+        scheduler_state="${stat_line##*) }"
+        scheduler_state="${scheduler_state%% *}"
+        if [[ -z "${stat_line}" || "${scheduler_state}" != Z ]]; then
+          echo "sampler process-group timeout left process ${pid} alive" >&2
+          kill -KILL "${pid}" 2>/dev/null || :
+          exit 1
+        fi
       fi
     done
   )
