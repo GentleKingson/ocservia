@@ -311,10 +311,11 @@ services:
     environment:
       # The binary default ("info,iroh=warn") hides the relay-transport and
       # path-selection internals that relay-failover diagnosis needs: relay
-      # connection transitions, selected-path changes, and connection
-      # close events.
+      # connection transitions, selected-path changes, and the noq
+      # handshake-decision logs (initial authentication, path adoption,
+      # multipath discards during handshake).
       RUST_LOG: >-
-        info,iroh=warn,iroh::socket::transports::relay::actor=info,iroh::socket::remote_map::remote_state=debug,iroh::_events=debug
+        info,iroh=warn,iroh::socket::transports::relay::actor=info,iroh::socket::remote_map::remote_state=debug,noq_proto::endpoint=debug,noq_proto::connection=debug
     command:
       - --socket
       - /run/ocserv-platform/transportd.sock
