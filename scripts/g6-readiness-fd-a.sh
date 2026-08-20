@@ -135,14 +135,15 @@ relay_prior_connection_retired() {
          AND owner_epoch=${prior_owner_epoch}
          AND lease_until<=clock_timestamp() THEN 'expired'
        WHEN connection_id<>decode('${prior_connection_id}','hex')
-         AND owner_epoch>${prior_owner_epoch} THEN 'changed'
+         AND owner_epoch>${prior_owner_epoch}
+         AND lease_until<=clock_timestamp() THEN 'changed-expired'
        ELSE 'live-or-invalid'
      END
      FROM connection_owner_fencing
      WHERE node_id=decode('${node//-/}','hex')")"; then
     return 1
   fi
-  [[ "${state}" == expired ]]
+  [[ "${state}" == expired || "${state}" == changed-expired ]]
 }
 
 peer_node_id() {

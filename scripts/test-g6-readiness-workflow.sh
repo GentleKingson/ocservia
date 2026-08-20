@@ -915,10 +915,11 @@ for token in \
   'owner_epoch=${prior_owner_epoch}' \
   "connection_id<>decode('\${prior_connection_id}','hex')" \
   'owner_epoch>${prior_owner_epoch}' \
+  'AND lease_until<=clock_timestamp()' \
   "THEN 'expired'" \
-  "THEN 'changed'" \
+  "THEN 'changed-expired'" \
   "ELSE 'live-or-invalid'" \
-  '[[ "${state}" == expired ]]'; do
+  '[[ "${state}" == expired || "${state}" == changed-expired ]]'; do
   grep -qF "${token}" <<<"${relay_retirement_probe}" || {
     echo "the selected relay Agent retirement gate is incomplete: ${token}" >&2
     exit 1
@@ -2493,7 +2494,7 @@ printf '%s\n' fixture-owner-password \
 rm -rf -- "${relay_dispatch_fixture}"
 
 relay_readiness_gate_fixture="$(mktemp -d)"
-for relay_readiness_stage in baseline stop retirement missing changed start topology success; do
+for relay_readiness_stage in baseline stop retirement missing changed-live changed-expired start topology success; do
   (
     export COMPOSE_PROJECT=g6-rd-relay-readiness
     export RUN_ID="relay-readiness-${relay_readiness_stage}-fd-a"
@@ -2547,8 +2548,10 @@ for relay_readiness_stage in baseline stop retirement missing changed start topo
           printf '%s\n' live-or-invalid
         elif [[ "${relay_readiness_stage}" == missing ]]; then
           printf ''
-        elif [[ "${relay_readiness_stage}" == changed ]]; then
-          printf '%s\n' changed
+        elif [[ "${relay_readiness_stage}" == changed-live ]]; then
+          printf '%s\n' live-or-invalid
+        elif [[ "${relay_readiness_stage}" == changed-expired ]]; then
+          printf '%s\n' changed-expired
         else
           printf '%s\n' expired
         fi
@@ -2585,7 +2588,8 @@ for relay_readiness_stage in baseline stop retirement missing changed start topo
         exit 1
       }
     fi
-    if [[ "${relay_readiness_stage}" == start \
+    if [[ "${relay_readiness_stage}" == changed-expired \
+      || "${relay_readiness_stage}" == start \
       || "${relay_readiness_stage}" == topology \
       || "${relay_readiness_stage}" == success ]]; then
       grep -qxF 'agent-compose start agent-fd-a-01' "${G6RD_STATE}/events" || {
@@ -2596,7 +2600,8 @@ for relay_readiness_stage in baseline stop retirement missing changed start topo
       echo "relay readiness started the selected Agent before proving retirement" >&2
       exit 1
     fi
-    if [[ "${relay_readiness_stage}" == success ]]; then
+    if [[ "${relay_readiness_stage}" == success \
+      || "${relay_readiness_stage}" == changed-expired ]]; then
       [[ "${status}" == 0 ]] || {
         echo "relay readiness rejected a retired prior connection" >&2
         exit 1
