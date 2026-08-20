@@ -32,7 +32,7 @@ zeroize.workspace = true
 ed25519-dalek.workspace = true
 futures-util.workspace = true
 iroh = { workspace = true, features = ["test-utils"] }
-iroh-relay.workspace = true
+iroh-relay = { workspace = true, features = ["test-utils"] }
 ocservia-transportd = { version = "=0.1.0", path = "../transportd" }
 tonic.workspace = true
 

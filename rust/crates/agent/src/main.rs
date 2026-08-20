@@ -1,12 +1,16 @@
 use std::collections::HashSet;
 use std::env;
+use std::future::Future;
 use std::io;
 use std::os::unix::fs::{MetadataExt as _, OpenOptionsExt};
 use std::path::{Path, PathBuf};
+use std::pin::Pin;
 use std::time::{Duration, SystemTime};
 
 use iroh::endpoint::{QuicTransportConfig, RelayMode, VarInt, presets};
-use iroh::{Endpoint, EndpointAddr, EndpointId, RelayMap, RelayUrl};
+use iroh::{
+    Endpoint, EndpointAddr, EndpointId, RelayMap, RelayUrl, SecretKey, TransportAddr, Watcher,
+};
 use ocservia_agent::{
     CommandContext, CommandError, CommandExecutor, ExternalEffectObservation, ExternalPreparation,
     MAX_COMMAND_BYTES, MAX_WRITE_QUEUE, PrivdClient,
@@ -47,6 +51,7 @@ use zeroize::Zeroizing;
 const AGENT_ALPN: &[u8] = b"ocserv-platform/agent/1";
 const ENROLL_ALPN: &[u8] = b"ocserv-platform/enroll/1";
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
+const RELAY_FAILOVER_POLL_INTERVAL: Duration = Duration::from_secs(1);
 const CONNECTION_FENCING_CAPABILITY: &str = "ocserv.fencing.v2";
 const ARTIFACT_FRAME_MASK: u32 = 3 << 30;
 const ARTIFACT_FETCH_FRAME: u32 = 1 << 31;
@@ -95,65 +100,32 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let transport = QuicTransportConfig::builder()
         .max_concurrent_bidi_streams(VarInt::from_u32(u32::try_from(MAX_WRITE_QUEUE)?))
         .build();
-    // The EndpointID remains the authenticated controller identity. Dedicated
-    // relay URLs are also safe addressing hints and keep redial independent of
-    // public address discovery during a relay or network-domain transition.
-    let controller = controller_address(controller, &config.relay_mode);
     let boot_id = ocservia_agent::read_boot_id().await?;
     let os_release = ocservia_agent::read_os_release().await?;
     let agent_instance_id = Uuid::now_v7();
-    let run = async {
-        let mut attempt = 0_u32;
-        let backoff = ocservia_agent::Backoff::default();
-        loop {
-            let keep_relays_connected = keep_dedicated_relays_connected(&config.relay_mode);
-            let endpoint = match with_relay_tls_roots(
-                Endpoint::builder(presets::N0),
-                relay_tls_roots.as_ref().clone(),
-            )
-            .secret_key(identity.secret_key().clone())
-            .relay_mode(config.relay_mode.clone())
-            .keep_relays_connected(keep_relays_connected)
-            .transport_config(transport.clone())
-            .bind()
-            .await
-            {
-                Ok(endpoint) => endpoint,
-                Err(error) => {
-                    tracing::warn!(error = %error, attempt, "agent endpoint creation failed");
-                    attempt = attempt.saturating_add(1);
-                    let delay = backoff.delay(attempt, &mut rand::rng());
-                    tokio::time::sleep(delay).await;
-                    continue;
-                }
-            };
-            let mut session = SessionContext {
-                node_id,
-                endpoint_id: identity.endpoint_id(),
-                privd: &privd,
-                journal: &mut journal,
-                command_executor: &mut command_executor,
-                boot_id: &boot_id,
-                os_release: &os_release,
-                agent_instance_id,
-                command_keys: &command_keys,
-                sealing_keys: &config.sealing_keys,
-                fence_epoch_floor: &mut fence_epoch_floor,
-                synthetic_barrier_file: config.synthetic_barrier_file.as_deref(),
-                startup_observations: &mut startup_observations,
-            };
-            match connect_once(&endpoint, controller.clone(), &mut session).await {
-                Ok(()) => attempt = 0,
-                Err(error) => {
-                    tracing::warn!(error = %error, attempt, "controller connection ended");
-                    attempt = attempt.saturating_add(1);
-                }
-            }
-            endpoint.close().await;
-            let delay = backoff.delay(attempt, &mut rand::rng());
-            tokio::time::sleep(delay).await;
-        }
+    let bind_endpoint = agent_endpoint_factory(
+        identity.secret_key().clone(),
+        config.relay_mode.clone(),
+        transport,
+        relay_tls_roots.as_ref().clone(),
+    );
+    let mut session = SessionContext {
+        node_id,
+        endpoint_id: identity.endpoint_id(),
+        privd: &privd,
+        journal: &mut journal,
+        command_executor: &mut command_executor,
+        boot_id: &boot_id,
+        os_release: &os_release,
+        agent_instance_id,
+        command_keys: &command_keys,
+        sealing_keys: &config.sealing_keys,
+        fence_epoch_floor: &mut fence_epoch_floor,
+        synthetic_barrier_file: config.synthetic_barrier_file.as_deref(),
+        startup_observations: &mut startup_observations,
     };
+    let run =
+        supervise_controller_sessions(bind_endpoint, controller, &config.relay_mode, &mut session);
     tokio::select! {
         () = run => {}
         () = shutdown_signal() => tracing::info!("agent shutdown requested"),
@@ -452,6 +424,7 @@ fn supported_capabilities() -> Vec<String> {
         .collect()
 }
 
+#[allow(clippy::too_many_lines)]
 async fn connect_once(
     endpoint: &Endpoint,
     controller: EndpointAddr,
@@ -509,12 +482,28 @@ async fn connect_once(
         "agent session accepted"
     );
     let mut heartbeat = tokio::time::interval(Duration::from_secs(30));
+    // Dedicated-relay health is rechecked while the session is idle so a dead
+    // relay is failed over before the QUIC idle timeout notices the loss.
+    let mut relay_watchdog = tokio::time::interval(RELAY_FAILOVER_POLL_INTERVAL);
+    relay_watchdog.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let session_expiry = wait_for_session_expiry(&session_mode);
     tokio::pin!(session_expiry);
     let mut sequence = 0_u64;
     loop {
         tokio::select! {
             _ = connection.closed() => return Ok(()),
+            _ = relay_watchdog.tick() => {
+                let Some(failover) = relay_failover_plan(endpoint, &connection) else {
+                    continue;
+                };
+                tracing::warn!(
+                    failed_relay = %failover.failed_relay,
+                    healthy_relays = ?failover.healthy_relays,
+                    "controller session relay failed; redialing over the healthy standby"
+                );
+                connection.close(VarInt::from_u32(0x10b), b"relay failover redial");
+                return Err(failover.into());
+            },
             expiry = &mut session_expiry => {
                 expiry?;
                 return Err(invalid("Controller session grant expired").into());
@@ -551,6 +540,188 @@ async fn connect_once(
             },
         }
     }
+}
+
+/// Builds the production Agent endpoint factory.
+///
+/// The factory is indirect so tests can pin relay-only transports while
+/// production keeps the configured preset, dedicated relays, and relay CA
+/// roots.
+fn agent_endpoint_factory(
+    secret_key: SecretKey,
+    relay_mode: RelayMode,
+    transport: QuicTransportConfig,
+    relay_tls_roots: Vec<rustls_pki_types::CertificateDer<'static>>,
+) -> EndpointFactory {
+    Box::new(move || {
+        let secret_key = secret_key.clone();
+        let relay_mode = relay_mode.clone();
+        let transport = transport.clone();
+        let relay_tls_roots = relay_tls_roots.clone();
+        Box::pin(async move {
+            let keep_relays_connected = keep_dedicated_relays_connected(&relay_mode);
+            with_relay_tls_roots(Endpoint::builder(presets::N0), relay_tls_roots)
+                .secret_key(secret_key)
+                .relay_mode(relay_mode)
+                .keep_relays_connected(keep_relays_connected)
+                .transport_config(transport)
+                .bind()
+                .await
+        })
+    })
+}
+
+/// The process-lifetime Agent endpoint factory used by the session supervisor.
+type EndpointFactory = Box<
+    dyn FnMut() -> Pin<Box<dyn Future<Output = Result<Endpoint, iroh::endpoint::BindError>> + Send>>
+        + Send,
+>;
+
+/// Supervises controller sessions for one Agent process.
+///
+/// The Iroh Endpoint outlives every controller session: `keep_relays_connected`
+/// standbys are Endpoint state and must survive a session redial, so the
+/// Endpoint is rebuilt only when it is actually closed, never between
+/// sessions. A session whose dedicated relay failed while a standby stays
+/// connected is redialed immediately over the healthy relay instead of waiting
+/// for the QUIC idle timeout or a transport-level failure.
+async fn supervise_controller_sessions(
+    mut bind_endpoint: EndpointFactory,
+    controller: EndpointId,
+    relay_mode: &RelayMode,
+    session: &mut SessionContext<'_>,
+) {
+    let mut attempt = 0_u32;
+    let backoff = ocservia_agent::Backoff::default();
+    let mut endpoint: Option<Endpoint> = None;
+    loop {
+        if endpoint.as_ref().is_none_or(Endpoint::is_closed) {
+            match bind_endpoint().await {
+                Ok(bound) => endpoint = Some(bound),
+                Err(error) => {
+                    tracing::warn!(error = %error, attempt, "agent endpoint creation failed");
+                    attempt = attempt.saturating_add(1);
+                    let delay = backoff.delay(attempt, &mut rand::rng());
+                    tokio::time::sleep(delay).await;
+                    continue;
+                }
+            }
+        }
+        let endpoint = endpoint.as_ref().expect("agent endpoint is bound");
+        let target = controller_dial_target(controller, relay_mode, endpoint);
+        let mut relay_failover = false;
+        match connect_once(endpoint, target, session).await {
+            Ok(()) => attempt = 0,
+            Err(error) => {
+                if error.downcast_ref::<RelayFailoverError>().is_some() {
+                    relay_failover = true;
+                    tracing::warn!(
+                        error = %error,
+                        "controller session moved to a healthy dedicated relay"
+                    );
+                } else {
+                    tracing::warn!(error = %error, attempt, "controller connection ended");
+                    attempt = attempt.saturating_add(1);
+                }
+            }
+        }
+        let delay = if relay_failover {
+            // The healthy standby is already connected: redial without the
+            // exponential backoff a genuine controller failure deserves.
+            backoff.delay(0, &mut rand::rng())
+        } else {
+            backoff.delay(attempt, &mut rand::rng())
+        };
+        tokio::time::sleep(delay).await;
+    }
+}
+
+/// Session-end instruction telling the supervisor to redial immediately over
+/// a healthy dedicated standby relay.
+#[derive(Debug)]
+struct RelayFailoverError {
+    failed_relay: RelayUrl,
+    healthy_relays: Vec<RelayUrl>,
+}
+
+impl std::fmt::Display for RelayFailoverError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "controller session relay {} failed while a standby is connected",
+            self.failed_relay
+        )
+    }
+}
+
+impl std::error::Error for RelayFailoverError {}
+
+/// Detects an active session whose selected relay path no longer matches a
+/// healthy home relay.
+///
+/// Only the home relay's state is publicly observable, but with dedicated
+/// standbys kept hot the relay actor moves the home relay to a connected
+/// standby as soon as the current one fails. A session still riding the
+/// failed relay at that point must be redialed over the new home relay
+/// instead of waiting for the QUIC idle timeout.
+fn relay_failover_plan(
+    endpoint: &Endpoint,
+    connection: &iroh::endpoint::Connection,
+) -> Option<RelayFailoverError> {
+    let home = endpoint.home_relay_status().get().into_iter().next()?;
+    if !home.is_connected() {
+        return None;
+    }
+    let failed_relay = connection
+        .paths()
+        .iter()
+        .find(iroh::endpoint::Path::is_selected)
+        .filter(iroh::endpoint::Path::is_relay)
+        .and_then(|path| match path.remote_addr() {
+            TransportAddr::Relay(url) => Some(url.clone()),
+            _ => None,
+        })?;
+    if home.url() == &failed_relay {
+        return None;
+    }
+    Some(RelayFailoverError {
+        failed_relay,
+        healthy_relays: vec![home.url().clone()],
+    })
+}
+
+/// Builds the controller dial target from the configured dedicated relays.
+///
+/// The `EndpointID` remains the authenticated controller identity. Dedicated
+/// relay URLs are safe addressing hints and keep redial independent of public
+/// address discovery during a relay or network-domain transition. While a
+/// dedicated home relay is connected it becomes the only hint, so a redial
+/// after a relay fault never spends its connect deadline on the failed relay.
+fn controller_dial_target(
+    controller: EndpointId,
+    relay_mode: &RelayMode,
+    endpoint: &Endpoint,
+) -> EndpointAddr {
+    let mut address = EndpointAddr::new(controller);
+    let RelayMode::Custom(relays) = relay_mode else {
+        return address;
+    };
+    let home = endpoint.home_relay_status().get().into_iter().next();
+    if keep_dedicated_relays_connected(relay_mode)
+        && home
+            .as_ref()
+            .is_some_and(iroh::endpoint::RelayStatus::is_connected)
+    {
+        return address.with_relay_url(
+            home.expect("home relay presence was just checked")
+                .url()
+                .clone(),
+        );
+    }
+    for relay in relays.urls::<Vec<_>>() {
+        address = address.with_relay_url(relay);
+    }
+    address
 }
 
 fn negotiate_and_activate_session(
@@ -4142,52 +4313,66 @@ mod tests {
         ));
     }
 
+    async fn answer_snapshot(mut stream: tokio::net::UnixStream) {
+        let request: PrivdRequest = read_frame(&mut stream).await.expect("snapshot request");
+        let result = match request.operation {
+            Some(privd_request::Operation::ServiceStatus(_)) => {
+                privd_response::Result::ServiceStatus(ServiceStatus::default())
+            }
+            Some(privd_request::Operation::OcservVersion(_)) => {
+                privd_response::Result::OcservVersion(OcservVersion::default())
+            }
+            Some(privd_request::Operation::SessionList(_)) => {
+                privd_response::Result::SessionList(SessionList::default())
+            }
+            Some(privd_request::Operation::IpBanList(_)) => {
+                privd_response::Result::IpBanList(IpBanList::default())
+            }
+            Some(privd_request::Operation::ConfigFingerprint(_)) => {
+                privd_response::Result::ConfigFingerprint(ConfigFingerprint::default())
+            }
+            Some(privd_request::Operation::UserList(_)) => {
+                privd_response::Result::UserList(UserList::default())
+            }
+            Some(privd_request::Operation::GroupList(_)) => {
+                privd_response::Result::GroupList(GroupList::default())
+            }
+            _ => panic!("unexpected snapshot operation"),
+        };
+        write_frame(
+            &mut stream,
+            &PrivdResponse {
+                request_id: request.request_id,
+                privileged_result_proof: None,
+                result: Some(result),
+            },
+        )
+        .await
+        .expect("snapshot response");
+    }
+
     async fn serve_snapshot(listener: tokio::net::UnixListener) {
         let mut handlers = tokio::task::JoinSet::new();
         for _ in 0..7 {
-            let (mut stream, _) = listener.accept().await.expect("accept snapshot request");
-            handlers.spawn(async move {
-                let request: PrivdRequest =
-                    read_frame(&mut stream).await.expect("snapshot request");
-                let result = match request.operation {
-                    Some(privd_request::Operation::ServiceStatus(_)) => {
-                        privd_response::Result::ServiceStatus(ServiceStatus::default())
-                    }
-                    Some(privd_request::Operation::OcservVersion(_)) => {
-                        privd_response::Result::OcservVersion(OcservVersion::default())
-                    }
-                    Some(privd_request::Operation::SessionList(_)) => {
-                        privd_response::Result::SessionList(SessionList::default())
-                    }
-                    Some(privd_request::Operation::IpBanList(_)) => {
-                        privd_response::Result::IpBanList(IpBanList::default())
-                    }
-                    Some(privd_request::Operation::ConfigFingerprint(_)) => {
-                        privd_response::Result::ConfigFingerprint(ConfigFingerprint::default())
-                    }
-                    Some(privd_request::Operation::UserList(_)) => {
-                        privd_response::Result::UserList(UserList::default())
-                    }
-                    Some(privd_request::Operation::GroupList(_)) => {
-                        privd_response::Result::GroupList(GroupList::default())
-                    }
-                    _ => panic!("unexpected snapshot operation"),
-                };
-                write_frame(
-                    &mut stream,
-                    &PrivdResponse {
-                        request_id: request.request_id,
-                        privileged_result_proof: None,
-                        result: Some(result),
-                    },
-                )
-                .await
-                .expect("snapshot response");
-            });
+            let (stream, _) = listener.accept().await.expect("accept snapshot request");
+            handlers.spawn(answer_snapshot(stream));
         }
         while let Some(result) = handlers.join_next().await {
             result.expect("snapshot handler");
         }
+    }
+
+    /// Serves snapshot requests for the whole test, so every redialed
+    /// controller session can keep taking privd heartbeats.
+    async fn serve_snapshots(listener: tokio::net::UnixListener) {
+        let mut handlers = tokio::task::JoinSet::new();
+        loop {
+            let Ok((stream, _)) = listener.accept().await else {
+                break;
+            };
+            handlers.spawn(answer_snapshot(stream));
+        }
+        while handlers.join_next().await.is_some() {}
     }
 
     #[tokio::test]
@@ -4711,6 +4896,278 @@ mod tests {
         drop(connections);
         relay_b_proxy.stop().await;
         relay_b.shutdown().await.expect("stop relay B");
+    }
+
+    /// Starts a relay whose self-signed certificate is returned so controllers
+    /// can pin it as an extra relay TLS root.
+    async fn start_private_relay() -> (
+        iroh_relay::server::Server,
+        std::net::SocketAddr,
+        rustls_pki_types::CertificateDer<'static>,
+    ) {
+        let (certs, server_config) =
+            iroh_relay::server::testing::self_signed_tls_certs_and_config();
+        let localhost = (std::net::Ipv4Addr::LOCALHOST, 0);
+        let mut relay = iroh_relay::server::RelayConfig::new(localhost);
+        relay.tls = Some(iroh_relay::server::TlsConfig::new(
+            localhost,
+            iroh_relay::server::CertConfig::Manual { server_config },
+        ));
+        relay.key_cache_capacity = Some(1024);
+        relay.access = std::sync::Arc::new(iroh_relay::server::AllowAll);
+        let mut config = iroh_relay::server::ServerConfig::default();
+        config.relay = Some(relay);
+        let server = iroh_relay::server::Server::spawn(config)
+            .await
+            .expect("spawn private relay");
+        let address = server.https_addr().expect("private relay https address");
+        (
+            server,
+            address,
+            certs.into_iter().next().expect("private relay certificate"),
+        )
+    }
+
+    #[tokio::test]
+    #[allow(clippy::similar_names, clippy::too_many_lines)]
+    async fn agent_supervisor_redials_controller_over_hot_standby_relay() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let temp_root = if cfg!(target_os = "macos") {
+            "/private/tmp"
+        } else {
+            "/tmp"
+        };
+        let directory = PathBuf::from(temp_root).join(format!("ocsa-{}", Uuid::now_v7().simple()));
+        std::fs::create_dir(&directory).expect("create relay failover fixture");
+        let privd_socket = PathBuf::from(format!("/tmp/ocsm-{}.sock", Uuid::now_v7().simple()));
+        let privd_listener =
+            tokio::net::UnixListener::bind(&privd_socket).expect("bind privd snapshot fixture");
+        let privd_server = tokio::spawn(serve_snapshots(privd_listener));
+        let privd =
+            PrivdClient::new(privd_socket.clone(), Duration::from_secs(2)).expect("privd client");
+        let mut startup_observations = Some(
+            require_healthy_snapshot(privd.snapshot().await.expect("startup snapshot"))
+                .expect("healthy startup snapshot"),
+        );
+
+        let (relay_a, relay_a_addr, relay_a_cert) = start_private_relay().await;
+        let relay_a_url: RelayUrl = format!("https://{relay_a_addr}")
+            .parse()
+            .expect("relay A URL");
+        let (relay_b, relay_b_addr, relay_b_cert) = start_private_relay().await;
+        // Relay B stays disabled behind a stopped proxy until the fault phase,
+        // matching the G6 pre-fault topology where only relay A carries the
+        // controller session.
+        let disabled_proxy =
+            RestartableTcpProxy::start("127.0.0.1:0".parse().unwrap(), relay_b_addr).await;
+        let relay_b_proxy_addr = disabled_proxy.stop().await;
+        let refused = TcpStream::connect(relay_b_proxy_addr)
+            .await
+            .expect_err("disabled relay B accepted a connection");
+        assert_eq!(refused.kind(), io::ErrorKind::ConnectionRefused);
+        let relay_b_url: RelayUrl = format!("https://{relay_b_proxy_addr}")
+            .parse()
+            .expect("relay B URL");
+        let relay_map = RelayMap::from_iter([
+            iroh_relay::RelayConfig::new(relay_a_url.clone(), None),
+            iroh_relay::RelayConfig::new(relay_b_url.clone(), None),
+        ]);
+        assert!(keep_dedicated_relays_connected(&RelayMode::Custom(
+            relay_map.clone()
+        )));
+
+        let node_id = Uuid::now_v7();
+        let agent_key = iroh::SecretKey::generate();
+        let controller_key = iroh::SecretKey::generate();
+        let policy = IdentityPolicy::new(
+            HashMap::from([(agent_key.public(), node_id.as_bytes().to_vec())]),
+            HashSet::new(),
+        );
+        let service = IrohTransportService::new_with_policy(16, policy.clone());
+        let router = ocservia_transportd::build_router_with_tls_roots(
+            controller_key,
+            RelayMode::Custom(relay_map.clone()),
+            policy,
+            vec![relay_a_cert.clone(), relay_b_cert.clone()],
+            &service,
+        )
+        .await
+        .expect("build relay failover transportd");
+        let controller_id = router.endpoint().id();
+
+        let telemetry_batches = std::sync::Arc::new(AtomicUsize::new(0));
+        let events_watcher = tokio::spawn({
+            let service = service.clone();
+            let telemetry_batches = telemetry_batches.clone();
+            async move {
+                let mut events = service
+                    .watch_events(tonic::Request::new(WatchEventsRequest {
+                        after_event_id: Vec::new(),
+                    }))
+                    .await
+                    .expect("watch transport events")
+                    .into_inner();
+                while let Some(event) = events.next().await {
+                    let event = event.expect("valid transport event");
+                    if event.r#type == i32::from(TransportEventType::Telemetry) {
+                        telemetry_batches.fetch_add(1, Ordering::SeqCst);
+                    }
+                }
+            }
+        });
+
+        let journal_path = directory.join("agent.db");
+        let supervisor = tokio::spawn({
+            let journal_path = journal_path.clone();
+            let relay_map = relay_map.clone();
+            let relay_tls_roots = vec![relay_a_cert.clone(), relay_b_cert.clone()];
+            let agent_key = agent_key.clone();
+            async move {
+                let mut journal = Journal::open(&journal_path).expect("Agent journal");
+                let mut command_executor =
+                    CommandExecutor::new(Journal::open(&journal_path).expect("executor journal"));
+                let command_keys = test_command_keyring();
+                let sealing_keys = test_sealing_keys();
+                let mut fence_epoch_floor = 0_u64;
+                let mut session = SessionContext {
+                    node_id,
+                    endpoint_id: agent_key.public(),
+                    privd: &privd,
+                    journal: &mut journal,
+                    command_executor: &mut command_executor,
+                    boot_id: "relay-failover-test-boot",
+                    os_release: "relay-failover-test-os",
+                    agent_instance_id: Uuid::now_v7(),
+                    command_keys: &command_keys,
+                    sealing_keys: &sealing_keys,
+                    fence_epoch_floor: &mut fence_epoch_floor,
+                    synthetic_barrier_file: None,
+                    startup_observations: &mut startup_observations,
+                };
+                let relay_mode = RelayMode::Custom(relay_map);
+                let dial_relay_mode = relay_mode.clone();
+                let transport = QuicTransportConfig::builder()
+                    .max_concurrent_bidi_streams(VarInt::from_u32(
+                        u32::try_from(MAX_WRITE_QUEUE).expect("write queue fits u32"),
+                    ))
+                    .build();
+                // Relay-only transports keep the localhost fixture honest:
+                // the session must ride the dedicated relays, never a
+                // same-host direct path.
+                let bind_endpoint: EndpointFactory = Box::new(move || {
+                    let agent_key = agent_key.clone();
+                    let relay_mode = relay_mode.clone();
+                    let transport = transport.clone();
+                    let relay_tls_roots = relay_tls_roots.clone();
+                    Box::pin(async move {
+                        Endpoint::builder(presets::Minimal)
+                            .secret_key(agent_key)
+                            .relay_mode(relay_mode)
+                            .keep_relays_connected(true)
+                            .ca_tls_config(
+                                iroh::tls::CaTlsConfig::default().with_extra_roots(relay_tls_roots),
+                            )
+                            .clear_address_lookup()
+                            .clear_ip_transports()
+                            .transport_config(transport)
+                            .bind()
+                            .await
+                    })
+                });
+                supervise_controller_sessions(
+                    bind_endpoint,
+                    controller_id,
+                    &dial_relay_mode,
+                    &mut session,
+                )
+                .await;
+            }
+        });
+
+        let node_connection = |relay_url: String| {
+            let service = service.clone();
+            async move {
+                loop {
+                    if let Ok(response) = service
+                        .get_node_connection(tonic::Request::new(GetNodeConnectionRequest {
+                            node_id: node_id.as_bytes().to_vec(),
+                        }))
+                        .await
+                    {
+                        let metadata = response.into_inner();
+                        if metadata.path_detail.contains(&relay_url) {
+                            return metadata;
+                        }
+                    }
+                    tokio::time::sleep(Duration::from_millis(200)).await;
+                }
+            }
+        };
+
+        let before = tokio::time::timeout(Duration::from_secs(30), {
+            let telemetry_batches = telemetry_batches.clone();
+            async move {
+                let metadata = node_connection(relay_a_url.to_string()).await;
+                // The relay-A session must be functional, not merely present.
+                while telemetry_batches.load(Ordering::SeqCst) == 0 {
+                    tokio::time::sleep(Duration::from_millis(200)).await;
+                }
+                metadata
+            }
+        })
+        .await
+        .expect("Agent session through relay A did not become healthy");
+        assert_eq!(before.endpoint_id, agent_key.public().as_bytes());
+        let before_connected_at = before.connected_at.expect("relay A connected_at");
+        // Captured before the fault: session 1's next heartbeat is 30s away,
+        // so any additional batch inside the failover window can only come
+        // from the replacement session.
+        let batches_at_fault = telemetry_batches.load(Ordering::SeqCst);
+
+        relay_a.shutdown().await.expect("stop relay A");
+        let relay_b_proxy = RestartableTcpProxy::start(relay_b_proxy_addr, relay_b_addr).await;
+
+        let after = tokio::time::timeout(
+            Duration::from_secs(15),
+            node_connection(relay_b_url.to_string()),
+        )
+        .await
+        .expect("Agent did not fail over to relay B within fifteen seconds");
+        let after_connected_at = after.connected_at.expect("relay B connected_at");
+        assert!(
+            (after_connected_at.seconds, after_connected_at.nanos)
+                > (before_connected_at.seconds, before_connected_at.nanos),
+            "relay B must carry a replacement session, not a path migration"
+        );
+        assert_eq!(after.endpoint_id, agent_key.public().as_bytes());
+        assert_eq!(
+            after.agent_instance_id, before.agent_instance_id,
+            "the same Agent process must own the replacement session"
+        );
+
+        tokio::time::timeout(Duration::from_secs(20), async {
+            while telemetry_batches.load(Ordering::SeqCst) <= batches_at_fault {
+                tokio::time::sleep(Duration::from_millis(200)).await;
+            }
+        })
+        .await
+        .expect("replacement session did not deliver telemetry");
+        assert!(
+            !supervisor.is_finished(),
+            "the session supervisor keeps running after the relay failover"
+        );
+
+        supervisor.abort();
+        events_watcher.abort();
+        privd_server.abort();
+        ocservia_transportd::shutdown(&service, router)
+            .await
+            .expect("shutdown relay failover transportd");
+        relay_b_proxy.stop().await;
+        relay_b.shutdown().await.expect("stop relay B");
+        std::fs::remove_file(&privd_socket).expect("remove privd snapshot socket");
+        std::fs::remove_dir_all(directory).expect("remove relay failover fixture");
     }
 
     #[test]
