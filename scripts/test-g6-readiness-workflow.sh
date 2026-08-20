@@ -415,7 +415,17 @@ for token in \
     exit 1
   }
 done
-grep -qF 'let controller = controller_address(controller, &config.relay_mode);' \
+controller_dial_target_helper="$(sed -n '/^fn controller_dial_target(/,/^}/p' "${AGENT_MAIN}")"
+for token in \
+  'EndpointAddr::new(controller)' \
+  'let RelayMode::Custom(relays) = relay_mode' \
+  'address.with_relay_url(relay)'; do
+  grep -qF "${token}" <<<"${controller_dial_target_helper}" || {
+    echo "dedicated relay addressing no longer supplies the redial hint: ${token}" >&2
+    exit 1
+  }
+done
+grep -qF 'let target = controller_dial_target(controller, relay_mode, endpoint);' \
   "${AGENT_MAIN}" || {
   echo "the Agent runtime must bind controller redial to its dedicated relay hints" >&2
   exit 1
