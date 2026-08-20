@@ -2831,7 +2831,7 @@ phase_evidence_build() {
 }
 
 phase_evidence_verify() {
-  local out="${G6RD_OUTBOX}/evidence-bundle" verify_status=0
+  local out="${G6RD_OUTBOX}/evidence-bundle" verify_status=0 result_status
   require_file "${out}/evidence.json"
   require_file "${out}/topology.json"
   require_file "${out}/release-manifest.json"
@@ -2839,6 +2839,7 @@ phase_evidence_verify() {
   # bytes. An engineering-rehearsal bundle is allowed to carry a non-final
   # verdict (the authority fence alone keeps it non-final), but any parse
   # or integrity rejection fails the run.
+  rm -f -- "${out}/verification-result.json" "${out}/verdict.json"
   "${G6RD_NODE_BIN:-node}" "${ROOT}/scripts/verify-g6-evidence.mjs" \
     --slo "${ROOT}/docs/acceptance/g6-slo.yaml" \
     --evidence "${out}/evidence.json" \
@@ -2851,29 +2852,58 @@ phase_evidence_verify() {
     --result "${out}/verification-result.json" \
     >"${out}/verify.stdout.log" 2>"${out}/verify.stderr.log" || verify_status=$?
   printf '%s\n' "${verify_status}" >"${out}/evidence-verify-exit-code.txt"
+  if [[ ! -s "${out}/verification-result.json" ]]; then
+    echo "the independent verifier did not emit verification-result.json" >&2
+    [[ ! -s "${out}/verify.stderr.log" ]] || cat "${out}/verify.stderr.log" >&2
+    return 1
+  fi
+  result_status="$(jq -er '
+    select(
+      .schema_version == "ocservia.g6-evidence-phase-result.v1" and
+      .phase == "verify"
+    ) | .status
+  ' "${out}/verification-result.json")" || {
+    echo "the independent verifier emitted an invalid verification result" >&2
+    return 1
+  }
   if [[ -s "${out}/verify.stdout.log" ]]; then
+    jq -e '.schema_version == "ocservia.g6-verdict.v2"' \
+      "${out}/verify.stdout.log" >/dev/null || {
+      echo "the independent verifier stdout is not a G6 verdict" >&2
+      return 1
+    }
     cp -f "${out}/verify.stdout.log" "${out}/verdict.json"
   fi
   [[ ! -s "${out}/verify.stderr.log" ]] || cat "${out}/verify.stderr.log" >&2
-  if [[ "${G6_AUTHORITY}" == production_readiness ]]; then
-    if [[ "${verify_status}" != 0 ]] \
+  case "${G6_AUTHORITY}" in
+  production_readiness)
+    if [[ "${verify_status}" != 0 || "${result_status}" != passed ]] \
+      || [[ ! -s "${out}/verdict.json" ]] \
       || ! jq -e '.schema_version == "ocservia.g6-verdict.v2" and .passed == true' \
         "${out}/verdict.json" >/dev/null; then
       echo "the independent verifier rejected the production-readiness bundle" >&2
       return 1
     fi
-  else
-    jq -e '
+    ;;
+  engineering)
+    if [[ "${verify_status}" != 1 || "${result_status}" != accepted_non_final ]] \
+      || [[ ! -s "${out}/verdict.json" ]] \
+      || ! jq -e '
       .schema_version == "ocservia.g6-verdict.v2" and
       .passed == false and
       .failure_reasons == ["final pass requires production_readiness authority"] and
       all(.measurement_results[]; .passed == true) and
       all(.observation_results[]; .passed == true)
-    ' "${out}/verdict.json" >/dev/null || {
+    ' "${out}/verdict.json" >/dev/null; then
       echo "the engineering verifier found a failure beyond the authority fence" >&2
       return 1
-    }
-  fi
+    fi
+    ;;
+  *)
+    echo "unknown G6 authority: ${G6_AUTHORITY}" >&2
+    return 1
+    ;;
+  esac
   cp -f "${out}/verdict.json" "${G6RD_OUTBOX}/verdict.json"
 }
 

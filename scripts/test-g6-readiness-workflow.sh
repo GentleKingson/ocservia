@@ -215,7 +215,23 @@ reject("fd-b must materialize real trust only after the rendezvous") unless fd_b
   job = jobs.fetch(job_id)
   reject("#{job_id} must depend on both failure domains") unless job.fetch("needs").sort == %w[g6-rd-fd-a g6-rd-fd-b]
   condition = job.fetch("if")
-  reject("#{job_id} must require both failure-domain conclusions") unless condition.include?("needs.g6-rd-fd-a.result == 'success'") && condition.include?("needs.g6-rd-fd-b.result == 'success'")
+  reject("#{job_id} must run after producer failure when both evidence artifacts exist") unless
+    condition.include?("always()") &&
+    condition.include?("needs.g6-rd-fd-a.outputs.evidence-artifact-id != ''") &&
+    condition.include?("needs.g6-rd-fd-b.outputs.evidence-artifact-id != ''") &&
+    !condition.include?(".result == 'success'")
+end
+{
+  "g6-rd-fd-a" => "fd-a-evidence-upload",
+  "g6-rd-fd-b" => "evidence-bundle-upload",
+}.each do |job_id, upload_id|
+  job = jobs.fetch(job_id)
+  reject("#{job_id} must expose its evidence artifact ID") unless
+    job.fetch("outputs").fetch("evidence-artifact-id").include?("steps.#{upload_id}.outputs.artifact-id")
+  reject("#{job_id} must expose its evidence artifact digest") unless
+    job.fetch("outputs").fetch("evidence-artifact-digest").include?("steps.#{upload_id}.outputs.artifact-digest")
+  upload = Array(job.fetch("steps")).find { |step| step["id"] == upload_id }
+  reject("#{job_id} evidence upload step is not bound to its outputs") unless upload
 end
 verifier_steps = Array(jobs.fetch("g6-rd-verifier").fetch("steps"))
 verifier_bootstrap = verifier_steps.find { |step| step["run"]&.include?("scripts/bootstrap.sh") }
@@ -4646,8 +4662,25 @@ while (($#)); do
   fi
   shift
 done
-[[ -z "${result}" ]] || printf '{"schema_version":"ocservia.g6-evidence-phase-result.v1","phase":"verify","status":"passed","verdict_passed":true,"exit_code":0,"failure_reasons":[]}\n' >"${result}"
-printf '{"schema_version":"ocservia.g6-verdict.v2","passed":true,"failure_reasons":[],"measurement_results":{},"observation_results":{}}\n'
+case "${G6RD_SHIM_VERIFY_MODE:-passed}" in
+passed)
+  [[ -z "${result}" ]] || printf '{"schema_version":"ocservia.g6-evidence-phase-result.v1","phase":"verify","status":"passed","verdict_passed":true,"exit_code":0,"failure_reasons":[]}\n' >"${result}"
+  printf '{"schema_version":"ocservia.g6-verdict.v2","passed":true,"failure_reasons":[],"measurement_results":{},"observation_results":{}}\n'
+  ;;
+accepted_non_final)
+  [[ -z "${result}" ]] || printf '{"schema_version":"ocservia.g6-evidence-phase-result.v1","phase":"verify","status":"accepted_non_final","verdict_passed":false,"exit_code":1,"failure_reasons":["final pass requires production_readiness authority"]}\n' >"${result}"
+  printf '{"schema_version":"ocservia.g6-verdict.v2","passed":false,"failure_reasons":["final pass requires production_readiness authority"],"measurement_results":{},"observation_results":{}}\n'
+  exit 1
+  ;;
+failed)
+  [[ -z "${result}" ]] || printf '{"schema_version":"ocservia.g6-evidence-phase-result.v1","phase":"verify","status":"failed","verdict_passed":false,"exit_code":1,"reason":"fixture schema rejection"}\n' >"${result}"
+  echo 'G6 evidence rejected: fixture schema rejection' >&2
+  exit 1
+  ;;
+*)
+  exit 99
+  ;;
+esac
 SHIM
 chmod +x "${node_shim}"
 RUNNER_TEMP="${producer_test}" RUN_ID="${run_id}" FD_ID=fd-b FD_ALIAS=fd-beta \
@@ -4661,6 +4694,33 @@ RUNNER_TEMP="${producer_test}" RUN_ID="${run_id}" FD_ID=fd-b FD_ALIAS=fd-beta \
 if [[ "$(<"${run_dir}/outbox/evidence-bundle/evidence-build-exit-code.txt")" != 0 \
   || "$(<"${run_dir}/outbox/evidence-bundle/evidence-verify-exit-code.txt")" != 0 ]]; then
   echo "the evidence producer must preserve separate successful phase exit codes" >&2
+  exit 1
+fi
+RUNNER_TEMP="${producer_test}" RUN_ID="${run_id}" FD_ID=fd-b FD_ALIAS=fd-beta \
+  G6_AUTHORITY=engineering G6RD_CANDIDATE_SHA="$(printf 'a%.0s' {1..40})" \
+  G6RD_NODE_BIN="${node_shim}" G6RD_SHIM_VERIFY_MODE=accepted_non_final \
+  "${FD_B}" evidence-verify
+if [[ "$(<"${run_dir}/outbox/evidence-bundle/evidence-verify-exit-code.txt")" != 1 ]] \
+  || ! jq -e '.status == "accepted_non_final"' \
+    "${run_dir}/outbox/evidence-bundle/verification-result.json" >/dev/null \
+  || ! jq -e '.failure_reasons == ["final pass requires production_readiness authority"]' \
+    "${run_dir}/outbox/evidence-bundle/verdict.json" >/dev/null; then
+  echo "the engineering authority fence was not accepted as non-final evidence" >&2
+  exit 1
+fi
+verify_failure_log="${producer_test}/verify-failure.log"
+if RUNNER_TEMP="${producer_test}" RUN_ID="${run_id}" FD_ID=fd-b FD_ALIAS=fd-beta \
+  G6_AUTHORITY=engineering G6RD_CANDIDATE_SHA="$(printf 'a%.0s' {1..40})" \
+  G6RD_NODE_BIN="${node_shim}" G6RD_SHIM_VERIFY_MODE=failed \
+  "${FD_B}" evidence-verify >"${verify_failure_log}" 2>&1; then
+  echo "the engineering schema-failure fixture unexpectedly passed" >&2
+  exit 1
+fi
+if ! jq -e '.status == "failed" and .reason == "fixture schema rejection"' \
+    "${run_dir}/outbox/evidence-bundle/verification-result.json" >/dev/null \
+  || [[ -e "${run_dir}/outbox/evidence-bundle/verdict.json" ]] \
+  || grep -Eq 'jq:|verdict.json.*(No such file|Could not open)' "${verify_failure_log}"; then
+  echo "the verifier schema failure did not remain structured and noise-free" >&2
   exit 1
 fi
 rm -rf "${run_dir}/outbox/evidence-bundle"

@@ -166,6 +166,9 @@ jobs:
       G6RD_TRANSPORTD_IMAGE: ocservia-g6-transportd:${{ github.run_id }}-${{ github.run_attempt }}
       G6RD_RELAY_IMAGE: ocservia-g6-relay:${{ github.run_id }}-${{ github.run_attempt }}
       G6RD_PROBE_IMAGE: ocservia-g6-probe:${{ github.run_id }}-${{ github.run_attempt }}
+    outputs:
+      evidence-artifact-id: ${{ steps.fd-a-evidence-upload.outputs.artifact-id }}
+      evidence-artifact-digest: ${{ steps.fd-a-evidence-upload.outputs.artifact-digest }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
@@ -376,6 +379,7 @@ jobs:
         timeout-minutes: 15
         run: scripts/g6-readiness-fd-a.sh evidence "${RUNNER_TEMP}/g6-rd-final-freeze"
       - name: Publish failure domain A evidence
+        id: fd-a-evidence-upload
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: g6-rd-fd-a-evidence-${{ github.run_id }}-${{ github.run_attempt }}
@@ -418,6 +422,9 @@ jobs:
       G6RD_TRANSPORTD_IMAGE: ocservia-g6-transportd:${{ github.run_id }}-${{ github.run_attempt }}
       G6RD_RELAY_IMAGE: ocservia-g6-relay:${{ github.run_id }}-${{ github.run_attempt }}
       G6RD_PROBE_IMAGE: ocservia-g6-probe:${{ github.run_id }}-${{ github.run_attempt }}
+    outputs:
+      evidence-artifact-id: ${{ steps.evidence-bundle-upload.outputs.artifact-id }}
+      evidence-artifact-digest: ${{ steps.evidence-bundle-upload.outputs.artifact-digest }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
@@ -652,6 +659,7 @@ jobs:
         timeout-minutes: 5
         run: scripts/g6-readiness-fd-b.sh evidence-verify
       - name: Publish the evidence bundle on every outcome
+        id: evidence-bundle-upload
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
@@ -680,7 +688,12 @@ jobs:
   g6-rd-secret-scan:
     name: G6 Readiness Secret Scan
     needs: [g6-rd-fd-a, g6-rd-fd-b]
-    if: ${{ needs.g6-rd-fd-a.result == 'success' && needs.g6-rd-fd-b.result == 'success' }}
+    if: >-
+      ${{
+        always() &&
+        needs.g6-rd-fd-a.outputs.evidence-artifact-id != '' &&
+        needs.g6-rd-fd-b.outputs.evidence-artifact-id != ''
+      }}
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     environment:
@@ -717,7 +730,12 @@ jobs:
   g6-rd-verifier:
     name: G6 Readiness Independent Verifier
     needs: [g6-rd-fd-a, g6-rd-fd-b]
-    if: ${{ needs.g6-rd-fd-a.result == 'success' && needs.g6-rd-fd-b.result == 'success' }}
+    if: >-
+      ${{
+        always() &&
+        needs.g6-rd-fd-a.outputs.evidence-artifact-id != '' &&
+        needs.g6-rd-fd-b.outputs.evidence-artifact-id != ''
+      }}
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     environment:
@@ -760,6 +778,7 @@ jobs:
           output="${RUNNER_TEMP}/g6-rd-verdict"
           mkdir -p "${output}"
           status=0
+          rm -f -- "${output}/verification-result.json" "${output}/verdict.json"
           node scripts/verify-g6-evidence.mjs \
             --slo docs/acceptance/g6-slo.yaml \
             --evidence "${bundle}/evidence.json" \
@@ -770,23 +789,55 @@ jobs:
             --expected-environment-id "${G6RD_EXPECTED_ENVIRONMENT_ID}" \
             --expected-failure-domain-class multi_host \
             --result "${output}/verification-result.json" \
-            >"${output}/verdict.json" || status=$?
-          jq -e '.schema_version == "ocservia.g6-verdict.v2"' "${output}/verdict.json" >/dev/null
+            >"${output}/verify.stdout.log" \
+            2>"${output}/verify.stderr.log" || status=$?
+          printf '%s\n' "${status}" >"${output}/evidence-verify-exit-code.txt"
+          if [[ ! -s "${output}/verification-result.json" ]]; then
+            echo "the independent verifier did not emit verification-result.json" >&2
+            cat "${output}/verify.stderr.log" >&2
+            exit 1
+          fi
+          result_status="$(jq -er '
+            select(
+              .schema_version == "ocservia.g6-evidence-phase-result.v1" and
+              .phase == "verify"
+            ) | .status
+          ' "${output}/verification-result.json")" || {
+            echo "the independent verifier emitted an invalid verification result" >&2
+            exit 1
+          }
+          if [[ -s "${output}/verify.stdout.log" ]]; then
+            jq -e '.schema_version == "ocservia.g6-verdict.v2"' \
+              "${output}/verify.stdout.log" >/dev/null || {
+              echo "the independent verifier stdout is not a G6 verdict" >&2
+              exit 1
+            }
+            cp -f "${output}/verify.stdout.log" "${output}/verdict.json"
+          fi
+          [[ ! -s "${output}/verify.stderr.log" ]] || cat "${output}/verify.stderr.log" >&2
           # A production-readiness dispatch must earn exit 0; an engineering
           # rehearsal may stay non-final on the authority fence alone, and
           # the preserved verdict records exactly that.
           if [[ "${G6_AUTHORITY}" == production_readiness ]]; then
-            if [[ "${status}" != 0 ]]; then
+            if [[ "${status}" != 0 || "${result_status}" != passed ]] \
+              || [[ ! -s "${output}/verdict.json" ]] \
+              || ! jq -e '.schema_version == "ocservia.g6-verdict.v2" and .passed == true' \
+                "${output}/verdict.json" >/dev/null; then
               echo "the independent verifier rejected the production-readiness bundle" >&2
               exit 1
             fi
           else
-            jq -e '
+            if [[ "${status}" != 1 || "${result_status}" != accepted_non_final ]] \
+              || [[ ! -s "${output}/verdict.json" ]] \
+              || ! jq -e '
               .passed == false and
               .failure_reasons == ["final pass requires production_readiness authority"] and
               all(.measurement_results[]; .passed == true) and
               all(.observation_results[]; .passed == true)
-            ' "${output}/verdict.json" >/dev/null
+            ' "${output}/verdict.json" >/dev/null; then
+              echo "the independent engineering verifier found a failure beyond the authority fence" >&2
+              exit 1
+            fi
             echo "engineering rehearsal verifier exit status: ${status}"
           fi
           if ! diff -u <(jq -S . "${bundle}/verdict.json") <(jq -S . "${output}/verdict.json"); then
