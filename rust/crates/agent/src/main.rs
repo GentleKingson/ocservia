@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
 use iroh::endpoint::{QuicTransportConfig, RelayMode, VarInt, presets};
-use iroh::{Endpoint, EndpointAddr, EndpointId, RelayMap, RelayUrl, Watcher as _};
+use iroh::{Endpoint, EndpointAddr, EndpointId, RelayMap, RelayUrl};
 use ocservia_agent::{
     CommandContext, CommandError, CommandExecutor, ExternalEffectObservation, ExternalPreparation,
     MAX_COMMAND_BYTES, MAX_WRITE_QUEUE, PrivdClient,
@@ -106,12 +106,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let mut attempt = 0_u32;
         let backoff = ocservia_agent::Backoff::default();
         loop {
+            let keep_relays_connected = keep_dedicated_relays_connected(&config.relay_mode);
             let endpoint = match with_relay_tls_roots(
                 Endpoint::builder(presets::N0),
                 relay_tls_roots.as_ref().clone(),
             )
             .secret_key(identity.secret_key().clone())
             .relay_mode(config.relay_mode.clone())
+            .keep_relays_connected(keep_relays_connected)
             .transport_config(transport.clone())
             .bind()
             .await
@@ -125,7 +127,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                     continue;
                 }
             };
-            spawn_dedicated_relay_failover(&endpoint, &config.relay_mode);
             let mut session = SessionContext {
                 node_id,
                 endpoint_id: identity.endpoint_id(),
@@ -226,15 +227,16 @@ async fn enroll_agent(
         .ok_or_else(|| invalid("--enrollment-environment is required"))?;
     let token = read_enrollment_token(token_file)?;
     let identity = ocservia_agent_identity::Identity::provision(&config.identity_dir, controller)?;
+    let keep_relays_connected = keep_dedicated_relays_connected(&config.relay_mode);
     let endpoint = with_relay_tls_roots(
         Endpoint::builder(presets::N0),
         load_relay_tls_roots(config)?,
     )
     .secret_key(identity.secret_key().clone())
     .relay_mode(config.relay_mode.clone())
+    .keep_relays_connected(keep_relays_connected)
     .bind()
     .await?;
-    spawn_dedicated_relay_failover(&endpoint, &config.relay_mode);
     let connection = endpoint
         .connect(
             controller_address(controller, &config.relay_mode),
@@ -306,36 +308,8 @@ async fn exchange_message<M: Message, R: Message + Default>(
     Ok(response)
 }
 
-fn spawn_dedicated_relay_failover(endpoint: &Endpoint, mode: &RelayMode) {
-    let RelayMode::Custom(configured) = mode else {
-        return;
-    };
-    if configured.len() < 2 {
-        return;
-    }
-    let endpoint = endpoint.clone();
-    let configured = configured.clone();
-    tokio::spawn(async move {
-        let mut watcher = endpoint.home_relay_status();
-        loop {
-            let failed = watcher
-                .get()
-                .into_iter()
-                .find(|status| !status.is_connected() && status.last_error().is_some())
-                .map(|status| status.url().clone());
-            if let Some(failed) = failed
-                && let Some(config) = configured.get(&failed)
-                && endpoint.remove_relay(&failed).await.is_some()
-            {
-                tracing::warn!(relay = %failed, "temporarily removed failed dedicated relay");
-                tokio::time::sleep(Duration::from_mins(1)).await;
-                let _ = endpoint.insert_relay(failed, config).await;
-            }
-            if watcher.updated().await.is_err() {
-                return;
-            }
-        }
-    });
+fn keep_dedicated_relays_connected(relay_mode: &RelayMode) -> bool {
+    matches!(relay_mode, RelayMode::Custom(relays) if relays.len() >= 2)
 }
 
 struct SessionContext<'a> {
@@ -2583,7 +2557,54 @@ mod tests {
     use ocservia_transportd::{IdentityPolicy, IrohTransportService};
     use prost_types::Timestamp;
     use std::collections::HashMap;
+    use std::net::SocketAddr;
     use std::os::unix::fs::PermissionsExt as _;
+    use tokio::net::{TcpListener, TcpStream};
+    use tokio::sync::oneshot;
+    use tokio::task::JoinHandle;
+
+    struct RestartableTcpProxy {
+        addr: SocketAddr,
+        stop: oneshot::Sender<()>,
+        task: JoinHandle<()>,
+    }
+
+    impl RestartableTcpProxy {
+        async fn start(addr: SocketAddr, target: SocketAddr) -> Self {
+            let listener = TcpListener::bind(addr).await.expect("bind relay proxy");
+            let addr = listener.local_addr().expect("relay proxy address");
+            let (stop, mut stop_rx) = oneshot::channel();
+            let task = tokio::spawn(async move {
+                let mut children = tokio::task::JoinSet::new();
+                loop {
+                    tokio::select! {
+                        _ = &mut stop_rx => break,
+                        accepted = listener.accept() => {
+                            let Ok((mut client, _)) = accepted else { break };
+                            children.spawn(async move {
+                                let Ok(mut upstream) = TcpStream::connect(target).await else {
+                                    return;
+                                };
+                                tokio::io::copy_bidirectional(&mut client, &mut upstream)
+                                    .await
+                                    .ok();
+                            });
+                        }
+                        Some(_) = children.join_next(), if !children.is_empty() => {}
+                    }
+                }
+                children.abort_all();
+                while children.join_next().await.is_some() {}
+            });
+            Self { addr, stop, task }
+        }
+
+        async fn stop(self) -> SocketAddr {
+            self.stop.send(()).ok();
+            self.task.await.expect("join relay proxy");
+            self.addr
+        }
+    }
 
     fn test_sealing_keys() -> Vec<SealingKeyDescriptorV1> {
         vec![
@@ -4546,6 +4567,150 @@ mod tests {
             .is_err()
         );
         std::fs::remove_dir_all(directory).expect("remove test directory");
+    }
+
+    #[test]
+    fn only_multi_member_custom_relays_enable_persistent_connections() {
+        let one = RelayMap::try_from_iter(["https://relay-one.invalid"]).expect("single relay map");
+        let two =
+            RelayMap::try_from_iter(["https://relay-one.invalid", "https://relay-two.invalid"])
+                .expect("two relay map");
+
+        assert!(!keep_dedicated_relays_connected(&RelayMode::Disabled));
+        assert!(!keep_dedicated_relays_connected(&RelayMode::Default));
+        assert!(!keep_dedicated_relays_connected(&RelayMode::Staging));
+        assert!(!keep_dedicated_relays_connected(&RelayMode::Custom(
+            RelayMap::empty()
+        )));
+        assert!(!keep_dedicated_relays_connected(&RelayMode::Custom(one)));
+        assert!(keep_dedicated_relays_connected(&RelayMode::Custom(two)));
+    }
+
+    #[tokio::test]
+    #[allow(clippy::similar_names, clippy::too_many_lines)]
+    async fn agent_hot_standby_recovers_authenticated_alpn_after_relay_fault() {
+        use iroh::tls::CaTlsConfig;
+
+        let (relay_a_map, relay_a_url, relay_a) = iroh::test_utils::run_relay_server_with(false)
+            .await
+            .expect("start relay A");
+        let (_relay_b_map, _relay_b_url, relay_b) = iroh::test_utils::run_relay_server_with(false)
+            .await
+            .expect("start relay B");
+        let relay_b_addr = relay_b.https_addr().expect("relay B HTTPS address");
+        let relay_b_proxy =
+            RestartableTcpProxy::start("127.0.0.1:0".parse().unwrap(), relay_b_addr).await;
+        let relay_b_url: RelayUrl = format!("https://{}", relay_b_proxy.addr)
+            .parse()
+            .expect("proxy relay URL");
+        let relay_b_config =
+            std::sync::Arc::new(iroh_relay::RelayConfig::new(relay_b_url.clone(), None));
+        let relay_map = RelayMap::from_iter([
+            relay_a_map
+                .get(&relay_a_url)
+                .expect("relay A configuration"),
+            relay_b_config,
+        ]);
+        assert!(keep_dedicated_relays_connected(&RelayMode::Custom(
+            relay_map.clone()
+        )));
+
+        let controller = Endpoint::builder(presets::Minimal)
+            .relay_mode(RelayMode::Custom(relay_map.clone()))
+            .keep_relays_connected(true)
+            .ca_tls_config(CaTlsConfig::insecure_skip_verify())
+            .clear_address_lookup()
+            .clear_ip_transports()
+            .alpns(vec![AGENT_ALPN.to_vec()])
+            .bind()
+            .await
+            .expect("build controller endpoint");
+        let agent = Endpoint::builder(presets::Minimal)
+            .relay_mode(RelayMode::Custom(relay_map))
+            .keep_relays_connected(true)
+            .ca_tls_config(CaTlsConfig::insecure_skip_verify())
+            .clear_address_lookup()
+            .clear_ip_transports()
+            .bind()
+            .await
+            .expect("build Agent endpoint");
+
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while relay_a.metrics().server.accepts.get() < 2
+                || relay_b.metrics().server.accepts.get() < 2
+            {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("Agent and Controller did not preconnect both relays");
+
+        let relay_b_proxy_addr = relay_b_proxy.stop().await;
+        let refused = TcpStream::connect(relay_b_proxy_addr)
+            .await
+            .expect_err("stopped Relay-B proxy accepted a connection");
+        assert_eq!(refused.kind(), io::ErrorKind::ConnectionRefused);
+
+        let echo = tokio::spawn({
+            let controller = controller.clone();
+            async move {
+                let mut connections = Vec::new();
+                for _ in 0..2 {
+                    let connection = controller
+                        .accept()
+                        .await
+                        .expect("incoming Agent connection")
+                        .await
+                        .expect("authenticated ALPN handshake");
+                    let (mut send, mut recv) = connection.accept_bi().await.expect("accept stream");
+                    let bytes = recv.read_to_end(1024).await.expect("read Agent payload");
+                    send.write_all(&bytes).await.expect("echo Agent payload");
+                    send.finish().expect("finish Agent echo");
+                    connections.push(connection);
+                }
+                connections
+            }
+        });
+
+        let relay_a_target = EndpointAddr::new(controller.id()).with_relay_url(relay_a_url);
+        let first = agent
+            .connect(relay_a_target, AGENT_ALPN)
+            .await
+            .expect("connect Agent through relay A");
+        let (mut send, mut recv) = first.open_bi().await.expect("open relay A stream");
+        send.write_all(b"before-fault")
+            .await
+            .expect("write relay A");
+        send.finish().expect("finish relay A");
+        assert_eq!(recv.read_to_end(1024).await.unwrap(), b"before-fault");
+
+        relay_a.shutdown().await.expect("stop relay A");
+        first.close(0_u32.into(), b"relay A failed");
+        let relay_b_proxy = RestartableTcpProxy::start(relay_b_proxy_addr, relay_b_addr).await;
+        let relay_b_target = EndpointAddr::new(controller.id()).with_relay_url(relay_b_url);
+        let second = tokio::time::timeout(
+            Duration::from_secs(15),
+            agent.connect(relay_b_target, AGENT_ALPN),
+        )
+        .await
+        .expect("Agent Relay-B transition exceeded fifteen seconds")
+        .expect("connect Agent through restored relay B");
+        let (mut send, mut recv) = second.open_bi().await.expect("open relay B stream");
+        send.write_all(b"after-fault").await.expect("write relay B");
+        send.finish().expect("finish relay B");
+        assert_eq!(recv.read_to_end(1024).await.unwrap(), b"after-fault");
+
+        let connections = tokio::time::timeout(Duration::from_secs(3), echo)
+            .await
+            .expect("Agent echo task timeout")
+            .expect("Agent echo task");
+        assert_eq!(connections.len(), 2);
+        second.close(0_u32.into(), b"test complete");
+        agent.close().await;
+        controller.close().await;
+        drop(connections);
+        relay_b_proxy.stop().await;
+        relay_b.shutdown().await.expect("stop relay B");
     }
 
     #[test]
