@@ -1093,6 +1093,15 @@ impl RelayStatusesWatch {
         }
     }
 
+    /// Returns a watcher over the per-relay connection states.
+    ///
+    /// Path selection subscribes to this so relay paths whose relay is no
+    /// longer connected stop being selected as soon as the relay transport
+    /// notices the outage.
+    pub(crate) fn watch(&self) -> n0_watcher::Direct<BTreeMap<RelayUrl, RelayConnectionState>> {
+        self.inner.watch()
+    }
+
     fn get(&self) -> BTreeMap<RelayUrl, RelayConnectionState> {
         self.inner.get()
     }
@@ -1673,6 +1682,7 @@ fn connected_standby(
 #[cfg(test)]
 mod tests {
     use std::{
+        collections::BTreeMap,
         sync::{Arc, atomic::AtomicBool},
         time::Duration,
     };
@@ -1691,10 +1701,12 @@ mod tests {
 
     use super::{
         ActiveRelayActor, ActiveRelayActorOptions, ActiveRelayMessage, ActiveRelayPrioMessage,
-        RELAY_INACTIVE_CLEANUP_TIME, RelayConnectionOptions, RelayRecvDatagram, RelaySendItem,
-        UNDELIVERABLE_DATAGRAM_TIMEOUT,
+        PERSISTENT_RELAY_MAX_RETRY_DELAY, RELAY_INACTIVE_CLEANUP_TIME, RelayConnectionOptions,
+        RelayConnectionState, RelayRecvDatagram, RelaySendItem, UNDELIVERABLE_DATAGRAM_TIMEOUT,
+        connected_standby,
     };
     use crate::{dns::DnsResolver, test_utils};
+    use iroh_relay::{RelayConfig, RelayMap};
 
     /// Starts a new [`ActiveRelayActor`].
     #[allow(clippy::too_many_arguments)]

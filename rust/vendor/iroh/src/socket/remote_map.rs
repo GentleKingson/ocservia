@@ -33,7 +33,7 @@ use super::{
     mapped_addrs::{
         AddrMap, CustomMappedAddr, EndpointIdMappedAddr, MultipathMappedAddr, RelayMappedAddr,
     },
-    transports,
+    transports::{self, RelayStatusesWatcher},
 };
 use crate::{
     address_lookup::{self, AddressLookupFailed},
@@ -132,6 +132,9 @@ struct Tasks {
     metrics: Arc<SocketMetrics>,
     /// The "direct" addresses known for our local endpoint
     local_direct_addrs: n0_watcher::Direct<BTreeSet<DirectAddr>>,
+    /// Connection states of all configured relays, so path selection can skip
+    /// relay paths whose relay is currently not connected.
+    relay_statuses: RelayStatusesWatcher,
     address_lookup: address_lookup::AddressLookupServices,
     shutdown_token: CancellationToken,
 
@@ -159,6 +162,7 @@ impl RemoteMap {
         address_lookup: address_lookup::AddressLookupServices,
         shutdown_token: CancellationToken,
         path_selector: Arc<dyn PathSelector>,
+        relay_statuses: RelayStatusesWatcher,
         span: Span,
     ) -> Self {
         Self {
@@ -167,6 +171,7 @@ impl RemoteMap {
             tasks: Tasks {
                 metrics,
                 local_direct_addrs,
+                relay_statuses,
                 address_lookup,
                 shutdown_token,
                 tasks: Default::default(),
@@ -335,6 +340,7 @@ impl Tasks {
             self.metrics.clone(),
             self.address_lookup.clone(),
             self.path_selector.clone(),
+            self.relay_statuses.clone(),
         )
         .start(
             initial_msgs,
@@ -378,12 +384,12 @@ pub(crate) enum Source {
 
 #[cfg(test)]
 mod tests {
-    use std::{net::SocketAddr, time::Duration};
+    use std::{collections::BTreeMap, net::SocketAddr, time::Duration};
 
     use iroh_base::{SecretKey, TransportAddr};
     use n0_future::future::now_or_never;
     use n0_tracing_test::traced_test;
-    use n0_watcher::Watchable;
+    use n0_watcher::{Watchable, Watcher as _};
     use tokio::sync::oneshot;
     use tracing::Span;
 
@@ -394,6 +400,10 @@ mod tests {
         let metrics = Arc::new(SocketMetrics::default());
         let watchable: Watchable<BTreeSet<DirectAddr>> = Watchable::new(BTreeSet::new());
         let local_direct_addrs = watchable.watch();
+        let relay_statuses: Watchable<BTreeMap<RelayUrl, transports::RelayConnectionState>> =
+            Watchable::new(BTreeMap::new());
+        let relay_statuses_watch = n0_watcher::Join::new(std::iter::once(relay_statuses.watch()))
+            .map(|maps| maps.into_iter().flatten().collect());
         let shutdown_token = CancellationToken::new();
         let remote_map = RemoteMap::new(
             metrics,
@@ -401,6 +411,7 @@ mod tests {
             address_lookup::AddressLookupServices::default(),
             shutdown_token.clone(),
             Arc::new(BiasedRttPathSelector::default()),
+            relay_statuses_watch,
             Span::none(),
         );
         let guards = (watchable, shutdown_token.clone().drop_guard());

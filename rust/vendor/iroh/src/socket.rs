@@ -985,6 +985,7 @@ impl EndpointInner {
 
         let direct_addrs = DiscoveredDirectAddrs::default();
 
+        let relay_statuses_watch = transports.relay_statuses_watch();
         let remote_map = {
             RemoteMap::new(
                 metrics.socket.clone(),
@@ -992,6 +993,7 @@ impl EndpointInner {
                 address_lookup.clone(),
                 shutdown_token.child_token(),
                 path_selector,
+                relay_statuses_watch,
                 span.clone(),
             )
         };
@@ -2192,6 +2194,8 @@ mod tests {
             metrics: Default::default(),
             hooks: Default::default(),
             path_selector: Arc::new(BiasedRttPathSelector::default()),
+            keep_relays_connected: false,
+            relay_inactive_cleanup_time: Duration::from_secs(60),
             portmapper_config: Default::default(),
             net_report_config: Default::default(),
             static_config,
@@ -2608,6 +2612,8 @@ mod tests {
             metrics: Default::default(),
             hooks: Default::default(),
             path_selector: Arc::new(BiasedRttPathSelector::default()),
+            keep_relays_connected: false,
+            relay_inactive_cleanup_time: Duration::from_secs(60),
             portmapper_config: Default::default(),
             net_report_config: Default::default(),
             static_config,
