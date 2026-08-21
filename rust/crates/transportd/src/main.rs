@@ -12,7 +12,6 @@ use ocservia_contracts::generated::ocserv::platform::transport::v1::transport_se
 use ocservia_transportd::{
     IdentityPolicy, IrohTransportService, TrustAuthority, TrustBudgetConfig, TrustClass,
     TrustClassLimit, build_router_with_tls_roots, build_router_with_trust_tls_roots,
-    spawn_dedicated_relay_failover,
 };
 use rustls_pki_types::pem::PemObject;
 use tokio::net::UnixListener;
@@ -53,10 +52,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     if let Some(stats_file) = config.stats_file.clone() {
         ocservia_observability::spawn_runtime_stats_writer(stats_file)?;
     }
-    let relay_failover = match &config.relay_mode {
-        RelayMode::Custom(relays) => Some(relays.clone()),
-        _ => None,
-    };
     let key = load_key(&config.key_file)?;
     let (listener, socket_identity) = bind_socket(&config.socket)?;
     let keyring = load_controller_keyring(&config)?;
@@ -99,10 +94,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         socket = %config.socket.display(),
         "transportd serving"
     );
-    if let Some(relays) = relay_failover {
-        spawn_dedicated_relay_failover(router.endpoint().clone(), relays);
-    }
-
     let (health_reporter, health_service) = tonic_health::server::health_reporter();
     health_reporter
         .set_serving::<TransportServiceServer<IrohTransportService>>()
