@@ -48,6 +48,9 @@ sha2 = "=0.10.9"
 ed25519-dalek = { version = "=3.0.0-rc.0", features = ["pem", "pkcs8"] }
 rustls-pki-types = { version = "=1.15.1", features = ["std"] }
 
+[patch.crates-io]
+iroh = { path = "vendor/iroh" }
+
 [workspace.lints.rust]
 unsafe_code = "forbid"
 

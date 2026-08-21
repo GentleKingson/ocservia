@@ -319,11 +319,22 @@ latency_percentiles="$(cut -f4 "${RESULTS}" | sort -n | awk '
     printf "p50=%s p95=%s p99=%s", values[p50], values[p95], values[p99]
   }')"
 completion_percentiles="$(psql_value "SELECT format('p50=%s p95=%s p99=%s', round((percentile_cont(0.50) WITHIN GROUP (ORDER BY extract(epoch FROM updated_at-created_at)*1000))::numeric,2), round((percentile_cont(0.95) WITHIN GROUP (ORDER BY extract(epoch FROM updated_at-created_at)*1000))::numeric,2), round((percentile_cont(0.99) WITHIN GROUP (ORDER BY extract(epoch FROM updated_at-created_at)*1000))::numeric,2)) FROM operations")"
-telemetry_batches="$(psql_value 'SELECT count(*) FROM telemetry_ingest_batches')"
-path_mix="$(psql_value "SELECT coalesce(path->>'mode','unknown'),count(*) FROM node_observed_snapshots GROUP BY 1 ORDER BY 1")"
-test "${telemetry_batches}" -ge "$((AGENT_COUNT * HEARTBEAT_COUNT))"
-grep -q direct <<<"${path_mix}"
-grep -q relay <<<"${path_mix}"
+expected_telemetry_batches=$((AGENT_COUNT * HEARTBEAT_COUNT))
+telemetry_batches=0
+path_mix=''
+for _ in $(seq 1 30); do
+  check_sampler
+  telemetry_batches="$(psql_value 'SELECT count(*) FROM telemetry_ingest_batches')"
+  path_mix="$(psql_value "SELECT coalesce(path->>'mode','unknown'),count(*) FROM node_observed_snapshots GROUP BY 1 ORDER BY 1")"
+  if initial_telemetry_ready "${telemetry_batches}" "${expected_telemetry_batches}" "${path_mix}"; then
+    break
+  fi
+  sleep 1
+done
+if ! initial_telemetry_ready "${telemetry_batches}" "${expected_telemetry_batches}" "${path_mix}"; then
+  echo "initial telemetry did not converge: batches=${telemetry_batches}/${expected_telemetry_batches}, path_mix=${path_mix//$'\n'/, }" >&2
+  exit 1
+fi
 echo "request latency seconds: ${latency_percentiles}"
 echo "operation completion milliseconds: ${completion_percentiles}"
 echo "telemetry batches: ${telemetry_batches}"

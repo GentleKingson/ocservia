@@ -281,8 +281,13 @@ docker image rm "${runtime_transport_image}" "${runtime_control_image}" >/dev/nu
 
 if [[ "${MODE}" == "full" ]]; then
   (cd "${ROOT}/rust" && cargo test --locked -p ocservia-transportd \
-    tests::dedicated_relay_failure_moves_traffic_to_second_relay -- --exact) \
+    tests::dedicated_relay_failure_accepts_an_immediate_survivor_connection -- --exact) \
     >"${ARTIFACT_DIR}/relay-failover.log" 2>&1
+  grep -Fq \
+    'test tests::dedicated_relay_failure_accepts_an_immediate_survivor_connection ... ok' \
+    "${ARTIFACT_DIR}/relay-failover.log"
+  grep -Fq 'test result: ok. 1 passed; 0 failed;' \
+    "${ARTIFACT_DIR}/relay-failover.log"
   (cd "${ROOT}/control-plane" && go test ./internal/auth \
     -run TestOIDCTLSAndIssuerOutagesFailClosed -count=1) \
     >"${ARTIFACT_DIR}/oidc-tls-outage.log" 2>&1

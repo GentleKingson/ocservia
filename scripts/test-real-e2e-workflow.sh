@@ -90,6 +90,7 @@ if GITHUB_RUN_ID=123456 GITHUB_RUN_ATTEMPT=2 \
   echo "artifact helper accepted a stale run attempt" >&2
   exit 1
 fi
+"${ROOT}/scripts/test-real-e2e-artifact.sh"
 
 OCSERV_CONTROLLER_ENDPOINT_ID="$(printf '0%.0s' {1..64})" \
   docker compose --project-name ocservia-real-e2e-policy --file "${COMPOSE_FILE}" config --quiet

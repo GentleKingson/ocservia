@@ -122,12 +122,6 @@ func Run(ctx context.Context, cfg config.Config, build BuildInfo, logger *slog.L
 	}
 	componentCtx, stopComponents := context.WithCancel(ctx)
 	defer stopComponents()
-	sliceService := localslice.NewWithSigner(pool, commandSigner)
-	if cfg.TestResultCommitBarrier != "" {
-		if err := sliceService.EnableResultCommitBarrier(cfg.TestResultCommitBarrier); err != nil {
-			return fmt.Errorf("configure result commit barrier: %w", err)
-		}
-	}
 	operationService := operationstore.NewWithSigner(pool, cfg.UserOperationConcurrency, commandSigner)
 	workerErr := make(chan error, 5)
 	maintenanceErr := make(chan error, 1)
@@ -160,6 +154,15 @@ func Run(ctx context.Context, cfg config.Config, build BuildInfo, logger *slog.L
 		}
 		go func() { trustErr <- trust.Serve() }()
 	}
+	sliceService := localslice.NewWithSigner(pool, commandSigner)
+	if ownerSessions != nil {
+		sliceService = localslice.NewWithCommandRecovery(pool, commandSigner, operationService, ownerSessions)
+	}
+	if cfg.TestResultCommitBarrier != "" {
+		if err := sliceService.EnableResultCommitBarrier(cfg.TestResultCommitBarrier); err != nil {
+			return fmt.Errorf("configure result commit barrier: %w", err)
+		}
+	}
 	var fenceExecutor ownersession.FencedExecutor
 	if ownerSessions != nil {
 		fenceExecutor = ownerSessions
@@ -180,6 +183,11 @@ func Run(ctx context.Context, cfg config.Config, build BuildInfo, logger *slog.L
 		operationWorker, err = operationstore.NewFencedWorker(operationService, transport, fenceExecutor, logger)
 		if err != nil {
 			return fmt.Errorf("configure outbox worker: %w", err)
+		}
+		if cfg.TestPreSendBarrier != "" {
+			if err := operationWorker.EnablePreSendBarrier(cfg.TestPreSendBarrier, cfg.TestCommandLease); err != nil {
+				return fmt.Errorf("configure command pre-send barrier: %w", err)
+			}
 		}
 		go func() { workerErr <- operationWorker.Run(componentCtx) }()
 		var trustWorker *enrollment.TrustConvergenceWorker
@@ -257,7 +265,15 @@ func Run(ctx context.Context, cfg config.Config, build BuildInfo, logger *slog.L
 						return err
 					}
 					certificateSpan.End()
-					return auditManager.CheckpointAll(sessionCtx)
+					if err := auditManager.CheckpointAll(sessionCtx); err != nil {
+						return err
+					}
+					if cfg.TestSchedulerEvidence {
+						if err := coordination.RecordMaintenanceCompletion(sessionCtx, pool, session); err != nil {
+							return err
+						}
+					}
+					return nil
 				})
 				if err != nil {
 					// Leadership loss is expected during failover: stay

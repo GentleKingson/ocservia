@@ -435,7 +435,7 @@ jobs:
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: .cache/npm
-          key: npm-v4-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'web/package-lock.json') }}
+          key: npm-v4-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'web/package-lock.json', 'scripts/g6-runtime/package-lock.json') }}
           restore-keys: |
             npm-v4-${{ runner.os }}-${{ runner.arch }}-
       - name: Bootstrap pinned Web tools
@@ -556,7 +556,7 @@ jobs:
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: .cache/npm
-          key: npm-v4-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'web/package-lock.json') }}
+          key: npm-v4-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'web/package-lock.json', 'scripts/g6-runtime/package-lock.json') }}
           restore-keys: |
             npm-v4-${{ runner.os }}-${{ runner.arch }}-
       - name: Bootstrap pinned contract tools
@@ -569,8 +569,14 @@ jobs:
         run: scripts/docs-check.sh
       - name: CI workflow policy tests
         run: |
+          shellcheck scripts/ci-install-native-fixtures.sh scripts/test-ci-install-native-fixtures.sh
+          scripts/test-ci-install-native-fixtures.sh
           scripts/test-bootstrap-profiles.sh
           scripts/test-ci-runtime-artifact.sh
+      - name: G6 readiness workflow policy
+        run: |
+          scripts/test-g6-readiness-workflow.sh
+          scripts/test-g6-readiness-hang-guards.sh
       - name: Generate contract outputs
         run: scripts/generate.sh
       - name: Lint contract sources
@@ -704,7 +710,7 @@ jobs:
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: .cache/npm
-          key: npm-v4-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'web/package-lock.json') }}
+          key: npm-v4-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'web/package-lock.json', 'scripts/g6-runtime/package-lock.json') }}
           restore-keys: |
             npm-v4-${{ runner.os }}-${{ runner.arch }}-
       - name: Restore shared Go cache
@@ -780,9 +786,7 @@ jobs:
       - name: Bootstrap pinned native tools
         run: scripts/bootstrap.sh native
       - name: Install ephemeral native fixtures
-        run: |
-          sudo apt-get update
-          sudo apt-get install --yes ocserv openconnect ssl-cert
+        run: sudo --preserve-env=RUNNER_TEMP scripts/ci-install-native-fixtures.sh
       - name: Native ocpasswd, OpenSSL, and Ocserv login
         env:
           ARTIFACT_DIR: ${{ runner.temp }}/artifacts/native-ocserv

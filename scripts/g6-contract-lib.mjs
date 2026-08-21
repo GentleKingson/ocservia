@@ -3,7 +3,7 @@ import { lstatSync, readFileSync } from "node:fs";
 import { isAbsolute, join, resolve, sep } from "node:path";
 import { createRequire } from "node:module";
 
-const require = createRequire(new URL("../web/package.json", import.meta.url));
+const require = createRequire(new URL("./g6-runtime/package.json", import.meta.url));
 const { parseDocument } = require("yaml");
 
 const comparisons = new Set(["lte", "gte", "eq"]);
@@ -36,6 +36,7 @@ const eventPattern = /^[a-z][a-z0-9_]{0,127}$/;
 const componentPattern = /^[a-z][a-z0-9-]{0,63}$/;
 const artifactNamePattern = /^[a-z0-9][a-z0-9._-]{0,127}$/;
 const identifierPattern = /^[a-z0-9][a-z0-9._-]{0,127}$/;
+const endpointIdentityPattern = /^[0-9a-f]{64}$/;
 const rfc3339Pattern =
   /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/;
 
@@ -46,6 +47,7 @@ export const structuredArtifactKinds = [
   "resource_samples",
   "timeline",
   "epoch_events",
+  "authority_cut",
   "command_trace",
   "outbox_snapshot",
   "http_samples",
@@ -65,6 +67,45 @@ function rfc3339(value, context) {
   const parsed = Date.parse(value);
   if (!Number.isFinite(parsed)) fail(`${context} must be a real timestamp`);
   return parsed;
+}
+
+function rfc3339Nanoseconds(value, context) {
+  const match =
+    /^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})(?:\.(\d{1,9}))?(Z|[+-]\d{2}:\d{2})$/.exec(
+      value,
+    );
+  if (!match) {
+    fail(`${context} must be an RFC 3339 timestamp with at most nanosecond precision`);
+  }
+  const wholeSecondMs = Date.parse(`${match[1]}${match[3]}`);
+  if (!Number.isFinite(wholeSecondMs)) {
+    fail(`${context} must be a real timestamp`);
+  }
+  return (
+    BigInt(wholeSecondMs) * 1000000n +
+    BigInt((match[2] ?? "").padEnd(9, "0"))
+  );
+}
+
+function compareRfc3339(left, right, leftContext, rightContext) {
+  const leftNs = rfc3339Nanoseconds(left, leftContext);
+  const rightNs = rfc3339Nanoseconds(right, rightContext);
+  return leftNs < rightNs ? -1 : leftNs > rightNs ? 1 : 0;
+}
+
+function utcStampMicros(value, context) {
+  const match =
+    /^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})(?:\.(\d{1,6}))?Z$/.exec(
+      value,
+    );
+  if (!match) {
+    fail(`${context} must be a microsecond RFC 3339 UTC timestamp`);
+  }
+  rfc3339(value, context);
+  return (
+    BigInt(Date.parse(`${match[1]}Z`)) * 1000n +
+    BigInt((match[2] ?? "").padEnd(6, "0"))
+  );
 }
 
 function fail(message) {
@@ -115,6 +156,13 @@ function nonNegativeInteger(value, context) {
   }
 }
 
+function positiveDecimalString(value, context) {
+  if (typeof value !== "string" || !/^[1-9][0-9]*$/.test(value)) {
+    fail(`${context} must be a canonical positive decimal string`);
+  }
+  return value;
+}
+
 function boolean(value, context) {
   if (typeof value !== "boolean") fail(`${context} must be a boolean`);
 }
@@ -123,6 +171,27 @@ function identifier(value, context) {
   if (typeof value !== "string" || !identifierPattern.test(value)) {
     fail(`${context} has an invalid identifier`);
   }
+}
+
+// Live probes render UUIDs with dashes while PostgreSQL snapshots may render
+// the same binary identity as 32 hexadecimal digits.
+function normalizedUUIDIdentity(value, context) {
+  if (/^[0-9a-f]{32}$/.test(value ?? "")) return value;
+  if (
+    /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(
+      value ?? "",
+    )
+  ) {
+    return value.replaceAll("-", "");
+  }
+  return fail(`${context} must be a UUID identity`);
+}
+
+function endpointIdentity(value, context) {
+  if (typeof value !== "string" || !endpointIdentityPattern.test(value)) {
+    fail(`${context} must be a 64-character lowercase hexadecimal endpoint id`);
+  }
+  return value;
 }
 
 function digest(value, context) {
@@ -186,11 +255,15 @@ function requireBinding(environmentId, candidateSha, label, binding) {
   }
 }
 
-function requireWindow(parsedTimestamp, label, binding) {
-  if (parsedTimestamp < binding.startedAtMs) {
+function requireWindow(timestampValue, label, binding) {
+  const parsedTimestampNs =
+    typeof timestampValue === "bigint"
+      ? timestampValue
+      : rfc3339Nanoseconds(timestampValue, `${label} timestamp`);
+  if (parsedTimestampNs < binding.startedAtNs) {
     fail(`${label} timestamp precedes the evidence window`);
   }
-  if (parsedTimestamp > binding.finishedAtMs) {
+  if (parsedTimestampNs > binding.finishedAtNs) {
     fail(`${label} timestamp escapes the evidence window`);
   }
 }
@@ -402,7 +475,9 @@ function verifyArtifacts(evidence, artifactRoot) {
     const bytes = readFileSync(artifactPath);
     const computed = `sha256:${createHash("sha256").update(bytes).digest("hex")}`;
     if (computed !== artifact.digest) {
-      fail(`artifact content digest mismatch: ${artifact.name}`);
+      fail(
+        `artifact content digest mismatch: ${artifact.name} (expected ${artifact.digest}, actual ${computed})`,
+      );
     }
     verified.set(artifact.name, {
       digest: artifact.digest,
@@ -444,7 +519,7 @@ function streamEventLines(entry, kindLabel, recordFields, binding, onRecord) {
     fail(`${kindLabel} artifact ${entry.name} must not be empty`);
   }
   let lastSequence;
-  let lastTimestamp;
+  let lastTimestampNs;
   for (const line of lines) {
     const record = parseJSON(
       line,
@@ -473,10 +548,14 @@ function streamEventLines(entry, kindLabel, recordFields, binding, onRecord) {
     }
     const label = ordinal(`${kindLabel} artifact ${entry.name}`);
     const parsed = rfc3339(record.timestamp, `${label} timestamp`);
-    if (lastTimestamp !== undefined && parsed < lastTimestamp) {
+    const parsedNs = rfc3339Nanoseconds(
+      record.timestamp,
+      `${label} timestamp`,
+    );
+    if (lastTimestampNs !== undefined && parsedNs < lastTimestampNs) {
       fail(`${kindLabel} artifact ${entry.name} timestamps must not decrease`);
     }
-    requireWindow(parsed, `${label}`, binding);
+    requireWindow(record.timestamp, `${label}`, binding);
     requireBinding(
       record.environment_id,
       record.candidate_sha,
@@ -484,8 +563,8 @@ function streamEventLines(entry, kindLabel, recordFields, binding, onRecord) {
       binding,
     );
     lastSequence = record.sequence;
-    lastTimestamp = parsed;
-    onRecord(record, parsed);
+    lastTimestampNs = parsedNs;
+    onRecord(record, parsed, parsedNs);
   }
 }
 
@@ -507,6 +586,14 @@ const resourceComponents = new Set([
   "agent",
   "postgres",
 ]);
+const resourceSampleBatchKeys = new Set([
+  "controller:api-fd-b",
+  "controller:worker-fd-b",
+  "controller:scheduler-fd-b",
+  "transportd:transportd-fd-b",
+  "agent:agent-fd-b-01",
+  "postgres:postgres-fd-b",
+]);
 
 function csvNonNegativeInteger(text, context) {
   if (!/^\d+$/.test(text)) {
@@ -515,12 +602,76 @@ function csvNonNegativeInteger(text, context) {
   return Number(text);
 }
 
+function csvSafeNonNegativeInteger(text, context) {
+  const value = csvNonNegativeInteger(text, context);
+  if (!Number.isSafeInteger(value)) {
+    fail(`${context} must be a safe integer`);
+  }
+  return value;
+}
+
 function csvFiniteNumber(text, context) {
   const value = Number(text);
   if (!/^\d+(?:\.\d+)?$/.test(text) || !Number.isFinite(value)) {
     fail(`${context} must be a non-negative decimal number`);
   }
   return value;
+}
+
+function csvSecondsNanoseconds(text, context) {
+  const match = /^(\d+)(?:\.(\d{1,9}))?$/.exec(text);
+  const value = csvFiniteNumber(text, context);
+  if (!match) {
+    fail(`${context} must have at most nanosecond precision`);
+  }
+  return {
+    value,
+    nanoseconds:
+      BigInt(match[1]) * 1000000000n +
+      BigInt((match[2] ?? "").padEnd(9, "0")),
+  };
+}
+
+function parseCsvRow(line, context) {
+  const values = [];
+  let value = "";
+  let quoted = false;
+  let closedQuote = false;
+  for (let index = 0; index < line.length; index += 1) {
+    const character = line[index];
+    if (quoted) {
+      if (character === '"') {
+        if (line[index + 1] === '"') {
+          value += '"';
+          index += 1;
+        } else {
+          quoted = false;
+          closedQuote = true;
+        }
+      } else {
+        value += character;
+      }
+    } else if (closedQuote) {
+      if (character !== ",") {
+        fail(`${context} has characters after a closing CSV quote`);
+      }
+      values.push(value);
+      value = "";
+      closedQuote = false;
+    } else if (character === ",") {
+      values.push(value);
+      value = "";
+    } else if (character === '"' && value.length === 0) {
+      quoted = true;
+    } else if (character === '"') {
+      fail(`${context} has an invalid CSV quote`);
+    } else {
+      value += character;
+    }
+  }
+  if (quoted) fail(`${context} has an unterminated CSV quote`);
+  values.push(value);
+  return values;
 }
 
 function parseResourceSamples(entry, binding) {
@@ -538,6 +689,8 @@ function parseResourceSamples(entry, binding) {
   }
   const rows = [];
   const componentRows = new Map();
+  const batches = new Map();
+  let lastTimestampNs;
   for (const component of resourceComponents) componentRows.set(component, []);
   for (const [index, line] of lines.slice(1).entries()) {
     const columns = line.split(",");
@@ -547,7 +700,15 @@ function parseResourceSamples(entry, binding) {
     const rowNumber = index + 2;
     const label = `resource samples artifact ${entry.name} row ${rowNumber}`;
     const parsedTimestamp = rfc3339(columns[0], `${label} timestamp`);
-    requireWindow(parsedTimestamp, label, binding);
+    const parsedTimestampNs = rfc3339Nanoseconds(
+      columns[0],
+      `${label} timestamp`,
+    );
+    if (lastTimestampNs !== undefined && parsedTimestampNs < lastTimestampNs) {
+      fail(`resource samples artifact ${entry.name} timestamps must not decrease`);
+    }
+    lastTimestampNs = parsedTimestampNs;
+    requireWindow(columns[0], label, binding);
     requireBinding(columns[8], columns[9], label, binding);
     const component = columns[1];
     if (!resourceComponents.has(component)) {
@@ -556,6 +717,23 @@ function parseResourceSamples(entry, binding) {
     if (!identifierPattern.test(columns[2])) {
       fail(`${label} has an invalid instance identifier`);
     }
+    const batchKey = `${component}:${columns[2]}`;
+    if (!resourceSampleBatchKeys.has(batchKey)) {
+      fail(`${label} is outside the exact formal sampler component/instance set`);
+    }
+    const timestampKey = parsedTimestampNs.toString();
+    if (!batches.has(timestampKey)) {
+      batches.set(timestampKey, {
+        timestampMs: parsedTimestamp,
+        timestampNs: parsedTimestampNs,
+        keys: new Set(),
+      });
+    }
+    const batch = batches.get(timestampKey);
+    if (batch.keys.has(batchKey)) {
+      fail(`${label} duplicates ${batchKey} in one sampler tick`);
+    }
+    batch.keys.add(batchKey);
     const dbConnectionsText = columns[7];
     const dbConnections =
       component === "postgres"
@@ -566,6 +744,7 @@ function parseResourceSamples(entry, binding) {
     }
     const row = {
       timestampMs: parsedTimestamp,
+      timestampNs: parsedTimestampNs,
       component,
       instance: columns[2],
       rssBytes: csvNonNegativeInteger(columns[3], `${label} rss_bytes`),
@@ -577,20 +756,36 @@ function parseResourceSamples(entry, binding) {
     rows.push(row);
     componentRows.get(component).push(row);
   }
-  if (rows.length < 2) {
-    fail(`resource samples artifact ${entry.name} needs at least two samples`);
+  for (const batch of batches.values()) {
+    if (
+      batch.keys.size !== resourceSampleBatchKeys.size ||
+      [...resourceSampleBatchKeys].some((key) => !batch.keys.has(key))
+    ) {
+      fail(
+        `resource samples artifact ${entry.name} has an incomplete sampler tick`,
+      );
+    }
   }
-  const timestamps = rows.map((row) => row.timestampMs);
-  timestamps.sort((left, right) => left - right);
-  let maxGap = 0;
-  for (let index = 1; index < timestamps.length; index += 1) {
-    maxGap = Math.max(maxGap, timestamps[index] - timestamps[index - 1]);
+  const sampleBatches = [...batches.values()];
+  if (sampleBatches.length < 2) {
+    fail(`resource samples artifact ${entry.name} needs at least two complete ticks`);
+  }
+  let maxGapNs = 0n;
+  for (let index = 1; index < sampleBatches.length; index += 1) {
+    const gap =
+      sampleBatches[index].timestampNs - sampleBatches[index - 1].timestampNs;
+    if (gap > maxGapNs) maxGapNs = gap;
   }
   return {
     rows,
     componentRows,
-    sampleSpanSeconds: (timestamps.at(-1) - timestamps[0]) / 1000,
-    maxSampleGapSeconds: maxGap / 1000,
+    batchCount: sampleBatches.length,
+    firstTimestampNs: sampleBatches[0].timestampNs,
+    lastTimestampNs: sampleBatches.at(-1).timestampNs,
+    sampleSpanSeconds: Number(
+      sampleBatches.at(-1).timestampNs - sampleBatches[0].timestampNs,
+    ) / 1_000_000_000,
+    maxSampleGapSeconds: Number(maxGapNs) / 1_000_000_000,
   };
 }
 
@@ -601,7 +796,7 @@ function parseTimeline(entry, binding) {
     "timeline",
     () => ["event_id"],
     binding,
-    (record, parsed) => {
+    (record, parsed, parsedNs) => {
       if (!eventPattern.test(record.event_id)) {
         fail(`timeline artifact ${entry.name} has an invalid event_id`);
       }
@@ -610,7 +805,12 @@ function parseTimeline(entry, binding) {
           `timeline artifact ${entry.name} repeats event_id ${record.event_id}`,
         );
       }
-      events.set(record.event_id, { sequence: record.sequence, timestampMs: parsed });
+      events.set(record.event_id, {
+        sequence: record.sequence,
+        timestamp: record.timestamp,
+        timestampMs: parsed,
+        timestampNs: parsedNs,
+      });
     },
   );
   if (events.size === 0) {
@@ -624,11 +824,16 @@ const epochSubjects = new Set(["connection_owner", "scheduler"]);
 function parseEpochEvents(entry, binding) {
   const state = {
     ownerMaxEpoch: new Map(),
+    ownerLatest: new Map(),
+    ownerRegistrationsByTerm: new Map(),
     ownerActive: new Map(),
-    ownerExpired: new Set(),
+    ownerInactive: new Set(),
     leaderMaxEpoch: 0,
+    leaderLatest: null,
     leaderActive: new Set(),
     leaderExpired: new Set(),
+    leaderTerms: new Map(),
+    leaderLastMaintenanceId: 0n,
     staleOwnerAccepts: 0,
     staleSchedulerCommits: 0,
     maxConcurrentOwners: 0,
@@ -649,34 +854,100 @@ function parseEpochEvents(entry, binding) {
       if (!epochSubjects.has(record.subject)) return null;
       switch (record.event_type) {
         case "owner_registered":
-          return ["subject", "event_type", "node", "instance", "epoch"];
+          return [
+            "subject",
+            "event_type",
+            "node",
+            "instance",
+            "incarnation",
+            "connection_id",
+            "epoch",
+            "lease_until",
+            ...(record.session_connected_at === undefined
+              ? []
+              : ["session_connected_at"]),
+          ];
         case "owner_lease_expired":
         case "owner_retired":
           return ["subject", "event_type", "node", "epoch"];
         case "owner_accept":
           return ["subject", "event_type", "node", "instance", "epoch", "accepted"];
         case "leader_acquired":
-          return ["subject", "event_type", "instance", "epoch"];
+          return [
+            "subject",
+            "event_type",
+            "instance",
+            "incarnation",
+            "epoch",
+            "lease_until",
+          ];
         case "leader_lease_expired":
           return ["subject", "event_type", "epoch"];
         case "leader_commit":
-          return ["subject", "event_type", "instance", "epoch", "accepted"];
+          return record.accepted === true
+            ? [
+                "subject",
+                "event_type",
+                "instance",
+                "incarnation",
+                "epoch",
+                "maintenance_id",
+                "marker_completed_at",
+                "accepted",
+              ]
+            : [
+                "subject",
+                "event_type",
+                "instance",
+                "incarnation",
+                "epoch",
+                "accepted",
+              ];
         default:
           return null;
       }
     },
     binding,
-    (record, parsed) => {
+    (record, parsed, parsedNs) => {
       if (record.subject === "connection_owner") {
-        identifier(record.node, "epoch event node");
+        const node = normalizedUUIDIdentity(record.node, "epoch event node");
         nonNegativeInteger(record.epoch, "epoch event epoch");
         if (record.epoch < 1) fail("epoch event epoch must be positive");
-        const node = record.node;
         if (!state.ownerActive.has(node)) state.ownerActive.set(node, new Set());
         const active = state.ownerActive.get(node);
         const maxEpoch = state.ownerMaxEpoch.get(node) ?? 0;
         if (record.event_type === "owner_registered") {
           identifier(record.instance, "epoch event instance");
+          positiveDecimalString(
+            record.incarnation,
+            "epoch event owner incarnation",
+          );
+          const connectionId = normalizedUUIDIdentity(
+            record.connection_id,
+            "epoch event owner connection_id",
+          );
+          const leaseUntilMs = rfc3339(
+            record.lease_until,
+            "epoch event owner lease_until",
+          );
+          if (leaseUntilMs <= parsed) {
+            fail("epoch event owner lease must extend past registration");
+          }
+          let sessionConnectedMs;
+          let sessionConnectedNs;
+          if (record.session_connected_at !== undefined) {
+            sessionConnectedMs = rfc3339(
+              record.session_connected_at,
+              "epoch event owner session_connected_at",
+            );
+            sessionConnectedNs = rfc3339Nanoseconds(
+              record.session_connected_at,
+              "epoch event owner session_connected_at",
+            );
+            if (sessionConnectedNs < parsedNs) {
+              fail("epoch event owner session completion predates registration");
+            }
+          }
           state.ownerRegisteredCount += 1;
           if (record.epoch <= maxEpoch) {
             fail(
@@ -684,8 +955,43 @@ function parseEpochEvents(entry, binding) {
             );
           }
           state.ownerMaxEpoch.set(node, record.epoch);
+          state.ownerLatest.set(node, {
+            epoch: record.epoch,
+            instance: record.instance,
+            incarnation: record.incarnation,
+            connectionId,
+            leaseUntil: record.lease_until,
+            leaseUntilMs,
+          });
+          const registrationKey = [
+            node,
+            record.instance,
+            record.incarnation,
+            connectionId,
+            record.epoch,
+          ].join(":");
+          if (state.ownerRegistrationsByTerm.has(registrationKey)) {
+            fail(
+              `epoch event log ${entry.name} repeats a connection-owner registration term`,
+            );
+          }
+          state.ownerRegistrationsByTerm.set(registrationKey, {
+            timestamp: record.timestamp,
+            timestampMs: parsed,
+            timestampNs: parsedNs,
+            sessionConnectedAt: record.session_connected_at,
+            sessionConnectedMs,
+            sessionConnectedNs,
+          });
           active.add(record.epoch);
-          state.ownerRegistrations.push({ node, epoch: record.epoch, timestampMs: parsed });
+          state.ownerRegistrations.push({
+            node,
+            epoch: record.epoch,
+            timestampMs: parsed,
+            timestampNs: parsedNs,
+            sessionConnectedMs,
+            sessionConnectedNs,
+          });
         } else if (record.event_type === "owner_lease_expired") {
           if (!active.has(record.epoch)) {
             fail(
@@ -693,15 +999,21 @@ function parseEpochEvents(entry, binding) {
             );
           }
           active.delete(record.epoch);
-          state.ownerExpired.add(`${node}:${record.epoch}`);
-          state.ownerExpiries.push({ node, epoch: record.epoch, timestampMs: parsed });
+          state.ownerInactive.add(`${node}:${record.epoch}`);
+          state.ownerExpiries.push({
+            node,
+            epoch: record.epoch,
+            timestampMs: parsed,
+            timestampNs: parsedNs,
+          });
         } else if (record.event_type === "owner_retired") {
-          if (record.epoch > maxEpoch) {
+          if (!active.has(record.epoch)) {
             fail(
-              `epoch event log ${entry.name} owner retirement must reference a registered epoch`,
+              `epoch event log ${entry.name} owner retirement must reference the active owner epoch`,
             );
           }
           active.delete(record.epoch);
+          state.ownerInactive.add(`${node}:${record.epoch}`);
         } else if (record.event_type === "owner_accept") {
           identifier(record.instance, "epoch event instance");
           boolean(record.accepted, "epoch event accepted");
@@ -713,7 +1025,7 @@ function parseEpochEvents(entry, binding) {
           }
           if (
             record.accepted &&
-            (record.epoch < maxEpoch || state.ownerExpired.has(`${node}:${record.epoch}`))
+            (record.epoch < maxEpoch || state.ownerInactive.has(`${node}:${record.epoch}`))
           ) {
             state.staleOwnerAccepts += 1;
           }
@@ -727,6 +1039,17 @@ function parseEpochEvents(entry, binding) {
         if (record.epoch < 1) fail("epoch event epoch must be positive");
         if (record.event_type === "leader_acquired") {
           identifier(record.instance, "epoch event instance");
+          positiveDecimalString(
+            record.incarnation,
+            "epoch event scheduler incarnation",
+          );
+          const leaseUntilMs = rfc3339(
+            record.lease_until,
+            "epoch event scheduler lease_until",
+          );
+          if (leaseUntilMs <= parsed) {
+            fail("epoch event scheduler lease must extend past acquisition");
+          }
           state.leaderAcquiredCount += 1;
           if (record.epoch <= state.leaderMaxEpoch) {
             fail(
@@ -734,6 +1057,21 @@ function parseEpochEvents(entry, binding) {
             );
           }
           state.leaderMaxEpoch = record.epoch;
+          state.leaderLatest = {
+            epoch: record.epoch,
+            instance: record.instance,
+            incarnation: record.incarnation,
+            leaseUntil: record.lease_until,
+            leaseUntilMs,
+          };
+          state.leaderTerms.set(record.epoch, {
+            instance: record.instance,
+            incarnation: record.incarnation,
+            acquiredAtNs: parsedNs,
+            active: true,
+            acceptedMaintenanceCount: 0,
+            maintenanceCompletions: [],
+          });
           state.leaderActive.add(record.epoch);
         } else if (record.event_type === "leader_lease_expired") {
           if (!state.leaderActive.has(record.epoch)) {
@@ -743,23 +1081,94 @@ function parseEpochEvents(entry, binding) {
           }
           state.leaderActive.delete(record.epoch);
           state.leaderExpired.add(record.epoch);
-          state.leaderExpiries.push({ epoch: record.epoch, timestampMs: parsed });
+          state.leaderTerms.get(record.epoch).active = false;
+          state.leaderExpiries.push({
+            epoch: record.epoch,
+            timestampMs: parsed,
+            timestampNs: parsedNs,
+          });
         } else if (record.event_type === "leader_commit") {
           identifier(record.instance, "epoch event instance");
+          positiveDecimalString(
+            record.incarnation,
+            "epoch event scheduler incarnation",
+          );
           boolean(record.accepted, "epoch event accepted");
           state.leaderCommitCount += 1;
-          if (record.epoch > state.leaderMaxEpoch) {
+          const term = state.leaderTerms.get(record.epoch);
+          if (!term) {
             fail(
               `epoch event log ${entry.name} scheduler commit references an unacquired epoch`,
             );
           }
           if (
-            record.accepted &&
-            (record.epoch < state.leaderMaxEpoch || state.leaderExpired.has(record.epoch))
+            term.instance !== record.instance ||
+            term.incarnation !== record.incarnation
           ) {
+            fail(
+              `epoch event log ${entry.name} scheduler commit does not match its exact acquired term`,
+            );
+          }
+          if (parsedNs < term.acquiredAtNs) {
+            fail(
+              `epoch event log ${entry.name} scheduler commit predates its acquired term`,
+            );
+          }
+          if (record.accepted) {
+            const maintenanceId = BigInt(
+              positiveDecimalString(
+                record.maintenance_id,
+                "epoch event scheduler maintenance_id",
+              ),
+            );
+            const markerCompletedAtMs = rfc3339(
+              record.marker_completed_at,
+              "epoch event scheduler marker_completed_at",
+            );
+            const markerCompletedAtNs = rfc3339Nanoseconds(
+              record.marker_completed_at,
+              "epoch event scheduler marker_completed_at",
+            );
+            if (markerCompletedAtNs < term.acquiredAtNs) {
+              fail(
+                `epoch event log ${entry.name} scheduler maintenance marker predates its acquired term`,
+              );
+            }
+            if (markerCompletedAtNs > parsedNs) {
+              fail(
+                `epoch event log ${entry.name} scheduler maintenance marker completed after its committed observation`,
+              );
+            }
+            if (maintenanceId <= state.leaderLastMaintenanceId) {
+              fail(
+                `epoch event log ${entry.name} scheduler maintenance ids must strictly increase`,
+              );
+            }
+            state.leaderLastMaintenanceId = maintenanceId;
+            term.acceptedMaintenanceCount += 1;
+            term.maintenanceCompletions.push({
+              maintenanceId,
+              markerCompletedAtMs,
+              markerCompletedAtNs,
+              timestampMs: parsed,
+              timestampNs: parsedNs,
+            });
+          } else if (term.active) {
+            fail(
+              `epoch event log ${entry.name} rejects a scheduler term that is still active`,
+            );
+          }
+          if (record.accepted && !term.active) {
             state.staleSchedulerCommits += 1;
           }
-          state.leaderCommits.push({ epoch: record.epoch, timestampMs: parsed, accepted: record.accepted });
+          state.leaderCommits.push({
+            epoch: record.epoch,
+            instance: record.instance,
+            incarnation: record.incarnation,
+            timestampMs: parsed,
+            timestampNs: parsedNs,
+            accepted: record.accepted,
+          });
         }
         state.maxConcurrentLeaders = Math.max(
           state.maxConcurrentLeaders,
@@ -768,7 +1177,403 @@ function parseEpochEvents(entry, binding) {
       }
     },
   );
+  for (const [epoch, term] of state.leaderTerms) {
+    if (term.acceptedMaintenanceCount === 0) {
+      fail(
+        `epoch event log ${entry.name} leadership epoch ${epoch} has no exact-term maintenance completion`,
+      );
+    }
+  }
   return state;
+}
+
+function parseTransportBracketInventory(
+  records,
+  label,
+  boundaryNs,
+  cutNs,
+) {
+  if (!Array.isArray(records) || records.length === 0) {
+    fail(`${label} must contain at least one transport observation`);
+  }
+  const observations = new Map();
+  for (const [index, observation] of records.entries()) {
+    const observationLabel = `${label} observation ${index + 1}`;
+    closed(
+      observation,
+      [
+        "node",
+        "endpoint_id",
+        "agent_instance_id",
+        "connected_at",
+        "session_expires_at",
+        "owner_fence_id",
+        "owner_instance",
+        "owner_incarnation",
+        "connection_id",
+        "owner_epoch",
+        "owner_lease_until",
+        "authorization_revision",
+        "negotiated_capabilities",
+      ],
+      observationLabel,
+    );
+    const node = normalizedUUIDIdentity(
+      observation.node,
+      `${observationLabel} node`,
+    );
+    const endpointId = endpointIdentity(
+      observation.endpoint_id,
+      `${observationLabel} endpoint_id`,
+    );
+    const agentInstanceId = normalizedUUIDIdentity(
+      observation.agent_instance_id,
+      `${observationLabel} agent_instance_id`,
+    );
+    const connectedAtMs = rfc3339(
+      observation.connected_at,
+      `${observationLabel} connected_at`,
+    );
+    const connectedAtNs = rfc3339Nanoseconds(
+      observation.connected_at,
+      `${observationLabel} connected_at`,
+    );
+    if (connectedAtNs > boundaryNs) {
+      fail(`${observationLabel} connects after its inventory boundary`);
+    }
+    const sessionExpiresAtMs = rfc3339(
+      observation.session_expires_at,
+      `${observationLabel} session_expires_at`,
+    );
+    const sessionExpiresAtNs = rfc3339Nanoseconds(
+      observation.session_expires_at,
+      `${observationLabel} session_expires_at`,
+    );
+    if (sessionExpiresAtNs <= cutNs) {
+      fail(`${observationLabel} session does not remain live across the cut`);
+    }
+    const ownerFenceId = normalizedUUIDIdentity(
+      observation.owner_fence_id,
+      `${observationLabel} owner_fence_id`,
+    );
+    identifier(observation.owner_instance, `${observationLabel} owner_instance`);
+    positiveDecimalString(
+      observation.owner_incarnation,
+      `${observationLabel} owner_incarnation`,
+    );
+    const connectionId = normalizedUUIDIdentity(
+      observation.connection_id,
+      `${observationLabel} connection_id`,
+    );
+    nonNegativeInteger(
+      observation.owner_epoch,
+      `${observationLabel} owner_epoch`,
+    );
+    if (observation.owner_epoch < 1) {
+      fail(`${observationLabel} owner_epoch must be positive`);
+    }
+    const ownerLeaseUntilMs = rfc3339(
+      observation.owner_lease_until,
+      `${observationLabel} owner_lease_until`,
+    );
+    const ownerLeaseUntilNs = rfc3339Nanoseconds(
+      observation.owner_lease_until,
+      `${observationLabel} owner_lease_until`,
+    );
+    if (ownerLeaseUntilNs <= cutNs) {
+      fail(`${observationLabel} owner lease does not remain live across the cut`);
+    }
+    nonNegativeInteger(
+      observation.authorization_revision,
+      `${observationLabel} authorization_revision`,
+    );
+    if (!Number.isSafeInteger(observation.authorization_revision)) {
+      fail(`${observationLabel} authorization_revision must be a safe integer`);
+    }
+    if (
+      !Array.isArray(observation.negotiated_capabilities) ||
+      observation.negotiated_capabilities.length === 0
+    ) {
+      fail(`${observationLabel} negotiated_capabilities must not be empty`);
+    }
+    const capabilities = observation.negotiated_capabilities.map(
+      (capability, capabilityIndex) => {
+        identifier(
+          capability,
+          `${observationLabel} negotiated_capabilities ${capabilityIndex + 1}`,
+        );
+        return capability;
+      },
+    );
+    if (new Set(capabilities).size !== capabilities.length) {
+      fail(`${observationLabel} repeats a negotiated capability`);
+    }
+    if (observations.has(node)) {
+      fail(`${label} repeats node ${node}`);
+    }
+    observations.set(node, {
+      node,
+      endpointId,
+      agentInstanceId,
+      connectedAt: observation.connected_at,
+      connectedAtMs,
+      connectedAtNs,
+      sessionExpiresAt: observation.session_expires_at,
+      sessionExpiresAtMs,
+      sessionExpiresAtNs,
+      ownerFenceId,
+      ownerInstance: observation.owner_instance,
+      ownerIncarnation: observation.owner_incarnation,
+      connectionId,
+      ownerEpoch: observation.owner_epoch,
+      ownerLeaseUntil: observation.owner_lease_until,
+      ownerLeaseUntilMs,
+      ownerLeaseUntilNs,
+      authorizationRevision: observation.authorization_revision,
+      capabilities: [...capabilities].sort(),
+    });
+  }
+  return observations;
+}
+
+function parseAuthorityCut(entry, binding) {
+  const label = `authority cut artifact ${entry.name}`;
+  const doc = parseArtifactJSON(entry, "authority cut");
+  closed(
+    doc,
+    [
+      "environment_id",
+      "candidate_sha",
+      "cut_at",
+      "transport_bracket",
+      "owners",
+      "scheduler",
+    ],
+    label,
+  );
+  requireBinding(doc.environment_id, doc.candidate_sha, label, binding);
+  const cutMs = rfc3339(doc.cut_at, `${label} cut_at`);
+  const cutNs = rfc3339Nanoseconds(doc.cut_at, `${label} cut_at`);
+  const cutMicros = utcStampMicros(doc.cut_at, `${label} cut_at`);
+  requireWindow(doc.cut_at, label, binding);
+  closed(
+    doc.transport_bracket,
+    ["before_complete_at", "after_start_at", "before", "after"],
+    `${label} transport bracket`,
+  );
+  const beforeCompleteMs = rfc3339(
+    doc.transport_bracket.before_complete_at,
+    `${label} transport bracket before_complete_at`,
+  );
+  const beforeCompleteMicros = utcStampMicros(
+    doc.transport_bracket.before_complete_at,
+    `${label} transport bracket before_complete_at`,
+  );
+  const beforeCompleteNs = rfc3339Nanoseconds(
+    doc.transport_bracket.before_complete_at,
+    `${label} transport bracket before_complete_at`,
+  );
+  const afterStartMs = rfc3339(
+    doc.transport_bracket.after_start_at,
+    `${label} transport bracket after_start_at`,
+  );
+  const afterStartMicros = utcStampMicros(
+    doc.transport_bracket.after_start_at,
+    `${label} transport bracket after_start_at`,
+  );
+  const afterStartNs = rfc3339Nanoseconds(
+    doc.transport_bracket.after_start_at,
+    `${label} transport bracket after_start_at`,
+  );
+  requireWindow(
+    doc.transport_bracket.before_complete_at,
+    `${label} before inventory boundary`,
+    binding,
+  );
+  requireWindow(
+    doc.transport_bracket.after_start_at,
+    `${label} after inventory boundary`,
+    binding,
+  );
+  if (!(beforeCompleteMicros < cutMicros && cutMicros < afterStartMicros)) {
+    fail(`${label} transport inventories must strictly bracket cut_at`);
+  }
+  const beforeObservations = parseTransportBracketInventory(
+    doc.transport_bracket.before,
+    `${label} before-cut transport inventory`,
+    beforeCompleteNs,
+    cutNs,
+  );
+  const afterObservations = parseTransportBracketInventory(
+    doc.transport_bracket.after,
+    `${label} after-cut transport inventory`,
+    afterStartNs,
+    cutNs,
+  );
+  if (!Array.isArray(doc.owners) || doc.owners.length === 0) {
+    fail(`${label} must contain at least one owner`);
+  }
+  const owners = new Map();
+  for (const [index, owner] of doc.owners.entries()) {
+    const ownerLabel = `${label} owner ${index + 1}`;
+    closed(
+      owner,
+      [
+        "node",
+        "instance",
+        "incarnation",
+        "connection_id",
+        "epoch",
+        "lease_until",
+      ],
+      ownerLabel,
+    );
+    const node = normalizedUUIDIdentity(owner.node, `${ownerLabel} node`);
+    identifier(owner.instance, `${ownerLabel} instance`);
+    positiveDecimalString(owner.incarnation, `${ownerLabel} incarnation`);
+    const connectionId = normalizedUUIDIdentity(
+      owner.connection_id,
+      `${ownerLabel} connection_id`,
+    );
+    nonNegativeInteger(owner.epoch, `${ownerLabel} epoch`);
+    if (owner.epoch < 1) fail(`${ownerLabel} epoch must be positive`);
+    const leaseUntilMs = rfc3339(
+      owner.lease_until,
+      `${ownerLabel} lease_until`,
+    );
+    const leaseUntilNs = rfc3339Nanoseconds(
+      owner.lease_until,
+      `${ownerLabel} lease_until`,
+    );
+    if (leaseUntilNs <= cutNs) {
+      fail(`${ownerLabel} lease must remain live after the cut`);
+    }
+    if (owners.has(node)) {
+      fail(`${label} repeats owner node ${node}`);
+    }
+    owners.set(node, {
+      instance: owner.instance,
+      incarnation: owner.incarnation,
+      connectionId,
+      epoch: owner.epoch,
+      leaseUntil: owner.lease_until,
+      leaseUntilMs,
+      leaseUntilNs,
+    });
+  }
+
+  if (
+    beforeObservations.size !== afterObservations.size ||
+    beforeObservations.size !== owners.size
+  ) {
+    fail(`${label} transport and database owner populations must match`);
+  }
+  for (const [node, before] of beforeObservations) {
+    const after = afterObservations.get(node);
+    if (!after) {
+      fail(`${label} after-cut transport inventory omits node ${node}`);
+    }
+    if (
+      before.endpointId !== after.endpointId ||
+      before.agentInstanceId !== after.agentInstanceId ||
+      before.connectedAt !== after.connectedAt ||
+      before.sessionExpiresAt !== after.sessionExpiresAt ||
+      before.ownerFenceId !== after.ownerFenceId ||
+      before.ownerInstance !== after.ownerInstance ||
+      before.ownerIncarnation !== after.ownerIncarnation ||
+      before.connectionId !== after.connectionId ||
+      before.ownerEpoch !== after.ownerEpoch ||
+      before.authorizationRevision !== after.authorizationRevision ||
+      JSON.stringify(before.capabilities) !== JSON.stringify(after.capabilities)
+    ) {
+      fail(`${label} immutable transport tuple changes across cut_at for node ${node}`);
+    }
+    const owner = owners.get(node);
+    if (!owner) {
+      fail(`${label} database authority cut omits transport node ${node}`);
+    }
+    if (
+      owner.instance !== after.ownerInstance ||
+      owner.incarnation !== after.ownerIncarnation ||
+      owner.connectionId !== after.connectionId ||
+      owner.epoch !== after.ownerEpoch
+    ) {
+      fail(`${label} transport owner term does not match the database cut for node ${node}`);
+    }
+  }
+  for (const node of owners.keys()) {
+    if (!beforeObservations.has(node)) {
+      fail(`${label} database authority owner ${node} is absent from the bracket`);
+    }
+  }
+
+  object(doc.scheduler, `${label} scheduler`);
+  closed(
+    doc.scheduler,
+    [
+      "instance",
+      "incarnation",
+      "epoch",
+      "lease_until",
+      "maintenance_id",
+      "maintenance_completed_at",
+    ],
+    `${label} scheduler`,
+  );
+  identifier(doc.scheduler.instance, `${label} scheduler instance`);
+  positiveDecimalString(
+    doc.scheduler.incarnation,
+    `${label} scheduler incarnation`,
+  );
+  nonNegativeInteger(doc.scheduler.epoch, `${label} scheduler epoch`);
+  if (doc.scheduler.epoch < 1) {
+    fail(`${label} scheduler epoch must be positive`);
+  }
+  const schedulerLeaseUntilMs = rfc3339(
+    doc.scheduler.lease_until,
+    `${label} scheduler lease_until`,
+  );
+  const schedulerLeaseUntilNs = rfc3339Nanoseconds(
+    doc.scheduler.lease_until,
+    `${label} scheduler lease_until`,
+  );
+  if (schedulerLeaseUntilNs <= cutNs) {
+    fail(`${label} scheduler lease must remain live after the cut`);
+  }
+  const schedulerMaintenanceId = positiveDecimalString(
+    doc.scheduler.maintenance_id,
+    `${label} scheduler maintenance_id`,
+  );
+  const schedulerMaintenanceCompletedAtNs = rfc3339Nanoseconds(
+    doc.scheduler.maintenance_completed_at,
+    `${label} scheduler maintenance_completed_at`,
+  );
+  if (schedulerMaintenanceCompletedAtNs > cutNs) {
+    fail(`${label} scheduler maintenance completed after the cut`);
+  }
+  return {
+    cutAt: doc.cut_at,
+    cutMs,
+    cutNs,
+    beforeCompleteAt: doc.transport_bracket.before_complete_at,
+    beforeCompleteMs,
+    afterStartAt: doc.transport_bracket.after_start_at,
+    afterStartMs,
+    beforeObservations,
+    afterObservations,
+    owners,
+    scheduler: {
+      instance: doc.scheduler.instance,
+      incarnation: doc.scheduler.incarnation,
+      epoch: doc.scheduler.epoch,
+      leaseUntil: doc.scheduler.lease_until,
+      leaseUntilMs: schedulerLeaseUntilMs,
+      leaseUntilNs: schedulerLeaseUntilNs,
+      maintenanceId: schedulerMaintenanceId,
+      maintenanceCompletedAt: doc.scheduler.maintenance_completed_at,
+      maintenanceCompletedAtNs: schedulerMaintenanceCompletedAtNs,
+    },
+  };
 }
 
 const commandOutcomes = new Set(["success", "failed", "unknown"]);
@@ -786,6 +1591,8 @@ function parseCommandTrace(entry, binding) {
     duplicateEffectCount: 0,
     inflight: 0,
     maxInflight: 0,
+    inflightSnapshot: null,
+    lastTimestampMicros: null,
   };
   streamEventLines(
     entry,
@@ -795,10 +1602,23 @@ function parseCommandTrace(entry, binding) {
         case "profile":
           return ["record_type", "dispatch_bound_seconds"];
         case "enqueued":
+          return ["record_type", "command_id", "idempotency_key"];
         case "dispatched":
           return ["record_type", "command_id"];
         case "effect":
-          return ["record_type", "idempotency_key", "effect_id"];
+          return [
+            "record_type",
+            "command_id",
+            "idempotency_key",
+            "effect_id",
+          ];
+        case "inflight_snapshot":
+          return [
+            "record_type",
+            "expected_count",
+            "result_count",
+            "commands",
+          ];
         case "result":
           return ["record_type", "command_id", "outcome"];
         default:
@@ -806,8 +1626,19 @@ function parseCommandTrace(entry, binding) {
       }
     },
     binding,
-    (record, parsed) => {
+    (record) => {
       const label = `command trace artifact ${entry.name}`;
+      const timestampMicros = utcStampMicros(
+        record.timestamp,
+        `${label} timestamp`,
+      );
+      if (
+        state.lastTimestampMicros !== null &&
+        timestampMicros < state.lastTimestampMicros
+      ) {
+        fail(`${label} timestamps must not decrease at microsecond precision`);
+      }
+      state.lastTimestampMicros = timestampMicros;
       if (record.record_type === "profile") {
         if (state.dispatchBoundSeconds !== null) {
           fail(`${label} must declare exactly one profile record`);
@@ -824,13 +1655,16 @@ function parseCommandTrace(entry, binding) {
       }
       if (record.record_type === "enqueued") {
         identifier(record.command_id, `${label} command_id`);
+        identifier(record.idempotency_key, `${label} idempotency_key`);
         if (state.commands.has(record.command_id)) {
           fail(`${label} repeats command_id ${record.command_id}`);
         }
         state.commands.set(record.command_id, {
-          enqueuedAtMs: parsed,
-          dispatchedAtMs: null,
-          firstResultAtMs: null,
+          idempotencyKey: record.idempotency_key,
+          enqueuedAtMicros: timestampMicros,
+          dispatchedAtMicros: null,
+          firstResultAtMicros: null,
+          proofOnly: false,
         });
       } else if (record.record_type === "dispatched") {
         identifier(record.command_id, `${label} command_id`);
@@ -842,22 +1676,95 @@ function parseCommandTrace(entry, binding) {
         }
         // Repeated dispatches model at-least-once retries; only each
         // command's first dispatch counts for inflight and sample counts.
-        if (command.dispatchedAtMs === null) {
-          command.dispatchedAtMs = parsed;
+        if (command.dispatchedAtMicros === null) {
+          command.dispatchedAtMicros = timestampMicros;
           state.dispatchedCommands += 1;
           state.inflight += 1;
           state.maxInflight = Math.max(state.maxInflight, state.inflight);
         }
       } else if (record.record_type === "effect") {
+        identifier(record.command_id, `${label} command_id`);
         identifier(record.idempotency_key, `${label} idempotency_key`);
         identifier(record.effect_id, `${label} effect_id`);
+        if (!state.commands.has(record.command_id)) {
+          fail(`${label} effect references unknown command ${record.command_id}`);
+        }
         if (state.effectIdSeen.has(record.effect_id)) {
           fail(`${label} repeats effect_id ${record.effect_id}`);
         }
         state.effectIdSeen.add(record.effect_id);
-        const seen = state.effects.get(record.idempotency_key) ?? 0;
-        if (seen > 0) state.duplicateEffectCount += 1;
-        state.effects.set(record.idempotency_key, seen + 1);
+        const effects = state.effects.get(record.idempotency_key) ?? [];
+        if (effects.length > 0) state.duplicateEffectCount += 1;
+        effects.push({
+          commandId: record.command_id,
+          effectId: record.effect_id,
+          timestampMicros,
+        });
+        state.effects.set(record.idempotency_key, effects);
+      } else if (record.record_type === "inflight_snapshot") {
+        if (state.inflightSnapshot !== null) {
+          fail(`${label} must contain exactly one inflight snapshot`);
+        }
+        if (
+          !Number.isInteger(record.expected_count) ||
+          record.expected_count <= 0 ||
+          record.result_count !== 0 ||
+          !Array.isArray(record.commands) ||
+          record.commands.length !== record.expected_count
+        ) {
+          fail(`${label} inflight snapshot is not an exact result-free population`);
+        }
+        const commandIds = new Set();
+        const nodeIds = new Set();
+        const snapshotCommands = new Map();
+        for (const [index, snapshotCommand] of record.commands.entries()) {
+          const commandLabel = `${label} inflight snapshot command ${index + 1}`;
+          closed(
+            snapshotCommand,
+            ["command_id", "node_id", "state"],
+            commandLabel,
+          );
+          identifier(snapshotCommand.command_id, `${commandLabel} command_id`);
+          const nodeId = normalizedUUIDIdentity(
+            snapshotCommand.node_id,
+            `${commandLabel} node_id`,
+          );
+          if (
+            !["dispatched", "accepted", "running"].includes(
+              snapshotCommand.state,
+            )
+          ) {
+            fail(`${commandLabel} is not active`);
+          }
+          if (
+            commandIds.has(snapshotCommand.command_id) ||
+            nodeIds.has(nodeId)
+          ) {
+            fail(`${label} inflight snapshot repeats a command or managed node`);
+          }
+          const command = state.commands.get(snapshotCommand.command_id);
+          if (
+            !command ||
+            command.dispatchedAtMicros === null ||
+            command.dispatchedAtMicros > timestampMicros
+          ) {
+            fail(
+              `${commandLabel} was not dispatched by the snapshot boundary`,
+            );
+          }
+          commandIds.add(snapshotCommand.command_id);
+          nodeIds.add(nodeId);
+          snapshotCommands.set(snapshotCommand.command_id, {
+            nodeId,
+            state: snapshotCommand.state,
+          });
+        }
+        state.inflightSnapshot = {
+          timestampMicros,
+          expectedCount: record.expected_count,
+          commands: snapshotCommands,
+          nodeIds,
+        };
       } else if (record.record_type === "result") {
         identifier(record.command_id, `${label} command_id`);
         if (!commandOutcomes.has(record.outcome)) {
@@ -873,17 +1780,31 @@ function parseCommandTrace(entry, binding) {
         state.resultCommandSeen.add(record.command_id);
         state.resultCount += 1;
         const command = state.commands.get(record.command_id);
-        if (!command || command.dispatchedAtMs === null) {
+        if (!command || command.dispatchedAtMicros === null) {
           state.unmatchedResultCount += 1;
           return;
         }
-        command.firstResultAtMs = parsed;
+        command.firstResultAtMicros = timestampMicros;
         state.inflight -= 1;
       }
     },
   );
   if (state.dispatchBoundSeconds === null) {
     fail(`command trace artifact ${entry.name} must declare a profile record`);
+  }
+  if (state.inflightSnapshot === null) {
+    fail(`command trace artifact ${entry.name} must contain one inflight snapshot`);
+  }
+  for (const commandId of state.inflightSnapshot.commands.keys()) {
+    const command = state.commands.get(commandId);
+    if (
+      command?.firstResultAtMicros === null ||
+      command.firstResultAtMicros <= state.inflightSnapshot.timestampMicros
+    ) {
+      fail(
+        `command trace inflight snapshot command ${commandId} is not result-free at its boundary`,
+      );
+    }
   }
   return state;
 }
@@ -906,11 +1827,16 @@ function parseOutboxSnapshot(entry, binding) {
   );
   requireBinding(doc.environment_id, doc.candidate_sha, label, binding);
   const snapshotMs = rfc3339(doc.snapshot_taken_at, `${label} snapshot_taken_at`);
-  requireWindow(snapshotMs, label, binding);
+  const snapshotNs = rfc3339Nanoseconds(
+    doc.snapshot_taken_at,
+    `${label} snapshot_taken_at`,
+  );
+  requireWindow(doc.snapshot_taken_at, label, binding);
   if (!Array.isArray(doc.rows) || doc.rows.length === 0) {
     fail(`${label} must contain at least one row`);
   }
   const ids = new Set();
+  const rows = [];
   for (const [index, row] of doc.rows.entries()) {
     const rowLabel = `${label} row ${index + 1}`;
     closed(row, ["command_id", "created_at", "due_at", "state"], rowLabel);
@@ -920,17 +1846,23 @@ function parseOutboxSnapshot(entry, binding) {
     }
     ids.add(row.command_id);
     const createdMs = rfc3339(row.created_at, `${rowLabel} created_at`);
-    requireWindow(createdMs, rowLabel, binding);
+    const createdNs = rfc3339Nanoseconds(
+      row.created_at,
+      `${rowLabel} created_at`,
+    );
+    requireWindow(row.created_at, rowLabel, binding);
     const dueMs = rfc3339(row.due_at, `${rowLabel} due_at`);
-    requireWindow(dueMs, rowLabel, binding);
+    const dueNs = rfc3339Nanoseconds(row.due_at, `${rowLabel} due_at`);
+    requireWindow(row.due_at, rowLabel, binding);
     if (!outboxStates.has(row.state)) {
       fail(`${rowLabel} has an invalid state`);
     }
-    if (createdMs > dueMs) {
+    if (createdNs > dueNs) {
       fail(`${rowLabel} must not be due before it was created`);
     }
+    rows.push({ ...row, createdMs, createdNs, dueMs, dueNs });
   }
-  return { snapshotMs, rows: doc.rows };
+  return { snapshotMs, snapshotNs, rows };
 }
 
 const httpSampleHeader = [
@@ -939,11 +1871,31 @@ const httpSampleHeader = [
   "status",
   "latency_seconds",
   "request_id",
+  "idempotency_key",
+  "attempt_ordinal",
+  "attempt_limit",
+  "requested_revision",
+  "http_status",
+  "problem_type",
+  "problem_detail",
+  "command_id",
   "environment_id",
   "candidate_sha",
 ];
 const httpKinds = new Set(["read", "enqueue"]);
 const httpStatuses = new Set(["ok", "error"]);
+const staleRevisionProblemType =
+  "https://ocservia.dev/problems/stale-revision";
+const staleRevisionProblemDetail =
+  "the node changed after this operation was prepared";
+
+function knownPreMutationStaleRevision(attempt) {
+  return (
+    attempt.httpStatus === 409 &&
+    attempt.problemType === staleRevisionProblemType &&
+    attempt.problemDetail === staleRevisionProblemDetail
+  );
+}
 
 function parseHttpSamples(entry, binding) {
   const lines = splitArtifactLines(
@@ -954,7 +1906,10 @@ function parseHttpSamples(entry, binding) {
   if (lines.length < 2) {
     fail(`http samples artifact ${entry.name} needs a header and samples`);
   }
-  const header = lines[0].split(",");
+  const header = parseCsvRow(
+    lines[0],
+    `http samples artifact ${entry.name} header`,
+  );
   if (JSON.stringify(header) !== JSON.stringify(httpSampleHeader)) {
     fail(`http samples artifact ${entry.name} has an invalid header`);
   }
@@ -966,52 +1921,183 @@ function parseHttpSamples(entry, binding) {
     okEnqueueLatencies: [],
     enqueueRequestIds: new Set(),
     okEnqueueRequestIds: new Set(),
+    okEnqueueIdempotencyByCommand: new Map(),
+    okEnqueueAttemptRequestIdByCommand: new Map(),
+    logicalEnqueues: new Map(),
+    configuredAttemptLimit: null,
   };
   for (const [index, line] of lines.slice(1).entries()) {
-    const columns = line.split(",");
+    const columns = parseCsvRow(
+      line,
+      `http samples artifact ${entry.name} row ${index + 2}`,
+    );
     if (columns.length !== header.length) {
       fail(`http samples artifact ${entry.name} has a ragged row`);
     }
     const rowNumber = index + 2;
     const label = `http samples artifact ${entry.name} row ${rowNumber}`;
-    const parsedTimestamp = rfc3339(columns[0], `${label} timestamp`);
-    requireWindow(parsedTimestamp, label, binding);
-    requireBinding(columns[5], columns[6], label, binding);
+    rfc3339(columns[0], `${label} timestamp`);
+    const timestampNs = rfc3339Nanoseconds(columns[0], `${label} timestamp`);
+    requireWindow(columns[0], label, binding);
+    requireBinding(columns[13], columns[14], label, binding);
     if (!httpKinds.has(columns[1])) {
       fail(`${label} has an invalid kind`);
     }
     if (!httpStatuses.has(columns[2])) {
       fail(`${label} has an invalid status`);
     }
-    const latency = csvFiniteNumber(columns[3], `${label} latency_seconds`);
+    const latency = csvSecondsNanoseconds(
+      columns[3],
+      `${label} latency_seconds`,
+    );
+    const httpStatus = csvSafeNonNegativeInteger(
+      columns[9],
+      `${label} http_status`,
+    );
+    if (httpStatus !== 0 && (httpStatus < 100 || httpStatus > 599)) {
+      fail(`${label} http_status must be zero or a three-digit HTTP status`);
+    }
     if (columns[1] === "read") {
-      if (columns[4] !== "") {
-        fail(`${label} read sample must not carry a request_id`);
+      if (
+        columns.slice(4, 9).some((value) => value !== "") ||
+        columns.slice(10, 13).some((value) => value !== "")
+      ) {
+        fail(`${label} read sample must not carry enqueue attempt fields`);
       }
-      state.reads.push(latency);
+      if ((columns[2] === "ok") !== (httpStatus === 200)) {
+        fail(`${label} read outcome does not match its HTTP status`);
+      }
+      state.reads.push(latency.value);
       if (columns[2] === "ok") state.readSuccesses += 1;
     } else {
-      // Every enqueue request carries a unique request_id; accepted ones
-      // form the authoritative write population shared with the outbox
-      // snapshot and the audit correlation report.
+      // Each wire attempt has a unique request identity. Attempts sharing an
+      // idempotency key are one logical enqueue and must form a strict,
+      // bounded stale-revision retry chain.
       identifier(columns[4], `${label} request_id`);
       if (state.enqueueRequestIds.has(columns[4])) {
         fail(`${label} repeats enqueue request_id ${columns[4]}`);
       }
       state.enqueueRequestIds.add(columns[4]);
-      state.enqueues.push(latency);
-      if (columns[2] === "ok") {
-        state.enqueueSuccesses += 1;
-        state.okEnqueueLatencies.push(latency);
-        state.okEnqueueRequestIds.add(columns[4]);
+      identifier(columns[5], `${label} idempotency_key`);
+      const attemptOrdinal = csvSafeNonNegativeInteger(
+        columns[6],
+        `${label} attempt_ordinal`,
+      );
+      const attemptLimit = csvSafeNonNegativeInteger(
+        columns[7],
+        `${label} attempt_limit`,
+      );
+      if (columns[4] !== `${columns[5]}.attempt-${attemptOrdinal}`) {
+        fail(`${label} request_id does not bind its idempotency key and ordinal`);
+      }
+      if (attemptLimit !== 3) {
+        fail(`${label} attempt_limit must equal the formal three-attempt bound`);
+      }
+      if (state.configuredAttemptLimit === null) {
+        state.configuredAttemptLimit = attemptLimit;
+      } else if (attemptLimit !== state.configuredAttemptLimit) {
+        fail(`${label} changes the run-wide configured enqueue attempt limit`);
+      }
+      if (attemptOrdinal < 1 || attemptOrdinal > attemptLimit) {
+        fail(`${label} attempt_ordinal exceeds its bounded attempt limit`);
+      }
+      const requestedRevision = csvSafeNonNegativeInteger(
+        columns[8],
+        `${label} requested_revision`,
+      );
+      const ok = httpStatus >= 200 && httpStatus < 300;
+      if ((columns[2] === "ok") !== ok) {
+        fail(`${label} enqueue outcome does not match its HTTP status`);
+      }
+      const commandId = columns[12];
+      if (ok) {
+        identifier(commandId, `${label} command_id`);
+        if (columns[10] !== "" || columns[11] !== "") {
+          fail(`${label} successful enqueue must not carry an RFC7807 problem`);
+        }
+      } else if (commandId !== "") {
+        fail(`${label} failed enqueue must not carry a command_id`);
+      }
+
+      let logical = state.logicalEnqueues.get(columns[5]);
+      if (!logical) {
+        if (attemptOrdinal !== 1) {
+          fail(`${label} logical enqueue must begin with attempt ordinal 1`);
+        }
+        logical = {
+          attemptLimit,
+          attempts: [],
+          terminal: false,
+          commandId: null,
+          acceptedLatency: null,
+        };
+        state.logicalEnqueues.set(columns[5], logical);
+      } else {
+        const prior = logical.attempts.at(-1);
+        if (attemptLimit !== logical.attemptLimit) {
+          fail(`${label} changes the configured enqueue attempt limit`);
+        }
+        if (attemptOrdinal !== prior.attemptOrdinal + 1) {
+          fail(`${label} enqueue attempt ordinals must be contiguous`);
+        }
+        if (!knownPreMutationStaleRevision(prior)) {
+          fail(
+            `${label} retries an outcome other than the known pre-mutation stale-revision conflict`,
+          );
+        }
+        if (logical.terminal) {
+          fail(`${label} follows a terminal enqueue attempt`);
+        }
+        if (requestedRevision <= prior.requestedRevision) {
+          fail(`${label} did not advance the stale requested revision`);
+        }
+        if (timestampNs < prior.timestampNs + prior.latencyNanoseconds) {
+          fail(`${label} begins before the stale 409 response completed`);
+        }
+      }
+      const attempt = {
+        attemptOrdinal,
+        requestedRevision,
+        httpStatus,
+        problemType: columns[10],
+        problemDetail: columns[11],
+        timestampNs,
+        latencyNanoseconds: latency.nanoseconds,
+      };
+      logical.attempts.push(attempt);
+      logical.terminal =
+        ok ||
+        !knownPreMutationStaleRevision(attempt) ||
+        attemptOrdinal === attemptLimit;
+      if (ok) {
+        if (state.okEnqueueRequestIds.has(commandId)) {
+          fail(`${label} repeats accepted command_id ${commandId}`);
+        }
+        logical.commandId = commandId;
+        logical.acceptedLatency = latency.value;
+        state.okEnqueueRequestIds.add(commandId);
+        state.okEnqueueIdempotencyByCommand.set(commandId, columns[5]);
+        state.okEnqueueAttemptRequestIdByCommand.set(commandId, columns[4]);
       }
     }
   }
   if (state.reads.length === 0) {
     fail(`http samples artifact ${entry.name} needs at least one read sample`);
   }
-  if (state.enqueues.length === 0) {
+  if (state.logicalEnqueues.size === 0) {
     fail(`http samples artifact ${entry.name} needs at least one enqueue sample`);
+  }
+  for (const logical of state.logicalEnqueues.values()) {
+    if (!logical.terminal) {
+      fail(
+        `http samples artifact ${entry.name} ends with an incomplete stale-revision retry chain`,
+      );
+    }
+    state.enqueues.push(logical.acceptedLatency ?? 0);
+    if (logical.commandId !== null) {
+      state.enqueueSuccesses += 1;
+      state.okEnqueueLatencies.push(logical.acceptedLatency);
+    }
   }
   return state;
 }
@@ -1032,12 +2118,22 @@ function parseTelemetrySnapshot(entry, binding) {
   );
   requireBinding(doc.environment_id, doc.candidate_sha, label, binding);
   positiveNumber(doc.freshness_bound_seconds, `${label} freshness_bound_seconds`);
+  const boundNanoseconds = doc.freshness_bound_seconds * 1_000_000_000;
+  if (!Number.isSafeInteger(boundNanoseconds)) {
+    fail(`${label} freshness_bound_seconds must have exact nanosecond precision`);
+  }
+  const boundNs = BigInt(boundNanoseconds);
   const snapshotMs = rfc3339(doc.snapshot_taken_at, `${label} snapshot_taken_at`);
-  requireWindow(snapshotMs, label, binding);
+  const snapshotNs = rfc3339Nanoseconds(
+    doc.snapshot_taken_at,
+    `${label} snapshot_taken_at`,
+  );
+  requireWindow(doc.snapshot_taken_at, label, binding);
   if (!Array.isArray(doc.agents) || doc.agents.length === 0) {
     fail(`${label} must contain at least one agent`);
   }
   const ids = new Set();
+  const agents = [];
   for (const [index, agent] of doc.agents.entries()) {
     const agentLabel = `${label} agent ${index + 1}`;
     closed(agent, ["agent_id", "last_telemetry_at"], agentLabel);
@@ -1050,12 +2146,23 @@ function parseTelemetrySnapshot(entry, binding) {
       agent.last_telemetry_at,
       `${agentLabel} last_telemetry_at`,
     );
-    requireWindow(telemetryMs, agentLabel, binding);
-    if (telemetryMs > snapshotMs) {
+    const telemetryNs = rfc3339Nanoseconds(
+      agent.last_telemetry_at,
+      `${agentLabel} last_telemetry_at`,
+    );
+    requireWindow(agent.last_telemetry_at, agentLabel, binding);
+    if (telemetryNs > snapshotNs) {
       fail(`${agentLabel} must not be newer than the snapshot`);
     }
+    agents.push({ ...agent, telemetryMs, telemetryNs });
   }
-  return { snapshotMs, boundSeconds: doc.freshness_bound_seconds, agents: doc.agents };
+  return {
+    snapshotMs,
+    snapshotNs,
+    boundSeconds: doc.freshness_bound_seconds,
+    boundNs,
+    agents,
+  };
 }
 
 function parseAuditCorrelation(entry, binding) {
@@ -1071,7 +2178,13 @@ function parseAuditCorrelation(entry, binding) {
     const writeLabel = `${label} write ${index + 1}`;
     closed(
       write,
-      ["write_id", "intent_recorded", "result_recorded"],
+      [
+        "write_id",
+        "intent_recorded",
+        "intent_request_id",
+        "result_recorded",
+        "result_request_id",
+      ],
       writeLabel,
     );
     identifier(write.write_id, `${writeLabel} write_id`);
@@ -1080,7 +2193,17 @@ function parseAuditCorrelation(entry, binding) {
     }
     ids.add(write.write_id);
     boolean(write.intent_recorded, `${writeLabel} intent_recorded`);
+    if (write.intent_recorded) {
+      identifier(write.intent_request_id, `${writeLabel} intent_request_id`);
+    } else if (write.intent_request_id !== "") {
+      fail(`${writeLabel} unrecorded intent must not carry a request_id`);
+    }
     boolean(write.result_recorded, `${writeLabel} result_recorded`);
+    if (write.result_recorded) {
+      identifier(write.result_request_id, `${writeLabel} result_request_id`);
+    } else if (write.result_request_id !== "") {
+      fail(`${writeLabel} unrecorded result must not carry a request_id`);
+    }
   }
   return { writes: doc.writes };
 }
@@ -1094,6 +2217,7 @@ function parsePostgresRecovery(entry, binding) {
       "environment_id",
       "candidate_sha",
       "outage_declared_at",
+      "rto_started_at",
       "service_restored_at",
       "acknowledged",
       "failover",
@@ -1103,14 +2227,27 @@ function parsePostgresRecovery(entry, binding) {
   );
   requireBinding(doc.environment_id, doc.candidate_sha, label, binding);
   const outageMs = rfc3339(doc.outage_declared_at, `${label} outage_declared_at`);
-  requireWindow(outageMs, label, binding);
+  const outageNs = rfc3339Nanoseconds(
+    doc.outage_declared_at,
+    `${label} outage_declared_at`,
+  );
+  requireWindow(doc.outage_declared_at, label, binding);
+  const rtoStartedNs = rfc3339Nanoseconds(
+    doc.rto_started_at,
+    `${label} rto_started_at`,
+  );
+  requireWindow(doc.rto_started_at, label, binding);
   const restoredServiceMs = rfc3339(
     doc.service_restored_at,
     `${label} service_restored_at`,
   );
-  requireWindow(restoredServiceMs, label, binding);
-  if (restoredServiceMs <= outageMs) {
-    fail(`${label} must restore service after the declared outage`);
+  const restoredServiceNs = rfc3339Nanoseconds(
+    doc.service_restored_at,
+    `${label} service_restored_at`,
+  );
+  requireWindow(doc.service_restored_at, label, binding);
+  if (restoredServiceNs <= rtoStartedNs) {
+    fail(`${label} must restore service after its same-clock RTO boundary`);
   }
   if (!Array.isArray(doc.acknowledged) || doc.acknowledged.length === 0) {
     fail(`${label} must acknowledge at least one marker transaction`);
@@ -1126,11 +2263,19 @@ function parsePostgresRecovery(entry, binding) {
     }
     txids.add(marker.txid);
     const ackMs = rfc3339(marker.acknowledged_at, `${markerLabel} acknowledged_at`);
-    requireWindow(ackMs, markerLabel, binding);
-    if (ackMs > outageMs) {
+    const ackNs = rfc3339Nanoseconds(
+      marker.acknowledged_at,
+      `${markerLabel} acknowledged_at`,
+    );
+    requireWindow(marker.acknowledged_at, markerLabel, binding);
+    if (ackNs > outageNs) {
       fail(`${markerLabel} must be acknowledged before the declared outage`);
     }
-    acknowledged.push({ txid: marker.txid, acknowledgedAtMs: ackMs });
+    acknowledged.push({
+      txid: marker.txid,
+      acknowledgedAtMs: ackMs,
+      acknowledgedAtNs: ackNs,
+    });
   }
   object(doc.failover, `${label} failover`);
   closed(
@@ -1144,11 +2289,19 @@ function parsePostgresRecovery(entry, binding) {
     fail(`${label} failover must name distinct primary instances`);
   }
   const isolatedMs = rfc3339(doc.failover.isolated_at, `${label} failover isolated_at`);
-  requireWindow(isolatedMs, label, binding);
+  const isolatedNs = rfc3339Nanoseconds(
+    doc.failover.isolated_at,
+    `${label} failover isolated_at`,
+  );
+  requireWindow(doc.failover.isolated_at, label, binding);
   const promotedMs = rfc3339(doc.failover.promoted_at, `${label} failover promoted_at`);
-  requireWindow(promotedMs, label, binding);
-  if (promotedMs < isolatedMs) {
-    fail(`${label} must promote the new primary after isolating the old one`);
+  const promotedNs = rfc3339Nanoseconds(
+    doc.failover.promoted_at,
+    `${label} failover promoted_at`,
+  );
+  requireWindow(doc.failover.promoted_at, label, binding);
+  if (doc.service_restored_at !== doc.failover.promoted_at) {
+    fail(`${label} service restoration must exactly match the promoted primary boundary`);
   }
   if (!Array.isArray(doc.failover.isolated_primary_writes) || doc.failover.isolated_primary_writes.length === 0) {
     fail(`${label} must probe the isolated former primary`);
@@ -1158,9 +2311,10 @@ function parsePostgresRecovery(entry, binding) {
     const attemptLabel = `${label} isolated primary write ${index + 1}`;
     closed(attempt, ["at", "accepted"], attemptLabel);
     const atMs = rfc3339(attempt.at, `${attemptLabel} at`);
-    requireWindow(atMs, attemptLabel, binding);
-    if (atMs < isolatedMs) {
-      fail(`${attemptLabel} must be attempted after isolation`);
+    const atNs = rfc3339Nanoseconds(attempt.at, `${attemptLabel} at`);
+    requireWindow(attempt.at, attemptLabel, binding);
+    if (atNs < promotedNs) {
+      fail(`${attemptLabel} must be attempted after promotion`);
     }
     boolean(attempt.accepted, `${attemptLabel} accepted`);
     if (attempt.accepted) dualPrimaryWriteAccepts += 1;
@@ -1168,8 +2322,12 @@ function parsePostgresRecovery(entry, binding) {
   object(doc.recovery, `${label} recovery`);
   closed(doc.recovery, ["restored_at", "present_txids"], `${label} recovery`);
   const restoredMs = rfc3339(doc.recovery.restored_at, `${label} recovery restored_at`);
-  requireWindow(restoredMs, label, binding);
-  if (restoredMs < outageMs) {
+  const restoredNs = rfc3339Nanoseconds(
+    doc.recovery.restored_at,
+    `${label} recovery restored_at`,
+  );
+  requireWindow(doc.recovery.restored_at, label, binding);
+  if (restoredNs < outageNs) {
     fail(`${label} recovery must complete after the declared outage`);
   }
   if (
@@ -1188,15 +2346,15 @@ function parsePostgresRecovery(entry, binding) {
   const presentMarkers = acknowledged.filter((marker) =>
     present.has(marker.txid),
   );
-  const newestPresentMs = Math.max(
-    ...presentMarkers.map((marker) => marker.acknowledgedAtMs),
-  );
+  const newestPresentNs = presentMarkers
+    .map((marker) => marker.acknowledgedAtNs)
+    .reduce((newest, value) => (value > newest ? value : newest));
   const acknowledgedTransactionLoss = acknowledged.filter(
     (marker) => !present.has(marker.txid),
   ).length;
   return {
-    rtoSeconds: (restoredServiceMs - outageMs) / 1000,
-    rpoSeconds: (outageMs - newestPresentMs) / 1000,
+    rtoSeconds: Number(restoredServiceNs - rtoStartedNs) / 1000000000,
+    rpoSeconds: Number(outageNs - newestPresentNs) / 1000000000,
     dualPrimaryWriteAccepts,
     acknowledgedTransactionLoss,
     acknowledgedCount: acknowledged.length,
@@ -1224,34 +2382,46 @@ function parsePitrReport(entry, binding) {
   const markerFields = (marker, markerLabel) => {
     closed(marker, ["txid", "written_at"], markerLabel);
     identifier(marker.txid, `${markerLabel} txid`);
-    const writtenMs = rfc3339(marker.written_at, `${markerLabel} written_at`);
-    requireWindow(writtenMs, markerLabel, binding);
-    return writtenMs;
+    rfc3339(marker.written_at, `${markerLabel} written_at`);
+    const writtenNs = rfc3339Nanoseconds(
+      marker.written_at,
+      `${markerLabel} written_at`,
+    );
+    requireWindow(marker.written_at, markerLabel, binding);
+    return writtenNs;
   };
-  const markerAMs = markerFields(doc.marker_a, `${label} marker_a`);
+  const markerANs = markerFields(doc.marker_a, `${label} marker_a`);
   if (doc.marker_a.txid === doc.marker_b.txid) {
     fail(`${label} markers must use distinct transaction identifiers`);
   }
-  const restorePointMs = rfc3339(
+  rfc3339(
     doc.restore_point_created_at,
     `${label} restore_point_created_at`,
   );
-  requireWindow(restorePointMs, label, binding);
-  const markerBMs = markerFields(doc.marker_b, `${label} marker_b`);
+  const restorePointNs = rfc3339Nanoseconds(
+    doc.restore_point_created_at,
+    `${label} restore_point_created_at`,
+  );
+  requireWindow(doc.restore_point_created_at, label, binding);
+  const markerBNs = markerFields(doc.marker_b, `${label} marker_b`);
   object(doc.restore, `${label} restore`);
   closed(
     doc.restore,
     ["restored_at", "marker_a_present", "marker_b_present"],
     `${label} restore`,
   );
-  const restoredMs = rfc3339(doc.restore.restored_at, `${label} restore restored_at`);
-  requireWindow(restoredMs, label, binding);
-  if (!(markerAMs < restorePointMs && restorePointMs < markerBMs)) {
+  rfc3339(doc.restore.restored_at, `${label} restore restored_at`);
+  const restoredNs = rfc3339Nanoseconds(
+    doc.restore.restored_at,
+    `${label} restore restored_at`,
+  );
+  requireWindow(doc.restore.restored_at, label, binding);
+  if (!(markerANs < restorePointNs && restorePointNs < markerBNs)) {
     fail(
       `${label} marker order must be marker_a < restore point < marker_b`,
     );
   }
-  if (restoredMs < markerBMs) {
+  if (restoredNs < markerBNs) {
     fail(`${label} restore must complete after the last marker`);
   }
   boolean(doc.restore.marker_a_present, `${label} restore marker_a_present`);
@@ -1275,17 +2445,23 @@ function parseAgentSessions(entry, binding) {
       "candidate_sha",
       "snapshot_taken_at",
       "sessions",
+      "scheduler_authority",
       "reconnect_storm",
     ],
     label,
   );
   requireBinding(doc.environment_id, doc.candidate_sha, label, binding);
   const snapshotMs = rfc3339(doc.snapshot_taken_at, `${label} snapshot_taken_at`);
-  requireWindow(snapshotMs, label, binding);
+  const snapshotNs = rfc3339Nanoseconds(
+    doc.snapshot_taken_at,
+    `${label} snapshot_taken_at`,
+  );
+  requireWindow(doc.snapshot_taken_at, label, binding);
   if (!Array.isArray(doc.sessions) || doc.sessions.length === 0) {
     fail(`${label} must contain at least one session`);
   }
   const ids = new Set();
+  const nodes = new Set();
   const sessions = [];
   for (const [index, session] of doc.sessions.entries()) {
     const sessionLabel = `${label} session ${index + 1}`;
@@ -1294,44 +2470,198 @@ function parseAgentSessions(entry, binding) {
       [
         "agent_id",
         "node",
+        "endpoint_id",
+        "agent_instance_id",
         "authorized",
         "connected",
+        "owner_instance",
+        "owner_incarnation",
+        "connection_id",
+        "owner_epoch",
+        "owner_lease_until",
         "session_started_at",
+        "connected_at",
+        "session_expires_at",
         "reconnected_at",
+        "reconnect_owner_instance",
+        "reconnect_owner_incarnation",
+        "reconnect_connection_id",
+        "reconnect_owner_epoch",
       ],
       sessionLabel,
     );
     identifier(session.agent_id, `${sessionLabel} agent_id`);
-    identifier(session.node, `${sessionLabel} node`);
+    const node = normalizedUUIDIdentity(session.node, `${sessionLabel} node`);
     if (ids.has(session.agent_id)) {
       fail(`${label} repeats agent_id ${session.agent_id}`);
     }
     ids.add(session.agent_id);
+    if (nodes.has(node)) {
+      fail(`${label} repeats node ${node}`);
+    }
+    nodes.add(node);
+    const endpointId = endpointIdentity(
+      session.endpoint_id,
+      `${sessionLabel} endpoint_id`,
+    );
+    const agentInstanceId = normalizedUUIDIdentity(
+      session.agent_instance_id,
+      `${sessionLabel} agent_instance_id`,
+    );
     boolean(session.authorized, `${sessionLabel} authorized`);
     boolean(session.connected, `${sessionLabel} connected`);
+    identifier(session.owner_instance, `${sessionLabel} owner_instance`);
+    positiveDecimalString(
+      session.owner_incarnation,
+      `${sessionLabel} owner_incarnation`,
+    );
+    const connectionId = normalizedUUIDIdentity(
+      session.connection_id,
+      `${sessionLabel} connection_id`,
+    );
+    nonNegativeInteger(session.owner_epoch, `${sessionLabel} owner_epoch`);
+    if (session.owner_epoch < 1) {
+      fail(`${sessionLabel} owner_epoch must be positive`);
+    }
+    const ownerLeaseUntilMs = rfc3339(
+      session.owner_lease_until,
+      `${sessionLabel} owner_lease_until`,
+    );
+    const ownerLeaseUntilNs = rfc3339Nanoseconds(
+      session.owner_lease_until,
+      `${sessionLabel} owner_lease_until`,
+    );
+    if (ownerLeaseUntilNs <= snapshotNs) {
+      fail(`${sessionLabel} owner lease must remain live after the snapshot`);
+    }
     const startedMs = rfc3339(
       session.session_started_at,
       `${sessionLabel} session_started_at`,
     );
-    requireWindow(startedMs, sessionLabel, binding);
-    if (startedMs > snapshotMs) {
+    const startedNs = rfc3339Nanoseconds(
+      session.session_started_at,
+      `${sessionLabel} session_started_at`,
+    );
+    requireWindow(session.session_started_at, sessionLabel, binding);
+    if (startedNs > snapshotNs) {
       fail(`${sessionLabel} must start before the snapshot`);
+    }
+    const connectedAtMs = rfc3339(
+      session.connected_at,
+      `${sessionLabel} connected_at`,
+    );
+    const connectedAtNs = rfc3339Nanoseconds(
+      session.connected_at,
+      `${sessionLabel} connected_at`,
+    );
+    requireWindow(session.connected_at, sessionLabel, binding);
+    if (connectedAtNs > snapshotNs) {
+      fail(`${sessionLabel} must connect before the snapshot`);
+    }
+    const sessionExpiresAtMs = rfc3339(
+      session.session_expires_at,
+      `${sessionLabel} session_expires_at`,
+    );
+    const sessionExpiresAtNs = rfc3339Nanoseconds(
+      session.session_expires_at,
+      `${sessionLabel} session_expires_at`,
+    );
+    if (sessionExpiresAtNs <= snapshotNs) {
+      fail(`${sessionLabel} session must remain live after the snapshot`);
     }
     const reconnectedMs = rfc3339(
       session.reconnected_at,
       `${sessionLabel} reconnected_at`,
     );
-    requireWindow(reconnectedMs, sessionLabel, binding);
-    if (reconnectedMs > snapshotMs) {
+    const reconnectedNs = rfc3339Nanoseconds(
+      session.reconnected_at,
+      `${sessionLabel} reconnected_at`,
+    );
+    requireWindow(session.reconnected_at, sessionLabel, binding);
+    if (reconnectedNs > snapshotNs) {
       fail(`${sessionLabel} must reconnect before the snapshot`);
+    }
+    identifier(
+      session.reconnect_owner_instance,
+      `${sessionLabel} reconnect_owner_instance`,
+    );
+    positiveDecimalString(
+      session.reconnect_owner_incarnation,
+      `${sessionLabel} reconnect_owner_incarnation`,
+    );
+    const reconnectConnectionId = normalizedUUIDIdentity(
+      session.reconnect_connection_id,
+      `${sessionLabel} reconnect_connection_id`,
+    );
+    nonNegativeInteger(
+      session.reconnect_owner_epoch,
+      `${sessionLabel} reconnect_owner_epoch`,
+    );
+    if (session.reconnect_owner_epoch < 1) {
+      fail(`${sessionLabel} reconnect_owner_epoch must be positive`);
     }
     sessions.push({
       agentId: session.agent_id,
+      node,
+      endpointId,
+      agentInstanceId,
+      ownerInstance: session.owner_instance,
+      ownerIncarnation: session.owner_incarnation,
+      connectionId,
+      ownerEpoch: session.owner_epoch,
+      ownerLeaseUntil: session.owner_lease_until,
+      ownerLeaseUntilMs,
+      ownerLeaseUntilNs,
       authorized: session.authorized,
       connected: session.connected,
       startedMs,
+      startedNs,
+      connectedAt: session.connected_at,
+      connectedAtMs,
+      connectedAtNs,
+      sessionExpiresAt: session.session_expires_at,
+      sessionExpiresAtMs,
+      sessionExpiresAtNs,
+      reconnectedAt: session.reconnected_at,
       reconnectedMs,
+      reconnectedNs,
+      reconnectOwnerInstance: session.reconnect_owner_instance,
+      reconnectOwnerIncarnation: session.reconnect_owner_incarnation,
+      reconnectConnectionId,
+      reconnectOwnerEpoch: session.reconnect_owner_epoch,
     });
+  }
+  object(doc.scheduler_authority, `${label} scheduler authority`);
+  closed(
+    doc.scheduler_authority,
+    ["instance", "incarnation", "epoch", "lease_until"],
+    `${label} scheduler authority`,
+  );
+  identifier(
+    doc.scheduler_authority.instance,
+    `${label} scheduler authority instance`,
+  );
+  positiveDecimalString(
+    doc.scheduler_authority.incarnation,
+    `${label} scheduler authority incarnation`,
+  );
+  nonNegativeInteger(
+    doc.scheduler_authority.epoch,
+    `${label} scheduler authority epoch`,
+  );
+  if (doc.scheduler_authority.epoch < 1) {
+    fail(`${label} scheduler authority epoch must be positive`);
+  }
+  const schedulerLeaseUntilMs = rfc3339(
+    doc.scheduler_authority.lease_until,
+    `${label} scheduler authority lease_until`,
+  );
+  const schedulerLeaseUntilNs = rfc3339Nanoseconds(
+    doc.scheduler_authority.lease_until,
+    `${label} scheduler authority lease_until`,
+  );
+  if (schedulerLeaseUntilNs <= snapshotNs) {
+    fail(`${label} scheduler lease must remain live after the snapshot`);
   }
   object(doc.reconnect_storm, `${label} reconnect storm`);
   closed(doc.reconnect_storm, ["bulk_disconnect_at"], `${label} reconnect storm`);
@@ -1339,20 +2669,31 @@ function parseAgentSessions(entry, binding) {
     doc.reconnect_storm.bulk_disconnect_at,
     `${label} reconnect storm bulk_disconnect_at`,
   );
-  requireWindow(disconnectMs, label, binding);
+  const disconnectNs = rfc3339Nanoseconds(
+    doc.reconnect_storm.bulk_disconnect_at,
+    `${label} reconnect storm bulk_disconnect_at`,
+  );
+  requireWindow(doc.reconnect_storm.bulk_disconnect_at, label, binding);
   const authorizedConnected = [];
   for (const session of sessions) {
     // The pre-storm expected population: every inventoried session
     // existed before the bulk disconnect and recovered on its own
     // afterwards; recovery cannot be claimed on behalf of an agent.
-    if (session.startedMs > disconnectMs) {
+    if (session.startedNs > disconnectNs) {
       fail(
         `${label} session for agent ${session.agentId} must predate the bulk disconnect`,
       );
     }
-    if (session.reconnectedMs < disconnectMs) {
+    if (
+      compareRfc3339(
+        session.reconnectedAt,
+        doc.reconnect_storm.bulk_disconnect_at,
+        `${label} session for agent ${session.agentId} reconnected_at`,
+        `${label} reconnect storm bulk_disconnect_at`,
+      ) <= 0
+    ) {
       fail(
-        `${label} session for agent ${session.agentId} must reconnect at or after the bulk disconnect`,
+        `${label} session for agent ${session.agentId} must reconnect after the bulk disconnect`,
       );
     }
     if (session.authorized && session.connected) {
@@ -1362,17 +2703,30 @@ function parseAgentSessions(entry, binding) {
   if (authorizedConnected.length === 0) {
     fail(`${label} must contain at least one authorized connected session`);
   }
-  const lastReconnectMs = Math.max(
-    ...authorizedConnected.map((session) => session.reconnectedMs),
-  );
+  const lastReconnectNs = authorizedConnected
+    .map((session) => session.reconnectedNs)
+    .reduce((worst, value) => (value > worst ? value : worst));
   return {
     agentIds: ids,
     authorizedConnectedIds: new Set(
       authorizedConnected.map((session) => session.agentId),
     ),
     authorizedConnectedCount: authorizedConnected.length,
-    sessions: doc.sessions,
-    stormRecoverySeconds: (lastReconnectMs - disconnectMs) / 1000,
+    sessions,
+    snapshotAt: doc.snapshot_taken_at,
+    snapshotMs,
+    snapshotNs,
+    schedulerInstance: doc.scheduler_authority.instance,
+    schedulerIncarnation: doc.scheduler_authority.incarnation,
+    schedulerEpoch: doc.scheduler_authority.epoch,
+    schedulerLeaseUntil: doc.scheduler_authority.lease_until,
+    schedulerLeaseUntilMs,
+    schedulerLeaseUntilNs,
+    bulkDisconnectAt: doc.reconnect_storm.bulk_disconnect_at,
+    disconnectMs,
+    disconnectNs,
+    stormRecoverySeconds:
+      Number(lastReconnectNs - disconnectNs) / 1000000000,
   };
 }
 
@@ -1383,20 +2737,73 @@ function parseRelayTransitions(entry, binding) {
   const state = {
     failures: [],
     activations: [],
+    relaySessions: [],
     relayTraffic: [],
     pairCount: 0,
   };
+  const relaySessionFields = [
+    "event_type",
+    "session_id",
+    "path",
+    "relay",
+    "endpoint_id",
+    "path_detail",
+    "owner_fence_id",
+    "owner_instance",
+    "owner_incarnation",
+    "connection_id",
+    "owner_epoch",
+    "authorization_revision",
+    "negotiated_capabilities",
+    "session_connected_at",
+    "owner_lease_until",
+    "session_expires_at",
+  ];
+  const relayFailureFields = [
+    "event_type",
+    "relay",
+    "session_id",
+    "owner_instance",
+    "owner_incarnation",
+    "connection_id",
+    "owner_epoch",
+    "owner_lease_until",
+    "authority_lease_until",
+    "fault_cut_at",
+  ];
   streamEventLines(
     entry,
     "relay transition log",
     (record) => {
       switch (record.event_type) {
         case "relay_failed":
+          return relayFailureFields;
         case "relay_active":
           return ["event_type", "relay"];
+        case "session_observed":
+          return relaySessionFields;
         case "path_active":
           return record.path === "relay"
-            ? ["event_type", "session_id", "path", "relay", "authenticated"]
+            ? [
+                "authenticated",
+                ...relaySessionFields,
+                ...(record.relay === "relay-a"
+                  ? [
+                      "topology_mode",
+                      "topology_network_name",
+                      "topology_agent_service",
+                      "topology_network_internal",
+                      "topology_agent_default_network_connected",
+                      "topology_ready_at",
+                      "relay_b_disabled_at",
+                    ]
+                  : ["relay_b_started_at"]),
+                "command_id",
+                "command_idempotency_key",
+                "effect_idempotency_key",
+                "effect_id",
+                "result_observed_at",
+              ]
             : ["event_type", "session_id", "path", "authenticated"];
         case "path_failed":
           return ["event_type", "session_id", "path"];
@@ -1405,20 +2812,71 @@ function parseRelayTransitions(entry, binding) {
       }
     },
     binding,
-    (record, parsed) => {
+    (record, parsed, parsedNs) => {
       const label = `relay transition artifact ${entry.name}`;
-      if (
-        record.event_type === "relay_failed" ||
-        record.event_type === "relay_active"
-      ) {
+      if (record.event_type === "relay_failed") {
         if (!relayNames.has(record.relay)) {
           fail(`${label} has an invalid relay name`);
         }
-        (
-          record.event_type === "relay_failed" ? state.failures : state.activations
-        ).push({
+        const node = normalizedUUIDIdentity(
+          record.session_id,
+          `${label} failed relay session_id`,
+        );
+        identifier(record.owner_instance, `${label} failed relay owner_instance`);
+        positiveDecimalString(
+          record.owner_incarnation,
+          `${label} failed relay owner_incarnation`,
+        );
+        const connectionId = normalizedUUIDIdentity(
+          record.connection_id,
+          `${label} failed relay connection_id`,
+        );
+        nonNegativeInteger(record.owner_epoch, `${label} failed relay owner_epoch`);
+        if (record.owner_epoch < 1) {
+          fail(`${label} failed relay owner_epoch must be positive`);
+        }
+        const ownerLeaseUntilNs = rfc3339Nanoseconds(
+          record.owner_lease_until,
+          `${label} failed relay owner_lease_until`,
+        );
+        const authorityLeaseUntilNs = rfc3339Nanoseconds(
+          record.authority_lease_until,
+          `${label} failed relay authority_lease_until`,
+        );
+        const faultCutNs = rfc3339Nanoseconds(
+          record.fault_cut_at,
+          `${label} failed relay fault_cut_at`,
+        );
+        if (
+          faultCutNs !== parsedNs ||
+          ownerLeaseUntilNs <= parsedNs ||
+          authorityLeaseUntilNs <= faultCutNs
+        ) {
+          fail(
+            `${label} failed relay proof or authority was not live at its boundary`,
+          );
+        }
+        state.failures.push({
+          relay: record.relay,
+          node,
+          ownerInstance: record.owner_instance,
+          ownerIncarnation: record.owner_incarnation,
+          connectionId,
+          ownerEpoch: record.owner_epoch,
+          timestampMs: parsed,
+          timestampNs: parsedNs,
+          faultCutNs,
+        });
+        return;
+      }
+      if (record.event_type === "relay_active") {
+        if (!relayNames.has(record.relay)) {
+          fail(`${label} has an invalid relay name`);
+        }
+        state.activations.push({
           relay: record.relay,
           timestampMs: parsed,
+          timestampNs: parsedNs,
         });
         return;
       }
@@ -1428,43 +2886,229 @@ function parseRelayTransitions(entry, binding) {
       }
       if (record.event_type === "path_active") {
         boolean(record.authenticated, `${label} authenticated`);
-        if (record.path === "relay") {
+      }
+      if (
+        record.event_type === "session_observed" ||
+        (record.event_type === "path_active" && record.path === "relay")
+      ) {
           if (!relayNames.has(record.relay)) {
             fail(`${label} has an invalid relay name`);
           }
-          state.relayTraffic.push({
+          const node = normalizedUUIDIdentity(
+            record.session_id,
+            `${label} relay session_id`,
+          );
+          const endpointId = endpointIdentity(
+            record.endpoint_id,
+            `${label} relay endpoint_id`,
+          );
+          if (
+            typeof record.path_detail !== "string" ||
+            !record.path_detail.includes(record.relay)
+          ) {
+            fail(`${label} relay path_detail does not identify ${record.relay}`);
+          }
+          const ownerFenceId = normalizedUUIDIdentity(
+            record.owner_fence_id,
+            `${label} relay owner_fence_id`,
+          );
+          identifier(record.owner_instance, `${label} relay owner_instance`);
+          positiveDecimalString(
+            record.owner_incarnation,
+            `${label} relay owner_incarnation`,
+          );
+          const connectionId = normalizedUUIDIdentity(
+            record.connection_id,
+            `${label} relay connection_id`,
+          );
+          nonNegativeInteger(record.owner_epoch, `${label} relay owner_epoch`);
+          if (record.owner_epoch < 1) {
+            fail(`${label} relay owner_epoch must be positive`);
+          }
+          nonNegativeInteger(
+            record.authorization_revision,
+            `${label} relay authorization_revision`,
+          );
+          const sessionConnectedNs = rfc3339Nanoseconds(
+            record.session_connected_at,
+            `${label} relay session_connected_at`,
+          );
+          const ownerLeaseUntilNs = rfc3339Nanoseconds(
+            record.owner_lease_until,
+            `${label} relay owner_lease_until`,
+          );
+          const sessionExpiresAtNs = rfc3339Nanoseconds(
+            record.session_expires_at,
+            `${label} relay session_expires_at`,
+          );
+          let topologyReadyNs = null;
+          let relayBDisabledNs = null;
+          let relayBStartedNs = null;
+          if (record.event_type === "path_active" && record.relay === "relay-a") {
+            if (record.topology_mode !== "relay-a-only") {
+              fail(`${label} relay-a traffic lacks the controlled topology proof`);
+            }
+            if (
+              typeof record.topology_network_name !== "string" ||
+              !/^[a-z0-9][a-z0-9_-]{0,191}_relay-a-only$/.test(
+                record.topology_network_name,
+              ) ||
+              record.topology_agent_service !== "agent-fd-a-01" ||
+              record.topology_network_internal !== true ||
+              record.topology_agent_default_network_connected !== false
+            ) {
+              fail(`${label} relay-a controlled topology attributes are invalid`);
+            }
+            topologyReadyNs = rfc3339Nanoseconds(
+              record.topology_ready_at,
+              `${label} relay-a topology_ready_at`,
+            );
+            relayBDisabledNs = rfc3339Nanoseconds(
+              record.relay_b_disabled_at,
+              `${label} relay-b disabled_at`,
+            );
+            if (
+              topologyReadyNs > relayBDisabledNs ||
+              relayBDisabledNs >= parsedNs
+            ) {
+              fail(`${label} relay-a controlled topology boundaries are invalid`);
+            }
+          }
+          if (record.event_type === "path_active" && record.relay === "relay-b") {
+            relayBStartedNs = rfc3339Nanoseconds(
+              record.relay_b_started_at,
+              `${label} relay-b started_at`,
+            );
+            if (relayBStartedNs >= parsedNs) {
+              fail(`${label} relay-b traffic does not follow its bounded start`);
+            }
+          }
+          if (
+            sessionConnectedNs > parsedNs ||
+            ownerLeaseUntilNs <= parsedNs ||
+            sessionExpiresAtNs <= parsedNs
+          ) {
+            fail(`${label} relay traffic is not bound to a live session`);
+          }
+          if (
+            !Array.isArray(record.negotiated_capabilities) ||
+            !record.negotiated_capabilities.includes("ocserv.fencing.v2") ||
+            new Set(record.negotiated_capabilities).size !==
+              record.negotiated_capabilities.length
+          ) {
+            fail(`${label} relay traffic lacks the authenticated fencing capability`);
+          }
+          for (const [index, capability] of record.negotiated_capabilities.entries()) {
+            identifier(capability, `${label} relay capability ${index + 1}`);
+          }
+          const session = {
+            node,
+            endpointId,
             relay: record.relay,
-            authenticated: record.authenticated,
+            authenticated: record.authenticated === true,
+            ownerFenceId,
+            ownerInstance: record.owner_instance,
+            ownerIncarnation: record.owner_incarnation,
+            connectionId,
+            ownerEpoch: record.owner_epoch,
             timestampMs: parsed,
-          });
-        }
+            timestampNs: parsedNs,
+            sessionConnectedAt: record.session_connected_at,
+            sessionConnectedNs,
+            ownerLeaseUntilNs,
+            sessionExpiresAtNs,
+            topologyReadyNs,
+            relayBDisabledNs,
+            relayBStartedNs,
+          };
+          if (record.event_type === "path_active") {
+            identifier(record.command_id, `${label} relay command_id`);
+            identifier(
+              record.command_idempotency_key,
+              `${label} relay command_idempotency_key`,
+            );
+            identifier(
+              record.effect_idempotency_key,
+              `${label} relay effect_idempotency_key`,
+            );
+            identifier(record.effect_id, `${label} relay effect_id`);
+            const resultObservedNs = rfc3339Nanoseconds(
+              record.result_observed_at,
+              `${label} relay result_observed_at`,
+            );
+            if (resultObservedNs > parsedNs) {
+              fail(`${label} relay command result postdates the path proof`);
+            }
+            Object.assign(session, {
+              commandId: record.command_id,
+              commandIdempotencyKey: record.command_idempotency_key,
+              effectIdempotencyKey: record.effect_idempotency_key,
+              effectId: record.effect_id,
+              resultObservedNs,
+            });
+            state.relayTraffic.push(session);
+          }
+          state.relaySessions.push(session);
       }
     },
   );
   // A takeover is only proven by authenticated session traffic flowing
   // through a replacement relay after the failed relay went down; a
   // control-plane "active" record alone proves nothing about traffic.
-  let worstTakeoverMs = null;
+  let worstTakeoverNs = null;
   for (const failure of state.failures) {
+    const predecessor = state.relaySessions
+      .filter(
+        (session) =>
+          session.relay === failure.relay &&
+          session.timestampNs <= failure.timestampNs &&
+          session.node === failure.node &&
+          session.ownerInstance === failure.ownerInstance &&
+          session.ownerIncarnation === failure.ownerIncarnation &&
+          session.connectionId === failure.connectionId &&
+          session.ownerEpoch === failure.ownerEpoch &&
+          session.ownerLeaseUntilNs > failure.timestampNs &&
+          session.authenticated &&
+          typeof session.commandId === "string",
+      )
+      .at(-1);
+    if (!predecessor) {
+      fail(
+        `relay transition artifact ${entry.name} lacks a live pre-fault session through ${failure.relay}`,
+      );
+    }
+    predecessor.precedesFailureTimestampNs = failure.timestampNs;
     const successor = state.relayTraffic.find(
       (traffic) =>
         traffic.relay !== failure.relay &&
         traffic.authenticated &&
-        traffic.timestampMs >= failure.timestampMs,
+        traffic.node === predecessor.node &&
+        traffic.endpointId === predecessor.endpointId &&
+        traffic.timestampNs > failure.timestampNs &&
+        predecessor.relayBDisabledNs !== null &&
+        predecessor.relayBDisabledNs < failure.timestampNs &&
+        traffic.relayBStartedNs !== null &&
+        traffic.relayBStartedNs > failure.timestampNs,
     );
     if (!successor) continue;
+    successor.failureTimestampNs = failure.timestampNs;
     state.pairCount += 1;
-    const delta = successor.timestampMs - failure.timestampMs;
-    if (worstTakeoverMs === null || delta > worstTakeoverMs) {
-      worstTakeoverMs = delta;
+    const delta = successor.timestampNs - failure.timestampNs;
+    if (worstTakeoverNs === null || delta > worstTakeoverNs) {
+      worstTakeoverNs = delta;
     }
   }
-  if (worstTakeoverMs === null) {
+  if (worstTakeoverNs === null) {
     fail(
       `relay transition artifact ${entry.name} must record authenticated traffic through a replacement relay`,
     );
   }
-  return { takeoverSeconds: worstTakeoverMs / 1000, pairCount: state.pairCount };
+  return {
+    takeoverSeconds: Number(worstTakeoverNs) / 1000000000,
+    pairCount: state.pairCount,
+    relaySessions: state.relaySessions,
+    relayTraffic: state.relayTraffic,
+  };
 }
 
 // Nearest-rank percentile over an ascending-sorted list.
@@ -1491,7 +3135,10 @@ function growth(parsed, component, column, ratio) {
     if (ratio && baseline <= 0) {
       fail(`resource samples ${component} baseline must be positive`);
     }
-    const value = ratio ? (end - baseline) / baseline : end - baseline;
+    const value = Math.max(
+      0,
+      ratio ? (end - baseline) / baseline : end - baseline,
+    );
     if (worst === null || value > worst) worst = value;
   }
   return { value: worst, sampleCount: rows.length };
@@ -1505,6 +3152,8 @@ function parseStructuredArtifact(kind, entry, binding) {
       return parseTimeline(entry, binding);
     case "epoch_events":
       return parseEpochEvents(entry, binding);
+    case "authority_cut":
+      return parseAuthorityCut(entry, binding);
     case "command_trace":
       return parseCommandTrace(entry, binding);
     case "outbox_snapshot":
@@ -1530,23 +3179,40 @@ function parseStructuredArtifact(kind, entry, binding) {
 
 // Every derivation recomputes both the metric value and the sample count from
 // the raw artifact bytes, so evidence cannot inflate either dimension.
-function ownerTakeover(state) {
+function completedOwnerTakeovers(state) {
   const pairs = [];
   for (const expiry of state.ownerExpiries) {
     const successor = state.ownerRegistrations.find(
       (registration) =>
         registration.node === expiry.node &&
         registration.epoch > expiry.epoch &&
-        registration.timestampMs >= expiry.timestampMs,
+        registration.sessionConnectedNs !== undefined &&
+        registration.timestampNs >= expiry.timestampNs &&
+        registration.sessionConnectedNs >= registration.timestampNs,
     );
     if (!successor) continue;
-    pairs.push(successor.timestampMs - expiry.timestampMs);
+    pairs.push({
+      node: expiry.node,
+      expiredEpoch: expiry.epoch,
+      successorEpoch: successor.epoch,
+      expiryTimestampMs: expiry.timestampMs,
+      successorTimestampMs: successor.sessionConnectedMs,
+      expiryTimestampNs: expiry.timestampNs,
+      successorTimestampNs: successor.sessionConnectedNs,
+      seconds:
+        Number(successor.sessionConnectedNs - expiry.timestampNs) / 1000000000,
+    });
   }
+  return pairs;
+}
+
+function ownerTakeover(state) {
+  const pairs = completedOwnerTakeovers(state);
   if (pairs.length === 0) {
     fail("epoch event log must record a completed connection-owner takeover");
   }
   return {
-    value: Math.max(...pairs) / 1000,
+    value: Math.max(...pairs.map((pair) => pair.seconds)),
     sampleCount: pairs.length,
   };
 }
@@ -1556,18 +3222,20 @@ function schedulerTakeover(state) {
   for (const expiry of state.leaderExpiries) {
     const successor = state.leaderCommits.find(
       (commit) =>
-        commit.epoch > expiry.epoch &&
+        commit.epoch === expiry.epoch + 1 &&
         commit.accepted &&
-        commit.timestampMs >= expiry.timestampMs,
+        commit.timestampNs >= expiry.timestampNs,
     );
     if (!successor) continue;
-    pairs.push(successor.timestampMs - expiry.timestampMs);
+    pairs.push(successor.timestampNs - expiry.timestampNs);
   }
   if (pairs.length === 0) {
     fail("epoch event log must record a completed scheduler takeover");
   }
   return {
-    value: Math.max(...pairs) / 1000,
+    value:
+      Number(pairs.reduce((worst, value) => (value > worst ? value : worst))) /
+      1000000000,
     sampleCount: pairs.length,
   };
 }
@@ -1575,8 +3243,12 @@ function schedulerTakeover(state) {
 function commandCompletionP99(state) {
   const completions = [];
   for (const command of state.commands.values()) {
-    if (command.firstResultAtMs !== null) {
-      completions.push((command.firstResultAtMs - command.enqueuedAtMs) / 1000);
+    if (command.proofOnly) continue;
+    if (command.firstResultAtMicros !== null) {
+      completions.push(
+        Number(command.firstResultAtMicros - command.enqueuedAtMicros) /
+          1000000,
+      );
     }
   }
   if (completions.length === 0) {
@@ -1593,22 +3265,25 @@ function commandCompletionP99(state) {
 // undispatched command is a miss, and only each command's first dispatch
 // attempt can satisfy the bound.
 function dispatchRatio(state) {
-  if (state.commands.size === 0) {
+  const profileCommands = [...state.commands.values()].filter(
+    (command) => !command.proofOnly,
+  );
+  if (profileCommands.length === 0) {
     fail("command trace must record at least one accepted command");
   }
   let withinBound = 0;
-  for (const command of state.commands.values()) {
-    if (command.dispatchedAtMs === null) continue;
+  for (const command of profileCommands) {
+    if (command.dispatchedAtMicros === null) continue;
     if (
-      (command.dispatchedAtMs - command.enqueuedAtMs) / 1000 <=
+      Number(command.dispatchedAtMicros - command.enqueuedAtMicros) / 1000000 <=
       state.dispatchBoundSeconds
     ) {
       withinBound += 1;
     }
   }
   return {
-    value: withinBound / state.commands.size,
-    sampleCount: state.commands.size,
+    value: withinBound / profileCommands.length,
+    sampleCount: profileCommands.length,
   };
 }
 
@@ -1619,9 +3294,9 @@ function outboxMetrics(snapshot) {
   let terminalOrReconciled = 0;
   let oldestDueAgeSeconds = 0;
   for (const row of snapshot.rows) {
-    if (row.state === "pending" && Date.parse(row.due_at) <= snapshot.snapshotMs) {
+    if (row.state === "pending" && row.dueNs <= snapshot.snapshotNs) {
       pendingDue += 1;
-      const age = (snapshot.snapshotMs - Date.parse(row.created_at)) / 1000;
+      const age = Number(snapshot.snapshotNs - row.createdNs) / 1_000_000_000;
       oldestDueAgeSeconds = Math.max(oldestDueAgeSeconds, age);
     }
     if (row.state === "unknown") unknown += 1;
@@ -1656,10 +3331,9 @@ function enqueueLatencyP95(state) {
 }
 
 function telemetryFreshRatio(state) {
-  const boundMs = state.boundSeconds * 1000;
   let fresh = 0;
   for (const agent of state.agents) {
-    if (state.snapshotMs - Date.parse(agent.last_telemetry_at) <= boundMs) {
+    if (state.snapshotNs - agent.telemetryNs <= state.boundNs) {
       fresh += 1;
     }
   }
@@ -1688,19 +3362,22 @@ export const derivationRegistry = new Map([
     kind: "resource_samples",
     compute: (parsed) => ({
       value: parsed.sampleSpanSeconds,
-      sampleCount: parsed.rows.length,
+      sampleCount: parsed.batchCount,
     }),
   }],
   ["resource_samples.max_sample_gap_seconds", {
     kind: "resource_samples",
     compute: (parsed) => ({
       value: parsed.maxSampleGapSeconds,
-      sampleCount: parsed.rows.length,
+      sampleCount: parsed.batchCount,
     }),
   }],
   ["resource_samples.valid_sample_count", {
     kind: "resource_samples",
-    compute: (parsed) => ({ value: parsed.rows.length, sampleCount: parsed.rows.length }),
+    compute: (parsed) => ({
+      value: parsed.batchCount,
+      sampleCount: parsed.batchCount,
+    }),
   }],
   ["resource_samples.controller_rss_growth_ratio", {
     kind: "resource_samples",
@@ -1785,10 +3462,16 @@ export const derivationRegistry = new Map([
   ["command_trace.max_inflight", {
     kind: "command_trace",
     compute: (parsed) => {
-      if (parsed.dispatchedCommands === 0) {
+      const profileDispatchedCommands = [...parsed.commands.values()].filter(
+        (command) => !command.proofOnly && command.dispatchedAtMicros !== null,
+      ).length;
+      if (profileDispatchedCommands === 0) {
         fail("command trace must record at least one dispatched command");
       }
-      return { value: parsed.maxInflight, sampleCount: parsed.dispatchedCommands };
+      return {
+        value: parsed.inflightSnapshot.expectedCount,
+        sampleCount: profileDispatchedCommands,
+      };
     },
   }],
   ["command_trace.completion_seconds_p99", {
@@ -1817,7 +3500,9 @@ export const derivationRegistry = new Map([
     kind: "command_trace",
     compute: (parsed) => ({
       value: parsed.dispatchBoundSeconds,
-      sampleCount: parsed.commands.size,
+      sampleCount: [...parsed.commands.values()].filter(
+        (command) => !command.proofOnly,
+      ).length,
     }),
   }],
   ["outbox_snapshot.unreconciled_due_row_count", {
@@ -1946,7 +3631,10 @@ function validateEvidence(evidence, slo, artifactRoot) {
   digest(evidence.topology_digest, "evidence topology_digest");
   timestamp(evidence.started_at, "evidence started_at");
   timestamp(evidence.finished_at, "evidence finished_at");
-  if (Date.parse(evidence.finished_at) <= Date.parse(evidence.started_at)) {
+  if (
+    rfc3339Nanoseconds(evidence.finished_at, "evidence finished_at") <=
+    rfc3339Nanoseconds(evidence.started_at, "evidence started_at")
+  ) {
     fail("evidence finished_at must be later than started_at");
   }
 
@@ -2174,6 +3862,14 @@ function parseAllStructuredArtifacts(standardArtifacts, verifiedArtifacts, evide
     candidateSha: evidence.candidate_sha,
     startedAtMs: Date.parse(evidence.started_at),
     finishedAtMs: Date.parse(evidence.finished_at),
+    startedAtNs: rfc3339Nanoseconds(
+      evidence.started_at,
+      "evidence started_at",
+    ),
+    finishedAtNs: rfc3339Nanoseconds(
+      evidence.finished_at,
+      "evidence finished_at",
+    ),
   };
   const parsed = new Map();
   for (const [kind, artifact] of standardArtifacts) {
@@ -2181,11 +3877,370 @@ function parseAllStructuredArtifacts(standardArtifacts, verifiedArtifacts, evide
     parsed.set(kind, parseStructuredArtifact(kind, entry, binding));
   }
 
+  // The DB-clock authority cut is the durable source for live lease tuples.
+  // Cross-check it against both the independently parsed epoch history and
+  // the final session inventory so rebinding any one artifact and its digest
+  // cannot manufacture a coherent authority boundary.
+  const epochs = parsed.get("epoch_events");
+  const authority = parsed.get("authority_cut");
+  const sessions = parsed.get("agent_sessions");
+  const relay = parsed.get("relay_transitions");
+  const trace = parsed.get("command_trace");
+  const timeline = parsed.get("timeline");
+  const resourceSamples = parsed.get("resource_samples");
+  if (authority.cutAt !== sessions.snapshotAt) {
+    fail("authority cut_at does not exactly match the agent session snapshot");
+  }
+  const bulkDisconnect = timeline.get("bulk_disconnect_injected");
+  const reconnectCompleted = timeline.get("reconnect_completed");
+  const ownerPaused = timeline.get("owner_a_paused");
+  const ownerAcquired = timeline.get("owner_b_acquired");
+  const samplingStopped = timeline.get("resource_sampling_stopped");
+  const apiSloMeasured = timeline.get("api_slo_measured");
+  if (!bulkDisconnect || !reconnectCompleted) {
+    fail("timeline must bind the reconnect storm boundaries");
+  }
+  if (!ownerPaused || !ownerAcquired) {
+    fail("timeline must bind the connection-owner failover boundaries");
+  }
+  if (!samplingStopped || !apiSloMeasured) {
+    fail("timeline must bind the resource sampler stop boundary");
+  }
+  if (
+    resourceSamples.lastTimestampNs > samplingStopped.timestampNs ||
+    samplingStopped.timestampNs - resourceSamples.lastTimestampNs >
+      5_000_000_000n ||
+    samplingStopped.timestampNs > apiSloMeasured.timestampNs
+  ) {
+    fail(
+      "resource samples must end within five seconds of the graceful sampler stop boundary",
+    );
+  }
+  if (
+    ownerPaused.timestampNs >= ownerAcquired.timestampNs ||
+    ownerAcquired.timestampNs >= bulkDisconnect.timestampNs
+  ) {
+    fail(
+      "timeline connection-owner takeover must finish before the reconnect storm",
+    );
+  }
+  for (const traffic of relay.relaySessions) {
+    const session = sessions.sessions.find(
+      (candidate) => candidate.node === traffic.node,
+    );
+    if (!session) {
+      fail(`relay traffic references unmanaged session node ${traffic.node}`);
+    }
+    if (
+      traffic.endpointId !== session.endpointId
+    ) {
+      fail(
+        `relay traffic endpoint does not match managed session node ${traffic.node}`,
+      );
+    }
+    const relayRegistrationKey = [
+      traffic.node,
+      traffic.ownerInstance,
+      traffic.ownerIncarnation,
+      traffic.connectionId,
+      traffic.ownerEpoch,
+    ].join(":");
+    const relayRegistration = epochs.ownerRegistrationsByTerm.get(
+      relayRegistrationKey,
+    );
+    if (
+      !relayRegistration ||
+      relayRegistration.timestampNs > traffic.sessionConnectedNs
+    ) {
+      fail(
+        `relay traffic has no causal durable owner registration for node ${traffic.node}`,
+      );
+    }
+  }
+  const relayProofCommandIds = new Set();
+  for (const traffic of relay.relayTraffic) {
+    const command = trace.commands.get(traffic.commandId);
+    const effects = trace.effects.get(traffic.effectIdempotencyKey) ?? [];
+    const enqueuedNs =
+      command?.enqueuedAtMicros === undefined
+        ? null
+        : BigInt(command.enqueuedAtMicros) * 1000n;
+    const dispatchedNs =
+      command?.dispatchedAtMicros === null ||
+      command?.dispatchedAtMicros === undefined
+        ? null
+        : BigInt(command.dispatchedAtMicros) * 1000n;
+    const isPreFaultProof =
+      typeof traffic.precedesFailureTimestampNs === "bigint";
+    const isPostFaultProof = typeof traffic.failureTimestampNs === "bigint";
+    const commandTimingBound = isPreFaultProof
+      ? enqueuedNs !== null &&
+        dispatchedNs !== null &&
+        traffic.relayBDisabledNs !== null &&
+        enqueuedNs > traffic.relayBDisabledNs &&
+        dispatchedNs > traffic.relayBDisabledNs &&
+        enqueuedNs <= dispatchedNs &&
+        dispatchedNs <= traffic.resultObservedNs &&
+        traffic.resultObservedNs <= traffic.timestampNs &&
+        traffic.timestampNs <= traffic.precedesFailureTimestampNs
+      : isPostFaultProof &&
+        enqueuedNs !== null &&
+        dispatchedNs !== null &&
+        traffic.relayBStartedNs !== null &&
+        enqueuedNs > traffic.relayBStartedNs &&
+        dispatchedNs > traffic.relayBStartedNs &&
+        enqueuedNs > traffic.failureTimestampNs &&
+        dispatchedNs > traffic.failureTimestampNs;
+    if (
+      !command ||
+      command.idempotencyKey !== traffic.commandIdempotencyKey ||
+      command.dispatchedAtMicros === null ||
+      command.firstResultAtMicros === null ||
+      !commandTimingBound ||
+      BigInt(command.firstResultAtMicros) * 1000n !==
+        traffic.resultObservedNs ||
+      traffic.resultObservedNs > traffic.timestampNs ||
+      effects.length !== 1 ||
+      effects[0].commandId !== traffic.commandId ||
+      effects[0].effectId !== traffic.effectId ||
+      BigInt(effects[0].timestampMicros) * 1000n >
+        traffic.resultObservedNs
+    ) {
+      fail(
+        `relay authenticated traffic is not exactly bound to its successful command and durable effect for node ${traffic.node}`,
+      );
+    }
+    command.proofOnly = true;
+    relayProofCommandIds.add(traffic.commandId);
+  }
+  if (sessions.bulkDisconnectAt !== bulkDisconnect.timestamp) {
+    fail("agent session reconnect storm does not match the timeline bulk disconnect");
+  }
+  if (
+    compareRfc3339(
+      reconnectCompleted.timestamp,
+      bulkDisconnect.timestamp,
+      "timeline reconnect completion",
+      "timeline bulk disconnect",
+    ) <= 0 ||
+    compareRfc3339(
+      reconnectCompleted.timestamp,
+      sessions.snapshotAt,
+      "timeline reconnect completion",
+      "agent session snapshot",
+    ) >= 0
+  ) {
+    fail("timeline reconnect completion must fall strictly between the storm and session snapshot");
+  }
+  const sessionNodes = new Set();
+  const scenarioOwnerTakeovers = new Map(
+    completedOwnerTakeovers(epochs)
+      .filter(
+        (pair) =>
+          pair.expiryTimestampNs >= ownerPaused.timestampNs &&
+          pair.successorTimestampNs > pair.expiryTimestampNs &&
+          pair.successorTimestampNs <= ownerAcquired.timestampNs,
+      )
+      .map((pair) => [pair.node, pair]),
+  );
+  for (const session of sessions.sessions) {
+    sessionNodes.add(session.node);
+    const scenarioTakeover = scenarioOwnerTakeovers.get(session.node);
+    if (!scenarioTakeover) {
+      fail(
+        `agent session inventory node ${session.node} has no completed lease-expiry connection-owner takeover within the owner failover timeline`,
+      );
+    }
+    const latestOwner = epochs.ownerLatest.get(session.node);
+    if (!latestOwner) {
+      fail(
+        `agent session inventory node ${session.node} has no registered connection-owner epoch`,
+      );
+    }
+    if (session.ownerEpoch !== latestOwner.epoch) {
+      fail(
+        `agent session inventory owner_epoch ${session.ownerEpoch} does not match latest connection-owner epoch ${latestOwner.epoch} for node ${session.node}`,
+      );
+    }
+    if (!epochs.ownerActive.get(session.node)?.has(session.ownerEpoch)) {
+      fail(
+        `agent session inventory owner_epoch ${session.ownerEpoch} is not active for node ${session.node}`,
+      );
+    }
+    if (session.reconnectOwnerEpoch > session.ownerEpoch) {
+      fail(
+        `agent session inventory reconnect owner epoch exceeds the final owner epoch for node ${session.node}`,
+      );
+    }
+    if (session.reconnectOwnerEpoch <= scenarioTakeover.successorEpoch) {
+      fail(
+        `agent session inventory reconnect owner epoch does not advance beyond the owner failover epoch for node ${session.node}`,
+      );
+    }
+    const reconnectRegistrationKey = [
+      session.node,
+      session.reconnectOwnerInstance,
+      session.reconnectOwnerIncarnation,
+      session.reconnectConnectionId,
+      session.reconnectOwnerEpoch,
+    ].join(":");
+    const reconnectRegistration = epochs.ownerRegistrationsByTerm.get(
+      reconnectRegistrationKey,
+    );
+    if (!reconnectRegistration) {
+      fail(
+        `agent session inventory reconnect tuple has no durable owner registration for node ${session.node}`,
+      );
+    }
+    if (session.reconnectedNs < reconnectRegistration.timestampNs) {
+      fail(
+        `agent session inventory transport reconnect predates the durable owner registration for node ${session.node}`,
+      );
+    }
+    if (
+      compareRfc3339(
+        reconnectRegistration.timestamp,
+        bulkDisconnect.timestamp,
+        "durable reconnect registration",
+        "timeline bulk disconnect",
+      ) <= 0 ||
+      compareRfc3339(
+        reconnectRegistration.timestamp,
+        reconnectCompleted.timestamp,
+        "durable reconnect registration",
+        "timeline reconnect completion",
+      ) > 0
+    ) {
+      fail(
+        `agent session inventory reconnect registration falls outside the timeline storm for node ${session.node}`,
+      );
+    }
+    if (
+      session.reconnectedNs <= bulkDisconnect.timestampNs ||
+      session.reconnectedNs > reconnectCompleted.timestampNs
+    ) {
+      fail(
+        `agent session inventory transport reconnect falls outside the timeline storm for node ${session.node}`,
+      );
+    }
+    if (session.reconnectOwnerEpoch === session.ownerEpoch) {
+      if (
+        session.reconnectOwnerInstance !== session.ownerInstance ||
+        session.reconnectOwnerIncarnation !== session.ownerIncarnation ||
+        session.reconnectConnectionId !== session.connectionId
+      ) {
+        fail(
+          `agent session inventory same-epoch reconnect tuple differs from the final owner for node ${session.node}`,
+        );
+      }
+    } else if (
+      compareRfc3339(
+        session.connectedAt,
+        reconnectRegistration.timestamp,
+        "final session connected_at",
+        "durable reconnect registration",
+      ) < 0
+    ) {
+      fail(
+        `agent session inventory replacement connection predates the reconnect registration for node ${session.node}`,
+      );
+    }
+    const cutOwner = authority.owners.get(session.node);
+    if (!cutOwner) {
+      fail(`authority cut omits session owner node ${session.node}`);
+    }
+    const transport = authority.afterObservations.get(session.node);
+    if (!transport) {
+      fail(`authority cut transport bracket omits session node ${session.node}`);
+    }
+    if (
+      transport.endpointId !== session.endpointId ||
+      transport.agentInstanceId !== session.agentInstanceId ||
+      transport.connectedAt !== session.connectedAt ||
+      transport.sessionExpiresAt !== session.sessionExpiresAt ||
+      transport.ownerInstance !== session.ownerInstance ||
+      transport.ownerIncarnation !== session.ownerIncarnation ||
+      transport.connectionId !== session.connectionId ||
+      transport.ownerEpoch !== session.ownerEpoch
+    ) {
+      fail(
+        `authority cut transport tuple does not match agent session node ${session.node}`,
+      );
+    }
+    if (
+      cutOwner.instance !== latestOwner.instance ||
+      cutOwner.incarnation !== latestOwner.incarnation ||
+      cutOwner.connectionId !== latestOwner.connectionId ||
+      cutOwner.epoch !== latestOwner.epoch ||
+      cutOwner.leaseUntil !== latestOwner.leaseUntil
+    ) {
+      fail(
+        `authority cut owner tuple does not match latest epoch for node ${session.node}`,
+      );
+    }
+    if (
+      cutOwner.instance !== session.ownerInstance ||
+      cutOwner.incarnation !== session.ownerIncarnation ||
+      cutOwner.connectionId !== session.connectionId ||
+      cutOwner.epoch !== session.ownerEpoch ||
+      cutOwner.leaseUntil !== session.ownerLeaseUntil
+    ) {
+      fail(`authority cut owner tuple does not match session node ${session.node}`);
+    }
+  }
+  for (const node of authority.owners.keys()) {
+    if (!sessionNodes.has(node)) {
+      fail(`authority cut contains owner node ${node} absent from sessions`);
+    }
+  }
+  if (sessions.schedulerEpoch !== epochs.leaderMaxEpoch) {
+    fail(
+      `agent session inventory scheduler epoch ${sessions.schedulerEpoch} does not match latest scheduler epoch ${epochs.leaderMaxEpoch}`,
+    );
+  }
+  if (!epochs.leaderActive.has(sessions.schedulerEpoch)) {
+    fail(
+      `agent session inventory scheduler epoch ${sessions.schedulerEpoch} is not active`,
+    );
+  }
+  if (
+    authority.scheduler.instance !== epochs.leaderLatest?.instance ||
+    authority.scheduler.incarnation !== epochs.leaderLatest?.incarnation ||
+    authority.scheduler.epoch !== epochs.leaderLatest?.epoch ||
+    authority.scheduler.leaseUntil !== epochs.leaderLatest?.leaseUntil
+  ) {
+    fail("authority cut scheduler tuple does not match latest epoch");
+  }
+  if (
+    authority.scheduler.instance !== sessions.schedulerInstance ||
+    authority.scheduler.incarnation !== sessions.schedulerIncarnation ||
+    authority.scheduler.epoch !== sessions.schedulerEpoch ||
+    authority.scheduler.leaseUntil !== sessions.schedulerLeaseUntil
+  ) {
+    fail("authority cut scheduler tuple does not match agent sessions");
+  }
+  const liveSchedulerTerm = epochs.leaderTerms.get(authority.scheduler.epoch);
+  if (
+    !liveSchedulerTerm ||
+    liveSchedulerTerm.instance !== authority.scheduler.instance ||
+    liveSchedulerTerm.incarnation !== authority.scheduler.incarnation ||
+    !liveSchedulerTerm.maintenanceCompletions.some(
+      (completion) =>
+        completion.maintenanceId === BigInt(authority.scheduler.maintenanceId) &&
+        completion.markerCompletedAtNs ===
+          authority.scheduler.maintenanceCompletedAtNs &&
+        completion.timestampNs <= authority.cutNs,
+    )
+  ) {
+    fail(
+      "authority cut live scheduler term has no exact-term maintenance completion",
+    );
+  }
+
   // Telemetry must cover exactly the authorized connected session
   // population; submitting a fresh-looking subset cannot stand in for
   // the full fleet.
   const telemetry = parsed.get("telemetry_snapshot");
-  const sessions = parsed.get("agent_sessions");
   const telemetryIds = new Set(telemetry.agents.map((agent) => agent.agent_id));
   for (const agentId of telemetryIds) {
     if (!sessions.authorizedConnectedIds.has(agentId)) {
@@ -2229,20 +4284,63 @@ function parseAllStructuredArtifacts(standardArtifacts, verifiedArtifacts, evide
       fail(`audit correlation contains the unaccepted enqueue ${writeId}`);
     }
   }
+  for (const write of audit.writes) {
+    const acceptedRequestId =
+      http.okEnqueueAttemptRequestIdByCommand.get(write.write_id);
+    if (
+      write.intent_recorded &&
+      write.intent_request_id !== acceptedRequestId
+    ) {
+      fail(
+        `audit intent for accepted enqueue ${write.write_id} does not retain the terminal HTTP request_id`,
+      );
+    }
+    if (
+      write.result_recorded &&
+      write.result_request_id !== acceptedRequestId
+    ) {
+      fail(
+        `audit result for accepted enqueue ${write.write_id} does not retain the terminal HTTP request_id`,
+      );
+    }
+  }
   // The command trace's enqueued population must be exactly the accepted
   // write population: an accepted command that vanishes from the trace
   // would silently leave the dispatch ratio denominator.
-  const trace = parsed.get("command_trace");
   const traceIds = new Set(trace.commands.keys());
   for (const commandId of acceptedIds) {
     if (!traceIds.has(commandId)) {
       fail(`command trace is missing the accepted enqueue ${commandId}`);
     }
+    if (
+      trace.commands.get(commandId).idempotencyKey !==
+      http.okEnqueueIdempotencyByCommand.get(commandId)
+    ) {
+      fail(
+        `command trace enqueue ${commandId} does not retain the HTTP idempotency key`,
+      );
+    }
   }
   for (const commandId of traceIds) {
-    if (!acceptedIds.has(commandId)) {
+    if (!acceptedIds.has(commandId) && !relayProofCommandIds.has(commandId)) {
       fail(`command trace contains the unaccepted enqueue ${commandId}`);
     }
+  }
+  for (const commandId of relayProofCommandIds) {
+    if (acceptedIds.has(commandId)) {
+      fail(`relay proof command ${commandId} contaminates the bounded HTTP population`);
+    }
+  }
+  if (
+    trace.inflightSnapshot.expectedCount !== sessionNodes.size ||
+    trace.inflightSnapshot.nodeIds.size !== sessionNodes.size ||
+    [...sessionNodes].some(
+      (nodeId) => !trace.inflightSnapshot.nodeIds.has(nodeId),
+    )
+  ) {
+    fail(
+      "command trace inflight snapshot does not cover the exact managed session population",
+    );
   }
   return parsed;
 }

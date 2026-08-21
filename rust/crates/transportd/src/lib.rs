@@ -14,7 +14,7 @@ use iroh::endpoint::{
     VarInt, presets,
 };
 use iroh::protocol::{AcceptError, ProtocolHandler, Router};
-use iroh::{Endpoint, EndpointId, RelayMap, SecretKey, Watcher as _};
+use iroh::{Endpoint, EndpointId, SecretKey};
 use ocservia_command_authorization::ControllerCommandKeyring;
 use ocservia_contracts::decode_strict_command_envelope;
 use ocservia_contracts::generated::ocserv::platform::agent::v1::{
@@ -51,35 +51,6 @@ pub const AGENT_ALPN: &[u8] = b"ocserv-platform/agent/1";
 
 const ARTIFACT_FETCH_FRAME: u32 = 1 << 31;
 const ARTIFACT_CONSUME_FRAME: u32 = 3 << 30;
-
-/// Temporarily removes a failed home relay so Iroh selects another member of
-/// the configured dedicated set instead of waiting for a periodic net report.
-pub fn spawn_dedicated_relay_failover(endpoint: Endpoint, configured: RelayMap) {
-    if configured.len() < 2 {
-        return;
-    }
-    tokio::spawn(async move {
-        let mut watcher = endpoint.home_relay_status();
-        loop {
-            let failed = watcher
-                .get()
-                .into_iter()
-                .find(|status| !status.is_connected() && status.last_error().is_some())
-                .map(|status| status.url().clone());
-            if let Some(failed) = failed
-                && let Some(config) = configured.get(&failed)
-                && endpoint.remove_relay(&failed).await.is_some()
-            {
-                tracing::warn!(relay = %failed, "temporarily removed failed dedicated relay");
-                tokio::time::sleep(Duration::from_mins(1)).await;
-                let _ = endpoint.insert_relay(failed, config).await;
-            }
-            if watcher.updated().await.is_err() {
-                return;
-            }
-        }
-    });
-}
 
 const PROTOCOL_MAJOR: u32 = 1;
 const PROTOCOL_MINOR: u32 = 1;
@@ -966,10 +937,11 @@ impl Shared {
         &self,
         node_id: &[u8],
         endpoint_hint: Option<&[u8; 32]>,
+        session_fence: Option<&RegisteredFence>,
         binding: Option<&FenceBindingV2>,
         kind: FenceOperationKind,
         operation_id: &[u8],
-    ) -> Result<(), Status> {
+    ) -> Result<Option<RegisteredFence>, Status> {
         let node_id = fixed16(node_id)?;
         let registered = self
             .inner
@@ -980,7 +952,7 @@ impl Shared {
             .cloned();
         let Some(registered) = registered else {
             if binding.is_none() && !self.inner.require_fencing {
-                return Ok(());
+                return Ok(None);
             }
             return Err(Status::permission_denied(
                 "no owner fence is registered for this node",
@@ -997,8 +969,9 @@ impl Shared {
         };
         let keyring = self.keyring()?;
         let endpoint = endpoint_hint.copied().unwrap_or(registered.endpoint_id);
+        let (now_seconds, now_nanos) = unix_now_parts();
         let claims = keyring
-            .verify_fence_binding_v2(binding, &node_id, &endpoint, unix_now())
+            .verify_fence_binding_v2_at(binding, &node_id, &endpoint, now_seconds, now_nanos)
             .map_err(|_| Status::permission_denied("fence binding is invalid"))?;
         if claims.operation_kind != kind as u32 || claims.operation_id.as_slice() != operation_id {
             return Err(Status::permission_denied(
@@ -1028,7 +1001,23 @@ impl Shared {
                 "fence binding does not match the registered owner term",
             ));
         }
-        Ok(())
+        match session_fence {
+            None if kind == FenceOperationKind::Artifact => {
+                return Err(Status::permission_denied(
+                    "artifact operation requires a fenced active agent session",
+                ));
+            }
+            Some(session_fence)
+                if session_fence.endpoint_id != endpoint
+                    || !same_fence_term(&session_fence.verified, &registered.verified) =>
+            {
+                return Err(Status::permission_denied(
+                    "operation fence does not match the active agent session",
+                ));
+            }
+            None | Some(_) => {}
+        }
+        Ok(Some(registered))
     }
 
     fn keyring(&self) -> Result<&Arc<ControllerCommandKeyring>, Status> {
@@ -1229,9 +1218,15 @@ impl IrohTransportService {
         };
         let keyring = self.shared.keyring()?;
         let node_id = fixed16(node_id)?;
-        let now = unix_now();
-        let (verified, claims) =
-            verify_command_carriers(keyring, &node_id, &session_fence.endpoint_id, command, now)?;
+        let (now_seconds, now_nanos) = unix_now_parts();
+        let (verified, claims) = verify_command_carriers(
+            keyring,
+            &node_id,
+            &session_fence.endpoint_id,
+            command,
+            now_seconds,
+            now_nanos,
+        )?;
         let registered = self
             .shared
             .inner
@@ -1337,6 +1332,24 @@ impl TransportService for IrohTransportService {
         })
         .await
         .map_err(|_| Status::deadline_exceeded("command stream timed out"))??;
+        let (dispatch_path, dispatch_path_detail, _) = metadata_path(&response_connection);
+        let dispatch_path = match dispatch_path {
+            ConnectionPath::Direct => "direct",
+            ConnectionPath::Relay => "relay",
+            ConnectionPath::Unspecified => "unspecified",
+        };
+        let fence = command.connection_fence.as_ref();
+        tracing::info!(
+            event_type = "command_frame_written",
+            command_id = %hex::encode(&command.command_id),
+            node_id = %hex::encode(&node_id),
+            owner_fence_id = %fence.map_or_else(String::new, |value| hex::encode(&value.fence_id)),
+            connection_id = %fence.map_or_else(String::new, |value| hex::encode(&value.connection_id)),
+            owner_epoch = fence.map_or(0, |value| value.owner_epoch),
+            path = dispatch_path,
+            path_detail = %dispatch_path_detail,
+            "command frame written to authenticated Agent session"
+        );
         tokio::spawn(read_agent_events(
             recv,
             self.shared.clone(),
@@ -1370,7 +1383,7 @@ impl TransportService for IrohTransportService {
         {
             return Err(Status::invalid_argument("artifact request is invalid"));
         }
-        let (connection, session_mode, endpoint_bytes) = self
+        let (connection, session_mode, endpoint_bytes, session_fence) = self
             .shared
             .inner
             .connections
@@ -1382,6 +1395,7 @@ impl TransportService for IrohTransportService {
                     entry.connection.clone(),
                     entry.session_mode,
                     entry.metadata.endpoint_id.clone(),
+                    entry.fence.clone(),
                 )
             })
             .ok_or_else(|| Status::unavailable("node is not connected"))?;
@@ -1396,10 +1410,12 @@ impl TransportService for IrohTransportService {
         // guard until the first validated frame of this stream, so deferring
         // or front-loading any output past this point would reopen the
         // stale-owner fetch window the guard exists to close.
-        self.shared
+        let dispatch_fence = self
+            .shared
             .verify_operation_binding(
                 &node_id,
                 Some(&fixed32(&endpoint_bytes)?),
+                session_fence.as_ref(),
                 request.fence_binding.as_ref(),
                 FenceOperationKind::Artifact,
                 &artifact_id,
@@ -1410,6 +1426,10 @@ impl TransportService for IrohTransportService {
             purpose: request.purpose,
             max_bytes: request.max_bytes,
             grant: request.grant,
+            connection_fence: dispatch_fence
+                .as_ref()
+                .map(|registered| registered.fence.clone()),
+            fence_binding: request.fence_binding,
         }
         .encode_to_vec();
         let (sender, receiver) = mpsc::channel::<Result<ArtifactChunk, Status>>(8);
@@ -1448,7 +1468,7 @@ impl TransportService for IrohTransportService {
         let expected_artifact_id = grant.artifact_id.clone();
         let expected_grant_id = grant.grant_id.clone();
         let confirm_only = request.confirm_only;
-        let (connection, session_mode, endpoint_bytes) = self
+        let (connection, session_mode, endpoint_bytes, session_fence) = self
             .shared
             .inner
             .connections
@@ -1460,6 +1480,7 @@ impl TransportService for IrohTransportService {
                     entry.connection.clone(),
                     entry.session_mode,
                     entry.metadata.endpoint_id.clone(),
+                    entry.fence.clone(),
                 )
             })
             .ok_or_else(|| Status::unavailable("node is not connected"))?;
@@ -1468,10 +1489,12 @@ impl TransportService for IrohTransportService {
                 "read-only session does not permit artifact consumption",
             ));
         }
-        self.shared
+        let dispatch_fence = self
+            .shared
             .verify_operation_binding(
                 &node_id,
                 Some(&fixed32(&endpoint_bytes)?),
+                session_fence.as_ref(),
                 request.fence_binding.as_ref(),
                 FenceOperationKind::Artifact,
                 &expected_grant_id,
@@ -1482,6 +1505,10 @@ impl TransportService for IrohTransportService {
             sha256: request.sha256,
             size: request.size,
             confirm_only,
+            connection_fence: dispatch_fence
+                .as_ref()
+                .map(|registered| registered.fence.clone()),
+            fence_binding: request.fence_binding,
         }
         .encode_to_vec();
         let response = tokio::time::timeout(
@@ -1516,11 +1543,13 @@ impl TransportService for IrohTransportService {
             .verify_operation_binding(
                 &node_id,
                 None,
+                None,
                 request.fence_binding.as_ref(),
                 FenceOperationKind::ConnectionClose,
                 &node_id,
             )
-            .await?;
+            .await
+            .map(|_| ())?;
         self.shared
             .remove(&node_id, request.reason.as_bytes())
             .await
@@ -1629,11 +1658,13 @@ impl TransportService for IrohTransportService {
             .verify_operation_binding(
                 &node_id,
                 Some(&endpoint_key),
+                None,
                 request.fence_binding.as_ref(),
                 FenceOperationKind::StateUpdate,
                 &request.operation_id,
             )
-            .await?;
+            .await
+            .map(|_| ())?;
         let previous_revision = self.policy.revision(endpoint);
         let disposition = self
             .policy
@@ -1685,8 +1716,15 @@ impl TransportService for IrohTransportService {
         let node_id = validate_uuid(&fence.node_id, "node_id")?;
         let endpoint_id = fixed32(&fence.endpoint_id)?;
         let keyring = self.shared.keyring()?;
+        let (now_seconds, now_nanos) = unix_now_parts();
         let verified = keyring
-            .verify_connection_fence_v2(&fence, &fixed16(&node_id)?, &endpoint_id, unix_now())
+            .verify_connection_fence_v2_at(
+                &fence,
+                &fixed16(&node_id)?,
+                &endpoint_id,
+                now_seconds,
+                now_nanos,
+            )
             .map_err(|_| Status::permission_denied("owner fence is invalid"))?;
         if lease_expired_at(verified.lease_until_seconds, verified.lease_until_nanos) {
             return Err(Status::failed_precondition("owner fence lease has expired"));
@@ -1932,8 +1970,9 @@ impl SessionHandler {
             .try_into()
             .map_err(|_| protocol_error("handshake node id is invalid"))?;
         let endpoint_id: [u8; 32] = *connection.remote_id().as_bytes();
+        let (now_seconds, now_nanos) = unix_now_parts();
         let verified = keyring
-            .verify_connection_fence_v2(fence, &node_id, &endpoint_id, unix_now())
+            .verify_connection_fence_v2_at(fence, &node_id, &endpoint_id, now_seconds, now_nanos)
             .map_err(|_| protocol_error("controller connection fence is invalid"))?;
         if lease_expired_at(verified.lease_until_seconds, verified.lease_until_nanos) {
             return Err(protocol_error("connection owner lease has expired"));
@@ -2729,6 +2768,7 @@ fn metadata_path(connection: &Connection) -> (ConnectionPath, String, u64) {
     )
 }
 
+#[cfg(test)]
 fn unix_now() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -2933,7 +2973,8 @@ fn verify_command_carriers(
     node_id: &[u8; 16],
     endpoint: &[u8; 32],
     command: &CommandEnvelope,
-    now: i64,
+    now_seconds: i64,
+    now_nanos: u32,
 ) -> Result<
     (
         ocservia_command_authorization::VerifiedConnectionFenceV2,
@@ -2950,10 +2991,10 @@ fn verify_command_carriers(
         ));
     };
     let verified = keyring
-        .verify_connection_fence_v2(envelope_fence, node_id, endpoint, now)
+        .verify_connection_fence_v2_at(envelope_fence, node_id, endpoint, now_seconds, now_nanos)
         .map_err(|_| Status::permission_denied("command connection fence is invalid"))?;
     let claims = keyring
-        .verify_fence_binding_v2(envelope_binding, node_id, endpoint, now)
+        .verify_fence_binding_v2_at(envelope_binding, node_id, endpoint, now_seconds, now_nanos)
         .map_err(|_| Status::permission_denied("command fence binding is invalid"))?;
     if claims.capability != command.required_capability
         || !verified
@@ -3186,6 +3227,7 @@ async fn build_router_with_direct(
     direct_enabled: bool,
     relay_tls_roots: Vec<rustls_pki_types::CertificateDer<'static>>,
 ) -> Result<Router, iroh::endpoint::BindError> {
+    let keep_relays_connected = keep_dedicated_relays_connected(&relay_mode);
     let transport = QuicTransportConfig::builder()
         .max_concurrent_bidi_streams(VarInt::from_u32(MAX_STREAMS))
         .max_concurrent_uni_streams(VarInt::from_u32(2))
@@ -3197,6 +3239,7 @@ async fn build_router_with_direct(
     let mut endpoint_builder = Endpoint::builder(presets::N0)
         .secret_key(secret_key)
         .relay_mode(relay_mode)
+        .keep_relays_connected(keep_relays_connected)
         .transport_config(transport)
         .hooks(SecurityHook::new(policy.clone(), trust.as_ref()));
     if !relay_tls_roots.is_empty() {
@@ -3229,6 +3272,10 @@ async fn build_router_with_direct(
         .spawn())
 }
 
+fn keep_dedicated_relays_connected(relay_mode: &RelayMode) -> bool {
+    matches!(relay_mode, RelayMode::Custom(relays) if relays.len() >= 2)
+}
+
 /// Shuts down active connections before closing the Iroh router.
 ///
 /// # Errors
@@ -3244,8 +3291,10 @@ pub async fn shutdown(
 
 #[cfg(test)]
 mod tests {
+    use std::net::SocketAddr;
+
     use ed25519_dalek::SigningKey;
-    use iroh::{TransportAddr, Watcher as _, tls::CaTlsConfig};
+    use iroh::{RelayMap, Watcher as _, tls::CaTlsConfig};
     use ocservia_contracts::generated::ocserv::platform::agent::v1::{
         ArtifactGrantV1, ArtifactGrantVersion, CommandAuthorizationProof,
         CommandAuthorizationVersion, CommandDeliveryMode, GroupObservation, PrivdReceiptVersion,
@@ -3255,10 +3304,58 @@ mod tests {
     };
     use ocservia_privd_attestation::{key_id, sign_receipt, verify_receipt};
     use sha2::{Digest as _, Sha256};
+    use tokio::{
+        net::{TcpListener, TcpStream},
+        sync::oneshot,
+        task::JoinHandle,
+    };
 
     use super::*;
 
     const RELAYED_AUTHORIZATION_SIGNATURE: &[u8] = &[0xa5; 64];
+
+    struct RestartableTcpProxy {
+        addr: SocketAddr,
+        stop: oneshot::Sender<()>,
+        task: JoinHandle<()>,
+    }
+
+    impl RestartableTcpProxy {
+        async fn start(addr: SocketAddr, target: SocketAddr) -> Self {
+            let listener = TcpListener::bind(addr).await.expect("bind relay proxy");
+            let addr = listener.local_addr().expect("relay proxy address");
+            let (stop, mut stop_rx) = oneshot::channel();
+            let task = tokio::spawn(async move {
+                let mut children = tokio::task::JoinSet::new();
+                loop {
+                    tokio::select! {
+                        _ = &mut stop_rx => break,
+                        accepted = listener.accept() => {
+                            let Ok((mut client, _)) = accepted else { break };
+                            children.spawn(async move {
+                                let Ok(mut upstream) = TcpStream::connect(target).await else {
+                                    return;
+                                };
+                                tokio::io::copy_bidirectional(&mut client, &mut upstream)
+                                    .await
+                                    .ok();
+                            });
+                        }
+                        Some(_) = children.join_next(), if !children.is_empty() => {}
+                    }
+                }
+                children.abort_all();
+                while children.join_next().await.is_some() {}
+            });
+            Self { addr, stop, task }
+        }
+
+        async fn stop(self) -> SocketAddr {
+            self.stop.send(()).ok();
+            self.task.await.expect("join relay proxy");
+            self.addr
+        }
+    }
 
     fn sealing_keys() -> Vec<SealingKeyDescriptorV1> {
         vec![
@@ -4724,11 +4821,194 @@ mod tests {
         client.close().await;
     }
 
+    #[test]
+    fn only_multi_member_custom_relays_enable_persistent_connections() {
+        let one = RelayMap::try_from_iter(["https://relay-one.invalid"]).expect("single relay map");
+        let two =
+            RelayMap::try_from_iter(["https://relay-one.invalid", "https://relay-two.invalid"])
+                .expect("two relay map");
+
+        assert!(!keep_dedicated_relays_connected(&RelayMode::Disabled));
+        assert!(!keep_dedicated_relays_connected(&RelayMode::Default));
+        assert!(!keep_dedicated_relays_connected(&RelayMode::Staging));
+        assert!(!keep_dedicated_relays_connected(&RelayMode::Custom(
+            RelayMap::empty()
+        )));
+        assert!(!keep_dedicated_relays_connected(&RelayMode::Custom(one)));
+        assert!(keep_dedicated_relays_connected(&RelayMode::Custom(two)));
+    }
+
+    #[tokio::test]
+    async fn relay_connections_are_not_persistent_by_default() {
+        let (relay_map, _relay_url, relay_one) = iroh::test_utils::run_relay_server_with(false)
+            .await
+            .expect("start first relay");
+        let (second_map, _second_url, relay_two) = iroh::test_utils::run_relay_server_with(false)
+            .await
+            .expect("start second relay");
+        relay_map.extend(&second_map);
+
+        let endpoint = Endpoint::builder(presets::Minimal)
+            .relay_mode(RelayMode::Custom(relay_map))
+            .ca_tls_config(CaTlsConfig::insecure_skip_verify())
+            .clear_address_lookup()
+            .clear_ip_transports()
+            .bind()
+            .await
+            .expect("build default relay endpoint");
+        tokio::time::timeout(Duration::from_secs(10), endpoint.online())
+            .await
+            .expect("default endpoint selected a home relay");
+        tokio::time::sleep(Duration::from_millis(250)).await;
+
+        let relay_one_connected = relay_one.metrics().server.accepts.get() > 0;
+        let relay_two_connected = relay_two.metrics().server.accepts.get() > 0;
+        assert_ne!(
+            relay_one_connected, relay_two_connected,
+            "default endpoint must connect only its selected home relay"
+        );
+
+        endpoint.close().await;
+        relay_one.shutdown().await.expect("stop first relay");
+        relay_two.shutdown().await.expect("stop second relay");
+    }
+
     #[tokio::test]
     #[allow(clippy::too_many_lines)]
-    async fn dedicated_relay_failure_moves_traffic_to_second_relay() {
+    async fn persistent_relay_map_add_remove_reconciles_connections() {
+        let (relay_map, relay_url, relay_one) = iroh::test_utils::run_relay_server_with(false)
+            .await
+            .expect("start first relay");
+        let (second_map, second_url, relay_two) = iroh::test_utils::run_relay_server_with(false)
+            .await
+            .expect("start second relay");
+        let first_config = relay_map
+            .get(&relay_url)
+            .expect("first relay configuration");
+        let second_config = second_map
+            .get(&second_url)
+            .expect("second relay configuration");
+
+        let endpoint = Endpoint::builder(presets::Minimal)
+            .relay_mode(RelayMode::Custom(relay_map))
+            .keep_relays_connected(true)
+            .ca_tls_config(CaTlsConfig::insecure_skip_verify())
+            .clear_address_lookup()
+            .clear_ip_transports()
+            .bind()
+            .await
+            .expect("build persistent relay endpoint");
+        tokio::time::timeout(Duration::from_secs(10), endpoint.online())
+            .await
+            .expect("persistent endpoint selected its initial home relay");
+
+        assert!(
+            endpoint
+                .insert_relay(second_url.clone(), second_config.clone())
+                .await
+                .is_none()
+        );
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while relay_two.metrics().server.accepts.get() < 1 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("inserted relay was not preconnected");
+
+        let replacement_home_config = Arc::new(
+            first_config
+                .as_ref()
+                .clone()
+                .with_auth_token("rotated-test-token"),
+        );
+        assert!(
+            endpoint
+                .insert_relay(relay_url.clone(), replacement_home_config)
+                .await
+                .is_some()
+        );
+        tokio::time::timeout(Duration::from_secs(3), async {
+            while relay_one.metrics().server.disconnects.get() < 1
+                || relay_one.metrics().server.accepts.get() < 2
+            {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("same-URL relay configuration was not restarted");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        tokio::time::timeout(Duration::from_secs(2), endpoint.online())
+            .await
+            .expect("replacement home relay status was overwritten by the retired actor");
+
+        assert!(endpoint.remove_relay(&second_url).await.is_some());
+        tokio::time::timeout(Duration::from_secs(3), async {
+            while relay_two.metrics().server.disconnects.get() < 1 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("removed non-home relay was not disconnected");
+
+        assert!(
+            endpoint
+                .insert_relay(second_url, second_config)
+                .await
+                .is_none()
+        );
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while relay_two.metrics().server.accepts.get() < 2 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("reinserted relay was not preconnected");
+
+        assert!(endpoint.remove_relay(&relay_url).await.is_some());
+        tokio::time::timeout(Duration::from_secs(3), async {
+            while relay_one.metrics().server.disconnects.get() < 2 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("removed home relay was not disconnected");
+        let accepts_after_removal = relay_one.metrics().server.accepts.get();
+        tokio::time::sleep(Duration::from_millis(250)).await;
+        assert_eq!(
+            relay_one.metrics().server.accepts.get(),
+            accepts_after_removal,
+            "removed home relay actor was resurrected"
+        );
+        assert!(
+            endpoint.addr().relay_urls().all(|url| url != &relay_url),
+            "removed home relay was republished by a stale network report"
+        );
+
+        endpoint.close().await;
+        relay_one.shutdown().await.expect("stop first relay");
+        relay_two.shutdown().await.expect("stop second relay");
+    }
+
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)]
+    async fn dedicated_relay_failure_accepts_an_immediate_survivor_connection() {
         const TEST_ALPN: &[u8] = b"ocservia/relay-failover-test/1";
         const RELAY_TOKEN: &str = "i18-dedicated-relay-token";
+
+        async fn relay_auth_error(endpoint: &Endpoint) -> String {
+            let mut statuses = endpoint.home_relay_status().stream();
+            tokio::time::timeout(Duration::from_secs(5), async {
+                while let Some(statuses) = statuses.next().await {
+                    if let Some(error) = statuses.iter().find_map(|status| status.last_error()) {
+                        return format!("{error:#}");
+                    }
+                }
+                panic!("home relay status stream ended before reporting auth denial");
+            })
+            .await
+            .expect("relay auth denial was not reported")
+        }
 
         #[derive(Debug)]
         struct TokenAccess;
@@ -4757,8 +5037,66 @@ mod tests {
                 .expect("start second dedicated relay");
         relay_map.extend(&second_map);
         assert_eq!(relay_map.len(), 2);
-        let unauthenticated = Endpoint::builder(presets::Minimal)
+        let unauthenticated_relay_map = RelayMap::from_iter([relay_map
+            .get(&relay_url)
+            .expect("unauthenticated relay configuration")]);
+        let relay_map = relay_map.with_auth_token(RELAY_TOKEN);
+        let server = Endpoint::builder(presets::Minimal)
             .relay_mode(RelayMode::Custom(relay_map.clone()))
+            .keep_relays_connected(true)
+            .relay_inactive_cleanup_time(Duration::from_millis(100))
+            .ca_tls_config(CaTlsConfig::insecure_skip_verify())
+            .clear_address_lookup()
+            .clear_ip_transports()
+            .alpns(vec![TEST_ALPN.to_vec()])
+            .bind()
+            .await
+            .expect("build relay-only server");
+
+        tokio::time::timeout(Duration::from_secs(10), server.online())
+            .await
+            .expect("controller selected a home relay");
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                if relay_one.metrics().server.accepts.get() >= 1
+                    && relay_two.metrics().server.accepts.get() >= 1
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("controller registered with both dedicated relays before traffic");
+
+        let relay_one_accepts = relay_one.metrics().server.accepts.get();
+        let relay_one_disconnects = relay_one.metrics().server.disconnects.get();
+        let relay_two_accepts = relay_two.metrics().server.accepts.get();
+        let relay_two_disconnects = relay_two.metrics().server.disconnects.get();
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert_eq!(
+            relay_one.metrics().server.accepts.get(),
+            relay_one_accepts,
+            "first persistent relay reconnected after the idle deadline"
+        );
+        assert_eq!(
+            relay_one.metrics().server.disconnects.get(),
+            relay_one_disconnects,
+            "first persistent relay disconnected after the idle deadline"
+        );
+        assert_eq!(
+            relay_two.metrics().server.accepts.get(),
+            relay_two_accepts,
+            "second persistent relay reconnected after the idle deadline"
+        );
+        assert_eq!(
+            relay_two.metrics().server.disconnects.get(),
+            relay_two_disconnects,
+            "second persistent relay disconnected after the idle deadline"
+        );
+
+        let unauthenticated = Endpoint::builder(presets::Minimal)
+            .relay_mode(RelayMode::Custom(unauthenticated_relay_map.clone()))
             .ca_tls_config(CaTlsConfig::insecure_skip_verify())
             .clear_address_lookup()
             .clear_ip_transports()
@@ -4766,15 +5104,16 @@ mod tests {
             .await
             .expect("build unauthenticated relay endpoint");
         assert!(
-            tokio::time::timeout(Duration::from_secs(2), unauthenticated.online())
+            relay_auth_error(&unauthenticated)
                 .await
-                .is_err(),
-            "dedicated relays accepted a client without the configured token"
+                .contains("not authorized"),
+            "dedicated relays did not reject a client without the configured token"
         );
         unauthenticated.close().await;
+
         let wrong_token = Endpoint::builder(presets::Minimal)
             .relay_mode(RelayMode::Custom(
-                relay_map.clone().with_auth_token("wrong-token"),
+                unauthenticated_relay_map.with_auth_token("wrong-token"),
             ))
             .ca_tls_config(CaTlsConfig::insecure_skip_verify())
             .clear_address_lookup()
@@ -4783,35 +5122,188 @@ mod tests {
             .await
             .expect("build wrong-token relay endpoint");
         assert!(
-            tokio::time::timeout(Duration::from_secs(2), wrong_token.online())
+            relay_auth_error(&wrong_token)
                 .await
-                .is_err(),
-            "dedicated relays accepted a client with the wrong token"
+                .contains("not authorized"),
+            "dedicated relays did not reject a client with the wrong token"
         );
         wrong_token.close().await;
-        let relay_map = relay_map.with_auth_token(RELAY_TOKEN);
-        let client_key = SecretKey::generate();
-        let client = Endpoint::builder(presets::Minimal)
-            .secret_key(client_key.clone())
-            .relay_mode(RelayMode::Custom(relay_map.clone()))
+
+        let server_id = server.id();
+        let advertised_before_fault = server.addr();
+        let advertised_relays = advertised_before_fault.relay_urls().collect::<Vec<_>>();
+        assert_eq!(
+            advertised_relays.len(),
+            1,
+            "persistent standby relays must not be published as additional homes"
+        );
+        let active_url = advertised_relays[0].clone();
+        let active_relay_map = RelayMap::from_iter([relay_map
+            .get(&active_url)
+            .expect("active relay configuration")]);
+        let peer_key = SecretKey::generate();
+        let active_peer = Endpoint::builder(presets::Minimal)
+            .secret_key(peer_key.clone())
+            .relay_mode(RelayMode::Custom(active_relay_map))
             .ca_tls_config(CaTlsConfig::insecure_skip_verify())
             .clear_address_lookup()
             .clear_ip_transports()
             .bind()
             .await
-            .expect("build relay-only client");
+            .expect("build active relay-only peer");
+        let echo = tokio::spawn({
+            let server = server.clone();
+            async move {
+                let mut live_connections = Vec::new();
+                for _ in 0..2 {
+                    let connection = tokio::time::timeout(Duration::from_secs(20), server.accept())
+                        .await
+                        .expect("incoming connection timeout")
+                        .expect("incoming relay connection")
+                        .await
+                        .expect("complete relay handshake");
+                    let (mut send, mut recv) = connection.accept_bi().await.expect("accept stream");
+                    let bytes = recv.read_to_end(1024).await.expect("read relay payload");
+                    send.write_all(&bytes).await.expect("echo relay payload");
+                    send.finish().expect("finish echo");
+                    live_connections.push(connection);
+                }
+                live_connections
+            }
+        });
+        let active_target = iroh::EndpointAddr::new(server_id).with_relay_url(active_url.clone());
+        let active_connection = tokio::time::timeout(
+            Duration::from_secs(10),
+            active_peer.connect(active_target, TEST_ALPN),
+        )
+        .await
+        .expect("active peer connection timeout")
+        .expect("connect active peer through home relay");
+        let (mut send, mut recv) = active_connection
+            .open_bi()
+            .await
+            .expect("open active peer stream");
+        send.write_all(b"before-fault")
+            .await
+            .expect("write active peer payload");
+        send.finish().expect("finish active peer payload");
+        assert_eq!(
+            recv.read_to_end(1024).await.expect("read active peer echo"),
+            b"before-fault"
+        );
+
+        let (failed_relay, surviving_relay, surviving_url) = if active_url == relay_url {
+            (relay_one, relay_two, second_url)
+        } else {
+            (relay_two, relay_one, relay_url)
+        };
+        failed_relay
+            .shutdown()
+            .await
+            .expect("stop selected dedicated relay");
+
+        // Do not wait for a home-relay status or address update. The survivor
+        // must already have the live server registered before the fault.
+        let surviving_relay_map = RelayMap::from_iter([relay_map
+            .get(&surviving_url)
+            .expect("surviving relay configuration")]);
+        let surviving_target =
+            iroh::EndpointAddr::new(server_id).with_relay_url(surviving_url.clone());
+        let (replacement, replacement_connection) =
+            tokio::time::timeout(Duration::from_secs(10), async {
+                let replacement = Endpoint::builder(presets::Minimal)
+                    .secret_key(peer_key)
+                    .relay_mode(RelayMode::Custom(surviving_relay_map))
+                    .ca_tls_config(CaTlsConfig::insecure_skip_verify())
+                    .clear_address_lookup()
+                    .clear_ip_transports()
+                    .bind()
+                    .await
+                    .expect("build same-key survivor-only peer");
+                let connection = replacement
+                    .connect(surviving_target, TEST_ALPN)
+                    .await
+                    .expect("connect same-key peer through surviving relay");
+                let (mut send, mut recv) =
+                    connection.open_bi().await.expect("open survivor stream");
+                send.write_all(b"after-fault")
+                    .await
+                    .expect("write survivor payload");
+                send.finish().expect("finish survivor payload");
+                assert_eq!(
+                    recv.read_to_end(1024).await.expect("read survivor echo"),
+                    b"after-fault"
+                );
+                (replacement, connection)
+            })
+            .await
+            .expect("survivor-only ALPN and echo exceeded ten seconds");
+
+        assert!(
+            server.addr().relay_urls().count() <= 1,
+            "persistent endpoint published more than one home relay after failover"
+        );
+
+        let live_server_connections = tokio::time::timeout(Duration::from_secs(5), echo)
+            .await
+            .expect("echo task completed")
+            .expect("echo task");
+        assert_eq!(live_server_connections.len(), 2);
+        replacement_connection.close(0_u32.into(), b"survivor complete");
+        replacement.close().await;
+        active_connection.close(0_u32.into(), b"home failed");
+        active_peer.close().await;
+        server.close().await;
+        drop(live_server_connections);
+        surviving_relay
+            .shutdown()
+            .await
+            .expect("stop surviving relay");
+    }
+
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)]
+    async fn persistent_replacement_reconnects_after_post_fault_refusal() {
+        const TEST_ALPN: &[u8] = b"ocservia/relay-restart-test/1";
+
+        let (relay_a_map, relay_a_url, relay_a) = iroh::test_utils::run_relay_server_with(false)
+            .await
+            .expect("start active relay");
+        let (_relay_b_map, _relay_b_url, relay_b) = iroh::test_utils::run_relay_server_with(false)
+            .await
+            .expect("start replacement relay");
+        let relay_b_addr = relay_b.https_addr().expect("relay B HTTPS address");
+        let proxy = RestartableTcpProxy::start("127.0.0.1:0".parse().unwrap(), relay_b_addr).await;
+        let proxy_url: iroh::RelayUrl = format!("https://{}", proxy.addr)
+            .parse()
+            .expect("proxy relay URL");
+        let proxy_addr = proxy.stop().await;
+        let relay_b_config = Arc::new(iroh_relay::RelayConfig::new(proxy_url.clone(), None));
+        let relay_map = RelayMap::from_iter([
+            relay_a_map
+                .get(&relay_a_url)
+                .expect("active relay configuration"),
+            relay_b_config.clone(),
+        ]);
+
         let server = Endpoint::builder(presets::Minimal)
-            .relay_mode(RelayMode::Custom(relay_map.clone()))
+            .relay_mode(RelayMode::Custom(relay_map))
+            .keep_relays_connected(true)
             .ca_tls_config(CaTlsConfig::insecure_skip_verify())
+            .clear_address_lookup()
+            .clear_ip_transports()
             .alpns(vec![TEST_ALPN.to_vec()])
             .bind()
             .await
-            .expect("build relay-only server");
-        spawn_dedicated_relay_failover(server.clone(), relay_map.clone());
+            .expect("build dual-relay persistent server");
+        tokio::time::timeout(Duration::from_secs(10), server.online())
+            .await
+            .expect("persistent server active relay online");
 
         let echo = tokio::spawn({
             let server = server.clone();
             async move {
+                let mut connections = Vec::new();
                 for _ in 0..2 {
                     let connection = server
                         .accept()
@@ -4823,118 +5315,78 @@ mod tests {
                     let bytes = recv.read_to_end(1024).await.expect("read relay payload");
                     send.write_all(&bytes).await.expect("echo relay payload");
                     send.finish().expect("finish echo");
-                    connection.closed().await;
+                    connections.push(connection);
                 }
+                connections
             }
         });
 
-        server.online().await;
-        let mut address = server.addr();
-        let active_url = address
-            .relay_urls()
-            .next()
-            .expect("server selected a dedicated relay")
-            .clone();
-        address
-            .addrs
-            .retain(|address| !matches!(address, TransportAddr::Ip(_)));
-        let connection = client
-            .connect(address, TEST_ALPN)
-            .await
-            .expect("connect through first relay");
-        let (mut send, mut recv) = connection.open_bi().await.expect("open first stream");
-        send.write_all(b"relay-one")
-            .await
-            .expect("write first payload");
-        send.finish().expect("finish first payload");
-        assert_eq!(
-            recv.read_to_end(1024).await.expect("read first echo"),
-            b"relay-one"
-        );
-        connection.close(0_u32.into(), b"first relay complete");
-        connection.closed().await;
-        client.close().await;
-
-        let mut addresses = server.watch_addr().stream();
-        let mut relay_status = server.home_relay_status();
-        let (failed_relay, surviving_relay, surviving_url) = if active_url == relay_url {
-            (relay_one, relay_two, second_url)
-        } else {
-            (relay_two, relay_one, relay_url)
-        };
-        failed_relay
-            .shutdown()
-            .await
-            .expect("stop selected dedicated relay");
-
-        let mut address = tokio::time::timeout(Duration::from_secs(20), async {
-            loop {
-                let address = addresses.next().await.expect("address update");
-                if address.relay_urls().any(|url| url == &surviving_url) {
-                    break address;
-                }
-            }
-        })
-        .await
-        .expect("publish second relay address");
-        tokio::time::timeout(Duration::from_secs(20), async {
-            loop {
-                if relay_status
-                    .get()
-                    .iter()
-                    .any(|status| status.url() == &surviving_url && status.is_connected())
-                {
-                    break;
-                }
-                relay_status.updated().await.expect("relay status update");
-            }
-        })
-        .await
-        .expect("connect server to surviving relay");
-        address
-            .addrs
-            .retain(|address| !matches!(address, TransportAddr::Ip(_)));
-        let replacement = Endpoint::builder(presets::Minimal)
-            .secret_key(client_key)
-            .relay_mode(RelayMode::Custom(relay_map.clone()))
+        let peer_key = SecretKey::generate();
+        let first_peer = Endpoint::builder(presets::Minimal)
+            .secret_key(peer_key.clone())
+            .relay_mode(RelayMode::Custom(relay_a_map))
             .ca_tls_config(CaTlsConfig::insecure_skip_verify())
             .clear_address_lookup()
             .clear_ip_transports()
             .bind()
             .await
-            .expect("rebuild relay-only client after outage");
-        spawn_dedicated_relay_failover(replacement.clone(), relay_map);
-        tokio::time::timeout(Duration::from_secs(20), replacement.online())
+            .expect("build first relay peer");
+        let target = iroh::EndpointAddr::new(server.id()).with_relay_url(relay_a_url);
+        let first = first_peer
+            .connect(target, TEST_ALPN)
             .await
-            .expect("replacement client selected surviving relay");
-        let connection = tokio::time::timeout(
-            Duration::from_secs(20),
-            replacement.connect(address, TEST_ALPN),
+            .expect("connect before relay restart");
+        let (mut send, mut recv) = first.open_bi().await.expect("open first stream");
+        send.write_all(b"before-restart")
+            .await
+            .expect("write first payload");
+        send.finish().expect("finish first payload");
+        assert_eq!(recv.read_to_end(1024).await.unwrap(), b"before-restart");
+
+        relay_a.shutdown().await.expect("stop active relay");
+        first.close(0_u32.into(), b"relay restarting");
+        first_peer.close().await;
+        let refused = TcpStream::connect(proxy_addr)
+            .await
+            .expect_err("stopped relay URL unexpectedly accepted a connection");
+        assert_eq!(refused.kind(), std::io::ErrorKind::ConnectionRefused);
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let replacement_proxy = RestartableTcpProxy::start(proxy_addr, relay_b_addr).await;
+        let replacement_map = RelayMap::from_iter([relay_b_config]);
+        let replacement = Endpoint::builder(presets::Minimal)
+            .secret_key(peer_key)
+            .relay_mode(RelayMode::Custom(replacement_map))
+            .ca_tls_config(CaTlsConfig::insecure_skip_verify())
+            .clear_address_lookup()
+            .clear_ip_transports()
+            .bind()
+            .await
+            .expect("build replacement relay peer");
+        let target = iroh::EndpointAddr::new(server.id()).with_relay_url(proxy_url);
+        let second = tokio::time::timeout(
+            Duration::from_secs(10),
+            replacement.connect(target, TEST_ALPN),
         )
         .await
-        .expect("second relay connection completed")
-        .expect("connect through second relay");
-        let (mut send, mut recv) = connection.open_bi().await.expect("open second stream");
-        send.write_all(b"relay-two")
+        .expect("relay restart recovery exceeded ten seconds")
+        .expect("connect after relay restart");
+        let (mut send, mut recv) = second.open_bi().await.expect("open second stream");
+        send.write_all(b"after-restart")
             .await
             .expect("write second payload");
         send.finish().expect("finish second payload");
-        assert_eq!(
-            recv.read_to_end(1024).await.expect("read second echo"),
-            b"relay-two"
-        );
-        connection.close(0_u32.into(), b"second relay complete");
+        assert_eq!(recv.read_to_end(1024).await.unwrap(), b"after-restart");
 
-        tokio::time::timeout(Duration::from_secs(5), echo)
+        let connections = tokio::time::timeout(Duration::from_secs(5), echo)
             .await
-            .expect("echo task completed")
+            .expect("echo completion timeout")
             .expect("echo task");
+        second.close(0_u32.into(), b"test complete");
         replacement.close().await;
         server.close().await;
-        surviving_relay
-            .shutdown()
-            .await
-            .expect("stop surviving relay");
+        drop(connections);
+        replacement_proxy.stop().await;
+        relay_b.shutdown().await.expect("stop replacement relay");
     }
 
     #[tokio::test]
@@ -5021,6 +5473,195 @@ mod tests {
             .await
             .expect("fetch_artifact completes once verification runs")
             .expect("verified artifact fetch accepted");
+        service.begin_shutdown().await;
+    }
+
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)]
+    async fn artifact_fence_carriers_cross_the_agent_boundary() {
+        let (signing_key, keyring) = controller_keyring();
+        let node_id = *Uuid::now_v7().as_bytes();
+        let service = IrohTransportService::new_with_fence_policy(
+            8,
+            IdentityPolicy::default(),
+            Some(keyring),
+            true,
+        );
+        let (term, _handshake_fence, _router, _client, connection) =
+            fenced_agent_session(&service, &signing_key, node_id, 58).await;
+        // Keep the immutable session term but age its handshake carrier past
+        // the lease deadline. Registration refreshes that same term, and the
+        // refreshed wire proof is the one transportd must relay to the Agent.
+        let expired_session_fence = signed_controller_fence_at(&signing_key, &term, -10, -1);
+        let expired_verified = service
+            .shared
+            .keyring()
+            .expect("test keyring")
+            .verify_connection_fence_v2(
+                &expired_session_fence,
+                &term.node_id,
+                &term.endpoint_id,
+                unix_now(),
+            )
+            .expect("verify expired-lease session proof");
+        let mut connections = service.shared.inner.connections.lock().await;
+        connections
+            .get_mut(node_id.as_slice())
+            .expect("registered session")
+            .fence = Some(RegisteredFence {
+            verified: expired_verified,
+            fence: expired_session_fence.clone(),
+            endpoint_id: term.endpoint_id,
+        });
+        drop(connections);
+        let fence = signed_controller_fence(&signing_key, &term, 60);
+        service
+            .register_owner_fence(Request::new(RegisterOwnerFenceRequest {
+                fence: Some(fence.clone()),
+            }))
+            .await
+            .expect("register owner fence");
+
+        let artifact_id = *Uuid::now_v7().as_bytes();
+        let grant = shape_valid_grant(node_id, artifact_id);
+        let fetch_binding = signed_fence_binding(
+            &signing_key,
+            &fence,
+            FenceOperationKind::Artifact,
+            artifact_id,
+            "ocserv.fencing.v2",
+        );
+        let mut fetched = service
+            .fetch_artifact(Request::new(FetchArtifactRequest {
+                node_id: node_id.to_vec(),
+                artifact_id: artifact_id.to_vec(),
+                purpose: "certificate_p12".to_owned(),
+                max_bytes: 32,
+                grant: Some(grant.clone()),
+                fence_binding: Some(fetch_binding.clone()),
+            }))
+            .await
+            .expect("fenced fetch accepted")
+            .into_inner();
+        let (mut fetch_send, mut fetch_recv) =
+            tokio::time::timeout(Duration::from_secs(5), connection.accept_bi())
+                .await
+                .expect("artifact fetch stream opened")
+                .expect("accept artifact fetch stream");
+        let mut framed = [0_u8; 4];
+        fetch_recv
+            .read_exact(&mut framed)
+            .await
+            .expect("read artifact fetch length");
+        let framed = u32::from_be_bytes(framed);
+        assert_ne!(framed & ARTIFACT_FETCH_FRAME, 0);
+        let mut body = vec![0_u8; (framed & !ARTIFACT_FETCH_FRAME) as usize];
+        fetch_recv
+            .read_exact(&mut body)
+            .await
+            .expect("read artifact fetch request");
+        let forwarded =
+            ArtifactFetchRequest::decode(body.as_slice()).expect("decode forwarded artifact fetch");
+        assert_eq!(forwarded.connection_fence.as_ref(), Some(&fence));
+        assert_ne!(
+            forwarded.connection_fence.as_ref(),
+            Some(&expired_session_fence),
+            "transportd must not relay the expired handshake carrier"
+        );
+        assert_eq!(forwarded.fence_binding.as_ref(), Some(&fetch_binding));
+        let chunk = ArtifactChunk {
+            artifact_id: artifact_id.to_vec(),
+            offset: 0,
+            data: vec![1],
+            eof: true,
+            sha256: vec![0; 32],
+        }
+        .encode_to_vec();
+        fetch_send
+            .write_all(
+                &u32::try_from(chunk.len())
+                    .expect("chunk length")
+                    .to_be_bytes(),
+            )
+            .await
+            .expect("write artifact chunk length");
+        fetch_send
+            .write_all(&chunk)
+            .await
+            .expect("write artifact chunk");
+        fetch_send.finish().expect("finish artifact fetch response");
+        assert!(fetched.next().await.expect("artifact stream item").is_ok());
+
+        let grant_id: [u8; 16] = grant.grant_id.as_slice().try_into().expect("grant id");
+        let consume_binding = signed_fence_binding(
+            &signing_key,
+            &fence,
+            FenceOperationKind::Artifact,
+            grant_id,
+            "ocserv.fencing.v2",
+        );
+        let consume = tokio::spawn({
+            let service = service.clone();
+            let grant = grant.clone();
+            let consume_binding = consume_binding.clone();
+            async move {
+                service
+                    .consume_artifact(Request::new(ConsumeArtifactRequest {
+                        node_id: node_id.to_vec(),
+                        grant: Some(grant),
+                        sha256: vec![0x11; 32],
+                        size: 32,
+                        confirm_only: false,
+                        fence_binding: Some(consume_binding),
+                    }))
+                    .await
+            }
+        });
+        let (mut consume_send, mut consume_recv) =
+            tokio::time::timeout(Duration::from_secs(5), connection.accept_bi())
+                .await
+                .expect("artifact consume stream opened")
+                .expect("accept artifact consume stream");
+        let mut framed = [0_u8; 4];
+        consume_recv
+            .read_exact(&mut framed)
+            .await
+            .expect("read artifact consume length");
+        let framed = u32::from_be_bytes(framed);
+        assert_eq!(framed & ARTIFACT_CONSUME_FRAME, ARTIFACT_CONSUME_FRAME);
+        let mut body = vec![0_u8; (framed & !ARTIFACT_CONSUME_FRAME) as usize];
+        consume_recv
+            .read_exact(&mut body)
+            .await
+            .expect("read artifact consume request");
+        let forwarded = AgentArtifactConsumeRequest::decode(body.as_slice())
+            .expect("decode forwarded artifact consume");
+        assert_eq!(forwarded.connection_fence.as_ref(), Some(&fence));
+        assert_eq!(forwarded.fence_binding.as_ref(), Some(&consume_binding));
+        let response = AgentArtifactConsumeResponse {
+            artifact_id: artifact_id.to_vec(),
+            grant_id: grant_id.to_vec(),
+            consumed: true,
+        }
+        .encode_to_vec();
+        consume_send
+            .write_all(
+                &u32::try_from(response.len())
+                    .expect("consume response length")
+                    .to_be_bytes(),
+            )
+            .await
+            .expect("write consume response length");
+        consume_send
+            .write_all(&response)
+            .await
+            .expect("write consume response");
+        consume_send.finish().expect("finish consume response");
+        consume
+            .await
+            .expect("consume task")
+            .expect("fenced consume accepted");
+
         service.begin_shutdown().await;
     }
 
@@ -5925,7 +6566,15 @@ mod tests {
         service: &IrohTransportService,
         node_id: [u8; 16],
     ) -> ([u8; 32], iroh::protocol::Router, Endpoint, Connection) {
-        let agent_key = SecretKey::generate();
+        fenceless_mutation_session_with_key(service, node_id, SecretKey::generate()).await
+    }
+
+    #[allow(clippy::type_complexity)]
+    async fn fenceless_mutation_session_with_key(
+        service: &IrohTransportService,
+        node_id: [u8; 16],
+        agent_key: SecretKey,
+    ) -> ([u8; 32], iroh::protocol::Router, Endpoint, Connection) {
         let mut handshake = handshake(&agent_key);
         handshake.node_id = node_id.to_vec();
         let endpoint_id = *agent_key.public().as_bytes();
@@ -6050,6 +6699,92 @@ mod tests {
             .await
             .expect_err("bare command rejected because a fence is registered");
         assert_eq!(error.code(), tonic::Code::PermissionDenied);
+
+        service.begin_shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn retained_fence_cannot_be_borrowed_by_a_fenceless_artifact_session() {
+        let (signing_key, keyring) = controller_keyring();
+        let node_id = *Uuid::now_v7().as_bytes();
+        let service = IrohTransportService::new_with_fence_policy(
+            8,
+            IdentityPolicy::default(),
+            Some(keyring),
+            false,
+        );
+
+        // This ordering is reachable during a rolling upgrade: transportd
+        // retains an owner fence, then an N-1 Agent opens an authorized
+        // session without carrying that fence. The endpoint is deliberately
+        // identical so signature pinning alone cannot reject the borrow.
+        let agent_key = SecretKey::generate();
+        let endpoint_id = *agent_key.public().as_bytes();
+        let term = FenceTerm::new(node_id, endpoint_id, 3);
+        let fence = signed_controller_fence(&signing_key, &term, 30);
+        service
+            .register_owner_fence(Request::new(RegisterOwnerFenceRequest {
+                fence: Some(fence.clone()),
+            }))
+            .await
+            .expect("retain owner fence before the N-1 session");
+        let (_endpoint, _router, _client, _connection) =
+            fenceless_mutation_session_with_key(&service, node_id, agent_key).await;
+
+        let artifact_id = *Uuid::now_v7().as_bytes();
+        let grant = shape_valid_grant(node_id, artifact_id);
+        let fetch_binding = signed_fence_binding(
+            &signing_key,
+            &fence,
+            FenceOperationKind::Artifact,
+            artifact_id,
+            "ocserv.fencing.v2",
+        );
+        let Err(fetch) = service
+            .fetch_artifact(Request::new(FetchArtifactRequest {
+                node_id: node_id.to_vec(),
+                artifact_id: artifact_id.to_vec(),
+                purpose: "certificate_p12".to_owned(),
+                max_bytes: 32,
+                grant: Some(grant.clone()),
+                fence_binding: Some(fetch_binding),
+            }))
+            .await
+        else {
+            panic!("fenceless N-1 session borrowed a retained fence for artifact fetch");
+        };
+        assert_eq!(fetch.code(), tonic::Code::PermissionDenied);
+        assert_eq!(
+            fetch.message(),
+            "artifact operation requires a fenced active agent session"
+        );
+
+        let grant_id: [u8; 16] = grant.grant_id.as_slice().try_into().expect("grant id");
+        let consume_binding = signed_fence_binding(
+            &signing_key,
+            &fence,
+            FenceOperationKind::Artifact,
+            grant_id,
+            "ocserv.fencing.v2",
+        );
+        for confirm_only in [false, true] {
+            let consume = service
+                .consume_artifact(Request::new(ConsumeArtifactRequest {
+                    node_id: node_id.to_vec(),
+                    grant: Some(grant.clone()),
+                    sha256: vec![0x11; 32],
+                    size: 32,
+                    confirm_only,
+                    fence_binding: Some(consume_binding.clone()),
+                }))
+                .await
+                .expect_err("fenceless N-1 session borrowed a retained fence for artifact consume");
+            assert_eq!(consume.code(), tonic::Code::PermissionDenied);
+            assert_eq!(
+                consume.message(),
+                "artifact operation requires a fenced active agent session"
+            );
+        }
 
         service.begin_shutdown().await;
     }

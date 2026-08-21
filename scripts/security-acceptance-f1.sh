@@ -52,7 +52,10 @@ fi
 for scenario in \
   baseline_budget_parameters_remain_partitioned \
   router_restart_retains_identity_and_direct_connectivity \
-  dedicated_relay_failure_moves_traffic_to_second_relay \
+  only_multi_member_custom_relays_enable_persistent_connections \
+  relay_connections_are_not_persistent_by_default \
+  persistent_relay_map_add_remove_reconciles_connections \
+  dedicated_relay_failure_accepts_an_immediate_survivor_connection \
   newer_authority_revision_closes_the_retained_session \
   trust_update_reports_stale_and_rejects_tombstone_reactivation \
   enrollment_identity_churn_refuses_new_identity_without_evicting_oldest; do

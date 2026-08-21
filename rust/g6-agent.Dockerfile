@@ -7,6 +7,7 @@ FROM rust:1.97.1-bookworm@sha256:14bc9c5966e7b3a385794b3d5389a8765668342025fbcc7
 WORKDIR /src
 COPY rust/Cargo.toml rust/Cargo.lock rust/rust-toolchain.toml ./
 COPY rust/.cargo ./.cargo
+COPY rust/vendor ./vendor
 COPY rust/crates ./crates
 RUN cargo build --locked --release --package ocservia-agent --package ocservia-privd
 

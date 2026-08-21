@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"os"
@@ -13,6 +14,7 @@ import (
 
 	agentv1 "github.com/GentleKingson/ocservia/control-plane/gen/proto/ocserv/platform/agent/v1"
 	transportv1 "github.com/GentleKingson/ocservia/control-plane/gen/proto/ocserv/platform/transport/v1"
+	"github.com/GentleKingson/ocservia/control-plane/internal/transportclient"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -53,6 +55,12 @@ func (r *recordingRegistrar) RegisterOwnerFence(_ context.Context, fence *agentv
 	return nil
 }
 
+type eventStreamFunc func(context.Context, transportclient.CursorStore, transportclient.EventHandler) error
+
+func (f eventStreamFunc) RunWatch(ctx context.Context, cursor transportclient.CursorStore, handler transportclient.EventHandler) error {
+	return f(ctx, cursor, handler)
+}
+
 func testNodeAndEndpoint(t *testing.T) ([16]byte, [32]byte) {
 	t.Helper()
 	nodeID := mustUUIDv7(t)
@@ -85,6 +93,18 @@ func TestManagerSessionOwnershipIntegration(t *testing.T) {
 	}
 	if fence.GetOwnerEpoch() == 0 || fence.GetAuthorizationRevision() != 5 {
 		t.Fatalf("fence epoch/revision = %d/%d", fence.GetOwnerEpoch(), fence.GetAuthorizationRevision())
+	}
+	connectionID, err := fixed16(fence.GetConnectionId())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !manager.OwnsTerm(nodeID, connectionID, int64(fence.GetOwnerEpoch())) {
+		t.Fatal("manager did not recognize its exact local owner term")
+	}
+	wrongConnection := connectionID
+	wrongConnection[0] ^= 0xff
+	if manager.OwnsTerm(nodeID, wrongConnection, int64(fence.GetOwnerEpoch())) || manager.OwnsTerm(nodeID, connectionID, int64(fence.GetOwnerEpoch())+1) {
+		t.Fatal("manager accepted a different local owner term")
 	}
 	if !fenceClaimsMatchCapabilities(fence, []string{"ocserv.fencing.v2", "ocserv.service.reload"}) {
 		t.Fatalf("fence capabilities = %v", fence.GetCapabilities())
@@ -176,6 +196,20 @@ func TestManagerTakeoverFailsClosedIntegration(t *testing.T) {
 	}
 	if _, _, err := owner.BindOperation(context.Background(), nodeID, agentv1.FenceOperationKind_FENCE_OPERATION_KIND_COMMAND, operationID, "ocserv.fencing.v2"); !errors.Is(err, ErrNotOwner) {
 		t.Fatalf("lost session bind error = %v, want ErrNotOwner", err)
+	}
+	firstConnection, err := fixed16(firstFence.GetConnectionId())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if owner.OwnsTerm(nodeID, firstConnection, int64(firstFence.GetOwnerEpoch())) {
+		t.Fatal("stale manager retained local recovery authority")
+	}
+	successorConnection, err := fixed16(successorFence.GetConnectionId())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !successor.OwnsTerm(nodeID, successorConnection, int64(successorFence.GetOwnerEpoch())) {
+		t.Fatal("successor did not acquire local recovery authority")
 	}
 
 	// The successor keeps operating on the node.
@@ -398,6 +432,401 @@ func TestManagerCloseSessionMatchesTheExactTermIntegration(t *testing.T) {
 	}
 	if _, _, err := manager.BindOperation(context.Background(), nodeID, agentv1.FenceOperationKind_FENCE_OPERATION_KIND_COMMAND, mustUUIDv7(t), "ocserv.fencing.v2"); !errors.Is(err, ErrNotOwner) {
 		t.Fatalf("closed manager bind = %v, want ErrNotOwner", err)
+	}
+}
+
+// TestManagerTransportEventGapReconcilesConnectionInventoryIntegration pins
+// the transportd-restart path. A stale in-memory cursor is reconciled against
+// the live connection inventory, disconnected exact terms are released, live
+// terms remain usable, and the watch stays active with a cleared cursor.
+func TestManagerTransportEventGapReconcilesConnectionInventoryIntegration(t *testing.T) {
+	pool := testPool(t)
+	signer, _ := testSigner(t)
+	manager, err := NewManager(pool, signer, &recordingRegistrar{}, 30*time.Second, testLogger())
+	if err != nil {
+		t.Fatalf("new manager: %v", err)
+	}
+	liveNode, liveEndpoint := testNodeAndEndpoint(t)
+	deadNode, deadEndpoint := testNodeAndEndpoint(t)
+	liveFence, err := manager.OpenSession(context.Background(), liveNode, liveEndpoint, 7, []string{FencingCapability})
+	if err != nil {
+		t.Fatalf("open live session: %v", err)
+	}
+	deadFence, err := manager.OpenSession(context.Background(), deadNode, deadEndpoint, 8, []string{FencingCapability})
+	if err != nil {
+		t.Fatalf("open disconnected session: %v", err)
+	}
+	reconciliationNow := time.Now().UTC().Add(manager.publicationGrace + time.Second)
+	manager.now = func() time.Time { return reconciliationNow }
+	liveConnection, err := fixed16(liveFence.GetConnectionId())
+	if err != nil {
+		t.Fatalf("live connection id: %v", err)
+	}
+	deadConnection, err := fixed16(deadFence.GetConnectionId())
+	if err != nil {
+		t.Fatalf("disconnected connection id: %v", err)
+	}
+
+	reconciled := make(chan struct{})
+	cursorID := mustUUIDv7(t)
+	stream := eventStreamFunc(func(ctx context.Context, cursor transportclient.CursorStore, handler transportclient.EventHandler) error {
+		if err := handler.Ingest(ctx, &transportv1.TransportEvent{
+			EventId: cursorID[:],
+			NodeId:  liveNode[:],
+			Type:    transportv1.TransportEventType_TRANSPORT_EVENT_TYPE_HEARTBEAT,
+		}); err != nil {
+			return fmt.Errorf("seed owner event cursor: %w", err)
+		}
+		before, err := cursor.LastEventID(ctx)
+		if err != nil {
+			return fmt.Errorf("read seeded owner event cursor: %w", err)
+		}
+		if !bytes.Equal(before, cursorID[:]) {
+			return fmt.Errorf("seeded owner event cursor = %x, want %x", before, cursorID)
+		}
+		reconciler, ok := handler.(transportclient.OwnerGapReconciler)
+		if !ok {
+			return errors.New("owner transport event handler cannot reconcile exact terms after a retention gap")
+		}
+		if err := reconciler.ReconcileOwnerEventGap(ctx, func(_ context.Context, nodeID []byte) (*transportv1.NodeConnection, error) {
+			switch {
+			case bytes.Equal(nodeID, liveNode[:]):
+				return &transportv1.NodeConnection{
+					NodeId:     bytes.Clone(liveNode[:]),
+					EndpointId: bytes.Clone(liveEndpoint[:]),
+					OwnerEpoch: liveFence.GetOwnerEpoch(),
+				}, nil
+			case bytes.Equal(nodeID, deadNode[:]):
+				return nil, nil
+			default:
+				return nil, fmt.Errorf("unexpected owner inventory node %x", nodeID)
+			}
+		}); err != nil {
+			return err
+		}
+		after, err := cursor.LastEventID(ctx)
+		if err != nil {
+			return fmt.Errorf("read reconciled owner event cursor: %w", err)
+		}
+		if len(after) != 0 {
+			return fmt.Errorf("reconciled owner event cursor was not cleared: %x", after)
+		}
+		close(reconciled)
+		<-ctx.Done()
+		return ctx.Err()
+	})
+
+	watchCtx, stopWatch := context.WithCancel(context.Background())
+	defer stopWatch()
+	watchResult := make(chan error, 1)
+	go func() { watchResult <- manager.WatchTransport(watchCtx, stream) }()
+	select {
+	case <-reconciled:
+	case err := <-watchResult:
+		t.Fatalf("owner watch ended during gap reconciliation: %v", err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("owner watch did not reconcile the transport event gap")
+	}
+
+	if !manager.OwnsTerm(liveNode, liveConnection, int64(liveFence.GetOwnerEpoch())) {
+		t.Fatal("gap reconciliation closed a still-connected owner term")
+	}
+	if manager.OwnsTerm(deadNode, deadConnection, int64(deadFence.GetOwnerEpoch())) {
+		t.Fatal("gap reconciliation retained a disconnected owner term")
+	}
+	if _, _, err := manager.BindOperation(context.Background(), deadNode, agentv1.FenceOperationKind_FENCE_OPERATION_KIND_COMMAND, mustUUIDv7(t), FencingCapability); !errors.Is(err, ErrNotOwner) {
+		t.Fatalf("disconnected owner bind = %v, want ErrNotOwner", err)
+	}
+	successor, err := NewManager(pool, signer, &recordingRegistrar{}, 30*time.Second, testLogger())
+	if err != nil {
+		t.Fatalf("new successor manager: %v", err)
+	}
+	successorFence, err := successor.OpenSession(context.Background(), deadNode, deadEndpoint, 9, []string{FencingCapability})
+	if err != nil {
+		t.Fatalf("take over disconnected gap term: %v", err)
+	}
+	if successorFence.GetOwnerEpoch() <= deadFence.GetOwnerEpoch() {
+		t.Fatalf("successor epoch %d does not exceed disconnected epoch %d", successorFence.GetOwnerEpoch(), deadFence.GetOwnerEpoch())
+	}
+
+	stopWatch()
+	select {
+	case err := <-watchResult:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("owner watch shutdown = %v, want context canceled", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("owner watch did not stop after cancellation")
+	}
+}
+
+// TestManagerTransportEventGapRejectsNonAuthoritativeInventoryTermsIntegration
+// proves that an unfenced epoch-zero connection and a different owner term do
+// not keep local PostgreSQL owner leases alive merely because the node IDs are
+// still present in transportd's inventory.
+func TestManagerTransportEventGapRejectsNonAuthoritativeInventoryTermsIntegration(t *testing.T) {
+	pool := testPool(t)
+	signer, _ := testSigner(t)
+	manager, err := NewManager(pool, signer, &recordingRegistrar{}, 30*time.Second, testLogger())
+	if err != nil {
+		t.Fatalf("new manager: %v", err)
+	}
+	epochZeroNode, epochZeroEndpoint := testNodeAndEndpoint(t)
+	wrongTermNode, wrongTermEndpoint := testNodeAndEndpoint(t)
+	epochZeroFence, err := manager.OpenSession(context.Background(), epochZeroNode, epochZeroEndpoint, 13, []string{FencingCapability})
+	if err != nil {
+		t.Fatalf("open epoch-zero-masked session: %v", err)
+	}
+	wrongTermFence, err := manager.OpenSession(context.Background(), wrongTermNode, wrongTermEndpoint, 14, []string{FencingCapability})
+	if err != nil {
+		t.Fatalf("open wrong-term-masked session: %v", err)
+	}
+	manager.now = func() time.Time {
+		return time.Now().UTC().Add(manager.publicationGrace + time.Second)
+	}
+
+	cursor := &memoryCursor{}
+	cursorID := mustUUIDv7(t)
+	cursor.set(cursorID[:])
+	handler := transportEventHandler{manager: manager, cursor: cursor}
+	err = handler.ReconcileOwnerEventGap(context.Background(), func(_ context.Context, nodeID []byte) (*transportv1.NodeConnection, error) {
+		switch {
+		case bytes.Equal(nodeID, epochZeroNode[:]):
+			return &transportv1.NodeConnection{
+				NodeId:     bytes.Clone(epochZeroNode[:]),
+				EndpointId: bytes.Clone(epochZeroEndpoint[:]),
+				OwnerEpoch: 0,
+			}, nil
+		case bytes.Equal(nodeID, wrongTermNode[:]):
+			return &transportv1.NodeConnection{
+				NodeId:     bytes.Clone(wrongTermNode[:]),
+				EndpointId: bytes.Clone(wrongTermEndpoint[:]),
+				OwnerEpoch: wrongTermFence.GetOwnerEpoch() + 1,
+			}, nil
+		default:
+			return nil, fmt.Errorf("unexpected owner inventory node %x", nodeID)
+		}
+	})
+	if err != nil {
+		t.Fatalf("reconcile non-authoritative connection terms: %v", err)
+	}
+	for _, test := range []struct {
+		name  string
+		node  [16]byte
+		fence *agentv1.ConnectionFenceV2
+	}{
+		{name: "epoch zero", node: epochZeroNode, fence: epochZeroFence},
+		{name: "wrong term", node: wrongTermNode, fence: wrongTermFence},
+	} {
+		connectionID, err := fixed16(test.fence.GetConnectionId())
+		if err != nil {
+			t.Fatalf("%s connection id: %v", test.name, err)
+		}
+		if manager.OwnsTerm(test.node, connectionID, int64(test.fence.GetOwnerEpoch())) {
+			t.Fatalf("%s inventory retained a non-authoritative owner term", test.name)
+		}
+	}
+	last, err := cursor.LastEventID(context.Background())
+	if err != nil {
+		t.Fatalf("read reconciled cursor: %v", err)
+	}
+	if len(last) != 0 {
+		t.Fatalf("successful exact-term reconciliation retained cursor %x", last)
+	}
+}
+
+// TestManagerTransportEventGapDoesNotCloseConcurrentReplacementIntegration
+// forces a successor open between the gap snapshot and its stale close. The
+// exact connection-and-epoch predicate must leave that replacement authoritative.
+func TestManagerTransportEventGapDoesNotCloseConcurrentReplacementIntegration(t *testing.T) {
+	pool := testPool(t)
+	signer, _ := testSigner(t)
+	manager, err := NewManager(pool, signer, &recordingRegistrar{}, 30*time.Second, testLogger())
+	if err != nil {
+		t.Fatalf("new manager: %v", err)
+	}
+	nodeID, endpointID := testNodeAndEndpoint(t)
+	oldFence, err := manager.OpenSession(context.Background(), nodeID, endpointID, 10, []string{FencingCapability})
+	if err != nil {
+		t.Fatalf("open old session: %v", err)
+	}
+	reconciliationNow := time.Now().UTC().Add(manager.publicationGrace + time.Second)
+	manager.now = func() time.Time { return reconciliationNow }
+
+	cursor := &memoryCursor{}
+	cursorID := mustUUIDv7(t)
+	cursor.set(cursorID[:])
+	handler := transportEventHandler{manager: manager, cursor: cursor}
+	lookupStarted := make(chan struct{})
+	replacementReady := make(chan struct{})
+	reconcileResult := make(chan error, 1)
+	reconcileCtx, stopReconcile := context.WithCancel(context.Background())
+	defer stopReconcile()
+	go func() {
+		reconcileResult <- handler.ReconcileOwnerEventGap(reconcileCtx, func(ctx context.Context, candidate []byte) (*transportv1.NodeConnection, error) {
+			if !bytes.Equal(candidate, nodeID[:]) {
+				return nil, fmt.Errorf("unexpected owner inventory node %x", candidate)
+			}
+			close(lookupStarted)
+			select {
+			case <-replacementReady:
+				return nil, nil
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			}
+		})
+	}()
+	select {
+	case <-lookupStarted:
+	case <-time.After(5 * time.Second):
+		t.Fatal("gap reconciliation did not reach the inventory lookup")
+	}
+	// Reconciliation captured its synthetic post-grace instant before the
+	// callback signalled lookupStarted. Restore the real clock before opening
+	// the concurrent successor so its freshly acquired PostgreSQL lease remains
+	// in the future and the test isolates the exact-term close race.
+	manager.now = func() time.Time { return time.Now().UTC() }
+	replacementFence, err := manager.OpenSession(context.Background(), nodeID, endpointID, 11, []string{FencingCapability})
+	if err != nil {
+		close(replacementReady)
+		t.Fatalf("open replacement during gap reconciliation: %v", err)
+	}
+	close(replacementReady)
+	select {
+	case err := <-reconcileResult:
+		if err != nil {
+			t.Fatalf("reconcile gap around replacement: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("gap reconciliation did not finish after replacement")
+	}
+
+	replacementConnection, err := fixed16(replacementFence.GetConnectionId())
+	if err != nil {
+		t.Fatalf("replacement connection id: %v", err)
+	}
+	if !manager.OwnsTerm(nodeID, replacementConnection, int64(replacementFence.GetOwnerEpoch())) {
+		t.Fatal("stale gap close ended the concurrent replacement term")
+	}
+	if replacementFence.GetOwnerEpoch() <= oldFence.GetOwnerEpoch() {
+		t.Fatalf("replacement epoch %d does not exceed old epoch %d", replacementFence.GetOwnerEpoch(), oldFence.GetOwnerEpoch())
+	}
+	last, err := cursor.LastEventID(context.Background())
+	if err != nil {
+		t.Fatalf("read cursor after replacement reconciliation: %v", err)
+	}
+	if len(last) != 0 {
+		t.Fatalf("successful replacement reconciliation retained cursor %x", last)
+	}
+}
+
+// TestManagerTransportEventGapWaitsForBoundedConnectionPublicationIntegration
+// pins the interval where OpenSession has recorded and registered a new term,
+// but transportd has not yet published its NodeConnection. A fresh negative
+// inventory read is retryable; publication succeeds, while a term that remains
+// absent beyond the fixed grace is closed exactly and cannot renew forever.
+func TestManagerTransportEventGapWaitsForBoundedConnectionPublicationIntegration(t *testing.T) {
+	pool := testPool(t)
+	signer, _ := testSigner(t)
+	manager, err := NewManager(pool, signer, &recordingRegistrar{}, 30*time.Second, testLogger())
+	if err != nil {
+		t.Fatalf("new manager: %v", err)
+	}
+	now := time.Now().UTC()
+	manager.now = func() time.Time { return now }
+	nodeID, endpointID := testNodeAndEndpoint(t)
+	fence, err := manager.OpenSession(context.Background(), nodeID, endpointID, 12, []string{FencingCapability})
+	if err != nil {
+		t.Fatalf("open pending session: %v", err)
+	}
+	connectionID, err := fixed16(fence.GetConnectionId())
+	if err != nil {
+		t.Fatalf("pending connection id: %v", err)
+	}
+	cursor := &memoryCursor{}
+	firstCursor := mustUUIDv7(t)
+	cursor.set(firstCursor[:])
+	handler := transportEventHandler{manager: manager, cursor: cursor}
+
+	err = handler.ReconcileOwnerEventGap(context.Background(), func(context.Context, []byte) (*transportv1.NodeConnection, error) {
+		return nil, nil
+	})
+	if !errors.Is(err, errConnectionPublicationPending) {
+		t.Fatalf("fresh unpublished term reconciliation = %v, want publication pending", err)
+	}
+	if !manager.OwnsTerm(nodeID, connectionID, int64(fence.GetOwnerEpoch())) {
+		t.Fatal("fresh unpublished term was closed during its publication grace")
+	}
+	last, err := cursor.LastEventID(context.Background())
+	if err != nil {
+		t.Fatalf("read retryable gap cursor: %v", err)
+	}
+	if !bytes.Equal(last, firstCursor[:]) {
+		t.Fatalf("retryable publication gap cursor = %x, want %x", last, firstCursor)
+	}
+
+	// The accepted response precedes transportd's path-metadata collection and
+	// trust recheck, whose combined bounded pipeline can legitimately take more
+	// than ten seconds before NodeConnection becomes visible.
+	const delayedPublication = 12 * time.Second
+	if manager.publicationGrace <= delayedPublication {
+		t.Fatalf("publication grace = %s, must cover the %s post-response pipeline", manager.publicationGrace, delayedPublication)
+	}
+	now = now.Add(delayedPublication)
+	err = handler.ReconcileOwnerEventGap(context.Background(), func(context.Context, []byte) (*transportv1.NodeConnection, error) {
+		return nil, nil
+	})
+	if !errors.Is(err, errConnectionPublicationPending) {
+		t.Fatalf("delayed unpublished term reconciliation = %v, want publication pending", err)
+	}
+	if !manager.OwnsTerm(nodeID, connectionID, int64(fence.GetOwnerEpoch())) {
+		t.Fatal("legitimate delayed publication lost its owner term")
+	}
+	last, err = cursor.LastEventID(context.Background())
+	if err != nil {
+		t.Fatalf("read delayed publication gap cursor: %v", err)
+	}
+	if !bytes.Equal(last, firstCursor[:]) {
+		t.Fatalf("delayed publication gap cursor = %x, want %x", last, firstCursor)
+	}
+
+	if err := handler.ReconcileOwnerEventGap(context.Background(), func(context.Context, []byte) (*transportv1.NodeConnection, error) {
+		return &transportv1.NodeConnection{
+			NodeId:     bytes.Clone(nodeID[:]),
+			EndpointId: bytes.Clone(endpointID[:]),
+			OwnerEpoch: fence.GetOwnerEpoch(),
+		}, nil
+	}); err != nil {
+		t.Fatalf("reconcile published connection: %v", err)
+	}
+	if !manager.OwnsTerm(nodeID, connectionID, int64(fence.GetOwnerEpoch())) {
+		t.Fatal("published connection lost its owner term")
+	}
+	last, err = cursor.LastEventID(context.Background())
+	if err != nil {
+		t.Fatalf("read published gap cursor: %v", err)
+	}
+	if len(last) != 0 {
+		t.Fatalf("published connection retained gap cursor %x", last)
+	}
+
+	secondCursor := mustUUIDv7(t)
+	cursor.set(secondCursor[:])
+	now = now.Add(manager.publicationGrace + time.Second)
+	if err := handler.ReconcileOwnerEventGap(context.Background(), func(context.Context, []byte) (*transportv1.NodeConnection, error) {
+		return nil, nil
+	}); err != nil {
+		t.Fatalf("reconcile unpublished term after grace: %v", err)
+	}
+	if manager.OwnsTerm(nodeID, connectionID, int64(fence.GetOwnerEpoch())) {
+		t.Fatal("unpublished term outlived its bounded publication grace")
+	}
+	last, err = cursor.LastEventID(context.Background())
+	if err != nil {
+		t.Fatalf("read expired publication gap cursor: %v", err)
+	}
+	if len(last) != 0 {
+		t.Fatalf("expired publication gap retained cursor %x", last)
 	}
 }
 
