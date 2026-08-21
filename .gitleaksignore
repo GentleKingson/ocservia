@@ -12,3 +12,8 @@ b4a00a0efbd45c0ca7f4b7d38d96ceae664a7e6a:control-plane/internal/certificates/ser
 b4a00a0efbd45c0ca7f4b7d38d96ceae664a7e6a:web/e2e/config-plan.spec.ts:generic-api-key:8
 b4a00a0efbd45c0ca7f4b7d38d96ceae664a7e6a:web/e2e/config-plan.spec.ts:generic-api-key:9
 ce7e5d6354ccf987f6c3866d4bd7fbf66badc4a3:control-plane/internal/certificates/service_integration_test.go:generic-api-key:376
+60aaad4d885e82c644f96f1723a697f80921bb9f:scripts/generate-g6-test-fixtures.mjs:generic-api-key:382
+60aaad4d885e82c644f96f1723a697f80921bb9f:scripts/test-g6-evidence-builder.mjs:generic-api-key:300
+60aaad4d885e82c644f96f1723a697f80921bb9f:testdata/g6/artifacts/relay-transitions.jsonl:generic-api-key:3
+60aaad4d885e82c644f96f1723a697f80921bb9f:scripts/generate-g6-test-fixtures.mjs:generic-api-key:719
+60aaad4d885e82c644f96f1723a697f80921bb9f:testdata/g6/artifacts/command-trace.jsonl:generic-api-key:2403
