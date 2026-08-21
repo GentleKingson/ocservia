@@ -2,6 +2,7 @@ package operations
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"time"
@@ -90,27 +91,39 @@ func (w *Worker) dispatch(ctx context.Context) error {
 		if err != nil {
 			span.RecordError(err)
 			span.End()
+			var accepted *sentDispatchError
+			if errors.As(err, &accepted) {
+				w.logger.ErrorContext(ctx, "record command dispatch success", "command_id", job.CommandID, "error", accepted.err)
+				continue
+			}
 			if markErr := w.service.MarkFailed(ctx, job, err); markErr != nil {
 				w.logger.ErrorContext(ctx, "record command dispatch failure", "command_id", job.CommandID, "error", markErr)
 			}
 			continue
-		}
-		if err := w.service.MarkSent(ctx, job); err != nil {
-			span.RecordError(err)
-			w.logger.ErrorContext(ctx, "record command dispatch success", "command_id", job.CommandID, "error", err)
 		}
 		span.End()
 	}
 	return nil
 }
 
-// dispatchFenced sends one dispatch envelope inside the owner's fencing
-// interval. Nodes without an owner fence keep the established unfenced wire
-// form; ownership loss fails the dispatch so the command returns to the
-// queue instead of being attributed to a stale owner.
+type sentDispatchError struct{ err error }
+
+func (e *sentDispatchError) Error() string { return e.err.Error() }
+func (e *sentDispatchError) Unwrap() error { return e.err }
+
+// dispatchFenced sends and records one dispatch inside the owner's fencing
+// interval. Keeping MarkSent inside the action prevents a same-process reopen
+// from advancing the owner epoch between transport acceptance and persistence
+// of the exact sent frame.
 func (w *Worker) dispatchFenced(ctx context.Context, job Dispatch) error {
 	if w.fences == nil {
-		return w.sender.SendCommand(ctx, job.NodeID[:], job.Envelope)
+		if err := w.sender.SendCommand(ctx, job.NodeID[:], job.Envelope); err != nil {
+			return err
+		}
+		if err := w.service.MarkSentWithEnvelope(ctx, job, job.Envelope); err != nil {
+			return &sentDispatchError{err: err}
+		}
+		return nil
 	}
 	envelope := &agentv1.CommandEnvelope{}
 	if err := proto.Unmarshal(job.Envelope, envelope); err != nil {
@@ -128,6 +141,12 @@ func (w *Worker) dispatchFenced(ctx context.Context, job Dispatch) error {
 			if err != nil {
 				return fmt.Errorf("encode fenced command envelope: %w", err)
 			}
-			return w.sender.SendCommand(ctx, job.NodeID[:], fenced)
+			if err := w.sender.SendCommand(ctx, job.NodeID[:], fenced); err != nil {
+				return err
+			}
+			if err := w.service.MarkSentWithEnvelope(ctx, job, fenced); err != nil {
+				return &sentDispatchError{err: err}
+			}
+			return nil
 		})
 }
