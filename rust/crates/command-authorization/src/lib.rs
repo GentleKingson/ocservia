@@ -310,7 +310,9 @@ impl ControllerCommandKeyring {
     ///
     /// Returns an authorization error when the fence is malformed, expired,
     /// signed by an unknown key, has an invalid signature, or does not match
-    /// the expected node and endpoint.
+    /// the expected node and endpoint. This second-only compatibility API
+    /// evaluates the supplied second at nanosecond zero; callers with a
+    /// subsecond clock should use [`Self::verify_connection_fence_v2_at`].
     pub fn verify_connection_fence_v2(
         &self,
         fence: &ConnectionFenceV2,
@@ -318,6 +320,37 @@ impl ControllerCommandKeyring {
         expected_endpoint_id: &[u8; 32],
         now_unix_seconds: i64,
     ) -> Result<VerifiedConnectionFenceV2, AuthorizationError> {
+        self.verify_connection_fence_v2_at(
+            fence,
+            expected_node_id,
+            expected_endpoint_id,
+            now_unix_seconds,
+            0,
+        )
+    }
+
+    /// Verifies a Controller-signed per-node connection-owner fence at an
+    /// exact nanosecond-precision wall-clock instant.
+    ///
+    /// # Errors
+    ///
+    /// Returns an authorization error when the current nanosecond value is
+    /// invalid or the fence is malformed, expired, future-issued beyond the
+    /// allowed skew, signed by an unknown key, has an invalid signature, or
+    /// does not match the expected node and endpoint.
+    pub fn verify_connection_fence_v2_at(
+        &self,
+        fence: &ConnectionFenceV2,
+        expected_node_id: &[u8; 16],
+        expected_endpoint_id: &[u8; 32],
+        now_unix_seconds: i64,
+        now_unix_nanos: u32,
+    ) -> Result<VerifiedConnectionFenceV2, AuthorizationError> {
+        if now_unix_nanos >= 1_000_000_000 {
+            return Err(AuthorizationError::ClaimsInvalid(
+                "connection_fence_clock_skew",
+            ));
+        }
         let claims = connection_fence_claims_v2(fence)?;
         let key = self
             .keys
@@ -333,12 +366,22 @@ impl ControllerCommandKeyring {
                 "connection_fence_endpoint_mismatch",
             ));
         }
-        if claims.expires_at_seconds <= now_unix_seconds {
+        if timestamp_expired(
+            claims.expires_at_seconds,
+            claims.expires_at_nanos,
+            now_unix_seconds,
+            now_unix_nanos,
+        ) {
             return Err(AuthorizationError::ClaimsInvalid(
                 "connection_fence_expired",
             ));
         }
-        if claims.issued_at_seconds > now_unix_seconds.saturating_add(MAX_FUTURE_SKEW_SECONDS) {
+        if timestamp_exceeds_future_skew(
+            claims.issued_at_seconds,
+            claims.issued_at_nanos,
+            now_unix_seconds,
+            now_unix_nanos,
+        ) {
             return Err(AuthorizationError::ClaimsInvalid(
                 "connection_fence_clock_skew",
             ));
@@ -374,7 +417,9 @@ impl ControllerCommandKeyring {
     ///
     /// Returns an authorization error when the binding is malformed, expired,
     /// signed by an unknown key, has an invalid signature, or does not match
-    /// the expected node and endpoint.
+    /// the expected node and endpoint. This second-only compatibility API
+    /// evaluates the supplied second at nanosecond zero; callers with a
+    /// subsecond clock should use [`Self::verify_fence_binding_v2_at`].
     pub fn verify_fence_binding_v2(
         &self,
         binding: &FenceBindingV2,
@@ -382,6 +427,37 @@ impl ControllerCommandKeyring {
         expected_endpoint_id: &[u8; 32],
         now_unix_seconds: i64,
     ) -> Result<FenceBindingClaimsV2, AuthorizationError> {
+        self.verify_fence_binding_v2_at(
+            binding,
+            expected_node_id,
+            expected_endpoint_id,
+            now_unix_seconds,
+            0,
+        )
+    }
+
+    /// Verifies a Controller-signed operation binding at an exact
+    /// nanosecond-precision wall-clock instant.
+    ///
+    /// # Errors
+    ///
+    /// Returns an authorization error when the current nanosecond value is
+    /// invalid or the binding is malformed, expired, future-issued beyond the
+    /// allowed skew, signed by an unknown key, has an invalid signature, or
+    /// does not match the expected node and endpoint.
+    pub fn verify_fence_binding_v2_at(
+        &self,
+        binding: &FenceBindingV2,
+        expected_node_id: &[u8; 16],
+        expected_endpoint_id: &[u8; 32],
+        now_unix_seconds: i64,
+        now_unix_nanos: u32,
+    ) -> Result<FenceBindingClaimsV2, AuthorizationError> {
+        if now_unix_nanos >= 1_000_000_000 {
+            return Err(AuthorizationError::ClaimsInvalid(
+                "fence_binding_clock_skew",
+            ));
+        }
         let claims = fence_binding_claims_v2(binding)?;
         let key = self
             .keys
@@ -397,10 +473,20 @@ impl ControllerCommandKeyring {
                 "fence_binding_endpoint_mismatch",
             ));
         }
-        if claims.expires_at_seconds <= now_unix_seconds {
+        if timestamp_expired(
+            claims.expires_at_seconds,
+            claims.expires_at_nanos,
+            now_unix_seconds,
+            now_unix_nanos,
+        ) {
             return Err(AuthorizationError::ClaimsInvalid("fence_binding_expired"));
         }
-        if claims.issued_at_seconds > now_unix_seconds.saturating_add(MAX_FUTURE_SKEW_SECONDS) {
+        if timestamp_exceeds_future_skew(
+            claims.issued_at_seconds,
+            claims.issued_at_nanos,
+            now_unix_seconds,
+            now_unix_nanos,
+        ) {
             return Err(AuthorizationError::ClaimsInvalid(
                 "fence_binding_clock_skew",
             ));
@@ -1113,6 +1199,28 @@ fn deadline_not_after(
     limit_nanos: u32,
 ) -> bool {
     until_seconds < limit_seconds || (until_seconds == limit_seconds && until_nanos <= limit_nanos)
+}
+
+fn timestamp_expired(
+    expires_at_seconds: i64,
+    expires_at_nanos: u32,
+    now_seconds: i64,
+    now_nanos: u32,
+) -> bool {
+    (expires_at_seconds, expires_at_nanos) <= (now_seconds, now_nanos)
+}
+
+fn timestamp_exceeds_future_skew(
+    issued_at_seconds: i64,
+    issued_at_nanos: u32,
+    now_seconds: i64,
+    now_nanos: u32,
+) -> bool {
+    now_seconds
+        .checked_add(MAX_FUTURE_SKEW_SECONDS)
+        .is_some_and(|limit_seconds| {
+            (issued_at_seconds, issued_at_nanos) > (limit_seconds, now_nanos)
+        })
 }
 
 /// Projects a command envelope into the independent v1 claims model.
@@ -2606,12 +2714,82 @@ mod tests {
             .expect_err("tampered epoch");
         assert_eq!(err, AuthorizationError::SignatureInvalid);
         let err = keyring
-            .verify_connection_fence_v2(&fence, &claims.node_id, &claims.endpoint_id, 1_700_000_300)
+            .verify_connection_fence_v2(&fence, &claims.node_id, &claims.endpoint_id, 1_700_000_301)
             .expect_err("expired fence");
         assert_eq!(
             err,
             AuthorizationError::ClaimsInvalid("connection_fence_expired")
         );
+    }
+
+    #[test]
+    fn connection_fence_v2_time_bounds_are_nanosecond_precise() {
+        let fixture = load_v2_fixture("connection-fence-v2.json");
+        let keyring = v2_keyring(&fixture);
+        let claims = fence_claims_from_fixture(&fixture);
+        let fence = fence_message_from_fixture(&fixture, &claims);
+
+        keyring
+            .verify_connection_fence_v2_at(
+                &fence,
+                &claims.node_id,
+                &claims.endpoint_id,
+                claims.expires_at_seconds,
+                claims
+                    .expires_at_nanos
+                    .checked_sub(1)
+                    .expect("expiry nanos"),
+            )
+            .expect("one nanosecond before expiry");
+        let err = keyring
+            .verify_connection_fence_v2_at(
+                &fence,
+                &claims.node_id,
+                &claims.endpoint_id,
+                claims.expires_at_seconds,
+                claims.expires_at_nanos,
+            )
+            .expect_err("exact expiry deadline");
+        assert_eq!(
+            err,
+            AuthorizationError::ClaimsInvalid("connection_fence_expired")
+        );
+
+        let future_skew_boundary = claims
+            .issued_at_seconds
+            .checked_sub(MAX_FUTURE_SKEW_SECONDS)
+            .expect("future skew boundary");
+        keyring
+            .verify_connection_fence_v2_at(
+                &fence,
+                &claims.node_id,
+                &claims.endpoint_id,
+                future_skew_boundary,
+                claims.issued_at_nanos,
+            )
+            .expect("exact future skew boundary");
+        let err = keyring
+            .verify_connection_fence_v2_at(
+                &fence,
+                &claims.node_id,
+                &claims.endpoint_id,
+                future_skew_boundary,
+                claims.issued_at_nanos.checked_sub(1).expect("issued nanos"),
+            )
+            .expect_err("one nanosecond beyond future skew");
+        assert_eq!(
+            err,
+            AuthorizationError::ClaimsInvalid("connection_fence_clock_skew")
+        );
+
+        keyring
+            .verify_connection_fence_v2(
+                &fence,
+                &claims.node_id,
+                &claims.endpoint_id,
+                claims.expires_at_seconds,
+            )
+            .expect("second-only API evaluates at nanosecond zero");
     }
 
     #[test]
@@ -2684,6 +2862,76 @@ mod tests {
             )
             .expect_err("downgraded version");
         assert_eq!(err, AuthorizationError::UnsupportedVersion);
+    }
+
+    #[test]
+    fn fence_binding_v2_time_bounds_are_nanosecond_precise() {
+        let fixture = load_v2_fixture("fence-binding-v2.json");
+        let keyring = v2_keyring(&fixture);
+        let claims = binding_claims_from_fixture(&fixture);
+        let binding = binding_message_from_fixture(&fixture, &claims);
+
+        keyring
+            .verify_fence_binding_v2_at(
+                &binding,
+                &claims.node_id,
+                &claims.endpoint_id,
+                claims.expires_at_seconds,
+                claims
+                    .expires_at_nanos
+                    .checked_sub(1)
+                    .expect("expiry nanos"),
+            )
+            .expect("one nanosecond before expiry");
+        let err = keyring
+            .verify_fence_binding_v2_at(
+                &binding,
+                &claims.node_id,
+                &claims.endpoint_id,
+                claims.expires_at_seconds,
+                claims.expires_at_nanos,
+            )
+            .expect_err("exact expiry deadline");
+        assert_eq!(
+            err,
+            AuthorizationError::ClaimsInvalid("fence_binding_expired")
+        );
+
+        let future_skew_boundary = claims
+            .issued_at_seconds
+            .checked_sub(MAX_FUTURE_SKEW_SECONDS)
+            .expect("future skew boundary");
+        keyring
+            .verify_fence_binding_v2_at(
+                &binding,
+                &claims.node_id,
+                &claims.endpoint_id,
+                future_skew_boundary,
+                claims.issued_at_nanos,
+            )
+            .expect("exact future skew boundary");
+        let err = keyring
+            .verify_fence_binding_v2_at(
+                &binding,
+                &claims.node_id,
+                &claims.endpoint_id,
+                future_skew_boundary,
+                claims.issued_at_nanos.checked_sub(1).expect("issued nanos"),
+            )
+            .expect_err("one nanosecond beyond future skew");
+        assert_eq!(
+            err,
+            AuthorizationError::ClaimsInvalid("fence_binding_clock_skew")
+        );
+
+        keyring
+            .verify_fence_binding_v2(
+                &binding,
+                &claims.node_id,
+                &claims.endpoint_id,
+                claims.expires_at_seconds,
+            )
+            .expect("second-only API evaluates at nanosecond zero");
     }
 
     #[test]

@@ -5096,13 +5096,17 @@ func (x *CertificateRevokeResult) GetKeyRemoved() bool {
 }
 
 type ArtifactFetchRequest struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	ArtifactId    []byte                 `protobuf:"bytes,1,opt,name=artifact_id,json=artifactId,proto3" json:"artifact_id,omitempty"`
-	Purpose       string                 `protobuf:"bytes,2,opt,name=purpose,proto3" json:"purpose,omitempty"`
-	MaxBytes      uint64                 `protobuf:"varint,3,opt,name=max_bytes,json=maxBytes,proto3" json:"max_bytes,omitempty"`
-	Grant         *ArtifactGrantV1       `protobuf:"bytes,4,opt,name=grant,proto3" json:"grant,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	state      protoimpl.MessageState `protogen:"open.v1"`
+	ArtifactId []byte                 `protobuf:"bytes,1,opt,name=artifact_id,json=artifactId,proto3" json:"artifact_id,omitempty"`
+	Purpose    string                 `protobuf:"bytes,2,opt,name=purpose,proto3" json:"purpose,omitempty"`
+	MaxBytes   uint64                 `protobuf:"varint,3,opt,name=max_bytes,json=maxBytes,proto3" json:"max_bytes,omitempty"`
+	Grant      *ArtifactGrantV1       `protobuf:"bytes,4,opt,name=grant,proto3" json:"grant,omitempty"`
+	// The Agent independently verifies the exact live owner term and the
+	// artifact operation binding; transportd is only a relay for these proofs.
+	ConnectionFence *ConnectionFenceV2 `protobuf:"bytes,5,opt,name=connection_fence,json=connectionFence,proto3" json:"connection_fence,omitempty"`
+	FenceBinding    *FenceBindingV2    `protobuf:"bytes,6,opt,name=fence_binding,json=fenceBinding,proto3" json:"fence_binding,omitempty"`
+	unknownFields   protoimpl.UnknownFields
+	sizeCache       protoimpl.SizeCache
 }
 
 func (x *ArtifactFetchRequest) Reset() {
@@ -5163,6 +5167,20 @@ func (x *ArtifactFetchRequest) GetGrant() *ArtifactGrantV1 {
 	return nil
 }
 
+func (x *ArtifactFetchRequest) GetConnectionFence() *ConnectionFenceV2 {
+	if x != nil {
+		return x.ConnectionFence
+	}
+	return nil
+}
+
+func (x *ArtifactFetchRequest) GetFenceBinding() *FenceBindingV2 {
+	if x != nil {
+		return x.FenceBinding
+	}
+	return nil
+}
+
 // ArtifactConsumeRequest is sent only after the Control Plane has received and
 // verified the complete artifact. The same signed grant authorizes deletion.
 type ArtifactConsumeRequest struct {
@@ -5172,9 +5190,14 @@ type ArtifactConsumeRequest struct {
 	Size   uint64                 `protobuf:"varint,3,opt,name=size,proto3" json:"size,omitempty"`
 	// Confirmation is read-only and may use an expired grant only to prove that
 	// the exact root-owned ledger record was already consumed.
-	ConfirmOnly   bool `protobuf:"varint,4,opt,name=confirm_only,json=confirmOnly,proto3" json:"confirm_only,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	ConfirmOnly bool `protobuf:"varint,4,opt,name=confirm_only,json=confirmOnly,proto3" json:"confirm_only,omitempty"`
+	// Consumption is bound to the same fenced artifact operation as the fetch.
+	// Confirmation remains side-effect free but retains the proof carriers so
+	// the Agent never has to trust transportd's authorization decision.
+	ConnectionFence *ConnectionFenceV2 `protobuf:"bytes,5,opt,name=connection_fence,json=connectionFence,proto3" json:"connection_fence,omitempty"`
+	FenceBinding    *FenceBindingV2    `protobuf:"bytes,6,opt,name=fence_binding,json=fenceBinding,proto3" json:"fence_binding,omitempty"`
+	unknownFields   protoimpl.UnknownFields
+	sizeCache       protoimpl.SizeCache
 }
 
 func (x *ArtifactConsumeRequest) Reset() {
@@ -5233,6 +5256,20 @@ func (x *ArtifactConsumeRequest) GetConfirmOnly() bool {
 		return x.ConfirmOnly
 	}
 	return false
+}
+
+func (x *ArtifactConsumeRequest) GetConnectionFence() *ConnectionFenceV2 {
+	if x != nil {
+		return x.ConnectionFence
+	}
+	return nil
+}
+
+func (x *ArtifactConsumeRequest) GetFenceBinding() *FenceBindingV2 {
+	if x != nil {
+		return x.FenceBinding
+	}
+	return nil
 }
 
 type ArtifactConsumeResponse struct {
@@ -6132,18 +6169,22 @@ const file_ocserv_platform_agent_v1_agent_proto_rawDesc = "" +
 	"\x17CertificateRevokeResult\x12%\n" +
 	"\x0ecertificate_id\x18\x01 \x01(\fR\rcertificateId\x12\x1f\n" +
 	"\vkey_removed\x18\x02 \x01(\bR\n" +
-	"keyRemoved\"\xaf\x01\n" +
+	"keyRemoved\"\xd6\x02\n" +
 	"\x14ArtifactFetchRequest\x12\x1f\n" +
 	"\vartifact_id\x18\x01 \x01(\fR\n" +
 	"artifactId\x12\x18\n" +
 	"\apurpose\x18\x02 \x01(\tR\apurpose\x12\x1b\n" +
 	"\tmax_bytes\x18\x03 \x01(\x04R\bmaxBytes\x12?\n" +
-	"\x05grant\x18\x04 \x01(\v2).ocserv.platform.agent.v1.ArtifactGrantV1R\x05grant\"\xa8\x01\n" +
+	"\x05grant\x18\x04 \x01(\v2).ocserv.platform.agent.v1.ArtifactGrantV1R\x05grant\x12V\n" +
+	"\x10connection_fence\x18\x05 \x01(\v2+.ocserv.platform.agent.v1.ConnectionFenceV2R\x0fconnectionFence\x12M\n" +
+	"\rfence_binding\x18\x06 \x01(\v2(.ocserv.platform.agent.v1.FenceBindingV2R\ffenceBinding\"\xcf\x02\n" +
 	"\x16ArtifactConsumeRequest\x12?\n" +
 	"\x05grant\x18\x01 \x01(\v2).ocserv.platform.agent.v1.ArtifactGrantV1R\x05grant\x12\x16\n" +
 	"\x06sha256\x18\x02 \x01(\fR\x06sha256\x12\x12\n" +
 	"\x04size\x18\x03 \x01(\x04R\x04size\x12!\n" +
-	"\fconfirm_only\x18\x04 \x01(\bR\vconfirmOnly\"q\n" +
+	"\fconfirm_only\x18\x04 \x01(\bR\vconfirmOnly\x12V\n" +
+	"\x10connection_fence\x18\x05 \x01(\v2+.ocserv.platform.agent.v1.ConnectionFenceV2R\x0fconnectionFence\x12M\n" +
+	"\rfence_binding\x18\x06 \x01(\v2(.ocserv.platform.agent.v1.FenceBindingV2R\ffenceBinding\"q\n" +
 	"\x17ArtifactConsumeResponse\x12\x1f\n" +
 	"\vartifact_id\x18\x01 \x01(\fR\n" +
 	"artifactId\x12\x19\n" +
@@ -6448,15 +6489,19 @@ var file_ocserv_platform_agent_v1_agent_proto_depIdxs = []int32{
 	21, // 81: ocserv.platform.agent.v1.CertificateP12.sealed_password_v1:type_name -> ocserv.platform.agent.v1.SealedSecretV1
 	70, // 82: ocserv.platform.agent.v1.CertificateP12.artifact_expires_at:type_name -> google.protobuf.Timestamp
 	64, // 83: ocserv.platform.agent.v1.ArtifactFetchRequest.grant:type_name -> ocserv.platform.agent.v1.ArtifactGrantV1
-	64, // 84: ocserv.platform.agent.v1.ArtifactConsumeRequest.grant:type_name -> ocserv.platform.agent.v1.ArtifactGrantV1
-	15, // 85: ocserv.platform.agent.v1.ArtifactGrantV1.version:type_name -> ocserv.platform.agent.v1.ArtifactGrantVersion
-	70, // 86: ocserv.platform.agent.v1.ArtifactGrantV1.issued_at:type_name -> google.protobuf.Timestamp
-	70, // 87: ocserv.platform.agent.v1.ArtifactGrantV1.expires_at:type_name -> google.protobuf.Timestamp
-	88, // [88:88] is the sub-list for method output_type
-	88, // [88:88] is the sub-list for method input_type
-	88, // [88:88] is the sub-list for extension type_name
-	88, // [88:88] is the sub-list for extension extendee
-	0,  // [0:88] is the sub-list for field type_name
+	24, // 84: ocserv.platform.agent.v1.ArtifactFetchRequest.connection_fence:type_name -> ocserv.platform.agent.v1.ConnectionFenceV2
+	25, // 85: ocserv.platform.agent.v1.ArtifactFetchRequest.fence_binding:type_name -> ocserv.platform.agent.v1.FenceBindingV2
+	64, // 86: ocserv.platform.agent.v1.ArtifactConsumeRequest.grant:type_name -> ocserv.platform.agent.v1.ArtifactGrantV1
+	24, // 87: ocserv.platform.agent.v1.ArtifactConsumeRequest.connection_fence:type_name -> ocserv.platform.agent.v1.ConnectionFenceV2
+	25, // 88: ocserv.platform.agent.v1.ArtifactConsumeRequest.fence_binding:type_name -> ocserv.platform.agent.v1.FenceBindingV2
+	15, // 89: ocserv.platform.agent.v1.ArtifactGrantV1.version:type_name -> ocserv.platform.agent.v1.ArtifactGrantVersion
+	70, // 90: ocserv.platform.agent.v1.ArtifactGrantV1.issued_at:type_name -> google.protobuf.Timestamp
+	70, // 91: ocserv.platform.agent.v1.ArtifactGrantV1.expires_at:type_name -> google.protobuf.Timestamp
+	92, // [92:92] is the sub-list for method output_type
+	92, // [92:92] is the sub-list for method input_type
+	92, // [92:92] is the sub-list for extension type_name
+	92, // [92:92] is the sub-list for extension extendee
+	0,  // [0:92] is the sub-list for field type_name
 }
 
 func init() { file_ocserv_platform_agent_v1_agent_proto_init() }
