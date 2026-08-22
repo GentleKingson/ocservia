@@ -17,15 +17,21 @@ case "${MODE}" in
     ;;
 esac
 
+GO_MODULES=(control-plane tools/g6-harness)
+
 if [[ "${MODE}" != "race" ]]; then
-  test -z "$(gofmt -l "${ROOT}/control-plane")"
-  (cd "${ROOT}/control-plane" && go vet ./...)
-  (cd "${ROOT}/control-plane" && \
-    HOME="${ROOT}/.cache/staticcheck-home" staticcheck ./...)
-  (cd "${ROOT}/control-plane" && go test ./...)
-  (cd "${ROOT}/control-plane" && govulncheck ./...)
+  test -z "$(gofmt -l "${ROOT}/control-plane" "${ROOT}/tools/g6-harness")"
+  for module in "${GO_MODULES[@]}"; do
+    (cd "${ROOT}/${module}" && go vet ./...)
+    (cd "${ROOT}/${module}" && \
+      HOME="${ROOT}/.cache/staticcheck-home" staticcheck ./...)
+    (cd "${ROOT}/${module}" && go test ./...)
+    (cd "${ROOT}/${module}" && govulncheck ./...)
+  done
 fi
 
 if [[ "${MODE}" != "standard" ]]; then
-  (cd "${ROOT}/control-plane" && go test -race ./...)
+  for module in "${GO_MODULES[@]}"; do
+    (cd "${ROOT}/${module}" && go test -race ./...)
+  done
 fi

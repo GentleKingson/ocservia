@@ -239,20 +239,30 @@ jobs:
             npm-v4-${{ runner.os }}-${{ runner.arch }}-
       - name: Bootstrap pinned G6 Node runtime
         run: scripts/bootstrap.sh g6-runtime
+      - name: Build the commit-bound G6 rendezvous client
+        run: |
+          set -euo pipefail
+          harness_bin="${RUNNER_TEMP}/ocservia-g6-harness"
+          go build -trimpath -o "${harness_bin}" ./tools/g6-harness/cmd/g6-harness
+          printf 'G6_HARNESS_BIN=%s\n' "${harness_bin}" >>"${GITHUB_ENV}"
       - name: Prepare failure domain A
         timeout-minutes: 10
         run: scripts/g6-readiness-fd-a.sh prepare
       - name: Publish failure domain A rendezvous
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: ./.github/actions/g6-checkpoint-upload
         with:
           name: g6-rd-tunnel-fd-a-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/g6-readiness-${{ env.RUN_ID }}/outbox/tunnel
-          if-no-files-found: error
           retention-days: 1
       - name: Wait for failure domain B rendezvous
         env:
           GITHUB_TOKEN: ${{ github.token }}
-        run: scripts/real-e2e-artifact.sh wait-download "g6-rd-tunnel-fd-b-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" "${RUNNER_TEMP}/g6-rd-tunnel-fd-b" 1200 "G6 Readiness Failure Domain B"
+        run: >-
+          "${G6_HARNESS_BIN}" wait-download
+          --name "g6-rd-tunnel-fd-b-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          --destination "${RUNNER_TEMP}/g6-rd-tunnel-fd-b"
+          --timeout 1200s
+          --peer-job "G6 Readiness Failure Domain B"
       - name: Import the peer tunnel identities
         run: scripts/g6-readiness-fd-a.sh import-peer-tunnel-nodes "${RUNNER_TEMP}/g6-rd-tunnel-fd-b"
       - name: Prepare failure domain A images
@@ -264,45 +274,46 @@ jobs:
       - name: Stage the shared trust material
         run: scripts/g6-readiness-fd-a.sh publish-shared-secrets
       - name: Publish the shared trust rendezvous
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: ./.github/actions/g6-checkpoint-upload
         with:
           name: g6-rd-shared-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/g6-readiness-${{ env.RUN_ID }}/outbox/shared
-          if-no-files-found: error
           retention-days: 1
       - name: Start primary, roles, and transportd
         timeout-minutes: 15
         run: scripts/g6-readiness-fd-a.sh primary-up
       - name: Publish the primary rendezvous
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: ./.github/actions/g6-checkpoint-upload
         with:
           name: g6-rd-primary-up-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/g6-readiness-${{ env.RUN_ID }}/outbox/primary-up
-          if-no-files-found: error
           retention-days: 1
       - name: Enroll the failure domain A fleet
         timeout-minutes: 25
         run: scripts/g6-readiness-fd-a.sh agents-enroll
       - name: Publish the agent fleet rendezvous
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: ./.github/actions/g6-checkpoint-upload
         with:
           name: g6-rd-agents-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/g6-readiness-${{ env.RUN_ID }}/outbox/agents
-          if-no-files-found: error
           retention-days: 1
       - name: Wait for failure domain B enrollment
         env:
           GITHUB_TOKEN: ${{ github.token }}
-        run: scripts/real-e2e-artifact.sh wait-download "g6-rd-agents-enrolled-fd-b-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" "${RUNNER_TEMP}/g6-rd-agents-enrolled-fd-b" 1200 "G6 Readiness Failure Domain B"
+        run: >-
+          "${G6_HARNESS_BIN}" wait-download
+          --name "g6-rd-agents-enrolled-fd-b-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          --destination "${RUNNER_TEMP}/g6-rd-agents-enrolled-fd-b"
+          --timeout 1200s
+          --peer-job "G6 Readiness Failure Domain B"
       - name: Reload the complete transport trust snapshot
         timeout-minutes: 10
         run: scripts/g6-readiness-fd-a.sh transport-trust-reload "${RUNNER_TEMP}/g6-rd-agents-enrolled-fd-b"
       - name: Publish transport trust readiness
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: ./.github/actions/g6-checkpoint-upload
         with:
           name: g6-rd-trust-ready-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/g6-readiness-${{ env.RUN_ID }}/outbox/trust-ready
-          if-no-files-found: error
           retention-days: 1
       - name: Start the failure domain A agents
         timeout-minutes: 10
@@ -310,7 +321,12 @@ jobs:
       - name: Wait for the active load rendezvous
         env:
           GITHUB_TOKEN: ${{ github.token }}
-        run: scripts/real-e2e-artifact.sh wait-download "g6-rd-load-active-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" "${RUNNER_TEMP}/g6-rd-load-active" 900 "G6 Readiness Failure Domain B"
+        run: >-
+          "${G6_HARNESS_BIN}" wait-download
+          --name "g6-rd-load-active-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          --destination "${RUNNER_TEMP}/g6-rd-load-active"
+          --timeout 900s
+          --peer-job "G6 Readiness Failure Domain B"
       - name: Record PITR markers and the base backup
         timeout-minutes: 15
         run: scripts/g6-readiness-fd-a.sh pitr-prepare
@@ -318,16 +334,20 @@ jobs:
         timeout-minutes: 10
         run: scripts/g6-readiness-fd-a.sh isolate
       - name: Publish the isolation record
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: ./.github/actions/g6-checkpoint-upload
         with:
           name: g6-rd-isolation-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/g6-readiness-${{ env.RUN_ID }}/outbox/isolation
-          if-no-files-found: error
           retention-days: 5
       - name: Wait for the promoted primary
         env:
           GITHUB_TOKEN: ${{ github.token }}
-        run: scripts/real-e2e-artifact.sh wait-download "g6-rd-new-primary-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" "${RUNNER_TEMP}/g6-rd-new-primary" 600 "G6 Readiness Failure Domain B"
+        run: >-
+          "${G6_HARNESS_BIN}" wait-download
+          --name "g6-rd-new-primary-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          --destination "${RUNNER_TEMP}/g6-rd-new-primary"
+          --timeout 600s
+          --peer-job "G6 Readiness Failure Domain B"
       - name: Probe the fenced former primary after promotion
         timeout-minutes: 10
         run: scripts/g6-readiness-fd-a.sh dual-primary-probes "${RUNNER_TEMP}/g6-rd-new-primary"
@@ -340,41 +360,48 @@ jobs:
       - name: Publish relay observation readiness
         run: scripts/g6-readiness-fd-a.sh relay-rejoin-ready
       - name: Upload relay observation readiness
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: ./.github/actions/g6-checkpoint-upload
         with:
           name: g6-rd-relay-rejoin-ready-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/g6-readiness-${{ env.RUN_ID }}/outbox/relay-rejoin-ready
-          if-no-files-found: error
           retention-days: 1
       - name: Wait for the pre-fault relay-a observation
         env:
           GITHUB_TOKEN: ${{ github.token }}
-        run: scripts/real-e2e-artifact.sh wait-download "g6-rd-relay-pre-fault-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" "${RUNNER_TEMP}/g6-rd-relay-pre-fault" 600 "G6 Readiness Failure Domain B"
+        run: >-
+          "${G6_HARNESS_BIN}" wait-download
+          --name "g6-rd-relay-pre-fault-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          --destination "${RUNNER_TEMP}/g6-rd-relay-pre-fault"
+          --timeout 600s
+          --peer-job "G6 Readiness Failure Domain B"
       - name: Stop relay-a
         timeout-minutes: 5
         run: scripts/g6-readiness-fd-a.sh relay-a-stop "${RUNNER_TEMP}/g6-rd-relay-pre-fault"
       - name: Publish failure domain A scenario readiness
         run: scripts/g6-readiness-fd-a.sh ready
       - name: Upload failure domain A scenario readiness
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: ./.github/actions/g6-checkpoint-upload
         with:
           name: g6-rd-fd-a-ready-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/g6-readiness-${{ env.RUN_ID }}/outbox/fd-a-ready
-          if-no-files-found: error
           retention-days: 5
       - name: Wait for the observation-window barrier request
         env:
           GITHUB_TOKEN: ${{ github.token }}
-        run: scripts/real-e2e-artifact.sh wait-download "g6-rd-window-barrier-arm-request-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" "${RUNNER_TEMP}/g6-rd-window-barrier-arm-request" 600 "G6 Readiness Failure Domain B"
+        run: >-
+          "${G6_HARNESS_BIN}" wait-download
+          --name "g6-rd-window-barrier-arm-request-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          --destination "${RUNNER_TEMP}/g6-rd-window-barrier-arm-request"
+          --timeout 600s
+          --peer-job "G6 Readiness Failure Domain B"
       - name: Arm failure domain A observation barriers
         timeout-minutes: 3
         run: scripts/g6-readiness-fd-a.sh window-barrier-arm "${RUNNER_TEMP}/g6-rd-window-barrier-arm-request"
       - name: Publish failure domain A barrier acknowledgement
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: ./.github/actions/g6-checkpoint-upload
         with:
           name: g6-rd-window-barrier-armed-fd-a-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/g6-readiness-${{ env.RUN_ID }}/outbox/window-barrier-armed
-          if-no-files-found: error
           retention-days: 1
       - name: Release failure domain A barriers after the all-fleet proof
         timeout-minutes: 3
@@ -382,7 +409,12 @@ jobs:
       - name: Wait for the final freeze request
         env:
           GITHUB_TOKEN: ${{ github.token }}
-        run: scripts/real-e2e-artifact.sh wait-download "g6-rd-final-freeze-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" "${RUNNER_TEMP}/g6-rd-final-freeze" 1800 "G6 Readiness Failure Domain B"
+        run: >-
+          "${G6_HARNESS_BIN}" wait-download
+          --name "g6-rd-final-freeze-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          --destination "${RUNNER_TEMP}/g6-rd-final-freeze"
+          --timeout 1800s
+          --peer-job "G6 Readiness Failure Domain B"
       - name: Collect failure domain A evidence
         timeout-minutes: 15
         run: scripts/g6-readiness-fd-a.sh evidence "${RUNNER_TEMP}/g6-rd-final-freeze"
@@ -502,20 +534,30 @@ jobs:
             npm-v4-${{ runner.os }}-${{ runner.arch }}-
       - name: Bootstrap pinned G6 Node runtime
         run: scripts/bootstrap.sh g6-runtime
+      - name: Build the commit-bound G6 rendezvous client
+        run: |
+          set -euo pipefail
+          harness_bin="${RUNNER_TEMP}/ocservia-g6-harness"
+          go build -trimpath -o "${harness_bin}" ./tools/g6-harness/cmd/g6-harness
+          printf 'G6_HARNESS_BIN=%s\n' "${harness_bin}" >>"${GITHUB_ENV}"
       - name: Prepare failure domain B
         timeout-minutes: 10
         run: scripts/g6-readiness-fd-b.sh prepare
       - name: Publish failure domain B rendezvous
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: ./.github/actions/g6-checkpoint-upload
         with:
           name: g6-rd-tunnel-fd-b-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/g6-readiness-${{ env.RUN_ID }}/outbox/tunnel
-          if-no-files-found: error
           retention-days: 1
       - name: Wait for failure domain A rendezvous
         env:
           GITHUB_TOKEN: ${{ github.token }}
-        run: scripts/real-e2e-artifact.sh wait-download "g6-rd-tunnel-fd-a-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" "${RUNNER_TEMP}/g6-rd-tunnel-fd-a" 1200 "G6 Readiness Failure Domain A"
+        run: >-
+          "${G6_HARNESS_BIN}" wait-download
+          --name "g6-rd-tunnel-fd-a-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          --destination "${RUNNER_TEMP}/g6-rd-tunnel-fd-a"
+          --timeout 1200s
+          --peer-job "G6 Readiness Failure Domain A"
       - name: Import the peer tunnel identities
         run: scripts/g6-readiness-fd-b.sh import-peer-tunnel-nodes "${RUNNER_TEMP}/g6-rd-tunnel-fd-a"
       - name: Prepare failure domain B images
@@ -524,7 +566,12 @@ jobs:
       - name: Wait for the shared trust rendezvous
         env:
           GITHUB_TOKEN: ${{ github.token }}
-        run: scripts/real-e2e-artifact.sh wait-download "g6-rd-shared-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" "${RUNNER_TEMP}/g6-rd-shared" 1200 "G6 Readiness Failure Domain A"
+        run: >-
+          "${G6_HARNESS_BIN}" wait-download
+          --name "g6-rd-shared-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          --destination "${RUNNER_TEMP}/g6-rd-shared"
+          --timeout 1200s
+          --peer-job "G6 Readiness Failure Domain A"
       - name: Materialize the peer runtime trust
         run: scripts/g6-readiness-fd-b.sh materialize-runtime "${RUNNER_TEMP}/g6-rd-shared"
       - name: Start relay-b
@@ -536,28 +583,42 @@ jobs:
       - name: Wait for the peer primary
         env:
           GITHUB_TOKEN: ${{ github.token }}
-        run: scripts/real-e2e-artifact.sh wait-download "g6-rd-primary-up-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" "${RUNNER_TEMP}/g6-rd-primary-up" 1200 "G6 Readiness Failure Domain A"
+        run: >-
+          "${G6_HARNESS_BIN}" wait-download
+          --name "g6-rd-primary-up-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          --destination "${RUNNER_TEMP}/g6-rd-primary-up"
+          --timeout 1200s
+          --peer-job "G6 Readiness Failure Domain A"
       - name: Bootstrap the streaming standby
         timeout-minutes: 15
         run: scripts/g6-readiness-fd-b.sh standby-bootstrap "${RUNNER_TEMP}/g6-rd-primary-up"
       - name: Wait for the agent fleet rendezvous
         env:
           GITHUB_TOKEN: ${{ github.token }}
-        run: scripts/real-e2e-artifact.sh wait-download "g6-rd-agents-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" "${RUNNER_TEMP}/g6-rd-agents" 1800 "G6 Readiness Failure Domain A"
+        run: >-
+          "${G6_HARNESS_BIN}" wait-download
+          --name "g6-rd-agents-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          --destination "${RUNNER_TEMP}/g6-rd-agents"
+          --timeout 1800s
+          --peer-job "G6 Readiness Failure Domain A"
       - name: Enroll the failure domain B fleet
         timeout-minutes: 25
         run: scripts/g6-readiness-fd-b.sh agents-enroll "${RUNNER_TEMP}/g6-rd-agents/nodes.tsv"
       - name: Publish failure domain B enrollment
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: ./.github/actions/g6-checkpoint-upload
         with:
           name: g6-rd-agents-enrolled-fd-b-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/g6-readiness-${{ env.RUN_ID }}/outbox/agents-enrolled
-          if-no-files-found: error
           retention-days: 1
       - name: Wait for the complete transport trust snapshot
         env:
           GITHUB_TOKEN: ${{ github.token }}
-        run: scripts/real-e2e-artifact.sh wait-download "g6-rd-trust-ready-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" "${RUNNER_TEMP}/g6-rd-trust-ready" 600 "G6 Readiness Failure Domain A"
+        run: >-
+          "${G6_HARNESS_BIN}" wait-download
+          --name "g6-rd-trust-ready-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          --destination "${RUNNER_TEMP}/g6-rd-trust-ready"
+          --timeout 600s
+          --peer-job "G6 Readiness Failure Domain A"
       - name: Start the failure domain B agents
         timeout-minutes: 10
         run: scripts/g6-readiness-fd-b.sh agents-start "${RUNNER_TEMP}/g6-rd-trust-ready"
@@ -565,44 +626,56 @@ jobs:
         timeout-minutes: 10
         run: scripts/g6-readiness-fd-b.sh load-start
       - name: Publish the active load rendezvous
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: ./.github/actions/g6-checkpoint-upload
         with:
           name: g6-rd-load-active-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/g6-readiness-${{ env.RUN_ID }}/outbox/load-active
-          if-no-files-found: error
           retention-days: 1
       - name: Wait for the isolation record
         env:
           GITHUB_TOKEN: ${{ github.token }}
-        run: scripts/real-e2e-artifact.sh wait-download "g6-rd-isolation-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" "${RUNNER_TEMP}/g6-rd-isolation" 600 "G6 Readiness Failure Domain A"
+        run: >-
+          "${G6_HARNESS_BIN}" wait-download
+          --name "g6-rd-isolation-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          --destination "${RUNNER_TEMP}/g6-rd-isolation"
+          --timeout 600s
+          --peer-job "G6 Readiness Failure Domain A"
       - name: Promote the standby under load
         timeout-minutes: 8
         run: scripts/g6-readiness-fd-b.sh promote "${RUNNER_TEMP}/g6-rd-isolation"
       - name: Publish the promoted primary
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: ./.github/actions/g6-checkpoint-upload
         with:
           name: g6-rd-new-primary-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/g6-readiness-${{ env.RUN_ID }}/outbox/new-primary
-          if-no-files-found: error
           retention-days: 5
       - name: Wait for relay observation readiness
         env:
           GITHUB_TOKEN: ${{ github.token }}
-        run: scripts/real-e2e-artifact.sh wait-download "g6-rd-relay-rejoin-ready-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" "${RUNNER_TEMP}/g6-rd-relay-rejoin-ready" 1800 "G6 Readiness Failure Domain A"
+        run: >-
+          "${G6_HARNESS_BIN}" wait-download
+          --name "g6-rd-relay-rejoin-ready-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          --destination "${RUNNER_TEMP}/g6-rd-relay-rejoin-ready"
+          --timeout 1800s
+          --peer-job "G6 Readiness Failure Domain A"
       - name: Capture the pre-fault relay-a session
         timeout-minutes: 8
         run: scripts/g6-readiness-fd-b.sh relay-pre-fault "${RUNNER_TEMP}/g6-rd-relay-rejoin-ready"
       - name: Publish the pre-fault relay-a observation
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: ./.github/actions/g6-checkpoint-upload
         with:
           name: g6-rd-relay-pre-fault-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/g6-readiness-${{ env.RUN_ID }}/outbox/relay-pre-fault
-          if-no-files-found: error
           retention-days: 1
       - name: Wait for failure domain A scenario readiness
         env:
           GITHUB_TOKEN: ${{ github.token }}
-        run: scripts/real-e2e-artifact.sh wait-download "g6-rd-fd-a-ready-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" "${RUNNER_TEMP}/g6-rd-fd-a-ready" 1200 "G6 Readiness Failure Domain A"
+        run: >-
+          "${G6_HARNESS_BIN}" wait-download
+          --name "g6-rd-fd-a-ready-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          --destination "${RUNNER_TEMP}/g6-rd-fd-a-ready"
+          --timeout 1200s
+          --peer-job "G6 Readiness Failure Domain A"
       - name: Merge the peer control evidence timeline
         timeout-minutes: 5
         run: scripts/g6-readiness-fd-b.sh merge-peer-evidence "${RUNNER_TEMP}/g6-rd-fd-a-ready"
@@ -631,11 +704,10 @@ jobs:
         timeout-minutes: 3
         run: scripts/g6-readiness-fd-b.sh window-barrier-arm
       - name: Publish the observation-window barrier request
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: ./.github/actions/g6-checkpoint-upload
         with:
           name: g6-rd-window-barrier-arm-request-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/g6-readiness-${{ env.RUN_ID }}/outbox/window-barrier-arm-request
-          if-no-files-found: error
           retention-days: 1
       - name: Preflight bounded resource evidence
         timeout-minutes: 3
@@ -643,7 +715,12 @@ jobs:
       - name: Wait for failure domain A observation barriers
         env:
           GITHUB_TOKEN: ${{ github.token }}
-        run: scripts/real-e2e-artifact.sh wait-download "g6-rd-window-barrier-armed-fd-a-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" "${RUNNER_TEMP}/g6-rd-window-barrier-armed-fd-a" 600 "G6 Readiness Failure Domain A"
+        run: >-
+          "${G6_HARNESS_BIN}" wait-download
+          --name "g6-rd-window-barrier-armed-fd-a-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          --destination "${RUNNER_TEMP}/g6-rd-window-barrier-armed-fd-a"
+          --timeout 600s
+          --peer-job "G6 Readiness Failure Domain A"
       - name: Run the bounded observation window
         timeout-minutes: 11
         run: scripts/g6-readiness-fd-b.sh window "${RUNNER_TEMP}/g6-rd-window-barrier-armed-fd-a"
@@ -654,11 +731,10 @@ jobs:
         timeout-minutes: 5
         run: scripts/g6-readiness-fd-b.sh final-freeze
       - name: Publish the final freeze request
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: ./.github/actions/g6-checkpoint-upload
         with:
           name: g6-rd-final-freeze-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/g6-readiness-${{ env.RUN_ID }}/outbox/final-freeze
-          if-no-files-found: error
           retention-days: 1
       - name: Finalize failure domain B runtime result
         if: always()

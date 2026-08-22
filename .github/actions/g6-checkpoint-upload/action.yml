@@ -1,0 +1,41 @@
+name: Upload a G6 checkpoint
+description: Generate a typed checkpoint manifest and upload the exact payload.
+
+inputs:
+  name:
+    description: Run-scoped G6 artifact name.
+    required: true
+  path:
+    description: Checkpoint payload directory.
+    required: true
+  retention-days:
+    description: Artifact retention in days.
+    required: false
+    default: "1"
+
+outputs:
+  artifact-id:
+    description: GitHub artifact ID.
+    value: ${{ steps.upload.outputs.artifact-id }}
+  artifact-digest:
+    description: GitHub artifact SHA-256 digest.
+    value: ${{ steps.upload.outputs.artifact-digest }}
+
+runs:
+  using: composite
+  steps:
+    - name: Generate the typed checkpoint manifest
+      shell: bash
+      run: >-
+        "${G6_HARNESS_BIN:?G6_HARNESS_BIN is required}"
+        checkpoint-manifest
+        --name "${{ inputs.name }}"
+        --root "${{ inputs.path }}"
+    - name: Upload the checkpoint
+      id: upload
+      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+      with:
+        name: ${{ inputs.name }}
+        path: ${{ inputs.path }}
+        if-no-files-found: error
+        retention-days: ${{ inputs.retention-days }}
