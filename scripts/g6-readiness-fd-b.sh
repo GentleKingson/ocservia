@@ -680,7 +680,7 @@ report_load_command_timeout() {
      JOIN outbox_events AS outbox ON outbox.command_id=command.id
      LEFT JOIN node_command_leases AS lease ON lease.command_id=command.id
      WHERE command.idempotency_key LIKE 'g6-load-${RUN_ID}-%'
-       AND command.state NOT IN ('succeeded','failed','rejected','unknown','expired','rolled_back','superseded')
+       AND command.state NOT IN ('succeeded','failed','rejected','expired','rolled_back','superseded')
      ORDER BY command.updated_at,command.id
      LIMIT 20" >&2 || {
     echo "unsettled load command sample unavailable" >&2
@@ -694,7 +694,7 @@ promoted_and_writable() {
 load_commands_settled() {
   local unsettled
   unsettled="$(psql_primary -Atc \
-    "SELECT count(*) FROM commands WHERE idempotency_key LIKE 'g6-load-${RUN_ID}-%' AND state NOT IN ('succeeded','failed','rejected','unknown','expired','rolled_back','superseded')")"
+    "SELECT count(*) FROM commands WHERE idempotency_key LIKE 'g6-load-${RUN_ID}-%' AND state NOT IN ('succeeded','failed','rejected','expired','rolled_back','superseded')")"
   [[ "${unsettled}" == 0 ]]
 }
 
@@ -1667,7 +1667,7 @@ wait_commands_settled() {
   local keys_prefix="${1:?key prefix}"
   local unsettled
   unsettled="$(psql_primary_probe -Atc \
-    "SELECT count(*) FROM commands WHERE idempotency_key LIKE '${keys_prefix}%' AND state NOT IN ('succeeded','failed','rejected','unknown','expired','rolled_back','superseded')")"
+    "SELECT count(*) FROM commands WHERE idempotency_key LIKE '${keys_prefix}%' AND state NOT IN ('succeeded','failed','rejected','expired','rolled_back','superseded')")"
   [[ "${unsettled}" == 0 ]]
 }
 
@@ -2239,7 +2239,7 @@ window_outbox_drained() {
 window_commands_settled() {
   local keys_prefix="${1:?key prefix}" unsettled
   unsettled="$(psql_window_probe -Atc \
-    "SELECT count(*) FROM commands WHERE idempotency_key LIKE '${keys_prefix}%' AND state NOT IN ('succeeded','failed','rejected','unknown','expired','rolled_back','superseded')")"
+    "SELECT count(*) FROM commands WHERE idempotency_key LIKE '${keys_prefix}%' AND state NOT IN ('succeeded','failed','rejected','expired','rolled_back','superseded')")"
   [[ "${unsettled}" == 0 ]]
 }
 
@@ -2307,7 +2307,7 @@ report_window_command_timeout() {
      JOIN outbox_events AS outbox ON outbox.command_id=command.id
      LEFT JOIN node_command_leases AS lease ON lease.command_id=command.id
      WHERE command.idempotency_key LIKE '${keys_prefix}%'
-       AND command.state NOT IN ('succeeded','failed','rejected','unknown','expired','rolled_back','superseded')
+       AND command.state NOT IN ('succeeded','failed','rejected','expired','rolled_back','superseded')
      ORDER BY command.updated_at,command.id LIMIT 20" >&2 ||
     echo "observation-window command state matrix unavailable" >&2
 }
@@ -2461,9 +2461,12 @@ phase_window() (
     echo "resource sampler failed during the all-fleet opening command wave" >&2
     return 1
   fi
-  g6rd_wait_until_deadline 60 1 \
+  if ! g6rd_wait_until_deadline 60 1 \
     "exact fifty-command production inflight proof" \
-    window_opening_commands_active
+    window_opening_commands_active; then
+    report_window_command_timeout "g6-window-${RUN_ID}-opening-"
+    return 1
+  fi
   capture_window_opening_active
   record_window_opening_proof
   g6rd_release_synthetic_barriers

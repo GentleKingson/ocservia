@@ -854,11 +854,15 @@ if ! grep -q 'node_command_leases' <<<"${load_timeout_report}" \
   echo "fd-b reconciliation timeout report must expose bounded state, lease, outbox, and result evidence" >&2
   exit 1
 fi
-for settled_function in load_commands_settled wait_commands_settled; do
+for settled_function in load_commands_settled wait_commands_settled window_commands_settled; do
   settled_body="$(sed -n "/^${settled_function}() {/,/^}/p" "${FD_B}")"
   if ! grep -q "'rejected'" <<<"${settled_body}" \
     || ! grep -q "'rolled_back'" <<<"${settled_body}"; then
     echo "${settled_function} must recognize every terminal command result" >&2
+    exit 1
+  fi
+  if grep -q "'unknown'" <<<"${settled_body}"; then
+    echo "${settled_function} must wait through unknown-outcome reconciliation" >&2
     exit 1
   fi
 done
@@ -4191,6 +4195,7 @@ window_arm_phase="$(sed -n '/^phase_window_barrier_arm() {/,/^}/p' "${FD_B}")"
 window_active_predicate="$(sed -n '/^window_opening_commands_active() {/,/^}/p' "${FD_B}")"
 window_active_capture="$(sed -n '/^capture_window_opening_active() {/,/^}/p' "${FD_B}")"
 window_proof_record="$(sed -n '/^record_window_opening_proof() {/,/^}/p' "${FD_B}")"
+window_timeout_report="$(sed -n '/^report_window_command_timeout() {/,/^}/p' "${FD_B}")"
 database_clock_file="$(sed -n '/^capture_database_clock_file() {/,/^}/p' "${FD_B}")"
 database_clock_bounded="$(sed -n '/^capture_database_clock_bounded() {/,/^}/p' "${FD_B}")"
 fd_a_window_proof="$(sed -n '/^fd_a_window_opening_proof_recorded() {/,/^}/p' "${FD_A}")"
@@ -4267,17 +4272,23 @@ if grep -vE 'capture_database_clock(_bounded|_file)?\(\)|capture_database_clock_
 fi
 window_opening_enqueue_line="$(grep -nF 'g6rd_enqueue_command "${node}" "g6-window-${RUN_ID}-opening-${count}"' <<<"${window_phase}" | cut -d: -f1)"
 window_active_wait_line="$(grep -nF '"exact fifty-command production inflight proof"' <<<"${window_phase}" | cut -d: -f1)"
+window_timeout_report_line="$(grep -nF 'report_window_command_timeout "g6-window-${RUN_ID}-opening-"' <<<"${window_phase}" | cut -d: -f1)"
 window_active_capture_line="$(grep -nF 'capture_window_opening_active' <<<"${window_phase}" | cut -d: -f1)"
 window_proof_record_line="$(grep -nF 'record_window_opening_proof' <<<"${window_phase}" | cut -d: -f1)"
 window_barrier_release_line="$(grep -nF 'g6rd_release_synthetic_barriers' <<<"${window_phase}" | tail -1 | cut -d: -f1)"
 [[ -n "${window_opening_enqueue_line}" && -n "${window_active_wait_line}" \
   && -n "${window_active_capture_line}" && -n "${window_proof_record_line}" \
-  && -n "${window_barrier_release_line}" \
+  && -n "${window_timeout_report_line}" && -n "${window_barrier_release_line}" \
   && "${window_opening_enqueue_line}" -lt "${window_active_wait_line}" \
   && "${window_active_wait_line}" -lt "${window_active_capture_line}" \
   && "${window_active_capture_line}" -lt "${window_proof_record_line}" \
   && "${window_proof_record_line}" -lt "${window_barrier_release_line}" ]] || {
   echo "the observation window must arm, prove, freeze, durably mark, then release the exact fifty-command population" >&2
+  exit 1
+}
+grep -qF "state NOT IN ('succeeded','failed','rejected','expired','rolled_back','superseded')" \
+  <<<"${window_timeout_report}" || {
+  echo "the observation-window timeout report must expose unknown outcomes as unsettled" >&2
   exit 1
 }
 for token in \
