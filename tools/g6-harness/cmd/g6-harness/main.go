@@ -136,6 +136,9 @@ func runSmokeAggregate(arguments []string) error {
 	fdADigest := flags.String("fd-a-artifact-digest", "", "FD-A result artifact digest")
 	fdBID := flags.String("fd-b-artifact-id", "", "FD-B result artifact ID")
 	fdBDigest := flags.String("fd-b-artifact-digest", "", "FD-B result artifact digest")
+	bundleID, bundleDigest := flags.String("bundle-artifact-id", "", "bundle artifact ID"), flags.String("bundle-artifact-digest", "", "bundle artifact digest")
+	secretID, secretDigest := flags.String("secret-scan-artifact-id", "", "secret scan artifact ID"), flags.String("secret-scan-artifact-digest", "", "secret scan artifact digest")
+	verificationID, verificationDigest := flags.String("verification-artifact-id", "", "verification artifact ID"), flags.String("verification-artifact-digest", "", "verification artifact digest")
 	if err := flags.Parse(arguments); err != nil {
 		return err
 	}
@@ -152,9 +155,16 @@ func runSmokeAggregate(arguments []string) error {
 	parseErr = errors.Join(parseErr, err)
 	artifactB, err := smoke.ParseArtifactReference(*fdBID, *fdBDigest)
 	parseErr = errors.Join(parseErr, err)
+	bundleArtifact, err := smoke.ParseArtifactReference(*bundleID, *bundleDigest)
+	parseErr = errors.Join(parseErr, err)
+	secretArtifact, err := smoke.ParseArtifactReference(*secretID, *secretDigest)
+	parseErr = errors.Join(parseErr, err)
+	verificationArtifact, err := smoke.ParseArtifactReference(*verificationID, *verificationDigest)
+	parseErr = errors.Join(parseErr, err)
 	result, aggregateErr := smoke.Aggregate(smoke.AggregateOptions{
 		Binding: binding, FDAPath: *fdA, FDBPath: *fdB, ReleaseArtifact: release,
 		FDAArtifact: artifactA, FDBArtifact: artifactB, ExpectedHarnessSHA: *expectedSHA, Now: time.Now,
+		BundleArtifact: bundleArtifact, SecretScanArtifact: secretArtifact, VerificationArtifact: verificationArtifact,
 	})
 	return errors.Join(parseErr, aggregateErr, smoke.Write(*output, result))
 }

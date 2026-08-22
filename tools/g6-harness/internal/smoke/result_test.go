@@ -68,6 +68,7 @@ func TestSmokeDomainAndAggregateBindDistinctFrozenRunners(t *testing.T) {
 	result, err := Aggregate(AggregateOptions{
 		Binding: binding, FDAPath: fdAPath, FDBPath: fdBPath,
 		ReleaseArtifact: artifact(1), FDAArtifact: artifact(2), FDBArtifact: artifact(3),
+		BundleArtifact: artifact(4), SecretScanArtifact: artifact(5), VerificationArtifact: artifact(6),
 		ExpectedHarnessSHA: digest, Now: func() time.Time { return base.Add(3 * time.Second) },
 	})
 	if err != nil {
@@ -107,6 +108,7 @@ func TestSmokeAggregateRejectsOneHostAndCrossCandidateResults(t *testing.T) {
 	options := AggregateOptions{
 		Binding: binding, FDAPath: fdAPath, FDBPath: fdBPath,
 		ReleaseArtifact: artifact(1), FDAArtifact: artifact(2), FDBArtifact: artifact(3),
+		BundleArtifact: artifact(4), SecretScanArtifact: artifact(5), VerificationArtifact: artifact(6),
 		ExpectedHarnessSHA: testDigest, Now: func() time.Time { return now },
 	}
 	result, err := Aggregate(options)
@@ -161,18 +163,32 @@ func TestSmokeAssemblyAndIndependentVerificationFailClosed(t *testing.T) {
 	root := t.TempDir()
 	binding := rendezvous.Binding{CandidateSHA: "0123456789abcdef0123456789abcdef01234567", RunID: "42", RunAttempt: 3, EnvironmentID: rendezvous.EnvironmentID("42", 3), Authority: "engineering"}
 	now := time.Date(2026, 8, 22, 12, 0, 0, 0, time.UTC)
-	domain := func(name, boot string) DomainResult {
+	domain := func(name, boot, directory string) DomainResult {
+		if err := os.MkdirAll(filepath.Join(directory, "evidence"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(directory, "smoke-observations.json"), []byte("{}"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(directory, "evidence", "frozen-at"), []byte("frozen"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		digest, files, err := digestTree(directory)
+		if err != nil {
+			t.Fatal(err)
+		}
 		return DomainResult{
 			SchemaVersion: DomainSchemaVersion, Profile: "smoke", Binding: resultBinding(binding), Domain: name,
-			RunnerName: "runner", RunnerBootID: boot, HarnessSHA256: testDigest, EvidenceSHA256: testDigest,
-			EvidenceFiles: 2, Claims: map[string]any{"raw_evidence_frozen": true}, StartedAt: now, CompletedAt: now, Status: "passed",
+			RunnerName: "runner", RunnerBootID: boot, HarnessSHA256: testDigest, EvidenceSHA256: digest,
+			EvidenceFiles: files, Claims: map[string]any{"raw_evidence_frozen": true}, StartedAt: now, CompletedAt: now, Status: "passed",
 		}
 	}
-	fdAPath, fdBPath, bundlePath := filepath.Join(root, "a.json"), filepath.Join(root, "b.json"), filepath.Join(root, "bundle.json")
-	if err := Write(fdAPath, domain("fd-a", "11111111-1111-1111-1111-111111111111")); err != nil {
+	fdADir, fdBDir := filepath.Join(root, "a"), filepath.Join(root, "b")
+	fdAPath, fdBPath, bundlePath := filepath.Join(fdADir, "domain-result.json"), filepath.Join(fdBDir, "domain-result.json"), filepath.Join(root, "bundle.json")
+	if err := Write(fdAPath, domain("fd-a", "11111111-1111-1111-1111-111111111111", fdADir)); err != nil {
 		t.Fatal(err)
 	}
-	if err := Write(fdBPath, domain("fd-b", "22222222-2222-2222-2222-222222222222")); err != nil {
+	if err := Write(fdBPath, domain("fd-b", "22222222-2222-2222-2222-222222222222", fdBDir)); err != nil {
 		t.Fatal(err)
 	}
 	assembly, err := Assemble(AssembleOptions{Binding: binding, FDAPath: fdAPath, FDBPath: fdBPath, BundlePath: bundlePath, ExpectedHarnessSHA: testDigest, ReleaseArtifact: artifact(1), FDAArtifact: artifact(2), FDBArtifact: artifact(3)})

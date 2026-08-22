@@ -1275,13 +1275,14 @@ jobs:
           retention-days: 14
 
   g6-smoke-release:
-    name: G6 Harness Smoke Frozen Binary
+    name: G6 Harness Smoke Frozen Release
     needs: g6-contract
     if: inputs.profile == 'smoke'
     runs-on: ubuntu-24.04
-    timeout-minutes: 10
+    timeout-minutes: 35
     outputs:
       harness-sha256: ${{ steps.freeze.outputs.harness-sha256 }}
+      release-manifest-digest: ${{ steps.freeze.outputs.release-manifest-digest }}
       artifact-id: ${{ steps.publish.outputs.artifact-id }}
       artifact-digest: ${{ steps.publish.outputs.artifact-digest }}
     steps:
@@ -1290,27 +1291,49 @@ jobs:
           persist-credentials: false
       - name: Runner preflight
         run: scripts/ci-preflight.sh
-      - name: Restore the pinned smoke Go toolchain
+      - name: Restore the pinned smoke release toolchain
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: |
             .cache/downloads
             .tools
           key: tooling-v4-g6-smoke-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'scripts/checksums.txt', 'scripts/bootstrap.sh', 'scripts/env.sh') }}
-      - name: Bootstrap the pinned smoke Go toolchain
+      - name: Bootstrap the pinned smoke release toolchain
         run: scripts/bootstrap.sh go-test
-      - name: Build and freeze the smoke harness
+      - name: Build and freeze the smoke release
         id: freeze
+        timeout-minutes: 30
+        env:
+          DOCKER_BUILDKIT: "1"
+          G6RD_AGENT_IMAGE: ocservia-g6-agent:${{ github.run_id }}-${{ github.run_attempt }}
+          G6RD_CONTROL_PLANE_IMAGE: ocservia-g6-control-plane:${{ github.run_id }}-${{ github.run_attempt }}
+          G6RD_TRANSPORTD_IMAGE: ocservia-g6-transportd:${{ github.run_id }}-${{ github.run_attempt }}
+          G6RD_RELAY_IMAGE: ocservia-g6-relay:${{ github.run_id }}-${{ github.run_attempt }}
+          G6RD_PROBE_IMAGE: ocservia-g6-probe:${{ github.run_id }}-${{ github.run_attempt }}
         run: |
           set -euo pipefail
+          output="${RUNNER_TEMP}/g6-harness-smoke-release"
+          mkdir -p "${output}"
+          docker pull postgres:17.10-bookworm
+          build_pids=()
+          docker build --pull=false --label "org.opencontainers.image.revision=${GITHUB_SHA}" --file control-plane/Dockerfile --tag "${G6RD_CONTROL_PLANE_IMAGE}" . & build_pids+=("$!")
+          docker build --pull=false --label "org.opencontainers.image.revision=${GITHUB_SHA}" --file rust/transportd.Dockerfile --tag "${G6RD_TRANSPORTD_IMAGE}" . & build_pids+=("$!")
+          docker build --pull=false --label "org.opencontainers.image.revision=${GITHUB_SHA}" --file deploy/production/relay.Dockerfile --tag "${G6RD_RELAY_IMAGE}" . & build_pids+=("$!")
+          docker build --pull=false --label "org.opencontainers.image.revision=${GITHUB_SHA}" --file rust/g6-probe.Dockerfile --tag "${G6RD_PROBE_IMAGE}" . & build_pids+=("$!")
+          docker build --pull=false --label "org.opencontainers.image.revision=${GITHUB_SHA}" --file rust/g6-agent.Dockerfile --tag "${G6RD_AGENT_IMAGE}" . & build_pids+=("$!")
+          build_status=0
+          for pid in "${build_pids[@]}"; do wait "${pid}" || build_status=1; done
+          test "${build_status}" -eq 0
+          tunnel_output="${output}/tunnel-output"
+          docker build --pull=false --file rust/g6-probe.Dockerfile --target g6-tunnel-artifact --output "type=local,dest=${tunnel_output}" .
+          install -m 0755 "${tunnel_output}/ocservia-g6-tunnel" "${output}/ocservia-g6-tunnel"
+          rm -rf -- "${tunnel_output}"
           source scripts/env.sh
           pinned_go="${GITHUB_WORKSPACE}/.tools/go/bin/go"
           expected_go="go$(sed -n 's/^go=//p' toolchains.lock)"
           actual_go="$("${pinned_go}" env GOVERSION)"
           test "$(command -v go)" = "${pinned_go}"
           test "${actual_go}" = "${expected_go}"
-          output="${RUNNER_TEMP}/g6-harness-smoke-release"
-          mkdir -p "${output}"
           CGO_ENABLED=0 GOOS=linux GOARCH=amd64 GOTOOLCHAIN=local \
             "${pinned_go}" build -trimpath \
             -o "${output}/ocservia-g6-harness" \
@@ -1319,7 +1342,16 @@ jobs:
           printf 'candidate_sha\t%s\n' "${GITHUB_SHA}" >"${output}/harness-manifest.tsv"
           printf 'go_version\t%s\n' "${actual_go}" >>"${output}/harness-manifest.tsv"
           printf 'ocservia-g6-harness\t%s\n' "${harness_sha256}" >>"${output}/harness-manifest.tsv"
+          printf 'candidate_sha\t%s\n' "${GITHUB_SHA}" >"${output}/tunnel-manifest.tsv"
+          printf 'ocservia-g6-tunnel\t%s\n' "$(sha256sum "${output}/ocservia-g6-tunnel" | awk '{print $1}')" >>"${output}/tunnel-manifest.tsv"
+          release_images=(postgres:17.10-bookworm "${G6RD_CONTROL_PLANE_IMAGE}" "${G6RD_TRANSPORTD_IMAGE}" "${G6RD_RELAY_IMAGE}" "${G6RD_PROBE_IMAGE}" "${G6RD_AGENT_IMAGE}")
+          : >"${output}/image-ids.tsv"
+          for image in "${release_images[@]}"; do printf '%s\t%s\n' "${image}" "$(docker image inspect --format '{{.Id}}' "${image}")" >>"${output}/image-ids.tsv"; done
+          docker save "${release_images[@]}" | gzip -1 >"${output}/runtime-images.tar.gz"
+          (cd "${output}" && sha256sum runtime-images.tar.gz image-ids.tsv ocservia-g6-tunnel tunnel-manifest.tsv ocservia-g6-harness harness-manifest.tsv >release-artifacts.sha256)
+          release_digest="$(sha256sum "${output}/release-artifacts.sha256" | awk '{print $1}')"
           printf 'harness-sha256=%s\n' "${harness_sha256}" >>"${GITHUB_OUTPUT}"
+          printf 'release-manifest-digest=%s\n' "${release_digest}" >>"${GITHUB_OUTPUT}"
       - name: Publish the frozen smoke harness
         id: publish
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
@@ -1327,99 +1359,372 @@ jobs:
           name: g6-harness-smoke-release-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/g6-harness-smoke-release
           if-no-files-found: error
+          compression-level: 0
           retention-days: 1
+      - name: Clean smoke release resources
+        if: always()
+        timeout-minutes: 5
+        run: |
+          set -euo pipefail
+          status=0
+          for image in ocservia-g6-agent:${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT} ocservia-g6-control-plane:${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT} ocservia-g6-transportd:${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT} ocservia-g6-relay:${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT} ocservia-g6-probe:${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT} postgres:17.10-bookworm; do
+            if docker image inspect "${image}" >/dev/null 2>&1; then docker image rm --force "${image}" >/dev/null || status=1; fi
+          done
+          rm -rf -- "${RUNNER_TEMP}/g6-harness-smoke-release" || status=1
+          exit "${status}"
 
   g6-smoke-fd-a:
     name: G6 Harness Smoke FD-A
     needs: g6-smoke-release
     if: inputs.profile == 'smoke'
     runs-on: ubuntu-24.04
-    timeout-minutes: 5
+    timeout-minutes: 45
     outputs:
       artifact-id: ${{ steps.publish.outputs.artifact-id }}
       artifact-digest: ${{ steps.publish.outputs.artifact-digest }}
     env:
+      RUN_ID: ${{ github.run_id }}-${{ github.run_attempt }}-fd-a
       G6RD_CANDIDATE_SHA: ${{ inputs.candidate_sha }}
       G6_AUTHORITY: engineering
       FD_ID: fd-a
+      FD_ALIAS: fd-alpha
+      G6RD_PROFILE: smoke
+      G6_AGENTS_A: "2"
+      G6_AGENTS_B: "2"
+      G6RD_WINDOW_SECONDS: "30"
+      G6RD_RELEASE_MANIFEST_DIGEST: ${{ needs.g6-smoke-release.outputs.release-manifest-digest }}
+      G6RD_AGENT_IMAGE: ocservia-g6-agent:${{ github.run_id }}-${{ github.run_attempt }}
+      G6RD_CONTROL_PLANE_IMAGE: ocservia-g6-control-plane:${{ github.run_id }}-${{ github.run_attempt }}
+      G6RD_TRANSPORTD_IMAGE: ocservia-g6-transportd:${{ github.run_id }}-${{ github.run_attempt }}
+      G6RD_RELAY_IMAGE: ocservia-g6-relay:${{ github.run_id }}-${{ github.run_attempt }}
+      G6RD_PROBE_IMAGE: ocservia-g6-probe:${{ github.run_id }}-${{ github.run_attempt }}
     steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - name: Runner preflight
+        run: scripts/ci-preflight.sh
       - name: Download the frozen smoke harness
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: g6-harness-smoke-release-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/g6-harness-smoke-release
-      - name: Verify and execute the frozen smoke harness
-        env:
-          G6_SMOKE_RUNNER_NAME: ${{ runner.name }}
-        run: |
-          set -euo pipefail
-          release="${RUNNER_TEMP}/g6-harness-smoke-release"
-          test "$(awk -F '\t' '$1 == "candidate_sha" {print $2}' "${release}/harness-manifest.tsv")" = "${GITHUB_SHA}"
-          expected="${{ needs.g6-smoke-release.outputs.harness-sha256 }}"
-          test "$(awk -F '\t' '$1 == "ocservia-g6-harness" {print $2}' "${release}/harness-manifest.tsv")" = "${expected}"
-          test "$(sha256sum "${release}/ocservia-g6-harness" | awk '{print $1}')" = "${expected}"
-          install -m 0755 "${release}/ocservia-g6-harness" "${RUNNER_TEMP}/ocservia-g6-harness"
-          "${RUNNER_TEMP}/ocservia-g6-harness" smoke-domain \
-            --domain fd-a \
-            --expected-harness-sha "${expected}" \
-            --output "${RUNNER_TEMP}/g6-harness-smoke-fd-a/domain-result.json"
-      - name: Publish the FD-A smoke result
+      - name: Install the frozen smoke release
+        uses: ./.github/actions/g6-install-release
+        with:
+          archive-dir: ${{ runner.temp }}/g6-harness-smoke-release
+      - name: Restore pinned smoke runtime
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: |
+            .cache/downloads
+            .tools
+          key: tooling-v5-g6-node-runtime-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'scripts/checksums.txt', 'scripts/bootstrap.sh', 'scripts/env.sh', 'scripts/g6-runtime/package-lock.json') }}
+      - name: Bootstrap pinned smoke runtime
+        run: scripts/bootstrap.sh g6-runtime
+      - name: Prepare FD-A
+        run: '"${G6_HARNESS_BIN}" run-segment --domain fd-a --segment prepare'
+      - name: Publish FD-A tunnel identity
+        uses: ./.github/actions/g6-checkpoint-upload
+        with: {name: 'g6-smoke-tunnel-fd-a-${{ github.run_id }}-${{ github.run_attempt }}', path: '${{ runner.temp }}/g6-readiness-${{ env.RUN_ID }}/outbox/tunnel', retention-days: 1}
+      - name: Wait for FD-B tunnel identity
+        env: {GITHUB_TOKEN: '${{ github.token }}'}
+        run: '"${G6_HARNESS_BIN}" wait-download --name "g6-smoke-tunnel-fd-b-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" --destination "${RUNNER_TEMP}/g6-smoke-tunnel-fd-b" --timeout 1200s --peer-job "G6 Harness Smoke FD-B"'
+      - name: Bootstrap FD-A
+        run: '"${G6_HARNESS_BIN}" run-segment --domain fd-a --segment bootstrap'
+      - name: Publish shared runtime
+        uses: ./.github/actions/g6-checkpoint-upload
+        with: {name: 'g6-smoke-shared-${{ github.run_id }}-${{ github.run_attempt }}', path: '${{ runner.temp }}/g6-readiness-${{ env.RUN_ID }}/outbox/shared', retention-days: 1}
+      - name: Start Primary
+        run: '"${G6_HARNESS_BIN}" run-segment --domain fd-a --segment primary'
+      - name: Publish Primary readiness
+        uses: ./.github/actions/g6-checkpoint-upload
+        with: {name: 'g6-smoke-primary-up-${{ github.run_id }}-${{ github.run_attempt }}', path: '${{ runner.temp }}/g6-readiness-${{ env.RUN_ID }}/outbox/primary-up', retention-days: 1}
+      - name: Enroll FD-A Agents
+        run: '"${G6_HARNESS_BIN}" run-segment --domain fd-a --segment enroll'
+      - name: Publish FD-A Agent inventory
+        uses: ./.github/actions/g6-checkpoint-upload
+        with: {name: 'g6-smoke-agents-${{ github.run_id }}-${{ github.run_attempt }}', path: '${{ runner.temp }}/g6-readiness-${{ env.RUN_ID }}/outbox/agents', retention-days: 1}
+      - name: Wait for FD-B enrollment
+        env: {GITHUB_TOKEN: '${{ github.token }}'}
+        run: '"${G6_HARNESS_BIN}" wait-download --name "g6-smoke-agents-enrolled-fd-b-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" --destination "${RUNNER_TEMP}/g6-smoke-agents-enrolled-fd-b" --timeout 1200s --peer-job "G6 Harness Smoke FD-B"'
+      - name: Activate full trust snapshot
+        run: '"${G6_HARNESS_BIN}" run-segment --domain fd-a --segment transport-trust'
+      - name: Publish transport trust
+        uses: ./.github/actions/g6-checkpoint-upload
+        with: {name: 'g6-smoke-trust-ready-${{ github.run_id }}-${{ github.run_attempt }}', path: '${{ runner.temp }}/g6-readiness-${{ env.RUN_ID }}/outbox/trust-ready', retention-days: 1}
+      - name: Start FD-A Agents
+        run: '"${G6_HARNESS_BIN}" run-segment --domain fd-a --segment activate-agents'
+      - name: Wait for authenticated cross-FD session
+        env: {GITHUB_TOKEN: '${{ github.token }}'}
+        run: '"${G6_HARNESS_BIN}" wait-download --name "g6-smoke-session-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" --destination "${RUNNER_TEMP}/g6-smoke-session" --timeout 1200s --peer-job "G6 Harness Smoke FD-B"'
+      - name: Isolate old Primary
+        run: '"${G6_HARNESS_BIN}" run-segment --domain fd-a --segment isolate'
+      - name: Publish isolation record
+        uses: ./.github/actions/g6-checkpoint-upload
+        with: {name: 'g6-smoke-isolation-${{ github.run_id }}-${{ github.run_attempt }}', path: '${{ runner.temp }}/g6-readiness-${{ env.RUN_ID }}/outbox/isolation', retention-days: 1}
+      - name: Wait for promotion
+        env: {GITHUB_TOKEN: '${{ github.token }}'}
+        run: '"${G6_HARNESS_BIN}" wait-download --name "g6-smoke-promotion-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" --destination "${RUNNER_TEMP}/g6-smoke-promotion" --timeout 1200s --peer-job "G6 Harness Smoke FD-B"'
+      - name: Freeze FD-A raw evidence
+        run: '"${G6_HARNESS_BIN}" run-segment --domain fd-a --segment evidence'
+      - name: Bind FD-A raw evidence
+        env: {G6_SMOKE_RUNNER_NAME: '${{ runner.name }}'}
+        run: '"${G6_HARNESS_BIN}" smoke-domain --domain fd-a --expected-harness-sha "${{ needs.g6-smoke-release.outputs.harness-sha256 }}" --evidence-root "${RUNNER_TEMP}/g6-readiness-${RUN_ID}/outbox/smoke-final" --output "${RUNNER_TEMP}/g6-readiness-${RUN_ID}/outbox/smoke-final/domain-result.json"'
+      - name: Publish FD-A raw smoke evidence
         id: publish
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: g6-harness-smoke-fd-a-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/g6-harness-smoke-fd-a
+          path: ${{ runner.temp }}/g6-readiness-${{ env.RUN_ID }}/outbox/smoke-final
           if-no-files-found: error
           retention-days: 1
+      - name: Collect FD-A diagnostics
+        if: always()
+        run: timeout --signal=TERM --kill-after=15s 120s scripts/g6-readiness-fd-a.sh diagnostics
+      - name: Clean FD-A resources
+        if: always()
+        run: '"${G6_HARNESS_BIN}" cleanup --domain fd-a --timeout 180s'
 
   g6-smoke-fd-b:
     name: G6 Harness Smoke FD-B
     needs: g6-smoke-release
     if: inputs.profile == 'smoke'
     runs-on: ubuntu-24.04
-    timeout-minutes: 5
+    timeout-minutes: 45
     outputs:
       artifact-id: ${{ steps.publish.outputs.artifact-id }}
       artifact-digest: ${{ steps.publish.outputs.artifact-digest }}
     env:
+      RUN_ID: ${{ github.run_id }}-${{ github.run_attempt }}-fd-b
       G6RD_CANDIDATE_SHA: ${{ inputs.candidate_sha }}
       G6_AUTHORITY: engineering
       FD_ID: fd-b
+      FD_ALIAS: fd-beta
+      G6RD_PROFILE: smoke
+      G6_AGENTS_A: "2"
+      G6_AGENTS_B: "2"
+      G6RD_WINDOW_SECONDS: "30"
+      G6RD_RELEASE_MANIFEST_DIGEST: ${{ needs.g6-smoke-release.outputs.release-manifest-digest }}
+      G6RD_AGENT_IMAGE: ocservia-g6-agent:${{ github.run_id }}-${{ github.run_attempt }}
+      G6RD_CONTROL_PLANE_IMAGE: ocservia-g6-control-plane:${{ github.run_id }}-${{ github.run_attempt }}
+      G6RD_TRANSPORTD_IMAGE: ocservia-g6-transportd:${{ github.run_id }}-${{ github.run_attempt }}
+      G6RD_RELAY_IMAGE: ocservia-g6-relay:${{ github.run_id }}-${{ github.run_attempt }}
+      G6RD_PROBE_IMAGE: ocservia-g6-probe:${{ github.run_id }}-${{ github.run_attempt }}
     steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - name: Runner preflight
+        run: scripts/ci-preflight.sh
       - name: Download the frozen smoke harness
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: g6-harness-smoke-release-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/g6-harness-smoke-release
-      - name: Verify and execute the frozen smoke harness
-        env:
-          G6_SMOKE_RUNNER_NAME: ${{ runner.name }}
-        run: |
-          set -euo pipefail
-          release="${RUNNER_TEMP}/g6-harness-smoke-release"
-          test "$(awk -F '\t' '$1 == "candidate_sha" {print $2}' "${release}/harness-manifest.tsv")" = "${GITHUB_SHA}"
-          expected="${{ needs.g6-smoke-release.outputs.harness-sha256 }}"
-          test "$(awk -F '\t' '$1 == "ocservia-g6-harness" {print $2}' "${release}/harness-manifest.tsv")" = "${expected}"
-          test "$(sha256sum "${release}/ocservia-g6-harness" | awk '{print $1}')" = "${expected}"
-          install -m 0755 "${release}/ocservia-g6-harness" "${RUNNER_TEMP}/ocservia-g6-harness"
-          "${RUNNER_TEMP}/ocservia-g6-harness" smoke-domain \
-            --domain fd-b \
-            --expected-harness-sha "${expected}" \
-            --output "${RUNNER_TEMP}/g6-harness-smoke-fd-b/domain-result.json"
-      - name: Publish the FD-B smoke result
+      - name: Install the frozen smoke release
+        uses: ./.github/actions/g6-install-release
+        with: {archive-dir: '${{ runner.temp }}/g6-harness-smoke-release'}
+      - name: Restore pinned smoke runtime
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: |
+            .cache/downloads
+            .tools
+          key: tooling-v5-g6-node-runtime-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'scripts/checksums.txt', 'scripts/bootstrap.sh', 'scripts/env.sh', 'scripts/g6-runtime/package-lock.json') }}
+      - name: Bootstrap pinned smoke runtime
+        run: scripts/bootstrap.sh g6-runtime
+      - name: Prepare FD-B
+        run: '"${G6_HARNESS_BIN}" run-segment --domain fd-b --segment prepare'
+      - name: Publish FD-B tunnel identity
+        uses: ./.github/actions/g6-checkpoint-upload
+        with: {name: 'g6-smoke-tunnel-fd-b-${{ github.run_id }}-${{ github.run_attempt }}', path: '${{ runner.temp }}/g6-readiness-${{ env.RUN_ID }}/outbox/tunnel', retention-days: 1}
+      - name: Wait for FD-A tunnel identity
+        env: {GITHUB_TOKEN: '${{ github.token }}'}
+        run: '"${G6_HARNESS_BIN}" wait-download --name "g6-smoke-tunnel-fd-a-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" --destination "${RUNNER_TEMP}/g6-smoke-tunnel-fd-a" --timeout 1200s --peer-job "G6 Harness Smoke FD-A"'
+      - name: Bootstrap FD-B
+        run: '"${G6_HARNESS_BIN}" run-segment --domain fd-b --segment bootstrap'
+      - name: Wait for shared runtime
+        env: {GITHUB_TOKEN: '${{ github.token }}'}
+        run: '"${G6_HARNESS_BIN}" wait-download --name "g6-smoke-shared-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" --destination "${RUNNER_TEMP}/g6-smoke-shared" --timeout 1200s --peer-job "G6 Harness Smoke FD-A"'
+      - name: Start FD-B relay and tunnel
+        run: '"${G6_HARNESS_BIN}" run-segment --domain fd-b --segment peer-runtime'
+      - name: Wait for Primary readiness
+        env: {GITHUB_TOKEN: '${{ github.token }}'}
+        run: '"${G6_HARNESS_BIN}" wait-download --name "g6-smoke-primary-up-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" --destination "${RUNNER_TEMP}/g6-smoke-primary-up" --timeout 1200s --peer-job "G6 Harness Smoke FD-A"'
+      - name: Bootstrap Standby
+        run: '"${G6_HARNESS_BIN}" run-segment --domain fd-b --segment standby'
+      - name: Wait for FD-A Agent inventory
+        env: {GITHUB_TOKEN: '${{ github.token }}'}
+        run: '"${G6_HARNESS_BIN}" wait-download --name "g6-smoke-agents-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" --destination "${RUNNER_TEMP}/g6-smoke-agents" --timeout 1200s --peer-job "G6 Harness Smoke FD-A"'
+      - name: Enroll FD-B Agents
+        run: '"${G6_HARNESS_BIN}" run-segment --domain fd-b --segment enroll'
+      - name: Publish FD-B enrollment
+        uses: ./.github/actions/g6-checkpoint-upload
+        with: {name: 'g6-smoke-agents-enrolled-fd-b-${{ github.run_id }}-${{ github.run_attempt }}', path: '${{ runner.temp }}/g6-readiness-${{ env.RUN_ID }}/outbox/agents-enrolled', retention-days: 1}
+      - name: Wait for transport trust
+        env: {GITHUB_TOKEN: '${{ github.token }}'}
+        run: '"${G6_HARNESS_BIN}" wait-download --name "g6-smoke-trust-ready-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" --destination "${RUNNER_TEMP}/g6-smoke-trust-ready" --timeout 1200s --peer-job "G6 Harness Smoke FD-A"'
+      - name: Start FD-B Agents
+        run: '"${G6_HARNESS_BIN}" run-segment --domain fd-b --segment activate-agents'
+      - name: Prove authenticated cross-FD session
+        run: '"${G6_HARNESS_BIN}" run-segment --domain fd-b --segment session'
+      - name: Publish authenticated session proof
+        uses: ./.github/actions/g6-checkpoint-upload
+        with: {name: 'g6-smoke-session-${{ github.run_id }}-${{ github.run_attempt }}', path: '${{ runner.temp }}/g6-readiness-${{ env.RUN_ID }}/outbox/smoke-session', retention-days: 1}
+      - name: Wait for old Primary isolation
+        env: {GITHUB_TOKEN: '${{ github.token }}'}
+        run: '"${G6_HARNESS_BIN}" wait-download --name "g6-smoke-isolation-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" --destination "${RUNNER_TEMP}/g6-smoke-isolation" --timeout 1200s --peer-job "G6 Harness Smoke FD-A"'
+      - name: Promote Standby
+        run: '"${G6_HARNESS_BIN}" run-segment --domain fd-b --segment promote'
+      - name: Publish promotion proof
+        uses: ./.github/actions/g6-checkpoint-upload
+        with: {name: 'g6-smoke-promotion-${{ github.run_id }}-${{ github.run_attempt }}', path: '${{ runner.temp }}/g6-readiness-${{ env.RUN_ID }}/outbox/new-primary', retention-days: 1}
+      - name: Observe post-promotion stability
+        run: sleep 30
+      - name: Freeze FD-B raw evidence
+        run: '"${G6_HARNESS_BIN}" run-segment --domain fd-b --segment evidence'
+      - name: Bind FD-B raw evidence
+        env: {G6_SMOKE_RUNNER_NAME: '${{ runner.name }}'}
+        run: '"${G6_HARNESS_BIN}" smoke-domain --domain fd-b --expected-harness-sha "${{ needs.g6-smoke-release.outputs.harness-sha256 }}" --evidence-root "${RUNNER_TEMP}/g6-readiness-${RUN_ID}/outbox/smoke-final" --output "${RUNNER_TEMP}/g6-readiness-${RUN_ID}/outbox/smoke-final/domain-result.json"'
+      - name: Publish FD-B raw smoke evidence
         id: publish
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: g6-harness-smoke-fd-b-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/g6-harness-smoke-fd-b
+          path: ${{ runner.temp }}/g6-readiness-${{ env.RUN_ID }}/outbox/smoke-final
           if-no-files-found: error
           retention-days: 1
+      - name: Collect FD-B diagnostics
+        if: always()
+        run: timeout --signal=TERM --kill-after=15s 120s scripts/g6-readiness-fd-b.sh diagnostics
+      - name: Clean FD-B resources
+        if: always()
+        run: '"${G6_HARNESS_BIN}" cleanup --domain fd-b --timeout 180s'
+
+  g6-smoke-assemble:
+    name: G6 Harness Smoke Evidence Builder
+    needs: [g6-smoke-release, g6-smoke-fd-a, g6-smoke-fd-b]
+    if: ${{ always() && inputs.profile == 'smoke' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    outputs:
+      bundle-sha256: ${{ steps.assemble.outputs.bundle-sha256 }}
+      artifact-id: ${{ steps.publish.outputs.artifact-id }}
+      artifact-digest: ${{ steps.publish.outputs.artifact-digest }}
+    env: {G6_AUTHORITY: engineering}
+    steps:
+      - name: Download frozen harness
+        if: needs.g6-smoke-release.result == 'success'
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with: {name: 'g6-harness-smoke-release-${{ github.run_id }}-${{ github.run_attempt }}', path: '${{ runner.temp }}/g6-harness-smoke-release'}
+      - name: Download FD-A raw evidence
+        if: needs.g6-smoke-fd-a.outputs.artifact-id != ''
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with: {name: 'g6-harness-smoke-fd-a-${{ github.run_id }}-${{ github.run_attempt }}', path: '${{ runner.temp }}/g6-harness-smoke-fd-a'}
+      - name: Download FD-B raw evidence
+        if: needs.g6-smoke-fd-b.outputs.artifact-id != ''
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with: {name: 'g6-harness-smoke-fd-b-${{ github.run_id }}-${{ github.run_attempt }}', path: '${{ runner.temp }}/g6-harness-smoke-fd-b'}
+      - name: Assemble candidate-bound smoke evidence
+        id: assemble
+        if: needs.g6-smoke-release.result == 'success' && needs.g6-smoke-fd-a.result == 'success' && needs.g6-smoke-fd-b.result == 'success'
+        run: |
+          set -euo pipefail
+          harness="${RUNNER_TEMP}/g6-harness-smoke-release/ocservia-g6-harness"
+          chmod 0755 "${harness}"
+          mkdir -p "${RUNNER_TEMP}/g6-harness-smoke-bundle"
+          "${harness}" smoke-assemble \
+            --fd-a "${RUNNER_TEMP}/g6-harness-smoke-fd-a/domain-result.json" --fd-b "${RUNNER_TEMP}/g6-harness-smoke-fd-b/domain-result.json" \
+            --bundle "${RUNNER_TEMP}/g6-harness-smoke-bundle/smoke-bundle.json" --output "${RUNNER_TEMP}/g6-harness-smoke-bundle/assembly-result.json" \
+            --expected-harness-sha "${{ needs.g6-smoke-release.outputs.harness-sha256 }}" \
+            --release-artifact-id "${{ needs.g6-smoke-release.outputs.artifact-id }}" --release-artifact-digest "${{ needs.g6-smoke-release.outputs.artifact-digest }}" \
+            --fd-a-artifact-id "${{ needs.g6-smoke-fd-a.outputs.artifact-id }}" --fd-a-artifact-digest "${{ needs.g6-smoke-fd-a.outputs.artifact-digest }}" \
+            --fd-b-artifact-id "${{ needs.g6-smoke-fd-b.outputs.artifact-id }}" --fd-b-artifact-digest "${{ needs.g6-smoke-fd-b.outputs.artifact-digest }}"
+          bundle_sha="$(jq -er '.bundle_sha256' "${RUNNER_TEMP}/g6-harness-smoke-bundle/assembly-result.json")"
+          printf 'bundle-sha256=%s\n' "${bundle_sha}" >>"${GITHUB_OUTPUT}"
+      - name: Publish smoke evidence bundle
+        id: publish
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with: {name: 'g6-harness-smoke-bundle-${{ github.run_id }}-${{ github.run_attempt }}', path: '${{ runner.temp }}/g6-harness-smoke-bundle', if-no-files-found: warn, retention-days: 1}
+
+  g6-smoke-secret-scan:
+    name: G6 Harness Smoke Secret Scan
+    needs: [g6-smoke-fd-a, g6-smoke-fd-b, g6-smoke-assemble]
+    if: ${{ always() && inputs.profile == 'smoke' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    outputs:
+      artifact-id: ${{ steps.publish.outputs.artifact-id }}
+      artifact-digest: ${{ steps.publish.outputs.artifact-digest }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with: {persist-credentials: false}
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with: {path: ".cache/downloads\n.tools", key: 'tooling-v4-security-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles(''toolchains.lock'', ''scripts/checksums.txt'', ''scripts/bootstrap.sh'') }}'}
+      - run: scripts/bootstrap.sh security
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with: {name: 'g6-harness-smoke-fd-a-${{ github.run_id }}-${{ github.run_attempt }}', path: '${{ runner.temp }}/g6-harness-smoke-fd-a'}
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with: {name: 'g6-harness-smoke-fd-b-${{ github.run_id }}-${{ github.run_attempt }}', path: '${{ runner.temp }}/g6-harness-smoke-fd-b'}
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with: {name: 'g6-harness-smoke-bundle-${{ github.run_id }}-${{ github.run_attempt }}', path: '${{ runner.temp }}/g6-harness-smoke-bundle'}
+      - name: Scan every smoke evidence layer
+        id: scan
+        run: |
+          gitleaks dir --no-banner --redact --no-color "${RUNNER_TEMP}/g6-harness-smoke-fd-a"
+          gitleaks dir --no-banner --redact --no-color "${RUNNER_TEMP}/g6-harness-smoke-fd-b"
+          gitleaks dir --no-banner --redact --no-color "${RUNNER_TEMP}/g6-harness-smoke-bundle"
+      - name: Record structured smoke secret scan result
+        if: always()
+        run: |
+          mkdir -p "${RUNNER_TEMP}/g6-harness-smoke-secret-scan"
+          status=failed; [[ "${{ steps.scan.outcome }}" == success ]] && status=passed
+          jq -n --arg candidate_sha "${GITHUB_SHA}" --arg run_id "${GITHUB_RUN_ID}" --argjson run_attempt "${GITHUB_RUN_ATTEMPT}" \
+            --arg environment_id "g6-$(printf '%s' "${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" | openssl dgst -sha256 -r | cut -c1-16)" --arg status "${status}" \
+            '{schema_version:"ocservia.g6-harness-smoke-secret-scan-result.v1",profile:"smoke",binding:{$candidate_sha,$run_id,$run_attempt,$environment_id,authority:"engineering"},$status,formal_verdict_eligible:false}' \
+            >"${RUNNER_TEMP}/g6-harness-smoke-secret-scan/secret-scan-result.json"
+      - name: Publish structured smoke secret scan result
+        id: publish
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with: {name: 'g6-harness-smoke-secret-scan-${{ github.run_id }}-${{ github.run_attempt }}', path: '${{ runner.temp }}/g6-harness-smoke-secret-scan', if-no-files-found: error, retention-days: 1}
+
+  g6-smoke-verifier:
+    name: G6 Harness Smoke Independent Verifier
+    needs: [g6-smoke-release, g6-smoke-assemble]
+    if: ${{ always() && inputs.profile == 'smoke' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      artifact-id: ${{ steps.publish.outputs.artifact-id }}
+      artifact-digest: ${{ steps.publish.outputs.artifact-digest }}
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with: {name: 'g6-harness-smoke-release-${{ github.run_id }}-${{ github.run_attempt }}', path: '${{ runner.temp }}/g6-harness-smoke-release'}
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with: {name: 'g6-harness-smoke-bundle-${{ github.run_id }}-${{ github.run_attempt }}', path: '${{ runner.temp }}/g6-harness-smoke-bundle'}
+      - name: Independently verify the smoke bundle
+        env: {G6_AUTHORITY: engineering}
+        run: |
+          harness="${RUNNER_TEMP}/g6-harness-smoke-release/ocservia-g6-harness"
+          chmod 0755 "${harness}"
+          "${harness}" smoke-verify --bundle "${RUNNER_TEMP}/g6-harness-smoke-bundle/smoke-bundle.json" \
+            --expected-bundle-sha "${{ needs.g6-smoke-assemble.outputs.bundle-sha256 }}" \
+            --expected-harness-sha "${{ needs.g6-smoke-release.outputs.harness-sha256 }}" \
+            --output "${RUNNER_TEMP}/g6-harness-smoke-verification/verification-result.json"
+      - name: Publish independent smoke verification
+        id: publish
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with: {name: 'g6-harness-smoke-verification-${{ github.run_id }}-${{ github.run_attempt }}', path: '${{ runner.temp }}/g6-harness-smoke-verification', if-no-files-found: warn, retention-days: 1}
 
   g6-smoke-result:
     name: G6 Harness Smoke Result
-    needs: [g6-smoke-release, g6-smoke-fd-a, g6-smoke-fd-b]
+    needs: [g6-smoke-release, g6-smoke-fd-a, g6-smoke-fd-b, g6-smoke-assemble, g6-smoke-secret-scan, g6-smoke-verifier]
     if: ${{ always() && inputs.profile == 'smoke' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 5
@@ -1446,7 +1751,7 @@ jobs:
           name: g6-harness-smoke-fd-b-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/g6-harness-smoke-fd-b
       - name: Aggregate the non-authoritative smoke result
-        if: needs.g6-smoke-release.result == 'success'
+        if: needs.g6-smoke-release.result == 'success' && needs.g6-smoke-fd-a.result == 'success' && needs.g6-smoke-fd-b.result == 'success' && needs.g6-smoke-assemble.result == 'success' && needs.g6-smoke-secret-scan.result == 'success' && needs.g6-smoke-verifier.result == 'success'
         run: |
           set -euo pipefail
           release="${RUNNER_TEMP}/g6-harness-smoke-release"
@@ -1464,6 +1769,12 @@ jobs:
             --fd-a-artifact-digest "${{ needs.g6-smoke-fd-a.outputs.artifact-digest }}" \
             --fd-b-artifact-id "${{ needs.g6-smoke-fd-b.outputs.artifact-id }}" \
             --fd-b-artifact-digest "${{ needs.g6-smoke-fd-b.outputs.artifact-digest }}" \
+            --bundle-artifact-id "${{ needs.g6-smoke-assemble.outputs.artifact-id }}" \
+            --bundle-artifact-digest "${{ needs.g6-smoke-assemble.outputs.artifact-digest }}" \
+            --secret-scan-artifact-id "${{ needs.g6-smoke-secret-scan.outputs.artifact-id }}" \
+            --secret-scan-artifact-digest "${{ needs.g6-smoke-secret-scan.outputs.artifact-digest }}" \
+            --verification-artifact-id "${{ needs.g6-smoke-verifier.outputs.artifact-id }}" \
+            --verification-artifact-digest "${{ needs.g6-smoke-verifier.outputs.artifact-digest }}" \
             --output "${RUNNER_TEMP}/g6-harness-smoke-result/smoke-result.json"
       - name: Preserve a smoke result when aggregation cannot start
         if: always()
@@ -1487,7 +1798,7 @@ jobs:
             --arg completed_at "$(date --utc +%Y-%m-%dT%H:%M:%S.%NZ)" \
             --arg failure_code "${failure_code}" \
             --arg failure_message "${failure_message}" \
-            '{schema_version:"ocservia.g6-harness-smoke-result.v1",profile:"smoke",binding:{$candidate_sha,$run_id,$run_attempt,$environment_id,authority:"engineering"},harness_sha256:null,started_at:$completed_at,completed_at:$completed_at,domains:null,artifacts:{release:null,fd_a:null,fd_b:null},status:"failed",formal_verdict_eligible:false,failure:{code:$failure_code,message:$failure_message}}' \
+            '{schema_version:"ocservia.g6-harness-smoke-result.v1",profile:"smoke",binding:{$candidate_sha,$run_id,$run_attempt,$environment_id,authority:"engineering"},harness_sha256:null,started_at:$completed_at,completed_at:$completed_at,domains:null,artifacts:{release:null,fd_a:null,fd_b:null,bundle:null,secret_scan:null,verification:null},stages:{runtime_fd_a:"failed",runtime_fd_b:"failed",assembly:"failed",secret_scan:"failed",verification:"failed"},status:"failed",formal_verdict_eligible:false,failure:{code:$failure_code,message:$failure_message}}' \
             >"${result}"
       - name: Publish the non-authoritative smoke result
         id: publish
@@ -1506,6 +1817,9 @@ jobs:
           test "${{ needs.g6-smoke-release.result }}" = success
           test "${{ needs.g6-smoke-fd-a.result }}" = success
           test "${{ needs.g6-smoke-fd-b.result }}" = success
+          test "${{ needs.g6-smoke-assemble.result }}" = success
+          test "${{ needs.g6-smoke-secret-scan.result }}" = success
+          test "${{ needs.g6-smoke-verifier.result }}" = success
           jq -e '
             .schema_version == "ocservia.g6-harness-smoke-result.v1" and
             .profile == "smoke" and

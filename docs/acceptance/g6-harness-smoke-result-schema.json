@@ -13,6 +13,7 @@
     "completed_at",
     "domains",
     "artifacts",
+    "stages",
     "status",
     "formal_verdict_eligible",
     "failure"
@@ -46,14 +47,29 @@
     "artifacts": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["release", "fd_a", "fd_b"],
+      "required": ["release", "fd_a", "fd_b", "bundle", "secret_scan", "verification"],
       "properties": {
         "release": { "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/artifact" }] },
         "fd_a": { "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/artifact" }] },
-        "fd_b": { "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/artifact" }] }
+        "fd_b": { "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/artifact" }] },
+        "bundle": { "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/artifact" }] },
+        "secret_scan": { "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/artifact" }] },
+        "verification": { "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/artifact" }] }
       }
     },
     "status": { "enum": ["passed", "failed"] },
+    "stages": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["runtime_fd_a", "runtime_fd_b", "assembly", "secret_scan", "verification"],
+      "properties": {
+        "runtime_fd_a": { "enum": ["passed", "failed"] },
+        "runtime_fd_b": { "enum": ["passed", "failed"] },
+        "assembly": { "enum": ["passed", "failed"] },
+        "secret_scan": { "enum": ["passed", "failed"] },
+        "verification": { "enum": ["passed", "failed"] }
+      }
+    },
     "formal_verdict_eligible": { "const": false },
     "failure": {
       "oneOf": [
@@ -143,6 +159,9 @@
               "release": { "type": "object" },
               "fd_a": { "type": "object" },
               "fd_b": { "type": "object" }
+              ,"bundle": { "type": "object" }
+              ,"secret_scan": { "type": "object" }
+              ,"verification": { "type": "object" }
             }
           }
         }

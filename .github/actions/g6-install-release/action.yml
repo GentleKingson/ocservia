@@ -1,0 +1,34 @@
+name: Install frozen G6 release
+description: Verify and install one candidate-bound G6 release on a runtime job
+inputs:
+  archive-dir:
+    description: Absolute downloaded release directory
+    required: true
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      run: |
+        set -euo pipefail
+        archive_dir="${{ inputs.archive-dir }}"
+        (cd "${archive_dir}" && sha256sum --check release-artifacts.sha256)
+        test "$(awk -F '\t' '$1 == "candidate_sha" {print $2}' "${archive_dir}/harness-manifest.tsv")" = "${GITHUB_SHA}"
+        expected_harness="$(awk -F '\t' '$1 == "ocservia-g6-harness" {print $2}' "${archive_dir}/harness-manifest.tsv")"
+        test "$(sha256sum "${archive_dir}/ocservia-g6-harness" | awk '{print $1}')" = "${expected_harness}"
+        harness_bin="${RUNNER_TEMP}/ocservia-g6-harness"
+        install -m 0755 "${archive_dir}/ocservia-g6-harness" "${harness_bin}"
+        tunnel_bin="${RUNNER_TEMP}/g6-readiness-${RUN_ID}/bin/ocservia-g6-tunnel"
+        install -D -m 0755 "${archive_dir}/ocservia-g6-tunnel" "${tunnel_bin}"
+        install -m 0444 "${archive_dir}/tunnel-manifest.tsv" "$(dirname "${tunnel_bin}")/tunnel-manifest.tsv"
+        printf 'G6_HARNESS_BIN=%s\n' "${harness_bin}" >>"${GITHUB_ENV}"
+        gzip -dc "${archive_dir}/runtime-images.tar.gz" | docker load
+        release_images=(postgres:17.10-bookworm "${G6RD_CONTROL_PLANE_IMAGE}" "${G6RD_TRANSPORTD_IMAGE}" "${G6RD_RELAY_IMAGE}" "${G6RD_PROBE_IMAGE}" "${G6RD_AGENT_IMAGE}")
+        test "$(wc -l <"${archive_dir}/image-ids.tsv")" -eq "${#release_images[@]}"
+        for image in "${release_images[@]}"; do
+          expected_id="$(awk -F '\t' -v image="${image}" '$1 == image {print $2}' "${archive_dir}/image-ids.tsv")"
+          test -n "${expected_id}"
+          test "$(docker image inspect --format '{{.Id}}' "${image}")" = "${expected_id}"
+          if [[ "${image}" != postgres:17.10-bookworm ]]; then
+            test "$(docker image inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' "${image}")" = "${GITHUB_SHA}"
+          fi
+        done

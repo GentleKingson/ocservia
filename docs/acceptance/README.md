@@ -59,6 +59,9 @@ Assembly and independent verification report through the separate
 `ocservia.g6-harness-smoke-assembly-result.v1` and
 `ocservia.g6-harness-smoke-verification-result.v1` contracts. Both permanently
 set `formal_verdict_eligible` to `false`.
+The intervening gitleaks job emits
+`ocservia.g6-harness-smoke-secret-scan-result.v1` and is likewise permanently
+non-formal.
 `ocservia.g6-harness-smoke-result.v1` binds those domain results and their
 GitHub artifact IDs and digests while fixing `formal_verdict_eligible` to
 `false`. A smoke result is never an `ocservia.g6-verdict.v2`, never references

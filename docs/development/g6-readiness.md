@@ -15,9 +15,12 @@ contract in `docs/acceptance/g6-slo.yaml` end to end.
 The separate `.github/workflows/g6-harness-smoke.yml` pull-request caller
 invokes only the reusable core's bounded `smoke` profile. It schedules two
 hosted runners, proves they have distinct boot identities, and makes both
-execute one candidate-bound harness binary built with the pinned Go toolchain.
-It does not build the product topology, use a production-readiness Environment,
-or emit a G6 verdict. Its `ocservia.g6-harness-smoke-result.v1` output always
+execute one candidate-bound frozen release. The bounded fixture brings up a
+Primary and Standby, two real Agents per domain, one cross-domain authenticated
+session, one promotion, a 30-second observation, raw evidence, assembly,
+gitleaks, independent verification, and cleanup. It does not use a
+production-readiness Environment or emit a G6 verdict. Its
+`ocservia.g6-harness-smoke-result.v1` output always
 sets `formal_verdict_eligible` to `false`.
 
 A bounded producer job builds the candidate-labeled control-plane, transportd,

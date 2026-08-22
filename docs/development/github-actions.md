@@ -54,9 +54,11 @@ The G6 harness has two thin callers over `.github/workflows/g6-harness-core.yml`
 `g6-readiness.yml` is the queued manual formal caller and preserves the full
 two-failure-domain production-readiness contract. `g6-harness-smoke.yml` is a
 latest-wins pull-request check fixed to engineering authority. Its two hosted
-jobs execute the same frozen harness binary and must report different runner
-boot identities. The smoke publishes only
-`ocservia.g6-harness-smoke-result.v1`; it never enters a formal Environment,
+jobs load the same frozen product release, bring up two Agents per domain,
+exercise one authenticated cross-domain mutation and one standby promotion,
+then freeze evidence after a bounded observation. Separate Builder, gitleaks,
+and independent Verifier jobs feed `ocservia.g6-harness-smoke-result.v1`; the
+smoke never enters a formal Environment,
 produces a production-readiness verdict, or substitutes for the three required
 CI aggregators or a formal G6 run.
 

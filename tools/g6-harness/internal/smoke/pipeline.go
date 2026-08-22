@@ -80,6 +80,18 @@ func Assemble(options AssembleOptions) (AssemblyResult, error) {
 	if err := validateDomain(fdB, "fd-b", options.Binding, options.ExpectedHarnessSHA); err != nil {
 		return fail("fd_b_result_rejected", err)
 	}
+	for _, domain := range []struct {
+		path   string
+		result DomainResult
+	}{{options.FDAPath, fdA}, {options.FDBPath, fdB}} {
+		digest, files, err := digestTree(filepath.Dir(domain.path))
+		if err != nil || digest != domain.result.EvidenceSHA256 || files != domain.result.EvidenceFiles {
+			if err == nil {
+				err = errors.New("raw evidence tree does not match its domain result digest and file count")
+			}
+			return fail("raw_evidence_rejected", err)
+		}
+	}
 	if fdA.RunnerBootID == fdB.RunnerBootID {
 		return fail("failure_domains_not_distinct", errors.New("smoke failure domains share one host boot identity"))
 	}

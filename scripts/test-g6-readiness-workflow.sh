@@ -108,6 +108,9 @@ required_jobs = %w[
   g6-smoke-release
   g6-smoke-fd-a
   g6-smoke-fd-b
+  g6-smoke-assemble
+  g6-smoke-secret-scan
+  g6-smoke-verifier
   g6-smoke-result
 ]
 reject("G6 readiness is missing a required semantic layer") unless
@@ -139,13 +142,13 @@ reject("Contracts and Policy must remain in the required quality aggregate") unl
 jobs.each do |job_id, job|
   reject("#{job_id} must use ubuntu-24.04") unless job.fetch("runs-on") == "ubuntu-24.04"
   reject("#{job_id} job env must not reference the step-only runner context") if job.fetch("env", {}).values.any? { |value| value.to_s.include?("runner.") }
-  timeout_bound = job_id.start_with?("g6-rd-fd-") ? 90 : (job_id == "g6-rd-release-image" ? 35 : 20)
+  timeout_bound = (job_id.start_with?("g6-rd-fd-") || job_id.start_with?("g6-smoke-fd-")) ? 90 : (%w[g6-rd-release-image g6-smoke-release].include?(job_id) ? 35 : 20)
   reject("#{job_id} must stay within the bounded window") unless job.fetch("timeout-minutes") <= timeout_bound
   reject("#{job_id} Action is not pinned to a full SHA or exact local path") if
     Array(job.fetch("steps")).any? do |step|
       step.key?("uses") &&
         !step.fetch("uses").match?(/@[0-9a-f]{40}\z/) &&
-        step.fetch("uses") != "./.github/actions/g6-checkpoint-upload"
+        !%w[./.github/actions/g6-checkpoint-upload ./.github/actions/g6-install-release].include?(step.fetch("uses"))
     end
   reject("#{job_id} must not force a failing check green") if Array(job.fetch("steps")).any? { |step| step.key?("run") && step.fetch("run").include?("continue-on-error") }
   reject("#{job_id} must not mask a failed step") if Array(job.fetch("steps")).any? { |step| step["continue-on-error"] == true }
@@ -169,17 +172,19 @@ end
 end
 
 smoke_release = jobs.fetch("g6-smoke-release")
-reject("smoke must build one frozen binary only on the smoke profile") unless
+reject("smoke must build one frozen product release only on the smoke profile") unless
   smoke_release.fetch("needs") == "g6-contract" && smoke_release.fetch("if") == "inputs.profile == 'smoke'"
 smoke_release_steps = Array(smoke_release.fetch("steps"))
-smoke_cache = smoke_release_steps.find { |step| step["name"] == "Restore the pinned smoke Go toolchain" }
-smoke_build = smoke_release_steps.find { |step| step["name"] == "Build and freeze the smoke harness" }
+smoke_cache = smoke_release_steps.find { |step| step["name"] == "Restore the pinned smoke release toolchain" }
+smoke_build = smoke_release_steps.find { |step| step["name"] == "Build and freeze the smoke release" }
 smoke_publish = smoke_release_steps.find { |step| step["name"] == "Publish the frozen smoke harness" }
-reject("smoke must build with the pinned local Go toolchain and freeze its digest") unless
+reject("smoke must freeze the product images, tunnel, and pinned-Go harness") unless
   smoke_build&.fetch("run", "").include?(".tools/go/bin/go") &&
   smoke_build.fetch("run").include?("GOTOOLCHAIN=local") &&
   smoke_build.fetch("run").include?("GOOS=linux") &&
   smoke_build.fetch("run").include?("harness-sha256") &&
+  smoke_build.fetch("run").include?("runtime-images.tar.gz") &&
+  smoke_build.fetch("run").include?("ocservia-g6-tunnel") &&
   smoke_release_steps.any? { |step| step.fetch("run", "") == "scripts/bootstrap.sh go-test" }
 reject("pull-request smoke must restore but never write a tool cache") unless
   smoke_cache&.fetch("uses", "").start_with?("actions/cache/restore@") &&
@@ -192,20 +197,32 @@ reject("the frozen smoke binary must be a run-attempt-scoped artifact") unless
   job = jobs.fetch(job_id)
   domain = job_id.end_with?("a") ? "fd-a" : "fd-b"
   steps = Array(job.fetch("steps"))
-  execute = steps.find { |step| step["name"] == "Verify and execute the frozen smoke harness" }
+  execute = steps.find { |step| step["name"] == "Bind #{domain.upcase} raw evidence" }
   reject("#{job_id} must independently consume the one frozen release") unless
     job.fetch("needs") == "g6-smoke-release" && job.fetch("if") == "inputs.profile == 'smoke'" &&
     execute&.fetch("run", "").include?("smoke-domain") && execute.fetch("run").include?("--domain #{domain}") &&
-    execute.fetch("run").include?("sha256sum")
+    execute.fetch("run").include?("--evidence-root") &&
+    steps.any? { |step| step["uses"] == "./.github/actions/g6-install-release" }
   reject("#{job_id} must be fixed to engineering authority") unless job.fetch("env").fetch("G6_AUTHORITY") == "engineering"
+  reject("#{job_id} must run two Agents per domain under the smoke profile") unless
+    job.fetch("env").values_at("G6RD_PROFILE", "G6_AGENTS_A", "G6_AGENTS_B") == ["smoke", "2", "2"]
 end
+
+smoke_assembly = jobs.fetch("g6-smoke-assemble")
+reject("smoke must separate Evidence Builder from runtime") unless
+  smoke_assembly.fetch("needs").sort == %w[g6-smoke-fd-a g6-smoke-fd-b g6-smoke-release] &&
+  Array(smoke_assembly.fetch("steps")).any? { |step| step.fetch("run", "").include?("smoke-assemble") }
+reject("smoke must independently scan all raw and assembled evidence") unless
+  Array(jobs.fetch("g6-smoke-secret-scan").fetch("steps")).sum { |step| step.fetch("run", "").scan("gitleaks dir").length } == 3
+reject("smoke must use an independent verifier job") unless
+  Array(jobs.fetch("g6-smoke-verifier").fetch("steps")).any? { |step| step.fetch("run", "").include?("smoke-verify") }
 
 smoke_result = jobs.fetch("g6-smoke-result")
 smoke_result_steps = Array(smoke_result.fetch("steps"))
 smoke_aggregate = smoke_result_steps.find { |step| step["name"] == "Aggregate the non-authoritative smoke result" }
 smoke_enforce = smoke_result_steps.find { |step| step["name"] == "Enforce the smoke contract" }
 reject("smoke aggregation must require two separately scheduled hosted domains") unless
-  smoke_result.fetch("needs").sort == %w[g6-smoke-fd-a g6-smoke-fd-b g6-smoke-release] &&
+  smoke_result.fetch("needs").sort == %w[g6-smoke-assemble g6-smoke-fd-a g6-smoke-fd-b g6-smoke-release g6-smoke-secret-scan g6-smoke-verifier] &&
   smoke_result.fetch("if") == "${{ always() && inputs.profile == 'smoke' }}" &&
   smoke_aggregate&.fetch("run", "").include?("smoke-aggregate")
 reject("the smoke result must be structurally unable to claim a formal verdict") unless

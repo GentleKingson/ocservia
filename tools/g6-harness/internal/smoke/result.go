@@ -62,9 +62,12 @@ type Domains struct {
 }
 
 type Artifacts struct {
-	Release *ArtifactReference `json:"release"`
-	FDA     *ArtifactReference `json:"fd_a"`
-	FDB     *ArtifactReference `json:"fd_b"`
+	Release      *ArtifactReference `json:"release"`
+	FDA          *ArtifactReference `json:"fd_a"`
+	FDB          *ArtifactReference `json:"fd_b"`
+	Bundle       *ArtifactReference `json:"bundle"`
+	SecretScan   *ArtifactReference `json:"secret_scan"`
+	Verification *ArtifactReference `json:"verification"`
 }
 
 type Failure struct {
@@ -81,9 +84,18 @@ type Result struct {
 	CompletedAt           time.Time `json:"completed_at"`
 	Domains               *Domains  `json:"domains"`
 	Artifacts             Artifacts `json:"artifacts"`
+	Stages                Stages    `json:"stages"`
 	Status                string    `json:"status"`
 	FormalVerdictEligible bool      `json:"formal_verdict_eligible"`
 	Failure               *Failure  `json:"failure"`
+}
+
+type Stages struct {
+	RuntimeFDA   string `json:"runtime_fd_a"`
+	RuntimeFDB   string `json:"runtime_fd_b"`
+	Assembly     string `json:"assembly"`
+	SecretScan   string `json:"secret_scan"`
+	Verification string `json:"verification"`
 }
 
 type DomainOptions struct {
@@ -153,14 +165,17 @@ func RunDomain(options DomainOptions) (DomainResult, error) {
 }
 
 type AggregateOptions struct {
-	Binding            rendezvous.Binding
-	FDAPath            string
-	FDBPath            string
-	ReleaseArtifact    ArtifactReference
-	FDAArtifact        ArtifactReference
-	FDBArtifact        ArtifactReference
-	ExpectedHarnessSHA string
-	Now                func() time.Time
+	Binding              rendezvous.Binding
+	FDAPath              string
+	FDBPath              string
+	ReleaseArtifact      ArtifactReference
+	FDAArtifact          ArtifactReference
+	FDBArtifact          ArtifactReference
+	BundleArtifact       ArtifactReference
+	SecretScanArtifact   ArtifactReference
+	VerificationArtifact ArtifactReference
+	ExpectedHarnessSHA   string
+	Now                  func() time.Time
 }
 
 func Aggregate(options AggregateOptions) (Result, error) {
@@ -175,6 +190,7 @@ func Aggregate(options AggregateOptions) (Result, error) {
 		StartedAt:             now,
 		CompletedAt:           now,
 		Artifacts:             Artifacts{},
+		Stages:                Stages{RuntimeFDA: "failed", RuntimeFDB: "failed", Assembly: "failed", SecretScan: "failed", Verification: "failed"},
 		Status:                "failed",
 		FormalVerdictEligible: false,
 	}
@@ -192,12 +208,12 @@ func Aggregate(options AggregateOptions) (Result, error) {
 		return fail("invalid_harness_digest", errors.New("expected harness digest is invalid"))
 	}
 	result.HarnessSHA256 = &options.ExpectedHarnessSHA
-	for _, artifact := range []ArtifactReference{options.ReleaseArtifact, options.FDAArtifact, options.FDBArtifact} {
+	for _, artifact := range []ArtifactReference{options.ReleaseArtifact, options.FDAArtifact, options.FDBArtifact, options.BundleArtifact, options.SecretScanArtifact, options.VerificationArtifact} {
 		if artifact.ID < 1 || !isDigest(artifact.Digest) {
 			return fail("invalid_artifact_binding", errors.New("smoke artifact binding is incomplete"))
 		}
 	}
-	result.Artifacts = Artifacts{Release: &options.ReleaseArtifact, FDA: &options.FDAArtifact, FDB: &options.FDBArtifact}
+	result.Artifacts = Artifacts{Release: &options.ReleaseArtifact, FDA: &options.FDAArtifact, FDB: &options.FDBArtifact, Bundle: &options.BundleArtifact, SecretScan: &options.SecretScanArtifact, Verification: &options.VerificationArtifact}
 	fdA, err := readDomain(options.FDAPath)
 	if err != nil {
 		return fail("fd_a_result_rejected", err)
@@ -218,6 +234,7 @@ func Aggregate(options AggregateOptions) (Result, error) {
 		return fail("failure_domains_not_distinct", errors.New("smoke failure domains ran on the same host boot identity"))
 	}
 	result.Status = "passed"
+	result.Stages = Stages{RuntimeFDA: "passed", RuntimeFDB: "passed", Assembly: "passed", SecretScan: "passed", Verification: "passed"}
 	result.Failure = nil
 	return result, nil
 }
@@ -334,7 +351,11 @@ func digestTree(root string) (string, int, error) {
 		if err != nil {
 			return err
 		}
-		paths = append(paths, filepath.ToSlash(relative))
+		relative = filepath.ToSlash(relative)
+		if relative == "domain-result.json" {
+			return nil
+		}
+		paths = append(paths, relative)
 		return nil
 	})
 	if err != nil {

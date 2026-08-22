@@ -43,6 +43,7 @@ const smokeSchemas = [
   ["docs/acceptance/g6-harness-smoke-result-schema.json", "ocservia.g6-harness-smoke-result.v1"],
   ["docs/acceptance/g6-harness-smoke-assembly-result-schema.json", "ocservia.g6-harness-smoke-assembly-result.v1"],
   ["docs/acceptance/g6-harness-smoke-verification-result-schema.json", "ocservia.g6-harness-smoke-verification-result.v1"],
+  ["docs/acceptance/g6-harness-smoke-secret-scan-result-schema.json", "ocservia.g6-harness-smoke-secret-scan-result.v1"],
 ];
 const phaseFailureClasses = [
   "product_assertion_failed",
