@@ -184,6 +184,11 @@ func Run(ctx context.Context, cfg config.Config, build BuildInfo, logger *slog.L
 		if err != nil {
 			return fmt.Errorf("configure outbox worker: %w", err)
 		}
+		if cfg.TestPreSendBarrier != "" {
+			if err := operationWorker.EnablePreSendBarrier(cfg.TestPreSendBarrier, cfg.TestCommandLease); err != nil {
+				return fmt.Errorf("configure command pre-send barrier: %w", err)
+			}
+		}
 		go func() { workerErr <- operationWorker.Run(componentCtx) }()
 		var trustWorker *enrollment.TrustConvergenceWorker
 		trustWorker, err = enrollment.NewFencedTrustConvergenceWorker(pool, transport, fenceExecutor, logger)
@@ -260,7 +265,15 @@ func Run(ctx context.Context, cfg config.Config, build BuildInfo, logger *slog.L
 						return err
 					}
 					certificateSpan.End()
-					return auditManager.CheckpointAll(sessionCtx)
+					if err := auditManager.CheckpointAll(sessionCtx); err != nil {
+						return err
+					}
+					if cfg.TestSchedulerEvidence {
+						if err := coordination.RecordMaintenanceCompletion(sessionCtx, pool, session); err != nil {
+							return err
+						}
+					}
+					return nil
 				})
 				if err != nil {
 					// Leadership loss is expected during failover: stay
