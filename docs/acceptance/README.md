@@ -52,7 +52,13 @@ peer failure, bounded timeout, GitHub API failure, and contract rejection.
 The formal caller and the pull-request smoke caller share one reusable core
 workflow but invoke disjoint profiles. The smoke profile is fixed to
 `engineering`, runs on two distinct hosted-runner boot identities, and verifies
-that both runners execute the same candidate-bound frozen harness bytes.
+that both runners execute the same candidate-bound frozen harness bytes. Each
+domain result also binds a deterministic digest of its bounded, regular-file-only
+raw evidence tree and the validated runtime claims recorded by the leaf phases.
+Assembly and independent verification report through the separate
+`ocservia.g6-harness-smoke-assembly-result.v1` and
+`ocservia.g6-harness-smoke-verification-result.v1` contracts. Both permanently
+set `formal_verdict_eligible` to `false`.
 `ocservia.g6-harness-smoke-result.v1` binds those domain results and their
 GitHub artifact IDs and digests while fixing `formal_verdict_eligible` to
 `false`. A smoke result is never an `ocservia.g6-verdict.v2`, never references

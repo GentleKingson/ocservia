@@ -19,8 +19,10 @@ import (
 )
 
 const (
-	DomainSchemaVersion = "ocservia.g6-harness-smoke-domain-result.v1"
-	SchemaVersion       = "ocservia.g6-harness-smoke-result.v1"
+	DomainSchemaVersion       = "ocservia.g6-harness-smoke-domain-result.v1"
+	AssemblySchemaVersion     = "ocservia.g6-harness-smoke-assembly-result.v1"
+	VerificationSchemaVersion = "ocservia.g6-harness-smoke-verification-result.v1"
+	SchemaVersion             = "ocservia.g6-harness-smoke-result.v1"
 )
 
 var bootIDPattern = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
@@ -39,16 +41,19 @@ type Binding struct {
 }
 
 type DomainResult struct {
-	SchemaVersion string    `json:"schema_version"`
-	Profile       string    `json:"profile"`
-	Binding       Binding   `json:"binding"`
-	Domain        string    `json:"failure_domain"`
-	RunnerName    string    `json:"runner_name"`
-	RunnerBootID  string    `json:"runner_boot_id"`
-	HarnessSHA256 string    `json:"harness_sha256"`
-	StartedAt     time.Time `json:"started_at"`
-	CompletedAt   time.Time `json:"completed_at"`
-	Status        string    `json:"status"`
+	SchemaVersion  string         `json:"schema_version"`
+	Profile        string         `json:"profile"`
+	Binding        Binding        `json:"binding"`
+	Domain         string         `json:"failure_domain"`
+	RunnerName     string         `json:"runner_name"`
+	RunnerBootID   string         `json:"runner_boot_id"`
+	HarnessSHA256  string         `json:"harness_sha256"`
+	EvidenceSHA256 string         `json:"evidence_sha256"`
+	EvidenceFiles  int            `json:"evidence_files"`
+	Claims         map[string]any `json:"claims"`
+	StartedAt      time.Time      `json:"started_at"`
+	CompletedAt    time.Time      `json:"completed_at"`
+	Status         string         `json:"status"`
 }
 
 type Domains struct {
@@ -88,6 +93,7 @@ type DomainOptions struct {
 	BootIDPath     string
 	ExecutablePath string
 	ExpectedSHA256 string
+	EvidenceRoot   string
 	Now            func() time.Time
 }
 
@@ -125,6 +131,22 @@ func RunDomain(options DomainOptions) (DomainResult, error) {
 	if digest != options.ExpectedSHA256 {
 		return result, errors.New("frozen harness digest does not match the release manifest")
 	}
+	observation, err := readObservation(filepath.Join(options.EvidenceRoot, "smoke-observations.json"))
+	if err != nil {
+		return result, fmt.Errorf("validate smoke observations: %w", err)
+	}
+	if observation.Profile != "smoke" || observation.CandidateSHA != options.Binding.CandidateSHA ||
+		observation.EnvironmentID != options.Binding.EnvironmentID || observation.Domain != options.Domain {
+		return result, errors.New("smoke observations violate the exact candidate, environment, profile, or domain binding")
+	}
+	if len(observation.Claims) == 0 {
+		return result, errors.New("smoke observations contain no claims")
+	}
+	evidenceDigest, files, err := digestTree(options.EvidenceRoot)
+	if err != nil {
+		return result, fmt.Errorf("hash raw smoke evidence: %w", err)
+	}
+	result.EvidenceSHA256, result.EvidenceFiles, result.Claims = evidenceDigest, files, observation.Claims
 	result.CompletedAt = options.Now().UTC()
 	result.Status = "passed"
 	return result, nil
@@ -251,7 +273,7 @@ func validateDomainOptions(options DomainOptions) error {
 	if options.Domain != "fd-a" && options.Domain != "fd-b" {
 		return errors.New("smoke failure domain must be fd-a or fd-b")
 	}
-	if options.RunnerName == "" || options.Now == nil || !filepath.IsAbs(options.BootIDPath) || !filepath.IsAbs(options.ExecutablePath) {
+	if options.RunnerName == "" || options.Now == nil || !filepath.IsAbs(options.BootIDPath) || !filepath.IsAbs(options.ExecutablePath) || !filepath.IsAbs(options.EvidenceRoot) {
 		return errors.New("smoke runner identity, clock, boot ID, and executable are required")
 	}
 	if !isDigest(options.ExpectedSHA256) {
@@ -263,8 +285,104 @@ func validateDomainOptions(options DomainOptions) error {
 func validateDomain(result DomainResult, domain string, binding rendezvous.Binding, harnessSHA string) error {
 	if result.SchemaVersion != DomainSchemaVersion || result.Profile != "smoke" || result.Domain != domain || result.Binding != resultBinding(binding) ||
 		result.RunnerName == "" || !bootIDPattern.MatchString(result.RunnerBootID) || result.HarnessSHA256 != harnessSHA ||
+		!isDigest(result.EvidenceSHA256) || result.EvidenceFiles < 2 || len(result.Claims) == 0 ||
 		result.Status != "passed" || result.StartedAt.IsZero() || result.CompletedAt.Before(result.StartedAt) {
 		return errors.New("smoke domain result violates its exact binding or passed contract")
+	}
+	return nil
+}
+
+type observation struct {
+	SchemaVersion string         `json:"schema_version"`
+	Profile       string         `json:"profile"`
+	CandidateSHA  string         `json:"candidate_sha"`
+	EnvironmentID string         `json:"environment_id"`
+	Domain        string         `json:"failure_domain"`
+	Claims        map[string]any `json:"claims"`
+}
+
+func readObservation(path string) (observation, error) {
+	var value observation
+	if err := readStrictJSON(path, 64<<10, &value); err != nil {
+		return value, err
+	}
+	if value.SchemaVersion != "ocservia.g6-smoke-observations.v1" {
+		return value, errors.New("unsupported smoke observation schema")
+	}
+	return value, nil
+}
+
+func digestTree(root string) (string, int, error) {
+	if !filepath.IsAbs(root) {
+		return "", 0, errors.New("evidence root must be absolute")
+	}
+	var paths []string
+	err := filepath.WalkDir(root, func(path string, entry os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if entry.Type()&os.ModeSymlink != 0 {
+			return errors.New("raw smoke evidence contains a symlink")
+		}
+		if entry.IsDir() {
+			return nil
+		}
+		if !entry.Type().IsRegular() {
+			return errors.New("raw smoke evidence contains a non-regular file")
+		}
+		relative, err := filepath.Rel(root, path)
+		if err != nil {
+			return err
+		}
+		paths = append(paths, filepath.ToSlash(relative))
+		return nil
+	})
+	if err != nil {
+		return "", 0, err
+	}
+	if len(paths) < 2 || len(paths) > 2048 {
+		return "", 0, errors.New("raw smoke evidence file count is outside its bounded contract")
+	}
+	sort.Strings(paths)
+	hash := sha256.New()
+	for _, relative := range paths {
+		path := filepath.Join(root, filepath.FromSlash(relative))
+		info, err := os.Lstat(path)
+		if err != nil {
+			return "", 0, err
+		}
+		if info.Size() > 32<<20 {
+			return "", 0, errors.New("raw smoke evidence file exceeds 32 MiB")
+		}
+		digest, err := digestFile(path)
+		if err != nil {
+			return "", 0, err
+		}
+		fmt.Fprintf(hash, "%s\x00%d\x00%s\n", relative, info.Size(), digest)
+	}
+	return hex.EncodeToString(hash.Sum(nil)), len(paths), nil
+}
+
+func readStrictJSON(path string, limit int64, destination any) error {
+	info, err := os.Lstat(path)
+	if err != nil {
+		return err
+	}
+	if !info.Mode().IsRegular() || info.Size() > limit {
+		return errors.New("JSON input must be a bounded regular file")
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+	decoder := json.NewDecoder(io.LimitReader(file, limit+1))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(destination); err != nil {
+		return err
+	}
+	if decoder.Decode(&struct{}{}) != io.EOF {
+		return errors.New("JSON input contains trailing data")
 	}
 	return nil
 }

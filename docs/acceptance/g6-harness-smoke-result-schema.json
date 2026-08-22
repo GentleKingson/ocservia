@@ -103,6 +103,9 @@
         "runner_name",
         "runner_boot_id",
         "harness_sha256",
+        "evidence_sha256",
+        "evidence_files",
+        "claims",
         "started_at",
         "completed_at",
         "status"
@@ -118,6 +121,9 @@
           "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
         },
         "harness_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "evidence_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "evidence_files": { "type": "integer", "minimum": 2, "maximum": 2048 },
+        "claims": { "type": "object", "minProperties": 1 },
         "started_at": { "type": "string", "format": "date-time" },
         "completed_at": { "type": "string", "format": "date-time" },
         "status": { "const": "passed" }

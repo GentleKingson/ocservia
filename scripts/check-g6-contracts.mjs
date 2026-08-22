@@ -41,6 +41,8 @@ const runtimeHarnessSchemas = [
 ];
 const smokeSchemas = [
   ["docs/acceptance/g6-harness-smoke-result-schema.json", "ocservia.g6-harness-smoke-result.v1"],
+  ["docs/acceptance/g6-harness-smoke-assembly-result-schema.json", "ocservia.g6-harness-smoke-assembly-result.v1"],
+  ["docs/acceptance/g6-harness-smoke-verification-result-schema.json", "ocservia.g6-harness-smoke-verification-result.v1"],
 ];
 const phaseFailureClasses = [
   "product_assertion_failed",
@@ -157,6 +159,8 @@ for (const [path, version] of runtimeHarnessSchemas) {
 
 for (const [path, version] of smokeSchemas) {
   const schema = JSON.parse(read(path));
+  const engineeringBinding = schema.$defs?.binding?.properties?.authority?.const === "engineering" ||
+    schema.properties?.binding?.$ref === "g6-harness-smoke-result-schema.json#/$defs/binding";
   if (
     schema.$schema !== "https://json-schema.org/draft/2020-12/schema" ||
     schema.type !== "object" ||
@@ -164,7 +168,7 @@ for (const [path, version] of smokeSchemas) {
     schema.properties?.schema_version?.const !== version ||
     schema.properties?.profile?.const !== "smoke" ||
     schema.properties?.formal_verdict_eligible?.const !== false ||
-    schema.$defs?.binding?.properties?.authority?.const !== "engineering"
+    !engineeringBinding
   ) {
     fail(`${path} must define a closed engineering-only non-formal ${version} contract`);
   }
