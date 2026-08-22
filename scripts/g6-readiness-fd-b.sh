@@ -469,7 +469,7 @@ phase_smoke_session() {
   # wait through reconciliation for the one durable successful Agent result.
   g6rd_wait_until_deadline 120 2 "cross-FD smoke command result" \
     smoke_command_succeeded "${key}" "${node}"
-  capture_relay_command_proof "${key}" "${node}" "${out}/command-proof.json"
+  capture_successful_command_proof "${key}" "${node}" "${out}/command-proof.json"
   cp -f "${NODES_FILE}" "${out}/nodes.tsv"
   printf '%s\n' "${G6RD_CANDIDATE_SHA}" >"${out}/candidate-sha"
 }
@@ -1358,7 +1358,7 @@ phase_relay_pre_fault() {
     wait_commands_settled "${key}"
   capture_relay_dispatch_proof "${command_id}" "${cross_vm_node}" "${before}" \
     "${out}/relay-a-dispatch-proof.json" relay-a
-  capture_relay_command_proof "${key}" "${cross_vm_node}" \
+  capture_successful_command_proof "${key}" "${cross_vm_node}" \
     "${out}/relay-a-command-proof.json"
   G6RD_NODE_CONNECTION_TIMEOUT_SECONDS=5 \
     g6rd_wait_until_deadline 30 2 \
@@ -1462,7 +1462,7 @@ phase_scenario_relay() {
   capture_relay_dispatch_proof \
     "${command_id}" "${cross_vm_node}" "${before_file}" "${dispatch_file}" relay-b
   proof_file="${G6RD_STATE}/relay-command-proof.json"
-  capture_relay_command_proof "${key}" "${cross_vm_node}" "${proof_file}"
+  capture_successful_command_proof "${key}" "${cross_vm_node}" "${proof_file}"
   G6RD_NODE_CONNECTION_TIMEOUT_SECONDS=5 \
     g6rd_wait_until_deadline 30 2 "same relay-b session after authenticated command" \
     relay_probe_relay_b "${cross_vm_node}" "${observation_file}"
@@ -1580,7 +1580,7 @@ relay_observations_same_session() {
   ' "${after}" >/dev/null
 }
 
-capture_relay_command_proof() {
+capture_successful_command_proof() {
   local key="${1:?idempotency key is required}"
   local node="${2:?node id is required}"
   local output="${3:?proof destination is required}"
@@ -1609,7 +1609,7 @@ capture_relay_command_proof() {
     and (.result_observed_at | test("^[0-9]{4}-.*Z$"))
   ' "${temporary}" >/dev/null || {
     mv -f -- "${temporary}" "${output}.failed.json"
-    echo "relay failover command lacks one successful durable result" >&2
+    echo "command lacks one successful durable result" >&2
     jq -c . "${output}.failed.json" >&2 || true
     return 1
   }
@@ -1622,6 +1622,7 @@ capture_relay_command_proof() {
 # converge back to the direct path.
 phase_scenario_path() {
   local service="agent-${FD_ID}-01" agent_name="g6-${FD_ID}-01" node isolated_network
+  local recovery_key recovery_proof
   node="$(awk -F'\t' -v name="${agent_name}" '$1 == name {print $2; exit}' "${NODES_FILE}")"
   [[ -n "${node}" ]] || {
     echo "node id for ${agent_name} is missing" >&2
@@ -1652,6 +1653,15 @@ phase_scenario_path() {
   G6RD_NODE_CONNECTION_TIMEOUT_SECONDS=5 \
     g6rd_wait_until_deadline 180 5 "agent-01 session recovered the direct path" \
     g6rd_probe_node_connection direct "${node}"
+  # A path snapshot can race the asynchronous removal of the last invalidated
+  # path. Prove the recovered local transport remains mutation-capable before
+  # later crash windows and the all-fleet opening wave rely on it.
+  recovery_key="g6-path-direct-recovery-${RUN_ID}"
+  recovery_proof="${G6RD_STATE}/direct-path-recovery-command.json"
+  g6rd_enqueue_command "${node}" "${recovery_key}"
+  g6rd_wait_until_deadline 60 2 "direct-path recovery command settled" \
+    wait_commands_settled "${recovery_key}"
+  capture_successful_command_proof "${recovery_key}" "${node}" "${recovery_proof}"
   g6rd_timeline_event direct_path_recovered
 }
 
@@ -2889,6 +2899,7 @@ phase_runtime_result() {
     state/relay-b-started.json
     state/relay-command-proof.json
     state/relay-dispatch-proof.json
+    state/direct-path-recovery-command.json
     state/all-nodes.tsv
     state/promoted-at
     state/window-ended-at

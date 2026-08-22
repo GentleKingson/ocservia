@@ -1126,7 +1126,7 @@ for token in \
   'relay-b-observation.json' \
   'g6rd_enqueue_command "${cross_vm_node}" "${key}"' \
   'capture_relay_dispatch_proof' \
-  'capture_relay_command_proof' \
+  'capture_successful_command_proof' \
   'relay_observations_same_session' \
   'capture_database_clock_bounded "${active_at_file}"' \
   'relay_probe_relay_b "${cross_vm_node}" "${observation_file}"' \
@@ -2627,6 +2627,28 @@ for event in \
     exit 1
   }
 done
+
+path_phase="$(sed -n '/^phase_scenario_path() {/,/^}/p' "${FD_B}")"
+for token in \
+  'g6-path-direct-recovery-${RUN_ID}' \
+  '"direct-path recovery command settled"' \
+  'capture_successful_command_proof "${recovery_key}" "${node}" "${recovery_proof}"' \
+  'state/direct-path-recovery-command.json'; do
+  grep -qF "${token}" "${FD_B}" || {
+    echo "direct-path recovery lacks its durable local command proof: ${token}" >&2
+    exit 1
+  }
+done
+recovered_probe_line="$(grep -nF '"agent-01 session recovered the direct path"' <<<"${path_phase}" | cut -d: -f1)"
+recovery_enqueue_line="$(grep -nF 'g6rd_enqueue_command "${node}" "${recovery_key}"' <<<"${path_phase}" | cut -d: -f1)"
+recovered_event_line="$(grep -nF 'g6rd_timeline_event direct_path_recovered' <<<"${path_phase}" | cut -d: -f1)"
+[[ -n "${recovered_probe_line}" && -n "${recovery_enqueue_line}" \
+  && -n "${recovered_event_line}" \
+  && "${recovered_probe_line}" -lt "${recovery_enqueue_line}" \
+  && "${recovery_enqueue_line}" -lt "${recovered_event_line}" ]] || {
+  echo "direct-path recovery is declared before its durable command proof" >&2
+  exit 1
+}
 
 relay_a_stop_phase="$(sed -n '/^phase_relay_a_stop() {/,/^}/p' "${FD_A}")"
 for token in \
