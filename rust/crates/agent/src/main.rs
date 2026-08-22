@@ -2866,8 +2866,10 @@ mod tests {
         node_id: &Uuid,
         endpoint_id: &EndpointId,
         owner_epoch: u64,
-        capabilities: Vec<String>,
+        mut capabilities: Vec<String>,
     ) -> SessionHandshakeResponse {
+        capabilities.sort();
+        capabilities.dedup();
         let now = unix_seconds().expect("current time");
         let fence_id = Uuid::now_v7().into_bytes();
         let connection_id = Uuid::now_v7().into_bytes();
