@@ -274,7 +274,8 @@ func runtimeOptions(binding rendezvous.Binding) (runtime.Options, error) {
 		return runtime.Options{}, err
 	}
 	return runtime.Options{
-		Domain: os.Getenv("FD_ID"), DomainRunID: os.Getenv("RUN_ID"), RunnerTemp: os.Getenv("RUNNER_TEMP"),
+		Profile: os.Getenv("G6RD_PROFILE"),
+		Domain:  os.Getenv("FD_ID"), DomainRunID: os.Getenv("RUN_ID"), RunnerTemp: os.Getenv("RUNNER_TEMP"),
 		Workspace: workspace,
 		Binding: state.Binding{
 			CandidateSHA: binding.CandidateSHA, RunID: binding.RunID, RunAttempt: binding.RunAttempt,

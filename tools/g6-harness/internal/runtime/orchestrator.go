@@ -18,6 +18,7 @@ import (
 )
 
 type Options struct {
+	Profile     string
 	Domain      string
 	DomainRunID string
 	RunnerTemp  string
@@ -31,7 +32,7 @@ func RunSegment(ctx context.Context, options Options, segmentName string) (runEr
 	if err := options.validate(); err != nil {
 		return err
 	}
-	graph, segment, err := phase.ResolveSegment(options.Domain, segmentName)
+	graph, segment, err := phase.ResolveProfileSegment(options.Profile, options.Domain, segmentName)
 	if err != nil {
 		return err
 	}
@@ -60,11 +61,11 @@ func RecordManifested(options Options, checkpoint string) (recordErr error) {
 	if err := options.validate(); err != nil {
 		return err
 	}
-	graph, err := phase.ResolveGraph(options.Domain)
+	graph, err := phase.ResolveProfileGraph(options.Profile, options.Domain)
 	if err != nil {
 		return err
 	}
-	required, err := phase.RequiredManifestPhase(options.Domain, checkpoint)
+	required, err := phase.RequiredManifestPhaseForProfile(options.Profile, options.Domain, checkpoint)
 	if err != nil {
 		return err
 	}
@@ -80,7 +81,7 @@ func RecordConsumed(options Options, checkpoint string) (recordErr error) {
 	if err := options.validate(); err != nil {
 		return err
 	}
-	graph, err := phase.ResolveGraph(options.Domain)
+	graph, err := phase.ResolveProfileGraph(options.Profile, options.Domain)
 	if err != nil {
 		return err
 	}

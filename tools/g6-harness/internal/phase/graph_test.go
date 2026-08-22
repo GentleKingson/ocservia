@@ -76,3 +76,33 @@ func TestEveryPhaseCheckpointPreconditionHasAProducer(t *testing.T) {
 		}
 	}
 }
+
+func TestSmokeSegmentsCoverEachPhaseExactlyOnceInOrder(t *testing.T) {
+	for _, domain := range []string{"fd-a", "fd-b"} {
+		graph, err := ResolveProfileGraph("smoke", domain)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if graph.Profile != "smoke" {
+			t.Fatalf("%s profile = %q", domain, graph.Profile)
+		}
+		var flattened []string
+		for _, segment := range graph.Segments {
+			flattened = append(flattened, segment.Phases...)
+		}
+		if len(flattened) != len(graph.Phases) {
+			t.Fatalf("%s segments cover %d/%d phases", domain, len(flattened), len(graph.Phases))
+		}
+		for index, definition := range graph.Phases {
+			if flattened[index] != definition.Name || (index > 0 && definition.Sequence <= graph.Phases[index-1].Sequence) {
+				t.Fatalf("%s smoke graph is unordered at %s", domain, definition.Name)
+			}
+		}
+	}
+	if _, err := RequiredManifestPhaseForProfile("smoke", "fd-b", "smoke-session"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := RequiredManifestPhaseForProfile("smoke", "fd-b", "production-load-active"); err == nil {
+		t.Fatal("formal checkpoint accepted by smoke profile")
+	}
+}
