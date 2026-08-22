@@ -1595,8 +1595,6 @@ dependencies = [
 [[package]]
 name = "iroh"
 version = "1.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6435544bb3a5c4e6ff7affaa0c0aa0d1bca45bd700226329d5059d3eb54f9dff"
 dependencies = [
  "axum",
  "backon",
