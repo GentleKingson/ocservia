@@ -134,6 +134,81 @@ func TestDisconnectedEventPreservesUntrustedNodeStatesIntegration(t *testing.T) 
 	}
 }
 
+func TestTransportEventsAdvanceNodeRevisionOnlyOnStatusChangeIntegration(t *testing.T) {
+	databaseURL := os.Getenv("OCSERV_TEST_DATABASE_URL")
+	if databaseURL == "" {
+		t.Skip("OCSERV_TEST_DATABASE_URL is not set")
+	}
+	ctx := context.Background()
+	pool, err := pgxpool.New(ctx, databaseURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	workspaceID, nodeID := uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7())
+	endpoint := integrationEndpoint(nodeID)
+	if _, err := pool.Exec(ctx, `INSERT INTO workspaces(id,name,slug,created_at,updated_at) VALUES($1,'Transport revision test',$2,now(),now())`, workspaceID, "transport-revision-"+workspaceID.String()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `INSERT INTO nodes(id,workspace_id,name,status,version,created_at,updated_at) VALUES($1,$2,$3,'active',7,now(),now())`, nodeID, workspaceID, "node-"+nodeID.String()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `INSERT INTO node_endpoint_keys(node_id,endpoint_id,state,bound_at) VALUES($1,$2,'active',now())`, nodeID, endpoint[:]); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_, _ = pool.Exec(context.Background(), `DELETE FROM transport_events WHERE node_id=$1`, nodeID)
+		_, _ = pool.Exec(context.Background(), `DELETE FROM node_endpoint_keys WHERE node_id=$1`, nodeID)
+		_, _ = pool.Exec(context.Background(), `DELETE FROM nodes WHERE id=$1`, nodeID)
+		_, _ = pool.Exec(context.Background(), `DELETE FROM workspaces WHERE id=$1`, workspaceID)
+		pool.Close()
+	})
+
+	service := NewWithSigner(pool, integrationCommandSigner())
+	traceparent := "00-0123456789abcdef0123456789abcdef-0123456789abcdef-01"
+	ingest := func(eventType transportv1.TransportEventType) {
+		t.Helper()
+		eventID := uuid.Must(uuid.NewV7())
+		if err := service.Ingest(ctx, &transportv1.TransportEvent{
+			EventId: eventID[:], NodeId: nodeID[:], EndpointId: endpoint[:], Type: eventType,
+			OccurredAt: timestamppb.Now(), Traceparent: traceparent, Payload: []byte("revision test"),
+		}); err != nil {
+			t.Fatalf("ingest %s: %v", eventType, err)
+		}
+	}
+	assertNode := func(wantStatus string, wantVersion int64) {
+		t.Helper()
+		var status string
+		var version int64
+		if err := pool.QueryRow(ctx, `SELECT status,version FROM nodes WHERE id=$1`, nodeID).Scan(&status, &version); err != nil {
+			t.Fatal(err)
+		}
+		if status != wantStatus || version != wantVersion {
+			t.Fatalf("node status/version = %s/%d, want %s/%d", status, version, wantStatus, wantVersion)
+		}
+	}
+
+	ingest(transportv1.TransportEventType_TRANSPORT_EVENT_TYPE_HEARTBEAT)
+	assertNode("active", 7)
+	ingest(transportv1.TransportEventType_TRANSPORT_EVENT_TYPE_PATH_CHANGED)
+	assertNode("active", 7)
+	ingest(transportv1.TransportEventType_TRANSPORT_EVENT_TYPE_DISCONNECTED)
+	assertNode("offline", 8)
+	ingest(transportv1.TransportEventType_TRANSPORT_EVENT_TYPE_DISCONNECTED)
+	assertNode("offline", 8)
+	ingest(transportv1.TransportEventType_TRANSPORT_EVENT_TYPE_HEARTBEAT)
+	assertNode("active", 9)
+	ingest(transportv1.TransportEventType_TRANSPORT_EVENT_TYPE_HEARTBEAT)
+	assertNode("active", 9)
+	var eventCount int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM transport_events WHERE node_id=$1`, nodeID).Scan(&eventCount); err != nil {
+		t.Fatal(err)
+	}
+	if eventCount != 6 {
+		t.Fatalf("committed transport events = %d, want 6", eventCount)
+	}
+}
+
 func TestOfflineTelemetryIngressSharesTheAuthoritativeTrustTransactionIntegration(t *testing.T) {
 	databaseURL := os.Getenv("OCSERV_TEST_DATABASE_URL")
 	if databaseURL == "" {
@@ -389,6 +464,13 @@ func TestStructuredAgentResultPersistsUnknownBeforeReconciledSuccessIntegration(
 	}
 	if state != "succeeded" || resultCount != 2 {
 		t.Fatalf("reconciled state/results = %q/%d", state, resultCount)
+	}
+	var nodeVersion int64
+	if err := pool.QueryRow(ctx, `SELECT version FROM nodes WHERE id=$1`, nodeID).Scan(&nodeVersion); err != nil {
+		t.Fatal(err)
+	}
+	if nodeVersion != 1 {
+		t.Fatalf("command results advanced the node mutation revision to %d", nodeVersion)
 	}
 }
 
