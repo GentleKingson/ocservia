@@ -86,6 +86,18 @@ func TestManagerSessionOwnershipIntegration(t *testing.T) {
 	if fence.GetOwnerEpoch() == 0 || fence.GetAuthorizationRevision() != 5 {
 		t.Fatalf("fence epoch/revision = %d/%d", fence.GetOwnerEpoch(), fence.GetAuthorizationRevision())
 	}
+	connectionID, err := fixed16(fence.GetConnectionId())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !manager.OwnsTerm(nodeID, connectionID, int64(fence.GetOwnerEpoch())) {
+		t.Fatal("manager did not recognize its exact local owner term")
+	}
+	wrongConnection := connectionID
+	wrongConnection[0] ^= 0xff
+	if manager.OwnsTerm(nodeID, wrongConnection, int64(fence.GetOwnerEpoch())) || manager.OwnsTerm(nodeID, connectionID, int64(fence.GetOwnerEpoch())+1) {
+		t.Fatal("manager accepted a different local owner term")
+	}
 	if !fenceClaimsMatchCapabilities(fence, []string{"ocserv.fencing.v2", "ocserv.service.reload"}) {
 		t.Fatalf("fence capabilities = %v", fence.GetCapabilities())
 	}
@@ -176,6 +188,20 @@ func TestManagerTakeoverFailsClosedIntegration(t *testing.T) {
 	}
 	if _, _, err := owner.BindOperation(context.Background(), nodeID, agentv1.FenceOperationKind_FENCE_OPERATION_KIND_COMMAND, operationID, "ocserv.fencing.v2"); !errors.Is(err, ErrNotOwner) {
 		t.Fatalf("lost session bind error = %v, want ErrNotOwner", err)
+	}
+	firstConnection, err := fixed16(firstFence.GetConnectionId())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if owner.OwnsTerm(nodeID, firstConnection, int64(firstFence.GetOwnerEpoch())) {
+		t.Fatal("stale manager retained local recovery authority")
+	}
+	successorConnection, err := fixed16(successorFence.GetConnectionId())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !successor.OwnsTerm(nodeID, successorConnection, int64(successorFence.GetOwnerEpoch())) {
+		t.Fatal("successor did not acquire local recovery authority")
 	}
 
 	// The successor keeps operating on the node.

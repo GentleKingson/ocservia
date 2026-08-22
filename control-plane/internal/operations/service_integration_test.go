@@ -1,6 +1,7 @@
 package operations
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"os"
@@ -206,30 +207,24 @@ func TestConcurrentWorkersNodeLeaseAndCrashWindowsIntegration(t *testing.T) {
 		t.Fatalf("concurrent claims = %d, want one per node", claimed)
 	}
 
-	// Crash after network send but before DB acknowledgement: lease expiry makes
-	// the side-effect-free command eligible for at-least-once redelivery.
+	// A crash around the network write has an ambiguous outcome. Lease expiry
+	// must schedule journal reconciliation before any effect-capable retry.
 	time.Sleep(100 * time.Millisecond)
 	if err := service.Reap(context.Background(), 3); err != nil {
 		t.Fatal(err)
 	}
-	var retried Dispatch
-	for range 2 {
-		retry, err := service.Claim(context.Background(), uuid.Must(uuid.NewV7()), 8, time.Second)
-		if err != nil || len(retry) != 1 {
-			t.Fatalf("crash-window retry = %+v, %v", retry, err)
-		}
-		if retry[0].CommandID == first.CommandID {
-			retried = retry[0]
-			break
-		}
-		if err := service.MarkSent(context.Background(), retry[0]); err != nil {
-			t.Fatal(err)
-		}
+	retried, err := service.Claim(context.Background(), uuid.Must(uuid.NewV7()), 8, time.Second)
+	if err != nil || len(retried) != 1 || retried[0].CommandID != first.CommandID {
+		t.Fatalf("crash-window reconciliation = %+v, %v", retried, err)
 	}
-	if retried.CommandID == uuid.Nil {
-		t.Fatal("lease-expired command was not redelivered")
+	var recovered agentv1.CommandEnvelope
+	if err := proto.Unmarshal(retried[0].Envelope, &recovered); err != nil {
+		t.Fatal(err)
 	}
-	if err := service.MarkSent(context.Background(), retried); err != nil {
+	if recovered.GetDeliveryMode() != agentv1.CommandDeliveryMode_COMMAND_DELIVERY_MODE_RECONCILE_ONLY {
+		t.Fatalf("crash-window delivery mode = %s", recovered.GetDeliveryMode())
+	}
+	if err := service.MarkSent(context.Background(), retried[0]); err != nil {
 		t.Fatal(err)
 	}
 
@@ -238,15 +233,245 @@ func TestConcurrentWorkersNodeLeaseAndCrashWindowsIntegration(t *testing.T) {
 	if err := pool.QueryRow(context.Background(), `SELECT count(*),min(command.state) FROM command_attempts AS attempt JOIN commands AS command ON command.id=attempt.command_id WHERE command.workspace_id=$1 AND command.id=$2 GROUP BY command.id`, workspaceID, first.CommandID).Scan(&attempts, &state); err != nil {
 		t.Fatal(err)
 	}
-	if attempts != 2 || state != "dispatched" {
+	if attempts != 2 || state != "unknown" {
 		t.Fatalf("attempts/state = %d/%s", attempts, state)
 	}
 	metrics, err := service.Metrics(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
-	if metrics.Unpublished != metrics.Queued || metrics.Queued > 1 || metrics.Unknown != 0 {
+	if metrics.Unpublished != 1 || metrics.Queued != 1 || metrics.Unknown != 1 {
 		t.Fatalf("metrics after dispatch = %+v", metrics)
+	}
+}
+
+func TestSentCommandWithoutResultEntersAndContinuesReconciliationIntegration(t *testing.T) {
+	service, pool, _, nodeID := integrationService(t)
+	ctx := context.Background()
+	operation, replayed, err := service.CreateSynthetic(ctx, testRequest(nodeID, "sent-result-missing", SyntheticNoop, ""))
+	if err != nil || replayed || operation.CommandID == nil {
+		t.Fatalf("create missing-result command = %+v, replayed=%v, err=%v", operation, replayed, err)
+	}
+	operationID := uuid.MustParse(operation.ID)
+	commandID := uuid.MustParse(*operation.CommandID)
+
+	jobs, err := service.Claim(ctx, uuid.Must(uuid.NewV7()), 1, time.Minute)
+	if err != nil || len(jobs) != 1 || jobs[0].CommandID != commandID {
+		t.Fatalf("claim normal command = %+v, err=%v", jobs, err)
+	}
+	var normal agentv1.CommandEnvelope
+	if err := proto.Unmarshal(jobs[0].Envelope, &normal); err != nil {
+		t.Fatal(err)
+	}
+	if normal.GetDeliveryMode() != agentv1.CommandDeliveryMode_COMMAND_DELIVERY_MODE_EXECUTE_OR_REPLAY {
+		t.Fatalf("normal delivery mode = %s", normal.GetDeliveryMode())
+	}
+	if err := service.MarkSentWithEnvelope(ctx, jobs[0], jobs[0].Envelope); err != nil {
+		t.Fatalf("mark normal command sent: %v", err)
+	}
+	assertSentCommandProjection(t, pool, commandID, operationID, jobs[0], "dispatched", "dispatched", true)
+	if err := service.Reap(ctx, 3); err != nil {
+		t.Fatalf("reap fresh sent command: %v", err)
+	}
+	assertSentCommandProjection(t, pool, commandID, operationID, jobs[0], "dispatched", "dispatched", true)
+
+	// Move only PostgreSQL's dispatch-attempt clock. The production scan uses
+	// the same clock, so this exercises the full timeout path without sleeping.
+	if _, err := pool.Exec(ctx, `UPDATE command_attempts
+		SET finished_at=clock_timestamp()-$2::interval
+		WHERE id=$1 AND state='sent'`, jobs[0].AttemptID, (commandResultResponseTimeout + time.Second).String()); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.Reap(ctx, 3); err != nil {
+		t.Fatalf("reap sent command with no result: %v", err)
+	}
+
+	var commandState, operationState string
+	var published, locked, leased bool
+	var recoveredBytes, outboxBytes []byte
+	var recoveredExpiry time.Time
+	var unknownEvents int
+	if err := pool.QueryRow(ctx, `SELECT command.state,operation.state,
+		outbox.published_at IS NOT NULL,outbox.locked_by IS NOT NULL,
+		EXISTS(SELECT 1 FROM node_command_leases AS lease WHERE lease.command_id=command.id),
+		command.envelope,outbox.payload,command.expires_at,
+		(SELECT count(*) FROM operation_events AS event WHERE event.operation_id=operation.id AND event.state='unknown')
+		FROM commands AS command
+		JOIN operations AS operation ON operation.id=command.operation_id
+		JOIN outbox_events AS outbox ON outbox.command_id=command.id
+		WHERE command.id=$1`, commandID).Scan(
+		&commandState, &operationState, &published, &locked, &leased,
+		&recoveredBytes, &outboxBytes, &recoveredExpiry, &unknownEvents,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if commandState != "unknown" || operationState != "unknown" || published || locked || leased || unknownEvents != 1 {
+		t.Fatalf("initial reconciliation state = %s/%s published=%v locked=%v leased=%v unknown_events=%d",
+			commandState, operationState, published, locked, leased, unknownEvents)
+	}
+	if !bytes.Equal(recoveredBytes, outboxBytes) {
+		t.Fatal("initial reconciliation command and outbox envelopes differ")
+	}
+	var recovered agentv1.CommandEnvelope
+	if err := proto.Unmarshal(recoveredBytes, &recovered); err != nil {
+		t.Fatal(err)
+	}
+	assertReconciliationEnvelope(t, &normal, &recovered, commandID, operationID, nodeID)
+	if !recovered.GetExpiresAt().AsTime().Equal(recoveredExpiry) || !recoveredExpiry.After(time.Now()) {
+		t.Fatalf("initial reconciliation expiry = %v/%v", recovered.GetExpiresAt(), recoveredExpiry)
+	}
+
+	recoveryJobs, err := service.Claim(ctx, uuid.Must(uuid.NewV7()), 1, time.Minute)
+	if err != nil || len(recoveryJobs) != 1 || recoveryJobs[0].CommandID != commandID {
+		t.Fatalf("claim reconcile-only command = %+v, err=%v", recoveryJobs, err)
+	}
+	var sentRecovery agentv1.CommandEnvelope
+	if err := proto.Unmarshal(recoveryJobs[0].Envelope, &sentRecovery); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.MarkSentWithEnvelope(ctx, recoveryJobs[0], recoveryJobs[0].Envelope); err != nil {
+		t.Fatalf("mark reconcile-only command sent: %v", err)
+	}
+	assertSentCommandProjection(t, pool, commandID, operationID, recoveryJobs[0], "unknown", "unknown", true)
+
+	if _, err := pool.Exec(ctx, `UPDATE command_attempts
+		SET finished_at=clock_timestamp()-$2::interval
+		WHERE id=$1 AND state='sent'`, recoveryJobs[0].AttemptID, (commandResultResponseTimeout + time.Second).String()); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.Reap(ctx, 3); err != nil {
+		t.Fatalf("continue stale reconcile-only command: %v", err)
+	}
+
+	var continuedBytes, continuedOutboxBytes []byte
+	if err := pool.QueryRow(ctx, `SELECT command.envelope,outbox.payload,outbox.published_at IS NOT NULL,
+		(SELECT count(*) FROM operation_events AS event WHERE event.operation_id=command.operation_id AND event.state='unknown')
+		FROM commands AS command JOIN outbox_events AS outbox ON outbox.command_id=command.id
+		WHERE command.id=$1`, commandID).Scan(&continuedBytes, &continuedOutboxBytes, &published, &unknownEvents); err != nil {
+		t.Fatal(err)
+	}
+	if published || unknownEvents != 1 || !bytes.Equal(continuedBytes, continuedOutboxBytes) {
+		t.Fatalf("continued reconciliation published=%v unknown_events=%d envelopes_equal=%v",
+			published, unknownEvents, bytes.Equal(continuedBytes, continuedOutboxBytes))
+	}
+	var continued agentv1.CommandEnvelope
+	if err := proto.Unmarshal(continuedBytes, &continued); err != nil {
+		t.Fatal(err)
+	}
+	assertReconciliationEnvelope(t, &normal, &continued, commandID, operationID, nodeID)
+	if bytes.Equal(sentRecovery.GetMessageId(), continued.GetMessageId()) {
+		t.Fatal("reconciliation continuation reused the prior message identity")
+	}
+	if !continued.GetExpiresAt().AsTime().Equal(sentRecovery.GetExpiresAt().AsTime()) {
+		t.Fatalf("reconciliation continuation extended expiry from %v to %v", sentRecovery.GetExpiresAt(), continued.GetExpiresAt())
+	}
+}
+
+func TestMissingResultReapSkipsOutboxLockedByTerminalResultIntegration(t *testing.T) {
+	service, pool, _, nodeID := integrationService(t)
+	ctx := context.Background()
+	operation, replayed, err := service.CreateSynthetic(ctx, testRequest(nodeID, "sent-result-race", SyntheticNoop, ""))
+	if err != nil || replayed || operation.CommandID == nil {
+		t.Fatalf("create result-race command = %+v, replayed=%v, err=%v", operation, replayed, err)
+	}
+	operationID := uuid.MustParse(operation.ID)
+	commandID := uuid.MustParse(*operation.CommandID)
+	jobs, err := service.Claim(ctx, uuid.Must(uuid.NewV7()), 1, time.Minute)
+	if err != nil || len(jobs) != 1 || jobs[0].CommandID != commandID {
+		t.Fatalf("claim result-race command = %+v, err=%v", jobs, err)
+	}
+	if err := service.MarkSentWithEnvelope(ctx, jobs[0], jobs[0].Envelope); err != nil {
+		t.Fatalf("mark result-race command sent: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `UPDATE command_attempts
+		SET finished_at=clock_timestamp()-$2::interval
+		WHERE id=$1 AND state='sent'`, jobs[0].AttemptID, (commandResultResponseTimeout + time.Second).String()); err != nil {
+		t.Fatal(err)
+	}
+
+	// Result ingestion takes the outbox lock before advancing the command and
+	// operation. Hold that exact commit window while Reap scans with SKIP LOCKED.
+	resultTx, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = resultTx.Rollback(context.Background()) }()
+	var outboxID uuid.UUID
+	if err := resultTx.QueryRow(ctx, `SELECT id FROM outbox_events WHERE command_id=$1 FOR UPDATE`, commandID).Scan(&outboxID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := resultTx.Exec(ctx, `UPDATE commands SET state='succeeded',updated_at=clock_timestamp() WHERE id=$1 AND state='dispatched'`, commandID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := resultTx.Exec(ctx, `UPDATE operations SET state='succeeded',version=version+1,updated_at=clock_timestamp(),completed_at=clock_timestamp() WHERE id=$1 AND state='dispatched'`, operationID); err != nil {
+		t.Fatal(err)
+	}
+
+	reapCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	if err := service.Reap(reapCtx, 3); err != nil {
+		t.Fatalf("reap while terminal result holds outbox: %v", err)
+	}
+	var visibleCommandState, visibleOperationState string
+	var published bool
+	if err := pool.QueryRow(ctx, `SELECT command.state,operation.state FROM commands AS command
+		JOIN operations AS operation ON operation.id=command.operation_id WHERE command.id=$1`, commandID).
+		Scan(&visibleCommandState, &visibleOperationState); err != nil {
+		t.Fatal(err)
+	}
+	if visibleCommandState != "dispatched" || visibleOperationState != "dispatched" {
+		t.Fatalf("Reap changed the row hidden behind the result lock: %s/%s", visibleCommandState, visibleOperationState)
+	}
+	if err := resultTx.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := pool.QueryRow(ctx, `SELECT command.state,operation.state,outbox.published_at IS NOT NULL
+		FROM commands AS command JOIN operations AS operation ON operation.id=command.operation_id
+		JOIN outbox_events AS outbox ON outbox.command_id=command.id WHERE command.id=$1`, commandID).
+		Scan(&visibleCommandState, &visibleOperationState, &published); err != nil {
+		t.Fatal(err)
+	}
+	if visibleCommandState != "succeeded" || visibleOperationState != "succeeded" || !published {
+		t.Fatalf("terminal result did not win: %s/%s published=%v", visibleCommandState, visibleOperationState, published)
+	}
+}
+
+func assertSentCommandProjection(t *testing.T, pool *pgxpool.Pool, commandID, operationID uuid.UUID, dispatch Dispatch, commandWant, operationWant string, publishedWant bool) {
+	t.Helper()
+	var commandState, operationState, attemptState string
+	var published bool
+	var leaseCount int
+	if err := pool.QueryRow(context.Background(), `SELECT command.state,operation.state,outbox.published_at IS NOT NULL,
+		(SELECT state FROM command_attempts WHERE id=$3),
+		(SELECT count(*) FROM node_command_leases WHERE lease_token=$4)
+		FROM commands AS command JOIN operations AS operation ON operation.id=command.operation_id
+		JOIN outbox_events AS outbox ON outbox.command_id=command.id
+		WHERE command.id=$1 AND operation.id=$2`, commandID, operationID, dispatch.AttemptID, dispatch.LeaseToken).
+		Scan(&commandState, &operationState, &published, &attemptState, &leaseCount); err != nil {
+		t.Fatal(err)
+	}
+	if commandState != commandWant || operationState != operationWant || published != publishedWant || attemptState != "sent" || leaseCount != 0 {
+		t.Fatalf("sent projection = %s/%s published=%v attempt=%s leases=%d, want %s/%s published=%v sent/0",
+			commandState, operationState, published, attemptState, leaseCount, commandWant, operationWant, publishedWant)
+	}
+}
+
+func assertReconciliationEnvelope(t *testing.T, original, reconciled *agentv1.CommandEnvelope, commandID, operationID, nodeID uuid.UUID) {
+	t.Helper()
+	if reconciled.GetDeliveryMode() != agentv1.CommandDeliveryMode_COMMAND_DELIVERY_MODE_RECONCILE_ONLY ||
+		reconciled.GetConnectionFence() != nil || reconciled.GetFenceBinding() != nil {
+		t.Fatalf("reconciliation delivery metadata is invalid: %v", reconciled)
+	}
+	if !bytes.Equal(reconciled.GetCommandId(), commandID[:]) ||
+		!bytes.Equal(reconciled.GetOperationId(), operationID[:]) ||
+		!bytes.Equal(reconciled.GetNodeId(), nodeID[:]) ||
+		!bytes.Equal(reconciled.GetIdempotencyKey(), original.GetIdempotencyKey()) ||
+		!bytes.Equal(reconciled.GetSemanticPayloadSha256(), original.GetSemanticPayloadSha256()) ||
+		reconciled.GetSyntheticNoop() == nil {
+		t.Fatal("reconciliation changed the logical command identity or payload")
+	}
+	if bytes.Equal(reconciled.GetMessageId(), original.GetMessageId()) {
+		t.Fatal("reconciliation reused the normal dispatch message identity")
 	}
 }
 

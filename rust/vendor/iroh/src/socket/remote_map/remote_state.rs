@@ -36,7 +36,9 @@ use crate::{
         Metrics as SocketMetrics, RELAY_PATH_MAX_IDLE_TIMEOUT,
         mapped_addrs::{AddrMap, CustomMappedAddr, RelayMappedAddr},
         remote_map::remote_state::path_watcher::PathStateSender,
-        transports::{self, OwnedTransmit, TransportsSender},
+        transports::{
+            self, OwnedTransmit, RelayConnectionState, RelayStatusesWatcher, TransportsSender,
+        },
     },
 };
 
@@ -117,6 +119,12 @@ struct State {
     ///
     /// These are our local addresses and any reflexive transport addresses.
     local_direct_addrs: n0_watcher::Direct<BTreeSet<DirectAddr>>,
+    /// Connection states of all configured relays.
+    ///
+    /// Paths over a relay whose relay is not currently connected cannot carry
+    /// traffic.  Selection consults this watch so stale paths on relays that
+    /// went down do not keep winning against live paths.
+    relay_statuses: RelayStatusesWatcher,
     /// The mapping between endpoints via a relay and their [`RelayMappedAddr`]s.
     relay_mapped_addrs: AddrMap<(RelayUrl, EndpointId), RelayMappedAddr>,
     /// The mapping between custom transport addresses and their [`CustomMappedAddr`]s.
@@ -180,6 +188,7 @@ impl RemoteStateActor {
         metrics: Arc<SocketMetrics>,
         address_lookup: AddressLookupServices,
         path_selector: Arc<dyn PathSelector>,
+        relay_statuses: RelayStatusesWatcher,
     ) -> Self {
         Self {
             connections: FxHashMap::default(),
@@ -187,6 +196,7 @@ impl RemoteStateActor {
                 endpoint_id,
                 metrics: metrics.clone(),
                 local_direct_addrs,
+                relay_statuses,
                 relay_mapped_addrs,
                 custom_mapped_addrs,
                 address_lookup,
@@ -300,6 +310,14 @@ impl RemoteStateActor {
                     self.update_local_direct_address();
                     trace!("local addrs updated, triggering holepunching");
                     self.trigger_holepunching();
+                }
+                res = self.state.relay_statuses.updated() => {
+                    if let Err(n0_watcher::Disconnected) = res {
+                        trace!("relay status watcher disconnected, shutting down");
+                        break;
+                    }
+                    debug!("relay connection states changed, reselecting paths");
+                    self.select_path();
                 }
                 _ = &mut scheduled_path_open => {
                     trace!("triggering scheduled path_open");
@@ -648,9 +666,27 @@ impl RemoteStateActor {
     /// direct paths are closed for all connections.
     #[instrument(skip_all)]
     fn select_path(&mut self) {
+        // Refresh the relay connection snapshot so a relay that went down
+        // since the last update is not treated as connected.
+        self.state.relay_statuses.update();
+        // A selected relay path whose relay is no longer connected cannot
+        // carry traffic.  Drop it instead of letting its stale RTT anchor
+        // selection: without this, paths on relays that went down keep
+        // winning against live paths until the connections owning them time
+        // out, blackholing new handshakes on the healthy relay.
+        if let Some(selected) = self.state.selected_path.as_ref()
+            && !self.state.is_path_reachable(selected)
+        {
+            let prev = self.state.selected_path.take();
+            debug!(
+                prev_path = ?prev,
+                "selected path's relay is not connected, clearing selected path"
+            );
+        }
         let current_path = self.state.selected_path.as_ref();
+        let connected_relays = self.state.connected_relays();
         let selected_addr = {
-            let ctx = PathSelectionContext::new(current_path, &self.connections);
+            let ctx = PathSelectionContext::new(current_path, &self.connections, &connected_relays);
             self.state.path_selector.select(&ctx).selected().cloned()
         };
 
@@ -663,7 +699,7 @@ impl RemoteStateActor {
                 Level::DEBUG,
                 remote = %self.state.endpoint_id.fmt_short(),
                 network_path = %addr,
-                prev_network_path = %prev_remote.map(|p| format!("{p}")).unwrap_or("None".to_string()),
+                prev_network_path = prev_remote.map(|p| format!("{p}")).unwrap_or("None".to_string()),
             );
         } else {
             trace!(?current_path, "keeping current path");
@@ -784,6 +820,35 @@ impl RemoteStateActor {
 }
 
 impl State {
+    /// Whether the relay at `url` is currently connected.
+    fn relay_connected(&self, url: &RelayUrl) -> bool {
+        self.relay_statuses
+            .peek()
+            .get(url)
+            .is_some_and(RelayConnectionState::is_connected)
+    }
+
+    /// Whether `addr` can currently carry traffic.
+    ///
+    /// Relay paths are only usable while their relay transport is connected;
+    /// IP and custom paths are assumed usable.
+    fn is_path_reachable(&self, addr: &transports::FourTuple) -> bool {
+        match addr {
+            transports::FourTuple::Relay { url, .. } => self.relay_connected(url),
+            _ => true,
+        }
+    }
+
+    /// The URLs of all currently connected relays.
+    fn connected_relays(&self) -> BTreeSet<RelayUrl> {
+        self.relay_statuses
+            .peek()
+            .iter()
+            .filter(|(_, state)| state.is_connected())
+            .map(|(url, _)| url.clone())
+            .collect()
+    }
+
     /// Handles [`RemoteStateMessage::SendDatagram`].
     async fn handle_msg_send_datagram(
         &mut self,
@@ -1288,9 +1353,23 @@ pub struct PathSelectionContext<'a> {
 /// (for unit-testing selectors).
 #[derive(Debug)]
 enum PathsSource<'a> {
-    Live(&'a FxHashMap<ConnId, ConnectionState>),
+    Live {
+        connections: &'a FxHashMap<ConnId, ConnectionState>,
+        connected_relays: &'a BTreeSet<RelayUrl>,
+    },
     #[cfg(test)]
     Test(Vec<PathSelectionData<'a>>),
+}
+
+/// Whether a path over `addr` is offered to selectors, given the connected relays.
+///
+/// Relay paths whose relay is currently not connected cannot carry traffic and
+/// must not shadow live paths with their stale statistics.
+fn path_offered(addr: &transports::FourTuple, connected_relays: &BTreeSet<RelayUrl>) -> bool {
+    match addr {
+        transports::FourTuple::Relay { url, .. } => connected_relays.contains(url),
+        _ => true,
+    }
 }
 
 #[cfg_attr(not(feature = "unstable-custom-transports"), allow(unreachable_pub))]
@@ -1298,10 +1377,14 @@ impl<'a> PathSelectionContext<'a> {
     fn new(
         current: Option<&'a transports::FourTuple>,
         connections: &'a FxHashMap<ConnId, ConnectionState>,
+        connected_relays: &'a BTreeSet<RelayUrl>,
     ) -> Self {
         Self {
             current,
-            source: PathsSource::Live(connections),
+            source: PathsSource::Live {
+                connections,
+                connected_relays,
+            },
         }
     }
 
@@ -1326,18 +1409,30 @@ impl<'a> PathSelectionContext<'a> {
     ///
     /// The same address may appear more than once when it is a path on multiple
     /// connections to the remote.  Selectors that care should aggregate as appropriate.
+    ///
+    /// Paths over relays that are currently not connected are not offered.
     pub fn paths(&self) -> Box<dyn Iterator<Item = PathSelectionData<'a>> + '_> {
         match &self.source {
-            PathsSource::Live(connections) => Box::new(
-                connections
-                    .values()
-                    .filter_map(|state| state.handle.upgrade().map(|conn| (state, conn)))
-                    .flat_map(|(state, conn)| {
-                        state.paths.iter().map(move |(path_id, addr)| {
-                            PathSelectionData::live(addr, *path_id, conn.clone())
-                        })
-                    }),
-            ),
+            PathsSource::Live {
+                connections,
+                connected_relays,
+            } => {
+                let connected_relays: &BTreeSet<RelayUrl> = connected_relays;
+                Box::new(
+                    connections
+                        .values()
+                        .filter_map(|state| state.handle.upgrade().map(|conn| (state, conn)))
+                        .flat_map(move |(state, conn)| {
+                            state
+                                .paths
+                                .iter()
+                                .filter(move |(_, addr)| path_offered(addr, connected_relays))
+                                .map(move |(path_id, addr)| {
+                                    PathSelectionData::live(addr, *path_id, conn.clone())
+                                })
+                        }),
+                )
+            }
             #[cfg(test)]
             PathsSource::Test(paths) => Box::new(paths.iter().cloned()),
         }
@@ -1526,5 +1621,46 @@ async fn maybe_next<S: Stream + Unpin>(maybe_stream: Option<&mut S>) -> Option<O
     match maybe_stream {
         None => None,
         Some(s) => Some(s.next().await),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use iroh_base::EndpointId;
+
+    use super::*;
+
+    fn relay_url(n: u8) -> RelayUrl {
+        format!("https://relay{n}.iroh.computer").parse().unwrap()
+    }
+
+    fn relay_tuple(n: u8) -> transports::FourTuple {
+        transports::FourTuple::Relay {
+            url: relay_url(n),
+            endpoint_id: EndpointId::from_bytes(&[0u8; 32]).unwrap(),
+        }
+    }
+
+    /// Regression test for relay failover: relay paths on relays that are not
+    /// connected must not be offered to the selector.  Zombie connections can
+    /// otherwise keep paths on a dead relay in the candidate set with stale,
+    /// optimistic RTTs that keep beating the live standby relay's paths.
+    #[test]
+    fn relay_paths_offered_only_for_connected_relays() {
+        let connected = BTreeSet::from_iter([relay_url(1)]);
+
+        // Paths on a connected relay are offered.
+        assert!(path_offered(&relay_tuple(1), &connected));
+
+        // Paths on a relay that went down are not offered.
+        assert!(!path_offered(&relay_tuple(2), &connected));
+        assert!(!path_offered(&relay_tuple(1), &BTreeSet::new()));
+
+        // IP paths are always offered.
+        let ip = transports::FourTuple::from_remote(transports::Addr::Ip(
+            "127.0.0.1:1234".parse().unwrap(),
+        ));
+        assert!(path_offered(&ip, &connected));
+        assert!(path_offered(&ip, &BTreeSet::new()));
     }
 }

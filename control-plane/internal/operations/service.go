@@ -37,6 +37,19 @@ var (
 	ErrBacklogExceeded     = commandlimit.ErrBacklogExceeded
 )
 
+const (
+	// A transport-accepted attempt without durable result evidence becomes an
+	// Unknown outcome after this interval. Recovery observes the Agent journal;
+	// it never replays the original effect blindly.
+	commandResultResponseTimeout = 30 * time.Second
+	reconciliationAttemptLimit   = 64
+	reconciliationBatchLimit     = 64
+	// The configured active-command ceiling is 500. Decode that full bounded
+	// candidate set before applying the reconcile-only batch limit so unrelated
+	// Unknown outcomes cannot permanently hide eligible continuation work.
+	reconciliationCandidateScanLimit = 500
+)
+
 type SyntheticKind string
 
 const (
@@ -571,7 +584,18 @@ func (s *Service) Claim(ctx context.Context, workerID uuid.UUID, limit int, leas
 }
 
 func (s *Service) MarkSent(ctx context.Context, dispatch Dispatch) error {
-	return s.finishDispatch(ctx, dispatch, true, "")
+	return s.MarkSentWithEnvelope(ctx, dispatch, dispatch.Envelope)
+}
+
+// MarkSentWithEnvelope records the exact command frame accepted by transport.
+// Fenced workers add per-attempt owner proofs after Claim, so persisting the
+// transmitted frame lets reconnect recovery distinguish old-term ambiguity
+// from a command that was already dispatched on the current connection.
+func (s *Service) MarkSentWithEnvelope(ctx context.Context, dispatch Dispatch, sentEnvelope []byte) error {
+	if err := validateSentEnvelope(dispatch, sentEnvelope); err != nil {
+		return err
+	}
+	return s.finishDispatch(ctx, dispatch, true, "", sentEnvelope)
 }
 
 func (s *Service) MarkFailed(ctx context.Context, dispatch Dispatch, cause error) error {
@@ -582,10 +606,18 @@ func (s *Service) MarkFailed(ctx context.Context, dispatch Dispatch, cause error
 	if len(message) > 512 {
 		message = message[:512]
 	}
-	return s.finishDispatch(ctx, dispatch, false, message)
+	return s.finishDispatch(ctx, dispatch, false, message, nil)
 }
 
-func (s *Service) finishDispatch(ctx context.Context, d Dispatch, sent bool, message string) error {
+func (s *Service) finishDispatch(ctx context.Context, d Dispatch, sent bool, message string, sentEnvelope []byte) error {
+	var sentMode agentv1.CommandDeliveryMode
+	if sent {
+		var envelope agentv1.CommandEnvelope
+		if err := proto.Unmarshal(sentEnvelope, &envelope); err != nil {
+			return fmt.Errorf("decode sent command delivery mode: %w", err)
+		}
+		sentMode = envelope.GetDeliveryMode()
+	}
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return err
@@ -594,22 +626,152 @@ func (s *Service) finishDispatch(ctx context.Context, d Dispatch, sent bool, mes
 	if err := commandlimit.Lock(ctx, tx); err != nil {
 		return fmt.Errorf("serialize dispatch completion: %w", err)
 	}
-	var valid bool
-	if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM node_command_leases WHERE node_id=$1 AND command_id=$2 AND lease_token=$3 AND leased_until>now())`, d.NodeID, d.CommandID, d.LeaseToken).Scan(&valid); err != nil {
-		return err
-	}
-	if !valid {
-		return errors.New("dispatch lease is no longer valid")
-	}
 	if sent {
+		// A successful transport write can race a takeover in another
+		// Controller. Hold the exact sent term through this commit so the old
+		// owner cannot publish a dispatched state after the successor's
+		// connected-event recovery sweep has already passed the command.
+		if err := guardSentEnvelopeAuthority(ctx, tx, d, sentEnvelope); err != nil {
+			return err
+		}
+
+		// Result ingestion locks this outbox row before advancing the command.
+		// Acquire that lock in its own statement: under READ COMMITTED, a query
+		// that waits on the row keeps its original snapshot for unrelated tables.
+		// The second statement must therefore take a fresh snapshot before it
+		// decides whether a concurrently committed Agent result won the race.
+		var lockedOutbox uuid.UUID
+		err := tx.QueryRow(ctx, `SELECT /* mark_sent_outbox_lock */ id FROM outbox_events
+			WHERE id=$1 AND command_id=$2
+			FOR UPDATE`, d.OutboxID, d.CommandID).Scan(&lockedOutbox)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return errors.New("dispatch outbox is no longer valid")
+		}
+		if err != nil {
+			return fmt.Errorf("lock dispatch completion: %w", err)
+		}
+
+		var leaseValid, attemptValid, ownsOutboxLock, resultAfterAttempt bool
+		var commandState string
+		err = tx.QueryRow(ctx, `SELECT
+			lease.leased_until>clock_timestamp(),
+			attempt.state='sending' AND attempt.finished_at IS NULL
+			  AND attempt.worker_id=lease.worker_id
+			  AND attempt.attempt_number=outbox.attempts,
+			COALESCE(outbox.locked_by=lease.worker_id AND outbox.locked_until>clock_timestamp(),false),
+			EXISTS(SELECT 1 FROM agent_command_results AS result
+			       WHERE result.command_id=command.id AND result.created_at>=attempt.started_at),
+			command.state
+		FROM outbox_events AS outbox
+		JOIN commands AS command ON command.id=outbox.command_id
+		JOIN operations AS operation ON operation.id=command.operation_id
+		JOIN node_command_leases AS lease
+		  ON lease.command_id=command.id AND lease.node_id=command.node_id
+		JOIN command_attempts AS attempt
+		  ON attempt.id=$5 AND attempt.command_id=command.id AND attempt.outbox_event_id=outbox.id
+		WHERE outbox.id=$1 AND command.id=$2 AND operation.id=$3 AND command.node_id=$4
+		  AND lease.lease_token=$6`, d.OutboxID, d.CommandID, d.OperationID, d.NodeID, d.AttemptID, d.LeaseToken).
+			Scan(&leaseValid, &attemptValid, &ownsOutboxLock, &resultAfterAttempt, &commandState)
+		if errors.Is(err, pgx.ErrNoRows) {
+			// Result ingestion is authoritative evidence that this exact sending
+			// attempt completed and releases its lease atomically. A same-owner
+			// MarkSent arriving afterward remains idempotent; a stale owner was
+			// already rejected by guardSentEnvelopeAuthority above.
+			err = tx.QueryRow(ctx, `SELECT command.state,
+				EXISTS(SELECT 1 FROM agent_command_results AS result
+				       WHERE result.command_id=command.id AND result.created_at>=attempt.started_at)
+				FROM outbox_events AS outbox
+				JOIN commands AS command ON command.id=outbox.command_id
+				JOIN operations AS operation ON operation.id=command.operation_id
+				JOIN command_attempts AS attempt
+				  ON attempt.id=$5 AND attempt.command_id=command.id AND attempt.outbox_event_id=outbox.id
+				WHERE outbox.id=$1 AND command.id=$2 AND operation.id=$3 AND command.node_id=$4
+				  AND attempt.state='sent' AND attempt.finished_at IS NOT NULL
+				  AND NOT EXISTS(SELECT 1 FROM node_command_leases AS lease
+				                 WHERE lease.node_id=command.node_id AND lease.command_id=command.id
+				                   AND lease.lease_token=$6)`,
+				d.OutboxID, d.CommandID, d.OperationID, d.NodeID, d.AttemptID, d.LeaseToken).
+				Scan(&commandState, &resultAfterAttempt)
+			if errors.Is(err, pgx.ErrNoRows) {
+				return errors.New("dispatch lease is no longer valid")
+			}
+			if err != nil {
+				return fmt.Errorf("confirm result-completed dispatch: %w", err)
+			}
+			if !resultAfterAttempt {
+				return errors.New("dispatch lease is no longer valid")
+			}
+			switch commandState {
+			case "succeeded", "failed", "rejected", "rolled_back":
+				if _, err = tx.Exec(ctx, `UPDATE commands SET envelope=$2 WHERE id=$1`, d.CommandID, sentEnvelope); err != nil {
+					return err
+				}
+			case "unknown":
+				// Preserve the reconcile-only envelope scheduled by result ingestion.
+			default:
+				return fmt.Errorf("agent result did not advance command from %s", commandState)
+			}
+			return tx.Commit(ctx)
+		}
+		if err != nil {
+			return fmt.Errorf("lock dispatch completion: %w", err)
+		}
+		if !leaseValid || !attemptValid {
+			return errors.New("dispatch lease is no longer valid")
+		}
+		if !ownsOutboxLock && !resultAfterAttempt {
+			return errors.New("dispatch outbox lock is no longer valid")
+		}
+		if resultAfterAttempt {
+			switch commandState {
+			case "succeeded", "failed", "rejected", "rolled_back":
+				if _, err = tx.Exec(ctx, `UPDATE commands SET envelope=$2 WHERE id=$1`, d.CommandID, sentEnvelope); err != nil {
+					return err
+				}
+			case "unknown":
+				// Unknown result ingestion may already have replaced the payload
+				// with a reconcile-only envelope. Preserve that recovery work.
+			default:
+				return fmt.Errorf("agent result did not advance command from %s", commandState)
+			}
+		}
+		if ownsOutboxLock {
+			outboxTag, err := tx.Exec(ctx, `UPDATE outbox_events SET published_at=now(),locked_by=NULL,locked_until=NULL,last_error=NULL WHERE id=$1 AND locked_by=(SELECT worker_id FROM node_command_leases WHERE lease_token=$2)`, d.OutboxID, d.LeaseToken)
+			if err != nil {
+				return err
+			}
+			if outboxTag.RowsAffected() != 1 {
+				return errors.New("dispatch outbox lock is no longer valid")
+			}
+		}
+		if resultAfterAttempt {
+			if err := closeDispatchAttempt(ctx, tx, d); err != nil {
+				return err
+			}
+			return tx.Commit(ctx)
+		}
+		if commandState != "queued" && commandState != "unknown" {
+			return fmt.Errorf("dispatch command is no longer mutable from %s", commandState)
+		}
+		if commandState == "unknown" && sentMode == agentv1.CommandDeliveryMode_COMMAND_DELIVERY_MODE_RECONCILE_ONLY {
+			// Sending an observation-only frame cannot make an Unknown logical
+			// outcome Dispatched again. Persist the exact fence used by this
+			// attempt, but keep the state truthful until result evidence arrives.
+			if _, err = tx.Exec(ctx, `UPDATE commands SET envelope=$2,updated_at=now()
+				WHERE id=$1 AND state='unknown'`, d.CommandID, sentEnvelope); err != nil {
+				return err
+			}
+			if err := closeDispatchAttempt(ctx, tx, d); err != nil {
+				return err
+			}
+			return tx.Commit(ctx)
+		}
+
 		eventID, err := uuid.NewV7()
 		if err != nil {
 			return err
 		}
-		if _, err = tx.Exec(ctx, `UPDATE outbox_events SET published_at=now(),locked_by=NULL,locked_until=NULL,last_error=NULL WHERE id=$1 AND locked_by IS NOT NULL`, d.OutboxID); err != nil {
-			return err
-		}
-		if _, err = tx.Exec(ctx, `UPDATE commands SET state='dispatched',updated_at=now() WHERE id=$1 AND state IN ('queued','unknown')`, d.CommandID); err != nil {
+		if _, err = tx.Exec(ctx, `UPDATE commands SET state='dispatched',envelope=$2,updated_at=now() WHERE id=$1 AND state IN ('queued','unknown')`, d.CommandID, sentEnvelope); err != nil {
 			return err
 		}
 		if _, err = tx.Exec(ctx, `UPDATE operations SET state='dispatched',version=version+1,updated_at=now() WHERE id=$1 AND state='queued'`, d.OperationID); err != nil {
@@ -618,24 +780,49 @@ func (s *Service) finishDispatch(ctx context.Context, d Dispatch, sent bool, mes
 		if _, err = tx.Exec(ctx, `UPDATE config_apply_operations SET state='dispatched',updated_at=now() WHERE operation_id=$1 AND state IN('queued','unknown')`, d.OperationID); err != nil {
 			return err
 		}
-		if _, err = tx.Exec(ctx, `UPDATE command_attempts SET state='sent',finished_at=now() WHERE id=$1 AND state='sending'`, d.AttemptID); err != nil {
-			return err
-		}
 		if _, err = tx.Exec(ctx, `INSERT INTO operation_events (id,operation_id,state,occurred_at) VALUES ($1,$2,'dispatched',now())`, eventID, d.OperationID); err != nil {
 			return err
 		}
+		if err := closeDispatchAttempt(ctx, tx, d); err != nil {
+			return err
+		}
 	} else {
+		var valid bool
+		if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM node_command_leases WHERE node_id=$1 AND command_id=$2 AND lease_token=$3 AND leased_until>now())`, d.NodeID, d.CommandID, d.LeaseToken).Scan(&valid); err != nil {
+			return err
+		}
+		if !valid {
+			return errors.New("dispatch lease is no longer valid")
+		}
 		if _, err = tx.Exec(ctx, `UPDATE outbox_events SET locked_by=NULL,locked_until=NULL,available_at=now()+interval '1 second',last_error=$2 WHERE id=$1 AND locked_by IS NOT NULL`, d.OutboxID, message); err != nil {
 			return err
 		}
 		if _, err = tx.Exec(ctx, `UPDATE command_attempts SET state='failed',finished_at=now(),error_code='transport_unavailable' WHERE id=$1 AND state='sending'`, d.AttemptID); err != nil {
 			return err
 		}
-	}
-	if _, err = tx.Exec(ctx, `DELETE FROM node_command_leases WHERE lease_token=$1`, d.LeaseToken); err != nil {
-		return err
+		if _, err = tx.Exec(ctx, `DELETE FROM node_command_leases WHERE lease_token=$1`, d.LeaseToken); err != nil {
+			return err
+		}
 	}
 	return tx.Commit(ctx)
+}
+
+func closeDispatchAttempt(ctx context.Context, tx pgx.Tx, d Dispatch) error {
+	attemptTag, err := tx.Exec(ctx, `UPDATE command_attempts SET state='sent',finished_at=now() WHERE id=$1 AND command_id=$2 AND outbox_event_id=$3 AND state='sending'`, d.AttemptID, d.CommandID, d.OutboxID)
+	if err != nil {
+		return err
+	}
+	if attemptTag.RowsAffected() != 1 {
+		return errors.New("dispatch attempt is no longer sending")
+	}
+	leaseTag, err := tx.Exec(ctx, `DELETE FROM node_command_leases WHERE node_id=$1 AND command_id=$2 AND lease_token=$3`, d.NodeID, d.CommandID, d.LeaseToken)
+	if err != nil {
+		return err
+	}
+	if leaseTag.RowsAffected() != 1 {
+		return errors.New("dispatch lease is no longer valid")
+	}
+	return nil
 }
 
 func (s *Service) Reap(ctx context.Context, maxAttempts int) error {
@@ -650,44 +837,8 @@ func (s *Service) Reap(ctx context.Context, maxAttempts int) error {
 	if err := commandlimit.Lock(ctx, tx); err != nil {
 		return fmt.Errorf("serialize dispatch lease reaping: %w", err)
 	}
-	if _, err = tx.Exec(ctx, `UPDATE command_attempts AS attempt SET state='unknown',finished_at=now(),error_code='lease_expired' FROM node_command_leases AS lease WHERE attempt.command_id=lease.command_id AND attempt.state='sending' AND lease.leased_until<=now()`); err != nil {
+	if err := s.reconcileExpiredSendingAttemptsTx(ctx, tx, maxAttempts); err != nil {
 		return err
-	}
-	if _, err = tx.Exec(ctx, `UPDATE outbox_events AS outbox SET locked_by=NULL,locked_until=NULL,available_at=now() FROM node_command_leases AS lease WHERE outbox.command_id=lease.command_id AND lease.leased_until<=now() AND outbox.attempts<$1`, maxAttempts); err != nil {
-		return err
-	}
-	rows, err := tx.Query(ctx, `UPDATE commands AS command SET state='unknown',updated_at=now() FROM outbox_events AS outbox,node_command_leases AS lease WHERE outbox.command_id=command.id AND lease.command_id=command.id AND lease.leased_until<=now() AND outbox.attempts>=$1 AND command.state='queued' RETURNING command.operation_id,outbox.id`, maxAttempts)
-	if err != nil {
-		return err
-	}
-	type stopped struct{ operationID, outboxID uuid.UUID }
-	var stoppedRows []stopped
-	for rows.Next() {
-		var row stopped
-		if err := rows.Scan(&row.operationID, &row.outboxID); err != nil {
-			rows.Close()
-			return err
-		}
-		stoppedRows = append(stoppedRows, row)
-	}
-	rows.Close()
-	for _, row := range stoppedRows {
-		eventID, err := uuid.NewV7()
-		if err != nil {
-			return err
-		}
-		if _, err = tx.Exec(ctx, `UPDATE operations SET state='unknown',version=version+1,updated_at=now() WHERE id=$1 AND state='queued'`, row.operationID); err != nil {
-			return err
-		}
-		if _, err = tx.Exec(ctx, `UPDATE config_apply_operations SET state='unknown',updated_at=now() WHERE operation_id=$1 AND state='queued'`, row.operationID); err != nil {
-			return err
-		}
-		if _, err = tx.Exec(ctx, `UPDATE outbox_events SET published_at=now(),locked_by=NULL,locked_until=NULL,last_error='dispatch outcome unknown' WHERE id=$1`, row.outboxID); err != nil {
-			return err
-		}
-		if _, err = tx.Exec(ctx, `INSERT INTO operation_events(id,operation_id,state,occurred_at)VALUES($1,$2,'unknown',now())`, eventID, row.operationID); err != nil {
-			return err
-		}
 	}
 	expiredRows, err := tx.Query(ctx, `SELECT command.id,command.operation_id,command.envelope FROM commands AS command JOIN config_apply_operations AS apply ON apply.operation_id=command.operation_id WHERE command.state IN('dispatched','accepted','running') AND apply.state IN('dispatched','accepted','running') AND command.expires_at<=now() FOR UPDATE OF command`)
 	if err != nil {
@@ -748,10 +899,467 @@ func (s *Service) Reap(ctx context.Context, maxAttempts int) error {
 			return err
 		}
 	}
-	if _, err = tx.Exec(ctx, `DELETE FROM node_command_leases WHERE leased_until<=now()`); err != nil {
+	if err := s.reconcileStaleSentCommandsTx(ctx, tx); err != nil {
+		return err
+	}
+	if err := s.continueStaleReconciliationsTx(ctx, tx); err != nil {
+		return err
+	}
+	if _, err = tx.Exec(ctx, `DELETE FROM node_command_leases AS lease
+		WHERE lease.leased_until<=now()
+		  AND NOT EXISTS(SELECT 1 FROM command_attempts AS attempt
+		                  WHERE attempt.command_id=lease.command_id AND attempt.state='sending')`); err != nil {
 		return err
 	}
 	return tx.Commit(ctx)
+}
+
+// reconcileExpiredSendingAttemptsTx closes the crash window between a
+// transport accepting a command and Controller durably recording that fact.
+// A sending lease can expire before or after the network write, so its outcome
+// is always Unknown and the next delivery must observe the Agent journal.
+func (s *Service) reconcileExpiredSendingAttemptsTx(ctx context.Context, tx pgx.Tx, maxAttempts int) error {
+	rows, err := tx.Query(ctx, `SELECT command.id
+		FROM outbox_events AS outbox
+		JOIN commands AS command ON command.id=outbox.command_id
+		JOIN operations AS operation ON operation.id=command.operation_id
+		JOIN node_command_leases AS lease
+		  ON lease.command_id=command.id AND lease.node_id=command.node_id
+		JOIN command_attempts AS attempt
+		  ON attempt.command_id=command.id AND attempt.outbox_event_id=outbox.id
+		  AND attempt.worker_id=lease.worker_id AND attempt.attempt_number=outbox.attempts
+		WHERE lease.leased_until<=clock_timestamp()
+		  AND attempt.state='sending' AND attempt.finished_at IS NULL
+		  AND command.state IN ('queued','unknown')
+		  AND operation.state IN ('queued','unknown')
+		  AND outbox.published_at IS NULL AND outbox.locked_by=lease.worker_id
+		ORDER BY lease.leased_until,command.id
+		LIMIT $1
+		FOR UPDATE OF outbox SKIP LOCKED`, reconciliationBatchLimit)
+	if err != nil {
+		return fmt.Errorf("select expired sending attempts: %w", err)
+	}
+	commandIDs := make([]uuid.UUID, 0, reconciliationBatchLimit)
+	for rows.Next() {
+		var commandID uuid.UUID
+		if err := rows.Scan(&commandID); err != nil {
+			rows.Close()
+			return fmt.Errorf("scan expired sending attempt: %w", err)
+		}
+		commandIDs = append(commandIDs, commandID)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return fmt.Errorf("iterate expired sending attempts: %w", err)
+	}
+	rows.Close()
+	if len(commandIDs) == 0 {
+		return nil
+	}
+	if s.signer == nil {
+		return errors.New("operations: reconciliation signer is unavailable")
+	}
+
+	var observedAt time.Time
+	if err := tx.QueryRow(ctx, `SELECT clock_timestamp()`).Scan(&observedAt); err != nil {
+		return fmt.Errorf("read expired sending attempt time: %w", err)
+	}
+	for _, commandID := range commandIDs {
+		var operationID, nodeID, outboxID, attemptID uuid.UUID
+		var commandState, operationState string
+		var attempts int
+		var encoded []byte
+		err := tx.QueryRow(ctx, `SELECT command.operation_id,command.node_id,command.envelope,
+			outbox.id,attempt.id,command.state,operation.state,outbox.attempts
+			FROM commands AS command
+			JOIN operations AS operation ON operation.id=command.operation_id
+			JOIN outbox_events AS outbox ON outbox.command_id=command.id
+			JOIN node_command_leases AS lease
+			  ON lease.command_id=command.id AND lease.node_id=command.node_id
+			JOIN command_attempts AS attempt
+			  ON attempt.command_id=command.id AND attempt.outbox_event_id=outbox.id
+			  AND attempt.worker_id=lease.worker_id AND attempt.attempt_number=outbox.attempts
+			WHERE command.id=$1 AND lease.leased_until<=clock_timestamp()
+			  AND attempt.state='sending' AND attempt.finished_at IS NULL
+			  AND command.state IN ('queued','unknown')
+			  AND operation.state IN ('queued','unknown')
+			  AND outbox.published_at IS NULL AND outbox.locked_by=lease.worker_id
+			FOR UPDATE OF command,operation`, commandID).
+			Scan(&operationID, &nodeID, &encoded, &outboxID, &attemptID, &commandState, &operationState, &attempts)
+		if errors.Is(err, pgx.ErrNoRows) {
+			continue
+		}
+		if err != nil {
+			return fmt.Errorf("recheck expired sending command %s: %w", commandID, err)
+		}
+
+		var envelope agentv1.CommandEnvelope
+		if err := proto.Unmarshal(encoded, &envelope); err != nil {
+			return fmt.Errorf("decode expired sending command %s: %w", commandID, err)
+		}
+		if !bytes.Equal(envelope.GetCommandId(), commandID[:]) ||
+			!bytes.Equal(envelope.GetOperationId(), operationID[:]) ||
+			!bytes.Equal(envelope.GetNodeId(), nodeID[:]) {
+			return fmt.Errorf("expired sending command %s has inconsistent identity", commandID)
+		}
+		scheduleRecovery := commandState == "queued" || attempts < maxAttempts
+		payload := encoded
+		expires := envelope.GetExpiresAt()
+		if expires == nil || expires.CheckValid() != nil {
+			return fmt.Errorf("expired sending command %s has invalid expiry", commandID)
+		}
+		expiresAt := expires.AsTime()
+		if scheduleRecovery {
+			// Unknown rows created by older code or operator recovery may still
+			// carry an ordinary execution envelope. Convert those exactly once;
+			// only an already reconcile-only envelope is a continuation attempt.
+			if envelope.GetDeliveryMode() != agentv1.CommandDeliveryMode_COMMAND_DELIVERY_MODE_RECONCILE_ONLY {
+				payload, expiresAt, err = PrepareRecoveryEnvelope(
+					&envelope,
+					agentv1.CommandDeliveryMode_COMMAND_DELIVERY_MODE_RECONCILE_ONLY,
+					observedAt,
+					s.signer,
+				)
+			} else {
+				payload, expiresAt, err = prepareRecoveryContinuationEnvelope(&envelope, observedAt, s.signer)
+			}
+			if err != nil {
+				return fmt.Errorf("prepare expired sending reconciliation for command %s: %w", commandID, err)
+			}
+		}
+		attemptTag, err := tx.Exec(ctx, `UPDATE command_attempts
+			SET state='unknown',finished_at=$2,error_code='lease_expired_outcome_unknown'
+			WHERE id=$1 AND state='sending' AND finished_at IS NULL`, attemptID, observedAt)
+		if err != nil {
+			return fmt.Errorf("mark expired sending attempt unknown: %w", err)
+		}
+		if attemptTag.RowsAffected() != 1 {
+			continue
+		}
+		if commandState == "queued" {
+			commandTag, err := tx.Exec(ctx, `UPDATE commands
+				SET state='unknown',envelope=$2,expires_at=$3,updated_at=$4
+				WHERE id=$1 AND state='queued'`, commandID, payload, expiresAt, observedAt)
+			if err != nil {
+				return fmt.Errorf("mark expired sending command unknown: %w", err)
+			}
+			if commandTag.RowsAffected() != 1 {
+				return fmt.Errorf("expired sending command %s is no longer queued", commandID)
+			}
+			operationTag, err := tx.Exec(ctx, `UPDATE operations
+				SET state='unknown',version=version+1,expires_at=$2,updated_at=$3,completed_at=NULL
+				WHERE id=$1 AND state='queued'`, operationID, expiresAt, observedAt)
+			if err != nil {
+				return fmt.Errorf("mark expired sending operation unknown: %w", err)
+			}
+			if operationTag.RowsAffected() != 1 || operationState != "queued" {
+				return fmt.Errorf("expired sending command %s has no queued operation", commandID)
+			}
+			if err := markRecoveryProjectionUnknown(ctx, tx, operationID, &envelope, observedAt); err != nil {
+				return err
+			}
+			eventID, err := uuid.NewV7()
+			if err != nil {
+				return fmt.Errorf("generate expired sending unknown event: %w", err)
+			}
+			if _, err := tx.Exec(ctx, `INSERT INTO operation_events(id,operation_id,state,occurred_at)
+				VALUES($1,$2,'unknown',$3)`, eventID, operationID, observedAt); err != nil {
+				return fmt.Errorf("record expired sending unknown event: %w", err)
+			}
+		} else if scheduleRecovery {
+			commandTag, err := tx.Exec(ctx, `UPDATE commands
+				SET envelope=$2,expires_at=$3,updated_at=$4
+				WHERE id=$1 AND state='unknown'`, commandID, payload, expiresAt, observedAt)
+			if err != nil {
+				return fmt.Errorf("continue expired reconciliation command: %w", err)
+			}
+			if commandTag.RowsAffected() != 1 || operationState != "unknown" {
+				return fmt.Errorf("expired reconciliation command %s lost its unknown state", commandID)
+			}
+		}
+		if scheduleRecovery {
+			outboxTag, err := tx.Exec(ctx, `UPDATE outbox_events
+				SET payload=$2,published_at=NULL,locked_by=NULL,locked_until=NULL,available_at=$3,
+					last_error='dispatch outcome unknown; reconciliation required'
+				WHERE id=$1 AND published_at IS NULL`, outboxID, payload, observedAt)
+			if err != nil {
+				return fmt.Errorf("schedule expired sending reconciliation: %w", err)
+			}
+			if outboxTag.RowsAffected() != 1 {
+				return fmt.Errorf("expired sending command %s lost its outbox", commandID)
+			}
+		} else {
+			outboxTag, err := tx.Exec(ctx, `UPDATE outbox_events
+				SET published_at=$2,locked_by=NULL,locked_until=NULL,
+					last_error='reconciliation attempt limit reached after unknown dispatch outcome'
+				WHERE id=$1 AND published_at IS NULL`, outboxID, observedAt)
+			if err != nil {
+				return fmt.Errorf("stop expired reconciliation attempts: %w", err)
+			}
+			if outboxTag.RowsAffected() != 1 {
+				return fmt.Errorf("expired reconciliation command %s lost its outbox", commandID)
+			}
+		}
+	}
+	return nil
+}
+
+// reconcileStaleSentCommandsTx handles the normal same-owner loss window:
+// transport accepted a command, MarkSent committed, but no trustworthy Agent
+// result arrived. A sent command becomes Unknown before any further delivery;
+// the only automatic follow-up is an observation-only reconciliation frame.
+func (s *Service) reconcileStaleSentCommandsTx(ctx context.Context, tx pgx.Tx) error {
+	rows, err := tx.Query(ctx, `SELECT command.id
+		FROM commands AS command
+		JOIN operations AS operation ON operation.id=command.operation_id
+		JOIN outbox_events AS outbox ON outbox.command_id=command.id
+		JOIN LATERAL (
+			SELECT state,finished_at,attempt_number
+			FROM command_attempts
+			WHERE command_id=command.id
+			ORDER BY attempt_number DESC
+			LIMIT 1
+		) AS attempt ON true
+		WHERE command.state IN ('dispatched','accepted','running')
+		  AND operation.state IN ('dispatched','accepted','running','unknown')
+		  AND outbox.published_at IS NOT NULL AND outbox.locked_by IS NULL
+		  AND attempt.state='sent'
+		  AND attempt.attempt_number=outbox.attempts
+		  AND attempt.finished_at<=clock_timestamp()-$1::interval
+		  AND NOT EXISTS(SELECT 1 FROM node_command_leases AS lease WHERE lease.command_id=command.id)
+		ORDER BY attempt.finished_at,command.id
+		LIMIT $2
+		FOR UPDATE OF outbox SKIP LOCKED`, commandResultResponseTimeout.String(), reconciliationBatchLimit)
+	if err != nil {
+		return fmt.Errorf("select sent commands with missing results: %w", err)
+	}
+	commandIDs := make([]uuid.UUID, 0, reconciliationBatchLimit)
+	for rows.Next() {
+		var commandID uuid.UUID
+		if err := rows.Scan(&commandID); err != nil {
+			rows.Close()
+			return fmt.Errorf("scan sent command with missing result: %w", err)
+		}
+		commandIDs = append(commandIDs, commandID)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return fmt.Errorf("iterate sent commands with missing results: %w", err)
+	}
+	rows.Close()
+	if len(commandIDs) == 0 {
+		return nil
+	}
+
+	var observedAt time.Time
+	if err := tx.QueryRow(ctx, `SELECT clock_timestamp()`).Scan(&observedAt); err != nil {
+		return fmt.Errorf("read missing-result reconciliation time: %w", err)
+	}
+	for _, commandID := range commandIDs {
+		// The outbox is already locked. Take a fresh snapshot and then lock the
+		// projections in the same outbox-to-command order as result ingestion.
+		var operationID, nodeID, outboxID uuid.UUID
+		var encoded []byte
+		var attempts int
+		err := tx.QueryRow(ctx, `SELECT command.operation_id,command.node_id,command.envelope,outbox.id,outbox.attempts
+			FROM commands AS command
+			JOIN operations AS operation ON operation.id=command.operation_id
+			JOIN outbox_events AS outbox ON outbox.command_id=command.id
+			JOIN LATERAL (
+				SELECT state,finished_at,attempt_number
+				FROM command_attempts
+				WHERE command_id=command.id
+				ORDER BY attempt_number DESC
+				LIMIT 1
+			) AS attempt ON true
+			WHERE command.id=$1
+			  AND command.state IN ('dispatched','accepted','running')
+			  AND operation.state IN ('dispatched','accepted','running','unknown')
+			  AND outbox.published_at IS NOT NULL AND outbox.locked_by IS NULL
+			  AND attempt.state='sent'
+			  AND attempt.attempt_number=outbox.attempts
+			  AND attempt.finished_at<=clock_timestamp()-$2::interval
+			  AND NOT EXISTS(SELECT 1 FROM node_command_leases AS lease WHERE lease.command_id=command.id)
+			FOR UPDATE OF command,operation`, commandID, commandResultResponseTimeout.String()).
+			Scan(&operationID, &nodeID, &encoded, &outboxID, &attempts)
+		if errors.Is(err, pgx.ErrNoRows) {
+			continue
+		}
+		if err != nil {
+			return fmt.Errorf("recheck sent command %s with missing result: %w", commandID, err)
+		}
+
+		var envelope agentv1.CommandEnvelope
+		if err := proto.Unmarshal(encoded, &envelope); err != nil {
+			return fmt.Errorf("decode sent command %s with missing result: %w", commandID, err)
+		}
+		if !bytes.Equal(envelope.GetCommandId(), commandID[:]) ||
+			!bytes.Equal(envelope.GetOperationId(), operationID[:]) ||
+			!bytes.Equal(envelope.GetNodeId(), nodeID[:]) {
+			return fmt.Errorf("sent command %s with missing result has inconsistent identity", commandID)
+		}
+
+		expires := envelope.GetExpiresAt()
+		if expires == nil || expires.CheckValid() != nil {
+			return fmt.Errorf("sent command %s with missing result has invalid expiry", commandID)
+		}
+		expiresAt := expires.AsTime()
+		payload := encoded
+		if attempts < reconciliationAttemptLimit {
+			if s.signer == nil {
+				return errors.New("operations: reconciliation signer is unavailable")
+			}
+			payload, expiresAt, err = PrepareRecoveryEnvelope(&envelope, agentv1.CommandDeliveryMode_COMMAND_DELIVERY_MODE_RECONCILE_ONLY, observedAt, s.signer)
+			if err != nil {
+				return fmt.Errorf("prepare missing-result reconciliation for command %s: %w", commandID, err)
+			}
+		}
+		commandTag, err := tx.Exec(ctx, `UPDATE commands
+			SET state='unknown',envelope=$2,expires_at=$3,updated_at=$4
+			WHERE id=$1 AND state IN ('dispatched','accepted','running')`, commandID, payload, expiresAt, observedAt)
+		if err != nil {
+			return fmt.Errorf("mark sent command with missing result unknown: %w", err)
+		}
+		if commandTag.RowsAffected() != 1 {
+			continue
+		}
+		operationTag, err := tx.Exec(ctx, `UPDATE operations
+			SET state='unknown',version=version+1,expires_at=$2,updated_at=$3,completed_at=NULL
+			WHERE id=$1 AND state IN ('dispatched','accepted','running','unknown')`, operationID, expiresAt, observedAt)
+		if err != nil {
+			return fmt.Errorf("mark sent operation with missing result unknown: %w", err)
+		}
+		if operationTag.RowsAffected() != 1 {
+			return fmt.Errorf("sent command %s with missing result has no mutable operation", commandID)
+		}
+		if err := markRecoveryProjectionUnknown(ctx, tx, operationID, &envelope, observedAt); err != nil {
+			return err
+		}
+
+		if attempts < reconciliationAttemptLimit {
+			outboxTag, err := tx.Exec(ctx, `UPDATE outbox_events
+				SET payload=$2,published_at=NULL,locked_by=NULL,locked_until=NULL,available_at=$3,
+					last_error='command result missing; reconciliation required'
+				WHERE id=$1 AND published_at IS NOT NULL AND locked_by IS NULL`, outboxID, payload, observedAt)
+			if err != nil {
+				return fmt.Errorf("schedule missing-result reconciliation: %w", err)
+			}
+			if outboxTag.RowsAffected() != 1 {
+				return fmt.Errorf("sent command %s with missing result lost its published outbox", commandID)
+			}
+		} else if _, err := tx.Exec(ctx, `UPDATE outbox_events
+			SET last_error='command result missing; reconciliation attempt limit reached'
+			WHERE id=$1 AND published_at IS NOT NULL AND locked_by IS NULL`, outboxID); err != nil {
+			return fmt.Errorf("record missing-result reconciliation limit: %w", err)
+		}
+		eventID, err := uuid.NewV7()
+		if err != nil {
+			return fmt.Errorf("generate missing-result reconciliation event: %w", err)
+		}
+		if _, err := tx.Exec(ctx, `INSERT INTO operation_events(id,operation_id,state,occurred_at)
+			VALUES($1,$2,'unknown',$3)`, eventID, operationID, observedAt); err != nil {
+			return fmt.Errorf("record missing-result reconciliation event: %w", err)
+		}
+	}
+	return nil
+}
+
+func (s *Service) continueStaleReconciliationsTx(ctx context.Context, tx pgx.Tx) error {
+	rows, err := tx.Query(ctx, `SELECT command.id,command.operation_id,command.node_id,command.envelope,outbox.id
+		FROM commands AS command
+		JOIN operations AS operation ON operation.id=command.operation_id
+		JOIN outbox_events AS outbox ON outbox.command_id=command.id
+		JOIN LATERAL (
+			SELECT state,finished_at
+			FROM command_attempts
+			WHERE command_id=command.id
+			ORDER BY attempt_number DESC
+			LIMIT 1
+		) AS attempt ON true
+		WHERE command.state='unknown' AND operation.state='unknown'
+		  AND outbox.published_at IS NOT NULL AND outbox.locked_by IS NULL
+		  AND outbox.attempts<$1
+		  AND attempt.state='sent'
+		  AND attempt.finished_at<=clock_timestamp()-$2::interval
+		  AND command.expires_at>clock_timestamp()
+		  AND NOT EXISTS(SELECT 1 FROM node_command_leases AS lease WHERE lease.command_id=command.id)
+		ORDER BY attempt.finished_at,command.id
+		LIMIT $3
+		FOR UPDATE OF outbox SKIP LOCKED`, reconciliationAttemptLimit, commandResultResponseTimeout.String(), reconciliationCandidateScanLimit)
+	if err != nil {
+		return fmt.Errorf("select stale reconciliation attempts: %w", err)
+	}
+	type continuation struct {
+		commandID, operationID, nodeID, outboxID uuid.UUID
+		envelope                                 []byte
+	}
+	candidates := make([]continuation, 0, reconciliationCandidateScanLimit)
+	for rows.Next() {
+		var candidate continuation
+		if err := rows.Scan(&candidate.commandID, &candidate.operationID, &candidate.nodeID, &candidate.envelope, &candidate.outboxID); err != nil {
+			rows.Close()
+			return fmt.Errorf("scan stale reconciliation attempt: %w", err)
+		}
+		candidates = append(candidates, candidate)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return fmt.Errorf("iterate stale reconciliation attempts: %w", err)
+	}
+	rows.Close()
+	if len(candidates) == 0 {
+		return nil
+	}
+	if s.signer == nil {
+		return errors.New("operations: reconciliation signer is unavailable")
+	}
+	var observedAt time.Time
+	if err := tx.QueryRow(ctx, `SELECT clock_timestamp()`).Scan(&observedAt); err != nil {
+		return fmt.Errorf("read reconciliation continuation time: %w", err)
+	}
+	continued := 0
+	for _, candidate := range candidates {
+		if continued == reconciliationBatchLimit {
+			break
+		}
+		var envelope agentv1.CommandEnvelope
+		if err := proto.Unmarshal(candidate.envelope, &envelope); err != nil {
+			return fmt.Errorf("decode stale reconciliation command %s: %w", candidate.commandID, err)
+		}
+		if !bytes.Equal(envelope.GetCommandId(), candidate.commandID[:]) ||
+			!bytes.Equal(envelope.GetOperationId(), candidate.operationID[:]) ||
+			!bytes.Equal(envelope.GetNodeId(), candidate.nodeID[:]) {
+			return fmt.Errorf("stale reconciliation command %s has inconsistent identity", candidate.commandID)
+		}
+		if envelope.GetDeliveryMode() != agentv1.CommandDeliveryMode_COMMAND_DELIVERY_MODE_RECONCILE_ONLY {
+			continue
+		}
+		payload, _, err := prepareRecoveryContinuationEnvelope(&envelope, observedAt, s.signer)
+		if err != nil {
+			return fmt.Errorf("continue reconciliation command %s: %w", candidate.commandID, err)
+		}
+		commandTag, err := tx.Exec(ctx, `UPDATE commands
+			SET envelope=$2,updated_at=$3
+			WHERE id=$1 AND state='unknown'`, candidate.commandID, payload, observedAt)
+		if err != nil {
+			return fmt.Errorf("prepare reconciliation continuation: %w", err)
+		}
+		if commandTag.RowsAffected() != 1 {
+			continue
+		}
+		outboxTag, err := tx.Exec(ctx, `UPDATE outbox_events
+			SET payload=$2,published_at=NULL,locked_by=NULL,locked_until=NULL,available_at=$3,
+				last_error='reconciliation response missing; continuing reconcile-only delivery'
+			WHERE id=$1 AND published_at IS NOT NULL AND locked_by IS NULL`, candidate.outboxID, payload, observedAt)
+		if err != nil {
+			return fmt.Errorf("schedule reconciliation continuation: %w", err)
+		}
+		if outboxTag.RowsAffected() != 1 {
+			return fmt.Errorf("reconciliation command %s lost its published outbox", candidate.commandID)
+		}
+		continued++
+	}
+	return nil
 }
 
 func (s *Service) Expire(ctx context.Context) error {

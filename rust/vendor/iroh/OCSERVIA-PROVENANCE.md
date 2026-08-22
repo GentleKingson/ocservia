@@ -26,6 +26,8 @@ The repository-local patch changes only these upstream Rust sources:
 
 - `src/endpoint.rs`
 - `src/socket.rs`
+- `src/socket/remote_map.rs`
+- `src/socket/remote_map/remote_state.rs`
 - `src/socket/transports.rs`
 - `src/socket/transports/relay.rs`
 - `src/socket/transports/relay/actor.rs`
@@ -35,12 +37,19 @@ archive source or manifest is modified.
 
 Local changes add an opt-in `Endpoint` builder setting that keeps all
 configured relay connections active, reconciles dynamic relay-map additions
-and removals, and bounds graceful relay-client close. A `test-utils`-gated
-builder hook shortens the non-home idle timeout for production-graph lifecycle
-regressions; the production default remains 60 seconds. Persistent connections
-are disabled by default. Ocservia transportd and Agent endpoints enable them
-only for custom relay maps containing at least two members. Default, disabled,
-and single-member custom relay modes retain the upstream behavior. The complete
-upstream test and example suite is not added to the ocservia workspace. Relay
-lifecycle regressions execute through the production crates against the
-workspace lock graph.
+and removals, bounds graceful relay-client close, and fails the home relay over
+to an already-connected standby. Concurrent per-relay status publishers update
+one mutex-serialized authoritative map before publishing immutable snapshots,
+so a healthy relay cannot disappear through a lost read-modify-write. Path
+selection excludes disconnected relay paths, reacts immediately to relay-state
+changes, and never blocks global
+datagram routing on a full queue belonging to an unconnected relay. A
+`test-utils`-gated builder hook shortens the non-home idle timeout for
+production-graph lifecycle regressions; the production default remains 60
+seconds. Persistent connections are disabled by default. Ocservia transportd
+and Agent endpoints enable them only for custom relay maps containing at least
+two members. Default, disabled, and single-member custom relay modes retain the
+upstream behavior. The complete upstream test and example suite is not added to
+the ocservia workspace. Relay lifecycle regressions execute through the
+production crates and the vendored crate's focused actor tests against the
+production workspace lock graph.
