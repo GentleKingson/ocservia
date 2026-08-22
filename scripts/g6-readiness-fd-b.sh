@@ -1587,8 +1587,9 @@ capture_relay_command_proof() {
     and (.agent_result_completed_at | test("^[0-9]{4}-.*Z$"))
     and (.result_observed_at | test("^[0-9]{4}-.*Z$"))
   ' "${temporary}" >/dev/null || {
-    rm -f -- "${temporary}"
+    mv -f -- "${temporary}" "${output}.failed.json"
     echo "relay failover command lacks one successful durable result" >&2
+    jq -c . "${output}.failed.json" >&2 || true
     return 1
   }
   mv -f -- "${temporary}" "${output}"

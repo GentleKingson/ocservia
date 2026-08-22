@@ -960,6 +960,7 @@ jobs:
       - name: Scan the published evidence for secrets
         id: secret-scan
         run: |
+          source scripts/env.sh
           release_manifest_digest="${{ needs.g6-rd-fd-a.outputs.release-manifest-digest }}"
           for domain in fd-a fd-b; do
             jq -e \
@@ -1496,7 +1497,7 @@ jobs:
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: g6-harness-smoke-fd-a-diagnostics-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/artifacts/g6-readiness-${{ env.RUN_ID }}
+          path: ${{ runner.temp }}/artifacts/g6-readiness-fd-a
           if-no-files-found: error
           retention-days: 1
       - name: Clean FD-A resources
@@ -1629,7 +1630,7 @@ jobs:
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: g6-harness-smoke-fd-b-diagnostics-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/artifacts/g6-readiness-${{ env.RUN_ID }}
+          path: ${{ runner.temp }}/artifacts/g6-readiness-fd-b
           if-no-files-found: error
           retention-days: 1
       - name: Clean FD-B resources
@@ -1717,6 +1718,7 @@ jobs:
       - name: Scan every smoke evidence layer
         id: scan
         run: |
+          source scripts/env.sh
           gitleaks dir --no-banner --redact --no-color "${RUNNER_TEMP}/g6-harness-smoke-fd-a"
           gitleaks dir --no-banner --redact --no-color "${RUNNER_TEMP}/g6-harness-smoke-fd-b"
           gitleaks dir --no-banner --redact --no-color "${RUNNER_TEMP}/g6-harness-smoke-bundle"

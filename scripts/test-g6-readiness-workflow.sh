@@ -213,6 +213,7 @@ reject("the frozen smoke binary must be a run-attempt-scoped artifact") unless
     diagnostics&.fetch("if") == "always()" &&
     diagnostics.fetch("run").start_with?("timeout --signal=TERM --kill-after=15s 120s ") &&
     diagnostics_upload&.fetch("if") == "always()" &&
+    diagnostics_upload.fetch("with").fetch("path") == "${{ runner.temp }}/artifacts/g6-readiness-#{domain}" &&
     diagnostics_upload.fetch("with").fetch("if-no-files-found") == "error" &&
     steps.index(diagnostics_upload) < cleanup_index
 end
@@ -222,7 +223,8 @@ reject("smoke must separate Evidence Builder from runtime") unless
   smoke_assembly.fetch("needs").sort == %w[g6-smoke-fd-a g6-smoke-fd-b g6-smoke-release] &&
   Array(smoke_assembly.fetch("steps")).any? { |step| step.fetch("run", "").include?("smoke-assemble") }
 reject("smoke must independently scan all raw and assembled evidence") unless
-  Array(jobs.fetch("g6-smoke-secret-scan").fetch("steps")).sum { |step| step.fetch("run", "").scan("gitleaks dir").length } == 3
+  Array(jobs.fetch("g6-smoke-secret-scan").fetch("steps")).sum { |step| step.fetch("run", "").scan("gitleaks dir").length } == 3 &&
+  Array(jobs.fetch("g6-smoke-secret-scan").fetch("steps")).any? { |step| step.fetch("run", "").include?("source scripts/env.sh") && step.fetch("run").include?("gitleaks dir") }
 smoke_verifier_steps = Array(jobs.fetch("g6-smoke-verifier").fetch("steps"))
 smoke_verifier_fallback = smoke_verifier_steps.find { |step| step["name"] == "Preserve structured smoke verification failure" }
 smoke_verifier_publish = smoke_verifier_steps.find { |step| step["name"] == "Publish independent smoke verification" }
@@ -429,6 +431,10 @@ end
 reject("secret scan must skip only unavailable downloads, not its structured result job") unless
   secret_downloads.length == 3 &&
   secret_downloads.all? { |step| step.fetch("if", "").include?("artifact-id != ''") }
+formal_secret_scan = Array(secret_scan.fetch("steps")).find { |step| step["name"] == "Scan the published evidence for secrets" }
+reject("formal secret scanning must activate the pinned tool environment") unless
+  formal_secret_scan&.fetch("run", "").include?("source scripts/env.sh") &&
+  formal_secret_scan.fetch("run").include?("gitleaks dir")
 verifier = jobs.fetch("g6-rd-verifier")
 reject("the independent verifier must consume only the assembled evidence layer") unless
   verifier.fetch("needs") == ["g6-rd-assemble"] && verifier.fetch("if") == "${{ always() && inputs.profile == 'formal' }}"
