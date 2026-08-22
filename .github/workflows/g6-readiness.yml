@@ -792,13 +792,7 @@ jobs:
   g6-rd-secret-scan:
     name: G6 Readiness Secret Scan
     needs: [g6-rd-fd-a, g6-rd-fd-b, g6-rd-assemble]
-    if: >-
-      ${{
-        always() &&
-        needs.g6-rd-fd-a.outputs.raw-artifact-id != '' &&
-        needs.g6-rd-fd-b.outputs.raw-artifact-id != '' &&
-        needs.g6-rd-assemble.outputs.bundle-artifact-id != ''
-      }}
+    if: always()
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     environment:
@@ -822,16 +816,19 @@ jobs:
       - name: Bootstrap pinned security tools
         run: scripts/bootstrap.sh security
       - name: Download failure domain A raw evidence
+        if: needs.g6-rd-fd-a.outputs.raw-artifact-id != ''
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: g6-rd-raw-fd-a-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/g6-rd-raw-fd-a
       - name: Download failure domain B raw evidence
+        if: needs.g6-rd-fd-b.outputs.raw-artifact-id != ''
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: g6-rd-raw-fd-b-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/g6-rd-raw-fd-b
       - name: Download the evidence bundle
+        if: needs.g6-rd-assemble.outputs.bundle-artifact-id != ''
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: g6-rd-evidence-bundle-${{ github.run_id }}-${{ github.run_attempt }}
@@ -888,11 +885,7 @@ jobs:
   g6-rd-verifier:
     name: G6 Readiness Independent Verifier
     needs: [g6-rd-assemble]
-    if: >-
-      ${{
-        always() &&
-        needs.g6-rd-assemble.outputs.bundle-artifact-id != ''
-      }}
+    if: always()
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     environment:
@@ -923,6 +916,7 @@ jobs:
       - name: Bootstrap pinned G6 Node runtime
         run: scripts/bootstrap.sh g6-runtime
       - name: Download the evidence bundle
+        if: needs.g6-rd-assemble.outputs.bundle-artifact-id != ''
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: g6-rd-evidence-bundle-${{ github.run_id }}-${{ github.run_attempt }}

@@ -232,10 +232,21 @@ reject("assembly must retain a bound failure result when its main command cannot
 secret_scan = jobs.fetch("g6-rd-secret-scan")
 reject("secret scan must inspect both raw domains and the assembled bundle") unless
   secret_scan.fetch("needs").sort == %w[g6-rd-assemble g6-rd-fd-a g6-rd-fd-b] &&
-  secret_scan.fetch("if").include?("always()")
+  secret_scan.fetch("if") == "always()"
+secret_downloads = Array(secret_scan.fetch("steps")).select do |step|
+  step.fetch("name", "").start_with?("Download ")
+end
+reject("secret scan must skip only unavailable downloads, not its structured result job") unless
+  secret_downloads.length == 3 &&
+  secret_downloads.all? { |step| step.fetch("if", "").include?("artifact-id != ''") }
 verifier = jobs.fetch("g6-rd-verifier")
 reject("the independent verifier must consume only the assembled evidence layer") unless
-  verifier.fetch("needs") == ["g6-rd-assemble"] && verifier.fetch("if").include?("always()")
+  verifier.fetch("needs") == ["g6-rd-assemble"] && verifier.fetch("if") == "always()"
+verifier_download = Array(verifier.fetch("steps")).find do |step|
+  step["name"] == "Download the evidence bundle"
+end
+reject("verifier must skip only an unavailable bundle download, not its structured result job") unless
+  verifier_download&.fetch("if") == "needs.g6-rd-assemble.outputs.bundle-artifact-id != ''"
 secret_result = Array(secret_scan.fetch("steps")).find do |step|
   step["name"] == "Record the secret scan result"
 end
