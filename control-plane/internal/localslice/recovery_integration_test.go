@@ -136,11 +136,23 @@ func TestCommandResultBeforeMarkSentIntegration(t *testing.T) {
 	if err := service.Ingest(ctx, recoveryResultEvent(t, nodeID, endpointID, sent, agentv1.CommandResultState_COMMAND_RESULT_STATE_SUCCEEDED)); err != nil {
 		t.Fatalf("ingest early success: %v", err)
 	}
-	assertRecoveryState(t, pool, commandID, "succeeded", "succeeded", true)
-	if err := operations.MarkSentWithEnvelope(ctx, dispatch, sent); err != nil {
-		t.Fatalf("finish dispatch after early success: %v", err)
+	assertEarlyResultDispatchClosed(t, pool, commandID, operationID, dispatch, "succeeded", true)
+	if err := term.Release(ctx, pool); err != nil {
+		t.Fatalf("release result-observed owner: %v", err)
+	}
+	term = acquireRecoveryTerm(t, ctx, pool, nodeID, 707)
+	authority.connectionID, authority.epoch = term.ConnectionID(), term.Epoch()
+	if err := operations.MarkSentWithEnvelope(ctx, dispatch, sent); !errors.Is(err, connectionowner.ErrNotOwner) {
+		t.Fatalf("stale MarkSent after terminal result error = %v, want ErrNotOwner", err)
+	}
+	if err := operations.Reap(ctx, 3); err != nil {
+		t.Fatalf("reap after terminal result takeover: %v", err)
 	}
 	assertEarlyResultDispatchClosed(t, pool, commandID, operationID, dispatch, "succeeded", true)
+	_, _, nextDispatch, nextSent := createClaimed(t, "post-terminal-takeover")
+	if err := operations.MarkSentWithEnvelope(ctx, nextDispatch, nextSent); err != nil {
+		t.Fatalf("claim next command after terminal result takeover: %v", err)
+	}
 
 	// Hold a fully applied result before its transaction releases the outbox
 	// row, then start MarkSent. This pins the real READ COMMITTED wait ordering

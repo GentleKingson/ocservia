@@ -673,7 +673,45 @@ func (s *Service) finishDispatch(ctx context.Context, d Dispatch, sent bool, mes
 		  AND lease.lease_token=$6`, d.OutboxID, d.CommandID, d.OperationID, d.NodeID, d.AttemptID, d.LeaseToken).
 			Scan(&leaseValid, &attemptValid, &ownsOutboxLock, &resultAfterAttempt, &commandState)
 		if errors.Is(err, pgx.ErrNoRows) {
-			return errors.New("dispatch lease is no longer valid")
+			// Result ingestion is authoritative evidence that this exact sending
+			// attempt completed and releases its lease atomically. A same-owner
+			// MarkSent arriving afterward remains idempotent; a stale owner was
+			// already rejected by guardSentEnvelopeAuthority above.
+			err = tx.QueryRow(ctx, `SELECT command.state,
+				EXISTS(SELECT 1 FROM agent_command_results AS result
+				       WHERE result.command_id=command.id AND result.created_at>=attempt.started_at)
+				FROM outbox_events AS outbox
+				JOIN commands AS command ON command.id=outbox.command_id
+				JOIN operations AS operation ON operation.id=command.operation_id
+				JOIN command_attempts AS attempt
+				  ON attempt.id=$5 AND attempt.command_id=command.id AND attempt.outbox_event_id=outbox.id
+				WHERE outbox.id=$1 AND command.id=$2 AND operation.id=$3 AND command.node_id=$4
+				  AND attempt.state='sent' AND attempt.finished_at IS NOT NULL
+				  AND NOT EXISTS(SELECT 1 FROM node_command_leases AS lease
+				                 WHERE lease.node_id=command.node_id AND lease.command_id=command.id
+				                   AND lease.lease_token=$6)`,
+				d.OutboxID, d.CommandID, d.OperationID, d.NodeID, d.AttemptID, d.LeaseToken).
+				Scan(&commandState, &resultAfterAttempt)
+			if errors.Is(err, pgx.ErrNoRows) {
+				return errors.New("dispatch lease is no longer valid")
+			}
+			if err != nil {
+				return fmt.Errorf("confirm result-completed dispatch: %w", err)
+			}
+			if !resultAfterAttempt {
+				return errors.New("dispatch lease is no longer valid")
+			}
+			switch commandState {
+			case "succeeded", "failed", "rejected", "rolled_back":
+				if _, err = tx.Exec(ctx, `UPDATE commands SET envelope=$2 WHERE id=$1`, d.CommandID, sentEnvelope); err != nil {
+					return err
+				}
+			case "unknown":
+				// Preserve the reconcile-only envelope scheduled by result ingestion.
+			default:
+				return fmt.Errorf("agent result did not advance command from %s", commandState)
+			}
+			return tx.Commit(ctx)
 		}
 		if err != nil {
 			return fmt.Errorf("lock dispatch completion: %w", err)

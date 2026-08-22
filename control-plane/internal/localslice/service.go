@@ -752,6 +752,7 @@ func ingestAgentCommandResult(ctx context.Context, tx pgx.Tx, eventID, nodeID uu
 	var currentState string
 	var commandCreatedAt time.Time
 	var dispatchInFlight bool
+	var inFlightAttemptID, inFlightLeaseToken uuid.UUID
 	if err := tx.QueryRow(ctx, `WITH locked_outbox AS MATERIALIZED (
 		SELECT id,locked_by,locked_until,attempts
 		FROM outbox_events
@@ -759,8 +760,13 @@ func ingestAgentCommandResult(ctx context.Context, tx pgx.Tx, eventID, nodeID uu
 		FOR UPDATE
 	)
 		SELECT command.envelope,command.state,command.created_at,
-		EXISTS(
-			SELECT 1
+		in_flight.attempt_id IS NOT NULL,
+		COALESCE(in_flight.attempt_id,'00000000-0000-0000-0000-000000000000'::uuid),
+		COALESCE(in_flight.lease_token,'00000000-0000-0000-0000-000000000000'::uuid)
+		FROM commands AS command
+		JOIN operations AS operation ON operation.command_id=command.id
+		LEFT JOIN LATERAL (
+			SELECT attempt.id AS attempt_id,lease.lease_token
 			FROM locked_outbox AS outbox
 			JOIN node_command_leases AS lease ON lease.command_id=command.id
 			JOIN command_attempts AS attempt
@@ -775,10 +781,11 @@ func ingestAgentCommandResult(ctx context.Context, tx pgx.Tx, eventID, nodeID uu
 			  AND attempt.attempt_number=outbox.attempts
 			  AND attempt.state='sending'
 			  AND attempt.finished_at IS NULL
-		)
-		FROM commands AS command
-		JOIN operations AS operation ON operation.command_id=command.id
-		WHERE command.id=$1 AND command.node_id=$2`, commandID, nodeID).Scan(&envelopeBytes, &currentState, &commandCreatedAt, &dispatchInFlight); err != nil {
+			LIMIT 1
+		) AS in_flight ON true
+		WHERE command.id=$1 AND command.node_id=$2`, commandID, nodeID).Scan(
+		&envelopeBytes, &currentState, &commandCreatedAt, &dispatchInFlight, &inFlightAttemptID, &inFlightLeaseToken,
+	); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return invalidCommandResult("command result does not match a dispatched command")
 		}
@@ -995,6 +1002,25 @@ func ingestAgentCommandResult(ctx context.Context, tx pgx.Tx, eventID, nodeID uu
 	if terminal {
 		if _, err := tx.Exec(ctx, `UPDATE outbox_events SET published_at=COALESCE(published_at,$2),locked_by=NULL,locked_until=NULL,last_error=NULL WHERE command_id=$1`, commandID, observedAt); err != nil {
 			return fmt.Errorf("complete command reconciliation outbox: %w", err)
+		}
+	}
+	if dispatchInFlight {
+		attemptTag, err := tx.Exec(ctx, `UPDATE command_attempts
+			SET state='sent',finished_at=clock_timestamp()
+			WHERE id=$1 AND command_id=$2 AND state='sending' AND finished_at IS NULL`, inFlightAttemptID, commandID)
+		if err != nil {
+			return fmt.Errorf("close result-observed dispatch attempt: %w", err)
+		}
+		if attemptTag.RowsAffected() != 1 {
+			return errors.New("result-observed dispatch attempt is no longer sending")
+		}
+		leaseTag, err := tx.Exec(ctx, `DELETE FROM node_command_leases
+			WHERE node_id=$1 AND command_id=$2 AND lease_token=$3`, nodeID, commandID, inFlightLeaseToken)
+		if err != nil {
+			return fmt.Errorf("release result-observed dispatch lease: %w", err)
+		}
+		if leaseTag.RowsAffected() != 1 {
+			return errors.New("result-observed dispatch lease is no longer valid")
 		}
 	}
 	if apply := envelope.GetConfigApply(); apply != nil {
