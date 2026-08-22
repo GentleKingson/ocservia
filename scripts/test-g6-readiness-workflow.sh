@@ -28,6 +28,7 @@ RELAY_DOCKERFILE="${ROOT}/deploy/production/relay.Dockerfile"
 POSTGRES_INIT="${ROOT}/deploy/g6-readiness/postgres-init/001-g6-readiness.sh"
 OCSERV_FIXTURE="${ROOT}/deploy/g6-readiness/fake-ocserv/shims/ocserv"
 RENDEZVOUS_CONTRACT="${ROOT}/tools/g6-harness/internal/rendezvous/contract.go"
+RUNTIME_ORCHESTRATOR="${ROOT}/tools/g6-harness/internal/runtime/orchestrator.go"
 CHECKPOINT_ACTION="${ROOT}/.github/actions/g6-checkpoint-upload/action.yml"
 
 ruby -r yaml - "${WORKFLOW}" "${COMPOSE_FILE}" "${CI_WORKFLOW}" <<'RUBY'
@@ -4418,27 +4419,25 @@ order_of() {
   grep -n -- "$1" "${WORKFLOW}" | head -1 | cut -d: -f1
 }
 fd_a_load_wait="$(order_of '--name "g6-rd-load-active')"
-fd_a_pitr="$(order_of 'fd-a.sh pitr-prepare')"
-if [[ -z "${fd_a_load_wait}" || -z "${fd_a_pitr}" || "${fd_a_load_wait}" -ge "${fd_a_pitr}" ]]; then
+fd_a_failover="$(order_of 'run-segment --domain fd-a --segment failover-cut')"
+if [[ -z "${fd_a_load_wait}" || -z "${fd_a_failover}" || "${fd_a_load_wait}" -ge "${fd_a_failover}" ]]; then
   echo "fd-a must wait for the active load before recording PITR markers" >&2
   exit 1
 fi
-fd_a_tunnel_up="$(order_of 'fd-a.sh tunnel-up')"
-fd_a_shared_stage="$(order_of 'fd-a.sh publish-shared-secrets')"
+fd_a_bootstrap="$(order_of 'run-segment --domain fd-a --segment bootstrap')"
 fd_a_shared_upload="$(order_of 'name: g6-rd-shared-')"
-if [[ -z "${fd_a_tunnel_up}" || -z "${fd_a_shared_stage}" || -z "${fd_a_shared_upload}" \
-  || "${fd_a_tunnel_up}" -ge "${fd_a_shared_stage}" \
-  || "${fd_a_shared_stage}" -ge "${fd_a_shared_upload}" ]]; then
+if [[ -z "${fd_a_bootstrap}" || -z "${fd_a_shared_upload}" \
+  || "${fd_a_bootstrap}" -ge "${fd_a_shared_upload}" ]]; then
   echo "fd-a must stage the shared trust material before publishing its rendezvous" >&2
   exit 1
 fi
-fd_a_enroll="$(order_of 'fd-a.sh agents-enroll')"
+fd_a_enroll="$(order_of 'run-segment --domain fd-a --segment enroll')"
 fd_a_peer_enrolled="$(order_of '--name "g6-rd-agents-enrolled-fd-b')"
-fd_a_trust_reload="$(order_of 'fd-a.sh transport-trust-reload')"
-fd_a_agents_start="$(order_of 'fd-a.sh agents-start')"
-fd_b_enroll="$(order_of 'fd-b.sh agents-enroll')"
+fd_a_trust_reload="$(order_of 'run-segment --domain fd-a --segment transport-trust')"
+fd_a_agents_start="$(order_of 'run-segment --domain fd-a --segment activate-agents')"
+fd_b_enroll="$(order_of 'run-segment --domain fd-b --segment enroll')"
 fd_b_peer_trust="$(order_of '--name "g6-rd-trust-ready')"
-fd_b_agents_start="$(order_of 'fd-b.sh agents-start')"
+fd_b_agents_start="$(order_of 'run-segment --domain fd-b --segment load')"
 if [[ -z "${fd_a_enroll}" || -z "${fd_a_peer_enrolled}" || -z "${fd_a_trust_reload}" \
   || -z "${fd_a_agents_start}" || "${fd_a_enroll}" -ge "${fd_a_peer_enrolled}" \
   || "${fd_a_peer_enrolled}" -ge "${fd_a_trust_reload}" \
@@ -4452,9 +4451,9 @@ if [[ -z "${fd_b_enroll}" || -z "${fd_b_peer_trust}" || -z "${fd_b_agents_start}
   echo "fd-b must wait for the complete transport trust snapshot before starting agents" >&2
   exit 1
 fi
-fd_b_load="$(order_of 'fd-b.sh load-start')"
+fd_b_load="$(order_of 'run-segment --domain fd-b --segment load')"
 fd_b_isolation_wait="$(order_of '--name "g6-rd-isolation')"
-fd_b_promote="$(order_of 'fd-b.sh promote ')"
+fd_b_promote="$(order_of 'run-segment --domain fd-b --segment promote')"
 if [[ -z "${fd_b_load}" || -z "${fd_b_promote}" || "${fd_b_load}" -ge "${fd_b_promote}" ]]; then
   echo "the load must start before the promotion consumes the isolation record" >&2
   exit 1
@@ -4463,10 +4462,10 @@ if [[ -z "${fd_b_isolation_wait}" || "${fd_b_isolation_wait}" -ge "${fd_b_promot
   echo "the promotion must wait for the isolation record" >&2
   exit 1
 fi
-fd_b_window="$(order_of 'fd-b.sh window')"
-fd_b_crash="$(order_of 'outbox-result-before-commit')"
-fd_b_collect="$(order_of 'fd-b.sh evidence-collect')"
-fd_b_freeze="$(order_of 'fd-b.sh final-freeze')"
+fd_b_window="$(order_of 'run-segment --domain fd-b --segment window')"
+fd_b_crash="$(order_of 'run-segment --domain fd-b --segment fault-scenarios')"
+fd_b_collect="$(order_of 'run-segment --domain fd-b --segment evidence')"
+fd_b_freeze="${fd_b_collect}"
 fd_b_result="$(order_of 'fd-b.sh runtime-result')"
 if [[ -z "${fd_b_crash}" || -z "${fd_b_window}" || "${fd_b_crash}" -ge "${fd_b_window}" ]]; then
   echo "every fault scenario must precede the bounded observation window" >&2
@@ -4477,16 +4476,16 @@ if [[ -z "${fd_b_window}" || -z "${fd_b_collect}" || "${fd_b_window}" -ge "${fd_
   exit 1
 fi
 if [[ -z "${fd_b_freeze}" || -z "${fd_b_result}" \
-  || "${fd_b_collect}" -ge "${fd_b_freeze}" || "${fd_b_freeze}" -ge "${fd_b_result}" ]]; then
+  || "${fd_b_freeze}" -ge "${fd_b_result}" ]]; then
   echo "fd-b must freeze runtime evidence before publishing its bound raw result" >&2
   exit 1
 fi
-fd_a_ready="$(order_of 'fd-a.sh ready')"
+fd_a_ready="$(order_of 'run-segment --domain fd-a --segment relay-cut')"
 fd_a_freeze_wait="$(order_of '--name "g6-rd-final-freeze')"
-fd_a_collect="$(order_of 'fd-a.sh evidence "${RUNNER_TEMP}/g6-rd-final-freeze')"
+fd_a_collect="$(order_of 'run-segment --domain fd-a --segment evidence')"
 fd_a_result="$(order_of 'fd-a.sh runtime-result')"
 fd_b_ready_wait="$(order_of '--name "g6-rd-fd-a-ready')"
-fd_b_scenario="$(order_of 'fd-b.sh scenario-scheduler')"
+fd_b_scenario="$(order_of 'run-segment --domain fd-b --segment fault-scenarios')"
 if [[ -z "${fd_a_ready}" || -z "${fd_a_freeze_wait}" || -z "${fd_a_collect}" || -z "${fd_a_result}" \
   || "${fd_a_ready}" -ge "${fd_a_freeze_wait}" || "${fd_a_freeze_wait}" -ge "${fd_a_collect}" \
   || "${fd_a_collect}" -ge "${fd_a_result}" ]]; then
@@ -4573,7 +4572,7 @@ grep -q -- '--user 999:999' <<<"${rejoin_phase}" || {
   exit 1
 }
 promoted_wait="$(order_of '--name "g6-rd-new-primary')"
-post_promotion_probe="$(order_of 'dual-primary-probes "${RUNNER_TEMP}/g6-rd-new-primary')"
+post_promotion_probe="$(order_of 'run-segment --domain fd-a --segment recovery')"
 if [[ -z "${promoted_wait}" || -z "${post_promotion_probe}" || "${promoted_wait}" -ge "${post_promotion_probe}" ]]; then
   echo "former-primary probes must run after the replacement promotion" >&2
   exit 1
@@ -4722,7 +4721,7 @@ grep -q 'fd-a final evidence was not frozen after the bounded window' "${BUILDER
 # with exact run bindings. Cross-domain construction no longer belongs to fd-b.
 node "${ROOT}/scripts/test-g6-pipeline.mjs"
 
-grep -q 'scenario-relay "${RUNNER_TEMP}/g6-rd-fd-a-ready"' "${WORKFLOW}" || {
+grep -qE '"scenario-relay":[[:space:]]+\{"scenario-relay", peer\("fd-a-ready"\)\}' "${RUNTIME_ORCHESTRATOR}" || {
   echo "the relay scenario must consume the peer readiness evidence" >&2
   exit 1
 }
