@@ -5,7 +5,9 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-WORKFLOW="${ROOT}/.github/workflows/g6-readiness.yml"
+FORMAL_CALLER="${ROOT}/.github/workflows/g6-readiness.yml"
+SMOKE_CALLER="${ROOT}/.github/workflows/g6-harness-smoke.yml"
+WORKFLOW="${ROOT}/.github/workflows/g6-harness-core.yml"
 CI_WORKFLOW="${ROOT}/.github/workflows/ci.yml"
 COMPOSE_FILE="${ROOT}/deploy/g6-readiness/compose.yaml"
 SUPERVISOR="${ROOT}/deploy/g6-readiness/agent-supervisor.sh"
@@ -31,8 +33,10 @@ RENDEZVOUS_CONTRACT="${ROOT}/tools/g6-harness/internal/rendezvous/contract.go"
 RUNTIME_ORCHESTRATOR="${ROOT}/tools/g6-harness/internal/runtime/orchestrator.go"
 CHECKPOINT_ACTION="${ROOT}/.github/actions/g6-checkpoint-upload/action.yml"
 
-ruby -r yaml - "${WORKFLOW}" "${COMPOSE_FILE}" "${CI_WORKFLOW}" <<'RUBY'
-workflow_path, compose_path, ci_workflow_path = ARGV
+ruby -r yaml - "${FORMAL_CALLER}" "${SMOKE_CALLER}" "${WORKFLOW}" "${COMPOSE_FILE}" "${CI_WORKFLOW}" <<'RUBY'
+formal_path, smoke_path, workflow_path, compose_path, ci_workflow_path = ARGV
+formal = YAML.safe_load(File.read(formal_path), aliases: true)
+smoke = YAML.safe_load(File.read(smoke_path), aliases: true)
 workflow = YAML.safe_load(File.read(workflow_path), aliases: true)
 compose = YAML.safe_load(File.read(compose_path), aliases: true)
 ci_workflow = YAML.safe_load(File.read(ci_workflow_path), aliases: true)
@@ -42,20 +46,58 @@ def reject(message)
   exit 1
 end
 
-trigger = workflow.fetch(true)
+trigger = formal.fetch(true)
 reject("G6 readiness must remain workflow_dispatch-only") unless trigger.keys == ["workflow_dispatch"]
 authority = trigger.fetch("workflow_dispatch").fetch("inputs").fetch("authority")
 reject("the authority input must be a required choice") unless authority.fetch("type") == "choice" && authority.fetch("required") == true
 reject("the authority enum is frozen") unless authority.fetch("options") == %w[engineering production_readiness]
 reject("engineering must stay the default authority") unless authority.fetch("default") == "engineering"
-reject("G6 readiness permissions must be read-only") unless workflow.fetch("permissions") == {"contents" => "read", "actions" => "read"}
-concurrency = workflow.fetch("concurrency")
+reject("G6 readiness permissions must be read-only") unless formal.fetch("permissions") == {"contents" => "read", "actions" => "read"}
+concurrency = formal.fetch("concurrency")
 reject("G6 readiness concurrency must bind ref and authority") unless concurrency.fetch("group").include?("github.ref") && concurrency.fetch("group").include?("inputs.authority")
 reject("formal G6 dispatches must queue without cancelling an active evidence run") unless
   concurrency.fetch("queue") == "max" && !concurrency.key?("cancel-in-progress")
 
+formal_jobs = formal.fetch("jobs")
+reject("formal readiness must be a single thin reusable-workflow caller") unless formal_jobs.keys == ["g6-harness-core"]
+formal_call = formal_jobs.fetch("g6-harness-core")
+reject("formal readiness must call the local reusable core") unless formal_call.fetch("uses") == "./.github/workflows/g6-harness-core.yml"
+reject("formal readiness must select only the formal profile") unless
+  formal_call.fetch("with") == {
+    "profile" => "formal",
+    "authority" => "${{ inputs.authority }}",
+    "candidate_sha" => "${{ github.sha }}",
+  }
+
+core_trigger = workflow.fetch(true)
+reject("the G6 core must be reusable-only") unless core_trigger.keys == ["workflow_call"]
+core_inputs = core_trigger.fetch("workflow_call").fetch("inputs")
+reject("the reusable core must expose exact typed profile, authority, and candidate inputs") unless
+  core_inputs.keys.sort == %w[authority candidate_sha profile] &&
+  core_inputs.values.all? { |input| input.fetch("type") == "string" && input.fetch("required") == true }
+reject("the reusable core permissions must remain read-only") unless workflow.fetch("permissions") == {"contents" => "read", "actions" => "read"}
+
+smoke_trigger = smoke.fetch(true)
+reject("G6 harness smoke must run only for pull requests") unless smoke_trigger.keys == ["pull_request"]
+reject("G6 harness smoke permissions must remain read-only") unless smoke.fetch("permissions") == {"contents" => "read", "actions" => "read"}
+smoke_concurrency = smoke.fetch("concurrency")
+reject("PR smoke must use latest-wins cancellation scoped to the pull request") unless
+  smoke_concurrency.fetch("group").include?("github.event.pull_request.number") &&
+  smoke_concurrency.fetch("cancel-in-progress") == true && !smoke_concurrency.key?("queue")
+smoke_jobs = smoke.fetch("jobs")
+reject("PR smoke must be a single thin reusable-workflow caller") unless smoke_jobs.keys == ["g6-harness-core"]
+smoke_call = smoke_jobs.fetch("g6-harness-core")
+reject("PR smoke must call the local reusable core") unless smoke_call.fetch("uses") == "./.github/workflows/g6-harness-core.yml"
+reject("PR smoke must be permanently non-authoritative") unless
+  smoke_call.fetch("with") == {
+    "profile" => "smoke",
+    "authority" => "engineering",
+    "candidate_sha" => "${{ github.sha }}",
+  }
+
 jobs = workflow.fetch("jobs")
 required_jobs = %w[
+  g6-contract
   g6-rd-release-image
   g6-rd-fd-a
   g6-rd-fd-b
@@ -63,6 +105,10 @@ required_jobs = %w[
   g6-rd-secret-scan
   g6-rd-verifier
   g6-rd-gate
+  g6-smoke-release
+  g6-smoke-fd-a
+  g6-smoke-fd-b
+  g6-smoke-result
 ]
 reject("G6 readiness is missing a required semantic layer") unless
   (required_jobs - jobs.keys).empty?
@@ -103,9 +149,71 @@ jobs.each do |job_id, job|
     end
   reject("#{job_id} must not force a failing check green") if Array(job.fetch("steps")).any? { |step| step.key?("run") && step.fetch("run").include?("continue-on-error") }
   reject("#{job_id} must not mask a failed step") if Array(job.fetch("steps")).any? { |step| step["continue-on-error"] == true }
-  environment = job.fetch("environment").fetch("name")
-  reject("#{job_id} must gate both authorities through GitHub environments") unless environment.include?("g6-production-readiness") && environment.include?("g6-engineering-rehearsal") && environment.include?("inputs.authority")
+  if job_id.start_with?("g6-rd-")
+    environment = job.fetch("environment").fetch("name")
+    reject("#{job_id} must gate both authorities through GitHub environments") unless environment.include?("g6-production-readiness") && environment.include?("g6-engineering-rehearsal") && environment.include?("inputs.authority")
+  else
+    reject("#{job_id} must never enter a formal G6 environment") if job.key?("environment")
+  end
 end
+
+reject("caller-specific concurrency policy must not be duplicated inside the reusable core") if
+  workflow.key?("concurrency")
+%w[g6-rd-release-image g6-rd-fd-a g6-rd-fd-b].each do |job_id|
+  reject("#{job_id} must be unreachable from the smoke profile") unless
+    jobs.fetch(job_id).fetch("if") == "inputs.profile == 'formal'"
+end
+%w[g6-rd-assemble g6-rd-secret-scan g6-rd-verifier g6-rd-gate].each do |job_id|
+  reject("#{job_id} must remain unreachable from the smoke profile even under always()") unless
+    jobs.fetch(job_id).fetch("if") == "${{ always() && inputs.profile == 'formal' }}"
+end
+
+smoke_release = jobs.fetch("g6-smoke-release")
+reject("smoke must build one frozen binary only on the smoke profile") unless
+  smoke_release.fetch("needs") == "g6-contract" && smoke_release.fetch("if") == "inputs.profile == 'smoke'"
+smoke_release_steps = Array(smoke_release.fetch("steps"))
+smoke_cache = smoke_release_steps.find { |step| step["name"] == "Restore the pinned smoke Go toolchain" }
+smoke_build = smoke_release_steps.find { |step| step["name"] == "Build and freeze the smoke harness" }
+smoke_publish = smoke_release_steps.find { |step| step["name"] == "Publish the frozen smoke harness" }
+reject("smoke must build with the pinned local Go toolchain and freeze its digest") unless
+  smoke_build&.fetch("run", "").include?(".tools/go/bin/go") &&
+  smoke_build.fetch("run").include?("GOTOOLCHAIN=local") &&
+  smoke_build.fetch("run").include?("GOOS=linux") &&
+  smoke_build.fetch("run").include?("harness-sha256") &&
+  smoke_release_steps.any? { |step| step.fetch("run", "") == "scripts/bootstrap.sh go-test" }
+reject("pull-request smoke must restore but never write a tool cache") unless
+  smoke_cache&.fetch("uses", "").start_with?("actions/cache/restore@") &&
+  smoke_release_steps.none? { |step| step.fetch("uses", "").match?(%r{\Aactions/cache(?:/save)?@}) }
+reject("the frozen smoke binary must be a run-attempt-scoped artifact") unless
+  smoke_publish&.fetch("with")&.fetch("name", "").include?("github.run_id") &&
+  smoke_publish.fetch("with").fetch("name").include?("github.run_attempt")
+
+%w[g6-smoke-fd-a g6-smoke-fd-b].each do |job_id|
+  job = jobs.fetch(job_id)
+  domain = job_id.end_with?("a") ? "fd-a" : "fd-b"
+  steps = Array(job.fetch("steps"))
+  execute = steps.find { |step| step["name"] == "Verify and execute the frozen smoke harness" }
+  reject("#{job_id} must independently consume the one frozen release") unless
+    job.fetch("needs") == "g6-smoke-release" && job.fetch("if") == "inputs.profile == 'smoke'" &&
+    execute&.fetch("run", "").include?("smoke-domain") && execute.fetch("run").include?("--domain #{domain}") &&
+    execute.fetch("run").include?("sha256sum")
+  reject("#{job_id} must be fixed to engineering authority") unless job.fetch("env").fetch("G6_AUTHORITY") == "engineering"
+end
+
+smoke_result = jobs.fetch("g6-smoke-result")
+smoke_result_steps = Array(smoke_result.fetch("steps"))
+smoke_aggregate = smoke_result_steps.find { |step| step["name"] == "Aggregate the non-authoritative smoke result" }
+smoke_enforce = smoke_result_steps.find { |step| step["name"] == "Enforce the smoke contract" }
+reject("smoke aggregation must require two separately scheduled hosted domains") unless
+  smoke_result.fetch("needs").sort == %w[g6-smoke-fd-a g6-smoke-fd-b g6-smoke-release] &&
+  smoke_result.fetch("if") == "${{ always() && inputs.profile == 'smoke' }}" &&
+  smoke_aggregate&.fetch("run", "").include?("smoke-aggregate")
+reject("the smoke result must be structurally unable to claim a formal verdict") unless
+  smoke_enforce&.fetch("if") == "always()" &&
+  smoke_enforce.fetch("run").include?('.formal_verdict_eligible == false') &&
+  smoke_enforce.fetch("run").include?('ocservia.g6-harness-smoke-result.v1') &&
+  !smoke_result_steps.any? { |step| step.fetch("run", "").include?("g6-pipeline.mjs gate") }
+
 release_job = jobs.fetch("g6-rd-release-image")
 release_steps = Array(release_job.fetch("steps"))
 reject("the release producer must expose its frozen manifest digest") unless
@@ -247,7 +355,7 @@ assemble = jobs.fetch("g6-rd-assemble")
 reject("evidence assembly must depend on both runtime jobs") unless
   assemble.fetch("needs").sort == %w[g6-rd-fd-a g6-rd-fd-b]
 reject("evidence assembly must always preserve a partial or complete result") unless
-  assemble.fetch("if") == "always()"
+  assemble.fetch("if") == "${{ always() && inputs.profile == 'formal' }}"
 assemble_steps = Array(assemble.fetch("steps"))
 assemble_fallback = assemble_steps.find do |step|
   step["name"] == "Preserve an assembly result when assembly could not start"
@@ -280,7 +388,7 @@ reject("assembly must publish a separate result bound to raw and bundle artifact
 secret_scan = jobs.fetch("g6-rd-secret-scan")
 reject("secret scan must inspect both raw domains and the assembled bundle") unless
   secret_scan.fetch("needs").sort == %w[g6-rd-assemble g6-rd-fd-a g6-rd-fd-b] &&
-  secret_scan.fetch("if") == "always()"
+  secret_scan.fetch("if") == "${{ always() && inputs.profile == 'formal' }}"
 secret_downloads = Array(secret_scan.fetch("steps")).select do |step|
   step.fetch("name", "").start_with?("Download ")
 end
@@ -289,7 +397,7 @@ reject("secret scan must skip only unavailable downloads, not its structured res
   secret_downloads.all? { |step| step.fetch("if", "").include?("artifact-id != ''") }
 verifier = jobs.fetch("g6-rd-verifier")
 reject("the independent verifier must consume only the assembled evidence layer") unless
-  verifier.fetch("needs") == ["g6-rd-assemble"] && verifier.fetch("if") == "always()"
+  verifier.fetch("needs") == ["g6-rd-assemble"] && verifier.fetch("if") == "${{ always() && inputs.profile == 'formal' }}"
 verifier_download = Array(verifier.fetch("steps")).find do |step|
   step["name"] == "Download the evidence bundle"
 end
@@ -319,7 +427,7 @@ reject("verifier result binding must survive an earlier download or verification
   verifier_binding.fetch("run").include?("needs.g6-rd-assemble.outputs.bundle-artifact-digest")
 gate = jobs.fetch("g6-rd-gate")
 reject("the final gate must always aggregate every result layer") unless
-  gate.fetch("if") == "always()" &&
+  gate.fetch("if") == "${{ always() && inputs.profile == 'formal' }}" &&
   gate.fetch("needs").sort == %w[g6-rd-assemble g6-rd-fd-a g6-rd-fd-b g6-rd-secret-scan g6-rd-verifier]
 gate_build = Array(gate.fetch("steps")).find { |step| step["name"] == "Build the fail-closed G6 gate result" }
 reject("the final gate must reject a failed semantic job even when it emitted a result") unless
@@ -4401,9 +4509,9 @@ if [[ "${authority_bindings}" -ne 3 ]]; then
   echo "both failure-domain jobs and the verifier must bind the dispatched authority (found ${authority_bindings})" >&2
   exit 1
 fi
-sha_bindings="$(grep -c 'G6RD_CANDIDATE_SHA: ${{ github.sha }}' "${WORKFLOW}")"
-if [[ "${sha_bindings}" -ne 2 ]]; then
-  echo "both failure-domain jobs must bind the candidate SHA (found ${sha_bindings})" >&2
+sha_bindings="$(grep -c 'G6RD_CANDIDATE_SHA: ${{ inputs.candidate_sha }}' "${WORKFLOW}")"
+if [[ "${sha_bindings}" -ne 5 ]]; then
+  echo "both formal domains and all smoke consumers must bind the reusable candidate input (found ${sha_bindings})" >&2
   exit 1
 fi
 if grep -q 'G6RD_FAILURE_DOMAIN_CLASS' "${WORKFLOW}"; then

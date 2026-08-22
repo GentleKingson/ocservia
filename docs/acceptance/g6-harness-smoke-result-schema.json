@@ -1,0 +1,147 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/GentleKingson/ocservia/docs/acceptance/g6-harness-smoke-result-schema.json",
+  "title": "Ocservia G6 Harness Smoke Result",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "profile",
+    "binding",
+    "harness_sha256",
+    "started_at",
+    "completed_at",
+    "domains",
+    "artifacts",
+    "status",
+    "formal_verdict_eligible",
+    "failure"
+  ],
+  "properties": {
+    "schema_version": { "const": "ocservia.g6-harness-smoke-result.v1" },
+    "profile": { "const": "smoke" },
+    "binding": { "$ref": "#/$defs/binding" },
+    "harness_sha256": {
+      "oneOf": [
+        { "type": "null" },
+        { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+      ]
+    },
+    "started_at": { "type": "string", "format": "date-time" },
+    "completed_at": { "type": "string", "format": "date-time" },
+    "domains": {
+      "oneOf": [
+        { "type": "null" },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["fd_a", "fd_b"],
+          "properties": {
+            "fd_a": { "$ref": "#/$defs/domain" },
+            "fd_b": { "$ref": "#/$defs/domain" }
+          }
+        }
+      ]
+    },
+    "artifacts": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["release", "fd_a", "fd_b"],
+      "properties": {
+        "release": { "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/artifact" }] },
+        "fd_a": { "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/artifact" }] },
+        "fd_b": { "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/artifact" }] }
+      }
+    },
+    "status": { "enum": ["passed", "failed"] },
+    "formal_verdict_eligible": { "const": false },
+    "failure": {
+      "oneOf": [
+        { "type": "null" },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["code", "message"],
+          "properties": {
+            "code": { "type": "string", "pattern": "^[a-z0-9_]+$" },
+            "message": { "type": "string", "minLength": 1 }
+          }
+        }
+      ]
+    }
+  },
+  "$defs": {
+    "binding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["candidate_sha", "run_id", "run_attempt", "environment_id", "authority"],
+      "properties": {
+        "candidate_sha": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+        "run_id": { "type": "string", "pattern": "^[1-9][0-9]*$" },
+        "run_attempt": { "type": "integer", "minimum": 1 },
+        "environment_id": { "type": "string", "pattern": "^g6-[a-z0-9]{8,32}$" },
+        "authority": { "const": "engineering" }
+      }
+    },
+    "artifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["artifact_id", "artifact_digest"],
+      "properties": {
+        "artifact_id": { "type": "integer", "minimum": 1 },
+        "artifact_digest": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+      }
+    },
+    "domain": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "profile",
+        "binding",
+        "failure_domain",
+        "runner_name",
+        "runner_boot_id",
+        "harness_sha256",
+        "started_at",
+        "completed_at",
+        "status"
+      ],
+      "properties": {
+        "schema_version": { "const": "ocservia.g6-harness-smoke-domain-result.v1" },
+        "profile": { "const": "smoke" },
+        "binding": { "$ref": "#/$defs/binding" },
+        "failure_domain": { "enum": ["fd-a", "fd-b"] },
+        "runner_name": { "type": "string", "minLength": 1 },
+        "runner_boot_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+        },
+        "harness_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "started_at": { "type": "string", "format": "date-time" },
+        "completed_at": { "type": "string", "format": "date-time" },
+        "status": { "const": "passed" }
+      }
+    }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "status": { "const": "passed" } } },
+      "then": {
+        "properties": {
+          "failure": { "type": "null" },
+          "harness_sha256": { "type": "string" },
+          "domains": { "type": "object" },
+          "artifacts": {
+            "properties": {
+              "release": { "type": "object" },
+              "fd_a": { "type": "object" },
+              "fd_b": { "type": "object" }
+            }
+          }
+        }
+      },
+      "else": { "properties": { "failure": { "type": "object" } } }
+    }
+  ]
+}

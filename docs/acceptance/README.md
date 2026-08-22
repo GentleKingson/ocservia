@@ -49,6 +49,15 @@ and artifact or payload digest mismatch. `ocservia.g6-rendezvous-result.v1`
 records every successful wait or structured fail-closed outcome, including
 peer failure, bounded timeout, GitHub API failure, and contract rejection.
 
+The formal caller and the pull-request smoke caller share one reusable core
+workflow but invoke disjoint profiles. The smoke profile is fixed to
+`engineering`, runs on two distinct hosted-runner boot identities, and verifies
+that both runners execute the same candidate-bound frozen harness bytes.
+`ocservia.g6-harness-smoke-result.v1` binds those domain results and their
+GitHub artifact IDs and digests while fixing `formal_verdict_eligible` to
+`false`. A smoke result is never an `ocservia.g6-verdict.v2`, never references
+the production-readiness Environment, and cannot satisfy the formal G6 gate.
+
 The harness records actual values and source artifact digests. It does not
 authoritatively declare limits, comparisons, per-item results, or the final
 result. `scripts/verify-g6-evidence.mjs` loads the exact SLO, topology, release

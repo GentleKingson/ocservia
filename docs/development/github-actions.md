@@ -50,6 +50,16 @@ runs the default 500-Agent single-VM profile and all fault phases with a
 45-minute timeout. Capacity evidence is not part of ordinary pull-request
 feedback, and the primary workflow keeps the smoke parameters unchanged.
 
+The G6 harness has two thin callers over `.github/workflows/g6-harness-core.yml`.
+`g6-readiness.yml` is the queued manual formal caller and preserves the full
+two-failure-domain production-readiness contract. `g6-harness-smoke.yml` is a
+latest-wins pull-request check fixed to engineering authority. Its two hosted
+jobs execute the same frozen harness binary and must report different runner
+boot identities. The smoke publishes only
+`ocservia.g6-harness-smoke-result.v1`; it never enters a formal Environment,
+produces a production-readiness verdict, or substitutes for the three required
+CI aggregators or a formal G6 run.
+
 ## Bootstrap profiles
 
 `toolchains.lock` is the only version source, and `scripts/checksums.txt`

@@ -1,0 +1,21 @@
+name: G6 Harness Smoke
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  g6-harness-core:
+    name: G6 Harness Smoke Core
+    uses: ./.github/workflows/g6-harness-core.yml
+    with:
+      profile: smoke
+      authority: engineering
+      candidate_sha: ${{ github.sha }}

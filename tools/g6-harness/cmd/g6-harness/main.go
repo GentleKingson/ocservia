@@ -15,6 +15,7 @@ import (
 
 	"github.com/GentleKingson/ocservia/tools/g6-harness/internal/rendezvous"
 	"github.com/GentleKingson/ocservia/tools/g6-harness/internal/runtime"
+	"github.com/GentleKingson/ocservia/tools/g6-harness/internal/smoke"
 	"github.com/GentleKingson/ocservia/tools/g6-harness/internal/state"
 )
 
@@ -27,7 +28,7 @@ func main() {
 
 func run(arguments []string) error {
 	if len(arguments) == 0 {
-		return errors.New("usage: g6-harness <checkpoint-manifest|wait-download|run-segment|cleanup> [options]")
+		return errors.New("usage: g6-harness <checkpoint-manifest|wait-download|run-segment|cleanup|smoke-domain|smoke-aggregate> [options]")
 	}
 	switch arguments[0] {
 	case "checkpoint-manifest":
@@ -38,9 +39,75 @@ func run(arguments []string) error {
 		return runSegment(arguments[1:])
 	case "cleanup":
 		return runCleanup(arguments[1:])
+	case "smoke-domain":
+		return runSmokeDomain(arguments[1:])
+	case "smoke-aggregate":
+		return runSmokeAggregate(arguments[1:])
 	default:
 		return fmt.Errorf("unknown g6-harness command %q", arguments[0])
 	}
+}
+
+func runSmokeDomain(arguments []string) error {
+	flags := flag.NewFlagSet("smoke-domain", flag.ContinueOnError)
+	domain := flags.String("domain", "", "smoke failure domain")
+	expectedSHA := flags.String("expected-harness-sha", "", "frozen harness SHA-256")
+	output := flags.String("output", "", "absolute domain result path")
+	bootID := flags.String("boot-id", "/proc/sys/kernel/random/boot_id", "absolute runner boot ID path")
+	if err := flags.Parse(arguments); err != nil {
+		return err
+	}
+	if flags.NArg() != 0 || *domain == "" || *expectedSHA == "" || *output == "" {
+		return errors.New("smoke-domain requires --domain, --expected-harness-sha, and --output")
+	}
+	binding, err := rendezvous.BindingFromEnvironment()
+	if err != nil {
+		return err
+	}
+	executable, err := os.Executable()
+	if err != nil {
+		return err
+	}
+	result, smokeErr := smoke.RunDomain(smoke.DomainOptions{
+		Binding: binding, Domain: *domain, RunnerName: os.Getenv("G6_SMOKE_RUNNER_NAME"), BootIDPath: *bootID,
+		ExecutablePath: executable, ExpectedSHA256: *expectedSHA, Now: time.Now,
+	})
+	return errors.Join(smokeErr, smoke.Write(*output, result))
+}
+
+func runSmokeAggregate(arguments []string) error {
+	flags := flag.NewFlagSet("smoke-aggregate", flag.ContinueOnError)
+	fdA := flags.String("fd-a", "", "absolute FD-A domain result path")
+	fdB := flags.String("fd-b", "", "absolute FD-B domain result path")
+	expectedSHA := flags.String("expected-harness-sha", "", "frozen harness SHA-256")
+	output := flags.String("output", "", "absolute aggregate result path")
+	releaseID := flags.String("release-artifact-id", "", "frozen harness artifact ID")
+	releaseDigest := flags.String("release-artifact-digest", "", "frozen harness artifact digest")
+	fdAID := flags.String("fd-a-artifact-id", "", "FD-A result artifact ID")
+	fdADigest := flags.String("fd-a-artifact-digest", "", "FD-A result artifact digest")
+	fdBID := flags.String("fd-b-artifact-id", "", "FD-B result artifact ID")
+	fdBDigest := flags.String("fd-b-artifact-digest", "", "FD-B result artifact digest")
+	if err := flags.Parse(arguments); err != nil {
+		return err
+	}
+	if flags.NArg() != 0 || *fdA == "" || *fdB == "" || *expectedSHA == "" || *output == "" {
+		return errors.New("smoke-aggregate requires both domain results, the harness digest, and output")
+	}
+	binding, err := rendezvous.BindingFromEnvironment()
+	if err != nil {
+		return err
+	}
+	release, err := smoke.ParseArtifactReference(*releaseID, *releaseDigest)
+	parseErr := err
+	artifactA, err := smoke.ParseArtifactReference(*fdAID, *fdADigest)
+	parseErr = errors.Join(parseErr, err)
+	artifactB, err := smoke.ParseArtifactReference(*fdBID, *fdBDigest)
+	parseErr = errors.Join(parseErr, err)
+	result, aggregateErr := smoke.Aggregate(smoke.AggregateOptions{
+		Binding: binding, FDAPath: *fdA, FDBPath: *fdB, ReleaseArtifact: release,
+		FDAArtifact: artifactA, FDBArtifact: artifactB, ExpectedHarnessSHA: *expectedSHA, Now: time.Now,
+	})
+	return errors.Join(parseErr, aggregateErr, smoke.Write(*output, result))
 }
 
 func runManifest(arguments []string) error {
