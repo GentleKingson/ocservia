@@ -972,7 +972,10 @@ func (s *Service) reconcileExpiredSendingAttemptsTx(ctx context.Context, tx pgx.
 		}
 		expiresAt := expires.AsTime()
 		if scheduleRecovery {
-			if commandState == "queued" {
+			// Unknown rows created by older code or operator recovery may still
+			// carry an ordinary execution envelope. Convert those exactly once;
+			// only an already reconcile-only envelope is a continuation attempt.
+			if envelope.GetDeliveryMode() != agentv1.CommandDeliveryMode_COMMAND_DELIVERY_MODE_RECONCILE_ONLY {
 				payload, expiresAt, err = PrepareRecoveryEnvelope(
 					&envelope,
 					agentv1.CommandDeliveryMode_COMMAND_DELIVERY_MODE_RECONCILE_ONLY,
