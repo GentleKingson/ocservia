@@ -1497,7 +1497,7 @@ jobs:
           name: g6-harness-smoke-result-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/g6-harness-smoke-result
           if-no-files-found: error
-          retention-days: 7
+          retention-days: 1
       - name: Enforce the smoke contract
         if: always()
         run: |
