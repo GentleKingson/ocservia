@@ -46,9 +46,10 @@ changes, and never blocks global
 datagram routing on a full queue belonging to an unconnected relay. A
 `test-utils`-gated builder hook shortens the non-home idle timeout for
 production-graph lifecycle regressions; the production default remains 60
-seconds. Persistent connections are disabled by default. Only ocservia
-transportd enables them, and only for custom relay maps containing at least two
-members. The Agent retains the unmodified default behavior. The complete
-upstream test and example suite is not added to the ocservia workspace. Relay
-lifecycle regressions execute through `ocservia-transportd` and the vendored
-crate's focused actor tests against the production workspace lock graph.
+seconds. Persistent connections are disabled by default. Ocservia transportd
+and Agent endpoints enable them only for custom relay maps containing at least
+two members. Default, disabled, and single-member custom relay modes retain the
+upstream behavior. The complete upstream test and example suite is not added to
+the ocservia workspace. Relay lifecycle regressions execute through the
+production crates and the vendored crate's focused actor tests against the
+production workspace lock graph.
