@@ -288,23 +288,28 @@ func TestCompleteFailureDomainGraphsAreExecutable(t *testing.T) {
 func TestPhaseGraphAndRendezvousRegistriesCannotDrift(t *testing.T) {
 	t.Parallel()
 	contracts := rendezvous.Contracts()
-	if len(contracts) != 16 {
-		t.Fatalf("rendezvous contract count = %d, want 16", len(contracts))
+	if len(contracts) != 26 {
+		t.Fatalf("rendezvous contract count = %d, want 26", len(contracts))
 	}
+	profileCounts := map[string]int{}
 	seen := make(map[string]bool, len(contracts))
 	for _, contract := range contracts {
+		profileCounts[contract.Profile]++
 		if seen[contract.Checkpoint] {
 			t.Fatalf("duplicate rendezvous checkpoint %s", contract.Checkpoint)
 		}
 		seen[contract.Checkpoint] = true
-		producer, err := phase.RequiredManifestPhase(contract.ProducerDomain, contract.Checkpoint)
+		producer, err := phase.RequiredManifestPhaseForProfile(contract.Profile, contract.ProducerDomain, contract.Checkpoint)
 		if err != nil {
 			t.Fatalf("rendezvous checkpoint %s is absent from the phase graph: %v", contract.Checkpoint, err)
 		}
-		graph, _ := phase.ResolveGraph(contract.ProducerDomain)
+		graph, _ := phase.ResolveProfileGraph(contract.Profile, contract.ProducerDomain)
 		if _, err := graph.Definition(producer); err != nil {
 			t.Fatalf("rendezvous checkpoint %s has invalid producer phase: %v", contract.Checkpoint, err)
 		}
+	}
+	if profileCounts["formal"] != 16 || profileCounts["smoke"] != 10 {
+		t.Fatalf("rendezvous profile counts = %v", profileCounts)
 	}
 }
 
