@@ -459,6 +459,10 @@ phase_smoke_session() {
   cp -f "${G6RD_STATE}/agent-readiness-last.json" "${out}/connections.json"
   node="$(awk -F'\t' '$1 == "g6-fd-b-01" {print $2}' "${NODES_FILE}")"
   [[ -n "${node}" ]] || { echo "cross-FD smoke node is absent" >&2; return 1; }
+  # Formal load deliberately starts with every synthetic command held at its
+  # Agent receipt barrier. Smoke proves an end-to-end result instead, so it
+  # must disarm that fixture before issuing its one authenticated command.
+  g6rd_release_synthetic_barriers
   g6rd_enqueue_command "${node}" "${key}"
   # A relay delivery can cross the Worker's ordinary-send ambiguity window.
   # Do not treat the intermediate `unknown` state as the smoke success point;

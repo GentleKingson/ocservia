@@ -572,6 +572,10 @@ grep -q 'smoke_command_succeeded "${key}" "${node}"' <<<"${smoke_session_phase}"
   echo "the authenticated smoke command must wait through unknown-outcome reconciliation" >&2
   exit 1
 }
+grep -q 'g6rd_release_synthetic_barriers' <<<"${smoke_session_phase}" || {
+  echo "the smoke session must release the formal load fixture before its command" >&2
+  exit 1
+}
 if grep -q 'wait_commands_settled' <<<"${smoke_session_phase}"; then
   echo "the smoke session must not accept an intermediate unknown command as success" >&2
   exit 1
