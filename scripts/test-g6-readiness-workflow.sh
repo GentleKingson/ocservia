@@ -568,6 +568,14 @@ grep -q '\$1 == "g6-fd-b-01"' <<<"${smoke_session_phase}" || {
   echo "the authenticated smoke command must target an Agent across the failure-domain boundary" >&2
   exit 1
 }
+grep -q 'smoke_command_succeeded "${key}" "${node}"' <<<"${smoke_session_phase}" || {
+  echo "the authenticated smoke command must wait through unknown-outcome reconciliation" >&2
+  exit 1
+}
+if grep -q 'wait_commands_settled' <<<"${smoke_session_phase}"; then
+  echo "the smoke session must not accept an intermediate unknown command as success" >&2
+  exit 1
+fi
 if grep -q 'g6rd_probe_node_connection' <<<"${smoke_session_phase}"; then
   echo "the pre-promotion FD-B smoke phase must not require a nonexistent local transport socket" >&2
   exit 1

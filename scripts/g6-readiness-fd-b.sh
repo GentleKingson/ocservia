@@ -460,10 +460,23 @@ phase_smoke_session() {
   node="$(awk -F'\t' '$1 == "g6-fd-b-01" {print $2}' "${NODES_FILE}")"
   [[ -n "${node}" ]] || { echo "cross-FD smoke node is absent" >&2; return 1; }
   g6rd_enqueue_command "${node}" "${key}"
-  g6rd_wait_until_deadline 120 2 "cross-FD smoke command result" wait_commands_settled "${key}"
+  # A relay delivery can cross the Worker's ordinary-send ambiguity window.
+  # Do not treat the intermediate `unknown` state as the smoke success point;
+  # wait through reconciliation for the one durable successful Agent result.
+  g6rd_wait_until_deadline 120 2 "cross-FD smoke command result" \
+    smoke_command_succeeded "${key}" "${node}"
   capture_relay_command_proof "${key}" "${node}" "${out}/command-proof.json"
   cp -f "${NODES_FILE}" "${out}/nodes.tsv"
   printf '%s\n' "${G6RD_CANDIDATE_SHA}" >"${out}/candidate-sha"
+}
+
+smoke_command_succeeded() {
+  local key="${1:?idempotency key is required}" node="${2:?node id is required}"
+  [[ "$(psql_primary_probe -Atc \
+    "SELECT count(*) FROM commands AS command
+     JOIN agent_command_results AS result ON result.command_id=command.id
+     WHERE command.idempotency_key='${key}' AND command.node_id='${node}'
+       AND command.state='succeeded' AND result.state='succeeded'")" == 1 ]]
 }
 
 phase_smoke_evidence() {
