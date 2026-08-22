@@ -732,8 +732,10 @@ phase_scenario_scheduler() {
   export SCHEDULER_OLD_EPOCH
   g6rd_compose stop scheduler
   g6rd_timeline_event scheduler_a_paused
-  g6rd_wait_until_deadline 120 2 "old scheduler lease lapsed" \
-    scheduler_lease_lapsed
+  # The replacement process is the authoritative expiry probe: Acquire can
+  # advance the epoch only after PostgreSQL observes the old lease expired.
+  # Starting it immediately also exercises the real ErrLeaseHeld retry path
+  # instead of polling the same predicate independently in the harness.
   g6rd_compose up --detach scheduler
   g6rd_wait_until_deadline 120 2 \
     "replacement scheduler acquired leadership" scheduler_replaced
@@ -785,11 +787,6 @@ phase_scenario_scheduler() {
 # the old owner's exact fence through both enforcement points (transportd
 # disposition and the Agent's stale_owner_epoch gate). The transportd stop
 # for the agent-side probe is also the reconnect-storm injection.
-scheduler_lease_lapsed() {
-  [[ "$(G6RD_PSQL_TIMEOUT_SECONDS=5 psql_primary -Atc \
-    'SELECT (lease_until <= clock_timestamp())::text FROM scheduler_leadership WHERE id=1')" == "t" ]]
-}
-
 scheduler_replaced() {
   local epoch
   epoch="$(G6RD_PSQL_TIMEOUT_SECONDS=5 psql_primary -Atc \

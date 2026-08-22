@@ -958,6 +958,7 @@ if grep -qE 'UNLOGGED|SET search_path = .*public' "${AUTHORITY_HISTORY_SQL}"; th
 fi
 scheduler_scenario_body="$(sed -n '/^phase_scenario_scheduler() {/,/^}/p' "${FD_B}")"
 scheduler_completion_probe="$(sed -n '/^scheduler_maintenance_completed() {/,/^}/p' "${FD_B}")"
+scheduler_replacement_probe="$(sed -n '/^scheduler_replaced() {/,/^}/p' "${FD_B}")"
 for token in \
   'scheduler-replacement-term' \
   'replacement scheduler completed exact-term fenced maintenance' \
@@ -970,18 +971,25 @@ for token in \
     exit 1
   }
 done
-scheduler_lease_probe="$(sed -n '/^scheduler_lease_lapsed() {/,/^}/p' "${FD_B}")"
 for token in \
-  'g6rd_wait_until_deadline 120 2 "old scheduler lease lapsed"' \
-  'G6RD_PSQL_TIMEOUT_SECONDS=5 psql_primary' \
-  'lease_until <= clock_timestamp()'; do
-  grep -qF "${token}" <<<"${scheduler_scenario_body}${scheduler_lease_probe}" || {
-    echo "scheduler lease expiry must use one bounded database-clock predicate: ${token}" >&2
+  'g6rd_compose stop scheduler' \
+  'g6rd_compose up --detach scheduler' \
+  'g6rd_wait_until_deadline 120 2' \
+  '"replacement scheduler acquired leadership" scheduler_replaced' \
+  '((epoch > SCHEDULER_OLD_EPOCH))'; do
+  grep -qF "${token}" <<<"${scheduler_scenario_body}${scheduler_replacement_probe}" || {
+    echo "scheduler takeover must use the database-enforced replacement acquisition path: ${token}" >&2
     exit 1
   }
 done
-if grep -qE 'to_char\(lease_until|date -u' <<<"${scheduler_lease_probe}"; then
-  echo "scheduler lease expiry must not compare a truncated database lease to the runner clock" >&2
+stop_scheduler_line="$(grep -nF 'g6rd_compose stop scheduler' <<<"${scheduler_scenario_body}" | cut -d: -f1)"
+start_scheduler_line="$(grep -nF 'g6rd_compose up --detach scheduler' <<<"${scheduler_scenario_body}" | cut -d: -f1)"
+replacement_wait_line="$(grep -nF '"replacement scheduler acquired leadership" scheduler_replaced' <<<"${scheduler_scenario_body}" | cut -d: -f1)"
+if [[ -z "${stop_scheduler_line}" || -z "${start_scheduler_line}" \
+  || -z "${replacement_wait_line}" \
+  || "${stop_scheduler_line}" -ge "${start_scheduler_line}" \
+  || "${start_scheduler_line}" -ge "${replacement_wait_line}" ]]; then
+  echo "scheduler replacement must start only after the old process stops and before the bounded acquisition wait" >&2
   exit 1
 fi
 for token in \
@@ -5040,8 +5048,9 @@ grep -qF 'actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a' "${C
 
 runtime_result_helper="$(sed -n '/^g6rd_write_runtime_result() {/,/^}/p' "${LIB}")"
 for token in 'harness/state.json' 'harness/events.jsonl' 'harness/phase-results' \
-  'harness/resources.json' 'harness/frozen-binary-manifest.tsv'; do
-  grep -qF "${token}" <<<"${runtime_result_helper}" || {
+  'ARTIFACT_DIR}/rendezvous' 'harness/resources.json' 'harness/frozen-binary-manifest.tsv' \
+  'failure.class' 'failure.code' '--failure-class' '--failure-code'; do
+  grep -qF -- "${token}" <<<"${runtime_result_helper}" || {
     echo "raw runtime evidence is missing typed harness artifact: ${token}" >&2
     exit 1
   }
@@ -5050,6 +5059,33 @@ if grep -qF 'cp -R "${G6RD_WORK}/harness/." "${root}' <<<"${runtime_result_helpe
   echo "raw runtime evidence must not publish unredacted phase logs" >&2
   exit 1
 fi
+
+runtime_result_test="$(mktemp -d)"
+(
+  export RUNNER_TEMP="${runtime_result_test}"
+  export RUN_ID=runtime-result-fd-b FD_ID=fd-b FD_ALIAS=fd-beta
+  export G6_AUTHORITY=engineering
+  export G6RD_CANDIDATE_SHA=5f9a2a943d7aa38224bc3266b7176f0a061a6b6c
+  export G6RD_RELEASE_MANIFEST_DIGEST=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+  export GITHUB_RUN_ID=1234 GITHUB_RUN_ATTEMPT=1
+  source "${LIB}"
+  g6rd_init_environment
+  mkdir -p "${G6RD_WORK}/harness/phase-results"
+  jq -n '{phase:"scenario-scheduler",sequence:150,status:"failed",failure:{class:"product_assertion_failed",code:"leaf_adapter_failed"}}' \
+    >"${G6RD_WORK}/harness/phase-results/150-scenario-scheduler.json"
+  g6rd_write_runtime_result "${G6RD_OUTBOX}/fd-b-final" failure unknown
+  jq -e '.status == "failed" and .last_phase == "scenario-scheduler" and .failure.class == "product_assertion_failed" and .failure.code == "leaf_adapter_failed"' \
+    "${G6RD_OUTBOX}/fd-b-final/runtime-result.json" >/dev/null
+  rm -rf "${G6RD_WORK}/harness/phase-results"
+  mkdir -p "${ARTIFACT_DIR}/rendezvous"
+  jq -n '{checkpoint:"final-freeze",status:"failed",completed_at:"2026-01-01T00:00:00Z",failure:{class:"peer_failed",code:"peer_job_failed"}}' \
+    >"${ARTIFACT_DIR}/rendezvous/final-freeze.result.json"
+  g6rd_write_runtime_result "${G6RD_OUTBOX}/fd-b-peer-failure" failure unknown
+  jq -e '.status == "failed" and .last_phase == "final-freeze" and .failure.class == "peer_failed" and .failure.code == "peer_job_failed"' \
+    "${G6RD_OUTBOX}/fd-b-peer-failure/runtime-result.json" >/dev/null
+  test -f "${G6RD_OUTBOX}/fd-b-peer-failure/harness/rendezvous/final-freeze.result.json"
+)
+rm -rf "${runtime_result_test}"
 
 # Every pinned action must reuse an exact `uses: action@sha` line already
 # proven by a merged workflow with hosted execution.
