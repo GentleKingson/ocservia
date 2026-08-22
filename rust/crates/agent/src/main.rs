@@ -2966,7 +2966,7 @@ mod tests {
                 seconds: now + 60,
                 nanos: 0,
             }),
-            expected_revision: 1,
+            expected_revision: fence.authorization_revision,
             traceparent: format!(
                 "00-{}-0000000000000001-01",
                 hex::encode(Uuid::now_v7().as_bytes())
@@ -5346,6 +5346,12 @@ mod tests {
         );
 
         supervisor.abort();
+        assert!(
+            supervisor
+                .await
+                .expect_err("aborted Agent supervisor")
+                .is_cancelled()
+        );
         events_watcher.abort();
         privd_server.abort();
         ocservia_transportd::shutdown(&service, router)
