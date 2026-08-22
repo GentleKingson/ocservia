@@ -95,7 +95,7 @@ g6rd_now() {
 g6rd_write_runtime_result() {
   local root="${1:?runtime evidence root is required}"
   local job_status="${2:?job status is required}"
-  local last_phase="${3:-unknown}" status
+  local last_phase="${3:-unknown}" status failure_class failure_code
   case "${job_status}" in
     success | passed) status=passed ;;
     cancelled) status=cancelled ;;
@@ -112,6 +112,10 @@ g6rd_write_runtime_result() {
         "${root}/harness/runtime/"
     fi
   fi
+  if [[ -d "${ARTIFACT_DIR}/rendezvous" ]]; then
+    mkdir -p "${root}/harness"
+    cp -R "${ARTIFACT_DIR}/rendezvous" "${root}/harness/"
+  fi
   if [[ -f "${ARTIFACT_DIR}/harness/resources.json" ]]; then
     mkdir -p "${root}/harness"
     cp -f "${ARTIFACT_DIR}/harness/resources.json" \
@@ -121,6 +125,43 @@ g6rd_write_runtime_result() {
     mkdir -p "${root}/harness"
     cp -f "${ARTIFACT_DIR}/g6-harness-manifest.tsv" \
       "${root}/harness/frozen-binary-manifest.tsv"
+  fi
+  if [[ "${status}" != passed ]]; then
+    local phase_failure rendezvous_failure state_file
+    phase_failure=""
+    if [[ -d "${G6RD_WORK}/harness/phase-results" ]]; then
+      phase_failure="$(find "${G6RD_WORK}/harness/phase-results" -type f -name '*.json' -print0 \
+        | xargs -0 -r jq -c 'select(.status == "failed" and .failure != null)' \
+        | jq -sc 'if length == 0 then empty else max_by(.sequence) end')"
+    fi
+    if [[ -n "${phase_failure}" ]]; then
+      last_phase="$(jq -er '.phase' <<<"${phase_failure}")"
+      failure_class="$(jq -er '.failure.class' <<<"${phase_failure}")"
+      failure_code="$(jq -er '.failure.code' <<<"${phase_failure}")"
+    else
+      rendezvous_failure=""
+      if [[ -d "${ARTIFACT_DIR}/rendezvous" ]]; then
+        rendezvous_failure="$(find "${ARTIFACT_DIR}/rendezvous" -type f -name '*.result.json' -print0 \
+          | xargs -0 -r jq -c 'select(.status == "failed" and .failure != null)' \
+          | jq -sc 'if length == 0 then empty else max_by(.completed_at) end')"
+      fi
+      if [[ -n "${rendezvous_failure}" ]]; then
+        last_phase="$(jq -er '.checkpoint // "rendezvous"' <<<"${rendezvous_failure}")"
+        failure_class="$(jq -er '.failure.class' <<<"${rendezvous_failure}")"
+        failure_code="$(jq -er '.failure.code' <<<"${rendezvous_failure}")"
+      else
+        state_file="${G6RD_WORK}/harness/state.json"
+        if [[ -f "${state_file}" ]]; then
+          last_phase="$(jq -er '.active_phase.name // .completed_phases[-1].name // "unknown"' "${state_file}")"
+        fi
+        failure_class=harness_contract_failed
+        failure_code=runtime_job_failed
+      fi
+    fi
+  fi
+  local -a failure_args=()
+  if [[ "${status}" != passed ]]; then
+    failure_args=(--failure-class "${failure_class}" --failure-code "${failure_code}")
   fi
   "${G6RD_NODE_BIN:-node}" "${G6RD_ROOT}/scripts/g6-pipeline.mjs" runtime-result \
     --root "${root}" \
@@ -133,6 +174,7 @@ g6rd_write_runtime_result() {
     --run-attempt "${GITHUB_RUN_ATTEMPT:?GITHUB_RUN_ATTEMPT is required}" \
     --environment-id "${G6RD_ENVIRONMENT_ID}" \
     --authority "${G6_AUTHORITY}" \
+    "${failure_args[@]}" \
     --release-manifest-digest "${G6RD_RELEASE_MANIFEST_DIGEST:?release manifest digest is required}"
 }
 

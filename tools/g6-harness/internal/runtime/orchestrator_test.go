@@ -226,6 +226,27 @@ func TestAdapterArgumentsAreFixedAndRunScoped(t *testing.T) {
 	}
 }
 
+func TestSmokeAdapterArgumentsCannotUseFormalRendezvousPaths(t *testing.T) {
+	t.Parallel()
+	options := testOptions(t, "fd-b")
+	options.Profile = "smoke"
+	for phaseName, suffix := range map[string]string{
+		"agents-enroll": "/g6-smoke-agents/nodes.tsv",
+		"promote":       "/g6-smoke-isolation",
+	} {
+		arguments, err := adapterArguments(options, phaseName)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(arguments) != 2 || !strings.HasSuffix(arguments[1], suffix) || strings.Contains(arguments[1], "/g6-rd-") {
+			t.Fatalf("unexpected %s smoke arguments: %v", phaseName, arguments)
+		}
+	}
+	if arguments, err := adapterArguments(options, "smoke-session"); err != nil || len(arguments) != 1 || arguments[0] != "smoke-session" {
+		t.Fatalf("unexpected smoke session adapter: %v, %v", arguments, err)
+	}
+}
+
 func TestCompleteFailureDomainGraphsAreExecutable(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -288,23 +309,28 @@ func TestCompleteFailureDomainGraphsAreExecutable(t *testing.T) {
 func TestPhaseGraphAndRendezvousRegistriesCannotDrift(t *testing.T) {
 	t.Parallel()
 	contracts := rendezvous.Contracts()
-	if len(contracts) != 16 {
-		t.Fatalf("rendezvous contract count = %d, want 16", len(contracts))
+	if len(contracts) != 26 {
+		t.Fatalf("rendezvous contract count = %d, want 26", len(contracts))
 	}
+	profileCounts := map[string]int{}
 	seen := make(map[string]bool, len(contracts))
 	for _, contract := range contracts {
+		profileCounts[contract.Profile]++
 		if seen[contract.Checkpoint] {
 			t.Fatalf("duplicate rendezvous checkpoint %s", contract.Checkpoint)
 		}
 		seen[contract.Checkpoint] = true
-		producer, err := phase.RequiredManifestPhase(contract.ProducerDomain, contract.Checkpoint)
+		producer, err := phase.RequiredManifestPhaseForProfile(contract.Profile, contract.ProducerDomain, contract.Checkpoint)
 		if err != nil {
 			t.Fatalf("rendezvous checkpoint %s is absent from the phase graph: %v", contract.Checkpoint, err)
 		}
-		graph, _ := phase.ResolveGraph(contract.ProducerDomain)
+		graph, _ := phase.ResolveProfileGraph(contract.Profile, contract.ProducerDomain)
 		if _, err := graph.Definition(producer); err != nil {
 			t.Fatalf("rendezvous checkpoint %s has invalid producer phase: %v", contract.Checkpoint, err)
 		}
+	}
+	if profileCounts["formal"] != 16 || profileCounts["smoke"] != 10 {
+		t.Fatalf("rendezvous profile counts = %v", profileCounts)
 	}
 }
 

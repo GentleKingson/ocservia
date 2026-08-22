@@ -41,6 +41,26 @@ func TestCreateAndValidateManifest(t *testing.T) {
 	}
 }
 
+func TestSmokeContractUsesSeparateNamespaceAndPeerJob(t *testing.T) {
+	contract, err := ResolveContract("g6-smoke-session-424242-3", testBinding())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if contract.Profile != "smoke" || contract.Checkpoint != "smoke-session" || contract.ProducerDomain != "fd-b" {
+		t.Fatalf("unexpected smoke contract: %+v", contract)
+	}
+	job, err := peerJobName(contract)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if job != "G6 Harness Smoke Core / G6 Harness Smoke FD-B" {
+		t.Fatalf("smoke peer job = %q", job)
+	}
+	if _, err := ResolveContract("g6-rd-load-active-424242-3", testBinding()); err != nil {
+		t.Fatalf("formal contract regressed: %v", err)
+	}
+}
+
 func TestManifestRejectsDigestAndFileSetChanges(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()

@@ -25,6 +25,7 @@ var (
 )
 
 type Contract struct {
+	Profile        string
 	Prefix         string
 	Checkpoint     string
 	Sequence       int
@@ -32,7 +33,7 @@ type Contract struct {
 }
 
 var checkpointContracts = []Contract{
-	{Prefix: "g6-rd-tunnel-fd-a", Checkpoint: "tunnel-fd-a", Sequence: 10, ProducerDomain: "fd-a"},
+	{Profile: "formal", Prefix: "g6-rd-tunnel-fd-a", Checkpoint: "tunnel-fd-a", Sequence: 10, ProducerDomain: "fd-a"},
 	{Prefix: "g6-rd-tunnel-fd-b", Checkpoint: "tunnel-fd-b", Sequence: 20, ProducerDomain: "fd-b"},
 	{Prefix: "g6-rd-shared", Checkpoint: "shared-trust-ready", Sequence: 30, ProducerDomain: "fd-a"},
 	{Prefix: "g6-rd-primary-up", Checkpoint: "primary-ready", Sequence: 40, ProducerDomain: "fd-a"},
@@ -48,6 +49,24 @@ var checkpointContracts = []Contract{
 	{Prefix: "g6-rd-window-barrier-arm-request", Checkpoint: "window-barrier-arm-request", Sequence: 180, ProducerDomain: "fd-b"},
 	{Prefix: "g6-rd-window-barrier-armed-fd-a", Checkpoint: "window-barrier-armed-fd-a", Sequence: 190, ProducerDomain: "fd-a"},
 	{Prefix: "g6-rd-final-freeze", Checkpoint: "final-freeze-request", Sequence: 210, ProducerDomain: "fd-b"},
+}
+
+func init() {
+	for index := 1; index < len(checkpointContracts); index++ {
+		checkpointContracts[index].Profile = "formal"
+	}
+	checkpointContracts = append(checkpointContracts,
+		Contract{Profile: "smoke", Prefix: "g6-smoke-tunnel-fd-a", Checkpoint: "smoke-tunnel-fd-a", Sequence: 10, ProducerDomain: "fd-a"},
+		Contract{Profile: "smoke", Prefix: "g6-smoke-tunnel-fd-b", Checkpoint: "smoke-tunnel-fd-b", Sequence: 20, ProducerDomain: "fd-b"},
+		Contract{Profile: "smoke", Prefix: "g6-smoke-shared", Checkpoint: "smoke-shared-trust-ready", Sequence: 30, ProducerDomain: "fd-a"},
+		Contract{Profile: "smoke", Prefix: "g6-smoke-primary-up", Checkpoint: "smoke-primary-ready", Sequence: 40, ProducerDomain: "fd-a"},
+		Contract{Profile: "smoke", Prefix: "g6-smoke-agents", Checkpoint: "smoke-fd-a-agent-inventory", Sequence: 50, ProducerDomain: "fd-a"},
+		Contract{Profile: "smoke", Prefix: "g6-smoke-agents-enrolled-fd-b", Checkpoint: "smoke-fd-b-agents-enrolled", Sequence: 60, ProducerDomain: "fd-b"},
+		Contract{Profile: "smoke", Prefix: "g6-smoke-trust-ready", Checkpoint: "smoke-transport-trust-ready", Sequence: 70, ProducerDomain: "fd-a"},
+		Contract{Profile: "smoke", Prefix: "g6-smoke-session", Checkpoint: "smoke-session", Sequence: 80, ProducerDomain: "fd-b"},
+		Contract{Profile: "smoke", Prefix: "g6-smoke-isolation", Checkpoint: "smoke-primary-isolated", Sequence: 90, ProducerDomain: "fd-a"},
+		Contract{Profile: "smoke", Prefix: "g6-smoke-promotion", Checkpoint: "smoke-promotion-complete", Sequence: 100, ProducerDomain: "fd-b"},
+	)
 }
 
 // Contracts returns a copy of the frozen checkpoint registry.
@@ -124,13 +143,21 @@ func ResolveContract(name string, binding Binding) (Contract, error) {
 	return Contract{}, fmt.Errorf("artifact name %q is not a G6 checkpoint for this run attempt", name)
 }
 
-func peerJobName(domain string) (string, error) {
-	switch domain {
+func peerJobName(contract Contract) (string, error) {
+	if contract.Profile == "smoke" {
+		switch contract.ProducerDomain {
+		case "fd-a":
+			return "G6 Harness Smoke Core / G6 Harness Smoke FD-A", nil
+		case "fd-b":
+			return "G6 Harness Smoke Core / G6 Harness Smoke FD-B", nil
+		}
+	}
+	switch contract.ProducerDomain {
 	case "fd-a":
-		return "G6 Readiness Failure Domain A", nil
+		return "G6 Readiness Core / G6 Readiness Failure Domain A", nil
 	case "fd-b":
-		return "G6 Readiness Failure Domain B", nil
+		return "G6 Readiness Core / G6 Readiness Failure Domain B", nil
 	default:
-		return "", fmt.Errorf("unsupported producer domain %q", domain)
+		return "", fmt.Errorf("unsupported producer domain %q", contract.ProducerDomain)
 	}
 }

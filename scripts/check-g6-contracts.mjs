@@ -39,6 +39,12 @@ const runtimeHarnessSchemas = [
   ["docs/acceptance/g6-phase-result-schema.json", "ocservia.g6-phase-result.v1"],
   ["docs/acceptance/g6-resource-registry-schema.json", "ocservia.g6-resource-registry.v1"],
 ];
+const smokeSchemas = [
+  ["docs/acceptance/g6-harness-smoke-result-schema.json", "ocservia.g6-harness-smoke-result.v1"],
+  ["docs/acceptance/g6-harness-smoke-assembly-result-schema.json", "ocservia.g6-harness-smoke-assembly-result.v1"],
+  ["docs/acceptance/g6-harness-smoke-verification-result-schema.json", "ocservia.g6-harness-smoke-verification-result.v1"],
+  ["docs/acceptance/g6-harness-smoke-secret-scan-result-schema.json", "ocservia.g6-harness-smoke-secret-scan-result.v1"],
+];
 const phaseFailureClasses = [
   "product_assertion_failed",
   "harness_contract_failed",
@@ -149,6 +155,23 @@ for (const [path, version] of runtimeHarnessSchemas) {
     !same(schema.properties.failure.properties.class.enum, phaseFailureClasses)
   ) {
     fail(`${path} failure classes drifted from the frozen harness taxonomy`);
+  }
+}
+
+for (const [path, version] of smokeSchemas) {
+  const schema = JSON.parse(read(path));
+  const engineeringBinding = schema.$defs?.binding?.properties?.authority?.const === "engineering" ||
+    schema.properties?.binding?.$ref === "g6-harness-smoke-result-schema.json#/$defs/binding";
+  if (
+    schema.$schema !== "https://json-schema.org/draft/2020-12/schema" ||
+    schema.type !== "object" ||
+    schema.additionalProperties !== false ||
+    schema.properties?.schema_version?.const !== version ||
+    schema.properties?.profile?.const !== "smoke" ||
+    schema.properties?.formal_verdict_eligible?.const !== false ||
+    !engineeringBinding
+  ) {
+    fail(`${path} must define a closed engineering-only non-formal ${version} contract`);
   }
 }
 
@@ -284,6 +307,11 @@ for (const [, version] of pipelineSchemas) {
 for (const [, version] of rendezvousSchemas) {
   if (!acceptanceReadme.includes(version)) {
     fail(`acceptance README must document the ${version} rendezvous contract`);
+  }
+}
+for (const [, version] of smokeSchemas) {
+  if (!acceptanceReadme.includes(version)) {
+    fail(`acceptance README must document the ${version} smoke contract`);
   }
 }
 

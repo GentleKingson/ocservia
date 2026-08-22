@@ -69,7 +69,7 @@ func TestWaitDownloadTimesOut(t *testing.T) {
 			fmt.Fprint(response, `{"total_count":0,"artifacts":[]}`)
 			return
 		}
-		fmt.Fprint(response, `{"jobs":[{"name":"G6 Readiness Failure Domain B","status":"in_progress","conclusion":"","steps":[]}]}`)
+		fmt.Fprint(response, `{"jobs":[{"name":"G6 Readiness Core / G6 Readiness Failure Domain B","status":"in_progress","conclusion":"","steps":[]}]}`)
 	}))
 	defer server.Close()
 	options := testOptions(t, server.URL, name)
@@ -118,7 +118,7 @@ func TestWaitDownloadRecoversFromBoundedDownload5xx(t *testing.T) {
 			fmt.Fprintf(response, `{"total_count":1,"artifacts":[{"id":99,"name":%q,"expired":false,"digest":%q}]}`, name, "sha256:"+hexDigest(archive))
 		default:
 			response.Header().Set("Content-Type", "application/json")
-			fmt.Fprint(response, `{"jobs":[{"name":"G6 Readiness Failure Domain B","status":"in_progress","conclusion":"","steps":[]}]}`)
+			fmt.Fprint(response, `{"jobs":[{"name":"G6 Readiness Core / G6 Readiness Failure Domain B","status":"in_progress","conclusion":"","steps":[]}]}`)
 		}
 	}))
 	defer server.Close()
@@ -182,7 +182,7 @@ func TestWaitDownloadRejectsPeerFailureBeforeDownload(t *testing.T) {
 		case strings.Contains(request.URL.Path, "/artifacts"):
 			fmt.Fprintf(response, `{"total_count":1,"artifacts":[{"id":99,"name":%q,"expired":false,"digest":%q}]}`, name, "sha256:"+hexDigest(archive))
 		default:
-			fmt.Fprint(response, `{"jobs":[{"name":"G6 Readiness Failure Domain B","status":"in_progress","conclusion":"","steps":[{"name":"enroll","status":"completed","conclusion":"failure"}]}]}`)
+			fmt.Fprint(response, `{"jobs":[{"name":"G6 Readiness Core / G6 Readiness Failure Domain B","status":"in_progress","conclusion":"","steps":[{"name":"enroll","status":"completed","conclusion":"failure"}]}]}`)
 		}
 	}))
 	defer server.Close()
@@ -220,7 +220,7 @@ func testOptions(t *testing.T, baseURL, name string) Options {
 		Binding:              testBinding(),
 		ArtifactName:         name,
 		Destination:          filepath.Join(root, "destination"),
-		PeerJob:              "G6 Readiness Failure Domain B",
+		PeerJob:              "G6 Readiness Core / G6 Readiness Failure Domain B",
 		StatePath:            filepath.Join(root, "state.json"),
 		Timeout:              250 * time.Millisecond,
 		PollInterval:         time.Millisecond,
@@ -287,7 +287,7 @@ func checkpointServer(t *testing.T, name string, archive []byte, digest string, 
 			json.NewEncoder(response).Encode(map[string]any{"total_count": totalCount, "artifacts": artifacts})
 		default:
 			response.Header().Set("Content-Type", "application/json")
-			fmt.Fprint(response, `{"jobs":[{"name":"G6 Readiness Failure Domain B","status":"in_progress","conclusion":"","steps":[]}]}`)
+			fmt.Fprint(response, `{"jobs":[{"name":"G6 Readiness Core / G6 Readiness Failure Domain B","status":"in_progress","conclusion":"","steps":[]}]}`)
 		}
 	}))
 }

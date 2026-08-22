@@ -290,7 +290,7 @@ func (store *Store) validateLoadedState() error {
 		return err
 	}
 	for _, checkpoint := range store.state.ManifestedCheckpoints {
-		required, err := phase.RequiredManifestPhase(store.Domain, checkpoint)
+		required, err := phase.RequiredManifestPhaseForProfile(store.Graph.Profile, store.Domain, checkpoint)
 		if err != nil || !store.phaseCompleted(required) {
 			return fmt.Errorf("manifested checkpoint %s lacks its exact producer phase", checkpoint)
 		}

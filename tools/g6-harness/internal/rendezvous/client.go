@@ -242,7 +242,7 @@ func (options Options) validate(contract Contract) error {
 		options.DownloadRetryTotal <= 0 || options.DownloadRetryTotal > 5*time.Minute || options.MaxConsecutiveErrors < 1 || options.MaxConsecutiveErrors > 10 {
 		return errors.New("rendezvous deadlines or retry limits are outside their bounded contract")
 	}
-	expectedPeer, err := peerJobName(contract.ProducerDomain)
+	expectedPeer, err := peerJobName(contract)
 	if err != nil {
 		return err
 	}

@@ -573,7 +573,12 @@ jobs:
           scripts/test-ci-runtime-artifact.sh
       - name: G6 readiness workflow policy
         run: |
-          scripts/test-g6-readiness-workflow.sh
+          scripts/test-g6-workflow-contract.sh
+          scripts/test-g6-formal-authority.sh
+          scripts/test-g6-release-identity.sh
+          scripts/test-g6-evidence-pipeline.sh
+          scripts/test-g6-runtime-adapters.sh
+          scripts/test-g6-smoke-relevance.sh
           scripts/test-g6-readiness-hang-guards.sh
       - name: Generate contract outputs
         run: scripts/generate.sh

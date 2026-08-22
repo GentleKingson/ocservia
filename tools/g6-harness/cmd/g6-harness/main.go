@@ -15,6 +15,7 @@ import (
 
 	"github.com/GentleKingson/ocservia/tools/g6-harness/internal/rendezvous"
 	"github.com/GentleKingson/ocservia/tools/g6-harness/internal/runtime"
+	"github.com/GentleKingson/ocservia/tools/g6-harness/internal/smoke"
 	"github.com/GentleKingson/ocservia/tools/g6-harness/internal/state"
 )
 
@@ -27,7 +28,7 @@ func main() {
 
 func run(arguments []string) error {
 	if len(arguments) == 0 {
-		return errors.New("usage: g6-harness <checkpoint-manifest|wait-download|run-segment|cleanup> [options]")
+		return errors.New("usage: g6-harness <checkpoint-manifest|wait-download|run-segment|cleanup|smoke-domain|smoke-assemble|smoke-verify|smoke-aggregate> [options]")
 	}
 	switch arguments[0] {
 	case "checkpoint-manifest":
@@ -38,9 +39,134 @@ func run(arguments []string) error {
 		return runSegment(arguments[1:])
 	case "cleanup":
 		return runCleanup(arguments[1:])
+	case "smoke-domain":
+		return runSmokeDomain(arguments[1:])
+	case "smoke-aggregate":
+		return runSmokeAggregate(arguments[1:])
+	case "smoke-assemble":
+		return runSmokeAssemble(arguments[1:])
+	case "smoke-verify":
+		return runSmokeVerify(arguments[1:])
 	default:
 		return fmt.Errorf("unknown g6-harness command %q", arguments[0])
 	}
+}
+
+func runSmokeAssemble(arguments []string) error {
+	flags := flag.NewFlagSet("smoke-assemble", flag.ContinueOnError)
+	fdA, fdB := flags.String("fd-a", "", "FD-A result"), flags.String("fd-b", "", "FD-B result")
+	bundle, output := flags.String("bundle", "", "bundle output"), flags.String("output", "", "assembly result output")
+	harness := flags.String("expected-harness-sha", "", "frozen harness digest")
+	releaseID, releaseDigest := flags.String("release-artifact-id", "", "release artifact ID"), flags.String("release-artifact-digest", "", "release artifact digest")
+	fdAID, fdADigest := flags.String("fd-a-artifact-id", "", "FD-A artifact ID"), flags.String("fd-a-artifact-digest", "", "FD-A artifact digest")
+	fdBID, fdBDigest := flags.String("fd-b-artifact-id", "", "FD-B artifact ID"), flags.String("fd-b-artifact-digest", "", "FD-B artifact digest")
+	if err := flags.Parse(arguments); err != nil {
+		return err
+	}
+	if flags.NArg() != 0 || *fdA == "" || *fdB == "" || *bundle == "" || *output == "" || *harness == "" {
+		return errors.New("smoke-assemble requires both domain results, bundle, output, and harness digest")
+	}
+	binding, err := rendezvous.BindingFromEnvironment()
+	if err != nil {
+		return err
+	}
+	release, err1 := smoke.ParseArtifactReference(*releaseID, *releaseDigest)
+	artifactA, err2 := smoke.ParseArtifactReference(*fdAID, *fdADigest)
+	artifactB, err3 := smoke.ParseArtifactReference(*fdBID, *fdBDigest)
+	result, assemblyErr := smoke.Assemble(smoke.AssembleOptions{Binding: binding, FDAPath: *fdA, FDBPath: *fdB, BundlePath: *bundle, ExpectedHarnessSHA: *harness, ReleaseArtifact: release, FDAArtifact: artifactA, FDBArtifact: artifactB})
+	return errors.Join(err1, err2, err3, assemblyErr, smoke.Write(*output, result))
+}
+
+func runSmokeVerify(arguments []string) error {
+	flags := flag.NewFlagSet("smoke-verify", flag.ContinueOnError)
+	bundle, output := flags.String("bundle", "", "bundle input"), flags.String("output", "", "verification result output")
+	bundleSHA, harnessSHA := flags.String("expected-bundle-sha", "", "bundle digest"), flags.String("expected-harness-sha", "", "harness digest")
+	if err := flags.Parse(arguments); err != nil {
+		return err
+	}
+	if flags.NArg() != 0 || *bundle == "" || *output == "" || *bundleSHA == "" || *harnessSHA == "" {
+		return errors.New("smoke-verify requires bundle, output, and exact digests")
+	}
+	binding, err := rendezvous.BindingFromEnvironment()
+	if err != nil {
+		return err
+	}
+	result, verifyErr := smoke.Verify(smoke.VerifyOptions{Binding: binding, BundlePath: *bundle, ExpectedBundleSHA: *bundleSHA, ExpectedHarnessSHA: *harnessSHA})
+	return errors.Join(verifyErr, smoke.Write(*output, result))
+}
+
+func runSmokeDomain(arguments []string) error {
+	flags := flag.NewFlagSet("smoke-domain", flag.ContinueOnError)
+	domain := flags.String("domain", "", "smoke failure domain")
+	expectedSHA := flags.String("expected-harness-sha", "", "frozen harness SHA-256")
+	output := flags.String("output", "", "absolute domain result path")
+	bootID := flags.String("boot-id", "/proc/sys/kernel/random/boot_id", "absolute runner boot ID path")
+	evidenceRoot := flags.String("evidence-root", "", "absolute frozen raw evidence root")
+	if err := flags.Parse(arguments); err != nil {
+		return err
+	}
+	if flags.NArg() != 0 || *domain == "" || *expectedSHA == "" || *output == "" || *evidenceRoot == "" {
+		return errors.New("smoke-domain requires --domain, --expected-harness-sha, --evidence-root, and --output")
+	}
+	binding, err := rendezvous.BindingFromEnvironment()
+	if err != nil {
+		return err
+	}
+	executable, err := os.Executable()
+	if err != nil {
+		return err
+	}
+	result, smokeErr := smoke.RunDomain(smoke.DomainOptions{
+		Binding: binding, Domain: *domain, RunnerName: os.Getenv("G6_SMOKE_RUNNER_NAME"), BootIDPath: *bootID,
+		ExecutablePath: executable, ExpectedSHA256: *expectedSHA, Now: time.Now,
+		EvidenceRoot: *evidenceRoot,
+	})
+	return errors.Join(smokeErr, smoke.Write(*output, result))
+}
+
+func runSmokeAggregate(arguments []string) error {
+	flags := flag.NewFlagSet("smoke-aggregate", flag.ContinueOnError)
+	fdA := flags.String("fd-a", "", "absolute FD-A domain result path")
+	fdB := flags.String("fd-b", "", "absolute FD-B domain result path")
+	expectedSHA := flags.String("expected-harness-sha", "", "frozen harness SHA-256")
+	output := flags.String("output", "", "absolute aggregate result path")
+	releaseID := flags.String("release-artifact-id", "", "frozen harness artifact ID")
+	releaseDigest := flags.String("release-artifact-digest", "", "frozen harness artifact digest")
+	fdAID := flags.String("fd-a-artifact-id", "", "FD-A result artifact ID")
+	fdADigest := flags.String("fd-a-artifact-digest", "", "FD-A result artifact digest")
+	fdBID := flags.String("fd-b-artifact-id", "", "FD-B result artifact ID")
+	fdBDigest := flags.String("fd-b-artifact-digest", "", "FD-B result artifact digest")
+	bundleID, bundleDigest := flags.String("bundle-artifact-id", "", "bundle artifact ID"), flags.String("bundle-artifact-digest", "", "bundle artifact digest")
+	secretID, secretDigest := flags.String("secret-scan-artifact-id", "", "secret scan artifact ID"), flags.String("secret-scan-artifact-digest", "", "secret scan artifact digest")
+	verificationID, verificationDigest := flags.String("verification-artifact-id", "", "verification artifact ID"), flags.String("verification-artifact-digest", "", "verification artifact digest")
+	if err := flags.Parse(arguments); err != nil {
+		return err
+	}
+	if flags.NArg() != 0 || *fdA == "" || *fdB == "" || *expectedSHA == "" || *output == "" {
+		return errors.New("smoke-aggregate requires both domain results, the harness digest, and output")
+	}
+	binding, err := rendezvous.BindingFromEnvironment()
+	if err != nil {
+		return err
+	}
+	release, err := smoke.ParseArtifactReference(*releaseID, *releaseDigest)
+	parseErr := err
+	artifactA, err := smoke.ParseArtifactReference(*fdAID, *fdADigest)
+	parseErr = errors.Join(parseErr, err)
+	artifactB, err := smoke.ParseArtifactReference(*fdBID, *fdBDigest)
+	parseErr = errors.Join(parseErr, err)
+	bundleArtifact, err := smoke.ParseArtifactReference(*bundleID, *bundleDigest)
+	parseErr = errors.Join(parseErr, err)
+	secretArtifact, err := smoke.ParseArtifactReference(*secretID, *secretDigest)
+	parseErr = errors.Join(parseErr, err)
+	verificationArtifact, err := smoke.ParseArtifactReference(*verificationID, *verificationDigest)
+	parseErr = errors.Join(parseErr, err)
+	result, aggregateErr := smoke.Aggregate(smoke.AggregateOptions{
+		Binding: binding, FDAPath: *fdA, FDBPath: *fdB, ReleaseArtifact: release,
+		FDAArtifact: artifactA, FDBArtifact: artifactB, ExpectedHarnessSHA: *expectedSHA, Now: time.Now,
+		BundleArtifact: bundleArtifact, SecretScanArtifact: secretArtifact, VerificationArtifact: verificationArtifact,
+	})
+	return errors.Join(parseErr, aggregateErr, smoke.Write(*output, result))
 }
 
 func runManifest(arguments []string) error {
@@ -207,7 +333,8 @@ func runtimeOptions(binding rendezvous.Binding) (runtime.Options, error) {
 		return runtime.Options{}, err
 	}
 	return runtime.Options{
-		Domain: os.Getenv("FD_ID"), DomainRunID: os.Getenv("RUN_ID"), RunnerTemp: os.Getenv("RUNNER_TEMP"),
+		Profile: os.Getenv("G6RD_PROFILE"),
+		Domain:  os.Getenv("FD_ID"), DomainRunID: os.Getenv("RUN_ID"), RunnerTemp: os.Getenv("RUNNER_TEMP"),
 		Workspace: workspace,
 		Binding: state.Binding{
 			CandidateSHA: binding.CandidateSHA, RunID: binding.RunID, RunAttempt: binding.RunAttempt,

@@ -438,6 +438,67 @@ phase_load_start() {
   g6rd_now >"${G6RD_OUTBOX}/load-active/load-active-at"
 }
 
+phase_smoke_session() {
+  require_file "${NODES_FILE}"
+  G6RD_WORKSPACE_ID="$(<"${G6RD_STATE}/workspace-id")"
+  export G6RD_WORKSPACE_ID
+  g6rd_export_common_env
+  g6rd_timeline_init
+  g6rd_timeline_event smoke_session_started
+  # Before promotion the active transportd and API live in FD-A. The FD-B API
+  # port is the authenticated tunnel to that controller, while FD-B has no
+  # local transport socket yet. Use the controller's durable node view here;
+  # the post-promotion phase uses the new local transport socket directly.
+  if ! g6rd_wait_until_deadline 90 3 "four smoke Agents connected" \
+    g6rd_capture_agent_readiness "${NODES_FILE}"; then
+    g6rd_report_agent_readiness
+    return 1
+  fi
+  local node key="g6-load-${RUN_ID}-smoke" out="${G6RD_OUTBOX}/smoke-session"
+  mkdir -p "${out}"
+  cp -f "${G6RD_STATE}/agent-readiness-last.json" "${out}/connections.json"
+  node="$(awk -F'\t' '$1 == "g6-fd-b-01" {print $2}' "${NODES_FILE}")"
+  [[ -n "${node}" ]] || { echo "cross-FD smoke node is absent" >&2; return 1; }
+  # Formal load deliberately starts with every synthetic command held at its
+  # Agent receipt barrier. Smoke proves an end-to-end result instead, so it
+  # must disarm that fixture before issuing its one authenticated command.
+  g6rd_release_synthetic_barriers
+  g6rd_enqueue_command "${node}" "${key}"
+  # A relay delivery can cross the Worker's ordinary-send ambiguity window.
+  # Do not treat the intermediate `unknown` state as the smoke success point;
+  # wait through reconciliation for the one durable successful Agent result.
+  g6rd_wait_until_deadline 120 2 "cross-FD smoke command result" \
+    smoke_command_succeeded "${key}" "${node}"
+  capture_relay_command_proof "${key}" "${node}" "${out}/command-proof.json"
+  cp -f "${NODES_FILE}" "${out}/nodes.tsv"
+  printf '%s\n' "${G6RD_CANDIDATE_SHA}" >"${out}/candidate-sha"
+}
+
+smoke_command_succeeded() {
+  local key="${1:?idempotency key is required}" node="${2:?node id is required}"
+  [[ "$(psql_primary_probe -Atc \
+    "SELECT count(*) FROM commands AS command
+     JOIN agent_command_results AS result ON result.command_id=command.id
+     WHERE command.idempotency_key='${key}' AND command.node_id='${node}'
+       AND command.state='succeeded' AND result.state='succeeded'")" == 1 ]]
+}
+
+phase_smoke_evidence() {
+  local out="${G6RD_OUTBOX}/smoke-final" args=()
+  require_file "${G6RD_STATE}/promoted-at"
+  mkdir -p "${out}/evidence"
+  readarray -t args < <(node_ids)
+  g6rd_probe_node_connection any "${args[@]}" >"${out}/evidence/post-promotion-connections.json"
+  cp -f "${G6RD_STATE}/era2-sessions.tsv" "${out}/evidence/era2-sessions.tsv"
+  cp -f "${G6RD_STATE}/promoted-at" "${out}/evidence/promoted-at"
+  stop_watchers
+  jq -cn --arg candidate "${G6RD_CANDIDATE_SHA}" --arg environment "${G6RD_ENVIRONMENT_ID}" \
+    --arg domain "${FD_ID}" --argjson agents "$(managed_node_count)" \
+    '{schema_version:"ocservia.g6-smoke-observations.v1",profile:"smoke",candidate_sha:$candidate,environment_id:$environment,failure_domain:$domain,claims:{managed_agents:$agents,primary_promoted:true,post_promotion_sessions:true,raw_evidence_frozen:true}}' \
+    >"${out}/smoke-observations.json"
+  g6rd_now >"${out}/evidence/frozen-at"
+}
+
 phase_promote() {
   local isolation="${1:?peer isolation directory is required}"
   require_file "${isolation}/isolation.json"
@@ -671,8 +732,10 @@ phase_scenario_scheduler() {
   export SCHEDULER_OLD_EPOCH
   g6rd_compose stop scheduler
   g6rd_timeline_event scheduler_a_paused
-  g6rd_wait_until_deadline 120 2 "old scheduler lease lapsed" \
-    scheduler_lease_lapsed
+  # The replacement process is the authoritative expiry probe: Acquire can
+  # advance the epoch only after PostgreSQL observes the old lease expired.
+  # Starting it immediately also exercises the real ErrLeaseHeld retry path
+  # instead of polling the same predicate independently in the harness.
   g6rd_compose up --detach scheduler
   g6rd_wait_until_deadline 120 2 \
     "replacement scheduler acquired leadership" scheduler_replaced
@@ -724,11 +787,6 @@ phase_scenario_scheduler() {
 # the old owner's exact fence through both enforcement points (transportd
 # disposition and the Agent's stale_owner_epoch gate). The transportd stop
 # for the agent-side probe is also the reconnect-storm injection.
-scheduler_lease_lapsed() {
-  [[ "$(G6RD_PSQL_TIMEOUT_SECONDS=5 psql_primary -Atc \
-    'SELECT (lease_until <= clock_timestamp())::text FROM scheduler_leadership WHERE id=1')" == "t" ]]
-}
-
 scheduler_replaced() {
   local epoch
   epoch="$(G6RD_PSQL_TIMEOUT_SECONDS=5 psql_primary -Atc \
@@ -1233,7 +1291,8 @@ phase_scenario_owner() {
     return 1
   fi
   capture_reconnect_sessions "${bulk_disconnect_file}"
-  capture_database_clock >"${G6RD_STATE}/reconnect-completed-at"
+  capture_database_clock_bounded "${G6RD_STATE}/reconnect-completed-at" \
+    "database clock after reconnect"
   g6rd_timeline_event reconnect_completed "${G6RD_STATE}/reconnect-completed-at"
 }
 
@@ -1270,7 +1329,9 @@ phase_relay_pre_fault() {
   rm -f -- "${observation}" "${before}"
   G6RD_COMPOSE_TIMEOUT_SECONDS=30 g6rd_compose stop relay
   g6rd_wait_until_deadline 30 1 "relay-b stopped before relay-a proof" relay_b_stopped
-  disabled_at="$(capture_database_clock)"
+  capture_database_clock_bounded "${G6RD_STATE}/relay-b-disabled-at" \
+    "database clock after relay-b stop"
+  disabled_at="$(<"${G6RD_STATE}/relay-b-disabled-at")"
   temporary="${out}/relay-b-disabled.json.$$"
   jq -cn --arg environment "${G6RD_ENVIRONMENT_ID}" \
     --arg candidate "${G6RD_CANDIDATE_SHA}" --arg node "${cross_vm_node}" \
@@ -1305,7 +1366,8 @@ phase_relay_pre_fault() {
     relay_probe_named relay-a "${cross_vm_node}" "${observation}"
   require_file "${observation}"
   relay_observations_same_session "${before}" "${observation}"
-  capture_database_clock >"${out}/observed-at"
+  capture_database_clock_bounded "${out}/observed-at" \
+    "database clock after relay-a observation"
   printf '%s\n' "${cross_vm_node}" >"${out}/node-id"
   printf '%s\n' "${G6RD_CANDIDATE_SHA}" >"${out}/candidate-sha"
 }
@@ -1360,7 +1422,9 @@ phase_scenario_relay() {
   }
   g6rd_timeline_event relay_a_failed "${relay_failed_at}"
   phase_relay_up
-  started_at="$(capture_database_clock)"
+  capture_database_clock_bounded "${G6RD_STATE}/relay-b-started-at" \
+    "database clock after relay-b start"
+  started_at="$(<"${G6RD_STATE}/relay-b-started-at")"
   jq -en --arg started_at "${started_at}" \
     --slurpfile cut "${peer_ready}/relay-fault-cut.json" '
       def stamp_key:
@@ -1405,7 +1469,8 @@ phase_scenario_relay() {
   require_file "${observation_file}"
   relay_observations_same_session "${before_file}" "${observation_file}"
   active_at_file="${G6RD_STATE}/relay-b-active-at"
-  capture_database_clock >"${active_at_file}"
+  capture_database_clock_bounded "${active_at_file}" \
+    "database clock after relay-b activation"
   g6rd_timeline_event relay_b_active "${active_at_file}"
 }
 
@@ -1543,8 +1608,9 @@ capture_relay_command_proof() {
     and (.agent_result_completed_at | test("^[0-9]{4}-.*Z$"))
     and (.result_observed_at | test("^[0-9]{4}-.*Z$"))
   ' "${temporary}" >/dev/null || {
-    rm -f -- "${temporary}"
+    mv -f -- "${temporary}" "${output}.failed.json"
     echo "relay failover command lacks one successful durable result" >&2
+    jq -c . "${output}.failed.json" >&2 || true
     return 1
   }
   mv -f -- "${temporary}" "${output}"
@@ -2335,9 +2401,9 @@ capture_window_opening_active() {
 
 record_window_opening_proof() {
   local marker="window-opening-proof-${RUN_ID}"
-  psql_window_probe -v marker_id="${marker}" -Atc \
+  psql_window_probe -Atc \
     "INSERT INTO g6_readiness_markers(id,txid,phase)
-     VALUES (:'marker_id',txid_current()::text,'window_opening_proof')
+     VALUES ('${marker}',txid_current()::text,'window_opening_proof')
      RETURNING id" \
     | grep -Fx -- "${marker}" >/dev/null
 }
@@ -2484,6 +2550,24 @@ quiesce_authority_renewers() {
 capture_database_clock() {
   psql_primary_probe -qAtc \
     "SELECT to_char(clock_timestamp() AT TIME ZONE 'UTC','YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"')"
+}
+
+capture_database_clock_file() {
+  local destination="${1:?database clock destination is required}" temporary
+  temporary="$(mktemp "${destination}.XXXXXX")"
+  if ! capture_database_clock >"${temporary}" \
+    || ! grep -Eq '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{6}Z$' "${temporary}"; then
+    rm -f -- "${temporary}"
+    return 1
+  fi
+  mv -f -- "${temporary}" "${destination}"
+}
+
+capture_database_clock_bounded() {
+  local destination="${1:?database clock destination is required}"
+  local description="${2:?database clock description is required}"
+  g6rd_wait_until_deadline 30 2 "${description}" \
+    capture_database_clock_file "${destination}"
 }
 
 capture_final_authority_cut() {
@@ -2751,11 +2835,13 @@ phase_evidence_collect() {
   local args=()
   readarray -t args < <(node_ids)
   g6rd_probe_node_connection any "${args[@]}" >"${dir}/final-sessions-before.json"
-  capture_database_clock >"${dir}/final-sessions-before-complete-at"
+  capture_database_clock_bounded "${dir}/final-sessions-before-complete-at" \
+    "database clock before final authority cut"
   capture_final_authority_cut
   stop_watchers
   append_final_history_snapshot
-  capture_database_clock >"${dir}/final-sessions-after-start-at"
+  capture_database_clock_bounded "${dir}/final-sessions-after-start-at" \
+    "database clock after final authority cut"
   g6rd_probe_node_connection any "${args[@]}" >"${dir}/final-sessions-after.json"
   assert_final_session_authority
   jq -er '.cut_at' "${G6RD_STATE}/final-authority-cut.json" \
@@ -2875,6 +2961,7 @@ relay-up) phase_relay_up ;;
   agents-enroll) phase_agents_enroll "${2:?peer nodes tsv}" ;;
   agents-start) phase_agents_start "${2:?transport trust rendezvous is required}" ;;
   load-start) phase_load_start ;;
+  smoke-session) phase_smoke_session ;;
   promote) phase_promote "${2:?peer isolation directory}" ;;
   merge-peer-evidence) phase_merge_peer_evidence "${2:?peer evidence root}" ;;
 scenario-scheduler) phase_scenario_scheduler ;;
@@ -2890,6 +2977,7 @@ outbox-send-before-mark) phase_outbox_send_before_mark ;;
   window) phase_window "${2:?peer window-barrier acknowledgement is required}" ;;
   evidence-collect) phase_evidence_collect ;;
   final-freeze) phase_final_freeze ;;
+  smoke-evidence) phase_smoke_evidence ;;
   runtime-result) phase_runtime_result "${2:?job status is required}" ;;
   diagnostics) g6rd_diagnostics ;;
   cleanup-prelude) phase_cleanup_prelude ;;

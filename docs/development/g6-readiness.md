@@ -4,12 +4,28 @@ The G6 production-readiness gate requires a real multi-host topology: at
 least two instances of every control-plane role across at least two failure
 domains, a PostgreSQL primary and a streaming standby on distinct hosts, at
 least fifty real Agents, and a fault-free 300-second observation window
-with continuous resource sampling. The readiness harness
-(`.github/workflows/g6-readiness.yml`, manual dispatch only) builds that
-topology from two concurrent GitHub-hosted `ubuntu-24.04` runners that
+with continuous resource sampling. The manual
+`.github/workflows/g6-readiness.yml` caller invokes the formal profile in
+`.github/workflows/g6-harness-core.yml`, which builds that topology from two
+concurrent GitHub-hosted `ubuntu-24.04` runners that
 rendezvous through run-scoped workflow artifacts, the same two-VM pattern
 as `docs/development/g6-ha-pitr-topology.md`, and evaluates the frozen
 contract in `docs/acceptance/g6-slo.yaml` end to end.
+
+The separate `.github/workflows/g6-harness-smoke.yml` pull-request caller
+invokes only the reusable core's bounded `smoke` profile. It schedules two
+hosted runners, proves they have distinct boot identities, and makes both
+execute one candidate-bound frozen release. The bounded fixture brings up a
+Primary and Standby, two real Agents per domain, one cross-domain authenticated
+session, one promotion, a 30-second observation, raw evidence, assembly,
+gitleaks, independent verification, and cleanup. It does not use a
+production-readiness Environment or emit a G6 verdict. Its
+`ocservia.g6-harness-smoke-result.v1` output always
+sets `formal_verdict_eligible` to `false`.
+The caller preserves that same result check for every pull request. Changes
+limited to ordinary documentation emit `status=not_applicable`; acceptance
+contracts and any executable or workflow change still run the complete hosted
+smoke, and an empty diff is treated as relevant.
 
 A bounded producer job builds the candidate-labeled control-plane, transportd,
 relay, probe, and Agent images once and includes the exact PostgreSQL support

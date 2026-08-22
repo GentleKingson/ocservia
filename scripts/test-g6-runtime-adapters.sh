@@ -1,11 +1,13 @@
 #!/usr/bin/env bash
-# shellcheck disable=SC1090,SC2016,SC2030,SC2031,SC2329
+# shellcheck disable=SC1090,SC1091,SC2016,SC2030,SC2031,SC2329
 # This test sources a path variable, matches literal expansions, and isolates
 # environment mutations in subshell fixtures.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-WORKFLOW="${ROOT}/.github/workflows/g6-readiness.yml"
+FORMAL_CALLER="${ROOT}/.github/workflows/g6-readiness.yml"
+SMOKE_CALLER="${ROOT}/.github/workflows/g6-harness-smoke.yml"
+WORKFLOW="${ROOT}/.github/workflows/g6-harness-core.yml"
 CI_WORKFLOW="${ROOT}/.github/workflows/ci.yml"
 COMPOSE_FILE="${ROOT}/deploy/g6-readiness/compose.yaml"
 SUPERVISOR="${ROOT}/deploy/g6-readiness/agent-supervisor.sh"
@@ -31,8 +33,10 @@ RENDEZVOUS_CONTRACT="${ROOT}/tools/g6-harness/internal/rendezvous/contract.go"
 RUNTIME_ORCHESTRATOR="${ROOT}/tools/g6-harness/internal/runtime/orchestrator.go"
 CHECKPOINT_ACTION="${ROOT}/.github/actions/g6-checkpoint-upload/action.yml"
 
-ruby -r yaml - "${WORKFLOW}" "${COMPOSE_FILE}" "${CI_WORKFLOW}" <<'RUBY'
-workflow_path, compose_path, ci_workflow_path = ARGV
+ruby -r yaml - "${FORMAL_CALLER}" "${SMOKE_CALLER}" "${WORKFLOW}" "${COMPOSE_FILE}" "${CI_WORKFLOW}" <<'RUBY'
+formal_path, smoke_path, workflow_path, compose_path, ci_workflow_path = ARGV
+formal = YAML.safe_load(File.read(formal_path), aliases: true)
+smoke = YAML.safe_load(File.read(smoke_path), aliases: true)
 workflow = YAML.safe_load(File.read(workflow_path), aliases: true)
 compose = YAML.safe_load(File.read(compose_path), aliases: true)
 ci_workflow = YAML.safe_load(File.read(ci_workflow_path), aliases: true)
@@ -42,20 +46,68 @@ def reject(message)
   exit 1
 end
 
-trigger = workflow.fetch(true)
+trigger = formal.fetch(true)
 reject("G6 readiness must remain workflow_dispatch-only") unless trigger.keys == ["workflow_dispatch"]
 authority = trigger.fetch("workflow_dispatch").fetch("inputs").fetch("authority")
 reject("the authority input must be a required choice") unless authority.fetch("type") == "choice" && authority.fetch("required") == true
 reject("the authority enum is frozen") unless authority.fetch("options") == %w[engineering production_readiness]
 reject("engineering must stay the default authority") unless authority.fetch("default") == "engineering"
-reject("G6 readiness permissions must be read-only") unless workflow.fetch("permissions") == {"contents" => "read", "actions" => "read"}
-concurrency = workflow.fetch("concurrency")
+reject("G6 readiness permissions must be read-only") unless formal.fetch("permissions") == {"contents" => "read", "actions" => "read"}
+concurrency = formal.fetch("concurrency")
 reject("G6 readiness concurrency must bind ref and authority") unless concurrency.fetch("group").include?("github.ref") && concurrency.fetch("group").include?("inputs.authority")
 reject("formal G6 dispatches must queue without cancelling an active evidence run") unless
   concurrency.fetch("queue") == "max" && !concurrency.key?("cancel-in-progress")
 
+formal_jobs = formal.fetch("jobs")
+reject("formal readiness must be a single thin reusable-workflow caller") unless formal_jobs.keys == ["g6-harness-core"]
+formal_call = formal_jobs.fetch("g6-harness-core")
+reject("formal readiness must call the local reusable core") unless formal_call.fetch("uses") == "./.github/workflows/g6-harness-core.yml"
+reject("formal readiness must select only the formal profile") unless
+  formal_call.fetch("with") == {
+    "profile" => "formal",
+    "authority" => "${{ inputs.authority }}",
+    "candidate_sha" => "${{ github.sha }}",
+    "smoke_relevant" => true,
+  }
+
+core_trigger = workflow.fetch(true)
+reject("the G6 core must be reusable-only") unless core_trigger.keys == ["workflow_call"]
+core_inputs = core_trigger.fetch("workflow_call").fetch("inputs")
+reject("the reusable core must expose exact typed profile, authority, candidate, and relevance inputs") unless
+  core_inputs.keys.sort == %w[authority candidate_sha profile smoke_relevant] &&
+  core_inputs.values_at("profile", "authority", "candidate_sha").all? { |input| input.fetch("type") == "string" && input.fetch("required") == true } &&
+  core_inputs.fetch("smoke_relevant").fetch("type") == "boolean" && core_inputs.fetch("smoke_relevant").fetch("required") == true
+reject("the reusable core permissions must remain read-only") unless workflow.fetch("permissions") == {"contents" => "read", "actions" => "read"}
+
+smoke_trigger = smoke.fetch(true)
+reject("G6 harness smoke must run only for pull requests") unless smoke_trigger.keys == ["pull_request"]
+reject("G6 harness smoke permissions must remain read-only") unless smoke.fetch("permissions") == {"contents" => "read", "actions" => "read"}
+smoke_concurrency = smoke.fetch("concurrency")
+reject("PR smoke must use latest-wins cancellation scoped to the pull request") unless
+  smoke_concurrency.fetch("group").include?("github.event.pull_request.number") &&
+  smoke_concurrency.fetch("cancel-in-progress") == true && !smoke_concurrency.key?("queue")
+smoke_jobs = smoke.fetch("jobs")
+reject("PR smoke must classify relevance before its thin reusable-workflow caller") unless smoke_jobs.keys.sort == %w[g6-harness-core g6-smoke-relevance]
+relevance = smoke_jobs.fetch("g6-smoke-relevance")
+relevance_steps = Array(relevance.fetch("steps"))
+reject("PR smoke relevance must compare the exact base and head with full history") unless
+  relevance.fetch("runs-on") == "ubuntu-24.04" && relevance.fetch("timeout-minutes") <= 5 &&
+  relevance_steps.any? { |step| step.fetch("with", {})["fetch-depth"] == 0 } &&
+  relevance_steps.any? { |step| step.fetch("run", "").include?("scripts/g6-smoke-relevance.sh") }
+smoke_call = smoke_jobs.fetch("g6-harness-core")
+reject("PR smoke must call the local reusable core") unless smoke_call.fetch("uses") == "./.github/workflows/g6-harness-core.yml"
+reject("PR smoke must be permanently non-authoritative") unless
+  smoke_call.fetch("needs") == "g6-smoke-relevance" &&
+  smoke_call.fetch("with") == {
+    "profile" => "smoke",
+    "authority" => "engineering",
+    "candidate_sha" => "${{ github.sha }}",
+    "smoke_relevant" => "${{ needs.g6-smoke-relevance.outputs.relevant == 'true' }}",
+  }
+
 jobs = workflow.fetch("jobs")
 required_jobs = %w[
+  g6-contract
   g6-rd-release-image
   g6-rd-fd-a
   g6-rd-fd-b
@@ -63,11 +115,23 @@ required_jobs = %w[
   g6-rd-secret-scan
   g6-rd-verifier
   g6-rd-gate
+  g6-smoke-release
+  g6-smoke-fd-a
+  g6-smoke-fd-b
+  g6-smoke-assemble
+  g6-smoke-secret-scan
+  g6-smoke-verifier
+  g6-smoke-result
 ]
 reject("G6 readiness is missing a required semantic layer") unless
   (required_jobs - jobs.keys).empty?
 policy_commands = %w[
-  scripts/test-g6-readiness-workflow.sh
+  scripts/test-g6-workflow-contract.sh
+  scripts/test-g6-formal-authority.sh
+  scripts/test-g6-release-identity.sh
+  scripts/test-g6-evidence-pipeline.sh
+  scripts/test-g6-runtime-adapters.sh
+  scripts/test-g6-smoke-relevance.sh
   scripts/test-g6-readiness-hang-guards.sh
 ]
 ci_jobs = ci_workflow.fetch("jobs")
@@ -93,19 +157,119 @@ reject("Contracts and Policy must remain in the required quality aggregate") unl
 jobs.each do |job_id, job|
   reject("#{job_id} must use ubuntu-24.04") unless job.fetch("runs-on") == "ubuntu-24.04"
   reject("#{job_id} job env must not reference the step-only runner context") if job.fetch("env", {}).values.any? { |value| value.to_s.include?("runner.") }
-  timeout_bound = job_id.start_with?("g6-rd-fd-") ? 90 : (job_id == "g6-rd-release-image" ? 35 : 20)
+  timeout_bound = (job_id.start_with?("g6-rd-fd-") || job_id.start_with?("g6-smoke-fd-")) ? 90 : (%w[g6-rd-release-image g6-smoke-release].include?(job_id) ? 35 : 20)
   reject("#{job_id} must stay within the bounded window") unless job.fetch("timeout-minutes") <= timeout_bound
   reject("#{job_id} Action is not pinned to a full SHA or exact local path") if
     Array(job.fetch("steps")).any? do |step|
       step.key?("uses") &&
         !step.fetch("uses").match?(/@[0-9a-f]{40}\z/) &&
-        step.fetch("uses") != "./.github/actions/g6-checkpoint-upload"
+        !%w[./.github/actions/g6-checkpoint-upload ./.github/actions/g6-install-release].include?(step.fetch("uses"))
     end
   reject("#{job_id} must not force a failing check green") if Array(job.fetch("steps")).any? { |step| step.key?("run") && step.fetch("run").include?("continue-on-error") }
   reject("#{job_id} must not mask a failed step") if Array(job.fetch("steps")).any? { |step| step["continue-on-error"] == true }
-  environment = job.fetch("environment").fetch("name")
-  reject("#{job_id} must gate both authorities through GitHub environments") unless environment.include?("g6-production-readiness") && environment.include?("g6-engineering-rehearsal") && environment.include?("inputs.authority")
+  if job_id.start_with?("g6-rd-")
+    environment = job.fetch("environment").fetch("name")
+    reject("#{job_id} must gate both authorities through GitHub environments") unless environment.include?("g6-production-readiness") && environment.include?("g6-engineering-rehearsal") && environment.include?("inputs.authority")
+  else
+    reject("#{job_id} must never enter a formal G6 environment") if job.key?("environment")
+  end
 end
+
+reject("caller-specific concurrency policy must not be duplicated inside the reusable core") if
+  workflow.key?("concurrency")
+%w[g6-rd-release-image g6-rd-fd-a g6-rd-fd-b].each do |job_id|
+  reject("#{job_id} must be unreachable from the smoke profile") unless
+    jobs.fetch(job_id).fetch("if") == "inputs.profile == 'formal'"
+end
+%w[g6-rd-assemble g6-rd-secret-scan g6-rd-verifier g6-rd-gate].each do |job_id|
+  reject("#{job_id} must remain unreachable from the smoke profile even under always()") unless
+    jobs.fetch(job_id).fetch("if") == "${{ always() && inputs.profile == 'formal' }}"
+end
+
+smoke_release = jobs.fetch("g6-smoke-release")
+reject("smoke must build one frozen product release only on the smoke profile") unless
+  smoke_release.fetch("needs") == "g6-contract" && smoke_release.fetch("if") == "inputs.profile == 'smoke' && inputs.smoke_relevant"
+smoke_release_steps = Array(smoke_release.fetch("steps"))
+smoke_cache = smoke_release_steps.find { |step| step["name"] == "Restore the pinned smoke release toolchain" }
+smoke_build = smoke_release_steps.find { |step| step["name"] == "Build and freeze the smoke release" }
+smoke_publish = smoke_release_steps.find { |step| step["name"] == "Publish the frozen smoke harness" }
+reject("smoke must freeze the product images, tunnel, and pinned-Go harness") unless
+  smoke_build&.fetch("run", "").include?(".tools/go/bin/go") &&
+  smoke_build.fetch("run").include?("GOTOOLCHAIN=local") &&
+  smoke_build.fetch("run").include?("GOOS=linux") &&
+  smoke_build.fetch("run").include?("harness-sha256") &&
+  smoke_build.fetch("run").include?("runtime-images.tar.gz") &&
+  smoke_build.fetch("run").include?("ocservia-g6-tunnel") &&
+  smoke_release_steps.any? { |step| step.fetch("run", "") == "scripts/bootstrap.sh go-test" }
+reject("pull-request smoke must restore but never write a tool cache") unless
+  smoke_cache&.fetch("uses", "").start_with?("actions/cache/restore@") &&
+  smoke_release_steps.none? { |step| step.fetch("uses", "").match?(%r{\Aactions/cache(?:/save)?@}) }
+reject("the frozen smoke binary must be a run-attempt-scoped artifact") unless
+  smoke_publish&.fetch("with")&.fetch("name", "").include?("github.run_id") &&
+  smoke_publish.fetch("with").fetch("name").include?("github.run_attempt")
+
+%w[g6-smoke-fd-a g6-smoke-fd-b].each do |job_id|
+  job = jobs.fetch(job_id)
+  domain = job_id.end_with?("a") ? "fd-a" : "fd-b"
+  steps = Array(job.fetch("steps"))
+  execute = steps.find { |step| step["name"] == "Bind #{domain.upcase} raw evidence" }
+  reject("#{job_id} must independently consume the one frozen release") unless
+    job.fetch("needs") == "g6-smoke-release" && job.fetch("if") == "inputs.profile == 'smoke' && inputs.smoke_relevant" &&
+    execute&.fetch("run", "").include?("smoke-domain") && execute.fetch("run").include?("--domain #{domain}") &&
+    execute.fetch("run").include?("--evidence-root") &&
+    steps.any? { |step| step["uses"] == "./.github/actions/g6-install-release" }
+  reject("#{job_id} must be fixed to engineering authority") unless job.fetch("env").fetch("G6_AUTHORITY") == "engineering"
+  reject("#{job_id} must run two Agents per domain under the smoke profile") unless
+    job.fetch("env").values_at("G6RD_PROFILE", "G6_AGENTS_A", "G6_AGENTS_B") == ["smoke", "2", "2"]
+  diagnostics = steps.find { |step| step["name"] == "Collect #{domain.upcase} diagnostics" }
+  diagnostics_upload = steps.find { |step| step["name"] == "Upload #{domain.upcase} diagnostics" }
+  cleanup_index = steps.index { |step| step["name"] == "Clean #{domain.upcase} resources" }
+  reject("#{job_id} must preserve bounded diagnostics before cleanup") unless
+    diagnostics&.fetch("if") == "always()" &&
+    diagnostics.fetch("run").start_with?("timeout --signal=TERM --kill-after=15s 120s ") &&
+    diagnostics_upload&.fetch("if") == "always()" &&
+    diagnostics_upload.fetch("with").fetch("path") == "${{ runner.temp }}/artifacts/g6-readiness-#{domain}" &&
+    diagnostics_upload.fetch("with").fetch("if-no-files-found") == "error" &&
+    steps.index(diagnostics_upload) < cleanup_index
+end
+
+smoke_assembly = jobs.fetch("g6-smoke-assemble")
+reject("smoke must separate Evidence Builder from runtime") unless
+  smoke_assembly.fetch("needs").sort == %w[g6-smoke-fd-a g6-smoke-fd-b g6-smoke-release] &&
+  Array(smoke_assembly.fetch("steps")).any? { |step| step.fetch("run", "").include?("smoke-assemble") }
+reject("smoke must independently scan all raw and assembled evidence") unless
+  Array(jobs.fetch("g6-smoke-secret-scan").fetch("steps")).sum { |step| step.fetch("run", "").scan("gitleaks dir").length } == 3 &&
+  Array(jobs.fetch("g6-smoke-secret-scan").fetch("steps")).any? { |step| step.fetch("run", "").include?("source scripts/env.sh") && step.fetch("run").include?("gitleaks dir") }
+smoke_verifier_steps = Array(jobs.fetch("g6-smoke-verifier").fetch("steps"))
+smoke_verifier_fallback = smoke_verifier_steps.find { |step| step["name"] == "Preserve structured smoke verification failure" }
+smoke_verifier_publish = smoke_verifier_steps.find { |step| step["name"] == "Publish independent smoke verification" }
+reject("smoke must use an independent verifier job") unless
+  smoke_verifier_steps.any? { |step| step.fetch("run", "").include?("smoke-verify") }
+reject("smoke verifier failures must remain structured and publishable") unless
+  smoke_verifier_fallback&.fetch("if") == "always()" &&
+  smoke_verifier_fallback.fetch("run").include?("ocservia.g6-harness-smoke-verification-result.v1") &&
+  smoke_verifier_publish&.fetch("if") == "always()" &&
+  smoke_verifier_publish.fetch("with").fetch("if-no-files-found") == "error"
+
+smoke_result = jobs.fetch("g6-smoke-result")
+smoke_result_steps = Array(smoke_result.fetch("steps"))
+smoke_aggregate = smoke_result_steps.find { |step| step["name"] == "Aggregate the non-authoritative smoke result" }
+smoke_enforce = smoke_result_steps.find { |step| step["name"] == "Enforce the smoke contract" }
+reject("smoke aggregation must require two separately scheduled hosted domains") unless
+  smoke_result.fetch("needs").sort == %w[g6-smoke-assemble g6-smoke-fd-a g6-smoke-fd-b g6-smoke-release g6-smoke-secret-scan g6-smoke-verifier] &&
+  smoke_result.fetch("if") == "${{ always() && inputs.profile == 'smoke' }}" &&
+  smoke_aggregate&.fetch("run", "").include?("smoke-aggregate")
+smoke_not_applicable = smoke_result_steps.find { |step| step["name"] == "Record a structured not-applicable result" }
+reject("unrelated pull requests must retain the stable smoke result check with structured not_applicable output") unless
+  smoke_not_applicable&.fetch("if") == "${{ !inputs.smoke_relevant }}" &&
+  smoke_not_applicable.fetch("run", "").include?('status:"not_applicable"') &&
+  smoke_enforce&.fetch("run", "").include?("expected_status=not_applicable")
+reject("the smoke result must be structurally unable to claim a formal verdict") unless
+  smoke_enforce&.fetch("if") == "always()" &&
+  smoke_enforce.fetch("run").include?('.formal_verdict_eligible == false') &&
+  smoke_enforce.fetch("run").include?('ocservia.g6-harness-smoke-result.v1') &&
+  !smoke_result_steps.any? { |step| step.fetch("run", "").include?("g6-pipeline.mjs gate") }
+
 release_job = jobs.fetch("g6-rd-release-image")
 release_steps = Array(release_job.fetch("steps"))
 reject("the release producer must expose its frozen manifest digest") unless
@@ -199,7 +363,7 @@ release_images = release_variables.to_h { |variable| [variable, release_job.fetc
   domain = job_id.end_with?("a") ? "fd-a" : "fd-b"
   reject("#{job_id} cleanup must run through the typed bounded registry recovery path") unless
     cleanup == %Q{"${G6_HARNESS_BIN}" cleanup --domain #{domain} --timeout 180s}
-  peer = job_id.end_with?("a") ? "G6 Readiness Failure Domain B" : "G6 Readiness Failure Domain A"
+  peer = job_id.end_with?("a") ? "G6 Readiness Core / G6 Readiness Failure Domain B" : "G6 Readiness Core / G6 Readiness Failure Domain A"
   waits = steps.select { |step| step["run"]&.include?(%Q{"${G6_HARNESS_BIN}" wait-download}) }
   reject("#{job_id} must use the Go client for every rendezvous wait") if waits.empty?
   reject("#{job_id} artifact waits must name their producer job") unless
@@ -247,7 +411,7 @@ assemble = jobs.fetch("g6-rd-assemble")
 reject("evidence assembly must depend on both runtime jobs") unless
   assemble.fetch("needs").sort == %w[g6-rd-fd-a g6-rd-fd-b]
 reject("evidence assembly must always preserve a partial or complete result") unless
-  assemble.fetch("if") == "always()"
+  assemble.fetch("if") == "${{ always() && inputs.profile == 'formal' }}"
 assemble_steps = Array(assemble.fetch("steps"))
 assemble_fallback = assemble_steps.find do |step|
   step["name"] == "Preserve an assembly result when assembly could not start"
@@ -280,16 +444,20 @@ reject("assembly must publish a separate result bound to raw and bundle artifact
 secret_scan = jobs.fetch("g6-rd-secret-scan")
 reject("secret scan must inspect both raw domains and the assembled bundle") unless
   secret_scan.fetch("needs").sort == %w[g6-rd-assemble g6-rd-fd-a g6-rd-fd-b] &&
-  secret_scan.fetch("if") == "always()"
+  secret_scan.fetch("if") == "${{ always() && inputs.profile == 'formal' }}"
 secret_downloads = Array(secret_scan.fetch("steps")).select do |step|
   step.fetch("name", "").start_with?("Download ")
 end
 reject("secret scan must skip only unavailable downloads, not its structured result job") unless
   secret_downloads.length == 3 &&
   secret_downloads.all? { |step| step.fetch("if", "").include?("artifact-id != ''") }
+formal_secret_scan = Array(secret_scan.fetch("steps")).find { |step| step["name"] == "Scan the published evidence for secrets" }
+reject("formal secret scanning must activate the pinned tool environment") unless
+  formal_secret_scan&.fetch("run", "").include?("source scripts/env.sh") &&
+  formal_secret_scan.fetch("run").include?("gitleaks dir")
 verifier = jobs.fetch("g6-rd-verifier")
 reject("the independent verifier must consume only the assembled evidence layer") unless
-  verifier.fetch("needs") == ["g6-rd-assemble"] && verifier.fetch("if") == "always()"
+  verifier.fetch("needs") == ["g6-rd-assemble"] && verifier.fetch("if") == "${{ always() && inputs.profile == 'formal' }}"
 verifier_download = Array(verifier.fetch("steps")).find do |step|
   step["name"] == "Download the evidence bundle"
 end
@@ -319,7 +487,7 @@ reject("verifier result binding must survive an earlier download or verification
   verifier_binding.fetch("run").include?("needs.g6-rd-assemble.outputs.bundle-artifact-digest")
 gate = jobs.fetch("g6-rd-gate")
 reject("the final gate must always aggregate every result layer") unless
-  gate.fetch("if") == "always()" &&
+  gate.fetch("if") == "${{ always() && inputs.profile == 'formal' }}" &&
   gate.fetch("needs").sort == %w[g6-rd-assemble g6-rd-fd-a g6-rd-fd-b g6-rd-secret-scan g6-rd-verifier]
 gate_build = Array(gate.fetch("steps")).find { |step| step["name"] == "Build the fail-closed G6 gate result" }
 reject("the final gate must reject a failed semantic job even when it emitted a result") unless
@@ -410,6 +578,32 @@ reject("transportd must enforce owner fencing for the stale-rejection scenarios"
 pgappname_count = compose.fetch("services").values.count { |service| service.dig("environment", "PGAPPNAME").to_s.start_with?("${G6_FD_ID:?}-") }
 reject("each role service must set its PGAPPNAME from G6_FD_ID (found #{pgappname_count})") unless pgappname_count == 3
 RUBY
+
+smoke_session_phase="$(sed -n '/^phase_smoke_session() {/,/^}/p' "${FD_B}")"
+grep -q 'g6rd_capture_agent_readiness "${NODES_FILE}"' <<<"${smoke_session_phase}" || {
+  echo "the pre-promotion smoke session must use the active FD-A controller view" >&2
+  exit 1
+}
+grep -q '\$1 == "g6-fd-b-01"' <<<"${smoke_session_phase}" || {
+  echo "the authenticated smoke command must target an Agent across the failure-domain boundary" >&2
+  exit 1
+}
+grep -q 'smoke_command_succeeded "${key}" "${node}"' <<<"${smoke_session_phase}" || {
+  echo "the authenticated smoke command must wait through unknown-outcome reconciliation" >&2
+  exit 1
+}
+grep -q 'g6rd_release_synthetic_barriers' <<<"${smoke_session_phase}" || {
+  echo "the smoke session must release the formal load fixture before its command" >&2
+  exit 1
+}
+if grep -q 'wait_commands_settled' <<<"${smoke_session_phase}"; then
+  echo "the smoke session must not accept an intermediate unknown command as success" >&2
+  exit 1
+fi
+if grep -q 'g6rd_probe_node_connection' <<<"${smoke_session_phase}"; then
+  echo "the pre-promotion FD-B smoke phase must not require a nonexistent local transport socket" >&2
+  exit 1
+fi
 
 # Debian already assigns UID 65534 to nobody. The probe must reuse that
 # account rather than attempting to create a duplicate numeric identity.
@@ -764,6 +958,7 @@ if grep -qE 'UNLOGGED|SET search_path = .*public' "${AUTHORITY_HISTORY_SQL}"; th
 fi
 scheduler_scenario_body="$(sed -n '/^phase_scenario_scheduler() {/,/^}/p' "${FD_B}")"
 scheduler_completion_probe="$(sed -n '/^scheduler_maintenance_completed() {/,/^}/p' "${FD_B}")"
+scheduler_replacement_probe="$(sed -n '/^scheduler_replaced() {/,/^}/p' "${FD_B}")"
 for token in \
   'scheduler-replacement-term' \
   'replacement scheduler completed exact-term fenced maintenance' \
@@ -776,18 +971,25 @@ for token in \
     exit 1
   }
 done
-scheduler_lease_probe="$(sed -n '/^scheduler_lease_lapsed() {/,/^}/p' "${FD_B}")"
 for token in \
-  'g6rd_wait_until_deadline 120 2 "old scheduler lease lapsed"' \
-  'G6RD_PSQL_TIMEOUT_SECONDS=5 psql_primary' \
-  'lease_until <= clock_timestamp()'; do
-  grep -qF "${token}" <<<"${scheduler_scenario_body}${scheduler_lease_probe}" || {
-    echo "scheduler lease expiry must use one bounded database-clock predicate: ${token}" >&2
+  'g6rd_compose stop scheduler' \
+  'g6rd_compose up --detach scheduler' \
+  'g6rd_wait_until_deadline 120 2' \
+  '"replacement scheduler acquired leadership" scheduler_replaced' \
+  '((epoch > SCHEDULER_OLD_EPOCH))'; do
+  grep -qF "${token}" <<<"${scheduler_scenario_body}${scheduler_replacement_probe}" || {
+    echo "scheduler takeover must use the database-enforced replacement acquisition path: ${token}" >&2
     exit 1
   }
 done
-if grep -qE 'to_char\(lease_until|date -u' <<<"${scheduler_lease_probe}"; then
-  echo "scheduler lease expiry must not compare a truncated database lease to the runner clock" >&2
+stop_scheduler_line="$(grep -nF 'g6rd_compose stop scheduler' <<<"${scheduler_scenario_body}" | cut -d: -f1)"
+start_scheduler_line="$(grep -nF 'g6rd_compose up --detach scheduler' <<<"${scheduler_scenario_body}" | cut -d: -f1)"
+replacement_wait_line="$(grep -nF '"replacement scheduler acquired leadership" scheduler_replaced' <<<"${scheduler_scenario_body}" | cut -d: -f1)"
+if [[ -z "${stop_scheduler_line}" || -z "${start_scheduler_line}" \
+  || -z "${replacement_wait_line}" \
+  || "${stop_scheduler_line}" -ge "${start_scheduler_line}" \
+  || "${start_scheduler_line}" -ge "${replacement_wait_line}" ]]; then
+  echo "scheduler replacement must start only after the old process stops and before the bounded acquisition wait" >&2
   exit 1
 fi
 for token in \
@@ -922,7 +1124,7 @@ for token in \
   'capture_relay_dispatch_proof' \
   'capture_relay_command_proof' \
   'relay_observations_same_session' \
-  'capture_database_clock >"${active_at_file}"' \
+  'capture_database_clock_bounded "${active_at_file}"' \
   'relay_probe_relay_b "${cross_vm_node}" "${observation_file}"' \
   'require_file "${observation_file}"'; do
   grep -qF "${token}" <<<"${relay_phase}" || {
@@ -942,7 +1144,7 @@ for token in \
   '"${out}/relay-a-dispatch-proof.json" relay-a' \
   '"${out}/relay-a-command-proof.json"' \
   'relay_observations_same_session "${before}" "${observation}"' \
-  'capture_database_clock >"${out}/observed-at"' \
+  'capture_database_clock_bounded "${out}/observed-at"' \
   'printf '\''%s\n'\'' "${cross_vm_node}" >"${out}/node-id"'; do
   grep -qF "${token}" <<<"${relay_pre_fault_phase}" || {
     echo "relay failover lacks a frozen pre-fault relay-a session: ${token}" >&2
@@ -3092,7 +3294,7 @@ bulk_event_line="$(grep -nF 'g6rd_timeline_event bulk_disconnect_injected "${bul
   echo "the reconnect fault clock must be frozen before transport shutdown begins" >&2
   exit 1
 }
-grep -qF 'capture_database_clock >"${G6RD_STATE}/reconnect-completed-at"' \
+grep -qF 'capture_database_clock_bounded "${G6RD_STATE}/reconnect-completed-at"' \
   <<<"${owner_phase}" || {
   echo "reconnect completion must preserve the database clock precision after capture" >&2
   exit 1
@@ -3710,9 +3912,9 @@ collect_instances_line="$(grep -nF 'done >>"${dir}/instances.tsv"' <<<"${collect
 collect_api_freeze_line="$(grep -nF 'quiesce_control_plane_writers' <<<"${collect_phase}" | cut -d: -f1)"
 collect_telemetry_line="$(grep -nF '>"${dir}/telemetry.jsonl"' <<<"${collect_phase}" | cut -d: -f1)"
 collect_sessions_before_line="$(grep -nF '>"${dir}/final-sessions-before.json"' <<<"${collect_phase}" | cut -d: -f1)"
-collect_before_complete_line="$(grep -nF '>"${dir}/final-sessions-before-complete-at"' <<<"${collect_phase}" | cut -d: -f1)"
+collect_before_complete_line="$(grep -nF 'capture_database_clock_bounded "${dir}/final-sessions-before-complete-at"' <<<"${collect_phase}" | cut -d: -f1)"
 collect_sessions_after_line="$(grep -nF '>"${dir}/final-sessions-after.json"' <<<"${collect_phase}" | cut -d: -f1)"
-collect_after_start_line="$(grep -nF '>"${dir}/final-sessions-after-start-at"' <<<"${collect_phase}" | cut -d: -f1)"
+collect_after_start_line="$(grep -nF 'capture_database_clock_bounded "${dir}/final-sessions-after-start-at"' <<<"${collect_phase}" | cut -d: -f1)"
 collect_observed_line="$(grep -nF '>"${dir}/final-session-observed-at"' <<<"${collect_phase}" | cut -d: -f1)"
 collect_ingress_freeze_line="$(grep -nF 'quiesce_transport_ingress' <<<"${collect_phase}" | cut -d: -f1)"
 collect_cut_line="$(grep -nF 'capture_final_authority_cut' <<<"${collect_phase}" | cut -d: -f1)"
@@ -3989,6 +4191,8 @@ window_arm_phase="$(sed -n '/^phase_window_barrier_arm() {/,/^}/p' "${FD_B}")"
 window_active_predicate="$(sed -n '/^window_opening_commands_active() {/,/^}/p' "${FD_B}")"
 window_active_capture="$(sed -n '/^capture_window_opening_active() {/,/^}/p' "${FD_B}")"
 window_proof_record="$(sed -n '/^record_window_opening_proof() {/,/^}/p' "${FD_B}")"
+database_clock_file="$(sed -n '/^capture_database_clock_file() {/,/^}/p' "${FD_B}")"
+database_clock_bounded="$(sed -n '/^capture_database_clock_bounded() {/,/^}/p' "${FD_B}")"
 fd_a_window_proof="$(sed -n '/^fd_a_window_opening_proof_recorded() {/,/^}/p' "${FD_A}")"
 fd_a_window_release="$(sed -n '/^phase_window_barrier_release_after_proof() (/,/^)/p' "${FD_A}")"
 for token in \
@@ -4025,6 +4229,7 @@ for token in \
 done
 for token in \
   'window-opening-proof-${RUN_ID}' \
+  "VALUES ('\${marker}',txid_current()::text,'window_opening_proof')" \
   "'window_opening_proof'" \
   'RETURNING id'; do
   grep -qF "${token}" <<<"${window_proof_record}" || {
@@ -4034,6 +4239,7 @@ for token in \
 done
 for token in \
   'window-opening-proof-${RUN_ID%-fd-a}-fd-b' \
+  "WHERE id='\${marker}'" \
   "phase='window_opening_proof'" \
   'G6_DB_PORT=15432' \
   '[[ "${observed}" == 1 ]]'; do
@@ -4042,6 +4248,23 @@ for token in \
     exit 1
   }
 done
+if grep -qF ":'marker_id'" <<<"${window_proof_record}${fd_a_window_proof}"; then
+  echo "single-command psql markers must not rely on unsupported client variable interpolation" >&2
+  exit 1
+fi
+for token in 'mktemp "${destination}.XXXXXX"' "grep -Eq '^[0-9]{4}" \
+  'g6rd_wait_until_deadline 30 2 "${description}"' \
+  'capture_database_clock_file "${destination}"'; do
+  grep -qF "${token}" <<<"${database_clock_file}${database_clock_bounded}" || {
+    echo "database-clock evidence must use an atomic bounded retry: ${token}" >&2
+    exit 1
+  }
+done
+clock_calls="$(grep -nF 'capture_database_clock' "${FD_B}")"
+if grep -vE 'capture_database_clock(_bounded|_file)?\(\)|capture_database_clock_bounded|capture_database_clock_file|^[0-9]+:  if ! capture_database_clock >' <<<"${clock_calls}" | grep -q .; then
+  echo "critical database-clock evidence must not use an unbounded one-shot capture" >&2
+  exit 1
+fi
 window_opening_enqueue_line="$(grep -nF 'g6rd_enqueue_command "${node}" "g6-window-${RUN_ID}-opening-${count}"' <<<"${window_phase}" | cut -d: -f1)"
 window_active_wait_line="$(grep -nF '"exact fifty-command production inflight proof"' <<<"${window_phase}" | cut -d: -f1)"
 window_active_capture_line="$(grep -nF 'capture_window_opening_active' <<<"${window_phase}" | cut -d: -f1)"
@@ -4401,9 +4624,9 @@ if [[ "${authority_bindings}" -ne 3 ]]; then
   echo "both failure-domain jobs and the verifier must bind the dispatched authority (found ${authority_bindings})" >&2
   exit 1
 fi
-sha_bindings="$(grep -c 'G6RD_CANDIDATE_SHA: ${{ github.sha }}' "${WORKFLOW}")"
-if [[ "${sha_bindings}" -ne 2 ]]; then
-  echo "both failure-domain jobs must bind the candidate SHA (found ${sha_bindings})" >&2
+sha_bindings="$(grep -c 'G6RD_CANDIDATE_SHA: ${{ inputs.candidate_sha }}' "${WORKFLOW}")"
+if [[ "${sha_bindings}" -ne 5 ]]; then
+  echo "both formal domains and all smoke consumers must bind the reusable candidate input (found ${sha_bindings})" >&2
   exit 1
 fi
 if grep -q 'G6RD_FAILURE_DOMAIN_CLASS' "${WORKFLOW}"; then
@@ -4846,8 +5069,9 @@ grep -qF 'actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a' "${C
 
 runtime_result_helper="$(sed -n '/^g6rd_write_runtime_result() {/,/^}/p' "${LIB}")"
 for token in 'harness/state.json' 'harness/events.jsonl' 'harness/phase-results' \
-  'harness/resources.json' 'harness/frozen-binary-manifest.tsv'; do
-  grep -qF "${token}" <<<"${runtime_result_helper}" || {
+  'ARTIFACT_DIR}/rendezvous' 'harness/resources.json' 'harness/frozen-binary-manifest.tsv' \
+  'failure.class' 'failure.code' '--failure-class' '--failure-code'; do
+  grep -qF -- "${token}" <<<"${runtime_result_helper}" || {
     echo "raw runtime evidence is missing typed harness artifact: ${token}" >&2
     exit 1
   }
@@ -4856,6 +5080,33 @@ if grep -qF 'cp -R "${G6RD_WORK}/harness/." "${root}' <<<"${runtime_result_helpe
   echo "raw runtime evidence must not publish unredacted phase logs" >&2
   exit 1
 fi
+
+runtime_result_test="$(mktemp -d)"
+(
+  export RUNNER_TEMP="${runtime_result_test}"
+  export RUN_ID=runtime-result-fd-b FD_ID=fd-b FD_ALIAS=fd-beta
+  export G6_AUTHORITY=engineering
+  export G6RD_CANDIDATE_SHA=5f9a2a943d7aa38224bc3266b7176f0a061a6b6c
+  export G6RD_RELEASE_MANIFEST_DIGEST=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+  export GITHUB_RUN_ID=1234 GITHUB_RUN_ATTEMPT=1
+  source "${LIB}"
+  g6rd_init_environment
+  mkdir -p "${G6RD_WORK}/harness/phase-results"
+  jq -n '{phase:"scenario-scheduler",sequence:150,status:"failed",failure:{class:"product_assertion_failed",code:"leaf_adapter_failed"}}' \
+    >"${G6RD_WORK}/harness/phase-results/150-scenario-scheduler.json"
+  g6rd_write_runtime_result "${G6RD_OUTBOX}/fd-b-final" failure unknown
+  jq -e '.status == "failed" and .last_phase == "scenario-scheduler" and .failure.class == "product_assertion_failed" and .failure.code == "leaf_adapter_failed"' \
+    "${G6RD_OUTBOX}/fd-b-final/runtime-result.json" >/dev/null
+  rm -rf "${G6RD_WORK}/harness/phase-results"
+  mkdir -p "${ARTIFACT_DIR}/rendezvous"
+  jq -n '{checkpoint:"final-freeze",status:"failed",completed_at:"2026-01-01T00:00:00Z",failure:{class:"peer_failed",code:"peer_job_failed"}}' \
+    >"${ARTIFACT_DIR}/rendezvous/final-freeze.result.json"
+  g6rd_write_runtime_result "${G6RD_OUTBOX}/fd-b-peer-failure" failure unknown
+  jq -e '.status == "failed" and .last_phase == "final-freeze" and .failure.class == "peer_failed" and .failure.code == "peer_job_failed"' \
+    "${G6RD_OUTBOX}/fd-b-peer-failure/runtime-result.json" >/dev/null
+  test -f "${G6RD_OUTBOX}/fd-b-peer-failure/harness/rendezvous/final-freeze.result.json"
+)
+rm -rf "${runtime_result_test}"
 
 # Every pinned action must reuse an exact `uses: action@sha` line already
 # proven by a merged workflow with hosted execution.
