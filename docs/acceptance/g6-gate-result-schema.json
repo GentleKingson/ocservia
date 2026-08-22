@@ -1,0 +1,43 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ocservia.example/schemas/g6-gate-result-schema.json",
+  "title": "Ocservia G6 Gate Result",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "candidate_sha",
+    "run_id",
+    "run_attempt",
+    "environment_id",
+    "authority",
+    "release_manifest_digest",
+    "runtime",
+    "assembly",
+    "secret_scan",
+    "independent_verification",
+    "final_status"
+  ],
+  "properties": {
+    "schema_version": { "const": "ocservia.g6-gate-result.v1" },
+    "candidate_sha": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+    "run_id": { "type": "string", "minLength": 1 },
+    "run_attempt": { "type": "integer", "minimum": 1 },
+    "environment_id": { "type": "string", "pattern": "^g6-[a-z0-9]{8,32}$" },
+    "authority": { "enum": ["engineering", "production_readiness"] },
+    "release_manifest_digest": { "type": ["string", "null"], "pattern": "^[0-9a-f]{64}$" },
+    "runtime": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["fd_a", "fd_b"],
+      "properties": {
+        "fd_a": { "enum": ["passed", "failed", "cancelled"] },
+        "fd_b": { "enum": ["passed", "failed", "cancelled"] }
+      }
+    },
+    "assembly": { "enum": ["passed", "failed"] },
+    "secret_scan": { "enum": ["passed", "failed"] },
+    "independent_verification": { "enum": ["passed", "accepted_non_final", "failed"] },
+    "final_status": { "enum": ["passed", "accepted_non_final", "failed"] }
+  }
+}

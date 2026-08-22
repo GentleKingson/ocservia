@@ -76,6 +76,7 @@ services:
     init: false
     cap_add: [CHOWN, FOWNER, DAC_OVERRIDE, SETUID, SETGID]
     image: postgres:17.10-bookworm
+    pull_policy: never
     environment:
       POSTGRES_DB: ocservia
       POSTGRES_USER: ocservia_owner
@@ -219,19 +220,26 @@ services:
     command: ["--config-path", "/etc/iroh-relay/relay.toml"]
     environment:
       IROH_RELAY_ACCESS_TOKEN_FILE: /run/relay-secrets/relay-token
+      # Relay-failover diagnosis: log per-client connection state and every
+      # dropped forward (destination client not connected) so a restarted
+      # relay's forwarding table can be audited against endpoint reconnects.
+      RUST_LOG: info,iroh_relay::server::clients=debug
     ports:
-      # Containers on this host and the pinned tunnel forward both reach the
-      # relay through the bridge gateway, so it publishes on all interfaces
-      # of the ephemeral CI VM; the token still gates access.
-      - "${G6_RELAY_BIND_ADDRESS:-0.0.0.0}:${G6_RELAY_BIND_PORT:-3443}:8443"
+      # Local containers use the canonical Docker DNS alias on port 3443.
+      # The loopback publication exists only as the tunnel server's target.
+      - "127.0.0.1:${G6_RELAY_BIND_PORT:-13443}:3443"
     volumes:
       - ./relay.toml:/etc/iroh-relay/relay.toml:ro
       - type: bind
-        source: ${G6_RELAY_DIR:?}
+        source: ${G6_RELAY_DIR:?}/relay
         target: /run/relay-secrets
         read_only: true
     extra_hosts:
       - "host.docker.internal:host-gateway"
+    networks:
+      default:
+        aliases:
+          - ${G6_LOCAL_RELAY_HOST:?}
     tmpfs:
       - /tmp:size=16m,mode=0700
     healthcheck:
@@ -257,6 +265,13 @@ services:
       <<: *role-environment
       PGAPPNAME: ${G6_FD_ID:?}-worker
       OCSERV_TRUST_SOCKET: /run/ocserv-trust/control-plane.sock
+      # Bound the exact SendCommand call once the deterministic pre-send hook
+      # releases it. Keep this below the owner lease.
+      OCSERV_TRANSPORT_TIMEOUT: 15s
+      # Test-only Worker hook: only the exact armed Claim is extended to this
+      # ceiling; every unarmed G6 dispatch keeps the production 10s lease.
+      OCSERV_TEST_PRE_SEND_BARRIER_DIR: /run/g6-result-barrier/pre-send
+      OCSERV_TEST_COMMAND_LEASE: 60s
       # One in-flight command per node and a raised global cap keep fifty
       # nodes dispatching concurrently during the peak-inflight probe.
       OCSERV_USER_OPERATION_CONCURRENCY: "200"
@@ -283,12 +298,24 @@ services:
     environment:
       <<: *role-environment
       PGAPPNAME: ${G6_FD_ID:?}-scheduler
+      # Explicitly enable the G6-only, exact-term fenced completion journal.
+      # The production binary defaults this evidence hook off and rejects it
+      # when OCSERV_ENVIRONMENT=production.
+      OCSERV_TEST_SCHEDULER_MAINTENANCE_EVIDENCE: "true"
 
   transportd:
     <<: *service-defaults
     build:
       context: ../..
       dockerfile: rust/transportd.Dockerfile
+    environment:
+      # The binary default ("info,iroh=warn") hides the relay-transport and
+      # path-selection internals that relay-failover diagnosis needs: relay
+      # connection transitions, selected-path changes, and the noq
+      # handshake-decision logs (initial authentication, path adoption,
+      # multipath discards during handshake).
+      RUST_LOG: >-
+        info,iroh=warn,iroh::socket::transports::relay::actor=info,iroh::socket::remote_map::remote_state=debug,noq_proto::endpoint=debug,noq_proto::connection=debug
     command:
       - --socket
       - /run/ocserv-platform/transportd.sock
@@ -329,14 +356,13 @@ services:
         volume:
           nocopy: true
       - type: bind
-        source: ${G6_RELAY_DIR:?}
+        source: ${G6_RELAY_DIR:?}/transportd
         target: /run/relay-secrets
         read_only: true
       - transport-stats:/run/transport-stats
     extra_hosts:
       - "host.docker.internal:host-gateway"
-      - "relay-a:host-gateway"
-      - "relay-b:host-gateway"
+      - "${G6_REMOTE_RELAY_HOST:?}:host-gateway"
     healthcheck:
       test: ["CMD-SHELL", "test -S /run/ocserv-platform/transportd.sock"]
       interval: 2s
@@ -360,7 +386,7 @@ services:
         target: /run/ocservia-signing
         read_only: true
       - type: bind
-        source: ${G6_RELAY_DIR:?}
+        source: ${G6_RELAY_DIR:?}/probe
         target: /run/relay-secrets
         read_only: true
       - type: bind
@@ -369,8 +395,7 @@ services:
         read_only: true
     extra_hosts:
       - "host.docker.internal:host-gateway"
-      - "relay-a:host-gateway"
-      - "relay-b:host-gateway"
+      - "${G6_REMOTE_RELAY_HOST:?}:host-gateway"
     tmpfs:
       - /tmp:size=16m,mode=0700
 

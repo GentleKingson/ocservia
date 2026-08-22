@@ -21,3 +21,4 @@ done < <(git -C "${ROOT}" ls-files '*.md')
 "${ROOT}/scripts/generate-g6-test-fixtures.mjs" --check
 "${ROOT}/scripts/test-g6-evidence-verifier.mjs"
 "${ROOT}/scripts/test-g6-evidence-builder.mjs"
+"${ROOT}/scripts/test-g6-pipeline.mjs"

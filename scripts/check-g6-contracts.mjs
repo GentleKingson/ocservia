@@ -18,6 +18,13 @@ const schemas = [
   ["docs/acceptance/g6-topology-schema.json", "ocservia.g6-topology.v1"],
   ["docs/acceptance/g6-verdict-schema.json", "ocservia.g6-verdict.v2"],
 ];
+const pipelineSchemas = [
+  ["docs/acceptance/g6-runtime-result-schema.json", "ocservia.g6-runtime-result.v1"],
+  ["docs/acceptance/g6-source-manifest-schema.json", "ocservia.g6-source-manifest.v1"],
+  ["docs/acceptance/g6-assembly-result-schema.json", "ocservia.g6-assembly-result.v1"],
+  ["docs/acceptance/g6-secret-scan-result-schema.json", "ocservia.g6-secret-scan-result.v1"],
+  ["docs/acceptance/g6-gate-result-schema.json", "ocservia.g6-gate-result.v1"],
+];
 const parsedSchemas = new Map();
 for (const [path, version] of schemas) {
   const schema = JSON.parse(read(path));
@@ -36,6 +43,30 @@ for (const [path, version] of schemas) {
   }
   if (!schema.required?.includes("release_manifest_digest")) {
     fail(`${path} must bind the release manifest digest`);
+  }
+}
+
+for (const [path, version] of pipelineSchemas) {
+  const schema = JSON.parse(read(path));
+  if (
+    schema.$schema !== "https://json-schema.org/draft/2020-12/schema" ||
+    schema.type !== "object" ||
+    schema.additionalProperties !== false ||
+    schema.properties?.schema_version?.const !== version
+  ) {
+    fail(`${path} must define a closed ${version} draft 2020-12 contract`);
+  }
+  for (const binding of [
+    "candidate_sha",
+    "run_id",
+    "run_attempt",
+    "environment_id",
+    "authority",
+    "release_manifest_digest",
+  ]) {
+    if (!schema.required?.includes(binding)) {
+      fail(`${path} must require exact ${binding} binding`);
+    }
   }
 }
 
@@ -162,6 +193,11 @@ for (const kind of structuredArtifactKinds) {
 }
 if (!acceptanceReadme.includes("environment_id")) {
   fail("acceptance README must document the per-record artifact binding");
+}
+for (const [, version] of pipelineSchemas) {
+  if (!acceptanceReadme.includes(version)) {
+    fail(`acceptance README must document the ${version} pipeline contract`);
+  }
 }
 
 const publicCapacity = read("docs/development/p1-resilience-capacity.md");

@@ -19,9 +19,15 @@
         },
         {
           "name": "epoch-events.jsonl",
-          "digest": "sha256:1341ce6d9f554b1b5172f71e9a79be0b0f4d304316e572be1bc8fcde770224ab",
+          "digest": "sha256:27f572589bcab84594581e342f516ef26c13d7e72f40d3a4dbd30d6b1188e674",
           "media_type": "application/x-ndjson",
           "kind": "epoch_events"
+        },
+        {
+          "name": "authority-cut.json",
+          "digest": "sha256:cb401b1620092cf94991c0b900405f3943a353b283ad732316b9fbabeb4059e7",
+          "media_type": "application/json",
+          "kind": "authority_cut"
         },
         {
           "name": "command-trace.jsonl",
