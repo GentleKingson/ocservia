@@ -37,7 +37,7 @@ func RunSegment(ctx context.Context, options Options, segmentName string) (runEr
 	}
 	if err := ensureRegistry(options); err != nil {
 		contractErr := fmt.Errorf("prepare durable cleanup registry: %w", err)
-		return errors.Join(contractErr, writeRejection(options, segmentName, graph.Phases[0], "cleanup_registry_rejected", contractErr))
+		return errors.Join(contractErr, writeRejection(options, segmentName, segmentFirstDefinition(graph, segment), "cleanup_registry_rejected", contractErr))
 	}
 	store, err := state.Open(options.stateRoot(), options.Domain, options.Binding, graph, options.Now)
 	if err != nil {

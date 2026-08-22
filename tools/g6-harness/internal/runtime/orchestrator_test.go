@@ -2,6 +2,7 @@ package runtime
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -13,6 +14,7 @@ import (
 	"github.com/GentleKingson/ocservia/tools/g6-harness/internal/execx"
 	"github.com/GentleKingson/ocservia/tools/g6-harness/internal/phase"
 	"github.com/GentleKingson/ocservia/tools/g6-harness/internal/rendezvous"
+	resultmodel "github.com/GentleKingson/ocservia/tools/g6-harness/internal/result"
 	"github.com/GentleKingson/ocservia/tools/g6-harness/internal/state"
 )
 
@@ -63,6 +65,46 @@ func TestRunSegmentEnforcesDurablePhaseAndCheckpointOrder(t *testing.T) {
 	other.Binding.CandidateSHA = "1123456789abcdef0123456789abcdef01234567"
 	if err := RecordConsumed(other, "promotion-complete"); err == nil {
 		t.Fatal("cross-candidate state update was accepted")
+	}
+}
+
+func TestCleanupRegistryRejectionIdentifiesTheRequestedSegmentPhase(t *testing.T) {
+	t.Parallel()
+	options := testOptions(t, "fd-b")
+	if err := ensureRegistry(options); err != nil {
+		t.Fatal(err)
+	}
+	registry, err := cleanup.Load(options.registryPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	registry.Resources[0].ID += "-tampered"
+	if err := cleanup.Write(options.registryPath(), registry); err != nil {
+		t.Fatal(err)
+	}
+	if err := RunSegment(context.Background(), options, "window"); err == nil {
+		t.Fatal("tampered cleanup registry was accepted")
+	}
+	rejections, err := filepath.Glob(filepath.Join(options.diagnosticsRoot(), "rejections", "*.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rejections) != 1 {
+		t.Fatalf("structured rejection count = %d, want 1", len(rejections))
+	}
+	content, err := os.ReadFile(rejections[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	var rejection resultmodel.Phase
+	if err := json.Unmarshal(content, &rejection); err != nil {
+		t.Fatal(err)
+	}
+	if rejection.Segment != "window" || rejection.Phase != "window" || rejection.Sequence != 230 {
+		t.Fatalf("rejection provenance = %s/%s/%d, want window/window/230", rejection.Segment, rejection.Phase, rejection.Sequence)
+	}
+	if rejection.Failure == nil || rejection.Failure.Code != "cleanup_registry_rejected" {
+		t.Fatalf("unexpected rejection failure: %+v", rejection.Failure)
 	}
 }
 
