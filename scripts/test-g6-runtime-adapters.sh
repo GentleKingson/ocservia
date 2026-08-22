@@ -1740,10 +1740,13 @@ SHIM
         # kill -0 also answers for a killed-but-unreaped zombie. The KILLed
         # subshell is reparented once its parent dies, so reaping latency
         # must not turn a successfully killed process into a false alarm.
-        stat_line="$(<"/proc/${pid}/stat")" || stat_line=""
+        stat_line="$(cat "/proc/${pid}/stat" 2>/dev/null || :)"
+        # The process can disappear after kill -0 and before procfs is read.
+        # That is successful termination, not a leaked process.
+        [[ -n "${stat_line}" ]] || continue
         scheduler_state="${stat_line##*) }"
         scheduler_state="${scheduler_state%% *}"
-        if [[ -z "${stat_line}" || "${scheduler_state}" != Z ]]; then
+        if [[ "${scheduler_state}" != Z ]]; then
           echo "sampler process-group timeout left process ${pid} alive" >&2
           kill -KILL "${pid}" 2>/dev/null || :
           exit 1
