@@ -937,10 +937,11 @@ impl Shared {
         &self,
         node_id: &[u8],
         endpoint_hint: Option<&[u8; 32]>,
+        session_fence: Option<&RegisteredFence>,
         binding: Option<&FenceBindingV2>,
         kind: FenceOperationKind,
         operation_id: &[u8],
-    ) -> Result<(), Status> {
+    ) -> Result<Option<RegisteredFence>, Status> {
         let node_id = fixed16(node_id)?;
         let registered = self
             .inner
@@ -951,7 +952,7 @@ impl Shared {
             .cloned();
         let Some(registered) = registered else {
             if binding.is_none() && !self.inner.require_fencing {
-                return Ok(());
+                return Ok(None);
             }
             return Err(Status::permission_denied(
                 "no owner fence is registered for this node",
@@ -968,8 +969,9 @@ impl Shared {
         };
         let keyring = self.keyring()?;
         let endpoint = endpoint_hint.copied().unwrap_or(registered.endpoint_id);
+        let (now_seconds, now_nanos) = unix_now_parts();
         let claims = keyring
-            .verify_fence_binding_v2(binding, &node_id, &endpoint, unix_now())
+            .verify_fence_binding_v2_at(binding, &node_id, &endpoint, now_seconds, now_nanos)
             .map_err(|_| Status::permission_denied("fence binding is invalid"))?;
         if claims.operation_kind != kind as u32 || claims.operation_id.as_slice() != operation_id {
             return Err(Status::permission_denied(
@@ -999,7 +1001,23 @@ impl Shared {
                 "fence binding does not match the registered owner term",
             ));
         }
-        Ok(())
+        match session_fence {
+            None if kind == FenceOperationKind::Artifact => {
+                return Err(Status::permission_denied(
+                    "artifact operation requires a fenced active agent session",
+                ));
+            }
+            Some(session_fence)
+                if session_fence.endpoint_id != endpoint
+                    || !same_fence_term(&session_fence.verified, &registered.verified) =>
+            {
+                return Err(Status::permission_denied(
+                    "operation fence does not match the active agent session",
+                ));
+            }
+            None | Some(_) => {}
+        }
+        Ok(Some(registered))
     }
 
     fn keyring(&self) -> Result<&Arc<ControllerCommandKeyring>, Status> {
@@ -1200,9 +1218,15 @@ impl IrohTransportService {
         };
         let keyring = self.shared.keyring()?;
         let node_id = fixed16(node_id)?;
-        let now = unix_now();
-        let (verified, claims) =
-            verify_command_carriers(keyring, &node_id, &session_fence.endpoint_id, command, now)?;
+        let (now_seconds, now_nanos) = unix_now_parts();
+        let (verified, claims) = verify_command_carriers(
+            keyring,
+            &node_id,
+            &session_fence.endpoint_id,
+            command,
+            now_seconds,
+            now_nanos,
+        )?;
         let registered = self
             .shared
             .inner
@@ -1341,7 +1365,7 @@ impl TransportService for IrohTransportService {
         {
             return Err(Status::invalid_argument("artifact request is invalid"));
         }
-        let (connection, session_mode, endpoint_bytes) = self
+        let (connection, session_mode, endpoint_bytes, session_fence) = self
             .shared
             .inner
             .connections
@@ -1353,6 +1377,7 @@ impl TransportService for IrohTransportService {
                     entry.connection.clone(),
                     entry.session_mode,
                     entry.metadata.endpoint_id.clone(),
+                    entry.fence.clone(),
                 )
             })
             .ok_or_else(|| Status::unavailable("node is not connected"))?;
@@ -1367,10 +1392,12 @@ impl TransportService for IrohTransportService {
         // guard until the first validated frame of this stream, so deferring
         // or front-loading any output past this point would reopen the
         // stale-owner fetch window the guard exists to close.
-        self.shared
+        let dispatch_fence = self
+            .shared
             .verify_operation_binding(
                 &node_id,
                 Some(&fixed32(&endpoint_bytes)?),
+                session_fence.as_ref(),
                 request.fence_binding.as_ref(),
                 FenceOperationKind::Artifact,
                 &artifact_id,
@@ -1381,6 +1408,10 @@ impl TransportService for IrohTransportService {
             purpose: request.purpose,
             max_bytes: request.max_bytes,
             grant: request.grant,
+            connection_fence: dispatch_fence
+                .as_ref()
+                .map(|registered| registered.fence.clone()),
+            fence_binding: request.fence_binding,
         }
         .encode_to_vec();
         let (sender, receiver) = mpsc::channel::<Result<ArtifactChunk, Status>>(8);
@@ -1419,7 +1450,7 @@ impl TransportService for IrohTransportService {
         let expected_artifact_id = grant.artifact_id.clone();
         let expected_grant_id = grant.grant_id.clone();
         let confirm_only = request.confirm_only;
-        let (connection, session_mode, endpoint_bytes) = self
+        let (connection, session_mode, endpoint_bytes, session_fence) = self
             .shared
             .inner
             .connections
@@ -1431,6 +1462,7 @@ impl TransportService for IrohTransportService {
                     entry.connection.clone(),
                     entry.session_mode,
                     entry.metadata.endpoint_id.clone(),
+                    entry.fence.clone(),
                 )
             })
             .ok_or_else(|| Status::unavailable("node is not connected"))?;
@@ -1439,10 +1471,12 @@ impl TransportService for IrohTransportService {
                 "read-only session does not permit artifact consumption",
             ));
         }
-        self.shared
+        let dispatch_fence = self
+            .shared
             .verify_operation_binding(
                 &node_id,
                 Some(&fixed32(&endpoint_bytes)?),
+                session_fence.as_ref(),
                 request.fence_binding.as_ref(),
                 FenceOperationKind::Artifact,
                 &expected_grant_id,
@@ -1453,6 +1487,10 @@ impl TransportService for IrohTransportService {
             sha256: request.sha256,
             size: request.size,
             confirm_only,
+            connection_fence: dispatch_fence
+                .as_ref()
+                .map(|registered| registered.fence.clone()),
+            fence_binding: request.fence_binding,
         }
         .encode_to_vec();
         let response = tokio::time::timeout(
@@ -1487,11 +1525,13 @@ impl TransportService for IrohTransportService {
             .verify_operation_binding(
                 &node_id,
                 None,
+                None,
                 request.fence_binding.as_ref(),
                 FenceOperationKind::ConnectionClose,
                 &node_id,
             )
-            .await?;
+            .await
+            .map(|_| ())?;
         self.shared
             .remove(&node_id, request.reason.as_bytes())
             .await
@@ -1600,11 +1640,13 @@ impl TransportService for IrohTransportService {
             .verify_operation_binding(
                 &node_id,
                 Some(&endpoint_key),
+                None,
                 request.fence_binding.as_ref(),
                 FenceOperationKind::StateUpdate,
                 &request.operation_id,
             )
-            .await?;
+            .await
+            .map(|_| ())?;
         let previous_revision = self.policy.revision(endpoint);
         let disposition = self
             .policy
@@ -1656,8 +1698,15 @@ impl TransportService for IrohTransportService {
         let node_id = validate_uuid(&fence.node_id, "node_id")?;
         let endpoint_id = fixed32(&fence.endpoint_id)?;
         let keyring = self.shared.keyring()?;
+        let (now_seconds, now_nanos) = unix_now_parts();
         let verified = keyring
-            .verify_connection_fence_v2(&fence, &fixed16(&node_id)?, &endpoint_id, unix_now())
+            .verify_connection_fence_v2_at(
+                &fence,
+                &fixed16(&node_id)?,
+                &endpoint_id,
+                now_seconds,
+                now_nanos,
+            )
             .map_err(|_| Status::permission_denied("owner fence is invalid"))?;
         if lease_expired_at(verified.lease_until_seconds, verified.lease_until_nanos) {
             return Err(Status::failed_precondition("owner fence lease has expired"));
@@ -1903,8 +1952,9 @@ impl SessionHandler {
             .try_into()
             .map_err(|_| protocol_error("handshake node id is invalid"))?;
         let endpoint_id: [u8; 32] = *connection.remote_id().as_bytes();
+        let (now_seconds, now_nanos) = unix_now_parts();
         let verified = keyring
-            .verify_connection_fence_v2(fence, &node_id, &endpoint_id, unix_now())
+            .verify_connection_fence_v2_at(fence, &node_id, &endpoint_id, now_seconds, now_nanos)
             .map_err(|_| protocol_error("controller connection fence is invalid"))?;
         if lease_expired_at(verified.lease_until_seconds, verified.lease_until_nanos) {
             return Err(protocol_error("connection owner lease has expired"));
@@ -2700,6 +2750,7 @@ fn metadata_path(connection: &Connection) -> (ConnectionPath, String, u64) {
     )
 }
 
+#[cfg(test)]
 fn unix_now() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -2904,7 +2955,8 @@ fn verify_command_carriers(
     node_id: &[u8; 16],
     endpoint: &[u8; 32],
     command: &CommandEnvelope,
-    now: i64,
+    now_seconds: i64,
+    now_nanos: u32,
 ) -> Result<
     (
         ocservia_command_authorization::VerifiedConnectionFenceV2,
@@ -2921,10 +2973,10 @@ fn verify_command_carriers(
         ));
     };
     let verified = keyring
-        .verify_connection_fence_v2(envelope_fence, node_id, endpoint, now)
+        .verify_connection_fence_v2_at(envelope_fence, node_id, endpoint, now_seconds, now_nanos)
         .map_err(|_| Status::permission_denied("command connection fence is invalid"))?;
     let claims = keyring
-        .verify_fence_binding_v2(envelope_binding, node_id, endpoint, now)
+        .verify_fence_binding_v2_at(envelope_binding, node_id, endpoint, now_seconds, now_nanos)
         .map_err(|_| Status::permission_denied("command fence binding is invalid"))?;
     if claims.capability != command.required_capability
         || !verified
@@ -5407,6 +5459,195 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::too_many_lines)]
+    async fn artifact_fence_carriers_cross_the_agent_boundary() {
+        let (signing_key, keyring) = controller_keyring();
+        let node_id = *Uuid::now_v7().as_bytes();
+        let service = IrohTransportService::new_with_fence_policy(
+            8,
+            IdentityPolicy::default(),
+            Some(keyring),
+            true,
+        );
+        let (term, _handshake_fence, _router, _client, connection) =
+            fenced_agent_session(&service, &signing_key, node_id, 58).await;
+        // Keep the immutable session term but age its handshake carrier past
+        // the lease deadline. Registration refreshes that same term, and the
+        // refreshed wire proof is the one transportd must relay to the Agent.
+        let expired_session_fence = signed_controller_fence_at(&signing_key, &term, -10, -1);
+        let expired_verified = service
+            .shared
+            .keyring()
+            .expect("test keyring")
+            .verify_connection_fence_v2(
+                &expired_session_fence,
+                &term.node_id,
+                &term.endpoint_id,
+                unix_now(),
+            )
+            .expect("verify expired-lease session proof");
+        let mut connections = service.shared.inner.connections.lock().await;
+        connections
+            .get_mut(node_id.as_slice())
+            .expect("registered session")
+            .fence = Some(RegisteredFence {
+            verified: expired_verified,
+            fence: expired_session_fence.clone(),
+            endpoint_id: term.endpoint_id,
+        });
+        drop(connections);
+        let fence = signed_controller_fence(&signing_key, &term, 60);
+        service
+            .register_owner_fence(Request::new(RegisterOwnerFenceRequest {
+                fence: Some(fence.clone()),
+            }))
+            .await
+            .expect("register owner fence");
+
+        let artifact_id = *Uuid::now_v7().as_bytes();
+        let grant = shape_valid_grant(node_id, artifact_id);
+        let fetch_binding = signed_fence_binding(
+            &signing_key,
+            &fence,
+            FenceOperationKind::Artifact,
+            artifact_id,
+            "ocserv.fencing.v2",
+        );
+        let mut fetched = service
+            .fetch_artifact(Request::new(FetchArtifactRequest {
+                node_id: node_id.to_vec(),
+                artifact_id: artifact_id.to_vec(),
+                purpose: "certificate_p12".to_owned(),
+                max_bytes: 32,
+                grant: Some(grant.clone()),
+                fence_binding: Some(fetch_binding.clone()),
+            }))
+            .await
+            .expect("fenced fetch accepted")
+            .into_inner();
+        let (mut fetch_send, mut fetch_recv) =
+            tokio::time::timeout(Duration::from_secs(5), connection.accept_bi())
+                .await
+                .expect("artifact fetch stream opened")
+                .expect("accept artifact fetch stream");
+        let mut framed = [0_u8; 4];
+        fetch_recv
+            .read_exact(&mut framed)
+            .await
+            .expect("read artifact fetch length");
+        let framed = u32::from_be_bytes(framed);
+        assert_ne!(framed & ARTIFACT_FETCH_FRAME, 0);
+        let mut body = vec![0_u8; (framed & !ARTIFACT_FETCH_FRAME) as usize];
+        fetch_recv
+            .read_exact(&mut body)
+            .await
+            .expect("read artifact fetch request");
+        let forwarded =
+            ArtifactFetchRequest::decode(body.as_slice()).expect("decode forwarded artifact fetch");
+        assert_eq!(forwarded.connection_fence.as_ref(), Some(&fence));
+        assert_ne!(
+            forwarded.connection_fence.as_ref(),
+            Some(&expired_session_fence),
+            "transportd must not relay the expired handshake carrier"
+        );
+        assert_eq!(forwarded.fence_binding.as_ref(), Some(&fetch_binding));
+        let chunk = ArtifactChunk {
+            artifact_id: artifact_id.to_vec(),
+            offset: 0,
+            data: vec![1],
+            eof: true,
+            sha256: vec![0; 32],
+        }
+        .encode_to_vec();
+        fetch_send
+            .write_all(
+                &u32::try_from(chunk.len())
+                    .expect("chunk length")
+                    .to_be_bytes(),
+            )
+            .await
+            .expect("write artifact chunk length");
+        fetch_send
+            .write_all(&chunk)
+            .await
+            .expect("write artifact chunk");
+        fetch_send.finish().expect("finish artifact fetch response");
+        assert!(fetched.next().await.expect("artifact stream item").is_ok());
+
+        let grant_id: [u8; 16] = grant.grant_id.as_slice().try_into().expect("grant id");
+        let consume_binding = signed_fence_binding(
+            &signing_key,
+            &fence,
+            FenceOperationKind::Artifact,
+            grant_id,
+            "ocserv.fencing.v2",
+        );
+        let consume = tokio::spawn({
+            let service = service.clone();
+            let grant = grant.clone();
+            let consume_binding = consume_binding.clone();
+            async move {
+                service
+                    .consume_artifact(Request::new(ConsumeArtifactRequest {
+                        node_id: node_id.to_vec(),
+                        grant: Some(grant),
+                        sha256: vec![0x11; 32],
+                        size: 32,
+                        confirm_only: false,
+                        fence_binding: Some(consume_binding),
+                    }))
+                    .await
+            }
+        });
+        let (mut consume_send, mut consume_recv) =
+            tokio::time::timeout(Duration::from_secs(5), connection.accept_bi())
+                .await
+                .expect("artifact consume stream opened")
+                .expect("accept artifact consume stream");
+        let mut framed = [0_u8; 4];
+        consume_recv
+            .read_exact(&mut framed)
+            .await
+            .expect("read artifact consume length");
+        let framed = u32::from_be_bytes(framed);
+        assert_eq!(framed & ARTIFACT_CONSUME_FRAME, ARTIFACT_CONSUME_FRAME);
+        let mut body = vec![0_u8; (framed & !ARTIFACT_CONSUME_FRAME) as usize];
+        consume_recv
+            .read_exact(&mut body)
+            .await
+            .expect("read artifact consume request");
+        let forwarded = AgentArtifactConsumeRequest::decode(body.as_slice())
+            .expect("decode forwarded artifact consume");
+        assert_eq!(forwarded.connection_fence.as_ref(), Some(&fence));
+        assert_eq!(forwarded.fence_binding.as_ref(), Some(&consume_binding));
+        let response = AgentArtifactConsumeResponse {
+            artifact_id: artifact_id.to_vec(),
+            grant_id: grant_id.to_vec(),
+            consumed: true,
+        }
+        .encode_to_vec();
+        consume_send
+            .write_all(
+                &u32::try_from(response.len())
+                    .expect("consume response length")
+                    .to_be_bytes(),
+            )
+            .await
+            .expect("write consume response length");
+        consume_send
+            .write_all(&response)
+            .await
+            .expect("write consume response");
+        consume_send.finish().expect("finish consume response");
+        consume
+            .await
+            .expect("consume task")
+            .expect("fenced consume accepted");
+
+        service.begin_shutdown().await;
+    }
+
+    #[tokio::test]
     #[ignore = "requires access to the configured public Iroh relay"]
     async fn relay_and_direct_paths_converge_to_direct() {
         let agent_key = SecretKey::generate();
@@ -6307,7 +6548,15 @@ mod tests {
         service: &IrohTransportService,
         node_id: [u8; 16],
     ) -> ([u8; 32], iroh::protocol::Router, Endpoint, Connection) {
-        let agent_key = SecretKey::generate();
+        fenceless_mutation_session_with_key(service, node_id, SecretKey::generate()).await
+    }
+
+    #[allow(clippy::type_complexity)]
+    async fn fenceless_mutation_session_with_key(
+        service: &IrohTransportService,
+        node_id: [u8; 16],
+        agent_key: SecretKey,
+    ) -> ([u8; 32], iroh::protocol::Router, Endpoint, Connection) {
         let mut handshake = handshake(&agent_key);
         handshake.node_id = node_id.to_vec();
         let endpoint_id = *agent_key.public().as_bytes();
@@ -6432,6 +6681,92 @@ mod tests {
             .await
             .expect_err("bare command rejected because a fence is registered");
         assert_eq!(error.code(), tonic::Code::PermissionDenied);
+
+        service.begin_shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn retained_fence_cannot_be_borrowed_by_a_fenceless_artifact_session() {
+        let (signing_key, keyring) = controller_keyring();
+        let node_id = *Uuid::now_v7().as_bytes();
+        let service = IrohTransportService::new_with_fence_policy(
+            8,
+            IdentityPolicy::default(),
+            Some(keyring),
+            false,
+        );
+
+        // This ordering is reachable during a rolling upgrade: transportd
+        // retains an owner fence, then an N-1 Agent opens an authorized
+        // session without carrying that fence. The endpoint is deliberately
+        // identical so signature pinning alone cannot reject the borrow.
+        let agent_key = SecretKey::generate();
+        let endpoint_id = *agent_key.public().as_bytes();
+        let term = FenceTerm::new(node_id, endpoint_id, 3);
+        let fence = signed_controller_fence(&signing_key, &term, 30);
+        service
+            .register_owner_fence(Request::new(RegisterOwnerFenceRequest {
+                fence: Some(fence.clone()),
+            }))
+            .await
+            .expect("retain owner fence before the N-1 session");
+        let (_endpoint, _router, _client, _connection) =
+            fenceless_mutation_session_with_key(&service, node_id, agent_key).await;
+
+        let artifact_id = *Uuid::now_v7().as_bytes();
+        let grant = shape_valid_grant(node_id, artifact_id);
+        let fetch_binding = signed_fence_binding(
+            &signing_key,
+            &fence,
+            FenceOperationKind::Artifact,
+            artifact_id,
+            "ocserv.fencing.v2",
+        );
+        let Err(fetch) = service
+            .fetch_artifact(Request::new(FetchArtifactRequest {
+                node_id: node_id.to_vec(),
+                artifact_id: artifact_id.to_vec(),
+                purpose: "certificate_p12".to_owned(),
+                max_bytes: 32,
+                grant: Some(grant.clone()),
+                fence_binding: Some(fetch_binding),
+            }))
+            .await
+        else {
+            panic!("fenceless N-1 session borrowed a retained fence for artifact fetch");
+        };
+        assert_eq!(fetch.code(), tonic::Code::PermissionDenied);
+        assert_eq!(
+            fetch.message(),
+            "artifact operation requires a fenced active agent session"
+        );
+
+        let grant_id: [u8; 16] = grant.grant_id.as_slice().try_into().expect("grant id");
+        let consume_binding = signed_fence_binding(
+            &signing_key,
+            &fence,
+            FenceOperationKind::Artifact,
+            grant_id,
+            "ocserv.fencing.v2",
+        );
+        for confirm_only in [false, true] {
+            let consume = service
+                .consume_artifact(Request::new(ConsumeArtifactRequest {
+                    node_id: node_id.to_vec(),
+                    grant: Some(grant.clone()),
+                    sha256: vec![0x11; 32],
+                    size: 32,
+                    confirm_only,
+                    fence_binding: Some(consume_binding.clone()),
+                }))
+                .await
+                .expect_err("fenceless N-1 session borrowed a retained fence for artifact consume");
+            assert_eq!(consume.code(), tonic::Code::PermissionDenied);
+            assert_eq!(
+                consume.message(),
+                "artifact operation requires a fenced active agent session"
+            );
+        }
 
         service.begin_shutdown().await;
     }

@@ -611,6 +611,10 @@ message ArtifactFetchRequest {
   string purpose = 2;
   uint64 max_bytes = 3;
   ArtifactGrantV1 grant = 4;
+  // The Agent independently verifies the exact live owner term and the
+  // artifact operation binding; transportd is only a relay for these proofs.
+  ConnectionFenceV2 connection_fence = 5;
+  FenceBindingV2 fence_binding = 6;
 }
 
 // ArtifactConsumeRequest is sent only after the Control Plane has received and
@@ -622,6 +626,11 @@ message ArtifactConsumeRequest {
   // Confirmation is read-only and may use an expired grant only to prove that
   // the exact root-owned ledger record was already consumed.
   bool confirm_only = 4;
+  // Consumption is bound to the same fenced artifact operation as the fetch.
+  // Confirmation remains side-effect free but retains the proof carriers so
+  // the Agent never has to trust transportd's authorization decision.
+  ConnectionFenceV2 connection_fence = 5;
+  FenceBindingV2 fence_binding = 6;
 }
 
 message ArtifactConsumeResponse {
