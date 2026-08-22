@@ -13,7 +13,8 @@
 #   /run/ocservia-agent/identity  persistent endpoint identity (0700)
 #   /run/ocservia-agent/journal   durable command journal and task stats
 #   /run/ocservia-agent/secrets   verification and seal keys (read-only)
-#   /run/ocservia-agent/state     node id, privd attestation key, pid files
+#   /run/ocservia-agent/state     harness-owned node id and synthetic barrier
+#   /run/ocservia-privd            root-only persistent attestation state
 set -eu
 
 G6_MODE="${G6_MODE:-run}"
@@ -22,6 +23,7 @@ IDENTITY="$BASE/identity"
 JOURNAL="$BASE/journal"
 SECRETS="$BASE/secrets"
 STATE="$BASE/state"
+PRIVD_STATE=/run/ocservia-privd
 SOCKET_DIR=/run/ocserv-platform
 
 require_env() {
@@ -93,12 +95,15 @@ run)
         echo "agent supervisor: node id is missing (enroll first)" >&2
         exit 2
     }
-    /usr/local/bin/ocservia-privd \
+    # Match the production systemd principal split (root:ocserv-agent), so
+    # privd's 0660 AF_UNIX socket is reachable by the unprivileged Agent.
+    setpriv --reuid 0 --regid 65532 --clear-groups \
+      /usr/local/bin/ocservia-privd \
         --socket "$SOCKET_DIR/privd.sock" \
         --agent-uid 65532 \
         --node-id "$NODE_ID" \
         --controller-command-key-file "$SECRETS/command-verification-privd.pem" \
-        --attestation-key-file "$STATE/attestation.key" \
+        --attestation-key-file "$PRIVD_STATE/attestation.key" \
         --user-password-seal-key-file "$SECRETS/seal-user-password.key" \
         --user-password-seal-key-id "$USER_SEAL_ID" \
         --user-password-seal-public-key-sha256 "$USER_SEAL_SHA256" \
@@ -141,8 +146,11 @@ run)
         --synthetic-barrier-file "$STATE/synthetic-barrier" \
         --stats-file "$JOURNAL/tasks.json" &
     agent_pid=$!
-    echo "$agent_pid" >"$STATE/agent.pid"
-    echo "$privd_pid" >"$STATE/privd.pid"
+    # The supervisor intentionally has no DAC override capability. Keep its
+    # process metadata in the root-owned runtime directory, not Agent-owned
+    # persistent state.
+    echo "$agent_pid" >"$SOCKET_DIR/agent.pid"
+    echo "$privd_pid" >"$SOCKET_DIR/privd.pid"
     wait "$agent_pid"
     status=$?
     kill "$privd_pid" 2>/dev/null || true

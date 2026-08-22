@@ -1,0 +1,13 @@
+{
+  "name": "@ocservia/g6-runtime",
+  "version": "0.1.0",
+  "private": true,
+  "license": "Apache-2.0",
+  "dependencies": {
+    "yaml": "2.9.0"
+  },
+  "engines": {
+    "node": "24.18.1",
+    "npm": "11.19.0"
+  }
+}

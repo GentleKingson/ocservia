@@ -32,8 +32,8 @@ use iroh::endpoint::{RelayMode, presets};
 use iroh::protocol::{AcceptError, ProtocolHandler, Router};
 use iroh::{Endpoint, RelayMap, RelayUrl, SecretKey};
 use ocservia_command_authorization::{
-    ConnectionFenceClaimsV2, SessionGrantClaimsV1, canonical_connection_fence_v2,
-    canonical_session_grant_v1, verification_key_id,
+    ConnectionFenceClaimsV2, ControllerCommandKeyring, SessionGrantClaimsV1,
+    canonical_connection_fence_v2, canonical_session_grant_v1, verification_key_id,
 };
 use ocservia_contracts::decode_strict_command_envelope;
 use ocservia_contracts::generated::ocserv::platform::agent::v1::{
@@ -44,7 +44,8 @@ use ocservia_contracts::generated::ocserv::platform::agent::v1::{
 };
 use ocservia_contracts::generated::ocserv::platform::transport::v1::transport_service_client::TransportServiceClient;
 use ocservia_contracts::generated::ocserv::platform::transport::v1::{
-    GetNodeConnectionRequest, OwnerFenceDisposition, RegisterOwnerFenceRequest,
+    GetNodeConnectionRequest, GetOwnerFenceRequest, NodeConnection, OwnerFenceDisposition,
+    RegisterOwnerFenceRequest,
 };
 use prost::Message;
 use rustls_pki_types::pem::PemObject as _;
@@ -53,10 +54,12 @@ use uuid::Uuid;
 const AGENT_ALPN: &[u8] = b"ocserv-platform/agent/1";
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 const MAX_FRAME_BYTES: usize = 1024 * 1024;
-/// The single capability the probe session negotiates. It keeps the probe
-/// inside the side-effect-free synthetic slice: a fence that survives the
-/// stale-epoch gate would still never authorize a mutation.
+/// The stale envelope keeps its synthetic mutation capability, but the
+/// impersonated handshake is intentionally read-only and unfenced. A correct
+/// Agent rejects the old epoch before capability authorization; a broken
+/// high-water mark falls through to a non-stale rejection instead.
 const PROBE_CAPABILITY: &str = "synthetic.noop";
+const PROBE_SESSION_CAPABILITY: &str = "ocserv.status.read";
 
 const FENCE_OPTION_NAMES: &[&str] = &[
     "--signing-key-file",
@@ -80,7 +83,12 @@ const AGENT_OPTION_NAMES: &[&str] = &[
     "--wait-seconds",
 ];
 
-const NODE_OPTION_NAMES: &[&str] = &["--socket", "--node-id", "--expect-path"];
+const NODE_OPTION_NAMES: &[&str] = &[
+    "--socket",
+    "--node-id",
+    "--expect-path",
+    "--signing-key-file",
+];
 
 fn main() {
     let args: Vec<String> = env::args().skip(1).collect();
@@ -90,8 +98,7 @@ fn main() {
         eprintln!("{usage}");
         std::process::exit(2);
     };
-    let known_mode_names: &[&[&str]] = &[UDS_OPTION_NAMES, AGENT_OPTION_NAMES, NODE_OPTION_NAMES];
-    let parsed = parse_probe_arguments(&args[1..], FENCE_OPTION_NAMES, known_mode_names);
+    let parsed = parse_mode_arguments(mode, &args[1..]);
     let result = match (mode.as_str(), parsed) {
         ("uds-stale-fence", Ok(options)) => {
             init_tracing();
@@ -145,12 +152,21 @@ struct ProbeArguments {
     mode: HashMap<String, Vec<String>>,
 }
 
+fn parse_mode_arguments(mode: &str, args: &[String]) -> Result<ProbeArguments, String> {
+    let (fence_names, mode_names): (&[&str], &[&str]) = match mode {
+        "uds-stale-fence" => (FENCE_OPTION_NAMES, UDS_OPTION_NAMES),
+        "agent-stale-command" => (FENCE_OPTION_NAMES, AGENT_OPTION_NAMES),
+        "node-connection" => (&[], NODE_OPTION_NAMES),
+        _ => return Err(format!("unknown probe mode: {mode}")),
+    };
+    parse_probe_arguments(args, fence_names, mode_names)
+}
+
 fn parse_probe_arguments(
     args: &[String],
     fence_names: &[&str],
-    mode_name_groups: &[&[&str]],
+    mode_names: &[&str],
 ) -> Result<ProbeArguments, String> {
-    let mode_names: Vec<&str> = mode_name_groups.concat();
     let mut probe = ProbeArguments {
         fence: HashMap::new(),
         mode: HashMap::new(),
@@ -161,14 +177,17 @@ fn parse_probe_arguments(
         let value = args
             .get(index + 1)
             .ok_or_else(|| format!("{argument} requires a value"))?;
-        if fence_names.contains(&argument) {
-            probe.fence.insert(argument.to_owned(), value.clone());
-        } else if mode_names.contains(&argument) {
+        // Mode-specific options take precedence when a spelling is shared.
+        // In particular, node-connection accepts repeated --node-id values,
+        // while the two stale-fence modes keep their one fence node id.
+        if mode_names.contains(&argument) {
             probe
                 .mode
                 .entry(argument.to_owned())
                 .or_default()
                 .push(value.clone());
+        } else if fence_names.contains(&argument) {
+            probe.fence.insert(argument.to_owned(), value.clone());
         } else {
             return Err(format!("unknown option: {argument}"));
         }
@@ -364,13 +383,18 @@ fn emit_json(value: &serde_json::Value) {
 fn timestamp_to_rfc3339(value: Option<&prost_types::Timestamp>) -> Option<String> {
     let stamp = value?;
     let seconds = stamp.seconds;
+    if !(-62_135_596_800..=253_402_300_799).contains(&seconds) {
+        return None;
+    }
     let nanos = u32::try_from(stamp.nanos).ok()?;
-    let millis = nanos / 1_000_000;
+    if nanos >= 1_000_000_000 {
+        return None;
+    }
     let days = seconds.div_euclid(86_400);
     let seconds_of_day = seconds.rem_euclid(86_400);
     let (year, month, day) = civil_from_days(days);
     Some(format!(
-        "{year:04}-{month:02}-{day:02}T{:02}:{:02}:{:02}.{millis:03}Z",
+        "{year:04}-{month:02}-{day:02}T{:02}:{:02}:{:02}.{nanos:09}Z",
         seconds_of_day / 3_600,
         (seconds_of_day % 3_600) / 60,
         seconds_of_day % 60
@@ -413,6 +437,9 @@ async fn run_node_connection(probe: ProbeArguments) -> Result<(), String> {
             .ok_or_else(|| format!("{name} is required"))
     };
     let socket = PathBuf::from(required_mode("--socket")?);
+    let signing = load_signing_key(&PathBuf::from(required_mode("--signing-key-file")?))?;
+    let keyring = ControllerCommandKeyring::new([signing.verifying_key()])
+        .map_err(|error| format!("construct Controller verification keyring: {error}"))?;
     let node_ids = probe
         .mode
         .get("--node-id")
@@ -455,27 +482,27 @@ async fn run_node_connection(probe: ProbeArguments) -> Result<(), String> {
             Ok(response) => response.into_inner(),
             Err(status) => return Err(format!("GetNodeConnection failed for {node_id}: {status}")),
         };
-        let path_name = match response.path {
-            1 => "direct",
-            2 => "relay",
-            _ => "unspecified",
-        };
-        let matched = expect_path == "any" || expect_path == path_name;
+        let fence = client
+            .get_owner_fence(GetOwnerFenceRequest {
+                node_id: node_id.as_bytes().to_vec(),
+            })
+            .await
+            .map_err(|status| format!("GetOwnerFence failed for {node_id}: {status}"))?
+            .into_inner()
+            .fence
+            .ok_or_else(|| format!("GetOwnerFence returned no fence for {node_id}"))?;
+        let (now_seconds, now_nanos) = unix_now_parts();
+        let (observation, matched) = node_connection_observation(
+            node_id,
+            &response,
+            &fence,
+            &keyring,
+            now_seconds,
+            now_nanos,
+            &expect_path,
+        )?;
         all_matched &= matched;
-        observations.push(serde_json::json!({
-            "node_id": node_id.to_string(),
-            "found": true,
-            "path": path_name,
-            "matched": matched,
-            "path_detail": response.path_detail,
-            "round_trip_time_millis": response.round_trip_time_millis,
-            "connected_at": timestamp_to_rfc3339(response.connected_at.as_ref()),
-            "last_seen": timestamp_to_rfc3339(response.last_seen.as_ref()),
-            "session_expires_at": timestamp_to_rfc3339(response.session_expires_at.as_ref()),
-            "owner_epoch": response.owner_epoch,
-            "authorization_revision": response.authorization_revision,
-            "negotiated_capabilities": response.negotiated_capabilities,
-        }));
+        observations.push(observation);
     }
     emit_json(&serde_json::json!({
         "mode": "node_connection",
@@ -490,6 +517,91 @@ async fn run_node_connection(probe: ProbeArguments) -> Result<(), String> {
             "at least one node does not use the expected path {expect_path}"
         ))
     }
+}
+
+fn node_connection_observation(
+    node_id: Uuid,
+    response: &NodeConnection,
+    fence: &ConnectionFenceV2,
+    keyring: &ControllerCommandKeyring,
+    now_seconds: i64,
+    now_nanos: u32,
+    expect_path: &str,
+) -> Result<(serde_json::Value, bool), String> {
+    if response.node_id != node_id.as_bytes() {
+        return Err(format!(
+            "GetNodeConnection returned a different node identity for {node_id}"
+        ));
+    }
+    let endpoint_id: [u8; 32] = response.endpoint_id.as_slice().try_into().map_err(|_| {
+        format!("GetNodeConnection returned malformed endpoint identity for {node_id}")
+    })?;
+    if response.agent_instance_id.len() != 16 {
+        return Err(format!(
+            "GetNodeConnection returned malformed connection identity for {node_id}"
+        ));
+    }
+    let verified = keyring
+        .verify_connection_fence_v2_at(
+            fence,
+            node_id.as_bytes(),
+            &endpoint_id,
+            now_seconds,
+            now_nanos,
+        )
+        .map_err(|error| format!("verify owner fence for {node_id}: {error}"))?;
+    if (verified.lease_until_seconds, verified.lease_until_nanos) <= (now_seconds, now_nanos) {
+        return Err(format!("verified owner lease has expired for {node_id}"));
+    }
+    let mut session_capabilities = response.negotiated_capabilities.clone();
+    let mut fence_capabilities = verified.capabilities.clone();
+    session_capabilities.sort();
+    fence_capabilities.sort();
+    if verified.owner_incarnation == 0
+        || verified.owner_epoch == 0
+        || verified.owner_epoch != response.owner_epoch
+        || verified.authorization_revision != response.authorization_revision
+        || fence_capabilities != session_capabilities
+    {
+        return Err(format!(
+            "verified owner fence does not match the live connection for {node_id}"
+        ));
+    }
+    let path_name = match response.path {
+        1 => "direct",
+        2 => "relay",
+        _ => "unspecified",
+    };
+    let matched = expect_path == "any" || expect_path == path_name;
+    Ok((
+        serde_json::json!({
+            "node_id": node_id.to_string(),
+            "found": true,
+            "endpoint_id": hex::encode(&response.endpoint_id),
+            "agent_instance_id": hex::encode(&response.agent_instance_id),
+            "path": path_name,
+            "matched": matched,
+            "path_detail": response.path_detail,
+            "round_trip_time_millis": response.round_trip_time_millis,
+            "connected_at": timestamp_to_rfc3339(response.connected_at.as_ref()),
+            "last_seen": timestamp_to_rfc3339(response.last_seen.as_ref()),
+            "session_expires_at": timestamp_to_rfc3339(response.session_expires_at.as_ref()),
+            "owner_fence_id": hex::encode(verified.fence_id),
+            "owner_instance_id": Uuid::from_slice(&verified.owner_instance_id)
+                .map_err(|_| format!("owner instance id is malformed for {node_id}"))?
+                .to_string(),
+            "owner_incarnation": verified.owner_incarnation.to_string(),
+            "connection_id": hex::encode(verified.connection_id),
+            "owner_lease_until": timestamp_to_rfc3339(Some(&timestamp(
+                verified.lease_until_seconds,
+                verified.lease_until_nanos,
+            ))),
+            "owner_epoch": response.owner_epoch,
+            "authorization_revision": response.authorization_revision,
+            "negotiated_capabilities": session_capabilities,
+        }),
+        matched,
+    ))
 }
 
 async fn run_uds_stale_fence(probe: ProbeArguments) -> Result<(), String> {
@@ -688,7 +800,7 @@ fn build_handshake_response(
 ) -> Result<SessionHandshakeResponse, String> {
     let (now_seconds, now_nanos) = unix_now_parts();
     let expires_seconds = now_seconds.saturating_add(options.validity_seconds);
-    let capabilities = vec![PROBE_CAPABILITY.to_owned()];
+    let capabilities = vec![PROBE_SESSION_CAPABILITY.to_owned()];
     let claims = SessionGrantClaimsV1 {
         version: 1,
         key_id: verification_key_id(&options.signing.verifying_key()),
@@ -1029,6 +1141,38 @@ mod tests {
     }
 
     #[test]
+    fn timestamp_json_preserves_nanoseconds_and_rejects_invalid_ranges() {
+        assert_eq!(
+            timestamp_to_rfc3339(Some(&prost_types::Timestamp {
+                seconds: 0,
+                nanos: 123_456_789,
+            }))
+            .as_deref(),
+            Some("1970-01-01T00:00:00.123456789Z")
+        );
+        for stamp in [
+            prost_types::Timestamp {
+                seconds: 0,
+                nanos: -1,
+            },
+            prost_types::Timestamp {
+                seconds: 0,
+                nanos: 1_000_000_000,
+            },
+            prost_types::Timestamp {
+                seconds: -62_135_596_801,
+                nanos: 0,
+            },
+            prost_types::Timestamp {
+                seconds: 253_402_300_800,
+                nanos: 0,
+            },
+        ] {
+            assert!(timestamp_to_rfc3339(Some(&stamp)).is_none());
+        }
+    }
+
+    #[test]
     fn stale_fence_is_verified_by_the_agent_keyring() {
         let (term, options, keyring) = fixture_term();
         let (now_seconds, _) = unix_now_parts();
@@ -1079,8 +1223,13 @@ mod tests {
         assert_eq!(verified.authorization_revision, 12);
         assert_eq!(
             verified.negotiated_capabilities,
-            vec!["synthetic.noop".to_owned()]
+            vec![PROBE_SESSION_CAPABILITY.to_owned()]
         );
+        assert_eq!(
+            response.negotiated_capabilities,
+            verified.negotiated_capabilities
+        );
+        assert!(response.connection_fence.is_none());
     }
 
     #[test]
@@ -1097,6 +1246,8 @@ mod tests {
             1
         );
         assert_eq!(envelope.node_id, options.node_id.as_bytes().to_vec());
+        assert_eq!(envelope.required_capability, PROBE_CAPABILITY);
+        assert_ne!(envelope.required_capability, PROBE_SESSION_CAPABILITY);
         assert!(envelope.authorization.is_none());
     }
 
@@ -1159,7 +1310,7 @@ mod tests {
             "--stale-epoch",
             "1",
         ]);
-        let probe = parse_probe_arguments(&args, FENCE_OPTION_NAMES, &[UDS_OPTION_NAMES])
+        let probe = parse_probe_arguments(&args, FENCE_OPTION_NAMES, UDS_OPTION_NAMES)
             .expect("arguments parse");
         assert_eq!(
             probe.mode.get("--socket").and_then(|v| v.first()),
@@ -1176,11 +1327,9 @@ mod tests {
     #[test]
     fn probe_arguments_reject_unknown_options_and_missing_values() {
         let args = argument_list(&["--socket", "/run/x", "--nonsense", "1"]);
-        assert!(parse_probe_arguments(&args, FENCE_OPTION_NAMES, &[UDS_OPTION_NAMES]).is_err());
+        assert!(parse_probe_arguments(&args, FENCE_OPTION_NAMES, UDS_OPTION_NAMES).is_err());
         let truncated = argument_list(&["--socket"]);
-        assert!(
-            parse_probe_arguments(&truncated, FENCE_OPTION_NAMES, &[UDS_OPTION_NAMES]).is_err()
-        );
+        assert!(parse_probe_arguments(&truncated, FENCE_OPTION_NAMES, UDS_OPTION_NAMES).is_err());
     }
 
     #[test]
@@ -1192,8 +1341,107 @@ mod tests {
             "01894a5c-6c1e-7b8f-9a2c-3d4e5f607182",
         ]);
         let probe =
-            parse_probe_arguments(&args, FENCE_OPTION_NAMES, &[UDS_OPTION_NAMES]).expect("parse");
+            parse_probe_arguments(&args, FENCE_OPTION_NAMES, UDS_OPTION_NAMES).expect("parse");
         let error = parse_fence_options(&probe.fence).expect_err("zero epoch must be rejected");
         assert!(error.contains("stale-epoch"));
+    }
+
+    #[test]
+    fn node_connection_preserves_every_repeated_node_id() {
+        let first = "01894a5c-6c1e-7b8f-9a2c-3d4e5f607182";
+        let second = "01894a5c-6c1e-7b8f-9a2c-3d4e5f607183";
+        let args = argument_list(&[
+            "--socket",
+            "/run/transportd.sock",
+            "--expect-path",
+            "any",
+            "--node-id",
+            first,
+            "--node-id",
+            second,
+        ]);
+        let probe = parse_mode_arguments("node-connection", &args).expect("arguments parse");
+
+        assert_eq!(
+            probe.mode.get("--node-id"),
+            Some(&vec![first.to_owned(), second.to_owned()])
+        );
+        assert!(!probe.fence.contains_key("--node-id"));
+    }
+
+    #[test]
+    fn node_connection_observation_binds_the_verified_owner_term() {
+        let node_id = Uuid::parse_str("01894a5c-6c1e-7b8f-9a2c-3d4e5f607182").expect("node UUID");
+        let owner_id = Uuid::parse_str("01894a5c-6c1e-7b8f-9a2c-3d4e5f607183").expect("owner UUID");
+        let endpoint_id = [4_u8; 32];
+        let signing = SigningKey::from_bytes(&[9_u8; 32]);
+        let keyring =
+            ControllerCommandKeyring::new([signing.verifying_key()]).expect("fixture keyring");
+        let fence = build_stale_fence(&signing, node_id, endpoint_id, owner_id, 3, 9, 11, 120, 300)
+            .expect("signed fence")
+            .fence;
+        let response = NodeConnection {
+            node_id: node_id.as_bytes().to_vec(),
+            endpoint_id: endpoint_id.to_vec(),
+            path: 1,
+            round_trip_time_millis: 7,
+            connected_at: Some(timestamp(unix_now_parts().0, 0)),
+            agent_instance_id: vec![5_u8; 16],
+            path_detail: "direct:test".to_owned(),
+            last_seen: Some(timestamp(unix_now_parts().0, 0)),
+            negotiated_capabilities: vec![PROBE_CAPABILITY.to_owned()],
+            authorization_revision: 11,
+            session_expires_at: Some(timestamp(unix_now_parts().0 + 300, 0)),
+            owner_epoch: 9,
+        };
+        let expected_connection_id = hex::encode(&fence.connection_id);
+
+        let (now_seconds, now_nanos) = unix_now_parts();
+        let (observation, matched) = node_connection_observation(
+            node_id,
+            &response,
+            &fence,
+            &keyring,
+            now_seconds,
+            now_nanos,
+            "direct",
+        )
+        .expect("matching observation");
+        assert!(matched);
+        assert_eq!(observation["owner_instance_id"], owner_id.to_string());
+        assert_eq!(observation["owner_incarnation"], "3");
+        assert_eq!(observation["connection_id"], expected_connection_id);
+        assert_eq!(observation["owner_epoch"], 9);
+        assert_eq!(observation["endpoint_id"], hex::encode([4_u8; 32]));
+        assert_eq!(observation["agent_instance_id"], hex::encode([5_u8; 16]));
+        assert!(observation["owner_lease_until"].is_string());
+
+        let mut wrong_capabilities = response.clone();
+        wrong_capabilities.negotiated_capabilities = vec!["ocserv.status.read".to_owned()];
+        let error = node_connection_observation(
+            node_id,
+            &wrong_capabilities,
+            &fence,
+            &keyring,
+            now_seconds,
+            now_nanos,
+            "any",
+        )
+        .expect_err("connection and fence capabilities mismatch must fail closed");
+        assert!(error.contains("verified owner fence"));
+
+        let mut tampered_fence = fence;
+        tampered_fence.owner_epoch = 10;
+        let error = node_connection_observation(
+            node_id,
+            &response,
+            &tampered_fence,
+            &keyring,
+            now_seconds,
+            now_nanos,
+            "any",
+        )
+        .expect_err("tampered owner fence must fail signature verification");
+        assert!(error.contains("verify owner fence"));
     }
 }

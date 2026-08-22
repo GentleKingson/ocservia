@@ -11,6 +11,13 @@ rendezvous through run-scoped workflow artifacts, the same two-VM pattern
 as `docs/development/g6-ha-pitr-topology.md`, and evaluates the frozen
 contract in `docs/acceptance/g6-slo.yaml` end to end.
 
+A bounded producer job builds the candidate-labeled control-plane, transportd,
+relay, probe, and Agent images once and includes the exact PostgreSQL support
+image in one checksummed archive. It records every image ID and publishes that
+immutable release set to both failure-domain runners. Each runner verifies and
+loads the same bytes before the concurrent topology starts, then overlays those
+images onto its independent runtime state instead of rebuilding them locally.
+
 ## Authorities
 
 The dispatch input selects the evidence authority:
@@ -36,8 +43,8 @@ One compose project per failure domain from `deploy/g6-readiness/compose.yaml`:
 
 ```text
 era 1 — fd-alpha (VM A): postgres primary, api, worker, scheduler,
-                          transportd, relay-a, 28 Agents
-        fd-beta  (VM B): postgres streaming standby, relay-b, 27 Agents
+                          transportd, relay-a, 25 Agents
+        fd-beta  (VM B): postgres streaming standby, relay-b, 25 Agents
 era 2 — fd-beta  promotes the standby and runs the full control plane
         (transportd reuses the controller key handed over by rendezvous,
         so every Agent redials the same controller NodeId)
@@ -56,12 +63,18 @@ before the run is accepted.
 
 1. Both failure domains exchange tunnel identities; VM A brings up the
    primary, migrates, starts its role split and relay-a, then enrolls and
-   approves the 55-node Agent fleet (28 on VM A, 27 on VM B).
+   approves the 50-node Agent fleet (25 on VM A, 25 on VM B). After the
+   complete trust snapshot is loaded, each domain starts one Agent canary,
+   requires the controller read model to report it active, online, and fresh,
+   and only then starts the remaining local Agents in bounded batches. A
+   failed readiness cycle captures the controller response and Agent logs and
+   permits one bounded fleet restart before failing closed.
 2. VM B clones the primary through the tunnel, joins as the streaming
    standby, starts relay-b, and enrolls its Agents.
 3. VM B opens one production command per node behind an Agent execution
-   barrier and confirms at least fifty are non-terminal, then holds dispatch
-   admission while a second fleet-wide wave remains due in the outbox. VM A
+   barrier, freezes a durable exact-population proof that all fifty are
+   non-terminal and result-free, then releases the barriers and starts a
+   second fleet-wide production wave. VM A
    takes and verifies the PITR base backup, then records marker A, the restore
    point, and marker B with their originating transaction identities. It
    switches WAL after marker B and waits for that completed segment to reach
@@ -73,7 +86,7 @@ before the run is accepted.
 5. VM A verifies the PITR restore target, rejoins as the standby, proves the
    rejoined instance rejects writes as read-only, recovers its roles, and
    stops relay-a. VM A publishes only the control evidence needed for the
-   remaining scenarios and keeps all 28 Agents alive; VM B proves
+   remaining scenarios and keeps all 25 Agents alive; VM B proves
    authenticated traffic moves to relay-b and exercises the direct↔relay path
    transitions.
 6. VM B runs the scheduler-leadership and connection-owner failover
@@ -82,27 +95,37 @@ before the run is accepted.
    result receipt but before database commit), the
    bulk-disconnect reconnect storm, and then the bounded 300-second
    fault-free window with ≥50 concurrent commands and continuous resource
-   sampling. VM B then captures the 55-node final session inventory and
-   requests a final freeze. Only then does VM A snapshot all 28 durable Agent
-   journals and its final container inventory; VM B waits for that snapshot
-   before assembly, so cleanup cannot race the final probes.
-7. `scripts/build-g6-evidence.mjs` assembles the evidence bundle purely
+   sampling. VM B then captures the 50-node final session inventory and
+   requests a final freeze. Only then does VM A snapshot all 25 durable Agent
+   journals and its final container inventory. Each runtime job publishes its
+   own raw evidence and an exact source manifest; neither runtime job assembles
+   or verifies the cross-domain bundle.
+7. A dedicated assembly job validates both raw source manifests before
+   `scripts/build-g6-evidence.mjs` assembles the evidence bundle purely
    from trusted producers — the authoritative database tables, the
    per-Agent durable journals from both failure domains, the live transportd
    session inventory, the fenced-probe outputs, and the runner clocks. Durable
    effect completeness is checked over every synthetic command in the run,
    while HTTP latency, availability, and dispatch SLOs retain the bounded
    window's accepted-request population. The frozen verifier evaluates that
-   bundle; an independent verifier job recomputes the environment identity
-   from the run identity, re-evaluates the published bundle, and requires its
-   verdict to match byte for byte.
+   bundle. Separate jobs scan both raw artifacts and the assembled bundle for
+   secrets, recompute the environment identity, independently verify the
+   published bundle, and aggregate every bound layer into the final gate.
 
 ## Artifacts
 
-Run-scoped workflow artifacts carry the rendezvous and the published
-evidence (`g6-rd-evidence-bundle-*` with its `verdict.json`, plus the
-independent `g6-rd-verdict-*`); redacted per-domain diagnostics are kept
-for five days. The bundle records the topology, the release manifest with
+Run-scoped workflow artifacts carry the rendezvous, immutable raw domain
+evidence (`g6-rd-raw-fd-a-*` and `g6-rd-raw-fd-b-*`), the partial or complete
+assembled bundle (`g6-rd-evidence-bundle-*`), the independent verdict, the
+secret-scan result, and the final gate result. Redacted per-domain diagnostics
+are kept for five days. The bundle records the topology, the release manifest with
 every component image digest, the raw structured artifacts, and every
 artifact digest, all bound to the run's environment id and candidate
 commit SHA.
+
+Every rendezvous wait also reads the producer Job from the exact workflow
+attempt. A failed producer step ends the peer wait immediately, while a
+successful producer gets only a short artifact-propagation grace period.
+GitHub API calls and downloads have bounded connection, transfer, and retry
+budgets. Diagnostics and cleanup have separate hard limits; cleanup uses a
+support image cached before isolation and is forbidden from pulling images.

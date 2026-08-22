@@ -1,0 +1,50 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ocservia.example/schemas/g6-runtime-result-schema.json",
+  "title": "Ocservia G6 Runtime Result",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "candidate_sha",
+    "run_id",
+    "run_attempt",
+    "environment_id",
+    "authority",
+    "release_manifest_digest",
+    "failure_domain",
+    "domain_run_id",
+    "status",
+    "evidence_complete",
+    "last_phase",
+    "failure"
+  ],
+  "properties": {
+    "schema_version": { "const": "ocservia.g6-runtime-result.v1" },
+    "candidate_sha": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+    "run_id": { "type": "string", "minLength": 1 },
+    "run_attempt": { "type": "integer", "minimum": 1 },
+    "environment_id": { "type": "string", "pattern": "^g6-[a-z0-9]{8,32}$" },
+    "authority": { "enum": ["engineering", "production_readiness"] },
+    "release_manifest_digest": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "failure_domain": { "enum": ["fd-a", "fd-b"] },
+    "domain_run_id": { "type": "string", "minLength": 1 },
+    "status": { "enum": ["passed", "failed", "cancelled"] },
+    "evidence_complete": { "type": "boolean" },
+    "last_phase": { "type": "string", "minLength": 1 },
+    "failure": {
+      "oneOf": [
+        { "type": "null" },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["class", "code"],
+          "properties": {
+            "class": { "type": "string", "minLength": 1 },
+            "code": { "type": "string", "minLength": 1 }
+          }
+        }
+      ]
+    }
+  }
+}

@@ -68,6 +68,9 @@ type Config struct {
 	LocalSimulator           bool
 	PprofAddress             string
 	TestResultCommitBarrier  string
+	TestPreSendBarrier       string
+	TestCommandLease         time.Duration
+	TestSchedulerEvidence    bool
 	CertificateSignerURL     string
 	CertificateSignerToken   string
 	CertificateSignerTimeout time.Duration
@@ -154,6 +157,7 @@ func Load(args []string, lookup LookupEnv) (Config, error) {
 	setString(lookup, "OCSERV_COMMAND_SIGNING_KEY_FILE", &cfg.CommandSigningKeyFile)
 	setString(lookup, "OCSERV_PPROF_ADDRESS", &cfg.PprofAddress)
 	setString(lookup, "OCSERV_TEST_RESULT_COMMIT_BARRIER_DIR", &cfg.TestResultCommitBarrier)
+	setString(lookup, "OCSERV_TEST_PRE_SEND_BARRIER_DIR", &cfg.TestPreSendBarrier)
 	if err := setHexOrFile(lookup, "OCSERV_BREAK_GLASS_TOKEN_SHA256", &cfg.BreakGlassTokenHash); err != nil {
 		return Config{}, err
 	}
@@ -171,6 +175,21 @@ func Load(args []string, lookup LookupEnv) (Config, error) {
 	}
 	if err := setDuration(lookup, "OCSERV_TRANSPORT_TIMEOUT", &cfg.TransportTimeout); err != nil {
 		return Config{}, err
+	}
+	testCommandLeaseConfigured := false
+	if value, ok := lookup("OCSERV_TEST_COMMAND_LEASE"); ok {
+		parsed, err := time.ParseDuration(value)
+		if err != nil {
+			return Config{}, fmt.Errorf("OCSERV_TEST_COMMAND_LEASE: %w", err)
+		}
+		if parsed == 0 {
+			return Config{}, errors.New("OCSERV_TEST_COMMAND_LEASE must not be zero")
+		}
+		cfg.TestCommandLease = parsed
+		testCommandLeaseConfigured = true
+	}
+	if cfg.TestPreSendBarrier != "" && !testCommandLeaseConfigured {
+		cfg.TestCommandLease = 10 * time.Second
 	}
 	if err := setDuration(lookup, "OCSERV_CERTIFICATE_SIGNER_TIMEOUT", &cfg.CertificateSignerTimeout); err != nil {
 		return Config{}, err
@@ -224,6 +243,13 @@ func Load(args []string, lookup LookupEnv) (Config, error) {
 			return Config{}, fmt.Errorf("OCSERV_LOCAL_SIMULATOR: %w", err)
 		}
 		cfg.LocalSimulator = parsed
+	}
+	if value, ok := lookup("OCSERV_TEST_SCHEDULER_MAINTENANCE_EVIDENCE"); ok {
+		parsed, err := strconv.ParseBool(value)
+		if err != nil {
+			return Config{}, fmt.Errorf("OCSERV_TEST_SCHEDULER_MAINTENANCE_EVIDENCE: %w", err)
+		}
+		cfg.TestSchedulerEvidence = parsed
 	}
 	if value, ok := lookup("OCSERV_BREAK_GLASS_ENABLED"); ok {
 		parsed, err := strconv.ParseBool(value)
@@ -373,8 +399,26 @@ func (c Config) Validate() error {
 			return errors.New("result commit barrier is test-only and requires an absolute directory")
 		}
 	}
+	if c.TestPreSendBarrier != "" {
+		if c.Environment == "production" || !filepath.IsAbs(c.TestPreSendBarrier) {
+			return errors.New("pre-send barrier is test-only and requires an absolute directory")
+		}
+	}
+	if c.TestCommandLease != 0 {
+		if c.TestPreSendBarrier == "" {
+			return errors.New("test command lease requires the pre-send barrier")
+		}
+		if c.Environment == "production" || c.TestCommandLease < 10*time.Second || c.TestCommandLease > 60*time.Second {
+			return errors.New("test command lease is test-only and must be between 10s and 60s")
+		}
+	} else if c.TestPreSendBarrier != "" {
+		return errors.New("pre-send barrier requires a test command lease")
+	}
 	if c.LocalSimulator && c.Environment == "production" {
 		return errors.New("local simulator is forbidden in production")
+	}
+	if c.TestSchedulerEvidence && c.Environment == "production" {
+		return errors.New("scheduler maintenance evidence is test-only")
 	}
 	if _, ok := map[string]bool{"debug": true, "info": true, "warn": true, "error": true}[c.LogLevelName]; !ok {
 		return fmt.Errorf("invalid log level %q", c.LogLevelName)
