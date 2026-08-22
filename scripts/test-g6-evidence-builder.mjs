@@ -1211,6 +1211,14 @@ write(
 // ---------------------------------------------------------------------------
 
 function runBuilder(outDir, authority) {
+  mkdirSync(outDir, { recursive: true });
+  writeFileSync(
+    join(outDir, "raw-source-inventory.json"),
+    `${JSON.stringify({
+      schema_version: "ocservia.g6-raw-source-inventory.v1",
+      sources: [{ failure_domain: "fd-a", artifact_id: "1001" }],
+    })}\n`,
+  );
   const result = spawnSync(
     process.execPath,
     [
@@ -1770,10 +1778,16 @@ try {
     );
   }
   const sourceInventory = JSON.parse(
-    readFileSync(join(productionDir, "source-inventory.json"), "utf8"),
+    readFileSync(join(productionDir, "builder-source-inventory.json"), "utf8"),
   );
+  const rawSourceInventory = JSON.parse(
+    readFileSync(join(productionDir, "raw-source-inventory.json"), "utf8"),
+  );
+  if (rawSourceInventory.sources[0]?.artifact_id !== "1001") {
+    throw new Error("builder overwrote the raw GitHub artifact provenance inventory");
+  }
   if (
-    sourceInventory.schema_version !== "ocservia.g6-source-inventory.v1" ||
+    sourceInventory.schema_version !== "ocservia.g6-builder-source-inventory.v1" ||
     !sourceInventory.sources.some(
       (source) => source.path === "peer/isolation/active-load.json",
     ) ||

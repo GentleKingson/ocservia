@@ -20,7 +20,8 @@ def reject(message)
 end
 
 concurrency = workflow.fetch("concurrency")
-reject("G6 readiness must cancel an older run for the same authority") unless concurrency.fetch("cancel-in-progress") == true
+reject("G6 readiness must queue formal runs without cancelling active evidence") unless
+  concurrency.fetch("queue") == "max" && !concurrency.key?("cancel-in-progress")
 for token in ["github.workflow", "github.ref", "inputs.authority"]
   reject("the G6 concurrency group must include #{token}") unless concurrency.fetch("group").include?(token)
 end

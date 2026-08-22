@@ -223,10 +223,59 @@ function mergePeerEffects(fdA, runDir) {
   }
 }
 
-function assemblyResultBase(binding, status, exitCode, reason) {
+function emptyArtifactBindings() {
+  return {
+    fd_a: { artifact_id: null, artifact_digest: null },
+    fd_b: { artifact_id: null, artifact_digest: null },
+    bundle: { artifact_id: null, artifact_digest: null },
+  };
+}
+
+function artifactBindingsFromOptions(values) {
+  return {
+    fd_a: artifactReference(
+      values["fd-a-artifact-id"],
+      values["fd-a-artifact-digest"],
+      "fd-a",
+    ),
+    fd_b: artifactReference(
+      values["fd-b-artifact-id"],
+      values["fd-b-artifact-digest"],
+      "fd-b",
+    ),
+    bundle: artifactReference(
+      values["bundle-artifact-id"],
+      values["bundle-artifact-digest"],
+      "bundle",
+    ),
+  };
+}
+
+function assertArtifactBindings(actual, expected, label) {
+  for (const source of ["fd_a", "fd_b", "bundle"]) {
+    for (const key of ["artifact_id", "artifact_digest"]) {
+      if (actual?.[source]?.[key] !== expected[source][key]) {
+        fail(
+          `${label} ${source} ${key} mismatch: expected ${expected[source][key]}, got ${actual?.[source]?.[key]}`,
+        );
+      }
+    }
+  }
+}
+
+function requireCompleteArtifactBindings(artifacts, label) {
+  for (const source of ["fd_a", "fd_b", "bundle"]) {
+    if (!artifacts[source].artifact_id || !artifacts[source].artifact_digest) {
+      fail(`${label} ${source} artifact provenance is unavailable`);
+    }
+  }
+}
+
+function assemblyResultBase(binding, status, exitCode, reason, artifacts) {
   return {
     schema_version: ASSEMBLY_SCHEMA,
     ...binding,
+    artifacts: artifacts ?? emptyArtifactBindings(),
     status,
     exit_code: exitCode,
     reason: reason || null,
@@ -246,33 +295,30 @@ function assemble(values) {
   const out = resolve(values.output);
   const work = resolve(values["work-dir"]);
   const binding = bindingFromOptions(values);
+  let artifacts = emptyArtifactBindings();
   mkdirSync(out, { recursive: true });
   let fdAResult;
   let fdBResult;
   try {
+    artifacts = artifactBindingsFromOptions(values);
     const sources = [
       {
         failure_domain: "fd-a",
         root: fdA,
-        ...artifactReference(
-          values["fd-a-artifact-id"],
-          values["fd-a-artifact-digest"],
-          "fd-a",
-        ),
+        ...artifacts.fd_a,
       },
       {
         failure_domain: "fd-b",
         root: fdB,
-        ...artifactReference(
-          values["fd-b-artifact-id"],
-          values["fd-b-artifact-digest"],
-          "fd-b",
-        ),
+        ...artifacts.fd_b,
       },
     ];
     const validationFailures = [];
     for (const source of sources) {
       try {
+        if (!source.artifact_id || !source.artifact_digest) {
+          fail(`${source.failure_domain} artifact provenance is unavailable`);
+        }
         const result = validateRuntime(source.root, binding, source.failure_domain);
         source.runtime_status = result.status;
         source.manifest_sha256 = digestFile(join(source.root, "source-manifest.json"));
@@ -286,8 +332,8 @@ function assemble(values) {
       }
       delete source.root;
     }
-    writeJson(join(out, "source-inventory.json"), {
-      schema_version: "ocservia.g6-source-inventory.v1",
+    writeJson(join(out, "raw-source-inventory.json"), {
+      schema_version: "ocservia.g6-raw-source-inventory.v1",
       ...binding,
       sources,
     });
@@ -299,6 +345,7 @@ function assemble(values) {
           "failed",
           1,
           `raw source validation failed: ${validationFailures.join("; ")}`,
+          artifacts,
         ),
       );
       return 1;
@@ -306,7 +353,7 @@ function assemble(values) {
     if (fdAResult.status !== "passed" || fdBResult.status !== "passed") {
       writeJson(
         join(out, "assembly-result.json"),
-        assemblyResultBase(binding, "failed", 1, "runtime evidence is incomplete"),
+        assemblyResultBase(binding, "failed", 1, "runtime evidence is incomplete", artifacts),
       );
       return 1;
     }
@@ -338,21 +385,60 @@ function assemble(values) {
       const reason = builderError?.reason || (builder.stderr || "evidence builder failed").trim();
       writeJson(
         join(out, "assembly-result.json"),
-        assemblyResultBase(binding, "failed", builder.status ?? 1, reason),
+        assemblyResultBase(binding, "failed", builder.status ?? 1, reason, artifacts),
       );
       return builder.status ?? 1;
     }
-    writeJson(join(out, "assembly-result.json"), assemblyResultBase(binding, "passed", 0, null));
+    writeJson(
+      join(out, "assembly-result.json"),
+      assemblyResultBase(binding, "passed", 0, null, artifacts),
+    );
     return 0;
   } catch (error) {
     writeJson(
       join(out, "assembly-result.json"),
-      assemblyResultBase(binding, "failed", 1, error.message),
+      assemblyResultBase(binding, "failed", 1, error.message, artifacts),
     );
     writeFileSync(join(out, "build.stderr.log"), `${error.stack || error.message}\n`);
     writeFileSync(join(out, "evidence-build-exit-code.txt"), "1\n");
     return 1;
   }
+}
+
+function finalizeAssembly(values) {
+  const binding = bindingFromOptions(values);
+  const input = readJson(values.input);
+  assertBinding(input, binding, "assembly result");
+  if (input.schema_version !== ASSEMBLY_SCHEMA) fail("assembly result schema is invalid");
+  const expected = artifactBindingsFromOptions(values);
+  for (const source of ["fd_a", "fd_b"]) {
+    for (const key of ["artifact_id", "artifact_digest"]) {
+      if (input.artifacts?.[source]?.[key] !== expected[source][key]) {
+        fail(`assembly result ${source} ${key} mismatch`);
+      }
+    }
+  }
+  if (!expected.bundle.artifact_id || !expected.bundle.artifact_digest) {
+    fail("assembled bundle artifact provenance is unavailable");
+  }
+  writeJson(values.output, { ...input, artifacts: expected });
+}
+
+function bindVerification(values) {
+  const binding = bindingFromOptions(values);
+  const result = readJson(values.input);
+  if (result.schema_version !== PHASE_SCHEMA || result.phase !== "verify") {
+    fail("verification result schema is invalid");
+  }
+  const artifacts = artifactBindingsFromOptions(values);
+  const assembly = readJson(values["assembly-result"]);
+  assertBinding(assembly, binding, "assembly result");
+  if (assembly.schema_version !== ASSEMBLY_SCHEMA) fail("assembly result schema is invalid");
+  assertArtifactBindings(assembly.artifacts, artifacts, "assembly result");
+  if (result.status !== "failed") {
+    requireCompleteArtifactBindings(artifacts, "verification");
+  }
+  writeJson(values.output, { ...result, ...binding, artifacts });
 }
 
 function gate(values) {
@@ -363,6 +449,8 @@ function gate(values) {
   const assembly = readJson(values["assembly-result"]);
   const scan = readJson(values["secret-scan-result"]);
   const verification = readJson(values["verification-result"]);
+  const artifacts = artifactBindingsFromOptions(values);
+  requireCompleteArtifactBindings(artifacts, "gate");
   for (const [label, result] of [
     ["fd-a runtime", fdA],
     ["fd-b runtime", fdB],
@@ -380,6 +468,8 @@ function gate(values) {
   if (verification.schema_version !== PHASE_SCHEMA || verification.phase !== "verify") {
     fail("gate verification result schema is invalid");
   }
+  assertArtifactBindings(assembly.artifacts, artifacts, "assembly result");
+  assertArtifactBindings(verification.artifacts, artifacts, "verification result");
   const prerequisitePass =
     fdA.status === "passed" &&
     fdB.status === "passed" &&
@@ -393,6 +483,7 @@ function gate(values) {
   writeJson(output, {
     schema_version: GATE_SCHEMA,
     ...binding,
+    artifacts,
     runtime: { fd_a: fdA.status, fd_b: fdB.status },
     assembly: assembly.status,
     secret_scan: scan.status,
@@ -436,6 +527,29 @@ function parse(command, args) {
       "fd-b-artifact-id": { type: "string" },
       "fd-b-artifact-digest": { type: "string" },
     },
+    "finalize-assembly": {
+      ...common,
+      input: { type: "string" },
+      output: { type: "string" },
+      "fd-a-artifact-id": { type: "string" },
+      "fd-a-artifact-digest": { type: "string" },
+      "fd-b-artifact-id": { type: "string" },
+      "fd-b-artifact-digest": { type: "string" },
+      "bundle-artifact-id": { type: "string" },
+      "bundle-artifact-digest": { type: "string" },
+    },
+    "bind-verification": {
+      ...common,
+      input: { type: "string" },
+      output: { type: "string" },
+      "assembly-result": { type: "string" },
+      "fd-a-artifact-id": { type: "string" },
+      "fd-a-artifact-digest": { type: "string" },
+      "fd-b-artifact-id": { type: "string" },
+      "fd-b-artifact-digest": { type: "string" },
+      "bundle-artifact-id": { type: "string" },
+      "bundle-artifact-digest": { type: "string" },
+    },
     gate: {
       ...common,
       output: { type: "string" },
@@ -444,6 +558,12 @@ function parse(command, args) {
       "assembly-result": { type: "string" },
       "secret-scan-result": { type: "string" },
       "verification-result": { type: "string" },
+      "fd-a-artifact-id": { type: "string" },
+      "fd-a-artifact-digest": { type: "string" },
+      "fd-b-artifact-id": { type: "string" },
+      "fd-b-artifact-digest": { type: "string" },
+      "bundle-artifact-id": { type: "string" },
+      "bundle-artifact-digest": { type: "string" },
     },
   };
   if (!commandOptions[command]) fail(`unknown command: ${command}`);
@@ -457,6 +577,8 @@ export {
   SECRET_SCAN_SCHEMA,
   SOURCE_SCHEMA,
   assemble,
+  bindVerification,
+  finalizeAssembly,
   gate,
   runtimeResult,
   sourceManifest,
@@ -471,7 +593,11 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
       ? (runtimeResult(values), 0)
       : command === "assemble"
         ? assemble(values)
-        : gate(values);
+        : command === "finalize-assembly"
+          ? (finalizeAssembly(values), 0)
+          : command === "bind-verification"
+            ? (bindVerification(values), 0)
+            : gate(values);
     process.exitCode = status;
   } catch (error) {
     console.error(error.stack || error.message);

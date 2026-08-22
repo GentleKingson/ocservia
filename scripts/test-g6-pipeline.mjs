@@ -8,6 +8,8 @@ import {
   ASSEMBLY_SCHEMA,
   SECRET_SCAN_SCHEMA,
   assemble,
+  bindVerification,
+  finalizeAssembly,
   gate,
   runtimeResult,
   verifySource,
@@ -29,6 +31,28 @@ const normalizedBinding = {
   environment_id: binding["environment-id"],
   authority: binding.authority,
   release_manifest_digest: binding["release-manifest-digest"],
+};
+const artifactOptions = {
+  "fd-a-artifact-id": "3001",
+  "fd-a-artifact-digest": "1".repeat(64),
+  "fd-b-artifact-id": "3002",
+  "fd-b-artifact-digest": "2".repeat(64),
+  "bundle-artifact-id": "3003",
+  "bundle-artifact-digest": "3".repeat(64),
+};
+const artifactBindings = {
+  fd_a: {
+    artifact_id: artifactOptions["fd-a-artifact-id"],
+    artifact_digest: artifactOptions["fd-a-artifact-digest"],
+  },
+  fd_b: {
+    artifact_id: artifactOptions["fd-b-artifact-id"],
+    artifact_digest: artifactOptions["fd-b-artifact-digest"],
+  },
+  bundle: {
+    artifact_id: artifactOptions["bundle-artifact-id"],
+    artifact_digest: artifactOptions["bundle-artifact-digest"],
+  },
 };
 
 function json(path, value) {
@@ -57,16 +81,23 @@ function gateInputs(directory, authority = "engineering") {
     failure_domain: "fd-b",
     status: "passed",
   });
-  json(paths.assembly, { schema_version: ASSEMBLY_SCHEMA, ...exact, status: "passed" });
+  json(paths.assembly, {
+    schema_version: ASSEMBLY_SCHEMA,
+    ...exact,
+    artifacts: artifactBindings,
+    status: "passed",
+  });
   json(paths.scan, { schema_version: SECRET_SCAN_SCHEMA, ...exact, status: "passed" });
   json(paths.verification, {
     schema_version: "ocservia.g6-evidence-phase-result.v1",
     ...exact,
+    artifacts: artifactBindings,
     phase: "verify",
     status: authority === "production_readiness" ? "passed" : "accepted_non_final",
   });
   return {
     ...binding,
+    ...artifactOptions,
     authority,
     output: paths.output,
     "fd-a-result": paths.fdA,
@@ -133,7 +164,7 @@ try {
     "runtime evidence is incomplete",
   );
   assert.equal(
-    JSON.parse(readFileSync(join(partialOutput, "source-inventory.json"))).sources.length,
+    JSON.parse(readFileSync(join(partialOutput, "raw-source-inventory.json"))).sources.length,
     2,
   );
 
@@ -170,6 +201,59 @@ try {
   assert.equal(builderFailure.exit_code, 17);
   assert.match(builderFailure.reason, /injected builder failure/);
   assert.equal(readFileSync(join(builderFailureOutput, "evidence-build-exit-code.txt"), "utf8"), "17\n");
+  assert.equal(
+    JSON.parse(readFileSync(join(builderFailureOutput, "raw-source-inventory.json"))).sources.length,
+    2,
+  );
+
+  const successfulBuilder = join(root, "successful-builder.mjs");
+  writeFileSync(
+    successfulBuilder,
+    'import { writeFileSync } from "node:fs"; import { join } from "node:path"; const index=process.argv.indexOf("--out-dir"); writeFileSync(join(process.argv[index+1],"builder-source-inventory.json"),"{\\"schema_version\\":\\"ocservia.g6-builder-source-inventory.v1\\",\\"sources\\":[]}\\n");\n',
+  );
+  const successfulOutput = join(root, "successful-output");
+  assert.equal(assemble({
+    ...binding,
+    "fd-a": join(builderFailureSources, "fd-a"),
+    "fd-b": join(builderFailureSources, "fd-b"),
+    output: successfulOutput,
+    "work-dir": join(root, "successful-work"),
+    builder: successfulBuilder,
+    slo: join(root, "unused-slo.yaml"),
+    "fd-a-artifact-id": "2001",
+    "fd-a-artifact-digest": "3".repeat(64),
+    "fd-b-artifact-id": "2002",
+    "fd-b-artifact-digest": "4".repeat(64),
+  }), 0);
+  assert.equal(
+    JSON.parse(readFileSync(join(successfulOutput, "raw-source-inventory.json")))
+      .sources[0].artifact_id,
+    "2001",
+  );
+  assert.equal(
+    JSON.parse(readFileSync(join(successfulOutput, "builder-source-inventory.json")))
+      .schema_version,
+    "ocservia.g6-builder-source-inventory.v1",
+  );
+
+  const swappedSourceOutput = join(root, "swapped-source-output");
+  assert.equal(assemble({
+    ...binding,
+    "fd-a": join(builderFailureSources, "fd-b"),
+    "fd-b": join(builderFailureSources, "fd-a"),
+    output: swappedSourceOutput,
+    "work-dir": join(root, "swapped-source-work"),
+    builder: successfulBuilder,
+    slo: join(root, "unused-slo.yaml"),
+    "fd-a-artifact-id": "2001",
+    "fd-a-artifact-digest": "3".repeat(64),
+    "fd-b-artifact-id": "2002",
+    "fd-b-artifact-digest": "4".repeat(64),
+  }), 1);
+  assert.match(
+    JSON.parse(readFileSync(join(swappedSourceOutput, "assembly-result.json"))).reason,
+    /runtime result is invalid/,
+  );
 
   const missingOutput = join(root, "missing-output");
   assert.equal(assemble({
@@ -184,7 +268,7 @@ try {
     "fd-b-artifact-digest": "4".repeat(64),
   }), 1);
   const missingInventory = JSON.parse(
-    readFileSync(join(missingOutput, "source-inventory.json")),
+    readFileSync(join(missingOutput, "raw-source-inventory.json")),
   );
   assert.equal(missingInventory.sources[0].runtime_status, "unavailable");
   assert.equal(missingInventory.sources[0].artifact_id, null);
@@ -193,11 +277,109 @@ try {
     /raw source validation failed/,
   );
 
+  const finalization = join(root, "finalization");
+  mkdirSync(finalization);
+  const preliminaryAssembly = join(finalization, "preliminary-assembly.json");
+  json(preliminaryAssembly, {
+    schema_version: ASSEMBLY_SCHEMA,
+    ...normalizedBinding,
+    artifacts: {
+      fd_a: artifactBindings.fd_a,
+      fd_b: artifactBindings.fd_b,
+      bundle: { artifact_id: null, artifact_digest: null },
+    },
+    status: "passed",
+    exit_code: 0,
+    reason: null,
+  });
+  const finalAssembly = join(finalization, "assembly.json");
+  finalizeAssembly({
+    ...binding,
+    ...artifactOptions,
+    input: preliminaryAssembly,
+    output: finalAssembly,
+  });
+  assert.deepEqual(JSON.parse(readFileSync(finalAssembly)).artifacts, artifactBindings);
+
+  const unboundVerification = join(finalization, "verification-unbound.json");
+  json(unboundVerification, {
+    schema_version: "ocservia.g6-evidence-phase-result.v1",
+    phase: "verify",
+    status: "accepted_non_final",
+    exit_code: 1,
+  });
+  const boundVerification = join(finalization, "verification.json");
+  bindVerification({
+    ...binding,
+    ...artifactOptions,
+    input: unboundVerification,
+    output: boundVerification,
+    "assembly-result": finalAssembly,
+  });
+  assert.deepEqual(JSON.parse(readFileSync(boundVerification)).artifacts, artifactBindings);
+
   const engineering = join(root, "engineering");
   mkdirSync(engineering);
   const engineeringInputs = gateInputs(engineering);
   assert.equal(gate(engineeringInputs), 0);
   assert.equal(JSON.parse(readFileSync(engineeringInputs.output)).final_status, "accepted_non_final");
+  assert.deepEqual(
+    JSON.parse(readFileSync(engineeringInputs.output)).artifacts,
+    artifactBindings,
+  );
+
+  const swapped = join(root, "swapped-artifacts");
+  mkdirSync(swapped);
+  const swappedInputs = gateInputs(swapped);
+  assert.throws(
+    () => gate({
+      ...swappedInputs,
+      "fd-a-artifact-id": artifactOptions["fd-b-artifact-id"],
+      "fd-a-artifact-digest": artifactOptions["fd-b-artifact-digest"],
+      "fd-b-artifact-id": artifactOptions["fd-a-artifact-id"],
+      "fd-b-artifact-digest": artifactOptions["fd-a-artifact-digest"],
+    }),
+    /assembly result fd_a artifact_id mismatch/,
+  );
+
+  const wrongDigest = join(root, "wrong-raw-digest");
+  mkdirSync(wrongDigest);
+  const wrongDigestInputs = gateInputs(wrongDigest);
+  const wrongDigestAssembly = JSON.parse(
+    readFileSync(wrongDigestInputs["assembly-result"]),
+  );
+  wrongDigestAssembly.artifacts.fd_a.artifact_digest = "9".repeat(64);
+  json(wrongDigestInputs["assembly-result"], wrongDigestAssembly);
+  assert.throws(
+    () => gate(wrongDigestInputs),
+    /assembly result fd_a artifact_digest mismatch/,
+  );
+
+  const wrongID = join(root, "wrong-raw-id");
+  mkdirSync(wrongID);
+  const wrongIDInputs = gateInputs(wrongID);
+  const wrongIDVerification = JSON.parse(
+    readFileSync(wrongIDInputs["verification-result"]),
+  );
+  wrongIDVerification.artifacts.fd_b.artifact_id = "9999";
+  json(wrongIDInputs["verification-result"], wrongIDVerification);
+  assert.throws(
+    () => gate(wrongIDInputs),
+    /verification result fd_b artifact_id mismatch/,
+  );
+
+  const wrongBundleDigest = join(root, "wrong-bundle-digest");
+  mkdirSync(wrongBundleDigest);
+  const wrongBundleInputs = gateInputs(wrongBundleDigest);
+  const wrongBundleVerification = JSON.parse(
+    readFileSync(wrongBundleInputs["verification-result"]),
+  );
+  wrongBundleVerification.artifacts.bundle.artifact_digest = "8".repeat(64);
+  json(wrongBundleInputs["verification-result"], wrongBundleVerification);
+  assert.throws(
+    () => gate(wrongBundleInputs),
+    /verification result bundle artifact_digest mismatch/,
+  );
 
   const production = join(root, "production");
   mkdirSync(production);

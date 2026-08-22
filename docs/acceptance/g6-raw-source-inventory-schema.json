@@ -1,0 +1,50 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ocservia.example/schemas/g6-raw-source-inventory-schema.json",
+  "title": "Ocservia G6 Raw Source Inventory",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "candidate_sha",
+    "run_id",
+    "run_attempt",
+    "environment_id",
+    "authority",
+    "release_manifest_digest",
+    "sources"
+  ],
+  "properties": {
+    "schema_version": { "const": "ocservia.g6-raw-source-inventory.v1" },
+    "candidate_sha": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+    "run_id": { "type": "string", "minLength": 1 },
+    "run_attempt": { "type": "integer", "minimum": 1 },
+    "environment_id": { "type": "string", "pattern": "^g6-[a-z0-9]{8,32}$" },
+    "authority": { "enum": ["engineering", "production_readiness"] },
+    "release_manifest_digest": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "sources": {
+      "type": "array",
+      "minItems": 2,
+      "maxItems": 2,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "failure_domain",
+          "artifact_id",
+          "artifact_digest",
+          "runtime_status",
+          "manifest_sha256"
+        ],
+        "properties": {
+          "failure_domain": { "enum": ["fd-a", "fd-b"] },
+          "artifact_id": { "type": ["string", "null"], "pattern": "^[1-9][0-9]*$" },
+          "artifact_digest": { "type": ["string", "null"], "pattern": "^[0-9a-f]{64}$" },
+          "runtime_status": { "enum": ["passed", "failed", "cancelled", "unavailable"] },
+          "manifest_sha256": { "type": ["string", "null"], "pattern": "^[0-9a-f]{64}$" },
+          "validation_error": { "type": "string", "minLength": 1 }
+        }
+      }
+    }
+  }
+}

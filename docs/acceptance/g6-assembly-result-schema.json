@@ -12,6 +12,7 @@
     "environment_id",
     "authority",
     "release_manifest_digest",
+    "artifacts",
     "status",
     "exit_code",
     "reason"
@@ -24,8 +25,30 @@
     "environment_id": { "type": "string", "pattern": "^g6-[a-z0-9]{8,32}$" },
     "authority": { "enum": ["engineering", "production_readiness"] },
     "release_manifest_digest": { "type": ["string", "null"], "pattern": "^[0-9a-f]{64}$" },
+    "artifacts": { "$ref": "#/$defs/artifactBindings" },
     "status": { "enum": ["passed", "failed"] },
     "exit_code": { "type": "integer", "minimum": 0 },
     "reason": { "type": ["string", "null"] }
+  },
+  "$defs": {
+    "artifactReference": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["artifact_id", "artifact_digest"],
+      "properties": {
+        "artifact_id": { "type": ["string", "null"], "pattern": "^[1-9][0-9]*$" },
+        "artifact_digest": { "type": ["string", "null"], "pattern": "^[0-9a-f]{64}$" }
+      }
+    },
+    "artifactBindings": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["fd_a", "fd_b", "bundle"],
+      "properties": {
+        "fd_a": { "$ref": "#/$defs/artifactReference" },
+        "fd_b": { "$ref": "#/$defs/artifactReference" },
+        "bundle": { "$ref": "#/$defs/artifactReference" }
+      }
+    }
   }
 }

@@ -91,10 +91,10 @@ function recordSource(path, content) {
     digest: sha256Digest(content),
   });
   writeFileSync(
-    join(outDir, "source-inventory.json"),
+    join(outDir, "builder-source-inventory.json"),
     `${JSON.stringify(
       {
-        schema_version: "ocservia.g6-source-inventory.v1",
+        schema_version: "ocservia.g6-builder-source-inventory.v1",
         sources: [...sourceInventory.values()].sort((left, right) =>
           left.path < right.path ? -1 : left.path > right.path ? 1 : 0,
         ),

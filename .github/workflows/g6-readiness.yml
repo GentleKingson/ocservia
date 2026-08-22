@@ -18,7 +18,7 @@ permissions:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}-${{ inputs.authority }}
-  cancel-in-progress: true
+  queue: max
 
 # One release-image producer freezes every runtime image and the host-side
 # tunnel binary used by both failure domains. The failure-domain jobs then run
@@ -702,6 +702,11 @@ jobs:
     outputs:
       bundle-artifact-id: ${{ steps.bundle-upload.outputs.artifact-id }}
       bundle-artifact-digest: ${{ steps.bundle-upload.outputs.artifact-digest }}
+      assembly-result-artifact-id: ${{ steps.assembly-result-upload.outputs.artifact-id }}
+      fd-a-artifact-id: ${{ needs.g6-rd-fd-a.outputs.raw-artifact-id }}
+      fd-a-artifact-digest: ${{ needs.g6-rd-fd-a.outputs.raw-artifact-digest }}
+      fd-b-artifact-id: ${{ needs.g6-rd-fd-b.outputs.raw-artifact-id }}
+      fd-b-artifact-digest: ${{ needs.g6-rd-fd-b.outputs.raw-artifact-digest }}
       release-manifest-digest: ${{ needs.g6-rd-fd-a.outputs.release-manifest-digest }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -776,9 +781,21 @@ jobs:
             --arg environment_id "g6-$(printf '%s' "${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" | openssl dgst -sha256 -r | cut -c1-16)" \
             --arg authority "${{ inputs.authority }}" \
             --arg release_manifest_digest "${{ needs.g6-rd-fd-a.outputs.release-manifest-digest }}" \
+            --arg fd_a_artifact_id "${{ needs.g6-rd-fd-a.outputs.raw-artifact-id }}" \
+            --arg fd_a_artifact_digest "${{ needs.g6-rd-fd-a.outputs.raw-artifact-digest }}" \
+            --arg fd_b_artifact_id "${{ needs.g6-rd-fd-b.outputs.raw-artifact-id }}" \
+            --arg fd_b_artifact_digest "${{ needs.g6-rd-fd-b.outputs.raw-artifact-digest }}" \
             --arg reason "${reason}" \
-            '{schema_version:"ocservia.g6-assembly-result.v1",$candidate_sha,$run_id,$run_attempt,$environment_id,$authority,release_manifest_digest:(if $release_manifest_digest == "" then null else $release_manifest_digest end),status:"failed",exit_code:1,$reason}' \
+            'def ref($id;$digest): {artifact_id:(if $id == "" then null else $id end),artifact_digest:(if $digest == "" then null else $digest end)};
+             {schema_version:"ocservia.g6-assembly-result.v1",$candidate_sha,$run_id,$run_attempt,$environment_id,$authority,release_manifest_digest:(if $release_manifest_digest == "" then null else $release_manifest_digest end),artifacts:{fd_a:ref($fd_a_artifact_id;$fd_a_artifact_digest),fd_b:ref($fd_b_artifact_id;$fd_b_artifact_digest),bundle:ref("";"")},status:"failed",exit_code:1,$reason}' \
             >"${result}"
+      - name: Stage the preliminary assembly result outside the bundle
+        if: always()
+        run: |
+          mkdir -p "${RUNNER_TEMP}/g6-rd-assembly-result"
+          mv -f \
+            "${RUNNER_TEMP}/g6-rd-evidence-bundle/assembly-result.json" \
+            "${RUNNER_TEMP}/g6-rd-assembly-result/assembly-result.preliminary.json"
       - name: Publish the partial or complete evidence bundle
         id: bundle-upload
         if: always()
@@ -786,6 +803,49 @@ jobs:
         with:
           name: g6-rd-evidence-bundle-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/g6-rd-evidence-bundle
+          if-no-files-found: error
+          retention-days: 14
+      - name: Bind the assembly result to the uploaded bundle
+        if: always()
+        run: |
+          status=0
+          node scripts/g6-pipeline.mjs finalize-assembly \
+            --input "${RUNNER_TEMP}/g6-rd-assembly-result/assembly-result.preliminary.json" \
+            --output "${RUNNER_TEMP}/g6-rd-assembly-result/assembly-result.json" \
+            --candidate-sha "${GITHUB_SHA}" \
+            --run-id "${GITHUB_RUN_ID}" \
+            --run-attempt "${GITHUB_RUN_ATTEMPT}" \
+            --environment-id "g6-$(printf '%s' "${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" | openssl dgst -sha256 -r | cut -c1-16)" \
+            --authority "${{ inputs.authority }}" \
+            --release-manifest-digest "${{ needs.g6-rd-fd-a.outputs.release-manifest-digest }}" \
+            --fd-a-artifact-id "${{ needs.g6-rd-fd-a.outputs.raw-artifact-id }}" \
+            --fd-a-artifact-digest "${{ needs.g6-rd-fd-a.outputs.raw-artifact-digest }}" \
+            --fd-b-artifact-id "${{ needs.g6-rd-fd-b.outputs.raw-artifact-id }}" \
+            --fd-b-artifact-digest "${{ needs.g6-rd-fd-b.outputs.raw-artifact-digest }}" \
+            --bundle-artifact-id "${{ steps.bundle-upload.outputs.artifact-id }}" \
+            --bundle-artifact-digest "${{ steps.bundle-upload.outputs.artifact-digest }}" || status=$?
+          if [[ "${status}" != 0 ]]; then
+            jq \
+              --arg fd_a_artifact_id "${{ needs.g6-rd-fd-a.outputs.raw-artifact-id }}" \
+              --arg fd_a_artifact_digest "${{ needs.g6-rd-fd-a.outputs.raw-artifact-digest }}" \
+              --arg fd_b_artifact_id "${{ needs.g6-rd-fd-b.outputs.raw-artifact-id }}" \
+              --arg fd_b_artifact_digest "${{ needs.g6-rd-fd-b.outputs.raw-artifact-digest }}" \
+              --arg bundle_artifact_id "${{ steps.bundle-upload.outputs.artifact-id }}" \
+              --arg bundle_artifact_digest "${{ steps.bundle-upload.outputs.artifact-digest }}" \
+              'def ref($id;$digest): {artifact_id:(if $id == "" then null else $id end),artifact_digest:(if $digest == "" then null else $digest end)};
+               . + {artifacts:{fd_a:ref($fd_a_artifact_id;$fd_a_artifact_digest),fd_b:ref($fd_b_artifact_id;$fd_b_artifact_digest),bundle:ref($bundle_artifact_id;$bundle_artifact_digest)},status:"failed",exit_code:1,reason:"artifact provenance finalization failed"}' \
+              "${RUNNER_TEMP}/g6-rd-assembly-result/assembly-result.preliminary.json" \
+              >"${RUNNER_TEMP}/g6-rd-assembly-result/assembly-result.json"
+          fi
+          rm -f "${RUNNER_TEMP}/g6-rd-assembly-result/assembly-result.preliminary.json"
+          exit "${status}"
+      - name: Publish the artifact-bound assembly result
+        id: assembly-result-upload
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: g6-rd-assembly-result-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/g6-rd-assembly-result
           if-no-files-found: error
           retention-days: 14
 
@@ -921,6 +981,12 @@ jobs:
         with:
           name: g6-rd-evidence-bundle-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/g6-rd-evidence-bundle
+      - name: Download the artifact-bound assembly result
+        if: needs.g6-rd-assemble.outputs.assembly-result-artifact-id != ''
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: g6-rd-assembly-result-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/g6-rd-assembly-result
       - name: Recompute the run-bound environment identity
         run: |
           echo "G6RD_EXPECTED_ENVIRONMENT_ID=g6-$(printf '%s' "${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" | openssl dgst -sha256 -r | cut -c1-16)" >>"${GITHUB_ENV}"
@@ -1004,20 +1070,26 @@ jobs:
         run: |
           result="${RUNNER_TEMP}/g6-rd-verdict/verification-result.json"
           expected_environment_id="g6-$(printf '%s' "${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" | openssl dgst -sha256 -r | cut -c1-16)"
-          release_manifest_digest="${{ needs.g6-rd-assemble.outputs.release-manifest-digest }}"
           if [[ ! -s "${result}" ]]; then
             mkdir -p "$(dirname "${result}")"
             jq -n '{schema_version:"ocservia.g6-evidence-phase-result.v1",phase:"verify",status:"failed",exit_code:1,reason:"verifier did not produce a result"}' >"${result}"
           fi
-          jq \
-            --arg candidate_sha "${GITHUB_SHA}" \
-            --arg run_id "${GITHUB_RUN_ID}" \
-            --argjson run_attempt "${GITHUB_RUN_ATTEMPT}" \
-            --arg environment_id "${expected_environment_id}" \
-            --arg authority "${{ inputs.authority }}" \
-            --arg release_manifest_digest "${release_manifest_digest}" \
-            '. + {$candidate_sha,$run_id,$run_attempt,$environment_id,$authority,$release_manifest_digest}' \
-            "${result}" >"${result}.tmp"
+          node scripts/g6-pipeline.mjs bind-verification \
+            --input "${result}" \
+            --output "${result}.tmp" \
+            --assembly-result "${RUNNER_TEMP}/g6-rd-assembly-result/assembly-result.json" \
+            --candidate-sha "${GITHUB_SHA}" \
+            --run-id "${GITHUB_RUN_ID}" \
+            --run-attempt "${GITHUB_RUN_ATTEMPT}" \
+            --environment-id "${expected_environment_id}" \
+            --authority "${{ inputs.authority }}" \
+            --release-manifest-digest "${{ needs.g6-rd-assemble.outputs.release-manifest-digest }}" \
+            --fd-a-artifact-id "${{ needs.g6-rd-assemble.outputs.fd-a-artifact-id }}" \
+            --fd-a-artifact-digest "${{ needs.g6-rd-assemble.outputs.fd-a-artifact-digest }}" \
+            --fd-b-artifact-id "${{ needs.g6-rd-assemble.outputs.fd-b-artifact-id }}" \
+            --fd-b-artifact-digest "${{ needs.g6-rd-assemble.outputs.fd-b-artifact-digest }}" \
+            --bundle-artifact-id "${{ needs.g6-rd-assemble.outputs.bundle-artifact-id }}" \
+            --bundle-artifact-digest "${{ needs.g6-rd-assemble.outputs.bundle-artifact-digest }}"
           mv -f "${result}.tmp" "${result}"
       - name: Publish the independent verdict
         id: verdict-upload
@@ -1059,8 +1131,8 @@ jobs:
       - name: Download assembly result
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          name: g6-rd-evidence-bundle-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/g6-rd-evidence-bundle
+          name: g6-rd-assembly-result-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/g6-rd-assembly-result
       - name: Download secret scan result
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
@@ -1084,7 +1156,7 @@ jobs:
           node scripts/g6-pipeline.mjs gate \
             --fd-a-result "${RUNNER_TEMP}/g6-rd-raw-fd-a/runtime-result.json" \
             --fd-b-result "${RUNNER_TEMP}/g6-rd-raw-fd-b/runtime-result.json" \
-            --assembly-result "${RUNNER_TEMP}/g6-rd-evidence-bundle/assembly-result.json" \
+            --assembly-result "${RUNNER_TEMP}/g6-rd-assembly-result/assembly-result.json" \
             --secret-scan-result "${RUNNER_TEMP}/g6-rd-secret-scan/secret-scan-result.json" \
             --verification-result "${RUNNER_TEMP}/g6-rd-verdict/verification-result.json" \
             --output "${RUNNER_TEMP}/g6-rd-gate/gate-result.json" \
@@ -1093,7 +1165,13 @@ jobs:
             --run-attempt "${GITHUB_RUN_ATTEMPT}" \
             --environment-id "${environment_id}" \
             --authority "${{ inputs.authority }}" \
-            --release-manifest-digest "${release_manifest_digest}"
+            --release-manifest-digest "${release_manifest_digest}" \
+            --fd-a-artifact-id "${{ needs.g6-rd-fd-a.outputs.raw-artifact-id }}" \
+            --fd-a-artifact-digest "${{ needs.g6-rd-fd-a.outputs.raw-artifact-digest }}" \
+            --fd-b-artifact-id "${{ needs.g6-rd-fd-b.outputs.raw-artifact-id }}" \
+            --fd-b-artifact-digest "${{ needs.g6-rd-fd-b.outputs.raw-artifact-digest }}" \
+            --bundle-artifact-id "${{ needs.g6-rd-assemble.outputs.bundle-artifact-id }}" \
+            --bundle-artifact-digest "${{ needs.g6-rd-assemble.outputs.bundle-artifact-digest }}"
       - name: Preserve a gate result when an upstream artifact is unavailable
         if: always()
         run: |
@@ -1108,13 +1186,20 @@ jobs:
             --arg environment_id "${environment_id}" \
             --arg authority "${{ inputs.authority }}" \
             --arg release_manifest_digest "${{ needs.g6-rd-fd-a.outputs.release-manifest-digest }}" \
+            --arg fd_a_artifact_id "${{ needs.g6-rd-fd-a.outputs.raw-artifact-id }}" \
+            --arg fd_a_artifact_digest "${{ needs.g6-rd-fd-a.outputs.raw-artifact-digest }}" \
+            --arg fd_b_artifact_id "${{ needs.g6-rd-fd-b.outputs.raw-artifact-id }}" \
+            --arg fd_b_artifact_digest "${{ needs.g6-rd-fd-b.outputs.raw-artifact-digest }}" \
+            --arg bundle_artifact_id "${{ needs.g6-rd-assemble.outputs.bundle-artifact-id }}" \
+            --arg bundle_artifact_digest "${{ needs.g6-rd-assemble.outputs.bundle-artifact-digest }}" \
             --arg fd_a "${{ needs.g6-rd-fd-a.result }}" \
             --arg fd_b "${{ needs.g6-rd-fd-b.result }}" \
             --arg assembly "${{ needs.g6-rd-assemble.result }}" \
             --arg secret_scan "${{ needs.g6-rd-secret-scan.result }}" \
             --arg verification "${{ needs.g6-rd-verifier.result }}" \
             'def normalized: if . == "success" then "passed" else "failed" end;
-             {schema_version:"ocservia.g6-gate-result.v1",$candidate_sha,$run_id,$run_attempt,$environment_id,$authority,release_manifest_digest:(if $release_manifest_digest == "" then null else $release_manifest_digest end),runtime:{fd_a:($fd_a|normalized),fd_b:($fd_b|normalized)},assembly:($assembly|normalized),secret_scan:($secret_scan|normalized),independent_verification:($verification|normalized),final_status:"failed"}' \
+             def ref($id;$digest): {artifact_id:(if $id == "" then null else $id end),artifact_digest:(if $digest == "" then null else $digest end)};
+             {schema_version:"ocservia.g6-gate-result.v1",$candidate_sha,$run_id,$run_attempt,$environment_id,$authority,release_manifest_digest:(if $release_manifest_digest == "" then null else $release_manifest_digest end),artifacts:{fd_a:ref($fd_a_artifact_id;$fd_a_artifact_digest),fd_b:ref($fd_b_artifact_id;$fd_b_artifact_digest),bundle:ref($bundle_artifact_id;$bundle_artifact_digest)},runtime:{fd_a:($fd_a|normalized),fd_b:($fd_b|normalized)},assembly:($assembly|normalized),secret_scan:($secret_scan|normalized),independent_verification:($verification|normalized),final_status:"failed"}' \
             >"${result}"
       - name: Publish the G6 gate result
         if: always()

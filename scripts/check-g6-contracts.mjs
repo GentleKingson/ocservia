@@ -24,6 +24,10 @@ const pipelineSchemas = [
   ["docs/acceptance/g6-assembly-result-schema.json", "ocservia.g6-assembly-result.v1"],
   ["docs/acceptance/g6-secret-scan-result-schema.json", "ocservia.g6-secret-scan-result.v1"],
   ["docs/acceptance/g6-gate-result-schema.json", "ocservia.g6-gate-result.v1"],
+  ["docs/acceptance/g6-raw-source-inventory-schema.json", "ocservia.g6-raw-source-inventory.v1"],
+];
+const auxiliarySchemas = [
+  ["docs/acceptance/g6-builder-source-inventory-schema.json", "ocservia.g6-builder-source-inventory.v1"],
 ];
 const parsedSchemas = new Map();
 for (const [path, version] of schemas) {
@@ -67,6 +71,18 @@ for (const [path, version] of pipelineSchemas) {
     if (!schema.required?.includes(binding)) {
       fail(`${path} must require exact ${binding} binding`);
     }
+  }
+}
+
+for (const [path, version] of auxiliarySchemas) {
+  const schema = JSON.parse(read(path));
+  if (
+    schema.$schema !== "https://json-schema.org/draft/2020-12/schema" ||
+    schema.type !== "object" ||
+    schema.additionalProperties !== false ||
+    schema.properties?.schema_version?.const !== version
+  ) {
+    fail(`${path} must define a closed ${version} draft 2020-12 contract`);
   }
 }
 

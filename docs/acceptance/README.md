@@ -20,6 +20,10 @@ authority, plus the frozen release manifest digest; a mismatch fails closed.
 
 - `ocservia.g6-runtime-result.v1` records each failure domain's terminal state.
 - `ocservia.g6-source-manifest.v1` binds every raw file by path, size, and digest.
+- `ocservia.g6-raw-source-inventory.v1` binds both downloaded raw artifacts to
+  their GitHub artifact IDs, digests, producer domains, and source manifests.
+- `ocservia.g6-builder-source-inventory.v1` records the exact producer files
+  transcribed by the evidence Builder without replacing raw provenance.
 - `ocservia.g6-assembly-result.v1` preserves bundle-construction diagnostics.
 - `ocservia.g6-secret-scan-result.v1` records the independent redacted scan.
 - `ocservia.g6-gate-result.v1` aggregates all preceding layers without

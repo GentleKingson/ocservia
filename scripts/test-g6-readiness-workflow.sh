@@ -48,7 +48,8 @@ reject("engineering must stay the default authority") unless authority.fetch("de
 reject("G6 readiness permissions must be read-only") unless workflow.fetch("permissions") == {"contents" => "read", "actions" => "read"}
 concurrency = workflow.fetch("concurrency")
 reject("G6 readiness concurrency must bind ref and authority") unless concurrency.fetch("group").include?("github.ref") && concurrency.fetch("group").include?("inputs.authority")
-reject("a replacement dispatch must cancel the same ref and authority") unless concurrency.fetch("cancel-in-progress") == true
+reject("formal G6 dispatches must queue without cancelling an active evidence run") unless
+  concurrency.fetch("queue") == "max" && !concurrency.key?("cancel-in-progress")
 
 jobs = workflow.fetch("jobs")
 required_jobs = %w[
@@ -228,7 +229,28 @@ end
 reject("assembly must retain a bound failure result when its main command cannot start") unless
   assemble_fallback&.fetch("if") == "always()" &&
   assemble_fallback.fetch("run").include?("ocservia.g6-assembly-result.v1") &&
-  assemble_fallback.fetch("run").include?("release_manifest_digest")
+  assemble_fallback.fetch("run").include?("release_manifest_digest") &&
+  assemble_fallback.fetch("run").include?("fd_a_artifact_id") &&
+  assemble_fallback.fetch("run").include?("fd_b_artifact_digest")
+assembly_finalize = assemble_steps.find do |step|
+  step["name"] == "Bind the assembly result to the uploaded bundle"
+end
+assembly_stage = assemble_steps.find do |step|
+  step["name"] == "Stage the preliminary assembly result outside the bundle"
+end
+assembly_result_upload = assemble_steps.find do |step|
+  step["name"] == "Publish the artifact-bound assembly result"
+end
+reject("assembly must publish a separate result bound to raw and bundle artifact identity") unless
+  assembly_stage&.fetch("if") == "always()" &&
+  assembly_stage.fetch("run").include?("assembly-result.preliminary.json") &&
+  assembly_finalize&.fetch("if") == "always()" &&
+  assembly_finalize.fetch("run").include?("finalize-assembly") &&
+  assembly_finalize.fetch("run").include?("steps.bundle-upload.outputs.artifact-id") &&
+  assembly_finalize.fetch("run").include?("steps.bundle-upload.outputs.artifact-digest") &&
+  assembly_result_upload&.fetch("if") == "always()" &&
+  assemble.fetch("outputs").fetch("assembly-result-artifact-id")
+    .include?("steps.assembly-result-upload.outputs.artifact-id")
 secret_scan = jobs.fetch("g6-rd-secret-scan")
 reject("secret scan must inspect both raw domains and the assembled bundle") unless
   secret_scan.fetch("needs").sort == %w[g6-rd-assemble g6-rd-fd-a g6-rd-fd-b] &&
@@ -247,6 +269,12 @@ verifier_download = Array(verifier.fetch("steps")).find do |step|
 end
 reject("verifier must skip only an unavailable bundle download, not its structured result job") unless
   verifier_download&.fetch("if") == "needs.g6-rd-assemble.outputs.bundle-artifact-id != ''"
+verifier_assembly_download = Array(verifier.fetch("steps")).find do |step|
+  step["name"] == "Download the artifact-bound assembly result"
+end
+reject("verifier must consume the separately published artifact-bound assembly result") unless
+  verifier_assembly_download&.fetch("if") ==
+    "needs.g6-rd-assemble.outputs.assembly-result-artifact-id != ''"
 secret_result = Array(secret_scan.fetch("steps")).find do |step|
   step["name"] == "Record the secret scan result"
 end
@@ -260,7 +288,9 @@ end
 reject("verifier result binding must survive an earlier download or verification failure") unless
   verifier_binding&.fetch("if") == "always()" &&
   verifier_binding.fetch("run").include?("needs.g6-rd-assemble.outputs.release-manifest-digest") &&
-  verifier_binding.fetch("run").include?("GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}")
+  verifier_binding.fetch("run").include?("GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}") &&
+  verifier_binding.fetch("run").include?("bind-verification") &&
+  verifier_binding.fetch("run").include?("needs.g6-rd-assemble.outputs.bundle-artifact-digest")
 gate = jobs.fetch("g6-rd-gate")
 reject("the final gate must always aggregate every result layer") unless
   gate.fetch("if") == "always()" &&
@@ -269,6 +299,11 @@ gate_build = Array(gate.fetch("steps")).find { |step| step["name"] == "Build the
 reject("the final gate must reject a failed semantic job even when it emitted a result") unless
   gate.fetch("needs").all? do |job_id|
     gate_build&.fetch("run", "").include?(%Q(test "${{ needs.#{job_id}.result }}" = success))
+  end
+reject("the final gate must bind both raw artifacts and the assembled bundle") unless
+  %w[fd-a-artifact-id fd-a-artifact-digest fd-b-artifact-id fd-b-artifact-digest
+     bundle-artifact-id bundle-artifact-digest].all? do |option|
+    gate_build&.fetch("run", "").include?("--#{option}")
   end
 {
   "g6-rd-fd-a" => "fd-a-raw-upload",
