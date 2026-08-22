@@ -10,6 +10,8 @@ source "${ROOT}/scripts/env.sh"
 rustfmt --edition 2024 --check \
   "${ROOT}/rust/vendor/iroh/src/endpoint.rs" \
   "${ROOT}/rust/vendor/iroh/src/socket.rs" \
+  "${ROOT}/rust/vendor/iroh/src/socket/remote_map.rs" \
+  "${ROOT}/rust/vendor/iroh/src/socket/remote_map/remote_state.rs" \
   "${ROOT}/rust/vendor/iroh/src/socket/transports.rs" \
   "${ROOT}/rust/vendor/iroh/src/socket/transports/relay.rs" \
   "${ROOT}/rust/vendor/iroh/src/socket/transports/relay/actor.rs"

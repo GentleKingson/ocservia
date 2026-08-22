@@ -1,4 +1,5 @@
 use std::{
+    collections::BTreeMap,
     fmt,
     io::{self, IoSliceMut},
     net::{IpAddr, Ipv6Addr, SocketAddr, SocketAddrV6},
@@ -76,6 +77,15 @@ type RelayTransportsWatcher = n0_watcher::Join<
 pub(super) type HomeRelayWatcher = n0_watcher::Map<
     n0_watcher::Join<Option<RelayStatus>, n0_watcher::Direct<Option<RelayStatus>>>,
     Vec<RelayStatus>,
+>;
+
+/// Combined watcher over the per-relay connection states of all relay transports.
+pub(super) type RelayStatusesWatcher = n0_watcher::Map<
+    n0_watcher::Join<
+        BTreeMap<RelayUrl, RelayConnectionState>,
+        n0_watcher::Direct<BTreeMap<RelayUrl, RelayConnectionState>>,
+    >,
+    BTreeMap<RelayUrl, RelayConnectionState>,
 >;
 
 #[cfg(not(wasm_browser))]
@@ -374,6 +384,13 @@ impl Transports {
     pub(super) fn home_relay_watch(&self) -> HomeRelayWatcher {
         n0_watcher::Join::new(self.relay.iter().map(|t| t.my_relay_status()))
             .map(|v| v.into_iter().flatten().collect())
+    }
+
+    /// Watcher over the connection state of every configured relay, merged
+    /// across all relay transports.
+    pub(super) fn relay_statuses_watch(&self) -> RelayStatusesWatcher {
+        n0_watcher::Join::new(self.relay.iter().map(|t| t.relay_statuses()))
+            .map(|maps| maps.into_iter().flatten().collect())
     }
 
     #[cfg(not(wasm_browser))]

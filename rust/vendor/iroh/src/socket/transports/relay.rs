@@ -1,4 +1,5 @@
 use std::{
+    collections::BTreeMap,
     io,
     num::NonZeroU16,
     task::{Context, Poll},
@@ -22,7 +23,9 @@ use crate::endpoint::RelayStatus;
 mod actor;
 
 pub(crate) use self::actor::{Config as RelayActorConfig, HomeRelayWatch, RelayConnectionState};
-use self::actor::{RelayActor, RelayActorMessage, RelayRecvDatagram, RelaySendItem};
+use self::actor::{
+    RelayActor, RelayActorMessage, RelayRecvDatagram, RelaySendItem, RelayStatusesWatch,
+};
 
 type RelayAddrWatcher =
     n0_watcher::Map<n0_watcher::Direct<Option<RelayStatus>>, Option<(RelayUrl, EndpointId)>>;
@@ -38,6 +41,7 @@ pub(crate) struct RelayTransport {
     actor_sender: mpsc::Sender<RelayActorMessage>,
     _actor_handle: AbortOnDropHandle<()>,
     my_relay: HomeRelayWatch,
+    relay_statuses: RelayStatusesWatch,
     my_endpoint_id: EndpointId,
 }
 
@@ -51,6 +55,7 @@ impl RelayTransport {
 
         let my_endpoint_id = config.secret_key.public();
         let my_relay = config.my_relay.clone();
+        let relay_statuses = config.relay_statuses.clone();
 
         let relay_actor = RelayActor::new(config, relay_datagram_recv_tx, cancel_token);
 
@@ -70,6 +75,7 @@ impl RelayTransport {
             actor_sender,
             _actor_handle: actor_handle,
             my_relay,
+            relay_statuses,
             my_endpoint_id,
         }
     }
@@ -180,6 +186,16 @@ impl RelayTransport {
 
     pub(super) fn my_relay_status(&self) -> n0_watcher::Direct<Option<RelayStatus>> {
         self.my_relay.watch()
+    }
+
+    /// Watcher over the connection state of every configured relay.
+    ///
+    /// Used by path selection to avoid selecting relay paths whose relay is
+    /// currently not connected.
+    pub(super) fn relay_statuses(
+        &self,
+    ) -> n0_watcher::Direct<BTreeMap<RelayUrl, RelayConnectionState>> {
+        self.relay_statuses.watch()
     }
 
     pub(super) fn create_network_change_sender(&self) -> RelayNetworkChangeSender {
