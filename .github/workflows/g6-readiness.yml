@@ -28,3 +28,4 @@ jobs:
       profile: formal
       authority: ${{ inputs.authority }}
       candidate_sha: ${{ github.sha }}
+      smoke_relevant: true

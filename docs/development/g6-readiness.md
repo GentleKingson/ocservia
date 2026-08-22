@@ -22,6 +22,10 @@ gitleaks, independent verification, and cleanup. It does not use a
 production-readiness Environment or emit a G6 verdict. Its
 `ocservia.g6-harness-smoke-result.v1` output always
 sets `formal_verdict_eligible` to `false`.
+The caller preserves that same result check for every pull request. Changes
+limited to ordinary documentation emit `status=not_applicable`; acceptance
+contracts and any executable or workflow change still run the complete hosted
+smoke, and an empty diff is treated as relevant.
 
 A bounded producer job builds the candidate-labeled control-plane, transportd,
 relay, probe, and Agent images once and includes the exact PostgreSQL support

@@ -15,6 +15,10 @@ on:
         description: Exact candidate commit executed by the caller
         type: string
         required: true
+      smoke_relevant:
+        description: Whether a smoke invocation must execute the hosted runtime
+        type: boolean
+        required: true
 
 permissions:
   contents: read
@@ -33,6 +37,7 @@ jobs:
       G6_CORE_PROFILE: ${{ inputs.profile }}
       G6_CORE_AUTHORITY: ${{ inputs.authority }}
       G6_CORE_CANDIDATE_SHA: ${{ inputs.candidate_sha }}
+      G6_CORE_SMOKE_RELEVANT: ${{ inputs.smoke_relevant }}
     steps:
       - name: Validate the exact reusable-workflow invocation
         run: |
@@ -41,6 +46,7 @@ jobs:
           test "${G6_CORE_CANDIDATE_SHA}" = "${GITHUB_SHA}"
           case "${G6_CORE_PROFILE}" in
             formal)
+              test "${G6_CORE_SMOKE_RELEVANT}" = true
               test "${G6_CORE_AUTHORITY}" = engineering || \
                 test "${G6_CORE_AUTHORITY}" = production_readiness
               ;;
@@ -1278,7 +1284,7 @@ jobs:
   g6-smoke-release:
     name: G6 Harness Smoke Frozen Release
     needs: g6-contract
-    if: inputs.profile == 'smoke'
+    if: inputs.profile == 'smoke' && inputs.smoke_relevant
     runs-on: ubuntu-24.04
     timeout-minutes: 35
     outputs:
@@ -1377,7 +1383,7 @@ jobs:
   g6-smoke-fd-a:
     name: G6 Harness Smoke FD-A
     needs: g6-smoke-release
-    if: inputs.profile == 'smoke'
+    if: inputs.profile == 'smoke' && inputs.smoke_relevant
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     outputs:
@@ -1507,7 +1513,7 @@ jobs:
   g6-smoke-fd-b:
     name: G6 Harness Smoke FD-B
     needs: g6-smoke-release
-    if: inputs.profile == 'smoke'
+    if: inputs.profile == 'smoke' && inputs.smoke_relevant
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     outputs:
@@ -1640,7 +1646,7 @@ jobs:
   g6-smoke-assemble:
     name: G6 Harness Smoke Evidence Builder
     needs: [g6-smoke-release, g6-smoke-fd-a, g6-smoke-fd-b]
-    if: ${{ always() && inputs.profile == 'smoke' }}
+    if: ${{ always() && inputs.profile == 'smoke' && inputs.smoke_relevant }}
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     outputs:
@@ -1697,7 +1703,7 @@ jobs:
   g6-smoke-secret-scan:
     name: G6 Harness Smoke Secret Scan
     needs: [g6-smoke-fd-a, g6-smoke-fd-b, g6-smoke-assemble]
-    if: ${{ always() && inputs.profile == 'smoke' }}
+    if: ${{ always() && inputs.profile == 'smoke' && inputs.smoke_relevant }}
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     outputs:
@@ -1740,7 +1746,7 @@ jobs:
   g6-smoke-verifier:
     name: G6 Harness Smoke Independent Verifier
     needs: [g6-smoke-release, g6-smoke-assemble]
-    if: ${{ always() && inputs.profile == 'smoke' }}
+    if: ${{ always() && inputs.profile == 'smoke' && inputs.smoke_relevant }}
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     outputs:
@@ -1786,26 +1792,41 @@ jobs:
       G6RD_CANDIDATE_SHA: ${{ inputs.candidate_sha }}
       G6_AUTHORITY: engineering
     steps:
+      - name: Record a structured not-applicable result
+        if: ${{ !inputs.smoke_relevant }}
+        run: |
+          set -euo pipefail
+          result="${RUNNER_TEMP}/g6-harness-smoke-result/smoke-result.json"
+          mkdir -p "$(dirname "${result}")"
+          environment_id="g6-$(printf '%s' "${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" | openssl dgst -sha256 -r | cut -c1-16)"
+          jq -n \
+            --arg candidate_sha "${GITHUB_SHA}" \
+            --arg run_id "${GITHUB_RUN_ID}" \
+            --argjson run_attempt "${GITHUB_RUN_ATTEMPT}" \
+            --arg environment_id "${environment_id}" \
+            --arg completed_at "$(date --utc +%Y-%m-%dT%H:%M:%S.%NZ)" \
+            '{schema_version:"ocservia.g6-harness-smoke-result.v1",profile:"smoke",binding:{$candidate_sha,$run_id,$run_attempt,$environment_id,authority:"engineering"},harness_sha256:null,started_at:$completed_at,completed_at:$completed_at,domains:null,artifacts:{release:null,fd_a:null,fd_b:null,bundle:null,secret_scan:null,verification:null},stages:{runtime_fd_a:"not_applicable",runtime_fd_b:"not_applicable",assembly:"not_applicable",secret_scan:"not_applicable",verification:"not_applicable"},status:"not_applicable",formal_verdict_eligible:false,failure:null}' \
+            >"${result}"
       - name: Download the frozen smoke harness
-        if: needs.g6-smoke-release.result == 'success'
+        if: inputs.smoke_relevant && needs.g6-smoke-release.result == 'success'
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: g6-harness-smoke-release-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/g6-harness-smoke-release
       - name: Download the FD-A smoke result
-        if: needs.g6-smoke-fd-a.result == 'success'
+        if: inputs.smoke_relevant && needs.g6-smoke-fd-a.result == 'success'
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: g6-harness-smoke-fd-a-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/g6-harness-smoke-fd-a
       - name: Download the FD-B smoke result
-        if: needs.g6-smoke-fd-b.result == 'success'
+        if: inputs.smoke_relevant && needs.g6-smoke-fd-b.result == 'success'
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: g6-harness-smoke-fd-b-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/g6-harness-smoke-fd-b
       - name: Aggregate the non-authoritative smoke result
-        if: needs.g6-smoke-release.result == 'success' && needs.g6-smoke-fd-a.result == 'success' && needs.g6-smoke-fd-b.result == 'success' && needs.g6-smoke-assemble.result == 'success' && needs.g6-smoke-secret-scan.result == 'success' && needs.g6-smoke-verifier.result == 'success'
+        if: inputs.smoke_relevant && needs.g6-smoke-release.result == 'success' && needs.g6-smoke-fd-a.result == 'success' && needs.g6-smoke-fd-b.result == 'success' && needs.g6-smoke-assemble.result == 'success' && needs.g6-smoke-secret-scan.result == 'success' && needs.g6-smoke-verifier.result == 'success'
         run: |
           set -euo pipefail
           release="${RUNNER_TEMP}/g6-harness-smoke-release"
@@ -1868,18 +1889,23 @@ jobs:
         run: |
           set -euo pipefail
           result="${RUNNER_TEMP}/g6-harness-smoke-result/smoke-result.json"
-          test "${{ needs.g6-smoke-release.result }}" = success
-          test "${{ needs.g6-smoke-fd-a.result }}" = success
-          test "${{ needs.g6-smoke-fd-b.result }}" = success
-          test "${{ needs.g6-smoke-assemble.result }}" = success
-          test "${{ needs.g6-smoke-secret-scan.result }}" = success
-          test "${{ needs.g6-smoke-verifier.result }}" = success
-          jq -e '
-            .schema_version == "ocservia.g6-harness-smoke-result.v1" and
-            .profile == "smoke" and
-            .binding.candidate_sha == env.GITHUB_SHA and
-            .binding.authority == "engineering" and
-            .status == "passed" and
-            .formal_verdict_eligible == false and
-            .failure == null
-          ' "${result}" >/dev/null
+          if [[ "${{ inputs.smoke_relevant }}" = true ]]; then
+            test "${{ needs.g6-smoke-release.result }}" = success
+            test "${{ needs.g6-smoke-fd-a.result }}" = success
+            test "${{ needs.g6-smoke-fd-b.result }}" = success
+            test "${{ needs.g6-smoke-assemble.result }}" = success
+            test "${{ needs.g6-smoke-secret-scan.result }}" = success
+            test "${{ needs.g6-smoke-verifier.result }}" = success
+            expected_status=passed
+          else
+            expected_status=not_applicable
+          fi
+          jq -e --arg expected_status "${expected_status}" '
+              .schema_version == "ocservia.g6-harness-smoke-result.v1" and
+              .profile == "smoke" and
+              .binding.candidate_sha == env.GITHUB_SHA and
+              .binding.authority == "engineering" and
+              .status == $expected_status and
+              .formal_verdict_eligible == false and
+              .failure == null
+            ' "${result}" >/dev/null

@@ -62,6 +62,15 @@ smoke never enters a formal Environment,
 produces a production-readiness verdict, or substitutes for the three required
 CI aggregators or a formal G6 run.
 
+The smoke caller always creates the same aggregate result check. Executable,
+workflow, deployment, and acceptance-contract changes run the complete hosted
+profile. Documentation-only pull requests publish a structured
+`not_applicable` smoke result and succeed without reserving the two runtime
+runners. Empty or unclassifiable diffs fail closed by running the full profile.
+Workflow policy is checked by separate authority, release-identity, evidence,
+and reusable-workflow contract tests; runtime adapter fixtures remain isolated
+from those YAML-level contracts.
+
 ## Bootstrap profiles
 
 `toolchains.lock` is the only version source, and `scripts/checksums.txt`

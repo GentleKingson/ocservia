@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# shellcheck disable=SC1090,SC2016,SC2030,SC2031,SC2329
+# shellcheck disable=SC1090,SC1091,SC2016,SC2030,SC2031,SC2329
 # This test sources a path variable, matches literal expansions, and isolates
 # environment mutations in subshell fixtures.
 set -euo pipefail
@@ -67,14 +67,16 @@ reject("formal readiness must select only the formal profile") unless
     "profile" => "formal",
     "authority" => "${{ inputs.authority }}",
     "candidate_sha" => "${{ github.sha }}",
+    "smoke_relevant" => true,
   }
 
 core_trigger = workflow.fetch(true)
 reject("the G6 core must be reusable-only") unless core_trigger.keys == ["workflow_call"]
 core_inputs = core_trigger.fetch("workflow_call").fetch("inputs")
-reject("the reusable core must expose exact typed profile, authority, and candidate inputs") unless
-  core_inputs.keys.sort == %w[authority candidate_sha profile] &&
-  core_inputs.values.all? { |input| input.fetch("type") == "string" && input.fetch("required") == true }
+reject("the reusable core must expose exact typed profile, authority, candidate, and relevance inputs") unless
+  core_inputs.keys.sort == %w[authority candidate_sha profile smoke_relevant] &&
+  core_inputs.values_at("profile", "authority", "candidate_sha").all? { |input| input.fetch("type") == "string" && input.fetch("required") == true } &&
+  core_inputs.fetch("smoke_relevant").fetch("type") == "boolean" && core_inputs.fetch("smoke_relevant").fetch("required") == true
 reject("the reusable core permissions must remain read-only") unless workflow.fetch("permissions") == {"contents" => "read", "actions" => "read"}
 
 smoke_trigger = smoke.fetch(true)
@@ -85,14 +87,22 @@ reject("PR smoke must use latest-wins cancellation scoped to the pull request") 
   smoke_concurrency.fetch("group").include?("github.event.pull_request.number") &&
   smoke_concurrency.fetch("cancel-in-progress") == true && !smoke_concurrency.key?("queue")
 smoke_jobs = smoke.fetch("jobs")
-reject("PR smoke must be a single thin reusable-workflow caller") unless smoke_jobs.keys == ["g6-harness-core"]
+reject("PR smoke must classify relevance before its thin reusable-workflow caller") unless smoke_jobs.keys.sort == %w[g6-harness-core g6-smoke-relevance]
+relevance = smoke_jobs.fetch("g6-smoke-relevance")
+relevance_steps = Array(relevance.fetch("steps"))
+reject("PR smoke relevance must compare the exact base and head with full history") unless
+  relevance.fetch("runs-on") == "ubuntu-24.04" && relevance.fetch("timeout-minutes") <= 5 &&
+  relevance_steps.any? { |step| step.fetch("with", {})["fetch-depth"] == 0 } &&
+  relevance_steps.any? { |step| step.fetch("run", "").include?("scripts/g6-smoke-relevance.sh") }
 smoke_call = smoke_jobs.fetch("g6-harness-core")
 reject("PR smoke must call the local reusable core") unless smoke_call.fetch("uses") == "./.github/workflows/g6-harness-core.yml"
 reject("PR smoke must be permanently non-authoritative") unless
+  smoke_call.fetch("needs") == "g6-smoke-relevance" &&
   smoke_call.fetch("with") == {
     "profile" => "smoke",
     "authority" => "engineering",
     "candidate_sha" => "${{ github.sha }}",
+    "smoke_relevant" => "${{ needs.g6-smoke-relevance.outputs.relevant == 'true' }}",
   }
 
 jobs = workflow.fetch("jobs")
@@ -116,7 +126,12 @@ required_jobs = %w[
 reject("G6 readiness is missing a required semantic layer") unless
   (required_jobs - jobs.keys).empty?
 policy_commands = %w[
-  scripts/test-g6-readiness-workflow.sh
+  scripts/test-g6-workflow-contract.sh
+  scripts/test-g6-formal-authority.sh
+  scripts/test-g6-release-identity.sh
+  scripts/test-g6-evidence-pipeline.sh
+  scripts/test-g6-runtime-adapters.sh
+  scripts/test-g6-smoke-relevance.sh
   scripts/test-g6-readiness-hang-guards.sh
 ]
 ci_jobs = ci_workflow.fetch("jobs")
@@ -173,7 +188,7 @@ end
 
 smoke_release = jobs.fetch("g6-smoke-release")
 reject("smoke must build one frozen product release only on the smoke profile") unless
-  smoke_release.fetch("needs") == "g6-contract" && smoke_release.fetch("if") == "inputs.profile == 'smoke'"
+  smoke_release.fetch("needs") == "g6-contract" && smoke_release.fetch("if") == "inputs.profile == 'smoke' && inputs.smoke_relevant"
 smoke_release_steps = Array(smoke_release.fetch("steps"))
 smoke_cache = smoke_release_steps.find { |step| step["name"] == "Restore the pinned smoke release toolchain" }
 smoke_build = smoke_release_steps.find { |step| step["name"] == "Build and freeze the smoke release" }
@@ -199,7 +214,7 @@ reject("the frozen smoke binary must be a run-attempt-scoped artifact") unless
   steps = Array(job.fetch("steps"))
   execute = steps.find { |step| step["name"] == "Bind #{domain.upcase} raw evidence" }
   reject("#{job_id} must independently consume the one frozen release") unless
-    job.fetch("needs") == "g6-smoke-release" && job.fetch("if") == "inputs.profile == 'smoke'" &&
+    job.fetch("needs") == "g6-smoke-release" && job.fetch("if") == "inputs.profile == 'smoke' && inputs.smoke_relevant" &&
     execute&.fetch("run", "").include?("smoke-domain") && execute.fetch("run").include?("--domain #{domain}") &&
     execute.fetch("run").include?("--evidence-root") &&
     steps.any? { |step| step["uses"] == "./.github/actions/g6-install-release" }
@@ -244,6 +259,11 @@ reject("smoke aggregation must require two separately scheduled hosted domains")
   smoke_result.fetch("needs").sort == %w[g6-smoke-assemble g6-smoke-fd-a g6-smoke-fd-b g6-smoke-release g6-smoke-secret-scan g6-smoke-verifier] &&
   smoke_result.fetch("if") == "${{ always() && inputs.profile == 'smoke' }}" &&
   smoke_aggregate&.fetch("run", "").include?("smoke-aggregate")
+smoke_not_applicable = smoke_result_steps.find { |step| step["name"] == "Record a structured not-applicable result" }
+reject("unrelated pull requests must retain the stable smoke result check with structured not_applicable output") unless
+  smoke_not_applicable&.fetch("if") == "${{ !inputs.smoke_relevant }}" &&
+  smoke_not_applicable.fetch("run", "").include?('status:"not_applicable"') &&
+  smoke_enforce&.fetch("run", "").include?("expected_status=not_applicable")
 reject("the smoke result must be structurally unable to claim a formal verdict") unless
   smoke_enforce&.fetch("if") == "always()" &&
   smoke_enforce.fetch("run").include?('.formal_verdict_eligible == false') &&

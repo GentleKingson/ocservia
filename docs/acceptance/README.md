@@ -66,6 +66,10 @@ non-formal.
 GitHub artifact IDs and digests while fixing `formal_verdict_eligible` to
 `false`. A smoke result is never an `ocservia.g6-verdict.v2`, never references
 the production-readiness Environment, and cannot satisfy the formal G6 gate.
+For a pull request limited to ordinary documentation, the same contract uses
+`status=not_applicable`, null artifact bindings, and `not_applicable` stage
+states. This keeps the aggregate check stable without representing that a
+runtime or verifier executed. Acceptance-contract changes are always relevant.
 
 The harness records actual values and source artifact digests. It does not
 authoritatively declare limits, comparisons, per-item results, or the final

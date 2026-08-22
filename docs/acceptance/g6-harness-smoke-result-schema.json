@@ -57,17 +57,17 @@
         "verification": { "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/artifact" }] }
       }
     },
-    "status": { "enum": ["passed", "failed"] },
+    "status": { "enum": ["passed", "failed", "not_applicable"] },
     "stages": {
       "type": "object",
       "additionalProperties": false,
       "required": ["runtime_fd_a", "runtime_fd_b", "assembly", "secret_scan", "verification"],
       "properties": {
-        "runtime_fd_a": { "enum": ["passed", "failed"] },
-        "runtime_fd_b": { "enum": ["passed", "failed"] },
-        "assembly": { "enum": ["passed", "failed"] },
-        "secret_scan": { "enum": ["passed", "failed"] },
-        "verification": { "enum": ["passed", "failed"] }
+        "runtime_fd_a": { "enum": ["passed", "failed", "not_applicable"] },
+        "runtime_fd_b": { "enum": ["passed", "failed", "not_applicable"] },
+        "assembly": { "enum": ["passed", "failed", "not_applicable"] },
+        "secret_scan": { "enum": ["passed", "failed", "not_applicable"] },
+        "verification": { "enum": ["passed", "failed", "not_applicable"] }
       }
     },
     "formal_verdict_eligible": { "const": false },
@@ -166,7 +166,11 @@
           }
         }
       },
-      "else": { "properties": { "failure": { "type": "object" } } }
+      "else": {
+        "if": { "properties": { "status": { "const": "not_applicable" } } },
+        "then": { "properties": { "failure": { "type": "null" } } },
+        "else": { "properties": { "failure": { "type": "object" } } }
+      }
     }
   ]
 }
