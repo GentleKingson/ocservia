@@ -2436,6 +2436,7 @@ dependencies = [
  "futures-util",
  "hex",
  "iroh",
+ "iroh-relay",
  "ocservia-agent-identity",
  "ocservia-agent-protocol",
  "ocservia-command-authorization",
