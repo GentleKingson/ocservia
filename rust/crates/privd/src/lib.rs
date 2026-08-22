@@ -123,9 +123,15 @@ pub async fn serve(
             () = &mut shutdown => return Ok(()),
             accepted = listener.accept() => {
                 let (stream, _) = accepted?;
-                let Ok(permit) = Arc::clone(&permits).try_acquire_owned() else {
-                    tracing::warn!("privd client refused because concurrency is full");
-                    continue;
+                // Keep execution at the fixed concurrency cap, but queue at
+                // most this one already-accepted local client while a prior
+                // request releases its permit. Dropping it here races the
+                // Agent's four-request snapshot batches and can tear down an
+                // otherwise healthy authoritative Controller session.
+                let permit = tokio::select! {
+                    () = &mut shutdown => return Ok(()),
+                    permit = Arc::clone(&permits).acquire_owned() => permit
+                        .map_err(|_| io::Error::other("privd concurrency limiter closed"))?,
                 };
                 let adapter = adapter.clone();
                 let agent_uid = config.agent_uid;
@@ -2040,6 +2046,79 @@ mod tests {
                 dispatch(unsigned_request(Some(mutation)), &node_id, &keys, &adapter).await;
             assert_permission_denied(&response);
         }
+    }
+
+    #[tokio::test]
+    async fn saturated_clients_wait_for_capacity_instead_of_being_reset() {
+        let signing = SigningKey::from_bytes(&[42; 32]);
+        let keys = keyring(&signing);
+        let node_id = *Uuid::now_v7().as_bytes();
+        let (adapter, _, _, directory) = test_adapter();
+        let socket = directory.join("privd.sock");
+        let config = ServerConfig {
+            socket: socket.clone(),
+            agent_uid: rustix_uid(),
+            node_id,
+            command_keys: keys,
+            attestation_key: Arc::new(SigningKey::from_bytes(&[43; 32])),
+        };
+        let listener = bind_socket(&config).expect("bind privd fixture");
+        let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
+        let server_config = config.clone();
+        let server = tokio::spawn(async move {
+            serve(listener, server_config, adapter, async {
+                let _ = shutdown_rx.await;
+            })
+            .await
+        });
+
+        // Keep every active slot inside the bounded request reader. A valid
+        // request arriving next must wait for one slot rather than being
+        // accepted and reset merely because cleanup of the prior batch has
+        // not released its permit yet.
+        let mut held = Vec::with_capacity(MAX_CONCURRENT_CLIENTS);
+        for _ in 0..MAX_CONCURRENT_CLIENTS {
+            held.push(
+                UnixStream::connect(&socket)
+                    .await
+                    .expect("connect held privd client"),
+            );
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        let mut queued = UnixStream::connect(&socket)
+            .await
+            .expect("connect queued privd client");
+        let request = unsigned_request(Some(privd_request::Operation::ServiceStatus(
+            ReadRequest {},
+        )));
+        let request_id = request.request_id.clone();
+        write_frame(&mut queued, &request)
+            .await
+            .expect("write queued read request");
+        let response = tokio::spawn(async move {
+            let response: Result<PrivdResponse, io::Error> = read_frame(&mut queued).await;
+            response
+        });
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(
+            !response.is_finished(),
+            "a saturated but valid local client was reset instead of queued"
+        );
+
+        drop(held.pop());
+        let response = tokio::time::timeout(Duration::from_secs(2), response)
+            .await
+            .expect("queued request remained blocked after capacity returned")
+            .expect("join queued request")
+            .expect("read queued response");
+        assert_eq!(response.request_id, request_id);
+        assert!(response.result.is_some());
+
+        drop(held);
+        shutdown_tx.send(()).expect("stop server");
+        server.await.expect("join server").expect("serve fixture");
+        remove_socket(&socket).expect("remove fixture socket");
+        std::fs::remove_dir_all(directory).expect("cleanup test directory");
     }
 
     #[tokio::test]
