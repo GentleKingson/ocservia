@@ -1291,7 +1291,8 @@ phase_scenario_owner() {
     return 1
   fi
   capture_reconnect_sessions "${bulk_disconnect_file}"
-  capture_database_clock >"${G6RD_STATE}/reconnect-completed-at"
+  capture_database_clock_bounded "${G6RD_STATE}/reconnect-completed-at" \
+    "database clock after reconnect"
   g6rd_timeline_event reconnect_completed "${G6RD_STATE}/reconnect-completed-at"
 }
 
@@ -1328,7 +1329,9 @@ phase_relay_pre_fault() {
   rm -f -- "${observation}" "${before}"
   G6RD_COMPOSE_TIMEOUT_SECONDS=30 g6rd_compose stop relay
   g6rd_wait_until_deadline 30 1 "relay-b stopped before relay-a proof" relay_b_stopped
-  disabled_at="$(capture_database_clock)"
+  capture_database_clock_bounded "${G6RD_STATE}/relay-b-disabled-at" \
+    "database clock after relay-b stop"
+  disabled_at="$(<"${G6RD_STATE}/relay-b-disabled-at")"
   temporary="${out}/relay-b-disabled.json.$$"
   jq -cn --arg environment "${G6RD_ENVIRONMENT_ID}" \
     --arg candidate "${G6RD_CANDIDATE_SHA}" --arg node "${cross_vm_node}" \
@@ -1363,7 +1366,8 @@ phase_relay_pre_fault() {
     relay_probe_named relay-a "${cross_vm_node}" "${observation}"
   require_file "${observation}"
   relay_observations_same_session "${before}" "${observation}"
-  capture_database_clock >"${out}/observed-at"
+  capture_database_clock_bounded "${out}/observed-at" \
+    "database clock after relay-a observation"
   printf '%s\n' "${cross_vm_node}" >"${out}/node-id"
   printf '%s\n' "${G6RD_CANDIDATE_SHA}" >"${out}/candidate-sha"
 }
@@ -1418,7 +1422,9 @@ phase_scenario_relay() {
   }
   g6rd_timeline_event relay_a_failed "${relay_failed_at}"
   phase_relay_up
-  started_at="$(capture_database_clock)"
+  capture_database_clock_bounded "${G6RD_STATE}/relay-b-started-at" \
+    "database clock after relay-b start"
+  started_at="$(<"${G6RD_STATE}/relay-b-started-at")"
   jq -en --arg started_at "${started_at}" \
     --slurpfile cut "${peer_ready}/relay-fault-cut.json" '
       def stamp_key:
@@ -1463,7 +1469,8 @@ phase_scenario_relay() {
   require_file "${observation_file}"
   relay_observations_same_session "${before_file}" "${observation_file}"
   active_at_file="${G6RD_STATE}/relay-b-active-at"
-  capture_database_clock >"${active_at_file}"
+  capture_database_clock_bounded "${active_at_file}" \
+    "database clock after relay-b activation"
   g6rd_timeline_event relay_b_active "${active_at_file}"
 }
 
@@ -2545,6 +2552,24 @@ capture_database_clock() {
     "SELECT to_char(clock_timestamp() AT TIME ZONE 'UTC','YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"')"
 }
 
+capture_database_clock_file() {
+  local destination="${1:?database clock destination is required}" temporary
+  temporary="$(mktemp "${destination}.XXXXXX")"
+  if ! capture_database_clock >"${temporary}" \
+    || ! grep -Eq '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{6}Z$' "${temporary}"; then
+    rm -f -- "${temporary}"
+    return 1
+  fi
+  mv -f -- "${temporary}" "${destination}"
+}
+
+capture_database_clock_bounded() {
+  local destination="${1:?database clock destination is required}"
+  local description="${2:?database clock description is required}"
+  g6rd_wait_until_deadline 30 2 "${description}" \
+    capture_database_clock_file "${destination}"
+}
+
 capture_final_authority_cut() {
   local out="${G6RD_STATE}/final-authority-cut.json" expected
   expected="$(node_ids | wc -l | tr -d '[:space:]')"
@@ -2810,11 +2835,13 @@ phase_evidence_collect() {
   local args=()
   readarray -t args < <(node_ids)
   g6rd_probe_node_connection any "${args[@]}" >"${dir}/final-sessions-before.json"
-  capture_database_clock >"${dir}/final-sessions-before-complete-at"
+  capture_database_clock_bounded "${dir}/final-sessions-before-complete-at" \
+    "database clock before final authority cut"
   capture_final_authority_cut
   stop_watchers
   append_final_history_snapshot
-  capture_database_clock >"${dir}/final-sessions-after-start-at"
+  capture_database_clock_bounded "${dir}/final-sessions-after-start-at" \
+    "database clock after final authority cut"
   g6rd_probe_node_connection any "${args[@]}" >"${dir}/final-sessions-after.json"
   assert_final_session_authority
   jq -er '.cut_at' "${G6RD_STATE}/final-authority-cut.json" \

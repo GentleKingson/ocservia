@@ -1124,7 +1124,7 @@ for token in \
   'capture_relay_dispatch_proof' \
   'capture_relay_command_proof' \
   'relay_observations_same_session' \
-  'capture_database_clock >"${active_at_file}"' \
+  'capture_database_clock_bounded "${active_at_file}"' \
   'relay_probe_relay_b "${cross_vm_node}" "${observation_file}"' \
   'require_file "${observation_file}"'; do
   grep -qF "${token}" <<<"${relay_phase}" || {
@@ -1144,7 +1144,7 @@ for token in \
   '"${out}/relay-a-dispatch-proof.json" relay-a' \
   '"${out}/relay-a-command-proof.json"' \
   'relay_observations_same_session "${before}" "${observation}"' \
-  'capture_database_clock >"${out}/observed-at"' \
+  'capture_database_clock_bounded "${out}/observed-at"' \
   'printf '\''%s\n'\'' "${cross_vm_node}" >"${out}/node-id"'; do
   grep -qF "${token}" <<<"${relay_pre_fault_phase}" || {
     echo "relay failover lacks a frozen pre-fault relay-a session: ${token}" >&2
@@ -3294,7 +3294,7 @@ bulk_event_line="$(grep -nF 'g6rd_timeline_event bulk_disconnect_injected "${bul
   echo "the reconnect fault clock must be frozen before transport shutdown begins" >&2
   exit 1
 }
-grep -qF 'capture_database_clock >"${G6RD_STATE}/reconnect-completed-at"' \
+grep -qF 'capture_database_clock_bounded "${G6RD_STATE}/reconnect-completed-at"' \
   <<<"${owner_phase}" || {
   echo "reconnect completion must preserve the database clock precision after capture" >&2
   exit 1
@@ -3912,9 +3912,9 @@ collect_instances_line="$(grep -nF 'done >>"${dir}/instances.tsv"' <<<"${collect
 collect_api_freeze_line="$(grep -nF 'quiesce_control_plane_writers' <<<"${collect_phase}" | cut -d: -f1)"
 collect_telemetry_line="$(grep -nF '>"${dir}/telemetry.jsonl"' <<<"${collect_phase}" | cut -d: -f1)"
 collect_sessions_before_line="$(grep -nF '>"${dir}/final-sessions-before.json"' <<<"${collect_phase}" | cut -d: -f1)"
-collect_before_complete_line="$(grep -nF '>"${dir}/final-sessions-before-complete-at"' <<<"${collect_phase}" | cut -d: -f1)"
+collect_before_complete_line="$(grep -nF 'capture_database_clock_bounded "${dir}/final-sessions-before-complete-at"' <<<"${collect_phase}" | cut -d: -f1)"
 collect_sessions_after_line="$(grep -nF '>"${dir}/final-sessions-after.json"' <<<"${collect_phase}" | cut -d: -f1)"
-collect_after_start_line="$(grep -nF '>"${dir}/final-sessions-after-start-at"' <<<"${collect_phase}" | cut -d: -f1)"
+collect_after_start_line="$(grep -nF 'capture_database_clock_bounded "${dir}/final-sessions-after-start-at"' <<<"${collect_phase}" | cut -d: -f1)"
 collect_observed_line="$(grep -nF '>"${dir}/final-session-observed-at"' <<<"${collect_phase}" | cut -d: -f1)"
 collect_ingress_freeze_line="$(grep -nF 'quiesce_transport_ingress' <<<"${collect_phase}" | cut -d: -f1)"
 collect_cut_line="$(grep -nF 'capture_final_authority_cut' <<<"${collect_phase}" | cut -d: -f1)"
@@ -4191,6 +4191,8 @@ window_arm_phase="$(sed -n '/^phase_window_barrier_arm() {/,/^}/p' "${FD_B}")"
 window_active_predicate="$(sed -n '/^window_opening_commands_active() {/,/^}/p' "${FD_B}")"
 window_active_capture="$(sed -n '/^capture_window_opening_active() {/,/^}/p' "${FD_B}")"
 window_proof_record="$(sed -n '/^record_window_opening_proof() {/,/^}/p' "${FD_B}")"
+database_clock_file="$(sed -n '/^capture_database_clock_file() {/,/^}/p' "${FD_B}")"
+database_clock_bounded="$(sed -n '/^capture_database_clock_bounded() {/,/^}/p' "${FD_B}")"
 fd_a_window_proof="$(sed -n '/^fd_a_window_opening_proof_recorded() {/,/^}/p' "${FD_A}")"
 fd_a_window_release="$(sed -n '/^phase_window_barrier_release_after_proof() (/,/^)/p' "${FD_A}")"
 for token in \
@@ -4248,6 +4250,19 @@ for token in \
 done
 if grep -qF ":'marker_id'" <<<"${window_proof_record}${fd_a_window_proof}"; then
   echo "single-command psql markers must not rely on unsupported client variable interpolation" >&2
+  exit 1
+fi
+for token in 'mktemp "${destination}.XXXXXX"' "grep -Eq '^[0-9]{4}" \
+  'g6rd_wait_until_deadline 30 2 "${description}"' \
+  'capture_database_clock_file "${destination}"'; do
+  grep -qF "${token}" <<<"${database_clock_file}${database_clock_bounded}" || {
+    echo "database-clock evidence must use an atomic bounded retry: ${token}" >&2
+    exit 1
+  }
+done
+clock_calls="$(grep -nF 'capture_database_clock' "${FD_B}")"
+if grep -vE 'capture_database_clock(_bounded|_file)?\(\)|capture_database_clock_bounded|capture_database_clock_file|^[0-9]+:  if ! capture_database_clock >' <<<"${clock_calls}" | grep -q .; then
+  echo "critical database-clock evidence must not use an unbounded one-shot capture" >&2
   exit 1
 fi
 window_opening_enqueue_line="$(grep -nF 'g6rd_enqueue_command "${node}" "g6-window-${RUN_ID}-opening-${count}"' <<<"${window_phase}" | cut -d: -f1)"
