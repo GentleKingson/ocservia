@@ -41,7 +41,10 @@ const (
 	// A transport-accepted attempt without durable result evidence becomes an
 	// Unknown outcome after this interval. Recovery observes the Agent journal;
 	// it never replays the original effect blindly.
-	commandResultResponseTimeout = 30 * time.Second
+	// Leave recovery headroom below the 30-second end-to-end command target.
+	// Reconciliation is observation-only, so advancing it cannot replay an
+	// effect whose immediate result was lost.
+	commandResultResponseTimeout = 20 * time.Second
 	reconciliationAttemptLimit   = 64
 	reconciliationBatchLimit     = 64
 	// The configured active-command ceiling is 500. Decode that full bounded

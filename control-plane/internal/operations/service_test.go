@@ -18,6 +18,14 @@ func testCommandSigner(t *testing.T) *commandauth.Signer {
 	return commandauth.NewSignerFromSeed(seed)
 }
 
+func TestCommandResultResponseTimeoutLeavesCompletionHeadroom(t *testing.T) {
+	const completionTarget = 30 * time.Second
+	const minimumObservationWindow = 20 * time.Second
+	if commandResultResponseTimeout < minimumObservationWindow || commandResultResponseTimeout > completionTarget-5*time.Second {
+		t.Fatalf("command result response timeout %s leaves insufficient recovery headroom below %s", commandResultResponseTimeout, completionTarget)
+	}
+}
+
 func TestValidateCreateRejectsUntypedOrOversizedSyntheticPayload(t *testing.T) {
 	base := CreateRequest{NodeID: uuid.Must(uuid.NewV7()), IdempotencyKey: "stable-key", ExpectedVersion: 1, Kind: SyntheticNoop, TTL: time.Minute, RequestID: "request", Traceparent: "00-0123456789abcdef0123456789abcdef-0123456789abcdef-01"}
 	for name, mutate := range map[string]func(*CreateRequest){
