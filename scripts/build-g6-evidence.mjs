@@ -1197,7 +1197,10 @@ const outcomeOf = (command) => {
 };
 
 const traceRecords = [];
-const traceBasetime = population[0].created_at;
+// The relay pre-fault proof can precede the bounded HTTP population. Anchor
+// the mandatory leading profile to the first command represented in the
+// complete trace, not only to the first command admitted during the window.
+const traceBasetime = tracePopulation[0].created_at;
 traceRecords.push({
   stampMicros: utcStampMicros(traceBasetime, "trace baseline"),
   rank: 0,

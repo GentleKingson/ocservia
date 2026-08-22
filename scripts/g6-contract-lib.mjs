@@ -3185,7 +3185,7 @@ function completedOwnerTakeovers(state) {
     const successor = state.ownerRegistrations.find(
       (registration) =>
         registration.node === expiry.node &&
-        registration.epoch > expiry.epoch &&
+        registration.epoch === expiry.epoch + 1 &&
         registration.sessionConnectedNs !== undefined &&
         registration.timestampNs >= expiry.timestampNs &&
         registration.sessionConnectedNs >= registration.timestampNs,

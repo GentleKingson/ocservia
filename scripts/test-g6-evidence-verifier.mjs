@@ -1738,6 +1738,92 @@ if (
   );
 }
 
+// A later session-bound term cannot retroactively complete an older expiry
+// whose immediate successor never established a session. Takeover evidence
+// must pair adjacent epochs rather than jump across an intervening term.
+const skippedOwnerEvents = modernReconnectFixture.artifacts[
+  "epoch-events.jsonl"
+]
+  .trimEnd()
+  .split("\n")
+  .map((line) => JSON.parse(line));
+const skippedOwnerNode = "b".repeat(32);
+skippedOwnerEvents.push(
+  {
+    timestamp: "2026-08-14T00:00:20.000000Z",
+    subject: "connection_owner",
+    event_type: "owner_registered",
+    node: skippedOwnerNode,
+    instance: "worker-skipped",
+    incarnation: "1700000000000000097",
+    connection_id: "1".repeat(32),
+    epoch: 1,
+    lease_until: "2026-08-14T00:00:25.000000Z",
+  },
+  {
+    timestamp: "2026-08-14T00:00:25.000000Z",
+    subject: "connection_owner",
+    event_type: "owner_lease_expired",
+    node: skippedOwnerNode,
+    epoch: 1,
+  },
+  {
+    timestamp: "2026-08-14T00:00:26.000000Z",
+    subject: "connection_owner",
+    event_type: "owner_registered",
+    node: skippedOwnerNode,
+    instance: "worker-skipped",
+    incarnation: "1700000000000000097",
+    connection_id: "2".repeat(32),
+    epoch: 2,
+    lease_until: "2026-08-14T00:01:00.000000Z",
+  },
+  {
+    timestamp: "2026-08-14T00:00:27.000000Z",
+    subject: "connection_owner",
+    event_type: "owner_retired",
+    node: skippedOwnerNode,
+    epoch: 2,
+  },
+  {
+    timestamp: "2026-08-14T00:00:28.000000Z",
+    subject: "connection_owner",
+    event_type: "owner_registered",
+    node: skippedOwnerNode,
+    instance: "worker-skipped",
+    incarnation: "1700000000000000097",
+    connection_id: "3".repeat(32),
+    epoch: 3,
+    lease_until: "2026-08-14T00:02:00.000000Z",
+    session_connected_at: "2026-08-14T00:00:28.000001Z",
+  },
+);
+skippedOwnerEvents.sort(
+  (left, right) => Date.parse(left.timestamp) - Date.parse(right.timestamp),
+);
+skippedOwnerEvents.forEach((event, index) => {
+  event.sequence = index + 1;
+  event.environment_id = "g6-12345678";
+  event.candidate_sha = "1".repeat(40);
+});
+const skippedOwnerOverride = `${skippedOwnerEvents
+  .map(JSON.stringify)
+  .join("\n")}\n`;
+const skippedOwnerEvidence = clone(baseEvidence);
+skippedOwnerEvidence.measurements.concurrent_active_connection_owners.sample_count += 3;
+rebindOverriddenArtifacts(skippedOwnerEvidence, {
+  "epoch-events.jsonl": skippedOwnerOverride,
+});
+if (
+  !verifyWithArtifactOverrides(skippedOwnerEvidence, {
+    "epoch-events.jsonl": skippedOwnerOverride,
+  }).passed
+) {
+  throw new Error(
+    "a later bound owner term was paired across an intervening epoch",
+  );
+}
+
 // A completed takeover elsewhere in the run cannot stand in for the formal
 // connection-owner scenario. Move its opening boundary past the durable
 // expiries while keeping the timeline itself ordered and fully bound.

@@ -1626,6 +1626,19 @@ try {
     .trimEnd()
     .split("\n")
     .map((line) => JSON.parse(line));
+  const earliestEnqueueTimestamp = builtCommandTrace
+    .filter((record) => record.record_type === "enqueued")
+    .map((record) => record.timestamp)
+    .sort()[0];
+  if (
+    builtCommandTrace[0]?.record_type !== "profile" ||
+    builtCommandTrace[0].sequence !== 1 ||
+    builtCommandTrace[0].timestamp !== earliestEnqueueTimestamp
+  ) {
+    throw new Error(
+      "builder did not anchor the leading command-trace profile to the complete traced population",
+    );
+  }
   const inflightSnapshot = builtCommandTrace.find(
     (record) => record.record_type === "inflight_snapshot",
   );
