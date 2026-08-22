@@ -9,6 +9,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"slices"
@@ -19,6 +20,8 @@ import (
 	transportv1 "github.com/GentleKingson/ocservia/control-plane/gen/proto/ocserv/platform/transport/v1"
 	"github.com/GentleKingson/ocservia/control-plane/internal/audit"
 	"github.com/GentleKingson/ocservia/control-plane/internal/commandauth"
+	"github.com/GentleKingson/ocservia/control-plane/internal/connectionowner"
+	operationstore "github.com/GentleKingson/ocservia/control-plane/internal/operations"
 	"github.com/GentleKingson/ocservia/control-plane/internal/postgresinput"
 	"github.com/GentleKingson/ocservia/control-plane/internal/privdattestation"
 	"github.com/GentleKingson/ocservia/control-plane/internal/semanticpayload"
@@ -28,6 +31,7 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/propagation"
 	"go.opentelemetry.io/otel/trace"
 	"google.golang.org/protobuf/proto"
@@ -76,7 +80,24 @@ type Service struct {
 	pool                   *pgxpool.Pool
 	now                    func() time.Time
 	signer                 *commandauth.Signer
+	commandRecovery        CommandRecoverer
+	recoveryAuthority      RecoveryAuthority
 	resultCommitBarrierDir string
+}
+
+// CommandRecoverer is the narrow business-layer hook used after transportd
+// reports that a fenced Agent connection is registered and usable. The
+// implementation must recheck PostgreSQL ownership inside the supplied event
+// transaction before it changes command or outbox state.
+type CommandRecoverer interface {
+	RecoverAmbiguousDispatchedTx(context.Context, pgx.Tx, operationstore.OwnerReconnect) (int, error)
+}
+
+// RecoveryAuthority binds reconnect scheduling to the process that owns the
+// exact local session term. PostgreSQL is still rechecked by CommandRecoverer
+// inside the state-changing transaction.
+type RecoveryAuthority interface {
+	OwnsTerm(nodeID, connectionID [16]byte, ownerEpoch int64) bool
 }
 
 const (
@@ -106,6 +127,14 @@ func New(pool *pgxpool.Pool) *Service {
 func NewWithSigner(pool *pgxpool.Pool, signer *commandauth.Signer) *Service {
 	service := New(pool)
 	service.signer = signer
+	return service
+}
+
+// NewWithCommandRecovery enables authoritative reconnect reconciliation while
+// leaving ownership acquisition and renewal inside ownersession.
+func NewWithCommandRecovery(pool *pgxpool.Pool, signer *commandauth.Signer, recovery CommandRecoverer, authority RecoveryAuthority) *Service {
+	service := NewWithSigner(pool, signer)
+	service.commandRecovery, service.recoveryAuthority = recovery, authority
 	return service
 }
 
@@ -436,7 +465,7 @@ func (s *Service) Ingest(ctx context.Context, event *transportv1.TransportEvent)
 	if _, err := tx.Exec(ctx, "SAVEPOINT transport_event_business"); err != nil {
 		return fmt.Errorf("create transport event savepoint: %w", err)
 	}
-	workspaceID, err := s.ingestTransportEventTx(ctx, tx, eventID, nodeID, event, observedAt)
+	workspaceID, inserted, err := s.ingestTransportEventTx(ctx, tx, eventID, nodeID, event, observedAt)
 	if err != nil {
 		var permanent *permanentInvalidEvent
 		if !errors.As(err, &permanent) {
@@ -452,6 +481,22 @@ func (s *Service) Ingest(ctx context.Context, event *transportv1.TransportEvent)
 			return err
 		}
 	} else {
+		if inserted && event.GetType() == transportv1.TransportEventType_TRANSPORT_EVENT_TYPE_CONNECTED && s.commandRecovery != nil && s.recoveryAuthority != nil {
+			connectionID, fenced, termErr := connectedOwnerTerm(event)
+			if termErr != nil {
+				return termErr
+			}
+			if fenced && s.recoveryAuthority.OwnsTerm([16]byte(nodeID), connectionID, int64(event.GetOwnerEpoch())) {
+				recovered, recoveryErr := s.commandRecovery.RecoverAmbiguousDispatchedTx(ctx, tx, operationstore.OwnerReconnect{
+					NodeID: nodeID, ConnectionID: connectionID, OwnerEpoch: event.GetOwnerEpoch(),
+					ObservedAt: observedAt, Limit: operationstore.DefaultReconnectRecoveryLimit,
+				})
+				if recoveryErr != nil && !errors.Is(recoveryErr, connectionowner.ErrNotOwner) {
+					return fmt.Errorf("recover commands after authoritative reconnect: %w", recoveryErr)
+				}
+				span.SetAttributes(attribute.Int("command.recovery.scheduled", recovered))
+			}
+		}
 		if _, err := tx.Exec(ctx, "RELEASE SAVEPOINT transport_event_business"); err != nil {
 			return fmt.Errorf("release transport event savepoint: %w", err)
 		}
@@ -506,70 +551,75 @@ func (s *Service) waitAtResultCommitBarrier(ctx context.Context, event *transpor
 	}
 }
 
-func (s *Service) ingestTransportEventTx(ctx context.Context, tx pgx.Tx, eventID, nodeID uuid.UUID, event *transportv1.TransportEvent, observedAt time.Time) (uuid.UUID, error) {
+func (s *Service) ingestTransportEventTx(ctx context.Context, tx pgx.Tx, eventID, nodeID uuid.UUID, event *transportv1.TransportEvent, observedAt time.Time) (uuid.UUID, bool, error) {
 	var workspaceID uuid.UUID
 	var nodeStatus, endpointState string
 	if err := tx.QueryRow(ctx, `SELECT n.workspace_id,n.status,k.state
 		FROM nodes n JOIN node_endpoint_keys k ON k.node_id=n.id
 		WHERE n.id=$1 AND k.endpoint_id=$2
 		FOR SHARE OF n,k`, nodeID, event.GetEndpointId()).Scan(&workspaceID, &nodeStatus, &endpointState); errors.Is(err, pgx.ErrNoRows) {
-		return uuid.Nil, invalidEvent("node_endpoint_not_active", "transport event node and EndpointID are not authoritatively active")
+		return uuid.Nil, false, invalidEvent("node_endpoint_not_active", "transport event node and EndpointID are not authoritatively active")
 	} else if err != nil {
-		return uuid.Nil, fmt.Errorf("check authoritative node ingress trust: %w", err)
+		return uuid.Nil, false, fmt.Errorf("check authoritative node ingress trust: %w", err)
 	}
 	eventType, err := eventName(event.GetType())
 	if err != nil {
-		return workspaceID, invalidEvent("unsupported_event_type", err.Error())
+		return workspaceID, false, invalidEvent("unsupported_event_type", err.Error())
+	}
+	if eventType == "connected" {
+		if _, _, err := connectedOwnerTerm(event); err != nil {
+			return workspaceID, false, invalidEvent("invalid_owner_term", err.Error())
+		}
 	}
 	activeIngress := (nodeStatus == "active" || nodeStatus == "offline") && endpointState == "active"
 	// Revocation commits the tombstone before transportd closes the old session.
 	// Only its exact node/endpoint terminal event may cross that closed trust boundary.
 	revokedTerminalDisconnect := eventType == "disconnected" && nodeStatus == "revoked" && endpointState == "revoked"
 	if !activeIngress && !revokedTerminalDisconnect {
-		return workspaceID, invalidEvent("node_endpoint_not_active", "transport event node is not authoritatively active")
+		return workspaceID, false, invalidEvent("node_endpoint_not_active", "transport event node is not authoritatively active")
 	}
 	if len(event.GetEndpointId()) != 32 {
-		return workspaceID, invalidEvent("invalid_endpoint_id", "transport event endpoint_id must be 32 bytes")
+		return workspaceID, false, invalidEvent("invalid_endpoint_id", "transport event endpoint_id must be 32 bytes")
 	}
 	if !validTraceparent(event.GetTraceparent()) {
-		return workspaceID, invalidEvent("invalid_traceparent", "transport event traceparent is invalid")
+		return workspaceID, false, invalidEvent("invalid_traceparent", "transport event traceparent is invalid")
 	}
 	if len(event.GetPayload()) > 1<<20 {
-		return workspaceID, invalidEvent("payload_too_large", "transport event payload exceeds 1 MiB")
+		return workspaceID, false, invalidEvent("payload_too_large", "transport event payload exceeds 1 MiB")
 	}
 	occurredAt := event.GetOccurredAt()
 	if occurredAt == nil || occurredAt.CheckValid() != nil {
-		return workspaceID, invalidEvent("invalid_occurred_at", "transport event occurred_at is invalid")
+		return workspaceID, false, invalidEvent("invalid_occurred_at", "transport event occurred_at is invalid")
 	}
 	occurredTime := occurredAt.AsTime()
 	if occurredTime.Before(observedAt.Add(-maxTransportEventAge)) || occurredTime.After(observedAt.Add(telemetrystore.MaxTelemetrySkew)) {
-		return workspaceID, invalidEvent("occurred_at_out_of_range", "transport event occurred_at is outside the accepted retention window")
+		return workspaceID, false, invalidEvent("occurred_at_out_of_range", "transport event occurred_at is outside the accepted retention window")
 	}
 	result, err := tx.Exec(ctx, `
 		INSERT INTO transport_events (event_id, node_id, event_type, occurred_at, traceparent, payload)
 		VALUES ($1, $2, $3, $4, $5, $6)
 		ON CONFLICT (event_id) DO NOTHING`, eventID, nodeID, eventType, occurredTime, event.GetTraceparent(), event.GetPayload())
 	if err != nil {
-		return workspaceID, fmt.Errorf("insert transport event: %w", err)
+		return workspaceID, false, fmt.Errorf("insert transport event: %w", err)
 	}
 	if result.RowsAffected() == 0 {
-		return workspaceID, nil
+		return workspaceID, false, nil
 	}
 	if eventType == "telemetry" {
 		if _, err := telemetrystore.New(s.pool).IngestWireTx(ctx, tx, nodeID, event.GetPayload()); err != nil {
 			if errors.Is(err, telemetrystore.ErrInvalidTelemetry) {
-				return workspaceID, invalidEvent("invalid_telemetry", err.Error())
+				return workspaceID, false, invalidEvent("invalid_telemetry", err.Error())
 			}
-			return workspaceID, fmt.Errorf("ingest telemetry payload: %w", err)
+			return workspaceID, false, fmt.Errorf("ingest telemetry payload: %w", err)
 		}
 	}
 	structuredCommandResult := eventType == "command_result"
 	if structuredCommandResult {
 		if err := ingestAgentCommandResult(ctx, tx, eventID, nodeID, event.GetPayload(), occurredTime, observedAt, s.signer); err != nil {
-			return workspaceID, err
+			return workspaceID, false, err
 		}
 		if err := s.waitAtResultCommitBarrier(ctx, event, observedAt); err != nil {
-			return workspaceID, err
+			return workspaceID, false, err
 		}
 	}
 	status := "active"
@@ -579,7 +629,7 @@ func (s *Service) ingestTransportEventTx(ctx context.Context, tx pgx.Tx, eventID
 	if eventType != "telemetry" {
 		// Routine same-state signals must not invalidate node mutation preconditions.
 		if _, err := tx.Exec(ctx, "UPDATE nodes SET status = $2, updated_at = $3, version = version + 1 WHERE id = $1 AND status IN ('active','offline') AND status IS DISTINCT FROM $2", nodeID, status, occurredTime); err != nil {
-			return workspaceID, fmt.Errorf("update node from transport event: %w", err)
+			return workspaceID, false, fmt.Errorf("update node from transport event: %w", err)
 		}
 	}
 	operationState := "running"
@@ -600,7 +650,7 @@ func (s *Service) ingestTransportEventTx(ctx context.Context, tx pgx.Tx, eventID
 			  AND job.dispatched_at IS NOT NULL
 			  AND operation.state NOT IN ('succeeded', 'failed', 'expired', 'rolled_back', 'superseded')`,
 			nodeID, occurredTime); err != nil {
-			return workspaceID, fmt.Errorf("mark disconnected operations unknown: %w", err)
+			return workspaceID, false, fmt.Errorf("mark disconnected operations unknown: %w", err)
 		}
 	} else if eventType != "telemetry" && eventType != "path_changed" && !structuredCommandResult {
 		if _, err := tx.Exec(ctx, `
@@ -611,10 +661,10 @@ func (s *Service) ingestTransportEventTx(ctx context.Context, tx pgx.Tx, eventID
 			  AND job.traceparent = $4
 			  AND operation.state NOT IN ('succeeded', 'failed', 'expired', 'rolled_back', 'superseded')`,
 			nodeID, operationState, occurredTime, event.GetTraceparent()); err != nil {
-			return workspaceID, fmt.Errorf("update operation from transport event: %w", err)
+			return workspaceID, false, fmt.Errorf("update operation from transport event: %w", err)
 		}
 	}
-	return workspaceID, nil
+	return workspaceID, true, nil
 }
 
 func quarantineTransportEvent(ctx context.Context, tx pgx.Tx, eventID, nodeID uuid.UUID, event *transportv1.TransportEvent, workspaceID uuid.UUID, observedAt time.Time, failure *permanentInvalidEvent) error {
@@ -701,11 +751,48 @@ func ingestAgentCommandResult(ctx context.Context, tx pgx.Tx, eventID, nodeID uu
 	var envelopeBytes []byte
 	var currentState string
 	var commandCreatedAt time.Time
-	if err := tx.QueryRow(ctx, `SELECT command.envelope,command.state,command.created_at FROM commands command JOIN operations operation ON operation.command_id=command.id WHERE command.id=$1 AND command.node_id=$2`, commandID, nodeID).Scan(&envelopeBytes, &currentState, &commandCreatedAt); err != nil {
+	var dispatchInFlight bool
+	var inFlightAttemptID, inFlightLeaseToken uuid.UUID
+	if err := tx.QueryRow(ctx, `WITH locked_outbox AS MATERIALIZED (
+		SELECT id,locked_by,locked_until,attempts
+		FROM outbox_events
+		WHERE command_id=$1
+		FOR UPDATE
+	)
+		SELECT command.envelope,command.state,command.created_at,
+		in_flight.attempt_id IS NOT NULL,
+		COALESCE(in_flight.attempt_id,'00000000-0000-0000-0000-000000000000'::uuid),
+		COALESCE(in_flight.lease_token,'00000000-0000-0000-0000-000000000000'::uuid)
+		FROM commands AS command
+		JOIN operations AS operation ON operation.command_id=command.id
+		LEFT JOIN LATERAL (
+			SELECT attempt.id AS attempt_id,lease.lease_token
+			FROM locked_outbox AS outbox
+			JOIN node_command_leases AS lease ON lease.command_id=command.id
+			JOIN command_attempts AS attempt
+			  ON attempt.command_id=lease.command_id
+			 AND attempt.outbox_event_id=outbox.id
+			 AND attempt.worker_id=lease.worker_id
+			WHERE lease.command_id=command.id
+			  AND lease.node_id=command.node_id
+			  AND lease.leased_until>clock_timestamp()
+			  AND outbox.locked_by=lease.worker_id
+			  AND outbox.locked_until>clock_timestamp()
+			  AND attempt.attempt_number=outbox.attempts
+			  AND attempt.state='sending'
+			  AND attempt.finished_at IS NULL
+			LIMIT 1
+		) AS in_flight ON true
+		WHERE command.id=$1 AND command.node_id=$2`, commandID, nodeID).Scan(
+		&envelopeBytes, &currentState, &commandCreatedAt, &dispatchInFlight, &inFlightAttemptID, &inFlightLeaseToken,
+	); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return invalidCommandResult("command result does not match a dispatched command")
 		}
 		return fmt.Errorf("load command envelope for result: %w", err)
+	}
+	if currentState == "queued" && !dispatchInFlight {
+		return invalidCommandResult("queued command result has no current sending attempt")
 	}
 	var envelope agentv1.CommandEnvelope
 	if err := proto.Unmarshal(envelopeBytes, &envelope); err != nil {
@@ -862,7 +949,9 @@ func ingestAgentCommandResult(ctx context.Context, tx pgx.Tx, eventID, nodeID uu
 	if verification.KeyID != "" {
 		keyID = verification.KeyID
 	}
-	if _, err := tx.Exec(ctx, `INSERT INTO agent_command_results(event_id,command_id,idempotency_key,payload_sha256,semantic_payload_hash_version,state,result,error_code,accepted_at,completed_at,replayed,created_at,receipt_verification_status,receipt_failure_reason,privd_attestation_key_id,effect_record_id,effect_sequence,receipt_sha256,privileged_result_proof) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19)`, eventID, commandID, idempotencyKey, payloadHash, hashVersion, state, resultBytes, errorCode, acceptedAtValue, completedTime, result.GetReplayed(), observedAt, verification.Status, failureReason, keyID, nullableBytes(verification.EffectRecordID), nullableUint64(verification.EffectSequence), nullableBytes(verification.ReceiptSHA256), nullableBytes(verification.EncodedProof)); err != nil {
+	// Timestamp results and attempts in PostgreSQL so MarkSent can compare
+	// them without process clock skew.
+	if _, err := tx.Exec(ctx, `INSERT INTO agent_command_results(event_id,command_id,idempotency_key,payload_sha256,semantic_payload_hash_version,state,result,error_code,accepted_at,completed_at,replayed,created_at,receipt_verification_status,receipt_failure_reason,privd_attestation_key_id,effect_record_id,effect_sequence,receipt_sha256,privileged_result_proof) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,clock_timestamp(),$12,$13,$14,$15,$16,$17,$18)`, eventID, commandID, idempotencyKey, payloadHash, hashVersion, state, resultBytes, errorCode, acceptedAtValue, completedTime, result.GetReplayed(), verification.Status, failureReason, keyID, nullableBytes(verification.EffectRecordID), nullableUint64(verification.EffectSequence), nullableBytes(verification.ReceiptSHA256), nullableBytes(verification.EncodedProof)); err != nil {
 		return fmt.Errorf("persist Agent command result: %w", err)
 	}
 	if verification.Status != "not_required" && !verification.Verified() {
@@ -890,7 +979,7 @@ func ingestAgentCommandResult(ctx context.Context, tx pgx.Tx, eventID, nodeID uu
 		return fmt.Errorf("generate operation result event ID: %w", err)
 	}
 	terminal := effectiveState == "succeeded" || effectiveState == "failed" || effectiveState == "rejected" || effectiveState == "rolled_back"
-	commandTag, err := tx.Exec(ctx, `UPDATE commands SET state=$2,updated_at=GREATEST(updated_at,$3) WHERE id=$1 AND state IN ('dispatched','accepted','running','unknown')`, commandID, effectiveState, observedAt)
+	commandTag, err := tx.Exec(ctx, `UPDATE commands SET state=$2,updated_at=GREATEST(updated_at,$3) WHERE id=$1 AND state IN ('queued','dispatched','accepted','running','unknown')`, commandID, effectiveState, observedAt)
 	if err != nil {
 		return fmt.Errorf("apply Agent command result: %w", err)
 	}
@@ -903,7 +992,7 @@ func ingestAgentCommandResult(ctx context.Context, tx pgx.Tx, eventID, nodeID uu
 	}
 	var operationID, workspaceID uuid.UUID
 	var operationRequestID, operationTraceID string
-	err = tx.QueryRow(ctx, `UPDATE operations SET state=$2,version=version+1,updated_at=GREATEST(updated_at,$3),completed_at=CASE WHEN $4::boolean THEN GREATEST(COALESCE(completed_at,$3),$3) ELSE NULL END WHERE command_id=$1 AND state IN ('dispatched','accepted','running','unknown') RETURNING id,workspace_id,request_id,COALESCE(trace_id,'')`, commandID, operationState, observedAt, terminal).Scan(&operationID, &workspaceID, &operationRequestID, &operationTraceID)
+	err = tx.QueryRow(ctx, `UPDATE operations SET state=$2,version=version+1,updated_at=GREATEST(updated_at,$3),completed_at=CASE WHEN $4::boolean THEN GREATEST(COALESCE(completed_at,$3),$3) ELSE NULL END WHERE command_id=$1 AND state IN ('queued','dispatched','accepted','running','unknown') RETURNING id,workspace_id,request_id,COALESCE(trace_id,'')`, commandID, operationState, observedAt, terminal).Scan(&operationID, &workspaceID, &operationRequestID, &operationTraceID)
 	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
 		return fmt.Errorf("apply Agent operation result: %w", err)
 	}
@@ -913,6 +1002,25 @@ func ingestAgentCommandResult(ctx context.Context, tx pgx.Tx, eventID, nodeID uu
 	if terminal {
 		if _, err := tx.Exec(ctx, `UPDATE outbox_events SET published_at=COALESCE(published_at,$2),locked_by=NULL,locked_until=NULL,last_error=NULL WHERE command_id=$1`, commandID, observedAt); err != nil {
 			return fmt.Errorf("complete command reconciliation outbox: %w", err)
+		}
+	}
+	if dispatchInFlight {
+		attemptTag, err := tx.Exec(ctx, `UPDATE command_attempts
+			SET state='sent',finished_at=clock_timestamp()
+			WHERE id=$1 AND command_id=$2 AND state='sending' AND finished_at IS NULL`, inFlightAttemptID, commandID)
+		if err != nil {
+			return fmt.Errorf("close result-observed dispatch attempt: %w", err)
+		}
+		if attemptTag.RowsAffected() != 1 {
+			return errors.New("result-observed dispatch attempt is no longer sending")
+		}
+		leaseTag, err := tx.Exec(ctx, `DELETE FROM node_command_leases
+			WHERE node_id=$1 AND command_id=$2 AND lease_token=$3`, nodeID, commandID, inFlightLeaseToken)
+		if err != nil {
+			return fmt.Errorf("release result-observed dispatch lease: %w", err)
+		}
+		if leaseTag.RowsAffected() != 1 {
+			return errors.New("result-observed dispatch lease is no longer valid")
 		}
 	}
 	if apply := envelope.GetConfigApply(); apply != nil {
@@ -1189,34 +1297,20 @@ func scheduleCommandRecovery(ctx context.Context, tx pgx.Tx, commandID uuid.UUID
 	default:
 		return nil
 	}
-	expiresAt := envelope.GetExpiresAt()
-	if expiresAt == nil {
-		return nil
-	}
-	if !expiresAt.AsTime().After(observedAt) {
-		if mode != agentv1.CommandDeliveryMode_COMMAND_DELIVERY_MODE_RECONCILE_ONLY {
+	if mode == agentv1.CommandDeliveryMode_COMMAND_DELIVERY_MODE_RETRY_IF_EFFECT_ABSENT {
+		expiresAt := envelope.GetExpiresAt()
+		if expiresAt == nil || expiresAt.CheckValid() != nil || !expiresAt.AsTime().After(observedAt) {
 			return nil
 		}
-		expiresAt = timestamppb.New(observedAt.Add(5 * time.Minute))
-		envelope.ExpiresAt = expiresAt
 	}
-	messageID, err := uuid.NewV7()
+	payload, expiresAt, err := operationstore.PrepareRecoveryEnvelope(envelope, mode, observedAt, signer)
 	if err != nil {
-		return fmt.Errorf("generate reconciliation message ID: %w", err)
+		return err
 	}
-	envelope.MessageId = messageID[:]
-	envelope.DeliveryMode = mode
-	if err := signer.Authorize(envelope); err != nil {
-		return fmt.Errorf("authorize reconciliation command: %w", err)
-	}
-	payload, err := proto.Marshal(envelope)
-	if err != nil {
-		return fmt.Errorf("encode reconciliation command: %w", err)
-	}
-	if _, err := tx.Exec(ctx, `UPDATE commands SET envelope=$2,expires_at=$3 WHERE id=$1 AND state='unknown'`, commandID, payload, expiresAt.AsTime()); err != nil {
+	if _, err := tx.Exec(ctx, `UPDATE commands SET envelope=$2,expires_at=$3 WHERE id=$1 AND state='unknown'`, commandID, payload, expiresAt); err != nil {
 		return fmt.Errorf("persist reconciliation command: %w", err)
 	}
-	if _, err := tx.Exec(ctx, `UPDATE operations SET expires_at=$2 WHERE command_id=$1 AND state='unknown'`, commandID, expiresAt.AsTime()); err != nil {
+	if _, err := tx.Exec(ctx, `UPDATE operations SET expires_at=$2 WHERE command_id=$1 AND state='unknown'`, commandID, expiresAt); err != nil {
 		return fmt.Errorf("extend reconciliation operation: %w", err)
 	}
 	if _, err := tx.Exec(ctx, `UPDATE outbox_events SET payload=$2,published_at=NULL,locked_by=NULL,locked_until=NULL,available_at=$3,last_error=NULL WHERE command_id=$1`, commandID, payload, observedAt); err != nil {
@@ -1424,6 +1518,24 @@ func eventName(value transportv1.TransportEventType) (string, error) {
 	default:
 		return "", errors.New("unsupported transport event type")
 	}
+}
+
+func connectedOwnerTerm(event *transportv1.TransportEvent) ([16]byte, bool, error) {
+	connection := event.GetConnectionId()
+	epoch := event.GetOwnerEpoch()
+	if len(connection) == 0 && epoch == 0 {
+		return [16]byte{}, false, nil
+	}
+	if len(connection) != 16 || epoch == 0 || epoch > math.MaxInt64 {
+		return [16]byte{}, false, errors.New("connected owner term must contain a 16-byte connection_id and positive owner_epoch")
+	}
+	id, err := uuid.FromBytes(connection)
+	if err != nil || id.Version() != 7 {
+		return [16]byte{}, false, errors.New("connected owner connection_id must be UUIDv7")
+	}
+	var fixed [16]byte
+	copy(fixed[:], connection)
+	return fixed, true, nil
 }
 
 func validTraceparent(value string) bool {
