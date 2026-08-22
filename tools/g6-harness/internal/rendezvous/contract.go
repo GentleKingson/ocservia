@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"regexp"
+	"slices"
 	"strconv"
 )
 
@@ -47,6 +48,11 @@ var checkpointContracts = []Contract{
 	{Prefix: "g6-rd-window-barrier-arm-request", Checkpoint: "window-barrier-arm-request", Sequence: 180, ProducerDomain: "fd-b"},
 	{Prefix: "g6-rd-window-barrier-armed-fd-a", Checkpoint: "window-barrier-armed-fd-a", Sequence: 190, ProducerDomain: "fd-a"},
 	{Prefix: "g6-rd-final-freeze", Checkpoint: "final-freeze-request", Sequence: 210, ProducerDomain: "fd-b"},
+}
+
+// Contracts returns a copy of the frozen checkpoint registry.
+func Contracts() []Contract {
+	return slices.Clone(checkpointContracts)
 }
 
 type Binding struct {

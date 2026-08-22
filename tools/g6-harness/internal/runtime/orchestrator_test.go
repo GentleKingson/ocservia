@@ -2,6 +2,7 @@ package runtime
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -9,6 +10,9 @@ import (
 	"time"
 
 	"github.com/GentleKingson/ocservia/tools/g6-harness/internal/cleanup"
+	"github.com/GentleKingson/ocservia/tools/g6-harness/internal/execx"
+	"github.com/GentleKingson/ocservia/tools/g6-harness/internal/phase"
+	"github.com/GentleKingson/ocservia/tools/g6-harness/internal/rendezvous"
 	"github.com/GentleKingson/ocservia/tools/g6-harness/internal/state"
 )
 
@@ -78,6 +82,59 @@ func TestCleanupRecoversFromRegistryWithoutOpeningRuntimeState(t *testing.T) {
 	if err := Cleanup(context.Background(), options, 5*time.Second); err != nil {
 		t.Fatal("idempotent completed cleanup failed:", err)
 	}
+}
+
+func TestFailedCleanupCanBeRetriedFromTheDurableRegistry(t *testing.T) {
+	t.Parallel()
+	options := testOptions(t, "fd-b")
+	adapter := options.adapterPath()
+	content := "#!/bin/sh\nset -eu\nif [ \"$1\" = cleanup ] && [ ! -e \"${RUNNER_TEMP}/cleanup-failed-once\" ]; then\n  touch \"${RUNNER_TEMP}/cleanup-failed-once\"\n  exit 23\nfi\n"
+	if err := os.WriteFile(adapter, []byte(content), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := Cleanup(context.Background(), options, 5*time.Second); err == nil {
+		t.Fatal("injected cleanup failure was accepted")
+	}
+	failed, err := cleanup.LoadAndValidate(options.registryPath(), mustExpectedRegistry(t, options))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if failed.CleanupStatus != "failed" || failed.CleanupAt == nil || failed.CleanupError == "" {
+		t.Fatalf("failed cleanup was not durable: %+v", failed)
+	}
+	if err := Cleanup(context.Background(), options, 5*time.Second); err != nil {
+		t.Fatal("retry from failed cleanup registry:", err)
+	}
+	passed, err := cleanup.LoadAndValidate(options.registryPath(), mustExpectedRegistry(t, options))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if passed.CleanupStatus != "passed" || passed.CleanupAt == nil || passed.CleanupError != "" {
+		t.Fatalf("cleanup retry did not reach a valid terminal state: %+v", passed)
+	}
+	logs, err := filepath.Glob(filepath.Join(options.diagnosticsRoot(), "cleanup-*.log"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(logs) != 4 {
+		t.Fatalf("cleanup retry log count = %d, want 4", len(logs))
+	}
+	results, err := filepath.Glob(filepath.Join(options.diagnosticsRoot(), "cleanup-results", "*.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(results) != 2 {
+		t.Fatalf("cleanup attempt result count = %d, want 2", len(results))
+	}
+}
+
+func mustExpectedRegistry(t *testing.T, options Options) cleanup.Registry {
+	t.Helper()
+	registry, err := expectedRegistry(options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return registry
 }
 
 func testOptions(t *testing.T, domain string) Options {
@@ -183,6 +240,46 @@ func TestCompleteFailureDomainGraphsAreExecutable(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestPhaseGraphAndRendezvousRegistriesCannotDrift(t *testing.T) {
+	t.Parallel()
+	contracts := rendezvous.Contracts()
+	if len(contracts) != 16 {
+		t.Fatalf("rendezvous contract count = %d, want 16", len(contracts))
+	}
+	seen := make(map[string]bool, len(contracts))
+	for _, contract := range contracts {
+		if seen[contract.Checkpoint] {
+			t.Fatalf("duplicate rendezvous checkpoint %s", contract.Checkpoint)
+		}
+		seen[contract.Checkpoint] = true
+		producer, err := phase.RequiredManifestPhase(contract.ProducerDomain, contract.Checkpoint)
+		if err != nil {
+			t.Fatalf("rendezvous checkpoint %s is absent from the phase graph: %v", contract.Checkpoint, err)
+		}
+		graph, _ := phase.ResolveGraph(contract.ProducerDomain)
+		if _, err := graph.Definition(producer); err != nil {
+			t.Fatalf("rendezvous checkpoint %s has invalid producer phase: %v", contract.Checkpoint, err)
+		}
+	}
+}
+
+func TestPhaseFailurePathsMatchTheUploadedDiagnosticsTree(t *testing.T) {
+	t.Parallel()
+	failure := classifyFailure(
+		execx.Outcome{ExitCode: 1, Err: errors.New("exit status 1")},
+		phase.Definition{Name: "prepare", Sequence: 10, Timeout: time.Minute},
+		time.Now().Add(time.Minute),
+		"010-prepare",
+	)
+	want := []string{
+		"harness/runtime/logs/010-prepare.stdout.log",
+		"harness/runtime/logs/010-prepare.stderr.log",
+	}
+	if strings.Join(failure.DiagnosticPaths, "\n") != strings.Join(want, "\n") {
+		t.Fatalf("diagnostic paths = %v, want %v", failure.DiagnosticPaths, want)
 	}
 }
 

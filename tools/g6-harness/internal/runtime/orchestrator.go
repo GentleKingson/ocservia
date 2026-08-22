@@ -116,14 +116,16 @@ func Cleanup(ctx context.Context, options Options, timeout time.Duration) error 
 	}
 	started := options.Now().UTC()
 	deadline := started.Add(timeout)
-	resultPath := filepath.Join(diagnostics, "cleanup-result.json")
-	stdoutPath := filepath.Join(diagnostics, "cleanup.stdout.log")
-	stderrPath := filepath.Join(diagnostics, "cleanup.stderr.log")
+	logBase := fmt.Sprintf("cleanup-%d", started.UnixNano())
+	resultPath := filepath.Join(diagnostics, "cleanup-results", logBase+".json")
+	latestResultPath := filepath.Join(diagnostics, "cleanup-result.json")
+	stdoutPath := filepath.Join(diagnostics, logBase+".stdout.log")
+	stderrPath := filepath.Join(diagnostics, logBase+".stderr.log")
 	initial := resultmodel.Phase{
 		Domain: options.Domain, Binding: options.Binding, Segment: "cleanup", Phase: "cleanup",
 		Sequence: 1000, Status: "running", StartedAt: started, CompletedAt: started, Deadline: deadline,
 	}
-	if err := resultmodel.Write(resultPath, initial); err != nil {
+	if err := writeCleanupResult(resultPath, latestResultPath, initial); err != nil {
 		return err
 	}
 	cleanupContext, cancel := context.WithTimeoutCause(ctx, timeout, errors.New("cleanup deadline exceeded"))
@@ -138,7 +140,7 @@ func Cleanup(ctx context.Context, options Options, timeout time.Duration) error 
 	final.ExitCode = &outcome.ExitCode
 	if outcome.Err == nil {
 		final.Status = "passed"
-		if err := resultmodel.Write(resultPath, final); err != nil {
+		if err := writeCleanupResult(resultPath, latestResultPath, final); err != nil {
 			return err
 		}
 		return cleanup.Mark(options.registryPath(), registry, "passed", nil, completed)
@@ -147,11 +149,15 @@ func Cleanup(ctx context.Context, options Options, timeout time.Duration) error 
 	final.Failure = &resultmodel.Failure{
 		Class: "cleanup_failed", Code: "cleanup_adapter_failed", Message: execx.ExitDescription(outcome),
 		Expected: "exit code 0 before " + deadline.Format(time.RFC3339Nano), Actual: fmt.Sprintf("exit code %d", outcome.ExitCode),
-		DiagnosticPaths: []string{"harness/cleanup.stdout.log", "harness/cleanup.stderr.log"},
+		DiagnosticPaths: []string{"harness/" + logBase + ".stdout.log", "harness/" + logBase + ".stderr.log"},
 	}
-	writeErr := resultmodel.Write(resultPath, final)
+	writeErr := writeCleanupResult(resultPath, latestResultPath, final)
 	markErr := cleanup.Mark(options.registryPath(), registry, "failed", outcome.Err, completed)
 	return errors.Join(outcome.Err, writeErr, markErr)
+}
+
+func writeCleanupResult(attemptPath, latestPath string, result resultmodel.Phase) error {
+	return errors.Join(resultmodel.Write(attemptPath, result), resultmodel.Write(latestPath, result))
 }
 
 func runPhase(parent context.Context, options Options, store *state.Store, segment string, definition phase.Definition) error {
@@ -239,7 +245,7 @@ func classifyFailure(outcome execx.Outcome, definition phase.Definition, deadlin
 	failure := &resultmodel.Failure{
 		Class: "product_assertion_failed", Code: "leaf_adapter_failed", Message: execx.ExitDescription(outcome),
 		Expected: "exit code 0", Actual: fmt.Sprintf("exit code %d", outcome.ExitCode),
-		DiagnosticPaths: []string{"harness/logs/" + basename + ".stdout.log", "harness/logs/" + basename + ".stderr.log"},
+		DiagnosticPaths: []string{"harness/runtime/logs/" + basename + ".stdout.log", "harness/runtime/logs/" + basename + ".stderr.log"},
 	}
 	if outcome.Cause != nil {
 		if errors.Is(outcome.Cause, context.Canceled) {
