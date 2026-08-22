@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/GentleKingson/ocservia/docs/acceptance/g6-runtime-event-schema.json",
+  "title": "Ocservia G6 Runtime Event",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "domain", "binding", "type", "at"],
+  "properties": {
+    "schema_version": { "const": "ocservia.g6-runtime-event.v1" },
+    "domain": { "enum": ["fd-a", "fd-b"] },
+    "binding": { "$ref": "g6-runtime-state-schema.json#/$defs/binding" },
+    "type": { "enum": ["runtime_created", "phase_started", "phase_completed", "phase_failed", "checkpoint_manifested", "checkpoint_consumed"] },
+    "phase": { "type": "string", "pattern": "^[a-z0-9-]+$" },
+    "checkpoint": { "type": "string", "pattern": "^[a-z0-9-]+$" },
+    "sequence": { "type": "integer", "minimum": 1 },
+    "at": { "type": "string", "format": "date-time" },
+    "message": { "type": "string", "minLength": 1 }
+  }
+}

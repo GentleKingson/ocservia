@@ -379,7 +379,6 @@ case "${PROFILE}" in
     install_g6_runtime_dependencies
     ;;
   g6-runtime)
-    install_go
     install_node
     install_npm
     install_g6_runtime_dependencies

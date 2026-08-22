@@ -29,6 +29,16 @@ authority, plus the frozen release manifest digest; a mismatch fails closed.
 - `ocservia.g6-gate-result.v1` aggregates all preceding layers without
   converting an engineering rehearsal into a final production-readiness pass.
 
+Each failure-domain runtime is driven by a frozen `ocservia-g6-harness`
+binary built once with the repository-pinned Go toolchain. Its typed phase
+graph persists `ocservia.g6-runtime-state.v1`, append-only
+`ocservia.g6-runtime-event.v1` records, one `ocservia.g6-phase-result.v1` per
+leaf phase, and an `ocservia.g6-resource-registry.v1`. Exact candidate, run,
+attempt, environment, authority, and failure-domain bindings reject duplicate,
+out-of-order, interrupted, or cross-run state. Cleanup reads the durable
+registry independently, so it remains available after the main state machine
+fails or its work directory becomes incomplete.
+
 Cross-runner rendezvous remains out-of-band through GitHub Actions artifacts,
 but it is no longer inferred from an artifact name or marker file alone.
 `ocservia.g6-checkpoint.v1` binds each checkpoint and every declared payload

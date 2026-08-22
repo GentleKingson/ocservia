@@ -1,0 +1,31 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/GentleKingson/ocservia/docs/acceptance/g6-resource-registry-schema.json",
+  "title": "Ocservia G6 Resource Registry",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "domain", "binding", "domain_run_id", "resources", "cleanup_status"],
+  "properties": {
+    "schema_version": { "const": "ocservia.g6-resource-registry.v1" },
+    "domain": { "enum": ["fd-a", "fd-b"] },
+    "binding": { "$ref": "g6-runtime-state-schema.json#/$defs/binding" },
+    "domain_run_id": { "type": "string", "pattern": "^[1-9][0-9]*-[1-9][0-9]*-fd-[ab]$" },
+    "resources": {
+      "type": "array",
+      "minItems": 11,
+      "maxItems": 11,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["kind", "id"],
+        "properties": {
+          "kind": { "enum": ["work_directory", "diagnostics_directory", "compose_project", "docker_run_label", "docker_network", "container_image"] },
+          "id": { "type": "string", "minLength": 1 }
+        }
+      }
+    },
+    "cleanup_status": { "enum": ["pending", "passed", "failed"] },
+    "cleanup_at": { "type": "string", "format": "date-time" },
+    "cleanup_error": { "type": "string", "minLength": 1 }
+  }
+}

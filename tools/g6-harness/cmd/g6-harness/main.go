@@ -7,11 +7,15 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"strconv"
+	"syscall"
 	"time"
 
 	"github.com/GentleKingson/ocservia/tools/g6-harness/internal/rendezvous"
+	"github.com/GentleKingson/ocservia/tools/g6-harness/internal/runtime"
+	"github.com/GentleKingson/ocservia/tools/g6-harness/internal/state"
 )
 
 func main() {
@@ -23,13 +27,17 @@ func main() {
 
 func run(arguments []string) error {
 	if len(arguments) == 0 {
-		return errors.New("usage: g6-harness <checkpoint-manifest|wait-download> [options]")
+		return errors.New("usage: g6-harness <checkpoint-manifest|wait-download|run-segment|cleanup> [options]")
 	}
 	switch arguments[0] {
 	case "checkpoint-manifest":
 		return runManifest(arguments[1:])
 	case "wait-download":
 		return runWait(arguments[1:])
+	case "run-segment":
+		return runSegment(arguments[1:])
+	case "cleanup":
+		return runCleanup(arguments[1:])
 	default:
 		return fmt.Errorf("unknown g6-harness command %q", arguments[0])
 	}
@@ -54,8 +62,15 @@ func runManifest(arguments []string) error {
 	if producer == "" {
 		return errors.New("FD_ID is required to produce a checkpoint")
 	}
-	_, err = rendezvous.CreateManifest(*root, *name, producer, binding, time.Now(), *ttl)
-	return err
+	manifest, err := rendezvous.CreateManifest(*root, *name, producer, binding, time.Now(), *ttl)
+	if err != nil {
+		return err
+	}
+	options, err := runtimeOptions(binding)
+	if err != nil {
+		return err
+	}
+	return runtime.RecordManifested(options, manifest.Checkpoint)
 }
 
 func runWait(arguments []string) error {
@@ -104,11 +119,102 @@ func runWait(arguments []string) error {
 		DownloadRetryTotal:   durationEnvironment("G6_RENDEZVOUS_DOWNLOAD_RETRY_TOTAL", 90*time.Second),
 		MaxConsecutiveErrors: integerEnvironment("G6_RENDEZVOUS_MAX_CONSECUTIVE_ERRORS", 3),
 	}
-	result, waitErr := rendezvous.WaitDownload(context.Background(), options)
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	result, waitErr := rendezvous.WaitDownload(ctx, options)
+	if waitErr == nil {
+		runtimeConfig, runtimeErr := runtimeOptions(binding)
+		if runtimeErr == nil {
+			runtimeErr = runtime.RecordConsumed(runtimeConfig, result.Checkpoint)
+		}
+		if runtimeErr != nil {
+			result.Status = "failed"
+			result.Artifact = nil
+			result.ManifestSHA256 = ""
+			result.Failure = &rendezvous.Failure{Class: "harness_contract_failed", Code: "runtime_checkpoint_rejected", Message: runtimeErr.Error()}
+			waitErr = runtimeErr
+		}
+	}
 	if writeErr := writeResult(*resultPath, result); writeErr != nil {
 		return errors.Join(waitErr, fmt.Errorf("write structured rendezvous result: %w", writeErr))
 	}
 	return waitErr
+}
+
+func runSegment(arguments []string) error {
+	flags := flag.NewFlagSet("run-segment", flag.ContinueOnError)
+	domain := flags.String("domain", "", "failure domain")
+	segment := flags.String("segment", "", "typed segment name")
+	if err := flags.Parse(arguments); err != nil {
+		return err
+	}
+	if flags.NArg() != 0 || *domain == "" || *segment == "" {
+		return errors.New("run-segment requires --domain and --segment")
+	}
+	binding, err := rendezvous.BindingFromEnvironment()
+	if err != nil {
+		return err
+	}
+	options, err := runtimeOptions(binding)
+	if err != nil {
+		return err
+	}
+	if options.Domain != *domain {
+		return fmt.Errorf("--domain %s does not match FD_ID %s", *domain, options.Domain)
+	}
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	return runtime.RunSegment(ctx, options, *segment)
+}
+
+func runCleanup(arguments []string) error {
+	flags := flag.NewFlagSet("cleanup", flag.ContinueOnError)
+	domain := flags.String("domain", "", "failure domain")
+	timeout := flags.Duration("timeout", 3*time.Minute, "cleanup deadline")
+	if err := flags.Parse(arguments); err != nil {
+		return err
+	}
+	if flags.NArg() != 0 || *domain == "" {
+		return errors.New("cleanup requires --domain")
+	}
+	binding, err := rendezvous.BindingFromEnvironment()
+	if err != nil {
+		return err
+	}
+	options, err := runtimeOptions(binding)
+	if err != nil {
+		return err
+	}
+	if options.Domain != *domain {
+		return fmt.Errorf("--domain %s does not match FD_ID %s", *domain, options.Domain)
+	}
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	return runtime.Cleanup(ctx, options, *timeout)
+}
+
+func runtimeOptions(binding rendezvous.Binding) (runtime.Options, error) {
+	workspace := os.Getenv("GITHUB_WORKSPACE")
+	if workspace == "" {
+		var err error
+		workspace, err = os.Getwd()
+		if err != nil {
+			return runtime.Options{}, err
+		}
+	}
+	workspace, err := filepath.Abs(workspace)
+	if err != nil {
+		return runtime.Options{}, err
+	}
+	return runtime.Options{
+		Domain: os.Getenv("FD_ID"), DomainRunID: os.Getenv("RUN_ID"), RunnerTemp: os.Getenv("RUNNER_TEMP"),
+		Workspace: workspace,
+		Binding: state.Binding{
+			CandidateSHA: binding.CandidateSHA, RunID: binding.RunID, RunAttempt: binding.RunAttempt,
+			EnvironmentID: binding.EnvironmentID, Authority: binding.Authority,
+		},
+		Environment: os.Environ(), Now: time.Now,
+	}, nil
 }
 
 type paths struct {
