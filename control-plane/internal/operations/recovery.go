@@ -352,7 +352,7 @@ func dispatchedOnAuthority(envelope *agentv1.CommandEnvelope, commandID, nodeID 
 func markRecoveryProjectionUnknown(ctx context.Context, tx pgx.Tx, operationID uuid.UUID, envelope *agentv1.CommandEnvelope, observedAt time.Time) error {
 	if envelope.GetConfigApply() != nil {
 		if _, err := tx.Exec(ctx, `UPDATE config_apply_operations SET state='unknown',updated_at=$2
-			WHERE operation_id=$1 AND state IN ('dispatched','accepted','running','unknown')`, operationID, observedAt); err != nil {
+			WHERE operation_id=$1 AND state IN ('queued','dispatched','accepted','running','unknown')`, operationID, observedAt); err != nil {
 			return fmt.Errorf("mark reconnect configuration apply unknown: %w", err)
 		}
 	}

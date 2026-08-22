@@ -492,6 +492,7 @@ func TestAuthoritativeReconnectRecoversLostCommandResultIntegration(t *testing.T
 	if err != nil || len(lateJobs) != 1 || lateJobs[0].CommandID != lateCommandID {
 		t.Fatalf("claim late old-owner dispatch = %d jobs, err=%v", len(lateJobs), err)
 	}
+	lateOriginal := decodeRecoveryEnvelope(t, lateJobs[0].Envelope)
 	lateOldFrame := fenceRecoveryDispatch(t, signer, endpointID, fourth, lateJobs[0])
 	if err := fourth.Release(ctx, pool); err != nil {
 		t.Fatalf("release fourth owner before late sent commit: %v", err)
@@ -502,6 +503,17 @@ func TestAuthoritativeReconnectRecoversLostCommandResultIntegration(t *testing.T
 		t.Fatalf("late old-owner sent commit error = %v, want ErrNotOwner", err)
 	}
 	assertRecoveryState(t, pool, lateCommandID, "queued", "queued", false)
+	if _, err := pool.Exec(ctx, `UPDATE node_command_leases
+		SET leased_until=clock_timestamp()-interval '1 second'
+		WHERE command_id=$1`, lateCommandID); err != nil {
+		t.Fatal(err)
+	}
+	if err := operations.Reap(ctx, 3); err != nil {
+		t.Fatalf("reap accepted old-owner ambiguity: %v", err)
+	}
+	assertRecoveryState(t, pool, lateCommandID, "unknown", "unknown", false)
+	lateRecovery := claimRecoveryDispatch(t, ctx, operations, lateCommandID)
+	assertReconcileOnlyIdentity(t, lateOriginal, decodeRecoveryEnvelope(t, lateRecovery.Envelope))
 }
 
 type recoveryTestAuthority struct {

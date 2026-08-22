@@ -207,30 +207,24 @@ func TestConcurrentWorkersNodeLeaseAndCrashWindowsIntegration(t *testing.T) {
 		t.Fatalf("concurrent claims = %d, want one per node", claimed)
 	}
 
-	// Crash after network send but before DB acknowledgement: lease expiry makes
-	// the side-effect-free command eligible for at-least-once redelivery.
+	// A crash around the network write has an ambiguous outcome. Lease expiry
+	// must schedule journal reconciliation before any effect-capable retry.
 	time.Sleep(100 * time.Millisecond)
 	if err := service.Reap(context.Background(), 3); err != nil {
 		t.Fatal(err)
 	}
-	var retried Dispatch
-	for range 2 {
-		retry, err := service.Claim(context.Background(), uuid.Must(uuid.NewV7()), 8, time.Second)
-		if err != nil || len(retry) != 1 {
-			t.Fatalf("crash-window retry = %+v, %v", retry, err)
-		}
-		if retry[0].CommandID == first.CommandID {
-			retried = retry[0]
-			break
-		}
-		if err := service.MarkSent(context.Background(), retry[0]); err != nil {
-			t.Fatal(err)
-		}
+	retried, err := service.Claim(context.Background(), uuid.Must(uuid.NewV7()), 8, time.Second)
+	if err != nil || len(retried) != 1 || retried[0].CommandID != first.CommandID {
+		t.Fatalf("crash-window reconciliation = %+v, %v", retried, err)
 	}
-	if retried.CommandID == uuid.Nil {
-		t.Fatal("lease-expired command was not redelivered")
+	var recovered agentv1.CommandEnvelope
+	if err := proto.Unmarshal(retried[0].Envelope, &recovered); err != nil {
+		t.Fatal(err)
 	}
-	if err := service.MarkSent(context.Background(), retried); err != nil {
+	if recovered.GetDeliveryMode() != agentv1.CommandDeliveryMode_COMMAND_DELIVERY_MODE_RECONCILE_ONLY {
+		t.Fatalf("crash-window delivery mode = %s", recovered.GetDeliveryMode())
+	}
+	if err := service.MarkSent(context.Background(), retried[0]); err != nil {
 		t.Fatal(err)
 	}
 
@@ -239,14 +233,14 @@ func TestConcurrentWorkersNodeLeaseAndCrashWindowsIntegration(t *testing.T) {
 	if err := pool.QueryRow(context.Background(), `SELECT count(*),min(command.state) FROM command_attempts AS attempt JOIN commands AS command ON command.id=attempt.command_id WHERE command.workspace_id=$1 AND command.id=$2 GROUP BY command.id`, workspaceID, first.CommandID).Scan(&attempts, &state); err != nil {
 		t.Fatal(err)
 	}
-	if attempts != 2 || state != "dispatched" {
+	if attempts != 2 || state != "unknown" {
 		t.Fatalf("attempts/state = %d/%s", attempts, state)
 	}
 	metrics, err := service.Metrics(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
-	if metrics.Unpublished != metrics.Queued || metrics.Queued > 1 || metrics.Unknown != 0 {
+	if metrics.Unpublished != 1 || metrics.Queued != 1 || metrics.Unknown != 1 {
 		t.Fatalf("metrics after dispatch = %+v", metrics)
 	}
 }
