@@ -445,12 +445,19 @@ phase_smoke_session() {
   g6rd_export_common_env
   g6rd_timeline_init
   g6rd_timeline_event smoke_session_started
-  g6rd_wait_until_deadline 90 3 "four smoke Agents connected" all_nodes_connected
-  local args=() node key="g6-load-${RUN_ID}-smoke" out="${G6RD_OUTBOX}/smoke-session"
-  readarray -t args < <(node_ids)
+  # Before promotion the active transportd and API live in FD-A. The FD-B API
+  # port is the authenticated tunnel to that controller, while FD-B has no
+  # local transport socket yet. Use the controller's durable node view here;
+  # the post-promotion phase uses the new local transport socket directly.
+  if ! g6rd_wait_until_deadline 90 3 "four smoke Agents connected" \
+    g6rd_capture_agent_readiness "${NODES_FILE}"; then
+    g6rd_report_agent_readiness
+    return 1
+  fi
+  local node key="g6-load-${RUN_ID}-smoke" out="${G6RD_OUTBOX}/smoke-session"
   mkdir -p "${out}"
-  g6rd_probe_node_connection any "${args[@]}" >"${out}/connections.json"
-  node="$(awk -F'\t' '$1 == "g6-fd-a-01" {print $2}' "${NODES_FILE}")"
+  cp -f "${G6RD_STATE}/agent-readiness-last.json" "${out}/connections.json"
+  node="$(awk -F'\t' '$1 == "g6-fd-b-01" {print $2}' "${NODES_FILE}")"
   [[ -n "${node}" ]] || { echo "cross-FD smoke node is absent" >&2; return 1; }
   g6rd_enqueue_command "${node}" "${key}"
   g6rd_wait_until_deadline 120 2 "cross-FD smoke command result" wait_commands_settled "${key}"

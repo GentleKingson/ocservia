@@ -206,6 +206,15 @@ reject("the frozen smoke binary must be a run-attempt-scoped artifact") unless
   reject("#{job_id} must be fixed to engineering authority") unless job.fetch("env").fetch("G6_AUTHORITY") == "engineering"
   reject("#{job_id} must run two Agents per domain under the smoke profile") unless
     job.fetch("env").values_at("G6RD_PROFILE", "G6_AGENTS_A", "G6_AGENTS_B") == ["smoke", "2", "2"]
+  diagnostics = steps.find { |step| step["name"] == "Collect #{domain.upcase} diagnostics" }
+  diagnostics_upload = steps.find { |step| step["name"] == "Upload #{domain.upcase} diagnostics" }
+  cleanup_index = steps.index { |step| step["name"] == "Clean #{domain.upcase} resources" }
+  reject("#{job_id} must preserve bounded diagnostics before cleanup") unless
+    diagnostics&.fetch("if") == "always()" &&
+    diagnostics.fetch("run").start_with?("timeout --signal=TERM --kill-after=15s 120s ") &&
+    diagnostics_upload&.fetch("if") == "always()" &&
+    diagnostics_upload.fetch("with").fetch("if-no-files-found") == "error" &&
+    steps.index(diagnostics_upload) < cleanup_index
 end
 
 smoke_assembly = jobs.fetch("g6-smoke-assemble")
@@ -214,8 +223,16 @@ reject("smoke must separate Evidence Builder from runtime") unless
   Array(smoke_assembly.fetch("steps")).any? { |step| step.fetch("run", "").include?("smoke-assemble") }
 reject("smoke must independently scan all raw and assembled evidence") unless
   Array(jobs.fetch("g6-smoke-secret-scan").fetch("steps")).sum { |step| step.fetch("run", "").scan("gitleaks dir").length } == 3
+smoke_verifier_steps = Array(jobs.fetch("g6-smoke-verifier").fetch("steps"))
+smoke_verifier_fallback = smoke_verifier_steps.find { |step| step["name"] == "Preserve structured smoke verification failure" }
+smoke_verifier_publish = smoke_verifier_steps.find { |step| step["name"] == "Publish independent smoke verification" }
 reject("smoke must use an independent verifier job") unless
-  Array(jobs.fetch("g6-smoke-verifier").fetch("steps")).any? { |step| step.fetch("run", "").include?("smoke-verify") }
+  smoke_verifier_steps.any? { |step| step.fetch("run", "").include?("smoke-verify") }
+reject("smoke verifier failures must remain structured and publishable") unless
+  smoke_verifier_fallback&.fetch("if") == "always()" &&
+  smoke_verifier_fallback.fetch("run").include?("ocservia.g6-harness-smoke-verification-result.v1") &&
+  smoke_verifier_publish&.fetch("if") == "always()" &&
+  smoke_verifier_publish.fetch("with").fetch("if-no-files-found") == "error"
 
 smoke_result = jobs.fetch("g6-smoke-result")
 smoke_result_steps = Array(smoke_result.fetch("steps"))
@@ -535,6 +552,20 @@ reject("transportd must enforce owner fencing for the stale-rejection scenarios"
 pgappname_count = compose.fetch("services").values.count { |service| service.dig("environment", "PGAPPNAME").to_s.start_with?("${G6_FD_ID:?}-") }
 reject("each role service must set its PGAPPNAME from G6_FD_ID (found #{pgappname_count})") unless pgappname_count == 3
 RUBY
+
+smoke_session_phase="$(sed -n '/^phase_smoke_session() {/,/^}/p' "${FD_B}")"
+grep -q 'g6rd_capture_agent_readiness "${NODES_FILE}"' <<<"${smoke_session_phase}" || {
+  echo "the pre-promotion smoke session must use the active FD-A controller view" >&2
+  exit 1
+}
+grep -q '\$1 == "g6-fd-b-01"' <<<"${smoke_session_phase}" || {
+  echo "the authenticated smoke command must target an Agent across the failure-domain boundary" >&2
+  exit 1
+}
+if grep -q 'g6rd_probe_node_connection' <<<"${smoke_session_phase}"; then
+  echo "the pre-promotion FD-B smoke phase must not require a nonexistent local transport socket" >&2
+  exit 1
+fi
 
 # Debian already assigns UID 65534 to nobody. The probe must reuse that
 # account rather than attempting to create a duplicate numeric identity.

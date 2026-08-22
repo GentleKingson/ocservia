@@ -686,6 +686,15 @@ function expectInlineRejection(label, evidence, overrides, expected) {
   }
 }
 
+const smokeSchemaEvidence = clone(baseEvidence);
+smokeSchemaEvidence.schema_version = "ocservia.g6-harness-smoke-result.v1";
+expectInlineRejection(
+  "smoke result presented to the formal verifier",
+  smokeSchemaEvidence,
+  {},
+  "unexpected G6 evidence schema_version",
+);
+
 function expectHttpRetryRejection(label, mutateRows, expected) {
   const lines = read("testdata/g6/artifacts/http-samples.csv")
     .trimEnd()
