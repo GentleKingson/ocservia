@@ -702,6 +702,7 @@ jobs:
     outputs:
       bundle-artifact-id: ${{ steps.bundle-upload.outputs.artifact-id }}
       bundle-artifact-digest: ${{ steps.bundle-upload.outputs.artifact-digest }}
+      release-manifest-digest: ${{ needs.g6-rd-fd-a.outputs.release-manifest-digest }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
@@ -759,6 +760,25 @@ jobs:
             --fd-a-artifact-digest "${{ needs.g6-rd-fd-a.outputs.raw-artifact-digest }}" \
             --fd-b-artifact-id "${{ needs.g6-rd-fd-b.outputs.raw-artifact-id }}" \
             --fd-b-artifact-digest "${{ needs.g6-rd-fd-b.outputs.raw-artifact-digest }}"
+      - name: Preserve an assembly result when assembly could not start
+        if: always()
+        run: |
+          result="${RUNNER_TEMP}/g6-rd-evidence-bundle/assembly-result.json"
+          [[ -s "${result}" ]] && exit 0
+          mkdir -p "$(dirname "${result}")"
+          reason="assembly did not produce a result"
+          printf '%s\n' "${reason}" >"${RUNNER_TEMP}/g6-rd-evidence-bundle/build.stderr.log"
+          printf '1\n' >"${RUNNER_TEMP}/g6-rd-evidence-bundle/evidence-build-exit-code.txt"
+          jq -n \
+            --arg candidate_sha "${GITHUB_SHA}" \
+            --arg run_id "${GITHUB_RUN_ID}" \
+            --argjson run_attempt "${GITHUB_RUN_ATTEMPT}" \
+            --arg environment_id "g6-$(printf '%s' "${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" | openssl dgst -sha256 -r | cut -c1-16)" \
+            --arg authority "${{ inputs.authority }}" \
+            --arg release_manifest_digest "${{ needs.g6-rd-fd-a.outputs.release-manifest-digest }}" \
+            --arg reason "${reason}" \
+            '{schema_version:"ocservia.g6-assembly-result.v1",$candidate_sha,$run_id,$run_attempt,$environment_id,$authority,release_manifest_digest:(if $release_manifest_digest == "" then null else $release_manifest_digest end),status:"failed",exit_code:1,$reason}' \
+            >"${result}"
       - name: Publish the partial or complete evidence bundle
         id: bundle-upload
         if: always()
@@ -819,6 +839,20 @@ jobs:
       - name: Scan the published evidence for secrets
         id: secret-scan
         run: |
+          release_manifest_digest="${{ needs.g6-rd-fd-a.outputs.release-manifest-digest }}"
+          for domain in fd-a fd-b; do
+            jq -e \
+              --arg candidate_sha "${GITHUB_SHA}" \
+              --arg run_id "${GITHUB_RUN_ID}" \
+              --argjson run_attempt "${GITHUB_RUN_ATTEMPT}" \
+              --arg environment_id "g6-$(printf '%s' "${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" | openssl dgst -sha256 -r | cut -c1-16)" \
+              --arg authority "${{ inputs.authority }}" \
+              --arg release_manifest_digest "${release_manifest_digest}" \
+              '.candidate_sha == $candidate_sha and .run_id == $run_id and
+               .run_attempt == $run_attempt and .environment_id == $environment_id and
+               .authority == $authority and .release_manifest_digest == $release_manifest_digest' \
+              "${RUNNER_TEMP}/g6-rd-raw-${domain}/runtime-result.json" >/dev/null
+          done
           gitleaks dir --no-banner --redact --no-color "${RUNNER_TEMP}/g6-rd-evidence-bundle"
           gitleaks dir --no-banner --redact --no-color "${RUNNER_TEMP}/g6-rd-raw-fd-a"
           gitleaks dir --no-banner --redact --no-color "${RUNNER_TEMP}/g6-rd-raw-fd-b"
@@ -826,8 +860,7 @@ jobs:
         if: always()
         run: |
           mkdir -p "${RUNNER_TEMP}/g6-rd-secret-scan"
-          release_manifest_digest="$(jq -er '.release_manifest_digest' "${RUNNER_TEMP}/g6-rd-raw-fd-a/runtime-result.json")"
-          test "$(jq -er '.release_manifest_digest' "${RUNNER_TEMP}/g6-rd-raw-fd-b/runtime-result.json")" = "${release_manifest_digest}"
+          release_manifest_digest="${{ needs.g6-rd-fd-a.outputs.release-manifest-digest }}"
           status=failed
           if [[ "${{ steps.secret-scan.outcome }}" == success ]]; then
             status=passed
@@ -840,7 +873,7 @@ jobs:
             --arg authority "${{ inputs.authority }}" \
             --arg release_manifest_digest "${release_manifest_digest}" \
             --arg status "${status}" \
-            '{schema_version:"ocservia.g6-secret-scan-result.v1",$candidate_sha,$run_id,$run_attempt,$environment_id,$authority,$release_manifest_digest,$status}' \
+            '{schema_version:"ocservia.g6-secret-scan-result.v1",$candidate_sha,$run_id,$run_attempt,$environment_id,$authority,release_manifest_digest:(if $release_manifest_digest == "" then null else $release_manifest_digest end),$status}' \
             >"${RUNNER_TEMP}/g6-rd-secret-scan/secret-scan-result.json"
       - name: Publish the secret scan result
         id: secret-scan-upload
@@ -866,6 +899,7 @@ jobs:
       name: ${{ inputs.authority == 'production_readiness' && 'g6-production-readiness' || 'g6-engineering-rehearsal' }}
     outputs:
       result-artifact-id: ${{ steps.verdict-upload.outputs.artifact-id }}
+      release-manifest-digest: ${{ needs.g6-rd-assemble.outputs.release-manifest-digest }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
@@ -975,7 +1009,8 @@ jobs:
         if: always()
         run: |
           result="${RUNNER_TEMP}/g6-rd-verdict/verification-result.json"
-          release_manifest_digest="$(jq -er '.release_manifest_digest' "${RUNNER_TEMP}/g6-rd-evidence-bundle/assembly-result.json")"
+          expected_environment_id="g6-$(printf '%s' "${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" | openssl dgst -sha256 -r | cut -c1-16)"
+          release_manifest_digest="${{ needs.g6-rd-assemble.outputs.release-manifest-digest }}"
           if [[ ! -s "${result}" ]]; then
             mkdir -p "$(dirname "${result}")"
             jq -n '{schema_version:"ocservia.g6-evidence-phase-result.v1",phase:"verify",status:"failed",exit_code:1,reason:"verifier did not produce a result"}' >"${result}"
@@ -984,7 +1019,7 @@ jobs:
             --arg candidate_sha "${GITHUB_SHA}" \
             --arg run_id "${GITHUB_RUN_ID}" \
             --argjson run_attempt "${GITHUB_RUN_ATTEMPT}" \
-            --arg environment_id "${G6RD_EXPECTED_ENVIRONMENT_ID}" \
+            --arg environment_id "${expected_environment_id}" \
             --arg authority "${{ inputs.authority }}" \
             --arg release_manifest_digest "${release_manifest_digest}" \
             '. + {$candidate_sha,$run_id,$run_attempt,$environment_id,$authority,$release_manifest_digest}' \

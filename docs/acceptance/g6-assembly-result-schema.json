@@ -23,7 +23,7 @@
     "run_attempt": { "type": "integer", "minimum": 1 },
     "environment_id": { "type": "string", "pattern": "^g6-[a-z0-9]{8,32}$" },
     "authority": { "enum": ["engineering", "production_readiness"] },
-    "release_manifest_digest": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "release_manifest_digest": { "type": ["string", "null"], "pattern": "^[0-9a-f]{64}$" },
     "status": { "enum": ["passed", "failed"] },
     "exit_code": { "type": "integer", "minimum": 0 },
     "reason": { "type": ["string", "null"] }

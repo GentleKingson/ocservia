@@ -221,6 +221,14 @@ reject("evidence assembly must depend on both runtime jobs") unless
   assemble.fetch("needs").sort == %w[g6-rd-fd-a g6-rd-fd-b]
 reject("evidence assembly must always preserve a partial or complete result") unless
   assemble.fetch("if") == "always()"
+assemble_steps = Array(assemble.fetch("steps"))
+assemble_fallback = assemble_steps.find do |step|
+  step["name"] == "Preserve an assembly result when assembly could not start"
+end
+reject("assembly must retain a bound failure result when its main command cannot start") unless
+  assemble_fallback&.fetch("if") == "always()" &&
+  assemble_fallback.fetch("run").include?("ocservia.g6-assembly-result.v1") &&
+  assemble_fallback.fetch("run").include?("release_manifest_digest")
 secret_scan = jobs.fetch("g6-rd-secret-scan")
 reject("secret scan must inspect both raw domains and the assembled bundle") unless
   secret_scan.fetch("needs").sort == %w[g6-rd-assemble g6-rd-fd-a g6-rd-fd-b] &&
@@ -228,6 +236,20 @@ reject("secret scan must inspect both raw domains and the assembled bundle") unl
 verifier = jobs.fetch("g6-rd-verifier")
 reject("the independent verifier must consume only the assembled evidence layer") unless
   verifier.fetch("needs") == ["g6-rd-assemble"] && verifier.fetch("if").include?("always()")
+secret_result = Array(secret_scan.fetch("steps")).find do |step|
+  step["name"] == "Record the secret scan result"
+end
+reject("secret scan must always retain a run-bound result independent of downloaded payload parsing") unless
+  secret_result&.fetch("if") == "always()" &&
+  secret_result.fetch("run").include?("needs.g6-rd-fd-a.outputs.release-manifest-digest") &&
+  !secret_result.fetch("run").include?("jq -er '.release_manifest_digest'")
+verifier_binding = Array(verifier.fetch("steps")).find do |step|
+  step["name"] == "Bind the verification result to this run"
+end
+reject("verifier result binding must survive an earlier download or verification failure") unless
+  verifier_binding&.fetch("if") == "always()" &&
+  verifier_binding.fetch("run").include?("needs.g6-rd-assemble.outputs.release-manifest-digest") &&
+  verifier_binding.fetch("run").include?("GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}")
 gate = jobs.fetch("g6-rd-gate")
 reject("the final gate must always aggregate every result layer") unless
   gate.fetch("if") == "always()" &&
