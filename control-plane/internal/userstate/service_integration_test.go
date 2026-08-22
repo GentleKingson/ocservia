@@ -896,6 +896,23 @@ func TestUnknownReconciliationBypassesConsumedDispatchSlotIntegration(t *testing
 	if err != nil || len(dispatches) != 1 || dispatches[0].OperationID != operationID {
 		t.Fatalf("unknown reconciliation claim=%+v err=%v", dispatches, err)
 	}
+	if _, err := pool.Exec(context.Background(), `UPDATE node_command_leases SET leased_until=clock_timestamp()-interval '1 second' WHERE lease_token=$1`, dispatches[0].LeaseToken); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.Reap(context.Background(), 3); err != nil {
+		t.Fatal(err)
+	}
+	var encoded []byte
+	if err := pool.QueryRow(context.Background(), `SELECT envelope FROM commands WHERE operation_id=$1`, operationID).Scan(&encoded); err != nil {
+		t.Fatal(err)
+	}
+	var envelope agentv1.CommandEnvelope
+	if err := proto.Unmarshal(encoded, &envelope); err != nil {
+		t.Fatal(err)
+	}
+	if envelope.GetDeliveryMode() != agentv1.CommandDeliveryMode_COMMAND_DELIVERY_MODE_RECONCILE_ONLY {
+		t.Fatalf("expired legacy unknown envelope mode=%v, want reconcile-only", envelope.GetDeliveryMode())
+	}
 }
 
 func TestDispatchCandidateFairnessAcrossNodesIntegration(t *testing.T) {
