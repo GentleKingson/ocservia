@@ -4227,6 +4227,7 @@ for token in \
 done
 for token in \
   'window-opening-proof-${RUN_ID}' \
+  "VALUES ('\${marker}',txid_current()::text,'window_opening_proof')" \
   "'window_opening_proof'" \
   'RETURNING id'; do
   grep -qF "${token}" <<<"${window_proof_record}" || {
@@ -4236,6 +4237,7 @@ for token in \
 done
 for token in \
   'window-opening-proof-${RUN_ID%-fd-a}-fd-b' \
+  "WHERE id='\${marker}'" \
   "phase='window_opening_proof'" \
   'G6_DB_PORT=15432' \
   '[[ "${observed}" == 1 ]]'; do
@@ -4244,6 +4246,10 @@ for token in \
     exit 1
   }
 done
+if grep -qF ":'marker_id'" <<<"${window_proof_record}${fd_a_window_proof}"; then
+  echo "single-command psql markers must not rely on unsupported client variable interpolation" >&2
+  exit 1
+fi
 window_opening_enqueue_line="$(grep -nF 'g6rd_enqueue_command "${node}" "g6-window-${RUN_ID}-opening-${count}"' <<<"${window_phase}" | cut -d: -f1)"
 window_active_wait_line="$(grep -nF '"exact fifty-command production inflight proof"' <<<"${window_phase}" | cut -d: -f1)"
 window_active_capture_line="$(grep -nF 'capture_window_opening_active' <<<"${window_phase}" | cut -d: -f1)"

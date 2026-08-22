@@ -1052,9 +1052,9 @@ phase_window_barrier_arm() {
 fd_a_window_opening_proof_recorded() {
   local marker="window-opening-proof-${RUN_ID%-fd-a}-fd-b" observed
   observed="$(G6_DB_PORT=15432 G6RD_PSQL_TIMEOUT_SECONDS=10 g6rd_psql \
-    -v marker_id="${marker}" -Atc \
+    -Atc \
     "SELECT count(*) FROM g6_readiness_markers
-     WHERE id=:'marker_id' AND phase='window_opening_proof'")" || return 1
+     WHERE id='${marker}' AND phase='window_opening_proof'")" || return 1
   [[ "${observed}" == 1 ]]
 }
 

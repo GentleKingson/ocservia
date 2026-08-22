@@ -2394,9 +2394,9 @@ capture_window_opening_active() {
 
 record_window_opening_proof() {
   local marker="window-opening-proof-${RUN_ID}"
-  psql_window_probe -v marker_id="${marker}" -Atc \
+  psql_window_probe -Atc \
     "INSERT INTO g6_readiness_markers(id,txid,phase)
-     VALUES (:'marker_id',txid_current()::text,'window_opening_proof')
+     VALUES ('${marker}',txid_current()::text,'window_opening_proof')
      RETURNING id" \
     | grep -Fx -- "${marker}" >/dev/null
 }
