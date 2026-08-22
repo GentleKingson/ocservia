@@ -178,6 +178,24 @@ release_images = release_variables.to_h { |variable| [variable, release_job.fetc
   builds = steps.select { |step| step["name"] == "Build the commit-bound G6 rendezvous client" }
   reject("#{job_id} must build exactly one commit-bound Go rendezvous client") unless
     builds.length == 1 && builds.first.fetch("run").include?("./tools/g6-harness/cmd/g6-harness")
+  build = builds.first.fetch("run")
+  reject("#{job_id} must load the repository-pinned toolchain environment") unless
+    build.include?("source scripts/env.sh")
+  reject("#{job_id} must build with the installed pinned Go binary") unless
+    build.include?('pinned_go="${GITHUB_WORKSPACE}/.tools/go/bin/go"') &&
+      build.include?('GOTOOLCHAIN=local "${pinned_go}" build -trimpath')
+  reject("#{job_id} must verify the exact locked Go version before building") unless
+    build.include?(%q{expected_go="go$(sed -n 's/^go=//p' toolchains.lock)"}) &&
+      build.include?('actual_go="$("${pinned_go}" env GOVERSION)"') &&
+      build.include?('test "${actual_go}" = "${expected_go}"')
+  reject("#{job_id} must reject an ambient Go binary") unless
+    build.include?('test "$(command -v go)" = "${pinned_go}"')
+  reject("#{job_id} must retain the harness toolchain and executable digest in diagnostics") unless
+    build.include?('printf \'go_version=%s\\n\' "${actual_go}"') &&
+      build.include?('printf \'harness_sha256=%s\\n\'') &&
+      build.include?('"${RUNNER_TEMP}/artifacts/g6-readiness-${FD_ID}"')
+  reject("#{job_id} must not fall back to a bare ambient go build") if
+    build.match?(/(?:^|\s)go\s+build(?:\s|$)/)
 end
 fd_a_steps = Array(jobs.fetch("g6-rd-fd-a").fetch("steps"))
 fd_b_steps = Array(jobs.fetch("g6-rd-fd-b").fetch("steps"))

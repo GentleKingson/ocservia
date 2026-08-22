@@ -237,13 +237,27 @@ jobs:
           key: npm-v4-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'web/package-lock.json', 'scripts/g6-runtime/package-lock.json') }}
           restore-keys: |
             npm-v4-${{ runner.os }}-${{ runner.arch }}-
-      - name: Bootstrap pinned G6 Node runtime
+      - name: Bootstrap pinned G6 Go and Node runtime
         run: scripts/bootstrap.sh g6-runtime
       - name: Build the commit-bound G6 rendezvous client
         run: |
           set -euo pipefail
+          source scripts/env.sh
+          pinned_go="${GITHUB_WORKSPACE}/.tools/go/bin/go"
+          expected_go="go$(sed -n 's/^go=//p' toolchains.lock)"
+          actual_go="$("${pinned_go}" env GOVERSION)"
+          test "$(command -v go)" = "${pinned_go}"
+          test "${actual_go}" = "${expected_go}"
           harness_bin="${RUNNER_TEMP}/ocservia-g6-harness"
-          go build -trimpath -o "${harness_bin}" ./tools/g6-harness/cmd/g6-harness
+          GOTOOLCHAIN=local "${pinned_go}" build -trimpath \
+            -o "${harness_bin}" ./tools/g6-harness/cmd/g6-harness
+          diagnostics_dir="${RUNNER_TEMP}/artifacts/g6-readiness-${FD_ID}"
+          mkdir -p "${diagnostics_dir}"
+          {
+            printf 'candidate_sha=%s\n' "${GITHUB_SHA}"
+            printf 'go_version=%s\n' "${actual_go}"
+            printf 'harness_sha256=%s\n' "$(sha256sum "${harness_bin}" | awk '{print $1}')"
+          } >"${diagnostics_dir}/g6-harness-build-${FD_ID}.txt"
           printf 'G6_HARNESS_BIN=%s\n' "${harness_bin}" >>"${GITHUB_ENV}"
       - name: Prepare failure domain A
         timeout-minutes: 10
@@ -532,13 +546,27 @@ jobs:
           key: npm-v4-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'web/package-lock.json', 'scripts/g6-runtime/package-lock.json') }}
           restore-keys: |
             npm-v4-${{ runner.os }}-${{ runner.arch }}-
-      - name: Bootstrap pinned G6 Node runtime
+      - name: Bootstrap pinned G6 Go and Node runtime
         run: scripts/bootstrap.sh g6-runtime
       - name: Build the commit-bound G6 rendezvous client
         run: |
           set -euo pipefail
+          source scripts/env.sh
+          pinned_go="${GITHUB_WORKSPACE}/.tools/go/bin/go"
+          expected_go="go$(sed -n 's/^go=//p' toolchains.lock)"
+          actual_go="$("${pinned_go}" env GOVERSION)"
+          test "$(command -v go)" = "${pinned_go}"
+          test "${actual_go}" = "${expected_go}"
           harness_bin="${RUNNER_TEMP}/ocservia-g6-harness"
-          go build -trimpath -o "${harness_bin}" ./tools/g6-harness/cmd/g6-harness
+          GOTOOLCHAIN=local "${pinned_go}" build -trimpath \
+            -o "${harness_bin}" ./tools/g6-harness/cmd/g6-harness
+          diagnostics_dir="${RUNNER_TEMP}/artifacts/g6-readiness-${FD_ID}"
+          mkdir -p "${diagnostics_dir}"
+          {
+            printf 'candidate_sha=%s\n' "${GITHUB_SHA}"
+            printf 'go_version=%s\n' "${actual_go}"
+            printf 'harness_sha256=%s\n' "$(sha256sum "${harness_bin}" | awk '{print $1}')"
+          } >"${diagnostics_dir}/g6-harness-build-${FD_ID}.txt"
           printf 'G6_HARNESS_BIN=%s\n' "${harness_bin}" >>"${GITHUB_ENV}"
       - name: Prepare failure domain B
         timeout-minutes: 10
