@@ -32,7 +32,7 @@ use std::{
     net::IpAddr,
     pin::{Pin, pin},
     sync::{
-        Arc,
+        Arc, Mutex,
         atomic::{AtomicBool, Ordering},
     },
 };
@@ -1072,25 +1072,43 @@ impl HomeRelayWatch {
 /// Unlike [`HomeRelayWatch`] this tracks every configured relay, not only the
 /// home relay, because dedicated standby relays carry failover traffic while the
 /// home relay is down.
+#[derive(Debug, Default)]
+struct RelayStatusesState {
+    statuses: Mutex<BTreeMap<RelayUrl, RelayConnectionState>>,
+    snapshots: Watchable<BTreeMap<RelayUrl, RelayConnectionState>>,
+}
+
 #[derive(Debug, Clone, Default)]
 pub(crate) struct RelayStatusesWatch {
-    inner: Watchable<BTreeMap<RelayUrl, RelayConnectionState>>,
+    inner: Arc<RelayStatusesState>,
 }
 
 impl RelayStatusesWatch {
+    fn modify(&self, modify: impl FnOnce(&mut BTreeMap<RelayUrl, RelayConnectionState>)) {
+        let mut statuses = self
+            .inner
+            .statuses
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        modify(&mut statuses);
+        // Publish while holding the same lock that protects the authoritative
+        // map. Otherwise an older snapshot can overtake a newer update after
+        // the read-modify-write section has unlocked.
+        let _ = self.inner.snapshots.set(statuses.clone());
+    }
+
     /// Records the latest connection state of `url`.
     fn update(&self, url: &RelayUrl, state: RelayConnectionState) {
-        let mut statuses = self.inner.get();
-        statuses.insert(url.clone(), state);
-        let _ = self.inner.set(statuses);
+        self.modify(|statuses| {
+            statuses.insert(url.clone(), state);
+        });
     }
 
     /// Forgets `url`, e.g. because its [`ActiveRelayActor`] was stopped.
     fn remove(&self, url: &RelayUrl) {
-        let mut statuses = self.inner.get();
-        if statuses.remove(url).is_some() {
-            let _ = self.inner.set(statuses);
-        }
+        self.modify(|statuses| {
+            statuses.remove(url);
+        });
     }
 
     /// Returns a watcher over the per-relay connection states.
@@ -1099,11 +1117,15 @@ impl RelayStatusesWatch {
     /// longer connected stop being selected as soon as the relay transport
     /// notices the outage.
     pub(crate) fn watch(&self) -> n0_watcher::Direct<BTreeMap<RelayUrl, RelayConnectionState>> {
-        self.inner.watch()
+        self.inner.snapshots.watch()
     }
 
     fn get(&self) -> BTreeMap<RelayUrl, RelayConnectionState> {
-        self.inner.get()
+        self.inner
+            .statuses
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
     }
 }
 
@@ -2180,6 +2202,37 @@ mod tests {
             connected_standby(&statuses, &relay_map, &home),
             Some(standby)
         );
+    }
+
+    #[test]
+    fn concurrent_relay_status_transitions_preserve_every_actor() {
+        const RELAY_COUNT: usize = 16;
+        let statuses = RelayStatusesWatch::default();
+        let barrier = Arc::new(std::sync::Barrier::new(RELAY_COUNT + 1));
+        let mut actors = Vec::with_capacity(RELAY_COUNT);
+        let mut urls = Vec::with_capacity(RELAY_COUNT);
+
+        for index in 0..RELAY_COUNT {
+            let url: RelayUrl = format!("https://relay-{index}.test/").parse().unwrap();
+            urls.push(url.clone());
+            let statuses = statuses.clone();
+            let barrier = barrier.clone();
+            actors.push(std::thread::spawn(move || {
+                barrier.wait();
+                statuses.update(&url, RelayConnectionState::Connected);
+            }));
+        }
+
+        barrier.wait();
+        for actor in actors {
+            actor.join().expect("relay status publisher panicked");
+        }
+
+        let snapshot = statuses.get();
+        assert_eq!(snapshot.len(), RELAY_COUNT);
+        for url in urls {
+            assert_eq!(snapshot.get(&url), Some(&RelayConnectionState::Connected));
+        }
     }
 
     /// Routing must never park the global relay actor behind a queue that an

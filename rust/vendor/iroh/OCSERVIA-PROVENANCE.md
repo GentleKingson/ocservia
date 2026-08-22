@@ -38,8 +38,11 @@ archive source or manifest is modified.
 Local changes add an opt-in `Endpoint` builder setting that keeps all
 configured relay connections active, reconciles dynamic relay-map additions
 and removals, bounds graceful relay-client close, and fails the home relay over
-to an already-connected standby. Path selection excludes disconnected relay
-paths, reacts immediately to relay-state changes, and never blocks global
+to an already-connected standby. Concurrent per-relay status publishers update
+one mutex-serialized authoritative map before publishing immutable snapshots,
+so a healthy relay cannot disappear through a lost read-modify-write. Path
+selection excludes disconnected relay paths, reacts immediately to relay-state
+changes, and never blocks global
 datagram routing on a full queue belonging to an unconnected relay. A
 `test-utils`-gated builder hook shortens the non-home idle timeout for
 production-graph lifecycle regressions; the production default remains 60

@@ -15,6 +15,7 @@ members = [
   "crates/transportd",
   "crates/transportd-stub",
 ]
+exclude = ["vendor/iroh"]
 resolver = "3"
 
 [workspace.package]
