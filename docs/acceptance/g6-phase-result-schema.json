@@ -1,0 +1,46 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/GentleKingson/ocservia/docs/acceptance/g6-phase-result-schema.json",
+  "title": "Ocservia G6 Phase Result",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "domain", "binding", "segment", "phase", "sequence", "status", "started_at", "completed_at", "deadline"],
+  "properties": {
+    "schema_version": { "const": "ocservia.g6-phase-result.v1" },
+    "domain": { "enum": ["fd-a", "fd-b"] },
+    "binding": { "$ref": "g6-runtime-state-schema.json#/$defs/binding" },
+    "segment": { "type": "string", "pattern": "^[a-z0-9-]+$" },
+    "phase": { "type": "string", "pattern": "^[a-z0-9-]+$" },
+    "sequence": { "type": "integer", "minimum": 1 },
+    "status": { "enum": ["running", "passed", "failed"] },
+    "started_at": { "type": "string", "format": "date-time" },
+    "completed_at": { "type": "string", "format": "date-time" },
+    "deadline": { "type": "string", "format": "date-time" },
+    "exit_code": { "type": "integer" },
+    "failure": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["class", "code", "message", "diagnostic_paths"],
+      "properties": {
+        "class": {
+          "enum": ["product_assertion_failed", "harness_contract_failed", "runner_infrastructure_failed", "peer_failed", "peer_checkpoint_timeout", "phase_timeout", "phase_cancelled", "evidence_assembly_failed", "secret_scan_failed", "verification_failed", "cleanup_failed"]
+        },
+        "code": { "type": "string", "pattern": "^[a-z0-9_]+$" },
+        "message": { "type": "string", "minLength": 1 },
+        "expected": { "type": "string" },
+        "actual": { "type": "string" },
+        "diagnostic_paths": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "type": "string", "minLength": 1 }
+        }
+      }
+    }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "status": { "const": "failed" } } },
+      "then": { "required": ["failure"] }
+    }
+  ]
+}

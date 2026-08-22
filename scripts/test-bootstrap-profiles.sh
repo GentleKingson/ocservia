@@ -116,7 +116,7 @@ execution_profiles = {
   reject("bootstrap profile is missing: #{profile}") unless bootstrap.match?(/^  #{Regexp.escape(profile)}\)$/)
 end
 {
-  "g6-runtime" => ["install_go", "install_node", "install_npm", "install_g6_runtime_dependencies"],
+  "g6-runtime" => ["install_node", "install_npm", "install_g6_runtime_dependencies"],
   "go-test" => ["install_go", "verify_host_command jq"],
   "go-quality" => ["install_go", "install_go_quality_tools", "verify_host_command jq"],
   "go-rust-integration" => [

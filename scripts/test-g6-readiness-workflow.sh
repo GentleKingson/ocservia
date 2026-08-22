@@ -126,6 +126,22 @@ tunnel_release_tokens = [
 ]
 reject("the host-side tunnel must be built once and frozen with the release") unless
   tunnel_release_tokens.all? { |token| release_run.include?(token) }
+harness_release_tokens = [
+  "scripts/env.sh",
+  '.tools/go/bin/go',
+  "GOTOOLCHAIN=local",
+  "GOOS=linux",
+  "GOARCH=amd64",
+  "./tools/g6-harness/cmd/g6-harness",
+  "ocservia-g6-harness",
+  "harness-manifest.tsv",
+  "go_version",
+]
+reject("the harness must be built once with the exact pinned Go toolchain and frozen with the release") unless
+  harness_release_tokens.all? { |token| release_run.include?(token) } &&
+    release_steps.any? { |step| step["run"] == "scripts/bootstrap.sh go-test" }
+reject("the release producer must not fall back to a bare ambient go build") if
+  release_run.match?(/(?:^|\s)go\s+build(?:\s|$)/)
 reject("parallel release builds must be PID-scoped and propagate every failure") unless release_run.include?('build_pids+=("$!")') && release_run.include?('for pid in "${build_pids[@]}"') && release_run.include?('if ! wait "${pid}"') && release_run.include?('test "${build_status}" -eq 0')
 reject("the release image artifact must be run scoped") unless release_upload&.fetch("with")&.fetch("name")&.include?("github.run_id") && release_upload.fetch("with").fetch("name").include?("github.run_attempt")
 reject("the release image archive must use the step-scoped runner temp directory") unless release_upload.fetch("with").fetch("path").include?("runner.temp") && release_run.include?("RUNNER_TEMP")
@@ -152,22 +168,36 @@ release_images = release_variables.to_h { |variable| [variable, release_job.fetc
   ]
   reject("#{job_id} must candidate-bind and install the exact frozen tunnel") unless
     tunnel_load_tokens.all? { |token| load.fetch("run").include?(token) }
+  harness_load_tokens = [
+    "harness-manifest.tsv",
+    "candidate_sha",
+    "go_version",
+    "expected_harness_sha",
+    "ocservia-g6-harness",
+    "G6_HARNESS_BIN",
+  ]
+  reject("#{job_id} must candidate-bind and install the exact frozen harness") unless
+    harness_load_tokens.all? { |token| load.fetch("run").include?(token) }
   bootstrap_runs = steps.each_with_object([]) do |step, runs|
     runs << step["run"] if step["run"]&.include?("scripts/bootstrap.sh")
   end
-  reject("#{job_id} must bootstrap only the minimal pinned G6 Go and Node runtime") unless
+  reject("#{job_id} must bootstrap only the minimal pinned G6 Node runtime") unless
     bootstrap_runs == ["scripts/bootstrap.sh g6-runtime"]
+  reject("#{job_id} must not install or build with Go") if
+    steps.any? { |step| step.fetch("run", "").include?("bootstrap.sh go-") || step.fetch("run", "").match?(/(?:^|\s)go\s+build(?:\s|$)/) }
   reject("#{job_id} must not perform a host-side Rust build") if
     steps.any? { |step| step.fetch("run", "").match?(/(?:bootstrap\.sh native|\bcargo (?:build|run|test)\b)/) }
   tooling = steps.find { |step| step["name"] == "Restore verified G6 Node runtime" }
   reject("#{job_id} tooling cache must bind the minimal G6 runtime lock") unless
-    tooling&.fetch("with")&.fetch("key")&.include?("tooling-v4-g6-runtime-") &&
+    tooling&.fetch("with")&.fetch("key")&.include?("tooling-v5-g6-node-runtime-") &&
       tooling.fetch("with").fetch("key").include?("scripts/g6-runtime/package-lock.json")
   reject("#{job_id} must collect diagnostics before cleanup") unless names.index { |n| n.include?("diagnostics") }.to_i < names.index { |n| n.include?("Clean") }.to_i
   diagnostics = steps.find { |step| step["name"]&.include?("diagnostics") }.fetch("run")
   cleanup = steps.find { |step| step["name"]&.include?("Clean") }.fetch("run")
   reject("#{job_id} diagnostics must have a hard timeout") unless diagnostics.start_with?("timeout --signal=TERM --kill-after=15s 120s ")
-  reject("#{job_id} cleanup must have a hard timeout") unless cleanup.start_with?("timeout --signal=TERM --kill-after=15s 180s ")
+  domain = job_id.end_with?("a") ? "fd-a" : "fd-b"
+  reject("#{job_id} cleanup must run through the typed bounded registry recovery path") unless
+    cleanup == %Q{"${G6_HARNESS_BIN}" cleanup --domain #{domain} --timeout 180s}
   peer = job_id.end_with?("a") ? "G6 Readiness Failure Domain B" : "G6 Readiness Failure Domain A"
   waits = steps.select { |step| step["run"]&.include?(%Q{"${G6_HARNESS_BIN}" wait-download}) }
   reject("#{job_id} must use the Go client for every rendezvous wait") if waits.empty?
@@ -175,27 +205,6 @@ release_images = release_variables.to_h { |variable| [variable, release_job.fetc
     waits.all? { |step| step.fetch("run").include?(%Q{--peer-job "#{peer}"}) }
   reject("#{job_id} must not call the legacy Bash artifact waiter") if
     steps.any? { |step| step.fetch("run", "").include?("real-e2e-artifact.sh wait-download") }
-  builds = steps.select { |step| step["name"] == "Build the commit-bound G6 rendezvous client" }
-  reject("#{job_id} must build exactly one commit-bound Go rendezvous client") unless
-    builds.length == 1 && builds.first.fetch("run").include?("./tools/g6-harness/cmd/g6-harness")
-  build = builds.first.fetch("run")
-  reject("#{job_id} must load the repository-pinned toolchain environment") unless
-    build.include?("source scripts/env.sh")
-  reject("#{job_id} must build with the installed pinned Go binary") unless
-    build.include?('pinned_go="${GITHUB_WORKSPACE}/.tools/go/bin/go"') &&
-      build.include?('GOTOOLCHAIN=local "${pinned_go}" build -trimpath')
-  reject("#{job_id} must verify the exact locked Go version before building") unless
-    build.include?(%q{expected_go="go$(sed -n 's/^go=//p' toolchains.lock)"}) &&
-      build.include?('actual_go="$("${pinned_go}" env GOVERSION)"') &&
-      build.include?('test "${actual_go}" = "${expected_go}"')
-  reject("#{job_id} must reject an ambient Go binary") unless
-    build.include?('test "$(command -v go)" = "${pinned_go}"')
-  reject("#{job_id} must retain the harness toolchain and executable digest in diagnostics") unless
-    build.include?('printf \'go_version=%s\\n\' "${actual_go}"') &&
-      build.include?('printf \'harness_sha256=%s\\n\'') &&
-      build.include?('"${RUNNER_TEMP}/artifacts/g6-readiness-${FD_ID}"')
-  reject("#{job_id} must not fall back to a bare ambient go build") if
-    build.match?(/(?:^|\s)go\s+build(?:\s|$)/)
 end
 fd_a_steps = Array(jobs.fetch("g6-rd-fd-a").fetch("steps"))
 fd_b_steps = Array(jobs.fetch("g6-rd-fd-b").fetch("steps"))
@@ -215,56 +224,24 @@ reject("every waited checkpoint must have exactly one typed producer upload") un
   waited_names.sort == published_names.sort && waited_names.uniq.length == waited_names.length
 reject("all current rendezvous uploads must use the typed checkpoint action") unless
   checkpoint_uploads.length == 16
-relay_pre_fault = fd_b_steps.find { |step| step["name"] == "Capture the pre-fault relay-a session" }
-reject("the pre-fault relay phase must outlive its existing bounded inner operations") unless
-  relay_pre_fault&.fetch("timeout-minutes") == 8
-resource_preflight = fd_b_steps.find { |step| step["name"] == "Preflight bounded resource evidence" }
-window_step = fd_b_steps.find { |step| step["name"] == "Run the bounded observation window" }
-reject("fd-b must run a hard-bounded real resource preflight") unless
-  resource_preflight&.fetch("timeout-minutes") == 3 &&
-  resource_preflight.fetch("run") == "timeout --signal=TERM --kill-after=15s 120s scripts/g6-readiness-fd-b.sh resource-preflight"
-reject("the resource preflight must precede rather than replace the complete window") unless
-  resource_preflight && window_step && fd_b_steps.index(resource_preflight) < fd_b_steps.index(window_step)
-barrier_b_order = [
-  "Arm failure domain B observation barriers",
-  "Publish the observation-window barrier request",
-  "Preflight bounded resource evidence",
-  "Wait for failure domain A observation barriers",
-  "Run the bounded observation window",
-]
-barrier_b_positions = barrier_b_order.map { |name| fd_b_steps.index { |step| step["name"] == name } }
-reject("fd-b observation barrier rendezvous is incomplete") if barrier_b_positions.any?(&:nil?)
-reject("fd-b must arm both domains before the all-fleet opening wave") unless
-  barrier_b_positions == barrier_b_positions.sort &&
-  window_step.fetch("run") == 'scripts/g6-readiness-fd-b.sh window "${RUNNER_TEMP}/g6-rd-window-barrier-armed-fd-a"'
-barrier_a_order = [
-  "Wait for the observation-window barrier request",
-  "Arm failure domain A observation barriers",
-  "Publish failure domain A barrier acknowledgement",
-  "Release failure domain A barriers after the all-fleet proof",
-  "Wait for the final freeze request",
-]
-barrier_a_positions = barrier_a_order.map { |name| fd_a_steps.index { |step| step["name"] == name } }
-reject("fd-a observation barrier rendezvous is incomplete") if barrier_a_positions.any?(&:nil?)
-reject("fd-a must acknowledge its barriers before waiting on the exact all-fleet proof") unless
-  barrier_a_positions == barrier_a_positions.sort
-reject("fd-a must use the trust-independent image build phase") unless fd_a_steps.any? { |step| step["run"] == "scripts/g6-readiness-fd-a.sh build-images" }
-build_order = [
-  "Wait for failure domain A rendezvous",
-  "Import the peer tunnel identities",
-  "Prepare failure domain B images",
-  "Wait for the shared trust rendezvous",
-  "Materialize the peer runtime trust",
-  "Start relay-b",
-  "Start pinned tunnels"
-]
-positions = build_order.map { |name| fd_b_steps.index { |step| step["name"] == name } }
-reject("fd-b build/runtime steps are incomplete") if positions.any?(&:nil?)
-reject("fd-b must build before waiting for shared trust, then materialize runtime state") unless positions == positions.sort
-fd_b_build = fd_b_steps.fetch(positions.fetch(2))
-reject("fd-b must use the trust-independent image build phase") unless fd_b_build.fetch("run") == "scripts/g6-readiness-fd-b.sh build-images"
-fd_b_materialize = fd_b_steps.fetch(positions.fetch(4))
-reject("fd-b must materialize real trust only after the rendezvous") unless fd_b_materialize.fetch("run").start_with?("scripts/g6-readiness-fd-b.sh materialize-runtime ")
+expected_segments = {
+  "fd-a" => %w[prepare bootstrap primary enroll transport-trust activate-agents failover-cut recovery relay-cut barrier-arm barrier-release evidence],
+  "fd-b" => %w[prepare bootstrap peer-runtime standby enroll load promote relay-observe fault-scenarios resource-preflight window evidence],
+}
+{"fd-a" => fd_a_steps, "fd-b" => fd_b_steps}.each do |domain, steps|
+  segment_runs = steps.map do |step|
+    step.fetch("run", "")[/\A"\$\{G6_HARNESS_BIN\}" run-segment --domain #{domain} --segment ([a-z0-9-]+)\z/, 1]
+  end.compact
+  reject("#{domain} must expose only its ordered high-level typed segments") unless
+    segment_runs == expected_segments.fetch(domain)
+  direct_leaf_calls = steps.select do |step|
+    run = step.fetch("run", "")
+    run.include?("scripts/g6-readiness-#{domain}.sh") &&
+      !run.include?(" runtime-result ") && !run.end_with?(" diagnostics")
+  end
+  reject("#{domain} workflow must not express the product state machine with Bash leaf steps") unless
+    direct_leaf_calls.empty?
+end
 assemble = jobs.fetch("g6-rd-assemble")
 reject("evidence assembly must depend on both runtime jobs") unless
   assemble.fetch("needs").sort == %w[g6-rd-fd-a g6-rd-fd-b]
@@ -376,7 +353,7 @@ verifier_tooling = verifier_steps.find do |step|
   step.fetch("with", {}).fetch("key", "").start_with?("tooling-")
 end
 reject("the independent verifier tooling cache must bind the minimal G6 runtime lock") unless
-  verifier_tooling&.fetch("with")&.fetch("key")&.include?("tooling-v4-g6-runtime-") &&
+  verifier_tooling&.fetch("with")&.fetch("key")&.include?("tooling-v5-g6-node-runtime-") &&
     verifier_tooling.fetch("with").fetch("key").include?("scripts/g6-runtime/package-lock.json")
 
 services = compose.fetch("services")
@@ -4867,6 +4844,19 @@ grep -qF 'actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a' "${C
   echo "the checkpoint upload action must use the proven pinned official uploader" >&2
   exit 1
 }
+
+runtime_result_helper="$(sed -n '/^g6rd_write_runtime_result() {/,/^}/p' "${LIB}")"
+for token in 'harness/state.json' 'harness/events.jsonl' 'harness/phase-results' \
+  'harness/resources.json' 'harness/frozen-binary-manifest.tsv'; do
+  grep -qF "${token}" <<<"${runtime_result_helper}" || {
+    echo "raw runtime evidence is missing typed harness artifact: ${token}" >&2
+    exit 1
+  }
+done
+if grep -qF 'cp -R "${G6RD_WORK}/harness/." "${root}' <<<"${runtime_result_helper}"; then
+  echo "raw runtime evidence must not publish unredacted phase logs" >&2
+  exit 1
+fi
 
 # Every pinned action must reuse an exact `uses: action@sha` line already
 # proven by a merged workflow with hosted execution.

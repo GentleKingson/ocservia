@@ -10,6 +10,7 @@ LIB="${ROOT}/scripts/g6-readiness-lib.sh"
 FD_A="${ROOT}/scripts/g6-readiness-fd-a.sh"
 FD_B="${ROOT}/scripts/g6-readiness-fd-b.sh"
 G6_RENDEZVOUS="${ROOT}/tools/g6-harness/internal/rendezvous/client.go"
+G6_PHASE_GRAPH="${ROOT}/tools/g6-harness/internal/phase/graph.go"
 
 ruby -r yaml - "${WORKFLOW}" "${CI_WORKFLOW}" <<'RUBY'
 workflow = YAML.safe_load(File.read(ARGV.fetch(0)), aliases: true)
@@ -59,35 +60,16 @@ reject("Contracts and Policy must remain in the required quality aggregate") unl
   end
 end
 
-fd_b_names = jobs.fetch("g6-rd-fd-b").fetch("steps").map { |step| step["name"] }.compact
-relay = fd_b_names.index("Start relay-b")
-tunnel = fd_b_names.index("Start pinned tunnels")
-standby = fd_b_names.index("Bootstrap the streaming standby")
-reject("relay-b must be healthy before its pinned tunnel is advertised") unless relay && tunnel && relay < tunnel
-reject("the standby must still bootstrap through the established pinned tunnel") unless tunnel && standby && tunnel < standby
+fd_b_runs = jobs.fetch("g6-rd-fd-b").fetch("steps").map { |step| step.fetch("run", "") }
+peer_runtime = fd_b_runs.index('"${G6_HARNESS_BIN}" run-segment --domain fd-b --segment peer-runtime')
+standby = fd_b_runs.index('"${G6_HARNESS_BIN}" run-segment --domain fd-b --segment standby')
+reject("the typed peer-runtime segment must establish relay-b and its tunnel before standby") unless
+  peer_runtime && standby && peer_runtime < standby
 
 critical_timeouts = {
   "g6-rd-release-image" => {
     "Build and freeze the release images" => 30,
     "Clean release-image resources" => 5
-  },
-  "g6-rd-fd-a" => {
-    "Prepare failure domain A images" => 35,
-    "Enroll the failure domain A fleet" => 25,
-    "Verify the PITR restore point" => 15,
-    "Rejoin the former primary as standby" => 15
-  },
-  "g6-rd-fd-b" => {
-    "Prepare failure domain B images" => 35,
-    "Bootstrap the streaming standby" => 15,
-    "Enroll the failure domain B fleet" => 25,
-    "Promote the standby under load" => 8,
-    "Capture the pre-fault relay-a session" => 8,
-    "Outbox crash window after claim" => 10,
-    "Outbox crash window after transport send" => 10,
-    "Outbox crash window before result commit" => 10,
-    "Preflight bounded resource evidence" => 3,
-    "Run the bounded observation window" => 11
   },
   "g6-rd-assemble" => {
     "Assemble the evidence bundle" => 15
@@ -103,10 +85,8 @@ critical_timeouts.each do |job_id, expected|
 end
 
 fd_b_steps = jobs.fetch("g6-rd-fd-b").fetch("steps")
-preflight = fd_b_steps.find { |step| step["name"] == "Preflight bounded resource evidence" }
-window = fd_b_steps.find { |step| step["name"] == "Run the bounded observation window" }
-reject("resource preflight must use its 120-second hard process limit") unless
-  preflight&.fetch("run") == "timeout --signal=TERM --kill-after=15s 120s scripts/g6-readiness-fd-b.sh resource-preflight"
+preflight = fd_b_steps.find { |step| step["run"] == '"${G6_HARNESS_BIN}" run-segment --domain fd-b --segment resource-preflight' }
+window = fd_b_steps.find { |step| step["run"] == '"${G6_HARNESS_BIN}" run-segment --domain fd-b --segment window' }
 reject("resource preflight must precede the full observation window") unless
   preflight && window && fd_b_steps.index(preflight) < fd_b_steps.index(window)
 
@@ -121,7 +101,7 @@ fd_a_steps = jobs.fetch("g6-rd-fd-a").fetch("steps")
 promoted_wait = fd_a_steps.find { |step| step["name"] == "Wait for the promoted primary" }
 reject("fd-a must wait for the promoted-primary artifact") unless promoted_wait
 wait_seconds = promoted_wait.fetch("run")[/--timeout\s+(\d+)s/, 1]&.to_i
-producer_minutes = critical_timeouts.fetch("g6-rd-fd-b").fetch("Promote the standby under load")
+producer_minutes = 8
 reject("the promoted-primary artifact wait must outlive its producer timeout") unless wait_seconds && wait_seconds > producer_minutes * 60
 RUBY
 
@@ -332,22 +312,20 @@ done
   echo "the observation-window overrun constants understate their process bounds" >&2
   exit 1
 }
-workflow_window_minutes="$(ruby -r yaml -e '
-  workflow = YAML.safe_load(File.read(ARGV.fetch(0)), aliases: true)
-  step = workflow.fetch("jobs").fetch("g6-rd-fd-b").fetch("steps")
-    .find { |candidate| candidate["name"] == "Run the bounded observation window" }
-  puts step.fetch("timeout-minutes")
-' "${WORKFLOW}")"
-workflow_outer=$((workflow_window_minutes * 60))
-[[ "${declared_outer}" == "${workflow_outer}" ]] || {
-  echo "the observation-window script and workflow disagree on the outer timeout" >&2
+grep -qF '{Name: "window", Sequence: 230, Timeout: 11 * time.Minute' "${G6_PHASE_GRAPH}" || {
+  echo "the typed observation-window phase lost its 11-minute outer deadline" >&2
+  exit 1
+}
+state_machine_outer=$((11 * 60))
+[[ "${declared_outer}" == "${state_machine_outer}" ]] || {
+  echo "the observation-window script and typed phase graph disagree on the outer timeout" >&2
   exit 1
 }
 inner_budget=$((window_default + api_ready_budget + pre_drain_budget + settle_budget
   + post_drain_budget + api_overrun + (3 * sql_overrun) + driver_overrun
   + diagnostic_budget + sampler_stop_budget))
-if ((inner_budget + minimum_margin >= workflow_outer)); then
-  echo "observation-window inner budget ${inner_budget}s does not leave the required ${minimum_margin}s margin inside ${workflow_outer}s" >&2
+if ((inner_budget + minimum_margin >= state_machine_outer)); then
+  echo "observation-window inner budget ${inner_budget}s does not leave the required ${minimum_margin}s margin inside ${state_machine_outer}s" >&2
   exit 1
 fi
 

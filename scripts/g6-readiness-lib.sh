@@ -102,6 +102,26 @@ g6rd_write_runtime_result() {
     *) status=failed ;;
   esac
   mkdir -p "${root}"
+  if [[ -d "${G6RD_WORK}/harness" ]]; then
+    mkdir -p "${root}/harness/runtime"
+    cp -f "${G6RD_WORK}/harness/state.json" \
+      "${G6RD_WORK}/harness/events.jsonl" \
+      "${root}/harness/runtime/" 2>/dev/null || true
+    if [[ -d "${G6RD_WORK}/harness/phase-results" ]]; then
+      cp -R "${G6RD_WORK}/harness/phase-results" \
+        "${root}/harness/runtime/"
+    fi
+  fi
+  if [[ -f "${ARTIFACT_DIR}/harness/resources.json" ]]; then
+    mkdir -p "${root}/harness"
+    cp -f "${ARTIFACT_DIR}/harness/resources.json" \
+      "${root}/harness/resources.json"
+  fi
+  if [[ -f "${ARTIFACT_DIR}/g6-harness-manifest.tsv" ]]; then
+    mkdir -p "${root}/harness"
+    cp -f "${ARTIFACT_DIR}/g6-harness-manifest.tsv" \
+      "${root}/harness/frozen-binary-manifest.tsv"
+  fi
   "${G6RD_NODE_BIN:-node}" "${G6RD_ROOT}/scripts/g6-pipeline.mjs" runtime-result \
     --root "${root}" \
     --domain "${FD_ID}" \
@@ -2460,6 +2480,10 @@ g6rd_reclaim_directory() {
 
 g6rd_diagnostics() {
   mkdir -p "${ARTIFACT_DIR}"
+  if [[ -d "${G6RD_WORK}/harness" ]]; then
+    mkdir -p "${ARTIFACT_DIR}/harness/runtime"
+    cp -R "${G6RD_WORK}/harness/." "${ARTIFACT_DIR}/harness/runtime/" || true
+  fi
   g6rd_compose ps --all >"${ARTIFACT_DIR}/compose-ps-${FD_ID}.txt" 2>&1 || true
   if [[ -s "${G6RD_AGENT_COMPOSE}" ]]; then
     g6rd_agent_compose ps --all >"${ARTIFACT_DIR}/compose-ps-agents-${FD_ID}.txt" 2>&1 || true

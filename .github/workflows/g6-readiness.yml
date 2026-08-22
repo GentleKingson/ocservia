@@ -48,6 +48,15 @@ jobs:
           persist-credentials: false
       - name: Runner preflight
         run: scripts/ci-preflight.sh
+      - name: Restore verified release Go toolchain
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: |
+            .cache/downloads
+            .tools
+          key: tooling-v4-g6-release-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'scripts/checksums.txt', 'scripts/bootstrap.sh', 'scripts/env.sh') }}
+      - name: Bootstrap the pinned release Go toolchain
+        run: scripts/bootstrap.sh go-test
       - name: Build and freeze the release images
         id: release-build
         timeout-minutes: 30
@@ -99,6 +108,23 @@ jobs:
           install -m 0755 "${tunnel_output}/ocservia-g6-tunnel" \
             "${archive_dir}/ocservia-g6-tunnel"
           rm -rf -- "${tunnel_output}"
+          source scripts/env.sh
+          pinned_go="${GITHUB_WORKSPACE}/.tools/go/bin/go"
+          expected_go="go$(sed -n 's/^go=//p' toolchains.lock)"
+          actual_go="$("${pinned_go}" env GOVERSION)"
+          test "$(command -v go)" = "${pinned_go}"
+          test "${actual_go}" = "${expected_go}"
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 GOTOOLCHAIN=local \
+            "${pinned_go}" build -trimpath \
+            -o "${archive_dir}/ocservia-g6-harness" \
+            ./tools/g6-harness/cmd/g6-harness
+          printf 'candidate_sha\t%s\n' "${GITHUB_SHA}" \
+            >"${archive_dir}/harness-manifest.tsv"
+          printf 'go_version\t%s\n' "${actual_go}" \
+            >>"${archive_dir}/harness-manifest.tsv"
+          printf 'ocservia-g6-harness\t%s\n' \
+            "$(sha256sum "${archive_dir}/ocservia-g6-harness" | awk '{print $1}')" \
+            >>"${archive_dir}/harness-manifest.tsv"
           printf 'candidate_sha\t%s\n' "${GITHUB_SHA}" \
             >"${archive_dir}/tunnel-manifest.tsv"
           printf 'ocservia-g6-tunnel\t%s\n' \
@@ -123,7 +149,8 @@ jobs:
           (
             cd "${archive_dir}"
             sha256sum runtime-images.tar.gz image-ids.tsv \
-              ocservia-g6-tunnel tunnel-manifest.tsv >release-artifacts.sha256
+              ocservia-g6-tunnel tunnel-manifest.tsv \
+              ocservia-g6-harness harness-manifest.tsv >release-artifacts.sha256
           )
           printf 'release-manifest-digest=%s\n' \
             "$(sha256sum "${archive_dir}/release-artifacts.sha256" | awk '{print $1}')" \
@@ -205,6 +232,18 @@ jobs:
           install -D -m 0755 "${archive_dir}/ocservia-g6-tunnel" "${tunnel_bin}"
           install -m 0444 "${archive_dir}/tunnel-manifest.tsv" "$(dirname "${tunnel_bin}")/tunnel-manifest.tsv"
           test -x "${tunnel_bin}"
+          test "$(wc -l <"${archive_dir}/harness-manifest.tsv" | tr -d '[:space:]')" -eq 3
+          test "$(awk -F '\t' '$1 == "candidate_sha" { print $2 }' "${archive_dir}/harness-manifest.tsv")" = "${GITHUB_SHA}"
+          test "$(awk -F '\t' '$1 == "go_version" { print $2 }' "${archive_dir}/harness-manifest.tsv")" = "go$(sed -n 's/^go=//p' toolchains.lock)"
+          expected_harness_sha="$(awk -F '\t' '$1 == "ocservia-g6-harness" { print $2 }' "${archive_dir}/harness-manifest.tsv")"
+          [[ "${expected_harness_sha}" =~ ^[0-9a-f]{64}$ ]]
+          test "$(sha256sum "${archive_dir}/ocservia-g6-harness" | awk '{print $1}')" = "${expected_harness_sha}"
+          harness_bin="${RUNNER_TEMP}/ocservia-g6-harness"
+          install -m 0755 "${archive_dir}/ocservia-g6-harness" "${harness_bin}"
+          diagnostics_dir="${RUNNER_TEMP}/artifacts/g6-readiness-${FD_ID}"
+          mkdir -p "${diagnostics_dir}"
+          install -m 0444 "${archive_dir}/harness-manifest.tsv" "${diagnostics_dir}/g6-harness-manifest.tsv"
+          printf 'G6_HARNESS_BIN=%s\n' "${harness_bin}" >>"${GITHUB_ENV}"
           gzip -dc "${archive_dir}/runtime-images.tar.gz" | docker load
           release_images=(
             postgres:17.10-bookworm
@@ -229,7 +268,7 @@ jobs:
           path: |
             .cache/downloads
             .tools
-          key: tooling-v4-g6-runtime-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'scripts/checksums.txt', 'scripts/bootstrap.sh', 'scripts/env.sh', 'scripts/g6-runtime/package-lock.json') }}
+          key: tooling-v5-g6-node-runtime-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'scripts/checksums.txt', 'scripts/bootstrap.sh', 'scripts/env.sh', 'scripts/g6-runtime/package-lock.json') }}
       - name: Restore shared npm cache
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
@@ -237,31 +276,10 @@ jobs:
           key: npm-v4-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'web/package-lock.json', 'scripts/g6-runtime/package-lock.json') }}
           restore-keys: |
             npm-v4-${{ runner.os }}-${{ runner.arch }}-
-      - name: Bootstrap pinned G6 Go and Node runtime
+      - name: Bootstrap pinned G6 Node runtime
         run: scripts/bootstrap.sh g6-runtime
-      - name: Build the commit-bound G6 rendezvous client
-        run: |
-          set -euo pipefail
-          source scripts/env.sh
-          pinned_go="${GITHUB_WORKSPACE}/.tools/go/bin/go"
-          expected_go="go$(sed -n 's/^go=//p' toolchains.lock)"
-          actual_go="$("${pinned_go}" env GOVERSION)"
-          test "$(command -v go)" = "${pinned_go}"
-          test "${actual_go}" = "${expected_go}"
-          harness_bin="${RUNNER_TEMP}/ocservia-g6-harness"
-          GOTOOLCHAIN=local "${pinned_go}" build -trimpath \
-            -o "${harness_bin}" ./tools/g6-harness/cmd/g6-harness
-          diagnostics_dir="${RUNNER_TEMP}/artifacts/g6-readiness-${FD_ID}"
-          mkdir -p "${diagnostics_dir}"
-          {
-            printf 'candidate_sha=%s\n' "${GITHUB_SHA}"
-            printf 'go_version=%s\n' "${actual_go}"
-            printf 'harness_sha256=%s\n' "$(sha256sum "${harness_bin}" | awk '{print $1}')"
-          } >"${diagnostics_dir}/g6-harness-build-${FD_ID}.txt"
-          printf 'G6_HARNESS_BIN=%s\n' "${harness_bin}" >>"${GITHUB_ENV}"
-      - name: Prepare failure domain A
-        timeout-minutes: 10
-        run: scripts/g6-readiness-fd-a.sh prepare
+      - name: Run failure domain A prepare segment
+        run: '"${G6_HARNESS_BIN}" run-segment --domain fd-a --segment prepare'
       - name: Publish failure domain A rendezvous
         uses: ./.github/actions/g6-checkpoint-upload
         with:
@@ -277,34 +295,24 @@ jobs:
           --destination "${RUNNER_TEMP}/g6-rd-tunnel-fd-b"
           --timeout 1200s
           --peer-job "G6 Readiness Failure Domain B"
-      - name: Import the peer tunnel identities
-        run: scripts/g6-readiness-fd-a.sh import-peer-tunnel-nodes "${RUNNER_TEMP}/g6-rd-tunnel-fd-b"
-      - name: Prepare failure domain A images
-        timeout-minutes: 35
-        run: scripts/g6-readiness-fd-a.sh build-images
-      - name: Start pinned tunnels
-        timeout-minutes: 5
-        run: scripts/g6-readiness-fd-a.sh tunnel-up
-      - name: Stage the shared trust material
-        run: scripts/g6-readiness-fd-a.sh publish-shared-secrets
+      - name: Run failure domain A bootstrap segment
+        run: '"${G6_HARNESS_BIN}" run-segment --domain fd-a --segment bootstrap'
       - name: Publish the shared trust rendezvous
         uses: ./.github/actions/g6-checkpoint-upload
         with:
           name: g6-rd-shared-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/g6-readiness-${{ env.RUN_ID }}/outbox/shared
           retention-days: 1
-      - name: Start primary, roles, and transportd
-        timeout-minutes: 15
-        run: scripts/g6-readiness-fd-a.sh primary-up
+      - name: Run failure domain A primary segment
+        run: '"${G6_HARNESS_BIN}" run-segment --domain fd-a --segment primary'
       - name: Publish the primary rendezvous
         uses: ./.github/actions/g6-checkpoint-upload
         with:
           name: g6-rd-primary-up-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/g6-readiness-${{ env.RUN_ID }}/outbox/primary-up
           retention-days: 1
-      - name: Enroll the failure domain A fleet
-        timeout-minutes: 25
-        run: scripts/g6-readiness-fd-a.sh agents-enroll
+      - name: Run failure domain A enrollment segment
+        run: '"${G6_HARNESS_BIN}" run-segment --domain fd-a --segment enroll'
       - name: Publish the agent fleet rendezvous
         uses: ./.github/actions/g6-checkpoint-upload
         with:
@@ -320,18 +328,16 @@ jobs:
           --destination "${RUNNER_TEMP}/g6-rd-agents-enrolled-fd-b"
           --timeout 1200s
           --peer-job "G6 Readiness Failure Domain B"
-      - name: Reload the complete transport trust snapshot
-        timeout-minutes: 10
-        run: scripts/g6-readiness-fd-a.sh transport-trust-reload "${RUNNER_TEMP}/g6-rd-agents-enrolled-fd-b"
+      - name: Run failure domain A transport trust segment
+        run: '"${G6_HARNESS_BIN}" run-segment --domain fd-a --segment transport-trust'
       - name: Publish transport trust readiness
         uses: ./.github/actions/g6-checkpoint-upload
         with:
           name: g6-rd-trust-ready-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/g6-readiness-${{ env.RUN_ID }}/outbox/trust-ready
           retention-days: 1
-      - name: Start the failure domain A agents
-        timeout-minutes: 10
-        run: scripts/g6-readiness-fd-a.sh agents-start
+      - name: Run failure domain A agent activation segment
+        run: '"${G6_HARNESS_BIN}" run-segment --domain fd-a --segment activate-agents'
       - name: Wait for the active load rendezvous
         env:
           GITHUB_TOKEN: ${{ github.token }}
@@ -341,12 +347,8 @@ jobs:
           --destination "${RUNNER_TEMP}/g6-rd-load-active"
           --timeout 900s
           --peer-job "G6 Readiness Failure Domain B"
-      - name: Record PITR markers and the base backup
-        timeout-minutes: 15
-        run: scripts/g6-readiness-fd-a.sh pitr-prepare
-      - name: Isolate the primary failure domain
-        timeout-minutes: 10
-        run: scripts/g6-readiness-fd-a.sh isolate
+      - name: Run failure domain A failover cut segment
+        run: '"${G6_HARNESS_BIN}" run-segment --domain fd-a --segment failover-cut'
       - name: Publish the isolation record
         uses: ./.github/actions/g6-checkpoint-upload
         with:
@@ -362,17 +364,8 @@ jobs:
           --destination "${RUNNER_TEMP}/g6-rd-new-primary"
           --timeout 600s
           --peer-job "G6 Readiness Failure Domain B"
-      - name: Probe the fenced former primary after promotion
-        timeout-minutes: 10
-        run: scripts/g6-readiness-fd-a.sh dual-primary-probes "${RUNNER_TEMP}/g6-rd-new-primary"
-      - name: Verify the PITR restore point
-        timeout-minutes: 15
-        run: scripts/g6-readiness-fd-a.sh pitr-restore
-      - name: Rejoin the former primary as standby
-        timeout-minutes: 15
-        run: scripts/g6-readiness-fd-a.sh rejoin
-      - name: Publish relay observation readiness
-        run: scripts/g6-readiness-fd-a.sh relay-rejoin-ready
+      - name: Run failure domain A recovery segment
+        run: '"${G6_HARNESS_BIN}" run-segment --domain fd-a --segment recovery'
       - name: Upload relay observation readiness
         uses: ./.github/actions/g6-checkpoint-upload
         with:
@@ -388,11 +381,8 @@ jobs:
           --destination "${RUNNER_TEMP}/g6-rd-relay-pre-fault"
           --timeout 600s
           --peer-job "G6 Readiness Failure Domain B"
-      - name: Stop relay-a
-        timeout-minutes: 5
-        run: scripts/g6-readiness-fd-a.sh relay-a-stop "${RUNNER_TEMP}/g6-rd-relay-pre-fault"
-      - name: Publish failure domain A scenario readiness
-        run: scripts/g6-readiness-fd-a.sh ready
+      - name: Run failure domain A relay cut segment
+        run: '"${G6_HARNESS_BIN}" run-segment --domain fd-a --segment relay-cut'
       - name: Upload failure domain A scenario readiness
         uses: ./.github/actions/g6-checkpoint-upload
         with:
@@ -408,18 +398,16 @@ jobs:
           --destination "${RUNNER_TEMP}/g6-rd-window-barrier-arm-request"
           --timeout 600s
           --peer-job "G6 Readiness Failure Domain B"
-      - name: Arm failure domain A observation barriers
-        timeout-minutes: 3
-        run: scripts/g6-readiness-fd-a.sh window-barrier-arm "${RUNNER_TEMP}/g6-rd-window-barrier-arm-request"
+      - name: Run failure domain A barrier arm segment
+        run: '"${G6_HARNESS_BIN}" run-segment --domain fd-a --segment barrier-arm'
       - name: Publish failure domain A barrier acknowledgement
         uses: ./.github/actions/g6-checkpoint-upload
         with:
           name: g6-rd-window-barrier-armed-fd-a-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/g6-readiness-${{ env.RUN_ID }}/outbox/window-barrier-armed
           retention-days: 1
-      - name: Release failure domain A barriers after the all-fleet proof
-        timeout-minutes: 3
-        run: scripts/g6-readiness-fd-a.sh window-barrier-release-after-proof
+      - name: Run failure domain A barrier release segment
+        run: '"${G6_HARNESS_BIN}" run-segment --domain fd-a --segment barrier-release'
       - name: Wait for the final freeze request
         env:
           GITHUB_TOKEN: ${{ github.token }}
@@ -429,9 +417,8 @@ jobs:
           --destination "${RUNNER_TEMP}/g6-rd-final-freeze"
           --timeout 1800s
           --peer-job "G6 Readiness Failure Domain B"
-      - name: Collect failure domain A evidence
-        timeout-minutes: 15
-        run: scripts/g6-readiness-fd-a.sh evidence "${RUNNER_TEMP}/g6-rd-final-freeze"
+      - name: Run failure domain A evidence segment
+        run: '"${G6_HARNESS_BIN}" run-segment --domain fd-a --segment evidence'
       - name: Finalize failure domain A runtime result
         if: always()
         timeout-minutes: 3
@@ -452,7 +439,7 @@ jobs:
       - name: Clean failure domain A resources
         if: always()
         timeout-minutes: 7
-        run: timeout --signal=TERM --kill-after=15s 180s scripts/g6-readiness-fd-a.sh cleanup
+        run: '"${G6_HARNESS_BIN}" cleanup --domain fd-a --timeout 180s'
       - name: Upload failure domain A diagnostics
         if: always()
         timeout-minutes: 5
@@ -514,6 +501,18 @@ jobs:
           install -D -m 0755 "${archive_dir}/ocservia-g6-tunnel" "${tunnel_bin}"
           install -m 0444 "${archive_dir}/tunnel-manifest.tsv" "$(dirname "${tunnel_bin}")/tunnel-manifest.tsv"
           test -x "${tunnel_bin}"
+          test "$(wc -l <"${archive_dir}/harness-manifest.tsv" | tr -d '[:space:]')" -eq 3
+          test "$(awk -F '\t' '$1 == "candidate_sha" { print $2 }' "${archive_dir}/harness-manifest.tsv")" = "${GITHUB_SHA}"
+          test "$(awk -F '\t' '$1 == "go_version" { print $2 }' "${archive_dir}/harness-manifest.tsv")" = "go$(sed -n 's/^go=//p' toolchains.lock)"
+          expected_harness_sha="$(awk -F '\t' '$1 == "ocservia-g6-harness" { print $2 }' "${archive_dir}/harness-manifest.tsv")"
+          [[ "${expected_harness_sha}" =~ ^[0-9a-f]{64}$ ]]
+          test "$(sha256sum "${archive_dir}/ocservia-g6-harness" | awk '{print $1}')" = "${expected_harness_sha}"
+          harness_bin="${RUNNER_TEMP}/ocservia-g6-harness"
+          install -m 0755 "${archive_dir}/ocservia-g6-harness" "${harness_bin}"
+          diagnostics_dir="${RUNNER_TEMP}/artifacts/g6-readiness-${FD_ID}"
+          mkdir -p "${diagnostics_dir}"
+          install -m 0444 "${archive_dir}/harness-manifest.tsv" "${diagnostics_dir}/g6-harness-manifest.tsv"
+          printf 'G6_HARNESS_BIN=%s\n' "${harness_bin}" >>"${GITHUB_ENV}"
           gzip -dc "${archive_dir}/runtime-images.tar.gz" | docker load
           release_images=(
             postgres:17.10-bookworm
@@ -538,7 +537,7 @@ jobs:
           path: |
             .cache/downloads
             .tools
-          key: tooling-v4-g6-runtime-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'scripts/checksums.txt', 'scripts/bootstrap.sh', 'scripts/env.sh', 'scripts/g6-runtime/package-lock.json') }}
+          key: tooling-v5-g6-node-runtime-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'scripts/checksums.txt', 'scripts/bootstrap.sh', 'scripts/env.sh', 'scripts/g6-runtime/package-lock.json') }}
       - name: Restore shared npm cache
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
@@ -546,31 +545,10 @@ jobs:
           key: npm-v4-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'web/package-lock.json', 'scripts/g6-runtime/package-lock.json') }}
           restore-keys: |
             npm-v4-${{ runner.os }}-${{ runner.arch }}-
-      - name: Bootstrap pinned G6 Go and Node runtime
+      - name: Bootstrap pinned G6 Node runtime
         run: scripts/bootstrap.sh g6-runtime
-      - name: Build the commit-bound G6 rendezvous client
-        run: |
-          set -euo pipefail
-          source scripts/env.sh
-          pinned_go="${GITHUB_WORKSPACE}/.tools/go/bin/go"
-          expected_go="go$(sed -n 's/^go=//p' toolchains.lock)"
-          actual_go="$("${pinned_go}" env GOVERSION)"
-          test "$(command -v go)" = "${pinned_go}"
-          test "${actual_go}" = "${expected_go}"
-          harness_bin="${RUNNER_TEMP}/ocservia-g6-harness"
-          GOTOOLCHAIN=local "${pinned_go}" build -trimpath \
-            -o "${harness_bin}" ./tools/g6-harness/cmd/g6-harness
-          diagnostics_dir="${RUNNER_TEMP}/artifacts/g6-readiness-${FD_ID}"
-          mkdir -p "${diagnostics_dir}"
-          {
-            printf 'candidate_sha=%s\n' "${GITHUB_SHA}"
-            printf 'go_version=%s\n' "${actual_go}"
-            printf 'harness_sha256=%s\n' "$(sha256sum "${harness_bin}" | awk '{print $1}')"
-          } >"${diagnostics_dir}/g6-harness-build-${FD_ID}.txt"
-          printf 'G6_HARNESS_BIN=%s\n' "${harness_bin}" >>"${GITHUB_ENV}"
-      - name: Prepare failure domain B
-        timeout-minutes: 10
-        run: scripts/g6-readiness-fd-b.sh prepare
+      - name: Run failure domain B prepare segment
+        run: '"${G6_HARNESS_BIN}" run-segment --domain fd-b --segment prepare'
       - name: Publish failure domain B rendezvous
         uses: ./.github/actions/g6-checkpoint-upload
         with:
@@ -586,11 +564,8 @@ jobs:
           --destination "${RUNNER_TEMP}/g6-rd-tunnel-fd-a"
           --timeout 1200s
           --peer-job "G6 Readiness Failure Domain A"
-      - name: Import the peer tunnel identities
-        run: scripts/g6-readiness-fd-b.sh import-peer-tunnel-nodes "${RUNNER_TEMP}/g6-rd-tunnel-fd-a"
-      - name: Prepare failure domain B images
-        timeout-minutes: 35
-        run: scripts/g6-readiness-fd-b.sh build-images
+      - name: Run failure domain B bootstrap segment
+        run: '"${G6_HARNESS_BIN}" run-segment --domain fd-b --segment bootstrap'
       - name: Wait for the shared trust rendezvous
         env:
           GITHUB_TOKEN: ${{ github.token }}
@@ -600,14 +575,8 @@ jobs:
           --destination "${RUNNER_TEMP}/g6-rd-shared"
           --timeout 1200s
           --peer-job "G6 Readiness Failure Domain A"
-      - name: Materialize the peer runtime trust
-        run: scripts/g6-readiness-fd-b.sh materialize-runtime "${RUNNER_TEMP}/g6-rd-shared"
-      - name: Start relay-b
-        timeout-minutes: 5
-        run: scripts/g6-readiness-fd-b.sh relay-up
-      - name: Start pinned tunnels
-        timeout-minutes: 5
-        run: scripts/g6-readiness-fd-b.sh tunnel-up
+      - name: Run failure domain B peer runtime segment
+        run: '"${G6_HARNESS_BIN}" run-segment --domain fd-b --segment peer-runtime'
       - name: Wait for the peer primary
         env:
           GITHUB_TOKEN: ${{ github.token }}
@@ -617,9 +586,8 @@ jobs:
           --destination "${RUNNER_TEMP}/g6-rd-primary-up"
           --timeout 1200s
           --peer-job "G6 Readiness Failure Domain A"
-      - name: Bootstrap the streaming standby
-        timeout-minutes: 15
-        run: scripts/g6-readiness-fd-b.sh standby-bootstrap "${RUNNER_TEMP}/g6-rd-primary-up"
+      - name: Run failure domain B standby segment
+        run: '"${G6_HARNESS_BIN}" run-segment --domain fd-b --segment standby'
       - name: Wait for the agent fleet rendezvous
         env:
           GITHUB_TOKEN: ${{ github.token }}
@@ -629,9 +597,8 @@ jobs:
           --destination "${RUNNER_TEMP}/g6-rd-agents"
           --timeout 1800s
           --peer-job "G6 Readiness Failure Domain A"
-      - name: Enroll the failure domain B fleet
-        timeout-minutes: 25
-        run: scripts/g6-readiness-fd-b.sh agents-enroll "${RUNNER_TEMP}/g6-rd-agents/nodes.tsv"
+      - name: Run failure domain B enrollment segment
+        run: '"${G6_HARNESS_BIN}" run-segment --domain fd-b --segment enroll'
       - name: Publish failure domain B enrollment
         uses: ./.github/actions/g6-checkpoint-upload
         with:
@@ -647,12 +614,8 @@ jobs:
           --destination "${RUNNER_TEMP}/g6-rd-trust-ready"
           --timeout 600s
           --peer-job "G6 Readiness Failure Domain A"
-      - name: Start the failure domain B agents
-        timeout-minutes: 10
-        run: scripts/g6-readiness-fd-b.sh agents-start "${RUNNER_TEMP}/g6-rd-trust-ready"
-      - name: Start the production load
-        timeout-minutes: 10
-        run: scripts/g6-readiness-fd-b.sh load-start
+      - name: Run failure domain B load segment
+        run: '"${G6_HARNESS_BIN}" run-segment --domain fd-b --segment load'
       - name: Publish the active load rendezvous
         uses: ./.github/actions/g6-checkpoint-upload
         with:
@@ -668,9 +631,8 @@ jobs:
           --destination "${RUNNER_TEMP}/g6-rd-isolation"
           --timeout 600s
           --peer-job "G6 Readiness Failure Domain A"
-      - name: Promote the standby under load
-        timeout-minutes: 8
-        run: scripts/g6-readiness-fd-b.sh promote "${RUNNER_TEMP}/g6-rd-isolation"
+      - name: Run failure domain B promotion segment
+        run: '"${G6_HARNESS_BIN}" run-segment --domain fd-b --segment promote'
       - name: Publish the promoted primary
         uses: ./.github/actions/g6-checkpoint-upload
         with:
@@ -686,9 +648,8 @@ jobs:
           --destination "${RUNNER_TEMP}/g6-rd-relay-rejoin-ready"
           --timeout 1800s
           --peer-job "G6 Readiness Failure Domain A"
-      - name: Capture the pre-fault relay-a session
-        timeout-minutes: 8
-        run: scripts/g6-readiness-fd-b.sh relay-pre-fault "${RUNNER_TEMP}/g6-rd-relay-rejoin-ready"
+      - name: Run failure domain B relay observation segment
+        run: '"${G6_HARNESS_BIN}" run-segment --domain fd-b --segment relay-observe'
       - name: Publish the pre-fault relay-a observation
         uses: ./.github/actions/g6-checkpoint-upload
         with:
@@ -704,42 +665,16 @@ jobs:
           --destination "${RUNNER_TEMP}/g6-rd-fd-a-ready"
           --timeout 1200s
           --peer-job "G6 Readiness Failure Domain A"
-      - name: Merge the peer control evidence timeline
-        timeout-minutes: 5
-        run: scripts/g6-readiness-fd-b.sh merge-peer-evidence "${RUNNER_TEMP}/g6-rd-fd-a-ready"
-      - name: Relay failover scenario
-        timeout-minutes: 10
-        run: scripts/g6-readiness-fd-b.sh scenario-relay "${RUNNER_TEMP}/g6-rd-fd-a-ready"
-      - name: Scheduler leadership failover scenario
-        timeout-minutes: 10
-        run: scripts/g6-readiness-fd-b.sh scenario-scheduler
-      - name: Connection owner fencing scenario
-        timeout-minutes: 10
-        run: scripts/g6-readiness-fd-b.sh scenario-owner
-      - name: Direct and relay path scenario
-        timeout-minutes: 10
-        run: scripts/g6-readiness-fd-b.sh scenario-path
-      - name: Outbox crash window after claim
-        timeout-minutes: 10
-        run: scripts/g6-readiness-fd-b.sh outbox-claim-before-send
-      - name: Outbox crash window after transport send
-        timeout-minutes: 10
-        run: scripts/g6-readiness-fd-b.sh outbox-send-before-mark
-      - name: Outbox crash window before result commit
-        timeout-minutes: 10
-        run: scripts/g6-readiness-fd-b.sh outbox-result-before-commit
-      - name: Arm failure domain B observation barriers
-        timeout-minutes: 3
-        run: scripts/g6-readiness-fd-b.sh window-barrier-arm
+      - name: Run failure domain B fault scenarios segment
+        run: '"${G6_HARNESS_BIN}" run-segment --domain fd-b --segment fault-scenarios'
       - name: Publish the observation-window barrier request
         uses: ./.github/actions/g6-checkpoint-upload
         with:
           name: g6-rd-window-barrier-arm-request-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/g6-readiness-${{ env.RUN_ID }}/outbox/window-barrier-arm-request
           retention-days: 1
-      - name: Preflight bounded resource evidence
-        timeout-minutes: 3
-        run: timeout --signal=TERM --kill-after=15s 120s scripts/g6-readiness-fd-b.sh resource-preflight
+      - name: Run failure domain B resource preflight segment
+        run: '"${G6_HARNESS_BIN}" run-segment --domain fd-b --segment resource-preflight'
       - name: Wait for failure domain A observation barriers
         env:
           GITHUB_TOKEN: ${{ github.token }}
@@ -749,15 +684,10 @@ jobs:
           --destination "${RUNNER_TEMP}/g6-rd-window-barrier-armed-fd-a"
           --timeout 600s
           --peer-job "G6 Readiness Failure Domain A"
-      - name: Run the bounded observation window
-        timeout-minutes: 11
-        run: scripts/g6-readiness-fd-b.sh window "${RUNNER_TEMP}/g6-rd-window-barrier-armed-fd-a"
-      - name: Collect the frozen evidence state
-        timeout-minutes: 10
-        run: scripts/g6-readiness-fd-b.sh evidence-collect
-      - name: Request the final failure-domain freeze
-        timeout-minutes: 5
-        run: scripts/g6-readiness-fd-b.sh final-freeze
+      - name: Run failure domain B observation window segment
+        run: '"${G6_HARNESS_BIN}" run-segment --domain fd-b --segment window'
+      - name: Run failure domain B evidence segment
+        run: '"${G6_HARNESS_BIN}" run-segment --domain fd-b --segment evidence'
       - name: Publish the final freeze request
         uses: ./.github/actions/g6-checkpoint-upload
         with:
@@ -784,7 +714,7 @@ jobs:
       - name: Clean failure domain B resources
         if: always()
         timeout-minutes: 7
-        run: timeout --signal=TERM --kill-after=15s 180s scripts/g6-readiness-fd-b.sh cleanup
+        run: '"${G6_HARNESS_BIN}" cleanup --domain fd-b --timeout 180s'
       - name: Upload failure domain B diagnostics
         if: always()
         timeout-minutes: 5
@@ -824,7 +754,7 @@ jobs:
           path: |
             .cache/downloads
             .tools
-          key: tooling-v4-g6-runtime-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'scripts/checksums.txt', 'scripts/bootstrap.sh', 'scripts/env.sh', 'scripts/g6-runtime/package-lock.json') }}
+          key: tooling-v5-g6-node-runtime-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'scripts/checksums.txt', 'scripts/bootstrap.sh', 'scripts/env.sh', 'scripts/g6-runtime/package-lock.json') }}
       - name: Restore shared npm cache
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
@@ -1069,7 +999,7 @@ jobs:
           path: |
             .cache/downloads
             .tools
-          key: tooling-v4-g6-runtime-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'scripts/checksums.txt', 'scripts/bootstrap.sh', 'scripts/env.sh', 'scripts/g6-runtime/package-lock.json') }}
+          key: tooling-v5-g6-node-runtime-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'scripts/checksums.txt', 'scripts/bootstrap.sh', 'scripts/env.sh', 'scripts/g6-runtime/package-lock.json') }}
       - name: Restore shared npm cache
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:

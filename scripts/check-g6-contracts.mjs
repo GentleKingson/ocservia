@@ -33,6 +33,25 @@ const rendezvousSchemas = [
   ["docs/acceptance/g6-checkpoint-schema.json", "ocservia.g6-checkpoint.v1"],
   ["docs/acceptance/g6-rendezvous-result-schema.json", "ocservia.g6-rendezvous-result.v1"],
 ];
+const runtimeHarnessSchemas = [
+  ["docs/acceptance/g6-runtime-state-schema.json", "ocservia.g6-runtime-state.v1"],
+  ["docs/acceptance/g6-runtime-event-schema.json", "ocservia.g6-runtime-event.v1"],
+  ["docs/acceptance/g6-phase-result-schema.json", "ocservia.g6-phase-result.v1"],
+  ["docs/acceptance/g6-resource-registry-schema.json", "ocservia.g6-resource-registry.v1"],
+];
+const phaseFailureClasses = [
+  "product_assertion_failed",
+  "harness_contract_failed",
+  "runner_infrastructure_failed",
+  "peer_failed",
+  "peer_checkpoint_timeout",
+  "phase_timeout",
+  "phase_cancelled",
+  "evidence_assembly_failed",
+  "secret_scan_failed",
+  "verification_failed",
+  "cleanup_failed",
+];
 const parsedSchemas = new Map();
 for (const [path, version] of schemas) {
   const schema = JSON.parse(read(path));
@@ -110,6 +129,26 @@ for (const [path, version] of rendezvousSchemas) {
     if (!schema.required?.includes(binding)) {
       fail(`${path} must require exact ${binding} binding`);
     }
+  }
+}
+
+for (const [path, version] of runtimeHarnessSchemas) {
+  const schema = JSON.parse(read(path));
+  if (
+    schema.$schema !== "https://json-schema.org/draft/2020-12/schema" ||
+    schema.type !== "object" ||
+    schema.additionalProperties !== false ||
+    schema.properties?.schema_version?.const !== version ||
+    !schema.required?.includes("domain") ||
+    !schema.required?.includes("binding")
+  ) {
+    fail(`${path} must define a closed exact-bound ${version} draft 2020-12 contract`);
+  }
+  if (
+    version === "ocservia.g6-phase-result.v1" &&
+    !same(schema.properties.failure.properties.class.enum, phaseFailureClasses)
+  ) {
+    fail(`${path} failure classes drifted from the frozen harness taxonomy`);
   }
 }
 
