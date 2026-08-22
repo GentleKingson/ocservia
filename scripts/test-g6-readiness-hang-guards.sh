@@ -9,6 +9,7 @@ POSTGRES_INIT="${ROOT}/deploy/g6-readiness/postgres-init/001-g6-readiness.sh"
 LIB="${ROOT}/scripts/g6-readiness-lib.sh"
 FD_A="${ROOT}/scripts/g6-readiness-fd-a.sh"
 FD_B="${ROOT}/scripts/g6-readiness-fd-b.sh"
+G6_RENDEZVOUS="${ROOT}/tools/g6-harness/internal/rendezvous/client.go"
 
 ruby -r yaml - "${WORKFLOW}" "${CI_WORKFLOW}" <<'RUBY'
 workflow = YAML.safe_load(File.read(ARGV.fetch(0)), aliases: true)
@@ -119,7 +120,7 @@ reject("assembly must always publish a structured partial or complete bundle") u
 fd_a_steps = jobs.fetch("g6-rd-fd-a").fetch("steps")
 promoted_wait = fd_a_steps.find { |step| step["name"] == "Wait for the promoted primary" }
 reject("fd-a must wait for the promoted-primary artifact") unless promoted_wait
-wait_seconds = promoted_wait.fetch("run")[/g6-rd-new-primary[^\n]*\s(\d+)\s+"G6 Readiness Failure Domain B"/, 1]&.to_i
+wait_seconds = promoted_wait.fetch("run")[/--timeout\s+(\d+)s/, 1]&.to_i
 producer_minutes = critical_timeouts.fetch("g6-rd-fd-b").fetch("Promote the standby under load")
 reject("the promoted-primary artifact wait must outlive its producer timeout") unless wait_seconds && wait_seconds > producer_minutes * 60
 RUBY
@@ -426,6 +427,22 @@ grep -qF 'REAL_E2E_ARTIFACT_CONNECT_TIMEOUT_SECONDS:-5' "${ARTIFACT_HELPER}" || 
   echo "artifact API calls must have a connect timeout" >&2
   exit 1
 }
+if grep -qF 'scripts/real-e2e-artifact.sh wait-download' "${WORKFLOW}"; then
+  echo "G6 must not call the legacy Bash artifact waiter" >&2
+  exit 1
+fi
+grep -qF 'context.WithTimeoutCause' "${G6_RENDEZVOUS}" || {
+  echo "the Go rendezvous client must carry an aggregate timeout cause" >&2
+  exit 1
+}
+grep -qF 'http.NewRequestWithContext' "${G6_RENDEZVOUS}" || {
+  echo "every Go rendezvous HTTP request must carry a request context" >&2
+  exit 1
+}
+if grep -qE 'exec\.Command|time\.Sleep|[^[:alnum:]_]curl[^[:alnum:]_]' "${G6_RENDEZVOUS}"; then
+  echo "the Go rendezvous client must not introduce unbounded shell or sleep loops" >&2
+  exit 1
+fi
 grep -qF 'REAL_E2E_ARTIFACT_API_TIMEOUT_SECONDS:-20' "${ARTIFACT_HELPER}" || {
   echo "artifact API calls must have a hard request timeout" >&2
   exit 1

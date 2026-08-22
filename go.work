@@ -1,3 +1,6 @@
 go 1.26.5
 
-use ./control-plane
+use (
+	./control-plane
+	./tools/g6-harness
+)

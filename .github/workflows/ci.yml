@@ -45,9 +45,9 @@ jobs:
             .cache/go-build
             .cache/go-mod
             .cache/gopath
-          key: go-v4-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'go.work', 'go.work.sum', 'control-plane/go.mod', 'control-plane/go.sum') }}-${{ github.sha }}
+          key: go-v4-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'go.work', 'go.work.sum', 'control-plane/go.mod', 'control-plane/go.sum', 'tools/g6-harness/go.mod') }}-${{ github.sha }}
           restore-keys: |
-            go-v4-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'go.work', 'go.work.sum', 'control-plane/go.mod', 'control-plane/go.sum') }}-
+            go-v4-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'go.work', 'go.work.sum', 'control-plane/go.mod', 'control-plane/go.sum', 'tools/g6-harness/go.mod') }}-
             go-v4-${{ runner.os }}-${{ runner.arch }}-
       - name: Enable sccache GitHub Actions backend
         uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
@@ -109,9 +109,9 @@ jobs:
             .cache/go-build
             .cache/go-mod
             .cache/gopath
-          key: go-v4-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'go.work', 'go.work.sum', 'control-plane/go.mod', 'control-plane/go.sum') }}-${{ github.sha }}
+          key: go-v4-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'go.work', 'go.work.sum', 'control-plane/go.mod', 'control-plane/go.sum', 'tools/g6-harness/go.mod') }}-${{ github.sha }}
           restore-keys: |
-            go-v4-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'go.work', 'go.work.sum', 'control-plane/go.mod', 'control-plane/go.sum') }}-
+            go-v4-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'go.work', 'go.work.sum', 'control-plane/go.mod', 'control-plane/go.sum', 'tools/g6-harness/go.mod') }}-
             go-v4-${{ runner.os }}-${{ runner.arch }}-
       - name: Bootstrap pinned Go tools
         run: scripts/bootstrap.sh go-quality
@@ -173,9 +173,9 @@ jobs:
             .cache/go-build
             .cache/go-mod
             .cache/gopath
-          key: go-v4-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'go.work', 'go.work.sum', 'control-plane/go.mod', 'control-plane/go.sum') }}-${{ github.sha }}
+          key: go-v4-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'go.work', 'go.work.sum', 'control-plane/go.mod', 'control-plane/go.sum', 'tools/g6-harness/go.mod') }}-${{ github.sha }}
           restore-keys: |
-            go-v4-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'go.work', 'go.work.sum', 'control-plane/go.mod', 'control-plane/go.sum') }}-
+            go-v4-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'go.work', 'go.work.sum', 'control-plane/go.mod', 'control-plane/go.sum', 'tools/g6-harness/go.mod') }}-
             go-v4-${{ runner.os }}-${{ runner.arch }}-
       - name: Bootstrap pinned Go tools
         run: scripts/bootstrap.sh go-test
@@ -232,9 +232,9 @@ jobs:
             .cache/go-build
             .cache/go-mod
             .cache/gopath
-          key: go-v4-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'go.work', 'go.work.sum', 'control-plane/go.mod', 'control-plane/go.sum') }}-${{ github.sha }}
+          key: go-v4-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'go.work', 'go.work.sum', 'control-plane/go.mod', 'control-plane/go.sum', 'tools/g6-harness/go.mod') }}-${{ github.sha }}
           restore-keys: |
-            go-v4-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'go.work', 'go.work.sum', 'control-plane/go.mod', 'control-plane/go.sum') }}-
+            go-v4-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'go.work', 'go.work.sum', 'control-plane/go.mod', 'control-plane/go.sum', 'tools/g6-harness/go.mod') }}-
             go-v4-${{ runner.os }}-${{ runner.arch }}-
       - name: Bootstrap pinned Go tools
         run: scripts/bootstrap.sh go-test
@@ -320,9 +320,9 @@ jobs:
             .cache/go-build
             .cache/go-mod
             .cache/gopath
-          key: go-v4-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'go.work', 'go.work.sum', 'control-plane/go.mod', 'control-plane/go.sum') }}-${{ github.sha }}
+          key: go-v4-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'go.work', 'go.work.sum', 'control-plane/go.mod', 'control-plane/go.sum', 'tools/g6-harness/go.mod') }}-${{ github.sha }}
           restore-keys: |
-            go-v4-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'go.work', 'go.work.sum', 'control-plane/go.mod', 'control-plane/go.sum') }}-
+            go-v4-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'go.work', 'go.work.sum', 'control-plane/go.mod', 'control-plane/go.sum', 'tools/g6-harness/go.mod') }}-
             go-v4-${{ runner.os }}-${{ runner.arch }}-
       - name: Enable sccache GitHub Actions backend
         uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
@@ -718,9 +718,9 @@ jobs:
             .cache/go-build
             .cache/go-mod
             .cache/gopath
-          key: go-v4-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'go.work', 'go.work.sum', 'control-plane/go.mod', 'control-plane/go.sum') }}-${{ github.sha }}
+          key: go-v4-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'go.work', 'go.work.sum', 'control-plane/go.mod', 'control-plane/go.sum', 'tools/g6-harness/go.mod') }}-${{ github.sha }}
           restore-keys: |
-            go-v4-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'go.work', 'go.work.sum', 'control-plane/go.mod', 'control-plane/go.sum') }}-
+            go-v4-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'go.work', 'go.work.sum', 'control-plane/go.mod', 'control-plane/go.sum', 'tools/g6-harness/go.mod') }}-
             go-v4-${{ runner.os }}-${{ runner.arch }}-
       - name: Enable sccache GitHub Actions backend
         uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11

@@ -27,6 +27,8 @@ G6_TUNNEL_LIB="${ROOT}/rust/crates/g6-tunnel/src/lib.rs"
 RELAY_DOCKERFILE="${ROOT}/deploy/production/relay.Dockerfile"
 POSTGRES_INIT="${ROOT}/deploy/g6-readiness/postgres-init/001-g6-readiness.sh"
 OCSERV_FIXTURE="${ROOT}/deploy/g6-readiness/fake-ocserv/shims/ocserv"
+RENDEZVOUS_CONTRACT="${ROOT}/tools/g6-harness/internal/rendezvous/contract.go"
+CHECKPOINT_ACTION="${ROOT}/.github/actions/g6-checkpoint-upload/action.yml"
 
 ruby -r yaml - "${WORKFLOW}" "${COMPOSE_FILE}" "${CI_WORKFLOW}" <<'RUBY'
 workflow_path, compose_path, ci_workflow_path = ARGV
@@ -92,7 +94,12 @@ jobs.each do |job_id, job|
   reject("#{job_id} job env must not reference the step-only runner context") if job.fetch("env", {}).values.any? { |value| value.to_s.include?("runner.") }
   timeout_bound = job_id.start_with?("g6-rd-fd-") ? 90 : (job_id == "g6-rd-release-image" ? 35 : 20)
   reject("#{job_id} must stay within the bounded window") unless job.fetch("timeout-minutes") <= timeout_bound
-  reject("#{job_id} Action is not pinned to a full SHA") if Array(job.fetch("steps")).any? { |step| step.key?("uses") && !step.fetch("uses").match?(/@[0-9a-f]{40}\z/) }
+  reject("#{job_id} Action is not pinned to a full SHA or exact local path") if
+    Array(job.fetch("steps")).any? do |step|
+      step.key?("uses") &&
+        !step.fetch("uses").match?(/@[0-9a-f]{40}\z/) &&
+        step.fetch("uses") != "./.github/actions/g6-checkpoint-upload"
+    end
   reject("#{job_id} must not force a failing check green") if Array(job.fetch("steps")).any? { |step| step.key?("run") && step.fetch("run").include?("continue-on-error") }
   reject("#{job_id} must not mask a failed step") if Array(job.fetch("steps")).any? { |step| step["continue-on-error"] == true }
   environment = job.fetch("environment").fetch("name")
@@ -148,7 +155,7 @@ release_images = release_variables.to_h { |variable| [variable, release_job.fetc
   bootstrap_runs = steps.each_with_object([]) do |step, runs|
     runs << step["run"] if step["run"]&.include?("scripts/bootstrap.sh")
   end
-  reject("#{job_id} must bootstrap only the minimal pinned G6 Node runtime") unless
+  reject("#{job_id} must bootstrap only the minimal pinned G6 Go and Node runtime") unless
     bootstrap_runs == ["scripts/bootstrap.sh g6-runtime"]
   reject("#{job_id} must not perform a host-side Rust build") if
     steps.any? { |step| step.fetch("run", "").match?(/(?:bootstrap\.sh native|\bcargo (?:build|run|test)\b)/) }
@@ -162,11 +169,52 @@ release_images = release_variables.to_h { |variable| [variable, release_job.fetc
   reject("#{job_id} diagnostics must have a hard timeout") unless diagnostics.start_with?("timeout --signal=TERM --kill-after=15s 120s ")
   reject("#{job_id} cleanup must have a hard timeout") unless cleanup.start_with?("timeout --signal=TERM --kill-after=15s 180s ")
   peer = job_id.end_with?("a") ? "G6 Readiness Failure Domain B" : "G6 Readiness Failure Domain A"
-  waits = steps.select { |step| step["run"]&.include?("real-e2e-artifact.sh wait-download") }
-  reject("#{job_id} artifact waits must name their producer job") unless waits.all? { |step| step.fetch("run").end_with?(%Q{"#{peer}"}) }
+  waits = steps.select { |step| step["run"]&.include?(%Q{"${G6_HARNESS_BIN}" wait-download}) }
+  reject("#{job_id} must use the Go client for every rendezvous wait") if waits.empty?
+  reject("#{job_id} artifact waits must name their producer job") unless
+    waits.all? { |step| step.fetch("run").include?(%Q{--peer-job "#{peer}"}) }
+  reject("#{job_id} must not call the legacy Bash artifact waiter") if
+    steps.any? { |step| step.fetch("run", "").include?("real-e2e-artifact.sh wait-download") }
+  builds = steps.select { |step| step["name"] == "Build the commit-bound G6 rendezvous client" }
+  reject("#{job_id} must build exactly one commit-bound Go rendezvous client") unless
+    builds.length == 1 && builds.first.fetch("run").include?("./tools/g6-harness/cmd/g6-harness")
+  build = builds.first.fetch("run")
+  reject("#{job_id} must load the repository-pinned toolchain environment") unless
+    build.include?("source scripts/env.sh")
+  reject("#{job_id} must build with the installed pinned Go binary") unless
+    build.include?('pinned_go="${GITHUB_WORKSPACE}/.tools/go/bin/go"') &&
+      build.include?('GOTOOLCHAIN=local "${pinned_go}" build -trimpath')
+  reject("#{job_id} must verify the exact locked Go version before building") unless
+    build.include?(%q{expected_go="go$(sed -n 's/^go=//p' toolchains.lock)"}) &&
+      build.include?('actual_go="$("${pinned_go}" env GOVERSION)"') &&
+      build.include?('test "${actual_go}" = "${expected_go}"')
+  reject("#{job_id} must reject an ambient Go binary") unless
+    build.include?('test "$(command -v go)" = "${pinned_go}"')
+  reject("#{job_id} must retain the harness toolchain and executable digest in diagnostics") unless
+    build.include?('printf \'go_version=%s\\n\' "${actual_go}"') &&
+      build.include?('printf \'harness_sha256=%s\\n\'') &&
+      build.include?('"${RUNNER_TEMP}/artifacts/g6-readiness-${FD_ID}"')
+  reject("#{job_id} must not fall back to a bare ambient go build") if
+    build.match?(/(?:^|\s)go\s+build(?:\s|$)/)
 end
 fd_a_steps = Array(jobs.fetch("g6-rd-fd-a").fetch("steps"))
 fd_b_steps = Array(jobs.fetch("g6-rd-fd-b").fetch("steps"))
+checkpoint_uploads = (fd_a_steps + fd_b_steps).select do |step|
+  step["uses"] == "./.github/actions/g6-checkpoint-upload"
+end
+waited_names = (fd_a_steps + fd_b_steps).each_with_object([]) do |step, names|
+  name = step.fetch("run", "")[/--name\s+"([^"]+)"/, 1]
+  names << name if name
+end
+published_names = checkpoint_uploads.map do |step|
+  step.fetch("with").fetch("name")
+    .gsub("${{ github.run_id }}", "${GITHUB_RUN_ID}")
+    .gsub("${{ github.run_attempt }}", "${GITHUB_RUN_ATTEMPT}")
+end
+reject("every waited checkpoint must have exactly one typed producer upload") unless
+  waited_names.sort == published_names.sort && waited_names.uniq.length == waited_names.length
+reject("all current rendezvous uploads must use the typed checkpoint action") unless
+  checkpoint_uploads.length == 16
 relay_pre_fault = fd_b_steps.find { |step| step["name"] == "Capture the pre-fault relay-a session" }
 reject("the pre-fault relay phase must outlive its existing bounded inner operations") unless
   relay_pre_fault&.fetch("timeout-minutes") == 8
@@ -4390,9 +4438,9 @@ fi
 # fault scenarios must precede the bounded window, and the frozen state
 # must be collected before the bundle is built and verified.
 order_of() {
-  grep -n "$1" "${WORKFLOW}" | head -1 | cut -d: -f1
+  grep -n -- "$1" "${WORKFLOW}" | head -1 | cut -d: -f1
 }
-fd_a_load_wait="$(order_of 'wait-download "g6-rd-load-active')"
+fd_a_load_wait="$(order_of '--name "g6-rd-load-active')"
 fd_a_pitr="$(order_of 'fd-a.sh pitr-prepare')"
 if [[ -z "${fd_a_load_wait}" || -z "${fd_a_pitr}" || "${fd_a_load_wait}" -ge "${fd_a_pitr}" ]]; then
   echo "fd-a must wait for the active load before recording PITR markers" >&2
@@ -4408,11 +4456,11 @@ if [[ -z "${fd_a_tunnel_up}" || -z "${fd_a_shared_stage}" || -z "${fd_a_shared_u
   exit 1
 fi
 fd_a_enroll="$(order_of 'fd-a.sh agents-enroll')"
-fd_a_peer_enrolled="$(order_of 'wait-download "g6-rd-agents-enrolled-fd-b')"
+fd_a_peer_enrolled="$(order_of '--name "g6-rd-agents-enrolled-fd-b')"
 fd_a_trust_reload="$(order_of 'fd-a.sh transport-trust-reload')"
 fd_a_agents_start="$(order_of 'fd-a.sh agents-start')"
 fd_b_enroll="$(order_of 'fd-b.sh agents-enroll')"
-fd_b_peer_trust="$(order_of 'wait-download "g6-rd-trust-ready')"
+fd_b_peer_trust="$(order_of '--name "g6-rd-trust-ready')"
 fd_b_agents_start="$(order_of 'fd-b.sh agents-start')"
 if [[ -z "${fd_a_enroll}" || -z "${fd_a_peer_enrolled}" || -z "${fd_a_trust_reload}" \
   || -z "${fd_a_agents_start}" || "${fd_a_enroll}" -ge "${fd_a_peer_enrolled}" \
@@ -4428,7 +4476,7 @@ if [[ -z "${fd_b_enroll}" || -z "${fd_b_peer_trust}" || -z "${fd_b_agents_start}
   exit 1
 fi
 fd_b_load="$(order_of 'fd-b.sh load-start')"
-fd_b_isolation_wait="$(order_of 'wait-download "g6-rd-isolation')"
+fd_b_isolation_wait="$(order_of '--name "g6-rd-isolation')"
 fd_b_promote="$(order_of 'fd-b.sh promote ')"
 if [[ -z "${fd_b_load}" || -z "${fd_b_promote}" || "${fd_b_load}" -ge "${fd_b_promote}" ]]; then
   echo "the load must start before the promotion consumes the isolation record" >&2
@@ -4457,10 +4505,10 @@ if [[ -z "${fd_b_freeze}" || -z "${fd_b_result}" \
   exit 1
 fi
 fd_a_ready="$(order_of 'fd-a.sh ready')"
-fd_a_freeze_wait="$(order_of 'wait-download "g6-rd-final-freeze')"
+fd_a_freeze_wait="$(order_of '--name "g6-rd-final-freeze')"
 fd_a_collect="$(order_of 'fd-a.sh evidence "${RUNNER_TEMP}/g6-rd-final-freeze')"
 fd_a_result="$(order_of 'fd-a.sh runtime-result')"
-fd_b_ready_wait="$(order_of 'wait-download "g6-rd-fd-a-ready')"
+fd_b_ready_wait="$(order_of '--name "g6-rd-fd-a-ready')"
 fd_b_scenario="$(order_of 'fd-b.sh scenario-scheduler')"
 if [[ -z "${fd_a_ready}" || -z "${fd_a_freeze_wait}" || -z "${fd_a_collect}" || -z "${fd_a_result}" \
   || "${fd_a_ready}" -ge "${fd_a_freeze_wait}" || "${fd_a_freeze_wait}" -ge "${fd_a_collect}" \
@@ -4547,7 +4595,7 @@ grep -q -- '--user 999:999' <<<"${rejoin_phase}" || {
   echo "pg_rewind and pg_basebackup must run as the PostgreSQL service user" >&2
   exit 1
 }
-promoted_wait="$(order_of 'wait-download "g6-rd-new-primary')"
+promoted_wait="$(order_of '--name "g6-rd-new-primary')"
 post_promotion_probe="$(order_of 'dual-primary-probes "${RUNNER_TEMP}/g6-rd-new-primary')"
 if [[ -z "${promoted_wait}" || -z "${post_promotion_probe}" || "${promoted_wait}" -ge "${post_promotion_probe}" ]]; then
   echo "former-primary probes must run after the replacement promotion" >&2
@@ -4801,17 +4849,24 @@ grep -q 'No credentials enter this bundle' "${FD_A}" || {
   exit 1
 }
 
-# Every artifact name the workflow waits on must pass the shared artifact
-# helper's allowlist.
+# Every artifact name the workflow waits on must exist in the typed Go
+# checkpoint registry for the exact run-scoped prefix.
 while IFS= read -r wait_name; do
-  concrete="${wait_name//\$\{GITHUB_RUN_ID\}/424242}"
-  concrete="${concrete//\$\{GITHUB_RUN_ATTEMPT\}/1}"
-  GITHUB_RUN_ID=424242 GITHUB_RUN_ATTEMPT=1 \
-    "${ROOT}/scripts/real-e2e-artifact.sh" validate-name "${concrete}" || {
-      echo "workflow artifact name is rejected by the shared validator: ${concrete}" >&2
-      exit 1
-    }
-done < <(grep -oE 'wait-download "[^"]+"' "${WORKFLOW}" | sed 's/^wait-download "//; s/"$//' | sort -u)
+  prefix="${wait_name%-\$\{GITHUB_RUN_ID\}-\$\{GITHUB_RUN_ATTEMPT\}}"
+  grep -qF "Prefix: \"${prefix}\"" "${RENDEZVOUS_CONTRACT}" || {
+    echo "workflow artifact name is absent from the typed checkpoint registry: ${prefix}" >&2
+    exit 1
+  }
+done < <(grep -oE -- '--name "g6-rd-[^"]+"' "${WORKFLOW}" | sed 's/^--name "//; s/"$//' | sort -u)
+
+grep -qF 'checkpoint-manifest' "${CHECKPOINT_ACTION}" || {
+  echo "the checkpoint upload action must generate a typed manifest before upload" >&2
+  exit 1
+}
+grep -qF 'actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a' "${CHECKPOINT_ACTION}" || {
+  echo "the checkpoint upload action must use the proven pinned official uploader" >&2
+  exit 1
+}
 
 # Every pinned action must reuse an exact `uses: action@sha` line already
 # proven by a merged workflow with hosted execution.

@@ -116,6 +116,7 @@ execution_profiles = {
   reject("bootstrap profile is missing: #{profile}") unless bootstrap.match?(/^  #{Regexp.escape(profile)}\)$/)
 end
 {
+  "g6-runtime" => ["install_go", "install_node", "install_npm", "install_g6_runtime_dependencies"],
   "go-test" => ["install_go", "verify_host_command jq"],
   "go-quality" => ["install_go", "install_go_quality_tools", "verify_host_command jq"],
   "go-rust-integration" => [
@@ -224,7 +225,7 @@ go_keys = go_jobs.map do |job_id|
   reject("#{job_id} Go cache paths changed") unless
     paths(cache).sort == [".cache/go-build", ".cache/go-mod", ".cache/gopath"].sort
   key = cache.fetch("with").fetch("key")
-  ["toolchains.lock", "go.work", "go.work.sum", "control-plane/go.mod", "control-plane/go.sum", "${{ github.sha }}"].each do |input|
+  ["toolchains.lock", "go.work", "go.work.sum", "control-plane/go.mod", "control-plane/go.sum", "tools/g6-harness/go.mod", "${{ github.sha }}"].each do |input|
     reject("#{job_id} Go cache key is missing #{input}") unless key.include?(input)
   end
   restore_keys = cache.fetch("with").fetch("restore-keys").lines.map(&:strip).reject(&:empty?)

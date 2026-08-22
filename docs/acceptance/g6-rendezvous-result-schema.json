@@ -1,0 +1,74 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/GentleKingson/ocservia/docs/acceptance/g6-rendezvous-result-schema.json",
+  "title": "Ocservia G6 Rendezvous Result",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "artifact_name",
+    "checkpoint",
+    "producer_domain",
+    "candidate_sha",
+    "run_id",
+    "run_attempt",
+    "environment_id",
+    "authority",
+    "started_at",
+    "completed_at",
+    "status"
+  ],
+  "properties": {
+    "schema_version": { "const": "ocservia.g6-rendezvous-result.v1" },
+    "artifact_name": { "type": "string", "minLength": 1 },
+    "checkpoint": { "type": "string", "pattern": "^[a-z0-9-]+$" },
+    "producer_domain": { "enum": ["fd-a", "fd-b"] },
+    "candidate_sha": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+    "run_id": { "type": "string", "pattern": "^[1-9][0-9]*$" },
+    "run_attempt": { "type": "integer", "minimum": 1 },
+    "environment_id": {
+      "type": "string",
+      "pattern": "^g6-[a-z0-9]{8,32}$"
+    },
+    "authority": { "enum": ["engineering", "production_readiness"] },
+    "started_at": { "type": "string", "format": "date-time" },
+    "completed_at": { "type": "string", "format": "date-time" },
+    "status": { "enum": ["passed", "failed"] },
+    "artifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["artifact_id", "artifact_digest"],
+      "properties": {
+        "artifact_id": { "type": "integer", "minimum": 1 },
+        "artifact_digest": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+      }
+    },
+    "manifest_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "failure": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["class", "code", "message"],
+      "properties": {
+        "class": {
+          "enum": [
+            "harness_contract_failed",
+            "runner_infrastructure_failed",
+            "peer_failed",
+            "peer_checkpoint_timeout"
+          ]
+        },
+        "code": { "type": "string", "pattern": "^[a-z0-9_]+$" },
+        "message": { "type": "string", "minLength": 1 },
+        "expected": { "type": "string" },
+        "actual": { "type": "string" }
+      }
+    }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "status": { "const": "passed" } } },
+      "then": { "required": ["artifact", "manifest_sha256"] },
+      "else": { "required": ["failure"] }
+    }
+  ]
+}

@@ -29,6 +29,16 @@ authority, plus the frozen release manifest digest; a mismatch fails closed.
 - `ocservia.g6-gate-result.v1` aggregates all preceding layers without
   converting an engineering rehearsal into a final production-readiness pass.
 
+Cross-runner rendezvous remains out-of-band through GitHub Actions artifacts,
+but it is no longer inferred from an artifact name or marker file alone.
+`ocservia.g6-checkpoint.v1` binds each checkpoint and every declared payload
+digest to the exact candidate, run, attempt, environment, authority, producer,
+and monotonic sequence. Consumers reject duplicate artifacts, sequence
+rollback, expired or swapped manifests, undeclared files, unsafe ZIP members,
+and artifact or payload digest mismatch. `ocservia.g6-rendezvous-result.v1`
+records every successful wait or structured fail-closed outcome, including
+peer failure, bounded timeout, GitHub API failure, and contract rejection.
+
 The harness records actual values and source artifact digests. It does not
 authoritatively declare limits, comparisons, per-item results, or the final
 result. `scripts/verify-g6-evidence.mjs` loads the exact SLO, topology, release

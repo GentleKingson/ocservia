@@ -29,6 +29,10 @@ const pipelineSchemas = [
 const auxiliarySchemas = [
   ["docs/acceptance/g6-builder-source-inventory-schema.json", "ocservia.g6-builder-source-inventory.v1"],
 ];
+const rendezvousSchemas = [
+  ["docs/acceptance/g6-checkpoint-schema.json", "ocservia.g6-checkpoint.v1"],
+  ["docs/acceptance/g6-rendezvous-result-schema.json", "ocservia.g6-rendezvous-result.v1"],
+];
 const parsedSchemas = new Map();
 for (const [path, version] of schemas) {
   const schema = JSON.parse(read(path));
@@ -83,6 +87,29 @@ for (const [path, version] of auxiliarySchemas) {
     schema.properties?.schema_version?.const !== version
   ) {
     fail(`${path} must define a closed ${version} draft 2020-12 contract`);
+  }
+}
+
+for (const [path, version] of rendezvousSchemas) {
+  const schema = JSON.parse(read(path));
+  if (
+    schema.$schema !== "https://json-schema.org/draft/2020-12/schema" ||
+    schema.type !== "object" ||
+    schema.additionalProperties !== false ||
+    schema.properties?.schema_version?.const !== version
+  ) {
+    fail(`${path} must define a closed ${version} draft 2020-12 contract`);
+  }
+  for (const binding of [
+    "candidate_sha",
+    "run_id",
+    "run_attempt",
+    "environment_id",
+    "authority",
+  ]) {
+    if (!schema.required?.includes(binding)) {
+      fail(`${path} must require exact ${binding} binding`);
+    }
   }
 }
 
@@ -213,6 +240,11 @@ if (!acceptanceReadme.includes("environment_id")) {
 for (const [, version] of pipelineSchemas) {
   if (!acceptanceReadme.includes(version)) {
     fail(`acceptance README must document the ${version} pipeline contract`);
+  }
+}
+for (const [, version] of rendezvousSchemas) {
+  if (!acceptanceReadme.includes(version)) {
+    fail(`acceptance README must document the ${version} rendezvous contract`);
   }
 }
 
