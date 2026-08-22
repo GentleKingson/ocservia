@@ -575,6 +575,47 @@ phase_isolate() {
   printf '%s\n' "${isolated}" >"${G6RD_OUTBOX}/isolation/isolated-at"
 }
 
+# Bounded smoke cut: preserve the real standby promotion path without the
+# formal profile's fifty-command/PITR assertions.
+phase_smoke_isolate() {
+  local outage isolated
+  require_file "${G6RD_STATE}/peer-pg-b-node-id"
+  mkdir -p "${G6RD_OUTBOX}/isolation"
+  g6rd_tunnel_forward pg-b-forward "$(<"${G6RD_STATE}/peer-pg-b-node-id")" 15432
+  G6_DB_PORT=15432 G6RD_PSQL_TIMEOUT_SECONDS=10 g6rd_psql -Atc \
+    "SELECT to_char(clock_timestamp() AT TIME ZONE 'UTC','YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"')" \
+    >"${G6RD_OUTBOX}/isolation/rto-started-at"
+  g6rd_psql -Atc \
+    "SELECT to_char(clock_timestamp() AT TIME ZONE 'UTC','YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"')" \
+    >"${G6RD_STATE}/outage-declared-at"
+  g6rd_compose stop scheduler api worker transportd >/dev/null 2>&1
+  g6rd_compose stop postgres
+  g6rd_now >"${G6RD_STATE}/isolated-at"
+  outage="$(<"${G6RD_STATE}/outage-declared-at")"
+  isolated="$(<"${G6RD_STATE}/isolated-at")"
+  jq -cn --arg outage_declared_at "${outage}" --arg isolated_at "${isolated}" --arg fd "${FD_ID}" \
+    '{outage_declared_at:$outage_declared_at,isolated_at:$isolated_at,failure_domain:$fd,profile:"smoke"}' \
+    >"${G6RD_OUTBOX}/isolation/isolation.json"
+  printf '%s\n' "${outage}" >"${G6RD_OUTBOX}/isolation/outage-declared-at"
+  printf '%s\n' "${isolated}" >"${G6RD_OUTBOX}/isolation/isolated-at"
+}
+
+phase_smoke_evidence() {
+  local promotion="${1:?promotion rendezvous is required}" out="${G6RD_OUTBOX}/smoke-final"
+  require_file "${promotion}/promoted-at"
+  mkdir -p "${out}/evidence"
+  cp -f "${promotion}/promoted-at" "${out}/evidence/promoted-at"
+  cp -f "${G6RD_OUTBOX}/agents/nodes.tsv" "${out}/evidence/nodes.tsv"
+  local running
+  running="$(g6rd_agent_compose ps --status running --services | grep -c "^agent-${FD_ID}-" || true)"
+  [[ "${running}" == "$(g6rd_agent_count)" ]] || { echo "smoke FD-A agent fleet is incomplete" >&2; return 1; }
+  jq -cn --arg candidate "${G6RD_CANDIDATE_SHA}" --arg environment "${G6RD_ENVIRONMENT_ID}" \
+    --arg domain "${FD_ID}" --argjson agents "${running}" \
+    '{schema_version:"ocservia.g6-smoke-observations.v1",profile:"smoke",candidate_sha:$candidate,environment_id:$environment,failure_domain:$domain,claims:{agents_running:$agents,promotion_observed:true,raw_evidence_frozen:true}}' \
+    >"${out}/smoke-observations.json"
+  g6rd_now >"${out}/evidence/frozen-at"
+}
+
 # Repeated write attempts against the stopped former primary, on fd-a's
 # clock. Every attempt must fail while the instance is down.
 phase_dual_primary_probes() {
@@ -1095,6 +1136,7 @@ agents-enroll) phase_agents_enroll ;;
 transport-trust-reload) phase_transport_trust_reload "${2:?fd-b enrollment rendezvous is required}" ;;
 agents-start) phase_agents_start ;;
 isolate) phase_isolate ;;
+smoke-isolate) phase_smoke_isolate ;;
 dual-primary-probes) phase_dual_primary_probes "${2:?promoted primary directory is required}" ;;
 pitr-restore) phase_pitr_restore ;;
 rejoin) phase_rejoin ;;
@@ -1104,6 +1146,7 @@ ready) phase_ready ;;
 window-barrier-arm) phase_window_barrier_arm "${2:?window barrier arm request directory is required}" ;;
 window-barrier-release-after-proof) phase_window_barrier_release_after_proof ;;
 evidence) phase_evidence "${2:?final-freeze directory is required}" ;;
+smoke-evidence) phase_smoke_evidence "${2:?promotion rendezvous is required}" ;;
 runtime-result) phase_runtime_result "${2:?job status is required}" ;;
 diagnostics) g6rd_diagnostics ;;
 cleanup) phase_cleanup ;;

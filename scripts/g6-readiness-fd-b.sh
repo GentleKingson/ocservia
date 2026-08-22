@@ -438,6 +438,43 @@ phase_load_start() {
   g6rd_now >"${G6RD_OUTBOX}/load-active/load-active-at"
 }
 
+phase_smoke_session() {
+  require_file "${NODES_FILE}"
+  G6RD_WORKSPACE_ID="$(<"${G6RD_STATE}/workspace-id")"
+  export G6RD_WORKSPACE_ID
+  g6rd_export_common_env
+  g6rd_timeline_init
+  g6rd_timeline_event smoke_session_started
+  g6rd_wait_until_deadline 90 3 "four smoke Agents connected" all_nodes_connected
+  local args=() node key="g6-load-${RUN_ID}-smoke" out="${G6RD_OUTBOX}/smoke-session"
+  readarray -t args < <(node_ids)
+  mkdir -p "${out}"
+  g6rd_probe_node_connection any "${args[@]}" >"${out}/connections.json"
+  node="$(awk -F'\t' '$1 == "g6-fd-a-01" {print $2}' "${NODES_FILE}")"
+  [[ -n "${node}" ]] || { echo "cross-FD smoke node is absent" >&2; return 1; }
+  g6rd_enqueue_command "${node}" "${key}"
+  g6rd_wait_until_deadline 120 2 "cross-FD smoke command result" wait_commands_settled "${key}"
+  capture_relay_command_proof "${key}" "${node}" "${out}/command-proof.json"
+  cp -f "${NODES_FILE}" "${out}/nodes.tsv"
+  printf '%s\n' "${G6RD_CANDIDATE_SHA}" >"${out}/candidate-sha"
+}
+
+phase_smoke_evidence() {
+  local out="${G6RD_OUTBOX}/smoke-final" args=()
+  require_file "${G6RD_STATE}/promoted-at"
+  mkdir -p "${out}/evidence"
+  readarray -t args < <(node_ids)
+  g6rd_probe_node_connection any "${args[@]}" >"${out}/evidence/post-promotion-connections.json"
+  cp -f "${G6RD_STATE}/era2-sessions.tsv" "${out}/evidence/era2-sessions.tsv"
+  cp -f "${G6RD_STATE}/promoted-at" "${out}/evidence/promoted-at"
+  stop_watchers
+  jq -cn --arg candidate "${G6RD_CANDIDATE_SHA}" --arg environment "${G6RD_ENVIRONMENT_ID}" \
+    --arg domain "${FD_ID}" --argjson agents "$(managed_node_count)" \
+    '{schema_version:"ocservia.g6-smoke-observations.v1",profile:"smoke",candidate_sha:$candidate,environment_id:$environment,failure_domain:$domain,claims:{managed_agents:$agents,primary_promoted:true,post_promotion_sessions:true,raw_evidence_frozen:true}}' \
+    >"${out}/smoke-observations.json"
+  g6rd_now >"${out}/evidence/frozen-at"
+}
+
 phase_promote() {
   local isolation="${1:?peer isolation directory is required}"
   require_file "${isolation}/isolation.json"
@@ -2875,6 +2912,7 @@ relay-up) phase_relay_up ;;
   agents-enroll) phase_agents_enroll "${2:?peer nodes tsv}" ;;
   agents-start) phase_agents_start "${2:?transport trust rendezvous is required}" ;;
   load-start) phase_load_start ;;
+  smoke-session) phase_smoke_session ;;
   promote) phase_promote "${2:?peer isolation directory}" ;;
   merge-peer-evidence) phase_merge_peer_evidence "${2:?peer evidence root}" ;;
 scenario-scheduler) phase_scenario_scheduler ;;
@@ -2890,6 +2928,7 @@ outbox-send-before-mark) phase_outbox_send_before_mark ;;
   window) phase_window "${2:?peer window-barrier acknowledgement is required}" ;;
   evidence-collect) phase_evidence_collect ;;
   final-freeze) phase_final_freeze ;;
+  smoke-evidence) phase_smoke_evidence ;;
   runtime-result) phase_runtime_result "${2:?job status is required}" ;;
   diagnostics) g6rd_diagnostics ;;
   cleanup-prelude) phase_cleanup_prelude ;;
