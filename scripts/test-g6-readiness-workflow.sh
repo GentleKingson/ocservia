@@ -324,7 +324,7 @@ release_images = release_variables.to_h { |variable| [variable, release_job.fetc
   domain = job_id.end_with?("a") ? "fd-a" : "fd-b"
   reject("#{job_id} cleanup must run through the typed bounded registry recovery path") unless
     cleanup == %Q{"${G6_HARNESS_BIN}" cleanup --domain #{domain} --timeout 180s}
-  peer = job_id.end_with?("a") ? "G6 Readiness Failure Domain B" : "G6 Readiness Failure Domain A"
+  peer = job_id.end_with?("a") ? "G6 Readiness Core / G6 Readiness Failure Domain B" : "G6 Readiness Core / G6 Readiness Failure Domain A"
   waits = steps.select { |step| step["run"]&.include?(%Q{"${G6_HARNESS_BIN}" wait-download}) }
   reject("#{job_id} must use the Go client for every rendezvous wait") if waits.empty?
   reject("#{job_id} artifact waits must name their producer job") unless

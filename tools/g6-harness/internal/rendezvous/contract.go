@@ -147,16 +147,16 @@ func peerJobName(contract Contract) (string, error) {
 	if contract.Profile == "smoke" {
 		switch contract.ProducerDomain {
 		case "fd-a":
-			return "G6 Harness Smoke FD-A", nil
+			return "G6 Harness Smoke Core / G6 Harness Smoke FD-A", nil
 		case "fd-b":
-			return "G6 Harness Smoke FD-B", nil
+			return "G6 Harness Smoke Core / G6 Harness Smoke FD-B", nil
 		}
 	}
 	switch contract.ProducerDomain {
 	case "fd-a":
-		return "G6 Readiness Failure Domain A", nil
+		return "G6 Readiness Core / G6 Readiness Failure Domain A", nil
 	case "fd-b":
-		return "G6 Readiness Failure Domain B", nil
+		return "G6 Readiness Core / G6 Readiness Failure Domain B", nil
 	default:
 		return "", fmt.Errorf("unsupported producer domain %q", contract.ProducerDomain)
 	}

@@ -53,7 +53,7 @@ func TestSmokeContractUsesSeparateNamespaceAndPeerJob(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if job != "G6 Harness Smoke FD-B" {
+	if job != "G6 Harness Smoke Core / G6 Harness Smoke FD-B" {
 		t.Fatalf("smoke peer job = %q", job)
 	}
 	if _, err := ResolveContract("g6-rd-load-active-424242-3", testBinding()); err != nil {
