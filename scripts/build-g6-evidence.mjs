@@ -999,10 +999,18 @@ const tracePopulation = [
 });
 
 const firstAttemptByCommand = new Map();
+const firstSentAttemptByCommand = new Map();
 for (const attempt of attempts) {
   const current = firstAttemptByCommand.get(attempt.command_id);
   if (!current || attempt.attempt_number < current.attempt_number) {
     firstAttemptByCommand.set(attempt.command_id, attempt);
+  }
+  const sent = firstSentAttemptByCommand.get(attempt.command_id);
+  if (
+    attempt.state === "sent" &&
+    (!sent || attempt.attempt_number < sent.attempt_number)
+  ) {
+    firstSentAttemptByCommand.set(attempt.command_id, attempt);
   }
 }
 
@@ -1034,9 +1042,13 @@ for (const [index, snapshotCommand] of windowOpeningActive.commands.entries()) {
     typeof snapshotCommand !== "object" ||
     Array.isArray(snapshotCommand) ||
     Object.keys(snapshotCommand).sort().join(",") !==
-      "command_id,node_id,state" ||
+      "command_id,node_id,sent_attempt_count,state" ||
     typeof snapshotCommand.command_id !== "string" ||
-    !["dispatched", "accepted", "running"].includes(snapshotCommand.state)
+    !["dispatched", "accepted", "running", "unknown"].includes(
+      snapshotCommand.state,
+    ) ||
+    !Number.isInteger(snapshotCommand.sent_attempt_count) ||
+    snapshotCommand.sent_attempt_count < 1
   ) {
     fail(`${label} is malformed`);
   }
@@ -1053,7 +1065,7 @@ for (const [index, snapshotCommand] of windowOpeningActive.commands.entries()) {
   if (openingCommandIds.has(command.id) || openingNodeIds.has(nodeId)) {
     fail("the window opening inflight snapshot repeats a command or managed node");
   }
-  const attempt = firstAttemptByCommand.get(command.id);
+  const attempt = firstSentAttemptByCommand.get(command.id);
   if (
     !attempt ||
     compareRfc3339(
@@ -1069,7 +1081,7 @@ for (const [index, snapshotCommand] of windowOpeningActive.commands.entries()) {
       "window opening inflight snapshot",
     ) <= 0
   ) {
-    fail(`${label} was not dispatched and result-free at the snapshot boundary`);
+    fail(`${label} was not transport-accepted and result-free at the snapshot boundary`);
   }
   openingCommandIds.add(command.id);
   openingNodeIds.add(nodeId);

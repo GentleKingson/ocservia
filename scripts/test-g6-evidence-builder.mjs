@@ -405,6 +405,7 @@ write(
         command_id: command.id,
         node_id: command.node_id,
         state: "running",
+        sent_attempt_count: 1,
       })),
       result_count: 0,
     },
@@ -1682,12 +1683,23 @@ try {
     join(work, "incomplete-opening-snapshot-bundle"),
     "window opening inflight snapshot is not the exact managed population",
   );
+  const unknownOpeningSnapshot = JSON.parse(originalOpeningSnapshot);
+  unknownOpeningSnapshot.commands[0].state = "unknown";
+  write(openingSnapshotPath, `${JSON.stringify(unknownOpeningSnapshot)}\n`);
+  runBuilder(join(work, "unknown-opening-snapshot-bundle"), "production_readiness");
+  const unsentOpeningSnapshot = JSON.parse(originalOpeningSnapshot);
+  unsentOpeningSnapshot.commands[0].sent_attempt_count = 0;
+  write(openingSnapshotPath, `${JSON.stringify(unsentOpeningSnapshot)}\n`);
+  expectBuilderFailure(
+    join(work, "unsent-opening-snapshot-bundle"),
+    "window opening inflight snapshot command 1 is malformed",
+  );
   const tiedOpeningSnapshot = JSON.parse(originalOpeningSnapshot);
   tiedOpeningSnapshot.captured_at = commands[0].updated_at;
   write(openingSnapshotPath, `${JSON.stringify(tiedOpeningSnapshot)}\n`);
   expectBuilderFailure(
     join(work, "terminal-tie-opening-snapshot-bundle"),
-    "was not dispatched and result-free at the snapshot boundary",
+    "was not transport-accepted and result-free at the snapshot boundary",
   );
   write(openingSnapshotPath, originalOpeningSnapshot);
   const builtSessionInventory = JSON.parse(

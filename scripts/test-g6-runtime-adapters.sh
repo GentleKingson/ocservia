@@ -4236,9 +4236,11 @@ for token in \
 done
 for token in \
   "count(DISTINCT opening.node_id)" \
-  "opening.state IN ('dispatched','accepted','running')" \
+  "opening.state IN ('dispatched','accepted','running','unknown')" \
+  "attempt.state='sent'" \
   'count(result.command_id)' \
-  '"${expected}"$'\''\t'\''"${expected}"$'\''\t'\''"${expected}"$'\''\t0'; do
+  "printf '%s\\t%s\\t%s\\t0\\t%s'" \
+  '[[ "${observed}" == "${required}" ]]'; do
   grep -qF "${token}" <<<"${window_active_predicate}" || {
     echo "the all-fleet production inflight predicate is incomplete: ${token}" >&2
     exit 1
@@ -4249,7 +4251,8 @@ for token in \
   'HH24:MI:SS.US\"Z\"' \
   '(.commands | length) == $expected' \
   '([.commands[].node_id] | unique | length) == $expected' \
-  'all(.commands[]; (.state | IN("dispatched","accepted","running")))' \
+  '(.state | IN("dispatched","accepted","running","unknown"))' \
+  '.sent_attempt_count >= 1' \
   '.result_count == 0' \
   'mv -f -- "${temporary}" "${output}"'; do
   grep -qF "${token}" <<<"${window_active_capture}" || {
@@ -4344,19 +4347,24 @@ done
   eval "${window_active_predicate}"
   export RUN_ID=fixture-run-fd-b
   managed_node_count() { printf '2\n'; }
-  psql_window_probe() { printf '2\t2\t2\t0\n'; }
+  psql_window_probe() { printf '2\t2\t2\t0\t2\n'; }
   window_opening_commands_active || {
     echo "the all-fleet production inflight predicate rejected an exact active population" >&2
     exit 1
   }
-  psql_window_probe() { printf '2\t2\t1\t0\n'; }
+  psql_window_probe() { printf '2\t2\t1\t0\t2\n'; }
   if window_opening_commands_active; then
     echo "the all-fleet production inflight predicate accepted a non-active command" >&2
     exit 1
   fi
-  psql_window_probe() { printf '2\t2\t2\t1\n'; }
+  psql_window_probe() { printf '2\t2\t2\t1\t2\n'; }
   if window_opening_commands_active; then
     echo "the all-fleet production inflight predicate accepted a completed result" >&2
+    exit 1
+  fi
+  psql_window_probe() { printf '2\t2\t2\t0\t1\n'; }
+  if window_opening_commands_active; then
+    echo "the all-fleet production inflight predicate accepted a command without a sent attempt" >&2
     exit 1
   fi
 )

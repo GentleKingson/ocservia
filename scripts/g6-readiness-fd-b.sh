@@ -2353,7 +2353,7 @@ wait_for_window_enqueue_wave() {
 }
 
 window_opening_commands_active() {
-  local expected prefix observed
+  local expected prefix observed required
   expected="$(managed_node_count)" || return 1
   prefix="g6-window-${RUN_ID}-opening-"
   observed="$(psql_window_probe -F $'\t' -Atc \
@@ -2363,11 +2363,15 @@ window_opening_commands_active() {
        WHERE command.idempotency_key LIKE '${prefix}%'
      )
      SELECT count(*),count(DISTINCT opening.node_id),
-       count(*) FILTER (WHERE opening.state IN ('dispatched','accepted','running')),
-       count(result.command_id)
+       count(*) FILTER (WHERE opening.state IN ('dispatched','accepted','running','unknown')),
+       count(result.command_id),
+       count(*) FILTER (WHERE EXISTS (
+         SELECT 1 FROM command_attempts AS attempt
+         WHERE attempt.command_id=opening.id AND attempt.state='sent'))
      FROM opening
      LEFT JOIN agent_command_results AS result ON result.command_id=opening.id")" || return 1
-  [[ "${observed}" == "${expected}"$'\t'"${expected}"$'\t'"${expected}"$'\t0' ]]
+  required="$(printf '%s\t%s\t%s\t0\t%s' "${expected}" "${expected}" "${expected}" "${expected}")"
+  [[ "${observed}" == "${required}" ]]
 }
 
 capture_window_opening_active() {
@@ -2387,7 +2391,10 @@ capture_window_opening_active() {
        'expected_count',${expected},
        'commands',coalesce(jsonb_agg(jsonb_build_object(
          'command_id',opening.id::text,'node_id',opening.node_id::text,
-         'state',opening.state) ORDER BY opening.node_id),'[]'::jsonb),
+         'state',opening.state,
+         'sent_attempt_count',(SELECT count(*) FROM command_attempts AS attempt
+           WHERE attempt.command_id=opening.id AND attempt.state='sent'))
+         ORDER BY opening.node_id),'[]'::jsonb),
        'result_count',count(result.command_id))
      FROM opening
      LEFT JOIN agent_command_results AS result ON result.command_id=opening.id" \
@@ -2400,10 +2407,12 @@ capture_window_opening_active() {
     and .result_count == 0
     and (.commands | length) == $expected
     and ([.commands[].node_id] | unique | length) == $expected
-    and all(.commands[]; (.state | IN("dispatched","accepted","running")))
+    and all(.commands[];
+      (.state | IN("dispatched","accepted","running","unknown"))
+      and .sent_attempt_count >= 1)
   ' "${temporary}" >/dev/null; then
     rm -f -- "${temporary}"
-    echo "the frozen opening-wave proof is not the exact active managed population" >&2
+    echo "the frozen opening-wave proof is not the exact transport-accepted managed population" >&2
     return 1
   fi
   mv -f -- "${temporary}" "${output}"
@@ -2456,9 +2465,12 @@ phase_window() (
     echo "the observation window did not load the exact managed population" >&2
     return 1
   }
-  # Arm both failure domains before admission, then prove exactly one active,
-  # result-free production command for every managed Agent before releasing
-  # either half of the fleet. This is the raw max-inflight witness.
+  # Arm both failure domains before admission, then prove exactly one
+  # transport-accepted, result-free production command for every managed
+  # Agent before releasing either half of the fleet. Unknown remains globally
+  # in-flight under the product concurrency limit, so a response-timeout
+  # transition while the synthetic barrier is deliberately held does not
+  # erase an otherwise durable max-inflight witness.
   for node in "${node_list[@]}"; do
     g6rd_enqueue_command "${node}" "g6-window-${RUN_ID}-opening-${count}" &
     enqueue_pids+=("$!")

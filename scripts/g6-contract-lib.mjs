@@ -1730,11 +1730,11 @@ function parseCommandTrace(entry, binding) {
             `${commandLabel} node_id`,
           );
           if (
-            !["dispatched", "accepted", "running"].includes(
+            !["dispatched", "accepted", "running", "unknown"].includes(
               snapshotCommand.state,
             )
           ) {
-            fail(`${commandLabel} is not active`);
+            fail(`${commandLabel} is not transport-accepted and unresolved`);
           }
           if (
             commandIds.has(snapshotCommand.command_id) ||
