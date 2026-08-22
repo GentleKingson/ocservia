@@ -105,10 +105,17 @@ original node binding: neither a stale nor a higher-revision ordinary Active
 update can reactivate or rebind them. Connection side effects occur only after
 the exact authoritative transition advances the retained state.
 
-Iroh is pinned to `1.0.0` in `Cargo.toml`; `Cargo.lock` pins the complete resolved
-graph. Patch upgrades within 1.0.x still require direct, relay, ALPN rejection,
-path-event, shutdown, dependency, audit, and license tests because transport and
-relay internals may change without affecting the Go contract.
+Iroh is pinned to `1.0.0` in `Cargo.toml`; the workspace carries a provenance-bound
+patch of that exact crates.io release, and `Cargo.lock` pins the complete resolved
+graph. Transportd opts into persistent connections to every member only for a
+custom dedicated relay set containing at least two relays. One preferred relay
+remains the sole published home address, while already-authenticated standby
+connections allow an incoming Agent to reach the same live Controller endpoint
+after the home relay fails. Agents and endpoints using default, disabled, or a
+single custom relay retain upstream idle-connection behavior. Patch upgrades
+within 1.0.x still require direct, relay, ALPN rejection, path-event, shutdown,
+dependency, audit, and license tests because transport and relay internals may
+change without affecting the Go contract.
 
 The side-effect-free `ocservia-transportd-stub` remains the default development
 stack and rollback mode. To roll back an unshipped Iroh deployment, stop the real

@@ -1,6 +1,7 @@
 FROM rust:1.97.1-bookworm AS build
 WORKDIR /src
 COPY rust/Cargo.toml rust/Cargo.lock rust/rust-toolchain.toml ./
+COPY rust/vendor ./vendor
 COPY rust/crates ./crates
 RUN cargo build --locked --release --package ocservia-transportd-stub
 
