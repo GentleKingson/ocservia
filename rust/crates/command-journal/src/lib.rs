@@ -911,22 +911,30 @@ impl Journal {
             .map_err(|_| rusqlite::Error::InvalidQuery)
     }
 
-    /// Raises the durable fencing epoch floor. The stored value only ever
-    /// increases, including across crashes, so a restarted Agent cannot be
-    /// reset to accept an already-superseded owner epoch.
+    /// Raises the durable fencing epoch floor and returns the resulting
+    /// persisted value. The stored value only ever increases, including
+    /// across crashes and overlapping database connections, so a restarted
+    /// Agent cannot be reset to accept an already-superseded owner epoch.
     ///
     /// # Errors
     ///
-    /// Returns a write error.
-    pub fn raise_owner_fence_epoch_floor(&self, epoch: u64) -> Result<(), rusqlite::Error> {
+    /// Returns a write or decoding error.
+    pub fn raise_owner_fence_epoch_floor(&self, epoch: u64) -> Result<u64, rusqlite::Error> {
         let value = epoch.to_be_bytes();
-        self.connection.execute(
+        let persisted: Vec<u8> = self.connection.query_row(
             "INSERT INTO agent_metadata(key,value) VALUES(?1,?2)
-             ON CONFLICT(key) DO UPDATE SET value=excluded.value
-             WHERE excluded.value>agent_metadata.value",
+             ON CONFLICT(key) DO UPDATE SET value=CASE
+                 WHEN excluded.value>agent_metadata.value THEN excluded.value
+                 ELSE agent_metadata.value
+             END
+             RETURNING value",
             rusqlite::params![OWNER_FENCE_EPOCH_FLOOR_KEY, value.as_slice()],
+            |row| row.get(0),
         )?;
-        Ok(())
+        persisted
+            .try_into()
+            .map(u64::from_be_bytes)
+            .map_err(|_| rusqlite::Error::InvalidQuery)
     }
 }
 
@@ -1741,25 +1749,65 @@ mod tests {
         {
             let journal = Journal::open(&path).expect("open");
             assert_eq!(journal.owner_fence_epoch_floor().expect("floor"), 0);
-            journal
-                .raise_owner_fence_epoch_floor(4)
-                .expect("raise first");
-            journal
-                .raise_owner_fence_epoch_floor(2)
-                .expect("raise lower ignored");
+            assert_eq!(
+                journal
+                    .raise_owner_fence_epoch_floor(4)
+                    .expect("raise first"),
+                4
+            );
+            assert_eq!(
+                journal
+                    .raise_owner_fence_epoch_floor(2)
+                    .expect("raise lower ignored"),
+                4
+            );
             assert_eq!(journal.owner_fence_epoch_floor().expect("floor"), 4);
-            journal
-                .raise_owner_fence_epoch_floor(9)
-                .expect("raise higher");
+            assert_eq!(
+                journal
+                    .raise_owner_fence_epoch_floor(9)
+                    .expect("raise higher"),
+                9
+            );
             assert_eq!(journal.owner_fence_epoch_floor().expect("floor"), 9);
         }
         let reopened = Journal::open(&path).expect("reopen");
         assert_eq!(reopened.owner_fence_epoch_floor().expect("floor"), 9);
-        reopened
-            .raise_owner_fence_epoch_floor(3)
-            .expect("raise lower ignored after reopen");
+        assert_eq!(
+            reopened
+                .raise_owner_fence_epoch_floor(3)
+                .expect("raise lower ignored after reopen"),
+            9
+        );
         assert_eq!(reopened.owner_fence_epoch_floor().expect("floor"), 9);
         drop(reopened);
+        cleanup(&path);
+    }
+
+    #[test]
+    fn owner_fence_epoch_floor_returns_concurrently_persisted_higher_value() {
+        let path = temporary_path("fence-floor-overlap");
+        let stale_writer = Journal::open(&path).expect("open stale writer");
+        let current_writer = Journal::open(&path).expect("open current writer");
+
+        assert_eq!(
+            current_writer
+                .raise_owner_fence_epoch_floor(10)
+                .expect("raise current floor"),
+            10
+        );
+        assert_eq!(
+            stale_writer
+                .raise_owner_fence_epoch_floor(6)
+                .expect("observe current floor from stale writer"),
+            10
+        );
+        assert_eq!(
+            stale_writer.owner_fence_epoch_floor().expect("stale read"),
+            10
+        );
+
+        drop(current_writer);
+        drop(stale_writer);
         cleanup(&path);
     }
 }

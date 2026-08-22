@@ -7,7 +7,35 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	transportv1 "github.com/GentleKingson/ocservia/control-plane/gen/proto/ocserv/platform/transport/v1"
 )
+
+type termAwareGapHandler struct {
+	called bool
+}
+
+func (*termAwareGapHandler) Ingest(context.Context, *transportv1.TransportEvent) error {
+	return nil
+}
+
+func (h *termAwareGapHandler) ReconcileOwnerEventGap(_ context.Context, reader NodeConnectionReader) error {
+	h.called = reader != nil
+	return nil
+}
+
+type presenceGapHandler struct {
+	called bool
+}
+
+func (*presenceGapHandler) Ingest(context.Context, *transportv1.TransportEvent) error {
+	return nil
+}
+
+func (h *presenceGapHandler) ReconcileEventGap(_ context.Context, reader func(context.Context, []byte) (bool, error)) error {
+	h.called = reader != nil
+	return nil
+}
 
 func TestNewRejectsTCPAndUnboundedConfiguration(t *testing.T) {
 	tests := []struct {
@@ -61,5 +89,23 @@ func TestFullJitterStaysWithinBound(t *testing.T) {
 		if delay < 0 || delay > 10*time.Millisecond {
 			t.Fatalf("attempt %d produced %s", attempt, delay)
 		}
+	}
+}
+
+func TestClientSelectsTermAwareAndPresenceGapReconcilers(t *testing.T) {
+	client := &Client{}
+	termAware := &termAwareGapHandler{}
+	if err := client.reconcileEventGap(context.Background(), termAware); err != nil {
+		t.Fatalf("term-aware reconciliation: %v", err)
+	}
+	if !termAware.called {
+		t.Fatal("term-aware reconciliation did not receive the connection metadata reader")
+	}
+	presence := &presenceGapHandler{}
+	if err := client.reconcileEventGap(context.Background(), presence); err != nil {
+		t.Fatalf("presence reconciliation: %v", err)
+	}
+	if !presence.called {
+		t.Fatal("legacy presence reconciliation did not receive the bool reader")
 	}
 }

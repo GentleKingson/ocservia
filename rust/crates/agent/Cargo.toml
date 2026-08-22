@@ -31,8 +31,11 @@ zeroize.workspace = true
 [dev-dependencies]
 ed25519-dalek.workspace = true
 futures-util.workspace = true
+iroh = { workspace = true, features = ["test-utils"] }
+iroh-relay = { workspace = true, features = ["test-utils"] }
 ocservia-transportd = { version = "=0.1.0", path = "../transportd" }
 tonic.workspace = true
+tokio-stream = { workspace = true, features = ["net"] }
 
 [lints]
 workspace = true
