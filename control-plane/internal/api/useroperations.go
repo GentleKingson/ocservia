@@ -1,9 +1,7 @@
 package api
 
 import (
-	"encoding/json"
 	"errors"
-	"io"
 	"net/http"
 	"strconv"
 	"strings"
@@ -64,7 +62,7 @@ func (s *Server) setUserPolicy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var body userPolicyRequest
-	if !decodeSingleJSON(w, r, &body) {
+	if !decodeStrictJSON(w, r, &body) {
 		return
 	}
 	var expiresAt *time.Time
@@ -101,7 +99,7 @@ func (s *Server) createUserBatch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var body userBatchRequest
-	if !decodeSingleJSON(w, r, &body) {
+	if !decodeStrictJSON(w, r, &body) {
 		return
 	}
 	principal := principal(r)
@@ -164,20 +162,6 @@ func (s *Server) userOperationMetrics(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, metrics)
-}
-
-func decodeSingleJSON(w http.ResponseWriter, r *http.Request, target any) bool {
-	decoder := json.NewDecoder(r.Body)
-	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(target); err != nil {
-		writeProblem(w, r, http.StatusBadRequest, "https://ocservia.dev/problems/invalid-request", "Request is invalid", "the request body is invalid")
-		return false
-	}
-	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
-		writeProblem(w, r, http.StatusBadRequest, "https://ocservia.dev/problems/invalid-request", "Request is invalid", "the request must contain one JSON object")
-		return false
-	}
-	return true
 }
 
 func (s *Server) writeUserOperationsError(w http.ResponseWriter, r *http.Request, err error) {

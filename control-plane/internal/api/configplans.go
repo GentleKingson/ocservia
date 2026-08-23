@@ -43,7 +43,7 @@ func (s *Server) createConfigPlan(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var body createConfigPlanRequest
-	if !decodeStrict(w, r, &body) {
+	if !decodeStrictJSON(w, r, &body) {
 		return
 	}
 	actor := principal(r)
@@ -104,7 +104,7 @@ func (s *Server) applyConfigPlan(w http.ResponseWriter, r *http.Request) {
 	}
 	key := strings.TrimSpace(r.Header.Get("Idempotency-Key"))
 	var body applyConfigPlanRequest
-	if key == "" || !decodeStrict(w, r, &body) {
+	if key == "" || !decodeStrictJSON(w, r, &body) {
 		if key == "" {
 			writeProblem(w, r, http.StatusBadRequest, "https://ocservia.dev/problems/idempotency-key-required", "Idempotency key is required", "Idempotency-Key must be provided")
 		}

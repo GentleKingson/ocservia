@@ -169,6 +169,14 @@ for name in ("transport-runtime-init", "transportd", "control-plane"):
 assert services["transportd"]["depends_on"]["transport-runtime-init"]["condition"] == "service_completed_successfully"
 assert services["control-plane"]["depends_on"]["transport-runtime-init"]["condition"] == "service_completed_successfully"
 assert services["gateway"].get("ports") and all(not service.get("ports") for name, service in services.items() if name != "gateway")
+# The browser-facing HTTPS boundary is exactly one published port, the
+# control-plane stays unreachable from the host, and gateway traffic reaches
+# it only over the internal application network.
+gateway_published = {(int(item["published"]), item["protocol"]) for item in services["gateway"]["ports"]}
+assert gateway_published == {(443, "tcp")}, gateway_published
+for name in ("gateway", "control-plane"):
+    assert "application" in services[name]["networks"], name
+assert "database" not in services["gateway"]["networks"]
 for name in ("application", "database", "observability"):
     assert platform["networks"][name]["internal"] is True
 command = services["transportd"]["command"]

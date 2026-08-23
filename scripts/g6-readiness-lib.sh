@@ -61,6 +61,9 @@ g6rd_init_environment() {
   G6RD_TUNNEL_BIN="${G6RD_WORK}/bin/ocservia-g6-tunnel"
   COMPOSE_PROJECT="ocservia-g6-rd-${RUN_ID}"
   COMPOSE_FILE="${G6RD_ROOT}/deploy/g6-readiness/compose.yaml"
+  # Must equal the origin the compose file's OCSERV_OIDC_REDIRECT_URL derives
+  # to; the runtime adapter contract keeps the two pinned together.
+  G6RD_BROWSER_ORIGIN="${G6RD_BROWSER_ORIGIN:-https://g6.invalid}"
   G6RD_RELEASE_COMPOSE="${G6RD_WORK}/release-images.yaml"
   G6RD_AGENT_COMPOSE="${G6RD_WORK}/agents-${FD_ID}.yaml"
   export COMPOSE_PROJECT COMPOSE_FILE G6RD_RELEASE_COMPOSE RUN_ID FD_ID FD_ALIAS G6_AUTHORITY
@@ -1127,7 +1130,11 @@ g6rd_api_session_curl() {
       ;;
   esac
   port="$(g6rd_api_port)"
+  # Cookie-authenticated mutations require the exact browser origin the
+  # control plane derives from OCSERV_OIDC_REDIRECT_URL, so the session
+  # client presents it instead of a curl request with no Origin at all.
   curl --silent --show-error --connect-timeout 3 --max-time 10 \
+    --header "Origin: ${G6RD_BROWSER_ORIGIN:?browser origin is required}" \
     --header "Cookie: __Host-ocservia_session=$(g6rd_secret "${role}-session-cookie")" \
     "$@" "http://127.0.0.1:${port}${path}"
 }

@@ -20,7 +20,7 @@ type secretRotateRequest struct {
 
 func (s *Server) createSecretRef(w http.ResponseWriter, r *http.Request) {
 	var body secretRefRequest
-	if !decodeStrict(w, r, &body) {
+	if !decodeStrictJSON(w, r, &body) {
 		return
 	}
 	actor := principal(r)
@@ -52,7 +52,7 @@ func (s *Server) rotateSecretRef(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var body secretRotateRequest
-	if !decodeStrict(w, r, &body) {
+	if !decodeStrictJSON(w, r, &body) {
 		return
 	}
 	actor := principal(r)

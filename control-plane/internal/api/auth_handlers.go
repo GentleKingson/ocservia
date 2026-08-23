@@ -61,8 +61,15 @@ func (s *Server) breakGlass(w http.ResponseWriter, r *http.Request) {
 		writeProblem(w, r, http.StatusNotFound, "https://ocservia.dev/problems/not-found", "Resource not found", "break-glass is not configured")
 		return
 	}
+	// Break-glass establishes a high-privilege session cookie, so it takes
+	// the same exact-origin boundary as the mutations that cookie authorizes;
+	// a cross-site page must not be able to drive an emergency login.
+	if err := s.validateBrowserMutation(r, auth.Principal{Issuer: "break-glass"}); err != nil {
+		writeProblem(w, r, http.StatusForbidden, "https://ocservia.dev/problems/cross-origin-request", "Cross-origin request", err.Error())
+		return
+	}
 	var body breakGlassRequest
-	if !decodeStrict(w, r, &body) || strings.TrimSpace(body.Token) == "" {
+	if !decodeStrictJSON(w, r, &body) || strings.TrimSpace(body.Token) == "" {
 		return
 	}
 	cookie, _, err := s.auth.BreakGlass(r.Context(), body.Token, requestID(r))

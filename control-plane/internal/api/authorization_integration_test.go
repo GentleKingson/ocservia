@@ -7,11 +7,13 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"strings"
 	"testing"
+	"time"
 
 	agentv1 "github.com/GentleKingson/ocservia/control-plane/gen/proto/ocserv/platform/agent/v1"
 	approvalstore "github.com/GentleKingson/ocservia/control-plane/internal/approvals"
@@ -243,6 +245,7 @@ func TestSyntheticCommandAuditUsesAuthenticatedOperator(t *testing.T) {
 	server := &Server{rbac: rbac.New(pool), operations: apiOperationService(pool)}
 	request := httptest.NewRequest(http.MethodPost, "/api/v1/nodes/"+nodeID.String()+"/synthetic-commands", strings.NewReader(`{"kind":"noop","expected_version":1}`))
 	request.SetPathValue("node_id", nodeID.String())
+	request.Header.Set("Content-Type", "application/json")
 	request.Header.Set("Idempotency-Key", "authenticated-operator-audit")
 	request.Header.Set("traceparent", "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01")
 	principal := auth.Principal{IdentityID: identityID, SessionID: sessionID, Subject: identityID.String(), Issuer: "integration"}
@@ -412,6 +415,148 @@ func apiOperationService(pool *pgxpool.Pool) *operationstore.Service {
 	var seed [32]byte
 	seed[0] = 7
 	return operationstore.NewWithSigner(pool, 50, commandauth.NewSignerFromSeed(seed))
+}
+
+// TestBrowserTrustBoundaryBlocksCrossSiteCookieMutations drives the full
+// middleware chain with a real break-glass session cookie: a sibling-origin
+// mutation with a text/plain JSON body must die at the origin boundary, a
+// same-origin text/plain mutation must die at the media-type boundary, only
+// the legitimate same-origin application/json request may create an
+// operation, and the database must prove the blocked attempts never executed.
+func TestBrowserTrustBoundaryBlocksCrossSiteCookieMutations(t *testing.T) {
+	databaseURL := os.Getenv("OCSERV_TEST_DATABASE_URL")
+	if databaseURL == "" {
+		t.Skip("OCSERV_TEST_DATABASE_URL is not set")
+	}
+	ctx := context.Background()
+	pool, err := pgxpool.New(ctx, databaseURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pool.Close()
+	workspaceID, nodeID := uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7())
+	// pgx executes one statement per Exec call, so the fixture and cleanup
+	// stay single-statement instead of relying on script-style semicolons.
+	fixture := []struct {
+		query string
+		args  []any
+	}{
+		{`INSERT INTO workspaces(id,name,slug,created_at,updated_at) VALUES($1,'csrf boundary',$2,now(),now())`, []any{workspaceID, "csrf-boundary-" + workspaceID.String()}},
+		{`INSERT INTO nodes(id,workspace_id,name,status,version,created_at,updated_at) VALUES($1,$2,'csrf-node','active',1,now(),now())`, []any{nodeID, workspaceID}},
+	}
+	for _, statement := range fixture {
+		if _, err := pool.Exec(ctx, statement.query, statement.args...); err != nil {
+			t.Fatal(err)
+		}
+	}
+	defer func() {
+		cleanup := []string{
+			`DELETE FROM outbox_events WHERE command_id IN(SELECT id FROM commands WHERE workspace_id=$1)`,
+			`DELETE FROM operation_events WHERE operation_id IN(SELECT id FROM operations WHERE workspace_id=$1)`,
+			`DELETE FROM commands WHERE workspace_id=$1`,
+			`DELETE FROM operations WHERE workspace_id=$1`,
+			`DELETE FROM audit_events WHERE workspace_id=$1`,
+			`DELETE FROM security_alerts WHERE source_session_id IN(SELECT s.id FROM auth_sessions s JOIN identities i ON i.id=s.identity_id WHERE i.issuer='break-glass')`,
+			`DELETE FROM break_glass_uses WHERE identity_id IN(SELECT id FROM identities WHERE issuer='break-glass')`,
+			`DELETE FROM auth_sessions WHERE identity_id IN(SELECT id FROM identities WHERE issuer='break-glass')`,
+			`DELETE FROM identities WHERE issuer='break-glass'`,
+			`DELETE FROM nodes WHERE workspace_id=$1`,
+			`DELETE FROM workspaces WHERE id=$1`,
+		}
+		for _, statement := range cleanup {
+			_, _ = pool.Exec(context.Background(), statement, workspaceID)
+		}
+	}()
+
+	breakGlassToken := strings.Repeat("break-glass-boundary-token-", 2)
+	authService, err := auth.New(ctx, pool, auth.Config{
+		Issuer: "https://id.example.test", ClientID: "client", ClientSecret: "secret",
+		RedirectURL: "https://admin.example.test/api/v1/auth/callback",
+		SessionKey:  make([]byte, 32), SessionTTL: time.Hour,
+		BreakGlassEnabled: true, BreakGlassTokenHash: auth.TokenHash(breakGlassToken),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := New("127.0.0.1:0", pool, BuildInfo{}, slog.New(slog.NewTextHandler(io.Discard, nil)), 1024, 15*time.Second, false, "", 1)
+	server.EnableBrowserOrigin("https://admin.example.test")
+	server.EnableAuthorization(authService, rbac.New(pool), approvalstore.New(pool), nil)
+	server.EnableOperations(apiOperationService(pool))
+
+	do := func(method, path, origin, fetchSite, contentType, cookie, idempotencyKey, body string) *httptest.ResponseRecorder {
+		t.Helper()
+		request := httptest.NewRequest(method, path, strings.NewReader(body))
+		if contentType != "" {
+			request.Header.Set("Content-Type", contentType)
+		}
+		if origin != "" {
+			request.Header.Set("Origin", origin)
+		}
+		if fetchSite != "" {
+			request.Header.Set("Sec-Fetch-Site", fetchSite)
+		}
+		if cookie != "" {
+			request.Header.Set("Cookie", auth.SessionCookieName+"="+cookie)
+		}
+		if idempotencyKey != "" {
+			request.Header.Set("Idempotency-Key", idempotencyKey)
+		}
+		response := httptest.NewRecorder()
+		server.http.Handler.ServeHTTP(response, request)
+		return response
+	}
+
+	var breakGlassUsesBefore int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM break_glass_uses`).Scan(&breakGlassUsesBefore); err != nil {
+		t.Fatal(err)
+	}
+	sibling := do(http.MethodPost, "/api/v1/auth/break-glass",
+		"https://app.example.test", "", "application/json", "", "", `{"token":"`+breakGlassToken+`"}`)
+	if sibling.Code != http.StatusForbidden || !strings.Contains(sibling.Body.String(), "https://ocservia.dev/problems/cross-origin-request") {
+		t.Fatalf("sibling-origin break-glass status=%d body=%s", sibling.Code, sibling.Body.String())
+	}
+	var blockedUses int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM break_glass_uses`).Scan(&blockedUses); err != nil || blockedUses != breakGlassUsesBefore {
+		t.Fatalf("sibling-origin break-glass reached the database: uses=%d want %d err=%v", blockedUses, breakGlassUsesBefore, err)
+	}
+
+	legitimate := do(http.MethodPost, "/api/v1/auth/break-glass",
+		"https://admin.example.test", "", "application/json", "", "", `{"token":"`+breakGlassToken+`"}`)
+	if legitimate.Code != http.StatusNoContent {
+		t.Fatalf("same-origin break-glass status=%d body=%s", legitimate.Code, legitimate.Body.String())
+	}
+	sessionCookie := ""
+	for _, entry := range legitimate.Result().Cookies() {
+		if entry.Name == auth.SessionCookieName {
+			sessionCookie = entry.Value
+		}
+	}
+	if sessionCookie == "" {
+		t.Fatal("same-origin break-glass did not establish a session cookie")
+	}
+
+	attack := do(http.MethodPost, "/api/v1/nodes/"+nodeID.String()+"/synthetic-commands",
+		"https://sibling.example.test", "", "text/plain", sessionCookie, "csrf-poc-attack", `{"kind":"noop","expected_version":1}`)
+	if attack.Code != http.StatusForbidden || !strings.Contains(attack.Body.String(), "https://ocservia.dev/problems/cross-origin-request") {
+		t.Fatalf("sibling-origin mutation status=%d body=%s", attack.Code, attack.Body.String())
+	}
+
+	smuggled := do(http.MethodPost, "/api/v1/nodes/"+nodeID.String()+"/synthetic-commands",
+		"https://admin.example.test", "", "text/plain", sessionCookie, "csrf-poc-smuggle", `{"kind":"noop","expected_version":1}`)
+	if smuggled.Code != http.StatusUnsupportedMediaType || !strings.Contains(smuggled.Body.String(), "https://ocservia.dev/problems/unsupported-media-type") {
+		t.Fatalf("text/plain mutation status=%d body=%s", smuggled.Code, smuggled.Body.String())
+	}
+
+	accepted := do(http.MethodPost, "/api/v1/nodes/"+nodeID.String()+"/synthetic-commands",
+		"https://admin.example.test", "", "application/json", sessionCookie, "csrf-poc-legitimate", `{"kind":"noop","expected_version":1}`)
+	if accepted.Code != http.StatusAccepted {
+		t.Fatalf("legitimate mutation status=%d body=%s", accepted.Code, accepted.Body.String())
+	}
+
+	var operationCount int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM operations WHERE node_id=$1`, nodeID).Scan(&operationCount); err != nil || operationCount != 1 {
+		t.Fatalf("operation count after the attack chain = %d (err=%v); only the legitimate request may create state", operationCount, err)
+	}
 }
 
 func TestBatchRouteAllowsNodeScopedPerItemAuthorization(t *testing.T) {

@@ -1,10 +1,8 @@
 package api
 
 import (
-	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"net/http"
 	"strconv"
 	"strings"
@@ -22,18 +20,11 @@ func (s *Server) createSimulation(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var scenario *localslice.Scenario
-	decoder := json.NewDecoder(r.Body)
-	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(&scenario); err != nil {
-		writeProblem(w, r, http.StatusBadRequest, "https://ocservia.dev/problems/invalid-request", "Request is invalid", "the simulation request is invalid")
+	if !decodeStrictJSON(w, r, &scenario) {
 		return
 	}
 	if scenario == nil {
 		writeProblem(w, r, http.StatusBadRequest, "https://ocservia.dev/problems/invalid-request", "Request is invalid", "the simulation request must be a JSON object")
-		return
-	}
-	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
-		writeProblem(w, r, http.StatusBadRequest, "https://ocservia.dev/problems/invalid-request", "Request is invalid", "the simulation request must contain one JSON object")
 		return
 	}
 	requestID, _ := r.Context().Value(requestIDKey{}).(string)

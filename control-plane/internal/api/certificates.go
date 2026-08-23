@@ -54,7 +54,7 @@ func (s *Server) createCertificate(w http.ResponseWriter, r *http.Request) {
 	}
 	key := strings.TrimSpace(r.Header.Get("Idempotency-Key"))
 	var body createCertificateRequest
-	if key == "" || !decodeStrict(w, r, &body) {
+	if key == "" || !decodeStrictJSON(w, r, &body) {
 		if key == "" {
 			writeProblem(w, r, http.StatusBadRequest, "https://ocservia.dev/problems/idempotency-key-required", "Idempotency key is required", "Idempotency-Key must be provided")
 		}
@@ -94,7 +94,7 @@ func (s *Server) issueCertificate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var body issueCertificateRequest
-	if !decodeStrict(w, r, &body) {
+	if !decodeStrictJSON(w, r, &body) {
 		return
 	}
 	approvalID, err := parseUUIDv7(body.ApprovalID)
@@ -119,7 +119,7 @@ func (s *Server) revokeCertificate(w http.ResponseWriter, r *http.Request) {
 	}
 	key := strings.TrimSpace(r.Header.Get("Idempotency-Key"))
 	var body revokeCertificateRequest
-	if key == "" || !decodeStrict(w, r, &body) {
+	if key == "" || !decodeStrictJSON(w, r, &body) {
 		if key == "" {
 			writeProblem(w, r, http.StatusBadRequest, "https://ocservia.dev/problems/idempotency-key-required", "Idempotency key is required", "Idempotency-Key must be provided")
 		}
@@ -150,7 +150,7 @@ func (s *Server) createCertificateP12(w http.ResponseWriter, r *http.Request) {
 	}
 	key := strings.TrimSpace(r.Header.Get("Idempotency-Key"))
 	var body createP12Request
-	if key == "" || !decodeStrict(w, r, &body) {
+	if key == "" || !decodeStrictJSON(w, r, &body) {
 		if key == "" {
 			writeProblem(w, r, http.StatusBadRequest, "https://ocservia.dev/problems/idempotency-key-required", "Idempotency key is required", "Idempotency-Key must be provided")
 		}

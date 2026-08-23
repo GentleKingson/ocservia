@@ -1,10 +1,8 @@
 package api
 
 import (
-	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"net/http"
 	"strconv"
 	"strings"
@@ -72,14 +70,11 @@ func (s *Server) createControlledCommand(w http.ResponseWriter, r *http.Request,
 		return
 	}
 	var body *controlledCommandRequest
-	decoder := json.NewDecoder(r.Body)
-	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(&body); err != nil || body == nil {
-		writeProblem(w, r, http.StatusBadRequest, "https://ocservia.dev/problems/invalid-request", "Request is invalid", "the controlled operation request is invalid")
+	if !decodeStrictJSON(w, r, &body) {
 		return
 	}
-	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
-		writeProblem(w, r, http.StatusBadRequest, "https://ocservia.dev/problems/invalid-request", "Request is invalid", "the request must contain one JSON object")
+	if body == nil {
+		writeProblem(w, r, http.StatusBadRequest, "https://ocservia.dev/problems/invalid-request", "Request is invalid", "the controlled operation request must be a JSON object")
 		return
 	}
 	expectedVersion, ok := expectedRevision(r.Header.Get("If-Match"), body.ExpectedVersion)
@@ -145,14 +140,11 @@ func (s *Server) createSyntheticCommand(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	var body *syntheticCommandRequest
-	decoder := json.NewDecoder(r.Body)
-	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(&body); err != nil || body == nil {
-		writeProblem(w, r, http.StatusBadRequest, "https://ocservia.dev/problems/invalid-request", "Request is invalid", "the synthetic command request is invalid")
+	if !decodeStrictJSON(w, r, &body) {
 		return
 	}
-	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
-		writeProblem(w, r, http.StatusBadRequest, "https://ocservia.dev/problems/invalid-request", "Request is invalid", "the request must contain one JSON object")
+	if body == nil {
+		writeProblem(w, r, http.StatusBadRequest, "https://ocservia.dev/problems/invalid-request", "Request is invalid", "the synthetic command request must be a JSON object")
 		return
 	}
 	expectedVersion, ok := expectedRevision(r.Header.Get("If-Match"), body.ExpectedVersion)

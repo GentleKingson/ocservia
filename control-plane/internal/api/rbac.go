@@ -59,7 +59,7 @@ func (s *Server) listWorkspaces(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) createRoleBinding(w http.ResponseWriter, r *http.Request) {
 	var body roleBindingRequest
-	if !decodeStrict(w, r, &body) {
+	if !decodeStrictJSON(w, r, &body) {
 		return
 	}
 	identityID, err := parseUUIDv7(body.IdentityID)

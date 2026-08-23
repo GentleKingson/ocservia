@@ -384,7 +384,7 @@ for major in "${POSTGRES_MAJORS[@]}"; do
   (cd "${ROOT}/control-plane" && OCSERV_TEST_DATABASE_URL="${runtime_url}" OCSERV_TEST_OWNER_DATABASE_URL="${owner_url}" \
     go test -p 1 ./internal/operations ./internal/enrollment ./internal/localslice ./internal/telemetry ./internal/userstate ./internal/useroperations ./internal/configplan ./internal/certificates ./internal/approvals ./internal/audit ./internal/rbac ./internal/auth ./internal/privdattestation -run Integration -count=1)
   (cd "${ROOT}/control-plane" && OCSERV_TEST_DATABASE_URL="${runtime_url}" \
-    go test -p 1 ./internal/api -run '^TestApprovalDetailRequiresEveryAuthorityScopeIntegration$' -count=1)
+    go test -p 1 ./internal/api -run '^TestApprovalDetailRequiresEveryAuthorityScopeIntegration$|^TestBrowserTrustBoundaryBlocksCrossSiteCookieMutations$' -count=1)
   OCSERV_DATABASE_URL="${runtime_url}" "${BIN}" --role=scheduler \
     >"${TMP_ROOT}/pg${major}-audit-checkpoint.log" 2>&1 &
   checkpoint_pid=$!

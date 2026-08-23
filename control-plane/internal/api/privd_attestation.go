@@ -43,7 +43,7 @@ func (s *Server) createPrivdAttestationCredential(w http.ResponseWriter, r *http
 		return
 	}
 	var body privdCredentialRequest
-	if !decodeStrict(w, r, &body) {
+	if !decodeStrictJSON(w, r, &body) {
 		return
 	}
 	actor := principal(r)
@@ -75,7 +75,7 @@ func (s *Server) registerPrivdAttestationKey(w http.ResponseWriter, r *http.Requ
 		return
 	}
 	var body privdRegistrationRequest
-	if !decodeStrict(w, r, &body) {
+	if !decodeStrictJSON(w, r, &body) {
 		return
 	}
 	decode := func(value string) ([]byte, bool) {
@@ -116,7 +116,7 @@ func (s *Server) revokePrivdAttestationKey(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	var body privdRevokeRequest
-	if !decodeStrict(w, r, &body) {
+	if !decodeStrictJSON(w, r, &body) {
 		return
 	}
 	actor := principal(r)

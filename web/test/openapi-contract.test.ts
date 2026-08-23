@@ -8,6 +8,7 @@ interface OpenApiDocument {
   openapi?: unknown;
   paths?: Record<string, Record<string, unknown>>;
   components?: {
+    responses?: Record<string, { content?: Record<string, unknown> }>;
     securitySchemes?: {
       oidc?: { type?: unknown; in?: unknown; name?: unknown };
       bearerAuth?: { type?: unknown; scheme?: unknown };
@@ -137,5 +138,46 @@ describe("OpenAPI invariants", () => {
       "user_password_rotate",
       "group_apply",
     ]);
+  });
+
+  it("pins the browser trust boundary on every JSON request body", async () => {
+    const source = await readFile(
+      resolve(import.meta.dirname, "../../openapi/openapi.yaml"),
+      "utf8",
+    );
+    const document = parse(source) as OpenApiDocument;
+    const responses = document.components?.responses ?? {};
+
+    expect(Object.keys(responses.CrossOriginRequest?.content ?? {})).toEqual([
+      "application/problem+json",
+    ]);
+    expect(Object.keys(responses.UnsupportedMediaType?.content ?? {})).toEqual([
+      "application/problem+json",
+    ]);
+
+    const methods = ["get", "post", "put", "patch", "delete"] as const;
+    for (const item of Object.values(document.paths ?? {})) {
+      for (const method of methods) {
+        const operation = item[method] as
+          | {
+              requestBody?: { content?: Record<string, unknown> };
+              responses?: Record<string, { $ref?: string }>;
+            }
+          | undefined;
+        if (!operation?.requestBody) continue;
+        expect(Object.keys(operation.requestBody.content ?? {})).toEqual([
+          "application/json",
+        ]);
+        expect(operation.responses?.["415"]).toEqual({
+          $ref: "#/components/responses/UnsupportedMediaType",
+        });
+      }
+    }
+
+    const breakGlass = document.paths?.["/auth/break-glass"]?.post as
+      { responses?: Record<string, { $ref?: string }> } | undefined;
+    expect(breakGlass?.responses?.["403"]).toEqual({
+      $ref: "#/components/responses/CrossOriginRequest",
+    });
   });
 });

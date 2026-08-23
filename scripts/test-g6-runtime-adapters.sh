@@ -625,6 +625,9 @@ reject("the Worker pre-send barrier must share only the scoped result-barrier bi
 role_environment = services.fetch("api").fetch("environment")
 reject("G6 API must enable session authentication") unless role_environment.fetch("OCSERV_SESSION_KEY_FILE") == "/run/ocservia-signing/session-key"
 reject("G6 API must use the test OIDC fixture") unless role_environment.fetch("OCSERV_OIDC_ISSUER") == "https://oidc.g6.invalid"
+redirect_url = role_environment.fetch("OCSERV_OIDC_REDIRECT_URL")
+browser_origin = redirect_url.sub(%r{/api/v1/auth/callback\z}, "")
+reject("the G6 browser origin must stay the redirect URL origin") unless browser_origin == "https://g6.invalid"
 reject("postgres must publish only loopback") unless services.fetch("postgres").fetch("ports") == ["127.0.0.1:5432:5432"]
 reject("the API host port must stay on loopback for the tunnel to serve") unless services.fetch("api").fetch("ports").fetch(0).start_with?("127.0.0.1:")
 reject("postgres must run data checksums") unless services.fetch("postgres").fetch("environment").fetch("POSTGRES_INITDB_ARGS").include?("data-checksums")
@@ -807,6 +810,18 @@ done
 mint_enrollment_token="$(sed -n '/^g6rd_mint_enrollment_token() {/,/^}/p' "${LIB}")"
 grep -q 'g6rd_api_session_curl requester' <<<"${mint_enrollment_token}" || {
   echo "enrollment token minting must use the authenticated requester session" >&2
+  exit 1
+}
+# Cookie-authenticated mutations are rejected without the exact browser
+# origin, so the session client itself must present the origin the compose
+# OIDC redirect URL derives to; both literals stay pinned to each other.
+session_curl_body="$(sed -n '/^g6rd_api_session_curl() {/,/^}/p' "${LIB}")"
+grep -q 'Origin: ${G6RD_BROWSER_ORIGIN:?browser origin is required}' <<<"${session_curl_body}" || {
+  echo "the session client must present the trusted browser origin" >&2
+  exit 1
+}
+grep -q 'G6RD_BROWSER_ORIGIN:-https://g6.invalid' "${LIB}" || {
+  echo "the browser origin default must match the compose redirect URL origin" >&2
   exit 1
 }
 if grep -q 'ttl_seconds' <<<"${mint_enrollment_token}"; then
