@@ -137,6 +137,7 @@ policy_commands = %w[
   scripts/test-g6-formal-authority.sh
   scripts/test-g6-release-identity.sh
   scripts/test-g6-evidence-pipeline.sh
+  scripts/test-g6-secret-scan-config.sh
   scripts/test-g6-runtime-adapters.sh
   scripts/test-g6-smoke-relevance.sh
   scripts/test-g6-readiness-hang-guards.sh
@@ -5116,13 +5117,14 @@ grep -q 'the independent verifier rejected the production-readiness bundle' "${W
 }
 
 # The secret scan is an independent job over the published evidence, run
-# with the pinned redacting scanner rather than the git-history scan.
-grep -q 'gitleaks dir --no-banner --redact --no-color "${RUNNER_TEMP}/g6-rd-evidence-bundle"' "${WORKFLOW}" || {
+# with the pinned redacting scanner rather than the git-history scan, and
+# always through the pinned narrow allowlist configuration.
+grep -q 'gitleaks dir --no-banner --redact --no-color --config "${GITHUB_WORKSPACE}/scripts/g6-secret-scan.toml" "${RUNNER_TEMP}/g6-rd-evidence-bundle"' "${WORKFLOW}" || {
   echo "the secret-scan job must scan the published bundle with redaction" >&2
   exit 1
 }
-if ! grep -q 'gitleaks dir --no-banner --redact --no-color "${RUNNER_TEMP}/g6-rd-raw-fd-a"' "${WORKFLOW}" \
-  || ! grep -q 'gitleaks dir --no-banner --redact --no-color "${RUNNER_TEMP}/g6-rd-raw-fd-b"' "${WORKFLOW}"; then
+if ! grep -q 'gitleaks dir --no-banner --redact --no-color --config "${GITHUB_WORKSPACE}/scripts/g6-secret-scan.toml" "${RUNNER_TEMP}/g6-rd-raw-fd-a"' "${WORKFLOW}" \
+  || ! grep -q 'gitleaks dir --no-banner --redact --no-color --config "${GITHUB_WORKSPACE}/scripts/g6-secret-scan.toml" "${RUNNER_TEMP}/g6-rd-raw-fd-b"' "${WORKFLOW}"; then
   echo "the secret-scan job must scan both published raw failure-domain artifacts" >&2
   exit 1
 fi

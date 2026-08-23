@@ -998,9 +998,9 @@ jobs:
                .authority == $authority and .release_manifest_digest == $release_manifest_digest' \
               "${RUNNER_TEMP}/g6-rd-raw-${domain}/runtime-result.json" >/dev/null
           done
-          gitleaks dir --no-banner --redact --no-color "${RUNNER_TEMP}/g6-rd-evidence-bundle"
-          gitleaks dir --no-banner --redact --no-color "${RUNNER_TEMP}/g6-rd-raw-fd-a"
-          gitleaks dir --no-banner --redact --no-color "${RUNNER_TEMP}/g6-rd-raw-fd-b"
+          gitleaks dir --no-banner --redact --no-color --config "${GITHUB_WORKSPACE}/scripts/g6-secret-scan.toml" "${RUNNER_TEMP}/g6-rd-evidence-bundle"
+          gitleaks dir --no-banner --redact --no-color --config "${GITHUB_WORKSPACE}/scripts/g6-secret-scan.toml" "${RUNNER_TEMP}/g6-rd-raw-fd-a"
+          gitleaks dir --no-banner --redact --no-color --config "${GITHUB_WORKSPACE}/scripts/g6-secret-scan.toml" "${RUNNER_TEMP}/g6-rd-raw-fd-b"
       - name: Record the secret scan result
         if: always()
         run: |
@@ -1750,9 +1750,9 @@ jobs:
         id: scan
         run: |
           source scripts/env.sh
-          gitleaks dir --no-banner --redact --no-color "${RUNNER_TEMP}/g6-harness-smoke-fd-a"
-          gitleaks dir --no-banner --redact --no-color "${RUNNER_TEMP}/g6-harness-smoke-fd-b"
-          gitleaks dir --no-banner --redact --no-color "${RUNNER_TEMP}/g6-harness-smoke-bundle"
+          gitleaks dir --no-banner --redact --no-color --config "${GITHUB_WORKSPACE}/scripts/g6-secret-scan.toml" "${RUNNER_TEMP}/g6-harness-smoke-fd-a"
+          gitleaks dir --no-banner --redact --no-color --config "${GITHUB_WORKSPACE}/scripts/g6-secret-scan.toml" "${RUNNER_TEMP}/g6-harness-smoke-fd-b"
+          gitleaks dir --no-banner --redact --no-color --config "${GITHUB_WORKSPACE}/scripts/g6-secret-scan.toml" "${RUNNER_TEMP}/g6-harness-smoke-bundle"
       - name: Record structured smoke secret scan result
         if: always()
         run: |
