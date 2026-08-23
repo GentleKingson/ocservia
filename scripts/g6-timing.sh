@@ -51,6 +51,7 @@ case "${command}" in
   init)
     [[ $# -eq 6 ]] || usage
     file="$1"
+    mkdir -p "$(dirname "${file}")"
     : >"${file}.tsv"
     append "${file}" "meta\tjob\t$2"
     append "${file}" "meta\tprofile\t$3"
