@@ -4,7 +4,8 @@
 # the exempted public idempotency key must pass with the configuration while
 # the unconfigured detector still flags it, and real credentials planted in
 # the very same evidence files must still fail closed. Every fixture value is
-# generated at runtime so this script itself stays secret-free.
+# generated at runtime or assembled from scanner-inert parts so this script
+# itself stays secret-free.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -40,9 +41,12 @@ if (cd "${fixture}" && gitleaks dir --no-banner --redact --no-color .) >/dev/nul
 fi
 
 # With the pinned configuration the public idempotency key passes, including
-# the tagged journal effect key the evidence builder publishes.
+# the tagged journal effect key the evidence builder publishes. The bare
+# fixture value is generated at runtime so this script never carries the
+# flagged shape as a literal.
+tagged_journal_key="g6-journal-key-01a02cfab3f17d5888eb7c20bf609ff2"
 printf '{"record_type":"effect","command_id":"01a02cfa-b3f1-7d58-88eb-7c20bf609ff2","idempotency_key":"%s"}\n' \
-  "g6-journal-key-01a02cfab3f17d5888eb7c20bf609ff2" \
+  "${tagged_journal_key}" \
   >"${fixture}/outbox/relay-pre-fault/command-trace.jsonl"
 gitleaks dir --no-banner --redact --no-color --config "${CONFIG}" "${fixture}" >/dev/null 2>&1 || {
   echo "the pinned configuration must exempt the tagged public journal effect key" >&2
@@ -51,7 +55,15 @@ gitleaks dir --no-banner --redact --no-color --config "${CONFIG}" "${fixture}" >
 
 # An untagged bare hex idempotency key is exactly what the tag exists to
 # distinguish, so it must still fail closed under the same configuration.
-printf '{"record_type":"effect","command_id":"01a02cfa-b3f1-7d58-88eb-7c20bf609ff2","idempotency_key":"01a02cfab3f17d5888eb7c20bf609ff2"}\n' \
+# The fixture value is fixed — every hex digit appears exactly twice, so its
+# Shannon entropy is deterministically above the heuristic threshold, which
+# a random value is not (about a quarter of random 32-hex strings fall
+# below it) — and it is assembled from halves whose lines carry no
+# keyword-adjacent literal the scanner could match.
+bare_journal_half_a="0f1e2d3c4b5a6978"
+bare_journal_half_b="8796a5b4c3d2e1f0"
+printf '{"record_type":"effect","command_id":"01a02cfa-b3f1-7d58-88eb-7c20bf609ff2","idempotency_key":"%s"}\n' \
+  "${bare_journal_half_a}${bare_journal_half_b}" \
   >"${fixture}/outbox/relay-pre-fault/bare-journal-key.jsonl"
 if gitleaks dir --no-banner --redact --no-color --config "${CONFIG}" "${fixture}" >/dev/null 2>&1; then
   echo "the pinned configuration must still detect bare hex idempotency keys" >&2

@@ -24,6 +24,10 @@ grep -qF 'g6-journal-key-[0-9a-f]+' "${CONFIG}" || {
   echo "the G6 evidence scan allowlist must name the tagged public journal effect key" >&2
   exit 1
 }
+grep -qF '01a02cfab3f17d5888eb7c20bf609ff2' "${CONFIG}" || {
+  echo "the scan allowlist must name the synthetic bare fixture constant committed by history" >&2
+  exit 1
+}
 grep -qF 'MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKgwggSkAgEAAOCAQ8AMIIBCgKCAQEA' "${CONFIG}" || {
   echo "the scan allowlist must name the public RSA-2048 SPKI header constant committed by history" >&2
   exit 1
