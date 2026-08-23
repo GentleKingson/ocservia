@@ -513,7 +513,8 @@ func TestBrowserOriginDerivesFromOIDCRedirectURL(t *testing.T) {
 		want        string
 	}{
 		{name: "host only", redirectURL: "https://admin.example.com/api/v1/auth/callback", want: "https://admin.example.com"},
-		{name: "explicit port is kept", redirectURL: "https://admin.example.com:8443/api/v1/auth/callback", want: "https://admin.example.com:8443"},
+		{name: "default HTTPS port is normalized away", redirectURL: "https://admin.example.com:443/api/v1/auth/callback", want: "https://admin.example.com"},
+		{name: "non-default port is kept", redirectURL: "https://admin.example.com:8443/api/v1/auth/callback", want: "https://admin.example.com:8443"},
 		{name: "uppercase host is normalized", redirectURL: "https://Admin.Example.COM/api/v1/auth/callback", want: "https://admin.example.com"},
 		{name: "no OIDC configuration yields no origin", redirectURL: "", want: ""},
 	}

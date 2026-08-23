@@ -9,7 +9,6 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
-	"net/url"
 	"runtime"
 	"strings"
 	"sync"
@@ -18,6 +17,7 @@ import (
 	"github.com/GentleKingson/ocservia/control-plane/internal/approvals"
 	"github.com/GentleKingson/ocservia/control-plane/internal/audit"
 	"github.com/GentleKingson/ocservia/control-plane/internal/auth"
+	"github.com/GentleKingson/ocservia/control-plane/internal/browserorigin"
 	"github.com/GentleKingson/ocservia/control-plane/internal/certificates"
 	"github.com/GentleKingson/ocservia/control-plane/internal/configplan"
 	"github.com/GentleKingson/ocservia/control-plane/internal/enrollment"
@@ -159,7 +159,7 @@ func (s *Server) EnableBrowserOrigin(origin string) {
 	if origin == "" {
 		return
 	}
-	normalized, ok := normalizeBrowserOrigin(origin)
+	normalized, ok := browserorigin.Normalize(origin)
 	if !ok {
 		s.logger.Warn("ignoring unparseable browser origin", "origin_length", len(origin))
 		return
@@ -499,22 +499,11 @@ func (s *Server) validateBrowserMutation(r *http.Request, principal auth.Princip
 	if s.browserOrigin == "" {
 		return errCrossOrigin
 	}
-	origin, ok := normalizeBrowserOrigin(r.Header.Get("Origin"))
+	origin, ok := browserorigin.Normalize(r.Header.Get("Origin"))
 	if !ok || origin != s.browserOrigin {
 		return errCrossOrigin
 	}
 	return nil
-}
-
-// normalizeBrowserOrigin reduces a configured or reported web origin to its
-// comparable scheme://host form. Anything carrying user info, a path beyond a
-// root slash, a query, or a fragment is not a browser origin and is refused.
-func normalizeBrowserOrigin(value string) (string, bool) {
-	parsed, err := url.Parse(strings.TrimSpace(value))
-	if err != nil || parsed.Scheme == "" || parsed.Host == "" || parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" || (parsed.Path != "" && parsed.Path != "/") {
-		return "", false
-	}
-	return strings.ToLower(parsed.Scheme) + "://" + strings.ToLower(parsed.Host), true
 }
 
 func (s *Server) hasOperationPrincipal(r *http.Request) bool {

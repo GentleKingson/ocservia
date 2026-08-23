@@ -375,32 +375,39 @@ func TestI14RoutesRequireAuthentication(t *testing.T) {
 func TestBrowserMutationRequiresExactOrigin(t *testing.T) {
 	cookiePrincipal := auth.Principal{IdentityID: uuid.Must(uuid.NewV7()), SessionID: uuid.Must(uuid.NewV7()), Issuer: "https://id.example.test"}
 	tests := []struct {
-		name      string
-		method    string
-		origin    string
-		fetchSite string
-		principal auth.Principal
-		allowed   bool
+		name          string
+		trustedOrigin string
+		method        string
+		origin        string
+		fetchSite     string
+		principal     auth.Principal
+		allowed       bool
 	}{
-		{"same origin mutation passes", http.MethodPost, "https://admin.example.com", "", cookiePrincipal, true},
-		{"same origin with same-origin fetch metadata passes", http.MethodPost, "https://admin.example.com", "same-origin", cookiePrincipal, true},
-		{"same origin with none fetch metadata passes", http.MethodPost, "https://admin.example.com", "none", cookiePrincipal, true},
-		{"sibling origin is rejected", http.MethodPost, "https://app.example.com", "", cookiePrincipal, false},
-		{"unknown origin is rejected", http.MethodPost, "https://evil.example.net", "", cookiePrincipal, false},
-		{"missing origin fails closed", http.MethodPost, "", "", cookiePrincipal, false},
-		{"port mismatch is rejected", http.MethodPost, "https://admin.example.com:8443", "", cookiePrincipal, false},
-		{"scheme mismatch is rejected", http.MethodPost, "http://admin.example.com", "", cookiePrincipal, false},
-		{"cross-site fetch metadata is rejected even with correct origin", http.MethodPost, "https://admin.example.com", "cross-site", cookiePrincipal, false},
-		{"same-site fetch metadata does not replace the exact origin check", http.MethodPost, "https://app.example.com", "same-site", cookiePrincipal, false},
-		{"cross-site fetch metadata with missing origin is rejected", http.MethodPost, "", "cross-site", cookiePrincipal, false},
-		{"safe method never requires an origin", http.MethodGet, "", "", cookiePrincipal, true},
-		{"development principal skips the browser boundary", http.MethodPost, "", "", auth.Principal{Subject: "developer", Issuer: "development", BreakGlass: true}, true},
-		{"break-glass session passes with the exact origin", http.MethodPost, "https://admin.example.com", "", auth.Principal{Subject: "offline", Issuer: "break-glass", BreakGlass: true}, true},
+		{"same origin mutation passes", "", http.MethodPost, "https://admin.example.com", "", cookiePrincipal, true},
+		{"configured default HTTPS port matches browser origin", "https://admin.example.com:443", http.MethodPost, "https://admin.example.com", "", cookiePrincipal, true},
+		{"same origin with same-origin fetch metadata passes", "", http.MethodPost, "https://admin.example.com", "same-origin", cookiePrincipal, true},
+		{"same origin with none fetch metadata passes", "", http.MethodPost, "https://admin.example.com", "none", cookiePrincipal, true},
+		{"sibling origin is rejected", "", http.MethodPost, "https://app.example.com", "", cookiePrincipal, false},
+		{"unknown origin is rejected", "", http.MethodPost, "https://evil.example.net", "", cookiePrincipal, false},
+		{"missing origin fails closed", "", http.MethodPost, "", "", cookiePrincipal, false},
+		{"port mismatch is rejected", "", http.MethodPost, "https://admin.example.com:8443", "", cookiePrincipal, false},
+		{"non-default configured port is rejected for default browser origin", "https://admin.example.com:8443", http.MethodPost, "https://admin.example.com", "", cookiePrincipal, false},
+		{"scheme mismatch is rejected", "", http.MethodPost, "http://admin.example.com", "", cookiePrincipal, false},
+		{"cross-site fetch metadata is rejected even with correct origin", "", http.MethodPost, "https://admin.example.com", "cross-site", cookiePrincipal, false},
+		{"same-site fetch metadata does not replace the exact origin check", "", http.MethodPost, "https://app.example.com", "same-site", cookiePrincipal, false},
+		{"cross-site fetch metadata with missing origin is rejected", "", http.MethodPost, "", "cross-site", cookiePrincipal, false},
+		{"safe method never requires an origin", "", http.MethodGet, "", "", cookiePrincipal, true},
+		{"development principal skips the browser boundary", "", http.MethodPost, "", "", auth.Principal{Subject: "developer", Issuer: "development", BreakGlass: true}, true},
+		{"break-glass session passes with the exact origin", "", http.MethodPost, "https://admin.example.com", "", auth.Principal{Subject: "offline", Issuer: "break-glass", BreakGlass: true}, true},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			server := &Server{logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
-			server.EnableBrowserOrigin("https://admin.example.com")
+			trustedOrigin := test.trustedOrigin
+			if trustedOrigin == "" {
+				trustedOrigin = "https://admin.example.com"
+			}
+			server.EnableBrowserOrigin(trustedOrigin)
 			request := httptest.NewRequest(test.method, "/api/v1/enrollment-tokens", nil)
 			if test.origin != "" {
 				request.Header.Set("Origin", test.origin)
@@ -439,31 +446,6 @@ func TestEnableBrowserOriginRejectsMalformedOrigins(t *testing.T) {
 	server.EnableBrowserOrigin("https://Admin.Example.Com")
 	if server.browserOrigin != "https://admin.example.com" {
 		t.Fatalf("normalized browser origin = %q", server.browserOrigin)
-	}
-}
-
-func TestNormalizeBrowserOrigin(t *testing.T) {
-	for _, test := range []struct {
-		value string
-		want  string
-		ok    bool
-	}{
-		{"https://admin.example.com", "https://admin.example.com", true},
-		{" https://admin.example.com ", "https://admin.example.com", true},
-		{"https://admin.example.com/", "https://admin.example.com", true},
-		{"HTTPS://Admin.Example.COM", "https://admin.example.com", true},
-		{"https://admin.example.com:8443", "https://admin.example.com:8443", true},
-		{"https://admin.example.com/callback", "", false},
-		{"https://admin.example.com?redirect=1", "", false},
-		{"https://admin.example.com#fragment", "", false},
-		{"https://user@admin.example.com", "", false},
-		{"admin.example.com", "", false},
-		{"", "", false},
-	} {
-		got, ok := normalizeBrowserOrigin(test.value)
-		if got != test.want || ok != test.ok {
-			t.Fatalf("normalizeBrowserOrigin(%q) = %q,%v; want %q,%v", test.value, got, ok, test.want, test.ok)
-		}
 	}
 }
 
