@@ -435,21 +435,37 @@ func TestBrowserTrustBoundaryBlocksCrossSiteCookieMutations(t *testing.T) {
 	}
 	defer pool.Close()
 	workspaceID, nodeID := uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7())
-	if _, err := pool.Exec(ctx, `INSERT INTO workspaces(id,name,slug,created_at,updated_at) VALUES($1,'csrf boundary',$2,now(),now());
-		INSERT INTO nodes(id,workspace_id,name,status,version,created_at,updated_at) VALUES($3,$1,'csrf-node','active',1,now(),now())`,
-		workspaceID, "csrf-boundary-"+workspaceID.String(), nodeID); err != nil {
-		t.Fatal(err)
+	// pgx executes one statement per Exec call, so the fixture and cleanup
+	// stay single-statement instead of relying on script-style semicolons.
+	fixture := []struct {
+		query string
+		args  []any
+	}{
+		{`INSERT INTO workspaces(id,name,slug,created_at,updated_at) VALUES($1,'csrf boundary',$2,now(),now())`, []any{workspaceID, "csrf-boundary-" + workspaceID.String()}},
+		{`INSERT INTO nodes(id,workspace_id,name,status,version,created_at,updated_at) VALUES($1,$2,'csrf-node','active',1,now(),now())`, []any{nodeID, workspaceID}},
+	}
+	for _, statement := range fixture {
+		if _, err := pool.Exec(ctx, statement.query, statement.args...); err != nil {
+			t.Fatal(err)
+		}
 	}
 	defer func() {
-		_, _ = pool.Exec(context.Background(), `DELETE FROM outbox_events WHERE command_id IN(SELECT id FROM commands WHERE workspace_id=$1);
-			DELETE FROM operation_events WHERE operation_id IN(SELECT id FROM operations WHERE workspace_id=$1);
-			DELETE FROM commands WHERE workspace_id=$1; DELETE FROM operations WHERE workspace_id=$1;
-			DELETE FROM audit_events WHERE workspace_id=$1;
-			DELETE FROM security_alerts WHERE source_session_id IN(SELECT s.id FROM auth_sessions s JOIN identities i ON i.id=s.identity_id WHERE i.issuer='break-glass');
-			DELETE FROM break_glass_uses WHERE identity_id IN(SELECT id FROM identities WHERE issuer='break-glass');
-			DELETE FROM auth_sessions WHERE identity_id IN(SELECT id FROM identities WHERE issuer='break-glass');
-			DELETE FROM identities WHERE issuer='break-glass';
-			DELETE FROM nodes WHERE workspace_id=$1; DELETE FROM workspaces WHERE id=$1`, workspaceID)
+		cleanup := []string{
+			`DELETE FROM outbox_events WHERE command_id IN(SELECT id FROM commands WHERE workspace_id=$1)`,
+			`DELETE FROM operation_events WHERE operation_id IN(SELECT id FROM operations WHERE workspace_id=$1)`,
+			`DELETE FROM commands WHERE workspace_id=$1`,
+			`DELETE FROM operations WHERE workspace_id=$1`,
+			`DELETE FROM audit_events WHERE workspace_id=$1`,
+			`DELETE FROM security_alerts WHERE source_session_id IN(SELECT s.id FROM auth_sessions s JOIN identities i ON i.id=s.identity_id WHERE i.issuer='break-glass')`,
+			`DELETE FROM break_glass_uses WHERE identity_id IN(SELECT id FROM identities WHERE issuer='break-glass')`,
+			`DELETE FROM auth_sessions WHERE identity_id IN(SELECT id FROM identities WHERE issuer='break-glass')`,
+			`DELETE FROM identities WHERE issuer='break-glass'`,
+			`DELETE FROM nodes WHERE workspace_id=$1`,
+			`DELETE FROM workspaces WHERE id=$1`,
+		}
+		for _, statement := range cleanup {
+			_, _ = pool.Exec(context.Background(), statement, workspaceID)
+		}
 	}()
 
 	breakGlassToken := strings.Repeat("break-glass-boundary-token-", 2)
