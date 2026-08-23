@@ -238,6 +238,7 @@ paths:
           $ref: "#/components/responses/Problem"
         "404":
           $ref: "#/components/responses/Problem"
+        "415": { $ref: "#/components/responses/UnsupportedMediaType" }
         default:
           $ref: "#/components/responses/Problem"
   /development/runtime:
@@ -285,6 +286,7 @@ paths:
           $ref: "#/components/responses/Problem"
         "401":
           $ref: "#/components/responses/Problem"
+        "415": { $ref: "#/components/responses/UnsupportedMediaType" }
         default:
           $ref: "#/components/responses/Problem"
   /nodes/{node_id}/approval:
@@ -312,6 +314,7 @@ paths:
           $ref: "#/components/responses/Problem"
         "503":
           $ref: "#/components/responses/Problem"
+        "415": { $ref: "#/components/responses/UnsupportedMediaType" }
         default:
           $ref: "#/components/responses/Problem"
   /nodes/{node_id}/revocation:
@@ -339,6 +342,7 @@ paths:
           $ref: "#/components/responses/Problem"
         "503":
           $ref: "#/components/responses/Problem"
+        "415": { $ref: "#/components/responses/UnsupportedMediaType" }
         default:
           $ref: "#/components/responses/Problem"
   /nodes/{node_id}/privd-attestation-credentials:
@@ -364,6 +368,7 @@ paths:
         "400": { $ref: "#/components/responses/Problem" }
         "404": { $ref: "#/components/responses/Problem" }
         "503": { $ref: "#/components/responses/Problem" }
+        "415": { $ref: "#/components/responses/UnsupportedMediaType" }
         default: { $ref: "#/components/responses/Problem" }
   /nodes/{node_id}/privd-attestation-keys:register:
     post:
@@ -388,6 +393,7 @@ paths:
         "401": { $ref: "#/components/responses/Problem" }
         "409": { $ref: "#/components/responses/Problem" }
         "503": { $ref: "#/components/responses/Problem" }
+        "415": { $ref: "#/components/responses/UnsupportedMediaType" }
         default: { $ref: "#/components/responses/Problem" }
   /nodes/{node_id}/privd-attestation-keys:revoke:
     post:
@@ -410,6 +416,7 @@ paths:
         "400": { $ref: "#/components/responses/Problem" }
         "404": { $ref: "#/components/responses/Problem" }
         "503": { $ref: "#/components/responses/Problem" }
+        "415": { $ref: "#/components/responses/UnsupportedMediaType" }
         default: { $ref: "#/components/responses/Problem" }
   /nodes:
     get:
@@ -498,6 +505,7 @@ paths:
           $ref: "#/components/responses/Problem"
         "409":
           $ref: "#/components/responses/Problem"
+        "415": { $ref: "#/components/responses/UnsupportedMediaType" }
         default:
           $ref: "#/components/responses/Problem"
   /nodes/{node_id}/sessions/{session_id}:terminate:
@@ -529,6 +537,7 @@ paths:
           $ref: "#/components/responses/Problem"
         "409":
           $ref: "#/components/responses/Problem"
+        "415": { $ref: "#/components/responses/UnsupportedMediaType" }
         default:
           $ref: "#/components/responses/Problem"
   /nodes/{node_id}/ip-bans/{ip}:remove:
@@ -563,6 +572,7 @@ paths:
           $ref: "#/components/responses/Problem"
         "409":
           $ref: "#/components/responses/Problem"
+        "415": { $ref: "#/components/responses/UnsupportedMediaType" }
         default:
           $ref: "#/components/responses/Problem"
   /nodes/{node_id}/ip-bans:
@@ -614,6 +624,7 @@ paths:
           $ref: "#/components/responses/Problem"
         "409":
           $ref: "#/components/responses/Problem"
+        "415": { $ref: "#/components/responses/UnsupportedMediaType" }
         default:
           $ref: "#/components/responses/Problem"
   /nodes/{node_id}/telemetry:
@@ -685,6 +696,7 @@ paths:
         "400": { $ref: "#/components/responses/Problem" }
         "404": { $ref: "#/components/responses/Problem" }
         "409": { $ref: "#/components/responses/Problem" }
+        "415": { $ref: "#/components/responses/UnsupportedMediaType" }
         default: { $ref: "#/components/responses/Problem" }
   /nodes/{node_id}/users/{username}:disable:
     post:
@@ -706,6 +718,7 @@ paths:
         "400": { $ref: "#/components/responses/Problem" }
         "404": { $ref: "#/components/responses/Problem" }
         "409": { $ref: "#/components/responses/Problem" }
+        "415": { $ref: "#/components/responses/UnsupportedMediaType" }
         default: { $ref: "#/components/responses/Problem" }
   /nodes/{node_id}/users/{username}:enable:
     post:
@@ -727,6 +740,7 @@ paths:
         "400": { $ref: "#/components/responses/Problem" }
         "404": { $ref: "#/components/responses/Problem" }
         "409": { $ref: "#/components/responses/Problem" }
+        "415": { $ref: "#/components/responses/UnsupportedMediaType" }
         default: { $ref: "#/components/responses/Problem" }
   /nodes/{node_id}/users/{username}:rotate-password:
     post:
@@ -748,6 +762,7 @@ paths:
         "400": { $ref: "#/components/responses/Problem" }
         "404": { $ref: "#/components/responses/Problem" }
         "409": { $ref: "#/components/responses/Problem" }
+        "415": { $ref: "#/components/responses/UnsupportedMediaType" }
         default: { $ref: "#/components/responses/Problem" }
   /nodes/{node_id}/users/{username}/policy:
     get:
@@ -787,6 +802,7 @@ paths:
         "400": { $ref: "#/components/responses/Problem" }
         "404": { $ref: "#/components/responses/Problem" }
         "409": { $ref: "#/components/responses/Problem" }
+        "415": { $ref: "#/components/responses/UnsupportedMediaType" }
         default: { $ref: "#/components/responses/Problem" }
   /user-batches:
     post:
@@ -814,6 +830,7 @@ paths:
         "400": { $ref: "#/components/responses/Problem" }
         "403": { $ref: "#/components/responses/Problem" }
         "409": { $ref: "#/components/responses/Problem" }
+        "415": { $ref: "#/components/responses/UnsupportedMediaType" }
         default: { $ref: "#/components/responses/Problem" }
   /user-batches/{batch_id}:
     get:
@@ -873,6 +890,7 @@ paths:
         "400": { $ref: "#/components/responses/Problem" }
         "403": { $ref: "#/components/responses/Problem" }
         "409": { $ref: "#/components/responses/Problem" }
+        "415": { $ref: "#/components/responses/UnsupportedMediaType" }
         default: { $ref: "#/components/responses/Problem" }
   /config-plans/{plan_id}:
     get:
@@ -914,6 +932,7 @@ paths:
         "400": { $ref: "#/components/responses/Problem" }
         "403": { $ref: "#/components/responses/Problem" }
         "409": { $ref: "#/components/responses/Problem" }
+        "415": { $ref: "#/components/responses/UnsupportedMediaType" }
         default: { $ref: "#/components/responses/Problem" }
   /nodes/{node_id}/certificates:
     get:
@@ -960,6 +979,7 @@ paths:
         "400": { $ref: "#/components/responses/Problem" }
         "403": { $ref: "#/components/responses/Problem" }
         "409": { $ref: "#/components/responses/Problem" }
+        "415": { $ref: "#/components/responses/UnsupportedMediaType" }
         default: { $ref: "#/components/responses/Problem" }
   /certificates/{certificate_id}:
     get:
@@ -1005,6 +1025,7 @@ paths:
         "403": { $ref: "#/components/responses/Problem" }
         "409": { $ref: "#/components/responses/Problem" }
         "503": { $ref: "#/components/responses/Problem" }
+        "415": { $ref: "#/components/responses/UnsupportedMediaType" }
         default: { $ref: "#/components/responses/Problem" }
   /certificates/{certificate_id}:revoke:
     post:
@@ -1028,6 +1049,7 @@ paths:
         "403": { $ref: "#/components/responses/Problem" }
         "409": { $ref: "#/components/responses/Problem" }
         "503": { $ref: "#/components/responses/Problem" }
+        "415": { $ref: "#/components/responses/UnsupportedMediaType" }
         default: { $ref: "#/components/responses/Problem" }
   /certificates/{certificate_id}:p12:
     post:
@@ -1055,6 +1077,7 @@ paths:
         "403": { $ref: "#/components/responses/Problem" }
         "409": { $ref: "#/components/responses/Problem" }
         "503": { $ref: "#/components/responses/Problem" }
+        "415": { $ref: "#/components/responses/UnsupportedMediaType" }
         default: { $ref: "#/components/responses/Problem" }
   /artifacts/{artifact_id}:
     get:
@@ -1099,6 +1122,7 @@ paths:
               schema: { $ref: "#/components/schemas/SecretProviderRef" }
         "400": { $ref: "#/components/responses/Problem" }
         "403": { $ref: "#/components/responses/Problem" }
+        "415": { $ref: "#/components/responses/UnsupportedMediaType" }
         default: { $ref: "#/components/responses/Problem" }
   /secret-provider-refs/{secret_ref_id}:
     get:
@@ -1143,6 +1167,7 @@ paths:
         "400": { $ref: "#/components/responses/Problem" }
         "403": { $ref: "#/components/responses/Problem" }
         "404": { $ref: "#/components/responses/Problem" }
+        "415": { $ref: "#/components/responses/UnsupportedMediaType" }
         default: { $ref: "#/components/responses/Problem" }
   /nodes/{node_id}/groups/{group_name}:
     put:
@@ -1164,6 +1189,7 @@ paths:
         "400": { $ref: "#/components/responses/Problem" }
         "404": { $ref: "#/components/responses/Problem" }
         "409": { $ref: "#/components/responses/Problem" }
+        "415": { $ref: "#/components/responses/UnsupportedMediaType" }
         default: { $ref: "#/components/responses/Problem" }
   /nodes/{node_id}/synthetic-commands:
     post:
@@ -1212,6 +1238,7 @@ paths:
           $ref: "#/components/responses/Problem"
         "409":
           $ref: "#/components/responses/Problem"
+        "415": { $ref: "#/components/responses/UnsupportedMediaType" }
         default:
           $ref: "#/components/responses/Problem"
   /auth/login:
@@ -1261,6 +1288,8 @@ paths:
         "204": { description: Short-lived emergency session established; alert and rotation requirement recorded. }
         "401": { $ref: "#/components/responses/Problem" }
         "423": { $ref: "#/components/responses/Problem" }
+        "403": { $ref: "#/components/responses/CrossOriginRequest" }
+        "415": { $ref: "#/components/responses/UnsupportedMediaType" }
         default: { $ref: "#/components/responses/Problem" }
   /workspaces:
     get:
@@ -1287,6 +1316,7 @@ paths:
           description: Role binding created.
           content: { application/json: { schema: { $ref: "#/components/schemas/RoleBinding" } } }
         "403": { $ref: "#/components/responses/Problem" }
+        "415": { $ref: "#/components/responses/UnsupportedMediaType" }
         default: { $ref: "#/components/responses/Problem" }
   /approval-requests:
     post:
@@ -1302,6 +1332,7 @@ paths:
           description: Pending approval created.
           content: { application/json: { schema: { $ref: "#/components/schemas/Approval" } } }
         "403": { $ref: "#/components/responses/Problem" }
+        "415": { $ref: "#/components/responses/UnsupportedMediaType" }
         default: { $ref: "#/components/responses/Problem" }
   /approval-requests/{approval_id}:
     get:
@@ -1338,6 +1369,7 @@ paths:
           content: { application/json: { schema: { $ref: "#/components/schemas/Approval" } } }
         "403": { $ref: "#/components/responses/Problem" }
         "409": { $ref: "#/components/responses/Problem" }
+        "415": { $ref: "#/components/responses/UnsupportedMediaType" }
         default: { $ref: "#/components/responses/Problem" }
   /audit/events:
     get:
@@ -1460,6 +1492,18 @@ components:
   responses:
     Problem:
       description: Request failed.
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/Problem"
+    CrossOriginRequest:
+      description: A cookie-authenticated mutation must originate from the exact public browser origin; a sibling origin, an unknown site, a missing Origin header, or a cross-site Fetch Metadata signal is rejected before authorization.
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/Problem"
+    UnsupportedMediaType:
+      description: Request bodies must use the application/json media type; JSON parsers never accept text, form, or multipart payloads.
       content:
         application/problem+json:
           schema:

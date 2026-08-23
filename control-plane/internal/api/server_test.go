@@ -12,10 +12,12 @@ import (
 	"testing"
 	"time"
 
+	"github.com/GentleKingson/ocservia/control-plane/internal/auth"
 	"github.com/GentleKingson/ocservia/control-plane/internal/enrollment"
 	"github.com/GentleKingson/ocservia/control-plane/internal/localslice"
 	operationstore "github.com/GentleKingson/ocservia/control-plane/internal/operations"
 	"github.com/GentleKingson/ocservia/control-plane/internal/userstate"
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -367,5 +369,180 @@ func TestI14RoutesRequireAuthentication(t *testing.T) {
 		if response.Code != http.StatusUnauthorized {
 			t.Fatalf("%s %s status = %d", test.method, test.path, response.Code)
 		}
+	}
+}
+
+func TestBrowserMutationRequiresExactOrigin(t *testing.T) {
+	cookiePrincipal := auth.Principal{IdentityID: uuid.Must(uuid.NewV7()), SessionID: uuid.Must(uuid.NewV7()), Issuer: "https://id.example.test"}
+	tests := []struct {
+		name      string
+		method    string
+		origin    string
+		fetchSite string
+		principal auth.Principal
+		allowed   bool
+	}{
+		{"same origin mutation passes", http.MethodPost, "https://admin.example.com", "", cookiePrincipal, true},
+		{"same origin with same-origin fetch metadata passes", http.MethodPost, "https://admin.example.com", "same-origin", cookiePrincipal, true},
+		{"same origin with none fetch metadata passes", http.MethodPost, "https://admin.example.com", "none", cookiePrincipal, true},
+		{"sibling origin is rejected", http.MethodPost, "https://app.example.com", "", cookiePrincipal, false},
+		{"unknown origin is rejected", http.MethodPost, "https://evil.example.net", "", cookiePrincipal, false},
+		{"missing origin fails closed", http.MethodPost, "", "", cookiePrincipal, false},
+		{"port mismatch is rejected", http.MethodPost, "https://admin.example.com:8443", "", cookiePrincipal, false},
+		{"scheme mismatch is rejected", http.MethodPost, "http://admin.example.com", "", cookiePrincipal, false},
+		{"cross-site fetch metadata is rejected even with correct origin", http.MethodPost, "https://admin.example.com", "cross-site", cookiePrincipal, false},
+		{"same-site fetch metadata does not replace the exact origin check", http.MethodPost, "https://app.example.com", "same-site", cookiePrincipal, false},
+		{"cross-site fetch metadata with missing origin is rejected", http.MethodPost, "", "cross-site", cookiePrincipal, false},
+		{"safe method never requires an origin", http.MethodGet, "", "", cookiePrincipal, true},
+		{"development principal skips the browser boundary", http.MethodPost, "", "", auth.Principal{Subject: "developer", Issuer: "development", BreakGlass: true}, true},
+		{"break-glass session passes with the exact origin", http.MethodPost, "https://admin.example.com", "", auth.Principal{Subject: "offline", Issuer: "break-glass", BreakGlass: true}, true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			server := &Server{logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
+			server.EnableBrowserOrigin("https://admin.example.com")
+			request := httptest.NewRequest(test.method, "/api/v1/enrollment-tokens", nil)
+			if test.origin != "" {
+				request.Header.Set("Origin", test.origin)
+			}
+			if test.fetchSite != "" {
+				request.Header.Set("Sec-Fetch-Site", test.fetchSite)
+			}
+			err := server.validateBrowserMutation(request, test.principal)
+			if test.allowed && err != nil {
+				t.Fatalf("expected the mutation to pass: %v", err)
+			}
+			if !test.allowed && !errors.Is(err, errCrossOrigin) {
+				t.Fatalf("expected a cross-origin rejection, got %v", err)
+			}
+		})
+	}
+}
+
+func TestBrowserMutationFailsClosedWithoutConfiguredOrigin(t *testing.T) {
+	server := &Server{logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/enrollment-tokens", nil)
+	request.Header.Set("Origin", "https://admin.example.com")
+	if err := server.validateBrowserMutation(request, auth.Principal{Issuer: "https://id.example.test"}); !errors.Is(err, errCrossOrigin) {
+		t.Fatalf("cookie mutation without a configured origin = %v", err)
+	}
+}
+
+func TestEnableBrowserOriginRejectsMalformedOrigins(t *testing.T) {
+	server := New("127.0.0.1:0", nil, BuildInfo{}, slog.New(slog.NewTextHandler(io.Discard, nil)), 1024, time.Second, false, "", 1)
+	for _, origin := range []string{"not a url", "https://admin.example.com/callback", "https://user:pass@admin.example.com", "https://admin.example.com?x=1"} {
+		server.EnableBrowserOrigin(origin)
+		if server.browserOrigin != "" {
+			t.Fatalf("EnableBrowserOrigin(%q) installed %q", origin, server.browserOrigin)
+		}
+	}
+	server.EnableBrowserOrigin("https://Admin.Example.Com")
+	if server.browserOrigin != "https://admin.example.com" {
+		t.Fatalf("normalized browser origin = %q", server.browserOrigin)
+	}
+}
+
+func TestNormalizeBrowserOrigin(t *testing.T) {
+	for _, test := range []struct {
+		value string
+		want  string
+		ok    bool
+	}{
+		{"https://admin.example.com", "https://admin.example.com", true},
+		{" https://admin.example.com ", "https://admin.example.com", true},
+		{"https://admin.example.com/", "https://admin.example.com", true},
+		{"HTTPS://Admin.Example.COM", "https://admin.example.com", true},
+		{"https://admin.example.com:8443", "https://admin.example.com:8443", true},
+		{"https://admin.example.com/callback", "", false},
+		{"https://admin.example.com?redirect=1", "", false},
+		{"https://admin.example.com#fragment", "", false},
+		{"https://user@admin.example.com", "", false},
+		{"admin.example.com", "", false},
+		{"", "", false},
+	} {
+		got, ok := normalizeBrowserOrigin(test.value)
+		if got != test.want || ok != test.ok {
+			t.Fatalf("normalizeBrowserOrigin(%q) = %q,%v; want %q,%v", test.value, got, ok, test.want, test.ok)
+		}
+	}
+}
+
+func TestRequireOperationAuthPassesDevelopmentBearerWithoutOrigin(t *testing.T) {
+	server := New("127.0.0.1:0", nil, BuildInfo{}, slog.New(slog.NewTextHandler(io.Discard, nil)), 1024, time.Second, false, "local-development-token-32-characters", 1)
+	server.EnableBrowserOrigin("https://admin.example.com")
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/enrollment-tokens", strings.NewReader("{}"))
+	request.Header.Set("Authorization", "Bearer local-development-token-32-characters")
+	request.Header.Set("Content-Type", "application/json")
+	response := httptest.NewRecorder()
+	server.http.Handler.ServeHTTP(response, request)
+	if response.Code == http.StatusForbidden {
+		t.Fatalf("development bearer was stopped by the browser origin boundary: %s", response.Body.String())
+	}
+}
+
+func TestJSONMediaTypeGate(t *testing.T) {
+	server := &Server{logger: slog.New(slog.NewTextHandler(io.Discard, nil)), devAuth: true, enrollment: &enrollment.Service{}}
+	tests := []struct {
+		name        string
+		contentType string
+		body        string
+		status      int
+	}{
+		{"text/plain JSON smuggling is rejected", "text/plain", `{"reason":"test"}`, http.StatusUnsupportedMediaType},
+		{"form bodies are rejected", "application/x-www-form-urlencoded", "reason=test", http.StatusUnsupportedMediaType},
+		{"multipart bodies are rejected", "multipart/form-data; boundary=x", "--x", http.StatusUnsupportedMediaType},
+		{"missing content type is rejected", "", `{"reason":"test"}`, http.StatusUnsupportedMediaType},
+		{"application/json passes the gate", "application/json", `{"reason":"test"}`, http.StatusBadRequest},
+		{"charset parameter is allowed", "application/json; charset=utf-8", `{"reason":"test"}`, http.StatusBadRequest},
+		{"malformed JSON stays invalid", "application/json", "{", http.StatusBadRequest},
+		{"unknown fields stay rejected", "application/json", `{"reason":"test","extra":1}`, http.StatusBadRequest},
+		{"trailing values stay rejected", "application/json", `{"reason":"test"}{"reason":"second"}`, http.StatusBadRequest},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			request := httptest.NewRequest(http.MethodPost, "/api/v1/enrollment-tokens", strings.NewReader(test.body))
+			if test.contentType != "" {
+				request.Header.Set("Content-Type", test.contentType)
+			}
+			response := httptest.NewRecorder()
+			server.createEnrollmentToken(response, request)
+			if response.Code != test.status {
+				t.Fatalf("status = %d, want %d, body = %s", response.Code, test.status, response.Body.String())
+			}
+			if test.status == http.StatusUnsupportedMediaType && !strings.Contains(response.Body.String(), "https://ocservia.dev/problems/unsupported-media-type") {
+				t.Fatalf("missing unsupported-media-type problem: %s", response.Body.String())
+			}
+		})
+	}
+}
+
+func TestBreakGlassRejectsCrossSiteRequests(t *testing.T) {
+	server := &Server{logger: slog.New(slog.NewTextHandler(io.Discard, nil)), auth: &auth.Service{}}
+	server.EnableBrowserOrigin("https://admin.example.com")
+	tests := []struct {
+		name      string
+		origin    string
+		fetchSite string
+	}{
+		{"sibling origin", "https://app.example.com", ""},
+		{"cross-site fetch metadata with a spoofed origin", "https://admin.example.com", "cross-site"},
+		{"missing origin", "", ""},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			request := httptest.NewRequest(http.MethodPost, "/api/v1/auth/break-glass", strings.NewReader(`{"token":"x"}`))
+			request.Header.Set("Content-Type", "application/json")
+			if test.origin != "" {
+				request.Header.Set("Origin", test.origin)
+			}
+			if test.fetchSite != "" {
+				request.Header.Set("Sec-Fetch-Site", test.fetchSite)
+			}
+			response := httptest.NewRecorder()
+			server.breakGlass(response, request)
+			if response.Code != http.StatusForbidden || !strings.Contains(response.Body.String(), "https://ocservia.dev/problems/cross-origin-request") {
+				t.Fatalf("break-glass boundary status = %d, body = %s", response.Code, response.Body.String())
+			}
+		})
 	}
 }
