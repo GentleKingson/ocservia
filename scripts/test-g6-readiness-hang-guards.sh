@@ -74,7 +74,8 @@ critical_timeouts = {
     "Clean release-image resources" => 5
   },
   "g6-rd-assemble" => {
-    "Assemble the evidence bundle" => 15
+    "Assemble the evidence bundle" => 15,
+    "Embed the deterministic bundle verdict" => 5
   }
 }
 critical_timeouts.each do |job_id, expected|

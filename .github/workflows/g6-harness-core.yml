@@ -852,6 +852,38 @@ jobs:
             --fd-a-artifact-digest "${{ needs.g6-rd-fd-a.outputs.raw-artifact-digest }}" \
             --fd-b-artifact-id "${{ needs.g6-rd-fd-b.outputs.raw-artifact-id }}" \
             --fd-b-artifact-digest "${{ needs.g6-rd-fd-b.outputs.raw-artifact-digest }}"
+      - name: Embed the deterministic bundle verdict
+        timeout-minutes: 5
+        run: |
+          set -euo pipefail
+          bundle="${RUNNER_TEMP}/g6-rd-evidence-bundle"
+          status=0
+          # The published bundle carries the verdict computed at assembly
+          # time from exactly the bytes being published, so the independent
+          # verifier's recomputation proves the bundle and its verdict
+          # cannot drift apart. Engineering authority legitimately settles
+          # non-final (exit 1) on the authority fence; only verdict-free or
+          # crashing evaluation fails assembly here.
+          node scripts/verify-g6-evidence.mjs \
+            --slo docs/acceptance/g6-slo.yaml \
+            --evidence "${bundle}/evidence.json" \
+            --topology "${bundle}/topology.json" \
+            --release-manifest "${bundle}/release-manifest.json" \
+            --artifact-root "${bundle}" \
+            --expected-authority "${{ inputs.authority }}" \
+            --expected-environment-id "${G6RD_EXPECTED_ENVIRONMENT_ID}" \
+            --expected-failure-domain-class multi_host \
+            --result "${RUNNER_TEMP}/g6-rd-assembly-work/bundle-verification-result.json" \
+            >"${bundle}/verdict.json" || status=$?
+          jq -e '.schema_version == "ocservia.g6-verdict.v2"' \
+            "${bundle}/verdict.json" >/dev/null || {
+            echo "the assembly-time verifier did not produce a G6 verdict" >&2
+            exit 1
+          }
+          if [[ "${status}" != 0 && "${status}" != 1 ]]; then
+            echo "the assembly-time verifier exited ${status}" >&2
+            exit 1
+          fi
       - name: Preserve an assembly result when assembly could not start
         if: always()
         run: |
