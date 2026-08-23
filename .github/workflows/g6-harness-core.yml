@@ -812,16 +812,8 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
-      - name: Initialize smoke FD-A timing diagnostics
-        run: >-
-          scripts/g6-timing.sh init
-          "${RUNNER_TEMP}/artifacts/timing/g6-smoke-fd-a.json"
-          g6-smoke-fd-a smoke "${GITHUB_SHA}" "${GITHUB_RUN_ID}" "${GITHUB_RUN_ATTEMPT}"
       - name: Runner preflight
-        run: |
-          scripts/g6-timing.sh start "${RUNNER_TEMP}/artifacts/timing/g6-smoke-fd-a.json" runner_preparation
-          scripts/ci-preflight.sh
-          scripts/g6-timing.sh end "${RUNNER_TEMP}/artifacts/timing/g6-smoke-fd-a.json" runner_preparation || true
+        run: scripts/ci-preflight.sh
       - name: Restore verified G6 Node runtime
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
@@ -1506,8 +1498,16 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
+      - name: Initialize smoke FD-A timing diagnostics
+        run: >-
+          scripts/g6-timing.sh init
+          "${RUNNER_TEMP}/artifacts/timing/g6-smoke-fd-a.json"
+          g6-smoke-fd-a smoke "${GITHUB_SHA}" "${GITHUB_RUN_ID}" "${GITHUB_RUN_ATTEMPT}"
       - name: Runner preflight
-        run: scripts/ci-preflight.sh
+        run: |
+          scripts/g6-timing.sh start "${RUNNER_TEMP}/artifacts/timing/g6-smoke-fd-a.json" runner_preparation
+          scripts/ci-preflight.sh
+          scripts/g6-timing.sh end "${RUNNER_TEMP}/artifacts/timing/g6-smoke-fd-a.json" runner_preparation || true
       - name: Download the frozen smoke harness
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:

@@ -4,6 +4,13 @@
 # readiness decision.
 set -euo pipefail
 
+# Timings are diagnostic only. A filesystem, jq, or clock problem must never
+# turn a readiness result into a pass or a failure; the calling workflow keeps
+# running its authoritative work after this helper returns successfully.
+if [[ "${G6_TIMING_REQUIRED:-false}" != true ]]; then
+  trap 'echo "non-authoritative G6 timing collection failed" >&2; exit 0' ERR
+fi
+
 usage() {
   echo "usage: $0 <init|start|end|artifact|rendezvous|render|summary> ..." >&2
   exit 2
