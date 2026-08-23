@@ -3413,6 +3413,15 @@ function readInstances(path, failureDomain) {
       finishedAt && !finishedAt.startsWith("0001-01-01")
         ? normalizeStamp(finishedAt, `${service} FinishedAt`)
         : undefined;
+    // Raw inventories publish image digests under the public
+    // scanner-inert tag; accept the canonical form as well so retained
+    // pre-tag artifacts still reassemble, then normalize to the canonical
+    // digest every downstream comparison already uses.
+    const digestMatch =
+      /^(?:sha256:|public-image-digest-sha256-)([0-9a-f]{64})$/.exec(image);
+    if (!digestMatch) {
+      fail(`instance ${service} has no recognizable image digest`);
+    }
     instances.push({
       instance_id: service.startsWith("agent-")
         ? service
@@ -3420,7 +3429,7 @@ function readInstances(path, failureDomain) {
       fault_domain: failureDomain === "fd-a" ? "fd-alpha" : "fd-beta",
       role: roleOfService(service, failureDomain),
       component: componentOfService(service),
-      component_digest: image,
+      component_digest: `sha256:${digestMatch[1]}`,
       started_at: started,
       ...(stopped ? { stopped_at: stopped } : {}),
     });

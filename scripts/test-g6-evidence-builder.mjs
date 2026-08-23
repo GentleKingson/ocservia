@@ -617,12 +617,15 @@ write(
   "failure_domain=fd-a\nalias=fd-alpha\n",
 );
 
-function instanceLine(service, startedSeconds, finishedSeconds, digestByte) {
+function instanceLine(service, startedSeconds, finishedSeconds, digestByte, tagged = false) {
   const finished =
     finishedSeconds === undefined
       ? "0001-01-01T00:00:00Z"
       : at(finishedSeconds);
-  return `/${service}\t${digestOf(digestByte)}\t${at(startedSeconds)}\t${finished}\t${service}`;
+  const digest = tagged
+    ? `public-image-digest-sha256-${digestByte.repeat(64)}`
+    : digestOf(digestByte);
+  return `/${service}\t${digest}\t${at(startedSeconds)}\t${finished}\t${service}`;
 }
 const peerInstances = [
   instanceLine("postgres", 200, undefined, "d"),
@@ -648,7 +651,7 @@ write(
 );
 const localInstances = [
   instanceLine("postgres", 60, undefined, "d"),
-  instanceLine("api", 121, undefined, "a"),
+  instanceLine("api", 121, undefined, "a", true),
   instanceLine("worker", 121, undefined, "a"),
   instanceLine("scheduler", 121, undefined, "a"),
   instanceLine("transportd", 121, undefined, "b"),

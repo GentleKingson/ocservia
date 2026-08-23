@@ -71,6 +71,44 @@ if gitleaks dir --no-banner --redact --no-color --config "${CONFIG}" "${fixture}
 fi
 rm -f "${fixture}/outbox/relay-pre-fault/bare-journal-key.jsonl"
 
+# The crash-scenario command keys are the same public run-scoped class as
+# the relay key; the unconfigured detector flagged exactly this shape in a
+# live run, so prove the failure first on an isolated fixture, then the
+# exemption under the pinned configuration.
+mkdir -p "${fixture}/outbox/crash-scenario"
+printf '{"idempotency_key":"g6-crash1-%s-%s-fd-b"}\n' "${run_id}" "${attempt}" \
+  >"${fixture}/outbox/crash-scenario/command.jsonl"
+if (cd "${fixture}/outbox/crash-scenario" \
+  && gitleaks dir --no-banner --redact --no-color .) >/dev/null 2>&1; then
+  echo "the crash scenario key no longer reproduces the generic-api-key finding" >&2
+  exit 1
+fi
+gitleaks dir --no-banner --redact --no-color --config "${CONFIG}" "${fixture}" >/dev/null 2>&1 || {
+  echo "the pinned configuration must exempt the enumerated public scenario command keys" >&2
+  exit 1
+}
+
+# Raw failure-domain inventories publish image digests under the public
+# scanner-inert tag next to instance names whose service labels read as
+# keywords. The tagged line passes, and a bare canonical digest beside the
+# very same name must still fail closed.
+image_digest_hex="0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+printf 'g6-rd-%s-fd-b-api-1\tpublic-image-digest-sha256-%s\n' \
+  "${run_id}" "${image_digest_hex}" \
+  >"${fixture}/outbox/relay-pre-fault/instances.tsv"
+gitleaks dir --no-banner --redact --no-color --config "${CONFIG}" "${fixture}" >/dev/null 2>&1 || {
+  echo "the pinned configuration must exempt the tagged public image digest" >&2
+  exit 1
+}
+printf 'g6-rd-%s-fd-b-api-1\tsha256:%s\n' \
+  "${run_id}" "${image_digest_hex}" \
+  >"${fixture}/outbox/relay-pre-fault/bare-instances.tsv"
+if gitleaks dir --no-banner --redact --no-color --config "${CONFIG}" "${fixture}" >/dev/null 2>&1; then
+  echo "the pinned configuration must still detect bare image digests beside keyword names" >&2
+  exit 1
+fi
+rm -f "${fixture}/outbox/relay-pre-fault/bare-instances.tsv"
+
 # A real credential inside the very same evidence files must still fail closed.
 token_suffix="$(openssl rand -hex 18)"
 printf 'github_token = "ghp_%s"\n' "${token_suffix}" \

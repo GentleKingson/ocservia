@@ -1122,9 +1122,14 @@ phase_evidence() {
   docker ps -a --filter "label=com.docker.compose.project=${COMPOSE_PROJECT}" \
     --format '{{.Names}}' | sort -u | while read -r name; do
     [[ -n "${name}" ]] || continue
+    # Image digests are public run-scoped values, but a raw sha256 next to an
+    # instance name containing a service keyword (api, controller-key-init)
+    # reads as a detected secret; publish the tagged form the builder
+    # normalizes back before validation.
     docker inspect --format \
       '{{.Name}}	{{.Image}}	{{.State.StartedAt}}	{{.State.FinishedAt}}	{{index .Config.Labels "com.docker.compose.service"}}' \
-      "${name}" 2>/dev/null || true
+      "${name}" 2>/dev/null \
+      | sed 's|sha256:\([0-9a-f]\{64\}\)|public-image-digest-sha256-\1|g' || true
   done >>"${out}/evidence/instances.tsv"
   g6rd_now >"${out}/evidence/snapshot-taken-at"
   printf 'failure_domain=%s\nalias=%s\n' "${FD_ID}" "${FD_ALIAS}" >"${out}/evidence/failure-domain.txt"

@@ -1670,16 +1670,9 @@ sampler_trace="$(mktemp)"
 (
   export G6RD_ENVIRONMENT_ID=fixture-environment
   export G6RD_CANDIDATE_SHA=0123456789abcdef0123456789abcdef01234567
-  sampler_fixture_value() {
-    case "$*" in
-      *VmRSS*) printf '1\n' ;;
-      */fd*) printf '2\n' ;;
-      *) printf '3\n' ;;
-    esac
-  }
   g6rd_compose() {
     printf 'base\n' >>"${sampler_trace}"
-    sampler_fixture_value "$@"
+    return 1
   }
   g6rd_agent_compose() {
     [[ "$#" == 8 && "$1" == exec && "$2" == -T \
@@ -1688,8 +1681,14 @@ sampler_trace="$(mktemp)"
       echo "Agent resource sampling did not use its process owner" >&2
       return 1
     }
+    # one merged probe script must read all three fields in a single exec
+    [[ "$8" == *VmRSS* && "$8" == */proc/*/fd* \
+      && "$8" == */run/ocservia-agent/journal/tasks.json* ]] || {
+      echo "the merged Agent probe lost a required field read" >&2
+      return 1
+    }
     printf 'agent\n' >>"${sampler_trace}"
-    sampler_fixture_value "$@"
+    printf '1 2\n3\n'
   }
   sample="$(g6rd_sampler_row agent agent-fd-b-01 agent-fd-b-01 \
     'cat /run/ocserv-platform/agent.pid' \
@@ -1700,9 +1699,9 @@ sampler_trace="$(mktemp)"
     echo "the resource sampler did not emit the expected Agent sample" >&2
     exit 1
   }
-  if [[ "$(grep -c '^agent$' "${sampler_trace}")" != 3 ]] \
+  if [[ "$(grep -c '^agent$' "${sampler_trace}")" != 1 ]] \
     || grep -q '^base$' "${sampler_trace}"; then
-    echo "Agent resource samples must use the Agent Compose overlay" >&2
+    echo "Agent resource samples must use one Agent Compose overlay exec" >&2
     exit 1
   fi
   g6rd_agent_compose() { return 1; }
@@ -1713,25 +1712,83 @@ sampler_trace="$(mktemp)"
     echo "a failed Agent sample was accepted" >&2
     exit 1
   fi
-  grep -qF 'resource sampler agent-fd-b-01 RSS probe failed' \
+  grep -qF 'resource sampler agent-fd-b-01 probe failed' \
     <<<"${sampler_error}" || {
-    echo "a resource probe failure did not identify its instance and field" >&2
+    echo "a resource probe failure did not identify its instance" >&2
     exit 1
   }
 )
 rm -f "${sampler_trace}"
 sampler_failure_output="$(mktemp)"
+sampler_state_fixture="$(mktemp -d)"
 (
   export FD_ID=fd-b
+  export G6RD_STATE="${sampler_state_fixture}"
   g6rd_now() { printf '2026-08-19T00:00:00Z\n'; }
-  g6rd_psql() { printf '1\n'; }
+  g6rd_psql() { printf '1 2\n'; }
   g6rd_sampler_row() { [[ "$1" != agent ]]; }
   if g6rd_sampler_tick "${sampler_failure_output}"; then
     echo "the resource sampler hid a missing required component sample" >&2
     exit 1
   fi
+  [[ -s "${sampler_failure_output}" ]] && {
+    echo "a failed tick appended partial rows" >&2
+    exit 1
+  }
+  [[ -z "$(ls -A "${sampler_state_fixture}")" ]] || {
+    echo "a failed tick leaked its scratch directory" >&2
+    exit 1
+  }
 )
 rm -f "${sampler_failure_output}"
+rm -rf "${sampler_state_fixture}"
+sampler_tick_output="$(mktemp)"
+sampler_tick_state="$(mktemp -d)"
+sampler_psql_trace="$(mktemp)"
+(
+  export FD_ID=fd-b
+  export G6RD_ENVIRONMENT_ID=fixture-environment
+  export G6RD_CANDIDATE_SHA=0123456789abcdef0123456789abcdef01234567
+  export G6RD_STATE="${sampler_tick_state}"
+  g6rd_now() { printf '2026-08-19T00:00:00Z\n'; }
+  g6rd_psql() {
+    printf 'call\n' >>"${sampler_psql_trace}"
+    printf '5 7\n'
+  }
+  g6rd_sampler_row() {
+    local component="$1" instance="$2"
+    sleep 0.05
+    printf '2026-08-19T00:00:00Z,%s,%s,1024,2,3,%s,%s,fixture-environment,%s\n' \
+      "${component}" "${instance}" \
+      "$([[ "${component}" == postgres ]] && printf 5 || printf 0)" \
+      "$([[ "${component}" == postgres ]] && printf 7 || printf '')" \
+      "${G6RD_CANDIDATE_SHA}"
+  }
+  g6rd_sampler_tick "${sampler_tick_output}" || {
+    echo "a complete sampler tick failed" >&2
+    exit 1
+  }
+  [[ "$(grep -c '^2026-08-19T00:00:00Z,' "${sampler_tick_output}")" == 6 ]] || {
+    echo "a complete tick did not append exactly six stamped rows" >&2
+    exit 1
+  }
+  [[ "$(awk -F, 'NR==1{print $3}' "${sampler_tick_output}")" == "api-fd-b" \
+    && "$(awk -F, 'NR==6{print $3}' "${sampler_tick_output}")" == "postgres-fd-b" ]] || {
+    echo "tick rows lost their deterministic component order" >&2
+    exit 1
+  }
+  [[ "$(grep -c '^call$' "${sampler_psql_trace}")" == 1 ]] || {
+    echo "a tick must read both database counters in one roundtrip" >&2
+    exit 1
+  }
+  [[ -z "$(ls -A "${sampler_tick_state}")" ]] || {
+    echo "a completed tick leaked its scratch directory" >&2
+    exit 1
+  }
+)
+rm -f "${sampler_tick_output}"
+rm -rf "${sampler_tick_state}"
+rm -f "${sampler_psql_trace}"
 sampler_preflight_fixture="$(mktemp -d)"
 sampler_preflight_valid="${sampler_preflight_fixture}/valid.csv"
 sampler_preflight_header='timestamp,component,instance,rss_bytes,fd_count,tasks,queue_depth,db_connections,environment_id,candidate_sha'

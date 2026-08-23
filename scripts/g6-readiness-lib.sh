@@ -2012,26 +2012,25 @@ g6rd_synthetic_barriers_armed() {
 
 g6rd_sampler_row() {
   local component="$1" instance="$2" container="$3" pid_expr="$4" tasks_expr="$5" queue="$6" db="$7" stamp="$8"
-  local compose_command=g6rd_compose rss fd tasks
+  local compose_command=g6rd_compose rss fd tasks probe
   local -a compose_args=()
   if [[ "${component}" == agent ]]; then
     compose_command=g6rd_agent_compose
     compose_args=(--user 65532:65532)
   fi
-  if ! rss="$("${compose_command}" exec -T "${compose_args[@]}" "${container}" sh -c \
-    "pid=\$(${pid_expr}); awk '/VmRSS/{print \$2}' /proc/\$pid/status" 2>/dev/null | tr -d '[:space:]')"; then
-    echo "resource sampler ${instance} RSS probe failed" >&2
+  # One exec per row: separate RSS, descriptor, and task probes tripled the
+  # per-tick Docker cost and whole ticks could stretch past the five-second
+  # sample-gap bound under load.
+  if ! probe="$("${compose_command}" exec -T "${compose_args[@]}" "${container}" sh -c \
+    "pid=\$(${pid_expr})
+printf '%s %s\n' \"\$(awk '/VmRSS/{print \$2}' /proc/\$pid/status 2>/dev/null)\" \"\$(ls /proc/\$pid/fd 2>/dev/null | wc -l)\"
+${tasks_expr}" 2>/dev/null)"; then
+    echo "resource sampler ${instance} probe failed" >&2
     return 1
   fi
-  if ! fd="$("${compose_command}" exec -T "${compose_args[@]}" "${container}" sh -c \
-    "pid=\$(${pid_expr}); ls /proc/\$pid/fd 2>/dev/null | wc -l" 2>/dev/null | tr -d '[:space:]')"; then
-    echo "resource sampler ${instance} file-descriptor probe failed" >&2
-    return 1
-  fi
-  if ! tasks="$("${compose_command}" exec -T "${compose_args[@]}" "${container}" sh -c "${tasks_expr}" 2>/dev/null | tr -d '[:space:]')"; then
-    echo "resource sampler ${instance} task probe failed" >&2
-    return 1
-  fi
+  rss="$(awk 'NR==1 { print $1 }' <<<"${probe}")"
+  fd="$(awk 'NR==1 { print $2 }' <<<"${probe}")"
+  tasks="$(awk 'NR==2' <<<"${probe}")"
   [[ "${rss}" =~ ^[0-9]+$ ]] || {
     echo "resource sampler ${instance} returned invalid RSS" >&2
     return 1
@@ -2060,7 +2059,8 @@ g6rd_sampler_row() {
 
 g6rd_sampler_tick() {
   local out_file="${1:?output csv is required}"
-  local queue db stamp
+  local counts queue db stamp row status=0 index
+  local -a row_order=(api worker scheduler transportd agent postgres) pids=()
   local G6RD_COMPOSE_TIMEOUT_SECONDS="${G6RD_SAMPLER_COMPOSE_TIMEOUT_SECONDS:-3}"
   local G6RD_PSQL_TIMEOUT_SECONDS="${G6RD_SAMPLER_PSQL_TIMEOUT_SECONDS:-3}"
   local G6RD_TIMEOUT_PROCESS_GROUP=1
@@ -2072,32 +2072,56 @@ g6rd_sampler_tick() {
   # one clock reading per tick: per-row stamps would let sequential docker
   # execs stretch a tick past the five-second sample-gap bound
   stamp="$(g6rd_now)"
-  db="$(g6rd_psql -Atc 'SELECT count(*) FROM pg_stat_activity' 2>/dev/null)" || return 1
-  queue="$(g6rd_psql -Atc \
-    'SELECT count(*) FROM outbox_events WHERE published_at IS NULL' 2>/dev/null)" || return 1
+  # one database roundtrip for both counters: two sequential psql calls
+  # doubled the fixed tick cost every three seconds
+  counts="$(g6rd_psql -Atc \
+    "SELECT (SELECT count(*) FROM pg_stat_activity) || ' ' || (SELECT count(*) FROM outbox_events WHERE published_at IS NULL)" \
+    2>/dev/null)" || return 1
+  read -r db queue <<<"${counts}"
   [[ "${db}" =~ ^[0-9]+$ && "${queue}" =~ ^[0-9]+$ ]] || return 1
-  {
-    g6rd_sampler_row controller "api-${FD_ID}" api 'echo 1' \
-      'curl -s 127.0.0.1:6060/debug/pprof/goroutine?debug=1 | sed -n "1s/.*total \([0-9]*\).*/\1/p"' \
-      0 "" "${stamp}" || return 1
-    g6rd_sampler_row controller "worker-${FD_ID}" worker 'echo 1' \
-      'curl -s 127.0.0.1:6060/debug/pprof/goroutine?debug=1 | sed -n "1s/.*total \([0-9]*\).*/\1/p"' \
-      0 "" "${stamp}" || return 1
-    g6rd_sampler_row controller "scheduler-${FD_ID}" scheduler 'echo 1' \
-      'curl -s 127.0.0.1:6060/debug/pprof/goroutine?debug=1 | sed -n "1s/.*total \([0-9]*\).*/\1/p"' \
-      0 "" "${stamp}" || return 1
-    # shellcheck disable=SC2016  # the sed program must reach the container verbatim
-    g6rd_sampler_row transportd "transportd-${FD_ID}" transportd 'echo 1' \
-      'sed -n "\$s/.*\"tasks_alive\":\([0-9]*\).*/\1/p" /run/transport-stats/tasks.json' \
-      0 "" "${stamp}" || return 1
-    # shellcheck disable=SC2016  # the sed program must reach the container verbatim
-    g6rd_sampler_row agent "agent-${FD_ID}-01" "agent-${FD_ID}-01" 'cat /run/ocserv-platform/agent.pid' \
-      'sed -n "\$s/.*\"tasks_alive\":\([0-9]*\).*/\1/p" /run/ocservia-agent/journal/tasks.json' \
-      0 "" "${stamp}" || return 1
-    g6rd_sampler_row postgres "postgres-${FD_ID}" postgres 'echo 1' \
-      'ls /proc | grep -c "^[0-9]"' \
-      "${queue}" "${db}" "${stamp}" || return 1
-  } >>"${out_file}"
+  # The six row probes run concurrently so a tick costs its slowest probe,
+  # not the sum of all probes; a sum of sequential probes is what pushed a
+  # loaded tick past the five-second sample-gap bound. Every probe keeps its
+  # own bounded timeout, and any failed row fails the whole tick closed.
+  local tick_tmp
+  tick_tmp="$(mktemp -d "${G6RD_STATE}/sampler-tick.XXXXXX")" || return 1
+  g6rd_sampler_row controller "api-${FD_ID}" api 'echo 1' \
+    'curl -s 127.0.0.1:6060/debug/pprof/goroutine?debug=1 | sed -n "1s/.*total \([0-9]*\).*/\1/p"' \
+    0 "" "${stamp}" >"${tick_tmp}/api" &
+  pids+=("$!")
+  g6rd_sampler_row controller "worker-${FD_ID}" worker 'echo 1' \
+    'curl -s 127.0.0.1:6060/debug/pprof/goroutine?debug=1 | sed -n "1s/.*total \([0-9]*\).*/\1/p"' \
+    0 "" "${stamp}" >"${tick_tmp}/worker" &
+  pids+=("$!")
+  g6rd_sampler_row controller "scheduler-${FD_ID}" scheduler 'echo 1' \
+    'curl -s 127.0.0.1:6060/debug/pprof/goroutine?debug=1 | sed -n "1s/.*total \([0-9]*\).*/\1/p"' \
+    0 "" "${stamp}" >"${tick_tmp}/scheduler" &
+  pids+=("$!")
+  # shellcheck disable=SC2016  # the sed program must reach the container verbatim
+  g6rd_sampler_row transportd "transportd-${FD_ID}" transportd 'echo 1' \
+    'sed -n "\$s/.*\"tasks_alive\":\([0-9]*\).*/\1/p" /run/transport-stats/tasks.json' \
+    0 "" "${stamp}" >"${tick_tmp}/transportd" &
+  pids+=("$!")
+  # shellcheck disable=SC2016  # the sed program must reach the container verbatim
+  g6rd_sampler_row agent "agent-${FD_ID}-01" "agent-${FD_ID}-01" 'cat /run/ocserv-platform/agent.pid' \
+    'sed -n "\$s/.*\"tasks_alive\":\([0-9]*\).*/\1/p" /run/ocservia-agent/journal/tasks.json' \
+    0 "" "${stamp}" >"${tick_tmp}/agent" &
+  pids+=("$!")
+  g6rd_sampler_row postgres "postgres-${FD_ID}" postgres 'echo 1' \
+    'ls /proc | grep -c "^[0-9]"' \
+    "${queue}" "${db}" "${stamp}" >"${tick_tmp}/postgres" &
+  pids+=("$!")
+  for index in "${!pids[@]}"; do
+    wait "${pids[$index]}" || status=1
+  done
+  if ((status != 0)); then
+    rm -rf "${tick_tmp}"
+    return 1
+  fi
+  for row in "${row_order[@]}"; do
+    cat "${tick_tmp}/${row}"
+  done >>"${out_file}"
+  rm -rf "${tick_tmp}"
 }
 
 g6rd_validate_sampler_batch() {
