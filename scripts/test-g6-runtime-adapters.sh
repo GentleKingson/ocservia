@@ -854,7 +854,7 @@ if ! grep -q 'node_command_leases' <<<"${load_timeout_report}" \
   echo "fd-b reconciliation timeout report must expose bounded state, lease, outbox, and result evidence" >&2
   exit 1
 fi
-for settled_function in load_commands_settled wait_commands_settled window_commands_settled; do
+for settled_function in load_commands_settled wait_commands_settled window_prior_commands_settled window_commands_settled; do
   settled_body="$(sed -n "/^${settled_function}() {/,/^}/p" "${FD_B}")"
   if ! grep -q "'rejected'" <<<"${settled_body}" \
     || ! grep -q "'rolled_back'" <<<"${settled_body}"; then
@@ -866,6 +866,19 @@ for settled_function in load_commands_settled wait_commands_settled window_comma
     exit 1
   fi
 done
+window_phase="$(sed -n '/^phase_window() (/,/^}/p' "${FD_B}")"
+if ! grep -q 'window_ready_for_opening' <<<"${window_phase}" \
+  || ! grep -q 'report_window_precondition_timeout' <<<"${window_phase}"; then
+  echo "fd-b must drain prior unresolved commands before freezing the opening wave" >&2
+  exit 1
+fi
+window_precondition_report="$(sed -n '/^report_window_precondition_timeout() {/,/^}/p' "${FD_B}")"
+if ! grep -q 'COALESCE(command.idempotency_key' <<<"${window_precondition_report}" \
+  || ! grep -q 'node_command_leases' <<<"${window_precondition_report}" \
+  || ! grep -q 'command_attempts' <<<"${window_precondition_report}"; then
+  echo "fd-b opening precondition timeout must report bounded prior-command evidence" >&2
+  exit 1
+fi
 connected_probe="$(sed -n '/^all_nodes_connected() {/,/^}/p' "${FD_B}")"
 if ! grep -q '\.owner_epoch > 0' <<<"${connected_probe}" \
   || ! grep -q 'index("ocserv.fencing.v2")' <<<"${connected_probe}" \

@@ -2246,6 +2246,19 @@ window_outbox_drained() {
     'SELECT count(*) FROM outbox_events WHERE published_at IS NULL')" == 0 ]]
 }
 
+window_prior_commands_settled() {
+  local opening_prefix="g6-window-${RUN_ID}-" unsettled
+  unsettled="$(psql_window_probe -Atc \
+    "SELECT count(*) FROM commands
+     WHERE COALESCE(idempotency_key,'') NOT LIKE '${opening_prefix}%'
+       AND state NOT IN ('succeeded','failed','rejected','expired','rolled_back','superseded')")"
+  [[ "${unsettled}" == 0 ]]
+}
+
+window_ready_for_opening() {
+  window_outbox_drained && window_prior_commands_settled
+}
+
 window_commands_settled() {
   local keys_prefix="${1:?key prefix}" unsettled
   unsettled="$(psql_window_probe -Atc \
@@ -2335,6 +2348,28 @@ report_window_outbox_timeout() {
      WHERE outbox.published_at IS NULL
      ORDER BY outbox.available_at,outbox.id LIMIT 20" >&2 ||
     echo "observation-window unpublished outbox state unavailable" >&2
+}
+
+report_window_precondition_timeout() {
+  local opening_prefix="g6-window-${RUN_ID}-"
+  report_window_outbox_timeout
+  echo "observation-window prior command state at drain timeout:" >&2
+  psql_window_probe -F $'\t' -Atc \
+    "SELECT 'unsettled',command.id::text,command.node_id::text,command.idempotency_key,
+       command.state,operation.state,outbox.published_at IS NOT NULL,
+       outbox.locked_by IS NOT NULL,lease.command_id IS NOT NULL,
+       COALESCE(lease.leased_until>clock_timestamp(),false),outbox.attempts,
+       COALESCE((SELECT string_agg(attempt.attempt_number::text||':'||attempt.state,',' ORDER BY attempt.attempt_number)
+         FROM command_attempts AS attempt WHERE attempt.command_id=command.id),'none'),
+       command.updated_at
+     FROM commands AS command
+     JOIN operations AS operation ON operation.id=command.operation_id
+     JOIN outbox_events AS outbox ON outbox.command_id=command.id
+     LEFT JOIN node_command_leases AS lease ON lease.command_id=command.id
+     WHERE COALESCE(command.idempotency_key,'') NOT LIKE '${opening_prefix}%'
+       AND command.state NOT IN ('succeeded','failed','rejected','expired','rolled_back','superseded')
+     ORDER BY command.updated_at,command.id LIMIT 20" >&2 ||
+    echo "observation-window prior command state unavailable" >&2
 }
 
 wait_for_window_enqueue_wave() {
@@ -2448,8 +2483,8 @@ phase_window() (
   g6rd_wait_until_deadline "${WINDOW_API_READY_TIMEOUT_SECONDS}" 2 \
     "api ready before the window" g6rd_api_ready
   if ! g6rd_wait_until_deadline "${WINDOW_PRE_DRAIN_TIMEOUT_SECONDS}" 5 \
-    "outbox drained before the window" window_outbox_drained; then
-    report_window_outbox_timeout
+    "outbox and prior commands drained before the window" window_ready_for_opening; then
+    report_window_precondition_timeout
     return 1
   fi
   g6rd_now >"${G6RD_STATE}/window-started-at"
