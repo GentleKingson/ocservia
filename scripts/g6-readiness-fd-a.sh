@@ -1147,7 +1147,7 @@ phase_cleanup() {
 
 case "${1:-}" in
 prepare) phase_prepare ;;
-publish-shared-secrets) phase_publish_shared_secrets ;;
+publish-shared-secrets) phase_publish_shared_secrets "${2:?recipient certificate directory is required}" ;;
 import-peer-secrets) phase_import_peer_secrets "${2:?peer directory}" ;;
 import-peer-tunnel-nodes) import_peer_tunnel_nodes "${2:?peer directory}" ;;
 build-images | images) phase_build_images ;;
