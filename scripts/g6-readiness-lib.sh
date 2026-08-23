@@ -95,7 +95,7 @@ g6rd_now() {
 g6rd_write_runtime_result() {
   local root="${1:?runtime evidence root is required}"
   local job_status="${2:?job status is required}"
-  local last_phase="${3:-unknown}" status
+  local last_phase="${3:-unknown}" status failure_class failure_code
   case "${job_status}" in
     success | passed) status=passed ;;
     cancelled) status=cancelled ;;
@@ -112,6 +112,10 @@ g6rd_write_runtime_result() {
         "${root}/harness/runtime/"
     fi
   fi
+  if [[ -d "${ARTIFACT_DIR}/rendezvous" ]]; then
+    mkdir -p "${root}/harness"
+    cp -R "${ARTIFACT_DIR}/rendezvous" "${root}/harness/"
+  fi
   if [[ -f "${ARTIFACT_DIR}/harness/resources.json" ]]; then
     mkdir -p "${root}/harness"
     cp -f "${ARTIFACT_DIR}/harness/resources.json" \
@@ -121,6 +125,43 @@ g6rd_write_runtime_result() {
     mkdir -p "${root}/harness"
     cp -f "${ARTIFACT_DIR}/g6-harness-manifest.tsv" \
       "${root}/harness/frozen-binary-manifest.tsv"
+  fi
+  if [[ "${status}" != passed ]]; then
+    local phase_failure rendezvous_failure state_file
+    phase_failure=""
+    if [[ -d "${G6RD_WORK}/harness/phase-results" ]]; then
+      phase_failure="$(find "${G6RD_WORK}/harness/phase-results" -type f -name '*.json' -print0 \
+        | xargs -0 -r jq -c 'select(.status == "failed" and .failure != null)' \
+        | jq -sc 'if length == 0 then empty else max_by(.sequence) end')"
+    fi
+    if [[ -n "${phase_failure}" ]]; then
+      last_phase="$(jq -er '.phase' <<<"${phase_failure}")"
+      failure_class="$(jq -er '.failure.class' <<<"${phase_failure}")"
+      failure_code="$(jq -er '.failure.code' <<<"${phase_failure}")"
+    else
+      rendezvous_failure=""
+      if [[ -d "${ARTIFACT_DIR}/rendezvous" ]]; then
+        rendezvous_failure="$(find "${ARTIFACT_DIR}/rendezvous" -type f -name '*.result.json' -print0 \
+          | xargs -0 -r jq -c 'select(.status == "failed" and .failure != null)' \
+          | jq -sc 'if length == 0 then empty else max_by(.completed_at) end')"
+      fi
+      if [[ -n "${rendezvous_failure}" ]]; then
+        last_phase="$(jq -er '.checkpoint // "rendezvous"' <<<"${rendezvous_failure}")"
+        failure_class="$(jq -er '.failure.class' <<<"${rendezvous_failure}")"
+        failure_code="$(jq -er '.failure.code' <<<"${rendezvous_failure}")"
+      else
+        state_file="${G6RD_WORK}/harness/state.json"
+        if [[ -f "${state_file}" ]]; then
+          last_phase="$(jq -er '.active_phase.name // .completed_phases[-1].name // "unknown"' "${state_file}")"
+        fi
+        failure_class=harness_contract_failed
+        failure_code=runtime_job_failed
+      fi
+    fi
+  fi
+  local -a failure_args=()
+  if [[ "${status}" != passed ]]; then
+    failure_args=(--failure-class "${failure_class}" --failure-code "${failure_code}")
   fi
   "${G6RD_NODE_BIN:-node}" "${G6RD_ROOT}/scripts/g6-pipeline.mjs" runtime-result \
     --root "${root}" \
@@ -133,6 +174,7 @@ g6rd_write_runtime_result() {
     --run-attempt "${GITHUB_RUN_ATTEMPT:?GITHUB_RUN_ATTEMPT is required}" \
     --environment-id "${G6RD_ENVIRONMENT_ID}" \
     --authority "${G6_AUTHORITY}" \
+    "${failure_args[@]}" \
     --release-manifest-digest "${G6RD_RELEASE_MANIFEST_DIGEST:?release manifest digest is required}"
 }
 
@@ -1970,26 +2012,25 @@ g6rd_synthetic_barriers_armed() {
 
 g6rd_sampler_row() {
   local component="$1" instance="$2" container="$3" pid_expr="$4" tasks_expr="$5" queue="$6" db="$7" stamp="$8"
-  local compose_command=g6rd_compose rss fd tasks
+  local compose_command=g6rd_compose rss fd tasks probe
   local -a compose_args=()
   if [[ "${component}" == agent ]]; then
     compose_command=g6rd_agent_compose
     compose_args=(--user 65532:65532)
   fi
-  if ! rss="$("${compose_command}" exec -T "${compose_args[@]}" "${container}" sh -c \
-    "pid=\$(${pid_expr}); awk '/VmRSS/{print \$2}' /proc/\$pid/status" 2>/dev/null | tr -d '[:space:]')"; then
-    echo "resource sampler ${instance} RSS probe failed" >&2
+  # One exec per row: separate RSS, descriptor, and task probes tripled the
+  # per-tick Docker cost and whole ticks could stretch past the five-second
+  # sample-gap bound under load.
+  if ! probe="$("${compose_command}" exec -T "${compose_args[@]}" "${container}" sh -c \
+    "pid=\$(${pid_expr})
+printf '%s %s\n' \"\$(awk '/VmRSS/{print \$2}' /proc/\$pid/status 2>/dev/null)\" \"\$(ls /proc/\$pid/fd 2>/dev/null | wc -l)\"
+${tasks_expr}" 2>/dev/null)"; then
+    echo "resource sampler ${instance} probe failed" >&2
     return 1
   fi
-  if ! fd="$("${compose_command}" exec -T "${compose_args[@]}" "${container}" sh -c \
-    "pid=\$(${pid_expr}); ls /proc/\$pid/fd 2>/dev/null | wc -l" 2>/dev/null | tr -d '[:space:]')"; then
-    echo "resource sampler ${instance} file-descriptor probe failed" >&2
-    return 1
-  fi
-  if ! tasks="$("${compose_command}" exec -T "${compose_args[@]}" "${container}" sh -c "${tasks_expr}" 2>/dev/null | tr -d '[:space:]')"; then
-    echo "resource sampler ${instance} task probe failed" >&2
-    return 1
-  fi
+  rss="$(awk 'NR==1 { print $1 }' <<<"${probe}")"
+  fd="$(awk 'NR==1 { print $2 }' <<<"${probe}")"
+  tasks="$(awk 'NR==2' <<<"${probe}")"
   [[ "${rss}" =~ ^[0-9]+$ ]] || {
     echo "resource sampler ${instance} returned invalid RSS" >&2
     return 1
@@ -2018,7 +2059,8 @@ g6rd_sampler_row() {
 
 g6rd_sampler_tick() {
   local out_file="${1:?output csv is required}"
-  local queue db stamp
+  local counts queue db stamp row status=0 index
+  local -a row_order=(api worker scheduler transportd agent postgres) pids=()
   local G6RD_COMPOSE_TIMEOUT_SECONDS="${G6RD_SAMPLER_COMPOSE_TIMEOUT_SECONDS:-3}"
   local G6RD_PSQL_TIMEOUT_SECONDS="${G6RD_SAMPLER_PSQL_TIMEOUT_SECONDS:-3}"
   local G6RD_TIMEOUT_PROCESS_GROUP=1
@@ -2030,32 +2072,56 @@ g6rd_sampler_tick() {
   # one clock reading per tick: per-row stamps would let sequential docker
   # execs stretch a tick past the five-second sample-gap bound
   stamp="$(g6rd_now)"
-  db="$(g6rd_psql -Atc 'SELECT count(*) FROM pg_stat_activity' 2>/dev/null)" || return 1
-  queue="$(g6rd_psql -Atc \
-    'SELECT count(*) FROM outbox_events WHERE published_at IS NULL' 2>/dev/null)" || return 1
+  # one database roundtrip for both counters: two sequential psql calls
+  # doubled the fixed tick cost every three seconds
+  counts="$(g6rd_psql -Atc \
+    "SELECT (SELECT count(*) FROM pg_stat_activity) || ' ' || (SELECT count(*) FROM outbox_events WHERE published_at IS NULL)" \
+    2>/dev/null)" || return 1
+  read -r db queue <<<"${counts}"
   [[ "${db}" =~ ^[0-9]+$ && "${queue}" =~ ^[0-9]+$ ]] || return 1
-  {
-    g6rd_sampler_row controller "api-${FD_ID}" api 'echo 1' \
-      'curl -s 127.0.0.1:6060/debug/pprof/goroutine?debug=1 | sed -n "1s/.*total \([0-9]*\).*/\1/p"' \
-      0 "" "${stamp}" || return 1
-    g6rd_sampler_row controller "worker-${FD_ID}" worker 'echo 1' \
-      'curl -s 127.0.0.1:6060/debug/pprof/goroutine?debug=1 | sed -n "1s/.*total \([0-9]*\).*/\1/p"' \
-      0 "" "${stamp}" || return 1
-    g6rd_sampler_row controller "scheduler-${FD_ID}" scheduler 'echo 1' \
-      'curl -s 127.0.0.1:6060/debug/pprof/goroutine?debug=1 | sed -n "1s/.*total \([0-9]*\).*/\1/p"' \
-      0 "" "${stamp}" || return 1
-    # shellcheck disable=SC2016  # the sed program must reach the container verbatim
-    g6rd_sampler_row transportd "transportd-${FD_ID}" transportd 'echo 1' \
-      'sed -n "\$s/.*\"tasks_alive\":\([0-9]*\).*/\1/p" /run/transport-stats/tasks.json' \
-      0 "" "${stamp}" || return 1
-    # shellcheck disable=SC2016  # the sed program must reach the container verbatim
-    g6rd_sampler_row agent "agent-${FD_ID}-01" "agent-${FD_ID}-01" 'cat /run/ocserv-platform/agent.pid' \
-      'sed -n "\$s/.*\"tasks_alive\":\([0-9]*\).*/\1/p" /run/ocservia-agent/journal/tasks.json' \
-      0 "" "${stamp}" || return 1
-    g6rd_sampler_row postgres "postgres-${FD_ID}" postgres 'echo 1' \
-      'ls /proc | grep -c "^[0-9]"' \
-      "${queue}" "${db}" "${stamp}" || return 1
-  } >>"${out_file}"
+  # The six row probes run concurrently so a tick costs its slowest probe,
+  # not the sum of all probes; a sum of sequential probes is what pushed a
+  # loaded tick past the five-second sample-gap bound. Every probe keeps its
+  # own bounded timeout, and any failed row fails the whole tick closed.
+  local tick_tmp
+  tick_tmp="$(mktemp -d "${G6RD_STATE}/sampler-tick.XXXXXX")" || return 1
+  g6rd_sampler_row controller "api-${FD_ID}" api 'echo 1' \
+    'curl -s 127.0.0.1:6060/debug/pprof/goroutine?debug=1 | sed -n "1s/.*total \([0-9]*\).*/\1/p"' \
+    0 "" "${stamp}" >"${tick_tmp}/api" &
+  pids+=("$!")
+  g6rd_sampler_row controller "worker-${FD_ID}" worker 'echo 1' \
+    'curl -s 127.0.0.1:6060/debug/pprof/goroutine?debug=1 | sed -n "1s/.*total \([0-9]*\).*/\1/p"' \
+    0 "" "${stamp}" >"${tick_tmp}/worker" &
+  pids+=("$!")
+  g6rd_sampler_row controller "scheduler-${FD_ID}" scheduler 'echo 1' \
+    'curl -s 127.0.0.1:6060/debug/pprof/goroutine?debug=1 | sed -n "1s/.*total \([0-9]*\).*/\1/p"' \
+    0 "" "${stamp}" >"${tick_tmp}/scheduler" &
+  pids+=("$!")
+  # shellcheck disable=SC2016  # the sed program must reach the container verbatim
+  g6rd_sampler_row transportd "transportd-${FD_ID}" transportd 'echo 1' \
+    'sed -n "\$s/.*\"tasks_alive\":\([0-9]*\).*/\1/p" /run/transport-stats/tasks.json' \
+    0 "" "${stamp}" >"${tick_tmp}/transportd" &
+  pids+=("$!")
+  # shellcheck disable=SC2016  # the sed program must reach the container verbatim
+  g6rd_sampler_row agent "agent-${FD_ID}-01" "agent-${FD_ID}-01" 'cat /run/ocserv-platform/agent.pid' \
+    'sed -n "\$s/.*\"tasks_alive\":\([0-9]*\).*/\1/p" /run/ocservia-agent/journal/tasks.json' \
+    0 "" "${stamp}" >"${tick_tmp}/agent" &
+  pids+=("$!")
+  g6rd_sampler_row postgres "postgres-${FD_ID}" postgres 'echo 1' \
+    'ls /proc | grep -c "^[0-9]"' \
+    "${queue}" "${db}" "${stamp}" >"${tick_tmp}/postgres" &
+  pids+=("$!")
+  for index in "${!pids[@]}"; do
+    wait "${pids[$index]}" || status=1
+  done
+  if ((status != 0)); then
+    rm -rf "${tick_tmp}"
+    return 1
+  fi
+  for row in "${row_order[@]}"; do
+    cat "${tick_tmp}/${row}"
+  done >>"${out_file}"
+  rm -rf "${tick_tmp}"
 }
 
 g6rd_validate_sampler_batch() {

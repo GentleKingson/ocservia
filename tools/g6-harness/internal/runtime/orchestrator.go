@@ -18,6 +18,7 @@ import (
 )
 
 type Options struct {
+	Profile     string
 	Domain      string
 	DomainRunID string
 	RunnerTemp  string
@@ -31,7 +32,7 @@ func RunSegment(ctx context.Context, options Options, segmentName string) (runEr
 	if err := options.validate(); err != nil {
 		return err
 	}
-	graph, segment, err := phase.ResolveSegment(options.Domain, segmentName)
+	graph, segment, err := phase.ResolveProfileSegment(options.Profile, options.Domain, segmentName)
 	if err != nil {
 		return err
 	}
@@ -60,11 +61,11 @@ func RecordManifested(options Options, checkpoint string) (recordErr error) {
 	if err := options.validate(); err != nil {
 		return err
 	}
-	graph, err := phase.ResolveGraph(options.Domain)
+	graph, err := phase.ResolveProfileGraph(options.Profile, options.Domain)
 	if err != nil {
 		return err
 	}
-	required, err := phase.RequiredManifestPhase(options.Domain, checkpoint)
+	required, err := phase.RequiredManifestPhaseForProfile(options.Profile, options.Domain, checkpoint)
 	if err != nil {
 		return err
 	}
@@ -80,7 +81,7 @@ func RecordConsumed(options Options, checkpoint string) (recordErr error) {
 	if err := options.validate(); err != nil {
 		return err
 	}
-	graph, err := phase.ResolveGraph(options.Domain)
+	graph, err := phase.ResolveProfileGraph(options.Profile, options.Domain)
 	if err != nil {
 		return err
 	}
@@ -269,7 +270,33 @@ func classifyFailure(outcome execx.Outcome, definition phase.Definition, deadlin
 }
 
 func adapterArguments(options Options, name string) ([]string, error) {
-	peer := func(checkpoint string) string { return filepath.Join(options.RunnerTemp, "g6-rd-"+checkpoint) }
+	prefix := "g6-rd-"
+	if options.Profile == "smoke" {
+		prefix = "g6-smoke-"
+	}
+	peer := func(checkpoint string) string { return filepath.Join(options.RunnerTemp, prefix+checkpoint) }
+	if options.Profile == "smoke" {
+		arguments := map[string][]string{
+			"import-peer-tunnel-nodes": {"import-peer-tunnel-nodes", peer(map[string]string{"fd-a": "tunnel-fd-b", "fd-b": "tunnel-fd-a"}[options.Domain])},
+			"publish-shared-secrets":   {"publish-shared-secrets", peer("shared-recipient-key")},
+			"materialize-runtime":      {"materialize-runtime", peer("shared")},
+			"standby-bootstrap":        {"standby-bootstrap", peer("primary-up")},
+			"agents-enroll":            map[string][]string{"fd-a": {"agents-enroll"}, "fd-b": {"agents-enroll", filepath.Join(peer("agents"), "nodes.tsv")}}[options.Domain],
+			"transport-trust-reload":   {"transport-trust-reload", peer("agents-enrolled-fd-b")},
+			"agents-start":             map[string][]string{"fd-a": {"agents-start"}, "fd-b": {"agents-start", peer("trust-ready")}}[options.Domain],
+			"smoke-isolate":            {"smoke-isolate"}, "promote": {"promote", peer("isolation")},
+			"smoke-evidence": map[string][]string{"fd-a": {"smoke-evidence", peer("promotion")}, "fd-b": {"smoke-evidence"}}[options.Domain],
+		}
+		if value, ok := arguments[name]; ok {
+			return value, nil
+		}
+		for _, allowed := range []string{"prepare", "build-images", "tunnel-up", "publish-shared-recipient-key", "primary-up", "relay-up", "smoke-session"} {
+			if name == allowed {
+				return []string{name}, nil
+			}
+		}
+		return nil, fmt.Errorf("smoke phase %s has no fixed leaf adapter", name)
+	}
 	if name == "window-barrier-arm" {
 		if options.Domain == "fd-a" {
 			return []string{"window-barrier-arm", peer("window-barrier-arm-request")}, nil
@@ -278,6 +305,7 @@ func adapterArguments(options Options, name string) ([]string, error) {
 	}
 	arguments := map[string][]string{
 		"import-peer-tunnel-nodes": {"import-peer-tunnel-nodes", peer(map[string]string{"fd-a": "tunnel-fd-b", "fd-b": "tunnel-fd-a"}[options.Domain])},
+		"publish-shared-secrets":   {"publish-shared-secrets", peer("shared-recipient-key")},
 		"transport-trust-reload":   {"transport-trust-reload", peer("agents-enrolled-fd-b")},
 		"dual-primary-probes":      {"dual-primary-probes", peer("new-primary")},
 		"relay-a-stop":             {"relay-a-stop", peer("relay-pre-fault")},
@@ -296,7 +324,7 @@ func adapterArguments(options Options, name string) ([]string, error) {
 		return value, nil
 	}
 	allowedWithoutArguments := map[string]bool{
-		"prepare": true, "build-images": true, "tunnel-up": true, "publish-shared-secrets": true,
+		"prepare": true, "build-images": true, "tunnel-up": true, "publish-shared-recipient-key": true,
 		"primary-up": true, "pitr-prepare": true, "isolate": true, "pitr-restore": true, "rejoin": true,
 		"relay-rejoin-ready": true, "ready": true, "window-barrier-release-after-proof": true,
 		"relay-up": true, "load-start": true, "scenario-scheduler": true, "scenario-owner": true,

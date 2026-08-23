@@ -1432,7 +1432,9 @@ impl Default for Backoff {
     fn default() -> Self {
         Self {
             base: Duration::from_millis(250),
-            cap: Duration::from_secs(30),
+            // Leave half of the 30-second connection-owner takeover budget
+            // for endpoint recovery, handshake, and fence persistence.
+            cap: Duration::from_secs(15),
         }
     }
 }
@@ -1801,7 +1803,7 @@ mod tests {
         let values = (0..64)
             .map(|_| policy.delay(20, &mut rng))
             .collect::<Vec<_>>();
-        assert!(values.iter().all(|delay| *delay <= Duration::from_secs(30)));
+        assert!(values.iter().all(|delay| *delay <= Duration::from_secs(15)));
         assert!(values.windows(2).any(|pair| pair[0] != pair[1]));
     }
 

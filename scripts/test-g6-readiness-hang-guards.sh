@@ -2,7 +2,8 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-WORKFLOW="${ROOT}/.github/workflows/g6-readiness.yml"
+FORMAL_CALLER="${ROOT}/.github/workflows/g6-readiness.yml"
+WORKFLOW="${ROOT}/.github/workflows/g6-harness-core.yml"
 CI_WORKFLOW="${ROOT}/.github/workflows/ci.yml"
 ARTIFACT_HELPER="${ROOT}/scripts/real-e2e-artifact.sh"
 POSTGRES_INIT="${ROOT}/deploy/g6-readiness/postgres-init/001-g6-readiness.sh"
@@ -12,16 +13,17 @@ FD_B="${ROOT}/scripts/g6-readiness-fd-b.sh"
 G6_RENDEZVOUS="${ROOT}/tools/g6-harness/internal/rendezvous/client.go"
 G6_PHASE_GRAPH="${ROOT}/tools/g6-harness/internal/phase/graph.go"
 
-ruby -r yaml - "${WORKFLOW}" "${CI_WORKFLOW}" <<'RUBY'
-workflow = YAML.safe_load(File.read(ARGV.fetch(0)), aliases: true)
-ci_workflow = YAML.safe_load(File.read(ARGV.fetch(1)), aliases: true)
+ruby -r yaml - "${FORMAL_CALLER}" "${WORKFLOW}" "${CI_WORKFLOW}" <<'RUBY'
+formal = YAML.safe_load(File.read(ARGV.fetch(0)), aliases: true)
+workflow = YAML.safe_load(File.read(ARGV.fetch(1)), aliases: true)
+ci_workflow = YAML.safe_load(File.read(ARGV.fetch(2)), aliases: true)
 
 def reject(message)
   warn message
   exit 1
 end
 
-concurrency = workflow.fetch("concurrency")
+concurrency = formal.fetch("concurrency")
 reject("G6 readiness must queue formal runs without cancelling active evidence") unless
   concurrency.fetch("queue") == "max" && !concurrency.key?("cancel-in-progress")
 for token in ["github.workflow", "github.ref", "inputs.authority"]
@@ -72,7 +74,8 @@ critical_timeouts = {
     "Clean release-image resources" => 5
   },
   "g6-rd-assemble" => {
-    "Assemble the evidence bundle" => 15
+    "Assemble the evidence bundle" => 15,
+    "Embed the deterministic bundle verdict" => 5
   }
 }
 critical_timeouts.each do |job_id, expected|

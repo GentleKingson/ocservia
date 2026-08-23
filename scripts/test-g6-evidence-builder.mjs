@@ -405,6 +405,7 @@ write(
         command_id: command.id,
         node_id: command.node_id,
         state: "running",
+        sent_attempt_count: 1,
       })),
       result_count: 0,
     },
@@ -616,12 +617,15 @@ write(
   "failure_domain=fd-a\nalias=fd-alpha\n",
 );
 
-function instanceLine(service, startedSeconds, finishedSeconds, digestByte) {
+function instanceLine(service, startedSeconds, finishedSeconds, digestByte, tagged = false) {
   const finished =
     finishedSeconds === undefined
       ? "0001-01-01T00:00:00Z"
       : at(finishedSeconds);
-  return `/${service}\t${digestOf(digestByte)}\t${at(startedSeconds)}\t${finished}\t${service}`;
+  const digest = tagged
+    ? `public-image-digest-sha256-${digestByte.repeat(64)}`
+    : digestOf(digestByte);
+  return `/${service}\t${digest}\t${at(startedSeconds)}\t${finished}\t${service}`;
 }
 const peerInstances = [
   instanceLine("postgres", 200, undefined, "d"),
@@ -647,7 +651,7 @@ write(
 );
 const localInstances = [
   instanceLine("postgres", 60, undefined, "d"),
-  instanceLine("api", 121, undefined, "a"),
+  instanceLine("api", 121, undefined, "a", true),
   instanceLine("worker", 121, undefined, "a"),
   instanceLine("scheduler", 121, undefined, "a"),
   instanceLine("transportd", 121, undefined, "b"),
@@ -1626,6 +1630,19 @@ try {
     .trimEnd()
     .split("\n")
     .map((line) => JSON.parse(line));
+  const earliestEnqueueTimestamp = builtCommandTrace
+    .filter((record) => record.record_type === "enqueued")
+    .map((record) => record.timestamp)
+    .sort()[0];
+  if (
+    builtCommandTrace[0]?.record_type !== "profile" ||
+    builtCommandTrace[0].sequence !== 1 ||
+    builtCommandTrace[0].timestamp !== earliestEnqueueTimestamp
+  ) {
+    throw new Error(
+      "builder did not anchor the leading command-trace profile to the complete traced population",
+    );
+  }
   const inflightSnapshot = builtCommandTrace.find(
     (record) => record.record_type === "inflight_snapshot",
   );
@@ -1669,12 +1686,23 @@ try {
     join(work, "incomplete-opening-snapshot-bundle"),
     "window opening inflight snapshot is not the exact managed population",
   );
+  const unknownOpeningSnapshot = JSON.parse(originalOpeningSnapshot);
+  unknownOpeningSnapshot.commands[0].state = "unknown";
+  write(openingSnapshotPath, `${JSON.stringify(unknownOpeningSnapshot)}\n`);
+  runBuilder(join(work, "unknown-opening-snapshot-bundle"), "production_readiness");
+  const unsentOpeningSnapshot = JSON.parse(originalOpeningSnapshot);
+  unsentOpeningSnapshot.commands[0].sent_attempt_count = 0;
+  write(openingSnapshotPath, `${JSON.stringify(unsentOpeningSnapshot)}\n`);
+  expectBuilderFailure(
+    join(work, "unsent-opening-snapshot-bundle"),
+    "window opening inflight snapshot command 1 is malformed",
+  );
   const tiedOpeningSnapshot = JSON.parse(originalOpeningSnapshot);
   tiedOpeningSnapshot.captured_at = commands[0].updated_at;
   write(openingSnapshotPath, `${JSON.stringify(tiedOpeningSnapshot)}\n`);
   expectBuilderFailure(
     join(work, "terminal-tie-opening-snapshot-bundle"),
-    "was not dispatched and result-free at the snapshot boundary",
+    "was not transport-accepted and result-free at the snapshot boundary",
   );
   write(openingSnapshotPath, originalOpeningSnapshot);
   const builtSessionInventory = JSON.parse(
@@ -1741,7 +1769,8 @@ try {
     builtRelayTraffic?.command_id !== relayCommandId ||
     builtRelayTraffic?.command_idempotency_key !== relayCommandKey ||
     builtRelayTraffic?.effect_id !== relayEffectId ||
-    builtRelayTraffic?.effect_idempotency_key !== relayEffectKey ||
+    builtRelayTraffic?.effect_idempotency_key !==
+      `g6-journal-key-${relayEffectKey}` ||
     builtRelayTraffic?.result_observed_at !== at(184) ||
     builtRelayTraffic?.relay_b_started_at !== atMicros(180, 500000) ||
     !builtRelayTraffic?.negotiated_capabilities?.includes("ocserv.fencing.v2")
@@ -1761,7 +1790,7 @@ try {
       relayPreFaultCommandKey ||
     builtPreFaultRelayTraffic?.effect_id !== relayPreFaultEffectId ||
     builtPreFaultRelayTraffic?.effect_idempotency_key !==
-      relayPreFaultEffectKey ||
+      `g6-journal-key-${relayPreFaultEffectKey}` ||
     builtPreFaultRelayTraffic?.result_observed_at !== at(178) ||
     builtPreFaultRelayTraffic?.topology_mode !== "relay-a-only" ||
     builtPreFaultRelayTraffic?.topology_network_name !==
@@ -2893,7 +2922,7 @@ try {
   const observedEffect = sameSecondTrace.find(
     (record) =>
       record.record_type === "effect" &&
-      record.idempotency_key === sameSecondEffectKey,
+      record.idempotency_key === `g6-journal-key-${sameSecondEffectKey}`,
   );
   if (observedEffect?.timestamp !== atMicros(15, 0)) {
     throw new Error(

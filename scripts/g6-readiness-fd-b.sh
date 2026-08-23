@@ -167,10 +167,55 @@ import_peer_tunnel_nodes() {
   done
 }
 
+phase_publish_shared_recipient_key() {
+  local private_key certificate
+  private_key="${G6RD_SECRETS}/shared-recipient-private.pem"
+  certificate="${G6RD_OUTBOX}/shared-recipient-key/recipient-cert.pem"
+  mkdir -p "${G6RD_OUTBOX}/shared-recipient-key"
+  umask 077
+  openssl req -x509 -newkey rsa:3072 -nodes -sha256 -days 1 \
+    -subj "/CN=ocservia-g6-${RUN_ID}-fd-b" \
+    -keyout "${private_key}" -out "${certificate}" >/dev/null 2>&1
+  openssl x509 -in "${certificate}" -noout >/dev/null
+  chmod 0600 "${private_key}" "${certificate}"
+}
+
 phase_import_peer_secrets() {
-  local peer="${1:?peer shared secrets directory is required}"
-  require_file "${peer}/dev-auth-token"
-  require_file "${peer}/controller.key"
+  local peer="${1:?encrypted shared runtime directory is required}"
+  local private_key certificate archive payload name
+  require_file "${peer}/shared-runtime.cms"
+  require_file "${peer}/envelope.json"
+  private_key="${G6RD_SECRETS}/shared-recipient-private.pem"
+  certificate="${G6RD_OUTBOX}/shared-recipient-key/recipient-cert.pem"
+  require_file "${private_key}"
+  require_file "${certificate}"
+  jq -e \
+    --arg candidate "${G6RD_CANDIDATE_SHA}" \
+    --arg run_id "${GITHUB_RUN_ID}" \
+    --argjson run_attempt "${GITHUB_RUN_ATTEMPT}" \
+    --arg environment_id "${G6RD_ENVIRONMENT_ID}" \
+    --arg certificate_sha256 "$(sha256sum "${certificate}" | awk '{print $1}')" \
+    --arg ciphertext_sha256 "$(sha256sum "${peer}/shared-runtime.cms" | awk '{print $1}')" \
+    '.schema == "ocservia.g6.shared-runtime-envelope.v1" and .candidate_sha == $candidate and .run_id == $run_id and .run_attempt == $run_attempt and .environment_id == $environment_id and .recipient_certificate_sha256 == $certificate_sha256 and .ciphertext_sha256 == $ciphertext_sha256' \
+    "${peer}/envelope.json" >/dev/null || {
+      echo "shared runtime envelope binding rejected" >&2
+      return 1
+    }
+  payload="$(mktemp -d "${G6RD_WORK}/shared-runtime.XXXXXX")"
+  archive="${payload}/shared-runtime.tar.gz"
+  openssl cms -decrypt -inform DER -in "${peer}/shared-runtime.cms" \
+    -recip "${certificate}" -inkey "${private_key}" -out "${archive}"
+  tar -tzf "${archive}" | sort -u | grep -Eq '^secrets/[A-Za-z0-9_.-]+$' || {
+    echo "shared runtime archive has no approved secret payload" >&2
+    rm -rf "${payload}"
+    return 1
+  }
+  if tar -tzf "${archive}" | grep -Ev '^secrets/$|^secrets/[A-Za-z0-9_.-]+$' >/dev/null; then
+    echo "shared runtime archive contains an unsafe path" >&2
+    rm -rf "${payload}"
+    return 1
+  fi
+  tar --no-same-owner -xzf "${archive}" -C "${payload}"
   local name
   for name in owner-password app-password replication-password dev-auth-token \
     oidc-client-secret session-key requester-identity-id requester-session-id \
@@ -181,21 +226,25 @@ phase_import_peer_secrets() {
     seal-user-password.key seal-user-password-sha256 \
     seal-p12.key seal-p12-sha256; do
     [[ -s "${G6RD_SECRETS}/${name}" ]] && continue
-    cp -f "${peer}/${name}" "${G6RD_SECRETS}/${name}"
+    require_file "${payload}/secrets/${name}"
+    cp -f "${payload}/secrets/${name}" "${G6RD_SECRETS}/${name}"
     chmod 0600 "${G6RD_SECRETS}/${name}"
   done
   # fd-b never generates its own controller key: era-2 transportd presents
   # the same controller NodeId fd-a's agents already dial.
   [[ -s "${G6RD_SECRETS}/controller.key" ]] || {
-    cp -f "${peer}/controller.key" "${G6RD_SECRETS}/controller.key"
+    require_file "${payload}/secrets/controller.key"
+    cp -f "${payload}/secrets/controller.key" "${G6RD_SECRETS}/controller.key"
     chmod 0600 "${G6RD_SECRETS}/controller.key"
   }
   for name in pg-a api-a relay-b-forward pg-b-forward; do
     [[ -s "${G6RD_SECRETS}/tunnel-${name}.key" ]] || {
-      cp -f "${peer}/tunnel-${name}.key" "${G6RD_SECRETS}/tunnel-${name}.key"
+      require_file "${payload}/secrets/tunnel-${name}.key"
+      cp -f "${payload}/secrets/tunnel-${name}.key" "${G6RD_SECRETS}/tunnel-${name}.key"
       chmod 0600 "${G6RD_SECRETS}/tunnel-${name}.key"
     }
   done
+  rm -rf "${payload}"
 }
 
 phase_materialize_runtime() {
@@ -438,6 +487,67 @@ phase_load_start() {
   g6rd_now >"${G6RD_OUTBOX}/load-active/load-active-at"
 }
 
+phase_smoke_session() {
+  require_file "${NODES_FILE}"
+  G6RD_WORKSPACE_ID="$(<"${G6RD_STATE}/workspace-id")"
+  export G6RD_WORKSPACE_ID
+  g6rd_export_common_env
+  g6rd_timeline_init
+  g6rd_timeline_event smoke_session_started
+  # Before promotion the active transportd and API live in FD-A. The FD-B API
+  # port is the authenticated tunnel to that controller, while FD-B has no
+  # local transport socket yet. Use the controller's durable node view here;
+  # the post-promotion phase uses the new local transport socket directly.
+  if ! g6rd_wait_until_deadline 90 3 "four smoke Agents connected" \
+    g6rd_capture_agent_readiness "${NODES_FILE}"; then
+    g6rd_report_agent_readiness
+    return 1
+  fi
+  local node key="g6-load-${RUN_ID}-smoke" out="${G6RD_OUTBOX}/smoke-session"
+  mkdir -p "${out}"
+  cp -f "${G6RD_STATE}/agent-readiness-last.json" "${out}/connections.json"
+  node="$(awk -F'\t' '$1 == "g6-fd-b-01" {print $2}' "${NODES_FILE}")"
+  [[ -n "${node}" ]] || { echo "cross-FD smoke node is absent" >&2; return 1; }
+  # Formal load deliberately starts with every synthetic command held at its
+  # Agent receipt barrier. Smoke proves an end-to-end result instead, so it
+  # must disarm that fixture before issuing its one authenticated command.
+  g6rd_release_synthetic_barriers
+  g6rd_enqueue_command "${node}" "${key}"
+  # A relay delivery can cross the Worker's ordinary-send ambiguity window.
+  # Do not treat the intermediate `unknown` state as the smoke success point;
+  # wait through reconciliation for the one durable successful Agent result.
+  g6rd_wait_until_deadline 120 2 "cross-FD smoke command result" \
+    smoke_command_succeeded "${key}" "${node}"
+  capture_successful_command_proof "${key}" "${node}" "${out}/command-proof.json"
+  cp -f "${NODES_FILE}" "${out}/nodes.tsv"
+  printf '%s\n' "${G6RD_CANDIDATE_SHA}" >"${out}/candidate-sha"
+}
+
+smoke_command_succeeded() {
+  local key="${1:?idempotency key is required}" node="${2:?node id is required}"
+  [[ "$(psql_primary_probe -Atc \
+    "SELECT count(*) FROM commands AS command
+     JOIN agent_command_results AS result ON result.command_id=command.id
+     WHERE command.idempotency_key='${key}' AND command.node_id='${node}'
+       AND command.state='succeeded' AND result.state='succeeded'")" == 1 ]]
+}
+
+phase_smoke_evidence() {
+  local out="${G6RD_OUTBOX}/smoke-final" args=()
+  require_file "${G6RD_STATE}/promoted-at"
+  mkdir -p "${out}/evidence"
+  readarray -t args < <(node_ids)
+  g6rd_probe_node_connection any "${args[@]}" >"${out}/evidence/post-promotion-connections.json"
+  cp -f "${G6RD_STATE}/era2-sessions.tsv" "${out}/evidence/era2-sessions.tsv"
+  cp -f "${G6RD_STATE}/promoted-at" "${out}/evidence/promoted-at"
+  stop_watchers
+  jq -cn --arg candidate "${G6RD_CANDIDATE_SHA}" --arg environment "${G6RD_ENVIRONMENT_ID}" \
+    --arg domain "${FD_ID}" --argjson agents "$(managed_node_count)" \
+    '{schema_version:"ocservia.g6-smoke-observations.v1",profile:"smoke",candidate_sha:$candidate,environment_id:$environment,failure_domain:$domain,claims:{managed_agents:$agents,primary_promoted:true,post_promotion_sessions:true,raw_evidence_frozen:true}}' \
+    >"${out}/smoke-observations.json"
+  g6rd_now >"${out}/evidence/frozen-at"
+}
+
 phase_promote() {
   local isolation="${1:?peer isolation directory is required}"
   require_file "${isolation}/isolation.json"
@@ -619,7 +729,7 @@ report_load_command_timeout() {
      JOIN outbox_events AS outbox ON outbox.command_id=command.id
      LEFT JOIN node_command_leases AS lease ON lease.command_id=command.id
      WHERE command.idempotency_key LIKE 'g6-load-${RUN_ID}-%'
-       AND command.state NOT IN ('succeeded','failed','rejected','unknown','expired','rolled_back','superseded')
+       AND command.state NOT IN ('succeeded','failed','rejected','expired','rolled_back','superseded')
      ORDER BY command.updated_at,command.id
      LIMIT 20" >&2 || {
     echo "unsettled load command sample unavailable" >&2
@@ -633,7 +743,7 @@ promoted_and_writable() {
 load_commands_settled() {
   local unsettled
   unsettled="$(psql_primary -Atc \
-    "SELECT count(*) FROM commands WHERE idempotency_key LIKE 'g6-load-${RUN_ID}-%' AND state NOT IN ('succeeded','failed','rejected','unknown','expired','rolled_back','superseded')")"
+    "SELECT count(*) FROM commands WHERE idempotency_key LIKE 'g6-load-${RUN_ID}-%' AND state NOT IN ('succeeded','failed','rejected','expired','rolled_back','superseded')")"
   [[ "${unsettled}" == 0 ]]
 }
 
@@ -671,8 +781,10 @@ phase_scenario_scheduler() {
   export SCHEDULER_OLD_EPOCH
   g6rd_compose stop scheduler
   g6rd_timeline_event scheduler_a_paused
-  g6rd_wait_until_deadline 120 2 "old scheduler lease lapsed" \
-    scheduler_lease_lapsed
+  # The replacement process is the authoritative expiry probe: Acquire can
+  # advance the epoch only after PostgreSQL observes the old lease expired.
+  # Starting it immediately also exercises the real ErrLeaseHeld retry path
+  # instead of polling the same predicate independently in the harness.
   g6rd_compose up --detach scheduler
   g6rd_wait_until_deadline 120 2 \
     "replacement scheduler acquired leadership" scheduler_replaced
@@ -724,11 +836,6 @@ phase_scenario_scheduler() {
 # the old owner's exact fence through both enforcement points (transportd
 # disposition and the Agent's stale_owner_epoch gate). The transportd stop
 # for the agent-side probe is also the reconnect-storm injection.
-scheduler_lease_lapsed() {
-  [[ "$(G6RD_PSQL_TIMEOUT_SECONDS=5 psql_primary -Atc \
-    'SELECT (lease_until <= clock_timestamp())::text FROM scheduler_leadership WHERE id=1')" == "t" ]]
-}
-
 scheduler_replaced() {
   local epoch
   epoch="$(G6RD_PSQL_TIMEOUT_SECONDS=5 psql_primary -Atc \
@@ -1233,7 +1340,8 @@ phase_scenario_owner() {
     return 1
   fi
   capture_reconnect_sessions "${bulk_disconnect_file}"
-  capture_database_clock >"${G6RD_STATE}/reconnect-completed-at"
+  capture_database_clock_bounded "${G6RD_STATE}/reconnect-completed-at" \
+    "database clock after reconnect"
   g6rd_timeline_event reconnect_completed "${G6RD_STATE}/reconnect-completed-at"
 }
 
@@ -1270,7 +1378,9 @@ phase_relay_pre_fault() {
   rm -f -- "${observation}" "${before}"
   G6RD_COMPOSE_TIMEOUT_SECONDS=30 g6rd_compose stop relay
   g6rd_wait_until_deadline 30 1 "relay-b stopped before relay-a proof" relay_b_stopped
-  disabled_at="$(capture_database_clock)"
+  capture_database_clock_bounded "${G6RD_STATE}/relay-b-disabled-at" \
+    "database clock after relay-b stop"
+  disabled_at="$(<"${G6RD_STATE}/relay-b-disabled-at")"
   temporary="${out}/relay-b-disabled.json.$$"
   jq -cn --arg environment "${G6RD_ENVIRONMENT_ID}" \
     --arg candidate "${G6RD_CANDIDATE_SHA}" --arg node "${cross_vm_node}" \
@@ -1297,7 +1407,7 @@ phase_relay_pre_fault() {
     wait_commands_settled "${key}"
   capture_relay_dispatch_proof "${command_id}" "${cross_vm_node}" "${before}" \
     "${out}/relay-a-dispatch-proof.json" relay-a
-  capture_relay_command_proof "${key}" "${cross_vm_node}" \
+  capture_successful_command_proof "${key}" "${cross_vm_node}" \
     "${out}/relay-a-command-proof.json"
   G6RD_NODE_CONNECTION_TIMEOUT_SECONDS=5 \
     g6rd_wait_until_deadline 30 2 \
@@ -1305,7 +1415,8 @@ phase_relay_pre_fault() {
     relay_probe_named relay-a "${cross_vm_node}" "${observation}"
   require_file "${observation}"
   relay_observations_same_session "${before}" "${observation}"
-  capture_database_clock >"${out}/observed-at"
+  capture_database_clock_bounded "${out}/observed-at" \
+    "database clock after relay-a observation"
   printf '%s\n' "${cross_vm_node}" >"${out}/node-id"
   printf '%s\n' "${G6RD_CANDIDATE_SHA}" >"${out}/candidate-sha"
 }
@@ -1360,7 +1471,9 @@ phase_scenario_relay() {
   }
   g6rd_timeline_event relay_a_failed "${relay_failed_at}"
   phase_relay_up
-  started_at="$(capture_database_clock)"
+  capture_database_clock_bounded "${G6RD_STATE}/relay-b-started-at" \
+    "database clock after relay-b start"
+  started_at="$(<"${G6RD_STATE}/relay-b-started-at")"
   jq -en --arg started_at "${started_at}" \
     --slurpfile cut "${peer_ready}/relay-fault-cut.json" '
       def stamp_key:
@@ -1398,14 +1511,15 @@ phase_scenario_relay() {
   capture_relay_dispatch_proof \
     "${command_id}" "${cross_vm_node}" "${before_file}" "${dispatch_file}" relay-b
   proof_file="${G6RD_STATE}/relay-command-proof.json"
-  capture_relay_command_proof "${key}" "${cross_vm_node}" "${proof_file}"
+  capture_successful_command_proof "${key}" "${cross_vm_node}" "${proof_file}"
   G6RD_NODE_CONNECTION_TIMEOUT_SECONDS=5 \
     g6rd_wait_until_deadline 30 2 "same relay-b session after authenticated command" \
     relay_probe_relay_b "${cross_vm_node}" "${observation_file}"
   require_file "${observation_file}"
   relay_observations_same_session "${before_file}" "${observation_file}"
   active_at_file="${G6RD_STATE}/relay-b-active-at"
-  capture_database_clock >"${active_at_file}"
+  capture_database_clock_bounded "${active_at_file}" \
+    "database clock after relay-b activation"
   g6rd_timeline_event relay_b_active "${active_at_file}"
 }
 
@@ -1515,7 +1629,7 @@ relay_observations_same_session() {
   ' "${after}" >/dev/null
 }
 
-capture_relay_command_proof() {
+capture_successful_command_proof() {
   local key="${1:?idempotency key is required}"
   local node="${2:?node id is required}"
   local output="${3:?proof destination is required}"
@@ -1543,8 +1657,9 @@ capture_relay_command_proof() {
     and (.agent_result_completed_at | test("^[0-9]{4}-.*Z$"))
     and (.result_observed_at | test("^[0-9]{4}-.*Z$"))
   ' "${temporary}" >/dev/null || {
-    rm -f -- "${temporary}"
-    echo "relay failover command lacks one successful durable result" >&2
+    mv -f -- "${temporary}" "${output}.failed.json"
+    echo "command lacks one successful durable result" >&2
+    jq -c . "${output}.failed.json" >&2 || true
     return 1
   }
   mv -f -- "${temporary}" "${output}"
@@ -1556,6 +1671,7 @@ capture_relay_command_proof() {
 # converge back to the direct path.
 phase_scenario_path() {
   local service="agent-${FD_ID}-01" agent_name="g6-${FD_ID}-01" node isolated_network
+  local recovery_key recovery_proof
   node="$(awk -F'\t' -v name="${agent_name}" '$1 == name {print $2; exit}' "${NODES_FILE}")"
   [[ -n "${node}" ]] || {
     echo "node id for ${agent_name} is missing" >&2
@@ -1586,6 +1702,15 @@ phase_scenario_path() {
   G6RD_NODE_CONNECTION_TIMEOUT_SECONDS=5 \
     g6rd_wait_until_deadline 180 5 "agent-01 session recovered the direct path" \
     g6rd_probe_node_connection direct "${node}"
+  # A path snapshot can race the asynchronous removal of the last invalidated
+  # path. Prove the recovered local transport remains mutation-capable before
+  # later crash windows and the all-fleet opening wave rely on it.
+  recovery_key="g6-path-direct-recovery-${RUN_ID}"
+  recovery_proof="${G6RD_STATE}/direct-path-recovery-command.json"
+  g6rd_enqueue_command "${node}" "${recovery_key}"
+  g6rd_wait_until_deadline 60 2 "direct-path recovery command settled" \
+    wait_commands_settled "${recovery_key}"
+  capture_successful_command_proof "${recovery_key}" "${node}" "${recovery_proof}"
   g6rd_timeline_event direct_path_recovered
 }
 
@@ -1601,7 +1726,7 @@ wait_commands_settled() {
   local keys_prefix="${1:?key prefix}"
   local unsettled
   unsettled="$(psql_primary_probe -Atc \
-    "SELECT count(*) FROM commands WHERE idempotency_key LIKE '${keys_prefix}%' AND state NOT IN ('succeeded','failed','rejected','unknown','expired','rolled_back','superseded')")"
+    "SELECT count(*) FROM commands WHERE idempotency_key LIKE '${keys_prefix}%' AND state NOT IN ('succeeded','failed','rejected','expired','rolled_back','superseded')")"
   [[ "${unsettled}" == 0 ]]
 }
 
@@ -2170,10 +2295,23 @@ window_outbox_drained() {
     'SELECT count(*) FROM outbox_events WHERE published_at IS NULL')" == 0 ]]
 }
 
+window_prior_commands_settled() {
+  local opening_prefix="g6-window-${RUN_ID}-" unsettled
+  unsettled="$(psql_window_probe -Atc \
+    "SELECT count(*) FROM commands
+     WHERE COALESCE(idempotency_key,'') NOT LIKE '${opening_prefix}%'
+       AND state NOT IN ('succeeded','failed','rejected','expired','rolled_back','superseded')")"
+  [[ "${unsettled}" == 0 ]]
+}
+
+window_ready_for_opening() {
+  window_outbox_drained && window_prior_commands_settled
+}
+
 window_commands_settled() {
   local keys_prefix="${1:?key prefix}" unsettled
   unsettled="$(psql_window_probe -Atc \
-    "SELECT count(*) FROM commands WHERE idempotency_key LIKE '${keys_prefix}%' AND state NOT IN ('succeeded','failed','rejected','unknown','expired','rolled_back','superseded')")"
+    "SELECT count(*) FROM commands WHERE idempotency_key LIKE '${keys_prefix}%' AND state NOT IN ('succeeded','failed','rejected','expired','rolled_back','superseded')")"
   [[ "${unsettled}" == 0 ]]
 }
 
@@ -2241,7 +2379,7 @@ report_window_command_timeout() {
      JOIN outbox_events AS outbox ON outbox.command_id=command.id
      LEFT JOIN node_command_leases AS lease ON lease.command_id=command.id
      WHERE command.idempotency_key LIKE '${keys_prefix}%'
-       AND command.state NOT IN ('succeeded','failed','rejected','unknown','expired','rolled_back','superseded')
+       AND command.state NOT IN ('succeeded','failed','rejected','expired','rolled_back','superseded')
      ORDER BY command.updated_at,command.id LIMIT 20" >&2 ||
     echo "observation-window command state matrix unavailable" >&2
 }
@@ -2261,6 +2399,28 @@ report_window_outbox_timeout() {
     echo "observation-window unpublished outbox state unavailable" >&2
 }
 
+report_window_precondition_timeout() {
+  local opening_prefix="g6-window-${RUN_ID}-"
+  report_window_outbox_timeout
+  echo "observation-window prior command state at drain timeout:" >&2
+  psql_window_probe -F $'\t' -Atc \
+    "SELECT 'unsettled',command.id::text,command.node_id::text,command.idempotency_key,
+       command.state,operation.state,outbox.published_at IS NOT NULL,
+       outbox.locked_by IS NOT NULL,lease.command_id IS NOT NULL,
+       COALESCE(lease.leased_until>clock_timestamp(),false),outbox.attempts,
+       COALESCE((SELECT string_agg(attempt.attempt_number::text||':'||attempt.state,',' ORDER BY attempt.attempt_number)
+         FROM command_attempts AS attempt WHERE attempt.command_id=command.id),'none'),
+       command.updated_at
+     FROM commands AS command
+     JOIN operations AS operation ON operation.id=command.operation_id
+     JOIN outbox_events AS outbox ON outbox.command_id=command.id
+     LEFT JOIN node_command_leases AS lease ON lease.command_id=command.id
+     WHERE COALESCE(command.idempotency_key,'') NOT LIKE '${opening_prefix}%'
+       AND command.state NOT IN ('succeeded','failed','rejected','expired','rolled_back','superseded')
+     ORDER BY command.updated_at,command.id LIMIT 20" >&2 ||
+    echo "observation-window prior command state unavailable" >&2
+}
+
 wait_for_window_enqueue_wave() {
   local pid status=0
   (($# > 0)) || {
@@ -2277,7 +2437,7 @@ wait_for_window_enqueue_wave() {
 }
 
 window_opening_commands_active() {
-  local expected prefix observed
+  local expected prefix observed required
   expected="$(managed_node_count)" || return 1
   prefix="g6-window-${RUN_ID}-opening-"
   observed="$(psql_window_probe -F $'\t' -Atc \
@@ -2287,11 +2447,15 @@ window_opening_commands_active() {
        WHERE command.idempotency_key LIKE '${prefix}%'
      )
      SELECT count(*),count(DISTINCT opening.node_id),
-       count(*) FILTER (WHERE opening.state IN ('dispatched','accepted','running')),
-       count(result.command_id)
+       count(*) FILTER (WHERE opening.state IN ('dispatched','accepted','running','unknown')),
+       count(result.command_id),
+       count(*) FILTER (WHERE EXISTS (
+         SELECT 1 FROM command_attempts AS attempt
+         WHERE attempt.command_id=opening.id AND attempt.state='sent'))
      FROM opening
      LEFT JOIN agent_command_results AS result ON result.command_id=opening.id")" || return 1
-  [[ "${observed}" == "${expected}"$'\t'"${expected}"$'\t'"${expected}"$'\t0' ]]
+  required="$(printf '%s\t%s\t%s\t0\t%s' "${expected}" "${expected}" "${expected}" "${expected}")"
+  [[ "${observed}" == "${required}" ]]
 }
 
 capture_window_opening_active() {
@@ -2311,7 +2475,10 @@ capture_window_opening_active() {
        'expected_count',${expected},
        'commands',coalesce(jsonb_agg(jsonb_build_object(
          'command_id',opening.id::text,'node_id',opening.node_id::text,
-         'state',opening.state) ORDER BY opening.node_id),'[]'::jsonb),
+         'state',opening.state,
+         'sent_attempt_count',(SELECT count(*) FROM command_attempts AS attempt
+           WHERE attempt.command_id=opening.id AND attempt.state='sent'))
+         ORDER BY opening.node_id),'[]'::jsonb),
        'result_count',count(result.command_id))
      FROM opening
      LEFT JOIN agent_command_results AS result ON result.command_id=opening.id" \
@@ -2324,10 +2491,12 @@ capture_window_opening_active() {
     and .result_count == 0
     and (.commands | length) == $expected
     and ([.commands[].node_id] | unique | length) == $expected
-    and all(.commands[]; (.state | IN("dispatched","accepted","running")))
+    and all(.commands[];
+      (.state | IN("dispatched","accepted","running","unknown"))
+      and .sent_attempt_count >= 1)
   ' "${temporary}" >/dev/null; then
     rm -f -- "${temporary}"
-    echo "the frozen opening-wave proof is not the exact active managed population" >&2
+    echo "the frozen opening-wave proof is not the exact transport-accepted managed population" >&2
     return 1
   fi
   mv -f -- "${temporary}" "${output}"
@@ -2335,9 +2504,9 @@ capture_window_opening_active() {
 
 record_window_opening_proof() {
   local marker="window-opening-proof-${RUN_ID}"
-  psql_window_probe -v marker_id="${marker}" -Atc \
+  psql_window_probe -Atc \
     "INSERT INTO g6_readiness_markers(id,txid,phase)
-     VALUES (:'marker_id',txid_current()::text,'window_opening_proof')
+     VALUES ('${marker}',txid_current()::text,'window_opening_proof')
      RETURNING id" \
     | grep -Fx -- "${marker}" >/dev/null
 }
@@ -2363,8 +2532,8 @@ phase_window() (
   g6rd_wait_until_deadline "${WINDOW_API_READY_TIMEOUT_SECONDS}" 2 \
     "api ready before the window" g6rd_api_ready
   if ! g6rd_wait_until_deadline "${WINDOW_PRE_DRAIN_TIMEOUT_SECONDS}" 5 \
-    "outbox drained before the window" window_outbox_drained; then
-    report_window_outbox_timeout
+    "outbox and prior commands drained before the window" window_ready_for_opening; then
+    report_window_precondition_timeout
     return 1
   fi
   g6rd_now >"${G6RD_STATE}/window-started-at"
@@ -2380,9 +2549,12 @@ phase_window() (
     echo "the observation window did not load the exact managed population" >&2
     return 1
   }
-  # Arm both failure domains before admission, then prove exactly one active,
-  # result-free production command for every managed Agent before releasing
-  # either half of the fleet. This is the raw max-inflight witness.
+  # Arm both failure domains before admission, then prove exactly one
+  # transport-accepted, result-free production command for every managed
+  # Agent before releasing either half of the fleet. Unknown remains globally
+  # in-flight under the product concurrency limit, so a response-timeout
+  # transition while the synthetic barrier is deliberately held does not
+  # erase an otherwise durable max-inflight witness.
   for node in "${node_list[@]}"; do
     g6rd_enqueue_command "${node}" "g6-window-${RUN_ID}-opening-${count}" &
     enqueue_pids+=("$!")
@@ -2395,9 +2567,12 @@ phase_window() (
     echo "resource sampler failed during the all-fleet opening command wave" >&2
     return 1
   fi
-  g6rd_wait_until_deadline 60 1 \
+  if ! g6rd_wait_until_deadline 60 1 \
     "exact fifty-command production inflight proof" \
-    window_opening_commands_active
+    window_opening_commands_active; then
+    report_window_command_timeout "g6-window-${RUN_ID}-opening-"
+    return 1
+  fi
   capture_window_opening_active
   record_window_opening_proof
   g6rd_release_synthetic_barriers
@@ -2484,6 +2659,24 @@ quiesce_authority_renewers() {
 capture_database_clock() {
   psql_primary_probe -qAtc \
     "SELECT to_char(clock_timestamp() AT TIME ZONE 'UTC','YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"')"
+}
+
+capture_database_clock_file() {
+  local destination="${1:?database clock destination is required}" temporary
+  temporary="$(mktemp "${destination}.XXXXXX")"
+  if ! capture_database_clock >"${temporary}" \
+    || ! grep -Eq '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{6}Z$' "${temporary}"; then
+    rm -f -- "${temporary}"
+    return 1
+  fi
+  mv -f -- "${temporary}" "${destination}"
+}
+
+capture_database_clock_bounded() {
+  local destination="${1:?database clock destination is required}"
+  local description="${2:?database clock description is required}"
+  g6rd_wait_until_deadline 30 2 "${description}" \
+    capture_database_clock_file "${destination}"
 }
 
 capture_final_authority_cut() {
@@ -2733,9 +2926,14 @@ phase_evidence_collect() {
   docker ps -a --filter "label=com.docker.compose.project=${COMPOSE_PROJECT}" \
     --format '{{.Names}}' | sort -u | while read -r name; do
     [[ -n "${name}" ]] || continue
+    # Image digests are public run-scoped values, but a raw sha256 next to an
+    # instance name containing a service keyword (api, controller-key-init)
+    # reads as a detected secret; publish the tagged form the builder
+    # normalizes back before validation.
     docker inspect --format \
       '{{.Name}}	{{.Image}}	{{.State.StartedAt}}	{{.State.FinishedAt}}	{{index .Config.Labels "com.docker.compose.service"}}' \
-      "${name}" 2>/dev/null || true
+      "${name}" 2>/dev/null \
+      | sed 's|sha256:\([0-9a-f]\{64\}\)|public-image-digest-sha256-\1|g' || true
   done >>"${dir}/instances.tsv"
   printf 'failure_domain=%s\nalias=%s\n' "${FD_ID}" "${FD_ALIAS}" >"${dir}/failure-domain.txt"
 
@@ -2751,11 +2949,13 @@ phase_evidence_collect() {
   local args=()
   readarray -t args < <(node_ids)
   g6rd_probe_node_connection any "${args[@]}" >"${dir}/final-sessions-before.json"
-  capture_database_clock >"${dir}/final-sessions-before-complete-at"
+  capture_database_clock_bounded "${dir}/final-sessions-before-complete-at" \
+    "database clock before final authority cut"
   capture_final_authority_cut
   stop_watchers
   append_final_history_snapshot
-  capture_database_clock >"${dir}/final-sessions-after-start-at"
+  capture_database_clock_bounded "${dir}/final-sessions-after-start-at" \
+    "database clock after final authority cut"
   g6rd_probe_node_connection any "${args[@]}" >"${dir}/final-sessions-after.json"
   assert_final_session_authority
   jq -er '.cut_at' "${G6RD_STATE}/final-authority-cut.json" \
@@ -2800,6 +3000,7 @@ phase_runtime_result() {
     state/relay-b-started.json
     state/relay-command-proof.json
     state/relay-dispatch-proof.json
+    state/direct-path-recovery-command.json
     state/all-nodes.tsv
     state/promoted-at
     state/window-ended-at
@@ -2866,6 +3067,7 @@ phase_cleanup() {
 
 case "${1:-}" in
 prepare) phase_prepare ;;
+publish-shared-recipient-key) phase_publish_shared_recipient_key ;;
 materialize-runtime | import-peer-secrets) phase_materialize_runtime "${2:?peer directory}" ;;
 import-peer-tunnel-nodes) import_peer_tunnel_nodes "${2:?peer directory}" ;;
 build-images | images) phase_build_images ;;
@@ -2875,6 +3077,7 @@ relay-up) phase_relay_up ;;
   agents-enroll) phase_agents_enroll "${2:?peer nodes tsv}" ;;
   agents-start) phase_agents_start "${2:?transport trust rendezvous is required}" ;;
   load-start) phase_load_start ;;
+  smoke-session) phase_smoke_session ;;
   promote) phase_promote "${2:?peer isolation directory}" ;;
   merge-peer-evidence) phase_merge_peer_evidence "${2:?peer evidence root}" ;;
 scenario-scheduler) phase_scenario_scheduler ;;
@@ -2890,6 +3093,7 @@ outbox-send-before-mark) phase_outbox_send_before_mark ;;
   window) phase_window "${2:?peer window-barrier acknowledgement is required}" ;;
   evidence-collect) phase_evidence_collect ;;
   final-freeze) phase_final_freeze ;;
+  smoke-evidence) phase_smoke_evidence ;;
   runtime-result) phase_runtime_result "${2:?job status is required}" ;;
   diagnostics) g6rd_diagnostics ;;
   cleanup-prelude) phase_cleanup_prelude ;;

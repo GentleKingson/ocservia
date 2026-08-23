@@ -1730,11 +1730,11 @@ function parseCommandTrace(entry, binding) {
             `${commandLabel} node_id`,
           );
           if (
-            !["dispatched", "accepted", "running"].includes(
+            !["dispatched", "accepted", "running", "unknown"].includes(
               snapshotCommand.state,
             )
           ) {
-            fail(`${commandLabel} is not active`);
+            fail(`${commandLabel} is not transport-accepted and unresolved`);
           }
           if (
             commandIds.has(snapshotCommand.command_id) ||
@@ -3185,7 +3185,7 @@ function completedOwnerTakeovers(state) {
     const successor = state.ownerRegistrations.find(
       (registration) =>
         registration.node === expiry.node &&
-        registration.epoch > expiry.epoch &&
+        registration.epoch === expiry.epoch + 1 &&
         registration.sessionConnectedNs !== undefined &&
         registration.timestampNs >= expiry.timestampNs &&
         registration.sessionConnectedNs >= registration.timestampNs,

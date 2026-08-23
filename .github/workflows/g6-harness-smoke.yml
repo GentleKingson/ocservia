@@ -1,0 +1,40 @@
+name: G6 Harness Smoke
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  g6-smoke-relevance:
+    name: G6 Harness Smoke Relevance
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      relevant: ${{ steps.relevance.outputs.relevant }}
+      reason: ${{ steps.relevance.outputs.reason }}
+      changed-count: ${{ steps.relevance.outputs.changed_count }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Classify the pull request change set
+        id: relevance
+        run: scripts/g6-smoke-relevance.sh "${{ github.event.pull_request.base.sha }}" "${{ github.event.pull_request.head.sha }}" "${GITHUB_OUTPUT}"
+
+  g6-harness-core:
+    name: G6 Harness Smoke Core
+    needs: g6-smoke-relevance
+    uses: ./.github/workflows/g6-harness-core.yml
+    with:
+      profile: smoke
+      authority: engineering
+      candidate_sha: ${{ github.sha }}
+      smoke_relevant: ${{ needs.g6-smoke-relevance.outputs.relevant == 'true' }}

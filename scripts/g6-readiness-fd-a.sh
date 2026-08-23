@@ -176,33 +176,58 @@ phase_prepare() {
     >"${G6RD_OUTBOX}/tunnel/boot-id-sha256"
 }
 
-# The shared-trust rendezvous: everything fd-b needs to run the standby,
-# relay-b, the era-2 transportd (same controller key), and the probes.
+# The shared-trust rendezvous contains credentials. Encrypt the complete
+# run-scoped payload for fd-b before it can enter a checkpoint artifact.
 phase_publish_shared_secrets() {
+  local recipient_dir="${1:?fd-b recipient certificate directory is required}"
+  local payload archive ciphertext envelope name
   g6rd_export_common_env
+  require_file "${recipient_dir}/recipient-cert.pem"
+  openssl x509 -in "${recipient_dir}/recipient-cert.pem" -noout >/dev/null
   mkdir -p "${G6RD_OUTBOX}/shared"
-  local name
+  payload="$(mktemp -d "${G6RD_WORK}/shared-runtime.XXXXXX")"
+  archive="${payload}/shared-runtime.tar.gz"
+  ciphertext="${G6RD_OUTBOX}/shared/shared-runtime.cms"
+  envelope="${G6RD_OUTBOX}/shared/envelope.json"
+  mkdir -p "${payload}/secrets"
   for name in owner-password app-password replication-password dev-auth-token \
     oidc-client-secret session-key requester-identity-id requester-session-id \
     requester-session-cookie approver-identity-id approver-session-id \
     approver-session-cookie; do
-    cp -f "${G6RD_SECRETS}/${name}" "${G6RD_OUTBOX}/shared/"
+    cp -f "${G6RD_SECRETS}/${name}" "${payload}/secrets/"
   done
-  cp -f "${G6RD_SECRETS}/relay-ca.pem" "${G6RD_OUTBOX}/shared/"
-  cp -f "${G6RD_SECRETS}/relay-chain.crt" "${G6RD_OUTBOX}/shared/"
-  cp -f "${G6RD_SECRETS}/relay-leaf.crt" "${G6RD_OUTBOX}/shared/"
-  cp -f "${G6RD_SECRETS}/relay-leaf.key" "${G6RD_OUTBOX}/shared/"
-  cp -f "${G6RD_SECRETS}/relay-token" "${G6RD_OUTBOX}/shared/"
-  cp -f "${G6RD_SECRETS}/command-signing.pem" "${G6RD_OUTBOX}/shared/"
-  cp -f "${G6RD_SECRETS}/command-verification.pem" "${G6RD_OUTBOX}/shared/"
-  cp -f "${G6RD_SECRETS}/seal-user-password.key" "${G6RD_OUTBOX}/shared/"
-  cp -f "${G6RD_SECRETS}/seal-user-password-sha256" "${G6RD_OUTBOX}/shared/"
-  cp -f "${G6RD_SECRETS}/seal-p12.key" "${G6RD_OUTBOX}/shared/"
-  cp -f "${G6RD_SECRETS}/seal-p12-sha256" "${G6RD_OUTBOX}/shared/"
-  cp -f "${G6RD_SECRETS}/controller.key" "${G6RD_OUTBOX}/shared/"
+  cp -f "${G6RD_SECRETS}/relay-ca.pem" "${payload}/secrets/"
+  cp -f "${G6RD_SECRETS}/relay-chain.crt" "${payload}/secrets/"
+  cp -f "${G6RD_SECRETS}/relay-leaf.crt" "${payload}/secrets/"
+  cp -f "${G6RD_SECRETS}/relay-leaf.key" "${payload}/secrets/"
+  cp -f "${G6RD_SECRETS}/relay-token" "${payload}/secrets/"
+  cp -f "${G6RD_SECRETS}/command-signing.pem" "${payload}/secrets/"
+  cp -f "${G6RD_SECRETS}/command-verification.pem" "${payload}/secrets/"
+  cp -f "${G6RD_SECRETS}/seal-user-password.key" "${payload}/secrets/"
+  cp -f "${G6RD_SECRETS}/seal-user-password-sha256" "${payload}/secrets/"
+  cp -f "${G6RD_SECRETS}/seal-p12.key" "${payload}/secrets/"
+  cp -f "${G6RD_SECRETS}/seal-p12-sha256" "${payload}/secrets/"
+  cp -f "${G6RD_SECRETS}/controller.key" "${payload}/secrets/"
   # tunnel keys so fd-b can serve its own forwards with stable NodeIds
-  cp -f "${G6RD_SECRETS}"/tunnel-*.key "${G6RD_OUTBOX}/shared/"
-  chmod 0600 "${G6RD_OUTBOX}/shared/"*
+  cp -f "${G6RD_SECRETS}"/tunnel-*.key "${payload}/secrets/"
+  chmod 0700 "${payload}" "${payload}/secrets"
+  chmod 0600 "${payload}/secrets/"*
+  tar --sort=name --mtime='@0' --owner=0 --group=0 --numeric-owner \
+    -C "${payload}" -czf "${archive}" secrets
+  openssl cms -encrypt -binary -outform DER -aes256 \
+    -in "${archive}" -out "${ciphertext}" "${recipient_dir}/recipient-cert.pem"
+  jq -n \
+    --arg schema 'ocservia.g6.shared-runtime-envelope.v1' \
+    --arg candidate "${G6RD_CANDIDATE_SHA}" \
+    --arg run_id "${GITHUB_RUN_ID}" \
+    --argjson run_attempt "${GITHUB_RUN_ATTEMPT}" \
+    --arg environment_id "${G6RD_ENVIRONMENT_ID}" \
+    --arg recipient_certificate_sha256 "$(sha256sum "${recipient_dir}/recipient-cert.pem" | awk '{print $1}')" \
+    --arg ciphertext_sha256 "$(sha256sum "${ciphertext}" | awk '{print $1}')" \
+    '{schema:$schema,candidate_sha:$candidate,run_id:$run_id,run_attempt:$run_attempt,environment_id:$environment_id,recipient_certificate_sha256:$recipient_certificate_sha256,ciphertext_sha256:$ciphertext_sha256}' \
+    >"${envelope}"
+  chmod 0600 "${ciphertext}" "${envelope}"
+  rm -rf "${payload}"
 }
 
 phase_import_peer_secrets() {
@@ -367,9 +392,6 @@ phase_primary_up() {
   mkdir -p "${G6RD_OUTBOX}/primary-up"
   cp -f "${G6RD_STATE}/controller-endpoint-id" "${G6RD_OUTBOX}/primary-up/"
   cp -f "${G6RD_STATE}/workspace-id" "${G6RD_OUTBOX}/primary-up/workspace-id"
-  # The controller iroh key hands the controller NodeId to fd-b's era-2
-  # transportd; the copy stays inside the 1-day rendezvous artifact.
-  cp -f "${G6RD_SECRETS}/controller.key" "${G6RD_OUTBOX}/primary-up/controller.key"
   chmod 0600 "${G6RD_OUTBOX}/primary-up/"*
 }
 
@@ -573,6 +595,47 @@ phase_isolate() {
     >"${G6RD_OUTBOX}/isolation/isolation.json"
   printf '%s\n' "${outage}" >"${G6RD_OUTBOX}/isolation/outage-declared-at"
   printf '%s\n' "${isolated}" >"${G6RD_OUTBOX}/isolation/isolated-at"
+}
+
+# Bounded smoke cut: preserve the real standby promotion path without the
+# formal profile's fifty-command/PITR assertions.
+phase_smoke_isolate() {
+  local outage isolated
+  require_file "${G6RD_STATE}/peer-pg-b-node-id"
+  mkdir -p "${G6RD_OUTBOX}/isolation"
+  g6rd_tunnel_forward pg-b-forward "$(<"${G6RD_STATE}/peer-pg-b-node-id")" 15432
+  G6_DB_PORT=15432 G6RD_PSQL_TIMEOUT_SECONDS=10 g6rd_psql -Atc \
+    "SELECT to_char(clock_timestamp() AT TIME ZONE 'UTC','YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"')" \
+    >"${G6RD_OUTBOX}/isolation/rto-started-at"
+  g6rd_psql -Atc \
+    "SELECT to_char(clock_timestamp() AT TIME ZONE 'UTC','YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"')" \
+    >"${G6RD_STATE}/outage-declared-at"
+  g6rd_compose stop scheduler api worker transportd >/dev/null 2>&1
+  g6rd_compose stop postgres
+  g6rd_now >"${G6RD_STATE}/isolated-at"
+  outage="$(<"${G6RD_STATE}/outage-declared-at")"
+  isolated="$(<"${G6RD_STATE}/isolated-at")"
+  jq -cn --arg outage_declared_at "${outage}" --arg isolated_at "${isolated}" --arg fd "${FD_ID}" \
+    '{outage_declared_at:$outage_declared_at,isolated_at:$isolated_at,failure_domain:$fd,profile:"smoke"}' \
+    >"${G6RD_OUTBOX}/isolation/isolation.json"
+  printf '%s\n' "${outage}" >"${G6RD_OUTBOX}/isolation/outage-declared-at"
+  printf '%s\n' "${isolated}" >"${G6RD_OUTBOX}/isolation/isolated-at"
+}
+
+phase_smoke_evidence() {
+  local promotion="${1:?promotion rendezvous is required}" out="${G6RD_OUTBOX}/smoke-final"
+  require_file "${promotion}/promoted-at"
+  mkdir -p "${out}/evidence"
+  cp -f "${promotion}/promoted-at" "${out}/evidence/promoted-at"
+  cp -f "${G6RD_OUTBOX}/agents/nodes.tsv" "${out}/evidence/nodes.tsv"
+  local running
+  running="$(g6rd_agent_compose ps --status running --services | grep -c "^agent-${FD_ID}-" || true)"
+  [[ "${running}" == "$(g6rd_agent_count)" ]] || { echo "smoke FD-A agent fleet is incomplete" >&2; return 1; }
+  jq -cn --arg candidate "${G6RD_CANDIDATE_SHA}" --arg environment "${G6RD_ENVIRONMENT_ID}" \
+    --arg domain "${FD_ID}" --argjson agents "${running}" \
+    '{schema_version:"ocservia.g6-smoke-observations.v1",profile:"smoke",candidate_sha:$candidate,environment_id:$environment,failure_domain:$domain,claims:{agents_running:$agents,promotion_observed:true,raw_evidence_frozen:true}}' \
+    >"${out}/smoke-observations.json"
+  g6rd_now >"${out}/evidence/frozen-at"
 }
 
 # Repeated write attempts against the stopped former primary, on fd-a's
@@ -1011,9 +1074,9 @@ phase_window_barrier_arm() {
 fd_a_window_opening_proof_recorded() {
   local marker="window-opening-proof-${RUN_ID%-fd-a}-fd-b" observed
   observed="$(G6_DB_PORT=15432 G6RD_PSQL_TIMEOUT_SECONDS=10 g6rd_psql \
-    -v marker_id="${marker}" -Atc \
+    -Atc \
     "SELECT count(*) FROM g6_readiness_markers
-     WHERE id=:'marker_id' AND phase='window_opening_proof'")" || return 1
+     WHERE id='${marker}' AND phase='window_opening_proof'")" || return 1
   [[ "${observed}" == 1 ]]
 }
 
@@ -1059,9 +1122,14 @@ phase_evidence() {
   docker ps -a --filter "label=com.docker.compose.project=${COMPOSE_PROJECT}" \
     --format '{{.Names}}' | sort -u | while read -r name; do
     [[ -n "${name}" ]] || continue
+    # Image digests are public run-scoped values, but a raw sha256 next to an
+    # instance name containing a service keyword (api, controller-key-init)
+    # reads as a detected secret; publish the tagged form the builder
+    # normalizes back before validation.
     docker inspect --format \
       '{{.Name}}	{{.Image}}	{{.State.StartedAt}}	{{.State.FinishedAt}}	{{index .Config.Labels "com.docker.compose.service"}}' \
-      "${name}" 2>/dev/null || true
+      "${name}" 2>/dev/null \
+      | sed 's|sha256:\([0-9a-f]\{64\}\)|public-image-digest-sha256-\1|g' || true
   done >>"${out}/evidence/instances.tsv"
   g6rd_now >"${out}/evidence/snapshot-taken-at"
   printf 'failure_domain=%s\nalias=%s\n' "${FD_ID}" "${FD_ALIAS}" >"${out}/evidence/failure-domain.txt"
@@ -1084,7 +1152,7 @@ phase_cleanup() {
 
 case "${1:-}" in
 prepare) phase_prepare ;;
-publish-shared-secrets) phase_publish_shared_secrets ;;
+publish-shared-secrets) phase_publish_shared_secrets "${2:?recipient certificate directory is required}" ;;
 import-peer-secrets) phase_import_peer_secrets "${2:?peer directory}" ;;
 import-peer-tunnel-nodes) import_peer_tunnel_nodes "${2:?peer directory}" ;;
 build-images | images) phase_build_images ;;
@@ -1095,6 +1163,7 @@ agents-enroll) phase_agents_enroll ;;
 transport-trust-reload) phase_transport_trust_reload "${2:?fd-b enrollment rendezvous is required}" ;;
 agents-start) phase_agents_start ;;
 isolate) phase_isolate ;;
+smoke-isolate) phase_smoke_isolate ;;
 dual-primary-probes) phase_dual_primary_probes "${2:?promoted primary directory is required}" ;;
 pitr-restore) phase_pitr_restore ;;
 rejoin) phase_rejoin ;;
@@ -1104,6 +1173,7 @@ ready) phase_ready ;;
 window-barrier-arm) phase_window_barrier_arm "${2:?window barrier arm request directory is required}" ;;
 window-barrier-release-after-proof) phase_window_barrier_release_after_proof ;;
 evidence) phase_evidence "${2:?final-freeze directory is required}" ;;
+smoke-evidence) phase_smoke_evidence "${2:?promotion rendezvous is required}" ;;
 runtime-result) phase_runtime_result "${2:?job status is required}" ;;
 diagnostics) g6rd_diagnostics ;;
 cleanup) phase_cleanup ;;

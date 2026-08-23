@@ -24,6 +24,9 @@ outputs:
 runs:
   using: composite
   steps:
+    - name: Reject plaintext credentials
+      shell: bash
+      run: 'scripts/g6-checkpoint-secret-policy.sh "${{ inputs.path }}"'
     - name: Generate the typed checkpoint manifest
       shell: bash
       run: >-

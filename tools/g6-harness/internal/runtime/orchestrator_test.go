@@ -36,6 +36,15 @@ func TestRunSegmentEnforcesDurablePhaseAndCheckpointOrder(t *testing.T) {
 	if err := RunSegment(context.Background(), options, "bootstrap"); err != nil {
 		t.Fatal(err)
 	}
+	if err := RunSegment(context.Background(), options, "shared-trust"); err == nil {
+		t.Fatal("shared trust was accepted before the recipient certificate")
+	}
+	if err := RecordConsumed(options, "shared-recipient-key"); err != nil {
+		t.Fatal(err)
+	}
+	if err := RunSegment(context.Background(), options, "shared-trust"); err != nil {
+		t.Fatal(err)
+	}
 	if err := RunSegment(context.Background(), options, "bootstrap"); err == nil {
 		t.Fatal("duplicate segment was accepted")
 	}
@@ -43,8 +52,8 @@ func TestRunSegmentEnforcesDurablePhaseAndCheckpointOrder(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(rejections) != 1 {
-		t.Fatalf("structured transition rejection count = %d, want 1", len(rejections))
+	if len(rejections) != 2 {
+		t.Fatalf("structured transition rejection count = %d, want 2", len(rejections))
 	}
 	content, err := os.ReadFile(filepath.Join(options.RunnerTemp, "leaves.log"))
 	if err != nil {
@@ -226,6 +235,27 @@ func TestAdapterArgumentsAreFixedAndRunScoped(t *testing.T) {
 	}
 }
 
+func TestSmokeAdapterArgumentsCannotUseFormalRendezvousPaths(t *testing.T) {
+	t.Parallel()
+	options := testOptions(t, "fd-b")
+	options.Profile = "smoke"
+	for phaseName, suffix := range map[string]string{
+		"agents-enroll": "/g6-smoke-agents/nodes.tsv",
+		"promote":       "/g6-smoke-isolation",
+	} {
+		arguments, err := adapterArguments(options, phaseName)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(arguments) != 2 || !strings.HasSuffix(arguments[1], suffix) || strings.Contains(arguments[1], "/g6-rd-") {
+			t.Fatalf("unexpected %s smoke arguments: %v", phaseName, arguments)
+		}
+	}
+	if arguments, err := adapterArguments(options, "smoke-session"); err != nil || len(arguments) != 1 || arguments[0] != "smoke-session" {
+		t.Fatalf("unexpected smoke session adapter: %v, %v", arguments, err)
+	}
+}
+
 func TestCompleteFailureDomainGraphsAreExecutable(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -234,7 +264,8 @@ func TestCompleteFailureDomainGraphsAreExecutable(t *testing.T) {
 	}{
 		{domain: "fd-a", steps: []graphStep{
 			{segment: "prepare", manifest: "tunnel-fd-a"},
-			{consume: "tunnel-fd-b", segment: "bootstrap", manifest: "shared-trust-ready"},
+			{consume: "tunnel-fd-b", segment: "bootstrap"},
+			{consume: "shared-recipient-key", segment: "shared-trust", manifest: "shared-trust-ready"},
 			{segment: "primary", manifest: "primary-ready"},
 			{segment: "enroll", manifest: "fd-a-agent-inventory"},
 			{consume: "fd-b-agents-enrolled", segment: "transport-trust", manifest: "transport-trust-ready"},
@@ -248,7 +279,7 @@ func TestCompleteFailureDomainGraphsAreExecutable(t *testing.T) {
 		}},
 		{domain: "fd-b", steps: []graphStep{
 			{segment: "prepare", manifest: "tunnel-fd-b"},
-			{consume: "tunnel-fd-a", segment: "bootstrap"},
+			{consume: "tunnel-fd-a", segment: "bootstrap", manifest: "shared-recipient-key"},
 			{consume: "shared-trust-ready", segment: "peer-runtime"},
 			{consume: "primary-ready", segment: "standby"},
 			{consume: "fd-a-agent-inventory", segment: "enroll", manifest: "fd-b-agents-enrolled"},
@@ -288,23 +319,28 @@ func TestCompleteFailureDomainGraphsAreExecutable(t *testing.T) {
 func TestPhaseGraphAndRendezvousRegistriesCannotDrift(t *testing.T) {
 	t.Parallel()
 	contracts := rendezvous.Contracts()
-	if len(contracts) != 16 {
-		t.Fatalf("rendezvous contract count = %d, want 16", len(contracts))
+	if len(contracts) != 28 {
+		t.Fatalf("rendezvous contract count = %d, want 28", len(contracts))
 	}
+	profileCounts := map[string]int{}
 	seen := make(map[string]bool, len(contracts))
 	for _, contract := range contracts {
+		profileCounts[contract.Profile]++
 		if seen[contract.Checkpoint] {
 			t.Fatalf("duplicate rendezvous checkpoint %s", contract.Checkpoint)
 		}
 		seen[contract.Checkpoint] = true
-		producer, err := phase.RequiredManifestPhase(contract.ProducerDomain, contract.Checkpoint)
+		producer, err := phase.RequiredManifestPhaseForProfile(contract.Profile, contract.ProducerDomain, contract.Checkpoint)
 		if err != nil {
 			t.Fatalf("rendezvous checkpoint %s is absent from the phase graph: %v", contract.Checkpoint, err)
 		}
-		graph, _ := phase.ResolveGraph(contract.ProducerDomain)
+		graph, _ := phase.ResolveProfileGraph(contract.Profile, contract.ProducerDomain)
 		if _, err := graph.Definition(producer); err != nil {
 			t.Fatalf("rendezvous checkpoint %s has invalid producer phase: %v", contract.Checkpoint, err)
 		}
+	}
+	if profileCounts["formal"] != 17 || profileCounts["smoke"] != 11 {
+		t.Fatalf("rendezvous profile counts = %v", profileCounts)
 	}
 }
 
