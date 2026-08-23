@@ -1371,7 +1371,17 @@ func (s *Service) Expire(ctx context.Context) error {
 		return fmt.Errorf("begin command expiry: %w", err)
 	}
 	defer rollback(tx)
-	rows, err := tx.Query(ctx, `WITH expired AS (UPDATE commands SET state='expired',updated_at=now() WHERE state='queued' AND expires_at<=now() RETURNING id,operation_id), stopped AS (UPDATE outbox_events SET published_at=now(),locked_by=NULL,locked_until=NULL,last_error='command expired before dispatch' FROM expired WHERE outbox_events.command_id=expired.id RETURNING expired.operation_id) UPDATE operations SET state='expired',version=version+1,updated_at=now(),completed_at=now() FROM stopped WHERE operations.id=stopped.operation_id AND operations.state='queued' RETURNING operations.id`)
+	// A command holding a node lease has a dispatch outcome that only lease
+	// expiry and reconciliation may resolve. Expiring it here would publish the
+	// outbox while its attempt stays 'sending', which no later cleanup can
+	// match, so the lease would survive forever and starve every later command
+	// on that node behind the per-node claim gate.
+	// A command holding a node lease has a dispatch outcome that only lease
+	// expiry and reconciliation may resolve. Expiring it here would publish the
+	// outbox while its attempt stays 'sending', which no later cleanup can
+	// match, so the lease would survive forever and starve every later command
+	// on that node behind the per-node claim gate.
+	rows, err := tx.Query(ctx, `WITH expired AS (UPDATE commands SET state='expired',updated_at=now() WHERE state='queued' AND expires_at<=now() AND NOT EXISTS(SELECT 1 FROM node_command_leases AS lease WHERE lease.command_id=commands.id) RETURNING id,operation_id), stopped AS (UPDATE outbox_events SET published_at=now(),locked_by=NULL,locked_until=NULL,last_error='command expired before dispatch' FROM expired WHERE outbox_events.command_id=expired.id RETURNING expired.operation_id) UPDATE operations SET state='expired',version=version+1,updated_at=now(),completed_at=now() FROM stopped WHERE operations.id=stopped.operation_id AND operations.state='queued' RETURNING operations.id`)
 	if err != nil {
 		return fmt.Errorf("expire queued commands: %w", err)
 	}

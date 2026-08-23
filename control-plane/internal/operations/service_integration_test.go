@@ -245,6 +245,88 @@ func TestConcurrentWorkersNodeLeaseAndCrashWindowsIntegration(t *testing.T) {
 	}
 }
 
+// TestClaimedCommandExpiryDoesNotLeakNodeLeaseIntegration reproduces the
+// worker-crash window where a claim dies before SendCommand and the command
+// TTL lapses while the lease is still unreconciled. Expiry must leave the
+// claimed command to lease reconciliation; otherwise the orphaned lease
+// blocks every later dispatch for that node.
+func TestClaimedCommandExpiryDoesNotLeakNodeLeaseIntegration(t *testing.T) {
+	service, pool, _, nodeID := integrationService(t)
+	ctx := context.Background()
+	operation, replayed, err := service.CreateSynthetic(ctx, testRequest(nodeID, "crash-window-expiry", SyntheticNoop, ""))
+	if err != nil || replayed || operation.CommandID == nil {
+		t.Fatalf("create crash-window command = %+v, replayed=%v, err=%v", operation, replayed, err)
+	}
+	commandID := uuid.MustParse(*operation.CommandID)
+	crashed, err := service.Claim(ctx, uuid.Must(uuid.NewV7()), 1, time.Minute)
+	if err != nil || len(crashed) != 1 || crashed[0].CommandID != commandID {
+		t.Fatalf("claim crash-window command = %d jobs, err=%v", len(crashed), err)
+	}
+
+	// The command TTL lapses first while the dead worker still holds the lease.
+	if _, err := pool.Exec(ctx, `UPDATE commands SET expires_at=clock_timestamp() WHERE id=$1`, commandID); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.Expire(ctx); err != nil {
+		t.Fatalf("expire while claimed: %v", err)
+	}
+	var state, attemptState string
+	var published, locked bool
+	var leases int
+	if err := pool.QueryRow(ctx, `SELECT command.state,outbox.published_at IS NOT NULL,outbox.locked_by IS NOT NULL,
+		(SELECT count(*) FROM node_command_leases WHERE command_id=command.id),
+		(SELECT state FROM command_attempts WHERE id=$2)
+		FROM commands AS command JOIN outbox_events AS outbox ON outbox.command_id=command.id
+		WHERE command.id=$1`, commandID, crashed[0].AttemptID).
+		Scan(&state, &published, &locked, &leases, &attemptState); err != nil {
+		t.Fatal(err)
+	}
+	if state != "queued" || published || !locked || leases != 1 || attemptState != "sending" {
+		t.Fatalf("expiry stole the claimed crash window: state=%s published=%v locked=%v leases=%d attempt=%s",
+			state, published, locked, leases, attemptState)
+	}
+
+	// Lease expiry must reconcile the ambiguous attempt and release the node.
+	if _, err := pool.Exec(ctx, `UPDATE node_command_leases SET leased_until=clock_timestamp()-interval '1 second' WHERE command_id=$1`, commandID); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.Reap(ctx, 3); err != nil {
+		t.Fatalf("reap expired crash-window lease: %v", err)
+	}
+	if err := pool.QueryRow(ctx, `SELECT command.state,
+		(SELECT count(*) FROM node_command_leases WHERE command_id=command.id),
+		(SELECT state FROM command_attempts WHERE id=$2)
+		FROM commands AS command WHERE command.id=$1`, commandID, crashed[0].AttemptID).
+		Scan(&state, &leases, &attemptState); err != nil {
+		t.Fatal(err)
+	}
+	if state != "unknown" || leases != 0 || attemptState != "unknown" {
+		t.Fatalf("crash-window reconciliation = state=%s leases=%d attempt=%s", state, leases, attemptState)
+	}
+
+	// The reconciled command dispatches again, and a later API command on the
+	// same node still obtains claims and sent attempts instead of starving.
+	recovery, err := service.Claim(ctx, uuid.Must(uuid.NewV7()), 1, time.Minute)
+	if err != nil || len(recovery) != 1 || recovery[0].CommandID != commandID {
+		t.Fatalf("claim reconcile-only recovery = %d jobs, err=%v", len(recovery), err)
+	}
+	if err := service.MarkSent(ctx, recovery[0]); err != nil {
+		t.Fatalf("mark recovery sent: %v", err)
+	}
+	later, replayed, err := service.CreateSynthetic(ctx, testRequest(nodeID, "post-crash-window", SyntheticNoop, ""))
+	if err != nil || replayed || later.CommandID == nil {
+		t.Fatalf("create later command = %+v, replayed=%v, err=%v", later, replayed, err)
+	}
+	laterJobs, err := service.Claim(ctx, uuid.Must(uuid.NewV7()), 1, time.Minute)
+	if err != nil || len(laterJobs) != 1 || laterJobs[0].CommandID.String() != *later.CommandID {
+		t.Fatalf("later command claim = %d jobs, err=%v", len(laterJobs), err)
+	}
+	if err := service.MarkSent(ctx, laterJobs[0]); err != nil {
+		t.Fatalf("mark later command sent: %v", err)
+	}
+	assertSentCommandProjection(t, pool, uuid.MustParse(*later.CommandID), uuid.MustParse(later.ID), laterJobs[0], "dispatched", "dispatched", true)
+}
+
 func TestSentCommandWithoutResultEntersAndContinuesReconciliationIntegration(t *testing.T) {
 	service, pool, _, nodeID := integrationService(t)
 	ctx := context.Background()

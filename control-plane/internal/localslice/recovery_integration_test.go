@@ -528,6 +528,178 @@ func TestAuthoritativeReconnectRecoversLostCommandResultIntegration(t *testing.T
 	assertReconcileOnlyIdentity(t, lateOriginal, decodeRecoveryEnvelope(t, lateRecovery.Envelope))
 }
 
+// TestCrashedClaimExpiryKeepsLaterCommandDispatchableIntegration reproduces
+// the production crash window where a worker dies holding a pre-send claim,
+// the command TTL lapses before the lease is reconciled, and the Agent
+// reconnects on a newer owner term. A later real API command for that node
+// must still obtain a sent attempt and settle normally instead of starving
+// behind an orphaned node lease.
+func TestCrashedClaimExpiryKeepsLaterCommandDispatchableIntegration(t *testing.T) {
+	databaseURL := os.Getenv("OCSERV_TEST_DATABASE_URL")
+	if databaseURL == "" {
+		t.Skip("OCSERV_TEST_DATABASE_URL is not set")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	pool, err := pgxpool.New(ctx, databaseURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	workspaceID, nodeID := uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7())
+	endpointID := integrationEndpoint(nodeID)
+	if _, err := pool.Exec(ctx, `INSERT INTO workspaces(id,name,slug,created_at,updated_at)
+		VALUES($1,'Crashed claim expiry',$2,now(),now())`, workspaceID, "crashed-claim-expiry-"+workspaceID.String()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `INSERT INTO nodes(id,workspace_id,name,status,version,created_at,updated_at)
+		VALUES($1,$2,$3,'active',1,now(),now())`, nodeID, workspaceID, "node-"+nodeID.String()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `INSERT INTO node_endpoint_keys(node_id,endpoint_id,state,bound_at)
+		VALUES($1,$2,'active',now())`, nodeID, endpointID[:]); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		cleanup := context.Background()
+		for _, statement := range []string{
+			`DELETE FROM agent_command_results WHERE command_id IN(SELECT id FROM commands WHERE workspace_id=$1)`,
+			`DELETE FROM transport_events WHERE node_id=$2`,
+			`DELETE FROM node_command_leases WHERE command_id IN(SELECT id FROM commands WHERE workspace_id=$1)`,
+			`DELETE FROM command_attempts WHERE command_id IN(SELECT id FROM commands WHERE workspace_id=$1)`,
+			`DELETE FROM outbox_events WHERE command_id IN(SELECT id FROM commands WHERE workspace_id=$1)`,
+			`DELETE FROM commands WHERE workspace_id=$1`,
+			`DELETE FROM operations WHERE workspace_id=$1`,
+			`DELETE FROM audit_events WHERE workspace_id=$1`,
+			`DELETE FROM node_endpoint_keys WHERE node_id=$2`,
+			`DELETE FROM nodes WHERE id=$2`,
+			`DELETE FROM workspaces WHERE id=$1`,
+		} {
+			_, _ = pool.Exec(cleanup, statement, workspaceID, nodeID)
+		}
+		pool.Close()
+	})
+
+	signer := integrationCommandSigner()
+	operations := operationstore.NewWithSigner(pool, 200, signer)
+	crashTerm := acquireRecoveryTerm(t, ctx, pool, nodeID, 606)
+	t.Cleanup(func() { _ = crashTerm.Release(context.Background(), pool) })
+	authority := &recoveryTestAuthority{nodeID: nodeID, connectionID: crashTerm.ConnectionID(), epoch: crashTerm.Epoch()}
+	service := NewWithCommandRecovery(pool, signer, operations, authority)
+
+	crashOperation, replayed, err := operations.CreateSynthetic(ctx, operationstore.CreateRequest{
+		NodeID: nodeID, IdempotencyKey: "crash-window-pre-send", ExpectedVersion: 1,
+		Kind: operationstore.SyntheticNoop, TTL: 10 * time.Minute,
+		RequestID: "crash-window-pre-send", Traceparent: reconnectRecoveryTraceparent,
+	})
+	if err != nil || replayed || crashOperation.CommandID == nil {
+		t.Fatalf("create crash-window command = %+v, replayed=%v, err=%v", crashOperation, replayed, err)
+	}
+	crashCommandID := uuid.MustParse(*crashOperation.CommandID)
+	crashOperationID := uuid.MustParse(crashOperation.ID)
+	// The worker claims the command and dies before any SendCommand. Nothing
+	// closes the attempt, so the node lease is the only dispatch authority.
+	crashed, err := operations.Claim(ctx, uuid.Must(uuid.NewV7()), 1, time.Minute)
+	if err != nil || len(crashed) != 1 || crashed[0].CommandID != crashCommandID {
+		t.Fatalf("claim crash-window command = %d jobs, err=%v", len(crashed), err)
+	}
+
+	// The command TTL lapses while the dead worker's lease is still
+	// unreconciled. Expiry must not guess the dispatch outcome or publish the
+	// outbox: that would orphan the lease and starve the node's claim gate.
+	if _, err := pool.Exec(ctx, `UPDATE commands SET expires_at=clock_timestamp() WHERE id=$1`, crashCommandID); err != nil {
+		t.Fatal(err)
+	}
+	if err := operations.Expire(ctx); err != nil {
+		t.Fatalf("expire while the crash window holds the lease: %v", err)
+	}
+	assertRecoveryState(t, pool, crashCommandID, "queued", "queued", false)
+	var locked bool
+	var leases int
+	if err := pool.QueryRow(ctx, `SELECT outbox.locked_by IS NOT NULL,
+		(SELECT count(*) FROM node_command_leases WHERE command_id=$1)
+		FROM outbox_events AS outbox WHERE outbox.command_id=$1`, crashCommandID).Scan(&locked, &leases); err != nil {
+		t.Fatal(err)
+	}
+	if !locked || leases != 1 {
+		t.Fatalf("expiry disturbed the claimed crash window: locked=%v leases=%d", locked, leases)
+	}
+
+	// Lease expiry reconciles the ambiguous attempt, releases the outbox, and
+	// removes the node lease so later dispatch can proceed.
+	if _, err := pool.Exec(ctx, `UPDATE node_command_leases SET leased_until=clock_timestamp()-interval '1 second' WHERE command_id=$1`, crashCommandID); err != nil {
+		t.Fatal(err)
+	}
+	if err := operations.Reap(ctx, 3); err != nil {
+		t.Fatalf("reap the crashed claim: %v", err)
+	}
+	assertRecoveryState(t, pool, crashCommandID, "unknown", "unknown", false)
+	var attemptState string
+	if err := pool.QueryRow(ctx, `SELECT (SELECT state FROM command_attempts WHERE id=$1),
+		(SELECT count(*) FROM node_command_leases WHERE command_id=$2)`,
+		crashed[0].AttemptID, crashCommandID).Scan(&attemptState, &leases); err != nil {
+		t.Fatal(err)
+	}
+	if attemptState != "unknown" || leases != 0 {
+		t.Fatalf("crashed claim reconciliation = attempt %s, leases %d", attemptState, leases)
+	}
+
+	// The Agent reconnects with a newer valid fence and session.
+	if err := crashTerm.Release(ctx, pool); err != nil {
+		t.Fatalf("release crashed owner: %v", err)
+	}
+	reconnected := acquireRecoveryTerm(t, ctx, pool, nodeID, 707)
+	t.Cleanup(func() { _ = reconnected.Release(context.Background(), pool) })
+	authority.connectionID, authority.epoch = reconnected.ConnectionID(), reconnected.Epoch()
+	if err := service.Ingest(ctx, recoveryConnectedEvent(t, nodeID, endpointID, reconnected)); err != nil {
+		t.Fatalf("ingest reconnected owner event: %v", err)
+	}
+
+	// The crashed command settles through its reconcile-only recovery frame.
+	recovery := claimRecoveryDispatch(t, ctx, operations, crashCommandID)
+	recoverySent := fenceRecoveryDispatch(t, signer, endpointID, reconnected, recovery)
+	if err := operations.MarkSentWithEnvelope(ctx, recovery, recoverySent); err != nil {
+		t.Fatalf("mark reconnected reconciliation sent: %v", err)
+	}
+	if err := service.Ingest(ctx, recoveryResultEvent(t, nodeID, endpointID, recoverySent, agentv1.CommandResultState_COMMAND_RESULT_STATE_SUCCEEDED)); err != nil {
+		t.Fatalf("ingest crashed command recovery result: %v", err)
+	}
+	assertRecoveryState(t, pool, crashCommandID, "succeeded", "succeeded", true)
+	assertSentAttemptClosed(t, pool, recovery)
+
+	// A real API command submitted afterwards must obtain a sent attempt on
+	// the same node and settle normally.
+	var nodeVersion int64
+	if err := pool.QueryRow(ctx, `SELECT version FROM nodes WHERE id=$1`, nodeID).Scan(&nodeVersion); err != nil {
+		t.Fatal(err)
+	}
+	later, replayed, err := operations.CreateSynthetic(ctx, operationstore.CreateRequest{
+		NodeID: nodeID, IdempotencyKey: "post-crash-real-command", ExpectedVersion: nodeVersion,
+		Kind: operationstore.SyntheticNoop, TTL: 10 * time.Minute,
+		RequestID: "post-crash-real-command", Traceparent: reconnectRecoveryTraceparent,
+	})
+	if err != nil || replayed || later.CommandID == nil {
+		t.Fatalf("create later command = %+v, replayed=%v, err=%v", later, replayed, err)
+	}
+	laterCommandID := uuid.MustParse(*later.CommandID)
+	laterJobs, err := operations.Claim(ctx, uuid.Must(uuid.NewV7()), 1, time.Minute)
+	if err != nil || len(laterJobs) != 1 || laterJobs[0].CommandID != laterCommandID {
+		t.Fatalf("later command claim = %d jobs, err=%v; node dispatch starved after the crash window", len(laterJobs), err)
+	}
+	laterSent := fenceRecoveryDispatch(t, signer, endpointID, reconnected, laterJobs[0])
+	if err := operations.MarkSentWithEnvelope(ctx, laterJobs[0], laterSent); err != nil {
+		t.Fatalf("mark later command sent: %v", err)
+	}
+	assertSentAttemptClosed(t, pool, laterJobs[0])
+	if err := service.Ingest(ctx, recoveryResultEvent(t, nodeID, endpointID, laterSent, agentv1.CommandResultState_COMMAND_RESULT_STATE_SUCCEEDED)); err != nil {
+		t.Fatalf("ingest later command result: %v", err)
+	}
+	assertRecoveryState(t, pool, laterCommandID, "succeeded", "succeeded", true)
+	if got := recoveryEventCount(t, pool, crashOperationID); got == 0 {
+		t.Fatal("crashed command never recorded its unknown recovery event")
+	}
+}
+
 type recoveryTestAuthority struct {
 	nodeID       uuid.UUID
 	connectionID [16]byte
