@@ -9,6 +9,7 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"runtime"
 	"strings"
 	"sync"
@@ -51,6 +52,7 @@ type Server struct {
 	requestTimeout   time.Duration
 	devAuth          bool
 	devAuthToken     string
+	browserOrigin    string
 	expectedSchema   int64
 	localSlice       *localslice.Service
 	localSliceMu     sync.RWMutex
@@ -148,6 +150,22 @@ func New(address string, pool *pgxpool.Pool, build BuildInfo, logger *slog.Logge
 }
 
 func (s *Server) EnableTelemetry(service *telemetrystore.Service) { s.telemetry = service }
+
+// EnableBrowserOrigin installs the exact public browser origin that may spend
+// a session cookie on state changing requests. An origin that does not
+// normalize is rejected so a misconfigured deployment fails closed instead of
+// trusting malformed input.
+func (s *Server) EnableBrowserOrigin(origin string) {
+	if origin == "" {
+		return
+	}
+	normalized, ok := normalizeBrowserOrigin(origin)
+	if !ok {
+		s.logger.Warn("ignoring unparseable browser origin", "origin_length", len(origin))
+		return
+	}
+	s.browserOrigin = normalized
+}
 
 func (s *Server) EnableOperations(service *operationstore.Service) { s.operations = service }
 
@@ -443,6 +461,10 @@ func (s *Server) requireOperationAuth(next http.HandlerFunc) http.HandlerFunc {
 			writeProblem(w, r, http.StatusUnauthorized, "https://ocservia.dev/problems/unauthenticated", "Authentication required", "operation state requires an authenticated principal")
 			return
 		}
+		if err := s.validateBrowserMutation(r, principal); err != nil {
+			writeProblem(w, r, http.StatusForbidden, "https://ocservia.dev/problems/cross-origin-request", "Cross-origin request", err.Error())
+			return
+		}
 		ctx, err := s.authorizeRoute(r, principal)
 		if err != nil {
 			s.writeAuthorizationError(w, r, err)
@@ -450,6 +472,49 @@ func (s *Server) requireOperationAuth(next http.HandlerFunc) http.HandlerFunc {
 		}
 		next(w, r.WithContext(ctx))
 	}
+}
+
+var errCrossOrigin = errors.New("the request Origin does not match the trusted browser origin")
+
+// validateBrowserMutation enforces the browser trust boundary for state
+// changing requests: a session cookie established through OIDC or break-glass
+// may only be spent by the exact public browser origin, so a sibling origin
+// on the same site, an unknown site, or a missing Origin cannot drive a
+// mutation. Development bearer principals are non-browser credentials and
+// safe methods never mutate state, so neither requires an Origin. A
+// cross-site Fetch Metadata signal is rejected even before the Origin
+// comparison, while same-site and same-origin signals never replace it.
+func (s *Server) validateBrowserMutation(r *http.Request, principal auth.Principal) error {
+	switch r.Method {
+	case http.MethodPost, http.MethodPut, http.MethodPatch, http.MethodDelete:
+	default:
+		return nil
+	}
+	if principal.Issuer == "development" {
+		return nil
+	}
+	if r.Header.Get("Sec-Fetch-Site") == "cross-site" {
+		return errCrossOrigin
+	}
+	if s.browserOrigin == "" {
+		return errCrossOrigin
+	}
+	origin, ok := normalizeBrowserOrigin(r.Header.Get("Origin"))
+	if !ok || origin != s.browserOrigin {
+		return errCrossOrigin
+	}
+	return nil
+}
+
+// normalizeBrowserOrigin reduces a configured or reported web origin to its
+// comparable scheme://host form. Anything carrying user info, a path beyond a
+// root slash, a query, or a fragment is not a browser origin and is refused.
+func normalizeBrowserOrigin(value string) (string, bool) {
+	parsed, err := url.Parse(strings.TrimSpace(value))
+	if err != nil || parsed.Scheme == "" || parsed.Host == "" || parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" || (parsed.Path != "" && parsed.Path != "/") {
+		return "", false
+	}
+	return strings.ToLower(parsed.Scheme) + "://" + strings.ToLower(parsed.Host), true
 }
 
 func (s *Server) hasOperationPrincipal(r *http.Request) bool {

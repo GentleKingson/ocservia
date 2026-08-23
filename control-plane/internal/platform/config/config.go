@@ -657,3 +657,20 @@ func setHexOrFile(lookup LookupEnv, name string, target *[]byte) error {
 }
 
 func (c Config) OIDCEnabled() bool { return c.OIDCIssuer != "" }
+
+// BrowserOrigin derives the exact public browser origin that may drive
+// cookie-authenticated mutations from the validated OIDC redirect URL, so the
+// CSRF boundary introduces no second origin configuration to drift. The
+// redirect URL carries no user info, query, or fragment and its host keeps
+// any explicit port; an unparseable value yields no origin rather than a
+// permissive one. Empty when OIDC is not configured.
+func (c Config) BrowserOrigin() string {
+	if c.OIDCRedirectURL == "" {
+		return ""
+	}
+	origin, err := url.Parse(c.OIDCRedirectURL)
+	if err != nil || origin.Scheme == "" || origin.Host == "" {
+		return ""
+	}
+	return strings.ToLower(origin.Scheme) + "://" + strings.ToLower(origin.Host)
+}
