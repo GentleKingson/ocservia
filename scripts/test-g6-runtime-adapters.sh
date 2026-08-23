@@ -32,6 +32,8 @@ OCSERV_FIXTURE="${ROOT}/deploy/g6-readiness/fake-ocserv/shims/ocserv"
 RENDEZVOUS_CONTRACT="${ROOT}/tools/g6-harness/internal/rendezvous/contract.go"
 RUNTIME_ORCHESTRATOR="${ROOT}/tools/g6-harness/internal/runtime/orchestrator.go"
 CHECKPOINT_ACTION="${ROOT}/.github/actions/g6-checkpoint-upload/action.yml"
+INSTALL_ACTION="${ROOT}/.github/actions/g6-install-release/action.yml"
+INSTALL_HELPER="${ROOT}/scripts/g6-install-release.sh"
 
 ruby -r yaml - "${FORMAL_CALLER}" "${SMOKE_CALLER}" "${WORKFLOW}" "${COMPOSE_FILE}" "${CI_WORKFLOW}" "${CHECKPOINT_ACTION}" "${RENDEZVOUS_CONTRACT}" <<'RUBY'
 formal_path, smoke_path, workflow_path, compose_path, ci_workflow_path = ARGV
@@ -217,7 +219,7 @@ reject("smoke must freeze the product images, tunnel, and pinned-Go harness") un
   smoke_build.fetch("run").include?("harness-sha256") &&
   smoke_build.fetch("run").include?("runtime-images.tar.gz") &&
   smoke_build.fetch("run").include?("ocservia-g6-tunnel") &&
-  smoke_release_steps.any? { |step| step.fetch("run", "") == "scripts/bootstrap.sh go-test" }
+  smoke_release_steps.any? { |step| step.fetch("run", "").include?("scripts/bootstrap.sh go-test") }
 reject("pull-request smoke must restore but never write a tool cache") unless
   smoke_cache&.fetch("uses", "").start_with?("actions/cache/restore@") &&
   smoke_release_steps.none? { |step| step.fetch("uses", "").match?(%r{\Aactions/cache(?:/save)?@}) }
@@ -321,7 +323,7 @@ harness_release_tokens = [
 ]
 reject("the harness must be built once with the exact pinned Go toolchain and frozen with the release") unless
   harness_release_tokens.all? { |token| release_run.include?(token) } &&
-    release_steps.any? { |step| step["run"] == "scripts/bootstrap.sh go-test" }
+    release_steps.any? { |step| step.fetch("run", "").include?("scripts/bootstrap.sh go-test") }
 reject("the release producer must not fall back to a bare ambient go build") if
   release_run.match?(/(?:^|\s)go\s+build(?:\s|$)/)
 reject("parallel release builds must be PID-scoped and propagate every failure") unless release_run.include?('build_pids+=("$!")') && release_run.include?('for pid in "${build_pids[@]}"') && release_run.include?('if ! wait "${pid}"') && release_run.include?('test "${build_status}" -eq 0')
@@ -339,32 +341,14 @@ release_images = release_variables.to_h { |variable| [variable, release_job.fetc
   download = steps.find { |step| step["name"] == "Download the frozen release images" }
   load = steps.find { |step| step["name"] == "Verify and load the release images" }
   reject("#{job_id} must download the exact run-scoped release images") unless download&.fetch("with")&.fetch("name") == release_upload.fetch("with").fetch("name")
-  reject("#{job_id} must verify, load, and candidate-bind every release image") unless load&.fetch("run")&.include?("sha256sum --check") && load.fetch("run").include?("docker load") && load.fetch("run").include?("image-ids.tsv") && load.fetch("run").include?("org.opencontainers.image.revision") && load.fetch("run").include?("GITHUB_SHA") && release_variables.all? { |variable| load.fetch("run").include?(variable) }
-  tunnel_load_tokens = [
-    "release-artifacts.sha256",
-    "tunnel-manifest.tsv",
-    "candidate_sha",
-    "expected_tunnel_sha",
-    "sha256sum",
-    "ocservia-g6-tunnel",
-  ]
-  reject("#{job_id} must candidate-bind and install the exact frozen tunnel") unless
-    tunnel_load_tokens.all? { |token| load.fetch("run").include?(token) }
-  harness_load_tokens = [
-    "harness-manifest.tsv",
-    "candidate_sha",
-    "go_version",
-    "expected_harness_sha",
-    "ocservia-g6-harness",
-    "G6_HARNESS_BIN",
-  ]
-  reject("#{job_id} must candidate-bind and install the exact frozen harness") unless
-    harness_load_tokens.all? { |token| load.fetch("run").include?(token) }
+  reject("#{job_id} must install the one frozen release through the shared verifier") unless
+    load&.fetch("uses") == "./.github/actions/g6-install-release" &&
+      load.fetch("with").fetch("archive-dir") == "${{ runner.temp }}/g6-rd-runtime-images"
   bootstrap_runs = steps.each_with_object([]) do |step, runs|
     runs << step["run"] if step["run"]&.include?("scripts/bootstrap.sh")
   end
   reject("#{job_id} must bootstrap only the minimal pinned G6 Node runtime") unless
-    bootstrap_runs == ["scripts/bootstrap.sh g6-runtime"]
+    bootstrap_runs.length == 1 && bootstrap_runs.first.include?("scripts/bootstrap.sh g6-runtime")
   reject("#{job_id} must not install or build with Go") if
     steps.any? { |step| step.fetch("run", "").include?("bootstrap.sh go-") || step.fetch("run", "").match?(/(?:^|\s)go\s+build(?:\s|$)/) }
   reject("#{job_id} must not perform a host-side Rust build") if
@@ -373,8 +357,11 @@ release_images = release_variables.to_h { |variable| [variable, release_job.fetc
   reject("#{job_id} tooling cache must bind the minimal G6 runtime lock") unless
     tooling&.fetch("with")&.fetch("key")&.include?("tooling-v5-g6-node-runtime-") &&
       tooling.fetch("with").fetch("key").include?("scripts/g6-runtime/package-lock.json")
-  reject("#{job_id} must collect diagnostics before cleanup") unless names.index { |n| n.include?("diagnostics") }.to_i < names.index { |n| n.include?("Clean") }.to_i
-  diagnostics = steps.find { |step| step["name"]&.include?("diagnostics") }.fetch("run")
+  diagnostics_step = steps.find { |step| step["name"]&.start_with?("Collect redacted") }
+  cleanup_step = steps.find { |step| step["name"]&.start_with?("Clean failure domain") }
+  reject("#{job_id} must collect diagnostics before cleanup") unless
+    diagnostics_step && cleanup_step && steps.index(diagnostics_step) < steps.index(cleanup_step)
+  diagnostics = diagnostics_step.fetch("run")
   cleanup = steps.find { |step| step["name"]&.include?("Clean") }.fetch("run")
   reject("#{job_id} diagnostics must have a hard timeout") unless diagnostics.start_with?("timeout --signal=TERM --kill-after=15s 120s ")
   domain = job_id.end_with?("a") ? "fd-a" : "fd-b"
@@ -5291,6 +5278,24 @@ grep -qF 'g6-checkpoint-secret-policy.sh' "${CHECKPOINT_ACTION}" || {
   exit 1
 }
 "${ROOT}/scripts/test-g6-checkpoint-secret-policy.sh"
+
+# Both formal failure domains deliberately delegate the complete frozen-release
+# verification to one local action. Keep the action's source-visible contract
+# and the fixture regressions close to the broader G6 policy test.
+grep -qF 'scripts/g6-install-release.sh' "${INSTALL_ACTION}" || {
+  echo "the frozen release action must use the shared release verifier" >&2
+  exit 1
+}
+for token in \
+  'release-artifacts.sha256' 'harness-manifest.tsv' 'tunnel-manifest.tsv' \
+  'image-ids.tsv' 'org.opencontainers.image.revision' 'docker load' \
+  'candidate SHA mismatch' 'harness Go version mismatch'; do
+  grep -qF "${token}" "${INSTALL_HELPER}" || {
+    echo "the shared frozen-release verifier is missing ${token}" >&2
+    exit 1
+  }
+done
+"${ROOT}/scripts/test-g6-install-release.sh"
 
 runtime_result_helper="$(sed -n '/^g6rd_write_runtime_result() {/,/^}/p' "${LIB}")"
 for token in 'harness/state.json' 'harness/events.jsonl' 'harness/phase-results' \

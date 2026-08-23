@@ -14,10 +14,9 @@ abort("formal release fell back to ambient Go") if build.match?(/(?:^|\s)go\s+bu
 %w[g6-rd-fd-a g6-rd-fd-b].each do |id|
   job = jobs.fetch(id)
   abort("#{id} must consume the shared release") unless job.fetch("needs") == "g6-rd-release-image"
-  load = Array(job.fetch("steps")).find { |step| step["name"] == "Verify and load the release images" }.fetch("run")
-  %w[sha256sum image-ids.tsv harness-manifest.tsv tunnel-manifest.tsv GITHUB_SHA].each do |token|
-    abort("#{id} does not bind #{token}") unless load.include?(token)
-  end
+  load = Array(job.fetch("steps")).find { |step| step["name"] == "Verify and load the release images" }
+  abort("#{id} must use the shared frozen release verifier") unless
+    load.fetch("uses") == "./.github/actions/g6-install-release"
 end
 smoke = jobs.fetch("g6-smoke-release")
 smoke_build = Array(smoke.fetch("steps")).find { |step| step["name"] == "Build and freeze the smoke release" }.fetch("run")

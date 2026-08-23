@@ -33,3 +33,22 @@ jobs.each do |id, job|
   end
 end
 RUBY
+
+TIMING_HELPER="${ROOT}/scripts/g6-timing.sh"
+INSTALL_HELPER="${ROOT}/scripts/g6-install-release.sh"
+for stage in runner_preparation toolchain_bootstrap candidate_docker_image_build \
+  docker_save_gzip fd_artifact_download checksum_provenance_verification \
+  docker_load scenario_execution observation_300_seconds evidence_collection; do
+  grep -qF "${stage}" "${ROOT}/.github/workflows/g6-harness-core.yml" \
+    "${TIMING_HELPER}" "${INSTALL_HELPER}" \
+    || { echo "G6 timing stage is missing: ${stage}" >&2; exit 1; }
+done
+grep -qF 'GITHUB_STEP_SUMMARY' "${TIMING_HELPER}" \
+  || { echo "G6 timing helper must write the step summary" >&2; exit 1; }
+grep -qF 'G6_TIMING_FILE' "${ROOT}/.github/actions/g6-install-release/action.yml" \
+  || { echo "release action must keep timing diagnostics non-authoritative" >&2; exit 1; }
+for token in 'release-artifacts.sha256' 'harness Go version mismatch' \
+  'image revision mismatch' 'G6_INSTALL_RELEASE_VERIFY_ONLY'; do
+  grep -qF "${token}" "${INSTALL_HELPER}" \
+    || { echo "release verifier is missing ${token}" >&2; exit 1; }
+done
