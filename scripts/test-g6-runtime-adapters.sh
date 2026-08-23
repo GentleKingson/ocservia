@@ -33,7 +33,7 @@ RENDEZVOUS_CONTRACT="${ROOT}/tools/g6-harness/internal/rendezvous/contract.go"
 RUNTIME_ORCHESTRATOR="${ROOT}/tools/g6-harness/internal/runtime/orchestrator.go"
 CHECKPOINT_ACTION="${ROOT}/.github/actions/g6-checkpoint-upload/action.yml"
 
-ruby -r yaml - "${FORMAL_CALLER}" "${SMOKE_CALLER}" "${WORKFLOW}" "${COMPOSE_FILE}" "${CI_WORKFLOW}" <<'RUBY'
+ruby -r yaml - "${FORMAL_CALLER}" "${SMOKE_CALLER}" "${WORKFLOW}" "${COMPOSE_FILE}" "${CI_WORKFLOW}" "${CHECKPOINT_ACTION}" "${RENDEZVOUS_CONTRACT}" <<'RUBY'
 formal_path, smoke_path, workflow_path, compose_path, ci_workflow_path = ARGV
 formal = YAML.safe_load(File.read(formal_path), aliases: true)
 smoke = YAML.safe_load(File.read(smoke_path), aliases: true)
@@ -45,6 +45,13 @@ def reject(message)
   warn message
   exit 1
 end
+
+# Only the typed checkpoint action may publish a registered rendezvous name;
+# a raw artifact upload with one of these prefixes would skip the secret
+# policy and the typed manifest entirely.
+registry_prefixes = File.read(ARGV[6]).scan(/Prefix: "([^"]+)"/).flatten
+reject("the typed checkpoint registry must declare both profiles") unless
+  registry_prefixes.length == 28 && registry_prefixes.uniq.length == 28
 
 trigger = formal.fetch(true)
 reject("G6 readiness must remain workflow_dispatch-only") unless trigger.keys == ["workflow_dispatch"]
@@ -167,6 +174,15 @@ jobs.each do |job_id, job|
     end
   reject("#{job_id} must not force a failing check green") if Array(job.fetch("steps")).any? { |step| step.key?("run") && step.fetch("run").include?("continue-on-error") }
   reject("#{job_id} must not mask a failed step") if Array(job.fetch("steps")).any? { |step| step["continue-on-error"] == true }
+  Array(job.fetch("steps")).each do |step|
+    next unless step["uses"].to_s.start_with?("actions/upload-artifact")
+    rendered = step.fetch("with", {}).fetch("name", "")
+      .gsub("${{ github.run_id }}", "${GITHUB_RUN_ID}")
+      .gsub("${{ github.run_attempt }}", "${GITHUB_RUN_ATTEMPT}")
+    prefix = rendered.sub(/-\$\{GITHUB_RUN_ID\}-\$\{GITHUB_RUN_ATTEMPT\}\z/, "")
+    reject("#{job_id} must publish #{prefix} through the typed checkpoint action") if
+      registry_prefixes.include?(prefix)
+  end
   if job_id.start_with?("g6-rd-")
     environment = job.fetch("environment").fetch("name")
     reject("#{job_id} must gate both authorities through GitHub environments") unless environment.include?("g6-production-readiness") && environment.include?("g6-engineering-rehearsal") && environment.include?("inputs.authority")
@@ -389,6 +405,48 @@ reject("every waited checkpoint must have exactly one typed producer upload") un
   waited_names.sort == published_names.sort && waited_names.uniq.length == waited_names.length
 reject("all current rendezvous uploads must use the typed checkpoint action") unless
   checkpoint_uploads.length == 17
+smoke_fd_a_steps = Array(jobs.fetch("g6-smoke-fd-a").fetch("steps"))
+smoke_fd_b_steps = Array(jobs.fetch("g6-smoke-fd-b").fetch("steps"))
+smoke_checkpoint_uploads = (smoke_fd_a_steps + smoke_fd_b_steps).select do |step|
+  step["uses"] == "./.github/actions/g6-checkpoint-upload"
+end
+smoke_waited_names = (smoke_fd_a_steps + smoke_fd_b_steps).each_with_object([]) do |step, names|
+  name = step.fetch("run", "")[/--name\s+"([^"]+)"/, 1]
+  names << name if name
+end
+smoke_published_names = smoke_checkpoint_uploads.map do |step|
+  step.fetch("with").fetch("name")
+    .gsub("${{ github.run_id }}", "${GITHUB_RUN_ID}")
+    .gsub("${{ github.run_attempt }}", "${GITHUB_RUN_ATTEMPT}")
+end
+reject("every waited smoke checkpoint must have exactly one typed producer upload") unless
+  smoke_waited_names.sort == smoke_published_names.sort && smoke_waited_names.uniq.length == smoke_waited_names.length
+reject("all current smoke rendezvous uploads must use the typed checkpoint action") unless
+  smoke_checkpoint_uploads.length == 11
+reject("smoke must publish exactly the encrypted shared runtime and its recipient certificate") unless
+  smoke_published_names.select { |name| name.start_with?("g6-smoke-shared") }.sort == %w[
+    g6-smoke-shared-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}
+    g6-smoke-shared-recipient-key-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}
+  ].sort
+checkpoint_action = YAML.safe_load(File.read(ARGV[5]), aliases: true)
+action_steps = Array(checkpoint_action.fetch("runs").fetch("steps"))
+reject("the checkpoint action must scan, manifest, then upload in that exact order") unless
+  action_steps.map { |step| step.fetch("name") } == ["Reject plaintext credentials", "Generate the typed checkpoint manifest", "Upload the checkpoint"]
+reject("the checkpoint secret policy must scan the exact upload payload first") unless
+  action_steps.fetch(0).fetch("run") == 'scripts/g6-checkpoint-secret-policy.sh "${{ inputs.path }}"'
+manifest_run = action_steps.fetch(1).fetch("run")
+reject("the typed checkpoint manifest must bind the exact artifact name and payload root") unless
+  manifest_run.include?("checkpoint-manifest") && manifest_run.include?('--name "${{ inputs.name }}"') && manifest_run.include?('--root "${{ inputs.path }}"')
+upload_step = action_steps.fetch(2)
+reject("the checkpoint upload must use the proven pinned official uploader") unless
+  upload_step.fetch("uses") == "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a"
+reject("the checkpoint upload must wire exactly the scanned payload and fail closed when empty") unless
+  upload_step.fetch("with") == {
+    "name" => "${{ inputs.name }}",
+    "path" => "${{ inputs.path }}",
+    "if-no-files-found" => "error",
+    "retention-days" => "${{ inputs.retention-days }}"
+  }
 expected_segments = {
   "fd-a" => %w[prepare bootstrap shared-trust primary enroll transport-trust activate-agents failover-cut recovery relay-cut barrier-arm barrier-release evidence],
   "fd-b" => %w[prepare bootstrap peer-runtime standby enroll load promote relay-observe fault-scenarios resource-preflight window evidence],
@@ -2584,6 +2642,25 @@ sed -n '/^phase_publish_shared_secrets() {/,/^}/p' "${FD_A}" \
   echo "the shared-trust handoff must require fd-b's recipient certificate" >&2
   exit 1
 }
+# The cross-domain outboxes stay closed contracts: fd-a writes exactly the
+# encrypted runtime plus its envelope, fd-b publishes only the public
+# recipient certificate, and fd-b never writes into the shared runtime.
+diff -u \
+  <(printf '%s\n' '${G6RD_OUTBOX}/shared/envelope.json' '${G6RD_OUTBOX}/shared/shared-runtime.cms') \
+  <(grep -oE '\$\{G6RD_OUTBOX\}/shared/[A-Za-z0-9_.-]+' "${FD_A}" | sort -u) || {
+  echo "the fd-a shared rendezvous must write exactly the encrypted runtime and its envelope" >&2
+  exit 1
+}
+diff -u \
+  <(printf '%s\n' '${G6RD_OUTBOX}/shared-recipient-key/recipient-cert.pem') \
+  <(grep -oE '\$\{G6RD_OUTBOX\}/shared-recipient-key/[A-Za-z0-9_.-]+' "${FD_B}" | sort -u) || {
+  echo "the fd-b recipient rendezvous must publish only the public certificate" >&2
+  exit 1
+}
+if grep -qE '\$\{G6RD_OUTBOX\}/shared/[A-Za-z0-9_.-]+' "${FD_B}"; then
+  echo "fd-b must never write into the shared runtime rendezvous" >&2
+  exit 1
+fi
 grep -q '^seed_authenticated_approval_fixtures()' "${FD_A}" || {
   echo "fd-a must seed independent authenticated approval principals" >&2
   exit 1
@@ -5125,7 +5202,7 @@ while IFS= read -r wait_name; do
     echo "workflow artifact name is absent from the typed checkpoint registry: ${prefix}" >&2
     exit 1
   }
-done < <(grep -oE -- '--name "g6-rd-[^"]+"' "${WORKFLOW}" | sed 's/^--name "//; s/"$//' | sort -u)
+done < <(grep -oE -- '--name "g6-(rd|smoke)-[^"]+"' "${WORKFLOW}" | sed 's/^--name "//; s/"$//' | sort -u)
 
 grep -qF 'checkpoint-manifest' "${CHECKPOINT_ACTION}" || {
   echo "the checkpoint upload action must generate a typed manifest before upload" >&2
