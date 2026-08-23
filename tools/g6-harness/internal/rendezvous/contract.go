@@ -35,6 +35,7 @@ type Contract struct {
 var checkpointContracts = []Contract{
 	{Profile: "formal", Prefix: "g6-rd-tunnel-fd-a", Checkpoint: "tunnel-fd-a", Sequence: 10, ProducerDomain: "fd-a"},
 	{Prefix: "g6-rd-tunnel-fd-b", Checkpoint: "tunnel-fd-b", Sequence: 20, ProducerDomain: "fd-b"},
+	{Prefix: "g6-rd-shared-recipient-key", Checkpoint: "shared-recipient-key", Sequence: 25, ProducerDomain: "fd-b"},
 	{Prefix: "g6-rd-shared", Checkpoint: "shared-trust-ready", Sequence: 30, ProducerDomain: "fd-a"},
 	{Prefix: "g6-rd-primary-up", Checkpoint: "primary-ready", Sequence: 40, ProducerDomain: "fd-a"},
 	{Prefix: "g6-rd-agents", Checkpoint: "fd-a-agent-inventory", Sequence: 50, ProducerDomain: "fd-a"},
@@ -58,6 +59,7 @@ func init() {
 	checkpointContracts = append(checkpointContracts,
 		Contract{Profile: "smoke", Prefix: "g6-smoke-tunnel-fd-a", Checkpoint: "smoke-tunnel-fd-a", Sequence: 10, ProducerDomain: "fd-a"},
 		Contract{Profile: "smoke", Prefix: "g6-smoke-tunnel-fd-b", Checkpoint: "smoke-tunnel-fd-b", Sequence: 20, ProducerDomain: "fd-b"},
+		Contract{Profile: "smoke", Prefix: "g6-smoke-shared-recipient-key", Checkpoint: "smoke-shared-recipient-key", Sequence: 25, ProducerDomain: "fd-b"},
 		Contract{Profile: "smoke", Prefix: "g6-smoke-shared", Checkpoint: "smoke-shared-trust-ready", Sequence: 30, ProducerDomain: "fd-a"},
 		Contract{Profile: "smoke", Prefix: "g6-smoke-primary-up", Checkpoint: "smoke-primary-ready", Sequence: 40, ProducerDomain: "fd-a"},
 		Contract{Profile: "smoke", Prefix: "g6-smoke-agents", Checkpoint: "smoke-fd-a-agent-inventory", Sequence: 50, ProducerDomain: "fd-a"},

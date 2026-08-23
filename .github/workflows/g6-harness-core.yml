@@ -332,6 +332,17 @@ jobs:
           --peer-job "G6 Readiness Core / G6 Readiness Failure Domain B"
       - name: Run failure domain A bootstrap segment
         run: '"${G6_HARNESS_BIN}" run-segment --domain fd-a --segment bootstrap'
+      - name: Wait for failure domain B recipient certificate
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: >-
+          "${G6_HARNESS_BIN}" wait-download
+          --name "g6-rd-shared-recipient-key-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          --destination "${RUNNER_TEMP}/g6-rd-shared-recipient-key"
+          --timeout 1200s
+          --peer-job "G6 Readiness Core / G6 Readiness Failure Domain B"
+      - name: Encrypt the shared trust rendezvous for failure domain B
+        run: '"${G6_HARNESS_BIN}" run-segment --domain fd-a --segment shared-trust'
       - name: Publish the shared trust rendezvous
         uses: ./.github/actions/g6-checkpoint-upload
         with:
@@ -602,6 +613,12 @@ jobs:
           --peer-job "G6 Readiness Core / G6 Readiness Failure Domain A"
       - name: Run failure domain B bootstrap segment
         run: '"${G6_HARNESS_BIN}" run-segment --domain fd-b --segment bootstrap'
+      - name: Publish failure domain B recipient certificate
+        uses: ./.github/actions/g6-checkpoint-upload
+        with:
+          name: g6-rd-shared-recipient-key-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/g6-readiness-${{ env.RUN_ID }}/outbox/shared-recipient-key
+          retention-days: 1
       - name: Wait for the shared trust rendezvous
         env:
           GITHUB_TOKEN: ${{ github.token }}
@@ -1439,6 +1456,11 @@ jobs:
         run: '"${G6_HARNESS_BIN}" wait-download --name "g6-smoke-tunnel-fd-b-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" --destination "${RUNNER_TEMP}/g6-smoke-tunnel-fd-b" --timeout 1200s --peer-job "G6 Harness Smoke Core / G6 Harness Smoke FD-B"'
       - name: Bootstrap FD-A
         run: '"${G6_HARNESS_BIN}" run-segment --domain fd-a --segment bootstrap'
+      - name: Wait for FD-B recipient certificate
+        env: {GITHUB_TOKEN: '${{ github.token }}'}
+        run: '"${G6_HARNESS_BIN}" wait-download --name "g6-smoke-shared-recipient-key-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" --destination "${RUNNER_TEMP}/g6-smoke-shared-recipient-key" --timeout 1200s --peer-job "G6 Harness Smoke Core / G6 Harness Smoke FD-B"'
+      - name: Encrypt shared runtime for FD-B
+        run: '"${G6_HARNESS_BIN}" run-segment --domain fd-a --segment shared-trust'
       - name: Publish shared runtime
         uses: ./.github/actions/g6-checkpoint-upload
         with: {name: 'g6-smoke-shared-${{ github.run_id }}-${{ github.run_attempt }}', path: '${{ runner.temp }}/g6-readiness-${{ env.RUN_ID }}/outbox/shared', retention-days: 1}
@@ -1568,6 +1590,9 @@ jobs:
         run: '"${G6_HARNESS_BIN}" wait-download --name "g6-smoke-tunnel-fd-a-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" --destination "${RUNNER_TEMP}/g6-smoke-tunnel-fd-a" --timeout 1200s --peer-job "G6 Harness Smoke Core / G6 Harness Smoke FD-A"'
       - name: Bootstrap FD-B
         run: '"${G6_HARNESS_BIN}" run-segment --domain fd-b --segment bootstrap'
+      - name: Publish FD-B recipient certificate
+        uses: ./.github/actions/g6-checkpoint-upload
+        with: {name: 'g6-smoke-shared-recipient-key-${{ github.run_id }}-${{ github.run_attempt }}', path: '${{ runner.temp }}/g6-readiness-${{ env.RUN_ID }}/outbox/shared-recipient-key', retention-days: 1}
       - name: Wait for shared runtime
         env: {GITHUB_TOKEN: '${{ github.token }}'}
         run: '"${G6_HARNESS_BIN}" wait-download --name "g6-smoke-shared-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" --destination "${RUNNER_TEMP}/g6-smoke-shared" --timeout 1200s --peer-job "G6 Harness Smoke Core / G6 Harness Smoke FD-A"'

@@ -45,8 +45,8 @@ func TestSegmentsCoverEachPhaseExactlyOnceInOrder(t *testing.T) {
 
 func TestEveryCheckpointHasExactProducerPhase(t *testing.T) {
 	t.Parallel()
-	if len(manifestedByCheckpoint) != 16 {
-		t.Fatalf("checkpoint registry has %d entries, want 16", len(manifestedByCheckpoint))
+	if len(manifestedByCheckpoint) != 17 {
+		t.Fatalf("checkpoint registry has %d entries, want 17", len(manifestedByCheckpoint))
 	}
 	for checkpoint, requirement := range manifestedByCheckpoint {
 		graph, err := ResolveGraph(requirement.Domain)

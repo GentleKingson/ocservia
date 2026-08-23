@@ -278,6 +278,7 @@ func adapterArguments(options Options, name string) ([]string, error) {
 	if options.Profile == "smoke" {
 		arguments := map[string][]string{
 			"import-peer-tunnel-nodes": {"import-peer-tunnel-nodes", peer(map[string]string{"fd-a": "tunnel-fd-b", "fd-b": "tunnel-fd-a"}[options.Domain])},
+			"publish-shared-secrets":   {"publish-shared-secrets", peer("shared-recipient-key")},
 			"materialize-runtime":      {"materialize-runtime", peer("shared")},
 			"standby-bootstrap":        {"standby-bootstrap", peer("primary-up")},
 			"agents-enroll":            map[string][]string{"fd-a": {"agents-enroll"}, "fd-b": {"agents-enroll", filepath.Join(peer("agents"), "nodes.tsv")}}[options.Domain],
@@ -289,7 +290,7 @@ func adapterArguments(options Options, name string) ([]string, error) {
 		if value, ok := arguments[name]; ok {
 			return value, nil
 		}
-		for _, allowed := range []string{"prepare", "build-images", "tunnel-up", "publish-shared-secrets", "primary-up", "relay-up", "smoke-session"} {
+		for _, allowed := range []string{"prepare", "build-images", "tunnel-up", "publish-shared-recipient-key", "primary-up", "relay-up", "smoke-session"} {
 			if name == allowed {
 				return []string{name}, nil
 			}
@@ -304,6 +305,7 @@ func adapterArguments(options Options, name string) ([]string, error) {
 	}
 	arguments := map[string][]string{
 		"import-peer-tunnel-nodes": {"import-peer-tunnel-nodes", peer(map[string]string{"fd-a": "tunnel-fd-b", "fd-b": "tunnel-fd-a"}[options.Domain])},
+		"publish-shared-secrets":   {"publish-shared-secrets", peer("shared-recipient-key")},
 		"transport-trust-reload":   {"transport-trust-reload", peer("agents-enrolled-fd-b")},
 		"dual-primary-probes":      {"dual-primary-probes", peer("new-primary")},
 		"relay-a-stop":             {"relay-a-stop", peer("relay-pre-fault")},
@@ -322,7 +324,7 @@ func adapterArguments(options Options, name string) ([]string, error) {
 		return value, nil
 	}
 	allowedWithoutArguments := map[string]bool{
-		"prepare": true, "build-images": true, "tunnel-up": true, "publish-shared-secrets": true,
+		"prepare": true, "build-images": true, "tunnel-up": true, "publish-shared-recipient-key": true,
 		"primary-up": true, "pitr-prepare": true, "isolate": true, "pitr-restore": true, "rejoin": true,
 		"relay-rejoin-ready": true, "ready": true, "window-barrier-release-after-proof": true,
 		"relay-up": true, "load-start": true, "scenario-scheduler": true, "scenario-owner": true,

@@ -176,33 +176,58 @@ phase_prepare() {
     >"${G6RD_OUTBOX}/tunnel/boot-id-sha256"
 }
 
-# The shared-trust rendezvous: everything fd-b needs to run the standby,
-# relay-b, the era-2 transportd (same controller key), and the probes.
+# The shared-trust rendezvous contains credentials. Encrypt the complete
+# run-scoped payload for fd-b before it can enter a checkpoint artifact.
 phase_publish_shared_secrets() {
+  local recipient_dir="${1:?fd-b recipient certificate directory is required}"
+  local payload archive ciphertext envelope name
   g6rd_export_common_env
+  require_file "${recipient_dir}/recipient-cert.pem"
+  openssl x509 -in "${recipient_dir}/recipient-cert.pem" -noout >/dev/null
   mkdir -p "${G6RD_OUTBOX}/shared"
-  local name
+  payload="$(mktemp -d "${G6RD_WORK}/shared-runtime.XXXXXX")"
+  archive="${payload}/shared-runtime.tar.gz"
+  ciphertext="${G6RD_OUTBOX}/shared/shared-runtime.cms"
+  envelope="${G6RD_OUTBOX}/shared/envelope.json"
+  mkdir -p "${payload}/secrets"
   for name in owner-password app-password replication-password dev-auth-token \
     oidc-client-secret session-key requester-identity-id requester-session-id \
     requester-session-cookie approver-identity-id approver-session-id \
     approver-session-cookie; do
-    cp -f "${G6RD_SECRETS}/${name}" "${G6RD_OUTBOX}/shared/"
+    cp -f "${G6RD_SECRETS}/${name}" "${payload}/secrets/"
   done
-  cp -f "${G6RD_SECRETS}/relay-ca.pem" "${G6RD_OUTBOX}/shared/"
-  cp -f "${G6RD_SECRETS}/relay-chain.crt" "${G6RD_OUTBOX}/shared/"
-  cp -f "${G6RD_SECRETS}/relay-leaf.crt" "${G6RD_OUTBOX}/shared/"
-  cp -f "${G6RD_SECRETS}/relay-leaf.key" "${G6RD_OUTBOX}/shared/"
-  cp -f "${G6RD_SECRETS}/relay-token" "${G6RD_OUTBOX}/shared/"
-  cp -f "${G6RD_SECRETS}/command-signing.pem" "${G6RD_OUTBOX}/shared/"
-  cp -f "${G6RD_SECRETS}/command-verification.pem" "${G6RD_OUTBOX}/shared/"
-  cp -f "${G6RD_SECRETS}/seal-user-password.key" "${G6RD_OUTBOX}/shared/"
-  cp -f "${G6RD_SECRETS}/seal-user-password-sha256" "${G6RD_OUTBOX}/shared/"
-  cp -f "${G6RD_SECRETS}/seal-p12.key" "${G6RD_OUTBOX}/shared/"
-  cp -f "${G6RD_SECRETS}/seal-p12-sha256" "${G6RD_OUTBOX}/shared/"
-  cp -f "${G6RD_SECRETS}/controller.key" "${G6RD_OUTBOX}/shared/"
+  cp -f "${G6RD_SECRETS}/relay-ca.pem" "${payload}/secrets/"
+  cp -f "${G6RD_SECRETS}/relay-chain.crt" "${payload}/secrets/"
+  cp -f "${G6RD_SECRETS}/relay-leaf.crt" "${payload}/secrets/"
+  cp -f "${G6RD_SECRETS}/relay-leaf.key" "${payload}/secrets/"
+  cp -f "${G6RD_SECRETS}/relay-token" "${payload}/secrets/"
+  cp -f "${G6RD_SECRETS}/command-signing.pem" "${payload}/secrets/"
+  cp -f "${G6RD_SECRETS}/command-verification.pem" "${payload}/secrets/"
+  cp -f "${G6RD_SECRETS}/seal-user-password.key" "${payload}/secrets/"
+  cp -f "${G6RD_SECRETS}/seal-user-password-sha256" "${payload}/secrets/"
+  cp -f "${G6RD_SECRETS}/seal-p12.key" "${payload}/secrets/"
+  cp -f "${G6RD_SECRETS}/seal-p12-sha256" "${payload}/secrets/"
+  cp -f "${G6RD_SECRETS}/controller.key" "${payload}/secrets/"
   # tunnel keys so fd-b can serve its own forwards with stable NodeIds
-  cp -f "${G6RD_SECRETS}"/tunnel-*.key "${G6RD_OUTBOX}/shared/"
-  chmod 0600 "${G6RD_OUTBOX}/shared/"*
+  cp -f "${G6RD_SECRETS}"/tunnel-*.key "${payload}/secrets/"
+  chmod 0700 "${payload}" "${payload}/secrets"
+  chmod 0600 "${payload}/secrets/"*
+  tar --sort=name --mtime='@0' --owner=0 --group=0 --numeric-owner \
+    -C "${payload}" -czf "${archive}" secrets
+  openssl cms -encrypt -binary -outform DER -aes256 \
+    -in "${archive}" -out "${ciphertext}" "${recipient_dir}/recipient-cert.pem"
+  jq -n \
+    --arg schema 'ocservia.g6.shared-runtime-envelope.v1' \
+    --arg candidate "${G6RD_CANDIDATE_SHA}" \
+    --arg run_id "${GITHUB_RUN_ID}" \
+    --argjson run_attempt "${GITHUB_RUN_ATTEMPT}" \
+    --arg environment_id "${G6RD_ENVIRONMENT_ID}" \
+    --arg recipient_certificate_sha256 "$(sha256sum "${recipient_dir}/recipient-cert.pem" | awk '{print $1}')" \
+    --arg ciphertext_sha256 "$(sha256sum "${ciphertext}" | awk '{print $1}')" \
+    '{schema:$schema,candidate_sha:$candidate,run_id:$run_id,run_attempt:$run_attempt,environment_id:$environment_id,recipient_certificate_sha256:$recipient_certificate_sha256,ciphertext_sha256:$ciphertext_sha256}' \
+    >"${envelope}"
+  chmod 0600 "${ciphertext}" "${envelope}"
+  rm -rf "${payload}"
 }
 
 phase_import_peer_secrets() {
@@ -367,9 +392,6 @@ phase_primary_up() {
   mkdir -p "${G6RD_OUTBOX}/primary-up"
   cp -f "${G6RD_STATE}/controller-endpoint-id" "${G6RD_OUTBOX}/primary-up/"
   cp -f "${G6RD_STATE}/workspace-id" "${G6RD_OUTBOX}/primary-up/workspace-id"
-  # The controller iroh key hands the controller NodeId to fd-b's era-2
-  # transportd; the copy stays inside the 1-day rendezvous artifact.
-  cp -f "${G6RD_SECRETS}/controller.key" "${G6RD_OUTBOX}/primary-up/controller.key"
   chmod 0600 "${G6RD_OUTBOX}/primary-up/"*
 }
 

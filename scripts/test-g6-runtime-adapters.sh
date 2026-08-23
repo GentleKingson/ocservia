@@ -388,9 +388,9 @@ end
 reject("every waited checkpoint must have exactly one typed producer upload") unless
   waited_names.sort == published_names.sort && waited_names.uniq.length == waited_names.length
 reject("all current rendezvous uploads must use the typed checkpoint action") unless
-  checkpoint_uploads.length == 16
+  checkpoint_uploads.length == 17
 expected_segments = {
-  "fd-a" => %w[prepare bootstrap primary enroll transport-trust activate-agents failover-cut recovery relay-cut barrier-arm barrier-release evidence],
+  "fd-a" => %w[prepare bootstrap shared-trust primary enroll transport-trust activate-agents failover-cut recovery relay-cut barrier-arm barrier-release evidence],
   "fd-b" => %w[prepare bootstrap peer-runtime standby enroll load promote relay-observe fault-scenarios resource-preflight window evidence],
 }
 {"fd-a" => fd_a_steps, "fd-b" => fd_b_steps}.each do |domain, steps|
@@ -2575,21 +2575,25 @@ touch "${archive_test}/already-archived"
 }
 rm -rf "${archive_test}"
 sed -n '/^phase_publish_shared_secrets() {/,/^}/p' "${FD_A}" \
-  | grep -q 'relay-chain.crt' || {
-  echo "the shared-trust handoff must include the relay certificate chain" >&2
+  | grep -q 'openssl cms -encrypt' || {
+  echo "the shared-trust handoff must encrypt its payload for fd-b" >&2
   exit 1
 }
 sed -n '/^phase_publish_shared_secrets() {/,/^}/p' "${FD_A}" \
-  | grep -q 'requester-session-cookie approver-identity-id' || {
-  echo "the peer must receive the short-lived authenticated session fixtures" >&2
+  | grep -q 'recipient-cert.pem' || {
+  echo "the shared-trust handoff must require fd-b's recipient certificate" >&2
   exit 1
 }
 grep -q '^seed_authenticated_approval_fixtures()' "${FD_A}" || {
   echo "fd-a must seed independent authenticated approval principals" >&2
   exit 1
 }
-grep -q 'relay-ca.pem relay-chain.crt relay-leaf.crt' "${FD_B}" || {
-  echo "fd-b must import the shared relay certificate chain" >&2
+grep -q 'openssl cms -decrypt' "${FD_B}" || {
+  echo "fd-b must decrypt the shared runtime with its local private key" >&2
+  exit 1
+}
+grep -q 'phase_publish_shared_recipient_key()' "${FD_B}" || {
+  echo "fd-b must generate the shared-runtime recipient key locally" >&2
   exit 1
 }
 
@@ -4705,10 +4709,14 @@ if [[ -z "${fd_a_load_wait}" || -z "${fd_a_failover}" || "${fd_a_load_wait}" -ge
   exit 1
 fi
 fd_a_bootstrap="$(order_of 'run-segment --domain fd-a --segment bootstrap')"
+fd_a_recipient_wait="$(order_of 'g6-rd-shared-recipient-key-')"
+fd_a_shared_segment="$(order_of 'run-segment --domain fd-a --segment shared-trust')"
 fd_a_shared_upload="$(order_of 'name: g6-rd-shared-')"
-if [[ -z "${fd_a_bootstrap}" || -z "${fd_a_shared_upload}" \
-  || "${fd_a_bootstrap}" -ge "${fd_a_shared_upload}" ]]; then
-  echo "fd-a must stage the shared trust material before publishing its rendezvous" >&2
+if [[ -z "${fd_a_bootstrap}" || -z "${fd_a_recipient_wait}" || -z "${fd_a_shared_segment}" || -z "${fd_a_shared_upload}" \
+  || "${fd_a_bootstrap}" -ge "${fd_a_recipient_wait}" \
+  || "${fd_a_recipient_wait}" -ge "${fd_a_shared_segment}" \
+  || "${fd_a_shared_segment}" -ge "${fd_a_shared_upload}" ]]; then
+  echo "fd-a must encrypt shared trust only after consuming fd-b's recipient certificate" >&2
   exit 1
 fi
 fd_a_enroll="$(order_of 'run-segment --domain fd-a --segment enroll')"
@@ -5080,18 +5088,22 @@ for token in \
   }
 done
 
-# The era model keeps one controller identity across the promotion: fd-b
-# must import the peer controller key, never generate its own, and fd-a must
-# include it in the short-lived shared-trust handoff consumed before startup.
+# The era model keeps one controller identity across the promotion. The key
+# moves only inside the encrypted shared-runtime envelope and never through
+# a plaintext checkpoint payload.
 grep -q 'fd-b never generates its own controller key' "${FD_B}" || {
   echo "fd-b must document the controller key handover" >&2
   exit 1
 }
 sed -n '/^phase_publish_shared_secrets() {/,/^}/p' "${FD_A}" \
-  | grep -q 'cp -f "${G6RD_SECRETS}/controller.key" "${G6RD_OUTBOX}/shared/"' || {
-  echo "fd-a must hand the controller key through the shared-trust rendezvous" >&2
+  | grep -q 'cp -f "${G6RD_SECRETS}/controller.key" "${payload}/secrets/"' || {
+  echo "fd-a must include the controller key only inside the encrypted payload" >&2
   exit 1
 }
+if grep -q 'controller.key' <(sed -n '/^phase_primary_up() {/,/^}/p' "${FD_A}"); then
+  echo "primary readiness must not publish the controller private key" >&2
+  exit 1
+fi
 
 # The evidence bundle published with long retention must stay
 # credential-free: the fd-a final bundle draws only from the isolation
@@ -5123,6 +5135,11 @@ grep -qF 'actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a' "${C
   echo "the checkpoint upload action must use the proven pinned official uploader" >&2
   exit 1
 }
+grep -qF 'g6-checkpoint-secret-policy.sh' "${CHECKPOINT_ACTION}" || {
+  echo "the checkpoint upload action must reject plaintext credentials before upload" >&2
+  exit 1
+}
+"${ROOT}/scripts/test-g6-checkpoint-secret-policy.sh"
 
 runtime_result_helper="$(sed -n '/^g6rd_write_runtime_result() {/,/^}/p' "${LIB}")"
 for token in 'harness/state.json' 'harness/events.jsonl' 'harness/phase-results' \

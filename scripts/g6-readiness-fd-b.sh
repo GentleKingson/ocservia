@@ -167,10 +167,55 @@ import_peer_tunnel_nodes() {
   done
 }
 
+phase_publish_shared_recipient_key() {
+  local private_key certificate
+  private_key="${G6RD_SECRETS}/shared-recipient-private.pem"
+  certificate="${G6RD_OUTBOX}/shared-recipient-key/recipient-cert.pem"
+  mkdir -p "${G6RD_OUTBOX}/shared-recipient-key"
+  umask 077
+  openssl req -x509 -newkey rsa:3072 -nodes -sha256 -days 1 \
+    -subj "/CN=ocservia-g6-${RUN_ID}-fd-b" \
+    -keyout "${private_key}" -out "${certificate}" >/dev/null 2>&1
+  openssl x509 -in "${certificate}" -noout >/dev/null
+  chmod 0600 "${private_key}" "${certificate}"
+}
+
 phase_import_peer_secrets() {
-  local peer="${1:?peer shared secrets directory is required}"
-  require_file "${peer}/dev-auth-token"
-  require_file "${peer}/controller.key"
+  local peer="${1:?encrypted shared runtime directory is required}"
+  local private_key certificate archive payload name
+  require_file "${peer}/shared-runtime.cms"
+  require_file "${peer}/envelope.json"
+  private_key="${G6RD_SECRETS}/shared-recipient-private.pem"
+  certificate="${G6RD_OUTBOX}/shared-recipient-key/recipient-cert.pem"
+  require_file "${private_key}"
+  require_file "${certificate}"
+  jq -e \
+    --arg candidate "${G6RD_CANDIDATE_SHA}" \
+    --arg run_id "${GITHUB_RUN_ID}" \
+    --argjson run_attempt "${GITHUB_RUN_ATTEMPT}" \
+    --arg environment_id "${G6RD_ENVIRONMENT_ID}" \
+    --arg certificate_sha256 "$(sha256sum "${certificate}" | awk '{print $1}')" \
+    --arg ciphertext_sha256 "$(sha256sum "${peer}/shared-runtime.cms" | awk '{print $1}')" \
+    '.schema == "ocservia.g6.shared-runtime-envelope.v1" and .candidate_sha == $candidate and .run_id == $run_id and .run_attempt == $run_attempt and .environment_id == $environment_id and .recipient_certificate_sha256 == $certificate_sha256 and .ciphertext_sha256 == $ciphertext_sha256' \
+    "${peer}/envelope.json" >/dev/null || {
+      echo "shared runtime envelope binding rejected" >&2
+      return 1
+    }
+  payload="$(mktemp -d "${G6RD_WORK}/shared-runtime.XXXXXX")"
+  archive="${payload}/shared-runtime.tar.gz"
+  openssl cms -decrypt -inform DER -in "${peer}/shared-runtime.cms" \
+    -recip "${certificate}" -inkey "${private_key}" -out "${archive}"
+  tar -tzf "${archive}" | sort -u | grep -Eq '^secrets/[A-Za-z0-9_.-]+$' || {
+    echo "shared runtime archive has no approved secret payload" >&2
+    rm -rf "${payload}"
+    return 1
+  }
+  if tar -tzf "${archive}" | grep -Ev '^secrets/$|^secrets/[A-Za-z0-9_.-]+$' >/dev/null; then
+    echo "shared runtime archive contains an unsafe path" >&2
+    rm -rf "${payload}"
+    return 1
+  fi
+  tar --no-same-owner -xzf "${archive}" -C "${payload}"
   local name
   for name in owner-password app-password replication-password dev-auth-token \
     oidc-client-secret session-key requester-identity-id requester-session-id \
@@ -181,21 +226,25 @@ phase_import_peer_secrets() {
     seal-user-password.key seal-user-password-sha256 \
     seal-p12.key seal-p12-sha256; do
     [[ -s "${G6RD_SECRETS}/${name}" ]] && continue
-    cp -f "${peer}/${name}" "${G6RD_SECRETS}/${name}"
+    require_file "${payload}/secrets/${name}"
+    cp -f "${payload}/secrets/${name}" "${G6RD_SECRETS}/${name}"
     chmod 0600 "${G6RD_SECRETS}/${name}"
   done
   # fd-b never generates its own controller key: era-2 transportd presents
   # the same controller NodeId fd-a's agents already dial.
   [[ -s "${G6RD_SECRETS}/controller.key" ]] || {
-    cp -f "${peer}/controller.key" "${G6RD_SECRETS}/controller.key"
+    require_file "${payload}/secrets/controller.key"
+    cp -f "${payload}/secrets/controller.key" "${G6RD_SECRETS}/controller.key"
     chmod 0600 "${G6RD_SECRETS}/controller.key"
   }
   for name in pg-a api-a relay-b-forward pg-b-forward; do
     [[ -s "${G6RD_SECRETS}/tunnel-${name}.key" ]] || {
-      cp -f "${peer}/tunnel-${name}.key" "${G6RD_SECRETS}/tunnel-${name}.key"
+      require_file "${payload}/secrets/tunnel-${name}.key"
+      cp -f "${payload}/secrets/tunnel-${name}.key" "${G6RD_SECRETS}/tunnel-${name}.key"
       chmod 0600 "${G6RD_SECRETS}/tunnel-${name}.key"
     }
   done
+  rm -rf "${payload}"
 }
 
 phase_materialize_runtime() {
@@ -3013,6 +3062,7 @@ phase_cleanup() {
 
 case "${1:-}" in
 prepare) phase_prepare ;;
+publish-shared-recipient-key) phase_publish_shared_recipient_key ;;
 materialize-runtime | import-peer-secrets) phase_materialize_runtime "${2:?peer directory}" ;;
 import-peer-tunnel-nodes) import_peer_tunnel_nodes "${2:?peer directory}" ;;
 build-images | images) phase_build_images ;;
