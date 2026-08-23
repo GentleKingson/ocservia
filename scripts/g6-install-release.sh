@@ -33,12 +33,22 @@ done
   sha256sum --check --strict release-artifacts.sha256
 ) || fail "release aggregate checksum mismatch"
 
-# The aggregate must bind precisely the six frozen payload entries; accepting
-# extra or missing lines would make the frozen release's trust surface vague.
-[[ "$(wc -l <"${archive_dir}/release-artifacts.sha256" | tr -d '[:space:]')" == "6" ]] || fail "unexpected release aggregate entry count"
-for file in runtime-images.tar.gz image-ids.tsv ocservia-g6-tunnel tunnel-manifest.tsv ocservia-g6-harness harness-manifest.tsv; do
-  grep -Eq "^[0-9a-f]{64}  \*?${file}$" "${archive_dir}/release-artifacts.sha256" || fail "aggregate missing ${file}"
-done
+# The aggregate must bind precisely the six frozen payload entries. Parse its
+# filenames as data, rather than interpolating them into a regular expression:
+# a look-alike such as runtime-imagesXtarYgz must never bind runtime-images.tar.gz.
+expected_aggregate_files=(runtime-images.tar.gz image-ids.tsv ocservia-g6-tunnel tunnel-manifest.tsv ocservia-g6-harness harness-manifest.tsv)
+actual_aggregate_files="$(
+  awk '
+    $0 !~ /^[0-9a-f]{64}  \*?[^[:space:]]+$/ { exit 1 }
+    {
+      name = substr($0, 67)
+      sub(/^\*/, "", name)
+      print name
+    }
+  ' "${archive_dir}/release-artifacts.sha256" | LC_ALL=C sort
+)" || fail "malformed release aggregate"
+expected_aggregate_file_set="$(printf '%s\n' "${expected_aggregate_files[@]}" | LC_ALL=C sort)"
+[[ "${actual_aggregate_files}" == "${expected_aggregate_file_set}" ]] || fail "release-artifacts.sha256 file set mismatch"
 
 assert_manifest "${archive_dir}/tunnel-manifest.tsv" 2
 [[ "$(single_tsv_value "${archive_dir}/tunnel-manifest.tsv" candidate_sha)" == "${candidate_sha}" ]] || fail "tunnel candidate SHA mismatch"
