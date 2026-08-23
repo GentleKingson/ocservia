@@ -39,11 +39,25 @@ if (cd "${fixture}" && gitleaks dir --no-banner --redact --no-color .) >/dev/nul
   exit 1
 fi
 
-# With the pinned configuration the public idempotency key passes.
+# With the pinned configuration the public idempotency key passes, including
+# the tagged journal effect key the evidence builder publishes.
+printf '{"record_type":"effect","command_id":"01a02cfa-b3f1-7d58-88eb-7c20bf609ff2","idempotency_key":"%s"}\n' \
+  "g6-journal-key-01a02cfab3f17d5888eb7c20bf609ff2" \
+  >"${fixture}/outbox/relay-pre-fault/command-trace.jsonl"
 gitleaks dir --no-banner --redact --no-color --config "${CONFIG}" "${fixture}" >/dev/null 2>&1 || {
-  echo "the pinned configuration must exempt the public relay-pre-fault key" >&2
+  echo "the pinned configuration must exempt the tagged public journal effect key" >&2
   exit 1
 }
+
+# An untagged bare hex idempotency key is exactly what the tag exists to
+# distinguish, so it must still fail closed under the same configuration.
+printf '{"record_type":"effect","command_id":"01a02cfa-b3f1-7d58-88eb-7c20bf609ff2","idempotency_key":"01a02cfab3f17d5888eb7c20bf609ff2"}\n' \
+  >"${fixture}/outbox/relay-pre-fault/bare-journal-key.jsonl"
+if gitleaks dir --no-banner --redact --no-color --config "${CONFIG}" "${fixture}" >/dev/null 2>&1; then
+  echo "the pinned configuration must still detect bare hex idempotency keys" >&2
+  exit 1
+fi
+rm -f "${fixture}/outbox/relay-pre-fault/bare-journal-key.jsonl"
 
 # A real credential inside the very same evidence files must still fail closed.
 token_suffix="$(openssl rand -hex 18)"

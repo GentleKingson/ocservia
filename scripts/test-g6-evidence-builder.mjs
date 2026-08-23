@@ -1766,7 +1766,8 @@ try {
     builtRelayTraffic?.command_id !== relayCommandId ||
     builtRelayTraffic?.command_idempotency_key !== relayCommandKey ||
     builtRelayTraffic?.effect_id !== relayEffectId ||
-    builtRelayTraffic?.effect_idempotency_key !== relayEffectKey ||
+    builtRelayTraffic?.effect_idempotency_key !==
+      `g6-journal-key-${relayEffectKey}` ||
     builtRelayTraffic?.result_observed_at !== at(184) ||
     builtRelayTraffic?.relay_b_started_at !== atMicros(180, 500000) ||
     !builtRelayTraffic?.negotiated_capabilities?.includes("ocserv.fencing.v2")
@@ -1786,7 +1787,7 @@ try {
       relayPreFaultCommandKey ||
     builtPreFaultRelayTraffic?.effect_id !== relayPreFaultEffectId ||
     builtPreFaultRelayTraffic?.effect_idempotency_key !==
-      relayPreFaultEffectKey ||
+      `g6-journal-key-${relayPreFaultEffectKey}` ||
     builtPreFaultRelayTraffic?.result_observed_at !== at(178) ||
     builtPreFaultRelayTraffic?.topology_mode !== "relay-a-only" ||
     builtPreFaultRelayTraffic?.topology_network_name !==
@@ -2918,7 +2919,7 @@ try {
   const observedEffect = sameSecondTrace.find(
     (record) =>
       record.record_type === "effect" &&
-      record.idempotency_key === sameSecondEffectKey,
+      record.idempotency_key === `g6-journal-key-${sameSecondEffectKey}`,
   );
   if (observedEffect?.timestamp !== atMicros(15, 0)) {
     throw new Error(

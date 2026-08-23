@@ -20,6 +20,10 @@ grep -qF 'g6-relay-pre-fault-[0-9]+-[0-9]+-fd-b' "${CONFIG}" || {
   echo "the G6 evidence scan allowlist must name the public relay-pre-fault key" >&2
   exit 1
 }
+grep -qF 'g6-journal-key-[0-9a-f]+' "${CONFIG}" || {
+  echo "the G6 evidence scan allowlist must name the tagged public journal effect key" >&2
+  exit 1
+}
 grep -qF 'MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKgwggSkAgEAAOCAQ8AMIIBCgKCAQEA' "${CONFIG}" || {
   echo "the scan allowlist must name the public RSA-2048 SPKI header constant committed by history" >&2
   exit 1
