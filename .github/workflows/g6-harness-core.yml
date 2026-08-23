@@ -500,6 +500,7 @@ jobs:
         if: always()
         run: |
           timing="${RUNNER_TEMP}/artifacts/timing/g6-rd-fd-a.json"
+          scripts/g6-timing.sh rendezvous-dir "${timing}" "${RUNNER_TEMP}/artifacts/g6-readiness-fd-a/rendezvous" || true
           scripts/g6-timing.sh summary "${timing}" || true
           mkdir -p "${RUNNER_TEMP}/artifacts/g6-readiness-fd-a"
           cp -f "${timing}" "${RUNNER_TEMP}/artifacts/g6-readiness-fd-a/timing.json" 2>/dev/null || true
@@ -774,6 +775,7 @@ jobs:
         if: always()
         run: |
           timing="${RUNNER_TEMP}/artifacts/timing/g6-rd-fd-b.json"
+          scripts/g6-timing.sh rendezvous-dir "${timing}" "${RUNNER_TEMP}/artifacts/g6-readiness-fd-b/rendezvous" || true
           scripts/g6-timing.sh summary "${timing}" || true
           mkdir -p "${RUNNER_TEMP}/artifacts/g6-readiness-fd-b"
           cp -f "${timing}" "${RUNNER_TEMP}/artifacts/g6-readiness-fd-b/timing.json" 2>/dev/null || true
@@ -1614,6 +1616,7 @@ jobs:
         if: always()
         run: |
           timing="${RUNNER_TEMP}/artifacts/timing/g6-smoke-fd-a.json"
+          scripts/g6-timing.sh rendezvous-dir "${timing}" "${RUNNER_TEMP}/artifacts/g6-readiness-fd-a/rendezvous" || true
           scripts/g6-timing.sh summary "${timing}" || true
           mkdir -p "${RUNNER_TEMP}/artifacts/g6-readiness-fd-a"
           cp -f "${timing}" "${RUNNER_TEMP}/artifacts/g6-readiness-fd-a/timing.json" 2>/dev/null || true
@@ -1779,6 +1782,7 @@ jobs:
         if: always()
         run: |
           timing="${RUNNER_TEMP}/artifacts/timing/g6-smoke-fd-b.json"
+          scripts/g6-timing.sh rendezvous-dir "${timing}" "${RUNNER_TEMP}/artifacts/g6-readiness-fd-b/rendezvous" || true
           scripts/g6-timing.sh summary "${timing}" || true
           mkdir -p "${RUNNER_TEMP}/artifacts/g6-readiness-fd-b"
           cp -f "${timing}" "${RUNNER_TEMP}/artifacts/g6-readiness-fd-b/timing.json" 2>/dev/null || true

@@ -45,6 +45,12 @@ for stage in runner_preparation toolchain_bootstrap candidate_docker_image_build
 done
 grep -qF 'GITHUB_STEP_SUMMARY' "${TIMING_HELPER}" \
   || { echo "G6 timing helper must write the step summary" >&2; exit 1; }
+grep -qF 'rendezvous-dir' "${TIMING_HELPER}" \
+  || { echo "G6 timing helper must aggregate rendezvous waits" >&2; exit 1; }
+if [[ "$(grep -cF 'rendezvous-dir "${timing}"' "${ROOT}/.github/workflows/g6-harness-core.yml")" -ne 4 ]]; then
+  echo "every G6 failure domain must record rendezvous timing diagnostics" >&2
+  exit 1
+fi
 grep -qF 'G6_TIMING_FILE' "${ROOT}/.github/actions/g6-install-release/action.yml" \
   || { echo "release action must keep timing diagnostics non-authoritative" >&2; exit 1; }
 for token in 'release-artifacts.sha256' 'harness Go version mismatch' \

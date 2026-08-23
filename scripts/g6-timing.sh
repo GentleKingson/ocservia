@@ -12,7 +12,7 @@ if [[ "${G6_TIMING_REQUIRED:-false}" != true ]]; then
 fi
 
 usage() {
-  echo "usage: $0 <init|start|end|artifact|rendezvous|render|summary> ..." >&2
+  echo "usage: $0 <init|start|end|artifact|rendezvous|rendezvous-dir|render|summary> ..." >&2
   exit 2
 }
 
@@ -92,6 +92,34 @@ case "${command}" in
     append "$1" "rendezvous\tcumulative_wait_ms\t$3"
     render "$1"
     ;;
+  rendezvous-dir)
+    [[ $# -eq 2 ]] || usage
+    [[ -d "$2" ]] || { echo "rendezvous directory does not exist: $2" >&2; exit 1; }
+    rendezvous_metrics="$(node - "$2" <<'NODE'
+const fs = require('fs');
+const path = require('path');
+const root = process.argv[2];
+const files = fs.readdirSync(root)
+  .filter((name) => name.endsWith('.result.json'))
+  .map((name) => path.join(root, name));
+let cumulativeWaitMs = 0;
+for (const file of files) {
+  const result = JSON.parse(fs.readFileSync(file, 'utf8'));
+  const startedAt = Date.parse(result.started_at);
+  const completedAt = Date.parse(result.completed_at);
+  if (!Number.isFinite(startedAt) || !Number.isFinite(completedAt) || completedAt < startedAt) {
+    throw new Error(`invalid rendezvous timestamps in ${file}`);
+  }
+  cumulativeWaitMs += completedAt - startedAt;
+}
+process.stdout.write(`${files.length}\t${cumulativeWaitMs}`);
+NODE
+)"
+    IFS=$'\t' read -r rendezvous_count rendezvous_wait_ms <<<"${rendezvous_metrics}"
+    append "$1" "rendezvous\tcount\t${rendezvous_count}"
+    append "$1" "rendezvous\tcumulative_wait_ms\t${rendezvous_wait_ms}"
+    render "$1"
+    ;;
   render)
     [[ $# -eq 1 ]] || usage
     render "$1"
@@ -109,6 +137,10 @@ case "${command}" in
       echo "| Artifact | Bytes |"
       echo "|---|---:|"
       jq -r '.artifact_bytes | to_entries[]? | "| \(.key) | \(.value) |"' "$1"
+      echo
+      echo "| Rendezvous metric | Value |"
+      echo "|---|---:|"
+      jq -r '.rendezvous | to_entries[]? | "| \(.key) | \(.value) |"' "$1"
     } >>"${GITHUB_STEP_SUMMARY:-/dev/null}"
     ;;
   *) usage ;;
