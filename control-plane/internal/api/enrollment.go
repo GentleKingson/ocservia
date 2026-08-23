@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"mime"
 	"net/http"
 	"strings"
 	"time"
@@ -44,7 +45,7 @@ func (s *Server) createEnrollmentToken(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var body tokenRequest
-	if !decodeStrict(w, r, &body) {
+	if !decodeStrictJSON(w, r, &body) {
 		return
 	}
 	workspaceID, err := parseUUIDv7(body.WorkspaceID)
@@ -89,7 +90,7 @@ func (s *Server) approveNode(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var body approvalRequest
-	if !decodeStrict(w, r, &body) {
+	if !decodeStrictJSON(w, r, &body) {
 		return
 	}
 	actor := principal(r)
@@ -120,7 +121,7 @@ func (s *Server) revokeNode(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var body revocationRequest
-	if !decodeStrict(w, r, &body) {
+	if !decodeStrictJSON(w, r, &body) {
 		return
 	}
 	actor := principal(r)
@@ -163,7 +164,17 @@ func (s *Server) adminExecuteFenced(ctx context.Context, nodeID uuid.UUID, kind 
 	return s.fences.ExecuteFenced(ctx, fixed, kind, operationID, ownersession.FencingCapability, action)
 }
 
-func decodeStrict(w http.ResponseWriter, r *http.Request, target any) bool {
+// decodeStrictJSON is the single request-body decoder for JSON endpoints.
+// The media type must be application/json (parameters such as charset are
+// allowed) so a form or text payload cannot ride through a JSON parser,
+// unknown fields and anything after the first JSON value are rejected, and
+// the error response is already written when it returns false.
+func decodeStrictJSON(w http.ResponseWriter, r *http.Request, target any) bool {
+	mediaType, _, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
+	if err != nil || mediaType != "application/json" {
+		writeProblem(w, r, http.StatusUnsupportedMediaType, "https://ocservia.dev/problems/unsupported-media-type", "Unsupported media type", "Content-Type must be application/json")
+		return false
+	}
 	decoder := json.NewDecoder(r.Body)
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(target); err != nil {

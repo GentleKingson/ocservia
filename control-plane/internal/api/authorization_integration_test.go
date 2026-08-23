@@ -243,6 +243,7 @@ func TestSyntheticCommandAuditUsesAuthenticatedOperator(t *testing.T) {
 	server := &Server{rbac: rbac.New(pool), operations: apiOperationService(pool)}
 	request := httptest.NewRequest(http.MethodPost, "/api/v1/nodes/"+nodeID.String()+"/synthetic-commands", strings.NewReader(`{"kind":"noop","expected_version":1}`))
 	request.SetPathValue("node_id", nodeID.String())
+	request.Header.Set("Content-Type", "application/json")
 	request.Header.Set("Idempotency-Key", "authenticated-operator-audit")
 	request.Header.Set("traceparent", "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01")
 	principal := auth.Principal{IdentityID: identityID, SessionID: sessionID, Subject: identityID.String(), Issuer: "integration"}

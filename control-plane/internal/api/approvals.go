@@ -57,7 +57,7 @@ func (s *Server) createApproval(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var body createApprovalRequest
-	if !decodeStrict(w, r, &body) {
+	if !decodeStrictJSON(w, r, &body) {
 		return
 	}
 	action := strings.TrimSpace(body.Action)
@@ -255,7 +255,7 @@ func (s *Server) approveRequest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var body approvalDecision
-	if !decodeStrict(w, r, &body) {
+	if !decodeStrictJSON(w, r, &body) {
 		return
 	}
 	actor := principal(r)

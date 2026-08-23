@@ -166,6 +166,7 @@ func TestCreateEnrollmentTokenRejectsUnboundEndpoint(t *testing.T) {
 		"environment":"production",
 		"reason":"provision a bound production node"
 	}`))
+	request.Header.Set("Content-Type", "application/json")
 	response := httptest.NewRecorder()
 	server.createEnrollmentToken(response, request)
 	if response.Code != http.StatusBadRequest {
@@ -197,6 +198,7 @@ func TestCreateSimulationRejectsNullBody(t *testing.T) {
 	server.EnableLocalSlice(localslice.New(nil))
 	response := httptest.NewRecorder()
 	request := httptest.NewRequest(http.MethodPost, "/api/v1/development/simulations", strings.NewReader("null"))
+	request.Header.Set("Content-Type", "application/json")
 	server.http.Handler.ServeHTTP(response, request)
 	if response.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())

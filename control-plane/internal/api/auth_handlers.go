@@ -69,7 +69,7 @@ func (s *Server) breakGlass(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var body breakGlassRequest
-	if !decodeStrict(w, r, &body) || strings.TrimSpace(body.Token) == "" {
+	if !decodeStrictJSON(w, r, &body) || strings.TrimSpace(body.Token) == "" {
 		return
 	}
 	cookie, _, err := s.auth.BreakGlass(r.Context(), body.Token, requestID(r))
