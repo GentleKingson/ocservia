@@ -208,6 +208,8 @@ jobs:
           printf 'release-manifest-digest=%s\n' \
             "$(sha256sum "${archive_dir}/release-artifacts.sha256" | awk '{print $1}')" \
             >>"${GITHUB_OUTPUT}"
+      - name: Start frozen release upload timing
+        run: scripts/g6-timing.sh start "${RUNNER_TEMP}/artifacts/timing/g6-rd-release.json" release_artifact_upload
       - name: Publish the frozen release images
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
@@ -220,8 +222,9 @@ jobs:
         if: always()
         run: |
           timing="${RUNNER_TEMP}/artifacts/timing/g6-rd-release.json"
+          scripts/g6-timing.sh end "${timing}" release_artifact_upload || true
           scripts/g6-timing.sh artifact "${timing}" frozen_release_payload "${RUNNER_TEMP}/g6-rd-runtime-images-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}/runtime-images.tar.gz" || true
-          scripts/g6-timing.sh render "${timing}" || true
+          scripts/g6-timing.sh summary "${timing}" || true
       - name: Upload release timing diagnostics
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
@@ -462,6 +465,10 @@ jobs:
           retention-days: 1
       - name: Run failure domain A barrier release segment
         run: '"${G6_HARNESS_BIN}" run-segment --domain fd-a --segment barrier-release'
+      - name: Finish failure domain A scenario timing
+        run: scripts/g6-timing.sh end "${RUNNER_TEMP}/artifacts/timing/g6-rd-fd-a.json" scenario_execution || true
+      - name: Start failure domain A peer observation timing
+        run: scripts/g6-timing.sh start "${RUNNER_TEMP}/artifacts/timing/g6-rd-fd-a.json" peer_observation_wait
       - name: Wait for the final freeze request
         env:
           GITHUB_TOKEN: ${{ github.token }}
@@ -471,14 +478,14 @@ jobs:
           --destination "${RUNNER_TEMP}/g6-rd-final-freeze"
           --timeout 1800s
           --peer-job "G6 Readiness Core / G6 Readiness Failure Domain B"
+      - name: Finish failure domain A peer observation timing
+        run: scripts/g6-timing.sh end "${RUNNER_TEMP}/artifacts/timing/g6-rd-fd-a.json" peer_observation_wait || true
       - name: Start failure domain A evidence timing
         run: scripts/g6-timing.sh start "${RUNNER_TEMP}/artifacts/timing/g6-rd-fd-a.json" evidence_collection
       - name: Run failure domain A evidence segment
         run: '"${G6_HARNESS_BIN}" run-segment --domain fd-a --segment evidence'
       - name: Finish failure domain A evidence timing
-        run: |
-          scripts/g6-timing.sh end "${RUNNER_TEMP}/artifacts/timing/g6-rd-fd-a.json" evidence_collection || true
-          scripts/g6-timing.sh end "${RUNNER_TEMP}/artifacts/timing/g6-rd-fd-a.json" scenario_execution || true
+        run: scripts/g6-timing.sh end "${RUNNER_TEMP}/artifacts/timing/g6-rd-fd-a.json" evidence_collection || true
       - name: Finalize failure domain A runtime result
         if: always()
         timeout-minutes: 3
@@ -1442,6 +1449,8 @@ jobs:
           release_digest="$(sha256sum "${output}/release-artifacts.sha256" | awk '{print $1}')"
           printf 'harness-sha256=%s\n' "${harness_sha256}" >>"${GITHUB_OUTPUT}"
           printf 'release-manifest-digest=%s\n' "${release_digest}" >>"${GITHUB_OUTPUT}"
+      - name: Start frozen smoke release upload timing
+        run: scripts/g6-timing.sh start "${RUNNER_TEMP}/artifacts/timing/g6-smoke-release.json" release_artifact_upload
       - name: Publish the frozen smoke harness
         id: publish
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
@@ -1451,6 +1460,13 @@ jobs:
           if-no-files-found: error
           compression-level: 0
           retention-days: 1
+      - name: Record frozen smoke release upload timing
+        if: always()
+        run: |
+          timing="${RUNNER_TEMP}/artifacts/timing/g6-smoke-release.json"
+          scripts/g6-timing.sh end "${timing}" release_artifact_upload || true
+          scripts/g6-timing.sh artifact "${timing}" frozen_release_payload "${RUNNER_TEMP}/g6-harness-smoke-release/runtime-images.tar.gz" || true
+          scripts/g6-timing.sh summary "${timing}" || true
       - name: Upload smoke release timing diagnostics
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
@@ -1583,12 +1599,13 @@ jobs:
       - name: Wait for promotion
         env: {GITHUB_TOKEN: '${{ github.token }}'}
         run: '"${G6_HARNESS_BIN}" wait-download --name "g6-smoke-promotion-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" --destination "${RUNNER_TEMP}/g6-smoke-promotion" --timeout 1200s --peer-job "G6 Harness Smoke Core / G6 Harness Smoke FD-B"'
+      - name: Finish smoke FD-A scenario timing
+        run: scripts/g6-timing.sh end "${RUNNER_TEMP}/artifacts/timing/g6-smoke-fd-a.json" scenario_execution || true
       - name: Freeze FD-A raw evidence
         run: |
           scripts/g6-timing.sh start "${RUNNER_TEMP}/artifacts/timing/g6-smoke-fd-a.json" evidence_collection
           "${G6_HARNESS_BIN}" run-segment --domain fd-a --segment evidence
           scripts/g6-timing.sh end "${RUNNER_TEMP}/artifacts/timing/g6-smoke-fd-a.json" evidence_collection || true
-          scripts/g6-timing.sh end "${RUNNER_TEMP}/artifacts/timing/g6-smoke-fd-a.json" scenario_execution || true
       - name: Bind FD-A raw evidence
         env: {G6_SMOKE_RUNNER_NAME: '${{ runner.name }}'}
         run: '"${G6_HARNESS_BIN}" smoke-domain --domain fd-a --expected-harness-sha "${{ needs.g6-smoke-release.outputs.harness-sha256 }}" --evidence-root "${RUNNER_TEMP}/g6-readiness-${RUN_ID}/outbox/smoke-final" --output "${RUNNER_TEMP}/g6-readiness-${RUN_ID}/outbox/smoke-final/domain-result.json"'
@@ -1744,6 +1761,8 @@ jobs:
       - name: Publish promotion proof
         uses: ./.github/actions/g6-checkpoint-upload
         with: {name: 'g6-smoke-promotion-${{ github.run_id }}-${{ github.run_attempt }}', path: '${{ runner.temp }}/g6-readiness-${{ env.RUN_ID }}/outbox/new-primary', retention-days: 1}
+      - name: Finish smoke FD-B scenario timing
+        run: scripts/g6-timing.sh end "${RUNNER_TEMP}/artifacts/timing/g6-smoke-fd-b.json" scenario_execution || true
       - name: Observe post-promotion stability
         run: |
           scripts/g6-timing.sh start "${RUNNER_TEMP}/artifacts/timing/g6-smoke-fd-b.json" observation
@@ -1754,7 +1773,6 @@ jobs:
           scripts/g6-timing.sh start "${RUNNER_TEMP}/artifacts/timing/g6-smoke-fd-b.json" evidence_collection
           "${G6_HARNESS_BIN}" run-segment --domain fd-b --segment evidence
           scripts/g6-timing.sh end "${RUNNER_TEMP}/artifacts/timing/g6-smoke-fd-b.json" evidence_collection || true
-          scripts/g6-timing.sh end "${RUNNER_TEMP}/artifacts/timing/g6-smoke-fd-b.json" scenario_execution || true
       - name: Bind FD-B raw evidence
         env: {G6_SMOKE_RUNNER_NAME: '${{ runner.name }}'}
         run: '"${G6_HARNESS_BIN}" smoke-domain --domain fd-b --expected-harness-sha "${{ needs.g6-smoke-release.outputs.harness-sha256 }}" --evidence-root "${RUNNER_TEMP}/g6-readiness-${RUN_ID}/outbox/smoke-final" --output "${RUNNER_TEMP}/g6-readiness-${RUN_ID}/outbox/smoke-final/domain-result.json"'
