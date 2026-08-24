@@ -56,9 +56,20 @@ expect_flag() {
 expect_full() {
   local output="$1"
   for flag in run_backend run_database run_rust run_native run_web \
-    run_browser run_p1_smoke run_contracts run_security; do
+    run_browser run_p1_smoke; do
     expect_flag "${output}" "${flag}" true
   done
+}
+
+# The classifier must not emit policy or security flags at all: those
+# workers are structurally always-on and outside its skip authority, so a
+# reintroduced output would hand back the power to switch them off.
+expect_never_flag() {
+  local output="$1" removed="$2"
+  if grep -q "^${removed}=" "${output}"; then
+    echo "${removed} must never be a classifier output in ${output}" >&2
+    exit 1
+  fi
 }
 
 # 1. README-only change: documentation edits keep the documentation policy
@@ -69,8 +80,9 @@ step readme
 readme_output="${fixture}/readme.output"
 expect_flag "${readme_output}" category docs_only
 expect_flag "${readme_output}" reason documentation_only
-expect_flag "${readme_output}" run_contracts true
-expect_flag "${readme_output}" run_security true
+for removed_flag in run_contracts run_security; do
+  expect_never_flag "${readme_output}" "${removed_flag}"
+done
 for flag in run_backend run_database run_rust run_native run_web \
   run_browser run_p1_smoke; do
   expect_flag "${readme_output}" "${flag}" false
@@ -82,8 +94,6 @@ git -C "${fixture}" commit -qam docs
 step docs
 docs_output="${fixture}/docs.output"
 expect_flag "${docs_output}" category docs_only
-expect_flag "${docs_output}" run_contracts true
-expect_flag "${docs_output}" run_security true
 expect_flag "${docs_output}" run_backend false
 expect_flag "${docs_output}" run_web false
 
@@ -94,7 +104,7 @@ step websrc
 web_output="${fixture}/websrc.output"
 expect_flag "${web_output}" category web_only
 expect_flag "${web_output}" reason web_source_only
-for flag in run_web run_browser run_p1_smoke run_contracts run_security; do
+for flag in run_web run_browser run_p1_smoke; do
   expect_flag "${web_output}" "${flag}" true
 done
 for flag in run_backend run_database run_rust run_native; do

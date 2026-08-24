@@ -46,8 +46,12 @@ skip, fails the aggregator. The workflow uses no workflow-level path filters.
 The `CI Relevance` job classifies each pull-request change set with the
 repository-owned `scripts/ci-relevance.sh` and publishes one authorization
 flag per worker family (`run_backend`, `run_database`, `run_rust`,
-`run_native`, `run_web`, `run_browser`, `run_p1_smoke`, `run_contracts`,
-`run_security`). A worker runs only when its flag is true. The classifier
+`run_native`, `run_web`, `run_browser`, `run_p1_smoke`). A worker runs only
+when its flag is true. Contracts and Policy and Security and Licenses are
+structurally outside the classifier's authority: they carry no relevance
+condition, start without waiting for the classifier, and the quality
+aggregate accepts only their success — never a classifier-authorized skip —
+because one of them runs the classifier's own tests. The classifier
 authorizes reduced validation for exactly two high-confidence categories:
 
 - Documentation-only changes (ordinary documentation paths, mirroring the G6

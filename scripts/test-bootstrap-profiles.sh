@@ -50,11 +50,14 @@ worker_relevance_flags = {
   "web-validation" => "run_web",
   "browser-e2e" => "run_browser",
   "p1-smoke" => "run_p1_smoke",
-  "contracts-policy" => "run_contracts",
   "rust-validation" => "run_rust",
-  "security-license" => "run_security",
   "native-ocserv" => "run_native"
 }
+# The policy and security workers are structurally outside the classifier's
+# skip authority: one of them runs the classifier's own tests, so a buggy or
+# tampered classifier must never be able to switch them off or make their
+# skip acceptable. They start immediately and only success counts.
+always_on_workers = %w[contracts-policy security-license]
 gate_needs = {
   "backend-integration" => %w[
     ci-relevance runtime-artifacts go-standard go-race database stage-contracts
@@ -71,6 +74,11 @@ reject("primary workflow execution graph changed unexpectedly") unless jobs.keys
 worker_jobs.each do |job_id|
   job = jobs.fetch(job_id)
   reject("#{job_id} must use ubuntu-24.04") unless job.fetch("runs-on") == "ubuntu-24.04"
+  if always_on_workers.include?(job_id)
+    reject("#{job_id} must not carry a relevance condition") if job.key?("if")
+    reject("#{job_id} must start without waiting for the classifier") unless Array(job["needs"]).empty?
+    next
+  end
   flag = worker_relevance_flags.fetch(job_id)
   expected_if = "needs.ci-relevance.outputs.#{flag} == 'true'"
   reject("#{job_id} must run only when the relevance classifier authorizes #{flag}") unless
@@ -79,7 +87,9 @@ end
 
 allowed_worker_dependencies = {
   "database" => ["ci-relevance", "runtime-artifacts"],
-  "local-slice" => ["ci-relevance", "runtime-artifacts"]
+  "local-slice" => ["ci-relevance", "runtime-artifacts"],
+  "contracts-policy" => [],
+  "security-license" => []
 }
 worker_jobs.each do |job_id|
   actual = Array(jobs.fetch(job_id)["needs"])
@@ -130,6 +140,17 @@ gate_needs.each do |job_id, expected_needs|
   reject("#{job_id} must fail for every other worker result") unless run_text.include?("exit 1")
   reject("#{job_id} must not blindly accept skipped workers") if
     run_text.include?("success | skipped")
+  if job_id == "quality-security-native"
+    # The policy and security workers may never be skipped on the
+    # classifier's word: their rows must carry the never-skippable marker,
+    # not a relevance flag reference.
+    reject("the quality aggregate must hard-require the policy worker") unless
+      run_text.include?("contracts-policy|${CONTRACTS_POLICY}|true")
+    reject("the quality aggregate must hard-require the security worker") unless
+      run_text.include?("security-license|${SECURITY_LICENSE}|true")
+    reject("the quality aggregate must not gate policy or security on the classifier") if
+      run_text.include?("run_contracts") || run_text.include?("run_security")
+  end
   (expected_needs - [relevance_job]).each do |dependency|
     reject("#{job_id} must aggregate #{dependency}") unless run_text.include?(dependency)
   end

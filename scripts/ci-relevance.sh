@@ -93,8 +93,6 @@ case "${category}" in
     run_web=false
     run_browser=false
     run_p1_smoke=false
-    run_contracts=true
-    run_security=true
     ;;
   web_only)
     run_backend=false
@@ -104,8 +102,6 @@ case "${category}" in
     run_web=true
     run_browser=true
     run_p1_smoke=true
-    run_contracts=true
-    run_security=true
     ;;
   *)
     run_backend=true
@@ -115,8 +111,6 @@ case "${category}" in
     run_web=true
     run_browser=true
     run_p1_smoke=true
-    run_contracts=true
-    run_security=true
     ;;
 esac
 
@@ -136,6 +130,4 @@ fi
   printf 'run_web=%s\n' "${run_web}"
   printf 'run_browser=%s\n' "${run_browser}"
   printf 'run_p1_smoke=%s\n' "${run_p1_smoke}"
-  printf 'run_contracts=%s\n' "${run_contracts}"
-  printf 'run_security=%s\n' "${run_security}"
 } >>"${output}"

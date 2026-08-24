@@ -29,8 +29,6 @@ jobs:
       run_web: ${{ steps.relevance.outputs.run_web }}
       run_browser: ${{ steps.relevance.outputs.run_browser }}
       run_p1_smoke: ${{ steps.relevance.outputs.run_p1_smoke }}
-      run_contracts: ${{ steps.relevance.outputs.run_contracts }}
-      run_security: ${{ steps.relevance.outputs.run_security }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
@@ -583,8 +581,6 @@ jobs:
 
   contracts-policy:
     name: Contracts and Policy
-    needs: [ci-relevance]
-    if: needs.ci-relevance.outputs.run_contracts == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
@@ -746,8 +742,6 @@ jobs:
 
   security-license:
     name: Security and Licenses
-    needs: [ci-relevance]
-    if: needs.ci-relevance.outputs.run_security == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     env:
@@ -1012,11 +1006,9 @@ jobs:
     env:
       CI_RELEVANCE: ${{ needs.ci-relevance.result }}
       CONTRACTS_POLICY: ${{ needs.contracts-policy.result }}
-      CONTRACTS_POLICY_RELEVANT: ${{ needs.ci-relevance.outputs.run_contracts }}
       RUST_VALIDATION: ${{ needs.rust-validation.result }}
       RUST_VALIDATION_RELEVANT: ${{ needs.ci-relevance.outputs.run_rust }}
       SECURITY_LICENSE: ${{ needs.security-license.result }}
-      SECURITY_LICENSE_RELEVANT: ${{ needs.ci-relevance.outputs.run_security }}
       NATIVE_OCSERV: ${{ needs.native-ocserv.result }}
       NATIVE_OCSERV_RELEVANT: ${{ needs.ci-relevance.outputs.run_native }}
     steps:
@@ -1026,6 +1018,11 @@ jobs:
             echo "the relevance classifier finished with ${CI_RELEVANCE}" >&2
             exit 1
           fi
+          # The policy and security workers are structurally outside the
+          # classifier's skip authority: the literal true below marks them as
+          # never skippable, so this aggregate only ever accepts their
+          # success. A classifier bug must not be able to switch off the
+          # worker that tests the classifier.
           while IFS='|' read -r worker result authorized; do
             if [[ "${result}" == "success" ]]; then
               continue
@@ -1036,8 +1033,8 @@ jobs:
             echo "${worker} finished with ${result} while its relevance flag is ${authorized:-missing}" >&2
             exit 1
           done <<CHECKS
-          contracts-policy|${CONTRACTS_POLICY}|${CONTRACTS_POLICY_RELEVANT}
+          contracts-policy|${CONTRACTS_POLICY}|true
           rust-validation|${RUST_VALIDATION}|${RUST_VALIDATION_RELEVANT}
-          security-license|${SECURITY_LICENSE}|${SECURITY_LICENSE_RELEVANT}
+          security-license|${SECURITY_LICENSE}|true
           native-ocserv|${NATIVE_OCSERV}|${NATIVE_OCSERV_RELEVANT}
           CHECKS
