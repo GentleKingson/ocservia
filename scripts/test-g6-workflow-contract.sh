@@ -289,6 +289,25 @@ secret_scan_jobs.each do |job_id, scan_targets|
     abort("#{job_id} is missing secret-scan tail timing stage #{stage}") unless
       job_run.include?(stage)
   end
+  # Telemetry must fail open at the call site: the timing helper runs with
+  # errexit and its ERR trap is not inherited by shell functions, so a
+  # filesystem, jq, or expansion failure inside the helper returns non-zero.
+  # An unguarded init or start would then skip or fail the authoritative
+  # bootstrap, download, scan, or publication work that follows it.
+  timing_lines = steps.map { |step| step["run"].to_s }
+    .flat_map { |run| run.lines.map(&:strip) }
+    .select { |line| line.include?("scripts/g6-timing.sh") }
+  abort("#{job_id} must keep its timing telemetry") if timing_lines.empty?
+  timing_lines.each do |line|
+    abort("#{job_id} timing call must be || true guarded: #{line}") unless
+      line.include?("|| true")
+  end
+  # The g6-secret-scan toolchain is small (one pinned gitleaks archive plus
+  # host jq/openssl); restoring a tooling cache with no trusted producer
+  # would only log a permanent miss while implying warm-cache behavior.
+  cache_steps = steps.select { |step| step["uses"].to_s.start_with?("actions/cache") }
+  abort("#{job_id} must not restore a tooling cache without a producer") unless
+    cache_steps.empty?
   timing_upload = steps.select { |step| step["uses"].to_s.start_with?("actions/upload-artifact@") }
     .find { |step| step.fetch("with", {}).fetch("name", "").include?("g6-timing-") }
   abort("#{job_id} must publish its timing diagnostics") unless timing_upload

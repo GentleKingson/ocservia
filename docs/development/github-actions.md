@@ -64,7 +64,10 @@ CI aggregators or a formal G6 run. The secret-scan jobs on both profiles scan
 every published evidence layer with the same repository gitleaks configuration
 and bootstrap only the dedicated minimal `g6-secret-scan` profile; their
 bootstrap, evidence download, scan, and result-publication spans are recorded
-as non-authoritative timing diagnostics that never influence a verdict.
+as non-authoritative timing diagnostics that never influence a verdict: every
+timing call is fail-open guarded at the call site, so a telemetry failure can
+neither skip nor fail the authoritative scan work. The minimal profile is
+small enough that it bootstraps cold every run with no tooling cache.
 
 The smoke caller always creates the same aggregate result check. Executable,
 workflow, deployment, and acceptance-contract changes run the complete hosted

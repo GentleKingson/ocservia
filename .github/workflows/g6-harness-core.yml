@@ -1117,26 +1117,19 @@ jobs:
           scripts/g6-timing.sh init
           "${RUNNER_TEMP}/artifacts/timing/g6-rd-secret-scan.json"
           g6-rd-secret-scan formal "${GITHUB_SHA}" "${GITHUB_RUN_ID}" "${GITHUB_RUN_ATTEMPT}"
+          || true
       - name: Runner preflight
         run: |
-          scripts/g6-timing.sh start "${RUNNER_TEMP}/artifacts/timing/g6-rd-secret-scan.json" runner_preparation
+          scripts/g6-timing.sh start "${RUNNER_TEMP}/artifacts/timing/g6-rd-secret-scan.json" runner_preparation || true
           scripts/ci-preflight.sh
           scripts/g6-timing.sh end "${RUNNER_TEMP}/artifacts/timing/g6-rd-secret-scan.json" runner_preparation || true
-      - name: Restore verified secret-scan tooling
-        id: readiness-secret-scan-cache
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
-        with:
-          path: |
-            .cache/downloads
-            .tools
-          key: tooling-v4-g6-secret-scan-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'scripts/checksums.txt', 'scripts/bootstrap.sh', 'scripts/env.sh') }}
       - name: Bootstrap the pinned secret-scan tools
         run: |
-          scripts/g6-timing.sh start "${RUNNER_TEMP}/artifacts/timing/g6-rd-secret-scan.json" secret_scan_tool_bootstrap
+          scripts/g6-timing.sh start "${RUNNER_TEMP}/artifacts/timing/g6-rd-secret-scan.json" secret_scan_tool_bootstrap || true
           scripts/bootstrap.sh g6-secret-scan
           scripts/g6-timing.sh end "${RUNNER_TEMP}/artifacts/timing/g6-rd-secret-scan.json" secret_scan_tool_bootstrap || true
       - name: Start secret scan evidence download timing
-        run: scripts/g6-timing.sh start "${RUNNER_TEMP}/artifacts/timing/g6-rd-secret-scan.json" secret_scan_artifact_download
+        run: scripts/g6-timing.sh start "${RUNNER_TEMP}/artifacts/timing/g6-rd-secret-scan.json" secret_scan_artifact_download || true
       - name: Download failure domain A raw evidence
         if: needs.g6-rd-fd-a.outputs.raw-artifact-id != ''
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
@@ -1158,7 +1151,7 @@ jobs:
       - name: Finish secret scan evidence download timing
         run: scripts/g6-timing.sh end "${RUNNER_TEMP}/artifacts/timing/g6-rd-secret-scan.json" secret_scan_artifact_download || true
       - name: Start secret scan execution timing
-        run: scripts/g6-timing.sh start "${RUNNER_TEMP}/artifacts/timing/g6-rd-secret-scan.json" secret_scan_execution
+        run: scripts/g6-timing.sh start "${RUNNER_TEMP}/artifacts/timing/g6-rd-secret-scan.json" secret_scan_execution || true
       - name: Scan the published evidence for secrets
         id: secret-scan
         run: |
@@ -1204,7 +1197,7 @@ jobs:
             >"${RUNNER_TEMP}/g6-rd-secret-scan/secret-scan-result.json"
       - name: Start secret scan result upload timing
         if: always()
-        run: scripts/g6-timing.sh start "${RUNNER_TEMP}/artifacts/timing/g6-rd-secret-scan.json" secret_scan_result_upload
+        run: scripts/g6-timing.sh start "${RUNNER_TEMP}/artifacts/timing/g6-rd-secret-scan.json" secret_scan_result_upload || true
       - name: Publish the secret scan result
         id: secret-scan-upload
         if: always()
@@ -2153,15 +2146,14 @@ jobs:
           scripts/g6-timing.sh init
           "${RUNNER_TEMP}/artifacts/timing/g6-smoke-secret-scan.json"
           g6-smoke-secret-scan smoke "${GITHUB_SHA}" "${GITHUB_RUN_ID}" "${GITHUB_RUN_ATTEMPT}"
-      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
-        with: {path: ".cache/downloads\n.tools", key: 'tooling-v4-g6-secret-scan-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles(''toolchains.lock'', ''scripts/checksums.txt'', ''scripts/bootstrap.sh'', ''scripts/env.sh'') }}'}
+          || true
       - name: Bootstrap the pinned secret-scan tools
         run: |
-          scripts/g6-timing.sh start "${RUNNER_TEMP}/artifacts/timing/g6-smoke-secret-scan.json" secret_scan_tool_bootstrap
+          scripts/g6-timing.sh start "${RUNNER_TEMP}/artifacts/timing/g6-smoke-secret-scan.json" secret_scan_tool_bootstrap || true
           scripts/bootstrap.sh g6-secret-scan
           scripts/g6-timing.sh end "${RUNNER_TEMP}/artifacts/timing/g6-smoke-secret-scan.json" secret_scan_tool_bootstrap || true
       - name: Start smoke secret scan evidence download timing
-        run: scripts/g6-timing.sh start "${RUNNER_TEMP}/artifacts/timing/g6-smoke-secret-scan.json" secret_scan_artifact_download
+        run: scripts/g6-timing.sh start "${RUNNER_TEMP}/artifacts/timing/g6-smoke-secret-scan.json" secret_scan_artifact_download || true
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with: {name: 'g6-harness-smoke-fd-a-${{ github.run_id }}-${{ github.run_attempt }}', path: '${{ runner.temp }}/g6-harness-smoke-fd-a'}
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
@@ -2171,7 +2163,7 @@ jobs:
       - name: Finish smoke secret scan evidence download timing
         run: scripts/g6-timing.sh end "${RUNNER_TEMP}/artifacts/timing/g6-smoke-secret-scan.json" secret_scan_artifact_download || true
       - name: Start smoke secret scan execution timing
-        run: scripts/g6-timing.sh start "${RUNNER_TEMP}/artifacts/timing/g6-smoke-secret-scan.json" secret_scan_execution
+        run: scripts/g6-timing.sh start "${RUNNER_TEMP}/artifacts/timing/g6-smoke-secret-scan.json" secret_scan_execution || true
       - name: Scan every smoke evidence layer
         id: scan
         run: |
@@ -2193,7 +2185,7 @@ jobs:
             >"${RUNNER_TEMP}/g6-harness-smoke-secret-scan/secret-scan-result.json"
       - name: Start smoke secret scan result upload timing
         if: always()
-        run: scripts/g6-timing.sh start "${RUNNER_TEMP}/artifacts/timing/g6-smoke-secret-scan.json" secret_scan_result_upload
+        run: scripts/g6-timing.sh start "${RUNNER_TEMP}/artifacts/timing/g6-smoke-secret-scan.json" secret_scan_result_upload || true
       - name: Publish structured smoke secret scan result
         id: publish
         if: always()
