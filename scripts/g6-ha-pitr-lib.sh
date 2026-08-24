@@ -355,6 +355,68 @@ g6_ha_role_connected() {
     | grep -qv '^0$'
 }
 
+# Non-authoritative timing diagnostics for the HA/PITR harness. Every helper
+# is a no-op when the workflow did not export G6HA_TIMING_FILE, and no timing
+# failure can change a phase result: metadata calls are || true guarded and
+# the run wrapper always returns the wrapped command's status.
+g6_ha_timing() {
+  local command="${1:?timing command is required}"
+  shift
+  [[ -n "${G6HA_TIMING_FILE:-}" ]] || return 0
+  "${G6HA_ROOT}/scripts/g6-timing.sh" "${command}" "${G6HA_TIMING_FILE}" "$@" \
+    >>"${G6HA_LOGS}/timing.log" 2>&1 || true
+}
+
+g6_ha_timing_run() {
+  local stage="$1"
+  shift
+  if [[ -z "${G6HA_TIMING_FILE:-}" ]]; then
+    "$@"
+    return
+  fi
+  local status=0
+  g6_ha_timing start "${stage}"
+  "$@" || status=$?
+  g6_ha_timing end "${stage}"
+  return "${status}"
+}
+
+# Records a directory tree's kilobyte-granular on-disk footprint as a sparse
+# marker file so the timing artifact log can carry the size without copying
+# data.
+g6_ha_timing_record_tree_bytes() {
+  local key="$1" directory="$2" kilobytes bytes marker
+  [[ -n "${G6HA_TIMING_FILE:-}" && -d "${directory}" ]] || return 0
+  kilobytes="$(du -sk "${directory}" 2>/dev/null | awk '{print $1}')"
+  [[ "${kilobytes}" =~ ^[0-9]+$ ]] || return 0
+  bytes="$(( kilobytes * 1024 ))"
+  marker="$(mktemp)"
+  truncate -s "${bytes}" "${marker}" 2>/dev/null || {
+    rm -f -- "${marker}"
+    return 0
+  }
+  g6_ha_timing artifact "${key}" "${marker}"
+  rm -f -- "${marker}"
+}
+
+# Records every compose-project image identity plus the frozen tunnel binary
+# so both failure domains can be compared for build-once benchmarks.
+g6_ha_timing_record_images() {
+  [[ -n "${G6HA_TIMING_FILE:-}" ]] || return 0
+  local short_id size key image_id
+  while read -r short_id; do
+    [[ -n "${short_id}" ]] || continue
+    image_id="$(docker image inspect --format '{{.Id}}' "${short_id}" 2>/dev/null || true)"
+    size="$(docker image inspect --format '{{.Size}}' "${short_id}" 2>/dev/null || true)"
+    key="$(docker image inspect --format '{{index .Config.Labels "com.docker.compose.service"}}' "${short_id}" 2>/dev/null || true)"
+    [[ -n "${key}" && "${size}" =~ ^[0-9]+$ && "${image_id}" =~ ^sha256:[0-9a-f]{64}$ ]] || continue
+    g6_ha_timing image "compose_${key}" "${size}" "${image_id}"
+  done < <(docker image ls --filter "label=com.docker.compose.project=${COMPOSE_PROJECT}" -q | sort -u)
+  [[ -x "${G6HA_TUNNEL_BIN}" ]] && g6_ha_timing artifact tunnel_binary "${G6HA_TUNNEL_BIN}"
+  g6_ha_timing_record_tree_bytes wal_archive_bytes "${G6HA_ARCHIVE}"
+  g6_ha_timing_record_tree_bytes basebackup_bytes "${G6HA_BASEBACKUP}"
+}
+
 g6_ha_diagnostics() {
   mkdir -p "${ARTIFACT_DIR}"
   g6_ha_compose ps --all >"${ARTIFACT_DIR}/compose-ps-${FD_ID}.txt" 2>&1 || true

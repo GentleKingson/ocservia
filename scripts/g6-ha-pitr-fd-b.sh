@@ -48,9 +48,12 @@ phase_prepare() {
 }
 
 phase_images() {
-  g6_ha_compose build migrate api worker scheduler transportd \
-    controller-key-init transport-runtime-init transport-endpoint-bootstrap
-  g6_ha_build_tunnel
+  g6_ha_timing_run control_plane_build g6_ha_compose build \
+    migrate api worker scheduler controller-key-init
+  g6_ha_timing_run transportd_build g6_ha_compose build \
+    transportd transport-runtime-init transport-endpoint-bootstrap
+  g6_ha_timing_run tunnel_build g6_ha_build_tunnel
+  g6_ha_timing_record_images
 }
 
 phase_tunnel_up() {
@@ -405,21 +408,25 @@ rejoined_peer_streaming() {
 }
 
 case "${1:-}" in
-  prepare) phase_prepare ;;
-  images) phase_images ;;
+  prepare) g6_ha_timing_run prepare phase_prepare ;;
+  images) g6_ha_timing_run compose_image_build phase_images ;;
   tunnel-up)
     cp -f "${2:?peer tunnel directory is required}/tunnel-node-id" \
       "${G6HA_STATE}/peer-tunnel-node-id"
     cp -f "${2:?peer tunnel directory is required}/boot-id-sha256" \
       "${G6HA_STATE}/peer-boot-id"
-    phase_tunnel_up
+    g6_ha_timing_run tunnel_up phase_tunnel_up
     ;;
-  standby-bootstrap) phase_standby_bootstrap "${2:?peer primary-up directory is required}" ;;
-  roles-up) phase_roles_up ;;
-  failover-ready) phase_failover_ready ;;
-  promote) phase_promote "${2:?peer isolation directory is required}" ;;
+  standby-bootstrap)
+    g6_ha_timing_run standby_bootstrap phase_standby_bootstrap "${2:?peer primary-up directory is required}"
+    ;;
+  roles-up) g6_ha_timing_run roles_up phase_roles_up ;;
+  failover-ready) g6_ha_timing_run failover_ready phase_failover_ready ;;
+  promote)
+    g6_ha_timing_run promotion phase_promote "${2:?peer isolation directory is required}"
+    ;;
   finalize)
-    phase_finalize "${2:?isolation directory is required}" \
+    g6_ha_timing_run evidence_collection phase_finalize "${2:?isolation directory is required}" \
       "${3:?load directory is required}" \
       "${4:?pitr directory is required}" \
       "${5:?peer recovered directory is required}" \
@@ -427,7 +434,7 @@ case "${1:-}" in
       "${7:?peer rejoin directory is required}" \
       "${8:?peer tunnel directory is required}"
     ;;
-  rejoin-wait) phase_rejoin_wait ;;
+  rejoin-wait) g6_ha_timing_run rejoin_confirm phase_rejoin_wait ;;
   diagnostics) g6_ha_diagnostics ;;
   cleanup) g6_ha_cleanup ;;
   *)

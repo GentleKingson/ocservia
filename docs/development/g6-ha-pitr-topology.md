@@ -101,6 +101,25 @@ accepts a non-read-only SQL error as post-rejoin rejection, finalize stops
 binding probe timestamps to the recorded promotion boundary, or the
 post-promotion probes disappear from either failure domain's flow.
 
+## Timing diagnostics
+
+Every HA/PITR run also emits non-authoritative timing telemetry so
+orchestration costs stay measurable without touching verdicts. Both failure
+domains wrap runner preparation, the toolchain bootstrap, the control-plane
+and transportd image builds, the tunnel build, every harness phase, every
+rendezvous artifact wait, diagnostics, cleanup, and the final upload with
+`scripts/g6-timing.sh` calls that are always guarded: a timing failure can
+never fail or pass a run, and each wrapped wait or phase keeps its own exit
+status.
+
+The per-domain `g6-timing-ha-fd-{a,b}-*` artifacts (retained five days) record
+per-stage durations, compose image IDs and sizes, the tunnel binary size, the
+WAL archive and base-backup footprints, and the rendezvous count plus
+cumulative wait milliseconds, all bound to the run ID, attempt, and candidate
+SHA. The policy test fails if a timing call stops being guarded, a required
+stage stops being timed, a rendezvous wait stops preserving its result, or the
+timing upload becomes required for a green run.
+
 ## Verification boundary
 
 This stage deploys api, worker, scheduler, transportd, and PostgreSQL across
