@@ -315,5 +315,17 @@ secret_scan_jobs.each do |job_id, scan_targets|
          timing_upload.fetch("with")["retention-days"] == 5
     abort("#{job_id} timing diagnostics must stay non-authoritative")
   end
+  # if-no-files-found only covers a missing local timing file: an artifact
+  # service failure would otherwise fail the whole job and flip the formal
+  # gate or smoke aggregate on pure telemetry. Only the telemetry upload is
+  # exempt; the structured scan result uploads stay fail-closed.
+  unless timing_upload["continue-on-error"] == true
+    abort("#{job_id} timing diagnostics upload must be continue-on-error")
+  end
+  steps.select { |step| step["uses"].to_s.start_with?("actions/upload-artifact@") }.each do |step|
+    next if step.equal?(timing_upload)
+    abort("#{job_id} authoritative artifact upload must stay fail-closed") if
+      step["continue-on-error"]
+  end
 end
 RUBY
