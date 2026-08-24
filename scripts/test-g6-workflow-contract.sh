@@ -137,7 +137,7 @@ export_builds = [
   builds.each do |build|
     file = build[/--file (\S+)/, 1]
     scope = expected_scope[file] || abort("#{job_id} builds an unexpected dockerfile: #{file}")
-    froms = build.scan(/--cache-from type=gha,scope=(\S+)/).flatten
+    froms = build.scan(/--cache-from type=gha,scope=([a-z0-9-]+),version=2/).flatten
     abort("#{job_id} #{file} must import exactly its own lane cache") unless froms == [scope]
     if build.include?("--tag")
       ["--load", '--label "org.opencontainers.image.revision=${GITHUB_SHA}"'].each do |token|
@@ -145,7 +145,7 @@ export_builds = [
       end
     end
     target = build[/--target (\S+)/, 1]
-    tos = build.scan(/--cache-to type=gha,scope=(\S+?),mode=max/).flatten
+    tos = build.scan(/--cache-to type=gha,scope=([a-z0-9-]+),mode=max,version=2/).flatten
     if export_builds.any? { |f, t| f == file && t == target }
       next abort("#{job_id} #{file} #{target} must export its lane cache with mode=max") unless tos == [scope]
     elsif !tos.empty?
@@ -188,6 +188,8 @@ for scope_counts in 'g6-rust-runtime:12' 'g6-control-plane:4' 'g6-relay:4'; do
 done
 if [[ "$(grep -oF -- '--cache-to type=gha' "${ROOT}/.github/workflows/g6-harness-core.yml" | wc -l | tr -d ' ')" -ne 6 ]] \
   || [[ "$(grep -oF 'mode=max' "${ROOT}/.github/workflows/g6-harness-core.yml" | wc -l | tr -d ' ')" -ne 6 ]] \
+  || [[ "$(grep -oF 'type=gha,scope=' "${ROOT}/.github/workflows/g6-harness-core.yml" | wc -l | tr -d ' ')" -ne 20 ]] \
+  || [[ "$(grep -oF ',version=2' "${ROOT}/.github/workflows/g6-harness-core.yml" | wc -l | tr -d ' ')" -ne 20 ]] \
   || [[ "$(grep -oF -- '--load' "${ROOT}/.github/workflows/g6-harness-core.yml" | wc -l | tr -d ' ')" -ne 10 ]] \
   || [[ "$(grep -cF 'docker buildx rm' "${ROOT}/.github/workflows/g6-harness-core.yml")" -ne 2 ]] \
   || [[ "$(grep -cF 'buildx_builder_prepare' "${ROOT}/.github/workflows/g6-harness-core.yml")" -ne 4 ]]; then
