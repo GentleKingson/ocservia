@@ -12,7 +12,7 @@ if [[ "${G6_TIMING_REQUIRED:-false}" != true ]]; then
 fi
 
 usage() {
-  echo "usage: $0 <init|start|end|artifact|rendezvous|rendezvous-dir|render|summary> ..." >&2
+  echo "usage: $0 <init|start|end|measure|artifact|image|rendezvous|rendezvous-dir|render|summary> ..." >&2
   exit 2
 }
 
@@ -32,23 +32,26 @@ append() {
 }
 
 render() {
-  local file="${1:?timing file is required}" metadata stages artifacts rendezvous
+  local file="${1:?timing file is required}" metadata stages artifacts images rendezvous
   [[ -f "${file}.tsv" ]] || return 0
   metadata="$(mktemp)"
   stages="$(mktemp)"
   artifacts="$(mktemp)"
+  images="$(mktemp)"
   rendezvous="$(mktemp)"
-  trap 'rm -f -- "${metadata}" "${stages}" "${artifacts}" "${rendezvous}"' RETURN
+  trap 'rm -f -- "${metadata}" "${stages}" "${artifacts}" "${images}" "${rendezvous}"' RETURN
   awk -F '\t' '$1 == "meta" { print $2 "\t" $3 }' "${file}.tsv" >"${metadata}"
   awk -F '\t' '$1 == "duration" { print $2 "\t" $3 }' "${file}.tsv" >"${stages}"
   awk -F '\t' '$1 == "artifact" { print $2 "\t" $3 }' "${file}.tsv" >"${artifacts}"
+  awk -F '\t' '$1 == "image" { print $2 "\t" $3 "\t" $4 }' "${file}.tsv" >"${images}"
   awk -F '\t' '$1 == "rendezvous" { print $2 "\t" $3 }' "${file}.tsv" >"${rendezvous}"
   jq -n \
     --slurpfile metadata <(jq -Rn '[inputs | split("\t") | {key: .[0], value: .[1]}]' <"${metadata}") \
     --slurpfile stages <(jq -Rn '[inputs | split("\t") | {name: .[0], duration_ms: (.[1] | tonumber)}]' <"${stages}") \
     --slurpfile artifacts <(jq -Rn '[inputs | split("\t") | {key: .[0], value: (.[1] | tonumber)}]' <"${artifacts}") \
+    --slurpfile images <(jq -Rn '[inputs | split("\t") | {key: .[0], value: {bytes: (.[1] | tonumber), image_id: .[2]}}]' <"${images}") \
     --slurpfile rendezvous <(jq -Rn '[inputs | split("\t") | {key: .[0], value: (.[1] | tonumber)}]' <"${rendezvous}") \
-    '$metadata[0] | from_entries as $m | {job: $m.job, profile: $m.profile, candidate_sha: $m.candidate_sha, run_id: $m.run_id, run_attempt: $m.run_attempt, stages: $stages[0], artifact_bytes: ($artifacts[0] | from_entries), rendezvous: ($rendezvous[0] | from_entries)}' \
+    '$metadata[0] | from_entries as $m | {job: $m.job, profile: $m.profile, candidate_sha: $m.candidate_sha, run_id: $m.run_id, run_attempt: $m.run_attempt, stages: $stages[0], artifact_bytes: ($artifacts[0] | from_entries), images: ($images[0] | from_entries), rendezvous: ($rendezvous[0] | from_entries)}' \
     >"${file}"
 }
 
@@ -84,6 +87,48 @@ case "${command}" in
     [[ -f "$3" ]] || { echo "timing artifact does not exist: $3" >&2; exit 1; }
     append "$1" "artifact\t$2\t$(wc -c <"$3" | tr -d '[:space:]')"
     render "$1"
+    ;;
+  image)
+    [[ $# -eq 4 ]] || usage
+    [[ "$3" =~ ^[0-9]+$ ]] || { echo "timing image bytes must be an integer: $3" >&2; exit 1; }
+    [[ "$4" =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "timing image id must be a sha256 digest: $4" >&2; exit 1; }
+    append "$1" "image\t$2\t$3\t$4"
+    render "$1"
+    ;;
+  measure)
+    [[ $# -ge 3 ]] || usage
+    file="$1"
+    stage="$2"
+    shift 2
+    [[ "${1:-}" == "--" ]] || usage
+    shift
+    # Wrap one timed command (for example a single release image build) and
+    # always propagate its exit status: timing collection must never mask a
+    # build failure, and a failed build still records its duration. Disarm
+    # the non-authoritative ERR trap and errexit BEFORE any timing work so a
+    # broken clock cannot exit 0 and skip the wrapped authoritative command;
+    # the wrapped command always runs, timestamps are validated before they
+    # are recorded, and the exit status comes only from the wrapped command.
+    # Appends stay raw so concurrent measures never rewrite the JSON
+    # mid-flight; the parent renders after every measured command has been
+    # waited on.
+    trap - ERR
+    set +e
+    start_ms="$(now_ms)"
+    start_ms_valid=0
+    [[ "${start_ms}" =~ ^[0-9]+$ ]] && start_ms_valid=1
+    "$@"
+    command_status=$?
+    end_ms="$(now_ms)"
+    end_ms_valid=0
+    [[ "${end_ms}" =~ ^[0-9]+$ ]] && end_ms_valid=1
+    if [[ "${start_ms_valid}" -eq 1 ]]; then
+      append "${file}" "start\t${stage}\t${start_ms}" || :
+    fi
+    if [[ "${start_ms_valid}" -eq 1 && "${end_ms_valid}" -eq 1 ]]; then
+      append "${file}" "duration\t${stage}\t$(( end_ms - start_ms ))" || :
+    fi
+    exit "${command_status}"
     ;;
   rendezvous)
     [[ $# -eq 3 ]] || usage
@@ -137,6 +182,10 @@ NODE
       echo "| Artifact | Bytes |"
       echo "|---|---:|"
       jq -r '.artifact_bytes | to_entries[]? | "| \(.key) | \(.value) |"' "$1"
+      echo
+      echo "| Release image | Bytes | Image ID |"
+      echo "|---|---:|---|"
+      jq -r '.images | to_entries[]? | "| \(.key) | \(.value.bytes) | \(.value.image_id) |"' "$1"
       echo
       echo "| Rendezvous metric | Value |"
       echo "|---|---:|"

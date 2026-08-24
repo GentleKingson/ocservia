@@ -1596,7 +1596,8 @@ EOF
         cat <<EOF
     build:
       context: ../..
-      dockerfile: rust/g6-agent.Dockerfile
+      dockerfile: rust/g6-runtime.Dockerfile
+      target: g6-agent-runtime
 EOF
       fi
       cat <<EOF

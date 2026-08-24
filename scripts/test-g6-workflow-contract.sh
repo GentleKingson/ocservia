@@ -44,6 +44,27 @@ for stage in runner_preparation toolchain_bootstrap candidate_docker_image_build
     "${TIMING_HELPER}" "${INSTALL_HELPER}" \
     || { echo "G6 timing stage is missing: ${stage}" >&2; exit 1; }
 done
+# Per-build telemetry inside the candidate image build: every lane of both
+# release producers (formal and smoke) must carry its own duration mark so a
+# regression can be attributed to one build graph, and every frozen image
+# must record its final size and image ID.
+for stage in control_plane_build relay_build rust_workspace_build \
+  transportd_build g6_probe_build g6_agent_build; do
+  grep -qF "${stage}" "${ROOT}/.github/workflows/g6-harness-core.yml" \
+    || { echo "G6 per-image build timing stage is missing: ${stage}" >&2; exit 1; }
+done
+measure_count="$(grep -cF 'g6-timing.sh measure' "${ROOT}/.github/workflows/g6-harness-core.yml")"
+if [[ "${measure_count}" -ne 12 ]]; then
+  echo "both release producers must time all six build lanes individually (expected 12 measures, found ${measure_count})" >&2
+  exit 1
+fi
+image_mark_count="$(grep -cF 'record_image_timing ' "${ROOT}/.github/workflows/g6-harness-core.yml")"
+if [[ "${image_mark_count}" -ne 10 ]]; then
+  echo "both release producers must record all five frozen images (expected 10 marks, found ${image_mark_count})" >&2
+  exit 1
+fi
+grep -qF 'g6-timing.sh image' "${ROOT}/.github/workflows/g6-harness-core.yml" \
+  || { echo "release producers must record per-image size and image ID" >&2; exit 1; }
 summary_count="$(grep -cF 'scripts/g6-timing.sh summary' "${ROOT}/.github/workflows/g6-harness-core.yml")"
 if [[ "${summary_count}" -ne 6 ]]; then
   echo "every G6 release and failure domain job must write a timing step summary (expected 6, found ${summary_count})" >&2

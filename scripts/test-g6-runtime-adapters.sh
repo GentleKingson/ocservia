@@ -22,7 +22,7 @@ COORDINATION_MAINTENANCE="${ROOT}/control-plane/internal/coordination/maintenanc
 BUILDER="${ROOT}/scripts/build-g6-evidence.mjs"
 CONTRACT="${ROOT}/scripts/g6-contract-lib.mjs"
 SLO="${ROOT}/docs/acceptance/g6-slo.yaml"
-PROBE_DOCKERFILE="${ROOT}/rust/g6-probe.Dockerfile"
+G6_RUNTIME_DOCKERFILE="${ROOT}/rust/g6-runtime.Dockerfile"
 TRANSPORT_DOCKERFILE="${ROOT}/rust/transportd.Dockerfile"
 TRANSPORT_LIB="${ROOT}/rust/crates/transportd/src/lib.rs"
 G6_TUNNEL_LIB="${ROOT}/rust/crates/g6-tunnel/src/lib.rs"
@@ -298,8 +298,19 @@ release_upload = release_steps.find { |step| step["name"] == "Publish the frozen
 release_cleanup = release_steps.find { |step| step["name"] == "Clean release-image resources" }
 release_run = release_build&.fetch("run")
 release_variables = %w[G6RD_CONTROL_PLANE_IMAGE G6RD_TRANSPORTD_IMAGE G6RD_RELAY_IMAGE G6RD_PROBE_IMAGE G6RD_AGENT_IMAGE]
-required_dockerfiles = %w[control-plane/Dockerfile rust/transportd.Dockerfile deploy/production/relay.Dockerfile rust/g6-probe.Dockerfile rust/g6-agent.Dockerfile]
+required_dockerfiles = %w[control-plane/Dockerfile rust/g6-runtime.Dockerfile deploy/production/relay.Dockerfile]
 reject("the complete release image set must be candidate-labeled and exported once") unless release_run&.include?("org.opencontainers.image.revision=${GITHUB_SHA}") && required_dockerfiles.all? { |path| release_run.include?(path) } && release_run.include?("postgres:17.10-bookworm") && release_run.include?("docker save") && release_run.include?("sha256sum runtime-images.tar.gz image-ids.tsv")
+shared_builder_tokens = [
+  "--target g6-rust-builder",
+  "--target transportd-runtime",
+  "--target g6-probe-runtime",
+  "--target g6-agent-runtime",
+]
+reject("every first-party Rust image must assemble from the one shared builder stage") unless
+  shared_builder_tokens.all? { |token| release_run.include?(token) }
+reject("the shared Rust graph must keep its own per-build timing marks") unless
+  %w[control_plane_build relay_build rust_workspace_build transportd_build g6_probe_build g6_agent_build].all? { |stage| release_run.include?(stage) } &&
+    release_run.include?("g6-timing.sh image")
 tunnel_release_tokens = [
   "--target g6-tunnel-artifact",
   "--output \"type=local,dest=${tunnel_output}\"",
@@ -626,6 +637,10 @@ transportd_command = services.fetch("transportd").fetch("command")
 reject("transportd must enforce owner fencing for the stale-rejection scenarios") unless transportd_command.include?("--require-fencing")
 pgappname_count = compose.fetch("services").values.count { |service| service.dig("environment", "PGAPPNAME").to_s.start_with?("${G6_FD_ID:?}-") }
 reject("each role service must set its PGAPPNAME from G6_FD_ID (found #{pgappname_count})") unless pgappname_count == 3
+probe_build = services.fetch("g6-probe").fetch("build")
+reject("local probe builds must assemble from the shared G6 runtime graph") unless
+  probe_build.fetch("dockerfile") == "rust/g6-runtime.Dockerfile" &&
+    probe_build.fetch("target") == "g6-probe-runtime"
 RUBY
 
 smoke_session_phase="$(sed -n '/^phase_smoke_session() {/,/^}/p' "${FD_B}")"
@@ -656,24 +671,89 @@ fi
 
 # Debian already assigns UID 65534 to nobody. The probe must reuse that
 # account rather than attempting to create a duplicate numeric identity.
-if grep -Eq 'useradd.*--uid 65534' "${PROBE_DOCKERFILE}"; then
+if grep -Eq 'useradd.*--uid 65534' "${G6_RUNTIME_DOCKERFILE}"; then
   echo "the G6 probe image must not create Debian's existing UID 65534" >&2
   exit 1
 fi
-grep -qF 'usermod --gid ocservia nobody' "${PROBE_DOCKERFILE}" || {
+grep -qF 'usermod --gid ocservia nobody' "${G6_RUNTIME_DOCKERFILE}" || {
   echo "the G6 probe image must join nobody to the transport peer group" >&2
   exit 1
 }
-grep -q '^USER nobody:ocservia$' "${PROBE_DOCKERFILE}" || {
+grep -q '^USER nobody:ocservia$' "${G6_RUNTIME_DOCKERFILE}" || {
   echo "the G6 probe image must run as the transport-authorized nobody account" >&2
   exit 1
 }
-grep -q -- '--package ocservia-g6-tunnel' "${PROBE_DOCKERFILE}" || {
-  echo "the release probe build stage must compile the host-side G6 tunnel once" >&2
+# The shared builder must preserve the three original compile partitions —
+# transportd alone, probe+tunnel, agent+privd — as separate Cargo invocations
+# sharing one target cache. A single merged invocation would unify dependency
+# features across packages and link different binaries than the production
+# transportd build that G6 must verify.
+dockerfile_joined="$(
+  awk '{
+    if (pending != "") { line = pending $0 } else { line = $0 }
+    if (line ~ /\\$/) { pending = substr(line, 1, length(line) - 1) } else { pending = ""; print line }
+  }' "${G6_RUNTIME_DOCKERFILE}"
+)"
+cargo_invocation_count="$(grep -c '^RUN cargo build' <<<"${dockerfile_joined}" || true)"
+if [[ "${cargo_invocation_count}" -ne 3 ]]; then
+  echo "the shared Rust builder must issue exactly three cargo invocations (transportd; probe+tunnel; agent+privd), found ${cargo_invocation_count}" >&2
   exit 1
-}
-grep -q '^FROM scratch AS g6-tunnel-artifact$' "${PROBE_DOCKERFILE}" || {
-  echo "the release probe Dockerfile must expose the frozen G6 tunnel target" >&2
+fi
+production_transportd_build_command="$(
+  sed -n 's/^RUN \(cargo build --locked --release --package ocservia-transportd\)$/\1/p' \
+    "${TRANSPORT_DOCKERFILE}"
+)"
+g6_transportd_build_command="$(
+  grep '^RUN cargo build' <<<"${dockerfile_joined}" | sed -n '1p' \
+    | sed -e 's/^RUN //' -e 's/[[:space:]]*&&.*$//'
+)"
+if [[ -z "${production_transportd_build_command}" ]] \
+  || [[ "${g6_transportd_build_command}" != "${production_transportd_build_command}" ]]; then
+  echo "the shared builder's transportd invocation must equal the production build command exactly" >&2
+  exit 1
+fi
+expected_partition_packages=(
+  'ocservia-transportd'
+  'ocservia-g6-probe ocservia-g6-tunnel'
+  'ocservia-agent ocservia-privd'
+)
+invocation_number=0
+while IFS= read -r invocation; do
+  invocation_number=$(( invocation_number + 1 ))
+  invocation_command="${invocation#RUN }"
+  invocation_command="${invocation_command%%&&*}"
+  if [[ "${invocation_command}" != *'--locked --release'* ]]; then
+    echo "cargo invocation ${invocation_number} must stay a locked release build" >&2
+    exit 1
+  fi
+  invocation_packages="$(
+    grep -oE -- '--package [a-z0-9_-]+' <<<"${invocation_command}" \
+      | sed 's/^--package //' | sort | paste -sd ' ' -
+  )"
+  expected_packages="$(
+    tr ' ' '\n' <<<"${expected_partition_packages[invocation_number - 1]}" \
+      | sed '/^$/d' | sort | paste -sd ' ' -
+  )"
+  if [[ "${invocation_packages}" != "${expected_packages}" ]]; then
+    echo "cargo invocation ${invocation_number} must compile exactly: ${expected_packages}" >&2
+    exit 1
+  fi
+done <<<"$(grep '^RUN cargo build' <<<"${dockerfile_joined}")"
+for frozen_copy in \
+  'cp target/release/ocservia-transportd /out/transportd/' \
+  'cp target/release/ocservia-g6-probe target/release/ocservia-g6-tunnel /out/probe/' \
+  'cp target/release/ocservia-agent target/release/ocservia-privd /out/agent/'; do
+  grep -qF "${frozen_copy}" "${G6_RUNTIME_DOCKERFILE}" || {
+    echo "the shared builder must freeze partition artifacts via: ${frozen_copy}" >&2
+    exit 1
+  }
+done
+if grep -Eq '^COPY --from=g6-rust-builder /src/' "${G6_RUNTIME_DOCKERFILE}"; then
+  echo "runtime stages must consume frozen /out artifacts, not the shared target tree" >&2
+  exit 1
+fi
+grep -q '^FROM scratch AS g6-tunnel-artifact$' "${G6_RUNTIME_DOCKERFILE}" || {
+  echo "the shared runtime Dockerfile must expose the frozen G6 tunnel target" >&2
   exit 1
 }
 grep -qF 'useradd --system --uid 65532 --gid ocservia transportd' \
@@ -693,6 +773,32 @@ grep -q '^USER relay:relay$' "${RELAY_DOCKERFILE}" || {
   echo "the relay image must run as its fixed unprivileged principal" >&2
   exit 1
 }
+
+# The harness transportd image must stay byte-equivalent to the production
+# image definition: same pinned base, principals, entrypoint, and command.
+# Normalize the stage names, builder reference, and frozen /out artifact
+# path so only real layout drift can fail this comparison; comments do not
+# change image content.
+shared_transportd_block="$(
+  awk '/^FROM debian:bookworm-slim@sha256:[0-9a-f]+ AS transportd-runtime-base$/ { in_block = 1 }
+       in_block && /^FROM/ && $0 !~ /transportd-runtime-base/ { exit }
+       in_block { print }' "${G6_RUNTIME_DOCKERFILE}" | grep -vE '^(#|$)'
+)"
+production_transportd_block="$(
+  awk '/^FROM debian:bookworm-slim@sha256:[0-9a-f]+ AS runtime-base$/ { in_block = 1 }
+       in_block { print }' "${TRANSPORT_DOCKERFILE}" \
+    | grep -vE '^(#|$)' \
+    | sed -e 's/ AS runtime-base$/ AS transportd-runtime-base/' \
+      -e 's/^FROM runtime-base$/FROM transportd-runtime-base AS transportd-runtime/' \
+      -e 's/--from=build/--from=g6-rust-builder/' \
+      -e 's|/src/target/release/ocservia-transportd|/out/transportd/ocservia-transportd|'
+)"
+if [[ "${shared_transportd_block}" != "${production_transportd_block}" ]]; then
+  echo "the shared G6 transportd runtime must mirror rust/transportd.Dockerfile exactly" >&2
+  diff <(printf '%s\n' "${production_transportd_block}") \
+    <(printf '%s\n' "${shared_transportd_block}") >&2 || true
+  exit 1
+fi
 
 # The FD runners must keep using the exact candidate-bound tunnel bytes after
 # bootstrap and across the phase boundaries, not merely trust the first
@@ -2043,7 +2149,8 @@ g6rd_stage_agent_node_state "${relay_topology_test}/nodes.tsv"
   exit 1
 }
 g6rd_write_agent_overlay 1
-grep -q 'dockerfile: rust/g6-agent.Dockerfile' "${G6RD_AGENT_COMPOSE}"
+grep -q 'dockerfile: rust/g6-runtime.Dockerfile' "${G6RD_AGENT_COMPOSE}"
+grep -q 'target: g6-agent-runtime' "${G6RD_AGENT_COMPOSE}"
 [[ "${G6_RELAY_URL_A}" == https://relay-a:3443 ]]
 [[ "${G6_RELAY_URL_B}" == https://relay-b:3443 ]]
 grep -q 'G6_RELAY_URL_A: "https://relay-a:3443"' "${G6RD_AGENT_COMPOSE}"
@@ -2061,7 +2168,7 @@ fi
 export G6RD_AGENT_IMAGE=ocservia-g6-agent:test-release
 g6rd_write_agent_overlay 1
 grep -q 'image: ocservia-g6-agent:test-release' "${G6RD_AGENT_COMPOSE}"
-if grep -q 'dockerfile: rust/g6-agent.Dockerfile' "${G6RD_AGENT_COMPOSE}"; then
+if grep -qE '^[[:space:]]*(build|dockerfile):' "${G6RD_AGENT_COMPOSE}"; then
   echo "the frozen Agent overlay must not rebuild the release image" >&2
   exit 1
 fi
