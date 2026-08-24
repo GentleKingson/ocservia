@@ -27,9 +27,10 @@ jobs:
           persist-credentials: false
       - name: Initialize failure domain A timing diagnostics
         run: |
-          echo "G6HA_TIMING_FILE=${RUNNER_TEMP}/artifacts/timing/g6-ha-fd-a.json" >>"${GITHUB_ENV}"
+          G6HA_TIMING_FILE="${RUNNER_TEMP}/artifacts/timing/g6-ha-fd-a.json"
+          echo "G6HA_TIMING_FILE=${G6HA_TIMING_FILE}" >>"${GITHUB_ENV}"
           export G6HA_TIMING_FILE
-          scripts/g6-timing.sh init "${G6HA_TIMING_FILE}" g6-ha-fd-a ha-pitr "${GITHUB_SHA}" "${GITHUB_RUN_ID}" "${GITHUB_RUN_ATTEMPT}"
+          scripts/g6-timing.sh init "${G6HA_TIMING_FILE}" g6-ha-fd-a ha-pitr "${GITHUB_SHA}" "${GITHUB_RUN_ID}" "${GITHUB_RUN_ATTEMPT}" || true
       - name: Start runner preparation timing
         run: scripts/g6-timing.sh start "${G6HA_TIMING_FILE}" runner_preparation || true
       - name: Runner preflight
@@ -231,9 +232,10 @@ jobs:
           persist-credentials: false
       - name: Initialize failure domain B timing diagnostics
         run: |
-          echo "G6HA_TIMING_FILE=${RUNNER_TEMP}/artifacts/timing/g6-ha-fd-b.json" >>"${GITHUB_ENV}"
+          G6HA_TIMING_FILE="${RUNNER_TEMP}/artifacts/timing/g6-ha-fd-b.json"
+          echo "G6HA_TIMING_FILE=${G6HA_TIMING_FILE}" >>"${GITHUB_ENV}"
           export G6HA_TIMING_FILE
-          scripts/g6-timing.sh init "${G6HA_TIMING_FILE}" g6-ha-fd-b ha-pitr "${GITHUB_SHA}" "${GITHUB_RUN_ID}" "${GITHUB_RUN_ATTEMPT}"
+          scripts/g6-timing.sh init "${G6HA_TIMING_FILE}" g6-ha-fd-b ha-pitr "${GITHUB_SHA}" "${GITHUB_RUN_ID}" "${GITHUB_RUN_ATTEMPT}" || true
       - name: Start runner preparation timing
         run: scripts/g6-timing.sh start "${G6HA_TIMING_FILE}" runner_preparation || true
       - name: Runner preflight

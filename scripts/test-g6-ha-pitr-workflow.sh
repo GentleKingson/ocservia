@@ -54,7 +54,7 @@ jobs.each do |job_id, job|
   init_step = run_steps.find { |step| step.fetch("run").include?("g6-timing.sh init") }
   reject("#{job_id} must initialize timing diagnostics") if init_step.nil?
   init_text = init_step.fetch("run")
-  reject("#{job_id} timing init must bind the per-domain timing file") unless init_text.include?("G6HA_TIMING_FILE=${RUNNER_TEMP}/artifacts/timing/#{job_id}.json")
+  reject("#{job_id} timing init must bind the per-domain timing file") unless init_text.include?("G6HA_TIMING_FILE=\"${RUNNER_TEMP}/artifacts/timing/#{job_id}.json\"")
   reject("#{job_id} timing init must publish the binding for later steps") unless init_text.include?(">>\"${GITHUB_ENV}\"")
   reject("#{job_id} timing init must bind the job identity") unless init_text.include?(job_id)
   reject("#{job_id} timing init must bind the ha-pitr profile") unless init_text.include?("ha-pitr")
@@ -63,7 +63,6 @@ jobs.each do |job_id, job|
   end
   run_text.lines chomp: true do |line|
     next unless line.include?("scripts/g6-timing.sh")
-    next if line.include?("g6-timing.sh init")
     reject("#{job_id} timing call must be non-authoritative: #{line}") unless line.include?("|| true")
   end
   %w[runner_preparation toolchain_bootstrap rendezvous_wait_ diagnostics_collection cleanup artifact_upload].each do |stage|
