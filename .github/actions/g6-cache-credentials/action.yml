@@ -1,0 +1,11 @@
+name: Relay Actions cache credentials
+description: >-
+  Relay the runner-provided Actions cache-service credentials from the
+  action process environment into the job environment so BuildKit's gha
+  cache backend can use them. The runner injects these variables only
+  into action processes; plain run steps never see them. Fails closed
+  when the runtime token is missing so cache persistence can never
+  silently degrade into full recompiles.
+runs:
+  using: node20
+  main: index.js

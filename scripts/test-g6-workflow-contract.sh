@@ -87,13 +87,18 @@ export_builds = [
 %w[g6-rd-release-image g6-smoke-release].each do |job_id|
   steps = Array(jobs.fetch(job_id).fetch("steps"))
   prep = steps.find { |step| step["name"] == "Prepare the BuildKit cache builder" }
+  relay = steps.find { |step| step["name"] == "Relay Actions cache credentials to the job environment" }
   freeze = steps.find do |step|
     run = step.fetch("run", "")
     run.include?("candidate_docker_image_build") && run.include?("docker build")
   end
   cleanup = steps.find { |step| step["name"].to_s.start_with?("Clean ") }
   next abort("#{job_id} must prepare the BuildKit cache builder before freezing") unless
-    prep && freeze && steps.index(prep) < steps.index(freeze) && cleanup
+    prep && relay && freeze && steps.index(relay) < steps.index(prep) &&
+    steps.index(prep) < steps.index(freeze) && cleanup
+  relay_uses = relay.fetch("uses", "")
+  next abort("#{job_id} must relay cache credentials via the repo-owned action") unless
+    relay_uses == "./.github/actions/g6-cache-credentials"
   prep_run = prep.fetch("run")
   ["--driver docker-container", "--bootstrap", "--use",
    'g6-buildx-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}',
@@ -160,6 +165,16 @@ RUBY
 builder_count="$(grep -cF 'docker buildx create' "${ROOT}/.github/workflows/g6-harness-core.yml")"
 if [[ "${builder_count}" -ne 2 ]]; then
   echo "both release producers must create exactly one run-scoped buildx builder (found ${builder_count})" >&2
+  exit 1
+fi
+# The credential relay must stay fail-closed and must never log values.
+for relay_token in 'ACTIONS_RUNTIME_TOKEN' 'ACTIONS_RESULTS_URL' 'process.exit(1)'; do
+  grep -qF "${relay_token}" "${ROOT}/.github/actions/g6-cache-credentials/index.js" \
+    || { echo "the cache credential relay is missing ${relay_token}" >&2; exit 1; }
+done
+if grep -nE 'console\.(log|error|info)\(.*value' "${ROOT}/.github/actions/g6-cache-credentials/index.js" \
+  | grep -qv 'relayed'; then
+  echo "the cache credential relay must not log credential values" >&2
   exit 1
 fi
 for scope_counts in 'g6-rust-runtime:12' 'g6-control-plane:4' 'g6-relay:4'; do

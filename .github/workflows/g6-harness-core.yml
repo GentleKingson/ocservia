@@ -103,6 +103,15 @@ jobs:
           scripts/g6-timing.sh start "${RUNNER_TEMP}/artifacts/timing/g6-rd-release.json" toolchain_bootstrap
           scripts/bootstrap.sh go-test
           scripts/g6-timing.sh end "${RUNNER_TEMP}/artifacts/timing/g6-rd-release.json" toolchain_bootstrap || true
+      - name: Relay Actions cache credentials to the job environment
+        # BuildKit's gha cache backend needs the runner's cache-service
+        # token and URLs, but the runner injects those only into action
+        # processes — plain run steps never see them (actions/runner#4325
+        # is still open). This repo-owned relay action copies them into
+        # the job environment for the builder preparation below and fails
+        # closed when the token is missing, so cache persistence can never
+        # silently degrade into full recompiles.
+        uses: ./.github/actions/g6-cache-credentials
       - name: Prepare the BuildKit cache builder
         run: |
           set -euo pipefail
@@ -1475,6 +1484,15 @@ jobs:
           scripts/g6-timing.sh start "${RUNNER_TEMP}/artifacts/timing/g6-smoke-release.json" toolchain_bootstrap
           scripts/bootstrap.sh go-test
           scripts/g6-timing.sh end "${RUNNER_TEMP}/artifacts/timing/g6-smoke-release.json" toolchain_bootstrap || true
+      - name: Relay Actions cache credentials to the job environment
+        # BuildKit's gha cache backend needs the runner's cache-service
+        # token and URLs, but the runner injects those only into action
+        # processes — plain run steps never see them (actions/runner#4325
+        # is still open). This repo-owned relay action copies them into
+        # the job environment for the builder preparation below and fails
+        # closed when the token is missing, so cache persistence can never
+        # silently degrade into full recompiles.
+        uses: ./.github/actions/g6-cache-credentials
       - name: Prepare the BuildKit cache builder
         run: |
           set -euo pipefail
