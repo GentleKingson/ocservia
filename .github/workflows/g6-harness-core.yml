@@ -113,9 +113,24 @@ jobs:
           # and the frozen release manifest are still recomputed from the
           # exact candidate below, and both failure domains still verify the
           # frozen release independently.
+          # The buildkitd container does not inherit the runner's Actions
+          # cache credentials, so forward them explicitly — the same
+          # plumbing docker/setup-buildx-action performs — and fail closed
+          # when they are absent instead of silently skipping every cache
+          # export (a missing export would silently revert every later run
+          # to full recompiles).
+          : "${ACTIONS_RUNTIME_TOKEN:?GitHub Actions cache token is required for BuildKit cache persistence}"
+          buildx_driver_opts=(--driver-opt "env.ACTIONS_RUNTIME_TOKEN=${ACTIONS_RUNTIME_TOKEN}")
+          if [[ -n "${ACTIONS_CACHE_URL:-}" ]]; then
+            buildx_driver_opts+=(--driver-opt "env.ACTIONS_CACHE_URL=${ACTIONS_CACHE_URL}")
+          fi
+          if [[ -n "${ACTIONS_RESULTS_URL:-}" ]]; then
+            buildx_driver_opts+=(--driver-opt "env.ACTIONS_RESULTS_URL=${ACTIONS_RESULTS_URL}")
+          fi
           docker buildx create \
             --driver docker-container \
             --name "g6-buildx-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" \
+            "${buildx_driver_opts[@]}" \
             --bootstrap \
             --use
           scripts/g6-timing.sh end "${timing}" buildx_builder_prepare || true
@@ -1470,9 +1485,24 @@ jobs:
           # and the frozen release manifest are still recomputed from the
           # exact candidate below, and both failure domains still verify the
           # frozen release independently.
+          # The buildkitd container does not inherit the runner's Actions
+          # cache credentials, so forward them explicitly — the same
+          # plumbing docker/setup-buildx-action performs — and fail closed
+          # when they are absent instead of silently skipping every cache
+          # export (a missing export would silently revert every later run
+          # to full recompiles).
+          : "${ACTIONS_RUNTIME_TOKEN:?GitHub Actions cache token is required for BuildKit cache persistence}"
+          buildx_driver_opts=(--driver-opt "env.ACTIONS_RUNTIME_TOKEN=${ACTIONS_RUNTIME_TOKEN}")
+          if [[ -n "${ACTIONS_CACHE_URL:-}" ]]; then
+            buildx_driver_opts+=(--driver-opt "env.ACTIONS_CACHE_URL=${ACTIONS_CACHE_URL}")
+          fi
+          if [[ -n "${ACTIONS_RESULTS_URL:-}" ]]; then
+            buildx_driver_opts+=(--driver-opt "env.ACTIONS_RESULTS_URL=${ACTIONS_RESULTS_URL}")
+          fi
           docker buildx create \
             --driver docker-container \
             --name "g6-buildx-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" \
+            "${buildx_driver_opts[@]}" \
             --bootstrap \
             --use
           scripts/g6-timing.sh end "${timing}" buildx_builder_prepare || true

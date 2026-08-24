@@ -96,7 +96,9 @@ export_builds = [
     prep && freeze && steps.index(prep) < steps.index(freeze) && cleanup
   prep_run = prep.fetch("run")
   ["--driver docker-container", "--bootstrap", "--use",
-   'g6-buildx-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}'].each do |token|
+   'g6-buildx-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}',
+   'env.ACTIONS_RUNTIME_TOKEN=${ACTIONS_RUNTIME_TOKEN}',
+   "ACTIONS_RUNTIME_TOKEN:?"].each do |token|
     next abort("#{job_id} builder preparation is missing #{token}") unless prep_run.include?(token)
   end
   cleanup_run = cleanup.fetch("run")
