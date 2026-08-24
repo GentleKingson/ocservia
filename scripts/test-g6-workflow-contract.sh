@@ -82,7 +82,7 @@ jobs = core.fetch("jobs")
   relay = steps.find { |step| step["name"] == "Relay Actions cache credentials to the job environment" }
   freeze = steps.find do |step|
     run = step.fetch("run", "")
-    run.include?("candidate_docker_image_build") && run.include?("docker build")
+    run.include?("candidate_docker_image_build") && run.include?("scripts/g6-buildx-cache.sh")
   end
   cleanup = steps.find { |step| step["name"].to_s.start_with?("Clean ") }
   next abort("#{job_id} must prepare the BuildKit cache builder before freezing") unless
@@ -93,6 +93,7 @@ jobs = core.fetch("jobs")
     relay_uses == "./.github/actions/g6-cache-credentials"
   prep_run = prep.fetch("run")
   ["--driver docker-container", "--bootstrap", "--use",
+   'image=moby/buildkit:v0.32.2@sha256:28a898719c18a33f4e8000685287fa36fd0dd9560c6440227d3a732d79bb41d8',
    'g6-buildx-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}',
    'G6_CACHE_AVAILABLE', 'buildx_driver_opts=()'].each do |token|
     next abort("#{job_id} builder preparation is missing #{token}") unless prep_run.include?(token)
@@ -125,7 +126,7 @@ jobs = core.fetch("jobs")
   next abort("#{job_id} must pin BUILDX_BUILDER to the run-scoped builder") unless
     job_env.fetch("BUILDX_BUILDER", step_env.fetch("BUILDX_BUILDER", nil)) ==
     "g6-buildx-${{ github.run_id }}-${{ github.run_attempt }}"
-  builds = logical.select { |line| line.include?("docker buildx build ") }
+  builds = logical.select { |line| line.include?("scripts/g6-buildx-cache.sh ") }
   abort("#{job_id} must keep the six lane builds plus the tunnel export (found #{builds.length})") unless builds.length == 7
   builds.each do |build|
     file = build[/--file (\S+)/, 1]
@@ -136,10 +137,10 @@ jobs = core.fetch("jobs")
       end
     end
     next if build.include?("--target g6-tunnel-artifact")
-    abort("#{job_id} #{file} build must accept the optional cache argument array") unless
-      build.include?("${G6_CACHE_ARGS[@]}")
+    abort("#{job_id} #{file} build must use the shared cache fallback helper") unless
+      build.include?("scripts/g6-buildx-cache.sh ")
   end
-  cache_calls = freeze.fetch("run").scan(/(?<![[:alnum:]_])g6_cache_args\s+(g6-[a-z-]+)\s+(true|false)/)
+  cache_calls = freeze.fetch("run").scan(/scripts\/g6-buildx-cache\.sh\s+(g6-[a-z-]+)\s+(true|false)/)
   expected_calls = [
     ["g6-control-plane", "true"],
     ["g6-relay", "true"],
@@ -150,11 +151,8 @@ jobs = core.fetch("jobs")
     ["g6-rust-runtime", "false"],
   ]
   abort("#{job_id} cache lanes drifted") unless cache_calls == expected_calls
-  abort("#{job_id} cache helper must gate imports and tolerate export failures") unless
-    freeze.fetch("run").include?("G6_CACHE_AVAILABLE") &&
-    freeze.fetch("run").include?("--cache-from") &&
-    freeze.fetch("run").include?("--cache-to") &&
-    freeze.fetch("run").include?("mode=max,ignore-error=true")
+  abort("#{job_id} cache helper must be present in every release build") unless
+    freeze.fetch("run").include?("scripts/g6-buildx-cache.sh")
   abort("#{job_id} control-plane runtime packages must not come from the external cache") unless
     builds.any? { |build| build.include?("--file control-plane/Dockerfile") && build.include?("--no-cache-filter runtime-base") }
   abort("#{job_id} relay runtime packages must not come from the external cache") unless
@@ -162,10 +160,21 @@ jobs = core.fetch("jobs")
   tunnel = builds.find { |b| b.include?("--target g6-tunnel-artifact") }
   abort("#{job_id} tunnel export must stay a local output export with rust cache import") unless
     tunnel&.include?('--output "type=local,dest=${tunnel_output}"') &&
-    tunnel.include?("${G6_CACHE_ARGS[@]}") &&
+    tunnel.include?("scripts/g6-buildx-cache.sh") &&
     !tunnel.include?("--cache-to")
 end
 RUBY
+cache_helper="${ROOT}/scripts/g6-buildx-cache.sh"
+test -x "${cache_helper}" || { echo "G6 cache fallback helper must be executable" >&2; exit 1; }
+for cache_token in \
+  "docker buildx build \"\${cache_args[@]}\" \"\$@\"" \
+  "docker buildx build \"\$@\"" \
+  'cache_timeout=60s' '--cache-from' '--cache-to' \
+  'mode=max,ignore-error=true' 'PIPESTATUS[0]' \
+  'failure_marker=' 'retrying once without external cache'; do
+  grep -qF -- "${cache_token}" "${cache_helper}" \
+    || { echo "G6 cache fallback helper is missing ${cache_token}" >&2; exit 1; }
+done
 builder_count="$(grep -cF 'docker buildx create' "${ROOT}/.github/workflows/g6-harness-core.yml")"
 if [[ "${builder_count}" -ne 2 ]]; then
   echo "both release producers must create exactly one run-scoped buildx builder (found ${builder_count})" >&2
@@ -190,16 +199,14 @@ fi
 for scope_counts in 'g6-rust-runtime:10' 'g6-control-plane:2' 'g6-relay:2'; do
   scope="${scope_counts%%:*}"
   expected="${scope_counts##*:}"
-  actual="$(grep -oF "g6_cache_args ${scope}" "${ROOT}/.github/workflows/g6-harness-core.yml" | wc -l | tr -d ' ')"
+  actual="$(grep -oF "scripts/g6-buildx-cache.sh ${scope}" "${ROOT}/.github/workflows/g6-harness-core.yml" | wc -l | tr -d ' ')"
   if [[ "${actual}" -ne "${expected}" ]]; then
     echo "cache scope ${scope} must appear exactly ${expected} times (found ${actual})" >&2
     exit 1
   fi
 done
-if [[ "$(grep -oF -- '--cache-to' "${ROOT}/.github/workflows/g6-harness-core.yml" | wc -l | tr -d ' ')" -ne 2 ]] \
-  || [[ "$(grep -oF 'mode=max,ignore-error=true' "${ROOT}/.github/workflows/g6-harness-core.yml" | wc -l | tr -d ' ')" -ne 2 ]] \
-  || [[ "$(grep -oF 'type=gha,scope=' "${ROOT}/.github/workflows/g6-harness-core.yml" | wc -l | tr -d ' ')" -ne 4 ]] \
-  || [[ "$(grep -oF ',version=2' "${ROOT}/.github/workflows/g6-harness-core.yml" | wc -l | tr -d ' ')" -ne 4 ]] \
+if [[ "$(grep -oF -- 'scripts/g6-buildx-cache.sh ' "${ROOT}/.github/workflows/g6-harness-core.yml" | wc -l | tr -d ' ')" -ne 14 ]] \
+  || [[ "$(grep -oF 'image=moby/buildkit:v0.32.2@sha256:28a898719c18a33f4e8000685287fa36fd0dd9560c6440227d3a732d79bb41d8' "${ROOT}/.github/workflows/g6-harness-core.yml" | wc -l | tr -d ' ')" -ne 2 ]] \
   || [[ "$(grep -oF -- '--load' "${ROOT}/.github/workflows/g6-harness-core.yml" | wc -l | tr -d ' ')" -ne 10 ]] \
   || [[ "$(grep -cF 'docker buildx rm' "${ROOT}/.github/workflows/g6-harness-core.yml")" -ne 2 ]] \
   || [[ "$(grep -cF 'buildx_builder_prepare' "${ROOT}/.github/workflows/g6-harness-core.yml")" -ne 4 ]] \

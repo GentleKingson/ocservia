@@ -584,6 +584,7 @@ jobs:
           scripts/test-g6-smoke-relevance.sh
           scripts/test-g6-readiness-hang-guards.sh
           scripts/test-g6-cache-credentials.sh
+          scripts/test-g6-buildx-cache-fallback.sh
           scripts/test-g6-buildkit-cache.sh
       - name: Generate contract outputs
         run: scripts/generate.sh
