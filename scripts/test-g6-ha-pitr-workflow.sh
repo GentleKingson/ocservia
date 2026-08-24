@@ -118,7 +118,7 @@ RUBY
 
 # Script-level timing telemetry must stay non-authoritative: the helpers no-op
 # without the workflow-provided file, metadata calls log and swallow failures,
-# and the run wrapper returns only the wrapped phase's exit status.
+# and the run wrapper never changes how a phase executes.
 grep -q "g6_ha_timing()" "${LIB}" || {
   echo "the shared lib must define the timing shim" >&2
   exit 1
@@ -131,6 +131,10 @@ grep -q "g6_ha_timing_record_images()" "${LIB}" || {
   echo "the shared lib must define the image recorder" >&2
   exit 1
 }
+grep -q "g6_ha_timing_record_storage_footprints()" "${LIB}" || {
+  echo "the shared lib must define the storage footprint recorder" >&2
+  exit 1
+}
 grep -qF '[[ -n "${G6HA_TIMING_FILE:-}" ]] || return 0' "${LIB}" || {
   echo "timing helpers must no-op without the workflow timing file" >&2
   exit 1
@@ -139,10 +143,21 @@ grep -qF '>>"${G6HA_LOGS}/timing.log" 2>&1 || true' "${LIB}" || {
   echo "timing metadata calls must never fail a phase" >&2
   exit 1
 }
-grep -qF 'return "${status}"' "${LIB}" || {
-  echo "the timed phase wrapper must return the wrapped phase status" >&2
+if grep -qF '|| status=$?' "${LIB}"; then
+  echo "the timed phase wrapper must not run a phase in a condition context:" >&2
+  echo "errexit is suppressed for the whole phase body, so a mid-phase failure would keep executing and could still return success" >&2
   exit 1
-}
+fi
+images_body="$(sed -n '/^g6_ha_timing_record_images()/,/^}/p' "${LIB}")"
+if grep -q 'wal_archive_bytes\|basebackup_bytes' <<<"${images_body}"; then
+  echo "image recording must not sample storage footprints: the trees are empty before the scenario runs" >&2
+  exit 1
+fi
+if ! grep -q 'g6_ha_timing_record_storage_footprints' \
+  <<<"$(sed -n '/^g6_ha_diagnostics()/,/^}/p' "${LIB}")"; then
+  echo "storage footprints must be sampled during diagnostics, after the scenario and before cleanup" >&2
+  exit 1
+fi
 fd_a_stages="prepare compose_image_build control_plane_build transportd_build \
 tunnel_build tunnel_up primary_bootstrap basebackup pitr_restore failover \
 post_promotion_probes recover_roles rejoin"
@@ -167,6 +182,45 @@ for fd_script in "${FD_A}" "${FD_B}"; do
     exit 1
   }
 done
+
+# The wrapper's fail-fast semantics are executed, not just grepped: a timed
+# phase running in a || context would keep executing after a mid-phase
+# failure (errexit is suppressed for the whole callee body) and could still
+# return success. The child shell must die at the failing command, never
+# reach the marker write, and must have entered the timed stage first.
+test_timing_run_preserves_fail_fast() (
+  local temporary child
+  temporary="$(mktemp -d)"
+  trap 'rm -rf "${temporary}"' EXIT INT TERM
+  mkdir -p "${temporary}/logs"
+  child="${temporary}/child.sh"
+  cat >"${child}" <<CHILD
+set -Eeuo pipefail
+source "${LIB}"
+G6HA_ROOT="${ROOT}"
+G6HA_TIMING_FILE="${temporary}/timing.json"
+G6HA_LOGS="${temporary}/logs"
+failing_phase() {
+  false
+  touch "${temporary}/must-not-exist"
+}
+g6_ha_timing_run regression_stage failing_phase
+CHILD
+  if bash "${child}" >"${temporary}/child.log" 2>&1; then
+    echo "a mid-phase failure must fail the phase shell" >&2
+    return 1
+  fi
+  if [[ -e "${temporary}/must-not-exist" ]]; then
+    echo "execution continued past a failed command inside a timed phase" >&2
+    return 1
+  fi
+  if ! grep -q 'regression_stage' "${temporary}/timing.json.tsv" 2>/dev/null; then
+    echo "the regression child never reached the timed phase:" >&2
+    cat "${temporary}/child.log" >&2
+    return 1
+  fi
+)
+test_timing_run_preserves_fail_fast
 
 # Secret export is exercised, not just grepped: every missing or zero-byte
 # cluster credential must fail both the reader and the aggregate export. A
