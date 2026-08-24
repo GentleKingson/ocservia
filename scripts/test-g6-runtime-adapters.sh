@@ -176,7 +176,15 @@ jobs.each do |job_id, job|
         !%w[./.github/actions/g6-checkpoint-upload ./.github/actions/g6-install-release ./.github/actions/g6-cache-credentials].include?(step.fetch("uses"))
     end
   reject("#{job_id} must not force a failing check green") if Array(job.fetch("steps")).any? { |step| step.key?("run") && step.fetch("run").include?("continue-on-error") }
-  reject("#{job_id} must not mask a failed step") if Array(job.fetch("steps")).any? { |step| step["continue-on-error"] == true }
+  # Failure masking stays forbidden for every authoritative step. The only
+  # exemption is the pure telemetry upload: an artifact-service failure in a
+  # g6-timing-* diagnostics upload must not fail a job whose scan result and
+  # evidence are already published; anything else masking a step is rejected.
+  reject("#{job_id} must not mask a failed step") if Array(job.fetch("steps")).any? do |step|
+    step["continue-on-error"] == true &&
+      !(step["uses"].to_s.start_with?("actions/upload-artifact@") &&
+        step.fetch("with", {}).fetch("name", "").include?("g6-timing-"))
+  end
   Array(job.fetch("steps")).each do |step|
     next unless step["uses"].to_s.start_with?("actions/upload-artifact")
     rendered = step.fetch("with", {}).fetch("name", "")

@@ -8,7 +8,7 @@ CHECKSUMS="${ROOT}/scripts/checksums.txt"
 PROFILE="${1:-}"
 
 if (($# > 1)); then
-  echo "usage: $0 [all|ci-quality|contracts|g6-runtime|go-test|go-quality|go-rust-integration|rust-validation|native|web|security]" >&2
+  echo "usage: $0 [all|ci-quality|contracts|g6-runtime|g6-secret-scan|go-test|go-quality|go-rust-integration|rust-validation|native|web|security]" >&2
   exit 2
 fi
 
@@ -21,7 +21,7 @@ if [[ -z "${PROFILE}" ]]; then
 fi
 
 case "${PROFILE}" in
-  all | ci-quality | contracts | g6-runtime | go-test | go-quality | go-rust-integration | rust-validation | native | web | security) ;;
+  all | ci-quality | contracts | g6-runtime | g6-secret-scan | go-test | go-quality | go-rust-integration | rust-validation | native | web | security) ;;
   *)
     echo "unsupported bootstrap profile: ${PROFILE}" >&2
     exit 2
@@ -382,6 +382,11 @@ case "${PROFILE}" in
     install_node
     install_npm
     install_g6_runtime_dependencies
+    ;;
+  g6-secret-scan)
+    install_gitleaks
+    verify_host_command jq
+    verify_host_command openssl
     ;;
   go-test)
     install_go
