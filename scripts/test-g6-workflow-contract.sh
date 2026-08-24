@@ -65,6 +65,156 @@ if [[ "${image_mark_count}" -ne 10 ]]; then
 fi
 grep -qF 'g6-timing.sh image' "${ROOT}/.github/workflows/g6-harness-core.yml" \
   || { echo "release producers must record per-image size and image ID" >&2; exit 1; }
+
+# Persistent BuildKit caches: both release producers must run a
+# run-scoped docker-container builder, split caches across the three
+# disjoint lane scopes, export only the heavyweight builds with mode=max,
+# tolerate cache export failures, rebuild mutable runtime package stages, load
+# every tagged build into the local store for freezing, and remove the builder
+# in the always-cleanup step. Cache credentials are optional, so a cold build
+# must remain possible when the runner does not provide them.
+ruby -r yaml - "${ROOT}/.github/workflows/g6-harness-core.yml" <<'RUBY'
+core = YAML.safe_load(File.read(ARGV[0]), aliases: true)
+jobs = core.fetch("jobs")
+%w[g6-rd-release-image g6-smoke-release].each do |job_id|
+  steps = Array(jobs.fetch(job_id).fetch("steps"))
+  prep = steps.find { |step| step["name"] == "Prepare the BuildKit cache builder" }
+  relay = steps.find { |step| step["name"] == "Relay Actions cache credentials to the job environment" }
+  freeze = steps.find do |step|
+    run = step.fetch("run", "")
+    run.include?("candidate_docker_image_build") && run.include?("scripts/g6-buildx-cache.sh")
+  end
+  cleanup = steps.find { |step| step["name"].to_s.start_with?("Clean ") }
+  next abort("#{job_id} must prepare the BuildKit cache builder before freezing") unless
+    prep && relay && freeze && steps.index(relay) < steps.index(prep) &&
+    steps.index(prep) < steps.index(freeze) && cleanup
+  relay_uses = relay.fetch("uses", "")
+  next abort("#{job_id} must relay cache credentials via the repo-owned action") unless
+    relay_uses == "./.github/actions/g6-cache-credentials"
+  prep_run = prep.fetch("run")
+  ["--driver docker-container", "--bootstrap", "--use",
+   'image=moby/buildkit:v0.32.2@sha256:28a898719c18a33f4e8000685287fa36fd0dd9560c6440227d3a732d79bb41d8',
+   'g6-buildx-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}',
+   'G6_CACHE_AVAILABLE', 'buildx_driver_opts=()'].each do |token|
+    next abort("#{job_id} builder preparation is missing #{token}") unless prep_run.include?(token)
+  end
+  abort("#{job_id} must not require cache credentials for a cold build") if
+    prep_run.include?("ACTIONS_RUNTIME_TOKEN:?")
+  cleanup_run = cleanup.fetch("run")
+  ['docker buildx rm', 'docker buildx inspect',
+   'g6-buildx-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}'].each do |token|
+    next abort("#{job_id} cleanup is missing #{token}") unless cleanup_run.include?(token)
+  end
+
+  logical = []
+  freeze.fetch("run").each_line do |line|
+    line = line.chomp
+    if !logical.empty? && logical.last.end_with?("\\")
+      logical[-1] = "#{logical.last.chomp('\\').rstrip} #{line.strip}"
+    else
+      logical << line
+    end
+  end
+  # The plain `docker build` alias always resolves to the default
+  # docker-driver builder and silently ignores the selected docker-container
+  # builder and its cache flags; release builds must go through
+  # `docker buildx build` bound to the run-scoped builder.
+  next abort("#{job_id} must not use the plain docker build alias") if
+    freeze.fetch("run").match?(/docker build(?!x)[[:space:]]/)
+  job_env = jobs.fetch(job_id).fetch("env", {})
+  step_env = freeze.fetch("env", {})
+  next abort("#{job_id} must pin BUILDX_BUILDER to the run-scoped builder") unless
+    job_env.fetch("BUILDX_BUILDER", step_env.fetch("BUILDX_BUILDER", nil)) ==
+    "g6-buildx-${{ github.run_id }}-${{ github.run_attempt }}"
+  builds = logical.select { |line| line.include?("scripts/g6-buildx-cache.sh ") }
+  abort("#{job_id} must keep the six lane builds plus the tunnel export (found #{builds.length})") unless builds.length == 7
+  builds.each do |build|
+    file = build[/--file (\S+)/, 1]
+    abort("#{job_id} build is missing a Dockerfile") unless file
+    if build.include?("--tag")
+      ["--load", '--label "org.opencontainers.image.revision=${GITHUB_SHA}"'].each do |token|
+        next abort("#{job_id} tagged builds must stay inspectable and candidate-labeled (#{token})") unless build.include?(token)
+      end
+    end
+    next if build.include?("--target g6-tunnel-artifact")
+    abort("#{job_id} #{file} build must use the shared cache fallback helper") unless
+      build.include?("scripts/g6-buildx-cache.sh ")
+  end
+  cache_calls = freeze.fetch("run").scan(/scripts\/g6-buildx-cache\.sh\s+(g6-[a-z-]+)\s+(true|false)/)
+  expected_calls = [
+    ["g6-control-plane", "true"],
+    ["g6-relay", "true"],
+    ["g6-rust-runtime", "true"],
+    ["g6-rust-runtime", "false"],
+    ["g6-rust-runtime", "false"],
+    ["g6-rust-runtime", "false"],
+    ["g6-rust-runtime", "false"],
+  ]
+  abort("#{job_id} cache lanes drifted") unless cache_calls == expected_calls
+  abort("#{job_id} cache helper must be present in every release build") unless
+    freeze.fetch("run").include?("scripts/g6-buildx-cache.sh")
+  abort("#{job_id} control-plane runtime packages must not come from the external cache") unless
+    builds.any? { |build| build.include?("--file control-plane/Dockerfile") && build.include?("--no-cache-filter runtime-base") }
+  abort("#{job_id} relay runtime packages must not come from the external cache") unless
+    builds.any? { |build| build.include?("--file deploy/production/relay.Dockerfile") && build.include?("--no-cache-filter relay-runtime") }
+  tunnel = builds.find { |b| b.include?("--target g6-tunnel-artifact") }
+  abort("#{job_id} tunnel export must stay a local output export with rust cache import") unless
+    tunnel&.include?('--output "type=local,dest=${tunnel_output}"') &&
+    tunnel.include?("scripts/g6-buildx-cache.sh") &&
+    !tunnel.include?("--cache-to")
+end
+RUBY
+cache_helper="${ROOT}/scripts/g6-buildx-cache.sh"
+test -x "${cache_helper}" || { echo "G6 cache fallback helper must be executable" >&2; exit 1; }
+for cache_token in \
+  "docker buildx build \"\${cache_args[@]}\" \"\$@\"" \
+  "docker buildx build \"\$@\"" \
+  'cache_timeout=60s' '--cache-from' '--cache-to' \
+  'mode=max,ignore-error=true' 'PIPESTATUS[0]' \
+  'failure_marker=' 'retrying once without external cache'; do
+  grep -qF -- "${cache_token}" "${cache_helper}" \
+    || { echo "G6 cache fallback helper is missing ${cache_token}" >&2; exit 1; }
+done
+builder_count="$(grep -cF 'docker buildx create' "${ROOT}/.github/workflows/g6-harness-core.yml")"
+if [[ "${builder_count}" -ne 2 ]]; then
+  echo "both release producers must create exactly one run-scoped buildx builder (found ${builder_count})" >&2
+  exit 1
+fi
+# The credential relay must stay best-effort and must never log values.
+for relay_token in 'ACTIONS_RUNTIME_TOKEN' 'ACTIONS_RESULTS_URL' 'G6_CACHE_AVAILABLE' 'process.exit(0)'; do
+  grep -qF "${relay_token}" "${ROOT}/.github/actions/g6-cache-credentials/index.js" \
+    || { echo "the cache credential relay is missing ${relay_token}" >&2; exit 1; }
+done
+if grep -qF 'process.exit(1)' "${ROOT}/.github/actions/g6-cache-credentials/index.js"; then
+  echo "the cache credential relay must not fail a build when credentials are unavailable" >&2
+  exit 1
+fi
+grep -qF 'using: node24' "${ROOT}/.github/actions/g6-cache-credentials/action.yml" \
+  || { echo "the cache credential relay must use the node24 action runtime" >&2; exit 1; }
+if grep -nE 'console\.(log|error|info)\(.*value' "${ROOT}/.github/actions/g6-cache-credentials/index.js" \
+  | grep -qv 'relayed'; then
+  echo "the cache credential relay must not log credential values" >&2
+  exit 1
+fi
+for scope_counts in 'g6-rust-runtime:10' 'g6-control-plane:2' 'g6-relay:2'; do
+  scope="${scope_counts%%:*}"
+  expected="${scope_counts##*:}"
+  actual="$(grep -oF "scripts/g6-buildx-cache.sh ${scope}" "${ROOT}/.github/workflows/g6-harness-core.yml" | wc -l | tr -d ' ')"
+  if [[ "${actual}" -ne "${expected}" ]]; then
+    echo "cache scope ${scope} must appear exactly ${expected} times (found ${actual})" >&2
+    exit 1
+  fi
+done
+if [[ "$(grep -oF -- 'scripts/g6-buildx-cache.sh ' "${ROOT}/.github/workflows/g6-harness-core.yml" | wc -l | tr -d ' ')" -ne 14 ]] \
+  || [[ "$(grep -oF 'image=moby/buildkit:v0.32.2@sha256:28a898719c18a33f4e8000685287fa36fd0dd9560c6440227d3a732d79bb41d8' "${ROOT}/.github/workflows/g6-harness-core.yml" | wc -l | tr -d ' ')" -ne 2 ]] \
+  || [[ "$(grep -oF -- '--load' "${ROOT}/.github/workflows/g6-harness-core.yml" | wc -l | tr -d ' ')" -ne 10 ]] \
+  || [[ "$(grep -cF 'docker buildx rm' "${ROOT}/.github/workflows/g6-harness-core.yml")" -ne 2 ]] \
+  || [[ "$(grep -cF 'buildx_builder_prepare' "${ROOT}/.github/workflows/g6-harness-core.yml")" -ne 4 ]] \
+  || [[ "$(grep -cF -- '--no-cache-filter runtime-base' "${ROOT}/.github/workflows/g6-harness-core.yml")" -ne 2 ]] \
+  || [[ "$(grep -cF -- '--no-cache-filter relay-runtime' "${ROOT}/.github/workflows/g6-harness-core.yml")" -ne 2 ]]; then
+  echo "BuildKit cache flags drifted from the pinned release graph" >&2
+  exit 1
+fi
 summary_count="$(grep -cF 'scripts/g6-timing.sh summary' "${ROOT}/.github/workflows/g6-harness-core.yml")"
 if [[ "${summary_count}" -ne 6 ]]; then
   echo "every G6 release and failure domain job must write a timing step summary (expected 6, found ${summary_count})" >&2
@@ -79,7 +229,8 @@ grep -qF 'GITHUB_STEP_SUMMARY' "${TIMING_HELPER}" \
   || { echo "G6 timing helper must write the step summary" >&2; exit 1; }
 grep -qF 'rendezvous-dir' "${TIMING_HELPER}" \
   || { echo "G6 timing helper must aggregate rendezvous waits" >&2; exit 1; }
-if [[ "$(grep -cF 'rendezvous-dir "${timing}"' "${ROOT}/.github/workflows/g6-harness-core.yml")" -ne 4 ]]; then
+rendezvous_marker="rendezvous-dir \"\${timing}\""
+if [[ "$(grep -cF "${rendezvous_marker}" "${ROOT}/.github/workflows/g6-harness-core.yml")" -ne 4 ]]; then
   echo "every G6 failure domain must record rendezvous timing diagnostics" >&2
   exit 1
 fi

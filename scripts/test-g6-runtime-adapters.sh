@@ -173,7 +173,7 @@ jobs.each do |job_id, job|
     Array(job.fetch("steps")).any? do |step|
       step.key?("uses") &&
         !step.fetch("uses").match?(/@[0-9a-f]{40}\z/) &&
-        !%w[./.github/actions/g6-checkpoint-upload ./.github/actions/g6-install-release].include?(step.fetch("uses"))
+        !%w[./.github/actions/g6-checkpoint-upload ./.github/actions/g6-install-release ./.github/actions/g6-cache-credentials].include?(step.fetch("uses"))
     end
   reject("#{job_id} must not force a failing check green") if Array(job.fetch("steps")).any? { |step| step.key?("run") && step.fetch("run").include?("continue-on-error") }
   reject("#{job_id} must not mask a failed step") if Array(job.fetch("steps")).any? { |step| step["continue-on-error"] == true }
