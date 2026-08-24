@@ -108,9 +108,9 @@ jobs:
         # token and URLs, but the runner injects those only into action
         # processes — plain run steps never see them (actions/runner#4325
         # is still open). This repo-owned relay action copies them into
-        # the job environment for the builder preparation below and fails
-        # closed when the token is missing, so cache persistence can never
-        # silently degrade into full recompiles.
+        # the job environment for the builder preparation below. If the
+        # credentials are unavailable, the build deliberately falls back to
+        # the local BuildKit cache and continues without the GHA backend.
         uses: ./.github/actions/g6-cache-credentials
       - name: Prepare the BuildKit cache builder
         run: |
@@ -123,18 +123,20 @@ jobs:
           # exact candidate below, and both failure domains still verify the
           # frozen release independently.
           # The buildkitd container does not inherit the runner's Actions
-          # cache credentials, so forward them explicitly — the same
-          # plumbing docker/setup-buildx-action performs — and fail closed
-          # when they are absent instead of silently skipping every cache
-          # export (a missing export would silently revert every later run
-          # to full recompiles).
-          : "${ACTIONS_RUNTIME_TOKEN:?GitHub Actions cache token is required for BuildKit cache persistence}"
-          buildx_driver_opts=(--driver-opt "env.ACTIONS_RUNTIME_TOKEN=${ACTIONS_RUNTIME_TOKEN}")
-          if [[ -n "${ACTIONS_CACHE_URL:-}" ]]; then
-            buildx_driver_opts+=(--driver-opt "env.ACTIONS_CACHE_URL=${ACTIONS_CACHE_URL}")
-          fi
-          if [[ -n "${ACTIONS_RESULTS_URL:-}" ]]; then
-            buildx_driver_opts+=(--driver-opt "env.ACTIONS_RESULTS_URL=${ACTIONS_RESULTS_URL}")
+          # cache credentials, so forward them explicitly when available.
+          # The external cache is never authoritative: a missing token or
+          # URL only disables the GHA cache flags and leaves a cold build.
+          buildx_driver_opts=()
+          if [[ "${G6_CACHE_AVAILABLE:-false}" == true ]]; then
+            buildx_driver_opts+=(--driver-opt "env.ACTIONS_RUNTIME_TOKEN=${ACTIONS_RUNTIME_TOKEN}")
+            if [[ -n "${ACTIONS_CACHE_URL:-}" ]]; then
+              buildx_driver_opts+=(--driver-opt "env.ACTIONS_CACHE_URL=${ACTIONS_CACHE_URL}")
+            fi
+            if [[ -n "${ACTIONS_RESULTS_URL:-}" ]]; then
+              buildx_driver_opts+=(--driver-opt "env.ACTIONS_RESULTS_URL=${ACTIONS_RESULTS_URL}")
+            fi
+          else
+            echo "::warning::GitHub Actions cache credentials unavailable; running a cold BuildKit solve"
           fi
           docker buildx create \
             --driver docker-container \
@@ -166,56 +168,72 @@ jobs:
           # target cache, so dependency features never unify across
           # partitions — and every first-party Rust image then only assembles
           # from those frozen layers.
+          g6_cache_args() {
+            local scope="$1"
+            local export_cache="$2"
+            G6_CACHE_ARGS=()
+            if [[ "${G6_CACHE_AVAILABLE:-false}" == true ]]; then
+              G6_CACHE_ARGS+=(--cache-from "type=gha,scope=${scope},version=2")
+              if [[ "${export_cache}" == true ]]; then
+                G6_CACHE_ARGS+=(--cache-to "type=gha,scope=${scope},mode=max,ignore-error=true,version=2")
+              fi
+            fi
+          }
           build_pids=()
           (
+            g6_cache_args g6-control-plane true
             scripts/g6-timing.sh measure "${timing}" control_plane_build -- \
               docker buildx build --pull=false \
                 --label "org.opencontainers.image.revision=${GITHUB_SHA}" \
-                --cache-from type=gha,scope=g6-control-plane,version=2 \
-                --cache-to type=gha,scope=g6-control-plane,mode=max,version=2 \
+                --no-cache-filter runtime-base \
+                "${G6_CACHE_ARGS[@]}" \
                 --load \
                 --file control-plane/Dockerfile \
                 --tag "${G6RD_CONTROL_PLANE_IMAGE}" .
           ) &
           build_pids+=("$!")
           (
+            g6_cache_args g6-relay true
             scripts/g6-timing.sh measure "${timing}" relay_build -- \
               docker buildx build --pull=false \
                 --label "org.opencontainers.image.revision=${GITHUB_SHA}" \
-                --cache-from type=gha,scope=g6-relay,version=2 \
-                --cache-to type=gha,scope=g6-relay,mode=max,version=2 \
+                --no-cache-filter relay-runtime \
+                "${G6_CACHE_ARGS[@]}" \
                 --load \
                 --file deploy/production/relay.Dockerfile \
                 --tag "${G6RD_RELAY_IMAGE}" .
           ) &
           build_pids+=("$!")
           (
+            g6_cache_args g6-rust-runtime true
             scripts/g6-timing.sh measure "${timing}" rust_workspace_build -- \
               docker buildx build --pull=false \
-                --cache-from type=gha,scope=g6-rust-runtime,version=2 \
-                --cache-to type=gha,scope=g6-rust-runtime,mode=max,version=2 \
+                "${G6_CACHE_ARGS[@]}" \
                 --file rust/g6-runtime.Dockerfile \
                 --target g6-rust-builder .
+            g6_cache_args g6-rust-runtime false
             scripts/g6-timing.sh measure "${timing}" transportd_build -- \
               docker buildx build --pull=false \
                 --label "org.opencontainers.image.revision=${GITHUB_SHA}" \
-                --cache-from type=gha,scope=g6-rust-runtime,version=2 \
+                "${G6_CACHE_ARGS[@]}" \
                 --load \
                 --file rust/g6-runtime.Dockerfile \
                 --target transportd-runtime \
                 --tag "${G6RD_TRANSPORTD_IMAGE}" .
+            g6_cache_args g6-rust-runtime false
             scripts/g6-timing.sh measure "${timing}" g6_probe_build -- \
               docker buildx build --pull=false \
                 --label "org.opencontainers.image.revision=${GITHUB_SHA}" \
-                --cache-from type=gha,scope=g6-rust-runtime,version=2 \
+                "${G6_CACHE_ARGS[@]}" \
                 --load \
                 --file rust/g6-runtime.Dockerfile \
                 --target g6-probe-runtime \
                 --tag "${G6RD_PROBE_IMAGE}" .
+            g6_cache_args g6-rust-runtime false
             scripts/g6-timing.sh measure "${timing}" g6_agent_build -- \
               docker buildx build --pull=false \
                 --label "org.opencontainers.image.revision=${GITHUB_SHA}" \
-                --cache-from type=gha,scope=g6-rust-runtime,version=2 \
+                "${G6_CACHE_ARGS[@]}" \
                 --load \
                 --file rust/g6-runtime.Dockerfile \
                 --target g6-agent-runtime \
@@ -240,8 +258,9 @@ jobs:
           # Export the tunnel from the shared builder's content-addressed
           # BuildKit stage; this reuses the compiled layer and does not
           # rebuild anything on either failure domain.
+          g6_cache_args g6-rust-runtime false
           docker buildx build --pull=false \
-            --cache-from type=gha,scope=g6-rust-runtime,version=2 \
+            "${G6_CACHE_ARGS[@]}" \
             --file rust/g6-runtime.Dockerfile \
             --target g6-tunnel-artifact \
             --output "type=local,dest=${tunnel_output}" .
@@ -1489,9 +1508,9 @@ jobs:
         # token and URLs, but the runner injects those only into action
         # processes — plain run steps never see them (actions/runner#4325
         # is still open). This repo-owned relay action copies them into
-        # the job environment for the builder preparation below and fails
-        # closed when the token is missing, so cache persistence can never
-        # silently degrade into full recompiles.
+        # the job environment for the builder preparation below. If the
+        # credentials are unavailable, the build deliberately falls back to
+        # the local BuildKit cache and continues without the GHA backend.
         uses: ./.github/actions/g6-cache-credentials
       - name: Prepare the BuildKit cache builder
         run: |
@@ -1504,18 +1523,20 @@ jobs:
           # exact candidate below, and both failure domains still verify the
           # frozen release independently.
           # The buildkitd container does not inherit the runner's Actions
-          # cache credentials, so forward them explicitly — the same
-          # plumbing docker/setup-buildx-action performs — and fail closed
-          # when they are absent instead of silently skipping every cache
-          # export (a missing export would silently revert every later run
-          # to full recompiles).
-          : "${ACTIONS_RUNTIME_TOKEN:?GitHub Actions cache token is required for BuildKit cache persistence}"
-          buildx_driver_opts=(--driver-opt "env.ACTIONS_RUNTIME_TOKEN=${ACTIONS_RUNTIME_TOKEN}")
-          if [[ -n "${ACTIONS_CACHE_URL:-}" ]]; then
-            buildx_driver_opts+=(--driver-opt "env.ACTIONS_CACHE_URL=${ACTIONS_CACHE_URL}")
-          fi
-          if [[ -n "${ACTIONS_RESULTS_URL:-}" ]]; then
-            buildx_driver_opts+=(--driver-opt "env.ACTIONS_RESULTS_URL=${ACTIONS_RESULTS_URL}")
+          # cache credentials, so forward them explicitly when available.
+          # The external cache is never authoritative: a missing token or
+          # URL only disables the GHA cache flags and leaves a cold build.
+          buildx_driver_opts=()
+          if [[ "${G6_CACHE_AVAILABLE:-false}" == true ]]; then
+            buildx_driver_opts+=(--driver-opt "env.ACTIONS_RUNTIME_TOKEN=${ACTIONS_RUNTIME_TOKEN}")
+            if [[ -n "${ACTIONS_CACHE_URL:-}" ]]; then
+              buildx_driver_opts+=(--driver-opt "env.ACTIONS_CACHE_URL=${ACTIONS_CACHE_URL}")
+            fi
+            if [[ -n "${ACTIONS_RESULTS_URL:-}" ]]; then
+              buildx_driver_opts+=(--driver-opt "env.ACTIONS_RESULTS_URL=${ACTIONS_RESULTS_URL}")
+            fi
+          else
+            echo "::warning::GitHub Actions cache credentials unavailable; running a cold BuildKit solve"
           fi
           docker buildx create \
             --driver docker-container \
@@ -1552,26 +1573,67 @@ jobs:
           # Rust builder, whose three-partition compile keeps the original
           # per-package feature resolution and whose frozen layers assemble
           # every first-party Rust image.
+          g6_cache_args() {
+            local scope="$1"
+            local export_cache="$2"
+            G6_CACHE_ARGS=()
+            if [[ "${G6_CACHE_AVAILABLE:-false}" == true ]]; then
+              G6_CACHE_ARGS+=(--cache-from "type=gha,scope=${scope},version=2")
+              if [[ "${export_cache}" == true ]]; then
+                G6_CACHE_ARGS+=(--cache-to "type=gha,scope=${scope},mode=max,ignore-error=true,version=2")
+              fi
+            fi
+          }
           build_pids=()
           (
+            g6_cache_args g6-control-plane true
             scripts/g6-timing.sh measure "${timing}" control_plane_build -- \
-              docker buildx build --pull=false --label "org.opencontainers.image.revision=${GITHUB_SHA}" --cache-from type=gha,scope=g6-control-plane,version=2 --cache-to type=gha,scope=g6-control-plane,mode=max,version=2 --load --file control-plane/Dockerfile --tag "${G6RD_CONTROL_PLANE_IMAGE}" .
+              docker buildx build --pull=false \
+                --label "org.opencontainers.image.revision=${GITHUB_SHA}" \
+                --no-cache-filter runtime-base \
+                "${G6_CACHE_ARGS[@]}" \
+                --load --file control-plane/Dockerfile \
+                --tag "${G6RD_CONTROL_PLANE_IMAGE}" .
           ) &
           build_pids+=("$!")
           (
+            g6_cache_args g6-relay true
             scripts/g6-timing.sh measure "${timing}" relay_build -- \
-              docker buildx build --pull=false --label "org.opencontainers.image.revision=${GITHUB_SHA}" --cache-from type=gha,scope=g6-relay,version=2 --cache-to type=gha,scope=g6-relay,mode=max,version=2 --load --file deploy/production/relay.Dockerfile --tag "${G6RD_RELAY_IMAGE}" .
+              docker buildx build --pull=false \
+                --label "org.opencontainers.image.revision=${GITHUB_SHA}" \
+                --no-cache-filter relay-runtime \
+                "${G6_CACHE_ARGS[@]}" \
+                --load --file deploy/production/relay.Dockerfile \
+                --tag "${G6RD_RELAY_IMAGE}" .
           ) &
           build_pids+=("$!")
           (
+            g6_cache_args g6-rust-runtime true
             scripts/g6-timing.sh measure "${timing}" rust_workspace_build -- \
-              docker buildx build --pull=false --cache-from type=gha,scope=g6-rust-runtime,version=2 --cache-to type=gha,scope=g6-rust-runtime,mode=max,version=2 --file rust/g6-runtime.Dockerfile --target g6-rust-builder .
+              docker buildx build --pull=false \
+                "${G6_CACHE_ARGS[@]}" \
+                --file rust/g6-runtime.Dockerfile --target g6-rust-builder .
+            g6_cache_args g6-rust-runtime false
             scripts/g6-timing.sh measure "${timing}" transportd_build -- \
-              docker buildx build --pull=false --label "org.opencontainers.image.revision=${GITHUB_SHA}" --cache-from type=gha,scope=g6-rust-runtime,version=2 --load --file rust/g6-runtime.Dockerfile --target transportd-runtime --tag "${G6RD_TRANSPORTD_IMAGE}" .
+              docker buildx build --pull=false \
+                --label "org.opencontainers.image.revision=${GITHUB_SHA}" \
+                "${G6_CACHE_ARGS[@]}" \
+                --load --file rust/g6-runtime.Dockerfile \
+                --target transportd-runtime --tag "${G6RD_TRANSPORTD_IMAGE}" .
+            g6_cache_args g6-rust-runtime false
             scripts/g6-timing.sh measure "${timing}" g6_probe_build -- \
-              docker buildx build --pull=false --label "org.opencontainers.image.revision=${GITHUB_SHA}" --cache-from type=gha,scope=g6-rust-runtime,version=2 --load --file rust/g6-runtime.Dockerfile --target g6-probe-runtime --tag "${G6RD_PROBE_IMAGE}" .
+              docker buildx build --pull=false \
+                --label "org.opencontainers.image.revision=${GITHUB_SHA}" \
+                "${G6_CACHE_ARGS[@]}" \
+                --load --file rust/g6-runtime.Dockerfile \
+                --target g6-probe-runtime --tag "${G6RD_PROBE_IMAGE}" .
+            g6_cache_args g6-rust-runtime false
             scripts/g6-timing.sh measure "${timing}" g6_agent_build -- \
-              docker buildx build --pull=false --label "org.opencontainers.image.revision=${GITHUB_SHA}" --cache-from type=gha,scope=g6-rust-runtime,version=2 --load --file rust/g6-runtime.Dockerfile --target g6-agent-runtime --tag "${G6RD_AGENT_IMAGE}" .
+              docker buildx build --pull=false \
+                --label "org.opencontainers.image.revision=${GITHUB_SHA}" \
+                "${G6_CACHE_ARGS[@]}" \
+                --load --file rust/g6-runtime.Dockerfile \
+                --target g6-agent-runtime --tag "${G6RD_AGENT_IMAGE}" .
           ) &
           build_pids+=("$!")
           build_status=0
@@ -1585,7 +1647,12 @@ jobs:
           record_image_timing g6_agent "${G6RD_AGENT_IMAGE}"
           scripts/g6-timing.sh start "${timing}" helper_harness_tunnel_build
           tunnel_output="${output}/tunnel-output"
-          docker buildx build --pull=false --cache-from type=gha,scope=g6-rust-runtime,version=2 --file rust/g6-runtime.Dockerfile --target g6-tunnel-artifact --output "type=local,dest=${tunnel_output}" .
+          g6_cache_args g6-rust-runtime false
+          docker buildx build --pull=false \
+            "${G6_CACHE_ARGS[@]}" \
+            --file rust/g6-runtime.Dockerfile \
+            --target g6-tunnel-artifact \
+            --output "type=local,dest=${tunnel_output}" .
           install -m 0755 "${tunnel_output}/ocservia-g6-tunnel" "${output}/ocservia-g6-tunnel"
           rm -rf -- "${tunnel_output}"
           source scripts/env.sh

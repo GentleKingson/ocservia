@@ -3,9 +3,9 @@ description: >-
   Relay the runner-provided Actions cache-service credentials from the
   action process environment into the job environment so BuildKit's gha
   cache backend can use them. The runner injects these variables only
-  into action processes; plain run steps never see them. Fails closed
-  when the runtime token is missing so cache persistence can never
-  silently degrade into full recompiles.
+  into action processes; plain run steps never see them. Cache credentials
+  are optional: when they are unavailable, the caller skips the external
+  cache and performs a normal cold build.
 runs:
-  using: node20
+  using: node24
   main: index.js
