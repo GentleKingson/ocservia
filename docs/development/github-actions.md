@@ -90,7 +90,14 @@ then freeze evidence after a bounded observation. Separate Builder, gitleaks,
 and independent Verifier jobs feed `ocservia.g6-harness-smoke-result.v1`; the
 smoke never enters a formal Environment,
 produces a production-readiness verdict, or substitutes for the three required
-CI aggregators or a formal G6 run.
+CI aggregators or a formal G6 run. The secret-scan jobs on both profiles scan
+every published evidence layer with the same repository gitleaks configuration
+and bootstrap only the dedicated minimal `g6-secret-scan` profile; their
+bootstrap, evidence download, scan, and result-publication spans are recorded
+as non-authoritative timing diagnostics that never influence a verdict: every
+timing call is fail-open guarded at the call site, so a telemetry failure can
+neither skip nor fail the authoritative scan work. The minimal profile is
+small enough that it bootstraps cold every run with no tooling cache.
 
 The smoke caller always creates the same aggregate result check. Executable,
 workflow, deployment, and acceptance-contract changes run the complete hosted
@@ -117,6 +124,7 @@ exactly one explicit profile:
 | `rust-validation` | Rust, rustfmt, clippy, cargo-audit, cargo-deny, and sccache | Rust Validation |
 | `security` | Go, Node/npm, Rust, gitleaks, cargo-deny, sccache, and Web dependencies | Security and Licenses |
 | `native` | Rust and sccache | Native Ocserv |
+| `g6-secret-scan` | gitleaks and host `jq`/`openssl` | G6 Readiness Secret Scan; G6 Harness Smoke Secret Scan |
 
 Stage contracts, credential rotation, Local Slice, Browser E2E, and P1 Smoke
 use runner-provided tools or artifacts and do not call bootstrap. Outside

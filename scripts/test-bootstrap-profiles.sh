@@ -160,6 +160,7 @@ execution_profiles = {
 end
 {
   "g6-runtime" => ["install_node", "install_npm", "install_g6_runtime_dependencies"],
+  "g6-secret-scan" => ["install_gitleaks", "verify_host_command jq", "verify_host_command openssl"],
   "go-test" => ["install_go", "verify_host_command jq"],
   "go-quality" => ["install_go", "install_go_quality_tools", "verify_host_command jq"],
   "go-rust-integration" => [
