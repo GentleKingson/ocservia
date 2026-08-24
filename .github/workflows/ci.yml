@@ -576,6 +576,8 @@ jobs:
           scripts/test-g6-workflow-contract.sh
           scripts/test-g6-formal-authority.sh
           scripts/test-g6-release-identity.sh
+          scripts/test-g6-install-release.sh
+          scripts/test-g6-timing.sh
           scripts/test-g6-evidence-pipeline.sh
           scripts/test-g6-secret-scan-config.sh
           scripts/test-g6-runtime-adapters.sh

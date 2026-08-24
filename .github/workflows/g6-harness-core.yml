@@ -80,8 +80,16 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
+      - name: Initialize release timing diagnostics
+        run: >-
+          scripts/g6-timing.sh init
+          "${RUNNER_TEMP}/artifacts/timing/g6-rd-release.json"
+          g6-rd-release formal "${GITHUB_SHA}" "${GITHUB_RUN_ID}" "${GITHUB_RUN_ATTEMPT}"
       - name: Runner preflight
-        run: scripts/ci-preflight.sh
+        run: |
+          scripts/g6-timing.sh start "${RUNNER_TEMP}/artifacts/timing/g6-rd-release.json" runner_preparation
+          scripts/ci-preflight.sh
+          scripts/g6-timing.sh end "${RUNNER_TEMP}/artifacts/timing/g6-rd-release.json" runner_preparation || true
       - name: Restore verified release Go toolchain
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
@@ -90,7 +98,10 @@ jobs:
             .tools
           key: tooling-v4-g6-release-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'scripts/checksums.txt', 'scripts/bootstrap.sh', 'scripts/env.sh') }}
       - name: Bootstrap the pinned release Go toolchain
-        run: scripts/bootstrap.sh go-test
+        run: |
+          scripts/g6-timing.sh start "${RUNNER_TEMP}/artifacts/timing/g6-rd-release.json" toolchain_bootstrap
+          scripts/bootstrap.sh go-test
+          scripts/g6-timing.sh end "${RUNNER_TEMP}/artifacts/timing/g6-rd-release.json" toolchain_bootstrap || true
       - name: Build and freeze the release images
         id: release-build
         timeout-minutes: 30
@@ -98,6 +109,8 @@ jobs:
           set -euo pipefail
           archive_dir="${RUNNER_TEMP}/g6-rd-runtime-images-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           mkdir -p "${archive_dir}"
+          timing="${RUNNER_TEMP}/artifacts/timing/g6-rd-release.json"
+          scripts/g6-timing.sh start "${timing}" candidate_docker_image_build
           docker pull postgres:17.10-bookworm
           build_pids=()
           docker build --pull=false \
@@ -132,6 +145,8 @@ jobs:
             fi
           done
           test "${build_status}" -eq 0
+          scripts/g6-timing.sh end "${timing}" candidate_docker_image_build || true
+          scripts/g6-timing.sh start "${timing}" helper_harness_tunnel_build
           tunnel_output="${archive_dir}/tunnel-output"
           # Export the tunnel from the completed probe build's content-addressed
           # BuildKit stage; this does not rebuild it on either failure domain.
@@ -152,6 +167,7 @@ jobs:
             "${pinned_go}" build -trimpath \
             -o "${archive_dir}/ocservia-g6-harness" \
             ./tools/g6-harness/cmd/g6-harness
+          scripts/g6-timing.sh end "${timing}" helper_harness_tunnel_build || true
           printf 'candidate_sha\t%s\n' "${GITHUB_SHA}" \
             >"${archive_dir}/harness-manifest.tsv"
           printf 'go_version\t%s\n' "${actual_go}" \
@@ -178,8 +194,11 @@ jobs:
               "$(docker image inspect --format '{{.Id}}' "${image}")" \
               >>"${archive_dir}/image-ids.tsv"
           done
+          scripts/g6-timing.sh start "${timing}" docker_save_gzip
           docker save "${release_images[@]}" \
             | gzip -1 >"${archive_dir}/runtime-images.tar.gz"
+          scripts/g6-timing.sh end "${timing}" docker_save_gzip || true
+          scripts/g6-timing.sh artifact "${timing}" frozen_runtime_archive "${archive_dir}/runtime-images.tar.gz" || true
           (
             cd "${archive_dir}"
             sha256sum runtime-images.tar.gz image-ids.tsv \
@@ -189,6 +208,8 @@ jobs:
           printf 'release-manifest-digest=%s\n' \
             "$(sha256sum "${archive_dir}/release-artifacts.sha256" | awk '{print $1}')" \
             >>"${GITHUB_OUTPUT}"
+      - name: Start frozen release upload timing
+        run: scripts/g6-timing.sh start "${RUNNER_TEMP}/artifacts/timing/g6-rd-release.json" release_artifact_upload
       - name: Publish the frozen release images
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
@@ -197,6 +218,21 @@ jobs:
           if-no-files-found: error
           compression-level: 0
           retention-days: 1
+      - name: Record frozen release upload timing
+        if: always()
+        run: |
+          timing="${RUNNER_TEMP}/artifacts/timing/g6-rd-release.json"
+          scripts/g6-timing.sh end "${timing}" release_artifact_upload || true
+          scripts/g6-timing.sh artifact "${timing}" frozen_release_payload "${RUNNER_TEMP}/g6-rd-runtime-images-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}/runtime-images.tar.gz" || true
+          scripts/g6-timing.sh summary "${timing}" || true
+      - name: Upload release timing diagnostics
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: g6-timing-release-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/artifacts/timing/g6-rd-release.json
+          if-no-files-found: warn
+          retention-days: 5
       - name: Clean release-image resources
         if: always()
         timeout-minutes: 5
@@ -243,60 +279,30 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
+      - name: Initialize failure domain A timing diagnostics
+        run: >-
+          scripts/g6-timing.sh init
+          "${RUNNER_TEMP}/artifacts/timing/g6-rd-fd-a.json"
+          g6-rd-fd-a formal "${GITHUB_SHA}" "${GITHUB_RUN_ID}" "${GITHUB_RUN_ATTEMPT}"
       - name: Runner preflight
-        run: scripts/ci-preflight.sh
+        run: |
+          scripts/g6-timing.sh start "${RUNNER_TEMP}/artifacts/timing/g6-rd-fd-a.json" runner_preparation
+          scripts/ci-preflight.sh
+          scripts/g6-timing.sh end "${RUNNER_TEMP}/artifacts/timing/g6-rd-fd-a.json" runner_preparation || true
+      - name: Start frozen release download timing
+        run: scripts/g6-timing.sh start "${RUNNER_TEMP}/artifacts/timing/g6-rd-fd-a.json" fd_artifact_download
       - name: Download the frozen release images
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: g6-rd-runtime-images-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/g6-rd-runtime-images
+      - name: Finish frozen release download timing
+        run: scripts/g6-timing.sh end "${RUNNER_TEMP}/artifacts/timing/g6-rd-fd-a.json" fd_artifact_download || true
       - name: Verify and load the release images
-        run: |
-          set -euo pipefail
-          archive_dir="${RUNNER_TEMP}/g6-rd-runtime-images"
-          (
-            cd "${archive_dir}"
-            sha256sum --check release-artifacts.sha256
-          )
-          test "$(wc -l <"${archive_dir}/tunnel-manifest.tsv" | tr -d '[:space:]')" -eq 2
-          test "$(awk -F '\t' '$1 == "candidate_sha" { print $2 }' "${archive_dir}/tunnel-manifest.tsv")" = "${GITHUB_SHA}"
-          expected_tunnel_sha="$(awk -F '\t' '$1 == "ocservia-g6-tunnel" { print $2 }' "${archive_dir}/tunnel-manifest.tsv")"
-          [[ "${expected_tunnel_sha}" =~ ^[0-9a-f]{64}$ ]]
-          test "$(sha256sum "${archive_dir}/ocservia-g6-tunnel" | awk '{print $1}')" = "${expected_tunnel_sha}"
-          tunnel_bin="${RUNNER_TEMP}/g6-readiness-${RUN_ID}/bin/ocservia-g6-tunnel"
-          install -D -m 0755 "${archive_dir}/ocservia-g6-tunnel" "${tunnel_bin}"
-          install -m 0444 "${archive_dir}/tunnel-manifest.tsv" "$(dirname "${tunnel_bin}")/tunnel-manifest.tsv"
-          test -x "${tunnel_bin}"
-          test "$(wc -l <"${archive_dir}/harness-manifest.tsv" | tr -d '[:space:]')" -eq 3
-          test "$(awk -F '\t' '$1 == "candidate_sha" { print $2 }' "${archive_dir}/harness-manifest.tsv")" = "${GITHUB_SHA}"
-          test "$(awk -F '\t' '$1 == "go_version" { print $2 }' "${archive_dir}/harness-manifest.tsv")" = "go$(sed -n 's/^go=//p' toolchains.lock)"
-          expected_harness_sha="$(awk -F '\t' '$1 == "ocservia-g6-harness" { print $2 }' "${archive_dir}/harness-manifest.tsv")"
-          [[ "${expected_harness_sha}" =~ ^[0-9a-f]{64}$ ]]
-          test "$(sha256sum "${archive_dir}/ocservia-g6-harness" | awk '{print $1}')" = "${expected_harness_sha}"
-          harness_bin="${RUNNER_TEMP}/ocservia-g6-harness"
-          install -m 0755 "${archive_dir}/ocservia-g6-harness" "${harness_bin}"
-          diagnostics_dir="${RUNNER_TEMP}/artifacts/g6-readiness-${FD_ID}"
-          mkdir -p "${diagnostics_dir}"
-          install -m 0444 "${archive_dir}/harness-manifest.tsv" "${diagnostics_dir}/g6-harness-manifest.tsv"
-          printf 'G6_HARNESS_BIN=%s\n' "${harness_bin}" >>"${GITHUB_ENV}"
-          gzip -dc "${archive_dir}/runtime-images.tar.gz" | docker load
-          release_images=(
-            postgres:17.10-bookworm
-            "${G6RD_CONTROL_PLANE_IMAGE}"
-            "${G6RD_TRANSPORTD_IMAGE}"
-            "${G6RD_RELAY_IMAGE}"
-            "${G6RD_PROBE_IMAGE}"
-            "${G6RD_AGENT_IMAGE}"
-          )
-          test "$(wc -l <"${archive_dir}/image-ids.tsv")" -eq "${#release_images[@]}"
-          for image in "${release_images[@]}"; do
-            expected_id="$(awk -F '\t' -v image="${image}" '$1 == image { print $2 }' "${archive_dir}/image-ids.tsv")"
-            test -n "${expected_id}"
-            test "$(docker image inspect --format '{{.Id}}' "${image}")" = "${expected_id}"
-            if [[ "${image}" != postgres:17.10-bookworm ]]; then
-              test "$(docker image inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' "${image}")" = "${GITHUB_SHA}"
-            fi
-          done
+        uses: ./.github/actions/g6-install-release
+        with:
+          archive-dir: ${{ runner.temp }}/g6-rd-runtime-images
+          timing-file: ${{ runner.temp }}/artifacts/timing/g6-rd-fd-a.json
       - name: Restore verified G6 Node runtime
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
@@ -312,7 +318,12 @@ jobs:
           restore-keys: |
             npm-v4-${{ runner.os }}-${{ runner.arch }}-
       - name: Bootstrap pinned G6 Node runtime
-        run: scripts/bootstrap.sh g6-runtime
+        run: |
+          scripts/g6-timing.sh start "${RUNNER_TEMP}/artifacts/timing/g6-rd-fd-a.json" toolchain_bootstrap
+          scripts/bootstrap.sh g6-runtime
+          scripts/g6-timing.sh end "${RUNNER_TEMP}/artifacts/timing/g6-rd-fd-a.json" toolchain_bootstrap || true
+      - name: Start failure domain A scenario timing
+        run: scripts/g6-timing.sh start "${RUNNER_TEMP}/artifacts/timing/g6-rd-fd-a.json" scenario_execution
       - name: Run failure domain A prepare segment
         run: '"${G6_HARNESS_BIN}" run-segment --domain fd-a --segment prepare'
       - name: Publish failure domain A rendezvous
@@ -454,6 +465,10 @@ jobs:
           retention-days: 1
       - name: Run failure domain A barrier release segment
         run: '"${G6_HARNESS_BIN}" run-segment --domain fd-a --segment barrier-release'
+      - name: Finish failure domain A scenario timing
+        run: scripts/g6-timing.sh end "${RUNNER_TEMP}/artifacts/timing/g6-rd-fd-a.json" scenario_execution || true
+      - name: Start failure domain A peer observation timing
+        run: scripts/g6-timing.sh start "${RUNNER_TEMP}/artifacts/timing/g6-rd-fd-a.json" peer_observation_wait
       - name: Wait for the final freeze request
         env:
           GITHUB_TOKEN: ${{ github.token }}
@@ -463,8 +478,14 @@ jobs:
           --destination "${RUNNER_TEMP}/g6-rd-final-freeze"
           --timeout 1800s
           --peer-job "G6 Readiness Core / G6 Readiness Failure Domain B"
+      - name: Finish failure domain A peer observation timing
+        run: scripts/g6-timing.sh end "${RUNNER_TEMP}/artifacts/timing/g6-rd-fd-a.json" peer_observation_wait || true
+      - name: Start failure domain A evidence timing
+        run: scripts/g6-timing.sh start "${RUNNER_TEMP}/artifacts/timing/g6-rd-fd-a.json" evidence_collection
       - name: Run failure domain A evidence segment
         run: '"${G6_HARNESS_BIN}" run-segment --domain fd-a --segment evidence'
+      - name: Finish failure domain A evidence timing
+        run: scripts/g6-timing.sh end "${RUNNER_TEMP}/artifacts/timing/g6-rd-fd-a.json" evidence_collection || true
       - name: Finalize failure domain A runtime result
         if: always()
         timeout-minutes: 3
@@ -482,6 +503,14 @@ jobs:
         if: always()
         timeout-minutes: 5
         run: timeout --signal=TERM --kill-after=15s 120s scripts/g6-readiness-fd-a.sh diagnostics
+      - name: Record failure domain A timing diagnostics
+        if: always()
+        run: |
+          timing="${RUNNER_TEMP}/artifacts/timing/g6-rd-fd-a.json"
+          scripts/g6-timing.sh rendezvous-dir "${timing}" "${RUNNER_TEMP}/artifacts/g6-readiness-fd-a/rendezvous" || true
+          scripts/g6-timing.sh summary "${timing}" || true
+          mkdir -p "${RUNNER_TEMP}/artifacts/g6-readiness-fd-a"
+          cp -f "${timing}" "${RUNNER_TEMP}/artifacts/g6-readiness-fd-a/timing.json" 2>/dev/null || true
       - name: Clean failure domain A resources
         if: always()
         timeout-minutes: 7
@@ -524,60 +553,30 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
+      - name: Initialize failure domain B timing diagnostics
+        run: >-
+          scripts/g6-timing.sh init
+          "${RUNNER_TEMP}/artifacts/timing/g6-rd-fd-b.json"
+          g6-rd-fd-b formal "${GITHUB_SHA}" "${GITHUB_RUN_ID}" "${GITHUB_RUN_ATTEMPT}"
       - name: Runner preflight
-        run: scripts/ci-preflight.sh
+        run: |
+          scripts/g6-timing.sh start "${RUNNER_TEMP}/artifacts/timing/g6-rd-fd-b.json" runner_preparation
+          scripts/ci-preflight.sh
+          scripts/g6-timing.sh end "${RUNNER_TEMP}/artifacts/timing/g6-rd-fd-b.json" runner_preparation || true
+      - name: Start frozen release download timing
+        run: scripts/g6-timing.sh start "${RUNNER_TEMP}/artifacts/timing/g6-rd-fd-b.json" fd_artifact_download
       - name: Download the frozen release images
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: g6-rd-runtime-images-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/g6-rd-runtime-images
+      - name: Finish frozen release download timing
+        run: scripts/g6-timing.sh end "${RUNNER_TEMP}/artifacts/timing/g6-rd-fd-b.json" fd_artifact_download || true
       - name: Verify and load the release images
-        run: |
-          set -euo pipefail
-          archive_dir="${RUNNER_TEMP}/g6-rd-runtime-images"
-          (
-            cd "${archive_dir}"
-            sha256sum --check release-artifacts.sha256
-          )
-          test "$(wc -l <"${archive_dir}/tunnel-manifest.tsv" | tr -d '[:space:]')" -eq 2
-          test "$(awk -F '\t' '$1 == "candidate_sha" { print $2 }' "${archive_dir}/tunnel-manifest.tsv")" = "${GITHUB_SHA}"
-          expected_tunnel_sha="$(awk -F '\t' '$1 == "ocservia-g6-tunnel" { print $2 }' "${archive_dir}/tunnel-manifest.tsv")"
-          [[ "${expected_tunnel_sha}" =~ ^[0-9a-f]{64}$ ]]
-          test "$(sha256sum "${archive_dir}/ocservia-g6-tunnel" | awk '{print $1}')" = "${expected_tunnel_sha}"
-          tunnel_bin="${RUNNER_TEMP}/g6-readiness-${RUN_ID}/bin/ocservia-g6-tunnel"
-          install -D -m 0755 "${archive_dir}/ocservia-g6-tunnel" "${tunnel_bin}"
-          install -m 0444 "${archive_dir}/tunnel-manifest.tsv" "$(dirname "${tunnel_bin}")/tunnel-manifest.tsv"
-          test -x "${tunnel_bin}"
-          test "$(wc -l <"${archive_dir}/harness-manifest.tsv" | tr -d '[:space:]')" -eq 3
-          test "$(awk -F '\t' '$1 == "candidate_sha" { print $2 }' "${archive_dir}/harness-manifest.tsv")" = "${GITHUB_SHA}"
-          test "$(awk -F '\t' '$1 == "go_version" { print $2 }' "${archive_dir}/harness-manifest.tsv")" = "go$(sed -n 's/^go=//p' toolchains.lock)"
-          expected_harness_sha="$(awk -F '\t' '$1 == "ocservia-g6-harness" { print $2 }' "${archive_dir}/harness-manifest.tsv")"
-          [[ "${expected_harness_sha}" =~ ^[0-9a-f]{64}$ ]]
-          test "$(sha256sum "${archive_dir}/ocservia-g6-harness" | awk '{print $1}')" = "${expected_harness_sha}"
-          harness_bin="${RUNNER_TEMP}/ocservia-g6-harness"
-          install -m 0755 "${archive_dir}/ocservia-g6-harness" "${harness_bin}"
-          diagnostics_dir="${RUNNER_TEMP}/artifacts/g6-readiness-${FD_ID}"
-          mkdir -p "${diagnostics_dir}"
-          install -m 0444 "${archive_dir}/harness-manifest.tsv" "${diagnostics_dir}/g6-harness-manifest.tsv"
-          printf 'G6_HARNESS_BIN=%s\n' "${harness_bin}" >>"${GITHUB_ENV}"
-          gzip -dc "${archive_dir}/runtime-images.tar.gz" | docker load
-          release_images=(
-            postgres:17.10-bookworm
-            "${G6RD_CONTROL_PLANE_IMAGE}"
-            "${G6RD_TRANSPORTD_IMAGE}"
-            "${G6RD_RELAY_IMAGE}"
-            "${G6RD_PROBE_IMAGE}"
-            "${G6RD_AGENT_IMAGE}"
-          )
-          test "$(wc -l <"${archive_dir}/image-ids.tsv")" -eq "${#release_images[@]}"
-          for image in "${release_images[@]}"; do
-            expected_id="$(awk -F '\t' -v image="${image}" '$1 == image { print $2 }' "${archive_dir}/image-ids.tsv")"
-            test -n "${expected_id}"
-            test "$(docker image inspect --format '{{.Id}}' "${image}")" = "${expected_id}"
-            if [[ "${image}" != postgres:17.10-bookworm ]]; then
-              test "$(docker image inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' "${image}")" = "${GITHUB_SHA}"
-            fi
-          done
+        uses: ./.github/actions/g6-install-release
+        with:
+          archive-dir: ${{ runner.temp }}/g6-rd-runtime-images
+          timing-file: ${{ runner.temp }}/artifacts/timing/g6-rd-fd-b.json
       - name: Restore verified G6 Node runtime
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
@@ -593,7 +592,12 @@ jobs:
           restore-keys: |
             npm-v4-${{ runner.os }}-${{ runner.arch }}-
       - name: Bootstrap pinned G6 Node runtime
-        run: scripts/bootstrap.sh g6-runtime
+        run: |
+          scripts/g6-timing.sh start "${RUNNER_TEMP}/artifacts/timing/g6-rd-fd-b.json" toolchain_bootstrap
+          scripts/bootstrap.sh g6-runtime
+          scripts/g6-timing.sh end "${RUNNER_TEMP}/artifacts/timing/g6-rd-fd-b.json" toolchain_bootstrap || true
+      - name: Start failure domain B scenario timing
+        run: scripts/g6-timing.sh start "${RUNNER_TEMP}/artifacts/timing/g6-rd-fd-b.json" scenario_execution
       - name: Run failure domain B prepare segment
         run: '"${G6_HARNESS_BIN}" run-segment --domain fd-b --segment prepare'
       - name: Publish failure domain B rendezvous
@@ -720,6 +724,8 @@ jobs:
           --peer-job "G6 Readiness Core / G6 Readiness Failure Domain A"
       - name: Run failure domain B fault scenarios segment
         run: '"${G6_HARNESS_BIN}" run-segment --domain fd-b --segment fault-scenarios'
+      - name: Finish failure domain B scenario timing
+        run: scripts/g6-timing.sh end "${RUNNER_TEMP}/artifacts/timing/g6-rd-fd-b.json" scenario_execution || true
       - name: Publish the observation-window barrier request
         uses: ./.github/actions/g6-checkpoint-upload
         with:
@@ -737,10 +743,18 @@ jobs:
           --destination "${RUNNER_TEMP}/g6-rd-window-barrier-armed-fd-a"
           --timeout 600s
           --peer-job "G6 Readiness Core / G6 Readiness Failure Domain A"
+      - name: Start 300-second observation timing
+        run: scripts/g6-timing.sh start "${RUNNER_TEMP}/artifacts/timing/g6-rd-fd-b.json" observation_300_seconds
       - name: Run failure domain B observation window segment
         run: '"${G6_HARNESS_BIN}" run-segment --domain fd-b --segment window'
+      - name: Finish 300-second observation timing
+        run: scripts/g6-timing.sh end "${RUNNER_TEMP}/artifacts/timing/g6-rd-fd-b.json" observation_300_seconds || true
+      - name: Start failure domain B evidence timing
+        run: scripts/g6-timing.sh start "${RUNNER_TEMP}/artifacts/timing/g6-rd-fd-b.json" evidence_collection
       - name: Run failure domain B evidence segment
         run: '"${G6_HARNESS_BIN}" run-segment --domain fd-b --segment evidence'
+      - name: Finish failure domain B evidence timing
+        run: scripts/g6-timing.sh end "${RUNNER_TEMP}/artifacts/timing/g6-rd-fd-b.json" evidence_collection || true
       - name: Publish the final freeze request
         uses: ./.github/actions/g6-checkpoint-upload
         with:
@@ -764,6 +778,14 @@ jobs:
         if: always()
         timeout-minutes: 5
         run: timeout --signal=TERM --kill-after=15s 120s scripts/g6-readiness-fd-b.sh diagnostics
+      - name: Record failure domain B timing diagnostics
+        if: always()
+        run: |
+          timing="${RUNNER_TEMP}/artifacts/timing/g6-rd-fd-b.json"
+          scripts/g6-timing.sh rendezvous-dir "${timing}" "${RUNNER_TEMP}/artifacts/g6-readiness-fd-b/rendezvous" || true
+          scripts/g6-timing.sh summary "${timing}" || true
+          mkdir -p "${RUNNER_TEMP}/artifacts/g6-readiness-fd-b"
+          cp -f "${timing}" "${RUNNER_TEMP}/artifacts/g6-readiness-fd-b/timing.json" 2>/dev/null || true
       - name: Clean failure domain B resources
         if: always()
         timeout-minutes: 7
@@ -1345,8 +1367,16 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
+      - name: Initialize smoke release timing diagnostics
+        run: >-
+          scripts/g6-timing.sh init
+          "${RUNNER_TEMP}/artifacts/timing/g6-smoke-release.json"
+          g6-smoke-release smoke "${GITHUB_SHA}" "${GITHUB_RUN_ID}" "${GITHUB_RUN_ATTEMPT}"
       - name: Runner preflight
-        run: scripts/ci-preflight.sh
+        run: |
+          scripts/g6-timing.sh start "${RUNNER_TEMP}/artifacts/timing/g6-smoke-release.json" runner_preparation
+          scripts/ci-preflight.sh
+          scripts/g6-timing.sh end "${RUNNER_TEMP}/artifacts/timing/g6-smoke-release.json" runner_preparation || true
       - name: Restore the pinned smoke release toolchain
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
@@ -1355,7 +1385,10 @@ jobs:
             .tools
           key: tooling-v4-g6-smoke-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'scripts/checksums.txt', 'scripts/bootstrap.sh', 'scripts/env.sh') }}
       - name: Bootstrap the pinned smoke release toolchain
-        run: scripts/bootstrap.sh go-test
+        run: |
+          scripts/g6-timing.sh start "${RUNNER_TEMP}/artifacts/timing/g6-smoke-release.json" toolchain_bootstrap
+          scripts/bootstrap.sh go-test
+          scripts/g6-timing.sh end "${RUNNER_TEMP}/artifacts/timing/g6-smoke-release.json" toolchain_bootstrap || true
       - name: Build and freeze the smoke release
         id: freeze
         timeout-minutes: 30
@@ -1370,6 +1403,8 @@ jobs:
           set -euo pipefail
           output="${RUNNER_TEMP}/g6-harness-smoke-release"
           mkdir -p "${output}"
+          timing="${RUNNER_TEMP}/artifacts/timing/g6-smoke-release.json"
+          scripts/g6-timing.sh start "${timing}" candidate_docker_image_build
           docker pull postgres:17.10-bookworm
           build_pids=()
           docker build --pull=false --label "org.opencontainers.image.revision=${GITHUB_SHA}" --file control-plane/Dockerfile --tag "${G6RD_CONTROL_PLANE_IMAGE}" . & build_pids+=("$!")
@@ -1380,6 +1415,8 @@ jobs:
           build_status=0
           for pid in "${build_pids[@]}"; do wait "${pid}" || build_status=1; done
           test "${build_status}" -eq 0
+          scripts/g6-timing.sh end "${timing}" candidate_docker_image_build || true
+          scripts/g6-timing.sh start "${timing}" helper_harness_tunnel_build
           tunnel_output="${output}/tunnel-output"
           docker build --pull=false --file rust/g6-probe.Dockerfile --target g6-tunnel-artifact --output "type=local,dest=${tunnel_output}" .
           install -m 0755 "${tunnel_output}/ocservia-g6-tunnel" "${output}/ocservia-g6-tunnel"
@@ -1394,6 +1431,7 @@ jobs:
             "${pinned_go}" build -trimpath \
             -o "${output}/ocservia-g6-harness" \
             ./tools/g6-harness/cmd/g6-harness
+          scripts/g6-timing.sh end "${timing}" helper_harness_tunnel_build || true
           harness_sha256="$(sha256sum "${output}/ocservia-g6-harness" | awk '{print $1}')"
           printf 'candidate_sha\t%s\n' "${GITHUB_SHA}" >"${output}/harness-manifest.tsv"
           printf 'go_version\t%s\n' "${actual_go}" >>"${output}/harness-manifest.tsv"
@@ -1403,11 +1441,16 @@ jobs:
           release_images=(postgres:17.10-bookworm "${G6RD_CONTROL_PLANE_IMAGE}" "${G6RD_TRANSPORTD_IMAGE}" "${G6RD_RELAY_IMAGE}" "${G6RD_PROBE_IMAGE}" "${G6RD_AGENT_IMAGE}")
           : >"${output}/image-ids.tsv"
           for image in "${release_images[@]}"; do printf '%s\t%s\n' "${image}" "$(docker image inspect --format '{{.Id}}' "${image}")" >>"${output}/image-ids.tsv"; done
+          scripts/g6-timing.sh start "${timing}" docker_save_gzip
           docker save "${release_images[@]}" | gzip -1 >"${output}/runtime-images.tar.gz"
+          scripts/g6-timing.sh end "${timing}" docker_save_gzip || true
+          scripts/g6-timing.sh artifact "${timing}" frozen_runtime_archive "${output}/runtime-images.tar.gz" || true
           (cd "${output}" && sha256sum runtime-images.tar.gz image-ids.tsv ocservia-g6-tunnel tunnel-manifest.tsv ocservia-g6-harness harness-manifest.tsv >release-artifacts.sha256)
           release_digest="$(sha256sum "${output}/release-artifacts.sha256" | awk '{print $1}')"
           printf 'harness-sha256=%s\n' "${harness_sha256}" >>"${GITHUB_OUTPUT}"
           printf 'release-manifest-digest=%s\n' "${release_digest}" >>"${GITHUB_OUTPUT}"
+      - name: Start frozen smoke release upload timing
+        run: scripts/g6-timing.sh start "${RUNNER_TEMP}/artifacts/timing/g6-smoke-release.json" release_artifact_upload
       - name: Publish the frozen smoke harness
         id: publish
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
@@ -1417,6 +1460,21 @@ jobs:
           if-no-files-found: error
           compression-level: 0
           retention-days: 1
+      - name: Record frozen smoke release upload timing
+        if: always()
+        run: |
+          timing="${RUNNER_TEMP}/artifacts/timing/g6-smoke-release.json"
+          scripts/g6-timing.sh end "${timing}" release_artifact_upload || true
+          scripts/g6-timing.sh artifact "${timing}" frozen_release_payload "${RUNNER_TEMP}/g6-harness-smoke-release/runtime-images.tar.gz" || true
+          scripts/g6-timing.sh summary "${timing}" || true
+      - name: Upload smoke release timing diagnostics
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: g6-timing-smoke-release-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/artifacts/timing/g6-smoke-release.json
+          if-no-files-found: warn
+          retention-days: 5
       - name: Clean smoke release resources
         if: always()
         timeout-minutes: 5
@@ -1458,8 +1516,16 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
+      - name: Initialize smoke FD-A timing diagnostics
+        run: >-
+          scripts/g6-timing.sh init
+          "${RUNNER_TEMP}/artifacts/timing/g6-smoke-fd-a.json"
+          g6-smoke-fd-a smoke "${GITHUB_SHA}" "${GITHUB_RUN_ID}" "${GITHUB_RUN_ATTEMPT}"
       - name: Runner preflight
-        run: scripts/ci-preflight.sh
+        run: |
+          scripts/g6-timing.sh start "${RUNNER_TEMP}/artifacts/timing/g6-smoke-fd-a.json" runner_preparation
+          scripts/ci-preflight.sh
+          scripts/g6-timing.sh end "${RUNNER_TEMP}/artifacts/timing/g6-smoke-fd-a.json" runner_preparation || true
       - name: Download the frozen smoke harness
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
@@ -1469,6 +1535,7 @@ jobs:
         uses: ./.github/actions/g6-install-release
         with:
           archive-dir: ${{ runner.temp }}/g6-harness-smoke-release
+          timing-file: ${{ runner.temp }}/artifacts/timing/g6-smoke-fd-a.json
       - name: Restore pinned smoke runtime
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
@@ -1477,7 +1544,12 @@ jobs:
             .tools
           key: tooling-v5-g6-node-runtime-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'scripts/checksums.txt', 'scripts/bootstrap.sh', 'scripts/env.sh', 'scripts/g6-runtime/package-lock.json') }}
       - name: Bootstrap pinned smoke runtime
-        run: scripts/bootstrap.sh g6-runtime
+        run: |
+          scripts/g6-timing.sh start "${RUNNER_TEMP}/artifacts/timing/g6-smoke-fd-a.json" toolchain_bootstrap
+          scripts/bootstrap.sh g6-runtime
+          scripts/g6-timing.sh end "${RUNNER_TEMP}/artifacts/timing/g6-smoke-fd-a.json" toolchain_bootstrap || true
+      - name: Start smoke FD-A scenario timing
+        run: scripts/g6-timing.sh start "${RUNNER_TEMP}/artifacts/timing/g6-smoke-fd-a.json" scenario_execution
       - name: Prepare FD-A
         run: '"${G6_HARNESS_BIN}" run-segment --domain fd-a --segment prepare'
       - name: Publish FD-A tunnel identity
@@ -1527,8 +1599,13 @@ jobs:
       - name: Wait for promotion
         env: {GITHUB_TOKEN: '${{ github.token }}'}
         run: '"${G6_HARNESS_BIN}" wait-download --name "g6-smoke-promotion-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" --destination "${RUNNER_TEMP}/g6-smoke-promotion" --timeout 1200s --peer-job "G6 Harness Smoke Core / G6 Harness Smoke FD-B"'
+      - name: Finish smoke FD-A scenario timing
+        run: scripts/g6-timing.sh end "${RUNNER_TEMP}/artifacts/timing/g6-smoke-fd-a.json" scenario_execution || true
       - name: Freeze FD-A raw evidence
-        run: '"${G6_HARNESS_BIN}" run-segment --domain fd-a --segment evidence'
+        run: |
+          scripts/g6-timing.sh start "${RUNNER_TEMP}/artifacts/timing/g6-smoke-fd-a.json" evidence_collection
+          "${G6_HARNESS_BIN}" run-segment --domain fd-a --segment evidence
+          scripts/g6-timing.sh end "${RUNNER_TEMP}/artifacts/timing/g6-smoke-fd-a.json" evidence_collection || true
       - name: Bind FD-A raw evidence
         env: {G6_SMOKE_RUNNER_NAME: '${{ runner.name }}'}
         run: '"${G6_HARNESS_BIN}" smoke-domain --domain fd-a --expected-harness-sha "${{ needs.g6-smoke-release.outputs.harness-sha256 }}" --evidence-root "${RUNNER_TEMP}/g6-readiness-${RUN_ID}/outbox/smoke-final" --output "${RUNNER_TEMP}/g6-readiness-${RUN_ID}/outbox/smoke-final/domain-result.json"'
@@ -1552,6 +1629,14 @@ jobs:
       - name: Collect FD-A diagnostics
         if: always()
         run: timeout --signal=TERM --kill-after=15s 120s scripts/g6-readiness-fd-a.sh diagnostics
+      - name: Record smoke FD-A timing diagnostics
+        if: always()
+        run: |
+          timing="${RUNNER_TEMP}/artifacts/timing/g6-smoke-fd-a.json"
+          scripts/g6-timing.sh rendezvous-dir "${timing}" "${RUNNER_TEMP}/artifacts/g6-readiness-fd-a/rendezvous" || true
+          scripts/g6-timing.sh summary "${timing}" || true
+          mkdir -p "${RUNNER_TEMP}/artifacts/g6-readiness-fd-a"
+          cp -f "${timing}" "${RUNNER_TEMP}/artifacts/g6-readiness-fd-a/timing.json" 2>/dev/null || true
       - name: Upload FD-A diagnostics
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
@@ -1593,8 +1678,16 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
+      - name: Initialize smoke FD-B timing diagnostics
+        run: >-
+          scripts/g6-timing.sh init
+          "${RUNNER_TEMP}/artifacts/timing/g6-smoke-fd-b.json"
+          g6-smoke-fd-b smoke "${GITHUB_SHA}" "${GITHUB_RUN_ID}" "${GITHUB_RUN_ATTEMPT}"
       - name: Runner preflight
-        run: scripts/ci-preflight.sh
+        run: |
+          scripts/g6-timing.sh start "${RUNNER_TEMP}/artifacts/timing/g6-smoke-fd-b.json" runner_preparation
+          scripts/ci-preflight.sh
+          scripts/g6-timing.sh end "${RUNNER_TEMP}/artifacts/timing/g6-smoke-fd-b.json" runner_preparation || true
       - name: Download the frozen smoke harness
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
@@ -1602,7 +1695,9 @@ jobs:
           path: ${{ runner.temp }}/g6-harness-smoke-release
       - name: Install the frozen smoke release
         uses: ./.github/actions/g6-install-release
-        with: {archive-dir: '${{ runner.temp }}/g6-harness-smoke-release'}
+        with:
+          archive-dir: ${{ runner.temp }}/g6-harness-smoke-release
+          timing-file: ${{ runner.temp }}/artifacts/timing/g6-smoke-fd-b.json
       - name: Restore pinned smoke runtime
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
@@ -1611,7 +1706,12 @@ jobs:
             .tools
           key: tooling-v5-g6-node-runtime-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'scripts/checksums.txt', 'scripts/bootstrap.sh', 'scripts/env.sh', 'scripts/g6-runtime/package-lock.json') }}
       - name: Bootstrap pinned smoke runtime
-        run: scripts/bootstrap.sh g6-runtime
+        run: |
+          scripts/g6-timing.sh start "${RUNNER_TEMP}/artifacts/timing/g6-smoke-fd-b.json" toolchain_bootstrap
+          scripts/bootstrap.sh g6-runtime
+          scripts/g6-timing.sh end "${RUNNER_TEMP}/artifacts/timing/g6-smoke-fd-b.json" toolchain_bootstrap || true
+      - name: Start smoke FD-B scenario timing
+        run: scripts/g6-timing.sh start "${RUNNER_TEMP}/artifacts/timing/g6-smoke-fd-b.json" scenario_execution
       - name: Prepare FD-B
         run: '"${G6_HARNESS_BIN}" run-segment --domain fd-b --segment prepare'
       - name: Publish FD-B tunnel identity
@@ -1661,10 +1761,18 @@ jobs:
       - name: Publish promotion proof
         uses: ./.github/actions/g6-checkpoint-upload
         with: {name: 'g6-smoke-promotion-${{ github.run_id }}-${{ github.run_attempt }}', path: '${{ runner.temp }}/g6-readiness-${{ env.RUN_ID }}/outbox/new-primary', retention-days: 1}
+      - name: Finish smoke FD-B scenario timing
+        run: scripts/g6-timing.sh end "${RUNNER_TEMP}/artifacts/timing/g6-smoke-fd-b.json" scenario_execution || true
       - name: Observe post-promotion stability
-        run: sleep 30
+        run: |
+          scripts/g6-timing.sh start "${RUNNER_TEMP}/artifacts/timing/g6-smoke-fd-b.json" observation
+          sleep 30
+          scripts/g6-timing.sh end "${RUNNER_TEMP}/artifacts/timing/g6-smoke-fd-b.json" observation || true
       - name: Freeze FD-B raw evidence
-        run: '"${G6_HARNESS_BIN}" run-segment --domain fd-b --segment evidence'
+        run: |
+          scripts/g6-timing.sh start "${RUNNER_TEMP}/artifacts/timing/g6-smoke-fd-b.json" evidence_collection
+          "${G6_HARNESS_BIN}" run-segment --domain fd-b --segment evidence
+          scripts/g6-timing.sh end "${RUNNER_TEMP}/artifacts/timing/g6-smoke-fd-b.json" evidence_collection || true
       - name: Bind FD-B raw evidence
         env: {G6_SMOKE_RUNNER_NAME: '${{ runner.name }}'}
         run: '"${G6_HARNESS_BIN}" smoke-domain --domain fd-b --expected-harness-sha "${{ needs.g6-smoke-release.outputs.harness-sha256 }}" --evidence-root "${RUNNER_TEMP}/g6-readiness-${RUN_ID}/outbox/smoke-final" --output "${RUNNER_TEMP}/g6-readiness-${RUN_ID}/outbox/smoke-final/domain-result.json"'
@@ -1688,6 +1796,14 @@ jobs:
       - name: Collect FD-B diagnostics
         if: always()
         run: timeout --signal=TERM --kill-after=15s 120s scripts/g6-readiness-fd-b.sh diagnostics
+      - name: Record smoke FD-B timing diagnostics
+        if: always()
+        run: |
+          timing="${RUNNER_TEMP}/artifacts/timing/g6-smoke-fd-b.json"
+          scripts/g6-timing.sh rendezvous-dir "${timing}" "${RUNNER_TEMP}/artifacts/g6-readiness-fd-b/rendezvous" || true
+          scripts/g6-timing.sh summary "${timing}" || true
+          mkdir -p "${RUNNER_TEMP}/artifacts/g6-readiness-fd-b"
+          cp -f "${timing}" "${RUNNER_TEMP}/artifacts/g6-readiness-fd-b/timing.json" 2>/dev/null || true
       - name: Upload FD-B diagnostics
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7

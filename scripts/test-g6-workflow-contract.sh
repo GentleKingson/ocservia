@@ -33,3 +33,39 @@ jobs.each do |id, job|
   end
 end
 RUBY
+
+TIMING_HELPER="${ROOT}/scripts/g6-timing.sh"
+INSTALL_HELPER="${ROOT}/scripts/g6-install-release.sh"
+for stage in runner_preparation toolchain_bootstrap candidate_docker_image_build \
+  docker_save_gzip fd_artifact_download checksum_provenance_verification \
+  docker_load scenario_execution peer_observation_wait observation_300_seconds \
+  evidence_collection release_artifact_upload; do
+  grep -qF "${stage}" "${ROOT}/.github/workflows/g6-harness-core.yml" \
+    "${TIMING_HELPER}" "${INSTALL_HELPER}" \
+    || { echo "G6 timing stage is missing: ${stage}" >&2; exit 1; }
+done
+summary_count="$(grep -cF 'scripts/g6-timing.sh summary' "${ROOT}/.github/workflows/g6-harness-core.yml")"
+if [[ "${summary_count}" -ne 6 ]]; then
+  echo "every G6 release and failure domain job must write a timing step summary (expected 6, found ${summary_count})" >&2
+  exit 1
+fi
+upload_stage_count="$(grep -cF 'release_artifact_upload' "${ROOT}/.github/workflows/g6-harness-core.yml")"
+if [[ "${upload_stage_count}" -ne 4 ]]; then
+  echo "both frozen release producers must time the full artifact upload (expected 4 stage marks, found ${upload_stage_count})" >&2
+  exit 1
+fi
+grep -qF 'GITHUB_STEP_SUMMARY' "${TIMING_HELPER}" \
+  || { echo "G6 timing helper must write the step summary" >&2; exit 1; }
+grep -qF 'rendezvous-dir' "${TIMING_HELPER}" \
+  || { echo "G6 timing helper must aggregate rendezvous waits" >&2; exit 1; }
+if [[ "$(grep -cF 'rendezvous-dir "${timing}"' "${ROOT}/.github/workflows/g6-harness-core.yml")" -ne 4 ]]; then
+  echo "every G6 failure domain must record rendezvous timing diagnostics" >&2
+  exit 1
+fi
+grep -qF 'G6_TIMING_FILE' "${ROOT}/.github/actions/g6-install-release/action.yml" \
+  || { echo "release action must keep timing diagnostics non-authoritative" >&2; exit 1; }
+for token in 'release-artifacts.sha256' 'harness Go version mismatch' \
+  'image revision mismatch' 'G6_INSTALL_RELEASE_VERIFY_ONLY'; do
+  grep -qF "${token}" "${INSTALL_HELPER}" \
+    || { echo "release verifier is missing ${token}" >&2; exit 1; }
+done
