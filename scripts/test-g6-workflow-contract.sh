@@ -114,7 +114,18 @@ export_builds = [
       logical << line
     end
   end
-  builds = logical.select { |line| line.include?("docker build ") }
+  # The plain `docker build` alias always resolves to the default
+  # docker-driver builder and silently ignores the selected docker-container
+  # builder and its cache flags; release builds must go through
+  # `docker buildx build` bound to the run-scoped builder.
+  next abort("#{job_id} must not use the plain docker build alias") if
+    freeze.fetch("run").match?(/docker build(?!x)[[:space:]]/)
+  job_env = jobs.fetch(job_id).fetch("env", {})
+  step_env = freeze.fetch("env", {})
+  next abort("#{job_id} must pin BUILDX_BUILDER to the run-scoped builder") unless
+    job_env.fetch("BUILDX_BUILDER", step_env.fetch("BUILDX_BUILDER", nil)) ==
+    "g6-buildx-${{ github.run_id }}-${{ github.run_attempt }}"
+  builds = logical.select { |line| line.include?("docker buildx build ") }
   abort("#{job_id} must keep the six lane builds plus the tunnel export (found #{builds.length})") unless builds.length == 7
   builds.each do |build|
     file = build[/--file (\S+)/, 1]
