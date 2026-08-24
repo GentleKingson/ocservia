@@ -28,3 +28,53 @@ if G6_TIMING_REQUIRED=true "${TIMING}" rendezvous-dir "${timing_file}" "${fixtur
   echo "expected malformed rendezvous result to fail" >&2
   exit 1
 fi
+
+# A measured command records its duration and always propagates the wrapped
+# exit status; timing collection must never mask a build failure.
+"${TIMING}" measure "${timing_file}" control_plane_build -- /bin/sh -c 'exit 0'
+if "${TIMING}" measure "${timing_file}" relay_build -- /bin/sh -c 'exit 3'; then
+  echo "expected a failing measured command to propagate its status" >&2
+  exit 1
+fi
+status_capture=0
+"${TIMING}" measure "${timing_file}" g6_probe_build -- /bin/sh -c 'exit 5' || status_capture=$?
+[[ "${status_capture}" -eq 5 ]] || {
+  echo "measure must preserve the exact wrapped exit code (got ${status_capture})" >&2
+  exit 1
+}
+# measure only appends raw rows; the parent renders after every measured
+# command has been waited on.
+"${TIMING}" render "${timing_file}"
+jq -e '.stages[] | select(.name == "control_plane_build" and .duration_ms >= 0)' \
+  "${timing_file}" >/dev/null
+jq -e '.stages[] | select(.name == "relay_build" and .duration_ms >= 0)' \
+  "${timing_file}" >/dev/null
+jq -e '.stages[] | select(.name == "g6_probe_build" and .duration_ms >= 0)' \
+  "${timing_file}" >/dev/null
+if G6_TIMING_REQUIRED=true "${TIMING}" measure "${timing_file}" malformed -- /bin/sh -c 'exit 9' >/dev/null 2>&1; then
+  echo "measure must stay authoritative under G6_TIMING_REQUIRED" >&2
+  exit 1
+fi
+status_capture=0
+G6_TIMING_REQUIRED=true "${TIMING}" measure "${timing_file}" required_probe -- /bin/sh -c 'exit 9' \
+  || status_capture=$?
+[[ "${status_capture}" -eq 9 ]] || {
+  echo "authoritative measure must still propagate the wrapped status" >&2
+  exit 1
+}
+
+digest="$(printf 'b%.0s' {1..64})"
+"${TIMING}" image "${timing_file}" transportd 1048576 "sha256:${digest}"
+jq -e '.images == {transportd: {bytes: 1048576, image_id: "sha256:'"${digest}"'"}}' \
+  "${timing_file}" >/dev/null
+if G6_TIMING_REQUIRED=true "${TIMING}" image "${timing_file}" bad_size not-an-integer "sha256:${digest}" >/dev/null 2>&1; then
+  echo "expected malformed image bytes to fail" >&2
+  exit 1
+fi
+if G6_TIMING_REQUIRED=true "${TIMING}" image "${timing_file}" bad_id 1024 not-a-digest >/dev/null 2>&1; then
+  echo "expected malformed image id to fail" >&2
+  exit 1
+fi
+summary="${fixture}/step-summary.md"
+GITHUB_STEP_SUMMARY="${summary}" "${TIMING}" summary "${timing_file}"
+grep -q '| transportd | 1048576 | sha256:'"${digest}"' |' "${summary}"

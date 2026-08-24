@@ -112,31 +112,59 @@ jobs:
           timing="${RUNNER_TEMP}/artifacts/timing/g6-rd-release.json"
           scripts/g6-timing.sh start "${timing}" candidate_docker_image_build
           docker pull postgres:17.10-bookworm
+          record_image_timing() {
+            scripts/g6-timing.sh image "${timing}" "$1" \
+              "$(docker image inspect --format '{{.Size}}' "$2")" \
+              "$(docker image inspect --format '{{.Id}}' "$2")" || true
+          }
+          # Three concurrent build lanes with disjoint dependency trees: the
+          # Go control-plane, the pinned iroh-relay, and one shared Rust
+          # graph. The Rust lane compiles the workspace once in the
+          # g6-rust-builder stage and every first-party Rust image then only
+          # assembles from those frozen layers, so the dependency build can
+          # no longer be repeated by parallel Cargo builds contending for the
+          # same runner cores.
           build_pids=()
-          docker build --pull=false \
-            --label "org.opencontainers.image.revision=${GITHUB_SHA}" \
-            --file control-plane/Dockerfile \
-            --tag "${G6RD_CONTROL_PLANE_IMAGE}" . &
+          (
+            scripts/g6-timing.sh measure "${timing}" control_plane_build -- \
+              docker build --pull=false \
+                --label "org.opencontainers.image.revision=${GITHUB_SHA}" \
+                --file control-plane/Dockerfile \
+                --tag "${G6RD_CONTROL_PLANE_IMAGE}" .
+          ) &
           build_pids+=("$!")
-          docker build --pull=false \
-            --label "org.opencontainers.image.revision=${GITHUB_SHA}" \
-            --file rust/transportd.Dockerfile \
-            --tag "${G6RD_TRANSPORTD_IMAGE}" . &
+          (
+            scripts/g6-timing.sh measure "${timing}" relay_build -- \
+              docker build --pull=false \
+                --label "org.opencontainers.image.revision=${GITHUB_SHA}" \
+                --file deploy/production/relay.Dockerfile \
+                --tag "${G6RD_RELAY_IMAGE}" .
+          ) &
           build_pids+=("$!")
-          docker build --pull=false \
-            --label "org.opencontainers.image.revision=${GITHUB_SHA}" \
-            --file deploy/production/relay.Dockerfile \
-            --tag "${G6RD_RELAY_IMAGE}" . &
-          build_pids+=("$!")
-          docker build --pull=false \
-            --label "org.opencontainers.image.revision=${GITHUB_SHA}" \
-            --file rust/g6-probe.Dockerfile \
-            --tag "${G6RD_PROBE_IMAGE}" . &
-          build_pids+=("$!")
-          docker build --pull=false \
-            --label "org.opencontainers.image.revision=${GITHUB_SHA}" \
-            --file rust/g6-agent.Dockerfile \
-            --tag "${G6RD_AGENT_IMAGE}" . &
+          (
+            scripts/g6-timing.sh measure "${timing}" rust_workspace_build -- \
+              docker build --pull=false \
+                --file rust/g6-runtime.Dockerfile \
+                --target g6-rust-builder .
+            scripts/g6-timing.sh measure "${timing}" transportd_build -- \
+              docker build --pull=false \
+                --label "org.opencontainers.image.revision=${GITHUB_SHA}" \
+                --file rust/g6-runtime.Dockerfile \
+                --target transportd-runtime \
+                --tag "${G6RD_TRANSPORTD_IMAGE}" .
+            scripts/g6-timing.sh measure "${timing}" g6_probe_build -- \
+              docker build --pull=false \
+                --label "org.opencontainers.image.revision=${GITHUB_SHA}" \
+                --file rust/g6-runtime.Dockerfile \
+                --target g6-probe-runtime \
+                --tag "${G6RD_PROBE_IMAGE}" .
+            scripts/g6-timing.sh measure "${timing}" g6_agent_build -- \
+              docker build --pull=false \
+                --label "org.opencontainers.image.revision=${GITHUB_SHA}" \
+                --file rust/g6-runtime.Dockerfile \
+                --target g6-agent-runtime \
+                --tag "${G6RD_AGENT_IMAGE}" .
+          ) &
           build_pids+=("$!")
           build_status=0
           for pid in "${build_pids[@]}"; do
@@ -146,12 +174,18 @@ jobs:
           done
           test "${build_status}" -eq 0
           scripts/g6-timing.sh end "${timing}" candidate_docker_image_build || true
+          record_image_timing control_plane "${G6RD_CONTROL_PLANE_IMAGE}"
+          record_image_timing transportd "${G6RD_TRANSPORTD_IMAGE}"
+          record_image_timing relay "${G6RD_RELAY_IMAGE}"
+          record_image_timing g6_probe "${G6RD_PROBE_IMAGE}"
+          record_image_timing g6_agent "${G6RD_AGENT_IMAGE}"
           scripts/g6-timing.sh start "${timing}" helper_harness_tunnel_build
           tunnel_output="${archive_dir}/tunnel-output"
-          # Export the tunnel from the completed probe build's content-addressed
-          # BuildKit stage; this does not rebuild it on either failure domain.
+          # Export the tunnel from the shared builder's content-addressed
+          # BuildKit stage; this reuses the compiled layer and does not
+          # rebuild anything on either failure domain.
           docker build --pull=false \
-            --file rust/g6-probe.Dockerfile \
+            --file rust/g6-runtime.Dockerfile \
             --target g6-tunnel-artifact \
             --output "type=local,dest=${tunnel_output}" .
           install -m 0755 "${tunnel_output}/ocservia-g6-tunnel" \
@@ -1406,19 +1440,49 @@ jobs:
           timing="${RUNNER_TEMP}/artifacts/timing/g6-smoke-release.json"
           scripts/g6-timing.sh start "${timing}" candidate_docker_image_build
           docker pull postgres:17.10-bookworm
+          record_image_timing() {
+            scripts/g6-timing.sh image "${timing}" "$1" \
+              "$(docker image inspect --format '{{.Size}}' "$2")" \
+              "$(docker image inspect --format '{{.Id}}' "$2")" || true
+          }
+          # Same three-lane release graph as the formal producer: the Go
+          # control-plane and pinned relay build concurrently with one shared
+          # Rust workspace compile whose frozen layers assemble every
+          # first-party Rust image.
           build_pids=()
-          docker build --pull=false --label "org.opencontainers.image.revision=${GITHUB_SHA}" --file control-plane/Dockerfile --tag "${G6RD_CONTROL_PLANE_IMAGE}" . & build_pids+=("$!")
-          docker build --pull=false --label "org.opencontainers.image.revision=${GITHUB_SHA}" --file rust/transportd.Dockerfile --tag "${G6RD_TRANSPORTD_IMAGE}" . & build_pids+=("$!")
-          docker build --pull=false --label "org.opencontainers.image.revision=${GITHUB_SHA}" --file deploy/production/relay.Dockerfile --tag "${G6RD_RELAY_IMAGE}" . & build_pids+=("$!")
-          docker build --pull=false --label "org.opencontainers.image.revision=${GITHUB_SHA}" --file rust/g6-probe.Dockerfile --tag "${G6RD_PROBE_IMAGE}" . & build_pids+=("$!")
-          docker build --pull=false --label "org.opencontainers.image.revision=${GITHUB_SHA}" --file rust/g6-agent.Dockerfile --tag "${G6RD_AGENT_IMAGE}" . & build_pids+=("$!")
+          (
+            scripts/g6-timing.sh measure "${timing}" control_plane_build -- \
+              docker build --pull=false --label "org.opencontainers.image.revision=${GITHUB_SHA}" --file control-plane/Dockerfile --tag "${G6RD_CONTROL_PLANE_IMAGE}" .
+          ) &
+          build_pids+=("$!")
+          (
+            scripts/g6-timing.sh measure "${timing}" relay_build -- \
+              docker build --pull=false --label "org.opencontainers.image.revision=${GITHUB_SHA}" --file deploy/production/relay.Dockerfile --tag "${G6RD_RELAY_IMAGE}" .
+          ) &
+          build_pids+=("$!")
+          (
+            scripts/g6-timing.sh measure "${timing}" rust_workspace_build -- \
+              docker build --pull=false --file rust/g6-runtime.Dockerfile --target g6-rust-builder .
+            scripts/g6-timing.sh measure "${timing}" transportd_build -- \
+              docker build --pull=false --label "org.opencontainers.image.revision=${GITHUB_SHA}" --file rust/g6-runtime.Dockerfile --target transportd-runtime --tag "${G6RD_TRANSPORTD_IMAGE}" .
+            scripts/g6-timing.sh measure "${timing}" g6_probe_build -- \
+              docker build --pull=false --label "org.opencontainers.image.revision=${GITHUB_SHA}" --file rust/g6-runtime.Dockerfile --target g6-probe-runtime --tag "${G6RD_PROBE_IMAGE}" .
+            scripts/g6-timing.sh measure "${timing}" g6_agent_build -- \
+              docker build --pull=false --label "org.opencontainers.image.revision=${GITHUB_SHA}" --file rust/g6-runtime.Dockerfile --target g6-agent-runtime --tag "${G6RD_AGENT_IMAGE}" .
+          ) &
+          build_pids+=("$!")
           build_status=0
           for pid in "${build_pids[@]}"; do wait "${pid}" || build_status=1; done
           test "${build_status}" -eq 0
           scripts/g6-timing.sh end "${timing}" candidate_docker_image_build || true
+          record_image_timing control_plane "${G6RD_CONTROL_PLANE_IMAGE}"
+          record_image_timing transportd "${G6RD_TRANSPORTD_IMAGE}"
+          record_image_timing relay "${G6RD_RELAY_IMAGE}"
+          record_image_timing g6_probe "${G6RD_PROBE_IMAGE}"
+          record_image_timing g6_agent "${G6RD_AGENT_IMAGE}"
           scripts/g6-timing.sh start "${timing}" helper_harness_tunnel_build
           tunnel_output="${output}/tunnel-output"
-          docker build --pull=false --file rust/g6-probe.Dockerfile --target g6-tunnel-artifact --output "type=local,dest=${tunnel_output}" .
+          docker build --pull=false --file rust/g6-runtime.Dockerfile --target g6-tunnel-artifact --output "type=local,dest=${tunnel_output}" .
           install -m 0755 "${tunnel_output}/ocservia-g6-tunnel" "${output}/ocservia-g6-tunnel"
           rm -rf -- "${tunnel_output}"
           source scripts/env.sh
