@@ -21,16 +21,15 @@ jobs:
       FD_ID: fd-a
       FD_ALIAS: fd-alpha
       G6HA_CANDIDATE_SHA: ${{ github.sha }}
-      G6HA_TIMING_FILE: ${{ runner.temp }}/artifacts/timing/g6-ha-fd-a.json
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
       - name: Initialize failure domain A timing diagnostics
-        run: >-
-          scripts/g6-timing.sh init
-          "${G6HA_TIMING_FILE}"
-          g6-ha-fd-a ha-pitr "${GITHUB_SHA}" "${GITHUB_RUN_ID}" "${GITHUB_RUN_ATTEMPT}"
+        run: |
+          echo "G6HA_TIMING_FILE=${RUNNER_TEMP}/artifacts/timing/g6-ha-fd-a.json" >>"${GITHUB_ENV}"
+          export G6HA_TIMING_FILE
+          scripts/g6-timing.sh init "${G6HA_TIMING_FILE}" g6-ha-fd-a ha-pitr "${GITHUB_SHA}" "${GITHUB_RUN_ID}" "${GITHUB_RUN_ATTEMPT}"
       - name: Start runner preparation timing
         run: scripts/g6-timing.sh start "${G6HA_TIMING_FILE}" runner_preparation || true
       - name: Runner preflight
@@ -226,16 +225,15 @@ jobs:
       FD_ID: fd-b
       FD_ALIAS: fd-beta
       G6HA_CANDIDATE_SHA: ${{ github.sha }}
-      G6HA_TIMING_FILE: ${{ runner.temp }}/artifacts/timing/g6-ha-fd-b.json
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
       - name: Initialize failure domain B timing diagnostics
-        run: >-
-          scripts/g6-timing.sh init
-          "${G6HA_TIMING_FILE}"
-          g6-ha-fd-b ha-pitr "${GITHUB_SHA}" "${GITHUB_RUN_ID}" "${GITHUB_RUN_ATTEMPT}"
+        run: |
+          echo "G6HA_TIMING_FILE=${RUNNER_TEMP}/artifacts/timing/g6-ha-fd-b.json" >>"${GITHUB_ENV}"
+          export G6HA_TIMING_FILE
+          scripts/g6-timing.sh init "${G6HA_TIMING_FILE}" g6-ha-fd-b ha-pitr "${GITHUB_SHA}" "${GITHUB_RUN_ID}" "${GITHUB_RUN_ATTEMPT}"
       - name: Start runner preparation timing
         run: scripts/g6-timing.sh start "${G6HA_TIMING_FILE}" runner_preparation || true
       - name: Runner preflight

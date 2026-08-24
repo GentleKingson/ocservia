@@ -43,7 +43,9 @@ jobs.each do |job_id, job|
   # preserve rendezvous wait results, and upload as a warn-only artifact.
   env = job.fetch("env", {})
   reject("#{job_id} must not make timing authoritative") if env.key?("G6_TIMING_REQUIRED")
-  reject("#{job_id} must export its per-domain timing file") unless env.fetch("G6HA_TIMING_FILE", "") == "${{ runner.temp }}/artifacts/timing/#{job_id}.json"
+  env.each_value do |value|
+    reject("#{job_id} job env must not use runner context: it is unavailable at job scope") if value.include?("${{ runner.")
+  end
   run_steps = Array(job.fetch("steps")).select { |step| step.key?("run") }
   run_steps.each do |step|
     reject("#{job_id} must not make timing authoritative") if step.fetch("env", {}).key?("G6_TIMING_REQUIRED")
@@ -52,6 +54,8 @@ jobs.each do |job_id, job|
   init_step = run_steps.find { |step| step.fetch("run").include?("g6-timing.sh init") }
   reject("#{job_id} must initialize timing diagnostics") if init_step.nil?
   init_text = init_step.fetch("run")
+  reject("#{job_id} timing init must bind the per-domain timing file") unless init_text.include?("G6HA_TIMING_FILE=${RUNNER_TEMP}/artifacts/timing/#{job_id}.json")
+  reject("#{job_id} timing init must publish the binding for later steps") unless init_text.include?(">>\"${GITHUB_ENV}\"")
   reject("#{job_id} timing init must bind the job identity") unless init_text.include?(job_id)
   reject("#{job_id} timing init must bind the ha-pitr profile") unless init_text.include?("ha-pitr")
   %w[${GITHUB_SHA} ${GITHUB_RUN_ID} ${GITHUB_RUN_ATTEMPT}].each do |binding|
