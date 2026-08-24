@@ -86,6 +86,16 @@ jobs.each do |job_id, job|
     reject("#{job_id} timing upload must stay non-authoritative") unless with.fetch("if-no-files-found") == "warn"
     reject("#{job_id} timing upload must stay short-lived") unless with.fetch("retention-days") == 5
   end
+  # if-no-files-found: warn only covers a missing local timing file; an
+  # artifact-service failure would otherwise fail the failure-domain job
+  # after all authoritative work and evidence already completed. Only the
+  # telemetry upload is exempt — every evidence and rendezvous artifact
+  # upload stays fail-closed.
+  reject("#{job_id} timing diagnostics upload must be continue-on-error") unless timing_upload["continue-on-error"] == true
+  Array(job.fetch("steps")).select { |step| step["uses"].to_s.start_with?("actions/upload-artifact@") }.each do |step|
+    next if step.equal?(timing_upload)
+    reject("#{job_id} authoritative artifact upload must stay fail-closed") if step["continue-on-error"]
+  end
 end
 
 services = compose.fetch("services")
