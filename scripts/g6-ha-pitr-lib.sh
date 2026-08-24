@@ -400,18 +400,20 @@ g6_ha_timing_record_tree_bytes() {
 }
 
 # Records every compose-project image identity plus the frozen tunnel binary
-# so both failure domains can be compared for build-once benchmarks.
+# so both failure domains can be compared for build-once benchmarks. Built
+# images are identified by the harness-controlled repository prefix
+# (compose does not label built images on every hosted compose version).
 g6_ha_timing_record_images() {
   [[ -n "${G6HA_TIMING_FILE:-}" ]] || return 0
-  local short_id size key image_id
-  while read -r short_id; do
-    [[ -n "${short_id}" ]] || continue
+  local short_id repository service image_id size
+  while read -r short_id repository; do
+    [[ -n "${short_id}" && "${repository:-}" == "${COMPOSE_PROJECT}-"* ]] || continue
+    service="${repository#"${COMPOSE_PROJECT}"-}"
     image_id="$(docker image inspect --format '{{.Id}}' "${short_id}" 2>/dev/null || true)"
     size="$(docker image inspect --format '{{.Size}}' "${short_id}" 2>/dev/null || true)"
-    key="$(docker image inspect --format '{{index .Config.Labels "com.docker.compose.service"}}' "${short_id}" 2>/dev/null || true)"
-    [[ -n "${key}" && "${size}" =~ ^[0-9]+$ && "${image_id}" =~ ^sha256:[0-9a-f]{64}$ ]] || continue
-    g6_ha_timing image "compose_${key}" "${size}" "${image_id}"
-  done < <(docker image ls --filter "label=com.docker.compose.project=${COMPOSE_PROJECT}" -q | sort -u)
+    [[ "${size}" =~ ^[0-9]+$ && "${image_id}" =~ ^sha256:[0-9a-f]{64}$ ]] || continue
+    g6_ha_timing image "compose_${service}" "${size}" "${image_id}"
+  done < <(docker image ls --format '{{.ID}} {{.Repository}}' 2>/dev/null || true)
   [[ -x "${G6HA_TUNNEL_BIN}" ]] && g6_ha_timing artifact tunnel_binary "${G6HA_TUNNEL_BIN}"
   g6_ha_timing_record_tree_bytes wal_archive_bytes "${G6HA_ARCHIVE}"
   g6_ha_timing_record_tree_bytes basebackup_bytes "${G6HA_BASEBACKUP}"
