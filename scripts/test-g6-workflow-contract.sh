@@ -39,7 +39,9 @@ INSTALL_HELPER="${ROOT}/scripts/g6-install-release.sh"
 for stage in runner_preparation toolchain_bootstrap candidate_docker_image_build \
   docker_save_gzip fd_artifact_download checksum_provenance_verification \
   docker_load scenario_execution peer_observation_wait observation_300_seconds \
-  evidence_collection release_artifact_upload; do
+  evidence_collection release_artifact_upload \
+  secret_scan_tool_bootstrap secret_scan_artifact_download \
+  secret_scan_execution secret_scan_result_upload; do
   grep -qF "${stage}" "${ROOT}/.github/workflows/g6-harness-core.yml" \
     "${TIMING_HELPER}" "${INSTALL_HELPER}" \
     || { echo "G6 timing stage is missing: ${stage}" >&2; exit 1; }
@@ -216,8 +218,8 @@ if [[ "$(grep -oF -- 'scripts/g6-buildx-cache.sh ' "${ROOT}/.github/workflows/g6
   exit 1
 fi
 summary_count="$(grep -cF 'scripts/g6-timing.sh summary' "${ROOT}/.github/workflows/g6-harness-core.yml")"
-if [[ "${summary_count}" -ne 6 ]]; then
-  echo "every G6 release and failure domain job must write a timing step summary (expected 6, found ${summary_count})" >&2
+if [[ "${summary_count}" -ne 8 ]]; then
+  echo "every G6 release, failure domain, and secret-scan job must write a timing step summary (expected 8, found ${summary_count})" >&2
   exit 1
 fi
 upload_stage_count="$(grep -cF 'release_artifact_upload' "${ROOT}/.github/workflows/g6-harness-core.yml")"
@@ -241,3 +243,58 @@ for token in 'release-artifacts.sha256' 'harness Go version mismatch' \
   grep -qF "${token}" "${INSTALL_HELPER}" \
     || { echo "release verifier is missing ${token}" >&2; exit 1; }
 done
+
+# The G6 secret-scan jobs scan published evidence with the pinned gitleaks
+# binary only. They must bootstrap the minimal g6-secret-scan profile (never
+# the heavyweight security profile), must keep scanning every published layer
+# with the repository gitleaks configuration, and must carry non-authoritative
+# tail telemetry for bootstrap, download, execution, and result publication.
+if grep -qF 'scripts/bootstrap.sh security' "${ROOT}/.github/workflows/g6-harness-core.yml"; then
+  echo "G6 secret-scan jobs must not bootstrap the heavyweight security profile" >&2
+  exit 1
+fi
+ruby -r yaml - "${ROOT}/.github/workflows/g6-harness-core.yml" <<'RUBY'
+core = YAML.safe_load(File.read(ARGV[0]), aliases: true)
+jobs = core.fetch("jobs")
+secret_scan_jobs = {
+  "g6-rd-secret-scan" => %w[
+    g6-rd-raw-fd-a g6-rd-raw-fd-b g6-rd-evidence-bundle
+  ],
+  "g6-smoke-secret-scan" => %w[
+    g6-harness-smoke-fd-a g6-harness-smoke-fd-b g6-harness-smoke-bundle
+  ]
+}
+secret_scan_jobs.each do |job_id, scan_targets|
+  job = jobs.fetch(job_id) { abort("secret-scan job is missing: #{job_id}") }
+  steps = Array(job.fetch("steps"))
+  bootstrap_lines = steps.map { |step| step["run"].to_s }
+    .flat_map { |run| run.lines.map(&:strip) }
+    .select { |line| line.include?("scripts/bootstrap.sh") }
+  unless bootstrap_lines == ["scripts/bootstrap.sh g6-secret-scan"]
+    abort("#{job_id} must bootstrap exactly the minimal g6-secret-scan profile")
+  end
+  scan_step = steps.find { |step| step["name"].to_s.include?("Scan") }
+  scan_run = scan_step.to_s
+  abort("#{job_id} must scan every published evidence layer") unless
+    scan_targets.all? { |target| scan_run.include?(target) }
+  abort("#{job_id} must keep exactly one gitleaks invocation per evidence layer") unless
+    scan_run.scan("gitleaks dir").length == scan_targets.length
+  abort("#{job_id} must use the repository gitleaks configuration") unless
+    scan_run.include?("scripts/g6-secret-scan.toml")
+  job_run = steps.map { |step| step["run"].to_s }.join("\n")
+  %w[
+    secret_scan_tool_bootstrap secret_scan_artifact_download
+    secret_scan_execution secret_scan_result_upload
+  ].each do |stage|
+    abort("#{job_id} is missing secret-scan tail timing stage #{stage}") unless
+      job_run.include?(stage)
+  end
+  timing_upload = steps.select { |step| step["uses"].to_s.start_with?("actions/upload-artifact@") }
+    .find { |step| step.fetch("with", {}).fetch("name", "").include?("g6-timing-") }
+  abort("#{job_id} must publish its timing diagnostics") unless timing_upload
+  unless timing_upload.fetch("with")["if-no-files-found"] == "warn" &&
+         timing_upload.fetch("with")["retention-days"] == 5
+    abort("#{job_id} timing diagnostics must stay non-authoritative")
+  end
+end
+RUBY
