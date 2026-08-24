@@ -8,11 +8,13 @@ the required checks for the exact pull-request commit.
 
 ## Execution graph
 
-The primary workflow has 15 worker job definitions. The PostgreSQL matrix
-expands one definition into separate PostgreSQL 17 and 18 executions, so a full
-run has 16 worker executions. Three lightweight result aggregators preserve the
-stable required-check names. Workers start independently except that the two
-PostgreSQL workers and Local Slice wait for the commit-bound runtime artifact.
+The primary workflow has 15 worker job definitions plus a `CI Relevance`
+classifier job. The PostgreSQL matrix expands one definition into separate
+PostgreSQL 17 and 18 executions, so a full run has 16 worker executions.
+Three lightweight result aggregators preserve the stable required-check
+names. Workers start independently after the relevance classifier except
+that the two PostgreSQL workers and Local Slice additionally wait for the
+commit-bound runtime artifact.
 
 | Worker execution | Coverage | Bootstrap profile | Timeout | Required-check aggregator |
 | --- | --- | --- | --- | --- |
@@ -34,9 +36,37 @@ PostgreSQL workers and Local Slice wait for the commit-bound runtime artifact.
 | Native Ocserv | Ephemeral native package, `ocpasswd`, OpenSSL, and loopback login fixture | `native` | 20 minutes | Quality, Security & Native |
 
 Rust Validation executes once and feeds two aggregators. Each aggregator has a
-five-minute timeout, uses `always()`, accepts only successful or intentionally
-skipped dependencies, and fails for cancelled, failed, or timed-out workers.
-The workflow currently has no path-based worker skipping.
+five-minute timeout, uses `always()`, and accepts a dependency only when it
+succeeded or when the relevance classifier explicitly marked it not
+applicable and it was skipped; every other result, including an unexpected
+skip, fails the aggregator. The workflow uses no workflow-level path filters.
+
+### Change relevance
+
+The `CI Relevance` job classifies each pull-request change set with the
+repository-owned `scripts/ci-relevance.sh` and publishes one authorization
+flag per worker family (`run_backend`, `run_database`, `run_rust`,
+`run_native`, `run_web`, `run_browser`, `run_p1_smoke`, `run_contracts`,
+`run_security`). A worker runs only when its flag is true. The classifier
+authorizes reduced validation for exactly two high-confidence categories:
+
+- Documentation-only changes (ordinary documentation paths, mirroring the G6
+  smoke relevance classifier, with `docs/acceptance/**` excluded) keep
+  Contracts and Policy plus Security and Licenses and skip the remaining
+  fourteen worker executions. Documentation policy checks and the repository
+  secret and license scan stay authoritative for documentation edits.
+- Web-only changes (`web/**`) keep Web Static and Unit, Browser E2E, P1
+  Smoke, Contracts and Policy, and Security and Licenses, and skip the
+  backend, database, Rust, and native workers.
+
+Everything else runs full validation: Go, Rust, migrations, workflow and
+deployment changes, bootstrap and toolchain pins, acceptance contracts, and
+any path the classifier does not recognize. Mixed categories, deleted and
+renamed files that touch reduced and full categories at once, and empty or
+unresolvable diffs also fail closed to full validation. Push and
+manual-dispatch runs always request full validation, and the classifier
+invariantly keeps the database flag a subset of the backend flag because the
+PostgreSQL workers consume the commit-bound runtime artifact.
 
 The focused I10 journal tests remain in the Rust workspace run. The I11
 Go/Rust tests remain in the dedicated language workers, while its boundary

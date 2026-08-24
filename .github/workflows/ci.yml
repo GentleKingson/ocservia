@@ -15,8 +15,38 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  ci-relevance:
+    name: CI Relevance
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      category: ${{ steps.relevance.outputs.category }}
+      reason: ${{ steps.relevance.outputs.reason }}
+      run_backend: ${{ steps.relevance.outputs.run_backend }}
+      run_database: ${{ steps.relevance.outputs.run_database }}
+      run_rust: ${{ steps.relevance.outputs.run_rust }}
+      run_native: ${{ steps.relevance.outputs.run_native }}
+      run_web: ${{ steps.relevance.outputs.run_web }}
+      run_browser: ${{ steps.relevance.outputs.run_browser }}
+      run_p1_smoke: ${{ steps.relevance.outputs.run_p1_smoke }}
+      run_contracts: ${{ steps.relevance.outputs.run_contracts }}
+      run_security: ${{ steps.relevance.outputs.run_security }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Classify the change set
+        id: relevance
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: scripts/ci-relevance.sh "${GITHUB_EVENT_NAME}" "${BASE_SHA}" "${HEAD_SHA}" "${GITHUB_OUTPUT}"
+
   runtime-artifacts:
     name: Build Runtime Artifacts
+    needs: ci-relevance
+    if: needs.ci-relevance.outputs.run_backend == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     env:
@@ -85,6 +115,8 @@ jobs:
 
   go-standard:
     name: Go Static and Unit
+    needs: [ci-relevance]
+    if: needs.ci-relevance.outputs.run_backend == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
@@ -150,6 +182,8 @@ jobs:
 
   go-race:
     name: Go Race
+    needs: [ci-relevance]
+    if: needs.ci-relevance.outputs.run_backend == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
@@ -205,7 +239,8 @@ jobs:
 
   database:
     name: PostgreSQL ${{ matrix.pg-major }} Integration
-    needs: runtime-artifacts
+    needs: [ci-relevance, runtime-artifacts]
+    if: needs.ci-relevance.outputs.run_database == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 25
     strategy:
@@ -263,6 +298,8 @@ jobs:
 
   stage-contracts:
     name: I14-I19 Contracts
+    needs: [ci-relevance]
+    if: needs.ci-relevance.outputs.run_backend == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
@@ -293,6 +330,8 @@ jobs:
 
   production-relays:
     name: I18 Production Relays
+    needs: [ci-relevance]
+    if: needs.ci-relevance.outputs.run_backend == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 25
     env:
@@ -356,6 +395,8 @@ jobs:
 
   credential-rotation:
     name: PostgreSQL Credential Rotation
+    needs: [ci-relevance]
+    if: needs.ci-relevance.outputs.run_backend == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
@@ -380,7 +421,8 @@ jobs:
 
   local-slice:
     name: Local Slice
-    needs: runtime-artifacts
+    needs: [ci-relevance, runtime-artifacts]
+    if: needs.ci-relevance.outputs.run_backend == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
@@ -414,6 +456,8 @@ jobs:
 
   web-validation:
     name: Web Static and Unit
+    needs: [ci-relevance]
+    if: needs.ci-relevance.outputs.run_web == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
@@ -472,6 +516,8 @@ jobs:
 
   browser-e2e:
     name: Browser E2E
+    needs: [ci-relevance]
+    if: needs.ci-relevance.outputs.run_browser == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 25
     steps:
@@ -497,6 +543,8 @@ jobs:
 
   p1-smoke:
     name: P1 Smoke
+    needs: [ci-relevance]
+    if: needs.ci-relevance.outputs.run_p1_smoke == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     env:
@@ -535,6 +583,8 @@ jobs:
 
   contracts-policy:
     name: Contracts and Policy
+    needs: [ci-relevance]
+    if: needs.ci-relevance.outputs.run_contracts == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
@@ -570,6 +620,7 @@ jobs:
       - name: CI workflow policy tests
         run: |
           scripts/test-bootstrap-profiles.sh
+          scripts/test-ci-relevance.sh
           scripts/test-ci-runtime-artifact.sh
       - name: G6 readiness workflow policy
         run: |
@@ -626,6 +677,8 @@ jobs:
 
   rust-validation:
     name: Rust Validation
+    needs: [ci-relevance]
+    if: needs.ci-relevance.outputs.run_rust == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 25
     env:
@@ -693,6 +746,8 @@ jobs:
 
   security-license:
     name: Security and Licenses
+    needs: [ci-relevance]
+    if: needs.ci-relevance.outputs.run_security == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     env:
@@ -764,6 +819,8 @@ jobs:
 
   native-ocserv:
     name: Native Ocserv
+    needs: [ci-relevance]
+    if: needs.ci-relevance.outputs.run_native == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     env:
@@ -841,6 +898,7 @@ jobs:
     name: Backend Integration
     if: ${{ always() }}
     needs:
+      - ci-relevance
       - runtime-artifacts
       - go-standard
       - go-race
@@ -853,57 +911,98 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     env:
+      CI_RELEVANCE: ${{ needs.ci-relevance.result }}
       RUNTIME_ARTIFACTS: ${{ needs.runtime-artifacts.result }}
+      RUNTIME_ARTIFACTS_RELEVANT: ${{ needs.ci-relevance.outputs.run_backend }}
       GO_STANDARD: ${{ needs.go-standard.result }}
+      GO_STANDARD_RELEVANT: ${{ needs.ci-relevance.outputs.run_backend }}
       GO_RACE: ${{ needs.go-race.result }}
+      GO_RACE_RELEVANT: ${{ needs.ci-relevance.outputs.run_backend }}
       DATABASE: ${{ needs.database.result }}
+      DATABASE_RELEVANT: ${{ needs.ci-relevance.outputs.run_database }}
       STAGE_CONTRACTS: ${{ needs.stage-contracts.result }}
+      STAGE_CONTRACTS_RELEVANT: ${{ needs.ci-relevance.outputs.run_backend }}
       PRODUCTION_RELAYS: ${{ needs.production-relays.result }}
+      PRODUCTION_RELAYS_RELEVANT: ${{ needs.ci-relevance.outputs.run_backend }}
       CREDENTIAL_ROTATION: ${{ needs.credential-rotation.result }}
+      CREDENTIAL_ROTATION_RELEVANT: ${{ needs.ci-relevance.outputs.run_backend }}
       LOCAL_SLICE: ${{ needs.local-slice.result }}
+      LOCAL_SLICE_RELEVANT: ${{ needs.ci-relevance.outputs.run_backend }}
       RUST_VALIDATION: ${{ needs.rust-validation.result }}
+      RUST_VALIDATION_RELEVANT: ${{ needs.ci-relevance.outputs.run_rust }}
     steps:
       - name: Aggregate backend results
         run: |
-          for result in \
-            "${RUNTIME_ARTIFACTS}" "${GO_STANDARD}" "${GO_RACE}" \
-            "${DATABASE}" "${STAGE_CONTRACTS}" "${PRODUCTION_RELAYS}" \
-            "${CREDENTIAL_ROTATION}" "${LOCAL_SLICE}" "${RUST_VALIDATION}"
-          do
-            case "${result}" in
-              success | skipped) ;;
-              *) exit 1 ;;
-            esac
-          done
+          if [[ "${CI_RELEVANCE}" != "success" ]]; then
+            echo "the relevance classifier finished with ${CI_RELEVANCE}" >&2
+            exit 1
+          fi
+          while IFS='|' read -r worker result authorized; do
+            if [[ "${result}" == "success" ]]; then
+              continue
+            fi
+            if [[ "${result}" == "skipped" && "${authorized}" == "false" ]]; then
+              continue
+            fi
+            echo "${worker} finished with ${result} while its relevance flag is ${authorized:-missing}" >&2
+            exit 1
+          done <<CHECKS
+          runtime-artifacts|${RUNTIME_ARTIFACTS}|${RUNTIME_ARTIFACTS_RELEVANT}
+          go-standard|${GO_STANDARD}|${GO_STANDARD_RELEVANT}
+          go-race|${GO_RACE}|${GO_RACE_RELEVANT}
+          database|${DATABASE}|${DATABASE_RELEVANT}
+          stage-contracts|${STAGE_CONTRACTS}|${STAGE_CONTRACTS_RELEVANT}
+          production-relays|${PRODUCTION_RELAYS}|${PRODUCTION_RELAYS_RELEVANT}
+          credential-rotation|${CREDENTIAL_ROTATION}|${CREDENTIAL_ROTATION_RELEVANT}
+          local-slice|${LOCAL_SLICE}|${LOCAL_SLICE_RELEVANT}
+          rust-validation|${RUST_VALIDATION}|${RUST_VALIDATION_RELEVANT}
+          CHECKS
 
   web-smoke:
     name: Web & Smoke
     if: ${{ always() }}
     needs:
+      - ci-relevance
       - web-validation
       - browser-e2e
       - p1-smoke
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     env:
+      CI_RELEVANCE: ${{ needs.ci-relevance.result }}
       WEB_VALIDATION: ${{ needs.web-validation.result }}
+      WEB_VALIDATION_RELEVANT: ${{ needs.ci-relevance.outputs.run_web }}
       BROWSER_E2E: ${{ needs.browser-e2e.result }}
+      BROWSER_E2E_RELEVANT: ${{ needs.ci-relevance.outputs.run_browser }}
       P1_SMOKE: ${{ needs.p1-smoke.result }}
+      P1_SMOKE_RELEVANT: ${{ needs.ci-relevance.outputs.run_p1_smoke }}
     steps:
       - name: Aggregate Web and smoke results
         run: |
-          for result in "${WEB_VALIDATION}" "${BROWSER_E2E}" "${P1_SMOKE}"
-          do
-            case "${result}" in
-              success | skipped) ;;
-              *) exit 1 ;;
-            esac
-          done
+          if [[ "${CI_RELEVANCE}" != "success" ]]; then
+            echo "the relevance classifier finished with ${CI_RELEVANCE}" >&2
+            exit 1
+          fi
+          while IFS='|' read -r worker result authorized; do
+            if [[ "${result}" == "success" ]]; then
+              continue
+            fi
+            if [[ "${result}" == "skipped" && "${authorized}" == "false" ]]; then
+              continue
+            fi
+            echo "${worker} finished with ${result} while its relevance flag is ${authorized:-missing}" >&2
+            exit 1
+          done <<CHECKS
+          web-validation|${WEB_VALIDATION}|${WEB_VALIDATION_RELEVANT}
+          browser-e2e|${BROWSER_E2E}|${BROWSER_E2E_RELEVANT}
+          p1-smoke|${P1_SMOKE}|${P1_SMOKE_RELEVANT}
+          CHECKS
 
   quality-security-native:
     name: Quality, Security & Native
     if: ${{ always() }}
     needs:
+      - ci-relevance
       - contracts-policy
       - rust-validation
       - security-license
@@ -911,19 +1010,34 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     env:
+      CI_RELEVANCE: ${{ needs.ci-relevance.result }}
       CONTRACTS_POLICY: ${{ needs.contracts-policy.result }}
+      CONTRACTS_POLICY_RELEVANT: ${{ needs.ci-relevance.outputs.run_contracts }}
       RUST_VALIDATION: ${{ needs.rust-validation.result }}
+      RUST_VALIDATION_RELEVANT: ${{ needs.ci-relevance.outputs.run_rust }}
       SECURITY_LICENSE: ${{ needs.security-license.result }}
+      SECURITY_LICENSE_RELEVANT: ${{ needs.ci-relevance.outputs.run_security }}
       NATIVE_OCSERV: ${{ needs.native-ocserv.result }}
+      NATIVE_OCSERV_RELEVANT: ${{ needs.ci-relevance.outputs.run_native }}
     steps:
       - name: Aggregate quality, security, and native results
         run: |
-          for result in \
-            "${CONTRACTS_POLICY}" "${RUST_VALIDATION}" \
-            "${SECURITY_LICENSE}" "${NATIVE_OCSERV}"
-          do
-            case "${result}" in
-              success | skipped) ;;
-              *) exit 1 ;;
-            esac
-          done
+          if [[ "${CI_RELEVANCE}" != "success" ]]; then
+            echo "the relevance classifier finished with ${CI_RELEVANCE}" >&2
+            exit 1
+          fi
+          while IFS='|' read -r worker result authorized; do
+            if [[ "${result}" == "success" ]]; then
+              continue
+            fi
+            if [[ "${result}" == "skipped" && "${authorized}" == "false" ]]; then
+              continue
+            fi
+            echo "${worker} finished with ${result} while its relevance flag is ${authorized:-missing}" >&2
+            exit 1
+          done <<CHECKS
+          contracts-policy|${CONTRACTS_POLICY}|${CONTRACTS_POLICY_RELEVANT}
+          rust-validation|${RUST_VALIDATION}|${RUST_VALIDATION_RELEVANT}
+          security-license|${SECURITY_LICENSE}|${SECURITY_LICENSE_RELEVANT}
+          native-ocserv|${NATIVE_OCSERV}|${NATIVE_OCSERV_RELEVANT}
+          CHECKS
