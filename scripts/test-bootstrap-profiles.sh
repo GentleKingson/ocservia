@@ -37,34 +37,79 @@ worker_jobs = %w[
   production-relays credential-rotation local-slice web-validation browser-e2e
   p1-smoke contracts-policy rust-validation security-license native-ocserv
 ]
+relevance_job = "ci-relevance"
+worker_relevance_flags = {
+  "runtime-artifacts" => "run_backend",
+  "go-standard" => "run_backend",
+  "go-race" => "run_backend",
+  "database" => "run_database",
+  "stage-contracts" => "run_backend",
+  "production-relays" => "run_backend",
+  "credential-rotation" => "run_backend",
+  "local-slice" => "run_backend",
+  "web-validation" => "run_web",
+  "browser-e2e" => "run_browser",
+  "p1-smoke" => "run_p1_smoke",
+  "rust-validation" => "run_rust",
+  "native-ocserv" => "run_native"
+}
+# The policy and security workers are structurally outside the classifier's
+# skip authority: one of them runs the classifier's own tests, so a buggy or
+# tampered classifier must never be able to switch them off or make their
+# skip acceptable. They start immediately and only success counts.
+always_on_workers = %w[contracts-policy security-license]
 gate_needs = {
   "backend-integration" => %w[
-    runtime-artifacts go-standard go-race database stage-contracts
+    ci-relevance runtime-artifacts go-standard go-race database stage-contracts
     production-relays credential-rotation local-slice rust-validation
   ],
-  "web-smoke" => %w[web-validation browser-e2e p1-smoke],
+  "web-smoke" => %w[ci-relevance web-validation browser-e2e p1-smoke],
   "quality-security-native" => %w[
-    contracts-policy rust-validation security-license native-ocserv
+    ci-relevance contracts-policy rust-validation security-license native-ocserv
   ]
 }
-expected_jobs = worker_jobs + gate_needs.keys
+expected_jobs = worker_jobs + gate_needs.keys + [relevance_job]
 reject("primary workflow execution graph changed unexpectedly") unless jobs.keys.sort == expected_jobs.sort
 
 worker_jobs.each do |job_id|
   job = jobs.fetch(job_id)
   reject("#{job_id} must use ubuntu-24.04") unless job.fetch("runs-on") == "ubuntu-24.04"
-  reject("#{job_id} must not be silently path-skipped before a change classifier is defined") if job.key?("if")
+  if always_on_workers.include?(job_id)
+    reject("#{job_id} must not carry a relevance condition") if job.key?("if")
+    reject("#{job_id} must start without waiting for the classifier") unless Array(job["needs"]).empty?
+    next
+  end
+  flag = worker_relevance_flags.fetch(job_id)
+  expected_if = "needs.ci-relevance.outputs.#{flag} == 'true'"
+  reject("#{job_id} must run only when the relevance classifier authorizes #{flag}") unless
+    job.fetch("if") == expected_if
 end
 
 allowed_worker_dependencies = {
-  "database" => ["runtime-artifacts"],
-  "local-slice" => ["runtime-artifacts"]
+  "database" => ["ci-relevance", "runtime-artifacts"],
+  "local-slice" => ["ci-relevance", "runtime-artifacts"],
+  "contracts-policy" => [],
+  "security-license" => []
 }
 worker_jobs.each do |job_id|
   actual = Array(jobs.fetch(job_id)["needs"])
-  expected = allowed_worker_dependencies.fetch(job_id, [])
+  expected = allowed_worker_dependencies.fetch(job_id, ["ci-relevance"])
   reject("#{job_id} has an unexpected dependency") unless actual == expected
 end
+
+relevance = jobs.fetch(relevance_job)
+reject("the relevance classifier must use ubuntu-24.04") unless relevance.fetch("runs-on") == "ubuntu-24.04"
+reject("the relevance classifier must have a timeout") unless relevance.fetch("timeout-minutes") > 0
+reject("the relevance classifier must always run") if relevance.key?("if")
+expected_relevance_outputs = (%w[category reason] + worker_relevance_flags.values.uniq).sort
+reject("the relevance classifier outputs drifted") unless
+  relevance.fetch("outputs").keys.sort == expected_relevance_outputs
+relevance_steps = Array(relevance.fetch("steps"))
+relevance_checkout = relevance_steps.find { |step| step["uses"].to_s.start_with?("actions/checkout@") }
+reject("the relevance classifier must clone the full history") unless
+  relevance_checkout && relevance_checkout.fetch("with", {}).fetch("fetch-depth", nil) == 0
+reject("the relevance classifier must run the repository classifier script") unless
+  relevance_steps.any? { |step| step["run"].to_s.include?("scripts/ci-relevance.sh") }
 
 expected_gate_names = {
   "backend-integration" => "Backend Integration",
@@ -86,10 +131,29 @@ gate_needs.each do |job_id, expected_needs|
   reject("#{job_id} must run after failed dependencies") unless job.fetch("if") == "${{ always() }}"
   reject("#{job_id} must use ubuntu-24.04") unless job.fetch("runs-on") == "ubuntu-24.04"
   reject("#{job_id} has the wrong aggregate dependencies") unless Array(job.fetch("needs")).sort == expected_needs.sort
-  serialized = job.to_s
-  reject("#{job_id} must accept successful or intentionally skipped workers") unless
-    serialized.include?("success | skipped")
-  reject("#{job_id} must fail for every other worker result") unless serialized.include?("*) exit 1")
+  reject("#{job_id} must gate the aggregate on the relevance classifier") unless
+    job.fetch("env").key?("CI_RELEVANCE")
+  run_text = Array(job.fetch("steps")).map { |step| step["run"].to_s }.join("\n")
+  reject("#{job_id} must accept successful or classifier-authorized skipped workers") unless
+    run_text.include?('== "success"') && run_text.include?('== "skipped"') &&
+    run_text.include?('== "false"')
+  reject("#{job_id} must fail for every other worker result") unless run_text.include?("exit 1")
+  reject("#{job_id} must not blindly accept skipped workers") if
+    run_text.include?("success | skipped")
+  if job_id == "quality-security-native"
+    # The policy and security workers may never be skipped on the
+    # classifier's word: their rows must carry the never-skippable marker,
+    # not a relevance flag reference.
+    reject("the quality aggregate must hard-require the policy worker") unless
+      run_text.include?("contracts-policy|${CONTRACTS_POLICY}|true")
+    reject("the quality aggregate must hard-require the security worker") unless
+      run_text.include?("security-license|${SECURITY_LICENSE}|true")
+    reject("the quality aggregate must not gate policy or security on the classifier") if
+      run_text.include?("run_contracts") || run_text.include?("run_security")
+  end
+  (expected_needs - [relevance_job]).each do |dependency|
+    reject("#{job_id} must aggregate #{dependency}") unless run_text.include?(dependency)
+  end
   reject("#{job_id} must remain a lightweight result aggregator") if
     Array(job.fetch("steps")).any? { |step| step.key?("uses") }
 end
@@ -117,6 +181,7 @@ execution_profiles = {
 end
 {
   "g6-runtime" => ["install_node", "install_npm", "install_g6_runtime_dependencies"],
+  "g6-secret-scan" => ["install_gitleaks", "verify_host_command jq", "verify_host_command openssl"],
   "go-test" => ["install_go", "verify_host_command jq"],
   "go-quality" => ["install_go", "install_go_quality_tools", "verify_host_command jq"],
   "go-rust-integration" => [

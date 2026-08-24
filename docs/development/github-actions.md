@@ -8,11 +8,13 @@ the required checks for the exact pull-request commit.
 
 ## Execution graph
 
-The primary workflow has 15 worker job definitions. The PostgreSQL matrix
-expands one definition into separate PostgreSQL 17 and 18 executions, so a full
-run has 16 worker executions. Three lightweight result aggregators preserve the
-stable required-check names. Workers start independently except that the two
-PostgreSQL workers and Local Slice wait for the commit-bound runtime artifact.
+The primary workflow has 15 worker job definitions plus a `CI Relevance`
+classifier job. The PostgreSQL matrix expands one definition into separate
+PostgreSQL 17 and 18 executions, so a full run has 16 worker executions.
+Three lightweight result aggregators preserve the stable required-check
+names. Workers start independently after the relevance classifier except
+that the two PostgreSQL workers and Local Slice additionally wait for the
+commit-bound runtime artifact.
 
 | Worker execution | Coverage | Bootstrap profile | Timeout | Required-check aggregator |
 | --- | --- | --- | --- | --- |
@@ -34,9 +36,41 @@ PostgreSQL workers and Local Slice wait for the commit-bound runtime artifact.
 | Native Ocserv | Ephemeral native package, `ocpasswd`, OpenSSL, and loopback login fixture | `native` | 20 minutes | Quality, Security & Native |
 
 Rust Validation executes once and feeds two aggregators. Each aggregator has a
-five-minute timeout, uses `always()`, accepts only successful or intentionally
-skipped dependencies, and fails for cancelled, failed, or timed-out workers.
-The workflow currently has no path-based worker skipping.
+five-minute timeout, uses `always()`, and accepts a dependency only when it
+succeeded or when the relevance classifier explicitly marked it not
+applicable and it was skipped; every other result, including an unexpected
+skip, fails the aggregator. The workflow uses no workflow-level path filters.
+
+### Change relevance
+
+The `CI Relevance` job classifies each pull-request change set with the
+repository-owned `scripts/ci-relevance.sh` and publishes one authorization
+flag per worker family (`run_backend`, `run_database`, `run_rust`,
+`run_native`, `run_web`, `run_browser`, `run_p1_smoke`). A worker runs only
+when its flag is true. Contracts and Policy and Security and Licenses are
+structurally outside the classifier's authority: they carry no relevance
+condition, start without waiting for the classifier, and the quality
+aggregate accepts only their success — never a classifier-authorized skip —
+because one of them runs the classifier's own tests. The classifier
+authorizes reduced validation for exactly two high-confidence categories:
+
+- Documentation-only changes (ordinary documentation paths, mirroring the G6
+  smoke relevance classifier, with `docs/acceptance/**` excluded) keep
+  Contracts and Policy plus Security and Licenses and skip the remaining
+  fourteen worker executions. Documentation policy checks and the repository
+  secret and license scan stay authoritative for documentation edits.
+- Web-only changes (`web/**`) keep Web Static and Unit, Browser E2E, P1
+  Smoke, Contracts and Policy, and Security and Licenses, and skip the
+  backend, database, Rust, and native workers.
+
+Everything else runs full validation: Go, Rust, migrations, workflow and
+deployment changes, bootstrap and toolchain pins, acceptance contracts, and
+any path the classifier does not recognize. Mixed categories, deleted and
+renamed files that touch reduced and full categories at once, and empty or
+unresolvable diffs also fail closed to full validation. Push and
+manual-dispatch runs always request full validation, and the classifier
+invariantly keeps the database flag a subset of the backend flag because the
+PostgreSQL workers consume the commit-bound runtime artifact.
 
 The focused I10 journal tests remain in the Rust workspace run. The I11
 Go/Rust tests remain in the dedicated language workers, while its boundary
@@ -60,7 +94,14 @@ then freeze evidence after a bounded observation. Separate Builder, gitleaks,
 and independent Verifier jobs feed `ocservia.g6-harness-smoke-result.v1`; the
 smoke never enters a formal Environment,
 produces a production-readiness verdict, or substitutes for the three required
-CI aggregators or a formal G6 run.
+CI aggregators or a formal G6 run. The secret-scan jobs on both profiles scan
+every published evidence layer with the same repository gitleaks configuration
+and bootstrap only the dedicated minimal `g6-secret-scan` profile; their
+bootstrap, evidence download, scan, and result-publication spans are recorded
+as non-authoritative timing diagnostics that never influence a verdict: every
+timing call is fail-open guarded at the call site, so a telemetry failure can
+neither skip nor fail the authoritative scan work. The minimal profile is
+small enough that it bootstraps cold every run with no tooling cache.
 
 The smoke caller always creates the same aggregate result check. Executable,
 workflow, deployment, and acceptance-contract changes run the complete hosted
@@ -87,6 +128,7 @@ exactly one explicit profile:
 | `rust-validation` | Rust, rustfmt, clippy, cargo-audit, cargo-deny, and sccache | Rust Validation |
 | `security` | Go, Node/npm, Rust, gitleaks, cargo-deny, sccache, and Web dependencies | Security and Licenses |
 | `native` | Rust and sccache | Native Ocserv |
+| `g6-secret-scan` | gitleaks and host `jq`/`openssl` | G6 Readiness Secret Scan; G6 Harness Smoke Secret Scan |
 
 Stage contracts, credential rotation, Local Slice, Browser E2E, and P1 Smoke
 use runner-provided tools or artifacts and do not call bootstrap. Outside
