@@ -65,6 +65,107 @@ if [[ "${image_mark_count}" -ne 10 ]]; then
 fi
 grep -qF 'g6-timing.sh image' "${ROOT}/.github/workflows/g6-harness-core.yml" \
   || { echo "release producers must record per-image size and image ID" >&2; exit 1; }
+
+# Persistent BuildKit caches: both release producers must run a
+# run-scoped docker-container builder, split caches across the three
+# disjoint lane scopes, export only the heavyweight builds with mode=max,
+# load every tagged build into the local store for freezing, and remove
+# the builder in the always-cleanup step.
+ruby -r yaml - "${ROOT}/.github/workflows/g6-harness-core.yml" <<'RUBY'
+core = YAML.safe_load(File.read(ARGV[0]), aliases: true)
+jobs = core.fetch("jobs")
+expected_scope = {
+  "control-plane/Dockerfile" => "g6-control-plane",
+  "deploy/production/relay.Dockerfile" => "g6-relay",
+  "rust/g6-runtime.Dockerfile" => "g6-rust-runtime",
+}
+export_builds = [
+  ["control-plane/Dockerfile", nil],
+  ["deploy/production/relay.Dockerfile", nil],
+  ["rust/g6-runtime.Dockerfile", "g6-rust-builder"],
+]
+%w[g6-rd-release-image g6-smoke-release].each do |job_id|
+  steps = Array(jobs.fetch(job_id).fetch("steps"))
+  prep = steps.find { |step| step["name"] == "Prepare the BuildKit cache builder" }
+  freeze = steps.find do |step|
+    run = step.fetch("run", "")
+    run.include?("candidate_docker_image_build") && run.include?("docker build")
+  end
+  cleanup = steps.find { |step| step["name"].to_s.start_with?("Clean ") }
+  next abort("#{job_id} must prepare the BuildKit cache builder before freezing") unless
+    prep && freeze && steps.index(prep) < steps.index(freeze) && cleanup
+  prep_run = prep.fetch("run")
+  ["--driver docker-container", "--bootstrap", "--use",
+   'g6-buildx-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}'].each do |token|
+    next abort("#{job_id} builder preparation is missing #{token}") unless prep_run.include?(token)
+  end
+  cleanup_run = cleanup.fetch("run")
+  ['docker buildx rm', 'docker buildx inspect',
+   'g6-buildx-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}'].each do |token|
+    next abort("#{job_id} cleanup is missing #{token}") unless cleanup_run.include?(token)
+  end
+
+  logical = []
+  freeze.fetch("run").each_line do |line|
+    line = line.chomp
+    if !logical.empty? && logical.last.end_with?("\\")
+      logical[-1] = "#{logical.last.chomp('\\').rstrip} #{line.strip}"
+    else
+      logical << line
+    end
+  end
+  builds = logical.select { |line| line.include?("docker build ") }
+  abort("#{job_id} must keep the six lane builds plus the tunnel export (found #{builds.length})") unless builds.length == 7
+  builds.each do |build|
+    file = build[/--file (\S+)/, 1]
+    scope = expected_scope[file] || abort("#{job_id} builds an unexpected dockerfile: #{file}")
+    froms = build.scan(/--cache-from type=gha,scope=(\S+)/).flatten
+    abort("#{job_id} #{file} must import exactly its own lane cache") unless froms == [scope]
+    if build.include?("--tag")
+      ["--load", '--label "org.opencontainers.image.revision=${GITHUB_SHA}"'].each do |token|
+        next abort("#{job_id} tagged builds must stay inspectable and candidate-labeled (#{token})") unless build.include?(token)
+      end
+    end
+    target = build[/--target (\S+)/, 1]
+    tos = build.scan(/--cache-to type=gha,scope=(\S+?),mode=max/).flatten
+    if export_builds.any? { |f, t| f == file && t == target }
+      next abort("#{job_id} #{file} #{target} must export its lane cache with mode=max") unless tos == [scope]
+    elsif !tos.empty?
+      abort("#{job_id} #{file} #{target} must not re-export the lane cache")
+    end
+    if build.include?("type=local") && !build.include?("--target g6-tunnel-artifact")
+      abort("#{job_id} #{file} must not use a non-GHA cache backend")
+    end
+  end
+  tunnel = builds.find { |b| b.include?("--target g6-tunnel-artifact") }
+  abort("#{job_id} tunnel export must stay a local output export with rust cache import") unless
+    tunnel&.include?('--output "type=local,dest=${tunnel_output}"') &&
+    tunnel.include?("--cache-from type=gha,scope=g6-rust-runtime") &&
+    !tunnel.include?("--cache-to")
+end
+RUBY
+builder_count="$(grep -cF 'docker buildx create' "${ROOT}/.github/workflows/g6-harness-core.yml")"
+if [[ "${builder_count}" -ne 2 ]]; then
+  echo "both release producers must create exactly one run-scoped buildx builder (found ${builder_count})" >&2
+  exit 1
+fi
+for scope_counts in 'g6-rust-runtime:12' 'g6-control-plane:4' 'g6-relay:4'; do
+  scope="${scope_counts%%:*}"
+  expected="${scope_counts##*:}"
+  actual="$(grep -oF "scope=${scope}" "${ROOT}/.github/workflows/g6-harness-core.yml" | wc -l | tr -d ' ')"
+  if [[ "${actual}" -ne "${expected}" ]]; then
+    echo "cache scope ${scope} must appear exactly ${expected} times (found ${actual})" >&2
+    exit 1
+  fi
+done
+if [[ "$(grep -oF -- '--cache-to type=gha' "${ROOT}/.github/workflows/g6-harness-core.yml" | wc -l | tr -d ' ')" -ne 6 ]] \
+  || [[ "$(grep -oF 'mode=max' "${ROOT}/.github/workflows/g6-harness-core.yml" | wc -l | tr -d ' ')" -ne 6 ]] \
+  || [[ "$(grep -oF -- '--load' "${ROOT}/.github/workflows/g6-harness-core.yml" | wc -l | tr -d ' ')" -ne 10 ]] \
+  || [[ "$(grep -cF 'docker buildx rm' "${ROOT}/.github/workflows/g6-harness-core.yml")" -ne 2 ]] \
+  || [[ "$(grep -cF 'buildx_builder_prepare' "${ROOT}/.github/workflows/g6-harness-core.yml")" -ne 4 ]]; then
+  echo "BuildKit cache flags drifted from the pinned release graph" >&2
+  exit 1
+fi
 summary_count="$(grep -cF 'scripts/g6-timing.sh summary' "${ROOT}/.github/workflows/g6-harness-core.yml")"
 if [[ "${summary_count}" -ne 6 ]]; then
   echo "every G6 release and failure domain job must write a timing step summary (expected 6, found ${summary_count})" >&2

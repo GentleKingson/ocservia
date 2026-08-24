@@ -102,6 +102,22 @@ jobs:
           scripts/g6-timing.sh start "${RUNNER_TEMP}/artifacts/timing/g6-rd-release.json" toolchain_bootstrap
           scripts/bootstrap.sh go-test
           scripts/g6-timing.sh end "${RUNNER_TEMP}/artifacts/timing/g6-rd-release.json" toolchain_bootstrap || true
+      - name: Prepare the BuildKit cache builder
+        run: |
+          set -euo pipefail
+          timing="${RUNNER_TEMP}/artifacts/timing/g6-rd-release.json"
+          scripts/g6-timing.sh start "${timing}" buildx_builder_prepare
+          # Persistent BuildKit caches are performance inputs only. Cache
+          # hit or miss, the candidate label, image IDs, payload checksums,
+          # and the frozen release manifest are still recomputed from the
+          # exact candidate below, and both failure domains still verify the
+          # frozen release independently.
+          docker buildx create \
+            --driver docker-container \
+            --name "g6-buildx-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" \
+            --bootstrap \
+            --use
+          scripts/g6-timing.sh end "${timing}" buildx_builder_prepare || true
       - name: Build and freeze the release images
         id: release-build
         timeout-minutes: 30
@@ -130,6 +146,9 @@ jobs:
             scripts/g6-timing.sh measure "${timing}" control_plane_build -- \
               docker build --pull=false \
                 --label "org.opencontainers.image.revision=${GITHUB_SHA}" \
+                --cache-from type=gha,scope=g6-control-plane \
+                --cache-to type=gha,scope=g6-control-plane,mode=max \
+                --load \
                 --file control-plane/Dockerfile \
                 --tag "${G6RD_CONTROL_PLANE_IMAGE}" .
           ) &
@@ -138,6 +157,9 @@ jobs:
             scripts/g6-timing.sh measure "${timing}" relay_build -- \
               docker build --pull=false \
                 --label "org.opencontainers.image.revision=${GITHUB_SHA}" \
+                --cache-from type=gha,scope=g6-relay \
+                --cache-to type=gha,scope=g6-relay,mode=max \
+                --load \
                 --file deploy/production/relay.Dockerfile \
                 --tag "${G6RD_RELAY_IMAGE}" .
           ) &
@@ -145,23 +167,31 @@ jobs:
           (
             scripts/g6-timing.sh measure "${timing}" rust_workspace_build -- \
               docker build --pull=false \
+                --cache-from type=gha,scope=g6-rust-runtime \
+                --cache-to type=gha,scope=g6-rust-runtime,mode=max \
                 --file rust/g6-runtime.Dockerfile \
                 --target g6-rust-builder .
             scripts/g6-timing.sh measure "${timing}" transportd_build -- \
               docker build --pull=false \
                 --label "org.opencontainers.image.revision=${GITHUB_SHA}" \
+                --cache-from type=gha,scope=g6-rust-runtime \
+                --load \
                 --file rust/g6-runtime.Dockerfile \
                 --target transportd-runtime \
                 --tag "${G6RD_TRANSPORTD_IMAGE}" .
             scripts/g6-timing.sh measure "${timing}" g6_probe_build -- \
               docker build --pull=false \
                 --label "org.opencontainers.image.revision=${GITHUB_SHA}" \
+                --cache-from type=gha,scope=g6-rust-runtime \
+                --load \
                 --file rust/g6-runtime.Dockerfile \
                 --target g6-probe-runtime \
                 --tag "${G6RD_PROBE_IMAGE}" .
             scripts/g6-timing.sh measure "${timing}" g6_agent_build -- \
               docker build --pull=false \
                 --label "org.opencontainers.image.revision=${GITHUB_SHA}" \
+                --cache-from type=gha,scope=g6-rust-runtime \
+                --load \
                 --file rust/g6-runtime.Dockerfile \
                 --target g6-agent-runtime \
                 --tag "${G6RD_AGENT_IMAGE}" .
@@ -186,6 +216,7 @@ jobs:
           # BuildKit stage; this reuses the compiled layer and does not
           # rebuild anything on either failure domain.
           docker build --pull=false \
+            --cache-from type=gha,scope=g6-rust-runtime \
             --file rust/g6-runtime.Dockerfile \
             --target g6-tunnel-artifact \
             --output "type=local,dest=${tunnel_output}" .
@@ -275,6 +306,10 @@ jobs:
           set -euo pipefail
           status=0
           archive_dir="${RUNNER_TEMP}/g6-rd-runtime-images-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          buildx_builder="g6-buildx-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          if docker buildx inspect "${buildx_builder}" >/dev/null 2>&1; then
+            docker buildx rm "${buildx_builder}" >/dev/null || status=1
+          fi
           for image in \
             "${G6RD_AGENT_IMAGE}" "${G6RD_CONTROL_PLANE_IMAGE}" \
             "${G6RD_TRANSPORTD_IMAGE}" "${G6RD_RELAY_IMAGE}" \
@@ -1424,6 +1459,22 @@ jobs:
           scripts/g6-timing.sh start "${RUNNER_TEMP}/artifacts/timing/g6-smoke-release.json" toolchain_bootstrap
           scripts/bootstrap.sh go-test
           scripts/g6-timing.sh end "${RUNNER_TEMP}/artifacts/timing/g6-smoke-release.json" toolchain_bootstrap || true
+      - name: Prepare the BuildKit cache builder
+        run: |
+          set -euo pipefail
+          timing="${RUNNER_TEMP}/artifacts/timing/g6-smoke-release.json"
+          scripts/g6-timing.sh start "${timing}" buildx_builder_prepare
+          # Persistent BuildKit caches are performance inputs only. Cache
+          # hit or miss, the candidate label, image IDs, payload checksums,
+          # and the frozen release manifest are still recomputed from the
+          # exact candidate below, and both failure domains still verify the
+          # frozen release independently.
+          docker buildx create \
+            --driver docker-container \
+            --name "g6-buildx-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" \
+            --bootstrap \
+            --use
+          scripts/g6-timing.sh end "${timing}" buildx_builder_prepare || true
       - name: Build and freeze the smoke release
         id: freeze
         timeout-minutes: 30
@@ -1454,23 +1505,23 @@ jobs:
           build_pids=()
           (
             scripts/g6-timing.sh measure "${timing}" control_plane_build -- \
-              docker build --pull=false --label "org.opencontainers.image.revision=${GITHUB_SHA}" --file control-plane/Dockerfile --tag "${G6RD_CONTROL_PLANE_IMAGE}" .
+              docker build --pull=false --label "org.opencontainers.image.revision=${GITHUB_SHA}" --cache-from type=gha,scope=g6-control-plane --cache-to type=gha,scope=g6-control-plane,mode=max --load --file control-plane/Dockerfile --tag "${G6RD_CONTROL_PLANE_IMAGE}" .
           ) &
           build_pids+=("$!")
           (
             scripts/g6-timing.sh measure "${timing}" relay_build -- \
-              docker build --pull=false --label "org.opencontainers.image.revision=${GITHUB_SHA}" --file deploy/production/relay.Dockerfile --tag "${G6RD_RELAY_IMAGE}" .
+              docker build --pull=false --label "org.opencontainers.image.revision=${GITHUB_SHA}" --cache-from type=gha,scope=g6-relay --cache-to type=gha,scope=g6-relay,mode=max --load --file deploy/production/relay.Dockerfile --tag "${G6RD_RELAY_IMAGE}" .
           ) &
           build_pids+=("$!")
           (
             scripts/g6-timing.sh measure "${timing}" rust_workspace_build -- \
-              docker build --pull=false --file rust/g6-runtime.Dockerfile --target g6-rust-builder .
+              docker build --pull=false --cache-from type=gha,scope=g6-rust-runtime --cache-to type=gha,scope=g6-rust-runtime,mode=max --file rust/g6-runtime.Dockerfile --target g6-rust-builder .
             scripts/g6-timing.sh measure "${timing}" transportd_build -- \
-              docker build --pull=false --label "org.opencontainers.image.revision=${GITHUB_SHA}" --file rust/g6-runtime.Dockerfile --target transportd-runtime --tag "${G6RD_TRANSPORTD_IMAGE}" .
+              docker build --pull=false --label "org.opencontainers.image.revision=${GITHUB_SHA}" --cache-from type=gha,scope=g6-rust-runtime --load --file rust/g6-runtime.Dockerfile --target transportd-runtime --tag "${G6RD_TRANSPORTD_IMAGE}" .
             scripts/g6-timing.sh measure "${timing}" g6_probe_build -- \
-              docker build --pull=false --label "org.opencontainers.image.revision=${GITHUB_SHA}" --file rust/g6-runtime.Dockerfile --target g6-probe-runtime --tag "${G6RD_PROBE_IMAGE}" .
+              docker build --pull=false --label "org.opencontainers.image.revision=${GITHUB_SHA}" --cache-from type=gha,scope=g6-rust-runtime --load --file rust/g6-runtime.Dockerfile --target g6-probe-runtime --tag "${G6RD_PROBE_IMAGE}" .
             scripts/g6-timing.sh measure "${timing}" g6_agent_build -- \
-              docker build --pull=false --label "org.opencontainers.image.revision=${GITHUB_SHA}" --file rust/g6-runtime.Dockerfile --target g6-agent-runtime --tag "${G6RD_AGENT_IMAGE}" .
+              docker build --pull=false --label "org.opencontainers.image.revision=${GITHUB_SHA}" --cache-from type=gha,scope=g6-rust-runtime --load --file rust/g6-runtime.Dockerfile --target g6-agent-runtime --tag "${G6RD_AGENT_IMAGE}" .
           ) &
           build_pids+=("$!")
           build_status=0
@@ -1484,7 +1535,7 @@ jobs:
           record_image_timing g6_agent "${G6RD_AGENT_IMAGE}"
           scripts/g6-timing.sh start "${timing}" helper_harness_tunnel_build
           tunnel_output="${output}/tunnel-output"
-          docker build --pull=false --file rust/g6-runtime.Dockerfile --target g6-tunnel-artifact --output "type=local,dest=${tunnel_output}" .
+          docker build --pull=false --cache-from type=gha,scope=g6-rust-runtime --file rust/g6-runtime.Dockerfile --target g6-tunnel-artifact --output "type=local,dest=${tunnel_output}" .
           install -m 0755 "${tunnel_output}/ocservia-g6-tunnel" "${output}/ocservia-g6-tunnel"
           rm -rf -- "${tunnel_output}"
           source scripts/env.sh
@@ -1547,6 +1598,10 @@ jobs:
         run: |
           set -euo pipefail
           status=0
+          buildx_builder="g6-buildx-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          if docker buildx inspect "${buildx_builder}" >/dev/null 2>&1; then
+            docker buildx rm "${buildx_builder}" >/dev/null || status=1
+          fi
           for image in ocservia-g6-agent:${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT} ocservia-g6-control-plane:${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT} ocservia-g6-transportd:${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT} ocservia-g6-relay:${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT} ocservia-g6-probe:${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT} postgres:17.10-bookworm; do
             if docker image inspect "${image}" >/dev/null 2>&1; then docker image rm --force "${image}" >/dev/null || status=1; fi
           done
