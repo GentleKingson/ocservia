@@ -119,11 +119,12 @@ jobs:
           }
           # Three concurrent build lanes with disjoint dependency trees: the
           # Go control-plane, the pinned iroh-relay, and one shared Rust
-          # graph. The Rust lane compiles the workspace once in the
-          # g6-rust-builder stage and every first-party Rust image then only
-          # assembles from those frozen layers, so the dependency build can
-          # no longer be repeated by parallel Cargo builds contending for the
-          # same runner cores.
+          # graph. The Rust lane runs the three original compile partitions
+          # (transportd; probe+tunnel; agent+privd) sequentially in the
+          # g6-rust-builder stage — separate Cargo invocations sharing one
+          # target cache, so dependency features never unify across
+          # partitions — and every first-party Rust image then only assembles
+          # from those frozen layers.
           build_pids=()
           (
             scripts/g6-timing.sh measure "${timing}" control_plane_build -- \
@@ -1446,9 +1447,10 @@ jobs:
               "$(docker image inspect --format '{{.Id}}' "$2")" || true
           }
           # Same three-lane release graph as the formal producer: the Go
-          # control-plane and pinned relay build concurrently with one shared
-          # Rust workspace compile whose frozen layers assemble every
-          # first-party Rust image.
+          # control-plane and pinned relay build concurrently with the shared
+          # Rust builder, whose three-partition compile keeps the original
+          # per-package feature resolution and whose frozen layers assemble
+          # every first-party Rust image.
           build_pids=()
           (
             scripts/g6-timing.sh measure "${timing}" control_plane_build -- \

@@ -63,6 +63,43 @@ G6_TIMING_REQUIRED=true "${TIMING}" measure "${timing_file}" required_probe -- /
   exit 1
 }
 
+# A broken clock must never satisfy the non-authoritative ERR trap and skip
+# the wrapped authoritative command: measure disarms the trap before any
+# timing work, always runs the wrapped command, and records no rows from
+# invalid timestamps. Fake both clock backends (awk for /proc/uptime, node
+# for the fallback) so the fixture fails on every host.
+broken_clock_bin="${fixture}/broken-clock-bin"
+mkdir -p "${broken_clock_bin}"
+for clock_tool in awk node; do
+  printf '#!/usr/bin/env bash\necho "broken clock: %s failed" >&2\nexit 1\n' \
+    "${clock_tool}" >"${broken_clock_bin}/${clock_tool}"
+  chmod 0755 "${broken_clock_bin}/${clock_tool}"
+done
+broken_clock_marker="${fixture}/broken-clock-ran"
+wrapped_command="${fixture}/broken-clock-wrapped.sh"
+printf '#!/usr/bin/env bash\nprintf ran >"%s"\nexit 7\n' \
+  "${broken_clock_marker}" >"${wrapped_command}"
+chmod 0755 "${wrapped_command}"
+status_capture=0
+PATH="${broken_clock_bin}:${PATH}" "${TIMING}" measure "${timing_file}" broken_clock \
+  -- "${wrapped_command}" || status_capture=$?
+[[ "${status_capture}" -eq 7 ]] || {
+  echo "a broken clock must not stop the wrapped command from returning its own status (got ${status_capture})" >&2
+  exit 1
+}
+[[ -f "${broken_clock_marker}" ]] || {
+  echo "the wrapped command must execute even when the timing clock is broken" >&2
+  exit 1
+}
+if grep -q $'^start\tbroken_clock\t' "${timing_file}.tsv"; then
+  echo "a broken clock must not record a bogus start timestamp" >&2
+  exit 1
+fi
+if grep -q $'^duration\tbroken_clock\t' "${timing_file}.tsv"; then
+  echo "a broken clock must not record a bogus duration" >&2
+  exit 1
+fi
+
 digest="$(printf 'b%.0s' {1..64})"
 "${TIMING}" image "${timing_file}" transportd 1048576 "sha256:${digest}"
 jq -e '.images == {transportd: {bytes: 1048576, image_id: "sha256:'"${digest}"'"}}' \

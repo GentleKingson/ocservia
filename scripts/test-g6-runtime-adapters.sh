@@ -683,13 +683,75 @@ grep -q '^USER nobody:ocservia$' "${G6_RUNTIME_DOCKERFILE}" || {
   echo "the G6 probe image must run as the transport-authorized nobody account" >&2
   exit 1
 }
-for package in ocservia-transportd ocservia-g6-probe ocservia-g6-tunnel \
-  ocservia-agent ocservia-privd; do
-  grep -q -- "--package ${package}" "${G6_RUNTIME_DOCKERFILE}" || {
-    echo "the shared Rust builder must compile ${package} exactly once" >&2
+# The shared builder must preserve the three original compile partitions —
+# transportd alone, probe+tunnel, agent+privd — as separate Cargo invocations
+# sharing one target cache. A single merged invocation would unify dependency
+# features across packages and link different binaries than the production
+# transportd build that G6 must verify.
+dockerfile_joined="$(
+  awk '{
+    if (pending != "") { line = pending $0 } else { line = $0 }
+    if (line ~ /\\$/) { pending = substr(line, 1, length(line) - 1) } else { pending = ""; print line }
+  }' "${G6_RUNTIME_DOCKERFILE}"
+)"
+cargo_invocation_count="$(grep -c '^RUN cargo build' <<<"${dockerfile_joined}" || true)"
+if [[ "${cargo_invocation_count}" -ne 3 ]]; then
+  echo "the shared Rust builder must issue exactly three cargo invocations (transportd; probe+tunnel; agent+privd), found ${cargo_invocation_count}" >&2
+  exit 1
+fi
+production_transportd_build_command="$(
+  sed -n 's/^RUN \(cargo build --locked --release --package ocservia-transportd\)$/\1/p' \
+    "${TRANSPORT_DOCKERFILE}"
+)"
+g6_transportd_build_command="$(
+  grep '^RUN cargo build' <<<"${dockerfile_joined}" | sed -n '1p' \
+    | sed -e 's/^RUN //' -e 's/[[:space:]]*&&.*$//'
+)"
+if [[ -z "${production_transportd_build_command}" ]] \
+  || [[ "${g6_transportd_build_command}" != "${production_transportd_build_command}" ]]; then
+  echo "the shared builder's transportd invocation must equal the production build command exactly" >&2
+  exit 1
+fi
+expected_partition_packages=(
+  'ocservia-transportd'
+  'ocservia-g6-probe ocservia-g6-tunnel'
+  'ocservia-agent ocservia-privd'
+)
+invocation_number=0
+while IFS= read -r invocation; do
+  invocation_number=$(( invocation_number + 1 ))
+  invocation_command="${invocation#RUN }"
+  invocation_command="${invocation_command%%&&*}"
+  if [[ "${invocation_command}" != *'--locked --release'* ]]; then
+    echo "cargo invocation ${invocation_number} must stay a locked release build" >&2
+    exit 1
+  fi
+  invocation_packages="$(
+    grep -oE -- '--package [a-z0-9_-]+' <<<"${invocation_command}" \
+      | sed 's/^--package //' | sort | paste -sd ' ' -
+  )"
+  expected_packages="$(
+    tr ' ' '\n' <<<"${expected_partition_packages[invocation_number - 1]}" \
+      | sed '/^$/d' | sort | paste -sd ' ' -
+  )"
+  if [[ "${invocation_packages}" != "${expected_packages}" ]]; then
+    echo "cargo invocation ${invocation_number} must compile exactly: ${expected_packages}" >&2
+    exit 1
+  fi
+done <<<"$(grep '^RUN cargo build' <<<"${dockerfile_joined}")"
+for frozen_copy in \
+  'cp target/release/ocservia-transportd /out/transportd/' \
+  'cp target/release/ocservia-g6-probe target/release/ocservia-g6-tunnel /out/probe/' \
+  'cp target/release/ocservia-agent target/release/ocservia-privd /out/agent/'; do
+  grep -qF "${frozen_copy}" "${G6_RUNTIME_DOCKERFILE}" || {
+    echo "the shared builder must freeze partition artifacts via: ${frozen_copy}" >&2
     exit 1
   }
 done
+if grep -Eq '^COPY --from=g6-rust-builder /src/' "${G6_RUNTIME_DOCKERFILE}"; then
+  echo "runtime stages must consume frozen /out artifacts, not the shared target tree" >&2
+  exit 1
+fi
 grep -q '^FROM scratch AS g6-tunnel-artifact$' "${G6_RUNTIME_DOCKERFILE}" || {
   echo "the shared runtime Dockerfile must expose the frozen G6 tunnel target" >&2
   exit 1
@@ -714,8 +776,9 @@ grep -q '^USER relay:relay$' "${RELAY_DOCKERFILE}" || {
 
 # The harness transportd image must stay byte-equivalent to the production
 # image definition: same pinned base, principals, entrypoint, and command.
-# Normalize the stage names and builder reference so only real layout drift
-# can fail this comparison; comments do not change image content.
+# Normalize the stage names, builder reference, and frozen /out artifact
+# path so only real layout drift can fail this comparison; comments do not
+# change image content.
 shared_transportd_block="$(
   awk '/^FROM debian:bookworm-slim@sha256:[0-9a-f]+ AS transportd-runtime-base$/ { in_block = 1 }
        in_block && /^FROM/ && $0 !~ /transportd-runtime-base/ { exit }
@@ -727,7 +790,8 @@ production_transportd_block="$(
     | grep -vE '^(#|$)' \
     | sed -e 's/ AS runtime-base$/ AS transportd-runtime-base/' \
       -e 's/^FROM runtime-base$/FROM transportd-runtime-base AS transportd-runtime/' \
-      -e 's/--from=build/--from=g6-rust-builder/'
+      -e 's/--from=build/--from=g6-rust-builder/' \
+      -e 's|/src/target/release/ocservia-transportd|/out/transportd/ocservia-transportd|'
 )"
 if [[ "${shared_transportd_block}" != "${production_transportd_block}" ]]; then
   echo "the shared G6 transportd runtime must mirror rust/transportd.Dockerfile exactly" >&2

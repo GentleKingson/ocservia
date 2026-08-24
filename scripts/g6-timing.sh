@@ -104,17 +104,30 @@ case "${command}" in
     shift
     # Wrap one timed command (for example a single release image build) and
     # always propagate its exit status: timing collection must never mask a
-    # build failure, and a failed build still records its duration. Appends
-    # stay raw so concurrent measures never rewrite the JSON mid-flight; the
-    # parent renders after every measured command has been waited on.
-    start_ms="$(now_ms)"
+    # build failure, and a failed build still records its duration. Disarm
+    # the non-authoritative ERR trap and errexit BEFORE any timing work so a
+    # broken clock cannot exit 0 and skip the wrapped authoritative command;
+    # the wrapped command always runs, timestamps are validated before they
+    # are recorded, and the exit status comes only from the wrapped command.
+    # Appends stay raw so concurrent measures never rewrite the JSON
+    # mid-flight; the parent renders after every measured command has been
+    # waited on.
     trap - ERR
     set +e
+    start_ms="$(now_ms)"
+    start_ms_valid=0
+    [[ "${start_ms}" =~ ^[0-9]+$ ]] && start_ms_valid=1
     "$@"
     command_status=$?
     end_ms="$(now_ms)"
-    append "${file}" "start\t${stage}\t${start_ms}" || :
-    append "${file}" "duration\t${stage}\t$(( end_ms - start_ms ))" || :
+    end_ms_valid=0
+    [[ "${end_ms}" =~ ^[0-9]+$ ]] && end_ms_valid=1
+    if [[ "${start_ms_valid}" -eq 1 ]]; then
+      append "${file}" "start\t${stage}\t${start_ms}" || :
+    fi
+    if [[ "${start_ms_valid}" -eq 1 && "${end_ms_valid}" -eq 1 ]]; then
+      append "${file}" "duration\t${stage}\t$(( end_ms - start_ms ))" || :
+    fi
     exit "${command_status}"
     ;;
   rendezvous)
