@@ -438,11 +438,17 @@ g6_ha_timing_record_images() {
 # WAL archive and basebackup trees hold real data only after the scenario has
 # run, so their footprints are sampled during diagnostics collection — after
 # the scenario, before cleanup — not next to the image recording that runs
-# before any data exists.
+# before any data exists. Both samples are pure telemetry, so each call is
+# || true guarded: a filesystem hiccup inside the sampler (mktemp, awk, du)
+# must not turn an authoritative green scenario red. Unlike the timed-phase
+# wrapper, nothing inside these calls is authoritative, so suppressing errexit
+# for their bodies is the desired behavior.
 g6_ha_timing_record_storage_footprints() {
   [[ -n "${G6HA_TIMING_FILE:-}" ]] || return 0
-  g6_ha_timing_record_tree_bytes wal_archive_bytes "${G6HA_ARCHIVE}" /var/lib/postgresql/archive
-  g6_ha_timing_record_tree_bytes basebackup_bytes "${G6HA_BASEBACKUP}" /var/lib/postgresql/basebackup
+  g6_ha_timing_record_tree_bytes wal_archive_bytes "${G6HA_ARCHIVE}" \
+    /var/lib/postgresql/archive || true
+  g6_ha_timing_record_tree_bytes basebackup_bytes "${G6HA_BASEBACKUP}" \
+    /var/lib/postgresql/basebackup || true
 }
 
 g6_ha_diagnostics() {

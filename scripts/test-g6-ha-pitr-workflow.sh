@@ -222,6 +222,43 @@ CHILD
 )
 test_timing_run_preserves_fail_fast
 
+# The storage footprint sampler is executed under a failing helper, not just
+# grepped: the sampler is pure telemetry that runs inside the set -e
+# diagnostics script, so a filesystem failure (mktemp, du, awk) inside it must
+# never abort the shell — that would flip an authoritative green scenario
+# red. The mocked mktemp fails every sampler call; the child must still exit
+# zero and reach the authoritative continuation marker.
+test_storage_footprints_fail_open() (
+  local temporary child
+  temporary="$(mktemp -d)"
+  trap 'rm -rf "${temporary}"' EXIT INT TERM
+  mkdir -p "${temporary}/logs" "${temporary}/pgarchive" "${temporary}/basebackup"
+  child="${temporary}/child.sh"
+  cat >"${child}" <<CHILD
+set -Eeuo pipefail
+source "${LIB}"
+G6HA_ROOT="${ROOT}"
+G6HA_TIMING_FILE="${temporary}/timing.json"
+G6HA_LOGS="${temporary}/logs"
+G6HA_ARCHIVE="${temporary}/pgarchive"
+G6HA_BASEBACKUP="${temporary}/basebackup"
+mktemp() { return 1; }
+g6_ha_compose() { return 1; }
+g6_ha_timing_record_storage_footprints
+touch "${temporary}/authoritative-continued"
+CHILD
+  if ! bash "${child}" >"${temporary}/child.log" 2>&1; then
+    echo "a telemetry failure inside the storage sampler must not fail the shell:" >&2
+    cat "${temporary}/child.log" >&2
+    return 1
+  fi
+  if [[ ! -e "${temporary}/authoritative-continued" ]]; then
+    echo "execution stopped at a telemetry failure before the next command" >&2
+    return 1
+  fi
+)
+test_storage_footprints_fail_open
+
 # Secret export is exercised, not just grepped: every missing or zero-byte
 # cluster credential must fail both the reader and the aggregate export. A
 # compose call from a fresh diagnostics/cleanup process must then use the

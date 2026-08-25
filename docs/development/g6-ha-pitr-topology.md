@@ -125,7 +125,8 @@ measured through the running postgres container, where the uid 999 trees are
 readable. The policy test fails if a timing call stops being guarded, a
 phase stops failing fast inside the wrapper, a required stage stops being
 timed, a rendezvous wait stops preserving its result, storage footprints
-move back to the pre-scenario image recording, or the timing upload becomes
+move back to the pre-scenario image recording, the storage-footprint sampler
+stops being fail-open under a failing helper, or the timing upload becomes
 required for a green run.
 
 ## Verification boundary
