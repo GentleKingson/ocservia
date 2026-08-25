@@ -618,6 +618,7 @@ jobs:
           scripts/test-bootstrap-profiles.sh
           scripts/test-ci-relevance.sh
           scripts/test-ci-runtime-artifact.sh
+          scripts/test-toolchain-consistency.sh
       - name: G6 readiness workflow policy
         run: |
           scripts/test-g6-workflow-contract.sh
