@@ -184,7 +184,7 @@ assert_upgraded_state() {
   assert_installed_state "${context}" "${expected_version}"
   sudo test -f /var/lib/ocservia-upgrade/upgrade-backup/MANIFEST.sha256 \
     || { echo "${context}: upgrade rollback snapshot manifest missing" >&2; exit 1; }
-  sudo test "$(awk 'END { print NR }' /var/lib/ocservia-upgrade/upgrade-backup/MANIFEST.sha256)" -eq 5 \
+  sudo test "$(sudo awk 'END { print NR }' /var/lib/ocservia-upgrade/upgrade-backup/MANIFEST.sha256)" -eq 5 \
     || { echo "${context}: upgrade rollback snapshot is incomplete" >&2; exit 1; }
   sudo grep -Fxq "USER_PASSWORD_SEAL_PUBLIC_KEY_SHA256=${user_seal_hash}" /etc/ocservia-agent/agent.env \
     || { echo "${context}: upgrade lost the configured agent environment" >&2; exit 1; }
