@@ -111,6 +111,7 @@ verify_arch_triple() {
     exit 1
   fi
   rootfs="${work}/rootfs-${package_arch}"
+  sudo install -d -o root -g root -m 0700 -- "${rootfs}"
   sudo install -d -o root -g root -m 0700 -- "${rootfs}/var/lib"
   package_root="$(sudo env DESTDIR="${rootfs}" AGENT_TRUSTED_KEY_SHA256="${fingerprint}" \
     "${ROOT}/scripts/verify-agent-package.sh" \
