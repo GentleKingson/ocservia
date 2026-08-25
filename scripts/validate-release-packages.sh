@@ -52,7 +52,7 @@ der_fingerprint_of() {
 
 verify_embedded_payload() {
   local package_arch="$1" archive="$2" pub="$3" fingerprint="$4"
-  local deb rpm extract archive_member embedded_tar deb_arch rpm_arch_actual
+  local deb rpm extract archive_member embedded_tar deb_arch rpm_arch_actual cpio_stream
 
   case "${package_arch}" in
     amd64) deb="${deb_amd64}" rpm="${rpm_amd64}" ;;
@@ -86,7 +86,17 @@ verify_embedded_payload() {
       ;;
   esac
   mkdir -p -- "${extract}/rpm"
-  (cd "${extract}/rpm" && rpm2cpio "${ASSET_DIR}/${rpm}" | cpio -idm --quiet)
+  # rpm2cpio writes the complete payload but exits nonzero on some rpm builds
+  # (observed with rpm 4.18); validate the extracted tree instead of trusting
+  # its exit status.
+  cpio_stream="${extract}/payload.cpio"
+  rpm2cpio "${ASSET_DIR}/${rpm}" >"${cpio_stream}" || true
+  [[ -s "${cpio_stream}" ]] \
+    || { echo "${rpm} produced an empty payload stream" >&2; exit 1; }
+  # Copy-in with --no-absolute-filenames: rpm members carry absolute paths,
+  # and GNU cpio would otherwise write them to the real filesystem root.
+  (cd "${extract}/rpm" && cpio -idm --quiet --no-absolute-filenames <"${cpio_stream}")
+  rm -f -- "${cpio_stream}"
   embedded_tar="${extract}/rpm/${archive_member}"
   [[ -f "${embedded_tar}" ]] \
     || { echo "${rpm} does not embed ${archive}" >&2; exit 1; }
