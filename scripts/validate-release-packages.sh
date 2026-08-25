@@ -64,6 +64,7 @@ verify_embedded_payload() {
   deb_arch="$(dpkg-deb -f "${ASSET_DIR}/${deb}" Architecture)"
   [[ "${deb_arch}" == "${package_arch}" ]] \
     || { echo "${deb} declares Architecture ${deb_arch}, expected ${package_arch}" >&2; exit 1; }
+  install -d -- "${extract}/deb"
   dpkg-deb -x "${ASSET_DIR}/${deb}" "${extract}/deb"
   embedded_tar="${extract}/deb/${archive_member}"
   [[ "$(sha256sum -- "${embedded_tar}" | awk '{print $1}')" == "$(sha256sum -- "${ASSET_DIR}/${archive}" | awk '{print $1}')" ]] \
