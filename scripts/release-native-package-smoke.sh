@@ -211,7 +211,9 @@ echo "deb removal state preservation passed"
 sudo rm -rf -- /etc/ocservia-agent /var/lib/ocservia-agent /var/lib/ocservia-upgrade \
   /var/lib/ocservia-privd
 sudo userdel ocserv-agent
-sudo groupdel ocserv-agent
+# userdel removes the primary group with the user when login.defs enables
+# USERGROUPS_ENAB, so the explicit group cleanup is best effort here.
+sudo groupdel ocserv-agent 2>/dev/null || true
 sudo systemctl daemon-reload
 
 # The stock rockylinux:9 image ships without systemd; build a one-off image
