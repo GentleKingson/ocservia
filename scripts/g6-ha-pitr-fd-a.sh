@@ -133,9 +133,12 @@ phase_prepare() {
 }
 
 phase_images() {
-  g6_ha_compose build migrate api worker scheduler transportd \
-    controller-key-init transport-runtime-init transport-endpoint-bootstrap
-  g6_ha_build_tunnel
+  g6_ha_timing_run control_plane_build g6_ha_compose build \
+    migrate api worker scheduler controller-key-init
+  g6_ha_timing_run transportd_build g6_ha_compose build \
+    transportd transport-runtime-init transport-endpoint-bootstrap
+  g6_ha_timing_run tunnel_build g6_ha_build_tunnel
+  g6_ha_timing_record_images
 }
 
 phase_tunnel_up() {
@@ -485,20 +488,22 @@ phase_rejoin() {
 }
 
 case "${1:-}" in
-  prepare) phase_prepare ;;
-  images) phase_images ;;
+  prepare) g6_ha_timing_run prepare phase_prepare ;;
+  images) g6_ha_timing_run compose_image_build phase_images ;;
   tunnel-up)
     cp -f "${2:?peer tunnel directory is required}/tunnel-node-id" \
       "${G6HA_STATE}/peer-tunnel-node-id"
-    phase_tunnel_up
+    g6_ha_timing_run tunnel_up phase_tunnel_up
     ;;
-  primary-up) phase_primary_up ;;
-  load) phase_load ;;
-  pitr) phase_pitr ;;
-  isolate) phase_isolate ;;
-  post-promotion-probes) phase_post_promotion_probes "${2:?peer promoted-at file is required}" ;;
-  recover-roles) phase_recover_roles ;;
-  rejoin) phase_rejoin ;;
+  primary-up) g6_ha_timing_run primary_bootstrap phase_primary_up ;;
+  load) g6_ha_timing_run basebackup phase_load ;;
+  pitr) g6_ha_timing_run pitr_restore phase_pitr ;;
+  isolate) g6_ha_timing_run failover phase_isolate ;;
+  post-promotion-probes)
+    g6_ha_timing_run post_promotion_probes phase_post_promotion_probes "${2:?peer promoted-at file is required}"
+    ;;
+  recover-roles) g6_ha_timing_run recover_roles phase_recover_roles ;;
+  rejoin) g6_ha_timing_run rejoin phase_rejoin ;;
   diagnostics) g6_ha_diagnostics ;;
   cleanup) g6_ha_cleanup ;;
   outbox)

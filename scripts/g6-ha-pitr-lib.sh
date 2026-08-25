@@ -355,8 +355,105 @@ g6_ha_role_connected() {
     | grep -qv '^0$'
 }
 
+# Non-authoritative timing diagnostics for the HA/PITR harness. Every helper
+# is a no-op when the workflow did not export G6HA_TIMING_FILE, and no timing
+# failure can change a phase result: metadata calls are || true guarded and
+# the run wrapper never alters how a phase executes.
+g6_ha_timing() {
+  local command="${1:?timing command is required}"
+  shift
+  [[ -n "${G6HA_TIMING_FILE:-}" ]] || return 0
+  "${G6HA_ROOT}/scripts/g6-timing.sh" "${command}" "${G6HA_TIMING_FILE}" "$@" \
+    >>"${G6HA_LOGS}/timing.log" 2>&1 || true
+}
+
+# Runs one phase under stage timing without changing its execution semantics.
+# The phase must run as a plain command: inside a || or if condition context
+# errexit is suppressed for the callee's entire body, so a mid-phase failure
+# would keep executing later commands yet could still return success. A
+# failing phase therefore aborts exactly as it would without telemetry; the
+# only cost is that phase's lost end timestamp.
+g6_ha_timing_run() {
+  local stage="$1"
+  shift
+  if [[ -z "${G6HA_TIMING_FILE:-}" ]]; then
+    "$@"
+    return
+  fi
+  g6_ha_timing start "${stage}"
+  "$@"
+  g6_ha_timing end "${stage}"
+}
+
+# Records a directory tree's kilobyte-granular on-disk footprint as a sparse
+# marker file so the timing artifact log can carry the size without copying
+# data. Postgres-owned trees are measured through the running postgres
+# container, where the uid 999 data is readable; host-side du is the
+# fallback. A du that cannot traverse the whole tree exits non-zero after
+# partial output, so only a fully traversed count becomes a record.
+g6_ha_timing_record_tree_bytes() {
+  local key="$1" directory="$2" container_path="${3:-}"
+  local du_output kilobytes bytes marker
+  [[ -n "${G6HA_TIMING_FILE:-}" && -d "${directory}" ]] || return 0
+  kilobytes=""
+  if [[ -n "${container_path}" ]]; then
+    du_output="$(g6_ha_compose exec -T postgres du -sk "${container_path}" 2>/dev/null | tr -d '\r')" || du_output=""
+    kilobytes="$(awk '{print $1}' <<<"${du_output}")"
+  fi
+  if [[ ! "${kilobytes}" =~ ^[0-9]+$ ]]; then
+    du_output="$(du -sk "${directory}" 2>/dev/null)" || du_output=""
+    kilobytes="$(awk '{print $1}' <<<"${du_output}")"
+  fi
+  [[ "${kilobytes}" =~ ^[0-9]+$ ]] || return 0
+  bytes="$(( kilobytes * 1024 ))"
+  marker="$(mktemp)"
+  truncate -s "${bytes}" "${marker}" 2>/dev/null || {
+    rm -f -- "${marker}"
+    return 0
+  }
+  g6_ha_timing artifact "${key}" "${marker}"
+  rm -f -- "${marker}"
+}
+
+# Records every compose-project image identity plus the frozen tunnel binary
+# so both failure domains can be compared for build-once benchmarks. Built
+# images are identified by the harness-controlled repository prefix
+# (compose does not label built images on every hosted compose version).
+g6_ha_timing_record_images() {
+  [[ -n "${G6HA_TIMING_FILE:-}" ]] || return 0
+  local short_id repository service image_id size
+  while read -r short_id repository; do
+    [[ -n "${short_id}" && "${repository:-}" == "${COMPOSE_PROJECT}-"* ]] || continue
+    service="${repository#"${COMPOSE_PROJECT}"-}"
+    image_id="$(docker image inspect --format '{{.Id}}' "${short_id}" 2>/dev/null || true)"
+    size="$(docker image inspect --format '{{.Size}}' "${short_id}" 2>/dev/null || true)"
+    [[ "${size}" =~ ^[0-9]+$ && "${image_id}" =~ ^sha256:[0-9a-f]{64}$ ]] || continue
+    g6_ha_timing image "compose_${service}" "${size}" "${image_id}"
+  done < <(docker image ls --format '{{.ID}} {{.Repository}}' 2>/dev/null || true)
+  if [[ -x "${G6HA_TUNNEL_BIN}" ]]; then
+    g6_ha_timing artifact tunnel_binary "${G6HA_TUNNEL_BIN}"
+  fi
+}
+
+# WAL archive and basebackup trees hold real data only after the scenario has
+# run, so their footprints are sampled during diagnostics collection — after
+# the scenario, before cleanup — not next to the image recording that runs
+# before any data exists. Both samples are pure telemetry, so each call is
+# || true guarded: a filesystem hiccup inside the sampler (mktemp, awk, du)
+# must not turn an authoritative green scenario red. Unlike the timed-phase
+# wrapper, nothing inside these calls is authoritative, so suppressing errexit
+# for their bodies is the desired behavior.
+g6_ha_timing_record_storage_footprints() {
+  [[ -n "${G6HA_TIMING_FILE:-}" ]] || return 0
+  g6_ha_timing_record_tree_bytes wal_archive_bytes "${G6HA_ARCHIVE}" \
+    /var/lib/postgresql/archive || true
+  g6_ha_timing_record_tree_bytes basebackup_bytes "${G6HA_BASEBACKUP}" \
+    /var/lib/postgresql/basebackup || true
+}
+
 g6_ha_diagnostics() {
   mkdir -p "${ARTIFACT_DIR}"
+  g6_ha_timing_record_storage_footprints
   g6_ha_compose ps --all >"${ARTIFACT_DIR}/compose-ps-${FD_ID}.txt" 2>&1 || true
   g6_ha_compose logs --no-color postgres api worker scheduler transportd \
     >"${ARTIFACT_DIR}/services-${FD_ID}.log" 2>&1 || true

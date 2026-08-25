@@ -101,6 +101,34 @@ accepts a non-read-only SQL error as post-rejoin rejection, finalize stops
 binding probe timestamps to the recorded promotion boundary, or the
 post-promotion probes disappear from either failure domain's flow.
 
+## Timing diagnostics
+
+Every HA/PITR run also emits non-authoritative timing telemetry so
+orchestration costs stay measurable without touching verdicts. Both failure
+domains wrap runner preparation, the toolchain bootstrap, the control-plane
+and transportd image builds, the tunnel build, every harness phase, every
+rendezvous artifact wait, diagnostics, cleanup, and the final upload with
+`scripts/g6-timing.sh` calls that are always guarded: a timing failure can
+never fail or pass a run. A timed phase runs as a plain command, so a
+mid-phase failure aborts exactly as it would without telemetry (the only
+cost is that phase's lost end timestamp); the guarded waits instead capture
+their exit status explicitly and preserve it to the step boundary.
+
+The per-domain `g6-timing-ha-fd-{a,b}-*` artifacts (retained five days) record
+per-stage durations, compose image IDs and sizes, the tunnel binary size, the
+WAL archive and base-backup footprints, and the rendezvous count plus
+cumulative wait milliseconds, all bound to the run ID, attempt, and candidate
+SHA. Image identities are recorded right after the builds; the WAL archive
+and base-backup footprints are sampled during diagnostics collection — after
+the scenario has produced the data and before cleanup removes it — and are
+measured through the running postgres container, where the uid 999 trees are
+readable. The policy test fails if a timing call stops being guarded, a
+phase stops failing fast inside the wrapper, a required stage stops being
+timed, a rendezvous wait stops preserving its result, storage footprints
+move back to the pre-scenario image recording, the storage-footprint sampler
+stops being fail-open under a failing helper, or the timing upload becomes
+required for a green run.
+
 ## Verification boundary
 
 This stage deploys api, worker, scheduler, transportd, and PostgreSQL across

@@ -37,6 +37,65 @@ jobs.each do |job_id, job|
   end
   names = Array(job.fetch("steps")).map { |step| step["name"] }.compact
   reject("#{job_id} must collect diagnostics before cleanup") unless names.index { |n| n.include?("diagnostics") }.to_i < names.index { |n| n.include?("Clean") }.to_i
+
+  # Timing telemetry is non-authoritative: it must identify the run, never be
+  # able to fail an authoritative step, cover the required measurement points,
+  # preserve rendezvous wait results, and upload as a warn-only artifact.
+  env = job.fetch("env", {})
+  reject("#{job_id} must not make timing authoritative") if env.key?("G6_TIMING_REQUIRED")
+  env.each_value do |value|
+    reject("#{job_id} job env must not use runner context: it is unavailable at job scope") if value.include?("${{ runner.")
+  end
+  run_steps = Array(job.fetch("steps")).select { |step| step.key?("run") }
+  run_steps.each do |step|
+    reject("#{job_id} must not make timing authoritative") if step.fetch("env", {}).key?("G6_TIMING_REQUIRED")
+  end
+  run_text = run_steps.map { |step| step.fetch("run") }.join("\n")
+  init_step = run_steps.find { |step| step.fetch("run").include?("g6-timing.sh init") }
+  reject("#{job_id} must initialize timing diagnostics") if init_step.nil?
+  init_text = init_step.fetch("run")
+  reject("#{job_id} timing init must bind the per-domain timing file") unless init_text.include?("G6HA_TIMING_FILE=\"${RUNNER_TEMP}/artifacts/timing/#{job_id}.json\"")
+  reject("#{job_id} timing init must publish the binding for later steps") unless init_text.include?(">>\"${GITHUB_ENV}\"")
+  reject("#{job_id} timing init must bind the job identity") unless init_text.include?(job_id)
+  reject("#{job_id} timing init must bind the ha-pitr profile") unless init_text.include?("ha-pitr")
+  %w[${GITHUB_SHA} ${GITHUB_RUN_ID} ${GITHUB_RUN_ATTEMPT}].each do |binding|
+    reject("#{job_id} timing init must bind #{binding}") unless init_text.include?(binding)
+  end
+  run_text.lines chomp: true do |line|
+    next unless line.include?("scripts/g6-timing.sh")
+    reject("#{job_id} timing call must be non-authoritative: #{line}") unless line.include?("|| true")
+  end
+  %w[runner_preparation toolchain_bootstrap rendezvous_wait_ diagnostics_collection cleanup artifact_upload].each do |stage|
+    reject("#{job_id} must time #{stage}") unless run_text.include?(stage)
+  end
+  run_steps.select { |step| step.fetch("run").include?("real-e2e-artifact.sh wait-download") }.each do |step|
+    text = step.fetch("run")
+    preserved = text.include?("status=0") && text.include?("|| status=$?") && text.include?('exit "${status}"')
+    reject("#{job_id} rendezvous timing must preserve the wait result") unless preserved
+  end
+  record_step = Array(job.fetch("steps")).find { |step| (step["name"] || "").include?("Record") && step["name"].include?("timing") }
+  reject("#{job_id} must aggregate its timing diagnostics") if record_step.nil?
+  record_text = record_step.fetch("run")
+  reject("#{job_id} must run in all outcomes to record timing") unless record_step.fetch("if") == "always()"
+  reject("#{job_id} must aggregate rendezvous wait metrics") unless record_text.include?("g6-timing.sh rendezvous") && record_text.include?('startswith("rendezvous_wait_")')
+  reject("#{job_id} must publish a timing summary") unless record_text.include?("g6-timing.sh summary")
+  timing_upload = Array(job.fetch("steps")).find { |step| (step["name"] || "").include?("Upload") && step["name"].include?("timing") }
+  reject("#{job_id} must upload its timing diagnostics") if timing_upload.nil?
+  timing_upload.fetch("with").tap do |with|
+    reject("#{job_id} timing upload must use the per-run timing name") unless with.fetch("name").start_with?("g6-timing-ha-")
+    reject("#{job_id} timing upload must stay non-authoritative") unless with.fetch("if-no-files-found") == "warn"
+    reject("#{job_id} timing upload must stay short-lived") unless with.fetch("retention-days") == 5
+  end
+  # if-no-files-found: warn only covers a missing local timing file; an
+  # artifact-service failure would otherwise fail the failure-domain job
+  # after all authoritative work and evidence already completed. Only the
+  # telemetry upload is exempt — every evidence and rendezvous artifact
+  # upload stays fail-closed.
+  reject("#{job_id} timing diagnostics upload must be continue-on-error") unless timing_upload["continue-on-error"] == true
+  Array(job.fetch("steps")).select { |step| step["uses"].to_s.start_with?("actions/upload-artifact@") }.each do |step|
+    next if step.equal?(timing_upload)
+    reject("#{job_id} authoritative artifact upload must stay fail-closed") if step["continue-on-error"]
+  end
 end
 
 services = compose.fetch("services")
@@ -56,6 +115,149 @@ end
 api_env = services.fetch("api").fetch("environment")
 reject("api must bind loopback: dev auth rejects non-loopback HTTP addresses") unless api_env.fetch("OCSERV_HTTP_ADDRESS").start_with?("127.0.0.1:")
 RUBY
+
+# Script-level timing telemetry must stay non-authoritative: the helpers no-op
+# without the workflow-provided file, metadata calls log and swallow failures,
+# and the run wrapper never changes how a phase executes.
+grep -q "g6_ha_timing()" "${LIB}" || {
+  echo "the shared lib must define the timing shim" >&2
+  exit 1
+}
+grep -q "g6_ha_timing_run()" "${LIB}" || {
+  echo "the shared lib must define the timed phase wrapper" >&2
+  exit 1
+}
+grep -q "g6_ha_timing_record_images()" "${LIB}" || {
+  echo "the shared lib must define the image recorder" >&2
+  exit 1
+}
+grep -q "g6_ha_timing_record_storage_footprints()" "${LIB}" || {
+  echo "the shared lib must define the storage footprint recorder" >&2
+  exit 1
+}
+grep -qF '[[ -n "${G6HA_TIMING_FILE:-}" ]] || return 0' "${LIB}" || {
+  echo "timing helpers must no-op without the workflow timing file" >&2
+  exit 1
+}
+grep -qF '>>"${G6HA_LOGS}/timing.log" 2>&1 || true' "${LIB}" || {
+  echo "timing metadata calls must never fail a phase" >&2
+  exit 1
+}
+if grep -qF '|| status=$?' "${LIB}"; then
+  echo "the timed phase wrapper must not run a phase in a condition context:" >&2
+  echo "errexit is suppressed for the whole phase body, so a mid-phase failure would keep executing and could still return success" >&2
+  exit 1
+fi
+images_body="$(sed -n '/^g6_ha_timing_record_images()/,/^}/p' "${LIB}")"
+if grep -q 'wal_archive_bytes\|basebackup_bytes' <<<"${images_body}"; then
+  echo "image recording must not sample storage footprints: the trees are empty before the scenario runs" >&2
+  exit 1
+fi
+if ! grep -q 'g6_ha_timing_record_storage_footprints' \
+  <<<"$(sed -n '/^g6_ha_diagnostics()/,/^}/p' "${LIB}")"; then
+  echo "storage footprints must be sampled during diagnostics, after the scenario and before cleanup" >&2
+  exit 1
+fi
+fd_a_stages="prepare compose_image_build control_plane_build transportd_build \
+tunnel_build tunnel_up primary_bootstrap basebackup pitr_restore failover \
+post_promotion_probes recover_roles rejoin"
+for stage in ${fd_a_stages}; do
+  grep -q "g6_ha_timing_run ${stage} " "${FD_A}" || {
+    echo "fd-a must time the ${stage} stage" >&2
+    exit 1
+  }
+done
+fd_b_stages="prepare compose_image_build control_plane_build transportd_build \
+tunnel_build tunnel_up standby_bootstrap roles_up failover_ready promotion \
+evidence_collection rejoin_confirm"
+for stage in ${fd_b_stages}; do
+  grep -q "g6_ha_timing_run ${stage} " "${FD_B}" || {
+    echo "fd-b must time the ${stage} stage" >&2
+    exit 1
+  }
+done
+for fd_script in "${FD_A}" "${FD_B}"; do
+  grep -q "g6_ha_timing_record_images" "${fd_script}" || {
+    echo "${fd_script} must record image identities after building" >&2
+    exit 1
+  }
+done
+
+# The wrapper's fail-fast semantics are executed, not just grepped: a timed
+# phase running in a || context would keep executing after a mid-phase
+# failure (errexit is suppressed for the whole callee body) and could still
+# return success. The child shell must die at the failing command, never
+# reach the marker write, and must have entered the timed stage first.
+test_timing_run_preserves_fail_fast() (
+  local temporary child
+  temporary="$(mktemp -d)"
+  trap 'rm -rf "${temporary}"' EXIT INT TERM
+  mkdir -p "${temporary}/logs"
+  child="${temporary}/child.sh"
+  cat >"${child}" <<CHILD
+set -Eeuo pipefail
+source "${LIB}"
+G6HA_ROOT="${ROOT}"
+G6HA_TIMING_FILE="${temporary}/timing.json"
+G6HA_LOGS="${temporary}/logs"
+failing_phase() {
+  false
+  touch "${temporary}/must-not-exist"
+}
+g6_ha_timing_run regression_stage failing_phase
+CHILD
+  if bash "${child}" >"${temporary}/child.log" 2>&1; then
+    echo "a mid-phase failure must fail the phase shell" >&2
+    return 1
+  fi
+  if [[ -e "${temporary}/must-not-exist" ]]; then
+    echo "execution continued past a failed command inside a timed phase" >&2
+    return 1
+  fi
+  if ! grep -q 'regression_stage' "${temporary}/timing.json.tsv" 2>/dev/null; then
+    echo "the regression child never reached the timed phase:" >&2
+    cat "${temporary}/child.log" >&2
+    return 1
+  fi
+)
+test_timing_run_preserves_fail_fast
+
+# The storage footprint sampler is executed under a failing helper, not just
+# grepped: the sampler is pure telemetry that runs inside the set -e
+# diagnostics script, so a filesystem failure (mktemp, du, awk) inside it must
+# never abort the shell — that would flip an authoritative green scenario
+# red. The mocked mktemp fails every sampler call; the child must still exit
+# zero and reach the authoritative continuation marker.
+test_storage_footprints_fail_open() (
+  local temporary child
+  temporary="$(mktemp -d)"
+  trap 'rm -rf "${temporary}"' EXIT INT TERM
+  mkdir -p "${temporary}/logs" "${temporary}/pgarchive" "${temporary}/basebackup"
+  child="${temporary}/child.sh"
+  cat >"${child}" <<CHILD
+set -Eeuo pipefail
+source "${LIB}"
+G6HA_ROOT="${ROOT}"
+G6HA_TIMING_FILE="${temporary}/timing.json"
+G6HA_LOGS="${temporary}/logs"
+G6HA_ARCHIVE="${temporary}/pgarchive"
+G6HA_BASEBACKUP="${temporary}/basebackup"
+mktemp() { return 1; }
+g6_ha_compose() { return 1; }
+g6_ha_timing_record_storage_footprints
+touch "${temporary}/authoritative-continued"
+CHILD
+  if ! bash "${child}" >"${temporary}/child.log" 2>&1; then
+    echo "a telemetry failure inside the storage sampler must not fail the shell:" >&2
+    cat "${temporary}/child.log" >&2
+    return 1
+  fi
+  if [[ ! -e "${temporary}/authoritative-continued" ]]; then
+    echo "execution stopped at a telemetry failure before the next command" >&2
+    return 1
+  fi
+)
+test_storage_footprints_fail_open
 
 # Secret export is exercised, not just grepped: every missing or zero-byte
 # cluster credential must fail both the reader and the aggregate export. A
