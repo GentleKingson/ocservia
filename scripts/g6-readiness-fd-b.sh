@@ -16,6 +16,7 @@ WINDOW_API_READY_TIMEOUT_SECONDS=15
 WINDOW_PRE_DRAIN_TIMEOUT_SECONDS=15
 WINDOW_COMMAND_SETTLE_TIMEOUT_SECONDS=110
 WINDOW_POST_DRAIN_TIMEOUT_SECONDS=15
+WINDOW_FINAL_SAMPLER_TICK_TIMEOUT_SECONDS=10
 WINDOW_API_PREDICATE_OVERRUN_SECONDS=10
 WINDOW_SQL_PREDICATE_OVERRUN_SECONDS=10
 WINDOW_DRIVER_OVERRUN_SECONDS=21
@@ -2295,6 +2296,13 @@ window_outbox_drained() {
     'SELECT count(*) FROM outbox_events WHERE published_at IS NULL')" == 0 ]]
 }
 
+window_sampler_records_drained_queue() {
+  local last_queue_depth
+  last_queue_depth="$(awk -F, '$2 == "postgres" {depth = $7}
+    END {print depth}' "${G6RD_STATE}/resource-samples.csv" 2>/dev/null)"
+  [[ "${last_queue_depth}" == 0 ]]
+}
+
 window_prior_commands_settled() {
   local opening_prefix="g6-window-${RUN_ID}-" unsettled
   unsettled="$(psql_window_probe -Atc \
@@ -2322,6 +2330,7 @@ window_inner_budget_seconds() {
     + WINDOW_PRE_DRAIN_TIMEOUT_SECONDS
     + WINDOW_COMMAND_SETTLE_TIMEOUT_SECONDS
     + WINDOW_POST_DRAIN_TIMEOUT_SECONDS
+    + WINDOW_FINAL_SAMPLER_TICK_TIMEOUT_SECONDS
     + WINDOW_API_PREDICATE_OVERRUN_SECONDS
     + (3 * WINDOW_SQL_PREDICATE_OVERRUN_SECONDS)
     + WINDOW_DRIVER_OVERRUN_SECONDS
@@ -2618,6 +2627,18 @@ phase_window() (
   if ! g6rd_wait_until_deadline "${WINDOW_POST_DRAIN_TIMEOUT_SECONDS}" 5 \
     "outbox drained after the window" window_outbox_drained; then
     report_window_outbox_timeout
+    g6rd_stop_sampler || true
+    return 1
+  fi
+  # A sampler tick that raced the still-active load tail records the load's
+  # own unpublished rows as the settled queue depth. The drain wait above
+  # observed the emptied outbox, so hold the sampler running until one tick
+  # records that drained state before stopping it.
+  if ! g6rd_wait_until_deadline "${WINDOW_FINAL_SAMPLER_TICK_TIMEOUT_SECONDS}" 1 \
+    "sampler tick covering the drained outbox" \
+    window_sampler_records_drained_queue; then
+    echo "resource sampler never recorded the drained outbox queue:" >&2
+    tail -n 12 "${G6RD_STATE}/resource-samples.csv" >&2 2>/dev/null || :
     g6rd_stop_sampler || true
     return 1
   fi
