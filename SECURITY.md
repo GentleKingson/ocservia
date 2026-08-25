@@ -2,8 +2,16 @@
 
 ## Supported Versions
 
-ocservia is in early development and has no supported release yet. Security
-updates currently apply only to the latest revision of the default branch.
+| Version | Supported |
+| --- | --- |
+| 0.1.x | Yes |
+| < 0.1 | No |
+
+Security fixes are provided for the latest patch release in the v0.1.x line.
+Users should update to the latest available v0.1.x patch before reporting a
+vulnerability believed to affect an older patch. The default branch may
+contain unreleased fixes and is not itself a substitute for a tagged
+supported release.
 
 ## Reporting a Vulnerability
 
