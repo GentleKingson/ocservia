@@ -41,7 +41,7 @@ Run the focused fault matrix with:
 ./scripts/i10-agent-journal.sh
 ```
 
-The authoritative `Rust` Actions job already executes these workspace tests,
+The authoritative `Rust Validation` Actions job already executes these workspace tests,
 including the named command-journal and Agent crash cases, so CI does not run
 the focused script a second time. The focused command remains useful for local
 reproduction.
