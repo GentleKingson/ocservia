@@ -119,7 +119,7 @@ cd rust
 cargo build --locked --release --package ocservia-agent --package ocservia-privd
 cd ..
 OUTPUT_DIR=dist AGENT_SIGNING_KEY=/secure/release-ed25519.key \
-  VERSION=1.0.0 SOURCE_DATE_EPOCH=1786147200 ./scripts/package-agent.sh
+  VERSION=1.0.0 PACKAGE_ARCH=amd64 SOURCE_DATE_EPOCH=1786147200 ./scripts/package-agent.sh
 VERIFIED_PACKAGE="$(sudo AGENT_TRUSTED_KEY_SHA256=<pinned-public-key-der-sha256> \
   ./scripts/verify-agent-package.sh dist/ocservia-agent-1.0.0-linux-amd64.tar.gz \
   dist/ocservia-agent-1.0.0-linux-amd64.tar.gz.sha256 \
@@ -128,9 +128,38 @@ VERIFIED_PACKAGE="$(sudo AGENT_TRUSTED_KEY_SHA256=<pinned-public-key-der-sha256>
 sudo "${VERIFIED_PACKAGE}/scripts/install-agent.sh"
 ```
 
+`PACKAGE_ARCH` selects the canonical package architecture, `amd64` or `arm64`;
+build the binaries natively on the matching host. Without `DESTDIR`, the
+verifier also refuses a package whose architecture does not match the local
+host (`x86_64` ↔ `amd64`, `aarch64` ↔ `arm64`) before anything is staged.
+
 The verifier is the only supported extraction path. It stages and verifies the
 exact archive below root-only `/var/lib/ocservia-upgrade/package-staging`; the
 installer refuses a source tree or an independently extracted download.
+
+`scripts/package-native-agent.sh` wraps the same signed archive into native
+installers without adding an install layout of its own:
+
+```bash
+OUTPUT_DIR=dist VERSION=1.0.0 PACKAGE_ARCH=amd64 \
+  SOURCE_DATE_EPOCH=1786147200 \
+  AGENT_TRUSTED_KEY_SHA256=<pinned-public-key-der-sha256> \
+  ./scripts/package-native-agent.sh
+```
+
+It requires the `tar.gz` triple produced by `package-agent.sh` plus the
+DER SHA-256 fingerprint of the signing key, and emits
+`ocservia-agent_<version>_amd64.deb` and
+`ocservia-agent-<version>-1.x86_64.rpm` (arm64 builds map to `arm64` and
+`aarch64`). Both formats embed the signed archive triple, the release public
+key, the pinned fingerprint, and `verify-agent-package.sh` under
+`/usr/share/ocservia-agent`. Installing embeds no layout decisions: the
+post-install scriptlet checks the host architecture, verifies the archive into
+trusted staging with the pinned fingerprint, and then runs the verified
+`install-agent.sh` or `upgrade-agent.sh`. No service is enabled or started
+automatically; `/etc/ocservia-agent/agent.env` must be provisioned first.
+Removing the package runs the verified `uninstall-agent.sh` and preserves
+identity, state, and configuration.
 
 Before enabling the units, install the independently provisioned Controller
 command verification key and two distinct RSA private keys for user-password

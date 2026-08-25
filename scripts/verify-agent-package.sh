@@ -34,12 +34,30 @@ for file in "${archive}" "${checksum}" "${signature}" "${public_key}"; do
 done
 
 archive_name="$(basename -- "${archive}")"
-if [[ ! "${archive_name}" =~ ^ocservia-agent-([0-9]+\.[0-9]+\.[0-9]+([+-][0-9A-Za-z.-]+)?)-linux-amd64\.tar\.gz$ ]]; then
+if [[ ! "${archive_name}" =~ ^ocservia-agent-([0-9]+\.[0-9]+\.[0-9]+([+-][0-9A-Za-z.-]+)?)-linux-(amd64|arm64)\.tar\.gz$ ]]; then
   echo "archive basename is not a supported Agent package name" >&2
   exit 1
 fi
 version="${BASH_REMATCH[1]}"
+package_arch="${BASH_REMATCH[3]}"
 package_name="ocservia-agent-${version}"
+
+# Without DESTDIR this verifier feeds a real host installation, so reject a
+# package built for another architecture before anything is staged or installed.
+if [[ -z "${DESTDIR}" ]]; then
+  case "$(uname -m)" in
+    x86_64) host_arch=amd64 ;;
+    aarch64) host_arch=arm64 ;;
+    *)
+      echo "unsupported host architecture for Agent package installation: $(uname -m)" >&2
+      exit 1
+      ;;
+  esac
+  if [[ "${package_arch}" != "${host_arch}" ]]; then
+    echo "package architecture ${package_arch} does not match host architecture ${host_arch}; refusing to install a foreign-architecture package" >&2
+    exit 1
+  fi
+fi
 
 validate_trusted_ancestry() {
   local path="$1" current="" relative component uid mode
