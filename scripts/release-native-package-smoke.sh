@@ -315,7 +315,10 @@ echo "rpm upgrade lifecycle passed"
 docker exec "${container}" rpm -e ocservia-agent >"${ARTIFACT_DIR}/rpm-remove.log" 2>&1
 docker exec "${container}" test ! -e /usr/libexec/ocservia/ocservia-agent \
   || { echo "rpm erase retained the Agent binary" >&2; exit 1; }
-docker exec "${container}" test ! -e /usr/share/ocservia-agent \
+# The rpm payload registers files, not their parent directory, so erasing may
+# leave an empty /usr/share/ocservia-agent behind.
+docker exec "${container}" bash -c \
+  'test ! -e /usr/share/ocservia-agent || test -z "$(ls -A /usr/share/ocservia-agent)"' \
   || { echo "rpm erase retained the package payload" >&2; exit 1; }
 docker exec "${container}" test -f /etc/ocservia-agent/agent.env \
   || { echo "rpm erase discarded the preserved Agent configuration" >&2; exit 1; }
