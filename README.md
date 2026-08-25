@@ -9,8 +9,8 @@ ocservia is a self-hosted platform for operating a fleet of OpenConnect VPN serv
 
 The project combines a Go control plane, Rust transport and node components, a Vue and TypeScript Web application, PostgreSQL, [Iroh](https://www.iroh.computer/) connectivity, and OpenTelemetry.
 
-> [!WARNING]
-> **Development preview:** ocservia does not yet have a tagged or supported release. The `main` branch is intended for local development, security review, and controlled evaluation. The production topology in this repository is a hardened reference deployment, not a production-readiness guarantee.
+> [!NOTE]
+> **Development status:** ocservia v0.1.x is the initial public release line. It is intended for controlled deployment and evaluation. Production deployments remain operator-validated, and no production SLA is provided. Because ocservia remains pre-1.0, compatibility may change between minor release lines. The production topology in this repository is a hardened reference deployment, not a production-readiness guarantee.
 
 [Quick start](#quick-start) · [Capabilities](#capabilities) · [Architecture](#architecture) · [Security model](#security-model) · [Production reference](#production-reference) · [Documentation](#documentation)
 
@@ -219,14 +219,15 @@ Managed-node installation and upgrades are documented separately in [Agent packa
 
 | Item | Status |
 | --- | --- |
-| End-to-end development stack | Available on `main` |
-| Real Iroh transport and Agent | Implemented on `main` |
-| Web fleet and management workflows | Implemented on `main` |
-| Production-oriented deployment, relay, backup, and Agent lifecycle assets | Available as reference workflows |
-| Tagged stable release | Not available |
-| Supported upgrade or compatibility window | Not established |
+| End-to-end development stack | Available |
+| Real Iroh transport and Agent | Available |
+| Web fleet and management workflows | Available |
+| Production-oriented deployment, relay, backup, and Agent lifecycle assets | Available as hardened reference workflows |
+| Current release line | v0.1.x |
+| Initial release target | v0.1.0 |
+| Compatibility commitment | Patch-level maintenance within v0.1.x; pre-1.0 minor lines may evolve |
 | Production SLA or capacity guarantee | Not provided |
-| Security support | Latest revision of the default branch only |
+| Security support | Latest v0.1.x patch release |
 
 The P1 harness exercises up to 500 side-effect-free simulated Agents, fault injection, restarts, PostgreSQL interruption, slow SSE consumers, and explicit unknown outcomes on a single GitHub-hosted runner. This is initial engineering evidence, not a production capacity claim. Multi-host, long-duration, and deployment-specific validation remain the operator's responsibility.
 
