@@ -1,0 +1,49 @@
+# nfpm configuration template for the ocservia Agent native packages.
+# scripts/package-native-agent.sh renders @VERSION@/@ARCH@ and builds from a
+# staging payload that embeds the signed release archive triple; nfpm is used
+# only for deb/rpm encapsulation and owns no install layout of its own.
+name: ocservia-agent
+arch: "@ARCH@"
+platform: linux
+version: "@VERSION@"
+release: 1
+section: net
+priority: optional
+maintainer: ocservia maintainers <ocservia@users.noreply.github.com>
+description: |
+  ocservia node-side Agent and privd, packaged as the signed release archive
+  plus its verifier. Installation verifies the archive against the pinned
+  release signing key in trusted staging before install-agent.sh runs, and no
+  service is enabled automatically.
+homepage: https://github.com/GentleKingson/ocservia
+license: MIT OR Apache-2.0
+depends:
+  - openssl
+contents:
+  - src: payload/usr/share/ocservia-agent/ocservia-agent-@VERSION@-linux-@ARCH@.tar.gz
+    dst: /usr/share/ocservia-agent/ocservia-agent-@VERSION@-linux-@ARCH@.tar.gz
+    file_info:
+      mode: 0644
+  - src: payload/usr/share/ocservia-agent/ocservia-agent-@VERSION@-linux-@ARCH@.tar.gz.sha256
+    dst: /usr/share/ocservia-agent/ocservia-agent-@VERSION@-linux-@ARCH@.tar.gz.sha256
+    file_info:
+      mode: 0644
+  - src: payload/usr/share/ocservia-agent/ocservia-agent-@VERSION@-linux-@ARCH@.tar.gz.sha256.sig
+    dst: /usr/share/ocservia-agent/ocservia-agent-@VERSION@-linux-@ARCH@.tar.gz.sha256.sig
+    file_info:
+      mode: 0644
+  - src: payload/usr/share/ocservia-agent/release-signing.pub.pem
+    dst: /usr/share/ocservia-agent/release-signing.pub.pem
+    file_info:
+      mode: 0644
+  - src: payload/usr/share/ocservia-agent/trusted-release-key.sha256
+    dst: /usr/share/ocservia-agent/trusted-release-key.sha256
+    file_info:
+      mode: 0644
+  - src: payload/usr/share/ocservia-agent/verify-agent-package.sh
+    dst: /usr/share/ocservia-agent/verify-agent-package.sh
+    file_info:
+      mode: 0755
+scripts:
+  postinstall: postinstall.sh
+  preremove: preremove.sh

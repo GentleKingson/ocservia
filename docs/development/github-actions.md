@@ -129,6 +129,7 @@ exactly one explicit profile:
 | `security` | Go, Node/npm, Rust, gitleaks, cargo-deny, sccache, and Web dependencies | Security and Licenses |
 | `native` | Rust and sccache | Native Ocserv |
 | `g6-secret-scan` | gitleaks and host `jq`/`openssl` | G6 Readiness Secret Scan; G6 Harness Smoke Secret Scan |
+| `native-packages` | Rust and nfpm (Linux `aarch64` mirrors only this profile) | Release Packages build matrix |
 
 Stage contracts, credential rotation, Local Slice, Browser E2E, and P1 Smoke
 use runner-provided tools or artifacts and do not call bootstrap. Outside
@@ -151,6 +152,9 @@ cache miss is supported because bootstrap revalidates versions and checksums.
 | `rust-validation` | Rust Validation | Rust Validation |
 | `security` | Security and Licenses | Security and Licenses |
 | `native` | Native Ocserv | Native Ocserv |
+
+The release-packages workflow writes its own `native-packages` tool cache from
+its per-architecture build matrix jobs.
 
 The shared Go cache contains `.cache/go-build`, `.cache/go-mod`, and
 `.cache/gopath`. Build Runtime Artifacts, Go Static and Unit, Go Race,
@@ -258,6 +262,33 @@ a successful check with the replacement name. A change is fully validated only
 when all three aggregators pass for its exact commit, diagnostic uploads and
 scoped cleanup complete, and any independent gate remains satisfied or is
 explicitly recorded as pending.
+
+## Release packages workflow
+
+`.github/workflows/release.yml` builds the Agent distribution outside the
+primary CI graph. It triggers on a published release (tags matching
+`^v[0-9]+\.[0-9]+\.[0-9]+$`) and on manual `workflow_dispatch`, which always
+stays a dry run and never uploads release assets.
+
+- The build job runs as a two-leg matrix on native runners
+  (`ubuntu-24.04` for `amd64`, `ubuntu-24.04-arm` for `arm64`, no emulation).
+  Each leg bootstraps the `native-packages` profile, builds the release
+  binaries natively, produces the signed archive triple plus `.deb` and
+  `.rpm`, and runs `scripts/release-native-package-smoke.sh`: a full
+  deb install/upgrade/removal lifecycle on the runner plus an rpm
+  install/upgrade/erase lifecycle inside a systemd-enabled Rocky Linux 9
+  container built for the run. A failure on either architecture fails the
+  workflow before any assets can be published.
+- The validate job downloads both legs' artifacts and runs
+  `scripts/validate-release-packages.sh`: presence and naming of the six
+  packages, both signed triples verified against the pinned fingerprint,
+  `MANIFEST` and ELF architecture agreement, deb/rpm architecture metadata,
+  identical embedded payloads, and a canonical `SHA256SUMS`.
+- The publish job runs only for release events with `contents: write`, signs
+  `SHA256SUMS` with the `AGENT_SIGNING_KEY` secret, revalidates against the
+  `AGENT_TRUSTED_KEY_SHA256` pin, and only then uploads the assets to the
+  release. Without the signing secret the build jobs sign with an ephemeral
+  key, which the publish job rejects.
 
 ## Deferred native validation
 

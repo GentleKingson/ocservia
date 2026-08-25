@@ -4,7 +4,7 @@ Build the Agent and privd release binaries, then create a deterministic signed p
 
 ```bash
 OUTPUT_DIR=dist AGENT_SIGNING_KEY=/secure/release-ed25519.key \
-  VERSION=1.0.0 SOURCE_DATE_EPOCH=1786147200 scripts/package-agent.sh
+  VERSION=1.0.0 PACKAGE_ARCH=amd64 SOURCE_DATE_EPOCH=1786147200 scripts/package-agent.sh
 VERIFIED_PACKAGE="$(sudo AGENT_TRUSTED_KEY_SHA256=<pinned-public-key-der-sha256> \
   scripts/verify-agent-package.sh dist/ocservia-agent-1.0.0-linux-amd64.tar.gz \
   dist/ocservia-agent-1.0.0-linux-amd64.tar.gz.sha256 \
@@ -24,6 +24,36 @@ member types, and extracts that same root-owned archive. Install and upgrade
 scripts accept only the verified directory printed by the verifier. Do not
 extract or run installers from a download directory, and remove the verified
 staging directory after the lifecycle operation succeeds.
+
+`PACKAGE_ARCH` pins the package architecture (`amd64` or `arm64`); the MANIFEST
+records it as `arch=`. On a real host install (no `DESTDIR`) the verifier also
+rejects a foreign-architecture package — `x86_64` ↔ `amd64`, `aarch64` ↔
+`arm64` — before anything is staged.
+
+## Native installer packages
+
+Each release publishes the verified archive plus native installers for both
+architectures: `ocservia-agent-<version>-linux-{amd64,arm64}.tar.gz` with its
+`.sha256`/`.sha256.sig` sidecars, `ocservia-agent_<version>_{amd64,arm64}.deb`,
+`ocservia-agent-<version>-1.{x86_64,aarch64}.rpm`, one `SHA256SUMS` covering
+the six packages, its Ed25519 `SHA256SUMS.sig`, and `release-signing.pub.pem`.
+All of them trust the same release key whose DER SHA-256 fingerprint is pinned
+out of band.
+
+The `.deb` and `.rpm` embed the signed archive triple, the release public key,
+the pinned fingerprint, and the verifier under `/usr/share/ocservia-agent`.
+Their scriptlets contain no layout logic: `postinst` refuses a host-architecture
+mismatch, verifies the archive into trusted staging, and runs the verified
+`install-agent.sh` (fresh host) or `upgrade-agent.sh` (existing installation).
+Installing or upgrading never enables or starts a service — provision
+`/etc/ocservia-agent/agent.env` and the keys first, then enable both units
+manually. Package removal runs the verified `uninstall-agent.sh`, preserving
+identity, state, and configuration by default.
+
+Package-manager downgrade is not a supported rollback path: it would skip the
+matched snapshot contract. Roll back only with
+`sudo /usr/libexec/ocservia/ocservia-agent-rollback`, then install the fixed
+release.
 
 `upgrade-agent.sh` first verifies that the existing `agent.env` contains exactly
 one absolute `CONTROLLER_COMMAND_VERIFICATION_KEY_FILE` and that the referenced

@@ -6,11 +6,19 @@ OUTPUT_DIR="${OUTPUT_DIR:?OUTPUT_DIR is required}"
 AGENT_SIGNING_KEY="${AGENT_SIGNING_KEY:?AGENT_SIGNING_KEY is required}"
 VERSION="${VERSION:?VERSION is required}"
 SOURCE_DATE_EPOCH="${SOURCE_DATE_EPOCH:?SOURCE_DATE_EPOCH is required}"
+PACKAGE_ARCH="${PACKAGE_ARCH:?PACKAGE_ARCH is required}"
 
 if [[ ! "${VERSION}" =~ ^[0-9]+\.[0-9]+\.[0-9]+([+-][0-9A-Za-z.-]+)?$ ]] || ! [[ "${SOURCE_DATE_EPOCH}" =~ ^[0-9]+$ ]]; then
   echo "VERSION must be SemVer and SOURCE_DATE_EPOCH must be numeric" >&2
   exit 2
 fi
+case "${PACKAGE_ARCH}" in
+  amd64 | arm64) ;;
+  *)
+    echo "PACKAGE_ARCH must be amd64 or arm64" >&2
+    exit 2
+    ;;
+esac
 if [[ ! -f "${AGENT_SIGNING_KEY}" || -L "${AGENT_SIGNING_KEY}" ]]; then
   echo "signing key must be a regular file" >&2
   exit 1
@@ -35,9 +43,10 @@ install -m 0644 -- "${ROOT}/deploy/production/systemd/ocservia-agent-relays.conf
   "${ROOT}/deploy/production/systemd/relays.env.example" "${package_root}/deploy/production/systemd/"
 install -m 0755 -- "${ROOT}/scripts/install-agent.sh" "${ROOT}/scripts/upgrade-agent.sh" \
   "${ROOT}/scripts/rollback-agent.sh" "${ROOT}/scripts/uninstall-agent.sh" "${package_root}/scripts/"
-printf 'version=%s\nagent_protocol=1.1\nplatform_compatibility=N,N-1 minor\n' "${VERSION}" >"${package_root}/MANIFEST"
+printf 'version=%s\narch=%s\nagent_protocol=1.1\nplatform_compatibility=N,N-1 minor\n' \
+  "${VERSION}" "${PACKAGE_ARCH}" >"${package_root}/MANIFEST"
 
-archive="${OUTPUT_DIR}/ocservia-agent-${VERSION}-linux-amd64.tar.gz"
+archive="${OUTPUT_DIR}/ocservia-agent-${VERSION}-linux-${PACKAGE_ARCH}.tar.gz"
 tar --sort=name --mtime="@${SOURCE_DATE_EPOCH}" --owner=0 --group=0 --numeric-owner \
   -C "${staging}" -czf "${archive}" "ocservia-agent-${VERSION}"
 checksum="${archive}.sha256"

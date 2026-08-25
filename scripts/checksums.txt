@@ -22,3 +22,7 @@ fe67d82a10d8597a3549364cb733a3f9cc1bfff9031b7ae46384a9f2a72090c3  cargo-deny-0.2
 9f12ed4c49936e09b48bf862b595cde2fe64fcbd9d74dfacac6131ca824c8d5f  cargo-deny-0.20.2-x86_64-unknown-linux-musl.tar.gz
 0c560bfba31aef5bdfb4fb3d2677f6e61d71c5c00952f2a83344f47aa31f00f1  sccache-v0.17.0-aarch64-apple-darwin.tar.gz
 67c4a96dd237c1f518f6b36083f270f9976d516f1e57fce891755ea782e50006  sccache-v0.17.0-x86_64-unknown-linux-musl.tar.gz
+e8c9d1d9ac218eeed479375143dc46b8d51a2b8dbba8e2f9f15ecc8faa2e404b  nfpm_2.47.0_Darwin_arm64.tar.gz
+0660ca602b2d2d2ae4781a06c692b3eeb9d437ffea05b831d76e41f4a3188783  nfpm_2.47.0_Linux_x86_64.tar.gz
+1c0f5f2999b9a974bfb04fdb0cc3306096de530ac5dbb25d739cc5f5219c919c  nfpm_2.47.0_Linux_arm64.tar.gz
+9732d6c5e2a098d3521fca8145d826ae0aaa067ef2385ead08e6feac88fa5792  rustup-init-aarch64-unknown-linux-gnu

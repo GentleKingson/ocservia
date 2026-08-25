@@ -15,6 +15,14 @@ if [[ "${RUN_ID}" == *[^a-zA-Z0-9._-]* ]]; then
   echo "RUN_ID contains unsafe characters" >&2
   exit 2
 fi
+case "$(uname -m)" in
+  x86_64) PACKAGE_ARCH=amd64 ;;
+  aarch64) PACKAGE_ARCH=arm64 ;;
+  *)
+    echo "agent package smoke requires a supported native host architecture, got $(uname -m)" >&2
+    exit 2
+    ;;
+esac
 work="${RUNNER_TEMP:-/tmp}/ocservia-i18-package-${RUN_ID}"
 rootfs="${work}/rootfs"
 verified_staging=""
@@ -84,7 +92,7 @@ trusted_fingerprint="$(sha256sum "${work}/trusted.der" | awk '{print $1}')"
 openssl pkey -in "${work}/controller-command.key" -pubout \
   -out "${work}/controller-command.pub.pem" >/dev/null 2>&1
 archive="$(OUTPUT_DIR="${ARTIFACT_DIR}" AGENT_SIGNING_KEY="${work}/signing.key" VERSION=1.0.0 \
-  SOURCE_DATE_EPOCH=1786147200 "${ROOT}/scripts/package-agent.sh")"
+  PACKAGE_ARCH="${PACKAGE_ARCH}" SOURCE_DATE_EPOCH=1786147200 "${ROOT}/scripts/package-agent.sh")"
 
 openssl genpkey -algorithm ED25519 -out "${work}/substitute.key" >/dev/null 2>&1
 openssl pkey -in "${work}/substitute.key" -pubout -out "${work}/substitute.pub.pem" >/dev/null 2>&1
@@ -126,6 +134,26 @@ if sudo env DESTDIR="${rootfs}" AGENT_TRUSTED_KEY_SHA256="${trusted_fingerprint}
 fi
 echo "option-like input basename rejection passed"
 
+foreign_arch=arm64
+if [[ "${PACKAGE_ARCH}" == arm64 ]]; then
+  foreign_arch=amd64
+fi
+foreign_archive="${work}/ocservia-agent-1.0.0-linux-${foreign_arch}.tar.gz"
+cp -- "${archive}" "${foreign_archive}"
+printf '%s  %s\n' "$(sha256sum -- "${foreign_archive}" | awk '{print $1}')" \
+  "$(basename -- "${foreign_archive}")" >"${foreign_archive}.sha256"
+openssl pkeyutl -sign -rawin -inkey "${work}/signing.key" \
+  -in "${foreign_archive}.sha256" -out "${foreign_archive}.sha256.sig"
+if sudo env AGENT_TRUSTED_KEY_SHA256="${trusted_fingerprint}" \
+  "${ROOT}/scripts/verify-agent-package.sh" "${foreign_archive}" "${foreign_archive}.sha256" \
+  "${foreign_archive}.sha256.sig" "${work}/trusted.pub.pem" >/dev/null 2>&1; then
+  echo "verifier accepted a package built for a foreign architecture" >&2
+  exit 1
+fi
+sudo test ! -e /var/lib/ocservia-upgrade \
+  || { echo "foreign-architecture rejection still created host staging state" >&2; exit 1; }
+echo "host architecture mismatch rejection passed"
+
 evil_root="${work}/evil/ocservia-agent-9.9.9"
 mkdir -p "${evil_root}/scripts" "${evil_root}/rust/target/release"
 for required in MANIFEST scripts/install-agent.sh scripts/upgrade-agent.sh scripts/rollback-agent.sh \
@@ -133,7 +161,7 @@ for required in MANIFEST scripts/install-agent.sh scripts/upgrade-agent.sh scrip
   : >"${evil_root}/${required}"
 done
 ln -s /etc/shadow "${evil_root}/shadow-link"
-evil_archive="${work}/ocservia-agent-9.9.9-linux-amd64.tar.gz"
+evil_archive="${work}/ocservia-agent-9.9.9-linux-${PACKAGE_ARCH}.tar.gz"
 tar -C "${work}/evil" -czf "${evil_archive}" ocservia-agent-9.9.9
 printf '%s  %s\n' "$(sha256sum -- "${evil_archive}" | awk '{print $1}')" \
   "$(basename -- "${evil_archive}")" >"${evil_archive}.sha256"
@@ -157,6 +185,7 @@ printf '%s\n' "${package_root}" >"${ARTIFACT_DIR}/verification.log"
 verified_staging="${package_root%%/extracted/*}"
 test "$(sudo stat -c '%u:%g:%a' -- "${verified_staging}")" = "0:0:700"
 sudo grep -Fxq 'agent_protocol=1.1' "${package_root}/MANIFEST"
+sudo grep -Fxq "arch=${PACKAGE_ARCH}" "${package_root}/MANIFEST"
 printf 'untrusted archive replaced after trusted staging\n' >"${download_archive}"
 
 sudo install -d -o 61000 -g 61000 -m 0700 -- \

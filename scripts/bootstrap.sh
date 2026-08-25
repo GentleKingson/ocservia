@@ -8,7 +8,7 @@ CHECKSUMS="${ROOT}/scripts/checksums.txt"
 PROFILE="${1:-}"
 
 if (($# > 1)); then
-  echo "usage: $0 [all|ci-quality|contracts|g6-runtime|g6-secret-scan|go-test|go-quality|go-rust-integration|rust-validation|native|web|security]" >&2
+  echo "usage: $0 [all|ci-quality|contracts|g6-runtime|g6-secret-scan|go-test|go-quality|go-rust-integration|native|native-packages|rust-validation|web|security]" >&2
   exit 2
 fi
 
@@ -21,7 +21,7 @@ if [[ -z "${PROFILE}" ]]; then
 fi
 
 case "${PROFILE}" in
-  all | ci-quality | contracts | g6-runtime | g6-secret-scan | go-test | go-quality | go-rust-integration | rust-validation | native | web | security) ;;
+  all | ci-quality | contracts | g6-runtime | g6-secret-scan | go-test | go-quality | go-rust-integration | native | native-packages | rust-validation | web | security) ;;
   *)
     echo "unsupported bootstrap profile: ${PROFILE}" >&2
     exit 2
@@ -94,6 +94,7 @@ case "$(uname -s)-$(uname -m)" in
     cargo_audit_platform="aarch64-apple-darwin"
     cargo_deny_platform="aarch64-apple-darwin"
     sccache_platform="aarch64-apple-darwin"
+    nfpm_platform="Darwin_arm64"
     ;;
   Linux-x86_64)
     go_platform="linux-amd64"
@@ -107,6 +108,13 @@ case "$(uname -s)-$(uname -m)" in
     cargo_audit_platform="x86_64-unknown-linux-gnu"
     cargo_deny_platform="x86_64-unknown-linux-musl"
     sccache_platform="x86_64-unknown-linux-musl"
+    nfpm_platform="Linux_x86_64"
+    ;;
+  Linux-aarch64)
+    # Only the native release packaging toolchain is mirrored for this
+    # platform; other profiles fail closed on their missing platform mappings.
+    rust_platform="aarch64-unknown-linux-gnu"
+    nfpm_platform="Linux_arm64"
     ;;
   *)
     echo "unsupported bootstrap platform: $(uname -s)-$(uname -m)" >&2
@@ -292,6 +300,20 @@ install_sccache() {
   [[ "$(sccache --version)" == *"$(version sccache)"* ]]
 }
 
+install_nfpm() {
+  local artifact archive
+  artifact="nfpm_$(version nfpm)_${nfpm_platform}.tar.gz"
+  # nfpm --version prints a multi-line banner; the pinned version is the
+  # GitVersion field.
+  if ! nfpm --version 2>/dev/null | awk '$1 == "GitVersion:" { print $2 }' \
+    | grep -Fxq "$(version nfpm)" || [[ ! -x "${TOOLS}/bin/nfpm" ]]; then
+    archive="$(download "https://github.com/goreleaser/nfpm/releases/download/v$(version nfpm)/${artifact}" "${artifact}")"
+    tar -xzf "${archive}" -C "${TOOLS}/bin" nfpm
+    chmod 0755 "${TOOLS}/bin/nfpm"
+  fi
+  [[ "$(nfpm --version 2>/dev/null | awk '$1 == "GitVersion:" { print $2 }')" == "$(version nfpm)" ]]
+}
+
 install_contract_tools() {
   install_buf
   install_openapi_generator
@@ -412,6 +434,10 @@ case "${PROFILE}" in
   native)
     install_rust
     install_sccache
+    ;;
+  native-packages)
+    install_rust
+    install_nfpm
     ;;
   web)
     install_node
