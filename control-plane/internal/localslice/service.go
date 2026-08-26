@@ -275,6 +275,8 @@ type OperationSummary struct {
 // query so dashboards stay accurate beyond any page limit. The classes match
 // operation-polling terminal semantics: terminal states are excluded, the
 // "unknown" recovery state is reported separately, everything else is active.
+// A nil workspace aggregates every workspace, matching the development-auth
+// semantics of the operation and event listings.
 func (s *Service) OperationSummaryInWorkspace(ctx context.Context, workspaceID uuid.UUID) (OperationSummary, error) {
 	var summary OperationSummary
 	err := s.pool.QueryRow(ctx, `
@@ -282,7 +284,7 @@ func (s *Service) OperationSummaryInWorkspace(ctx context.Context, workspaceID u
 			count(*) FILTER (WHERE state NOT IN ('succeeded','failed','expired','rolled_back','drifted','superseded') AND state <> 'unknown'),
 			count(*) FILTER (WHERE state = 'unknown')
 		FROM operations
-		WHERE workspace_id=$1`, workspaceID).Scan(&summary.Active, &summary.Unknown)
+		WHERE ($1::uuid IS NULL OR workspace_id=$1)`, nullableUUID(workspaceID)).Scan(&summary.Active, &summary.Unknown)
 	if err != nil {
 		return OperationSummary{}, fmt.Errorf("operation summary: %w", err)
 	}

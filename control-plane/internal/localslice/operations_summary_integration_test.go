@@ -39,6 +39,11 @@ func TestOperationSummaryInWorkspaceCountsAllStatesIntegration(t *testing.T) {
 			t.Fatalf("insert %s operation: %v", state, err)
 		}
 	}
+	service := New(pool)
+	baseline, err := service.OperationSummaryInWorkspace(ctx, uuid.Nil)
+	if err != nil {
+		t.Fatal(err)
+	}
 	for _, state := range []string{"draft", "queued", "dispatched", "accepted", "running", "offline_pending"} {
 		insert(workspaceID, state)
 	}
@@ -50,7 +55,6 @@ func TestOperationSummaryInWorkspaceCountsAllStatesIntegration(t *testing.T) {
 	insert(otherWorkspaceID, "queued")
 	insert(otherWorkspaceID, "unknown")
 
-	service := New(pool)
 	summary, err := service.OperationSummaryInWorkspace(ctx, workspaceID)
 	if err != nil {
 		t.Fatal(err)
@@ -65,5 +69,16 @@ func TestOperationSummaryInWorkspaceCountsAllStatesIntegration(t *testing.T) {
 	}
 	if otherSummary.Active != 1 || otherSummary.Unknown != 1 {
 		t.Fatalf("other workspace summary = %+v, want active=1 unknown=1", otherSummary)
+	}
+
+	// Development auth serves REST requests without a workspace context, so a
+	// nil workspace must aggregate every workspace like the listings do. The
+	// baseline delta tolerates rows left by other tests sharing the database.
+	allSummary, err := service.OperationSummaryInWorkspace(ctx, uuid.Nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if allSummary.Active != baseline.Active+7 || allSummary.Unknown != baseline.Unknown+3 {
+		t.Fatalf("nil workspace summary = %+v (baseline %+v), want active=+%d unknown=+%d", allSummary, baseline, 7, 3)
 	}
 }
