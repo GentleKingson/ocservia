@@ -538,3 +538,43 @@ func TestBrowserOriginDerivesFromOIDCRedirectURL(t *testing.T) {
 		})
 	}
 }
+
+func TestRecommendedAgentVersion(t *testing.T) {
+	tests := []struct {
+		name        string
+		value       string
+		want        string
+		wantFailure bool
+	}{
+		{name: "unset keeps classification unknown", value: "", want: ""},
+		{name: "plain semver", value: "0.2.0", want: "0.2.0"},
+		{name: "v-prefixed semver", value: "v0.2.0", want: "v0.2.0"},
+		{name: "prerelease", value: "0.2.0-rc.1", want: "0.2.0-rc.1"},
+		{name: "non-semver rejected", value: "latest", wantFailure: true},
+		{name: "short form accepted", value: "0.2", want: "0.2"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			values := map[string]string{"OCSERV_DATABASE_URL": "postgres://db/test"}
+			if test.value != "" {
+				values["OCSERV_RECOMMENDED_AGENT_VERSION"] = test.value
+			}
+			config, err := Load(nil, func(key string) (string, bool) {
+				value, ok := values[key]
+				return value, ok
+			})
+			if test.wantFailure {
+				if err == nil {
+					t.Fatal("invalid recommended agent version accepted")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("Load() error = %v", err)
+			}
+			if config.RecommendedAgentVersion != test.want {
+				t.Fatalf("recommended agent version=%q want %q", config.RecommendedAgentVersion, test.want)
+			}
+		})
+	}
+}
