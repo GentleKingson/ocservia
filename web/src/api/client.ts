@@ -12,6 +12,7 @@ import {
   type OperationSummary,
   type PlatformEventPage,
   type Readiness,
+  type BuildInfo,
   type NodeObservedState,
   type NodeIpBanPage,
   type NodePage,
@@ -336,6 +337,10 @@ export async function operationSummary(
 
 export async function getReadiness(): Promise<Readiness> {
   return platform.getReadiness();
+}
+
+export async function getVersion(): Promise<BuildInfo> {
+  return platform.getVersion();
 }
 
 export async function createLocalSimulation(

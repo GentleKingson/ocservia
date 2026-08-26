@@ -555,6 +555,28 @@ h1 {
   color: #8c5418 !important;
   background: #fff0dc;
 }
+.version-badge {
+  display: inline-block;
+  margin-left: 6px;
+  padding: 2px 6px;
+  border-radius: 5px;
+  color: #52615c !important;
+  background: #edf1ef;
+  white-space: nowrap;
+  font-size: 11px;
+}
+.version-badge.current {
+  color: #176d47 !important;
+  background: #e3f5eb;
+}
+.version-badge.upgrade_available {
+  color: #8c5418 !important;
+  background: #fff0dc;
+}
+.version-badge.ahead {
+  color: #1f5d7a !important;
+  background: #e2f0f7;
+}
 .node-detail dl {
   margin: 0;
   padding: 8px 18px;

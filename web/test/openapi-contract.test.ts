@@ -16,6 +16,18 @@ interface OpenApiDocument {
     schemas?: {
       UuidV7?: { pattern?: unknown };
       Problem?: { required?: unknown };
+      NodeObservedState?: {
+        required?: unknown;
+        properties?: {
+          agent_version_state?: { enum?: unknown };
+          recommended_agent_version?: { maxLength?: unknown };
+        };
+      };
+      BuildInfo?: {
+        properties?: {
+          recommended_agent_version?: { maxLength?: unknown };
+        };
+      };
       EnrollmentToken?: {
         properties?: {
           token?: { readOnly?: unknown; writeOnly?: unknown };
@@ -91,6 +103,35 @@ describe("OpenAPI invariants", () => {
     expect(source).not.toMatch(
       /shell|docker\.sock|systemctl_command|occtl_command/,
     );
+  });
+
+  it("publishes the server-derived agent version state", async () => {
+    const source = await readFile(
+      resolve(import.meta.dirname, "../../openapi/openapi.yaml"),
+      "utf8",
+    );
+    const schemas = (parse(source) as OpenApiDocument).components?.schemas;
+
+    expect(
+      schemas?.NodeObservedState?.properties?.agent_version_state?.enum,
+    ).toEqual([
+      "current",
+      "upgrade_available",
+      "ahead",
+      "unsupported",
+      "unknown",
+    ]);
+    expect(
+      schemas?.NodeObservedState?.properties?.recommended_agent_version
+        ?.maxLength,
+    ).toBe(128);
+    // The derived state stays additive so older clients keep working.
+    expect(schemas?.NodeObservedState?.required).not.toContain(
+      "agent_version_state",
+    );
+    expect(
+      schemas?.BuildInfo?.properties?.recommended_agent_version?.maxLength,
+    ).toBe(128);
   });
 
   it("publishes the role binding identifier returned by the server", async () => {

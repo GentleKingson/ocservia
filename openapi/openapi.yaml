@@ -1591,6 +1591,11 @@ components:
         role:
           type: string
           enum: [api, worker, scheduler, all]
+        recommended_agent_version:
+          description: Operator-configured recommended agent version; absent when no recommendation is configured.
+          type: string
+          minLength: 1
+          maxLength: 128
     UuidV7:
       type: string
       format: uuid
@@ -2378,6 +2383,11 @@ components:
         boot_id: { type: string, minLength: 1, maxLength: 128 }
         agent_instance_id: { $ref: "#/components/schemas/UuidV7" }
         agent_version: { type: string, minLength: 1, maxLength: 128 }
+        agent_version_state:
+          description: Server-side classification of agent_version against the operator-configured recommended agent version.
+          type: string
+          enum: [current, upgrade_available, ahead, unsupported, unknown]
+        recommended_agent_version: { type: string, minLength: 1, maxLength: 128 }
         ocserv_version: { type: string, minLength: 1, maxLength: 128 }
         os_release: { type: string, minLength: 1, maxLength: 128 }
         ocserv: { type: object, additionalProperties: true }

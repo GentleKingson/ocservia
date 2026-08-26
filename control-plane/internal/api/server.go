@@ -38,9 +38,10 @@ import (
 )
 
 type BuildInfo struct {
-	Version string `json:"version"`
-	Commit  string `json:"commit"`
-	Role    string `json:"role"`
+	Version                 string `json:"version"`
+	Commit                  string `json:"commit"`
+	Role                    string `json:"role"`
+	RecommendedAgentVersion string `json:"recommended_agent_version,omitempty"`
 }
 
 type Server struct {

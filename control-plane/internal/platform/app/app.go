@@ -197,7 +197,7 @@ func Run(ctx context.Context, cfg config.Config, build BuildInfo, logger *slog.L
 		}
 		go func() { workerErr <- trustWorker.Run(componentCtx) }()
 	}
-	telemetryService := telemetrystore.New(pool)
+	telemetryService := telemetrystore.NewWithRecommendedAgentVersion(pool, cfg.RecommendedAgentVersion)
 	userStateService := userstate.NewWithSigner(pool, commandSigner)
 	userOperationsService := useroperations.NewWithConcurrency(pool, userStateService, cfg.UserOperationConcurrency)
 	var apiTransport *transportclient.Client
@@ -320,7 +320,7 @@ func Run(ctx context.Context, cfg config.Config, build BuildInfo, logger *slog.L
 		}
 	}
 
-	server := api.New(cfg.HTTPAddress, pool, api.BuildInfo{Version: build.Version, Commit: build.Commit, Role: string(cfg.Role)}, logger, cfg.BodyLimit, cfg.RequestTimeout, operationAuthEnabled(cfg), cfg.DevAuthToken, expectedSchemaVersion)
+	server := api.New(cfg.HTTPAddress, pool, api.BuildInfo{Version: build.Version, Commit: build.Commit, Role: string(cfg.Role), RecommendedAgentVersion: cfg.RecommendedAgentVersion}, logger, cfg.BodyLimit, cfg.RequestTimeout, operationAuthEnabled(cfg), cfg.DevAuthToken, expectedSchemaVersion)
 	server.EnableBrowserOrigin(cfg.BrowserOrigin())
 	if err := server.ConfigureEventStreams(cfg.EventStreams); err != nil {
 		return fmt.Errorf("configure SSE admission: %w", err)
