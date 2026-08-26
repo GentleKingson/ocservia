@@ -2,6 +2,7 @@
 import {
   Activity,
   Boxes,
+  FlaskConical,
   LayoutDashboard,
   ListChecks,
   ScrollText,
@@ -18,6 +19,7 @@ import {
   selectWorkspace,
 } from "./api/client";
 import { useReadinessStore } from "./shared/readiness";
+import { developmentRuntime } from "./shared/routes";
 
 const readiness = useReadinessStore();
 const router = useRouter();
@@ -51,6 +53,9 @@ const links = [
   { to: "/nodes", label: "nodes", icon: Boxes },
   { to: "/operations", label: "operations", icon: ListChecks },
   { to: "/audit", label: "audit", icon: ScrollText },
+  ...(developmentRuntime
+    ? [{ to: "/dev", label: "development", icon: FlaskConical }]
+    : []),
 ];
 </script>
 

@@ -3,10 +3,12 @@ import { expect, test } from "@playwright/test";
 test("runs and rebuilds the local vertical slice", async ({ page }) => {
   const pageErrors: string[] = [];
   page.on("pageerror", (error) => pageErrors.push(error.message));
-  await page.goto("/");
+  await page.goto("/dev");
   await page.waitForTimeout(500);
   expect(pageErrors).toEqual([]);
-  await expect(page.getByRole("heading", { name: "Overview" })).toBeVisible();
+  await expect(
+    page.getByRole("heading", { name: "Development" }),
+  ).toBeVisible();
 
   const operationResponse = page.waitForResponse(
     (response) =>

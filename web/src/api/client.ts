@@ -36,6 +36,7 @@ const loginReturnKey = "ocservia.login.return-to";
 const loginStartedKey = "ocservia.login.started-at";
 const workspaceKey = "ocservia.workspace-id";
 export const workspaceChangedEvent = "ocservia:workspace-changed";
+export const platformEventsEvent = "ocservia:platform-events";
 
 function newIdempotencyKey(): string {
   if (typeof globalThis.crypto.randomUUID === "function")
