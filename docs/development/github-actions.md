@@ -191,11 +191,14 @@ a unique directory below `RUNNER_TEMP`.
 
 Build Runtime Artifacts compiles `ocserv-control` and
 `ocservia-transportd-stub`, then creates
-`runtime-<run>-<attempt>/runtime-artifacts.tar.gz`. Its manifest records the
+`runtime-<run>/runtime-artifacts.tar.gz`. Its manifest records the
 full candidate commit and a SHA-256 digest for each executable. Extraction
 allows exactly the manifest and two expected binaries, rejects unsafe or
 unexpected entries, validates both digests, and verifies that the manifest
-commit equals `GITHUB_SHA`.
+commit equals `GITHUB_SHA`. The name omits the run attempt and the upload
+overwrites, so "Re-run failed jobs" reuses the artifact the successful build
+already produced while a full re-run replaces it; the manifest check still
+binds the artifact to the exact commit.
 
 PostgreSQL 17, PostgreSQL 18, and Local Slice download and validate that
 artifact instead of rebuilding the same binaries. The PostgreSQL matrix uses
@@ -206,11 +209,11 @@ the local `PG_MAJOR=all` mode; it is not repeated in the PostgreSQL 17 worker.
 ## Diagnostics
 
 Uploads use SHA-pinned Actions, one-day retention, and names bound to the run
-and attempt:
+(except the reusable runtime artifact) or to the run and attempt:
 
 | Worker | Artifact name |
 | --- | --- |
-| Build Runtime Artifacts | `runtime-<run>-<attempt>` |
+| Build Runtime Artifacts | `runtime-<run>` |
 | Go Static and Unit | `go-standard-<run>-<attempt>` |
 | Go Race | `go-race-<run>-<attempt>` |
 | PostgreSQL 17/18 | `database-pg<major>-<run>-<attempt>` |
