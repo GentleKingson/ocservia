@@ -185,12 +185,20 @@ export const useFleetStore = defineStore("fleet", () => {
         (node) => node.agentVersionState === "upgrade_available",
       ).length,
   );
+  const agentAhead = computed(
+    () =>
+      nodes.value.filter((node) => node.agentVersionState === "ahead").length,
+  );
+  // agentVersionState is optional on the wire, so anything missing or not yet
+  // classified (unknown, unsupported) rolls up as unknown; current, update,
+  // ahead, and unknown therefore always sum to the fleet node count.
   const agentUnknown = computed(
     () =>
       nodes.value.filter(
         (node) =>
-          node.agentVersionState === "unknown" ||
-          node.agentVersionState === "unsupported",
+          node.agentVersionState !== "current" &&
+          node.agentVersionState !== "upgrade_available" &&
+          node.agentVersionState !== "ahead",
       ).length,
   );
 
@@ -584,6 +592,7 @@ export const useFleetStore = defineStore("fleet", () => {
     sessionCount,
     agentCurrent,
     agentUpdateAvailable,
+    agentAhead,
     agentUnknown,
     rebuild,
     select,

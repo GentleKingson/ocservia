@@ -80,7 +80,16 @@ describe("fleet agent version intelligence", () => {
 
     expect(fleet.agentCurrent).toBe(1);
     expect(fleet.agentUpdateAvailable).toBe(1);
-    expect(fleet.agentUnknown).toBe(2);
+    expect(fleet.agentAhead).toBe(1);
+    // unknown, unsupported, and a missing optional state all roll up as unknown
+    // so the summary always covers the whole fleet.
+    expect(fleet.agentUnknown).toBe(3);
+    expect(
+      fleet.agentCurrent +
+        fleet.agentUpdateAvailable +
+        fleet.agentAhead +
+        fleet.agentUnknown,
+    ).toBe(fleet.nodes.length);
     fleet.$dispose();
   });
 });
@@ -114,6 +123,7 @@ describe("version intelligence presentation", () => {
     );
     expect(source).toContain('data-testid="overview-agent-versions"');
     expect(source).toContain("agentUpdateAvailable");
+    expect(source).toContain("agentAhead");
     expect(source).toContain("agentUnknown");
   });
 

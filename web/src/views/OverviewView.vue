@@ -180,6 +180,7 @@ onBeforeUnmount(() => {
             }}</template>
             <template v-else
               >{{ fleet.agentUpdateAvailable }} {{ $t("upgrade_available") }} ·
+              {{ fleet.agentAhead }} {{ $t("ahead") }} ·
               {{ fleet.agentUnknown }} {{ $t("unknown") }}</template
             >
           </small>

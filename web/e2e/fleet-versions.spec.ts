@@ -4,6 +4,7 @@ const workspaceId = "019fc0a4-6d92-765c-a8a1-4af556614ed1";
 const currentNodeId = "019fc0a4-6d92-765c-a8a1-4af556614ed2";
 const updateNodeId = "019fc0a4-6d92-765c-a8a1-4af556614ed3";
 const unknownNodeId = "019fc0a4-6d92-765c-a8a1-4af556614ed4";
+const aheadNodeId = "019fc0a4-6d92-765c-a8a1-4af556614ed5";
 const recommended = "0.2.0";
 const nodeRow = (id: string, name: string, extra: Record<string, unknown>) => ({
   id,
@@ -30,6 +31,10 @@ const nodes = [
   }),
   nodeRow(unknownNodeId, "node-unknown", {
     agent_version_state: "unknown",
+  }),
+  nodeRow(aheadNodeId, "node-ahead", {
+    agent_version: "0.3.0",
+    agent_version_state: "ahead",
   }),
 ];
 
@@ -139,6 +144,8 @@ test("shows server-derived version badges on the fleet list", async ({
   );
   const unknownRow = page.locator("tr", { hasText: "node-unknown" });
   await expect(unknownRow.locator(".version-badge")).toHaveText("Unknown");
+  const aheadRow = page.locator("tr", { hasText: "node-ahead" });
+  await expect(aheadRow.locator(".version-badge")).toHaveText("Ahead");
 });
 
 test("summarizes version states on the overview dashboard", async ({
@@ -147,9 +154,11 @@ test("summarizes version states on the overview dashboard", async ({
   await page.goto("/");
 
   await expect(page.getByTestId("overview-agent-versions")).toHaveText("1");
+  // Every classified bucket is visible so an ahead-only fleet cannot read as
+  // an unclassified one.
   await expect(
     page.getByTestId("overview-agent-versions").locator(".."),
-  ).toContainText(/1 Update available · 1 Unknown/);
+  ).toContainText(/1 Update available · 1 Ahead · 1 Unknown/);
 });
 
 test("shows observed, recommended, and state on node detail", async ({
