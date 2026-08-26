@@ -274,21 +274,42 @@ func optionalText(value pgtype.Text) *string {
 }
 
 func (s *Service) ListEvents(ctx context.Context, after uuid.UUID, limit int) ([]Event, bool, error) {
-	return s.ListEventsInWorkspace(ctx, uuid.Nil, after, limit)
+	return s.ListEventsInWorkspace(ctx, uuid.Nil, after, limit, ListEventsAscending)
 }
 
-func (s *Service) ListEventsInWorkspace(ctx context.Context, workspaceID, after uuid.UUID, limit int) ([]Event, bool, error) {
+// Event list orders. The desc order lets clients read the newest events with
+// a bounded number of pages instead of walking the whole durable history.
+const (
+	ListEventsAscending  = "asc"
+	ListEventsDescending = "desc"
+)
+
+func (s *Service) ListEventsInWorkspace(ctx context.Context, workspaceID, after uuid.UUID, limit int, order string) ([]Event, bool, error) {
 	if limit < 1 || limit > 200 {
 		return nil, false, errors.New("event page size must be between 1 and 200")
 	}
-	rows, err := s.pool.Query(ctx, `
+	if order != ListEventsAscending && order != ListEventsDescending {
+		return nil, false, errors.New("event order must be asc or desc")
+	}
+	query := `
 		SELECT event.event_id::text, event.node_id::text, event.event_type, event.traceparent, event.occurred_at, event.ingest_sequence
 		FROM transport_events event JOIN nodes node ON node.id=event.node_id
 		WHERE ($1::uuid IS NULL OR event.ingest_sequence > (
 			SELECT ingest_sequence FROM transport_events WHERE event_id = $1
 		)) AND ($3::uuid IS NULL OR node.workspace_id=$3)
 		ORDER BY event.ingest_sequence
-		LIMIT $2`, nullableUUID(after), limit+1, nullableUUID(workspaceID))
+		LIMIT $2`
+	if order == ListEventsDescending {
+		query = `
+		SELECT event.event_id::text, event.node_id::text, event.event_type, event.traceparent, event.occurred_at, event.ingest_sequence
+		FROM transport_events event JOIN nodes node ON node.id=event.node_id
+		WHERE ($1::uuid IS NULL OR event.ingest_sequence < (
+			SELECT ingest_sequence FROM transport_events WHERE event_id = $1
+		)) AND ($3::uuid IS NULL OR node.workspace_id=$3)
+		ORDER BY event.ingest_sequence DESC
+		LIMIT $2`
+	}
+	rows, err := s.pool.Query(ctx, query, nullableUUID(after), limit+1, nullableUUID(workspaceID))
 	if err != nil {
 		return nil, false, fmt.Errorf("list transport events: %w", err)
 	}

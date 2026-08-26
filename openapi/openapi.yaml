@@ -171,10 +171,22 @@ paths:
           required: false
           schema:
             $ref: "#/components/schemas/UuidV7"
+          description: >-
+            Exclusive event cursor; in asc order it resumes after the event,
+            in desc order it resumes before the event.
+        - name: order
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [asc, desc]
+            default: asc
         - $ref: "#/components/parameters/PageSize"
       responses:
         "200":
-          description: Events ordered from oldest to newest.
+          description: >-
+            Events ordered from oldest to newest, or from newest to oldest
+            when order is desc.
           content:
             application/json:
               schema:

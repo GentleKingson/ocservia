@@ -196,13 +196,13 @@ describe("operational overview", () => {
   });
 
   it("bounds and orders recent events and operations", async () => {
-    const events = Array.from({ length: 20 }, (_, index) =>
+    const newestFirst = Array.from({ length: 20 }, (_, index) =>
       platformEvent(
-        `019fc0a4-6d92-765c-a8a1-4af556614e${String(index).padStart(2, "0")}`,
-        index,
+        `019fc0a4-6d92-765c-a8a1-4af556614e${String(19 - index).padStart(2, "0")}`,
+        19 - index,
       ),
     );
-    vi.mocked(listEvents).mockResolvedValue(eventPage(events));
+    vi.mocked(listEvents).mockResolvedValue(eventPage(newestFirst));
     vi.mocked(listOperations).mockResolvedValue(
       operationPage(
         Array.from({ length: 20 }, (_, index) =>
@@ -214,30 +214,80 @@ describe("operational overview", () => {
     overview.start();
     await vi.advanceTimersByTimeAsync(0);
 
+    expect(listEvents).toHaveBeenCalledTimes(1);
+    expect(listEvents).toHaveBeenCalledWith(
+      undefined,
+      expect.any(AbortSignal),
+      "desc",
+    );
     expect(overview.events).toHaveLength(20);
+    expect(overview.events[0]?.id).toContain("e00");
+    expect(overview.events.at(-1)?.id).toContain("e19");
     expect(overview.recentEvents).toHaveLength(12);
-    expect(overview.recentEvents[0]?.id).toBe(events.at(-1)?.id);
-    expect(overview.recentEvents.at(-1)?.id).toBe(events.at(20 - 12)?.id);
+    expect(overview.recentEvents[0]?.id).toBe(overview.events.at(-1)?.id);
     expect(overview.recentOperations).toHaveLength(12);
     expect(overview.recentOperations[0]?.id).toBe("op-00");
     overview.stop();
   });
 
-  it("appends only new events on an incremental refresh", async () => {
-    vi.mocked(listEvents)
-      .mockResolvedValueOnce(eventPage([platformEvent("event-1", 1)]))
-      .mockResolvedValueOnce(
-        eventPage([platformEvent("event-2", 2), platformEvent("event-3", 3)]),
-      );
+  it("does not walk history when the newest event page has more", async () => {
+    vi.mocked(listEvents).mockResolvedValue(
+      eventPage(
+        [platformEvent("event-newest", 2), platformEvent("event-oldest", 1)],
+        true,
+      ),
+    );
     const overview = useOverviewStore();
     overview.start();
     await vi.advanceTimersByTimeAsync(0);
-    expect(overview.events.map((event) => event.id)).toEqual(["event-1"]);
+
+    expect(listEvents).toHaveBeenCalledTimes(1);
+    expect(overview.events.map((event) => event.id)).toEqual([
+      "event-oldest",
+      "event-newest",
+    ]);
+    overview.stop();
+  });
+
+  it("reads only the newest operations page on every refresh", async () => {
+    vi.mocked(listOperations).mockResolvedValue(
+      operationPage([operation("op-new", "running")], true),
+    );
+    const overview = useOverviewStore();
+    overview.start();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(listOperations).toHaveBeenCalledTimes(1);
+
+    overview.refresh();
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(listOperations).toHaveBeenCalledTimes(2);
+    expect(listOperations).toHaveBeenLastCalledWith(
+      undefined,
+      expect.any(AbortSignal),
+    );
+    expect(overview.activeOperations).toBe(1);
+    overview.stop();
+  });
+
+  it("appends only new events on an incremental refresh", async () => {
+    vi.mocked(listEvents)
+      .mockResolvedValueOnce(
+        eventPage([platformEvent("event-2", 2), platformEvent("event-1", 1)]),
+      )
+      .mockResolvedValueOnce(eventPage([platformEvent("event-3", 3)]));
+    const overview = useOverviewStore();
+    overview.start();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(overview.events.map((event) => event.id)).toEqual([
+      "event-1",
+      "event-2",
+    ]);
 
     overview.refresh();
     await vi.advanceTimersByTimeAsync(0);
     expect(listEvents).toHaveBeenLastCalledWith(
-      "event-1",
+      "event-2",
       expect.any(AbortSignal),
     );
     expect(overview.events.map((event) => event.id)).toEqual([
@@ -342,6 +392,26 @@ describe("operational overview", () => {
     await vi.advanceTimersByTimeAsync(500);
     expect(listOperations).toHaveBeenCalledTimes(2);
     expect(listEvents).toHaveBeenCalledTimes(2);
+    overview.stop();
+  });
+
+  it("still refreshes while platform events arrive continuously", async () => {
+    const overview = useOverviewStore();
+    overview.start();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(listOperations).toHaveBeenCalledTimes(1);
+
+    // Events every 150ms forever postpone a trailing debounce; the fixed
+    // refresh window must still fire mid-burst.
+    for (let elapsed = 0; elapsed < 1_400; elapsed += 150) {
+      window.dispatchEvent(new Event(platformEventsEvent));
+      await vi.advanceTimersByTimeAsync(150);
+    }
+
+    expect(vi.mocked(listOperations).mock.calls.length).toBeGreaterThanOrEqual(
+      3,
+    );
+    expect(vi.mocked(listEvents).mock.calls.length).toBeGreaterThanOrEqual(3);
     overview.stop();
   });
 

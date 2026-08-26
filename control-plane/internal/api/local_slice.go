@@ -123,12 +123,20 @@ func (s *Server) listEvents(w http.ResponseWriter, r *http.Request) {
 		writeProblem(w, r, http.StatusBadRequest, "https://ocservia.dev/problems/invalid-cursor", "Cursor is invalid", "after must be a UUIDv7 event ID")
 		return
 	}
+	order := r.URL.Query().Get("order")
+	if order == "" {
+		order = localslice.ListEventsAscending
+	}
+	if order != localslice.ListEventsAscending && order != localslice.ListEventsDescending {
+		writeProblem(w, r, http.StatusBadRequest, "https://ocservia.dev/problems/invalid-order", "Order is invalid", "order must be either asc or desc")
+		return
+	}
 	limit, ok := pageSize(r, 50)
 	if !ok {
 		writeProblem(w, r, http.StatusBadRequest, "https://ocservia.dev/problems/invalid-page-size", "Page size is invalid", "page_size must be an integer between 1 and 200")
 		return
 	}
-	events, hasMore, err := service.ListEventsInWorkspace(r.Context(), workspace(r), after, limit)
+	events, hasMore, err := service.ListEventsInWorkspace(r.Context(), workspace(r), after, limit, order)
 	if err != nil {
 		s.logger.ErrorContext(r.Context(), "list events", "error", err)
 		writeProblem(w, r, http.StatusServiceUnavailable, "https://ocservia.dev/problems/database-unavailable", "Service is unavailable", "events are temporarily unavailable")

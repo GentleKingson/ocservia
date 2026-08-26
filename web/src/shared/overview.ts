@@ -86,16 +86,12 @@ export const useOverviewStore = defineStore("overview", () => {
           isCurrent(context, controller, sequence, operationsSequence),
         );
       if (!isLatest()) return;
-      const rebuilt: Operation[] = [];
-      let cursor: string | undefined;
-      do {
-        const page = await listOperations(cursor, controller.signal);
-        if (!isLatest()) return;
-        rebuilt.push(...page.items);
-        cursor = page.page.hasMore ? page.page.nextCursor : undefined;
-      } while (cursor);
+      // Operations are listed newest-first, so a single page bounds every
+      // refresh to one request. Classification covers the in-flight
+      // operations within that newest page.
+      const page = await listOperations(undefined, controller.signal);
       if (!isLatest()) return;
-      operations.value = rebuilt;
+      operations.value = page.items;
       operationsLoaded.value = true;
       operationsUnavailable.value = false;
     } catch {
@@ -119,9 +115,11 @@ export const useOverviewStore = defineStore("overview", () => {
     eventsController = controller;
     const sequence = ++eventsSequence;
     eventsLoading.value = true;
-    // Events are listed oldest-first; incremental refreshes resume after the
-    // newest retained event instead of re-walking the whole history.
-    const since = eventsLoaded.value ? events.value.at(-1)?.id : undefined;
+    const incremental = eventsLoaded.value;
+    // The first load reads one newest-first page so the cost stays bounded
+    // no matter how much durable history the workspace has. Incremental
+    // refreshes resume ascending after the newest retained event.
+    const since = incremental ? events.value.at(-1)?.id : undefined;
     let context: WorkspaceContext | undefined;
     try {
       context = await currentContext();
@@ -132,18 +130,24 @@ export const useOverviewStore = defineStore("overview", () => {
           isCurrent(context, controller, sequence, eventsSequence),
         );
       if (!isLatest()) return;
-      const appended: PlatformEvent[] = [];
-      let cursor = since;
-      do {
-        const page = await listEvents(cursor, controller.signal);
+      const collected: PlatformEvent[] = [];
+      if (!incremental) {
+        const page = await listEvents(undefined, controller.signal, "desc");
         if (!isLatest()) return;
-        appended.push(...page.items);
-        cursor = page.page.hasMore ? page.page.nextCursor : undefined;
-      } while (cursor);
+        collected.push(...[...page.items].reverse());
+      } else {
+        let cursor = since;
+        do {
+          const page = await listEvents(cursor, controller.signal);
+          if (!isLatest()) return;
+          collected.push(...page.items);
+          cursor = page.page.hasMore ? page.page.nextCursor : undefined;
+        } while (cursor);
+      }
       if (!isLatest()) return;
-      events.value = since
-        ? [...events.value, ...appended].slice(-retainedEventLimit)
-        : appended.slice(-retainedEventLimit);
+      events.value = incremental
+        ? [...events.value, ...collected].slice(-retainedEventLimit)
+        : collected.slice(-retainedEventLimit);
       eventsLoaded.value = true;
       eventsUnavailable.value = false;
     } catch {
@@ -167,8 +171,13 @@ export const useOverviewStore = defineStore("overview", () => {
   }
 
   function schedulePlatformRefresh(): void {
-    clearTimeout(refreshTimer);
-    refreshTimer = setTimeout(refresh, platformRefreshDelay);
+    // Fixed-window coalescing: a scheduled refresh is never postponed by
+    // later events, so a sustained event stream cannot starve the overview.
+    if (refreshTimer) return;
+    refreshTimer = setTimeout(() => {
+      refreshTimer = undefined;
+      refresh();
+    }, platformRefreshDelay);
   }
 
   function clearState(): void {

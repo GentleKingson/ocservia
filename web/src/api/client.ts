@@ -350,12 +350,16 @@ export async function getOperation(
 export async function listEvents(
   after?: string,
   signal?: AbortSignal,
+  order?: "asc" | "desc",
 ): Promise<PlatformEventPage> {
   const xWorkspaceID = await workspaceID();
   return events.listEvents(
-    after
-      ? { xWorkspaceID, after, pageSize: 200 }
-      : { xWorkspaceID, pageSize: 200 },
+    {
+      xWorkspaceID,
+      pageSize: 200,
+      ...(after ? { after } : {}),
+      ...(order ? { order } : {}),
+    },
     requestInit(signal),
   );
 }
