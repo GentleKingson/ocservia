@@ -68,6 +68,15 @@ function waitForPoll(delay: number, signal: AbortSignal): Promise<void> {
   });
 }
 
+function responseStatus(error: unknown): number | undefined {
+  if (typeof error !== "object" || error === null || !("response" in error))
+    return undefined;
+  const response = (error as { response?: unknown }).response;
+  if (typeof response !== "object" || response === null) return undefined;
+  const status = (response as { status?: unknown }).status;
+  return typeof status === "number" ? status : undefined;
+}
+
 export const useFleetStore = defineStore("fleet", () => {
   const nodes = ref<NodeObservedState[]>([]);
   const selected = ref<NodeObservedState>();
@@ -79,6 +88,9 @@ export const useFleetStore = defineStore("fleet", () => {
   const operationTracking = ref(false);
   const operationError = ref("");
   const loading = ref(false);
+  const initialized = ref(false);
+  const selecting = ref(false);
+  const selectionError = ref<"" | "notFound" | "unavailable">("");
   const unavailable = ref(false);
   let source: EventSource | undefined;
   let refreshTimer: ReturnType<typeof setTimeout> | undefined;
@@ -113,6 +125,7 @@ export const useFleetStore = defineStore("fleet", () => {
     rebuildController = undefined;
     selectController = undefined;
     operationController = undefined;
+    selecting.value = false;
     activeOperation.value = undefined;
     operationTracking.value = false;
     rebuildSequence += 1;
@@ -183,6 +196,7 @@ export const useFleetStore = defineStore("fleet", () => {
       } while (cursor);
       if (!isLatestRebuild()) return;
       nodes.value = rebuilt;
+      initialized.value = true;
       if (selected.value && selectSequence === selectSequenceAtStart)
         await select(selected.value.id);
       if (!isLatestRebuild()) return;
@@ -211,12 +225,18 @@ export const useFleetStore = defineStore("fleet", () => {
       activeOperation.value = undefined;
       operationTracking.value = false;
       operationSequence += 1;
+      selected.value = undefined;
+      sessions.value = [];
+      ipBans.value = [];
+      userGroupState.value = [];
     }
     cancelRequest(selectController);
     const controller = trackRequest();
     selectController = controller;
     const sequence = ++selectSequence;
     let context: WorkspaceContext | undefined;
+    selecting.value = true;
+    selectionError.value = "";
     try {
       context = await currentContext();
       const isLatestSelect = () =>
@@ -248,18 +268,27 @@ export const useFleetStore = defineStore("fleet", () => {
       sessions.value = rebuiltSessions;
       ipBans.value = rebuiltIpBans;
       userGroupState.value = rebuiltUserGroupState;
+      selectionError.value = "";
       unavailable.value = false;
-    } catch {
+    } catch (error) {
       if (!context) return;
       const isLatestSelect =
         selectController === controller &&
         sequence === selectSequence &&
         isCurrent(context, controller);
       if (!isLatestSelect) return;
-      unavailable.value = true;
+      if (responseStatus(error) === 404) {
+        selectionError.value = "notFound";
+      } else {
+        unavailable.value = true;
+        selectionError.value = "unavailable";
+      }
     } finally {
       releaseRequest(controller);
-      if (selectController === controller) selectController = undefined;
+      if (selectController === controller) {
+        selectController = undefined;
+        selecting.value = false;
+      }
     }
   }
 
@@ -493,6 +522,9 @@ export const useFleetStore = defineStore("fleet", () => {
     operationTracking.value = false;
     operationError.value = "";
     loading.value = false;
+    initialized.value = false;
+    selecting.value = false;
+    selectionError.value = "";
     void rebuild().then(() => connect());
   }
   if (typeof window !== "undefined") {
@@ -513,6 +545,9 @@ export const useFleetStore = defineStore("fleet", () => {
     operationTracking,
     operationError,
     loading,
+    initialized,
+    selecting,
+    selectionError,
     unavailable,
     online,
     relay,
