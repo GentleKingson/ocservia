@@ -4,6 +4,7 @@ import {
   Boxes,
   LayoutDashboard,
   ListChecks,
+  ScrollText,
   Settings,
 } from "@lucide/vue";
 import type { Workspace } from "@ocservia/api-client";
@@ -49,6 +50,7 @@ const links = [
   { to: "/", label: "overview", icon: LayoutDashboard },
   { to: "/nodes", label: "nodes", icon: Boxes },
   { to: "/operations", label: "operations", icon: ListChecks },
+  { to: "/audit", label: "audit", icon: ScrollText },
 ];
 </script>
 

@@ -11,6 +11,7 @@ export const i18n = createI18n({
       nodes: "Nodes",
       fleet: "Fleet",
       operations: "Operations",
+      audit: "Audit",
       settings: "Settings",
       workspace: "Workspace",
       platform: "Platform",

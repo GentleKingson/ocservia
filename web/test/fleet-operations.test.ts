@@ -367,6 +367,18 @@ describe("controlled fleet operations", () => {
     store.$dispose();
   });
 
+  it("does not mark the fleet unavailable when a node selection returns 404", async () => {
+    vi.mocked(getNode).mockRejectedValueOnce({ response: { status: 404 } });
+    const store = useFleetStore();
+
+    await store.select("missing-node");
+
+    expect(store.selectionError).toBe("notFound");
+    expect(store.unavailable).toBe(false);
+    expect(store.selected).toBeUndefined();
+    store.$dispose();
+  });
+
   it("does not refresh the operated node over a selection that is still loading", async () => {
     const nodeBDetails = deferred<NodeObservedState>();
     const operationResult = deferred<Operation>();

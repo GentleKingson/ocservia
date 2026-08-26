@@ -34,7 +34,14 @@ describe("web information architecture routes", () => {
     );
 
     expect(pageNames).toEqual(
-      new Set(["overview", "nodes", "node-detail", "operations", "settings"]),
+      new Set([
+        "overview",
+        "nodes",
+        "node-detail",
+        "operations",
+        "audit",
+        "settings",
+      ]),
     );
     expect(
       routeRecords.find((route) => route.name === "operations")?.component,

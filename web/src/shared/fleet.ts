@@ -277,9 +277,12 @@ export const useFleetStore = defineStore("fleet", () => {
         sequence === selectSequence &&
         isCurrent(context, controller);
       if (!isLatestSelect) return;
-      unavailable.value = true;
-      selectionError.value =
-        responseStatus(error) === 404 ? "notFound" : "unavailable";
+      if (responseStatus(error) === 404) {
+        selectionError.value = "notFound";
+      } else {
+        unavailable.value = true;
+        selectionError.value = "unavailable";
+      }
     } finally {
       releaseRequest(controller);
       if (selectController === controller) {

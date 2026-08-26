@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { RefreshCw, Server } from "@lucide/vue";
 import type { Operation } from "@ocservia/api-client";
-import { onBeforeUnmount, onMounted, ref } from "vue";
+import { computed, onBeforeUnmount, onMounted, ref } from "vue";
 import { useI18n } from "vue-i18n";
 
 import {
@@ -11,10 +11,20 @@ import {
   workspaceChangedEvent,
   workspaceContext,
 } from "../api/client";
+import {
+  completeOperationDetail,
+  failOperationDetail,
+  startOperationDetail,
+  type OperationDetailState,
+} from "../shared/operation-detail";
 
 const operations = ref<Operation[]>([]);
 const { t } = useI18n();
-const selectedOperation = ref<Operation>();
+const detailState = ref<OperationDetailState<Operation>>(
+  startOperationDetail(),
+);
+const selectedOperation = computed(() => detailState.value.selected);
+const detailError = computed(() => detailState.value.error);
 const loading = ref(false);
 const detailLoading = ref(false);
 const unavailable = ref(false);
@@ -95,6 +105,7 @@ async function inspectOperation(operationId: string): Promise<void> {
   detailController = controller;
   const sequence = ++detailSequence;
   detailLoading.value = true;
+  detailState.value = startOperationDetail();
   try {
     await getWorkspace();
     const context = workspaceContext();
@@ -107,10 +118,10 @@ async function inspectOperation(operationId: string): Promise<void> {
       current.generation !== context.generation
     )
       return;
-    selectedOperation.value = operation;
+    detailState.value = completeOperationDetail(operation);
   } catch {
     if (controller.signal.aborted || sequence !== detailSequence) return;
-    error.value = t("operationDetailsUnavailable");
+    detailState.value = failOperationDetail(t("operationDetailsUnavailable"));
   } finally {
     if (detailController === controller) {
       detailController = undefined;
@@ -120,7 +131,7 @@ async function inspectOperation(operationId: string): Promise<void> {
 }
 
 function refreshForWorkspace(): void {
-  selectedOperation.value = undefined;
+  detailState.value = startOperationDetail();
   void loadOperations();
 }
 
@@ -225,6 +236,9 @@ onBeforeUnmount(() => {
         {{ $t("loadMore") }}
       </button>
     </section>
+    <p v-if="detailError" class="operation-error page-error" role="alert">
+      {{ detailError }}
+    </p>
     <section v-if="selectedOperation" class="operation-detail">
       <header>
         <h2>{{ $t("operationDetails") }}</h2>
