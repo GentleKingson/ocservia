@@ -54,6 +54,11 @@ import {
   OperationPageToJSON,
 } from "../models/OperationPage";
 import {
+  type OperationSummary,
+  OperationSummaryFromJSON,
+  OperationSummaryToJSON,
+} from "../models/OperationSummary";
+import {
   type PasswordRotateRequest,
   PasswordRotateRequestFromJSON,
   PasswordRotateRequestToJSON,
@@ -173,6 +178,10 @@ export interface GetApprovalRequestRequest {
 
 export interface GetOperationRequest {
   operationId: string;
+}
+
+export interface GetOperationSummaryRequest {
+  xWorkspaceID?: string;
 }
 
 export interface GetUserBatchRequest {
@@ -1309,6 +1318,71 @@ export class OperationsApi extends runtime.BaseAPI {
     initOverrides?: RequestInit | runtime.InitOverrideFunction,
   ): Promise<QueueMetrics> {
     const response = await this.getOperationQueueMetricsRaw(initOverrides);
+    return await response.value();
+  }
+
+  /**
+   * Creates request options for getOperationSummary without sending the request
+   */
+  async getOperationSummaryRequestOpts(
+    requestParameters: GetOperationSummaryRequest,
+  ): Promise<runtime.RequestOpts> {
+    const queryParameters: any = {};
+
+    const headerParameters: runtime.HTTPHeaders = {};
+
+    if (requestParameters["xWorkspaceID"] != null) {
+      headerParameters["X-Workspace-ID"] = String(
+        requestParameters["xWorkspaceID"],
+      );
+    }
+
+    if (this.configuration && this.configuration.accessToken) {
+      const token = this.configuration.accessToken;
+      const tokenString = await token("bearerAuth", []);
+
+      if (tokenString) {
+        headerParameters["Authorization"] = `Bearer ${tokenString}`;
+      }
+    }
+
+    let urlPath = `/operations/summary`;
+
+    return {
+      path: urlPath,
+      method: "GET",
+      headers: headerParameters,
+      query: queryParameters,
+    };
+  }
+
+  /**
+   * Get workspace-wide operation state counters
+   */
+  async getOperationSummaryRaw(
+    requestParameters: GetOperationSummaryRequest,
+    initOverrides?: RequestInit | runtime.InitOverrideFunction,
+  ): Promise<runtime.ApiResponse<OperationSummary>> {
+    const requestOptions =
+      await this.getOperationSummaryRequestOpts(requestParameters);
+    const response = await this.request(requestOptions, initOverrides);
+
+    return new runtime.JSONApiResponse(response, (jsonValue) =>
+      OperationSummaryFromJSON(jsonValue),
+    );
+  }
+
+  /**
+   * Get workspace-wide operation state counters
+   */
+  async getOperationSummary(
+    requestParameters: GetOperationSummaryRequest = {},
+    initOverrides?: RequestInit | runtime.InitOverrideFunction,
+  ): Promise<OperationSummary> {
+    const response = await this.getOperationSummaryRaw(
+      requestParameters,
+      initOverrides,
+    );
     return await response.value();
   }
 

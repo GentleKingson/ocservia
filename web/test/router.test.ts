@@ -3,11 +3,16 @@ import {
   createRouter,
   type RouteRecordRaw,
 } from "vue-router";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { routeRecords } from "../src/shared/routes";
 
 describe("web information architecture routes", () => {
+  afterEach(() => {
+    vi.unstubAllEnvs();
+    vi.resetModules();
+  });
+
   it("resolves the node detail route on a direct navigation", async () => {
     const router = createRouter({
       history: createMemoryHistory(),
@@ -41,6 +46,7 @@ describe("web information architecture routes", () => {
         "operations",
         "audit",
         "settings",
+        "development",
       ]),
     );
     expect(
@@ -49,5 +55,26 @@ describe("web information architecture routes", () => {
     expect(
       routeRecords.find((route) => route.name === "settings")?.component,
     ).toBeDefined();
+  });
+
+  it("registers the development simulator route only on development runtimes", async () => {
+    vi.stubEnv("DEV", false);
+    vi.stubEnv("VITE_DEV_AUTH_TOKEN", "");
+    vi.resetModules();
+    const { routeRecords: productionRoutes } =
+      await import("../src/shared/routes");
+
+    expect(
+      productionRoutes.find((route) => route.name === "development"),
+    ).toBeUndefined();
+
+    vi.stubEnv("VITE_DEV_AUTH_TOKEN", "local-development-token-32-characters");
+    vi.resetModules();
+    const { routeRecords: developmentRoutes } =
+      await import("../src/shared/routes");
+
+    expect(
+      developmentRoutes.find((route) => route.name === "development"),
+    ).toMatchObject({ path: "/dev" });
   });
 });

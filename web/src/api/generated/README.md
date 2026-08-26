@@ -102,6 +102,7 @@ All URIs are relative to _/api/v1_
 | _OperationsApi_    | [**getApprovalRequest**](docs/OperationsApi.md#getapprovalrequest)                        | **GET** /approval-requests/{approval_id}                   | Inspect immutable approval details before deciding                               |
 | _OperationsApi_    | [**getOperation**](docs/OperationsApi.md#getoperation)                                    | **GET** /operations/{operation_id}                         | Get an asynchronous operation                                                    |
 | _OperationsApi_    | [**getOperationQueueMetrics**](docs/OperationsApi.md#getoperationqueuemetrics)            | **GET** /operations/queue-metrics                          | Get transactional outbox and command queue metrics                               |
+| _OperationsApi_    | [**getOperationSummary**](docs/OperationsApi.md#getoperationsummary)                      | **GET** /operations/summary                                | Get workspace-wide operation state counters                                      |
 | _OperationsApi_    | [**getUserBatch**](docs/OperationsApi.md#getuserbatch)                                    | **GET** /user-batches/{batch_id}                           | Get parent and per-item authorization, command, and result state                 |
 | _OperationsApi_    | [**getUserOperationMetrics**](docs/OperationsApi.md#getuseroperationmetrics)              | **GET** /user-operations/metrics                           | Get workspace quota, expiry, and batch scheduler health counters                 |
 | _OperationsApi_    | [**listOperations**](docs/OperationsApi.md#listoperations)                                | **GET** /operations                                        | List operations                                                                  |
@@ -171,6 +172,7 @@ All URIs are relative to _/api/v1_
 - [Operation](docs/Operation.md)
 - [OperationPage](docs/OperationPage.md)
 - [OperationState](docs/OperationState.md)
+- [OperationSummary](docs/OperationSummary.md)
 - [PageInfo](docs/PageInfo.md)
 - [PasswordRotateRequest](docs/PasswordRotateRequest.md)
 - [PlatformEvent](docs/PlatformEvent.md)

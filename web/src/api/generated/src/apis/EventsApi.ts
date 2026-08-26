@@ -42,6 +42,7 @@ export interface ListAuditEventsRequest {
 export interface ListEventsRequest {
   xWorkspaceID?: string;
   after?: string;
+  order?: ListEventsOrderEnum;
   pageSize?: number;
 }
 
@@ -137,6 +138,10 @@ export class EventsApi extends runtime.BaseAPI {
 
     if (requestParameters["after"] != null) {
       queryParameters["after"] = requestParameters["after"];
+    }
+
+    if (requestParameters["order"] != null) {
+      queryParameters["order"] = requestParameters["order"];
     }
 
     if (requestParameters["pageSize"] != null) {
@@ -333,3 +338,13 @@ export class EventsApi extends runtime.BaseAPI {
     return await response.value();
   }
 }
+
+/**
+ * @export
+ */
+export const ListEventsOrderEnum = {
+  Asc: "asc",
+  Desc: "desc",
+} as const;
+export type ListEventsOrderEnum =
+  (typeof ListEventsOrderEnum)[keyof typeof ListEventsOrderEnum];

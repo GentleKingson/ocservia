@@ -9,6 +9,7 @@ import {
   PlatformApi,
   type Operation,
   type OperationPage,
+  type OperationSummary,
   type PlatformEventPage,
   type Readiness,
   type NodeObservedState,
@@ -36,6 +37,7 @@ const loginReturnKey = "ocservia.login.return-to";
 const loginStartedKey = "ocservia.login.started-at";
 const workspaceKey = "ocservia.workspace-id";
 export const workspaceChangedEvent = "ocservia:workspace-changed";
+export const platformEventsEvent = "ocservia:platform-events";
 
 function newIdempotencyKey(): string {
   if (typeof globalThis.crypto.randomUUID === "function")
@@ -325,6 +327,13 @@ export async function listOperations(
   );
 }
 
+export async function operationSummary(
+  signal?: AbortSignal,
+): Promise<OperationSummary> {
+  const xWorkspaceID = await workspaceID();
+  return operations.getOperationSummary({ xWorkspaceID }, requestInit(signal));
+}
+
 export async function getReadiness(): Promise<Readiness> {
   return platform.getReadiness();
 }
@@ -349,12 +358,16 @@ export async function getOperation(
 export async function listEvents(
   after?: string,
   signal?: AbortSignal,
+  order?: "asc" | "desc",
 ): Promise<PlatformEventPage> {
   const xWorkspaceID = await workspaceID();
   return events.listEvents(
-    after
-      ? { xWorkspaceID, after, pageSize: 200 }
-      : { xWorkspaceID, pageSize: 200 },
+    {
+      xWorkspaceID,
+      pageSize: 200,
+      ...(after ? { after } : {}),
+      ...(order ? { order } : {}),
+    },
     requestInit(signal),
   );
 }

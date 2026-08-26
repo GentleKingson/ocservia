@@ -17,6 +17,7 @@ import {
   listNodeIpBans,
   listNodes,
   listNodeSessions,
+  platformEventsEvent,
   reloadService,
   removeIpBan,
   terminateSession,
@@ -161,8 +162,15 @@ export const useFleetStore = defineStore("fleet", () => {
     () =>
       nodes.value.filter((node) => node.connectionState === "online").length,
   );
+  const offline = computed(
+    () =>
+      nodes.value.filter((node) => node.connectionState !== "online").length,
+  );
   const relay = computed(
     () => nodes.value.filter((node) => node.path?.mode === "relay").length,
+  );
+  const direct = computed(
+    () => nodes.value.filter((node) => node.path?.mode === "direct").length,
   );
   const sessionCount = computed(() =>
     nodes.value.reduce((total, node) => total + node.sessionCount, 0),
@@ -485,6 +493,8 @@ export const useFleetStore = defineStore("fleet", () => {
         }
         clearTimeout(refreshTimer);
         refreshTimer = setTimeout(() => void rebuild(), 150);
+        if (typeof window !== "undefined")
+          window.dispatchEvent(new Event(platformEventsEvent));
       });
       stream.onerror = () => {
         if (
@@ -550,7 +560,9 @@ export const useFleetStore = defineStore("fleet", () => {
     selectionError,
     unavailable,
     online,
+    offline,
     relay,
+    direct,
     sessionCount,
     rebuild,
     select,

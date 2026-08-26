@@ -12,6 +12,7 @@ import (
 
 	"github.com/GentleKingson/ocservia/control-plane/internal/auth"
 	"github.com/GentleKingson/ocservia/control-plane/internal/eventstream"
+	"github.com/GentleKingson/ocservia/control-plane/internal/localslice"
 	"github.com/google/uuid"
 )
 
@@ -134,7 +135,7 @@ func (s *Server) fetchPlatformEvents(ctx context.Context, scope string, after uu
 	if service == nil {
 		return nil, errors.New("platform event source is unavailable")
 	}
-	events, _, err := service.ListEventsInWorkspace(ctx, workspaceID, after, limit)
+	events, _, err := service.ListEventsInWorkspace(ctx, workspaceID, after, limit, localslice.ListEventsAscending)
 	if err != nil {
 		return nil, err
 	}
