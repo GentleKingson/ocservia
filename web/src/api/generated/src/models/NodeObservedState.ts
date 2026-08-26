@@ -101,6 +101,18 @@ export interface NodeObservedState {
    */
   agentVersion?: string;
   /**
+   * Server-side classification of agent_version against the operator-configured recommended agent version.
+   * @type {NodeObservedStateAgentVersionStateEnum}
+   * @memberof NodeObservedState
+   */
+  agentVersionState?: NodeObservedStateAgentVersionStateEnum;
+  /**
+   *
+   * @type {string}
+   * @memberof NodeObservedState
+   */
+  recommendedAgentVersion?: string;
+  /**
    *
    * @type {string}
    * @memberof NodeObservedState
@@ -178,6 +190,19 @@ export type NodeObservedStateFreshnessEnum =
   (typeof NodeObservedStateFreshnessEnum)[keyof typeof NodeObservedStateFreshnessEnum];
 
 /**
+ * @export
+ */
+export const NodeObservedStateAgentVersionStateEnum = {
+  Current: "current",
+  UpgradeAvailable: "upgrade_available",
+  Ahead: "ahead",
+  Unsupported: "unsupported",
+  Unknown: "unknown",
+} as const;
+export type NodeObservedStateAgentVersionStateEnum =
+  (typeof NodeObservedStateAgentVersionStateEnum)[keyof typeof NodeObservedStateAgentVersionStateEnum];
+
+/**
  * Check if a given object implements the NodeObservedState interface.
  */
 export function instanceOfNodeObservedState(
@@ -241,6 +266,14 @@ export function NodeObservedStateFromJSONTyped(
       json["agent_instance_id"] == null ? undefined : json["agent_instance_id"],
     agentVersion:
       json["agent_version"] == null ? undefined : json["agent_version"],
+    agentVersionState:
+      json["agent_version_state"] == null
+        ? undefined
+        : json["agent_version_state"],
+    recommendedAgentVersion:
+      json["recommended_agent_version"] == null
+        ? undefined
+        : json["recommended_agent_version"],
     ocservVersion:
       json["ocserv_version"] == null ? undefined : json["ocserv_version"],
     osRelease: json["os_release"] == null ? undefined : json["os_release"],
@@ -285,6 +318,8 @@ export function NodeObservedStateToJSONTyped(
     boot_id: value["bootId"],
     agent_instance_id: value["agentInstanceId"],
     agent_version: value["agentVersion"],
+    agent_version_state: value["agentVersionState"],
+    recommended_agent_version: value["recommendedAgentVersion"],
     ocserv_version: value["ocservVersion"],
     os_release: value["osRelease"],
     ocserv: value["ocserv"],

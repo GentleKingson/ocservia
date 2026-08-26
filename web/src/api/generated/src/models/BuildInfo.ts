@@ -37,6 +37,12 @@ export interface BuildInfo {
    * @memberof BuildInfo
    */
   role: BuildInfoRoleEnum;
+  /**
+   * Operator-configured recommended agent version; absent when no recommendation is configured.
+   * @type {string}
+   * @memberof BuildInfo
+   */
+  recommendedAgentVersion?: string;
 }
 
 /**
@@ -76,6 +82,10 @@ export function BuildInfoFromJSONTyped(
     version: json["version"],
     commit: json["commit"],
     role: json["role"],
+    recommendedAgentVersion:
+      json["recommended_agent_version"] == null
+        ? undefined
+        : json["recommended_agent_version"],
   };
 }
 
@@ -95,5 +105,6 @@ export function BuildInfoToJSONTyped(
     version: value["version"],
     commit: value["commit"],
     role: value["role"],
+    recommended_agent_version: value["recommendedAgentVersion"],
   };
 }
