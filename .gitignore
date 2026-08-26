@@ -21,6 +21,7 @@ tmp/
 # Project-local tool downloads and caches.
 .tools/
 .cache/
+.zcode/
 
 target/
 node_modules/
