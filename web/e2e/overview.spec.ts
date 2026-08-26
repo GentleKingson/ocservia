@@ -227,6 +227,18 @@ test("switching workspaces replaces every overview number and list", async ({
       body: JSON.stringify({ items, page: { has_more: false } }),
     });
   });
+  await page.route("**/api/v1/operations/summary", (route) => {
+    const workspaceId = route.request().headers()["x-workspace-id"];
+    const summary =
+      workspaceId === alphaId
+        ? { active: 1, unknown: 0 }
+        : { active: 0, unknown: 1 };
+    return route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify(summary),
+    });
+  });
   await page.route("**/api/v1/events?**", (route) => {
     const workspaceId = route.request().headers()["x-workspace-id"];
     const isAlpha = workspaceId === alphaId;

@@ -16,6 +16,7 @@ import {
   listEvents,
   listNodes,
   listOperations,
+  operationSummary,
   platformEventsEvent,
   workspaceContext,
   workspaceChangedEvent,
@@ -28,6 +29,7 @@ vi.mock("../src/api/client", () => ({
   listEvents: vi.fn(),
   listNodes: vi.fn(),
   listOperations: vi.fn(),
+  operationSummary: vi.fn(),
   platformEventsEvent: "ocservia:platform-events",
   workspaceContext: vi.fn().mockReturnValue({ id: "workspace", generation: 1 }),
   workspaceChangedEvent: "ocservia:workspace-changed",
@@ -98,6 +100,7 @@ describe("operational overview", () => {
     vi.mocked(listEvents).mockReset();
     vi.mocked(listNodes).mockReset();
     vi.mocked(listOperations).mockReset();
+    vi.mocked(operationSummary).mockReset();
     vi.mocked(getWorkspace).mockResolvedValue({
       id: "workspace",
       name: "Workspace",
@@ -109,6 +112,7 @@ describe("operational overview", () => {
       generation: 1,
     });
     vi.mocked(listOperations).mockResolvedValue(operationPage([]));
+    vi.mocked(operationSummary).mockResolvedValue({ active: 0, unknown: 0 });
     vi.mocked(listEvents).mockResolvedValue(eventPage([]));
     vi.mocked(listNodes).mockResolvedValue({
       items: [],
@@ -146,7 +150,7 @@ describe("operational overview", () => {
     fleet.$dispose();
   });
 
-  it("classifies operation counts with polling terminal semantics", async () => {
+  it("serves operation totals from the workspace summary", async () => {
     const states: Operation["state"][] = [
       "queued",
       "running",
@@ -166,6 +170,7 @@ describe("operational overview", () => {
         states.map((state, index) => operation(`op-${String(index)}`, state)),
       ),
     );
+    vi.mocked(operationSummary).mockResolvedValue({ active: 3, unknown: 1 });
     const overview = useOverviewStore();
     overview.start();
     await vi.advanceTimersByTimeAsync(0);
@@ -173,6 +178,31 @@ describe("operational overview", () => {
     expect(overview.activeOperations).toBe(3);
     expect(overview.unknownOperations).toBe(1);
     expect(overview.recentFailedOperations).toBe(3);
+    overview.stop();
+  });
+
+  it("counts operations beyond the newest page via the summary", async () => {
+    // The whole newest page is terminal while the workspace still holds a
+    // large active/unknown backlog; only the summary sees the truth.
+    vi.mocked(listOperations).mockResolvedValue(
+      operationPage(
+        Array.from({ length: 200 }, (_, index) =>
+          operation(`op-${String(index).padStart(3, "0")}`, "succeeded"),
+        ),
+        true,
+      ),
+    );
+    vi.mocked(operationSummary).mockResolvedValue({
+      active: 300,
+      unknown: 100,
+    });
+    const overview = useOverviewStore();
+    overview.start();
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(overview.activeOperations).toBe(300);
+    expect(overview.unknownOperations).toBe(100);
+    expect(overview.recentFailedOperations).toBe(0);
     overview.stop();
   });
 
@@ -253,10 +283,12 @@ describe("operational overview", () => {
     vi.mocked(listOperations).mockResolvedValue(
       operationPage([operation("op-new", "running")], true),
     );
+    vi.mocked(operationSummary).mockResolvedValue({ active: 1, unknown: 0 });
     const overview = useOverviewStore();
     overview.start();
     await vi.advanceTimersByTimeAsync(0);
     expect(listOperations).toHaveBeenCalledTimes(1);
+    expect(operationSummary).toHaveBeenCalledTimes(1);
 
     overview.refresh();
     await vi.advanceTimersByTimeAsync(0);
@@ -266,6 +298,7 @@ describe("operational overview", () => {
       undefined,
       expect.any(AbortSignal),
     );
+    expect(operationSummary).toHaveBeenCalledTimes(2);
     expect(overview.activeOperations).toBe(1);
     overview.stop();
   });
@@ -319,6 +352,7 @@ describe("operational overview", () => {
     vi.mocked(listOperations).mockResolvedValue(
       operationPage([operation("op-1", "running")]),
     );
+    vi.mocked(operationSummary).mockResolvedValue({ active: 1, unknown: 0 });
     vi.mocked(listEvents)
       .mockResolvedValueOnce(eventPage([]))
       .mockRejectedValueOnce(new Error("unavailable"));

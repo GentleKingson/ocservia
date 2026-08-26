@@ -98,6 +98,26 @@ paths:
           $ref: "#/components/responses/Problem"
         default:
           $ref: "#/components/responses/Problem"
+  /operations/summary:
+    get:
+      operationId: getOperationSummary
+      summary: Get workspace-wide operation state counters
+      tags: [operations]
+      parameters:
+        - $ref: "#/components/parameters/WorkspaceId"
+      responses:
+        "200":
+          description: Workspace-wide operation counts, accurate beyond any page limit.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OperationSummary"
+        "401":
+          $ref: "#/components/responses/Problem"
+        "403":
+          $ref: "#/components/responses/Problem"
+        default:
+          $ref: "#/components/responses/Problem"
   /operations/{operation_id}:
     get:
       operationId: getOperation
@@ -2096,6 +2116,21 @@ components:
           type: integer
           format: int64
           minimum: 0
+    OperationSummary:
+      type: object
+      additionalProperties: false
+      required: [active, unknown]
+      properties:
+        active:
+          type: integer
+          format: int64
+          minimum: 0
+          description: Operations in a non-terminal state other than unknown.
+        unknown:
+          type: integer
+          format: int64
+          minimum: 0
+          description: Operations in the unknown recovery state.
     UserOperationMetrics:
       type: object
       additionalProperties: false

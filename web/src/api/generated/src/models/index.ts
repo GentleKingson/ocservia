@@ -48,6 +48,7 @@ export * from "./NodeTrustState";
 export * from "./Operation";
 export * from "./OperationPage";
 export * from "./OperationState";
+export * from "./OperationSummary";
 export * from "./PageInfo";
 export * from "./PasswordRotateRequest";
 export * from "./PlatformEvent";

@@ -112,6 +112,21 @@ func (s *Server) listOperations(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"items": operations, "page": page})
 }
 
+func (s *Server) operationSummary(w http.ResponseWriter, r *http.Request) {
+	service := s.localSliceService()
+	if service == nil {
+		writeProblem(w, r, http.StatusNotFound, "https://ocservia.dev/problems/not-found", "Resource not found", "the requested resource does not exist")
+		return
+	}
+	summary, err := service.OperationSummaryInWorkspace(r.Context(), workspace(r))
+	if err != nil {
+		s.logger.ErrorContext(r.Context(), "operation summary", "error", err)
+		writeProblem(w, r, http.StatusServiceUnavailable, "https://ocservia.dev/problems/database-unavailable", "Service is unavailable", "operations are temporarily unavailable")
+		return
+	}
+	writeJSON(w, http.StatusOK, summary)
+}
+
 func (s *Server) listEvents(w http.ResponseWriter, r *http.Request) {
 	service := s.localSliceService()
 	if service == nil {

@@ -97,6 +97,7 @@ func New(address string, pool *pgxpool.Pool, build BuildInfo, logger *slog.Logge
 	mux.HandleFunc("POST /api/v1/development/simulations", s.createSimulation)
 	mux.HandleFunc("GET /api/v1/development/runtime", s.developmentRuntime)
 	mux.HandleFunc("GET /api/v1/operations", s.requireOperationAuth(s.listOperations))
+	mux.HandleFunc("GET /api/v1/operations/summary", s.requireOperationAuth(s.operationSummary))
 	mux.HandleFunc("GET /api/v1/operations/{operation_id}", s.requireOperationAuth(s.getOperation))
 	mux.HandleFunc("GET /api/v1/operations/{operation_id}/events", s.requireOperationAuth(s.streamOperationEvents))
 	mux.HandleFunc("GET /api/v1/operations/queue-metrics", s.requireOperationAuth(s.queueMetrics))
@@ -326,7 +327,7 @@ func (s *Server) routeErrors(next http.Handler) http.Handler {
 
 func routeMethod(path string) (string, bool) {
 	switch path {
-	case "/livez", "/readyz", "/version", "/api/v1/livez", "/api/v1/readyz", "/api/v1/version", "/api/v1/operations", "/api/v1/operations/queue-metrics", "/api/v1/user-operations/metrics", "/api/v1/events", "/api/v1/events/stream", "/api/v1/development/runtime", "/api/v1/auth/login", "/api/v1/auth/callback", "/api/v1/audit/events", "/api/v1/workspaces":
+	case "/livez", "/readyz", "/version", "/api/v1/livez", "/api/v1/readyz", "/api/v1/version", "/api/v1/operations", "/api/v1/operations/queue-metrics", "/api/v1/operations/summary", "/api/v1/user-operations/metrics", "/api/v1/events", "/api/v1/events/stream", "/api/v1/development/runtime", "/api/v1/auth/login", "/api/v1/auth/callback", "/api/v1/audit/events", "/api/v1/workspaces":
 		return http.MethodGet, true
 	case "/api/v1/nodes":
 		return http.MethodGet, true

@@ -1,4 +1,8 @@
-import type { Operation, PlatformEvent } from "@ocservia/api-client";
+import type {
+  Operation,
+  OperationSummary,
+  PlatformEvent,
+} from "@ocservia/api-client";
 import { defineStore } from "pinia";
 import { computed, ref } from "vue";
 
@@ -6,22 +10,13 @@ import {
   getWorkspace,
   listEvents,
   listOperations,
+  operationSummary,
   platformEventsEvent,
   workspaceContext,
   workspaceChangedEvent,
   type WorkspaceContext,
 } from "../api/client";
 
-// Matches the terminal semantics of operation polling in fleet.ts; the
-// "unknown" recovery state stays non-terminal and is classified separately.
-const terminalStates = new Set([
-  "succeeded",
-  "failed",
-  "expired",
-  "rolled_back",
-  "drifted",
-  "superseded",
-]);
 const recentOperationWindow = 20;
 const recentEventLimit = 12;
 const retainedEventLimit = 50;
@@ -30,6 +25,7 @@ const platformRefreshDelay = 500;
 export const useOverviewStore = defineStore("overview", () => {
   const operations = ref<Operation[]>([]);
   const events = ref<PlatformEvent[]>([]);
+  const summary = ref<OperationSummary>({ active: 0, unknown: 0 });
   const operationsLoading = ref(false);
   const eventsLoading = ref(false);
   const operationsLoaded = ref(false);
@@ -87,11 +83,16 @@ export const useOverviewStore = defineStore("overview", () => {
         );
       if (!isLatest()) return;
       // Operations are listed newest-first, so a single page bounds every
-      // refresh to one request. Classification covers the in-flight
-      // operations within that newest page.
-      const page = await listOperations(undefined, controller.signal);
+      // refresh to one request. The page feeds the recent list only; the
+      // active/unknown totals come from the workspace summary, which stays
+      // accurate when the backlog outgrows the page limit.
+      const [page, counts] = await Promise.all([
+        listOperations(undefined, controller.signal),
+        operationSummary(controller.signal),
+      ]);
       if (!isLatest()) return;
       operations.value = page.items;
+      summary.value = counts;
       operationsLoaded.value = true;
       operationsUnavailable.value = false;
     } catch {
@@ -189,6 +190,7 @@ export const useOverviewStore = defineStore("overview", () => {
     eventsSequence += 1;
     operations.value = [];
     events.value = [];
+    summary.value = { active: 0, unknown: 0 };
     operationsLoading.value = false;
     eventsLoading.value = false;
     operationsLoaded.value = false;
@@ -221,18 +223,10 @@ export const useOverviewStore = defineStore("overview", () => {
     clearState();
   }
 
-  const activeOperations = computed(
-    () =>
-      operations.value.filter(
-        (operation) =>
-          !terminalStates.has(operation.state) && operation.state !== "unknown",
-      ).length,
-  );
-  const unknownOperations = computed(
-    () =>
-      operations.value.filter((operation) => operation.state === "unknown")
-        .length,
-  );
+  // Active/unknown totals come from the backend summary so they count the
+  // whole workspace, not just the newest operations page.
+  const activeOperations = computed(() => summary.value.active);
+  const unknownOperations = computed(() => summary.value.unknown);
   const recentFailedOperations = computed(
     () =>
       operations.value

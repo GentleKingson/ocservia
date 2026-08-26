@@ -9,6 +9,7 @@ import {
   PlatformApi,
   type Operation,
   type OperationPage,
+  type OperationSummary,
   type PlatformEventPage,
   type Readiness,
   type NodeObservedState,
@@ -324,6 +325,13 @@ export async function listOperations(
       : { xWorkspaceID, pageSize: 200 },
     requestInit(signal),
   );
+}
+
+export async function operationSummary(
+  signal?: AbortSignal,
+): Promise<OperationSummary> {
+  const xWorkspaceID = await workspaceID();
+  return operations.getOperationSummary({ xWorkspaceID }, requestInit(signal));
 }
 
 export async function getReadiness(): Promise<Readiness> {
