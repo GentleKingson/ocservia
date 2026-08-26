@@ -18,6 +18,7 @@ import (
 
 	"github.com/GentleKingson/ocservia/control-plane/internal/browserorigin"
 	"github.com/GentleKingson/ocservia/control-plane/internal/eventstream"
+	"golang.org/x/mod/semver"
 	"golang.org/x/sys/unix"
 )
 
@@ -75,6 +76,7 @@ type Config struct {
 	CertificateSignerURL     string
 	CertificateSignerToken   string
 	CertificateSignerTimeout time.Duration
+	RecommendedAgentVersion  string
 	EventStreams             eventstream.Config
 }
 
@@ -125,6 +127,7 @@ func Load(args []string, lookup LookupEnv) (Config, error) {
 	}
 	setString(lookup, "OCSERV_OIDC_REDIRECT_URL", &cfg.OIDCRedirectURL)
 	setString(lookup, "OCSERV_CERTIFICATE_SIGNER_URL", &cfg.CertificateSignerURL)
+	setString(lookup, "OCSERV_RECOMMENDED_AGENT_VERSION", &cfg.RecommendedAgentVersion)
 	if err := setStringOrFile(lookup, "OCSERV_CERTIFICATE_SIGNER_TOKEN", &cfg.CertificateSignerToken); err != nil {
 		return Config{}, err
 	}
@@ -372,6 +375,9 @@ func (c Config) Validate() error {
 			return errors.New("certificate signer requires an HTTPS URL, token, and timeout from 1s to 30s")
 		}
 	}
+	if !validRecommendedAgentVersion(c.RecommendedAgentVersion) {
+		return errors.New("OCSERV_RECOMMENDED_AGENT_VERSION must be a semantic version")
+	}
 	if !strings.HasPrefix(c.TrustSocket, "/") {
 		return errors.New("trust UDS path is invalid")
 	}
@@ -589,6 +595,19 @@ func validKeyID(value string) bool {
 		}
 	}
 	return true
+}
+
+// validRecommendedAgentVersion accepts an empty recommendation (classification
+// then reports unknown) and otherwise any semantic version in the plain
+// "0.2.0" or "v0.2.0" form reported by agents.
+func validRecommendedAgentVersion(value string) bool {
+	if value == "" {
+		return true
+	}
+	if !strings.HasPrefix(value, "v") {
+		value = "v" + value
+	}
+	return semver.IsValid(value)
 }
 
 func setInt64(lookup LookupEnv, name string, target *int64) error {

@@ -124,24 +124,29 @@ type Batch struct {
 }
 
 type Node struct {
-	ID              string          `json:"id"`
-	Name            string          `json:"name"`
-	Version         int64           `json:"version"`
-	TrustStatus     string          `json:"trust_status"`
-	ConnectionState string          `json:"connection_state"`
-	Freshness       string          `json:"freshness"`
-	ObservedAt      *time.Time      `json:"observed_at,omitempty"`
-	LastHeartbeatAt *time.Time      `json:"last_heartbeat_at,omitempty"`
-	BootID          string          `json:"boot_id,omitempty"`
-	AgentInstanceID string          `json:"agent_instance_id,omitempty"`
-	AgentVersion    string          `json:"agent_version,omitempty"`
-	OcservVersion   string          `json:"ocserv_version,omitempty"`
-	OSRelease       string          `json:"os_release,omitempty"`
-	Ocserv          json.RawMessage `json:"ocserv,omitempty"`
-	System          json.RawMessage `json:"system,omitempty"`
-	Path            json.RawMessage `json:"path,omitempty"`
-	Dropped         DropCounters    `json:"dropped"`
-	SessionCount    int             `json:"session_count"`
+	ID              string     `json:"id"`
+	Name            string     `json:"name"`
+	Version         int64      `json:"version"`
+	TrustStatus     string     `json:"trust_status"`
+	ConnectionState string     `json:"connection_state"`
+	Freshness       string     `json:"freshness"`
+	ObservedAt      *time.Time `json:"observed_at,omitempty"`
+	LastHeartbeatAt *time.Time `json:"last_heartbeat_at,omitempty"`
+	BootID          string     `json:"boot_id,omitempty"`
+	AgentInstanceID string     `json:"agent_instance_id,omitempty"`
+	AgentVersion    string     `json:"agent_version,omitempty"`
+	// AgentVersionState and RecommendedAgentVersion are derived at read time
+	// from AgentVersion and the configured recommendation; they are never
+	// persisted.
+	AgentVersionState       string          `json:"agent_version_state"`
+	RecommendedAgentVersion string          `json:"recommended_agent_version,omitempty"`
+	OcservVersion           string          `json:"ocserv_version,omitempty"`
+	OSRelease               string          `json:"os_release,omitempty"`
+	Ocserv                  json.RawMessage `json:"ocserv,omitempty"`
+	System                  json.RawMessage `json:"system,omitempty"`
+	Path                    json.RawMessage `json:"path,omitempty"`
+	Dropped                 DropCounters    `json:"dropped"`
+	SessionCount            int             `json:"session_count"`
 }
 
 type HistoryPoint struct {
@@ -174,11 +179,24 @@ func (s *Service) ListIPBans(ctx context.Context, nodeID uuid.UUID, limit int) (
 }
 
 type Service struct {
-	pool *pgxpool.Pool
-	now  func() time.Time
+	pool                    *pgxpool.Pool
+	now                     func() time.Time
+	recommendedAgentVersion string
 }
 
 func New(pool *pgxpool.Pool) *Service { return &Service{pool: pool, now: time.Now} }
+
+// NewWithRecommendedAgentVersion builds the read model with the
+// operator-configured recommended agent version used to derive per-node
+// agent version state.
+func NewWithRecommendedAgentVersion(pool *pgxpool.Pool, recommendedAgentVersion string) *Service {
+	return &Service{pool: pool, now: time.Now, recommendedAgentVersion: recommendedAgentVersion}
+}
+
+func (s *Service) applyAgentVersionState(node *Node) {
+	node.RecommendedAgentVersion = s.recommendedAgentVersion
+	node.AgentVersionState = ClassifyAgentVersion(node.AgentVersion, s.recommendedAgentVersion)
+}
 
 func (s *Service) IngestWire(ctx context.Context, expectedNodeID uuid.UUID, payload []byte) (bool, error) {
 	batch, payloadBytes, err := s.validateWire(expectedNodeID, payload)
@@ -602,6 +620,7 @@ func (s *Service) ListNodesInWorkspace(ctx context.Context, workspaceID, after u
 		if err != nil {
 			return nil, false, err
 		}
+		s.applyAgentVersionState(&node)
 		result = append(result, node)
 	}
 	if err := rows.Err(); err != nil {
@@ -623,7 +642,12 @@ func nullableWorkspace(id uuid.UUID) any {
 
 func (s *Service) GetNode(ctx context.Context, id uuid.UUID) (Node, error) {
 	row := s.pool.QueryRow(ctx, `SELECT n.id::text,n.name,n.version,n.status,o.observed_at,o.last_heartbeat_at,o.boot_id,o.agent_instance_id::text,o.agent_version,o.ocserv_version,o.os_release,o.ocserv,o.system,o.path,o.dropped_security,o.dropped_health,o.dropped_aggregate,o.dropped_raw,(SELECT count(*) FROM node_sessions ss WHERE ss.node_id=n.id) FROM nodes n LEFT JOIN node_observed_snapshots o ON o.node_id=n.id WHERE n.id=$1`, id)
-	return scanNode(row, s.now())
+	node, err := scanNode(row, s.now())
+	if err != nil {
+		return Node{}, err
+	}
+	s.applyAgentVersionState(&node)
+	return node, nil
 }
 
 type scanner interface{ Scan(...any) error }
