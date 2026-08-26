@@ -676,7 +676,35 @@ async function revokeCurrentCertificate(): Promise<void> {
             </div>
             <div>
               <dt><Server :size="15" />{{ $t("agent") }}</dt>
-              <dd>{{ currentNode.agentVersion ?? $t("notAvailable") }}</dd>
+              <dd>
+                {{ currentNode.agentVersion ?? $t("notAvailable") }}
+                <span
+                  v-if="currentNode.agentVersionState"
+                  class="version-badge"
+                  :class="currentNode.agentVersionState"
+                  >{{ $t(currentNode.agentVersionState) }}</span
+                >
+              </dd>
+            </div>
+            <div>
+              <dt>{{ $t("versionState") }}</dt>
+              <dd>
+                {{
+                  currentNode.agentVersionState
+                    ? $t(currentNode.agentVersionState)
+                    : $t("notAvailable")
+                }}
+              </dd>
+            </div>
+            <div>
+              <dt>{{ $t("recommendedAgentVersion") }}</dt>
+              <dd>
+                {{ currentNode.recommendedAgentVersion ?? $t("notAvailable") }}
+              </dd>
+            </div>
+            <div>
+              <dt>{{ $t("osRelease") }}</dt>
+              <dd>{{ currentNode.osRelease ?? $t("notAvailable") }}</dd>
             </div>
             <div>
               <dt><Users :size="15" />{{ $t("sessions") }}</dt>

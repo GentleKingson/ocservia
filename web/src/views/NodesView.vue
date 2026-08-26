@@ -114,7 +114,15 @@ function openNode(nodeId: string): void {
                   >{{ node.lastHeartbeatAt.toLocaleString() }}</time
                 ><span v-else>{{ $t("notObserved") }}</span>
               </td>
-              <td>{{ node.agentVersion ?? $t("notAvailable") }}</td>
+              <td>
+                <span>{{ node.agentVersion ?? $t("notAvailable") }}</span>
+                <span
+                  v-if="node.agentVersionState"
+                  class="version-badge"
+                  :class="node.agentVersionState"
+                  >{{ $t(node.agentVersionState) }}</span
+                >
+              </td>
               <td>{{ node.ocservVersion ?? $t("notAvailable") }}</td>
               <td>{{ node.sessionCount }}</td>
             </tr>

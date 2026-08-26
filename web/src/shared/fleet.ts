@@ -175,6 +175,24 @@ export const useFleetStore = defineStore("fleet", () => {
   const sessionCount = computed(() =>
     nodes.value.reduce((total, node) => total + node.sessionCount, 0),
   );
+  const agentCurrent = computed(
+    () =>
+      nodes.value.filter((node) => node.agentVersionState === "current").length,
+  );
+  const agentUpdateAvailable = computed(
+    () =>
+      nodes.value.filter(
+        (node) => node.agentVersionState === "upgrade_available",
+      ).length,
+  );
+  const agentUnknown = computed(
+    () =>
+      nodes.value.filter(
+        (node) =>
+          node.agentVersionState === "unknown" ||
+          node.agentVersionState === "unsupported",
+      ).length,
+  );
 
   async function rebuild(): Promise<void> {
     cancelRequest(rebuildController);
@@ -564,6 +582,9 @@ export const useFleetStore = defineStore("fleet", () => {
     relay,
     direct,
     sessionCount,
+    agentCurrent,
+    agentUpdateAvailable,
+    agentUnknown,
     rebuild,
     select,
     connect,

@@ -1,21 +1,28 @@
 <script setup lang="ts">
 import { CheckCircle2, CircleAlert, Settings2 } from "@lucide/vue";
-import type { Workspace } from "@ocservia/api-client";
+import type { BuildInfo, Workspace } from "@ocservia/api-client";
 import { onBeforeUnmount, onMounted, ref } from "vue";
 
-import { getWorkspace, workspaceChangedEvent } from "../api/client";
+import { getWorkspace, getVersion, workspaceChangedEvent } from "../api/client";
 import { useReadinessStore } from "../shared/readiness";
 
 const readiness = useReadinessStore();
 const workspace = ref<Workspace>();
+const buildInfo = ref<BuildInfo>();
 const loading = ref(true);
 const unavailable = ref(false);
 
 async function loadWorkspace(): Promise<void> {
   loading.value = true;
   unavailable.value = false;
+  buildInfo.value = undefined;
   try {
-    workspace.value = await getWorkspace();
+    const [workspaceResult, buildResult] = await Promise.all([
+      getWorkspace(),
+      getVersion().catch(() => undefined),
+    ]);
+    workspace.value = workspaceResult;
+    buildInfo.value = buildResult;
   } catch {
     workspace.value = undefined;
     unavailable.value = true;
@@ -90,6 +97,12 @@ onBeforeUnmount(() => {
               <CheckCircle2 v-if="readiness.isReady" :size="16" />
               <CircleAlert v-else :size="16" />
               {{ $t(readiness.isReady ? "ready" : "unavailable") }}
+            </dd>
+          </div>
+          <div>
+            <dt>{{ $t("recommendedAgentVersion") }}</dt>
+            <dd>
+              {{ buildInfo?.recommendedAgentVersion ?? $t("notAvailable") }}
             </dd>
           </div>
         </dl>

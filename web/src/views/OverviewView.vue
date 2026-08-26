@@ -2,6 +2,7 @@
 import {
   Clock3,
   ListChecks,
+  PackageCheck,
   Radio,
   Server,
   Users,
@@ -165,6 +166,25 @@ onBeforeUnmount(() => {
           </small>
         </div>
         <Radio :size="20" />
+      </article>
+      <article>
+        <div>
+          <span>{{ $t("agentVersions") }}</span>
+          <strong data-testid="overview-agent-versions">{{
+            fleetLoading ? "…" : fleet.unavailable ? "–" : fleet.agentCurrent
+          }}</strong>
+          <small>
+            <template v-if="fleetLoading">{{ $t("loading") }}</template>
+            <template v-else-if="fleet.unavailable">{{
+              $t("systemsUnavailable")
+            }}</template>
+            <template v-else
+              >{{ fleet.agentUpdateAvailable }} {{ $t("upgrade_available") }} ·
+              {{ fleet.agentUnknown }} {{ $t("unknown") }}</template
+            >
+          </small>
+        </div>
+        <PackageCheck :size="20" />
       </article>
     </section>
     <div class="overview-panels">
