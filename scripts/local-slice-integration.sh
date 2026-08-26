@@ -86,10 +86,22 @@ fi
 docker run -d --name "${POSTGRES}" \
   -e POSTGRES_DB=ocservia -e POSTGRES_USER=ocservia_owner -e POSTGRES_PASSWORD=test-owner-only \
   -p "127.0.0.1::5432" postgres:17-bookworm >/dev/null
+# Probe over TCP: the entrypoint's initdb temporary server listens on the Unix
+# socket only, so a socket probe can report ready before the final server exists.
+postgres_ready=false
 for _ in $(seq 1 60); do
-  if docker exec "${POSTGRES}" psql -U ocservia_owner -d ocservia -Atc "SELECT 1" >/dev/null 2>&1; then break; fi
+  if docker exec -e PGPASSWORD=test-owner-only "${POSTGRES}" psql \
+      -h 127.0.0.1 -U ocservia_owner -d ocservia \
+      -Atc "SELECT 1" >/dev/null 2>&1; then
+    postgres_ready=true
+    break
+  fi
   sleep 1
 done
+if [[ "${postgres_ready}" != true ]]; then
+  echo "PostgreSQL did not become ready over TCP" >&2
+  exit 1
+fi
 port="$(docker port "${POSTGRES}" 5432/tcp | sed -n 's/.*://p')"
 owner_url="postgres://ocservia_owner:test-owner-only@127.0.0.1:${port}/ocservia?sslmode=disable"
 runtime_url="postgres://ocservia_app:test-runtime-only@127.0.0.1:${port}/ocservia?sslmode=disable"

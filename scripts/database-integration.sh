@@ -79,8 +79,10 @@ esac
 
 wait_for_postgres() {
   local container=$1
+  # TCP probe: the entrypoint's initdb temporary server listens on the Unix
+  # socket only, so a socket probe can report ready before the final server.
   for _ in $(seq 1 60); do
-    if docker exec "${container}" psql -U ocservia_owner -d ocservia -Atc "SELECT 1" >/dev/null 2>&1; then return 0; fi
+    if docker exec -e PGPASSWORD=test-owner-only "${container}" psql -h 127.0.0.1 -U ocservia_owner -d ocservia -Atc "SELECT 1" >/dev/null 2>&1; then return 0; fi
     sleep 1
   done
   return 1
