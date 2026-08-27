@@ -27,6 +27,7 @@ import (
 	"github.com/GentleKingson/ocservia/control-plane/internal/ownersession"
 	"github.com/GentleKingson/ocservia/control-plane/internal/privdattestation"
 	"github.com/GentleKingson/ocservia/control-plane/internal/rbac"
+	"github.com/GentleKingson/ocservia/control-plane/internal/releasecatalog"
 	telemetrystore "github.com/GentleKingson/ocservia/control-plane/internal/telemetry"
 	"github.com/GentleKingson/ocservia/control-plane/internal/transportclient"
 	"github.com/GentleKingson/ocservia/control-plane/internal/useroperations"
@@ -63,6 +64,7 @@ type Server struct {
 	transport        *transportclient.Client
 	fences           ownersession.FencedExecutor
 	telemetry        *telemetrystore.Service
+	releaseCatalog   *releasecatalog.Catalog
 	auth             *auth.Service
 	rbac             *rbac.Service
 	approvals        *approvals.Service
@@ -106,6 +108,7 @@ func New(address string, pool *pgxpool.Pool, build BuildInfo, logger *slog.Logge
 	mux.HandleFunc("POST /api/v1/nodes/{node_id}/sessions/{session_action}", s.requireOperationAuth(s.sessionAction))
 	mux.HandleFunc("POST /api/v1/nodes/{node_id}/ip-bans/{ip_action}", s.requireOperationAuth(s.ipBanAction))
 	mux.HandleFunc("POST /api/v1/nodes/{node_id}/service:reload", s.requireOperationAuth(s.reloadService))
+	mux.HandleFunc("POST /api/v1/nodes/{node_id}/agent-upgrade", s.requireOperationAuth(s.upgradeAgent))
 	mux.HandleFunc("GET /api/v1/events", s.requireOperationAuth(s.listEvents))
 	mux.HandleFunc("GET /api/v1/events/stream", s.requireOperationAuth(s.streamEvents))
 	mux.HandleFunc("POST /api/v1/enrollment-tokens", s.requireOperationAuth(s.createEnrollmentToken))
@@ -170,6 +173,10 @@ func (s *Server) EnableBrowserOrigin(origin string) {
 }
 
 func (s *Server) EnableOperations(service *operationstore.Service) { s.operations = service }
+
+// EnableReleaseCatalog installs the operator-provisioned trusted agent
+// release catalog backing the single-node upgrade workflow.
+func (s *Server) EnableReleaseCatalog(catalog *releasecatalog.Catalog) { s.releaseCatalog = catalog }
 
 func (s *Server) EnableUserState(service *userstate.Service) { s.userstate = service }
 
@@ -402,6 +409,9 @@ func routeMethod(path string) (string, bool) {
 		return http.MethodPost, true
 	}
 	if len(parts) == 5 && parts[0] == "api" && parts[1] == "v1" && parts[2] == "nodes" && parts[3] != "" && parts[4] == "service:reload" {
+		return http.MethodPost, true
+	}
+	if len(parts) == 5 && parts[0] == "api" && parts[1] == "v1" && parts[2] == "nodes" && parts[3] != "" && parts[4] == "agent-upgrade" {
 		return http.MethodPost, true
 	}
 	if len(parts) == 5 && parts[0] == "api" && parts[1] == "v1" && parts[2] == "operations" && parts[3] != "" && parts[4] == "events" {

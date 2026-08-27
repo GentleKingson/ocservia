@@ -77,6 +77,8 @@ type Config struct {
 	CertificateSignerToken   string
 	CertificateSignerTimeout time.Duration
 	RecommendedAgentVersion  string
+	AgentReleaseManifest     string
+	AgentUpgradeReconcile    time.Duration
 	EventStreams             eventstream.Config
 }
 
@@ -89,8 +91,9 @@ func Load(args []string, lookup LookupEnv) (Config, error) {
 		LogLevelName: "info", TransportSocket: "/run/ocserv-platform/transportd.sock",
 		TrustSocket:      "/run/ocserv-trust/control-plane.sock",
 		TransportTimeout: 3 * time.Second, TransportQueue: 256, OwnerLeaseTTL: 30 * time.Second, UserOperationConcurrency: 50, SessionTTL: 8 * time.Hour, CertificateSignerTimeout: 10 * time.Second,
-		EventStreams: eventstream.DefaultConfig(),
-		TransportUID: uint32(os.Geteuid()), TransportGID: uint32(os.Getegid()),
+		AgentUpgradeReconcile: 30 * time.Minute,
+		EventStreams:          eventstream.DefaultConfig(),
+		TransportUID:          uint32(os.Geteuid()), TransportGID: uint32(os.Getegid()),
 	}
 	setString(lookup, "OCSERV_ENVIRONMENT", &cfg.Environment)
 	setString(lookup, "OCSERV_HTTP_ADDRESS", &cfg.HTTPAddress)
@@ -128,6 +131,7 @@ func Load(args []string, lookup LookupEnv) (Config, error) {
 	setString(lookup, "OCSERV_OIDC_REDIRECT_URL", &cfg.OIDCRedirectURL)
 	setString(lookup, "OCSERV_CERTIFICATE_SIGNER_URL", &cfg.CertificateSignerURL)
 	setString(lookup, "OCSERV_RECOMMENDED_AGENT_VERSION", &cfg.RecommendedAgentVersion)
+	setString(lookup, "OCSERV_AGENT_RELEASE_MANIFEST", &cfg.AgentReleaseManifest)
 	if err := setStringOrFile(lookup, "OCSERV_CERTIFICATE_SIGNER_TOKEN", &cfg.CertificateSignerToken); err != nil {
 		return Config{}, err
 	}
@@ -202,6 +206,9 @@ func Load(args []string, lookup LookupEnv) (Config, error) {
 		return Config{}, err
 	}
 	if err := setDuration(lookup, "OCSERV_OWNER_LEASE_TTL", &cfg.OwnerLeaseTTL); err != nil {
+		return Config{}, err
+	}
+	if err := setDuration(lookup, "OCSERV_AGENT_UPGRADE_RECONCILE_TIMEOUT", &cfg.AgentUpgradeReconcile); err != nil {
 		return Config{}, err
 	}
 	if cfg.OwnerLeaseTTL <= 0 {
@@ -377,6 +384,12 @@ func (c Config) Validate() error {
 	}
 	if !validRecommendedAgentVersion(c.RecommendedAgentVersion) {
 		return errors.New("OCSERV_RECOMMENDED_AGENT_VERSION must be a semantic version")
+	}
+	if c.AgentUpgradeReconcile < time.Minute || c.AgentUpgradeReconcile > 24*time.Hour {
+		return errors.New("OCSERV_AGENT_UPGRADE_RECONCILE_TIMEOUT must be between 1m and 24h")
+	}
+	if c.AgentReleaseManifest != "" && !strings.HasPrefix(c.AgentReleaseManifest, "/") {
+		return errors.New("OCSERV_AGENT_RELEASE_MANIFEST must be an absolute path")
 	}
 	if !strings.HasPrefix(c.TrustSocket, "/") {
 		return errors.New("trust UDS path is invalid")

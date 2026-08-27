@@ -25,6 +25,7 @@ import (
 	"github.com/GentleKingson/ocservia/control-plane/internal/platform/telemetry"
 	"github.com/GentleKingson/ocservia/control-plane/internal/privdattestation"
 	"github.com/GentleKingson/ocservia/control-plane/internal/rbac"
+	"github.com/GentleKingson/ocservia/control-plane/internal/releasecatalog"
 	telemetrystore "github.com/GentleKingson/ocservia/control-plane/internal/telemetry"
 	"github.com/GentleKingson/ocservia/control-plane/internal/transportclient"
 	"github.com/GentleKingson/ocservia/control-plane/internal/trustserver"
@@ -123,6 +124,16 @@ func Run(ctx context.Context, cfg config.Config, build BuildInfo, logger *slog.L
 	componentCtx, stopComponents := context.WithCancel(ctx)
 	defer stopComponents()
 	operationService := operationstore.NewWithSigner(pool, cfg.UserOperationConcurrency, commandSigner)
+	if err := operationService.SetAgentUpgradeReconcileTimeout(cfg.AgentUpgradeReconcile); err != nil {
+		return fmt.Errorf("configure agent upgrade reconciliation window: %w", err)
+	}
+	var releaseCatalog *releasecatalog.Catalog
+	if cfg.AgentReleaseManifest != "" {
+		releaseCatalog, err = releasecatalog.Load(cfg.AgentReleaseManifest)
+		if err != nil {
+			return fmt.Errorf("load trusted agent release manifest: %w", err)
+		}
+	}
 	workerErr := make(chan error, 5)
 	maintenanceErr := make(chan error, 1)
 	var trust *trustserver.Server
@@ -198,6 +209,7 @@ func Run(ctx context.Context, cfg config.Config, build BuildInfo, logger *slog.L
 		go func() { workerErr <- trustWorker.Run(componentCtx) }()
 	}
 	telemetryService := telemetrystore.NewWithRecommendedAgentVersion(pool, cfg.RecommendedAgentVersion)
+	telemetryService.EnableAgentUpgradeEligibility(releaseCatalog)
 	userStateService := userstate.NewWithSigner(pool, commandSigner)
 	userOperationsService := useroperations.NewWithConcurrency(pool, userStateService, cfg.UserOperationConcurrency)
 	var apiTransport *transportclient.Client
@@ -334,6 +346,7 @@ func Run(ctx context.Context, cfg config.Config, build BuildInfo, logger *slog.L
 	}
 	server.EnableAuthorization(authService, rbac.New(pool), approvals.New(pool), auditManager)
 	server.EnableOperations(operationService)
+	server.EnableReleaseCatalog(releaseCatalog)
 	server.EnableUserState(userStateService)
 	server.EnableUserOperations(userOperationsService)
 	server.EnableConfigPlans(configplan.New(pool, operationService))

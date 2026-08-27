@@ -20,6 +20,8 @@ import (
 	agentv1 "github.com/GentleKingson/ocservia/control-plane/gen/proto/ocserv/platform/agent/v1"
 	"github.com/GentleKingson/ocservia/control-plane/internal/coordination"
 	"github.com/GentleKingson/ocservia/control-plane/internal/postgresinput"
+	"github.com/GentleKingson/ocservia/control-plane/internal/releasecatalog"
+	"github.com/GentleKingson/ocservia/control-plane/internal/semanticpayload"
 	"github.com/GentleKingson/ocservia/control-plane/internal/userusage"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -48,16 +50,28 @@ var allowedMetrics = map[string]bool{
 }
 
 type Snapshot struct {
-	ObservedAt    time.Time       `json:"observed_at"`
-	BootID        string          `json:"boot_id"`
-	AgentInstance uuid.UUID       `json:"agent_instance_id"`
-	AgentVersion  string          `json:"agent_version"`
-	OcservVersion string          `json:"ocserv_version"`
-	OSRelease     string          `json:"os_release"`
-	Ocserv        json.RawMessage `json:"ocserv"`
-	System        json.RawMessage `json:"system"`
-	Path          json.RawMessage `json:"path"`
-	Dropped       DropCounters    `json:"dropped"`
+	ObservedAt     time.Time       `json:"observed_at"`
+	BootID         string          `json:"boot_id"`
+	AgentInstance  uuid.UUID       `json:"agent_instance_id"`
+	AgentVersion   string          `json:"agent_version"`
+	OcservVersion  string          `json:"ocserv_version"`
+	OSRelease      string          `json:"os_release"`
+	Architecture   string          `json:"architecture,omitempty"`
+	Ocserv         json.RawMessage `json:"ocserv"`
+	System         json.RawMessage `json:"system"`
+	Path           json.RawMessage `json:"path"`
+	Dropped        DropCounters    `json:"dropped"`
+	UpgradeResults []UpgradeResult `json:"upgrade_results,omitempty"`
+}
+
+// UpgradeResult is one bounded durable local upgrader outcome reported
+// read-only by the Agent through its heartbeat.
+type UpgradeResult struct {
+	OperationID   uuid.UUID `json:"operation_id"`
+	State         string    `json:"state"`
+	TargetVersion string    `json:"target_version"`
+	CompletedAt   time.Time `json:"completed_at"`
+	Detail        string    `json:"detail,omitempty"`
 }
 
 type DropCounters struct {
@@ -138,15 +152,20 @@ type Node struct {
 	// AgentVersionState and RecommendedAgentVersion are derived at read time
 	// from AgentVersion and the configured recommendation; they are never
 	// persisted.
-	AgentVersionState       string          `json:"agent_version_state"`
-	RecommendedAgentVersion string          `json:"recommended_agent_version,omitempty"`
-	OcservVersion           string          `json:"ocserv_version,omitempty"`
-	OSRelease               string          `json:"os_release,omitempty"`
-	Ocserv                  json.RawMessage `json:"ocserv,omitempty"`
-	System                  json.RawMessage `json:"system,omitempty"`
-	Path                    json.RawMessage `json:"path,omitempty"`
-	Dropped                 DropCounters    `json:"dropped"`
-	SessionCount            int             `json:"session_count"`
+	AgentVersionState       string `json:"agent_version_state"`
+	RecommendedAgentVersion string `json:"recommended_agent_version,omitempty"`
+	Architecture            string `json:"architecture,omitempty"`
+	// AgentUpgradeEligible is a read-time derivation: an upgrade_available
+	// version state, an online fresh node with the upgrade capability, a
+	// trusted release for its architecture, and no conflicting active upgrade.
+	AgentUpgradeEligible bool            `json:"agent_upgrade_eligible"`
+	OcservVersion        string          `json:"ocserv_version,omitempty"`
+	OSRelease            string          `json:"os_release,omitempty"`
+	Ocserv               json.RawMessage `json:"ocserv,omitempty"`
+	System               json.RawMessage `json:"system,omitempty"`
+	Path                 json.RawMessage `json:"path,omitempty"`
+	Dropped              DropCounters    `json:"dropped"`
+	SessionCount         int             `json:"session_count"`
 }
 
 type HistoryPoint struct {
@@ -182,6 +201,7 @@ type Service struct {
 	pool                    *pgxpool.Pool
 	now                     func() time.Time
 	recommendedAgentVersion string
+	agentUpgradeCatalog     *releasecatalog.Catalog
 }
 
 func New(pool *pgxpool.Pool) *Service { return &Service{pool: pool, now: time.Now} }
@@ -191,6 +211,12 @@ func New(pool *pgxpool.Pool) *Service { return &Service{pool: pool, now: time.No
 // agent version state.
 func NewWithRecommendedAgentVersion(pool *pgxpool.Pool, recommendedAgentVersion string) *Service {
 	return &Service{pool: pool, now: time.Now, recommendedAgentVersion: recommendedAgentVersion}
+}
+
+// EnableAgentUpgradeEligibility installs the trusted release catalog used to
+// derive whether a node currently offers the single-node upgrade workflow.
+func (s *Service) EnableAgentUpgradeEligibility(catalog *releasecatalog.Catalog) {
+	s.agentUpgradeCatalog = catalog
 }
 
 func (s *Service) applyAgentVersionState(node *Node) {
@@ -271,9 +297,16 @@ func decodeWire(payload []byte) (Batch, error) {
 	kinds := map[agentv1.TelemetryPriority]string{agentv1.TelemetryPriority_TELEMETRY_PRIORITY_SECURITY: "security", agentv1.TelemetryPriority_TELEMETRY_PRIORITY_CURRENT_HEALTH: "current_health", agentv1.TelemetryPriority_TELEMETRY_PRIORITY_AGGREGATE: "aggregate", agentv1.TelemetryPriority_TELEMETRY_PRIORITY_RAW_HISTORY: "raw_history"}
 	kind := kinds[wire.GetPriority()]
 	dropped := snapshot.GetDropped()
-	batch := Batch{ID: batchID, NodeID: nodeID, Sequence: wire.GetSequence(), Kind: kind, Snapshot: Snapshot{ObservedAt: snapshot.GetObservedAt().AsTime(), BootID: snapshot.GetBootId(), AgentInstance: instance, AgentVersion: snapshot.GetAgentVersion(), OcservVersion: snapshot.GetOcservVersion(), OSRelease: snapshot.GetOsRelease(), Ocserv: snapshot.GetOcservJson(), System: snapshot.GetSystemJson(), Path: snapshot.GetPathJson()}}
+	batch := Batch{ID: batchID, NodeID: nodeID, Sequence: wire.GetSequence(), Kind: kind, Snapshot: Snapshot{ObservedAt: snapshot.GetObservedAt().AsTime(), BootID: snapshot.GetBootId(), AgentInstance: instance, AgentVersion: snapshot.GetAgentVersion(), OcservVersion: snapshot.GetOcservVersion(), OSRelease: snapshot.GetOsRelease(), Architecture: snapshot.GetArchitecture(), Ocserv: snapshot.GetOcservJson(), System: snapshot.GetSystemJson(), Path: snapshot.GetPathJson()}}
 	if dropped != nil {
 		batch.Snapshot.Dropped = DropCounters{Security: dropped.GetSecurity(), Health: dropped.GetHealth(), Aggregate: dropped.GetAggregate(), Raw: dropped.GetRaw()}
+	}
+	for _, item := range snapshot.GetUpgradeResults() {
+		operationID, operationErr := uuid.FromBytes(item.GetOperationId())
+		if operationErr != nil || item.GetCompletedUnixMs() == 0 {
+			return Batch{}, errors.New("upgrade result report identity or time invalid")
+		}
+		batch.Snapshot.UpgradeResults = append(batch.Snapshot.UpgradeResults, UpgradeResult{OperationID: operationID, State: agentUpgradeOutcomeState(item.GetState()), TargetVersion: item.GetTargetVersion(), CompletedAt: time.UnixMilli(int64(item.GetCompletedUnixMs())).UTC(), Detail: item.GetDetail()})
 	}
 	for _, item := range wire.GetSessions() {
 		if item.GetConnectedAt() == nil || item.GetConnectedAt().CheckValid() != nil {
@@ -358,11 +391,11 @@ func (s *Service) ingestTx(ctx context.Context, tx pgx.Tx, batch Batch, payloadB
 	}
 
 	updated, err := tx.Exec(ctx, `INSERT INTO node_observed_snapshots
-		(node_id,observed_at,boot_id,agent_instance_id,agent_version,ocserv_version,os_release,ocserv,system,path,last_heartbeat_at,dropped_security,dropped_health,dropped_aggregate,dropped_raw)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$2,$11,$12,$13,$14)
+		(node_id,observed_at,boot_id,agent_instance_id,agent_version,ocserv_version,os_release,architecture,ocserv,system,path,last_heartbeat_at,dropped_security,dropped_health,dropped_aggregate,dropped_raw)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$15,$8,$9,$10,$2,$11,$12,$13,$14)
 		ON CONFLICT (node_id) DO UPDATE SET observed_at=EXCLUDED.observed_at,received_at=now(),boot_id=EXCLUDED.boot_id,
 		agent_instance_id=EXCLUDED.agent_instance_id,agent_version=EXCLUDED.agent_version,ocserv_version=EXCLUDED.ocserv_version,
-		os_release=EXCLUDED.os_release,ocserv=EXCLUDED.ocserv,system=EXCLUDED.system,path=EXCLUDED.path,
+		os_release=EXCLUDED.os_release,architecture=EXCLUDED.architecture,ocserv=EXCLUDED.ocserv,system=EXCLUDED.system,path=EXCLUDED.path,
 		last_heartbeat_at=GREATEST(node_observed_snapshots.last_heartbeat_at,EXCLUDED.last_heartbeat_at),
 		dropped_security=GREATEST(node_observed_snapshots.dropped_security,EXCLUDED.dropped_security),
 		dropped_health=GREATEST(node_observed_snapshots.dropped_health,EXCLUDED.dropped_health),
@@ -372,7 +405,8 @@ func (s *Service) ingestTx(ctx context.Context, tx pgx.Tx, batch Batch, payloadB
 		batch.NodeID, batch.Snapshot.ObservedAt, batch.Snapshot.BootID, batch.Snapshot.AgentInstance,
 		batch.Snapshot.AgentVersion, batch.Snapshot.OcservVersion, batch.Snapshot.OSRelease,
 		batch.Snapshot.Ocserv, batch.Snapshot.System, batch.Snapshot.Path,
-		batch.Snapshot.Dropped.Security, batch.Snapshot.Dropped.Health, batch.Snapshot.Dropped.Aggregate, batch.Snapshot.Dropped.Raw)
+		batch.Snapshot.Dropped.Security, batch.Snapshot.Dropped.Health, batch.Snapshot.Dropped.Aggregate, batch.Snapshot.Dropped.Raw,
+		batch.Snapshot.Architecture)
 	if err != nil {
 		return false, fmt.Errorf("upsert observed snapshot: %w", err)
 	}
@@ -428,6 +462,15 @@ func (s *Service) ingestTx(ctx context.Context, tx pgx.Tx, batch Batch, payloadB
 			}
 		}
 	}
+	for _, report := range batch.Snapshot.UpgradeResults {
+		if _, err := tx.Exec(ctx, `INSERT INTO node_agent_upgrade_results(operation_id,node_id,state,target_version,detail,completed_at,reported_at)
+			SELECT $1,$2,$3,$4,$5,$6,now()
+			WHERE EXISTS(SELECT 1 FROM agent_upgrade_operations u WHERE u.operation_id=$1 AND u.node_id=$2 AND u.target_version=$4 AND u.state IN ('accepted','running','unknown'))
+			ON CONFLICT (operation_id) DO NOTHING`,
+			report.OperationID, batch.NodeID, report.State, report.TargetVersion, report.Detail, report.CompletedAt); err != nil {
+			return false, fmt.Errorf("insert reported agent upgrade result: %w", err)
+		}
+	}
 	for _, event := range batch.Security {
 		if _, err := tx.Exec(ctx, `INSERT INTO telemetry_security_events (event_id,node_id,observed_at,severity,event_type,detail) VALUES ($1,$2,$3,$4,$5,$6) ON CONFLICT DO NOTHING`, event.ID, batch.NodeID, event.ObservedAt, event.Severity, event.Type, event.Detail); err != nil {
 			return false, fmt.Errorf("insert security event: %w", err)
@@ -463,6 +506,22 @@ func validateBatch(batch Batch, now time.Time) error {
 		if !postgresinput.ValidText(value, 128) {
 			return errors.New("observed version is invalid")
 		}
+	}
+	if batch.Snapshot.Architecture != "" && !semanticpayload.ValidAgentUpgradeArchitecture(batch.Snapshot.Architecture) {
+		return errors.New("observed architecture is invalid")
+	}
+	if len(batch.Snapshot.UpgradeResults) > 8 {
+		return errors.New("upgrade result report count exceeds limit")
+	}
+	seenUpgradeOperations := make(map[uuid.UUID]struct{}, len(batch.Snapshot.UpgradeResults))
+	for _, report := range batch.Snapshot.UpgradeResults {
+		if report.OperationID.Version() != 7 || report.State == "" || !semanticpayload.ValidAgentUpgradeTargetVersion(report.TargetVersion) || !postgresinput.ValidText(report.Detail, 160) {
+			return errors.New("upgrade result report is invalid")
+		}
+		if _, duplicate := seenUpgradeOperations[report.OperationID]; duplicate {
+			return errors.New("duplicate upgrade result report")
+		}
+		seenUpgradeOperations[report.OperationID] = struct{}{}
 	}
 	for _, document := range []json.RawMessage{batch.Snapshot.Ocserv, batch.Snapshot.System, batch.Snapshot.Path} {
 		if !validObject(document) {
@@ -609,7 +668,7 @@ func (s *Service) ListNodesInWorkspace(ctx context.Context, workspaceID, after u
 	if after != uuid.Nil {
 		cursor = after
 	}
-	rows, err := s.pool.Query(ctx, `SELECT n.id::text,n.name,n.version,n.status,o.observed_at,o.last_heartbeat_at,o.boot_id,o.agent_instance_id::text,o.agent_version,o.ocserv_version,o.os_release,o.ocserv,o.system,o.path,o.dropped_security,o.dropped_health,o.dropped_aggregate,o.dropped_raw,(SELECT count(*) FROM node_sessions ss WHERE ss.node_id=n.id) FROM nodes n LEFT JOIN node_observed_snapshots o ON o.node_id=n.id WHERE ($1::uuid IS NULL OR n.id>$1) AND ($3::uuid IS NULL OR n.workspace_id=$3) ORDER BY n.id LIMIT $2`, cursor, limit+1, nullableWorkspace(workspaceID))
+	rows, err := s.pool.Query(ctx, `SELECT n.id::text,n.name,n.version,n.status,o.observed_at,o.last_heartbeat_at,o.boot_id,o.agent_instance_id::text,o.agent_version,o.ocserv_version,o.os_release,o.architecture,o.ocserv,o.system,o.path,o.dropped_security,o.dropped_health,o.dropped_aggregate,o.dropped_raw,(SELECT count(*) FROM node_sessions ss WHERE ss.node_id=n.id) FROM nodes n LEFT JOIN node_observed_snapshots o ON o.node_id=n.id WHERE ($1::uuid IS NULL OR n.id>$1) AND ($3::uuid IS NULL OR n.workspace_id=$3) ORDER BY n.id LIMIT $2`, cursor, limit+1, nullableWorkspace(workspaceID))
 	if err != nil {
 		return nil, false, fmt.Errorf("list nodes: %w", err)
 	}
@@ -641,24 +700,61 @@ func nullableWorkspace(id uuid.UUID) any {
 }
 
 func (s *Service) GetNode(ctx context.Context, id uuid.UUID) (Node, error) {
-	row := s.pool.QueryRow(ctx, `SELECT n.id::text,n.name,n.version,n.status,o.observed_at,o.last_heartbeat_at,o.boot_id,o.agent_instance_id::text,o.agent_version,o.ocserv_version,o.os_release,o.ocserv,o.system,o.path,o.dropped_security,o.dropped_health,o.dropped_aggregate,o.dropped_raw,(SELECT count(*) FROM node_sessions ss WHERE ss.node_id=n.id) FROM nodes n LEFT JOIN node_observed_snapshots o ON o.node_id=n.id WHERE n.id=$1`, id)
+	row := s.pool.QueryRow(ctx, `SELECT n.id::text,n.name,n.version,n.status,o.observed_at,o.last_heartbeat_at,o.boot_id,o.agent_instance_id::text,o.agent_version,o.ocserv_version,o.os_release,o.architecture,o.ocserv,o.system,o.path,o.dropped_security,o.dropped_health,o.dropped_aggregate,o.dropped_raw,(SELECT count(*) FROM node_sessions ss WHERE ss.node_id=n.id) FROM nodes n LEFT JOIN node_observed_snapshots o ON o.node_id=n.id WHERE n.id=$1`, id)
 	node, err := scanNode(row, s.now())
 	if err != nil {
 		return Node{}, err
 	}
 	s.applyAgentVersionState(&node)
+	s.applyAgentUpgradeEligibility(ctx, &node)
 	return node, nil
+}
+
+// applyAgentUpgradeEligibility derives the single-node upgrade workflow gate
+// from durable state: an upgrade_available version state, an online fresh
+// node with the approved upgrade capability, a trusted release for its
+// architecture, and no conflicting active upgrade. It is never persisted and
+// fails closed on any lookup error.
+func (s *Service) applyAgentUpgradeEligibility(ctx context.Context, node *Node) {
+	if s.agentUpgradeCatalog == nil || node.AgentVersionState != "upgrade_available" || node.ConnectionState != "online" || node.Freshness != "fresh" || node.Architecture == "" {
+		return
+	}
+	if _, trusted := s.agentUpgradeCatalog.Lookup(node.RecommendedAgentVersion, node.Architecture); !trusted {
+		return
+	}
+	nodeID, err := uuid.Parse(node.ID)
+	if err != nil {
+		return
+	}
+	var capable, conflict bool
+	if err := s.pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM node_capabilities WHERE node_id=$1 AND capability='ocserv.agent.upgrade.v1' AND approved=true), EXISTS(SELECT 1 FROM agent_upgrade_operations WHERE node_id=$1 AND state IN ('queued','accepted','running','unknown'))`, nodeID).Scan(&capable, &conflict); err != nil {
+		return
+	}
+	node.AgentUpgradeEligible = capable && !conflict
 }
 
 type scanner interface{ Scan(...any) error }
 
+func agentUpgradeOutcomeState(state agentv1.AgentUpgradeOutcomeState) string {
+	switch state {
+	case agentv1.AgentUpgradeOutcomeState_AGENT_UPGRADE_OUTCOME_STATE_SUCCEEDED:
+		return "succeeded"
+	case agentv1.AgentUpgradeOutcomeState_AGENT_UPGRADE_OUTCOME_STATE_FAILED:
+		return "failed"
+	case agentv1.AgentUpgradeOutcomeState_AGENT_UPGRADE_OUTCOME_STATE_ROLLED_BACK:
+		return "rolled_back"
+	default:
+		return ""
+	}
+}
+
 func scanNode(row scanner, now time.Time) (Node, error) {
 	var n Node
 	var observed, heartbeat *time.Time
-	var boot, instance, agent, ocserv, os *string
+	var boot, instance, agent, ocserv, os, arch *string
 	var ocservJSON, systemJSON, pathJSON []byte
 	var ds, dh, da, dr *int64
-	if err := row.Scan(&n.ID, &n.Name, &n.Version, &n.TrustStatus, &observed, &heartbeat, &boot, &instance, &agent, &ocserv, &os, &ocservJSON, &systemJSON, &pathJSON, &ds, &dh, &da, &dr, &n.SessionCount); err != nil {
+	if err := row.Scan(&n.ID, &n.Name, &n.Version, &n.TrustStatus, &observed, &heartbeat, &boot, &instance, &agent, &ocserv, &os, &arch, &ocservJSON, &systemJSON, &pathJSON, &ds, &dh, &da, &dr, &n.SessionCount); err != nil {
 		return Node{}, err
 	}
 	n.ObservedAt = observed
@@ -690,6 +786,9 @@ func scanNode(row scanner, now time.Time) (Node, error) {
 	}
 	if os != nil {
 		n.OSRelease = *os
+	}
+	if arch != nil {
+		n.Architecture = *arch
 	}
 	n.Ocserv = ocservJSON
 	n.System = systemJSON

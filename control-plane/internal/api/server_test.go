@@ -343,6 +343,7 @@ func TestControlledOperationRoutesRequireAuthentication(t *testing.T) {
 		"/api/v1/nodes/019fc0a4-6d92-765c-a8a1-4af556614cc3/sessions/42:terminate",
 		"/api/v1/nodes/019fc0a4-6d92-765c-a8a1-4af556614cc3/ip-bans/192.0.2.9:remove",
 		"/api/v1/nodes/019fc0a4-6d92-765c-a8a1-4af556614cc3/service:reload",
+		"/api/v1/nodes/019fc0a4-6d92-765c-a8a1-4af556614cc3/agent-upgrade",
 	} {
 		response := httptest.NewRecorder()
 		server.http.Handler.ServeHTTP(response, httptest.NewRequest(http.MethodPost, path, nil))

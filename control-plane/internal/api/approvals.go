@@ -11,6 +11,7 @@ import (
 
 	"github.com/GentleKingson/ocservia/control-plane/internal/approvals"
 	"github.com/GentleKingson/ocservia/control-plane/internal/rbac"
+	"github.com/GentleKingson/ocservia/control-plane/internal/semanticpayload"
 	"github.com/GentleKingson/ocservia/control-plane/internal/useroperations"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -26,6 +27,14 @@ type createApprovalRequest struct {
 	NodeApproval *nodeApprovalBindingRequest        `json:"node_approval,omitempty"`
 	Certificate  *certificateApprovalBindingRequest `json:"certificate,omitempty"`
 	RoleBinding  *roleBindingApprovalRequest        `json:"role_binding,omitempty"`
+	AgentUpgrade *agentUpgradeApprovalRequest       `json:"agent_upgrade,omitempty"`
+}
+
+// agentUpgradeApprovalRequest selects only the target version. The package
+// digest and architecture resolve server-side from the node's observed state
+// and the trusted release catalog so approval content is never caller-trusted.
+type agentUpgradeApprovalRequest struct {
+	TargetVersion string `json:"target_version"`
 }
 
 type nodeApprovalBindingRequest struct {
@@ -191,6 +200,37 @@ func (s *Server) createApproval(w http.ResponseWriter, r *http.Request) {
 		}
 		requestHash, requestSummary = hash, summary
 		authorityResources = append(authorityResources, approvals.AuthorityResource{WorkspaceID: workspaceID, Type: "node", ID: nodeID})
+	} else if action == "agent.upgrade" {
+		if resource.Type != "node" || body.AgentUpgrade == nil || s.releaseCatalog == nil {
+			writeProblem(w, r, http.StatusBadRequest, "https://ocservia.dev/problems/invalid-request", "Invalid request", "agent upgrade approval requires a target version and a trusted release catalog")
+			return
+		}
+		target := strings.TrimSpace(body.AgentUpgrade.TargetVersion)
+		if !semanticpayload.ValidAgentUpgradeTargetVersion(target) {
+			writeProblem(w, r, http.StatusBadRequest, "https://ocservia.dev/problems/invalid-request", "Invalid request", "agent upgrade approval target version is invalid")
+			return
+		}
+		var nodeWorkspace uuid.UUID
+		var architecture string
+		if err := s.pool.QueryRow(r.Context(), `SELECT n.workspace_id,COALESCE(o.architecture,'') FROM nodes n LEFT JOIN node_observed_snapshots o ON o.node_id=n.id WHERE n.id=$1`, resourceID).Scan(&nodeWorkspace, &architecture); err != nil || nodeWorkspace != resource.WorkspaceID {
+			writeProblem(w, r, http.StatusConflict, "https://ocservia.dev/problems/node-not-ready", "Node is not ready", "agent upgrade approval requires an observed node in the selected workspace")
+			return
+		}
+		if architecture == "" {
+			writeProblem(w, r, http.StatusConflict, "https://ocservia.dev/problems/node-not-ready", "Node is not ready", "the node has not reported its package architecture yet")
+			return
+		}
+		digest, trusted := s.releaseCatalog.Lookup(target, architecture)
+		if !trusted {
+			writeProblem(w, r, http.StatusConflict, "https://ocservia.dev/problems/release-not-trusted", "Release is not trusted", "no trusted release exists for the requested version and architecture")
+			return
+		}
+		requestHash, requestSummary = approvals.AgentUpgradeBinding(resourceID, target, digest[:], architecture)
+		authorityResources = append(authorityResources, approvals.AuthorityResource{WorkspaceID: resource.WorkspaceID, Type: "node", ID: resourceID})
+		if !s.devAuth && s.rbac.Authorize(r.Context(), actor.IdentityID, action, rbac.Resource{WorkspaceID: resource.WorkspaceID, Type: "node", ID: resourceID}, actor.BreakGlass) != nil {
+			s.writeAuthorizationError(w, r, rbac.ErrForbidden)
+			return
+		}
 	} else if action == "role_binding.elevate" {
 		if resource.Type != "role_binding" || body.RoleBinding == nil {
 			writeProblem(w, r, http.StatusBadRequest, "https://ocservia.dev/problems/invalid-request", "Invalid request", "role elevation approval requires exact binding content")

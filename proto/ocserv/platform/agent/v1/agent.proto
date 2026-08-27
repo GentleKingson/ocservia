@@ -374,6 +374,10 @@ message ObservedSnapshot {
   bytes system_json = 8;
   bytes path_json = 9;
   TelemetryDropCounters dropped = 10;
+  // Bounded most-recent durable agent upgrade outcomes read from privd.
+  repeated AgentUpgradeResultReport upgrade_results = 11;
+  // Node package architecture (amd64 or arm64) of the running agent.
+  string architecture = 12;
 }
 
 message SessionObservation {
@@ -628,6 +632,24 @@ message AgentUpgradeScheduledResult {
   bytes operation_id = 1;
   string target_version = 2;
   bytes package_sha256 = 3;
+}
+
+// Terminal local outcome of one durable upgrade operation as recorded by the
+// root upgrader. The Agent surfaces this evidence read-only through privd;
+// it is a bounded observation, never a controller-controlled value.
+enum AgentUpgradeOutcomeState {
+  AGENT_UPGRADE_OUTCOME_STATE_UNSPECIFIED = 0;
+  AGENT_UPGRADE_OUTCOME_STATE_SUCCEEDED = 1;
+  AGENT_UPGRADE_OUTCOME_STATE_FAILED = 2;
+  AGENT_UPGRADE_OUTCOME_STATE_ROLLED_BACK = 3;
+}
+
+message AgentUpgradeResultReport {
+  bytes operation_id = 1;
+  AgentUpgradeOutcomeState state = 2;
+  string target_version = 3;
+  uint64 completed_unix_ms = 4;
+  string detail = 5;
 }
 
 message ArtifactFetchRequest {
