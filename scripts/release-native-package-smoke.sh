@@ -56,6 +56,7 @@ cleanup() {
   sudo rm -rf -- /etc/ocservia-agent /var/lib/ocservia-agent /var/lib/ocservia-upgrade \
     /var/lib/ocservia-privd /usr/share/ocservia-agent /usr/libexec/ocservia \
     /usr/lib/systemd/system/ocservia-agent.service /usr/lib/systemd/system/ocservia-privd.service \
+    /usr/lib/systemd/system/ocservia-upgrader@.service \
     /usr/lib/systemd/system/ocservia-agent.service.d || status=1
   sudo userdel ocserv-agent >/dev/null 2>&1 || true
   sudo groupdel ocserv-agent >/dev/null 2>&1 || true
@@ -67,7 +68,7 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
-(cd "${ROOT}/rust" && cargo build --locked --release --package ocservia-agent --package ocservia-privd)
+(cd "${ROOT}/rust" && cargo build --locked --release --package ocservia-agent --package ocservia-privd --package ocservia-upgrader)
 for binary in ocservia-agent ocservia-privd; do
   file_output="$(file -b "${ROOT}/rust/target/release/${binary}")"
   if [[ "${PACKAGE_ARCH}" == amd64 && "${file_output}" != *"x86-64"* ]] ||
@@ -134,10 +135,16 @@ assert_installed_state() {
     || { echo "${context}: privd binary missing" >&2; exit 1; }
   sudo test -x /usr/libexec/ocservia/ocservia-agent-rollback \
     || { echo "${context}: rollback command missing" >&2; exit 1; }
+  sudo test -x /usr/libexec/ocservia/ocservia-upgrader \
+    || { echo "${context}: upgrader binary missing" >&2; exit 1; }
+  sudo test -x /usr/libexec/ocservia/ocservia-agent-verify \
+    || { echo "${context}: package verifier missing" >&2; exit 1; }
   sudo test -f /usr/lib/systemd/system/ocservia-agent.service \
     || { echo "${context}: agent unit missing" >&2; exit 1; }
   sudo test -f /usr/lib/systemd/system/ocservia-privd.service \
     || { echo "${context}: privd unit missing" >&2; exit 1; }
+  sudo test -f /usr/lib/systemd/system/ocservia-upgrader@.service \
+    || { echo "${context}: upgrader unit missing" >&2; exit 1; }
   sudo test -f "/usr/share/ocservia-agent/ocservia-agent-${expected_version}-linux-${PACKAGE_ARCH}.tar.gz" \
     || { echo "${context}: embedded archive missing" >&2; exit 1; }
   getent passwd ocserv-agent >/dev/null \
@@ -184,7 +191,7 @@ assert_upgraded_state() {
   assert_installed_state "${context}" "${expected_version}"
   sudo test -f /var/lib/ocservia-upgrade/upgrade-backup/MANIFEST.sha256 \
     || { echo "${context}: upgrade rollback snapshot manifest missing" >&2; exit 1; }
-  sudo test "$(sudo awk 'END { print NR }' /var/lib/ocservia-upgrade/upgrade-backup/MANIFEST.sha256)" -eq 5 \
+  sudo test "$(sudo awk 'END { print NR }' /var/lib/ocservia-upgrade/upgrade-backup/MANIFEST.sha256)" -eq 8 \
     || { echo "${context}: upgrade rollback snapshot is incomplete" >&2; exit 1; }
   sudo grep -Fxq "USER_PASSWORD_SEAL_PUBLIC_KEY_SHA256=${user_seal_hash}" /etc/ocservia-agent/agent.env \
     || { echo "${context}: upgrade lost the configured agent environment" >&2; exit 1; }
@@ -247,10 +254,16 @@ container_assert_installed() {
     || { echo "${context}: privd binary missing" >&2; exit 1; }
   docker exec "${container}" test -x /usr/libexec/ocservia/ocservia-agent-rollback \
     || { echo "${context}: rollback command missing" >&2; exit 1; }
+  docker exec "${container}" test -x /usr/libexec/ocservia/ocservia-upgrader \
+    || { echo "${context}: upgrader binary missing" >&2; exit 1; }
+  docker exec "${container}" test -x /usr/libexec/ocservia/ocservia-agent-verify \
+    || { echo "${context}: package verifier missing" >&2; exit 1; }
   docker exec "${container}" test -f /usr/lib/systemd/system/ocservia-agent.service \
     || { echo "${context}: agent unit missing" >&2; exit 1; }
   docker exec "${container}" test -f /usr/lib/systemd/system/ocservia-privd.service \
     || { echo "${context}: privd unit missing" >&2; exit 1; }
+  docker exec "${container}" test -f /usr/lib/systemd/system/ocservia-upgrader@.service \
+    || { echo "${context}: upgrader unit missing" >&2; exit 1; }
   docker exec "${container}" test -f \
     "/usr/share/ocservia-agent/ocservia-agent-${expected_version}-linux-${PACKAGE_ARCH}.tar.gz" \
     || { echo "${context}: embedded archive missing" >&2; exit 1; }
@@ -305,7 +318,7 @@ container_assert_installed "rpm upgrade" 1.0.1
 docker exec "${container}" test -f /var/lib/ocservia-upgrade/upgrade-backup/MANIFEST.sha256 \
   || { echo "rpm upgrade rollback snapshot manifest missing" >&2; exit 1; }
 docker exec "${container}" bash -c \
-  'test "$(awk '\''END { print NR }'\'' /var/lib/ocservia-upgrade/upgrade-backup/MANIFEST.sha256)" -eq 5' \
+  'test "$(awk '\''END { print NR }'\'' /var/lib/ocservia-upgrade/upgrade-backup/MANIFEST.sha256)" -eq 8' \
   || { echo "rpm upgrade rollback snapshot is incomplete" >&2; exit 1; }
 docker exec "${container}" grep -Fxq "USER_PASSWORD_SEAL_PUBLIC_KEY_SHA256=${user_seal_hash}" \
   /etc/ocservia-agent/agent.env \

@@ -131,7 +131,7 @@ validate_installed_snapshot_source() {
 }
 
 write_snapshot_manifest() {
-  local directory="$1" manifest name digest
+  local directory="$1" manifest name digest entry
   manifest="${directory}/MANIFEST.sha256"
   : >"${manifest}"
   chmod 0600 -- "${manifest}"
@@ -144,13 +144,21 @@ write_snapshot_manifest() {
     digest="$(sha256sum -- "${directory}/${name}" | awk '{print $1}')"
     printf '%s  %s\n' "${digest}" "${name}" >>"${manifest}"
   done
-  if [[ -f "${directory}/ocservia-agent-relays.conf.previous" ]]; then
-    name=ocservia-agent-relays.conf.previous
-  else
-    name=ocservia-agent-relays.conf.absent
-  fi
-  digest="$(sha256sum -- "${directory}/${name}" | awk '{print $1}')"
-  printf '%s  %s\n' "${digest}" "${name}" >>"${manifest}"
+  # Optional rollback sources record .previous when the file existed and
+  # .absent when it did not, so restore and removal stay deterministic.
+  for name in \
+    ocservia-agent-relays.conf \
+    ocservia-upgrader \
+    ocservia-upgrader@.service \
+    ocservia-agent-verify; do
+    if [[ -f "${directory}/${name}.previous" ]]; then
+      entry="${name}.previous"
+    else
+      entry="${name}.absent"
+    fi
+    digest="$(sha256sum -- "${directory}/${entry}" | awk '{print $1}')"
+    printf '%s  %s\n' "${digest}" "${entry}" >>"${manifest}"
+  done
   sync -f "${manifest}"
   sync -f "${directory}"
 }
@@ -442,8 +450,11 @@ validate_password_sealing_keys
 
 installed_agent="${DESTDIR}${PREFIX}/libexec/ocservia/ocservia-agent"
 installed_privd="${DESTDIR}${PREFIX}/libexec/ocservia/ocservia-privd"
+installed_upgrader="${DESTDIR}${PREFIX}/libexec/ocservia/ocservia-upgrader"
+installed_verifier="${DESTDIR}${PREFIX}/libexec/ocservia/ocservia-agent-verify"
 installed_agent_unit="${DESTDIR}${PREFIX}/lib/systemd/system/ocservia-agent.service"
 installed_privd_unit="${DESTDIR}${PREFIX}/lib/systemd/system/ocservia-privd.service"
+installed_upgrader_unit="${DESTDIR}${PREFIX}/lib/systemd/system/ocservia-upgrader@.service"
 installed_relay_dropin="${DESTDIR}${PREFIX}/lib/systemd/system/ocservia-agent.service.d/10-production-relays.conf"
 for installed_file in \
   "${installed_agent}" \
@@ -458,6 +469,17 @@ if [[ -e "${installed_relay_dropin}" || -L "${installed_relay_dropin}" ]] && \
   [[ ! -f "${installed_relay_dropin}" || -L "${installed_relay_dropin}" ]]; then
   installed_pair_preflight_error "the installed production relay drop-in must be a regular file"
 fi
+# The durable upgrade runner set may legitimately be absent on a pre-upgrade
+# node, but anything present must still be a safe snapshot source.
+for installed_file in \
+  "${installed_upgrader}" \
+  "${installed_verifier}" \
+  "${installed_upgrader_unit}"; do
+  if [[ -e "${installed_file}" || -L "${installed_file}" ]] && \
+    [[ ! -f "${installed_file}" || -L "${installed_file}" ]]; then
+    installed_pair_preflight_error "the installed durable upgrade runner set must be regular files"
+  fi
+done
 
 validate_installed_snapshot_source "${installed_agent}" 755
 validate_installed_snapshot_source "${installed_privd}" 755
@@ -465,6 +487,15 @@ validate_installed_snapshot_source "${installed_agent_unit}" 644
 validate_installed_snapshot_source "${installed_privd_unit}" 644
 if [[ -f "${installed_relay_dropin}" ]]; then
   validate_installed_snapshot_source "${installed_relay_dropin}" 644
+fi
+if [[ -e "${installed_upgrader}" || -L "${installed_upgrader}" ]]; then
+  validate_installed_snapshot_source "${installed_upgrader}" 755
+fi
+if [[ -e "${installed_verifier}" || -L "${installed_verifier}" ]]; then
+  validate_installed_snapshot_source "${installed_verifier}" 755
+fi
+if [[ -e "${installed_upgrader_unit}" || -L "${installed_upgrader_unit}" ]]; then
+  validate_installed_snapshot_source "${installed_upgrader_unit}" 644
 fi
 
 # A pre-P1-06 node has no Controller-side sealing-key binding. Use the verified
@@ -487,12 +518,33 @@ install -o root -g root -m 0755 -- "${installed_privd}" "${BACKUP_DIR}/ocservia-
 install -o root -g root -m 0644 -- "${installed_agent_unit}" "${BACKUP_DIR}/ocservia-agent.service.previous"
 install -o root -g root -m 0644 -- "${installed_privd_unit}" "${BACKUP_DIR}/ocservia-privd.service.previous"
 rm -f -- "${BACKUP_DIR}/ocservia-agent-relays.conf.previous" \
-  "${BACKUP_DIR}/ocservia-agent-relays.conf.absent"
+  "${BACKUP_DIR}/ocservia-agent-relays.conf.absent" \
+  "${BACKUP_DIR}/ocservia-upgrader.previous" \
+  "${BACKUP_DIR}/ocservia-upgrader.absent" \
+  "${BACKUP_DIR}/ocservia-upgrader@.service.previous" \
+  "${BACKUP_DIR}/ocservia-upgrader@.service.absent" \
+  "${BACKUP_DIR}/ocservia-agent-verify.previous" \
+  "${BACKUP_DIR}/ocservia-agent-verify.absent"
 if [[ -f "${installed_relay_dropin}" ]]; then
   install -o root -g root -m 0644 -- "${installed_relay_dropin}" \
     "${BACKUP_DIR}/ocservia-agent-relays.conf.previous"
 else
   install -o root -g root -m 0600 -- /dev/null "${BACKUP_DIR}/ocservia-agent-relays.conf.absent"
+fi
+if [[ -e "${installed_upgrader}" ]]; then
+  install -o root -g root -m 0755 -- "${installed_upgrader}" "${BACKUP_DIR}/ocservia-upgrader.previous"
+else
+  install -o root -g root -m 0600 -- /dev/null "${BACKUP_DIR}/ocservia-upgrader.absent"
+fi
+if [[ -e "${installed_upgrader_unit}" ]]; then
+  install -o root -g root -m 0644 -- "${installed_upgrader_unit}" "${BACKUP_DIR}/ocservia-upgrader@.service.previous"
+else
+  install -o root -g root -m 0600 -- /dev/null "${BACKUP_DIR}/ocservia-upgrader@.service.absent"
+fi
+if [[ -e "${installed_verifier}" ]]; then
+  install -o root -g root -m 0755 -- "${installed_verifier}" "${BACKUP_DIR}/ocservia-agent-verify.previous"
+else
+  install -o root -g root -m 0600 -- /dev/null "${BACKUP_DIR}/ocservia-agent-verify.absent"
 fi
 write_snapshot_manifest "${BACKUP_DIR}"
 

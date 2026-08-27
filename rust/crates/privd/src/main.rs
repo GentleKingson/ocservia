@@ -14,6 +14,7 @@ use ocservia_contracts::generated::ocserv::platform::agent::v1::{
 use ocservia_ocserv_adapter::{Adapter, FixedResources, Limits};
 use ocservia_privd::{ServerConfig, bind_socket, remove_socket, serve};
 use ocservia_privd_attestation::{key_id, load_or_create_signing_key, sign_registration};
+use ocservia_upgrader::{DEFAULT_OPERATIONS_DIR, UpgradeScheduler, UpgradeTrigger};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
@@ -124,6 +125,7 @@ fn parse_args_from(
     let mut p12_seal_key_file = None;
     let mut p12_seal_key_id = None;
     let mut p12_seal_public_key_sha256 = None;
+    let mut upgrade_operations_dir = PathBuf::from(DEFAULT_OPERATIONS_DIR);
     while let Some(argument) = args.next() {
         match argument.as_str() {
             "--socket" => socket = PathBuf::from(required(&mut args, "--socket")?),
@@ -187,6 +189,18 @@ fn parse_args_from(
                     "--p12-password-seal-public-key-sha256",
                 )?);
             }
+            "--upgrade-operations-dir" => {
+                let value = required(&mut args, "--upgrade-operations-dir")?;
+                let path = PathBuf::from(&value);
+                if !path.is_absolute()
+                    || path.components().any(|component| {
+                        matches!(component, Component::CurDir | Component::ParentDir)
+                    })
+                {
+                    return Err(invalid("upgrade operations directory path invalid"));
+                }
+                upgrade_operations_dir = path;
+            }
             _ => return Err(invalid("unknown privd argument")),
         }
     }
@@ -238,6 +252,7 @@ fn parse_args_from(
             node_id: node_id.ok_or_else(|| invalid("--node-id is required"))?,
             command_keys,
             attestation_key,
+            upgrades: UpgradeScheduler::new(upgrade_operations_dir, UpgradeTrigger::Systemd),
         },
         resources,
         Limits::default(),

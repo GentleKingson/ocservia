@@ -117,8 +117,8 @@ fi
 
 manifest="${BACKUP_DIR}/MANIFEST.sha256"
 validate_file "${manifest}" 600
-if [[ "$(wc -l <"${manifest}")" -ne 5 ]] || \
-  awk 'length($1) != 64 || $1 !~ /^[0-9a-f]+$/ || $2 !~ /^(ocservia-agent\.previous|ocservia-privd\.previous|ocservia-agent\.service\.previous|ocservia-privd\.service\.previous|ocservia-agent-relays\.conf\.(previous|absent))$/ || NF != 2 { bad=1 } END { exit bad ? 0 : 1 }' "${manifest}"; then
+if [[ "$(wc -l <"${manifest}")" -ne 8 ]] || \
+  awk 'length($1) != 64 || $1 !~ /^[0-9a-f]+$/ || $2 !~ /^(ocservia-agent\.previous|ocservia-privd\.previous|ocservia-agent\.service\.previous|ocservia-privd\.service\.previous|ocservia-agent-relays\.conf\.(previous|absent)|ocservia-upgrader\.(previous|absent)|ocservia-upgrader@\.service\.(previous|absent)|ocservia-agent-verify\.(previous|absent))$/ || NF != 2 { bad=1 } END { exit bad ? 0 : 1 }' "${manifest}"; then
   rollback_error "rollback snapshot manifest is malformed"
 fi
 
@@ -151,6 +151,31 @@ else
   rollback_error "rollback snapshot has ambiguous or unsafe relay drop-in state"
 fi
 
+# Each durable upgrade runner artifact is either restored from .previous or
+# removed per .absent, so a rollback cannot leave a mixed-generation runner.
+resolve_optional_backup() {
+  local base="$1" expected_mode="$2"
+  local backup="${BACKUP_DIR}/${base}.previous" absent="${BACKUP_DIR}/${base}.absent"
+  if [[ -f "${backup}" && ! -L "${backup}" && ! -e "${absent}" && ! -L "${absent}" ]]; then
+    validate_file "${backup}" "${expected_mode}"
+    validate_digest "${base}.previous" "${manifest}"
+    resolved_backup="${backup}"
+  elif [[ -f "${absent}" && ! -L "${absent}" && ! -e "${backup}" && ! -L "${backup}" ]]; then
+    validate_file "${absent}" 600
+    validate_digest "${base}.absent" "${manifest}"
+    resolved_backup=""
+  else
+    rollback_error "rollback snapshot has ambiguous or unsafe ${base} state"
+  fi
+}
+
+resolve_optional_backup ocservia-upgrader 755
+upgrader_backup="${resolved_backup}"
+resolve_optional_backup 'ocservia-upgrader@.service' 644
+upgrader_unit_backup="${resolved_backup}"
+resolve_optional_backup ocservia-agent-verify 755
+verifier_backup="${resolved_backup}"
+
 libexec="${DESTDIR}${PREFIX}/libexec/ocservia"
 systemd="${DESTDIR}${PREFIX}/lib/systemd/system"
 relay_directory="${systemd}/ocservia-agent.service.d"
@@ -161,6 +186,17 @@ validate_destination "${systemd}/ocservia-agent.service" 644
 validate_destination "${systemd}/ocservia-privd.service" 644
 validate_root_ancestry "${libexec}"
 validate_root_ancestry "${systemd}"
+# A present runner artifact must be a safe restore destination; an absent one
+# matches the .absent snapshot branch.
+if [[ -n "${upgrader_backup}" ]]; then
+  validate_destination "${libexec}/ocservia-upgrader" 755
+fi
+if [[ -n "${upgrader_unit_backup}" ]]; then
+  validate_destination "${systemd}/ocservia-upgrader@.service" 644
+fi
+if [[ -n "${verifier_backup}" ]]; then
+  validate_destination "${libexec}/ocservia-agent-verify" 755
+fi
 if [[ "${restore_relay}" == true ]]; then
   if [[ ! -e "${relay_directory}" && ! -L "${relay_directory}" ]]; then
     validate_root_ancestry "$(dirname -- "${relay_directory}")"
@@ -173,9 +209,36 @@ elif [[ -e "${relay_directory}/10-production-relays.conf" || -L "${relay_directo
   validate_destination "${relay_directory}/10-production-relays.conf" 644
 fi
 
+# A rollback invalidates every durable upgrade intent that has not reached a
+# terminal state, so a restarted upgrader cannot re-apply the rolled-back
+# release afterwards.
+mark_operations_rolled_back() {
+  local operations="${DESTDIR}${UPGRADE_STATE_DIR}/operations" entry state staging
+  [[ -d "${operations}" ]] || return 0
+  for entry in "${operations}"/*; do
+    [[ -d "${entry}" ]] || continue
+    [[ "$(basename -- "${entry}")" =~ ^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$ ]] \
+      || continue
+    state="${entry}/state"
+    [[ -f "${state}" && ! -L "${state}" ]] || continue
+    case "$(cat -- "${state}")" in
+      accepted | running*) ;;
+      *) continue ;;
+    esac
+    staging="${entry}/.state.rollback.$$"
+    install -o root -g root -m 0600 -- /dev/null "${staging}"
+    printf 'rolled_back\n' >"${staging}"
+    mv -fT -- "${staging}" "${state}"
+    sync -f "${state}"
+    sync -f "${entry}"
+  done
+}
+
 if [[ -z "${DESTDIR}" ]]; then
+  systemctl stop 'ocservia-upgrader@*.service' 2>/dev/null || true
   systemctl stop ocservia-agent.service ocservia-privd.service
 fi
+mark_operations_rolled_back
 if [[ "${relay_directory_missing}" == true ]]; then
   install -d -o root -g root -m 0755 -- "${relay_directory}"
   validate_root_ancestry "${relay_directory}"
@@ -185,6 +248,21 @@ restore_file "${BACKUP_DIR}/ocservia-agent.previous" "${libexec}/ocservia-agent"
 restore_file "${BACKUP_DIR}/ocservia-privd.previous" "${libexec}/ocservia-privd" 755
 restore_file "${BACKUP_DIR}/ocservia-agent.service.previous" "${systemd}/ocservia-agent.service" 644
 restore_file "${BACKUP_DIR}/ocservia-privd.service.previous" "${systemd}/ocservia-privd.service" 644
+if [[ -n "${upgrader_backup}" ]]; then
+  restore_file "${upgrader_backup}" "${libexec}/ocservia-upgrader" 755
+else
+  rm -f -- "${libexec}/ocservia-upgrader"
+fi
+if [[ -n "${upgrader_unit_backup}" ]]; then
+  restore_file "${upgrader_unit_backup}" "${systemd}/ocservia-upgrader@.service" 644
+else
+  rm -f -- "${systemd}/ocservia-upgrader@.service"
+fi
+if [[ -n "${verifier_backup}" ]]; then
+  restore_file "${verifier_backup}" "${libexec}/ocservia-agent-verify" 755
+else
+  rm -f -- "${libexec}/ocservia-agent-verify"
+fi
 if [[ "${restore_relay}" == true ]]; then
   restore_file "${relay_backup}" "${relay_directory}/10-production-relays.conf" 644
 else

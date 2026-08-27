@@ -32,7 +32,7 @@ cleanup() {
 trap cleanup EXIT INT TERM
 
 "${ROOT}/scripts/agent-boundary-check.sh" | tee "${ARTIFACT_DIR}/boundary.log"
-(cd "${ROOT}/rust" && cargo build --locked --release --package ocservia-agent --package ocservia-privd)
+(cd "${ROOT}/rust" && cargo build --locked --release --package ocservia-agent --package ocservia-privd --package ocservia-upgrader)
 
 sudo install -d -o root -g root -m 0755 /usr/local/libexec
 sudo install -o root -g root -m 0755 "${ROOT}/rust/target/release/ocservia-privd" "${binary}"
@@ -74,7 +74,7 @@ start_privd() {
     --property=RestrictAddressFamilies='AF_UNIX AF_NETLINK' \
     --property=IPAddressDeny=any \
     --property=CapabilityBoundingSet=CAP_DAC_OVERRIDE \
-    --property=ReadWritePaths='-/etc/ocserv /var/lib/ocservia-privd' \
+    --property=ReadWritePaths='-/etc/ocserv /var/lib/ocservia-privd /var/lib/ocservia-upgrade' \
     --property=UMask=0007 \
     --property=TasksMax=32 \
     --property=LimitNOFILE=128 \

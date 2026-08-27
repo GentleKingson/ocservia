@@ -18,15 +18,17 @@ use ocservia_command_authorization::{
     ArtifactGrantClaimsV1, AuthorizationError, CommandAuthorizationV1, ControllerCommandKeyring,
 };
 use ocservia_contracts::generated::ocserv::platform::agent::v1::{
-    CommandDeliveryMode, CommandEnvelope, CommandResultState, PrivdCertificateReceiptBindingV1,
-    PrivdReceiptVersion, PrivdResultReceiptV1, PrivilegedCommandKind, PrivilegedResultKind,
-    SealedSecretPurpose, SealedSecretVersion, command_envelope,
+    AgentUpgrade, CommandDeliveryMode, CommandEnvelope, CommandResultState,
+    PrivdCertificateReceiptBindingV1, PrivdReceiptVersion, PrivdResultReceiptV1,
+    PrivilegedCommandKind, PrivilegedResultKind, SealedSecretPurpose, SealedSecretVersion,
+    command_envelope,
 };
 use ocservia_ocserv_adapter::{
     Adapter, ArtifactLeaseIdentity, AuthorizedEffectDecision, AuthorizedEffectIdentity,
     EffectIdentity,
 };
 use ocservia_privd_attestation::{key_id, requested_subject_digest, sign_receipt};
+use ocservia_upgrader::{ScheduleOutcome, UpgradeIntent, UpgradeScheduler, UpgradeStoreError};
 use prost::Message as _;
 use sha2::{Digest as _, Sha256};
 use tokio::net::{UnixListener, UnixStream};
@@ -49,6 +51,9 @@ pub struct ServerConfig {
     pub command_keys: ControllerCommandKeyring,
     /// Root-owned per-node terminal-result attestation key.
     pub attestation_key: Arc<SigningKey>,
+    /// Durable self-upgrade scheduling boundary; privd commits intents and
+    /// starts the fixed upgrader unit but never executes an upgrade.
+    pub upgrades: UpgradeScheduler,
 }
 
 impl std::fmt::Debug for ServerConfig {
@@ -59,6 +64,7 @@ impl std::fmt::Debug for ServerConfig {
             .field("agent_uid", &self.agent_uid)
             .field("node_id", &Uuid::from_bytes(self.node_id))
             .field("attestation_key", &"[redacted]")
+            .field("upgrades", &self.upgrades)
             .finish_non_exhaustive()
     }
 }
@@ -138,10 +144,19 @@ pub async fn serve(
                 let node_id = config.node_id;
                 let command_keys = config.command_keys.clone();
                 let attestation_key = Arc::clone(&config.attestation_key);
+                let upgrades = config.upgrades.clone();
                 tokio::spawn(async move {
                     let _permit = permit;
-                    if let Err(error) =
-                        handle_client(stream, agent_uid, node_id, command_keys, attestation_key, adapter).await
+                    if let Err(error) = handle_client(
+                        stream,
+                        agent_uid,
+                        node_id,
+                        command_keys,
+                        attestation_key,
+                        upgrades,
+                        adapter,
+                    )
+                    .await
                     {
                         tracing::warn!(error = %error, "privd client failed");
                     }
@@ -157,6 +172,7 @@ async fn handle_client(
     node_id: [u8; 16],
     command_keys: ControllerCommandKeyring,
     attestation_key: Arc<SigningKey>,
+    upgrades: UpgradeScheduler,
     adapter: Adapter,
 ) -> Result<(), io::Error> {
     let credentials = stream.peer_cred()?;
@@ -169,8 +185,15 @@ async fn handle_client(
     let request: PrivdRequest = tokio::time::timeout(MAX_REQUEST_LIFETIME, read_frame(&mut stream))
         .await
         .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "privd request read timed out"))??;
-    let response =
-        dispatch_attested(request, &node_id, &command_keys, &attestation_key, &adapter).await;
+    let response = dispatch_attested(
+        &request,
+        &node_id,
+        &command_keys,
+        &attestation_key,
+        &upgrades,
+        &adapter,
+    )
+    .await;
     tokio::time::timeout(MAX_REQUEST_LIFETIME, write_frame(&mut stream, &response))
         .await
         .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "privd response write timed out"))??;
@@ -178,16 +201,19 @@ async fn handle_client(
 }
 
 async fn dispatch_attested(
-    request: PrivdRequest,
+    request: &PrivdRequest,
     node_id: &[u8; 16],
     command_keys: &ControllerCommandKeyring,
     attestation_key: &SigningKey,
+    upgrades: &UpgradeScheduler,
     adapter: &Adapter,
 ) -> PrivdResponse {
     let request_id = request.request_id.clone();
-    let result = match validate_request(&request, node_id, command_keys) {
+    let result = match validate_request(request, node_id, command_keys) {
         Ok((deadline, ValidatedRequest::Read)) => {
-            match tokio::time::timeout(deadline, execute_read(request.operation, adapter)).await {
+            match tokio::time::timeout(deadline, execute_read(request.operation.clone(), adapter))
+                .await
+            {
                 Ok(result) => result,
                 Err(_) => deadline_error(),
             }
@@ -195,6 +221,7 @@ async fn dispatch_attested(
         Ok((deadline, ValidatedRequest::Execute(claims, accepted_at))) => {
             let command = request
                 .authorization_command
+                .clone()
                 .expect("validated command must be present");
             match tokio::time::timeout(
                 deadline,
@@ -204,6 +231,7 @@ async fn dispatch_attested(
                     &accepted_at,
                     node_id,
                     attestation_key,
+                    upgrades,
                     adapter,
                 ),
             )
@@ -219,6 +247,7 @@ async fn dispatch_attested(
         Ok((deadline, ValidatedRequest::Reconcile(claims))) => {
             let command = request
                 .authorization_command
+                .clone()
                 .expect("validated command must be present");
             match tokio::time::timeout(deadline, reconcile_command(&command, &claims, adapter))
                 .await
@@ -282,7 +311,27 @@ async fn dispatch(
     adapter: &Adapter,
 ) -> PrivdResponse {
     let key = SigningKey::from_bytes(&[41; 32]);
-    dispatch_attested(request, node_id, command_keys, &key, adapter).await
+    dispatch_attested(
+        &request,
+        node_id,
+        command_keys,
+        &key,
+        &UpgradeScheduler::disabled(),
+        adapter,
+    )
+    .await
+}
+
+#[cfg(test)]
+async fn dispatch_upgrade(
+    request: PrivdRequest,
+    node_id: &[u8; 16],
+    command_keys: &ControllerCommandKeyring,
+    adapter: &Adapter,
+    upgrades: &UpgradeScheduler,
+) -> PrivdResponse {
+    let key = SigningKey::from_bytes(&[41; 32]);
+    dispatch_attested(&request, node_id, command_keys, &key, upgrades, adapter).await
 }
 
 enum ValidatedRequest {
@@ -989,6 +1038,7 @@ async fn execute_command(
     accepted_at: &prost_types::Timestamp,
     node_id: &[u8; 16],
     attestation_key: &SigningKey,
+    upgrades: &UpgradeScheduler,
     adapter: &Adapter,
 ) -> PrivdResponse {
     let binding = effect_binding(command, claims);
@@ -998,6 +1048,17 @@ async fn execute_command(
             Ok(AuthorizedEffectDecision::Replay(encoded)) => {
                 return decode_cached_response(&encoded);
             }
+            // For an agent upgrade a Pending effect means the journal lost
+            // the completed response (for example privd restarted between
+            // the durable intent commit and the journal completion). The
+            // immutable intent store is the idempotency authority for this
+            // family, so the retry continues into scheduling instead of
+            // stalling on an Unknown outcome.
+            Ok(AuthorizedEffectDecision::Pending)
+                if matches!(
+                    command.payload.as_ref(),
+                    Some(command_envelope::Payload::AgentUpgrade(_))
+                ) => {}
             Ok(AuthorizedEffectDecision::Pending) => {
                 return response_error(
                     ErrorKind::Unavailable,
@@ -1013,7 +1074,15 @@ async fn execute_command(
             }
         }
     }
-    let (operation_name, result) = execute_signed_payload(command, claims, adapter).await;
+    let (operation_name, result) =
+        if let Some(command_envelope::Payload::AgentUpgrade(payload)) = command.payload.as_ref() {
+            (
+                "agent_upgrade_prepare",
+                schedule_agent_upgrade(payload, claims, upgrades),
+            )
+        } else {
+            execute_signed_payload(command, claims, adapter).await
+        };
     let result = finish_operation(operation_name, result);
     if matches!(&result, privd_response::Result::Error(error) if terminal_result_error_code(error).is_none())
     {
@@ -1053,6 +1122,56 @@ async fn execute_command(
         };
     }
     response
+}
+
+/// The durable self-upgrade preparation boundary. privd independently
+/// verified the Controller-signed release identity, commits the immutable
+/// root-owned intent, starts the fixed upgrader unit, and returns only the
+/// scheduled acknowledgment. It never executes the upgrade itself, so a
+/// normal upgrade cannot destroy the process that owes the command result.
+fn schedule_agent_upgrade(
+    payload: &AgentUpgrade,
+    claims: &CommandAuthorizationV1,
+    upgrades: &UpgradeScheduler,
+) -> Result<privd_response::Result, ocservia_ocserv_adapter::AdapterError> {
+    let package_sha256: [u8; 32] = payload
+        .package_sha256
+        .clone()
+        .try_into()
+        .map_err(|_| ocservia_ocserv_adapter::AdapterError::InvalidRequest)?;
+    let intent = UpgradeIntent::new(
+        claims.operation_id,
+        claims.command_id,
+        &payload.target_version,
+        package_sha256,
+        &payload.architecture,
+        claims.semantic_payload_sha256,
+    )
+    .map_err(|failure| upgrade_store_error(&failure))?;
+    match upgrades.schedule_and_trigger(&intent) {
+        Ok(ScheduleOutcome::Scheduled | ScheduleOutcome::AlreadyScheduled) => Ok(
+            privd_response::Result::AgentUpgradeScheduled(AgentUpgradeScheduledResult {
+                operation_id: claims.operation_id.to_vec(),
+                target_version: payload.target_version.clone(),
+                package_sha256: payload.package_sha256.clone(),
+            }),
+        ),
+        Err(failure) => Err(upgrade_store_error(&failure)),
+    }
+}
+
+fn upgrade_store_error(failure: &UpgradeStoreError) -> ocservia_ocserv_adapter::AdapterError {
+    tracing::warn!(error = %failure, "durable upgrade scheduling refused");
+    match failure {
+        UpgradeStoreError::Io(_) | UpgradeStoreError::Lifecycle(_) => {
+            ocservia_ocserv_adapter::AdapterError::Unavailable
+        }
+        UpgradeStoreError::Invalid(_)
+        | UpgradeStoreError::IdentityConflict
+        | UpgradeStoreError::ActiveConflict
+        | UpgradeStoreError::Unsafe(_)
+        | UpgradeStoreError::Package(_) => ocservia_ocserv_adapter::AdapterError::InvalidRequest,
+    }
 }
 
 #[allow(clippy::too_many_lines)]
@@ -1223,20 +1342,9 @@ async fn execute_signed_payload(
                 .await
                 .map(privd_response::Result::CertificateP12),
         ),
-        // The upgrade preparation boundary: the release identity was already
-        // verified against the Controller-signed command, so privd only
-        // acknowledges the scheduled intent here. No package is installed and
-        // no service is restarted by this operation.
-        Some(command_envelope::Payload::AgentUpgrade(payload)) => (
-            "agent_upgrade_prepare",
-            Ok(privd_response::Result::AgentUpgradeScheduled(
-                AgentUpgradeScheduledResult {
-                    operation_id: claims.operation_id.to_vec(),
-                    target_version: payload.target_version.clone(),
-                    package_sha256: payload.package_sha256.clone(),
-                },
-            )),
-        ),
+        // AgentUpgrade payloads never reach this executor: privd intercepts
+        // them in `execute_command` and hands them to the durable scheduler,
+        // because the upgrade must survive the Agent/privd restart it causes.
         _ => (
             "privileged_command",
             Err(ocservia_ocserv_adapter::AdapterError::InvalidRequest),
@@ -1564,6 +1672,7 @@ mod tests {
         SemanticPayloadHashVersion, ServiceReload, UserCreate, command_envelope,
     };
     use ocservia_ocserv_adapter::{FixedResources, Limits};
+    use ocservia_upgrader::UpgradeTrigger;
     use prost_types::Timestamp;
 
     use super::*;
@@ -1986,6 +2095,24 @@ mod tests {
         std::fs::remove_dir_all(directory).expect("cleanup test directory");
     }
 
+    fn upgrade_scheduler(directory: &Path) -> (UpgradeScheduler, PathBuf) {
+        let operations_dir = directory.join("upgrade-operations");
+        fs::create_dir(&operations_dir).expect("create upgrade operations root");
+        fs::set_permissions(&operations_dir, fs::Permissions::from_mode(0o700))
+            .expect("secure upgrade operations root");
+        (
+            UpgradeScheduler::new(operations_dir.clone(), UpgradeTrigger::Disabled),
+            operations_dir,
+        )
+    }
+
+    fn durable_operation_state(operations_dir: &Path, operation_id: &[u8]) -> String {
+        let id = Uuid::from_slice(operation_id).expect("operation UUID");
+        let state = fs::read_to_string(operations_dir.join(id.to_string()).join("state"))
+            .expect("durable operation state");
+        state.trim_end_matches('\n').to_owned()
+    }
+
     #[tokio::test]
     async fn agent_upgrade_prepare_attests_scheduled_intent_exactly_once() {
         let signing = SigningKey::from_bytes(&[29; 32]);
@@ -2002,8 +2129,16 @@ mod tests {
             host_architecture(),
         );
         let (adapter, resources, _, directory) = test_adapter();
+        let (upgrades, operations_dir) = upgrade_scheduler(&directory);
 
-        let first = dispatch(command_request(command.clone()), &node_id, &keys, &adapter).await;
+        let first = dispatch_upgrade(
+            command_request(command.clone()),
+            &node_id,
+            &keys,
+            &adapter,
+            &upgrades,
+        )
+        .await;
         let Some(privd_response::Result::AgentUpgradeScheduled(ref scheduled)) = first.result
         else {
             panic!("upgrade preparation must return the scheduled intent");
@@ -2011,6 +2146,21 @@ mod tests {
         assert_eq!(scheduled.target_version, "1.2.3");
         assert_eq!(scheduled.package_sha256, vec![0x43; 32]);
         assert_eq!(scheduled.operation_id, command.operation_id);
+        // The durable root-owned intent outlives both privd and the Agent.
+        assert_eq!(
+            durable_operation_state(&operations_dir, &command.operation_id),
+            "accepted"
+        );
+        assert!(
+            operations_dir
+                .join(
+                    Uuid::from_slice(&command.operation_id)
+                        .expect("operation UUID")
+                        .to_string()
+                )
+                .join("intent")
+                .exists()
+        );
         let proof = first
             .privileged_result_proof
             .clone()
@@ -2034,20 +2184,101 @@ mod tests {
             Ok(CommandResultState::Succeeded)
         );
 
-        let duplicate = dispatch(command_request(command.clone()), &node_id, &keys, &adapter).await;
+        let duplicate = dispatch_upgrade(
+            command_request(command.clone()),
+            &node_id,
+            &keys,
+            &adapter,
+            &upgrades,
+        )
+        .await;
         assert_eq!(duplicate.privileged_result_proof, Some(proof.clone()));
         assert_eq!(duplicate.result, first.result);
+        assert_eq!(
+            durable_operation_state(&operations_dir, &command.operation_id),
+            "accepted"
+        );
         drop(adapter);
         let restarted = Adapter::new(resources, Limits::default());
-        let replay = dispatch(
+        let replay = dispatch_upgrade(
             reconcile_request(command, &signing),
             &node_id,
             &keys,
             &restarted,
+            &upgrades,
         )
         .await;
         assert_eq!(replay.privileged_result_proof, Some(proof));
         assert_eq!(replay.result, first.result);
+        std::fs::remove_dir_all(directory).expect("cleanup test directory");
+    }
+
+    #[tokio::test]
+    async fn agent_upgrade_prepare_refuses_a_second_active_operation() {
+        let signing = SigningKey::from_bytes(&[32; 32]);
+        let keys = keyring(&signing);
+        let node_id = *Uuid::now_v7().as_bytes();
+        let now = unix_seconds();
+        let first_command = signed_agent_upgrade(
+            &signing,
+            node_id,
+            now,
+            now + 60,
+            "1.2.3",
+            vec![0x51; 32],
+            host_architecture(),
+        );
+        let second_command = signed_agent_upgrade(
+            &signing,
+            node_id,
+            now,
+            now + 60,
+            "1.2.4",
+            vec![0x52; 32],
+            host_architecture(),
+        );
+        let (adapter, _, _, directory) = test_adapter();
+        let (upgrades, operations_dir) = upgrade_scheduler(&directory);
+
+        let first = dispatch_upgrade(
+            command_request(first_command),
+            &node_id,
+            &keys,
+            &adapter,
+            &upgrades,
+        )
+        .await;
+        assert!(matches!(
+            first.result,
+            Some(privd_response::Result::AgentUpgradeScheduled(_))
+        ));
+        let second = dispatch_upgrade(
+            command_request(second_command),
+            &node_id,
+            &keys,
+            &adapter,
+            &upgrades,
+        )
+        .await;
+        assert!(matches!(
+            second.result,
+            Some(privd_response::Result::Error(ref failure))
+                if ErrorKind::try_from(failure.kind).unwrap_or(ErrorKind::Unspecified)
+                    == ErrorKind::InvalidRequest
+        ));
+        // The refused command still receives a terminal failure receipt.
+        if let Some(proof) = second.privileged_result_proof.as_ref() {
+            assert_eq!(
+                CommandResultState::try_from(
+                    proof.receipt_v1.as_ref().expect("receipt").terminal_state
+                ),
+                Ok(CommandResultState::Failed)
+            );
+        }
+        let durable: Vec<_> = std::fs::read_dir(&operations_dir)
+            .expect("list durable operations")
+            .collect();
+        assert_eq!(durable.len(), 1, "only the first operation may be durable");
         std::fs::remove_dir_all(directory).expect("cleanup test directory");
     }
 
@@ -2275,6 +2506,7 @@ mod tests {
             node_id,
             command_keys: keys,
             attestation_key: Arc::new(SigningKey::from_bytes(&[43; 32])),
+            upgrades: UpgradeScheduler::disabled(),
         };
         let listener = bind_socket(&config).expect("bind privd fixture");
         let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
@@ -2348,6 +2580,7 @@ mod tests {
             node_id,
             command_keys: keys,
             attestation_key: Arc::new(SigningKey::from_bytes(&[41; 32])),
+            upgrades: UpgradeScheduler::disabled(),
         };
         let listener = bind_socket(&config).expect("bind privd fixture");
         let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();

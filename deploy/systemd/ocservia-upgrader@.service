@@ -1,0 +1,42 @@
+[Unit]
+Description=Ocservia durable standalone upgrade runner (%i)
+# privd commits the immutable intent, then starts this fixed unit. Type=exec
+# returns control to privd as soon as the runner binary is exec'd, so privd
+# never waits for - and never lives inside - the upgrade it authorized.
+ConditionPathExists=/var/lib/ocservia-upgrade/operations/%i/intent
+
+[Service]
+Type=exec
+User=root
+Group=root
+ExecStart=/usr/libexec/ocservia/ocservia-upgrader --operation %i
+# A crashed runner converges on restart: committed state plus installed
+# binaries skip the destructive lifecycle instead of repeating it.
+Restart=on-failure
+RestartSec=10s
+StartLimitIntervalSec=10min
+StartLimitBurst=6
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_UNIX AF_NETLINK
+IPAddressDeny=any
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RestrictSUIDSGID=yes
+RestrictNamespaces=yes
+SystemCallArchitectures=native
+# The durable runner is the one fixed component allowed to replace Agent and
+# privd binaries, units, and upgrade state on this node.
+CapabilityBoundingSet=CAP_DAC_OVERRIDE CAP_CHOWN CAP_FOWNER CAP_SETUID CAP_SETGID
+ReadWritePaths=-/etc/ocservia -/etc/ocservia-agent /usr /run -/var/lib/ocservia-agent -/var/lib/ocservia-privd /var/lib/ocservia-upgrade
+UMask=0077
+TasksMax=64
+LimitNOFILE=256
