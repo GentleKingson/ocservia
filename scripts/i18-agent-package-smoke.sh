@@ -822,6 +822,9 @@ EOF
 sudo chmod 0600 -- "${durable_operation_dir}/intent"
 printf 'accepted\n' | sudo tee "${durable_operation_dir}/state" >/dev/null
 sudo chmod 0600 -- "${durable_operation_dir}/state"
+# The mainline verified staging for this smoke stays alive by design, so the
+# runner's cleanup is proven by an unchanged staging membership instead.
+staging_before_runner="$(sudo ls -A "${rootfs}/var/lib/ocservia-upgrade/package-staging")"
 sudo env AGENT_UID=61000 AGENT_GID=61000 \
   "${rootfs}/usr/libexec/ocservia/ocservia-upgrader" \
   --root "${rootfs}" --operation "${operation_id}"
@@ -831,10 +834,8 @@ sudo grep -Fxq "target_version=1.0.0" "${durable_operation_dir}/result"
 sudo cmp -s "${ROOT}/rust/target/release/ocservia-agent" \
   "${rootfs}/usr/libexec/ocservia/ocservia-agent" \
   || { echo "durable runner lifecycle left a non-package Agent binary" >&2; exit 1; }
-if sudo find "${rootfs}/var/lib/ocservia-upgrade/package-staging" -mindepth 1 -print -quit 2>/dev/null | grep -q .; then
-  echo "durable runner left package staging behind" >&2
-  exit 1
-fi
+test "${staging_before_runner}" = "$(sudo ls -A "${rootfs}/var/lib/ocservia-upgrade/package-staging")" \
+  || { echo "durable runner left package staging behind" >&2; exit 1; }
 # A replay of the terminal operation converges without re-running the
 # destructive lifecycle (the fresh matched snapshot below must stay in place).
 snapshot_before_replay="$(sudo sha256sum \
