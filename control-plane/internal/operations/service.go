@@ -1486,7 +1486,7 @@ func validateCreate(r CreateRequest) error {
 	if r.HoldDispatch && r.Kind != CertificateRevoke {
 		return ErrInvalidRequest
 	}
-	if r.Kind != ConfigPlan && r.Kind != ConfigApply && r.Kind != AgentUpgrade && (len(r.Candidate) != 0 || len(r.CandidateHash) != 0 || len(r.ExpectedCurrentHash) != 0 || r.DesiredRevision != 0 || r.PlanRevision != 0 || r.PlanMetadata != nil || r.ApplyMetadata != nil || r.OcservVersion != "" || len(r.PlanCapabilities) != 0) {
+	if r.Kind != ConfigPlan && r.Kind != ConfigApply && (len(r.Candidate) != 0 || len(r.CandidateHash) != 0 || len(r.ExpectedCurrentHash) != 0 || r.DesiredRevision != 0 || r.PlanRevision != 0 || r.PlanMetadata != nil || r.ApplyMetadata != nil || r.OcservVersion != "" || len(r.PlanCapabilities) != 0) {
 		return ErrInvalidRequest
 	}
 	if r.Kind == AgentUpgrade && (!semanticpayload.ValidAgentUpgradeTargetVersion(r.TargetVersion) || len(r.PackageSHA256) != sha256.Size || !semanticpayload.ValidAgentUpgradeArchitecture(r.Architecture)) {

@@ -9,7 +9,6 @@ import (
 	"testing"
 
 	agentv1 "github.com/GentleKingson/ocservia/control-plane/gen/proto/ocserv/platform/agent/v1"
-	"google.golang.org/protobuf/proto"
 )
 
 func TestHashV2MatchesSharedConfigPlanVector(t *testing.T) {
@@ -105,38 +104,48 @@ func TestHashV2MatchesSharedAgentUpgradeVector(t *testing.T) {
 	if hex.EncodeToString(digest[:]) != fixture.Vector.ExpectedSHA256 {
 		t.Fatalf("v2 agent upgrade digest=%x want=%s", digest, fixture.Vector.ExpectedSHA256)
 	}
-	mutatedPayload := func() *agentv1.AgentUpgrade {
-		return proto.Clone(envelope.GetAgentUpgrade()).(*agentv1.AgentUpgrade)
+	pristine := func() *agentv1.AgentUpgrade {
+		return &agentv1.AgentUpgrade{
+			TargetVersion: fixture.Vector.TargetVersion,
+			PackageSha256: append([]byte(nil), packageSHA256...),
+			Architecture:  fixture.Vector.Architecture,
+		}
 	}
-	for name, mutate := range map[string]func(*agentv1.AgentUpgrade){
-		"target version": func(p *agentv1.AgentUpgrade) { p.TargetVersion = "1.2.4" },
-		"package digest": func(p *agentv1.AgentUpgrade) { p.PackageSha256[0] ^= 0xff },
-		"architecture":   func(p *agentv1.AgentUpgrade) { p.Architecture = "amd64" },
+	for _, tc := range []struct {
+		name   string
+		mutate func(*agentv1.AgentUpgrade)
+	}{
+		{"target version", func(p *agentv1.AgentUpgrade) { p.TargetVersion = "1.2.4" }},
+		{"package digest", func(p *agentv1.AgentUpgrade) { p.PackageSha256[0] ^= 0xff }},
+		{"architecture", func(p *agentv1.AgentUpgrade) { p.Architecture = "amd64" }},
 	} {
-		t.Run(name, func(t *testing.T) {
-			changed := mutatedPayload()
-			mutate(changed)
+		t.Run(tc.name, func(t *testing.T) {
+			changed := pristine()
+			tc.mutate(changed)
 			envelope.Payload = &agentv1.CommandEnvelope_AgentUpgrade{AgentUpgrade: changed}
 			changedDigest, err := HashV2(envelope)
 			if err != nil || changedDigest == digest {
-				t.Fatalf("agent upgrade %s was not bound: digest=%x err=%v", name, changedDigest, err)
+				t.Fatalf("agent upgrade %s was not bound: digest=%x err=%v", tc.name, changedDigest, err)
 			}
 		})
 	}
-	for name, mutate := range map[string]func(*agentv1.AgentUpgrade){
-		"invalid semver":    func(p *agentv1.AgentUpgrade) { p.TargetVersion = "1.2" },
-		"v-prefixed semver": func(p *agentv1.AgentUpgrade) { p.TargetVersion = "v1.2.3" },
-		"leading zero":      func(p *agentv1.AgentUpgrade) { p.TargetVersion = "1.02.3" },
-		"short digest":      func(p *agentv1.AgentUpgrade) { p.PackageSha256 = make([]byte, 31) },
-		"unsupported arch":  func(p *agentv1.AgentUpgrade) { p.Architecture = "x86_64" },
-		"empty version":     func(p *agentv1.AgentUpgrade) { p.TargetVersion = "" },
+	for _, tc := range []struct {
+		name   string
+		mutate func(*agentv1.AgentUpgrade)
+	}{
+		{"invalid semver", func(p *agentv1.AgentUpgrade) { p.TargetVersion = "1.2" }},
+		{"v-prefixed semver", func(p *agentv1.AgentUpgrade) { p.TargetVersion = "v1.2.3" }},
+		{"leading zero", func(p *agentv1.AgentUpgrade) { p.TargetVersion = "1.02.3" }},
+		{"short digest", func(p *agentv1.AgentUpgrade) { p.PackageSha256 = make([]byte, 31) }},
+		{"unsupported arch", func(p *agentv1.AgentUpgrade) { p.Architecture = "x86_64" }},
+		{"empty version", func(p *agentv1.AgentUpgrade) { p.TargetVersion = "" }},
 	} {
-		t.Run(name, func(t *testing.T) {
-			changed := mutatedPayload()
-			mutate(changed)
+		t.Run(tc.name, func(t *testing.T) {
+			changed := pristine()
+			tc.mutate(changed)
 			envelope.Payload = &agentv1.CommandEnvelope_AgentUpgrade{AgentUpgrade: changed}
 			if _, err := HashV2(envelope); err == nil {
-				t.Fatalf("malformed agent upgrade payload was hashed: %s", name)
+				t.Fatalf("malformed agent upgrade payload was hashed: %s", tc.name)
 			}
 		})
 	}

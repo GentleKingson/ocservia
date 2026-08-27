@@ -3,6 +3,7 @@ package operations
 import (
 	"bytes"
 	"crypto/ed25519"
+	"crypto/sha256"
 	"testing"
 	"time"
 
@@ -211,6 +212,28 @@ func TestAgentUpgradeRequiresApprovalAndValidReleaseIdentity(t *testing.T) {
 	if err := validateCreate(leak); err == nil {
 		t.Fatal("upgrade release fields leaked into another kind")
 	}
+	for _, tc := range []struct {
+		name   string
+		mutate func(*CreateRequest)
+	}{
+		{"candidate", func(r *CreateRequest) { r.Candidate = []byte("config") }},
+		{"candidate hash", func(r *CreateRequest) { r.CandidateHash = make([]byte, sha256.Size) }},
+		{"expected current hash", func(r *CreateRequest) { r.ExpectedCurrentHash = make([]byte, sha256.Size) }},
+		{"desired revision", func(r *CreateRequest) { r.DesiredRevision = 7 }},
+		{"plan revision", func(r *CreateRequest) { r.PlanRevision = 3 }},
+		{"plan metadata", func(r *CreateRequest) { r.PlanMetadata = &ConfigPlanMetadata{} }},
+		{"apply metadata", func(r *CreateRequest) { r.ApplyMetadata = &ConfigApplyMetadata{} }},
+		{"ocserv version", func(r *CreateRequest) { r.OcservVersion = "1.2.3" }},
+		{"plan capabilities", func(r *CreateRequest) { r.PlanCapabilities = []string{"ocserv.config.capabilities.v1"} }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			request := base
+			tc.mutate(&request)
+			if err := validateCreate(request); err == nil {
+				t.Fatalf("config field %q was silently dropped from an upgrade request", tc.name)
+			}
+		})
+	}
 }
 
 func TestMarshalEnvelopeSignsAgentUpgradeReleaseIdentity(t *testing.T) {
@@ -264,16 +287,20 @@ func TestMarshalEnvelopeSignsAgentUpgradeReleaseIdentity(t *testing.T) {
 func TestRequestHashBindsAgentUpgradeReleaseIdentity(t *testing.T) {
 	base := agentUpgradeRequest()
 	baseHash := requestHash(base)
-	for name, mutate := range map[string]func(*CreateRequest){
-		"target version": func(r *CreateRequest) { r.TargetVersion = "2.0.0" },
-		"package digest": func(r *CreateRequest) { r.PackageSHA256[0] ^= 0xff },
-		"architecture":   func(r *CreateRequest) { r.Architecture = "amd64" },
+	for _, tc := range []struct {
+		name   string
+		mutate func(*CreateRequest)
+	}{
+		{"target version", func(r *CreateRequest) { r.TargetVersion = "2.0.0" }},
+		{"package digest", func(r *CreateRequest) { r.PackageSHA256[0] ^= 0xff }},
+		{"architecture", func(r *CreateRequest) { r.Architecture = "amd64" }},
 	} {
-		t.Run(name, func(t *testing.T) {
+		t.Run(tc.name, func(t *testing.T) {
 			request := base
-			mutate(&request)
+			request.PackageSHA256 = append([]byte(nil), base.PackageSHA256...)
+			tc.mutate(&request)
 			if requestHash(request) == baseHash {
-				t.Fatalf("%s was not bound into the idempotency digest", name)
+				t.Fatalf("%s was not bound into the idempotency digest", tc.name)
 			}
 		})
 	}
