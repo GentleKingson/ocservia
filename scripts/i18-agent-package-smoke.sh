@@ -796,11 +796,12 @@ durable_uuid() {
   python3 - <<'PY'
 import time, uuid
 raw = bytearray(uuid.uuid4().bytes)
-ms = time.time_ns() // 1_000_000
-raw[0:6] = ms.to_bytes(6, "big")
+raw[0:6] = (time.time_ns() // 1_000_000).to_bytes(6, "big")
 raw[6] = (raw[6] & 0x0F) | 0x70
 raw[8] = (raw[8] & 0x3F) | 0x80
-print(uuid.UUID(bytes=bytes(raw), version=7))
+value = uuid.UUID(bytes=bytes(raw))
+assert value.version == 7 and value.variant == uuid.RFC_4122
+print(value)
 PY
 }
 operation_id="$(durable_uuid)"
