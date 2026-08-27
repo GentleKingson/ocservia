@@ -51,7 +51,7 @@ func observeUpgradeNode(t *testing.T, pool *pgxpool.Pool, nodeID uuid.UUID, agen
 func createScheduledUpgrade(t *testing.T, service *Service, pool *pgxpool.Pool, workspaceID, nodeID uuid.UUID, key string) uuid.UUID {
 	t.Helper()
 	ctx := context.Background()
-	if _, err := pool.Exec(ctx, `INSERT INTO node_capabilities(node_id,capability,approved) VALUES($1,'ocserv.agent.upgrade.v1',true)`, nodeID); err != nil {
+	if _, err := pool.Exec(ctx, `INSERT INTO node_capabilities(node_id,capability,approved) VALUES($1,'ocserv.agent.upgrade.v1',true) ON CONFLICT(node_id,capability) DO UPDATE SET approved=true`, nodeID); err != nil {
 		t.Fatal(err)
 	}
 	request := CreateRequest{NodeID: nodeID, IdempotencyKey: key, ExpectedVersion: 1, Kind: AgentUpgrade, ActorID: "operator", Action: "agent.upgrade", Reason: "integration test", TargetVersion: "2.0.0", PackageSHA256: bytes.Repeat([]byte{0x43}, 32), Architecture: "amd64", TTL: time.Hour, RequestID: "request-" + key, Traceparent: testTraceparent}
@@ -91,7 +91,7 @@ func acknowledgeUpgradeScheduling(t *testing.T, pool *pgxpool.Pool, operationID 
 
 func reportDurableUpgradeResult(t *testing.T, pool *pgxpool.Pool, operationID, nodeID uuid.UUID, state string) {
 	t.Helper()
-	if _, err := pool.Exec(context.Background(), `INSERT INTO node_agent_upgrade_results(operation_id,node_id,state,target_version,detail,completed_at,reported_at) VALUES($1,$2,$3,'2.0.0','',$4,$4)`, operationID, nodeID, state, time.Now().UTC()); err != nil {
+	if _, err := pool.Exec(context.Background(), `INSERT INTO node_agent_upgrade_results(operation_id,node_id,state,target_version,detail,completed_at,reported_at,privileged_result_proof) VALUES($1,$2,$3,'2.0.0','',$4,$4,decode('00','hex'))`, operationID, nodeID, state, time.Now().UTC()); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -206,6 +206,28 @@ func TestAgentUpgradeReconciliationLifecycleIntegration(t *testing.T) {
 			t.Fatal(err)
 		}
 		assertUpgradeStates(t, pool, operationID, "unknown", "expired", "unknown")
+		var eventCount, auditCount int
+		if err := pool.QueryRow(context.Background(), `SELECT count(*) FROM operation_events WHERE operation_id=$1`, operationID).Scan(&eventCount); err != nil {
+			t.Fatal(err)
+		}
+		if err := pool.QueryRow(context.Background(), `SELECT count(*) FROM audit_events WHERE resource_id=$1`, operationID).Scan(&auditCount); err != nil {
+			t.Fatal(err)
+		}
+		if err := service.ReconcileAgentUpgrades(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+		assertUpgradeStates(t, pool, operationID, "unknown", "expired", "unknown")
+		var repeatedEvents, repeatedAudits int
+		if err := pool.QueryRow(context.Background(), `SELECT count(*) FROM operation_events WHERE operation_id=$1`, operationID).Scan(&repeatedEvents); err != nil {
+			t.Fatal(err)
+		}
+		if err := pool.QueryRow(context.Background(), `SELECT count(*) FROM audit_events WHERE resource_id=$1`, operationID).Scan(&repeatedAudits); err != nil {
+			t.Fatal(err)
+		}
+		if repeatedEvents != eventCount || repeatedAudits != auditCount {
+			t.Fatalf("terminal unknown reconciliation added events/audits: %d/%d -> %d/%d", eventCount, auditCount, repeatedEvents, repeatedAudits)
+		}
+		createScheduledUpgrade(t, service, pool, workspaceID, nodeID, "upgrade-after-unknown")
 	})
 
 	t.Run("a generic expiry mirrors into an unknown projection", func(t *testing.T) {

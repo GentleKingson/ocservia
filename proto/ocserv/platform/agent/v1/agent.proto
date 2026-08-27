@@ -644,12 +644,29 @@ enum AgentUpgradeOutcomeState {
   AGENT_UPGRADE_OUTCOME_STATE_ROLLED_BACK = 3;
 }
 
+// AgentUpgradeResultProof is signed by root-owned privd over the durable
+// upgrader record identity and digest. The Agent only relays this evidence;
+// it cannot mint or alter a terminal outcome.
+message AgentUpgradeResultProof {
+  PrivdReceiptVersion version = 1;
+  bytes node_id = 2;
+  string privd_attestation_key_id = 3;
+  bytes operation_id = 4;
+  string target_version = 5;
+  bytes package_sha256 = 6;
+  AgentUpgradeOutcomeState state = 7;
+  uint64 completed_unix_ms = 8;
+  bytes result_sha256 = 9;
+  bytes signature = 10;
+}
+
 message AgentUpgradeResultReport {
   bytes operation_id = 1;
   AgentUpgradeOutcomeState state = 2;
   string target_version = 3;
   uint64 completed_unix_ms = 4;
   string detail = 5;
+  AgentUpgradeResultProof privileged_result_proof = 6;
 }
 
 message ArtifactFetchRequest {

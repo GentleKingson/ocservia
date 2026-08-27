@@ -20,6 +20,7 @@ import (
 	agentv1 "github.com/GentleKingson/ocservia/control-plane/gen/proto/ocserv/platform/agent/v1"
 	"github.com/GentleKingson/ocservia/control-plane/internal/coordination"
 	"github.com/GentleKingson/ocservia/control-plane/internal/postgresinput"
+	"github.com/GentleKingson/ocservia/control-plane/internal/privdattestation"
 	"github.com/GentleKingson/ocservia/control-plane/internal/releasecatalog"
 	"github.com/GentleKingson/ocservia/control-plane/internal/semanticpayload"
 	"github.com/GentleKingson/ocservia/control-plane/internal/userusage"
@@ -67,11 +68,12 @@ type Snapshot struct {
 // UpgradeResult is one bounded durable local upgrader outcome reported
 // read-only by the Agent through its heartbeat.
 type UpgradeResult struct {
-	OperationID   uuid.UUID `json:"operation_id"`
-	State         string    `json:"state"`
-	TargetVersion string    `json:"target_version"`
-	CompletedAt   time.Time `json:"completed_at"`
-	Detail        string    `json:"detail,omitempty"`
+	OperationID   uuid.UUID                        `json:"operation_id"`
+	State         string                           `json:"state"`
+	TargetVersion string                           `json:"target_version"`
+	CompletedAt   time.Time                        `json:"completed_at"`
+	Detail        string                           `json:"detail,omitempty"`
+	Proof         *agentv1.AgentUpgradeResultProof `json:"privileged_result_proof,omitempty"`
 }
 
 type DropCounters struct {
@@ -303,10 +305,14 @@ func decodeWire(payload []byte) (Batch, error) {
 	}
 	for _, item := range snapshot.GetUpgradeResults() {
 		operationID, operationErr := uuid.FromBytes(item.GetOperationId())
-		if operationErr != nil || item.GetCompletedUnixMs() == 0 {
+		if operationErr != nil || item.GetCompletedUnixMs() == 0 || item.GetCompletedUnixMs() > math.MaxInt64 {
 			return Batch{}, errors.New("upgrade result report identity or time invalid")
 		}
-		batch.Snapshot.UpgradeResults = append(batch.Snapshot.UpgradeResults, UpgradeResult{OperationID: operationID, State: agentUpgradeOutcomeState(item.GetState()), TargetVersion: item.GetTargetVersion(), CompletedAt: time.UnixMilli(int64(item.GetCompletedUnixMs())).UTC(), Detail: item.GetDetail()})
+		var proof *agentv1.AgentUpgradeResultProof
+		if item.GetPrivilegedResultProof() != nil {
+			proof = proto.Clone(item.GetPrivilegedResultProof()).(*agentv1.AgentUpgradeResultProof)
+		}
+		batch.Snapshot.UpgradeResults = append(batch.Snapshot.UpgradeResults, UpgradeResult{OperationID: operationID, State: agentUpgradeOutcomeState(item.GetState()), TargetVersion: item.GetTargetVersion(), CompletedAt: time.UnixMilli(int64(item.GetCompletedUnixMs())).UTC(), Detail: item.GetDetail(), Proof: proof})
 	}
 	for _, item := range wire.GetSessions() {
 		if item.GetConnectedAt() == nil || item.GetConnectedAt().CheckValid() != nil {
@@ -377,6 +383,12 @@ func (s *Service) validateForIngest(batch Batch) (int, error) {
 }
 
 func (s *Service) ingestTx(ctx context.Context, tx pgx.Tx, batch Batch, payloadBytes int) (bool, error) {
+	var nodeID uuid.UUID
+	if err := tx.QueryRow(ctx, `SELECT id FROM nodes WHERE id=$1 FOR UPDATE`, batch.NodeID).Scan(&nodeID); errors.Is(err, pgx.ErrNoRows) {
+		return false, fmt.Errorf("%w: telemetry node is unavailable", ErrInvalidTelemetry)
+	} else if err != nil {
+		return false, fmt.Errorf("lock telemetry node: %w", err)
+	}
 	if err := validatePostgresJSONDocuments(ctx, tx, batch); err != nil {
 		return false, err
 	}
@@ -463,11 +475,18 @@ func (s *Service) ingestTx(ctx context.Context, tx pgx.Tx, batch Batch, payloadB
 		}
 	}
 	for _, report := range batch.Snapshot.UpgradeResults {
-		if _, err := tx.Exec(ctx, `INSERT INTO node_agent_upgrade_results(operation_id,node_id,state,target_version,detail,completed_at,reported_at)
-			SELECT $1,$2,$3,$4,$5,$6,now()
-			WHERE EXISTS(SELECT 1 FROM agent_upgrade_operations u WHERE u.operation_id=$1 AND u.node_id=$2 AND u.target_version=$4 AND u.state IN ('accepted','running','unknown'))
+		verification, err := privdattestation.VerifyUpgradeResult(ctx, tx, batch.NodeID, report.OperationID, agentUpgradeOutcomeProtoState(report.State), report.TargetVersion, report.CompletedAt, report.Proof)
+		if err != nil {
+			return false, fmt.Errorf("verify reported agent upgrade result: %w", err)
+		}
+		if !verification.Verified() {
+			continue
+		}
+		if _, err := tx.Exec(ctx, `INSERT INTO node_agent_upgrade_results(operation_id,node_id,state,target_version,detail,completed_at,reported_at,privileged_result_proof)
+			SELECT $1,$2,$3,$4,$5,$6,now(),$7
+			WHERE EXISTS(SELECT 1 FROM agent_upgrade_operations u WHERE u.operation_id=$1 AND u.node_id=$2 AND u.target_version=$4 AND u.package_sha256=$8 AND u.state IN ('accepted','running','unknown') AND u.completed_at IS NULL)
 			ON CONFLICT (operation_id) DO NOTHING`,
-			report.OperationID, batch.NodeID, report.State, report.TargetVersion, report.Detail, report.CompletedAt); err != nil {
+			report.OperationID, batch.NodeID, report.State, report.TargetVersion, report.Detail, verification.CompletedAt, verification.EncodedProof, verification.PackageSHA256); err != nil {
 			return false, fmt.Errorf("insert reported agent upgrade result: %w", err)
 		}
 	}
@@ -515,8 +534,16 @@ func validateBatch(batch Batch, now time.Time) error {
 	}
 	seenUpgradeOperations := make(map[uuid.UUID]struct{}, len(batch.Snapshot.UpgradeResults))
 	for _, report := range batch.Snapshot.UpgradeResults {
-		if report.OperationID.Version() != 7 || report.State == "" || !semanticpayload.ValidAgentUpgradeTargetVersion(report.TargetVersion) || !postgresinput.ValidText(report.Detail, 160) {
+		if report.OperationID.Version() != 7 || report.State == "" || !semanticpayload.ValidAgentUpgradeTargetVersion(report.TargetVersion) || !postgresinput.ValidText(report.Detail, 160) || report.Proof == nil {
 			return errors.New("upgrade result report is invalid")
+		}
+		if _, err := privdattestation.CanonicalAgentUpgradeResultProofV1(report.Proof); err != nil ||
+			!bytes.Equal(report.Proof.GetNodeId(), batch.NodeID[:]) ||
+			!bytes.Equal(report.Proof.GetOperationId(), report.OperationID[:]) ||
+			report.Proof.GetState() != agentUpgradeOutcomeProtoState(report.State) ||
+			report.Proof.GetTargetVersion() != report.TargetVersion ||
+			!upgradeResultCompletedAtMatches(report.Proof, report.CompletedAt) {
+			return errors.New("upgrade result proof claims are invalid")
 		}
 		if _, duplicate := seenUpgradeOperations[report.OperationID]; duplicate {
 			return errors.New("duplicate upgrade result report")
@@ -727,7 +754,7 @@ func (s *Service) applyAgentUpgradeEligibility(ctx context.Context, node *Node) 
 		return
 	}
 	var capable, conflict bool
-	if err := s.pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM node_capabilities WHERE node_id=$1 AND capability='ocserv.agent.upgrade.v1' AND approved=true), EXISTS(SELECT 1 FROM agent_upgrade_operations WHERE node_id=$1 AND state IN ('queued','accepted','running','unknown'))`, nodeID).Scan(&capable, &conflict); err != nil {
+	if err := s.pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM node_capabilities WHERE node_id=$1 AND capability='ocserv.agent.upgrade.v1' AND approved=true), EXISTS(SELECT 1 FROM agent_upgrade_operations WHERE node_id=$1 AND completed_at IS NULL AND state IN ('queued','accepted','running','unknown'))`, nodeID).Scan(&capable, &conflict); err != nil {
 		return
 	}
 	node.AgentUpgradeEligible = capable && !conflict
@@ -746,6 +773,26 @@ func agentUpgradeOutcomeState(state agentv1.AgentUpgradeOutcomeState) string {
 	default:
 		return ""
 	}
+}
+
+func agentUpgradeOutcomeProtoState(state string) agentv1.AgentUpgradeOutcomeState {
+	switch state {
+	case "succeeded":
+		return agentv1.AgentUpgradeOutcomeState_AGENT_UPGRADE_OUTCOME_STATE_SUCCEEDED
+	case "failed":
+		return agentv1.AgentUpgradeOutcomeState_AGENT_UPGRADE_OUTCOME_STATE_FAILED
+	case "rolled_back":
+		return agentv1.AgentUpgradeOutcomeState_AGENT_UPGRADE_OUTCOME_STATE_ROLLED_BACK
+	default:
+		return agentv1.AgentUpgradeOutcomeState_AGENT_UPGRADE_OUTCOME_STATE_UNSPECIFIED
+	}
+}
+
+func upgradeResultCompletedAtMatches(proof *agentv1.AgentUpgradeResultProof, completedAt time.Time) bool {
+	if proof == nil || completedAt.IsZero() || completedAt.UnixMilli() < 0 {
+		return false
+	}
+	return completedAt.Equal(time.UnixMilli(int64(proof.GetCompletedUnixMs())).UTC())
 }
 
 func scanNode(row scanner, now time.Time) (Node, error) {

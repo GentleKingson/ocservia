@@ -2232,6 +2232,7 @@ fn build_telemetry(
                     target_version: outcome.target_version,
                     completed_unix_ms: outcome.completed_unix_ms,
                     detail: outcome.detail,
+                    privileged_result_proof: outcome.privileged_result_proof,
                 })
                 .collect(),
             dropped: Some(TelemetryDropCounters {

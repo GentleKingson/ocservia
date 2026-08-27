@@ -603,7 +603,7 @@ func (s *Service) ingestTransportEventTx(ctx context.Context, tx pgx.Tx, eventID
 	if err := tx.QueryRow(ctx, `SELECT n.workspace_id,n.status,k.state
 		FROM nodes n JOIN node_endpoint_keys k ON k.node_id=n.id
 		WHERE n.id=$1 AND k.endpoint_id=$2
-		FOR SHARE OF n,k`, nodeID, event.GetEndpointId()).Scan(&workspaceID, &nodeStatus, &endpointState); errors.Is(err, pgx.ErrNoRows) {
+		FOR UPDATE OF n,k`, nodeID, event.GetEndpointId()).Scan(&workspaceID, &nodeStatus, &endpointState); errors.Is(err, pgx.ErrNoRows) {
 		return uuid.Nil, false, invalidEvent("node_endpoint_not_active", "transport event node and EndpointID are not authoritatively active")
 	} else if err != nil {
 		return uuid.Nil, false, fmt.Errorf("check authoritative node ingress trust: %w", err)

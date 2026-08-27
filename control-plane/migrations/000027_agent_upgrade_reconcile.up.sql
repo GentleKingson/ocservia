@@ -23,7 +23,8 @@ COMMENT ON TABLE agent_upgrade_operations IS
 
 CREATE INDEX agent_upgrade_operations_pending_idx
     ON agent_upgrade_operations (node_id)
-    WHERE state IN ('queued', 'accepted', 'running', 'unknown');
+    WHERE completed_at IS NULL
+      AND state IN ('queued', 'accepted', 'running', 'unknown');
 
 CREATE INDEX agent_upgrade_operations_operation_idx
     ON agent_upgrade_operations (operation_id);
@@ -35,7 +36,8 @@ CREATE TABLE node_agent_upgrade_results (
     target_version text NOT NULL,
     detail text NOT NULL DEFAULT '' CHECK (length(detail) <= 160),
     completed_at timestamptz NOT NULL,
-    reported_at timestamptz NOT NULL
+    reported_at timestamptz NOT NULL,
+    privileged_result_proof bytea NOT NULL CHECK (octet_length(privileged_result_proof) BETWEEN 1 AND 65536)
 );
 
 COMMENT ON TABLE node_agent_upgrade_results IS

@@ -496,8 +496,10 @@ pub struct DurableUpgradeResult {
     pub operation_id: Uuid,
     pub state: OperationState,
     pub target_version: String,
+    pub package_sha256: [u8; 32],
     pub completed_unix: u64,
     pub detail: String,
+    pub result_sha256: [u8; 32],
 }
 
 /// Reads the bounded most-recent terminal upgrade outcomes from the fixed
@@ -534,12 +536,26 @@ pub fn read_recent_results(
         if name != candidate.to_string() || candidate.get_version_num() != 7 {
             continue;
         }
+        let operation_dir = entry.path();
+        validate_directory_strict(&operation_dir)?;
+        let intent = load_intent(&operation_dir)?;
+        if intent.operation_id != candidate {
+            return Err(UpgradeStoreError::Unsafe(
+                "durable intent operation identity does not match its directory",
+            ));
+        }
         let result_path = entry.path().join("result");
-        let Ok(bytes) = fs::read(&result_path) else {
-            // No terminal result record exists yet; the operation is still
-            // in flight and simply carries no reconciliation evidence.
-            continue;
-        };
+        match fs::symlink_metadata(&result_path) {
+            Err(failure) if failure.kind() == io::ErrorKind::NotFound => {
+                // No terminal result record exists yet; the operation is still
+                // in flight and simply carries no reconciliation evidence.
+                continue;
+            }
+            Err(failure) => return Err(UpgradeStoreError::Io(failure)),
+            Ok(_) => {}
+        }
+        validate_record_file(&result_path)?;
+        let bytes = fs::read(&result_path).map_err(UpgradeStoreError::Io)?;
         if bytes.len() > 1024 {
             return Err(UpgradeStoreError::Unsafe(
                 "durable result exceeds its bound",
@@ -555,7 +571,12 @@ pub fn read_recent_results(
             ));
         }
         let target_version = parse_line_value(&lines[3], "target_version")?;
-        parse_line_digest(&lines[4], "package_sha256")?;
+        let package_sha256 = parse_line_digest(&lines[4], "package_sha256")?;
+        if target_version != intent.target_version || package_sha256 != intent.package_sha256 {
+            return Err(UpgradeStoreError::Unsafe(
+                "durable result release identity does not match its intent",
+            ));
+        }
         let completed_unix = parse_line_value(&lines[5], "completed_unix")?
             .parse::<u64>()
             .map_err(|_| UpgradeStoreError::Unsafe("durable result completion time malformed"))?;
@@ -565,12 +586,20 @@ pub fn read_recent_results(
                 "durable result records a non-terminal state",
             ));
         }
+        if completed_unix == 0 || completed_unix > i64::MAX as u64 {
+            return Err(UpgradeStoreError::Unsafe(
+                "durable result completion time malformed",
+            ));
+        }
+        let result_sha256 = Sha256::digest(&bytes).into();
         results.push(DurableUpgradeResult {
             operation_id,
             state,
             target_version,
+            package_sha256,
             completed_unix,
             detail,
+            result_sha256,
         });
     }
     // UUIDv7 ordering is creation-time ordering, so the newest outcomes win
@@ -2240,6 +2269,33 @@ echo \"${pkg}\"
             "drifted identity",
         )
         .expect("terminal outcome");
+        assert!(matches!(
+            read_recent_results(&operations_dir(&root), 8),
+            Err(UpgradeStoreError::Unsafe(_))
+        ));
+        fs::remove_dir_all(&root).expect("cleanup");
+    }
+
+    #[test]
+    fn read_recent_results_rejects_unsafe_present_record() {
+        let root = test_root("read-results-unsafe-record");
+        let intent = new_intent([0x47; 32]);
+        scheduler(&root)
+            .schedule_and_trigger(&intent)
+            .expect("schedule");
+        let operation_dir = operations_dir(&root).join(intent.operation_id.to_string());
+        write_terminal(
+            &operation_dir,
+            &intent,
+            OperationState::Succeeded,
+            "activated release",
+        )
+        .expect("terminal outcome");
+        fs::set_permissions(
+            operation_dir.join("result"),
+            fs::Permissions::from_mode(0o644),
+        )
+        .expect("make result metadata unsafe");
         assert!(matches!(
             read_recent_results(&operations_dir(&root), 8),
             Err(UpgradeStoreError::Unsafe(_))

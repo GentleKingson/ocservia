@@ -19,6 +19,7 @@ import (
 	"github.com/GentleKingson/ocservia/control-plane/internal/commandauth"
 	"github.com/GentleKingson/ocservia/control-plane/internal/commandlimit"
 	"github.com/GentleKingson/ocservia/control-plane/internal/semanticpayload"
+	"github.com/GentleKingson/ocservia/control-plane/internal/telemetry"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -371,8 +372,14 @@ func (s *Service) CreateSynthetic(ctx context.Context, request CreateRequest) (O
 	}
 	if request.Kind == AgentUpgrade {
 		var observedVersion string
-		if err := tx.QueryRow(ctx, `SELECT COALESCE((SELECT o.agent_version FROM node_observed_snapshots o WHERE o.node_id=$1 ORDER BY o.observed_at DESC LIMIT 1),'')`, request.NodeID).Scan(&observedVersion); err != nil {
+		err := tx.QueryRow(ctx, `SELECT agent_version FROM node_observed_snapshots WHERE node_id=$1 FOR UPDATE`, request.NodeID).Scan(&observedVersion)
+		if errors.Is(err, pgx.ErrNoRows) {
+			observedVersion = ""
+		} else if err != nil {
 			return Operation{}, false, fmt.Errorf("read observed agent version: %w", err)
+		}
+		if telemetry.ClassifyAgentVersion(observedVersion, request.TargetVersion) != telemetry.AgentVersionStateUpgradeAvailable {
+			return Operation{}, false, ErrStaleRevision
 		}
 		request.FromVersion = observedVersion
 		approvalHash, _ := approvals.AgentUpgradeBinding(request.NodeID, request.TargetVersion, request.PackageSHA256, request.Architecture)
@@ -384,7 +391,7 @@ func (s *Service) CreateSynthetic(ctx context.Context, request CreateRequest) (O
 		// advance per node, so a second concurrent attempt fails closed
 		// before any durable intent is written.
 		var upgradeActive bool
-		if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM agent_upgrade_operations WHERE node_id=$1 AND state IN ('queued','accepted','running','unknown'))`, request.NodeID).Scan(&upgradeActive); err != nil {
+		if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM agent_upgrade_operations WHERE node_id=$1 AND completed_at IS NULL AND state IN ('queued','accepted','running','unknown'))`, request.NodeID).Scan(&upgradeActive); err != nil {
 			return Operation{}, false, fmt.Errorf("check active agent upgrade: %w", err)
 		}
 		if upgradeActive {
@@ -995,6 +1002,10 @@ func (s *Service) reconcileExpiredSendingAttemptsTx(ctx context.Context, tx pgx.
 		  AND attempt.state='sending' AND attempt.finished_at IS NULL
 		  AND command.state IN ('queued','unknown')
 		  AND operation.state IN ('queued','unknown')
+		  AND NOT (command.payload_type='agent_upgrade' AND EXISTS(
+			SELECT 1 FROM agent_command_results AS result
+			WHERE result.command_id=command.id AND result.state='succeeded'
+			  AND result.receipt_verification_status='verified'))
 		  AND outbox.published_at IS NULL AND outbox.locked_by=lease.worker_id
 		ORDER BY lease.leased_until,command.id
 		LIMIT $1
@@ -1046,6 +1057,10 @@ func (s *Service) reconcileExpiredSendingAttemptsTx(ctx context.Context, tx pgx.
 			  AND attempt.state='sending' AND attempt.finished_at IS NULL
 			  AND command.state IN ('queued','unknown')
 			  AND operation.state IN ('queued','unknown')
+			  AND NOT (command.payload_type='agent_upgrade' AND EXISTS(
+				SELECT 1 FROM agent_command_results AS result
+				WHERE result.command_id=command.id AND result.state='succeeded'
+				  AND result.receipt_verification_status='verified'))
 			  AND outbox.published_at IS NULL AND outbox.locked_by=lease.worker_id
 			FOR UPDATE OF command,operation`, commandID).
 			Scan(&operationID, &nodeID, &encoded, &outboxID, &attemptID, &commandState, &operationState, &attempts)
@@ -1185,6 +1200,10 @@ func (s *Service) reconcileStaleSentCommandsTx(ctx context.Context, tx pgx.Tx) e
 		) AS attempt ON true
 		WHERE command.state IN ('dispatched','accepted','running')
 		  AND operation.state IN ('dispatched','accepted','running','unknown')
+		  AND NOT (command.payload_type='agent_upgrade' AND EXISTS(
+			SELECT 1 FROM agent_command_results AS result
+			WHERE result.command_id=command.id AND result.state='succeeded'
+			  AND result.receipt_verification_status='verified'))
 		  AND outbox.published_at IS NOT NULL AND outbox.locked_by IS NULL
 		  AND attempt.state='sent'
 		  AND attempt.attempt_number=outbox.attempts
@@ -1238,6 +1257,10 @@ func (s *Service) reconcileStaleSentCommandsTx(ctx context.Context, tx pgx.Tx) e
 			WHERE command.id=$1
 			  AND command.state IN ('dispatched','accepted','running')
 			  AND operation.state IN ('dispatched','accepted','running','unknown')
+			  AND NOT (command.payload_type='agent_upgrade' AND EXISTS(
+				SELECT 1 FROM agent_command_results AS result
+				WHERE result.command_id=command.id AND result.state='succeeded'
+				  AND result.receipt_verification_status='verified'))
 			  AND outbox.published_at IS NOT NULL AND outbox.locked_by IS NULL
 			  AND attempt.state='sent'
 			  AND attempt.attempt_number=outbox.attempts
@@ -1260,6 +1283,15 @@ func (s *Service) reconcileStaleSentCommandsTx(ctx context.Context, tx pgx.Tx) e
 			!bytes.Equal(envelope.GetOperationId(), operationID[:]) ||
 			!bytes.Equal(envelope.GetNodeId(), nodeID[:]) {
 			return fmt.Errorf("sent command %s with missing result has inconsistent identity", commandID)
+		}
+		if envelope.GetAgentUpgrade() != nil {
+			acked, err := agentUpgradeSchedulingAcked(ctx, tx, operationID)
+			if err != nil {
+				return err
+			}
+			if acked {
+				continue
+			}
 		}
 
 		expires := envelope.GetExpiresAt()
@@ -1393,6 +1425,15 @@ func (s *Service) continueStaleReconciliationsTx(ctx context.Context, tx pgx.Tx)
 			!bytes.Equal(envelope.GetOperationId(), candidate.operationID[:]) ||
 			!bytes.Equal(envelope.GetNodeId(), candidate.nodeID[:]) {
 			return fmt.Errorf("stale reconciliation command %s has inconsistent identity", candidate.commandID)
+		}
+		if envelope.GetAgentUpgrade() != nil {
+			acked, err := agentUpgradeSchedulingAcked(ctx, tx, candidate.operationID)
+			if err != nil {
+				return err
+			}
+			if acked {
+				continue
+			}
 		}
 		if envelope.GetDeliveryMode() != agentv1.CommandDeliveryMode_COMMAND_DELIVERY_MODE_RECONCILE_ONLY {
 			continue

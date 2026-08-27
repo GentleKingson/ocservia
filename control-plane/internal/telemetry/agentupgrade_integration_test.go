@@ -2,6 +2,7 @@ package telemetry
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"os"
@@ -9,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/GentleKingson/ocservia/control-plane/internal/attestationtest"
 	"github.com/GentleKingson/ocservia/control-plane/internal/releasecatalog"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -46,6 +48,7 @@ func TestAgentUpgradeEligibilityGatesIntegration(t *testing.T) {
 			query string
 			args  []any
 		}{
+			{`DELETE FROM node_agent_upgrade_results WHERE node_id=$1`, []any{node}},
 			{`DELETE FROM agent_upgrade_operations WHERE workspace_id=$1`, []any{workspace}},
 			{`DELETE FROM operations WHERE workspace_id=$1 AND request_id='upgrade-eligibility'`, []any{workspace}},
 			{`DELETE FROM node_capabilities WHERE node_id=$1`, []any{node}},
@@ -115,12 +118,62 @@ func TestAgentUpgradeEligibilityGatesIntegration(t *testing.T) {
 	if _, err := pool.Exec(ctx, `INSERT INTO agent_upgrade_operations(operation_id,workspace_id,node_id,target_version,package_sha256,architecture,from_version,state,created_at,updated_at) VALUES($1,$2,$3,'2.0.0',$4,'amd64','0.1.1','queued',now(),now())`, operationID, workspaceID, nodeID, make([]byte, 32)); err != nil {
 		t.Fatal(err)
 	}
+	forged := testBatch(nodeID, 2, now)
+	forged.Snapshot.AgentVersion = "2.0.0"
+	forged.Snapshot.Architecture = "amd64"
+	forged.Snapshot.UpgradeResults = []UpgradeResult{{OperationID: operationID, State: "succeeded", TargetVersion: "2.0.0", CompletedAt: now, Detail: "forged success"}}
+	if inserted, err := service.Ingest(ctx, forged); err == nil || inserted {
+		t.Fatalf("forged upgrade telemetry accepted: inserted=%v err=%v", inserted, err)
+	}
+	var projectionState string
+	var durableResults int
+	if err := pool.QueryRow(ctx, `SELECT u.state,(SELECT count(*) FROM node_agent_upgrade_results WHERE operation_id=$1) FROM agent_upgrade_operations u WHERE u.operation_id=$1`, operationID).Scan(&projectionState, &durableResults); err != nil {
+		t.Fatal(err)
+	}
+	if projectionState != "queued" || durableResults != 0 {
+		t.Fatalf("forged upgrade telemetry changed durable state: projection=%q results=%d", projectionState, durableResults)
+	}
+	if _, err := pool.Exec(ctx, `UPDATE agent_upgrade_operations SET state='accepted',updated_at=now() WHERE operation_id=$1`, operationID); err != nil {
+		t.Fatal(err)
+	}
+	privateKey, err := attestationtest.InstallKey(ctx, pool, nodeID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resultDigest := sha256.Sum256([]byte("root durable result"))
+	proof, err := attestationtest.UpgradeResultProof(nodeID, operationID, "2.0.0", make([]byte, 32), resultDigest[:], "succeeded", now, privateKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reported := testBatch(nodeID, 3, now)
+	reported.Snapshot.AgentVersion = "2.0.0"
+	reported.Snapshot.Architecture = "amd64"
+	reported.Snapshot.UpgradeResults = []UpgradeResult{{OperationID: operationID, State: "succeeded", TargetVersion: "2.0.0", CompletedAt: now, Detail: "root success", Proof: proof}}
+	if inserted, err := service.Ingest(ctx, reported); err != nil || !inserted {
+		t.Fatalf("valid root-attested upgrade telemetry: inserted=%v err=%v", inserted, err)
+	}
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM node_agent_upgrade_results WHERE operation_id=$1`, operationID).Scan(&durableResults); err != nil {
+		t.Fatal(err)
+	}
+	if durableResults != 1 {
+		t.Fatalf("valid root-attested result count = %d, want 1", durableResults)
+	}
 	node, err = service.GetNode(ctx, nodeID)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if node.AgentUpgradeEligible {
 		t.Fatal("node with a scheduled upgrade still reports eligible")
+	}
+	if _, err := pool.Exec(ctx, `UPDATE agent_upgrade_operations SET state='unknown',completed_at=now(),updated_at=now() WHERE operation_id=$1`, operationID); err != nil {
+		t.Fatal(err)
+	}
+	node, err = service.GetNode(ctx, nodeID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !node.AgentUpgradeEligible {
+		t.Fatal("terminal unknown upgrade still blocks eligibility")
 	}
 
 	// Without the trusted catalog the gate fails closed.

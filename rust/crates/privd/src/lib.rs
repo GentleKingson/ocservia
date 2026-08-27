@@ -19,16 +19,18 @@ use ocservia_command_authorization::{
     ArtifactGrantClaimsV1, AuthorizationError, CommandAuthorizationV1, ControllerCommandKeyring,
 };
 use ocservia_contracts::generated::ocserv::platform::agent::v1::{
-    AgentUpgrade, CommandDeliveryMode, CommandEnvelope, CommandResultState,
-    PrivdCertificateReceiptBindingV1, PrivdReceiptVersion, PrivdResultReceiptV1,
-    PrivilegedCommandKind, PrivilegedResultKind, SealedSecretPurpose, SealedSecretVersion,
-    command_envelope,
+    AgentUpgrade, AgentUpgradeOutcomeState, AgentUpgradeResultProof, CommandDeliveryMode,
+    CommandEnvelope, CommandResultState, PrivdCertificateReceiptBindingV1, PrivdReceiptVersion,
+    PrivdResultReceiptV1, PrivilegedCommandKind, PrivilegedResultKind, SealedSecretPurpose,
+    SealedSecretVersion, command_envelope,
 };
 use ocservia_ocserv_adapter::{
     Adapter, ArtifactLeaseIdentity, AuthorizedEffectDecision, AuthorizedEffectIdentity,
     EffectIdentity,
 };
-use ocservia_privd_attestation::{key_id, requested_subject_digest, sign_receipt};
+use ocservia_privd_attestation::{
+    key_id, requested_subject_digest, sign_receipt, sign_upgrade_result,
+};
 use ocservia_upgrader::{ScheduleOutcome, UpgradeIntent, UpgradeScheduler, UpgradeStoreError};
 use prost::Message as _;
 use sha2::{Digest as _, Sha256};
@@ -214,7 +216,13 @@ async fn dispatch_attested(
         Ok((deadline, ValidatedRequest::Read)) => {
             match tokio::time::timeout(
                 deadline,
-                execute_read(request.operation.clone(), adapter, upgrades),
+                execute_read(
+                    request.operation.clone(),
+                    node_id,
+                    attestation_key,
+                    adapter,
+                    upgrades,
+                ),
             )
             .await
             {
@@ -794,6 +802,8 @@ fn validate_uuid(value: &[u8], detail: &str) -> Result<(), PrivdError> {
 
 async fn execute_read(
     operation: Option<privd_request::Operation>,
+    node_id: &[u8; 16],
+    attestation_key: &SigningKey,
     adapter: &Adapter,
     upgrades: &UpgradeScheduler,
 ) -> privd_response::Result {
@@ -856,19 +866,68 @@ async fn execute_read(
         privd_request::Operation::UpgradeResultList(_) => (
             "upgrade_result_list",
             ocservia_upgrader::read_recent_results(upgrades.operations_root(), 8)
-                .map(|results| {
-                    privd_response::Result::UpgradeResultList(UpgradeResultList {
-                        results: results
-                            .into_iter()
-                            .map(|result| UpgradeOperationResult {
+                .and_then(|results| {
+                    results
+                        .into_iter()
+                        .map(|result| {
+                            let completed_unix_ms = result.completed_unix.checked_mul(1000).ok_or(
+                                UpgradeStoreError::Unsafe(
+                                    "durable result completion time overflows milliseconds",
+                                ),
+                            )?;
+                            let state = match result.state {
+                                ocservia_upgrader::OperationState::Succeeded => {
+                                    AgentUpgradeOutcomeState::Succeeded
+                                }
+                                ocservia_upgrader::OperationState::Failed => {
+                                    AgentUpgradeOutcomeState::Failed
+                                }
+                                ocservia_upgrader::OperationState::RolledBack => {
+                                    AgentUpgradeOutcomeState::RolledBack
+                                }
+                                ocservia_upgrader::OperationState::Accepted
+                                | ocservia_upgrader::OperationState::Running => {
+                                    return Err(UpgradeStoreError::Unsafe(
+                                        "durable result is not terminal",
+                                    ));
+                                }
+                            };
+                            let proof = sign_upgrade_result(
+                                AgentUpgradeResultProof {
+                                    version: PrivdReceiptVersion::V1.into(),
+                                    node_id: node_id.to_vec(),
+                                    privd_attestation_key_id: key_id(
+                                        &attestation_key.verifying_key(),
+                                    ),
+                                    operation_id: result.operation_id.as_bytes().to_vec(),
+                                    target_version: result.target_version.clone(),
+                                    package_sha256: result.package_sha256.to_vec(),
+                                    state: state.into(),
+                                    completed_unix_ms,
+                                    result_sha256: result.result_sha256.to_vec(),
+                                    signature: Vec::new(),
+                                },
+                                attestation_key,
+                            )
+                            .map_err(|_| {
+                                UpgradeStoreError::Unsafe(
+                                    "durable result proof claims are malformed",
+                                )
+                            })?;
+                            Ok(UpgradeOperationResult {
                                 operation_id: result.operation_id.as_bytes().to_vec(),
                                 state: result.state.as_str().to_owned(),
                                 target_version: result.target_version,
-                                completed_unix_ms: result.completed_unix.saturating_mul(1000),
+                                completed_unix_ms,
                                 detail: result.detail,
+                                package_sha256: result.package_sha256.to_vec(),
+                                privileged_result_proof: Some(proof),
                             })
-                            .collect(),
-                    })
+                        })
+                        .collect::<Result<Vec<_>, UpgradeStoreError>>()
+                        .map(|results| {
+                            privd_response::Result::UpgradeResultList(UpgradeResultList { results })
+                        })
                 })
                 .map_err(|failure| {
                     ocservia_ocserv_adapter::AdapterError::Io(io::Error::other(failure.to_string()))
@@ -2858,6 +2917,15 @@ mod tests {
         assert_eq!(list.results[0].state, "failed");
         assert_eq!(list.results[0].target_version, "2.0.0");
         assert!(list.results[0].completed_unix_ms > 0);
+        let proof = list.results[0]
+            .privileged_result_proof
+            .as_ref()
+            .expect("root-attested durable result");
+        assert_eq!(proof.node_id, node_id);
+        assert_eq!(proof.operation_id, intent.operation_id.as_bytes());
+        assert_eq!(proof.package_sha256, intent.package_sha256);
+        assert_eq!(proof.result_sha256.len(), 32);
+        assert_eq!(proof.signature.len(), ed25519_dalek::SIGNATURE_LENGTH);
         std::fs::remove_dir_all(&directory).expect("cleanup test directory");
     }
 }

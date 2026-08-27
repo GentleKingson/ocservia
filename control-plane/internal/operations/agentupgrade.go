@@ -55,7 +55,8 @@ func (s *Service) ReconcileAgentUpgrades(ctx context.Context) error {
 		JOIN nodes n ON n.id=u.node_id
 		LEFT JOIN node_observed_snapshots snap ON snap.node_id=u.node_id
 		LEFT JOIN node_agent_upgrade_results r ON r.operation_id=u.operation_id
-		WHERE u.state IN ('queued','accepted','running','unknown')
+		WHERE u.completed_at IS NULL
+		  AND u.state IN ('queued','accepted','running','unknown')
 		LIMIT $1`, reconciliationBatchLimit)
 	if err != nil {
 		return fmt.Errorf("scan pending agent upgrades: %w", err)
@@ -154,8 +155,12 @@ func (s *Service) applyAgentUpgradeTerminal(ctx context.Context, upgrade pending
 			return fmt.Errorf("complete agent upgrade outbox: %w", err)
 		}
 	}
-	if _, err := tx.Exec(ctx, `UPDATE agent_upgrade_operations SET state=$2,completed_at=$3,updated_at=$3 WHERE operation_id=$1 AND state IN ('queued','accepted','running','unknown')`, upgrade.OperationID, decision.State, now); err != nil {
+	projectionTag, err := tx.Exec(ctx, `UPDATE agent_upgrade_operations SET state=$2,completed_at=$3,updated_at=$3 WHERE operation_id=$1 AND completed_at IS NULL AND state IN ('queued','accepted','running','unknown')`, upgrade.OperationID, decision.State, now)
+	if err != nil {
 		return fmt.Errorf("apply agent upgrade projection outcome: %w", err)
+	}
+	if projectionTag.RowsAffected() == 0 {
+		return nil
 	}
 	eventID, err := uuid.NewV7()
 	if err != nil {

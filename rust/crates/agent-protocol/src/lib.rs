@@ -5,7 +5,7 @@
 use std::io;
 
 use ocservia_contracts::generated::ocserv::platform::agent::v1::{
-    ArtifactGrantV1, CommandEnvelope, PrivilegedResultProof,
+    AgentUpgradeResultProof, ArtifactGrantV1, CommandEnvelope, PrivilegedResultProof,
 };
 use prost::Message;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
@@ -229,6 +229,10 @@ pub struct UpgradeOperationResult {
     pub completed_unix_ms: u64,
     #[prost(string, tag = "5")]
     pub detail: String,
+    #[prost(bytes = "vec", tag = "6")]
+    pub package_sha256: Vec<u8>,
+    #[prost(message, optional, tag = "7")]
+    pub privileged_result_proof: Option<AgentUpgradeResultProof>,
 }
 
 /// Bounded most-recent durable upgrade outcomes.
@@ -897,6 +901,8 @@ mod tests {
                         target_version: "2.0.0".to_owned(),
                         completed_unix_ms: 1_751_000_000_000,
                         detail: "activated release 2.0.0".to_owned(),
+                        package_sha256: vec![2; 32],
+                        privileged_result_proof: None,
                     }],
                 },
             )),

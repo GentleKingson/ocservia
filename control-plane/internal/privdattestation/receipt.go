@@ -15,6 +15,7 @@ import (
 	"time"
 
 	agentv1 "github.com/GentleKingson/ocservia/control-plane/gen/proto/ocserv/platform/agent/v1"
+	"github.com/GentleKingson/ocservia/control-plane/internal/semanticpayload"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"google.golang.org/protobuf/proto"
@@ -22,10 +23,11 @@ import (
 )
 
 const (
-	receiptDomain      = "ocservia/privd-result-receipt/v1\x00"
-	registrationDomain = "ocservia/privd-attestation-registration/v1\x00"
-	keyIDPrefix        = "ed25519-sha256:"
-	maxCanonicalBytes  = 2048
+	receiptDomain       = "ocservia/privd-result-receipt/v1\x00"
+	registrationDomain  = "ocservia/privd-attestation-registration/v1\x00"
+	upgradeResultDomain = "ocservia/privd-upgrade-result/v1\x00"
+	keyIDPrefix         = "ed25519-sha256:"
+	maxCanonicalBytes   = 2048
 )
 
 type Verification struct {
@@ -40,6 +42,20 @@ type Verification struct {
 }
 
 func (v Verification) Verified() bool { return v.Status == "verified" }
+
+// UpgradeResultVerification is the Controller-side verification result for a
+// root-owned durable upgrader outcome.
+type UpgradeResultVerification struct {
+	Status        string
+	FailureReason string
+	KeyID         string
+	EncodedProof  []byte
+	PackageSHA256 []byte
+	ResultSHA256  []byte
+	CompletedAt   time.Time
+}
+
+func (v UpgradeResultVerification) Verified() bool { return v.Status == "verified" }
 
 type attestationKeyRecord struct {
 	PublicKey   []byte
@@ -166,6 +182,95 @@ func verifyResult(ctx context.Context, lookup keyLookup, nodeID uuid.UUID, envel
 	}
 	verification.Status, verification.FailureReason = "verified", ""
 	return verification
+}
+
+// VerifyUpgradeResult verifies the root-signed durable outcome and checks
+// that its claims match the surrounding telemetry report. Database key
+// lookup errors are returned separately; an invalid proof is represented in
+// the result and must not be persisted by the caller.
+func VerifyUpgradeResult(ctx context.Context, tx pgx.Tx, nodeID, operationID uuid.UUID, state agentv1.AgentUpgradeOutcomeState, targetVersion string, completedAt time.Time, proof *agentv1.AgentUpgradeResultProof) (verification UpgradeResultVerification, err error) {
+	encoded, marshalErr := proto.MarshalOptions{Deterministic: true}.Marshal(proof)
+	if marshalErr != nil || len(encoded) == 0 || len(encoded) > 64*1024 {
+		return UpgradeResultVerification{Status: "invalid", FailureReason: "upgrade_result_proof_malformed"}, nil
+	}
+	verification = UpgradeResultVerification{Status: "invalid", FailureReason: "upgrade_result_claim_mismatch", EncodedProof: encoded}
+	canonical, canonicalErr := CanonicalAgentUpgradeResultProofV1(proof)
+	if canonicalErr != nil {
+		verification.FailureReason = "upgrade_result_proof_malformed"
+		return verification, nil
+	}
+	verification.KeyID = proof.GetPrivdAttestationKeyId()
+	verification.PackageSHA256 = slices.Clone(proof.GetPackageSha256())
+	verification.ResultSHA256 = slices.Clone(proof.GetResultSha256())
+	verification.CompletedAt = time.UnixMilli(int64(proof.GetCompletedUnixMs())).UTC()
+	if completedAt.IsZero() || completedAt.UnixMilli() < 0 || uint64(completedAt.UnixMilli()) != proof.GetCompletedUnixMs() ||
+		!bytes.Equal(proof.GetNodeId(), nodeID[:]) || !bytes.Equal(proof.GetOperationId(), operationID[:]) ||
+		proof.GetState() != state || proof.GetTargetVersion() != targetVersion {
+		return verification, nil
+	}
+	if tx == nil {
+		return UpgradeResultVerification{}, errors.New("privd upgrade result key transaction is unavailable")
+	}
+	var record attestationKeyRecord
+	err = tx.QueryRow(ctx, `SELECT public_key,state,activated_at,valid_until FROM node_privd_attestation_keys WHERE node_id=$1 AND key_id=$2`, nodeID, proof.GetPrivdAttestationKeyId()).Scan(&record.PublicKey, &record.State, &record.ActivatedAt, &record.ValidUntil)
+	if errors.Is(err, pgx.ErrNoRows) {
+		verification.Status, verification.FailureReason = "unknown_key", "upgrade_result_key_unknown"
+		return verification, nil
+	}
+	if err != nil {
+		return UpgradeResultVerification{}, fmt.Errorf("lookup upgrade result attestation key: %w", err)
+	}
+	if record.State != "active" || len(record.PublicKey) != ed25519.PublicKeySize {
+		verification.Status, verification.FailureReason = "revoked_key", "upgrade_result_key_revoked"
+		return verification, nil
+	}
+	if verification.CompletedAt.Before(record.ActivatedAt) || record.ValidUntil != nil && verification.CompletedAt.After(*record.ValidUntil) {
+		verification.FailureReason = "upgrade_result_key_outside_validity"
+		return verification, nil
+	}
+	if len(proof.GetSignature()) != ed25519.SignatureSize || !ed25519.Verify(ed25519.PublicKey(record.PublicKey), canonical, proof.GetSignature()) {
+		verification.FailureReason = "upgrade_result_signature_invalid"
+		return verification, nil
+	}
+	verification.Status, verification.FailureReason = "verified", ""
+	return verification, nil
+}
+
+// CanonicalAgentUpgradeResultProofV1 reconstructs the signed durable outcome
+// transcript independently of Protobuf serialization.
+func CanonicalAgentUpgradeResultProofV1(proof *agentv1.AgentUpgradeResultProof) ([]byte, error) {
+	if !validAgentUpgradeResultProof(proof) {
+		return nil, errors.New("agent upgrade result proof is malformed")
+	}
+	output := []byte(upgradeResultDomain)
+	output = appendU32(output, uint32(proof.GetVersion()))
+	output = appendBytes(output, proof.GetNodeId())
+	output = appendBytes(output, []byte(proof.GetPrivdAttestationKeyId()))
+	output = appendBytes(output, proof.GetOperationId())
+	output = appendBytes(output, []byte(proof.GetTargetVersion()))
+	output = appendBytes(output, proof.GetPackageSha256())
+	output = appendU32(output, uint32(proof.GetState()))
+	output = appendU64(output, proof.GetCompletedUnixMs())
+	output = appendBytes(output, proof.GetResultSha256())
+	if len(output) > maxCanonicalBytes {
+		return nil, errors.New("agent upgrade result proof is oversized")
+	}
+	return output, nil
+}
+
+func validAgentUpgradeResultProof(proof *agentv1.AgentUpgradeResultProof) bool {
+	if proof == nil || proof.GetVersion() != agentv1.PrivdReceiptVersion_PRIVD_RECEIPT_VERSION_V1 ||
+		!validUUIDv7(proof.GetNodeId()) || !validUUIDv7(proof.GetOperationId()) ||
+		!validKeyID(proof.GetPrivdAttestationKeyId()) ||
+		!semanticpayload.ValidAgentUpgradeTargetVersion(proof.GetTargetVersion()) ||
+		len(proof.GetPackageSha256()) != sha256.Size || len(proof.GetResultSha256()) != sha256.Size ||
+		(proof.GetState() != agentv1.AgentUpgradeOutcomeState_AGENT_UPGRADE_OUTCOME_STATE_SUCCEEDED &&
+			proof.GetState() != agentv1.AgentUpgradeOutcomeState_AGENT_UPGRADE_OUTCOME_STATE_FAILED &&
+			proof.GetState() != agentv1.AgentUpgradeOutcomeState_AGENT_UPGRADE_OUTCOME_STATE_ROLLED_BACK) ||
+		proof.GetCompletedUnixMs() == 0 || proof.GetCompletedUnixMs() > math.MaxInt64 {
+		return false
+	}
+	return true
 }
 
 func CanonicalReceiptV1(receipt *agentv1.PrivdResultReceiptV1) ([]byte, error) {

@@ -387,6 +387,26 @@ for major in "${POSTGRES_MAJORS[@]}"; do
     INSERT INTO nodes (id, workspace_id, name, status, created_at, updated_at) VALUES ('00000000-0000-7000-8000-000000000003', '00000000-0000-7000-8000-000000000001', 'node', 'active', now(), now());
   " >/dev/null
   test "$(docker exec "${container}" psql -U ocservia_owner -d ocservia -Atc "SELECT authorization_revision > 0 FROM nodes WHERE id='00000000-0000-7000-8000-000000000003'")" = "t"
+  # A terminal reconciliation projection must block version 27 rollback
+  # before its tables or the observed architecture column are touched.
+  docker exec "${container}" psql -v ON_ERROR_STOP=1 -U ocservia_owner -d ocservia -c "
+    INSERT INTO operations(id,workspace_id,node_id,state,version,request_id,idempotency_key,request_hash,created_at,updated_at)
+    VALUES('00000000-0000-7000-8000-000000000270','00000000-0000-7000-8000-000000000001','00000000-0000-7000-8000-000000000003','succeeded',1,'p1-27-rollback-guard','p1-27-rollback-guard',decode(repeat('27',32),'hex'),now(),now());
+    INSERT INTO agent_upgrade_operations(operation_id,workspace_id,node_id,target_version,package_sha256,architecture,from_version,state,completed_at,created_at,updated_at)
+    VALUES('00000000-0000-7000-8000-000000000270','00000000-0000-7000-8000-000000000001','00000000-0000-7000-8000-000000000003','2.0.0',decode(repeat('27',32),'hex'),'amd64','1.0.0','succeeded',now(),now(),now());
+  " >/dev/null
+  if docker exec -i "${container}" psql -v ON_ERROR_STOP=1 -U ocservia_owner -d ocservia \
+    <"${ROOT}/control-plane/migrations/000027_agent_upgrade_reconcile.down.sql" >"${TMP_ROOT}/pg${major}-agent-upgrade-reconcile-down.log" 2>&1; then
+    echo "version 27 rollback discarded agent upgrade reconciliation history" >&2
+    exit 1
+  fi
+  grep -Fq 'cannot roll back agent upgrade reconciliation while agent upgrade history exists' "${TMP_ROOT}/pg${major}-agent-upgrade-reconcile-down.log"
+  test "$(docker exec "${container}" psql -U ocservia_owner -d ocservia -Atc "SELECT count(*) FROM information_schema.tables WHERE table_schema='public' AND table_name IN ('agent_upgrade_operations','node_agent_upgrade_results')")" = "2"
+  test "$(docker exec "${container}" psql -U ocservia_owner -d ocservia -Atc "SELECT count(*) FROM information_schema.columns WHERE table_schema='public' AND table_name='node_observed_snapshots' AND column_name='architecture'")" = "1"
+  docker exec "${container}" psql -v ON_ERROR_STOP=1 -U ocservia_owner -d ocservia -c "
+    DELETE FROM agent_upgrade_operations WHERE operation_id='00000000-0000-7000-8000-000000000270';
+    DELETE FROM operations WHERE id='00000000-0000-7000-8000-000000000270';
+  " >/dev/null
   # A terminal agent-upgrade command must block the version 26 rollback
   # before the typed-payload constraint is touched: the down script runs
   # under psql autocommit, so a late constraint failure would otherwise
