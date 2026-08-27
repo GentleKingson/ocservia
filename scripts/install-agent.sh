@@ -63,13 +63,16 @@ validate_verified_package_source() {
   for source in \
     "${ROOT}/rust/target/release/ocservia-agent" \
     "${ROOT}/rust/target/release/ocservia-privd" \
+    "${ROOT}/rust/target/release/ocservia-upgrader" \
     "${ROOT}/scripts/install-agent.sh" \
     "${ROOT}/scripts/upgrade-agent.sh" \
     "${ROOT}/scripts/rollback-agent.sh" \
     "${ROOT}/scripts/uninstall-agent.sh" \
+    "${ROOT}/scripts/verify-agent-package.sh" \
     "${ROOT}/deploy/systemd/agent.env.example" \
     "${ROOT}/deploy/systemd/ocservia-agent.service" \
     "${ROOT}/deploy/systemd/ocservia-privd.service" \
+    "${ROOT}/deploy/systemd/ocservia-upgrader@.service" \
     "${ROOT}/deploy/production/systemd/ocservia-agent-relays.conf" \
     "${ROOT}/deploy/production/systemd/relays.env.example"; do
     if [[ ! -f "${source}" || -L "${source}" || "$(stat -c '%u:%g:%h' -- "${source}")" != "0:0:1" ]] || \
@@ -219,9 +222,12 @@ ensure_root_directory "${DESTDIR}${PRIVD_STATE_DIR}" "${agent_group}" "${AGENT_G
 ensure_root_directory "${DESTDIR}${SYSCONFDIR}/ocservia-agent" "${agent_group}" "${AGENT_GID}" 0750
 install -m 0755 -- "${ROOT}/rust/target/release/ocservia-agent" "${DESTDIR}${PREFIX}/libexec/ocservia/ocservia-agent"
 install -m 0755 -- "${ROOT}/rust/target/release/ocservia-privd" "${DESTDIR}${PREFIX}/libexec/ocservia/ocservia-privd"
+install -m 0755 -- "${ROOT}/rust/target/release/ocservia-upgrader" "${DESTDIR}${PREFIX}/libexec/ocservia/ocservia-upgrader"
 install -m 0755 -- "${ROOT}/scripts/rollback-agent.sh" "${DESTDIR}${PREFIX}/libexec/ocservia/ocservia-agent-rollback"
+install -m 0755 -- "${ROOT}/scripts/verify-agent-package.sh" "${DESTDIR}${PREFIX}/libexec/ocservia/ocservia-agent-verify"
 install -m 0644 -- "${ROOT}/deploy/systemd/ocservia-agent.service" "${DESTDIR}${PREFIX}/lib/systemd/system/ocservia-agent.service"
 install -m 0644 -- "${ROOT}/deploy/systemd/ocservia-privd.service" "${DESTDIR}${PREFIX}/lib/systemd/system/ocservia-privd.service"
+install -m 0644 -- "${ROOT}/deploy/systemd/ocservia-upgrader@.service" "${DESTDIR}${PREFIX}/lib/systemd/system/ocservia-upgrader@.service"
 
 printf 'AGENT_UID=%s\nPRIVD_ATTESTATION_KEY_FILE=/var/lib/ocservia-privd/attestation.key\nUSER_PASSWORD_SEAL_PRIVATE_KEY_FILE=/etc/ocservia-agent/user-password-seal-private.pem\nP12_PASSWORD_SEAL_PRIVATE_KEY_FILE=/etc/ocservia-agent/p12-password-seal-private.pem\n' "${AGENT_UID}" >"${DESTDIR}${SYSCONFDIR}/ocservia-agent/privd.env"
 chmod 0640 -- "${DESTDIR}${SYSCONFDIR}/ocservia-agent/privd.env"

@@ -2588,6 +2588,7 @@ dependencies = [
  "ocservia-observability",
  "ocservia-ocserv-adapter",
  "ocservia-privd-attestation",
+ "ocservia-upgrader",
  "prost",
  "prost-types",
  "rand 0.9.5",
@@ -2658,6 +2659,19 @@ dependencies = [
  "tokio-stream",
  "tonic",
  "tonic-health",
+ "uuid",
+]
+
+[[package]]
+name = "ocservia-upgrader"
+version = "0.1.0"
+dependencies = [
+ "hex",
+ "ocservia-contracts",
+ "ocservia-observability",
+ "rustix",
+ "sha2 0.10.9",
+ "tracing",
  "uuid",
 ]
 

@@ -117,6 +117,60 @@ identity and journal by default;
 `--purge-state` is irreversible and is appropriate only after revoking the node
 identity and preserving required audit material.
 
+## Durable self-upgrade runner
+
+Controller-driven upgrades never execute inside the Agent or privd. When privd
+accepts a Controller-signed `AgentUpgrade` command it independently re-validates
+the typed release identity (version, SHA-256 digest, architecture), commits an
+immutable root-owned intent under
+`/var/lib/ocservia-upgrade/operations/<operation-id>/`, and starts the fixed
+on-demand unit `ocservia-upgrader@<operation-id>.service`. privd's
+responsibility ends there: the unit is `Type=exec`, so the handoff returns as
+soon as the runner binary starts, and no upgrade can destroy the process that
+still owes the command result. The unit has no `[Install]` section — it exists
+only to be started by privd — and refuses to run without the committed intent
+(`ConditionPathExists`).
+
+Each operation directory holds three fixed records, all root-owned mode `0600`,
+written atomically (write, fsync, rename): `intent` (schema version, operation
+and command IDs, target version, package digest, architecture, semantic
+payload hash — immutable after commit), `state` (one of `accepted`, `running`,
+`succeeded`, `failed`, `rolled_back`), and `result` (terminal evidence written
+when the operation finishes). Replaying the same operation ID with the same
+signed identity converges on the committed intent; the same operation ID with
+a changed identity is rejected, and only one active operation may exist per
+node. If privd loses its effect journal between the intent commit and the
+journal completion, the durable intent store remains the idempotency
+authority for this command family.
+
+The runner resolves packages only from the fixed local spool
+`/var/lib/ocservia-upgrade/package-spool` — the operator or provisioning
+pipeline places the signed release triple
+(`ocservia-agent-<version>-linux-<arch>.tar.gz` plus `.sha256` and
+`.sha256.sig`) there before issuing the upgrade. There is no URL fetch and no
+caller-selected path. The runner requires the spool archive digest to equal the
+signed intent digest, then re-verifies the package through the installed
+`/usr/libexec/ocservia/ocservia-agent-verify` with the pinned trust anchors
+`/etc/ocservia/release-signing.pub.pem` and
+`/etc/ocservia/trusted-release-key.sha256` (DER SHA-256 fingerprint, provisioned
+out of band exactly like the installation key). Only after the verified marker
+matches the intent does it run the package's own `upgrade-agent.sh` lifecycle,
+re-check the installed binaries against the verified package, restart
+`ocservia-privd` and `ocservia-agent`, and write the terminal result. A crash at
+any point converges on restart: a `running` operation whose installed binaries
+already match the package skips the destructive lifecycle instead of repeating
+it, and every refusal persists `failed` evidence before exiting non-zero.
+
+Rollback interacts with the durable state explicitly:
+`ocservia-agent-rollback` stops any `ocservia-upgrader@*.service` instance,
+marks non-terminal operations `rolled_back` so a stale runner cannot re-apply
+the rolled-back release, and restores or removes the upgrader binary, the
+`ocservia-upgrader@.service` unit, and the installed verifier exactly as
+recorded in the matched snapshot (`.previous` restored, `.absent` removed). The
+same three files are installed by `install-agent.sh`, carried in every signed
+package, and removed by `uninstall-agent.sh`, so all six native package formats
+ship the durable runner.
+
 Command protocol `1.1` is fail closed: provision the Controller command
 verification public key before upgrading the Agent and privd pair. Both
 services load it independently, and privd also pins `NODE_ID`. New binaries

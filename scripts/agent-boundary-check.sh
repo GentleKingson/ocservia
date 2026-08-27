@@ -34,4 +34,18 @@ grep -Fxq 'RestrictAddressFamilies=AF_UNIX AF_NETLINK' "${ROOT}/deploy/systemd/o
 grep -Fxq 'IPAddressDeny=any' "${ROOT}/deploy/systemd/ocservia-privd.service"
 grep -Fxq 'StateDirectory=ocservia-privd' "${ROOT}/deploy/systemd/ocservia-privd.service"
 grep -Fxq 'StateDirectoryMode=0700' "${ROOT}/deploy/systemd/ocservia-privd.service"
-grep -Fxq 'ReadWritePaths=-/etc/ocserv /var/lib/ocservia-privd' "${ROOT}/deploy/systemd/ocservia-privd.service"
+grep -Fxq 'ReadWritePaths=-/etc/ocserv /var/lib/ocservia-privd /var/lib/ocservia-upgrade' "${ROOT}/deploy/systemd/ocservia-privd.service"
+
+# The durable upgrade runner is a fixed on-demand unit: root-owned, bound to
+# the committed immutable intent, exec-only handoff, and never installable.
+grep -Fxq 'Type=exec' "${ROOT}/deploy/systemd/ocservia-upgrader@.service"
+grep -Fxq 'User=root' "${ROOT}/deploy/systemd/ocservia-upgrader@.service"
+grep -Fxq 'Group=root' "${ROOT}/deploy/systemd/ocservia-upgrader@.service"
+grep -Fxq 'ExecStart=/usr/libexec/ocservia/ocservia-upgrader --operation %i' "${ROOT}/deploy/systemd/ocservia-upgrader@.service"
+grep -Fxq 'ConditionPathExists=/var/lib/ocservia-upgrade/operations/%i/intent' "${ROOT}/deploy/systemd/ocservia-upgrader@.service"
+grep -Fxq 'ProtectSystem=strict' "${ROOT}/deploy/systemd/ocservia-upgrader@.service"
+grep -Fxq 'IPAddressDeny=any' "${ROOT}/deploy/systemd/ocservia-upgrader@.service"
+if grep -q '^\[Install\]' "${ROOT}/deploy/systemd/ocservia-upgrader@.service"; then
+  echo "the durable upgrade runner must stay an on-demand unit without an [Install] section" >&2
+  exit 1
+fi

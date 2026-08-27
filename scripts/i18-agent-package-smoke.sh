@@ -56,7 +56,7 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
-(cd "${ROOT}/rust" && cargo build --locked --release --package ocservia-agent --package ocservia-privd)
+(cd "${ROOT}/rust" && cargo build --locked --release --package ocservia-agent --package ocservia-privd --package ocservia-upgrader)
 echo "agent package release build passed"
 openssl genpkey -algorithm ED25519 -out "${work}/signing.key" >/dev/null 2>&1
 openssl genpkey -algorithm ED25519 -out "${work}/controller-command.key" >/dev/null 2>&1
@@ -155,9 +155,11 @@ sudo test ! -e /var/lib/ocservia-upgrade \
 echo "host architecture mismatch rejection passed"
 
 evil_root="${work}/evil/ocservia-agent-9.9.9"
-mkdir -p "${evil_root}/scripts" "${evil_root}/rust/target/release"
+mkdir -p "${evil_root}/scripts" "${evil_root}/rust/target/release" "${evil_root}/deploy/systemd"
 for required in MANIFEST scripts/install-agent.sh scripts/upgrade-agent.sh scripts/rollback-agent.sh \
-  scripts/uninstall-agent.sh rust/target/release/ocservia-agent rust/target/release/ocservia-privd; do
+  scripts/uninstall-agent.sh scripts/verify-agent-package.sh rust/target/release/ocservia-agent \
+  rust/target/release/ocservia-privd rust/target/release/ocservia-upgrader \
+  deploy/systemd/ocservia-upgrader@.service; do
   : >"${evil_root}/${required}"
 done
 ln -s /etc/shadow "${evil_root}/shadow-link"
@@ -277,6 +279,12 @@ assert_privd_command_authority() {
 }
 assert_privd_command_authority
 echo "agent package install passed"
+sudo test -x "${rootfs}/usr/libexec/ocservia/ocservia-upgrader" \
+  || { echo "installed durable upgrade runner is missing" >&2; exit 1; }
+sudo test -x "${rootfs}/usr/libexec/ocservia/ocservia-agent-verify" \
+  || { echo "installed package verifier is missing" >&2; exit 1; }
+sudo test -f "${rootfs}/usr/lib/systemd/system/ocservia-upgrader@.service" \
+  || { echo "installed durable upgrade runner unit is missing" >&2; exit 1; }
 sudo install -o 61000 -g 61000 -m 0600 /dev/null "${rootfs}/var/lib/ocservia-agent/identity/controller.key"
 sudo install -o 61000 -g 61000 -m 0600 /dev/null "${rootfs}/var/lib/ocservia-agent/agent.db"
 
@@ -563,7 +571,16 @@ backup_dir="${rootfs}/var/lib/ocservia-upgrade/upgrade-backup"
 test "$(sudo stat -c '%u:%g:%a' -- "${rootfs}/var/lib/ocservia-upgrade")" = "0:0:700"
 test "$(sudo stat -c '%u:%g:%a' -- "${backup_dir}")" = "0:0:700"
 test "$(sudo stat -c '%u:%g:%a:%h' -- "${backup_dir}/MANIFEST.sha256")" = "0:0:600:1"
-test "$(sudo awk 'END { print NR }' "${backup_dir}/MANIFEST.sha256")" -eq 5
+test "$(sudo awk 'END { print NR }' "${backup_dir}/MANIFEST.sha256")" -eq 8
+# The fresh package install already placed the durable runner set, so the
+# matched snapshot must carry it as concrete rollback sources.
+for runner_snapshot in ocservia-upgrader.previous ocservia-agent-verify.previous \
+  ocservia-upgrader@.service.previous; do
+  sudo test -f "${backup_dir}/${runner_snapshot}" \
+    || { echo "snapshot is missing ${runner_snapshot}" >&2; exit 1; }
+done
+sudo test ! -e "${backup_dir}/ocservia-upgrader.absent" \
+  || { echo "snapshot recorded the installed runner as absent" >&2; exit 1; }
 if sudo setpriv --reuid=61000 --regid=61000 --clear-groups test -r "${backup_dir}/ocservia-agent.previous"; then
   echo "Agent UID can read a root-only rollback snapshot" >&2
   exit 1
@@ -600,9 +617,12 @@ for snapshot in \
   ocservia-privd.previous \
   ocservia-agent.service.previous \
   ocservia-privd.service.previous \
-  ocservia-agent-relays.conf.previous; do
+  ocservia-agent-relays.conf.previous \
+  ocservia-upgrader.previous \
+  ocservia-agent-verify.previous \
+  ocservia-upgrader@.service.previous; do
   case "${snapshot}" in
-    ocservia-agent.previous|ocservia-privd.previous) expected_mode=755 ;;
+    ocservia-agent.previous|ocservia-privd.previous|ocservia-upgrader.previous|ocservia-agent-verify.previous) expected_mode=755 ;;
     *) expected_mode=644 ;;
   esac
   test "$(sudo stat -c '%u:%g:%a:%h' -- "${backup_dir}/${snapshot}")" = "0:0:${expected_mode}:1"
@@ -715,6 +735,14 @@ sudo "${rootfs}/usr/libexec/ocservia/ocservia-agent" \
   --relay-mode custom --relay-url https://relay-a.invalid \
   --relay-url https://relay-b.invalid --relay-token-file /etc/ocservia-agent/relay-access-token \
   | grep -Fxq 'legacy Agent arguments accepted'
+# The snapshot carried the runner set as concrete sources, so the matched
+# rollback must restore it rather than remove it.
+sudo test -x "${rootfs}/usr/libexec/ocservia/ocservia-upgrader" \
+  || { echo "rollback dropped the durable upgrade runner" >&2; exit 1; }
+sudo test -x "${rootfs}/usr/libexec/ocservia/ocservia-agent-verify" \
+  || { echo "rollback dropped the package verifier" >&2; exit 1; }
+sudo test -f "${rootfs}/usr/lib/systemd/system/ocservia-upgrader@.service" \
+  || { echo "rollback dropped the durable upgrade runner unit" >&2; exit 1; }
 echo "matched Agent/privd binary and systemd rollback passed"
 
 sudo rm -f -- \
@@ -740,13 +768,121 @@ sudo test ! -e "${rootfs}/usr/libexec/ocservia/ocservia-agent" \
   || { echo "uninstall retained the Agent binary" >&2; exit 1; }
 sudo test ! -e "${rootfs}/usr/libexec/ocservia/ocservia-agent-rollback" \
   || { echo "uninstall retained the rollback command" >&2; exit 1; }
+sudo test ! -e "${rootfs}/usr/libexec/ocservia/ocservia-upgrader" \
+  || { echo "uninstall retained the durable upgrade runner" >&2; exit 1; }
+sudo test ! -e "${rootfs}/usr/lib/systemd/system/ocservia-upgrader@.service" \
+  || { echo "uninstall retained the durable upgrade runner unit" >&2; exit 1; }
 echo "agent package uninstall preservation passed"
 
 sudo env DESTDIR="${rootfs}" AGENT_UID=61000 AGENT_GID=61000 INSTALL_PRODUCTION_RELAYS=true \
   "${package_root}/scripts/install-agent.sh"
+
+# Durable runner end-to-end: a committed root-owned intent drives the fixed
+# runner binary, which resolves the trusted spool, re-verifies the signed
+# package through the installed verifier, executes the package lifecycle, and
+# leaves a local terminal result that survives the restart it caused.
+spool_dir="${rootfs}/var/lib/ocservia-upgrade/package-spool"
+operations_dir="${rootfs}/var/lib/ocservia-upgrade/operations"
+sudo install -d -o root -g root -m 0700 -- "${spool_dir}" "${operations_dir}" \
+  "${rootfs}/etc/ocservia"
+sudo install -o root -g root -m 0644 -- "${archive}" "${archive}.sha256" \
+  "${archive}.sha256.sig" "${spool_dir}/"
+sudo install -o root -g root -m 0644 -- "${work}/trusted.pub.pem" \
+  "${rootfs}/etc/ocservia/release-signing.pub.pem"
+printf '%s\n' "${trusted_fingerprint}" >"${work}/trusted-release-key.sha256"
+sudo install -o root -g root -m 0600 -- "${work}/trusted-release-key.sha256" \
+  "${rootfs}/etc/ocservia/trusted-release-key.sha256"
+durable_uuid() {
+  python3 - <<'PY'
+import time, uuid
+raw = bytearray(uuid.uuid4().bytes)
+raw[0:6] = (time.time_ns() // 1_000_000).to_bytes(6, "big")
+raw[6] = (raw[6] & 0x0F) | 0x70
+raw[8] = (raw[8] & 0x3F) | 0x80
+value = uuid.UUID(bytes=bytes(raw))
+assert value.version == 7 and value.variant == uuid.RFC_4122
+print(value)
+PY
+}
+operation_id="$(durable_uuid)"
+command_id="$(durable_uuid)"
+archive_sha="$(sha256sum -- "${archive}" | awk '{print $1}')"
+semantic_sha="$(printf 'ocservia-durable-runner-fixture' | sha256sum | awk '{print $1}')"
+durable_operation_dir="${operations_dir}/${operation_id}"
+sudo install -d -o root -g root -m 0700 -- "${durable_operation_dir}"
+sudo tee "${durable_operation_dir}/intent" >/dev/null <<EOF
+schema=1
+operation_id=${operation_id}
+command_id=${command_id}
+target_version=1.0.0
+package_sha256=${archive_sha}
+architecture=${PACKAGE_ARCH}
+semantic_payload_sha256=${semantic_sha}
+EOF
+sudo chmod 0600 -- "${durable_operation_dir}/intent"
+printf 'accepted\n' | sudo tee "${durable_operation_dir}/state" >/dev/null
+sudo chmod 0600 -- "${durable_operation_dir}/state"
+# The mainline verified staging for this smoke stays alive by design, so the
+# runner's cleanup is proven by an unchanged staging membership instead.
+staging_before_runner="$(sudo ls -A "${rootfs}/var/lib/ocservia-upgrade/package-staging")"
+sudo env AGENT_UID=61000 AGENT_GID=61000 \
+  "${rootfs}/usr/libexec/ocservia/ocservia-upgrader" \
+  --root "${rootfs}" --operation "${operation_id}"
+sudo grep -Fxq 'succeeded' "${durable_operation_dir}/state"
+sudo grep -Fxq "operation_id=${operation_id}" "${durable_operation_dir}/result"
+sudo grep -Fxq "target_version=1.0.0" "${durable_operation_dir}/result"
+sudo cmp -s "${ROOT}/rust/target/release/ocservia-agent" \
+  "${rootfs}/usr/libexec/ocservia/ocservia-agent" \
+  || { echo "durable runner lifecycle left a non-package Agent binary" >&2; exit 1; }
+test "${staging_before_runner}" = "$(sudo ls -A "${rootfs}/var/lib/ocservia-upgrade/package-staging")" \
+  || { echo "durable runner left package staging behind" >&2; exit 1; }
+# A replay of the terminal operation converges without re-running the
+# destructive lifecycle (the fresh matched snapshot below must stay in place).
+snapshot_before_replay="$(sudo sha256sum \
+  "${rootfs}/var/lib/ocservia-upgrade/upgrade-backup/MANIFEST.sha256" \
+  | awk '{print $1}')"
+sudo env AGENT_UID=61000 AGENT_GID=61000 \
+  "${rootfs}/usr/libexec/ocservia/ocservia-upgrader" \
+  --root "${rootfs}" --operation "${operation_id}"
+sudo grep -Fxq 'succeeded' "${durable_operation_dir}/state"
+test "${snapshot_before_replay}" = "$(sudo sha256sum \
+  "${rootfs}/var/lib/ocservia-upgrade/upgrade-backup/MANIFEST.sha256" \
+  | awk '{print $1}')" \
+  || { echo "terminal durable operation replay re-ran the lifecycle" >&2; exit 1; }
+# An intent whose digest matches no spool package must fail terminally with
+# local evidence instead of touching installed state.
+unknown_operation_id="$(durable_uuid)"
+unknown_operation_dir="${operations_dir}/${unknown_operation_id}"
+sudo install -d -o root -g root -m 0700 -- "${unknown_operation_dir}"
+sudo tee "${unknown_operation_dir}/intent" >/dev/null <<EOF
+schema=1
+operation_id=${unknown_operation_id}
+command_id=$(durable_uuid)
+target_version=1.0.0
+package_sha256=0000000000000000000000000000000000000000000000000000000000000000
+architecture=${PACKAGE_ARCH}
+semantic_payload_sha256=${semantic_sha}
+EOF
+sudo chmod 0600 -- "${unknown_operation_dir}/intent"
+printf 'accepted\n' | sudo tee "${unknown_operation_dir}/state" >/dev/null
+sudo chmod 0600 -- "${unknown_operation_dir}/state"
+if sudo env AGENT_UID=61000 AGENT_GID=61000 \
+  "${rootfs}/usr/libexec/ocservia/ocservia-upgrader" \
+  --root "${rootfs}" --operation "${unknown_operation_id}" \
+  >"${ARTIFACT_DIR}/durable-unknown-digest.log" 2>&1; then
+  echo "durable runner accepted an unknown package digest" >&2
+  exit 1
+fi
+sudo grep -Fxq 'failed' "${unknown_operation_dir}/state"
+sudo test -f "${unknown_operation_dir}/result"
+sudo cmp -s "${ROOT}/rust/target/release/ocservia-agent" \
+  "${rootfs}/usr/libexec/ocservia/ocservia-agent" \
+  || { echo "unknown-digest failure modified installed state" >&2; exit 1; }
+echo "durable upgrade runner lifecycle passed"
+
 sudo env DESTDIR="${rootfs}" "${package_root}/scripts/uninstall-agent.sh" --purge-state
 sudo test ! -e "${rootfs}/var/lib/ocservia-agent" || { echo "purge retained Agent state" >&2; exit 1; }
 sudo test ! -e "${rootfs}/etc/ocservia-agent" || { echo "purge retained Agent configuration" >&2; exit 1; }
 echo "agent package purge passed"
-printf 'trusted_staging=pass\nsame_basename=pass\narchive_types=pass\ninstall_path=pass\ninstall=pass\nlegacy_upgrade_preflight=pass\nupgrade=pass\nsystemd_state_ownership=pass\nrollback_substitution=pass\nrollback=pass\nuninstall_preserves_state=pass\npurge=pass\n' \
+printf 'trusted_staging=pass\nsame_basename=pass\narchive_types=pass\ninstall_path=pass\ninstall=pass\nlegacy_upgrade_preflight=pass\nupgrade=pass\nsystemd_state_ownership=pass\nrollback_substitution=pass\nrollback=pass\nuninstall_preserves_state=pass\ndurable_runner=pass\npurge=pass\n' \
   >"${ARTIFACT_DIR}/lifecycle-summary.txt"

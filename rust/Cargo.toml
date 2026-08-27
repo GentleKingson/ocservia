@@ -14,6 +14,7 @@ members = [
   "crates/privd-attestation",
   "crates/transportd",
   "crates/transportd-stub",
+  "crates/upgrader",
 ]
 exclude = ["vendor/iroh"]
 resolver = "3"

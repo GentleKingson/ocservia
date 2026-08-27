@@ -181,7 +181,7 @@ archive_verbose="${staging}/archive.verbose"
 LC_ALL=C tar --list --gzip --file="${trusted_archive}" >"${archive_listing}"
 LC_ALL=C tar --list --verbose --gzip --file="${trusted_archive}" >"${archive_verbose}"
 if [[ "$(wc -l <"${archive_listing}")" -lt 1 || "$(wc -l <"${archive_listing}")" -gt 128 ]] || \
-  awk 'length($0) > 255 || $0 !~ /^[A-Za-z0-9._+\/-]+$/ || $0 ~ /^\// || $0 ~ /(^|\/)\.\.?($|\/)/ || $0 ~ /\/\// || $0 ~ /(^|\/)-/ { bad=1 } END { exit bad ? 0 : 1 }' "${archive_listing}"; then
+  awk 'length($0) > 255 || $0 !~ /^[A-Za-z0-9._+@\/-]+$/ || $0 ~ /^\// || $0 ~ /(^|\/)\.\.?($|\/)/ || $0 ~ /\/\// || $0 ~ /(^|\/)-/ { bad=1 } END { exit bad ? 0 : 1 }' "${archive_listing}"; then
   echo "package contains an unsafe member path" >&2
   exit 1
 fi
@@ -197,7 +197,7 @@ if awk -v root="${package_name}" 'index($0, root "/") != 1 && $0 != root "/" { b
   echo "package contains a member outside its versioned root" >&2
   exit 1
 fi
-for required in MANIFEST scripts/install-agent.sh scripts/upgrade-agent.sh scripts/rollback-agent.sh scripts/uninstall-agent.sh rust/target/release/ocservia-agent rust/target/release/ocservia-privd; do
+for required in MANIFEST scripts/install-agent.sh scripts/upgrade-agent.sh scripts/rollback-agent.sh scripts/uninstall-agent.sh scripts/verify-agent-package.sh rust/target/release/ocservia-agent rust/target/release/ocservia-privd rust/target/release/ocservia-upgrader deploy/systemd/ocservia-upgrader@.service; do
   if ! grep -Fxq -- "${package_name}/${required}" "${archive_listing}"; then
     echo "package is missing ${required}" >&2
     exit 1
