@@ -2214,6 +2214,100 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn agent_upgrade_pending_journal_replays_while_runner_holds_execution_lock() {
+        use std::fs::OpenOptions;
+        use std::os::unix::fs::OpenOptionsExt as _;
+
+        let signing = SigningKey::from_bytes(&[33; 32]);
+        let keys = keyring(&signing);
+        let node_id = *Uuid::now_v7().as_bytes();
+        let now = unix_seconds();
+        let command = signed_agent_upgrade(
+            &signing,
+            node_id,
+            now,
+            now + 60,
+            "1.2.3",
+            vec![0x61; 32],
+            host_architecture(),
+        );
+        let claims = claims_from_envelope_v1(&command).expect("upgrade claims");
+        let binding = effect_binding(&command, &claims).expect("upgrade effect binding");
+        let (adapter, _, _, directory) = test_adapter();
+        assert_eq!(
+            adapter
+                .prepare_authorized_effect(authorized_effect(&command, &claims, &binding))
+                .expect("prepare pending root effect"),
+            AuthorizedEffectDecision::Execute
+        );
+        let (upgrades, operations_dir) = upgrade_scheduler(&directory);
+        let Some(command_envelope::Payload::AgentUpgrade(payload)) = command.payload.as_ref()
+        else {
+            panic!("upgrade payload");
+        };
+        let intent = UpgradeIntent::new(
+            claims.operation_id,
+            claims.command_id,
+            &payload.target_version,
+            payload
+                .package_sha256
+                .clone()
+                .try_into()
+                .expect("package digest"),
+            &payload.architecture,
+            claims.semantic_payload_sha256,
+        )
+        .expect("upgrade intent");
+        assert_eq!(
+            upgrades
+                .schedule_and_trigger(&intent)
+                .expect("commit durable intent"),
+            ScheduleOutcome::Scheduled
+        );
+        let durable_path = operations_dir.join(intent.operation_id.to_string());
+        fs::write(durable_path.join("state"), b"running\n").expect("runner state");
+        let execution_lock = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(operations_dir.join(".run.lock"))
+            .expect("execution lock file");
+        rustix::fs::flock(
+            &execution_lock,
+            rustix::fs::FlockOperation::NonBlockingLockExclusive,
+        )
+        .expect("hold runner execution lock");
+
+        let replay = dispatch_upgrade(
+            command_request(command.clone()),
+            &node_id,
+            &keys,
+            &adapter,
+            &upgrades,
+        )
+        .await;
+        assert!(matches!(
+            replay.result,
+            Some(privd_response::Result::AgentUpgradeScheduled(_))
+        ));
+        let receipt = replay
+            .privileged_result_proof
+            .as_ref()
+            .and_then(|proof| proof.receipt_v1.as_ref())
+            .expect("successful replay receipt");
+        assert_eq!(
+            CommandResultState::try_from(receipt.terminal_state),
+            Ok(CommandResultState::Succeeded)
+        );
+        assert_eq!(
+            durable_operation_state(&operations_dir, &command.operation_id),
+            "running"
+        );
+        drop(execution_lock);
+        std::fs::remove_dir_all(directory).expect("cleanup test directory");
+    }
+
+    #[tokio::test]
     async fn agent_upgrade_prepare_refuses_a_second_active_operation() {
         let signing = SigningKey::from_bytes(&[32; 32]);
         let keys = keyring(&signing);

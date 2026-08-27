@@ -45,6 +45,8 @@ pub const UPGRADE_UNIT_TEMPLATE: &str = "ocservia-upgrader@{operation}.service";
 
 const MAX_DETAIL_BYTES: usize = 160;
 const MAX_SPOOL_PACKAGE_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+const SCHEDULE_LOCK_FILE: &str = ".schedule.lock";
+const EXECUTION_LOCK_FILE: &str = ".run.lock";
 
 /// The immutable release identity and command binding of one scheduled
 /// upgrade. Rendering is fully derived from the Controller-signed command, so
@@ -300,7 +302,7 @@ impl UpgradeScheduler {
         let operation_dir = self.operations_dir.join(intent.operation_id.to_string());
         let intent_bytes = intent.render().into_bytes();
         let outcome = {
-            let _active = ActiveLock::acquire(&self.operations_dir)?;
+            let _schedule = UpgradeLock::acquire_schedule(&self.operations_dir)?;
             cleanup_stale_temporaries(&operation_dir)?;
             match read_operation_pieces(&operation_dir)? {
                 OperationPieces::Absent => {
@@ -537,7 +539,7 @@ impl UpgradeRunner {
             tracing::info!(operation = %operation_id, state = state.as_str(), "durable upgrade already terminal");
             return Ok(state);
         }
-        let _active = ActiveLock::acquire(&operations_root)?;
+        let _execution = UpgradeLock::acquire_execution(&operations_root)?;
         cleanup_stale_temporaries(&operation_dir)?;
         let state = load_state(&operation_dir)?;
         if state.is_terminal() {
@@ -807,13 +809,13 @@ fn refuse(
     Err(failure)
 }
 
-struct ActiveLock {
+struct UpgradeLock {
     _file: File,
 }
 
-impl ActiveLock {
-    fn acquire(operations_dir: &Path) -> Result<Self, UpgradeStoreError> {
-        let path = operations_dir.join(".lock");
+impl UpgradeLock {
+    fn open(operations_dir: &Path, name: &str) -> Result<File, UpgradeStoreError> {
+        let path = operations_dir.join(name);
         let file = match OpenOptions::new()
             .write(true)
             .create_new(true)
@@ -830,6 +832,18 @@ impl ActiveLock {
             }
             Err(error) => return Err(UpgradeStoreError::Io(error)),
         };
+        Ok(file)
+    }
+
+    fn acquire_schedule(operations_dir: &Path) -> Result<Self, UpgradeStoreError> {
+        let file = Self::open(operations_dir, SCHEDULE_LOCK_FILE)?;
+        rustix::fs::flock(&file, FlockOperation::NonBlockingLockExclusive)
+            .map_err(|_| UpgradeStoreError::ActiveConflict)?;
+        Ok(Self { _file: file })
+    }
+
+    fn acquire_execution(operations_dir: &Path) -> Result<Self, UpgradeStoreError> {
+        let file = Self::open(operations_dir, EXECUTION_LOCK_FILE)?;
         rustix::fs::flock(&file, FlockOperation::NonBlockingLockExclusive)
             .map_err(|_| UpgradeStoreError::ActiveConflict)?;
         Ok(Self { _file: file })
@@ -1376,6 +1390,25 @@ mod tests {
         // The conflicting delivery cannot rewrite the immutable intent.
         let persisted = load_intent(&operation_dir).expect("persisted intent");
         assert_eq!(persisted.package_sha256, [0x43; 32]);
+        fs::remove_dir_all(&root).expect("cleanup");
+    }
+
+    #[test]
+    fn scheduling_replays_while_execution_lock_is_held() {
+        let root = test_root("replay-during-execution");
+        let intent = new_intent([0x45; 32]);
+        scheduler(&root)
+            .schedule_and_trigger(&intent)
+            .expect("initial schedule");
+        let _execution =
+            UpgradeLock::acquire_execution(&operations_dir(&root)).expect("runner execution lock");
+
+        assert_eq!(
+            scheduler(&root)
+                .schedule_and_trigger(&intent)
+                .expect("exact replay while runner is active"),
+            ScheduleOutcome::AlreadyScheduled
+        );
         fs::remove_dir_all(&root).expect("cleanup");
     }
 
