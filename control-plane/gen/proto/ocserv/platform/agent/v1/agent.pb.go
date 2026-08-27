@@ -650,6 +650,7 @@ const (
 	PrivilegedCommandKind_PRIVILEGED_COMMAND_KIND_CERTIFICATE_CSR      PrivilegedCommandKind = 12
 	PrivilegedCommandKind_PRIVILEGED_COMMAND_KIND_CERTIFICATE_P12      PrivilegedCommandKind = 13
 	PrivilegedCommandKind_PRIVILEGED_COMMAND_KIND_CERTIFICATE_REVOKE   PrivilegedCommandKind = 14
+	PrivilegedCommandKind_PRIVILEGED_COMMAND_KIND_AGENT_UPGRADE        PrivilegedCommandKind = 15
 )
 
 // Enum value maps for PrivilegedCommandKind.
@@ -670,6 +671,7 @@ var (
 		12: "PRIVILEGED_COMMAND_KIND_CERTIFICATE_CSR",
 		13: "PRIVILEGED_COMMAND_KIND_CERTIFICATE_P12",
 		14: "PRIVILEGED_COMMAND_KIND_CERTIFICATE_REVOKE",
+		15: "PRIVILEGED_COMMAND_KIND_AGENT_UPGRADE",
 	}
 	PrivilegedCommandKind_value = map[string]int32{
 		"PRIVILEGED_COMMAND_KIND_UNSPECIFIED":          0,
@@ -687,6 +689,7 @@ var (
 		"PRIVILEGED_COMMAND_KIND_CERTIFICATE_CSR":      12,
 		"PRIVILEGED_COMMAND_KIND_CERTIFICATE_P12":      13,
 		"PRIVILEGED_COMMAND_KIND_CERTIFICATE_REVOKE":   14,
+		"PRIVILEGED_COMMAND_KIND_AGENT_UPGRADE":        15,
 	}
 )
 
@@ -728,6 +731,9 @@ const (
 	PrivilegedResultKind_PRIVILEGED_RESULT_KIND_CERTIFICATE_P12    PrivilegedResultKind = 5
 	PrivilegedResultKind_PRIVILEGED_RESULT_KIND_CERTIFICATE_REVOKE PrivilegedResultKind = 6
 	PrivilegedResultKind_PRIVILEGED_RESULT_KIND_ERROR              PrivilegedResultKind = 7
+	// The signed upgrade intent was accepted and scheduled by privd. It never
+	// attests that the target version is running.
+	PrivilegedResultKind_PRIVILEGED_RESULT_KIND_AGENT_UPGRADE_SCHEDULED PrivilegedResultKind = 8
 )
 
 // Enum value maps for PrivilegedResultKind.
@@ -741,16 +747,18 @@ var (
 		5: "PRIVILEGED_RESULT_KIND_CERTIFICATE_P12",
 		6: "PRIVILEGED_RESULT_KIND_CERTIFICATE_REVOKE",
 		7: "PRIVILEGED_RESULT_KIND_ERROR",
+		8: "PRIVILEGED_RESULT_KIND_AGENT_UPGRADE_SCHEDULED",
 	}
 	PrivilegedResultKind_value = map[string]int32{
-		"PRIVILEGED_RESULT_KIND_UNSPECIFIED":        0,
-		"PRIVILEGED_RESULT_KIND_MUTATION":           1,
-		"PRIVILEGED_RESULT_KIND_CONFIG_PLAN":        2,
-		"PRIVILEGED_RESULT_KIND_CONFIG_APPLY":       3,
-		"PRIVILEGED_RESULT_KIND_CERTIFICATE_CSR":    4,
-		"PRIVILEGED_RESULT_KIND_CERTIFICATE_P12":    5,
-		"PRIVILEGED_RESULT_KIND_CERTIFICATE_REVOKE": 6,
-		"PRIVILEGED_RESULT_KIND_ERROR":              7,
+		"PRIVILEGED_RESULT_KIND_UNSPECIFIED":             0,
+		"PRIVILEGED_RESULT_KIND_MUTATION":                1,
+		"PRIVILEGED_RESULT_KIND_CONFIG_PLAN":             2,
+		"PRIVILEGED_RESULT_KIND_CONFIG_APPLY":            3,
+		"PRIVILEGED_RESULT_KIND_CERTIFICATE_CSR":         4,
+		"PRIVILEGED_RESULT_KIND_CERTIFICATE_P12":         5,
+		"PRIVILEGED_RESULT_KIND_CERTIFICATE_REVOKE":      6,
+		"PRIVILEGED_RESULT_KIND_ERROR":                   7,
+		"PRIVILEGED_RESULT_KIND_AGENT_UPGRADE_SCHEDULED": 8,
 	}
 )
 
@@ -3429,6 +3437,7 @@ type CommandEnvelope struct {
 	//	*CommandEnvelope_CertificateCsr
 	//	*CommandEnvelope_CertificateP12
 	//	*CommandEnvelope_CertificateRevoke
+	//	*CommandEnvelope_AgentUpgrade
 	Payload                    isCommandEnvelope_Payload  `protobuf_oneof:"payload"`
 	DeliveryMode               CommandDeliveryMode        `protobuf:"varint,109,opt,name=delivery_mode,json=deliveryMode,proto3,enum=ocserv.platform.agent.v1.CommandDeliveryMode" json:"delivery_mode,omitempty"`
 	SemanticPayloadHashVersion SemanticPayloadHashVersion `protobuf:"varint,110,opt,name=semantic_payload_hash_version,json=semanticPayloadHashVersion,proto3,enum=ocserv.platform.agent.v1.SemanticPayloadHashVersion" json:"semantic_payload_hash_version,omitempty"`
@@ -3725,6 +3734,15 @@ func (x *CommandEnvelope) GetCertificateRevoke() *CertificateRevoke {
 	return nil
 }
 
+func (x *CommandEnvelope) GetAgentUpgrade() *AgentUpgrade {
+	if x != nil {
+		if x, ok := x.Payload.(*CommandEnvelope_AgentUpgrade); ok {
+			return x.AgentUpgrade
+		}
+	}
+	return nil
+}
+
 func (x *CommandEnvelope) GetDeliveryMode() CommandDeliveryMode {
 	if x != nil {
 		return x.DeliveryMode
@@ -3874,6 +3892,10 @@ type CommandEnvelope_CertificateRevoke struct {
 	CertificateRevoke *CertificateRevoke `protobuf:"bytes,119,opt,name=certificate_revoke,json=certificateRevoke,proto3,oneof"`
 }
 
+type CommandEnvelope_AgentUpgrade struct {
+	AgentUpgrade *AgentUpgrade `protobuf:"bytes,128,opt,name=agent_upgrade,json=agentUpgrade,proto3,oneof"`
+}
+
 func (*CommandEnvelope_SessionDisconnect) isCommandEnvelope_Payload() {}
 
 func (*CommandEnvelope_UserCreate) isCommandEnvelope_Payload() {}
@@ -3907,6 +3929,8 @@ func (*CommandEnvelope_CertificateCsr) isCommandEnvelope_Payload() {}
 func (*CommandEnvelope_CertificateP12) isCommandEnvelope_Payload() {}
 
 func (*CommandEnvelope_CertificateRevoke) isCommandEnvelope_Payload() {}
+
+func (*CommandEnvelope_AgentUpgrade) isCommandEnvelope_Payload() {}
 
 type SessionDisconnect struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
@@ -5095,6 +5119,133 @@ func (x *CertificateRevokeResult) GetKeyRemoved() bool {
 	return false
 }
 
+// AgentUpgrade authorizes exactly one immutable agent release identity. The
+// Controller signs the target version, package SHA-256, and architecture.
+// There is deliberately no URL, path, executable, command, argument,
+// environment, script, shell, or package-manager recipe on the wire.
+type AgentUpgrade struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	TargetVersion string                 `protobuf:"bytes,1,opt,name=target_version,json=targetVersion,proto3" json:"target_version,omitempty"`
+	PackageSha256 []byte                 `protobuf:"bytes,2,opt,name=package_sha256,json=packageSha256,proto3" json:"package_sha256,omitempty"`
+	Architecture  string                 `protobuf:"bytes,3,opt,name=architecture,proto3" json:"architecture,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *AgentUpgrade) Reset() {
+	*x = AgentUpgrade{}
+	mi := &file_ocserv_platform_agent_v1_agent_proto_msgTypes[45]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *AgentUpgrade) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*AgentUpgrade) ProtoMessage() {}
+
+func (x *AgentUpgrade) ProtoReflect() protoreflect.Message {
+	mi := &file_ocserv_platform_agent_v1_agent_proto_msgTypes[45]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use AgentUpgrade.ProtoReflect.Descriptor instead.
+func (*AgentUpgrade) Descriptor() ([]byte, []int) {
+	return file_ocserv_platform_agent_v1_agent_proto_rawDescGZIP(), []int{45}
+}
+
+func (x *AgentUpgrade) GetTargetVersion() string {
+	if x != nil {
+		return x.TargetVersion
+	}
+	return ""
+}
+
+func (x *AgentUpgrade) GetPackageSha256() []byte {
+	if x != nil {
+		return x.PackageSha256
+	}
+	return nil
+}
+
+func (x *AgentUpgrade) GetArchitecture() string {
+	if x != nil {
+		return x.Architecture
+	}
+	return ""
+}
+
+// AgentUpgradeScheduledResult reports that the signed upgrade intent was
+// accepted and scheduled. It never claims the target version is running;
+// final upgrade success is established by later reconciliation.
+type AgentUpgradeScheduledResult struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	OperationId   []byte                 `protobuf:"bytes,1,opt,name=operation_id,json=operationId,proto3" json:"operation_id,omitempty"`
+	TargetVersion string                 `protobuf:"bytes,2,opt,name=target_version,json=targetVersion,proto3" json:"target_version,omitempty"`
+	PackageSha256 []byte                 `protobuf:"bytes,3,opt,name=package_sha256,json=packageSha256,proto3" json:"package_sha256,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *AgentUpgradeScheduledResult) Reset() {
+	*x = AgentUpgradeScheduledResult{}
+	mi := &file_ocserv_platform_agent_v1_agent_proto_msgTypes[46]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *AgentUpgradeScheduledResult) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*AgentUpgradeScheduledResult) ProtoMessage() {}
+
+func (x *AgentUpgradeScheduledResult) ProtoReflect() protoreflect.Message {
+	mi := &file_ocserv_platform_agent_v1_agent_proto_msgTypes[46]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use AgentUpgradeScheduledResult.ProtoReflect.Descriptor instead.
+func (*AgentUpgradeScheduledResult) Descriptor() ([]byte, []int) {
+	return file_ocserv_platform_agent_v1_agent_proto_rawDescGZIP(), []int{46}
+}
+
+func (x *AgentUpgradeScheduledResult) GetOperationId() []byte {
+	if x != nil {
+		return x.OperationId
+	}
+	return nil
+}
+
+func (x *AgentUpgradeScheduledResult) GetTargetVersion() string {
+	if x != nil {
+		return x.TargetVersion
+	}
+	return ""
+}
+
+func (x *AgentUpgradeScheduledResult) GetPackageSha256() []byte {
+	if x != nil {
+		return x.PackageSha256
+	}
+	return nil
+}
+
 type ArtifactFetchRequest struct {
 	state      protoimpl.MessageState `protogen:"open.v1"`
 	ArtifactId []byte                 `protobuf:"bytes,1,opt,name=artifact_id,json=artifactId,proto3" json:"artifact_id,omitempty"`
@@ -5111,7 +5262,7 @@ type ArtifactFetchRequest struct {
 
 func (x *ArtifactFetchRequest) Reset() {
 	*x = ArtifactFetchRequest{}
-	mi := &file_ocserv_platform_agent_v1_agent_proto_msgTypes[45]
+	mi := &file_ocserv_platform_agent_v1_agent_proto_msgTypes[47]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5123,7 +5274,7 @@ func (x *ArtifactFetchRequest) String() string {
 func (*ArtifactFetchRequest) ProtoMessage() {}
 
 func (x *ArtifactFetchRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_ocserv_platform_agent_v1_agent_proto_msgTypes[45]
+	mi := &file_ocserv_platform_agent_v1_agent_proto_msgTypes[47]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5136,7 +5287,7 @@ func (x *ArtifactFetchRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ArtifactFetchRequest.ProtoReflect.Descriptor instead.
 func (*ArtifactFetchRequest) Descriptor() ([]byte, []int) {
-	return file_ocserv_platform_agent_v1_agent_proto_rawDescGZIP(), []int{45}
+	return file_ocserv_platform_agent_v1_agent_proto_rawDescGZIP(), []int{47}
 }
 
 func (x *ArtifactFetchRequest) GetArtifactId() []byte {
@@ -5202,7 +5353,7 @@ type ArtifactConsumeRequest struct {
 
 func (x *ArtifactConsumeRequest) Reset() {
 	*x = ArtifactConsumeRequest{}
-	mi := &file_ocserv_platform_agent_v1_agent_proto_msgTypes[46]
+	mi := &file_ocserv_platform_agent_v1_agent_proto_msgTypes[48]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5214,7 +5365,7 @@ func (x *ArtifactConsumeRequest) String() string {
 func (*ArtifactConsumeRequest) ProtoMessage() {}
 
 func (x *ArtifactConsumeRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_ocserv_platform_agent_v1_agent_proto_msgTypes[46]
+	mi := &file_ocserv_platform_agent_v1_agent_proto_msgTypes[48]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5227,7 +5378,7 @@ func (x *ArtifactConsumeRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ArtifactConsumeRequest.ProtoReflect.Descriptor instead.
 func (*ArtifactConsumeRequest) Descriptor() ([]byte, []int) {
-	return file_ocserv_platform_agent_v1_agent_proto_rawDescGZIP(), []int{46}
+	return file_ocserv_platform_agent_v1_agent_proto_rawDescGZIP(), []int{48}
 }
 
 func (x *ArtifactConsumeRequest) GetGrant() *ArtifactGrantV1 {
@@ -5283,7 +5434,7 @@ type ArtifactConsumeResponse struct {
 
 func (x *ArtifactConsumeResponse) Reset() {
 	*x = ArtifactConsumeResponse{}
-	mi := &file_ocserv_platform_agent_v1_agent_proto_msgTypes[47]
+	mi := &file_ocserv_platform_agent_v1_agent_proto_msgTypes[49]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5295,7 +5446,7 @@ func (x *ArtifactConsumeResponse) String() string {
 func (*ArtifactConsumeResponse) ProtoMessage() {}
 
 func (x *ArtifactConsumeResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_ocserv_platform_agent_v1_agent_proto_msgTypes[47]
+	mi := &file_ocserv_platform_agent_v1_agent_proto_msgTypes[49]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5308,7 +5459,7 @@ func (x *ArtifactConsumeResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ArtifactConsumeResponse.ProtoReflect.Descriptor instead.
 func (*ArtifactConsumeResponse) Descriptor() ([]byte, []int) {
-	return file_ocserv_platform_agent_v1_agent_proto_rawDescGZIP(), []int{47}
+	return file_ocserv_platform_agent_v1_agent_proto_rawDescGZIP(), []int{49}
 }
 
 func (x *ArtifactConsumeResponse) GetArtifactId() []byte {
@@ -5356,7 +5507,7 @@ type ArtifactGrantV1 struct {
 
 func (x *ArtifactGrantV1) Reset() {
 	*x = ArtifactGrantV1{}
-	mi := &file_ocserv_platform_agent_v1_agent_proto_msgTypes[48]
+	mi := &file_ocserv_platform_agent_v1_agent_proto_msgTypes[50]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5368,7 +5519,7 @@ func (x *ArtifactGrantV1) String() string {
 func (*ArtifactGrantV1) ProtoMessage() {}
 
 func (x *ArtifactGrantV1) ProtoReflect() protoreflect.Message {
-	mi := &file_ocserv_platform_agent_v1_agent_proto_msgTypes[48]
+	mi := &file_ocserv_platform_agent_v1_agent_proto_msgTypes[50]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5381,7 +5532,7 @@ func (x *ArtifactGrantV1) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ArtifactGrantV1.ProtoReflect.Descriptor instead.
 func (*ArtifactGrantV1) Descriptor() ([]byte, []int) {
-	return file_ocserv_platform_agent_v1_agent_proto_rawDescGZIP(), []int{48}
+	return file_ocserv_platform_agent_v1_agent_proto_rawDescGZIP(), []int{50}
 }
 
 func (x *ArtifactGrantV1) GetVersion() ArtifactGrantVersion {
@@ -5495,7 +5646,7 @@ type ArtifactChunk struct {
 
 func (x *ArtifactChunk) Reset() {
 	*x = ArtifactChunk{}
-	mi := &file_ocserv_platform_agent_v1_agent_proto_msgTypes[49]
+	mi := &file_ocserv_platform_agent_v1_agent_proto_msgTypes[51]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5507,7 +5658,7 @@ func (x *ArtifactChunk) String() string {
 func (*ArtifactChunk) ProtoMessage() {}
 
 func (x *ArtifactChunk) ProtoReflect() protoreflect.Message {
-	mi := &file_ocserv_platform_agent_v1_agent_proto_msgTypes[49]
+	mi := &file_ocserv_platform_agent_v1_agent_proto_msgTypes[51]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5520,7 +5671,7 @@ func (x *ArtifactChunk) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ArtifactChunk.ProtoReflect.Descriptor instead.
 func (*ArtifactChunk) Descriptor() ([]byte, []int) {
-	return file_ocserv_platform_agent_v1_agent_proto_rawDescGZIP(), []int{49}
+	return file_ocserv_platform_agent_v1_agent_proto_rawDescGZIP(), []int{51}
 }
 
 func (x *ArtifactChunk) GetArtifactId() []byte {
@@ -5566,7 +5717,7 @@ type ServiceReload struct {
 
 func (x *ServiceReload) Reset() {
 	*x = ServiceReload{}
-	mi := &file_ocserv_platform_agent_v1_agent_proto_msgTypes[50]
+	mi := &file_ocserv_platform_agent_v1_agent_proto_msgTypes[52]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5578,7 +5729,7 @@ func (x *ServiceReload) String() string {
 func (*ServiceReload) ProtoMessage() {}
 
 func (x *ServiceReload) ProtoReflect() protoreflect.Message {
-	mi := &file_ocserv_platform_agent_v1_agent_proto_msgTypes[50]
+	mi := &file_ocserv_platform_agent_v1_agent_proto_msgTypes[52]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5591,7 +5742,7 @@ func (x *ServiceReload) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ServiceReload.ProtoReflect.Descriptor instead.
 func (*ServiceReload) Descriptor() ([]byte, []int) {
-	return file_ocserv_platform_agent_v1_agent_proto_rawDescGZIP(), []int{50}
+	return file_ocserv_platform_agent_v1_agent_proto_rawDescGZIP(), []int{52}
 }
 
 // Synthetic commands exercise delivery without changing remote state.
@@ -5603,7 +5754,7 @@ type SyntheticNoop struct {
 
 func (x *SyntheticNoop) Reset() {
 	*x = SyntheticNoop{}
-	mi := &file_ocserv_platform_agent_v1_agent_proto_msgTypes[51]
+	mi := &file_ocserv_platform_agent_v1_agent_proto_msgTypes[53]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5615,7 +5766,7 @@ func (x *SyntheticNoop) String() string {
 func (*SyntheticNoop) ProtoMessage() {}
 
 func (x *SyntheticNoop) ProtoReflect() protoreflect.Message {
-	mi := &file_ocserv_platform_agent_v1_agent_proto_msgTypes[51]
+	mi := &file_ocserv_platform_agent_v1_agent_proto_msgTypes[53]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5628,7 +5779,7 @@ func (x *SyntheticNoop) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SyntheticNoop.ProtoReflect.Descriptor instead.
 func (*SyntheticNoop) Descriptor() ([]byte, []int) {
-	return file_ocserv_platform_agent_v1_agent_proto_rawDescGZIP(), []int{51}
+	return file_ocserv_platform_agent_v1_agent_proto_rawDescGZIP(), []int{53}
 }
 
 type SyntheticEcho struct {
@@ -5640,7 +5791,7 @@ type SyntheticEcho struct {
 
 func (x *SyntheticEcho) Reset() {
 	*x = SyntheticEcho{}
-	mi := &file_ocserv_platform_agent_v1_agent_proto_msgTypes[52]
+	mi := &file_ocserv_platform_agent_v1_agent_proto_msgTypes[54]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5652,7 +5803,7 @@ func (x *SyntheticEcho) String() string {
 func (*SyntheticEcho) ProtoMessage() {}
 
 func (x *SyntheticEcho) ProtoReflect() protoreflect.Message {
-	mi := &file_ocserv_platform_agent_v1_agent_proto_msgTypes[52]
+	mi := &file_ocserv_platform_agent_v1_agent_proto_msgTypes[54]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5665,7 +5816,7 @@ func (x *SyntheticEcho) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SyntheticEcho.ProtoReflect.Descriptor instead.
 func (*SyntheticEcho) Descriptor() ([]byte, []int) {
-	return file_ocserv_platform_agent_v1_agent_proto_rawDescGZIP(), []int{52}
+	return file_ocserv_platform_agent_v1_agent_proto_rawDescGZIP(), []int{54}
 }
 
 func (x *SyntheticEcho) GetMessage() string {
@@ -5689,7 +5840,7 @@ type SimulationProbe struct {
 
 func (x *SimulationProbe) Reset() {
 	*x = SimulationProbe{}
-	mi := &file_ocserv_platform_agent_v1_agent_proto_msgTypes[53]
+	mi := &file_ocserv_platform_agent_v1_agent_proto_msgTypes[55]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5701,7 +5852,7 @@ func (x *SimulationProbe) String() string {
 func (*SimulationProbe) ProtoMessage() {}
 
 func (x *SimulationProbe) ProtoReflect() protoreflect.Message {
-	mi := &file_ocserv_platform_agent_v1_agent_proto_msgTypes[53]
+	mi := &file_ocserv_platform_agent_v1_agent_proto_msgTypes[55]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5714,7 +5865,7 @@ func (x *SimulationProbe) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SimulationProbe.ProtoReflect.Descriptor instead.
 func (*SimulationProbe) Descriptor() ([]byte, []int) {
-	return file_ocserv_platform_agent_v1_agent_proto_rawDescGZIP(), []int{53}
+	return file_ocserv_platform_agent_v1_agent_proto_rawDescGZIP(), []int{55}
 }
 
 func (x *SimulationProbe) GetHeartbeatCount() uint32 {
@@ -6021,7 +6172,7 @@ const file_ocserv_platform_agent_v1_agent_proto_rawDesc = "" +
 	"group_name\x18\x01 \x01(\tR\tgroupName\x12\x18\n" +
 	"\amembers\x18\x02 \x03(\tR\amembers\x12\x1a\n" +
 	"\brevision\x18\x03 \x01(\x04R\brevision\x12-\n" +
-	"\x12fingerprint_sha256\x18\x04 \x01(\fR\x11fingerprintSha256\"\xb5\x14\n" +
+	"\x12fingerprint_sha256\x18\x04 \x01(\fR\x11fingerprintSha256\"\x85\x15\n" +
 	"\x0fCommandEnvelope\x12)\n" +
 	"\x10protocol_version\x18\x01 \x01(\tR\x0fprotocolVersion\x12\x1d\n" +
 	"\n" +
@@ -6059,7 +6210,8 @@ const file_ocserv_platform_agent_v1_agent_proto_rawDesc = "" +
 	"userEnable\x12S\n" +
 	"\x0fcertificate_csr\x18u \x01(\v2(.ocserv.platform.agent.v1.CertificateCsrH\x00R\x0ecertificateCsr\x12S\n" +
 	"\x0fcertificate_p12\x18v \x01(\v2(.ocserv.platform.agent.v1.CertificateP12H\x00R\x0ecertificateP12\x12\\\n" +
-	"\x12certificate_revoke\x18w \x01(\v2+.ocserv.platform.agent.v1.CertificateRevokeH\x00R\x11certificateRevoke\x12R\n" +
+	"\x12certificate_revoke\x18w \x01(\v2+.ocserv.platform.agent.v1.CertificateRevokeH\x00R\x11certificateRevoke\x12N\n" +
+	"\ragent_upgrade\x18\x80\x01 \x01(\v2&.ocserv.platform.agent.v1.AgentUpgradeH\x00R\fagentUpgrade\x12R\n" +
 	"\rdelivery_mode\x18m \x01(\x0e2-.ocserv.platform.agent.v1.CommandDeliveryModeR\fdeliveryMode\x12w\n" +
 	"\x1dsemantic_payload_hash_version\x18n \x01(\x0e24.ocserv.platform.agent.v1.SemanticPayloadHashVersionR\x1asemanticPayloadHashVersion\x126\n" +
 	"\x17semantic_payload_sha256\x18o \x01(\fR\x15semanticPayloadSha256\x12!\n" +
@@ -6169,7 +6321,15 @@ const file_ocserv_platform_agent_v1_agent_proto_rawDesc = "" +
 	"\x17CertificateRevokeResult\x12%\n" +
 	"\x0ecertificate_id\x18\x01 \x01(\fR\rcertificateId\x12\x1f\n" +
 	"\vkey_removed\x18\x02 \x01(\bR\n" +
-	"keyRemoved\"\xd6\x02\n" +
+	"keyRemoved\"\x80\x01\n" +
+	"\fAgentUpgrade\x12%\n" +
+	"\x0etarget_version\x18\x01 \x01(\tR\rtargetVersion\x12%\n" +
+	"\x0epackage_sha256\x18\x02 \x01(\fR\rpackageSha256\x12\"\n" +
+	"\farchitecture\x18\x03 \x01(\tR\farchitecture\"\x8e\x01\n" +
+	"\x1bAgentUpgradeScheduledResult\x12!\n" +
+	"\foperation_id\x18\x01 \x01(\fR\voperationId\x12%\n" +
+	"\x0etarget_version\x18\x02 \x01(\tR\rtargetVersion\x12%\n" +
+	"\x0epackage_sha256\x18\x03 \x01(\fR\rpackageSha256\"\xd6\x02\n" +
 	"\x14ArtifactFetchRequest\x12\x1f\n" +
 	"\vartifact_id\x18\x01 \x01(\fR\n" +
 	"artifactId\x12\x18\n" +
@@ -6278,7 +6438,7 @@ const file_ocserv_platform_agent_v1_agent_proto_rawDesc = "" +
 	" COMMAND_AUTHORIZATION_VERSION_V1\x10\x01*Z\n" +
 	"\x13PrivdReceiptVersion\x12%\n" +
 	"!PRIVD_RECEIPT_VERSION_UNSPECIFIED\x10\x00\x12\x1c\n" +
-	"\x18PRIVD_RECEIPT_VERSION_V1\x10\x01*\xaa\x05\n" +
+	"\x18PRIVD_RECEIPT_VERSION_V1\x10\x01*\xd5\x05\n" +
 	"\x15PrivilegedCommandKind\x12'\n" +
 	"#PRIVILEGED_COMMAND_KIND_UNSPECIFIED\x10\x00\x12.\n" +
 	"*PRIVILEGED_COMMAND_KIND_SESSION_DISCONNECT\x10\x01\x12-\n" +
@@ -6295,7 +6455,8 @@ const file_ocserv_platform_agent_v1_agent_proto_rawDesc = "" +
 	"$PRIVILEGED_COMMAND_KIND_CONFIG_APPLY\x10\v\x12+\n" +
 	"'PRIVILEGED_COMMAND_KIND_CERTIFICATE_CSR\x10\f\x12+\n" +
 	"'PRIVILEGED_COMMAND_KIND_CERTIFICATE_P12\x10\r\x12.\n" +
-	"*PRIVILEGED_COMMAND_KIND_CERTIFICATE_REVOKE\x10\x0e*\xdd\x02\n" +
+	"*PRIVILEGED_COMMAND_KIND_CERTIFICATE_REVOKE\x10\x0e\x12)\n" +
+	"%PRIVILEGED_COMMAND_KIND_AGENT_UPGRADE\x10\x0f*\x91\x03\n" +
 	"\x14PrivilegedResultKind\x12&\n" +
 	"\"PRIVILEGED_RESULT_KIND_UNSPECIFIED\x10\x00\x12#\n" +
 	"\x1fPRIVILEGED_RESULT_KIND_MUTATION\x10\x01\x12&\n" +
@@ -6304,7 +6465,8 @@ const file_ocserv_platform_agent_v1_agent_proto_rawDesc = "" +
 	"&PRIVILEGED_RESULT_KIND_CERTIFICATE_CSR\x10\x04\x12*\n" +
 	"&PRIVILEGED_RESULT_KIND_CERTIFICATE_P12\x10\x05\x12-\n" +
 	")PRIVILEGED_RESULT_KIND_CERTIFICATE_REVOKE\x10\x06\x12 \n" +
-	"\x1cPRIVILEGED_RESULT_KIND_ERROR\x10\a*\xc5\x01\n" +
+	"\x1cPRIVILEGED_RESULT_KIND_ERROR\x10\a\x122\n" +
+	".PRIVILEGED_RESULT_KIND_AGENT_UPGRADE_SCHEDULED\x10\b*\xc5\x01\n" +
 	"\x11TelemetryPriority\x12\"\n" +
 	"\x1eTELEMETRY_PRIORITY_UNSPECIFIED\x10\x00\x12\x1f\n" +
 	"\x1bTELEMETRY_PRIORITY_SECURITY\x10\x01\x12%\n" +
@@ -6330,7 +6492,7 @@ func file_ocserv_platform_agent_v1_agent_proto_rawDescGZIP() []byte {
 }
 
 var file_ocserv_platform_agent_v1_agent_proto_enumTypes = make([]protoimpl.EnumInfo, 16)
-var file_ocserv_platform_agent_v1_agent_proto_msgTypes = make([]protoimpl.MessageInfo, 54)
+var file_ocserv_platform_agent_v1_agent_proto_msgTypes = make([]protoimpl.MessageInfo, 56)
 var file_ocserv_platform_agent_v1_agent_proto_goTypes = []any{
 	(HandshakeResult)(0),                     // 0: ocserv.platform.agent.v1.HandshakeResult
 	(SealedSecretVersion)(0),                 // 1: ocserv.platform.agent.v1.SealedSecretVersion
@@ -6393,23 +6555,25 @@ var file_ocserv_platform_agent_v1_agent_proto_goTypes = []any{
 	(*CertificateArtifactResult)(nil),        // 58: ocserv.platform.agent.v1.CertificateArtifactResult
 	(*CertificateRevoke)(nil),                // 59: ocserv.platform.agent.v1.CertificateRevoke
 	(*CertificateRevokeResult)(nil),          // 60: ocserv.platform.agent.v1.CertificateRevokeResult
-	(*ArtifactFetchRequest)(nil),             // 61: ocserv.platform.agent.v1.ArtifactFetchRequest
-	(*ArtifactConsumeRequest)(nil),           // 62: ocserv.platform.agent.v1.ArtifactConsumeRequest
-	(*ArtifactConsumeResponse)(nil),          // 63: ocserv.platform.agent.v1.ArtifactConsumeResponse
-	(*ArtifactGrantV1)(nil),                  // 64: ocserv.platform.agent.v1.ArtifactGrantV1
-	(*ArtifactChunk)(nil),                    // 65: ocserv.platform.agent.v1.ArtifactChunk
-	(*ServiceReload)(nil),                    // 66: ocserv.platform.agent.v1.ServiceReload
-	(*SyntheticNoop)(nil),                    // 67: ocserv.platform.agent.v1.SyntheticNoop
-	(*SyntheticEcho)(nil),                    // 68: ocserv.platform.agent.v1.SyntheticEcho
-	(*SimulationProbe)(nil),                  // 69: ocserv.platform.agent.v1.SimulationProbe
-	(*timestamppb.Timestamp)(nil),            // 70: google.protobuf.Timestamp
+	(*AgentUpgrade)(nil),                     // 61: ocserv.platform.agent.v1.AgentUpgrade
+	(*AgentUpgradeScheduledResult)(nil),      // 62: ocserv.platform.agent.v1.AgentUpgradeScheduledResult
+	(*ArtifactFetchRequest)(nil),             // 63: ocserv.platform.agent.v1.ArtifactFetchRequest
+	(*ArtifactConsumeRequest)(nil),           // 64: ocserv.platform.agent.v1.ArtifactConsumeRequest
+	(*ArtifactConsumeResponse)(nil),          // 65: ocserv.platform.agent.v1.ArtifactConsumeResponse
+	(*ArtifactGrantV1)(nil),                  // 66: ocserv.platform.agent.v1.ArtifactGrantV1
+	(*ArtifactChunk)(nil),                    // 67: ocserv.platform.agent.v1.ArtifactChunk
+	(*ServiceReload)(nil),                    // 68: ocserv.platform.agent.v1.ServiceReload
+	(*SyntheticNoop)(nil),                    // 69: ocserv.platform.agent.v1.SyntheticNoop
+	(*SyntheticEcho)(nil),                    // 70: ocserv.platform.agent.v1.SyntheticEcho
+	(*SimulationProbe)(nil),                  // 71: ocserv.platform.agent.v1.SimulationProbe
+	(*timestamppb.Timestamp)(nil),            // 72: google.protobuf.Timestamp
 }
 var file_ocserv_platform_agent_v1_agent_proto_depIdxs = []int32{
-	70, // 0: ocserv.platform.agent.v1.EnrollRequest.time:type_name -> google.protobuf.Timestamp
+	72, // 0: ocserv.platform.agent.v1.EnrollRequest.time:type_name -> google.protobuf.Timestamp
 	17, // 1: ocserv.platform.agent.v1.EnrollRequest.proof:type_name -> ocserv.platform.agent.v1.EnrollmentProofV1
 	20, // 2: ocserv.platform.agent.v1.EnrollRequest.sealing_keys:type_name -> ocserv.platform.agent.v1.SealingKeyDescriptorV1
 	0,  // 3: ocserv.platform.agent.v1.EnrollResponse.result:type_name -> ocserv.platform.agent.v1.HandshakeResult
-	70, // 4: ocserv.platform.agent.v1.SessionHandshake.time:type_name -> google.protobuf.Timestamp
+	72, // 4: ocserv.platform.agent.v1.SessionHandshake.time:type_name -> google.protobuf.Timestamp
 	20, // 5: ocserv.platform.agent.v1.SessionHandshake.sealing_keys:type_name -> ocserv.platform.agent.v1.SealingKeyDescriptorV1
 	1,  // 6: ocserv.platform.agent.v1.SealingKeyDescriptorV1.version:type_name -> ocserv.platform.agent.v1.SealedSecretVersion
 	2,  // 7: ocserv.platform.agent.v1.SealingKeyDescriptorV1.purpose:type_name -> ocserv.platform.agent.v1.SealedSecretPurpose
@@ -6419,21 +6583,21 @@ var file_ocserv_platform_agent_v1_agent_proto_depIdxs = []int32{
 	23, // 11: ocserv.platform.agent.v1.SessionHandshakeResponse.session_grant:type_name -> ocserv.platform.agent.v1.SessionGrantV1
 	24, // 12: ocserv.platform.agent.v1.SessionHandshakeResponse.connection_fence:type_name -> ocserv.platform.agent.v1.ConnectionFenceV2
 	3,  // 13: ocserv.platform.agent.v1.SessionGrantV1.version:type_name -> ocserv.platform.agent.v1.SessionGrantVersion
-	70, // 14: ocserv.platform.agent.v1.SessionGrantV1.issued_at:type_name -> google.protobuf.Timestamp
-	70, // 15: ocserv.platform.agent.v1.SessionGrantV1.expires_at:type_name -> google.protobuf.Timestamp
+	72, // 14: ocserv.platform.agent.v1.SessionGrantV1.issued_at:type_name -> google.protobuf.Timestamp
+	72, // 15: ocserv.platform.agent.v1.SessionGrantV1.expires_at:type_name -> google.protobuf.Timestamp
 	4,  // 16: ocserv.platform.agent.v1.ConnectionFenceV2.signature_version:type_name -> ocserv.platform.agent.v1.FenceSignatureVersion
-	70, // 17: ocserv.platform.agent.v1.ConnectionFenceV2.lease_until:type_name -> google.protobuf.Timestamp
-	70, // 18: ocserv.platform.agent.v1.ConnectionFenceV2.issued_at:type_name -> google.protobuf.Timestamp
-	70, // 19: ocserv.platform.agent.v1.ConnectionFenceV2.expires_at:type_name -> google.protobuf.Timestamp
+	72, // 17: ocserv.platform.agent.v1.ConnectionFenceV2.lease_until:type_name -> google.protobuf.Timestamp
+	72, // 18: ocserv.platform.agent.v1.ConnectionFenceV2.issued_at:type_name -> google.protobuf.Timestamp
+	72, // 19: ocserv.platform.agent.v1.ConnectionFenceV2.expires_at:type_name -> google.protobuf.Timestamp
 	4,  // 20: ocserv.platform.agent.v1.FenceBindingV2.signature_version:type_name -> ocserv.platform.agent.v1.FenceSignatureVersion
 	5,  // 21: ocserv.platform.agent.v1.FenceBindingV2.operation_kind:type_name -> ocserv.platform.agent.v1.FenceOperationKind
-	70, // 22: ocserv.platform.agent.v1.FenceBindingV2.issued_at:type_name -> google.protobuf.Timestamp
-	70, // 23: ocserv.platform.agent.v1.FenceBindingV2.expires_at:type_name -> google.protobuf.Timestamp
+	72, // 22: ocserv.platform.agent.v1.FenceBindingV2.issued_at:type_name -> google.protobuf.Timestamp
+	72, // 23: ocserv.platform.agent.v1.FenceBindingV2.expires_at:type_name -> google.protobuf.Timestamp
 	6,  // 24: ocserv.platform.agent.v1.AgentEvent.type:type_name -> ocserv.platform.agent.v1.AgentEventType
 	10, // 25: ocserv.platform.agent.v1.CommandAuthorizationProof.version:type_name -> ocserv.platform.agent.v1.CommandAuthorizationVersion
 	7,  // 26: ocserv.platform.agent.v1.CommandResult.state:type_name -> ocserv.platform.agent.v1.CommandResultState
-	70, // 27: ocserv.platform.agent.v1.CommandResult.accepted_at:type_name -> google.protobuf.Timestamp
-	70, // 28: ocserv.platform.agent.v1.CommandResult.completed_at:type_name -> google.protobuf.Timestamp
+	72, // 27: ocserv.platform.agent.v1.CommandResult.accepted_at:type_name -> google.protobuf.Timestamp
+	72, // 28: ocserv.platform.agent.v1.CommandResult.completed_at:type_name -> google.protobuf.Timestamp
 	9,  // 29: ocserv.platform.agent.v1.CommandResult.semantic_payload_hash_version:type_name -> ocserv.platform.agent.v1.SemanticPayloadHashVersion
 	29, // 30: ocserv.platform.agent.v1.CommandResult.privileged_result_proof:type_name -> ocserv.platform.agent.v1.PrivilegedResultProof
 	11, // 31: ocserv.platform.agent.v1.PrivilegedResultProof.version:type_name -> ocserv.platform.agent.v1.PrivdReceiptVersion
@@ -6443,15 +6607,15 @@ var file_ocserv_platform_agent_v1_agent_proto_depIdxs = []int32{
 	12, // 35: ocserv.platform.agent.v1.PrivdResultReceiptV1.command_kind:type_name -> ocserv.platform.agent.v1.PrivilegedCommandKind
 	13, // 36: ocserv.platform.agent.v1.PrivdResultReceiptV1.result_kind:type_name -> ocserv.platform.agent.v1.PrivilegedResultKind
 	7,  // 37: ocserv.platform.agent.v1.PrivdResultReceiptV1.terminal_state:type_name -> ocserv.platform.agent.v1.CommandResultState
-	70, // 38: ocserv.platform.agent.v1.PrivdResultReceiptV1.accepted_at:type_name -> google.protobuf.Timestamp
-	70, // 39: ocserv.platform.agent.v1.PrivdResultReceiptV1.completed_at:type_name -> google.protobuf.Timestamp
+	72, // 38: ocserv.platform.agent.v1.PrivdResultReceiptV1.accepted_at:type_name -> google.protobuf.Timestamp
+	72, // 39: ocserv.platform.agent.v1.PrivdResultReceiptV1.completed_at:type_name -> google.protobuf.Timestamp
 	31, // 40: ocserv.platform.agent.v1.PrivdResultReceiptV1.certificate:type_name -> ocserv.platform.agent.v1.PrivdCertificateReceiptBindingV1
 	11, // 41: ocserv.platform.agent.v1.PrivdAttestationRegistrationV1.version:type_name -> ocserv.platform.agent.v1.PrivdReceiptVersion
-	70, // 42: ocserv.platform.agent.v1.ObservedSnapshot.observed_at:type_name -> google.protobuf.Timestamp
+	72, // 42: ocserv.platform.agent.v1.ObservedSnapshot.observed_at:type_name -> google.protobuf.Timestamp
 	33, // 43: ocserv.platform.agent.v1.ObservedSnapshot.dropped:type_name -> ocserv.platform.agent.v1.TelemetryDropCounters
-	70, // 44: ocserv.platform.agent.v1.SessionObservation.connected_at:type_name -> google.protobuf.Timestamp
-	70, // 45: ocserv.platform.agent.v1.MetricSample.sampled_at:type_name -> google.protobuf.Timestamp
-	70, // 46: ocserv.platform.agent.v1.SecurityObservation.observed_at:type_name -> google.protobuf.Timestamp
+	72, // 44: ocserv.platform.agent.v1.SessionObservation.connected_at:type_name -> google.protobuf.Timestamp
+	72, // 45: ocserv.platform.agent.v1.MetricSample.sampled_at:type_name -> google.protobuf.Timestamp
+	72, // 46: ocserv.platform.agent.v1.SecurityObservation.observed_at:type_name -> google.protobuf.Timestamp
 	14, // 47: ocserv.platform.agent.v1.TelemetryBatch.priority:type_name -> ocserv.platform.agent.v1.TelemetryPriority
 	34, // 48: ocserv.platform.agent.v1.TelemetryBatch.snapshot:type_name -> ocserv.platform.agent.v1.ObservedSnapshot
 	35, // 49: ocserv.platform.agent.v1.TelemetryBatch.sessions:type_name -> ocserv.platform.agent.v1.SessionObservation
@@ -6460,17 +6624,17 @@ var file_ocserv_platform_agent_v1_agent_proto_depIdxs = []int32{
 	36, // 52: ocserv.platform.agent.v1.TelemetryBatch.ip_bans:type_name -> ocserv.platform.agent.v1.IpBanObservation
 	40, // 53: ocserv.platform.agent.v1.TelemetryBatch.users:type_name -> ocserv.platform.agent.v1.UserObservation
 	41, // 54: ocserv.platform.agent.v1.TelemetryBatch.groups:type_name -> ocserv.platform.agent.v1.GroupObservation
-	70, // 55: ocserv.platform.agent.v1.CommandEnvelope.issued_at:type_name -> google.protobuf.Timestamp
-	70, // 56: ocserv.platform.agent.v1.CommandEnvelope.expires_at:type_name -> google.protobuf.Timestamp
+	72, // 55: ocserv.platform.agent.v1.CommandEnvelope.issued_at:type_name -> google.protobuf.Timestamp
+	72, // 56: ocserv.platform.agent.v1.CommandEnvelope.expires_at:type_name -> google.protobuf.Timestamp
 	43, // 57: ocserv.platform.agent.v1.CommandEnvelope.session_disconnect:type_name -> ocserv.platform.agent.v1.SessionDisconnect
 	46, // 58: ocserv.platform.agent.v1.CommandEnvelope.user_create:type_name -> ocserv.platform.agent.v1.UserCreate
 	47, // 59: ocserv.platform.agent.v1.CommandEnvelope.user_disable:type_name -> ocserv.platform.agent.v1.UserDisable
 	51, // 60: ocserv.platform.agent.v1.CommandEnvelope.config_plan:type_name -> ocserv.platform.agent.v1.ConfigPlan
 	53, // 61: ocserv.platform.agent.v1.CommandEnvelope.config_apply:type_name -> ocserv.platform.agent.v1.ConfigApply
-	66, // 62: ocserv.platform.agent.v1.CommandEnvelope.service_reload:type_name -> ocserv.platform.agent.v1.ServiceReload
-	69, // 63: ocserv.platform.agent.v1.CommandEnvelope.simulation_probe:type_name -> ocserv.platform.agent.v1.SimulationProbe
-	67, // 64: ocserv.platform.agent.v1.CommandEnvelope.synthetic_noop:type_name -> ocserv.platform.agent.v1.SyntheticNoop
-	68, // 65: ocserv.platform.agent.v1.CommandEnvelope.synthetic_echo:type_name -> ocserv.platform.agent.v1.SyntheticEcho
+	68, // 62: ocserv.platform.agent.v1.CommandEnvelope.service_reload:type_name -> ocserv.platform.agent.v1.ServiceReload
+	71, // 63: ocserv.platform.agent.v1.CommandEnvelope.simulation_probe:type_name -> ocserv.platform.agent.v1.SimulationProbe
+	69, // 64: ocserv.platform.agent.v1.CommandEnvelope.synthetic_noop:type_name -> ocserv.platform.agent.v1.SyntheticNoop
+	70, // 65: ocserv.platform.agent.v1.CommandEnvelope.synthetic_echo:type_name -> ocserv.platform.agent.v1.SyntheticEcho
 	44, // 66: ocserv.platform.agent.v1.CommandEnvelope.session_terminate:type_name -> ocserv.platform.agent.v1.SessionTerminate
 	45, // 67: ocserv.platform.agent.v1.CommandEnvelope.ip_ban_remove:type_name -> ocserv.platform.agent.v1.IpBanRemove
 	49, // 68: ocserv.platform.agent.v1.CommandEnvelope.user_password_rotate:type_name -> ocserv.platform.agent.v1.UserPasswordRotate
@@ -6479,29 +6643,30 @@ var file_ocserv_platform_agent_v1_agent_proto_depIdxs = []int32{
 	55, // 71: ocserv.platform.agent.v1.CommandEnvelope.certificate_csr:type_name -> ocserv.platform.agent.v1.CertificateCsr
 	57, // 72: ocserv.platform.agent.v1.CommandEnvelope.certificate_p12:type_name -> ocserv.platform.agent.v1.CertificateP12
 	59, // 73: ocserv.platform.agent.v1.CommandEnvelope.certificate_revoke:type_name -> ocserv.platform.agent.v1.CertificateRevoke
-	8,  // 74: ocserv.platform.agent.v1.CommandEnvelope.delivery_mode:type_name -> ocserv.platform.agent.v1.CommandDeliveryMode
-	9,  // 75: ocserv.platform.agent.v1.CommandEnvelope.semantic_payload_hash_version:type_name -> ocserv.platform.agent.v1.SemanticPayloadHashVersion
-	27, // 76: ocserv.platform.agent.v1.CommandEnvelope.authorization:type_name -> ocserv.platform.agent.v1.CommandAuthorizationProof
-	24, // 77: ocserv.platform.agent.v1.CommandEnvelope.connection_fence:type_name -> ocserv.platform.agent.v1.ConnectionFenceV2
-	25, // 78: ocserv.platform.agent.v1.CommandEnvelope.fence_binding:type_name -> ocserv.platform.agent.v1.FenceBindingV2
-	21, // 79: ocserv.platform.agent.v1.UserCreate.sealed_password_v1:type_name -> ocserv.platform.agent.v1.SealedSecretV1
-	21, // 80: ocserv.platform.agent.v1.UserPasswordRotate.sealed_password_v1:type_name -> ocserv.platform.agent.v1.SealedSecretV1
-	21, // 81: ocserv.platform.agent.v1.CertificateP12.sealed_password_v1:type_name -> ocserv.platform.agent.v1.SealedSecretV1
-	70, // 82: ocserv.platform.agent.v1.CertificateP12.artifact_expires_at:type_name -> google.protobuf.Timestamp
-	64, // 83: ocserv.platform.agent.v1.ArtifactFetchRequest.grant:type_name -> ocserv.platform.agent.v1.ArtifactGrantV1
-	24, // 84: ocserv.platform.agent.v1.ArtifactFetchRequest.connection_fence:type_name -> ocserv.platform.agent.v1.ConnectionFenceV2
-	25, // 85: ocserv.platform.agent.v1.ArtifactFetchRequest.fence_binding:type_name -> ocserv.platform.agent.v1.FenceBindingV2
-	64, // 86: ocserv.platform.agent.v1.ArtifactConsumeRequest.grant:type_name -> ocserv.platform.agent.v1.ArtifactGrantV1
-	24, // 87: ocserv.platform.agent.v1.ArtifactConsumeRequest.connection_fence:type_name -> ocserv.platform.agent.v1.ConnectionFenceV2
-	25, // 88: ocserv.platform.agent.v1.ArtifactConsumeRequest.fence_binding:type_name -> ocserv.platform.agent.v1.FenceBindingV2
-	15, // 89: ocserv.platform.agent.v1.ArtifactGrantV1.version:type_name -> ocserv.platform.agent.v1.ArtifactGrantVersion
-	70, // 90: ocserv.platform.agent.v1.ArtifactGrantV1.issued_at:type_name -> google.protobuf.Timestamp
-	70, // 91: ocserv.platform.agent.v1.ArtifactGrantV1.expires_at:type_name -> google.protobuf.Timestamp
-	92, // [92:92] is the sub-list for method output_type
-	92, // [92:92] is the sub-list for method input_type
-	92, // [92:92] is the sub-list for extension type_name
-	92, // [92:92] is the sub-list for extension extendee
-	0,  // [0:92] is the sub-list for field type_name
+	61, // 74: ocserv.platform.agent.v1.CommandEnvelope.agent_upgrade:type_name -> ocserv.platform.agent.v1.AgentUpgrade
+	8,  // 75: ocserv.platform.agent.v1.CommandEnvelope.delivery_mode:type_name -> ocserv.platform.agent.v1.CommandDeliveryMode
+	9,  // 76: ocserv.platform.agent.v1.CommandEnvelope.semantic_payload_hash_version:type_name -> ocserv.platform.agent.v1.SemanticPayloadHashVersion
+	27, // 77: ocserv.platform.agent.v1.CommandEnvelope.authorization:type_name -> ocserv.platform.agent.v1.CommandAuthorizationProof
+	24, // 78: ocserv.platform.agent.v1.CommandEnvelope.connection_fence:type_name -> ocserv.platform.agent.v1.ConnectionFenceV2
+	25, // 79: ocserv.platform.agent.v1.CommandEnvelope.fence_binding:type_name -> ocserv.platform.agent.v1.FenceBindingV2
+	21, // 80: ocserv.platform.agent.v1.UserCreate.sealed_password_v1:type_name -> ocserv.platform.agent.v1.SealedSecretV1
+	21, // 81: ocserv.platform.agent.v1.UserPasswordRotate.sealed_password_v1:type_name -> ocserv.platform.agent.v1.SealedSecretV1
+	21, // 82: ocserv.platform.agent.v1.CertificateP12.sealed_password_v1:type_name -> ocserv.platform.agent.v1.SealedSecretV1
+	72, // 83: ocserv.platform.agent.v1.CertificateP12.artifact_expires_at:type_name -> google.protobuf.Timestamp
+	66, // 84: ocserv.platform.agent.v1.ArtifactFetchRequest.grant:type_name -> ocserv.platform.agent.v1.ArtifactGrantV1
+	24, // 85: ocserv.platform.agent.v1.ArtifactFetchRequest.connection_fence:type_name -> ocserv.platform.agent.v1.ConnectionFenceV2
+	25, // 86: ocserv.platform.agent.v1.ArtifactFetchRequest.fence_binding:type_name -> ocserv.platform.agent.v1.FenceBindingV2
+	66, // 87: ocserv.platform.agent.v1.ArtifactConsumeRequest.grant:type_name -> ocserv.platform.agent.v1.ArtifactGrantV1
+	24, // 88: ocserv.platform.agent.v1.ArtifactConsumeRequest.connection_fence:type_name -> ocserv.platform.agent.v1.ConnectionFenceV2
+	25, // 89: ocserv.platform.agent.v1.ArtifactConsumeRequest.fence_binding:type_name -> ocserv.platform.agent.v1.FenceBindingV2
+	15, // 90: ocserv.platform.agent.v1.ArtifactGrantV1.version:type_name -> ocserv.platform.agent.v1.ArtifactGrantVersion
+	72, // 91: ocserv.platform.agent.v1.ArtifactGrantV1.issued_at:type_name -> google.protobuf.Timestamp
+	72, // 92: ocserv.platform.agent.v1.ArtifactGrantV1.expires_at:type_name -> google.protobuf.Timestamp
+	93, // [93:93] is the sub-list for method output_type
+	93, // [93:93] is the sub-list for method input_type
+	93, // [93:93] is the sub-list for extension type_name
+	93, // [93:93] is the sub-list for extension extendee
+	0,  // [0:93] is the sub-list for field type_name
 }
 
 func init() { file_ocserv_platform_agent_v1_agent_proto_init() }
@@ -6528,6 +6693,7 @@ func file_ocserv_platform_agent_v1_agent_proto_init() {
 		(*CommandEnvelope_CertificateCsr)(nil),
 		(*CommandEnvelope_CertificateP12)(nil),
 		(*CommandEnvelope_CertificateRevoke)(nil),
+		(*CommandEnvelope_AgentUpgrade)(nil),
 	}
 	type x struct{}
 	out := protoimpl.TypeBuilder{
@@ -6535,7 +6701,7 @@ func file_ocserv_platform_agent_v1_agent_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_ocserv_platform_agent_v1_agent_proto_rawDesc), len(file_ocserv_platform_agent_v1_agent_proto_rawDesc)),
 			NumEnums:      16,
-			NumMessages:   54,
+			NumMessages:   56,
 			NumExtensions: 0,
 			NumServices:   0,
 		},

@@ -63,6 +63,10 @@ pub enum PrivilegedRequestMode {
 }
 
 /// Fixed request variants. There is intentionally no raw command or path variant.
+/// Controller-authorized mutations — including the agent upgrade preparation
+/// request — travel only as the signed `authorization_command` carrier; privd
+/// derives the typed operation from that payload after independent
+/// verification, so no unsigned upgrade operation exists in this allowlist.
 pub mod privd_request {
     use prost::Oneof;
 
@@ -188,6 +192,19 @@ pub struct CertificateRevokeResult {
     pub certificate_id: Vec<u8>,
     #[prost(bool, tag = "2")]
     pub key_removed: bool,
+}
+
+/// Mirrors the platform `AgentUpgradeScheduledResult`: privd accepted and
+/// scheduled the signed upgrade intent. It never claims the target version is
+/// running.
+#[derive(Clone, PartialEq, Eq, Message)]
+pub struct AgentUpgradeScheduledResult {
+    #[prost(bytes = "vec", tag = "1")]
+    pub operation_id: Vec<u8>,
+    #[prost(string, tag = "2")]
+    pub target_version: String,
+    #[prost(bytes = "vec", tag = "3")]
+    pub package_sha256: Vec<u8>,
 }
 
 #[derive(Clone, PartialEq, Eq, Message)]
@@ -579,7 +596,7 @@ pub struct PrivdResponse {
     /// Exactly one stable result or error.
     #[prost(
         oneof = "privd_response::Result",
-        tags = "10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25"
+        tags = "10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26"
     )]
     pub result: Option<privd_response::Result>,
 }
@@ -589,10 +606,10 @@ pub mod privd_response {
     use prost::Oneof;
 
     use super::{
-        ArtifactData, CertificateArtifactResult, CertificateCsrResult, CertificateRevokeResult,
-        ConfigApplyResult, ConfigFingerprint, ConfigPlanResult, DesiredEffectObservation,
-        GroupList, IpBanList, MutationResult, OcservVersion, PrivdError, ServiceStatus,
-        SessionList, UserList,
+        AgentUpgradeScheduledResult, ArtifactData, CertificateArtifactResult, CertificateCsrResult,
+        CertificateRevokeResult, ConfigApplyResult, ConfigFingerprint, ConfigPlanResult,
+        DesiredEffectObservation, GroupList, IpBanList, MutationResult, OcservVersion, PrivdError,
+        ServiceStatus, SessionList, UserList,
     };
 
     /// Result allowlist.
@@ -639,6 +656,9 @@ pub mod privd_response {
         /// One bounded artifact chunk read by privd under a verified grant.
         #[prost(message, tag = "25")]
         ArtifactData(ArtifactData),
+        /// Scheduled agent upgrade intent accepted from a verified signed command.
+        #[prost(message, tag = "26")]
+        AgentUpgradeScheduled(AgentUpgradeScheduledResult),
         /// Stable failure.
         #[prost(message, tag = "20")]
         Error(PrivdError),

@@ -281,6 +281,7 @@ enum PrivilegedCommandKind {
   PRIVILEGED_COMMAND_KIND_CERTIFICATE_CSR = 12;
   PRIVILEGED_COMMAND_KIND_CERTIFICATE_P12 = 13;
   PRIVILEGED_COMMAND_KIND_CERTIFICATE_REVOKE = 14;
+  PRIVILEGED_COMMAND_KIND_AGENT_UPGRADE = 15;
 }
 
 enum PrivilegedResultKind {
@@ -292,6 +293,9 @@ enum PrivilegedResultKind {
   PRIVILEGED_RESULT_KIND_CERTIFICATE_P12 = 5;
   PRIVILEGED_RESULT_KIND_CERTIFICATE_REVOKE = 6;
   PRIVILEGED_RESULT_KIND_ERROR = 7;
+  // The signed upgrade intent was accepted and scheduled by privd. It never
+  // attests that the target version is running.
+  PRIVILEGED_RESULT_KIND_AGENT_UPGRADE_SCHEDULED = 8;
 }
 
 // PrivilegedResultProof is opaque evidence to Agent and transportd. Only
@@ -462,6 +466,7 @@ message CommandEnvelope {
     CertificateCsr certificate_csr = 117;
     CertificateP12 certificate_p12 = 118;
     CertificateRevoke certificate_revoke = 119;
+    AgentUpgrade agent_upgrade = 128;
   }
   CommandDeliveryMode delivery_mode = 109;
   SemanticPayloadHashVersion semantic_payload_hash_version = 110;
@@ -604,6 +609,25 @@ message CertificateRevoke {
 message CertificateRevokeResult {
   bytes certificate_id = 1;
   bool key_removed = 2;
+}
+
+// AgentUpgrade authorizes exactly one immutable agent release identity. The
+// Controller signs the target version, package SHA-256, and architecture.
+// There is deliberately no URL, path, executable, command, argument,
+// environment, script, shell, or package-manager recipe on the wire.
+message AgentUpgrade {
+  string target_version = 1;
+  bytes package_sha256 = 2;
+  string architecture = 3;
+}
+
+// AgentUpgradeScheduledResult reports that the signed upgrade intent was
+// accepted and scheduled. It never claims the target version is running;
+// final upgrade success is established by later reconciliation.
+message AgentUpgradeScheduledResult {
+  bytes operation_id = 1;
+  string target_version = 2;
+  bytes package_sha256 = 3;
 }
 
 message ArtifactFetchRequest {

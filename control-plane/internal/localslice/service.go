@@ -1325,6 +1325,8 @@ func commandAuditAction(envelope *agentv1.CommandEnvelope) string {
 		return "certificate.private_key.export"
 	case *agentv1.CommandEnvelope_CertificateRevoke:
 		return "certificate.revoke"
+	case *agentv1.CommandEnvelope_AgentUpgrade:
+		return "agent.upgrade"
 	default:
 		return "synthetic.command"
 	}

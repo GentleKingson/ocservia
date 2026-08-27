@@ -367,6 +367,8 @@ func commandKind(envelope *agentv1.CommandEnvelope) agentv1.PrivilegedCommandKin
 		return agentv1.PrivilegedCommandKind_PRIVILEGED_COMMAND_KIND_CERTIFICATE_P12
 	case *agentv1.CommandEnvelope_CertificateRevoke:
 		return agentv1.PrivilegedCommandKind_PRIVILEGED_COMMAND_KIND_CERTIFICATE_REVOKE
+	case *agentv1.CommandEnvelope_AgentUpgrade:
+		return agentv1.PrivilegedCommandKind_PRIVILEGED_COMMAND_KIND_AGENT_UPGRADE
 	default:
 		return agentv1.PrivilegedCommandKind_PRIVILEGED_COMMAND_KIND_UNSPECIFIED
 	}
@@ -387,6 +389,8 @@ func resultKind(envelope *agentv1.CommandEnvelope, result *agentv1.CommandResult
 		return agentv1.PrivilegedResultKind_PRIVILEGED_RESULT_KIND_CERTIFICATE_P12
 	case agentv1.PrivilegedCommandKind_PRIVILEGED_COMMAND_KIND_CERTIFICATE_REVOKE:
 		return agentv1.PrivilegedResultKind_PRIVILEGED_RESULT_KIND_CERTIFICATE_REVOKE
+	case agentv1.PrivilegedCommandKind_PRIVILEGED_COMMAND_KIND_AGENT_UPGRADE:
+		return agentv1.PrivilegedResultKind_PRIVILEGED_RESULT_KIND_AGENT_UPGRADE_SCHEDULED
 	default:
 		return agentv1.PrivilegedResultKind_PRIVILEGED_RESULT_KIND_MUTATION
 	}

@@ -1573,6 +1573,25 @@ fn canonical_semantic_payload_hash(
                 )?,
             )
         }
+        Some(command_envelope::Payload::AgentUpgrade(payload)) => {
+            if !ocservia_contracts::agent_upgrade::valid_target_version(&payload.target_version)
+                || payload.package_sha256.len() != 32
+                || !ocservia_contracts::agent_upgrade::valid_architecture(&payload.architecture)
+            {
+                return Err(invalid_claim("agent_upgrade_invalid"));
+            }
+            (
+                128_u32,
+                canonical_strings_and_bytes(
+                    &[
+                        payload.target_version.as_str(),
+                        payload.architecture.as_str(),
+                    ],
+                    &payload.package_sha256,
+                    0,
+                )?,
+            )
+        }
         Some(command_envelope::Payload::SessionTerminate(payload)) => (
             112_u32,
             canonical_session_payload(&payload.session_id, &payload.boot_id)?,
@@ -1935,6 +1954,9 @@ fn payload_authorization(
         ),
         Some(command_envelope::Payload::CertificateRevoke(_)) => {
             (119, "certificate.revoke", "ocserv.certificate.revoke")
+        }
+        Some(command_envelope::Payload::AgentUpgrade(_)) => {
+            (128, "agent.upgrade", "ocserv.agent.upgrade.v1")
         }
         _ => return Err(AuthorizationError::PayloadUnsupported),
     })
@@ -2968,5 +2990,96 @@ mod tests {
             .verify_connection_fence_v2(&fence, &claims.node_id, &claims.endpoint_id, 1_700_000_100)
             .expect_err("V1-domain signature on V2 message");
         assert_eq!(err, AuthorizationError::SignatureInvalid);
+    }
+
+    #[test]
+    fn canonical_semantic_hash_v2_matches_shared_agent_upgrade_vector() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../../testdata/semantic-payload-hash-v2-agent-upgrade.json");
+        let fixture: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(&path)
+                .unwrap_or_else(|error| panic!("read {}: {error}", path.display())),
+        )
+        .expect("parse agent upgrade vector fixture");
+        let vector = fixture.get("vector").expect("vector");
+        assert_eq!(
+            vector["payload_kind"].as_u64(),
+            Some(128),
+            "agent upgrade payload kind is the oneof tag"
+        );
+        let node_id =
+            hex::decode(vector["node_id_hex"].as_str().expect("node ID")).expect("node ID hex");
+        let package_sha256 = hex::decode(
+            vector["package_sha256_hex"]
+                .as_str()
+                .expect("package digest"),
+        )
+        .expect("package digest hex");
+        let envelope = CommandEnvelope {
+            node_id,
+            expected_revision: vector["authorization_revision"]
+                .as_u64()
+                .expect("authorization revision"),
+            payload: Some(command_envelope::Payload::AgentUpgrade(
+                ocservia_contracts::generated::ocserv::platform::agent::v1::AgentUpgrade {
+                    target_version: vector["target_version"]
+                        .as_str()
+                        .expect("target version")
+                        .to_owned(),
+                    package_sha256,
+                    architecture: vector["architecture"]
+                        .as_str()
+                        .expect("architecture")
+                        .to_owned(),
+                },
+            )),
+            ..CommandEnvelope::default()
+        };
+        let digest = semantic_payload_hash_v2(&envelope).expect("v2 agent upgrade hash");
+        assert_eq!(
+            hex::encode(digest),
+            vector["expected_sha256"].as_str().expect("expected hash")
+        );
+        // Every release identity field changes the canonical digest, and any
+        // malformed identity is refused instead of hashed.
+        for (name, mutated) in [
+            ("target-version", "1.2.4"),
+            ("architecture", "amd64"),
+            ("bogus-version", "latest"),
+            ("short-version", "1.2"),
+        ] {
+            let mut changed = envelope.clone();
+            if let Some(command_envelope::Payload::AgentUpgrade(payload)) = changed.payload.as_mut()
+            {
+                if name.ends_with("version") {
+                    payload.target_version = mutated.to_owned();
+                } else {
+                    payload.architecture = mutated.to_owned();
+                }
+            }
+            let outcome = semantic_payload_hash_v2(&changed);
+            if name.starts_with("bogus") || name.starts_with("short") {
+                assert!(
+                    matches!(
+                        outcome,
+                        Err(AuthorizationError::ClaimsInvalid("agent_upgrade_invalid"))
+                    ),
+                    "{name} must be rejected"
+                );
+            } else {
+                let changed_digest = outcome.expect("valid mutated identity");
+                assert_ne!(changed_digest, digest, "{name} must be bound");
+            }
+        }
+        let mut short_digest = envelope;
+        if let Some(command_envelope::Payload::AgentUpgrade(payload)) =
+            short_digest.payload.as_mut()
+        {
+            payload.package_sha256.pop();
+        }
+        assert!(matches!(
+            semantic_payload_hash_v2(&short_digest),
+            Err(AuthorizationError::ClaimsInvalid("agent_upgrade_invalid"))
+        ));
     }
 }

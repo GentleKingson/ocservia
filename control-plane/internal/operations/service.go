@@ -67,6 +67,7 @@ const (
 	CertificateCSR    SyntheticKind = "certificate_csr"
 	CertificateP12    SyntheticKind = "certificate_p12"
 	CertificateRevoke SyntheticKind = "certificate_revoke"
+	AgentUpgrade      SyntheticKind = "agent_upgrade"
 )
 
 type CreateRequest struct {
@@ -94,6 +95,9 @@ type CreateRequest struct {
 	CertificateVersion  uint64
 	ArtifactID          uuid.UUID
 	RevocationReason    string
+	TargetVersion       string
+	PackageSHA256       []byte
+	Architecture        string
 	SessionID           string
 	BootID              string
 	IP                  string
@@ -338,6 +342,13 @@ func (s *Service) CreateSynthetic(ctx context.Context, request CreateRequest) (O
 		}
 	}
 	if request.Kind == ServiceReload {
+		approvalHash, _ := approvals.GenericBinding(request.Action, "node", request.NodeID)
+		if err := approvals.ConsumeBound(ctx, tx, request.ApprovalID, workspaceID, request.ActorIdentityID, request.Action, "node", request.NodeID, approvalHash); err != nil {
+			return Operation{}, false, err
+		}
+		request.ApprovalRequestHash = approvalHash
+	}
+	if request.Kind == AgentUpgrade {
 		approvalHash, _ := approvals.GenericBinding(request.Action, "node", request.NodeID)
 		if err := approvals.ConsumeBound(ctx, tx, request.ApprovalID, workspaceID, request.ActorIdentityID, request.Action, "node", request.NodeID, approvalHash); err != nil {
 			return Operation{}, false, err
@@ -1429,7 +1440,7 @@ func validateCreate(r CreateRequest) error {
 	if len(r.ApprovalRequestHash) != 0 && r.Kind != CertificateP12 && r.Kind != CertificateRevoke {
 		return ErrInvalidRequest
 	}
-	if r.Kind != SyntheticNoop && r.Kind != SyntheticEcho && r.Kind != SessionDisconnect && r.Kind != SessionTerminate && r.Kind != IPBanRemove && r.Kind != ServiceReload && r.Kind != ConfigPlan && r.Kind != ConfigApply && r.Kind != CertificateCSR && r.Kind != CertificateP12 && r.Kind != CertificateRevoke {
+	if r.Kind != SyntheticNoop && r.Kind != SyntheticEcho && r.Kind != SessionDisconnect && r.Kind != SessionTerminate && r.Kind != IPBanRemove && r.Kind != ServiceReload && r.Kind != ConfigPlan && r.Kind != ConfigApply && r.Kind != CertificateCSR && r.Kind != CertificateP12 && r.Kind != CertificateRevoke && r.Kind != AgentUpgrade {
 		return ErrInvalidRequest
 	}
 	if r.Kind == SyntheticNoop && r.Message != "" || len(r.Message) > 4096 {
@@ -1475,7 +1486,13 @@ func validateCreate(r CreateRequest) error {
 	if r.HoldDispatch && r.Kind != CertificateRevoke {
 		return ErrInvalidRequest
 	}
-	if r.Kind != ConfigPlan && r.Kind != ConfigApply && (len(r.Candidate) != 0 || len(r.CandidateHash) != 0 || len(r.ExpectedCurrentHash) != 0 || r.DesiredRevision != 0 || r.PlanRevision != 0 || r.PlanMetadata != nil || r.ApplyMetadata != nil || r.OcservVersion != "" || len(r.PlanCapabilities) != 0) {
+	if r.Kind != ConfigPlan && r.Kind != ConfigApply && r.Kind != AgentUpgrade && (len(r.Candidate) != 0 || len(r.CandidateHash) != 0 || len(r.ExpectedCurrentHash) != 0 || r.DesiredRevision != 0 || r.PlanRevision != 0 || r.PlanMetadata != nil || r.ApplyMetadata != nil || r.OcservVersion != "" || len(r.PlanCapabilities) != 0) {
+		return ErrInvalidRequest
+	}
+	if r.Kind == AgentUpgrade && (!semanticpayload.ValidAgentUpgradeTargetVersion(r.TargetVersion) || len(r.PackageSHA256) != sha256.Size || !semanticpayload.ValidAgentUpgradeArchitecture(r.Architecture)) {
+		return ErrInvalidRequest
+	}
+	if r.Kind != AgentUpgrade && (r.TargetVersion != "" || len(r.PackageSHA256) != 0 || r.Architecture != "") {
 		return ErrInvalidRequest
 	}
 	if r.Kind == SessionDisconnect || r.Kind == SessionTerminate {
@@ -1494,13 +1511,18 @@ func validateCreate(r CreateRequest) error {
 			return ErrInvalidRequest
 		}
 	}
-	if (r.Kind == SessionDisconnect || r.Kind == SessionTerminate || r.Kind == IPBanRemove || r.Kind == ServiceReload || r.Kind == ConfigPlan || r.Kind == ConfigApply || r.Kind == CertificateCSR || r.Kind == CertificateP12 || r.Kind == CertificateRevoke) && (r.Action == "" || r.Reason == "" || len(r.Reason) > 512) {
+	if (r.Kind == SessionDisconnect || r.Kind == SessionTerminate || r.Kind == IPBanRemove || r.Kind == ServiceReload || r.Kind == ConfigPlan || r.Kind == ConfigApply || r.Kind == CertificateCSR || r.Kind == CertificateP12 || r.Kind == CertificateRevoke || r.Kind == AgentUpgrade) && (r.Action == "" || r.Reason == "" || len(r.Reason) > 512) {
 		return ErrInvalidRequest
 	}
 	if r.Kind == ConfigPlan && r.ActorID == "" {
 		return ErrInvalidRequest
 	}
 	if r.Kind == ServiceReload && (r.ActorID == "" || r.ActorIdentityID == uuid.Nil || r.ActorSessionID == uuid.Nil || r.ApprovalID == uuid.Nil) {
+		return ErrInvalidRequest
+	}
+	// Upgrades replace root-owned agent binaries, so they demand the same
+	// independent approval boundary as other high-impact node operations.
+	if r.Kind == AgentUpgrade && (r.ActorID == "" || r.ActorIdentityID == uuid.Nil || r.ActorSessionID == uuid.Nil || r.ApprovalID == uuid.Nil) {
 		return ErrInvalidRequest
 	}
 	return nil
@@ -1551,6 +1573,9 @@ func requestHash(r CreateRequest) [32]byte {
 		ArtifactRequestHash  string        `json:"artifact_request_hash"`
 		ArtifactExpiresAt    string        `json:"artifact_expires_at"`
 		RevocationReason     string        `json:"revocation_reason"`
+		TargetVersion        string        `json:"target_version"`
+		PackageSHA256        string        `json:"package_sha256"`
+		Architecture         string        `json:"architecture"`
 	}{NodeID: r.NodeID, Kind: r.Kind, Message: r.Message, SessionID: r.SessionID, BootID: r.BootID, IP: r.IP,
 		ExpectedVersion: r.ExpectedVersion, SupersedePending: r.SupersedePending, HoldDispatch: r.HoldDispatch, TTLSeconds: int64(r.TTL / time.Second),
 		ActorID: actorID, Action: action, Reason: reason, ActorSessionID: r.ActorSessionID, ActorIdentityID: r.ActorIdentityID,
@@ -1560,7 +1585,7 @@ func requestHash(r CreateRequest) [32]byte {
 		CertificateID: idempotencyCertificateID(r), CommonName: r.CommonName, DNSNames: r.DNSNames, KeyBits: r.KeyBits, ArtifactID: r.ArtifactID,
 		CertificateChainHash: hashBytes(r.CertificateChain), SealedPasswordHash: sealedPasswordHash(r.SealedPassword), SecretKeyID: sealedPasswordKeyID(r.SealedPassword), SecretVersion: sealedPasswordVersion(r.SealedPassword), SecretPurpose: sealedPasswordPurpose(r.SealedPassword), CertificateVersion: r.CertificateVersion,
 		ArtifactTokenHash: artifactTokenHash(r.ArtifactMetadata), ArtifactRequestHash: artifactRequestHash(r.ArtifactMetadata), ArtifactExpiresAt: artifactExpiry(r.ArtifactMetadata),
-		RevocationReason: r.RevocationReason}
+		RevocationReason: r.RevocationReason, TargetVersion: r.TargetVersion, PackageSHA256: fmt.Sprintf("%x", r.PackageSHA256), Architecture: r.Architecture}
 	encoded, err := json.Marshal(intent)
 	if err != nil {
 		panic("marshal fixed idempotency intent: " + err.Error())
@@ -1707,6 +1732,9 @@ func marshalEnvelope(r CreateRequest, operationID, commandID uuid.UUID, authoriz
 	case CertificateRevoke:
 		payloadType = "certificate_revoke"
 		envelope.Payload = &agentv1.CommandEnvelope_CertificateRevoke{CertificateRevoke: &agentv1.CertificateRevoke{CertificateId: r.CertificateID[:], Reason: r.RevocationReason, CertificateVersion: r.CertificateVersion}}
+	case AgentUpgrade:
+		payloadType = "agent_upgrade"
+		envelope.Payload = &agentv1.CommandEnvelope_AgentUpgrade{AgentUpgrade: &agentv1.AgentUpgrade{TargetVersion: r.TargetVersion, PackageSha256: r.PackageSHA256, Architecture: r.Architecture}}
 	}
 	if err := semanticpayload.PopulateV2(envelope); err != nil {
 		return nil, "", fmt.Errorf("compute semantic payload hash: %w", err)
@@ -1748,6 +1776,8 @@ func capabilityFor(kind SyntheticKind) string {
 		return "ocserv.certificate.issue"
 	case CertificateRevoke:
 		return "ocserv.certificate.revoke"
+	case AgentUpgrade:
+		return "ocserv.agent.upgrade.v1"
 	default:
 		return ""
 	}

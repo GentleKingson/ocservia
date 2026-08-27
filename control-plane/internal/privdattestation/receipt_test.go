@@ -263,3 +263,18 @@ func makeRepeated(value byte, length int) []byte {
 	}
 	return result
 }
+
+func TestAgentUpgradeReceiptMapsToScheduledIntentKind(t *testing.T) {
+	envelope := &agentv1.CommandEnvelope{Payload: &agentv1.CommandEnvelope_AgentUpgrade{AgentUpgrade: &agentv1.AgentUpgrade{TargetVersion: "1.2.3", PackageSha256: make([]byte, sha256.Size), Architecture: "arm64"}}}
+	if commandKind(envelope) != agentv1.PrivilegedCommandKind_PRIVILEGED_COMMAND_KIND_AGENT_UPGRADE {
+		t.Fatal("agent upgrade envelope did not map to its privileged command kind")
+	}
+	succeeded := &agentv1.CommandResult{State: agentv1.CommandResultState_COMMAND_RESULT_STATE_SUCCEEDED}
+	if resultKind(envelope, succeeded) != agentv1.PrivilegedResultKind_PRIVILEGED_RESULT_KIND_AGENT_UPGRADE_SCHEDULED {
+		t.Fatal("successful upgrade result must attest a scheduled intent, never a running version")
+	}
+	failed := &agentv1.CommandResult{State: agentv1.CommandResultState_COMMAND_RESULT_STATE_FAILED}
+	if resultKind(envelope, failed) != agentv1.PrivilegedResultKind_PRIVILEGED_RESULT_KIND_ERROR {
+		t.Fatal("failed upgrade result must attest an error outcome")
+	}
+}

@@ -118,6 +118,7 @@ enum MessageKind {
     CertificateCsr,
     CertificateP12,
     CertificateRevoke,
+    AgentUpgrade,
     ServiceReload,
     SimulationProbe,
     SyntheticNoop,
@@ -145,6 +146,7 @@ impl MessageKind {
             Self::CertificateCsr => "CertificateCsr",
             Self::CertificateP12 => "CertificateP12",
             Self::CertificateRevoke => "CertificateRevoke",
+            Self::AgentUpgrade => "AgentUpgrade",
             Self::ServiceReload => "ServiceReload",
             Self::SimulationProbe => "SimulationProbe",
             Self::SyntheticNoop => "SyntheticNoop",
@@ -202,10 +204,11 @@ fn take_nested(bytes: &mut Bytes, message: &'static str) -> Result<Bytes, Strict
     Ok(bytes.split_to(length))
 }
 
+#[allow(clippy::too_many_lines)]
 fn field_kind(message: MessageKind, tag: u32) -> Option<FieldKind> {
     use FieldKind::{Nested, Scalar};
     use MessageKind::{
-        CertificateCsr, CertificateP12, CertificateRevoke, CommandAuthorizationProof,
+        AgentUpgrade, CertificateCsr, CertificateP12, CertificateRevoke, CommandAuthorizationProof,
         CommandEnvelope, ConfigApply, ConfigPlan, ConnectionFenceV2, FenceBindingV2, GroupApply,
         IpBanRemove, ServiceReload, SessionDisconnect, SessionTerminate, SimulationProbe,
         SyntheticEcho, SyntheticNoop, Timestamp, UserCreate, UserDisable, UserEnable,
@@ -238,6 +241,7 @@ fn field_kind(message: MessageKind, tag: u32) -> Option<FieldKind> {
             117 => Some(Nested(CertificateCsr)),
             118 => Some(Nested(CertificateP12)),
             119 => Some(Nested(CertificateRevoke)),
+            128 => Some(Nested(AgentUpgrade)),
             _ => None,
         },
         Timestamp => match tag {
@@ -294,6 +298,10 @@ fn field_kind(message: MessageKind, tag: u32) -> Option<FieldKind> {
         },
         CertificateRevoke => match tag {
             1 | 2 => Some(Scalar(LengthDelimited)),
+            _ => None,
+        },
+        AgentUpgrade => match tag {
+            1..=3 => Some(Scalar(LengthDelimited)),
             _ => None,
         },
         ServiceReload | SyntheticNoop => None,
