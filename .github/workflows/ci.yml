@@ -856,7 +856,10 @@ jobs:
           ARTIFACT_DIR: ${{ runner.temp }}/artifacts/native-ocserv
         run: |
           mkdir -p "${ARTIFACT_DIR}"
-          port=$((40000 + GITHUB_RUN_ID % 10000))
+          # Stay below the Linux ephemeral port range (32768+) so an
+          # unrelated outbound connection on the runner cannot collide with
+          # the Ocserv listener bind.
+          port=$((20000 + GITHUB_RUN_ID % 10000))
           native_target="${RUNNER_TEMP}/ocservia-native-target-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           native_status=0
           sudo --preserve-env=RUNNER_TEMP,ARTIFACT_DIR,RUSTC_WRAPPER,SCCACHE_GHA_ENABLED,SCCACHE_BASEDIRS,ACTIONS_CACHE_SERVICE_V2,ACTIONS_CACHE_URL,ACTIONS_RESULTS_URL,ACTIONS_RUNTIME_TOKEN env \

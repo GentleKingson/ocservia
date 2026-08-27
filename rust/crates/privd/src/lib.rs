@@ -2307,6 +2307,76 @@ mod tests {
         std::fs::remove_dir_all(directory).expect("cleanup test directory");
     }
 
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn concurrent_duplicate_agent_upgrades_both_attest_the_schedule() {
+        let signing = SigningKey::from_bytes(&[34; 32]);
+        let keys = keyring(&signing);
+        let node_id = *Uuid::now_v7().as_bytes();
+        let now = unix_seconds();
+        let command = signed_agent_upgrade(
+            &signing,
+            node_id,
+            now,
+            now + 60,
+            "1.2.3",
+            vec![0x71; 32],
+            host_architecture(),
+        );
+        let operation_id = command.operation_id.clone();
+        let (adapter, _, _, directory) = test_adapter();
+        let (upgrades, operations_dir) = upgrade_scheduler(&directory);
+
+        // Two identical deliveries race through the Pending journal and the
+        // durable schedule lock. The loser must observe the committed intent
+        // as an exact replay - never a terminal privd_rejected receipt.
+        let (first, second) = tokio::join!(
+            dispatch_upgrade(
+                command_request(command.clone()),
+                &node_id,
+                &keys,
+                &adapter,
+                &upgrades
+            ),
+            dispatch_upgrade(
+                command_request(command),
+                &node_id,
+                &keys,
+                &adapter,
+                &upgrades
+            )
+        );
+        for response in [&first, &second] {
+            assert!(
+                matches!(
+                    response.result,
+                    Some(privd_response::Result::AgentUpgradeScheduled(_))
+                ),
+                "concurrent duplicate must replay the scheduled intent, got {:?}",
+                response.result
+            );
+            let receipt = response
+                .privileged_result_proof
+                .as_ref()
+                .and_then(|proof| proof.receipt_v1.as_ref())
+                .expect("successful scheduled-intent receipt");
+            assert_eq!(
+                CommandResultState::try_from(receipt.terminal_state),
+                Ok(CommandResultState::Succeeded)
+            );
+        }
+        let durable = fs::read_dir(&operations_dir)
+            .expect("operations root")
+            .filter_map(Result::ok)
+            .filter(|entry| Uuid::parse_str(&entry.file_name().to_string_lossy()).is_ok())
+            .count();
+        assert_eq!(durable, 1);
+        assert_eq!(
+            durable_operation_state(&operations_dir, &operation_id),
+            "accepted"
+        );
+        std::fs::remove_dir_all(directory).expect("cleanup test directory");
+    }
+
     #[tokio::test]
     async fn agent_upgrade_prepare_refuses_a_second_active_operation() {
         let signing = SigningKey::from_bytes(&[32; 32]);

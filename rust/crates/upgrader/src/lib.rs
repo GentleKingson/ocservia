@@ -303,7 +303,7 @@ impl UpgradeScheduler {
         let intent_bytes = intent.render().into_bytes();
         let outcome = {
             let _schedule = UpgradeLock::acquire_schedule(&self.operations_dir)?;
-            cleanup_stale_temporaries(&operation_dir)?;
+            cleanup_stale_temporaries(&operation_dir, TempOwner::Schedule)?;
             match read_operation_pieces(&operation_dir)? {
                 OperationPieces::Absent => {
                     if self.active_sibling(Some(intent.operation_id))?.is_some() {
@@ -317,10 +317,15 @@ impl UpgradeScheduler {
                     if self.active_sibling(Some(intent.operation_id))?.is_some() {
                         return Err(UpgradeStoreError::ActiveConflict);
                     }
-                    write_atomic(&operation_dir.join("intent"), &intent_bytes)?;
+                    write_atomic(
+                        &operation_dir.join("intent"),
+                        &intent_bytes,
+                        TempOwner::Schedule,
+                    )?;
                     write_atomic(
                         &operation_dir.join("state"),
                         format!("{}\n", OperationState::Accepted.as_str()).as_bytes(),
+                        TempOwner::Schedule,
                     )?;
                     ScheduleOutcome::Scheduled
                 }
@@ -333,6 +338,7 @@ impl UpgradeScheduler {
                     write_atomic(
                         &operation_dir.join("state"),
                         format!("{}\n", OperationState::Accepted.as_str()).as_bytes(),
+                        TempOwner::Schedule,
                     )?;
                     ScheduleOutcome::Scheduled
                 }
@@ -409,10 +415,15 @@ enum OperationPieces {
 }
 
 fn commit_intent(operation_dir: &Path, intent_bytes: &[u8]) -> Result<(), UpgradeStoreError> {
-    write_atomic(&operation_dir.join("intent"), intent_bytes)?;
+    write_atomic(
+        &operation_dir.join("intent"),
+        intent_bytes,
+        TempOwner::Schedule,
+    )?;
     write_atomic(
         &operation_dir.join("state"),
         format!("{}\n", OperationState::Accepted.as_str()).as_bytes(),
+        TempOwner::Schedule,
     )?;
     Ok(())
 }
@@ -540,7 +551,7 @@ impl UpgradeRunner {
             return Ok(state);
         }
         let _execution = UpgradeLock::acquire_execution(&operations_root)?;
-        cleanup_stale_temporaries(&operation_dir)?;
+        cleanup_stale_temporaries(&operation_dir, TempOwner::Run)?;
         let state = load_state(&operation_dir)?;
         if state.is_terminal() {
             return Ok(state);
@@ -629,6 +640,7 @@ impl UpgradeRunner {
         write_atomic(
             &operation_dir.join("state"),
             format!("{}\n", OperationState::Running.as_str()).as_bytes(),
+            TempOwner::Run,
         )?;
         let outcome = if replaced {
             // Crash window: the replacement finished but the service restart
@@ -774,10 +786,15 @@ fn write_terminal(
     );
     let _ = writeln!(record, "completed_unix={}", completed.as_secs());
     let _ = writeln!(record, "detail={}", bounded_detail(detail));
-    write_atomic(&operation_dir.join("result"), record.as_bytes())?;
+    write_atomic(
+        &operation_dir.join("result"),
+        record.as_bytes(),
+        TempOwner::Run,
+    )?;
     write_atomic(
         &operation_dir.join("state"),
         format!("{}\n", state.as_str()).as_bytes(),
+        TempOwner::Run,
     )?;
     Ok(())
 }
@@ -835,13 +852,20 @@ impl UpgradeLock {
         Ok(file)
     }
 
+    /// The scheduling critical section covers only the durable read, active
+    /// scan, and intent commit - never the unit trigger - so a concurrent
+    /// scheduler for the same command waits briefly here and then observes
+    /// the committed intent as an exact replay instead of being rejected.
     fn acquire_schedule(operations_dir: &Path) -> Result<Self, UpgradeStoreError> {
         let file = Self::open(operations_dir, SCHEDULE_LOCK_FILE)?;
-        rustix::fs::flock(&file, FlockOperation::NonBlockingLockExclusive)
-            .map_err(|_| UpgradeStoreError::ActiveConflict)?;
+        rustix::fs::flock(&file, FlockOperation::LockExclusive)
+            .map_err(|failure| UpgradeStoreError::Io(io::Error::from(failure)))?;
         Ok(Self { _file: file })
     }
 
+    /// The execution lock stays non-blocking: a second runner instance for
+    /// one operation is genuinely conflicting, and systemd's own restart
+    /// convergence owns recovery after a crashed runner.
     fn acquire_execution(operations_dir: &Path) -> Result<Self, UpgradeStoreError> {
         let file = Self::open(operations_dir, EXECUTION_LOCK_FILE)?;
         rustix::fs::flock(&file, FlockOperation::NonBlockingLockExclusive)
@@ -1203,7 +1227,26 @@ fn create_operation_dir(operation_dir: &Path) -> Result<(), UpgradeStoreError> {
     validate_directory_strict(operation_dir)
 }
 
-fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), UpgradeStoreError> {
+/// Which lock owner an atomic temporary belongs to. The scheduler and the
+/// runner may hold their own locks on the same operation directory at the
+/// same time, so each side names - and therefore only ever cleans up - its
+/// own temporaries.
+#[derive(Clone, Copy, Debug)]
+enum TempOwner {
+    Schedule,
+    Run,
+}
+
+impl TempOwner {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Schedule => "schedule",
+            Self::Run => "run",
+        }
+    }
+}
+
+fn write_atomic(path: &Path, bytes: &[u8], owner: TempOwner) -> Result<(), UpgradeStoreError> {
     let directory = path.parent().ok_or(UpgradeStoreError::Unsafe(
         "durable record path needs a parent",
     ))?;
@@ -1213,7 +1256,7 @@ fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), UpgradeStoreError> {
         .ok_or(UpgradeStoreError::Unsafe(
             "durable record name must be UTF-8",
         ))?;
-    let temporary = directory.join(format!(".{name}.tmp.{}", Uuid::now_v7()));
+    let temporary = directory.join(format!(".{name}.{}.tmp.{}", owner.as_str(), Uuid::now_v7()));
     let mut file = OpenOptions::new()
         .write(true)
         .create_new(true)
@@ -1227,7 +1270,10 @@ fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), UpgradeStoreError> {
     sync_directory(directory)
 }
 
-fn cleanup_stale_temporaries(operation_dir: &Path) -> Result<(), UpgradeStoreError> {
+fn cleanup_stale_temporaries(
+    operation_dir: &Path,
+    owner: TempOwner,
+) -> Result<(), UpgradeStoreError> {
     match fs::symlink_metadata(operation_dir) {
         Ok(_) => validate_directory_strict(operation_dir)?,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
@@ -1241,11 +1287,11 @@ fn cleanup_stale_temporaries(operation_dir: &Path) -> Result<(), UpgradeStoreErr
             continue;
         };
         let stale = ["intent", "state", "result"].iter().any(|record| {
-            let legacy = format!(".{record}.tmp");
-            if name == legacy {
+            let prefix = format!(".{record}.{}.tmp", owner.as_str());
+            if name == prefix {
                 return true;
             }
-            name.strip_prefix(&format!("{legacy}."))
+            name.strip_prefix(&format!("{prefix}."))
                 .is_some_and(|suffix| {
                     Uuid::parse_str(suffix)
                         .is_ok_and(|id| id.get_version_num() == 7 && id.to_string() == suffix)
@@ -1341,6 +1387,7 @@ mod tests {
                 .join(operation.to_string())
                 .join("state"),
             format!("{}\n", state.as_str()).as_bytes(),
+            TempOwner::Run,
         )
         .expect("force durable state");
     }
@@ -1436,8 +1483,12 @@ mod tests {
             .mode(0o700)
             .create(&second_dir)
             .expect("second operation directory");
-        write_atomic(&second_dir.join("intent"), second.render().as_bytes())
-            .expect("crashed after intent commit");
+        write_atomic(
+            &second_dir.join("intent"),
+            second.render().as_bytes(),
+            TempOwner::Schedule,
+        )
+        .expect("crashed after intent commit");
         assert_eq!(
             scheduler(&root)
                 .schedule_and_trigger(&second)
@@ -1459,7 +1510,12 @@ mod tests {
             .mode(0o700)
             .create(&orphan_dir)
             .expect("orphan directory");
-        write_atomic(&orphan_dir.join("state"), b"accepted\n").expect("orphan state");
+        write_atomic(
+            &orphan_dir.join("state"),
+            b"accepted\n",
+            TempOwner::Schedule,
+        )
+        .expect("orphan state");
         assert!(matches!(
             scheduler(&root).schedule_and_trigger(&orphan),
             Err(UpgradeStoreError::Unsafe(_))
@@ -1477,9 +1533,13 @@ mod tests {
             .mode(0o700)
             .create(&operation_dir)
             .expect("operation directory");
-        write_atomic(&operation_dir.join("intent"), intent.render().as_bytes())
-            .expect("committed intent");
-        let stale = operation_dir.join(".state.tmp");
+        write_atomic(
+            &operation_dir.join("intent"),
+            intent.render().as_bytes(),
+            TempOwner::Schedule,
+        )
+        .expect("committed intent");
+        let stale = operation_dir.join(format!(".state.schedule.tmp.{}", Uuid::now_v7()));
         plant_stale_temporary(&stale, b"accepted\n");
 
         assert_eq!(
@@ -1493,6 +1553,35 @@ mod tests {
             load_state(&operation_dir).expect("recovered state"),
             OperationState::Accepted
         );
+        fs::remove_dir_all(&root).expect("cleanup");
+    }
+
+    #[test]
+    fn scheduler_cleanup_leaves_runner_temporaries_alone() {
+        let root = test_root("temp-ownership");
+        let intent = new_intent([0x61; 32]);
+        scheduler(&root)
+            .schedule_and_trigger(&intent)
+            .expect("schedule");
+        let operation_dir = operations_dir(&root).join(intent.operation_id.to_string());
+        // The runner owns these between create and rename while it executes
+        // the upgrade; the scheduler's replay cleanup must never remove them.
+        let runner_state = operation_dir.join(format!(".state.run.tmp.{}", Uuid::now_v7()));
+        let runner_result = operation_dir.join(format!(".result.run.tmp.{}", Uuid::now_v7()));
+        plant_stale_temporary(&runner_state, b"running\n");
+        plant_stale_temporary(&runner_result, b"partial result");
+        let scheduler_state = operation_dir.join(format!(".state.schedule.tmp.{}", Uuid::now_v7()));
+        plant_stale_temporary(&scheduler_state, b"accepted\n");
+
+        assert_eq!(
+            scheduler(&root)
+                .schedule_and_trigger(&intent)
+                .expect("exact replay"),
+            ScheduleOutcome::AlreadyScheduled
+        );
+        assert!(runner_state.exists());
+        assert!(runner_result.exists());
+        assert!(!scheduler_state.exists());
         fs::remove_dir_all(&root).expect("cleanup");
     }
 
@@ -1563,6 +1652,53 @@ mod tests {
     }
 
     #[test]
+    fn concurrent_same_intent_is_exact_replay() {
+        use std::sync::{Arc, Barrier};
+
+        let root = test_root("concurrent-replay");
+        let intent = new_intent([0x51; 32]);
+        let barrier = Arc::new(Barrier::new(3));
+        let handles = [intent.clone(), intent].map(|intent| {
+            let root = root.clone();
+            let barrier = Arc::clone(&barrier);
+            std::thread::spawn(move || {
+                barrier.wait();
+                scheduler(&root).schedule_and_trigger(&intent)
+            })
+        });
+        barrier.wait();
+        let outcomes = handles.map(|handle| handle.join().expect("scheduler thread"));
+        assert_eq!(
+            outcomes
+                .iter()
+                .filter(|outcome| matches!(outcome, Ok(ScheduleOutcome::Scheduled)))
+                .count(),
+            1
+        );
+        assert_eq!(
+            outcomes
+                .iter()
+                .filter(|outcome| matches!(outcome, Ok(ScheduleOutcome::AlreadyScheduled)))
+                .count(),
+            1
+        );
+        assert_eq!(
+            outcomes
+                .iter()
+                .filter(|outcome| matches!(outcome, Err(UpgradeStoreError::ActiveConflict)))
+                .count(),
+            0
+        );
+        let durable = fs::read_dir(operations_dir(&root))
+            .expect("operations root")
+            .filter_map(Result::ok)
+            .filter(|entry| Uuid::parse_str(&entry.file_name().to_string_lossy()).is_ok())
+            .count();
+        assert_eq!(durable, 1);
+        fs::remove_dir_all(&root).expect("cleanup");
+    }
+
+    #[test]
     fn terminal_history_does_not_block_new_scheduling() {
         let root = test_root("terminal-history");
         for index in 0..65 {
@@ -1601,7 +1737,7 @@ mod tests {
             Err(UpgradeStoreError::Unsafe(_))
         ));
         fs::remove_file(&intent_path).expect("remove symlink");
-        write_atomic(&intent_path, &trusted).expect("restore intent");
+        write_atomic(&intent_path, &trusted, TempOwner::Schedule).expect("restore intent");
 
         fs::remove_file(&state_path).expect("remove state");
         fs::write(&state_path, "accepted\n").expect("loose state");
@@ -1713,14 +1849,17 @@ mod tests {
             .schedule_and_trigger(&intent)
             .expect("schedule");
         let operation_dir = operations_dir(&root).join(intent.operation_id.to_string());
-        let stale = operation_dir.join(format!(".result.tmp.{}", Uuid::now_v7()));
+        let stale = operation_dir.join(format!(".result.run.tmp.{}", Uuid::now_v7()));
         plant_stale_temporary(&stale, b"incomplete result");
+        let scheduler_state = operation_dir.join(format!(".state.schedule.tmp.{}", Uuid::now_v7()));
+        plant_stale_temporary(&scheduler_state, b"accepted\n");
 
         let failure = UpgradeRunner::new(root.clone())
             .run(&intent.operation_id.to_string())
             .expect_err("empty spool fails after recovery");
         assert!(matches!(failure, UpgradeStoreError::Package(_)));
         assert!(!stale.exists());
+        assert!(scheduler_state.exists());
         assert_eq!(
             load_state(&operation_dir).expect("terminal state"),
             OperationState::Failed
