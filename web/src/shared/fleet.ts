@@ -22,6 +22,7 @@ import {
   removeIpBan,
   terminateSession,
   probeAuthentication,
+  upgradeNodeAgent,
   workspaceContext,
   workspaceChangedEvent,
   listNodeUserGroupState,
@@ -41,6 +42,9 @@ const terminalStates = new Set([
   "drifted",
   "superseded",
 ]);
+// A reconciled agent upgrade ends in one of the family outcomes; unknown is
+// terminal there because no retry of the same upgrade may be inferred.
+const upgradeTerminalStates = new Set([...terminalStates, "unknown"]);
 const recoveryPollDelays = [1_500, 3_000, 5_000] as const;
 
 function pollDelay(state: Operation["state"], recoveryAttempt: number): number {
@@ -331,6 +335,7 @@ export const useFleetStore = defineStore("fleet", () => {
       node: NodeObservedState,
       signal: AbortSignal,
     ) => Promise<Operation>,
+    terminal: Set<string> = terminalStates,
   ): Promise<void> {
     if (!selected.value || operationTracking.value) return;
     cancelRequest(operationController);
@@ -352,7 +357,7 @@ export const useFleetStore = defineStore("fleet", () => {
       latestOperation.value = currentOperation;
       activeOperation.value = currentOperation;
       let recoveryAttempt = 0;
-      while (!terminalStates.has(currentOperation.state)) {
+      while (!terminal.has(currentOperation.state)) {
         const recovering = currentOperation.state === "unknown";
         await waitForPoll(
           pollDelay(currentOperation.state, recoveryAttempt),
@@ -421,6 +426,18 @@ export const useFleetStore = defineStore("fleet", () => {
   async function reload(reason: string, approvalId: string): Promise<void> {
     await runOperation((node, signal) =>
       reloadService(node, reason, approvalId, signal),
+    );
+  }
+
+  async function upgradeAgent(
+    targetVersion: string,
+    reason: string,
+    approvalId: string,
+  ): Promise<void> {
+    await runOperation(
+      (node, signal) =>
+        upgradeNodeAgent(node, targetVersion, reason, approvalId, signal),
+      upgradeTerminalStates,
     );
   }
 
@@ -602,6 +619,7 @@ export const useFleetStore = defineStore("fleet", () => {
     terminateSession: terminate,
     removeIpBan: unban,
     reloadService: reload,
+    upgradeAgent,
     createUser: createUserAction,
     disableUser: disableUserAction,
     enableUser: enableUserAction,

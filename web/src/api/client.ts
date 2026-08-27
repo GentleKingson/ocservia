@@ -678,3 +678,25 @@ export async function reloadService(
     requestInit(signal),
   );
 }
+
+// The browser only names the trusted release; the Controller resolves the
+// package digest from its operator-provisioned catalog, and the reconciled
+// terminal outcome (including the conservative unknown) arrives through the
+// operation being tracked.
+export async function upgradeNodeAgent(
+  node: NodeObservedState,
+  targetVersion: string,
+  reason: string,
+  approvalId: string,
+  signal?: AbortSignal,
+): Promise<Operation> {
+  return operations.upgradeNodeAgent(
+    {
+      nodeId: node.id,
+      idempotencyKey: newIdempotencyKey(),
+      ifMatch: `"revision-${String(node.version)}"`,
+      agentUpgradeRequest: { targetVersion, approvalId, reason },
+    },
+    requestInit(signal),
+  );
+}

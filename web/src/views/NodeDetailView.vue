@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import {
   ArrowLeft,
+  ArrowUpCircle,
   Ban,
   Cable,
   CircleStop,
@@ -50,6 +51,7 @@ import {
 import UserPolicyFields from "../upstream/UserPolicyFields.vue";
 import { recoveryDialogKind } from "../shared/desired-recovery";
 import { useFleetStore } from "../shared/fleet";
+import { operationStatusKey } from "../shared/operation-status";
 import { workspaceChangedEvent } from "../api/client";
 
 const route = useRoute();
@@ -67,7 +69,7 @@ const detailState = ref<"loading" | "unavailable" | "not-found">("loading");
 let detailSequence = 0;
 
 const pendingAction = ref<{
-  kind: "disconnect" | "terminate" | "unban" | "reload";
+  kind: "disconnect" | "terminate" | "unban" | "reload" | "upgradeAgent";
   target: string;
   label: string;
 }>();
@@ -180,12 +182,14 @@ function pathRtt(node: NodeObservedState): string {
   return node.path ? String(Math.round(node.path.rttMs)) : "";
 }
 
-function operationLabel(state: string): string {
-  return "operation_" + state;
-}
+const upgradeEligible = computed(
+  () =>
+    Boolean(currentNode.value?.agentUpgradeEligible) &&
+    Boolean(currentNode.value?.recommendedAgentVersion),
+);
 
 function openAction(
-  kind: "disconnect" | "terminate" | "unban" | "reload",
+  kind: "disconnect" | "terminate" | "unban" | "reload" | "upgradeAgent",
   target: string,
   label: string,
 ): void {
@@ -205,6 +209,12 @@ async function submitAction(): Promise<void> {
     await fleet.terminateSession(action.target, explanation);
   else if (action.kind === "unban")
     await fleet.removeIpBan(action.target, explanation);
+  else if (action.kind === "upgradeAgent")
+    await fleet.upgradeAgent(
+      action.target,
+      explanation,
+      approvalId.value.trim(),
+    );
   else await fleet.reloadService(explanation, approvalId.value.trim());
 }
 
@@ -633,6 +643,22 @@ async function revokeCurrentCertificate(): Promise<void> {
             >
               <Power :size="15" />{{ $t("reload") }}
             </button>
+            <button
+              v-if="upgradeEligible"
+              type="button"
+              data-testid="upgrade-agent"
+              :disabled="operationBusy"
+              :title="$t('upgradeAgentTitle')"
+              @click="
+                openAction(
+                  'upgradeAgent',
+                  currentNode.recommendedAgentVersion ?? '',
+                  $t('upgradeAgentTitle'),
+                )
+              "
+            >
+              <ArrowUpCircle :size="15" />{{ $t("upgradeAgent") }}
+            </button>
           </div>
           <div
             v-if="fleet.latestOperation"
@@ -641,8 +667,11 @@ async function revokeCurrentCertificate(): Promise<void> {
           >
             <span>{{ $t("latestOperation") }}</span>
             <strong :class="fleet.latestOperation.state">{{
-              $t(operationLabel(fleet.latestOperation.state))
+              $t(operationStatusKey(fleet.latestOperation))
             }}</strong>
+            <code v-if="fleet.latestOperation.agentUpgradeTargetVersion">{{
+              fleet.latestOperation.agentUpgradeTargetVersion
+            }}</code>
             <button
               v-if="
                 fleet.operationTracking &&
@@ -1154,6 +1183,13 @@ async function revokeCurrentCertificate(): Promise<void> {
           <h2>{{ pendingAction.label }}</h2>
           <code v-if="pendingAction.target">{{ pendingAction.target }}</code>
         </header>
+        <template v-if="pendingAction.kind === 'upgradeAgent'">
+          <label for="upgrade-target">{{ $t("targetVersion") }}</label>
+          <output id="upgrade-target" class="read-only-value">{{
+            pendingAction.target
+          }}</output>
+          <p class="dialog-hint">{{ $t("upgradeTargetReadOnly") }}</p>
+        </template>
         <label for="operation-reason">{{ $t("reason") }}</label>
         <textarea
           id="operation-reason"
@@ -1161,7 +1197,12 @@ async function revokeCurrentCertificate(): Promise<void> {
           maxlength="512"
           required
         ></textarea>
-        <template v-if="pendingAction.kind === 'reload'">
+        <template
+          v-if="
+            pendingAction.kind === 'reload' ||
+            pendingAction.kind === 'upgradeAgent'
+          "
+        >
           <label for="approval-id">{{ $t("approvalId") }}</label>
           <input
             id="approval-id"
@@ -1179,7 +1220,9 @@ async function revokeCurrentCertificate(): Promise<void> {
             class="primary"
             :disabled="
               !reason.trim() ||
-              (pendingAction.kind === 'reload' && !approvalId.trim())
+              ((pendingAction.kind === 'reload' ||
+                pendingAction.kind === 'upgradeAgent') &&
+                !approvalId.trim())
             "
           >
             {{ $t("confirm") }}

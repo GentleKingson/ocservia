@@ -16,6 +16,10 @@ interface OpenApiDocument {
     schemas?: {
       UuidV7?: { pattern?: unknown };
       Problem?: { required?: unknown };
+      AgentUpgradeRequest?: {
+        required?: unknown;
+        properties?: Record<string, unknown>;
+      };
       NodeObservedState?: {
         required?: unknown;
         properties?: {
@@ -85,7 +89,7 @@ describe("OpenAPI invariants", () => {
     });
   });
 
-  it("publishes only the four typed controlled operation routes", async () => {
+  it("publishes only the five typed controlled operation routes", async () => {
     const source = await readFile(
       resolve(import.meta.dirname, "../../openapi/openapi.yaml"),
       "utf8",
@@ -97,12 +101,33 @@ describe("OpenAPI invariants", () => {
       "/nodes/{node_id}/sessions/{session_id}:terminate",
       "/nodes/{node_id}/ip-bans/{ip}:remove",
       "/nodes/{node_id}/service:reload",
+      "/nodes/{node_id}/agent-upgrade",
     ]) {
       expect(document.paths?.[path]?.post).toBeDefined();
     }
     expect(source).not.toMatch(
       /shell|docker\.sock|systemctl_command|occtl_command/,
     );
+  });
+
+  it("never lets the browser supply upgrade package metadata", async () => {
+    const source = await readFile(
+      resolve(import.meta.dirname, "../../openapi/openapi.yaml"),
+      "utf8",
+    );
+    const schemas = (parse(source) as OpenApiDocument).components?.schemas;
+
+    expect(schemas?.AgentUpgradeRequest?.required).toEqual([
+      "target_version",
+      "approval_id",
+      "reason",
+    ]);
+    expect(
+      Object.keys(schemas?.AgentUpgradeRequest?.properties ?? {}),
+    ).not.toContain("package_sha256");
+    expect(
+      Object.keys(schemas?.AgentUpgradeRequest?.properties ?? {}),
+    ).not.toContain("url");
   });
 
   it("publishes the server-derived agent version state", async () => {

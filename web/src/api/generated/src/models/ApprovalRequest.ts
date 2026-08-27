@@ -20,6 +20,13 @@ import {
   ApprovalRequestCertificateToJSON,
   ApprovalRequestCertificateToJSONTyped,
 } from "./ApprovalRequestCertificate";
+import type { ApprovalRequestAgentUpgrade } from "./ApprovalRequestAgentUpgrade";
+import {
+  ApprovalRequestAgentUpgradeFromJSON,
+  ApprovalRequestAgentUpgradeFromJSONTyped,
+  ApprovalRequestAgentUpgradeToJSON,
+  ApprovalRequestAgentUpgradeToJSONTyped,
+} from "./ApprovalRequestAgentUpgrade";
 import type { NodeApproval } from "./NodeApproval";
 import {
   NodeApprovalFromJSON,
@@ -102,6 +109,12 @@ export interface ApprovalRequest {
    * @memberof ApprovalRequest
    */
   roleBinding?: ApprovalRequestRoleBinding;
+  /**
+   *
+   * @type {ApprovalRequestAgentUpgrade}
+   * @memberof ApprovalRequest
+   */
+  agentUpgrade?: ApprovalRequestAgentUpgrade;
 }
 
 /**
@@ -162,6 +175,10 @@ export function ApprovalRequestFromJSONTyped(
       json["role_binding"] == null
         ? undefined
         : ApprovalRequestRoleBindingFromJSON(json["role_binding"]),
+    agentUpgrade:
+      json["agent_upgrade"] == null
+        ? undefined
+        : ApprovalRequestAgentUpgradeFromJSON(json["agent_upgrade"]),
   };
 }
 
@@ -190,5 +207,6 @@ export function ApprovalRequestToJSONTyped(
     node_approval: NodeApprovalToJSON(value["nodeApproval"]),
     certificate: ApprovalRequestCertificateToJSON(value["certificate"]),
     role_binding: ApprovalRequestRoleBindingToJSON(value["roleBinding"]),
+    agent_upgrade: ApprovalRequestAgentUpgradeToJSON(value["agentUpgrade"]),
   };
 }

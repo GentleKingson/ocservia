@@ -1,8 +1,10 @@
 /* tslint:disable */
 /* eslint-disable */
+export * from "./AgentUpgradeRequest";
 export * from "./Approval";
 export * from "./ApprovalDecision";
 export * from "./ApprovalRequest";
+export * from "./ApprovalRequestAgentUpgrade";
 export * from "./ApprovalRequestCertificate";
 export * from "./ApprovalRequestRoleBinding";
 export * from "./ApprovalRequestSummary";

@@ -14,6 +14,11 @@
 
 import * as runtime from "../runtime";
 import {
+  type AgentUpgradeRequest,
+  AgentUpgradeRequestFromJSON,
+  AgentUpgradeRequestToJSON,
+} from "../models/AgentUpgradeRequest";
+import {
   type Approval,
   ApprovalFromJSON,
   ApprovalToJSON,
@@ -235,6 +240,13 @@ export interface TerminateNodeSessionRequest {
   sessionId: string;
   idempotencyKey: string;
   controlledOperationRequest: ControlledOperationRequest;
+  ifMatch?: string;
+}
+
+export interface UpgradeNodeAgentRequest {
+  nodeId: string;
+  idempotencyKey: string;
+  agentUpgradeRequest: AgentUpgradeRequest;
   ifMatch?: string;
 }
 
@@ -2133,6 +2145,105 @@ export class OperationsApi extends runtime.BaseAPI {
     initOverrides?: RequestInit | runtime.InitOverrideFunction,
   ): Promise<Operation> {
     const response = await this.terminateNodeSessionRaw(
+      requestParameters,
+      initOverrides,
+    );
+    return await response.value();
+  }
+
+  /**
+   * Creates request options for upgradeNodeAgent without sending the request
+   */
+  async upgradeNodeAgentRequestOpts(
+    requestParameters: UpgradeNodeAgentRequest,
+  ): Promise<runtime.RequestOpts> {
+    if (requestParameters["nodeId"] == null) {
+      throw new runtime.RequiredError(
+        "nodeId",
+        'Required parameter "nodeId" was null or undefined when calling upgradeNodeAgent().',
+      );
+    }
+
+    if (requestParameters["idempotencyKey"] == null) {
+      throw new runtime.RequiredError(
+        "idempotencyKey",
+        'Required parameter "idempotencyKey" was null or undefined when calling upgradeNodeAgent().',
+      );
+    }
+
+    if (requestParameters["agentUpgradeRequest"] == null) {
+      throw new runtime.RequiredError(
+        "agentUpgradeRequest",
+        'Required parameter "agentUpgradeRequest" was null or undefined when calling upgradeNodeAgent().',
+      );
+    }
+
+    const queryParameters: any = {};
+
+    const headerParameters: runtime.HTTPHeaders = {};
+
+    headerParameters["Content-Type"] = "application/json";
+
+    if (requestParameters["idempotencyKey"] != null) {
+      headerParameters["Idempotency-Key"] = String(
+        requestParameters["idempotencyKey"],
+      );
+    }
+
+    if (requestParameters["ifMatch"] != null) {
+      headerParameters["If-Match"] = String(requestParameters["ifMatch"]);
+    }
+
+    if (this.configuration && this.configuration.accessToken) {
+      const token = this.configuration.accessToken;
+      const tokenString = await token("bearerAuth", []);
+
+      if (tokenString) {
+        headerParameters["Authorization"] = `Bearer ${tokenString}`;
+      }
+    }
+
+    let urlPath = `/nodes/{node_id}/agent-upgrade`;
+    urlPath = urlPath.replace(
+      "{node_id}",
+      encodeURIComponent(String(requestParameters["nodeId"])),
+    );
+
+    return {
+      path: urlPath,
+      method: "POST",
+      headers: headerParameters,
+      query: queryParameters,
+      body: AgentUpgradeRequestToJSON(requestParameters["agentUpgradeRequest"]),
+    };
+  }
+
+  /**
+   * Creates an agent upgrade operation whose package identity resolves server-side from the trusted release catalog for the node\'s observed architecture. The browser never supplies a digest, URL, or path. The scheduling acknowledgement is not success: the operation reaches a terminal state only through reconciliation of the durable local outcome, node freshness, and the observed target version.
+   * Start one reconciled single-node agent upgrade
+   */
+  async upgradeNodeAgentRaw(
+    requestParameters: UpgradeNodeAgentRequest,
+    initOverrides?: RequestInit | runtime.InitOverrideFunction,
+  ): Promise<runtime.ApiResponse<Operation>> {
+    const requestOptions =
+      await this.upgradeNodeAgentRequestOpts(requestParameters);
+    const response = await this.request(requestOptions, initOverrides);
+
+    return new runtime.JSONApiResponse(response, (jsonValue) =>
+      OperationFromJSON(jsonValue),
+    );
+  }
+
+  /**
+   * Creates an agent upgrade operation whose package identity resolves server-side from the trusted release catalog for the node\'s observed architecture. The browser never supplies a digest, URL, or path. The scheduling acknowledgement is not success: the operation reaches a terminal state only through reconciliation of the durable local outcome, node freshness, and the observed target version.
+   * Start one reconciled single-node agent upgrade
+   */
+  async upgradeNodeAgent(
+    requestParameters: UpgradeNodeAgentRequest,
+    initOverrides?: RequestInit | runtime.InitOverrideFunction,
+  ): Promise<Operation> {
+    const response = await this.upgradeNodeAgentRaw(
       requestParameters,
       initOverrides,
     );

@@ -113,6 +113,18 @@ export interface NodeObservedState {
    */
   recommendedAgentVersion?: string;
   /**
+   * Node package architecture reported by the agent heartbeat.
+   * @type {NodeObservedStateArchitectureEnum}
+   * @memberof NodeObservedState
+   */
+  architecture?: NodeObservedStateArchitectureEnum;
+  /**
+   * Read-time derivation gating the single-node upgrade workflow: upgrade_available version state, online fresh node with the approved upgrade capability, a trusted release for its architecture, and no conflicting active upgrade.
+   * @type {boolean}
+   * @memberof NodeObservedState
+   */
+  agentUpgradeEligible?: boolean;
+  /**
    *
    * @type {string}
    * @memberof NodeObservedState
@@ -203,6 +215,17 @@ export type NodeObservedStateAgentVersionStateEnum =
   (typeof NodeObservedStateAgentVersionStateEnum)[keyof typeof NodeObservedStateAgentVersionStateEnum];
 
 /**
+ * @export
+ */
+export const NodeObservedStateArchitectureEnum = {
+  Amd64: "amd64",
+  Arm64: "arm64",
+  Empty: "",
+} as const;
+export type NodeObservedStateArchitectureEnum =
+  (typeof NodeObservedStateArchitectureEnum)[keyof typeof NodeObservedStateArchitectureEnum];
+
+/**
  * Check if a given object implements the NodeObservedState interface.
  */
 export function instanceOfNodeObservedState(
@@ -274,6 +297,12 @@ export function NodeObservedStateFromJSONTyped(
       json["recommended_agent_version"] == null
         ? undefined
         : json["recommended_agent_version"],
+    architecture:
+      json["architecture"] == null ? undefined : json["architecture"],
+    agentUpgradeEligible:
+      json["agent_upgrade_eligible"] == null
+        ? undefined
+        : json["agent_upgrade_eligible"],
     ocservVersion:
       json["ocserv_version"] == null ? undefined : json["ocserv_version"],
     osRelease: json["os_release"] == null ? undefined : json["os_release"],
@@ -320,6 +349,8 @@ export function NodeObservedStateToJSONTyped(
     agent_version: value["agentVersion"],
     agent_version_state: value["agentVersionState"],
     recommended_agent_version: value["recommendedAgentVersion"],
+    architecture: value["architecture"],
+    agent_upgrade_eligible: value["agentUpgradeEligible"],
     ocserv_version: value["ocservVersion"],
     os_release: value["osRelease"],
     ocserv: value["ocserv"],
