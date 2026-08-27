@@ -44,7 +44,6 @@ pub const DEFAULT_VERIFIER: &str = "/usr/libexec/ocservia/ocservia-agent-verify"
 pub const UPGRADE_UNIT_TEMPLATE: &str = "ocservia-upgrader@{operation}.service";
 
 const MAX_DETAIL_BYTES: usize = 160;
-const MAX_SIBLING_OPERATIONS: usize = 64;
 const MAX_SPOOL_PACKAGE_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 
 /// The immutable release identity and command binding of one scheduled
@@ -300,43 +299,47 @@ impl UpgradeScheduler {
         ensure_operations_root(&self.operations_dir)?;
         let operation_dir = self.operations_dir.join(intent.operation_id.to_string());
         let intent_bytes = intent.render().into_bytes();
-        let outcome = match read_operation_pieces(&operation_dir)? {
-            OperationPieces::Absent => {
-                if self.active_sibling(Some(intent.operation_id))?.is_some() {
-                    return Err(UpgradeStoreError::ActiveConflict);
+        let outcome = {
+            let _active = ActiveLock::acquire(&self.operations_dir)?;
+            cleanup_stale_temporaries(&operation_dir)?;
+            match read_operation_pieces(&operation_dir)? {
+                OperationPieces::Absent => {
+                    if self.active_sibling(Some(intent.operation_id))?.is_some() {
+                        return Err(UpgradeStoreError::ActiveConflict);
+                    }
+                    create_operation_dir(&operation_dir)?;
+                    commit_intent(&operation_dir, &intent_bytes)?;
+                    ScheduleOutcome::Scheduled
                 }
-                create_operation_dir(&operation_dir)?;
-                commit_intent(&operation_dir, &intent_bytes)?;
-                ScheduleOutcome::Scheduled
-            }
-            OperationPieces::Partial { intent: None } => {
-                if self.active_sibling(Some(intent.operation_id))?.is_some() {
-                    return Err(UpgradeStoreError::ActiveConflict);
+                OperationPieces::Partial { intent: None } => {
+                    if self.active_sibling(Some(intent.operation_id))?.is_some() {
+                        return Err(UpgradeStoreError::ActiveConflict);
+                    }
+                    write_atomic(&operation_dir.join("intent"), &intent_bytes)?;
+                    write_atomic(
+                        &operation_dir.join("state"),
+                        format!("{}\n", OperationState::Accepted.as_str()).as_bytes(),
+                    )?;
+                    ScheduleOutcome::Scheduled
                 }
-                write_atomic(&operation_dir.join("intent"), &intent_bytes)?;
-                write_atomic(
-                    &operation_dir.join("state"),
-                    format!("{}\n", OperationState::Accepted.as_str()).as_bytes(),
-                )?;
-                ScheduleOutcome::Scheduled
-            }
-            OperationPieces::Partial {
-                intent: Some(existing),
-            } => {
-                if existing != *intent {
-                    return Err(UpgradeStoreError::IdentityConflict);
+                OperationPieces::Partial {
+                    intent: Some(existing),
+                } => {
+                    if existing != *intent {
+                        return Err(UpgradeStoreError::IdentityConflict);
+                    }
+                    write_atomic(
+                        &operation_dir.join("state"),
+                        format!("{}\n", OperationState::Accepted.as_str()).as_bytes(),
+                    )?;
+                    ScheduleOutcome::Scheduled
                 }
-                write_atomic(
-                    &operation_dir.join("state"),
-                    format!("{}\n", OperationState::Accepted.as_str()).as_bytes(),
-                )?;
-                ScheduleOutcome::Scheduled
-            }
-            OperationPieces::Complete { intent: existing } => {
-                if existing != *intent {
-                    return Err(UpgradeStoreError::IdentityConflict);
+                OperationPieces::Complete { intent: existing } => {
+                    if existing != *intent {
+                        return Err(UpgradeStoreError::IdentityConflict);
+                    }
+                    ScheduleOutcome::AlreadyScheduled
                 }
-                ScheduleOutcome::AlreadyScheduled
             }
         };
         self.trigger(intent.operation_id)?;
@@ -365,15 +368,8 @@ impl UpgradeScheduler {
     }
 
     fn active_sibling(&self, exclude: Option<Uuid>) -> Result<Option<Uuid>, UpgradeStoreError> {
-        let mut scanned = 0;
         for entry in fs::read_dir(&self.operations_dir)? {
             let entry = entry.map_err(UpgradeStoreError::Io)?;
-            scanned += 1;
-            if scanned > MAX_SIBLING_OPERATIONS {
-                return Err(UpgradeStoreError::Unsafe(
-                    "durable operations hierarchy exceeds its bound",
-                ));
-            }
             let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
                 return Err(UpgradeStoreError::Unsafe(
                     "durable operations hierarchy has a non-UTF-8 entry",
@@ -542,6 +538,7 @@ impl UpgradeRunner {
             return Ok(state);
         }
         let _active = ActiveLock::acquire(&operations_root)?;
+        cleanup_stale_temporaries(&operation_dir)?;
         let state = load_state(&operation_dir)?;
         if state.is_terminal() {
             return Ok(state);
@@ -1202,24 +1199,55 @@ fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), UpgradeStoreError> {
         .ok_or(UpgradeStoreError::Unsafe(
             "durable record name must be UTF-8",
         ))?;
-    let temporary = directory.join(format!(".{name}.tmp"));
+    let temporary = directory.join(format!(".{name}.tmp.{}", Uuid::now_v7()));
     let mut file = OpenOptions::new()
         .write(true)
         .create_new(true)
         .mode(0o600)
         .open(&temporary)
-        .map_err(|error| {
-            if error.kind() == io::ErrorKind::AlreadyExists {
-                UpgradeStoreError::Unsafe("durable record staging path already exists")
-            } else {
-                UpgradeStoreError::Io(error)
-            }
-        })?;
+        .map_err(UpgradeStoreError::Io)?;
     file.write_all(bytes).map_err(UpgradeStoreError::Io)?;
     file.sync_all().map_err(UpgradeStoreError::Io)?;
     drop(file);
     fs::rename(&temporary, path).map_err(UpgradeStoreError::Io)?;
     sync_directory(directory)
+}
+
+fn cleanup_stale_temporaries(operation_dir: &Path) -> Result<(), UpgradeStoreError> {
+    match fs::symlink_metadata(operation_dir) {
+        Ok(_) => validate_directory_strict(operation_dir)?,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(UpgradeStoreError::Io(error)),
+    }
+    let entries = fs::read_dir(operation_dir).map_err(UpgradeStoreError::Io)?;
+    let mut removed = false;
+    for entry in entries {
+        let entry = entry.map_err(UpgradeStoreError::Io)?;
+        let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
+            continue;
+        };
+        let stale = ["intent", "state", "result"].iter().any(|record| {
+            let legacy = format!(".{record}.tmp");
+            if name == legacy {
+                return true;
+            }
+            name.strip_prefix(&format!("{legacy}."))
+                .is_some_and(|suffix| {
+                    Uuid::parse_str(suffix)
+                        .is_ok_and(|id| id.get_version_num() == 7 && id.to_string() == suffix)
+                })
+        });
+        if !stale {
+            continue;
+        }
+        validate_record_file(&entry.path())?;
+        fs::remove_file(entry.path()).map_err(UpgradeStoreError::Io)?;
+        removed = true;
+    }
+    if removed {
+        sync_directory(operation_dir)?;
+    }
+    Ok(())
 }
 
 fn sync_directory(directory: &Path) -> Result<(), UpgradeStoreError> {
@@ -1301,6 +1329,17 @@ mod tests {
             format!("{}\n", state.as_str()).as_bytes(),
         )
         .expect("force durable state");
+    }
+
+    fn plant_stale_temporary(path: &Path, bytes: &[u8]) {
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(path)
+            .expect("create stale temporary");
+        file.write_all(bytes).expect("write stale temporary");
+        file.sync_all().expect("sync stale temporary");
     }
 
     #[test]
@@ -1396,6 +1435,35 @@ mod tests {
     }
 
     #[test]
+    fn scheduling_recovers_stale_state_temporary_before_rename() {
+        let root = test_root("stale-state");
+        let intent = new_intent([0x31; 32]);
+        let operation_dir = operations_dir(&root).join(intent.operation_id.to_string());
+        fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(&operation_dir)
+            .expect("operation directory");
+        write_atomic(&operation_dir.join("intent"), intent.render().as_bytes())
+            .expect("committed intent");
+        let stale = operation_dir.join(".state.tmp");
+        plant_stale_temporary(&stale, b"accepted\n");
+
+        assert_eq!(
+            scheduler(&root)
+                .schedule_and_trigger(&intent)
+                .expect("resume after interrupted rename"),
+            ScheduleOutcome::Scheduled
+        );
+        assert!(!stale.exists());
+        assert_eq!(
+            load_state(&operation_dir).expect("recovered state"),
+            OperationState::Accepted
+        );
+        fs::remove_dir_all(&root).expect("cleanup");
+    }
+
+    #[test]
     fn only_one_active_operation_is_scheduled_per_node() {
         let root = test_root("active");
         let first = new_intent([4; 32]);
@@ -1411,6 +1479,69 @@ mod tests {
         scheduler(&root)
             .schedule_and_trigger(&second)
             .expect("terminal operation frees the node");
+        fs::remove_dir_all(&root).expect("cleanup");
+    }
+
+    #[test]
+    fn concurrent_scheduling_commits_exactly_one_active_operation() {
+        use std::sync::{Arc, Barrier};
+
+        let root = test_root("concurrent-active");
+        let first = new_intent([0x41; 32]);
+        let second = new_intent([0x42; 32]);
+        let barrier = Arc::new(Barrier::new(3));
+        let handles = [first, second].map(|intent| {
+            let root = root.clone();
+            let barrier = Arc::clone(&barrier);
+            std::thread::spawn(move || {
+                barrier.wait();
+                scheduler(&root).schedule_and_trigger(&intent)
+            })
+        });
+        barrier.wait();
+        let outcomes = handles.map(|handle| handle.join().expect("scheduler thread"));
+        assert_eq!(
+            outcomes
+                .iter()
+                .filter(|outcome| matches!(outcome, Ok(ScheduleOutcome::Scheduled)))
+                .count(),
+            1
+        );
+        assert_eq!(
+            outcomes
+                .iter()
+                .filter(|outcome| matches!(outcome, Err(UpgradeStoreError::ActiveConflict)))
+                .count(),
+            1
+        );
+        let active = fs::read_dir(operations_dir(&root))
+            .expect("operations root")
+            .filter_map(Result::ok)
+            .filter(|entry| Uuid::parse_str(&entry.file_name().to_string_lossy()).is_ok())
+            .filter(|entry| {
+                matches!(
+                    load_state(&entry.path()),
+                    Ok(OperationState::Accepted | OperationState::Running)
+                )
+            })
+            .count();
+        assert_eq!(active, 1);
+        fs::remove_dir_all(&root).expect("cleanup");
+    }
+
+    #[test]
+    fn terminal_history_does_not_block_new_scheduling() {
+        let root = test_root("terminal-history");
+        for index in 0..65 {
+            let intent = new_intent([index; 32]);
+            scheduler(&root)
+                .schedule_and_trigger(&intent)
+                .expect("schedule historical operation");
+            force_state(&root, &intent.operation_id, OperationState::Succeeded);
+        }
+        scheduler(&root)
+            .schedule_and_trigger(&new_intent([0xff; 32]))
+            .expect("schedule after retained terminal history");
         fs::remove_dir_all(&root).expect("cleanup");
     }
 
@@ -1538,6 +1669,30 @@ mod tests {
         );
         let result = fs::read_to_string(operation_dir.join("result")).expect("failure evidence");
         assert!(result.contains("state=failed"));
+        fs::remove_dir_all(&root).expect("cleanup");
+    }
+
+    #[test]
+    fn runner_recovers_stale_result_temporary_before_rename() {
+        let root = test_root("stale-result");
+        let intent = new_intent([0x0b; 32]);
+        scheduler(&root)
+            .schedule_and_trigger(&intent)
+            .expect("schedule");
+        let operation_dir = operations_dir(&root).join(intent.operation_id.to_string());
+        let stale = operation_dir.join(format!(".result.tmp.{}", Uuid::now_v7()));
+        plant_stale_temporary(&stale, b"incomplete result");
+
+        let failure = UpgradeRunner::new(root.clone())
+            .run(&intent.operation_id.to_string())
+            .expect_err("empty spool fails after recovery");
+        assert!(matches!(failure, UpgradeStoreError::Package(_)));
+        assert!(!stale.exists());
+        assert_eq!(
+            load_state(&operation_dir).expect("terminal state"),
+            OperationState::Failed
+        );
+        assert!(operation_dir.join("result").exists());
         fs::remove_dir_all(&root).expect("cleanup");
     }
 
