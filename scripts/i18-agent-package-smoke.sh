@@ -155,7 +155,7 @@ sudo test ! -e /var/lib/ocservia-upgrade \
 echo "host architecture mismatch rejection passed"
 
 evil_root="${work}/evil/ocservia-agent-9.9.9"
-mkdir -p "${evil_root}/scripts" "${evil_root}/rust/target/release"
+mkdir -p "${evil_root}/scripts" "${evil_root}/rust/target/release" "${evil_root}/deploy/systemd"
 for required in MANIFEST scripts/install-agent.sh scripts/upgrade-agent.sh scripts/rollback-agent.sh \
   scripts/uninstall-agent.sh scripts/verify-agent-package.sh rust/target/release/ocservia-agent \
   rust/target/release/ocservia-privd rust/target/release/ocservia-upgrader \
