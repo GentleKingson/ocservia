@@ -349,7 +349,7 @@ func (s *Service) CreateSynthetic(ctx context.Context, request CreateRequest) (O
 		request.ApprovalRequestHash = approvalHash
 	}
 	if request.Kind == AgentUpgrade {
-		approvalHash, _ := approvals.GenericBinding(request.Action, "node", request.NodeID)
+		approvalHash, _ := approvals.AgentUpgradeBinding(request.NodeID, request.TargetVersion, request.PackageSHA256, request.Architecture)
 		if err := approvals.ConsumeBound(ctx, tx, request.ApprovalID, workspaceID, request.ActorIdentityID, request.Action, "node", request.NodeID, approvalHash); err != nil {
 			return Operation{}, false, err
 		}
