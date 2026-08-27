@@ -28,12 +28,24 @@ func TestAgentUpgradeScheduledAckStaysNonTerminalIntegration(t *testing.T) {
 	if databaseURL == "" {
 		t.Skip("OCSERV_TEST_DATABASE_URL is not set")
 	}
+	// The ingested acknowledgement rows are runtime-role append-only, so
+	// only the owner role can remove them; the scripted rollback checks
+	// assert no agent upgrade command history survives the suite.
+	ownerURL := os.Getenv("OCSERV_TEST_OWNER_DATABASE_URL")
+	if ownerURL == "" {
+		t.Skip("OCSERV_TEST_OWNER_DATABASE_URL is not set")
+	}
 	ctx := context.Background()
 	pool, err := pgxpool.New(ctx, databaseURL)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer pool.Close()
+	cleanupPool, err := pgxpool.New(ctx, ownerURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cleanupPool.Close()
 	workspaceID, nodeID := uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7())
 	if _, err := pool.Exec(ctx, `INSERT INTO workspaces(id,name,slug,created_at,updated_at) VALUES($1,'upgrade ack',$2,now(),now())`, workspaceID, "upgrade-ack-"+workspaceID.String()); err != nil {
 		t.Fatal(err)
@@ -51,7 +63,7 @@ func TestAgentUpgradeScheduledAckStaysNonTerminalIntegration(t *testing.T) {
 	if _, err := pool.Exec(ctx, `INSERT INTO node_endpoint_keys(node_id,endpoint_id,state,bound_at) VALUES($1,$2,'active',now())`, nodeID, endpoint[:]); err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() {
+	defer func() {
 		for _, statement := range []string{
 			`DELETE FROM agent_command_results WHERE command_id IN(SELECT id FROM commands WHERE workspace_id=$1)`,
 			`DELETE FROM transport_events WHERE node_id IN(SELECT id FROM nodes WHERE workspace_id=$1)`,
@@ -63,11 +75,12 @@ func TestAgentUpgradeScheduledAckStaysNonTerminalIntegration(t *testing.T) {
 			`DELETE FROM operation_events WHERE operation_id IN(SELECT id FROM operations WHERE workspace_id=$1)`,
 			`DELETE FROM commands WHERE workspace_id=$1`, `DELETE FROM operations WHERE workspace_id=$1`,
 			`DELETE FROM audit_events WHERE workspace_id=$1`, `DELETE FROM node_endpoint_keys WHERE node_id IN(SELECT id FROM nodes WHERE workspace_id=$1)`,
+			`DELETE FROM node_privd_attestation_keys WHERE node_id IN(SELECT id FROM nodes WHERE workspace_id=$1)`,
 			`DELETE FROM nodes WHERE workspace_id=$1`, `DELETE FROM workspaces WHERE id=$1`,
 		} {
-			_, _ = pool.Exec(context.Background(), statement, workspaceID)
+			_, _ = cleanupPool.Exec(context.Background(), statement, workspaceID)
 		}
-	})
+	}()
 
 	signer := integrationCommandSigner()
 	target, digest := "2.0.0", bytes.Repeat([]byte{0x43}, 32)

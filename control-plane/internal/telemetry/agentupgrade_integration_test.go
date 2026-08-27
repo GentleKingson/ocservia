@@ -36,18 +36,26 @@ func TestAgentUpgradeEligibilityGatesIntegration(t *testing.T) {
 	if _, err = pool.Exec(ctx, `INSERT INTO nodes(id,workspace_id,name,status,created_at,updated_at) VALUES($1,$2,'node','active',now(),now())`, nodeID, workspaceID); err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() {
+	// A deferred cleanup (not t.Cleanup) so it runs before the deferred
+	// pool.Close, with per-statement arguments: pgx rejects statements
+	// bound with more parameters than they reference.
+	defer func() {
 		cleanupCtx := context.Background()
-		for _, statement := range []string{
-			`DELETE FROM agent_upgrade_operations WHERE workspace_id=$1`,
-			`DELETE FROM operations WHERE workspace_id=$1 AND request_id='upgrade-eligibility'`,
-			`DELETE FROM node_capabilities WHERE node_id=$2`,
-			`DELETE FROM telemetry_ingest_batches WHERE node_id=$2`,
-			`DELETE FROM nodes WHERE id=$2`, `DELETE FROM workspaces WHERE id=$1`,
+		workspace, node := workspaceID, nodeID
+		for _, statement := range []struct {
+			query string
+			args  []any
+		}{
+			{`DELETE FROM agent_upgrade_operations WHERE workspace_id=$1`, []any{workspace}},
+			{`DELETE FROM operations WHERE workspace_id=$1 AND request_id='upgrade-eligibility'`, []any{workspace}},
+			{`DELETE FROM node_capabilities WHERE node_id=$1`, []any{node}},
+			{`DELETE FROM telemetry_ingest_batches WHERE node_id=$1`, []any{node}},
+			{`DELETE FROM nodes WHERE id=$1`, []any{node}},
+			{`DELETE FROM workspaces WHERE id=$1`, []any{workspace}},
 		} {
-			_, _ = pool.Exec(cleanupCtx, statement, workspaceID, nodeID)
+			_, _ = pool.Exec(cleanupCtx, statement.query, statement.args...)
 		}
-	})
+	}()
 	manifest := filepath.Join(t.TempDir(), "agent-releases.json")
 	if err := os.WriteFile(manifest, []byte(`{"releases":[{"version":"2.0.0","architecture":"amd64","package_sha256":"`+hex.EncodeToString(make([]byte, 32))+`"}]}`), 0o600); err != nil {
 		t.Fatal(err)

@@ -60,20 +60,32 @@ func TestAgentUpgradeRouteResolvesTrustedReleasesIntegration(t *testing.T) {
 	if _, err := attestationtest.InstallKey(ctx, pool, nodeID); err != nil {
 		t.Fatal(err)
 	}
+	// Per-statement arguments: pgx rejects statements bound with more
+	// parameters than they reference, which would silently leak the
+	// agent upgrade command history the scripted rollback checks.
 	defer func() {
-		for _, statement := range []string{
-			`DELETE FROM node_agent_upgrade_results WHERE node_id=$2`,
-			`DELETE FROM agent_upgrade_operations WHERE workspace_id=$1`,
-			`DELETE FROM outbox_events WHERE command_id IN(SELECT id FROM commands WHERE workspace_id=$1)`,
-			`DELETE FROM operation_events WHERE operation_id IN(SELECT id FROM operations WHERE workspace_id=$1)`,
-			`DELETE FROM commands WHERE workspace_id=$1`, `DELETE FROM operations WHERE workspace_id=$1`,
-			`DELETE FROM approval_requests WHERE workspace_id=$1`, `DELETE FROM audit_events WHERE workspace_id=$1`,
-			`DELETE FROM role_bindings WHERE id IN($3,$4)`, `DELETE FROM auth_sessions WHERE id IN($5,$6)`,
-			`DELETE FROM identities WHERE id IN($7,$8,$9)`, `DELETE FROM node_observed_snapshots WHERE node_id=$2`,
-			`DELETE FROM node_capabilities WHERE node_id=$2`, `DELETE FROM nodes WHERE workspace_id=$1`,
-			`DELETE FROM workspaces WHERE id=$1`,
+		workspace, node := workspaceID, nodeID
+		for _, statement := range []struct {
+			query string
+			args  []any
+		}{
+			{`DELETE FROM node_agent_upgrade_results WHERE node_id=$1`, []any{node}},
+			{`DELETE FROM agent_upgrade_operations WHERE workspace_id=$1`, []any{workspace}},
+			{`DELETE FROM outbox_events WHERE command_id IN(SELECT id FROM commands WHERE workspace_id=$1)`, []any{workspace}},
+			{`DELETE FROM operation_events WHERE operation_id IN(SELECT id FROM operations WHERE workspace_id=$1)`, []any{workspace}},
+			{`DELETE FROM commands WHERE workspace_id=$1`, []any{workspace}},
+			{`DELETE FROM operations WHERE workspace_id=$1`, []any{workspace}},
+			{`DELETE FROM approval_requests WHERE workspace_id=$1`, []any{workspace}},
+			{`DELETE FROM role_bindings WHERE id IN($1,$2)`, []any{operatorBinding, viewerBinding}},
+			{`DELETE FROM auth_sessions WHERE id IN($1,$2)`, []any{operatorSession, viewerSession}},
+			{`DELETE FROM identities WHERE id IN($1,$2,$3)`, []any{operatorID, viewerID, approverID}},
+			{`DELETE FROM node_observed_snapshots WHERE node_id=$1`, []any{node}},
+			{`DELETE FROM node_capabilities WHERE node_id=$1`, []any{node}},
+			{`DELETE FROM node_privd_attestation_keys WHERE node_id=$1`, []any{node}},
+			{`DELETE FROM nodes WHERE workspace_id=$1`, []any{workspace}},
+			{`DELETE FROM workspaces WHERE id=$1`, []any{workspace}},
 		} {
-			_, _ = pool.Exec(context.Background(), statement, workspaceID, nodeID, operatorBinding, viewerBinding, operatorSession, viewerSession, operatorID, viewerID, approverID)
+			_, _ = pool.Exec(context.Background(), statement.query, statement.args...)
 		}
 	}()
 
