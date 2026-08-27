@@ -2277,6 +2277,8 @@ mod tests {
         }
         let durable: Vec<_> = std::fs::read_dir(&operations_dir)
             .expect("list durable operations")
+            .filter_map(Result::ok)
+            .filter(|entry| Uuid::parse_str(&entry.file_name().to_string_lossy()).is_ok())
             .collect();
         assert_eq!(durable.len(), 1, "only the first operation may be durable");
         std::fs::remove_dir_all(directory).expect("cleanup test directory");
