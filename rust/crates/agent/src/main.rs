@@ -17,7 +17,7 @@ use ocservia_agent::{
 };
 use ocservia_agent_protocol::{
     ArtifactConsumeRequest, ArtifactReadRequest, DesiredEffectState, ErrorKind,
-    MAX_MANAGED_RESOURCES, PrivdResponse, privd_request, privd_response,
+    MAX_MANAGED_RESOURCES, PrivdResponse, UpgradeOperationResult, privd_request, privd_response,
 };
 use ocservia_command_authorization::{
     ControllerCommandKeyring, FenceBindingClaimsV2, VerifiedConnectionFenceV2,
@@ -28,7 +28,7 @@ use ocservia_command_journal::{
 };
 use ocservia_contracts::decode_strict_command_envelope;
 use ocservia_contracts::generated::ocserv::platform::agent::v1::{
-    AgentEvent, AgentEventType, ArtifactChunk,
+    AgentEvent, AgentEventType, AgentUpgradeOutcomeState, AgentUpgradeResultReport, ArtifactChunk,
     ArtifactConsumeRequest as ArtifactConsumeFinalizeRequest,
     ArtifactConsumeResponse as ArtifactConsumeFinalizeResponse, ArtifactFetchRequest,
     CommandDeliveryMode, CommandEnvelope, CommandResult, CommandResultState, ConnectionFenceV2,
@@ -514,9 +514,12 @@ async fn connect_once(
             },
             _ = heartbeat.tick() => {
                 let observations=session.privd.snapshot().await?;
+                // Durable upgrade outcome evidence is best-effort: an older
+                // privd without the fixed read simply yields an empty report.
+                let upgrade_outcomes=session.privd.upgrade_results().await.unwrap_or_default();
                 sequence=sequence.saturating_add(1);
                 let drops=session.journal.telemetry_drop_counters()?;
-                let batch=build_telemetry(session,sequence,&observations,&connection,drops)?;
+                let batch=build_telemetry(session,sequence,&observations,upgrade_outcomes,&connection,drops)?;
                 let payload=batch.encode_to_vec();
                 let batch_id: [u8;16]=batch.batch_id.as_slice().try_into().map_err(|_| invalid("telemetry batch ID invalid"))?;
                 let now=SystemTime::now().duration_since(SystemTime::UNIX_EPOCH)?.as_secs();
@@ -1230,6 +1233,7 @@ async fn handle_command_stream(
                 | command_envelope::Payload::CertificateCsr(_)
                 | command_envelope::Payload::CertificateRevoke(_)
                 | command_envelope::Payload::CertificateP12(_)
+                | command_envelope::Payload::AgentUpgrade(_)
         )
     );
     let execution = if external {
@@ -2052,6 +2056,7 @@ fn build_telemetry(
     session: &SessionContext<'_>,
     sequence: u64,
     observations: &[PrivdResponse],
+    upgrade_outcomes: Vec<UpgradeOperationResult>,
     connection: &iroh::endpoint::Connection,
     drops: [u64; 4],
 ) -> Result<TelemetryBatch, io::Error> {
@@ -2208,9 +2213,27 @@ fn build_telemetry(
             agent_version: env!("CARGO_PKG_VERSION").to_owned(),
             ocserv_version: version,
             os_release: session.os_release.to_owned(),
+            architecture: ocservia_contracts::agent_upgrade::runtime_architecture()
+                .unwrap_or_default()
+                .to_owned(),
             ocserv_json: serde_json::to_vec(&ocserv).unwrap_or_else(|_| b"{}".to_vec()),
             system_json: b"{}".to_vec(),
             path_json: serde_json::to_vec(&path).unwrap_or_else(|_| b"{}".to_vec()),
+            upgrade_results: upgrade_outcomes
+                .into_iter()
+                .map(|outcome| AgentUpgradeResultReport {
+                    operation_id: outcome.operation_id,
+                    state: match outcome.state.as_str() {
+                        "succeeded" => AgentUpgradeOutcomeState::Succeeded,
+                        "failed" => AgentUpgradeOutcomeState::Failed,
+                        "rolled_back" => AgentUpgradeOutcomeState::RolledBack,
+                        _ => AgentUpgradeOutcomeState::Unspecified,
+                    } as i32,
+                    target_version: outcome.target_version,
+                    completed_unix_ms: outcome.completed_unix_ms,
+                    detail: outcome.detail,
+                })
+                .collect(),
             dropped: Some(TelemetryDropCounters {
                 security: drops[0],
                 health: drops[1],

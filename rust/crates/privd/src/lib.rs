@@ -12,7 +12,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use ed25519_dalek::SigningKey;
 use ocservia_agent_protocol::{
     AgentUpgradeScheduledResult, ErrorKind, PrivdError, PrivdRequest, PrivdResponse,
-    PrivilegedRequestMode, privd_request, privd_response, read_frame, write_frame,
+    PrivilegedRequestMode, UpgradeOperationResult, UpgradeResultList, privd_request,
+    privd_response, read_frame, write_frame,
 };
 use ocservia_command_authorization::{
     ArtifactGrantClaimsV1, AuthorizationError, CommandAuthorizationV1, ControllerCommandKeyring,
@@ -211,8 +212,11 @@ async fn dispatch_attested(
     let request_id = request.request_id.clone();
     let result = match validate_request(request, node_id, command_keys) {
         Ok((deadline, ValidatedRequest::Read)) => {
-            match tokio::time::timeout(deadline, execute_read(request.operation.clone(), adapter))
-                .await
+            match tokio::time::timeout(
+                deadline,
+                execute_read(request.operation.clone(), adapter, upgrades),
+            )
+            .await
             {
                 Ok(result) => result,
                 Err(_) => deadline_error(),
@@ -525,6 +529,7 @@ fn validate_request(
                     | privd_request::Operation::ConfigFingerprint(_)
                     | privd_request::Operation::UserList(_)
                     | privd_request::Operation::GroupList(_)
+                    | privd_request::Operation::UpgradeResultList(_)
             )
         ) {
             return Err(error(
@@ -790,6 +795,7 @@ fn validate_uuid(value: &[u8], detail: &str) -> Result<(), PrivdError> {
 async fn execute_read(
     operation: Option<privd_request::Operation>,
     adapter: &Adapter,
+    upgrades: &UpgradeScheduler,
 ) -> privd_response::Result {
     let Some(operation) = operation else {
         return privd_response::Result::Error(error(
@@ -846,6 +852,27 @@ async fn execute_read(
                 .group_list()
                 .await
                 .map(privd_response::Result::GroupList),
+        ),
+        privd_request::Operation::UpgradeResultList(_) => (
+            "upgrade_result_list",
+            ocservia_upgrader::read_recent_results(upgrades.operations_root(), 8)
+                .map(|results| {
+                    privd_response::Result::UpgradeResultList(UpgradeResultList {
+                        results: results
+                            .into_iter()
+                            .map(|result| UpgradeOperationResult {
+                                operation_id: result.operation_id.as_bytes().to_vec(),
+                                state: result.state.as_str().to_owned(),
+                                target_version: result.target_version,
+                                completed_unix_ms: result.completed_unix.saturating_mul(1000),
+                                detail: result.detail,
+                            })
+                            .collect(),
+                    })
+                })
+                .map_err(|failure| {
+                    ocservia_ocserv_adapter::AdapterError::Io(io::Error::other(failure.to_string()))
+                }),
         ),
         _ => {
             return privd_response::Result::Error(error(
@@ -2773,5 +2800,64 @@ mod tests {
         server.await.expect("join server").expect("serve fixture");
         remove_socket(&socket).expect("remove fixture socket");
         std::fs::remove_dir_all(directory).expect("cleanup test directory");
+    }
+
+    #[tokio::test]
+    async fn upgrade_result_list_surfaces_durable_outcomes_read_only() {
+        let signing = SigningKey::from_bytes(&[7; 32]);
+        let keys = keyring(&signing);
+        let node_id = *Uuid::now_v7().as_bytes();
+        let adapter = Adapter::new(FixedResources::default(), Limits::default());
+        let directory =
+            std::env::temp_dir().join(format!("ocservia-privd-upgrade-read-{}", Uuid::now_v7()));
+        fs::create_dir(&directory).expect("create test directory");
+        let operations = directory.join("var/lib/ocservia-upgrade/operations");
+        fs::create_dir_all(&operations).expect("create operations root");
+        let scheduler = UpgradeScheduler::new(operations.clone(), UpgradeTrigger::Disabled);
+        let intent = UpgradeIntent::new(
+            *Uuid::now_v7().as_bytes(),
+            *Uuid::now_v7().as_bytes(),
+            "2.0.0",
+            [0x43; 32],
+            ocservia_contracts::agent_upgrade::runtime_architecture().expect("host architecture"),
+            [0x55; 32],
+        )
+        .expect("valid test intent");
+        scheduler
+            .schedule_and_trigger(&intent)
+            .expect("schedule intent");
+        // The spool is empty, so the runner durably refuses the upgrade and
+        // leaves exactly the terminal evidence the read-only query must show.
+        let runner = ocservia_upgrader::UpgradeRunner::new(directory.clone());
+        assert!(runner.run(&intent.operation_id.to_string()).is_err());
+
+        let request = PrivdRequest {
+            request_id: Uuid::now_v7().as_bytes().to_vec(),
+            deadline_unix_ms: deadline(),
+            accepted_at: None,
+            authorization_command: None,
+            privileged_mode: PrivilegedRequestMode::Unspecified.into(),
+            operation: Some(privd_request::Operation::UpgradeResultList(
+                ocservia_agent_protocol::UpgradeResultListRequest {},
+            )),
+        };
+        let response = dispatch_attested(
+            &request,
+            &node_id,
+            &keys,
+            &SigningKey::from_bytes(&[41; 32]),
+            &scheduler,
+            &adapter,
+        )
+        .await;
+        let Some(privd_response::Result::UpgradeResultList(list)) = response.result else {
+            panic!("expected an upgrade result list, got {:?}", response.result);
+        };
+        assert_eq!(list.results.len(), 1);
+        assert_eq!(list.results[0].operation_id, intent.operation_id.as_bytes());
+        assert_eq!(list.results[0].state, "failed");
+        assert_eq!(list.results[0].target_version, "2.0.0");
+        assert!(list.results[0].completed_unix_ms > 0);
+        std::fs::remove_dir_all(&directory).expect("cleanup test directory");
     }
 }

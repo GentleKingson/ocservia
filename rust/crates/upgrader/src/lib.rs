@@ -287,6 +287,12 @@ impl UpgradeScheduler {
         Self::new(PathBuf::new(), UpgradeTrigger::Disabled)
     }
 
+    /// The durable operations root backing this scheduler.
+    #[must_use]
+    pub fn operations_root(&self) -> &Path {
+        &self.operations_dir
+    }
+
     /// Commits the immutable intent (or replays an identical one) and starts
     /// the fixed upgrader unit.
     ///
@@ -482,6 +488,101 @@ fn load_state(operation_dir: &Path) -> Result<OperationState, UpgradeStoreError>
         .read_to_end(&mut bytes)
         .map_err(UpgradeStoreError::Io)?;
     OperationState::parse(&bytes)
+}
+
+/// One durable terminal upgrade outcome read back from the fixed store.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct DurableUpgradeResult {
+    pub operation_id: Uuid,
+    pub state: OperationState,
+    pub target_version: String,
+    pub completed_unix: u64,
+    pub detail: String,
+}
+
+/// Reads the bounded most-recent terminal upgrade outcomes from the fixed
+/// root-owned store. This is the only public read surface of the durable
+/// evidence: callers cannot select operation IDs, paths, or content, and
+/// every present record must parse fail-closed.
+///
+/// # Errors
+///
+/// Returns [`UpgradeStoreError`] when the hierarchy or any present result
+/// record fails its fail-closed validation.
+pub fn read_recent_results(
+    operations_dir: &Path,
+    limit: usize,
+) -> Result<Vec<DurableUpgradeResult>, UpgradeStoreError> {
+    let limit = limit.clamp(1, 32);
+    let mut results = Vec::new();
+    let entries = match fs::read_dir(operations_dir) {
+        Ok(entries) => entries,
+        // A node that never ran an upgrade has no durable evidence at all.
+        Err(failure) if failure.kind() == std::io::ErrorKind::NotFound => return Ok(results),
+        Err(failure) => return Err(UpgradeStoreError::Io(failure)),
+    };
+    for entry in entries {
+        let entry = entry.map_err(UpgradeStoreError::Io)?;
+        let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
+            return Err(UpgradeStoreError::Unsafe(
+                "durable operations hierarchy has a non-UTF-8 entry",
+            ));
+        };
+        let Ok(candidate) = Uuid::parse_str(&name) else {
+            continue;
+        };
+        if name != candidate.to_string() || candidate.get_version_num() != 7 {
+            continue;
+        }
+        let result_path = entry.path().join("result");
+        let Ok(bytes) = fs::read(&result_path) else {
+            // No terminal result record exists yet; the operation is still
+            // in flight and simply carries no reconciliation evidence.
+            continue;
+        };
+        if bytes.len() > 1024 {
+            return Err(UpgradeStoreError::Unsafe(
+                "durable result exceeds its bound",
+            ));
+        }
+        let lines = decode_record_lines(&bytes, 7)?;
+        expect_line(&lines[0], "schema", &RECORD_SCHEMA_VERSION.to_string())?;
+        let state = OperationState::parse(parse_line_value(&lines[1], "state")?.as_bytes())?;
+        let operation_id = parse_line_uuid(&lines[2], "operation_id")?;
+        if operation_id != candidate {
+            return Err(UpgradeStoreError::Unsafe(
+                "durable result operation identity does not match its directory",
+            ));
+        }
+        let target_version = parse_line_value(&lines[3], "target_version")?;
+        parse_line_digest(&lines[4], "package_sha256")?;
+        let completed_unix = parse_line_value(&lines[5], "completed_unix")?
+            .parse::<u64>()
+            .map_err(|_| UpgradeStoreError::Unsafe("durable result completion time malformed"))?;
+        let detail = parse_line_value(&lines[6], "detail")?;
+        if !state.is_terminal() {
+            return Err(UpgradeStoreError::Unsafe(
+                "durable result records a non-terminal state",
+            ));
+        }
+        results.push(DurableUpgradeResult {
+            operation_id,
+            state,
+            target_version,
+            completed_unix,
+            detail,
+        });
+    }
+    // UUIDv7 ordering is creation-time ordering, so the newest outcomes win
+    // the bounded report window deterministically.
+    results.sort_by(|left, right| {
+        right
+            .operation_id
+            .as_u128()
+            .cmp(&left.operation_id.as_u128())
+    });
+    results.truncate(limit);
+    Ok(results)
 }
 
 /// The standalone runner bound to one filesystem root. Production always uses
@@ -2073,5 +2174,76 @@ echo \"${pkg}\"
             OperationState::Failed
         );
         fs::remove_dir_all(&package.root).expect("cleanup");
+    }
+
+    #[test]
+    fn read_recent_results_reports_terminal_outcomes_newest_first() {
+        let root = test_root("read-results");
+        let first = new_intent([0x43; 32]);
+        let second = new_intent([0x44; 32]);
+        let in_flight = new_intent([0x45; 32]);
+        let operations = operations_dir(&root);
+        // The durable store admits one active operation at a time, so each
+        // predecessor is terminal before the next is scheduled.
+        scheduler(&root)
+            .schedule_and_trigger(&first)
+            .expect("schedule first");
+        write_terminal(
+            &operations.join(first.operation_id.to_string()),
+            &first,
+            OperationState::Succeeded,
+            "activated release",
+        )
+        .expect("first terminal outcome");
+        scheduler(&root)
+            .schedule_and_trigger(&second)
+            .expect("schedule second");
+        write_terminal(
+            &operations.join(second.operation_id.to_string()),
+            &second,
+            OperationState::Failed,
+            "spool could not resolve the release",
+        )
+        .expect("second terminal outcome");
+        scheduler(&root)
+            .schedule_and_trigger(&in_flight)
+            .expect("schedule in-flight");
+
+        let results = read_recent_results(&operations, 8).expect("read recent results");
+        assert_eq!(results.len(), 2, "in-flight operation carries no evidence");
+        assert_eq!(results[0].operation_id, second.operation_id);
+        assert_eq!(results[0].state, OperationState::Failed);
+        assert!(results[0].completed_unix > 0);
+        assert_eq!(results[1].operation_id, first.operation_id);
+        assert_eq!(results[1].state, OperationState::Succeeded);
+        assert_eq!(results[1].target_version, "1.2.3");
+        assert_eq!(results[1].detail, "activated release");
+        let bounded = read_recent_results(&operations, 1).expect("bounded read");
+        assert_eq!(bounded.len(), 1, "the report window stays bounded");
+        assert_eq!(bounded[0].operation_id, second.operation_id);
+        fs::remove_dir_all(&root).expect("cleanup");
+    }
+
+    #[test]
+    fn read_recent_results_fails_closed_on_identity_drift() {
+        let root = test_root("read-results-drift");
+        let intent = new_intent([0x46; 32]);
+        scheduler(&root)
+            .schedule_and_trigger(&intent)
+            .expect("schedule");
+        let mut drifted = intent.clone();
+        drifted.operation_id = Uuid::now_v7();
+        write_terminal(
+            &operations_dir(&root).join(intent.operation_id.to_string()),
+            &drifted,
+            OperationState::Succeeded,
+            "drifted identity",
+        )
+        .expect("terminal outcome");
+        assert!(matches!(
+            read_recent_results(&operations_dir(&root), 8),
+            Err(UpgradeStoreError::Unsafe(_))
+        ));
+        fs::remove_dir_all(&root).expect("cleanup");
     }
 }

@@ -9,8 +9,8 @@ use std::path::Path;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use ocservia_agent_protocol::{
-    PrivdRequest, PrivdResponse, PrivilegedRequestMode, ReadRequest, privd_request, read_frame,
-    write_frame,
+    PrivdRequest, PrivdResponse, PrivilegedRequestMode, ReadRequest, UpgradeOperationResult,
+    UpgradeResultListRequest, privd_request, privd_response, read_frame, write_frame,
 };
 use ocservia_command_authorization::ControllerCommandKeyring;
 use ocservia_command_journal::{
@@ -1634,6 +1634,33 @@ impl PrivdClient {
             ));
         }
         Ok(response)
+    }
+
+    /// Reads the bounded most-recent durable agent upgrade outcomes through
+    /// the fixed read-only privd query. Telemetry treats this as best-effort
+    /// evidence: a privd build without the read reports an error the caller
+    /// maps to an empty list instead of failing the heartbeat.
+    ///
+    /// # Errors
+    ///
+    /// Returns the transport or refusal error.
+    pub async fn upgrade_results(&self) -> Result<Vec<UpgradeOperationResult>, io::Error> {
+        let response = self
+            .call(privd_request::Operation::UpgradeResultList(
+                UpgradeResultListRequest {},
+            ))
+            .await?;
+        match response.result {
+            Some(privd_response::Result::UpgradeResultList(list)) => Ok(list.results),
+            Some(privd_response::Result::Error(failure)) => Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                format!("privd upgrade result list refused: {}", failure.detail),
+            )),
+            _ => Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "privd upgrade result list response invalid",
+            )),
+        }
     }
 
     /// Reads all seven routine observations with at most four active tasks.
