@@ -7,6 +7,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"net"
+	"slices"
 	"strings"
 
 	agentv1 "github.com/GentleKingson/ocservia/control-plane/gen/proto/ocserv/platform/agent/v1"
@@ -165,6 +166,13 @@ func hash(envelope *agentv1.CommandEnvelope, version agentv1.SemanticPayloadHash
 			return [sha256.Size]byte{}, errors.New("certificate revoke version is malformed")
 		}
 		canonicalPayload = canonicalStringsAndBytes([]string{payload.GetReason()}, payload.GetCertificateId(), payload.GetCertificateVersion())
+	case *agentv1.CommandEnvelope_AgentUpgrade:
+		payloadKind = 128
+		payload := envelope.GetAgentUpgrade()
+		if !ValidAgentUpgradeTargetVersion(payload.GetTargetVersion()) || len(payload.GetPackageSha256()) != sha256.Size || !ValidAgentUpgradeArchitecture(payload.GetArchitecture()) {
+			return [sha256.Size]byte{}, errors.New("agent upgrade release identity is malformed")
+		}
+		canonicalPayload = canonicalStringsAndBytes([]string{payload.GetTargetVersion(), payload.GetArchitecture()}, payload.GetPackageSha256(), 0)
 	default:
 		return [sha256.Size]byte{}, errors.New("command payload type is not reconcilable")
 	}
@@ -224,6 +232,88 @@ func canonicalStrings(values ...string) []byte {
 		out = append(out, value...)
 	}
 	return out
+}
+
+// AgentUpgradeArchitectures are the release package architectures of the
+// published native agent packages.
+var AgentUpgradeArchitectures = []string{"amd64", "arm64"}
+
+// ValidAgentUpgradeArchitecture reports whether architecture is one of the
+// supported agent package architectures.
+func ValidAgentUpgradeArchitecture(architecture string) bool {
+	return slices.Contains(AgentUpgradeArchitectures, architecture)
+}
+
+// ValidAgentUpgradeTargetVersion reports whether version is a strict SemVer
+// 2.0.0 version without the Go module "v" prefix. The same grammar is enforced
+// by the Rust agent and privd so the semantic identity stays canonical.
+func ValidAgentUpgradeTargetVersion(version string) bool {
+	if len(version) < 5 || len(version) > 128 {
+		return false
+	}
+	core := version
+	if index := strings.IndexByte(version, '+'); index >= 0 {
+		if !validSemverIdentifiers(version[index+1:], false) {
+			return false
+		}
+		core = version[:index]
+	}
+	if index := strings.IndexByte(core, '-'); index >= 0 {
+		if !validSemverIdentifiers(core[index+1:], true) {
+			return false
+		}
+		core = core[:index]
+	}
+	major, minor, found := strings.Cut(core, ".")
+	if !found {
+		return false
+	}
+	minor, patch, found := strings.Cut(minor, ".")
+	if !found || strings.Contains(patch, ".") {
+		return false
+	}
+	return validSemverNumber(major) && validSemverNumber(minor) && validSemverNumber(patch)
+}
+
+// validSemverIdentifiers validates dot-separated prerelease or build
+// identifiers. Prerelease numeric identifiers must not carry leading zeros;
+// build identifiers are permissive per SemVer 2.0.0.
+func validSemverIdentifiers(value string, prerelease bool) bool {
+	if value == "" {
+		return false
+	}
+	for _, identifier := range strings.Split(value, ".") {
+		if identifier == "" {
+			return false
+		}
+		numeric := true
+		for index := 0; index < len(identifier); index++ {
+			c := identifier[index]
+			if c >= '0' && c <= '9' {
+				continue
+			}
+			numeric = false
+			if !(c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c == '-') {
+				return false
+			}
+		}
+		if numeric && prerelease && !validSemverNumber(identifier) {
+			return false
+		}
+	}
+	return true
+}
+
+func validSemverNumber(value string) bool {
+	if value == "" || len(value) > 1 && value[0] == '0' {
+		return false
+	}
+	for index := 0; index < len(value); index++ {
+		if value[index] < '0' || value[index] > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 // PopulateV1 fills the versioned hash fields on a reconcilable command envelope.

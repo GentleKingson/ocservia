@@ -1,12 +1,15 @@
 package operations
 
 import (
+	"bytes"
 	"crypto/ed25519"
+	"crypto/sha256"
 	"testing"
 	"time"
 
 	agentv1 "github.com/GentleKingson/ocservia/control-plane/gen/proto/ocserv/platform/agent/v1"
 	"github.com/GentleKingson/ocservia/control-plane/internal/commandauth"
+	"github.com/GentleKingson/ocservia/control-plane/internal/semanticpayload"
 	"github.com/google/uuid"
 	"google.golang.org/protobuf/proto"
 )
@@ -166,5 +169,139 @@ func TestRequestHashBindsTargetActorAndActionButNotAttemptMetadata(t *testing.T)
 	attempt.Traceparent = "00-1123456789abcdef0123456789abcdef-1123456789abcdef-01"
 	if requestHash(attempt) != baseHash {
 		t.Fatal("attempt-only metadata changed the idempotency digest")
+	}
+}
+
+func agentUpgradeRequest() CreateRequest {
+	return CreateRequest{NodeID: uuid.Must(uuid.NewV7()), IdempotencyKey: "stable-key", ExpectedVersion: 1, Kind: AgentUpgrade, ActorID: "operator", Action: "agent.upgrade", Reason: "roll out 1.2.3", TargetVersion: "1.2.3", PackageSHA256: make([]byte, 32), Architecture: "arm64", ActorIdentityID: uuid.Must(uuid.NewV7()), ActorSessionID: uuid.Must(uuid.NewV7()), ApprovalID: uuid.Must(uuid.NewV7()), TTL: time.Minute, RequestID: "request", Traceparent: "00-0123456789abcdef0123456789abcdef-0123456789abcdef-01"}
+}
+
+func TestAgentUpgradeRequiresApprovalAndValidReleaseIdentity(t *testing.T) {
+	base := agentUpgradeRequest()
+	if err := validateCreate(base); err != nil {
+		t.Fatalf("approved upgrade rejected: %v", err)
+	}
+	unapproved := base
+	unapproved.ApprovalID = uuid.Nil
+	if err := validateCreate(unapproved); err == nil {
+		t.Fatal("upgrade accepted without approval metadata")
+	}
+	unidentified := base
+	unidentified.ActorIdentityID = uuid.Nil
+	if err := validateCreate(unidentified); err == nil {
+		t.Fatal("upgrade accepted without actor identity")
+	}
+	for name, mutate := range map[string]func(*CreateRequest){
+		"non-semver version": func(r *CreateRequest) { r.TargetVersion = "latest" },
+		"partial version":    func(r *CreateRequest) { r.TargetVersion = "1.2" },
+		"v-prefixed version": func(r *CreateRequest) { r.TargetVersion = "v1.2.3" },
+		"short digest":       func(r *CreateRequest) { r.PackageSHA256 = make([]byte, 31) },
+		"foreign arch":       func(r *CreateRequest) { r.Architecture = "x86_64" },
+		"unknown arch":       func(r *CreateRequest) { r.Architecture = "riscv64" },
+	} {
+		t.Run(name, func(t *testing.T) {
+			request := base
+			mutate(&request)
+			if err := validateCreate(request); err == nil {
+				t.Fatal("malformed upgrade release identity was accepted")
+			}
+		})
+	}
+	leak := base
+	leak.Kind = SyntheticEcho
+	if err := validateCreate(leak); err == nil {
+		t.Fatal("upgrade release fields leaked into another kind")
+	}
+	for _, tc := range []struct {
+		name   string
+		mutate func(*CreateRequest)
+	}{
+		{"candidate", func(r *CreateRequest) { r.Candidate = []byte("config") }},
+		{"candidate hash", func(r *CreateRequest) { r.CandidateHash = make([]byte, sha256.Size) }},
+		{"expected current hash", func(r *CreateRequest) { r.ExpectedCurrentHash = make([]byte, sha256.Size) }},
+		{"desired revision", func(r *CreateRequest) { r.DesiredRevision = 7 }},
+		{"plan revision", func(r *CreateRequest) { r.PlanRevision = 3 }},
+		{"plan metadata", func(r *CreateRequest) { r.PlanMetadata = &ConfigPlanMetadata{} }},
+		{"apply metadata", func(r *CreateRequest) { r.ApplyMetadata = &ConfigApplyMetadata{} }},
+		{"ocserv version", func(r *CreateRequest) { r.OcservVersion = "1.2.3" }},
+		{"plan capabilities", func(r *CreateRequest) { r.PlanCapabilities = []string{"ocserv.config.capabilities.v1"} }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			request := base
+			tc.mutate(&request)
+			if err := validateCreate(request); err == nil {
+				t.Fatalf("config field %q was silently dropped from an upgrade request", tc.name)
+			}
+		})
+	}
+}
+
+func TestMarshalEnvelopeSignsAgentUpgradeReleaseIdentity(t *testing.T) {
+	request := agentUpgradeRequest()
+	signer := testCommandSigner(t)
+	data, payloadType, err := marshalEnvelope(request, uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7()), 1, time.Now(), time.Now().Add(time.Minute), signer)
+	if err != nil || payloadType != "agent_upgrade" || len(data) == 0 {
+		t.Fatalf("marshalEnvelope() = %q, %d bytes, %v", payloadType, len(data), err)
+	}
+	var envelope agentv1.CommandEnvelope
+	if err := proto.Unmarshal(data, &envelope); err != nil {
+		t.Fatal(err)
+	}
+	if envelope.GetAction() != "agent.upgrade" || envelope.GetRequiredCapability() != "ocserv.agent.upgrade.v1" {
+		t.Fatalf("upgrade authorization labels = %q/%q", envelope.GetAction(), envelope.GetRequiredCapability())
+	}
+	upgrade := envelope.GetAgentUpgrade()
+	if upgrade == nil || upgrade.GetTargetVersion() != request.TargetVersion || !bytes.Equal(upgrade.GetPackageSha256(), request.PackageSHA256) || upgrade.GetArchitecture() != request.Architecture {
+		t.Fatal("upgrade payload did not carry the requested release identity")
+	}
+	claims, err := commandauth.ClaimsFromEnvelopeV1(&envelope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if claims.PayloadKind != 128 || claims.Action != "agent.upgrade" || claims.RequiredCapability != "ocserv.agent.upgrade.v1" {
+		t.Fatalf("signed claims did not bind the upgrade identity: %+v", claims)
+	}
+	digest, err := semanticpayload.HashV2(&envelope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(claims.SemanticPayloadSHA256[:], digest[:]) {
+		t.Fatal("signed semantic hash does not cover the upgrade release identity")
+	}
+	mutated := proto.Clone(&envelope).(*agentv1.CommandEnvelope)
+	mutated.GetAgentUpgrade().TargetVersion = "9.9.9"
+	mutatedDigest, err := semanticpayload.HashV2(mutated)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Equal(mutatedDigest[:], claims.SemanticPayloadSHA256[:]) {
+		t.Fatal("mutated target version still matches the signed semantic hash")
+	}
+	mutated.GetAgentUpgrade().PackageSha256[0] ^= 0xff
+	digestAgain, err := semanticpayload.HashV2(mutated)
+	if err != nil || bytes.Equal(digestAgain[:], mutatedDigest[:]) {
+		t.Fatal("mutated package digest did not change the semantic hash")
+	}
+}
+
+func TestRequestHashBindsAgentUpgradeReleaseIdentity(t *testing.T) {
+	base := agentUpgradeRequest()
+	baseHash := requestHash(base)
+	for _, tc := range []struct {
+		name   string
+		mutate func(*CreateRequest)
+	}{
+		{"target version", func(r *CreateRequest) { r.TargetVersion = "2.0.0" }},
+		{"package digest", func(r *CreateRequest) { r.PackageSHA256[0] ^= 0xff }},
+		{"architecture", func(r *CreateRequest) { r.Architecture = "amd64" }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			request := base
+			request.PackageSHA256 = append([]byte(nil), base.PackageSHA256...)
+			tc.mutate(&request)
+			if requestHash(request) == baseHash {
+				t.Fatalf("%s was not bound into the idempotency digest", tc.name)
+			}
+		})
 	}
 }

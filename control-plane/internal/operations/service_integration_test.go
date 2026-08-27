@@ -172,6 +172,74 @@ func TestControlledOperationsRequireApprovedCapabilityAndObservedTargetIntegrati
 	}
 }
 
+func TestAgentUpgradeApprovalBindsExactReleaseIdentityIntegration(t *testing.T) {
+	service, pool, workspaceID, nodeID := integrationService(t)
+	ctx := context.Background()
+	if _, err := pool.Exec(ctx, `INSERT INTO node_capabilities(node_id,capability,approved) VALUES($1,'ocserv.agent.upgrade.v1',true)`, nodeID); err != nil {
+		t.Fatal(err)
+	}
+	base := CreateRequest{NodeID: nodeID, IdempotencyKey: "upgrade-exact", ExpectedVersion: 1, Kind: AgentUpgrade, ActorID: "operator", Action: "agent.upgrade", Reason: "integration test", TargetVersion: "1.2.3", PackageSHA256: bytes.Repeat([]byte{0x43}, 32), Architecture: "amd64", TTL: time.Minute, RequestID: "request-upgrade", Traceparent: testTraceparent}
+	approveOperation(t, pool, workspaceID, &base)
+	operation, replayed, err := service.CreateSynthetic(ctx, base)
+	if err != nil || replayed || operation.State != "queued" {
+		t.Fatalf("create approved upgrade = %+v, %v, %v", operation, replayed, err)
+	}
+	if _, replayed, err := service.CreateSynthetic(ctx, base); err != nil || !replayed {
+		t.Fatalf("replay approved upgrade = %v, %v", replayed, err)
+	}
+
+	// The approval was consumed for exactly this release identity, so a
+	// drifted version, digest, or architecture must fail closed.
+	for _, tc := range []struct {
+		name   string
+		mutate func(*CreateRequest)
+	}{
+		{"target version", func(r *CreateRequest) {
+			r.TargetVersion = "1.2.4"
+			r.IdempotencyKey = "upgrade-drift-version"
+			r.RequestID = "request-drift-version"
+		}},
+		{"package digest", func(r *CreateRequest) {
+			r.PackageSHA256[0] ^= 0xff
+			r.IdempotencyKey = "upgrade-drift-digest"
+			r.RequestID = "request-drift-digest"
+		}},
+		{"architecture", func(r *CreateRequest) {
+			r.Architecture = "arm64"
+			r.IdempotencyKey = "upgrade-drift-arch"
+			r.RequestID = "request-drift-arch"
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			request := base
+			request.PackageSHA256 = append([]byte(nil), base.PackageSHA256...)
+			tc.mutate(&request)
+			if _, _, err := service.CreateSynthetic(ctx, request); !errors.Is(err, approvals.ErrNotReady) {
+				t.Fatalf("drifted %s error = %v", tc.name, err)
+			}
+		})
+	}
+
+	// An action-level approval never satisfies the release-identity binding.
+	generic := base
+	generic.IdempotencyKey, generic.RequestID = "upgrade-generic", "request-upgrade-generic"
+	generic.ActorIdentityID, generic.ActorSessionID, generic.ApprovalID = uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7())
+	approverID := uuid.Must(uuid.NewV7())
+	genericHash, genericSummary := approvals.GenericBinding("agent.upgrade", "node", nodeID)
+	if _, err := pool.Exec(ctx, `INSERT INTO identities(id,issuer,subject,created_at,updated_at) VALUES($1,'test',$2,now(),now()),($3,'test',$4,now(),now())`, generic.ActorIdentityID, "requester-"+generic.ActorIdentityID.String(), approverID, "approver-"+approverID.String()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `INSERT INTO auth_sessions(id,identity_id,expires_at,created_at) VALUES($1,$2,now()+interval '1 hour',now())`, generic.ActorSessionID, generic.ActorIdentityID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `INSERT INTO approval_requests(id,workspace_id,requester_id,action,resource_type,resource_id,reason,status,approver_id,approval_reason,expires_at,approved_at,created_at,request_hash,request_summary) VALUES($1,$2,$3,'agent.upgrade','node',$4,'integration test','approved',$5,'independent approval',now()+interval '1 hour',now(),now(),$6,$7)`, generic.ApprovalID, workspaceID, generic.ActorIdentityID, nodeID, approverID, genericHash, genericSummary); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := service.CreateSynthetic(ctx, generic); !errors.Is(err, approvals.ErrNotReady) {
+		t.Fatalf("action-level approval error = %v", err)
+	}
+}
+
 func TestConcurrentWorkersNodeLeaseAndCrashWindowsIntegration(t *testing.T) {
 	service, pool, workspaceID, nodeID := integrationService(t)
 	for _, key := range []string{"one", "two"} {
@@ -685,7 +753,12 @@ func approveOperation(t *testing.T, pool *pgxpool.Pool, workspaceID uuid.UUID, r
 		_, err = pool.Exec(context.Background(), `INSERT INTO auth_sessions(id,identity_id,expires_at,created_at) VALUES($1,$2,now()+interval '1 hour',now())`, request.ActorSessionID, request.ActorIdentityID)
 	}
 	if err == nil {
-		approvalHash, approvalSummary := approvals.GenericBinding(request.Action, "node", request.NodeID)
+		var approvalHash, approvalSummary []byte
+		if request.Kind == AgentUpgrade {
+			approvalHash, approvalSummary = approvals.AgentUpgradeBinding(request.NodeID, request.TargetVersion, request.PackageSHA256, request.Architecture)
+		} else {
+			approvalHash, approvalSummary = approvals.GenericBinding(request.Action, "node", request.NodeID)
+		}
 		_, err = pool.Exec(context.Background(), `INSERT INTO approval_requests(id,workspace_id,requester_id,action,resource_type,resource_id,reason,status,approver_id,approval_reason,expires_at,approved_at,created_at,request_hash,request_summary) VALUES($1,$2,$3,$4,'node',$5,'integration test','approved',$6,'independent approval',now()+interval '1 hour',now(),now(),$7,$8)`, request.ApprovalID, workspaceID, request.ActorIdentityID, request.Action, request.NodeID, approverID, approvalHash, approvalSummary)
 	}
 	if err != nil {

@@ -16,6 +16,7 @@ use ocservia_command_authorization::ControllerCommandKeyring;
 use ocservia_command_journal::{
     AcceptOutcome, AppliedResourceRevision, CommandRecord, CommandState, Journal,
 };
+pub use ocservia_contracts::agent_upgrade::AGENT_UPGRADE_CAPABILITY;
 #[cfg(test)]
 use ocservia_contracts::generated::ocserv::platform::agent::v1::ConfigApplyResult;
 use ocservia_contracts::generated::ocserv::platform::agent::v1::{
@@ -1340,8 +1341,37 @@ fn validate_payload(
             }
             ("ocserv.groups.write", Vec::new(), true)
         }
+        Some(command_envelope::Payload::AgentUpgrade(payload)) => {
+            validate_agent_upgrade(payload)?;
+            (AGENT_UPGRADE_CAPABILITY, Vec::new(), true)
+        }
         _ => return Err(CommandError::Rejected("capability_rejected")),
     })
+}
+
+/// Validates the typed upgrade release identity before any external effect.
+/// The same checks are repeated independently by privd after its own
+/// Controller-authorization verification.
+fn validate_agent_upgrade(
+    payload: &ocservia_contracts::generated::ocserv::platform::agent::v1::AgentUpgrade,
+) -> Result<(), CommandError> {
+    if !ocservia_contracts::agent_upgrade::valid_target_version(&payload.target_version) {
+        return Err(CommandError::Rejected("agent_upgrade_version_invalid"));
+    }
+    if payload.package_sha256.len() != 32 {
+        return Err(CommandError::Rejected("agent_upgrade_digest_invalid"));
+    }
+    if !ocservia_contracts::agent_upgrade::valid_architecture(&payload.architecture) {
+        return Err(CommandError::Rejected("agent_upgrade_architecture_invalid"));
+    }
+    if ocservia_contracts::agent_upgrade::runtime_architecture()
+        != Some(payload.architecture.as_str())
+    {
+        return Err(CommandError::Rejected(
+            "agent_upgrade_architecture_mismatch",
+        ));
+    }
+    Ok(())
 }
 
 fn validate_session_payload(session_id: &str, boot_id: &str) -> Result<(), CommandError> {
@@ -1732,10 +1762,10 @@ mod tests {
         ControllerCommandKeyring, canonical_v1, claims_from_envelope_v1, verification_key_id,
     };
     use ocservia_contracts::generated::ocserv::platform::agent::v1::{
-        CommandAuthorizationProof, CommandAuthorizationVersion, ConfigApply, ConfigApplyResult,
-        ConfigPlan, GroupApply, IpBanRemove, ServiceReload, SessionDisconnect, SessionTerminate,
-        SyntheticEcho, SyntheticNoop, UserCreate, UserDisable, UserEnable, UserPasswordRotate,
-        command_envelope,
+        AgentUpgrade, CommandAuthorizationProof, CommandAuthorizationVersion, ConfigApply,
+        ConfigApplyResult, ConfigPlan, GroupApply, IpBanRemove, ServiceReload, SessionDisconnect,
+        SessionTerminate, SyntheticEcho, SyntheticNoop, UserCreate, UserDisable, UserEnable,
+        UserPasswordRotate, command_envelope,
     };
     use prost_types::Timestamp;
     use rand::{SeedableRng, rngs::StdRng};
@@ -2048,6 +2078,9 @@ mod tests {
             }
             Some(command_envelope::Payload::ConfigApply(_)) => {
                 ("config.apply", "ocserv.config.apply")
+            }
+            Some(command_envelope::Payload::AgentUpgrade(_)) => {
+                ("agent.upgrade", "ocserv.agent.upgrade.v1")
             }
             _ => panic!("test command payload is unsupported"),
         };
@@ -3443,6 +3476,231 @@ mod tests {
                 .expect("count"),
             1
         );
+        drop(executor);
+        cleanup_journal(&path);
+    }
+
+    fn host_architecture() -> &'static str {
+        ocservia_contracts::agent_upgrade::runtime_architecture().expect("test host architecture")
+    }
+
+    fn foreign_architecture() -> &'static str {
+        if host_architecture() == "amd64" {
+            "arm64"
+        } else {
+            "amd64"
+        }
+    }
+
+    fn agent_upgrade_envelope(
+        node_id: [u8; 16],
+        key: [u8; 16],
+        target_version: &str,
+        package_sha256: Vec<u8>,
+        architecture: &str,
+        now: i64,
+    ) -> CommandEnvelope {
+        let mut envelope = command(node_id, key, "", now);
+        envelope.payload = Some(command_envelope::Payload::AgentUpgrade(AgentUpgrade {
+            target_version: target_version.to_owned(),
+            package_sha256,
+            architecture: architecture.to_owned(),
+        }));
+        envelope.semantic_payload_hash_version = SemanticPayloadHashVersion::V2 as i32;
+        envelope.semantic_payload_sha256 = semantic_payload_hash_v2(&envelope)
+            .expect("agent upgrade semantic hash")
+            .to_vec();
+        authorize_test_command(&mut envelope);
+        envelope
+    }
+
+    fn upgrade_context(node_id: [u8; 16], now: i64) -> CommandContext {
+        let mut command_context = context(node_id, now);
+        command_context.capabilities = capabilities(&[AGENT_UPGRADE_CAPABILITY]);
+        command_context
+    }
+
+    fn rejected_code(envelope: &CommandEnvelope, command_context: &CommandContext) -> &'static str {
+        match validate_command(envelope, command_context) {
+            Err(CommandError::Rejected(code)) => code,
+            Err(other) => panic!("expected a rejected command, got {other}"),
+            Ok(_) => panic!("expected a rejected command, got success"),
+        }
+    }
+
+    #[test]
+    fn agent_upgrade_command_requires_negotiated_capability() {
+        let node_id = *Uuid::now_v7().as_bytes();
+        let key = *Uuid::now_v7().as_bytes();
+        let envelope = agent_upgrade_envelope(
+            node_id,
+            key,
+            "1.2.3",
+            vec![0x43; 32],
+            host_architecture(),
+            100,
+        );
+        let mut without_capability = context(node_id, 100);
+        without_capability.capabilities = capabilities(&["ocserv.service.reload"]);
+        assert_eq!(
+            rejected_code(&envelope, &without_capability),
+            "capability_rejected"
+        );
+        validate_command(&envelope, &upgrade_context(node_id, 100))
+            .expect("typed upgrade command validates with negotiated capability");
+    }
+
+    #[test]
+    fn agent_upgrade_validation_fails_at_the_payload_layer() {
+        let node_id = *Uuid::now_v7().as_bytes();
+        let key = *Uuid::now_v7().as_bytes();
+        let base = agent_upgrade_envelope(
+            node_id,
+            key,
+            "1.2.3",
+            vec![0x43; 32],
+            host_architecture(),
+            100,
+        );
+        let command_context = upgrade_context(node_id, 100);
+        let mut cases: Vec<(&'static str, CommandEnvelope)> = Vec::new();
+        let mut invalid_semver = base.clone();
+        invalid_semver.payload = Some(command_envelope::Payload::AgentUpgrade(AgentUpgrade {
+            target_version: "latest".to_owned(),
+            package_sha256: vec![0x43; 32],
+            architecture: host_architecture().to_owned(),
+        }));
+        cases.push(("agent_upgrade_version_invalid", invalid_semver));
+        let mut short_digest = base.clone();
+        short_digest.payload = Some(command_envelope::Payload::AgentUpgrade(AgentUpgrade {
+            target_version: "1.2.3".to_owned(),
+            package_sha256: vec![0x43; 31],
+            architecture: host_architecture().to_owned(),
+        }));
+        cases.push(("agent_upgrade_digest_invalid", short_digest));
+        let mut unsupported_arch = base.clone();
+        unsupported_arch.payload = Some(command_envelope::Payload::AgentUpgrade(AgentUpgrade {
+            target_version: "1.2.3".to_owned(),
+            package_sha256: vec![0x43; 32],
+            architecture: "x86_64".to_owned(),
+        }));
+        cases.push(("agent_upgrade_architecture_invalid", unsupported_arch));
+        let mut foreign_arch = base.clone();
+        foreign_arch.payload = Some(command_envelope::Payload::AgentUpgrade(AgentUpgrade {
+            target_version: "1.2.3".to_owned(),
+            package_sha256: vec![0x43; 32],
+            architecture: foreign_architecture().to_owned(),
+        }));
+        cases.push(("agent_upgrade_architecture_mismatch", foreign_arch));
+        for (expected_code, envelope) in cases {
+            assert_eq!(rejected_code(&envelope, &command_context), expected_code);
+        }
+    }
+
+    #[test]
+    fn agent_upgrade_authorization_boundaries_fail_closed() {
+        let node_id = *Uuid::now_v7().as_bytes();
+        let key = *Uuid::now_v7().as_bytes();
+        let base = agent_upgrade_envelope(
+            node_id,
+            key,
+            "1.2.3",
+            vec![0x43; 32],
+            host_architecture(),
+            100,
+        );
+        let command_context = upgrade_context(node_id, 100);
+
+        let mut unsigned = base.clone();
+        unsigned.authorization = None;
+        assert_eq!(
+            rejected_code(&unsigned, &command_context),
+            "command_authorization_missing"
+        );
+
+        let mut wrong_key = base.clone();
+        let attacker = SigningKey::from_bytes(&[0x66; 32]);
+        let attacker_claims = claims_from_envelope_v1(&wrong_key).expect("claims");
+        let signature = attacker.sign(&canonical_v1(&attacker_claims).expect("canonical"));
+        wrong_key.authorization = Some(CommandAuthorizationProof {
+            version: CommandAuthorizationVersion::V1.into(),
+            key_id: verification_key_id(&attacker.verifying_key()),
+            signature: signature.to_bytes().to_vec(),
+        });
+        assert_eq!(
+            rejected_code(&wrong_key, &command_context),
+            "command_authorization_key_unknown"
+        );
+
+        let mut wrong_capability = base.clone();
+        wrong_capability.required_capability = "ocserv.users.write".to_owned();
+        assert_eq!(
+            rejected_code(&wrong_capability, &command_context),
+            "command_authorization_capability_mismatch"
+        );
+
+        let mut wrong_action = base.clone();
+        wrong_action.action = "service.reload".to_owned();
+        assert_eq!(
+            rejected_code(&wrong_action, &command_context),
+            "command_authorization_action_mismatch"
+        );
+
+        let mut wrong_node = base.clone();
+        wrong_node.node_id = Uuid::now_v7().as_bytes().to_vec();
+        assert_eq!(
+            rejected_code(&wrong_node, &command_context),
+            "node_id_mismatch"
+        );
+
+        let mut stale_revision = base.clone();
+        stale_revision.expected_revision = 2;
+        assert_eq!(
+            rejected_code(&stale_revision, &command_context),
+            "revision_mismatch"
+        );
+
+        let mut mutated_hash = base.clone();
+        mutated_hash.semantic_payload_sha256[0] ^= 0xff;
+        assert_eq!(
+            rejected_code(&mutated_hash, &command_context),
+            "semantic_payload_hash_mismatch"
+        );
+    }
+
+    #[test]
+    fn agent_upgrade_idempotency_conflict_never_prepares_twice() {
+        let path = temporary_journal("upgrade-conflict");
+        let node_id = *Uuid::now_v7().as_bytes();
+        let key = *Uuid::now_v7().as_bytes();
+        let command_context = upgrade_context(node_id, 100);
+        let mut executor = CommandExecutor::new(Journal::open(&path).expect("open"));
+        let first = agent_upgrade_envelope(
+            node_id,
+            key,
+            "1.2.3",
+            vec![0x43; 32],
+            host_architecture(),
+            100,
+        );
+        assert!(matches!(
+            executor.prepare_external(&first, &command_context),
+            Ok(ExternalPreparation::Execute(_))
+        ));
+        let mut conflicting = first.clone();
+        conflicting.payload = Some(command_envelope::Payload::AgentUpgrade(AgentUpgrade {
+            target_version: "2.0.0".to_owned(),
+            package_sha256: vec![0x43; 32],
+            architecture: host_architecture().to_owned(),
+        }));
+        conflicting.semantic_payload_sha256 = semantic_payload_hash_v2(&conflicting)
+            .expect("conflicting semantic hash")
+            .to_vec();
+        authorize_test_command(&mut conflicting);
+        assert!(matches!(
+            executor.prepare_external(&conflicting, &command_context),
+            Err(CommandError::PayloadConflict)
+        ));
         drop(executor);
         cleanup_journal(&path);
     }

@@ -3,6 +3,7 @@ package approvals
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -83,6 +84,16 @@ func New(pool *pgxpool.Pool) *Service {
 func GenericBinding(action, resourceType string, resourceID uuid.UUID) ([]byte, json.RawMessage) {
 	summary, _ := json.Marshal(map[string]any{"action": action, "resource_type": resourceType, "resource_id": resourceID})
 	digest := sha256.Sum256(append([]byte("ocservia/approval-request/v1\x00"), summary...))
+	return digest[:], summary
+}
+
+// AgentUpgradeBinding binds an approval to the exact immutable agent release
+// identity an upgrade may install. Approving a node upgrade therefore never
+// authorizes a different version, package digest, or architecture than the
+// approver reviewed.
+func AgentUpgradeBinding(nodeID uuid.UUID, targetVersion string, packageSHA256 []byte, architecture string) ([]byte, json.RawMessage) {
+	summary, _ := json.Marshal(map[string]any{"action": "agent.upgrade", "node_id": nodeID, "target_version": targetVersion, "package_sha256": hex.EncodeToString(packageSHA256), "architecture": architecture})
+	digest := sha256.Sum256(append([]byte("ocservia/approval-request/agent-upgrade/v1\x00"), summary...))
 	return digest[:], summary
 }
 

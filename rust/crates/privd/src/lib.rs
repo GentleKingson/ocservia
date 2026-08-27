@@ -11,8 +11,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use ed25519_dalek::SigningKey;
 use ocservia_agent_protocol::{
-    ErrorKind, PrivdError, PrivdRequest, PrivdResponse, PrivilegedRequestMode, privd_request,
-    privd_response, read_frame, write_frame,
+    AgentUpgradeScheduledResult, ErrorKind, PrivdError, PrivdRequest, PrivdResponse,
+    PrivilegedRequestMode, privd_request, privd_response, read_frame, write_frame,
 };
 use ocservia_command_authorization::{
     ArtifactGrantClaimsV1, AuthorizationError, CommandAuthorizationV1, ControllerCommandKeyring,
@@ -640,6 +640,9 @@ fn validate_privileged_payload(
             | command_envelope::Payload::UserDisable(_)
             | command_envelope::Payload::UserEnable(_),
         ) => {}
+        Some(command_envelope::Payload::AgentUpgrade(payload)) => {
+            validate_upgrade_release(payload)?;
+        }
         _ => {
             return Err(error(
                 ErrorKind::PermissionDenied,
@@ -664,6 +667,41 @@ fn validate_sealed_secret(
         || secret.ciphertext.len() > 16 * 1024
     {
         return Err(error(ErrorKind::InvalidRequest, "sealed secret invalid"));
+    }
+    Ok(())
+}
+
+/// Independently validates the immutable upgrade release identity carried by a
+/// Controller-signed command. Privd never trusts the Agent-side validation and
+/// never executes package installation at this boundary.
+fn validate_upgrade_release(
+    payload: &ocservia_contracts::generated::ocserv::platform::agent::v1::AgentUpgrade,
+) -> Result<(), PrivdError> {
+    if !ocservia_contracts::agent_upgrade::valid_target_version(&payload.target_version) {
+        return Err(error(
+            ErrorKind::InvalidRequest,
+            "agent upgrade target version invalid",
+        ));
+    }
+    if payload.package_sha256.len() != 32 {
+        return Err(error(
+            ErrorKind::InvalidRequest,
+            "agent upgrade package digest invalid",
+        ));
+    }
+    if !ocservia_contracts::agent_upgrade::valid_architecture(&payload.architecture) {
+        return Err(error(
+            ErrorKind::InvalidRequest,
+            "agent upgrade architecture invalid",
+        ));
+    }
+    if ocservia_contracts::agent_upgrade::runtime_architecture()
+        != Some(payload.architecture.as_str())
+    {
+        return Err(error(
+            ErrorKind::InvalidRequest,
+            "agent upgrade architecture does not match this host",
+        ));
     }
     Ok(())
 }
@@ -852,6 +890,15 @@ fn effect_binding(
                 "{}:{}",
                 Uuid::from_slice(&payload.certificate_id).ok()?,
                 Uuid::from_slice(&payload.artifact_id).ok()?
+            ),
+            claims.expected_revision,
+        ),
+        command_envelope::Payload::AgentUpgrade(payload) => (
+            "agent_upgrade_prepare",
+            format!(
+                "{}:{}",
+                payload.target_version,
+                hex::encode(&payload.package_sha256)
             ),
             claims.expected_revision,
         ),
@@ -1176,6 +1223,20 @@ async fn execute_signed_payload(
                 .await
                 .map(privd_response::Result::CertificateP12),
         ),
+        // The upgrade preparation boundary: the release identity was already
+        // verified against the Controller-signed command, so privd only
+        // acknowledges the scheduled intent here. No package is installed and
+        // no service is restarted by this operation.
+        Some(command_envelope::Payload::AgentUpgrade(payload)) => (
+            "agent_upgrade_prepare",
+            Ok(privd_response::Result::AgentUpgradeScheduled(
+                AgentUpgradeScheduledResult {
+                    operation_id: claims.operation_id.to_vec(),
+                    target_version: payload.target_version.clone(),
+                    package_sha256: payload.package_sha256.clone(),
+                },
+            )),
+        ),
         _ => (
             "privileged_command",
             Err(ocservia_ocserv_adapter::AdapterError::InvalidRequest),
@@ -1319,6 +1380,7 @@ fn exact_result_bytes(result: &privd_response::Result) -> Option<Vec<u8>> {
         privd_response::Result::CertificateCsr(value) => Some(value.encode_to_vec()),
         privd_response::Result::CertificateP12(value) => Some(value.encode_to_vec()),
         privd_response::Result::CertificateRevoke(value) => Some(value.encode_to_vec()),
+        privd_response::Result::AgentUpgradeScheduled(value) => Some(value.encode_to_vec()),
         privd_response::Result::Error(error) if terminal_result_error_code(error).is_some() => {
             Some(Vec::new())
         }
@@ -1335,6 +1397,9 @@ fn privileged_result_kind(result: &privd_response::Result) -> Option<PrivilegedR
         privd_response::Result::CertificateP12(_) => Some(PrivilegedResultKind::CertificateP12),
         privd_response::Result::CertificateRevoke(_) => {
             Some(PrivilegedResultKind::CertificateRevoke)
+        }
+        privd_response::Result::AgentUpgradeScheduled(_) => {
+            Some(PrivilegedResultKind::AgentUpgradeScheduled)
         }
         privd_response::Result::Error(error) if terminal_result_error_code(error).is_some() => {
             Some(PrivilegedResultKind::Error)
@@ -1367,6 +1432,7 @@ fn privileged_command_kind(command: &CommandEnvelope) -> Option<PrivilegedComman
         command_envelope::Payload::CertificateRevoke(_) => {
             Some(PrivilegedCommandKind::CertificateRevoke)
         }
+        command_envelope::Payload::AgentUpgrade(_) => Some(PrivilegedCommandKind::AgentUpgrade),
         _ => None,
     }
 }
@@ -1493,7 +1559,7 @@ mod tests {
         canonical_v1, claims_from_envelope_v1, semantic_payload_hash_v2, verification_key_id,
     };
     use ocservia_contracts::generated::ocserv::platform::agent::v1::{
-        CertificateP12, CommandAuthorizationProof, CommandAuthorizationVersion,
+        AgentUpgrade, CertificateP12, CommandAuthorizationProof, CommandAuthorizationVersion,
         CommandDeliveryMode, ConfigApply, SealedSecretPurpose, SealedSecretV1, SealedSecretVersion,
         SemanticPayloadHashVersion, ServiceReload, UserCreate, command_envelope,
     };
@@ -1542,6 +1608,42 @@ mod tests {
             "ocserv.service.reload",
             command_envelope::Payload::ServiceReload(ServiceReload {}),
         )
+    }
+
+    fn signed_agent_upgrade(
+        key: &SigningKey,
+        node_id: [u8; 16],
+        issued_at: i64,
+        expires_at: i64,
+        target_version: &str,
+        package_sha256: Vec<u8>,
+        architecture: &str,
+    ) -> CommandEnvelope {
+        signed_command(
+            key,
+            node_id,
+            issued_at,
+            expires_at,
+            "agent.upgrade",
+            "ocserv.agent.upgrade.v1",
+            command_envelope::Payload::AgentUpgrade(AgentUpgrade {
+                target_version: target_version.to_owned(),
+                package_sha256,
+                architecture: architecture.to_owned(),
+            }),
+        )
+    }
+
+    fn host_architecture() -> &'static str {
+        ocservia_contracts::agent_upgrade::runtime_architecture().expect("test host architecture")
+    }
+
+    fn foreign_architecture() -> &'static str {
+        if host_architecture() == "amd64" {
+            "arm64"
+        } else {
+            "amd64"
+        }
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1882,6 +1984,118 @@ mod tests {
         ));
         assert!(!counter.exists());
         std::fs::remove_dir_all(directory).expect("cleanup test directory");
+    }
+
+    #[tokio::test]
+    async fn agent_upgrade_prepare_attests_scheduled_intent_exactly_once() {
+        let signing = SigningKey::from_bytes(&[29; 32]);
+        let keys = keyring(&signing);
+        let node_id = *Uuid::now_v7().as_bytes();
+        let now = unix_seconds();
+        let command = signed_agent_upgrade(
+            &signing,
+            node_id,
+            now,
+            now + 60,
+            "1.2.3",
+            vec![0x43; 32],
+            host_architecture(),
+        );
+        let (adapter, resources, _, directory) = test_adapter();
+
+        let first = dispatch(command_request(command.clone()), &node_id, &keys, &adapter).await;
+        let Some(privd_response::Result::AgentUpgradeScheduled(ref scheduled)) = first.result
+        else {
+            panic!("upgrade preparation must return the scheduled intent");
+        };
+        assert_eq!(scheduled.target_version, "1.2.3");
+        assert_eq!(scheduled.package_sha256, vec![0x43; 32]);
+        assert_eq!(scheduled.operation_id, command.operation_id);
+        let proof = first
+            .privileged_result_proof
+            .clone()
+            .expect("scheduled intent must be root-attested");
+        ocservia_privd_attestation::verify_receipt(
+            &proof,
+            &SigningKey::from_bytes(&[41; 32]).verifying_key(),
+        )
+        .expect("valid scheduled-intent receipt");
+        let receipt = proof.receipt_v1.as_ref().expect("receipt");
+        assert_eq!(
+            PrivilegedCommandKind::try_from(receipt.command_kind),
+            Ok(PrivilegedCommandKind::AgentUpgrade)
+        );
+        assert_eq!(
+            PrivilegedResultKind::try_from(receipt.result_kind),
+            Ok(PrivilegedResultKind::AgentUpgradeScheduled)
+        );
+        assert_eq!(
+            CommandResultState::try_from(receipt.terminal_state),
+            Ok(CommandResultState::Succeeded)
+        );
+
+        let duplicate = dispatch(command_request(command.clone()), &node_id, &keys, &adapter).await;
+        assert_eq!(duplicate.privileged_result_proof, Some(proof.clone()));
+        assert_eq!(duplicate.result, first.result);
+        drop(adapter);
+        let restarted = Adapter::new(resources, Limits::default());
+        let replay = dispatch(
+            reconcile_request(command, &signing),
+            &node_id,
+            &keys,
+            &restarted,
+        )
+        .await;
+        assert_eq!(replay.privileged_result_proof, Some(proof));
+        assert_eq!(replay.result, first.result);
+        std::fs::remove_dir_all(directory).expect("cleanup test directory");
+    }
+
+    #[tokio::test]
+    async fn agent_upgrade_prepare_rejects_unverified_release_identities() {
+        let signing = SigningKey::from_bytes(&[30; 32]);
+        let keys = keyring(&signing);
+        let node_id = *Uuid::now_v7().as_bytes();
+        let now = unix_seconds();
+        let adapter = Adapter::new(FixedResources::default(), Limits::default());
+
+        // A foreign-but-well-formed release identity passes the semantic hash
+        // and Controller signature, so it must be refused by privd's own
+        // host-architecture validation, not by an earlier generic failure.
+        let foreign = signed_agent_upgrade(
+            &signing,
+            node_id,
+            now,
+            now + 60,
+            "1.2.3",
+            vec![0x43; 32],
+            foreign_architecture(),
+        );
+        let response = dispatch(command_request(foreign), &node_id, &keys, &adapter).await;
+        assert!(matches!(
+            response.result,
+            Some(privd_response::Result::Error(ref failure))
+                if ErrorKind::try_from(failure.kind).unwrap_or(ErrorKind::Unspecified)
+                    == ErrorKind::InvalidRequest
+        ));
+
+        // Unknown controller keys never reach the release identity checks.
+        let unknown_key = SigningKey::from_bytes(&[31; 32]);
+        let forged = signed_agent_upgrade(
+            &unknown_key,
+            node_id,
+            now,
+            now + 60,
+            "1.2.3",
+            vec![0x43; 32],
+            host_architecture(),
+        );
+        let response = dispatch(command_request(forged), &node_id, &keys, &adapter).await;
+        assert_permission_denied(&response);
+
+        // Unsigned upgrade intents have no fixed local operation to ride on.
+        let response = dispatch(unsigned_request(None), &node_id, &keys, &adapter).await;
+        assert_permission_denied(&response);
     }
 
     #[tokio::test]

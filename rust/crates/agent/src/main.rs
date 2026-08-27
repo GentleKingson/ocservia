@@ -414,6 +414,7 @@ fn supported_capabilities() -> Vec<String> {
             "config.runtime",
             "ocserv.certificate.issue",
             "ocserv.certificate.revoke",
+            "ocserv.agent.upgrade.v1",
         ])
         .map(str::to_owned)
         .collect()
@@ -1683,6 +1684,14 @@ async fn execute_external_command(
                     )
                 }
                 Some(privd_response::Result::CertificateP12(result)) => {
+                    session.command_executor.complete_external_attested(
+                        &command,
+                        Ok(&result.encode_to_vec()),
+                        &proof,
+                        completed_at,
+                    )
+                }
+                Some(privd_response::Result::AgentUpgradeScheduled(result)) => {
                     session.command_executor.complete_external_attested(
                         &command,
                         Ok(&result.encode_to_vec()),
