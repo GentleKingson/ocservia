@@ -572,15 +572,15 @@ test "$(sudo stat -c '%u:%g:%a' -- "${rootfs}/var/lib/ocservia-upgrade")" = "0:0
 test "$(sudo stat -c '%u:%g:%a' -- "${backup_dir}")" = "0:0:700"
 test "$(sudo stat -c '%u:%g:%a:%h' -- "${backup_dir}/MANIFEST.sha256")" = "0:0:600:1"
 test "$(sudo awk 'END { print NR }' "${backup_dir}/MANIFEST.sha256")" -eq 8
-# The legacy fixture predates the durable runner, so its matched snapshot must
-# record the whole runner set as absent rather than invent rollback sources.
-for absent in ocservia-upgrader.absent ocservia-upgrader@.service.absent ocservia-agent-verify.absent; do
-  sudo test -f "${backup_dir}/${absent}" \
-    || { echo "legacy snapshot is missing ${absent}" >&2; exit 1; }
-  test "$(sudo stat -c '%u:%g:%a:%h' -- "${backup_dir}/${absent}")" = "0:0:600:1"
+# The fresh package install already placed the durable runner set, so the
+# matched snapshot must carry it as concrete rollback sources.
+for runner_snapshot in ocservia-upgrader.previous ocservia-agent-verify.previous \
+  ocservia-upgrader@.service.previous; do
+  sudo test -f "${backup_dir}/${runner_snapshot}" \
+    || { echo "snapshot is missing ${runner_snapshot}" >&2; exit 1; }
 done
-sudo test ! -e "${backup_dir}/ocservia-upgrader.previous" \
-  || { echo "legacy snapshot invented an upgrader binary source" >&2; exit 1; }
+sudo test ! -e "${backup_dir}/ocservia-upgrader.absent" \
+  || { echo "snapshot recorded the installed runner as absent" >&2; exit 1; }
 if sudo setpriv --reuid=61000 --regid=61000 --clear-groups test -r "${backup_dir}/ocservia-agent.previous"; then
   echo "Agent UID can read a root-only rollback snapshot" >&2
   exit 1
@@ -617,9 +617,12 @@ for snapshot in \
   ocservia-privd.previous \
   ocservia-agent.service.previous \
   ocservia-privd.service.previous \
-  ocservia-agent-relays.conf.previous; do
+  ocservia-agent-relays.conf.previous \
+  ocservia-upgrader.previous \
+  ocservia-agent-verify.previous \
+  ocservia-upgrader@.service.previous; do
   case "${snapshot}" in
-    ocservia-agent.previous|ocservia-privd.previous) expected_mode=755 ;;
+    ocservia-agent.previous|ocservia-privd.previous|ocservia-upgrader.previous|ocservia-agent-verify.previous) expected_mode=755 ;;
     *) expected_mode=644 ;;
   esac
   test "$(sudo stat -c '%u:%g:%a:%h' -- "${backup_dir}/${snapshot}")" = "0:0:${expected_mode}:1"
@@ -732,14 +735,14 @@ sudo "${rootfs}/usr/libexec/ocservia/ocservia-agent" \
   --relay-mode custom --relay-url https://relay-a.invalid \
   --relay-url https://relay-b.invalid --relay-token-file /etc/ocservia-agent/relay-access-token \
   | grep -Fxq 'legacy Agent arguments accepted'
-# The pre-durable legacy snapshot records the runner set as absent, so the
-# rollback must remove exactly what the upgrade installed for it.
-sudo test ! -e "${rootfs}/usr/libexec/ocservia/ocservia-upgrader" \
-  || { echo "rollback retained the durable upgrade runner" >&2; exit 1; }
-sudo test ! -e "${rootfs}/usr/libexec/ocservia/ocservia-agent-verify" \
-  || { echo "rollback retained the package verifier" >&2; exit 1; }
-sudo test ! -e "${rootfs}/usr/lib/systemd/system/ocservia-upgrader@.service" \
-  || { echo "rollback retained the durable upgrade runner unit" >&2; exit 1; }
+# The snapshot carried the runner set as concrete sources, so the matched
+# rollback must restore it rather than remove it.
+sudo test -x "${rootfs}/usr/libexec/ocservia/ocservia-upgrader" \
+  || { echo "rollback dropped the durable upgrade runner" >&2; exit 1; }
+sudo test -x "${rootfs}/usr/libexec/ocservia/ocservia-agent-verify" \
+  || { echo "rollback dropped the package verifier" >&2; exit 1; }
+sudo test -f "${rootfs}/usr/lib/systemd/system/ocservia-upgrader@.service" \
+  || { echo "rollback dropped the durable upgrade runner unit" >&2; exit 1; }
 echo "matched Agent/privd binary and systemd rollback passed"
 
 sudo rm -f -- \
@@ -827,8 +830,10 @@ sudo grep -Fxq "target_version=1.0.0" "${durable_operation_dir}/result"
 sudo cmp -s "${ROOT}/rust/target/release/ocservia-agent" \
   "${rootfs}/usr/libexec/ocservia/ocservia-agent" \
   || { echo "durable runner lifecycle left a non-package Agent binary" >&2; exit 1; }
-sudo test ! -e "${rootfs}/var/lib/ocservia-upgrade/package-staging" \
-  || { echo "durable runner left package staging behind" >&2; exit 1; }
+if sudo find "${rootfs}/var/lib/ocservia-upgrade/package-staging" -mindepth 1 -print -quit 2>/dev/null | grep -q .; then
+  echo "durable runner left package staging behind" >&2
+  exit 1
+fi
 # A replay of the terminal operation converges without re-running the
 # destructive lifecycle (the fresh matched snapshot below must stay in place).
 snapshot_before_replay="$(sudo sha256sum \
