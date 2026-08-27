@@ -1,6 +1,8 @@
+BEGIN;
+
 DO $$ BEGIN
-  IF EXISTS (SELECT 1 FROM commands WHERE payload_type='agent_upgrade' AND state IN ('queued','dispatched','accepted','running','unknown')) THEN
-    RAISE EXCEPTION 'cannot roll back the typed agent upgrade contract while upgrade commands are nonterminal';
+  IF EXISTS (SELECT 1 FROM commands WHERE payload_type='agent_upgrade') THEN
+    RAISE EXCEPTION 'cannot roll back the typed agent upgrade contract while agent upgrade command history exists';
   END IF;
 END $$;
 
@@ -10,3 +12,5 @@ ALTER TABLE commands ADD CONSTRAINT commands_payload_type_check CHECK (
 );
 COMMENT ON CONSTRAINT commands_payload_type_check ON commands IS
     'Only typed command payloads are dispatchable; raw shell, file, occtl, and systemctl operations are forbidden.';
+
+COMMIT;

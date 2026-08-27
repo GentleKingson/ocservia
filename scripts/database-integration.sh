@@ -379,6 +379,27 @@ for major in "${POSTGRES_MAJORS[@]}"; do
     INSERT INTO nodes (id, workspace_id, name, status, created_at, updated_at) VALUES ('00000000-0000-7000-8000-000000000003', '00000000-0000-7000-8000-000000000001', 'node', 'active', now(), now());
   " >/dev/null
   test "$(docker exec "${container}" psql -U ocservia_owner -d ocservia -Atc "SELECT authorization_revision > 0 FROM nodes WHERE id='00000000-0000-7000-8000-000000000003'")" = "t"
+  # A terminal agent-upgrade command must block the version 26 rollback
+  # before the typed-payload constraint is touched: the down script runs
+  # under psql autocommit, so a late constraint failure would otherwise
+  # strip the guard from a live database.
+  docker exec "${container}" psql -v ON_ERROR_STOP=1 -U ocservia_owner -d ocservia -c "
+    INSERT INTO operations(id,workspace_id,node_id,state,version,request_id,idempotency_key,request_hash,created_at,updated_at)
+    VALUES('00000000-0000-7000-8000-000000000260','00000000-0000-7000-8000-000000000001','00000000-0000-7000-8000-000000000003','succeeded',1,'p1-26-rollback-guard','p1-26-rollback-guard',decode(repeat('26',32),'hex'),now(),now());
+    INSERT INTO commands(id,operation_id,workspace_id,node_id,state,payload_type,envelope,idempotency_key,expected_version,traceparent,expires_at,created_at,updated_at)
+    VALUES('00000000-0000-7000-8000-000000000261','00000000-0000-7000-8000-000000000260','00000000-0000-7000-8000-000000000001','00000000-0000-7000-8000-000000000003','succeeded','agent_upgrade',decode('00','hex'),'00000000-0000-7000-8000-000000000262',1,'00-26262626262626262626262626262626-2626262626262626-01',now()+interval '1 hour',now(),now());
+  " >/dev/null
+  if docker exec -i "${container}" psql -v ON_ERROR_STOP=1 -U ocservia_owner -d ocservia \
+    <"${ROOT}/control-plane/migrations/000026_agent_upgrade.down.sql" >"${TMP_ROOT}/pg${major}-agent-upgrade-down.log" 2>&1; then
+    echo "version 26 rollback discarded terminal agent upgrade history" >&2
+    exit 1
+  fi
+  grep -Fq 'cannot roll back the typed agent upgrade contract while agent upgrade command history exists' "${TMP_ROOT}/pg${major}-agent-upgrade-down.log"
+  test "$(docker exec "${container}" psql -U ocservia_owner -d ocservia -Atc "SELECT count(*) FROM pg_constraint WHERE conname='commands_payload_type_check' AND convalidated")" = "1"
+  docker exec "${container}" psql -v ON_ERROR_STOP=1 -U ocservia_owner -d ocservia -c "
+    DELETE FROM commands WHERE id='00000000-0000-7000-8000-000000000261';
+    DELETE FROM operations WHERE id='00000000-0000-7000-8000-000000000260';
+  " >/dev/null
   docker exec "${container}" psql -v ON_ERROR_STOP=1 -U ocservia_owner -d ocservia -c "
     DO \$\$
     DECLARE start_at timestamptz := date_trunc('month', now()) - interval '2 months';
