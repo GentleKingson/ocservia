@@ -202,3 +202,5 @@ mod runtime_stats_tests {
             + u128::from(std::process::id())
     }
 }
+
+// G6 B4 warm-cache acceptance run 1: first-party source touch.
