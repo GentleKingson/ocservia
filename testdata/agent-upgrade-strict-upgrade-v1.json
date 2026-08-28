@@ -1,0 +1,27 @@
+{
+  "version": 1,
+  "domain": "ocservia.agent-upgrade.strict-upgrade.v1",
+  "notes": "Cross-language corpus for the single strict-upgrade question the execution-time downgrade fence asks: is target strictly newer than current under SemVer 2.0.0 precedence? The Go control plane (golang.org/x/mod/semver) and the Rust runner (contracts::is_strict_upgrade) must answer every case identically, including numeric prerelease identifiers beyond any fixed-width integer.",
+  "cases": [
+    { "name": "patch bump", "current": "1.2.3", "target": "1.2.4", "strict_upgrade": true },
+    { "name": "minor rollover", "current": "0.1.9", "target": "0.2.0", "strict_upgrade": true },
+    { "name": "major rollover", "current": "1.9.9", "target": "2.0.0", "strict_upgrade": true },
+    { "name": "prerelease to release", "current": "1.0.0-alpha", "target": "1.0.0", "strict_upgrade": true },
+    { "name": "small numeric identifiers", "current": "1.0.0-2", "target": "1.0.0-10", "strict_upgrade": true },
+    { "name": "numeric below alphanumeric", "current": "1.0.0-1", "target": "1.0.0-alpha", "strict_upgrade": true },
+    { "name": "longer prerelease wins", "current": "1.0.0-alpha", "target": "1.0.0-alpha.1", "strict_upgrade": true },
+    { "name": "release candidate of higher core", "current": "2.0.0-rc.1", "target": "2.0.0", "strict_upgrade": true },
+    { "name": "u64 boundary", "current": "1.0.0-18446744073709551615", "target": "1.0.0-18446744073709551616", "strict_upgrade": true },
+    { "name": "big numeric length dominance", "current": "1.0.0-9", "target": "1.0.0-99999999999999999999", "strict_upgrade": true },
+    { "name": "big numeric same length lexicographic", "current": "1.0.0-99999999999999999998", "target": "1.0.0-99999999999999999999", "strict_upgrade": true },
+    { "name": "twenty digit numeric over nineteen digit numeric", "current": "1.0.0-9999999999999999999", "target": "1.0.0-10000000000000000000", "strict_upgrade": true },
+    { "name": "reviewer overflow case target is older", "current": "1.0.0-100000000000000000000", "target": "1.0.0-99999999999999999999", "strict_upgrade": false },
+    { "name": "reviewer overflow case reversed", "current": "1.0.0-99999999999999999999", "target": "1.0.0-100000000000000000000", "strict_upgrade": true },
+    { "name": "big numeric same length lexicographic downgrade", "current": "1.0.0-99999999999999999999", "target": "1.0.0-99999999999999999998", "strict_upgrade": false },
+    { "name": "equal versions", "current": "1.2.3", "target": "1.2.3", "strict_upgrade": false },
+    { "name": "build metadata ignored", "current": "1.2.3+b1", "target": "1.2.3+b2", "strict_upgrade": false },
+    { "name": "plain downgrade", "current": "2.0.0", "target": "1.9.9", "strict_upgrade": false },
+    { "name": "release to its own prerelease", "current": "1.0.0", "target": "1.0.0-rc.1", "strict_upgrade": false },
+    { "name": "alphanumeric lexicographic downgrade", "current": "1.0.0-beta", "target": "1.0.0-alpha", "strict_upgrade": false }
+  ]
+}

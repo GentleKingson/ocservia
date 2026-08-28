@@ -16,5 +16,8 @@ prost-types.workspace = true
 tonic = { workspace = true, optional = true }
 tonic-prost = { workspace = true, optional = true }
 
+[dev-dependencies]
+serde_json.workspace = true
+
 [lints]
 workspace = true

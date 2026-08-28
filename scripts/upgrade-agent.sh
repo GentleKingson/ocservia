@@ -549,6 +549,16 @@ fi
 write_snapshot_manifest "${BACKUP_DIR}"
 
 "${ROOT}/scripts/install-agent.sh"
+# Durable installation commit record: written only after install-agent.sh
+# has placed every binary, verifier, and unit of this package. The upgrade
+# runner proves crash convergence exclusively through this digest-bound
+# record, so a host lost mid-install can never be mistaken for a completed
+# one.
+commit_record="${DESTDIR}${UPGRADE_STATE_DIR}/installed-commit"
+install -o root -g root -m 0600 -- /dev/null "${commit_record}"
+printf 'archive_sha256=%s\n' "${archive_hash}" >"${commit_record}"
+sync -f "${commit_record}"
+sync -f "${DESTDIR}${UPGRADE_STATE_DIR}"
 if [[ -z "${DESTDIR}" ]]; then
   systemctl try-restart ocservia-privd.service ocservia-agent.service
 fi

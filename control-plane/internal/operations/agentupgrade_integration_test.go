@@ -51,7 +51,7 @@ func observeUpgradeNode(t *testing.T, pool *pgxpool.Pool, nodeID uuid.UUID, agen
 func createScheduledUpgrade(t *testing.T, service *Service, pool *pgxpool.Pool, workspaceID, nodeID uuid.UUID, key string) uuid.UUID {
 	t.Helper()
 	ctx := context.Background()
-	if _, err := pool.Exec(ctx, `INSERT INTO node_capabilities(node_id,capability,approved) VALUES($1,'ocserv.agent.upgrade.v1',true) ON CONFLICT(node_id,capability) DO UPDATE SET approved=true`, nodeID); err != nil {
+	if _, err := pool.Exec(ctx, `INSERT INTO node_capabilities(node_id,capability,approved) VALUES($1,'ocserv.agent.upgrade.v2',true) ON CONFLICT(node_id,capability) DO UPDATE SET approved=true`, nodeID); err != nil {
 		t.Fatal(err)
 	}
 	request := CreateRequest{NodeID: nodeID, IdempotencyKey: key, ExpectedVersion: 1, Kind: AgentUpgrade, ActorID: "operator", Action: "agent.upgrade", Reason: "integration test", TargetVersion: "2.0.0", PackageSHA256: bytes.Repeat([]byte{0x43}, 32), Architecture: "amd64", TTL: time.Hour, RequestID: "request-" + key, Traceparent: testTraceparent}

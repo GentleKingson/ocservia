@@ -1955,9 +1955,11 @@ fn payload_authorization(
         Some(command_envelope::Payload::CertificateRevoke(_)) => {
             (119, "certificate.revoke", "ocserv.certificate.revoke")
         }
-        Some(command_envelope::Payload::AgentUpgrade(_)) => {
-            (128, "agent.upgrade", "ocserv.agent.upgrade.v1")
-        }
+        Some(command_envelope::Payload::AgentUpgrade(_)) => (
+            128,
+            "agent.upgrade",
+            ocservia_contracts::agent_upgrade::AGENT_UPGRADE_CAPABILITY,
+        ),
         _ => return Err(AuthorizationError::PayloadUnsupported),
     })
 }

@@ -424,7 +424,7 @@ fn supported_capabilities() -> Vec<String> {
             "config.runtime",
             "ocserv.certificate.issue",
             "ocserv.certificate.revoke",
-            "ocserv.agent.upgrade.v1",
+            "ocserv.agent.upgrade.v2",
         ])
         .map(str::to_owned)
         .collect()

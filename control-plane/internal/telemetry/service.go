@@ -753,8 +753,11 @@ func (s *Service) applyAgentUpgradeEligibility(ctx context.Context, node *Node) 
 	if err != nil {
 		return
 	}
+	// Only nodes that advertise the fence-capable v2 capability are eligible:
+	// a v1 source runner would execute the first hop without the
+	// execution-time downgrade fence and installation commit record.
 	var capable, conflict bool
-	if err := s.pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM node_capabilities WHERE node_id=$1 AND capability='ocserv.agent.upgrade.v1' AND approved=true), EXISTS(SELECT 1 FROM agent_upgrade_operations WHERE node_id=$1 AND completed_at IS NULL AND state IN ('queued','accepted','running','unknown'))`, nodeID).Scan(&capable, &conflict); err != nil {
+	if err := s.pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM node_capabilities WHERE node_id=$1 AND capability='ocserv.agent.upgrade.v2' AND approved=true), EXISTS(SELECT 1 FROM agent_upgrade_operations WHERE node_id=$1 AND completed_at IS NULL AND state IN ('queued','accepted','running','unknown'))`, nodeID).Scan(&capable, &conflict); err != nil {
 		return
 	}
 	node.AgentUpgradeEligible = capable && !conflict

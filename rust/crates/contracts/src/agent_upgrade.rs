@@ -9,8 +9,13 @@
 
 use std::cmp::Ordering;
 
-/// Required session capability for the typed agent upgrade command.
-pub const AGENT_UPGRADE_CAPABILITY: &str = "ocserv.agent.upgrade.v1";
+/// Required session capability for the typed agent upgrade command. Version
+/// `v2` is fence-capable: only runners that advertise it execute the
+/// operation with the execution-time downgrade fence and the installation
+/// commit record. The Controller refuses to schedule upgrades from nodes
+/// that still advertise `ocserv.agent.upgrade.v1`, because a pre-fence
+/// source runner would execute the first N -> N+1 hop unprotected.
+pub const AGENT_UPGRADE_CAPABILITY: &str = "ocserv.agent.upgrade.v2";
 
 /// Release package architectures of the published native agent packages.
 pub const AGENT_UPGRADE_ARCHITECTURES: &[&str] = &["amd64", "arm64"];
@@ -93,7 +98,7 @@ type SemVerCore = ([u64; 3], Vec<Identifier>);
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum Identifier {
-    Numeric(u64),
+    Numeric(String),
     Alphanumeric(String),
 }
 
@@ -121,9 +126,15 @@ fn semver_core(version: &str) -> Option<SemVerCore> {
     } else {
         prerelease
             .split('.')
-            .map(|identifier| match identifier.parse::<u64>() {
-                Ok(number) => Identifier::Numeric(number),
-                Err(_) => Identifier::Alphanumeric(identifier.to_owned()),
+            .map(|identifier| {
+                // Keep numeric identifiers as their canonical digit string:
+                // SemVer puts no upper bound on their magnitude, so they
+                // must compare numerically beyond any fixed-width integer.
+                if identifier.bytes().all(|byte| byte.is_ascii_digit()) {
+                    Identifier::Numeric(identifier.to_owned())
+                } else {
+                    Identifier::Alphanumeric(identifier.to_owned())
+                }
             })
             .collect()
     };
@@ -148,7 +159,13 @@ fn semver_prerelease_order(left: &[Identifier], right: &[Identifier]) -> Orderin
     }
     for (l, r) in left.iter().zip(right.iter()) {
         let order = match (l, r) {
-            (Identifier::Numeric(l), Identifier::Numeric(r)) => l.cmp(r),
+            (Identifier::Numeric(l), Identifier::Numeric(r)) => {
+                // Canonical digit strings (no leading zeros) compare
+                // numerically by length and then lexicographically, which
+                // stays exact for identifiers beyond any fixed-width
+                // integer the same way the Go ordering does.
+                l.len().cmp(&r.len()).then_with(|| l.cmp(r))
+            }
             (Identifier::Numeric(_), Identifier::Alphanumeric(_)) => Ordering::Less,
             (Identifier::Alphanumeric(_), Identifier::Numeric(_)) => Ordering::Greater,
             (Identifier::Alphanumeric(l), Identifier::Alphanumeric(r)) => l.cmp(r),
@@ -240,7 +257,7 @@ mod tests {
         for architecture in ["", "x86_64", "aarch64", "AMD64", "arm64 "] {
             assert!(!valid_architecture(architecture));
         }
-        assert_eq!(AGENT_UPGRADE_CAPABILITY, "ocserv.agent.upgrade.v1");
+        assert_eq!(AGENT_UPGRADE_CAPABILITY, "ocserv.agent.upgrade.v2");
     }
 
     #[test]
@@ -289,5 +306,46 @@ mod tests {
         // The injected identity must satisfy the same grammar as upgrade
         // targets; local builds fall back to the crate version.
         assert!(valid_target_version(release_version()));
+    }
+
+    #[test]
+    fn strict_upgrade_matches_the_shared_cross_language_corpus() {
+        // The Go admission path and this Rust execution-time fence must
+        // answer the same ordering question identically; the shared corpus
+        // pins both, including numeric prerelease identifiers beyond any
+        // fixed-width integer.
+        let raw = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../../testdata/agent-upgrade-strict-upgrade-v1.json"),
+        )
+        .expect("shared corpus readable");
+        let corpus: serde_json::Value = serde_json::from_str(&raw).expect("shared corpus json");
+        let cases = corpus
+            .get("cases")
+            .and_then(serde_json::Value::as_array)
+            .expect("corpus cases");
+        assert!(!cases.is_empty(), "corpus must not be empty");
+        for case in cases {
+            let name = case.get("name").and_then(serde_json::Value::as_str);
+            let current = case.get("current").and_then(serde_json::Value::as_str);
+            let target = case.get("target").and_then(serde_json::Value::as_str);
+            let expected = case
+                .get("strict_upgrade")
+                .and_then(serde_json::Value::as_bool);
+            let (Some(name), Some(current), Some(target), Some(expected)) =
+                (name, current, target, expected)
+            else {
+                panic!("corpus case is incomplete: {case}");
+            };
+            assert!(
+                valid_target_version(current) && valid_target_version(target),
+                "corpus case {name} must use valid target versions"
+            );
+            assert_eq!(
+                is_strict_upgrade(current, target),
+                expected,
+                "corpus case {name}: {current} -> {target}"
+            );
+        }
     }
 }

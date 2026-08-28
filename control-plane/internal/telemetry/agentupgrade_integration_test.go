@@ -89,7 +89,7 @@ func TestAgentUpgradeEligibilityGatesIntegration(t *testing.T) {
 		t.Fatal("node is eligible without the approved upgrade capability")
 	}
 
-	if _, err := pool.Exec(ctx, `INSERT INTO node_capabilities(node_id,capability,approved) VALUES($1,'ocserv.agent.upgrade.v1',true)`, nodeID); err != nil {
+	if _, err := pool.Exec(ctx, `INSERT INTO node_capabilities(node_id,capability,approved) VALUES($1,'ocserv.agent.upgrade.v2',true)`, nodeID); err != nil {
 		t.Fatal(err)
 	}
 	node, err = service.GetNode(ctx, nodeID)

@@ -1839,7 +1839,7 @@ mod tests {
             issued_at,
             expires_at,
             "agent.upgrade",
-            "ocserv.agent.upgrade.v1",
+            "ocserv.agent.upgrade.v2",
             command_envelope::Payload::AgentUpgrade(AgentUpgrade {
                 target_version: target_version.to_owned(),
                 package_sha256,

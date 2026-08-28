@@ -663,6 +663,13 @@ impl UpgradeRunner {
         self.root.join(format!("usr/libexec/ocservia/{name}"))
     }
 
+    /// The durable, package-digest-bound record the installer writes only
+    /// after every binary, verifier, and unit of one package is fully
+    /// installed and synced. Crash convergence trusts this record alone.
+    fn installation_commit(&self) -> PathBuf {
+        self.root.join("var/lib/ocservia-upgrade/installed-commit")
+    }
+
     /// Executes (or replays) exactly one durable upgrade operation.
     ///
     /// # Errors
@@ -763,10 +770,34 @@ impl UpgradeRunner {
         }
         let expected_agent = sha256_file(&agent_source)?;
         let expected_privd = sha256_file(&privd_source)?;
-        let replaced = sha256_if_present(&self.installed_binary("ocservia-agent"))?
-            .is_some_and(|digest| digest == expected_agent)
-            && sha256_if_present(&self.installed_binary("ocservia-privd"))?
-                .is_some_and(|digest| digest == expected_privd);
+        let installed_agent = sha256_if_present(&self.installed_binary("ocservia-agent"))?;
+        let installed_privd = sha256_if_present(&self.installed_binary("ocservia-privd"))?;
+        let agent_matched = installed_agent.is_some_and(|digest| digest == expected_agent);
+        let privd_matched = installed_privd.is_some_and(|digest| digest == expected_privd);
+        let committed = match read_installation_commit(&self.installation_commit())? {
+            Some(record) => record == hex::encode(digest),
+            None => false,
+        };
+        // Crash convergence is proven exclusively by the digest-bound
+        // installation commit record: matching agent and privd binaries
+        // alone can be a partial install (for example both binaries were
+        // replaced before the upgrader, verifier, or units were). Only a
+        // complete, synced installation writes the record.
+        let replaced = committed && agent_matched && privd_matched;
+        if !replaced && (agent_matched || privd_matched) {
+            // An interrupted lifecycle already modified this host. Re-running
+            // the destructive backup step would snapshot the mixed state as
+            // the previous release, and guessing success would certify it;
+            // the rollback snapshot from the original attempt is preserved,
+            // so refuse durably and leave recovery to the operator.
+            return refuse(
+                operation_dir,
+                intent,
+                UpgradeStoreError::Unsafe(
+                    "installation was interrupted before its commit record; the rollback snapshot is preserved",
+                ),
+            );
+        }
         // Execution-time downgrade fence: the authorization was an upgrade
         // when it was scheduled, but the host may have moved on since. The
         // currently running release identity (this runner ships with the
@@ -820,6 +851,18 @@ impl UpgradeRunner {
                     intent,
                     UpgradeStoreError::Lifecycle(
                         "lifecycle completed without installing the authorized binaries".to_owned(),
+                    ),
+                );
+            }
+            if !matches!(
+                read_installation_commit(&self.installation_commit())?,
+                Some(record) if record == hex::encode(digest)
+            ) {
+                return refuse(
+                    operation_dir,
+                    intent,
+                    UpgradeStoreError::Lifecycle(
+                        "lifecycle completed without recording the installation commit".to_owned(),
                     ),
                 );
             }
@@ -1190,6 +1233,39 @@ fn validate_regular_executable(path: &Path) -> Result<(), UpgradeStoreError> {
         ));
     }
     Ok(())
+}
+
+/// Reads the installer's durable commit record. `Ok(None)` means no record
+/// exists (a pre-upgrade host or a fresh operation); a present but
+/// non-regular, symlinked, oversized, or malformed record is unsafe and
+/// fails closed instead of being ignored, because convergence decisions
+/// hinge on it.
+fn read_installation_commit(path: &Path) -> Result<Option<String>, UpgradeStoreError> {
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(UpgradeStoreError::Io(error)),
+    };
+    if !metadata.is_file() || metadata.file_type().is_symlink() || metadata.len() > 96 {
+        return Err(UpgradeStoreError::Unsafe(
+            "installation commit record is not a bounded regular file",
+        ));
+    }
+    let record = fs::read_to_string(path).map_err(UpgradeStoreError::Io)?;
+    let digest = record
+        .strip_prefix("archive_sha256=")
+        .and_then(|digest| digest.strip_suffix('\n'))
+        .unwrap_or_default();
+    if digest.len() != 64
+        || !digest
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        return Err(UpgradeStoreError::Unsafe(
+            "installation commit record is malformed",
+        ));
+    }
+    Ok(Some(digest.to_owned()))
 }
 
 fn validate_spool_file(path: &Path) -> Result<(), UpgradeStoreError> {
@@ -2099,6 +2175,7 @@ printf 'new-privd-@TAG@\n' > \"${pkg}/rust/target/release/ocservia-privd\"
   printf 'here=$(dirname \"$0\")\n'
   printf 'cp \"${here}/../rust/target/release/ocservia-agent\" \"${DESTDIR}/usr/libexec/ocservia/ocservia-agent\"\n'
   printf 'cp \"${here}/../rust/target/release/ocservia-privd\" \"${DESTDIR}/usr/libexec/ocservia/ocservia-privd\"\n'
+  printf 'echo \"archive_sha256=%s\" > \"${DESTDIR}/var/lib/ocservia-upgrade/installed-commit\"\\n' \"${digest}\"
   printf 'printf x >> \"@LIFECYCLE_LOG@\"\n'
 } > \"${pkg}/scripts/upgrade-agent.sh\"
 chmod 0755 \"${pkg}/rust/target/release/ocservia-agent\" \"${pkg}/rust/target/release/ocservia-privd\" \"${pkg}/scripts/upgrade-agent.sh\"
@@ -2166,6 +2243,177 @@ echo \"${pkg}\"
         assert_eq!(
             fs::read_to_string(&package.lifecycle_runs).expect("lifecycle counter"),
             "x"
+        );
+        fs::remove_dir_all(&package.root).expect("cleanup");
+    }
+
+    /// Stages the crash window the review pinned: an interrupted lifecycle
+    /// already replaced some host files, but the installation commit record
+    /// was never written.
+    fn seed_partial_install(package: &FakePackage, tag: &str, agent: bool, privd: bool) {
+        if agent {
+            fs::write(
+                package.root.join("usr/libexec/ocservia/ocservia-agent"),
+                format!("new-agent-{tag}\n"),
+            )
+            .expect("seed agent");
+        }
+        if privd {
+            fs::write(
+                package.root.join("usr/libexec/ocservia/ocservia-privd"),
+                format!("new-privd-{tag}\n"),
+            )
+            .expect("seed privd");
+        }
+    }
+
+    fn seed_commit_record(package: &FakePackage, digest_hex: &str) {
+        fs::write(
+            package
+                .root
+                .join("var/lib/ocservia-upgrade/installed-commit"),
+            format!("archive_sha256={digest_hex}\n"),
+        )
+        .expect("seed commit record");
+    }
+
+    fn assert_interrupted_install_refused(package: &FakePackage, intent: &UpgradeIntent) {
+        let runner = UpgradeRunner::new(package.root.clone());
+        let failure = runner
+            .run(&intent.operation_id.to_string())
+            .expect_err("partial install must be refused");
+        assert!(matches!(failure, UpgradeStoreError::Unsafe(_)));
+        let operation_dir = operations_dir(&package.root).join(intent.operation_id.to_string());
+        assert_eq!(
+            load_state(&operation_dir).expect("durable failure"),
+            OperationState::Failed
+        );
+        let result = fs::read_to_string(operation_dir.join("result")).expect("result evidence");
+        assert!(result.contains("state=failed"));
+        assert!(result.contains("interrupted before its commit record"));
+        // The refusal happens before any lifecycle side effect, so the
+        // rollback snapshot from the interrupted attempt is never overwritten.
+        assert_eq!(
+            fs::read_to_string(&package.lifecycle_runs).expect("lifecycle counter"),
+            ""
+        );
+    }
+
+    #[test]
+    fn runner_refuses_a_crash_after_both_binaries_without_the_commit_record() {
+        // Power loss after agent and privd were replaced but before the
+        // upgrader, verifier, units, and commit record existed: the mixed
+        // host must never converge to success or re-run the backup step.
+        let package = fake_lifecycle_tree("crash-both");
+        seed_partial_install(&package, "crash-both", true, true);
+        let intent = new_intent(package.archive_digest);
+        scheduler(&package.root)
+            .schedule_and_trigger(&intent)
+            .expect("schedule");
+        assert_interrupted_install_refused(&package, &intent);
+        fs::remove_dir_all(&package.root).expect("cleanup");
+    }
+
+    #[test]
+    fn runner_refuses_a_crash_after_the_agent_binary_alone() {
+        // Power loss between replacing the agent and the privd: still an
+        // interrupted install that must refuse rather than snapshot the
+        // mixed pair as the previous release.
+        let package = fake_lifecycle_tree("crash-agent");
+        seed_partial_install(&package, "crash-agent", true, false);
+        let intent = new_intent(package.archive_digest);
+        scheduler(&package.root)
+            .schedule_and_trigger(&intent)
+            .expect("schedule");
+        assert_interrupted_install_refused(&package, &intent);
+        fs::remove_dir_all(&package.root).expect("cleanup");
+    }
+
+    #[test]
+    fn runner_refuses_matching_binaries_behind_a_foreign_commit_record() {
+        // Binaries of this package are installed, but the commit record
+        // names a different package: the record is the only convergence
+        // proof, so a mismatch stays an interrupted install.
+        let package = fake_lifecycle_tree("foreign-record");
+        seed_partial_install(&package, "foreign-record", true, true);
+        let mut foreign = package.archive_digest;
+        foreign[0] ^= 0xff;
+        seed_commit_record(&package, &hex::encode(foreign));
+        let intent = new_intent(package.archive_digest);
+        scheduler(&package.root)
+            .schedule_and_trigger(&intent)
+            .expect("schedule");
+        assert_interrupted_install_refused(&package, &intent);
+        fs::remove_dir_all(&package.root).expect("cleanup");
+    }
+
+    #[test]
+    fn runner_converges_only_through_the_matching_commit_record() {
+        // The complete install finished and recorded its commit, but the
+        // result persistence was lost: the retry converges through the
+        // digest-bound record without re-running the lifecycle.
+        let package = fake_lifecycle_tree("commit-converge");
+        seed_partial_install(&package, "commit-converge", true, true);
+        seed_commit_record(&package, &hex::encode(package.archive_digest));
+        let intent = new_intent(package.archive_digest);
+        scheduler(&package.root)
+            .schedule_and_trigger(&intent)
+            .expect("schedule");
+        let runner = UpgradeRunner::new(package.root.clone());
+        assert_eq!(
+            runner
+                .run(&intent.operation_id.to_string())
+                .expect("converge through the commit record"),
+            OperationState::Succeeded
+        );
+        assert_eq!(
+            fs::read_to_string(&package.lifecycle_runs).expect("lifecycle counter"),
+            ""
+        );
+        let operation_dir = operations_dir(&package.root).join(intent.operation_id.to_string());
+        assert!(
+            fs::read_to_string(operation_dir.join("result"))
+                .expect("result evidence")
+                .contains("verified package already installed")
+        );
+        fs::remove_dir_all(&package.root).expect("cleanup");
+    }
+
+    #[test]
+    fn runner_refuses_a_replay_without_the_commit_record() {
+        // A lifecycle that installed the binaries but lost (or never wrote)
+        // its commit record cannot be certified on replay: the record is
+        // the only convergence proof, so the retry fails closed.
+        let package = fake_lifecycle_tree("missing-record");
+        // Sabotage only the record: run the lifecycle once through the
+        // normal path, then remove the record and replay as if the crash
+        // lost it before the runner could verify.
+        let intent = new_intent(package.archive_digest);
+        scheduler(&package.root)
+            .schedule_and_trigger(&intent)
+            .expect("schedule");
+        let runner = UpgradeRunner::new(package.root.clone());
+        assert_eq!(
+            runner
+                .run(&intent.operation_id.to_string())
+                .expect("lifecycle completes"),
+            OperationState::Succeeded
+        );
+        fs::remove_file(
+            package
+                .root
+                .join("var/lib/ocservia-upgrade/installed-commit"),
+        )
+        .expect("drop commit record");
+        force_state(&package.root, &intent.operation_id, OperationState::Running);
+        let failure = runner
+            .run(&intent.operation_id.to_string())
+            .expect_err("missing commit record");
+        assert!(matches!(failure, UpgradeStoreError::Unsafe(_)));
+        assert_eq!(
+            load_state(&operations_dir(&package.root).join(intent.operation_id.to_string()))
+                .expect("durable failure"),
+            OperationState::Failed
         );
         fs::remove_dir_all(&package.root).expect("cleanup");
     }

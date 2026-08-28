@@ -178,7 +178,7 @@ func TestAgentUpgradeApprovalBindsExactReleaseIdentityIntegration(t *testing.T) 
 	// that restrict the shared operations cleanup.
 	service, pool, workspaceID, nodeID := upgradeReconciliationFixture(t)
 	ctx := context.Background()
-	if _, err := pool.Exec(ctx, `INSERT INTO node_capabilities(node_id,capability,approved) VALUES($1,'ocserv.agent.upgrade.v1',true)`, nodeID); err != nil {
+	if _, err := pool.Exec(ctx, `INSERT INTO node_capabilities(node_id,capability,approved) VALUES($1,'ocserv.agent.upgrade.v2',true)`, nodeID); err != nil {
 		t.Fatal(err)
 	}
 	base := CreateRequest{NodeID: nodeID, IdempotencyKey: "upgrade-exact", ExpectedVersion: 1, Kind: AgentUpgrade, ActorID: "operator", Action: "agent.upgrade", Reason: "integration test", TargetVersion: "1.2.3", PackageSHA256: bytes.Repeat([]byte{0x43}, 32), Architecture: "amd64", TTL: time.Minute, RequestID: "request-upgrade", Traceparent: testTraceparent}
@@ -247,7 +247,7 @@ func TestAgentUpgradeAuthoritativeVersionFenceIntegration(t *testing.T) {
 	service, pool, workspaceID, nodeID := integrationService(t)
 	ctx := context.Background()
 	observeUpgradeNode(t, pool, nodeID, "2.1.0", 0)
-	if _, err := pool.Exec(ctx, `INSERT INTO node_capabilities(node_id,capability,approved) VALUES($1,'ocserv.agent.upgrade.v1',true)`, nodeID); err != nil {
+	if _, err := pool.Exec(ctx, `INSERT INTO node_capabilities(node_id,capability,approved) VALUES($1,'ocserv.agent.upgrade.v2',true)`, nodeID); err != nil {
 		t.Fatal(err)
 	}
 	request := CreateRequest{NodeID: nodeID, IdempotencyKey: "upgrade-authoritative-fence", ExpectedVersion: 1, Kind: AgentUpgrade, ActorID: "operator", Action: "agent.upgrade", Reason: "integration test", TargetVersion: "2.0.0", PackageSHA256: bytes.Repeat([]byte{0x43}, 32), Architecture: "amd64", TTL: time.Minute, RequestID: "request-authoritative-fence", Traceparent: testTraceparent}

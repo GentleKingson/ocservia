@@ -1867,7 +1867,10 @@ func capabilityFor(kind SyntheticKind) string {
 	case CertificateRevoke:
 		return "ocserv.certificate.revoke"
 	case AgentUpgrade:
-		return "ocserv.agent.upgrade.v1"
+		// v2 is fence-capable: the source runner executes the upgrade with
+		// the execution-time downgrade fence and installation commit record.
+		// Scheduling from a v1-only node would run the first hop unprotected.
+		return "ocserv.agent.upgrade.v2"
 	default:
 		return ""
 	}

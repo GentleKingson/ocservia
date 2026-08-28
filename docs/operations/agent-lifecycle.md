@@ -212,6 +212,15 @@ node's observed agent version, and the request must carry the node's current
 revision (`If-Match`) plus an independent approval bound to the exact
 `node + version + digest + architecture` release identity.
 
+The Controller only schedules upgrades from nodes that advertise the
+fence-capable `ocserv.agent.upgrade.v2` capability. The upgrade is executed
+by the runner that is already installed on the node, so the first
+N → N+1 hop can only be protected when that runner carries the
+execution-time downgrade fence and the installation commit record. Nodes
+still advertising `ocserv.agent.upgrade.v1` are ineligible: seed the first
+fence-capable package manually (or with the native installers), approve its
+`v2` capability, and Controller-driven upgrades start from there.
+
 The operation is created `queued`, and the agent's scheduling acknowledgement
 moves it to the non-terminal `accepted` state — an acknowledged schedule is
 never success. The node is then expected to disconnect while the upgrader

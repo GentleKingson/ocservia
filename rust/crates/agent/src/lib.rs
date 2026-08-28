@@ -2107,7 +2107,7 @@ mod tests {
                 ("config.apply", "ocserv.config.apply")
             }
             Some(command_envelope::Payload::AgentUpgrade(_)) => {
-                ("agent.upgrade", "ocserv.agent.upgrade.v1")
+                ("agent.upgrade", "ocserv.agent.upgrade.v2")
             }
             _ => panic!("test command payload is unsupported"),
         };
