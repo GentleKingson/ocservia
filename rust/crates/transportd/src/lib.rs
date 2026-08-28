@@ -5934,7 +5934,7 @@ mod tests {
         let mut handshake = handshake(&agent_key);
         handshake.node_id = node_id.to_vec();
         let term = FenceTerm::new(node_id, *agent_key.public().as_bytes(), owner_epoch);
-        let fence = signed_controller_fence(signing_key, &term, 30);
+        let fence = signed_controller_fence(signing_key, &term, 120);
         let router = build_router(
             SecretKey::generate(),
             RelayMode::Disabled,
