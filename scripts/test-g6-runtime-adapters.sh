@@ -702,9 +702,62 @@ dockerfile_joined="$(
     if (line ~ /\\$/) { pending = substr(line, 1, length(line) - 1) } else { pending = ""; print line }
   }' "${G6_RUNTIME_DOCKERFILE}"
 )"
-cargo_invocation_count="$(grep -c '^RUN cargo build' <<<"${dockerfile_joined}" || true)"
-if [[ "${cargo_invocation_count}" -ne 3 ]]; then
-  echo "the shared Rust builder must issue exactly three cargo invocations (transportd; probe+tunnel; agent+privd), found ${cargo_invocation_count}" >&2
+# Partition invocations freeze artifacts under /out; the dependency warmup
+# experiment's invocations do not. Both classes are tracked separately so a
+# warmup invocation can never stand in for a real partition.
+partition_invocations="$(grep '^RUN cargo build' <<<"${dockerfile_joined}" | grep '&& mkdir -p /out/' || true)"
+warmup_invocations="$(grep '^RUN cargo build' <<<"${dockerfile_joined}" | grep -v '&& mkdir -p /out/' || true)"
+partition_invocation_count="$(grep -c '^RUN' <<<"${partition_invocations}" || true)"
+warmup_invocation_count="$(grep -c '^RUN' <<<"${warmup_invocations}" || true)"
+if [[ "${partition_invocation_count}" -ne 3 ]]; then
+  echo "the shared Rust builder must issue exactly three cargo invocations (transportd; probe+tunnel; agent+privd), found ${partition_invocation_count}" >&2
+  exit 1
+fi
+if [[ "${warmup_invocation_count}" -ne 3 ]]; then
+  echo "the dependency warmup must duplicate all three partitions exactly, found ${warmup_invocation_count} warmup invocations" >&2
+  exit 1
+fi
+# Each warmup invocation must equal its partition's cargo command byte for
+# byte (trailing whitespace from line continuations is formatting, not part
+# of the command), so the warm target/ cache resolves exactly the features
+# the real partitions consume.
+warmup_number=0
+while IFS= read -r warmup_invocation; do
+  warmup_number=$(( warmup_number + 1 ))
+  partition_invocation="$(sed -n "${warmup_number}p" <<<"${partition_invocations}")"
+  warmup_command="${warmup_invocation#RUN }"
+  warmup_command="${warmup_command%%&&*}"
+  partition_command="${partition_invocation#RUN }"
+  partition_command="${partition_command%%&&*}"
+  warmup_command="$(sed -e 's/[[:space:]]*$//' <<<"${warmup_command}")"
+  partition_command="$(sed -e 's/[[:space:]]*$//' <<<"${partition_command}")"
+  if [[ "${warmup_command}" != "${partition_command}" ]]; then
+    echo "dependency warmup invocation ${warmup_number} must equal its partition's cargo command exactly" >&2
+    exit 1
+  fi
+  if [[ "${warmup_command}" != *'--locked --release'* ]]; then
+    echo "dependency warmup invocation ${warmup_number} must stay a locked release build" >&2
+    exit 1
+  fi
+done <<<"$(grep -v '^$' <<<"${warmup_invocations}")"
+# The warmup's cache key must never depend on first-party crate sources:
+# layers before the first warmup invocation may reference member manifests
+# only, and the real source tree must be copied only after the warmup and
+# before the real partitions.
+warmup_prefix="$(awk '/^RUN cargo build/ { exit } { print }' "${G6_RUNTIME_DOCKERFILE}")"
+if grep -E '^COPY .*rust/crates' <<<"${warmup_prefix}" | grep -v 'Cargo.toml' | grep -q .; then
+  echo "layers before the dependency warmup must not copy first-party crate sources" >&2
+  exit 1
+fi
+joined_warmup_first="$(grep -n '^RUN cargo build' <<<"${dockerfile_joined}" | head -1 | cut -d: -f1)"
+joined_crates_copy="$(grep -n '^COPY rust/crates \./crates$' <<<"${dockerfile_joined}" | cut -d: -f1)"
+joined_partition_first="$(
+  grep -n '^RUN cargo build' <<<"${dockerfile_joined}" | grep '&& mkdir -p /out/' | head -1 | cut -d: -f1
+)"
+if [[ -z "${joined_warmup_first}" || -z "${joined_crates_copy}" || -z "${joined_partition_first}" ]] \
+  || [[ "${joined_warmup_first}" -ge "${joined_crates_copy}" ]] \
+  || [[ "${joined_crates_copy}" -ge "${joined_partition_first}" ]]; then
+  echo "the warmup must run before COPY rust/crates ./crates and the real partitions" >&2
   exit 1
 fi
 production_transportd_build_command="$(
@@ -712,7 +765,7 @@ production_transportd_build_command="$(
     "${TRANSPORT_DOCKERFILE}"
 )"
 g6_transportd_build_command="$(
-  grep '^RUN cargo build' <<<"${dockerfile_joined}" | sed -n '1p' \
+  grep '^RUN cargo build' <<<"${dockerfile_joined}" | grep '&& mkdir -p /out/' | sed -n '1p' \
     | sed -e 's/^RUN //' -e 's/[[:space:]]*&&.*$//'
 )"
 if [[ -z "${production_transportd_build_command}" ]] \
@@ -746,7 +799,7 @@ while IFS= read -r invocation; do
     echo "cargo invocation ${invocation_number} must compile exactly: ${expected_packages}" >&2
     exit 1
   fi
-done <<<"$(grep '^RUN cargo build' <<<"${dockerfile_joined}")"
+done <<<"$(grep -v '^$' <<<"${partition_invocations}")"
 for frozen_copy in \
   'cp target/release/ocservia-transportd /out/transportd/' \
   'cp target/release/ocservia-g6-probe target/release/ocservia-g6-tunnel /out/probe/' \
