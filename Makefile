@@ -1,8 +1,8 @@
 SHELL := /usr/bin/env bash
 
-.DEFAULT_GOAL := verify
+.DEFAULT_GOAL := test
 
-.PHONY: bootstrap generate format lint test verify docs-check generated-clean generated-clean-test policy-check contracts-breaking go-check rust-check web-check security-check license-check database-integration integration e2e p1-smoke p1-full real-e2e-check
+.PHONY: bootstrap generate format lint test test-go test-rust test-web verify docs-check generated-clean generated-clean-test policy-check contracts-breaking go-check rust-check web-check security-check license-check database-integration integration e2e p1-smoke p1-full real-e2e-check
 
 bootstrap:
 	./scripts/bootstrap.sh all
@@ -18,6 +18,15 @@ lint:
 
 test:
 	./scripts/test.sh
+
+test-go:
+	source ./scripts/env.sh && cd control-plane && go test ./...
+
+test-rust:
+	source ./scripts/env.sh && cd rust && cargo test --workspace --all-features
+
+test-web:
+	source ./scripts/env.sh && cd web && npm test
 
 go-check:
 	./scripts/go-check.sh
