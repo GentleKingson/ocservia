@@ -23,7 +23,7 @@ test-go:
 	source ./scripts/env.sh && cd control-plane && go test ./...
 
 test-rust:
-	source ./scripts/env.sh && cd rust && cargo test --workspace --all-features -- --test-threads=1
+	source ./scripts/env.sh && cd rust && cargo test --workspace --all-features
 
 test-web:
 	source ./scripts/env.sh && cd web && npm test
