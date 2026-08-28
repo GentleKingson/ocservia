@@ -26,19 +26,39 @@ validate_commit() {
   }
 }
 
+runtime_build_go() {
+  local output_dir=$1
+  (cd "${ROOT}/control-plane" && \
+    go build -trimpath -o "${output_dir}/ocserv-control" ./cmd/ocserv-control)
+}
+
+runtime_build_stub() {
+  local output_dir=$1
+  (cd "${ROOT}/rust" && cargo build --locked --package ocservia-transportd-stub)
+  install -m 0755 "${ROOT}/rust/target/debug/ocservia-transportd-stub" \
+    "${output_dir}/ocservia-transportd-stub"
+}
+
 build_artifact() {
-  local output_dir=$1 candidate_sha=$2
+  local output_dir=$1 candidate_sha=$2 build_status=0 go_pid stub_pid
   validate_commit "${candidate_sha}"
   mkdir -p "${output_dir}"
   TMP_ROOT="$(mktemp -d "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/ocservia-runtime-build-XXXXXX")"
 
   # shellcheck source=scripts/env.sh
   source "${ROOT}/scripts/env.sh"
-  (cd "${ROOT}/control-plane" && \
-    go build -trimpath -o "${TMP_ROOT}/ocserv-control" ./cmd/ocserv-control)
-  (cd "${ROOT}/rust" && cargo build --locked --package ocservia-transportd-stub)
-  install -m 0755 "${ROOT}/rust/target/debug/ocservia-transportd-stub" \
-    "${TMP_ROOT}/ocservia-transportd-stub"
+  runtime_build_go "${TMP_ROOT}" &
+  go_pid=$!
+  runtime_build_stub "${TMP_ROOT}" &
+  stub_pid=$!
+  # Both waits must run so a late failure cannot be masked by set -e exiting
+  # before the other build is reaped.
+  wait "${go_pid}" || build_status=1
+  wait "${stub_pid}" || build_status=1
+  if [[ "${build_status}" -ne 0 ]]; then
+    echo "runtime artifact build failed" >&2
+    return 1
+  fi
 
   printf 'candidate_sha\t%s\n' "${candidate_sha}" >"${TMP_ROOT}/manifest.tsv"
   printf 'ocserv-control\t%s\n' "$(sha256_file "${TMP_ROOT}/ocserv-control")" \
@@ -92,23 +112,25 @@ extract_artifact() {
   }
 }
 
-case "${1:-}" in
-  build)
-    (($# == 3)) || {
-      echo "usage: $0 build OUTPUT_DIR CANDIDATE_SHA" >&2
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+  case "${1:-}" in
+    build)
+      (($# == 3)) || {
+        echo "usage: $0 build OUTPUT_DIR CANDIDATE_SHA" >&2
+        exit 2
+      }
+      build_artifact "$2" "$3"
+      ;;
+    extract)
+      (($# == 4)) || {
+        echo "usage: $0 extract ARCHIVE OUTPUT_DIR EXPECTED_SHA" >&2
+        exit 2
+      }
+      extract_artifact "$2" "$3" "$4"
+      ;;
+    *)
+      echo "usage: $0 {build OUTPUT_DIR CANDIDATE_SHA|extract ARCHIVE OUTPUT_DIR EXPECTED_SHA}" >&2
       exit 2
-    }
-    build_artifact "$2" "$3"
-    ;;
-  extract)
-    (($# == 4)) || {
-      echo "usage: $0 extract ARCHIVE OUTPUT_DIR EXPECTED_SHA" >&2
-      exit 2
-    }
-    extract_artifact "$2" "$3" "$4"
-    ;;
-  *)
-    echo "usage: $0 {build OUTPUT_DIR CANDIDATE_SHA|extract ARCHIVE OUTPUT_DIR EXPECTED_SHA}" >&2
-    exit 2
-    ;;
-esac
+      ;;
+  esac
+fi
