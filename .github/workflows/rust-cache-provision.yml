@@ -104,6 +104,10 @@ jobs:
               --pull=false \
               --file rust/g6-runtime.Dockerfile \
               --target g6-rust-builder .
+          # measure appends raw records; render turns them into the JSON
+          # artifact that the upload step publishes.
+          scripts/g6-timing.sh render \
+            "${RUNNER_TEMP}/artifacts/timing/g6-rust-provision.json"
       - name: Upload provision timing diagnostics
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
