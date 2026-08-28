@@ -4198,3 +4198,5 @@ mod tests {
         );
     }
 }
+
+// G6 dependency-cache experiment run 2: first-party source touch.
