@@ -94,7 +94,25 @@ pub fn is_strict_upgrade(current: &str, target: &str) -> bool {
     }
 }
 
-type SemVerCore = ([u64; 3], Vec<Identifier>);
+// Core fields and numeric prerelease identifiers keep their canonical digit
+// strings: SemVer puts no upper bound on any of them, so every numeric
+// comparison must stay exact beyond any fixed-width integer, matching the
+// Go ordering exactly.
+type SemVerCore = ([String; 3], Vec<Identifier>);
+
+fn canonical_digits(value: &str) -> Option<String> {
+    if value.is_empty() || !value.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    Some(value.to_owned())
+}
+
+/// Numeric order over canonical digit strings (no leading zeros): shorter is
+/// smaller, equal length falls back to lexicographic, which is exact for any
+/// magnitude.
+fn compare_canonical_digits(left: &str, right: &str) -> Ordering {
+    left.len().cmp(&right.len()).then_with(|| left.cmp(right))
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum Identifier {
@@ -114,9 +132,9 @@ fn semver_core(version: &str) -> Option<SemVerCore> {
     };
     let mut parts = core.split('.');
     let numbers = [
-        parts.next()?.parse::<u64>().ok()?,
-        parts.next()?.parse::<u64>().ok()?,
-        parts.next()?.parse::<u64>().ok()?,
+        canonical_digits(parts.next()?)?,
+        canonical_digits(parts.next()?)?,
+        canonical_digits(parts.next()?)?,
     ];
     if parts.next().is_some() {
         return None;
@@ -146,7 +164,7 @@ fn semver_core(version: &str) -> Option<SemVerCore> {
 fn semver_precedence(left: &SemVerCore, right: &SemVerCore) -> Ordering {
     for (l, r) in left.0.iter().zip(right.0.iter()) {
         if l != r {
-            return l.cmp(r);
+            return compare_canonical_digits(l, r);
         }
     }
     semver_prerelease_order(&left.1, &right.1)
@@ -159,13 +177,7 @@ fn semver_prerelease_order(left: &[Identifier], right: &[Identifier]) -> Orderin
     }
     for (l, r) in left.iter().zip(right.iter()) {
         let order = match (l, r) {
-            (Identifier::Numeric(l), Identifier::Numeric(r)) => {
-                // Canonical digit strings (no leading zeros) compare
-                // numerically by length and then lexicographically, which
-                // stays exact for identifiers beyond any fixed-width
-                // integer the same way the Go ordering does.
-                l.len().cmp(&r.len()).then_with(|| l.cmp(r))
-            }
+            (Identifier::Numeric(l), Identifier::Numeric(r)) => compare_canonical_digits(l, r),
             (Identifier::Numeric(_), Identifier::Alphanumeric(_)) => Ordering::Less,
             (Identifier::Alphanumeric(_), Identifier::Numeric(_)) => Ordering::Greater,
             (Identifier::Alphanumeric(l), Identifier::Alphanumeric(r)) => l.cmp(r),

@@ -549,6 +549,14 @@ fi
 write_snapshot_manifest "${BACKUP_DIR}"
 
 "${ROOT}/scripts/install-agent.sh"
+# The installed binaries, verifier, and units can live on a different
+# filesystem than this state directory (for example /usr on one device and
+# /var on another), and sync -f only flushes the filesystem of the file it
+# is given. Flush every filesystem the install touched before the commit
+# record below is written: once the record is durable, everything it
+# certifies must already be durable too, or a power loss could leave a
+# durable record over a partially persisted installation.
+sync
 # Durable installation commit record: written only after install-agent.sh
 # has placed every binary, verifier, and unit of this package. The upgrade
 # runner proves crash convergence exclusively through this digest-bound

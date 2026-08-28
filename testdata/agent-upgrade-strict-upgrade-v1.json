@@ -1,7 +1,7 @@
 {
   "version": 1,
   "domain": "ocservia.agent-upgrade.strict-upgrade.v1",
-  "notes": "Cross-language corpus for the single strict-upgrade question the execution-time downgrade fence asks: is target strictly newer than current under SemVer 2.0.0 precedence? The Go control plane (golang.org/x/mod/semver) and the Rust runner (contracts::is_strict_upgrade) must answer every case identically, including numeric prerelease identifiers beyond any fixed-width integer.",
+  "notes": "Cross-language corpus for the single strict-upgrade question the execution-time downgrade fence asks: is target strictly newer than current under SemVer 2.0.0 precedence? The Go control plane (golang.org/x/mod/semver) and the Rust runner (contracts::is_strict_upgrade) must answer every case identically, including numeric core fields and prerelease identifiers beyond any fixed-width integer.",
   "cases": [
     { "name": "patch bump", "current": "1.2.3", "target": "1.2.4", "strict_upgrade": true },
     { "name": "minor rollover", "current": "0.1.9", "target": "0.2.0", "strict_upgrade": true },
@@ -20,6 +20,12 @@
     { "name": "big numeric same length lexicographic downgrade", "current": "1.0.0-99999999999999999999", "target": "1.0.0-99999999999999999998", "strict_upgrade": false },
     { "name": "equal versions", "current": "1.2.3", "target": "1.2.3", "strict_upgrade": false },
     { "name": "build metadata ignored", "current": "1.2.3+b1", "target": "1.2.3+b2", "strict_upgrade": false },
+    { "name": "u64 major boundary", "current": "18446744073709551615.0.0", "target": "18446744073709551616.0.0", "strict_upgrade": true },
+    { "name": "u64 minor boundary", "current": "1.18446744073709551615.0", "target": "1.18446744073709551616.0", "strict_upgrade": true },
+    { "name": "u64 patch boundary", "current": "1.0.18446744073709551615", "target": "1.0.18446744073709551616", "strict_upgrade": true },
+    { "name": "big major length dominance", "current": "9.0.0", "target": "99999999999999999999.0.0", "strict_upgrade": true },
+    { "name": "big core same length lexicographic downgrade", "current": "18446744073709551617.0.0", "target": "18446744073709551616.0.0", "strict_upgrade": false },
+    { "name": "big core release over its own prerelease", "current": "18446744073709551616.0.0-rc.1", "target": "18446744073709551616.0.0", "strict_upgrade": true },
     { "name": "plain downgrade", "current": "2.0.0", "target": "1.9.9", "strict_upgrade": false },
     { "name": "release to its own prerelease", "current": "1.0.0", "target": "1.0.0-rc.1", "strict_upgrade": false },
     { "name": "alphanumeric lexicographic downgrade", "current": "1.0.0-beta", "target": "1.0.0-alpha", "strict_upgrade": false }
