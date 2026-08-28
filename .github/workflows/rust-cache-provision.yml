@@ -41,6 +41,13 @@ jobs:
     env:
       BUILDX_BUILDER: g6-buildx-${{ github.run_id }}-${{ github.run_attempt }}
     steps:
+      - name: Require main provisioning ref
+        # workflow_dispatch accepts any ref, so fail closed before any
+        # checkout runs untrusted repository code. Green must mean the
+        # default-branch cache was provisioned.
+        run: |
+          set -euo pipefail
+          test "${GITHUB_REF}" = "refs/heads/main"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false

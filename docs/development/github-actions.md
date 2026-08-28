@@ -86,9 +86,9 @@ feedback, and the primary workflow keeps the smoke parameters unchanged.
 
 `rust-cache-provision.yml` is a performance-input producer, not a validation:
 it runs on trusted `main` pushes that touch the Rust workspace (plus a weekly
-refresh and manual dispatch), rebuilds the shared `g6-rust-builder` stage with
-the strict cache exporter, and publishes the `g6-rust-runtime` cache on the
-default branch. Pull-request workflows can restore base-branch caches, while
+refresh and manual dispatch, which fail closed on any non-`main` ref before
+checkout), rebuilds the shared `g6-rust-builder` stage with the strict cache
+exporter, and publishes the `g6-rust-runtime` cache on the default branch. Pull-request workflows can restore base-branch caches, while
 caches they write themselves are bound to their own merge ref, so this
 producer is what lets a brand-new PR start from a warm dependency cache. A
 red provision run never affects correctness on `main`; it only means that run
