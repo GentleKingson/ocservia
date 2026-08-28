@@ -171,9 +171,12 @@ test -x "${cache_helper}" || { echo "G6 cache fallback helper must be executable
 for cache_token in \
   "docker buildx build \"\${cache_args[@]}\" \"\$@\"" \
   "docker buildx build \"\$@\"" \
-  'cache_timeout=60s' '--cache-from' '--cache-to' \
+  'cache_timeout="${G6_CACHE_TIMEOUT:-60s}"' '--cache-from' '--cache-to' \
   'mode=max,ignore-error=true' 'PIPESTATUS[0]' \
-  'failure_marker=' 'retrying once without external cache'; do
+  'failure_marker=' 'retrying once without external cache' \
+  'G6_CACHE_STRICT_EXPORT' \
+  'strict cache export requires Actions cache credentials' \
+  'a completed cache export is required'; do
   grep -qF -- "${cache_token}" "${cache_helper}" \
     || { echo "G6 cache fallback helper is missing ${cache_token}" >&2; exit 1; }
 done
