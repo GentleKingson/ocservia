@@ -64,6 +64,12 @@ RUN cargo build --locked --release \
     --package ocservia-agent \
     --package ocservia-privd
 COPY rust/crates ./crates
+# BuildKit COPY preserves build-context mtimes, which predate the warmup
+# build outputs in the same solve. cargo treats sources older than a unit's
+# recorded build as unchanged, which would silently link the warmup's stub
+# rlibs into the real partitions. Normalize mtimes so cargo consults content
+# hashes instead: changed crates recompile, unchanged crates stay cached.
+RUN find crates -type f -exec touch {} +
 RUN cargo build --locked --release --package ocservia-transportd \
     && mkdir -p /out/transportd \
     && cp target/release/ocservia-transportd /out/transportd/
