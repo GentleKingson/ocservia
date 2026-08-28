@@ -15,7 +15,61 @@ WORKDIR /src
 COPY rust/Cargo.toml rust/Cargo.lock rust/rust-toolchain.toml ./
 COPY rust/.cargo ./.cargo
 COPY rust/vendor ./vendor
+# Dependency warmup experiment: the layers below are keyed only on the pinned
+# toolchain, the workspace manifests, and the vendored third-party sources —
+# never on first-party crate sources, so a first-party edit leaves them
+# cached. Each member's manifest is copied individually to its real path, and
+# the generated stub sources match every member's real target layout exactly
+# (no workspace member declares build.rs, [lib], [[bin]], or custom target
+# paths), so the real COPY rust/crates layer below replaces every stub file
+# one-for-one. The three warmup invocations are byte-identical to the three
+# real partitions below — same per-partition package sets, no workspace-level
+# unification — so the warm target/ cache resolves exactly the features the
+# real partitions consume. scripts/test-g6-runtime-adapters.sh enforces both
+# the byte identity and this layer ordering.
+COPY rust/crates/agent/Cargo.toml crates/agent/Cargo.toml
+COPY rust/crates/agent-identity/Cargo.toml crates/agent-identity/Cargo.toml
+COPY rust/crates/agent-protocol/Cargo.toml crates/agent-protocol/Cargo.toml
+COPY rust/crates/command-authorization/Cargo.toml crates/command-authorization/Cargo.toml
+COPY rust/crates/command-journal/Cargo.toml crates/command-journal/Cargo.toml
+COPY rust/crates/contracts/Cargo.toml crates/contracts/Cargo.toml
+COPY rust/crates/g6-probe/Cargo.toml crates/g6-probe/Cargo.toml
+COPY rust/crates/g6-tunnel/Cargo.toml crates/g6-tunnel/Cargo.toml
+COPY rust/crates/observability/Cargo.toml crates/observability/Cargo.toml
+COPY rust/crates/ocserv-adapter/Cargo.toml crates/ocserv-adapter/Cargo.toml
+COPY rust/crates/privd/Cargo.toml crates/privd/Cargo.toml
+COPY rust/crates/privd-attestation/Cargo.toml crates/privd-attestation/Cargo.toml
+COPY rust/crates/transportd/Cargo.toml crates/transportd/Cargo.toml
+COPY rust/crates/transportd-stub/Cargo.toml crates/transportd-stub/Cargo.toml
+COPY rust/crates/upgrader/Cargo.toml crates/upgrader/Cargo.toml
+RUN mkdir -p crates/agent/src crates/agent-identity/src crates/agent-protocol/src \
+    crates/command-authorization/src crates/command-journal/src crates/contracts/src \
+    crates/g6-probe/src crates/g6-tunnel/src crates/observability/src \
+    crates/ocserv-adapter/src crates/privd/src crates/privd-attestation/src \
+    crates/transportd/src crates/transportd-stub/src crates/upgrader/src \
+    && for lib_only in agent-identity agent-protocol command-authorization \
+      command-journal contracts observability ocserv-adapter privd-attestation; do \
+      : > "crates/${lib_only}/src/lib.rs"; \
+    done \
+    && printf 'fn main() {}\n' > crates/g6-probe/src/main.rs \
+    && for lib_and_bin in agent g6-tunnel privd transportd transportd-stub upgrader; do \
+      : > "crates/${lib_and_bin}/src/lib.rs"; \
+      printf 'fn main() {}\n' > "crates/${lib_and_bin}/src/main.rs"; \
+    done
+RUN cargo build --locked --release --package ocservia-transportd
+RUN cargo build --locked --release \
+    --package ocservia-g6-probe \
+    --package ocservia-g6-tunnel
+RUN cargo build --locked --release \
+    --package ocservia-agent \
+    --package ocservia-privd
 COPY rust/crates ./crates
+# BuildKit COPY preserves build-context mtimes, which predate the warmup
+# build outputs in the same solve. cargo treats sources older than a unit's
+# recorded build as unchanged, which would silently link the warmup's stub
+# rlibs into the real partitions. Normalize mtimes so cargo consults content
+# hashes instead: changed crates recompile, unchanged crates stay cached.
+RUN find crates -type f -exec touch {} +
 RUN cargo build --locked --release --package ocservia-transportd \
     && mkdir -p /out/transportd \
     && cp target/release/ocservia-transportd /out/transportd/

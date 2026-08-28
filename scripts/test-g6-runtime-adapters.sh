@@ -702,9 +702,143 @@ dockerfile_joined="$(
     if (line ~ /\\$/) { pending = substr(line, 1, length(line) - 1) } else { pending = ""; print line }
   }' "${G6_RUNTIME_DOCKERFILE}"
 )"
-cargo_invocation_count="$(grep -c '^RUN cargo build' <<<"${dockerfile_joined}" || true)"
-if [[ "${cargo_invocation_count}" -ne 3 ]]; then
-  echo "the shared Rust builder must issue exactly three cargo invocations (transportd; probe+tunnel; agent+privd), found ${cargo_invocation_count}" >&2
+# Partition invocations freeze artifacts under /out; the dependency warmup
+# experiment's invocations do not. Both classes are tracked separately so a
+# warmup invocation can never stand in for a real partition.
+partition_invocations="$(grep '^RUN cargo build' <<<"${dockerfile_joined}" | grep '&& mkdir -p /out/' || true)"
+warmup_invocations="$(grep '^RUN cargo build' <<<"${dockerfile_joined}" | grep -v '&& mkdir -p /out/' || true)"
+partition_invocation_count="$(grep -c '^RUN' <<<"${partition_invocations}" || true)"
+warmup_invocation_count="$(grep -c '^RUN' <<<"${warmup_invocations}" || true)"
+if [[ "${partition_invocation_count}" -ne 3 ]]; then
+  echo "the shared Rust builder must issue exactly three cargo invocations (transportd; probe+tunnel; agent+privd), found ${partition_invocation_count}" >&2
+  exit 1
+fi
+if [[ "${warmup_invocation_count}" -ne 3 ]]; then
+  echo "the dependency warmup must duplicate all three partitions exactly, found ${warmup_invocation_count} warmup invocations" >&2
+  exit 1
+fi
+# Each warmup invocation must equal its partition's cargo command byte for
+# byte (trailing whitespace from line continuations is formatting, not part
+# of the command), so the warm target/ cache resolves exactly the features
+# the real partitions consume.
+warmup_number=0
+while IFS= read -r warmup_invocation; do
+  warmup_number=$(( warmup_number + 1 ))
+  partition_invocation="$(sed -n "${warmup_number}p" <<<"${partition_invocations}")"
+  warmup_command="${warmup_invocation#RUN }"
+  warmup_command="${warmup_command%%&&*}"
+  partition_command="${partition_invocation#RUN }"
+  partition_command="${partition_command%%&&*}"
+  warmup_command="$(sed -e 's/[[:space:]]*$//' <<<"${warmup_command}")"
+  partition_command="$(sed -e 's/[[:space:]]*$//' <<<"${partition_command}")"
+  if [[ "${warmup_command}" != "${partition_command}" ]]; then
+    echo "dependency warmup invocation ${warmup_number} must equal its partition's cargo command exactly" >&2
+    exit 1
+  fi
+  if [[ "${warmup_command}" != *'--locked --release'* ]]; then
+    echo "dependency warmup invocation ${warmup_number} must stay a locked release build" >&2
+    exit 1
+  fi
+done <<<"$(grep -v '^$' <<<"${warmup_invocations}")"
+# The warmup's cache key must never depend on first-party crate sources:
+# layers before the first warmup invocation may reference member manifests
+# only, and the real source tree must be copied only after the warmup and
+# before the real partitions.
+warmup_prefix="$(awk '/^RUN cargo build/ { exit } { print }' "${G6_RUNTIME_DOCKERFILE}")"
+if grep -E '^COPY .*rust/crates' <<<"${warmup_prefix}" | grep -v 'Cargo.toml' | grep -q .; then
+  echo "layers before the dependency warmup must not copy first-party crate sources" >&2
+  exit 1
+fi
+joined_warmup_first="$(grep -n '^RUN cargo build' <<<"${dockerfile_joined}" | head -1 | cut -d: -f1)"
+joined_crates_copy="$(grep -n '^COPY rust/crates \./crates$' <<<"${dockerfile_joined}" | cut -d: -f1)"
+joined_partition_first="$(
+  grep -n '^RUN cargo build' <<<"${dockerfile_joined}" | grep '&& mkdir -p /out/' | head -1 | cut -d: -f1
+)"
+if [[ -z "${joined_warmup_first}" || -z "${joined_crates_copy}" || -z "${joined_partition_first}" ]] \
+  || [[ "${joined_warmup_first}" -ge "${joined_crates_copy}" ]] \
+  || [[ "${joined_crates_copy}" -ge "${joined_partition_first}" ]]; then
+  echo "the warmup must run before COPY rust/crates ./crates and the real partitions" >&2
+  exit 1
+fi
+# The warmup stub model is generated from a fixed snapshot of the workspace,
+# so it is only valid while the workspace still matches that snapshot.
+# Enforce the exact member set, the per-member stub classification against
+# the real source layout, and the absence of any Cargo mechanism that would
+# change automatic target discovery underneath the stubs. Path dependencies
+# between workspace members are legitimate and are deliberately not checked.
+workspace_members="$(
+  sed -n '/^members = \[/,/^\]/p' "${ROOT}/rust/Cargo.toml" \
+    | grep -oE '"crates/[^"]+"' | sed -e 's/^"crates\///' -e 's/"$//' | sort
+)"
+warmup_manifest_members="$(
+  grep -E '^COPY rust/crates/[a-z0-9_-]+/Cargo\.toml crates/[a-z0-9_-]+/Cargo\.toml$' \
+    "${G6_RUNTIME_DOCKERFILE}" \
+    | awk '{
+        src = $2; dst = $3;
+        sub(/^rust\/crates\//, "", src); sub(/\/Cargo\.toml$/, "", src);
+        sub(/^crates\//, "", dst); sub(/\/Cargo\.toml$/, "", dst);
+        if (src == dst) { print src }
+      }' | sort
+)"
+if [[ -z "${workspace_members}" || "${workspace_members}" != "${warmup_manifest_members}" ]]; then
+  echo "the warmup manifest copies must cover exactly the workspace members" >&2
+  exit 1
+fi
+lib_only_members="$(
+  sed -n 's/^.*for lib_only in \([a-z0-9_ -]*\); do.*$/\1/p' <<<"${dockerfile_joined}" \
+    | tr -s ' ' '\n' | sed '/^$/d' | sort
+)"
+lib_and_bin_members="$(
+  sed -n 's/^.*for lib_and_bin in \([a-z0-9_ -]*\); do.*$/\1/p' <<<"${dockerfile_joined}" \
+    | tr -s ' ' '\n' | sed '/^$/d' | sort
+)"
+bin_only_members="$(
+  grep -oE '> crates/[a-z0-9_-]+/src/main\.rs' <<<"${dockerfile_joined}" \
+    | grep -oE 'crates/[a-z0-9_-]+' | sed 's|^crates/||' | sort
+)"
+fs_lib_only=""
+fs_lib_and_bin=""
+fs_bin_only=""
+for member in ${workspace_members}; do
+  member_manifest="${ROOT}/rust/crates/${member}/Cargo.toml"
+  if [[ -f "${ROOT}/rust/crates/${member}/build.rs" ]]; then
+    echo "workspace member ${member} has build.rs; Cargo discovers it without a manifest key and the warmup stub model does not run it" >&2
+    exit 1
+  fi
+  if [[ -d "${ROOT}/rust/crates/${member}/src/bin" ]]; then
+    echo "workspace member ${member} has src/bin auto binary targets the warmup stub model cannot represent" >&2
+    exit 1
+  fi
+  if grep -qE '^\[\[?(lib|bin)\]\]?' "${member_manifest}"; then
+    echo "workspace member ${member} declares an explicit [lib]/[[bin]] target; the stub model assumes automatic target discovery" >&2
+    exit 1
+  fi
+  if grep -qE '^(autolib|autobins)[[:space:]]*=' "${member_manifest}"; then
+    echo "workspace member ${member} overrides autolib/autobins; the stub model assumes automatic target discovery" >&2
+    exit 1
+  fi
+  if grep -qE '^build[[:space:]]*=' "${member_manifest}"; then
+    echo "workspace member ${member} declares a build key; the warmup stub model does not support build scripts" >&2
+    exit 1
+  fi
+  if [[ -f "${ROOT}/rust/crates/${member}/src/lib.rs" && ! -f "${ROOT}/rust/crates/${member}/src/main.rs" ]]; then
+    fs_lib_only+="${member}"$'\n'
+  elif [[ ! -f "${ROOT}/rust/crates/${member}/src/lib.rs" && -f "${ROOT}/rust/crates/${member}/src/main.rs" ]]; then
+    fs_bin_only+="${member}"$'\n'
+  elif [[ -f "${ROOT}/rust/crates/${member}/src/lib.rs" && -f "${ROOT}/rust/crates/${member}/src/main.rs" ]]; then
+    fs_lib_and_bin+="${member}"$'\n'
+  else
+    echo "workspace member ${member} has neither src/lib.rs nor src/main.rs; the warmup stub model cannot represent it" >&2
+    exit 1
+  fi
+done
+fs_lib_only="$(sed '/^$/d' <<<"${fs_lib_only}" | sort)"
+fs_lib_and_bin="$(sed '/^$/d' <<<"${fs_lib_and_bin}" | sort)"
+fs_bin_only="$(sed '/^$/d' <<<"${fs_bin_only}" | sort)"
+if [[ "${fs_lib_only}" != "${lib_only_members}" ]] \
+  || [[ "${fs_lib_and_bin}" != "${lib_and_bin_members}" ]] \
+  || [[ "${fs_bin_only}" != "${bin_only_members}" ]]; then
+  echo "the warmup stub classification must match each member's real src/lib.rs and src/main.rs layout" >&2
   exit 1
 fi
 production_transportd_build_command="$(
@@ -712,7 +846,7 @@ production_transportd_build_command="$(
     "${TRANSPORT_DOCKERFILE}"
 )"
 g6_transportd_build_command="$(
-  grep '^RUN cargo build' <<<"${dockerfile_joined}" | sed -n '1p' \
+  grep '^RUN cargo build' <<<"${dockerfile_joined}" | grep '&& mkdir -p /out/' | sed -n '1p' \
     | sed -e 's/^RUN //' -e 's/[[:space:]]*&&.*$//'
 )"
 if [[ -z "${production_transportd_build_command}" ]] \
@@ -746,7 +880,7 @@ while IFS= read -r invocation; do
     echo "cargo invocation ${invocation_number} must compile exactly: ${expected_packages}" >&2
     exit 1
   fi
-done <<<"$(grep '^RUN cargo build' <<<"${dockerfile_joined}")"
+done <<<"$(grep -v '^$' <<<"${partition_invocations}")"
 for frozen_copy in \
   'cp target/release/ocservia-transportd /out/transportd/' \
   'cp target/release/ocservia-g6-probe target/release/ocservia-g6-tunnel /out/probe/' \

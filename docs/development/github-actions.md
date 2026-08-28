@@ -84,6 +84,16 @@ runs the default 500-Agent single-VM profile and all fault phases with a
 45-minute timeout. Capacity evidence is not part of ordinary pull-request
 feedback, and the primary workflow keeps the smoke parameters unchanged.
 
+`rust-cache-provision.yml` is a performance-input producer, not a validation:
+it runs on trusted `main` pushes that touch the Rust workspace (plus a weekly
+refresh and manual dispatch, which fail closed on any non-`main` ref before
+checkout), rebuilds the shared `g6-rust-builder` stage with the strict cache
+exporter, and publishes the `g6-rust-runtime` cache on the default branch. Pull-request workflows can restore base-branch caches, while
+caches they write themselves are bound to their own merge ref, so this
+producer is what lets a brand-new PR start from a warm dependency cache. A
+red provision run never affects correctness on `main`; it only means that run
+did not finish publishing the cache.
+
 The G6 harness has two thin callers over `.github/workflows/g6-harness-core.yml`.
 `g6-readiness.yml` is the queued manual formal caller and preserves the full
 two-failure-domain production-readiness contract. `g6-harness-smoke.yml` is a
