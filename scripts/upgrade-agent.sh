@@ -553,10 +553,15 @@ write_snapshot_manifest "${BACKUP_DIR}"
 # has placed every binary, verifier, and unit of this package. The upgrade
 # runner proves crash convergence exclusively through this digest-bound
 # record, so a host lost mid-install can never be mistaken for a completed
-# one.
+# one. The digest is re-read from the root-owned verified package marker,
+# the same trusted source the preflight validated.
+commit_archive_hash="$(sed -n 's/^archive_sha256=//p' "${ROOT}/.ocservia-package-verified")"
+if [[ ! "${commit_archive_hash}" =~ ^[0-9a-f]{64}$ ]]; then
+  installed_pair_preflight_error "verified package marker lost its archive digest"
+fi
 commit_record="${DESTDIR}${UPGRADE_STATE_DIR}/installed-commit"
 install -o root -g root -m 0600 -- /dev/null "${commit_record}"
-printf 'archive_sha256=%s\n' "${archive_hash}" >"${commit_record}"
+printf 'archive_sha256=%s\n' "${commit_archive_hash}" >"${commit_record}"
 sync -f "${commit_record}"
 sync -f "${DESTDIR}${UPGRADE_STATE_DIR}"
 if [[ -z "${DESTDIR}" ]]; then
