@@ -536,9 +536,9 @@ pub fn read_recent_results(
         if name != candidate.to_string() || candidate.get_version_num() != 7 {
             continue;
         }
-        let operation_dir = entry.path();
-        validate_directory_strict(&operation_dir)?;
-        let intent = load_intent(&operation_dir)?;
+        let record_dir = entry.path();
+        validate_directory_strict(&record_dir)?;
+        let intent = load_intent(&record_dir)?;
         if intent.operation_id != candidate {
             return Err(UpgradeStoreError::Unsafe(
                 "durable intent operation identity does not match its directory",
@@ -767,6 +767,28 @@ impl UpgradeRunner {
             .is_some_and(|digest| digest == expected_agent)
             && sha256_if_present(&self.installed_binary("ocservia-privd"))?
                 .is_some_and(|digest| digest == expected_privd);
+        // Execution-time downgrade fence: the authorization was an upgrade
+        // when it was scheduled, but the host may have moved on since. The
+        // currently running release identity (this runner ships with the
+        // installed package) must still be strictly older than the target.
+        // The already-replaced crash-recovery branch above is exempt: its
+        // binaries match the authorized package, so the operation finished.
+        if !replaced
+            && !ocservia_contracts::agent_upgrade::is_strict_upgrade(
+                ocservia_contracts::agent_upgrade::release_version(),
+                &intent.target_version,
+            )
+        {
+            return refuse(
+                operation_dir,
+                intent,
+                UpgradeStoreError::Package(format!(
+                    "target version {} is not newer than the running release {}",
+                    intent.target_version,
+                    ocservia_contracts::agent_upgrade::release_version()
+                )),
+            );
+        }
         write_atomic(
             &operation_dir.join("state"),
             format!("{}\n", OperationState::Running.as_str()).as_bytes(),
@@ -2005,6 +2027,10 @@ mod tests {
     }
 
     fn fake_lifecycle_tree(tag: &str) -> FakePackage {
+        fake_lifecycle_tree_with_version(tag, "1.2.3")
+    }
+
+    fn fake_lifecycle_tree_with_version(tag: &str, version: &str) -> FakePackage {
         let root = test_root(tag);
         let architecture =
             ocservia_contracts::agent_upgrade::runtime_architecture().expect("host architecture");
@@ -2016,7 +2042,7 @@ mod tests {
             .expect("spool");
         let archive_bytes = format!("fake-agent-package-{tag}").into_bytes();
         let archive_digest: [u8; 32] = Sha256::digest(&archive_bytes).into();
-        let archive_name = format!("ocservia-agent-1.2.3-linux-{architecture}.tar.gz");
+        let archive_name = format!("ocservia-agent-{version}-linux-{architecture}.tar.gz");
         let archive = spool.join(&archive_name);
         fs::write(&archive, &archive_bytes).expect("archive");
         fs::write(
@@ -2064,7 +2090,7 @@ mod tests {
 set -e
 digest=$(cut -d' ' -f1 \"$2\")
 stage=\"${DESTDIR}/var/lib/ocservia-upgrade/package-staging/pkg.1\"
-pkg=\"${stage}/extracted/ocservia-agent-1.2.3\"
+pkg=\"${stage}/extracted/ocservia-agent-@VERSION@\"
 mkdir -p \"${pkg}/rust/target/release\" \"${pkg}/scripts\"
 printf 'new-agent-@TAG@\n' > \"${pkg}/rust/target/release/ocservia-agent\"
 printf 'new-privd-@TAG@\n' > \"${pkg}/rust/target/release/ocservia-privd\"
@@ -2076,12 +2102,13 @@ printf 'new-privd-@TAG@\n' > \"${pkg}/rust/target/release/ocservia-privd\"
   printf 'printf x >> \"@LIFECYCLE_LOG@\"\n'
 } > \"${pkg}/scripts/upgrade-agent.sh\"
 chmod 0755 \"${pkg}/rust/target/release/ocservia-agent\" \"${pkg}/rust/target/release/ocservia-privd\" \"${pkg}/scripts/upgrade-agent.sh\"
-printf 'version=1\narchive_sha256=%s\npackage=ocservia-agent-1.2.3\n' \"${digest}\" > \"${pkg}/.ocservia-package-verified\"
+printf 'version=1\narchive_sha256=%s\npackage=ocservia-agent-@VERSION@\n' \"${digest}\" > \"${pkg}/.ocservia-package-verified\"
 chmod 0600 \"${pkg}/.ocservia-package-verified\"
 chmod 0700 \"${pkg}\"
 echo \"${pkg}\"
 "
         .replace("@TAG@", tag)
+        .replace("@VERSION@", version)
         .replace("@LIFECYCLE_LOG@", &lifecycle_runs.display().to_string());
         fs::write(&verifier, verifier_source).expect("verifier script");
         fs::write(&lifecycle_runs, b"").expect("lifecycle counter");
@@ -2201,6 +2228,44 @@ echo \"${pkg}\"
         assert_eq!(
             load_state(&operation_dir).expect("durable failure"),
             OperationState::Failed
+        );
+        fs::remove_dir_all(&package.root).expect("cleanup");
+    }
+
+    #[test]
+    fn runner_refuses_a_target_not_newer_than_the_running_release() {
+        // "0.0.0" predates every publishable release, so the fence refuses
+        // regardless of the identity embedded in this test build.
+        let package = fake_lifecycle_tree_with_version("downgrade-fence", "0.0.0");
+        let intent = UpgradeIntent::new(
+            *Uuid::now_v7().as_bytes(),
+            *Uuid::now_v7().as_bytes(),
+            "0.0.0",
+            package.archive_digest,
+            ocservia_contracts::agent_upgrade::runtime_architecture().expect("host architecture"),
+            [0x55; 32],
+        )
+        .expect("downgrade intent");
+        scheduler(&package.root)
+            .schedule_and_trigger(&intent)
+            .expect("schedule");
+        let runner = UpgradeRunner::new(package.root.clone());
+        let failure = runner
+            .run(&intent.operation_id.to_string())
+            .expect_err("stale target version");
+        assert!(matches!(failure, UpgradeStoreError::Package(_)));
+        let operation_dir = operations_dir(&package.root).join(intent.operation_id.to_string());
+        assert_eq!(
+            load_state(&operation_dir).expect("durable failure"),
+            OperationState::Failed
+        );
+        let result = fs::read_to_string(operation_dir.join("result")).expect("result evidence");
+        assert!(result.contains("state=failed"));
+        assert!(result.contains("not newer than the running release"));
+        // The refusal happens before any lifecycle side effect.
+        assert_eq!(
+            fs::read_to_string(&package.lifecycle_runs).expect("lifecycle counter"),
+            ""
         );
         fs::remove_dir_all(&package.root).expect("cleanup");
     }

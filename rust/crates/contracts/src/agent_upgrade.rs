@@ -7,6 +7,8 @@
 
 #![forbid(unsafe_code)]
 
+use std::cmp::Ordering;
+
 /// Required session capability for the typed agent upgrade command.
 pub const AGENT_UPGRADE_CAPABILITY: &str = "ocserv.agent.upgrade.v1";
 
@@ -61,6 +63,101 @@ pub fn runtime_architecture() -> Option<&'static str> {
         "aarch64" => Some("arm64"),
         _ => None,
     }
+}
+
+/// Compile-time release identity of this installed package. Release builds
+/// inject the published package version through `OCSERV_AGENT_RELEASE_VERSION`
+/// so the Agent heartbeat, the upgrade fence, and the package MANIFEST all
+/// report the same version; local development builds fall back to the crate
+/// version.
+#[must_use]
+pub const fn release_version() -> &'static str {
+    match option_env!("OCSERV_AGENT_RELEASE_VERSION") {
+        Some(version) => version,
+        None => env!("CARGO_PKG_VERSION"),
+    }
+}
+
+/// Reports whether `target` is strictly newer than `current` under `SemVer`
+/// 2.0.0 precedence (build metadata ignored). Both versions must be valid;
+/// anything unparsable fails closed to `false`.
+#[must_use]
+pub fn is_strict_upgrade(current: &str, target: &str) -> bool {
+    match (semver_core(current), semver_core(target)) {
+        (Some(current), Some(target)) => semver_precedence(&target, &current).is_gt(),
+        _ => false,
+    }
+}
+
+type SemVerCore = ([u64; 3], Vec<Identifier>);
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Identifier {
+    Numeric(u64),
+    Alphanumeric(String),
+}
+
+fn semver_core(version: &str) -> Option<SemVerCore> {
+    if !valid_target_version(version) {
+        return None;
+    }
+    // Build metadata never affects precedence.
+    let precedence = version.split('+').next().unwrap_or_default();
+    let (core, prerelease) = match precedence.split_once('-') {
+        Some((core, prerelease)) => (core, prerelease),
+        None => (precedence, ""),
+    };
+    let mut parts = core.split('.');
+    let numbers = [
+        parts.next()?.parse::<u64>().ok()?,
+        parts.next()?.parse::<u64>().ok()?,
+        parts.next()?.parse::<u64>().ok()?,
+    ];
+    if parts.next().is_some() {
+        return None;
+    }
+    let identifiers = if prerelease.is_empty() {
+        Vec::new()
+    } else {
+        prerelease
+            .split('.')
+            .map(|identifier| match identifier.parse::<u64>() {
+                Ok(number) => Identifier::Numeric(number),
+                Err(_) => Identifier::Alphanumeric(identifier.to_owned()),
+            })
+            .collect()
+    };
+    Some((numbers, identifiers))
+}
+
+/// Ordering by `SemVer` 2.0.0 precedence: numeric core fields, then the
+/// prerelease rules where a release outranks any of its prereleases.
+fn semver_precedence(left: &SemVerCore, right: &SemVerCore) -> Ordering {
+    for (l, r) in left.0.iter().zip(right.0.iter()) {
+        if l != r {
+            return l.cmp(r);
+        }
+    }
+    semver_prerelease_order(&left.1, &right.1)
+}
+
+fn semver_prerelease_order(left: &[Identifier], right: &[Identifier]) -> Ordering {
+    // A version without prerelease identifiers outranks one with them.
+    if left.is_empty() || right.is_empty() {
+        return left.len().cmp(&right.len()).reverse();
+    }
+    for (l, r) in left.iter().zip(right.iter()) {
+        let order = match (l, r) {
+            (Identifier::Numeric(l), Identifier::Numeric(r)) => l.cmp(r),
+            (Identifier::Numeric(_), Identifier::Alphanumeric(_)) => Ordering::Less,
+            (Identifier::Alphanumeric(_), Identifier::Numeric(_)) => Ordering::Greater,
+            (Identifier::Alphanumeric(l), Identifier::Alphanumeric(r)) => l.cmp(r),
+        };
+        if order != Ordering::Equal {
+            return order;
+        }
+    }
+    left.len().cmp(&right.len())
 }
 
 fn valid_identifier_list(value: &str, prerelease: bool) -> bool {
@@ -144,5 +241,53 @@ mod tests {
             assert!(!valid_architecture(architecture));
         }
         assert_eq!(AGENT_UPGRADE_CAPABILITY, "ocserv.agent.upgrade.v1");
+    }
+
+    #[test]
+    fn strict_upgrade_follows_semver_precedence() {
+        for (current, target) in [
+            ("0.1.0", "0.2.0"),
+            ("0.1.9", "0.2.0"),
+            ("1.2.3", "1.2.4"),
+            ("1.9.9", "2.0.0"),
+            ("1.0.0-alpha", "1.0.0"),
+            ("1.0.0-alpha", "1.0.0-alpha.1"),
+            ("1.0.0-alpha.1", "1.0.0-beta"),
+            ("1.0.0-2", "1.0.0-10"),
+            ("1.0.0", "1.0.1+build.9"),
+        ] {
+            assert!(
+                is_strict_upgrade(current, target),
+                "expected upgrade: {current} -> {target}"
+            );
+        }
+    }
+
+    #[test]
+    fn strict_upgrade_rejects_replays_downgrades_and_malformed_versions() {
+        for (current, target) in [
+            ("1.2.3", "1.2.3"),
+            ("1.2.3", "1.2.2"),
+            ("2.0.0", "1.9.9"),
+            ("1.0.0", "1.0.0-rc.1"),
+            ("1.0.0-alpha.1", "1.0.0-alpha"),
+            ("1.0.0-10", "1.0.0-2"),
+            ("", "1.2.3"),
+            ("1.2.3", ""),
+            ("v1.2.3", "1.2.4"),
+            ("1.2.3", "latest"),
+        ] {
+            assert!(
+                !is_strict_upgrade(current, target),
+                "expected refusal: {current} -> {target}"
+            );
+        }
+    }
+
+    #[test]
+    fn release_version_is_a_valid_target_version() {
+        // The injected identity must satisfy the same grammar as upgrade
+        // targets; local builds fall back to the crate version.
+        assert!(valid_target_version(release_version()));
     }
 }

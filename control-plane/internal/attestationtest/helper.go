@@ -109,7 +109,14 @@ func AttachProof(envelope *agentv1.CommandEnvelope, result *agentv1.CommandResul
 // UpgradeResultProof signs the root-owned durable upgrade evidence used by
 // telemetry integration tests.
 func UpgradeResultProof(nodeID, operationID uuid.UUID, targetVersion string, packageSHA256, resultSHA256 []byte, state string, completedAt time.Time, privateKey ed25519.PrivateKey) (*agentv1.AgentUpgradeResultProof, error) {
-	if nodeID.Version() != 7 || operationID.Version() != 7 || len(packageSHA256) != sha256.Size || len(resultSHA256) != sha256.Size || completedAt.IsZero() || completedAt.UnixMilli() < 0 {
+	return UpgradeResultProofAttestingAt(nodeID, operationID, targetVersion, packageSHA256, resultSHA256, state, completedAt, time.Now().UTC(), privateKey)
+}
+
+// UpgradeResultProofAttestingAt mirrors the production signing model: the
+// proof is signed at attestation time, which may be long after the durable
+// effect completed (for example across a privd key rotation).
+func UpgradeResultProofAttestingAt(nodeID, operationID uuid.UUID, targetVersion string, packageSHA256, resultSHA256 []byte, state string, completedAt, attestedAt time.Time, privateKey ed25519.PrivateKey) (*agentv1.AgentUpgradeResultProof, error) {
+	if nodeID.Version() != 7 || operationID.Version() != 7 || len(packageSHA256) != sha256.Size || len(resultSHA256) != sha256.Size || completedAt.IsZero() || completedAt.UnixMilli() < 0 || attestedAt.Before(completedAt) {
 		return nil, fmt.Errorf("upgrade result fixture is incomplete")
 	}
 	var outcome agentv1.AgentUpgradeOutcomeState
@@ -128,6 +135,7 @@ func UpgradeResultProof(nodeID, operationID uuid.UUID, targetVersion string, pac
 		NodeId:  nodeID[:], PrivdAttestationKeyId: privdattestation.PublicKeyID(privateKey.Public().(ed25519.PublicKey)),
 		OperationId: operationID[:], TargetVersion: targetVersion, PackageSha256: append([]byte(nil), packageSHA256...),
 		State: outcome, CompletedUnixMs: uint64(completedAt.UnixMilli()), ResultSha256: append([]byte(nil), resultSHA256...),
+		AttestedUnixMs: uint64(attestedAt.UnixMilli()),
 	}
 	canonical, err := privdattestation.CanonicalAgentUpgradeResultProofV1(proof)
 	if err != nil {

@@ -26,6 +26,16 @@ fi
 for binary in ocservia-agent ocservia-privd ocservia-upgrader; do
   test -x "${ROOT}/rust/target/release/${binary}"
 done
+# Every packaged binary must carry exactly this release identity: the Agent
+# heartbeat, the upgrade downgrade fence, and the MANIFEST must all report
+# the same version, otherwise reconciliation can never observe success.
+for binary in ocservia-agent ocservia-privd ocservia-upgrader; do
+  reported="$("${ROOT}/rust/target/release/${binary}" --version | awk '{print $NF}')"
+  if [[ "${reported}" != "${VERSION}" ]]; then
+    echo "${binary} reports release ${reported}, expected ${VERSION}" >&2
+    exit 1
+  fi
+done
 
 umask 077
 mkdir -p -- "${OUTPUT_DIR}"

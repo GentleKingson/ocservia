@@ -59,6 +59,16 @@ const ARTIFACT_CONSUME_FRAME: u32 = 3 << 30;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    // The packaging pipeline verifies the binary's embedded release
+    // identity before it is shipped, so --version stays a read-only
+    // query that works for any caller.
+    if std::env::args().any(|argument| argument == "--version") {
+        println!(
+            "ocservia-agent {}",
+            ocservia_contracts::agent_upgrade::release_version()
+        );
+        return Ok(());
+    }
     ocservia_agent::ensure_unprivileged(rustix::process::geteuid().as_raw())?;
     let config = parse_args()?;
     if prepare_enrollment_if_requested(&config)? {
@@ -214,7 +224,7 @@ async fn enroll_agent(
     let mut request = EnrollRequest {
         token,
         endpoint_id: identity.endpoint_id().as_bytes().to_vec(),
-        agent_version: env!("CARGO_PKG_VERSION").to_owned(),
+        agent_version: ocservia_contracts::agent_upgrade::release_version().to_owned(),
         os_release: ocservia_agent::read_os_release().await?,
         ocserv_version: "unknown".to_owned(),
         boot_id: ocservia_agent::read_boot_id().await?,
@@ -431,7 +441,7 @@ async fn connect_once(
     let handshake = SessionHandshake {
         protocol_major: 1,
         protocol_minor: 1,
-        agent_version: env!("CARGO_PKG_VERSION").to_owned(),
+        agent_version: ocservia_contracts::agent_upgrade::release_version().to_owned(),
         controller_version: String::new(),
         node_id: session.node_id.as_bytes().to_vec(),
         endpoint_id: session.endpoint_id.as_bytes().to_vec(),
@@ -2210,7 +2220,7 @@ fn build_telemetry(
             observed_at: Some(now.into()),
             boot_id: session.boot_id.to_owned(),
             agent_instance_id: session.agent_instance_id.as_bytes().to_vec(),
-            agent_version: env!("CARGO_PKG_VERSION").to_owned(),
+            agent_version: ocservia_contracts::agent_upgrade::release_version().to_owned(),
             ocserv_version: version,
             os_release: session.os_release.to_owned(),
             architecture: ocservia_contracts::agent_upgrade::runtime_architecture()

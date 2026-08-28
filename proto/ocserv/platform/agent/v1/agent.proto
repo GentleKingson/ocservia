@@ -646,7 +646,10 @@ enum AgentUpgradeOutcomeState {
 
 // AgentUpgradeResultProof is signed by root-owned privd over the durable
 // upgrader record identity and digest. The Agent only relays this evidence;
-// it cannot mint or alter a terminal outcome.
+// it cannot mint or alter a terminal outcome. completed_unix_ms is when the
+// durable effect finished; attested_unix_ms is when privd signed this proof,
+// which is the time key validity is judged against so a key rotation after
+// completion can still attest history it now reads.
 message AgentUpgradeResultProof {
   PrivdReceiptVersion version = 1;
   bytes node_id = 2;
@@ -658,6 +661,7 @@ message AgentUpgradeResultProof {
   uint64 completed_unix_ms = 8;
   bytes result_sha256 = 9;
   bytes signature = 10;
+  uint64 attested_unix_ms = 11;
 }
 
 message AgentUpgradeResultReport {

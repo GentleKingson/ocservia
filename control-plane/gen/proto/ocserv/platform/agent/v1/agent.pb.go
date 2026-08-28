@@ -5321,7 +5321,10 @@ func (x *AgentUpgradeScheduledResult) GetPackageSha256() []byte {
 
 // AgentUpgradeResultProof is signed by root-owned privd over the durable
 // upgrader record identity and digest. The Agent only relays this evidence;
-// it cannot mint or alter a terminal outcome.
+// it cannot mint or alter a terminal outcome. completed_unix_ms is when the
+// durable effect finished; attested_unix_ms is when privd signed this proof,
+// which is the time key validity is judged against so a key rotation after
+// completion can still attest history it now reads.
 type AgentUpgradeResultProof struct {
 	state                 protoimpl.MessageState   `protogen:"open.v1"`
 	Version               PrivdReceiptVersion      `protobuf:"varint,1,opt,name=version,proto3,enum=ocserv.platform.agent.v1.PrivdReceiptVersion" json:"version,omitempty"`
@@ -5334,6 +5337,7 @@ type AgentUpgradeResultProof struct {
 	CompletedUnixMs       uint64                   `protobuf:"varint,8,opt,name=completed_unix_ms,json=completedUnixMs,proto3" json:"completed_unix_ms,omitempty"`
 	ResultSha256          []byte                   `protobuf:"bytes,9,opt,name=result_sha256,json=resultSha256,proto3" json:"result_sha256,omitempty"`
 	Signature             []byte                   `protobuf:"bytes,10,opt,name=signature,proto3" json:"signature,omitempty"`
+	AttestedUnixMs        uint64                   `protobuf:"varint,11,opt,name=attested_unix_ms,json=attestedUnixMs,proto3" json:"attested_unix_ms,omitempty"`
 	unknownFields         protoimpl.UnknownFields
 	sizeCache             protoimpl.SizeCache
 }
@@ -5436,6 +5440,13 @@ func (x *AgentUpgradeResultProof) GetSignature() []byte {
 		return x.Signature
 	}
 	return nil
+}
+
+func (x *AgentUpgradeResultProof) GetAttestedUnixMs() uint64 {
+	if x != nil {
+		return x.AttestedUnixMs
+	}
+	return 0
 }
 
 type AgentUpgradeResultReport struct {
@@ -6607,7 +6618,7 @@ const file_ocserv_platform_agent_v1_agent_proto_rawDesc = "" +
 	"\x1bAgentUpgradeScheduledResult\x12!\n" +
 	"\foperation_id\x18\x01 \x01(\fR\voperationId\x12%\n" +
 	"\x0etarget_version\x18\x02 \x01(\tR\rtargetVersion\x12%\n" +
-	"\x0epackage_sha256\x18\x03 \x01(\fR\rpackageSha256\"\xde\x03\n" +
+	"\x0epackage_sha256\x18\x03 \x01(\fR\rpackageSha256\"\x88\x04\n" +
 	"\x17AgentUpgradeResultProof\x12G\n" +
 	"\aversion\x18\x01 \x01(\x0e2-.ocserv.platform.agent.v1.PrivdReceiptVersionR\aversion\x12\x17\n" +
 	"\anode_id\x18\x02 \x01(\fR\x06nodeId\x127\n" +
@@ -6619,7 +6630,8 @@ const file_ocserv_platform_agent_v1_agent_proto_rawDesc = "" +
 	"\x11completed_unix_ms\x18\b \x01(\x04R\x0fcompletedUnixMs\x12#\n" +
 	"\rresult_sha256\x18\t \x01(\fR\fresultSha256\x12\x1c\n" +
 	"\tsignature\x18\n" +
-	" \x01(\fR\tsignature\"\xdd\x02\n" +
+	" \x01(\fR\tsignature\x12(\n" +
+	"\x10attested_unix_ms\x18\v \x01(\x04R\x0eattestedUnixMs\"\xdd\x02\n" +
 	"\x18AgentUpgradeResultReport\x12!\n" +
 	"\foperation_id\x18\x01 \x01(\fR\voperationId\x12H\n" +
 	"\x05state\x18\x02 \x01(\x0e22.ocserv.platform.agent.v1.AgentUpgradeOutcomeStateR\x05state\x12%\n" +

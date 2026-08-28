@@ -25,6 +25,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         println!("{}", attestation_registration(args)?);
         return Ok(());
     }
+    // The packaging pipeline verifies the binary's embedded release
+    // identity before it is shipped; --version stays read-only.
+    if env::args().nth(1).as_deref() == Some("--version") {
+        println!(
+            "ocservia-privd {}",
+            ocservia_contracts::agent_upgrade::release_version()
+        );
+        return Ok(());
+    }
     ocservia_observability::init("ocservia-privd")?;
     let (config, resources, limits) = parse_args()?;
     let adapter = Adapter::new(resources, limits);

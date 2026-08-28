@@ -203,6 +203,7 @@ async fn handle_client(
     Ok(())
 }
 
+#[allow(clippy::too_many_lines)]
 async fn dispatch_attested(
     request: &PrivdRequest,
     node_id: &[u8; 16],
@@ -800,6 +801,7 @@ fn validate_uuid(value: &[u8], detail: &str) -> Result<(), PrivdError> {
     Ok(())
 }
 
+#[allow(clippy::too_many_lines)]
 async fn execute_read(
     operation: Option<privd_request::Operation>,
     node_id: &[u8; 16],
@@ -892,6 +894,22 @@ async fn execute_read(
                                     ));
                                 }
                             };
+                            // The signature time, not the historical completion
+                            // time, carries key validity: a key rotated after
+                            // completion may still attest the older result.
+                            let attested_unix_ms = u64::try_from(
+                                SystemTime::now()
+                                    .duration_since(UNIX_EPOCH)
+                                    .map_err(|_| {
+                                        UpgradeStoreError::Unsafe(
+                                            "system clock precedes the unix epoch",
+                                        )
+                                    })?
+                                    .as_millis(),
+                            )
+                            .map_err(|_| {
+                                UpgradeStoreError::Unsafe("attestation time overflows milliseconds")
+                            })?;
                             let proof = sign_upgrade_result(
                                 AgentUpgradeResultProof {
                                     version: PrivdReceiptVersion::V1.into(),
@@ -905,6 +923,7 @@ async fn execute_read(
                                     state: state.into(),
                                     completed_unix_ms,
                                     result_sha256: result.result_sha256.to_vec(),
+                                    attested_unix_ms,
                                     signature: Vec::new(),
                                 },
                                 attestation_key,

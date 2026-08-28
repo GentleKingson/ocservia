@@ -203,6 +203,11 @@ func VerifyUpgradeResult(ctx context.Context, tx pgx.Tx, nodeID, operationID uui
 	verification.PackageSHA256 = slices.Clone(proof.GetPackageSha256())
 	verification.ResultSHA256 = slices.Clone(proof.GetResultSha256())
 	verification.CompletedAt = time.UnixMilli(int64(proof.GetCompletedUnixMs())).UTC()
+	// Key validity is judged at signature time, not effect completion time:
+	// a key rotated after completion still legitimately attests history it
+	// reads today, which is exactly the reconnect-after-rotation recovery
+	// this evidence exists for.
+	attestedAt := time.UnixMilli(int64(proof.GetAttestedUnixMs())).UTC()
 	if completedAt.IsZero() || completedAt.UnixMilli() < 0 || uint64(completedAt.UnixMilli()) != proof.GetCompletedUnixMs() ||
 		!bytes.Equal(proof.GetNodeId(), nodeID[:]) || !bytes.Equal(proof.GetOperationId(), operationID[:]) ||
 		proof.GetState() != state || proof.GetTargetVersion() != targetVersion {
@@ -224,7 +229,7 @@ func VerifyUpgradeResult(ctx context.Context, tx pgx.Tx, nodeID, operationID uui
 		verification.Status, verification.FailureReason = "revoked_key", "upgrade_result_key_revoked"
 		return verification, nil
 	}
-	if verification.CompletedAt.Before(record.ActivatedAt) || record.ValidUntil != nil && verification.CompletedAt.After(*record.ValidUntil) {
+	if attestedAt.Before(record.ActivatedAt) || record.ValidUntil != nil && attestedAt.After(*record.ValidUntil) {
 		verification.FailureReason = "upgrade_result_key_outside_validity"
 		return verification, nil
 	}
@@ -252,6 +257,7 @@ func CanonicalAgentUpgradeResultProofV1(proof *agentv1.AgentUpgradeResultProof) 
 	output = appendU32(output, uint32(proof.GetState()))
 	output = appendU64(output, proof.GetCompletedUnixMs())
 	output = appendBytes(output, proof.GetResultSha256())
+	output = appendU64(output, proof.GetAttestedUnixMs())
 	if len(output) > maxCanonicalBytes {
 		return nil, errors.New("agent upgrade result proof is oversized")
 	}
@@ -267,7 +273,9 @@ func validAgentUpgradeResultProof(proof *agentv1.AgentUpgradeResultProof) bool {
 		(proof.GetState() != agentv1.AgentUpgradeOutcomeState_AGENT_UPGRADE_OUTCOME_STATE_SUCCEEDED &&
 			proof.GetState() != agentv1.AgentUpgradeOutcomeState_AGENT_UPGRADE_OUTCOME_STATE_FAILED &&
 			proof.GetState() != agentv1.AgentUpgradeOutcomeState_AGENT_UPGRADE_OUTCOME_STATE_ROLLED_BACK) ||
-		proof.GetCompletedUnixMs() == 0 || proof.GetCompletedUnixMs() > math.MaxInt64 {
+		proof.GetCompletedUnixMs() == 0 || proof.GetCompletedUnixMs() > math.MaxInt64 ||
+		proof.GetAttestedUnixMs() == 0 || proof.GetAttestedUnixMs() > math.MaxInt64 ||
+		proof.GetAttestedUnixMs() < proof.GetCompletedUnixMs() {
 		return false
 	}
 	return true

@@ -99,7 +99,12 @@ jobs:
           # shellcheck disable=SC1091
           source scripts/env.sh
           cd rust
-          cargo build --locked --release --package ocservia-agent --package ocservia-privd
+          # The published package version is the binaries' release identity:
+          # the Agent heartbeat and the upgrade downgrade fence both compare
+          # against it, so it must be embedded at compile time.
+          OCSERV_AGENT_RELEASE_VERSION="${version}" \
+            cargo build --locked --release \
+            --package ocservia-agent --package ocservia-privd --package ocservia-upgrader
       - name: Package signed archive and native installers
         run: |
           # shellcheck source=scripts/env.sh

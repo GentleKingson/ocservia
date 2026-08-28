@@ -173,7 +173,10 @@ func TestControlledOperationsRequireApprovedCapabilityAndObservedTargetIntegrati
 }
 
 func TestAgentUpgradeApprovalBindsExactReleaseIdentityIntegration(t *testing.T) {
-	service, pool, workspaceID, nodeID := integrationService(t)
+	// The fixture stages an older observed agent version: the authoritative
+	// creation fence reads it, and its cleanup drops the upgrade family rows
+	// that restrict the shared operations cleanup.
+	service, pool, workspaceID, nodeID := upgradeReconciliationFixture(t)
 	ctx := context.Background()
 	if _, err := pool.Exec(ctx, `INSERT INTO node_capabilities(node_id,capability,approved) VALUES($1,'ocserv.agent.upgrade.v1',true)`, nodeID); err != nil {
 		t.Fatal(err)

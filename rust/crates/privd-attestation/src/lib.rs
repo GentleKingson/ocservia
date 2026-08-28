@@ -200,6 +200,10 @@ pub fn verify_receipt(
 /// Signs a root-owned durable upgrade outcome after validating every claim.
 /// The signature excludes its own field and is independent of Protobuf
 /// encoding, so an Agent can only relay the resulting evidence.
+///
+/// # Errors
+///
+/// Returns an error for malformed claims or a mismatched signing key ID.
 pub fn sign_upgrade_result(
     mut proof: AgentUpgradeResultProof,
     key: &SigningKey,
@@ -214,6 +218,10 @@ pub fn sign_upgrade_result(
 }
 
 /// Verifies a root-owned durable upgrade outcome with its registered key.
+///
+/// # Errors
+///
+/// Returns an error for a missing, malformed, unsupported, or invalidly signed proof.
 pub fn verify_upgrade_result(
     proof: &AgentUpgradeResultProof,
     key: &VerifyingKey,
@@ -234,6 +242,10 @@ pub fn verify_upgrade_result(
 }
 
 /// Encodes a V1 durable upgrade outcome independently of Protobuf field order.
+///
+/// # Errors
+///
+/// Returns an error when any claim violates the V1 canonical contract.
 pub fn canonical_upgrade_result_v1(
     proof: &AgentUpgradeResultProof,
 ) -> Result<Vec<u8>, ReceiptError> {
@@ -257,6 +269,7 @@ pub fn canonical_upgrade_result_v1(
     );
     encoded.extend_from_slice(&proof.completed_unix_ms.to_be_bytes());
     append_bytes(&mut encoded, &proof.result_sha256)?;
+    encoded.extend_from_slice(&proof.attested_unix_ms.to_be_bytes());
     if encoded.len() > MAX_CANONICAL_BYTES {
         return Err(ReceiptError::Malformed);
     }
@@ -283,6 +296,9 @@ fn validate_upgrade_result(proof: &AgentUpgradeResultProof) -> Result<(), Receip
         || proof.completed_unix_ms == 0
         || proof.completed_unix_ms > i64::MAX as u64
         || proof.result_sha256.len() != 32
+        || proof.attested_unix_ms == 0
+        || proof.attested_unix_ms > i64::MAX as u64
+        || proof.attested_unix_ms < proof.completed_unix_ms
     {
         return Err(ReceiptError::Malformed);
     }
@@ -689,6 +705,7 @@ mod tests {
             state: AgentUpgradeOutcomeState::Succeeded.into(),
             completed_unix_ms: 1_700_000_000_000,
             result_sha256: vec![0x22; 32],
+            attested_unix_ms: 1_700_000_000_000 + 60_000,
             signature: Vec::new(),
         };
         let signed = sign_upgrade_result(proof, &key).expect("sign");
@@ -698,6 +715,20 @@ mod tests {
         tampered.package_sha256[0] ^= 1;
         assert_eq!(
             verify_upgrade_result(&tampered, &key.verifying_key()),
+            Err(ReceiptError::SignatureInvalid)
+        );
+        // The signature time itself is signed and can never precede the
+        // durable completion it attests.
+        let mut backdated = signed.clone();
+        backdated.attested_unix_ms = signed.completed_unix_ms - 1;
+        assert_eq!(
+            canonical_upgrade_result_v1(&backdated),
+            Err(ReceiptError::Malformed)
+        );
+        let mut shifted = signed.clone();
+        shifted.attested_unix_ms += 1;
+        assert_eq!(
+            verify_upgrade_result(&shifted, &key.verifying_key()),
             Err(ReceiptError::SignatureInvalid)
         );
     }

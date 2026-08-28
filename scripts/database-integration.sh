@@ -511,6 +511,12 @@ for major in "${POSTGRES_MAJORS[@]}"; do
     UPDATE certificates SET csr_receipt_legacy=true,csr_receipt_verified_at=NULL,csr_receipt_sha256=NULL,csr_privd_attestation_key_id=NULL,csr_effect_record_id=NULL,csr_der_sha256=NULL,csr_requested_subject_sha256=NULL WHERE csr_receipt_verified_at IS NOT NULL;
     DELETE FROM node_privd_attestation_keys;
     DELETE FROM privd_attestation_enrollment_credentials;
+    -- The runtime role deliberately cannot delete append-only upgrade
+    -- history, and the integration tests run as the runtime role, so the
+    -- rollback fixture must clear their residue before the version 27
+    -- down migration checks for leftover history.
+    DELETE FROM node_agent_upgrade_results;
+    DELETE FROM agent_upgrade_operations;
   " >/dev/null
   for database in "${key_receipt_database}" "${key_only_database}" "${receipt_only_database}"; do
     docker exec "${container}" psql -v ON_ERROR_STOP=1 -U ocservia_owner -d postgres -c \
