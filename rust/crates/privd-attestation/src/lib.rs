@@ -10,14 +10,16 @@ use std::path::Path;
 
 use ed25519_dalek::{Signature, Signer as _, SigningKey, VerifyingKey};
 use ocservia_contracts::generated::ocserv::platform::agent::v1::{
-    CertificateCsr, CommandResultState, PrivdAttestationRegistrationV1,
-    PrivdCertificateReceiptBindingV1, PrivdReceiptVersion, PrivdResultReceiptV1,
-    PrivilegedCommandKind, PrivilegedResultKind, PrivilegedResultProof, SemanticPayloadHashVersion,
+    AgentUpgradeOutcomeState, AgentUpgradeResultProof, CertificateCsr, CommandResultState,
+    PrivdAttestationRegistrationV1, PrivdCertificateReceiptBindingV1, PrivdReceiptVersion,
+    PrivdResultReceiptV1, PrivilegedCommandKind, PrivilegedResultKind, PrivilegedResultProof,
+    SemanticPayloadHashVersion,
 };
 use sha2::{Digest as _, Sha256};
 
 const RECEIPT_DOMAIN: &[u8] = b"ocservia/privd-result-receipt/v1\0";
 const REGISTRATION_DOMAIN: &[u8] = b"ocservia/privd-attestation-registration/v1\0";
+const UPGRADE_RESULT_DOMAIN: &[u8] = b"ocservia/privd-upgrade-result/v1\0";
 const KEY_ID_PREFIX: &str = "ed25519-sha256:";
 const MAX_CANONICAL_BYTES: usize = 2048;
 const PRIVATE_KEY_BYTES: usize = 32;
@@ -193,6 +195,114 @@ pub fn verify_receipt(
     key.verify_strict(&canonical, &signature)
         .map_err(|_| ReceiptError::SignatureInvalid)?;
     Ok(receipt.clone())
+}
+
+/// Signs a root-owned durable upgrade outcome after validating every claim.
+/// The signature excludes its own field and is independent of Protobuf
+/// encoding, so an Agent can only relay the resulting evidence.
+///
+/// # Errors
+///
+/// Returns an error for malformed claims or a mismatched signing key ID.
+pub fn sign_upgrade_result(
+    mut proof: AgentUpgradeResultProof,
+    key: &SigningKey,
+) -> Result<AgentUpgradeResultProof, ReceiptError> {
+    proof.signature.clear();
+    let canonical = canonical_upgrade_result_v1(&proof)?;
+    if proof.privd_attestation_key_id != key_id(&key.verifying_key()) {
+        return Err(ReceiptError::Malformed);
+    }
+    proof.signature = key.sign(&canonical).to_bytes().to_vec();
+    Ok(proof)
+}
+
+/// Verifies a root-owned durable upgrade outcome with its registered key.
+///
+/// # Errors
+///
+/// Returns an error for a missing, malformed, unsupported, or invalidly signed proof.
+pub fn verify_upgrade_result(
+    proof: &AgentUpgradeResultProof,
+    key: &VerifyingKey,
+) -> Result<AgentUpgradeResultProof, ReceiptError> {
+    if PrivdReceiptVersion::try_from(proof.version).unwrap_or(PrivdReceiptVersion::Unspecified)
+        != PrivdReceiptVersion::V1
+    {
+        return Err(ReceiptError::UnsupportedVersion);
+    }
+    if proof.privd_attestation_key_id != key_id(key) {
+        return Err(ReceiptError::Malformed);
+    }
+    let canonical = canonical_upgrade_result_v1(proof)?;
+    let signature = Signature::from_slice(&proof.signature).map_err(|_| ReceiptError::Malformed)?;
+    key.verify_strict(&canonical, &signature)
+        .map_err(|_| ReceiptError::SignatureInvalid)?;
+    Ok(proof.clone())
+}
+
+/// Encodes a V1 durable upgrade outcome independently of Protobuf field order.
+///
+/// # Errors
+///
+/// Returns an error when any claim violates the V1 canonical contract.
+pub fn canonical_upgrade_result_v1(
+    proof: &AgentUpgradeResultProof,
+) -> Result<Vec<u8>, ReceiptError> {
+    validate_upgrade_result(proof)?;
+    let mut encoded = Vec::with_capacity(256);
+    encoded.extend_from_slice(UPGRADE_RESULT_DOMAIN);
+    encoded.extend_from_slice(
+        &u32::try_from(proof.version)
+            .map_err(|_| ReceiptError::Malformed)?
+            .to_be_bytes(),
+    );
+    append_bytes(&mut encoded, &proof.node_id)?;
+    append_string(&mut encoded, &proof.privd_attestation_key_id)?;
+    append_bytes(&mut encoded, &proof.operation_id)?;
+    append_string(&mut encoded, &proof.target_version)?;
+    append_bytes(&mut encoded, &proof.package_sha256)?;
+    encoded.extend_from_slice(
+        &u32::try_from(proof.state)
+            .map_err(|_| ReceiptError::Malformed)?
+            .to_be_bytes(),
+    );
+    encoded.extend_from_slice(&proof.completed_unix_ms.to_be_bytes());
+    append_bytes(&mut encoded, &proof.result_sha256)?;
+    encoded.extend_from_slice(&proof.attested_unix_ms.to_be_bytes());
+    if encoded.len() > MAX_CANONICAL_BYTES {
+        return Err(ReceiptError::Malformed);
+    }
+    Ok(encoded)
+}
+
+fn validate_upgrade_result(proof: &AgentUpgradeResultProof) -> Result<(), ReceiptError> {
+    let version =
+        PrivdReceiptVersion::try_from(proof.version).unwrap_or(PrivdReceiptVersion::Unspecified);
+    let state = AgentUpgradeOutcomeState::try_from(proof.state)
+        .unwrap_or(AgentUpgradeOutcomeState::Unspecified);
+    if version != PrivdReceiptVersion::V1
+        || !uuid_v7(&proof.node_id)
+        || !uuid_v7(&proof.operation_id)
+        || !valid_key_id(&proof.privd_attestation_key_id)
+        || !ocservia_contracts::agent_upgrade::valid_target_version(&proof.target_version)
+        || proof.package_sha256.len() != 32
+        || !matches!(
+            state,
+            AgentUpgradeOutcomeState::Succeeded
+                | AgentUpgradeOutcomeState::Failed
+                | AgentUpgradeOutcomeState::RolledBack
+        )
+        || proof.completed_unix_ms == 0
+        || proof.completed_unix_ms > i64::MAX as u64
+        || proof.result_sha256.len() != 32
+        || proof.attested_unix_ms == 0
+        || proof.attested_unix_ms > i64::MAX as u64
+        || proof.attested_unix_ms < proof.completed_unix_ms
+    {
+        return Err(ReceiptError::Malformed);
+    }
+    Ok(())
 }
 
 /// Encodes a V1 receipt independently of Protobuf field order and unknown fields.
@@ -580,6 +690,47 @@ mod tests {
                 Err(ReceiptError::SignatureInvalid)
             );
         }
+    }
+
+    #[test]
+    fn upgrade_result_signature_binds_durable_identity() {
+        let key = SigningKey::from_bytes(&[9; 32]);
+        let proof = AgentUpgradeResultProof {
+            version: PrivdReceiptVersion::V1.into(),
+            node_id: hex::decode("018f2a3b4c5d70008000000000000001").expect("node"),
+            privd_attestation_key_id: key_id(&key.verifying_key()),
+            operation_id: hex::decode("018f2a3b4c5d70008000000000000002").expect("operation"),
+            target_version: "1.2.3".to_owned(),
+            package_sha256: vec![0x11; 32],
+            state: AgentUpgradeOutcomeState::Succeeded.into(),
+            completed_unix_ms: 1_700_000_000_000,
+            result_sha256: vec![0x22; 32],
+            attested_unix_ms: 1_700_000_000_000 + 60_000,
+            signature: Vec::new(),
+        };
+        let signed = sign_upgrade_result(proof, &key).expect("sign");
+        verify_upgrade_result(&signed, &key.verifying_key()).expect("verify");
+
+        let mut tampered = signed.clone();
+        tampered.package_sha256[0] ^= 1;
+        assert_eq!(
+            verify_upgrade_result(&tampered, &key.verifying_key()),
+            Err(ReceiptError::SignatureInvalid)
+        );
+        // The signature time itself is signed and can never precede the
+        // durable completion it attests.
+        let mut backdated = signed.clone();
+        backdated.attested_unix_ms = signed.completed_unix_ms - 1;
+        assert_eq!(
+            canonical_upgrade_result_v1(&backdated),
+            Err(ReceiptError::Malformed)
+        );
+        let mut shifted = signed.clone();
+        shifted.attested_unix_ms += 1;
+        assert_eq!(
+            verify_upgrade_result(&shifted, &key.verifying_key()),
+            Err(ReceiptError::SignatureInvalid)
+        );
     }
 
     #[test]

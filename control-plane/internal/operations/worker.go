@@ -103,6 +103,9 @@ func (w *Worker) Run(ctx context.Context) error {
 			if err := w.service.Expire(ctx); err != nil {
 				w.logger.ErrorContext(ctx, "expire queued commands", "error", err)
 			}
+			if err := w.service.ReconcileAgentUpgrades(ctx); err != nil {
+				w.logger.ErrorContext(ctx, "reconcile agent upgrades", "error", err)
+			}
 		case <-poll.C:
 			if err := w.dispatch(ctx); err != nil {
 				w.logger.ErrorContext(ctx, "dispatch outbox batch", "error", err)

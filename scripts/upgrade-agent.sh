@@ -549,6 +549,29 @@ fi
 write_snapshot_manifest "${BACKUP_DIR}"
 
 "${ROOT}/scripts/install-agent.sh"
+# The installed binaries, verifier, and units can live on a different
+# filesystem than this state directory (for example /usr on one device and
+# /var on another), and sync -f only flushes the filesystem of the file it
+# is given. Flush every filesystem the install touched before the commit
+# record below is written: once the record is durable, everything it
+# certifies must already be durable too, or a power loss could leave a
+# durable record over a partially persisted installation.
+sync
+# Durable installation commit record: written only after install-agent.sh
+# has placed every binary, verifier, and unit of this package. The upgrade
+# runner proves crash convergence exclusively through this digest-bound
+# record, so a host lost mid-install can never be mistaken for a completed
+# one. The digest is re-read from the root-owned verified package marker,
+# the same trusted source the preflight validated.
+commit_archive_hash="$(sed -n 's/^archive_sha256=//p' "${ROOT}/.ocservia-package-verified")"
+if [[ ! "${commit_archive_hash}" =~ ^[0-9a-f]{64}$ ]]; then
+  installed_pair_preflight_error "verified package marker lost its archive digest"
+fi
+commit_record="${DESTDIR}${UPGRADE_STATE_DIR}/installed-commit"
+install -o root -g root -m 0600 -- /dev/null "${commit_record}"
+printf 'archive_sha256=%s\n' "${commit_archive_hash}" >"${commit_record}"
+sync -f "${commit_record}"
+sync -f "${DESTDIR}${UPGRADE_STATE_DIR}"
 if [[ -z "${DESTDIR}" ]]; then
   systemctl try-restart ocservia-privd.service ocservia-agent.service
 fi

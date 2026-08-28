@@ -64,6 +64,18 @@ export interface Operation {
    */
   configApplyFailureCode?: string;
   /**
+   * Reconciled single-node upgrade outcome when this operation upgrades the node agent.
+   * @type {OperationAgentUpgradeStateEnum}
+   * @memberof Operation
+   */
+  agentUpgradeState?: OperationAgentUpgradeStateEnum;
+  /**
+   * Trusted target agent version of this upgrade operation.
+   * @type {string}
+   * @memberof Operation
+   */
+  agentUpgradeTargetVersion?: string;
+  /**
    *
    * @type {number}
    * @memberof Operation
@@ -106,6 +118,21 @@ export const OperationConfigApplyStateEnum = {
 } as const;
 export type OperationConfigApplyStateEnum =
   (typeof OperationConfigApplyStateEnum)[keyof typeof OperationConfigApplyStateEnum];
+
+/**
+ * @export
+ */
+export const OperationAgentUpgradeStateEnum = {
+  Queued: "queued",
+  Accepted: "accepted",
+  Running: "running",
+  Succeeded: "succeeded",
+  Failed: "failed",
+  RolledBack: "rolled_back",
+  Unknown: "unknown",
+} as const;
+export type OperationAgentUpgradeStateEnum =
+  (typeof OperationAgentUpgradeStateEnum)[keyof typeof OperationAgentUpgradeStateEnum];
 
 /**
  * Check if a given object implements the Operation interface.
@@ -155,6 +182,14 @@ export function OperationFromJSONTyped(
       json["config_apply_failure_code"] == null
         ? undefined
         : json["config_apply_failure_code"],
+    agentUpgradeState:
+      json["agent_upgrade_state"] == null
+        ? undefined
+        : json["agent_upgrade_state"],
+    agentUpgradeTargetVersion:
+      json["agent_upgrade_target_version"] == null
+        ? undefined
+        : json["agent_upgrade_target_version"],
     version: json["version"],
     createdAt: new Date(json["created_at"]),
     updatedAt: new Date(json["updated_at"]),
@@ -182,6 +217,8 @@ export function OperationToJSONTyped(
     command_id: value["commandId"],
     config_apply_state: value["configApplyState"],
     config_apply_failure_code: value["configApplyFailureCode"],
+    agent_upgrade_state: value["agentUpgradeState"],
+    agent_upgrade_target_version: value["agentUpgradeTargetVersion"],
     version: value["version"],
     created_at: value["createdAt"].toISOString(),
     updated_at: value["updatedAt"].toISOString(),

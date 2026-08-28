@@ -247,7 +247,7 @@ func TestMarshalEnvelopeSignsAgentUpgradeReleaseIdentity(t *testing.T) {
 	if err := proto.Unmarshal(data, &envelope); err != nil {
 		t.Fatal(err)
 	}
-	if envelope.GetAction() != "agent.upgrade" || envelope.GetRequiredCapability() != "ocserv.agent.upgrade.v1" {
+	if envelope.GetAction() != "agent.upgrade" || envelope.GetRequiredCapability() != "ocserv.agent.upgrade.v2" {
 		t.Fatalf("upgrade authorization labels = %q/%q", envelope.GetAction(), envelope.GetRequiredCapability())
 	}
 	upgrade := envelope.GetAgentUpgrade()
@@ -258,7 +258,7 @@ func TestMarshalEnvelopeSignsAgentUpgradeReleaseIdentity(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if claims.PayloadKind != 128 || claims.Action != "agent.upgrade" || claims.RequiredCapability != "ocserv.agent.upgrade.v1" {
+	if claims.PayloadKind != 128 || claims.Action != "agent.upgrade" || claims.RequiredCapability != "ocserv.agent.upgrade.v2" {
 		t.Fatalf("signed claims did not bind the upgrade identity: %+v", claims)
 	}
 	digest, err := semanticpayload.HashV2(&envelope)

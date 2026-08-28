@@ -12,22 +12,25 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use ed25519_dalek::SigningKey;
 use ocservia_agent_protocol::{
     AgentUpgradeScheduledResult, ErrorKind, PrivdError, PrivdRequest, PrivdResponse,
-    PrivilegedRequestMode, privd_request, privd_response, read_frame, write_frame,
+    PrivilegedRequestMode, UpgradeOperationResult, UpgradeResultList, privd_request,
+    privd_response, read_frame, write_frame,
 };
 use ocservia_command_authorization::{
     ArtifactGrantClaimsV1, AuthorizationError, CommandAuthorizationV1, ControllerCommandKeyring,
 };
 use ocservia_contracts::generated::ocserv::platform::agent::v1::{
-    AgentUpgrade, CommandDeliveryMode, CommandEnvelope, CommandResultState,
-    PrivdCertificateReceiptBindingV1, PrivdReceiptVersion, PrivdResultReceiptV1,
-    PrivilegedCommandKind, PrivilegedResultKind, SealedSecretPurpose, SealedSecretVersion,
-    command_envelope,
+    AgentUpgrade, AgentUpgradeOutcomeState, AgentUpgradeResultProof, CommandDeliveryMode,
+    CommandEnvelope, CommandResultState, PrivdCertificateReceiptBindingV1, PrivdReceiptVersion,
+    PrivdResultReceiptV1, PrivilegedCommandKind, PrivilegedResultKind, SealedSecretPurpose,
+    SealedSecretVersion, command_envelope,
 };
 use ocservia_ocserv_adapter::{
     Adapter, ArtifactLeaseIdentity, AuthorizedEffectDecision, AuthorizedEffectIdentity,
     EffectIdentity,
 };
-use ocservia_privd_attestation::{key_id, requested_subject_digest, sign_receipt};
+use ocservia_privd_attestation::{
+    key_id, requested_subject_digest, sign_receipt, sign_upgrade_result,
+};
 use ocservia_upgrader::{ScheduleOutcome, UpgradeIntent, UpgradeScheduler, UpgradeStoreError};
 use prost::Message as _;
 use sha2::{Digest as _, Sha256};
@@ -200,6 +203,7 @@ async fn handle_client(
     Ok(())
 }
 
+#[allow(clippy::too_many_lines)]
 async fn dispatch_attested(
     request: &PrivdRequest,
     node_id: &[u8; 16],
@@ -211,8 +215,17 @@ async fn dispatch_attested(
     let request_id = request.request_id.clone();
     let result = match validate_request(request, node_id, command_keys) {
         Ok((deadline, ValidatedRequest::Read)) => {
-            match tokio::time::timeout(deadline, execute_read(request.operation.clone(), adapter))
-                .await
+            match tokio::time::timeout(
+                deadline,
+                execute_read(
+                    request.operation.clone(),
+                    node_id,
+                    attestation_key,
+                    adapter,
+                    upgrades,
+                ),
+            )
+            .await
             {
                 Ok(result) => result,
                 Err(_) => deadline_error(),
@@ -525,6 +538,7 @@ fn validate_request(
                     | privd_request::Operation::ConfigFingerprint(_)
                     | privd_request::Operation::UserList(_)
                     | privd_request::Operation::GroupList(_)
+                    | privd_request::Operation::UpgradeResultList(_)
             )
         ) {
             return Err(error(
@@ -787,9 +801,13 @@ fn validate_uuid(value: &[u8], detail: &str) -> Result<(), PrivdError> {
     Ok(())
 }
 
+#[allow(clippy::too_many_lines)]
 async fn execute_read(
     operation: Option<privd_request::Operation>,
+    node_id: &[u8; 16],
+    attestation_key: &SigningKey,
     adapter: &Adapter,
+    upgrades: &UpgradeScheduler,
 ) -> privd_response::Result {
     let Some(operation) = operation else {
         return privd_response::Result::Error(error(
@@ -846,6 +864,93 @@ async fn execute_read(
                 .group_list()
                 .await
                 .map(privd_response::Result::GroupList),
+        ),
+        privd_request::Operation::UpgradeResultList(_) => (
+            "upgrade_result_list",
+            ocservia_upgrader::read_recent_results(upgrades.operations_root(), 8)
+                .and_then(|results| {
+                    results
+                        .into_iter()
+                        .map(|result| {
+                            let completed_unix_ms = result.completed_unix.checked_mul(1000).ok_or(
+                                UpgradeStoreError::Unsafe(
+                                    "durable result completion time overflows milliseconds",
+                                ),
+                            )?;
+                            let state = match result.state {
+                                ocservia_upgrader::OperationState::Succeeded => {
+                                    AgentUpgradeOutcomeState::Succeeded
+                                }
+                                ocservia_upgrader::OperationState::Failed => {
+                                    AgentUpgradeOutcomeState::Failed
+                                }
+                                ocservia_upgrader::OperationState::RolledBack => {
+                                    AgentUpgradeOutcomeState::RolledBack
+                                }
+                                ocservia_upgrader::OperationState::Accepted
+                                | ocservia_upgrader::OperationState::Running => {
+                                    return Err(UpgradeStoreError::Unsafe(
+                                        "durable result is not terminal",
+                                    ));
+                                }
+                            };
+                            // The signature time, not the historical completion
+                            // time, carries key validity: a key rotated after
+                            // completion may still attest the older result.
+                            let attested_unix_ms = u64::try_from(
+                                SystemTime::now()
+                                    .duration_since(UNIX_EPOCH)
+                                    .map_err(|_| {
+                                        UpgradeStoreError::Unsafe(
+                                            "system clock precedes the unix epoch",
+                                        )
+                                    })?
+                                    .as_millis(),
+                            )
+                            .map_err(|_| {
+                                UpgradeStoreError::Unsafe("attestation time overflows milliseconds")
+                            })?;
+                            let proof = sign_upgrade_result(
+                                AgentUpgradeResultProof {
+                                    version: PrivdReceiptVersion::V1.into(),
+                                    node_id: node_id.to_vec(),
+                                    privd_attestation_key_id: key_id(
+                                        &attestation_key.verifying_key(),
+                                    ),
+                                    operation_id: result.operation_id.as_bytes().to_vec(),
+                                    target_version: result.target_version.clone(),
+                                    package_sha256: result.package_sha256.to_vec(),
+                                    state: state.into(),
+                                    completed_unix_ms,
+                                    result_sha256: result.result_sha256.to_vec(),
+                                    attested_unix_ms,
+                                    signature: Vec::new(),
+                                },
+                                attestation_key,
+                            )
+                            .map_err(|_| {
+                                UpgradeStoreError::Unsafe(
+                                    "durable result proof claims are malformed",
+                                )
+                            })?;
+                            Ok(UpgradeOperationResult {
+                                operation_id: result.operation_id.as_bytes().to_vec(),
+                                state: result.state.as_str().to_owned(),
+                                target_version: result.target_version,
+                                completed_unix_ms,
+                                detail: result.detail,
+                                package_sha256: result.package_sha256.to_vec(),
+                                privileged_result_proof: Some(proof),
+                            })
+                        })
+                        .collect::<Result<Vec<_>, UpgradeStoreError>>()
+                        .map(|results| {
+                            privd_response::Result::UpgradeResultList(UpgradeResultList { results })
+                        })
+                })
+                .map_err(|failure| {
+                    ocservia_ocserv_adapter::AdapterError::Io(io::Error::other(failure.to_string()))
+                }),
         ),
         _ => {
             return privd_response::Result::Error(error(
@@ -1734,7 +1839,7 @@ mod tests {
             issued_at,
             expires_at,
             "agent.upgrade",
-            "ocserv.agent.upgrade.v1",
+            "ocserv.agent.upgrade.v2",
             command_envelope::Payload::AgentUpgrade(AgentUpgrade {
                 target_version: target_version.to_owned(),
                 package_sha256,
@@ -2773,5 +2878,73 @@ mod tests {
         server.await.expect("join server").expect("serve fixture");
         remove_socket(&socket).expect("remove fixture socket");
         std::fs::remove_dir_all(directory).expect("cleanup test directory");
+    }
+
+    #[tokio::test]
+    async fn upgrade_result_list_surfaces_durable_outcomes_read_only() {
+        let signing = SigningKey::from_bytes(&[7; 32]);
+        let keys = keyring(&signing);
+        let node_id = *Uuid::now_v7().as_bytes();
+        let adapter = Adapter::new(FixedResources::default(), Limits::default());
+        let directory =
+            std::env::temp_dir().join(format!("ocservia-privd-upgrade-read-{}", Uuid::now_v7()));
+        fs::create_dir(&directory).expect("create test directory");
+        let operations = directory.join("var/lib/ocservia-upgrade/operations");
+        fs::create_dir_all(&operations).expect("create operations root");
+        let scheduler = UpgradeScheduler::new(operations.clone(), UpgradeTrigger::Disabled);
+        let intent = UpgradeIntent::new(
+            *Uuid::now_v7().as_bytes(),
+            *Uuid::now_v7().as_bytes(),
+            "2.0.0",
+            [0x43; 32],
+            ocservia_contracts::agent_upgrade::runtime_architecture().expect("host architecture"),
+            [0x55; 32],
+        )
+        .expect("valid test intent");
+        scheduler
+            .schedule_and_trigger(&intent)
+            .expect("schedule intent");
+        // The spool is empty, so the runner durably refuses the upgrade and
+        // leaves exactly the terminal evidence the read-only query must show.
+        let runner = ocservia_upgrader::UpgradeRunner::new(directory.clone());
+        assert!(runner.run(&intent.operation_id.to_string()).is_err());
+
+        let request = PrivdRequest {
+            request_id: Uuid::now_v7().as_bytes().to_vec(),
+            deadline_unix_ms: deadline(),
+            accepted_at: None,
+            authorization_command: None,
+            privileged_mode: PrivilegedRequestMode::Unspecified.into(),
+            operation: Some(privd_request::Operation::UpgradeResultList(
+                ocservia_agent_protocol::UpgradeResultListRequest {},
+            )),
+        };
+        let response = dispatch_attested(
+            &request,
+            &node_id,
+            &keys,
+            &SigningKey::from_bytes(&[41; 32]),
+            &scheduler,
+            &adapter,
+        )
+        .await;
+        let Some(privd_response::Result::UpgradeResultList(list)) = response.result else {
+            panic!("expected an upgrade result list, got {:?}", response.result);
+        };
+        assert_eq!(list.results.len(), 1);
+        assert_eq!(list.results[0].operation_id, intent.operation_id.as_bytes());
+        assert_eq!(list.results[0].state, "failed");
+        assert_eq!(list.results[0].target_version, "2.0.0");
+        assert!(list.results[0].completed_unix_ms > 0);
+        let proof = list.results[0]
+            .privileged_result_proof
+            .as_ref()
+            .expect("root-attested durable result");
+        assert_eq!(proof.node_id, node_id);
+        assert_eq!(proof.operation_id, intent.operation_id.as_bytes());
+        assert_eq!(proof.package_sha256, intent.package_sha256);
+        assert_eq!(proof.result_sha256.len(), 32);
+        assert_eq!(proof.signature.len(), ed25519_dalek::SIGNATURE_LENGTH);
+        std::fs::remove_dir_all(&directory).expect("cleanup test directory");
     }
 }

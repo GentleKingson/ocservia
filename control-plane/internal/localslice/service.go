@@ -603,7 +603,7 @@ func (s *Service) ingestTransportEventTx(ctx context.Context, tx pgx.Tx, eventID
 	if err := tx.QueryRow(ctx, `SELECT n.workspace_id,n.status,k.state
 		FROM nodes n JOIN node_endpoint_keys k ON k.node_id=n.id
 		WHERE n.id=$1 AND k.endpoint_id=$2
-		FOR SHARE OF n,k`, nodeID, event.GetEndpointId()).Scan(&workspaceID, &nodeStatus, &endpointState); errors.Is(err, pgx.ErrNoRows) {
+		FOR UPDATE OF n,k`, nodeID, event.GetEndpointId()).Scan(&workspaceID, &nodeStatus, &endpointState); errors.Is(err, pgx.ErrNoRows) {
 		return uuid.Nil, false, invalidEvent("node_endpoint_not_active", "transport event node and EndpointID are not authoritatively active")
 	} else if err != nil {
 		return uuid.Nil, false, fmt.Errorf("check authoritative node ingress trust: %w", err)
@@ -949,6 +949,19 @@ func ingestAgentCommandResult(ctx context.Context, tx pgx.Tx, eventID, nodeID uu
 	if normalizationErr == nil && artifactErr != nil {
 		normalizationErr = artifactErr
 	}
+	// An acknowledged agent upgrade is only scheduled: the expected restart
+	// and target-version verification follow, so the operation must not
+	// become terminal here. Any other state (explicit failure, rejection, or
+	// an unverified receipt) keeps the generic semantics.
+	upgradeScheduled := false
+	if envelope.GetAgentUpgrade() != nil && normalizationErr == nil && normalizationState == "succeeded" {
+		if err := validateAgentUpgradeScheduledResult(&envelope, resultBytes); err != nil {
+			normalizationErr = err
+		} else {
+			effectiveState = "accepted"
+			upgradeScheduled = true
+		}
+	}
 	recoveryReason := result.GetErrorCode()
 	if verification.Status != "not_required" && !verification.Verified() {
 		normalizationErr = errors.New("privileged result receipt verification failed")
@@ -1165,6 +1178,15 @@ func ingestAgentCommandResult(ctx context.Context, tx pgx.Tx, eventID, nodeID uu
 			return fmt.Errorf("update certificate artifact outcome: %w", err)
 		}
 	}
+	if envelope.GetAgentUpgrade() != nil {
+		var scheduledAt any
+		if upgradeScheduled {
+			scheduledAt = observedAt
+		}
+		if _, err := tx.Exec(ctx, `UPDATE agent_upgrade_operations SET state=$2,scheduled_at=COALESCE($3,scheduled_at),updated_at=$4 WHERE operation_id=$1`, operationID, operationState, scheduledAt, observedAt); err != nil {
+			return fmt.Errorf("update agent upgrade outcome: %w", err)
+		}
+	}
 	if _, err := tx.Exec(ctx, `INSERT INTO operation_events(id,operation_id,state,occurred_at) VALUES($1,$2,$3,$4)`, operationEventID, operationID, operationState, observedAt); err != nil {
 		return fmt.Errorf("append Agent operation result event: %w", err)
 	}
@@ -1293,6 +1315,24 @@ func normalizeConfigApplyResult(envelope *agentv1.CommandEnvelope, state string,
 	default:
 		return "", nil, errors.New("configuration apply result has an invalid outcome")
 	}
+}
+
+// validateAgentUpgradeScheduledResult checks that a succeeded agent upgrade
+// result carries the scheduling acknowledgement bound to this exact command.
+// The acknowledgement proves scheduling only; the reconciled terminal outcome
+// comes later from durable evidence.
+func validateAgentUpgradeScheduledResult(envelope *agentv1.CommandEnvelope, resultBytes []byte) error {
+	upgrade := envelope.GetAgentUpgrade()
+	var scheduled agentv1.AgentUpgradeScheduledResult
+	if len(resultBytes) == 0 || proto.Unmarshal(resultBytes, &scheduled) != nil {
+		return errors.New("agent upgrade scheduled result is malformed")
+	}
+	if !bytes.Equal(scheduled.GetOperationId(), envelope.GetOperationId()) ||
+		scheduled.GetTargetVersion() != upgrade.GetTargetVersion() ||
+		!bytes.Equal(scheduled.GetPackageSha256(), upgrade.GetPackageSha256()) {
+		return errors.New("agent upgrade scheduled result does not match the release identity")
+	}
+	return nil
 }
 
 func commandAuditAction(envelope *agentv1.CommandEnvelope) string {

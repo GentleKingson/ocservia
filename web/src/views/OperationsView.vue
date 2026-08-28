@@ -17,6 +17,7 @@ import {
   startOperationDetail,
   type OperationDetailState,
 } from "../shared/operation-detail";
+import { operationStatusKey } from "../shared/operation-status";
 
 const operations = ref<Operation[]>([]);
 const { t } = useI18n();
@@ -35,10 +36,6 @@ let requestController: AbortController | undefined;
 let detailController: AbortController | undefined;
 let requestSequence = 0;
 let detailSequence = 0;
-
-function operationLabel(state: string): string {
-  return "operation_" + state;
-}
 
 function dateLabel(value: Date): string {
   return value.toLocaleString();
@@ -203,8 +200,11 @@ onBeforeUnmount(() => {
               </td>
               <td>
                 <strong :class="operation.state">{{
-                  $t(operationLabel(operation.state))
+                  $t(operationStatusKey(operation))
                 }}</strong>
+                <code v-if="operation.agentUpgradeTargetVersion">{{
+                  operation.agentUpgradeTargetVersion
+                }}</code>
               </td>
               <td>
                 <code v-if="operation.nodeId">{{
@@ -262,7 +262,11 @@ onBeforeUnmount(() => {
         </div>
         <div>
           <dt>{{ $t("state") }}</dt>
-          <dd>{{ $t(operationLabel(selectedOperation.state)) }}</dd>
+          <dd>{{ $t(operationStatusKey(selectedOperation)) }}</dd>
+        </div>
+        <div v-if="selectedOperation.agentUpgradeTargetVersion">
+          <dt>{{ $t("targetVersion") }}</dt>
+          <dd>{{ selectedOperation.agentUpgradeTargetVersion }}</dd>
         </div>
         <div>
           <dt>{{ $t("operationNode") }}</dt>

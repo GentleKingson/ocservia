@@ -106,6 +106,45 @@ func AttachProof(envelope *agentv1.CommandEnvelope, result *agentv1.CommandResul
 	return nil
 }
 
+// UpgradeResultProof signs the root-owned durable upgrade evidence used by
+// telemetry integration tests.
+func UpgradeResultProof(nodeID, operationID uuid.UUID, targetVersion string, packageSHA256, resultSHA256 []byte, state string, completedAt time.Time, privateKey ed25519.PrivateKey) (*agentv1.AgentUpgradeResultProof, error) {
+	return UpgradeResultProofAttestingAt(nodeID, operationID, targetVersion, packageSHA256, resultSHA256, state, completedAt, time.Now().UTC(), privateKey)
+}
+
+// UpgradeResultProofAttestingAt mirrors the production signing model: the
+// proof is signed at attestation time, which may be long after the durable
+// effect completed (for example across a privd key rotation).
+func UpgradeResultProofAttestingAt(nodeID, operationID uuid.UUID, targetVersion string, packageSHA256, resultSHA256 []byte, state string, completedAt, attestedAt time.Time, privateKey ed25519.PrivateKey) (*agentv1.AgentUpgradeResultProof, error) {
+	if nodeID.Version() != 7 || operationID.Version() != 7 || len(packageSHA256) != sha256.Size || len(resultSHA256) != sha256.Size || completedAt.IsZero() || completedAt.UnixMilli() < 0 || attestedAt.Before(completedAt) {
+		return nil, fmt.Errorf("upgrade result fixture is incomplete")
+	}
+	var outcome agentv1.AgentUpgradeOutcomeState
+	switch state {
+	case "succeeded":
+		outcome = agentv1.AgentUpgradeOutcomeState_AGENT_UPGRADE_OUTCOME_STATE_SUCCEEDED
+	case "failed":
+		outcome = agentv1.AgentUpgradeOutcomeState_AGENT_UPGRADE_OUTCOME_STATE_FAILED
+	case "rolled_back":
+		outcome = agentv1.AgentUpgradeOutcomeState_AGENT_UPGRADE_OUTCOME_STATE_ROLLED_BACK
+	default:
+		return nil, fmt.Errorf("upgrade result fixture state is invalid")
+	}
+	proof := &agentv1.AgentUpgradeResultProof{
+		Version: agentv1.PrivdReceiptVersion_PRIVD_RECEIPT_VERSION_V1,
+		NodeId:  nodeID[:], PrivdAttestationKeyId: privdattestation.PublicKeyID(privateKey.Public().(ed25519.PublicKey)),
+		OperationId: operationID[:], TargetVersion: targetVersion, PackageSha256: append([]byte(nil), packageSHA256...),
+		State: outcome, CompletedUnixMs: uint64(completedAt.UnixMilli()), ResultSha256: append([]byte(nil), resultSHA256...),
+		AttestedUnixMs: uint64(attestedAt.UnixMilli()),
+	}
+	canonical, err := privdattestation.CanonicalAgentUpgradeResultProofV1(proof)
+	if err != nil {
+		return nil, err
+	}
+	proof.Signature = ed25519.Sign(privateKey, canonical)
+	return proof, nil
+}
+
 func certificateBinding(envelope *agentv1.CommandEnvelope, result *agentv1.CommandResult, effect []byte) (*agentv1.PrivdCertificateReceiptBindingV1, error) {
 	switch request := envelope.GetPayload().(type) {
 	case *agentv1.CommandEnvelope_CertificateCsr:
@@ -163,6 +202,8 @@ func commandKind(envelope *agentv1.CommandEnvelope) agentv1.PrivilegedCommandKin
 		return agentv1.PrivilegedCommandKind_PRIVILEGED_COMMAND_KIND_CERTIFICATE_P12
 	case *agentv1.CommandEnvelope_CertificateRevoke:
 		return agentv1.PrivilegedCommandKind_PRIVILEGED_COMMAND_KIND_CERTIFICATE_REVOKE
+	case *agentv1.CommandEnvelope_AgentUpgrade:
+		return agentv1.PrivilegedCommandKind_PRIVILEGED_COMMAND_KIND_AGENT_UPGRADE
 	default:
 		return agentv1.PrivilegedCommandKind_PRIVILEGED_COMMAND_KIND_UNSPECIFIED
 	}
@@ -183,6 +224,8 @@ func resultKind(envelope *agentv1.CommandEnvelope, result *agentv1.CommandResult
 		return agentv1.PrivilegedResultKind_PRIVILEGED_RESULT_KIND_CERTIFICATE_P12
 	case agentv1.PrivilegedCommandKind_PRIVILEGED_COMMAND_KIND_CERTIFICATE_REVOKE:
 		return agentv1.PrivilegedResultKind_PRIVILEGED_RESULT_KIND_CERTIFICATE_REVOKE
+	case agentv1.PrivilegedCommandKind_PRIVILEGED_COMMAND_KIND_AGENT_UPGRADE:
+		return agentv1.PrivilegedResultKind_PRIVILEGED_RESULT_KIND_AGENT_UPGRADE_SCHEDULED
 	default:
 		return agentv1.PrivilegedResultKind_PRIVILEGED_RESULT_KIND_MUTATION
 	}

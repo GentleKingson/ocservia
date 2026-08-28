@@ -19,6 +19,7 @@ import (
 	"github.com/GentleKingson/ocservia/control-plane/internal/commandauth"
 	"github.com/GentleKingson/ocservia/control-plane/internal/commandlimit"
 	"github.com/GentleKingson/ocservia/control-plane/internal/semanticpayload"
+	"github.com/GentleKingson/ocservia/control-plane/internal/telemetry"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -32,6 +33,7 @@ var (
 	ErrStaleRevision       = errors.New("resource revision is stale")
 	ErrNodeUnavailable     = errors.New("node is unavailable")
 	ErrConfigApplyActive   = errors.New("a configuration apply is already active for this node")
+	ErrUpgradeActive       = errors.New("an agent upgrade is already active for this node")
 	ErrCapabilityMissing   = errors.New("node capability is unavailable")
 	ErrTargetNotObserved   = errors.New("target is not present in observed state")
 	ErrBacklogExceeded     = commandlimit.ErrBacklogExceeded
@@ -98,6 +100,7 @@ type CreateRequest struct {
 	TargetVersion       string
 	PackageSHA256       []byte
 	Architecture        string
+	FromVersion         string
 	SessionID           string
 	BootID              string
 	IP                  string
@@ -141,6 +144,8 @@ type Operation struct {
 	CommandID              *string    `json:"command_id,omitempty"`
 	ConfigApplyState       string     `json:"config_apply_state,omitempty"`
 	ConfigApplyFailureCode string     `json:"config_apply_failure_code,omitempty"`
+	AgentUpgradeState      string     `json:"agent_upgrade_state,omitempty"`
+	AgentUpgradeTarget     string     `json:"agent_upgrade_target_version,omitempty"`
 	Version                int64      `json:"version"`
 	CreatedAt              time.Time  `json:"created_at"`
 	UpdatedAt              time.Time  `json:"updated_at"`
@@ -175,11 +180,18 @@ type QueueMetrics struct {
 	ConfigFailedCritical int64   `json:"config_failed_critical_total"`
 }
 
+// defaultAgentUpgradeReconcileTimeout bounds the whole scheduled-upgrade
+// lifecycle: after it elapses without conclusive evidence the reconciliation
+// loop must move the operation to a terminal unknown instead of waiting
+// forever.
+const defaultAgentUpgradeReconcileTimeout = 30 * time.Minute
+
 type Service struct {
-	pool         *pgxpool.Pool
-	now          func() time.Time
-	commandLimit int
-	signer       *commandauth.Signer
+	pool                      *pgxpool.Pool
+	now                       func() time.Time
+	commandLimit              int
+	signer                    *commandauth.Signer
+	agentUpgradeReconcileTime time.Duration
 }
 
 func New(pool *pgxpool.Pool) *Service {
@@ -187,7 +199,7 @@ func New(pool *pgxpool.Pool) *Service {
 }
 
 func NewWithConcurrency(pool *pgxpool.Pool, commandLimit int) *Service {
-	return &Service{pool: pool, now: func() time.Time { return time.Now().UTC() }, commandLimit: commandLimit}
+	return &Service{pool: pool, now: func() time.Time { return time.Now().UTC() }, commandLimit: commandLimit, agentUpgradeReconcileTime: defaultAgentUpgradeReconcileTimeout}
 }
 
 // NewWithSigner configures command issuance with an end-to-end Controller signer.
@@ -195,6 +207,16 @@ func NewWithSigner(pool *pgxpool.Pool, commandLimit int, signer *commandauth.Sig
 	service := NewWithConcurrency(pool, commandLimit)
 	service.signer = signer
 	return service
+}
+
+// SetAgentUpgradeReconcileTimeout installs the bounded single-node upgrade
+// reconciliation window. Values outside 1m..24h are refused.
+func (s *Service) SetAgentUpgradeReconcileTimeout(value time.Duration) error {
+	if value < time.Minute || value > 24*time.Hour {
+		return errors.New("agent upgrade reconcile timeout must be between 1m and 24h")
+	}
+	s.agentUpgradeReconcileTime = value
+	return nil
 }
 
 func (s *Service) CreateSynthetic(ctx context.Context, request CreateRequest) (Operation, bool, error) {
@@ -349,11 +371,32 @@ func (s *Service) CreateSynthetic(ctx context.Context, request CreateRequest) (O
 		request.ApprovalRequestHash = approvalHash
 	}
 	if request.Kind == AgentUpgrade {
+		var observedVersion string
+		err := tx.QueryRow(ctx, `SELECT agent_version FROM node_observed_snapshots WHERE node_id=$1 FOR UPDATE`, request.NodeID).Scan(&observedVersion)
+		if errors.Is(err, pgx.ErrNoRows) {
+			observedVersion = ""
+		} else if err != nil {
+			return Operation{}, false, fmt.Errorf("read observed agent version: %w", err)
+		}
+		if telemetry.ClassifyAgentVersion(observedVersion, request.TargetVersion) != telemetry.AgentVersionStateUpgradeAvailable {
+			return Operation{}, false, ErrStaleRevision
+		}
+		request.FromVersion = observedVersion
 		approvalHash, _ := approvals.AgentUpgradeBinding(request.NodeID, request.TargetVersion, request.PackageSHA256, request.Architecture)
 		if err := approvals.ConsumeBound(ctx, tx, request.ApprovalID, workspaceID, request.ActorIdentityID, request.Action, "node", request.NodeID, approvalHash); err != nil {
 			return Operation{}, false, err
 		}
 		request.ApprovalRequestHash = approvalHash
+		// The release identity is approved; only one scheduled upgrade may
+		// advance per node, so a second concurrent attempt fails closed
+		// before any durable intent is written.
+		var upgradeActive bool
+		if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM agent_upgrade_operations WHERE node_id=$1 AND completed_at IS NULL AND state IN ('queued','accepted','running','unknown'))`, request.NodeID).Scan(&upgradeActive); err != nil {
+			return Operation{}, false, fmt.Errorf("check active agent upgrade: %w", err)
+		}
+		if upgradeActive {
+			return Operation{}, false, ErrUpgradeActive
+		}
 	}
 
 	operationID, commandID, outboxID, auditID, eventID, err := newIDs(5)
@@ -422,6 +465,12 @@ func (s *Service) CreateSynthetic(ctx context.Context, request CreateRequest) (O
 			return Operation{}, false, fmt.Errorf("insert certificate artifact operation: %w", err)
 		}
 	}
+	if request.Kind == AgentUpgrade {
+		if _, err := tx.Exec(ctx, `INSERT INTO agent_upgrade_operations(operation_id,workspace_id,node_id,target_version,package_sha256,architecture,from_version,approval_id,state,created_at,updated_at)
+			VALUES($1,$2,$3,$4,$5,$6,$7,$8,'queued',$9,$9)`, operationID, workspaceID, request.NodeID, request.TargetVersion, request.PackageSHA256, request.Architecture, request.FromVersion, optionalUUID(request.ApprovalID), now); err != nil {
+			return Operation{}, false, fmt.Errorf("insert agent upgrade operation: %w", err)
+		}
+	}
 	if _, err := tx.Exec(ctx, `
 		INSERT INTO commands (id, operation_id, workspace_id, node_id, state, payload_type, envelope, idempotency_key, expected_version, traceparent, expires_at, created_at, updated_at)
 		VALUES ($1,$2,$3,$4,'queued',$5,$6,$7,$8,$9,$10,$11,$11)`,
@@ -448,6 +497,9 @@ func (s *Service) CreateSynthetic(ctx context.Context, request CreateRequest) (O
 	if request.Kind == ConfigApply {
 		auditSummary, _ = json.Marshal(map[string]any{"plan_id": request.ApplyMetadata.PlanID, "candidate_hash": fmt.Sprintf("%x", request.CandidateHash), "previous_hash": fmt.Sprintf("%x", request.ExpectedCurrentHash), "desired_revision": request.DesiredRevision})
 	}
+	if request.Kind == AgentUpgrade {
+		auditSummary, _ = json.Marshal(map[string]any{"from_version": request.FromVersion, "target_version": request.TargetVersion, "architecture": request.Architecture, "package_sha256": fmt.Sprintf("%x", request.PackageSHA256)})
+	}
 	if err := audit.AppendChain(ctx, tx, audit.ChainRecord{EventID: auditID, WorkspaceID: workspaceID, ActorType: "user", ActorID: actorID, SessionID: optionalUUID(request.ActorSessionID), Action: action, ResourceType: "operation", ResourceID: operationID, NodeID: &request.NodeID, CommandID: &commandID, ApprovalID: optionalUUID(request.ApprovalID), RequestID: request.RequestID, TraceID: traceID(request.Traceparent), Reason: reason, AfterSummary: auditSummary, At: now}); err != nil {
 		return Operation{}, false, fmt.Errorf("append operation audit intent: %w", err)
 	}
@@ -462,11 +514,15 @@ func (s *Service) CreateSynthetic(ctx context.Context, request CreateRequest) (O
 	if request.Kind == ConfigApply {
 		operation.ConfigApplyState = "queued"
 	}
+	if request.Kind == AgentUpgrade {
+		operation.AgentUpgradeState = "queued"
+		operation.AgentUpgradeTarget = request.TargetVersion
+	}
 	return operation, false, nil
 }
 
 func (s *Service) Get(ctx context.Context, id uuid.UUID) (Operation, error) {
-	return scanOperation(s.pool.QueryRow(ctx, `SELECT o.id::text,o.state,o.node_id::text,o.command_id::text,o.version,o.created_at,o.updated_at,o.expires_at,COALESCE(x.state,''),COALESCE(x.failure_code,'') FROM operations o LEFT JOIN config_apply_operations x ON x.operation_id=o.id WHERE o.id=$1`, id))
+	return scanOperation(s.pool.QueryRow(ctx, `SELECT o.id::text,o.state,o.node_id::text,o.command_id::text,o.version,o.created_at,o.updated_at,o.expires_at,COALESCE(x.state,''),COALESCE(x.failure_code,''),COALESCE(u.state,''),COALESCE(u.target_version,'') FROM operations o LEFT JOIN config_apply_operations x ON x.operation_id=o.id LEFT JOIN agent_upgrade_operations u ON u.operation_id=o.id WHERE o.id=$1`, id))
 }
 
 func (s *Service) ListEvents(ctx context.Context, operationID, after uuid.UUID, limit int) ([]Event, error) {
@@ -946,6 +1002,10 @@ func (s *Service) reconcileExpiredSendingAttemptsTx(ctx context.Context, tx pgx.
 		  AND attempt.state='sending' AND attempt.finished_at IS NULL
 		  AND command.state IN ('queued','unknown')
 		  AND operation.state IN ('queued','unknown')
+		  AND NOT (command.payload_type='agent_upgrade' AND EXISTS(
+			SELECT 1 FROM agent_command_results AS result
+			WHERE result.command_id=command.id AND result.state='succeeded'
+			  AND result.receipt_verification_status='verified'))
 		  AND outbox.published_at IS NULL AND outbox.locked_by=lease.worker_id
 		ORDER BY lease.leased_until,command.id
 		LIMIT $1
@@ -997,6 +1057,10 @@ func (s *Service) reconcileExpiredSendingAttemptsTx(ctx context.Context, tx pgx.
 			  AND attempt.state='sending' AND attempt.finished_at IS NULL
 			  AND command.state IN ('queued','unknown')
 			  AND operation.state IN ('queued','unknown')
+			  AND NOT (command.payload_type='agent_upgrade' AND EXISTS(
+				SELECT 1 FROM agent_command_results AS result
+				WHERE result.command_id=command.id AND result.state='succeeded'
+				  AND result.receipt_verification_status='verified'))
 			  AND outbox.published_at IS NULL AND outbox.locked_by=lease.worker_id
 			FOR UPDATE OF command,operation`, commandID).
 			Scan(&operationID, &nodeID, &encoded, &outboxID, &attemptID, &commandState, &operationState, &attempts)
@@ -1136,6 +1200,10 @@ func (s *Service) reconcileStaleSentCommandsTx(ctx context.Context, tx pgx.Tx) e
 		) AS attempt ON true
 		WHERE command.state IN ('dispatched','accepted','running')
 		  AND operation.state IN ('dispatched','accepted','running','unknown')
+		  AND NOT (command.payload_type='agent_upgrade' AND EXISTS(
+			SELECT 1 FROM agent_command_results AS result
+			WHERE result.command_id=command.id AND result.state='succeeded'
+			  AND result.receipt_verification_status='verified'))
 		  AND outbox.published_at IS NOT NULL AND outbox.locked_by IS NULL
 		  AND attempt.state='sent'
 		  AND attempt.attempt_number=outbox.attempts
@@ -1189,6 +1257,10 @@ func (s *Service) reconcileStaleSentCommandsTx(ctx context.Context, tx pgx.Tx) e
 			WHERE command.id=$1
 			  AND command.state IN ('dispatched','accepted','running')
 			  AND operation.state IN ('dispatched','accepted','running','unknown')
+			  AND NOT (command.payload_type='agent_upgrade' AND EXISTS(
+				SELECT 1 FROM agent_command_results AS result
+				WHERE result.command_id=command.id AND result.state='succeeded'
+				  AND result.receipt_verification_status='verified'))
 			  AND outbox.published_at IS NOT NULL AND outbox.locked_by IS NULL
 			  AND attempt.state='sent'
 			  AND attempt.attempt_number=outbox.attempts
@@ -1211,6 +1283,15 @@ func (s *Service) reconcileStaleSentCommandsTx(ctx context.Context, tx pgx.Tx) e
 			!bytes.Equal(envelope.GetOperationId(), operationID[:]) ||
 			!bytes.Equal(envelope.GetNodeId(), nodeID[:]) {
 			return fmt.Errorf("sent command %s with missing result has inconsistent identity", commandID)
+		}
+		if envelope.GetAgentUpgrade() != nil {
+			acked, err := agentUpgradeSchedulingAcked(ctx, tx, operationID)
+			if err != nil {
+				return err
+			}
+			if acked {
+				continue
+			}
 		}
 
 		expires := envelope.GetExpiresAt()
@@ -1344,6 +1425,15 @@ func (s *Service) continueStaleReconciliationsTx(ctx context.Context, tx pgx.Tx)
 			!bytes.Equal(envelope.GetOperationId(), candidate.operationID[:]) ||
 			!bytes.Equal(envelope.GetNodeId(), candidate.nodeID[:]) {
 			return fmt.Errorf("stale reconciliation command %s has inconsistent identity", candidate.commandID)
+		}
+		if envelope.GetAgentUpgrade() != nil {
+			acked, err := agentUpgradeSchedulingAcked(ctx, tx, candidate.operationID)
+			if err != nil {
+				return err
+			}
+			if acked {
+				continue
+			}
 		}
 		if envelope.GetDeliveryMode() != agentv1.CommandDeliveryMode_COMMAND_DELIVERY_MODE_RECONCILE_ONLY {
 			continue
@@ -1777,7 +1867,10 @@ func capabilityFor(kind SyntheticKind) string {
 	case CertificateRevoke:
 		return "ocserv.certificate.revoke"
 	case AgentUpgrade:
-		return "ocserv.agent.upgrade.v1"
+		// v2 is fence-capable: the source runner executes the upgrade with
+		// the execution-time downgrade fence and installation commit record.
+		// Scheduling from a v1-only node would run the first hop unprotected.
+		return "ocserv.agent.upgrade.v2"
 	default:
 		return ""
 	}
@@ -1801,11 +1894,11 @@ func validDNSName(value string) bool {
 }
 
 func findIdempotent(ctx context.Context, tx pgx.Tx, workspaceID uuid.UUID, key string, hash []byte) (Operation, bool, error) {
-	row := tx.QueryRow(ctx, `SELECT o.id::text,o.state,o.node_id::text,o.command_id::text,o.version,o.created_at,o.updated_at,o.expires_at,o.request_hash=$3,COALESCE(x.state,''),COALESCE(x.failure_code,'') FROM operations o LEFT JOIN config_apply_operations x ON x.operation_id=o.id WHERE o.workspace_id=$1 AND o.idempotency_key=$2`, workspaceID, key, hash)
+	row := tx.QueryRow(ctx, `SELECT o.id::text,o.state,o.node_id::text,o.command_id::text,o.version,o.created_at,o.updated_at,o.expires_at,o.request_hash=$3,COALESCE(x.state,''),COALESCE(x.failure_code,''),COALESCE(u.state,''),COALESCE(u.target_version,'') FROM operations o LEFT JOIN config_apply_operations x ON x.operation_id=o.id LEFT JOIN agent_upgrade_operations u ON u.operation_id=o.id WHERE o.workspace_id=$1 AND o.idempotency_key=$2`, workspaceID, key, hash)
 	var op Operation
 	var nodeID, commandID *string
 	var same bool
-	err := row.Scan(&op.ID, &op.State, &nodeID, &commandID, &op.Version, &op.CreatedAt, &op.UpdatedAt, &op.ExpiresAt, &same, &op.ConfigApplyState, &op.ConfigApplyFailureCode)
+	err := row.Scan(&op.ID, &op.State, &nodeID, &commandID, &op.Version, &op.CreatedAt, &op.UpdatedAt, &op.ExpiresAt, &same, &op.ConfigApplyState, &op.ConfigApplyFailureCode, &op.AgentUpgradeState, &op.AgentUpgradeTarget)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Operation{}, false, nil
 	}
@@ -1820,7 +1913,7 @@ func findIdempotent(ctx context.Context, tx pgx.Tx, workspaceID uuid.UUID, key s
 func scanOperation(row pgx.Row) (Operation, error) {
 	var op Operation
 	var nodeID, commandID *string
-	err := row.Scan(&op.ID, &op.State, &nodeID, &commandID, &op.Version, &op.CreatedAt, &op.UpdatedAt, &op.ExpiresAt, &op.ConfigApplyState, &op.ConfigApplyFailureCode)
+	err := row.Scan(&op.ID, &op.State, &nodeID, &commandID, &op.Version, &op.CreatedAt, &op.UpdatedAt, &op.ExpiresAt, &op.ConfigApplyState, &op.ConfigApplyFailureCode, &op.AgentUpgradeState, &op.AgentUpgradeTarget)
 	if err != nil {
 		return Operation{}, err
 	}

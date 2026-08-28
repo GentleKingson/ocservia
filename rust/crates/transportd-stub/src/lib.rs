@@ -414,6 +414,8 @@ fn new_telemetry_event(
             boot_id: "capacity-boot".to_owned(),
             agent_instance_id: agent_instance_id.as_bytes().to_vec(),
             agent_version: env!("CARGO_PKG_VERSION").to_owned(),
+            upgrade_results: Vec::new(),
+            architecture: "amd64".to_owned(),
             ocserv_version: "1.3.0".to_owned(),
             os_release: "capacity-simulator".to_owned(),
             ocserv_json: br#"{"status":"running","sessions":1}"#.to_vec(),

@@ -173,9 +173,12 @@ func TestControlledOperationsRequireApprovedCapabilityAndObservedTargetIntegrati
 }
 
 func TestAgentUpgradeApprovalBindsExactReleaseIdentityIntegration(t *testing.T) {
-	service, pool, workspaceID, nodeID := integrationService(t)
+	// The fixture stages an older observed agent version: the authoritative
+	// creation fence reads it, and its cleanup drops the upgrade family rows
+	// that restrict the shared operations cleanup.
+	service, pool, workspaceID, nodeID := upgradeReconciliationFixture(t)
 	ctx := context.Background()
-	if _, err := pool.Exec(ctx, `INSERT INTO node_capabilities(node_id,capability,approved) VALUES($1,'ocserv.agent.upgrade.v1',true)`, nodeID); err != nil {
+	if _, err := pool.Exec(ctx, `INSERT INTO node_capabilities(node_id,capability,approved) VALUES($1,'ocserv.agent.upgrade.v2',true)`, nodeID); err != nil {
 		t.Fatal(err)
 	}
 	base := CreateRequest{NodeID: nodeID, IdempotencyKey: "upgrade-exact", ExpectedVersion: 1, Kind: AgentUpgrade, ActorID: "operator", Action: "agent.upgrade", Reason: "integration test", TargetVersion: "1.2.3", PackageSHA256: bytes.Repeat([]byte{0x43}, 32), Architecture: "amd64", TTL: time.Minute, RequestID: "request-upgrade", Traceparent: testTraceparent}
@@ -237,6 +240,20 @@ func TestAgentUpgradeApprovalBindsExactReleaseIdentityIntegration(t *testing.T) 
 	}
 	if _, _, err := service.CreateSynthetic(ctx, generic); !errors.Is(err, approvals.ErrNotReady) {
 		t.Fatalf("action-level approval error = %v", err)
+	}
+}
+
+func TestAgentUpgradeAuthoritativeVersionFenceIntegration(t *testing.T) {
+	service, pool, workspaceID, nodeID := integrationService(t)
+	ctx := context.Background()
+	observeUpgradeNode(t, pool, nodeID, "2.1.0", 0)
+	if _, err := pool.Exec(ctx, `INSERT INTO node_capabilities(node_id,capability,approved) VALUES($1,'ocserv.agent.upgrade.v2',true)`, nodeID); err != nil {
+		t.Fatal(err)
+	}
+	request := CreateRequest{NodeID: nodeID, IdempotencyKey: "upgrade-authoritative-fence", ExpectedVersion: 1, Kind: AgentUpgrade, ActorID: "operator", Action: "agent.upgrade", Reason: "integration test", TargetVersion: "2.0.0", PackageSHA256: bytes.Repeat([]byte{0x43}, 32), Architecture: "amd64", TTL: time.Minute, RequestID: "request-authoritative-fence", Traceparent: testTraceparent}
+	approveOperation(t, pool, workspaceID, &request)
+	if _, _, err := service.CreateSynthetic(ctx, request); !errors.Is(err, ErrStaleRevision) {
+		t.Fatalf("target older than authoritative observed version error = %v", err)
 	}
 }
 

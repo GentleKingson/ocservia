@@ -659,6 +659,44 @@ paths:
         "415": { $ref: "#/components/responses/UnsupportedMediaType" }
         default:
           $ref: "#/components/responses/Problem"
+  /nodes/{node_id}/agent-upgrade:
+    post:
+      operationId: upgradeNodeAgent
+      summary: Start one reconciled single-node agent upgrade
+      description: >-
+        Creates an agent upgrade operation whose package identity resolves
+        server-side from the trusted release catalog for the node's observed
+        architecture. The browser never supplies a digest, URL, or path. The
+        scheduling acknowledgement is not success: the operation reaches a
+        terminal state only through reconciliation of the durable local
+        outcome, node freshness, and the observed target version.
+      tags: [operations]
+      parameters:
+        - $ref: "#/components/parameters/NodeId"
+        - $ref: "#/components/parameters/IdempotencyKey"
+        - $ref: "#/components/parameters/IfMatch"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AgentUpgradeRequest"
+      responses:
+        "202":
+          $ref: "#/components/responses/OperationAccepted"
+        "400":
+          $ref: "#/components/responses/Problem"
+        "401":
+          $ref: "#/components/responses/Problem"
+        "403":
+          $ref: "#/components/responses/Problem"
+        "404":
+          $ref: "#/components/responses/Problem"
+        "409":
+          $ref: "#/components/responses/Problem"
+        "415": { $ref: "#/components/responses/UnsupportedMediaType" }
+        default:
+          $ref: "#/components/responses/Problem"
   /nodes/{node_id}/telemetry:
     get:
       operationId: listNodeTelemetry
@@ -1653,6 +1691,15 @@ components:
           type: string
           minLength: 1
           maxLength: 128
+        agent_upgrade_state:
+          type: string
+          enum: [queued, accepted, running, succeeded, failed, rolled_back, unknown]
+          description: Reconciled single-node upgrade outcome when this operation upgrades the node agent.
+        agent_upgrade_target_version:
+          type: string
+          minLength: 1
+          maxLength: 128
+          description: Trusted target agent version of this upgrade operation.
         version:
           type: integer
           format: int64
@@ -1711,6 +1758,28 @@ components:
           minimum: 1
           maximum: 300
           default: 60
+      description: expected_version is required unless If-Match supplies the same revision.
+    AgentUpgradeRequest:
+      type: object
+      additionalProperties: false
+      required: [target_version, approval_id, reason]
+      properties:
+        target_version:
+          type: string
+          minLength: 5
+          maxLength: 128
+          description: Semantic version of the trusted release; the digest resolves server-side.
+        approval_id:
+          $ref: "#/components/schemas/UuidV7"
+        reason: { type: string, minLength: 1, maxLength: 512 }
+        expected_version: { type: integer, format: int64, minimum: 1 }
+        ttl_seconds:
+          type: integer
+          format: int64
+          minimum: 60
+          maximum: 3600
+          default: 300
+          description: Bounded dispatch and scheduling acknowledgement window; the restart and reconciliation windows are separate and server-owned.
       description: expected_version is required unless If-Match supplies the same revision.
     DesiredMutationRequest:
       type: object
@@ -2388,6 +2457,17 @@ components:
           type: string
           enum: [current, upgrade_available, ahead, unsupported, unknown]
         recommended_agent_version: { type: string, minLength: 1, maxLength: 128 }
+        architecture:
+          type: string
+          enum: [amd64, arm64, ""]
+          description: Node package architecture reported by the agent heartbeat.
+        agent_upgrade_eligible:
+          type: boolean
+          description: >-
+            Read-time derivation gating the single-node upgrade workflow:
+            upgrade_available version state, online fresh node with the
+            approved upgrade capability, a trusted release for its
+            architecture, and no conflicting active upgrade.
         ocserv_version: { type: string, minLength: 1, maxLength: 128 }
         os_release: { type: string, minLength: 1, maxLength: 128 }
         ocserv: { type: object, additionalProperties: true }
@@ -2605,6 +2685,16 @@ components:
             role: { type: string, enum: [SecurityAdmin, PlatformAdmin] }
             resource_type: { type: string, enum: [workspace, node, resource, secret_ref, certificate, config_plan, batch_operation, role_binding] }
             resource_id: { $ref: "#/components/schemas/UuidV7" }
+        agent_upgrade:
+          type: object
+          additionalProperties: false
+          required: [target_version]
+          properties:
+            target_version:
+              type: string
+              minLength: 5
+              maxLength: 128
+              description: The approval binds this version plus the server-resolved package digest and architecture.
     ApprovalDecision:
       type: object
       additionalProperties: false

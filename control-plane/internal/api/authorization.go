@@ -242,6 +242,8 @@ func routeAction(r *http.Request) string {
 		return "ip_ban.remove"
 	case strings.HasSuffix(path, "/service:reload"):
 		return "service.reload"
+	case r.Method == http.MethodPost && strings.HasSuffix(path, "/agent-upgrade"):
+		return "agent.upgrade"
 	case strings.HasSuffix(path, "/apply") && strings.Contains(path, "/config-plans/"):
 		return "config.apply"
 	case strings.HasSuffix(path, ":disable"), strings.HasSuffix(path, ":enable"), strings.HasSuffix(path, ":rotate-password"), strings.HasSuffix(path, "/users"):

@@ -97,6 +97,10 @@ func (s *Service) RecoverAmbiguousDispatchedTx(ctx context.Context, tx pgx.Tx, r
 		WHERE command.node_id=$1
 		  AND command.state IN ('dispatched','accepted','running','unknown')
 		  AND operation.state IN ('dispatched','accepted','running','unknown')
+		  AND NOT (command.payload_type='agent_upgrade' AND EXISTS(
+			SELECT 1 FROM agent_command_results AS result
+			WHERE result.command_id=command.id AND result.state='succeeded'
+			  AND result.receipt_verification_status='verified'))
 		  AND outbox.published_at IS NOT NULL
 		  AND outbox.locked_by IS NULL
 		  AND NOT EXISTS(SELECT 1 FROM node_command_leases AS lease WHERE lease.command_id=command.id)
@@ -138,6 +142,10 @@ func (s *Service) RecoverAmbiguousDispatchedTx(ctx context.Context, tx pgx.Tx, r
 			WHERE command.id=$1 AND command.node_id=$2
 			  AND command.state IN ('dispatched','accepted','running','unknown')
 			  AND operation.state IN ('dispatched','accepted','running','unknown')
+			  AND NOT (command.payload_type='agent_upgrade' AND EXISTS(
+				SELECT 1 FROM agent_command_results AS result
+				WHERE result.command_id=command.id AND result.state='succeeded'
+				  AND result.receipt_verification_status='verified'))
 			  AND outbox.published_at IS NOT NULL AND outbox.locked_by IS NULL
 			  AND NOT EXISTS(SELECT 1 FROM node_command_leases AS lease WHERE lease.command_id=command.id)
 			FOR UPDATE OF command,operation`, candidate.commandID, reconnect.NodeID).
@@ -160,6 +168,15 @@ func (s *Service) RecoverAmbiguousDispatchedTx(ctx context.Context, tx pgx.Tx, r
 		// outage ambiguity, even when its result is still in flight.
 		if dispatchedOnAuthority(&envelope, candidate.commandID, reconnect.NodeID, authority) {
 			continue
+		}
+		if envelope.GetAgentUpgrade() != nil {
+			acked, err := agentUpgradeSchedulingAcked(ctx, tx, operationID)
+			if err != nil {
+				return 0, err
+			}
+			if acked {
+				continue
+			}
 		}
 
 		payload, expiresAt, err := PrepareRecoveryEnvelope(&envelope, agentv1.CommandDeliveryMode_COMMAND_DELIVERY_MODE_RECONCILE_ONLY, reconnect.ObservedAt, s.signer)
@@ -350,6 +367,15 @@ func dispatchedOnAuthority(envelope *agentv1.CommandEnvelope, commandID, nodeID 
 }
 
 func markRecoveryProjectionUnknown(ctx context.Context, tx pgx.Tx, operationID uuid.UUID, envelope *agentv1.CommandEnvelope, observedAt time.Time) error {
+	if envelope.GetAgentUpgrade() != nil {
+		acked, err := agentUpgradeSchedulingAcked(ctx, tx, operationID)
+		if err != nil {
+			return err
+		}
+		if acked {
+			return nil
+		}
+	}
 	if envelope.GetConfigApply() != nil {
 		if _, err := tx.Exec(ctx, `UPDATE config_apply_operations SET state='unknown',updated_at=$2
 			WHERE operation_id=$1 AND state IN ('queued','dispatched','accepted','running','unknown')`, operationID, observedAt); err != nil {
@@ -379,4 +405,18 @@ func markRecoveryProjectionUnknown(ctx context.Context, tx pgx.Tx, operationID u
 		}
 	}
 	return nil
+}
+
+func agentUpgradeSchedulingAcked(ctx context.Context, tx pgx.Tx, operationID uuid.UUID) (bool, error) {
+	var acked bool
+	if err := tx.QueryRow(ctx, `SELECT EXISTS(
+		SELECT 1
+		FROM commands AS command
+		JOIN agent_command_results AS result ON result.command_id=command.id
+		WHERE command.operation_id=$1 AND command.payload_type='agent_upgrade'
+		  AND result.state='succeeded' AND result.receipt_verification_status='verified'
+	)`, operationID).Scan(&acked); err != nil {
+		return false, fmt.Errorf("check agent upgrade scheduling acknowledgement: %w", err)
+	}
+	return acked, nil
 }

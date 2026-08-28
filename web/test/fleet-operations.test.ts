@@ -9,6 +9,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   createUser,
   disconnectSession,
+  upgradeNodeAgent,
   getNode,
   getOperation,
   listNodeIpBans,
@@ -37,6 +38,7 @@ vi.mock("../src/api/client", () => ({
   removeIpBan: vi.fn(),
   rotateUserPassword: vi.fn(),
   terminateSession: vi.fn(),
+  upgradeNodeAgent: vi.fn(),
   workspaceContext: vi.fn().mockReturnValue({ id: "workspace", generation: 1 }),
   workspaceChangedEvent: "ocservia:workspace-changed",
 }));
@@ -101,6 +103,7 @@ describe("controlled fleet operations", () => {
     vi.mocked(listNodes).mockReset();
     vi.mocked(listNodeSessions).mockReset();
     vi.mocked(disconnectSession).mockReset();
+    vi.mocked(upgradeNodeAgent).mockReset();
     vi.mocked(createUser).mockReset();
     vi.mocked(workspaceContext).mockReturnValue({
       id: "workspace",
@@ -403,6 +406,60 @@ describe("controlled fleet operations", () => {
 
     expect(store.selected?.id).toBe(nodeB.id);
     expect(store.selected?.name).toBe(nodeB.name);
+    store.$dispose();
+  });
+
+  it("tracks the reconciled agent upgrade through verification to success", async () => {
+    vi.mocked(upgradeNodeAgent).mockResolvedValue(operation("accepted"));
+    vi.mocked(getOperation)
+      .mockResolvedValueOnce(operation("running"))
+      .mockResolvedValueOnce(operation("succeeded"));
+    const store = useFleetStore();
+    await store.select(node.id);
+
+    const completion = store.upgradeAgent(
+      "2.0.0",
+      "monthly maintained release",
+      "019fc0a4-6d92-765c-a8a1-4af556614c77",
+    );
+    await vi.advanceTimersByTimeAsync(0);
+    expect(upgradeNodeAgent).toHaveBeenCalledWith(
+      node,
+      "2.0.0",
+      "monthly maintained release",
+      "019fc0a4-6d92-765c-a8a1-4af556614c77",
+      expect.any(AbortSignal),
+    );
+    expect(store.latestOperation?.state).toBe("accepted");
+    await vi.advanceTimersByTimeAsync(750);
+    expect(store.latestOperation?.state).toBe("running");
+    await vi.advanceTimersByTimeAsync(750);
+    await completion;
+    expect(store.latestOperation?.state).toBe("succeeded");
+    expect(getOperation).toHaveBeenCalledTimes(2);
+    store.$dispose();
+  });
+
+  it("ends upgrade tracking on the conservative unknown outcome", async () => {
+    vi.mocked(upgradeNodeAgent).mockResolvedValue(operation("accepted"));
+    vi.mocked(getOperation)
+      .mockResolvedValueOnce(operation("unknown"))
+      .mockResolvedValueOnce(operation("failed"));
+    const store = useFleetStore();
+    await store.select(node.id);
+
+    const completion = store.upgradeAgent(
+      "2.0.0",
+      "monthly maintained release",
+      "019fc0a4-6d92-765c-a8a1-4af556614c77",
+    );
+    await vi.advanceTimersByTimeAsync(750);
+    await completion;
+
+    expect(store.latestOperation?.state).toBe("unknown");
+    // Unknown is terminal for a reconciled upgrade: no retry may be inferred.
+    expect(getOperation).toHaveBeenCalledTimes(1);
+    expect(store.operationTracking).toBe(false);
     store.$dispose();
   });
 });

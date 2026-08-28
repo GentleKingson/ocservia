@@ -179,3 +179,70 @@ boundaries, so schedule rollout and Controller signing-key enablement as one
 maintenance window. Keep both old and new public keys pinned during a
 signing-key rotation until old authorizations have expired and all Unknown
 outcomes have been reconciled.
+
+## Controller-driven single-node upgrades
+
+The console exposes one reconciled upgrade per node:
+`POST /api/v1/nodes/{node_id}/agent-upgrade` (RBAC action `agent.upgrade`,
+Operator role) accepts only a target version, an approval ID, and a reason.
+Callers never supply a URL, path, or package digest. The Controller resolves
+the digest from its operator-provisioned trusted release manifest, configured
+with `OCSERV_AGENT_RELEASE_MANIFEST` (default
+`/etc/ocservia/agent-releases.json`):
+
+```json
+{
+  "releases": [
+    {
+      "version": "1.2.3",
+      "architecture": "amd64",
+      "package_sha256": "<64 lowercase hex characters>"
+    }
+  ]
+}
+```
+
+The manifest is the only digest source for this workflow. It must contain
+between 1 and 512 unique `(version, architecture)` releases; a missing,
+unreadable, malformed, or ambiguous file fails Controller startup. There is no
+GitHub or registry synchronization: publishing a release means placing the
+signed package triple in each node's local spool and adding the exact digest
+to this file. The API additionally rejects a target that is not newer than the
+node's observed agent version, and the request must carry the node's current
+revision (`If-Match`) plus an independent approval bound to the exact
+`node + version + digest + architecture` release identity.
+
+The Controller only schedules upgrades from nodes that advertise the
+fence-capable `ocserv.agent.upgrade.v2` capability. The upgrade is executed
+by the runner that is already installed on the node, so the first
+N → N+1 hop can only be protected when that runner carries the
+execution-time downgrade fence and the installation commit record. Nodes
+still advertising `ocserv.agent.upgrade.v1` are ineligible: seed the first
+fence-capable package manually (or with the native installers), approve its
+`v2` capability, and Controller-driven upgrades start from there.
+
+The operation is created `queued`, and the agent's scheduling acknowledgement
+moves it to the non-terminal `accepted` state — an acknowledged schedule is
+never success. The node is then expected to disconnect while the upgrader
+restarts the Agent and privd; a disconnect during this window is normal
+progress, never a failure. Terminal outcomes are decided only from durable
+Controller-side evidence: success additionally requires the node to be back
+online with a fresh observation of the target agent version together with the
+upgrader's terminal local result. An explicit local failure closes the
+operation as `failed`, a matched rollback as `rolled_back`, and an operation
+that is still unresolved after the bounded reconciliation window
+(`OCSERV_AGENT_UPGRADE_RECONCILE_TIMEOUT`, default 30 minutes, accepted
+range 1 minute to 24 hours at startup) closes conservatively as `unknown`
+with its command marked expired so nothing is retried blind. Only one upgrade
+may be active per node; a second attempt fails with a conflict until the
+previous operation is terminal. Every terminal outcome appends an audit
+record covering the operator, approval identity, from/to versions, and
+outcome.
+
+The Agent reports the upgrader's terminal local outcomes read-only through a
+fixed privd query surfaced in its regular telemetry; the Controller accepts
+the first report per operation and cross-checks it against the node's
+observed version before concluding success. Nodes still running a pre-upgrade
+privd simply report no outcomes; their operations still resolve through the
+version observation, the failure and rollback paths, or the conservative
+`unknown` deadline.

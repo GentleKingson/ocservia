@@ -111,6 +111,7 @@ All URIs are relative to _/api/v1_
 | _OperationsApi_    | [**rotateNodeUserPassword**](docs/OperationsApi.md#rotatenodeuserpassword)                | **POST** /nodes/{node_id}/users/{username}:rotate-password | Queue write-only password rotation using node-sealed ciphertext                  |
 | _OperationsApi_    | [**setNodeUserPolicy**](docs/OperationsApi.md#setnodeuserpolicy)                          | **PUT** /nodes/{node_id}/users/{username}/policy           | Set byte quota and exact UTC expiry for one node-scoped user                     |
 | _OperationsApi_    | [**terminateNodeSession**](docs/OperationsApi.md#terminatenodesession)                    | **POST** /nodes/{node_id}/sessions/{session_id}:terminate  | Terminate one observed session and invalidate its reconnect cookie               |
+| _OperationsApi_    | [**upgradeNodeAgent**](docs/OperationsApi.md#upgradenodeagent)                            | **POST** /nodes/{node_id}/agent-upgrade                    | Start one reconciled single-node agent upgrade                                   |
 | _OperationsApi_    | [**watchOperationEvents**](docs/OperationsApi.md#watchoperationevents)                    | **GET** /operations/{operation_id}/events                  | Watch durable operation state changes                                            |
 | _PlatformApi_      | [**beginOIDCLogin**](docs/PlatformApi.md#beginoidclogin)                                  | **GET** /auth/login                                        | Begin OIDC Authorization Code login with PKCE S256                               |
 | _PlatformApi_      | [**completeOIDCLogin**](docs/PlatformApi.md#completeoidclogin)                            | **GET** /auth/callback                                     | Validate OIDC state, nonce, code, and ID token                                   |
@@ -124,9 +125,11 @@ All URIs are relative to _/api/v1_
 
 ### Models
 
+- [AgentUpgradeRequest](docs/AgentUpgradeRequest.md)
 - [Approval](docs/Approval.md)
 - [ApprovalDecision](docs/ApprovalDecision.md)
 - [ApprovalRequest](docs/ApprovalRequest.md)
+- [ApprovalRequestAgentUpgrade](docs/ApprovalRequestAgentUpgrade.md)
 - [ApprovalRequestCertificate](docs/ApprovalRequestCertificate.md)
 - [ApprovalRequestRoleBinding](docs/ApprovalRequestRoleBinding.md)
 - [ApprovalRequestSummary](docs/ApprovalRequestSummary.md)

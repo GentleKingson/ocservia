@@ -5,7 +5,7 @@
 use std::io;
 
 use ocservia_contracts::generated::ocserv::platform::agent::v1::{
-    ArtifactGrantV1, CommandEnvelope, PrivilegedResultProof,
+    AgentUpgradeResultProof, ArtifactGrantV1, CommandEnvelope, PrivilegedResultProof,
 };
 use prost::Message;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
@@ -47,7 +47,7 @@ pub struct PrivdRequest {
     /// One of the permanently fixed operations.
     #[prost(
         oneof = "privd_request::Operation",
-        tags = "10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43"
+        tags = "10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44"
     )]
     pub operation: Option<privd_request::Operation>,
 }
@@ -74,8 +74,8 @@ pub mod privd_request {
         ArtifactConsumeRequest, ArtifactReadRequest, CertificateCsrRequest, CertificateP12Request,
         CertificateRevokeRequest, ConfigApplyRequest, ConfigPlanRequest,
         DesiredEffectObserveRequest, GroupApplyRequest, IpBanRemoveRequest, ReadRequest,
-        ServiceReloadRequest, SessionMutationRequest, UserDisableRequest, UserEnableRequest,
-        UserSecretRequest,
+        ServiceReloadRequest, SessionMutationRequest, UpgradeResultListRequest, UserDisableRequest,
+        UserEnableRequest, UserSecretRequest,
     };
 
     /// Read-only operation allowlist.
@@ -111,6 +111,11 @@ pub mod privd_request {
         /// Read one bounded chunk under a Controller-signed artifact lease.
         #[prost(message, tag = "19")]
         ArtifactRead(ArtifactReadRequest),
+        /// Read the bounded most-recent durable agent upgrade outcomes by
+        /// operation ID. Fixed read-only evidence; no operation ID set can be
+        /// selected or influenced by the caller.
+        #[prost(message, tag = "44")]
+        UpgradeResultList(UpgradeResultListRequest),
         /// Disconnect one numeric session without invalidating its cookie.
         #[prost(message, tag = "30")]
         SessionDisconnect(SessionMutationRequest),
@@ -205,6 +210,36 @@ pub struct AgentUpgradeScheduledResult {
     pub target_version: String,
     #[prost(bytes = "vec", tag = "3")]
     pub package_sha256: Vec<u8>,
+}
+
+/// Empty marker for the fixed read-only upgrade outcome list query.
+#[derive(Clone, Copy, PartialEq, Eq, Message)]
+pub struct UpgradeResultListRequest {}
+
+/// One durable terminal upgrade outcome read from the fixed upgrader store.
+#[derive(Clone, PartialEq, Eq, Message)]
+pub struct UpgradeOperationResult {
+    #[prost(bytes = "vec", tag = "1")]
+    pub operation_id: Vec<u8>,
+    #[prost(string, tag = "2")]
+    pub state: String,
+    #[prost(string, tag = "3")]
+    pub target_version: String,
+    #[prost(uint64, tag = "4")]
+    pub completed_unix_ms: u64,
+    #[prost(string, tag = "5")]
+    pub detail: String,
+    #[prost(bytes = "vec", tag = "6")]
+    pub package_sha256: Vec<u8>,
+    #[prost(message, optional, tag = "7")]
+    pub privileged_result_proof: Option<AgentUpgradeResultProof>,
+}
+
+/// Bounded most-recent durable upgrade outcomes.
+#[derive(Clone, PartialEq, Eq, Message)]
+pub struct UpgradeResultList {
+    #[prost(message, repeated, tag = "1")]
+    pub results: Vec<UpgradeOperationResult>,
 }
 
 #[derive(Clone, PartialEq, Eq, Message)]
@@ -596,7 +631,7 @@ pub struct PrivdResponse {
     /// Exactly one stable result or error.
     #[prost(
         oneof = "privd_response::Result",
-        tags = "10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26"
+        tags = "10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27"
     )]
     pub result: Option<privd_response::Result>,
 }
@@ -609,7 +644,7 @@ pub mod privd_response {
         AgentUpgradeScheduledResult, ArtifactData, CertificateArtifactResult, CertificateCsrResult,
         CertificateRevokeResult, ConfigApplyResult, ConfigFingerprint, ConfigPlanResult,
         DesiredEffectObservation, GroupList, IpBanList, MutationResult, OcservVersion, PrivdError,
-        ServiceStatus, SessionList, UserList,
+        ServiceStatus, SessionList, UpgradeResultList, UserList,
     };
 
     /// Result allowlist.
@@ -659,6 +694,9 @@ pub mod privd_response {
         /// Scheduled agent upgrade intent accepted from a verified signed command.
         #[prost(message, tag = "26")]
         AgentUpgradeScheduled(AgentUpgradeScheduledResult),
+        /// Bounded durable agent upgrade outcomes for Controller reconciliation.
+        #[prost(message, tag = "27")]
+        UpgradeResultList(UpgradeResultList),
         /// Stable failure.
         #[prost(message, tag = "20")]
         Error(PrivdError),
@@ -829,5 +867,53 @@ mod tests {
         write_result.expect("maximum group list frame");
         let decoded = read_result.expect("decode maximum group list");
         assert_eq!(decoded, groups);
+    }
+
+    #[tokio::test]
+    async fn upgrade_result_list_round_trip() {
+        let request = PrivdRequest {
+            request_id: vec![7; 16],
+            deadline_unix_ms: 42,
+            accepted_at: None,
+            authorization_command: None,
+            privileged_mode: PrivilegedRequestMode::Unspecified.into(),
+            operation: Some(privd_request::Operation::UpgradeResultList(
+                UpgradeResultListRequest {},
+            )),
+        };
+        let mut bytes = Vec::new();
+        write_frame(&mut bytes, &request)
+            .await
+            .expect("encode upgrade result request");
+        let decoded: PrivdRequest = read_frame(&mut bytes.as_slice())
+            .await
+            .expect("decode upgrade result request");
+        assert_eq!(decoded, request);
+
+        let response = PrivdResponse {
+            request_id: vec![7; 16],
+            privileged_result_proof: None,
+            result: Some(privd_response::Result::UpgradeResultList(
+                UpgradeResultList {
+                    results: vec![UpgradeOperationResult {
+                        operation_id: vec![1; 16],
+                        state: "succeeded".to_owned(),
+                        target_version: "2.0.0".to_owned(),
+                        completed_unix_ms: 1_751_000_000_000,
+                        detail: "activated release 2.0.0".to_owned(),
+                        package_sha256: vec![2; 32],
+                        privileged_result_proof: None,
+                    }],
+                },
+            )),
+        };
+        let mut response_bytes = Vec::new();
+        write_frame(&mut response_bytes, &response)
+            .await
+            .expect("encode upgrade result response");
+        let decoded_response: PrivdResponse = read_frame(&mut response_bytes.as_slice())
+            .await
+            .expect("decode upgrade result response");
+        assert_eq!(decoded_response, response);
     }
 }

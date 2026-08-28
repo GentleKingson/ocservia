@@ -98,6 +98,12 @@ p12_seal_hash="$(openssl rsa -in "${work}/p12-password-seal-private.pem" -pubout
 
 build_packages() {
   local version="$1"
+  # Each package version embeds its own release identity: the packaged
+  # binaries must report exactly the package version they ship.
+  (cd "${ROOT}/rust" && OCSERV_AGENT_RELEASE_VERSION="${version}" cargo build --locked --release \
+    --package ocservia-agent --package ocservia-privd --package ocservia-upgrader)
+  sha256sum "${ROOT}/rust/target/release/ocservia-agent" | awk '{print $1}' \
+    >"${work}/binary-sha-${version}"
   OUTPUT_DIR="${pkg_dir}" AGENT_SIGNING_KEY="${work}/signing.key" VERSION="${version}" \
     PACKAGE_ARCH="${PACKAGE_ARCH}" SOURCE_DATE_EPOCH=1786147200 \
     "${ROOT}/scripts/package-agent.sh" >/dev/null
@@ -124,8 +130,6 @@ for field in Package Version Architecture; do
   esac
 done
 echo "deb metadata validation passed"
-
-agent_binary_sha="$(sha256sum "${ROOT}/rust/target/release/ocservia-agent" | awk '{print $1}')"
 
 assert_installed_state() {
   local context="$1" expected_version="$2" binary_sha
@@ -158,7 +162,7 @@ assert_installed_state() {
       || { echo "${context}: ${unit} is ${active} without configuration" >&2; exit 1; }
   done
   binary_sha="$(sudo sha256sum /usr/libexec/ocservia/ocservia-agent | awk '{print $1}')"
-  [[ "${binary_sha}" == "${agent_binary_sha}" ]] \
+  [[ "${binary_sha}" == "$(cat "${work}/binary-sha-${expected_version}")" ]] \
     || { echo "${context}: installed Agent binary does not match the built binary" >&2; exit 1; }
 }
 
@@ -278,7 +282,7 @@ container_assert_installed() {
       || { echo "${context}: ${unit} is ${active} without configuration" >&2; exit 1; }
   done
   binary_sha="$(docker exec "${container}" sha256sum /usr/libexec/ocservia/ocservia-agent | awk '{print $1}')"
-  [[ "${binary_sha}" == "${agent_binary_sha}" ]] \
+  [[ "${binary_sha}" == "$(cat "${work}/binary-sha-${expected_version}")" ]] \
     || { echo "${context}: installed Agent binary does not match the built binary" >&2; exit 1; }
 }
 container_assert_installed "rpm install" 1.0.0

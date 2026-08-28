@@ -6,6 +6,15 @@ use std::process::ExitCode;
 use ocservia_upgrader::UpgradeRunner;
 
 fn main() -> ExitCode {
+    // The packaging pipeline verifies the binary's embedded release
+    // identity before it is shipped; --version stays read-only.
+    if env::args().nth(1).as_deref() == Some("--version") {
+        println!(
+            "ocservia-upgrader {}",
+            ocservia_contracts::agent_upgrade::release_version()
+        );
+        return ExitCode::SUCCESS;
+    }
     let mut args = env::args().skip(1);
     let (operation, root) = match parse_args(&mut args) {
         Ok(parsed) => parsed,
