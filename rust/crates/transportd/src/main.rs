@@ -1014,3 +1014,5 @@ mod tests {
         std::fs::remove_dir(directory).expect("remove test directory");
     }
 }
+
+// G6 B4 warm-cache acceptance run 2: transportd-side first-party touch.
