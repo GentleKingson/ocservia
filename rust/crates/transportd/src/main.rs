@@ -1014,3 +1014,5 @@ mod tests {
         std::fs::remove_dir(directory).expect("remove test directory");
     }
 }
+
+// G6 dependency-cache experiment run 3: first-party source touch.
