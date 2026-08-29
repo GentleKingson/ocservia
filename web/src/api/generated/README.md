@@ -92,6 +92,7 @@ All URIs are relative to _/api/v1_
 | _NodesApi_         | [**revokePrivdAttestationKey**](docs/NodesApi.md#revokeprivdattestationkey)               | **POST** /nodes/{node_id}/privd-attestation-keys:revoke    | Revoke a node privd result attestation key                                       |
 | _OperationsApi_    | [**applyNodeGroup**](docs/OperationsApi.md#applynodegroup)                                | **PUT** /nodes/{node_id}/groups/{group_name}               | Queue atomic application of one node-scoped group                                |
 | _OperationsApi_    | [**approveRequest**](docs/OperationsApi.md#approverequest)                                | **POST** /approval-requests/{approval_id}:approve          | Approve another principal\&#39;s high-risk request                               |
+| _OperationsApi_    | [**createAgentRollout**](docs/OperationsApi.md#createagentrollout)                        | **POST** /agent-rollouts                                   | Create a durable canary and rolling agent upgrade rollout                        |
 | _OperationsApi_    | [**createApprovalRequest**](docs/OperationsApi.md#createapprovalrequest)                  | **POST** /approval-requests                                | Request independent approval for a high-risk action                              |
 | _OperationsApi_    | [**createNodeUser**](docs/OperationsApi.md#createnodeuser)                                | **POST** /nodes/{node_id}/users                            | Queue creation of one node-scoped user                                           |
 | _OperationsApi_    | [**createSyntheticCommand**](docs/OperationsApi.md#createsyntheticcommand)                | **POST** /nodes/{node_id}/synthetic-commands               | Queue a side-effect-free typed synthetic command                                 |
@@ -99,15 +100,18 @@ All URIs are relative to _/api/v1_
 | _OperationsApi_    | [**disableNodeUser**](docs/OperationsApi.md#disablenodeuser)                              | **POST** /nodes/{node_id}/users/{username}:disable         | Queue disabling one node-scoped user                                             |
 | _OperationsApi_    | [**disconnectNodeSession**](docs/OperationsApi.md#disconnectnodesession)                  | **POST** /nodes/{node_id}/sessions/{session_id}:disconnect | Disconnect one observed session                                                  |
 | _OperationsApi_    | [**enableNodeUser**](docs/OperationsApi.md#enablenodeuser)                                | **POST** /nodes/{node_id}/users/{username}:enable          | Queue enabling one node-scoped user without changing its password or groups      |
+| _OperationsApi_    | [**getAgentRollout**](docs/OperationsApi.md#getagentrollout)                              | **GET** /agent-rollouts/{rollout_id}                       | Get rollout state, batch progress, and per-node outcomes                         |
 | _OperationsApi_    | [**getApprovalRequest**](docs/OperationsApi.md#getapprovalrequest)                        | **GET** /approval-requests/{approval_id}                   | Inspect immutable approval details before deciding                               |
 | _OperationsApi_    | [**getOperation**](docs/OperationsApi.md#getoperation)                                    | **GET** /operations/{operation_id}                         | Get an asynchronous operation                                                    |
 | _OperationsApi_    | [**getOperationQueueMetrics**](docs/OperationsApi.md#getoperationqueuemetrics)            | **GET** /operations/queue-metrics                          | Get transactional outbox and command queue metrics                               |
 | _OperationsApi_    | [**getOperationSummary**](docs/OperationsApi.md#getoperationsummary)                      | **GET** /operations/summary                                | Get workspace-wide operation state counters                                      |
 | _OperationsApi_    | [**getUserBatch**](docs/OperationsApi.md#getuserbatch)                                    | **GET** /user-batches/{batch_id}                           | Get parent and per-item authorization, command, and result state                 |
 | _OperationsApi_    | [**getUserOperationMetrics**](docs/OperationsApi.md#getuseroperationmetrics)              | **GET** /user-operations/metrics                           | Get workspace quota, expiry, and batch scheduler health counters                 |
+| _OperationsApi_    | [**listAgentRollouts**](docs/OperationsApi.md#listagentrollouts)                          | **GET** /agent-rollouts                                    | List the workspace\&#39;s most recent fleet agent rollouts                       |
 | _OperationsApi_    | [**listOperations**](docs/OperationsApi.md#listoperations)                                | **GET** /operations                                        | List operations                                                                  |
 | _OperationsApi_    | [**reloadNodeService**](docs/OperationsApi.md#reloadnodeservice)                          | **POST** /nodes/{node_id}/service:reload                   | Reload the fixed Ocserv service unit                                             |
 | _OperationsApi_    | [**removeNodeIpBan**](docs/OperationsApi.md#removenodeipban)                              | **POST** /nodes/{node_id}/ip-bans/{ip}:remove              | Remove one canonical IP address from the Ocserv ban list                         |
+| _OperationsApi_    | [**resumeAgentRollout**](docs/OperationsApi.md#resumeagentrollout)                        | **POST** /agent-rollouts/{rollout_id}/resume               | Resume a paused rollout after an explicit operator decision                      |
 | _OperationsApi_    | [**rotateNodeUserPassword**](docs/OperationsApi.md#rotatenodeuserpassword)                | **POST** /nodes/{node_id}/users/{username}:rotate-password | Queue write-only password rotation using node-sealed ciphertext                  |
 | _OperationsApi_    | [**setNodeUserPolicy**](docs/OperationsApi.md#setnodeuserpolicy)                          | **PUT** /nodes/{node_id}/users/{username}/policy           | Set byte quota and exact UTC expiry for one node-scoped user                     |
 | _OperationsApi_    | [**terminateNodeSession**](docs/OperationsApi.md#terminatenodesession)                    | **POST** /nodes/{node_id}/sessions/{session_id}:terminate  | Terminate one observed session and invalidate its reconnect cookie               |
@@ -125,10 +129,16 @@ All URIs are relative to _/api/v1_
 
 ### Models
 
+- [AgentRollout](docs/AgentRollout.md)
+- [AgentRolloutCreateRequest](docs/AgentRolloutCreateRequest.md)
+- [AgentRolloutExclusion](docs/AgentRolloutExclusion.md)
+- [AgentRolloutNode](docs/AgentRolloutNode.md)
+- [AgentRolloutPage](docs/AgentRolloutPage.md)
 - [AgentUpgradeRequest](docs/AgentUpgradeRequest.md)
 - [Approval](docs/Approval.md)
 - [ApprovalDecision](docs/ApprovalDecision.md)
 - [ApprovalRequest](docs/ApprovalRequest.md)
+- [ApprovalRequestAgentRollout](docs/ApprovalRequestAgentRollout.md)
 - [ApprovalRequestAgentUpgrade](docs/ApprovalRequestAgentUpgrade.md)
 - [ApprovalRequestCertificate](docs/ApprovalRequestCertificate.md)
 - [ApprovalRequestRoleBinding](docs/ApprovalRequestRoleBinding.md)

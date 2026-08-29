@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/GentleKingson/ocservia/control-plane/internal/auth"
+	operationstore "github.com/GentleKingson/ocservia/control-plane/internal/operations"
 	"github.com/GentleKingson/ocservia/control-plane/internal/rbac"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -65,7 +66,7 @@ func (s *Server) authorizeRoute(r *http.Request, principal auth.Principal) (cont
 	if action == "" {
 		return nil, rbac.ErrForbidden
 	}
-	if (r.Method == http.MethodPost && (r.URL.Path == "/api/v1/user-batches" || r.URL.Path == "/api/v1/approval-requests")) || (r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/api/v1/user-batches/")) {
+	if (r.Method == http.MethodPost && (r.URL.Path == "/api/v1/user-batches" || r.URL.Path == "/api/v1/approval-requests" || r.URL.Path == "/api/v1/agent-rollouts")) || (r.Method == http.MethodGet && (strings.HasPrefix(r.URL.Path, "/api/v1/user-batches/") || r.URL.Path == "/api/v1/agent-rollouts")) {
 		workspaceID, err := s.selectWorkspace(r, principal, action)
 		if err != nil {
 			return nil, err
@@ -87,6 +88,16 @@ func (s *Server) authorizeRoute(r *http.Request, principal auth.Principal) (cont
 			return nil, pgx.ErrNoRows
 		}
 		resource, err = s.rbac.Operation(r.Context(), operationID)
+	} else if rolloutText := r.PathValue("rollout_id"); rolloutText != "" {
+		rolloutID, parseErr := uuid.Parse(rolloutText)
+		if parseErr != nil || rolloutID.Version() != 7 || s.operations == nil {
+			return nil, pgx.ErrNoRows
+		}
+		rolloutWorkspace, rolloutErr := operationstore.RolloutWorkspace(r.Context(), s.pool, rolloutID)
+		if rolloutErr != nil {
+			return nil, rolloutErr
+		}
+		resource, err = s.rbac.Workspace(r.Context(), rolloutWorkspace)
 	} else if approvalText := r.PathValue("approval_id"); approvalText != "" {
 		approvalID, parseErr := uuid.Parse(strings.TrimSuffix(approvalText, ":approve"))
 		if parseErr != nil || approvalID.Version() != 7 || s.approvals == nil {
@@ -256,6 +267,16 @@ func routeAction(r *http.Request) string {
 	case path == "/api/v1/user-batches":
 		return "user.manage"
 	case strings.HasPrefix(path, "/api/v1/user-batches/"):
+		return "operation.read"
+	case path == "/api/v1/agent-rollouts":
+		if r.Method == http.MethodPost {
+			return "agent.upgrade"
+		}
+		return "operation.read"
+	case strings.HasPrefix(path, "/api/v1/agent-rollouts/"):
+		if r.Method == http.MethodPost && strings.HasSuffix(path, "/resume") {
+			return "agent.upgrade"
+		}
 		return "operation.read"
 	case path == "/api/v1/user-operations/metrics":
 		return "operation.read"

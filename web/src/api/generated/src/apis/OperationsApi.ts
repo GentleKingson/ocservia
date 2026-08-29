@@ -14,6 +14,21 @@
 
 import * as runtime from "../runtime";
 import {
+  type AgentRollout,
+  AgentRolloutFromJSON,
+  AgentRolloutToJSON,
+} from "../models/AgentRollout";
+import {
+  type AgentRolloutCreateRequest,
+  AgentRolloutCreateRequestFromJSON,
+  AgentRolloutCreateRequestToJSON,
+} from "../models/AgentRolloutCreateRequest";
+import {
+  type AgentRolloutPage,
+  AgentRolloutPageFromJSON,
+  AgentRolloutPageToJSON,
+} from "../models/AgentRolloutPage";
+import {
   type AgentUpgradeRequest,
   AgentUpgradeRequestFromJSON,
   AgentUpgradeRequestToJSON,
@@ -127,6 +142,12 @@ export interface ApproveRequestRequest {
   approvalDecision: ApprovalDecision;
 }
 
+export interface CreateAgentRolloutRequest {
+  idempotencyKey: string;
+  agentRolloutCreateRequest: AgentRolloutCreateRequest;
+  xWorkspaceID?: string;
+}
+
 export interface CreateApprovalRequestRequest {
   approvalRequest: ApprovalRequest;
   xWorkspaceID?: string;
@@ -177,6 +198,11 @@ export interface EnableNodeUserRequest {
   ifMatch?: string;
 }
 
+export interface GetAgentRolloutRequest {
+  rolloutId: string;
+  xWorkspaceID?: string;
+}
+
 export interface GetApprovalRequestRequest {
   approvalId: string;
 }
@@ -196,6 +222,11 @@ export interface GetUserBatchRequest {
 
 export interface GetUserOperationMetricsRequest {
   xWorkspaceID?: string;
+}
+
+export interface ListAgentRolloutsRequest {
+  xWorkspaceID?: string;
+  limit?: number;
 }
 
 export interface ListOperationsRequest {
@@ -218,6 +249,12 @@ export interface RemoveNodeIpBanRequest {
   idempotencyKey: string;
   controlledOperationRequest: ControlledOperationRequest;
   ifMatch?: string;
+}
+
+export interface ResumeAgentRolloutRequest {
+  idempotencyKey: string;
+  rolloutId: string;
+  xWorkspaceID?: string;
 }
 
 export interface RotateNodeUserPasswordRequest {
@@ -441,6 +478,98 @@ export class OperationsApi extends runtime.BaseAPI {
     initOverrides?: RequestInit | runtime.InitOverrideFunction,
   ): Promise<Approval> {
     const response = await this.approveRequestRaw(
+      requestParameters,
+      initOverrides,
+    );
+    return await response.value();
+  }
+
+  /**
+   * Creates request options for createAgentRollout without sending the request
+   */
+  async createAgentRolloutRequestOpts(
+    requestParameters: CreateAgentRolloutRequest,
+  ): Promise<runtime.RequestOpts> {
+    if (requestParameters["idempotencyKey"] == null) {
+      throw new runtime.RequiredError(
+        "idempotencyKey",
+        'Required parameter "idempotencyKey" was null or undefined when calling createAgentRollout().',
+      );
+    }
+
+    if (requestParameters["agentRolloutCreateRequest"] == null) {
+      throw new runtime.RequiredError(
+        "agentRolloutCreateRequest",
+        'Required parameter "agentRolloutCreateRequest" was null or undefined when calling createAgentRollout().',
+      );
+    }
+
+    const queryParameters: any = {};
+
+    const headerParameters: runtime.HTTPHeaders = {};
+
+    headerParameters["Content-Type"] = "application/json";
+
+    if (requestParameters["xWorkspaceID"] != null) {
+      headerParameters["X-Workspace-ID"] = String(
+        requestParameters["xWorkspaceID"],
+      );
+    }
+
+    if (requestParameters["idempotencyKey"] != null) {
+      headerParameters["Idempotency-Key"] = String(
+        requestParameters["idempotencyKey"],
+      );
+    }
+
+    if (this.configuration && this.configuration.accessToken) {
+      const token = this.configuration.accessToken;
+      const tokenString = await token("bearerAuth", []);
+
+      if (tokenString) {
+        headerParameters["Authorization"] = `Bearer ${tokenString}`;
+      }
+    }
+
+    let urlPath = `/agent-rollouts`;
+
+    return {
+      path: urlPath,
+      method: "POST",
+      headers: headerParameters,
+      query: queryParameters,
+      body: AgentRolloutCreateRequestToJSON(
+        requestParameters["agentRolloutCreateRequest"],
+      ),
+    };
+  }
+
+  /**
+   * Creates a server-owned fleet rollout with a mandatory one-node canary and fixed-size batches. The server canonicalizes and sorts the node set, recomputes eligibility from durable evidence, resolves package digests from the trusted release catalog, and consumes one approval bound to the exact immutable rollout request. Every generated node upgrade reuses the reconciled single-node operation; the rollout survives browser closure and Controller restart.
+   * Create a durable canary and rolling agent upgrade rollout
+   */
+  async createAgentRolloutRaw(
+    requestParameters: CreateAgentRolloutRequest,
+    initOverrides?: RequestInit | runtime.InitOverrideFunction,
+  ): Promise<runtime.ApiResponse<AgentRollout>> {
+    const requestOptions =
+      await this.createAgentRolloutRequestOpts(requestParameters);
+    const response = await this.request(requestOptions, initOverrides);
+
+    return new runtime.JSONApiResponse(response, (jsonValue) =>
+      AgentRolloutFromJSON(jsonValue),
+    );
+  }
+
+  /**
+   * Creates a server-owned fleet rollout with a mandatory one-node canary and fixed-size batches. The server canonicalizes and sorts the node set, recomputes eligibility from durable evidence, resolves package digests from the trusted release catalog, and consumes one approval bound to the exact immutable rollout request. Every generated node upgrade reuses the reconciled single-node operation; the rollout survives browser closure and Controller restart.
+   * Create a durable canary and rolling agent upgrade rollout
+   */
+  async createAgentRollout(
+    requestParameters: CreateAgentRolloutRequest,
+    initOverrides?: RequestInit | runtime.InitOverrideFunction,
+  ): Promise<AgentRollout> {
+    const response = await this.createAgentRolloutRaw(
       requestParameters,
       initOverrides,
     );
@@ -1143,6 +1272,82 @@ export class OperationsApi extends runtime.BaseAPI {
   }
 
   /**
+   * Creates request options for getAgentRollout without sending the request
+   */
+  async getAgentRolloutRequestOpts(
+    requestParameters: GetAgentRolloutRequest,
+  ): Promise<runtime.RequestOpts> {
+    if (requestParameters["rolloutId"] == null) {
+      throw new runtime.RequiredError(
+        "rolloutId",
+        'Required parameter "rolloutId" was null or undefined when calling getAgentRollout().',
+      );
+    }
+
+    const queryParameters: any = {};
+
+    const headerParameters: runtime.HTTPHeaders = {};
+
+    if (requestParameters["xWorkspaceID"] != null) {
+      headerParameters["X-Workspace-ID"] = String(
+        requestParameters["xWorkspaceID"],
+      );
+    }
+
+    if (this.configuration && this.configuration.accessToken) {
+      const token = this.configuration.accessToken;
+      const tokenString = await token("bearerAuth", []);
+
+      if (tokenString) {
+        headerParameters["Authorization"] = `Bearer ${tokenString}`;
+      }
+    }
+
+    let urlPath = `/agent-rollouts/{rollout_id}`;
+    urlPath = urlPath.replace(
+      "{rollout_id}",
+      encodeURIComponent(String(requestParameters["rolloutId"])),
+    );
+
+    return {
+      path: urlPath,
+      method: "GET",
+      headers: headerParameters,
+      query: queryParameters,
+    };
+  }
+
+  /**
+   * Get rollout state, batch progress, and per-node outcomes
+   */
+  async getAgentRolloutRaw(
+    requestParameters: GetAgentRolloutRequest,
+    initOverrides?: RequestInit | runtime.InitOverrideFunction,
+  ): Promise<runtime.ApiResponse<AgentRollout>> {
+    const requestOptions =
+      await this.getAgentRolloutRequestOpts(requestParameters);
+    const response = await this.request(requestOptions, initOverrides);
+
+    return new runtime.JSONApiResponse(response, (jsonValue) =>
+      AgentRolloutFromJSON(jsonValue),
+    );
+  }
+
+  /**
+   * Get rollout state, batch progress, and per-node outcomes
+   */
+  async getAgentRollout(
+    requestParameters: GetAgentRolloutRequest,
+    initOverrides?: RequestInit | runtime.InitOverrideFunction,
+  ): Promise<AgentRollout> {
+    const response = await this.getAgentRolloutRaw(
+      requestParameters,
+      initOverrides,
+    );
+    return await response.value();
+  }
+
+  /**
    * Creates request options for getApprovalRequest without sending the request
    */
   async getApprovalRequestRequestOpts(
@@ -1540,6 +1745,75 @@ export class OperationsApi extends runtime.BaseAPI {
   }
 
   /**
+   * Creates request options for listAgentRollouts without sending the request
+   */
+  async listAgentRolloutsRequestOpts(
+    requestParameters: ListAgentRolloutsRequest,
+  ): Promise<runtime.RequestOpts> {
+    const queryParameters: any = {};
+
+    if (requestParameters["limit"] != null) {
+      queryParameters["limit"] = requestParameters["limit"];
+    }
+
+    const headerParameters: runtime.HTTPHeaders = {};
+
+    if (requestParameters["xWorkspaceID"] != null) {
+      headerParameters["X-Workspace-ID"] = String(
+        requestParameters["xWorkspaceID"],
+      );
+    }
+
+    if (this.configuration && this.configuration.accessToken) {
+      const token = this.configuration.accessToken;
+      const tokenString = await token("bearerAuth", []);
+
+      if (tokenString) {
+        headerParameters["Authorization"] = `Bearer ${tokenString}`;
+      }
+    }
+
+    let urlPath = `/agent-rollouts`;
+
+    return {
+      path: urlPath,
+      method: "GET",
+      headers: headerParameters,
+      query: queryParameters,
+    };
+  }
+
+  /**
+   * List the workspace\'s most recent fleet agent rollouts
+   */
+  async listAgentRolloutsRaw(
+    requestParameters: ListAgentRolloutsRequest,
+    initOverrides?: RequestInit | runtime.InitOverrideFunction,
+  ): Promise<runtime.ApiResponse<AgentRolloutPage>> {
+    const requestOptions =
+      await this.listAgentRolloutsRequestOpts(requestParameters);
+    const response = await this.request(requestOptions, initOverrides);
+
+    return new runtime.JSONApiResponse(response, (jsonValue) =>
+      AgentRolloutPageFromJSON(jsonValue),
+    );
+  }
+
+  /**
+   * List the workspace\'s most recent fleet agent rollouts
+   */
+  async listAgentRollouts(
+    requestParameters: ListAgentRolloutsRequest = {},
+    initOverrides?: RequestInit | runtime.InitOverrideFunction,
+  ): Promise<AgentRolloutPage> {
+    const response = await this.listAgentRolloutsRaw(
+      requestParameters,
+      initOverrides,
+    );
+    return await response.value();
+  }
+
+  /**
    * Creates request options for listOperations without sending the request
    */
   async listOperationsRequestOpts(
@@ -1821,6 +2095,97 @@ export class OperationsApi extends runtime.BaseAPI {
     initOverrides?: RequestInit | runtime.InitOverrideFunction,
   ): Promise<Operation> {
     const response = await this.removeNodeIpBanRaw(
+      requestParameters,
+      initOverrides,
+    );
+    return await response.value();
+  }
+
+  /**
+   * Creates request options for resumeAgentRollout without sending the request
+   */
+  async resumeAgentRolloutRequestOpts(
+    requestParameters: ResumeAgentRolloutRequest,
+  ): Promise<runtime.RequestOpts> {
+    if (requestParameters["idempotencyKey"] == null) {
+      throw new runtime.RequiredError(
+        "idempotencyKey",
+        'Required parameter "idempotencyKey" was null or undefined when calling resumeAgentRollout().',
+      );
+    }
+
+    if (requestParameters["rolloutId"] == null) {
+      throw new runtime.RequiredError(
+        "rolloutId",
+        'Required parameter "rolloutId" was null or undefined when calling resumeAgentRollout().',
+      );
+    }
+
+    const queryParameters: any = {};
+
+    const headerParameters: runtime.HTTPHeaders = {};
+
+    if (requestParameters["xWorkspaceID"] != null) {
+      headerParameters["X-Workspace-ID"] = String(
+        requestParameters["xWorkspaceID"],
+      );
+    }
+
+    if (requestParameters["idempotencyKey"] != null) {
+      headerParameters["Idempotency-Key"] = String(
+        requestParameters["idempotencyKey"],
+      );
+    }
+
+    if (this.configuration && this.configuration.accessToken) {
+      const token = this.configuration.accessToken;
+      const tokenString = await token("bearerAuth", []);
+
+      if (tokenString) {
+        headerParameters["Authorization"] = `Bearer ${tokenString}`;
+      }
+    }
+
+    let urlPath = `/agent-rollouts/{rollout_id}/resume`;
+    urlPath = urlPath.replace(
+      "{rollout_id}",
+      encodeURIComponent(String(requestParameters["rolloutId"])),
+    );
+
+    return {
+      path: urlPath,
+      method: "POST",
+      headers: headerParameters,
+      query: queryParameters,
+    };
+  }
+
+  /**
+   * Requeues failed, unknown, and rolled-back nodes of the current batch for a fresh eligibility check. Succeeded nodes are never redispatched and no batch ever advances automatically while paused.
+   * Resume a paused rollout after an explicit operator decision
+   */
+  async resumeAgentRolloutRaw(
+    requestParameters: ResumeAgentRolloutRequest,
+    initOverrides?: RequestInit | runtime.InitOverrideFunction,
+  ): Promise<runtime.ApiResponse<AgentRollout>> {
+    const requestOptions =
+      await this.resumeAgentRolloutRequestOpts(requestParameters);
+    const response = await this.request(requestOptions, initOverrides);
+
+    return new runtime.JSONApiResponse(response, (jsonValue) =>
+      AgentRolloutFromJSON(jsonValue),
+    );
+  }
+
+  /**
+   * Requeues failed, unknown, and rolled-back nodes of the current batch for a fresh eligibility check. Succeeded nodes are never redispatched and no batch ever advances automatically while paused.
+   * Resume a paused rollout after an explicit operator decision
+   */
+  async resumeAgentRollout(
+    requestParameters: ResumeAgentRolloutRequest,
+    initOverrides?: RequestInit | runtime.InitOverrideFunction,
+  ): Promise<AgentRollout> {
+    const response = await this.resumeAgentRolloutRaw(
       requestParameters,
       initOverrides,
     );
