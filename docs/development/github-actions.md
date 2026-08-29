@@ -306,11 +306,16 @@ stays a dry run and never uploads release assets.
   packages, both signed triples verified against the pinned fingerprint,
   `MANIFEST` and ELF architecture agreement, deb/rpm architecture metadata,
   identical embedded payloads, and a canonical `SHA256SUMS`.
-- The publish job runs only for release events with `contents: write`, signs
-  `SHA256SUMS` with the `AGENT_SIGNING_KEY` secret, revalidates against the
-  `AGENT_TRUSTED_KEY_SHA256` pin, and only then uploads the assets to the
-  release. Without the signing secret the build jobs sign with an ephemeral
-  key, which the publish job rejects.
+- Every build job signs with an ephemeral key generated on the runner, so a
+  `workflow_dispatch` run never touches the production signing credential,
+  and the validate job checks the internal consistency of the signed set
+  without the production pin.
+- The publish job runs only for release events behind the protected
+  `release-publishing` environment with `contents: write`: it re-signs both
+  archive checksum triples with the release key, rebuilds the native
+  packages with the release trust anchor, validates the whole set against
+  the `AGENT_TRUSTED_KEY_SHA256` pin, signs the unified `SHA256SUMS`, and
+  only then uploads the assets to the release.
 
 ## Deferred native validation
 
