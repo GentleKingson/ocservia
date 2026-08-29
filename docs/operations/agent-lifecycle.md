@@ -219,7 +219,12 @@ N → N+1 hop can only be protected when that runner carries the
 execution-time downgrade fence and the installation commit record. Nodes
 still advertising `ocserv.agent.upgrade.v1` are ineligible: seed the first
 fence-capable package manually (or with the native installers), approve its
-`v2` capability, and Controller-driven upgrades start from there.
+`v2` capability, and Controller-driven upgrades start from there. Upgrading
+an existing 0.1.x installation with the native package manager (`dpkg -i`,
+`rpm -Uvh`) preserves node identity, configuration, and durable state, and
+leaves services stopped rather than auto-enabled; the release pipeline
+exercises exactly this published-baseline → candidate hop on both
+architectures.
 
 The operation is created `queued`, and the agent's scheduling acknowledgement
 moves it to the non-terminal `accepted` state — an acknowledged schedule is
@@ -246,3 +251,43 @@ observed version before concluding success. Nodes still running a pre-upgrade
 privd simply report no outcomes; their operations still resolve through the
 version observation, the failure and rollback paths, or the conservative
 `unknown` deadline.
+
+## Fleet rolling upgrades (rollouts)
+
+`POST /api/v1/agent-rollouts` (RBAC action `agent.upgrade`, Operator role)
+upgrades a selected set of nodes to one trusted target version in bounded
+batches. The request carries the target version, the node IDs, a batch size,
+a stop-on-failure flag, and a reason, and must reference an approval that
+binds exactly that target version, the sorted node set, the batch size, and
+the stop-on-failure flag. The target must exist in the trusted release
+manifest for every selected node's architecture, and every selected node must
+advertise the `ocserv.agent.upgrade.v2` capability.
+
+The console's fleet version badges and the recommended version shown in
+Settings are driven by the operator-pinned `OCSERV_RECOMMENDED_AGENT_VERSION`
+(SemVer); it classifies observed versions but never schedules anything by
+itself.
+
+Batch 0 is a mandatory single-node canary. Later batches start only after the
+canary reaches `succeeded`; a failed or skipped canary pauses the rollout, and
+resuming requeues that canary for a fresh attempt — no operator decision can
+replace the mandatory successful canary.
+
+Each node follows the reconciled single-node upgrade lifecycle above under
+its own stable operation ID; a succeeding node is never redispatched. A batch
+advances only when every node in it has a terminal outcome, and any failed,
+unknown, or rolled-back node pauses the rollout. A node that became
+ineligible when its batch was dispatched (offline, stale observation,
+capability withdrawn, version already current or ahead, another upgrade
+active, or no manifest entry) is marked `skipped` with a reason code and the
+rollout pauses. Resuming requeues the failed, unknown, rolled-back, and
+skipped-canary nodes of the current batch for a fresh eligibility check; a
+skipped non-canary node stays skipped and keeps its reason. The rollout
+detail view therefore reports succeeded, failed, and skipped nodes per batch
+plus the remaining count: a rollout that finished `succeeded` does not imply
+every selected node was upgraded.
+
+Rollout state is durable: it survives Controller restarts and console
+sessions unchanged. Reading a rollout requires `operation.read`; creating and
+resuming require `agent.upgrade`; a rollout is visible and resumable only
+inside its workspace.
