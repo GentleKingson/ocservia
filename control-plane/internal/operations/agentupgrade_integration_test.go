@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/GentleKingson/ocservia/control-plane/internal/approvals"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -108,6 +109,62 @@ func assertUpgradeStates(t *testing.T, pool *pgxpool.Pool, operationID uuid.UUID
 	terminal := projectionState == "succeeded" || projectionState == "failed" || projectionState == "rolled_back" || projectionState == "unknown"
 	if gotOperation != operationState || gotCommand != commandState || gotProjection != projectionState || completed != terminal {
 		t.Fatalf("operation/command/projection/completed = %q/%q/%q/%v, want %q/%q/%q/%v", gotOperation, gotCommand, gotProjection, completed, operationState, commandState, projectionState, terminal)
+	}
+}
+
+func TestRolloutDispatchRechecksEligibilityAfterClaimIntegration(t *testing.T) {
+	service, pool, workspaceID, nodeID := upgradeReconciliationFixture(t)
+	service.EnableReleaseCatalog(rolloutTestCatalog(t))
+	ctx := context.Background()
+	if _, err := pool.Exec(ctx, `INSERT INTO node_capabilities(node_id,capability,approved) VALUES($1,'ocserv.agent.upgrade.v2',true)`, nodeID); err != nil {
+		t.Fatal(err)
+	}
+	rolloutID, approvalID := uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7())
+	requesterID, requesterSessionID, approverID := uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7())
+	requestHash, requestSummary := approvals.AgentRolloutBinding("2.0.0", []uuid.UUID{nodeID}, 1, true)
+	if _, err := pool.Exec(ctx, `INSERT INTO identities(id,issuer,subject,created_at,updated_at) VALUES($1,'test',$2,now(),now()),($3,'test',$4,now(),now())`, requesterID, requesterID.String(), approverID, approverID.String()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `INSERT INTO auth_sessions(id,identity_id,expires_at,created_at) VALUES($1,$2,now()+interval '1 hour',now())`, requesterSessionID, requesterID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `INSERT INTO approval_requests(id,workspace_id,requester_id,action,resource_type,resource_id,reason,status,approver_id,approval_reason,expires_at,approved_at,consumed_at,created_at,request_hash,request_summary) VALUES($1,$2,$3,'agent.rollout','batch_operation',$4,'integration test','consumed',$5,'independent approval',now()+interval '1 hour',now(),now(),now(),$6,$7)`, approvalID, workspaceID, requesterID, rolloutID, approverID, requestHash, requestSummary); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `INSERT INTO agent_rollouts(id,workspace_id,target_version,state,batch_size,stop_on_failure,reason,approval_id,request_hash,created_by,actor_session_id,current_batch,pause_code,exclusions,idempotency_key,created_at,updated_at) VALUES($1,$2,'2.0.0','running',1,true,'integration test',$3,$4,$5,$6,0,'','[]','rollout-post-claim',now(),now())`, rolloutID, workspaceID, approvalID, requestHash, requesterID, requesterSessionID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `INSERT INTO agent_rollout_nodes(rollout_id,node_id,ordinal,batch,state,dispatch_node_version,dispatch_attempt,dispatch_lease_until,updated_at) VALUES($1,$2,0,0,'pending',1,1,now()+interval '1 minute',now())`, rolloutID, nodeID); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_, _ = pool.Exec(context.Background(), `DELETE FROM agent_rollouts WHERE id=$1`, rolloutID)
+		_, _ = pool.Exec(context.Background(), `DELETE FROM approval_requests WHERE id=$1`, approvalID)
+		_, _ = pool.Exec(context.Background(), `DELETE FROM auth_sessions WHERE id=$1`, requesterSessionID)
+		_, _ = pool.Exec(context.Background(), `DELETE FROM identities WHERE id IN($1,$2)`, requesterID, approverID)
+	})
+
+	// The claim was eligible, but the node changed before operation intent was
+	// created. The dispatch fence must turn that late rejection into a pause.
+	if _, err := pool.Exec(ctx, `UPDATE nodes SET status='offline' WHERE id=$1`, nodeID); err != nil {
+		t.Fatal(err)
+	}
+	digest := [32]byte{}
+	claimed := claimedRolloutNode{rolloutNodeRow: rolloutNodeRow{NodeID: nodeID, Batch: 0, DispatchVersion: 1, DispatchAttempt: 1}, Observation: rolloutNodeObservation{NodeID: nodeID, Status: "active", Architecture: "amd64", AgentVersion: "1.2.0", CapabilityOK: true}, Digest: digest}
+	stop, err := service.dispatchRolloutNode(ctx, rolloutID, claimed)
+	if err != nil || !stop {
+		t.Fatalf("late-ineligible dispatch stop=%v err=%v", stop, err)
+	}
+	var rolloutState, pauseCode, nodeState, failureCode string
+	if err := pool.QueryRow(ctx, `SELECT r.state,r.pause_code,rn.state,rn.failure_code FROM agent_rollouts r JOIN agent_rollout_nodes rn ON rn.rollout_id=r.id WHERE r.id=$1`, rolloutID).Scan(&rolloutState, &pauseCode, &nodeState, &failureCode); err != nil {
+		t.Fatal(err)
+	}
+	var operationCount int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM agent_upgrade_operations WHERE approval_id=$1`, approvalID).Scan(&operationCount); err != nil {
+		t.Fatal(err)
+	}
+	if rolloutState != "paused" || pauseCode != "node_skipped" || nodeState != "skipped" || failureCode != "node_unavailable" || operationCount != 0 {
+		t.Fatalf("late-ineligible result=%s/%s node=%s/%s operations=%d", rolloutState, pauseCode, nodeState, failureCode, operationCount)
 	}
 }
 

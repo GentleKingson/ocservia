@@ -351,6 +351,7 @@ type rolloutRow struct {
 	ActorSession  uuid.UUID
 	CurrentBatch  int
 	PauseCode     string
+	Excluded      []AgentRolloutExclusion
 	CreatedAt     time.Time
 	UpdatedAt     time.Time
 }
@@ -464,12 +465,15 @@ func nodeIDStrings(ids []uuid.UUID) []string {
 func scanRolloutRow(row pgx.Row) (rolloutRow, error) {
 	var rollout rolloutRow
 	var id, workspace, approval, createdBy, actorSession uuid.UUID
-	var requestHash []byte
+	var requestHash, exclusionsJSON []byte
 	err := row.Scan(&id, &workspace, &rollout.TargetVersion, &rollout.State, &rollout.BatchSize, &rollout.StopOnFailure,
 		&rollout.Reason, &approval, &requestHash, &createdBy, &actorSession, &rollout.CurrentBatch, &rollout.PauseCode,
-		&rollout.CreatedAt, &rollout.UpdatedAt)
+		&exclusionsJSON, &rollout.CreatedAt, &rollout.UpdatedAt)
 	if err != nil {
 		return rolloutRow{}, err
+	}
+	if err := json.Unmarshal(exclusionsJSON, &rollout.Excluded); err != nil {
+		return rolloutRow{}, fmt.Errorf("decode agent rollout exclusions: %w", err)
 	}
 	rollout.ID, rollout.WorkspaceID, rollout.ApprovalID = id, workspace, approval
 	rollout.RequestHash, rollout.CreatedBy, rollout.ActorSession = requestHash, createdBy, actorSession
@@ -482,7 +486,7 @@ func rolloutFromRow(rollout rolloutRow, nodes []AgentRolloutNode) AgentRollout {
 		State: rollout.State, BatchSize: rollout.BatchSize, StopOnFailure: rollout.StopOnFailure,
 		Reason: rollout.Reason, ApprovalID: rollout.ApprovalID.String(), CreatedBy: rollout.CreatedBy.String(),
 		CurrentBatch: rollout.CurrentBatch, PauseCode: rollout.PauseCode,
-		CreatedAt: rollout.CreatedAt, UpdatedAt: rollout.UpdatedAt, Nodes: nodes,
+		CreatedAt: rollout.CreatedAt, UpdatedAt: rollout.UpdatedAt, Nodes: nodes, Excluded: rollout.Excluded,
 	}
 }
 
@@ -502,7 +506,7 @@ type rolloutQueryer interface {
 	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
 }
 
-const rolloutHeaderSelect = "SELECT id,workspace_id,target_version,state,batch_size,stop_on_failure,reason,approval_id,request_hash,created_by,actor_session_id,current_batch,pause_code,created_at,updated_at" +
+const rolloutHeaderSelect = "SELECT id,workspace_id,target_version,state,batch_size,stop_on_failure,reason,approval_id,request_hash,created_by,actor_session_id,current_batch,pause_code,exclusions,created_at,updated_at" +
 	" FROM agent_rollouts"
 
 func loadRolloutNodeObservation(ctx context.Context, q rolloutQueryer, nodeID, workspaceID uuid.UUID) (rolloutNodeObservation, error) {
@@ -702,13 +706,17 @@ func (s *Service) CreateAgentRollout(ctx context.Context, request CreateAgentRol
 	if len(eligible) == 0 {
 		return AgentRollout{}, false, ErrNoEligibleNodes
 	}
+	exclusionsJSON, err := json.Marshal(exclusions)
+	if err != nil {
+		return AgentRollout{}, false, err
+	}
 	auditID, err := uuid.NewV7()
 	if err != nil {
 		return AgentRollout{}, false, err
 	}
-	if _, err := q.Exec(ctx, "INSERT INTO agent_rollouts(id,workspace_id,target_version,state,batch_size,stop_on_failure,reason,approval_id,request_hash,created_by,actor_session_id,current_batch,pause_code,idempotency_key,created_at,updated_at)"+
-		" VALUES($1,$2,$3,'queued',$4,true,$5,$6,$7,$8,$9,0,'',$10,$11,$11)",
-		rolloutID, request.WorkspaceID, target, request.BatchSize, reason, request.ApprovalID, requestHash[:], request.ActorIdentityID, request.ActorSessionID, request.IdempotencyKey, now); err != nil {
+	if _, err := q.Exec(ctx, "INSERT INTO agent_rollouts(id,workspace_id,target_version,state,batch_size,stop_on_failure,reason,approval_id,request_hash,created_by,actor_session_id,current_batch,pause_code,exclusions,idempotency_key,created_at,updated_at)"+
+		" VALUES($1,$2,$3,'queued',$4,true,$5,$6,$7,$8,$9,0,'',$10,$11,$12,$12)",
+		rolloutID, request.WorkspaceID, target, request.BatchSize, reason, request.ApprovalID, requestHash[:], request.ActorIdentityID, request.ActorSessionID, string(exclusionsJSON), request.IdempotencyKey, now); err != nil {
 		return AgentRollout{}, false, fmt.Errorf("insert agent rollout: %w", err)
 	}
 	for ordinal, node := range eligible {
@@ -739,15 +747,14 @@ func (s *Service) CreateAgentRollout(ctx context.Context, request CreateAgentRol
 	if err != nil {
 		return AgentRollout{}, false, err
 	}
-	rollout.Excluded = exclusions
 	return rollout, false, nil
 }
 
 // ResumeAgentRollout records an explicit operator decision to continue a
 // paused rollout. Succeeded nodes are never redispatched; failed, unknown,
 // and rolled-back nodes of the current batch are requeued for a fresh
-// eligibility check and upgrade attempt, while skipped nodes keep their
-// recorded exclusion reason.
+// eligibility check and upgrade attempt. A skipped canary is also requeued:
+// no operator decision may replace the mandatory successful canary.
 func (s *Service) ResumeAgentRollout(ctx context.Context, rolloutID uuid.UUID, actorID string, actorIdentityID, actorSessionID uuid.UUID, requestID, traceparent string) (AgentRollout, error) {
 	if actorIdentityID == uuid.Nil || actorSessionID == uuid.Nil {
 		return AgentRollout{}, ErrRolloutInvalid
@@ -767,7 +774,7 @@ func (s *Service) ResumeAgentRollout(ctx context.Context, rolloutID uuid.UUID, a
 		return AgentRollout{}, ErrRolloutState
 	}
 	tag, err := q.Exec(ctx, "UPDATE agent_rollout_nodes SET state='pending',failure_code='',dispatch_node_version=NULL,dispatch_attempt=dispatch_attempt+1,dispatch_lease_until=NULL,updated_at=$3"+
-		" WHERE rollout_id=$1 AND batch=$2 AND state IN ('failed','rolled_back','unknown')", rolloutID, rollout.CurrentBatch, now)
+		" WHERE rollout_id=$1 AND batch=$2 AND (state IN ('failed','rolled_back','unknown') OR (state='skipped' AND batch=0))", rolloutID, rollout.CurrentBatch, now)
 	if err != nil {
 		return AgentRollout{}, fmt.Errorf("requeue failed rollout nodes: %w", err)
 	}
@@ -842,8 +849,12 @@ func (s *Service) advanceAgentRollout(ctx context.Context, rolloutID uuid.UUID) 
 			return nil
 		}
 		for _, node := range claimed {
-			if err := s.dispatchRolloutNode(ctx, rolloutID, node); err != nil {
+			stop, err := s.dispatchRolloutNode(ctx, rolloutID, node)
+			if err != nil {
 				return err
+			}
+			if stop {
+				return nil
 			}
 		}
 	}
@@ -990,7 +1001,8 @@ func (s *Service) rollUpTerminalRolloutNodes(ctx context.Context, q rolloutQuery
 
 // evaluateRolloutBatch enforces stop-on-first-failure/unknown, advances the
 // batch pointer, and claims the dispatchable pending nodes of the current
-// batch. Skipped nodes never block advancement but never count as upgrades.
+// batch. A skipped node can only be observed here after an operator resumes
+// the rollout; it never counts as an upgrade.
 // The second return reports whether the batch pointer advanced.
 func (s *Service) evaluateRolloutBatch(ctx context.Context, q rolloutQueryer, rollout *rolloutRow, now time.Time, appendEvent func(map[string]any) error) ([]claimedRolloutNode, bool, error) {
 	nodes, err := readRolloutNodesLocked(ctx, q, rollout.ID)
@@ -1112,7 +1124,14 @@ func readRolloutNodesLocked(ctx context.Context, q rolloutQueryer, rolloutID uui
 // that the fleet no longer matches the approved request before the next
 // batch starts.
 func (s *Service) claimRolloutPendingNodes(ctx context.Context, q rolloutQueryer, rollout *rolloutRow, current []*rolloutNodeRow, now time.Time, appendEvent func(map[string]any) error) ([]claimedRolloutNode, error) {
-	claimed := []claimedRolloutNode{}
+	type eligibleClaim struct {
+		observation rolloutNodeObservation
+		digest      [sha256.Size]byte
+	}
+	eligible := make(map[uuid.UUID]eligibleClaim, len(current))
+	// Preflight the complete dispatchable batch before taking any leases. If
+	// one node changed eligibility, no peer from the approved batch may be
+	// dispatched until an operator explicitly resumes the rollout.
 	for _, node := range current {
 		if node.State != RolloutNodePending || node.DispatchLease.After(now) {
 			continue
@@ -1121,17 +1140,19 @@ func (s *Service) claimRolloutPendingNodes(ctx context.Context, q rolloutQueryer
 		if err != nil {
 			return nil, err
 		}
-		reason, digest, eligible := s.rolloutNodeEligibility(now, observation, rollout.TargetVersion)
-		if !eligible {
-			if _, err := q.Exec(ctx, "UPDATE agent_rollout_nodes SET state='skipped',failure_code=$3,dispatch_lease_until=NULL,updated_at=$4"+
-				" WHERE rollout_id=$1 AND node_id=$2 AND state='pending'", rollout.ID, node.NodeID, reason, now); err != nil {
-				return nil, fmt.Errorf("skip rollout node: %w", err)
-			}
-			node.State = RolloutNodeSkipped
-			node.FailureCode = reason
-			if err := appendEvent(map[string]any{"event": "node_skipped", "batch": node.Batch, "node_id": node.NodeID.String(), "reason": reason}); err != nil {
+		reason, digest, ok := s.rolloutNodeEligibility(now, observation, rollout.TargetVersion)
+		if !ok {
+			if _, err := pauseRolloutForSkippedNode(ctx, q, rollout, node, reason, now, appendEvent); err != nil {
 				return nil, err
 			}
+			return nil, nil
+		}
+		eligible[node.NodeID] = eligibleClaim{observation: observation, digest: digest}
+	}
+	claimed := []claimedRolloutNode{}
+	for _, node := range current {
+		candidate, ok := eligible[node.NodeID]
+		if !ok {
 			continue
 		}
 		var nodeVersion int64
@@ -1158,19 +1179,51 @@ func (s *Service) claimRolloutPendingNodes(ctx context.Context, q rolloutQueryer
 		}
 		node.DispatchVersion = nodeVersion
 		node.DispatchAttempt = attempt
-		claimed = append(claimed, claimedRolloutNode{rolloutNodeRow: *node, Observation: observation, Digest: digest})
+		claimed = append(claimed, claimedRolloutNode{rolloutNodeRow: *node, Observation: candidate.observation, Digest: candidate.digest})
 	}
 	return claimed, nil
+}
+
+func pauseRolloutForSkippedNode(ctx context.Context, q rolloutQueryer, rollout *rolloutRow, node *rolloutNodeRow, reason string, now time.Time, appendEvent func(map[string]any) error) (bool, error) {
+	tag, err := q.Exec(ctx, "UPDATE agent_rollout_nodes SET state='skipped',failure_code=$3,dispatch_lease_until=NULL,updated_at=$4"+
+		" WHERE rollout_id=$1 AND node_id=$2 AND state='pending'", rollout.ID, node.NodeID, reason, now)
+	if err != nil {
+		return false, fmt.Errorf("skip rollout node: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return false, nil
+	}
+	if _, err := q.Exec(ctx, "UPDATE agent_rollout_nodes SET dispatch_lease_until=NULL,updated_at=$3"+
+		" WHERE rollout_id=$1 AND batch=$2 AND state='pending'", rollout.ID, node.Batch, now); err != nil {
+		return false, fmt.Errorf("release skipped rollout batch claims: %w", err)
+	}
+	if _, err := q.Exec(ctx, "UPDATE agent_rollouts SET state='paused',pause_code='node_skipped',updated_at=$2 WHERE id=$1", rollout.ID, now); err != nil {
+		return false, fmt.Errorf("pause skipped rollout: %w", err)
+	}
+	node.State = RolloutNodeSkipped
+	node.FailureCode = reason
+	rollout.State = RolloutStatePaused
+	rollout.PauseCode = "node_skipped"
+	if err := appendEvent(map[string]any{"event": "node_skipped", "batch": node.Batch, "node_id": node.NodeID.String(), "reason": reason}); err != nil {
+		return false, err
+	}
+	if err := appendEvent(map[string]any{"event": "rollout_paused", "pause_code": "node_skipped", "batch": node.Batch, "node_id": node.NodeID.String(), "node_state": RolloutNodeSkipped}); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 // dispatchRolloutNode creates the reconciled single-node upgrade for one
 // claimed node. The deterministic idempotency key and the pinned node
 // version make a reclaim after a Controller crash replay the exact same
 // operation instead of dispatching a duplicate upgrade.
-func (s *Service) dispatchRolloutNode(ctx context.Context, rolloutID uuid.UUID, node claimedRolloutNode) error {
+func (s *Service) dispatchRolloutNode(ctx context.Context, rolloutID uuid.UUID, node claimedRolloutNode) (bool, error) {
 	rollout, err := scanRolloutRow(s.pool.QueryRow(ctx, rolloutHeaderSelect+" WHERE id=$1", rolloutID))
 	if err != nil {
-		return fmt.Errorf("reload rollout for dispatch: %w", err)
+		return false, fmt.Errorf("reload rollout for dispatch: %w", err)
+	}
+	if rollout.State != RolloutStateRunning {
+		return true, nil
 	}
 	operation, _, err := s.CreateSynthetic(ctx, CreateRequest{
 		NodeID:              node.NodeID,
@@ -1206,44 +1259,74 @@ func (s *Service) dispatchRolloutNode(ctx context.Context, rolloutID uuid.UUID, 
 		return s.recordRolloutNodeSkipped(ctx, rolloutID, node.NodeID, "approval_unavailable")
 	case errors.Is(err, ErrIdempotencyConflict):
 		return s.recordRolloutNodeSkipped(ctx, rolloutID, node.NodeID, "dispatch_conflict")
+	case errors.Is(err, ErrRolloutState):
+		return true, nil
 	case errors.Is(err, ErrBacklogExceeded):
 		// Global or node backlog pressure is transient: release the claim and
 		// retry on a later pass instead of recording a failure.
-		return s.releaseRolloutNodeClaim(ctx, rolloutID, node.NodeID)
+		return false, s.releaseRolloutNodeClaim(ctx, rolloutID, node.NodeID)
 	default:
-		return fmt.Errorf("dispatch rollout node upgrade: %w", err)
+		return false, fmt.Errorf("dispatch rollout node upgrade: %w", err)
 	}
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
-		return fmt.Errorf("begin rollout dispatch record: %w", err)
+		return false, fmt.Errorf("begin rollout dispatch record: %w", err)
 	}
 	defer rollback(tx)
 	q := rolloutQueryer(tx)
 	if _, err := q.Exec(ctx, "UPDATE agent_rollout_nodes SET state='running',operation_id=$3,from_version=$4,dispatch_lease_until=NULL,updated_at=$5"+
 		" WHERE rollout_id=$1 AND node_id=$2 AND state='pending'", rolloutID, node.NodeID, operation.ID, node.Observation.AgentVersion, s.now()); err != nil {
-		return fmt.Errorf("record rollout dispatch: %w", err)
+		return false, fmt.Errorf("record rollout dispatch: %w", err)
 	}
 	if err := tx.Commit(ctx); err != nil {
-		return fmt.Errorf("commit rollout dispatch record: %w", err)
+		return false, fmt.Errorf("commit rollout dispatch record: %w", err)
 	}
-	return nil
+	return false, nil
 }
 
-func (s *Service) recordRolloutNodeSkipped(ctx context.Context, rolloutID uuid.UUID, nodeID uuid.UUID, reason string) error {
+func (s *Service) recordRolloutNodeSkipped(ctx context.Context, rolloutID uuid.UUID, nodeID uuid.UUID, reason string) (bool, error) {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
-		return fmt.Errorf("begin rollout skip record: %w", err)
+		return false, fmt.Errorf("begin rollout skip record: %w", err)
 	}
 	defer rollback(tx)
 	q := rolloutQueryer(tx)
-	if _, err := q.Exec(ctx, "UPDATE agent_rollout_nodes SET state='skipped',failure_code=$3,dispatch_lease_until=NULL,updated_at=$4"+
-		" WHERE rollout_id=$1 AND node_id=$2 AND state='pending'", rolloutID, nodeID, reason, s.now()); err != nil {
-		return fmt.Errorf("record rollout node skip: %w", err)
+	rollout, err := scanRolloutRow(q.QueryRow(ctx, rolloutHeaderSelect+" WHERE id=$1 FOR UPDATE", rolloutID))
+	if err != nil {
+		return false, fmt.Errorf("lock rollout skip record: %w", err)
+	}
+	var node rolloutNodeRow
+	node.NodeID = nodeID
+	if err := q.QueryRow(ctx, "SELECT batch,state FROM agent_rollout_nodes WHERE rollout_id=$1 AND node_id=$2 FOR UPDATE", rolloutID, nodeID).Scan(&node.Batch, &node.State); err != nil {
+		return false, fmt.Errorf("lock skipped rollout node: %w", err)
+	}
+	now := s.now()
+	events := []audit.ChainRecord{}
+	appendEvent := func(summary map[string]any) error {
+		eventID, eventErr := uuid.NewV7()
+		if eventErr != nil {
+			return eventErr
+		}
+		encoded, _ := json.Marshal(summary)
+		events = append(events, audit.ChainRecord{
+			EventID: eventID, WorkspaceID: rollout.WorkspaceID, ActorType: "controller", ActorID: "agent-rollout-orchestrator",
+			Action: "agent.rollout", ResourceType: "agent_rollout", ResourceID: rollout.ID, AfterSummary: encoded, At: now,
+		})
+		return nil
+	}
+	paused, err := pauseRolloutForSkippedNode(ctx, q, &rollout, &node, reason, now, appendEvent)
+	if err != nil {
+		return false, err
+	}
+	for _, event := range events {
+		if err := audit.AppendChain(ctx, tx, event); err != nil {
+			return false, fmt.Errorf("append rollout skip audit: %w", err)
+		}
 	}
 	if err := tx.Commit(ctx); err != nil {
-		return fmt.Errorf("commit rollout skip record: %w", err)
+		return false, fmt.Errorf("commit rollout skip record: %w", err)
 	}
-	return nil
+	return paused, nil
 }
 
 func (s *Service) releaseRolloutNodeClaim(ctx context.Context, rolloutID uuid.UUID, nodeID uuid.UUID) error {

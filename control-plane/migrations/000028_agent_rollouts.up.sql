@@ -16,6 +16,9 @@ CREATE TABLE agent_rollouts (
     actor_session_id uuid NOT NULL,
     current_batch integer NOT NULL DEFAULT 0 CHECK (current_batch >= 0),
     pause_code text NOT NULL DEFAULT '' CHECK (length(pause_code) <= 128),
+    exclusions jsonb NOT NULL DEFAULT '[]'::jsonb CHECK (
+        jsonb_typeof(exclusions) = 'array' AND jsonb_array_length(exclusions) <= 500
+    ),
     idempotency_key text NOT NULL CHECK (length(idempotency_key) BETWEEN 1 AND 128),
     created_at timestamptz NOT NULL,
     updated_at timestamptz NOT NULL,

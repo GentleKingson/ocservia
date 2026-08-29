@@ -273,9 +273,9 @@ func TestAgentRolloutFleetLifecycleIntegration(t *testing.T) {
 			query string
 			args  []any
 		}{
-			{"DELETE FROM node_agent_upgrade_results WHERE node_id IN (SELECT node_id FROM agent_rollout_nodes WHERE rollout_id=$1)", []any{rolloutID}},
-			{"DELETE FROM agent_rollout_nodes WHERE rollout_id=$1", []any{rolloutID}},
-			{"DELETE FROM agent_rollouts WHERE id=$1", []any{rolloutID}},
+			{"DELETE FROM node_agent_upgrade_results WHERE node_id=ANY($1)", []any{allNodes}},
+			{"DELETE FROM agent_rollout_nodes WHERE rollout_id IN (SELECT id FROM agent_rollouts WHERE workspace_id=$1)", []any{workspace}},
+			{"DELETE FROM agent_rollouts WHERE workspace_id=$1", []any{workspace}},
 			{"DELETE FROM agent_upgrade_operations WHERE workspace_id IN ($1,$2)", []any{workspace, workspaceOther}},
 			{"DELETE FROM outbox_events WHERE command_id IN(SELECT id FROM commands WHERE workspace_id IN ($1,$2))", []any{workspace, workspaceOther}},
 			{"DELETE FROM operation_events WHERE operation_id IN(SELECT id FROM operations WHERE workspace_id IN ($1,$2))", []any{workspace, workspaceOther}},
@@ -325,6 +325,19 @@ func TestAgentRolloutFleetLifecycleIntegration(t *testing.T) {
 		server.createAgentRollout(response, request)
 		return response
 	}
+	getRollout := func(id uuid.UUID) *httptest.ResponseRecorder {
+		t.Helper()
+		request := httptest.NewRequest(http.MethodGet, "/api/v1/agent-rollouts/"+id.String(), nil)
+		request.SetPathValue("rollout_id", id.String())
+		authorized, err := server.authorizeRoute(request, operator)
+		if err != nil {
+			t.Fatalf("authorize rollout get: %v", err)
+		}
+		request = request.WithContext(authorized)
+		response := httptest.NewRecorder()
+		server.getAgentRollout(response, request)
+		return response
+	}
 	rolloutBody := func(batchSize int, approval string, ids ...uuid.UUID) string {
 		raw := make([]string, 0, len(ids))
 		for _, id := range ids {
@@ -365,7 +378,7 @@ func TestAgentRolloutFleetLifecycleIntegration(t *testing.T) {
 	if response.Code != http.StatusCreated {
 		t.Fatalf("created rollout status=%d body=%s", response.Code, response.Body.String())
 	}
-	var created struct {
+	type rolloutResponse struct {
 		ID           string `json:"id"`
 		State        string `json:"state"`
 		CurrentBatch int    `json:"current_batch"`
@@ -380,6 +393,7 @@ func TestAgentRolloutFleetLifecycleIntegration(t *testing.T) {
 			Reason string `json:"reason"`
 		} `json:"excluded"`
 	}
+	var created rolloutResponse
 	if err := json.Unmarshal(response.Body.Bytes(), &created); err != nil {
 		t.Fatal(err)
 	}
@@ -407,9 +421,34 @@ func TestAgentRolloutFleetLifecycleIntegration(t *testing.T) {
 	if exclusionReasons[offlineNodeID.String()] != "offline" || exclusionReasons[currentNodeID.String()] != "already_current" {
 		t.Fatalf("exclusion reasons = %+v", created.Excluded)
 	}
-	if replay := postRollout("rollout-create-1", createBody); replay.Code != http.StatusCreated || replay.Header().Get("Idempotency-Replayed") != "true" {
+	assertExclusions := func(label string, rollout rolloutResponse) {
+		t.Helper()
+		reasons := map[string]string{}
+		for _, exclusion := range rollout.Excluded {
+			reasons[exclusion.NodeID] = exclusion.Reason
+		}
+		if len(reasons) != 2 || reasons[offlineNodeID.String()] != "offline" || reasons[currentNodeID.String()] != "already_current" {
+			t.Fatalf("%s rollout exclusions = %+v", label, rollout.Excluded)
+		}
+	}
+	replay := postRollout("rollout-create-1", createBody)
+	if replay.Code != http.StatusCreated || replay.Header().Get("Idempotency-Replayed") != "true" {
 		t.Fatalf("replayed rollout status=%d replayed=%q", replay.Code, replay.Header().Get("Idempotency-Replayed"))
 	}
+	var replayed rolloutResponse
+	if err := json.Unmarshal(replay.Body.Bytes(), &replayed); err != nil {
+		t.Fatal(err)
+	}
+	assertExclusions("replayed", replayed)
+	got := getRollout(rolloutID)
+	if got.Code != http.StatusOK {
+		t.Fatalf("get rollout status=%d body=%s", got.Code, got.Body.String())
+	}
+	var fetched rolloutResponse
+	if err := json.Unmarshal(got.Body.Bytes(), &fetched); err != nil {
+		t.Fatal(err)
+	}
+	assertExclusions("fetched", fetched)
 	if conflict := postRollout("rollout-create-1", rolloutBody(5, approvalID.String(), nodeIDs...)); conflict.Code != http.StatusConflict {
 		t.Fatalf("idempotency conflict status=%d body=%s", conflict.Code, conflict.Body.String())
 	}
@@ -460,12 +499,12 @@ func TestAgentRolloutFleetLifecycleIntegration(t *testing.T) {
 
 	// Resume requeues the unknown node with a fresh attempt; the next pass
 	// dispatches attempt two instead of replaying the old operation.
-	resume := func() *httptest.ResponseRecorder {
+	resume := func(id uuid.UUID, key string) *httptest.ResponseRecorder {
 		t.Helper()
-		request := httptest.NewRequest(http.MethodPost, "/api/v1/agent-rollouts/"+rolloutID.String()+"/resume", strings.NewReader("{}"))
-		request.SetPathValue("rollout_id", rolloutID.String())
+		request := httptest.NewRequest(http.MethodPost, "/api/v1/agent-rollouts/"+id.String()+"/resume", strings.NewReader("{}"))
+		request.SetPathValue("rollout_id", id.String())
 		request.Header.Set("Content-Type", "application/json")
-		request.Header.Set("Idempotency-Key", "rollout-resume-1")
+		request.Header.Set("Idempotency-Key", key)
 		authorized, err := server.authorizeRoute(request, operator)
 		if err != nil {
 			t.Fatalf("authorize rollout resume: %v", err)
@@ -475,7 +514,7 @@ func TestAgentRolloutFleetLifecycleIntegration(t *testing.T) {
 		server.resumeAgentRollout(recorder, request)
 		return recorder
 	}
-	if resumed := resume(); resumed.Code != http.StatusOK {
+	if resumed := resume(rolloutID, "rollout-resume-1"); resumed.Code != http.StatusOK {
 		t.Fatalf("resume status=%d body=%s", resumed.Code, resumed.Body.String())
 	}
 	if err := advance(); err != nil {
@@ -505,7 +544,7 @@ func TestAgentRolloutFleetLifecycleIntegration(t *testing.T) {
 	if rolloutState != "paused" || pauseCode != "node_failed" {
 		t.Fatalf("failure must pause: state=%s pause=%s", rolloutState, pauseCode)
 	}
-	if resumed := resume(); resumed.Code != http.StatusOK {
+	if resumed := resume(rolloutID, "rollout-resume-2"); resumed.Code != http.StatusOK {
 		t.Fatalf("second resume status=%d body=%s", resumed.Code, resumed.Body.String())
 	}
 	if err := advance(); err != nil {
@@ -526,5 +565,107 @@ func TestAgentRolloutFleetLifecycleIntegration(t *testing.T) {
 	}
 	if rolloutState != "succeeded" {
 		t.Fatalf("completed rollout state=%s, want succeeded", rolloutState)
+	}
+
+	createApprovedRollout := func(id uuid.UUID, key string, batchSize int) uuid.UUID {
+		t.Helper()
+		hash, summary := approvalstore.AgentRolloutBinding("2.0.0", nodeIDs, batchSize, true)
+		approvalID := uuid.Must(uuid.NewV7())
+		if _, err := pool.Exec(ctx, "INSERT INTO approval_requests(id,workspace_id,requester_id,action,resource_type,resource_id,reason,status,approver_id,approval_reason,expires_at,approved_at,created_at,request_hash,request_summary) VALUES($1,$2,$3,'agent.rollout','batch_operation',$4,'fleet rollout integration','approved',$5,'independent approval',now()+interval '1 hour',now(),now(),$6,$7)", approvalID, workspaceID, operatorID, id, approverID, hash, summary); err != nil {
+			t.Fatal(err)
+		}
+		response := postRollout(key, rolloutBody(batchSize, approvalID.String(), nodeIDs...))
+		if response.Code != http.StatusCreated {
+			t.Fatalf("create rollout %s status=%d body=%s", id, response.Code, response.Body.String())
+		}
+		return approvalID
+	}
+	countRolloutNodeUpgrades := func(approvalID, nodeID uuid.UUID) int {
+		t.Helper()
+		var count int
+		if err := pool.QueryRow(ctx, "SELECT count(*) FROM agent_upgrade_operations WHERE approval_id=$1 AND node_id=$2", approvalID, nodeID).Scan(&count); err != nil {
+			t.Fatal(err)
+		}
+		return count
+	}
+	assertPausedSkip := func(id, nodeID uuid.UUID, wantBatch int, reason string) {
+		t.Helper()
+		var state, code, nodeState, failureCode string
+		var currentBatch int
+		if err := pool.QueryRow(ctx, "SELECT state,pause_code,current_batch FROM agent_rollouts WHERE id=$1", id).Scan(&state, &code, &currentBatch); err != nil {
+			t.Fatal(err)
+		}
+		if err := pool.QueryRow(ctx, "SELECT state,failure_code FROM agent_rollout_nodes WHERE rollout_id=$1 AND node_id=$2", id, nodeID).Scan(&nodeState, &failureCode); err != nil {
+			t.Fatal(err)
+		}
+		if state != "paused" || code != "node_skipped" || currentBatch != wantBatch || nodeState != "skipped" || failureCode != reason {
+			t.Fatalf("skipped rollout %s = state %s/%s batch %d node %s/%s", id, state, code, currentBatch, nodeState, failureCode)
+		}
+	}
+
+	// A canary that becomes ineligible after creation pauses batch zero. No
+	// later batch operation may be created without an operator resume.
+	canarySkipRolloutID := uuid.Must(uuid.NewV7())
+	canarySkipApprovalID := createApprovedRollout(canarySkipRolloutID, "rollout-canary-skip", 2)
+	if _, err := pool.Exec(ctx, "UPDATE nodes SET status='offline' WHERE id=$1", canaryID); err != nil {
+		t.Fatal(err)
+	}
+	if err := advance(); err != nil {
+		t.Fatal(err)
+	}
+	assertPausedSkip(canarySkipRolloutID, canaryID, 0, "offline")
+	if countRolloutNodeUpgrades(canarySkipApprovalID, canaryID)+countRolloutNodeUpgrades(canarySkipApprovalID, batchID)+countRolloutNodeUpgrades(canarySkipApprovalID, otherID) != 0 {
+		t.Fatal("an ineligible canary must not dispatch any rollout operation")
+	}
+	if _, err := pool.Exec(ctx, "UPDATE nodes SET status='active' WHERE id=$1", canaryID); err != nil {
+		t.Fatal(err)
+	}
+	if resumed := resume(canarySkipRolloutID, "rollout-resume-skipped-canary"); resumed.Code != http.StatusOK {
+		t.Fatalf("resume skipped canary status=%d body=%s", resumed.Code, resumed.Body.String())
+	}
+	if err := advance(); err != nil {
+		t.Fatal(err)
+	}
+	if countRolloutNodeUpgrades(canarySkipApprovalID, canaryID) != 1 || countRolloutNodeUpgrades(canarySkipApprovalID, batchID) != 0 || countRolloutNodeUpgrades(canarySkipApprovalID, otherID) != 0 {
+		t.Fatal("resuming a skipped canary must retry the canary before ordinary batches")
+	}
+	if _, err := pool.Exec(ctx, "UPDATE agent_upgrade_operations SET state='succeeded',completed_at=now() WHERE approval_id=$1 AND completed_at IS NULL", canarySkipApprovalID); err != nil {
+		t.Fatal(err)
+	}
+	if err := advance(); err != nil {
+		t.Fatal(err)
+	}
+	if countRolloutNodeUpgrades(canarySkipApprovalID, batchID) != 1 || countRolloutNodeUpgrades(canarySkipApprovalID, otherID) != 1 {
+		t.Fatal("ordinary batches may start only after the retried canary succeeds")
+	}
+	if _, err := pool.Exec(ctx, "UPDATE agent_upgrade_operations SET state='succeeded',completed_at=now() WHERE approval_id=$1 AND completed_at IS NULL", canarySkipApprovalID); err != nil {
+		t.Fatal(err)
+	}
+	if err := advance(); err != nil {
+		t.Fatal(err)
+	}
+
+	// If an ordinary-batch node loses eligibility while the canary runs, its
+	// batch remains current and the following batch is not dispatched.
+	batchSkipRolloutID := uuid.Must(uuid.NewV7())
+	batchSkipApprovalID := createApprovedRollout(batchSkipRolloutID, "rollout-batch-skip", 1)
+	if err := advance(); err != nil {
+		t.Fatal(err)
+	}
+	if countRolloutNodeUpgrades(batchSkipApprovalID, canaryID) != 1 {
+		t.Fatal("batch-skip rollout must dispatch its canary first")
+	}
+	if _, err := pool.Exec(ctx, "UPDATE agent_upgrade_operations SET state='succeeded',completed_at=now() WHERE approval_id=$1 AND node_id=$2 AND completed_at IS NULL", batchSkipApprovalID, canaryID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, "UPDATE nodes SET status='offline' WHERE id=$1", batchID); err != nil {
+		t.Fatal(err)
+	}
+	if err := advance(); err != nil {
+		t.Fatal(err)
+	}
+	assertPausedSkip(batchSkipRolloutID, batchID, 1, "offline")
+	if countRolloutNodeUpgrades(batchSkipApprovalID, batchID) != 0 || countRolloutNodeUpgrades(batchSkipApprovalID, otherID) != 0 {
+		t.Fatal("an ineligible ordinary-batch node must hold it and every later batch")
 	}
 }
