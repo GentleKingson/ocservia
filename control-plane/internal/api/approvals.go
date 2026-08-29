@@ -28,6 +28,7 @@ type createApprovalRequest struct {
 	Certificate  *certificateApprovalBindingRequest `json:"certificate,omitempty"`
 	RoleBinding  *roleBindingApprovalRequest        `json:"role_binding,omitempty"`
 	AgentUpgrade *agentUpgradeApprovalRequest       `json:"agent_upgrade,omitempty"`
+	AgentRollout *agentRolloutApprovalRequest       `json:"agent_rollout,omitempty"`
 }
 
 // agentUpgradeApprovalRequest selects only the target version. The package
@@ -35,6 +36,16 @@ type createApprovalRequest struct {
 // and the trusted release catalog so approval content is never caller-trusted.
 type agentUpgradeApprovalRequest struct {
 	TargetVersion string `json:"target_version"`
+}
+
+// agentRolloutApprovalRequest pins the immutable fleet rollout request: the
+// target version, the sorted node set, the batch size, and the stop-on-failure
+// policy. Eligibility and package identities still resolve server-side.
+type agentRolloutApprovalRequest struct {
+	TargetVersion string   `json:"target_version"`
+	NodeIDs       []string `json:"node_ids"`
+	BatchSize     int      `json:"batch_size"`
+	StopOnFailure bool     `json:"stop_on_failure"`
 }
 
 type nodeApprovalBindingRequest struct {
@@ -75,6 +86,12 @@ func (s *Server) createApproval(w http.ResponseWriter, r *http.Request) {
 	if action == "user.batch.disable" {
 		if strings.TrimSpace(body.ResourceID) != "" {
 			writeProblem(w, r, http.StatusBadRequest, "https://ocservia.dev/problems/invalid-request", "Invalid request", "batch resource identifiers are server generated")
+			return
+		}
+		resourceID = uuid.Must(uuid.NewV7())
+	} else if action == "agent.rollout" {
+		if strings.TrimSpace(body.ResourceID) != "" {
+			writeProblem(w, r, http.StatusBadRequest, "https://ocservia.dev/problems/invalid-request", "Invalid request", "rollout resource identifiers are server generated")
 			return
 		}
 		resourceID = uuid.Must(uuid.NewV7())
@@ -231,6 +248,44 @@ func (s *Server) createApproval(w http.ResponseWriter, r *http.Request) {
 			s.writeAuthorizationError(w, r, rbac.ErrForbidden)
 			return
 		}
+	} else if action == "agent.rollout" {
+		if resource.Type != "batch_operation" || body.AgentRollout == nil || s.releaseCatalog == nil {
+			writeProblem(w, r, http.StatusBadRequest, "https://ocservia.dev/problems/invalid-request", "Invalid request", "agent rollout approval requires the exact rollout request and a trusted release catalog")
+			return
+		}
+		target := strings.TrimSpace(body.AgentRollout.TargetVersion)
+		if !semanticpayload.ValidAgentUpgradeTargetVersion(target) || !body.AgentRollout.StopOnFailure || body.AgentRollout.BatchSize < 1 || body.AgentRollout.BatchSize > 20 || len(body.AgentRollout.NodeIDs) == 0 || len(body.AgentRollout.NodeIDs) > 500 {
+			writeProblem(w, r, http.StatusBadRequest, "https://ocservia.dev/problems/invalid-request", "Invalid request", "agent rollout approval target version, node set, batch size, or stop-on-failure policy is invalid")
+			return
+		}
+		nodeIDs := make([]uuid.UUID, 0, len(body.AgentRollout.NodeIDs))
+		seen := make(map[uuid.UUID]struct{}, len(body.AgentRollout.NodeIDs))
+		for _, raw := range body.AgentRollout.NodeIDs {
+			nodeID, parseErr := uuid.Parse(strings.TrimSpace(raw))
+			if parseErr != nil || nodeID.Version() != 7 {
+				writeProblem(w, r, http.StatusBadRequest, "https://ocservia.dev/problems/invalid-request", "Invalid request", "every rollout node_id must be a UUIDv7")
+				return
+			}
+			if _, duplicate := seen[nodeID]; duplicate {
+				continue
+			}
+			seen[nodeID] = struct{}{}
+			nodeIDs = append(nodeIDs, nodeID)
+		}
+		slices.SortFunc(nodeIDs, func(a, b uuid.UUID) int { return strings.Compare(a.String(), b.String()) })
+		for _, nodeID := range nodeIDs {
+			node, nodeErr := s.rbac.Node(r.Context(), nodeID)
+			if nodeErr != nil || node.WorkspaceID != resource.WorkspaceID {
+				writeProblem(w, r, http.StatusBadRequest, "https://ocservia.dev/problems/invalid-request", "Invalid request", "every rollout node must reference the selected workspace")
+				return
+			}
+			if !s.devAuth && s.rbac.Authorize(r.Context(), actor.IdentityID, "agent.upgrade", node, actor.BreakGlass) != nil {
+				s.writeAuthorizationError(w, r, rbac.ErrForbidden)
+				return
+			}
+			authorityResources = append(authorityResources, approvals.AuthorityResource{WorkspaceID: node.WorkspaceID, Type: "node", ID: nodeID})
+		}
+		requestHash, requestSummary = approvals.AgentRolloutBinding(target, nodeIDs, body.AgentRollout.BatchSize, body.AgentRollout.StopOnFailure)
 	} else if action == "role_binding.elevate" {
 		if resource.Type != "role_binding" || body.RoleBinding == nil {
 			writeProblem(w, r, http.StatusBadRequest, "https://ocservia.dev/problems/invalid-request", "Invalid request", "role elevation approval requires exact binding content")
@@ -273,7 +328,7 @@ func (s *Server) createApproval(w http.ResponseWriter, r *http.Request) {
 	}
 	// Approval requests cannot be used to ask another user to authorize an action
 	// that the requester could not perform themselves.
-	if !s.devAuth && action != "user.batch.disable" && action != "config.apply" && action != "certificate.issue" && action != "certificate.revoke" && action != "certificate.private_key.export" && action != "node.approve" && action != "role_binding.elevate" {
+	if !s.devAuth && action != "user.batch.disable" && action != "config.apply" && action != "certificate.issue" && action != "certificate.revoke" && action != "certificate.private_key.export" && action != "node.approve" && action != "role_binding.elevate" && action != "agent.rollout" {
 		if err := s.rbac.Authorize(r.Context(), actor.IdentityID, action, resource, actor.BreakGlass); err != nil {
 			s.writeAuthorizationError(w, r, err)
 			return

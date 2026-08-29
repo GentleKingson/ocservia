@@ -18,6 +18,7 @@ import (
 	"github.com/GentleKingson/ocservia/control-plane/internal/audit"
 	"github.com/GentleKingson/ocservia/control-plane/internal/commandauth"
 	"github.com/GentleKingson/ocservia/control-plane/internal/commandlimit"
+	"github.com/GentleKingson/ocservia/control-plane/internal/releasecatalog"
 	"github.com/GentleKingson/ocservia/control-plane/internal/semanticpayload"
 	"github.com/GentleKingson/ocservia/control-plane/internal/telemetry"
 	"github.com/google/uuid"
@@ -101,6 +102,10 @@ type CreateRequest struct {
 	PackageSHA256       []byte
 	Architecture        string
 	FromVersion         string
+	// RolloutID binds a generated node upgrade to its durable fleet rollout.
+	// The rollout approval was consumed once at rollout creation; dispatch
+	// validates against the consumed binding instead of consuming again.
+	RolloutID           uuid.UUID
 	SessionID           string
 	BootID              string
 	IP                  string
@@ -192,6 +197,7 @@ type Service struct {
 	commandLimit              int
 	signer                    *commandauth.Signer
 	agentUpgradeReconcileTime time.Duration
+	releaseCatalog            *releasecatalog.Catalog
 }
 
 func New(pool *pgxpool.Pool) *Service {
@@ -219,6 +225,13 @@ func (s *Service) SetAgentUpgradeReconcileTimeout(value time.Duration) error {
 	return nil
 }
 
+// EnableReleaseCatalog installs the operator-provisioned trusted release
+// catalog used to resolve package digests for rollout-dispatched node
+// upgrades. Without it, rollout creation and advancement fail closed.
+func (s *Service) EnableReleaseCatalog(catalog *releasecatalog.Catalog) {
+	s.releaseCatalog = catalog
+}
+
 func (s *Service) CreateSynthetic(ctx context.Context, request CreateRequest) (Operation, bool, error) {
 	if err := validateCreate(request); err != nil {
 		return Operation{}, false, err
@@ -235,6 +248,7 @@ func (s *Service) CreateSynthetic(ctx context.Context, request CreateRequest) (O
 	var nodeVersion int64
 	var authorizationRevision uint64
 	var nodeStatus string
+	var rolloutObservation *rolloutNodeObservation
 	if err := tx.QueryRow(ctx, `SELECT workspace_id, version, authorization_revision, status FROM nodes WHERE id = $1 FOR UPDATE`, request.NodeID).Scan(&workspaceID, &nodeVersion, &authorizationRevision, &nodeStatus); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return Operation{}, false, ErrNodeUnavailable
@@ -243,6 +257,63 @@ func (s *Service) CreateSynthetic(ctx context.Context, request CreateRequest) (O
 	}
 	if nodeStatus != "active" && nodeStatus != "offline" {
 		return Operation{}, false, ErrNodeUnavailable
+	}
+	if request.RolloutID != uuid.Nil {
+		// Serialize generated operation intent, including idempotent replay,
+		// with rollout pause/resume. A cleared claim or non-running rollout
+		// must not create or recover an operation from an older memory claim.
+		var rolloutState, rolloutNodeState string
+		var dispatchLease *time.Time
+		err := tx.QueryRow(ctx, `SELECT r.state,rn.state,rn.dispatch_lease_until
+			FROM agent_rollouts r JOIN agent_rollout_nodes rn ON rn.rollout_id=r.id
+			WHERE r.id=$1 AND r.workspace_id=$2 AND rn.node_id=$3
+			FOR UPDATE OF r,rn`, request.RolloutID, workspaceID, request.NodeID).Scan(&rolloutState, &rolloutNodeState, &dispatchLease)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return Operation{}, false, ErrRolloutState
+		}
+		if err != nil {
+			return Operation{}, false, fmt.Errorf("lock rollout dispatch claim: %w", err)
+		}
+		if rolloutState != RolloutStateRunning || rolloutNodeState != RolloutNodePending || dispatchLease == nil || !dispatchLease.After(now) {
+			return Operation{}, false, ErrRolloutState
+		}
+		if s.releaseCatalog == nil {
+			return Operation{}, false, ErrRolloutState
+		}
+		observation := rolloutNodeObservation{NodeID: request.NodeID, Status: nodeStatus}
+		if err := tx.QueryRow(ctx, `SELECT architecture,agent_version,last_heartbeat_at FROM node_observed_snapshots WHERE node_id=$1 FOR UPDATE`, request.NodeID).Scan(&observation.Architecture, &observation.AgentVersion, &observation.LastHeartbeatAt); err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				return Operation{}, false, ErrStaleRevision
+			}
+			return Operation{}, false, fmt.Errorf("lock rollout node observation: %w", err)
+		}
+		err = tx.QueryRow(ctx, `SELECT approved FROM node_capabilities WHERE node_id=$1 AND capability='ocserv.agent.upgrade.v2' FOR UPDATE`, request.NodeID).Scan(&observation.CapabilityOK)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return Operation{}, false, ErrCapabilityMissing
+		}
+		if err != nil {
+			return Operation{}, false, fmt.Errorf("lock rollout node capability: %w", err)
+		}
+		if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM agent_upgrade_operations WHERE node_id=$1 AND completed_at IS NULL AND state IN ('queued','accepted','running','unknown'))`, request.NodeID).Scan(&observation.UpgradeActive); err != nil {
+			return Operation{}, false, fmt.Errorf("recheck active rollout upgrade: %w", err)
+		}
+		reason, digest, eligible := s.rolloutNodeEligibility(now, observation, request.TargetVersion)
+		if !eligible {
+			switch reason {
+			case "not_trusted", "offline":
+				return Operation{}, false, ErrNodeUnavailable
+			case "missing_capability":
+				return Operation{}, false, ErrCapabilityMissing
+			case "upgrade_in_progress":
+				return Operation{}, false, ErrUpgradeActive
+			default:
+				return Operation{}, false, ErrStaleRevision
+			}
+		}
+		if observation.Architecture != request.Architecture || !bytes.Equal(digest[:], request.PackageSHA256) {
+			return Operation{}, false, ErrStaleRevision
+		}
+		rolloutObservation = &observation
 	}
 	if existing, same, err := findIdempotent(ctx, tx, workspaceID, request.IdempotencyKey, hash[:]); err != nil {
 		return Operation{}, false, err
@@ -372,21 +443,34 @@ func (s *Service) CreateSynthetic(ctx context.Context, request CreateRequest) (O
 	}
 	if request.Kind == AgentUpgrade {
 		var observedVersion string
-		err := tx.QueryRow(ctx, `SELECT agent_version FROM node_observed_snapshots WHERE node_id=$1 FOR UPDATE`, request.NodeID).Scan(&observedVersion)
-		if errors.Is(err, pgx.ErrNoRows) {
-			observedVersion = ""
-		} else if err != nil {
-			return Operation{}, false, fmt.Errorf("read observed agent version: %w", err)
+		if rolloutObservation != nil {
+			observedVersion = rolloutObservation.AgentVersion
+		} else {
+			err := tx.QueryRow(ctx, `SELECT agent_version FROM node_observed_snapshots WHERE node_id=$1 FOR UPDATE`, request.NodeID).Scan(&observedVersion)
+			if errors.Is(err, pgx.ErrNoRows) {
+				observedVersion = ""
+			} else if err != nil {
+				return Operation{}, false, fmt.Errorf("read observed agent version: %w", err)
+			}
 		}
 		if telemetry.ClassifyAgentVersion(observedVersion, request.TargetVersion) != telemetry.AgentVersionStateUpgradeAvailable {
 			return Operation{}, false, ErrStaleRevision
 		}
 		request.FromVersion = observedVersion
-		approvalHash, _ := approvals.AgentUpgradeBinding(request.NodeID, request.TargetVersion, request.PackageSHA256, request.Architecture)
-		if err := approvals.ConsumeBound(ctx, tx, request.ApprovalID, workspaceID, request.ActorIdentityID, request.Action, "node", request.NodeID, approvalHash); err != nil {
-			return Operation{}, false, err
+		if request.RolloutID != uuid.Nil {
+			// The rollout approval bound the immutable rollout request and was
+			// consumed when the rollout was created; every generated node
+			// upgrade validates against that consumed binding.
+			if err := approvals.ValidateConsumedBound(ctx, tx, request.ApprovalID, workspaceID, request.ActorIdentityID, "agent.rollout", "batch_operation", request.RolloutID, request.ApprovalRequestHash); err != nil {
+				return Operation{}, false, err
+			}
+		} else {
+			approvalHash, _ := approvals.AgentUpgradeBinding(request.NodeID, request.TargetVersion, request.PackageSHA256, request.Architecture)
+			if err := approvals.ConsumeBound(ctx, tx, request.ApprovalID, workspaceID, request.ActorIdentityID, request.Action, "node", request.NodeID, approvalHash); err != nil {
+				return Operation{}, false, err
+			}
+			request.ApprovalRequestHash = approvalHash
 		}
-		request.ApprovalRequestHash = approvalHash
 		// The release identity is approved; only one scheduled upgrade may
 		// advance per node, so a second concurrent attempt fails closed
 		// before any durable intent is written.
@@ -498,7 +582,11 @@ func (s *Service) CreateSynthetic(ctx context.Context, request CreateRequest) (O
 		auditSummary, _ = json.Marshal(map[string]any{"plan_id": request.ApplyMetadata.PlanID, "candidate_hash": fmt.Sprintf("%x", request.CandidateHash), "previous_hash": fmt.Sprintf("%x", request.ExpectedCurrentHash), "desired_revision": request.DesiredRevision})
 	}
 	if request.Kind == AgentUpgrade {
-		auditSummary, _ = json.Marshal(map[string]any{"from_version": request.FromVersion, "target_version": request.TargetVersion, "architecture": request.Architecture, "package_sha256": fmt.Sprintf("%x", request.PackageSHA256)})
+		summary := map[string]any{"from_version": request.FromVersion, "target_version": request.TargetVersion, "architecture": request.Architecture, "package_sha256": fmt.Sprintf("%x", request.PackageSHA256)}
+		if request.RolloutID != uuid.Nil {
+			summary["rollout_id"] = request.RolloutID
+		}
+		auditSummary, _ = json.Marshal(summary)
 	}
 	if err := audit.AppendChain(ctx, tx, audit.ChainRecord{EventID: auditID, WorkspaceID: workspaceID, ActorType: "user", ActorID: actorID, SessionID: optionalUUID(request.ActorSessionID), Action: action, ResourceType: "operation", ResourceID: operationID, NodeID: &request.NodeID, CommandID: &commandID, ApprovalID: optionalUUID(request.ApprovalID), RequestID: request.RequestID, TraceID: traceID(request.Traceparent), Reason: reason, AfterSummary: auditSummary, At: now}); err != nil {
 		return Operation{}, false, fmt.Errorf("append operation audit intent: %w", err)
@@ -1527,7 +1615,13 @@ func validateCreate(r CreateRequest) error {
 	if len(r.IdempotencyKey) < 1 || len(r.IdempotencyKey) > 128 || strings.TrimSpace(r.IdempotencyKey) != r.IdempotencyKey {
 		return ErrInvalidRequest
 	}
-	if len(r.ApprovalRequestHash) != 0 && r.Kind != CertificateP12 && r.Kind != CertificateRevoke {
+	if len(r.ApprovalRequestHash) != 0 && r.Kind != CertificateP12 && r.Kind != CertificateRevoke && !(r.Kind == AgentUpgrade && r.RolloutID != uuid.Nil) {
+		return ErrInvalidRequest
+	}
+	if r.Kind == AgentUpgrade && r.RolloutID == uuid.Nil && len(r.ApprovalRequestHash) != 0 {
+		return ErrInvalidRequest
+	}
+	if r.RolloutID != uuid.Nil && (r.RolloutID.Version() != 7 || r.Kind != AgentUpgrade || len(r.ApprovalRequestHash) != sha256.Size) {
 		return ErrInvalidRequest
 	}
 	if r.Kind != SyntheticNoop && r.Kind != SyntheticEcho && r.Kind != SessionDisconnect && r.Kind != SessionTerminate && r.Kind != IPBanRemove && r.Kind != ServiceReload && r.Kind != ConfigPlan && r.Kind != ConfigApply && r.Kind != CertificateCSR && r.Kind != CertificateP12 && r.Kind != CertificateRevoke && r.Kind != AgentUpgrade {

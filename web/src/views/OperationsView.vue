@@ -1,12 +1,14 @@
 <script setup lang="ts">
 import { RefreshCw, Server } from "@lucide/vue";
-import type { Operation } from "@ocservia/api-client";
+import type { AgentRollout, Operation } from "@ocservia/api-client";
 import { computed, onBeforeUnmount, onMounted, ref } from "vue";
 import { useI18n } from "vue-i18n";
+import { useRouter } from "vue-router";
 
 import {
   getOperation,
   getWorkspace,
+  listAgentRollouts,
   listOperations,
   workspaceChangedEvent,
   workspaceContext,
@@ -21,6 +23,9 @@ import { operationStatusKey } from "../shared/operation-status";
 
 const operations = ref<Operation[]>([]);
 const { t } = useI18n();
+const router = useRouter();
+const rollouts = ref<AgentRollout[]>([]);
+const rolloutsUnavailable = ref(false);
 const detailState = ref<OperationDetailState<Operation>>(
   startOperationDetail(),
 );
@@ -127,14 +132,31 @@ async function inspectOperation(operationId: string): Promise<void> {
   }
 }
 
+async function loadRollouts(): Promise<void> {
+  try {
+    const page = await listAgentRollouts(10);
+    rollouts.value = page.rollouts;
+    rolloutsUnavailable.value = false;
+  } catch {
+    rollouts.value = [];
+    rolloutsUnavailable.value = true;
+  }
+}
+
+function openRollout(rolloutId: string): void {
+  void router.push({ name: "rollout-detail", params: { rolloutId } });
+}
+
 function refreshForWorkspace(): void {
   detailState.value = startOperationDetail();
   void loadOperations();
+  void loadRollouts();
 }
 
 onMounted(() => {
   window.addEventListener(workspaceChangedEvent, refreshForWorkspace);
   void loadOperations();
+  void loadRollouts();
 });
 onBeforeUnmount(() => {
   window.removeEventListener(workspaceChangedEvent, refreshForWorkspace);
@@ -163,6 +185,46 @@ onBeforeUnmount(() => {
     <p v-if="error" class="operation-error page-error" role="alert">
       {{ error }}
     </p>
+    <section
+      v-if="rollouts.length || !rolloutsUnavailable"
+      class="rollouts-panel"
+    >
+      <h2>{{ $t("rollouts") }}</h2>
+      <div v-if="rollouts.length" class="operations-table-wrap">
+        <table class="operations-table">
+          <thead>
+            <tr>
+              <th>{{ $t("targetVersion") }}</th>
+              <th>{{ $t("state") }}</th>
+              <th>{{ $t("reason") }}</th>
+              <th>{{ $t("created") }}</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr
+              v-for="item in rollouts"
+              :key="item.id"
+              tabindex="0"
+              @click="openRollout(item.id)"
+              @keydown.enter="openRollout(item.id)"
+            >
+              <td>
+                <code>{{ item.targetVersion }}</code>
+              </td>
+              <td>
+                <span class="state-dot" :class="item.state"></span
+                >{{ $t(`rolloutState_${item.state}`) }}
+              </td>
+              <td>{{ item.reason }}</td>
+              <td>{{ new Date(item.createdAt).toLocaleString() }}</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+      <div v-else class="empty-state">
+        <Server :size="24" /><span>{{ $t("noRollouts") }}</span>
+      </div>
+    </section>
     <div v-if="loading && operations.length === 0" class="detail-state">
       <Server :size="24" /><span>{{ $t("loading") }}</span>
     </div>

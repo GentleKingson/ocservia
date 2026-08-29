@@ -921,6 +921,108 @@ paths:
               schema: { $ref: "#/components/schemas/UserBatch" }
         "404": { $ref: "#/components/responses/Problem" }
         default: { $ref: "#/components/responses/Problem" }
+  /agent-rollouts:
+    post:
+      operationId: createAgentRollout
+      summary: Create a durable canary and rolling agent upgrade rollout
+      description: >-
+        Creates a server-owned fleet rollout with a mandatory one-node canary
+        and fixed-size batches. The server canonicalizes and sorts the node
+        set, recomputes eligibility from durable evidence, resolves package
+        digests from the trusted release catalog, and consumes one approval
+        bound to the exact immutable rollout request. Every generated node
+        upgrade reuses the reconciled single-node operation; the rollout
+        survives browser closure and Controller restart.
+      tags: [operations]
+      parameters:
+        - $ref: "#/components/parameters/WorkspaceId"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AgentRolloutCreateRequest" }
+      responses:
+        "201":
+          description: Rollout recorded with selected nodes and explained exclusions.
+          headers:
+            Location:
+              schema: { type: string, format: uri-reference }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AgentRollout" }
+        "400": { $ref: "#/components/responses/Problem" }
+        "403": { $ref: "#/components/responses/Problem" }
+        "404": { $ref: "#/components/responses/Problem" }
+        "409": { $ref: "#/components/responses/Problem" }
+        "415": { $ref: "#/components/responses/UnsupportedMediaType" }
+        default: { $ref: "#/components/responses/Problem" }
+    get:
+      operationId: listAgentRollouts
+      summary: List the workspace's most recent fleet agent rollouts
+      tags: [operations]
+      parameters:
+        - $ref: "#/components/parameters/WorkspaceId"
+        - name: limit
+          in: query
+          required: false
+          schema: { type: integer, minimum: 1, maximum: 100, default: 50 }
+      responses:
+        "200":
+          description: Most recent rollouts with their per-node projections.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AgentRolloutPage" }
+        "400": { $ref: "#/components/responses/Problem" }
+        "403": { $ref: "#/components/responses/Problem" }
+        default: { $ref: "#/components/responses/Problem" }
+  /agent-rollouts/{rollout_id}:
+    get:
+      operationId: getAgentRollout
+      summary: Get rollout state, batch progress, and per-node outcomes
+      tags: [operations]
+      parameters:
+        - $ref: "#/components/parameters/WorkspaceId"
+        - name: rollout_id
+          in: path
+          required: true
+          schema: { $ref: "#/components/schemas/UuidV7" }
+      responses:
+        "200":
+          description: Rollout header and nodes in stable ordinal order.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AgentRollout" }
+        "403": { $ref: "#/components/responses/Problem" }
+        "404": { $ref: "#/components/responses/Problem" }
+        default: { $ref: "#/components/responses/Problem" }
+  /agent-rollouts/{rollout_id}/resume:
+    post:
+      operationId: resumeAgentRollout
+      summary: Resume a paused rollout after an explicit operator decision
+      description: >-
+        Requeues failed, unknown, and rolled-back nodes of the current batch
+        for a fresh eligibility check. Succeeded nodes are never redispatched
+        and no batch ever advances automatically while paused.
+      tags: [operations]
+      parameters:
+        - $ref: "#/components/parameters/WorkspaceId"
+        - $ref: "#/components/parameters/IdempotencyKey"
+        - name: rollout_id
+          in: path
+          required: true
+          schema: { $ref: "#/components/schemas/UuidV7" }
+      responses:
+        "200":
+          description: Rollout resumed.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AgentRollout" }
+        "403": { $ref: "#/components/responses/Problem" }
+        "404": { $ref: "#/components/responses/Problem" }
+        "409": { $ref: "#/components/responses/Problem" }
+        "415": { $ref: "#/components/responses/UnsupportedMediaType" }
+        default: { $ref: "#/components/responses/Problem" }
   /user-operations/metrics:
     get:
       operationId: getUserOperationMetrics
@@ -2161,6 +2263,97 @@ components:
           items: { $ref: "#/components/schemas/UserBatchItem" }
         created_at: { $ref: "#/components/schemas/UtcDateTime" }
         updated_at: { $ref: "#/components/schemas/UtcDateTime" }
+    AgentRolloutCreateRequest:
+      type: object
+      additionalProperties: false
+      required: [target_version, node_ids, reason, approval_id]
+      properties:
+        target_version:
+          type: string
+          minLength: 5
+          maxLength: 128
+          description: Semantic version of the trusted release; every package digest resolves server-side per node architecture.
+        node_ids:
+          type: array
+          minItems: 1
+          maxItems: 500
+          description: Candidate nodes; the server sorts, deduplicates, and rechecks eligibility. Ineligible nodes are excluded with a reason.
+          items: { $ref: "#/components/schemas/UuidV7" }
+        batch_size:
+          type: integer
+          minimum: 1
+          maximum: 20
+          default: 5
+          description: Nodes per batch after the mandatory one-node canary.
+        reason: { type: string, minLength: 1, maxLength: 512 }
+        approval_id:
+          $ref: "#/components/schemas/UuidV7"
+      description: Approval is bound to the immutable rollout request hash (target version, sorted node set, batch size, stop-on-failure policy).
+    AgentRolloutNode:
+      type: object
+      additionalProperties: false
+      required: [node_id, ordinal, batch, state]
+      properties:
+        node_id: { $ref: "#/components/schemas/UuidV7" }
+        ordinal: { type: integer, minimum: 0 }
+        batch:
+          type: integer
+          minimum: 0
+          description: Batch 0 is the mandatory single-node canary.
+        state:
+          type: string
+          enum: [pending, running, succeeded, failed, rolled_back, unknown, skipped]
+        operation_id:
+          $ref: "#/components/schemas/UuidV7"
+        from_version: { type: string }
+        failure_code: { type: string }
+      description: One selected node in stable sorted order; operation_id links to the underlying single-node upgrade operation.
+    AgentRolloutExclusion:
+      type: object
+      additionalProperties: false
+      required: [node_id, reason]
+      properties:
+        node_id: { $ref: "#/components/schemas/UuidV7" }
+        reason:
+          type: string
+          enum: [not_trusted, offline, stale, missing_release_metadata, unknown_version, already_current, ahead, missing_capability, upgrade_in_progress]
+      description: Why a requested node was not selected at creation time.
+    AgentRollout:
+      type: object
+      additionalProperties: false
+      required: [id, workspace_id, target_version, state, batch_size, stop_on_failure, reason, approval_id, created_by, current_batch, created_at, updated_at]
+      properties:
+        id: { $ref: "#/components/schemas/UuidV7" }
+        workspace_id: { $ref: "#/components/schemas/UuidV7" }
+        target_version: { type: string }
+        state: { type: string, enum: [queued, running, paused, succeeded, failed, cancelled] }
+        batch_size: { type: integer, minimum: 1, maximum: 20 }
+        stop_on_failure: { type: boolean }
+        reason: { type: string }
+        approval_id: { $ref: "#/components/schemas/UuidV7" }
+        created_by: { $ref: "#/components/schemas/UuidV7" }
+        current_batch: { type: integer, minimum: 0 }
+        pause_code: { type: string }
+        created_at: { $ref: "#/components/schemas/UtcDateTime" }
+        updated_at: { $ref: "#/components/schemas/UtcDateTime" }
+        nodes:
+          type: array
+          maxItems: 500
+          items: { $ref: "#/components/schemas/AgentRolloutNode" }
+        excluded:
+          type: array
+          maxItems: 500
+          items: { $ref: "#/components/schemas/AgentRolloutExclusion" }
+      description: Durable server-side orchestration state; failed and unknown node outcomes always pause the rollout.
+    AgentRolloutPage:
+      type: object
+      additionalProperties: false
+      required: [rollouts]
+      properties:
+        rollouts:
+          type: array
+          maxItems: 100
+          items: { $ref: "#/components/schemas/AgentRollout" }
     QueueMetrics:
       type: object
       additionalProperties: false
@@ -2695,6 +2888,23 @@ components:
               minLength: 5
               maxLength: 128
               description: The approval binds this version plus the server-resolved package digest and architecture.
+        agent_rollout:
+          type: object
+          additionalProperties: false
+          required: [target_version, node_ids, batch_size, stop_on_failure]
+          properties:
+            target_version:
+              type: string
+              minLength: 5
+              maxLength: 128
+            node_ids:
+              type: array
+              minItems: 1
+              maxItems: 500
+              items: { $ref: "#/components/schemas/UuidV7" }
+            batch_size: { type: integer, minimum: 1, maximum: 20 }
+            stop_on_failure: { type: boolean }
+          description: Required for agent.rollout; the approval binds the immutable rollout request hash.
     ApprovalDecision:
       type: object
       additionalProperties: false

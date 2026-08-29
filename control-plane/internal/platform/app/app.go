@@ -134,6 +134,7 @@ func Run(ctx context.Context, cfg config.Config, build BuildInfo, logger *slog.L
 			return fmt.Errorf("load trusted agent release manifest: %w", err)
 		}
 	}
+	operationService.EnableReleaseCatalog(releaseCatalog)
 	workerErr := make(chan error, 5)
 	maintenanceErr := make(chan error, 1)
 	var trust *trustserver.Server
@@ -266,6 +267,9 @@ func Run(ctx context.Context, cfg config.Config, build BuildInfo, logger *slog.L
 					}
 					span.End()
 					logger.InfoContext(sessionCtx, "user operations scheduler completed", "duration_ms", time.Since(started).Milliseconds(), "submission_limit", cfg.UserOperationConcurrency)
+					if err := operationService.AdvanceAgentRollouts(sessionCtx); err != nil {
+						logger.ErrorContext(sessionCtx, "advance agent rollouts", "error", err)
+					}
 					if err := telemetryService.Maintain(sessionCtx); err != nil {
 						return err
 					}

@@ -23,5 +23,8 @@ tmp/
 .cache/
 .zcode/
 
+# Local Mimosa runtime state and reports.
+**/.mimosa/
+
 target/
 node_modules/

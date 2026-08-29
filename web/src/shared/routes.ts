@@ -4,6 +4,7 @@ import NodeDetailView from "../views/NodeDetailView.vue";
 import NodesView from "../views/NodesView.vue";
 import OperationsView from "../views/OperationsView.vue";
 import OverviewView from "../views/OverviewView.vue";
+import RolloutDetailView from "../views/RolloutDetailView.vue";
 import SettingsView from "../views/SettingsView.vue";
 
 const AuditPlaceholderView = {
@@ -26,6 +27,11 @@ export const routeRecords: RouteRecordRaw[] = [
     component: NodeDetailView,
   },
   { path: "/operations", name: "operations", component: OperationsView },
+  {
+    path: "/rollouts/:rolloutId",
+    name: "rollout-detail",
+    component: RolloutDetailView,
+  },
   { path: "/audit", name: "audit", component: AuditPlaceholderView },
   { path: "/settings", name: "settings", component: SettingsView },
   ...(developmentRuntime

@@ -123,7 +123,11 @@ test("sets an upstream quota form through the node-scoped adapter", async ({
 
   await page.goto("/nodes");
   await page.getByText("Policy node").click();
+  const policyLoaded = page.waitForResponse((response) =>
+    response.url().endsWith(`/api/v1/nodes/${nodeId}/users/alice/policy`),
+  );
   await page.getByTitle("Quota and expiry").click();
+  await policyLoaded;
   await page.getByLabel("Quota period").selectOption("monthly");
   await page.getByLabel("Quota size").fill("2");
   await page.getByLabel("Quota unit").selectOption("GiB");

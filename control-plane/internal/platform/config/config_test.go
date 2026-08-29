@@ -374,7 +374,7 @@ func TestProductionRequiresAbsoluteControllerCommandSigningKey(t *testing.T) {
 	cfg.Environment = "production"
 	cfg.OIDCIssuer = "https://id.example.test"
 	cfg.OIDCClientID = "ocservia"
-	cfg.OIDCClientSecret = "test-secret"
+	cfg.OIDCClientSecret = strings.Repeat("s", 11)
 	cfg.OIDCRedirectURL = "https://ocservia.example.test/api/v1/auth/callback"
 	cfg.SessionKey = make([]byte, 32)
 	cfg.AuditCheckpointKey = make([]byte, 32)

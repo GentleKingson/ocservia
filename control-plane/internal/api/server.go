@@ -130,6 +130,10 @@ func New(address string, pool *pgxpool.Pool, build BuildInfo, logger *slog.Logge
 	mux.HandleFunc("PUT /api/v1/nodes/{node_id}/users/{username}/policy", s.requireOperationAuth(s.setUserPolicy))
 	mux.HandleFunc("POST /api/v1/user-batches", s.requireOperationAuth(s.createUserBatch))
 	mux.HandleFunc("GET /api/v1/user-batches/{batch_id}", s.requireOperationAuth(s.getUserBatch))
+	mux.HandleFunc("POST /api/v1/agent-rollouts", s.requireOperationAuth(s.createAgentRollout))
+	mux.HandleFunc("GET /api/v1/agent-rollouts", s.requireOperationAuth(s.listAgentRollouts))
+	mux.HandleFunc("GET /api/v1/agent-rollouts/{rollout_id}", s.requireOperationAuth(s.getAgentRollout))
+	mux.HandleFunc("POST /api/v1/agent-rollouts/{rollout_id}/resume", s.requireOperationAuth(s.resumeAgentRollout))
 	mux.HandleFunc("GET /api/v1/user-operations/metrics", s.requireOperationAuth(s.userOperationMetrics))
 	mux.HandleFunc("POST /api/v1/nodes/{node_id}/config-plans", s.requireOperationAuth(s.createConfigPlan))
 	mux.HandleFunc("GET /api/v1/config-plans/{plan_id}", s.requireOperationAuth(s.getConfigPlan))
@@ -389,6 +393,15 @@ func routeMethod(path string) (string, bool) {
 	}
 	if len(parts) == 4 && parts[0] == "api" && parts[1] == "v1" && parts[2] == "user-batches" && parts[3] != "" {
 		return http.MethodGet, true
+	}
+	if path == "/api/v1/agent-rollouts" {
+		return "GET_OR_POST", true
+	}
+	if len(parts) == 4 && parts[0] == "api" && parts[1] == "v1" && parts[2] == "agent-rollouts" && parts[3] != "" {
+		return http.MethodGet, true
+	}
+	if len(parts) == 5 && parts[0] == "api" && parts[1] == "v1" && parts[2] == "agent-rollouts" && parts[3] != "" && parts[4] == "resume" {
+		return http.MethodPost, true
 	}
 	if len(parts) == 5 && parts[0] == "api" && parts[1] == "v1" && parts[2] == "nodes" && parts[3] != "" && parts[4] == "synthetic-commands" {
 		return http.MethodPost, true

@@ -31,6 +31,8 @@ import {
   type CertificateP12Request,
   type CertificateRequest,
   type CertificateRevokeRequest,
+  type AgentRollout,
+  type AgentRolloutPage,
 } from "@ocservia/api-client";
 
 const devAuthToken = import.meta.env.VITE_DEV_AUTH_TOKEN;
@@ -696,6 +698,71 @@ export async function upgradeNodeAgent(
       idempotencyKey: newIdempotencyKey(),
       ifMatch: `"revision-${String(node.version)}"`,
       agentUpgradeRequest: { targetVersion, approvalId, reason },
+    },
+    requestInit(signal),
+  );
+}
+
+// Fleet rollouts are orchestrated server-side: the browser only selects the
+// target version, candidate nodes, and batch size, then tracks durable
+// rollout state that survives browser closure and Controller restart.
+export async function createAgentRollout(
+  targetVersion: string,
+  nodeIds: string[],
+  batchSize: number,
+  reason: string,
+  approvalId: string,
+  signal?: AbortSignal,
+): Promise<AgentRollout> {
+  return operations.createAgentRollout(
+    {
+      idempotencyKey: newIdempotencyKey(),
+      xWorkspaceID: await workspaceID(),
+      agentRolloutCreateRequest: {
+        targetVersion,
+        nodeIds,
+        batchSize,
+        reason,
+        approvalId,
+      },
+    },
+    requestInit(signal),
+  );
+}
+
+export async function listAgentRollouts(
+  limit?: number,
+  signal?: AbortSignal,
+): Promise<AgentRolloutPage> {
+  const xWorkspaceID = await workspaceID();
+  return operations.listAgentRollouts(
+    limit === undefined ? { xWorkspaceID } : { xWorkspaceID, limit },
+    requestInit(signal),
+  );
+}
+
+export async function getAgentRollout(
+  rolloutId: string,
+  signal?: AbortSignal,
+): Promise<AgentRollout> {
+  return operations.getAgentRollout(
+    {
+      xWorkspaceID: await workspaceID(),
+      rolloutId,
+    },
+    requestInit(signal),
+  );
+}
+
+export async function resumeAgentRollout(
+  rolloutId: string,
+  signal?: AbortSignal,
+): Promise<AgentRollout> {
+  return operations.resumeAgentRollout(
+    {
+      idempotencyKey: newIdempotencyKey(),
+      xWorkspaceID: await workspaceID(),
+      rolloutId,
     },
     requestInit(signal),
   );

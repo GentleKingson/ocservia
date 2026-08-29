@@ -13,6 +13,13 @@
  */
 
 import { mapValues } from "../runtime";
+import type { ApprovalRequestAgentRollout } from "./ApprovalRequestAgentRollout";
+import {
+  ApprovalRequestAgentRolloutFromJSON,
+  ApprovalRequestAgentRolloutFromJSONTyped,
+  ApprovalRequestAgentRolloutToJSON,
+  ApprovalRequestAgentRolloutToJSONTyped,
+} from "./ApprovalRequestAgentRollout";
 import type { ApprovalRequestCertificate } from "./ApprovalRequestCertificate";
 import {
   ApprovalRequestCertificateFromJSON,
@@ -115,6 +122,12 @@ export interface ApprovalRequest {
    * @memberof ApprovalRequest
    */
   agentUpgrade?: ApprovalRequestAgentUpgrade;
+  /**
+   *
+   * @type {ApprovalRequestAgentRollout}
+   * @memberof ApprovalRequest
+   */
+  agentRollout?: ApprovalRequestAgentRollout;
 }
 
 /**
@@ -179,6 +192,10 @@ export function ApprovalRequestFromJSONTyped(
       json["agent_upgrade"] == null
         ? undefined
         : ApprovalRequestAgentUpgradeFromJSON(json["agent_upgrade"]),
+    agentRollout:
+      json["agent_rollout"] == null
+        ? undefined
+        : ApprovalRequestAgentRolloutFromJSON(json["agent_rollout"]),
   };
 }
 
@@ -208,5 +225,6 @@ export function ApprovalRequestToJSONTyped(
     certificate: ApprovalRequestCertificateToJSON(value["certificate"]),
     role_binding: ApprovalRequestRoleBindingToJSON(value["roleBinding"]),
     agent_upgrade: ApprovalRequestAgentUpgradeToJSON(value["agentUpgrade"]),
+    agent_rollout: ApprovalRequestAgentRolloutToJSON(value["agentRollout"]),
   };
 }
