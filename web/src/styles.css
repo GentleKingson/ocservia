@@ -1153,3 +1153,147 @@ h1 {
     grid-template-columns: 1fr;
   }
 }
+
+/* Fleet agent rollouts */
+.rollout-actions {
+  display: flex;
+  justify-content: flex-end;
+  padding: 10px 2px 0;
+}
+.rollouts-panel {
+  display: grid;
+  gap: 10px;
+  padding: 16px;
+  border: 1px solid #e3e7e4;
+  border-radius: 12px;
+  background: #fff;
+}
+.rollouts-panel h2 {
+  margin: 0;
+  font-size: 15px;
+}
+.rollouts-panel .operations-table tr {
+  cursor: pointer;
+}
+.rollout-summary dl {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 12px;
+  margin: 0;
+}
+.rollout-summary dt {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: #7b8783;
+}
+.rollout-summary dd {
+  margin: 4px 0 0;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+.rollout-paused {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  padding: 14px 16px;
+  border: 1px solid #c97c22;
+  border-radius: 12px;
+  background: #fdf4e7;
+}
+.rollout-paused strong {
+  display: block;
+}
+.rollout-paused span,
+.rollout-paused small {
+  display: block;
+  color: #6d5a3f;
+}
+.rollout-batches {
+  display: grid;
+  gap: 12px;
+}
+.rollout-batches article {
+  padding: 14px 16px;
+  border: 1px solid #e3e7e4;
+  border-radius: 12px;
+  background: #fff;
+}
+.rollout-batches header {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+}
+.rollout-batches h2 {
+  margin: 0;
+  font-size: 14px;
+}
+.rollout-batch-failed {
+  color: #b3401f;
+}
+.rollout-batches ul {
+  margin: 10px 0 0;
+  padding: 0;
+  list-style: none;
+  display: grid;
+  gap: 6px;
+}
+.rollout-batches li {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.rollout-failure-code {
+  color: #b3401f;
+}
+.rollout-exclusions {
+  padding: 14px 16px;
+  border: 1px solid #e3e7e4;
+  border-radius: 12px;
+  background: #fff;
+}
+.rollout-exclusions h2 {
+  margin: 0 0 8px;
+  font-size: 14px;
+}
+.rollout-exclusions ul {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: grid;
+  gap: 6px;
+}
+.rollout-exclusions li {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.link-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 0;
+  border: none;
+  background: none;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+.state-dot.succeeded,
+.state-dot.running {
+  background: #28a96b;
+}
+.state-dot.failed,
+.state-dot.unknown,
+.state-dot.rolled_back {
+  background: #c94b22;
+}
+.state-dot.skipped {
+  background: #c97c22;
+}
+.state-dot.paused {
+  background: #c97c22;
+}
