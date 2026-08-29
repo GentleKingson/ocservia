@@ -26,6 +26,15 @@ if [[ ! "${VERSION}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || [[ "${BASELINE_RELEASE}" 
   exit 2
 fi
 BASELINE_VERSION="${BASELINE_RELEASE#v}"
+# The baseline GitHub release is not immutable, so the tag alone does not pin
+# the historical artifacts. This table fixes the exact SHA256SUMS bytes each
+# smoked baseline release must match, and a release without a pin here
+# refuses to run; the signature and package-digest checks below extend the
+# pinned identity to the installed deb.
+case "${BASELINE_RELEASE}" in
+  v0.1.1) baseline_sums_sha256=518a4e6e0393dfc5378d117069c7affdeeb26d7dea84521e128c40256d11a1d9 ;;
+  *) echo "no pinned SHA256SUMS identity for baseline release ${BASELINE_RELEASE}" >&2; exit 2 ;;
+esac
 if [[ ! -f "${CANDIDATE_DEB}" ]]; then
   echo "candidate deb not found: ${CANDIDATE_DEB}" >&2
   exit 2
@@ -79,9 +88,10 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
-# The baseline identity is pinned by tag. Verify the manifest signature and
-# the baseline deb digest against the published release assets before
-# installing anything; this validates release-set integrity, not the
+# The pinned SHA256SUMS digest carries the historical identity: the tag
+# locates the assets, the pin fixes their bytes. Verify it before trusting
+# any other downloaded asset, then verify the manifest signature and the
+# baseline deb digest; this validates release-set integrity, not the
 # production signing key (that is provisioned out of band on real hosts).
 base_url="https://github.com/GentleKingson/ocservia/releases/download/${BASELINE_RELEASE}"
 for asset in \
@@ -90,6 +100,8 @@ for asset in \
   curl --fail --silent --show-error --location \
     -o "${download_dir}/${asset}" "${base_url}/${asset}"
 done
+printf '%s  %s\n' "${baseline_sums_sha256}" "${download_dir}/SHA256SUMS" \
+  | sha256sum -c --strict -
 openssl pkeyutl -verify -rawin -pubin -inkey "${download_dir}/release-signing.pub.pem" \
   -in "${download_dir}/SHA256SUMS" -sigfile "${download_dir}/SHA256SUMS.sig" \
   >"${ARTIFACT_DIR}/baseline-manifest-signature.log" 2>&1 \
