@@ -292,16 +292,30 @@ stays a dry run and never uploads release assets.
   install/upgrade/erase lifecycle inside a systemd-enabled Rocky Linux 9
   container built for the run. A failure on either architecture fails the
   workflow before any assets can be published.
+- Each build leg also runs
+  `scripts/release-baseline-upgrade-smoke.sh`: it installs the published
+  v0.1.1 `.deb` after verifying it against the release's signed
+  `SHA256SUMS`, whose exact bytes the smoke pins in-repo (the v0.1.1
+  release is not immutable), then upgrades it in place to the candidate
+  while asserting the package state and the rollback snapshot. The
+  published-baseline leg is deb-only; rpm cross-version coverage remains
+  the fabricated-version lifecycle smoke inside the Rocky Linux 9
+  container.
 - The validate job downloads both legs' artifacts and runs
   `scripts/validate-release-packages.sh`: presence and naming of the six
   packages, both signed triples verified against the pinned fingerprint,
   `MANIFEST` and ELF architecture agreement, deb/rpm architecture metadata,
   identical embedded payloads, and a canonical `SHA256SUMS`.
-- The publish job runs only for release events with `contents: write`, signs
-  `SHA256SUMS` with the `AGENT_SIGNING_KEY` secret, revalidates against the
-  `AGENT_TRUSTED_KEY_SHA256` pin, and only then uploads the assets to the
-  release. Without the signing secret the build jobs sign with an ephemeral
-  key, which the publish job rejects.
+- Every build job signs with an ephemeral key generated on the runner, so a
+  `workflow_dispatch` run never touches the production signing credential,
+  and the validate job checks the internal consistency of the signed set
+  without the production pin.
+- The publish job runs only for release events behind the protected
+  `release-publishing` environment with `contents: write`: it re-signs both
+  archive checksum triples with the release key, rebuilds the native
+  packages with the release trust anchor, validates the whole set against
+  the `AGENT_TRUSTED_KEY_SHA256` pin, signs the unified `SHA256SUMS`, and
+  only then uploads the assets to the release.
 
 ## Deferred native validation
 
