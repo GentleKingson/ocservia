@@ -222,9 +222,11 @@ fence-capable package manually (or with the native installers), approve its
 `v2` capability, and Controller-driven upgrades start from there. Upgrading
 an existing 0.1.x installation with the native package manager (`dpkg -i`,
 `rpm -Uvh`) preserves node identity, configuration, and durable state, and
-leaves services stopped rather than auto-enabled; the release pipeline
-exercises exactly this published-baseline → candidate hop on both
-architectures.
+leaves services stopped rather than auto-enabled. The release pipeline
+exercises the published v0.1.1 DEB → candidate hop on both amd64 and arm64;
+RPM package-manager upgrade semantics are covered by the native
+fabricated-version lifecycle smoke, and a published historical RPM baseline
+leg is not yet implemented.
 
 The operation is created `queued`, and the agent's scheduling acknowledgement
 moves it to the non-terminal `accepted` state — an acknowledged schedule is
