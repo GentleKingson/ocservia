@@ -292,6 +292,13 @@ stays a dry run and never uploads release assets.
   install/upgrade/erase lifecycle inside a systemd-enabled Rocky Linux 9
   container built for the run. A failure on either architecture fails the
   workflow before any assets can be published.
+- Each build leg also runs
+  `scripts/release-baseline-upgrade-smoke.sh`: it installs the published
+  v0.1.1 `.deb` after verifying it against the release's signed
+  `SHA256SUMS`, then upgrades it in place to the candidate while asserting
+  the package state and the rollback snapshot. The published-baseline leg
+  is deb-only; rpm cross-version coverage remains the fabricated-version
+  lifecycle smoke inside the Rocky Linux 9 container.
 - The validate job downloads both legs' artifacts and runs
   `scripts/validate-release-packages.sh`: presence and naming of the six
   packages, both signed triples verified against the pinned fingerprint,
