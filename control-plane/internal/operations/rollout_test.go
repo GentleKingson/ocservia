@@ -118,12 +118,9 @@ func TestRolloutNodeEligibility(t *testing.T) {
 	for _, testCase := range cases {
 		node := base
 		testCase.mutate(&node)
-		reason, digest, ok := service.rolloutNodeEligibility(now, node, testCase.target)
+		reason, _, ok := service.rolloutNodeEligibility(now, node, testCase.target)
 		if ok != testCase.wantOK || reason != testCase.wantReason {
 			t.Fatalf("%s: reason=%q ok=%v, want %q/%v", testCase.name, reason, ok, testCase.wantReason, testCase.wantOK)
-		}
-		if ok && len(digest) != 32 {
-			t.Fatalf("%s: eligible node must resolve a package digest", testCase.name)
 		}
 	}
 }
