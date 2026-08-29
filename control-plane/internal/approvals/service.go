@@ -97,6 +97,21 @@ func AgentUpgradeBinding(nodeID uuid.UUID, targetVersion string, packageSHA256 [
 	return digest[:], summary
 }
 
+// AgentRolloutBinding binds one approval to the exact immutable fleet
+// rollout request: target version, the sorted node set, the batch size, and
+// the stop-on-failure policy. The consumed approval authorizes exactly the
+// reviewed rollout and nothing else; per-node eligibility and command
+// authorization still apply at dispatch time.
+func AgentRolloutBinding(targetVersion string, nodeIDs []uuid.UUID, batchSize int, stopOnFailure bool) ([]byte, json.RawMessage) {
+	identifiers := make([]string, 0, len(nodeIDs))
+	for _, nodeID := range nodeIDs {
+		identifiers = append(identifiers, nodeID.String())
+	}
+	summary, _ := json.Marshal(map[string]any{"action": "agent.rollout", "target_version": targetVersion, "node_ids": identifiers, "batch_size": batchSize, "stop_on_failure": stopOnFailure})
+	digest := sha256.Sum256(append([]byte("ocservia/approval-request/agent-rollout/v1\x00"), summary...))
+	return digest[:], summary
+}
+
 func (s *Service) Create(ctx context.Context, request Request) (Approval, error) {
 	request.Action = strings.TrimSpace(request.Action)
 	request.ResourceType = strings.TrimSpace(request.ResourceType)

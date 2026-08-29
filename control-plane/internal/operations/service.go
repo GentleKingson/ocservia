@@ -18,6 +18,7 @@ import (
 	"github.com/GentleKingson/ocservia/control-plane/internal/audit"
 	"github.com/GentleKingson/ocservia/control-plane/internal/commandauth"
 	"github.com/GentleKingson/ocservia/control-plane/internal/commandlimit"
+	"github.com/GentleKingson/ocservia/control-plane/internal/releasecatalog"
 	"github.com/GentleKingson/ocservia/control-plane/internal/semanticpayload"
 	"github.com/GentleKingson/ocservia/control-plane/internal/telemetry"
 	"github.com/google/uuid"
@@ -101,6 +102,10 @@ type CreateRequest struct {
 	PackageSHA256       []byte
 	Architecture        string
 	FromVersion         string
+	// RolloutID binds a generated node upgrade to its durable fleet rollout.
+	// The rollout approval was consumed once at rollout creation; dispatch
+	// validates against the consumed binding instead of consuming again.
+	RolloutID           uuid.UUID
 	SessionID           string
 	BootID              string
 	IP                  string
@@ -192,6 +197,7 @@ type Service struct {
 	commandLimit              int
 	signer                    *commandauth.Signer
 	agentUpgradeReconcileTime time.Duration
+	releaseCatalog            *releasecatalog.Catalog
 }
 
 func New(pool *pgxpool.Pool) *Service {
@@ -217,6 +223,13 @@ func (s *Service) SetAgentUpgradeReconcileTimeout(value time.Duration) error {
 	}
 	s.agentUpgradeReconcileTime = value
 	return nil
+}
+
+// EnableReleaseCatalog installs the operator-provisioned trusted release
+// catalog used to resolve package digests for rollout-dispatched node
+// upgrades. Without it, rollout creation and advancement fail closed.
+func (s *Service) EnableReleaseCatalog(catalog *releasecatalog.Catalog) {
+	s.releaseCatalog = catalog
 }
 
 func (s *Service) CreateSynthetic(ctx context.Context, request CreateRequest) (Operation, bool, error) {
@@ -382,11 +395,20 @@ func (s *Service) CreateSynthetic(ctx context.Context, request CreateRequest) (O
 			return Operation{}, false, ErrStaleRevision
 		}
 		request.FromVersion = observedVersion
-		approvalHash, _ := approvals.AgentUpgradeBinding(request.NodeID, request.TargetVersion, request.PackageSHA256, request.Architecture)
-		if err := approvals.ConsumeBound(ctx, tx, request.ApprovalID, workspaceID, request.ActorIdentityID, request.Action, "node", request.NodeID, approvalHash); err != nil {
-			return Operation{}, false, err
+		if request.RolloutID != uuid.Nil {
+			// The rollout approval bound the immutable rollout request and was
+			// consumed when the rollout was created; every generated node
+			// upgrade validates against that consumed binding.
+			if err := approvals.ValidateConsumedBound(ctx, tx, request.ApprovalID, workspaceID, request.ActorIdentityID, "agent.rollout", "batch_operation", request.RolloutID, request.ApprovalRequestHash); err != nil {
+				return Operation{}, false, err
+			}
+		} else {
+			approvalHash, _ := approvals.AgentUpgradeBinding(request.NodeID, request.TargetVersion, request.PackageSHA256, request.Architecture)
+			if err := approvals.ConsumeBound(ctx, tx, request.ApprovalID, workspaceID, request.ActorIdentityID, request.Action, "node", request.NodeID, approvalHash); err != nil {
+				return Operation{}, false, err
+			}
+			request.ApprovalRequestHash = approvalHash
 		}
-		request.ApprovalRequestHash = approvalHash
 		// The release identity is approved; only one scheduled upgrade may
 		// advance per node, so a second concurrent attempt fails closed
 		// before any durable intent is written.
@@ -498,7 +520,11 @@ func (s *Service) CreateSynthetic(ctx context.Context, request CreateRequest) (O
 		auditSummary, _ = json.Marshal(map[string]any{"plan_id": request.ApplyMetadata.PlanID, "candidate_hash": fmt.Sprintf("%x", request.CandidateHash), "previous_hash": fmt.Sprintf("%x", request.ExpectedCurrentHash), "desired_revision": request.DesiredRevision})
 	}
 	if request.Kind == AgentUpgrade {
-		auditSummary, _ = json.Marshal(map[string]any{"from_version": request.FromVersion, "target_version": request.TargetVersion, "architecture": request.Architecture, "package_sha256": fmt.Sprintf("%x", request.PackageSHA256)})
+		summary := map[string]any{"from_version": request.FromVersion, "target_version": request.TargetVersion, "architecture": request.Architecture, "package_sha256": fmt.Sprintf("%x", request.PackageSHA256)}
+		if request.RolloutID != uuid.Nil {
+			summary["rollout_id"] = request.RolloutID
+		}
+		auditSummary, _ = json.Marshal(summary)
 	}
 	if err := audit.AppendChain(ctx, tx, audit.ChainRecord{EventID: auditID, WorkspaceID: workspaceID, ActorType: "user", ActorID: actorID, SessionID: optionalUUID(request.ActorSessionID), Action: action, ResourceType: "operation", ResourceID: operationID, NodeID: &request.NodeID, CommandID: &commandID, ApprovalID: optionalUUID(request.ApprovalID), RequestID: request.RequestID, TraceID: traceID(request.Traceparent), Reason: reason, AfterSummary: auditSummary, At: now}); err != nil {
 		return Operation{}, false, fmt.Errorf("append operation audit intent: %w", err)
@@ -1527,7 +1553,13 @@ func validateCreate(r CreateRequest) error {
 	if len(r.IdempotencyKey) < 1 || len(r.IdempotencyKey) > 128 || strings.TrimSpace(r.IdempotencyKey) != r.IdempotencyKey {
 		return ErrInvalidRequest
 	}
-	if len(r.ApprovalRequestHash) != 0 && r.Kind != CertificateP12 && r.Kind != CertificateRevoke {
+	if len(r.ApprovalRequestHash) != 0 && r.Kind != CertificateP12 && r.Kind != CertificateRevoke && !(r.Kind == AgentUpgrade && r.RolloutID != uuid.Nil) {
+		return ErrInvalidRequest
+	}
+	if r.Kind == AgentUpgrade && r.RolloutID == uuid.Nil && len(r.ApprovalRequestHash) != 0 {
+		return ErrInvalidRequest
+	}
+	if r.RolloutID != uuid.Nil && (r.RolloutID.Version() != 7 || r.Kind != AgentUpgrade || len(r.ApprovalRequestHash) != sha256.Size) {
 		return ErrInvalidRequest
 	}
 	if r.Kind != SyntheticNoop && r.Kind != SyntheticEcho && r.Kind != SessionDisconnect && r.Kind != SessionTerminate && r.Kind != IPBanRemove && r.Kind != ServiceReload && r.Kind != ConfigPlan && r.Kind != ConfigApply && r.Kind != CertificateCSR && r.Kind != CertificateP12 && r.Kind != CertificateRevoke && r.Kind != AgentUpgrade {
