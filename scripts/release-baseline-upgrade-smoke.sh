@@ -98,7 +98,8 @@ baseline_deb="ocservia-agent_${BASELINE_VERSION}_${PACKAGE_ARCH}.deb"
 (cd "${download_dir}" && grep -F " ${baseline_deb}" SHA256SUMS | sha256sum -c --strict -)
 
 assert_state() {
-  local context="$1" expected_version="$2" want_upgrader="$3" version_output
+  local context="$1" expected_version="$2" want_upgrader="$3" want_version_query="$4"
+  local version_output
   sudo test -x /usr/libexec/ocservia/ocservia-agent \
     || { echo "${context}: Agent binary missing" >&2; exit 1; }
   sudo test -x /usr/libexec/ocservia/ocservia-privd \
@@ -127,15 +128,19 @@ assert_state() {
     [[ "${active}" == "inactive" ]] \
       || { echo "${context}: ${unit} is ${active} without configuration" >&2; exit 1; }
   done
-  # Run as the service user: the installed baseline release refuses to run
-  # as root even for the read-only version query.
-  version_output="$(sudo -u ocserv-agent /usr/libexec/ocservia/ocservia-agent --version)"
-  [[ "${version_output}" == "ocservia-agent ${expected_version}" ]] \
-    || { echo "${context}: observed version is '${version_output}', expected ${expected_version}" >&2; exit 1; }
+  # The candidate binary answers the read-only version query as the service
+  # user. The baseline release predates the --version argument entirely, so
+  # its version identity stays pinned by the embedded archive and dpkg check
+  # above.
+  if [[ "${want_version_query}" == "yes" ]]; then
+    version_output="$(sudo -u ocserv-agent /usr/libexec/ocservia/ocservia-agent --version)"
+    [[ "${version_output}" == "ocservia-agent ${expected_version}" ]] \
+      || { echo "${context}: observed version is '${version_output}', expected ${expected_version}" >&2; exit 1; }
+  fi
 }
 
 { sudo dpkg -i "${download_dir}/${baseline_deb}"; } >"${ARTIFACT_DIR}/baseline-install.log" 2>&1
-assert_state "baseline install" "${BASELINE_VERSION}" no
+assert_state "baseline install" "${BASELINE_VERSION}" no no
 echo "published baseline ${BASELINE_RELEASE} install passed"
 
 # The candidate upgrade preflight requires the shared command verification
@@ -171,7 +176,7 @@ sudo install -o root -g root -m 0600 "${work}/p12-password-seal-private.pem" \
   /etc/ocservia-agent/p12-password-seal-private.pem
 
 { sudo dpkg -i "${CANDIDATE_DEB}"; } >"${ARTIFACT_DIR}/baseline-candidate-upgrade.log" 2>&1
-assert_state "candidate upgrade" "${VERSION}" yes
+assert_state "candidate upgrade" "${VERSION}" yes yes
 sudo test -f /var/lib/ocservia-upgrade/upgrade-backup/MANIFEST.sha256 \
   || { echo "candidate upgrade: rollback snapshot manifest missing" >&2; exit 1; }
 sudo test -s /var/lib/ocservia-upgrade/upgrade-backup/MANIFEST.sha256 \
