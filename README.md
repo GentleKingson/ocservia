@@ -1,7 +1,7 @@
 # ocservia
 
 [![CI](https://github.com/GentleKingson/ocservia/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/GentleKingson/ocservia/actions/workflows/ci.yml)
-[![License](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#license)
+[![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](#license)
 
 **A centralized, security-focused management plane for multiple [ocserv](https://ocserv.openconnect-vpn.net/) nodes.**
 
@@ -246,7 +246,7 @@ The P1 harness exercises up to 500 side-effect-free simulated Agents, fault inje
 ├── testdata/            Shared and cross-language fixtures
 ├── Makefile             Common developer and validation entry points
 ├── SECURITY.md          Private vulnerability-reporting policy
-└── LICENSE-*            MIT and Apache-2.0 license texts
+└── LICENSE              Apache License 2.0
 ```
 
 ## Documentation
@@ -312,10 +312,9 @@ For vulnerabilities, follow [SECURITY.md](SECURITY.md) and use GitHub Private Vu
 
 ## License
 
-Unless otherwise noted, ocservia is dual-licensed under either of the following, at your option:
+Unless otherwise noted, ocservia is licensed under the Apache License 2.0.
 
-- [Apache License 2.0](LICENSE-APACHE)
-- [MIT License](LICENSE-MIT)
+See [LICENSE](LICENSE) for the full license text.
 
 Third-party attribution and licensing information is recorded in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
 

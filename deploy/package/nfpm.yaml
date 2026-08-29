@@ -16,7 +16,7 @@ description: |
   release signing key in trusted staging before install-agent.sh runs, and no
   service is enabled automatically.
 homepage: https://github.com/GentleKingson/ocservia
-license: MIT OR Apache-2.0
+license: Apache-2.0
 depends:
   - openssl
 contents:
