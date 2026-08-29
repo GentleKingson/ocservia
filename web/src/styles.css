@@ -397,7 +397,7 @@ h1 {
 .node-table tbody tr.selected {
   background: #f0f8f4;
 }
-.node-table td:first-child {
+.node-table td:nth-child(2) {
   display: grid;
   align-content: center;
   gap: 4px;
@@ -1112,16 +1112,16 @@ h1 {
   .fleet-layout {
     grid-template-columns: 1fr;
   }
-  .fleet-table th:nth-child(2),
-  .fleet-table td:nth-child(2),
   .fleet-table th:nth-child(3),
   .fleet-table td:nth-child(3),
-  .fleet-table th:nth-child(6),
-  .fleet-table td:nth-child(6),
+  .fleet-table th:nth-child(4),
+  .fleet-table td:nth-child(4),
   .fleet-table th:nth-child(7),
   .fleet-table td:nth-child(7),
   .fleet-table th:nth-child(8),
-  .fleet-table td:nth-child(8) {
+  .fleet-table td:nth-child(8),
+  .fleet-table th:nth-child(9),
+  .fleet-table td:nth-child(9) {
     display: none;
   }
   .node-table th,
