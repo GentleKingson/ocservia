@@ -80,17 +80,14 @@ jobs:
             echo "version=${version}"
             echo "source_date_epoch=$(git log -1 --format=%ct)"
           } >>"${GITHUB_ENV}"
-      - name: Prepare release signing key
-        env:
-          AGENT_SIGNING_KEY_SECRET: ${{ secrets.AGENT_SIGNING_KEY }}
+      - name: Prepare ephemeral build signing key
         run: |
           key_file="${RUNNER_TEMP}/release-signing.key"
-          if [[ -n "${AGENT_SIGNING_KEY_SECRET}" ]]; then
-            printf '%s\n' "${AGENT_SIGNING_KEY_SECRET}" >"${key_file}"
-          else
-            echo "AGENT_SIGNING_KEY secret is not set; signing with an ephemeral dry-run key" >&2
-            openssl genpkey -algorithm ED25519 -out "${key_file}" >/dev/null 2>&1
-          fi
+          # Every build is a dry run from the signing perspective: the
+          # production release key is loaded only by the release-only
+          # publish job, which re-signs the packages for release events.
+          echo "signing with an ephemeral dry-run key; release publishing re-signs with the release key" >&2
+          openssl genpkey -algorithm ED25519 -out "${key_file}" >/dev/null 2>&1
           chmod 0600 "${key_file}"
           echo "release_signing_key=${key_file}" >>"${GITHUB_ENV}"
       - name: Build release binaries natively
@@ -187,9 +184,10 @@ jobs:
           fi
           echo "version=${version}" >>"${GITHUB_ENV}"
       - name: Validate both architecture package sets
-        env:
-          AGENT_TRUSTED_KEY_SHA256: ${{ secrets.AGENT_TRUSTED_KEY_SHA256 }}
         run: |
+          # No production pin here: a dispatch build validates the internal
+          # consistency of the ephemeral-signed set only. The release pin is
+          # enforced by the release-only publish job.
           ls -l "${RUNNER_TEMP}/assets"
           WRITE_SHA256SUMS=1 ASSET_DIR="${RUNNER_TEMP}/assets" VERSION="${version}" \
             scripts/validate-release-packages.sh
@@ -200,6 +198,7 @@ jobs:
     if: github.event_name == 'release'
     runs-on: ubuntu-24.04
     timeout-minutes: 15
+    environment: release-publishing
     permissions:
       contents: write
     steps:
@@ -227,7 +226,17 @@ jobs:
           {
             echo "version=${RELEASE_TAG#v}"
             echo "release_tag=${RELEASE_TAG}"
+            echo "source_date_epoch=$(git log -1 --format=%ct)"
           } >>"${GITHUB_ENV}"
+      - name: Restore verified tools
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: |
+            .cache/downloads
+            .tools
+          key: tooling-v4-native-packages-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'scripts/checksums.txt', 'scripts/bootstrap.sh', 'scripts/env.sh') }}
+      - name: Bootstrap pinned nfpm tool
+        run: scripts/bootstrap.sh native-packages
       - name: Load release signing key
         env:
           AGENT_SIGNING_KEY_SECRET: ${{ secrets.AGENT_SIGNING_KEY }}
@@ -240,6 +249,28 @@ jobs:
           printf '%s\n' "${AGENT_SIGNING_KEY_SECRET}" >"${key_file}"
           chmod 0600 "${key_file}"
           echo "release_signing_key=${key_file}" >>"${GITHUB_ENV}"
+      - name: Re-sign archive triples and rebuild native packages
+        run: |
+          # The build jobs only ever sign with an ephemeral key. The release
+          # set that reaches hosts must chain to the release key, so re-sign
+          # both checksum triples with it and rebuild the native packages
+          # around them with the release trust anchor embedded.
+          # shellcheck source=scripts/env.sh
+          # shellcheck disable=SC1091
+          source scripts/env.sh
+          fingerprint="$(openssl pkey -in "${release_signing_key}" -pubout -outform DER \
+            | sha256sum | awk '{print $1}')"
+          for package_arch in amd64 arm64; do
+            archive="${RUNNER_TEMP}/assets/ocservia-agent-${version}-linux-${package_arch}.tar.gz"
+            openssl pkeyutl -sign -rawin -inkey "${release_signing_key}" \
+              -in "${archive}.sha256" -out "${archive}.sha256.sig"
+            openssl pkey -in "${release_signing_key}" -pubout \
+              -out "${archive}.sha256.pub.pem" >/dev/null 2>&1
+            OUTPUT_DIR="${RUNNER_TEMP}/assets" VERSION="${version}" PACKAGE_ARCH="${package_arch}" \
+              SOURCE_DATE_EPOCH="${source_date_epoch}" \
+              AGENT_TRUSTED_KEY_SHA256="${fingerprint}" \
+              scripts/package-native-agent.sh >/dev/null
+          done
       - name: Validate package set against the pinned release key
         env:
           AGENT_TRUSTED_KEY_SHA256: ${{ secrets.AGENT_TRUSTED_KEY_SHA256 }}
