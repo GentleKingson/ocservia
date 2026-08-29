@@ -127,7 +127,9 @@ assert_state() {
     [[ "${active}" == "inactive" ]] \
       || { echo "${context}: ${unit} is ${active} without configuration" >&2; exit 1; }
   done
-  version_output="$(sudo /usr/libexec/ocservia/ocservia-agent --version)"
+  # Run as the service user: the installed baseline release refuses to run
+  # as root even for the read-only version query.
+  version_output="$(sudo -u ocserv-agent /usr/libexec/ocservia/ocservia-agent --version)"
   [[ "${version_output}" == "ocservia-agent ${expected_version}" ]] \
     || { echo "${context}: observed version is '${version_output}', expected ${expected_version}" >&2; exit 1; }
 }
