@@ -4,8 +4,8 @@ info:
   version: 1.0.0
   description: Public control-plane API contract.
   license:
-    name: MIT OR Apache-2.0
-    identifier: MIT OR Apache-2.0
+    name: Apache License 2.0
+    identifier: Apache-2.0
 servers:
   - url: /api/v1
 security:

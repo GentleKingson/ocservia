@@ -10,7 +10,7 @@ Unlicense and Zlib licenses and a public-root certificate data package under
 CDLA-Permissive-2.0. These are permissive terms; their exact versions and
 license texts are recorded by `Cargo.lock` and the generated dependency SBOM.
 
-The project itself is available under `MIT OR Apache-2.0`.
+The project itself is licensed under `Apache-2.0`.
 
 Quota, expiry, and related user-form behavior were reviewed against
 `mmtaee/ocserv-dashboard` v4.9 and commit
