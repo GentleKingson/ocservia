@@ -813,14 +813,14 @@ for major in "${POSTGRES_MAJORS[@]}"; do
   runtime_url="postgres://ocservia_app:test-runtime-only@127.0.0.1:${port}/ocservia?sslmode=disable"
   wait_for_tcp 127.0.0.1 "${port}"
   docker exec "${container}" psql -v ON_ERROR_STOP=1 -U ocservia_owner -d ocservia -c \
-    "INSERT INTO schema_migrations (version, name, checksum) VALUES (28, '000028_future.up.sql', decode(repeat('00', 32), 'hex'))" >/dev/null
+    "INSERT INTO schema_migrations (version, name, checksum) VALUES (29, '000029_future.up.sql', decode(repeat('00', 32), 'hex'))" >/dev/null
   if OCSERV_ENVIRONMENT=test OCSERV_HTTP_ADDRESS="127.0.0.1:${api_port}" \
     OCSERV_DATABASE_URL="${runtime_url}" "${BIN}" --role=all \
     >"${TMP_ROOT}/pg${major}-unknown-version.log" 2>&1; then
     echo "binary accepted an unknown schema version" >&2
     exit 1
   fi
-  if ! grep -Fq 'database schema version 28 is unknown to this binary' "${TMP_ROOT}/pg${major}-unknown-version.log"; then
+  if ! grep -Fq 'database schema version 29 is unknown to this binary' "${TMP_ROOT}/pg${major}-unknown-version.log"; then
     cat "${TMP_ROOT}/pg${major}-unknown-version.log" >&2
     echo "binary failed for an unexpected reason with an unknown schema version" >&2
     exit 1
