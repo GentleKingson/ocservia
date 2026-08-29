@@ -133,6 +133,7 @@ jobs:
         env:
           RUN_ID: release-baseline-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.package_arch }}
           ARTIFACT_DIR: ${{ runner.temp }}/artifacts/native-smoke
+          VERSION: ${{ env.version }}
           CANDIDATE_DEB: ${{ runner.temp }}/packages/ocservia-agent_${{ env.version }}_${{ matrix.package_arch }}.deb
         run: scripts/release-baseline-upgrade-smoke.sh
       - name: Upload built packages
