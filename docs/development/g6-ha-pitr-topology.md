@@ -1,5 +1,10 @@
 # G6 HA/PITR cross-VM harness
 
+> Historical topology reference. The standalone `g6-ha-pitr.yml` entry point
+> was retired after its release-blocking assertions were confirmed in the
+> formal `g6-readiness.yml` workflow. The legacy scripts and fixture remain as
+> implementation history; use G6 Formal Readiness for current acceptance.
+
 The G6 production-readiness environment requires the PostgreSQL primary and
 standby, and every control-plane role, to span at least two real failure
 domains — single-host container topologies cannot substitute. GitHub-hosted
@@ -25,7 +30,7 @@ the raw identifiers never leave the runner.
 
 ## Scenario
 
-`gh workflow run g6-ha-pitr.yml --ref <ref>` runs on manual dispatch only:
+The retired manual workflow executed this scenario:
 
 1. Both failure domains exchange tunnel node IDs through run-scoped workflow
    artifacts and start pinned tunnels.
@@ -91,15 +96,9 @@ evidence whose shapes match the frozen G6 artifact contracts:
   harness), acknowledged-transaction loss, dual-primary accepts, and PITR
   marker outcomes.
 
-Harness thresholds are always read from `g6-slo.yaml`; regression protection
-lives in `scripts/test-g6-ha-pitr-workflow.sh`, which fails if a threshold is
-copied into shell code, a required timeline event stops being produced, the
-load bracket events are emitted by this stage, fd-b skips importing the peer
-cluster credentials, the environment id leaves the frozen
-`g6-[a-z0-9]{8,32}` pattern, a write probe stops upserting run-unique ids or
-accepts a non-read-only SQL error as post-rejoin rejection, finalize stops
-binding probe timestamps to the recorded promotion boundary, or the
-post-promotion probes disappear from either failure domain's flow.
+Harness thresholds were read from `g6-slo.yaml`. Current regression protection
+for these assertions lives in the formal G6 workflow contract, evidence, and
+runtime-adapter tests.
 
 ## Timing diagnostics
 

@@ -72,9 +72,9 @@ together and restart dependent roles after rotation.
 
 ## Evidence collection
 
-The cross-VM harness that exercises this entire runbook is
-`.github/workflows/g6-ha-pitr.yml` (manual dispatch) driven by
-`scripts/g6-ha-pitr-fd-a.sh` and `scripts/g6-ha-pitr-fd-b.sh`. It records the
+The formal cross-VM harness that exercises this runbook is
+`.github/workflows/g6-readiness.yml`, driven by
+`scripts/g6-readiness-fd-a.sh` and `scripts/g6-readiness-fd-b.sh`. It records the
 outage declaration, promotion, dual-primary probes, reconciliation, RTO/RPO,
-and rejoin into the `g6-ha-evidence-*` artifact; see
-`docs/development/g6-ha-pitr-topology.md` for the artifact inventory.
+and rejoin in the formal G6 evidence set; see
+`docs/development/g6-readiness.md` for the current artifact inventory.

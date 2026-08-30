@@ -476,7 +476,7 @@ for argument in "$@"; do
   case "${argument}" in
     */jobs\?*)
       cat <<'JSON'
-{"jobs":[{"id":42,"name":"G6 Readiness Failure Domain B","status":"in_progress","conclusion":null,"steps":[{"name":"Enroll the failure domain B fleet","status":"completed","conclusion":"failure"}]}]}
+{"jobs":[{"id":42,"name":"G6 Formal FD-B: Standby, Promotion & Faults","status":"in_progress","conclusion":null,"steps":[{"name":"Enroll the failure domain B fleet","status":"completed","conclusion":"failure"}]}]}
 JSON
       exit 0
       ;;
@@ -516,7 +516,7 @@ set -e
   echo "a failed peer was not detected promptly" >&2
   exit 1
 }
-grep -qF 'peer job G6 Readiness Failure Domain B failed at step Enroll the failure domain B fleet (failure)' "${tmp}/stderr" || {
+grep -qF 'peer job G6 Formal FD-B: Standby, Promotion & Faults failed at step Enroll the failure domain B fleet (failure)' "${tmp}/stderr" || {
   echo "peer failure diagnostics must identify the failed step" >&2
   cat "${tmp}/stderr" >&2
   exit 1

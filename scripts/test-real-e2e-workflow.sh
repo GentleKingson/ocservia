@@ -3,13 +3,15 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 WORKFLOW="${ROOT}/.github/workflows/real-e2e.yml"
+CI_WORKFLOW="${ROOT}/.github/workflows/ci.yml"
 COMPOSE_FILE="${ROOT}/deploy/real-e2e/controller.compose.yaml"
 TOOLCHAINS="${ROOT}/toolchains.lock"
 CONTROL_DOCKERFILE="${ROOT}/control-plane/Dockerfile"
 
-ruby -r yaml - "${WORKFLOW}" "${COMPOSE_FILE}" "${TOOLCHAINS}" "${CONTROL_DOCKERFILE}" <<'RUBY'
-workflow_path, compose_path, toolchains_path, control_dockerfile_path = ARGV
+ruby -r yaml - "${WORKFLOW}" "${CI_WORKFLOW}" "${COMPOSE_FILE}" "${TOOLCHAINS}" "${CONTROL_DOCKERFILE}" <<'RUBY'
+workflow_path, ci_workflow_path, compose_path, toolchains_path, control_dockerfile_path = ARGV
 workflow = YAML.safe_load(File.read(workflow_path), aliases: true)
+ci_workflow = YAML.safe_load(File.read(ci_workflow_path), aliases: true)
 compose = YAML.safe_load(File.read(compose_path), aliases: true)
 
 def reject(message)
@@ -33,16 +35,26 @@ end
 
 node_steps = jobs.fetch("real-node").fetch("steps")
 node_step_names = node_steps.map { |step| step["name"] }.compact
-build_index = node_step_names.index("Build Agent")
-wait_index = node_step_names.index("Wait for Controller EndpointID")
-prepare_index = node_step_names.index("Prepare persistent Agent EndpointID")
+build_index = node_step_names.index("Build managed-node Agent")
+wait_index = node_step_names.index("Wait for controller Iroh EndpointID")
+prepare_index = node_step_names.index("Create persistent managed-node EndpointID")
 reject("Real E2E node must build the Agent") unless build_index
 reject("Real E2E node must wait for the Controller EndpointID") unless wait_index
 reject("Real E2E node must prepare a persistent Agent EndpointID") unless prepare_index
 reject("Agent build must run before the Controller rendezvous") unless build_index < wait_index
 reject("Agent identity preparation must follow the Controller rendezvous") unless wait_index < prepare_index
-reject("Agent build step must only invoke the node build phase") unless node_steps.find { |step| step["name"] == "Build Agent" }.fetch("run").include?("real-e2e-node.sh build")
-reject("Agent prepare step must consume the Controller artifact") unless node_steps.find { |step| step["name"] == "Prepare persistent Agent EndpointID" }.fetch("run").include?("real-e2e-node.sh prepare")
+reject("Agent build step must only invoke the node build phase") unless node_steps.find { |step| step["name"] == "Build managed-node Agent" }.fetch("run").include?("real-e2e-node.sh build")
+reject("Agent prepare step must consume the Controller artifact") unless node_steps.find { |step| step["name"] == "Create persistent managed-node EndpointID" }.fetch("run").include?("real-e2e-node.sh prepare")
+
+runtime_invocations = jobs.values.sum do |job|
+  job.fetch("steps").count { |step| step.fetch("run", "").include?("scripts/test-real-e2e-workflow.sh") }
+end
+reject("Cross-VM runtime jobs must not repeat the static workflow contract") unless runtime_invocations.zero?
+contracts_steps = ci_workflow.fetch("jobs").fetch("contracts-policy").fetch("steps")
+contract_invocations = contracts_steps.count do |step|
+  step.fetch("run", "").include?("scripts/test-real-e2e-workflow.sh")
+end
+reject("Repository Contracts & Policy must run the Cross-VM workflow contract exactly once") unless contract_invocations == 1
 
 required_services = %w[postgres migrate control-plane transportd transport-runtime-init controller-key-init]
 reject("Real E2E Controller service set is incomplete") unless (required_services - compose.fetch("services").keys).empty?

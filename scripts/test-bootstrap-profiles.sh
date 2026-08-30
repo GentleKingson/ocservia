@@ -5,6 +5,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BOOTSTRAP="${ROOT}/scripts/bootstrap.sh"
 WORKFLOW="${ROOT}/.github/workflows/ci.yml"
 P1_WORKFLOW="${ROOT}/.github/workflows/p1-capacity.yml"
+RELEASE_WORKFLOW="${ROOT}/.github/workflows/release.yml"
 
 set +e
 output="$(GITHUB_ACTIONS=true "${BOOTSTRAP}" 2>&1)"
@@ -15,10 +16,11 @@ if [[ ${status} -ne 2 ]] || [[ "${output}" != *"bootstrap profile must be explic
   exit 1
 fi
 
-ruby -r yaml - "${ROOT}" "${WORKFLOW}" "${P1_WORKFLOW}" <<'RUBY'
-root, workflow_path, p1_workflow_path = ARGV
+ruby -r yaml - "${ROOT}" "${WORKFLOW}" "${P1_WORKFLOW}" "${RELEASE_WORKFLOW}" <<'RUBY'
+root, workflow_path, p1_workflow_path, release_workflow_path = ARGV
 workflow = YAML.safe_load(File.read(workflow_path), aliases: true)
 p1_workflow = YAML.safe_load(File.read(p1_workflow_path), aliases: true)
+release_workflow = YAML.safe_load(File.read(release_workflow_path), aliases: true)
 jobs = workflow.fetch("jobs")
 bootstrap = File.read(File.join(root, "scripts/bootstrap.sh"))
 makefile = File.read(File.join(root, "Makefile"))
@@ -33,8 +35,8 @@ def reject(message)
 end
 
 worker_jobs = %w[
-  runtime-artifacts go-standard go-race database stage-contracts
-  production-relays credential-rotation local-slice web-validation browser-e2e
+  runtime-artifacts go-standard go-race database production-relays
+  credential-rotation local-slice web-validation browser-e2e
   p1-smoke contracts-policy rust-validation security-scan license native-ocserv
 ]
 relevance_job = "ci-relevance"
@@ -43,7 +45,6 @@ worker_relevance_flags = {
   "go-standard" => "run_go_standard",
   "go-race" => "run_go_race",
   "database" => "run_database",
-  "stage-contracts" => "run_stage_contracts",
   "production-relays" => "run_production_relays",
   "credential-rotation" => "run_credential_rotation",
   "local-slice" => "run_local_slice",
@@ -60,7 +61,7 @@ worker_relevance_flags = {
 always_on_workers = %w[security-scan]
 gate_needs = {
   "backend-integration" => %w[
-    ci-relevance runtime-artifacts go-standard go-race database stage-contracts
+    ci-relevance runtime-artifacts go-standard go-race database contracts-policy
     production-relays credential-rotation local-slice p1-smoke rust-validation
   ],
   "web-smoke" => %w[ci-relevance web-validation browser-e2e],
@@ -120,8 +121,8 @@ expected_gate_names = {
   "web-smoke" => "Web & Smoke",
   "quality-security-native" => "Quality, Security & Native"
 }
-reject("GitHub Actions guide must describe all 17 worker executions") unless
-  actions_doc.include?("16 worker job definitions") && actions_doc.include?("17 worker executions")
+reject("GitHub Actions guide must describe all 16 worker executions") unless
+  actions_doc.include?("15 worker job definitions") && actions_doc.include?("16 worker executions")
 expected_gate_names.each_value do |name|
   reject("GitHub Actions guide is missing required-check aggregator #{name}") unless
     actions_doc.include?("- `#{name}`")
@@ -341,8 +342,10 @@ sccache_jobs.each do |job_id|
   reject("#{job_id} must expose the GitHub Actions cache credentials through the pinned sccache action") unless setup
   reject("#{job_id} must request the repository-pinned sccache release") unless
     setup.fetch("with").fetch("version") == "v0.17.0"
-  reject("#{job_id} must use the explicit sccache statistics step") unless
+  reject("#{job_id} must keep sccache annotations disabled") unless
     setup.fetch("with").fetch("disable_annotations") == true
+  reject("#{job_id} must not emit correctness-irrelevant sccache statistics") if
+    Array(job.fetch("steps")).any? { |step| step["run"].to_s.include?("sccache --show-stats") }
 end
 reject("sccache version is not pinned") unless toolchains.match?(/^sccache=0\.17\.0$/)
 %w[aarch64-apple-darwin x86_64-unknown-linux-musl].each do |platform|
@@ -390,7 +393,11 @@ legacy_fixture = database_script.index('container="${PREFIX}-upgrade"')
 reject("PostgreSQL 18 legacy upgrade fixture must not repeat in the PostgreSQL 17 worker") unless
   pg17_exit && legacy_fixture && pg17_exit < legacy_fixture
 
-stage_run = Array(jobs.fetch("stage-contracts").fetch("steps")).map { |step| step["run"].to_s }.join("\n")
+contracts_steps = Array(jobs.fetch("contracts-policy").fetch("steps"))
+stage_step = contracts_steps.find { |step| step["name"] == "Validate staged feature contracts" }
+reject("staged feature contracts must remain relevance-gated") unless
+  stage_step && stage_step.fetch("if").include?("run_stage_contracts")
+stage_run = stage_step.fetch("run")
 %w[
   i14-quota-expiry-backport.sh i15-config-plan.sh i16-config-apply.sh
   i17-certificate-secret.sh i19-five-minute-offline-recovery.sh
@@ -416,6 +423,20 @@ expected_p1 = {
   "REQUEST_CONCURRENCY" => 8
 }
 reject("P1 smoke profile changed") unless jobs.fetch("p1-smoke").fetch("env") == expected_p1
+p1_smoke_run = Array(jobs.fetch("p1-smoke").fetch("steps")).map { |step| step["run"].to_s }.join("\n")
+reject("runtime smoke must not repeat harness boundary tests") if
+  p1_smoke_run.include?("test-p1-resilience-capacity.sh")
+reject("Repository Contracts & Policy must run harness boundary tests exactly once") unless
+  contracts_steps.count { |step| step["run"].to_s.include?("test-p1-resilience-capacity.sh") } == 1
+
+worker_jobs.each do |job_id|
+  reject("#{job_id} must not run the generic runner preflight") if
+    Array(jobs.fetch(job_id).fetch("steps")).any? { |step| step["run"] == "scripts/ci-preflight.sh" }
+end
+
+license_run = Array(jobs.fetch("license").fetch("steps")).map { |step| step["run"].to_s }.join("\n")
+reject("License Policy must skip duplicate Rust license validation when Rust Validation runs") unless
+  license_run.include?("--skip-rust") && license_run.include?("run_rust")
 
 native_steps = Array(jobs.fetch("native-ocserv").fetch("steps"))
 native_run = native_steps.find { |step| step["name"] == "Native ocpasswd, OpenSSL, and Ocserv login" }.fetch("run")
@@ -428,6 +449,26 @@ p1_job = p1_workflow.fetch("jobs").fetch("p1-full")
 reject("P1 Full must use ubuntu-24.04") unless p1_job.fetch("runs-on") == "ubuntu-24.04"
 reject("P1 Full profile changed") unless p1_job.fetch("env").fetch("P1_PROFILE") == "full"
 reject("P1 Full timeout changed") unless p1_job.fetch("timeout-minutes") == 45
+
+release_jobs = release_workflow.fetch("jobs")
+build_steps = release_jobs.fetch("build-agent-packages").fetch("steps")
+restore = build_steps.find { |step| step["name"] == "Restore native-package tool cache" }
+save = build_steps.find { |step| step["name"] == "Save native-package tool cache" }
+release_build = build_steps.find { |step| step["name"] == "Build native Agent / privd / upgrader binaries" }
+reject("release tool cache restore must expose its primary key") unless
+  restore && restore["id"] == "native-package-tools-cache"
+reject("release tool cache save must reuse restore path and primary key") unless
+  save && save.fetch("with").fetch("path") == restore.fetch("with").fetch("path") &&
+    save.fetch("with").fetch("key") == "${{ steps.native-package-tools-cache.outputs.cache-primary-key }}"
+reject("release tool cache save must require a successful miss") unless
+  save.fetch("if").include?("success()") &&
+    save.fetch("if").include?("steps.native-package-tools-cache.outputs.cache-hit != 'true'")
+reject("release tool cache must not save before native build success") unless
+  build_steps.index(release_build) < build_steps.index(save)
+publish = release_jobs.fetch("publish-release-packages")
+reject("release publishing environment changed") unless publish.fetch("environment") == "release-publishing"
+reject("release publishing must retain contents write as a job-local permission") unless
+  publish.fetch("permissions") == {"contents" => "write"}
 RUBY
 
 for script in \

@@ -110,8 +110,8 @@ default_peer_job_name() {
     return 0
   fi
   case "${GITHUB_JOB:-}" in
-    g6-rd-fd-a) printf '%s\n' 'G6 Readiness Failure Domain B' ;;
-    g6-rd-fd-b) printf '%s\n' 'G6 Readiness Failure Domain A' ;;
+    g6-rd-fd-a) printf '%s\n' 'G6 Formal FD-B: Standby, Promotion & Faults' ;;
+    g6-rd-fd-b) printf '%s\n' 'G6 Formal FD-A: Primary & PITR' ;;
     *) return 1 ;;
   esac
 }

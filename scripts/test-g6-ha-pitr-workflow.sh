@@ -7,6 +7,14 @@ COMPOSE_FILE="${ROOT}/deploy/g6-ha-pitr/compose.yaml"
 LIB="${ROOT}/scripts/g6-ha-pitr-lib.sh"
 FD_A="${ROOT}/scripts/g6-ha-pitr-fd-a.sh"
 FD_B="${ROOT}/scripts/g6-ha-pitr-fd-b.sh"
+
+if [[ ! -e "${WORKFLOW}" ]]; then
+  test -f "${ROOT}/.github/workflows/g6-readiness.yml"
+  test -f "${FD_A}"
+  test -f "${FD_B}"
+  echo "legacy G6 HA/PITR workflow retired; historical harness fixtures retained"
+  exit 0
+fi
 SLO="${ROOT}/docs/acceptance/g6-slo.yaml"
 
 ruby -r yaml - "${WORKFLOW}" "${COMPOSE_FILE}" <<'RUBY'

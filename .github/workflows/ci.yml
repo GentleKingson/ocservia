@@ -1,4 +1,4 @@
-name: CI
+name: Change-Aware CI
 
 on:
   pull_request:
@@ -16,7 +16,7 @@ concurrency:
 
 jobs:
   ci-relevance:
-    name: CI Relevance
+    name: Change Impact Router
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     outputs:
@@ -42,7 +42,8 @@ jobs:
       run_license: ${{ steps.relevance.outputs.run_license }}
       run_g6_smoke: ${{ steps.relevance.outputs.run_g6_smoke }}
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Checkout candidate source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           fetch-depth: 0
           persist-credentials: false
@@ -54,7 +55,7 @@ jobs:
         run: scripts/ci-relevance.sh "${GITHUB_EVENT_NAME}" "${BASE_SHA}" "${HEAD_SHA}" "${GITHUB_OUTPUT}"
 
   runtime-artifacts:
-    name: Build Runtime Artifacts
+    name: Build Shared Runtime Binaries
     needs: ci-relevance
     if: needs.ci-relevance.outputs.run_runtime_artifacts == 'true'
     runs-on: ubuntu-24.04
@@ -65,11 +66,10 @@ jobs:
       SCCACHE_BASEDIRS: ${{ github.workspace }}
       SCCACHE_GHA_ENABLED: "true"
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Checkout candidate source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
-      - name: Runner preflight
-        run: scripts/ci-preflight.sh
       - name: Restore verified tools
         id: runtime-tools-cache
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
@@ -108,13 +108,6 @@ jobs:
             .cache/downloads
             .tools
           key: ${{ steps.runtime-tools-cache.outputs.cache-primary-key }}
-      - name: Show sccache statistics
-        if: always()
-        run: |
-          source scripts/env.sh
-          if command -v sccache >/dev/null 2>&1; then
-            sccache --show-stats || true
-          fi
       - name: Upload runtime artifacts
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
@@ -125,17 +118,16 @@ jobs:
           retention-days: 1
 
   go-standard:
-    name: Go Static and Unit
+    name: Go Quality & Unit Tests
     needs: [ci-relevance]
     if: needs.ci-relevance.outputs.run_go_standard == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Checkout candidate source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
-      - name: Runner preflight
-        run: scripts/ci-preflight.sh
       - name: Restore verified tools
         id: go-standard-tools-cache
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
@@ -182,8 +174,8 @@ jobs:
             .cache/go-mod
             .cache/gopath
           key: ${{ steps.go-standard-cache.outputs.cache-primary-key }}
-      - name: Upload Go diagnostics
-        if: always()
+      - name: Upload Go failure diagnostics
+        if: ${{ failure() || cancelled() }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: go-standard-${{ github.run_id }}-${{ github.run_attempt }}
@@ -192,17 +184,16 @@ jobs:
           retention-days: 1
 
   go-race:
-    name: Go Race
+    name: Go Race Tests
     needs: [ci-relevance]
     if: needs.ci-relevance.outputs.run_go_race == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Checkout candidate source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
-      - name: Runner preflight
-        run: scripts/ci-preflight.sh
       - name: Restore verified tools
         id: go-race-tools-cache
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
@@ -239,8 +230,8 @@ jobs:
             .cache/downloads
             .tools
           key: ${{ steps.go-race-tools-cache.outputs.cache-primary-key }}
-      - name: Upload Go race diagnostics
-        if: always()
+      - name: Upload Go race failure diagnostics
+        if: ${{ failure() || cancelled() }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: go-race-${{ github.run_id }}-${{ github.run_attempt }}
@@ -249,7 +240,7 @@ jobs:
           retention-days: 1
 
   database:
-    name: PostgreSQL ${{ matrix.pg-major }} Integration
+    name: PostgreSQL ${{ matrix.pg-major }} Migration & Integration
     needs: [ci-relevance, runtime-artifacts]
     if: needs.ci-relevance.outputs.run_database == 'true'
     runs-on: ubuntu-24.04
@@ -259,11 +250,10 @@ jobs:
       matrix:
         pg-major: [17, 18]
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Checkout candidate source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
-      - name: Runner preflight
-        run: scripts/ci-preflight.sh
       - name: Restore verified tools
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
@@ -284,7 +274,7 @@ jobs:
             go-v4-${{ runner.os }}-${{ runner.arch }}-
       - name: Bootstrap pinned Go tools
         run: scripts/bootstrap.sh go-test
-      - name: Download runtime artifacts
+      - name: Download shared runtime binaries
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: runtime-${{ github.run_id }}
@@ -298,8 +288,8 @@ jobs:
           PG_MAJOR: ${{ matrix.pg-major }}
           RUN_ID: database-${{ github.run_id }}-${{ github.run_attempt }}-pg${{ matrix.pg-major }}
         run: scripts/database-integration.sh
-      - name: Upload PostgreSQL diagnostics
-        if: always()
+      - name: Upload PostgreSQL failure diagnostics
+        if: ${{ failure() || cancelled() }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: database-pg${{ matrix.pg-major }}-${{ github.run_id }}-${{ github.run_attempt }}
@@ -307,40 +297,8 @@ jobs:
           if-no-files-found: warn
           retention-days: 1
 
-  stage-contracts:
-    name: I14-I19 Contracts
-    needs: [ci-relevance]
-    if: needs.ci-relevance.outputs.run_stage_contracts == 'true'
-    runs-on: ubuntu-24.04
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-        with:
-          persist-credentials: false
-      - name: Runner preflight
-        run: scripts/ci-preflight.sh
-      - name: Stage-specific contract assertions
-        env:
-          ARTIFACT_DIR: ${{ runner.temp }}/artifacts/stage-contracts
-        run: |
-          mkdir -p "${ARTIFACT_DIR}"
-          set -o pipefail
-          scripts/i14-quota-expiry-backport.sh --contract-only 2>&1 | tee "${ARTIFACT_DIR}/i14.log"
-          scripts/i15-config-plan.sh --contract-only 2>&1 | tee "${ARTIFACT_DIR}/i15.log"
-          scripts/i16-config-apply.sh --contract-only 2>&1 | tee "${ARTIFACT_DIR}/i16.log"
-          scripts/i17-certificate-secret.sh --contract-only 2>&1 | tee "${ARTIFACT_DIR}/i17.log"
-          scripts/i19-five-minute-offline-recovery.sh --contract-only 2>&1 | tee "${ARTIFACT_DIR}/i19.log"
-      - name: Upload stage contract diagnostics
-        if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
-        with:
-          name: stage-contracts-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/artifacts/stage-contracts
-          if-no-files-found: warn
-          retention-days: 1
-
   production-relays:
-    name: I18 Production Relays
+    name: Production Topology & Relay Contracts
     needs: [ci-relevance]
     if: needs.ci-relevance.outputs.run_production_relays == 'true'
     runs-on: ubuntu-24.04
@@ -351,11 +309,10 @@ jobs:
       SCCACHE_BASEDIRS: ${{ github.workspace }}
       SCCACHE_GHA_ENABLED: "true"
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Checkout candidate source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
-      - name: Runner preflight
-        run: scripts/ci-preflight.sh
       - name: Restore verified tools
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
@@ -388,15 +345,8 @@ jobs:
           ARTIFACT_DIR: ${{ runner.temp }}/artifacts/production-relays
           RUN_ID: production-${{ github.run_id }}-${{ github.run_attempt }}-relays
         run: scripts/i18-production-relays.sh --contract-only
-      - name: Show sccache statistics
-        if: always()
-        run: |
-          source scripts/env.sh
-          if command -v sccache >/dev/null 2>&1; then
-            sccache --show-stats || true
-          fi
-      - name: Upload production relay diagnostics
-        if: always()
+      - name: Upload production relay failure diagnostics
+        if: ${{ failure() || cancelled() }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: production-relays-${{ github.run_id }}-${{ github.run_attempt }}
@@ -405,24 +355,23 @@ jobs:
           retention-days: 1
 
   credential-rotation:
-    name: PostgreSQL Credential Rotation
+    name: PostgreSQL Credential Rotation Integration
     needs: [ci-relevance]
     if: needs.ci-relevance.outputs.run_credential_rotation == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Checkout candidate source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
-      - name: Runner preflight
-        run: scripts/ci-preflight.sh
       - name: Application and backup credential rotation
         env:
           ARTIFACT_DIR: ${{ runner.temp }}/artifacts/credential-rotation
           RUN_ID: postgres-rotation-${{ github.run_id }}-${{ github.run_attempt }}
         run: scripts/i18-postgres-credential-rotation.sh
-      - name: Upload credential rotation diagnostics
-        if: always()
+      - name: Upload credential rotation failure diagnostics
+        if: ${{ failure() || cancelled() }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: credential-rotation-${{ github.run_id }}-${{ github.run_attempt }}
@@ -431,18 +380,17 @@ jobs:
           retention-days: 1
 
   local-slice:
-    name: Local Slice
+    name: Control Plane ↔ Transport Local Integration
     needs: [ci-relevance, runtime-artifacts]
     if: needs.ci-relevance.outputs.run_local_slice == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Checkout candidate source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
-      - name: Runner preflight
-        run: scripts/ci-preflight.sh
-      - name: Download runtime artifacts
+      - name: Download shared runtime binaries
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: runtime-${{ github.run_id }}
@@ -456,8 +404,8 @@ jobs:
           OCSERVIA_TRANSPORTD_STUB_BIN: ${{ runner.temp }}/runtime/ocservia-transportd-stub
           RUN_ID: local-slice-${{ github.run_id }}-${{ github.run_attempt }}
         run: scripts/local-slice-integration.sh
-      - name: Upload local slice diagnostics
-        if: always()
+      - name: Upload local slice failure diagnostics
+        if: ${{ failure() || cancelled() }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: local-slice-${{ github.run_id }}-${{ github.run_attempt }}
@@ -466,17 +414,16 @@ jobs:
           retention-days: 1
 
   web-validation:
-    name: Web Static and Unit
+    name: Web Quality, Unit & Build
     needs: [ci-relevance]
     if: needs.ci-relevance.outputs.run_web == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Checkout candidate source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
-      - name: Runner preflight
-        run: scripts/ci-preflight.sh
       - name: Restore verified tools
         id: web-tools-cache
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
@@ -516,8 +463,8 @@ jobs:
         with:
           path: .cache/npm
           key: ${{ steps.web-npm-cache.outputs.cache-primary-key }}
-      - name: Upload Web diagnostics
-        if: always()
+      - name: Upload Web failure diagnostics
+        if: ${{ failure() || cancelled() }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: web-validation-${{ github.run_id }}-${{ github.run_attempt }}
@@ -526,25 +473,24 @@ jobs:
           retention-days: 1
 
   browser-e2e:
-    name: Browser E2E
+    name: Web Browser E2E
     needs: [ci-relevance]
     if: needs.ci-relevance.outputs.run_browser == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 25
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Checkout candidate source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
-      - name: Runner preflight
-        run: scripts/ci-preflight.sh
       - name: Docker Compose Playwright E2E
         env:
           ARTIFACT_DIR: ${{ runner.temp }}/artifacts/browser-e2e
           COMPOSE_PROJECT: ocservia-e2e-${{ github.run_id }}-${{ github.run_attempt }}
           RUN_ID: e2e-${{ github.run_id }}-${{ github.run_attempt }}
         run: scripts/e2e.sh
-      - name: Upload browser diagnostics
-        if: always()
+      - name: Upload browser failure diagnostics
+        if: ${{ failure() || cancelled() }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: browser-e2e-${{ github.run_id }}-${{ github.run_attempt }}
@@ -553,7 +499,7 @@ jobs:
           retention-days: 1
 
   p1-smoke:
-    name: P1 Smoke
+    name: Runtime Resilience Smoke (24 Agents)
     needs: [ci-relevance]
     if: needs.ci-relevance.outputs.run_p1_smoke == 'true'
     runs-on: ubuntu-24.04
@@ -567,24 +513,18 @@ jobs:
       QUEUE_CAPACITY: 256
       REQUEST_CONCURRENCY: 8
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Checkout candidate source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
-      - name: Runner preflight
-        run: scripts/ci-preflight.sh
-      - name: P1 harness boundary tests
-        env:
-          COMPOSE_PROJECT: ocservia-p1-smoke-${{ github.run_id }}-${{ github.run_attempt }}
-          RUN_ID: p1-smoke-${{ github.run_id }}-${{ github.run_attempt }}
-        run: scripts/test-p1-resilience-capacity.sh
-      - name: P1 hosted-runner smoke profile
+      - name: Run 24-Agent resilience smoke
         env:
           ARTIFACT_DIR: ${{ runner.temp }}/artifacts/p1-smoke
           COMPOSE_PROJECT: ocservia-p1-smoke-${{ github.run_id }}-${{ github.run_attempt }}
           RUN_ID: p1-smoke-${{ github.run_id }}-${{ github.run_attempt }}
         run: scripts/p1-resilience-capacity.sh
-      - name: Upload P1 smoke diagnostics
-        if: always()
+      - name: Upload runtime resilience failure diagnostics
+        if: ${{ failure() || cancelled() }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: p1-smoke-${{ github.run_id }}-${{ github.run_attempt }}
@@ -593,18 +533,17 @@ jobs:
           retention-days: 1
 
   contracts-policy:
-    name: Contracts and Policy
+    name: Repository Contracts & Policy
     needs: [ci-relevance]
     if: needs.ci-relevance.outputs.run_contracts_policy == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Checkout candidate source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           fetch-depth: 0
           persist-credentials: false
-      - name: Runner preflight
-        run: scripts/ci-preflight.sh
       - name: Restore verified tools
         id: contracts-tools-cache
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
@@ -634,6 +573,22 @@ jobs:
           scripts/test-ci-relevance.sh
           scripts/test-ci-runtime-artifact.sh
           scripts/test-toolchain-consistency.sh
+      - name: Validate runtime-resilience harness contracts
+        run: scripts/test-p1-resilience-capacity.sh
+      - name: Validate Cross-VM enrollment workflow contract
+        run: scripts/test-real-e2e-workflow.sh
+      - name: Validate staged feature contracts
+        if: needs.ci-relevance.outputs.run_stage_contracts == 'true'
+        env:
+          ARTIFACT_DIR: ${{ runner.temp }}/artifacts/contracts/staged-features
+        run: |
+          mkdir -p "${ARTIFACT_DIR}"
+          set -o pipefail
+          scripts/i14-quota-expiry-backport.sh --contract-only 2>&1 | tee "${ARTIFACT_DIR}/i14.log"
+          scripts/i15-config-plan.sh --contract-only 2>&1 | tee "${ARTIFACT_DIR}/i15.log"
+          scripts/i16-config-apply.sh --contract-only 2>&1 | tee "${ARTIFACT_DIR}/i16.log"
+          scripts/i17-certificate-secret.sh --contract-only 2>&1 | tee "${ARTIFACT_DIR}/i17.log"
+          scripts/i19-five-minute-offline-recovery.sh --contract-only 2>&1 | tee "${ARTIFACT_DIR}/i19.log"
       - name: G6 readiness workflow policy
         run: |
           scripts/test-g6-workflow-contract.sh
@@ -669,16 +624,16 @@ jobs:
             .cache/downloads
             .tools
           key: ${{ steps.contracts-tools-cache.outputs.cache-primary-key }}
-      - name: Capture contract diagnostics
-        if: always()
+      - name: Capture contract failure diagnostics
+        if: ${{ failure() || cancelled() }}
         env:
           ARTIFACT_DIR: ${{ runner.temp }}/artifacts/contracts
         run: |
           mkdir -p "${ARTIFACT_DIR}"
           git status --short >"${ARTIFACT_DIR}/git-status.txt"
           git diff --binary >"${ARTIFACT_DIR}/generated-output.diff"
-      - name: Upload contract diagnostics
-        if: always()
+      - name: Upload contract failure diagnostics
+        if: ${{ failure() || cancelled() }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: contracts-${{ github.run_id }}-${{ github.run_attempt }}
@@ -687,7 +642,7 @@ jobs:
           retention-days: 1
 
   rust-validation:
-    name: Rust Validation
+    name: Rust Quality, Tests & Boundaries
     needs: [ci-relevance]
     if: needs.ci-relevance.outputs.run_rust == 'true'
     runs-on: ubuntu-24.04
@@ -698,11 +653,10 @@ jobs:
       SCCACHE_BASEDIRS: ${{ github.workspace }}
       SCCACHE_GHA_ENABLED: "true"
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Checkout candidate source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
-      - name: Runner preflight
-        run: scripts/ci-preflight.sh
       - name: Restore verified tools
         id: rust-tools-cache
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
@@ -739,15 +693,8 @@ jobs:
             .cache/downloads
             .tools
           key: ${{ steps.rust-tools-cache.outputs.cache-primary-key }}
-      - name: Show sccache statistics
-        if: always()
-        run: |
-          source scripts/env.sh
-          if command -v sccache >/dev/null 2>&1; then
-            sccache --show-stats || true
-          fi
-      - name: Upload Rust diagnostics
-        if: always()
+      - name: Upload Rust failure diagnostics
+        if: ${{ failure() || cancelled() }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: rust-${{ github.run_id }}-${{ github.run_attempt }}
@@ -756,23 +703,22 @@ jobs:
           retention-days: 1
 
   security-scan:
-    name: Secret Scan
+    name: Repository Secret Scan
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Checkout candidate source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           fetch-depth: 0
           persist-credentials: false
-      - name: Runner preflight
-        run: scripts/ci-preflight.sh
       - name: Bootstrap pinned secret-scan tools
         run: scripts/bootstrap.sh g6-secret-scan
       - name: Secret scan
         run: scripts/security-check.sh
 
   license:
-    name: License Policy
+    name: Dependency License Policy
     needs: [ci-relevance]
     if: needs.ci-relevance.outputs.run_license == 'true'
     runs-on: ubuntu-24.04
@@ -783,12 +729,11 @@ jobs:
       SCCACHE_BASEDIRS: ${{ github.workspace }}
       SCCACHE_GHA_ENABLED: "true"
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Checkout candidate source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           fetch-depth: 0
           persist-credentials: false
-      - name: Runner preflight
-        run: scripts/ci-preflight.sh
       - name: Restore verified tools
         id: security-tools-cache
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
@@ -825,7 +770,7 @@ jobs:
       - name: Bootstrap pinned security tools
         run: scripts/bootstrap.sh security
       - name: License checks
-        run: scripts/license-check.sh
+        run: scripts/license-check.sh ${{ needs.ci-relevance.outputs.run_rust == 'true' && '--skip-rust' || '' }}
       - name: Save verified tools
         if: success() && github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.security-tools-cache.outputs.cache-hit != 'true'
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
@@ -834,16 +779,9 @@ jobs:
             .cache/downloads
             .tools
           key: ${{ steps.security-tools-cache.outputs.cache-primary-key }}
-      - name: Show sccache statistics
-        if: always()
-        run: |
-          source scripts/env.sh
-          if command -v sccache >/dev/null 2>&1; then
-            sccache --show-stats || true
-          fi
 
   native-ocserv:
-    name: Native Ocserv
+    name: Native Ocserv / Agent Integration
     needs: [ci-relevance]
     if: needs.ci-relevance.outputs.run_native == 'true'
     runs-on: ubuntu-24.04
@@ -854,11 +792,10 @@ jobs:
       SCCACHE_BASEDIRS: ${{ github.workspace }}
       SCCACHE_GHA_ENABLED: "true"
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Checkout candidate source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
-      - name: Runner preflight
-        run: scripts/ci-preflight.sh
       - name: Restore verified tools
         id: native-tools-cache
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
@@ -906,15 +843,8 @@ jobs:
             .cache/downloads
             .tools
           key: ${{ steps.native-tools-cache.outputs.cache-primary-key }}
-      - name: Show sccache statistics
-        if: always()
-        run: |
-          source scripts/env.sh
-          if command -v sccache >/dev/null 2>&1; then
-            sccache --show-stats || true
-          fi
-      - name: Upload native diagnostics
-        if: always()
+      - name: Upload native failure diagnostics
+        if: ${{ failure() || cancelled() }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: native-ocserv-${{ github.run_id }}-${{ github.run_attempt }}
@@ -931,12 +861,12 @@ jobs:
       - go-standard
       - go-race
       - database
-      - stage-contracts
       - production-relays
       - credential-rotation
       - local-slice
       - p1-smoke
       - rust-validation
+      - contracts-policy
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     env:
@@ -949,7 +879,7 @@ jobs:
       GO_RACE_RELEVANT: ${{ needs.ci-relevance.outputs.run_go_race }}
       DATABASE: ${{ needs.database.result }}
       DATABASE_RELEVANT: ${{ needs.ci-relevance.outputs.run_database }}
-      STAGE_CONTRACTS: ${{ needs.stage-contracts.result }}
+      CONTRACTS_POLICY: ${{ needs.contracts-policy.result }}
       STAGE_CONTRACTS_RELEVANT: ${{ needs.ci-relevance.outputs.run_stage_contracts }}
       PRODUCTION_RELAYS: ${{ needs.production-relays.result }}
       PRODUCTION_RELAYS_RELEVANT: ${{ needs.ci-relevance.outputs.run_production_relays }}
@@ -962,10 +892,14 @@ jobs:
       RUST_VALIDATION: ${{ needs.rust-validation.result }}
       RUST_VALIDATION_RELEVANT: ${{ needs.ci-relevance.outputs.run_rust }}
     steps:
-      - name: Aggregate backend results
+      - name: Verify backend/runtime worker results
         run: |
           if [[ "${CI_RELEVANCE}" != "success" ]]; then
             echo "the relevance classifier finished with ${CI_RELEVANCE}" >&2
+            exit 1
+          fi
+          if [[ "${STAGE_CONTRACTS_RELEVANT}" == "true" && "${CONTRACTS_POLICY}" != "success" ]]; then
+            echo "staged feature contracts require contracts-policy success, got ${CONTRACTS_POLICY}" >&2
             exit 1
           fi
           while IFS='|' read -r worker result authorized; do
@@ -982,7 +916,6 @@ jobs:
           go-standard|${GO_STANDARD}|${GO_STANDARD_RELEVANT}
           go-race|${GO_RACE}|${GO_RACE_RELEVANT}
           database|${DATABASE}|${DATABASE_RELEVANT}
-          stage-contracts|${STAGE_CONTRACTS}|${STAGE_CONTRACTS_RELEVANT}
           production-relays|${PRODUCTION_RELAYS}|${PRODUCTION_RELAYS_RELEVANT}
           credential-rotation|${CREDENTIAL_ROTATION}|${CREDENTIAL_ROTATION_RELEVANT}
           local-slice|${LOCAL_SLICE}|${LOCAL_SLICE_RELEVANT}
@@ -1006,7 +939,7 @@ jobs:
       BROWSER_E2E: ${{ needs.browser-e2e.result }}
       BROWSER_E2E_RELEVANT: ${{ needs.ci-relevance.outputs.run_browser }}
     steps:
-      - name: Aggregate Web and smoke results
+      - name: Verify Web/browser worker results
         run: |
           if [[ "${CI_RELEVANCE}" != "success" ]]; then
             echo "the relevance classifier finished with ${CI_RELEVANCE}" >&2
@@ -1050,7 +983,7 @@ jobs:
       NATIVE_OCSERV: ${{ needs.native-ocserv.result }}
       NATIVE_OCSERV_RELEVANT: ${{ needs.ci-relevance.outputs.run_native }}
     steps:
-      - name: Aggregate quality, security, and native results
+      - name: Verify contracts/security/native worker results
         run: |
           if [[ "${CI_RELEVANCE}" != "success" ]]; then
             echo "the relevance classifier finished with ${CI_RELEVANCE}" >&2

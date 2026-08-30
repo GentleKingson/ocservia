@@ -1,4 +1,5 @@
-name: G6 Readiness Harness
+name: G6 Formal Readiness
+run-name: G6 Formal · ${{ inputs.authority }} · ${{ github.sha }}
 
 on:
   workflow_dispatch:
@@ -22,7 +23,7 @@ concurrency:
 
 jobs:
   g6-harness-core:
-    name: G6 Readiness Core
+    name: G6 Formal Readiness
     uses: ./.github/workflows/g6-harness-core.yml
     with:
       profile: formal

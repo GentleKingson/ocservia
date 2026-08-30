@@ -9,7 +9,8 @@
 # credentials. It is deliberately not a required check: the cache is a
 # performance input, but the strict exporter below fails the solve when the
 # export does not complete, so green means the cache was provisioned.
-name: Rust Cache Provision
+name: G6 Rust Build Cache Provisioning
+run-name: G6 Rust Cache · ${{ github.ref }} · ${{ github.sha }}
 
 on:
   push:
@@ -40,28 +41,29 @@ concurrency:
 
 jobs:
   provision:
-    name: Provision the main Rust build cache
+    name: Provision default-branch G6 Rust builder cache
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     env:
       BUILDX_BUILDER: g6-buildx-${{ github.run_id }}-${{ github.run_attempt }}
     steps:
-      - name: Require main provisioning ref
+      - name: Guard trusted main ref
         # workflow_dispatch accepts any ref, so fail closed before any
         # checkout runs untrusted repository code. Green must mean the
         # default-branch cache was provisioned.
         run: |
           set -euo pipefail
           test "${GITHUB_REF}" = "refs/heads/main"
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Checkout trusted main source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
-      - name: Initialize provision timing diagnostics
+      - name: Initialize cache timing report
         run: >-
           scripts/g6-timing.sh init
           "${RUNNER_TEMP}/artifacts/timing/g6-rust-provision.json"
           rust-cache-provision provision "${GITHUB_SHA}" "${GITHUB_RUN_ID}" "${GITHUB_RUN_ATTEMPT}"
-      - name: Relay Actions cache credentials to the job environment
+      - name: Expose Actions cache credentials to BuildKit
         # BuildKit's gha cache backend needs the runner's cache-service
         # token and URLs, but the runner injects those only into action
         # processes — plain run steps never see them (actions/runner#4325
@@ -69,7 +71,7 @@ jobs:
         # the job environment for the builder preparation below. The strict
         # exporter fails the solve when they are unavailable.
         uses: ./.github/actions/g6-cache-credentials
-      - name: Prepare the BuildKit cache builder
+      - name: Create BuildKit cache builder
         run: |
           set -euo pipefail
           timing="${RUNNER_TEMP}/artifacts/timing/g6-rust-provision.json"
@@ -96,7 +98,7 @@ jobs:
             --bootstrap \
             --use
           scripts/g6-timing.sh end "${timing}" buildx_builder_prepare || true
-      - name: Build the workspace dependency cache
+      - name: Populate G6 Rust builder cache
         env:
           G6_CACHE_STRICT_EXPORT: "true"
           G6_CACHE_TIMEOUT: 300s
@@ -109,7 +111,7 @@ jobs:
               --pull=false \
               --file rust/g6-runtime.Dockerfile \
               --target g6-rust-builder .
-      - name: Render provision timing diagnostics
+      - name: Finalize cache timing report
         if: always()
         # measure appends raw records even for a failed strict solve, but
         # the JSON is only produced by an explicit render; a failure exits
@@ -117,7 +119,7 @@ jobs:
         run: |
           scripts/g6-timing.sh render \
             "${RUNNER_TEMP}/artifacts/timing/g6-rust-provision.json"
-      - name: Upload provision timing diagnostics
+      - name: Upload cache timing report
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
@@ -133,7 +135,7 @@ jobs:
           path: ${{ runner.temp }}/artifacts/g6-buildkit-cache-fallback
           if-no-files-found: ignore
           retention-days: 5
-      - name: Clean provision resources
+      - name: Remove BuildKit builder
         if: always()
         timeout-minutes: 5
         run: |

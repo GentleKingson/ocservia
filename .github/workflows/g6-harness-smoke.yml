@@ -1,4 +1,4 @@
-name: G6 Harness Smoke
+name: G6 PR Readiness Smoke
 
 on:
   pull_request:
@@ -13,7 +13,7 @@ concurrency:
 
 jobs:
   g6-smoke-relevance:
-    name: G6 Harness Smoke Relevance
+    name: G6 Smoke Change Impact Router
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     outputs:
@@ -21,7 +21,8 @@ jobs:
       reason: ${{ steps.relevance.outputs.reason }}
       changed-count: ${{ steps.relevance.outputs.changed_count }}
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Checkout candidate source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
           fetch-depth: 0

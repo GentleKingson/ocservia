@@ -1,4 +1,5 @@
-name: Release Packages
+name: Agent Release Packages
+run-name: Agent Packages · ${{ github.event.release.tag_name || inputs.version || github.sha }}
 
 on:
   release:
@@ -22,7 +23,7 @@ env:
 
 jobs:
   build-agent-packages:
-    name: Build Agent Packages (${{ matrix.package_arch }})
+    name: Build & Smoke Agent Packages (${{ matrix.package_arch }})
     runs-on: ${{ matrix.runs_on }}
     timeout-minutes: 60
     strategy:
@@ -34,12 +35,14 @@ jobs:
           - package_arch: arm64
             runs_on: ubuntu-24.04-arm
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Checkout release source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
-      - name: Runner preflight
+      - name: Verify runner prerequisites
         run: scripts/ci-preflight.sh
-      - name: Restore verified tools
+      - name: Restore native-package tool cache
+        id: native-package-tools-cache
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: |
@@ -48,16 +51,7 @@ jobs:
           key: tooling-v4-native-packages-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'scripts/checksums.txt', 'scripts/bootstrap.sh', 'scripts/env.sh') }}
       - name: Bootstrap pinned Rust and nfpm tools
         run: scripts/bootstrap.sh native-packages
-      - name: Save verified tools
-        if: always()
-        continue-on-error: true
-        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
-        with:
-          path: |
-            .cache/downloads
-            .tools
-          key: tooling-v4-native-packages-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'scripts/checksums.txt', 'scripts/bootstrap.sh', 'scripts/env.sh') }}
-      - name: Resolve release metadata
+      - name: Resolve package version & source epoch
         env:
           RELEASE_TAG: ${{ github.event.release.tag_name }}
           INPUT_VERSION: ${{ inputs.version }}
@@ -80,7 +74,7 @@ jobs:
             echo "version=${version}"
             echo "source_date_epoch=$(git log -1 --format=%ct)"
           } >>"${GITHUB_ENV}"
-      - name: Prepare ephemeral build signing key
+      - name: Create ephemeral dry-run signing key
         run: |
           key_file="${RUNNER_TEMP}/release-signing.key"
           # Every build is a dry run from the signing perspective: the
@@ -90,7 +84,7 @@ jobs:
           openssl genpkey -algorithm ED25519 -out "${key_file}" >/dev/null 2>&1
           chmod 0600 "${key_file}"
           echo "release_signing_key=${key_file}" >>"${GITHUB_ENV}"
-      - name: Build release binaries natively
+      - name: Build native Agent / privd / upgrader binaries
         run: |
           # shellcheck source=scripts/env.sh
           # shellcheck disable=SC1091
@@ -102,7 +96,15 @@ jobs:
           OCSERV_AGENT_RELEASE_VERSION="${version}" \
             cargo build --locked --release \
             --package ocservia-agent --package ocservia-privd --package ocservia-upgrader
-      - name: Package signed archive and native installers
+      - name: Save native-package tool cache
+        if: ${{ success() && steps.native-package-tools-cache.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: |
+            .cache/downloads
+            .tools
+          key: ${{ steps.native-package-tools-cache.outputs.cache-primary-key }}
+      - name: Build tar / deb / rpm package set
         run: |
           # shellcheck source=scripts/env.sh
           # shellcheck disable=SC1091
@@ -121,19 +123,19 @@ jobs:
             AGENT_TRUSTED_KEY_SHA256="${fingerprint}" \
             scripts/package-native-agent.sh >/dev/null
           ls -l "${package_dir}"
-      - name: Native package lifecycle smoke (${{ matrix.package_arch }})
+      - name: Validate native package lifecycle (${{ matrix.package_arch }})
         env:
           RUN_ID: release-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.package_arch }}
           ARTIFACT_DIR: ${{ runner.temp }}/artifacts/native-smoke
         run: scripts/release-native-package-smoke.sh
-      - name: Published baseline upgrade smoke (${{ matrix.package_arch }})
+      - name: Validate upgrade from published baseline (${{ matrix.package_arch }})
         env:
           RUN_ID: release-baseline-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.package_arch }}
           ARTIFACT_DIR: ${{ runner.temp }}/artifacts/native-smoke
           VERSION: ${{ env.version }}
           CANDIDATE_DEB: ${{ runner.temp }}/packages/ocservia-agent_${{ env.version }}_${{ matrix.package_arch }}.deb
         run: scripts/release-baseline-upgrade-smoke.sh
-      - name: Upload built packages
+      - name: Upload package set
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: agent-packages-${{ matrix.package_arch }}-${{ github.run_id }}-${{ github.run_attempt }}
@@ -153,15 +155,16 @@ jobs:
         run: rm -f -- "${release_signing_key}" "${RUNNER_TEMP}/release-signing.pub.pem"
 
   validate-release-packages:
-    name: Validate Release Packages
+    name: Validate Multi-Arch Package Set
     needs: build-agent-packages
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Checkout release source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
-      - name: Runner preflight
+      - name: Verify runner prerequisites
         run: scripts/ci-preflight.sh
       - name: Install rpm inspection tools
         run: sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends rpm cpio
@@ -171,7 +174,7 @@ jobs:
           pattern: agent-packages-*
           path: ${{ runner.temp }}/assets
           merge-multiple: true
-      - name: Resolve release metadata
+      - name: Resolve package version
         env:
           RELEASE_TAG: ${{ github.event.release.tag_name }}
           INPUT_VERSION: ${{ inputs.version }}
@@ -193,7 +196,7 @@ jobs:
             scripts/validate-release-packages.sh
 
   publish-release-packages:
-    name: Publish Release Packages
+    name: Sign & Publish Release Assets
     needs: validate-release-packages
     if: github.event_name == 'release'
     runs-on: ubuntu-24.04
@@ -202,10 +205,11 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Checkout release source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
-      - name: Runner preflight
+      - name: Verify runner prerequisites
         run: scripts/ci-preflight.sh
       - name: Install rpm inspection tools
         run: sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends rpm cpio
@@ -215,7 +219,7 @@ jobs:
           pattern: agent-packages-*
           path: ${{ runner.temp }}/assets
           merge-multiple: true
-      - name: Resolve release metadata
+      - name: Resolve package version & source epoch
         env:
           RELEASE_TAG: ${{ github.event.release.tag_name }}
         run: |
@@ -228,7 +232,7 @@ jobs:
             echo "release_tag=${RELEASE_TAG}"
             echo "source_date_epoch=$(git log -1 --format=%ct)"
           } >>"${GITHUB_ENV}"
-      - name: Restore verified tools
+      - name: Restore native-package tool cache
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: |
@@ -249,7 +253,7 @@ jobs:
           printf '%s\n' "${AGENT_SIGNING_KEY_SECRET}" >"${key_file}"
           chmod 0600 "${key_file}"
           echo "release_signing_key=${key_file}" >>"${GITHUB_ENV}"
-      - name: Re-sign archive triples and rebuild native packages
+      - name: Re-sign archives & rebuild installers
         run: |
           # The build jobs only ever sign with an ephemeral key. The release
           # set that reaches hosts must chain to the release key, so re-sign
@@ -284,11 +288,11 @@ jobs:
             -out "${RUNNER_TEMP}/assets/SHA256SUMS.sig"
           openssl pkey -in "${release_signing_key}" -pubout \
             -out "${RUNNER_TEMP}/assets/release-signing.pub.pem" >/dev/null 2>&1
-      - name: Revalidate signed manifest
+      - name: Verify signed release manifest
         run: |
           ASSET_DIR="${RUNNER_TEMP}/assets" VERSION="${version}" \
             scripts/validate-release-packages.sh
-      - name: Upload release assets
+      - name: Publish assets to GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |

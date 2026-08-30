@@ -52,9 +52,9 @@ cluster is untouched until step 6, so aborting loses nothing.
 
 ## Evidence collection
 
-`scripts/g6-ha-pitr-fd-a.sh` executes this runbook end to end against real
+`scripts/g6-readiness-fd-a.sh` executes this runbook end to end against real
 base backups and archived WAL: it writes the marker pair, creates the restore
 point, forces a WAL switch, waits for the segment to reach the archive,
 restores into a separate instance, pauses at the target, and checks both
 markers. The result is published as the `pitr-report.json` evidence artifact
-(see `docs/development/g6-ha-pitr-topology.md`).
+(see `docs/development/g6-readiness.md`).

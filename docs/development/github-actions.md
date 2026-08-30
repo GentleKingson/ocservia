@@ -6,38 +6,56 @@ It uses GitHub-hosted `ubuntu-24.04` runners, read-only repository permissions,
 and no production secrets. Local commands reproduce behavior but never replace
 the required checks for the exact pull-request commit.
 
+## Workflow inventory
+
+The retained workflows are:
+
+- **Change-Aware CI**: change-routed pull-request and `main` validation.
+- **G6 PR Readiness Smoke**: required pull-request G6 smoke validation.
+- **G6 Formal Readiness**: manually dispatched formal readiness acceptance.
+- **G6 Readiness Core (Reusable)**: shared formal and smoke execution graph.
+- **Manual Runtime & Security Acceptance**: high-cost runtime and security phases.
+- **Cross-VM Iroh Enrollment E2E**: real two-runner enrollment acceptance.
+- **Agent Release Packages**: multi-architecture build, validation, signing, and publishing.
+- **G6 Rust Build Cache Provisioning**: trusted default-branch BuildKit cache producer.
+
+The legacy `g6-ha-pitr.yml` entry point was removed after parity review. Formal
+G6 covers its two failure domains, streaming standby, base backup and PITR,
+primary isolation, promotion and post-promotion probes, role recovery,
+former-primary rejoin, merged evidence, secret scanning, and independent
+verification. The historical scripts and fixtures remain for reference.
+
 ## Execution graph
 
-The primary workflow has 16 worker job definitions plus a `CI Relevance`
+The primary workflow has 15 worker job definitions plus a `Change Impact Router`
 classifier job. The PostgreSQL matrix expands one definition into separate
-PostgreSQL 17 and 18 executions, so a full run has 17 worker executions.
+PostgreSQL 17 and 18 executions, so a full run has 16 worker executions.
 Three lightweight result aggregators preserve the stable required-check
 names. Conditional workers start after the relevance classifier except that
-the two PostgreSQL workers and Local Slice additionally wait for the
-commit-bound runtime artifact. Secret Scan starts independently and is always
+the two PostgreSQL workers and Control Plane ↔ Transport Local Integration
+additionally wait for the commit-bound runtime artifact. Repository Secret Scan starts independently and is always
 required by the quality aggregate.
 
 | Worker execution | Coverage | Bootstrap profile | Timeout | Required-check aggregator |
 | --- | --- | --- | --- | --- |
-| Build Runtime Artifacts | Builds `ocserv-control` and `ocservia-transportd-stub` once | `go-rust-integration` | 15 minutes | Backend Integration |
-| Go Static and Unit | Format, vet, staticcheck, unit tests, and govulncheck | `go-quality` | 20 minutes | Backend Integration |
-| Go Race | Full Go race suite | `go-test` | 20 minutes | Backend Integration |
-| PostgreSQL 17 Integration | PostgreSQL 17 migrations, rollback, runtime, and failure behavior | `go-test` | 25 minutes | Backend Integration |
-| PostgreSQL 18 Integration | PostgreSQL 18 coverage plus the legacy full upgrade fixture | `go-test` | 25 minutes | Backend Integration |
-| I14-I19 Contracts | Focused I14-I17 and I19 contract assertions | none | 10 minutes | Backend Integration |
-| I18 Production Relays | Production topology, controlled relay failover, backup restore, and Agent package lifecycle | `go-rust-integration` | 25 minutes | Backend Integration |
-| PostgreSQL Credential Rotation | Application and backup credential rotation | none | 15 minutes | Backend Integration |
-| Local Slice | Go, PostgreSQL, UDS, and Rust-stub integration | none | 15 minutes | Backend Integration |
-| Web Static and Unit | Web format, type, unit, build, and audit checks | `web` | 20 minutes | Web & Smoke |
-| Browser E2E | Isolated Compose Playwright desktop and mobile E2E | none | 25 minutes | Web & Smoke |
-| P1 Smoke | P1 harness tests and the unchanged 24-Agent smoke profile | none | 20 minutes | Backend Integration |
-| Contracts and Policy | Repository policy, docs, workflow policy, generation, lint, and breaking-change checks | `contracts` | 20 minutes | Quality, Security & Native |
-| Rust Validation | Rust format, clippy, workspace tests, audit, and agent/transport boundaries | `rust-validation` | 25 minutes | Backend Integration and Quality, Security & Native |
-| Secret Scan | Full-history repository gitleaks scan | `g6-secret-scan` | 20 minutes | Quality, Security & Native |
-| License Policy | Go, Rust, and Web dependency license policy | `security` | 20 minutes | Quality, Security & Native |
-| Native Ocserv | Ephemeral native package, `ocpasswd`, OpenSSL, and loopback login fixture | `native` | 20 minutes | Quality, Security & Native |
+| Build Shared Runtime Binaries | Builds `ocserv-control` and `ocservia-transportd-stub` once | `go-rust-integration` | 15 minutes | Backend Integration |
+| Go Quality & Unit Tests | Format, vet, staticcheck, unit tests, and govulncheck | `go-quality` | 20 minutes | Backend Integration |
+| Go Race Tests | Full Go race suite | `go-test` | 20 minutes | Backend Integration |
+| PostgreSQL 17 Migration & Integration | PostgreSQL 17 migrations, rollback, runtime, and failure behavior | `go-test` | 25 minutes | Backend Integration |
+| PostgreSQL 18 Migration & Integration | PostgreSQL 18 coverage plus the legacy full upgrade fixture | `go-test` | 25 minutes | Backend Integration |
+| Production Topology & Relay Contracts | Production topology, controlled relay failover, backup restore, and Agent package lifecycle | `go-rust-integration` | 25 minutes | Backend Integration |
+| PostgreSQL Credential Rotation Integration | Application and backup credential rotation | none | 15 minutes | Backend Integration |
+| Control Plane ↔ Transport Local Integration | Go, PostgreSQL, UDS, and Rust-stub integration | none | 15 minutes | Backend Integration |
+| Web Quality, Unit & Build | Web format, type, unit, build, and audit checks | `web` | 20 minutes | Web & Smoke |
+| Web Browser E2E | Isolated Compose Playwright desktop and mobile E2E | none | 25 minutes | Web & Smoke |
+| Runtime Resilience Smoke (24 Agents) | Hosted-runner runtime resilience smoke | none | 20 minutes | Backend Integration |
+| Repository Contracts & Policy | Repository, docs, workflow, generated-output, staged-feature, runtime-harness, and Cross-VM contracts | `contracts` | 20 minutes | Quality, Security & Native |
+| Rust Quality, Tests & Boundaries | Rust format, clippy, workspace tests, audit, and agent/transport boundaries | `rust-validation` | 25 minutes | Backend Integration and Quality, Security & Native |
+| Repository Secret Scan | Full-history repository gitleaks scan | `g6-secret-scan` | 20 minutes | Quality, Security & Native |
+| Dependency License Policy | Go, Rust when not covered by Rust validation, and Web dependency license policy | `security` | 20 minutes | Quality, Security & Native |
+| Native Ocserv / Agent Integration | Ephemeral native package, `ocpasswd`, OpenSSL, and loopback login fixture | `native` | 20 minutes | Quality, Security & Native |
 
-Rust Validation executes once and feeds two aggregators. Each aggregator has a
+Rust Quality, Tests & Boundaries executes once and feeds two aggregators. Each aggregator has a
 five-minute timeout, uses `always()`, and accepts a dependency only when it
 succeeded or when the relevance classifier explicitly marked it not
 applicable and it was skipped; every other result, including an unexpected
@@ -48,20 +66,20 @@ skip, fails the aggregator. The workflow uses no workflow-level path filters.
 The repository-owned `scripts/ci-relevance.sh` publishes one authorization
 flag for every conditional worker. It ORs the impact domains of all recognized
 paths, so a Web plus Rust change runs the Web, Browser, and Rust workers rather
-than full CI. Ordinary documentation runs Contracts and Policy plus the
-structurally always-on Secret Scan. Web unit/config-only inputs run Web Static
+than full CI. Ordinary documentation runs Repository Contracts & Policy plus the
+structurally always-on Repository Secret Scan. Web unit/config-only inputs run Web Quality, Unit & Build
 and Unit; Web runtime, build, dependency, and Playwright inputs also run
-Browser E2E. P1 Smoke is a backend/runtime responsibility and is not activated
+Web Browser E2E. Runtime Resilience Smoke is a backend/runtime responsibility and is not activated
 by Web changes.
 
 Database packages and migrations alone activate PostgreSQL 17/18, and
-PostgreSQL or Local Slice relevance explicitly implies Build Runtime
+PostgreSQL or local-integration relevance explicitly implies Build Shared Runtime
 Artifacts. Native, production relay, credential rotation, stage-contract,
 license, and G6 smoke flags each follow the inputs consumed by their own
 harness. Machine-readable G6 acceptance contracts activate Contracts and
 Policy plus G6 Smoke, while ordinary release-readiness Markdown does not.
-Secret Scan remains always-on and keeps the full-history `gitleaks git`
-semantics; License Policy runs only for dependency manifests, lockfiles, or
+Repository Secret Scan remains always-on and keeps the full-history `gitleaks git`
+semantics; Dependency License Policy runs only for dependency manifests, lockfiles, or
 license-policy inputs.
 
 Pull requests are classified with `base...head` three-dot semantics, so base
@@ -72,14 +90,12 @@ unresolvable merge bases, failed or empty diffs, global toolchain changes, the
 primary CI routing authority, and unknown paths fail closed to full CI.
 Known mixed changes never become full merely because they are mixed.
 
-The focused I10 journal tests remain in the Rust workspace run. The I11
-Go/Rust tests remain in the dedicated language workers, while its boundary
-assertions run with the applicable contract and Rust workers. The I14-I19
-`--contract-only` modes omit only repeated Go or Rust language-suite
-invocations; they retain the stage-specific contract, topology, relay,
-recovery, backup, packaging, and policy assertions owned by those scripts.
+Staged-feature `--contract-only` modes omit only repeated Go or Rust language
+suite invocations. Their static source, API, manifest, recovery, and policy
+assertions now run conditionally inside Repository Contracts & Policy.
 
-P1 Full Validation remains a separate manual `p1-capacity.yml` workflow. It
+The 500-Agent Resilience & Capacity Acceptance remains a separate manual
+`p1-capacity.yml` phase. It
 runs the default 500-Agent single-VM profile and all fault phases with a
 45-minute timeout. Capacity evidence is not part of ordinary pull-request
 feedback, and the primary workflow keeps the smoke parameters unchanged.
@@ -130,18 +146,18 @@ exactly one explicit profile:
 
 | Profile | Installed or verified tools | Workers |
 | --- | --- | --- |
-| `go-test` | Go and host `jq` | Go Race; PostgreSQL 17/18 Integration |
-| `go-quality` | Go, staticcheck, govulncheck, and host `jq` | Go Static and Unit |
-| `go-rust-integration` | Go, Rust, staticcheck, govulncheck, sccache, and host `jq` | Build Runtime Artifacts; I18 Production Relays |
-| `web` | Node, pinned npm, and `npm ci` dependencies | Web Static and Unit |
-| `contracts` | Node/npm, Buf, OpenAPI Generator, oasdiff, host Java, and Web dependencies | Contracts and Policy |
-| `rust-validation` | Rust, rustfmt, clippy, cargo-audit, cargo-deny, and sccache | Rust Validation |
-| `security` | Go, Node/npm, Rust, cargo-deny, sccache, and Web dependencies | License Policy |
-| `native` | Rust and sccache | Native Ocserv |
-| `g6-secret-scan` | gitleaks and host `jq`/`openssl` | CI Secret Scan; G6 Readiness Secret Scan; G6 Harness Smoke Secret Scan |
-| `native-packages` | Rust and nfpm (Linux `aarch64` mirrors only this profile) | Release Packages build matrix |
+| `go-test` | Go and host `jq` | Go Race Tests; PostgreSQL 17/18 Migration & Integration |
+| `go-quality` | Go, staticcheck, govulncheck, and host `jq` | Go Quality & Unit Tests |
+| `go-rust-integration` | Go, Rust, staticcheck, govulncheck, sccache, and host `jq` | Build Shared Runtime Binaries; Production Topology & Relay Contracts |
+| `web` | Node, pinned npm, and `npm ci` dependencies | Web Quality, Unit & Build |
+| `contracts` | Node/npm, Buf, OpenAPI Generator, oasdiff, host Java, and Web dependencies | Repository Contracts & Policy |
+| `rust-validation` | Rust, rustfmt, clippy, cargo-audit, cargo-deny, and sccache | Rust Quality, Tests & Boundaries |
+| `security` | Go, Node/npm, Rust, cargo-deny, sccache, and Web dependencies | Dependency License Policy |
+| `native` | Rust and sccache | Native Ocserv / Agent Integration |
+| `g6-secret-scan` | gitleaks and host `jq`/`openssl` | Repository Secret Scan; G6 Formal Evidence Secret Scan; G6 Smoke Evidence Secret Scan |
+| `native-packages` | Rust and nfpm (Linux `aarch64` mirrors only this profile) | Agent Release Packages build matrix |
 
-Stage contracts, credential rotation, Local Slice, Browser E2E, and P1 Smoke
+Staged-feature contracts, credential rotation, local integration, Web Browser E2E, and runtime resilience smoke
 use runner-provided tools or artifacts and do not call bootstrap. Outside
 GitHub Actions, `make bootstrap` explicitly selects the complete `all` profile.
 
@@ -154,35 +170,35 @@ cache miss is supported because bootstrap revalidates versions and checksums.
 
 | Tool-cache profile | Main-branch writer | Restore consumers |
 | --- | --- | --- |
-| `go-rust-integration` | Build Runtime Artifacts | Build Runtime Artifacts; I18 Production Relays |
-| `go-quality` | Go Static and Unit | Go Static and Unit |
-| `go-test` | Go Race | Go Race; PostgreSQL 17/18 Integration |
-| `web` | Web Static and Unit | Web Static and Unit |
-| `contracts` | Contracts and Policy | Contracts and Policy |
-| `rust-validation` | Rust Validation | Rust Validation |
-| `security` | License Policy | License Policy |
-| `native` | Native Ocserv | Native Ocserv |
+| `go-rust-integration` | Build Shared Runtime Binaries | Build Shared Runtime Binaries; Production Topology & Relay Contracts |
+| `go-quality` | Go Quality & Unit Tests | Go Quality & Unit Tests |
+| `go-test` | Go Race Tests | Go Race Tests; PostgreSQL 17/18 Migration & Integration |
+| `web` | Web Quality, Unit & Build | Web Quality, Unit & Build |
+| `contracts` | Repository Contracts & Policy | Repository Contracts & Policy |
+| `rust-validation` | Rust Quality, Tests & Boundaries | Rust Quality, Tests & Boundaries |
+| `security` | Dependency License Policy | Dependency License Policy |
+| `native` | Native Ocserv / Agent Integration | Native Ocserv / Agent Integration |
 
 The release-packages workflow writes its own `native-packages` tool cache from
 its per-architecture build matrix jobs.
 
 The shared Go cache contains `.cache/go-build`, `.cache/go-mod`, and
-`.cache/gopath`. Build Runtime Artifacts, Go Static and Unit, Go Race,
-PostgreSQL 17/18, I18 Production Relays, and License Policy restore it.
+`.cache/gopath`. Build Shared Runtime Binaries, Go Quality & Unit Tests, Go Race Tests,
+PostgreSQL 17/18, Production Topology & Relay Contracts, and Dependency License Policy restore it.
 Its primary key includes the exact commit and Go dependency inputs, with
-dependency and platform prefix fallbacks. Go Static and Unit is its only
+dependency and platform prefix fallbacks. Go Quality & Unit Tests is its only
 writer.
 
-The shared npm cache contains `.cache/npm`. Web Static and Unit, Contracts and
-Policy, and License Policy restore it; Web Static and Unit is its only
+The shared npm cache contains `.cache/npm`. Web Quality, Unit & Build, Repository Contracts &
+Policy, and Dependency License Policy restore it; Web Quality, Unit & Build is its only
 writer. All explicit tool, Go, and npm cache writes require a successful push
 to `main` and a primary-key miss. Pull-request workers are restore-only. CI
 does not cache `node_modules`, credentials, environment files, logs, test
 artifacts, or `rust/target`.
 
 Rust compiler outputs use sccache instead of archiving `rust/target`. Build
-Runtime Artifacts, I18 Production Relays, Rust Validation, License Policy, and
-Native Ocserv:
+Shared Runtime Binaries, Production Topology & Relay Contracts, Rust Quality,
+Tests & Boundaries, Dependency License Policy, and Native Ocserv / Agent Integration:
 
 - request repository-pinned sccache `0.17.0` through the SHA-pinned sccache
   Action;
@@ -193,13 +209,13 @@ Native Ocserv:
 - fall back to the local `.cache/sccache` directory outside that environment.
 
 The downloaded sccache binary and platform checksums are pinned in the same
-toolchain files as other bootstrap tools. Native Ocserv preserves the required
+toolchain files as other bootstrap tools. Native Ocserv / Agent Integration preserves the required
 sccache environment across its root fixture while keeping its Cargo target in
 a unique directory below `RUNNER_TEMP`.
 
 ## Runtime artifact
 
-Build Runtime Artifacts compiles `ocserv-control` and
+Build Shared Runtime Binaries compiles `ocserv-control` and
 `ocservia-transportd-stub`, then creates
 `runtime-<run>/runtime-artifacts.tar.gz`. Its manifest records the
 full candidate commit and a SHA-256 digest for each executable. Extraction
@@ -210,7 +226,7 @@ overwrites, so "Re-run failed jobs" reuses the artifact the successful build
 already produced while a full re-run replaces it; the manifest check still
 binds the artifact to the exact commit.
 
-PostgreSQL 17, PostgreSQL 18, and Local Slice download and validate that
+PostgreSQL 17, PostgreSQL 18, and the local integration worker download and validate that
 artifact instead of rebuilding the same binaries. The PostgreSQL matrix uses
 `fail-fast: false`, so a failure in one major does not cancel evidence from the
 other. The PostgreSQL 18-only legacy upgrade fixture runs for `PG_MAJOR=18` or
@@ -219,28 +235,29 @@ the local `PG_MAJOR=all` mode; it is not repeated in the PostgreSQL 17 worker.
 ## Diagnostics
 
 Uploads use SHA-pinned Actions, one-day retention, and names bound to the run
-(except the reusable runtime artifact) or to the run and attempt:
+(except the reusable runtime artifact) or to the run and attempt. Ordinary CI
+diagnostics upload only after failure or cancellation; acceptance and release
+evidence keeps its existing unconditional publication semantics.
 
 | Worker | Artifact name |
 | --- | --- |
-| Build Runtime Artifacts | `runtime-<run>` |
-| Go Static and Unit | `go-standard-<run>-<attempt>` |
-| Go Race | `go-race-<run>-<attempt>` |
+| Build Shared Runtime Binaries | `runtime-<run>` |
+| Go Quality & Unit Tests | `go-standard-<run>-<attempt>` |
+| Go Race Tests | `go-race-<run>-<attempt>` |
 | PostgreSQL 17/18 | `database-pg<major>-<run>-<attempt>` |
-| I14-I19 Contracts | `stage-contracts-<run>-<attempt>` |
-| I18 Production Relays | `production-relays-<run>-<attempt>` |
-| PostgreSQL Credential Rotation | `credential-rotation-<run>-<attempt>` |
-| Local Slice | `local-slice-<run>-<attempt>` |
-| Web Static and Unit | `web-validation-<run>-<attempt>` |
-| Browser E2E | `browser-e2e-<run>-<attempt>` |
-| P1 Smoke | `p1-smoke-<run>-<attempt>` |
-| Contracts and Policy | `contracts-<run>-<attempt>` |
-| Rust Validation | `rust-<run>-<attempt>` |
-| Native Ocserv | `native-ocserv-<run>-<attempt>` |
-| P1 Full Validation | `p1-full-<run>-<attempt>` |
+| Production Topology & Relay Contracts | `production-relays-<run>-<attempt>` |
+| PostgreSQL Credential Rotation Integration | `credential-rotation-<run>-<attempt>` |
+| Control Plane ↔ Transport Local Integration | `local-slice-<run>-<attempt>` |
+| Web Quality, Unit & Build | `web-validation-<run>-<attempt>` |
+| Web Browser E2E | `browser-e2e-<run>-<attempt>` |
+| Runtime Resilience Smoke (24 Agents) | `p1-smoke-<run>-<attempt>` |
+| Repository Contracts & Policy | `contracts-<run>-<attempt>` |
+| Rust Quality, Tests & Boundaries | `rust-<run>-<attempt>` |
+| Native Ocserv / Agent Integration | `native-ocserv-<run>-<attempt>` |
+| 500-Agent Resilience & Capacity Acceptance | `p1-full-<run>-<attempt>` |
 
-Secret Scan and License Policy have no separate diagnostic artifact; their
-results remain in the job log. Browser E2E and P1 Smoke use distinct
+Repository Secret Scan and Dependency License Policy have no separate diagnostic artifact; their
+results remain in the job log. Web Browser E2E and Runtime Resilience Smoke use distinct
 `RUN_ID`, Compose project, and artifact paths. Docker and native scripts capture
 diagnostics before scoped cleanup, preserve the original test result, and turn
 their own leftovers into failures.
@@ -258,18 +275,20 @@ use unique `RUN_ID` and `COMPOSE_PROJECT` values.
 
 ## Required checks
 
-Branch protection requires only the three stable result aggregators:
+Branch protection requires these stable result contexts:
 
 - `Backend Integration`
 - `Web & Smoke`
 - `Quality, Security & Native`
+- `G6 Harness Smoke Core / G6 Harness Smoke Result`
 
 The worker names are visible checks but are not configured individually as
-required checks. Backend Integration waits for its nine worker job definitions,
-including both PostgreSQL matrix executions and P1 Smoke. Web & Smoke waits for
-its two Web workers. Quality, Security & Native waits for Contracts and Policy,
-the shared Rust Validation execution, Secret Scan, License Policy, and Native
-Ocserv.
+required checks. Backend Integration waits for its ten worker job definitions,
+including both PostgreSQL matrix executions, Runtime Resilience Smoke, and the
+contract worker that conditionally owns staged-feature assertions. Web & Smoke
+waits for its two Web workers. Quality, Security & Native waits for Repository
+Contracts & Policy, the shared Rust validation execution, Repository Secret
+Scan, Dependency License Policy, and Native Ocserv / Agent Integration.
 
 Do not rename an aggregator until the branch ruleset has first been migrated to
 a successful check with the replacement name. A change is fully validated only
@@ -321,7 +340,7 @@ stays a dry run and never uploads release assets.
 ## Deferred native validation
 
 The `native_user_and_group_operations` ignored test and the real I13 loopback
-login run in Native Ocserv. Pure adapter logic remains in ordinary Rust tests.
+login run in Native Ocserv / Agent Integration. Pure adapter logic remains in ordinary Rust tests.
 These tests are not reported as hosted validation:
 
 - `native_controlled_operations` needs prepared live sessions, an IP ban, and a

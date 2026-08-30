@@ -4,12 +4,23 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # shellcheck source=scripts/env.sh
 source "${ROOT}/scripts/env.sh"
 
+if (($# > 1)) || { (($# == 1)) && [[ "$1" != "--skip-rust" ]]; }; then
+  echo "usage: $0 [--skip-rust]" >&2
+  exit 2
+fi
+skip_rust=false
+if (($# == 1)); then
+  skip_rust=true
+fi
+
 (cd "${ROOT}/control-plane" && \
   go run github.com/google/go-licenses/v2@v2.0.1 check ./... \
     --ignore=github.com/GentleKingson/ocservia/control-plane \
     --allowed_licenses=Apache-2.0,BSD-2-Clause,BSD-3-Clause,ISC,MIT)
 
-(cd "${ROOT}/rust" && cargo deny check licenses)
+if [[ "${skip_rust}" != true ]]; then
+  (cd "${ROOT}/rust" && cargo deny check licenses)
+fi
 
 (cd "${ROOT}/web" && node <<'EOF'
 import { existsSync, readFileSync } from "node:fs";
