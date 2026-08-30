@@ -16,7 +16,12 @@ on:
     branches: [main]
     paths:
       - 'rust/**'
+      - 'toolchains.lock'
+      - 'scripts/checksums.txt'
+      - 'scripts/bootstrap.sh'
+      - 'scripts/env.sh'
       - '.github/workflows/rust-cache-provision.yml'
+      - '.github/actions/g6-cache-credentials/**'
       - 'scripts/g6-buildx-cache.sh'
       - 'scripts/g6-timing.sh'
   schedule:

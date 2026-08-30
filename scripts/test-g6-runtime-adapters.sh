@@ -102,7 +102,7 @@ relevance_steps = Array(relevance.fetch("steps"))
 reject("PR smoke relevance must compare the exact base and head with full history") unless
   relevance.fetch("runs-on") == "ubuntu-24.04" && relevance.fetch("timeout-minutes") <= 5 &&
   relevance_steps.any? { |step| step.fetch("with", {})["fetch-depth"] == 0 } &&
-  relevance_steps.any? { |step| step.fetch("run", "").include?("scripts/g6-smoke-relevance.sh") }
+  relevance_steps.any? { |step| step.fetch("run", "").include?("scripts/ci-relevance.sh pull_request") }
 smoke_call = smoke_jobs.fetch("g6-harness-core")
 reject("PR smoke must call the local reusable core") unless smoke_call.fetch("uses") == "./.github/workflows/g6-harness-core.yml"
 reject("PR smoke must be permanently non-authoritative") unless
@@ -141,7 +141,6 @@ policy_commands = %w[
   scripts/test-g6-evidence-pipeline.sh
   scripts/test-g6-secret-scan-config.sh
   scripts/test-g6-runtime-adapters.sh
-  scripts/test-g6-smoke-relevance.sh
   scripts/test-g6-readiness-hang-guards.sh
 ]
 ci_jobs = ci_workflow.fetch("jobs")
