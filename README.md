@@ -216,6 +216,13 @@ deploy/production/compose.sh config --quiet
 deploy/production/compose.sh up -d
 ```
 
+For a fresh Controller host, use the lifecycle entrypoint with the published
+release manifest:
+
+```bash
+deploy/production/controller.sh install --release-file /path/to/controller-release.json
+```
+
 Direct `docker compose` invocation is not the supported production path because the launcher enforces image, secret, ownership, mode, path, and runtime-initialization requirements.
 
 Managed-node installation and upgrades are documented separately in [Agent package lifecycle](docs/operations/agent-lifecycle.md). Enrollment and EndpointID trust are documented in [Enrollment and node trust](docs/development/enrollment.md).
