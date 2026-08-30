@@ -258,12 +258,17 @@ version observation, the failure and rollback paths, or the conservative
 
 `POST /api/v1/agent-rollouts` (RBAC action `agent.upgrade`, Operator role)
 upgrades a selected set of nodes to one trusted target version in bounded
-batches. The request carries the target version, the node IDs, a batch size,
-a stop-on-failure flag, and a reason, and must reference an approval that
-binds exactly that target version, the sorted node set, the batch size, and
-the stop-on-failure flag. The target must exist in the trusted release
-manifest for every selected node's architecture, and every selected node must
-advertise the `ocserv.agent.upgrade.v2` capability.
+batches. The rollout creation request carries the target version, node IDs, an
+optional batch size, reason, and approval ID. `batch_size` defaults to 5 and is
+bounded from 1 through 20. It does not accept `stop_on_failure`.
+
+The referenced `agent.rollout` approval binding additionally includes the
+target version, sorted node set, batch size, and `stop_on_failure`. The current
+server contract requires that policy to be true; rollout creation fixes
+`StopOnFailure = true` and does not expose it as a caller-selectable field. The
+target must exist in the trusted release manifest for every selected node's
+architecture, and every selected node must advertise the
+`ocserv.agent.upgrade.v2` capability.
 
 The console's fleet version badges and the recommended version shown in
 Settings are driven by the operator-pinned `OCSERV_RECOMMENDED_AGENT_VERSION`

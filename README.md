@@ -10,7 +10,7 @@ ocservia is a self-hosted platform for operating a fleet of OpenConnect VPN serv
 The project combines a Go control plane, Rust transport and node components, a Vue and TypeScript Web application, PostgreSQL, [Iroh](https://www.iroh.computer/) connectivity, and OpenTelemetry.
 
 > [!NOTE]
-> **Development status:** ocservia v0.1.x is the initial public release line. It is intended for controlled deployment and evaluation. Production deployments remain operator-validated, and no production SLA is provided. Because ocservia remains pre-1.0, compatibility may change between minor release lines. The production topology in this repository is a hardened reference deployment, not a production-readiness guarantee.
+> **Development status:** ocservia v0.1.x is the current published release line. It is intended for controlled deployment and evaluation. Production deployments remain operator-validated, and no production SLA is provided. Because ocservia remains pre-1.0, compatibility may change between minor release lines. The production topology in this repository is a hardened reference deployment, not a production-readiness guarantee.
 
 [Quick start](#quick-start) · [Capabilities](#capabilities) · [Architecture](#architecture) · [Security model](#security-model) · [Production reference](#production-reference) · [Documentation](#documentation)
 
@@ -42,6 +42,7 @@ The following capabilities are implemented on `main`. Their presence does not im
 | Auditability | Business-operation audit intents, authenticated append-only event chains, signed checkpoints, terminal Agent results, and verification endpoints |
 | Certificates and secrets | Node-generated private keys, signed CSRs, external PKI integration, purpose-separated sealed secrets, short-lived P12 artifacts, revocation, and external secret references |
 | Delivery and recovery | Transactional outbox, versioned semantic command hashes, Agent idempotency journal, privileged desired-effect evidence, explicit `unknown` outcomes, and reconciliation |
+| Agent lifecycle / fleet upgrades | Agent version intelligence, trusted release catalog, reconciled single-node upgrades, durable self-upgrade runner, mandatory one-node canaries, bounded rolling upgrades, eligibility rechecks, pause/resume, skipped-node semantics, and durable rollout state |
 | Deployment operations | HTTPS-only reference topology, dedicated relays, PostgreSQL backup and restore workflow, credential rotation, signed Agent packaging, upgrade, rollback, and state-preserving removal |
 
 ## Architecture
@@ -61,6 +62,8 @@ flowchart LR
     Controller <-->|Versioned gRPC over UDS| Transport["Rust transportd\nIroh endpoint"]
     Transport <-->|Direct path or dedicated relays| Agent["Rust Agent\nUnprivileged"]
     Agent -->|Signed typed RPC over UDS| Privd["Rust privd\nRoot · no TCP listener"]
+    Privd -->|Verified AgentUpgrade intent\nFixed systemd handoff| Upgrader["ocservia-upgrader\nRoot · fixed runner"]
+    Upgrader -->|Trusted Agent lifecycle| Agent
     Privd --> Ocserv["ocserv · occtl · systemd\nFixed allowlist"]
 ```
 
@@ -72,7 +75,8 @@ flowchart LR
 | Web console | Fleet views and controlled workflows using the generated API client | [`web/`](web/) |
 | `transportd` | Owns the Iroh endpoint and bridges the Go boundary through a versioned Unix-socket gRPC contract | [`rust/crates/transportd/`](rust/crates/transportd/) |
 | Agent | Maintains node connectivity, telemetry, command validation, and the durable SQLite command journal without root privileges | [`rust/crates/agent/`](rust/crates/agent/) |
-| `privd` | Performs only fixed, typed ocserv reads and mutations after independently verifying Controller authorization | [`rust/crates/privd/`](rust/crates/privd/) |
+| `privd` | Performs fixed, typed ocserv effects and independently verifies Controller-authorized AgentUpgrade handoffs | [`rust/crates/privd/`](rust/crates/privd/) |
+| `ocservia-upgrader` | Fixed root-owned systemd runner that consumes verified intents, re-verifies releases from the local spool, persists terminal results, and converges after crashes or replay | [`rust/crates/upgrader/`](rust/crates/upgrader/) |
 | ocserv adapter | Bounded parsing and fixed invocations for ocserv, `occtl`, `ocpasswd`, and service lifecycle operations | [`rust/crates/ocserv-adapter/`](rust/crates/ocserv-adapter/) |
 | Contracts | Protobuf transport and Agent contracts plus the OpenAPI HTTP contract | [`proto/`](proto/) · [`openapi/`](openapi/) |
 | Deployment assets | Local Compose stack, production reference topology, relay deployment, backup, and launch guards | [`deploy/`](deploy/) |
@@ -181,7 +185,8 @@ ocservia is designed around explicit trust boundaries rather than broad remote a
 | Transport to Agent | Enrollment pins the node's Iroh EndpointID; sessions carry negotiated capabilities, authorization revision, and expiry |
 | Controller commands | Every privileged operation is typed, signed, revision-fenced, expiry-fenced, capability-checked, and bound to a canonical semantic payload hash |
 | Agent | Runs unprivileged, owns network connectivity and its SQLite journal, and treats duplicate delivery as replay rather than a second side effect |
-| `privd` | Has no TCP listener, verifies the original Controller authorization independently, accepts no arbitrary program, path, service, or raw command, and uses fixed bounded adapters |
+| `privd` | Has no TCP listener, independently verifies Controller authorization for fixed ocserv effects and AgentUpgrade handoffs, accepts no arbitrary program, path, service, or raw command, and uses fixed bounded adapters |
+| `ocservia-upgrader` | Runs as the fixed root-owned systemd runner, accepts only persisted upgrade intents, reads the fixed local package spool, re-verifies pinned release trust anchors, and persists terminal results |
 | Recovery | Uncertain effects remain `unknown` until durable evidence proves applied or absent; missing evidence fails closed and never authorizes a blind retry |
 | Audit | Business writes and audit intents commit together; events are append-only, hash chained, HMAC authenticated, and covered by independently keyed checkpoints |
 | Secrets | Password and P12 sealing use distinct purpose-bound keys; certificate signing and secret values remain outside the control-plane database |
@@ -224,7 +229,8 @@ Managed-node installation and upgrades are documented separately in [Agent packa
 | Web fleet and management workflows | Available |
 | Production-oriented deployment, relay, backup, and Agent lifecycle assets | Available as hardened reference workflows |
 | Current release line | v0.1.x |
-| Initial release target | v0.1.0 |
+| Latest published release | v0.1.1 |
+| Next release target | v0.2.0 — release readiness passed, not yet published |
 | Compatibility commitment | Patch-level maintenance within v0.1.x; pre-1.0 minor lines may evolve |
 | Production SLA or capacity guarantee | Not provided |
 | Security support | Latest v0.1.x patch release |

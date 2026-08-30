@@ -15,11 +15,17 @@ The Web shell is available at `http://127.0.0.1:4173`. The control-plane live,
 readiness, and version endpoints are `http://127.0.0.1:8080/livez`, `/readyz`,
 and `/version`.
 
-The Overview page can run normal, duplicate-event, error, and disconnect probe
-scenarios. Each probe is durably queued before the worker sends it over the
-UDS. Events are idempotently stored, exposed by `GET /api/v1/events`, and
-streamed by `GET /api/v1/events/stream`. SSE resumes with `Last-Event-ID`; the
-REST collection remains the complete rebuild source.
+The production Overview page displays real operational state from the current
+readiness, fleet, operations, and events APIs: fleet health and connectivity,
+Agent version classification, recent operations, recent events, and notable
+offline or stale nodes. The simulator is not part of the production Overview.
+It is exposed only through the development-only `/dev` page, which can run
+normal, duplicate-event, error, and disconnect probe scenarios. The production
+runtime does not register the `/dev` route. Each development probe is durably
+queued before the worker sends it over the UDS. Events are idempotently stored,
+exposed by `GET /api/v1/events`, and streamed by `GET /api/v1/events/stream`.
+SSE resumes with `Last-Event-ID`; the REST collection remains the complete
+rebuild source.
 
 Both platform and operation streams use one shared admission manager. The safe
 production defaults are 128 global, 8 per identity, 4 per session, 32 per
@@ -92,14 +98,22 @@ Run the browser-to-simulator E2E with `make e2e`. The script scopes every
 container, network, and volume to `COMPOSE_PROJECT` and removes them on success,
 failure, or interruption.
 
-The same Compose stack is used by the `Browser E2E` GitHub Actions job. CI gives
-each run and attempt a unique Compose project, retains the Playwright HTML
-report, traces, screenshots, videos, test results, Compose logs, and container
-status as a workflow artifact, then verifies scoped cleanup. `make e2e` is the
-local reproduction command; it is not a separate acceptance environment.
+The same Compose stack is used by the `Browser E2E` GitHub Actions job. The E2E
+harness collects the Playwright HTML report, traces, screenshots, videos, test
+results, Compose logs, and container status as diagnostics. GitHub Actions
+uploads the failure diagnostics artifact only when the job fails or is
+cancelled (`if: ${{ failure() || cancelled() }}`); a successful run does not
+upload this diagnostics artifact. Scoped cleanup still runs, and `make e2e` is
+the local reproduction command rather than a separate acceptance environment.
 
-Roll back an unshipped development deployment by stopping the stack, removing
-its named volume, and reverting migration `000002_local_slice` before
-`000001_foundation`. Shipped schema changes use a forward fix or database
-restore. Reverting I03 removes only the development stub, simulator queue,
-transport events, and their Web surface.
+For a disposable development stack with no data to preserve, recreate the
+database from the current schema with:
+
+```bash
+docker compose -f deploy/compose/compose.yaml down --volumes
+```
+
+For persisted or shipped schema changes, do not rely on historical manual
+down-chains. Use a forward fix or a controlled database restore. Migration
+down/up behavior is verified by the current database integration harness; see
+[PostgreSQL backup](../operations/postgres-backup.md) for the restore workflow.
