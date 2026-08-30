@@ -33,7 +33,7 @@ classify_path() {
       fail_closed global_toolchain_changed ;;
     .github/workflows/g6-harness-core.yml|.github/workflows/g6-harness-smoke.yml|.github/actions/g6-*/*)
       run_contracts_policy=true; run_g6_smoke=true ;;
-    .github/workflows/g6-readiness.yml|.github/workflows/p1-capacity.yml|.github/workflows/real-e2e.yml|.github/workflows/release.yml|.github/workflows/rust-cache-provision.yml|.github/workflows/g6-ha-pitr.yml|.github/workflows/*)
+    .github/workflows/g6-readiness.yml|.github/workflows/p1-capacity.yml|.github/workflows/real-e2e.yml|.github/workflows/release.yml|.github/workflows/rust-cache-provision.yml|.github/workflows/*)
       run_contracts_policy=true ;;
     docs/acceptance/g6-*.json|docs/acceptance/g6-*.yaml|docs/acceptance/README.md)
       run_contracts_policy=true; run_g6_smoke=true ;;
@@ -88,6 +88,7 @@ classify_path() {
       enable_go; run_local_slice=true; run_runtime_artifacts=true ;;
     control-plane/internal/platform/app/*|control-plane/internal/platform/config/*|control-plane/internal/coordination/maintenance.go|control-plane/Dockerfile)
       if [[ "${path}" == *.go ]]; then enable_go; fi
+      if [[ "${path}" == control-plane/Dockerfile ]]; then run_contracts_policy=true; fi
       run_g6_smoke=true; run_production_relays=true ;;
     control-plane/*.go|control-plane/**/*.go)
       enable_go ;;
@@ -121,7 +122,7 @@ classify_path() {
       run_browser=true; run_p1_smoke=true ;;
     deploy/systemd/*|deploy/package/*|deploy/prepare-transport-runtime.sh)
       run_native=true; run_contracts_policy=true ;;
-    deploy/real-e2e/*|deploy/g6-ha-pitr/*|deploy/g6-ha-pitr/**/*)
+    deploy/real-e2e/*|deploy/real-e2e/**/*|deploy/g6-ha-pitr/*|deploy/g6-ha-pitr/**/*)
       run_contracts_policy=true ;;
 
     scripts/ci-relevance.sh)
@@ -134,6 +135,8 @@ classify_path() {
       run_database=true; run_runtime_artifacts=true; run_contracts_policy=true ;;
     scripts/local-slice-integration.sh)
       run_local_slice=true; run_runtime_artifacts=true; run_contracts_policy=true ;;
+    scripts/real-e2e-*.sh|scripts/test-real-e2e-workflow.sh)
+      run_contracts_policy=true ;;
     scripts/p1-*|scripts/test-p1-*)
       run_p1_smoke=true; run_contracts_policy=true ;;
     scripts/i13-native-*|scripts/package-native-*|scripts/install-agent.sh|scripts/uninstall-agent.sh|scripts/upgrade-agent.sh|scripts/rollback-agent.sh)

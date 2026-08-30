@@ -1,4 +1,5 @@
-name: P1 full validation
+name: Manual Runtime & Security Acceptance
+run-name: Runtime Acceptance · ${{ inputs.phase }} · ${{ github.sha }}
 
 on:
   workflow_dispatch:
@@ -24,7 +25,7 @@ concurrency:
 jobs:
   p1-full:
     if: inputs.phase == 'p1-full'
-    name: P1 Full Validation
+    name: 500-Agent Resilience & Capacity Acceptance
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     env:
@@ -32,10 +33,11 @@ jobs:
       P1_PROFILE: full
       RUN_ID: p1-full-${{ github.run_id }}-${{ github.run_attempt }}-p1-full
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Checkout selected commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
-      - name: Runner preflight
+      - name: Record runner environment
         run: scripts/ci-preflight.sh
       - name: Record runner capacity
         env:
@@ -45,9 +47,9 @@ jobs:
           df -h >"${ARTIFACT_DIR}/disk-runner-before.txt"
           free -h >"${ARTIFACT_DIR}/memory-before.txt"
           docker system df >"${ARTIFACT_DIR}/docker-storage-before.txt"
-      - name: Harness boundary tests
+      - name: Validate runtime-resilience harness contracts
         run: scripts/test-p1-resilience-capacity.sh
-      - name: Full single-runner validation
+      - name: Run 500-Agent resilience and capacity acceptance
         env:
           ARTIFACT_DIR: ${{ runner.temp }}/artifacts/p1-full
         run: scripts/p1-resilience-capacity.sh
@@ -68,7 +70,7 @@ jobs:
               echo '```'
             fi
           } >>"${GITHUB_STEP_SUMMARY}"
-      - name: Upload full P1 evidence
+      - name: Upload resilience and capacity evidence
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
@@ -79,17 +81,18 @@ jobs:
 
   f1-live-iroh:
     if: inputs.phase == 'f1-live-iroh'
-    name: F1 Live Iroh
+    name: Iroh Transport Security Acceptance
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     env:
       RUN_ID: f1-${{ github.run_id }}-${{ github.run_attempt }}
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Checkout selected commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           fetch-depth: 0
           persist-credentials: false
-      - name: Runner preflight
+      - name: Verify runner prerequisites
         run: scripts/ci-preflight.sh
       - name: Restore verified tools
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
@@ -100,13 +103,13 @@ jobs:
           key: tooling-v3-f1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'scripts/checksums.txt', 'scripts/bootstrap.sh', 'scripts/env.sh') }}
       - name: Bootstrap Rust validation tools
         run: scripts/bootstrap.sh rust-validation
-      - name: Baseline positive control and Candidate live Iroh
+      - name: Validate baseline and candidate over live Iroh
         env:
           ARTIFACT_DIR: ${{ runner.temp }}/artifacts/f1
         run: |
           source scripts/env.sh
           scripts/security-acceptance-f1.sh
-      - name: Upload F1 evidence
+      - name: Upload Iroh transport security evidence
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
@@ -117,22 +120,23 @@ jobs:
 
   f2-sse-live:
     if: inputs.phase == 'f2-sse-live'
-    name: F2 SSE Live Capacity
+    name: SSE 1/10/100 Connection Acceptance
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     env:
       RUN_ID: f2-${{ github.run_id }}-${{ github.run_attempt }}
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Checkout selected commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
-      - name: Runner preflight
+      - name: Verify runner prerequisites
         run: scripts/ci-preflight.sh
       - name: Run 1, 10, and 100 connection SSE validation
         env:
           ARTIFACT_DIR: ${{ runner.temp }}/artifacts/f2
         run: scripts/security-acceptance-f2.sh
-      - name: Upload F2 evidence
+      - name: Upload SSE capacity evidence
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
@@ -143,16 +147,17 @@ jobs:
 
   f3-systemd-privd-pki:
     if: inputs.phase == 'f3-systemd-privd-pki'
-    name: F3 systemd, privd, and PKI
+    name: Native systemd / privd / PKI Acceptance
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     env:
       RUN_ID: f3-${{ github.run_id }}-${{ github.run_attempt }}
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Checkout selected commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
-      - name: Runner preflight
+      - name: Verify runner prerequisites
         run: scripts/ci-preflight.sh
       - name: Restore verified tools
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
@@ -173,7 +178,7 @@ jobs:
         run: |
           source scripts/env.sh
           scripts/security-acceptance-f3.sh
-      - name: Upload F3 evidence
+      - name: Upload native security evidence
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:

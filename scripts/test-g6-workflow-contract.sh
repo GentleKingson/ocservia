@@ -207,12 +207,12 @@ abort("the provisioner concurrency must be latest-wins per ref") unless
 steps = provision.fetch("jobs").fetch("provision").fetch("steps")
 guard = steps.first
 abort("the first provisioner step must fail closed on a non-main ref before any checkout") unless
-  guard["name"] == "Require main provisioning ref" &&
+  guard["name"] == "Guard trusted main ref" &&
     guard.fetch("run").to_s.include?('test "${GITHUB_REF}" = "refs/heads/main"')
 checkout_index = steps.index { |step| step["uses"].to_s.start_with?("actions/checkout") }
 abort("the provisioner checkout must follow the main-ref guard") unless checkout_index == 1
 
-build_step = steps.find { |step| step["name"] == "Build the workspace dependency cache" }
+build_step = steps.find { |step| step["name"] == "Populate G6 Rust builder cache" }
 abort("the provisioner solve must use the strict exporter against the shared Rust builder") unless
   build_step&.dig("env", "G6_CACHE_STRICT_EXPORT") == "true" &&
     build_step&.dig("env", "G6_CACHE_TIMEOUT") == "300s" &&

@@ -1,4 +1,5 @@
-name: Cross-VM Real E2E
+name: Cross-VM Iroh Enrollment E2E
+run-name: Cross-VM Enrollment · ${{ github.sha }}
 
 on:
   workflow_dispatch:
@@ -13,34 +14,33 @@ concurrency:
 
 jobs:
   real-controller:
-    name: Real Controller VM
+    name: "Controller VM: Enrollment Authority"
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     env:
       COMPOSE_PROJECT: ocservia-real-e2e-${{ github.run_id }}-${{ github.run_attempt }}-controller
       RUN_ID: real-e2e-${{ github.run_id }}-${{ github.run_attempt }}-controller
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Checkout selected commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
-      - name: Runner preflight
+      - name: Verify runner prerequisites
         run: scripts/ci-preflight.sh
-      - name: Real E2E policy tests
-        run: scripts/test-real-e2e-workflow.sh
       - name: Start Controller, PostgreSQL, and real transportd
         run: scripts/real-e2e-controller.sh start
-      - name: Publish Controller EndpointID
+      - name: Publish controller Iroh EndpointID
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: real-e2e-controller-ready-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/ocservia-real-e2e-controller-${{ env.RUN_ID }}/outbox/controller-ready
           if-no-files-found: error
           retention-days: 1
-      - name: Wait for Agent EndpointID
+      - name: Wait for managed-node Iroh EndpointID
         env:
           GITHUB_TOKEN: ${{ github.token }}
         run: scripts/real-e2e-artifact.sh wait-download "real-e2e-agent-endpoint-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" "${RUNNER_TEMP}/real-e2e-agent-endpoint" 600
-      - name: Bind and publish one-time enrollment token
+      - name: Issue token bound to managed-node EndpointID
         run: scripts/real-e2e-controller.sh issue-token "${RUNNER_TEMP}/real-e2e-agent-endpoint"
       - name: Publish enrollment token
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
@@ -50,11 +50,11 @@ jobs:
           if-no-files-found: error
           retention-days: 1
           include-hidden-files: false
-      - name: Wait for real Iroh enrollment result
+      - name: Wait for cross-VM enrollment result
         env:
           GITHUB_TOKEN: ${{ github.token }}
         run: scripts/real-e2e-artifact.sh wait-download "real-e2e-enrollment-result-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" "${RUNNER_TEMP}/real-e2e-enrollment-result" 600
-      - name: Verify pending EndpointID binding
+      - name: Verify enrolled EndpointID binding
         run: scripts/real-e2e-controller.sh verify-enrollment "${RUNNER_TEMP}/real-e2e-enrollment-result"
       - name: Collect redacted Controller diagnostics
         if: always()
@@ -72,18 +72,19 @@ jobs:
           retention-days: 1
 
   real-node:
-    name: Real Managed Node VM
+    name: "Managed Node VM: Agent Enrollment"
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     env:
       RUN_ID: real-e2e-${{ github.run_id }}-${{ github.run_attempt }}-node
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Checkout selected commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
-      - name: Runner preflight
+      - name: Verify runner prerequisites
         run: scripts/ci-preflight.sh
-      - name: Restore verified Rust toolchain
+      - name: Restore managed-node Rust tool cache
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: |
@@ -92,17 +93,15 @@ jobs:
           key: tooling-v3-real-e2e-node-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'scripts/checksums.txt', 'scripts/bootstrap.sh', 'scripts/env.sh') }}
       - name: Bootstrap pinned Rust toolchain
         run: scripts/bootstrap.sh native
-      - name: Real E2E policy tests
-        run: scripts/test-real-e2e-workflow.sh
-      - name: Build Agent
+      - name: Build managed-node Agent
         run: |
           source scripts/env.sh
           scripts/real-e2e-node.sh build
-      - name: Wait for Controller EndpointID
+      - name: Wait for controller Iroh EndpointID
         env:
           GITHUB_TOKEN: ${{ github.token }}
         run: scripts/real-e2e-artifact.sh wait-download "real-e2e-controller-ready-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" "${RUNNER_TEMP}/real-e2e-controller-ready" 600
-      - name: Prepare persistent Agent EndpointID
+      - name: Create persistent managed-node EndpointID
         run: scripts/real-e2e-node.sh prepare "${RUNNER_TEMP}/real-e2e-controller-ready"
       - name: Publish Agent EndpointID
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
@@ -115,7 +114,7 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ github.token }}
         run: scripts/real-e2e-artifact.sh wait-download "real-e2e-enrollment-token-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" "${RUNNER_TEMP}/real-e2e-enrollment-token" 600
-      - name: Enroll over real cross-VM Iroh
+      - name: Enroll managed node over real Iroh
         run: scripts/real-e2e-node.sh enroll "${RUNNER_TEMP}/real-e2e-enrollment-token"
       - name: Publish enrollment result
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7

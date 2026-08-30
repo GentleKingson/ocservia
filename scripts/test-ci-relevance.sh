@@ -23,6 +23,8 @@ paths=(
   proto/ocserv/platform/agent/v1/agent.proto tools/g6-harness/internal/smoke/pipeline.go
   deploy/systemd/ocservia-agent.service .github/workflows/g6-harness-smoke.yml
   .github/workflows/release.yml scripts/ci-relevance.sh web/package.json
+  scripts/real-e2e-node.sh deploy/real-e2e/controller.compose.yaml
+  control-plane/Dockerfile
 )
 for path in "${paths[@]}"; do
   mkdir -p "${fixture}/$(dirname "${path}")"
@@ -116,6 +118,12 @@ out="$(case_commit workflow .github/workflows/g6-harness-smoke.yml)"
 expect_only "${out}" run_contracts_policy run_g6_smoke
 out="$(case_commit release_workflow .github/workflows/release.yml)"
 expect_only "${out}" run_contracts_policy
+out="$(case_commit real_e2e_script scripts/real-e2e-node.sh)"
+expect_only "${out}" run_contracts_policy
+out="$(case_commit real_e2e_deploy deploy/real-e2e/controller.compose.yaml)"
+expect_only "${out}" run_contracts_policy
+out="$(case_commit control_dockerfile control-plane/Dockerfile)"
+expect_only "${out}" run_contracts_policy run_production_relays run_g6_smoke
 out="$(case_commit classifier_authority scripts/ci-relevance.sh)"
 expect_only "${out}" "${flags[@]}"
 expect_flag "${out}" reason ci_relevance_authority_changed

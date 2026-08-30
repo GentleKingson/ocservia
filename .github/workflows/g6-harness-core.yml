@@ -1,4 +1,4 @@
-name: G6 Harness Core
+name: G6 Readiness Core (Reusable)
 
 on:
   workflow_call:
@@ -30,7 +30,7 @@ permissions:
 # Environment, and can never reach the formal evidence or gate jobs.
 jobs:
   g6-contract:
-    name: G6 Harness Invocation Contract
+    name: G6 Readiness Invocation Contract
     runs-on: ubuntu-24.04
     timeout-minutes: 2
     env:
@@ -60,7 +60,7 @@ jobs:
           esac
 
   g6-rd-release-image:
-    name: G6 Readiness Release Images
+    name: G6 Formal Release Build
     needs: g6-contract
     if: inputs.profile == 'formal'
     runs-on: ubuntu-24.04
@@ -78,7 +78,8 @@ jobs:
       G6RD_RELAY_IMAGE: ocservia-g6-relay:${{ github.run_id }}-${{ github.run_attempt }}
       G6RD_PROBE_IMAGE: ocservia-g6-probe:${{ github.run_id }}-${{ github.run_attempt }}
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Checkout candidate source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
       - name: Initialize release timing diagnostics
@@ -86,7 +87,7 @@ jobs:
           scripts/g6-timing.sh init
           "${RUNNER_TEMP}/artifacts/timing/g6-rd-release.json"
           g6-rd-release formal "${GITHUB_SHA}" "${GITHUB_RUN_ID}" "${GITHUB_RUN_ATTEMPT}"
-      - name: Runner preflight
+      - name: Verify runner prerequisites
         run: |
           scripts/g6-timing.sh start "${RUNNER_TEMP}/artifacts/timing/g6-rd-release.json" runner_preparation
           scripts/ci-preflight.sh
@@ -360,7 +361,7 @@ jobs:
           exit "${status}"
 
   g6-rd-fd-a:
-    name: G6 Readiness Failure Domain A
+    name: "G6 Formal FD-A: Primary & PITR"
     needs: g6-rd-release-image
     if: inputs.profile == 'formal'
     runs-on: ubuntu-24.04
@@ -384,7 +385,8 @@ jobs:
       raw-artifact-digest: ${{ steps.fd-a-raw-upload.outputs.artifact-digest }}
       release-manifest-digest: ${{ needs.g6-rd-release-image.outputs.release-manifest-digest }}
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Checkout candidate source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
       - name: Initialize failure domain A timing diagnostics
@@ -392,7 +394,7 @@ jobs:
           scripts/g6-timing.sh init
           "${RUNNER_TEMP}/artifacts/timing/g6-rd-fd-a.json"
           g6-rd-fd-a formal "${GITHUB_SHA}" "${GITHUB_RUN_ID}" "${GITHUB_RUN_ATTEMPT}"
-      - name: Runner preflight
+      - name: Verify runner prerequisites
         run: |
           scripts/g6-timing.sh start "${RUNNER_TEMP}/artifacts/timing/g6-rd-fd-a.json" runner_preparation
           scripts/ci-preflight.sh
@@ -448,7 +450,7 @@ jobs:
           --name "g6-rd-tunnel-fd-b-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           --destination "${RUNNER_TEMP}/g6-rd-tunnel-fd-b"
           --timeout 1200s
-          --peer-job "G6 Readiness Core / G6 Readiness Failure Domain B"
+          --peer-job "G6 Formal Readiness / G6 Formal FD-B: Standby, Promotion & Faults"
       - name: Run failure domain A bootstrap segment
         run: '"${G6_HARNESS_BIN}" run-segment --domain fd-a --segment bootstrap'
       - name: Wait for failure domain B recipient certificate
@@ -459,7 +461,7 @@ jobs:
           --name "g6-rd-shared-recipient-key-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           --destination "${RUNNER_TEMP}/g6-rd-shared-recipient-key"
           --timeout 1200s
-          --peer-job "G6 Readiness Core / G6 Readiness Failure Domain B"
+          --peer-job "G6 Formal Readiness / G6 Formal FD-B: Standby, Promotion & Faults"
       - name: Encrypt the shared trust rendezvous for failure domain B
         run: '"${G6_HARNESS_BIN}" run-segment --domain fd-a --segment shared-trust'
       - name: Publish the shared trust rendezvous
@@ -492,7 +494,7 @@ jobs:
           --name "g6-rd-agents-enrolled-fd-b-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           --destination "${RUNNER_TEMP}/g6-rd-agents-enrolled-fd-b"
           --timeout 1200s
-          --peer-job "G6 Readiness Core / G6 Readiness Failure Domain B"
+          --peer-job "G6 Formal Readiness / G6 Formal FD-B: Standby, Promotion & Faults"
       - name: Run failure domain A transport trust segment
         run: '"${G6_HARNESS_BIN}" run-segment --domain fd-a --segment transport-trust'
       - name: Publish transport trust readiness
@@ -511,7 +513,7 @@ jobs:
           --name "g6-rd-load-active-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           --destination "${RUNNER_TEMP}/g6-rd-load-active"
           --timeout 900s
-          --peer-job "G6 Readiness Core / G6 Readiness Failure Domain B"
+          --peer-job "G6 Formal Readiness / G6 Formal FD-B: Standby, Promotion & Faults"
       - name: Run failure domain A failover cut segment
         run: '"${G6_HARNESS_BIN}" run-segment --domain fd-a --segment failover-cut'
       - name: Publish the isolation record
@@ -528,7 +530,7 @@ jobs:
           --name "g6-rd-new-primary-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           --destination "${RUNNER_TEMP}/g6-rd-new-primary"
           --timeout 600s
-          --peer-job "G6 Readiness Core / G6 Readiness Failure Domain B"
+          --peer-job "G6 Formal Readiness / G6 Formal FD-B: Standby, Promotion & Faults"
       - name: Run failure domain A recovery segment
         run: '"${G6_HARNESS_BIN}" run-segment --domain fd-a --segment recovery'
       - name: Upload relay observation readiness
@@ -545,7 +547,7 @@ jobs:
           --name "g6-rd-relay-pre-fault-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           --destination "${RUNNER_TEMP}/g6-rd-relay-pre-fault"
           --timeout 600s
-          --peer-job "G6 Readiness Core / G6 Readiness Failure Domain B"
+          --peer-job "G6 Formal Readiness / G6 Formal FD-B: Standby, Promotion & Faults"
       - name: Run failure domain A relay cut segment
         run: '"${G6_HARNESS_BIN}" run-segment --domain fd-a --segment relay-cut'
       - name: Upload failure domain A scenario readiness
@@ -562,7 +564,7 @@ jobs:
           --name "g6-rd-window-barrier-arm-request-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           --destination "${RUNNER_TEMP}/g6-rd-window-barrier-arm-request"
           --timeout 600s
-          --peer-job "G6 Readiness Core / G6 Readiness Failure Domain B"
+          --peer-job "G6 Formal Readiness / G6 Formal FD-B: Standby, Promotion & Faults"
       - name: Run failure domain A barrier arm segment
         run: '"${G6_HARNESS_BIN}" run-segment --domain fd-a --segment barrier-arm'
       - name: Publish failure domain A barrier acknowledgement
@@ -585,7 +587,7 @@ jobs:
           --name "g6-rd-final-freeze-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           --destination "${RUNNER_TEMP}/g6-rd-final-freeze"
           --timeout 1800s
-          --peer-job "G6 Readiness Core / G6 Readiness Failure Domain B"
+          --peer-job "G6 Formal Readiness / G6 Formal FD-B: Standby, Promotion & Faults"
       - name: Finish failure domain A peer observation timing
         run: scripts/g6-timing.sh end "${RUNNER_TEMP}/artifacts/timing/g6-rd-fd-a.json" peer_observation_wait || true
       - name: Start failure domain A evidence timing
@@ -634,7 +636,7 @@ jobs:
           retention-days: 5
 
   g6-rd-fd-b:
-    name: G6 Readiness Failure Domain B
+    name: "G6 Formal FD-B: Standby, Promotion & Faults"
     needs: g6-rd-release-image
     if: inputs.profile == 'formal'
     runs-on: ubuntu-24.04
@@ -658,7 +660,8 @@ jobs:
       raw-artifact-digest: ${{ steps.fd-b-raw-upload.outputs.artifact-digest }}
       release-manifest-digest: ${{ needs.g6-rd-release-image.outputs.release-manifest-digest }}
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Checkout candidate source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
       - name: Initialize failure domain B timing diagnostics
@@ -666,7 +669,7 @@ jobs:
           scripts/g6-timing.sh init
           "${RUNNER_TEMP}/artifacts/timing/g6-rd-fd-b.json"
           g6-rd-fd-b formal "${GITHUB_SHA}" "${GITHUB_RUN_ID}" "${GITHUB_RUN_ATTEMPT}"
-      - name: Runner preflight
+      - name: Verify runner prerequisites
         run: |
           scripts/g6-timing.sh start "${RUNNER_TEMP}/artifacts/timing/g6-rd-fd-b.json" runner_preparation
           scripts/ci-preflight.sh
@@ -722,7 +725,7 @@ jobs:
           --name "g6-rd-tunnel-fd-a-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           --destination "${RUNNER_TEMP}/g6-rd-tunnel-fd-a"
           --timeout 1200s
-          --peer-job "G6 Readiness Core / G6 Readiness Failure Domain A"
+          --peer-job "G6 Formal Readiness / G6 Formal FD-A: Primary & PITR"
       - name: Run failure domain B bootstrap segment
         run: '"${G6_HARNESS_BIN}" run-segment --domain fd-b --segment bootstrap'
       - name: Publish failure domain B recipient certificate
@@ -739,7 +742,7 @@ jobs:
           --name "g6-rd-shared-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           --destination "${RUNNER_TEMP}/g6-rd-shared"
           --timeout 1200s
-          --peer-job "G6 Readiness Core / G6 Readiness Failure Domain A"
+          --peer-job "G6 Formal Readiness / G6 Formal FD-A: Primary & PITR"
       - name: Run failure domain B peer runtime segment
         run: '"${G6_HARNESS_BIN}" run-segment --domain fd-b --segment peer-runtime'
       - name: Wait for the peer primary
@@ -750,7 +753,7 @@ jobs:
           --name "g6-rd-primary-up-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           --destination "${RUNNER_TEMP}/g6-rd-primary-up"
           --timeout 1200s
-          --peer-job "G6 Readiness Core / G6 Readiness Failure Domain A"
+          --peer-job "G6 Formal Readiness / G6 Formal FD-A: Primary & PITR"
       - name: Run failure domain B standby segment
         run: '"${G6_HARNESS_BIN}" run-segment --domain fd-b --segment standby'
       - name: Wait for the agent fleet rendezvous
@@ -761,7 +764,7 @@ jobs:
           --name "g6-rd-agents-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           --destination "${RUNNER_TEMP}/g6-rd-agents"
           --timeout 1800s
-          --peer-job "G6 Readiness Core / G6 Readiness Failure Domain A"
+          --peer-job "G6 Formal Readiness / G6 Formal FD-A: Primary & PITR"
       - name: Run failure domain B enrollment segment
         run: '"${G6_HARNESS_BIN}" run-segment --domain fd-b --segment enroll'
       - name: Publish failure domain B enrollment
@@ -778,7 +781,7 @@ jobs:
           --name "g6-rd-trust-ready-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           --destination "${RUNNER_TEMP}/g6-rd-trust-ready"
           --timeout 600s
-          --peer-job "G6 Readiness Core / G6 Readiness Failure Domain A"
+          --peer-job "G6 Formal Readiness / G6 Formal FD-A: Primary & PITR"
       - name: Run failure domain B load segment
         run: '"${G6_HARNESS_BIN}" run-segment --domain fd-b --segment load'
       - name: Publish the active load rendezvous
@@ -795,7 +798,7 @@ jobs:
           --name "g6-rd-isolation-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           --destination "${RUNNER_TEMP}/g6-rd-isolation"
           --timeout 600s
-          --peer-job "G6 Readiness Core / G6 Readiness Failure Domain A"
+          --peer-job "G6 Formal Readiness / G6 Formal FD-A: Primary & PITR"
       - name: Run failure domain B promotion segment
         run: '"${G6_HARNESS_BIN}" run-segment --domain fd-b --segment promote'
       - name: Publish the promoted primary
@@ -812,7 +815,7 @@ jobs:
           --name "g6-rd-relay-rejoin-ready-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           --destination "${RUNNER_TEMP}/g6-rd-relay-rejoin-ready"
           --timeout 1800s
-          --peer-job "G6 Readiness Core / G6 Readiness Failure Domain A"
+          --peer-job "G6 Formal Readiness / G6 Formal FD-A: Primary & PITR"
       - name: Run failure domain B relay observation segment
         run: '"${G6_HARNESS_BIN}" run-segment --domain fd-b --segment relay-observe'
       - name: Publish the pre-fault relay-a observation
@@ -829,7 +832,7 @@ jobs:
           --name "g6-rd-fd-a-ready-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           --destination "${RUNNER_TEMP}/g6-rd-fd-a-ready"
           --timeout 1200s
-          --peer-job "G6 Readiness Core / G6 Readiness Failure Domain A"
+          --peer-job "G6 Formal Readiness / G6 Formal FD-A: Primary & PITR"
       - name: Run failure domain B fault scenarios segment
         run: '"${G6_HARNESS_BIN}" run-segment --domain fd-b --segment fault-scenarios'
       - name: Finish failure domain B scenario timing
@@ -850,7 +853,7 @@ jobs:
           --name "g6-rd-window-barrier-armed-fd-a-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           --destination "${RUNNER_TEMP}/g6-rd-window-barrier-armed-fd-a"
           --timeout 600s
-          --peer-job "G6 Readiness Core / G6 Readiness Failure Domain A"
+          --peer-job "G6 Formal Readiness / G6 Formal FD-A: Primary & PITR"
       - name: Start 300-second observation timing
         run: scripts/g6-timing.sh start "${RUNNER_TEMP}/artifacts/timing/g6-rd-fd-b.json" observation_300_seconds
       - name: Run failure domain B observation window segment
@@ -909,7 +912,7 @@ jobs:
           retention-days: 5
 
   g6-rd-assemble:
-    name: G6 Readiness Evidence Assemble
+    name: G6 Formal Evidence Assembly
     needs: [g6-rd-fd-a, g6-rd-fd-b]
     if: ${{ always() && inputs.profile == 'formal' }}
     runs-on: ubuntu-24.04
@@ -926,10 +929,11 @@ jobs:
       fd-b-artifact-digest: ${{ needs.g6-rd-fd-b.outputs.raw-artifact-digest }}
       release-manifest-digest: ${{ needs.g6-rd-fd-a.outputs.release-manifest-digest }}
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Checkout candidate source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
-      - name: Runner preflight
+      - name: Verify runner prerequisites
         run: scripts/ci-preflight.sh
       - name: Restore verified G6 Node runtime
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
@@ -1099,7 +1103,7 @@ jobs:
           retention-days: 14
 
   g6-rd-secret-scan:
-    name: G6 Readiness Secret Scan
+    name: G6 Formal Evidence Secret Scan
     needs: [g6-rd-fd-a, g6-rd-fd-b, g6-rd-assemble]
     if: ${{ always() && inputs.profile == 'formal' }}
     runs-on: ubuntu-24.04
@@ -1109,7 +1113,8 @@ jobs:
     outputs:
       result-artifact-id: ${{ steps.secret-scan-upload.outputs.artifact-id }}
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Checkout candidate source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
       - name: Initialize secret scan timing diagnostics
@@ -1118,7 +1123,7 @@ jobs:
           "${RUNNER_TEMP}/artifacts/timing/g6-rd-secret-scan.json"
           g6-rd-secret-scan formal "${GITHUB_SHA}" "${GITHUB_RUN_ID}" "${GITHUB_RUN_ATTEMPT}"
           || true
-      - name: Runner preflight
+      - name: Verify runner prerequisites
         run: |
           scripts/g6-timing.sh start "${RUNNER_TEMP}/artifacts/timing/g6-rd-secret-scan.json" runner_preparation || true
           scripts/ci-preflight.sh
@@ -1224,7 +1229,7 @@ jobs:
           retention-days: 5
 
   g6-rd-verifier:
-    name: G6 Readiness Independent Verifier
+    name: G6 Formal Independent Verification
     needs: [g6-rd-assemble]
     if: ${{ always() && inputs.profile == 'formal' }}
     runs-on: ubuntu-24.04
@@ -1235,10 +1240,11 @@ jobs:
       result-artifact-id: ${{ steps.verdict-upload.outputs.artifact-id }}
       release-manifest-digest: ${{ needs.g6-rd-assemble.outputs.release-manifest-digest }}
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Checkout candidate source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
-      - name: Runner preflight
+      - name: Verify runner prerequisites
         run: scripts/ci-preflight.sh
       - name: Restore verified tools
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
@@ -1383,7 +1389,7 @@ jobs:
           retention-days: 14
 
   g6-rd-gate:
-    name: G6 Readiness Gate
+    name: G6 Formal Readiness Verdict
     needs:
       - g6-rd-fd-a
       - g6-rd-fd-b
@@ -1396,7 +1402,8 @@ jobs:
     environment:
       name: ${{ inputs.authority == 'production_readiness' && 'g6-production-readiness' || 'g6-engineering-rehearsal' }}
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Checkout candidate source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
       - name: Download failure domain A runtime result
@@ -1492,7 +1499,7 @@ jobs:
           retention-days: 14
 
   g6-smoke-release:
-    name: G6 Harness Smoke Frozen Release
+    name: G6 Smoke Release Build
     needs: g6-contract
     if: inputs.profile == 'smoke' && inputs.smoke_relevant
     runs-on: ubuntu-24.04
@@ -1503,7 +1510,8 @@ jobs:
       artifact-id: ${{ steps.publish.outputs.artifact-id }}
       artifact-digest: ${{ steps.publish.outputs.artifact-digest }}
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Checkout candidate source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
       - name: Initialize smoke release timing diagnostics
@@ -1511,7 +1519,7 @@ jobs:
           scripts/g6-timing.sh init
           "${RUNNER_TEMP}/artifacts/timing/g6-smoke-release.json"
           g6-smoke-release smoke "${GITHUB_SHA}" "${GITHUB_RUN_ID}" "${GITHUB_RUN_ATTEMPT}"
-      - name: Runner preflight
+      - name: Verify runner prerequisites
         run: |
           scripts/g6-timing.sh start "${RUNNER_TEMP}/artifacts/timing/g6-smoke-release.json" runner_preparation
           scripts/ci-preflight.sh
@@ -1745,7 +1753,7 @@ jobs:
           exit "${status}"
 
   g6-smoke-fd-a:
-    name: G6 Harness Smoke FD-A
+    name: G6 Smoke FD-A
     needs: g6-smoke-release
     if: inputs.profile == 'smoke' && inputs.smoke_relevant
     runs-on: ubuntu-24.04
@@ -1770,7 +1778,8 @@ jobs:
       G6RD_RELAY_IMAGE: ocservia-g6-relay:${{ github.run_id }}-${{ github.run_attempt }}
       G6RD_PROBE_IMAGE: ocservia-g6-probe:${{ github.run_id }}-${{ github.run_attempt }}
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Checkout candidate source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
       - name: Initialize smoke FD-A timing diagnostics
@@ -1778,7 +1787,7 @@ jobs:
           scripts/g6-timing.sh init
           "${RUNNER_TEMP}/artifacts/timing/g6-smoke-fd-a.json"
           g6-smoke-fd-a smoke "${GITHUB_SHA}" "${GITHUB_RUN_ID}" "${GITHUB_RUN_ATTEMPT}"
-      - name: Runner preflight
+      - name: Verify runner prerequisites
         run: |
           scripts/g6-timing.sh start "${RUNNER_TEMP}/artifacts/timing/g6-smoke-fd-a.json" runner_preparation
           scripts/ci-preflight.sh
@@ -1814,12 +1823,12 @@ jobs:
         with: {name: 'g6-smoke-tunnel-fd-a-${{ github.run_id }}-${{ github.run_attempt }}', path: '${{ runner.temp }}/g6-readiness-${{ env.RUN_ID }}/outbox/tunnel', retention-days: 1}
       - name: Wait for FD-B tunnel identity
         env: {GITHUB_TOKEN: '${{ github.token }}'}
-        run: '"${G6_HARNESS_BIN}" wait-download --name "g6-smoke-tunnel-fd-b-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" --destination "${RUNNER_TEMP}/g6-smoke-tunnel-fd-b" --timeout 1200s --peer-job "G6 Harness Smoke Core / G6 Harness Smoke FD-B"'
+        run: '"${G6_HARNESS_BIN}" wait-download --name "g6-smoke-tunnel-fd-b-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" --destination "${RUNNER_TEMP}/g6-smoke-tunnel-fd-b" --timeout 1200s --peer-job "G6 Harness Smoke Core / G6 Smoke FD-B"'
       - name: Bootstrap FD-A
         run: '"${G6_HARNESS_BIN}" run-segment --domain fd-a --segment bootstrap'
       - name: Wait for FD-B recipient certificate
         env: {GITHUB_TOKEN: '${{ github.token }}'}
-        run: '"${G6_HARNESS_BIN}" wait-download --name "g6-smoke-shared-recipient-key-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" --destination "${RUNNER_TEMP}/g6-smoke-shared-recipient-key" --timeout 1200s --peer-job "G6 Harness Smoke Core / G6 Harness Smoke FD-B"'
+        run: '"${G6_HARNESS_BIN}" wait-download --name "g6-smoke-shared-recipient-key-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" --destination "${RUNNER_TEMP}/g6-smoke-shared-recipient-key" --timeout 1200s --peer-job "G6 Harness Smoke Core / G6 Smoke FD-B"'
       - name: Encrypt shared runtime for FD-B
         run: '"${G6_HARNESS_BIN}" run-segment --domain fd-a --segment shared-trust'
       - name: Publish shared runtime
@@ -1837,7 +1846,7 @@ jobs:
         with: {name: 'g6-smoke-agents-${{ github.run_id }}-${{ github.run_attempt }}', path: '${{ runner.temp }}/g6-readiness-${{ env.RUN_ID }}/outbox/agents', retention-days: 1}
       - name: Wait for FD-B enrollment
         env: {GITHUB_TOKEN: '${{ github.token }}'}
-        run: '"${G6_HARNESS_BIN}" wait-download --name "g6-smoke-agents-enrolled-fd-b-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" --destination "${RUNNER_TEMP}/g6-smoke-agents-enrolled-fd-b" --timeout 1200s --peer-job "G6 Harness Smoke Core / G6 Harness Smoke FD-B"'
+        run: '"${G6_HARNESS_BIN}" wait-download --name "g6-smoke-agents-enrolled-fd-b-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" --destination "${RUNNER_TEMP}/g6-smoke-agents-enrolled-fd-b" --timeout 1200s --peer-job "G6 Harness Smoke Core / G6 Smoke FD-B"'
       - name: Activate full trust snapshot
         run: '"${G6_HARNESS_BIN}" run-segment --domain fd-a --segment transport-trust'
       - name: Publish transport trust
@@ -1847,7 +1856,7 @@ jobs:
         run: '"${G6_HARNESS_BIN}" run-segment --domain fd-a --segment activate-agents'
       - name: Wait for authenticated cross-FD session
         env: {GITHUB_TOKEN: '${{ github.token }}'}
-        run: '"${G6_HARNESS_BIN}" wait-download --name "g6-smoke-session-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" --destination "${RUNNER_TEMP}/g6-smoke-session" --timeout 1200s --peer-job "G6 Harness Smoke Core / G6 Harness Smoke FD-B"'
+        run: '"${G6_HARNESS_BIN}" wait-download --name "g6-smoke-session-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" --destination "${RUNNER_TEMP}/g6-smoke-session" --timeout 1200s --peer-job "G6 Harness Smoke Core / G6 Smoke FD-B"'
       - name: Isolate old Primary
         run: '"${G6_HARNESS_BIN}" run-segment --domain fd-a --segment isolate'
       - name: Publish isolation record
@@ -1855,7 +1864,7 @@ jobs:
         with: {name: 'g6-smoke-isolation-${{ github.run_id }}-${{ github.run_attempt }}', path: '${{ runner.temp }}/g6-readiness-${{ env.RUN_ID }}/outbox/isolation', retention-days: 1}
       - name: Wait for promotion
         env: {GITHUB_TOKEN: '${{ github.token }}'}
-        run: '"${G6_HARNESS_BIN}" wait-download --name "g6-smoke-promotion-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" --destination "${RUNNER_TEMP}/g6-smoke-promotion" --timeout 1200s --peer-job "G6 Harness Smoke Core / G6 Harness Smoke FD-B"'
+        run: '"${G6_HARNESS_BIN}" wait-download --name "g6-smoke-promotion-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" --destination "${RUNNER_TEMP}/g6-smoke-promotion" --timeout 1200s --peer-job "G6 Harness Smoke Core / G6 Smoke FD-B"'
       - name: Finish smoke FD-A scenario timing
         run: scripts/g6-timing.sh end "${RUNNER_TEMP}/artifacts/timing/g6-smoke-fd-a.json" scenario_execution || true
       - name: Freeze FD-A raw evidence
@@ -1907,7 +1916,7 @@ jobs:
         run: '"${G6_HARNESS_BIN}" cleanup --domain fd-a --timeout 180s'
 
   g6-smoke-fd-b:
-    name: G6 Harness Smoke FD-B
+    name: G6 Smoke FD-B
     needs: g6-smoke-release
     if: inputs.profile == 'smoke' && inputs.smoke_relevant
     runs-on: ubuntu-24.04
@@ -1932,7 +1941,8 @@ jobs:
       G6RD_RELAY_IMAGE: ocservia-g6-relay:${{ github.run_id }}-${{ github.run_attempt }}
       G6RD_PROBE_IMAGE: ocservia-g6-probe:${{ github.run_id }}-${{ github.run_attempt }}
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Checkout candidate source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
       - name: Initialize smoke FD-B timing diagnostics
@@ -1940,7 +1950,7 @@ jobs:
           scripts/g6-timing.sh init
           "${RUNNER_TEMP}/artifacts/timing/g6-smoke-fd-b.json"
           g6-smoke-fd-b smoke "${GITHUB_SHA}" "${GITHUB_RUN_ID}" "${GITHUB_RUN_ATTEMPT}"
-      - name: Runner preflight
+      - name: Verify runner prerequisites
         run: |
           scripts/g6-timing.sh start "${RUNNER_TEMP}/artifacts/timing/g6-smoke-fd-b.json" runner_preparation
           scripts/ci-preflight.sh
@@ -1976,7 +1986,7 @@ jobs:
         with: {name: 'g6-smoke-tunnel-fd-b-${{ github.run_id }}-${{ github.run_attempt }}', path: '${{ runner.temp }}/g6-readiness-${{ env.RUN_ID }}/outbox/tunnel', retention-days: 1}
       - name: Wait for FD-A tunnel identity
         env: {GITHUB_TOKEN: '${{ github.token }}'}
-        run: '"${G6_HARNESS_BIN}" wait-download --name "g6-smoke-tunnel-fd-a-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" --destination "${RUNNER_TEMP}/g6-smoke-tunnel-fd-a" --timeout 1200s --peer-job "G6 Harness Smoke Core / G6 Harness Smoke FD-A"'
+        run: '"${G6_HARNESS_BIN}" wait-download --name "g6-smoke-tunnel-fd-a-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" --destination "${RUNNER_TEMP}/g6-smoke-tunnel-fd-a" --timeout 1200s --peer-job "G6 Harness Smoke Core / G6 Smoke FD-A"'
       - name: Bootstrap FD-B
         run: '"${G6_HARNESS_BIN}" run-segment --domain fd-b --segment bootstrap'
       - name: Publish FD-B recipient certificate
@@ -1984,17 +1994,17 @@ jobs:
         with: {name: 'g6-smoke-shared-recipient-key-${{ github.run_id }}-${{ github.run_attempt }}', path: '${{ runner.temp }}/g6-readiness-${{ env.RUN_ID }}/outbox/shared-recipient-key', retention-days: 1}
       - name: Wait for shared runtime
         env: {GITHUB_TOKEN: '${{ github.token }}'}
-        run: '"${G6_HARNESS_BIN}" wait-download --name "g6-smoke-shared-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" --destination "${RUNNER_TEMP}/g6-smoke-shared" --timeout 1200s --peer-job "G6 Harness Smoke Core / G6 Harness Smoke FD-A"'
+        run: '"${G6_HARNESS_BIN}" wait-download --name "g6-smoke-shared-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" --destination "${RUNNER_TEMP}/g6-smoke-shared" --timeout 1200s --peer-job "G6 Harness Smoke Core / G6 Smoke FD-A"'
       - name: Start FD-B relay and tunnel
         run: '"${G6_HARNESS_BIN}" run-segment --domain fd-b --segment peer-runtime'
       - name: Wait for Primary readiness
         env: {GITHUB_TOKEN: '${{ github.token }}'}
-        run: '"${G6_HARNESS_BIN}" wait-download --name "g6-smoke-primary-up-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" --destination "${RUNNER_TEMP}/g6-smoke-primary-up" --timeout 1200s --peer-job "G6 Harness Smoke Core / G6 Harness Smoke FD-A"'
+        run: '"${G6_HARNESS_BIN}" wait-download --name "g6-smoke-primary-up-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" --destination "${RUNNER_TEMP}/g6-smoke-primary-up" --timeout 1200s --peer-job "G6 Harness Smoke Core / G6 Smoke FD-A"'
       - name: Bootstrap Standby
         run: '"${G6_HARNESS_BIN}" run-segment --domain fd-b --segment standby'
       - name: Wait for FD-A Agent inventory
         env: {GITHUB_TOKEN: '${{ github.token }}'}
-        run: '"${G6_HARNESS_BIN}" wait-download --name "g6-smoke-agents-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" --destination "${RUNNER_TEMP}/g6-smoke-agents" --timeout 1200s --peer-job "G6 Harness Smoke Core / G6 Harness Smoke FD-A"'
+        run: '"${G6_HARNESS_BIN}" wait-download --name "g6-smoke-agents-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" --destination "${RUNNER_TEMP}/g6-smoke-agents" --timeout 1200s --peer-job "G6 Harness Smoke Core / G6 Smoke FD-A"'
       - name: Enroll FD-B Agents
         run: '"${G6_HARNESS_BIN}" run-segment --domain fd-b --segment enroll'
       - name: Publish FD-B enrollment
@@ -2002,7 +2012,7 @@ jobs:
         with: {name: 'g6-smoke-agents-enrolled-fd-b-${{ github.run_id }}-${{ github.run_attempt }}', path: '${{ runner.temp }}/g6-readiness-${{ env.RUN_ID }}/outbox/agents-enrolled', retention-days: 1}
       - name: Wait for transport trust
         env: {GITHUB_TOKEN: '${{ github.token }}'}
-        run: '"${G6_HARNESS_BIN}" wait-download --name "g6-smoke-trust-ready-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" --destination "${RUNNER_TEMP}/g6-smoke-trust-ready" --timeout 1200s --peer-job "G6 Harness Smoke Core / G6 Harness Smoke FD-A"'
+        run: '"${G6_HARNESS_BIN}" wait-download --name "g6-smoke-trust-ready-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" --destination "${RUNNER_TEMP}/g6-smoke-trust-ready" --timeout 1200s --peer-job "G6 Harness Smoke Core / G6 Smoke FD-A"'
       - name: Start FD-B Agents
         run: '"${G6_HARNESS_BIN}" run-segment --domain fd-b --segment activate-agents'
       - name: Prove authenticated cross-FD session
@@ -2012,7 +2022,7 @@ jobs:
         with: {name: 'g6-smoke-session-${{ github.run_id }}-${{ github.run_attempt }}', path: '${{ runner.temp }}/g6-readiness-${{ env.RUN_ID }}/outbox/smoke-session', retention-days: 1}
       - name: Wait for old Primary isolation
         env: {GITHUB_TOKEN: '${{ github.token }}'}
-        run: '"${G6_HARNESS_BIN}" wait-download --name "g6-smoke-isolation-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" --destination "${RUNNER_TEMP}/g6-smoke-isolation" --timeout 1200s --peer-job "G6 Harness Smoke Core / G6 Harness Smoke FD-A"'
+        run: '"${G6_HARNESS_BIN}" wait-download --name "g6-smoke-isolation-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" --destination "${RUNNER_TEMP}/g6-smoke-isolation" --timeout 1200s --peer-job "G6 Harness Smoke Core / G6 Smoke FD-A"'
       - name: Promote Standby
         run: '"${G6_HARNESS_BIN}" run-segment --domain fd-b --segment promote'
       - name: Publish promotion proof
@@ -2074,7 +2084,7 @@ jobs:
         run: '"${G6_HARNESS_BIN}" cleanup --domain fd-b --timeout 180s'
 
   g6-smoke-assemble:
-    name: G6 Harness Smoke Evidence Builder
+    name: G6 Smoke Evidence Assembly
     needs: [g6-smoke-release, g6-smoke-fd-a, g6-smoke-fd-b]
     if: ${{ always() && inputs.profile == 'smoke' && inputs.smoke_relevant }}
     runs-on: ubuntu-24.04
@@ -2131,7 +2141,7 @@ jobs:
         run: test "${{ steps.assemble.outcome }}" = success
 
   g6-smoke-secret-scan:
-    name: G6 Harness Smoke Secret Scan
+    name: G6 Smoke Evidence Secret Scan
     needs: [g6-smoke-fd-a, g6-smoke-fd-b, g6-smoke-assemble]
     if: ${{ always() && inputs.profile == 'smoke' && inputs.smoke_relevant }}
     runs-on: ubuntu-24.04
@@ -2140,7 +2150,8 @@ jobs:
       artifact-id: ${{ steps.publish.outputs.artifact-id }}
       artifact-digest: ${{ steps.publish.outputs.artifact-digest }}
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Checkout candidate source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with: {persist-credentials: false}
       - name: Initialize smoke secret scan timing diagnostics
         run: >-
@@ -2155,11 +2166,14 @@ jobs:
           scripts/g6-timing.sh end "${RUNNER_TEMP}/artifacts/timing/g6-smoke-secret-scan.json" secret_scan_tool_bootstrap || true
       - name: Start smoke secret scan evidence download timing
         run: scripts/g6-timing.sh start "${RUNNER_TEMP}/artifacts/timing/g6-smoke-secret-scan.json" secret_scan_artifact_download || true
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+      - name: Download smoke FD-A evidence
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with: {name: 'g6-harness-smoke-fd-a-${{ github.run_id }}-${{ github.run_attempt }}', path: '${{ runner.temp }}/g6-harness-smoke-fd-a'}
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+      - name: Download smoke FD-B evidence
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with: {name: 'g6-harness-smoke-fd-b-${{ github.run_id }}-${{ github.run_attempt }}', path: '${{ runner.temp }}/g6-harness-smoke-fd-b'}
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+      - name: Download assembled smoke evidence
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with: {name: 'g6-harness-smoke-bundle-${{ github.run_id }}-${{ github.run_attempt }}', path: '${{ runner.temp }}/g6-harness-smoke-bundle'}
       - name: Finish smoke secret scan evidence download timing
         run: scripts/g6-timing.sh end "${RUNNER_TEMP}/artifacts/timing/g6-smoke-secret-scan.json" secret_scan_artifact_download || true
@@ -2205,7 +2219,7 @@ jobs:
         with: {name: 'g6-timing-smoke-secret-scan-${{ github.run_id }}-${{ github.run_attempt }}', path: '${{ runner.temp }}/artifacts/timing/g6-smoke-secret-scan.json', if-no-files-found: warn, retention-days: 5}
 
   g6-smoke-verifier:
-    name: G6 Harness Smoke Independent Verifier
+    name: G6 Smoke Independent Verification
     needs: [g6-smoke-release, g6-smoke-assemble]
     if: ${{ always() && inputs.profile == 'smoke' && inputs.smoke_relevant }}
     runs-on: ubuntu-24.04
@@ -2214,9 +2228,11 @@ jobs:
       artifact-id: ${{ steps.publish.outputs.artifact-id }}
       artifact-digest: ${{ steps.publish.outputs.artifact-digest }}
     steps:
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+      - name: Download frozen smoke release
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with: {name: 'g6-harness-smoke-release-${{ github.run_id }}-${{ github.run_attempt }}', path: '${{ runner.temp }}/g6-harness-smoke-release'}
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+      - name: Download assembled smoke evidence
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with: {name: 'g6-harness-smoke-bundle-${{ github.run_id }}-${{ github.run_attempt }}', path: '${{ runner.temp }}/g6-harness-smoke-bundle'}
       - name: Independently verify the smoke bundle
         id: verify
